@@ -195,8 +195,12 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 	for k, v := range joinTokenAuditDetails(resp) {
 		details[k] = v
 	}
+	kv := append([]string{"operation", operation}, keptSettingsAuditDetails(resp.KeptSettings)...)
+	if resp.GCPHostSet {
+		kv = append(kv, "gcp_host_set", "true")
+	}
 	LogRegistrationEvent(r.Context(), s.auditLogger, resp.BrokerID, req.Name, user.ID(), getClientIP(r),
-		mergeBrokerAuditDetails(details, "operation", operation))
+		mergeBrokerAuditDetails(details, kv...))
 
 	writeJSON(w, http.StatusCreated, resp)
 }
@@ -209,13 +213,14 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 // autoProvideAuthorized is the handler's broker.auto_provide decision; the
 // write is pinned to it as on the legacy path (flatRegistration.GateAutoProvide).
 func (s *Server) createFlatBrokerRegistration(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy string, existing *store.RuntimeBroker, autoProvideAuthorized bool) (*CreateBrokerRegistrationResponse, error) {
-	labels := registrationLabels(req.Labels)
+	requested := stripReservedBrokerLabels(req.Labels)
 	saEmail := strings.ToLower(req.GCPHostServiceAccountEmail)
 	// PreserveSettings (GoogleCloudPlatform/scion#2702) applies as on the
 	// legacy path: a re-registration leaves the row's metadata as it is and
 	// only issues a new join token; a new row gets AutoProvide off and no
 	// GCP host fields, with only the labels applied.
 	preserve := req.PreserveSettings
+	var keptLabels []KeptSetting
 	row, created, err := s.registerFlatRuntimeBroker(ctx, flatRegistration{
 		BrokerID:  req.BrokerID,
 		Name:      req.Name,
@@ -232,23 +237,42 @@ func (s *Server) createFlatBrokerRegistration(ctx context.Context, req CreateBro
 			}
 			if !preserve {
 				b.AutoProvide = req.AutoProvide
-				b.GCPHostServiceAccountEmail = saEmail
-				b.GCPHostProjectID = req.GCPHostProjectID
 			}
-			if b.Labels == nil {
-				b.Labels = map[string]string{}
+			if created {
+				// A new row takes the GCP host pair and labels from the
+				// request; the Hub sets the broker role.
+				if !preserve && (saEmail != "" || req.GCPHostProjectID != "") {
+					b.GCPHostServiceAccountEmail = saEmail
+					b.GCPHostProjectID = req.GCPHostProjectID
+					b.GCPHostSource = store.GCPHostSourceRegistration
+				}
+				b.Labels = registrationLabels(requested)
+				b.Labels[store.BrokerRoleLabel] = store.BrokerRoleRemote
+				return
 			}
-			for k, v := range labels {
-				b.Labels[k] = v
-			}
+			// An existing row keeps its GCP host pair here (filled below
+			// only while unset) and the value of its existing labels.
+			b.Labels, keptLabels = mergeRegistrationLabels(b.Labels, requested)
 		},
 	})
 	if err != nil {
 		return nil, err
 	}
+	var gcp registrationGCPHostResult
+	if !created && !preserve {
+		if gcp, err = fillRegistrationGCPHost(ctx, s.store, row.ID, saEmail, req.GCPHostProjectID); err != nil {
+			return nil, err
+		}
+	}
 	// A flat re-registration re-mints the join token: issueJoinToken's upsert
 	// replaces an outstanding one (for example left by a refused join).
-	return s.brokerAuthService.issueJoinToken(ctx, row.ID, createdBy, !created, req.JoinTokenTTLSeconds, row.RuntimeTarget)
+	resp, err := s.brokerAuthService.issueJoinToken(ctx, row.ID, createdBy, !created, req.JoinTokenTTLSeconds, row.RuntimeTarget)
+	if err != nil {
+		return nil, err
+	}
+	resp.KeptSettings = append(gcp.Kept, keptLabels...)
+	resp.GCPHostSet = gcp.Applied
+	return resp, nil
 }
 
 // joinTokenAuditDetails describes an issued join token for the register
@@ -355,7 +379,10 @@ func (s *Server) brokerRemintTargetAuthorized(ctx context.Context, user UserIden
 	if !brokerUserCredentialKindAdmitted(ctx, user, false) {
 		return false
 	}
-	return s.authzService.IsSystemAdmin(ctx, user.ID())
+	// Test identities with admin roles do not remint broker credentials
+	// (test-admin policy: key material).
+	return s.authzService.IsSystemAdmin(ctx, user.ID()) &&
+		!s.testAdminPolicyRefusesUser(ctx, user.ID(), "handlers_brokers.go:brokerRemintTargetAuthorized")
 }
 
 // authorizeBrokerAutoProvide reports whether the caller may turn on a
@@ -503,7 +530,10 @@ func (s *Server) authorizedForBrokerRotate(ctx context.Context, user UserIdentit
 		user = nil
 	}
 
-	if user != nil && s.authzService.IsSystemAdmin(ctx, user.ID()) {
+	// Test identities with admin roles do not rotate broker secrets
+	// (test-admin policy: key material).
+	if user != nil && s.authzService.IsSystemAdmin(ctx, user.ID()) &&
+		!s.testAdminPolicyRefusesUser(ctx, user.ID(), "handlers_brokers.go:authorizedForBrokerRotate") {
 		return true, nil
 	}
 

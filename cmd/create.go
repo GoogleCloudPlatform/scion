@@ -23,12 +23,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
-	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/spf13/cobra"
 )
@@ -75,152 +72,19 @@ The agent is provisioned but not started, even when a task is given. Run
 			return asUsageError(err)
 		}
 
-		// Check if Hub should be used, excluding the target agent from sync requirements.
-		// This allows creating an agent even if it already exists on Hub (recreate scenario)
-		// or if other agents are out of sync.
-		hubCtx, err := CheckHubAvailabilityForAgent(projectPath, agentName, true)
+		hubCtx, err := requireHub(projectPath)
 		if err != nil {
 			return err
 		}
 
-		if hubCtx != nil {
-			return createAgentViaHub(hubCtx, agentName, task)
-		}
-
-		// Load inline config if --config was specified
-		var inlineCfg *api.ScionConfig
-		if inlineConfigPath != "" {
-			var inlineConfigDir string
-			var loadErr error
-			inlineCfg, inlineConfigDir, loadErr = loadInlineConfig(inlineConfigPath)
-			if loadErr != nil {
-				return loadErr
-			}
-			if loadErr := resolveInlineConfigContent(inlineCfg, inlineConfigDir); loadErr != nil {
-				return loadErr
-			}
-		}
-
-		// Local mode
-		rt := runtime.GetRuntime(projectPath, profile)
-		mgr := agent.NewManager(rt)
-
-		// Apply inline config overrides to CLI options
-		effectiveBranch := branch
-		effectiveTask := task
-		effectiveHarnessConfig := harnessConfigFlag
-		effectiveImage := agentImage
-
-		if inlineCfg != nil {
-			if effectiveBranch == "" && inlineCfg.Branch != "" {
-				effectiveBranch = inlineCfg.Branch
-			}
-			if effectiveTask == "" && inlineCfg.Task != "" {
-				effectiveTask = inlineCfg.Task
-			}
-			if effectiveHarnessConfig == "" && inlineCfg.HarnessConfig != "" {
-				effectiveHarnessConfig = inlineCfg.HarnessConfig
-			}
-			if effectiveImage == "" && inlineCfg.Image != "" {
-				effectiveImage = inlineCfg.Image
-			}
-		}
-
-		opts := api.StartOptions{
-			Name:          agentName,
-			Task:          effectiveTask,
-			Template:      templateName,
-			Profile:       profile,
-			HarnessConfig: effectiveHarnessConfig,
-			Image:         effectiveImage,
-			ProjectPath:   projectPath,
-			Branch:        effectiveBranch,
-			Workspace:     workspace,
-			InlineConfig:  inlineCfg,
-		}
-
-		// Check if agent already exists (directory on disk or running container)
-		projectDir, err := config.GetResolvedProjectDir(projectPath)
-		if err != nil {
-			return err
-		}
-		agentDir := filepath.Join(projectDir, "agents", agentName)
-		if _, err := os.Stat(agentDir); err == nil {
-			return fmt.Errorf("agent '%s' already exists. Use 'scion delete %s' first to recreate it", agentName, agentName)
-		}
-
-		ctx := context.Background()
-		// Attempt Hub connection for skill resolution in local mode.
-		// If Hub is not configured, this returns nil and provisioning
-		// proceeds without a resolver (S1 fail-closed for required skills).
-		hctx, hubErr := hubsync.EnsureHubReady(projectPath, skillResolverHubOptions(projectPath))
-		if hubErr == nil && hctx != nil && hctx.Client != nil {
-			var flushResolutions func()
-			ctx, flushResolutions = withLocalSkillResolution(ctx, hctx.Client.Skills(), hctx.Client.SkillRegistries(),
-				hctx.ProjectID, os.Getenv("GITHUB_TOKEN"), nil)
-			// Write resolutions to the disk cache before this process exits,
-			// rather than relying on the cache's delayed write.
-			defer flushResolutions()
-		}
-
-		_, err = mgr.Provision(ctx, opts)
+		// Load inline config if --config was specified.
+		inlineCfg, err := loadCreateInlineConfig()
 		if err != nil {
 			return err
 		}
 
-		if isJSONOutput() {
-			return outputJSON(localCreateResult(agentName))
-		}
-		writeLocalCreateResult(os.Stdout, agentName)
-		return nil
+		return createAgentViaHub(hubCtx, agentName, task, inlineCfg)
 	},
-}
-
-// withLocalSkillResolution returns ctx set up to resolve skills for a local
-// create: a routing resolver that sends skill:// refs and bare names to the
-// Hub, gh:// refs to a GitHub resolver using ghToken, and gcp-skill:// refs
-// to a resolver that looks registries up through the Hub; the credentials
-// the install step needs for gh:// downloads; and projectID as the resolve
-// project, when set. cache is the GitHub resolution cache to use, or nil for
-// the default one. The returned func writes pending resolution cache entries
-// to disk and must be called before the process exits.
-func withLocalSkillResolution(
-	ctx context.Context,
-	skills hubclient.SkillService,
-	registries hubclient.SkillRegistryService,
-	projectID, ghToken string,
-	cache *agent.GitHubResolutionCache,
-) (context.Context, func()) {
-	resolver := agent.NewRoutingSkillResolver(agent.NewHubSkillResolver(skills))
-	ghResolver := agent.NewGitHubSkillResolverWithCredentials(ghToken, nil, cache)
-	resolver.Register("gh", ghResolver)
-
-	gcpLookup := func(ctx context.Context, name string) (*agent.RegistryLookupResult, error) {
-		reg, err := registries.Get(ctx, name)
-		if err != nil {
-			return nil, err
-		}
-		if reg == nil {
-			return nil, fmt.Errorf("registry %q not found", name)
-		}
-		return &agent.RegistryLookupResult{
-			Name:     reg.Name,
-			Endpoint: reg.Endpoint,
-			Type:     reg.Type,
-			Status:   reg.Status,
-		}, nil
-	}
-	resolver.Register("gcp-skill", agent.NewGCPSkillResolver(gcpLookup))
-
-	ctx = agent.ContextWithSkillResolver(ctx, resolver)
-	// Credentials for install-phase downloads of gh:// skills: the default
-	// for skills the Hub resolved, and the GitHub resolver's own lookup for
-	// skills it served from its disk cache.
-	ctx = ghResolver.WithInstallCredentials(ctx, ghToken)
-	if projectID != "" {
-		ctx = agent.ContextWithResolveProjectID(ctx, projectID)
-	}
-	return ctx, ghResolver.FlushCache
 }
 
 // scion create provisions an agent and never starts it; scion start launches
@@ -272,24 +136,6 @@ func addCreateNotStartedDetails(details map[string]interface{}, agentName string
 	details["started"] = false
 	details["provisioned"] = provisioned
 	details["startCommand"] = createStartCommand(agentName)
-}
-
-// localCreateResult is the JSON result of a local scion create.
-func localCreateResult(agentName string) ActionResult {
-	details := map[string]interface{}{}
-	addCreateNotStartedDetails(details, agentName, true)
-	return ActionResult{
-		Status:  "success",
-		Command: "create",
-		Agent:   agentName,
-		Message: fmt.Sprintf("Agent '%s' created successfully. ", agentName) + createNotStartedHint(agentName),
-		Details: details,
-	}
-}
-
-// writeLocalCreateResult prints the text result of a local scion create.
-func writeLocalCreateResult(w io.Writer, agentName string) {
-	_, _ = fmt.Fprintf(w, "Agent '%s' created successfully.\n%s\n", agentName, createNotStartedHint(agentName))
 }
 
 // hubCreateResult is the JSON result of a scion create through a Hub.
@@ -350,7 +196,26 @@ func writeHubCreateText(w io.Writer, agentName string, resp *hubclient.CreateAge
 	_, _ = io.WriteString(w, b.String())
 }
 
-func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error {
+// loadCreateInlineConfig loads the --config file, if one was given, and
+// resolves its file:// content fields. It returns nil without --config.
+func loadCreateInlineConfig() (*api.ScionConfig, error) {
+	if inlineConfigPath == "" {
+		return nil, nil
+	}
+	cfg, configDir, err := loadInlineConfig(inlineConfigPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := resolveInlineConfigContent(cfg, configDir); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// createAgentViaHub provisions the agent through the Hub. inlineCfg is the
+// --config file's config (nil without --config); it is sent as the request
+// config, as startAgentViaHub does, so the Hub stores it with the agent.
+func createAgentViaHub(hubCtx *HubContext, agentName string, task string, inlineCfg *api.ScionConfig) error {
 	PrintUsingHub(hubCtx.Endpoint)
 
 	// Get the project ID for this project
@@ -403,7 +268,8 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error 
 		RuntimeBrokerID: runtimeBrokerID,
 		Profile:         profile,
 		Task:            task,
-		Branch:          branch,
+		Branch:          resolveBranch(branch, inlineCfg),
+		Workspace:       workspace,
 		Labels:          parsedLabels,
 		ProvisionOnly:   true,
 		AgentRole:       agentRoleFlag,
@@ -413,7 +279,14 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error 
 	// Wire --service-account flag into the GCP identity assignment.
 	applyServiceAccountFlag(req, serviceAccountFlag)
 
-	if agentImage != "" {
+	// The inline config from --config is the base; CLI flags override
+	// specific fields (ptone/scion#4012).
+	if inlineCfg != nil {
+		req.Config = inlineCfg
+		if agentImage != "" {
+			req.Config.Image = agentImage
+		}
+	} else if agentImage != "" {
 		req.Config = &api.ScionConfig{
 			Image: agentImage,
 		}
@@ -470,7 +343,7 @@ func init() {
 
 	createCmd.Flags().StringVar(&harnessAuthFlag, "harness-auth", "", "Override auth method for the harness (api-key, oauth-token, auth-file, vertex-ai)")
 
-	// Template resolution flags for Hub mode (Section 9.4)
+	// Template resolution flags (Section 9.4)
 	createCmd.Flags().BoolVar(&uploadTemplate, "upload-template", false, "Automatically upload local template to Hub if not found")
 	createCmd.Flags().BoolVar(&noUpload, "no-upload", false, "Fail if template requires upload (never prompt)")
 	createCmd.Flags().StringVar(&templateScope, "template-scope", "project", "Scope for uploaded template (global, project, user)")
@@ -492,18 +365,5 @@ func init() {
 			"Default: the template's mode, else the parent agent's, else 'project'.")
 
 	// GCP service account assignment flag
-	createCmd.Flags().StringVar(&serviceAccountFlag, "service-account", "", "GCP service account to assign to this agent: its id, email or display name (requires Hub mode)")
-}
-
-// skillResolverHubOptions returns the EnsureHubReady options for the hub
-// context that create uses for skill resolution. A project named with a
-// flag keeps its own ID over SCION_PROJECT_ID (ptone/scion#3123).
-func skillResolverHubOptions(projectPath string) hubsync.EnsureHubReadyOptions {
-	return hubsync.EnsureHubReadyOptions{
-		NoHub:           noHub,
-		AutoConfirm:     true,
-		NonInteractive:  nonInteractive,
-		SkipSync:        true,
-		ExplicitProject: explicitProjectTargetFor(projectPath),
-	}
+	createCmd.Flags().StringVar(&serviceAccountFlag, "service-account", "", "GCP service account to assign to this agent: its id, email or display name")
 }

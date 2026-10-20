@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -295,7 +296,9 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 			span.SetStatus(codes.Error, err.Error())
 			return nil, &startContextError{Status: http.StatusInternalServerError, Message: "Failed to resolve the global config directory", OriginalErr: err}
 		}
-		in.ProjectPath = filepath.Join(globalDir, "projects", in.ProjectSlug)
+		// The same helper decides the path the hub's built-in profile
+		// reference count reads agent-info.json from (ptone/scion#5113).
+		in.ProjectPath = config.BrokerProjectPath(globalDir, "", in.ProjectSlug)
 		if s.config.Debug {
 			s.agentLifecycleLog.Debug("Resolved hub-managed project path from slug",
 				"agent_id", in.AgentID, "slug", in.ProjectSlug, "path", in.ProjectPath)
@@ -434,7 +437,9 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// A saved profile that no longer resolves fails here, with the same
 	// 503 as start/restart's own later resolution, rather than classifying
 	// the dispatch against the default runtime first (ptone/scion#2709).
-	// Create and a start without a saved profile stay non-strict.
+	// Create and a start without a saved profile stay non-strict, except
+	// that, on a co-located broker, a profile missing from the Hub's stored
+	// profiles is refused (errProfileUnresolved / errDefaultProfileUnresolved).
 	mgr, dispatchRuntimeType, err := s.resolveExistingAgentManager(api.StartOptions{
 		Name:        in.Name,
 		ProjectPath: in.ProjectPath,
@@ -969,12 +974,10 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	}
 
 	// --- Shared workspace mode (git-workspace hybrid) ---
-	// Deprecated: SCION_SHARED_WORKSPACE — superseded by SCION_WORKSPACE_MODE +
-	// SCION_WORKSPACE_GIT. Kept for compatibility during the transition period.
-	// Removal is tracked in https://github.com/ptone/scion/issues/575.
+	// The agent learns its workspace mode from SCION_WORKSPACE_MODE and
+	// SCION_WORKSPACE_GIT; the legacy SCION_SHARED_WORKSPACE var is no longer
+	// emitted (ptone/scion#575).
 	if in.Config != nil && in.Config.SharedWorkspace {
-		env["SCION_SHARED_WORKSPACE"] = "true"
-		classifyBrokerEnv("SCION_SHARED_WORKSPACE", api.EnvKindPlain)
 		if s.config.Debug {
 			s.agentLifecycleLog.Debug("Shared workspace mode enabled", "agent_id", in.AgentID)
 		}
@@ -1521,6 +1524,58 @@ func shouldCleanupPartialWorktree(projectRoot, worktreePath string, preExisted b
 	return worktreePath != "" && projectRoot != "" && isStrictWorktreeChild(projectRoot, worktreePath)
 }
 
+// cleanupPartialWorktree removes the partial worktree a failed
+// provisioning left at worktreePath, and git's entry for it. It uses `git
+// worktree remove --force` (via SafeGitCommand), so the worktree's admin
+// metadata in the base's .git/worktrees/<id> is unregistered too: a bare
+// os.RemoveAll would leave a stale registration that makes git refuse to
+// recreate the worktree at that path on retry. If that fails, it removes the
+// directory and then only that worktree's entry. It never runs a
+// repository-wide prune, which would also drop the entries of other
+// agents' worktrees that this process cannot see (ptone/scion#5071).
+// Callers gate worktreePath with shouldCleanupPartialWorktree; the path check
+// is repeated here.
+func cleanupPartialWorktree(ctx context.Context, projectRoot, worktreePath, agentID string) {
+	// Repeat the caller's gate here, so this function can only ever remove a
+	// path strictly inside <projectRoot>/worktrees, never that directory
+	// itself, the checkout, or anything outside it.
+	if !isStrictWorktreeChild(projectRoot, worktreePath) {
+		slog.Warn("worktree-per-agent: refusing to clean up a path that is not inside the shared checkout's worktrees directory",
+			"agent_id", agentID, "path", worktreePath)
+		return
+	}
+	rm, rmCmdErr := provision.SafeGitCommand(ctx, projectRoot, "worktree", "remove", "--force", worktreePath)
+	var out []byte
+	var rmErr error
+	if rmCmdErr != nil {
+		rmErr = rmCmdErr
+	} else {
+		out, rmErr = rm.CombinedOutput()
+	}
+	if rmErr == nil {
+		slog.Info("worktree-per-agent: cleaned up partial worktree and unregistered from git",
+			"agent_id", agentID, "path", worktreePath)
+		return
+	}
+	slog.Warn("worktree-per-agent: git worktree remove failed, removing the directory and its git entry",
+		"agent_id", agentID, "path", worktreePath,
+		"error", rmErr, "output", strings.TrimSpace(string(out)))
+	if cleanErr := os.RemoveAll(worktreePath); cleanErr != nil {
+		// The directory is (partly) still there, so its entry is not
+		// stale and is left in place; nothing else is touched.
+		slog.Warn("worktree-per-agent: failed to remove the partial worktree's directory; its git entry is left in place",
+			"agent_id", agentID, "path", worktreePath, "error", cleanErr)
+		return
+	}
+	gitCmd := func(ctx context.Context, args ...string) (*exec.Cmd, error) {
+		return provision.SafeGitCommand(ctx, projectRoot, args...)
+	}
+	if err := util.RemoveWorktreeEntry(ctx, worktreePath, gitCmd); err != nil {
+		slog.Warn("worktree-per-agent: could not remove the partial worktree's git entry",
+			"agent_id", agentID, "path", worktreePath, "error", err)
+	}
+}
+
 // validateMountedWorktree is the gate applied to the final resolved
 // workspace path for a worktree-per-agent dispatch, right before it is set
 // as opts.Workspace and mounted into the container. workspacePath itself —
@@ -1771,37 +1826,9 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 		// isStrictWorktreeChild additionally guards that the path is a real
 		// descendant of <base>/worktrees and never that directory itself, so
 		// a resolver bug can never turn this into a removal of every agent's
-		// worktree. Uses `git worktree remove --force` (via SafeGitCommand)
-		// so the worktree's admin metadata in the base's .git/worktrees/<id> is
-		// unregistered too — a bare os.RemoveAll would leave a stale
-		// registration that makes git refuse to recreate the worktree at that
-		// path on retry. Falls back to os.RemoveAll + prune.
+		// worktree.
 		if shouldCleanupPartialWorktree(result.ProjectRoot, result.WorktreePath, preExisted) {
-			rm, rmCmdErr := provision.SafeGitCommand(ctx, result.ProjectRoot,
-				"worktree", "remove", "--force", result.WorktreePath)
-			var out []byte
-			var rmErr error
-			if rmCmdErr != nil {
-				rmErr = rmCmdErr
-			} else {
-				out, rmErr = rm.CombinedOutput()
-			}
-			if rmErr != nil {
-				slog.Warn("worktree-per-agent: git worktree remove failed, falling back to os.RemoveAll+prune",
-					"agent_id", in.AgentID, "path", result.WorktreePath,
-					"error", rmErr, "output", strings.TrimSpace(string(out)))
-				if cleanErr := os.RemoveAll(result.WorktreePath); cleanErr != nil {
-					slog.Warn("worktree-per-agent: failed to clean up partial worktree",
-						"agent_id", in.AgentID, "path", result.WorktreePath, "error", cleanErr)
-				}
-				// Prune the now-stale .git/worktrees/<id> registration so retries succeed.
-				if pruneCmd, pruneCmdErr := provision.SafeGitCommand(ctx, result.ProjectRoot, "worktree", "prune"); pruneCmdErr == nil {
-					_ = pruneCmd.Run()
-				}
-			} else {
-				slog.Info("worktree-per-agent: cleaned up partial worktree and unregistered from git",
-					"agent_id", in.AgentID, "path", result.WorktreePath)
-			}
+			cleanupPartialWorktree(ctx, result.ProjectRoot, result.WorktreePath, in.AgentID)
 		}
 		return false, "", nil
 	}
@@ -2089,8 +2116,9 @@ func isGlobalDirProjectID(globalDir, projectID string) bool {
 	if id := globalSettingsProjectID(globalDir); id != "" {
 		return id == projectID
 	}
-	// The global marker may carry an empty slug, which ReadProjectMarker
-	// rejects, so only its project-id is read here.
+	// The global marker may carry an empty slug (see
+	// writeGlobalDirIDRecord), which ReadProjectMarker rejects, so only its
+	// project-id is read here.
 	markerPath := filepath.Join(globalDir, config.DotScion)
 	if !config.IsProjectMarkerFile(markerPath) {
 		return false
@@ -2101,6 +2129,20 @@ func isGlobalDirProjectID(globalDir, projectID string) bool {
 	}
 	var marker config.ProjectMarker
 	return yaml.Unmarshal(data, &marker) == nil && marker.ProjectID != "" && marker.ProjectID == projectID
+}
+
+// writeGlobalDirIDRecord records projectID, the global project's hub id, in
+// the global directory's .scion file at markerPath. The record is
+// deliberately written without a project slug: the global project's dispatch
+// carries none, and config.WriteProjectMarker refuses an empty slug. Such a
+// record is not a readable project marker (config.ReadProjectMarker rejects
+// it); only isGlobalDirProjectID reads it, for its project-id.
+func writeGlobalDirIDRecord(markerPath, projectID string) error {
+	data, err := yaml.Marshal(&config.ProjectMarker{ProjectID: projectID})
+	if err != nil {
+		return fmt.Errorf("failed to marshal the global project id record: %w", err)
+	}
+	return os.WriteFile(markerPath, data, 0644)
 }
 
 // globalSettingsProjectID returns the hub project id recorded in the global
@@ -2153,7 +2195,9 @@ func withHubAgentDefaults(ctx context.Context, cfg *CreateAgentConfig) context.C
 
 // withStartHubAgentDefaults attaches hub defaults decoded from a start or
 // restart request body (or a create request's config) to ctx, so
-// Manager.Start's buildAgentEnv applies their env entries at its lowest tier.
+// Manager.Start applies them at their low-precedence tiers: the limits and
+// resources below the agent's own values, and the env entries at
+// buildAgentEnv's lowest tier.
 // Returns ctx unchanged for a nil or empty value.
 func withStartHubAgentDefaults(ctx context.Context, d *api.HubAgentDefaults) context.Context {
 	if ctx == nil {
@@ -2232,6 +2276,20 @@ func (s *Server) recordHubProjectFiles(ctx context.Context, in startContextInput
 	// then find it matching.
 	s.alignHubManagedProjectIdentity(ctx, in.AgentID, in.ProjectPath, in.ProjectSlug, in.ProjectID)
 
+	// A linked project's path is often its own .scion config directory
+	// (the provider path that linking records). That project already has
+	// its config: there is no marker to write inside it, and no external
+	// config dir to create for it. Treating the .scion directory as a
+	// project root would write a stray <repo>/.scion/.scion marker and a
+	// project-configs entry the project never uses.
+	if isOwnProjectConfigDir(in.ProjectPath) {
+		if s.config.Debug {
+			s.agentLifecycleLog.Debug("Project path is the project's own .scion directory; not recording hub project files",
+				"agent_id", in.AgentID, "project_id", in.ProjectID, "path", in.ProjectPath)
+		}
+		return
+	}
+
 	scionPath := filepath.Join(in.ProjectPath, config.DotScion)
 
 	if config.IsProjectMarkerFile(scionPath) {
@@ -2265,10 +2323,7 @@ func (s *Server) recordHubProjectFiles(ctx context.Context, in startContextInput
 				}
 			}
 			// Ensure external split storage directories exist.
-			if extPath, err := marker.ExternalProjectPath(); err == nil && extPath != "" {
-				_ = os.MkdirAll(extPath, 0755)
-				_ = os.MkdirAll(filepath.Join(extPath, "agents"), 0755)
-			}
+			ensureMarkerExternalDirs(marker)
 			if s.config.Debug {
 				s.agentLifecycleLog.Debug("Hub-managed project has marker with split storage",
 					"agent_id", in.AgentID, "slug", in.ProjectSlug, "project_id", marker.ProjectID, "path", scionPath)
@@ -2311,10 +2366,35 @@ func (s *Server) recordHubProjectFiles(ctx context.Context, in startContextInput
 			}
 		}
 	} else if in.ProjectID != "" {
-		// .scion doesn't exist — create project dir and write a marker file
+		// .scion doesn't exist — create project dir and write a marker file.
+		// A marker needs a slug: ReadProjectMarker rejects one without, and
+		// its external dir would be named "__<id>". Without a slug nothing
+		// is written, except for the global directory, whose marker records
+		// the global project's id with an empty slug (see
+		// isGlobalDirProjectID); it still gets no external dir.
+		if in.ProjectSlug == "" && !config.IsGlobalProjectDir(in.ProjectPath) {
+			s.agentLifecycleLog.Info("Hub-managed project dispatch has no project slug; not writing a .scion marker",
+				"agent_id", in.AgentID, "project_id", in.ProjectID, "path", in.ProjectPath)
+			return
+		}
 		if err := os.MkdirAll(in.ProjectPath, 0755); err != nil {
 			s.agentLifecycleLog.Warn("Failed to create project dir for hub-managed project",
 				"agent_id", in.AgentID, "slug", in.ProjectSlug, "path", in.ProjectPath, "error", err)
+		} else if in.ProjectSlug == "" && config.IsGlobalProjectDir(in.ProjectPath) {
+			// The global project's dispatch carries no slug (see
+			// splitHubGlobalSlug); globalDirProjectConflict has already
+			// refused any other project at this path. Only the id is
+			// recorded, for isGlobalDirProjectID.
+			if wErr := writeGlobalDirIDRecord(scionPath, in.ProjectID); wErr != nil {
+				s.agentLifecycleLog.Warn("Failed to record the global project id",
+					"agent_id", in.AgentID, "project_id", in.ProjectID, "error", wErr)
+			}
+		} else if in.ProjectSlug == "" {
+			// A marker needs a slug (config.WriteProjectMarker refuses an
+			// empty one), so none is written for a dispatch that names
+			// only the project ID.
+			s.agentLifecycleLog.Warn("Not writing .scion marker for hub-managed project: the dispatch names no project slug",
+				"agent_id", in.AgentID, "project_id", in.ProjectID, "path", in.ProjectPath)
 		} else {
 			marker := &config.ProjectMarker{
 				ProjectID:   in.ProjectID,
@@ -2325,10 +2405,7 @@ func (s *Server) recordHubProjectFiles(ctx context.Context, in startContextInput
 				s.agentLifecycleLog.Warn("Failed to write .scion marker for hub-managed project",
 					"agent_id", in.AgentID, "project_id", in.ProjectID, "error", wErr)
 			} else {
-				if extPath, err := marker.ExternalProjectPath(); err == nil && extPath != "" {
-					_ = os.MkdirAll(extPath, 0755)
-					_ = os.MkdirAll(filepath.Join(extPath, "agents"), 0755)
-				}
+				ensureMarkerExternalDirs(marker)
 				if s.config.Debug {
 					s.agentLifecycleLog.Debug("Initialized hub-managed project with split storage",
 						"agent_id", in.AgentID, "slug", in.ProjectSlug, "project_id", in.ProjectID, "path", scionPath)
@@ -2336,6 +2413,35 @@ func (s *Server) recordHubProjectFiles(ctx context.Context, in startContextInput
 			}
 		}
 	}
+}
+
+// ensureMarkerExternalDirs creates the external split storage directories
+// (<project-configs>/<slug>__<id>/.scion and its agents dir) of a marker. A
+// marker without a slug gets none: "__<id>" names no project.
+func ensureMarkerExternalDirs(marker *config.ProjectMarker) {
+	if marker.ProjectSlug == "" {
+		return
+	}
+	if extPath, err := marker.ExternalProjectPath(); err == nil && extPath != "" {
+		_ = os.MkdirAll(extPath, 0755)
+		_ = os.MkdirAll(filepath.Join(extPath, "agents"), 0755)
+	}
+}
+
+// isOwnProjectConfigDir reports whether projectPath is itself an existing
+// project's .scion config directory, such as a linked checkout's
+// <repo>/.scion, rather than a project root that holds one. The broker's
+// global directory is excluded: it is the global project's root, and its
+// marker is handled by recordHubProjectFiles as before.
+func isOwnProjectConfigDir(projectPath string) bool {
+	if filepath.Base(filepath.Clean(projectPath)) != config.DotScion {
+		return false
+	}
+	info, err := os.Stat(projectPath)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	return !config.IsGlobalProjectDir(projectPath)
 }
 
 // telemetryPolicy returns the telemetry policy for this dispatch: the start or

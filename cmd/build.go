@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -76,7 +77,10 @@ field is updated to reference the built image.`,
 
 		imageRegistry := ""
 		if settings != nil {
-			imageRegistry = settings.ResolveImageRegistry(profile)
+			// SCION_IMAGE_REGISTRY beats every settings layer
+			// (ptone/scion#3916).
+			imageRegistry = config.ResolveImageRegistryLayers(
+				settings.ImageRegistryLayers(profile, config.ImageRegistryFromEnv())).Value
 		}
 
 		baseImage := buildBaseImage
@@ -289,19 +293,16 @@ func resolveGCPProject(settings *config.VersionedSettings) string {
 // modifying the image field in config.yaml. The image field is a stable
 // reference; two-phase resolution at agent start prefers local images.
 func syncBuildToHub(harnessConfigName string, hcDir *config.HarnessConfigDir) {
-	var gp string
-	if projectPath != "" {
-		if resolved, err := config.GetResolvedProjectDir(projectPath); err == nil {
-			gp = resolved
-		}
-	} else if resolved, err := config.GetResolvedProjectDir(""); err == nil {
-		gp = resolved
+	hubCtx, hubErr := requireHubForUpload(projectPath)
+	if errors.Is(hubErr, errHubNotConfigured) {
+		// No hub configured: the image is built locally and there is
+		// nothing to sync it to.
+		return
 	}
-	hubCtx, hubErr := CheckHubAvailabilityWithOptions(gp, true)
 	if hubErr != nil {
 		fmt.Printf("Warning: could not sync to Hub: %v\n", hubErr)
 		fmt.Println("Run 'scion harness-config push " + harnessConfigName + "' to sync manually.")
-	} else if hubCtx != nil {
+	} else {
 		if err := syncHarnessConfigToHub(hubCtx, harnessConfigName, hcDir.Path, "global", "", hcDir.Config.Harness, ""); err != nil {
 			fmt.Printf("Warning: failed to sync to Hub: %v\n", err)
 			fmt.Println("Run 'scion harness-config push " + harnessConfigName + "' to sync manually.")

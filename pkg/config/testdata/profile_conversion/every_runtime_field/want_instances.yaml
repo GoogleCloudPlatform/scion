@@ -1,0 +1,29 @@
+server:
+  broker:
+    instances:
+      - key: docker
+        name: docker
+        runtime_target:
+          type: docker
+          shared_dir_storage_backend: local
+          shared_dir_storage_backends:
+            cache: local
+      - key: k8s-kind-a-agents
+        name: k8s-kind-a-agents
+        runtime_target:
+          type: kubernetes
+          context: kind-a
+          namespace: agents
+          gke: true
+          priority_class_name: agents-high
+          shared_dir_storage_class: standard-rwx
+          shared_dir_size: 20Gi
+          safe_to_evict: false
+          shared_dir_storage_backend: nfs
+          shared_dir_storage_backends:
+            cache: local
+          home_storage_backend: local
+          home_storage_leaf: broker
+          kubernetes_service_account_mappings:
+            agent@proj.iam.gserviceaccount.com: ksa-agent
+          kubernetes_block_service_account: zero-priv

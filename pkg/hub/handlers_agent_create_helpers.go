@@ -190,6 +190,10 @@ func (s *Server) buildAppliedConfig(req CreateAgentRequest, creatorName string, 
 	ac.NoAuth = req.NoAuth
 
 	if req.Config != nil {
+		// cleared_fields is hub bookkeeping for clears made after creation
+		// (nextClearedFields); a new agent starts with none, whatever the
+		// request carries (ptone/scion#3906).
+		req.Config.ClearedFields = nil
 		ac.Image = req.Config.Image
 		// Env gets its own map, never req.Config.Env itself: ac.InlineConfig
 		// below IS req.Config, so sharing the map would let every later
@@ -529,8 +533,8 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 //
 // Exceptions — these ignore whether the slot is already set:
 //   - TemplateID and TemplateHash are replaced whenever resolvedTemplate is
-//     non-nil; HubAccessScopes too, but only when the template declares
-//     hubAccess (otherwise an existing value is left as-is).
+//     non-nil. A template no longer sets HubAccessScopes (ptone/scion#4224);
+//     an existing value is left as-is.
 //   - Model-alias resolution: when AppliedConfig.Model is an alias, rewrites
 //     it to the resolved concrete name, and overwrites a non-empty
 //     InlineConfig.Model with that same resolved value (InlineConfig.Model
@@ -587,22 +591,11 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 // design §3.3) — those are populated by populateAgentConfig above this call,
 // before AppliedConfig is handed here.
 func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, project *store.Project, resolvedTemplate *store.Template) {
-	// Populate template ID, hash, and hub access scopes if template was resolved.
+	// Populate template ID and hash if template was resolved. The agent role
+	// determines hub access scopes; a template sets none (ptone/scion#4224).
 	if resolvedTemplate != nil {
 		agent.AppliedConfig.TemplateID = resolvedTemplate.ID
 		agent.AppliedConfig.TemplateHash = resolvedTemplate.ContentHash
-		if resolvedTemplate.Config != nil && resolvedTemplate.Config.HubAccess != nil {
-			// Still store the scopes on AppliedConfig for backward-compat visibility,
-			// but they are no longer used for token generation (replaced by AgentRole).
-			agent.AppliedConfig.HubAccessScopes = resolvedTemplate.Config.HubAccess.Scopes
-			if len(resolvedTemplate.Config.HubAccess.Scopes) > 0 {
-				slog.Warn("Template uses deprecated hubAccess.scopes; agent role determines scopes instead",
-					"template", resolvedTemplate.Slug,
-					"scopes", resolvedTemplate.Config.HubAccess.Scopes,
-					"agent_role", agent.AppliedConfig.AgentRole,
-				)
-			}
-		}
 
 		// The template's job keys are not copied here. Its model is filled
 		// by deriveAgentConfig's template rung, from the AgentConfig
@@ -1103,7 +1096,7 @@ func newNotifySubscription(projectID, notifySubscriberType, notifySubscriberID, 
 		SubscriberType:    notifySubscriberType,
 		SubscriberID:      notifySubscriberID,
 		ProjectID:         projectID,
-		TriggerActivities: []string{"COMPLETED", "WAITING_FOR_INPUT", "LIMITS_EXCEEDED", "STALLED", "ERROR"},
+		TriggerActivities: []string{"COMPLETED", "WAITING_FOR_INPUT", "LIMITS_EXCEEDED", "STALLED", "ERROR", NotificationStatusHalted},
 		CreatedAt:         time.Now(),
 		CreatedBy:         createdBy,
 	}
@@ -1131,7 +1124,7 @@ func resumeInPlaceDecision(phase string, resume, force bool) (resumeInPlace, for
 	if force && phase == string(state.PhaseError) {
 		return true, true
 	}
-	return phase == string(state.PhaseStopped), false
+	return phase == string(state.PhaseStopped) || phase == string(state.PhaseHalted), false
 }
 
 // existingAgentBranch is the branch handleExistingAgent takes for a request,
@@ -1153,7 +1146,7 @@ func classifyExistingAgent(a *store.Agent, req CreateAgentRequest) existingAgent
 	switch {
 	case !req.ProvisionOnly && a.Phase == string(state.PhaseSuspended):
 		return existingBranchStart
-	case !req.ProvisionOnly && (a.Phase == string(state.PhaseRunning) || a.Phase == string(state.PhaseStopped) || a.Phase == string(state.PhaseError)):
+	case !req.ProvisionOnly && (a.Phase == string(state.PhaseRunning) || a.Phase == string(state.PhaseStopped) || a.Phase == string(state.PhaseError) || a.Phase == string(state.PhaseHalted)):
 		if inPlace, _ := resumeInPlaceDecision(a.Phase, req.Resume, req.ForceResume); inPlace {
 			return existingBranchStart
 		}
@@ -1460,8 +1453,6 @@ func (s *Server) handleExistingAgent(
 				// 503: the agent's secrets or stored env settings could not be read; nothing was sent.
 			case writeEmptyPerAgentCapabilityError(w, err):
 				// 412 already written (design #2703 D3).
-			case isContainerNameConflict(err):
-				Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
 			case relayDispatchRefusal(w, err):
 				// Required-skill resolution failure relayed with the broker's status.
 			case relayBrokerRefusal(w, err):
@@ -1490,12 +1481,13 @@ func (s *Server) handleExistingAgent(
 		return existingAgentStarted
 	}
 
-	// Branch 2: Agent is running/stopped/error.
-	// Resume=true for stopped agents restarts in-place; otherwise reject as duplicate.
+	// Branch 2: Agent is running/stopped/error/halted.
+	// Resume=true for stopped or halted agents restarts in-place; otherwise reject as duplicate.
 	if !req.ProvisionOnly &&
 		(existingAgent.Phase == string(state.PhaseRunning) ||
 			existingAgent.Phase == string(state.PhaseStopped) ||
-			existingAgent.Phase == string(state.PhaseError)) {
+			existingAgent.Phase == string(state.PhaseError) ||
+			existingAgent.Phase == string(state.PhaseHalted)) {
 
 		resumeInPlace, forcedRecovery := resumeInPlaceDecision(existingAgent.Phase, req.Resume, req.ForceResume)
 		if resumeInPlace {
@@ -1602,8 +1594,6 @@ func (s *Server) handleExistingAgent(
 					// 503: the agent's secrets or stored env settings could not be read; nothing was sent.
 				case writeEmptyPerAgentCapabilityError(w, err):
 					// 412 already written (design #2703 D3).
-				case isContainerNameConflict(err):
-					Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
 				case relayDispatchRefusal(w, err):
 					// Required-skill resolution failure relayed with the broker's status.
 				case relayBrokerRefusal(w, err):
@@ -1637,6 +1627,14 @@ func (s *Server) handleExistingAgent(
 
 	// Branch 3: Env-gather re-provisioning — provisioning + GatherEnv requested.
 	if req.GatherEnv && existingAgent.Phase == string(state.PhaseProvisioning) {
+		// Flat placement pre-check on the agent being replaced, before its
+		// stop intent: the recreate deletes it on its Runtime Broker.
+		if _, err := s.pinnedPlacementBroker(ctx, existingAgent); err != nil {
+			if !writeRuntimeTargetRefusal(w, err) {
+				writeErrorFromErr(w, err, "")
+			}
+			return existingAgentErrored
+		}
 		if _, err := s.recordRunIntent(ctx, existingAgent, store.RunIntentStopped); err != nil {
 			writeErrorFromErr(w, err, "")
 			return existingAgentErrored
@@ -1644,6 +1642,18 @@ func (s *Server) handleExistingAgent(
 		dispatcher := s.GetDispatcher()
 		if dispatcher != nil && existingAgent.RuntimeBrokerID != "" {
 			if err := dispatcher.DispatchAgentDelete(ctx, existingAgent, false, false, false, time.Time{}); err != nil {
+				// The agent's saved placement is inconsistent, and the
+				// dispatcher's placement backstop sent nothing
+				// (requirePinnedPlacement): as for a run mismatch,
+				// removing the row could leave a running workload with no
+				// row, so the recreate is refused with the placement 409,
+				// and cleanupMode=force does not override it.
+				if refusal, ok := placementRefusalOf(err); ok {
+					s.agentLifecycleLog.Warn("Env-gather recreate: agent placement is inconsistent; not removing the agent",
+						"agent_id", existingAgent.ID, "code", refusal.Code, "cleanup_mode", cleanupMode)
+					writeError(w, refusal.Status, refusal.Code, refusal.Message, refusal.Details)
+					return existingAgentErrored
+				}
 				// The broker holds a different run of the agent than the
 				// row records and deleted nothing (ptone/scion#3080):
 				// removing the row would leave that run with no row.
@@ -1818,8 +1828,6 @@ func (s *Server) handleExistingAgent(
 				// 503: the agent's secrets or stored env settings could not be read; nothing was sent.
 			case writeEmptyPerAgentCapabilityError(w, err):
 				// 412 already written (design #2703 D3).
-			case isContainerNameConflict(err):
-				Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
 			case relayDispatchRefusal(w, err):
 				// Required-skill resolution failure relayed with the broker's status.
 			case relayBrokerRefusal(w, err):
@@ -2053,7 +2061,9 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 				Status:     broker.Status,
 				LinkedBy:   linkedByForProvider(GetUserIdentityFromContext(ctx)),
 			}
-			if addErr := s.store.AddProjectProvider(ctx, provider); addErr != nil {
+			// linkProjectProvider also retains the project's activeProfile
+			// built-in before this request dispatches (ptone/scion#5113).
+			if addErr := s.linkProjectProvider(ctx, provider); addErr != nil {
 				slog.Warn("Failed to auto-link broker during agent creation",
 					"broker", broker.Name, "project_id", project.ID, "error", addErr)
 				RuntimeBrokerUnavailable(w, requestedBrokerID, usableBrokers())
@@ -2215,6 +2225,34 @@ func (s *Server) canDispatchToBroker(ctx context.Context, broker *store.RuntimeB
 	return s.brokerDispatchAllowed(ctx, broker, func(user UserIdentity) bool {
 		return s.userHoldsBrokerDispatch(ctx, user, broker)
 	})
+}
+
+// canRunBrokerImageOps reports whether the caller may pull or remove an
+// image on broker (the harness-config image operations with broker_id). It
+// writes no HTTP response.
+//
+// Dispatch authority is checked first: a user or dev caller holding
+// broker.dispatch on the broker passes. A user or dev caller whose
+// credential is not an interactive session or dev credential
+// (sessionCredentialAllowed) is then refused, so the broker's auto-provide
+// setting never admits a user access token or any other non-session
+// credential. Every other caller is decided by canDispatchToBroker, the
+// shared-broker rule agent creation uses. Agent creation itself keeps
+// canUseBrokerForProject.
+func (s *Server) canRunBrokerImageOps(ctx context.Context, broker *store.RuntimeBroker) bool {
+	identity := GetIdentityFromContext(ctx)
+	if isNilIdentity(identity) || broker == nil {
+		return false
+	}
+	if user, ok := identity.(UserIdentity); ok && (identity.Type() == "user" || identity.Type() == "dev") {
+		if s.userHoldsBrokerDispatch(ctx, user, broker) {
+			return true
+		}
+		if !sessionCredentialAllowed(ctx) {
+			return false
+		}
+	}
+	return s.canDispatchToBroker(ctx, broker)
 }
 
 // canUseBrokerForProject reports whether the caller, already authorized to

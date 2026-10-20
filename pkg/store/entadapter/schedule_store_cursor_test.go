@@ -171,7 +171,7 @@ func TestListSchedules_CursorBoundaryRowPaused(t *testing.T) {
 	}
 	ids := seedCursorSchedules(t, s, projectID, created)
 	// ids[2] is already paused, so it is never in the active listing.
-	require.NoError(t, s.UpdateScheduleStatus(ctx, ids[2], store.ScheduleStatusPaused))
+	require.NoError(t, s.UpdateScheduleStatus(ctx, ids[2], store.ScheduleStatusPaused, store.ScheduleStatusReasonNone))
 
 	filter := store.ScheduleFilter{ProjectID: projectID, Status: store.ScheduleStatusActive}
 	page1, err := s.ListSchedules(ctx, filter, store.ListOptions{Limit: 2})
@@ -179,7 +179,7 @@ func TestListSchedules_CursorBoundaryRowPaused(t *testing.T) {
 	require.Equal(t, []string{ids[5], ids[4]}, pageIDs(page1.Items))
 
 	// Pause the page-boundary row: it no longer matches the filter.
-	require.NoError(t, s.UpdateScheduleStatus(ctx, ids[4], store.ScheduleStatusPaused))
+	require.NoError(t, s.UpdateScheduleStatus(ctx, ids[4], store.ScheduleStatusPaused, store.ScheduleStatusReasonNone))
 
 	page2, err := s.ListSchedules(ctx, filter, store.ListOptions{Limit: 2, Cursor: page1.NextCursor})
 	require.NoError(t, err)

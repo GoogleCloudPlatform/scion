@@ -201,47 +201,75 @@ func TestBackgroundSubagentWait_OwnAnswerReleases(t *testing.T) {
 
 // A stale owner (it never sends an end event) holds the wait through the
 // parent's Stop and tool activity, and is released by the parent's next
-// prompt, a session start or a status write. The prompt row runs both
-// handlers and checks the Hub report too. The session start and status
-// write rows call only the StatusHandler, so they check local state only
-// (wantHub is nil and no Hub assertion is made).
+// prompt, a session start of any source or a status write. The prompt row
+// and the clear and compact session start rows run both handlers and check
+// the Hub report too; a clear or compact leaves the session-restart marker
+// that the HubHandler reports. The plain session start and status write
+// rows call only the StatusHandler, so they check local state only (wantHub
+// is nil and no Hub assertion is made). Each row runs twice: with only the
+// stale owner, and with the parent's own prompt also recorded (parentWait),
+// which the same writes clear.
 func TestBackgroundSubagentWait_SafetyNetReleasesStaleOwner(t *testing.T) {
-	for _, tc := range []struct {
-		name      string
-		release   func(*testing.T, *StatusHandler, *HubHandler, func() []string) []string
-		wantLocal string
-		wantHub   []string // nil: local state only
-	}{
-		{"parent prompt", func(t *testing.T, sh *StatusHandler, hh *HubHandler, sent func() []string) []string {
-			got, _ := parentHeldStep(t, sh, hh, sent, parentHeldParent(t, "UserPromptSubmit", ""))
-			return got
-		}, "thinking", []string{parentHeldThinking}},
-		{"session start", func(t *testing.T, sh *StatusHandler, _ *HubHandler, _ func() []string) []string {
-			require.NoError(t, sh.Handle(parentHeldParent(t, "SessionStart", "")))
-			return nil
-		}, "working", nil},
-		{"status write", func(t *testing.T, sh *StatusHandler, _ *HubHandler, _ func() []string) []string {
-			require.NoError(t, sh.UpdateActivity(state.ActivityBlocked, ""))
-			return nil
-		}, "blocked", nil},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			sh, hh, sent := claudeHubSetup(t)
-			bgHeldAfterStop(t, sh, hh, sent, parentHeldSubA)
-
-			got, info := parentHeldStep(t, sh, hh, sent, parentHeldParent(t, "PreToolUse", "Bash"))
-			require.Equal(t, "waiting_for_input", info["activity"], "parent tool-start does not release it")
-			require.Empty(t, got)
-
-			got = tc.release(t, sh, hh, sent)
-			info = readAgentInfoMap(t, sh.StatusPath)
-			assert.Equal(t, tc.wantLocal, info["activity"])
-			assert.NotContains(t, info, activitySourceKey)
-			assert.NotContains(t, info, notificationWaitAgentsKey)
-			if tc.wantHub != nil {
-				assert.Equal(t, tc.wantHub, got)
+	for _, parentAsks := range []bool{false, true} {
+		for _, tc := range []struct {
+			name       string
+			release    func(*testing.T, *StatusHandler, *HubHandler, func() []string) []string
+			wantLocal  string
+			wantSource string   // activitySource after the release; "" means none
+			wantHub    []string // nil: local state only
+		}{
+			{"parent prompt", func(t *testing.T, sh *StatusHandler, hh *HubHandler, sent func() []string) []string {
+				got, _ := parentHeldStep(t, sh, hh, sent, parentHeldParent(t, "UserPromptSubmit", ""))
+				return got
+			}, "thinking", "", []string{parentHeldThinking}},
+			{"session start", func(t *testing.T, sh *StatusHandler, _ *HubHandler, _ func() []string) []string {
+				require.NoError(t, sh.Handle(parentHeldParent(t, "SessionStart", "")))
+				return nil
+			}, "working", "", nil},
+			{"session start (clear)", func(t *testing.T, sh *StatusHandler, hh *HubHandler, sent func() []string) []string {
+				got, _ := parentHeldStep(t, sh, hh, sent, parentHeldSessionStart(t, "clear", ""))
+				return got
+			}, "working", activitySourceSessionRestart, []string{parentHeldWorking}},
+			{"session start (compact)", func(t *testing.T, sh *StatusHandler, hh *HubHandler, sent func() []string) []string {
+				got, _ := parentHeldStep(t, sh, hh, sent, parentHeldSessionStart(t, "compact", ""))
+				return got
+			}, "working", activitySourceSessionRestart, []string{parentHeldWorking}},
+			{"status write", func(t *testing.T, sh *StatusHandler, _ *HubHandler, _ func() []string) []string {
+				require.NoError(t, sh.UpdateActivity(state.ActivityBlocked, ""))
+				return nil
+			}, "blocked", "", nil},
+		} {
+			name := tc.name
+			if parentAsks {
+				name += " with parent prompt"
 			}
-		})
+			t.Run(name, func(t *testing.T) {
+				sh, hh, sent := claudeHubSetup(t)
+				bgHeldAfterStop(t, sh, hh, sent, parentHeldSubA)
+
+				got, info := parentHeldStep(t, sh, hh, sent, parentHeldParent(t, "PreToolUse", "Bash"))
+				require.Equal(t, "waiting_for_input", info["activity"], "parent tool-start does not release it")
+				require.Empty(t, got)
+				if parentAsks {
+					_, info = parentHeldStep(t, sh, hh, sent, parentHeldParent(t, "Notification", ""))
+					require.Equal(t, parentWaitNotification, info[parentWaitKey])
+				}
+
+				got = tc.release(t, sh, hh, sent)
+				info = readAgentInfoMap(t, sh.StatusPath)
+				assert.Equal(t, tc.wantLocal, info["activity"])
+				if tc.wantSource == "" {
+					assert.NotContains(t, info, activitySourceKey)
+				} else {
+					assert.Equal(t, tc.wantSource, info[activitySourceKey])
+				}
+				assert.NotContains(t, info, notificationWaitAgentsKey)
+				assert.NotContains(t, info, parentWaitKey)
+				if tc.wantHub != nil {
+					assert.Equal(t, tc.wantHub, got)
+				}
+			})
+		}
 	}
 }
 
@@ -356,14 +384,12 @@ func TestBackgroundSubagentWait_ForegroundSequence(t *testing.T) {
 	})
 }
 
-// Known limitation, pinned so it stays visible: the parent's own
-// Notification (for example a permission prompt) during a wait that a
-// sub-agent holds is folded into that wait and keeps the owner list, with
-// nothing recording that the parent is waiting too. When the last owner then
-// ends without answering, its SubagentStop releases the wait to working and
-// reports working to the Hub, although the parent's prompt may still be
-// open. Fixing it needs a change on the question path
-// (setWaitingFromNotificationFor), which is out of scope here.
+// The parent's own Notification (for example a permission prompt) during a
+// wait that a sub-agent holds is recorded as the parent's wait next to the
+// owner list. When the last owner then ends without answering, its
+// SubagentStop leaves the parent's wait in place: waiting_for_input, set by a
+// notification, with no owner list, and no Hub update replaces it.
+// (Before ptone/scion#4830 the SubagentStop released it to working.)
 func TestBackgroundSubagentWait_ParentNotificationFoldedIntoOwnerHeldWait(t *testing.T) {
 	sh, hh, sent := claudeHubSetup(t)
 	parentHeldHold(t, sh, "working")
@@ -371,14 +397,16 @@ func TestBackgroundSubagentWait_ParentNotificationFoldedIntoOwnerHeldWait(t *tes
 
 	got, info := parentHeldStep(t, sh, hh, sent, parentHeldParent(t, "Notification", ""))
 	require.Equal(t, "waiting_for_input", info["activity"])
-	require.Equal(t, []string{parentHeldSubA}, waitOwnersOf(info), "the parent's prompt is folded into A's wait")
+	require.Equal(t, []string{parentHeldSubA}, waitOwnersOf(info), "A still owns its entry")
+	require.Equal(t, parentWaitNotification, info[parentWaitKey], "the parent's prompt is recorded")
 	require.Equal(t, []string{parentHeldWaiting}, got)
 
 	got, info = parentHeldStep(t, sh, hh, sent, bgSubagentStop(t, parentHeldSubA))
-	assert.Equal(t, "working", info["activity"], "limitation: the parent's open prompt is not kept")
-	assert.Equal(t, activitySourceSubagentEnd, info[activitySourceKey])
+	assert.Equal(t, "waiting_for_input", info["activity"], "the parent's open prompt is kept")
+	assert.Equal(t, activitySourceNotification, info[activitySourceKey])
 	assert.NotContains(t, info, notificationWaitAgentsKey)
-	assert.Equal(t, []string{parentHeldWorking}, got)
+	assert.NotContains(t, info, parentWaitKey)
+	assert.Empty(t, got, "no working report replaces the wait")
 }
 
 func countString(list []string, s string) int {

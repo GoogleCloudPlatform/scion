@@ -486,14 +486,28 @@ export interface AgentLaunch {
    * can be in.
    */
   active: boolean;
-  /** create | start | restart. Only `create` launches are async today. */
+  /**
+   * create | start | restart. A resume is a `start` launch. Start and
+   * restart launches exist only where the hub runs starts asynchronously.
+   */
   kind: string;
   /** The last step the broker reported, e.g. `claim` or `launching`. */
   step?: string;
   /** Failure code, e.g. `runtime_error`, `launch_timeout`, `broker_lost`. */
   error?: string;
+  /**
+   * The runtime cause behind a `runtime_error`, when the broker reported one
+   * (ptone/scion#4666): `runtime_forbidden` or `runtime_unauthorized`.
+   */
+  cause?: string;
   /** succeeded | running_observed | failed | timed_out | lost | not_launched | superseded */
   endReason?: string;
+  /**
+   * The resume memory of a failed start (ptone/scion#4669): the resting
+   * phase a later start or resume treats the agent as being in, sent only
+   * when it differs from the agent's phase.
+   */
+  resumePhase?: AgentPhase;
   /** Present only while the launch is active. */
   deadline?: string;
   remainingSeconds?: number;
@@ -531,6 +545,31 @@ export function isIncompleteCreate(agent: AgentLaunchFields): boolean {
       // The hub's wind-down arm is LaunchState == "active", which reaches
       // the web as `state`; `active` is always false in these phases.
       return launch.state === 'active' || !!launch.error;
+    default:
+      return false;
+  }
+}
+
+/**
+ * Whether the agent rests after a start or restart launch that failed
+ * (design wave 3 D-c, ptone/scion#4669). Unlike an incomplete create, the hub
+ * still accepts a start or resume of such an agent. A failed start launch
+ * ends in a resting phase: stopped, error (with launch.resumePhase when the
+ * agent rested in another phase before), or suspended. A launch the user
+ * stopped (`launch_stopped`) is not a failure. The hub clears launch.error
+ * only on a new launch or a running write, so a later synchronous start
+ * keeps the old error while it runs through starting, provisioning and
+ * cloning; those phases do not count.
+ */
+export function isFailedStartLaunch(agent: AgentLaunchFields): boolean {
+  const launch = agent.launch;
+  if (!launch || (launch.kind !== 'start' && launch.kind !== 'restart')) return false;
+  if (launch.state !== 'ended' || !launch.error || launch.error === 'launch_stopped') return false;
+  switch (agent.phase) {
+    case 'stopped':
+    case 'suspended':
+    case 'error':
+      return true;
     default:
       return false;
   }
@@ -1026,7 +1065,6 @@ export interface Template {
   description?: string;
   harness: string;
   defaultHarnessConfig?: string;
-  image?: string;
   status: string;
   scope: string;
   scopeId?: string;
@@ -1077,6 +1115,12 @@ export interface HarnessConfig {
   files?: TemplateFileInfo[];
   imageStatus?: string;
   imageStatusCheckedAt?: string;
+  /**
+   * Image the hub's image-build executor last built for this harness-config
+   * (ptone/scion#4219). Operational state, not derived from config.yaml;
+   * when set it is the image to show and check, in place of config.image.
+   */
+  builtImage?: string;
   created?: string;
   updated?: string;
   _capabilities?: Capabilities;
@@ -1156,7 +1200,7 @@ export type BrokerStatus = 'online' | 'offline' | 'degraded';
  * Capabilities advertised by a Runtime Broker
  */
 export interface BrokerCapabilities {
-  webPTY: boolean;
+  webPty: boolean;
   sync: boolean;
   attach: boolean;
 }
@@ -1204,6 +1248,8 @@ export interface RuntimeBroker {
   labels?: Record<string, string>;
   createdBy?: string;
   createdByName?: string;
+  /** Configured GCP host service account (Go JSON tag is snake_case). */
+  gcp_host_service_account_email?: string;
   /** Creation and last-update times, as the hub sends them. */
   created?: string;
   updated?: string;
@@ -1246,6 +1292,27 @@ export interface RuntimeBroker {
    * Renderers must show this visibly, not only in a tooltip.
    */
   agentLimitSource?: string;
+  /**
+   * Host identity state of a co-located broker: the configured GCP host
+   * service account compared with the identity the host reports. Mirrors Go
+   * store.HostIdentityStatus. observedEmail and observedAt are present only
+   * for callers allowed to update the broker.
+   */
+  hostIdentity?: BrokerHostIdentity;
+}
+
+/** Mirrors Go store.HostIdentityStatus (pkg/store/models.go). */
+export interface BrokerHostIdentity {
+  state:
+    | 'unobserved'
+    | 'unknown'
+    | 'unset_detected'
+    | 'match'
+    | 'mismatch'
+    | 'pinned_absent'
+    | 'none';
+  observedEmail?: string;
+  observedAt?: string;
 }
 
 /**

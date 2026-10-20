@@ -95,7 +95,13 @@ type AgentLaunch struct {
 	Kind      string `json:"kind"`   // create | start | restart
 	Step      string `json:"step,omitempty"`
 	Error     string `json:"error,omitempty"` // launch error code, e.g. image_pull_failed
+	Cause     string `json:"cause,omitempty"` // runtime cause code behind a runtime_error, e.g. runtime_forbidden
 	EndReason string `json:"endReason,omitempty"`
+	// ResumePhase is the resume memory of a failed start (ptone/scion#4669):
+	// the resting phase the agent is treated as being in for a later start or
+	// resume (store.EffectiveRestingPhase), set only when it differs from the
+	// agent's phase.
+	ResumePhase string `json:"resumePhase,omitempty"`
 	// Deadline and RemainingSeconds are present only while the launch is
 	// active. RemainingSeconds is never negative.
 	Deadline         *time.Time `json:"deadline,omitempty"`
@@ -215,6 +221,11 @@ type ProjectProvider struct {
 }
 
 // ProjectSettings represents project configuration settings.
+//
+// Bucket, Runtimes, Harnesses and Profiles are not stored at the project
+// layer: GET never returns them, and a PUT that sets any of them (to a
+// non-null value) is refused with 400. They are configured in server or
+// Runtime Broker settings.
 type ProjectSettings struct {
 	// ActiveProfile names the broker profile new agents in the project run
 	// under when the request names none. On PUT, an absent (null) field
@@ -407,6 +418,12 @@ type BrokerCapabilities struct {
 	// create/start/restart as policy above everything. A hub may stop writing those values into
 	// InlineConfig only for a broker that reports this (ptone/scion#4222).
 	TemplateTiers bool `json:"templateTiers,omitempty"`
+	// NodeImageRegistry is the broker's SCION_IMAGE_REGISTRY, the node env
+	// layer of image_registry that beats every settings value for agents
+	// this broker runs (ptone/scion#3916). It is a node configuration value
+	// carried with the capabilities, not a feature flag; empty means none
+	// (store.BrokerCapabilities.NodeImageRegistry is its counterpart).
+	NodeImageRegistry string `json:"nodeImageRegistry,omitempty"`
 }
 
 // BrokerProfile describes a runtime profile available on a broker.

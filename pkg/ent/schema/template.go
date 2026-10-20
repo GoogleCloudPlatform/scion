@@ -29,7 +29,7 @@ import (
 // legacy SQLite `templates` table (final post-V50 state; grove_id renamed to
 // project_id).
 //
-// JSON columns (config, files) are kept as raw strings to stay dialect-neutral.
+// JSON columns (agent_config, files) are kept as raw strings to stay dialect-neutral.
 // Foreign references (project_id, scope_id, owner ids) are modeled as plain
 // strings rather than edges so global/unscoped rows with empty values port
 // cleanly; edges can be added later when the full entity migrates.
@@ -57,10 +57,8 @@ func (Template) Fields() []ent.Field {
 		field.String("harness"),
 		field.String("default_harness_config").
 			Optional(),
-		field.String("image").
-			Optional(),
-		field.String("config").
-			Optional(),
+		// The retired image and config columns are dropped after migration by
+		// entc.dropTemplateLegacyColumns (ptone/scion#4224).
 		// agent_config is a derived, read-only JSON snapshot of the template's
 		// own scion-agent.{yaml,yml,json} (api.ScionConfig). Only the hub's
 		// template commit path (pkg/hub/template_commit.go) sets it; it is

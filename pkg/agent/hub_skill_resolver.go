@@ -102,6 +102,7 @@ func hubResolveResponseToResult(refs []api.SkillReference, resp *hubclient.Resol
 			URI:     re.URI,
 			Code:    re.Code,
 			Message: re.Message,
+			Status:  re.Status,
 		})
 	}
 

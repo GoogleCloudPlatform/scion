@@ -24,6 +24,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestRequireImageRegistryForBroker_NoRegistry(t *testing.T) {
@@ -49,16 +50,34 @@ func TestRequireImageRegistryForBroker_EnvVar(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestRequireImageRegistryForBroker_MaintenanceEnvVar(t *testing.T) {
+// TestRequireImageRegistryForBroker_MaintenanceEnvVarIsNotASource: the
+// maintenance registry applies to maintenance builds only, so it does not
+// satisfy the broker check, and the error names the replacement
+// (ptone/scion#3916). The broker and hosted error never mentions the
+// setup wizard, which neither has.
+func TestRequireImageRegistryForBroker_MaintenanceEnvVarIsNotASource(t *testing.T) {
 	t.Setenv("SCION_IMAGE_REGISTRY", "")
 	t.Setenv("SCION_MAINTENANCE_IMAGE_REGISTRY", "ghcr.io/test-maintenance")
 
 	// Point HOME at an empty temp dir so settings.yaml is absent.
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
+	t.Chdir(tmpHome)
 
 	err := requireImageRegistryForBroker()
-	assert.NoError(t, err)
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "SCION_MAINTENANCE_IMAGE_REGISTRY now applies only to maintenance builds; set SCION_IMAGE_REGISTRY or image_registry in settings.yaml")
+		assert.NotContains(t, err.Error(), "wizard")
+	}
+	assert.Contains(t, workstationRegistryDegradeWarning(), "SCION_MAINTENANCE_IMAGE_REGISTRY now applies only to maintenance builds")
+	assert.Contains(t, workstationRegistryDegradeWarning(), "setup wizard")
+
+	t.Setenv("SCION_MAINTENANCE_IMAGE_REGISTRY", "")
+	err = requireImageRegistryForBroker()
+	if assert.Error(t, err) {
+		assert.NotContains(t, err.Error(), "SCION_MAINTENANCE_IMAGE_REGISTRY")
+	}
+	assert.NotContains(t, workstationRegistryDegradeWarning(), "SCION_MAINTENANCE_IMAGE_REGISTRY")
 }
 
 func TestRequireImageRegistryForBroker_Settings(t *testing.T) {
@@ -155,7 +174,8 @@ func TestResolveBrokerIDPrefersConfiguredIDOverDefault(t *testing.T) {
 		Hub: &config.HubClientConfig{BrokerID: "configured-broker"},
 	}
 
-	got := resolveBrokerID(context.Background(), cfg, settings, nil, t.TempDir(), "cloudrun-default", nil)
+	got, err := resolveBrokerID(context.Background(), cfg, settings, nil, isolatedGlobalDir(t), "cloudrun-default", nil)
+	require.NoError(t, err)
 
 	assert.Equal(t, "configured-broker", got)
 }

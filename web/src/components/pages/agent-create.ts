@@ -60,6 +60,7 @@ import { GcpIdentityState } from '../../shared/gcp-identity-state.js';
 import { assignStatusTarget } from '../../shared/gcp-sa-assign-status.js';
 import { GCPServiceAccountsLoader } from '../../client/gcp-sa-accounts-loader.js';
 import { apiFetch, apiFetchAllPages, parseApiError } from '../../client/api.js';
+import { getPublicSettings } from '../../client/server-feature-flags.js';
 import { navigateTo } from '../../client/navigation.js';
 import { showToast } from '../../utils/toast.js';
 import { showResponseWarnings, showResponseBodyWarnings } from '../../client/response-warnings.js';
@@ -438,7 +439,7 @@ export class ScionPageAgentCreate extends LitElement {
       }
       const tmplUrl = `/api/v1/templates?${tmplParams.toString()}`;
 
-      const [projectsRes, brokersRes, templates, settingsRes, harnessConfigsRes] =
+      const [projectsRes, brokersRes, templates, publicSettings, harnessConfigsRes] =
         await Promise.all([
           // Not `mine=true`: on the server that resolves to projects where the
           // caller holds the project-owner role specifically, but creating an
@@ -463,7 +464,7 @@ export class ScionPageAgentCreate extends LitElement {
               return [] as Template[];
             }
           ),
-          fetch('/api/v1/settings/public', { credentials: 'include' }),
+          getPublicSettings(),
           apiFetch('/api/v1/harness-configs?status=active&limit=100'),
         ]);
 
@@ -480,8 +481,8 @@ export class ScionPageAgentCreate extends LitElement {
 
       this.templates = templates;
 
-      if (settingsRes.ok) {
-        this.hubSettings = (await settingsRes.json()) as HubPublicDefaults;
+      if (publicSettings) {
+        this.hubSettings = publicSettings;
       }
 
       if (harnessConfigsRes.ok) {
@@ -852,8 +853,8 @@ export class ScionPageAgentCreate extends LitElement {
         projectId: this.projectId,
         harnessConfig: this.resolvedHarness,
         notify: this.notify,
-        // Take the hub's async launch path when it has it on
-        // (server.hub.async_agent_launch); a hub with it off ignores this
+        // Take the hub's async launch path when it has it on (the
+        // hub.async_agent_launch experiment); a hub with it off ignores this
         // and answers synchronously as before.
         acceptAsyncLaunch: true,
       };

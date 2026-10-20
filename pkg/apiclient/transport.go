@@ -113,6 +113,7 @@ func NewTransport(baseURL string, opts ...TransportOption) *Transport {
 // rewound (non-empty Body, nil GetBody) is sent exactly once: its first
 // response is returned as-is, and its first transport error is returned
 // wrapped as "request failed: %w".
+// Canceling ctx interrupts the wait between attempts and returns ctx.Err().
 //
 // A retry replays the request, so Do must only be used with retries enabled
 // for idempotent operations. Non-idempotent operations should use DoNoRetry
@@ -129,6 +130,18 @@ func (t *Transport) Do(ctx context.Context, req *http.Request) (*http.Response, 
 	canRewind := bodyRewindable(req)
 	attempts := t.MaxRetries + 1
 	for i := 0; i < attempts; i++ {
+		if i > 0 {
+			timer := time.NewTimer(t.RetryWait)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+			}
+			timer.Stop()
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+
 		attempt := req.WithContext(ctx)
 		if i > 0 && req.GetBody != nil {
 			// The previous attempt drained (and the client closed) the body;
@@ -151,16 +164,14 @@ func (t *Transport) Do(ctx context.Context, req *http.Request) (*http.Response, 
 
 			// Retry on network errors
 			if retry {
-				time.Sleep(t.RetryWait)
 				continue
 			}
-			return nil, fmt.Errorf("request failed: %w", err)
+			return nil, fmt.Errorf("request failed: %w", redactURLError(err))
 		}
 
 		// Retry on 5xx errors
 		if resp.StatusCode >= 500 && retry {
 			_ = resp.Body.Close()
-			time.Sleep(t.RetryWait)
 			continue
 		}
 
@@ -223,7 +234,7 @@ func (t *Transport) DoNoRetry(ctx context.Context, req *http.Request) (*http.Res
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return nil, fmt.Errorf("request failed: %w", err)
+		return nil, fmt.Errorf("request failed: %w", redactURLError(err))
 	}
 	return resp, nil
 }
@@ -290,7 +301,7 @@ func (t *Transport) Get(ctx context.Context, path string, headers http.Header) (
 func (t *Transport) GetWithQuery(ctx context.Context, path string, query url.Values, headers http.Header) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, t.buildURL(path, query), nil)
 	if err != nil {
-		return nil, err
+		return nil, redactURLError(err)
 	}
 
 	for k, v := range headers {
@@ -327,7 +338,7 @@ func (t *Transport) Patch(ctx context.Context, path string, body interface{}, he
 func (t *Transport) Delete(ctx context.Context, path string, headers http.Header) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, t.buildURL(path, nil), nil)
 	if err != nil {
-		return nil, err
+		return nil, redactURLError(err)
 	}
 
 	for k, v := range headers {
@@ -357,7 +368,7 @@ func (t *Transport) doJSONVia(ctx context.Context, send func(context.Context, *h
 
 	req, err := http.NewRequestWithContext(ctx, method, t.buildURL(path, nil), bodyReader)
 	if err != nil {
-		return nil, err
+		return nil, redactURLError(err)
 	}
 
 	if body != nil {

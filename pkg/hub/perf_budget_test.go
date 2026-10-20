@@ -158,9 +158,13 @@ var perfBudgets = []perfBudget{
 		// Bytes: upstream #3070 added agent editability to the single-agent GET (main ca19871).
 		// 14175 is the value CI measured with ptone/scion#4222 merged on main: about 117 bytes
 		// are its new config.message_mode editability row, the rest is main's own drift
-		// since the 14029 baseline (e8c1576a7, #3112).
+		// since the 14029 baseline (e8c1576a7, #3112). 14475: CI's measurement
+		// with main fb721f16f merged (its #3536 edit rows) plus the TX
+		// config.agent_plugins editability row (ptone/scion#4933). 14680: CI's
+		// measurement with the claude harness's agent_plugins capability row
+		// added (default-claude, ptone/scion#4933 U4).
 		// Store calls: the invited-user account-status check reads the user record per decision; this route has no request-local authz memo (ptone/scion#3684).
-		baseline: perfBudgetCounts{authzStoreCalls: 20, decisions: 10, dbReads: 0, bytes: 14175},
+		baseline: perfBudgetCounts{authzStoreCalls: 20, decisions: 10, dbReads: 0, bytes: 14680},
 	},
 	{
 		// Store calls: per-request sender standing (upstream #3101).
@@ -171,9 +175,13 @@ var perfBudgets = []perfBudget{
 		// Bytes: upstream #3070 added agent editability to the single-agent GET (main ca19871).
 		// 14175 is the value CI measured with ptone/scion#4222 merged on main: about 117 bytes
 		// are its new config.message_mode editability row, the rest is main's own drift
-		// since the 14029 baseline (e8c1576a7, #3112).
+		// since the 14029 baseline (e8c1576a7, #3112). 14475: CI's measurement
+		// with main fb721f16f merged (its #3536 edit rows) plus the TX
+		// config.agent_plugins editability row (ptone/scion#4933). 14680: CI's
+		// measurement with the claude harness's agent_plugins capability row
+		// added (default-claude, ptone/scion#4933 U4).
 		// Store calls: the invited-user account-status check reads the user record per decision; this route has no request-local authz memo (ptone/scion#3684).
-		baseline: perfBudgetCounts{authzStoreCalls: 19, decisions: 10, dbReads: 0, bytes: 14175},
+		baseline: perfBudgetCounts{authzStoreCalls: 19, decisions: 10, dbReads: 0, bytes: 14680},
 	},
 }
 

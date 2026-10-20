@@ -32,6 +32,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -541,6 +542,13 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	//     pod, since nothing will ever record it as a running agent. Other
 	//     failures after the pod exists keep it, as before, so its status and
 	//     logs stay available until the agent is deleted.
+	//   On the broker's synchronous create path, ctx does not follow the
+	//   hub's request once the start has begun (runtimebroker
+	//   syncStart.bind): the request ending does not make it done, so a cold
+	//   start still pulling its image is removed here only by a stop, delete
+	//   or newer start of the agent, broker shutdown, or the broker's bound
+	//   (ptone/scion#4817). The start and restart handlers for an existing
+	//   agent still run under the request.
 	// The cleanup runs on a fresh context because ctx may already be done.
 	// cleanupArmed is set just before the first object is created, so early
 	// validation failures make no API calls.
@@ -2803,6 +2811,10 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			Env:             initEnv,
 			VolumeMounts:    initVolumeMounts,
 			SecurityContext: initSecurityContext,
+			// As on the home init containers: when provisioning fails
+			// without writing a termination message, the kubelet uses the
+			// tail of the container log, so the create error can say why.
+			TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
 		}
 		pod.Spec.InitContainers = append(pod.Spec.InitContainers, initContainer)
 	}
@@ -3004,14 +3016,25 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	}
 
 	if config.Kubernetes != nil {
+		// Validate the merged placement values before they reach the pod
+		// spec; the rules match the API server's, so only values that pod
+		// creation would reject fail here.
+		if err := validateKubernetesPlacement(config.Kubernetes); err != nil {
+			return nil, err
+		}
 		if config.Kubernetes.ServiceAccountName != "" {
 			pod.Spec.ServiceAccountName = config.Kubernetes.ServiceAccountName
 		}
 		if config.Kubernetes.RuntimeClassName != "" {
-			pod.Spec.RuntimeClassName = &config.Kubernetes.RuntimeClassName
+			// Copy the value so the pod spec does not point into the
+			// caller's configuration.
+			runtimeClassName := config.Kubernetes.RuntimeClassName
+			pod.Spec.RuntimeClassName = &runtimeClassName
 		}
 		if len(config.Kubernetes.NodeSelector) > 0 {
-			pod.Spec.NodeSelector = config.Kubernetes.NodeSelector
+			// Copy the map so later changes to the pod spec never reach
+			// the caller's configuration.
+			pod.Spec.NodeSelector = maps.Clone(config.Kubernetes.NodeSelector)
 		}
 		if len(config.Kubernetes.Tolerations) > 0 {
 			for _, t := range config.Kubernetes.Tolerations {
@@ -3081,6 +3104,27 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 // keeps the autoscaler from removing the node while the pod runs and, on GKE
 // Autopilot, requests extended run duration for the pod.
 const annotationSafeToEvict = "cluster-autoscaler.kubernetes.io/safe-to-evict"
+
+// maxInitTerminationMessage bounds how much of an init container's
+// termination message goes into a launch error.
+const maxInitTerminationMessage = 1024
+
+// boundedTerminationMessage returns msg trimmed of surrounding whitespace
+// and, when longer than maxInitTerminationMessage bytes, only its tail,
+// cut at a rune boundary and marked with a leading "...". With
+// FallbackToLogsOnError the message can be the container's log tail, and
+// the last lines carry the error.
+func boundedTerminationMessage(msg string) string {
+	msg = strings.TrimSpace(msg)
+	if len(msg) <= maxInitTerminationMessage {
+		return msg
+	}
+	tail := msg[len(msg)-maxInitTerminationMessage:]
+	for len(tail) > 0 && !utf8.RuneStart(tail[0]) {
+		tail = tail[1:]
+	}
+	return "..." + strings.TrimSpace(tail)
+}
 
 // classifyTerminalWaitingReason turns a terminal (non-retryable)
 // ContainerStateWaiting reason into an error, or returns nil if reason is
@@ -3406,7 +3450,8 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 						"message", ics.State.Terminated.Message, "phase", "init-container")
 					return newLaunchFailure(api.LaunchCodeInitContainerFailed, api.LaunchStepInitContainers, ics.State.Terminated.Reason,
 						fmt.Errorf("init container %q failed in pod %q: exit code %d (%s): %s",
-							ics.Name, podName, ics.State.Terminated.ExitCode, ics.State.Terminated.Reason, ics.State.Terminated.Message))
+							ics.Name, podName, ics.State.Terminated.ExitCode, ics.State.Terminated.Reason,
+							boundedTerminationMessage(ics.State.Terminated.Message)))
 				}
 				if ics.State.Waiting != nil {
 					if err := classifyTerminalWaitingReason(podName, ics.Name, ics.State.Waiting.Reason, ics.State.Waiting.Message); err != nil {
@@ -3979,7 +4024,8 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 			agentStatus = string(state.PhaseError)
 		case corev1.PodPending, corev1.PodRunning, corev1.PodUnknown:
 			// Non-terminal pod phases are represented via ContainerStatus and
-			// local agent-info state until the agent exits.
+			// local agent-info state until the agent exits; a Pending pod
+			// reports "starting" (below, after the container status check).
 		}
 
 		// Try to get more detail from container status
@@ -4011,6 +4057,19 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 				}
 				break
 			}
+		}
+
+		// A Pending pod has not started its agent container yet: it is
+		// waiting to be scheduled (for example for a node scale-up), pulling
+		// images or running init containers. Report it as starting, so
+		// agent.Manager.List does not fall back to agent-info.json's phase,
+		// which Start sets to running before the pod is created; otherwise a
+		// broker heartbeat would report a Pending pod as running and the hub
+		// would end an active launch as observed running (ptone/scion#5365).
+		// A terminated agent container keeps its stopped/error mapping, and a
+		// committed disruption below still overrides this.
+		if agentStatus == "" && p.Status.Phase == corev1.PodPending {
+			agentStatus = string(state.PhaseStarting)
 		}
 
 		// A pod that reached a terminal phase may have gotten there through a

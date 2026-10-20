@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -50,36 +51,45 @@ func asyncCreateBody(name, launchID string) map[string]any {
 }
 
 // TestAsyncCreate_RuntimeWithoutAsyncSupportStaysSynchronous: an otherwise
-// eligible async create whose resolved runtime is substrate (which does not
-// call the async launch hooks) takes the synchronous path and logs why.
+// eligible async create whose resolved runtime does not call the async
+// launch hooks (substrate) takes the synchronous path and logs why.
 func TestAsyncCreate_RuntimeWithoutAsyncSupportStaysSynchronous(t *testing.T) {
-	mgr := &runtimeAsyncManager{asyncManager: newAsyncManager(), rt: newTestSubstrateRuntime()}
-	srv, rtb := newAsyncTestServer(t, mgr)
-	var logBuf bytes.Buffer
-	srv.agentLifecycleLog = slog.New(slog.NewTextHandler(&logBuf, nil))
+	for _, tc := range []struct {
+		name string
+		rt   runtime.Runtime
+	}{
+		{"substrate", newTestSubstrateRuntime()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := &runtimeAsyncManager{asyncManager: newAsyncManager(), rt: tc.rt}
+			srv, rtb := newAsyncTestServer(t, mgr)
+			var logBuf bytes.Buffer
+			srv.agentLifecycleLog = slog.New(slog.NewTextHandler(&logBuf, nil))
 
-	w := postCreate(t, srv, asyncCreateBody("agent-sub", "L-sub"))
-	if w.Code != http.StatusCreated {
-		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
-	}
-	resp := decodeCreateResponse(t, w)
-	if resp.LaunchPending {
-		t.Fatalf("LaunchPending must be false for a runtime without async launch support: %+v", resp)
-	}
-	if resp.Agent == nil || !resp.Created {
-		t.Fatalf("expected a synchronous created agent: %+v", resp)
-	}
-	if n := mgr.PreflightCallCount(); n != 0 {
-		t.Fatalf("Preflight must not be called on the synchronous path, got %d calls", n)
-	}
-	if n := mgr.StartCallCount(); n != 1 {
-		t.Fatalf("expected exactly 1 synchronous Start call, got %d", n)
-	}
-	if len(rtb.getLaunchReports()) != 0 {
-		t.Fatalf("the synchronous path must send no launch reports")
-	}
-	if !strings.Contains(logBuf.String(), asyncUnsupportedWarn) {
-		t.Fatalf("expected the fallback warning in the log, got:\n%s", logBuf.String())
+			w := postCreate(t, srv, asyncCreateBody("agent-"+tc.name, "L-"+tc.name))
+			if w.Code != http.StatusCreated {
+				t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+			}
+			resp := decodeCreateResponse(t, w)
+			if resp.LaunchPending {
+				t.Fatalf("LaunchPending must be false for a runtime without async launch support: %+v", resp)
+			}
+			if resp.Agent == nil || !resp.Created {
+				t.Fatalf("expected a synchronous created agent: %+v", resp)
+			}
+			if n := mgr.PreflightCallCount(); n != 0 {
+				t.Fatalf("Preflight must not be called on the synchronous path, got %d calls", n)
+			}
+			if n := mgr.StartCallCount(); n != 1 {
+				t.Fatalf("expected exactly 1 synchronous Start call, got %d", n)
+			}
+			if len(rtb.getLaunchReports()) != 0 {
+				t.Fatalf("the synchronous path must send no launch reports")
+			}
+			if !strings.Contains(logBuf.String(), asyncUnsupportedWarn) {
+				t.Fatalf("expected the fallback warning in the log, got:\n%s", logBuf.String())
+			}
+		})
 	}
 }
 
@@ -111,6 +121,52 @@ func TestAsyncCreate_RuntimeWithoutCapabilityMethodStillAsync(t *testing.T) {
 	}
 }
 
+// TestAsyncCreate_CloudRunRuntimesReturnLaunchPending: an eligible async
+// create on the cloudrun and cloudrun-sandbox runtimes, which call the
+// async launch hooks, is accepted as a pending launch with no synchronous
+// fallback, and the launch runs to a succeeded report. Start does not
+// block, so a synchronous fallback completes and fails the LaunchPending
+// assertion instead of hanging.
+func TestAsyncCreate_CloudRunRuntimesReturnLaunchPending(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		rt   runtime.Runtime
+	}{
+		{"cloudrun", &runtime.CloudRunRuntime{}},
+		{"cloudrun-sandbox", &runtime.CloudRunSandboxRuntime{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := &runtimeAsyncManager{asyncManager: newAsyncManager(), rt: tc.rt}
+			srv, rtb := newAsyncTestServer(t, mgr)
+			var logBuf bytes.Buffer
+			srv.agentLifecycleLog = slog.New(slog.NewTextHandler(&logBuf, nil))
+
+			launchID := "L-" + tc.name
+			w := postCreate(t, srv, asyncCreateBody("agent-"+tc.name, launchID))
+			if w.Code != http.StatusCreated {
+				t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+			}
+			resp := decodeCreateResponse(t, w)
+			if !resp.LaunchPending || resp.LaunchID != launchID {
+				t.Fatalf("expected an accepted async launch on %s, got %+v", tc.name, resp)
+			}
+			if !waitUntil(t, 2*time.Second, func() bool {
+				for _, r := range rtb.getLaunchReports() {
+					if r.Report.State == hubclient.AgentLaunchReportStateSucceeded {
+						return true
+					}
+				}
+				return false
+			}) {
+				t.Fatalf("expected the async launch to send a succeeded report")
+			}
+			if strings.Contains(logBuf.String(), asyncUnsupportedWarn) {
+				t.Fatalf("unexpected fallback warning for %s:\n%s", tc.name, logBuf.String())
+			}
+		})
+	}
+}
+
 // TestManagerSupportsAsyncLaunch covers the lookup on the real
 // agent.AgentManager the broker builds for each runtime.
 func TestManagerSupportsAsyncLaunch(t *testing.T) {
@@ -118,6 +174,16 @@ func TestManagerSupportsAsyncLaunch(t *testing.T) {
 	t.Cleanup(subMgr.Close)
 	if managerSupportsAsyncLaunch(subMgr) {
 		t.Error("substrate-backed manager: got async support, want none")
+	}
+	cloudRunMgr := agent.NewManager(&runtime.CloudRunRuntime{})
+	t.Cleanup(cloudRunMgr.Close)
+	if !managerSupportsAsyncLaunch(cloudRunMgr) {
+		t.Error("cloudrun-backed manager: got no async support, want support")
+	}
+	sandboxMgr := agent.NewManager(&runtime.CloudRunSandboxRuntime{})
+	t.Cleanup(sandboxMgr.Close)
+	if !managerSupportsAsyncLaunch(sandboxMgr) {
+		t.Error("cloudrun-sandbox-backed manager: got no async support, want support")
 	}
 	mockMgr := agent.NewManager(&runtime.MockRuntime{NameFunc: func() string { return "docker" }})
 	t.Cleanup(mockMgr.Close)

@@ -7,12 +7,12 @@ package telemetry
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"os"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/util/otlptls"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/sdk/trace"
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
@@ -27,10 +27,9 @@ import (
 )
 
 var (
-	errOTLPCACertsNotFound = errors.New("parsing OTLP CA file: no certificates found")
 	// errOTLPIncompleteClientKeyPair reports that only one of the OTLP
 	// client certificate and key paths is set; mTLS needs both.
-	errOTLPIncompleteClientKeyPair = errors.New("OTLP client certificate and key must be set together")
+	errOTLPIncompleteClientKeyPair = otlptls.ErrIncompleteClientKeyPair
 )
 
 // partialSuccessError is terminal: replaying the whole batch duplicates the
@@ -51,38 +50,10 @@ func (e *partialSuccessError) Error() string { return e.message }
 // keyFile add a client certificate for mTLS; they must be set together.
 // Errors name the file paths only, never file contents. With all three
 // empty the result carries no roots and no certificates (system defaults).
+// The client pair is reloaded on each new TLS handshake (certificate
+// rotation); see otlptls.LoadClientConfig.
 func loadOTLPTLSConfig(caFile, certFile, keyFile string) (*tls.Config, error) {
-	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
-
-	if caFile != "" {
-		pemBytes, err := os.ReadFile(caFile)
-		if err != nil {
-			return nil, fmt.Errorf("reading OTLP CA file: %w", err)
-		}
-
-		roots := x509.NewCertPool()
-		if !roots.AppendCertsFromPEM(pemBytes) {
-			return nil, fmt.Errorf("%w in %q", errOTLPCACertsNotFound, caFile)
-		}
-		tlsConfig.RootCAs = roots
-	}
-
-	if certFile == "" && keyFile == "" {
-		return tlsConfig, nil
-	}
-	if certFile == "" {
-		return nil, fmt.Errorf("%w: key file %q is set but the certificate file is not", errOTLPIncompleteClientKeyPair, keyFile)
-	}
-	if keyFile == "" {
-		return nil, fmt.Errorf("%w: certificate file %q is set but the key file is not", errOTLPIncompleteClientKeyPair, certFile)
-	}
-
-	clientCert, err := tls.LoadX509KeyPair(certFile, keyFile)
-	if err != nil {
-		return nil, fmt.Errorf("loading OTLP client certificate %q and key %q: %w", certFile, keyFile, err)
-	}
-	tlsConfig.Certificates = []tls.Certificate{clientCert}
-	return tlsConfig, nil
+	return otlptls.LoadClientConfig(caFile, certFile, keyFile)
 }
 
 // loadGCPDialOptions loads GCP credentials from a service account key file

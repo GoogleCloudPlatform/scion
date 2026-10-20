@@ -27,6 +27,7 @@ import type { TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { invalidatePublicSettings } from '../../client/server-feature-flags.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import type { RuntimeBroker, GCPServiceAccount } from '../../shared/types.js';
@@ -55,6 +56,13 @@ import {
   settingsErrorStyles,
 } from '../shared/settings-error-views.js';
 import './admin-experiments.js';
+import {
+  type ImageRegistryProvenance,
+  hasOtherProfileEnvOverrides,
+  imageRegistryBadgeLines,
+  profileImageRegistryEnvLine,
+  profileInheritedHint,
+} from './image-registry-provenance.js';
 
 /** GET /api/v1/admin/server-config returns this in place of each secret. */
 const MASKED_VALUE = '********';
@@ -156,6 +164,18 @@ interface V1ServerHubConfig {
   stalled_threshold?: string;
   gcp_iam_check_mode?: string;
   gcp_iam_deny_unknown_policy?: string;
+  observability?: V1ServerHubObservabilityConfig;
+}
+
+/**
+ * The hub's own metrics and trace export switches
+ * (server.hub.observability, ptone/scion#4914). Absent means unset: the
+ * hub keeps the rule that applied before the switch existed. null in a save
+ * clears a stored switch.
+ */
+interface V1ServerHubObservabilityConfig {
+  metrics_enabled?: boolean | null;
+  tracing_enabled?: boolean | null;
 }
 
 interface V1BrokerConfig {
@@ -428,6 +448,9 @@ interface ServerConfigResponse {
   layer0_editable?: boolean;
   env_overrides?: string[];
   public_url_status?: PublicURLStatus;
+  observability_export?: HubObservabilityExport;
+  /** Where the image_registry in effect comes from (read-only, ptone/scion#3916). */
+  image_registry_provenance?: ImageRegistryProvenance;
   section_metadata?: Record<string, SectionMetadataInfo>;
   superseded_keys?: Record<string, SupersededKeyInfo[]>;
   deprecated_env_keys?: DeprecatedEnvKeyInfo[];
@@ -442,6 +465,11 @@ interface HarnessConfigEntry {
   scope: string;
 }
 
+interface SkippedKey {
+  key: string;
+  reason: string;
+}
+
 interface ReloadResult {
   applied?: string[];
   requires_restart?: string[];
@@ -450,6 +478,10 @@ interface ReloadResult {
   // a hub restart (registry restart_required flag).
   applied_keys?: string[];
   pending_restart?: string[];
+  // Changed keys that were saved but are not in use (for example a
+  // notification channel that fails validation), each with a reason. They
+  // are not in applied_keys (ptone/scion#4466).
+  skipped?: SkippedKey[];
   // Workstation hubs: the settings.yaml changes applied live (also listed
   // in applied, next to the section names).
   file_applied?: string[];
@@ -467,6 +499,34 @@ interface PublicURLStatus {
   pinned_by?: string; // SCION_SERVER_HUB_ENDPOINT, --base-url or SCION_SERVER_BASE_URL
 }
 
+/** The export project of the hub's own metrics and traces, as resolved at startup. */
+interface HubExportProject {
+  id?: string;
+  source?: string; // "env" | "file" | "metadata"; absent when none resolved
+  detail?: string; // why no project resolved
+}
+
+/** The startup state of one hub exporter (pkg/observability/hubexport.Decision). */
+interface HubExportDecision {
+  exporter: string;
+  setting: boolean | null;
+  enabled: boolean;
+  basis: string; // "setting" | "legacy" | "no_project" | "exporter_error"
+  reason: string;
+  project?: HubExportProject;
+}
+
+/**
+ * The hub's own metrics and trace exporters as started, and the export
+ * project with its source (ptone/scion#4914). Read-only: the export project
+ * is not a settings key.
+ */
+interface HubObservabilityExport {
+  project?: HubExportProject;
+  metrics?: HubExportDecision;
+  tracing?: HubExportDecision;
+}
+
 /** Per-section provenance metadata from the settings-db GET response (DB-backed hubs). */
 interface SectionMetadataInfo {
   source: string; // "db" | "file" | "default"
@@ -479,7 +539,7 @@ interface SectionMetadataInfo {
 /** A bootstrap-material key whose value differs from the DB value in a managed section. */
 interface SupersededKeyInfo {
   key: string;
-  source: string; // "seed_env" | "yaml" | "server_env"
+  source: string; // "seed_env" | "yaml" | "server_env" | "default"
 }
 
 /** A SCION_SERVER_* env var that targets a Layer-1 key (deprecated, migrate to SCION_SEED_*). */
@@ -567,6 +627,9 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   // gcp iam section
   'server.hub.gcp_iam_check_mode': 'IAM Check Mode',
   'server.hub.gcp_iam_deny_unknown_policy': 'Deny Policy Fallback',
+  // hub_observability section
+  'server.hub.observability.metrics_enabled': 'Hub Metrics Export',
+  'server.hub.observability.tracing_enabled': 'Hub Trace Export',
   // auto_expose_ports section
   'auto_expose_ports.enabled': 'Auto-Expose Ports Enabled',
   // quotas section
@@ -634,21 +697,34 @@ type ReadOnlyReason = 'bootstrap' | 'env' | 'flag' | 'pinned';
 
 /** The koanf key of the hub's public URL. */
 const PUBLIC_URL_KEY = 'server.hub.public_url';
+const HUB_METRICS_ENABLED_KEY = 'server.hub.observability.metrics_enabled';
+const HUB_TRACING_ENABLED_KEY = 'server.hub.observability.tracing_enabled';
 
 /**
  * Workstation fields that `scion server start` overrides at every start
  * (workstation defaults and flags such as --enable-runtime-broker,
  * --dev-auth, --host, --storage-bucket), so a settings.yaml value has no
- * effect. Shown read-only on workstation hubs.
+ * effect. Shown read-only on workstation hubs. server.broker.host is not
+ * listed: --host sets only the hub and web listeners, and the runtime
+ * broker uses server.broker.host (see WORKSTATION_BROKER_HOST_DEFAULT).
  */
 const WORKSTATION_FLAG_MANAGED_KEYS: Set<string> = new Set([
   'server.broker.enabled',
-  'server.broker.host',
   'server.hub.host',
   'server.auth.dev_mode',
   'server.storage.provider',
   'server.secrets.backend',
 ]);
+
+/**
+ * Runtime broker listen host on a workstation hub when server.broker.host is
+ * unset. An empty value or 0.0.0.0 counts as unset (applyServerListenHosts
+ * in cmd/server_foreground.go).
+ */
+const WORKSTATION_BROKER_HOST_DEFAULT = '127.0.0.1';
+
+/** Whether a server.broker.host value counts as unset in workstation mode. */
+const isUnsetBrokerHost = (host: string): boolean => host === '' || host === '0.0.0.0';
 
 /** Safe own-property check that won't match inherited keys on user-controlled objects. */
 const hasOwn = (obj: Record<string, unknown>, key: string): boolean =>
@@ -902,6 +978,15 @@ export class ScionPageAdminServerConfig extends LitElement {
   // ── Settings-DB metadata (DB-backed hubs, any driver) ──
   @state() private envOverrides: string[] = [];
   @state() private publicUrlStatus: PublicURLStatus | null = null;
+  @state() private imageRegistryProvenance: ImageRegistryProvenance | null = null;
+  @state() private observabilityExport: HubObservabilityExport | null = null;
+
+  // ── Hub observability export switches (ptone/scion#4914) ──
+  // null = unset (the earlier rule applies). Sent only when changed.
+  @state() private hubMetricsEnabled: boolean | null = null;
+  @state() private hubTracingEnabled: boolean | null = null;
+  private loadedHubMetricsEnabled: boolean | null = null;
+  private loadedHubTracingEnabled: boolean | null = null;
   @state() private sectionMetadata: Record<string, SectionMetadataInfo> | null = null;
   @state() private ignoredKeysNotice: string[] | null = null;
   @state() private supersededKeys: Record<string, SupersededKeyInfo[]> | null = null;
@@ -1278,6 +1363,15 @@ export class ScionPageAdminServerConfig extends LitElement {
 
     .reload-info .restart {
       color: var(--scion-warning-text, #92400e);
+    }
+
+    .reload-info .skipped {
+      color: var(--scion-warning-text, #92400e);
+    }
+
+    .reload-info .skipped ul {
+      margin: 0.25rem 0 0;
+      padding-left: 1.25rem;
     }
 
     .loading-container {
@@ -1949,6 +2043,13 @@ export class ScionPageAdminServerConfig extends LitElement {
     // Agent Secrets — absent means permissive (agents may write project scope).
     this.agentSecretsUserScopeOnly = data.agent_secrets?.user_scope_only ?? false;
 
+    // Hub observability export switches — absent means unset.
+    const obs = data.server?.hub?.observability;
+    this.hubMetricsEnabled = obs?.metrics_enabled ?? null;
+    this.hubTracingEnabled = obs?.tracing_enabled ?? null;
+    this.loadedHubMetricsEnabled = this.hubMetricsEnabled;
+    this.loadedHubTracingEnabled = this.hubTracingEnabled;
+
     // Runtimes, profiles, harness_configs — deep-copy into editable state
     this.runtimes = data.runtimes
       ? (JSON.parse(JSON.stringify(data.runtimes)) as Record<string, V1RuntimeConfig>)
@@ -1977,6 +2078,8 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.envOverrides = data.env_overrides || [];
     this.envKeys = new Set(this.envOverrides);
     this.publicUrlStatus = data.public_url_status || null;
+    this.imageRegistryProvenance = data.image_registry_provenance || null;
+    this.observabilityExport = data.observability_export || null;
     this.sectionMetadata = data.section_metadata || null;
     // The hub leaves a pinned public URL out of superseded_keys
     // (computeSupersededKeys), so the list is shown as it is.
@@ -2114,6 +2217,42 @@ export class ScionPageAdminServerConfig extends LitElement {
             ? '🔒 Set by workstation startup defaults / server flags'
             : '🔒 Set via environment variable';
     return html`<span class="read-only-badge">${text}</span>`;
+  }
+
+  /**
+   * Runtime broker host. On a workstation hub an unset value (empty or
+   * 0.0.0.0) shows the address the broker binds to instead. An env-pinned
+   * value shows as loaded, with no effective hint: the page does not see
+   * the environment value.
+   */
+  private renderBrokerHostField(): ReturnType<typeof html> {
+    const onInput = (e: Event) => {
+      this.brokerHost = (e.target as HTMLInputElement).value;
+    };
+    if (!this.layer0Editable) {
+      return this.renderFieldValue(
+        'server.broker.host',
+        this.brokerHost || '0.0.0.0',
+        html`<sl-input value=${this.brokerHost || '0.0.0.0'} @sl-input=${onInput}></sl-input>`
+      );
+    }
+    if (this.readOnlyReason('server.broker.host') === 'env') {
+      return this.renderFieldValue('server.broker.host', this.brokerHost, html``);
+    }
+    const unset = isUnsetBrokerHost(this.brokerHost);
+    return html`${this.renderFieldValue(
+      'server.broker.host',
+      unset ? WORKSTATION_BROKER_HOST_DEFAULT : this.brokerHost,
+      html`<sl-input
+        value=${this.brokerHost}
+        placeholder=${WORKSTATION_BROKER_HOST_DEFAULT}
+        @sl-input=${onInput}
+      ></sl-input>`
+    )}${unset
+      ? html`<span class="hint broker-host-effective"
+          >Effective: ${WORKSTATION_BROKER_HOST_DEFAULT} (empty or 0.0.0.0 counts as unset)</span
+        >`
+      : ''}`;
   }
 
   private renderFieldValue(
@@ -2257,6 +2396,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       this.hubGcpIamDenyUnknownPolicy !== this.loadedGcpIamDenyUnknownPolicy
     )
       hub.gcp_iam_deny_unknown_policy = this.hubGcpIamDenyUnknownPolicy;
+    this.addHubObservability(hub, ok);
     if (Object.keys(hub).length > 0) server.hub = hub;
 
     // Auth — only Layer-1 auth fields
@@ -2354,6 +2494,23 @@ export class ScionPageAdminServerConfig extends LitElement {
   }
 
   /**
+   * Adds the hub observability export switches to a hub payload block, each
+   * only when it changed: a switch stays unset until an admin sets it, and
+   * null (Use default) clears a stored switch so the earlier rule applies
+   * again. Both apply at the next hub restart (ptone/scion#4914).
+   */
+  private addHubObservability(hub: Record<string, unknown>, ok: (key: string) => boolean): void {
+    const obs: Record<string, unknown> = {};
+    if (ok(HUB_METRICS_ENABLED_KEY) && this.hubMetricsEnabled !== this.loadedHubMetricsEnabled) {
+      obs.metrics_enabled = this.hubMetricsEnabled;
+    }
+    if (ok(HUB_TRACING_ENABLED_KEY) && this.hubTracingEnabled !== this.loadedHubTracingEnabled) {
+      obs.tracing_enabled = this.hubTracingEnabled;
+    }
+    if (Object.keys(obs).length > 0) hub.observability = obs;
+  }
+
+  /**
    * Adds server.hub.monitoring_dashboard_url to a hub payload block only
    * when the user edited the field and the trimmed value differs from the
    * loaded one. A cleared field is sent as "", which clears the setting.
@@ -2429,8 +2586,8 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('server.broker.hub_endpoint')) broker.hub_endpoint = this.brokerHubEndpoint || '';
     if (ok('server.broker.container_hub_endpoint'))
       broker.container_hub_endpoint = this.brokerContainerHubEndpoint || '';
-    if (ok('server.broker.name')) broker.broker_name = this.brokerName || '';
-    if (ok('server.broker.nickname')) broker.broker_nickname = this.brokerNickname || '';
+    if (ok('server.broker.broker_name')) broker.broker_name = this.brokerName || '';
+    if (ok('server.broker.broker_nickname')) broker.broker_nickname = this.brokerNickname || '';
     if (ok('server.broker.auto_provide')) broker.auto_provide = this.brokerAutoProvide;
     if (Object.keys(broker).length > 0) server.broker = broker;
 
@@ -2591,6 +2748,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('server.hub.gcp_iam_check_mode')) hub.gcp_iam_check_mode = this.hubGcpIamCheckMode;
     if (ok('server.hub.gcp_iam_deny_unknown_policy'))
       hub.gcp_iam_deny_unknown_policy = this.hubGcpIamDenyUnknownPolicy;
+    this.addHubObservability(hub, ok);
     server.hub = hub;
 
     // Broker
@@ -2601,8 +2759,8 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('server.broker.hub_endpoint')) broker.hub_endpoint = this.brokerHubEndpoint || '';
     if (ok('server.broker.container_hub_endpoint'))
       broker.container_hub_endpoint = this.brokerContainerHubEndpoint || '';
-    if (ok('server.broker.name')) broker.broker_name = this.brokerName || '';
-    if (ok('server.broker.nickname')) broker.broker_nickname = this.brokerNickname || '';
+    if (ok('server.broker.broker_name')) broker.broker_name = this.brokerName || '';
+    if (ok('server.broker.broker_nickname')) broker.broker_nickname = this.brokerNickname || '';
     if (ok('server.broker.auto_provide')) broker.auto_provide = this.brokerAutoProvide;
     server.broker = broker;
 
@@ -2783,6 +2941,10 @@ export class ScionPageAdminServerConfig extends LitElement {
         await this.handleSaveError(res);
         return;
       }
+      // The save can change what GET /api/v1/settings/public returns (chat
+      // toggle, telemetry and auto-expose defaults, hub agent defaults,
+      // agent_secrets.user_scope_only); drop this tab's cached copy.
+      invalidatePublicSettings();
 
       const result = (await res.json()) as {
         reload?: ReloadResult;
@@ -2997,6 +3159,49 @@ export class ScionPageAdminServerConfig extends LitElement {
     >`;
   }
 
+  /**
+   * The one image_registry badge, from the server's provenance: how an
+   * environment variable sets the hub-wide value, and every Runtime Broker
+   * whose SCION_IMAGE_REGISTRY overrides it for its agents. It replaces the
+   * generic env-override badge for this key (ptone/scion#3916).
+   */
+  private renderImageRegistryBadge(): typeof nothing | ReturnType<typeof html> {
+    const lines = imageRegistryBadgeLines(this.imageRegistryProvenance, this.envOverrides);
+    if (lines.length === 0) return nothing;
+    return html`
+      <span class="env-badge image-registry-badge">
+        <sl-icon name="exclamation-triangle"></sl-icon>
+        ${lines.map((l, i) => html`${i > 0 ? html`<br />` : nothing}${l}`)}
+      </span>
+    `;
+  }
+
+  /**
+   * The profiles section's env badge: profile image_registry keys are
+   * startup values a saved profile value replaces, so they get their own
+   * text; any other overridden profile key keeps the generic badge.
+   */
+  private renderProfilesEnvBadge(): typeof nothing | ReturnType<typeof html> {
+    const registryLine = profileImageRegistryEnvLine(this.envOverrides);
+    const generic = hasOtherProfileEnvOverrides(this.envOverrides)
+      ? this.envBadgeTemplate()
+      : nothing;
+    if (!registryLine) return generic;
+    return html`${generic}<span class="env-badge image-registry-badge">
+        <sl-icon name="exclamation-triangle"></sl-icon>
+        ${registryLine}
+      </span>`;
+  }
+
+  /** What a profile without a saved image_registry inherits, and from where. */
+  private renderProfileInheritedHint(
+    name: string,
+    saved: string | undefined
+  ): typeof nothing | ReturnType<typeof html> {
+    const hint = profileInheritedHint(this.imageRegistryProvenance, name, saved);
+    return hint ? html`<span class="hint image-registry-inherited">${hint}</span>` : nothing;
+  }
+
   /** The env-override badge shared by renderEnvBadge and renderEnvBadgeUnder. */
   private envBadgeTemplate(): ReturnType<typeof html> {
     return html`
@@ -3098,6 +3303,8 @@ export class ScionPageAdminServerConfig extends LitElement {
           return 'settings.yaml';
         case 'server_env':
           return 'SCION_SERVER_*';
+        case 'default':
+          return 'built-in default';
         default:
           return s;
       }
@@ -3162,6 +3369,8 @@ export class ScionPageAdminServerConfig extends LitElement {
         this.error = `Reset failed: ${errText}`;
         return;
       }
+      // Like a save, a reset can change GET /api/v1/settings/public.
+      invalidatePublicSettings();
       this.resetConfirmSection = null;
       await this.loadConfig();
       this.successMessage = `Section "${sectionName}" has been reset to deployment configuration.`;
@@ -3366,6 +3575,14 @@ export class ScionPageAdminServerConfig extends LitElement {
         ${r.pending_restart && r.pending_restart.length > 0
           ? html`<div class="restart pending-restart">
               Saved; applies after restart: ${r.pending_restart.join(', ')}
+            </div>`
+          : nothing}
+        ${r.skipped && r.skipped.length > 0
+          ? html`<div class="skipped skipped-keys">
+              Saved but not applied:
+              <ul>
+                ${r.skipped.map((s) => html`<li><code>${s.key}</code>: ${s.reason}</li>`)}
+              </ul>
             </div>`
           : nothing}
         ${r.requires_restart && r.requires_restart.length > 0
@@ -3641,7 +3858,7 @@ export class ScionPageAdminServerConfig extends LitElement {
             ${this.renderFieldValue(
               'image_registry',
               this.imageRegistry,
-              html`${this.renderEnvBadge('image_registry')}<sl-input
+              html`${this.renderImageRegistryBadge()}<sl-input
                   value=${this.imageRegistry}
                   placeholder="ghcr.io/myorg"
                   @sl-input=${(e: Event) => {
@@ -4528,9 +4745,112 @@ export class ScionPageAdminServerConfig extends LitElement {
         </div>
       </div>
 
-      ${this.renderNativeChatSection()} ${this.renderMessageBrokerSection()}
-      ${this.renderCrossProjectMessagingSection()}
+      ${this.renderHubObservabilitySection()} ${this.renderNativeChatSection()}
+      ${this.renderMessageBrokerSection()} ${this.renderCrossProjectMessagingSection()}
     `;
+  }
+
+  /**
+   * The hub's own metrics and trace export: one switch per exporter (applies
+   * after a restart) and, read-only, the exporters as started with the
+   * export project and its source (ptone/scion#4914). The export project is
+   * not editable here.
+   */
+  private renderHubObservabilitySection(): ReturnType<typeof html> {
+    return html`
+      <div class="section hub-observability">
+        ${this.renderSectionHeader('Hub Observability Export', 'hub_observability')}
+        ${this.renderSectionMeta('hub_observability')}
+        <div class="form-grid">
+          ${this.renderHubExportSwitch('metrics')} ${this.renderHubExportSwitch('tracing')}
+          <div class="form-field full-width">
+            <label>Export Project</label>
+            ${this.renderHubExportProject()}
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  private renderHubExportSwitch(exporter: 'metrics' | 'tracing'): ReturnType<typeof html> {
+    const isMetrics = exporter === 'metrics';
+    const key = isMetrics ? HUB_METRICS_ENABLED_KEY : HUB_TRACING_ENABLED_KEY;
+    const value = isMetrics ? this.hubMetricsEnabled : this.hubTracingEnabled;
+    const loaded = isMetrics ? this.loadedHubMetricsEnabled : this.loadedHubTracingEnabled;
+    const running = this.observabilityExport?.[exporter];
+    const set = (v: boolean | null) => {
+      if (isMetrics) this.hubMetricsEnabled = v;
+      else this.hubTracingEnabled = v;
+    };
+    // An unset switch is drawn in the state the earlier rule gave at
+    // startup, or off when the hub did not report it; the label next to
+    // the toggle says the switch is unset either way.
+    const unsetChecked = running?.enabled ?? false;
+    const checked = value ?? unsetChecked;
+    // Toggling a switch that is not stored back to the state it showed
+    // while unset leaves it unset, so toggling twice sends nothing.
+    const onToggle = (on: boolean) => set(loaded === null && on === unsetChecked ? null : on);
+    const defaultRule = isMetrics
+      ? 'on when SCION_SERVER_HUB_GCPPROJECTID is set'
+      : 'on when SCION_TRACING_ENABLED and SCION_SERVER_HUB_GCPPROJECTID are set';
+    const defaultLabel = running
+      ? `Default (${running.enabled ? 'on' : 'off'})`
+      : 'Default (state not reported)';
+    const display = value === null ? defaultLabel : value ? 'Enabled' : 'Disabled';
+    return html`<div class="form-field full-width">
+      ${this.renderFieldValue(
+        key,
+        display,
+        html`${this.renderEnvBadge(key)}<sl-switch
+            class="hub-export-switch"
+            data-key=${key}
+            ?checked=${checked}
+            @sl-change=${(e: Event) => onToggle((e.target as HTMLInputElement).checked)}
+            >${isMetrics ? 'Export hub metrics' : 'Export hub traces'}</sl-switch
+          >${value !== null
+            ? html`<sl-button
+                size="small"
+                variant="text"
+                class="hub-export-default"
+                data-key=${key}
+                @click=${() => set(null)}
+                >Use default</sl-button
+              >`
+            : html`<span class="hint hub-export-default-state" data-key=${key}
+                >${defaultLabel}</span
+              >`}`
+      )}
+      <span class="hint hub-export-restart" data-key=${key}
+        >${value === null ? `Not set: ${defaultRule}. ` : ''}Applies after restart.</span
+      >
+      ${running
+        ? html`<span class="hint hub-export-in-effect" data-key=${key}
+            >In effect: ${running.enabled ? 'on' : 'off'} (${running.reason})</span
+          >`
+        : nothing}
+    </div>`;
+  }
+
+  /** The export project resolved at startup and its source; read-only. */
+  private renderHubExportProject(): ReturnType<typeof html> {
+    const project = this.observabilityExport?.project;
+    if (!this.observabilityExport) {
+      return html`<span class="hint hub-export-project">Not reported by this hub.</span>`;
+    }
+    if (!project?.id) {
+      return html`<span class="read-only-value hub-export-project">None resolved</span>
+        <span class="hint">${project?.detail ?? ''}</span>
+        <span class="hint hub-export-project-remedy"
+          >Set SCION_SERVER_HUB_GCPPROJECTID or run on Google Cloud. Not editable here.</span
+        >`;
+    }
+    return html`<span class="read-only-value hub-export-project"
+        ><code>${project.id}</code> (source: ${project.source})</span
+      >
+      <span class="hint"
+        >SCION_SERVER_HUB_GCPPROJECTID when set, else the project of the Google Cloud metadata
+        server. Not editable here.</span
+      >`;
   }
 
   private renderCrossProjectMessagingSection() {
@@ -5028,7 +5348,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       <div class="section">
         ${this.renderSectionHeader('Profiles', 'profiles')} ${this.renderSectionMeta('profiles')}
         ${profileReadOnly ? html`${this.renderReadOnlyBadge(profileReadOnly)}` : nothing}
-        ${this.renderEnvBadgeUnder('profiles')}
+        ${this.renderProfilesEnvBadge()}
         ${profileNames.length === 0
           ? html`<p class="hint">No profiles configured.</p>`
           : profileNames.map((name) =>
@@ -5185,6 +5505,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                 );
               }}
             ></sl-input>
+            ${this.renderProfileInheritedHint(name, profile.image_registry)}
           </div>
           <div class="form-field">
             <label>Default Template</label>
@@ -5569,16 +5890,7 @@ export class ScionPageAdminServerConfig extends LitElement {
           <div class="form-field">
             <label>Host</label>
             <span class="hint">Requires restart</span>
-            ${this.renderFieldValue(
-              'server.broker.host',
-              this.brokerHost || '0.0.0.0',
-              html`<sl-input
-                value=${this.brokerHost || '0.0.0.0'}
-                @sl-input=${(e: Event) => {
-                  this.brokerHost = (e.target as HTMLInputElement).value;
-                }}
-              ></sl-input>`
-            )}
+            ${this.renderBrokerHostField()}
           </div>
           <div class="form-field full-width">
             <label>Hub Endpoint</label>
@@ -5617,7 +5929,7 @@ export class ScionPageAdminServerConfig extends LitElement {
           <div class="form-field">
             <label>Broker Name</label>
             ${this.renderFieldValue(
-              'server.broker.name',
+              'server.broker.broker_name',
               this.brokerName || '—',
               html`<sl-input
                 value=${this.brokerName}
@@ -5630,7 +5942,7 @@ export class ScionPageAdminServerConfig extends LitElement {
           <div class="form-field">
             <label>Broker Nickname</label>
             ${this.renderFieldValue(
-              'server.broker.nickname',
+              'server.broker.broker_nickname',
               this.brokerNickname || '—',
               html`<sl-input
                 value=${this.brokerNickname}

@@ -123,6 +123,28 @@ describe('agent page during an async launch', () => {
     expect(text(banner!.querySelector('.launch-message'))).toBe('pulling image');
   });
 
+  it('shows the label of the launch step, with the raw step as data-step', () => {
+    const host = renderBanner(
+      makeAgent({ phase: 'provisioning', launch: { ...activeLaunch, step: 'container_create' } })
+    );
+
+    const step = host.querySelector('[data-testid="launch-step"]');
+    expect(text(step)).toBe('Step: preparing the container (image pull, volume mounts)');
+    expect(step?.getAttribute('data-step')).toBe('container_create');
+  });
+
+  it.each([
+    ['start', 'Starting'],
+    ['restart', 'Restarting'],
+  ])('titles a %s launch in flight', (kind, title) => {
+    const host = renderBanner(
+      makeAgent({ phase: 'starting', launch: { ...activeLaunch, kind, step: 'pod_create' } })
+    );
+
+    expect(text(host.querySelector('.launch-title'))).toBe(title);
+    expect(text(host.querySelector('[data-testid="launch-step"]'))).toBe('Step: creating the pod');
+  });
+
   it('offers no Start while the hub launches the agent', () => {
     const labels = headerButtonLabels(makeAgent({ phase: 'provisioning', launch: activeLaunch }));
 
@@ -154,11 +176,60 @@ describe('agent page for a create that did not complete', () => {
     expect(banner).not.toBeNull();
     expect(text(banner!.querySelector('.error-title'))).toBe('Agent create did not complete');
     expect(text(banner!.querySelector('[data-testid="launch-error-code"]'))).toBe(
-      'runtime_error — failed'
+      'runtime_error: the runtime could not start the agent — failed'
+    );
+    expect(text(banner!.querySelector('[data-testid="launch-failed-step"]'))).toBe(
+      'Failed at: launching'
     );
     expect(text(banner!.querySelector('.error-message'))).toBe(
       'launching: the runtime could not start the agent'
     );
+  });
+
+  it('shows no cause line when the launch has no cause', () => {
+    const host = renderBanner(failed);
+    expect(host.querySelector('[data-testid="launch-error-cause"]')).toBeNull();
+  });
+
+  it('shows the runtime cause the hub reported', () => {
+    const host = renderBanner(
+      makeAgent({
+        phase: 'error',
+        message: 'launching: Failed to create agent',
+        launch: failedLaunch({ cause: 'runtime_forbidden' }),
+      })
+    );
+    expect(text(host.querySelector('[data-testid="launch-error-code"]'))).toBe(
+      'runtime_error: the runtime could not start the agent — failed'
+    );
+    expect(text(host.querySelector('[data-testid="launch-error-cause"]'))).toBe(
+      'Cause: runtime forbidden'
+    );
+  });
+
+  it('labels a typed runtime failure and the step it failed in', () => {
+    const host = renderBanner(
+      makeAgent({
+        phase: 'error',
+        message: 'container_create: the agent image could not be pulled (ImagePullBackOff)',
+        launch: failedLaunch({ error: 'image_pull_failed', step: 'container_create' }),
+      })
+    );
+
+    expect(text(host.querySelector('[data-testid="launch-code"]'))).toBe('image_pull_failed');
+    expect(text(host.querySelector('[data-testid="launch-code-label"]'))).toBe(
+      'the agent image could not be pulled'
+    );
+    const step = host.querySelector('[data-testid="launch-failed-step"]');
+    expect(text(step)).toBe('Failed at: preparing the container (image pull, volume mounts)');
+    expect(step?.getAttribute('data-step')).toBe('container_create');
+  });
+
+  it('shows no failed-step line when the launch has no step', () => {
+    const host = renderBanner(
+      makeAgent({ phase: 'error', message: 'm', launch: failedLaunch({ step: undefined }) })
+    );
+    expect(host.querySelector('[data-testid="launch-failed-step"]')).toBeNull();
   });
 
   it('shows the template and task to create it again with', () => {
@@ -214,8 +285,8 @@ describe('agent page for a create that did not complete', () => {
   });
 
   it.each([
-    ['timed_out', 'launch_timeout', 'launch_timeout — timed out'],
-    ['lost', 'broker_lost', 'broker_lost — broker lost'],
+    ['timed_out', 'launch_timeout', 'launch_timeout: the launch timed out — timed out'],
+    ['lost', 'broker_lost', 'broker_lost: the runtime broker stopped responding — broker lost'],
   ])('labels a launch that ended %s', (endReason, error, want) => {
     const host = renderBanner(
       makeAgent({ phase: 'error', message: 'm', launch: failedLaunch({ endReason, error }) })
@@ -234,7 +305,9 @@ describe('agent page for a create that did not complete', () => {
     expect(() => {
       host = renderBanner(agent);
     }).not.toThrow();
-    expect(text(host!.querySelector('[data-testid="launch-error-code"]'))).toBe('runtime_error');
+    expect(text(host!.querySelector('[data-testid="launch-error-code"]'))).toBe(
+      'runtime_error: the runtime could not start the agent'
+    );
   });
 
   it('omits the delete offer without delete permission', () => {
@@ -265,5 +338,106 @@ describe('agent page for an error without an async launch', () => {
 
     expect(labels).toContain('Resume (best effort)');
     expect(labels).toContain('Start');
+  });
+});
+
+describe('agent page for a start or restart that did not complete', () => {
+  beforeAll(async () => {
+    await import('./agent-detail.js');
+  }, 30_000);
+
+  const failedStart = failedLaunch({
+    kind: 'start',
+    error: 'crash_loop',
+    step: 'container_start',
+  });
+  const message = 'container_start: the agent container keeps crashing on start (CrashLoopBackOff)';
+
+  it('shows the failure of a start restored to stopped', () => {
+    const host = renderBanner(makeAgent({ phase: 'stopped', message, launch: failedStart }));
+
+    const banner = host.querySelector('[data-testid="failed-start-banner"]');
+    expect(banner).not.toBeNull();
+    expect(text(banner!.querySelector('.error-title'))).toBe('Agent start did not complete');
+    expect(text(banner!.querySelector('[data-testid="launch-error-code"]'))).toBe(
+      'crash_loop: the agent container keeps crashing on start — failed'
+    );
+    expect(text(banner!.querySelector('[data-testid="launch-failed-step"]'))).toBe(
+      'Failed at: starting the container'
+    );
+    expect(text(banner!.querySelector('[data-testid="launch-error-message"]'))).toBe(message);
+    expect(text(banner!.querySelector('.error-hint'))).toBe(
+      'Start or resume the agent to try again.'
+    );
+    expect(host.querySelector('[data-testid="incomplete-create-banner"]')).toBeNull();
+    expect(banner!.querySelector('.error-actions')).toBeNull();
+  });
+
+  it('shows it instead of the generic error banner in phase error', () => {
+    const host = renderBanner(
+      makeAgent({
+        phase: 'error',
+        message,
+        launch: { ...failedStart, resumePhase: 'suspended' },
+      })
+    );
+
+    expect(host.querySelector('[data-testid="failed-start-banner"]')).not.toBeNull();
+    expect(host.querySelectorAll('.error-title')).toHaveLength(1);
+    expect(text(host.querySelector('.error-title'))).toBe('Agent start did not complete');
+  });
+
+  it('titles a failed restart and shows its cause', () => {
+    const host = renderBanner(
+      makeAgent({
+        phase: 'stopped',
+        message: 'launching: Failed to create agent',
+        launch: failedLaunch({ kind: 'restart', cause: 'runtime_forbidden' }),
+      })
+    );
+
+    expect(text(host.querySelector('.error-title'))).toBe('Agent restart did not complete');
+    expect(text(host.querySelector('[data-testid="launch-error-cause"]'))).toBe(
+      'Cause: runtime forbidden'
+    );
+  });
+
+  it('keeps Start, and Resume for a suspended row, in the header', () => {
+    expect(headerButtonLabels(makeAgent({ phase: 'error', launch: failedStart }))).toContain(
+      'Start'
+    );
+    expect(headerButtonLabels(makeAgent({ phase: 'stopped', launch: failedStart }))).toContain(
+      'Start'
+    );
+    expect(headerButtonLabels(makeAgent({ phase: 'suspended', launch: failedStart }))).toContain(
+      'Resume'
+    );
+  });
+
+  it('shows no failure for a start the user stopped', () => {
+    const host = renderBanner(
+      makeAgent({
+        phase: 'stopped',
+        message: 'launching: launch stopped',
+        launch: failedLaunch({ kind: 'start', error: 'launch_stopped', endReason: 'failed' }),
+      })
+    );
+
+    expect(host.querySelector('[data-testid="failed-start-banner"]')).toBeNull();
+    expect(host.querySelector('.agent-error-banner')).toBeNull();
+    expect(host.textContent ?? '').not.toContain('did not complete');
+  });
+
+  it('shows no failure while a later synchronous start runs', () => {
+    const host = renderBanner(makeAgent({ phase: 'starting', launch: failedStart }));
+
+    expect(host.querySelector('[data-testid="failed-start-banner"]')).toBeNull();
+    expect(host.querySelector('[data-testid="agent-launch-banner"]')).toBeNull();
+    expect(host.querySelector('.agent-error-banner')).toBeNull();
+  });
+
+  it('shows no banner once the agent runs', () => {
+    const host = renderBanner(makeAgent({ phase: 'running', launch: failedStart }));
+    expect(host.querySelector('.agent-error-banner')).toBeNull();
   });
 });

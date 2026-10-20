@@ -17,7 +17,6 @@ package cmd
 import (
 	"context"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -67,32 +66,6 @@ func completeAgentNames(cmd *cobra.Command, args []string, toComplete string) ([
 		}
 	}
 
-	// Helper to scan a project directory for local agents
-	scanProject := func(projectDir string) {
-		if projectDir == "" {
-			return
-		}
-		agentsDir := filepath.Join(projectDir, "agents")
-		entries, err := os.ReadDir(agentsDir)
-		if err != nil {
-			return
-		}
-
-		for _, e := range entries {
-			if e.IsDir() && strings.HasPrefix(e.Name(), toComplete) {
-				// Verify it looks like an agent (has scion-agent.json)
-				// This check might be too slow for thousands of dirs, but for typical usage it's fine
-				// and prevents completing random directories.
-				if _, err := os.Stat(filepath.Join(agentsDir, e.Name(), "scion-agent.json")); err == nil {
-					if !seen[e.Name()] {
-						names = append(names, e.Name())
-						seen[e.Name()] = true
-					}
-				}
-			}
-		}
-	}
-
 	// Try to get project path from flag if specified by user in the command line so far
 	currentProjectPath, _ := cmd.Flags().GetString("project")
 
@@ -104,46 +77,41 @@ func completeAgentNames(cmd *cobra.Command, args []string, toComplete string) ([
 
 	resolvedPath, _ := config.GetResolvedProjectDir(currentProjectPath)
 
-	// 1. Scan local/current project
-	scanProject(resolvedPath)
-
-	// 2. Scan global project if not already scanned
-	globalDir, _ := config.GetGlobalDir()
-	if globalDir != "" && globalDir != resolvedPath {
-		scanProject(globalDir)
-	}
-
-	// 3. Fetch Hub agents (if enabled)
-	// Check --no-hub flag
-	noHubFlag, _ := cmd.Flags().GetBool("no-hub")
-	if !noHubFlag {
-		hubAgents := fetchHubAgentsForCompletion(resolvedPath)
-		addNames(hubAgents)
-	}
+	// Fetch Hub agents (when a hub endpoint is configured)
+	addNames(fetchHubAgentsForCompletion(cmd, resolvedPath))
 
 	return names, cobra.ShellCompDirectiveNoFileComp
 }
 
+// completionTargetResolver resolves the hub of a shell completion
+// (resolveCompletionTarget). It is assigned in init(), not called
+// directly: the resolver reads command variables (commandRequiresProject
+// reads reincarnateCmd), and the completion functions are themselves set on
+// command variables (ValidArgsFunction), so a direct call would be a
+// package initialization cycle.
+var completionTargetResolver func(cmd *cobra.Command) error
+
+func init() { completionTargetResolver = resolveCompletionTarget }
+
 // fetchHubAgentsForCompletion fetches agent names from the Hub for shell completion.
 // It uses a short timeout and falls back to cache if the Hub is slow or unavailable.
 // This function is designed to be silent - it never returns errors to avoid breaking completion.
-func fetchHubAgentsForCompletion(projectPath string) []string {
-	// Load settings to check if Hub is enabled
+// Completion skips PersistentPreRunE, so it resolves the hub itself (from
+// the hub list, without imports or output; see completionTargetResolver).
+func fetchHubAgentsForCompletion(cmd *cobra.Command, projectPath string) []string {
 	settings, err := config.LoadSettings(projectPath)
 	if err != nil {
 		return nil
 	}
-
-	// Check if Hub is enabled in settings
-	if !settings.IsHubEnabled() {
+	if err := completionTargetResolver(cmd); err != nil {
 		return nil
 	}
 
-	// Get Hub endpoint
-	endpoint := GetHubEndpoint(settings)
-	if endpoint == "" {
+	// Without a hub there is nothing to ask
+	if !hubConfigured() {
 		return nil
 	}
+	endpoint := invocationHubEndpoint()
 
 	// Generate cache key for this project
 	cacheKey := agentcache.GenerateCacheKey(projectPath)
@@ -173,13 +141,12 @@ func fetchHubAgents(ctx context.Context, endpoint string, settings *config.Setti
 	}
 
 	// Add authentication - non-interactive only
-	// Check settings for explicit auth first
+	// An explicit token from the environment first (tokens in settings
+	// files are not read).
 	authConfigured := false
-	if settings.Hub != nil {
-		if settings.Hub.Token != "" {
-			opts = append(opts, hubclient.WithBearerToken(settings.Hub.Token))
-			authConfigured = true
-		}
+	if token := os.Getenv("SCION_HUB_TOKEN"); token != "" {
+		opts = append(opts, hubclient.WithBearerToken(token))
+		authConfigured = true
 	}
 
 	// Check for OAuth credentials (non-interactive)

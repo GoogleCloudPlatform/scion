@@ -23,6 +23,26 @@ which restarts its token refresh loop. Use it when an agent's token has expired 
 itself, for example after a Hub signing-key rotation. A stopped agent gets a fresh token at its next
 start. The token carries the same scopes a refresh would.
 
+### All running agents
+
+`POST /api/v1/admin/agents/reset-auth-all` with no body (the **Reset Auth** card on the admin
+Maintenance page) resets every running agent and answers `200` with `succeeded`, `failed`, `total`
+and `failed_by_code`, the count of failures per code. A failure that carries no code is counted as
+`unclassified`. Each failed entry holds `id`, `name`, `error` and, when known, `code`:
+
+| Code | Meaning | What to do |
+| :--- | :--- | :--- |
+| `delegation_creator_missing` | The agent's creator (or an agent further up its creator chain) no longer has an active delegation in this project, for example because it was deleted. `ancestor_id` names that agent and `ancestor_depth` is `1` for the creator. | Recreate the agent. |
+| `delegation_own_missing` | The agent has no active delegation of its own in this project. | Reincarnate or recreate the agent. |
+| `delegation_ceiling` | Any other problem with the agent's delegation chain. | See the Hub log. |
+| `agent_not_in_standing` | The agent is not in good standing, for example it is held. | Resolve its standing, then reset auth again. |
+| `runtime_unavailable` | The agent's broker does not have its runtime available. | Retry later. |
+| `internal_error` | The new token could not be recorded. | Retry. |
+
+For the `delegation_*` codes the entry also holds `cause`, the deny cause. For these codes,
+`agent_not_in_standing` and `internal_error`, `error` is a fixed plain reason; the raw error is
+written to the Hub log only.
+
 ## Scope re-issue
 
 A scope added to an agent role later does not reach some existing agents. Artifact access
@@ -105,6 +125,8 @@ scion reset-auth --all --reissue-scopes --apply    # apply
 ```
 
 Re-issues every agent on the Hub. It is a dry run unless `--apply` is given.
+
+Super-admins can run the same batch from the Web Dashboard: **Admin → Maintenance**, **Re-issue scopes**. **Dry Run** shows what would change, and **Apply**, offered after a dry run, asks for confirmation first.
 
 The bulk route requires a Hub super-admin signed in with a user session; a user access token is refused, even one held by a super-admin.
 

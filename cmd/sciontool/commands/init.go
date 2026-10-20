@@ -44,6 +44,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/services"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/startuplistener"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/supervisor"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/suppgroups"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
@@ -588,6 +589,30 @@ func RunInit(args []string, opts InitRunOptions) int {
 		}
 	}
 
+	// Open the startup listener when the runtime asked for one (only the
+	// cloudrun Instances runtime does, for its TCP startup probe). This runs
+	// after the re-exec above so it opens once, and before the slower setup
+	// below so the probe sees the port early. A bind failure is logged and
+	// init carries on: the probe then fails and the platform restart makes
+	// the problem visible.
+	//
+	// Declaring the listener port as the container port makes the platform
+	// pass it in PORT. The listener holds that port for the life of init,
+	// so PORT is dropped from what the harness, hooks and services inherit;
+	// a workload that honours PORT then falls back to its own default
+	// instead of failing to bind.
+	if ln, err := startuplistener.Start(os.Getenv); err != nil {
+		log.Error("%v", err)
+	} else if ln != nil {
+		port := os.Getenv(startuplistener.EnvPort)
+		log.Info("Startup listener open on port %s", port)
+		defer func() { _ = ln.Close() }()
+		if os.Getenv("PORT") == port {
+			_ = os.Unsetenv("PORT")
+			log.Info("Dropped PORT=%s from the child environment (the startup listener holds it)", port)
+		}
+	}
+
 	// Start telemetry pipeline if configured. This must happen after
 	// staged secrets are written so that the GCP credentials file
 	// referenced by SCION_OTEL_GCP_CREDENTIALS exists on disk.
@@ -1005,15 +1030,17 @@ func RunInit(args []string, opts InitRunOptions) int {
 	}, 1)
 
 	// Start a new harness-readiness run before tmux starts: drop the previous
-	// run's files and record a fresh nonce and mode. The agent runtime waits
-	// on these before pasting a buffered message. Failure only means the
-	// runtime falls back to its session-age check, so it is not fatal.
-	readyNonce, err := writeInitRunFile(os.Getenv("SCION_HARNESS"))
+	// run's files and record a fresh nonce and the ready spec the broker
+	// passed in. The agent runtime waits on these before pasting a buffered
+	// message. Failure only means the runtime falls back to its session-age
+	// check, so it is not fatal.
+	readySpec := hooks.LoadReadySpec(os.Getenv)
+	readyNonce, err := writeInitRunFile(readySpec)
 	if err != nil {
 		log.Warn("Harness readiness: writing init-run file: %v", err)
 		readyNonce = ""
 	}
-	readyMode := hooks.HarnessReadyMode(os.Getenv("SCION_HARNESS"))
+	readyMode := state.ReadyModeForStrategy(readySpec.Strategy)
 	harnessLaunchedAt := time.Now()
 
 	// The conduit SSH server and its host key are prepared, and the first
@@ -1113,7 +1140,9 @@ func RunInit(args []string, opts InitRunOptions) int {
 			Nonce:         readyNonce,
 			Mode:          readyMode,
 			Start:         harnessLaunchedAt,
-			MarkerReady:   harnessReadyMarkerMatches,
+			Settle:        readySpec.Settle,
+			Deadline:      readySpec.Timeout,
+			MarkerTime:    harnessReadyMarkerTime,
 			LocalActivity: statusHandler.CurrentActivity,
 			ReplaceLocal:  statusHandler.ReplaceActivityIf,
 		}
@@ -1524,28 +1553,7 @@ waitLoop:
 	// Report final status to Hub, distinguishing clean stop from crash.
 	if hubClient := hub.NewClient(); hubClient != nil && hubClient.IsConfigured() {
 		hubCtx, hubCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		var hubErr error
-		if outcome.isCrash {
-			s := state.AgentState{Phase: state.PhaseError}
-			hubErr = hubClient.UpdateStatus(hubCtx, hub.StatusUpdate{
-				Phase:    state.PhaseError,
-				Activity: "",
-				Status:   s.DisplayStatus(),
-				Message:  outcome.message,
-				ExitCode: &finalCode,
-			})
-		} else if limitsExceeded {
-			s := state.AgentState{Phase: state.PhaseStopped, Activity: state.ActivityLimitsExceeded}
-			hubErr = hubClient.UpdateStatus(hubCtx, hub.StatusUpdate{
-				Phase:    state.PhaseStopped,
-				Activity: state.ActivityLimitsExceeded,
-				Status:   s.DisplayStatus(),
-				Message:  "Agent stopped: limits exceeded",
-				ExitCode: &finalCode,
-			})
-		} else {
-			hubErr = hubClient.ReportState(hubCtx, state.PhaseStopped, "", "Agent stopped")
-		}
+		hubErr := hubClient.UpdateStatus(hubCtx, finalStatusUpdate(outcome))
 		if hubErr != nil {
 			log.Error("Failed to report final status to Hub: %v", hubErr)
 		} else {
@@ -1748,6 +1756,46 @@ type exitOutcome struct {
 	limitsExceeded bool
 	isCrash        bool
 	message        string
+	// signaled is true when init received SIGTERM/SIGINT before the child
+	// exited and the outcome is neither a crash nor a limits stop.
+	signaled bool
+}
+
+// finalStatusUpdate is the final status report sent to the Hub for a
+// classified exit: a crash (phase error), a limits stop, or a plain stop,
+// which carries exit reason "signaled" when the stop followed a
+// termination signal.
+func finalStatusUpdate(outcome exitOutcome) hub.StatusUpdate {
+	switch {
+	case outcome.isCrash:
+		s := state.AgentState{Phase: state.PhaseError}
+		return hub.StatusUpdate{
+			Phase:    state.PhaseError,
+			Activity: "",
+			Status:   s.DisplayStatus(),
+			Message:  outcome.message,
+			ExitCode: &outcome.exitCode,
+		}
+	case outcome.limitsExceeded:
+		s := state.AgentState{Phase: state.PhaseStopped, Activity: state.ActivityLimitsExceeded}
+		return hub.StatusUpdate{
+			Phase:    state.PhaseStopped,
+			Activity: state.ActivityLimitsExceeded,
+			Status:   s.DisplayStatus(),
+			Message:  "Agent stopped: limits exceeded",
+			ExitCode: &outcome.exitCode,
+		}
+	}
+	s := state.AgentState{Phase: state.PhaseStopped}
+	u := hub.StatusUpdate{
+		Phase:   state.PhaseStopped,
+		Status:  s.DisplayStatus(),
+		Message: "Agent stopped",
+	}
+	if outcome.signaled {
+		u.ExitReason = string(state.ExitReasonSignaled)
+	}
+	return u
 }
 
 // classifyExit applies the HYBRID exit mapping. It is a pure function so it can
@@ -1756,6 +1804,7 @@ type exitOutcome struct {
 //   - limitsExceeded                  → stopped + limits_exceeded (handled by caller)
 //   - clean exit (code 0, no error)   → stopped
 //   - requestedShutdown + code -1     → stopped (signal-killed by intentional SIGTERM)
+//   - requestedShutdown + clean exit  → stopped, marked signaled
 //   - unexpected non-zero exit/error  → error (crash), restartable
 //
 // harnessCode, when non-nil, is the authoritative harness exit code recovered
@@ -1783,7 +1832,7 @@ func classifyExit(supervisedCode int, supervisorErr error, harnessCode *int, lim
 	// When init was told to shut down (SIGTERM/SIGINT), the child is killed by
 	// signal and Go reports exit code -1. This is expected, not a crash.
 	if requestedShutdown && finalCode == -1 {
-		return exitOutcome{exitCode: 0}
+		return exitOutcome{exitCode: 0, signaled: true}
 	}
 
 	// A supervisor error with a zero exit code is itself a failure.
@@ -1794,7 +1843,7 @@ func classifyExit(supervisedCode int, supervisorErr error, harnessCode *int, lim
 
 	isCrash := finalCode != 0
 	if !isCrash {
-		return exitOutcome{exitCode: 0}
+		return exitOutcome{exitCode: 0, signaled: requestedShutdown}
 	}
 
 	var msg string
@@ -3213,21 +3262,13 @@ func ensureWorkspaceOwnership(workspacePath string, uid, gid, currentEUID int, c
 // resolveIsSharedGitWorkspace returns true when the agent is in a shared-plain
 // git workspace and should configure git credentials accordingly.
 //
-// Prefers the new canonical workspace mode env vars (SCION_WORKSPACE_MODE +
-// SCION_WORKSPACE_GIT) emitted by brokers >= workspace-mode-env release.
-// Falls back to the legacy SCION_SHARED_WORKSPACE var for older broker versions
-// that don't yet emit the new vars.
-//
-// Deprecated: SCION_SHARED_WORKSPACE — use SCION_WORKSPACE_MODE + SCION_WORKSPACE_GIT.
-// Removal is tracked in https://github.com/ptone/scion/issues/575.
+// SCION_WORKSPACE_MODE and SCION_WORKSPACE_GIT are the only inputs. When
+// SCION_WORKSPACE_MODE is absent (for example, a broker that predates it), the
+// workspace is not treated as a shared git workspace. The legacy
+// SCION_SHARED_WORKSPACE var was removed (ptone/scion#575) and is ignored.
 func resolveIsSharedGitWorkspace() bool {
-	if workspaceMode := os.Getenv("SCION_WORKSPACE_MODE"); workspaceMode != "" {
-		// New path: broker emits canonical workspace mode vars.
-		// A shared-plain workspace is git-backed when SCION_WORKSPACE_GIT=true.
-		return workspaceMode == "shared-plain" && util.ParseBoolEnv("SCION_WORKSPACE_GIT", false)
-	}
-	// Fallback: older broker that only emits SCION_SHARED_WORKSPACE.
-	return util.ParseBoolEnv("SCION_SHARED_WORKSPACE", false)
+	return os.Getenv("SCION_WORKSPACE_MODE") == "shared-plain" &&
+		util.ParseBoolEnv("SCION_WORKSPACE_GIT", false)
 }
 
 // errSharedWorkspaceGitPrivilegeDropRequired is returned when

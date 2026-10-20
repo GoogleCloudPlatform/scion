@@ -381,15 +381,23 @@ func TestUATEnforcement_NoPolicyScopesExist(t *testing.T) {
 		}
 	})
 
-	t.Run("no role UAT scopes", func(t *testing.T) {
+	// Role definitions and role bindings have read selectors only; no
+	// selector creates, changes or deletes them.
+	t.Run("role UAT scopes are read only", func(t *testing.T) {
 		for scope := range validScopes {
-			assert.NotContains(t, scope, "role:", "ValidUATScopes must not include any role:* entries, found: %s", scope)
+			if scope == "role:read" {
+				continue
+			}
+			assert.NotContains(t, scope, "role:", "ValidUATScopes must not include a role:* entry other than role:read, found: %s", scope)
 		}
 	})
 
-	t.Run("no role_binding UAT scopes", func(t *testing.T) {
+	t.Run("role_binding UAT scopes are read only", func(t *testing.T) {
 		for scope := range validScopes {
-			assert.NotContains(t, scope, "role_binding:", "ValidUATScopes must not include any role_binding:* entries, found: %s", scope)
+			if scope == "role_binding:read" {
+				continue
+			}
+			assert.NotContains(t, scope, "role_binding:", "ValidUATScopes must not include a role_binding:* entry other than role_binding:read, found: %s", scope)
 		}
 	})
 }
@@ -958,6 +966,8 @@ func TestValidUATScopes_Completeness(t *testing.T) {
 			"project:clone",
 			// Agent manage alias
 			"agent:manage",
+			// Quota administration scopes (hub boundary only)
+			"quota:read", "quota:create", "quota:update", "quota:delete",
 		}
 		for _, scope := range expectedScopes {
 			assert.True(t, validScopes[scope], "ValidUATScopes should include %s", scope)
@@ -965,8 +975,14 @@ func TestValidUATScopes_Completeness(t *testing.T) {
 	})
 
 	t.Run("excludes authority-escalation scopes", func(t *testing.T) {
-		excludedPrefixes := []string{"policy:", "role:", "role_binding:", "quota:", "hub:"}
+		excludedPrefixes := []string{"policy:", "role:", "role_binding:", "hub:"}
+		// Role definition and role binding reads are the only selectors
+		// of those resources; no selector creates, changes or deletes them.
+		readOnly := map[string]bool{"role:read": true, "role_binding:read": true}
 		for scope := range validScopes {
+			if readOnly[scope] {
+				continue
+			}
 			for _, prefix := range excludedPrefixes {
 				assert.False(t, strings.HasPrefix(scope, prefix),
 					"ValidUATScopes must not include %s (authority-escalation scope)", scope)

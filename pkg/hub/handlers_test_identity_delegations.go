@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,22 +30,27 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// Workload-bound issuer delegations (ptone/scion#4240, phase X2).
+// Workload-bound issuer delegations (ptone/scion#4240, phases X2 and X4).
 //
-// POST /api/v1/test-identity-delegations lets a human issuer delegate
-// member-tier test identity issuance to one pinned workload identity:
-// a subject in the startup allowlist server.hub.test_identities.workload_issuers.
-// GET lists delegations and DELETE /{id} revokes one. All three need
-// test_identity.issue at hub scope from an interactive session of a live
-// human user: a PAT, an agent, a workload delegation and every test
-// identity kind are refused. The response holds only ids and settings; a
-// delegation is not a secret, and presenting its id without a workload
-// token proves nothing (see test_identity_workload_issuer.go).
+// POST /api/v1/test-identity-delegations lets a human issuer delegate test
+// identity issuance to one pinned workload identity: a subject in the
+// startup allowlist server.hub.test_identities.workload_issuers. A
+// delegation holds one scope: test_identity:issue (member and viewer), or
+// on a hub running the admin tiers test_identity:issue_admin (test
+// hub-admin, --test-mode=admin or above) or test_identity:issue_super_admin
+// (test super-admin, --test-mode=super-admin). GET lists delegations and
+// DELETE /{id} revokes one. All three need test_identity.issue at hub scope
+// from an interactive session of a live human user: a PAT, an agent, a
+// workload delegation and every test identity kind are refused (a test
+// identity of an admin kind by the test-admin policy, which denies it
+// test_identity.issue). An admin scope also needs the scope's capability
+// and a live super-admin grantor (canIssueTestAdmin) on an interactive
+// session. The response holds only ids and settings; a delegation is not a
+// secret, and presenting its id without a workload token proves nothing
+// (see test_identity_workload_issuer.go).
 
-// Delegation defaults and bounds.
+// Delegation bounds (the lifetimes are in test_identity_workload_issuer.go).
 const (
-	testIdentityDelegationDefaultTTL = 8 * time.Hour
-	testIdentityDelegationMinTTL     = time.Minute
 	// testIdentityDelegationLabelMaxRunes bounds a delegation label.
 	testIdentityDelegationLabelMaxRunes = 64
 
@@ -66,6 +72,7 @@ const (
 	testIdentityDelegationReasonSub         = "workload_sub_not_allowed"
 	testIdentityDelegationReasonTTL         = "invalid_ttl"
 	testIdentityDelegationReasonCap         = "invalid_member_cap"
+	testIdentityDelegationReasonAdminCap    = "invalid_admin_cap"
 	testIdentityDelegationReasonLabel       = "invalid_label"
 	testIdentityDelegationReasonNotHuman    = "grantor_not_human"
 	testIdentityDelegationReasonCredential  = "session_credential_required"
@@ -78,14 +85,22 @@ type CreateTestIdentityDelegationRequest struct {
 	// WorkloadSub is the Google subject (service account unique id) the
 	// delegation is pinned to. It must be in the startup allowlist.
 	WorkloadSub string `json:"workloadSub"`
-	// Scopes holds exactly one scope: "test_identity:issue".
+	// Scopes holds exactly one scope: "test_identity:issue",
+	// "test_identity:issue_admin" or "test_identity:issue_super_admin".
 	Scopes []string `json:"scopes"`
-	// TTLSeconds is the delegation lifetime. 0 means the default (8 h); at
-	// least 60 and at most 7 days.
+	// TTLSeconds is the delegation lifetime, at least 60. 0 means the
+	// scope's default. Member: default 8 h, at most 7 days. Hub-admin:
+	// default 4 h, at most 8 h. Super-admin: default 1 h, at most 2 h.
 	TTLSeconds int64 `json:"ttlSeconds,omitempty"`
-	// MemberCap is the number of live test identities the delegation may
-	// hold at once: 1 to 5. 0 means 5.
+	// MemberCap is the number of live test identities a member-scope
+	// delegation may hold at once: 1 to 5. 0 means 5. Refused for an admin
+	// scope.
 	MemberCap int `json:"memberCap,omitempty"`
+	// AdminCap is the number of live admin-kind test identities an
+	// admin-scope delegation may hold at once: 1 to 2 for hub-admin, 1 for
+	// super-admin. 0 means the maximum. Refused for the member scope. The
+	// hub-wide admin caps always apply on top.
+	AdminCap int `json:"adminCap,omitempty"`
 	// Label is a short free-text label for the test window.
 	Label string `json:"label,omitempty"`
 }
@@ -97,13 +112,20 @@ type TestIdentityDelegationView struct {
 	GrantorID   string     `json:"grantorId"`
 	WorkloadSub string     `json:"workloadSub"`
 	Scope       string     `json:"scope"`
-	MemberCap   int        `json:"memberCap"`
+	MemberCap   int        `json:"memberCap,omitempty"`
+	AdminCap    int        `json:"adminCap,omitempty"`
 	Label       string     `json:"label,omitempty"`
 	Created     time.Time  `json:"created"`
 	ExpiresAt   time.Time  `json:"expiresAt"`
 	RevokedAt   *time.Time `json:"revokedAt,omitempty"`
 	RevokedBy   string     `json:"revokedBy,omitempty"`
 	Live        bool       `json:"live"`
+	// GrantorKind is "human" or "test_infra_offline" (phase DL: created by
+	// the offline host command; GrantorID is then a reserved id that names
+	// no user).
+	GrantorKind string `json:"grantorKind"`
+	// HubID is the hub id an offline delegation is bound to.
+	HubID string `json:"hubId,omitempty"`
 }
 
 // testIdentityDelegationViewOf renders d. Live uses the auth arm's own
@@ -112,18 +134,41 @@ type TestIdentityDelegationView struct {
 // allowlist covers), so a delegation that mints nothing, for example one
 // whose subject was removed at a restart, is not shown as live. wi may be
 // nil (no workload issuer configured): nothing is live then.
-func testIdentityDelegationViewOf(d *store.TestIdentityDelegation, now time.Time, wi *workloadIssuerAuthenticator) TestIdentityDelegationView {
+//
+// An offline delegation (phase DL) is live only if the offline gate also
+// passes now (read through st, which must not be inside a transaction the
+// caller holds open); an unknown grantor kind is never live.
+func testIdentityDelegationViewOf(ctx context.Context, st store.Store, d *store.TestIdentityDelegation, now time.Time, wi *workloadIssuerAuthenticator) TestIdentityDelegationView {
+	live := wi != nil && wi.checkDelegationLive(d, now) == nil
+	switch d.EffectiveGrantorKind() {
+	case store.DelegationGrantorHuman:
+	case store.DelegationGrantorTestInfraOffline:
+		if live {
+			_, refusal := wi.offlineGrantorGate(ctx, st, d)
+			live = refusal == nil
+		}
+	default:
+		live = false
+	}
 	v := TestIdentityDelegationView{
 		ID:          d.ID,
 		GrantorID:   d.GrantorID,
 		WorkloadSub: d.WorkloadSub,
 		Scope:       d.Scope,
-		MemberCap:   d.MemberCap,
 		Label:       d.Label,
 		Created:     d.Created,
 		ExpiresAt:   d.ExpiresAt,
 		RevokedAt:   d.RevokedAt,
-		Live:        wi != nil && wi.checkDelegationLive(d, now) == nil,
+		Live:        live,
+		GrantorKind: d.EffectiveGrantorKind(),
+		HubID:       d.HubID,
+	}
+	// The stored cap is the delegation's per-delegation identity cap for
+	// its scope's tier.
+	if testIdentityDelegationScopes[d.Scope].isAdmin() {
+		v.AdminCap = d.MemberCap
+	} else {
+		v.MemberCap = d.MemberCap
 	}
 	if d.RevokedBy != nil {
 		v.RevokedBy = *d.RevokedBy
@@ -212,16 +257,84 @@ func writeDelegationValidation(w http.ResponseWriter, field, reason, msg string)
 // testIdentityDelegationSummary is the audit summary of a delegation. It
 // holds no secret.
 func testIdentityDelegationSummary(d *store.TestIdentityDelegation) string {
+	memberCap, adminCap := d.MemberCap, 0
+	if testIdentityDelegationScopes[d.Scope].isAdmin() {
+		memberCap, adminCap = 0, d.MemberCap
+	}
 	b, _ := json.Marshal(struct {
 		DelegationID string `json:"delegation_id"`
 		Grantor      string `json:"grantor"`
 		WorkloadSub  string `json:"workload_sub"`
 		Scope        string `json:"scope"`
-		MemberCap    int    `json:"member_cap"`
+		MemberCap    int    `json:"member_cap,omitempty"`
+		AdminCap     int    `json:"admin_cap,omitempty"`
 		Label        string `json:"label"`
 		ExpiresAt    string `json:"expires_at"`
-	}{d.ID, d.GrantorID, d.WorkloadSub, d.Scope, d.MemberCap, d.Label, d.ExpiresAt.UTC().Format(time.RFC3339)})
+	}{d.ID, d.GrantorID, d.WorkloadSub, d.Scope, memberCap, adminCap, d.Label, d.ExpiresAt.UTC().Format(time.RFC3339)})
 	return string(b)
+}
+
+// delegationIdentityCap resolves the per-delegation identity cap of a
+// create request for spec: memberCap for the member scope, adminCap for an
+// admin scope (the other field must be unset). It writes a 422 and returns
+// false on an invalid value.
+func delegationIdentityCap(w http.ResponseWriter, spec testIdentityDelegationScopeSpec, req CreateTestIdentityDelegationRequest) (int, bool) {
+	field, other, requested, otherValue, reason := "memberCap", "adminCap", req.MemberCap, req.AdminCap, testIdentityDelegationReasonCap
+	if spec.isAdmin() {
+		field, other, requested, otherValue, reason = "adminCap", "memberCap", req.AdminCap, req.MemberCap, testIdentityDelegationReasonAdminCap
+	}
+	if otherValue != 0 {
+		writeDelegationValidation(w, other, reason, fmt.Sprintf("%s does not apply to this scope; use %s", other, field))
+		return 0, false
+	}
+	if requested == 0 {
+		return spec.defaultCap, true
+	}
+	if requested < 1 || requested > spec.maxCap {
+		writeDelegationValidation(w, field, reason, fmt.Sprintf("invalid %s: must be between 1 and %d for this scope", field, spec.maxCap))
+		return 0, false
+	}
+	return requested, true
+}
+
+// testIdentityAdminDelegationGrantor runs the extra grantor checks of an
+// admin-scope delegation create (phase X4), after testIdentityDelegationCaller
+// admitted a live human session holding test_identity.issue: the credential
+// is an interactive session (never a token, dev credential, agent or
+// workload delegation), the session holds the scope's capability, and the
+// grantor is, through its own current bindings, a live super-admin holding
+// it (canIssueTestAdmin, the same rule as admin-kind issuance). It writes a
+// 403 and returns false on refusal.
+func (s *Server) testIdentityAdminDelegationGrantor(w http.ResponseWriter, r *http.Request, grantor UserIdentity, spec testIdentityDelegationScopeSpec) bool {
+	ctx := r.Context()
+	resource := Resource{Type: permissions.ResourceTestIdentity}
+	action := Action(permissionAction(spec.permission))
+	if GetCredentialContextFromContext(ctx).Kind != CredentialKindInteractive {
+		logAuthzDenial(r, grantor, resource, action, "admin-scope issuer delegations require an interactive session")
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "admin-scope issuer delegations require an interactive session",
+			map[string]interface{}{"reason": testIdentityDelegationReasonCredential})
+		return false
+	}
+	decision := s.authzService.Decide(ctx, AuthzRequest{
+		Principal:      principalContextForIdentity(grantor),
+		Credential:     credentialContextForIdentity(grantor),
+		Resource:       resource,
+		Action:         action,
+		Permission:     spec.permission,
+		TargetEvidence: hubCollectionEvidence(spec.permission),
+	})
+	if !decision.Allowed {
+		logAuthzDenial(r, grantor, resource, action, decision.Reason)
+		writeForbiddenStructured(w, "requires "+spec.permission+" permission", permissions.ResourceTestIdentity, action)
+		return false
+	}
+	if err := s.canIssueTestAdmin(ctx, grantor.ID(), spec.permission); err != nil {
+		logAuthzDenial(r, grantor, resource, action, err.Error())
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "admin-scope issuer delegations require a live human super-admin",
+			map[string]interface{}{"reason": testAdminReasonNotLiveAdmin})
+		return false
+	}
+	return true
 }
 
 // handleCreateTestIdentityDelegation handles POST
@@ -243,14 +356,18 @@ func (s *Server) handleCreateTestIdentityDelegation(w http.ResponseWriter, r *ht
 		return
 	}
 	scope := req.Scopes[0]
-	if testIdentityDelegationAdminScopes[scope] {
-		writeDelegationValidation(w, "scopes", testIdentityDelegationReasonAdminTier,
-			"admin-tier issuer delegations are not available in this release; only test_identity:issue is accepted")
+	spec, known := testIdentityDelegationScopes[scope]
+	if !known {
+		writeDelegationValidation(w, "scopes", testIdentityDelegationReasonScope,
+			fmt.Sprintf("invalid scope: must be %q, %q or %q", testIdentityDelegationScope, testIdentityDelegationAdminScope, testIdentityDelegationSuperAdminScope))
 		return
 	}
-	if scope != testIdentityDelegationScope {
-		writeDelegationValidation(w, "scopes", testIdentityDelegationReasonScope,
-			fmt.Sprintf("invalid scope: must be %q", testIdentityDelegationScope))
+	if spec.isAdmin() && !s.workloadAdminScopeAvailable(spec.adminKind) {
+		writeDelegationValidation(w, "scopes", testIdentityDelegationReasonAdminTier,
+			fmt.Sprintf("scope %q is not available on this hub: it needs the matching --test-mode level (admin for test_identity:issue_admin, super-admin for test_identity:issue_super_admin)", scope))
+		return
+	}
+	if spec.isAdmin() && !s.testIdentityAdminDelegationGrantor(w, r, grantor, spec) {
 		return
 	}
 	if s.workloadIssuer == nil {
@@ -263,23 +380,18 @@ func (s *Server) handleCreateTestIdentityDelegation(w http.ResponseWriter, r *ht
 			"workloadSub is not in this hub's workload issuer allowlist for this scope")
 		return
 	}
-	ttl := testIdentityDelegationDefaultTTL
+	ttl := spec.defaultTTL
 	if req.TTLSeconds != 0 {
-		if req.TTLSeconds < int64(testIdentityDelegationMinTTL/time.Second) || req.TTLSeconds > int64(testIdentityDelegationMaxAge/time.Second) {
+		if req.TTLSeconds < int64(testIdentityDelegationMinTTL/time.Second) || req.TTLSeconds > int64(spec.maxAge/time.Second) {
 			writeDelegationValidation(w, "ttlSeconds", testIdentityDelegationReasonTTL,
-				fmt.Sprintf("invalid ttlSeconds: must be between %d and %d", int64(testIdentityDelegationMinTTL/time.Second), int64(testIdentityDelegationMaxAge/time.Second)))
+				fmt.Sprintf("invalid ttlSeconds: must be between %d and %d for this scope", int64(testIdentityDelegationMinTTL/time.Second), int64(spec.maxAge/time.Second)))
 			return
 		}
 		ttl = time.Duration(req.TTLSeconds) * time.Second
 	}
-	memberCap := testIdentityPerIssuerCap
-	if req.MemberCap != 0 {
-		if req.MemberCap < 1 || req.MemberCap > testIdentityPerIssuerCap {
-			writeDelegationValidation(w, "memberCap", testIdentityDelegationReasonCap,
-				fmt.Sprintf("invalid memberCap: must be between 1 and %d", testIdentityPerIssuerCap))
-			return
-		}
-		memberCap = req.MemberCap
+	identityCap, ok := delegationIdentityCap(w, spec, req)
+	if !ok {
+		return
 	}
 	label := strings.TrimSpace(req.Label)
 	if utf8.RuneCountInString(label) > testIdentityDelegationLabelMaxRunes || hasControlChar(label, false) {
@@ -294,10 +406,13 @@ func (s *Server) handleCreateTestIdentityDelegation(w http.ResponseWriter, r *ht
 		GrantorID:   grantor.ID(),
 		WorkloadSub: req.WorkloadSub,
 		Scope:       scope,
-		MemberCap:   memberCap,
+		MemberCap:   identityCap,
 		Label:       label,
 		Created:     now,
 		ExpiresAt:   now.Add(ttl),
+		// The API creates human-grantor delegations only (the store
+		// refuses any other kind).
+		GrantorKind: store.DelegationGrantorHuman,
 	}
 	auditActor := s.buildAuditActorFromContext(ctx)
 	err := s.store.WithTx(ctx, func(tx store.Store) error {
@@ -329,8 +444,8 @@ func (s *Server) handleCreateTestIdentityDelegation(w http.ResponseWriter, r *ht
 		return
 	}
 	slog.InfoContext(ctx, "test identity issuer delegation created", "delegation_id", d.ID, "grantor_id", d.GrantorID,
-		"workload_sub", d.WorkloadSub, "scope", d.Scope, "member_cap", d.MemberCap, "expires_at", d.ExpiresAt)
-	writeJSON(w, http.StatusCreated, testIdentityDelegationViewOf(d, now, s.workloadIssuer))
+		"workload_sub", d.WorkloadSub, "scope", d.Scope, "identity_cap", d.MemberCap, "expires_at", d.ExpiresAt)
+	writeJSON(w, http.StatusCreated, testIdentityDelegationViewOf(ctx, s.store, d, now, s.workloadIssuer))
 }
 
 // handleListTestIdentityDelegations handles GET
@@ -343,7 +458,7 @@ func (s *Server) handleListTestIdentityDelegations(w http.ResponseWriter, r *htt
 		return
 	}
 	grantorID := caller.ID()
-	if testIdentityCallerSeesAll(caller) {
+	if s.testIdentityCallerSeesAll(ctx, caller) {
 		grantorID = ""
 	}
 	limit := testIdentityDelegationListDefaultLimit
@@ -367,7 +482,7 @@ func (s *Server) handleListTestIdentityDelegations(w http.ResponseWriter, r *htt
 	now := s.testIdentities.clock()
 	items := make([]TestIdentityDelegationView, 0, len(rows))
 	for i := range rows {
-		items = append(items, testIdentityDelegationViewOf(&rows[i], now, s.workloadIssuer))
+		items = append(items, testIdentityDelegationViewOf(ctx, s.store, &rows[i], now, s.workloadIssuer))
 	}
 	writeJSON(w, http.StatusOK, ListTestIdentityDelegationsResponse{Items: items, Truncated: truncated})
 }
@@ -387,7 +502,7 @@ func (s *Server) handleRevokeTestIdentityDelegation(w http.ResponseWriter, r *ht
 	}
 	id := r.PathValue("id")
 	d, err := s.store.GetTestIdentityDelegation(ctx, id)
-	if errors.Is(err, store.ErrNotFound) || (err == nil && d.GrantorID != caller.ID() && !testIdentityCallerSeesAll(caller)) {
+	if errors.Is(err, store.ErrNotFound) || (err == nil && d.GrantorID != caller.ID() && !s.testIdentityCallerSeesAll(ctx, caller)) {
 		NotFound(w, "issuer delegation")
 		return
 	}

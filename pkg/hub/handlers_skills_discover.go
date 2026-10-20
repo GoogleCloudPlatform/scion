@@ -47,9 +47,8 @@ var skillDiscoverKind = resourceImportKind{
 // DiscoverSkillsRequest is the request body for
 // POST /api/v1/skills/discover-directory.
 //
-// ProjectID is optional; when set it is used to resolve GitHub credentials (a
-// GitHub App installation token, falling back to the project's GITHUB_TOKEN
-// secret) so private repositories can be scanned.
+// ProjectID is optional; when set it is used to resolve the project's GitHub
+// credential (see importCredential) so private repositories can be scanned.
 type DiscoverSkillsRequest struct {
 	SourceURL string `json:"sourceUrl"`
 	ProjectID string `json:"projectId,omitempty"`
@@ -102,7 +101,7 @@ func (s *Server) handleSkillsDiscoverDirectory(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	if !s.authorizeSkillDiscover(ctx, w, &req) {
+	if !s.authorizeSkillDiscover(r, w, &req) {
 		return
 	}
 
@@ -163,7 +162,7 @@ func (s *Server) handleSkillsDiscoverDirectory(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	cachePath, err := s.fetchRemoteForImport(ctx, req.ProjectID, base)
+	cachePath, err := s.fetchRemoteForImport(ctx, store.TemplateScopeProject, req.ProjectID, base)
 	if err != nil {
 		// Never echo err: the sparse-checkout fallback shells out to git with a
 		// "https://x-access-token:<TOKEN>@github.com/..." remote, and git's stderr
@@ -238,12 +237,14 @@ func (s *Server) handleSkillsDiscoverDirectory(w http.ResponseWriter, r *http.Re
 // returns false when the caller is rejected.
 //
 // Discovery persists nothing, but it does *spend* a project's GitHub
-// credentials: fetchRemoteForImport mints a GitHub App installation token or
-// reads the project's GITHUB_TOKEN secret. Supplying a projectId therefore has
+// credentials: fetchRemoteForImport reads the project's GH_{OWNER}__{REPO},
+// GH_{OWNER} or GITHUB_TOKEN secret, or mints a GitHub App installation token
+// (see importCredential). Supplying a projectId therefore has
 // to be authorized exactly like any other use of that project's credentials,
 // which is why the user branch runs the same CheckAccess as
 // authorizeProjectImport rather than settling for "is logged in".
-func (s *Server) authorizeSkillDiscover(ctx context.Context, w http.ResponseWriter, req *DiscoverSkillsRequest) bool {
+func (s *Server) authorizeSkillDiscover(r *http.Request, w http.ResponseWriter, req *DiscoverSkillsRequest) bool {
+	ctx := r.Context()
 	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 		if !agentIdent.HasScope(ScopeAgentCreate) {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Missing required scope: project:agent:create", nil)
@@ -263,6 +264,10 @@ func (s *Server) authorizeSkillDiscover(ctx context.Context, w http.ResponseWrit
 	if userIdent == nil {
 		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "Authentication required", nil)
 		return false
+	}
+
+	if isUserAccessTokenRequest(r, userIdent) {
+		return s.authorizeTokenSkillDiscover(ctx, w, userIdent, req.ProjectID)
 	}
 
 	// No projectId means an unauthenticated fetch of a public repo — any
@@ -285,6 +290,46 @@ func (s *Server) authorizeSkillDiscover(ctx context.Context, w http.ResponseWrit
 	// Confirm the project exists so a typo'd UUID fails loudly rather than
 	// silently degrading to an unauthenticated fetch.
 	if _, perr := s.store.GetProject(ctx, req.ProjectID); perr != nil {
+		if errors.Is(perr, store.ErrNotFound) {
+			NotFound(w, "Project")
+			return false
+		}
+		writeErrorFromErr(w, perr, "")
+		return false
+	}
+	return true
+}
+
+// authorizeTokenSkillDiscover authorizes skill discovery for a user access
+// token. Discovery offers skills to add to a catalog, so the check is the
+// skill create permission of the catalog the request names:
+//
+//   - with a projectId, skill.create on a collection-level request inside
+//     that project (skill:create on a boundary that contains the project);
+//   - without one, skill.create_global on a collection-level request at the
+//     hub scope (skill:create_global on a hub boundary).
+//
+// A named project must exist. It writes the error response and returns false
+// when the request is refused.
+func (s *Server) authorizeTokenSkillDiscover(ctx context.Context, w http.ResponseWriter, userIdent UserIdentity, projectID string) bool {
+	if projectID == "" {
+		decision := s.authzService.CheckAccessWithEvidence(ctx, userIdent,
+			skillScopeResource(store.SkillScopeGlobal, ""), ActionCreateGlobal, hubCollectionEvidence("skill.create_global"))
+		if !decision.Allowed {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"You don't have permission to discover skills for the global catalog", nil)
+			return false
+		}
+		return true
+	}
+	decision := s.authzService.CheckAccessWithEvidence(ctx, userIdent,
+		skillScopeResource(store.SkillScopeProject, projectID), ActionCreate, projectCollectionEvidence("skill.create", projectID))
+	if !decision.Allowed {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden,
+			"You don't have permission to discover skills in this project", nil)
+		return false
+	}
+	if _, perr := s.store.GetProject(ctx, projectID); perr != nil {
 		if errors.Is(perr, store.ErrNotFound) {
 			NotFound(w, "Project")
 			return false

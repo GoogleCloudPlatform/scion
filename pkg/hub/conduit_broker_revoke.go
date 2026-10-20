@@ -267,7 +267,7 @@ func (s *Server) conduitBrokerCredentialChanged(brokerID string) {
 }
 
 // conduitBrokerSessionCtxKey carries the *conduitBrokerSession from
-// handleConduitBroker to the post-registration revalidation.
+// serveConduitBroker to the post-registration revalidation.
 type conduitBrokerSessionCtxKey struct{}
 
 // conduitBrokerAdmissionSecret returns the fingerprint of the broker secret
@@ -349,7 +349,9 @@ func (s *Server) trackConduitBrokerSession(ctx context.Context, brokerID string,
 	}
 }
 
-// check evaluates one tracked broker session.
+// check evaluates one tracked broker session. While the broker's
+// credential is current, it also closes this node's sessions of the broker
+// that belong to an older incarnation (conduit_broker_incarnation.go).
 func (v *conduitBrokerRevoker) check(ctx context.Context, st *conduitUserStream) (conduitAuthzVerdict, string) {
 	v.mu.Lock()
 	bs, ok := v.sessions[st]
@@ -358,7 +360,11 @@ func (v *conduitBrokerRevoker) check(ctx context.Context, st *conduitUserStream)
 		// Untracked meanwhile (the session ended): nothing to act on.
 		return conduitAuthzAllowed, "session no longer tracked"
 	}
-	return v.s.conduitBrokerCredentialVerdict(ctx, bs.brokerID, bs.fp)
+	verdict, detail := v.s.conduitBrokerCredentialVerdict(ctx, bs.brokerID, bs.fp)
+	if verdict == conduitAuthzAllowed {
+		v.s.closeSupersededBrokerSessions(ctx, bs.brokerID)
+	}
+	return verdict, detail
 }
 
 // conduitBrokerCredentialVerdict evaluates whether brokerID is still

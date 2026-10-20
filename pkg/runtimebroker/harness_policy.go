@@ -401,7 +401,7 @@ func (s *Server) evaluateHarnessConfigPolicy(harnessConfigName string, entry con
 		Code:       ErrCodeForbidden,
 		HTTPStatus: 403,
 		Message: fmt.Sprintf(
-			"harness-config %q uses scripted provisioning but this broker has allow_container_script_harnesses=false. Set broker.allow_container_script_harnesses=true (SCION_SERVER_BROKER_ALLOWCONTAINERSCRIPTHARNESSES=true) to enable.",
+			"harness-config %q uses scripted provisioning but this broker has allow_container_script_harnesses=false. Set broker.allow_container_script_harnesses=true (SCION_SERVER_RUNTIMEBROKER_ALLOWCONTAINERSCRIPTHARNESSES=true) to enable.",
 			harnessConfigName,
 		),
 	}

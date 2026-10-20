@@ -66,25 +66,10 @@ func runTemplatesUpdate(cmd *cobra.Command, args []string) error {
 		return newUsageError("--scope must be global, project or user")
 	}
 
-	var gp string
-	if projectPath != "" {
-		resolved, err := config.GetResolvedProjectDir(projectPath)
-		if err != nil {
-			return fmt.Errorf("failed to resolve project path %q: %w", projectPath, err)
-		}
-		gp = resolved
-	} else if projectDir, err := config.GetResolvedProjectDir(""); err == nil {
-		gp = projectDir
-	}
-
-	hubCtx, err := CheckHubAvailabilityWithOptions(gp, true)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return err
 	}
-	if hubCtx == nil {
-		return fmt.Errorf("hub is not available, the update command requires a hub connection")
-	}
-
 	PrintUsingHub(hubCtx.Endpoint)
 
 	// Project templates are limited to the current project when one is

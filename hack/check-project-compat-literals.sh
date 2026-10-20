@@ -170,6 +170,12 @@ allowed_paths=(
   "^pkg/sciontool/telemetry/aggregator_test.go$"
   "^pkg/storage/storage_test.go$"
   "^pkg/store/entadapter/agent_session_metrics_projectid_test.go$"
+  # Grant shaping censuses (admin tier A3, ptone/scion#4240): each names the
+  # one-time pre-project migration file pkg/ent/entc/migrate_grove_to_project.go
+  # as a classified exemption key. The key must equal the scanned path, so the
+  # literal is required.
+  "^pkg/store/entadapter/grant_shaping_census_test.go$"
+  "^pkg/store/entadapter/grant_shaping_reads_census_test.go$"
   # Seeds scope='grove' rows with raw SQL to prove the data migration in
   # legacy_scope_migration.go rewrites them; the literal is the point of the
   # test.

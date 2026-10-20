@@ -30,7 +30,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/router"
-	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/portforward"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
@@ -316,13 +315,19 @@ func (s *Server) registerAgentPort(w http.ResponseWriter, r *http.Request, agent
 		return
 	}
 	now := time.Now().UTC()
+	// ExposedBy names the kind of caller that registered the port: the
+	// agent itself, or a user holding agent.port_access on the agent.
+	exposedBy := "user"
+	if GetAgentIdentityFromContext(r.Context()) != nil {
+		exposedBy = "agent"
+	}
 	ports = append(ports, store.ExposedPort{
 		Port:      req.Port,
 		Label:     req.Label,
 		Host:      req.Host,
 		Mode:      "rw",
 		ExposedAt: now,
-		ExposedBy: "agent",
+		ExposedBy: exposedBy,
 	})
 	if err := s.store.UpdateAgentExposedPorts(r.Context(), agent.ID, ports); err != nil {
 		writeErrorFromErr(w, err, "")
@@ -406,9 +411,10 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 	// form (127.0.0.0/8, ::1, ::ffff:127.0.0.1, localhost) qualifies and is
 	// retargeted: the stream always goes to conduitProxyHost (127.0.0.1)
 	// inside the agent.
-	conduitOn := s.conduitServing()
+	conduitOn := s.conduitRoutable()
+	identity := GetIdentityFromContext(r.Context())
 	if conduitOn && isLoopbackHost(exposed.Host) {
-		conn, err := s.openConduitPort(r.Context(), GetIdentityFromContext(r.Context()), agent, exposed.Port)
+		conn, err := s.openConduitPort(r.Context(), identity, agent, exposed.Port)
 		switch {
 		case err == nil:
 			s.serveConduitProxy(w, r, agent, exposed.Port, proxyPath, conn)
@@ -417,6 +423,13 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 			writeConduitProxyError(w, r, agent.ID, err)
 			return
 		}
+	}
+	// No path without a target-side deadline (design §3.5 Q14, v2.21.46):
+	// in external relay mode with enforce, a user request that only the
+	// port-forward tunnel below could serve is refused with the
+	// routing-unavailable 503.
+	if s.refuseLegacyProxy(w, r, identity, agent.ID, conduitOn, isLoopbackHost(exposed.Host)) {
+		return
 	}
 	if isWebSocketUpgrade(r) {
 		if conduitOn && !s.portTunnels.has(agent.ID) {
@@ -517,7 +530,7 @@ func (s *Server) handleAgentPortTunnel(w http.ResponseWriter, r *http.Request, a
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "WebSocket upgrade required", nil)
 		return
 	}
-	agent, ok := s.authorizePortRegistration(w, r, agentID)
+	agent, ok := s.authorizePortTunnel(w, r, agentID)
 	if !ok {
 		return
 	}
@@ -555,18 +568,17 @@ func (s *Server) authorizePortAccess(w http.ResponseWriter, r *http.Request, age
 	return nil, false
 }
 
+// authorizePortRegistration authorizes registering, deleting and clearing an
+// agent's exposed ports. The agent itself needs the port-forward scope on its
+// own record. A user needs agent.port_access on the agent record (the same
+// check as authorizePortAccess) and agent.port_access at hub level; a role
+// that grants agent.port_access only within a project opens an agent's
+// exposed ports but does not manage them. For a user access token the
+// record check needs the agent:port_access selector, a boundary that
+// contains the agent's project and current access to that project, and the
+// hub-level check applies to the token's holder. Loopback, reserved-port and
+// per-agent limits are checked by the callers.
 func (s *Server) authorizePortRegistration(w http.ResponseWriter, r *http.Request, agentID string) (*store.Agent, bool) {
-	// A user access token never manages exposed ports, whatever its scopes
-	// or holder. Check that first so the caller gets this specific reason
-	// rather than a generic deny from the general access check below (which
-	// for a UAT also requires live project access).
-	if userIdent := GetUserIdentityFromContext(r.Context()); userIdent != nil {
-		if _, scoped := userIdent.(*ScopedUserIdentity); scoped {
-			// Session-only with the GOV_PENDING reason (session_only_gate.go).
-			writeSessionOnlyDenial(w, ErrCodeForbidden, "Scoped access tokens cannot manage exposed ports", authzop.ReasonGovernancePending)
-			return nil, false
-		}
-	}
 	agent, ok := s.authorizePortAccess(w, r, agentID, ActionPortAccess)
 	if !ok {
 		return nil, false
@@ -579,18 +591,35 @@ func (s *Server) authorizePortRegistration(w http.ResponseWriter, r *http.Reques
 		return agent, true
 	}
 	if userIdent := GetUserIdentityFromContext(r.Context()); userIdent != nil {
+		holder := UserIdentity(userIdent)
+		if scoped, isToken := userIdent.(*ScopedUserIdentity); isToken && scoped != nil {
+			holder = scoped.UserIdentity
+		}
 		if s.authzService.Decide(r.Context(), AuthzRequest{
-			Principal:  principalContextForIdentity(userIdent),
-			Credential: credentialContextForIdentity(userIdent),
+			Principal:  principalContextForIdentity(holder),
+			Credential: credentialContextForIdentity(holder),
 			Resource:   Resource{Type: "agent", ID: "hub"},
-			Action:     Action("port_access"),
+			Action:     ActionPortAccess,
 			Permission: "agent.port_access",
 		}).Allowed {
 			return agent, true
 		}
 	}
-	writeError(w, http.StatusForbidden, ErrCodeForbidden, "Only the agent can manage its exposed ports", nil)
+	writeError(w, http.StatusForbidden, ErrCodeForbidden, "Managing an agent's exposed ports requires agent.port_access at hub level", nil)
 	return nil, false
+}
+
+// authorizePortTunnel authorizes opening an agent's port tunnel. Only the
+// agent itself opens its tunnel: an agent identity for the agent's own ID
+// and project, holding the port-forward scope. Every other identity,
+// including every user, is refused.
+func (s *Server) authorizePortTunnel(w http.ResponseWriter, r *http.Request, agentID string) (*store.Agent, bool) {
+	agentIdent := GetAgentIdentityFromContext(r.Context())
+	if agentIdent == nil {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Only the agent can open its port tunnel", nil)
+		return nil, false
+	}
+	return s.authorizePortRegistration(w, r, agentID)
 }
 
 func exposedPortResponses(agentID string, ports []store.ExposedPort) []exposedPortResponse {
@@ -744,10 +773,11 @@ func (s *Server) exposedPortsSweepHandler() func(ctx context.Context) {
 			}
 
 			// An agent's ports are stale if the agent is soft-deleted or in a
-			// terminal phase (stopped, error). We are generous: running,
-			// suspended, provisioning, starting, etc. are left alone.
+			// terminal phase (stopped, error, halted). We are generous:
+			// running, suspended, provisioning, starting, etc. are left alone.
 			isDeleted := !agent.DeletedAt.IsZero()
-			isTerminal := agent.Phase == string(state.PhaseStopped) || agent.Phase == string(state.PhaseError)
+			isTerminal := agent.Phase == string(state.PhaseStopped) || agent.Phase == string(state.PhaseError) ||
+				agent.Phase == string(state.PhaseHalted)
 
 			if !isDeleted && !isTerminal {
 				continue
@@ -769,4 +799,24 @@ func (s *Server) exposedPortsSweepHandler() func(ctx context.Context) {
 			slog.Info("Scheduler: exposed-ports sweep cleared stale registrations", "count", cleared)
 		}
 	}
+}
+
+// refuseLegacyProxy answers, and reports true for, a user request the
+// port-forward tunnel would otherwise serve while user streams need a
+// target-side deadline (conduitLegacyRouteRefused): conduit not routable,
+// a port conduit does not carry, or an agent with no conduit session. The
+// answer is the routing-unavailable 503 (no details.reason).
+func (s *Server) refuseLegacyProxy(w http.ResponseWriter, r *http.Request, identity Identity, agentID string, conduitOn, loopback bool) bool {
+	cause, message := conduitCauseNoConduitSession, conduitNoSessionMessage
+	switch {
+	case !conduitOn:
+		cause, message = conduitCauseConduitNotRoutable, conduitNotRoutableMessage
+	case !loopback:
+		cause, message = conduitCauseLegacyOnlyPort, conduitLegacyOnlyMessage
+	}
+	if !s.conduitLegacyRouteRefused(r.Context(), identity, conduitRouteProxy, ErrCodeUnavailable, cause, agentID) {
+		return false
+	}
+	writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, message, nil)
+	return true
 }

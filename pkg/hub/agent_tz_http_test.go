@@ -128,7 +128,7 @@ func createTZTemplate(t *testing.T, s store.Store, slug, hcName string, env map[
 		ContentHash:          "d00dfeed",
 		Scope:                store.TemplateScopeGlobal,
 		Status:               "active",
-		Config:               &store.TemplateConfig{Harness: "claude", Env: env},
+		AgentConfig:          &api.ScionConfig{Harness: "claude", Env: env},
 	}))
 }
 
@@ -210,7 +210,7 @@ func TestCreateAgent_CapturesTimezone(t *testing.T) {
 }
 
 // tzTemplateStore resolves any template slug to a global template whose
-// config env carries TZ, for the scheduled-spawn create path.
+// agent config env carries TZ, for the scheduled-spawn create path.
 type tzTemplateStore struct {
 	*mockScheduledEventStore
 }
@@ -224,7 +224,7 @@ func (r *tzTemplateStore) GetTemplateBySlug(_ context.Context, slug, _, _ string
 		ContentHash: "d00dfeed",
 		Status:      "active",
 		Scope:       store.TemplateScopeGlobal,
-		Config:      &store.TemplateConfig{Harness: "claude", Env: map[string]string{"TZ": "Asia/Kathmandu"}},
+		AgentConfig: &api.ScionConfig{Harness: "claude", Env: map[string]string{"TZ": "Asia/Kathmandu"}},
 	}, nil
 }
 
@@ -704,7 +704,7 @@ func updateTZTemplateEnv(t *testing.T, s store.Store, slug string, env map[strin
 	ctx := context.Background()
 	tmpl, err := s.GetTemplate(ctx, tid("template-"+slug+"-"+t.Name()))
 	require.NoError(t, err)
-	tmpl.Config.Env = env
+	tmpl.AgentConfig.Env = env
 	tmpl.ContentHash = "feedd00d"
 	require.NoError(t, setTemplateContentForTest(ctx, s, tmpl))
 }

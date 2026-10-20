@@ -26,6 +26,11 @@ import (
 // directory that refuses new files.
 var createTempFile = os.CreateTemp
 
+// beforeAtomicRename, when set by a test, runs after the temporary file is
+// written, synced and closed and before it is renamed over the target. An
+// error from it fails the write as a failed rename would.
+var beforeAtomicRename func(tmpName, targetPath string) error
+
 // errAtomicTempCreate marks a writeFileAtomic failure to create its
 // temporary file: nothing has been written and the target is untouched.
 var errAtomicTempCreate = errors.New("cannot create temporary file")
@@ -46,9 +51,9 @@ var errAtomicNotDurable = errors.New("file replaced but the change may not be du
 // error wrapping errAtomicNotDurable means the content was replaced but may
 // not be durable; repeating the write is safe.
 //
-// It does not serialise concurrent read-modify-write cycles: with two
-// writers the last rename wins and the other update is lost (no torn file,
-// though). That predates the atomic write and is tracked separately.
+// It does not serialise concurrent read-modify-write cycles by itself:
+// settings writers hold the settings lock (LockSettingsDir) from their read
+// to this write.
 func writeFileAtomic(targetPath string, data []byte) error {
 	mode := os.FileMode(0644)
 	if info, err := os.Lstat(targetPath); err == nil && info.Mode().IsRegular() {
@@ -85,6 +90,11 @@ func writeFileAtomicMode(targetPath string, data []byte, mode os.FileMode) error
 	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close temp file for %s: %w", targetPath, err)
+	}
+	if beforeAtomicRename != nil {
+		if err := beforeAtomicRename(tmpName, targetPath); err != nil {
+			return fmt.Errorf("replace %s: %w", targetPath, err)
+		}
 	}
 	if err := os.Rename(tmpName, targetPath); err != nil {
 		return fmt.Errorf("replace %s: %w", targetPath, err)

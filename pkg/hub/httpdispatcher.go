@@ -32,6 +32,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
@@ -182,11 +183,12 @@ type HTTPAgentDispatcher struct {
 	commandBus      CommandBus
 	dispatchMetrics dispatchmetrics.Recorder
 
-	// imageRegistryProvider returns the configured image registry prefix
-	// for rewriting bare image names before dispatching to brokers. It is
+	// imageRegistryProvider returns the image registry prefix for
+	// rewriting bare image names before dispatching an agent to a broker,
+	// for that broker and the agent's profile ("" = no rewrite). It is
 	// read at each dispatch, so a saved image_registry change (or its
 	// clear) applies to the next agent. Nil = no rewrite.
-	imageRegistryProvider func() string
+	imageRegistryProvider func(brokerID, profile string) string
 
 	// Resource hash repair callbacks sync a resource's DB manifest from GCS
 	// when a hash mismatch is detected during dispatch. Nil = no repair.
@@ -470,19 +472,20 @@ func (d *HTTPAgentDispatcher) autoExposePortsDefault() *bool {
 }
 
 // SetImageRegistryProvider registers the accessor for the image registry
-// prefix used to rewrite bare image names before dispatching to brokers. It
-// is read at each dispatch.
-func (d *HTTPAgentDispatcher) SetImageRegistryProvider(fn func() string) {
+// prefix used to rewrite bare image names before dispatching to a broker
+// (per broker and profile). It is read at each dispatch.
+func (d *HTTPAgentDispatcher) SetImageRegistryProvider(fn func(brokerID, profile string) string) {
 	d.imageRegistryProvider = fn
 }
 
-// ImageRegistry returns the registry prefix this dispatcher rewrites bare
-// image names to at send time ("" = no rewrite).
-func (d *HTTPAgentDispatcher) ImageRegistry() string {
+// ImageRegistryFor returns the registry prefix this dispatcher rewrites
+// bare image names to when sending an agent with profile to brokerID
+// ("" = no rewrite).
+func (d *HTTPAgentDispatcher) ImageRegistryFor(brokerID, profile string) string {
 	if d.imageRegistryProvider == nil {
 		return ""
 	}
-	return d.imageRegistryProvider()
+	return d.imageRegistryProvider(brokerID, profile)
 }
 
 // SetTemplateRepairer registers a callback that syncs a template's DB manifest
@@ -851,9 +854,9 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 	// Read once, so the broker and the agent see the same set.
 	experiments := d.dispatchExperiments()
 
-	// Telemetry for this dispatch: separate tiers for a templateTiers
-	// broker, the legacy inline merge otherwise (see dispatch_telemetry.go).
-	tel := d.dispatchTelemetry(ctx, agent, projectInfo.telemetryPolicy)
+	// Telemetry for this dispatch: always the separate tiers, never inline
+	// telemetry (see dispatch_telemetry.go).
+	tel := d.dispatchTelemetry(agent, projectInfo.telemetryPolicy)
 
 	// Add configuration if available
 	if agent.AppliedConfig != nil {
@@ -881,7 +884,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 		// Only the user's explicit image travels as Config.Image (the
 		// broker's top tier); a template-derived AppliedConfig.Image does
 		// not — see explicitDispatchImage (ptone/scion#1799).
-		image := d.dispatchImageForBroker(agent.AppliedConfig)
+		image := d.dispatchImageForBroker(agent)
 		req.Config = &RemoteAgentConfig{
 			Template:                  agent.Template,
 			Image:                     image,
@@ -1388,6 +1391,7 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 	info.telemetryPolicy = projectTelemetryPolicy(project)
 
 	// First check if the broker has a registered local path for this project.
+	localPath := ""
 	if agent.RuntimeBrokerID != "" {
 		provider, provErr := d.store.GetProjectProvider(ctx, agent.ProjectID, agent.RuntimeBrokerID)
 		if provErr != nil {
@@ -1395,9 +1399,9 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 				d.log.Warn("Failed to get project provider for path lookup", "error", provErr)
 			}
 		} else if provider.LocalPath != "" {
-			info.projectPath = provider.LocalPath
+			localPath = provider.LocalPath
 			if d.debug {
-				d.log.Debug("Found project path for broker", "brokerID", agent.RuntimeBrokerID, "path", info.projectPath)
+				d.log.Debug("Found project path for broker", "brokerID", agent.RuntimeBrokerID, "path", localPath)
 			}
 		}
 	}
@@ -1405,16 +1409,12 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 	// slug. This applies to both hub-native projects (no git remote) and
 	// git-anchored projects — the broker needs a project identity to create
 	// agent directories under ~/.scion/projects/<slug>/ rather than falling
-	// back to the global project.
-	if info.projectPath == "" {
-		info.projectSlug = project.Slug
-	} else if isGlobalHubProject(project.Slug) {
-		// The global project's slug travels with its provider path so the
-		// broker can tell the global project apart from another project
-		// whose path points at the broker's global directory. The broker
-		// keeps resolving the project from the path.
-		info.projectSlug = globalProjectSlug
-	}
+	// back to the global project. The global project's slug travels with its
+	// provider path so the broker can tell the global project apart from
+	// another project whose path points at the broker's global directory.
+	// The same helper decides the path the built-in profile reference count
+	// reads agent-info.json from (ptone/scion#5113).
+	info.projectPath, info.projectSlug = config.ProjectDispatchLocation(localPath, project.Slug, isGlobalHubProject(project.Slug))
 	return info, nil
 }
 
@@ -1489,40 +1489,29 @@ func validWorkspacePlacementReport(placement string) bool {
 }
 
 // applyBrokerAgentConfig copies the non-status fields of a broker's agent
-// answer (template, harness, image, profile, runtime) onto agent.
+// answer (template, harness, image, profile, runtime) onto agent. The rules
+// live in store.ApplyBrokerAgentConfig, which an async launch's succeeded
+// report also uses (ptone/scion#4818).
 func applyBrokerAgentConfig(agent *store.Agent, info *RemoteAgentInfo) {
-	if info.Template != "" {
-		agent.Template = info.Template
+	store.ApplyBrokerAgentConfig(agent, brokerAgentConfigOf(info))
+}
+
+// brokerAgentConfigOf extracts the broker-resolved agent config from a
+// broker's agent answer. A synchronous dispatch and an async launch's
+// succeeded report both convert with it. A nil info yields the zero value,
+// which changes nothing.
+func brokerAgentConfigOf(info *RemoteAgentInfo) store.BrokerAgentConfig {
+	if info == nil {
+		return store.BrokerAgentConfig{}
 	}
-	if agent.AppliedConfig != nil {
-		if info.HarnessConfig != "" {
-			agent.AppliedConfig.HarnessConfig = info.HarnessConfig
-		}
-		if info.HarnessAuth != "" {
-			agent.AppliedConfig.HarnessAuth = info.HarnessAuth
-		}
-		// Empty only from an older broker (a current broker reports
-		// "unresolved" when no harness-config dir resolved), so keep the
-		// recorded value in that case.
-		if info.HarnessConfigSource != "" {
-			agent.AppliedConfig.HarnessConfigSource = info.HarnessConfigSource
-		}
-		// AppliedConfig.Image records what the broker actually resolved,
-		// for display. It never feeds a later dispatch's top-tier image
-		// (explicitDispatchImage reads the explicit inputs instead), so
-		// recording it here no longer freezes the image across restarts
-		// (ptone/scion#1799).
-		if info.Image != "" {
-			agent.AppliedConfig.Image = info.Image
-		}
-		// No Runtime Broker-reported profile is written onto a pinned (flat)
-		// agent.
-		if info.Profile != "" && !agent.IsPinned() {
-			agent.AppliedConfig.Profile = info.Profile
-		}
-	}
-	if info.Runtime != "" {
-		agent.Runtime = info.Runtime
+	return store.BrokerAgentConfig{
+		Template:            info.Template,
+		HarnessConfig:       info.HarnessConfig,
+		HarnessAuth:         info.HarnessAuth,
+		HarnessConfigSource: info.HarnessConfigSource,
+		Image:               info.Image,
+		Profile:             info.Profile,
+		Runtime:             info.Runtime,
 	}
 }
 
@@ -1845,7 +1834,10 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 	// revokeAgentCredentialsBestEffort's doc comment.
 	issued := false
 	defer func() {
-		if err != nil && issued {
+		// A caller that keeps the agent on an unknown outcome keeps the
+		// credential too: the broker may still be starting the agent with
+		// it (ptone/scion#4817; keepCredentialOnDispatchError).
+		if err != nil && issued && !keepCredentialOnDispatchError(ctx, err) {
 			revokeAgentCredentialsBestEffort(ctx, d.store, agent.ID, agentCredentialRevokeReasonCreateFailed)
 		}
 	}()
@@ -1924,6 +1916,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentReprovision(ctx context.Context, agen
 // back into AppliedConfig.
 func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *store.Agent, callerName string, reprovision bool, expectNFSWorkspace string) (err error) {
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
+		return err
+	}
+	// Flat placement backstop (requirePinnedPlacement): first after the
+	// assignment check, before any store write or broker call.
+	if err := d.placementBackstop(ctx, agent); err != nil {
 		return err
 	}
 
@@ -2148,7 +2145,10 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 	// deferredCreateWithGather fallback, does go through this defer.
 	issued := false
 	defer func() {
-		if err != nil && issued {
+		// A caller that keeps the agent on an unknown outcome keeps the
+		// credential too: the broker may still be starting the agent with
+		// it (ptone/scion#4817; keepCredentialOnDispatchError).
+		if err != nil && issued && !keepCredentialOnDispatchError(ctx, err) {
 			revokeAgentCredentialsBestEffort(ctx, d.store, agent.ID, agentCredentialRevokeReasonCreateFailed)
 		}
 	}()
@@ -2276,6 +2276,11 @@ func (e *ErrEnvStillMissing) Error() string {
 // action. This makes the finalize HA-safe: the replay can land on any broker
 // replica because it carries the complete request state.
 func (d *HTTPAgentDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string) (*CreateDispatchResult, error) {
+	// Flat placement backstop: the first pass pinned the agent, so this
+	// refuses only a pin corrupted between the two passes.
+	if err := d.placementBackstop(ctx, agent); err != nil {
+		return nil, err
+	}
 	return d.finalizeEnv(ctx, agent, env, false)
 }
 
@@ -2332,7 +2337,10 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 	// non-error needs-still-missing case).
 	issued := false
 	defer func() {
-		if err != nil && issued {
+		// A caller that keeps the agent on an unknown outcome keeps the
+		// credential too: the broker may still be starting the agent with
+		// it (ptone/scion#4817; keepCredentialOnDispatchError).
+		if err != nil && issued && !keepCredentialOnDispatchError(ctx, err) {
 			revokeAgentCredentialsBestEffort(ctx, d.store, agent.ID, agentCredentialRevokeReasonCreateFailed)
 		}
 	}()
@@ -2750,7 +2758,7 @@ func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *
 		return result, plain, nil
 	}
 
-	for _, filter := range d.envScopesInPrecedenceOrder(agent) {
+	for _, filter := range d.envScopesForDispatch(ctx, agent) {
 		vars, err := d.store.ListEnvVars(ctx, filter)
 		if err != nil {
 			return nil, nil, fmt.Errorf("list %s env vars: %w", filter.Scope, err)
@@ -2847,7 +2855,7 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 	delete(keySet, agentTZEnvKey)
 
 	// 1. Check env_vars table (all scopes, in precedence order so last-wins).
-	for _, filter := range d.envScopesInPrecedenceOrder(agent) {
+	for _, filter := range d.envScopesForDispatch(ctx, agent) {
 		vars, err := d.store.ListEnvVars(ctx, filter)
 		if err != nil {
 			if d.debug {
@@ -2936,6 +2944,9 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 
 		resolved, err := d.secretBackend.Resolve(
 			ctx, agent.OwnerID, agent.ProjectID, agent.RuntimeBrokerID, resolveOpts)
+		if err == nil {
+			resolved = d.restrictTestAdminRootedSecrets(ctx, agent, resolved)
+		}
 		if err != nil {
 			if d.debug {
 				d.log.Warn("resolveAsNeededForKeys: failed to resolve secrets", "error", err)
@@ -3005,7 +3016,7 @@ func (d *HTTPAgentDispatcher) buildEnvSources(ctx context.Context, agent *store.
 		return sources
 	}
 
-	for _, filter := range d.envScopesInPrecedenceOrder(agent) {
+	for _, filter := range d.envScopesForDispatch(ctx, agent) {
 		vars, err := d.store.ListEnvVars(ctx, filter)
 		if err != nil {
 			if d.debug {
@@ -3588,7 +3599,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 	// from the stored InlineConfig: an agent created by an older hub has a
 	// hub-default copy there, and resending it would keep that default at
 	// the top tier (ptone/scion#4222).
-	tel := d.dispatchTelemetry(ctx, agent, projectInfo.telemetryPolicy)
+	tel := d.dispatchTelemetry(agent, projectInfo.telemetryPolicy)
 	tel.injectRequesterEnabled(resolvedEnv, &envClassifications)
 
 	// Thread through updated InlineConfig so the broker can apply config
@@ -3625,7 +3636,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		Workspace:            startEnv.workspace,
 		HubAgentDefaults:     startHubAgentDefaults(d.hubAgentDefaults(), d.autoExposePortsDefault(), startEnv.experiments, tel.wireTelemetry()),
 		TelemetryPolicy:      tel.telemetryPolicy(),
-		Image:                d.dispatchImageForBroker(agent.AppliedConfig),
+		Image:                d.dispatchImageForBroker(agent),
 		TemplateName:         agent.Template,
 	}
 	extras.TemplateID, extras.TemplateHash = dispatchTemplateIdentity(agent)
@@ -3717,6 +3728,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentStop(ctx context.Context, agent *stor
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
 	}
+	// Flat placement backstop (requirePinnedPlacement): first after the
+	// assignment check, before any store write or broker call.
+	if err := d.placementBackstop(ctx, agent); err != nil {
+		return err
+	}
 	ctx = withRecordedRuntime(ctx, agent.Runtime)
 	ctx = withDispatchAgentID(ctx, agent.ID)
 
@@ -3805,10 +3821,9 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	// would. A resolution error is handled there as on start: it is logged
 	// and the restart proceeds without injected secrets.
 	projectInfo := startEnv.projectInfo
-	// Telemetry tiers for a templateTiers broker (see dispatch_telemetry.go).
-	// A restart sends no inline config, so a legacy broker keeps the
-	// telemetry its stored agent config already has.
-	tel := d.dispatchTelemetry(ctx, agent, projectInfo.telemetryPolicy)
+	// Telemetry tiers for this restart (see dispatch_telemetry.go). A restart
+	// sends no inline config, so it never carries inline telemetry.
+	tel := d.dispatchTelemetry(agent, projectInfo.telemetryPolicy)
 	tel.injectRequesterEnabled(resolvedEnv, &envClassifications)
 	extras := StartExtras{
 		HubEndpoint:          d.effectiveAgentHubEndpoint(),
@@ -3817,7 +3832,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		Workspace:            startEnv.workspace,
 		HubAgentDefaults:     startHubAgentDefaults(d.hubAgentDefaults(), d.autoExposePortsDefault(), startEnv.experiments, tel.wireTelemetry()),
 		TelemetryPolicy:      tel.telemetryPolicy(),
-		Image:                d.dispatchImageForBroker(agent.AppliedConfig),
+		Image:                d.dispatchImageForBroker(agent),
 		SharedWorkspace:      projectInfo.sharedWorkspace,
 		TemplateName:         agent.Template,
 		ProjectPath:          projectInfo.projectPath,
@@ -3867,6 +3882,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 // endpoint, which writes it into the container and signals the agent process.
 func (d *HTTPAgentDispatcher) DispatchAgentResetAuth(ctx context.Context, agent *store.Agent) error {
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
+		return err
+	}
+	// Flat placement backstop (requirePinnedPlacement): first after the
+	// assignment check, before any store write or broker call.
+	if err := d.placementBackstop(ctx, agent); err != nil {
 		return err
 	}
 	ctx = withRecordedRuntime(ctx, agent.Runtime)
@@ -3924,6 +3944,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentDelete(ctx context.Context, agent *st
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
 	}
+	// Flat placement backstop (requirePinnedPlacement): first after the
+	// assignment check, before any store write or broker call.
+	if err := d.placementBackstop(ctx, agent); err != nil {
+		return err
+	}
 	ctx = withRecordedRuntime(ctx, agent.Runtime)
 	ctx = withDispatchAgentID(ctx, agent.ID)
 
@@ -3962,6 +3987,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentDelete(ctx context.Context, agent *st
 		DeletedAt:    deletedAt,
 		RunID:        agent.RunID,
 		NotAfter:     notAfter,
+		// The purge job's removal of retained files (ptone/scion#4744).
+		PurgeRetained: purgeRetainedFrom(ctx),
 	}
 	err = d.client.DeleteAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, opts)
 	if errors.Is(err, ErrLifecycleDeferred) {
@@ -4053,6 +4080,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentMessage(ctx context.Context, agent *s
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
 	}
+	// Flat placement backstop (requirePinnedPlacement): first after the
+	// assignment check, before any store write or broker call.
+	if err := d.placementBackstop(ctx, agent); err != nil {
+		return err
+	}
 	ctx = withRecordedRuntime(ctx, agent.Runtime)
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
@@ -4079,6 +4111,13 @@ func (d *HTTPAgentDispatcher) DispatchAgentMessage(ctx context.Context, agent *s
 // as agentkeys.ErrNotDispatched: both failures are proven, Hub-side, before
 // any request could have reached a broker.
 func (d *HTTPAgentDispatcher) DispatchAgentKeys(ctx context.Context, target agentkeys.Target, operationID string, executeBefore time.Time, keys string) (agentkeys.BrokerResult, error) {
+	// Flat placement backstop, first: target is not an agent, so the row
+	// is loaded and checked, and target must name the agent's current
+	// Runtime Broker. Every failure is proven Hub-side, before anything is
+	// built or sent (agentkeys.ErrNotDispatched).
+	if err := d.keysPlacementBackstop(ctx, target); err != nil {
+		return agentkeys.BrokerResult{}, fmt.Errorf("%w: %w", agentkeys.ErrNotDispatched, err)
+	}
 	// Fail closed on a missing or already-past deadline before spending a
 	// network round trip on it: BrokerRequest.ExecuteBefore's doc requires a
 	// zero value to fail closed, and contract §4.3 lists "the Hub's own
@@ -4142,6 +4181,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentLogs(ctx context.Context, agent *stor
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return "", err
 	}
+	// Flat placement backstop (requirePinnedPlacement): first after the
+	// assignment check, before any store write or broker call.
+	if err := d.placementBackstop(ctx, agent); err != nil {
+		return "", err
+	}
 	ctx = withRecordedRuntime(ctx, agent.Runtime)
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
@@ -4157,6 +4201,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentExec(ctx context.Context, agent *stor
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return "", 0, err
 	}
+	// Flat placement backstop (requirePinnedPlacement): first after the
+	// assignment check, before any store write or broker call.
+	if err := d.placementBackstop(ctx, agent); err != nil {
+		return "", 0, err
+	}
 	ctx = withRecordedRuntime(ctx, agent.Runtime)
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
@@ -4170,6 +4219,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentExec(ctx context.Context, agent *stor
 // DispatchCheckAgentPrompt checks if an agent has a non-empty prompt.md file.
 func (d *HTTPAgentDispatcher) DispatchCheckAgentPrompt(ctx context.Context, agent *store.Agent) (bool, error) {
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
+		return false, err
+	}
+	// Flat placement backstop (requirePinnedPlacement): first after the
+	// assignment check, before any store write or broker call.
+	if err := d.placementBackstop(ctx, agent); err != nil {
 		return false, err
 	}
 	ctx = withRecordedRuntime(ctx, agent.Runtime)
@@ -4238,10 +4292,15 @@ func injectThinkingLevelEnv(env map[string]string, cfg *store.AgentAppliedConfig
 // =============================================================================
 
 // isStartTerminal returns true for terminal phases of a start/restart op.
-func isStartTerminal(phase string) bool { return phase == "running" || phase == "error" }
+// error and halted end it as a failure.
+func isStartTerminal(phase string) bool {
+	return phase == "running" || phase == "error" || phase == "halted"
+}
 
 // isStopTerminal returns true for terminal phases of a stop op.
-func isStopTerminal(phase string) bool { return phase == "stopped" || phase == "error" }
+func isStopTerminal(phase string) bool {
+	return phase == "stopped" || phase == "error" || phase == "halted"
+}
 
 // deferredStart handles a cross-node agent start: subscribe → write intent →
 // signal → wait for the terminal phase. Called when client.StartAgent returns
@@ -4283,6 +4342,7 @@ func (d *HTTPAgentDispatcher) deferredDelete(ctx context.Context, agent *store.A
 		DeletedAt:      deletedAt,
 		RunID:          agent.RunID,
 		PreviousRunIDs: agent.PreviousRunIDs,
+		PurgeRetained:  purgeRetainedFrom(ctx),
 		// The target lets the executing node send the delete even after
 		// the agent row is gone, as after a project delete
 		// (ptone/scion#3665).
@@ -4570,6 +4630,7 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 	if err != nil {
 		return nil, nil, err
 	}
+	resolved = d.restrictTestAdminRootedSecrets(ctx, agent, resolved)
 	result := make([]ResolvedSecret, 0, len(resolved))
 	var asNeededKeys []string
 	for _, sv := range resolved {

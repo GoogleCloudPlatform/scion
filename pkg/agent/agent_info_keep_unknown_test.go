@@ -97,9 +97,6 @@ func TestUpdateSavedAgentInfoKeepsUnknownFields(t *testing.T) {
 	if err := UpdateAgentConfig(agentName, projectDir, "stopped", "docker", "fast"); err != nil {
 		t.Fatalf("UpdateAgentConfig() error = %v", err)
 	}
-	if err := SetSavedRunID(agentName, projectDir, "run-1"); err != nil {
-		t.Fatalf("SetSavedRunID() error = %v", err)
-	}
 
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -110,7 +107,7 @@ func TestUpdateSavedAgentInfoKeepsUnknownFields(t *testing.T) {
 	if err := json.Unmarshal(data, &info); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-	if info.Phase != "stopped" || info.Runtime != "docker" || info.Profile != "fast" || info.RunID != "run-1" {
+	if info.Phase != "stopped" || info.Runtime != "docker" || info.Profile != "fast" {
 		t.Errorf("known fields not updated: %+v", info)
 	}
 	if info.Name != "keep-agent" || info.Activity != "waiting_for_input" {

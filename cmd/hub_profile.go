@@ -15,10 +15,8 @@
 package cmd
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"strings"
 	"text/tabwriter"
@@ -44,7 +42,11 @@ import (
 //     every other command is refused before it runs;
 //   - a profile whose endpoint names the agent's own hub (SCION_HUB_ENDPOINT,
 //     SCION_HUB_URL) is refused; the comparison is by parsed host name and
-//     port (hubprofile.CheckNotOwnHub) and does not resolve DNS aliases.
+//     port (hubprofile.CheckNotOwnHub). Before a profile bearer is minted
+//     or sent, the session also compares hub identities: a target that
+//     reports the agent's own hub id is refused under any name
+//     (Session.CheckNotOwnHubByID; the name check alone applies when an id
+//     is unavailable).
 
 var (
 	hubProfileFlag string // --hub-profile
@@ -57,35 +59,39 @@ var (
 // explicitly. Each one builds its client through openHubProfileClient (or
 // needs none) and reads no local project state under a profile.
 var hubProfileAllowed = map[string]bool{
-	"hub":                        true,
-	"hub.status":                 true,
-	"hub.profile":                true,
-	"hub.profile.add":            true,
-	"hub.profile.list":           true,
-	"hub.profile.show":           true,
-	"hub.profile.remove":         true,
-	"hub.test-identity":          true,
-	"hub.test-identity.issue":    true,
-	"hub.test-identity.token":    true,
-	"hub.test-identity.list":     true,
-	"hub.test-identity.delete":   true,
-	"hub.test-identity.teardown": true,
-	"hub.test-identity.web-code": true,
-	"hub.projects":               true,
-	"hub.projects.info":          true,
-	"hub.projects.create":        true,
-	"hub.projects.delete":        true,
-	"artifact":                   true,
-	"artifact.publish":           true,
-	"artifact.get":               true,
-	"artifact.versions":          true,
-	"artifact.delete":            true,
-	"help":                       true,
-	"global-flags":               true,
-	"version":                    true,
-	"completion":                 true,
-	"__complete":                 true,
-	"__completeNoDesc":           true,
+	"hub":                          true,
+	"hub.status":                   true,
+	"hub.profile":                  true,
+	"hub.profile.add":              true,
+	"hub.profile.list":             true,
+	"hub.profile.show":             true,
+	"hub.profile.remove":           true,
+	"hub.test-identity":            true,
+	"hub.test-identity.issue":      true,
+	"hub.test-identity.token":      true,
+	"hub.test-identity.list":       true,
+	"hub.test-identity.delete":     true,
+	"hub.test-identity.teardown":   true,
+	"hub.test-identity.web-code":   true,
+	"hub.test-identity.cleanup":    true,
+	"hub.test-identity.provenance": true,
+	"hub.projects":                 true,
+	"hub.projects.info":            true,
+	"hub.projects.create":          true,
+	"hub.projects.delete":          true,
+	"artifact":                     true,
+	"artifact.publish":             true,
+	"artifact.get":                 true,
+	"artifact.versions":            true,
+	"artifact.delete":              true,
+	"help":                         true,
+	"global-flags":                 true,
+	"version":                      true,
+	"completion":                   true,
+	"__complete":                   true,
+	"__completeNoDesc":             true,
+	// issue-admin (X4b) issues through the profile's admin delegation.
+	"hub.test-identity.issue-admin": true,
 	// hub.test-identity.delegate is deliberately absent: the delegation
 	// routes take a human session, which a profile never uses.
 
@@ -115,16 +121,22 @@ var hubProfileNoSession = map[string]bool{
 // own hub (ptone/scion#4240). hub.profile.list is not here: it reads only the local
 // profile directory and contacts no hub.
 var hubProfileAgentRuntime = map[string]bool{
-	"hub.status":                 true,
-	"hub.profile.add":            true,
-	"hub.profile.show":           true,
-	"hub.profile.remove":         true,
-	"hub.test-identity.issue":    true,
-	"hub.test-identity.token":    true,
-	"hub.test-identity.list":     true,
-	"hub.test-identity.delete":   true,
-	"hub.test-identity.teardown": true,
-	"hub.test-identity.web-code": true,
+	"hub.status":                   true,
+	"hub.profile.add":              true,
+	"hub.profile.show":             true,
+	"hub.profile.remove":           true,
+	"hub.test-identity.issue":      true,
+	"hub.test-identity.token":      true,
+	"hub.test-identity.list":       true,
+	"hub.test-identity.delete":     true,
+	"hub.test-identity.teardown":   true,
+	"hub.test-identity.web-code":   true,
+	"hub.test-identity.cleanup":    true,
+	"hub.test-identity.provenance": true,
+	// issue-admin (X4b) needs a profile in human mode too (it refuses
+	// without one); listing it here gives agent mode the same refusal
+	// before any work.
+	"hub.test-identity.issue-admin": true,
 }
 
 // commandPath returns cmd's dot-separated path below the root.
@@ -158,7 +170,8 @@ func hubProfileSelected() bool { return hubProfileName() != "" }
 
 // checkHubProfileGate runs from root's PersistentPreRunE. With a profile
 // selected it refuses every command outside hubProfileAllowed, and
-// --hub-profile together with --hub or --no-hub. Without one it refuses
+// --hub-profile together with --hub (root rejects the removed --no-hub
+// before this gate runs). Without one it refuses
 // --as and --run. In agent mode it applies the target-profile rule to the
 // commands in hubProfileAgentRuntime.
 func checkHubProfileGate(cmd *cobra.Command, mode CLIMode) error {
@@ -182,8 +195,8 @@ func checkHubProfileGate(cmd *cobra.Command, mode CLIMode) error {
 	if !hubProfileAllowed[path] {
 		return fmt.Errorf("'%s' is not available with a hub profile (%q): with a profile selected, only the target-hub commands run (hub status, hub profile, hub test-identity except delegate, hub projects, artifact publish/get/versions/delete, and create, start, list, stop, delete, look and logs with --project); unset %s or drop --hub-profile to use it", cmd.CommandPath(), hubProfileName(), hubprofile.EnvHubProfile)
 	}
-	if hubEndpoint != "" || noHub {
-		return errors.New("--hub and --no-hub cannot be used with a hub profile: the profile names the hub")
+	if hubEndpoint != "" {
+		return errors.New("--hub cannot be used with a hub profile: the profile names the hub")
 	}
 	if mode == ModeAgent && !hubProfileNoSession[path] {
 		// The session itself refuses the agent's own hub (hubprofile.Open);
@@ -305,8 +318,14 @@ no transport credential.
 --issuer-sa is the target's issuer service account; issuer ID tokens are
 minted as this account for the target's issuer audience (read from the
 target's GET /api/v1/test-infra/status). --issuer-delegation member=<id>
-names the delegation a human issuer created on the target. Only the member
-tier is supported.
+names the member delegation a human issuer created on the target.
+
+On a target running the test admin tier (a systemd test hub),
+--issuer-delegation hub-admin=<id> and super-admin=<id> name its admin
+delegations, and --admin-issuer-sa names the target's admin issuer service
+account (<T>-admin-issuer), which the admin delegations pin. It is required
+with an admin delegation and must differ from --issuer-sa; admin issuer ID
+tokens are minted as this account.
 
 Tokens are minted in-process from the agent's assigned service account (the
 metadata server in "assign" mode) through IAM Credentials generateIdToken,
@@ -353,6 +372,7 @@ var (
 	hubProfileAddTransport   string
 	hubProfileAddIAPAudience string
 	hubProfileAddIssuerSA    string
+	hubProfileAddAdminSA     string
 	hubProfileAddUATSA       string
 	hubProfileAddDelegations []string
 	hubProfileAddReplace     bool
@@ -378,8 +398,9 @@ func init() {
 	f.StringVar(&hubProfileAddTransport, "transport", hubprofile.TransportIAP, `Transport credential: "iap" or "none"`)
 	f.StringVar(&hubProfileAddIAPAudience, "iap-audience", "", "IAP OAuth client id (transport iap)")
 	f.StringVar(&hubProfileAddIssuerSA, "issuer-sa", "", "The target's issuer service account email")
+	f.StringVar(&hubProfileAddAdminSA, "admin-issuer-sa", "", "The target's admin issuer service account email (with an admin delegation)")
 	f.StringVar(&hubProfileAddUATSA, "uat-sa", "", "The target's IAP service account email (transport iap)")
-	f.StringSliceVar(&hubProfileAddDelegations, "issuer-delegation", nil, "Issuer delegation on the target, tier=id (only member=<id>)")
+	f.StringSliceVar(&hubProfileAddDelegations, "issuer-delegation", nil, "Issuer delegation on the target, tier=id (member=<id>, hub-admin=<id>, super-admin=<id>)")
 	f.BoolVar(&hubProfileAddReplace, "replace", false, "Replace an existing profile of the same name")
 	_ = hubProfileAddCmd.MarkFlagRequired("endpoint")
 
@@ -406,7 +427,8 @@ func runHubProfileAdd(cmd *cobra.Command, args []string) error {
 	p := &hubprofile.Profile{
 		Name: args[0], Endpoint: hubProfileAddEndpoint, Transport: hubProfileAddTransport,
 		IAPAudience: hubProfileAddIAPAudience, IssuerServiceAccount: hubProfileAddIssuerSA,
-		UATServiceAccount: hubProfileAddUATSA, IssuerDelegations: delegations,
+		AdminIssuerServiceAccount: hubProfileAddAdminSA,
+		UATServiceAccount:         hubProfileAddUATSA, IssuerDelegations: delegations,
 	}
 	if err := p.Validate(); err != nil {
 		return asUsageError(err)
@@ -450,7 +472,7 @@ func runHubProfileList(cmd *cobra.Command, _ []string) error {
 		if profiles == nil {
 			profiles = []*hubprofile.Profile{}
 		}
-		return writeIndentedJSON(out, map[string]any{"profiles": profiles})
+		return writeJSONTo(out, map[string]any{"profiles": profiles})
 	}
 	if len(profiles) == 0 {
 		_, _ = fmt.Fprintln(out, "No hub profiles.")
@@ -485,7 +507,7 @@ func runHubProfileShow(cmd *cobra.Command, args []string) error {
 	}
 	out := cmd.OutOrStdout()
 	if hubProfileJSON {
-		return writeIndentedJSON(out, map[string]any{"profile": p, "runs": runs})
+		return writeJSONTo(out, map[string]any{"profile": p, "runs": runs})
 	}
 	_, _ = fmt.Fprintf(out, "Profile:            %s\n", p.Name)
 	_, _ = fmt.Fprintf(out, "Endpoint:           %s\n", p.Endpoint)
@@ -496,6 +518,11 @@ func runHubProfileShow(cmd *cobra.Command, args []string) error {
 	}
 	_, _ = fmt.Fprintf(out, "Issuer account:     %s\n", valueOrNone(p.IssuerServiceAccount))
 	_, _ = fmt.Fprintf(out, "Member delegation:  %s\n", valueOrNone(p.MemberDelegation()))
+	if p.AdminIssuerServiceAccount != "" || p.Delegation(hubprofile.TierHubAdmin) != "" || p.Delegation(hubprofile.TierSuperAdmin) != "" {
+		_, _ = fmt.Fprintf(out, "Admin issuer:       %s\n", valueOrNone(p.AdminIssuerServiceAccount))
+		_, _ = fmt.Fprintf(out, "Hub-admin deleg.:   %s\n", valueOrNone(p.Delegation(hubprofile.TierHubAdmin)))
+		_, _ = fmt.Fprintf(out, "Super-admin deleg.: %s\n", valueOrNone(p.Delegation(hubprofile.TierSuperAdmin)))
+	}
 	_, _ = fmt.Fprintf(out, "Cached runs:        %s\n", valueOrNone(strings.Join(runs, ", ")))
 	return nil
 }
@@ -517,12 +544,6 @@ func runHubProfileRemove(cmd *cobra.Command, args []string) error {
 	}
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Removed hub profile %q.\n", args[0])
 	return nil
-}
-
-func writeIndentedJSON(out io.Writer, v any) error {
-	enc := json.NewEncoder(out)
-	enc.SetIndent("", "  ")
-	return enc.Encode(v)
 }
 
 // hubProfileRequested reports whether a profile is selected, before or

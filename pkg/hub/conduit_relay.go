@@ -20,8 +20,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"os"
-	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
@@ -36,7 +34,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
-	"github.com/google/uuid"
 )
 
 // The hub's in-process conduit relay (design v2.4 §3.9: every hub process
@@ -72,6 +69,12 @@ type ConduitRelayOptions struct {
 	// testHookAdmission, when set, runs during admission (before the
 	// session is registered). Tests only.
 	testHookAdmission func()
+	// sessionWriteWait, when positive, is the per-write deadline of every
+	// relay session (conduit.Config.WriteWait; 0 = conduit.DefaultWriteWait).
+	// It runs on Clock, so tests that advance a fake Clock set it above
+	// their largest advance. It also stretches the backstop a session arms
+	// when the peer sends GoAway (drain deadline + WriteWait). Tests only.
+	sessionWriteWait time.Duration
 	// InternalEndpoint is the advertised base URL of this process's
 	// internal listener ("" = unaddressable).
 	InternalEndpoint string
@@ -99,6 +102,10 @@ type ConduitRelayOptions struct {
 	Store       registry.Store
 	Clock       clock.Clock
 	RegistryNow func() time.Time
+	// AuthzClock, when set, drives the user-stream re-check and its renewal
+	// driver instead of Clock, so a test can move stream deadlines without
+	// moving the relay's session timers.
+	AuthzClock clock.Clock
 }
 
 // conduitRuntime is the running relay and what it was built from.
@@ -136,6 +143,30 @@ func (s *Server) ConduitGrantRingShared() bool {
 	return len(s.encryptionKey) > 0
 }
 
+// SetConduitRelayStartFailure records that the in-process relay failed to
+// start. setting is the key of the setting that caused it, or "" when the
+// cause was not one setting; it is shown in the relay-not-running response
+// (writeConduitRelayNotRunning), so it must be a key, never a value.
+func (s *Server) SetConduitRelayStartFailure(setting string) {
+	s.conduitStartFailure.Store(&setting)
+}
+
+// writeConduitRelayNotRunning answers a conduit handshake on a node with no
+// relay running (503). It names the failing setting when startup recorded
+// one, and otherwise the only other cause: hub.conduit was turned on after
+// startup.
+func (s *Server) writeConduitRelayNotRunning(w http.ResponseWriter) {
+	msg := "Conduit relay is not running on this hub node (hub.conduit was enabled after startup; restart required)"
+	if p := s.conduitStartFailure.Load(); p != nil {
+		if *p != "" {
+			msg = "Conduit relay is not running on this hub node: startup failed on " + *p + "; see the startup log"
+		} else {
+			msg = "Conduit relay is not running on this hub node: startup failed; see the startup log"
+		}
+	}
+	writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, msg, nil)
+}
+
 // StartConduitRelay builds and starts the in-process relay when hub.conduit
 // is on (a no-op otherwise). It must be called at most once, before the
 // background services start (they register the registry singleton only
@@ -145,7 +176,7 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 		slog.Info("Conduit relay not started: hub.conduit is off (turning it on takes effect after a restart)")
 		return nil
 	}
-	if s.conduit.Load() != nil {
+	if s.conduit.Load() != nil || s.conduitExternal.Load() != nil {
 		return errors.New("conduit relay already started")
 	}
 	if opts.RequireHA && !s.ConduitGrantRingShared() {
@@ -199,9 +230,14 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 		PeerAuth:         opts.PeerAuth,
 		HTTPClient:       opts.HTTPClient,
 		Clock:            opts.Clock,
+		Session:          conduit.Config{WriteWait: opts.sessionWriteWait},
 		ReconnectWindow:  opts.ReconnectWindow,
 		LifetimeCap:      lifetimeCap,
-		Logger:           slog.Default().With("subsystem", "hub.conduit"),
+		OnBrokerSessionsSuperseded: func(brokerID string, closed int) {
+			s.recordBrokerSessionsSuperseded(brokerID, brokerSupersededAtAdmission, closed)
+		},
+		OnBrokerIncarnationFlap: s.recordBrokerIncarnationFlap,
+		Logger:                  slog.Default().With("subsystem", "hub.conduit"),
 	})
 	if err != nil {
 		return fmt.Errorf("conduit relay: %w", err)
@@ -224,7 +260,11 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 	if interval == 0 {
 		interval = s.config.ConduitAuthzRecheckInterval
 	}
-	_, stopAuthz, err := s.startConduitStreamAuthz(ctx, opts.Clock, interval)
+	authzClock := opts.Clock
+	if opts.AuthzClock != nil {
+		authzClock = opts.AuthzClock
+	}
+	_, stopAuthz, err := s.startConduitStreamAuthz(ctx, authzClock, interval)
 	if err != nil {
 		return err
 	}
@@ -252,17 +292,7 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 // processes must never share an id: a relay start supersedes any relay
 // registered under the same id.
 func ConduitInstanceID(configured string) string {
-	if configured != "" {
-		return configured
-	}
-	if pod := os.Getenv("POD_NAME"); pod != "" {
-		return pod
-	}
-	suffix := strings.ReplaceAll(uuid.NewString(), "-", "")[:12]
-	if h, err := os.Hostname(); err == nil && h != "" {
-		return h + "-" + suffix
-	}
-	return uuid.NewString()
+	return relay.InstanceID(configured)
 }
 
 // ConduitRelayFatal is closed or receives when the relay stops serving on
@@ -275,11 +305,17 @@ func (s *Server) ConduitRelayFatal() <-chan error {
 	return nil
 }
 
-// ConduitInternalHandler serves the internal relay API. It is mounted only
-// on the internal listener, never on the public mux, and answers 503 while
-// no relay is published (not yet started, or its start failed).
+// ConduitInternalHandler serves the internal relay API, or in external
+// relay mode the hub internal API. It is mounted only on the internal
+// listener, never on the public mux, and answers 503 while no runtime is
+// published (not yet started, or its start failed).
 func (s *Server) ConduitInternalHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if ext := s.conduitExternal.Load(); ext != nil {
+			// External relay mode: the hub internal API relays call.
+			s.serveHubInternal(w, r, ext)
+			return
+		}
 		rt := s.conduit.Load()
 		if rt == nil {
 			http.Error(w, "conduit relay not running", http.StatusServiceUnavailable)
@@ -302,7 +338,7 @@ func (s *Server) conduitWelcomeGrantKeys(ctx context.Context) ([]*conduitv1.Gran
 // token-refresh response, or nil when the experiment is off or the keys are
 // unavailable (the refresh itself must not fail over them).
 func (s *Server) conduitRefreshGrantKeys(ctx context.Context) []grant.WireKey {
-	keys, err := s.ConduitGrantPublicKeys(ctx)
+	keys, err := s.conduitHubDirectGrantKeys(ctx)
 	if err != nil {
 		if !errors.Is(err, errConduitDisabled) {
 			slog.Warn("Conduit grant keys unavailable for the token-refresh response", "error", err)
@@ -369,22 +405,22 @@ func (s *Server) DrainConduitForShutdown(grace time.Duration, capDrain bool) {
 // default horizons.
 func (s *Server) conduitRegistryReapHandler() func(ctx context.Context) {
 	return func(ctx context.Context) {
-		rt := s.conduit.Load()
-		if rt == nil {
+		reg, _, clk := s.conduitRegistry()
+		if reg == nil {
 			return
 		}
-		now := rt.now()
-		if n, err := rt.registry.ReapStaleRelays(ctx, 0, now); err != nil {
+		now := clk()
+		if n, err := reg.ReapStaleRelays(ctx, 0, now); err != nil {
 			slog.Warn("Conduit registry: reaping sessions of stale relays failed", "error", err)
 		} else if n > 0 {
 			slog.Info("Conduit registry: reaped sessions of stale relays", "count", n)
 		}
-		if n, err := rt.registry.ReapStaleSessions(ctx, 0, now); err != nil {
+		if n, err := reg.ReapStaleSessions(ctx, 0, now); err != nil {
 			slog.Warn("Conduit registry: reaping stale sessions failed", "error", err)
 		} else if n > 0 {
 			slog.Info("Conduit registry: reaped stale sessions", "count", n)
 		}
-		if n, err := rt.registry.PruneRelayInstances(ctx, 0, now); err != nil {
+		if n, err := reg.PruneRelayInstances(ctx, 0, now); err != nil {
 			slog.Warn("Conduit registry: pruning idle relay rows failed", "error", err)
 		} else if n > 0 {
 			slog.Info("Conduit registry: pruned idle relay rows", "count", n)
@@ -398,22 +434,27 @@ func (s *Server) conduitRegistryReapHandler() func(ctx context.Context) {
 // session) and deletes the agent's epoch counter. Errors are logged; rows
 // left behind are reaped and are already unroutable (no agent row).
 func (s *Server) conduitForgetAgent(ctx context.Context, agentID string) {
-	rt := s.conduit.Load()
-	if rt == nil || agentID == "" {
+	reg, st, _ := s.conduitRegistry()
+	if reg == nil || agentID == "" {
 		return
 	}
-	rt.relay.CloseSessionsOf(registry.PrincipalAgent, agentID, conduit.CloseUnauthenticated, relay.ReasonUnauthenticated+": agent deleted")
-	ps, err := rt.store.ListPrincipalSessions(ctx, registry.PrincipalAgent, agentID)
+	// The local close needs a local relay. In external relay mode the
+	// owner relay closes the sessions when its session re-check sees the
+	// agent gone (the agent deletion event, or its next sweep).
+	if rt := s.conduit.Load(); rt != nil {
+		rt.relay.CloseSessionsOf(registry.PrincipalAgent, agentID, conduit.CloseUnauthenticated, relay.ReasonUnauthenticated+": agent deleted")
+	}
+	ps, err := st.ListPrincipalSessions(ctx, registry.PrincipalAgent, agentID)
 	if err != nil {
 		slog.Warn("Conduit: listing sessions of a deleted agent failed", "agent_id", agentID, "error", err)
 	} else {
 		for _, v := range ps.Sessions {
-			if _, err := rt.registry.DeleteSessionCAS(ctx, v.Session.SessionID, v.Session.RelayInstanceID, v.Session.RelayGeneration); err != nil {
+			if _, err := reg.DeleteSessionCAS(ctx, v.Session.SessionID, v.Session.RelayInstanceID, v.Session.RelayGeneration); err != nil {
 				slog.Warn("Conduit: deleting a session of a deleted agent failed", "agent_id", agentID, "session_id", v.Session.SessionID, "error", err)
 			}
 		}
 	}
-	if err := rt.registry.ForgetPrincipalEpoch(ctx, registry.PrincipalAgent, agentID); err != nil {
+	if err := reg.ForgetPrincipalEpoch(ctx, registry.PrincipalAgent, agentID); err != nil {
 		slog.Warn("Conduit: deleting the epoch row of a deleted agent failed", "agent_id", agentID, "error", err)
 	}
 }
@@ -451,22 +492,69 @@ func (s *Server) conduitRevalidatePrincipal(ctx context.Context, p relay.Princip
 	return nil
 }
 
+// conduitAdmission is the pre-upgrade admission decision of a conduit
+// handshake (decideConduit): the principal the session is admitted as and
+// what serving it needs. The decision only reads; the session is created
+// by serveConduitAdmitted.
+type conduitAdmission struct {
+	rt        *conduitRuntime
+	principal relay.Principal
+	// brokerSecret is the fingerprint of the broker secret the upgrade
+	// was signed with (brokers only).
+	brokerSecret conduitBrokerSecretFingerprint
+	// user and credentialExpiry are the user principal and its
+	// credential's expiry (users only).
+	user             UserIdentity
+	credentialExpiry time.Time
+}
+
 // handleConduit serves GET /api/v1/conduit: a conduit session for an
-// agent, a Runtime Broker (HMAC headers, handleConduitBroker) or a user
-// (serveConduitUser, which asks for tunnels by RPC). Agent principals need
-// an agent token with agent:port:forward; anonymous callers and other
-// principals are refused at the HTTP layer before any upgrade. An agent's
-// project, launch id and generation come from the agent row read here,
-// never from the Hello; admission then applies the 1d-i incarnation policy
-// (launch-id match, the legacy-fallback fence, gen-N fallback).
+// agent, a Runtime Broker (HMAC headers, decideConduitBroker) or a user
+// (decideConduitUser; the session asks for tunnels by RPC). Agent
+// principals need an agent token with agent:port:forward; anonymous
+// callers and other principals are refused at the HTTP layer before any
+// upgrade. An agent's project, launch id and generation come from the
+// agent row read here, never from the Hello; admission then applies the
+// 1d-i incarnation policy (launch-id match, the legacy-fallback fence,
+// gen-N fallback).
 func (s *Server) handleConduit(w http.ResponseWriter, r *http.Request) {
+	if rt := s.conduitExternal.Load(); rt != nil {
+		// External relay mode: this hub holds no conduit sessions.
+		switch {
+		case !s.experimentEnabled(conduitExperiment):
+			NotFound(w, "route")
+		case r.Method != http.MethodGet:
+			MethodNotAllowed(w, http.MethodGet)
+		default:
+			s.refuseConduitExternal(w, r, rt)
+		}
+		return
+	}
+	a, ok := s.decideConduit(w, r)
+	if !ok {
+		return
+	}
+	s.serveConduitAdmitted(w, r, a)
+}
+
+// decideConduit runs every pre-upgrade check of a conduit handshake and
+// returns the admission. On a refusal it writes the response and returns
+// false.
+func (s *Server) decideConduit(w http.ResponseWriter, r *http.Request) (conduitAdmission, bool) {
+	return s.decideConduitFor(w, r, false)
+}
+
+// decideConduitFor is decideConduit; forRelay decides for a separate relay
+// (Admit), which holds the session itself, so no in-process relay is
+// required and the admission carries no runtime.
+func (s *Server) decideConduitFor(w http.ResponseWriter, r *http.Request, forRelay bool) (conduitAdmission, bool) {
 	if !s.experimentEnabled(conduitExperiment) {
 		NotFound(w, "route")
-		return
+		return conduitAdmission{}, false
 	}
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w, http.MethodGet)
-		return
+		return conduitAdmission{}, false
 	}
 	// One arm per principal kind; anything else is refused before any
 	// upgrade. A broker authenticates with HMAC headers in its own handler,
@@ -475,48 +563,45 @@ func (s *Server) handleConduit(w http.ResponseWriter, r *http.Request) {
 	identity := GetIdentityFromContext(r.Context())
 	agentIdent, isAgent := identity.(AgentIdentity)
 	userIdent, isUser := identity.(UserIdentity)
-	var ident AgentIdentity
 	switch {
 	case r.Header.Get(HeaderBrokerID) != "":
-		s.handleConduitBroker(w, r)
-		return
+		return s.decideConduitBroker(w, r, forRelay)
 	case isAgent:
-		ident = agentIdent
+		return s.decideConduitAgent(w, r, agentIdent, forRelay)
 	case isUser:
-		s.serveConduitUser(w, r, userIdent)
-		return
+		return s.decideConduitUser(w, r, userIdent, forRelay)
 	default:
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Conduit sessions are open to agent, broker and user principals only", nil)
-		return
+		return conduitAdmission{}, false
 	}
+}
+
+// decideConduitAgent is decideConduit for an agent principal.
+func (s *Server) decideConduitAgent(w http.ResponseWriter, r *http.Request, ident AgentIdentity, forRelay bool) (conduitAdmission, bool) {
 	if err := conduitAgentScopeCheck(ident); err != nil {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Missing required scope: agent:port:forward", nil)
-		return
+		return conduitAdmission{}, false
 	}
 	rt := s.conduit.Load()
-	if rt == nil {
-		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "Conduit relay is not running on this hub node (hub.conduit was enabled after startup; restart required)", nil)
-		return
+	if rt == nil && !forRelay {
+		s.writeConduitRelayNotRunning(w)
+		return conduitAdmission{}, false
 	}
 	agent, err := s.conduitAgentRowCheck(r.Context(), ident)
 	switch {
 	case errors.Is(err, errConduitAgentGone):
 		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "Agent no longer exists", nil)
-		return
+		return conduitAdmission{}, false
 	case errors.Is(err, errConduitAgentMismatch):
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agent token does not match the agent", nil)
-		return
+		return conduitAdmission{}, false
 	case err != nil:
 		writeErrorFromErr(w, errors.Unwrap(err), "") // the store error, as read
-		return
+		return conduitAdmission{}, false
 	}
 	if !isWebSocketUpgrade(r) {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "WebSocket upgrade required", nil)
-		return
-	}
-	conn, err := ws.Upgrade(w, r, nil, ws.Options{})
-	if err != nil {
-		return
+		return conduitAdmission{}, false
 	}
 	p := relay.Principal{
 		Kind:      registry.PrincipalAgent,
@@ -529,17 +614,43 @@ func (s *Server) handleConduit(w http.ResponseWriter, r *http.Request) {
 			p.TokenRun = rs.conduitBinding(context.WithoutCancel(r.Context()), claims, runScopeRequestFrom(r))
 		}
 	}
+	return conduitAdmission{rt: rt, principal: p}, true
+}
+
+// serveConduitAdmitted upgrades the connection and serves the admitted
+// session until it ends. An admission of any other principal kind is
+// refused before any upgrade.
+func (s *Server) serveConduitAdmitted(w http.ResponseWriter, r *http.Request, a conduitAdmission) {
+	switch a.principal.Kind {
+	case registry.PrincipalAgent:
+		s.serveConduitAgent(w, r, a)
+	case registry.PrincipalBroker:
+		s.serveConduitBroker(w, r, a)
+	case registry.PrincipalUser:
+		s.serveConduitUser(w, r, a)
+	default:
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Conduit sessions are open to agent, broker and user principals only", nil)
+	}
+}
+
+// serveConduitAgent serves an admitted agent session.
+func (s *Server) serveConduitAgent(w http.ResponseWriter, r *http.Request, a conduitAdmission) {
+	conn, err := ws.Upgrade(w, r, nil, ws.Options{})
+	if err != nil {
+		return
+	}
+	rt, p := a.rt, a.principal
 	// The session outlives no request deadline: it ends when the
 	// connection closes or the relay drains.
 	ctx := context.WithoutCancel(r.Context())
 	if err := rt.relay.Serve(ctx, conn, p); err != nil && !errors.Is(err, relay.ErrNotServing) {
-		slog.Debug("Conduit session ended", "agent_id", agent.ID, "error", err)
+		slog.Debug("Conduit session ended", "agent_id", p.ID, "error", err)
 	}
 	// An agent deleted during the handshake: the session row is gone
 	// (Serve deleted it); drop the epoch row its admission recreated.
 	if errors.Is(s.conduitRevalidatePrincipal(ctx, p), errConduitAgentGone) {
-		if err := rt.registry.ForgetPrincipalEpoch(ctx, registry.PrincipalAgent, agent.ID); err != nil {
-			slog.Warn("Conduit: deleting the epoch row of a deleted agent failed", "agent_id", agent.ID, "error", err)
+		if err := rt.registry.ForgetPrincipalEpoch(ctx, registry.PrincipalAgent, p.ID); err != nil {
+			slog.Warn("Conduit: deleting the epoch row of a deleted agent failed", "agent_id", p.ID, "error", err)
 		}
 	}
 }

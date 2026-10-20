@@ -48,7 +48,7 @@ func runHubProfileStatus(cmd *cobra.Command) error {
 	r := s.Status(ctx)
 	out := cmd.OutOrStdout()
 	if isJSONOutput() {
-		if err := writeIndentedJSON(out, r); err != nil {
+		if err := writeJSONTo(out, r); err != nil {
 			return err
 		}
 		if !r.OK {

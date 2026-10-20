@@ -876,6 +876,62 @@ func (_c *AgentCreate) SetNillableLaunchError(v *string) *AgentCreate {
 	return _c
 }
 
+// SetLaunchCause sets the "launch_cause" field.
+func (_c *AgentCreate) SetLaunchCause(v string) *AgentCreate {
+	_c.mutation.SetLaunchCause(v)
+	return _c
+}
+
+// SetNillableLaunchCause sets the "launch_cause" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableLaunchCause(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetLaunchCause(*v)
+	}
+	return _c
+}
+
+// SetLaunchPriorPhase sets the "launch_prior_phase" field.
+func (_c *AgentCreate) SetLaunchPriorPhase(v string) *AgentCreate {
+	_c.mutation.SetLaunchPriorPhase(v)
+	return _c
+}
+
+// SetNillableLaunchPriorPhase sets the "launch_prior_phase" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableLaunchPriorPhase(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetLaunchPriorPhase(*v)
+	}
+	return _c
+}
+
+// SetLaunchRevokeOnFail sets the "launch_revoke_on_fail" field.
+func (_c *AgentCreate) SetLaunchRevokeOnFail(v bool) *AgentCreate {
+	_c.mutation.SetLaunchRevokeOnFail(v)
+	return _c
+}
+
+// SetNillableLaunchRevokeOnFail sets the "launch_revoke_on_fail" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableLaunchRevokeOnFail(v *bool) *AgentCreate {
+	if v != nil {
+		_c.SetLaunchRevokeOnFail(*v)
+	}
+	return _c
+}
+
+// SetLaunchResumePhase sets the "launch_resume_phase" field.
+func (_c *AgentCreate) SetLaunchResumePhase(v string) *AgentCreate {
+	_c.mutation.SetLaunchResumePhase(v)
+	return _c
+}
+
+// SetNillableLaunchResumePhase sets the "launch_resume_phase" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableLaunchResumePhase(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetLaunchResumePhase(*v)
+	}
+	return _c
+}
+
 // SetDeletionState sets the "deletion_state" field.
 func (_c *AgentCreate) SetDeletionState(v string) *AgentCreate {
 	_c.mutation.SetDeletionState(v)
@@ -1408,6 +1464,22 @@ func (_c *AgentCreate) defaults() {
 		v := agent.DefaultLaunchError
 		_c.mutation.SetLaunchError(v)
 	}
+	if _, ok := _c.mutation.LaunchCause(); !ok {
+		v := agent.DefaultLaunchCause
+		_c.mutation.SetLaunchCause(v)
+	}
+	if _, ok := _c.mutation.LaunchPriorPhase(); !ok {
+		v := agent.DefaultLaunchPriorPhase
+		_c.mutation.SetLaunchPriorPhase(v)
+	}
+	if _, ok := _c.mutation.LaunchRevokeOnFail(); !ok {
+		v := agent.DefaultLaunchRevokeOnFail
+		_c.mutation.SetLaunchRevokeOnFail(v)
+	}
+	if _, ok := _c.mutation.LaunchResumePhase(); !ok {
+		v := agent.DefaultLaunchResumePhase
+		_c.mutation.SetLaunchResumePhase(v)
+	}
 	if _, ok := _c.mutation.DeletionState(); !ok {
 		v := agent.DefaultDeletionState
 		_c.mutation.SetDeletionState(v)
@@ -1527,6 +1599,9 @@ func (_c *AgentCreate) check() error {
 	}
 	if _, ok := _c.mutation.LaunchSeq(); !ok {
 		return &ValidationError{Name: "launch_seq", err: errors.New(`ent: missing required field "Agent.launch_seq"`)}
+	}
+	if _, ok := _c.mutation.LaunchRevokeOnFail(); !ok {
+		return &ValidationError{Name: "launch_revoke_on_fail", err: errors.New(`ent: missing required field "Agent.launch_revoke_on_fail"`)}
 	}
 	if _, ok := _c.mutation.DeletionClaim(); !ok {
 		return &ValidationError{Name: "deletion_claim", err: errors.New(`ent: missing required field "Agent.deletion_claim"`)}
@@ -1825,6 +1900,22 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.LaunchError(); ok {
 		_spec.SetField(agent.FieldLaunchError, field.TypeString, value)
 		_node.LaunchError = value
+	}
+	if value, ok := _c.mutation.LaunchCause(); ok {
+		_spec.SetField(agent.FieldLaunchCause, field.TypeString, value)
+		_node.LaunchCause = value
+	}
+	if value, ok := _c.mutation.LaunchPriorPhase(); ok {
+		_spec.SetField(agent.FieldLaunchPriorPhase, field.TypeString, value)
+		_node.LaunchPriorPhase = value
+	}
+	if value, ok := _c.mutation.LaunchRevokeOnFail(); ok {
+		_spec.SetField(agent.FieldLaunchRevokeOnFail, field.TypeBool, value)
+		_node.LaunchRevokeOnFail = value
+	}
+	if value, ok := _c.mutation.LaunchResumePhase(); ok {
+		_spec.SetField(agent.FieldLaunchResumePhase, field.TypeString, value)
+		_node.LaunchResumePhase = value
 	}
 	if value, ok := _c.mutation.DeletionState(); ok {
 		_spec.SetField(agent.FieldDeletionState, field.TypeString, value)
@@ -3074,6 +3165,72 @@ func (u *AgentUpsert) UpdateLaunchError() *AgentUpsert {
 // ClearLaunchError clears the value of the "launch_error" field.
 func (u *AgentUpsert) ClearLaunchError() *AgentUpsert {
 	u.SetNull(agent.FieldLaunchError)
+	return u
+}
+
+// SetLaunchCause sets the "launch_cause" field.
+func (u *AgentUpsert) SetLaunchCause(v string) *AgentUpsert {
+	u.Set(agent.FieldLaunchCause, v)
+	return u
+}
+
+// UpdateLaunchCause sets the "launch_cause" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateLaunchCause() *AgentUpsert {
+	u.SetExcluded(agent.FieldLaunchCause)
+	return u
+}
+
+// ClearLaunchCause clears the value of the "launch_cause" field.
+func (u *AgentUpsert) ClearLaunchCause() *AgentUpsert {
+	u.SetNull(agent.FieldLaunchCause)
+	return u
+}
+
+// SetLaunchPriorPhase sets the "launch_prior_phase" field.
+func (u *AgentUpsert) SetLaunchPriorPhase(v string) *AgentUpsert {
+	u.Set(agent.FieldLaunchPriorPhase, v)
+	return u
+}
+
+// UpdateLaunchPriorPhase sets the "launch_prior_phase" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateLaunchPriorPhase() *AgentUpsert {
+	u.SetExcluded(agent.FieldLaunchPriorPhase)
+	return u
+}
+
+// ClearLaunchPriorPhase clears the value of the "launch_prior_phase" field.
+func (u *AgentUpsert) ClearLaunchPriorPhase() *AgentUpsert {
+	u.SetNull(agent.FieldLaunchPriorPhase)
+	return u
+}
+
+// SetLaunchRevokeOnFail sets the "launch_revoke_on_fail" field.
+func (u *AgentUpsert) SetLaunchRevokeOnFail(v bool) *AgentUpsert {
+	u.Set(agent.FieldLaunchRevokeOnFail, v)
+	return u
+}
+
+// UpdateLaunchRevokeOnFail sets the "launch_revoke_on_fail" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateLaunchRevokeOnFail() *AgentUpsert {
+	u.SetExcluded(agent.FieldLaunchRevokeOnFail)
+	return u
+}
+
+// SetLaunchResumePhase sets the "launch_resume_phase" field.
+func (u *AgentUpsert) SetLaunchResumePhase(v string) *AgentUpsert {
+	u.Set(agent.FieldLaunchResumePhase, v)
+	return u
+}
+
+// UpdateLaunchResumePhase sets the "launch_resume_phase" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateLaunchResumePhase() *AgentUpsert {
+	u.SetExcluded(agent.FieldLaunchResumePhase)
+	return u
+}
+
+// ClearLaunchResumePhase clears the value of the "launch_resume_phase" field.
+func (u *AgentUpsert) ClearLaunchResumePhase() *AgentUpsert {
+	u.SetNull(agent.FieldLaunchResumePhase)
 	return u
 }
 
@@ -4748,6 +4905,83 @@ func (u *AgentUpsertOne) UpdateLaunchError() *AgentUpsertOne {
 func (u *AgentUpsertOne) ClearLaunchError() *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearLaunchError()
+	})
+}
+
+// SetLaunchCause sets the "launch_cause" field.
+func (u *AgentUpsertOne) SetLaunchCause(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLaunchCause(v)
+	})
+}
+
+// UpdateLaunchCause sets the "launch_cause" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateLaunchCause() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLaunchCause()
+	})
+}
+
+// ClearLaunchCause clears the value of the "launch_cause" field.
+func (u *AgentUpsertOne) ClearLaunchCause() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearLaunchCause()
+	})
+}
+
+// SetLaunchPriorPhase sets the "launch_prior_phase" field.
+func (u *AgentUpsertOne) SetLaunchPriorPhase(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLaunchPriorPhase(v)
+	})
+}
+
+// UpdateLaunchPriorPhase sets the "launch_prior_phase" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateLaunchPriorPhase() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLaunchPriorPhase()
+	})
+}
+
+// ClearLaunchPriorPhase clears the value of the "launch_prior_phase" field.
+func (u *AgentUpsertOne) ClearLaunchPriorPhase() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearLaunchPriorPhase()
+	})
+}
+
+// SetLaunchRevokeOnFail sets the "launch_revoke_on_fail" field.
+func (u *AgentUpsertOne) SetLaunchRevokeOnFail(v bool) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLaunchRevokeOnFail(v)
+	})
+}
+
+// UpdateLaunchRevokeOnFail sets the "launch_revoke_on_fail" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateLaunchRevokeOnFail() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLaunchRevokeOnFail()
+	})
+}
+
+// SetLaunchResumePhase sets the "launch_resume_phase" field.
+func (u *AgentUpsertOne) SetLaunchResumePhase(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLaunchResumePhase(v)
+	})
+}
+
+// UpdateLaunchResumePhase sets the "launch_resume_phase" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateLaunchResumePhase() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLaunchResumePhase()
+	})
+}
+
+// ClearLaunchResumePhase clears the value of the "launch_resume_phase" field.
+func (u *AgentUpsertOne) ClearLaunchResumePhase() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearLaunchResumePhase()
 	})
 }
 
@@ -6658,6 +6892,83 @@ func (u *AgentUpsertBulk) UpdateLaunchError() *AgentUpsertBulk {
 func (u *AgentUpsertBulk) ClearLaunchError() *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearLaunchError()
+	})
+}
+
+// SetLaunchCause sets the "launch_cause" field.
+func (u *AgentUpsertBulk) SetLaunchCause(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLaunchCause(v)
+	})
+}
+
+// UpdateLaunchCause sets the "launch_cause" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateLaunchCause() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLaunchCause()
+	})
+}
+
+// ClearLaunchCause clears the value of the "launch_cause" field.
+func (u *AgentUpsertBulk) ClearLaunchCause() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearLaunchCause()
+	})
+}
+
+// SetLaunchPriorPhase sets the "launch_prior_phase" field.
+func (u *AgentUpsertBulk) SetLaunchPriorPhase(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLaunchPriorPhase(v)
+	})
+}
+
+// UpdateLaunchPriorPhase sets the "launch_prior_phase" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateLaunchPriorPhase() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLaunchPriorPhase()
+	})
+}
+
+// ClearLaunchPriorPhase clears the value of the "launch_prior_phase" field.
+func (u *AgentUpsertBulk) ClearLaunchPriorPhase() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearLaunchPriorPhase()
+	})
+}
+
+// SetLaunchRevokeOnFail sets the "launch_revoke_on_fail" field.
+func (u *AgentUpsertBulk) SetLaunchRevokeOnFail(v bool) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLaunchRevokeOnFail(v)
+	})
+}
+
+// UpdateLaunchRevokeOnFail sets the "launch_revoke_on_fail" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateLaunchRevokeOnFail() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLaunchRevokeOnFail()
+	})
+}
+
+// SetLaunchResumePhase sets the "launch_resume_phase" field.
+func (u *AgentUpsertBulk) SetLaunchResumePhase(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLaunchResumePhase(v)
+	})
+}
+
+// UpdateLaunchResumePhase sets the "launch_resume_phase" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateLaunchResumePhase() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLaunchResumePhase()
+	})
+}
+
+// ClearLaunchResumePhase clears the value of the "launch_resume_phase" field.
+func (u *AgentUpsertBulk) ClearLaunchResumePhase() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearLaunchResumePhase()
 	})
 }
 

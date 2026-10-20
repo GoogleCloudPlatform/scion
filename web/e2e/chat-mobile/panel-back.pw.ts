@@ -113,6 +113,16 @@ async function toNewPage(page: Page, navigate: () => Promise<unknown>): Promise<
   });
 }
 
+/**
+ * Wait for the chat page to have opened the conversation its URL names. The
+ * header renders only for an open conversation, and the page sets the panel
+ * in the same step that opens it.
+ */
+async function expectConversationOpen(page: Page): Promise<void> {
+  const header = page.locator('scion-page-chat:not([data-old-page]) .v2-thread-header');
+  await expect(header).toBeVisible({ timeout: 15_000 });
+}
+
 /** The panel the current history entry records. */
 const entryPanel = (page: Page): Promise<string | undefined> =>
   page.evaluate(
@@ -392,6 +402,10 @@ test.describe('Back and Forward step through the mobile chat panels', () => {
     expect(new URL(page.url()).pathname).toBe(THREAD_URL);
     await expect.poll(() => entryPanel(page)).toBe('left');
     expect(await historyLength(page)).toBe(length);
+    // The new page opens the URL's conversation after an API lookup, and,
+    // created wide, puts it on the conversation panel. Let that land before
+    // narrowing, or it overwrites the panel the narrowing restored.
+    await expectConversationOpen(page);
 
     // Narrow again: the page shows the panel the entry records, and the
     // entries after it still lead to the conversation and the members.

@@ -142,8 +142,11 @@ var agentAllowed = map[string]bool{
 	"artifact.publish":              true,
 	"artifact.get":                  true,
 	"artifact.versions":             true,
-	// artifact share and artifact delete are human-only and deliberately
-	// absent (ptone/scion#4529): agents may not share or delete artifacts.
+	"artifact.list":                 true,
+	"artifact.view":                 true,
+	// artifact share, artifact grants and artifact delete are human-only
+	// and deliberately absent (ptone/scion#4529, ptone/scion#4579): agents
+	// may not share or delete artifacts, or manage their grants.
 	// Target-hub profiles and test identities (ptone/scion#4240).
 	// These run in agent mode only against a target-hub profile whose
 	// endpoint is not the agent's own hub; the run-time refusal is in
@@ -164,6 +167,25 @@ var agentAllowed = map[string]bool{
 	"hub.test-identity.delete":   true,
 	"hub.test-identity.teardown": true,
 	"hub.test-identity.web-code": true,
+	// Issuer cleanup and provenance (Phase 3c, DEC-7): the same gate, so
+	// an agent runner can verify a run by absence on a target hub.
+	"hub.test-identity.cleanup":    true,
+	"hub.test-identity.provenance": true,
+	// issue-admin (X4b, DEC-7) issues through the profile's admin
+	// delegation; it needs a profile in every mode.
+	"hub.test-identity.issue-admin": true,
+
+	// Project thread groups (ptone/scion#4424, design section 4 and
+	// decision Q3): agents may list, read, create, rename and re-file
+	// threads. conversation.group.delete is deliberately absent: only
+	// users may delete a thread group, and the hub refuses an agent.
+	"conversation.group":        true,
+	"conversation.group.list":   true,
+	"conversation.group.get":    true,
+	"conversation.group.create": true,
+	"conversation.group.rename": true,
+	"conversation.group.add":    true,
+	"conversation.group.remove": true,
 }
 
 // resolveMode determines the active CLI mode from environment and settings.

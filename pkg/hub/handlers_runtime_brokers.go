@@ -28,6 +28,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -110,12 +111,6 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 			resources[i] = brokerResource(&result.Items[i])
 		}
 		caps = s.authzService.ComputeCapabilitiesBatch(ctx, ident, resources, "broker")
-		// Auto-provide brokers grant dispatch to all authenticated users.
-		for i, broker := range result.Items {
-			if broker.AutoProvide && i < len(caps) && !capabilityAllows(caps[i], ActionDispatch) {
-				caps[i].Actions = append(caps[i].Actions, string(ActionDispatch))
-			}
-		}
 	}
 
 	// If filtering by projectId, include project-specific provider data (like localPath)
@@ -133,6 +128,13 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 			brokerLocalPaths[p.BrokerID] = p.LocalPath
 		}
 
+		// The dispatch capability of a project-filtered listing follows the
+		// project-aware rule agent creation uses.
+		var project *store.Project
+		if p, err := s.store.GetProject(ctx, projectID); err == nil {
+			project = p
+		}
+
 		// Build extended broker list with provider data
 		extendedBrokers := make([]RuntimeBrokerWithProvider, 0, len(result.Items))
 		for i, broker := range result.Items {
@@ -140,11 +142,14 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			eb := RuntimeBrokerWithProvider{
-				RuntimeBroker: broker,
+				RuntimeBroker: brokerForDisplay(broker),
 				LocalPath:     brokerLocalPaths[broker.ID],
 			}
+			eb.RuntimeBroker = withHostIdentity(eb.RuntimeBroker, false)
 			if caps != nil && i < len(caps) {
+				eb.RuntimeBroker = brokerForDisplayWithCap(broker, caps[i])
 				eb.Cap = caps[i]
+				s.reportBrokerDispatchCapability(ctx, eb.Cap, &result.Items[i], project)
 			}
 			extendedBrokers = append(extendedBrokers, eb)
 		}
@@ -167,15 +172,22 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 	// lookupAgentLimitDefinition, so a per-broker cap never costs more than
 	// one extra limit-definition lookup for the whole page.
 	limitDef := s.lookupAgentLimitDefinition(ctx)
+	// One non-blocking snapshot of this process's embedded brokers for the
+	// whole page (hostedByThisServer).
+	embedded := s.embeddedBrokerSnapshot()
 
 	brokersWithCaps := make([]RuntimeBrokerWithCapabilities, 0, len(result.Items))
 	for i, broker := range result.Items {
 		if caps != nil && !capabilityAllows(caps[i], ActionRead) {
 			continue
 		}
-		resp := RuntimeBrokerWithCapabilities{RuntimeBroker: broker}
+		resp := RuntimeBrokerWithCapabilities{RuntimeBroker: withHostIdentity(brokerForDisplay(broker), false)}
+		resp.HostedByThisServer = embedded.has(broker.ID)
 		if caps != nil && i < len(caps) {
+			resp.RuntimeBroker = brokerForDisplayWithCap(broker, caps[i])
 			resp.Cap = caps[i]
+			// Without a project, the project-independent dispatch rule.
+			s.reportBrokerDispatchCapability(ctx, resp.Cap, &result.Items[i], nil)
 		}
 		// Capacity fields carry no visibility check beyond the ActionRead
 		// filter above: whoever can already see this broker row sees its
@@ -388,13 +400,12 @@ func (s *Server) getRuntimeBroker(w http.ResponseWriter, r *http.Request, id str
 	}
 
 	// Compute capabilities for the requesting user
-	resp := RuntimeBrokerWithCapabilities{RuntimeBroker: *broker}
+	resp := RuntimeBrokerWithCapabilities{RuntimeBroker: withHostIdentity(brokerForDisplay(*broker), false)}
+	resp.HostedByThisServer = s.embeddedBrokerSnapshot().has(broker.ID)
 	if ident := GetIdentityFromContext(ctx); ident != nil {
 		resp.Cap = s.authzService.ComputeCapabilities(ctx, ident, brokerResource(broker))
-		// Auto-provide brokers grant dispatch to all authenticated users.
-		if broker.AutoProvide && !capabilityAllows(resp.Cap, ActionDispatch) {
-			resp.Cap.Actions = append(resp.Cap.Actions, string(ActionDispatch))
-		}
+		resp.RuntimeBroker = brokerForDisplayWithCap(*broker, resp.Cap)
+		s.reportBrokerDispatchCapability(ctx, resp.Cap, broker, nil)
 	}
 
 	writeJSON(w, http.StatusOK, resp)
@@ -403,9 +414,24 @@ func (s *Server) getRuntimeBroker(w http.ResponseWriter, r *http.Request, id str
 func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 
+	// Updating a broker is a governance action on a hub-level record that
+	// user access tokens cannot take (GOV_PENDING); broker.update is then
+	// checked on the record.
+	actor, ok := s.requireSessionCredentialFor(w, ctx, authzop.ReasonGovernancePending)
+	if !ok {
+		return
+	}
+
 	broker, err := s.store.GetRuntimeBroker(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// A test identity with an admin role updates only a broker it
+	// registered (test-admin policy).
+	if broker.CreatedBy != actor.ID() && s.testAdminPolicyRefuses(ctx, "handlers_runtime_brokers.go:updateRuntimeBroker") {
+		Forbidden(w)
 		return
 	}
 
@@ -419,6 +445,11 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 		Labels                     map[string]string `json:"labels,omitempty"`
 		GCPHostServiceAccountEmail *string           `json:"gcpHostServiceAccountEmail,omitempty"`
 		GCPHostProjectID           *string           `json:"gcpHostProjectId,omitempty"`
+		// GCPHostPinned false hands the GCP host pair back to registration
+		// and detection (the values are unchanged); true keeps the current
+		// values until the next update. Setting either GCP host field
+		// implies true unless false is sent with it.
+		GCPHostPinned *bool `json:"gcpHostPinned,omitempty"`
 	}
 
 	if err := readJSON(r, &updates); err != nil {
@@ -430,6 +461,13 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 
+	before := *broker
+	before.Labels = make(map[string]string, len(broker.Labels))
+	for k, v := range broker.Labels {
+		before.Labels[k] = v
+	}
+
+	recordChanged := false
 	if updates.Name != "" {
 		// A rename may not make a flat row's name or slug collide with
 		// another row, or another row's with a flat row (flat contract
@@ -447,18 +485,25 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 			}
 		}
 		broker.Name = updates.Name
+		recordChanged = true
 	}
 	if updates.Labels != nil {
-		// The hub-reserved plugin label is never taken from the client: it
-		// is dropped from the request and the stored value, if any, kept.
+		// Hub-managed labels are never taken from the client: they are
+		// dropped from the request and the stored values, if any, kept.
 		labels := stripReservedBrokerLabels(updates.Labels)
-		if v, ok := broker.Labels[pluginBrokerLabel]; ok {
-			labels[pluginBrokerLabel] = v
+		for _, k := range reservedBrokerLabels {
+			if v, ok := broker.Labels[k]; ok {
+				labels[k] = v
+			}
 		}
 		broker.Labels = labels
+		recordChanged = true
 	}
+
+	setGCPHost := updates.GCPHostServiceAccountEmail != nil || updates.GCPHostProjectID != nil
+	email, project := broker.GCPHostServiceAccountEmail, broker.GCPHostProjectID
 	if updates.GCPHostServiceAccountEmail != nil {
-		email := strings.ToLower(*updates.GCPHostServiceAccountEmail)
+		email = strings.ToLower(*updates.GCPHostServiceAccountEmail)
 		if email != "" && !isValidServiceAccountEmail(email) {
 			ValidationError(w, "gcpHostServiceAccountEmail must be a valid GCP service account email "+
 				"(name@project.iam.gserviceaccount.com)", map[string]interface{}{
@@ -466,22 +511,83 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 			})
 			return
 		}
-		broker.GCPHostServiceAccountEmail = email
 	}
 	if updates.GCPHostProjectID != nil {
-		broker.GCPHostProjectID = *updates.GCPHostProjectID
+		project = *updates.GCPHostProjectID
 	}
 
-	if err := s.store.UpdateRuntimeBroker(ctx, broker); err != nil {
+	// The GCP host pair is written only through the dedicated store
+	// writers: a value set or cleared here is kept by registration and
+	// detection until the next update. The writers return the values they
+	// replaced, which the audit event records as the old values.
+	var gcpPrev *store.GCPHostSetting
+	writeErr := func() error {
+		if recordChanged {
+			if err := s.store.UpdateRuntimeBroker(ctx, broker); err != nil {
+				return err
+			}
+		}
+		if setGCPHost {
+			prev, err := s.store.SetRuntimeBrokerGCPHost(ctx, broker.ID, email, project)
+			if err != nil {
+				return err
+			}
+			gcpPrev = &prev
+		}
+		if updates.GCPHostPinned != nil {
+			source := store.GCPHostSourceAdmin
+			if !*updates.GCPHostPinned {
+				source = ""
+			}
+			prev, err := s.store.SetRuntimeBrokerGCPHostSource(ctx, broker.ID, source)
+			if err != nil {
+				return err
+			}
+			if gcpPrev == nil {
+				gcpPrev = &prev
+			}
+		}
+		return nil
+	}()
+
+	// The update audit event covers what was applied, also when a later
+	// write failed.
+	after, err := s.store.GetRuntimeBroker(ctx, broker.ID)
+	if err == nil {
+		old := before
+		if gcpPrev != nil {
+			old.GCPHostServiceAccountEmail, old.GCPHostProjectID, old.GCPHostSource = gcpPrev.Email, gcpPrev.Project, gcpPrev.Source
+		} else {
+			// No GCP host writer ran: any difference is not this update's.
+			old.GCPHostServiceAccountEmail, old.GCPHostProjectID, old.GCPHostSource = after.GCPHostServiceAccountEmail, after.GCPHostProjectID, after.GCPHostSource
+		}
+		if details := brokerSettingsChangeDetails(&old, after); details != nil {
+			LogBrokerSettingsEvent(ctx, s.auditLogger, after.ID, after.Name, actor.ID(), getClientIP(r),
+				mergeBrokerAuditDetails(brokerAuditCredentialDetails(ctx), details...))
+		}
+	}
+	if writeErr != nil {
+		writeErrorFromErr(w, writeErr, "")
+		return
+	}
+	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, broker)
+	// The caller holds broker.update (checked above).
+	writeJSON(w, http.StatusOK, withHostIdentity(brokerForDisplay(*after), true))
 }
 
 func (s *Server) deleteRuntimeBroker(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
+
+	// Deregistering a broker is a governance action that user access tokens
+	// cannot take (GOV_PENDING); broker.delete is then checked on the record.
+	actor, ok := s.requireSessionCredentialFor(w, ctx, authzop.ReasonGovernancePending)
+	if !ok {
+		return
+	}
 
 	// Get broker info before deletion for authz and audit logging
 	broker, err := s.store.GetRuntimeBroker(ctx, id)
@@ -490,14 +596,20 @@ func (s *Server) deleteRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 
+	// A test identity with an admin role deregisters only a broker it
+	// registered (test-admin policy).
+	if broker.CreatedBy != actor.ID() && s.testAdminPolicyRefuses(ctx, "handlers_runtime_brokers.go:deleteRuntimeBroker") {
+		Forbidden(w)
+		return
+	}
+
 	// Enforce authorization: only the broker owner or admins can delete
 	if !s.authorize(w, r, brokerResource(broker), ActionDelete) {
 		return
 	}
 
-	// Attribution for the audit events below. Read from the full identity rather
-	// than the user identity: a caller that is not a user now has to pass the
-	// check above rather than skip it, so the event should name whoever it was.
+	// Attribution for the audit events below, read from the identity that
+	// passed the checks above.
 	var actorID string
 	if ident := GetIdentityFromContext(ctx); ident != nil {
 		actorID = ident.ID()
@@ -545,6 +657,26 @@ func (s *Server) deleteRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 	LogDeregisterEvent(ctx, s.auditLogger, id, brokerName, actorID, clientIP)
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// reportBrokerDispatchCapability adds the dispatch action to caps when the
+// caller may have an agent dispatched to broker: canUseBrokerForProject when
+// a project is given, canDispatchToBroker otherwise. The capability then
+// matches the decision agent creation makes, including auto-provide brokers
+// and providers shared with the owner's consent.
+func (s *Server) reportBrokerDispatchCapability(ctx context.Context, caps *Capabilities, broker *store.RuntimeBroker, project *store.Project) {
+	if caps == nil || broker == nil || capabilityAllows(caps, ActionDispatch) {
+		return
+	}
+	var allowed bool
+	if project != nil {
+		allowed = s.canUseBrokerForProject(ctx, broker, project)
+	} else {
+		allowed = s.canDispatchToBroker(ctx, broker)
+	}
+	if allowed {
+		caps.Actions = append(caps.Actions, string(ActionDispatch))
+	}
 }
 
 // checkBrokerDispatchAccess verifies that the caller may have an agent in
@@ -934,7 +1066,8 @@ type brokerAgentHeartbeat struct {
 	// empty for an unlabelled entry or an older broker. OtherEntries are
 	// the agent's entries on the broker's other targets
 	// (hubclient.AgentHeartbeat.OtherEntries). Read only by the
-	// stranded-run adoption (broker_heartbeat_run_adoption.go).
+	// stranded-run adoption (broker_heartbeat_run_adoption.go) and the
+	// store's run check (AgentStatusUpdate.ReportRunID).
 	RunID        string                    `json:"runId,omitempty"`
 	OtherEntries []brokerAgentRuntimeEntry `json:"otherEntries,omitempty"`
 }
@@ -953,33 +1086,42 @@ func heartbeatBrokerIsFlat(load func() (*store.RuntimeBroker, error)) bool {
 	return err == nil && b.IsFlat()
 }
 
+// authorizeBrokerHeartbeatUser decides the user path of the broker
+// heartbeat. Only the broker itself heartbeats as a matter of course; a user
+// may do so only on an interactive session or dev credential
+// (HOST_OPERATIONS) and only with broker.update granted on the broker by a
+// role binding. The check names the broker by ID without reading its row,
+// so the owner relationship does not apply here and a heartbeat reads the
+// broker row only when its own processing needs it. It writes the response
+// and returns false when the caller is refused.
+func (s *Server) authorizeBrokerHeartbeatUser(w http.ResponseWriter, r *http.Request, id string) bool {
+	ctx := r.Context()
+	resource := Resource{Type: permissions.ResourceBroker, ID: id}
+	user, ok := s.requireSessionCredentialFor(w, ctx, authzop.ReasonHostOperations)
+	if !ok {
+		logAuthzDenial(r, GetIdentityFromContext(ctx), resource, ActionUpdate, "heartbeat user path refused")
+		return false
+	}
+	decision := s.authzService.CheckAccess(ctx, user, resource, ActionUpdate)
+	if !decision.Allowed {
+		logAuthzDenial(r, user, resource, ActionUpdate, decision.Reason)
+		Forbidden(w)
+		return false
+	}
+	return true
+}
+
 func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 
-	// Authorize: broker self-access or user with CheckAccess (ActionUpdate —
-	// heartbeats modify agent state and broker liveness).
+	// Authorize: the broker itself, or a user on an interactive session or
+	// dev credential holding broker.update on the broker (heartbeats modify
+	// agent state and broker liveness). A user access token is refused with
+	// the HOST_OPERATIONS session-only reason.
 	if brokerIdent := GetBrokerIdentityFromContext(ctx); brokerIdent != nil && brokerIdent.BrokerID() == id {
 		// Broker sending its own heartbeat — allowed
-	} else {
-		identity := GetIdentityFromContext(ctx)
-		if identity == nil {
-			logAuthzDenial(r, nil, Resource{Type: "runtime_broker", ID: id}, ActionUpdate, "no identity")
-			Unauthorized(w)
-			return
-		}
-		if userIdent, ok := identity.(UserIdentity); ok {
-			decision := s.authzService.CheckAccess(ctx, userIdent,
-				Resource{Type: "runtime_broker", ID: id}, ActionUpdate)
-			if !decision.Allowed {
-				logAuthzDenial(r, userIdent, Resource{Type: "runtime_broker", ID: id}, ActionUpdate, decision.Reason)
-				Forbidden(w)
-				return
-			}
-		} else {
-			logAuthzDenial(r, identity, Resource{Type: "runtime_broker", ID: id}, ActionUpdate, "non-user non-broker identity")
-			Forbidden(w)
-			return
-		}
+	} else if !s.authorizeBrokerHeartbeatUser(w, r, id) {
+		return
 	}
 
 	var heartbeat brokerHeartbeatRequest
@@ -1010,12 +1152,12 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 
 	// heartbeatBroker is loaded at most once per heartbeat, on first use: either
 	// eagerly right below when Capabilities need refreshing, or lazily by
-	// loadHeartbeatBroker the first time an agent's Runtime backfill actually
-	// needs it (ptone/scion#2262). Current brokers report Capabilities on
-	// every heartbeat, so this is normally the one read the Capabilities
-	// refresh already makes, and the Runtime backfill reuses it rather than
-	// adding another. A heartbeat without Capabilities reads the broker only
-	// if some agent needs a Runtime backfill. The error (if any) is cached
+	// loadHeartbeatBroker the first time an agent's Profile backfill needs its
+	// flat-broker check (ptone/scion#2262). Current brokers report
+	// Capabilities on every heartbeat, so this is normally the one read the
+	// Capabilities refresh already makes, and the Profile backfill reuses it
+	// rather than adding another. A heartbeat without Capabilities reads the
+	// broker only if some agent needs a Profile backfill. The error (if any) is cached
 	// alongside the broker so each caller can log it with its own message
 	// and level.
 	var heartbeatBroker *store.RuntimeBroker
@@ -1069,6 +1211,9 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				heartbeat.ProfileSAMappings = nil
 				heartbeat.ProfileSAMappingsHashes = nil
 			}
+			// A broker older than templateTiers ignores the telemetry tiers
+			// dispatch sends; warn once (ptone/scion#4224).
+			s.warnBrokerWithoutTemplateTiers(id, broker.Name, heartbeat.Capabilities)
 			changed := false
 			if heartbeat.Capabilities != nil && !reflect.DeepEqual(broker.Capabilities, heartbeat.Capabilities) {
 				broker.Capabilities = heartbeat.Capabilities
@@ -1149,10 +1294,17 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			// When the broker sends structured Phase/Activity fields, use
 			// them directly. Fall back to container-status derivation for
 			// backward compatibility with older brokers.
+			// ReportRunID lets the store drop a report of an older run
+			// (ptone/scion#4853); Result tells this handler whether the
+			// write halted the agent.
+			var statusResult store.AgentStatusResult
 			statusUpdate := store.AgentStatusUpdate{
 				ContainerStatus: agentHB.ContainerStatus,
 				Heartbeat:       true, // Ensures LastSeen is updated
 				Message:         agentHB.Message,
+				ReportSource:    store.StatusReportSourceRuntime,
+				ReportRunID:     agentHB.RunID,
+				Result:          &statusResult,
 			}
 			// A stop queued while the broker was offline keeps its
 			// stop_queued status and notice while it is still the agent's
@@ -1173,7 +1325,8 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			// can race and overwrite the stopped state with stale
 			// container data.
 			agentInTerminalPhase := agent.Phase == string(state.PhaseStopped) ||
-				agent.Phase == string(state.PhaseError)
+				agent.Phase == string(state.PhaseError) ||
+				agent.Phase == string(state.PhaseHalted)
 
 			// Suspended is sticky: a suspended agent's container is being torn
 			// down, so a racing heartbeat reporting stopped/crashed must not
@@ -1240,11 +1393,12 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 					// phase, so without this the more specific reason is
 					// silently dropped and the agent is stuck reading as a
 					// plain stop — the exact symptom in #2528. Back it in
-					// only when nothing more specific is stored yet, and
-					// leave the phase itself untouched.
+					// only when no platform-observed reason is stored yet
+					// (a reason the agent reported itself does not block
+					// it), and leave the phase itself untouched.
 					hbExitReason := state.ExitReason(agentHB.ExitReason)
 					isDisruption := hbExitReason == state.ExitReasonPreempted || hbExitReason == state.ExitReasonEvicted
-					if isDisruption && agent.ExitReason == "" {
+					if isDisruption && !store.IsHaltEvidence(agent.ExitReason) {
 						statusUpdate.ExitReason = agentHB.ExitReason
 						statusUpdate.ExitCode = agentHB.ExitCode
 						if isGenericStopMessage(agent.Message) {
@@ -1268,10 +1422,11 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 					// its own crash report (for example when only the
 					// harness process was killed) or an earlier heartbeat
 					// recorded a plain crash. Record the more specific
-					// reason over an empty or crashed one, keep the phase,
-					// and replace only a message that says nothing more.
+					// reason over any reason that is not platform-observed
+					// (store.IsHaltEvidence), keep the phase, and replace
+					// only a message that says nothing more.
 					if hbExitReason == state.ExitReasonOOMKilled &&
-						(agent.ExitReason == "" || agent.ExitReason == string(state.ExitReasonCrashed)) {
+						!store.IsHaltEvidence(agent.ExitReason) {
 						statusUpdate.ExitReason = agentHB.ExitReason
 						if agentHB.ExitCode != nil {
 							statusUpdate.ExitCode = agentHB.ExitCode
@@ -1296,7 +1451,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 					if isDisruption && agentHB.Phase == string(state.PhaseError) &&
 						agent.Phase == string(state.PhaseStopped) &&
 						agent.RunIntent != store.RunIntentStopped &&
-						(agent.ExitReason == "" || agent.ExitReason == agentHB.ExitReason) {
+						(!store.IsHaltEvidence(agent.ExitReason) || agent.ExitReason == agentHB.ExitReason) {
 						statusUpdate.Phase = string(state.PhaseError)
 						statusUpdate.ExitReason = agentHB.ExitReason
 						if agentHB.ExitCode != nil {
@@ -1413,7 +1568,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 						// replacement.
 						hbExitReason := state.ExitReason(agentHB.ExitReason)
 						isDisruption := hbExitReason == state.ExitReasonPreempted || hbExitReason == state.ExitReasonEvicted
-						if isDisruption && agent.ExitReason == "" {
+						if isDisruption && !store.IsHaltEvidence(agent.ExitReason) {
 							statusUpdate.ExitReason = agentHB.ExitReason
 						}
 					}
@@ -1490,7 +1645,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				// touching the phase or message derived from ContainerStatus.
 				hbExitReason := state.ExitReason(agentHB.ExitReason)
 				isDisruption := hbExitReason == state.ExitReasonPreempted || hbExitReason == state.ExitReasonEvicted
-				if isDisruption && agent.ExitReason == "" {
+				if isDisruption && !store.IsHaltEvidence(agent.ExitReason) {
 					statusUpdate.ExitReason = agentHB.ExitReason
 				}
 			}
@@ -1538,40 +1693,11 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				agent.AppliedConfig.Profile = agentHB.Profile
 				needsUpdate = true
 			}
-			// Companion to the Profile backfill above: when Runtime is
-			// still empty, resolve it from the applied profile (or from the
-			// broker's single shared profile type when the profile is
-			// unknown or unmatched) (ptone/scion#2262). This only fires for
-			// the broker sending this heartbeat, which is the broker the
-			// agent is actually running on.
-			//
-			// Runtime is persisted here (not left purely derived, the way
-			// display-time enrichment computes it on every read) because a
-			// couple of raw, unenriched reads of store.Agent surface it
-			// directly: restoreAgent publishes AgentCreatedEvent and returns
-			// agent.ToAPI() without enrichment (handlers_agent_messaging.go),
-			// and the agent-create path re-reads the row before publishing
-			// its own AgentCreatedEvent (handlers_agents_core.go) — so a
-			// heartbeat that backfills Runtime before either of those runs
-			// is reflected there.
-			//
-			// Only fires when Runtime is empty. The only other writer of a
-			// non-empty Runtime for a broker-hosted agent is the dispatch
-			// response path (httpdispatcher.go's applyBrokerResponse), which
-			// sets Runtime from the broker's own AgentInfo for the agent it
-			// actually started (recording Profile too when AppliedConfig
-			// exists), so it is authoritative and must never be overwritten
-			// by a resolveAgentRuntime guess here, even when a
-			// newly-backfilled Profile would resolve to a different value.
-			if agent.Runtime == "" {
-				broker, err := loadHeartbeatBroker()
-				if err != nil {
-					s.agentLifecycleLog.Debug("heartbeat: failed to load broker for runtime backfill", "broker_id", id, "error", err)
-				} else if rt := resolveAgentRuntime(agent, broker); rt != "" {
-					agent.Runtime = rt
-					needsUpdate = true
-				}
-			}
+			// Runtime is not backfilled here. The halt rule trusts the
+			// runtime recorded on the agent, so only the broker's own
+			// reports write it (the dispatch response, the launch report,
+			// a reincarnation move); a guess resolved from the profile is
+			// display-only (enrichAgentRuntime) (ptone/scion#4853).
 			if needsUpdate {
 				if err := s.store.UpdateAgent(ctx, agent); err != nil {
 					slog.Warn("Failed to backfill agent config from heartbeat",
@@ -1591,8 +1717,12 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			// Reconcile the max_agents_per_broker reservation against the
 			// phase this heartbeat will actually persist — e.g. release on an
 			// observed crash/exit, or best-effort re-reserve on an observed
-			// out-of-band restart (ptone/scion#1963).
-			s.reconcileBrokerQuotaOnPhaseChange(ctx, agent, agent.Phase, statusUpdate.Phase)
+			// out-of-band restart (ptone/scion#1963). A report of another
+			// run changes nothing (the store's run check), so it leaves the
+			// reservation alone too.
+			if !reportOfOtherRun(agentHB.RunID, agent.RunID) {
+				s.reconcileBrokerQuotaOnPhaseChange(ctx, agent, agent.Phase, statusUpdate.Phase)
+			}
 
 			// Update the agent's status
 			if err := s.store.UpdateAgentStatus(ctx, agent.ID, statusUpdate); err != nil {
@@ -1608,6 +1738,9 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				// (a delete finishing concurrently) publishes nothing.
 				if updated, err := s.store.GetAgent(ctx, agent.ID); err == nil && updated.DeletedAt.IsZero() {
 					s.events.PublishAgentStatus(ctx, updated)
+					if statusResult.Halted {
+						s.onAgentHalted(ctx, updated, statusResult.HaltedFrom)
+					}
 				}
 			}
 		}

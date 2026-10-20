@@ -1245,7 +1245,7 @@ func TestCreateRoleBinding_BuiltInMembership_IdempotentRetry(t *testing.T) {
 
 	// Idempotent retry with the SAME role returns ErrAlreadyExists
 	// (not ErrBuiltInMembershipConflict), preserving the contract
-	// that callers like createProjectOwnerRoleBinding rely on.
+	// that callers like createProjectOwnerRoleBindingTx rely on.
 	_, err = env.roleStore.CreateRoleBinding(ctx, binding)
 	require.Error(t, err, "duplicate binding should be rejected")
 	assert.True(t, errors.Is(err, store.ErrAlreadyExists),
@@ -1259,7 +1259,7 @@ func TestCreateRoleBinding_BuiltInMembership_OwnerIdempotent(t *testing.T) {
 	ctx := context.Background()
 
 	// Regression test for production idempotent paths:
-	// createProjectOwnerRoleBinding and seed backfill catch ErrAlreadyExists
+	// createProjectOwnerRoleBindingTx and seed backfill catch ErrAlreadyExists
 	// and return nil. This verifies the owner role specifically.
 	binding := &store.RoleBinding{
 		RoleDefinitionID: env.projectOwnerDef.ID, // project-owner

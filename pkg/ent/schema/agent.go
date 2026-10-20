@@ -265,9 +265,9 @@ func (Agent) Fields() []ent.Field {
 
 		// --- T1 async agent create (design t1-async-create-v11.md §3.3) ---
 		// launch_async_opt_in records whether the client that created (or is
-		// finalizing) this agent opted into non-blocking launch. The Hub flag
-		// hub.asyncAgentLaunch is the kill switch; this is the per-request
-		// half of the gate.
+		// finalizing) this agent opted into non-blocking launch. The Hub
+		// experiment hub.async_agent_launch is the switch; this is the
+		// per-request half of the gate.
 		field.Bool("launch_async_opt_in").
 			Default(false),
 		// launch_id is the current or most recent launch's identity. It is
@@ -369,6 +369,36 @@ func (Agent) Fields() []ent.Field {
 		// agent that has ever run is never treated as an incomplete create
 		// again, whatever happens to it later.
 		field.String("launch_error").
+			Optional().
+			Default(""),
+		// launch_cause is the fixed runtime cause code
+		// (api.BrokerRuntimeCause*, e.g. runtime_forbidden) a broker's
+		// failed launch report gave for the runtime_error in launch_error
+		// (ptone/scion#4666), or "". It is written with launch_error by a
+		// failed report and cleared wherever launch_error is cleared.
+		field.String("launch_cause").
+			Optional().
+			Default(""),
+		// launch_prior_phase is the effective resting phase a start or
+		// restart launch began from (ptone/scion#4669): written by
+		// BeginStartLaunch, reset to "" by a create BeginLaunch. A failed
+		// start-kind launch reads it to choose the phase it ends in.
+		field.String("launch_prior_phase").
+			Optional().
+			Default(""),
+		// launch_revoke_on_fail records the Hub's decision, taken when a
+		// start launch began, whether a failed end revokes the start's
+		// credential (ptone/scion#4669). Written with launch_prior_phase.
+		field.Bool("launch_revoke_on_fail").
+			Default(false),
+		// launch_resume_phase is the resume memory of a failed start
+		// (ptone/scion#4669): the resting phase (suspended, created,
+		// provisioning or halted) a start-kind launch began from when its
+		// failure left the row in phase error, or "". Every launch-ending
+		// write of a start-kind launch writes it, and the
+		// ClearLaunchResumePhaseHook clears it on any write of a phase other
+		// than starting or error. UpdateAgent never writes it.
+		field.String("launch_resume_phase").
 			Optional().
 			Default(""),
 

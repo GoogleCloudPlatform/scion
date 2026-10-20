@@ -335,6 +335,17 @@ func (s *Server) handleAuthzExplain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Only the credentials the user.self.explain catalog operation
+	// declares are admitted here; an explain for another principal, or a
+	// comparison with another principal (comparePrincipalId), is checked
+	// again against hub.audit.explain below. A user access token explains
+	// through its own ceiling and boundary.
+	token, credentialOK := selfReadCredential(ctx, identity, "user.self.explain")
+	if !credentialOK {
+		refuseSelfReadCredential(w, r, identity, "hub")
+		return
+	}
+
 	var req explainRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
@@ -360,10 +371,20 @@ func (s *Server) handleAuthzExplain(w http.ResponseWriter, r *http.Request) {
 			Principal:  principalContextForIdentity(user),
 			Credential: credentialContextForIdentity(user),
 			Resource:   Resource{Type: "hub", ID: "hub"},
-			Action:     Action("manage"),
+			Action:     ActionRead,
 			Permission: "hub.audit.read",
 		})
 		isSuperAdmin = decision.Allowed
+	}
+
+	// An explain for another principal, or a comparison with another
+	// principal, admits only the credentials the hub.audit.explain catalog
+	// operation declares.
+	if isCrossPrincipal || req.ComparePrincipalID != "" {
+		if _, ok := selfReadCredential(ctx, identity, "hub.audit.explain"); !ok {
+			refuseSelfReadCredential(w, r, identity, "hub")
+			return
+		}
 	}
 
 	// Non-admin cannot explain for a different principal.
@@ -410,10 +431,25 @@ func (s *Server) handleAuthzExplain(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// A project-boundary token explains its holder's own access only inside
+	// its boundary project, and only while the holder is a current member
+	// of that project.
+	if !isCrossPrincipal && token != nil && token.Boundary().Kind == BoundaryKindProject {
+		if explainResourceProject(resource) != token.Boundary().ProjectID || !s.tokenBoundaryProjectMember(ctx, token) {
+			writeForbidden(w, "a project token can explain access only inside its boundary project")
+			return
+		}
+	}
+
 	// Handle effective_permissions mode: return full effective permission set
-	// with per-permission provenance.
+	// with per-permission provenance. A token explaining its holder's own
+	// access lists only the permissions the token may use.
 	if req.Mode == "effective_permissions" {
-		s.handleExplainEffectivePermissions(w, ctx, req, explainIdentity, resource, isCrossPrincipal, isSuperAdmin)
+		var ceilingToken *ScopedUserIdentity
+		if !isCrossPrincipal {
+			ceilingToken = token
+		}
+		s.handleExplainEffectivePermissions(w, ctx, req, explainIdentity, resource, isCrossPrincipal, isSuperAdmin, ceilingToken)
 		return
 	}
 
@@ -468,6 +504,19 @@ func (s *Server) handleAuthzExplain(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// explainResourceProject returns the project an explain target belongs to:
+// its project parent, or its own ID for a project. A target with no
+// project returns "".
+func explainResourceProject(resource Resource) string {
+	if resource.ParentType == "project" && resource.ParentID != "" {
+		return resource.ParentID
+	}
+	if resource.Type == "project" {
+		return resource.ID
+	}
+	return ""
+}
+
 // handleExplainEffectivePermissions handles the effective_permissions mode
 // of the explain endpoint. It returns the full effective permission set
 // with per-permission provenance showing which grant sourced each permission
@@ -489,6 +538,7 @@ func (s *Server) handleExplainEffectivePermissions(
 	resource Resource,
 	isCrossPrincipal bool,
 	isSuperAdmin bool,
+	ceilingToken *ScopedUserIdentity,
 ) {
 	// C1 fix: ComparePrincipalID reveals another principal's effective
 	// permissions. Require the same hub.audit.read gate used for PrincipalID.
@@ -526,6 +576,9 @@ func (s *Server) handleExplainEffectivePermissions(
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"failed to compute effective permissions", nil)
 		return
+	}
+	if ceilingToken != nil {
+		effectivePerms = filterPermissionsForToken(ceilingToken, effectivePerms)
 	}
 
 	// Build per-permission provenance by running a Decide for each

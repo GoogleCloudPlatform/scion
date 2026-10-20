@@ -16,7 +16,7 @@
 # workstation-smoke.sh - end-to-end check of the workstation hub path.
 #
 # In a temporary HOME and a temporary git repo, with no hub configured:
-#   1. scion hub link              fails with the one-line "No hub configured"
+#   1. scion hub link              fails with the one-line "No hub selected"
 #                                  error and starts no server
 #   2. scion server start          starts the local workstation server,
 #                                  registers it as the hub 'local' and,
@@ -25,7 +25,11 @@
 #   3. scion hub link              links to the local hub without a prompt
 #   4. scion hub status            reports the project as linked
 #   5. scion list                  returns an empty list through the hub
-#  5b. scion use <slug>            from a directory outside any project
+#   5b. scion list (auto-link)     in a second project that was never
+#                                  linked, links it to the local hub without
+#                                  a prompt and returns an empty list (only
+#                                  where 'scion init' can run)
+#   5c. scion use <slug>           from a directory outside any project
 #                                  selects the linked project (then again by
 #                                  its UUID); scion list
 #                                  then returns the empty list through the
@@ -239,11 +243,33 @@ git commit -q --allow-empty -m "initial commit"
 # target the global project with --global (commands run outside a project
 # require it). --format json skips the interactive image-registry question.
 TARGET=()
+REPO2=""
 if command -v docker >/dev/null 2>&1 || command -v podman >/dev/null 2>&1; then
   log "scion init --machine && scion init"
   "$SCION" init --machine --format json >"$WORK/init-machine.out" 2>&1 || {
     cat "$WORK/init-machine.out" >&2; fail "scion init --machine"; }
+  # init --machine prefers podman over docker. Where docker answers, use it,
+  # so a podman that is installed but old or unconfigured does not leave the
+  # workstation broker reporting a degraded runtime.
+  # profiles.* is not a settable key, so edit the seeded line directly.
+  if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    SEEDED="$HOME/.scion/settings.yaml"
+    [ -f "$SEEDED" ] || fail "init --machine did not seed $SEEDED"
+    sed -i.bak 's/^    runtime: podman  # Auto-detected$/    runtime: docker  # set by the smoke test/' "$SEEDED" &&
+      rm -f "$SEEDED.bak"
+    # --global: no project exists yet, and the global settings are the ones edited.
+    got_rt="$("$SCION" --global config get profiles.local.runtime 2>"$WORK/runtime.err")" || {
+      cat "$WORK/runtime.err" >&2; fail "scion config get profiles.local.runtime"; }
+    [ "$got_rt" = docker ] || fail "local profile runtime is '$got_rt', want docker"
+    log "local profile runtime: docker"
+  fi
   "$SCION" init --format json >"$WORK/init.out" 2>&1 || { cat "$WORK/init.out" >&2; fail "scion init"; }
+  # A second project, initialised while no hub runs (so init does not link
+  # it): step 5b checks that its first command links it automatically.
+  REPO2="$WORK/repo2"
+  mkdir -p "$REPO2"
+  (cd "$REPO2" && git init -q && git commit -q --allow-empty -m "initial commit" &&
+    "$SCION" init --format json) >"$WORK/init2.out" 2>&1 || { cat "$WORK/init2.out" >&2; fail "scion init (second project)"; }
 else
   log "no container runtime found: skipping scion init, using the global project"
   TARGET=(--global)
@@ -254,7 +280,7 @@ if "$SCION" ${TARGET[@]+"${TARGET[@]}"} -y hub link >"$WORK/noep.out" 2>&1; then
   cat "$WORK/noep.out" >&2
   fail "hub link succeeded with no hub endpoint"
 fi
-grep -qF "No hub configured. Start the local hub with 'scion server start' (first run opens setup), or set a remote one with 'scion config set hub.endpoint <url>'." "$WORK/noep.out" || {
+grep -qF "No hub selected. Add one with 'scion hub add <name> <url>', start a local hub with 'scion server start', or pick one with 'scion use --hub <name>'." "$WORK/noep.out" || {
   cat "$WORK/noep.out" >&2; fail "missing the not-configured error"; }
 if [ -e "$HOME/.scion/server.pid" ] || grep -q "Starting server" "$WORK/noep.out"; then
   cat "$WORK/noep.out" >&2; fail "hub link started a server"
@@ -318,7 +344,26 @@ grep -q "Using hub: http://127.0.0.1:" "$WORK/list.err" || {
 tr -d '[:space:]' <"$WORK/list.json" | grep -Eq '^(\[\]|null)$' || {
   cat "$WORK/list.json" "$WORK/list.err" >&2; fail "scion list did not return an empty list"; }
 
-log "5b. outside any project, scion use selects the project and scion list targets it"
+if [ -n "$REPO2" ]; then
+  log "5b. scion list in a never-linked project links it to the local hub"
+  # No terminal and no -y: a link prompt would decline, so this passes only
+  # if the project is linked without one.
+  (cd "$REPO2" && "$SCION" list --format json </dev/null) >"$WORK/autolink.json" 2>"$WORK/autolink.err" || {
+    cat "$WORK/autolink.json" "$WORK/autolink.err" >&2; fail "scion list in a never-linked project"; }
+  grep -q "Linking project '.*' to the local hub at http://127.0.0.1:" "$WORK/autolink.err" || {
+    cat "$WORK/autolink.err" >&2; fail "scion list did not link the project to the local hub"; }
+  if grep -q "Link project with Hub?" "$WORK/autolink.err"; then fail "the auto-link asked for confirmation"; fi
+  tr -d '[:space:]' <"$WORK/autolink.json" | grep -Eq '^(\[\]|null)$' || {
+    cat "$WORK/autolink.json" "$WORK/autolink.err" >&2; fail "scion list did not return an empty list"; }
+  (cd "$REPO2" && "$SCION" hub status --format json) >"$WORK/autolink-status.json" 2>&1 || {
+    cat "$WORK/autolink-status.json" >&2; fail "scion hub status (second project)"; }
+  grep -Eq '"linked"[[:space:]]*:[[:space:]]*true' "$WORK/autolink-status.json" || {
+    cat "$WORK/autolink-status.json" >&2; fail "hub status does not report the auto-linked project as linked"; }
+else
+  log "5b. skipped: no container runtime for 'scion init'"
+fi
+
+log "5c. outside any project, scion use selects the project and scion list targets it"
 HUB_PROJECT_ID="$(tr -d '\n' <"$WORK/status.json" | grep -o '"hubProjectId"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/' | head -n 1)"
 [ -n "$HUB_PROJECT_ID" ] || { cat "$WORK/status.json" >&2; fail "hub status did not report the hub project ID"; }
 "$SCION" ${TARGET[@]+"${TARGET[@]}"} hub projects info "$HUB_PROJECT_ID" --format json >"$WORK/project.json" 2>"$WORK/project.err" || {

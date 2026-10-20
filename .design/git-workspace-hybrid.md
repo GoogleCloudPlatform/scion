@@ -515,7 +515,7 @@ The branch name field on the new-agent form adapts its default based on workspac
 1. ✅ Update `ProvisionAgent()` to detect shared-workspace groves and skip worktree/clone.
    - ✅ `SharedWorkspace` flag threaded via context from hub → dispatcher → broker → provisioning.
    - ✅ Hub dispatcher resolves `grove.IsSharedWorkspace()` and propagates to broker.
-   - ✅ Broker injects `SCION_SHARED_WORKSPACE` env var for sciontool.
+   - ✅ Broker injects `SCION_SHARED_WORKSPACE` env var for sciontool. _(Later superseded by `SCION_WORKSPACE_MODE` + `SCION_WORKSPACE_GIT`, see `workspace-mode-env.md`; `SCION_SHARED_WORKSPACE` was removed in ptone/scion#575.)_
 2. ✅ Mount shared workspace path for agents on shared-workspace groves.
    - ✅ Hub sets workspace to hub-managed grove path; broker passes through.
    - ✅ ProvisionAgent takes explicit workspace path (skips worktree creation).

@@ -57,11 +57,15 @@ func explicitDispatchImage(ac *store.AgentAppliedConfig) string {
 	return ""
 }
 
-// dispatchImageForBroker is explicitDispatchImage rewritten to the
-// dispatcher's image registry, the form every dispatch sends.
-func (d *HTTPAgentDispatcher) dispatchImageForBroker(ac *store.AgentAppliedConfig) string {
-	image := explicitDispatchImage(ac)
-	if registry := d.ImageRegistry(); image != "" && registry != "" {
+// dispatchImageForBroker is explicitDispatchImage rewritten to the image
+// registry for the agent's broker and profile, the form every dispatch
+// sends.
+func (d *HTTPAgentDispatcher) dispatchImageForBroker(agent *store.Agent) string {
+	image := explicitDispatchImage(agent.AppliedConfig)
+	if image == "" {
+		return ""
+	}
+	if registry := d.ImageRegistryFor(agentImageRegistryTarget(agent)); registry != "" {
 		image = config.RewriteImageRegistry(image, registry)
 	}
 	return image

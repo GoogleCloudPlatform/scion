@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -757,14 +758,6 @@ func (s *Server) createProjectWithOwner(ctx context.Context, project *store.Proj
 	})
 }
 
-// createProjectOwnerRoleBinding creates a project-owner role binding for the
-// user on the project, with its audit record, in one transaction.
-func (s *Server) createProjectOwnerRoleBinding(ctx context.Context, projectID, userID string) error {
-	return s.store.WithTx(ctx, func(tx store.Store) error {
-		return s.createProjectOwnerRoleBindingTx(ctx, tx, projectID, userID)
-	})
-}
-
 // createProjectOwnerRoleBindingTx writes the project-owner role binding for
 // userID on projectID and its project_member_add audit record on tx. A
 // binding that already exists is left as is and writes no record.
@@ -1004,9 +997,10 @@ func (s *Server) createProjectMembersGroup(ctx context.Context, project *store.P
 	// the idempotent re-create of an existing project and clone, so granting
 	// here would re-make a removed or demoted creator an owner on the next
 	// read. The creator-owner binding is created only on genuine first
-	// creation, by createProjectOwnerRoleBinding in the create, register and
-	// clone handlers; legacy projects with no owner binding at all are
-	// backfilled at startup by backfillProjectOwnerRoleBindings.
+	// creation, by createProjectWithOwner (createProjectOwnerRoleBindingTx)
+	// in the create, register and clone handlers; legacy projects with no
+	// owner binding at all are backfilled at startup by
+	// backfillProjectOwnerRoleBindings.
 
 	// ── Legacy policy bridge (pre-CO1) ──────────────────────────────────
 	// CO1 cutover: legacy project policies are no longer needed.
@@ -1258,17 +1252,20 @@ func (s *Server) initHubManagedProject(project *store.Project) error {
 		if err != nil {
 			return fmt.Errorf("failed to read default project settings: %w", err)
 		}
-		if err := os.WriteFile(settingsPath, defaultSettings, 0644); err != nil {
+		// Checked again under the settings lock, so a file another writer
+		// has just created is not replaced.
+		if err := config.CreateSettingsFileIfMissing(settingsPath, defaultSettings); err != nil {
 			return fmt.Errorf("failed to seed settings.yaml: %w", err)
 		}
 	}
 
 	// Write hub connection settings into the seeded settings file.
+	// hub.project_id is the one v1 key for the project ID (the other
+	// project-ID key names map to it).
 	settingsUpdates := map[string]string{
-		"hub.enabled":   "true",
-		"hub.endpoint":  s.HubEndpointFor(HubEndpointForProjectSettings),
-		"hub.projectId": project.ID,
-		"project_id":    project.ID,
+		"hub.enabled":                     "true",
+		"hub.endpoint":                    s.HubEndpointFor(HubEndpointForProjectSettings),
+		projectkeys.ConfigHubProjectIDKey: project.ID,
 	}
 	for key, value := range settingsUpdates {
 		if err := config.UpdateSetting(scionDir, key, value, false); err != nil {
@@ -1310,6 +1307,20 @@ func (s *Server) cloneSharedWorkspaceProject(ctx context.Context, project *store
 		return fmt.Errorf("shared workspace clone failed: %w", err)
 	}
 
+	// Agents provision from this clone, and provisioning requires
+	// .scion/agents/ to be git-ignored. The explicit-target InitProject
+	// below leaves the tracked .gitignore alone, so add the rule to the
+	// clone's own exclude file instead. Without it no agent can start, so
+	// a failure here fails the clone. The detailed error names host paths,
+	// so it is logged here and the returned error (which reaches the API
+	// response) is fixed text.
+	if err := config.EnsureScionGitExclude(workspacePath); err != nil {
+		s.projectsLogger().Warn("failed to set up the .scion/agents/ ignore rule in the shared workspace clone",
+			"project_id", project.ID, "error", err.Error())
+		_ = util.RemoveAllSafe(workspacePath)
+		return errors.New("shared workspace clone failed: could not set up the .scion/agents/ ignore rule")
+	}
+
 	// Seed the .scion project on top of the cloned workspace, with the hub
 	// project ID as the workspace project identity (replacing any identity
 	// the repository carries).
@@ -1324,11 +1335,12 @@ func (s *Server) cloneSharedWorkspaceProject(ctx context.Context, project *store
 	}
 
 	// Write hub connection settings
+	// hub.project_id is the one v1 key for the project ID (the other
+	// project-ID key names map to it).
 	settingsUpdates := map[string]string{
-		"hub.enabled":   "true",
-		"hub.endpoint":  s.HubEndpointFor(HubEndpointForProjectSettings),
-		"hub.projectId": project.ID,
-		"project_id":    project.ID,
+		"hub.enabled":                     "true",
+		"hub.endpoint":                    s.HubEndpointFor(HubEndpointForProjectSettings),
+		projectkeys.ConfigHubProjectIDKey: project.ID,
 	}
 	for key, value := range settingsUpdates {
 		if err := config.UpdateSetting(scionDir, key, value, false); err != nil {
@@ -1468,7 +1480,9 @@ func (s *Server) syncWorkspaceOnStop(ctx context.Context, agent *store.Agent) {
 		StoragePath: storagePath,
 	}
 	var uploadResp RuntimeBrokerWorkspaceUploadResponse
-	if err := tunnelWorkspaceRequest(ctx, cc, agent.RuntimeBrokerID, "POST", "/api/v1/workspace/upload", uploadReq, &uploadResp); err != nil {
+	// A placement refusal only skips the sync-back (logged below): the stop
+	// itself is guarded by its own pre-check and the dispatcher backstop.
+	if err := tunnelAgentWorkspaceRequest(ctx, s.store, cc, agent, "POST", "/api/v1/workspace/upload", uploadReq, &uploadResp); err != nil {
 		s.agentLifecycleLog.Warn("syncWorkspaceOnStop: failed to upload workspace from broker",
 			"agent_id", agent.ID,
 			"agent", agent.Name, "project_id", project.ID, "error", err,
@@ -1979,7 +1993,7 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			LinkedBy:   linkedByForProvider(GetUserIdentityFromContext(ctx)),
 		}
 
-		if err := s.store.AddProjectProvider(ctx, provider); err != nil {
+		if err := s.linkProjectProvider(ctx, provider); err != nil {
 			writeErrorFromErr(w, err, "")
 			return
 		}
@@ -2027,10 +2041,9 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 
 		if existingBroker != nil {
 			registerOperation = "reregister"
-			// Update existing broker
+			// Update existing broker. The name and slug are set at
+			// creation or through the update API, so they are kept.
 			broker = existingBroker
-			broker.Name = req.Broker.Name
-			broker.Slug = api.Slugify(req.Broker.Name)
 			broker.Version = req.Broker.Version
 			broker.Status = store.BrokerStatusOnline
 			broker.ConnectionState = "connected"
@@ -2094,7 +2107,7 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			LinkedBy:   linkedByForProvider(callerUser),
 		}
 
-		if err := s.store.AddProjectProvider(ctx, provider); err != nil {
+		if err := s.linkProjectProvider(ctx, provider); err != nil {
 			writeErrorFromErr(w, err, "")
 			return
 		}
@@ -2142,6 +2155,11 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// The node image registry is shown redacted (ptone/scion#3916).
+	if broker != nil {
+		shown := brokerForDisplay(*broker)
+		broker = &shown
+	}
 	writeJSON(w, http.StatusOK, RegisterProjectResponse{
 		Project:     project,
 		Broker:      broker,
@@ -2226,6 +2244,13 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 		} else {
 			s.handleProjectMemberByID(w, r, projectID, memberPath)
 		}
+		return
+	}
+
+	// Project visitor grants (ptone/scion#4603):
+	// …/visitors and …/visitors/{visitorId}.
+	if rest, ok := strings.CutPrefix(subPath, "visitors"); ok && (rest == "" || strings.HasPrefix(rest, "/")) {
+		s.handleProjectVisitors(w, r, projectID, rest)
 		return
 	}
 
@@ -2786,8 +2811,8 @@ func (s *Server) createProjectAgent(w http.ResponseWriter, r *http.Request, proj
 // an agent reading its own record. getAgent applies the same exemption.
 // Reading a *different* agent in the caller's project goes through the
 // same agent.read check as getAgent (authorizeSingleAgentRead), which
-// denies it unless the caller directly launched that agent
-// (authz_launcher_read.go). An agent caller that is denied, or that names
+// denies it unless the caller launched that agent, directly or through
+// its descendants (authz_launcher_read.go). An agent caller that is denied, or that names
 // an agent in another project, gets the same 404 as for a missing agent.
 func (s *Server) getProjectAgent(w http.ResponseWriter, r *http.Request, projectID, agentID string) {
 	if !checkAgentReadScope(w, r) {
@@ -2946,6 +2971,12 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		if err == store.ErrNotFound {
 			agent, err = s.store.GetAgent(ctx, agentID)
+			if (errors.Is(err, store.ErrNotFound) || (err == nil && agent.ProjectID != projectID)) && isVisitorIdentity(GetIdentityFromContext(ctx)) {
+				// A visitor gets the one refusal for an unknown agent too
+				// (admitVisitorSubRoute already refused it before here).
+				writeVisitorRefusal(w)
+				return
+			}
 			if err != nil {
 				writeError(w, http.StatusNotFound, ErrCodeAgentNotFound,
 					fmt.Sprintf("Agent %q not found in project", agentID),
@@ -2997,6 +3028,11 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 		isSystemPlane := false
 		allowed, reason, decision := s.authorizeAgentMessage(r.Context(), identity, agent, isSystemPlane)
 		messaging.RecordStep(r.Context(), "message_authorized")
+		if !allowed && isVisitorIdentity(identity) {
+			// A visitor's refusal names no reason or message mode.
+			writeVisitorRefusal(w)
+			return
+		}
 		if !allowed {
 			// Use typed denial code from the decision (agent path) or
 			// fall back to generic forbidden code (user path).
@@ -3387,9 +3423,12 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string
 		http.Error(w, "deletion service not configured", http.StatusInternalServerError)
 		return
 	}
+	// force=true deletes the project even while agents remain whose
+	// runtime deletion is not confirmed (ptone/scion#4811).
 	req := ProjectDeleteRequest{
 		ProjectID: id,
 		Actor:     userIdentity,
+		Force:     r.URL.Query().Get("force") == "true",
 	}
 	result, decision := s.deletionService.Delete(ctx, req)
 	if decision != nil {
@@ -3671,8 +3710,18 @@ func (s *Server) dispatchAgentDeletions(ctx context.Context, agents []store.Agen
 					"agent_id", agent.ID, "error", err)
 			}
 			if err := dispatcher.DispatchAgentDelete(ctx, agent, true, true, false, now); err != nil {
-				s.agentLifecycleLog.Warn("failed to dispatch agent delete during project deletion",
-					"agent_id", agent.ID, "broker", agent.RuntimeBrokerID, "error", err)
+				if refusal, refused := placementRefusalOf(err); refused {
+					// Nothing was sent: the agent's saved placement is
+					// inconsistent. Its workload stays running on the
+					// Runtime Broker with no agent record left.
+					s.agentLifecycleLog.Error("project deletion: agent delete refused for an inconsistent placement; its workload is left running on the Runtime Broker",
+						"agent_id", agent.ID, "agent", agent.Slug, "project_id", agent.ProjectID, "code", refusal.Code,
+						"broker", agent.RuntimeBrokerID, "pinned_runtime_broker_id", agent.PinnedRuntimeBrokerID,
+						"pinned_runtime_target_id", agent.PinnedRuntimeTargetID)
+				} else {
+					s.agentLifecycleLog.Warn("failed to dispatch agent delete during project deletion",
+						"agent_id", agent.ID, "broker", agent.RuntimeBrokerID, "error", err)
+				}
 			}
 		}
 		s.events.PublishAgentDeleted(ctx, agent.ID, agent.ProjectID)
@@ -3695,9 +3744,10 @@ func (s *Server) deleteStorageFiles(ctx context.Context, projectID string, templ
 			}
 		}
 	}
-	for _, hc := range harnesses {
+	for i := range harnesses {
+		hc := &harnesses[i]
 		if hc.StoragePath != "" {
-			if err := stor.DeletePrefix(ctx, storage.DirPrefix(hc.StoragePath)); err != nil {
+			if err := s.deleteHarnessConfigStorage(ctx, stor, hc); err != nil {
 				s.projectsLogger().Warn("failed to delete harness config storage files",
 					"project_id", projectID, "harnessConfig", hc.ID, "path", hc.StoragePath, "error", err)
 			}

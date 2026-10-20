@@ -176,9 +176,10 @@ type UploadRequest struct {
 type UploadResponse struct {
 	UploadURLs  []UploadURLInfo `json:"uploadUrls"`
 	ManifestURL string          `json:"manifestUrl,omitempty"`
-	// UploadID names the staging directory a template's upload URLs write
-	// to; a client may send it back in the finalize request
-	// (ptone/scion#4221). Empty for resources that do not stage uploads.
+	// UploadID names the staging directory a template's or harness-config's
+	// upload URLs write to; a client may send it back in the finalize
+	// request (ptone/scion#4221, ptone/scion#4219). Empty for resources that
+	// do not stage uploads.
 	UploadID string `json:"uploadId,omitempty"`
 }
 
@@ -216,9 +217,10 @@ type DownloadResponse struct {
 	ManifestURL string            `json:"manifestUrl,omitempty"`
 	Files       []DownloadURLInfo `json:"files"`
 	Expires     time.Time         `json:"expires"`
-	// ContentHash is the content hash of the template row the URLs were
-	// signed from, so a client can cache the files under the hash they
-	// really have (ptone/scion#4221). Set for templates only.
+	// ContentHash is the content hash of the template or harness-config
+	// row the URLs were signed from, so a client can cache the files under
+	// the hash they really have (ptone/scion#4221, ptone/scion#4219). Set
+	// for templates and harness-configs.
 	ContentHash string `json:"contentHash,omitempty"`
 }
 
@@ -736,6 +738,15 @@ func (s *Server) deleteTemplateV2(w http.ResponseWriter, r *http.Request, id str
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You can only delete your own user-scoped templates", nil)
 			return
 		}
+		// The record is the caller's own, so the check runs on the caller's
+		// user scope: a user access token needs template:delete on a hub
+		// boundary.
+		userRecord := templateUserScopeResource(userIdent)
+		userRecord.ID = existing.ID
+		if !s.authzService.CheckAccess(ctx, userIdent, userRecord, ActionDelete).Allowed {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to delete templates in your user scope", nil)
+			return
+		}
 	}
 
 	// If deleteFiles is true and we have storage, delete the files
@@ -1098,6 +1109,12 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You can only clone templates into your own user scope", nil)
 			return
 		}
+		// The destination is a new record in the caller's user scope: a
+		// user access token needs template:create on a hub boundary.
+		if !s.authzService.CheckAccess(ctx, userIdent, templateUserScopeResource(userIdent), ActionCreate).Allowed {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to create templates in your user scope", nil)
+			return
+		}
 	default:
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Cloning into this resource scope is not supported", nil)
 		return
@@ -1110,8 +1127,6 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 		Slug:         api.Slugify(req.Name),
 		DisplayName:  source.DisplayName,
 		Description:  source.Description,
-		Image:        source.Image,
-		Config:       source.Config,
 		Scope:        destScope,
 		ScopeID:      scopeID,
 		ProjectID:    scopeID,

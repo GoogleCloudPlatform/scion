@@ -1546,3 +1546,39 @@ profiles:
 		assert.NotEmpty(t, errors, "an invalid ServiceAccount name should fail schema validation: %s", doc)
 	}
 }
+
+// TestValidateSettings_RejectsProfileEnv pins ptone/scion#3048 for settings
+// files: a profile has no env field, so profiles.<name>.env fails
+// validation. Env under harness_overrides stays valid.
+func TestValidateSettings_RejectsProfileEnv(t *testing.T) {
+	bad := []byte(`
+schema_version: "1"
+profiles:
+  dev:
+    runtime: docker
+    env:
+      FOO: bar
+`)
+	errs, err := ValidateSettings(bad, "1")
+	require.NoError(t, err)
+	require.NotEmpty(t, errs, "profiles.dev.env should fail validation")
+	var msgs []string
+	for _, e := range errs {
+		msgs = append(msgs, e.Error())
+	}
+	assert.Contains(t, strings.Join(msgs, "; "), "profiles/dev")
+
+	good := []byte(`
+schema_version: "1"
+profiles:
+  dev:
+    runtime: docker
+    harness_overrides:
+      claude:
+        env:
+          FOO: bar
+`)
+	errs, err = ValidateSettings(good, "1")
+	require.NoError(t, err)
+	assert.Empty(t, errs)
+}

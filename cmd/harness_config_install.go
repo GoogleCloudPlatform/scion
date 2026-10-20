@@ -23,7 +23,6 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/spf13/cobra"
 )
 
@@ -39,11 +38,16 @@ Source can be:
   - An rclone URI (:gcs:bucket/path)
   - An archive URL (.tgz, .zip)
 
+For a GitHub URL the fetch authenticates with the first of these
+environment variables that is set: GH_{OWNER}__{REPO}, GH_{OWNER}, then
+GITHUB_TOKEN (OWNER and REPO uppercased, with "-" and "." as "_"). Other
+sources are fetched without a credential.
+
 The installed name is, in order of precedence: --name; the "name" field in
 the source's config.yaml; its "harness" field; the source directory name.
 
-Without --global the config is installed into the current project (locally,
-or in the project's scope on the Hub when Hub mode is enabled); with
+Without --global the config is installed into the current project's scope
+on the Hub; with
 --global it is installed globally. If a harness-config with the same name
 already exists in the target scope, install fails unless --force is given.
 
@@ -61,16 +65,6 @@ func runHarnessConfigInstall(cmd *cobra.Command, args []string) error {
 	source := args[0]
 	nameOverride, _ := cmd.Flags().GetString("name")
 	force, _ := cmd.Flags().GetBool("force")
-
-	var gp string
-	if projectPath != "" {
-		resolved, err := config.GetResolvedProjectDir(projectPath)
-		if err == nil {
-			gp = resolved
-		}
-	} else if projectDir, err := config.GetResolvedProjectDir(""); err == nil {
-		gp = projectDir
-	}
 
 	localSourcePath, cleanup, err := resolveInstallSource(source)
 	if err != nil {
@@ -99,16 +93,12 @@ func runHarnessConfigInstall(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("invalid harness-config name %q; name cannot contain path components or separators", name)
 	}
 
-	hubCtx, err := CheckHubAvailabilityWithOptions(gp, true)
+	hubCtx, err := requireHubForUpload(projectPath)
 	if err != nil {
 		return err
 	}
 
-	if hubCtx != nil {
-		return installToHub(hubCtx, name, localSourcePath, hcDir.Config.Harness, installSourceURL(source), force)
-	}
-
-	return installLocally(name, localSourcePath, gp, force, hcDir.Config.Harness)
+	return installToHub(hubCtx, name, localSourcePath, hcDir.Config.Harness, installSourceURL(source), force)
 }
 
 func resolveInstallSource(source string) (localPath string, cleanup func(), err error) {
@@ -135,7 +125,7 @@ func resolveInstallSource(source string) (localPath string, cleanup func(), err 
 		}
 
 		fmt.Printf("Fetching remote source: %s\n", source)
-		cachePath, fetchErr := config.FetchRemoteTemplate(context.Background(), normalized)
+		cachePath, fetchErr := config.FetchRemoteTemplate(context.Background(), normalized, remoteFetchCredential(normalized))
 		if fetchErr != nil {
 			return "", nil, fmt.Errorf("failed to fetch remote source: %w", fetchErr)
 		}
@@ -196,7 +186,7 @@ func installToHub(hubCtx *HubContext, name, localPath, harnessType, sourceURL st
 		return err
 	}
 
-	// Match local-mode --force semantics: refuse to replace an existing
+	// --force semantics: refuse to replace an existing
 	// config of the same name in the target scope unless --force is given.
 	// syncHarnessConfigToHub itself always updates in place (that is what
 	// 'sync' is for), so the check lives here in the install caller.
@@ -212,59 +202,6 @@ func installToHub(hubCtx *HubContext, name, localPath, harnessType, sourceURL st
 	}
 
 	return syncHarnessConfigToHub(hubCtx, name, localPath, scope, scopeID, harnessType, sourceURL)
-}
-
-func installLocally(name, sourcePath, projectPath string, force bool, harnessType string) error {
-	var destDir string
-	if globalMode {
-		globalDir, err := config.GetGlobalDir()
-		if err != nil {
-			return fmt.Errorf("failed to resolve global directory: %w", err)
-		}
-		destDir = filepath.Join(globalDir, "harness-configs", name)
-	} else if projectPath != "" {
-		destDir = filepath.Join(projectPath, "harness-configs", name)
-	} else {
-		globalDir, err := config.GetGlobalDir()
-		if err != nil {
-			return fmt.Errorf("failed to resolve global directory: %w", err)
-		}
-		destDir = filepath.Join(globalDir, "harness-configs", name)
-		fmt.Fprintf(os.Stderr, "No project found, installing to global: %s\n", destDir)
-	}
-
-	if info, err := os.Stat(destDir); err == nil && info.IsDir() {
-		if !force {
-			return fmt.Errorf("harness-config %q already exists at %s; use --force to overwrite", name, destDir)
-		}
-		if err := os.RemoveAll(destDir); err != nil {
-			return fmt.Errorf("failed to remove existing harness-config: %w", err)
-		}
-	}
-
-	if err := os.MkdirAll(filepath.Dir(destDir), 0755); err != nil {
-		return fmt.Errorf("failed to create parent directory: %w", err)
-	}
-
-	if err := util.CopyDir(sourcePath, destDir); err != nil {
-		return fmt.Errorf("failed to install harness-config: %w", err)
-	}
-
-	if isJSONOutput() {
-		return outputJSON(ActionResult{
-			Status:  "success",
-			Command: "harness-config install",
-			Message: fmt.Sprintf("Harness-config '%s' installed successfully.", name),
-			Details: map[string]interface{}{
-				"name":        name,
-				"harness":     harnessType,
-				"destination": destDir,
-			},
-		})
-	}
-
-	fmt.Printf("Harness-config '%s' installed to %s\n", name, destDir)
-	return nil
 }
 
 // deriveHarnessConfigName extracts a harness-config name from a source URL or

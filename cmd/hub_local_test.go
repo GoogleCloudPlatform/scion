@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -44,11 +45,16 @@ func TestIsLocalWorkstationEndpoint_CLI(t *testing.T) {
 func setupNoEndpointLink(t *testing.T) string {
 	t.Helper()
 	origProjectPath, origGlobal, origYes := projectPath, globalMode, autoConfirm
+	origEP, origSrc := hubEndpoint, hubSource
 	origOffer := offerTemplateSyncOnLinkFn
 	t.Cleanup(func() {
 		projectPath, globalMode, autoConfirm = origProjectPath, origGlobal, origYes
+		hubEndpoint, hubSource = origEP, origSrc
 		offerTemplateSyncOnLinkFn = origOffer
 	})
+	hubEndpoint, hubSource = "", ""
+	t.Setenv("SCION_HUB_ENDPOINT", "")
+	t.Setenv("SCION_HUB_URL", "")
 	offerTemplateSyncOnLinkFn = func(_, _, _ string, _ bool) {}
 
 	home := t.TempDir()
@@ -68,8 +74,8 @@ func TestRunHubLink_NoEndpoint(t *testing.T) {
 	err := runHubLink(hubLinkCmd, nil)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, errHubLinkNoEndpoint), "error = %v", err)
-	assert.Equal(t, "No hub configured. Start the local hub with 'scion server start' (first run opens setup), "+
-		"or set a remote one with 'scion config set hub.endpoint <url>'.", err.Error())
+	assert.Equal(t, "No hub selected. Add one with 'scion hub add <name> <url>', start a local hub with 'scion server start', "+
+		"or pick one with 'scion use --hub <name>'.", err.Error())
 	assert.NotContains(t, err.Error(), "\n", "the error is one line")
 	_, statErr := os.Stat(filepath.Join(globalDir, "server.pid"))
 	assert.True(t, os.IsNotExist(statErr), "no server is started")
@@ -123,10 +129,11 @@ func TestRunHubLink_LocalHubSkipsLinkPrompt(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			globalDir := setupNoEndpointLink(t)
+			setupNoEndpointLink(t)
 			autoConfirm = false
 			server, registered := fakeLinkHub(t)
-			require.NoError(t, config.UpdateVersionedSetting(globalDir, "hub.endpoint", server.URL))
+			// The hub selected for the invocation (here as with --hub).
+			hubEndpoint = server.URL
 			t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
 			t.Setenv("SCION_HUB_TOKEN", tc.hubToken)
 
@@ -141,4 +148,28 @@ func TestRunHubLink_LocalHubSkipsLinkPrompt(t *testing.T) {
 			assert.True(t, *registered)
 		})
 	}
+}
+
+// TestRunHubLink_StaleDisableNotice: a project the removed 'scion hub
+// disable' turned off gets the one-time notice from 'scion hub link', and
+// the stale hub.enabled=false is cleared.
+func TestRunHubLink_StaleDisableNotice(t *testing.T) {
+	globalDir := setupNoEndpointLink(t)
+	server, registered := fakeLinkHub(t)
+	hubEndpoint = server.URL
+	require.NoError(t, config.UpdateVersionedSetting(globalDir, "hub.enabled", "false"))
+	t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
+
+	var err error
+	_, stderr := captureStdIO(t, func() { err = runHubLink(hubLinkCmd, nil) })
+	require.NoError(t, err)
+	assert.True(t, *registered)
+	assert.Contains(t, stderr, hubsync.LegacyModeIgnoredNotice)
+	assert.Empty(t, hubsync.StaleModeKeys(globalDir, true), "the stale switch is cleared")
+
+	s, loadErr := config.LoadSettingsFromDir(globalDir)
+	require.NoError(t, loadErr)
+	require.NotNil(t, s.Hub)
+	require.NotNil(t, s.Hub.Enabled)
+	assert.True(t, *s.Hub.Enabled, "cleared to the value an older binary reads as hub mode")
 }

@@ -441,6 +441,8 @@ func TestAgentAllowedList(t *testing.T) {
 		"hub.profile.show", "hub.profile.remove", "hub.test-identity",
 		"hub.test-identity.issue", "hub.test-identity.token", "hub.test-identity.list",
 		"hub.test-identity.delete", "hub.test-identity.teardown",
+		"hub.test-identity.web-code", "hub.test-identity.issue-admin",
+		"hub.test-identity.cleanup", "hub.test-identity.provenance",
 		"notifications",
 		"schedule", "schedule.list", "schedule.get", "schedule.cancel", "schedule.history",
 		"schedule.create", "schedule.create-recurring", "schedule.pause", "schedule.resume", "schedule.delete",
@@ -649,7 +651,7 @@ func TestAgentModeAllowsKeys(t *testing.T) {
 // TestSSHCommands_HumanOnly pins that ssh and ssh-config are absent in agent
 // mode: they are not in agentAllowed and are removed from the real tree.
 func TestSSHCommands_HumanOnly(t *testing.T) {
-	for _, name := range []string{"ssh", "ssh-config"} {
+	for _, name := range []string{"ssh", "ssh-config", "vscode"} {
 		t.Run(name, func(t *testing.T) {
 			assert.False(t, agentAllowed[name], "agentAllowed must not contain %s", name)
 			real := resolveCommandPath(rootCmd, name)

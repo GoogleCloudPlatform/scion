@@ -99,7 +99,7 @@ Agents use `sciontool` as their init process, which includes an embedded OTLP fo
 
 #### Via Settings File (Recommended)
 
-The preferred approach is to configure telemetry in `settings.yaml`. Settings at the global level apply to all agents; project-level settings apply to a specific project. Templates and individual agents can further override these via their `scion-agent.yaml`.
+The preferred approach is to configure telemetry in `settings.yaml`. Settings at the global level apply to all agents; project-level settings apply to a specific project. Templates cannot set telemetry (a template's `telemetry:` block is ignored), and an individual agent can only turn it on or off; the project's telemetry policy beats both. See the [telemetry ladder](/scion/reference/settings-precedence/#the-telemetry-ladder).
 
 ```yaml
 # In ~/.scion/settings.yaml (global) or .scion/settings.yaml (project)
@@ -236,17 +236,14 @@ Agents do not inherit debug settings. A Hub or Broker running with `--debug` (or
 
 To debug an agent, set `SCION_LOG_LEVEL` for it explicitly. The value uses the same syntax as above, and `scion` commands and `sciontool` inside the agent apply it.
 
-- **One agent, at start**: pass `--agent-log-level` to `scion start` or `scion resume`. It sets `SCION_LOG_LEVEL` in that agent's environment, both for local agents and for agents started through a Hub. An invalid value is rejected before the agent starts.
+- **One agent, at start**: pass `--agent-log-level` to `scion start` or `scion resume`. It sets `SCION_LOG_LEVEL` in that agent's environment. An invalid value is rejected before the agent starts.
 
   ```bash
   scion start my-agent --agent-log-level debug
   scion start my-agent --agent-log-level info,hubsync=debug
   ```
 
-  How long the setting lasts depends on the path:
-
-  - **Through a Hub**, the value is saved in the agent's applied configuration and kept on later restarts and resumes. To remove or change it, delete and re-create the agent. When the Hub reuses an agent that already exists (for example, resuming a suspended agent), it keeps the stored configuration and does not apply `--agent-log-level`; both `scion start` and `scion resume` print a warning in that case.
-  - **Locally**, the value applies to that launch only. A later `scion start` or `scion resume` without the flag starts the agent without it.
+  The value is saved in the agent's applied configuration and kept on later restarts and resumes. To remove or change it, delete and re-create the agent. When the Hub reuses an agent that already exists (for example, resuming a suspended agent), it keeps the stored configuration and does not apply `--agent-log-level`; both `scion start` and `scion resume` print a warning in that case.
 
 - **Many agents, through the Hub**: store `SCION_LOG_LEVEL` as a Hub environment variable at the scope you want. Use `--always` so it is injected without a template requesting it.
 
@@ -261,7 +258,7 @@ To debug an agent, set `SCION_LOG_LEVEL` for it explicitly. The value uses the s
   scion hub env clear --project SCION_LOG_LEVEL
   ```
 
-- **In agent configuration**: add `SCION_LOG_LEVEL` to the `env` of a template or an inline `--config` file. A value set this way overrides the Hub scopes; `--agent-log-level` overrides it in turn.
+- **In agent configuration**: add `SCION_LOG_LEVEL` to the `env` of an inline `--config` file (a template cannot set `SCION_*` keys). A value set this way overrides the Hub scopes; `--agent-log-level` overrides it in turn.
 
 ## Telemetry Collection
 
@@ -337,6 +334,21 @@ jsonPayload.request_id = "YOUR_REQUEST_ID"
 ```
 
 See the [Local Development Logging guide](/scion/contributing/logging/#http-request-logging) for the full field reference and file output format.
+
+## Artifact Decision Log
+
+The Hub writes one structured entry per artifact decision (publish, versions, grants, share links, moves, expiry, deletion, owner liveness marks and authorization refusals) to a dedicated log, `scion-artifacts`. With `SCION_CLOUD_LOGGING=true` it is a separate Cloud Logging log. Otherwise it goes to stdout. Entries carry the artifact id (from the parsed route, never the raw path), the outcome, a fixed reason code for refusals and failures, and, for decisions made on a request, the route template and the `request_id` of the matching request log line:
+
+```
+-- Every decision about one artifact
+logName="projects/YOUR_PROJECT/logs/scion-artifacts"
+labels.artifact_id = "ARTIFACT_ID"
+
+-- Refusals and the request they answered
+logName="projects/YOUR_PROJECT/logs/scion-artifacts" AND labels.outcome = "refused"
+```
+
+Reads answered with `404` are logged at `DEBUG` only. Share-link tokens, titles, notes, file contents and credentials are never logged. See [Artifacts: Decision log](/scion/reference/artifacts/#decision-log) for the actions, fields and reason codes.
 
 ## Querying Logs by Subsystem
 
@@ -576,7 +588,7 @@ If you see logs but they aren't linked to traces in the Cloud Trace waterfall:
 * **Observable:** Loop between user `login` and `session_expired` states.
 * **Root Cause:** The Hub regenerated its JWT/session signing keys on restart, or there is a multi-replica key mismatch (replicas using different signing keys).
 * **Operator Action:** 
-  1. Pin the session/JWT signing key securely in the deployment configuration. Ensure `SESSION_SECRET` (or `SharedSigningSecret`) is set consistently across all Hub replicas and survives restarts.
+  1. Pin the session/JWT signing key securely in the deployment configuration. Ensure `SCION_SERVER_SESSION_SECRET` (or `SharedSigningSecret`) is set consistently across all Hub replicas and survives restarts.
   2. Have users run `scion message <agent> "continue"` to trigger resume, or perform a manual login refresh.
 
 #### 3. Duplicate `sciontool` Processes (Split-Brain Agent)

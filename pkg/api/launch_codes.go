@@ -61,6 +61,19 @@ const (
 	// LaunchStepLaunching: the generic step of runtimes that report no
 	// finer steps (container runtimes).
 	LaunchStepLaunching = "launching"
+	// LaunchStepSandboxLayout: the cloudrun-sandbox runtime is preparing
+	// the agent's host directory layout, before its Starting entry and
+	// `sandbox run` (which use LaunchStepLaunching).
+	LaunchStepSandboxLayout = "sandbox_layout"
+	// LaunchStepWorkspaceProvision: the Cloud Run Instances runtime is
+	// provisioning the agent's NFS workspace and agent directories.
+	LaunchStepWorkspaceProvision = "workspace_provision"
+	// LaunchStepInstanceStart: the Cloud Run Instances runtime is starting
+	// an existing instance (StartInstance).
+	LaunchStepInstanceStart = "instance_start"
+	// LaunchStepInstanceCreate: the Cloud Run Instances runtime is creating
+	// the agent's instance (CreateInstance).
+	LaunchStepInstanceCreate = "instance_create"
 )
 
 // Launch failure codes.

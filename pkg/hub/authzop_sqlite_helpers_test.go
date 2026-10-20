@@ -86,12 +86,21 @@ type idFixtures struct {
 	uatRevokePost           string
 	uatRevokeDelete         string
 	runtimeBroker           string
+	runtimeBrokerDel        string
+	brokerEnvKey            string
+	brokerSecretKey         string
 	githubInstallationID    string
 	roleDefinition          string
 	roleDefinitionDel       string
 	roleBindingDel          string
 	projectMembership       string
 	projectMembershipUpdate string
+	memberPrincipalDel      string
+	roleBindingProjectDel   string
+	projectVisitor          string
+	projectVisitorUpdate    string
+	projectVisitorRule      string
+	projectVisitorRuleUpd   string
 	projectMemberRoleID     string
 	allowListEmail          string
 	maintenanceOpKey        string
@@ -114,6 +123,29 @@ type idFixtures struct {
 	// dev user's here, the matrix super-admin's in the bearer disposition
 	// matrix (seedUserSkillInjection).
 	userSkillInjection string
+	// userTemplate and userTemplateDel are user-scope templates of the
+	// caller, reached through /api/v1/users/me/templates: the dev user's
+	// here, the matrix super-admin's in the bearer disposition matrix
+	// (seedUserTemplates). userTemplateDel is the delete entry's target.
+	userTemplate    string
+	userTemplateDel string
+	// userScopeTemplateDel, userHarnessConfig and userHarnessConfigDel are
+	// the dev user's user-scope records for the user-scope branches of the
+	// /api/v1/templates and /api/v1/harness-configs routes.
+	userScopeTemplateDel string
+	userHarnessConfig    string
+	userHarnessConfigDel string
+	// skillRegistryDel is a disposable skill registry for the delete
+	// entry, so the pin entries keep skillRegistry.
+	skillRegistryDel string
+	// skillFiles is a global skill with one published version
+	// (skillVersion, 1.0.0) holding one stored file, SKILL.md;
+	// templateFiles and harnessConfigFiles are global records holding one
+	// stored file each, README.md (seedLiveInventoryCatalogFiles).
+	skillFiles         string
+	skillVersion       string
+	templateFiles      string
+	harnessConfigFiles string
 	// delegation holds an agent delegation grant bound to agent, a
 	// disposable twin grant for the revoke entry, and an active delegated
 	// credential of the first grant (seedLiveInventoryDelegation).
@@ -130,6 +162,66 @@ type idFixtures struct {
 	// the dev user's here, the matrix super-admin's in the bearer
 	// disposition matrix.
 	inbox inboxRecords
+	// chat holds the caller's own native chat records (seedChatRecords):
+	// the dev user's here, the matrix super-admin's in the bearer
+	// disposition matrix.
+	chat chatRecords
+	// agentDelProject is a disposable agent for the project-form DELETE,
+	// so the by-ID DELETE keeps agentDel.
+	agentDelProject string
+	// agentPorts is the target of the port registration entries, with one
+	// exposed port (agentPortsPort), so clearing its ports leaves agent's
+	// port for the proxy entries.
+	agentPorts     string
+	agentPortsPort string
+}
+
+// chatRecords are native chat records of one user: a second thread of the
+// fixture project (for the delete entry), a DM with an agent of that
+// project and a DM with another user, messages the user wrote in the
+// fixture thread (one for edit, one for delete, one more), and a message
+// in the agent DM.
+type chatRecords struct {
+	topicDel           string
+	dmAgent            string
+	dmUser             string
+	topicMessage       string
+	topicMessageEdit   string
+	topicMessageDelete string
+	dmMessage          string
+}
+
+// seedChatRecords creates chatRecords for userID: topicID is the fixture
+// thread of projectID, agentID an agent of projectID, peerUserID another
+// active user.
+func seedChatRecords(t *testing.T, ctx context.Context, s store.Store, wcs WebChatStore, userID, projectID, topicID, agentID, peerUserID string) chatRecords {
+	t.Helper()
+	at := time.Now().UTC().Add(-time.Minute)
+	r := chatRecords{topicDel: uuid.NewString()}
+	require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
+		ID: r.topicDel, ProjectID: projectID, Name: "chat-del-" + r.topicDel[:8],
+		CreatedBy: userID, CreatedAt: at, LastActivityAt: at,
+	}))
+	var err error
+	r.dmAgent, err = messages.DMConversationKey("user", userID, "agent", agentID)
+	require.NoError(t, err)
+	r.dmUser, err = messages.DMConversationKey("user", userID, "user", peerUserID)
+	require.NoError(t, err)
+
+	message := func(threadID, projectOfRow string, offset time.Duration) string {
+		id := uuid.NewString()
+		require.NoError(t, s.CreateMessage(ctx, &store.Message{
+			ID: id, ProjectID: projectOfRow, Sender: "user:" + userID, SenderID: userID,
+			Recipient: "chat", Msg: "chat record " + id[:8], Type: "chat",
+			Channel: "web", ThreadID: threadID, CreatedAt: at.Add(offset),
+		}))
+		return id
+	}
+	r.topicMessageEdit = message(topicID, projectID, time.Second)
+	r.topicMessageDelete = message(topicID, projectID, 2*time.Second)
+	r.topicMessage = message(topicID, projectID, 3*time.Second)
+	r.dmMessage = message(r.dmAgent, projectID, 4*time.Second)
+	return r
 }
 
 // seedInboxRecords creates inboxRecords for userID in projectID; agentID
@@ -211,6 +303,10 @@ func seedInboxRecords(t *testing.T, ctx context.Context, s store.Store, userID, 
 	return r
 }
 
+// liveInventoryFederationAudience is the peer hub audience the live
+// inventory server allows for POST /api/v1/auth/federation-token.
+const liveInventoryFederationAudience = "https://peer-hub.example.com"
+
 // seedLiveInventoryFixtures creates one real store row per resource family
 // (plus a second, disposable instance for families with a destructive
 // catalog operation, so a DELETE entry tested earlier in catalog
@@ -256,6 +352,9 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 		uatRevokePost:        tid("li-uat-revoke-post"),
 		uatRevokeDelete:      tid("li-uat-revoke-delete"),
 		runtimeBroker:        tid("li-broker"),
+		runtimeBrokerDel:     tid("li-broker-del"),
+		brokerEnvKey:         "LI_BROKER_ENV_VAR",
+		brokerSecretKey:      "LI_BROKER_SECRET",
 		githubInstallationID: "900000001",
 		roleDefinition:       tid("li-role"),
 		roleDefinitionDel:    tid("li-role-del"),
@@ -267,6 +366,9 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 		agentRestore:         tid("li-agent-restore"),
 		agentRestoreProject:  tid("li-agent-restore-project"),
 		agentProvisioning:    tid("li-agent-provisioning"),
+		agentDelProject:      tid("li-agent-del-project"),
+		agentPorts:           tid("li-agent-ports"),
+		agentPortsPort:       "18081",
 	}
 
 	f.projectSharedDir = "li-shared"
@@ -311,6 +413,10 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	// form, leaving this fixture's phase untouched.
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: f.agentProvisioning, Slug: "li-agent-provisioning", Name: "LI Agent Provisioning", ProjectID: f.project, Phase: string(state.PhaseProvisioning)}))
 
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: f.agentDelProject, Slug: "li-agent-del-project", Name: "LI Agent Del Project", ProjectID: f.project, Phase: string(state.PhaseRunning)}))
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: f.agentPorts, Slug: "li-agent-ports", Name: "LI Agent Ports", ProjectID: f.project, Phase: string(state.PhaseRunning)}))
+	require.NoError(t, s.UpdateAgentExposedPorts(ctx, f.agentPorts, []store.ExposedPort{{Port: 18081, Host: "127.0.0.1", Label: "li-ports", Mode: "rw", ExposedAt: now, ExposedBy: "agent"}}))
+
 	require.NoError(t, s.CreateGroup(ctx, &store.Group{ID: f.group, Slug: "li-group", Name: "LI Group"}))
 	require.NoError(t, s.CreateGroup(ctx, &store.Group{ID: f.groupDel, Slug: "li-group-del", Name: "LI Group Del"}))
 
@@ -326,6 +432,9 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	skillRegistry := &store.SkillRegistry{Name: "li-skill-registry", Endpoint: "https://example.invalid/registry", Type: store.SkillRegistryTypeHub, TrustLevel: store.SkillRegistryTrustTrusted, Status: store.SkillRegistryStatusActive, Created: now, Updated: now}
 	require.NoError(t, s.CreateSkillRegistry(ctx, skillRegistry))
 	f.skillRegistry = skillRegistry.ID
+	skillRegistryDel := &store.SkillRegistry{Name: "li-skill-registry-del", Endpoint: "https://example.invalid/registry-del", Type: store.SkillRegistryTypeHub, TrustLevel: store.SkillRegistryTrustTrusted, Status: store.SkillRegistryStatusActive, Created: now, Updated: now}
+	require.NoError(t, s.CreateSkillRegistry(ctx, skillRegistryDel))
+	f.skillRegistryDel = skillRegistryDel.ID
 
 	require.NoError(t, s.CreateTemplate(ctx, &store.Template{ID: f.template, Name: "li-template", Slug: "li-template", Harness: "claude", Scope: store.TemplateScopeGlobal, Created: now, Updated: now}))
 	require.NoError(t, s.CreateTemplate(ctx, &store.Template{ID: f.templateDel, Name: "li-template-del", Slug: "li-template-del", Harness: "claude", Scope: store.TemplateScopeGlobal, Created: now, Updated: now}))
@@ -387,6 +496,11 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	require.NoError(t, s.CreateUserAccessToken(ctx, &store.UserAccessToken{ID: f.uatRevokeDelete, UserID: DevUserID, Name: "li-uat-revoke-delete", Prefix: "li_d", KeyHash: "li-uat-revoke-delete-key-hash", ProjectID: f.project, Scopes: []string{"project:read"}, ExpiresAt: &expiry, Created: now}))
 
 	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{ID: f.runtimeBroker, Name: "li-broker", Slug: "li-broker", Status: "offline", ConnectionState: "disconnected"}))
+	// DELETE /runtime-brokers/{id} deregisters the broker, so it takes its
+	// own disposable broker.
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{ID: f.runtimeBrokerDel, Name: "li-broker-del", Slug: "li-broker-del", Status: "offline", ConnectionState: "disconnected"}))
+	// A sensitive broker-scoped variable: reads of it return a masked value.
+	require.NoError(t, s.CreateEnvVar(ctx, &store.EnvVar{ID: tid("li-broker-envvar"), Key: f.brokerEnvKey, Value: "1", Sensitive: true, Scope: store.ScopeRuntimeBroker, ScopeID: f.runtimeBroker, Created: now, Updated: now}))
 
 	require.NoError(t, s.CreateGitHubInstallation(ctx, &store.GitHubInstallation{InstallationID: 900000001, AccountLogin: "li-account", AccountType: "Organization", AppID: 1, Status: store.GitHubInstallationStatusActive, CreatedAt: now, UpdatedAt: now}))
 
@@ -414,6 +528,59 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	pmUpdate, err := s.CreateRoleBinding(ctx, &store.RoleBinding{RoleDefinitionID: projectMemberRole.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: f.userDel, ScopeType: store.RoleScopeProject, ScopeID: f.project, CreatedBy: f.user, CreatedAt: now})
 	require.NoError(t, err)
 	f.projectMembershipUpdate = pmUpdate.ID
+	// The members principal DELETE and the project-scoped role-binding
+	// DELETE each remove a project binding, so each gets its own
+	// principal holding project-member on f.project.
+	for _, d := range []struct {
+		name  string
+		user  *string
+		bound *string
+	}{
+		{"li-member-principal-del", &f.memberPrincipalDel, nil},
+		{"li-rb-project-del", nil, &f.roleBindingProjectDel},
+	} {
+		uid := tid(d.name)
+		require.NoError(t, s.CreateUser(ctx, &store.User{ID: uid, Email: d.name + "@test.com", DisplayName: d.name, Role: "member", Status: "active"}))
+		b, err := s.CreateRoleBinding(ctx, &store.RoleBinding{RoleDefinitionID: projectMemberRole.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: uid, ScopeType: store.RoleScopeProject, ScopeID: f.project, CreatedBy: f.user, CreatedAt: now})
+		require.NoError(t, err)
+		if d.user != nil {
+			*d.user = uid
+		}
+		if d.bound != nil {
+			*d.bound = b.ID
+		}
+	}
+
+	// project.visitors.update / .remove address a visitor (a federated
+	// account with a project-visitor binding on f.project) by account ID;
+	// update gets its own visitor so remove's is still there.
+	for _, v := range []struct {
+		email string
+		dst   *string
+	}{
+		{"li-visitor@corp.example", &f.projectVisitor},
+		{"li-visitor-update@corp.example", &f.projectVisitorUpdate},
+	} {
+		issuer, email := "https://li-issuer.example.com", v.email
+		acct := &store.User{DisplayName: "LI Visitor", Kind: store.UserKindFederated, Status: store.UserStatusPending, HomeIssuer: &issuer, FederatedEmail: &email}
+		require.NoError(t, s.CreateFederatedUser(ctx, acct))
+		_, err = s.CreateVisitorRoleBinding(ctx, &store.RoleBinding{PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: acct.ID, ScopeType: store.RoleScopeProject, ScopeID: f.project, CreatedBy: f.user})
+		require.NoError(t, err)
+		*v.dst = acct.ID
+	}
+	// project.visitors.rules.update / .remove address a visitor rule of
+	// f.project by ID; update gets its own rule so remove's is still there.
+	for _, v := range []struct {
+		domain string
+		dst    *string
+	}{
+		{"li-rule.example", &f.projectVisitorRule},
+		{"li-rule-update.example", &f.projectVisitorRuleUpd},
+	} {
+		rule := &store.ProjectVisitorRule{ProjectID: f.project, Issuer: "https://li-issuer.example.com", Domain: v.domain, CreatedBy: f.user}
+		require.NoError(t, s.CreateProjectVisitorRule(ctx, rule))
+		*v.dst = rule.ID
+	}
 
 	// Maintenance operations and migrations are seeded once, by key, during
 	// Migrate() (SeedMaintenanceOperations) — they are a fixed built-in
@@ -511,14 +678,15 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	// single-file artifact owned by the dev user, homed in f.project.
 	artStore, artBlobs := enableArtifactsForTest(t, srv)
 	f.artifact = seedLiveInventoryArtifact(t, ctx, artStore, artBlobs, f.project)
+	seedLiveInventoryCatalogFiles(t, ctx, s, artBlobs, &f)
 
-	// hub.conduit, hub.agent_delegation and hub.chat_thread_groups on
-	// too, so their experiment-gated routes are live: the registry above
-	// with all three also defaulting on (no operational settings, which
-	// the other entries rely on, are replaced).
+	// hub.conduit, hub.agent_delegation, hub.chat_thread_groups and
+	// federation.project_visitors on too, so their experiment-gated routes
+	// are live: the registry above with all four also defaulting on (no
+	// operational settings, which the other entries rely on, are replaced).
 	var active []experiments.Experiment
 	for _, e := range srv.experimentRegistry().All() {
-		if e.Name == conduitExperiment || e.Name == experiments.AgentDelegation || e.Name == experiments.ChatThreadGroups {
+		if e.Name == conduitExperiment || e.Name == experiments.AgentDelegation || e.Name == experiments.ChatThreadGroups || e.Name == experiments.FederationProjectVisitors {
 			e.Default = true
 		}
 		active = append(active, e)
@@ -530,10 +698,27 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	require.True(t, srv.experimentEnabled(experiments.Artifacts))
 	require.True(t, srv.experimentEnabled(experiments.AgentDelegation))
 	require.True(t, srv.experimentEnabled(experiments.ChatThreadGroups))
+	require.True(t, srv.experimentEnabled(experiments.FederationProjectVisitors))
+	// POST /api/v1/auth/federation-token also answers 404 while the OIDC
+	// provider is off: install a test key manager and allow the audience
+	// that bodyOverrides sends, so the route reaches its caller checks.
+	installTestOIDCKeyManager(t, srv)
+	srv.config.OIDCConfig.UserTokenAudiences = []string{liveInventoryFederationAudience}
 
 	// Inbox, conversation and notification records of the dev user.
 	f.inbox = seedInboxRecords(t, ctx, s, DevUserID, f.project, f.agent)
+	f.chat = seedChatRecords(t, ctx, s, srv.webChatStore, DevUserID, f.project, f.chatTopic, f.agent, f.user)
 	f.userSkillInjection = seedUserSkillInjection(t, ctx, s, DevUserID)
+	f.userTemplate, f.userTemplateDel = seedUserTemplates(t, ctx, s, DevUserID)
+	f.userScopeTemplateDel = tid("li-user-scope-template-del")
+	require.NoError(t, s.CreateTemplate(ctx, &store.Template{ID: f.userScopeTemplateDel, Name: "li-user-scope-template-del", Slug: "li-user-scope-template-del", Harness: "claude",
+		Scope: store.TemplateScopeUser, ScopeID: DevUserID, OwnerID: DevUserID, CreatedBy: DevUserID, Status: store.TemplateStatusActive, Created: now, Updated: now}))
+	f.userHarnessConfig = tid("li-user-hc")
+	f.userHarnessConfigDel = tid("li-user-hc-del")
+	for _, id := range []string{f.userHarnessConfig, f.userHarnessConfigDel} {
+		require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{ID: id, Name: "li-user-hc-" + id[len(id)-6:], Slug: "li-user-hc-" + id[len(id)-6:], Harness: "claude",
+			Scope: store.HarnessConfigScopeUser, ScopeID: DevUserID, OwnerID: DevUserID, CreatedBy: DevUserID, Status: store.HarnessConfigStatusActive, Created: now, Updated: now}))
+	}
 	f.delegation = seedLiveInventoryDelegation(t, ctx, s, f.agent, f.project)
 
 	// Hub test identities: turn the feature on (--test-mode=member)
@@ -557,6 +742,45 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	return f
 }
 
+// seedLiveInventoryCatalogFiles creates the global catalog records whose
+// file routes the probes address: a skill with a published version 1.0.0
+// holding SKILL.md, and a template and a harness config holding README.md.
+// Each file is stored in blobs at the record's storage path.
+func seedLiveInventoryCatalogFiles(t *testing.T, ctx context.Context, s store.Store, blobs storage.Storage, f *idFixtures) {
+	t.Helper()
+	now := time.Now()
+	content := []byte("li\n")
+	sum := sha256.Sum256(content)
+	file := func(path string) []store.TemplateFile {
+		return []store.TemplateFile{{Path: path, Size: int64(len(content)), Hash: "sha256:" + hex.EncodeToString(sum[:]), Mode: "0644"}}
+	}
+	put := func(objectPath string) {
+		_, err := blobs.Upload(ctx, objectPath, bytes.NewReader(content), storage.UploadOptions{ContentType: "text/plain"})
+		require.NoError(t, err)
+	}
+
+	f.skillFiles = tid("li-skill-files")
+	skillPath := "li-catalog/skills/li-skill-files"
+	require.NoError(t, s.CreateSkill(ctx, &store.Skill{ID: f.skillFiles, Name: "li-skill-files", Slug: "li-skill-files", Scope: store.SkillScopeGlobal,
+		Status: "active", StoragePath: skillPath, Created: now, Updated: now}))
+	f.skillVersion = tid("li-skill-version")
+	require.NoError(t, s.CreateSkillVersion(ctx, &store.SkillVersion{ID: f.skillVersion, SkillID: f.skillFiles, Version: "1.0.0",
+		Status: store.SkillVersionStatusPublished, Files: file("SKILL.md"), Created: now}))
+	put(skillPath + "/1.0.0/SKILL.md")
+
+	f.templateFiles = tid("li-template-files")
+	templatePath := "li-catalog/templates/li-template-files"
+	require.NoError(t, s.CreateTemplate(ctx, &store.Template{ID: f.templateFiles, Name: "li-template-files", Slug: "li-template-files", Harness: "claude",
+		Scope: store.TemplateScopeGlobal, Status: store.TemplateStatusActive, StoragePath: templatePath, Files: file("README.md"), Created: now, Updated: now}))
+	put(templatePath + "/README.md")
+
+	f.harnessConfigFiles = tid("li-hc-files")
+	hcPath := "li-catalog/harness-configs/li-hc-files"
+	require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{ID: f.harnessConfigFiles, Name: "li-hc-files", Slug: "li-hc-files", Harness: "claude",
+		Scope: store.HarnessConfigScopeGlobal, Status: store.HarnessConfigStatusActive, StoragePath: hcPath, Files: file("README.md"), Created: now, Updated: now}))
+	put(hcPath + "/README.md")
+}
+
 // seedUserSkillInjection adds a user-scope injected skill for userID and
 // returns its ID.
 func seedUserSkillInjection(t *testing.T, ctx context.Context, s store.Store, userID string) string {
@@ -564,6 +788,20 @@ func seedUserSkillInjection(t *testing.T, ctx context.Context, s store.Store, us
 	si := &store.SkillInjection{Scope: store.SkillInjectionScopeUser, ScopeID: userID, SkillURI: "skill://li-user-injected", CreatedBy: userID}
 	require.NoError(t, s.AddSkillInjection(ctx, si))
 	return si.ID
+}
+
+// seedUserTemplates adds two active user-scope templates owned by userID
+// and returns their IDs: one the read and update entries address, and one
+// the delete entry removes.
+func seedUserTemplates(t *testing.T, ctx context.Context, s store.Store, userID string) (keep, del string) {
+	t.Helper()
+	now := time.Now()
+	ids := []string{tid("li-user-template-" + userID), tid("li-user-template-del-" + userID)}
+	for i, name := range []string{"li-user-template", "li-user-template-del"} {
+		require.NoError(t, s.CreateTemplate(ctx, &store.Template{ID: ids[i], Name: name, Slug: name, Harness: "claude",
+			Scope: store.TemplateScopeUser, ScopeID: userID, OwnerID: userID, CreatedBy: userID, Status: store.TemplateStatusActive, Created: now, Updated: now}))
+	}
+	return ids[0], ids[1]
 }
 
 // overrideKey identifies one (operation, pattern) pair for parameter
@@ -586,14 +824,41 @@ type overrideKey struct {
 // patternOverrides gives its pattern.
 func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
 	return map[overrideKey]map[string]string{
-		{"agent.lifecycle.delete", "/api/v1/agents/{id}"}:                         {"id": f.agentDel},
-		{"project.lifecycle.delete", "/api/v1/projects/{id}"}:                     {"id": f.projectDel},
-		{"group.delete", "/api/v1/groups/{id}"}:                                   {"id": f.groupDel},
-		{"user.admin.delete", "/api/v1/users/{id}"}:                               {"id": f.userDel},
-		{"testidentity.delete", "/api/v1/test-identities/{id}"}:                   {"id": f.testIdentityDel},
-		{"skill.delete", "/api/v1/skills/{id}"}:                                   {"id": f.skillDel},
-		{"template.delete", "/api/v1/templates/{id}"}:                             {"id": f.templateDel},
-		{"harnessconfig.delete", "/api/v1/harness-configs/{id}"}:                  {"id": f.harnessConfigDel},
+		// Chat: the DM variants address the caller's DMs; topic delete
+		// takes the disposable second thread; message delete its own
+		// message.
+		{"chat.topic.delete", "/api/v1/chat/topics/{id}"}:                               {"id": f.chat.topicDel},
+		{"chat.conversation.history.dm", "/api/v1/chat/conversations/{id}/messages"}:    {"id": f.chat.dmAgent},
+		{"chat.conversation.send.dmagent", "/api/v1/chat/conversations/{id}/messages"}:  {"id": f.chat.dmAgent},
+		{"chat.conversation.send.dmuser", "/api/v1/chat/conversations/{id}/messages"}:   {"id": f.chat.dmUser},
+		{"chat.conversation.readstate.dm", "/api/v1/chat/conversations/{id}/read"}:      {"id": f.chat.dmAgent},
+		{"chat.conversation.markread.dm", "/api/v1/chat/conversations/{id}/read"}:       {"id": f.chat.dmAgent},
+		{"chat.conversation.markunread.dm", "/api/v1/chat/conversations/{id}/unread"}:   {"id": f.chat.dmAgent},
+		{"chat.conversation.mute.dm", "/api/v1/chat/conversations/{id}/mute"}:           {"id": f.chat.dmAgent},
+		{"chat.conversation.pin.dm", "/api/v1/chat/conversations/{id}/pin"}:             {"id": f.chat.dmAgent},
+		{"chat.conversation.typing.dm", "/api/v1/chat/conversations/{id}/typing"}:       {"id": f.chat.dmAgent},
+		{"chat.message.delete", "/api/v1/chat/conversations/{id}/messages/{messageId}"}: {"id": f.chatTopic, "messageId": f.chat.topicMessageDelete},
+		{"agent.lifecycle.delete", "/api/v1/agents/{id}"}:                               {"id": f.agentDel},
+		{"agent.lifecycle.delete", "/api/v1/projects/{projectId}/agents/{id}"}:          {"projectId": f.project, "id": f.agentDelProject},
+		{"agent.port.register", "/api/v1/agents/{id}/ports"}:                            {"id": f.agentPorts},
+		{"project.lifecycle.delete", "/api/v1/projects/{id}"}:                           {"id": f.projectDel},
+		{"group.delete", "/api/v1/groups/{id}"}:                                         {"id": f.groupDel},
+		{"user.admin.delete", "/api/v1/users/{id}"}:                                     {"id": f.userDel},
+		{"testidentity.delete", "/api/v1/test-identities/{id}"}:                         {"id": f.testIdentityDel},
+		{"skill.delete", "/api/v1/skills/{id}"}:                                         {"id": f.skillDel},
+		{"skill.register", "/api/v1/skill-registries/{id}"}:                             {"id": f.skillRegistryDel},
+		{"template.delete", "/api/v1/templates/{id}"}:                                   {"id": f.templateDel},
+		{"harnessconfig.delete", "/api/v1/harness-configs/{id}"}:                        {"id": f.harnessConfigDel},
+		// User-scope branches address the caller's user-scope records; a
+		// clone copies the global fixture into the caller's user scope.
+		{"template.user.delete", "/api/v1/users/me/templates/{id}"}:               {"id": f.userTemplateDel},
+		{"template.user.delete", "/api/v1/templates/{id}"}:                        {"id": f.userScopeTemplateDel},
+		{"template.user.clone", "/api/v1/templates/{id}/clone"}:                   {"id": f.template},
+		{"template.user.reimport", "/api/v1/templates/{id}/reimport"}:             {"id": f.userTemplate},
+		{"harnessconfig.user.clone", "/api/v1/harness-configs/{id}/clone"}:        {"id": f.harnessConfig},
+		{"harnessconfig.user.delete", "/api/v1/harness-configs/{id}"}:             {"id": f.userHarnessConfigDel},
+		{"harnessconfig.user.reimport", "/api/v1/harness-configs/{id}/reimport"}:  {"id": f.userHarnessConfig},
+		{"broker.delete", "/api/v1/runtime-brokers/{id}"}:                         {"id": f.runtimeBrokerDel},
 		{"gcp.identity.delete", "/api/v1/gcp-service-accounts/{id}"}:              {"id": f.gcpSADel},
 		{"role.definition.delete", "/api/v1/admin/roles/{id}"}:                    {"id": f.roleDefinitionDel},
 		{"quota.update", "/api/v1/admin/limits/{id}"}:                             {"id": f.limitUD},
@@ -603,6 +868,9 @@ func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
 		{"access.constraint.update", "/api/v1/admin/access-constraints/{id}"}:     {"id": f.accessConstraintUD},
 		{"access.constraint.delete", "/api/v1/admin/access-constraints/{id}"}:     {"id": f.accessConstraintUD},
 		{"project.membership.update", "/api/v1/projects/{id}/members/{memberId}"}: {"id": f.project, "memberId": f.projectMembershipUpdate},
+		{"project.visitors.update", "/api/v1/projects/{id}/visitors/{visitorId}"}: {"id": f.project, "visitorId": f.projectVisitorUpdate},
+		// Visitor rule update takes its own rule; remove takes the other.
+		{"project.visitors.rules.update", "/api/v1/projects/{id}/visitors/rules/{ruleId}"}: {"id": f.project, "ruleId": f.projectVisitorRuleUpd},
 		// Grant revoke and grant read share their pattern; revoke takes
 		// the disposable twin grant.
 		{"agent.delegation.revoke", "/api/v1/agents/{id}/delegations/{grantId}"}: {"id": f.agent, "grantId": f.delegation.grantRevoke},
@@ -617,6 +885,10 @@ func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
 
 		// Thread group delete uses its disposable twin.
 		{"inbox.threadgroup.delete", "/api/v1/thread-groups/{id}"}: {"id": f.inbox.threadGroupDel},
+
+		// The project-scoped role-binding DELETE removes its own project
+		// binding; the hub-path DELETE keeps the system-scoped fixture.
+		{"project.membership.rolebinding.delete", "/api/v1/admin/role-bindings/{id}"}: {"id": f.roleBindingProjectDel},
 	}
 }
 
@@ -658,6 +930,28 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/agents/{id}/delegations/{grantId}":                            {"id": f.agent, "grantId": f.delegation.grant},
 		"/api/v1/agents/{id}/delegations/{grantId}/credentials/{credentialId}": {"id": f.agent, "grantId": f.delegation.grant, "credentialId": f.delegation.credential},
 		"/api/v1/projects/{projectId}/agents/{id}/set_message_mode":            {"projectId": f.project, "id": f.agent},
+		"/api/v1/agents/{id}/ports/{port}":                                     {"id": f.agentPorts, "port": f.agentPortsPort},
+		"/api/v1/projects/{projectId}/agents":                                  {"projectId": f.project},
+		"/api/v1/projects/{projectId}/agents/stop-all":                         {"projectId": f.project},
+		"/api/v1/projects/{projectId}/agents/{id}":                             {"projectId": f.project, "id": f.agent},
+		"/api/v1/agents/{id}/status":                                           {"id": f.agent},
+		"/api/v1/projects/{projectId}/agents/{id}/status":                      {"projectId": f.project, "id": f.agent},
+		"/api/v1/agents/{id}/workspace":                                        {"id": f.agent},
+		"/api/v1/agents/{id}/workspace/sync-from":                              {"id": f.agent},
+		"/api/v1/agents/{id}/workspace/sync-to":                                {"id": f.agent},
+		"/api/v1/agents/{id}/workspace/sync-to/finalize":                       {"id": f.agent},
+		"/api/v1/agents/{id}/logs":                                             {"id": f.agent},
+		"/api/v1/projects/{projectId}/agents/{id}/logs":                        {"projectId": f.project, "id": f.agent},
+		"/api/v1/agents/{id}/cloud-logs":                                       {"id": f.agent},
+		"/api/v1/projects/{projectId}/agents/{id}/cloud-logs":                  {"projectId": f.project, "id": f.agent},
+		"/api/v1/agents/{id}/messages":                                         {"id": f.agent},
+		"/api/v1/agents/{id}/message-logs":                                     {"id": f.agent},
+		"/api/v1/projects/{projectId}/agents/{id}/message-logs":                {"projectId": f.project, "id": f.agent},
+		"/api/v1/agents/{id}/metrics/summary":                                  {"id": f.agent},
+		"/api/v1/agents/{id}/keys":                                             {"id": f.agent},
+		"/api/v1/projects/{projectId}/agents/{id}/keys":                        {"projectId": f.project, "id": f.agent},
+		"/api/v1/agents/{id}/message":                                          {"id": f.agent},
+		"/api/v1/projects/{projectId}/agents/{id}/message":                     {"projectId": f.project, "id": f.agent},
 
 		// --- agent self-access family (agent JWT routes) ---
 		"/api/v1/agents/{id}/token/refresh":                         {"id": f.agent},
@@ -687,10 +981,20 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/projects/{projectId}/agents/{id}/reincarnate": {"projectId": f.project, "id": f.agent},
 
 		// --- project family ---
-		"/api/v1/projects/{id}":                    {"id": f.project},
-		"/api/v1/projects/{id}/members":            {"id": f.project},
-		"/api/v1/projects/{id}/members/{memberId}": {"id": f.project, "memberId": f.projectMembership},
-		"/api/v1/projects/{id}/transfer-ownership": {"id": f.project},
+		"/api/v1/projects/{id}":                      {"id": f.project},
+		"/api/v1/projects/{id}/agents":               {"id": f.project},
+		"/api/v1/projects/{id}/members":              {"id": f.project},
+		"/api/v1/projects/{id}/members/{memberId}":   {"id": f.project, "memberId": f.projectMembership},
+		"/api/v1/projects/{id}/transfer-ownership":   {"id": f.project},
+		"/api/v1/projects/{id}/visitors":             {"id": f.project},
+		"/api/v1/projects/{id}/visitors/{visitorId}": {"id": f.project, "visitorId": f.projectVisitor},
+		// Visitor rules (the item pattern addresses the rule remove takes).
+		"/api/v1/projects/{id}/visitors/rules":          {"id": f.project},
+		"/api/v1/projects/{id}/visitors/rules/{ruleId}": {"id": f.project, "ruleId": f.projectVisitorRule},
+
+		// The principal PUT (an empty body) and DELETE address a principal
+		// that holds a project binding the DELETE removes.
+		"/api/v1/projects/{id}/members/principals/{type}/{principalId}": {"id": f.project, "type": "user", "principalId": f.memberPrincipalDel},
 
 		// --- project-route operations family ---
 		"/api/v1/projects/{id}/env":                               {"id": f.project},
@@ -706,6 +1010,10 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/projects/{id}/injected-skills":                   {"id": f.project},
 		"/api/v1/projects/{id}/injected-skills/{entryId}":         {"id": f.project, "entryId": f.projectSkillInjection},
 		"/api/v1/users/me/injected-skills/{id}":                   {"id": f.userSkillInjection},
+		"/api/v1/users/me/templates/{id}":                         {"id": f.userTemplate},
+		"/api/v1/users/me/templates/{id}/upload":                  {"id": f.userTemplate},
+		"/api/v1/users/me/templates/{id}/finalize":                {"id": f.userTemplate},
+		"/api/v1/users/me/templates/{id}/download":                {"id": f.userTemplate},
 		"/api/v1/projects/{id}/gcp-service-accounts":              {"id": f.project},
 		"/api/v1/projects/{id}/message-logs":                      {"id": f.project},
 		"/api/v1/projects/{id}/broadcast":                         {"id": f.project},
@@ -748,16 +1056,45 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/users/{id}/revoke-sessions": {"id": f.user},
 
 		// --- skill family ---
-		"/api/v1/skills/{id}": {"id": f.skill},
+		"/api/v1/skills/{id}":                          {"id": f.skill},
+		"/api/v1/skills/{id}/versions":                 {"id": f.skillFiles},
+		"/api/v1/skills/{id}/versions/{vid}":           {"id": f.skillFiles, "vid": f.skillVersion},
+		"/api/v1/skills/{id}/versions/{vid}/deprecate": {"id": f.skillFiles, "vid": f.skillVersion},
+		"/api/v1/skills/{id}/download":                 {"id": f.skillFiles},
+		"/api/v1/skills/{id}/resolve":                  {"id": f.skillFiles},
+		"/api/v1/skills/{id}/upload":                   {"id": f.skillFiles},
+		"/api/v1/skills/{id}/finalize":                 {"id": f.skillFiles},
+		"/api/v1/skills/{id}/files/{path}":             {"id": f.skillFiles, "path": "SKILL.md"},
 
 		// --- skill registry family ---
-		"/api/v1/skill-registries/{id}": {"id": f.skillRegistry},
+		"/api/v1/skill-registries/{id}":       {"id": f.skillRegistry},
+		"/api/v1/skill-registries/{id}/pin":   {"id": f.skillRegistry},
+		"/api/v1/skill-registries/{id}/pins":  {"id": f.skillRegistry},
+		"/api/v1/skill-registries/{id}/unpin": {"id": f.skillRegistry},
 
 		// --- template family ---
-		"/api/v1/templates/{id}": {"id": f.template},
+		"/api/v1/templates/{id}":              {"id": f.template},
+		"/api/v1/templates/{id}/download":     {"id": f.templateFiles},
+		"/api/v1/templates/{id}/validate":     {"id": f.templateFiles},
+		"/api/v1/templates/{id}/upload":       {"id": f.templateFiles},
+		"/api/v1/templates/{id}/finalize":     {"id": f.templateFiles},
+		"/api/v1/templates/{id}/files":        {"id": f.templateFiles},
+		"/api/v1/templates/{id}/files/{path}": {"id": f.templateFiles, "path": "README.md"},
+		"/api/v1/templates/{id}/clone":        {"id": f.template},
+		"/api/v1/templates/{id}/reimport":     {"id": f.template},
 
 		// --- harness config family ---
-		"/api/v1/harness-configs/{id}": {"id": f.harnessConfig},
+		"/api/v1/harness-configs/{id}":              {"id": f.harnessConfig},
+		"/api/v1/harness-configs/{id}/download":     {"id": f.harnessConfigFiles},
+		"/api/v1/harness-configs/{id}/validate":     {"id": f.harnessConfigFiles},
+		"/api/v1/harness-configs/{id}/image-status": {"id": f.harnessConfigFiles},
+		"/api/v1/harness-configs/{id}/check-image":  {"id": f.harnessConfigFiles},
+		"/api/v1/harness-configs/{id}/upload":       {"id": f.harnessConfigFiles},
+		"/api/v1/harness-configs/{id}/finalize":     {"id": f.harnessConfigFiles},
+		"/api/v1/harness-configs/{id}/files":        {"id": f.harnessConfigFiles},
+		"/api/v1/harness-configs/{id}/files/{path}": {"id": f.harnessConfigFiles, "path": "README.md"},
+		"/api/v1/harness-configs/{id}/clone":        {"id": f.harnessConfig},
+		"/api/v1/harness-configs/{id}/reimport":     {"id": f.harnessConfig},
 
 		// --- schedule family ---
 		"/api/v1/projects/{projectId}/scheduled-events/{id}": {"projectId": f.project, "id": f.scheduledEvent},
@@ -784,15 +1121,18 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 
 		// --- access constraint family (read default; update/.delete are
 		// re-pointed at the disposable UD instance by opPatternOverrides) ---
-		"/api/v1/admin/access-constraints/{id}": {"id": f.accessConstraint},
+		"/api/v1/admin/access-constraints/{id}":                     {"id": f.accessConstraint},
+		"/api/v1/admin/access-constraints/{id}/affected-principals": {"id": f.accessConstraint},
+		"/api/v1/admin/access-constraints/{id}/audit":               {"id": f.accessConstraint},
 
 		// --- credential token family ---
 		"/api/v1/auth/tokens/{id}/revoke": {"id": f.uatRevokePost},
 		"/api/v1/auth/tokens/{id}":        {"id": f.uatRevokeDelete},
 
 		// --- invite family ---
-		"/api/v1/admin/invites/{id}":       {"id": f.invite},
-		"/api/v1/admin/allow-list/{email}": {"email": f.allowListEmail},
+		"/api/v1/admin/invites/{id}":        {"id": f.invite},
+		"/api/v1/admin/invites/{id}/revoke": {"id": f.invite},
+		"/api/v1/admin/allow-list/{email}":  {"email": f.allowListEmail},
 
 		// --- env var family ---
 		"/api/v1/env/{key}": {"key": f.envVarKey},
@@ -800,6 +1140,12 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		// --- runtime broker family ---
 		"/api/v1/runtime-brokers/{id}":                         {"id": f.runtimeBroker},
 		"/api/v1/runtime-brokers/{id}/settings":                {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/heartbeat":               {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/projects":                {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/env":                     {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/env/{key}":               {"id": f.runtimeBroker, "key": f.brokerEnvKey},
+		"/api/v1/runtime-brokers/{id}/secrets":                 {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/secrets/{key}":           {"id": f.runtimeBroker, "key": f.brokerSecretKey},
 		"/api/v1/runtime-brokers/{id}/message-failures":        {"id": f.runtimeBroker},
 		"/api/v1/runtime-brokers/{id}/agents/{agentId}/launch": {"id": f.runtimeBroker, "agentId": f.agent},
 
@@ -824,9 +1170,20 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/admin/maintenance/migrations/{id}/run": {"id": f.maintenanceOpKey},
 
 		// --- chat family ---
-		"/api/v1/chat/spaces/{id}/threads":         {"id": f.project},
-		"/api/v1/chat/topics/{id}":                 {"id": f.chatTopic},
-		"/api/v1/chat/conversations/{id}/messages": {"id": f.chatTopic},
+		"/api/v1/chat/spaces/{id}/threads":                     {"id": f.project},
+		"/api/v1/chat/spaces/{id}/members":                     {"id": f.project},
+		"/api/v1/chat/spaces/{id}/read":                        {"id": f.project},
+		"/api/v1/chat/spaces/{id}/emoji":                       {"id": f.project},
+		"/api/v1/chat/topics/{id}":                             {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/messages":             {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/messages/{messageId}": {"id": f.chatTopic, "messageId": f.chat.topicMessageEdit},
+		"/api/v1/chat/conversations/{id}/read":                 {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/unread":               {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/mute":                 {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/pin":                  {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/typing":               {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/interagent":           {"id": f.chat.dmAgent},
+		"/api/v1/chat/conversations/{id}/promote":              {"id": f.chat.dmAgent},
 
 		// --- integrations family ---
 		"/api/v1/admin/integrations/{name}":         {"name": f.integrationName},
@@ -871,8 +1228,12 @@ func queryOverrides(f idFixtures) map[string]string {
 		"/api/v1/artifacts": "name=live-inventory.txt&scope=" + f.project,
 		// handleConversationResolve 400s without a reference.
 		"/api/v1/conversations/resolve": "reference=conv:" + f.inbox.groupConversation,
+		// handleAdminEffectiveAccess 400s without a principal.
+		"/api/v1/admin/effective-access": "principalType=user&principalId=" + f.user,
 		// handleListThreadGroups 400s without a project for a user.
 		"/api/v1/thread-groups": "projectId=" + f.project,
+		// Skill file reads and writes name the version.
+		"/api/v1/skills/{id}/files/{path}": "version=1.0.0",
 	}
 }
 
@@ -890,6 +1251,10 @@ func bodyOverrides(f idFixtures) map[overrideKey]map[string]interface{} {
 			"boundary": map[string]string{"kind": "hub"}, "permissions": []string{"agent:read"}, "name": "live-inventory",
 		},
 		{"agent.delegation.exchange", "/api/v1/agents/{id}/delegations/{grantId}/exchange"}: {"audience": "scion-hub"},
+		// User access credential for a peer hub: an allowed audience, so
+		// an admitted caller gets 200 instead of a body 400
+		// (seedLiveInventoryFixtures allows it).
+		{"federation.token.mint", "/api/v1/auth/federation-token"}: {"audience": liveInventoryFederationAudience},
 		// updateProjectMemberRole (handlers_project_members.go) 400s
 		// "roleDefinitionId is required" on an empty body before the
 		// binding ID is used for anything; with a real role ID, the
@@ -926,6 +1291,50 @@ func bodyOverrides(f idFixtures) map[overrideKey]map[string]interface{} {
 		// body before it loads the project or checks authorization; a real
 		// email lets every probe reach those steps.
 		{"project.gcpsa.create", "/api/v1/projects/{id}/gcp-service-accounts"}: {"email": "li-project-sa@li-gcp-project.iam.gserviceaccount.com"},
+		// User-scope writes: valid bodies, so the probes reach the
+		// user-scope branch past body validation.
+		{"template.user.create", "/api/v1/users/me/templates"}:             {"name": "li-user-template-created"},
+		{"template.user.update", "/api/v1/users/me/templates/{id}"}:        {"name": "li-user-template-renamed"},
+		{"template.user.clone", "/api/v1/templates/{id}/clone"}:            {"name": "li-user-template-clone", "scope": "user"},
+		{"harnessconfig.user.clone", "/api/v1/harness-configs/{id}/clone"}: {"name": "li-user-hc-clone", "scope": "user"},
+		{"skill.user.create", "/api/v1/skills"}:                            {"name": "li-user-skill", "scope": "user"},
+		{"template.user.import", "/api/v1/resources/import"}:               {"kind": "template", "scope": "user", "sourceUrl": "https://example.invalid/li-user"},
+		{"template.user.import", "/api/v1/resources/discover"}:             {"kind": "template", "scope": "user", "sourceUrl": "https://example.invalid/li-user"},
+		{"harnessconfig.user.import", "/api/v1/resources/import"}:          {"kind": "harness-config", "scope": "user", "sourceUrl": "https://example.invalid/li-user"},
+		{"harnessconfig.user.import", "/api/v1/resources/discover"}:        {"kind": "harness-config", "scope": "user", "sourceUrl": "https://example.invalid/li-user"},
+		// handleWorkspaceSyncTo and handleWorkspaceSyncToFinalize validate
+		// the file list and the manifest before they look up the agent or
+		// check authorization.
+		{"agent.workspace.sync", "/api/v1/agents/{id}/workspace/sync-to"}: {
+			"files": []interface{}{map[string]interface{}{"path": "li.txt", "size": 3, "hash": "li-hash"}},
+		},
+		{"agent.workspace.sync", "/api/v1/agents/{id}/workspace/sync-to/finalize"}: {
+			"manifest": map[string]interface{}{"version": "1", "files": []interface{}{}},
+		},
+		// beginAgentKeysRequest validates the body before the agent lookup
+		// and the authorization check.
+		{"agent.lifecycle.keys", "/api/v1/agents/{id}/keys"}:                      {"keys": "li"},
+		{"agent.lifecycle.keys", "/api/v1/projects/{projectId}/agents/{id}/keys"}: {"keys": "li"},
+		// Global catalog and project-scope branches: valid bodies, so the
+		// probes reach the branch past body validation. A discovery or
+		// import source that is not a GitHub URL stops after the check.
+		{"skill.create", "/api/v1/skills"}:                              {"name": "li-project-skill", "scope": "project", "scopeId": f.project},
+		{"skill.global.create", "/api/v1/skills"}:                       {"name": "li-global-skill", "scope": "global"},
+		{"skill.discover.project", "/api/v1/skills/discover-directory"}: {"projectId": f.project, "sourceUrl": "https://example.invalid/li-skills"},
+		{"skill.discover.global", "/api/v1/skills/discover-directory"}:  {"sourceUrl": "https://example.invalid/li-skills"},
+		{"template.create", "/api/v1/templates"}:                        {"name": "li-created-template", "harness": "claude", "scope": "global"},
+		{"harnessconfig.create", "/api/v1/harness-configs"}:             {"name": "li-created-hc", "harness": "claude", "scope": "global"},
+		{"template.import.global", "/api/v1/resources/import"}:          {"kind": "template", "scope": "global", "sourceUrl": "https://example.invalid/li-global"},
+		{"template.import.global", "/api/v1/resources/discover"}:        {"kind": "template", "scope": "global", "sourceUrl": "https://example.invalid/li-global"},
+		{"template.import.project", "/api/v1/resources/import"}:         {"kind": "template", "scope": "project", "scopeId": f.project, "sourceUrl": "https://example.invalid/li-project"},
+		{"template.import.project", "/api/v1/resources/discover"}:       {"kind": "template", "scope": "project", "scopeId": f.project, "sourceUrl": "https://example.invalid/li-project"},
+		{"harnessconfig.import.global", "/api/v1/resources/import"}:     {"kind": "harness-config", "scope": "global", "sourceUrl": "https://example.invalid/li-global"},
+		{"harnessconfig.import.global", "/api/v1/resources/discover"}:   {"kind": "harness-config", "scope": "global", "sourceUrl": "https://example.invalid/li-global"},
+		{"harnessconfig.import.project", "/api/v1/resources/import"}:    {"kind": "harness-config", "scope": "project", "scopeId": f.project, "sourceUrl": "https://example.invalid/li-project"},
+		{"harnessconfig.import.project", "/api/v1/resources/discover"}:  {"kind": "harness-config", "scope": "project", "scopeId": f.project, "sourceUrl": "https://example.invalid/li-project"},
+		{"skill.resolve.local", "/api/v1/skills/resolve"}:               {"skills": []map[string]string{{"uri": "skill://li-skill-files"}}},
+		{"skill.resolve.github.project", "/api/v1/skills/resolve"}:      {"projectId": f.project, "skills": []map[string]string{{"uri": "gh://li-invalid"}}},
+		{"skill.resolve.github.public", "/api/v1/skills/resolve"}:       {"skills": []map[string]string{{"uri": "gh://li-invalid"}}},
 	}
 }
 

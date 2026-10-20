@@ -30,7 +30,7 @@ import (
 
 // reincarnatePatchNeedsUpdateMsg is the 403 body for a user caller whose
 // reincarnate request has patch flags but who lacks agent.update.
-const reincarnatePatchNeedsUpdateMsg = "Reincarnate patch flags (--service-account, --role, --model, --thinking-level, --harness-auth, --image) need permission to update the agent (agent.update) in addition to lifecycle; a user access token cannot grant it, so use a signed-in session"
+const reincarnatePatchNeedsUpdateMsg = "Reincarnate patch flags (--service-account, --role, --model, --thinking-level, --harness-auth, --image) need permission to update the agent (agent.update) in addition to lifecycle; a user access token also needs the agent:update scope"
 
 // maxHandoffBytes bounds the reincarnate request's handoff text (design §3.2).
 const maxHandoffBytes = 256 * 1024
@@ -276,7 +276,7 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// Decision D4 (ptone/scion#3302): a patch flag edits the agent's
 	// config, so a user caller (session or UAT) also needs ActionUpdate on
 	// the target, the same gate the agent PATCH applies (applyAgentUpdate).
-	// agent.update has no UAT scope, so a UAT cannot patch. Agent callers
+	// A UAT needs the agent:update selector to patch. Agent callers
 	// stay on the lifecycle check (D1). Runs before any side effect, for a
 	// dry run too.
 	if req.hasPatch() && GetUserIdentityFromContext(ctx) != nil {
@@ -525,8 +525,8 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// store (templates, harness configs, pre-start hooks, skills settings),
 	// it never writes. Any store writes happen only below this point, and
 	// only for a non-dry-run request.
-	imageRegistry := dispatchImageRegistry(dispatcher)
-	fresh, warnings, err := s.buildPatchedAppliedConfig(ctx, agent, project, imageRegistry, patch)
+	resolveRegistry := reincarnateImageRegistry(dispatcher, agent.RuntimeBrokerID)
+	fresh, warnings, err := s.buildPatchedAppliedConfig(ctx, agent, project, resolveRegistry, patch)
 	if err != nil {
 		if writeWorkspaceStorageUnavailable(w, err) {
 			return
@@ -535,6 +535,7 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 			"failed to resolve new configuration: "+err.Error(), nil)
 		return
 	}
+	imageRegistry := resolveRegistry(fresh.Profile)
 	if len(req.SharedDirBackends) > 0 {
 		fresh.SharedDirBackendChanges = req.SharedDirBackends
 		fresh.AllowEmptySharedDir = req.AllowEmptySharedDir
@@ -792,8 +793,10 @@ func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, req
 
 	// buildFreshAppliedConfig only reads; the plan and the profile the
 	// agent would run under come from the same call the real path uses.
-	imageRegistry := dispatchImageRegistry(dispatcher)
-	fresh, warnings, err := s.buildPatchedAppliedConfig(ctx, agent, project, imageRegistry, patch)
+	// The new generation runs on dst: resolve its registry there, for the
+	// new profile (ptone/scion#3916).
+	resolveRegistry := reincarnateImageRegistry(dispatcher, dst.ID)
+	fresh, warnings, err := s.buildPatchedAppliedConfig(ctx, agent, project, resolveRegistry, patch)
 	if err != nil {
 		if writeWorkspaceStorageUnavailable(w, err) {
 			return
@@ -810,7 +813,7 @@ func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, req
 		return
 	}
 
-	plan := computeReincarnationPlan(agent.AppliedConfig, fresh, warnings, imageRegistry)
+	plan := computeReincarnationPlan(agent.AppliedConfig, fresh, warnings, resolveRegistry(fresh.Profile))
 	addPatchToPlan(&plan, agent.AppliedConfig, fresh, req)
 	addAuthorityToPlan(&plan, auth)
 	in.Profile = effectiveRuntimeProfileName(fresh.Profile, project)

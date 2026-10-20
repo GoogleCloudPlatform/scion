@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"entgo.io/ent/dialect"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -289,4 +290,92 @@ func TestTestIdentityDelegation_PerDelegationCapUnderLock(t *testing.T) {
 		total += n
 	}
 	assert.Equal(t, hubCap, total)
+}
+
+// Phase DL: the store path creates human-grantor delegations only; an
+// offline delegation (grantor kind test_infra_offline) is written only by
+// the offline host command.
+func TestTestIdentityDelegation_CreateRefusesOfflineKind(t *testing.T) {
+	cs := newFixtureTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	markerAt := now.Add(-time.Hour)
+
+	for name, mutate := range map[string]func(*store.TestIdentityDelegation){
+		"offline kind":   func(d *store.TestIdentityDelegation) { d.GrantorKind = store.DelegationGrantorTestInfraOffline },
+		"unknown kind":   func(d *store.TestIdentityDelegation) { d.GrantorKind = "robot" },
+		"hub binding":    func(d *store.TestIdentityDelegation) { d.HubID = "hub-1" },
+		"marker binding": func(d *store.TestIdentityDelegation) { d.MarkerCreatedAt = &markerAt },
+	} {
+		t.Run(name, func(t *testing.T) {
+			d := newDelegation(uuid.NewString(), now, time.Hour)
+			mutate(d)
+			require.ErrorIs(t, cs.CreateTestIdentityDelegation(ctx, d), store.ErrInvalidInput)
+		})
+	}
+	rows, err := cs.ListTestIdentityDelegations(ctx, "", 0)
+	require.NoError(t, err)
+	assert.Empty(t, rows, "nothing was written")
+
+	// The human path stores and reads back the human kind.
+	d := newDelegation(uuid.NewString(), now, time.Hour)
+	d.GrantorKind = store.DelegationGrantorHuman
+	require.NoError(t, cs.CreateTestIdentityDelegation(ctx, d))
+	got, err := cs.GetTestIdentityDelegation(ctx, d.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.DelegationGrantorHuman, got.GrantorKind)
+	assert.Equal(t, store.DelegationGrantorHuman, got.EffectiveGrantorKind())
+	assert.Empty(t, got.HubID)
+	assert.Nil(t, got.MarkerCreatedAt)
+}
+
+// Phase DL: the binding read returns the marker's hub id, class and
+// creation time, or ErrNotFound without a marker.
+func TestGetTestInfraBinding(t *testing.T) {
+	cs := newFixtureTestStore(t)
+	ctx := context.Background()
+	_, err := cs.GetTestInfraBinding(ctx)
+	require.ErrorIs(t, err, store.ErrNotFound)
+
+	at := time.Date(2026, 10, 19, 1, 2, 3, 0, time.UTC)
+	_, err = cs.client.TestInfraMarker.Create().
+		SetID(testInfraMarkerRowID).
+		SetHubID("hub-1").
+		SetClass("test").
+		SetCreatedAt(at).
+		SetCreatedByHost("host-1").
+		SetWebSessionKey(make([]byte, 64)).
+		Save(ctx)
+	require.NoError(t, err)
+	b, err := cs.GetTestInfraBinding(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "hub-1", b.HubID)
+	assert.Equal(t, "test", b.Class)
+	assert.True(t, b.CreatedAt.Equal(at))
+}
+
+// OPT-4 (ti-dl-rev round 1): a row written without grantor_kind, hub_id
+// and marker_created_at (as every row that predates phase DL was) reads
+// back as a human-grantor delegation with no hub or marker binding: the
+// migration's column default is "human". Raw SQL bypasses ent's create
+// default, so this pins the DDL default itself.
+func TestTestIdentityDelegation_PreDLRowsReadAsHuman(t *testing.T) {
+	cs := newFixtureTestStore(t)
+	ctx := context.Background()
+	db := cs.DB()
+	require.NotNil(t, db)
+	id := uuid.New()
+	now := time.Now().UTC().Truncate(time.Second)
+	q := "INSERT INTO test_identity_delegations (id, grantor_id, workload_sub, scope, member_cap, label, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+	if cs.Dialect() == dialect.Postgres {
+		q = "INSERT INTO test_identity_delegations (id, grantor_id, workload_sub, scope, member_cap, label, created_at, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
+	}
+	_, err := db.ExecContext(ctx, q, id, uuid.NewString(), "100000000000000000042", "test_identity:issue", 5, "", now, now.Add(time.Hour))
+	require.NoError(t, err)
+
+	got, err := cs.GetTestIdentityDelegation(ctx, id.String())
+	require.NoError(t, err)
+	assert.Equal(t, store.DelegationGrantorHuman, got.GrantorKind, "the column default reads as human")
+	assert.Empty(t, got.HubID)
+	assert.Nil(t, got.MarkerCreatedAt)
 }

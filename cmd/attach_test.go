@@ -151,30 +151,29 @@ func newAttachMockHubServer(t *testing.T, projectID, agentName, agentID, runtime
 }
 
 // TestAttachCmd_RuntimeErrorSilencesUsage is a regression test for
-// ptone/scion#2089: a runtime attach failure (agent not found, in this case —
-// standing in for any post-argument-validation failure such as an abnormal
-// session close) must set SilenceUsage on the command so Execute does not
+// ptone/scion#2089: a runtime attach failure (no hub configured, in this
+// case — standing in for any post-argument-validation failure such as an
+// abnormal session close) must set SilenceUsage on the command so Execute does not
 // print the cobra usage block after it, while the error itself is still
 // returned so the exit code stays non-zero.
 func TestAttachCmd_RuntimeErrorSilencesUsage(t *testing.T) {
-	origNoHub := noHub
 	origProjectPath := projectPath
 	origSilenceUsage := attachCmd.SilenceUsage
 	defer func() {
-		noHub = origNoHub
 		projectPath = origProjectPath
 		attachCmd.SilenceUsage = origSilenceUsage
 	}()
 
-	noHub = true
-	projectPath = t.TempDir() // no agents/ dir present -> deterministic "not found"
+	// No hub configured: requireHub fails, a runtime error standing in for
+	// any failure after argument validation.
+	hermeticCLIEnv(t)
+	projectPath = t.TempDir()
 	attachCmd.SilenceUsage = false
 	stubAttachTerminal(t, true)
 
 	err := attachCmd.RunE(attachCmd, []string{"does-not-exist"})
 
-	require.Error(t, err, "expected a runtime error for a nonexistent agent")
-	assert.Contains(t, err.Error(), "not found")
+	require.Error(t, err, "expected a runtime error")
 	assert.True(t, attachCmd.SilenceUsage,
 		"a runtime attach error must silence usage so Execute does not print it")
 }

@@ -105,6 +105,21 @@ type Capabilities struct {
 	// v2.4 §3.4): "launch_id", "generation", or "" for legacy endpoints. The
 	// registry only stores and round-trips it; nothing filters on it.
 	IncarnationSource string `json:"incarnation_source,omitempty"`
+	// Features lists the optional protocol features the session's Hello
+	// advertised (Hello.capabilities.features), such as stream renewal.
+	// The registry only stores and round-trips it; nothing filters on it.
+	Features []string `json:"features,omitempty"`
+}
+
+// HasFeature reports whether the capabilities advertise the optional
+// protocol feature name. Only an exact name matches.
+func (c Capabilities) HasFeature(name string) bool {
+	for _, f := range c.Features {
+		if f == name {
+			return true
+		}
+	}
+	return false
 }
 
 // Has reports whether the capabilities advertise name as a stream kind or

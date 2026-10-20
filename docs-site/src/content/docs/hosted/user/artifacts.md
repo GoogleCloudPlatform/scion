@@ -8,7 +8,7 @@ An **artifact** is a file or a folder that you or an agent publish to the Hub. I
 This guide walks through the common tasks. For every flag, limit, status code and API route, see the [Artifacts reference](/scion/reference/artifacts/).
 
 :::caution[Experimental]
-Artifacts are behind the `hub.artifacts` [experiment](/scion/reference/experiments/), which is off by default, and they need Hub mode. While the experiment is off, the web UI shows no artifact pages, every `scion artifact` command fails, and messages sent with `--artifact` lose their references. See [The artifacts experiment is off](#the-artifacts-experiment-is-off).
+Artifacts are behind the `hub.artifacts` [experiment](/scion/reference/experiments/), which is off by default. While the experiment is off, the web UI shows no artifact pages, every `scion artifact` command fails, and messages sent with `--artifact` lose their references. See [The artifacts experiment is off](#the-artifacts-experiment-is-off).
 :::
 
 ## Who does what
@@ -68,13 +68,13 @@ Things to know before you publish:
 - **Choose a descriptive key.** `--key` is how later publishes find the same artifact, and readers can see it. Name the content (`q3-report`), not yourself or the agent.
 - **Hidden files are left out.** Files and folders whose names start with `.` are not published, and symbolic links inside the folder are refused. Keep build tools and sources outside the folder you publish, so that the folder holds exactly what readers should get.
 - **Size limits apply.** By default a file may be up to 32 MiB, a version up to 256 MiB and 200 files; your Hub may set other limits.
-- **Where it is homed.** An agent's artifact is homed in the agent's project. When you publish as a user, the artifact is homed in the Hub project that your checkout is linked to; link it first with `scion hub link` if the CLI asks you to.
+- **Where it is homed.** An agent's artifact is homed in the agent's project. When you publish as a user, the artifact is homed in the Hub project that your checkout is linked to; if the CLI says the checkout is not linked to a Hub project, link it with `scion hub link`.
 
 ### Web
 
 Open a project, go to its **Files** area and choose the **Artifacts** view. **New artifact** uploads a file, or a folder with a chosen entry file, with a title, an optional key and an optional note. The new artifact is homed in that project.
 
-You can also start from chat: when the **Attach artifact…** picker has nothing to list, it offers **New artifact**, and the new artifact is attached to your message.
+You can also start from chat: in a conversation that belongs to a project, when the **Attach artifact…** picker has nothing to list, it offers **New artifact**, and the new artifact is attached to your message.
 
 ## Publish new versions and get an artifact
 
@@ -82,7 +82,7 @@ Each artifact has numbered versions. A version never changes once it is publishe
 
 ### Add a version (CLI)
 
-Publish again under the same key, optionally with a note:
+Publish again under the same key, optionally with a note. A key belongs to its publisher within a project: publishing under a key adds a version only to your own artifact with that key. The artifact keeps the title it was created with; `--title` is ignored here.
 
 ```bash
 scion artifact publish design.md --key design --note "Addressed review comments"
@@ -94,7 +94,7 @@ Or name the artifact directly, which also works for an artifact without a key:
 scion artifact publish design.md --version-of scion://artifact/5f1c2d3e-...
 ```
 
-With `--version-of`, a single file replaces the current version's entry file, whatever the local file is called, and the version's other files are kept. A folder replaces the whole bundle. You can add versions to artifacts you own and to artifacts shared with you with edit access.
+With `--version-of`, a single file replaces the current version's entry file, whatever the local file is called, and the version's other files are kept. A folder replaces the whole bundle. You can add versions to artifacts you own and to artifacts shared with you with edit access. If the reference names a version (`@<n>`), it must be the current one, or the CLI stops before uploading; `--title` and `--key` cannot be used with `--version-of` or `--review`.
 
 ### Add a version (web)
 
@@ -106,7 +106,7 @@ On the artifact's page, **Edit** opens a Markdown or text entry file in an edito
 scion artifact versions scion://artifact/5f1c2d3e-...
 ```
 
-lists the versions, newest first, with who published each, when, and its note. The current version is marked `*`. Version numbers can skip: a version that was discarded, such as a refused review, keeps its number. The list shows why.
+lists the versions, newest first, with who published each (as an id, such as `agent:<id>`), when, and its note. The current version is marked `*`. Version numbers can skip: a version that was discarded, such as a refused review, keeps its number. The list shows why.
 
 `scion artifact get` fetches an artifact from any runtime broker:
 
@@ -118,7 +118,7 @@ scion artifact get scion://artifact/5f1c2d3e-... > design.md
 scion artifact get scion://artifact/5f1c2d3e-...@2 --out ./design-v2/
 ```
 
-`get` checks every file against what the Hub recorded at publish time, and it does not replace an existing file under `--out` unless you add `--force`.
+`get` checks every file against what the Hub recorded at publish time, and it does not replace an existing file under `--out` (short form `-o`) unless you add `--force`; without it, `get` stops and says which file already exists.
 
 ## View an artifact
 
@@ -132,7 +132,7 @@ Opening an artifact shows its page with three tabs:
 - **Files** lists every file of the version. Plain text, Markdown, CSV, TSV, JSON, YAML, TOML and PNG, JPEG, GIF and WebP images open in the browser; other files, such as HTML, CSS and SVG, can only be downloaded there. An HTML entry renders in **Preview**.
 - **History** lists the versions. Use the **Version** menu in the header, or a version's link here, to open an earlier one.
 
-**Copy reference** in the header copies the version's `scion://artifact/` reference, ready to paste into a message or a command. For a single-file version, **Download** in the header downloads the file; for a version with more than one file, download them from the **Files** tab.
+The clipboard button next to the reference in the header (**Copy reference**) copies the version's `scion://artifact/` reference, ready to paste into a message or a command. For a single-file version, **Download** in the header downloads the file; for a version with more than one file, download them from the **Files** tab.
 
 ### How HTML artifacts render
 
@@ -174,11 +174,11 @@ scion artifact get scion://artifact/5f1c2d3e-... > plan.md
 scion artifact publish plan.md --review scion://artifact/5f1c2d3e-...
 ```
 
-The [reference](/scion/reference/artifacts/#reviews) lists every mark and the rules for code.
+As with `--version-of`, a reference with `@<n>` must name the current version. The [reference](/scion/reference/artifacts/#reviews) lists every mark and the rules for code.
 
 ### Act on a review (owner)
 
-When an agent owns the artifact, the Hub sends it a message when someone else's review is published, with the commands to read it. To read a review:
+When an agent owns the artifact, the Hub sends it a message when someone else's review is published, with the commands to read it. A user owner gets no message; check for the *Review pending* badge instead. To read a review:
 
 ```bash
 scion artifact get scion://artifact/5f1c2d3e-...             # with the marks
@@ -191,9 +191,26 @@ Apply or answer the marks, then publish the resolved text as the next version wi
 
 ## Share an artifact
 
-Sharing is for **users only**: the artifact's owner, or a user it gave *Can manage*. Agents cannot share artifacts, including their own, so nobody can share an artifact owned by an agent beyond its home project (see [What agents cannot do](#what-agents-cannot-do)).
+Sharing is for **users only**: the artifact's owner, or a user it gave *Can manage*. Agents cannot share artifacts, including their own. For an artifact owned by an agent, the user who delegated to the agent and the owners of its home project can share it too, with limits; see [Share an agent's artifact](#share-an-agents-artifact).
 
-On the artifact's page, **Share** opens a dialog with three parts.
+On the artifact's page, **Share** opens a dialog with three parts: **Share links**, **People and projects**, and **Retention** (see [Expiry, moving and deleting](#expiry-moving-and-deleting)).
+
+### Share links
+
+A share link lets anyone who holds it open the artifact's **current** version in a browser **without signing in**. Use one for readers who do not have an account on the Hub.
+
+- Choose a lifetime (1, 7 or 30 days) and **Create link**. The link is shown **once**, with **Copy**; copy it then.
+- Treat the link like a password: anyone holding it can open the artifact until it expires or you **Revoke** it. Every link expires, at the latest when the artifact itself expires.
+- An HTML entry renders in its sandbox; a Markdown entry opens as plain text.
+- A link gives no other access: it does not add the artifact to anyone's list.
+
+From the CLI, users can do the same with `scion artifact share`. `--ttl` sets the lifetime in hours or days (such as `24h` or `3d`), up to the Hub's maximum; see the [reference](/scion/reference/artifacts/#share-links) for defaults:
+
+```bash
+scion artifact share scion://artifact/5f1c2d3e-... --ttl 3d
+scion artifact share scion://artifact/5f1c2d3e-... --list
+scion artifact share scion://artifact/5f1c2d3e-... --revoke <link-id>
+```
 
 ### People and projects (grants)
 
@@ -207,31 +224,38 @@ Search for a user, or for a project when the Hub's cross-project sharing setting
 
 A grant to a project covers its members and its agents. The home project is listed first: it always has at least *Can view*, can be raised to *Can edit*, and cannot be removed. Grants stay until they are removed or the artifact is deleted.
 
-### Share links
+### Share an agent's artifact
 
-A share link lets anyone who holds it open the artifact's **current** version in a browser **without signing in**. Use one for readers who do not have an account on the Hub.
+An agent cannot share what it publishes, so the people accountable for it can. For an artifact **owned by an agent**, these users are its **stewards**:
 
-- Choose a lifetime (1, 7 or 30 days) and **Create link**. The link is shown **once**, with **Copy**; copy it then.
-- Treat the link like a password: anyone holding it can open the artifact until it expires or you **Revoke** it. Every link expires, at the latest when the artifact itself expires.
-- An HTML entry renders in its sandbox; a Markdown entry opens as plain text.
-- A link gives no other access: it does not add the artifact to anyone's list.
+- the user who delegated to the agent (or to the agent that started it), while they hold a role in the artifact's home project;
+- the owners of the artifact's home project (and super-admins).
 
-From the CLI, users can do the same with `scion artifact share`:
+Project admins who are not owners, and other members, are not stewards.
+
+A steward can:
+
+- give people and projects *Can view* or *Can edit*, and give a person *Can review* (a project grant still needs the Hub's cross-project sharing setting);
+- change or remove existing grants, including lowering a *Can manage* grant;
+- create, list and revoke share links;
+- change the artifact's expiry, and delete it.
+
+A steward cannot give *Can manage* or move the artifact to another project. The Hub refuses both with `steward_action_not_allowed`. A user with *Can manage* on the artifact can do both. For full control of your own copy, fetch it and publish it as your own artifact (see [What agents cannot do](#what-agents-cannot-do)).
+
+Steward rights follow the artifact as it is now. They end when you lose your role in the home project, when the delegation to the agent is revoked, or when the artifact moves to a project where you no longer qualify: as a project owner, one you do not own; as the delegating user, one where you hold no role. Grants and links you created stay until someone removes them. Every grant, change and link you create is recorded with the reason you were allowed.
+
+For now, stewards share from the CLI: the artifact page does not show **Share** to them yet.
 
 ```bash
-scion artifact share scion://artifact/5f1c2d3e-... --ttl 7d
-scion artifact share scion://artifact/5f1c2d3e-... --list
-scion artifact share scion://artifact/5f1c2d3e-... --revoke <link-id>
+scion artifact grants scion://artifact/5f1c2d3e-... --add user:<id> --permission read
+scion artifact share scion://artifact/5f1c2d3e-... --ttl 3d
 ```
 
 ### Grant review access to an agent's artifact
 
-Because an agent cannot share its own artifacts, it cannot choose who reviews its work. For an artifact **owned by an agent**, these users may give a person review access even though they cannot otherwise manage the artifact:
+For an artifact **owned by an agent**, admins of its home project who are not stewards may still give a person review access, even though they cannot otherwise manage the artifact. The stewards (the user who delegated to the agent, and the project's owners) can do this too, and more; see [Share an agent's artifact](#share-an-agents-artifact).
 
-- the user who delegated to the agent;
-- the project owners and admins of the artifact's home project, and super-admins.
-
-They see **Grant review access** on the artifact page instead of **Share**. Search for a user and choose **Add** to give them *Can review*: they can then publish reviews, and nothing else.
+They see **Grant review access** on the artifact page instead of **Share**. Stewards see it too, for now. Search for a user and choose **Add** to give them *Can review*: they can then publish reviews, and nothing else.
 
 Review access does not give read access. The person must already be able to read the artifact, through its home project or a grant to one of their projects; if that access ends, so does review. It is refused for someone who already holds a grant of their own on the artifact; check that grant, because *Can edit* and *Can manage* already include review.
 
@@ -259,15 +283,15 @@ Keep in mind:
 
 - The Hub keeps only references that you can read, and drops the others with a warning.
 - When you message one agent or one user directly, the Hub warns if the recipient may not be able to read a reference. The message is still delivered; ask whoever manages the artifact to share it with the recipient, or check the recipient agent's scopes (see [`missing_scope`](#missing_scope-when-an-agent-publishes)).
-- Some messages do not carry artifact references, among them group (`group[...]`) and broadcast messages, @-mention copies, and messages that arrive through chat plugins. See [Artifacts in messages](/scion/reference/artifacts/#artifacts-in-messages).
+- `scion message --artifact` cannot be used with `group[...]` recipients or with `--in`/`--at`. Broadcast messages, @-mention copies and messages that arrive through chat plugins lose their references. See [Artifacts in messages](/scion/reference/artifacts/#artifacts-in-messages).
 
 ## Expiry, moving and deleting
 
 These actions are for **users** who manage the artifact. Agents cannot do any of them.
 
 - **Expiry.** In the Share dialog, **Retention** sets when the artifact expires: never, or 1, 7, 30 or 90 days from now. Before you save, the dialog says how many share links end early and how many grants go with the artifact. From the moment it expires, nobody can open it and its share links stop working. Your Hub may also give new artifacts an expiry by default.
-- **Moving.** **Move…** gives an artifact a new home project, for example after its project was deleted. It appears on the artifact page, and in the Artifacts list on rows whose home project was deleted, for the owner and users with *Can manage*, while the Hub's cross-project sharing setting is on. You must be allowed to publish in the new project. The old home project loses its access unless you add a grant for it.
-- **Deleting.** Run `scion artifact delete <ref>` (users only; add `--yes` when not at a terminal). The owner, a user with *Can manage*, and the project owners and admins of the artifact's home project (and super-admins) can delete it. Deleting ends its grants and share links, and chat references to it show as unavailable. **There is no undelete.**
+- **Moving.** **Move…** gives an artifact a new home project, for example after its project was deleted. It appears on the artifact page, and in the Artifacts list on rows whose home project was deleted, for the owner and users with *Can manage* (not for [stewards](#share-an-agents-artifact)), while the Hub's cross-project sharing setting is on. You must be allowed to publish in the new project. The old home project loses its access unless you add a grant for it.
+- **Deleting.** Run `scion artifact delete <ref>` (users only; add `--yes` when not at a terminal). The owner, a user with *Can manage*, the project owners and admins of the artifact's home project (and super-admins), and, for an artifact owned by an agent, the user who delegated to the agent (while they hold a role in its home project) can delete it. Deleting ends its grants and share links, and chat references to it show as unavailable. **There is no undelete.**
 
 Deleting a project does not delete its artifacts, and it does not revoke their share links. Moving the artifact does not end them either. To end that access, revoke the links, set the artifact to expire under **Retention**, or delete it.
 
@@ -277,24 +301,24 @@ Agents use the same `scion artifact` command, but in agent mode:
 
 - **No share links.** `scion artifact share` is not available to agents, and the Hub refuses an agent's request to create one, even for an artifact the agent owns.
 - **No grants.** Agents cannot add, change or remove grants, including review access.
-- **No deleting, expiry changes or moves.** `scion artifact delete` is not available to agents.
+- **No deleting, expiry changes or moves.** `scion artifact delete` is not available to agents. In an agent, `share` and `delete` do not exist at all: running one fails with `unknown command "share" for "scion artifact"` (or `"delete"`). That is expected, not a typo or an old CLI.
 - **Publishing needs the right agent role.** Agents started with `--role readonly` can read artifacts but not publish them; `baseline` and `full` agents can do both. An agent can publish new versions or reviews of someone else's artifact only with *Can edit* on it, granted to the agent or to its project.
 
-An artifact an agent owns has no user owner and no one with *Can manage*, so nobody can share it beyond its home project, and **Grant review access** reaches only people who can already read it. When the work needs readers or reviewers outside the project, the user who delegated to the agent can fetch it (`scion artifact get <ref> --out <folder>`) and publish it as their own artifact, which they can then share. The copy is a new artifact with its own reference, and it starts without the original's history or reviews; versions the agent publishes later still go to the original. If a review is current, add `--kind publish` (or `--accept`) to `get`. To let the agent keep publishing to the copy, publish the copy into the agent's project, then raise that home project's grant on the copy to *Can edit*.
+An artifact an agent owns has no user owner, but it does have [stewards](#share-an-agents-artifact): the user who delegated to the agent and the owners of its home project can share it with readers and reviewers outside the project. When someone needs full ownership, they can republish it: fetch it (`scion artifact get <ref> --out <folder>`) and publish it as your own artifact. The copy is a new artifact with its own reference and without the original's history or reviews.
 
 ## Troubleshooting
 
 ### "Not found" for an artifact
 
-A `404` means that the artifact does not exist **or** that you cannot read it. The Hub gives the same answer for both, by design, so it does not reveal whether an artifact exists. Check the reference, then ask whoever manages the artifact (its owner, or a user with *Can manage*) to share it with you or your project. An artifact owned by an agent cannot be shared beyond its home project; see [What agents cannot do](#what-agents-cannot-do).
+A `404` means that the artifact does not exist **or** that you cannot read it. The Hub gives the same answer for both, by design, so it does not reveal whether an artifact exists. Check the reference, then ask whoever manages the artifact (its owner, or a user with *Can manage*) to share it with you or your project. For an artifact owned by an agent, ask the user who delegated to the agent or an owner of its home project; see [Share an agent's artifact](#share-an-agents-artifact).
 
 ### `missing_scope` when an agent publishes
 
-`scion artifact publish` fails with code `missing_scope` and a message such as "the credential does not carry the project:artifact:read scope needed to publish artifacts". The agent's token lacks the artifact scopes. The error names every missing scope: `project:artifact:read` to use artifacts at all, and `project:artifact:write` to publish. Without `project:artifact:read`, every read answers `404`, even for an artifact shared with the agent.
+`scion artifact publish` fails with code `missing_scope` and a message such as "the credential does not carry the project:artifact:read and project:artifact:write scopes needed to publish artifacts", followed by a hint with the fix below. The agent's token lacks the artifact scopes. The error names every missing scope: `project:artifact:read` to use artifacts at all, and `project:artifact:write` to publish. Without `project:artifact:read`, every read answers `404`, even for an artifact shared with the agent.
 
-- **Check.** `scion whoami --full`, run inside the agent, lists the token's scopes.
+- **Check.** `scion whoami --full`, run inside the agent, lists the token's scopes on its `Scopes:` line.
 - **Usual cause.** The agent's creator does not hold the artifact scopes, so they were left out of the agent's token. The Hub warns about this when it creates or starts the agent. Recreating the agent from the same parent gives it the same scopes, so that does not help.
-- **Fix.** Once the creator holds the scopes, a Hub super-admin runs `scion reset-auth <agent> --reissue-scopes`, parents before children (see [Reset Auth and Scope Re-issue](/scion/reference/reset-auth/)). Agents created from an access token issued before artifacts existed need to be recreated from a current credential.
+- **Fix.** Once the creator holds the scopes, a Hub super-admin runs `scion reset-auth <agent> --reissue-scopes` (add `--dry-run` first to preview the change), parents before children (see [Reset Auth and Scope Re-issue](/scion/reference/reset-auth/)). Agents created from an access token issued before artifacts existed need to be recreated from a current credential.
 - **Role.** A `readonly` agent can never publish; use a `baseline` or `full` agent.
 
 ### The artifacts experiment is off
@@ -303,7 +327,7 @@ While `hub.artifacts` is off:
 
 - **Web:** there is no *Artifacts* item in the sidebar, artifact pages show "not found", the project Files area has no *Artifacts* view, and the chat paperclip offers only file upload.
 - **CLI:** every artifact request answers `404`. `scion artifact publish` adds a hint that the experiment may be off; `get` lists it among the possible causes. Messages sent with `--artifact` lose their references, with a warning.
-- **Check.** Inside an agent, `scion whoami --full` lists the experiments that are on now. A Hub admin turns the experiment on under **Admin → Server Config → Experiments** (see [Experiments](/scion/reference/experiments/)).
+- **Check.** Inside an agent, `scion whoami --full` lists the experiments that are on now, on its `Experiments:` line. A Hub admin turns the experiment on under **Admin → Server Config → Experiments** (see [Experiments](/scion/reference/experiments/)).
 
 If the experiment is on but artifacts are disabled in the Hub's settings, the web controls still appear, but every artifact request behind them, and every `scion artifact` command, answers `404` (ptone/scion#4932). Messages sent with `--artifact` lose their references, with a warning. Ask a Hub admin to check the Hub's `artifacts` settings.
 

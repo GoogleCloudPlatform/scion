@@ -20,6 +20,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
@@ -43,13 +45,13 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
-	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/managedagent"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/google/uuid"
 	"github.com/knadh/koanf/v2"
@@ -554,9 +556,15 @@ type reincarnateTestDispatcher struct {
 	// resolved container image on a successful start response.
 	startImage string
 
-	// imageRegistry is the registry the fake reports through ImageRegistry(),
-	// as the HTTP dispatcher reports the registry it rewrites images to.
+	// imageRegistry is the registry the fake reports through
+	// ImageRegistryFor, as the HTTP dispatcher reports the registry it
+	// rewrites images to.
 	imageRegistry string
+	// imageRegistryByBroker, when set, answers ImageRegistryFor per broker
+	// instead of imageRegistry; registryCalls records each (broker,
+	// profile) asked for.
+	imageRegistryByBroker map[string]string
+	registryCalls         [][2]string
 
 	// reprovisionEcho and startEcho, when set, run on a successful dispatch
 	// against the dispatched agent's AppliedConfig, simulating the broker
@@ -3361,6 +3369,42 @@ func setupProjectWithBroker(t *testing.T, s store.Store, projectID, projectName 
 
 const testOIDCIssuerURL = "https://scion.example.com"
 
+// installTestOIDCKeyManager sets an OIDCKeyManager with a fresh RS256 key and
+// the testOIDCIssuerURL issuer on srv. Routes that New() registers only when
+// the OIDC provider is enabled stay unregistered.
+func installTestOIDCKeyManager(t *testing.T, srv *Server) {
+	t.Helper()
+
+	// Generate a test RSA key pair.
+	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	kid := computeKeyID(&privKey.PublicKey)
+	signingKey := &OIDCSigningKey{
+		KeyID:      kid,
+		PrivateKey: privKey,
+		PublicKey:  &privKey.PublicKey,
+		Active:     true,
+	}
+
+	// Create the RS256 signer (needed by identity token endpoint).
+	signer, err := jose.NewSigner(
+		jose.SigningKey{Algorithm: jose.RS256, Key: privKey},
+		(&jose.SignerOptions{}).WithType("JWT").WithHeader("kid", kid),
+	)
+	require.NoError(t, err)
+
+	mgr := &OIDCKeyManager{
+		activeKey: signingKey,
+		allKeys:   []*OIDCSigningKey{signingKey},
+		signer:    signer,
+		issuerURL: testOIDCIssuerURL,
+	}
+
+	srv.oidcKeyManager = mgr
+	srv.oidcIssuerURL = testOIDCIssuerURL
+}
+
 // testOIDCServerWithRoutes creates a Server with OIDC enabled via config so
 // that routes are registered during New(). Use for mux-routing tests.
 func testOIDCServerWithRoutes(t *testing.T) *Server {
@@ -4396,20 +4440,13 @@ type getProjectErrStore struct {
 // regardless of how many callers need it, no read at all when nothing needs
 // it, and a failed read that the handler recovers from without crashing.
 //
-// getRuntimeBrokerErrBroker, when set alongside getRuntimeBrokerErr, is
-// returned together with the error, simulating a store call that returns a
-// (non-nil but unreliable) value in the same breath as an error. This proves
-// a caller actually gates on the error rather than trusting whatever value
-// came back whenever one happens to be present.
-//
 // updateRuntimeBrokerCalls counts broker row writes, so a test can prove the
 // heartbeat handler writes the row only when the refreshed state changed.
 type countingBrokerLoadStore struct {
 	store.Store
-	getRuntimeBrokerCalls     int
-	getRuntimeBrokerErr       error
-	getRuntimeBrokerErrBroker *store.RuntimeBroker
-	updateRuntimeBrokerCalls  int
+	getRuntimeBrokerCalls    int
+	getRuntimeBrokerErr      error
+	updateRuntimeBrokerCalls int
 }
 
 func setupScheduledEventTest(t *testing.T) (*Server, store.Store, string) {
@@ -4521,34 +4558,6 @@ func setupScopedDispatchAgentOwner(t *testing.T, srv *Server, s store.Store, pro
 	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, projectID, userID))
 
 	return ownerUser
-}
-
-// assertScheduledEventBoundaryIneligible checks that identity is refused
-// scheduled_event.<action> on projectID at bearer gate stage 3b.
-// scheduled_event.create is not eligible for a project boundary.
-// TestAuthorizeScheduledDispatchAgentAuthoring_Precondition checks the
-// dispatch_agent authoring precondition itself for every credential shape.
-func assertScheduledEventBoundaryIneligible(t *testing.T, srv *Server, identity Identity, projectID string, action Action) {
-	t.Helper()
-	decision := srv.authzService.Decide(context.Background(), AuthzRequest{
-		Principal:  principalContextForIdentity(identity),
-		Credential: credentialContextForIdentity(identity),
-		Resource:   Resource{Type: "scheduled_event", ParentType: "project", ParentID: projectID},
-		Action:     action,
-		Permission: "scheduled_event." + string(action),
-	})
-	assert.False(t, decision.Allowed)
-	assert.Equal(t, bearerReasonBoundaryIneligible, decision.Reason)
-}
-
-// assertScheduleAuthoringRefused checks that rec is the authoring credential
-// gate's refusal: 403 with the GOV_PENDING session-only reason.
-func assertScheduleAuthoringRefused(t *testing.T, rec *httptest.ResponseRecorder) {
-	t.Helper()
-	reason, credential := sessionOnlyDetailsOf(rec)
-	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	assert.Equal(t, string(authzop.ReasonGovernancePending), reason, rec.Body.String())
-	assert.Equal(t, sessionRequiredCredential, credential, rec.Body.String())
 }
 
 // checkJSONError asserts that the response body is a valid JSON ErrorResponse.
@@ -5135,9 +5144,13 @@ func (d *reincarnateTestDispatcher) reprovisionSnapshot() (int, []store.AgentApp
 	return d.reprovisionCalls, append([]store.AgentAppliedConfig(nil), d.reprovisionConfigs...)
 }
 
-func (d *reincarnateTestDispatcher) ImageRegistry() string {
+func (d *reincarnateTestDispatcher) ImageRegistryFor(brokerID, profile string) string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.registryCalls = append(d.registryCalls, [2]string{brokerID, profile})
+	if d.imageRegistryByBroker != nil {
+		return d.imageRegistryByBroker[brokerID]
+	}
 	return d.imageRegistry
 }
 
@@ -5980,7 +5993,7 @@ func (s *countingBrokerLoadStore) UpdateRuntimeBroker(ctx context.Context, broke
 func (s *countingBrokerLoadStore) GetRuntimeBroker(ctx context.Context, id string) (*store.RuntimeBroker, error) {
 	s.getRuntimeBrokerCalls++
 	if s.getRuntimeBrokerErr != nil {
-		return s.getRuntimeBrokerErrBroker, s.getRuntimeBrokerErr
+		return nil, s.getRuntimeBrokerErr
 	}
 	return s.Store.GetRuntimeBroker(ctx, id)
 }
@@ -6440,3 +6453,13 @@ func (f *brokerAuthFixture) asAgent(t *testing.T, method, path string, body inte
 }
 
 const provisionPath = "/api/v1/users"
+
+// createProjectOwnerRoleBinding creates a project-owner role binding for the
+// user on the project, with its audit record, in one transaction. Only
+// tests use it; the create, register and clone handlers write the binding
+// inside the project create transaction (createProjectWithOwner).
+func (s *Server) createProjectOwnerRoleBinding(ctx context.Context, projectID, userID string) error {
+	return s.store.WithTx(ctx, func(tx store.Store) error {
+		return s.createProjectOwnerRoleBindingTx(ctx, tx, projectID, userID)
+	})
+}

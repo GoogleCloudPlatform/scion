@@ -36,9 +36,8 @@ func UnmarshalJSONC(data []byte, v any) error {
 	return json.Unmarshal(data, v)
 }
 
-// StripComments replaces C-style comments with whitespace to preserve locations,
-// or just removes them. For JSON unmarshal, removing them is fine.
-// We'll just skip them.
+// StripComments removes C-style comments, replacing block comments with a space
+// so adjacent JSON tokens cannot merge.
 func StripComments(data []byte) []byte {
 	var out []byte
 	inString := false
@@ -58,7 +57,7 @@ func StripComments(data []byte) []byte {
 		}
 
 		if inLineComment {
-			if c == '\n' {
+			if c == '\n' || c == '\r' {
 				inLineComment = false
 				out = append(out, c)
 			}
@@ -93,6 +92,7 @@ func StripComments(data []byte) []byte {
 				}
 				if data[i+1] == '*' {
 					inBlockComment = true
+					out = append(out, ' ')
 					i++
 					continue
 				}
