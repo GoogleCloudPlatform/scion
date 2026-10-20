@@ -27,7 +27,6 @@ import (
 	"net/http"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -70,7 +69,7 @@ const (
 	// home, one directory per message.
 	attachmentInboxDir = "~/.scion/inbox/"
 	// maxAttachmentNameRunes bounds a reduced attachment name.
-	maxAttachmentNameRunes = 120
+	maxAttachmentNameRunes = messaging.MaxAttachmentNameRunes
 	// deliveryRedemptionRetention is how long a redeemed nonce is kept;
 	// longer than any capability lives.
 	deliveryRedemptionRetention = 24 * time.Hour
@@ -184,33 +183,10 @@ func (s *Server) verifyDeliveryCapability(token string, now time.Time) (delivery
 // reduceAttachmentName reduces a stored attachment name to a name that is
 // safe as a file name and in an envelope: [A-Za-z0-9._-] only (every other
 // rune becomes '_'), at most maxAttachmentNameRunes runes, and never
-// starting with '.' or '-' (such a name gets an "attachment-" prefix).
+// starting with '.' or '-' (such a name gets an "attachment-" prefix):
+// messaging.ReduceAttachmentName, which the CLI shares.
 func reduceAttachmentName(name string) string {
-	var b strings.Builder
-	n := 0
-	for _, r := range name {
-		if n == maxAttachmentNameRunes {
-			break
-		}
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
-			b.WriteRune(r)
-		default:
-			b.WriteRune('_')
-		}
-		n++
-	}
-	out := b.String()
-	if out == "" {
-		return "attachment"
-	}
-	if out[0] == '.' || out[0] == '-' {
-		out = "attachment-" + out
-		if utf8.RuneCountInString(out) > maxAttachmentNameRunes {
-			out = out[:maxAttachmentNameRunes]
-		}
-	}
-	return out
+	return messaging.ReduceAttachmentName(name)
 }
 
 // attachmentInboxPath is where attachment name (reduced) of message
