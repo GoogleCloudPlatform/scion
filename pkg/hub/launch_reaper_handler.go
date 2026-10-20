@@ -137,6 +137,10 @@ func (s *Server) launchReaperTickHandler() func(ctx context.Context) {
 		// is fire-and-forget over in-memory subscriber channels — so there is
 		// nothing to check or that could feed back into arming state here.
 		for i := range result.Reaped {
+			// A start launch the reaper ended (timed out or lost) from a
+			// provisioned prior returns the agent to rest, as an applied
+			// failed report does (ptone/scion#4669).
+			s.settleFailedStartLaunch(ctx, &result.Reaped[i])
 			s.events.PublishAgentStatus(ctx, &result.Reaped[i])
 		}
 	}

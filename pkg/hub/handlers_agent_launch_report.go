@@ -204,6 +204,10 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 		if reason := launchFailureRevokeReason(&updated); reason != "" {
 			revokeAgentCredentialsBestEffort(ctx, s.store, agentID, reason)
 		}
+		// A failed start of a provisioned agent returns it to rest, as a
+		// synchronous failed start does (ptone/scion#4669, design D-c "Run
+		// intent").
+		s.settleFailedStartLaunch(ctx, &updated)
 	}
 
 	// An applied succeeded report settles the run the launch started

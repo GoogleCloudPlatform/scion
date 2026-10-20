@@ -702,6 +702,39 @@ func (s *Server) settleFailedProvisionedStart(ctx context.Context, agentID strin
 	}
 }
 
+// settleFailedStartLaunch is the run-intent hook of a start launch's
+// failure end (ptone/scion#4669, design D-c "Run intent"): when a start
+// launch (kind start; a restart's failure ends stopped and keeps its intent)
+// ended failed, timed_out or lost from a provisioned prior
+// (launch_prior_phase created or provisioning, which covers a retry from a
+// resume-memory row), it calls settleFailedProvisionedStart as the
+// synchronous failed start does (startAgentCore). The run intent returns to
+// stopped and the message, "Start failed: <the failure>. <the provisioned
+// note>", says why. a is the row the failure end wrote. It is the shared
+// call site for every start-launch failure end: the applied failed report,
+// the launch reaper's ends and any later failure branch (kr-5368 PR 2's
+// failure after running_observed reuses it). Start launches exist only
+// while hub.async_agent_start is on; one begun before the experiment was
+// turned off still settles here when it ends.
+func (s *Server) settleFailedStartLaunch(ctx context.Context, a *store.Agent) {
+	if a == nil || a.LaunchKind != store.LaunchKindStart || a.LaunchState != store.LaunchStateEnded || a.RunIntentAt == nil {
+		return
+	}
+	switch a.LaunchEndReason {
+	case store.LaunchEndReasonFailed, store.LaunchEndReasonTimedOut, store.LaunchEndReasonLost:
+	default:
+		return
+	}
+	if prior := state.Phase(a.LaunchPriorPhase); prior != state.PhaseCreated && prior != state.PhaseProvisioning {
+		return
+	}
+	failure := a.Message
+	if failure == "" {
+		failure = a.LaunchError
+	}
+	s.settleFailedProvisionedStart(ctx, a.ID, *a.RunIntentAt, "Start failed: "+failure+". "+provisionedRestingNote)
+}
+
 // writeStartedStatus is startAgentCore's default post-start write: the
 // phase the broker reported (running when it reported none or a resting
 // phase), its container status, and the previous run's exit fields cleared

@@ -351,10 +351,14 @@ type asyncHubDispatcher struct {
 	// onAccept, when set, runs after a start is accepted (for example a
 	// delete that wins while the start is in flight).
 	onAccept func(ctx context.Context, a *store.Agent)
-	mu       sync.Mutex
-	opts     []StartDispatchOptions
-	resumes  []bool
-	plain    int
+	// failSync, when set, is what a synchronous start returns.
+	failSync error
+	// launchTimeout is the accepted launch's budget (default 5 minutes).
+	launchTimeout time.Duration
+	mu            sync.Mutex
+	opts          []StartDispatchOptions
+	resumes       []bool
+	plain         int
 }
 
 func (d *asyncHubDispatcher) DispatchAgentStart(_ context.Context, _ *store.Agent, _ string, resume bool) error {
@@ -362,7 +366,7 @@ func (d *asyncHubDispatcher) DispatchAgentStart(_ context.Context, _ *store.Agen
 	defer d.mu.Unlock()
 	d.plain++
 	d.resumes = append(d.resumes, resume)
-	return nil
+	return d.failSync
 }
 
 func (d *asyncHubDispatcher) DispatchAgentStartWithOptions(ctx context.Context, a *store.Agent, _ string, resume bool, opts StartDispatchOptions) (*StartDispatchResult, error) {
@@ -373,7 +377,11 @@ func (d *asyncHubDispatcher) DispatchAgentStartWithOptions(ctx context.Context, 
 	if !opts.Async || !d.accept {
 		return nil, nil
 	}
-	id, err := d.s.BeginStartLaunch(ctx, a.ID, opts.launchKind(), 5*time.Minute, store.BeginLaunchOptions{PriorPhase: opts.PriorPhase})
+	timeout := d.launchTimeout
+	if timeout == 0 {
+		timeout = 5 * time.Minute
+	}
+	id, err := d.s.BeginStartLaunch(ctx, a.ID, opts.launchKind(), timeout, store.BeginLaunchOptions{PriorPhase: opts.PriorPhase})
 	if err != nil {
 		return nil, err
 	}
@@ -773,6 +781,147 @@ func TestAsyncStart_FailedHandoffReleasesSlot(t *testing.T) {
 
 	f.srv.ReconcileStaleBrokerQuotaReservations(context.Background())
 	assert.False(t, hasReservation(t, f.s, store.LimitMaxAgentsPerBroker, a.ID), "the sweep does not restore it")
+}
+
+// startEnd is the part of an agent row D-T9 compares between a failed
+// synchronous start and a failed asynchronous start.
+type startEnd struct {
+	phase     string
+	intent    store.RunIntent
+	message   string
+	reserved  bool
+	resumeMem string
+}
+
+func readStartEnd(t *testing.T, f *reconcileFixture, id string) startEnd {
+	t.Helper()
+	a := getAgent(t, f.s, id)
+	return startEnd{
+		phase: a.Phase, intent: a.RunIntent, message: a.Message,
+		reserved:  hasReservation(t, f.s, store.LimitMaxAgentsPerBroker, id),
+		resumeMem: a.LaunchResumePhase,
+	}
+}
+
+// d9Prior is one D-T9 prior: the agent's phase, and the phase a failed
+// start remembers (resume memory) when the row starts as an error row
+// that remembers it ("" for a plain row).
+type d9Prior struct {
+	name   string
+	phase  state.Phase
+	memory state.Phase
+}
+
+var d9Priors = []d9Prior{
+	{"stopped", state.PhaseStopped, ""},
+	{"error", state.PhaseError, ""},
+	{"suspended", state.PhaseSuspended, ""},
+	{"halted", state.PhaseHalted, ""},
+	{"created memory (retry)", state.PhaseCreated, state.PhaseCreated},
+	{"provisioning memory (retry)", state.PhaseProvisioning, state.PhaseProvisioning},
+	{"suspended memory (retry)", state.PhaseSuspended, state.PhaseSuspended},
+}
+
+// newD9Agent makes the prior's row: a plain row in its phase, or an error
+// row remembering the memory phase (seedResumeMemory).
+func newD9Agent(t *testing.T, f *reconcileFixture, slug string, p d9Prior) *store.Agent {
+	t.Helper()
+	if p.memory == "" {
+		return f.addAgent(slug, string(p.phase), "")
+	}
+	return seedResumeMemory(t, f.s, f.addAgent(slug, string(p.memory), ""), string(p.memory))
+}
+
+// TestAsyncStart_D9SyncAsyncParity is design D-T9 (with v3.1 N2's retry
+// from a memory row): for each prior phase, a failed synchronous start and
+// a failed asynchronous start (an applied failed report) leave the agent
+// with
+//   - the phase D-c assigns: the synchronous rollback restores the stored
+//     phase; the asynchronous end restores stopped or error, and ends error
+//     with resume memory for a suspended, halted, created or provisioning
+//     prior (D-c failure phase, the memory carried forward on a retry);
+//   - the same run intent: stopped for a provisioned prior (created or
+//     provisioning, directly or remembered), which also gets the same
+//     message shape, "Start failed: <the failure>. <provisionedRestingNote>";
+//     running otherwise, since a failed start is still a start asked for;
+//   - the same reservation state: released (every prior here is uncounted).
+func TestAsyncStart_D9SyncAsyncParity(t *testing.T) {
+	refused := fmt.Errorf("broker refused: %w", errStartRequestNotSent)
+	for i, p := range d9Priors {
+		t.Run(p.name, func(t *testing.T) {
+			f, d := newAsyncStartFixture(t)
+			setBrokerAgentCeiling(t, f.s, 10)
+			d.failSync = refused
+
+			syncA := newD9Agent(t, f, fmt.Sprintf("d9-sync-%d", i), p)
+			code, body := lifecycleWithBody(t, f, syncA.ID, "start", nil)
+			require.NotEqual(t, http.StatusOK, code, "the synchronous start failed: %v", body)
+			syncEnd := readStartEnd(t, f, syncA.ID)
+
+			asyncA := newD9Agent(t, f, fmt.Sprintf("d9-async-%d", i), p)
+			code, body = lifecycleWithBody(t, f, asyncA.ID, "start", map[string]bool{"acceptAsyncLaunch": true})
+			require.Equal(t, http.StatusOK, code, body)
+			row := getAgent(t, f.s, asyncA.ID)
+			require.Equal(t, store.LaunchStateActive, row.LaunchState)
+			rec := postLaunchReport(t, f.srv, f.brokerID, asyncA.ID, f.brokerID, AgentLaunchReport{
+				LaunchID: row.LaunchID, InstanceID: "inst-1", State: "failed", ErrorCode: "boom", Step: "pull", Message: "image pull failed",
+			})
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			require.Contains(t, rec.Body.String(), store.LaunchReportResultApplied)
+			asyncEnd := readStartEnd(t, f, asyncA.ID)
+
+			// Phase, per D-c.
+			wantSync := string(state.PhaseError)
+			if p.memory == "" {
+				wantSync = string(p.phase)
+			}
+			assert.Equal(t, wantSync, syncEnd.phase, "the synchronous rollback restores the stored phase")
+			wantAsync, wantMem := string(state.PhaseError), string(p.phase)
+			if p.phase == state.PhaseStopped || (p.phase == state.PhaseError && p.memory == "") {
+				wantAsync, wantMem = string(p.phase), ""
+			}
+			assert.Equal(t, wantAsync, asyncEnd.phase, "the asynchronous end phase follows D-c")
+			assert.Equal(t, wantMem, asyncEnd.resumeMem, "the asynchronous end's resume memory follows D-c")
+
+			// Run intent and message shape.
+			provisioned := p.phase == state.PhaseCreated || p.phase == state.PhaseProvisioning
+			assert.Equal(t, syncEnd.intent, asyncEnd.intent, "sync and async leave the same run intent")
+			if provisioned {
+				assert.Equal(t, store.RunIntentStopped, asyncEnd.intent, "a failed async start of a provisioned agent returns it to rest")
+				for _, e := range []startEnd{syncEnd, asyncEnd} {
+					assert.True(t, strings.HasPrefix(e.message, "Start failed: "), "message shape: %q", e.message)
+					assert.True(t, strings.HasSuffix(e.message, provisionedRestingNote), "message shape: %q", e.message)
+				}
+				assert.Contains(t, asyncEnd.message, "pull: image pull failed", "the async message names the failure")
+			} else {
+				assert.Equal(t, store.RunIntentRunning, asyncEnd.intent)
+			}
+
+			// Reservation.
+			assert.Equal(t, syncEnd.reserved, asyncEnd.reserved, "sync and async leave the same reservation state")
+			assert.False(t, asyncEnd.reserved, "the failed launch released the slot")
+		})
+	}
+}
+
+// TestAsyncStart_ReapedProvisionedStartRests pins the reaper side of the
+// D-c run-intent hook: a start launch from a created memory row that the
+// launch reaper times out returns the agent to rest (run intent stopped,
+// the provisioned note), as an applied failed report does.
+func TestAsyncStart_ReapedProvisionedStartRests(t *testing.T) {
+	f, d := newAsyncStartFixture(t)
+	d.launchTimeout = time.Millisecond
+	a := newD9Agent(t, f, "d9-reaped", d9Prior{"created memory", state.PhaseCreated, state.PhaseCreated})
+	code, body := lifecycleWithBody(t, f, a.ID, "start", map[string]bool{"acceptAsyncLaunch": true})
+	require.Equal(t, http.StatusOK, code, body)
+	require.Eventually(t, func() bool {
+		f.srv.launchReaperTickHandler()(context.Background())
+		return getAgent(t, f.s, a.ID).LaunchState == store.LaunchStateEnded
+	}, 10*time.Second, 50*time.Millisecond, "the reaper ends the launch past its deadline")
+	got := getAgent(t, f.s, a.ID)
+	assert.Equal(t, store.LaunchEndReasonTimedOut, got.LaunchEndReason)
+	assert.Equal(t, store.RunIntentStopped, got.RunIntent, "a reaped provisioned start returns the agent to rest")
+	assert.True(t, strings.HasSuffix(got.Message, provisionedRestingNote), "message: %q", got.Message)
 }
 
 // TestAsyncStart_CreateEndpointCreatedStaysSync pins design D-b's phase
