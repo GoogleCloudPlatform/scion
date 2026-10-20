@@ -52,16 +52,37 @@ func (s *Server) attachmentArtifactsReady() bool {
 
 // attachmentUploadsToArtifacts reports, for one upload request, whether its
 // files are stored as artifacts: the experiment is on, the artifact service
-// is ready, and the caller is one the service lets read attachments
-// (PermitsMessageRead: a session of a user or the dev user). Otherwise
-// uploads go to the AttachmentStore as before, so a user access token or a
-// federated user keeps uploading, and reading what it uploads, as it did
-// with the experiment off.
+// is ready, and attachmentWriterKind admits the caller. Otherwise uploads
+// go to the AttachmentStore as before, so a federated user keeps uploading,
+// and reading what it uploads, as it did with the experiment off.
 func (s *Server) attachmentUploadsToArtifacts(ctx context.Context) bool {
 	if !s.experimentEnabled(experiments.AttachmentArtifacts) || !s.attachmentArtifactsReady() {
 		return false
 	}
-	return s.attachmentCallerIsSession(ctx)
+	return s.attachmentWriterKind(ctx) != ""
+}
+
+// attachmentWriterKind answers the write question of attachments stored as
+// artifacts (ptone/scion#4596): may the caller of ctx create such
+// attachments (upload them, and name them on a send)? It returns the
+// principal kind the attachment is owned by, or "" when the caller keeps
+// the AttachmentStore path. It is not a read question: who reads an
+// attachment is the artifact service's decision alone
+// (artifacts.Service.MayReadAttachments and ServeAttachment over
+// artifactHost). A session of a user or the dev user is
+// admitted.
+func (s *Server) attachmentWriterKind(ctx context.Context) string {
+	cred, _ := inboxCredentialOf(ctx)
+	if cred != inboxCredentialSession {
+		return ""
+	}
+	switch id := GetIdentityFromContext(ctx).(type) {
+	case *AuthenticatedUser, *DevUser:
+		if id.ID() != "" {
+			return artifacts.PrincipalKindUser
+		}
+	}
+	return ""
 }
 
 // attachmentMaxBytes is the per-file limit of an upload: the artifact file
@@ -182,23 +203,29 @@ var errNoAttachmentStaging = errors.New("no attachment staging directory for thi
 
 // mergeArtifactAttachments adds the artifact attachments of the messages
 // in msgIDs to byMessage (the AttachmentStore attachments of history),
-// creating it when needed. A failure is logged and leaves byMessage as it
-// is. The caller has already authorized the history read.
+// creating it when needed. One batched query finds the attachments of the
+// page; then the read decision (MayReadAttachments) is asked once
+// per message that has any, so a page costs one query plus one decision
+// per message with attachments. A failure is logged and leaves byMessage
+// as it is. The caller has already authorized the history read; the
+// decision is asked anyway, so every credential class is decided in one
+// place.
 func (s *Server) mergeArtifactAttachments(ctx context.Context, msgIDs []string, byMessage map[string][]AttachmentRef) map[string][]AttachmentRef {
 	if len(msgIDs) == 0 || !s.attachmentArtifactsReady() {
 		return byMessage
 	}
-	// Only a caller the artifact service lets read attachments (a session)
-	// sees them listed; user access tokens do not (ptone/scion#4596).
-	if !s.attachmentCallerIsSession(ctx) {
-		return byMessage
-	}
-	found, err := s.attachmentService().MessageAttachments(ctx, msgIDs)
+	svc := s.attachmentService()
+	found, err := svc.MessageAttachments(ctx, msgIDs)
 	if err != nil {
 		s.messageLog.Error("Failed to list message attachments", "error", err)
 		return byMessage
 	}
-	for msgID, list := range found {
+	ctx = withStandingMemo(ctx)
+	for _, msgID := range msgIDs {
+		list := found[msgID]
+		if len(list) == 0 || !svc.MayReadAttachments(ctx, msgID, list[0].MessageProjectID) {
+			continue
+		}
 		if byMessage == nil {
 			byMessage = make(map[string][]AttachmentRef, len(found))
 		}
@@ -209,6 +236,35 @@ func (s *Server) mergeArtifactAttachments(ctx context.Context, msgIDs []string, 
 		}
 	}
 	return byMessage
+}
+
+// filterReadableAttachments returns refs without the artifact attachments
+// of message messageID when the caller of ctx does not read them (the
+// send echo: one decision per send, since every ref belongs to the one
+// message). AttachmentStore references are returned as they are.
+func (s *Server) filterReadableAttachments(ctx context.Context, messageID string, refs []AttachmentRef) []AttachmentRef {
+	hasArtifact := false
+	for _, ref := range refs {
+		if ref.artifact {
+			hasArtifact = true
+			break
+		}
+	}
+	if !hasArtifact {
+		return refs
+	}
+	if s.attachmentArtifactsReady() {
+		svc := s.attachmentService()
+		found, err := svc.MessageAttachments(ctx, []string{messageID})
+		if err == nil && len(found[messageID]) > 0 &&
+			svc.MayReadAttachments(withStandingMemo(ctx), messageID, found[messageID][0].MessageProjectID) {
+			return refs
+		}
+		if err != nil {
+			s.messageLog.Error("Failed to list message attachments for the send echo", "message", messageID, "error", err)
+		}
+	}
+	return legacyAttachmentRefs(refs)
 }
 
 // retireMessageAttachments retires the artifact attachments of message

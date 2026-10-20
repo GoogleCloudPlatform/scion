@@ -379,12 +379,11 @@ func (s *Server) validateChatSendInputMode(ctx context.Context, user UserIdentit
 	// logged.
 	var attachmentRefs []AttachmentRef
 	if len(in.Attachments) > 0 && target.wcs != nil {
-		// Only a caller the artifact service lets read attachments (a
-		// session) may name one; any other caller's id is looked up in the
-		// AttachmentStore only, so an artifact id gets the answer of an
-		// unknown one (user access tokens: ptone/scion#4596).
+		// Only a caller attachmentWriterKind admits may name one; any other
+		// caller's id is looked up in the AttachmentStore only, so an
+		// artifact id gets the answer of an unknown one.
 		var svc *artifacts.Service
-		if s.attachmentArtifactsReady() && s.attachmentCallerIsSession(ctx) {
+		if s.attachmentArtifactsReady() && s.attachmentWriterKind(ctx) != "" {
 			svc = s.attachmentService()
 		}
 		for _, aid := range in.Attachments {

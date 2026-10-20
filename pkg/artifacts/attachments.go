@@ -65,6 +65,9 @@ type AttachmentInfo struct {
 	Name      string
 	MediaType string
 	Size      int64
+	// MessageProjectID is the project recorded at bind time
+	// (Artifact.MessageProjectID), set by MessageAttachments.
+	MessageProjectID *string
 }
 
 // AttachmentState is what UsableAttachment found.
@@ -289,10 +292,31 @@ func (s *Service) MessageAttachments(ctx context.Context, messageIDs []string) (
 			}
 			out[msgID] = append(out[msgID], AttachmentInfo{
 				ID: row.Artifact.ID, Name: row.File.Path, MediaType: row.File.MediaType, Size: row.File.Size,
+				MessageProjectID: row.Artifact.MessageProjectID,
 			})
 		}
 	}
 	return out, nil
+}
+
+// MayReadAttachments reports whether the caller of ctx may read the
+// attachments bound to message messageID, for the paths that list them
+// (history, the send echo, delivery planning; ptone/scion#4596). It asks
+// the same two host questions as the read rule of a message attachment
+// (canReadAttachmentScope), in the same order, without a row:
+// MessageScopeHost.PermitsMessageRead, then MayReadMessage.
+// messageProjectID is the project the message's attachment rows record
+// (all rows of one message are bound by one send, so any row's value
+// serves). A host without MessageScopeHost answers false.
+func (s *Service) MayReadAttachments(ctx context.Context, messageID string, messageProjectID *string) bool {
+	mh, ok := s.host.(MessageScopeHost)
+	if !ok || messageID == "" {
+		return false
+	}
+	if !mh.PermitsMessageRead(ctx) {
+		return false
+	}
+	return mh.MayReadMessage(ctx, messageID, messageProjectID)
 }
 
 // OpenBoundAttachment opens the bytes of attachment artifactID, which must

@@ -77,7 +77,7 @@ func (h *messageHost) PermitsMessageRead(ctx context.Context) bool {
 	return !h.noMessageRead[PrincipalRef(kind, ref)]
 }
 
-func (h *messageHost) MayReadMessage(ctx context.Context, messageID string) bool {
+func (h *messageHost) MayReadMessage(ctx context.Context, messageID string, _ *string) bool {
 	kind, ref, _, ok := h.Principal(ctx)
 	if !ok {
 		return false

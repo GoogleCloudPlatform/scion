@@ -230,3 +230,85 @@ func receiveEventWithin(t *testing.T, ch <-chan Event, subject string) Event {
 		return Event{}
 	}
 }
+
+// hubCallerFuncs returns, for every call in the non-test files of pkg/hub
+// whose callee name is one of names (a plain identifier or the selector of
+// a method value), the "file:func" it is made from.
+func hubCallerFuncs(t *testing.T, names ...string) map[string][]string {
+	t.Helper()
+	want := map[string]bool{}
+	for _, n := range names {
+		want[n] = true
+	}
+	paths, err := filepath.Glob("*.go")
+	require.NoError(t, err)
+	fset := token.NewFileSet()
+	out := map[string][]string{}
+	for _, path := range paths {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, path, nil, 0)
+		require.NoError(t, err, path)
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok {
+				continue
+			}
+			ast.Inspect(fn, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				name := ""
+				switch f := call.Fun.(type) {
+				case *ast.Ident:
+					name = f.Name
+				case *ast.SelectorExpr:
+					name = f.Sel.Name
+				}
+				if want[name] {
+					out[name] = append(out[name], path+":"+fn.Name.Name)
+				}
+				return true
+			})
+		}
+	}
+	return out
+}
+
+// TestOpenBoundAttachment_OnlyFromSendPath: OpenBoundAttachment checks no
+// caller, so pkg/hub calls it only from stageArtifactAttachment, and that
+// only from stageChatAttachments (design section 2).
+func TestOpenBoundAttachment_OnlyFromSendPath(t *testing.T) {
+	sites := hubCallerFuncs(t, "OpenBoundAttachment", "stageArtifactAttachment")
+	require.Equal(t, []string{"attachments_artifacts.go:stageArtifactAttachment"}, sites["OpenBoundAttachment"])
+	require.Equal(t, []string{"handlers_chat_v2.go:stageChatAttachments"}, sites["stageArtifactAttachment"])
+}
+
+// attachmentDecisionPaths are the artifact attachment paths of
+// TestAttachmentReadDecision_NoSecondRule: a file ("file.go:*") or one
+// function of a file ("file.go:func").
+var attachmentDecisionPaths = []string{
+	"attachments_artifacts.go:*",
+}
+
+// TestAttachmentReadDecision_NoSecondRule (required by the design, section
+// 2): on the artifact attachment paths, pkg/hub makes no call to the
+// message read helpers; the read decision is the artifact service's rule
+// over artifactHost, and nothing else. The legacy path (canReadAttachment)
+// is out of scope.
+func TestAttachmentReadDecision_NoSecondRule(t *testing.T) {
+	sites := hubCallerFuncs(t, "canReadNativeMessage", "canUserReadMessage", "tokenMayReadNativeMessage", "ListAddressees")
+	for helper, list := range sites {
+		for _, site := range list {
+			file, fn, _ := strings.Cut(site, ":")
+			for _, p := range attachmentDecisionPaths {
+				pf, pfn, _ := strings.Cut(p, ":")
+				if file == pf && (pfn == "*" || pfn == fn) {
+					t.Errorf("%s calls %s: the attachment read decision is artifactHost's alone", site, helper)
+				}
+			}
+		}
+	}
+}

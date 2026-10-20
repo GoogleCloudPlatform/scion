@@ -25,6 +25,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -65,7 +66,7 @@ func newRefFixture(t *testing.T) *refFixture {
 	t.Helper()
 	srv, st, _, _, projA, faults, fault := setupDemoPolicyTestWithFault(t,
 		func(inner store.Store, fault *storeFaultSwitch) *refFaultStore {
-			return &refFaultStore{Store: inner, fault: fault}
+			return &refFaultStore{Store: inner, fault: fault, gets: map[string]int{}}
 		})
 	db := openTestMemorySQLite(t, "sqlite")
 	wcs := NewWebChatStore(db, "sqlite")
@@ -348,6 +349,18 @@ type refFaultStore struct {
 	failGetAgent bool
 	// failGetProjectID, when set, fails GetProject for that project only.
 	failGetProjectID string
+	// getsMu guards gets, which counts GetMessage calls by message id; it is
+	// set when the fixture is built, so tests read it without swapping the
+	// server's store.
+	getsMu sync.Mutex
+	gets   map[string]int
+}
+
+// messageGets returns how many times GetMessage was called for id.
+func (r *refFaultStore) messageGets(id string) int {
+	r.getsMu.Lock()
+	defer r.getsMu.Unlock()
+	return r.gets[id]
 }
 
 func dmKeyFor(t *testing.T, kindA, idA, kindB, idB string) string {
@@ -372,6 +385,11 @@ func postAgentMessageAs(t *testing.T, srv *Server, withCtx func(context.Context)
 }
 
 func (r *refFaultStore) GetMessage(ctx context.Context, id string) (*store.Message, error) {
+	r.getsMu.Lock()
+	if r.gets != nil {
+		r.gets[id]++
+	}
+	r.getsMu.Unlock()
 	if r.failGetMessage && r.fault.Active() {
 		return nil, errRefStoreFault
 	}

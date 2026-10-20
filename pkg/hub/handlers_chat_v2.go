@@ -2291,7 +2291,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		Type:                storeMsg.Type,
 		CreatedAt:           now,
 		Mentions:            mentionResults,
-		Attachments:         attachmentRefs,
+		Attachments:         s.filterReadableAttachments(ctx, storeMsg.ID, attachmentRefs),
 		DispatchState:       storeMsg.DispatchState,
 		DispatchFailureCode: dispatchFailureCode,
 		ArtifactWarning:     artifactWarning,
@@ -2561,7 +2561,7 @@ func (s *Server) sendHumanToHuman(ctx context.Context, key, projectID string, us
 		SenderID:    storeMsg.SenderID,
 		Type:        storeMsg.Type,
 		CreatedAt:   now,
-		Attachments: attachmentRefs,
+		Attachments: s.filterReadableAttachments(ctx, storeMsg.ID, attachmentRefs),
 	}
 	if storeMsg.DispatchState == store.MessageDispatchNoRecipient {
 		resp.DispatchState = storeMsg.DispatchState

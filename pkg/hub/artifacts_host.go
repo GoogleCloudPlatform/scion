@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -724,11 +725,18 @@ var _ artifacts.MessageScopeHost = (*artifactHost)(nil)
 // PermitsMessageRead implements artifacts.MessageScopeHost: whether the
 // caller's credential allows reading attachments stored as artifacts at
 // all, classified the way the inbox and conversation routes classify it
-// (inboxCredentialOf). Only a session (the session allowlist) of a user or
-// the dev user may. Every other credential is refused: user access tokens
-// read only attachments of the AttachmentStore until token access comes
-// with its own design, and agents read attachments only through the fetch
-// path of a later phase (both ptone/scion#4596).
+// (inboxCredentialOf):
+//   - a session (the session allowlist) of a user or the dev user: yes;
+//   - an agent: only while it is in good standing (agentStanding,
+//     ptone/scion#3433). The check sits here, not in MayReadMessage, so it
+//     covers every agent read, the upload scope included; a lookup fault
+//     refuses. Callers that ask twice for one request install
+//     withStandingMemo. Agents have no attachment read route: they receive
+//     attachments by delivery, which asks this decision for the recipient
+//     (ptone/scion#4596);
+//   - a user access token: not yet (ptone/scion#4596, section 9);
+//   - federated users and visitors, brokers acting for a user, and every
+//     other credential: no.
 func (h *artifactHost) PermitsMessageRead(ctx context.Context) bool {
 	cred, _ := inboxCredentialOf(ctx)
 	switch cred {
@@ -738,35 +746,86 @@ func (h *artifactHost) PermitsMessageRead(ctx context.Context) bool {
 			return id.ID() != ""
 		}
 		return false
+	case inboxCredentialAgent:
+		agent := GetAgentIdentityFromContext(ctx)
+		if agent == nil || agent.ID() == "" || h.server == nil {
+			return false
+		}
+		return h.server.agentStanding(ctx, agent.ID()) == nil
 	case inboxCredentialToken:
-		return false // user access tokens: ptone/scion#4596
+		return false // user access tokens: ptone/scion#4596, section 9
 	default:
 		return false
 	}
 }
 
-// MayReadMessage implements artifacts.MessageScopeHost: whether the calling
-// user may read message messageID now. The message must exist and not be
-// deleted; then the user reads it through its conversation or thread
-// (canReadNativeMessage: DM participants, project readers for a project
-// thread, active participants of a group without a project), or is one of
-// its addressees. It answers only for the identity of the request (users,
-// as PermitsMessageRead), and every lookup failure answers false.
-func (h *artifactHost) MayReadMessage(ctx context.Context, messageID string) bool {
+// MayReadMessage implements artifacts.MessageScopeHost: whether the caller
+// may read message messageID now. The message must exist and not be
+// deleted; then, by credential class:
+//   - a session user reads it through its conversation or thread
+//     (canReadNativeMessage: DM participants, project readers for a
+//     project thread, active participants of a group without a project),
+//     or is one of its user addressees;
+//   - an agent reads it through its conversation (canUserReadMessage: a
+//     DM party by key; a group of its own project), or is one of its
+//     addressees (attachmentAgentAddressee).
+//
+// messageProjectID is not read by these classes. It answers only for the
+// identity of the request (as PermitsMessageRead, which it asks first),
+// and every lookup failure answers false.
+func (h *artifactHost) MayReadMessage(ctx context.Context, messageID string, messageProjectID *string) bool {
 	if h.server == nil || messageID == "" || !h.PermitsMessageRead(ctx) {
 		return false
 	}
-	user := GetUserIdentityFromContext(ctx)
-	if user == nil || user.ID() == "" {
+	s := h.server
+	msg, ok := s.liveMessageForAttachments(ctx, messageID)
+	if !ok {
 		return false
 	}
-	s := h.server
+	cred, _ := inboxCredentialOf(ctx)
+	switch cred {
+	case inboxCredentialSession:
+		user := GetUserIdentityFromContext(ctx)
+		if user == nil || user.ID() == "" {
+			return false
+		}
+		if s.canReadNativeMessage(ctx, user, msg) {
+			return true
+		}
+		addressees, err := s.store.ListAddressees(ctx, messageID)
+		if err != nil {
+			slog.WarnContext(ctx, "artifacts: attachment addressee lookup failed", "message", messageID, "error", err)
+			return false
+		}
+		for _, a := range addressees {
+			if a.PrincipalKind == artifacts.PrincipalKindUser && a.PrincipalID == user.ID() {
+				return true
+			}
+		}
+		return false
+	case inboxCredentialAgent:
+		agent := GetAgentIdentityFromContext(ctx)
+		if agent == nil || agent.ID() == "" {
+			return false
+		}
+		if s.canUserReadMessage(ctx, agent, msg) {
+			return true
+		}
+		return s.attachmentAgentAddressee(ctx, msg, agent.ID())
+	default:
+		return false
+	}
+}
+
+// liveMessageForAttachments returns message messageID when it exists and
+// is not deleted on the web chat channel. Any lookup failure answers false.
+func (s *Server) liveMessageForAttachments(ctx context.Context, messageID string) (*store.Message, bool) {
 	msg, err := s.store.GetMessage(ctx, messageID)
 	if err != nil || msg == nil {
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			slog.WarnContext(ctx, "artifacts: attachment message lookup failed", "message", messageID, "error", err)
 		}
-		return false
+		return nil, false
 	}
 	s.mu.RLock()
 	wcs := s.webChatStore
@@ -775,24 +834,42 @@ func (h *artifactHost) MayReadMessage(ctx context.Context, messageID string) boo
 		ext, err := wcs.GetMessageExt(ctx, messageID)
 		if err != nil {
 			slog.WarnContext(ctx, "artifacts: attachment message state lookup failed", "message", messageID, "error", err)
-			return false
+			return nil, false
 		}
 		if ext != nil && ext.DeletedAt != nil {
-			return false
+			return nil, false
 		}
 	}
-	if s.canReadNativeMessage(ctx, user, msg) {
+	return msg, true
+}
+
+// attachmentAgentAddressee reports whether agent agentID is an addressee of
+// msg for its attachments (ptone/scion#4596, design section 6.4): the
+// message row's own recipient, or a message_addressees row for the agent
+// whose delivery state is pending or delivered. A failed row grants
+// nothing. A lookup failure answers false.
+func (s *Server) attachmentAgentAddressee(ctx context.Context, msg *store.Message, agentID string) bool {
+	if kind, ok := messages.PrincipalKindFromAddress(msg.Recipient); ok && kind == artifacts.PrincipalKindAgent && msg.RecipientID == agentID {
 		return true
 	}
-	addressees, err := s.store.ListAddressees(ctx, messageID)
+	addressees, err := s.store.ListAddressees(ctx, msg.ID)
 	if err != nil {
-		slog.WarnContext(ctx, "artifacts: attachment addressee lookup failed", "message", messageID, "error", err)
+		slog.WarnContext(ctx, "artifacts: attachment addressee lookup failed", "message", msg.ID, "error", err)
 		return false
 	}
 	for _, a := range addressees {
-		if a.PrincipalKind == artifacts.PrincipalKindUser && a.PrincipalID == user.ID() {
+		if a.PrincipalKind != artifacts.PrincipalKindAgent || a.PrincipalID != agentID {
+			continue
+		}
+		if a.DeliveryState == addresseePending || a.DeliveryState == addresseeDelivered {
 			return true
 		}
 	}
 	return false
 }
+
+// Delivery states of a message_addressees row.
+const (
+	addresseePending   = "pending"
+	addresseeDelivered = "delivered"
+)
