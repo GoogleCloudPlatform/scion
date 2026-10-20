@@ -793,7 +793,7 @@ func TestFlatReregistration_StalePinWritesNothing(t *testing.T) {
 	_, err := f.srv.createFlatBrokerRegistration(context.Background(), f.req(func(r *CreateBrokerRegistrationRequest) {
 		withGCPHost(ownedEmailA, ownedProjectA)(r)
 		r.Labels = map[string]string{"zone": "x"}
-	}), f.owner.ID, otherRow, false)
+	}), f.owner.ID, otherRow, false, hostSAClaimVerdict{})
 
 	require.True(t, errors.Is(err, ErrBrokerRegistrationAuthorizationStale), "got %v", err)
 	f.requireGCPHost(t, "", "")
