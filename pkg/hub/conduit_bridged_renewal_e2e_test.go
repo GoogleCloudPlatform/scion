@@ -18,7 +18,6 @@ package hub
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -53,10 +52,6 @@ type bridgedRenewalE2E struct {
 	refreshed []uint32
 	// sends are the results of hub B's renewal sends on the leaf's bridge.
 	sends []error
-	// Diagnostics (r2 only; removed in the final round): hub B's renewal
-	// attempts and the credentials the agent's session received.
-	outcomes []string
-	creds    [][]byte
 }
 
 func newBridgedRenewalE2E(t *testing.T) *bridgedRenewalE2E {
@@ -85,7 +80,6 @@ func newBridgedRenewalE2E(t *testing.T) *bridgedRenewalE2E {
 			if ar := f.GetAuthRefresh(); dir == conduit.Inbound && ar != nil {
 				e.mu.Lock()
 				e.refreshed = append(e.refreshed, ar.GetStreamId())
-				e.creds = append(e.creds, append([]byte(nil), ar.GetCredential()...))
 				e.mu.Unlock()
 			}
 			if next == nil {
@@ -96,25 +90,6 @@ func newBridgedRenewalE2E(t *testing.T) *bridgedRenewalE2E {
 	})
 	require.NotNil(t, e.w.hubB.conduitExternal.Load(), "hub B is in external relay mode")
 	require.True(t, e.w.clock.Now().Equal(e.w.authzClocks["hub-b"].Now()), "the clocks start together")
-	// Diagnostics: record hub B's renewal outcomes. Set before any stream
-	// is tracked, so no driver reads it concurrently.
-	a := e.w.hubB.conduitAuthz.Load()
-	require.NotNil(t, a)
-	renew := a.cfg.Renew
-	a.cfg.Renew = func(ctx context.Context, st *conduitUserStream) (*conduitRenewal, error) {
-		r, err := renew(ctx, st)
-		out := "minted"
-		if err != nil {
-			out = fmt.Sprintf("class=%s err=%v", ClassifyConduitRenewal(err), err)
-		}
-		if r != nil {
-			out += " authz_until=" + r.AuthzUntil.UTC().Format(time.RFC3339)
-		}
-		e.mu.Lock()
-		e.outcomes = append(e.outcomes, out)
-		e.mu.Unlock()
-		return r, err
-	}
 	return e
 }
 
@@ -256,7 +231,7 @@ func TestBridgedRenewalE2E_RenewalMovesTargetDeadline(t *testing.T) {
 			}
 			st := e.soleBridgedLeaf(t)
 			first := st.AuthzUntil
-			e.stage(t, st, e.w.agentClock.WaitForTimer(10*time.Second, first.Add(30*time.Second)),
+			require.True(t, e.w.agentClock.WaitForTimer(10*time.Second, first.Add(30*time.Second)),
 				"S1: the agent enforces the open grant's deadline (a timer at authz_until + 30s)")
 			e.recordSends(t, st)
 			before := e.soleAgentSession(t)
@@ -265,21 +240,19 @@ func TestBridgedRenewalE2E_RenewalMovesTargetDeadline(t *testing.T) {
 			// Past 80% plus the largest jitter, before the first deadline.
 			e.advance(e2eInterval*4/5 + e2eInterval/20 + time.Second)
 			renewedUntil := e.w.clock.Now().Truncate(time.Second).Add(e2eInterval)
-			after := e.w.agentSessions(t)
-			e.stage(t, st, len(after) == 1 && after[0].SessionID == before.SessionID && after[0].ConnectionEpoch == before.ConnectionEpoch,
-				"S1b: the agent kept its session across the advance (session %s epoch %d before; rows after: %v)",
-				before.SessionID, before.ConnectionEpoch, sessionIDsAndEpochs(after))
-			e.stage(t, st, e.waitFor(func() bool { return len(e.sends) > 0 }),
+			e.requireSameSession(t, before, "S1b: across the advance")
+			require.True(t, e.waitFor(func() bool { return len(e.sends) > 0 }),
 				"S2: hub B minted a renewal and called the leaf's sender")
 			e.mu.Lock()
 			firstSend := e.sends[0]
 			e.mu.Unlock()
-			e.stage(t, st, firstSend == nil, "S2: hub B's renewal send on the bridge to relay-0 succeeded (%v)", firstSend)
-			e.stage(t, st, e.waitFor(func() bool { return slices.Contains(e.refreshed, st.StreamID) }),
+			require.NoError(t, firstSend, "S2: hub B's renewal send on the bridge to relay-0")
+			require.Truef(t, e.waitFor(func() bool { return slices.Contains(e.refreshed, st.StreamID) }),
 				"S3: relay-0 forwarded the renewal to the agent's stream (AuthRefresh for stream %d)", st.StreamID)
-			e.stage(t, st, e.w.agentClock.WaitForTimer(10*time.Second, renewedUntil.Add(30*time.Second)),
+			require.True(t, e.w.agentClock.WaitForTimer(10*time.Second, renewedUntil.Add(30*time.Second)),
 				"S4: the agent accepted the renewal and moved its deadline to its authz_until + 30s")
 			assert.True(t, st.Deadline().Equal(renewedUntil), "hub B's deadline moved with it")
+			e.requireSameSession(t, before, "after S4: the renewal reached the original session")
 
 			// Past the first deadline plus the target's grace.
 			e.advance(first.Add(30*time.Second).Sub(e.w.clock.Now()) + 10*time.Second)
@@ -312,55 +285,6 @@ func TestBridgedRenewalE2E_NoSenderClosesAtDeadline(t *testing.T) {
 	assert.Equal(t, conduitReasonAuthzExpired, sc.Reason)
 }
 
-// jwsPayload returns the decoded payload of a compact JWS (unverified), for
-// diagnostics only.
-func jwsPayload(tok []byte) string {
-	parts := strings.Split(string(tok), ".")
-	if len(parts) != 3 {
-		return fmt.Sprintf("<not a compact JWS: %d parts>", len(parts))
-	}
-	body, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return fmt.Sprintf("<payload: %v>", err)
-	}
-	return string(body)
-}
-
-// diagnose logs (r2 diagnostics; removed in the final round) what each hop
-// of st's renewal did: hub B's renewal attempts, its sends on the bridge,
-// the AuthRefresh frames the agent's session received with their claims,
-// st's open grant claims, the agent's session rows and the clocks. It
-// separates a mint or verification refusal from a delivery miss.
-func (e *bridgedRenewalE2E) diagnose(t *testing.T, st *conduitUserStream) {
-	t.Helper()
-	e.mu.Lock()
-	outcomes, sends, refreshed := slices.Clone(e.outcomes), slices.Clone(e.sends), slices.Clone(e.refreshed)
-	creds := slices.Clone(e.creds)
-	e.mu.Unlock()
-	t.Logf("DIAG hub B renewal attempts: %q", outcomes)
-	t.Logf("DIAG hub B sends on the bridge: %v", sends)
-	t.Logf("DIAG agent AuthRefresh stream ids: %v (leaf target stream %d on session %s)", refreshed, st.StreamID, st.SessionID)
-	for i, c := range creds {
-		t.Logf("DIAG agent AuthRefresh %d claims: %s", i, jwsPayload(c))
-	}
-	t.Logf("DIAG leaf open grant claims: %s", jwsPayload(st.Grant))
-	for _, r := range e.w.agentSessions(t) {
-		t.Logf("DIAG agent session row: session=%s epoch=%d incarnation=%s relay=%s", r.SessionID, r.ConnectionEpoch, r.EndpointIncarnation, r.RelayInstanceID)
-	}
-	t.Logf("DIAG clocks: grants/agent=%s hub-b=%s; hub B deadline=%s",
-		e.w.clock.Now().UTC().Format(time.RFC3339), e.w.authzClocks["hub-b"].Now().UTC().Format(time.RFC3339), st.Deadline().UTC().Format(time.RFC3339))
-}
-
-// stage requires ok for one hop of the renewal; on failure it first logs
-// the diagnostics (diagnose), so the run shows which hop failed and why.
-func (e *bridgedRenewalE2E) stage(t *testing.T, st *conduitUserStream, ok bool, msg string, args ...any) {
-	t.Helper()
-	if !ok {
-		e.diagnose(t, st)
-	}
-	require.Truef(t, ok, msg, args...)
-}
-
 // soleAgentSession returns the agent's one session row.
 func (e *bridgedRenewalE2E) soleAgentSession(t *testing.T) registry.SessionRecord {
 	t.Helper()
@@ -376,4 +300,15 @@ func sessionIDsAndEpochs(rows []registry.SessionRecord) []string {
 		out = append(out, fmt.Sprintf("%s@%d", r.SessionID, r.ConnectionEpoch))
 	}
 	return out
+}
+
+// requireSameSession requires that the agent still has exactly one session,
+// with before's session id and connection epoch: a reconnect is named as
+// such (when, says where in the test the check runs).
+func (e *bridgedRenewalE2E) requireSameSession(t *testing.T, before registry.SessionRecord, when string) {
+	t.Helper()
+	after := e.w.agentSessions(t)
+	require.Truef(t, len(after) == 1 && after[0].SessionID == before.SessionID && after[0].ConnectionEpoch == before.ConnectionEpoch,
+		"%s: the agent kept its session (session %s epoch %d before; rows now: %v)",
+		when, before.SessionID, before.ConnectionEpoch, sessionIDsAndEpochs(after))
 }
