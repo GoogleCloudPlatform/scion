@@ -121,9 +121,9 @@ permission:
 | `user:update` | Hub only | Change another user's display name and preferences. A token PATCH of another user that names no `status` field is checked as a profile update, so it needs this scope. |
 | `user:suspend` | Hub only | Suspend or reactivate another user (the `status` field). |
 
-- A request that names several fields needs the check of every field to pass before anything
-  is written.
-- A token that may use neither scope on the user gets the same `403` for every user ID,
+- A request that names several fields is written only if every field passes its check;
+  otherwise nothing is written.
+- A token that cannot use either scope on that user gets the same `403` for every user ID,
   including one that does not exist.
 - Changing a user's role, and changing your own profile, still need a sign-in. No credential can
   change your own status or activate an invited user.

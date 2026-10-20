@@ -1105,7 +1105,7 @@ the override, or pass `--image`, if a template's own image must win. Conversely,
 is not applied to an existing agent; the CLI warns that the flag is ignored. Re-create the agent to
 change or drop a create-time image.
 
-#### `Changed in GoogleCloudPlatform/scion#2074` — Hub settings now wins over the harness-config file's image default
+#### `Changed in GoogleCloudPlatform/scion#2074` — Hub settings now win over the harness-config file's image default
 
 **Before:** `ProvisionAgent` never copied `harness_configs.<name>.image` (or a profile's
 `harness_overrides.<name>.image`) into an agent's config, and `run.go`'s own image resolution
