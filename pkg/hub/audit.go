@@ -19,6 +19,8 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -47,6 +49,9 @@ const (
 	BrokerAuthEventLink BrokerAuthEventType = "link"
 	// BrokerAuthEventUnlink is logged when a broker is unlinked from a project.
 	BrokerAuthEventUnlink BrokerAuthEventType = "unlink"
+	// BrokerAuthEventUpdateSettings is logged when the update API changes a
+	// broker's name, labels or GCP host fields.
+	BrokerAuthEventUpdateSettings BrokerAuthEventType = "update_settings"
 )
 
 // GCPTokenEventType defines the type of GCP token event.
@@ -836,6 +841,74 @@ func LogRegistrationEvent(ctx context.Context, logger AuditLogger, brokerID, bro
 	}
 
 	_ = logger.LogBrokerAuthEvent(ctx, event)
+}
+
+// LogBrokerSettingsEvent logs a change made through the broker update API.
+// details carries the credential attribution and brokerSettingsChangeDetails.
+func LogBrokerSettingsEvent(ctx context.Context, logger AuditLogger, brokerID, brokerName, actorID, ipAddress string, details map[string]string) {
+	if logger == nil {
+		return
+	}
+
+	event := &BrokerAuthEvent{
+		EventType:  BrokerAuthEventUpdateSettings,
+		BrokerID:   brokerID,
+		BrokerName: brokerName,
+		IPAddress:  ipAddress,
+		Success:    true,
+		ActorID:    actorID,
+		ActorType:  "user",
+		Timestamp:  time.Now(),
+		Details:    mergeBrokerAuditDetails(details),
+	}
+
+	_ = logger.LogBrokerAuthEvent(ctx, event)
+}
+
+// brokerSettingsChangeDetails returns the audit details for what changed
+// between two reads of a broker record (name, labels, GCP host fields and
+// their source), as key/value pairs, or nil when nothing changed.
+func brokerSettingsChangeDetails(before, after *store.RuntimeBroker) []string {
+	var kv []string
+	if before.Name != after.Name {
+		kv = append(kv, "name.old", sanitizeForLog(before.Name, 256), "name.new", sanitizeForLog(after.Name, 256))
+	}
+	var added, removed, changed []string
+	for k, v := range after.Labels {
+		old, ok := before.Labels[k]
+		switch {
+		case !ok:
+			added = append(added, k)
+		case old != v:
+			changed = append(changed, k)
+		}
+	}
+	for k := range before.Labels {
+		if _, ok := after.Labels[k]; !ok {
+			removed = append(removed, k)
+		}
+	}
+	for _, l := range []struct {
+		key  string
+		keys []string
+	}{{"labels.added", added}, {"labels.removed", removed}, {"labels.changed", changed}} {
+		if len(l.keys) > 0 {
+			sort.Strings(l.keys)
+			kv = append(kv, l.key, sanitizeForLog(strings.Join(l.keys, ","), 1024))
+		}
+	}
+	if before.GCPHostServiceAccountEmail != after.GCPHostServiceAccountEmail || before.GCPHostProjectID != after.GCPHostProjectID {
+		kv = append(kv,
+			"gcp_host_service_account_email.old", sanitizeForLog(before.GCPHostServiceAccountEmail, 256),
+			"gcp_host_service_account_email.new", sanitizeForLog(after.GCPHostServiceAccountEmail, 256),
+			"gcp_host_project_id.old", sanitizeForLog(before.GCPHostProjectID, 256),
+			"gcp_host_project_id.new", sanitizeForLog(after.GCPHostProjectID, 256),
+		)
+	}
+	if before.GCPHostSource != after.GCPHostSource {
+		kv = append(kv, "gcp_host_source.old", before.GCPHostSource, "gcp_host_source.new", after.GCPHostSource)
+	}
+	return kv
 }
 
 // LogJoinEvent logs a broker join event.

@@ -58,6 +58,11 @@ const (
 	HealthAttentionSchedule       = "schedule"
 )
 
+// HealthAttentionBrokerHostIdentity is the attention item kind for a
+// co-located broker whose configured GCP host service account differs from,
+// or is missing on, the host.
+const HealthAttentionBrokerHostIdentity = "broker_host_identity"
+
 // Attention subject types.
 const (
 	HealthSubjectHub         = "hub"
@@ -76,7 +81,7 @@ type HealthAttentionItem struct {
 	// Severity is critical or warning.
 	Severity string `json:"severity"`
 	// Kind is hub_check, hub_instance, broker_offline, broker_degraded,
-	// broker_nfs, integration, dispatch, agents or schedule.
+	// broker_nfs, broker_host_identity, integration, dispatch, agents or schedule.
 	Kind    string                 `json:"kind"`
 	Subject HealthAttentionSubject `json:"subject"`
 	// Message is a fixed, server-composed sentence.
@@ -98,7 +103,8 @@ type HealthAttentionSubject struct {
 // Status is the worst of:
 //   - the fleet hub status (fleetHubStatus over the live hub instances);
 //   - degraded when a runtime broker is not online, reports its own health
-//     as degraded or unhealthy, or reports an unhealthy NFS workspace share;
+//     as degraded or unhealthy, reports an unhealthy NFS workspace share, or
+//     has a host identity state of mismatch or pinned_absent;
 //   - degraded when dispatch has stuck messages or stuck broker dispatches;
 //   - degraded when a managed integration reports unhealthy;
 //   - degraded when at least agentErrorDegradedRatio of the considered
@@ -182,6 +188,16 @@ func deriveHealthSummaryStatus(resp *HealthSummaryResponse) (string, []HealthAtt
 					Message: "Runtime broker " + label + " reports its NFS workspace storage unhealthy",
 				})
 			}
+		}
+		if hi := b.HostIdentity; hi != nil && hostIdentityIsProblem(hi.State) {
+			degrade()
+			msg := "Runtime broker " + label + ": the configured GCP host service account differs from the host's identity"
+			if hi.State == HostIdentityPinnedAbsent {
+				msg = "Runtime broker " + label + ": the configured GCP host service account is not present on the host"
+			}
+			items = append(items, HealthAttentionItem{
+				Severity: HealthAttentionWarning, Kind: HealthAttentionBrokerHostIdentity, Subject: subject, Message: msg,
+			})
 		}
 	}
 

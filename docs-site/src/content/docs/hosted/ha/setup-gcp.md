@@ -429,7 +429,7 @@ gcloud projects add-iam-policy-binding $SA_PROJECT_ID \
   --role="roles/iam.securityReviewer"
 ```
 
-Without it, assigning a service account from that project is refused with a message that names the project and gives this command. If the check cannot run because of the Hub's identity, the admin health summary reports it (see [Hub Identity Access for the Assignment Check](/scion/hosted/ha/permissions/#hub-identity-access-for-the-assignment-check)).
+Without it, assigning a service account from that project is refused with a message that names the project and gives this command. Registering or verifying such an account returns the same message as a warning, so you can grant the role before the first assignment. If the check cannot run because of the Hub's identity, the admin health summary reports it (see [Hub Identity Access for the Assignment Check](/scion/hosted/ha/permissions/#hub-identity-access-for-the-assignment-check)).
 
 ### 2f. Transport SA — IAP Access
 

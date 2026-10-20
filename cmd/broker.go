@@ -805,6 +805,8 @@ func registerBrokerWithHub(ctx context.Context, client hubclient.Client, multiSt
 		return "", fmt.Errorf("failed to create broker registration: %w", err)
 	}
 
+	hubclient.PrintKeptSettings(os.Stdout, createResp.KeptSettings)
+
 	name := reg.Name
 	if createResp.Reregistered {
 		// The hub matches a re-registration by name, then by broker ID,
