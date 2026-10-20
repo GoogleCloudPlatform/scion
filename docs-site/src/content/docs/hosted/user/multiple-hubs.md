@@ -237,7 +237,7 @@ The warning applies to project commands only. Commands that need no project, suc
 
 **Environment variables.** `SCION_HUB_ENDPOINT` overrides the current hub in that shell and is never saved. `SCION_HUB_URL` does the same when `SCION_HUB_ENDPOINT` is not set. Bare `scion use` and `scion use --hub` print `Note: SCION_HUB_ENDPOINT is set and overrides the current hub in this shell.` (or `SCION_HUB_URL`, whichever is set) when the variable names another hub. `SCION_HUB_TOKEN` is not tied to a hub. When it is set and the hub came from the current context, `scion use` warns: `Warning: SCION_HUB_TOKEN is set and will be sent to hub '<name>'`.
 
-**`scion server` and `scion runtime-broker start`** do not use the current context: only a `--hub` nickname is resolved there, and they read nothing else from `~/.scion/context.yaml`. The other `scion runtime-broker` commands, such as `register` and `join`, talk to the hub the CLI selected, like any other command. See [The server's own hub endpoint](#the-servers-own-hub-endpoint).
+**`scion server` and `scion runtime-broker start`** do not use the current context: only a `--hub` nickname is resolved there, and nothing else in `~/.scion/context.yaml` chooses their Hub (a background `scion server start` still adds the local Hub to the list, as described above). The other `scion runtime-broker` commands, such as `register` and `join`, talk to the hub the CLI selected, like any other command. See [The server's own hub endpoint](#the-servers-own-hub-endpoint).
 
 ## Linked directories
 

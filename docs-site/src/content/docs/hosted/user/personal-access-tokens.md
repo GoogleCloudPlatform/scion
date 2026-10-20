@@ -262,9 +262,11 @@ The same per-request checks apply, with these limits:
 - **Messages.** A message sent to an agent with a token passes the same boundary, ceiling, and
   live project-access checks before any other rule can allow it.
 - **Inbox and conversations.** Chat writes made with a token (sending, changing or removing your
-  own inbox items and direct messages) need `inbox:write`. Reading your own direct messages,
-  read state and notification preferences needs `inbox:read`. Both act only on your own records,
-  work on a project or a hub token, and still pass the token's boundary.
+  own inbox items, notifications, conversations and direct messages) need `inbox:write`. Reading
+  your own inbox, notifications, conversations, direct messages, read state and notification
+  preferences needs `inbox:read`. Both act only on your own records. A project token reaches only
+  records of its project, and only while you are a member; a record with no project, such as a
+  direct message between users, needs a hub token.
 - **Limits and quotas.** Reading limit definitions, entitlements and usage needs `quota:read`;
   creating, updating or deleting them needs `quota:read` together with `quota:create`,
   `quota:update` or `quota:delete`.
@@ -308,8 +310,8 @@ The same per-request checks apply, with these limits:
   project needs `skill:create` on a token whose boundary contains the project; discovering
   them with no project needs `skill:create_global` on a hub token. Resolving `gh://` skill
   references with no project needs `skill:read` on a hub token.
-- **Schedules.** Creating a scheduled event or schedule needs `scheduled_event:create`; updating
-  or resuming a schedule needs `scheduled_event:update`. The request also passes the event type's
+- **Schedules.** Creating a scheduled event or schedule needs `scheduled_event:create`; updating,
+  re-targeting, pausing or resuming a schedule needs `scheduled_event:update`. The request also passes the event type's
   own target checks, and each fire stays within the recording token's ceiling and boundary. See
   [Scheduling](/scion/hosted/user/scheduling/#security--authorization).
 - **Identity governance.** Reading role definitions, role bindings and access constraints needs
@@ -377,8 +379,8 @@ To use the CLI from a coding agent running on your machine, see
 Because a UAT is scoped, some operations that must be re-checked later, or that rely on
 owner or administrator shortcuts, require an unscoped sign-in (CLI or Web UI login) instead:
 
-- **Chat scheduled messages**: creating, reading, changing or cancelling a message scheduled in a
-  chat conversation.
+- **Chat scheduled messages**: creating, listing, sending now, dismissing or cancelling a message
+  scheduled in a chat conversation.
 - **Runtime Broker registration**: creating a Runtime Broker (`POST /api/v1/brokers` and the
   embedded Runtime Broker path of project registration) admits a UAT only when it is a
   hub-boundary token carrying `broker:create` and your user holds `broker.create`; any other UAT
