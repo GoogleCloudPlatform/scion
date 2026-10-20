@@ -23,6 +23,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 // Offline member-tier workload issuer delegations (ptone/scion#4240, phase
@@ -168,7 +169,7 @@ func (a *workloadIssuerAuthenticator) auditOfflineRedeem(ctx context.Context, r 
 		AfterSummary: fmt.Sprintf("offline issuer delegation redeemed: grantor_kind=%s hub_id=%s marker_id=%s marker_created_at=%s test_mode=%s delegation_id=%s workload_sub=%s route=%s %s run_label=%q",
 			store.DelegationGrantorTestInfraOffline, facts.hubID, testInfraMarkerAuditID,
 			facts.markerCreatedAt.UTC().Format(time.RFC3339Nano), string(facts.level), d.ID, sub,
-			r.Method, r.URL.Path, runLabel),
+			r.Method, logging.RequestPath(r), runLabel),
 	}
 	if err := a.writeAudit(ctx, a.store, record); err != nil {
 		return refuse403("offline redeem audit could not be written")
