@@ -1549,9 +1549,10 @@ func cleanupPartialWorktree(ctx context.Context, projectRoot, worktreePath, agen
 	// gets its own path (it looks the worktree up by the path it
 	// registered); the directory fallback below removes the checked path.
 	// A path that is not there has nothing on disk to check or remove;
-	// only git's entry for it is cleaned up below.
+	// only git's entry for it is cleaned up below. Any other Lstat result
+	// (a permission or not-a-directory error) goes through the guard.
 	checkedPath := worktreePath
-	if _, statErr := os.Lstat(worktreePath); statErr == nil {
+	if _, statErr := os.Lstat(worktreePath); !errors.Is(statErr, os.ErrNotExist) {
 		var guardErr error
 		if checkedPath, guardErr = agent.CheckAgentWorktreeRemoval(agentID, projectRoot, worktreePath); guardErr != nil {
 			slog.Warn("worktree-per-agent: refusing to clean up the partial worktree",

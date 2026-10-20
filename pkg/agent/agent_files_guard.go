@@ -216,7 +216,10 @@ func (g *agentFilesGuard) checkLeaf(path string) (string, error) {
 	}
 	parent, err := resolveRealPath(filepath.Dir(path))
 	if err != nil {
-		return "", fmt.Errorf("%w %s for agent %s: cannot resolve its directory: %w", ErrAgentFilesDeleteRefused, path, g.agentName, err)
+		err = fmt.Errorf("%w %s for agent %s: cannot resolve its directory: %w", ErrAgentFilesDeleteRefused, path, g.agentName, err)
+		slog.Warn("Agent files delete refused; agent deletion never removes a shared project workspace",
+			"agent", g.agentName, "path", path, "error", err)
+		return "", err
 	}
 	return filepath.Join(parent, filepath.Base(path)), nil
 }

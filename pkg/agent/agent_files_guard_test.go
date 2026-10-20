@@ -490,3 +490,65 @@ func TestDeleteAgentFiles_LinksBesideLiveWorktreeAreUnlinked(t *testing.T) {
 		t.Errorf("shared worktree removed while another sharer remains: %v", err)
 	}
 }
+
+// A17 (O-a): checkLeaf classifies an entry by its directory's real location
+// and its name: a project path is refused; a link in the agent directory
+// that points into the project is allowed and returned as the link itself
+// (check, which follows it, refuses it); an entry whose directory cannot be
+// resolved is refused.
+func TestAgentFilesGuard_CheckLeaf(t *testing.T) {
+	tr := newGuardTestTree(t)
+	g := tr.guard()
+	assertRefused(t, checkErr(g.checkLeaf(tr.projectFile)), "project file")
+
+	link := filepath.Join(tr.agentDir, "into-project")
+	mustSymlink(t, tr.proj, link)
+	realAgent, err := resolveRealPath(tr.agentDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := g.checkLeaf(link)
+	if want := filepath.Join(realAgent, "into-project"); err != nil || got != want {
+		t.Errorf("checkLeaf(%s) = %q, %v; want %q (the link, not its target)", link, got, err, want)
+	}
+	assertRefused(t, checkErr(g.check(link)), "check of the same link")
+
+	assertRefused(t, checkErr(g.checkLeaf(filepath.Join(tr.agentDir, "missing-dir", "entry"))), "entry of an unresolvable directory")
+}
+
+// A17 (O-c): a dangling symlink at the last sharer's worktree path is
+// refused, and nothing is removed: the link and the agent's directory stay.
+func TestDeleteAgentFiles_LastSharerWorktreeDanglingLinkRefused(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	t.Setenv("HOME", tmpDir)
+
+	bare := initBareRepo(t)
+	gc := &api.GitCloneConfig{URL: bare, Branch: "main", Depth: intPtr(0)}
+	projectPath := filepath.Join(tmpDir, "proj")
+	scionDir := filepath.Join(projectPath, config.DotScion)
+	agentDir := filepath.Join(scionDir, "agents", "solo-agent")
+	mustMkdir(t, agentDir)
+	base := filepath.Join(projectPath, "workspace")
+	if err := provision.ProvisionShared(provision.ProvisionInput{
+		Resolved: provision.ResolvedWorkspace{HostPath: base, Backend: "local"}, Mode: store.SharingModeWorktreePerAgent,
+		ProjectID: "p1", AgentID: "solo-agent", AgentName: "solo-agent", GitClone: gc,
+	}); err != nil {
+		t.Fatalf("provision solo-agent: %v", err)
+	}
+	wtPath := provision.WorktreePath(base, "solo-agent")
+	if err := os.RemoveAll(wtPath); err != nil {
+		t.Fatal(err)
+	}
+	mustSymlink(t, filepath.Join(tmpDir, "missing"), wtPath)
+
+	_, err := DeleteAgentFiles("solo-agent", projectPath, true)
+	assertRefused(t, err, "DeleteAgentFiles with a dangling link at the worktree path")
+	if _, err := os.Lstat(wtPath); err != nil {
+		t.Errorf("the link at the worktree path was removed: %v", err)
+	}
+	if _, err := os.Stat(agentDir); err != nil {
+		t.Errorf("the agent directory was removed: %v", err)
+	}
+}
