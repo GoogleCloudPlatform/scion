@@ -2017,6 +2017,9 @@ type UserStore interface {
 	// Returns ErrNotFound if the user doesn't exist.
 	UpdateUser(ctx context.Context, user *User) error
 
+	// UpdateUserLastLogin sets only the last_login timestamp for a user.
+	UpdateUserLastLogin(ctx context.Context, id string, t time.Time) error
+
 	// UpdateUserLastSeen sets only the last_seen timestamp for a user.
 	UpdateUserLastSeen(ctx context.Context, id string, t time.Time) error
 

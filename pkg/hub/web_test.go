@@ -1490,7 +1490,8 @@ func TestDevAuth_RecordsLastLogin(t *testing.T) {
 			} else {
 				assert.Equal(t, tt.previous, user.LastLogin)
 			}
-			assert.Equal(t, tt.wantUpdates, s.updateCalls)
+			assert.Equal(t, tt.wantUpdates, s.lastLoginUpdateCalls)
+			assert.Zero(t, s.updateCalls, "login must not write the full user record")
 			loginTime := user.LastLogin
 
 			// Reusing a session must not turn last login into last activity.
@@ -1504,7 +1505,8 @@ func TestDevAuth_RecordsLastLogin(t *testing.T) {
 			user, err = s.GetUser(context.Background(), DevUserID)
 			require.NoError(t, err)
 			assert.Equal(t, loginTime, user.LastLogin)
-			assert.Equal(t, tt.wantUpdates, s.updateCalls)
+			assert.Equal(t, tt.wantUpdates, s.lastLoginUpdateCalls)
+			assert.Zero(t, s.updateCalls)
 
 			// Clients that discard cookies must not write on every request.
 			rec = httptest.NewRecorder()
@@ -1513,7 +1515,8 @@ func TestDevAuth_RecordsLastLogin(t *testing.T) {
 			user, err = s.GetUser(context.Background(), DevUserID)
 			require.NoError(t, err)
 			assert.Equal(t, loginTime, user.LastLogin)
-			assert.Equal(t, tt.wantUpdates, s.updateCalls)
+			assert.Equal(t, tt.wantUpdates, s.lastLoginUpdateCalls)
+			assert.Zero(t, s.updateCalls)
 		})
 	}
 }
@@ -1522,7 +1525,7 @@ func TestDevAuth_LastLoginWriteFailure(t *testing.T) {
 	ws := newDevAuthWebServer(t)
 	s := newFakeUserStore()
 	require.NoError(t, s.CreateUser(context.Background(), &store.User{ID: DevUserID}))
-	s.updateErr = errors.New("last login write failed")
+	s.lastLoginUpdateErr = errors.New("last login write failed")
 	ws.store = s
 	handler := ws.devAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -1533,6 +1536,8 @@ func TestDevAuth_LastLoginWriteFailure(t *testing.T) {
 	user, err := s.GetUser(context.Background(), DevUserID)
 	require.NoError(t, err)
 	assert.True(t, user.LastLogin.IsZero())
+	assert.Equal(t, 1, s.lastLoginUpdateCalls)
+	assert.Zero(t, s.updateCalls)
 }
 
 func TestDevAuth_SessionPersists(t *testing.T) {

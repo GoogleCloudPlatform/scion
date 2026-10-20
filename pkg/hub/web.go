@@ -2450,6 +2450,8 @@ func isProxyRoute(path string) bool {
 	return len(parts) >= 4 && parts[1] == "ports" && parts[3] == "proxy"
 }
 
+const devAuthLastLoginInterval = 5 * time.Minute
+
 // devAuthMiddleware auto-populates the session with the dev user identity
 // when a dev token is configured and no user is already in the session.
 func (ws *WebServer) devAuthMiddleware(next http.Handler) http.Handler {
@@ -2511,9 +2513,9 @@ func (ws *WebServer) devAuthMiddleware(next http.Handler) http.Handler {
 					devName = dbUser.DisplayName
 				}
 				// Throttle writes for clients that do not retain session cookies.
-				if dbUser.LastLogin.IsZero() || time.Since(dbUser.LastLogin) > 5*time.Minute {
-					dbUser.LastLogin = time.Now()
-					if err := ws.store.UpdateUser(r.Context(), dbUser); err != nil {
+				now := time.Now()
+				if dbUser.LastLogin.IsZero() || now.Sub(dbUser.LastLogin) > devAuthLastLoginInterval {
+					if err := ws.store.UpdateUserLastLogin(r.Context(), dbUser.ID, now); err != nil {
 						ws.logger().Warn("Failed to update dev-auth last login", "error", err)
 					}
 				}
