@@ -1252,7 +1252,9 @@ func (s *Server) initHubManagedProject(project *store.Project) error {
 		if err != nil {
 			return fmt.Errorf("failed to read default project settings: %w", err)
 		}
-		if err := os.WriteFile(settingsPath, defaultSettings, 0644); err != nil {
+		// Checked again under the settings lock, so a file another writer
+		// has just created is not replaced.
+		if err := config.CreateSettingsFileIfMissing(settingsPath, defaultSettings); err != nil {
 			return fmt.Errorf("failed to seed settings.yaml: %w", err)
 		}
 	}

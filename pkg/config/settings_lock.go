@@ -250,3 +250,36 @@ func RewriteSettingsFile(dir string, rewrite func(path string, data []byte) ([]b
 	}
 	return writeSettingsFileAtomic(lock, path, out)
 }
+
+// WriteSettingsFileLocked replaces the settings file at path with data
+// through the locked writer (writeSettingsFileAtomic): atomically, following
+// a symlinked file, and in place in a read-only directory. lock must be the
+// held settings lock for path's directory, and the caller must have read
+// the file it is replacing under that lock. For callers outside this
+// package that rewrite the whole file themselves (the hub's server-config
+// and GitHub App writes).
+func WriteSettingsFileLocked(lock *SettingsLock, path string, data []byte) error {
+	return writeSettingsFileAtomic(lock, path, data)
+}
+
+// CreateSettingsFileIfMissing writes data to the settings file at path
+// unless a file already exists there, checked under the settings lock for
+// path's directory so a concurrent writer's new file is never replaced. A
+// dangling symlink at path counts as missing: its target is created and the
+// link kept, as a plain os.WriteFile would.
+func CreateSettingsFileIfMissing(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	lock, err := LockSettingsDir(dir)
+	if err != nil {
+		return err
+	}
+	defer lock.Unlock()
+	// os.Stat, as the hub's own pre-check does: a dangling symlink counts as
+	// missing, and the write then creates its target (keeping the link).
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	return writeSettingsFileAtomic(lock, path, data)
+}

@@ -68,21 +68,22 @@ type settingsWriterGolden struct {
 	fixture string
 	write   func(t *testing.T, dir string) error
 	output  string // file whose bytes are compared
+	global  bool   // the fixture is the global settings file ($HOME/.scion)
 }
 
 var settingsWriterGoldens = []settingsWriterGolden{
 	{"update_versioned_existing_key", "settings.yaml", goldenSettingsFixture,
-		func(t *testing.T, dir string) error { return UpdateVersionedSetting(dir, "active_profile", "remote") }, "settings.yaml"},
+		func(t *testing.T, dir string) error { return UpdateVersionedSetting(dir, "active_profile", "remote") }, "settings.yaml", false},
 	{"update_versioned_new_nested_key", "settings.yaml", goldenSettingsFixture,
 		func(t *testing.T, dir string) error {
 			return UpdateVersionedSetting(dir, "server.auth.display_name", "Dev")
-		}, "settings.yaml"},
+		}, "settings.yaml", false},
 	{"update_setting_auto_migrates_legacy", "settings.yaml", goldenLegacyFixture,
-		func(t *testing.T, dir string) error { return UpdateSetting(dir, "default_template", "gemini", false) }, "settings.yaml"},
+		func(t *testing.T, dir string) error { return UpdateSetting(dir, "default_template", "gemini", false) }, "settings.yaml", false},
 	{"update_versioned_alias_struct_fallback", "settings.yaml", "# header\nschema_version: \"1\"\nbase: &b\n  broker_id: b-1\nserver:\n  broker: *b\nactive_profile: local\n",
-		func(t *testing.T, dir string) error { return UpdateVersionedSetting(dir, "hub.brokerId", "b-2") }, "settings.yaml"},
+		func(t *testing.T, dir string) error { return UpdateVersionedSetting(dir, "hub.brokerId", "b-2") }, "settings.yaml", false},
 	{"delete_hub_connection_versioned", "settings.yaml", goldenSettingsFixture,
-		func(t *testing.T, dir string) error { return DeleteHubConnection(dir, "hub-prod", false) }, "settings.yaml"},
+		func(t *testing.T, dir string) error { return DeleteHubConnection(dir, "hub-prod", false) }, "settings.yaml", false},
 	{"staged_path_edits_commit", "settings.yaml", goldenSettingsFixture,
 		func(t *testing.T, dir string) error {
 			return commitGoldenPathEdits(t, dir, []SettingsPathEdit{
@@ -90,30 +91,44 @@ var settingsWriterGoldens = []settingsWriterGolden{
 				{Path: []string{"server", "broker", "hub_endpoint"}, Value: "https://hub.example.com"},
 				{Path: []string{"hub_connections", "hub-staging"}, Delete: true},
 			})
-		}, "settings.yaml"},
+		}, "settings.yaml", false},
 	{"load_modify_save_struct_rewrite", "settings.yaml", goldenSettingsFixture,
 		func(t *testing.T, dir string) error {
 			return LoadModifySaveVersionedSettings(dir, func(vs *VersionedSettings) error {
 				vs.DefaultTemplate = "gemini"
 				return nil
 			})
-		}, "settings.yaml"},
+		}, "settings.yaml", false},
 	{"migrate_legacy_settings", "settings.yaml", goldenLegacyFixture,
-		func(t *testing.T, dir string) error { _, err := MigrateSettingsFile(dir, false); return err }, "settings.yaml"},
+		func(t *testing.T, dir string) error { _, err := MigrateSettingsFile(dir, false); return err }, "settings.yaml", false},
 	{"migrate_legacy_state_yaml", "settings.yaml", goldenLegacyFixture,
-		func(t *testing.T, dir string) error { _, err := MigrateSettingsFile(dir, false); return err }, "state.yaml"},
+		func(t *testing.T, dir string) error { _, err := MigrateSettingsFile(dir, false); return err }, "state.yaml", false},
 	{"save_project_state", "", "",
 		func(t *testing.T, dir string) error {
 			return SaveProjectState(dir, &ProjectState{LastSyncedAt: "2026-01-02T03:04:05Z"})
-		}, "state.yaml"},
+		}, "state.yaml", false},
 	{"init_write_project_settings", "", "",
 		func(t *testing.T, dir string) error {
 			return writeProjectSettings(dir, "/work/space", "11111111-2222-3333-4444-555555555555", InitProjectOpts{SkipRuntimeCheck: true})
-		}, "settings.yaml"},
+		}, "settings.yaml", false},
 	{"init_seed_project_settings", "", "",
 		func(t *testing.T, dir string) error {
 			return ensureProjectSettingsFile(dir, InitProjectOpts{SkipRuntimeCheck: true})
-		}, "settings.yaml"},
+		}, "settings.yaml", false},
+	// These write the global settings file: the fixture is written to
+	// $HOME/.scion with HOME set to a temporary directory.
+	{"integration_self_managed_plugin", "settings.yaml", goldenSettingsFixture,
+		func(t *testing.T, dir string) error {
+			return AddSelfManagedPluginWithBrokerType(SelfManagedPluginEntry{Name: "a2a-bridge", Address: "localhost:9090", ConfigFile: "/cfg/a2a.yaml"})
+		}, "settings.yaml", true},
+	{"integration_add_plugin", "settings.yaml", goldenSettingsFixture,
+		func(t *testing.T, dir string) error { return AddPluginToSettings("slack", "/cfg/slack.yaml") }, "settings.yaml", true},
+	{"integration_message_broker_type", "settings.yaml", goldenSettingsFixture,
+		func(t *testing.T, dir string) error { return AddPluginToMessageBrokerTypes("slack") }, "settings.yaml", true},
+	{"integration_self_managed_plugin_new_file", "", "",
+		func(t *testing.T, dir string) error {
+			return AddSelfManagedPluginWithBrokerType(SelfManagedPluginEntry{Name: "a2a-bridge", Address: "localhost:9090", ConfigFile: "/cfg/a2a.yaml"})
+		}, "settings.yaml", true},
 }
 
 func TestSettingsWriters_Golden(t *testing.T) {
@@ -121,6 +136,11 @@ func TestSettingsWriters_Golden(t *testing.T) {
 	for _, g := range settingsWriterGoldens {
 		t.Run(g.name, func(t *testing.T) {
 			dir := filepath.Join(t.TempDir(), "proj")
+			if g.global {
+				home := t.TempDir()
+				t.Setenv("HOME", home)
+				dir = filepath.Join(home, ".scion")
+			}
 			if err := os.MkdirAll(dir, 0755); err != nil {
 				t.Fatal(err)
 			}

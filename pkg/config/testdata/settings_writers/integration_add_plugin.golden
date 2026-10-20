@@ -1,0 +1,18 @@
+active_profile: local
+default_harness_config: claude
+hub_connections:
+    hub-prod:
+        endpoint: https://prod.example.com
+    hub-staging:
+        endpoint: https://staging.example.com
+schema_version: "1"
+server:
+    broker:
+        broker_id: b-1
+    hub:
+        port: 9810
+    plugins:
+        broker:
+            slack:
+                config_file: /cfg/slack.yaml
+zz_unknown_key: kept
