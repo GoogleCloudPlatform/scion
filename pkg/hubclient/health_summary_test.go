@@ -146,7 +146,7 @@ func TestHealthSummary_DecodesHubPausedSchedules(t *testing.T) {
 		`"schedules":{"failing":[],"total":0,"truncated":false,"scan_limited":false,` +
 		`"paused":[{"id":"s1","name":"nightly","project_id":"p1","project_slug":"alpha","event_type":"message",` +
 		`"target":"worker","reason":"creator_deleted","updated_at":"2026-10-12T09:00:00Z"}],` +
-		`"paused_total":3,"paused_truncated":true,"paused_scan_limited":true}}`
+		`"paused_total":3,"paused_truncated":true,"paused_scan_limited":true,"paused_unavailable":true}}`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(body))
@@ -162,7 +162,7 @@ func TestHealthSummary_DecodesHubPausedSchedules(t *testing.T) {
 		t.Fatal(err)
 	}
 	sec := got.Schedules
-	if sec == nil || sec.PausedTotal != 3 || !sec.PausedTruncated || !sec.PausedScanLimited || len(sec.Paused) != 1 {
+	if sec == nil || sec.PausedTotal != 3 || !sec.PausedTruncated || !sec.PausedScanLimited || !sec.PausedUnavailable || len(sec.Paused) != 1 {
 		t.Fatalf("unexpected schedules section %+v", sec)
 	}
 	p := sec.Paused[0]

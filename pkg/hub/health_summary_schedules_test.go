@@ -196,6 +196,28 @@ func TestScheduleAttention_PausedScanLimited(t *testing.T) {
 	assert.Equal(t, "More scheduled events may have been paused by the hub", items[1].Message)
 }
 
+// When only the paused list could not be read, the failing items stay and
+// one warning replaces the paused items.
+func TestScheduleAttention_PausedUnavailable(t *testing.T) {
+	sec := &HealthSummarySchedules{
+		Failing:           []HealthFailingSchedule{{ID: "f1", Name: "failing", ProjectID: "p1"}},
+		Total:             1,
+		PausedUnavailable: true,
+	}
+	assert.Equal(t, []HealthAttentionItem{
+		{
+			Severity: HealthAttentionWarning, Kind: HealthAttentionSchedule,
+			Subject: HealthAttentionSubject{Type: HealthSubjectSchedule, ID: "f1", Name: "failing", ProjectID: "p1"},
+			Message: "Scheduled event failing failed its last run",
+		},
+		{
+			Severity: HealthAttentionWarning, Kind: HealthAttentionSchedule,
+			Subject: HealthAttentionSubject{Type: HealthSubjectSchedules},
+			Message: "Hub-paused scheduled event data not available",
+		},
+	}, scheduleAttention(sec))
+}
+
 // Failing schedules add attention items after the agent items and never
 // change the overall status: the section depends on the caller.
 func TestDeriveHealthSummaryStatus_FailingSchedulesWarnOnly(t *testing.T) {

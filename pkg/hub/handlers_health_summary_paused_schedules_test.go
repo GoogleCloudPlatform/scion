@@ -227,25 +227,68 @@ func (f pausedListFailStore) ListSchedules(ctx context.Context, filter store.Sch
 	return f.Store.ListSchedules(ctx, filter, opts)
 }
 
-// A failed hub-paused read leaves the whole section null with one
-// warning, like a failed failing read, and no store error text.
+// A failed hub-paused read marks only the paused list as not reported:
+// the failing list is still listed, paused is null with
+// paused_unavailable true, one warning says so, and no store error text
+// is returned.
 func TestHandleHealthSummary_HubPausedSchedulesNotReported(t *testing.T) {
-	srv, _, _, _ := testServerWithStoreFault(t, func(inner store.Store, _ *storeFaultSwitch) pausedListFailStore {
+	srv, s, _, _ := testServerWithStoreFault(t, func(inner store.Store, _ *storeFaultSwitch) pausedListFailStore {
 		return pausedListFailStore{Store: inner}
 	})
 	tickHubInstance(t, srv)
+	p := createHealthScheduleProject(t, s, "paused-fail")
+	failing := createHealthSchedule(t, s, p.ID, "still-failing", time.Date(2026, 10, 19, 8, 0, 0, 0, time.UTC), "e")
 
 	rr := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-	var raw map[string]json.RawMessage
+	var raw struct {
+		Schedules map[string]json.RawMessage `json:"schedules"`
+	}
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &raw))
-	assert.Equal(t, "null", string(raw["schedules"]))
+	require.NotNil(t, raw.Schedules, "the section stays reported")
+	assert.Equal(t, "null", string(raw.Schedules["paused"]))
+	assert.Equal(t, "true", string(raw.Schedules["paused_unavailable"]))
 	var resp HealthSummaryResponse
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.NotNil(t, resp.Schedules)
+	assert.Equal(t, 1, resp.Schedules.Total)
+	assert.Equal(t, []string{failing.ID}, failingScheduleIDs(resp.Schedules))
 	assert.Contains(t, resp.Attention, HealthAttentionItem{
 		Severity: HealthAttentionWarning, Kind: HealthAttentionSchedule,
 		Subject: HealthAttentionSubject{Type: HealthSubjectSchedules},
-		Message: "Scheduled event data not available",
+		Message: "Hub-paused scheduled event data not available",
 	})
+	for _, it := range resp.Attention {
+		assert.NotEqual(t, "Scheduled event data not available", it.Message, "the failing list was read")
+	}
 	assert.NotContains(t, rr.Body.String(), "10.0.0.9")
+}
+
+// pausedFilterIgnoredStore drops SystemPausedOnly from every schedule
+// list, as a store that does not know the field would.
+type pausedFilterIgnoredStore struct{ store.Store }
+
+func (f pausedFilterIgnoredStore) ListSchedules(ctx context.Context, filter store.ScheduleFilter, opts store.ListOptions) (*store.ListResult[store.Schedule], error) {
+	filter.SystemPausedOnly = false
+	return f.Store.ListSchedules(ctx, filter, opts)
+}
+
+// When the store ignores SystemPausedOnly, the hub's per-row re-check
+// still leaves out a user-paused schedule.
+func TestHandleHealthSummary_HubPausedSchedulesRecheckedPerRow(t *testing.T) {
+	srv, s, _, _ := testServerWithStoreFault(t, func(inner store.Store, _ *storeFaultSwitch) pausedFilterIgnoredStore {
+		return pausedFilterIgnoredStore{Store: inner}
+	})
+	tickHubInstance(t, srv)
+	p := createHealthScheduleProject(t, s, "paused-recheck")
+	ranAt := time.Date(2026, 10, 19, 8, 0, 0, 0, time.UTC)
+	hub := createHealthSchedule(t, s, p.ID, "recheck-hub", ranAt)
+	pauseHealthSchedule(t, s, hub, store.ScheduleStatusReasonCreatorDeleted)
+	pauseHealthSchedule(t, s, createHealthSchedule(t, s, p.ID, "recheck-user", ranAt), store.ScheduleStatusReasonNone)
+
+	resp, body := healthSummaryAsAdmin(t, srv)
+	require.NotNil(t, resp.Schedules)
+	assert.Equal(t, 1, resp.Schedules.PausedTotal)
+	assert.Equal(t, []string{hub.ID}, pausedScheduleIDs(resp.Schedules))
+	assert.NotContains(t, body, "recheck-user")
 }

@@ -100,13 +100,15 @@ export interface HealthSummarySchedules {
   truncated: boolean;
   /** True when the hub read only part of the failing schedules. */
   scan_limited: boolean;
-  /** Schedules the hub paused; absent when an older hub served the summary. */
-  paused?: HealthPausedSchedule[];
+  /** Schedules the hub paused; absent from an older hub, null when not reported. */
+  paused?: HealthPausedSchedule[] | null;
   /** Hub-paused schedules visible to the caller; a lower bound when paused_scan_limited. */
   paused_total?: number;
   paused_truncated?: boolean;
   /** True when the hub read only part of the hub-paused schedules. */
   paused_scan_limited?: boolean;
+  /** True when the hub could not list the hub-paused schedules (paused is then null). */
+  paused_unavailable?: boolean;
 }
 
 /** Fixed text per known pause reason code. */

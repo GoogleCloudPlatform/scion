@@ -312,6 +312,9 @@ type HealthSummarySchedules struct {
 	// Paused lists schedules the hub paused itself, with their reason.
 	// A schedule a user paused is not listed. Nil from an older hub.
 	Paused []HealthPausedSchedule `json:"paused"`
+	// PausedUnavailable is true when the hub could not list them; the
+	// failing list is still reported.
+	PausedUnavailable bool `json:"paused_unavailable"`
 	// PausedTotal is a lower bound when PausedScanLimited is true.
 	PausedTotal       int  `json:"paused_total"`
 	PausedTruncated   bool `json:"paused_truncated"`

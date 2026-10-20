@@ -29,8 +29,8 @@ import (
 // recurring schedules whose most recent run failed, read from the fields
 // every schedule already records (last run status, time and error, run
 // and error counts), and schedules the hub paused itself, with their
-// stored status reason (ptone/scion#5403). It is read-only: nothing here changes how schedules
-// run, pause or are authorized.
+// stored status reason (ptone/scion#5403). It is read-only: nothing here
+// changes how schedules run, pause or are authorized.
 
 // healthSummaryScheduleLimit caps the failing schedule rows returned. The
 // visible total is still reported. A variable so tests can lower it.
@@ -72,8 +72,11 @@ type HealthSummarySchedules struct {
 	// Paused lists schedules the hub paused itself (paused with a status
 	// reason), most recently updated first, capped at
 	// healthSummaryScheduleLimit. A schedule a user paused is not listed.
-	// Never null.
+	// Null only when PausedUnavailable is true.
 	Paused []HealthPausedSchedule `json:"paused"`
+	// PausedUnavailable is true when the hub-paused schedules could not be
+	// listed. The failing list above is still reported.
+	PausedUnavailable bool `json:"paused_unavailable"`
 	// PausedTotal is the number of hub-paused schedules visible to the
 	// caller among the rows read; a lower bound when PausedScanLimited.
 	PausedTotal int `json:"paused_total"`
@@ -128,7 +131,9 @@ type HealthFailingSchedule struct {
 }
 
 // healthSummarySchedules builds the schedules section for the caller of r.
-// It returns nil and the error when the store read fails ("not reported").
+// It returns nil and the error when the failing schedules cannot be read
+// ("not reported"). A failed read of the hub-paused schedules only sets
+// PausedUnavailable.
 func (s *Server) healthSummarySchedules(r *http.Request) (*HealthSummarySchedules, error) {
 	ctx := r.Context()
 	out := &HealthSummarySchedules{Failing: []HealthFailingSchedule{}, Paused: []HealthPausedSchedule{}}
@@ -140,11 +145,16 @@ func (s *Server) healthSummarySchedules(r *http.Request) (*HealthSummarySchedule
 	if err != nil {
 		return nil, err
 	}
-	paused, pausedScanLimited, err := s.healthSummaryScanSchedules(r, allowed,
+	// The paused list is read on its own: a failed read leaves the failing
+	// list in place and marks only the paused list as not reported.
+	paused, pausedScanLimited, pausedErr := s.healthSummaryScanSchedules(r, allowed,
 		store.ScheduleFilter{Status: store.ScheduleStatusPaused, SystemPausedOnly: true},
 		isSystemPausedSchedule)
-	if err != nil {
-		return nil, err
+	if pausedErr != nil {
+		slog.Error("health summary: failed to list hub-paused schedules", "error", pausedErr)
+		paused, pausedScanLimited = nil, false
+		out.Paused = nil
+		out.PausedUnavailable = true
 	}
 
 	sort.SliceStable(visible, func(i, j int) bool {
@@ -414,8 +424,16 @@ func scheduleAttention(sec *HealthSummarySchedules) []HealthAttentionItem {
 
 // pausedScheduleAttention returns one warning per listed hub-paused
 // schedule, with a fixed sentence for its reason, plus one for those
-// beyond the cap or past the scan limit.
+// beyond the cap or past the scan limit, or one "not available" warning
+// when the paused list could not be read.
 func pausedScheduleAttention(sec *HealthSummarySchedules) []HealthAttentionItem {
+	if sec.PausedUnavailable {
+		return []HealthAttentionItem{{
+			Severity: HealthAttentionWarning, Kind: HealthAttentionSchedule,
+			Subject: HealthAttentionSubject{Type: HealthSubjectSchedules},
+			Message: "Hub-paused scheduled event data not available",
+		}}
+	}
 	out := make([]HealthAttentionItem, 0, len(sec.Paused)+1)
 	for _, sc := range sec.Paused {
 		label := sc.Name
