@@ -93,6 +93,27 @@ export function currentDocumentTiming(): DocumentTiming {
   return { msSinceNavigationStart: performance.now(), navigationType };
 }
 
+/**
+ * Reads this document's prefetched payload from the __SCION_DATA__ script.
+ * The hub puts that script at the end of the body, after the entry module
+ * script in the head; a module script runs only once the document is
+ * parsed, so the element is always present when the entry calls this.
+ */
+export function readInitialPageData(doc: Document): PageData | null {
+  const script = doc.getElementById('__SCION_DATA__');
+  if (!script) {
+    console.warn('[Scion] No initial data found');
+    return null;
+  }
+
+  try {
+    return JSON.parse(script.textContent || '{}') as PageData;
+  } catch (e) {
+    console.error('[Scion] Failed to parse initial data:', e);
+    return null;
+  }
+}
+
 /** The payload not yet offered to a render; set once at startup. */
 let pendingPayload: PageData | null = null;
 

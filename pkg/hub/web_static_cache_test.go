@@ -86,7 +86,7 @@ func cachePolicyServers(t *testing.T) map[string][2]*WebServer {
 		ws.assets = cachePolicyAssets()
 		ws.assetsDisk = ""
 		ws.hasAssets = ws.detectWebAssets()
-		ws.fingerprintedAssets = ws.loadFingerprintedAssets()
+		ws.fingerprintedAssets = fingerprintedAssetsOf(ws)
 		require.True(t, ws.hasAssets)
 		return ws
 	}
@@ -175,7 +175,7 @@ func TestCacheControl_HexHeuristicOneDay(t *testing.T) {
 		ws.assets = files
 		ws.assetsDisk = ""
 		ws.hasAssets = ws.detectWebAssets()
-		ws.fingerprintedAssets = ws.loadFingerprintedAssets()
+		ws.fingerprintedAssets = fingerprintedAssetsOf(ws)
 		require.True(t, ws.hasAssets)
 		require.Empty(t, ws.fingerprintedAssets)
 		// Without a manifest nothing is immutable; hex names keep one day.
