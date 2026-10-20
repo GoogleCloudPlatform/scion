@@ -32,6 +32,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
 	sconduit "github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
@@ -70,6 +71,13 @@ func newBridgedRenewalE2E(t *testing.T) *bridgedRenewalE2E {
 			e.spawned <- p
 			return p, nil
 		}
+		// Keepalive and write timers far out, so advancing the agent's clock
+		// fires only the timers under test (as the in-process PTY fixture
+		// does): at the defaults (ping 30s, pong wait 60s) an advance past
+		// 80% of the interval would end the agent's session and redial it.
+		w.agentSession.PingInterval = time.Hour
+		w.agentSession.PongWait = 24 * time.Hour
+		w.agentSession.WriteWait = time.Hour
 		// Record every AuthRefresh that reaches the agent's session, in
 		// front of the world's own interceptor.
 		next := w.agentSession.Interceptor
@@ -251,10 +259,16 @@ func TestBridgedRenewalE2E_RenewalMovesTargetDeadline(t *testing.T) {
 			e.stage(t, st, e.w.agentClock.WaitForTimer(10*time.Second, first.Add(30*time.Second)),
 				"S1: the agent enforces the open grant's deadline (a timer at authz_until + 30s)")
 			e.recordSends(t, st)
+			before := e.soleAgentSession(t)
+			require.Equal(t, st.SessionID, before.SessionID, "the leaf's target is the agent's session")
 
 			// Past 80% plus the largest jitter, before the first deadline.
 			e.advance(e2eInterval*4/5 + e2eInterval/20 + time.Second)
 			renewedUntil := e.w.clock.Now().Truncate(time.Second).Add(e2eInterval)
+			after := e.w.agentSessions(t)
+			e.stage(t, st, len(after) == 1 && after[0].SessionID == before.SessionID && after[0].ConnectionEpoch == before.ConnectionEpoch,
+				"S1b: the agent kept its session across the advance (session %s epoch %d before; rows after: %v)",
+				before.SessionID, before.ConnectionEpoch, sessionIDsAndEpochs(after))
 			e.stage(t, st, e.waitFor(func() bool { return len(e.sends) > 0 }),
 				"S2: hub B minted a renewal and called the leaf's sender")
 			e.mu.Lock()
@@ -345,4 +359,21 @@ func (e *bridgedRenewalE2E) stage(t *testing.T, st *conduitUserStream, ok bool, 
 		e.diagnose(t, st)
 	}
 	require.Truef(t, ok, msg, args...)
+}
+
+// soleAgentSession returns the agent's one session row.
+func (e *bridgedRenewalE2E) soleAgentSession(t *testing.T) registry.SessionRecord {
+	t.Helper()
+	rows := e.w.agentSessions(t)
+	require.Len(t, rows, 1, "the agent has one session")
+	return rows[0]
+}
+
+// sessionIDsAndEpochs lists rows as session@epoch.
+func sessionIDsAndEpochs(rows []registry.SessionRecord) []string {
+	out := make([]string, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, fmt.Sprintf("%s@%d", r.SessionID, r.ConnectionEpoch))
+	}
+	return out
 }
