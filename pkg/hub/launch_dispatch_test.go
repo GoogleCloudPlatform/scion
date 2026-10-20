@@ -129,6 +129,9 @@ func TestDispatchAgentCreate_SynchronousAnswerEndsLaunch(t *testing.T) {
 	row := f.row(t, agent.ID)
 	assert.Equal(t, store.LaunchStateEnded, row.LaunchState)
 	assert.Equal(t, store.LaunchEndReasonNotLaunched, row.LaunchEndReason)
+	// The start goes on: no code, so a client following the launch keeps
+	// waiting on the agent (ptone/scion#5283).
+	assert.Empty(t, row.LaunchError)
 	assert.False(t, row.IsInFlight())
 }
 
@@ -144,6 +147,8 @@ func TestDispatchAgentCreate_MismatchedEchoFails(t *testing.T) {
 	row := f.row(t, agent.ID)
 	assert.Equal(t, store.LaunchStateEnded, row.LaunchState)
 	assert.Equal(t, store.LaunchEndReasonNotLaunched, row.LaunchEndReason)
+	assert.Equal(t, store.LaunchErrorDispatchFailed, row.LaunchError, "a failed dispatch carries a code (ptone/scion#5283)")
+	assert.Equal(t, string(state.PhaseCreated), row.Phase, "the code does not change the phase")
 }
 
 func TestDispatchAgentCreate_SendErrorEndsLaunch(t *testing.T) {
@@ -159,6 +164,8 @@ func TestDispatchAgentCreate_SendErrorEndsLaunch(t *testing.T) {
 	row := f.row(t, agent.ID)
 	assert.Equal(t, store.LaunchStateEnded, row.LaunchState)
 	assert.Equal(t, store.LaunchEndReasonNotLaunched, row.LaunchEndReason)
+	assert.Equal(t, store.LaunchErrorDispatchFailed, row.LaunchError, "a failed dispatch carries a code (ptone/scion#5283)")
+	assert.Equal(t, string(state.PhaseCreated), row.Phase, "the code does not change the phase")
 }
 
 func TestDispatchAgentCreate_InvalidPhaseIsNotSent(t *testing.T) {
@@ -186,6 +193,8 @@ func TestDispatchAgentCreateWithGather_EnvRequirementsEndLaunch(t *testing.T) {
 	row := f.row(t, agent.ID)
 	assert.Equal(t, store.LaunchStateEnded, row.LaunchState)
 	assert.Equal(t, store.LaunchEndReasonNotLaunched, row.LaunchEndReason)
+	// Waiting for env is not a failure: no code (ptone/scion#5283).
+	assert.Empty(t, row.LaunchError)
 }
 
 func TestDispatchLaunching_PredictedDeferralWritesNothing(t *testing.T) {

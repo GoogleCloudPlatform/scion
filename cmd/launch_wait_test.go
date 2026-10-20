@@ -185,6 +185,18 @@ func TestWaitForAgentLaunch_TerminalStates(t *testing.T) {
 			wantContains:   []string{"(launch_timeout: the launch timed out): launch timed out during image_pull", "scion delete a1"},
 		},
 		{
+			// The Hub's failed dispatch ends the launch not_launched with a
+			// code and keeps the row in provisioning: the code ends the wait
+			// (ptone/scion#5283).
+			name: "create dispatch failed while provisioning",
+			agent: &hubclient.Agent{
+				Phase:  "provisioning",
+				Launch: &hubclient.AgentLaunch{ID: "l1", State: "ended", Kind: "create", Error: "dispatch_failed", EndReason: "not_launched"},
+			},
+			wantIncomplete: true,
+			wantContains:   []string{"agent 'a1' create did not complete (dispatch_failed: the runtime broker did not accept the launch)"},
+		},
+		{
 			name: "start launch error is not an incomplete create",
 			agent: &hubclient.Agent{
 				Phase: "error", Template: "claude",
