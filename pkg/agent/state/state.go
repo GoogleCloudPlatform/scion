@@ -463,8 +463,9 @@ const (
 )
 
 // ExitReason describes why an agent process terminated. Unlike Activity
-// (self-reported by the agent), ExitReason is runtime-derived and set by
-// the platform when it observes a container/process exit.
+// (self-reported by the agent), ExitReason is runtime- or hub-derived and
+// set by the platform when it observes a container/process exit. The one
+// exception is ExitReasonSignaled, which the agent reports.
 type ExitReason string
 
 const (
@@ -485,6 +486,12 @@ const (
 	// reason OOMKilled). It is a crash, not a disruption: the workload
 	// exceeded its own limit, so a relaunch without a change hits it again.
 	ExitReasonOOMKilled ExitReason = "oom_killed"
+	// ExitReasonSignaled is agent-reported: the agent stopped after it
+	// received a termination signal (SIGTERM/SIGINT), without a crash or a
+	// limits stop. It is not halt evidence. It only fills an empty exit
+	// reason, and it is cleared when the agent next moves to starting or
+	// running.
+	ExitReasonSignaled ExitReason = "signaled"
 )
 
 // IsValid reports whether r is a recognised ExitReason value.
@@ -503,6 +510,8 @@ func (r ExitReason) IsValid() bool {
 		return true
 	case ExitReasonOOMKilled:
 		return true
+	case ExitReasonSignaled:
+		return true
 	}
 	return false
 }
@@ -518,9 +527,10 @@ var exitReasonLabels = map[ExitReason]string{
 	ExitReasonEvicted:          "evicted",
 	ExitReasonOOMKilled:        "out of memory",
 	ExitReasonContainerMissing: "container lost",
+	ExitReasonSignaled:         "signal",
 }
 
-// Label returns the display label of r for a halted agent: a fixed phrase
+// Label returns the label of r for display: a fixed phrase
 // for each known reason, and "unknown" for anything else, including no
 // reason (a halt always records one).
 func (r ExitReason) Label() string {

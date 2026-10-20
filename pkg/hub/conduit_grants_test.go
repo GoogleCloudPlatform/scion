@@ -361,13 +361,8 @@ func TestMintConduitGrant_ViaTunnelRequiresTunnelAction(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, _, err := f.srv.mintConduitGrant(ctx, conduitGrantRequest{
-				Identity: tc.ident, Agent: f.agent, Stream: grant.StreamHeader{Kind: grant.StreamKindLogs}, Target: f.target(), ViaTunnel: true,
+				Identity: tc.ident, Agent: f.agent, Stream: tcpHeader("3000"), Target: f.target(), Via: grant.ViaTunnel,
 			})
-			if tc.ident == Identity(f.portOnly) {
-				// Logs needs agent.read, which the port-only token lacks.
-				assert.ErrorIs(t, err, errConduitForbidden)
-				return
-			}
 			if tc.want == nil {
 				assert.NoError(t, err)
 			} else {
@@ -375,11 +370,12 @@ func TestMintConduitGrant_ViaTunnelRequiresTunnelAction(t *testing.T) {
 			}
 		})
 	}
-	// Tunnel path for tcp works with the port-only token.
+	// The tunnel origin does not carry logs (design §3.5 origin table):
+	// the request is invalid, whoever asks.
 	_, _, err := f.srv.mintConduitGrant(ctx, conduitGrantRequest{
-		Identity: f.portOnly, Agent: f.agent, Stream: tcpHeader("3000"), Target: f.target(), ViaTunnel: true,
+		Identity: f.owner, Agent: f.agent, Stream: grant.StreamHeader{Kind: grant.StreamKindLogs}, Target: f.target(), Via: grant.ViaTunnel,
 	})
-	assert.NoError(t, err)
+	assert.ErrorIs(t, err, errConduitInvalid)
 }
 
 func TestMintConduitGrant_AgentCaller(t *testing.T) {

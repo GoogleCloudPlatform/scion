@@ -37,6 +37,7 @@
         "experiments.hub.artifacts:boolean",
         "experiments.hub.attachment_artifacts:boolean",
         "experiments.hub.chat_thread_groups:boolean",
+        "experiments.hub.flat_runtime_brokers:boolean",
         "experiments.web.agent_edit:boolean",
         "experiments.web.chat_scheduled_send:boolean",
         "experiments.web.gcs_links:boolean",
@@ -271,6 +272,7 @@
     "/api/v1/test-infra/status": {
       "status": 200,
       "fields": [
+        "testAdminWebSessions:boolean",
         "testHubAdmin:boolean",
         "testIdentities:boolean",
         "testIdentityWebSessions:boolean",

@@ -219,8 +219,12 @@ hub:
   # The member level is refused at startup unless every precondition holds:
   # server.hub.class is test (set hub.hubClass: test; the render fails without
   # it), the database carries a test infrastructure marker for this hub id, the
-  # hub id binding matches (the chart renders hub.hubId), and the hub does not
-  # run with --production. The marker is written offline by an operator with
+  # hub id binding matches (the chart renders hub.hubId), the hub id is pinned
+  # (the chart renders server.hub.hub_id from hub.hubId, so every replica
+  # shares it), and the hub does not run with --production. With
+  # config.existingSecret the chart cannot read your settings file: its
+  # server.hub.hub_id must be set and equal hub.hubId, or every pod refuses to
+  # start. The marker is written offline by an operator with
   # `scion server test-infra mark`, never by the chart or an agent.
   testIdentities:
     enabled: false
@@ -372,9 +376,10 @@ agents:
   # broker without a registry (requireImageRegistryForBroker,
   # cmd/server_foreground.go), so an empty value fails the render. The hub
   # also accepts image_registry for the active profile through config.extra,
-  # or SCION_IMAGE_REGISTRY / SCION_MAINTENANCE_IMAGE_REGISTRY through
-  # hub.extraEnv; either satisfies the check instead. Not checked under
-  # config.existingSecret, where your file must carry it.
+  # or SCION_IMAGE_REGISTRY through hub.extraEnv; either satisfies the check
+  # instead (SCION_MAINTENANCE_IMAGE_REGISTRY applies to maintenance builds
+  # only and does not). Not checked under config.existingSecret, where your
+  # file must carry it.
   #
   #   imageRegistry: us-docker.pkg.dev/my-project/scion
   #

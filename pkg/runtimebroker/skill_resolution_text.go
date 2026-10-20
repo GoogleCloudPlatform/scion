@@ -34,29 +34,10 @@ import (
 // correlation id. The full resolver error is logged by
 // logSkillResolutionFailure with the same correlation id.
 
-// skillResolutionPhrases is the fixed reason phrase for each resolver
-// error code. A code not listed gets skillResolutionDefaultPhrase.
-var skillResolutionPhrases = map[string]string{
-	agent.SkillErrCodeNotFound:            "skill not found",
-	agent.SkillErrCodeForbidden:           "access denied",
-	agent.SkillErrCodeRateLimited:         "rate limited by the skill source",
-	agent.SkillErrCodeTimeout:             "timed out reaching the skill source",
-	agent.SkillErrCodeUpstreamUnavailable: "skill source unavailable",
-	agent.SkillErrCodeUnreachable:         "skill source unreachable",
-	agent.SkillErrCodeInvalidURI:          "invalid skill URI",
-}
-
-// skillResolutionDefaultPhrase is the reason phrase for a resolver error
-// code with no phrase of its own.
-const skillResolutionDefaultPhrase = "resolver error"
-
-// skillResolutionPhrase returns the fixed reason phrase for code.
-func skillResolutionPhrase(code string) string {
-	if p, ok := skillResolutionPhrases[code]; ok {
-		return p
-	}
-	return skillResolutionDefaultPhrase
-}
+// skillResolutionPhrase returns agent.SkillResolutionPhrase(code). The
+// phrase map lives in pkg/agent, so that the Hub's skill resolve errors
+// share it.
+func skillResolutionPhrase(code string) string { return agent.SkillResolutionPhrase(code) }
 
 // maxPublicSkillRefLen bounds the skill reference shown to the user, as
 // quoted in the text (without the quotes) and as the skill detail, so the
@@ -194,10 +175,10 @@ func (f *skillFailure) publicText() string {
 // failure log record. For a skill resolution failure f they are its
 // user-visible text and correlation id: the full text is in the one record
 // logSkillResolutionFailure writes. For any other error (f nil) they are
-// err itself.
+// err's text, through sanitizeFailureCause.
 func failureLogAttrs(err error, f *skillFailure) []any {
 	if f == nil {
-		return []any{"error", err}
+		return []any{"error", sanitizeFailureCause(err.Error())}
 	}
 	return []any{"error", f.publicText(), "correlation_id", f.ref}
 }

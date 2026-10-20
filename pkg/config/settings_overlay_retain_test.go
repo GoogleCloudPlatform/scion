@@ -68,7 +68,7 @@ type overlaySpec struct {
 func newRetainOverlay(spec overlaySpec) *SettingsOverlay {
 	o := NewSettingsOverlay()
 	o.builtinsOverride = testBuiltins()
-	o.Update(spec.runtimes, spec.profiles, nil, "")
+	o.Update(spec.runtimes, spec.profiles, nil)
 	return o
 }
 
@@ -580,7 +580,7 @@ func TestRetain_StoredNameNotReported(t *testing.T) {
 	if ps, _ := o2.RetainedState(); len(ps) != 1 {
 		t.Fatalf("precondition: RetainedState = %+v", ps)
 	}
-	o2.Update(nil, map[string]V1ProfileConfig{"gke": {Runtime: "gke-autopilot"}, "local": {Runtime: "docker"}}, nil, "")
+	o2.Update(nil, map[string]V1ProfileConfig{"gke": {Runtime: "gke-autopilot"}, "local": {Runtime: "docker"}}, nil)
 	o2.Apply(fileSettings("gke"))
 	if ps, _ := o2.RetainedState(); ps != nil {
 		t.Fatalf("RetainedState after storing local = %+v, want empty", ps)
@@ -704,7 +704,7 @@ func TestRetain_UnmanagedHubReportsNothing(t *testing.T) {
 	if ps, rs := o2.RetainedState(); len(ps) != 1 || len(rs) != 1 {
 		t.Fatalf("precondition: RetainedState = %+v / %+v", ps, rs)
 	}
-	o2.Update(map[string]V1RuntimeConfig{}, map[string]V1ProfileConfig{}, nil, "")
+	o2.Update(map[string]V1RuntimeConfig{}, map[string]V1ProfileConfig{}, nil)
 	logs = captureLogs(t, func() { o2.Apply(fileSettings("gke")) })
 	if ps, rs := o2.RetainedState(); ps != nil || rs != nil {
 		t.Fatalf("RetainedState after clearing the stored sets = %+v / %+v, want empty", ps, rs)

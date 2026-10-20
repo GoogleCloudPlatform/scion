@@ -39,6 +39,8 @@ type RoleBinding struct {
 	Created time.Time `json:"created,omitempty"`
 	// MembershipKind holds the value of the "membership_kind" field.
 	MembershipKind *string `json:"membership_kind,omitempty"`
+	// SourceRuleID holds the value of the "source_rule_id" field.
+	SourceRuleID *uuid.UUID `json:"source_rule_id,omitempty"`
 	// Issuance ID of the admin-kind test identity that created this row (grant shaping)
 	IssuanceID *string `json:"issuance_id,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
@@ -72,7 +74,7 @@ func (*RoleBinding) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case rolebinding.FieldRoleDefinitionID:
+		case rolebinding.FieldRoleDefinitionID, rolebinding.FieldSourceRuleID:
 			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
 		case rolebinding.FieldPrincipalType, rolebinding.FieldPrincipalID, rolebinding.FieldScopeType, rolebinding.FieldScopeID, rolebinding.FieldCreatedBy, rolebinding.FieldMembershipKind, rolebinding.FieldIssuanceID:
 			values[i] = new(sql.NullString)
@@ -165,6 +167,13 @@ func (_m *RoleBinding) assignValues(columns []string, values []any) error {
 				_m.MembershipKind = new(string)
 				*_m.MembershipKind = value.String
 			}
+		case rolebinding.FieldSourceRuleID:
+			if value, ok := values[i].(*sql.NullScanner); !ok {
+				return fmt.Errorf("unexpected type %T for field source_rule_id", values[i])
+			} else if value.Valid {
+				_m.SourceRuleID = new(uuid.UUID)
+				*_m.SourceRuleID = *value.S.(*uuid.UUID)
+			}
 		case rolebinding.FieldIssuanceID:
 			if value, ok := values[i].(*sql.NullString); !ok {
 				return fmt.Errorf("unexpected type %T for field issuance_id", values[i])
@@ -249,6 +258,11 @@ func (_m *RoleBinding) String() string {
 	if v := _m.MembershipKind; v != nil {
 		builder.WriteString("membership_kind=")
 		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	if v := _m.SourceRuleID; v != nil {
+		builder.WriteString("source_rule_id=")
+		builder.WriteString(fmt.Sprintf("%v", *v))
 	}
 	builder.WriteString(", ")
 	if v := _m.IssuanceID; v != nil {

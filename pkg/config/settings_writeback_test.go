@@ -192,8 +192,8 @@ func TestUpdateVersionedSetting_NoOpLeavesFileUntouched(t *testing.T) {
 	for _, kv := range [][2]string{
 		{"active_profile", "local"},
 		{"hub.brokerId", "old-id"},
-		{"image_registry", ""}, // deleting an absent key
-		{"hub.token", "ignored"},
+		{"image_registry", ""},                         // deleting an absent key
+		{"hub_connections.foo.endpoint", "left-as-is"}, // accepted and left unchanged
 	} {
 		require.NoError(t, UpdateVersionedSetting(dir, kv[0], kv[1]), kv[0])
 	}
@@ -390,7 +390,9 @@ func TestUpdateVersionedSetting_EdgeCases(t *testing.T) {
 
 // updateVersionedSettingKeys lists every key handled by the switch in
 // updateVersionedSettingStruct (the pre-ptone/scion#1800 behaviour), plus the project
-// ID aliases and the ignored keys.
+// ID aliases and hub_connections.*, which is accepted and left unchanged.
+// The keys ValidateSettingWrite rejects at every layer are covered by
+// TestUpdateVersionedSetting_RejectsNotStoredKeys instead.
 var updateVersionedSettingKeys = []string{
 	"active_profile", "default_template", "default_harness_config", "workspace_path",
 	"image_registry", "cli.autohelp", "hub.enabled", "hub.linked", "hub.endpoint",
@@ -398,8 +400,7 @@ var updateVersionedSettingKeys = []string{
 	"server.auth.display_name", "server.auth.email", "server.auth.username",
 	"use_host_credentials",
 	"project_id", "hub.project_id",
-	"hub.token", "hub.apiKey", "hub.lastSyncedAt",
-	"bucket.provider", "bucket.name", "bucket.prefix", "hub_connections.foo.endpoint",
+	"hub_connections.foo.endpoint",
 }
 
 func TestVersionedSettingKeys_MatchStructSwitch(t *testing.T) {
@@ -491,8 +492,9 @@ var structParityBases = []structParityBase{
 //
 // There are thousands of cases, so the subtests run in parallel. That is
 // safe because each case works only in its own temporary directories.
-// UpdateVersionedSetting takes the package-wide settings-file lock
-// (LockSettingsFile), so that part of each case still runs one at a time.
+// UpdateVersionedSetting takes the settings lock (LockSettingsDir). Its
+// file lock is per directory, and the cases use separate directories, but
+// its process-wide mutex still runs that part of each case one at a time.
 // Callers must not use t.Setenv or change package variables
 // (such as createTempFile) while the subtests run.
 func runStructParity(t *testing.T, bases []structParityBase) {
@@ -510,7 +512,9 @@ func runStructParity(t *testing.T, bases []structParityBase) {
 						}
 					}
 					errNew := UpdateVersionedSetting(newDir, key, value)
-					errOld := updateVersionedSettingStruct(oldDir, key, value)
+					errOld := withSettingsLock(oldDir, func(lock *SettingsLock) error {
+						return updateVersionedSettingStruct(lock, oldDir, key, value)
+					})
 					require.Equal(t, errOld == nil, errNew == nil, "new err=%v old err=%v", errNew, errOld)
 					if errOld != nil {
 						return

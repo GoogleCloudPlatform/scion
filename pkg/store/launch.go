@@ -75,6 +75,11 @@ const (
 	// journal on the next boot; ptone/scion#4668). Broker-confirmed: the
 	// broker reports it only for a launch it ended.
 	LaunchErrorBrokerRestarted = api.LaunchCodeBrokerRestarted
+	// LaunchErrorDispatchFailed: the hub's send of the launch failed with a
+	// known outcome, or the broker acknowledged a different launch; the
+	// dispatcher ends the launch not_launched with this code
+	// (api.LaunchCodeDispatchFailed).
+	LaunchErrorDispatchFailed = "dispatch_failed"
 )
 
 // LaunchReport report-state values (mirrors the broker->Hub wire report's

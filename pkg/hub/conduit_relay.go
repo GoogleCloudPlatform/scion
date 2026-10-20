@@ -69,6 +69,12 @@ type ConduitRelayOptions struct {
 	// testHookAdmission, when set, runs during admission (before the
 	// session is registered). Tests only.
 	testHookAdmission func()
+	// sessionWriteWait, when positive, is the per-write deadline of every
+	// relay session (conduit.Config.WriteWait; 0 = conduit.DefaultWriteWait).
+	// It runs on Clock, so tests that advance a fake Clock set it above
+	// their largest advance. It also stretches the backstop a session arms
+	// when the peer sends GoAway (drain deadline + WriteWait). Tests only.
+	sessionWriteWait time.Duration
 	// InternalEndpoint is the advertised base URL of this process's
 	// internal listener ("" = unaddressable).
 	InternalEndpoint string
@@ -96,6 +102,10 @@ type ConduitRelayOptions struct {
 	Store       registry.Store
 	Clock       clock.Clock
 	RegistryNow func() time.Time
+	// AuthzClock, when set, drives the user-stream re-check and its renewal
+	// driver instead of Clock, so a test can move stream deadlines without
+	// moving the relay's session timers.
+	AuthzClock clock.Clock
 }
 
 // conduitRuntime is the running relay and what it was built from.
@@ -220,9 +230,14 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 		PeerAuth:         opts.PeerAuth,
 		HTTPClient:       opts.HTTPClient,
 		Clock:            opts.Clock,
+		Session:          conduit.Config{WriteWait: opts.sessionWriteWait},
 		ReconnectWindow:  opts.ReconnectWindow,
 		LifetimeCap:      lifetimeCap,
-		Logger:           slog.Default().With("subsystem", "hub.conduit"),
+		OnBrokerSessionsSuperseded: func(brokerID string, closed int) {
+			s.recordBrokerSessionsSuperseded(brokerID, brokerSupersededAtAdmission, closed)
+		},
+		OnBrokerIncarnationFlap: s.recordBrokerIncarnationFlap,
+		Logger:                  slog.Default().With("subsystem", "hub.conduit"),
 	})
 	if err != nil {
 		return fmt.Errorf("conduit relay: %w", err)
@@ -245,7 +260,11 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 	if interval == 0 {
 		interval = s.config.ConduitAuthzRecheckInterval
 	}
-	_, stopAuthz, err := s.startConduitStreamAuthz(ctx, opts.Clock, interval)
+	authzClock := opts.Clock
+	if opts.AuthzClock != nil {
+		authzClock = opts.AuthzClock
+	}
+	_, stopAuthz, err := s.startConduitStreamAuthz(ctx, authzClock, interval)
 	if err != nil {
 		return err
 	}
@@ -319,7 +338,7 @@ func (s *Server) conduitWelcomeGrantKeys(ctx context.Context) ([]*conduitv1.Gran
 // token-refresh response, or nil when the experiment is off or the keys are
 // unavailable (the refresh itself must not fail over them).
 func (s *Server) conduitRefreshGrantKeys(ctx context.Context) []grant.WireKey {
-	keys, err := s.ConduitGrantPublicKeys(ctx)
+	keys, err := s.conduitHubDirectGrantKeys(ctx)
 	if err != nil {
 		if !errors.Is(err, errConduitDisabled) {
 			slog.Warn("Conduit grant keys unavailable for the token-refresh response", "error", err)

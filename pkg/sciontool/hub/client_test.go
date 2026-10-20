@@ -204,6 +204,19 @@ func TestClient_UpdateStatus(t *testing.T) {
 	assert.Equal(t, "test message", receivedStatus.Message)
 }
 
+func TestStatusUpdate_ExitReasonJSON(t *testing.T) {
+	raw, err := json.Marshal(StatusUpdate{Phase: state.PhaseStopped, ExitReason: "signaled"})
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), `"exitReason":"signaled"`)
+	var back StatusUpdate
+	require.NoError(t, json.Unmarshal(raw, &back))
+	assert.Equal(t, "signaled", back.ExitReason)
+
+	raw, err = json.Marshal(StatusUpdate{Phase: state.PhaseStopped})
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "exitReason", "an empty reason is omitted")
+}
+
 func TestClient_UpdateStatus_Errors(t *testing.T) {
 	t.Run("not configured", func(t *testing.T) {
 		client := &Client{}

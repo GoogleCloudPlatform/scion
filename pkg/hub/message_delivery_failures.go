@@ -23,6 +23,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -103,7 +104,7 @@ func (s *Server) handleBrokerMessageFailures(w http.ResponseWriter, r *http.Requ
 
 	brokerIdent := GetBrokerIdentityFromContext(ctx)
 	if brokerIdent == nil || brokerIdent.BrokerID() != brokerID {
-		logAuthzDenial(r, GetIdentityFromContext(ctx), Resource{Type: "runtime_broker", ID: brokerID}, ActionUpdate,
+		logAuthzDenial(r, GetIdentityFromContext(ctx), Resource{Type: permissions.ResourceBroker, ID: brokerID}, ActionUpdate,
 			"message-failures may only be reported by the broker itself")
 		Forbidden(w)
 		return

@@ -412,8 +412,9 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 	// retargeted: the stream always goes to conduitProxyHost (127.0.0.1)
 	// inside the agent.
 	conduitOn := s.conduitRoutable()
+	identity := GetIdentityFromContext(r.Context())
 	if conduitOn && isLoopbackHost(exposed.Host) {
-		conn, err := s.openConduitPort(r.Context(), GetIdentityFromContext(r.Context()), agent, exposed.Port)
+		conn, err := s.openConduitPort(r.Context(), identity, agent, exposed.Port)
 		switch {
 		case err == nil:
 			s.serveConduitProxy(w, r, agent, exposed.Port, proxyPath, conn)
@@ -422,6 +423,13 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 			writeConduitProxyError(w, r, agent.ID, err)
 			return
 		}
+	}
+	// No path without a target-side deadline (design §3.5 Q14, v2.21.46):
+	// in external relay mode with enforce, a user request that only the
+	// port-forward tunnel below could serve is refused with the
+	// routing-unavailable 503.
+	if s.refuseLegacyProxy(w, r, identity, agent.ID, conduitOn, isLoopbackHost(exposed.Host)) {
+		return
 	}
 	if isWebSocketUpgrade(r) {
 		if conduitOn && !s.portTunnels.has(agent.ID) {
@@ -791,4 +799,24 @@ func (s *Server) exposedPortsSweepHandler() func(ctx context.Context) {
 			slog.Info("Scheduler: exposed-ports sweep cleared stale registrations", "count", cleared)
 		}
 	}
+}
+
+// refuseLegacyProxy answers, and reports true for, a user request the
+// port-forward tunnel would otherwise serve while user streams need a
+// target-side deadline (conduitLegacyRouteRefused): conduit not routable,
+// a port conduit does not carry, or an agent with no conduit session. The
+// answer is the routing-unavailable 503 (no details.reason).
+func (s *Server) refuseLegacyProxy(w http.ResponseWriter, r *http.Request, identity Identity, agentID string, conduitOn, loopback bool) bool {
+	cause, message := conduitCauseNoConduitSession, conduitNoSessionMessage
+	switch {
+	case !conduitOn:
+		cause, message = conduitCauseConduitNotRoutable, conduitNotRoutableMessage
+	case !loopback:
+		cause, message = conduitCauseLegacyOnlyPort, conduitLegacyOnlyMessage
+	}
+	if !s.conduitLegacyRouteRefused(r.Context(), identity, conduitRouteProxy, ErrCodeUnavailable, cause, agentID) {
+		return false
+	}
+	writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, message, nil)
+	return true
 }

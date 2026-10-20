@@ -83,6 +83,8 @@ func TestHubProfileGate_UnlistedCommandsRefused(t *testing.T) {
 		"hub.status", "hub.profile.add", "hub.profile.list", "hub.profile.show", "hub.profile.remove",
 		"hub.test-identity.issue", "hub.test-identity.token", "hub.test-identity.list",
 		"hub.test-identity.delete", "hub.test-identity.teardown", "hub.test-identity.web-code",
+		"hub.test-identity.cleanup", "hub.test-identity.provenance",
+		"hub.test-identity.issue-admin",
 		"hub.projects", "hub.projects.info", "hub.projects.create", "hub.projects.delete",
 		"artifact.publish", "artifact.get", "artifact.versions", "artifact.delete",
 		"create", "start", "list", "stop", "delete", "look", "logs",
@@ -159,7 +161,8 @@ func TestHubProfileGate_AgentModeRule(t *testing.T) {
 	profileGateEnv(t, "")
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	runtime := []string{"hub.status", "hub.test-identity.issue", "hub.test-identity.token", "hub.test-identity.list", "hub.test-identity.delete", "hub.test-identity.teardown", "hub.test-identity.web-code"}
+	runtime := []string{"hub.status", "hub.test-identity.issue", "hub.test-identity.token", "hub.test-identity.list", "hub.test-identity.delete", "hub.test-identity.teardown", "hub.test-identity.web-code",
+		"hub.test-identity.cleanup", "hub.test-identity.provenance", "hub.test-identity.issue-admin"}
 
 	t.Run("no profile", func(t *testing.T) {
 		for _, p := range runtime {

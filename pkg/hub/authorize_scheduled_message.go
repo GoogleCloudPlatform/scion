@@ -85,8 +85,8 @@ func scheduledPayloadTargetChanged(stored, replacement string) bool {
 // authoring time (create / update / resume). It resolves the target agent from
 // convenience fields or raw payload and rejects when:
 //   - the request's credential may not author scheduled work
-//     (authorizeScheduleAuthoringCredential: every user access token is
-//     refused), checked before the target is resolved,
+//     (authorizeScheduleAuthoringCredential), checked before the target is
+//     resolved,
 //   - the target agent is in a different project from projectID and
 //     cross-project messaging is disabled, or
 //   - the caller is not currently authorized to message the target

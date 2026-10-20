@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -453,7 +454,7 @@ func TestAdminGrantRouteReview(t *testing.T) {
 func TestReviewGrantSubjectCheckFailureIsLoud(t *testing.T) {
 	f, id := newReviewGrantFixture(t)
 	f.host.subjectErr = errors.New("lookup failed")
-	records := captureRefusalLogs(t)
+	c := captureLog(f, slog.LevelInfo)
 	rec := f.postGrantBody(delegator, id, reviewBody(SubjectPrincipal, reviewerID, GrantReview))
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("subject check failing: %d %s", rec.Code, rec.Body.String())
@@ -461,8 +462,8 @@ func TestReviewGrantSubjectCheckFailureIsLoud(t *testing.T) {
 	if g := f.grantOf(id, reviewerID); g != nil {
 		t.Errorf("grant written: %+v", g)
 	}
-	if got := records(); len(got) != 0 {
-		t.Errorf("a failed lookup logged as a refusal: %v", got)
+	if got, raw := c.take(t); len(got) != 0 {
+		t.Errorf("a failed lookup logged as a refusal: %s", raw)
 	}
 }
 
@@ -498,7 +499,7 @@ func TestReviewGrantAccessCheckFailureIsLoud(t *testing.T) {
 		t.Fatal("no grants read")
 	}
 	st.calls, st.failAt = 0, last
-	records := captureRefusalLogs(t)
+	c := captureLog(f, slog.LevelInfo)
 	rec := f.postGrantBody(delegator, id, body)
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("access check failing: %d %s", rec.Code, rec.Body.String())
@@ -509,8 +510,8 @@ func TestReviewGrantAccessCheckFailureIsLoud(t *testing.T) {
 	if g := f.grantOf(id, stranger); g != nil {
 		t.Errorf("grant written: %+v", g)
 	}
-	if got := records(); len(got) != 0 {
-		t.Errorf("a failed lookup logged as a refusal: %v", got)
+	if got, raw := c.take(t); len(got) != 0 {
+		t.Errorf("a failed lookup logged as a refusal: %s", raw)
 	}
 }
 
@@ -526,16 +527,18 @@ func TestReviewGrantNeedsSubjectSupport(t *testing.T) {
 	r := withPrincipal(httptest.NewRequest(http.MethodPost, grantsPath(id),
 		strings.NewReader(reviewBody(SubjectPrincipal, reviewerID, GrantReview))), delegator)
 	rec := httptest.NewRecorder()
-	records := captureRefusalLogs(t)
+	c := &logCapture{}
+	l := slog.New(slog.NewJSONHandler(c, nil))
+	svc.SetLogger(func() *slog.Logger { return l })
 	svc.ServeHTTP(rec, r)
 	if got := response(rec); got != want {
 		t.Errorf("host without the subject check: %s", got)
 	}
-	// One refusal record, with reason subject_unreadable (the subject check
-	// cannot run, so it fails closed), the artifact id and the grantee.
-	if got := records(); len(got) != 1 || got[0]["reason"] != "subject_unreadable" ||
-		got[0]["artifact_id"] != id || got[0]["grantee"] != reviewerID {
-		t.Errorf("refusal records: %v", got)
+	// One refusal entry, with reason review_subject_unreadable (the subject
+	// check cannot run, so it fails closed), the artifact and the grantee.
+	if got, raw := c.take(t); len(got) != 1 || got[0][logKeyReason] != logReasonReviewSubjectUnreadable ||
+		got[0][logKeyArtifactID] != id || got[0][logKeySubjectRef] != reviewerID {
+		t.Errorf("refusal entries: %s", raw)
 	}
 	if g := f.grantOf(id, reviewerID); g != nil {
 		t.Errorf("grant written: %+v", g)

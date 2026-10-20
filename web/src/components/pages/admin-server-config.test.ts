@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { setPreferredTimeZone } from '../../utils/time.js';
+import { getPublicSettings, invalidatePublicSettings } from '../../client/server-feature-flags.js';
+import { requestUrl } from '../../client/__fixtures__/request-url.js';
 import type { ScionPageAdminServerConfig } from './admin-server-config.js';
 import {
   isLayer0Key,
@@ -483,6 +485,93 @@ describe('scion-page-admin-server-config', () => {
 
       expect(putCalled).toBe(true);
       expect(query(element, '.safety-net-notice')).toBeNull();
+    });
+  });
+
+  // ptone/scion#5311: the public settings are cached per page load; a save
+  // here can change them, so a successful save drops the cache and a failed
+  // one keeps it.
+  describe('public settings cache', () => {
+    async function saveWith(status: number): Promise<number> {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      const handler = createFetchHandler(config, {
+        putHandler: () =>
+          status < 400
+            ? { status, body: { reload: { applied: [] } } }
+            : { status, body: { error: { code: 'validation_error', message: 'bad' } } },
+      });
+      element = await createComponent((url, init) =>
+        requestUrl(url).includes('/api/v1/settings/public')
+          ? Promise.resolve(new Response('{}', { status: 200 }))
+          : handler(url, init)
+      );
+      const fetchMock = vi.mocked(fetch);
+      const settingsCalls = (): number =>
+        fetchMock.mock.calls.filter(([u]) => requestUrl(u).includes('/api/v1/settings/public'))
+          .length;
+      invalidatePublicSettings();
+      await getPublicSettings();
+      const before = settingsCalls();
+
+      const buttons = queryAll(element, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      await getPublicSettings();
+      return settingsCalls() - before;
+    }
+
+    it('a successful save makes the next public settings read fetch again', async () => {
+      expect(await saveWith(200)).toBe(1);
+    });
+
+    it('a failed save keeps the cached public settings', async () => {
+      expect(await saveWith(422)).toBe(0);
+    });
+
+    /** Like saveWith, for a section reset (DELETE /admin/server-config/sections/{name}). */
+    async function resetWith(status: number): Promise<number> {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      const handler = createFetchHandler(config);
+      element = await createComponent((url, init) => {
+        if (requestUrl(url).includes('/api/v1/settings/public')) {
+          return Promise.resolve(new Response('{}', { status: 200 }));
+        }
+        if (init?.method === 'DELETE') {
+          return Promise.resolve(new Response(status < 400 ? '{}' : 'bad', { status }));
+        }
+        return handler(url, init);
+      });
+      const fetchMock = vi.mocked(fetch);
+      const settingsCalls = (): number =>
+        fetchMock.mock.calls.filter(([u]) => requestUrl(u).includes('/api/v1/settings/public'))
+          .length;
+      invalidatePublicSettings();
+      await getPublicSettings();
+      const before = settingsCalls();
+
+      await (
+        element as unknown as { handleResetSection(name: string): Promise<void> }
+      ).handleResetSection('telemetry');
+      expect(
+        fetchMock.mock.calls.some(
+          ([u, init]) =>
+            init?.method === 'DELETE' &&
+            requestUrl(u).includes('/api/v1/admin/server-config/sections/telemetry')
+        )
+      ).toBe(true);
+
+      await getPublicSettings();
+      return settingsCalls() - before;
+    }
+
+    it('a successful section reset makes the next public settings read fetch again', async () => {
+      expect(await resetWith(200)).toBe(1);
+    });
+
+    it('a failed section reset keeps the cached public settings', async () => {
+      expect(await resetWith(500)).toBe(0);
     });
   });
 
@@ -2370,6 +2459,82 @@ describe('scion-page-admin-server-config', () => {
     });
   });
 
+  // ── image_registry: one badge from the server's provenance (ptone/scion#3916) ──
+
+  describe('image_registry provenance badge and inherited hint', () => {
+    const generic = 'Overridden by environment on this node';
+    function texts(el: HTMLElement, sel: string): string[] {
+      return queryAll(el, sel).map((b) => (b.textContent ?? '').replace(/\s+/g, ' ').trim());
+    }
+
+    it('names the startup env instead of the generic badge', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'db',
+            env_overrides: ['image_registry'],
+            image_registry_provenance: { source: 'file', value: 's.example' },
+          })
+        )
+      );
+      const badges = texts(element, '.image-registry-badge');
+      expect(badges).toHaveLength(1);
+      expect(badges[0]).toContain('SCION_SERVER_IMAGEREGISTRY at startup');
+      expect(texts(element, '.env-badge').some((t) => t.includes(generic))).toBe(false);
+    });
+
+    it('lists a broker that reports a node env', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'db',
+            image_registry_provenance: {
+              source: 'hub_db',
+              value: 'db.example',
+              node_env_overrides: [
+                { broker_id: 'b1', broker_name: 'gpu-pool', value: 'n.example', differs: true },
+              ],
+            },
+          })
+        )
+      );
+      const badges = texts(element, '.image-registry-badge');
+      expect(badges).toHaveLength(1);
+      expect(badges[0]).toContain('Runtime Broker gpu-pool sets SCION_IMAGE_REGISTRY=n.example');
+    });
+
+    it('describes a profile image_registry env value as a startup value', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({ settings_tier: 'db', env_overrides: ['profiles.k8s.image_registry'] })
+        )
+      );
+      const badges = texts(element, '.image-registry-badge');
+      expect(badges).toHaveLength(1);
+      expect(badges[0]).toContain('a saved profile value replaces it');
+      expect(texts(element, '.env-badge').some((t) => t.includes(generic))).toBe(false);
+    });
+
+    it('shows what a profile without a saved registry inherits', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'db',
+            profiles: { k8s: { runtime: 'docker' } },
+            image_registry_provenance: {
+              source: 'hub_db',
+              value: 'db.example',
+              profiles: { k8s: { source: 'hub_db', value: 'db.example' } },
+            },
+          })
+        )
+      );
+      expect(texts(element, '.image-registry-inherited')).toEqual([
+        'Inherited: db.example (saved hub value).',
+      ]);
+    });
+  });
+
   // ── Experiments tab (ptone/scion#2217) ──
 
   describe('Experiments tab', () => {
@@ -4228,12 +4393,12 @@ describe('scion-page-admin-server-config', () => {
         clear: (el) => (el.brokerContainerHubEndpoint = ''),
         expected: '',
       },
-      'server.broker.name': {
+      'server.broker.broker_name': {
         clear: (el) => (el.brokerName = ''),
         expected: '',
         bodyPath: ['server', 'broker', 'broker_name'],
       },
-      'server.broker.nickname': {
+      'server.broker.broker_nickname': {
         clear: (el) => (el.brokerNickname = ''),
         expected: '',
         bodyPath: ['server', 'broker', 'broker_nickname'],

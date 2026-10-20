@@ -155,6 +155,26 @@ func GcpHostProjectID(v string) predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldEQ(FieldGcpHostProjectID, v))
 }
 
+// GcpHostSource applies equality check predicate on the "gcp_host_source" field. It's identical to GcpHostSourceEQ.
+func GcpHostSource(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldGcpHostSource, v))
+}
+
+// HostIdentityObservedEmail applies equality check predicate on the "host_identity_observed_email" field. It's identical to HostIdentityObservedEmailEQ.
+func HostIdentityObservedEmail(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldHostIdentityObservedEmail, v))
+}
+
+// HostIdentityObservation applies equality check predicate on the "host_identity_observation" field. It's identical to HostIdentityObservationEQ.
+func HostIdentityObservation(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldHostIdentityObservation, v))
+}
+
+// HostIdentityObservedAt applies equality check predicate on the "host_identity_observed_at" field. It's identical to HostIdentityObservedAtEQ.
+func HostIdentityObservedAt(v time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldHostIdentityObservedAt, v))
+}
+
 // ConnectedHubID applies equality check predicate on the "connected_hub_id" field. It's identical to ConnectedHubIDEQ.
 func ConnectedHubID(v string) predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldEQ(FieldConnectedHubID, v))
@@ -1538,6 +1558,281 @@ func GcpHostProjectIDEqualFold(v string) predicate.RuntimeBroker {
 // GcpHostProjectIDContainsFold applies the ContainsFold predicate on the "gcp_host_project_id" field.
 func GcpHostProjectIDContainsFold(v string) predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldContainsFold(FieldGcpHostProjectID, v))
+}
+
+// GcpHostSourceEQ applies the EQ predicate on the "gcp_host_source" field.
+func GcpHostSourceEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldGcpHostSource, v))
+}
+
+// GcpHostSourceNEQ applies the NEQ predicate on the "gcp_host_source" field.
+func GcpHostSourceNEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNEQ(FieldGcpHostSource, v))
+}
+
+// GcpHostSourceIn applies the In predicate on the "gcp_host_source" field.
+func GcpHostSourceIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIn(FieldGcpHostSource, vs...))
+}
+
+// GcpHostSourceNotIn applies the NotIn predicate on the "gcp_host_source" field.
+func GcpHostSourceNotIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotIn(FieldGcpHostSource, vs...))
+}
+
+// GcpHostSourceGT applies the GT predicate on the "gcp_host_source" field.
+func GcpHostSourceGT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGT(FieldGcpHostSource, v))
+}
+
+// GcpHostSourceGTE applies the GTE predicate on the "gcp_host_source" field.
+func GcpHostSourceGTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGTE(FieldGcpHostSource, v))
+}
+
+// GcpHostSourceLT applies the LT predicate on the "gcp_host_source" field.
+func GcpHostSourceLT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLT(FieldGcpHostSource, v))
+}
+
+// GcpHostSourceLTE applies the LTE predicate on the "gcp_host_source" field.
+func GcpHostSourceLTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLTE(FieldGcpHostSource, v))
+}
+
+// GcpHostSourceContains applies the Contains predicate on the "gcp_host_source" field.
+func GcpHostSourceContains(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContains(FieldGcpHostSource, v))
+}
+
+// GcpHostSourceHasPrefix applies the HasPrefix predicate on the "gcp_host_source" field.
+func GcpHostSourceHasPrefix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasPrefix(FieldGcpHostSource, v))
+}
+
+// GcpHostSourceHasSuffix applies the HasSuffix predicate on the "gcp_host_source" field.
+func GcpHostSourceHasSuffix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasSuffix(FieldGcpHostSource, v))
+}
+
+// GcpHostSourceIsNil applies the IsNil predicate on the "gcp_host_source" field.
+func GcpHostSourceIsNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIsNull(FieldGcpHostSource))
+}
+
+// GcpHostSourceNotNil applies the NotNil predicate on the "gcp_host_source" field.
+func GcpHostSourceNotNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotNull(FieldGcpHostSource))
+}
+
+// GcpHostSourceEqualFold applies the EqualFold predicate on the "gcp_host_source" field.
+func GcpHostSourceEqualFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEqualFold(FieldGcpHostSource, v))
+}
+
+// GcpHostSourceContainsFold applies the ContainsFold predicate on the "gcp_host_source" field.
+func GcpHostSourceContainsFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContainsFold(FieldGcpHostSource, v))
+}
+
+// HostIdentityObservedEmailEQ applies the EQ predicate on the "host_identity_observed_email" field.
+func HostIdentityObservedEmailEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldHostIdentityObservedEmail, v))
+}
+
+// HostIdentityObservedEmailNEQ applies the NEQ predicate on the "host_identity_observed_email" field.
+func HostIdentityObservedEmailNEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNEQ(FieldHostIdentityObservedEmail, v))
+}
+
+// HostIdentityObservedEmailIn applies the In predicate on the "host_identity_observed_email" field.
+func HostIdentityObservedEmailIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIn(FieldHostIdentityObservedEmail, vs...))
+}
+
+// HostIdentityObservedEmailNotIn applies the NotIn predicate on the "host_identity_observed_email" field.
+func HostIdentityObservedEmailNotIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotIn(FieldHostIdentityObservedEmail, vs...))
+}
+
+// HostIdentityObservedEmailGT applies the GT predicate on the "host_identity_observed_email" field.
+func HostIdentityObservedEmailGT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGT(FieldHostIdentityObservedEmail, v))
+}
+
+// HostIdentityObservedEmailGTE applies the GTE predicate on the "host_identity_observed_email" field.
+func HostIdentityObservedEmailGTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGTE(FieldHostIdentityObservedEmail, v))
+}
+
+// HostIdentityObservedEmailLT applies the LT predicate on the "host_identity_observed_email" field.
+func HostIdentityObservedEmailLT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLT(FieldHostIdentityObservedEmail, v))
+}
+
+// HostIdentityObservedEmailLTE applies the LTE predicate on the "host_identity_observed_email" field.
+func HostIdentityObservedEmailLTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLTE(FieldHostIdentityObservedEmail, v))
+}
+
+// HostIdentityObservedEmailContains applies the Contains predicate on the "host_identity_observed_email" field.
+func HostIdentityObservedEmailContains(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContains(FieldHostIdentityObservedEmail, v))
+}
+
+// HostIdentityObservedEmailHasPrefix applies the HasPrefix predicate on the "host_identity_observed_email" field.
+func HostIdentityObservedEmailHasPrefix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasPrefix(FieldHostIdentityObservedEmail, v))
+}
+
+// HostIdentityObservedEmailHasSuffix applies the HasSuffix predicate on the "host_identity_observed_email" field.
+func HostIdentityObservedEmailHasSuffix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasSuffix(FieldHostIdentityObservedEmail, v))
+}
+
+// HostIdentityObservedEmailIsNil applies the IsNil predicate on the "host_identity_observed_email" field.
+func HostIdentityObservedEmailIsNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIsNull(FieldHostIdentityObservedEmail))
+}
+
+// HostIdentityObservedEmailNotNil applies the NotNil predicate on the "host_identity_observed_email" field.
+func HostIdentityObservedEmailNotNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotNull(FieldHostIdentityObservedEmail))
+}
+
+// HostIdentityObservedEmailEqualFold applies the EqualFold predicate on the "host_identity_observed_email" field.
+func HostIdentityObservedEmailEqualFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEqualFold(FieldHostIdentityObservedEmail, v))
+}
+
+// HostIdentityObservedEmailContainsFold applies the ContainsFold predicate on the "host_identity_observed_email" field.
+func HostIdentityObservedEmailContainsFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContainsFold(FieldHostIdentityObservedEmail, v))
+}
+
+// HostIdentityObservationEQ applies the EQ predicate on the "host_identity_observation" field.
+func HostIdentityObservationEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldHostIdentityObservation, v))
+}
+
+// HostIdentityObservationNEQ applies the NEQ predicate on the "host_identity_observation" field.
+func HostIdentityObservationNEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNEQ(FieldHostIdentityObservation, v))
+}
+
+// HostIdentityObservationIn applies the In predicate on the "host_identity_observation" field.
+func HostIdentityObservationIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIn(FieldHostIdentityObservation, vs...))
+}
+
+// HostIdentityObservationNotIn applies the NotIn predicate on the "host_identity_observation" field.
+func HostIdentityObservationNotIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotIn(FieldHostIdentityObservation, vs...))
+}
+
+// HostIdentityObservationGT applies the GT predicate on the "host_identity_observation" field.
+func HostIdentityObservationGT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGT(FieldHostIdentityObservation, v))
+}
+
+// HostIdentityObservationGTE applies the GTE predicate on the "host_identity_observation" field.
+func HostIdentityObservationGTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGTE(FieldHostIdentityObservation, v))
+}
+
+// HostIdentityObservationLT applies the LT predicate on the "host_identity_observation" field.
+func HostIdentityObservationLT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLT(FieldHostIdentityObservation, v))
+}
+
+// HostIdentityObservationLTE applies the LTE predicate on the "host_identity_observation" field.
+func HostIdentityObservationLTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLTE(FieldHostIdentityObservation, v))
+}
+
+// HostIdentityObservationContains applies the Contains predicate on the "host_identity_observation" field.
+func HostIdentityObservationContains(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContains(FieldHostIdentityObservation, v))
+}
+
+// HostIdentityObservationHasPrefix applies the HasPrefix predicate on the "host_identity_observation" field.
+func HostIdentityObservationHasPrefix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasPrefix(FieldHostIdentityObservation, v))
+}
+
+// HostIdentityObservationHasSuffix applies the HasSuffix predicate on the "host_identity_observation" field.
+func HostIdentityObservationHasSuffix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasSuffix(FieldHostIdentityObservation, v))
+}
+
+// HostIdentityObservationIsNil applies the IsNil predicate on the "host_identity_observation" field.
+func HostIdentityObservationIsNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIsNull(FieldHostIdentityObservation))
+}
+
+// HostIdentityObservationNotNil applies the NotNil predicate on the "host_identity_observation" field.
+func HostIdentityObservationNotNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotNull(FieldHostIdentityObservation))
+}
+
+// HostIdentityObservationEqualFold applies the EqualFold predicate on the "host_identity_observation" field.
+func HostIdentityObservationEqualFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEqualFold(FieldHostIdentityObservation, v))
+}
+
+// HostIdentityObservationContainsFold applies the ContainsFold predicate on the "host_identity_observation" field.
+func HostIdentityObservationContainsFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContainsFold(FieldHostIdentityObservation, v))
+}
+
+// HostIdentityObservedAtEQ applies the EQ predicate on the "host_identity_observed_at" field.
+func HostIdentityObservedAtEQ(v time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldHostIdentityObservedAt, v))
+}
+
+// HostIdentityObservedAtNEQ applies the NEQ predicate on the "host_identity_observed_at" field.
+func HostIdentityObservedAtNEQ(v time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNEQ(FieldHostIdentityObservedAt, v))
+}
+
+// HostIdentityObservedAtIn applies the In predicate on the "host_identity_observed_at" field.
+func HostIdentityObservedAtIn(vs ...time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIn(FieldHostIdentityObservedAt, vs...))
+}
+
+// HostIdentityObservedAtNotIn applies the NotIn predicate on the "host_identity_observed_at" field.
+func HostIdentityObservedAtNotIn(vs ...time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotIn(FieldHostIdentityObservedAt, vs...))
+}
+
+// HostIdentityObservedAtGT applies the GT predicate on the "host_identity_observed_at" field.
+func HostIdentityObservedAtGT(v time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGT(FieldHostIdentityObservedAt, v))
+}
+
+// HostIdentityObservedAtGTE applies the GTE predicate on the "host_identity_observed_at" field.
+func HostIdentityObservedAtGTE(v time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGTE(FieldHostIdentityObservedAt, v))
+}
+
+// HostIdentityObservedAtLT applies the LT predicate on the "host_identity_observed_at" field.
+func HostIdentityObservedAtLT(v time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLT(FieldHostIdentityObservedAt, v))
+}
+
+// HostIdentityObservedAtLTE applies the LTE predicate on the "host_identity_observed_at" field.
+func HostIdentityObservedAtLTE(v time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLTE(FieldHostIdentityObservedAt, v))
+}
+
+// HostIdentityObservedAtIsNil applies the IsNil predicate on the "host_identity_observed_at" field.
+func HostIdentityObservedAtIsNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIsNull(FieldHostIdentityObservedAt))
+}
+
+// HostIdentityObservedAtNotNil applies the NotNil predicate on the "host_identity_observed_at" field.
+func HostIdentityObservedAtNotNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotNull(FieldHostIdentityObservedAt))
 }
 
 // ConnectedHubIDEQ applies the EQ predicate on the "connected_hub_id" field.

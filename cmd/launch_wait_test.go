@@ -113,7 +113,7 @@ func TestWaitForAgentLaunch_RunningPrintsProgress(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, a)
 	assert.Equal(t, "id-1", a.ID)
-	assert.Equal(t, "  a1: provisioning (pod_create)\n  a1: provisioning (image_pull)\n  a1: running\n", out.String())
+	assert.Equal(t, "  a1: provisioning (creating the pod)\n  a1: provisioning (pulling the image)\n  a1: running\n", out.String())
 	assert.Equal(t, 5, seq.calls)
 }
 
@@ -147,7 +147,7 @@ func TestWaitForAgentLaunch_TerminalStates(t *testing.T) {
 			},
 			wantIncomplete: true,
 			wantContains: []string{
-				"agent 'a1' create did not complete (image_pull_failed): image pull failed for example.com/img:bad",
+				"agent 'a1' create did not complete (image_pull_failed: the agent image could not be pulled): image pull failed for example.com/img:bad",
 				"Template: claude", "Task: fix the tests",
 				"scion delete a1", "scion start a1", "force=true or purged",
 			},
@@ -161,7 +161,7 @@ func TestWaitForAgentLaunch_TerminalStates(t *testing.T) {
 			},
 			wantIncomplete: true,
 			wantContains: []string{
-				"agent 'a1' create did not complete (runtime_error, cause runtime_forbidden): launching: Failed to create agent",
+				"agent 'a1' create did not complete (runtime_error: the runtime could not start the agent, cause runtime_forbidden): launching: Failed to create agent",
 				"scion delete a1",
 			},
 		},
@@ -172,7 +172,7 @@ func TestWaitForAgentLaunch_TerminalStates(t *testing.T) {
 				Launch: &hubclient.AgentLaunch{ID: "l1", State: "ended", Kind: "create", Error: "launch_stopped", EndReason: "stopped"},
 			},
 			wantIncomplete: true,
-			wantContains:   []string{"create did not complete (launch_stopped)", "scion delete a1"},
+			wantContains:   []string{"agent 'a1' create did not complete: the create was stopped (launch_stopped)", "scion delete a1"},
 			wantMissing:    []string{"Template:", "Task:"},
 		},
 		{
@@ -182,7 +182,19 @@ func TestWaitForAgentLaunch_TerminalStates(t *testing.T) {
 				Launch: &hubclient.AgentLaunch{ID: "l1", State: "ended", Kind: "create", Error: "launch_timeout", EndReason: "timed_out"},
 			},
 			wantIncomplete: true,
-			wantContains:   []string{"(launch_timeout): launch timed out during image_pull", "scion delete a1"},
+			wantContains:   []string{"(launch_timeout: the launch timed out): launch timed out during image_pull", "scion delete a1"},
+		},
+		{
+			// The Hub's failed dispatch ends the launch not_launched with a
+			// code and keeps the row in provisioning: the code ends the wait
+			// (ptone/scion#5283).
+			name: "create dispatch failed while provisioning",
+			agent: &hubclient.Agent{
+				Phase:  "provisioning",
+				Launch: &hubclient.AgentLaunch{ID: "l1", State: "ended", Kind: "create", Error: "dispatch_failed", EndReason: "not_launched"},
+			},
+			wantIncomplete: true,
+			wantContains:   []string{"agent 'a1' create did not complete (dispatch_failed: the runtime broker did not accept the launch)"},
 		},
 		{
 			name: "start launch error is not an incomplete create",
@@ -190,7 +202,7 @@ func TestWaitForAgentLaunch_TerminalStates(t *testing.T) {
 				Phase: "error", Template: "claude",
 				Launch: &hubclient.AgentLaunch{ID: "l2", State: "ended", Kind: "start", Error: "image_pull_failed", EndReason: "failed"},
 			},
-			wantContains: []string{"agent 'a1' did not start (image_pull_failed)", "scion logs a1"},
+			wantContains: []string{"agent 'a1' did not start (image_pull_failed: the agent image could not be pulled)", "scion logs a1"},
 			wantMissing:  []string{"scion delete", "create did not complete", "Template:"},
 		},
 		{
@@ -564,7 +576,7 @@ func TestStartAgentViaHub_AsyncWaitsUntilRunning(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 2, hub.getsAfterCR)
 	assert.Contains(t, stderr, "Waiting for agent 'a1' to start...")
-	assert.Contains(t, stderr, "  a1: provisioning (pod_create)")
+	assert.Contains(t, stderr, "  a1: provisioning (creating the pod)")
 	assert.Contains(t, stderr, "Agent 'a1' started via Hub.")
 	assert.Contains(t, stderr, "Phase: running")
 }
@@ -583,7 +595,7 @@ func TestStartAgentViaHub_AsyncFailure(t *testing.T) {
 	var failed *launchFailedError
 	require.ErrorAs(t, err, &failed)
 	assert.Contains(t, stderr, "Warning: broker is near capacity", "warnings are printed when the wait fails")
-	assert.Contains(t, err.Error(), "create did not complete (unschedulable)")
+	assert.Contains(t, err.Error(), "create did not complete (unschedulable: the agent pod cannot be scheduled)")
 	assert.Contains(t, err.Error(), "scion delete a1")
 }
 
@@ -1150,7 +1162,7 @@ func TestWaitForAgentLaunch_BrieflyUnreadableThenProgress(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, a)
 	assert.Equal(t, "running", a.Phase)
-	assert.Equal(t, "  a1: provisioning (pod_create)\n  a1: running\n", out.String())
+	assert.Equal(t, "  a1: provisioning (creating the pod)\n  a1: running\n", out.String())
 	assert.Equal(t, 5, seq.calls)
 }
 
@@ -1429,7 +1441,7 @@ func TestStartAgentViaHub_AgentLauncherBrieflyUnreadable(t *testing.T) {
 		_ = captureStdout(t, func() { err = startAgentViaHub(nil, hubCtx, "a1", "", false, nil) })
 	})
 	require.NoError(t, err)
-	assert.Contains(t, stderr, "  a1: provisioning (pod_create)")
+	assert.Contains(t, stderr, "  a1: provisioning (creating the pod)")
 	assert.Contains(t, stderr, "Agent 'a1' started via Hub.")
 	assert.NotContains(t, stderr, "no longer exists")
 	assert.NotContains(t, stderr, "not readable")

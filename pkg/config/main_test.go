@@ -16,6 +16,7 @@ package config
 
 import (
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
@@ -50,5 +51,25 @@ func TestMain(m *testing.M) {
 	for _, name := range ambientTestEnvVars {
 		_ = os.Unsetenv(name)
 	}
+	clearAmbientSettingsEnv()
+	// A re-exec'd copy of this test binary acting as a separate settings
+	// writer process (see settings_lock_test.go).
+	if mode := os.Getenv(settingsHelperEnv); mode != "" {
+		os.Exit(runSettingsHelper(mode))
+	}
 	os.Exit(m.Run())
+}
+
+// clearAmbientSettingsEnv unsets every SCION_SERVER_* and SCION_SEED_*
+// variable the environment running the tests exports. The env mappers read
+// the process env to let a canonical name win over its aliases
+// (resolveServerEnv), so an ambient value would change what a test's
+// alias mapping returns. Tests that need one set it with t.Setenv.
+func clearAmbientSettingsEnv() {
+	for _, kv := range os.Environ() {
+		name, _, _ := strings.Cut(kv, "=")
+		if strings.HasPrefix(name, serverEnvPrefix) || strings.HasPrefix(name, seedEnvPrefix) {
+			_ = os.Unsetenv(name)
+		}
+	}
 }

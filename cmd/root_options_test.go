@@ -101,17 +101,20 @@ func TestRootOptionsReachRunEThroughCobra(t *testing.T) {
 		rootCmd.SetErr(nil)
 	})
 
-	var cobraOut bytes.Buffer
+	// whoami writes its result to cmd.OutOrStdout(), which is cobraOut here.
+	// Errors and usage go to a separate buffer so they cannot pollute the JSON.
+	var cobraOut, cobraErr bytes.Buffer
 	rootCmd.SetOut(&cobraOut)
-	rootCmd.SetErr(&cobraOut)
+	rootCmd.SetErr(&cobraErr)
 	rootCmd.SetArgs([]string{"whoami", "--format", "json"})
 
-	out := captureStdout(t, func() {
-		require.NoError(t, rootCmd.Execute())
+	stdout := captureStdout(t, func() {
+		require.NoError(t, rootCmd.Execute(), "stderr: %s", cobraErr.String())
 	})
+	assert.Empty(t, stdout, "whoami must write to cmd.OutOrStdout(), not os.Stdout")
 
 	var result WhoamiResult
-	require.NoError(t, json.Unmarshal([]byte(out), &result), "stdout must be JSON, got %q", out)
+	require.NoError(t, json.Unmarshal(cobraOut.Bytes(), &result), "cmd output must be JSON, got %q", cobraOut.String())
 	assert.Equal(t, "e2e-agent", result.Slug)
 	assert.Equal(t, "E2E Agent", result.Name)
 	assert.Equal(t, "e2e-id", result.ID)

@@ -129,7 +129,9 @@ func TestAdminConduitGrantKeyRotate(t *testing.T) {
 
 // TestAdminConduitGrantKeyRotate_ReadSurfaceUnchanged: rotation does not
 // change what GET /api/v1/conduit/grant-keys returns (the same fields, public
-// halves only) or who may read it.
+// halves only) or who may read it. The fields are the keys and, since 6.6b-2,
+// the target_stream_deadlines mode targets read with them (design §3.5
+// Gating); rotation changes neither.
 func TestAdminConduitGrantKeyRotate_ReadSurfaceUnchanged(t *testing.T) {
 	srv, _, _, member := setupScopedAdminTest(t)
 	clock := &conduitTestClock{now: time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)}
@@ -144,7 +146,7 @@ func TestAdminConduitGrantKeyRotate_ReadSurfaceUnchanged(t *testing.T) {
 
 	var raw map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
-	assert.Equal(t, []string{"keys"}, jsonFieldNames(raw))
+	assert.Equal(t, []string{"keys", "target_stream_deadlines"}, jsonFieldNames(raw))
 	var keys []map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(raw["keys"], &keys))
 	require.Len(t, keys, 2, "both keys are published during the overlap")
