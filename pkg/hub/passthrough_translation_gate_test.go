@@ -74,7 +74,7 @@ func (f *ptgFixture) nonOwnerCreator(t *testing.T, name string) *store.User {
 	ensureHubMembership(context.Background(), f.store, id)
 	b, err := f.store.GetRuntimeBroker(context.Background(), f.broker.ID)
 	require.NoError(t, err)
-	require.NotEqual(t, id, b.CreatedBy)
+	require.Equal(t, f.owner.ID, b.CreatedBy, "the broker stays owned by the project owner")
 	b.AutoProvide = true
 	require.NoError(t, f.store.UpdateRuntimeBroker(context.Background(), b))
 	u, err := f.store.GetUser(context.Background(), id)
