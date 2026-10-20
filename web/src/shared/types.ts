@@ -1248,6 +1248,8 @@ export interface RuntimeBroker {
   labels?: Record<string, string>;
   createdBy?: string;
   createdByName?: string;
+  /** Configured GCP host service account (Go JSON tag is snake_case). */
+  gcp_host_service_account_email?: string;
   /** Creation and last-update times, as the hub sends them. */
   created?: string;
   updated?: string;
@@ -1290,6 +1292,27 @@ export interface RuntimeBroker {
    * Renderers must show this visibly, not only in a tooltip.
    */
   agentLimitSource?: string;
+  /**
+   * Host identity state of a co-located broker: the configured GCP host
+   * service account compared with the identity the host reports. Mirrors Go
+   * store.HostIdentityStatus. observedEmail and observedAt are present only
+   * for callers allowed to update the broker.
+   */
+  hostIdentity?: BrokerHostIdentity;
+}
+
+/** Mirrors Go store.HostIdentityStatus (pkg/store/models.go). */
+export interface BrokerHostIdentity {
+  state:
+    | 'unobserved'
+    | 'unknown'
+    | 'unset_detected'
+    | 'match'
+    | 'mismatch'
+    | 'pinned_absent'
+    | 'none';
+  observedEmail?: string;
+  observedAt?: string;
 }
 
 /**

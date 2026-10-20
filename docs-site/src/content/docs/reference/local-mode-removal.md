@@ -40,8 +40,9 @@ re-link it. See [Linked git projects](/scion/local/workspace/#linked-git-project
 | --- | --- |
 | Running agents with no hub | Start the local hub once with `scion server start` (its first run opens the [onboarding wizard](/scion/getting-started/onboarding/)). To start it at login, install the service file that `scion server install` prints. |
 | `--no-hub` flag | Removed. It stays for one release as a hidden flag that fails with a pointer to this page. Every command uses the hub. |
-| `scion hub enable` | Removed. A configured hub endpoint is used automatically. The hidden command fails with guidance. |
+| `scion hub enable` | Removed. The hub the CLI selects (from the hub list) is used automatically. The hidden command fails with guidance. |
 | `scion hub disable` | Removed. To stop the local hub, run `scion server stop`. The hidden command fails with guidance. |
+| `local_experiments` setting | No effect: every agent starts through a hub, and the hub's experiments decide (**Admin → Server Config → Experiments**; see [Experiments](/scion/reference/experiments/)). |
 | `hub.enabled`, `hub.local_only` settings | Deprecated and ignored. They are still accepted so existing settings files validate. `scion hub status` notes it when a settings file still sets them. |
 | `scion hub link` before using a repository with the local hub | Not needed. A repository links itself to the local workstation hub on its first command, without a prompt. A remote hub still asks before linking. |
 | `scion --no-hub delete <name>` to finish a failed local cleanup | `scion delete --cleanup-only <name>` (add `--preserve-branch` to keep the branch). |
@@ -64,7 +65,7 @@ When the configured hub is the local workstation server and it is not running:
 Local scion server is not running. Start it with 'scion server start'.
 ```
 
-To use a remote hub: `scion hub add <name> <url>`, then `scion use --hub <name>`. An existing `hub.endpoint` in your global settings is added once to the hub list as a named hub. Inside a project directory, the directory's hub link and any `hub.endpoint` in its settings or your global settings still take precedence over the selected hub; pass `--hub <name>` there, or remove the old `hub.endpoint`. If you used `scion server start` before, your global settings may still hold `hub.endpoint: http://127.0.0.1:8080`.
+To use a remote hub: `scion hub add <name> <url>`, then `scion use --hub <name>`. An existing `hub.endpoint` in your global settings is added once to the hub list as a named hub, and becomes the current hub when none is current; after that the CLI no longer reads it. Inside a project directory, the directory's link entry still takes precedence over the selected hub; a project linked through `hub.endpoint` in its settings gets a link entry for that hub the first time the CLI resolves it. Pass `--hub <name>` there to target another hub. If you used `scion server start` before, your global settings may still hold `hub.endpoint: http://127.0.0.1:8080`, which is imported as `local`.
 
 ## Your first command after upgrading
 
@@ -140,9 +141,10 @@ project's own settings are read; a value in your global settings does not mark o
 
 ### Users with a remote hub endpoint
 
-If your settings already had a remote `hub.endpoint` but you kept the hub turned off, that hub is
-now used. `scion hub status` shows the endpoint and where it came from. Nothing is linked to a
-remote hub without a prompt.
+If your global settings already had a remote `hub.endpoint` but you kept the hub turned off, that
+hub is imported into the hub list and becomes the current hub if none is current. `scion hub
+status` shows the endpoint and where it came from. Nothing is linked to a remote hub without a
+prompt.
 
 ## Missing image registry
 

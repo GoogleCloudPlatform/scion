@@ -1055,6 +1055,12 @@ func (r *Relay) registered(ctx context.Context, sessionID string) (*entry, error
 
 // CloseSessionsOf closes every local session of the principal (agent
 // deletion). Rows are deleted as each session ends.
+//
+// It reaches registered sessions only: a session that is admitted but not
+// yet registered is not closed. A caller must therefore first make that
+// session's post-registration Revalidate fail (for example by deleting the
+// agent row, or by marking the broker session denied) before calling it,
+// so a session registered afterwards closes on its own.
 func (r *Relay) CloseSessionsOf(kind, id string, code uint32, reason string) int {
 	r.mu.Lock()
 	var hit []*entry

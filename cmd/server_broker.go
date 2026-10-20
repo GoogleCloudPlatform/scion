@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -30,6 +31,95 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+// hostDetection is what detectHostGCPIdentity read from the metadata server.
+type hostDetection struct {
+	// Email is the host's default service account (lowercased), when
+	// reported.
+	Email string
+	// ProjectID is the host's GCP project, when reported.
+	ProjectID string
+	// Outcome is the store.HostObservation* outcome; empty is derived from
+	// Email (present when set, otherwise unavailable).
+	Outcome string
+	// ObservedAt is when the metadata server was read.
+	ObservedAt time.Time
+}
+
+// Observation is the host identity observation for the broker record.
+func (d hostDetection) Observation() store.HostIdentityObservation {
+	outcome := d.Outcome
+	if outcome == "" {
+		outcome = store.HostObservationUnavailable
+		if d.Email != "" {
+			outcome = store.HostObservationPresent
+		}
+	}
+	at := d.ObservedAt
+	if at.IsZero() {
+		at = time.Now()
+	}
+	return store.HostIdentityObservation{Outcome: outcome, Email: d.Email, ObservedAt: at}
+}
+
+// detectHostGCPIdentity reads the host's GCP identity from the GCE metadata
+// server (GCE, Cloud Run and GKE). A variable so tests can replace it.
+var detectHostGCPIdentity = func(ctx context.Context) hostDetection {
+	d := hostDetection{Outcome: store.HostObservationUnavailable, ObservedAt: time.Now()}
+	if !metadata.OnGCE() {
+		return d
+	}
+	email, err := metadata.EmailWithContext(ctx, "default")
+	switch {
+	case err != nil:
+		var notDefined metadata.NotDefinedError
+		if errors.As(err, &notDefined) {
+			d.Outcome = store.HostObservationAbsent
+		}
+	case email == "":
+		d.Outcome = store.HostObservationAbsent
+	default:
+		d.Outcome = store.HostObservationPresent
+		d.Email = strings.ToLower(email)
+		log.Printf("Auto-detected GCP host service account: %s", d.Email)
+	}
+	if pid, err := metadata.ProjectIDWithContext(ctx); err == nil && pid != "" {
+		d.ProjectID = pid
+	}
+	return d
+}
+
+// detectedSource is the GCP host source for a pair read from the metadata
+// server: GCPHostSourceDetected when anything was read, otherwise "".
+func detectedSource(email, project string) string {
+	if email == "" && project == "" {
+		return ""
+	}
+	return store.GCPHostSourceDetected
+}
+
+// refreshDetectedGCPHost refreshes the co-located broker's GCP host pair
+// from the metadata server on every start, so the record follows a change
+// of the host's service account. A value set or cleared through the update
+// API is kept: the detected value is then only logged. Nothing detected
+// leaves the stored pair unchanged.
+func refreshDetectedGCPHost(ctx context.Context, s store.Store, broker *store.RuntimeBroker, email, project string) error {
+	if email == "" {
+		return nil
+	}
+	if project == "" {
+		project = broker.GCPHostProjectID
+	}
+	applied, err := s.SetRuntimeBrokerGCPHostDetected(ctx, broker.ID, email, project)
+	if err != nil {
+		return fmt.Errorf("failed to update the runtime broker GCP host fields: %w", err)
+	}
+	if !applied && !strings.EqualFold(email, broker.GCPHostServiceAccountEmail) {
+		log.Printf("Warning: broker %s (%s): the GCP host service account set through the update API (%q) differs from the host's detected service account (%q); keeping the configured value",
+			broker.Name, broker.ID, broker.GCPHostServiceAccountEmail, email)
+	}
+	return nil
+}
 
 // registerGlobalProjectAndBroker creates the global project and registers this
 // runtime broker as a provider. This enables automatic agent handoff.
@@ -102,11 +192,18 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 	// If not found by ID, try to find an existing broker with the same name
 	// to prevent duplicate registrations when the broker ID changes (e.g.,
 	// settings file recreated, format migration, or database reset). Only
-	// legacy rows are candidates: a flat row is never adopted by name.
+	// legacy rows are candidates: a flat row is never adopted by name, and
+	// neither is a row with a recorded owner (only the Hub-managed row the
+	// co-located server wrote itself).
 	if broker == nil && brokerName != "" {
 		existingByName, nameErr := s.GetLegacyRuntimeBrokerByName(ctx, brokerName)
 		if nameErr != nil && nameErr != store.ErrNotFound {
 			return brokerID, fmt.Errorf("failed to check for runtime broker by name: %w", nameErr)
+		}
+		if existingByName != nil && existingByName.CreatedBy != "" {
+			log.Printf("Warning: broker %q (ID: %s) has a recorded owner and is not adopted as the co-located broker; registering a new record",
+				brokerName, existingByName.ID)
+			existingByName = nil
 		}
 		if existingByName != nil {
 			log.Printf("Found existing broker by name %q (ID: %s), reusing instead of creating duplicate", brokerName, existingByName.ID)
@@ -122,16 +219,8 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 	// Auto-detect host service account from the GCE metadata server.
 	// This works on GCE, Cloud Run, and GKE, and populates the fields
 	// that the passthrough identity gate requires.
-	var detectedSAEmail, detectedProjectID string
-	if metadata.OnGCE() {
-		if email, err := metadata.EmailWithContext(ctx, "default"); err == nil && email != "" {
-			detectedSAEmail = strings.ToLower(email)
-			log.Printf("Auto-detected GCP host service account: %s", detectedSAEmail)
-		}
-		if pid, err := metadata.ProjectIDWithContext(ctx); err == nil && pid != "" {
-			detectedProjectID = pid
-		}
-	}
+	detected := detectHostGCPIdentity(ctx)
+	detectedSAEmail, detectedProjectID := detected.Email, detected.ProjectID
 
 	if broker == nil {
 		// Creating a legacy row next to a flat row with the same name or
@@ -155,6 +244,7 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 			AutoProvide:                autoProvide,
 			GCPHostServiceAccountEmail: detectedSAEmail,
 			GCPHostProjectID:           detectedProjectID,
+			GCPHostSource:              detectedSource(detectedSAEmail, detectedProjectID),
 			Capabilities:               storeBrokerCapabilities(runtimebroker.StaticCapabilities(rt, config.ImageRegistryFromEnv())),
 			Profiles:                   profiles,
 			DefaultProfile:             defaultProfile,
@@ -172,14 +262,6 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 		broker.Endpoint = endpoint
 		broker.AutoProvide = autoProvide
 		broker.LastHeartbeat = time.Now()
-		// Refresh host SA from metadata on every restart so the broker
-		// record stays current when the runtime SA changes.
-		if detectedSAEmail != "" {
-			broker.GCPHostServiceAccountEmail = detectedSAEmail
-		}
-		if detectedProjectID != "" {
-			broker.GCPHostProjectID = detectedProjectID
-		}
 		// Update profiles from settings (may have changed)
 		broker.Profiles = profiles
 		broker.DefaultProfile = defaultProfile
@@ -209,7 +291,11 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 		if err := s.UpdateRuntimeBroker(ctx, broker); err != nil {
 			return brokerID, fmt.Errorf("failed to update runtime broker: %w", err)
 		}
+		if err := refreshDetectedGCPHost(ctx, s, broker, detectedSAEmail, detectedProjectID); err != nil {
+			return brokerID, err
+		}
 	}
+	hub.RecordHostObservation(ctx, s, brokerID, detected.Observation())
 
 	// Re-assign agents orphaned by broker ID changes.
 	// An agent is orphaned when its RuntimeBrokerID points to a broker that
