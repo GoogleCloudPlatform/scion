@@ -583,51 +583,84 @@ func TestFileSource_RacyModTimeIsReread(t *testing.T) {
 	assert.Equal(t, 3, reads, "a read that started well after the modification time is reused")
 }
 
-// A change to the file that leaves its identity, size and modification time
-// as they were still changes its change time, and the file is read again.
-func TestFileSource_ChangeTimeInvalidatesCachedRead(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "tt")
+// cachedReadValidLocked reuses an earlier read only when every piece of
+// metadata matches and the modification time is safely before the start of
+// that read. Each case changes one input from a state that is reused. The
+// identities are real Lstat results (os.SameFile only compares results from
+// os.Stat or os.Lstat); the other inputs are plain values, so the table
+// needs no clock or kernel timing.
+func TestFileSource_CachedReadValidLocked(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tt")
+	other := filepath.Join(dir, "other")
 	writeTokenFile(t, path, makeTestJWT(time.Now().Add(10*time.Minute)))
-	mtime := setModTime(t, path, time.Now().Add(-time.Hour).Truncate(time.Second))
+	writeTokenFile(t, other, makeTestJWT(time.Now().Add(10*time.Minute)))
+	fi, err := os.Lstat(path)
+	require.NoError(t, err)
+	otherFi, err := os.Lstat(other)
+	require.NoError(t, err)
+	require.False(t, os.SameFile(fi, otherFi))
 
-	reads := 0
-	src := NewFileSource(path, countingReader(&reads))
-	_, err := src.Token()
-	require.NoError(t, err)
-	_, err = src.Token()
-	require.NoError(t, err)
-	require.Equal(t, 1, reads, "an unchanged file well past the racy window is not read again")
+	mtime := fi.ModTime()
+	ctime := time.Unix(1_700_000_000, 123)
+	const nlink = uint64(1)
 
-	before, err := os.Lstat(path)
-	require.NoError(t, err)
-	ctime0, _, ok := fileStatExtra(before)
-	require.True(t, ok)
-	// Change only the change time: chmod to the same mode updates it. The
-	// kernel stamps it from a coarse clock, so repeat until it moves.
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		require.NoError(t, os.Chmod(path, 0o600))
-		after, err := os.Lstat(path)
-		require.NoError(t, err)
-		ctime1, _, _ := fileStatExtra(after)
-		if !ctime1.Equal(ctime0) {
-			require.True(t, os.SameFile(before, after))
-			require.Equal(t, before.Size(), after.Size())
-			require.True(t, after.ModTime().Equal(mtime))
-			break
-		}
-		require.True(t, time.Now().Before(deadline), "change time did not move")
-		time.Sleep(time.Millisecond)
+	type input struct {
+		src       *FileSource
+		ctime     time.Time
+		nlink     uint64
+		haveExtra bool
 	}
-
-	_, err = src.Token()
-	require.NoError(t, err)
-	assert.Equal(t, 2, reads, "a changed change time must cause a new read")
+	// reusable returns the state in which the earlier read is reused.
+	reusable := func() input {
+		return input{
+			src: &FileSource{
+				path:        path,
+				fileInfo:    fi,
+				fileModTime: mtime,
+				fileSize:    fi.Size(),
+				fileCtime:   ctime,
+				fileNlink:   nlink,
+				fileReadAt:  mtime.Add(racyModTimeWindow + time.Nanosecond),
+			},
+			ctime:     ctime,
+			nlink:     nlink,
+			haveExtra: true,
+		}
+	}
+	tests := []struct {
+		name   string
+		change func(in *input)
+		want   bool
+	}{
+		{"all equal, modified before the racy window", func(*input) {}, true},
+		{"different file", func(in *input) { in.src.fileInfo = otherFi }, false},
+		{"modification time differs", func(in *input) { in.src.fileModTime = mtime.Add(-time.Hour) }, false},
+		{"size differs", func(in *input) { in.src.fileSize++ }, false},
+		{"change time differs", func(in *input) { in.ctime = ctime.Add(time.Nanosecond) }, false},
+		{"link count differs", func(in *input) { in.nlink = nlink + 1 }, false},
+		{"modified inside the racy window", func(in *input) { in.src.fileReadAt = mtime.Add(racyModTimeWindow / 2) }, false},
+		{"modified exactly at the window boundary", func(in *input) { in.src.fileReadAt = mtime.Add(racyModTimeWindow) }, false},
+		{"modified after the read started", func(in *input) { in.src.fileReadAt = mtime.Add(-time.Second) }, false},
+		{"change time and link count unavailable", func(in *input) { in.haveExtra = false }, false},
+		{"last read failed", func(in *input) { in.src.fileErr = errors.New("read failed") }, false},
+		{"no earlier read", func(in *input) { in.src.fileInfo = nil }, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			in := reusable()
+			tt.change(&in)
+			got := in.src.cachedReadValidLocked(fi, in.ctime, in.nlink, in.haveExtra)
+			assert.Equal(t, tt.want, got)
+		})
+	}
 }
 
-// A hard link added after a successful read changes the link count, so the
-// file is read again and the reader refuses it; the earlier value is not
-// served.
+// End to end: after a hard link is added to the file, the next call reads
+// it again and the reader refuses it, so the earlier value is not served.
+// Adding the link changes the change time as well as the link count, so this
+// does not isolate the link-count comparison; TestFileSource_CachedReadValidLocked
+// covers each comparison on its own.
 func TestFileSource_LinkAddedAfterReadIsRefused(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "tt")
