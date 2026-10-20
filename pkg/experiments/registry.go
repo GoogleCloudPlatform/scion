@@ -271,13 +271,16 @@ var compiled = []Experiment{
 	{
 		Name:        FlatRuntimeBrokers,
 		Title:       "Flat Runtime Brokers",
-		Description: "Lets a Runtime Broker serve exactly one runtime target with a stable identity: the hub accepts single-target Runtime Broker registrations, pins new agents to that target and rejects mismatched dispatches. Existing profile-based Runtime Brokers are unchanged.",
+		Description: "Lets a Runtime Broker serve exactly one runtime target with a stable identity: the hub accepts single-target Runtime Broker registrations, pins new agents to that target and rejects mismatched dispatches. Existing profile-based Runtime Brokers are unchanged. Also switches the web UI to the Brokers area (LayerWeb, presentation only; every hub check is LayerServer).",
 		Default:     false,
-		Layers:      []Layer{LayerServer},
-		Stage:       StageAlpha,
-		Issue:       "ptone/scion#2926",
-		Owner:       "runtime-broker",
-		ReviewBy:    "2027-03-31",
+		Layers: []Layer{
+			LayerServer,
+			LayerWeb,
+		},
+		Stage:    StageAlpha,
+		Issue:    "ptone/scion#2926",
+		Owner:    "runtime-broker",
+		ReviewBy: "2027-03-31",
 	},
 	{
 		Name:        Artifacts,
