@@ -19,12 +19,15 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 )
 
 // agentCredential builds an unsigned test credential: header alg, the
@@ -145,8 +148,8 @@ func TestCredentialChanged(t *testing.T) {
 type fakeFiles struct {
 	mu               sync.Mutex
 	agent, transport string
+	reads            int
 	// onRead, if set, runs after every agent read (count is 1-based).
-	reads  int
 	onRead func(count int)
 }
 
@@ -400,5 +403,316 @@ func TestTransportTokenFileChanged(t *testing.T) {
 	plain := NewClientWithConfig("http://127.0.0.1:1", "credential", "agent-1")
 	if plain.TransportTokenFileChanged() {
 		t.Fatal("changed for a client without a hub-provided transport")
+	}
+}
+
+func TestValidateCandidateTokenRequiresSubject(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	claims := validClaims(now, "id-1")
+	delete(claims, "sub")
+	if _, err := ValidateCandidateToken(agentCredential(t, "HS256", claims, 32), "agent-1", now); !errors.Is(err, ErrCandidateSubject) {
+		t.Fatalf("err = %v, want %v", err, ErrCandidateSubject)
+	}
+}
+
+// acceptHub answers GET /api/v1/agents/agent-1 per its fields and records
+// what it saw. /elsewhere answers 200 with the agent record.
+type acceptHub struct {
+	srv       *httptest.Server
+	mu        sync.Mutex
+	status    int    // status for the agent record; 0 = 200 if accepted
+	accept    string // the credential that gets a 200
+	body      string // 200 body; "" = the agent-1 record
+	location  string // Location for a 3xx status
+	tokens    []string
+	transport []string
+	elsewhere int
+}
+
+func newAcceptHub(t *testing.T) *acceptHub {
+	t.Helper()
+	h := &acceptHub{}
+	h.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		if r.URL.Path == "/elsewhere" {
+			h.elsewhere++
+			_, _ = w.Write([]byte(`{"id":"agent-1"}`))
+			return
+		}
+		h.tokens = append(h.tokens, r.Header.Get("X-Scion-Agent-Token"))
+		h.transport = append(h.transport, r.Header.Get("Authorization"))
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/agents/agent-1" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		switch {
+		case h.status >= 300 && h.status < 400:
+			w.Header().Set("Location", h.location)
+			w.WriteHeader(h.status)
+		case h.status != 0:
+			w.WriteHeader(h.status)
+		case r.Header.Get("X-Scion-Agent-Token") != h.accept:
+			w.WriteHeader(http.StatusUnauthorized)
+		default:
+			body := h.body
+			if body == "" {
+				body = `{"id":"agent-1","name":"agent"}`
+			}
+			_, _ = w.Write([]byte(body))
+		}
+	}))
+	t.Cleanup(h.srv.Close)
+	return h
+}
+
+func TestCheckCredentialAccepted(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	candidate := agentCredential(t, "HS256", validClaims(now, "cand"), 32)
+	big := `{"id":"agent-1","pad":"` + strings.Repeat("x", agentRecordMaxBytes) + `"}`
+	tests := []struct {
+		name     string
+		status   int
+		location string
+		body     string
+		accept   string
+		want     error
+	}{
+		{name: "accepted", accept: candidate},
+		{name: "401", accept: "other", want: ErrCandidateRefused},
+		{name: "403", status: http.StatusForbidden, want: ErrCandidateRefused},
+		{name: "500", status: http.StatusInternalServerError, want: ErrCandidateUnchecked},
+		{name: "301 to a 200", status: http.StatusMovedPermanently, location: "/elsewhere", want: ErrCandidateUnchecked},
+		{name: "302 to a 200", status: http.StatusFound, location: "/elsewhere", want: ErrCandidateUnchecked},
+		{name: "307 to a 200", status: http.StatusTemporaryRedirect, location: "/elsewhere", want: ErrCandidateUnchecked},
+		{name: "other agent record", accept: candidate, body: `{"id":"agent-2"}`, want: ErrCandidateUnchecked},
+		{name: "not a record", accept: candidate, body: `<html>ok</html>`, want: ErrCandidateUnchecked},
+		{name: "oversized record", accept: candidate, body: big, want: ErrCandidateUnchecked},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newAcceptHub(t)
+			h.status, h.location, h.body, h.accept = tt.status, tt.location, tt.body, tt.accept
+			c := NewClientWithConfig(h.srv.URL, "in-memory-credential", "agent-1")
+			err := c.CheckCredentialAccepted(context.Background(), candidate)
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("err = %v, want %v", err, tt.want)
+			}
+			if err != nil && strings.Contains(err.Error(), candidate) {
+				t.Fatal("error quotes the credential")
+			}
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			if len(h.tokens) != 1 || h.tokens[0] != candidate {
+				t.Fatalf("the check did not present exactly the candidate once (%d requests)", len(h.tokens))
+			}
+			if h.elsewhere != 0 {
+				t.Fatal("the check followed the hub's answer to another URL")
+			}
+			anchor := c.VerifiedIssuedAt()
+			if tt.want == nil && !anchor.Equal(now) {
+				t.Fatalf("verified issue time = %v, want %v", anchor, now)
+			}
+			if tt.want != nil && !anchor.IsZero() {
+				t.Fatalf("verified issue time moved to %v on %v", anchor, err)
+			}
+		})
+	}
+}
+
+func TestCheckCredentialAcceptedNoHub(t *testing.T) {
+	h := newAcceptHub(t)
+	url := h.srv.URL
+	h.srv.Close()
+	c := NewClientWithConfig(url, "in-memory-credential", "agent-1")
+	if err := c.CheckCredentialAccepted(context.Background(), "candidate"); !errors.Is(err, ErrCandidateUnchecked) {
+		t.Fatalf("err = %v, want %v", err, ErrCandidateUnchecked)
+	}
+}
+
+// The check sends the client's transport credential, read when the check
+// runs.
+func TestCheckCredentialAcceptedSendsTransportCredential(t *testing.T) {
+	t.Cleanup(SetTokenHome(t.TempDir()))
+	now := time.Now().Truncate(time.Second)
+	candidate := agentCredential(t, "HS256", validClaims(now, "cand"), 32)
+	transport := agentCredential(t, "HS256", validClaims(now, "transport"), 32)
+	if err := WriteTokenFile("in-memory-credential", 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteTransportTokenFile(transport, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	h := newAcceptHub(t)
+	h.accept = candidate
+	t.Setenv(EnvHubEndpoint, h.srv.URL)
+	t.Setenv(EnvHubURL, "")
+	t.Setenv(EnvAgentID, "agent-1")
+	t.Setenv(EnvHubToken, "")
+	t.Setenv(EnvLaunchID, "")
+	t.Setenv(transportauth.EnvTransportMode, "")
+	t.Setenv(transportauth.EnvTransportToken, "")
+	t.Setenv(transportauth.EnvTransportTokenFile, TransportTokenFilePath())
+	c := NewClient()
+	if c == nil {
+		t.Fatal("no client")
+	}
+	if err := c.CheckCredentialAccepted(context.Background(), candidate); err != nil {
+		t.Fatalf("check: %v", err)
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.transport) != 1 || h.transport[0] != "Bearer "+transport {
+		t.Fatal("the check did not send the transport credential")
+	}
+}
+
+func TestVerifiedIssuedAtNeverDecreases(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	newer := agentCredential(t, "HS256", validClaims(now, "newer"), 32)
+	older := agentCredential(t, "HS256", validClaims(now.Add(-time.Hour), "older"), 32)
+	h := newAcceptHub(t)
+	c := NewClientWithConfig(h.srv.URL, newer, "agent-1")
+	h.accept = newer
+	if err := c.CheckCredentialAccepted(context.Background(), newer); err != nil {
+		t.Fatal(err)
+	}
+	h.mu.Lock()
+	h.accept = older
+	h.mu.Unlock()
+	if err := c.CheckCredentialAccepted(context.Background(), older); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.VerifiedIssuedAt(); !got.Equal(now) {
+		t.Fatalf("verified issue time = %v, want %v", got, now)
+	}
+}
+
+// refreshHub answers the token refresh endpoint with a fixed credential,
+// optionally through a 307 to /real, and the transport token entry.
+func refreshHub(t *testing.T, token, transport string, via307 bool) *httptest.Server {
+	t.Helper()
+	answer := func(w http.ResponseWriter) {
+		resp := RefreshTokenResponse{Token: token, ExpiresAt: time.Now().Add(10 * time.Hour).UTC().Format(time.RFC3339)}
+		if transport != "" {
+			resp.Tokens = []RefreshTokenEntry{{Layer: "transport", Type: "google_oidc", Value: transport, ExpiresIn: 3600}}
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/real" {
+			answer(w)
+			return
+		}
+		if via307 {
+			w.Header().Set("Location", "/real")
+			w.WriteHeader(http.StatusTemporaryRedirect)
+			return
+		}
+		answer(w)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestRefreshRaisesVerifiedIssuedAtAndBroadcasts(t *testing.T) {
+	t.Cleanup(SetTokenHome(t.TempDir()))
+	now := time.Now().Truncate(time.Second)
+	issued := agentCredential(t, "HS256", validClaims(now, "issued"), 32)
+	c := NewClientWithConfig(refreshHub(t, issued, "", false).URL, "old", "agent-1")
+	changed := c.CredentialChanged()
+	if _, _, err := c.RefreshToken(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-changed:
+	default:
+		t.Fatal("a successful refresh did not report a credential change")
+	}
+	if got := c.VerifiedIssuedAt(); !got.Equal(now) {
+		t.Fatalf("verified issue time = %v, want %v", got, now)
+	}
+}
+
+func TestRefreshAnsweredElsewhereDoesNotRaiseVerifiedIssuedAt(t *testing.T) {
+	t.Cleanup(SetTokenHome(t.TempDir()))
+	now := time.Now().Truncate(time.Second)
+	issued := agentCredential(t, "HS256", validClaims(now, "issued"), 32)
+	c := NewClientWithConfig(refreshHub(t, issued, "", true).URL, "old", "agent-1")
+	if _, _, err := c.RefreshToken(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.VerifiedIssuedAt(); !got.IsZero() {
+		t.Fatalf("verified issue time = %v, want zero", got)
+	}
+}
+
+// A transport token the refresh writes is not later counted as written by
+// another process.
+func TestRefreshTransportWriteIsNotAnOutsideChange(t *testing.T) {
+	t.Cleanup(SetTokenHome(t.TempDir()))
+	now := time.Now().Truncate(time.Second)
+	issued := agentCredential(t, "HS256", validClaims(now, "issued"), 32)
+	transport := agentCredential(t, "HS256", validClaims(now, "transport"), 32)
+	c := NewClientWithConfig(refreshHub(t, issued, transport, false).URL, "old", "agent-1")
+	c.oidcSource = NewTransportTokenFileSource()
+	if _, _, err := c.RefreshToken(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if v := readTransportTokenForWatch(); v != transport {
+		t.Fatal("setup: the refresh did not write the transport token file")
+	}
+	if c.TransportTokenFileChanged() {
+		t.Fatal("the refresh's own transport token write counted as an outside change")
+	}
+}
+
+func TestTokenFileWatcher_RetryAfter(t *testing.T) {
+	h := newWatchHarness(t, "credential-a", "")
+	h.files.set("credential-b", "")
+	h.checkChange()
+	if !h.notified() {
+		t.Fatal("no notification")
+	}
+	h.w.RetryAfter(TokenFingerprint("credential-b"), 2*DefaultTokenWatchInterval)
+	h.checkNoChange() // 5s later: not due yet
+	if h.notified() {
+		t.Fatal("reported again before the retry delay")
+	}
+	h.checkChange() // 10s later: due
+	if !h.notified() {
+		t.Fatal("not reported again after the retry delay")
+	}
+}
+
+func TestTokenFileWatcher_RetryDroppedForNewValue(t *testing.T) {
+	h := newWatchHarness(t, "credential-a", "")
+	h.files.set("credential-b", "")
+	h.checkChange()
+	_ = h.notified()
+	h.w.RetryAfter(TokenFingerprint("credential-b"), DefaultTokenWatchInterval)
+	h.files.set("credential-c", "")
+	h.checkChange()
+	if !h.notified() {
+		t.Fatal("a new value was not reported at the next check")
+	}
+	h.files.set("credential-b", "")
+	h.checkChange() // B is a change again (last reported is C)
+	_ = h.notified()
+	h.files.set("credential-c", "")
+	h.checkChange()
+	_ = h.notified()
+	h.checkNoChange()
+	if h.notified() {
+		t.Fatal("a dropped retry was served later")
+	}
+}
+
+func TestTokenFileWatcher_RecheckAgent(t *testing.T) {
+	h := newWatchHarness(t, "credential-a", "")
+	h.w.RecheckAgent()
+	h.checkChange()
+	if !h.notified() {
+		t.Fatal("the current value was not reported after RecheckAgent")
 	}
 }

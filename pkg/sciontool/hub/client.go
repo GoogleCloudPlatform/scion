@@ -226,6 +226,10 @@ type Client struct {
 	// Guarded by tokenMu.
 	transportFP    [32]byte
 	transportFPSet bool
+	// verifiedIAT is the newest issue time among agent credentials the hub
+	// has accepted from this client (see VerifiedIssuedAt). It only ever
+	// increases. Guarded by tokenMu.
+	verifiedIAT time.Time
 }
 
 // NewClient creates a new Hub client from environment variables.
@@ -862,6 +866,14 @@ func (c *Client) RefreshToken(ctx context.Context) (string, time.Time, error) {
 	chownUID, chownGID := c.tokenChownUID, c.tokenChownGID
 	c.tokenMu.Unlock()
 	c.writes.reset()
+	// A credential the hub issued in answer to this request counts as
+	// accepted, but only if the hub URL itself answered: resp.Request is
+	// the request that produced the response, and its Response field is set
+	// only when the client made that request on the hub's instruction to
+	// go elsewhere.
+	if resp.Request == nil || resp.Request.Response == nil {
+		c.noteVerified(result.Token)
+	}
 
 	// Persist the new token to a file so child processes can read it.
 	// Errors are non-fatal — the in-memory token is already updated.

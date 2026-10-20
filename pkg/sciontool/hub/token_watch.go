@@ -21,6 +21,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -79,7 +82,13 @@ var (
 	ErrCandidateNoExpiry  = errors.New("credential has no expiry")
 	ErrCandidateExpired   = errors.New("credential has expired")
 	ErrCandidateSubject   = errors.New("credential subject does not match this agent")
-	ErrCandidateOlder     = errors.New("credential was issued before the current one")
+	ErrCandidateOlder     = errors.New("credential is not newer than the last accepted one")
+	// ErrCandidateRefused: the hub answered 401 or 403 for the credential.
+	ErrCandidateRefused = errors.New("the hub did not accept the credential")
+	// ErrCandidateUnchecked: no answer was obtained, or the answer was not a
+	// 2xx with this agent's record, so the credential was neither accepted
+	// nor refused.
+	ErrCandidateUnchecked = errors.New("the hub could not confirm the credential")
 )
 
 type tokenClaims struct {
@@ -136,9 +145,10 @@ func InspectToken(token string) TokenInfo {
 // ValidateCandidateToken checks that token, read from the credential file,
 // is a complete agent credential this agent can adopt: three base64url
 // parts, an HS256 header with a full-length signature (a partly written
-// file fails here), an expiry after now, and a subject equal to agentID
-// when both are set. It does not check the signature itself; the hub
-// does. Errors are the fixed ErrCandidate* values.
+// file fails here), an expiry after now, and a subject claim equal to
+// agentID (a credential without a subject is refused). It does not check
+// the signature itself; the hub does (see CheckCredentialAccepted). Errors
+// are the fixed ErrCandidate* values.
 func ValidateCandidateToken(token, agentID string, now time.Time) (TokenInfo, error) {
 	if token == "" {
 		return TokenInfo{}, ErrCandidateEmpty
@@ -171,10 +181,100 @@ func ValidateCandidateToken(token, agentID string, now time.Time) (TokenInfo, er
 	if !now.Before(info.Expiry) {
 		return TokenInfo{}, ErrCandidateExpired
 	}
-	if agentID != "" && claims.Sub != "" && claims.Sub != agentID {
+	if claims.Sub == "" || claims.Sub != agentID {
 		return TokenInfo{}, ErrCandidateSubject
 	}
 	return info, nil
+}
+
+// noteVerified raises the verified issue time to token's iat, if later.
+// Call it only for a credential the hub has accepted.
+func (c *Client) noteVerified(token string) {
+	iat := InspectToken(token).IssuedAt
+	if iat.IsZero() {
+		return
+	}
+	c.tokenMu.Lock()
+	if iat.After(c.verifiedIAT) {
+		c.verifiedIAT = iat
+	}
+	c.tokenMu.Unlock()
+}
+
+// VerifiedIssuedAt returns the newest issue time among agent credentials
+// the hub has accepted from this client: a credential returned by a token
+// refresh answered directly by the hub, or one CheckCredentialAccepted
+// confirmed. It is zero until one is accepted and never decreases. A
+// credential read from the credential file must be newer than it to be
+// adopted from the file.
+func (c *Client) VerifiedIssuedAt() time.Time {
+	c.tokenMu.RLock()
+	defer c.tokenMu.RUnlock()
+	return c.verifiedIAT
+}
+
+// agentRecordMaxBytes bounds how much of the agent record
+// CheckCredentialAccepted reads; a longer answer is not confirmation.
+const agentRecordMaxBytes = 1 << 20
+
+// directClient returns a copy of the client's HTTP client, built now so it
+// has the client's current transport (including any transport credential),
+// that returns the response to the request it was given as is: the caller
+// sees the status the hub URL answered with.
+func (c *Client) directClient() *http.Client {
+	dc := *c.client
+	dc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &dc
+}
+
+// CheckCredentialAccepted asks the hub whether it accepts token as this
+// agent's credential, by reading this agent's own record (GET
+// /api/v1/agents/{id}) with token as the agent credential, sent the same
+// way as on any other request. The request changes nothing on the hub.
+//
+// It returns nil only for a 2xx from the hub URL itself (see directClient)
+// whose body is this agent's record. That shows the hub's handler
+// answered for this agent; it does not show that the credential belongs to
+// this agent (a credential allowed to read another agent's record gets the
+// same answer), which is why callers must also check the credential's
+// subject (ValidateCandidateToken). A 401 or 403 returns
+// ErrCandidateRefused; any other status, or no answer, returns
+// ErrCandidateUnchecked. On success the verified issue time is raised to
+// the credential's. Neither the credential nor the response body appears
+// in an error.
+func (c *Client) CheckCredentialAccepted(ctx context.Context, token string) error {
+	if c == nil || c.hubURL == "" || c.agentID == "" || token == "" {
+		return ErrCandidateUnchecked
+	}
+	endpoint := fmt.Sprintf("%s/api/v1/agents/%s", strings.TrimSuffix(c.hubURL, "/"), c.agentID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return ErrCandidateUnchecked
+	}
+	c.setAgentAuth(req.Header, token)
+	resp, err := c.directClient().Do(req)
+	if err != nil {
+		return ErrCandidateUnchecked
+	}
+	defer func() { _ = resp.Body.Close() }()
+	switch {
+	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+		return ErrCandidateRefused
+	case resp.StatusCode < 200 || resp.StatusCode > 299:
+		return ErrCandidateUnchecked
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, agentRecordMaxBytes+1))
+	if err != nil || len(body) > agentRecordMaxBytes {
+		return ErrCandidateUnchecked
+	}
+	var record struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(body, &record); err != nil || record.ID != c.agentID {
+		return ErrCandidateUnchecked
+	}
+	c.noteVerified(token)
+	return nil
 }
 
 // CredentialInfo describes the client's in-memory agent credential.
@@ -218,6 +318,18 @@ func (c *Client) TransportTokenFileChanged() bool {
 	c.tokenMu.RLock()
 	defer c.tokenMu.RUnlock()
 	return !c.transportFPSet || fp != c.transportFP
+}
+
+// readTokenFileQuiet reads the agent credential file like ReadTokenFile,
+// through the same guarded reader, but without warning about a refused
+// file: the watcher reads every few seconds, and a refused file is reported
+// by the reset path when it reads the file.
+func readTokenFileQuiet() string {
+	v, err := readTokenFileGuarded(TokenFilePath())
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(v)
 }
 
 // readTransportTokenForWatch reads the transport token file through the
@@ -271,6 +383,11 @@ type TokenFileWatcher struct {
 	lastAgentSet  bool
 	lastTransport Fingerprint
 	lastTransSet  bool
+	// retryFP and retryAt: report retryFP again once retryAt has passed,
+	// if the agent credential file still holds it (RetryAfter).
+	retryFP  Fingerprint
+	retryAt  time.Time
+	retrySet bool
 }
 
 // NewTokenFileWatcher returns a watcher seeded with the files' current
@@ -286,7 +403,7 @@ func NewTokenFileWatcher(cfg TokenWatchConfig) *TokenFileWatcher {
 		cfg.Clock = clock.Real()
 	}
 	if cfg.readAgent == nil {
-		cfg.readAgent = ReadTokenFile
+		cfg.readAgent = readTokenFileQuiet
 	}
 	if cfg.readTransport == nil {
 		cfg.readTransport = readTransportTokenForWatch
@@ -334,6 +451,43 @@ func (w *TokenFileWatcher) Refused(refused Fingerprint) {
 	}
 }
 
+// RecheckAgent makes the watcher report the agent credential file's
+// current value at its next check, even if it reported that value before.
+func (w *TokenFileWatcher) RecheckAgent() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.lastAgentSet = false
+}
+
+// RetryAfter asks the watcher to report the agent credential with
+// fingerprint fp again once d has passed on its clock, if the file still
+// holds it then. It is for a credential whose check could not complete. A
+// different value in the file is reported as usual and drops the request.
+func (w *TokenFileWatcher) RetryAfter(fp Fingerprint, d time.Duration) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.retryFP, w.retryAt, w.retrySet = fp, w.cfg.Clock.Now().Add(d), true
+}
+
+// retryDue reports whether a RetryAfter request for the agent credential
+// a is due, and clears a request that is due or no longer applies.
+func (w *TokenFileWatcher) retryDue(a Fingerprint, aok bool) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.retrySet {
+		return false
+	}
+	if !aok || a != w.retryFP {
+		w.retrySet = false
+		return false
+	}
+	if w.cfg.Clock.Now().Before(w.retryAt) {
+		return false
+	}
+	w.retrySet = false
+	return true
+}
+
 // Run checks the files every Interval until ctx is cancelled. It returns
 // a channel that is closed when it stops.
 func (w *TokenFileWatcher) Run(ctx context.Context) <-chan struct{} {
@@ -345,7 +499,8 @@ func (w *TokenFileWatcher) Run(ctx context.Context) <-chan struct{} {
 				return
 			}
 			a, aok, t, tok := w.read()
-			if !w.changed(a, aok, t, tok) {
+			retry := w.retryDue(a, aok)
+			if !retry && !w.changed(a, aok, t, tok) {
 				continue
 			}
 			if !w.sleep(ctx, w.cfg.StableDelay) {

@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -35,10 +36,16 @@ import (
 // issued at iat and expiring 10h later.
 func testCredential(t *testing.T, jti string, iat time.Time) string {
 	t.Helper()
+	return testCredentialFor(t, "agent-1", jti, iat)
+}
+
+// testCredentialFor is testCredential with a given subject.
+func testCredentialFor(t *testing.T, sub, jti string, iat time.Time) string {
+	t.Helper()
 	enc := base64.RawURLEncoding
 	h, _ := json.Marshal(map[string]string{"alg": "HS256", "typ": "JWT"})
 	c, err := json.Marshal(map[string]any{
-		"sub": "agent-1", "jti": jti,
+		"sub": sub, "jti": jti,
 		"iat": iat.Unix(), "exp": iat.Add(10 * time.Hour).Unix(),
 	})
 	if err != nil {
@@ -47,33 +54,77 @@ func testCredential(t *testing.T, jti string, iat time.Time) string {
 	return enc.EncodeToString(h) + "." + enc.EncodeToString(c) + "." + enc.EncodeToString(make([]byte, 32))
 }
 
-// credHub is a test hub that accepts only the credential in accept and
-// records every credential presented.
+// credHub is a test hub. It accepts the credentials in accepted on every
+// request; the agent record read (the credential check) can instead be
+// made to answer with checkStatus. It records every credential presented
+// and counts checks.
 type credHub struct {
-	srv    *httptest.Server
-	mu     sync.Mutex
-	accept string
-	seen   []string
+	srv         *httptest.Server
+	mu          sync.Mutex
+	accepted    map[string]bool
+	checkStatus int  // 0: 200 or 401 by accepted; else this status
+	checkHang   bool // the check never answers (until the client gives up)
+	seen        []string
+	checks      []string
+	elsewhere   int
 }
 
-func newCredHub(t *testing.T, accept string) *credHub {
+func newCredHub(t *testing.T, accept ...string) *credHub {
 	t.Helper()
-	h := &credHub{accept: accept}
+	h := &credHub{accepted: map[string]bool{}}
+	for _, a := range accept {
+		h.accepted[a] = true
+	}
 	h.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/elsewhere" {
+			h.mu.Lock()
+			h.elsewhere++
+			h.mu.Unlock()
+			_, _ = w.Write([]byte(`{"id":"agent-1"}`))
+			return
+		}
 		tok := r.Header.Get("X-Scion-Agent-Token")
 		h.mu.Lock()
 		h.seen = append(h.seen, tok)
-		ok := tok == h.accept
+		ok := h.accepted[tok]
+		isCheck := r.Method == http.MethodGet && r.URL.Path == "/api/v1/agents/agent-1"
+		status, hang := h.checkStatus, h.checkHang
+		if isCheck {
+			h.checks = append(h.checks, tok)
+		}
 		h.mu.Unlock()
+		if isCheck && hang {
+			<-r.Context().Done()
+			return
+		}
+		if isCheck && status >= 300 && status < 400 {
+			w.Header().Set("Location", "/elsewhere")
+			w.WriteHeader(status)
+			return
+		}
+		if isCheck && status != 0 {
+			w.WriteHeader(status)
+			return
+		}
 		if !ok {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
+		if isCheck {
+			_, _ = w.Write([]byte(`{"id":"agent-1"}`))
+			return
+		}
 		_, _ = w.Write([]byte("{}"))
 	}))
 	t.Cleanup(h.srv.Close)
 	return h
+}
+
+func (h *credHub) set(fn func(h *credHub)) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	fn(h)
 }
 
 func (h *credHub) presented(tok string) int {
@@ -86,6 +137,35 @@ func (h *credHub) presented(tok string) int {
 		}
 	}
 	return n
+}
+
+func (h *credHub) checkCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.checks)
+}
+
+func (h *credHub) checkCountExcept(tok string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	n := 0
+	for _, c := range h.checks {
+		if c != tok {
+			n++
+		}
+	}
+	return n
+}
+
+func (h *credHub) checked(tok string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, c := range h.checks {
+		if c == tok {
+			return true
+		}
+	}
+	return false
 }
 
 type resetHarness struct {
@@ -102,8 +182,8 @@ type resetHarness struct {
 
 // newResetHarness sets up an agent whose in-memory and on-disk credential
 // is oldTok, with a running refresh loop, against a hub that accepts only
-// newTok (the old one was revoked by a reissue).
-func newResetHarness(t *testing.T) *resetHarness {
+// newTok (the old one was revoked by a reissue) plus any extra values.
+func newResetHarness(t *testing.T, alsoAccept ...string) *resetHarness {
 	t.Helper()
 	home := t.TempDir()
 	t.Cleanup(hub.SetTokenHome(home))
@@ -117,7 +197,7 @@ func newResetHarness(t *testing.T) *resetHarness {
 	if err := hub.WriteTokenFile(h.oldTok, 0, 0); err != nil {
 		t.Fatal(err)
 	}
-	h.hub = newCredHub(t, h.newTok)
+	h.hub = newCredHub(t, append([]string{h.newTok}, alsoAccept...)...)
 	h.client = hub.NewClientWithConfig(h.hub.srv.URL, h.oldTok, "agent-1")
 	h.startClient()
 	return h
@@ -164,9 +244,9 @@ func loopRunning(done <-chan struct{}) bool {
 	}
 }
 
-// Recovery without the reset signal, through the init wiring: the watcher
-// sees the reissued credential, the wait loop's file-change case runs the
-// reset path, and the shared client presents the new credential.
+// Recovery without the reset signal, through the watcher and reset path:
+// the watcher sees the reissued credential, the file-change reset checks it
+// with the hub and adopts it, and the shared client presents it.
 func TestCredentialReload_NoSignal_EndToEnd(t *testing.T) {
 	h := newResetHarness(t)
 	clk := clock.NewFake(time.Unix(1_800_000_000, 0))
@@ -200,7 +280,7 @@ func TestCredentialReload_NoSignal_EndToEnd(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("no credential file notification")
 	}
-	handleAuthEvent(h.r, authResetFileChange)
+	h.r.reset(authResetFileChange)
 
 	if !h.usingCredential(h.newTok) {
 		t.Fatal("the shared client did not switch to the new credential")
@@ -225,14 +305,14 @@ func TestCredentialReload_NoSignal_EndToEnd(t *testing.T) {
 func TestCredentialReload_SignalThenPendingFileChange(t *testing.T) {
 	h := newResetHarness(t)
 	h.write(h.newTok)
-	handleAuthEvent(h.r, authResetSignal)
+	h.r.reset(authResetSignal)
 	if !h.usingCredential(h.newTok) {
 		t.Fatal("signal reset did not adopt the credential")
 	}
 	loop := h.done
 	beats := h.hub.presented(h.newTok)
 
-	handleAuthEvent(h.r, authResetFileChange)
+	h.r.reset(authResetFileChange)
 	if h.done != loop || !loopRunning(loop) {
 		t.Fatal("the pending file change restarted the refresh loop")
 	}
@@ -246,12 +326,12 @@ func TestCredentialReload_SignalThenPendingFileChange(t *testing.T) {
 func TestCredentialReload_FileChangeThenSignal(t *testing.T) {
 	h := newResetHarness(t)
 	h.write(h.newTok)
-	handleAuthEvent(h.r, authResetFileChange)
+	h.r.reset(authResetFileChange)
 	if !h.usingCredential(h.newTok) {
 		t.Fatal("file change did not adopt the credential")
 	}
 	loop := h.done
-	handleAuthEvent(h.r, authResetSignal)
+	h.r.reset(authResetSignal)
 	if !h.usingCredential(h.newTok) {
 		t.Fatal("the signal changed the credential")
 	}
@@ -270,7 +350,7 @@ func TestCredentialReload_StaleReadIsNotAdopted(t *testing.T) {
 	loop := h.done
 	changed := h.client.CredentialChanged()
 
-	handleAuthEvent(h.r, authResetFileChange)
+	h.r.reset(authResetFileChange)
 	if !h.usingCredential(h.oldTok) {
 		t.Fatal("a partial credential replaced the working one")
 	}
@@ -284,23 +364,57 @@ func TestCredentialReload_StaleReadIsNotAdopted(t *testing.T) {
 	}
 }
 
-// A valid credential issued before the current one is refused on the
-// file path.
-func TestCredentialReload_OlderCredentialRefused(t *testing.T) {
+// After the hub accepted the new credential, the old one written
+// back to the file is refused without a hub check, even though the hub
+// would still accept it.
+func TestCredentialReload_OlderAcceptedCredentialRefused(t *testing.T) {
 	h := newResetHarness(t)
+	h.hub.set(func(c *credHub) { c.accepted[h.oldTok] = true })
 	h.write(h.newTok)
-	handleAuthEvent(h.r, authResetFileChange)
+	h.r.reset(authResetFileChange)
 	if !h.usingCredential(h.newTok) {
 		t.Fatal("setup: new credential not adopted")
 	}
+	if got := h.client.VerifiedIssuedAt(); !got.Equal(h.now) {
+		t.Fatalf("verified issue time = %v, want %v", got, h.now)
+	}
 	loop := h.done
 	h.write(h.oldTok)
-	handleAuthEvent(h.r, authResetFileChange)
+	h.r.reset(authResetFileChange)
 	if !h.usingCredential(h.newTok) {
 		t.Fatal("an older credential replaced the current one")
 	}
+	if h.hub.checked(h.oldTok) {
+		t.Fatal("the older credential was checked with the hub")
+	}
 	if h.done != loop || !loopRunning(loop) {
 		t.Fatal("the refresh loop was stopped for a refused credential")
+	}
+	// A genuinely newer reissue is still adopted.
+	newer := testCredential(t, "newer", h.now.Add(time.Minute))
+	h.hub.set(func(c *credHub) { c.accepted[newer] = true })
+	h.write(newer)
+	h.r.reset(authResetFileChange)
+	if !h.usingCredential(newer) {
+		t.Fatal("a newer reissue was not adopted")
+	}
+}
+
+// A credential issued in the same second as the last accepted one is not
+// newer, and is refused on the file path.
+func TestCredentialReload_EqualIssuedAtRefused(t *testing.T) {
+	h := newResetHarness(t)
+	same := testCredential(t, "same-second", h.now)
+	h.hub.set(func(c *credHub) { c.accepted[same] = true })
+	h.write(h.newTok)
+	h.r.reset(authResetFileChange)
+	if !h.usingCredential(h.newTok) {
+		t.Fatal("setup: new credential not adopted")
+	}
+	h.write(same)
+	h.r.reset(authResetFileChange)
+	if !h.usingCredential(h.newTok) {
+		t.Fatal("a credential issued in the same second was adopted")
 	}
 }
 
@@ -310,7 +424,7 @@ func TestCredentialReload_ExpiredOnSignalKeepsLoop(t *testing.T) {
 	h := newResetHarness(t)
 	h.write(testCredential(t, "expired", h.now.Add(-11*time.Hour)))
 	loop := h.done
-	handleAuthEvent(h.r, authResetSignal)
+	h.r.reset(authResetSignal)
 	if !h.usingCredential(h.oldTok) {
 		t.Fatal("an expired credential replaced the working one")
 	}
@@ -361,7 +475,7 @@ func TestCredentialReload_TransportTokenWrittenLater(t *testing.T) {
 		t.Fatal(err)
 	}
 	loop := h.done
-	handleAuthEvent(h.r, authResetFileChange)
+	h.r.reset(authResetFileChange)
 	if client.TransportTokenFileChanged() {
 		t.Fatal("the new transport token was not adopted")
 	}
@@ -371,5 +485,311 @@ func TestCredentialReload_TransportTokenWrittenLater(t *testing.T) {
 	}
 	if h.done != loop {
 		t.Fatal("a transport-only change restarted the agent credential refresh loop")
+	}
+}
+
+// assertKept checks that the agent still uses oldTok: in memory, on the
+// next request, and with the refresh loop running.
+func (h *resetHarness) assertKept(loop <-chan struct{}) {
+	h.t.Helper()
+	if !h.usingCredential(h.oldTok) {
+		h.t.Fatal("the working credential was replaced")
+	}
+	if h.done != loop || !loopRunning(loop) {
+		h.t.Fatal("the refresh loop was stopped")
+	}
+	before := h.hub.presented(h.oldTok)
+	_ = h.client.Heartbeat(context.Background())
+	if h.hub.presented(h.oldTok) == before {
+		h.t.Fatal("the next request did not present the working credential")
+	}
+}
+
+// A well-formed credential for this agent that the hub does not accept is
+// not adopted, even with a far-future issue time, and a later genuine
+// reissue still is.
+func TestCredentialReload_UnacceptedCredentialRefused(t *testing.T) {
+	h := newResetHarness(t)
+	unaccepted := testCredential(t, "unaccepted", h.now.Add(100*time.Hour))
+	loop := h.done
+	changed := h.client.CredentialChanged()
+	h.write(unaccepted)
+	h.r.reset(authResetFileChange)
+	if !h.hub.checked(unaccepted) {
+		t.Fatal("the credential was not checked with the hub")
+	}
+	select {
+	case <-changed:
+		t.Fatal("waiting loops were woken for a refused credential")
+	default:
+	}
+	h.assertKept(loop)
+	if !h.client.VerifiedIssuedAt().IsZero() {
+		t.Fatal("a refused credential moved the verified issue time")
+	}
+	h.write(h.newTok)
+	h.r.reset(authResetFileChange)
+	if !h.usingCredential(h.newTok) {
+		t.Fatal("a genuine reissue after a refused credential was not adopted")
+	}
+}
+
+// A credential for another agent is refused on both paths without a hub
+// check, even if the hub would accept it.
+func TestCredentialReload_OtherAgentRefused(t *testing.T) {
+	h := newResetHarness(t)
+	other := testCredentialFor(t, "agent-2", "other", h.now)
+	h.hub.set(func(c *credHub) { c.accepted[other] = true })
+	loop := h.done
+	h.write(other)
+	h.r.reset(authResetFileChange)
+	h.r.reset(authResetSignal)
+	if h.hub.checkCount() != 0 {
+		t.Fatal("a credential for another agent was checked with the hub")
+	}
+	h.assertKept(loop)
+}
+
+// When the hub cannot confirm the credential (an error status, no answer,
+// a timeout, or an answer pointing elsewhere), the working credential is
+// kept and still in use, and the verified issue time does not move.
+func TestCredentialReload_UnconfirmedKeepsCurrentCredential(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(h *resetHarness)
+	}{
+		{"500", func(h *resetHarness) { h.hub.set(func(c *credHub) { c.checkStatus = http.StatusInternalServerError }) }},
+		{"301", func(h *resetHarness) { h.hub.set(func(c *credHub) { c.checkStatus = http.StatusMovedPermanently }) }},
+		{"302", func(h *resetHarness) { h.hub.set(func(c *credHub) { c.checkStatus = http.StatusFound }) }},
+		{"307", func(h *resetHarness) { h.hub.set(func(c *credHub) { c.checkStatus = http.StatusTemporaryRedirect }) }},
+		{"timeout", func(h *resetHarness) {
+			h.hub.set(func(c *credHub) { c.checkHang = true })
+			h.r.checkTimeout = 50 * time.Millisecond
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newResetHarness(t)
+			tc.setup(h)
+			loop := h.done
+			h.write(h.newTok)
+			h.r.reset(authResetFileChange)
+			if h.r.uncheckedAttempts != 1 {
+				t.Fatalf("unchecked attempts = %d, want 1 (a re-check is scheduled)", h.r.uncheckedAttempts)
+			}
+			h.hub.set(func(c *credHub) { c.checkHang = false })
+			h.assertKept(loop)
+			if !h.client.VerifiedIssuedAt().IsZero() {
+				t.Fatal("the verified issue time moved")
+			}
+			h.hub.mu.Lock()
+			elsewhere := h.hub.elsewhere
+			h.hub.mu.Unlock()
+			if elsewhere != 0 {
+				t.Fatal("the check followed the answer elsewhere")
+			}
+		})
+	}
+}
+
+// With no hub reachable at all, the working credential is kept.
+func TestCredentialReload_NoHubKeepsCurrentCredential(t *testing.T) {
+	h := newResetHarness(t)
+	loop := h.done
+	h.hub.srv.Close()
+	h.write(h.newTok)
+	h.r.reset(authResetFileChange)
+	if !h.usingCredential(h.oldTok) {
+		t.Fatal("the working credential was replaced")
+	}
+	if h.done != loop || !loopRunning(loop) {
+		t.Fatal("the refresh loop was stopped")
+	}
+}
+
+// watchStep advances the fake clock through one watcher check that sees a
+// change (interval, then the stability re-read) and returns once the
+// watcher has armed its next check.
+func watchStep(t *testing.T, clk *clock.Fake) {
+	t.Helper()
+	tick := clk.Now().Add(hub.DefaultTokenWatchInterval)
+	if !clk.WaitForTimer(5*time.Second, tick) {
+		t.Fatal("watcher armed no check")
+	}
+	clk.Advance(tick.Sub(clk.Now()))
+	stable := tick.Add(hub.DefaultTokenWatchStableDelay)
+	if !clk.WaitForTimer(5*time.Second, stable) {
+		t.Fatal("watcher did not re-read for stability")
+	}
+	clk.Advance(hub.DefaultTokenWatchStableDelay)
+	if !clk.WaitForTimer(5*time.Second, stable.Add(hub.DefaultTokenWatchInterval)) {
+		t.Fatal("watcher did not arm its next check")
+	}
+}
+
+// watchQuietStep advances through one check that sees no change.
+func watchQuietStep(t *testing.T, clk *clock.Fake) {
+	t.Helper()
+	tick := clk.Now().Add(hub.DefaultTokenWatchInterval)
+	if !clk.WaitForTimer(5*time.Second, tick) {
+		t.Fatal("watcher armed no check")
+	}
+	clk.Advance(tick.Sub(clk.Now()))
+	if !clk.WaitForTimer(5*time.Second, tick.Add(hub.DefaultTokenWatchInterval)) {
+		t.Fatal("watcher did not arm its next check")
+	}
+}
+
+// startWatch starts a watcher on a fake clock for the harness and returns
+// the clock and the notification channel.
+func (h *resetHarness) startWatch() (*clock.Fake, chan struct{}) {
+	h.t.Helper()
+	clk := clock.NewFake(time.Unix(1_800_000_000, 0))
+	notify := make(chan struct{}, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	h.t.Cleanup(cancel)
+	h.r.watcher = startCredentialFileWatch(ctx, h.client, hub.TokenWatchConfig{Notify: notify, Clock: clk})
+	return clk, notify
+}
+
+func pending(ch chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
+}
+
+// A value the hub could not confirm is checked again after the retry
+// delay, and adopted once the hub accepts it.
+func TestCredentialReload_UnconfirmedRetriedThenAdopted(t *testing.T) {
+	h := newResetHarness(t)
+	h.hub.set(func(c *credHub) { c.checkStatus = http.StatusInternalServerError })
+	clk, notify := h.startWatch()
+	h.write(h.newTok)
+	watchStep(t, clk)
+	if !pending(notify) {
+		t.Fatal("no notification for the new credential")
+	}
+	h.r.reset(authResetFileChange)
+	if !h.usingCredential(h.oldTok) {
+		t.Fatal("adopted without confirmation")
+	}
+	h.hub.set(func(c *credHub) { c.checkStatus = 0 })
+	// The first retry is due one interval later.
+	watchStep(t, clk)
+	if !pending(notify) {
+		t.Fatal("the unconfirmed value was not reported again")
+	}
+	h.r.reset(authResetFileChange)
+	if !h.usingCredential(h.newTok) {
+		t.Fatal("the value was not adopted once the hub accepted it")
+	}
+}
+
+// A new value is checked at the next check even while another value waits
+// out a long retry delay.
+func TestCredentialReload_NewValueNotDelayedByRetry(t *testing.T) {
+	h := newResetHarness(t)
+	h.hub.set(func(c *credHub) { c.checkStatus = http.StatusInternalServerError })
+	clk, notify := h.startWatch()
+	first := testCredential(t, "first", h.now.Add(-time.Minute))
+	h.write(first)
+	watchStep(t, clk)
+	_ = pending(notify)
+	h.r.uncheckedFP, h.r.uncheckedAttempts = hub.TokenFingerprint(first), 4 // next delay: 60s
+	h.r.reset(authResetFileChange)
+	h.hub.set(func(c *credHub) { c.checkStatus = 0 })
+	h.write(h.newTok)
+	watchStep(t, clk)
+	if !pending(notify) {
+		t.Fatal("the new value was not reported at the next check")
+	}
+	h.r.reset(authResetFileChange)
+	if !h.usingCredential(h.newTok) {
+		t.Fatal("the new value was not adopted")
+	}
+}
+
+// Heavy churn of malformed and unaccepted values, then a genuine reissue:
+// the reissue is adopted at the check that first sees it, and only the
+// well-formed values for this agent were checked with the hub.
+func TestCredentialReload_ChurnThenReissue(t *testing.T) {
+	h := newResetHarness(t)
+	clk, notify := h.startWatch()
+	n := 0
+	step := func(v string) {
+		n++
+		h.write(v)
+		watchStep(t, clk)
+		if !pending(notify) {
+			t.Fatalf("no notification for value %d", n)
+		}
+		h.r.reset(authResetFileChange)
+	}
+	for i := range 4 {
+		step(fmt.Sprintf("malformed-%d", i))
+	}
+	for i := range 4 {
+		step(testCredential(t, fmt.Sprintf("unaccepted-%d", i), h.now.Add(time.Duration(i+1)*time.Hour)))
+	}
+	if !h.usingCredential(h.oldTok) {
+		t.Fatal("a churned value was adopted")
+	}
+	step(h.newTok)
+	if !h.usingCredential(h.newTok) {
+		t.Fatal("the genuine reissue was not adopted at the check that saw it")
+	}
+	// The watcher's start-up check of the current credential is not counted.
+	if got := h.hub.checkCountExcept(h.oldTok); got != 5 {
+		t.Fatalf("hub checks = %d, want 5 (4 unaccepted + the reissue)", got)
+	}
+}
+
+// The signal adopts without a hub check, even when the hub accepts
+// nothing.
+func TestCredentialReload_SignalAdoptsWithoutHubCheck(t *testing.T) {
+	h := newResetHarness(t)
+	h.hub.set(func(c *credHub) { c.accepted = map[string]bool{} })
+	h.write(h.newTok)
+	h.r.reset(authResetSignal)
+	if !h.usingCredential(h.newTok) {
+		t.Fatal("the signal did not adopt the credential")
+	}
+}
+
+// An unaccepted far-future credential adopted on the signal does not move
+// the verified issue time, so a later genuine reissue is still adopted
+// from the file. Covered with the hub refusing it and with the hub's
+// answer pointing elsewhere.
+func TestCredentialReload_SignalAdoptionDoesNotBlockLaterReissue(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+	}{{"refused", 0}, {"302", http.StatusFound}} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newResetHarness(t)
+			h.hub.set(func(c *credHub) { c.accepted[h.oldTok] = true })
+			if err := h.client.CheckCredentialAccepted(context.Background(), h.oldTok); err != nil {
+				t.Fatalf("setup: %v", err)
+			}
+			anchor := h.client.VerifiedIssuedAt()
+			unaccepted := testCredential(t, "unaccepted", h.now.Add(100*time.Hour))
+			h.hub.set(func(c *credHub) { c.checkStatus = tc.status })
+			h.write(unaccepted)
+			h.r.reset(authResetSignal)
+			if !h.usingCredential(unaccepted) {
+				t.Fatal("setup: the signal did not adopt")
+			}
+			if got := h.client.VerifiedIssuedAt(); !got.Equal(anchor) {
+				t.Fatalf("verified issue time moved to %v", got)
+			}
+			h.hub.set(func(c *credHub) { c.checkStatus = 0 })
+			h.write(h.newTok)
+			h.r.reset(authResetFileChange)
+			if !h.usingCredential(h.newTok) {
+				t.Fatal("a later genuine reissue was not adopted")
+			}
+		})
 	}
 }

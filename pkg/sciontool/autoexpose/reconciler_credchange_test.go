@@ -19,6 +19,7 @@ import (
 	"errors"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -127,29 +128,47 @@ func TestRun_UnauthorizedWakesOnLaterCredentialChange(t *testing.T) {
 	runNeverFiring(t, r, c, func() { go c.creds.SetToken("new-credential") })
 }
 
-// A credential change does not cut a backoff for a failure other than 401.
+// A credential change does not cut a backoff for a failure other than 401:
+// the next pass starts only after the test fires the backoff timer.
 func TestRun_CredentialChangeDoesNotCutOtherBackoff(t *testing.T) {
+	var fired atomic.Bool
+	firedAtNextPass := make(chan bool, 1)
 	var c *notifyingHubClient
 	c = newNotifyingClient(func(int) ([]scionhub.ExposedPort, error) {
 		c.creds.SetToken("new-credential")
 		return nil, &scionhub.StatusError{StatusCode: http.StatusServiceUnavailable}
 	})
+	c.stopAt = -1 // never block in ListPorts
 	r := newLoopReconciler(c)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	timer := make(chan time.Time, 1)
 	waiting := make(chan struct{})
+	waits := 0
 	r.after = func(time.Duration) <-chan time.Time {
-		close(waiting)
+		waits++
+		switch waits {
+		case 1:
+			close(waiting)
+			return timer
+		case 2:
+			firedAtNextPass <- fired.Load()
+		}
 		return nil
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := make(chan struct{})
 	go func() { r.Run(ctx); close(done) }()
 	<-waiting
-	// Give a wrongly woken loop the chance to make another request.
-	time.Sleep(50 * time.Millisecond)
+	fired.Store(true)
+	timer <- time.Time{}
+	select {
+	case ok := <-firedAtNextPass:
+		if !ok {
+			t.Fatal("a credential change cut a non-401 backoff")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("no next pass after the backoff timer fired")
+	}
 	cancel()
 	<-done
-	if got := c.calls(); got != 1 {
-		t.Fatalf("ListPorts called %d times, want 1: a credential change cut a non-401 backoff", got)
-	}
 }

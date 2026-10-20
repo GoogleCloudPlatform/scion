@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -119,32 +120,47 @@ func TestRun_UnauthorizedWakesOnLaterCredentialChange(t *testing.T) {
 	<-done
 }
 
-// A credential change does not cut a backoff for a failure other than 401.
+// A credential change does not cut a backoff for a failure other than 401:
+// the second connect happens only after the test fires the backoff timer.
 func TestRun_CredentialChangeDoesNotCutOtherBackoff(t *testing.T) {
 	client := scionhub.NewClientWithConfig("http://127.0.0.1:1", "old-credential", "agent-1")
 	m := NewManager(client)
 	m.backoff.Rand = func() float64 { return 0 }
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	var fired atomic.Bool
+	firedAtSecond := make(chan bool, 1)
 	calls := 0
-	m.connect = func(context.Context) (bool, error) {
+	m.connect = func(ctx context.Context) (bool, error) {
 		calls++
+		if calls == 2 {
+			firedAtSecond <- fired.Load()
+			<-ctx.Done()
+			return false, ctx.Err()
+		}
+		// The credential changes during the failing connect.
 		client.SetToken("new-credential")
 		return false, errors.New("dial failed")
 	}
+	timer := make(chan time.Time, 1)
 	waiting := make(chan struct{})
 	m.after = func(time.Duration) <-chan time.Time {
 		close(waiting)
-		return nil
+		return timer
 	}
 	done := make(chan struct{})
 	go func() { m.run(ctx); close(done) }()
 	<-waiting
-	// Give a wrongly woken loop the chance to call connect again.
-	time.Sleep(50 * time.Millisecond)
+	fired.Store(true)
+	timer <- time.Time{}
+	select {
+	case ok := <-firedAtSecond:
+		if !ok {
+			t.Fatal("a credential change cut a non-401 backoff")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("no second connect after the backoff timer fired")
+	}
 	cancel()
 	<-done
-	if calls != 1 {
-		t.Fatalf("connect called %d times, want 1: a credential change cut a non-401 backoff", calls)
-	}
 }

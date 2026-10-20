@@ -1445,12 +1445,12 @@ waitLoop:
 			break waitLoop
 		case <-usr2Chan:
 			// SIGUSR2: auth reset — re-read token file and restart refresh loop.
-			handleAuthEvent(authReset, authResetSignal)
+			authReset.reset(authResetSignal)
 			// Continue waiting — this is non-terminal.
 		case <-credFileChan:
 			// The credential file changed: adopt a valid new credential
 			// through the same reset path. Non-terminal.
-			handleAuthEvent(authReset, authResetFileChange)
+			authReset.reset(authResetFileChange)
 		case <-triggerChan:
 			// Trigger file detected from hook handler - limits already set in agent-info.json
 			limitsExceeded = true
@@ -1965,40 +1965,84 @@ type authResetter struct {
 	// watcher is told about refused credentials; nil when not watching.
 	watcher *hub.TokenFileWatcher
 	now     func() time.Time
+	// checkTimeout bounds each hub check of a credential; zero uses
+	// credentialCheckTimeout.
+	checkTimeout time.Duration
+
+	// The credential file value whose hub check last could not complete,
+	// how many times in a row, and whether that was logged.
+	uncheckedFP       hub.Fingerprint
+	uncheckedAttempts int
+	uncheckedLogged   bool
+}
+
+const (
+	// credentialCheckTimeout bounds a hub check of a credential.
+	credentialCheckTimeout = 5 * time.Second
+	// credentialRecheckBase and credentialRecheckMax pace re-checks of a
+	// credential file value whose hub check could not complete: 5s, 10s,
+	// 20s, 40s, then every 60s. Each value is paced on its own; a new
+	// value is checked at once.
+	credentialRecheckBase = 5 * time.Second
+	credentialRecheckMax  = 60 * time.Second
+)
+
+// recheckDelay is the wait before re-checking a value whose hub check could
+// not complete attempts times in a row.
+func recheckDelay(attempts int) time.Duration {
+	d := credentialRecheckBase
+	for i := 1; i < attempts && d < credentialRecheckMax; i++ {
+		d *= 2
+	}
+	return min(d, credentialRecheckMax)
 }
 
 // startCredentialFileWatch starts a watcher on the credential and transport
 // token files that notifies cfg.Notify on a change, until ctx ends. It
 // records the transport token file's current content as known first, so
-// only a later write by another process counts as a transport change.
+// only a later write by another process counts as a transport change, and
+// checks the current credential with the hub once in the background, so
+// its issue time is known when a newer credential arrives. That check is
+// not retried and changes nothing if it does not succeed.
 func startCredentialFileWatch(ctx context.Context, hubClient *hub.Client, cfg hub.TokenWatchConfig) *hub.TokenFileWatcher {
 	hubClient.NoteTransportTokenFile()
 	w := hub.NewTokenFileWatcher(cfg)
 	w.Run(ctx)
+	current := hubClient.GetToken()
+	go func() {
+		checkCtx, cancel := context.WithTimeout(ctx, credentialCheckTimeout)
+		defer cancel()
+		_ = hubClient.CheckCredentialAccepted(checkCtx, current)
+	}()
 	log.Info("Watching the credential file for changes (every %s)", hub.DefaultTokenWatchInterval)
 	return w
 }
 
-// handleAuthEvent runs the auth reset path for source. The wait loop calls
-// it for both SIGUSR2 and credential file changes, on one goroutine, so
-// two resets never run at once.
-func handleAuthEvent(r *authResetter, source authResetSource) {
-	r.reset(source)
-}
-
 // reset re-reads the credential file and, if it holds a credential this
 // agent can adopt, puts it in the shared hub client and restarts the token
-// refresh loop. The file is validated before anything is stopped or
-// replaced, so a refused file leaves the working credential and the
-// refresh loop untouched. For a file change, a credential equal to the
-// current one is a silent no-op (this process writes the file after each
-// refresh), and one issued before the current one is refused. The signal
-// path always resets, as an operator may use it to restart the refresh
-// loop. Credential values are never logged; log lines name a credential by
+// refresh loop. The wait loop calls it for both SIGUSR2 and credential file
+// changes, on one goroutine, so two resets never run at once. Everything is
+// checked before anything is stopped or replaced, so a credential that is
+// not adopted leaves the working credential and the refresh loop untouched.
+//
+// Both sources require a complete, unexpired credential whose subject is
+// this agent. For a file change, in addition:
+//   - a credential equal to the current one is a silent no-op (this process
+//     writes the file after each refresh);
+//   - it must be issued after the newest credential the hub has accepted
+//     from this client (hub.Client.VerifiedIssuedAt);
+//   - the hub must accept it (hub.Client.CheckCredentialAccepted). If the
+//     hub cannot be asked, the current credential is kept and the same value
+//     is checked again later, with a growing delay.
+//
+// The signal path adopts without asking the hub, so an operator reset
+// works even when the hub cannot be reached; the adopted credential is
+// checked afterwards, and only an accepted one moves the verified issue
+// time. Credential values are never logged; log lines name a credential by
 // its jti or a short fingerprint.
 func (r *authResetter) reset(source authResetSource) {
 	if source == authResetSignal {
-		log.TaggedInfo("AUTH_RESET", "Auth reset requested (%s, SIGUSR2)", source)
+		log.TaggedInfo("AUTH_RESET", "Auth reset requested (SIGUSR2)")
 	}
 
 	hubClient := r.hubClient
@@ -2010,30 +2054,41 @@ func (r *authResetter) reset(source authResetSource) {
 	}
 
 	newToken := hub.ReadTokenFile()
+	fp := hub.TokenFingerprint(newToken)
 	info, err := hub.ValidateCandidateToken(newToken, hubClient.AgentID(), r.now())
 	if source == authResetFileChange {
-		current := hubClient.CredentialInfo()
-		if newToken != "" && hub.TokenFingerprint(newToken) == current.Fingerprint {
+		if newToken != "" && fp == hubClient.CredentialInfo().Fingerprint {
 			// The agent credential is the one in use; only the transport
 			// token file may have changed.
 			r.adoptTransportIfChanged(source)
 			return
 		}
-		if err == nil && !current.IssuedAt.IsZero() && info.IssuedAt.Before(current.IssuedAt) {
-			err = hub.ErrCandidateOlder
+		if err == nil {
+			if anchor := hubClient.VerifiedIssuedAt(); !anchor.IsZero() && !info.IssuedAt.After(anchor) {
+				err = hub.ErrCandidateOlder
+			}
+		}
+		if err == nil {
+			err = r.checkWithHub(newToken)
+			if errors.Is(err, hub.ErrCandidateUnchecked) {
+				r.recheckLater(fp, info)
+				r.adoptTransportIfChanged(source)
+				return
+			}
 		}
 	}
 	if err != nil {
 		// err is a fixed hub.ErrCandidate* value; it never quotes the file.
 		log.Error("AUTH_RESET: Not adopting the credential file (%s): %v", source, err)
 		if r.watcher != nil {
-			r.watcher.Refused(hub.TokenFingerprint(newToken))
+			r.watcher.Refused(fp)
 		}
 		if source == authResetFileChange {
 			r.adoptTransportIfChanged(source)
 		}
 		return
 	}
+	r.uncheckedFP, r.uncheckedAttempts, r.uncheckedLogged = hub.Fingerprint{}, 0, false
 	log.TaggedInfo("AUTH_RESET", "Adopting credential %s (%s)", info.LogID(), source)
 
 	// Cancel the existing token refresh loop if running.
@@ -2103,6 +2158,44 @@ func (r *authResetter) reset(source authResetSource) {
 		}
 		hubCancel()
 	}
+
+	// A credential adopted on the signal was not asked about first; check
+	// it now, so that once the hub accepts it, a later credential file
+	// value is compared against its issue time.
+	if source == authResetSignal {
+		if err := r.checkWithHub(newToken); err != nil {
+			log.Info("AUTH_RESET: Adopted credential %s not confirmed by the hub yet: %v", info.LogID(), err)
+		}
+	}
+}
+
+// checkWithHub asks the hub whether it accepts token, within checkTimeout.
+func (r *authResetter) checkWithHub(token string) error {
+	timeout := r.checkTimeout
+	if timeout <= 0 {
+		timeout = credentialCheckTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return r.hubClient.CheckCredentialAccepted(ctx, token)
+}
+
+// recheckLater keeps the current credential after the hub could not be
+// asked about the file's value fp, and asks the watcher to report fp
+// again after a delay that grows while the same value stays unconfirmed.
+func (r *authResetter) recheckLater(fp hub.Fingerprint, info hub.TokenInfo) {
+	if fp != r.uncheckedFP {
+		r.uncheckedFP, r.uncheckedAttempts, r.uncheckedLogged = fp, 0, false
+	}
+	r.uncheckedAttempts++
+	delay := recheckDelay(r.uncheckedAttempts)
+	if !r.uncheckedLogged {
+		log.Error("AUTH_RESET: Keeping the current credential: %v for %s; checking again in %s and later", hub.ErrCandidateUnchecked, info.LogID(), delay)
+		r.uncheckedLogged = true
+	}
+	if r.watcher != nil {
+		r.watcher.RetryAfter(fp, delay)
+	}
 }
 
 // adoptTransportIfChanged adopts the transport token file when another
@@ -2116,6 +2209,12 @@ func (r *authResetter) adoptTransportIfChanged(source authResetSource) {
 		log.Error("AUTH_RESET: Failed to adopt transport token file (%s): %v", source, err)
 	} else if adopted {
 		log.TaggedInfo("AUTH_RESET", "Transport token reloaded (%s)", source)
+		// A credential file value the hub refused may have been refused
+		// for want of this transport token; let the watcher report it
+		// again.
+		if r.watcher != nil {
+			r.watcher.RecheckAgent()
+		}
 	}
 }
 
