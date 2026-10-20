@@ -3072,6 +3072,10 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 			)
 			hubSrv.SetSAAssignChecker(cached)
 			hubSrv.SetHookIdentityChecker(cached)
+			// Registration and verification warn when the hub's identity
+			// cannot read IAM policy in an account's GCP project other
+			// than this one; the assignment check would fail there.
+			hubSrv.SetSAProjectAccessProbe(hub.NewPTProjectAccessProbe(ptClient), ptProjectID)
 			// Both surfaces share one checker instance and one cache.
 			log.Printf("Policy Troubleshooter checker configured for actAs checks (quota project: %s)", ptProjectID)
 		}
