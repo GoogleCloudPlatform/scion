@@ -408,3 +408,18 @@ ALTER TABLE artifact_version ADD COLUMN IF NOT EXISTS source_message_id TEXT;
 CREATE INDEX IF NOT EXISTS idx_artifact_scope_created
     ON artifact (scope_kind, created_at) WHERE deleted_at IS NULL;
 `
+
+// migrationAttachmentProject records, on an attachment bound to a message,
+// the project of that message as the hub derived it from the message's
+// conversation at bind time (ptone/scion#4596). NULL means unknown: an
+// upload not yet bound, or a row bound before this step (nothing is
+// backfilled); an empty string means the message has no project.
+const migrationAttachmentProject = "0010_attachment_project"
+
+const sqliteAttachmentProject = `
+ALTER TABLE artifact ADD COLUMN message_project_id TEXT;
+`
+
+const postgresAttachmentProject = `
+ALTER TABLE artifact ADD COLUMN IF NOT EXISTS message_project_id TEXT;
+`

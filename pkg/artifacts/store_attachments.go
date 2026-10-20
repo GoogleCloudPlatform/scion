@@ -85,7 +85,7 @@ func (s *sqlStore) GetAttachment(ctx context.Context, id string) (*Artifact, err
 }
 
 // BindAttachment implements Store.
-func (s *sqlStore) BindAttachment(ctx context.Context, artifactID, ownerKind, ownerRef, messageID string, now time.Time) error {
+func (s *sqlStore) BindAttachment(ctx context.Context, artifactID, ownerKind, ownerRef, messageID, messageProjectID string, now time.Time) error {
 	if artifactID == "" || ownerKind == "" || ownerRef == "" || messageID == "" {
 		return errors.New("artifacts: BindAttachment needs an artifact, an owner and a message")
 	}
@@ -112,9 +112,9 @@ func (s *sqlStore) BindAttachment(ctx context.Context, artifactID, ownerKind, ow
 	case ref != sender || oKind != ownerKind || oRef != ownerRef:
 		return ErrAttachmentNotOwned
 	}
-	res, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact SET scope_kind = ?, scope_ref = ?, updated_at = ?
+	res, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact SET scope_kind = ?, scope_ref = ?, message_project_id = ?, updated_at = ?
 		WHERE id = ? AND scope_kind = ? AND scope_ref = ? AND deleted_at IS NULL`),
-		ScopeKindMessage, messageID, s.timeArg(now), artifactID, ScopeKindUpload, sender)
+		ScopeKindMessage, messageID, messageProjectID, s.timeArg(now), artifactID, ScopeKindUpload, sender)
 	if err != nil {
 		return fmt.Errorf("artifacts: bind attachment: %w", err)
 	}
@@ -149,6 +149,7 @@ func (s *sqlStore) listMessageAttachmentsChunk(ctx context.Context, chunk []stri
 	placeholders := strings.TrimSuffix(strings.Repeat("?, ", len(chunk)), ", ")
 	rows, err := s.db.QueryContext(ctx, s.rebind(`SELECT
 		a.id, a.scope_kind, a.scope_ref, a.owner_kind, a.owner_ref, a.title, a.current_seq, a.created_at, a.updated_at,
+		a.message_project_id,
 		f.version_id, f.path, f.size, f.sha256, f.media_type, f.origin, f.source_url, f.fetch_status, f.fetch_error, f.received
 		FROM artifact a
 		JOIN artifact_version v ON v.artifact_id = a.id AND v.seq = a.current_seq
@@ -166,14 +167,17 @@ func (s *sqlStore) listMessageAttachmentsChunk(ctx context.Context, chunk []stri
 			created, updated                 dbTime
 			digest, src, status, fetchErrMsg sql.NullString
 			received                         bool
+			messageProject                   sql.NullString
 		)
 		a, f := &row.Artifact, &row.File
 		if err := rows.Scan(&a.ID, &a.ScopeKind, &a.ScopeRef, &a.OwnerKind, &a.OwnerRef, &a.Title, &seq, &created, &updated,
+			&messageProject,
 			&f.VersionID, &f.Path, &f.Size, &digest, &f.MediaType, &f.Origin, &src, &status, &fetchErrMsg, &received); err != nil {
 			return fmt.Errorf("artifacts: scan message attachment: %w", err)
 		}
 		a.CurrentSeq = int(seq.Int64)
 		a.CreatedAt, a.UpdatedAt = created.Time, updated.Time
+		a.MessageProjectID = nullStringPtr(messageProject)
 		f.SHA256, f.SourceURL, f.FetchStatus, f.FetchError = digest.String, src.String, status.String, fetchErrMsg.String
 		f.Pending = !received
 		out[a.ScopeRef] = append(out[a.ScopeRef], row)
@@ -278,4 +282,14 @@ func (s *sqlStore) ListLiveScopeRefs(ctx context.Context, kind, after string, li
 		return nil, fmt.Errorf("artifacts: list scope refs: %w", err)
 	}
 	return out, nil
+}
+
+// nullStringPtr returns a pointer to the value of v, or nil when v is
+// NULL. An empty string is a value, so it gives a pointer to "".
+func nullStringPtr(v sql.NullString) *string {
+	if !v.Valid {
+		return nil
+	}
+	s := v.String
+	return &s
 }

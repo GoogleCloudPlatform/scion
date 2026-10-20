@@ -1886,7 +1886,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 
 	// Attachments stored as artifacts move to the message's scope now that
 	// it is stored; one that cannot be bound is left out of the message.
-	attachmentRefs = s.bindChatAttachments(ctx, user, storeMsg.ID, attachmentRefs)
+	attachmentRefs = s.bindChatAttachments(ctx, user, storeMsg.ID, s.bindProject(ctx, storeMsg, attachmentRefs), attachmentRefs)
 
 	// Attachment files are copied to the agent's scratchpad only now: every
 	// check that can refuse the send (authorization, validation, wake,
@@ -2498,7 +2498,7 @@ func (s *Server) sendHumanToHuman(ctx context.Context, key, projectID string, us
 
 	// Attachments stored as artifacts move to the message's scope now that
 	// it is stored; one that cannot be bound is left out of the message.
-	attachmentRefs = s.bindChatAttachments(ctx, user, storeMsg.ID, attachmentRefs)
+	attachmentRefs = s.bindChatAttachments(ctx, user, storeMsg.ID, s.bindProject(ctx, storeMsg, attachmentRefs), attachmentRefs)
 
 	// W7: Link attachments to the persisted message.
 	if wcs != nil && len(attachmentRefs) > 0 {

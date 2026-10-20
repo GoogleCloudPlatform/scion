@@ -239,7 +239,7 @@ func TestAttachmentArtifacts_ProjectlessGroupJoinAndLeave(t *testing.T) {
 	// A message of a group without a project carries the nil project id.
 	msgID := f.seedMessage(t, uuid.Nil.String(), "group-thread-"+conv.ID, conv.ID, "in a group without a project")
 	id := f.uploadAs(t, f.ua, "", "notes.txt", "group bytes")
-	require.NoError(t, f.srv.attachmentService().BindAttachment(ctx, id, artifacts.PrincipalKindUser, f.ua.ID, msgID))
+	require.NoError(t, f.srv.attachmentService().BindAttachment(ctx, id, artifacts.PrincipalKindUser, f.ua.ID, msgID, ""))
 
 	missing := f.download(t, f.ub, uuid.NewString())
 	require.Equal(t, http.StatusOK, f.download(t, f.uc, id).status, "a participant reads it")
@@ -323,7 +323,7 @@ func TestAttachmentArtifacts_CrossProjectAddressee(t *testing.T) {
 	require.NoError(t, err)
 	msgID := f.seedMessage(t, f.projA.ID, f.topicA, convID, "for bob too")
 	id := f.uploadAs(t, f.ua, "", "brief.txt", "addressed")
-	require.NoError(t, f.srv.attachmentService().BindAttachment(ctx, id, artifacts.PrincipalKindUser, f.ua.ID, msgID))
+	require.NoError(t, f.srv.attachmentService().BindAttachment(ctx, id, artifacts.PrincipalKindUser, f.ua.ID, msgID, f.projA.ID))
 
 	missing := f.download(t, f.ub, uuid.NewString())
 	requireSameAnswer(t, missing, f.download(t, f.ub, id))
@@ -531,7 +531,7 @@ func TestAttachmentArtifacts_TokensReadNoArtifactAttachments(t *testing.T) {
 	agentDM := dmKeyFor(t, "user", f.ua.ID, "agent", f.aa.ID)
 	agentMsg := f.seedMessage(t, f.projA.ID, agentDM, "", "for the agent")
 	agentFile := f.uploadAs(t, f.ua, f.projA.ID, "agent.txt", "agent dm")
-	require.NoError(t, f.srv.attachmentService().BindAttachment(ctx, agentFile, artifacts.PrincipalKindUser, f.ua.ID, agentMsg))
+	require.NoError(t, f.srv.attachmentService().BindAttachment(ctx, agentFile, artifacts.PrincipalKindUser, f.ua.ID, agentMsg, f.projA.ID))
 	conv, err := f.st.UpsertConversationByExternalRef(ctx, &store.Conversation{
 		Kind: "group", Surface: "native", ExternalRef: "group:none:" + uuid.NewString(), DriftState: "active",
 	})
@@ -540,7 +540,7 @@ func TestAttachmentArtifacts_TokensReadNoArtifactAttachments(t *testing.T) {
 		ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: f.ua.ID, Role: "member", JoinedAt: time.Now()}))
 	groupMsg := f.seedMessage(t, uuid.Nil.String(), "group-thread-"+conv.ID, conv.ID, "in a group without a project")
 	groupFile := f.uploadAs(t, f.ua, "", "group.txt", "projectless group")
-	require.NoError(t, f.srv.attachmentService().BindAttachment(ctx, groupFile, artifacts.PrincipalKindUser, f.ua.ID, groupMsg))
+	require.NoError(t, f.srv.attachmentService().BindAttachment(ctx, groupFile, artifacts.PrincipalKindUser, f.ua.ID, groupMsg, ""))
 
 	hubToken := selfToken(t, f.ua.ID, hubBoundary(), "project:read", "inbox:read", "agent:read")
 	missing := f.downloadAs(t, hubToken, uuid.NewString())
@@ -823,7 +823,7 @@ func TestAttachmentArtifacts_SettingsSectionDisabled(t *testing.T) {
 // to a concurrent send of the same upload.
 type failBindStore struct{ artifacts.Store }
 
-func (failBindStore) BindAttachment(context.Context, string, string, string, string, time.Time) error {
+func (failBindStore) BindAttachment(context.Context, string, string, string, string, string, time.Time) error {
 	return artifacts.ErrAttachmentBound
 }
 

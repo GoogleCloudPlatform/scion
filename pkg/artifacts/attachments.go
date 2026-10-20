@@ -185,10 +185,12 @@ func (s *Service) UsableAttachment(ctx context.Context, id, senderKind, senderRe
 
 // BindAttachment moves the upload artifactID of the sender (senderKind,
 // senderRef) to the message scope of messageID, a message that is already
-// stored. It returns ErrAttachmentNotOwned for an upload of someone else,
+// stored, and records messageProjectID, the project the host derived from
+// the stored message ("" for none), on the row in the same write. It
+// returns ErrAttachmentNotOwned for an upload of someone else,
 // ErrAttachmentBound for one already sent, and ErrNotFound for an unknown
 // id.
-func (s *Service) BindAttachment(ctx context.Context, artifactID, senderKind, senderRef, messageID string) error {
+func (s *Service) BindAttachment(ctx context.Context, artifactID, senderKind, senderRef, messageID, messageProjectID string) error {
 	b, ok := s.backend()
 	if !ok {
 		return ErrUnavailable
@@ -196,7 +198,7 @@ func (s *Service) BindAttachment(ctx context.Context, artifactID, senderKind, se
 	if !canonicalID(artifactID) {
 		return ErrNotFound
 	}
-	return b.store.BindAttachment(ctx, artifactID, senderKind, senderRef, messageID, time.Now())
+	return b.store.BindAttachment(ctx, artifactID, senderKind, senderRef, messageID, messageProjectID, time.Now())
 }
 
 // ServeAttachment answers a download of attachment id (an artifact id or

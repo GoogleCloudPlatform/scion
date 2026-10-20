@@ -167,6 +167,13 @@ type Artifact struct {
 	// OrphanedAt is when the owner liveness reconciler found the owner
 	// gone, or nil while the owner is live (or was never checked).
 	OrphanedAt *time.Time
+	// MessageProjectID is, for an attachment bound to a message, the project
+	// of that message as the hub derived it at bind time (ptone/scion#4596):
+	// nil while unknown (an unbound upload, or a row bound before migration
+	// 0010_attachment_project), "" when the message has no project. nil and
+	// "" are distinct values and are never converted into each other. Rows
+	// that are not attachments always read nil.
+	MessageProjectID *string
 }
 
 // ArtifactRef names an artifact and its home scope.
@@ -557,8 +564,11 @@ type Store interface {
 	// the artifact is absent, deleted or not an attachment,
 	// ErrAttachmentNotOwned when the upload is not scoped to
 	// PrincipalRef(ownerKind, ownerRef) or not owned by that principal, and
-	// ErrAttachmentBound when it is no longer an upload.
-	BindAttachment(ctx context.Context, artifactID, ownerKind, ownerRef, messageID string, now time.Time) error
+	// ErrAttachmentBound when it is no longer an upload. The same statement
+	// that moves the scope sets message_project_id to messageProjectID (""
+	// is a value: the message has no project), so the project is never
+	// written without the bind, nor the bind without the project.
+	BindAttachment(ctx context.Context, artifactID, ownerKind, ownerRef, messageID, messageProjectID string, now time.Time) error
 
 	// ListMessageAttachments returns the live attachments bound to each of
 	// messageIDs, keyed by message id, each with its one file, ordered by

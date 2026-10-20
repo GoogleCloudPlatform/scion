@@ -130,7 +130,7 @@ func (f *attachmentFixture) upload(p principal, name, mediaType string, body []b
 func (f *attachmentFixture) send(p principal, messageID string, body []byte) string {
 	f.t.Helper()
 	id := f.upload(p, "shot.png", "image/png", body)
-	if err := f.svc.BindAttachment(context.Background(), id, p.kind, p.ref, messageID); err != nil {
+	if err := f.svc.BindAttachment(context.Background(), id, p.kind, p.ref, messageID, ""); err != nil {
 		f.t.Fatalf("BindAttachment: %v", err)
 	}
 	return id
@@ -392,10 +392,10 @@ func TestUsableAttachment(t *testing.T) {
 	if _, state, err := f.svc.UsableAttachment(ctx, uuid.NewString(), userU.kind, userU.ref); err != nil || state != AttachmentAbsent {
 		t.Errorf("unknown id = %d, %v; want AttachmentAbsent", state, err)
 	}
-	if err := f.svc.BindAttachment(ctx, up, outside.kind, outside.ref, "msg-2"); !errors.Is(err, ErrAttachmentNotOwned) {
+	if err := f.svc.BindAttachment(ctx, up, outside.kind, outside.ref, "msg-2", ""); !errors.Is(err, ErrAttachmentNotOwned) {
 		t.Errorf("bind by another user = %v, want ErrAttachmentNotOwned", err)
 	}
-	if err := f.svc.BindAttachment(ctx, sent, userU.kind, userU.ref, "msg-2"); !errors.Is(err, ErrAttachmentBound) {
+	if err := f.svc.BindAttachment(ctx, sent, userU.kind, userU.ref, "msg-2", ""); !errors.Is(err, ErrAttachmentBound) {
 		t.Errorf("second bind = %v, want ErrAttachmentBound", err)
 	}
 }

@@ -62,6 +62,7 @@ var migrations = []migration{
 	{name: migrationOrphans, sqlite: sqliteOrphans, postgres: postgresOrphans},
 	{name: migrationVersionFailReason, sqlite: sqliteVersionFailReason, postgres: postgresVersionFailReason},
 	{name: migrationAttachments, sqlite: sqliteAttachments, postgres: postgresAttachments},
+	{name: migrationAttachmentProject, sqlite: sqliteAttachmentProject, postgres: postgresAttachmentProject},
 }
 
 const ledgerSQLite = `CREATE TABLE IF NOT EXISTS artifact_migrations (
@@ -697,13 +698,14 @@ func (s *sqlStore) getArtifact(ctx context.Context, where string, args ...any) (
 		expires, created     dbTime
 		updated, deletedTime dbTime
 		orphaned             dbTime
+		messageProject       sql.NullString
 	)
 	err := s.db.QueryRowContext(ctx, s.rebind(`SELECT
 		id, scope_kind, scope_ref, owner_kind, owner_ref, "key", title, current_seq, expires_at, created_at, updated_at, deleted_at,
-		orphaned_at
+		orphaned_at, message_project_id
 		FROM artifact WHERE `+where+` AND deleted_at IS NULL`), args...).Scan(
 		&a.ID, &a.ScopeKind, &a.ScopeRef, &a.OwnerKind, &a.OwnerRef, &key, &a.Title, &seq,
-		&expires, &created, &updated, &deletedTime, &orphaned)
+		&expires, &created, &updated, &deletedTime, &orphaned, &messageProject)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -717,6 +719,7 @@ func (s *sqlStore) getArtifact(ctx context.Context, where string, args ...any) (
 	a.UpdatedAt = updated.Time
 	a.DeletedAt = deletedTime.ptr()
 	a.OrphanedAt = orphaned.ptr()
+	a.MessageProjectID = nullStringPtr(messageProject)
 	return &a, nil
 }
 
