@@ -223,7 +223,7 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 			return
 		case errors.Is(claimErr, context.Canceled) && shutdownCancelled(ctx):
 			// The broker is shutting down (design wave 3 §1 C-e).
-			s.failLaunch(ctx, sender, rec, lc, false, currentStep, api.LaunchCodeBrokerRestarted, launchShutdownMessage, "")
+			s.failLaunch(ctx, sender, rec, lc, false, false, currentStep, api.LaunchCodeBrokerRestarted, launchShutdownMessage, "")
 			return
 		case errors.Is(claimErr, context.Canceled):
 			// A local stop/delete (launchRegistry.CancelLocalFor) woke the
@@ -234,7 +234,7 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 		default:
 			// ctx' expired without any answer: follow the failure rule
 			// (step 7) with failed{hub_unreachable}.
-			s.failLaunch(ctx, sender, rec, lc, false, currentStep, api.LaunchCodeHubUnreachable, "claim: hub unreachable", "")
+			s.failLaunch(ctx, sender, rec, lc, false, false, currentStep, api.LaunchCodeHubUnreachable, "claim: hub unreachable", "")
 			return
 		}
 	}
@@ -281,7 +281,7 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 			s.agentLifecycleLog.Error("runLaunch: failed to write launch marker; failing the launch rather than risk undeletable files",
 				"agent_id", rec.AgentID, "project_id", lc.projectID, "run_id", lc.opts.RunID,
 				"launch_id", rec.ID, "error", err)
-			s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, currentStep, api.LaunchCodeRuntimeError, runtimeOpError("write launch marker", err).Error(), "")
+			s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, false, currentStep, api.LaunchCodeRuntimeError, runtimeOpError("write launch marker", err).Error(), "")
 			return
 		}
 	}
@@ -306,7 +306,7 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 	opts, _, dlMessage, dlErr := download(ctx, lc.req, lc.opts)
 	if dlErr != nil {
 		if shutdownCancelled(ctx) {
-			s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, currentStep, api.LaunchCodeBrokerRestarted, launchShutdownMessage, "")
+			s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, false, currentStep, api.LaunchCodeBrokerRestarted, launchShutdownMessage, "")
 			return
 		}
 		if locallyCancelled(ctx) {
@@ -321,7 +321,7 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 		// too: admission (beginAsyncLaunch) normally answers those with the
 		// sync 400/422, and one only found here reports the same text,
 		// under runtime_error.
-		s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, currentStep, api.LaunchCodeRuntimeError, dlMessage, "")
+		s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, false, currentStep, api.LaunchCodeRuntimeError, dlMessage, "")
 		return
 	}
 	lc.opts = opts
@@ -419,7 +419,7 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 			// The broker is shutting down (design wave 3 §1 C-e): report
 			// broker_restarted, then clean up on a confirming answer, as
 			// for any failure. Keyed on ctx', like the local-cancel case.
-			s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, stepOr(sender.LastStep(), api.LaunchStepLaunching), api.LaunchCodeBrokerRestarted, launchShutdownMessage, "")
+			s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, true, stepOr(sender.LastStep(), api.LaunchStepLaunching), api.LaunchCodeBrokerRestarted, launchShutdownMessage, "")
 			return
 		}
 		if locallyCancelled(ctx) {
@@ -481,7 +481,7 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 		// Computed from the final code: only a runtime_error carries a
 		// cause, so the hub_unreachable override above carries none.
 		cause := launchFailureCause(code, sr.err)
-		s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, step, code, message, cause)
+		s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, true, step, code, message, cause)
 		return
 	}
 
@@ -565,14 +565,21 @@ func (s *Server) handleKeepaliveAbort(sender *launchSender, rec *launchRecord, l
 }
 
 // failLaunch implements design §3.8.2 step 7 (F2(d), "report first, then
-// clean up only if the Hub confirms the agent never ran"). alreadyCompleted
-// skips the report entirely, per "if an earlier gate or keepalive already
-// answered completed, send nothing and do not clean up". step records which
+// clean up only if the Hub confirms the agent never ran"). step records which
 // generic step (claim/launching) the launch was in (design §3.9). cause is
 // the fixed runtime cause code for a runtime_error (launchFailureCause), or
 // "".
-func (s *Server) failLaunch(ctx context.Context, sender *launchSender, rec *launchRecord, lc launchCtx, alreadyCompleted bool, step, errorCode, message, cause string) {
-	if alreadyCompleted || sender.IsCompleted() {
+//
+// startAttempted is true only when this attempt's Manager.Start failed. A
+// failure before Start, once an earlier gate or keepalive answered
+// completed (alreadyCompleted or sender.IsCompleted()), sends nothing and
+// cleans nothing up: this attempt has created no runtime object. A Start
+// failure is always reported and journalled with StartFailed, and its
+// clean-up follows startFailureCleanup; after a completed answer it is
+// also PostCompleted (ptone/scion#5368).
+func (s *Server) failLaunch(ctx context.Context, sender *launchSender, rec *launchRecord, lc launchCtx, alreadyCompleted, startAttempted bool, step, errorCode, message, cause string) {
+	postCompleted := alreadyCompleted || sender.IsCompleted()
+	if postCompleted && !startAttempted {
 		return
 	}
 
@@ -582,19 +589,113 @@ func (s *Server) failLaunch(ctx context.Context, sender *launchSender, rec *laun
 	terminalCtx, cancel := s.launchTerminalContext(rec.Deadline)
 	defer cancel()
 
-	rec.journal.terminal(journalTerminal{Step: step, ErrorCode: errorCode, Message: message, Cause: cause})
+	rec.journal.terminal(journalTerminal{Step: step, ErrorCode: errorCode, Message: message, Cause: cause,
+		StartFailed: startAttempted, PostCompleted: postCompleted})
 	result, err := sender.SendTerminal(terminalCtx, false, step, errorCode, message, cause, nil)
 	if err != nil {
 		// No definitive answer by the TTL: the Hub has reaped the record by
-		// then. No cleanup here; the journal record is kept so the next
-		// boot resends the report (ptone/scion#5186).
+		// then. The journal record is kept so the next boot resends the
+		// report (ptone/scion#5186).
 		rec.terminalUndelivered.Store(true)
 		s.agentLifecycleLog.Warn("runLaunch: failed report did not get a definitive answer within the TTL",
 			"agent_id", rec.AgentID, "launch_id", rec.ID, "error_code", errorCode, "error", err)
+		if startAttempted && startFailureCleanup(nil, err, postCompleted) == launchCleanupResources {
+			// The Hub had already answered completed, so nothing else
+			// removes this attempt's objects: remove them now and leave
+			// the files to the resent report's answer. During a shutdown
+			// drain the kept record makes the next boot's recovery do it,
+			// so the drain is not extended by the clean-up budget.
+			if s.drainExpired() || shutdownCancelled(ctx) {
+				return
+			}
+			rec.resourcesOnlyCleanup.Store(true)
+			// A failure is logged and recorded on rec by cleanupLaunchResources.
+			_ = s.cleanupLaunchResources(lc.mgr, rec)
+		}
 		return
 	}
-	if shouldCleanupAfterFailureReport(result) {
+	action := launchCleanupNone
+	switch {
+	case startAttempted:
+		action = startFailureCleanup(result, nil, postCompleted)
+	case shouldCleanupAfterFailureReport(result):
+		action = launchCleanupFull
+	}
+	switch action {
+	case launchCleanupFull:
 		s.cleanupAbortedLaunch(lc.mgr, rec, lc)
+	case launchCleanupResources:
+		// Every delete is conditional on the identity recorded at create
+		// time, so only this attempt's objects can go; the files are kept.
+		rec.resourcesOnlyCleanup.Store(true)
+		// A failure is logged and recorded on rec by cleanupLaunchResources.
+		_ = s.cleanupLaunchResources(lc.mgr, rec)
+	}
+}
+
+// launchCleanup is the clean-up a failed report's outcome calls for.
+type launchCleanup int
+
+const (
+	// launchCleanupNone removes nothing.
+	launchCleanupNone launchCleanup = iota
+	// launchCleanupResources removes the launch's recorded runtime
+	// resources only (cleanupLaunchResources); the agent files are kept.
+	launchCleanupResources
+	// launchCleanupFull removes the resources and, for a create launch,
+	// the agent files (cleanupAbortedLaunch).
+	launchCleanupFull
+)
+
+// startFailureCleanup classifies the outcome of a failed report whose
+// launch's Start failed (a StartFailed terminal), live and in recovery
+// (ptone/scion#5368). err is the send's error (no definitive answer by the
+// TTL) and result its answer otherwise.
+//
+// When postCompleted is false (no completed answer had reached the broker),
+// it is shouldCleanupAfterFailureReport's answer, except that 200 completed
+// gives resources-only: the hub may have ended the launch running_observed
+// from another report, and this attempt's objects must not be left running.
+// No answer gives none; the record is kept for a resend.
+//
+// When postCompleted is true (the hub had already answered completed), the
+// files go only once the hub confirms this run's failure:
+//   - 200 applied or duplicate: full;
+//   - 409 failed: full. Once a launch has ended running_observed or
+//     succeeded, the hub ends it failed only by applying this run's failed
+//     report, so 409 failed means an earlier send applied and its answer was
+//     lost;
+//   - 409 superseded or other_owner: none, the owning launch holds the names;
+//   - no answer: resources-only now; the record is kept for a resend;
+//   - every other answer (200 completed, 400, 401, 403, 404 and any other
+//     409 reason): resources-only.
+func startFailureCleanup(result *hubclient.AgentLaunchReportResult, err error, postCompleted bool) launchCleanup {
+	if !postCompleted {
+		switch {
+		case err != nil:
+			return launchCleanupNone
+		case result.HTTPStatus == 0 && result.Result == hubclient.AgentLaunchReportResultCompleted:
+			return launchCleanupResources
+		case shouldCleanupAfterFailureReport(result):
+			return launchCleanupFull
+		default:
+			return launchCleanupNone
+		}
+	}
+	if err != nil {
+		return launchCleanupResources
+	}
+	switch {
+	case result.HTTPStatus == 0 &&
+		(result.Result == hubclient.AgentLaunchReportResultApplied || result.Result == hubclient.AgentLaunchReportResultDuplicate):
+		return launchCleanupFull
+	case result.HTTPStatus == http.StatusConflict && result.Reason == hubclient.AgentLaunchReportReasonFailed:
+		return launchCleanupFull
+	case result.HTTPStatus == http.StatusConflict &&
+		(result.Reason == hubclient.AgentLaunchReportReasonSuperseded || result.Reason == hubclient.AgentLaunchReportReasonOtherOwner):
+		return launchCleanupNone
+	default:
+		return launchCleanupResources
 	}
 }
 

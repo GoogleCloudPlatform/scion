@@ -295,7 +295,9 @@ func (s *AgentStore) applyLaunchReportActive(ctx context.Context, ltx *launchTx,
 			return store.LaunchReportAnswer{Result: store.LaunchReportResultApplied, Changed: true}, updated, nil
 		}
 		// Non-terminal or failed: end the launch as running_observed. The
-		// broker does not clean up on `completed` (§3.8.2).
+		// broker does not clean up on `completed` (§3.8.2), except that a
+		// broker whose Start failed removes that attempt's recorded
+		// resources and keeps the files (ptone/scion#5368).
 		upd.SetLaunchState(store.LaunchStateEnded).SetLaunchEndReason(store.LaunchEndReasonRunningObserved)
 		withStartEndClearsMemory(upd, current)
 		updated, err := withLaunchEndSettlement(upd, current, store.LaunchEndReasonRunningObserved, now).Save(ctx)
