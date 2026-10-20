@@ -166,7 +166,7 @@ export class ScionPageBrokerAreaDetail extends LitElement {
   /**
    * Marks the projects whose default Runtime Broker is this broker: one GET per
    * project, at most DEFAULTS_CONCURRENCY at a time (the providers listing does not
-   * carry the default; adding it there is a hub follow-up).
+   * carry the default; adding it there is ptone/scion#5413).
    */
   private async loadDefaults(): Promise<void> {
     const queue = this.projects.map((p) => p.projectId);
