@@ -38,7 +38,7 @@ const ptgHostSA = "broker-host@ptg-project.iam.gserviceaccount.com"
 type ptgFixture struct {
 	srv     *Server
 	store   store.Store
-	owner   *store.User // project owner; broker owner unless setBrokerOwner moved it
+	owner   *store.User // project owner and broker owner
 	project *store.Project
 	broker  *store.RuntimeBroker
 	audit   *mockAuditLogger
@@ -63,21 +63,33 @@ func setupPTG(t *testing.T, name, hostSA string) *ptgFixture {
 	return f
 }
 
-// setBrokerOwner gives the broker to another user, so the project owner is
-// no longer the broker owner. Auto-provide keeps the broker dispatchable.
-func (f *ptgFixture) setBrokerOwner(t *testing.T, name string) {
+// nonOwnerCreator returns a project member who is neither the broker owner
+// nor a hub admin. The broker is set to auto-provide so it stays
+// dispatchable for that user. (The broker's owner is fixed at creation:
+// UpdateRuntimeBroker does not write CreatedBy.)
+func (f *ptgFixture) nonOwnerCreator(t *testing.T, name string) *store.User {
 	t.Helper()
-	other := addExtraUser(t, f.store, tid(name+"-broker-owner"), name+"-broker-owner@test.com", store.UserRoleMember)
+	id := tid(name + "-project-member")
+	createTestUserWithProjectRole(t, f.store, id, name+"-project-member@test.com", f.project.ID, store.ProjectRoleMember)
+	ensureHubMembership(context.Background(), f.store, id)
 	b, err := f.store.GetRuntimeBroker(context.Background(), f.broker.ID)
 	require.NoError(t, err)
-	b.CreatedBy = other.ID
+	require.NotEqual(t, id, b.CreatedBy)
 	b.AutoProvide = true
 	require.NoError(t, f.store.UpdateRuntimeBroker(context.Background(), b))
+	u, err := f.store.GetUser(context.Background(), id)
+	require.NoError(t, err)
+	return u
 }
 
 func (f *ptgFixture) createDefault(t *testing.T, name string) (int, string) {
 	t.Helper()
-	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+	return f.createDefaultAs(t, f.owner, name)
+}
+
+func (f *ptgFixture) createDefaultAs(t *testing.T, as *store.User, name string) (int, string) {
+	t.Helper()
+	rec := doRequestAsUser(t, f.srv, as, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name: name, ProjectID: f.project.ID, Task: "test",
 	})
 	return rec.Code, rec.Body.String()
@@ -98,10 +110,10 @@ func (f *ptgFixture) agentMissing(t *testing.T, slug string) {
 
 func TestPassthroughTranslation_ProjectDefault_NonOwnerDenied_Create(t *testing.T) {
 	f := setupPTG(t, "ptg-nonowner", ptgHostSA)
-	f.setBrokerOwner(t, "ptg-nonowner")
+	creator := f.nonOwnerCreator(t, "ptg-nonowner")
 	enforceSAAssign(f.srv, store.NewFakeCallerPermissionChecker().AllowTarget(ptgHostSA))
 
-	code, body := f.createDefault(t, "ptg-nonowner-agent")
+	code, body := f.createDefaultAs(t, creator, "ptg-nonowner-agent")
 
 	assert.Equal(t, http.StatusForbidden, code, "body: %s", body)
 	assert.Contains(t, body, "requires broker ownership")
@@ -173,7 +185,7 @@ func TestPassthroughTranslation_ProjectDefault_AgentCreatorDenied_Create(t *test
 
 func TestPassthroughTranslation_ProjectDefault_Scheduled_NonOwnerFailsDispatch(t *testing.T) {
 	f := setupPTG(t, "ptg-sched", ptgHostSA)
-	f.setBrokerOwner(t, "ptg-sched")
+	creator := f.nonOwnerCreator(t, "ptg-sched")
 	enforceSAAssign(f.srv, store.NewFakeCallerPermissionChecker().AllowTarget(ptgHostSA))
 	ctx := context.Background()
 
@@ -182,8 +194,8 @@ func TestPassthroughTranslation_ProjectDefault_Scheduled_NonOwnerFailsDispatch(t
 		ProjectID: f.project.ID,
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"ptg-sched-agent","task":"scheduled work"}`,
-		CreatedBy: f.owner.ID,
-	}, f.owner.ID))
+		CreatedBy: creator.ID,
+	}, creator.ID))
 
 	require.Error(t, err, "a scheduled translation by a non-owner fails the dispatch")
 	assert.Contains(t, err.Error(), "requires broker ownership")
