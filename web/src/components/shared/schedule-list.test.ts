@@ -784,7 +784,7 @@ describe('scion-schedule-list status reason', () => {
     const el = await mount([
       schedule({ id: 'a', name: 'orphaned', status: 'paused', statusReason: 'creator_deleted' }),
       schedule({ id: 'b', name: 'user-paused', status: 'paused' }),
-      schedule({ id: 'c', name: 'running', status: 'active' }),
+      schedule({ id: 'c', name: 'live-sched', status: 'active' }),
     ]);
 
     const reason = rowFor(el, 'orphaned').querySelector('.status-reason');
@@ -793,7 +793,7 @@ describe('scion-schedule-list status reason', () => {
     expect(reason?.textContent?.trim()).toBe(mod.scheduleStatusReasonLabel('creator_deleted'));
     // Positive control above uses the same selector that must find nothing here.
     expect(rowFor(el, 'user-paused').querySelector('.status-reason')).toBeNull();
-    expect(rowFor(el, 'running').querySelector('.status-reason')).toBeNull();
+    expect(rowFor(el, 'live-sched').querySelector('.status-reason')).toBeNull();
   });
 
   it('shows the reason in the detail dialog', async () => {
