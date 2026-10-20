@@ -115,8 +115,8 @@ func scheduledEventResource(projectID string) Resource {
 
 // scheduledEventAccessDecision decides whether the identity in ctx may
 // perform action on the scheduled events of projectID, without writing a
-// response. It fails closed. An agent identity is allowed here: callers
-// check its project isolation and project:read scope first (see
+// response. It fails closed. An agent identity is allowed here; its
+// project isolation and read scope are enforced on the request path (see
 // handleSchedules and healthSummaryCanReadSchedules).
 func (s *Server) scheduledEventAccessDecision(ctx context.Context, projectID string, action Action) scheduledEventAccess {
 	identity := GetIdentityFromContext(ctx)
