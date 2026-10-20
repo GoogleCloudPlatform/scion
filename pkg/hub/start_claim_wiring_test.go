@@ -924,13 +924,17 @@ func TestStartClaimWiring_StartLostWithoutADeleteIsAbandoned(t *testing.T) {
 
 func TestStartClaimWiring_StatusWriteFailureHeartbeatClearsExitFields(t *testing.T) {
 	f, d, a := newClaimFixture(t)
+	// The fixture only writes through the raw store, before any audited setup.
+	_, fault := installStoreFault(t, f.srv, func(inner store.Store, sw *storeFaultSwitch) failRunningStatusStore {
+		return failRunningStatusStore{Store: inner, agentID: a.ID, fault: sw}
+	})
 	dispatched := false
 	d.start = func(context.Context, *store.Agent) error { dispatched = true; return nil }
 	ctx := context.Background()
 	oldCode := 137
 	a.ExitCode, a.ExitReason = &oldCode, "crashed"
 	require.NoError(t, f.s.UpdateAgent(ctx, a))
-	f.srv.store = failRunningStatusStore{Store: f.s, agentID: a.ID}
+	fault.Arm()
 	code, _ := lifecycle(t, f, a.ID, "start")
 	require.Equal(t, http.StatusInternalServerError, code)
 	require.True(t, dispatched, "the broker start succeeded before the write failed")
