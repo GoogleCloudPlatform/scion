@@ -101,7 +101,7 @@ describe('scion-page-broker-area-detail', () => {
     summaryItems = [];
     patchResponse = {};
     afterPatch = null;
-    fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+    fetchMock = vi.fn((url: string, init?: RequestInit) => {
       const id = broker.id;
       if (url === `/api/v1/runtime-brokers/${id}` && init?.method === 'PATCH') {
         if (afterPatch) broker = afterPatch;

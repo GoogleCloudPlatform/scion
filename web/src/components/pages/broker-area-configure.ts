@@ -397,8 +397,7 @@ export class ScionBrokerAreaConfigure extends LitElement {
           }}
         >
           <sl-radio value="default" ?disabled=${!canEdit || this.capacitySaving}
-            >Use the inherited limit
-            (${effectiveLimitText(effective.inherited.value)})</sl-radio
+            >Use the inherited limit (${effectiveLimitText(effective.inherited.value)})</sl-radio
           >
           <sl-radio value="custom" ?disabled=${!canEdit || this.capacitySaving}>Custom</sl-radio>
         </sl-radio-group>

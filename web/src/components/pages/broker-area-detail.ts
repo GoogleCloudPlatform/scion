@@ -39,6 +39,7 @@ import { apiFetch, extractApiError } from '../../client/api.js';
 import { loadAdminStatus } from '../../client/admin-status.js';
 import { hasAnyPermission } from '../../lib/admin-permissions.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
+import { replaceSearch } from '../../client/navigation.js';
 import { stateManager } from '../../client/state.js';
 import { brokerTypeBadgeStyles } from '../shared/resource-styles.js';
 import { brokerAreaStyles } from '../shared/broker-area-styles.js';
@@ -218,13 +219,13 @@ export class ScionPageBrokerAreaDetail extends LitElement {
 
   private onTabShow(e: CustomEvent<{ name: string }>): void {
     this.tab = parseBrokerAreaTab(e.detail.name);
-    const url = new URL(window.location.href);
+    const params = new URLSearchParams(window.location.search);
     if (this.tab === 'overview') {
-      url.searchParams.delete('tab');
+      params.delete('tab');
     } else {
-      url.searchParams.set('tab', this.tab);
+      params.set('tab', this.tab);
     }
-    window.history.replaceState(window.history.state, '', url.toString());
+    replaceSearch(params);
   }
 
   /** Configure saved and re-read the broker: the fresh record replaces the row. */

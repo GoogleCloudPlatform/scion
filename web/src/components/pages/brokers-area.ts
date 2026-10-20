@@ -49,7 +49,7 @@ import type { ViewMode } from '../shared/view-toggle.js';
 import '../shared/status-badge.js';
 import '../shared/view-toggle.js';
 import { formatRelative } from '../../utils/time.js';
-import { navigateTo } from '../../client/navigation.js';
+import { navigateTo, replaceSearch } from '../../client/navigation.js';
 import { visibleInterval } from '../../client/visible-interval.js';
 
 /** One runtime broker row of the health summary, as far as this page reads it. */
@@ -219,19 +219,17 @@ export class ScionPageBrokersArea extends LitElement {
 
   private setFilter(filter: BrokerFilter): void {
     this.filter = filter;
-    const url = new URL(window.location.href);
+    const params = new URLSearchParams(window.location.search);
     if (filter === 'all') {
-      url.searchParams.delete('filter');
+      params.delete('filter');
     } else {
-      url.searchParams.set('filter', filter);
+      params.set('filter', filter);
     }
-    window.history.replaceState(window.history.state, '', url.toString());
+    replaceSearch(params);
   }
 
   private get visibleBrokers(): RuntimeBroker[] {
-    return this.brokers.filter((b) =>
-      matchesBrokerFilter(b, this.filter, this.health?.get(b.id))
-    );
+    return this.brokers.filter((b) => matchesBrokerFilter(b, this.filter, this.health?.get(b.id)));
   }
 
   private getStatusVariant(status: string): 'success' | 'warning' | 'danger' | 'neutral' {

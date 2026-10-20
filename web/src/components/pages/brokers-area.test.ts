@@ -76,7 +76,7 @@ describe('scion-page-brokers-area', () => {
     localStorage.removeItem('scion-view-brokers-area');
     window.history.replaceState(null, '', '/brokers');
     summaryStatus = 200;
-    fetchMock = vi.fn(async (url: string) => {
+    fetchMock = vi.fn((url: string) => {
       if (url.startsWith('/api/v1/runtime-brokers')) {
         return jsonResponse({ brokers: [FLAT_K8S, FLAT_DOCKER, LEGACY] });
       }
@@ -158,9 +158,7 @@ describe('scion-page-brokers-area', () => {
     expect(requested('/api/v1/admin/health/summary')).toBe(true);
     expect(root.querySelector('th.health-col')).not.toBeNull();
     expect(row(root, FLAT_K8S.id)?.textContent).toContain('ok');
-    expect(row(root, FLAT_DOCKER.id)?.querySelector('.health-warn')?.textContent?.trim()).toBe(
-      '1'
-    );
+    expect(row(root, FLAT_DOCKER.id)?.querySelector('.health-warn')?.textContent?.trim()).toBe('1');
   });
 
   it('a status-only problem (unhealthy, no failing check) is a warning, never ok', async () => {

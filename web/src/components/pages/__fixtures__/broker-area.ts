@@ -57,7 +57,7 @@ function base(over: Partial<RuntimeBroker>): RuntimeBroker {
     agentLimitSource: 'hub_default',
     _capabilities: { actions: ['read'] },
     ...over,
-  } as RuntimeBroker;
+  };
 }
 
 /** A flat Kubernetes broker hosted by this server. */
@@ -91,7 +91,7 @@ export const LEGACY = base({
     { name: 'b', type: 'kubernetes', available: true },
     { name: 'c', type: 'docker', available: false },
   ],
-} as Partial<RuntimeBroker>);
+});
 
 /** An admin status that holds hub.health.read (or not). */
 export function adminStatus(canReadHealth: boolean) {

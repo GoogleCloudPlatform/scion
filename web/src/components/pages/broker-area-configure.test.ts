@@ -76,7 +76,7 @@ async function mount(broker: RuntimeBroker, s: BrokerSettingsResponse | null = s
 function bodyOf(method: string): unknown {
   const call = fetchMock.mock.calls.find(([, init]) => (init as RequestInit)?.method === method);
   expect(call, method).toBeDefined();
-  return JSON.parse(String((call![1] as RequestInit).body));
+  return JSON.parse((call![1] as RequestInit).body as string);
 }
 
 function click(el: Cfg, sel: string): void {
@@ -91,7 +91,7 @@ describe('scion-broker-area-configure', () => {
   beforeEach(() => {
     patchStatus = 200;
     putStatus = 200;
-    fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+    fetchMock = vi.fn((_url: string, init?: RequestInit) => {
       if (init?.method === 'PATCH') {
         if (patchStatus !== 200) {
           return jsonResponse(
