@@ -1072,6 +1072,22 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 		}
 	}
 
+	// ── Step 5b4: Offline test-infra delegation grant (ptone/scion#4240,
+	// phase DL) ─────────────────────────────────────────────────────────
+	// A workload request through an offline delegation acts for a reserved
+	// grantor id that has no bindings. offlineDelegationBinding adds a
+	// request-local hub-scope grant of exactly test_identity.issue, only
+	// when the request's workload delegation state says the offline gate
+	// passed for this request and every id agrees (see its doc comment).
+	// The bearer gate (Step 1) and the frozen ceiling still apply. It
+	// shares no state with the agent synthetic bindings above.
+	if principal.Kind == PrincipalKindUser {
+		if cb, role := offlineDelegationBinding(ctx, principal, credential, permissionID); cb != nil {
+			candidates = append(candidates, *cb)
+			roleDefs[role.RoleID] = role
+		}
+	}
+
 	// ── Step 5c/5d/5e: Hub-wide catalog scope containment (ptone/scion#1901,
 	// #1916) ───────────────────────────────────────────────────────────
 	// The curated hub-member/hub-viewer roles carry skill/template/

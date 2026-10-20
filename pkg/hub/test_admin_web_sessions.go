@@ -254,6 +254,25 @@ func (s *Server) testAdminCredentialIssuer(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "requires "+spec.permission+" permission", details)
 		return false
 	}
+	// The grantor kind of a workload delegation, explicitly and first
+	// (phase DL): an admin-kind credential through a delegation needs a
+	// human grantor (X4b); an offline or any other grantor kind, or a
+	// human-kind state carrying offline gate state, is refused before any
+	// grantor read.
+	if GetCredentialContextFromContext(ctx).Kind == CredentialKindWorkloadDelegation {
+		st := workloadDelegationCaller(ctx)
+		if st == nil {
+			return deny("workload delegation state missing", "")
+		}
+		switch st.delegation.EffectiveGrantorKind() {
+		case store.DelegationGrantorHuman:
+			if st.offlineGatePassed || st.offline != nil {
+				return deny("workload delegation state inconsistent with its grantor kind", "")
+			}
+		default:
+			return deny("admin-kind credentials through a workload delegation require a human grantor", "")
+		}
+	}
 	if !allowed[spec.permission] {
 		// testIdentityCallerFor stops at the first allowed permission, so
 		// the kind's capability is decided here, for an admin-kind code

@@ -82,7 +82,7 @@ func TestScheduleCRUD(t *testing.T) {
 	assert.Equal(t, "0 9 * * 1", updated.CronExpr)
 
 	// Status
-	require.NoError(t, s.UpdateScheduleStatus(ctx, sc.ID, store.ScheduleStatusPaused))
+	require.NoError(t, s.UpdateScheduleStatus(ctx, sc.ID, store.ScheduleStatusPaused, store.ScheduleStatusReasonNone))
 	paused, err := s.GetSchedule(ctx, sc.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.ScheduleStatusPaused, paused.Status)
@@ -174,7 +174,7 @@ func TestListSchedulesExcludesDeletedByDefault(t *testing.T) {
 	require.NoError(t, s.CreateSchedule(ctx, active))
 	deleted := newTestSchedule(projectID, "deleted")
 	require.NoError(t, s.CreateSchedule(ctx, deleted))
-	require.NoError(t, s.UpdateScheduleStatus(ctx, deleted.ID, store.ScheduleStatusDeleted))
+	require.NoError(t, s.UpdateScheduleStatus(ctx, deleted.ID, store.ScheduleStatusDeleted, store.ScheduleStatusReasonNone))
 
 	res, err := s.ListSchedules(ctx, store.ScheduleFilter{ProjectID: projectID}, store.ListOptions{})
 	require.NoError(t, err)
@@ -241,7 +241,7 @@ func TestListDueSchedulesClaimPath(t *testing.T) {
 	paused := newTestSchedule(projectID, "paused")
 	paused.NextRunAt = &early
 	require.NoError(t, s.CreateSchedule(ctx, paused))
-	require.NoError(t, s.UpdateScheduleStatus(ctx, paused.ID, store.ScheduleStatusPaused))
+	require.NoError(t, s.UpdateScheduleStatus(ctx, paused.ID, store.ScheduleStatusPaused, store.ScheduleStatusReasonNone))
 
 	due, err := s.ListDueSchedules(ctx, now)
 	require.NoError(t, err)

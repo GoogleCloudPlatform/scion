@@ -87,9 +87,10 @@ The command:
   - refuses, writing nothing, unless the hub id is pinned in server.hub.hub_id
     (or SCION_SERVER_HUB_HUBID) and --hub-id equals the hub id resolved from
     that same configuration; pin the hub's CURRENT resolved id, never a new
-    value (when unpinned, the error prints the id read from ~/.scion/hub-id
-    or K_SERVICE in this user's environment, to confirm against the running
-    hub's GET /healthz; without that file it points to GET /healthz)
+    value (when unpinned, the error prints the id resolved in this user's
+    environment, from ~/.scion/hub-id or, on Cloud Run, from K_SERVICE, to
+    confirm against the running hub's GET /healthz; with neither it points
+    to GET /healthz)
   - opens the configured database directly (no running server is needed)
   - writes one marker row (hub id, class "test", time, host, attested JSON)
   - generates the hub-local test-identity web session key (64 random bytes)

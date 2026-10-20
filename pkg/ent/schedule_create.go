@@ -286,6 +286,20 @@ func (_c *ScheduleCreate) SetNillableStatus(v *string) *ScheduleCreate {
 	return _c
 }
 
+// SetStatusReason sets the "status_reason" field.
+func (_c *ScheduleCreate) SetStatusReason(v string) *ScheduleCreate {
+	_c.mutation.SetStatusReason(v)
+	return _c
+}
+
+// SetNillableStatusReason sets the "status_reason" field if the given value is not nil.
+func (_c *ScheduleCreate) SetNillableStatusReason(v *string) *ScheduleCreate {
+	if v != nil {
+		_c.SetStatusReason(*v)
+	}
+	return _c
+}
+
 // SetNextRunAt sets the "next_run_at" field.
 func (_c *ScheduleCreate) SetNextRunAt(v time.Time) *ScheduleCreate {
 	_c.mutation.SetNextRunAt(v)
@@ -686,6 +700,10 @@ func (_c *ScheduleCreate) createSpec() (*Schedule, *sqlgraph.CreateSpec) {
 		_spec.SetField(schedule.FieldStatus, field.TypeString, value)
 		_node.Status = value
 	}
+	if value, ok := _c.mutation.StatusReason(); ok {
+		_spec.SetField(schedule.FieldStatusReason, field.TypeString, value)
+		_node.StatusReason = value
+	}
 	if value, ok := _c.mutation.NextRunAt(); ok {
 		_spec.SetField(schedule.FieldNextRunAt, field.TypeTime, value)
 		_node.NextRunAt = &value
@@ -1071,6 +1089,24 @@ func (u *ScheduleUpsert) SetStatus(v string) *ScheduleUpsert {
 // UpdateStatus sets the "status" field to the value that was provided on create.
 func (u *ScheduleUpsert) UpdateStatus() *ScheduleUpsert {
 	u.SetExcluded(schedule.FieldStatus)
+	return u
+}
+
+// SetStatusReason sets the "status_reason" field.
+func (u *ScheduleUpsert) SetStatusReason(v string) *ScheduleUpsert {
+	u.Set(schedule.FieldStatusReason, v)
+	return u
+}
+
+// UpdateStatusReason sets the "status_reason" field to the value that was provided on create.
+func (u *ScheduleUpsert) UpdateStatusReason() *ScheduleUpsert {
+	u.SetExcluded(schedule.FieldStatusReason)
+	return u
+}
+
+// ClearStatusReason clears the value of the "status_reason" field.
+func (u *ScheduleUpsert) ClearStatusReason() *ScheduleUpsert {
+	u.SetNull(schedule.FieldStatusReason)
 	return u
 }
 
@@ -1616,6 +1652,27 @@ func (u *ScheduleUpsertOne) SetStatus(v string) *ScheduleUpsertOne {
 func (u *ScheduleUpsertOne) UpdateStatus() *ScheduleUpsertOne {
 	return u.Update(func(s *ScheduleUpsert) {
 		s.UpdateStatus()
+	})
+}
+
+// SetStatusReason sets the "status_reason" field.
+func (u *ScheduleUpsertOne) SetStatusReason(v string) *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetStatusReason(v)
+	})
+}
+
+// UpdateStatusReason sets the "status_reason" field to the value that was provided on create.
+func (u *ScheduleUpsertOne) UpdateStatusReason() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateStatusReason()
+	})
+}
+
+// ClearStatusReason clears the value of the "status_reason" field.
+func (u *ScheduleUpsertOne) ClearStatusReason() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.ClearStatusReason()
 	})
 }
 
@@ -2351,6 +2408,27 @@ func (u *ScheduleUpsertBulk) SetStatus(v string) *ScheduleUpsertBulk {
 func (u *ScheduleUpsertBulk) UpdateStatus() *ScheduleUpsertBulk {
 	return u.Update(func(s *ScheduleUpsert) {
 		s.UpdateStatus()
+	})
+}
+
+// SetStatusReason sets the "status_reason" field.
+func (u *ScheduleUpsertBulk) SetStatusReason(v string) *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetStatusReason(v)
+	})
+}
+
+// UpdateStatusReason sets the "status_reason" field to the value that was provided on create.
+func (u *ScheduleUpsertBulk) UpdateStatusReason() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateStatusReason()
+	})
+}
+
+// ClearStatusReason clears the value of the "status_reason" field.
+func (u *ScheduleUpsertBulk) ClearStatusReason() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.ClearStatusReason()
 	})
 }
 
