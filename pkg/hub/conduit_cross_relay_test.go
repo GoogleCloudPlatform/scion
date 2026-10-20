@@ -55,8 +55,14 @@ type crossRelayWorld struct {
 
 func newCrossRelayWorld(t *testing.T) *crossRelayWorld {
 	t.Helper()
+	return newCrossRelayWorldWith(t, separateRelayOptions{})
+}
+
+// newCrossRelayWorldWith is newCrossRelayWorld with opts.
+func newCrossRelayWorldWith(t *testing.T, opts separateRelayOptions) *crossRelayWorld {
+	t.Helper()
 	cw := &crossRelayWorld{}
-	cw.separateRelayWorld, cw.spawned = newPTYSeparateRelayWorld(t)
+	cw.separateRelayWorld, cw.spawned = newPTYSeparateRelayWorldWith(t, opts)
 	internalB := httptest.NewServer(cw.hubB.ConduitInternalHandler())
 	t.Cleanup(internalB.Close)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
