@@ -325,6 +325,9 @@ func (s *ScheduleStore) ListSchedules(ctx context.Context, filter store.Schedule
 	if filter.Name != "" {
 		query.Where(schedule.NameEQ(filter.Name))
 	}
+	if filter.LastRunStatus != "" {
+		query.Where(schedule.LastRunStatusEQ(filter.LastRunStatus))
+	}
 
 	// TotalCount covers the whole filtered set, not the rows after the
 	// cursor, so it is taken before the keyset predicate is added.

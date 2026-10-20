@@ -3232,6 +3232,9 @@ type ScheduleFilter struct {
 	ProjectID string
 	Status    string
 	Name      string
+	// LastRunStatus, when set, keeps only schedules whose most recent run
+	// ended with this status (ScheduleRunSuccess or ScheduleRunError).
+	LastRunStatus string
 }
 
 // ToAPI converts a store.Agent to an api.AgentInfo for external consumption.

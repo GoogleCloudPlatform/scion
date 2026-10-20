@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -74,36 +75,67 @@ type ListScheduledEventsResponse struct {
 // permission ID for role-binding resolution) against a project-scoped
 // scheduled_event resource.
 func (s *Server) authorizeScheduledEventAccess(w http.ResponseWriter, r *http.Request, projectID string, action Action) bool {
-	ctx := r.Context()
-	identity := GetIdentityFromContext(ctx)
+	identity := GetIdentityFromContext(r.Context())
 	if identity == nil {
 		Unauthorized(w)
 		return false
 	}
+	d := s.scheduledEventAccessDecision(r.Context(), projectID, action)
+	if d.allowed {
+		return true
+	}
+	logAuthzDenial(r, identity, scheduledEventResource(projectID), action, d.reason)
+	if d.byPolicy {
+		writeForbidden(w, "You don't have permission to access scheduled events in this project")
+	} else {
+		writeForbidden(w, "")
+	}
+	return false
+}
 
-	resource := Resource{
+// scheduledEventAccess is the outcome of scheduledEventAccessDecision.
+type scheduledEventAccess struct {
+	allowed bool
+	// reason is logged for a denial.
+	reason string
+	// byPolicy is true when the authorization service denied the request,
+	// the one denial authorizeScheduledEventAccess explains to the caller.
+	byPolicy bool
+}
+
+// scheduledEventResource is the resource a scheduled event decision is
+// about: scheduled events under projectID.
+func scheduledEventResource(projectID string) Resource {
+	return Resource{
 		Type:       "scheduled_event",
 		ParentType: "project",
 		ParentID:   projectID,
 	}
+}
 
+// scheduledEventAccessDecision decides whether the identity in ctx may
+// perform action on the scheduled events of projectID, without writing a
+// response. It fails closed. An agent identity is allowed here: callers
+// check its project isolation and project:read scope first (see
+// handleSchedules and healthSummaryCanReadSchedules).
+func (s *Server) scheduledEventAccessDecision(ctx context.Context, projectID string, action Action) scheduledEventAccess {
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		return scheduledEventAccess{reason: "no identity"}
+	}
 	switch identity.Type() {
 	case "agent":
 		// Agent authorization is handled by checkAgentReadScope and project
 		// isolation in the dispatcher. If we reach here, those passed.
-		return true
+		return scheduledEventAccess{allowed: true}
 
 	case "user", "dev", "federated_user":
 		userIdent, ok := identity.(UserIdentity)
 		if !ok {
-			logAuthzDenial(r, identity, resource, action, "invalid user identity")
-			writeForbidden(w, "")
-			return false
+			return scheduledEventAccess{reason: "invalid user identity"}
 		}
 		if s.authzService == nil {
-			logAuthzDenial(r, identity, resource, action, "authorization service is uninitialized")
-			writeForbidden(w, "")
-			return false
+			return scheduledEventAccess{reason: "authorization service is uninitialized"}
 		}
 		// Pass the canonical permission ID so the kernel evaluates
 		// scheduled_event permissions through system-scoped role bindings.
@@ -111,22 +143,17 @@ func (s *Server) authorizeScheduledEventAccess(w http.ResponseWriter, r *http.Re
 		decision := s.authzService.Decide(ctx, AuthzRequest{
 			Principal:  principalContextForIdentity(userIdent),
 			Credential: credentialContextForIdentity(userIdent),
-			Resource:   resource,
+			Resource:   scheduledEventResource(projectID),
 			Action:     action,
 			Permission: permissionID,
 		})
 		if !decision.Allowed {
-			logAuthzDenial(r, identity, resource, action, decision.Reason)
-			writeForbidden(w, "You don't have permission to access scheduled events in this project")
-			return false
+			return scheduledEventAccess{reason: decision.Reason, byPolicy: true}
 		}
-		return true
+		return scheduledEventAccess{allowed: true}
 
 	default:
-		logAuthzDenial(r, identity, resource, action,
-			"identity type may not access scheduled events")
-		writeForbidden(w, "")
-		return false
+		return scheduledEventAccess{reason: "identity type may not access scheduled events"}
 	}
 }
 
