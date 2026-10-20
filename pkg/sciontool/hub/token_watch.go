@@ -210,9 +210,8 @@ func (c *Client) noteVerified(token string, onlyIfCurrent bool) {
 // refresh the hub URL itself answered, one CheckCredentialAccepted
 // confirmed, or the in-memory credential once CheckCurrentCredentialAccepted
 // confirmed it (if still in memory then). It is zero until one is accepted
-// and never decreases. A
-// credential read from the credential file must be newer than it to be
-// adopted from the file.
+// and never decreases. A credential read from the credential file must be
+// newer than it to be adopted from the file.
 func (c *Client) VerifiedIssuedAt() time.Time {
 	c.tokenMu.RLock()
 	defer c.tokenMu.RUnlock()

@@ -866,3 +866,44 @@ func TestCredentialReload_RefusalResetsRecheckDelay(t *testing.T) {
 		t.Fatalf("unchecked attempts = %d, want 1 after the value returned", h.r.uncheckedAttempts)
 	}
 }
+
+// The re-check delay is paced per value: a different unconfirmed value
+// starts again from the first delay.
+func TestCredentialReload_RecheckDelayIsPerValue(t *testing.T) {
+	h := newResetHarness(t)
+	h.hub.set(func(c *credHub) { c.checkStatus = http.StatusInternalServerError })
+	h.write(h.newTok)
+	h.r.reset(authResetFileChange)
+	h.r.reset(authResetFileChange)
+	if h.r.uncheckedAttempts != 2 {
+		t.Fatalf("setup: unchecked attempts = %d, want 2", h.r.uncheckedAttempts)
+	}
+	other := testCredential(t, "other-value", h.now.Add(time.Minute))
+	h.write(other)
+	h.r.reset(authResetFileChange)
+	if h.r.uncheckedAttempts != 1 || h.r.uncheckedFP != hub.TokenFingerprint(other) {
+		t.Fatalf("a different value continued the previous value's pacing (%d attempts)", h.r.uncheckedAttempts)
+	}
+}
+
+// With no verified issue time yet, the file holding the credential already
+// in use is a no-op: no hub check, no refresh loop restart, no wake.
+func TestCredentialReload_CurrentValueIsNoOpWithoutVerifiedTime(t *testing.T) {
+	h := newResetHarness(t)
+	h.hub.set(func(c *credHub) { c.accepted[h.oldTok] = true })
+	loop := h.done
+	changed := h.client.CredentialChanged()
+	h.write(h.oldTok)
+	h.r.reset(authResetFileChange)
+	if h.hub.checkCount() != 0 {
+		t.Fatal("the credential in use was checked with the hub")
+	}
+	if h.done != loop || !loopRunning(loop) {
+		t.Fatal("the refresh loop was restarted for the credential in use")
+	}
+	select {
+	case <-changed:
+		t.Fatal("waiting loops were woken for the credential in use")
+	default:
+	}
+}

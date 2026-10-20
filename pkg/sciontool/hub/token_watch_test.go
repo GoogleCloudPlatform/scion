@@ -699,21 +699,18 @@ func TestTokenFileWatcher_RetryDroppedForNewValue(t *testing.T) {
 	h.files.set("credential-b", "")
 	h.checkChange()
 	_ = h.notified()
-	h.w.RetryAfter(TokenFingerprint("credential-b"), DefaultTokenWatchInterval)
+	// A retry of B is due two checks later; the file changes to C first.
+	h.w.RetryAfter(TokenFingerprint("credential-b"), 2*DefaultTokenWatchInterval)
 	h.files.set("credential-c", "")
 	h.checkChange()
 	if !h.notified() {
 		t.Fatal("a new value was not reported at the next check")
 	}
-	h.files.set("credential-b", "")
-	h.checkChange() // B is a change again (last reported is C)
-	_ = h.notified()
-	h.files.set("credential-c", "")
-	h.checkChange()
-	_ = h.notified()
+	// When B's retry would have been due, the file still holds C: nothing
+	// is reported (checkNoChange fails if the watcher re-reads instead).
 	h.checkNoChange()
 	if h.notified() {
-		t.Fatal("a dropped retry was served later")
+		t.Fatal("a retry for a value no longer in the file was served")
 	}
 }
 
