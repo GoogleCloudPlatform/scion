@@ -4,11 +4,11 @@ title: Release Notes
 
 Scion release notes are published weekly.
 
-## Latest: Week of October 5 -- 11, 2026
+## Latest: Week of October 12 -- 18, 2026
 
-Conduit, still behind its experiment flag, now carries agent terminals, Runtime Broker traffic and user tunnels, including SSH through `scion tunnel`. Agent create, start, stop and delete hold up under races: a create or start that loses to a delete no longer revives the agent, operations are scoped to the run they target, and starts fail closed when credentials or settings cannot be resolved. Access follows membership: removed members' agents are suspended, sharing a Runtime Broker needs its owner's consent, and schedules run under recorded authority. `scion reincarnate` can move agents between Runtime Brokers and change their settings, and the health dashboard was rebuilt around a single attention policy.
+The CLI's local-only mode is gone. Every command now goes through a Hub, picked from a per-user list of named Hubs and a current context set with `scion use`. Async agent launch became the `hub.async_agent_launch` experiment, with per-step progress, typed failures and launches that survive Runtime Broker restarts. User access tokens now need matching selectors for chat, quota, agent and user-scope operations, and can now administer invitations, membership, schedules and skill catalogs. `scion ssh` and `scion vscode` open shells and editors on agents, and the terminal workspace left its experiment.
 
-[Read the full release notes for this week ->](/scion/release-notes/2026-10-05/)
+[Read the full release notes for this week ->](/scion/release-notes/2026-10-12/)
 
 ## Templates describe the job, not the environment
 
@@ -67,6 +67,7 @@ Upgrade note: on the first start after upgrading, the Hub has no record yet, so 
 
 ## Previous Weeks
 
+- [Week of October 5 -- 11, 2026](/scion/release-notes/2026-10-05/)
 - [Week of September 28 -- October 4, 2026](/scion/release-notes/2026-09-28/)
 - [Week of September 21 -- 27, 2026](/scion/release-notes/2026-09-21/)
 - [Week of September 14 -- 20, 2026](/scion/release-notes/2026-09-14/)
