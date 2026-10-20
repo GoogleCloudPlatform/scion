@@ -251,6 +251,7 @@ func loadSettingsFileConverting(k *koanf.Koanf, dir string, legacy *legacyLayerS
 		}
 		if override != "" && legacy != nil {
 			legacy.hubIDFromCamel = false
+			legacy.touch(projectkeys.ConfigHubProjectIDKey)
 		}
 		if override != "" {
 			// The override is applied at this file's own layer,

@@ -19,7 +19,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 	"syscall"
 
@@ -28,7 +27,11 @@ import (
 	"github.com/spf13/pflag"
 )
 
-var configGlobal bool
+var (
+	configGlobal      bool
+	configUnsetGlobal bool
+	configGetSource   bool
+)
 
 var configCmd = &cobra.Command{
 	Use:   "config",
@@ -63,53 +66,60 @@ var configCmd = &cobra.Command{
 
 var configListCmd = &cobra.Command{
 	Use:   "list",
-	Short: "List all effective settings",
+	Short: "List all effective settings and where each comes from",
+	Long: `List every setting "config set" accepts, plus the hub transport settings
+and each hub connection's endpoint, with its effective value and the layer
+it comes from: the embedded defaults, the global settings file, the
+project's settings file, an environment variable, or the project-id file.
+
+A setting with no value shows <unset>. The value of a credential-like
+setting (for example hub.brokerToken) is masked. "config get <key>" reads
+the same settings and gives the same value and source.
+
+With --format json the output is an object keyed by setting:
+{"<key>": {"value": "...", "source": "..."}, ...}.`,
+	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// Resolve project path
-		projectDir, err := config.GetResolvedProjectDir(projectPath)
-		// If we are not in a project, we might only show global settings or defaults
-		// We handle the case where project resolution fails gracefully for global listing?
-		// But LoadSettings expects projectPath. If empty, it loads Global + Defaults.
-
-		var effective *config.Settings
-		if err == nil {
-			effective, err = config.LoadSettings(projectDir)
-		} else {
-			// Try loading just global/defaults
-			effective, err = config.LoadSettings("")
-		}
-
+		values, err := config.ResolveSettingValues(configReadProjectDir())
 		if err != nil {
 			return err
 		}
 
-		// Flatten struct for display
-		m := config.GetSettingsMap(effective)
-
 		if isJSONOutput() {
-			return outputJSON(m)
-		}
-
-		// Sort keys
-		keys := make([]string, 0, len(m))
-		for k := range m {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-
-		fmt.Println("Effective Settings:")
-		for _, k := range keys {
-			val := m[k]
-			if val == "" {
-				val = "<empty>"
+			out := make(map[string]map[string]string, len(values))
+			for _, v := range values {
+				out[v.Key] = map[string]string{"value": v.Value, "source": v.Source}
 			}
-			fmt.Printf("  %s: %s\n", k, val)
+			return outputJSON(out)
 		}
 
-		// Also show sources?
-		// For now just effective settings as per design doc example.
+		w := cmd.OutOrStdout()
+		fmt.Fprintln(w, "Effective Settings:")
+		for _, v := range values {
+			fmt.Fprintf(w, "  %s\n", formatSettingValue(v))
+		}
 		return nil
 	},
+}
+
+// configReadProjectDir is the project whose settings config list and config
+// get read: the resolved project, else "" (the current directory's project
+// or, outside one, the global settings and defaults).
+func configReadProjectDir() string {
+	projectDir, err := config.GetResolvedProjectDir(projectPath)
+	if err != nil {
+		return ""
+	}
+	return projectDir
+}
+
+// formatSettingValue is one config list line: "key: value  (source)", or
+// "key: <unset>".
+func formatSettingValue(v config.SettingValue) string {
+	if v.Source == "" && v.Value == "" {
+		return v.Key + ": <unset>"
+	}
+	return fmt.Sprintf("%s: %s  (%s)", v.Key, v.Value, v.Source)
 }
 
 var configSetCmd = &cobra.Command{
@@ -144,6 +154,9 @@ hub.brokerToken) is masked in the output.`,
 		// contains the value.
 		layerGlobal := configGlobal || config.IsGlobalProjectDir(targetPath)
 		if err := config.ValidateConfigSetKey(key, layerGlobal); err != nil {
+			return err
+		}
+		if err := config.ValidateSettingValue(key, value); err != nil {
 			return err
 		}
 
@@ -192,8 +205,9 @@ var configGetCmd = &cobra.Command{
 
 Supported keys include the top-level settings (active_profile, default_template,
 default_harness_config, workspace_path, image_registry, project_id, cli.autohelp,
-hub.enabled, hub.linked, hub.endpoint, hub.local_only, hub.brokerId, hub.brokerToken,
-hub.brokerNickname — note that hub.brokerToken prints its value, as it always has),
+cli.mode, hub.enabled, hub.linked, hub.endpoint, hub.local_only, hub.transport.mode,
+hub.transport.audience, hub_connections.<name>.endpoint, hub.brokerId, hub.brokerToken
+(masked), hub.brokerNickname),
 plus dotted paths into a named entry of the profiles or runtimes maps:
 profiles.<name>.<field> and runtimes.<name>.<field>, where <field> is one of that
 entry's scalar (string, bool, or integer) settings, named by its settings.yaml key
@@ -206,8 +220,14 @@ harness_configs.<name>.<field> is not supported: harness configs are normally
 resolved from on-disk harness-config directories, not from settings.yaml alone.
 Use "scion harness-config" to inspect them.
 
+With --source the value is followed by the layer it comes from, the same
+source "config list" shows. With --format json the output is
+{"key": "...", "value": "...", "source": "..."}. The value of a
+credential-like setting is masked.
+
 Examples:
   scion config get active_profile
+  scion config get --source hub.endpoint
   scion config get image_registry
   scion config get profiles.local.runtime
   scion config get runtimes.kubernetes.namespace`,
@@ -215,28 +235,114 @@ Examples:
 	RunE: func(cmd *cobra.Command, args []string) error {
 		key := args[0]
 
-		projectDir, _ := config.GetResolvedProjectDir(projectPath)
-		// Even if error, we can try loading defaults/global
-
-		// Try versioned settings first (supports all v1 keys like image_registry)
-		vs, err := config.LoadVersionedSettings(projectDir)
-		if err != nil {
-			return err
-		}
-
-		val, err := config.GetVersionedSettingValue(vs, key)
+		v, err := config.ResolveSettingValue(configReadProjectDir(), key)
 		if err != nil {
 			return err
 		}
 
 		if isJSONOutput() {
 			return outputJSON(map[string]string{
-				"key":   key,
-				"value": val,
+				"key":    key,
+				"value":  v.Value,
+				"source": v.Source,
 			})
 		}
 
-		fmt.Println(val)
+		w := cmd.OutOrStdout()
+		if configGetSource {
+			if v.Source == "" {
+				fmt.Fprintln(w, "<unset>")
+			} else {
+				fmt.Fprintf(w, "%s  (%s)\n", v.Value, v.Source)
+			}
+			return nil
+		}
+		fmt.Fprintln(w, v.Value)
+		return nil
+	},
+}
+
+var configUnsetCmd = &cobra.Command{
+	Use:   "unset <key>",
+	Short: "Remove a setting so it takes its value from the layer below",
+	Long: `Remove a setting from the project's own settings, or from the global
+settings (~/.scion/settings.yaml) with --global. The setting then takes its
+value from the layers below (the global settings or the embedded defaults),
+which is not the same as setting a boolean to false.
+
+It accepts the keys "config set" accepts, with the same write rules. A key
+that is not in the settings file changes nothing. An environment variable
+that sets the key still applies after it is removed from the file.
+
+Examples:
+  scion config unset cli.autohelp
+  scion config unset --global hub.endpoint`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		key := args[0]
+
+		targetPath := ""
+		if !configUnsetGlobal {
+			projectDir, err := config.GetResolvedProjectDir(projectPath)
+			if err != nil {
+				return fmt.Errorf("cannot unset local setting: not inside a project or project path invalid: %w", err)
+			}
+			targetPath = projectDir
+		}
+
+		res, err := config.UnsetSetting(targetPath, key, configUnsetGlobal)
+		if err != nil {
+			return err
+		}
+		errOut := cmd.ErrOrStderr()
+		for _, w := range res.MigrationWarnings {
+			fmt.Fprintf(errOut, "  Migration warning: %s\n", w)
+		}
+
+		scope := "local"
+		if configUnsetGlobal || config.IsGlobalProjectDir(targetPath) {
+			scope = "global"
+		}
+
+		// The value the setting has now, and where it comes from.
+		now, nowErr := config.ResolveSettingValue(configReadProjectDir(), key)
+		if nowErr == nil && strings.HasPrefix(now.Source, "env ") {
+			fmt.Fprintf(errOut, "Warning: %s is still set by %s\n", key, strings.TrimPrefix(now.Source, "env "))
+		}
+		if nowErr == nil && strings.HasPrefix(now.Source, "project-id file ") {
+			fmt.Fprintf(errOut, "Note: %s still comes from %s\n", key, strings.TrimPrefix(now.Source, "project-id file "))
+		}
+
+		var msg string
+		if res.Removed {
+			msg = fmt.Sprintf("Removed %s setting '%s'", scope, key)
+		} else {
+			msg = fmt.Sprintf("%s setting '%s' is not set; nothing changed", strings.ToUpper(scope[:1])+scope[1:], key)
+		}
+
+		if isJSONOutput() {
+			details := map[string]interface{}{
+				"key":     key,
+				"scope":   scope,
+				"removed": res.Removed,
+			}
+			if nowErr == nil {
+				details["value"] = now.Value
+				details["source"] = now.Source
+			}
+			return outputJSON(ActionResult{
+				Status:  "success",
+				Command: "config unset",
+				Message: msg,
+				Details: details,
+			})
+		}
+
+		w := cmd.OutOrStdout()
+		fmt.Fprintln(w, msg)
+		if nowErr == nil {
+			fmt.Fprintf(w, "Now: %s\n", formatSettingValue(now))
+		}
 		return nil
 	},
 }
@@ -651,6 +757,7 @@ func init() {
 	configCmd.AddCommand(configListCmd)
 	configCmd.AddCommand(configSetCmd)
 	configCmd.AddCommand(configGetCmd)
+	configCmd.AddCommand(configUnsetCmd)
 	configCmd.AddCommand(configValidateCmd)
 	configCmd.AddCommand(configMigrateCmd)
 	configCmd.AddCommand(configDirCmd)
@@ -658,6 +765,8 @@ func init() {
 	configCmd.AddCommand(configCdProjectCmd)
 
 	configSetCmd.Flags().BoolVar(&configGlobal, "global", false, "Set configuration globally (~/.scion/settings.yaml)")
+	configUnsetCmd.Flags().BoolVar(&configUnsetGlobal, "global", false, "Unset the setting in the global settings (~/.scion/settings.yaml)")
+	configGetCmd.Flags().BoolVar(&configGetSource, "source", false, "Also print where the value comes from")
 	configMigrateCmd.Flags().BoolVar(&configMigrateDryRun, "dry-run", false, "Preview changes without writing files")
 	configMigrateCmd.Flags().BoolVar(&configMigrateGlobal, "global", false, "Migrate only the global settings file")
 }

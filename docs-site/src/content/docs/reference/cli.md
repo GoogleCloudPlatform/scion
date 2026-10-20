@@ -986,18 +986,26 @@ In a git repository, `scion clean` removes the repository's `.scion` but leaves 
 
 View and modify configuration settings.
 
-- `list`: List all effective settings.
-- `get <key>`: Get a specific configuration value.
+- `list`: List all effective settings and where each comes from.
+- `get <key>`: Get a specific configuration value (`--source` adds where it comes from).
 - `set <key> <value>`: Set a configuration value.
+- `unset <key>`: Remove a setting so it takes its value from the layer below.
 - `validate`: Validate settings files against the schema.
 - `migrate`: Migrate configuration to the latest versioned format.
 - `dir`: Print the path to the active configuration directory.
 
-`config get` supports the top-level settings keys (`active_profile`, `default_template`,
-`default_harness_config`, `workspace_path`, `image_registry`, `project_id`, `cli.autohelp`,
-`hub.enabled`, `hub.linked`, `hub.endpoint`, `hub.local_only`, `hub.brokerId`,
-`hub.brokerToken`, `hub.brokerNickname` — note that `hub.brokerToken` prints its value,
-as it always has), plus dotted paths into a named entry of the `profiles` or `runtimes`
+`config list` shows every key `config set` accepts, the hub transport settings
+(`hub.transport.mode`, `hub.transport.audience`) and each hub connection's endpoint
+(`hub_connections.<name>.endpoint`), with the effective value and its source: `default`
+(the embedded defaults), `global <file>`, `project <file>`, `env <VARIABLE>` or
+`project-id file <file>`. A setting with no value shows `<unset>`. `config get <key>`
+reads the same settings and gives the same value and source. The value of a
+credential-like key (for example `hub.brokerToken`) is masked in both. With
+`--format json`, `config list` prints an object keyed by setting
+(`{"<key>": {"value": "...", "source": "..."}}`) and `config get` prints
+`{"key": "...", "value": "...", "source": "..."}`.
+
+`config get` supports those keys (including `cli.mode`) plus dotted paths into a named entry of the `profiles` or `runtimes`
 maps: `profiles.<name>.<field>` and `runtimes.<name>.<field>`, where `<field>` is one of
 that entry's scalar settings named by its `settings.yaml` key (e.g.
 `profiles.local.runtime`, `runtimes.kubernetes.namespace`). Within a profiles/runtimes
@@ -1016,7 +1024,17 @@ would accept but never read, and leaves the file unchanged:
 `server.auth.display_name`, `server.auth.email` and `server.auth.username` at the
 project layer (they are read only from the global settings). The error names the key
 and does not include the value. After a successful write, the value of a
-credential-like key (for example `hub.brokerToken`) is shown masked.
+credential-like key (for example `hub.brokerToken`) is shown masked. `cli.mode`
+accepts `human` or `agent`.
+
+`config unset <key>` removes the key from the project's own settings, or from the
+global settings with `--global`, so the setting takes its value from the layers below
+instead of, for example, a boolean being written `false`. It accepts the keys
+`config set` accepts, under the same rules. A key that is not in the file changes
+nothing (a legacy-format file is then not migrated). A YAML file is edited in place,
+and a section left empty is removed with the key. An environment variable that sets
+the key still applies, and the command warns about it. `config unset` is available
+in human mode only, like `config set`.
 
 ### `scion cd-config`
 
