@@ -79,7 +79,7 @@ For `soft_delete_retention` and `soft_delete_retain_files`, `GET` returns that r
 
 - The top-level field shows the saved value, or else this Hub replica's settings-file value (`settings.yaml`, `SCION_SEED_IMAGEREGISTRY` and `SCION_SERVER_IMAGEREGISTRY`). It never shows an environment value such as `SCION_IMAGE_REGISTRY`. A save stores the field only when it differs from the value shown, so saving the page unchanged stores nothing. To pin the settings-file value, change it once.
 - Each profile's field shows only a value saved for that profile. A hint shows what the profile inherits and from where. Typing a value saves it.
-- `image_registry_provenance` in the `GET` response is read-only and tells you where the value in effect comes from: the Hub-wide source and value, every Runtime Broker that reports `SCION_IMAGE_REGISTRY` (which beats every saved or file value for that Runtime Broker's agents), and each profile's value. The page shows it as one badge on the field. Every value in the report has the credentials part of a registry reference (anything before an `@` in the host part, as in `user:password@registry.example.com`) replaced with `***`.
+- `image_registry_provenance` in the `GET` response is read-only and tells you where the value in effect comes from: the Hub-wide source and value, every Runtime Broker that reports `SCION_IMAGE_REGISTRY` (which beats every saved or file value for that Runtime Broker's agents), and each profile's value. The page shows it as one badge on the field. Every value in the report has its credentials part (everything up to the last `@` that is not part of a digest, after any scheme) replaced with `***`, as in `***@registry.example.com` for `user:password@registry.example.com`.
 
 #### Save report
 
@@ -167,8 +167,8 @@ The "Reset to bootstrap" feature requires a backend endpoint that is not yet ava
 
 ## Environment Variable Namespaces
 
-:::tip[Boolean Environments]
-Operational boolean settings configured via environment variables (such as `SCION_SEED_*` and `SCION_SERVER_*`) are processed using the standard `parseBoolEnv` logic. They support case-insensitive spellings for `yes`/`y`/`on` and `no`/`n`/`off`, and issue startup warnings on unrecognized non-empty inputs to help administrators catch configuration typos.
+:::tip[Boolean environment variables]
+A `SCION_SERVER_*` or `SCION_SEED_*` variable for a boolean setting takes `true`/`false`, `1`/`0` or `t`/`f`. A value that does not parse stops the server at startup with an error that names the variable (never the value); see [Environment Variables](/scion/reference/server-config/#environment-variables). Only the directly read variables under [Tracked Boolean Variables](/scion/reference/server-config/#tracked-boolean-variables) also accept `yes`/`y`/`on` and `no`/`n`/`off`.
 :::
 
 ### `SCION_SEED_*` (New)

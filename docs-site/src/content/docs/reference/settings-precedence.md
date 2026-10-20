@@ -503,8 +503,7 @@ For environment variables, **`user` beats `project`**. For secrets, **`project` 
 and `runtime_broker` is still highest for secrets.
 
 This is a **filed difference, not a documented design**. Nobody has established that the
-divergence is intentional, so this page does not present it as a second designed ladder. It is
-tracked as [issue #624](https://github.com/ptone/scion/issues/624).
+divergence is intentional, so this page does not present it as a second designed ladder.
 
 :::note[Related: two code comments state the secret order without `hub`]
 `pkg/secret/secret.go` and `pkg/hub/httpdispatcher.go` both describe the secret order as
@@ -1217,8 +1216,7 @@ equivalent to "set to the hub default value" gets this backwards.
 
 ### Where hub `agent_defaults` rank
 
-**`Changed in this release`** (this settles [issue #623](https://github.com/ptone/scion/issues/623)'s
-precedence question for job keys). Hub `agent_defaults` are a **low-priority fallback**: for every
+**`Changed in this release`** (this settles the precedence question for job keys). Hub `agent_defaults` are a **low-priority fallback**: for every
 job key they sit below the template and the project, and above only the broker's own
 `settings.yaml` defaults and the harness-config base (see [the job-key
 ladder](#the-job-key-ladder)). Before, a hub `default_model` or `default_thinking_level` was
@@ -1273,7 +1271,7 @@ restart. The Runtime Broker applies them on each start and does not save them in
 `scion-agent.json`. The same holds for the broker's own `settings.yaml` limit defaults. A limit
 the agent sets itself (from its template or its own config) still wins over both. A limit
 cleared on the hub falls back to the template's value, or to the current defaults when the
-template sets none. Tracked as [issue #623](https://github.com/ptone/scion/issues/623).
+template sets none.
 
 Agents created before this change keep the limits they have stored. Their saved values look
 the same as values set on the agent itself, so a changed default does not reach them.
@@ -1350,7 +1348,7 @@ go test ./pkg/hub -count=1 -timeout 60m   # slow (see below); -race needs far mo
 
 A whole-repo `go test ./...` passes on `main` given enough time: CI's Full Test Suite runs
 `go test -timeout 60m ./...`. With the default 10-minute timeout it fails in `pkg/hub`, whose
-SQLite-enabled run takes longer than that, so pass `-timeout 60m`.
+SQLite-enabled run takes longer than that (GoogleCloudPlatform/scion#2842), so pass `-timeout 60m`.
 
 ## See also
 

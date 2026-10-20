@@ -125,8 +125,8 @@ permission:
   is written.
 - A token that may use neither scope on the user gets the same `403` for every user ID,
   including one that does not exist.
-- Changing a user's role, and changing your own profile, still need a sign-in. No credential can change
-  your own status or activate an invited user.
+- Changing a user's role, and changing your own profile, still need a sign-in. No credential can
+  change your own status or activate an invited user.
 
 ### Scopes are restrictions, not grants
 
