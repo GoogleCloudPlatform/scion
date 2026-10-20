@@ -23,6 +23,7 @@ COPY pkg/ pkg/
 COPY cmd/ cmd/
 COPY web/ web/
 COPY harnesses/ harnesses/
+COPY internal/ internal/
 COPY proto/ proto/
 COPY resources/ resources/
 COPY third_party/ third_party/
