@@ -871,7 +871,7 @@ func (c *Client) RefreshToken(ctx context.Context) (string, time.Time, error) {
 	// the request that produced the response, and its Response field is set
 	// only when the client made that request on the hub's instruction to
 	// go elsewhere.
-	if resp.Request == nil || resp.Request.Response == nil {
+	if resp.Request != nil && resp.Request.Response == nil {
 		c.noteVerified(result.Token)
 	}
 

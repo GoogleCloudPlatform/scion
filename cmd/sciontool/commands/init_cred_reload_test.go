@@ -98,8 +98,10 @@ func newCredHub(t *testing.T, accept ...string) *credHub {
 			return
 		}
 		if isCheck && status >= 300 && status < 400 {
+			// The body is the agent record, so only the status decides.
 			w.Header().Set("Location", "/elsewhere")
 			w.WriteHeader(status)
+			_, _ = w.Write([]byte(`{"id":"agent-1"}`))
 			return
 		}
 		if isCheck && status != 0 {
@@ -791,5 +793,53 @@ func TestCredentialReload_SignalAdoptionDoesNotBlockLaterReissue(t *testing.T) {
 				t.Fatal("a later genuine reissue was not adopted")
 			}
 		})
+	}
+}
+
+// waitForAnchor waits (in real time, bounded) until the verified issue
+// time equals want.
+func (h *resetHarness) waitForAnchor(want time.Time) {
+	h.t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !h.client.VerifiedIssuedAt().Equal(want) {
+		if time.Now().After(deadline) {
+			h.t.Fatalf("verified issue time = %v, want %v", h.client.VerifiedIssuedAt(), want)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// The watcher's start-up check of the current credential, once accepted,
+// sets the verified issue time, so an older accepted value is then refused
+// from the file.
+func TestCredentialReload_StartupCheckSetsVerifiedIssuedAt(t *testing.T) {
+	h := newResetHarness(t)
+	h.hub.set(func(c *credHub) { c.accepted[h.oldTok] = true })
+	_, _ = h.startWatch()
+	h.waitForAnchor(h.now.Add(-time.Hour))
+	older := testCredential(t, "older", h.now.Add(-2*time.Hour))
+	h.hub.set(func(c *credHub) { c.accepted[older] = true })
+	h.write(older)
+	h.r.reset(authResetFileChange)
+	if !h.usingCredential(h.oldTok) {
+		t.Fatal("an older credential was adopted after the start-up check")
+	}
+}
+
+// The check after a signal adoption, once accepted, sets the verified
+// issue time to the adopted credential's, so an older accepted value is
+// then refused from the file.
+func TestCredentialReload_SignalCheckSetsVerifiedIssuedAt(t *testing.T) {
+	h := newResetHarness(t)
+	h.hub.set(func(c *credHub) { c.accepted[h.oldTok] = true })
+	h.write(h.newTok)
+	h.r.reset(authResetSignal)
+	if got := h.client.VerifiedIssuedAt(); !got.Equal(h.now) {
+		t.Fatalf("verified issue time = %v, want %v", got, h.now)
+	}
+	h.write(h.oldTok)
+	h.r.reset(authResetFileChange)
+	if !h.usingCredential(h.newTok) {
+		t.Fatal("an older credential was adopted after the signal check")
 	}
 }

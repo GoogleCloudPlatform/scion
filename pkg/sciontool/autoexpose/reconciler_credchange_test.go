@@ -19,7 +19,6 @@ import (
 	"errors"
 	"net/http"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -129,10 +128,9 @@ func TestRun_UnauthorizedWakesOnLaterCredentialChange(t *testing.T) {
 }
 
 // A credential change does not cut a backoff for a failure other than 401:
-// the next pass starts only after the test fires the backoff timer.
+// the loop must take the (unbuffered) backoff timer before its next pass,
+// so a loop woken by the change starts the next pass first and is caught.
 func TestRun_CredentialChangeDoesNotCutOtherBackoff(t *testing.T) {
-	var fired atomic.Bool
-	firedAtNextPass := make(chan bool, 1)
 	var c *notifyingHubClient
 	c = newNotifyingClient(func(int) ([]scionhub.ExposedPort, error) {
 		c.creds.SetToken("new-credential")
@@ -140,8 +138,9 @@ func TestRun_CredentialChangeDoesNotCutOtherBackoff(t *testing.T) {
 	})
 	c.stopAt = -1 // never block in ListPorts
 	r := newLoopReconciler(c)
-	timer := make(chan time.Time, 1)
+	timer := make(chan time.Time)
 	waiting := make(chan struct{})
+	nextPass := make(chan struct{})
 	waits := 0
 	r.after = func(time.Duration) <-chan time.Time {
 		waits++
@@ -150,7 +149,7 @@ func TestRun_CredentialChangeDoesNotCutOtherBackoff(t *testing.T) {
 			close(waiting)
 			return timer
 		case 2:
-			firedAtNextPass <- fired.Load()
+			close(nextPass)
 		}
 		return nil
 	}
@@ -159,13 +158,15 @@ func TestRun_CredentialChangeDoesNotCutOtherBackoff(t *testing.T) {
 	done := make(chan struct{})
 	go func() { r.Run(ctx); close(done) }()
 	<-waiting
-	fired.Store(true)
-	timer <- time.Time{}
 	select {
-	case ok := <-firedAtNextPass:
-		if !ok {
-			t.Fatal("a credential change cut a non-401 backoff")
-		}
+	case timer <- time.Time{}:
+	case <-nextPass:
+		t.Fatal("a credential change cut a non-401 backoff")
+	case <-time.After(10 * time.Second):
+		t.Fatal("the loop neither took the backoff timer nor ran another pass")
+	}
+	select {
+	case <-nextPass:
 	case <-time.After(10 * time.Second):
 		t.Fatal("no next pass after the backoff timer fired")
 	}

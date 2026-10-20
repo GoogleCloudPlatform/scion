@@ -448,8 +448,10 @@ func newAcceptHub(t *testing.T) *acceptHub {
 		}
 		switch {
 		case h.status >= 300 && h.status < 400:
+			// The body is the agent record, so only the status decides.
 			w.Header().Set("Location", h.location)
 			w.WriteHeader(h.status)
+			_, _ = w.Write([]byte(`{"id":"agent-1"}`))
 		case h.status != 0:
 			w.WriteHeader(h.status)
 		case r.Header.Get("X-Scion-Agent-Token") != h.accept:
@@ -714,5 +716,31 @@ func TestTokenFileWatcher_RecheckAgent(t *testing.T) {
 	h.checkChange()
 	if !h.notified() {
 		t.Fatal("the current value was not reported after RecheckAgent")
+	}
+}
+
+// CheckCurrentCredentialAccepted raises the verified issue time only for
+// the in-memory credential.
+func TestCheckCurrentCredentialAccepted(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	current := agentCredential(t, "HS256", validClaims(now, "current"), 32)
+	other := agentCredential(t, "HS256", validClaims(now.Add(time.Hour), "other"), 32)
+	h := newAcceptHub(t)
+	c := NewClientWithConfig(h.srv.URL, current, "agent-1")
+	h.accept = other
+	if err := c.CheckCurrentCredentialAccepted(context.Background(), other); err != nil {
+		t.Fatal(err)
+	}
+	if !c.VerifiedIssuedAt().IsZero() {
+		t.Fatal("a credential that is not current moved the verified issue time")
+	}
+	h.mu.Lock()
+	h.accept = current
+	h.mu.Unlock()
+	if err := c.CheckCurrentCredentialAccepted(context.Background(), current); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.VerifiedIssuedAt(); !got.Equal(now) {
+		t.Fatalf("verified issue time = %v, want %v", got, now)
 	}
 }

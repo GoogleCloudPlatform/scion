@@ -2012,7 +2012,7 @@ func startCredentialFileWatch(ctx context.Context, hubClient *hub.Client, cfg hu
 	go func() {
 		checkCtx, cancel := context.WithTimeout(ctx, credentialCheckTimeout)
 		defer cancel()
-		_ = hubClient.CheckCredentialAccepted(checkCtx, current)
+		_ = hubClient.CheckCurrentCredentialAccepted(checkCtx, current)
 	}()
 	log.Info("Watching the credential file for changes (every %s)", hub.DefaultTokenWatchInterval)
 	return w
@@ -2080,6 +2080,7 @@ func (r *authResetter) reset(source authResetSource) {
 	if err != nil {
 		// err is a fixed hub.ErrCandidate* value; it never quotes the file.
 		log.Error("AUTH_RESET: Not adopting the credential file (%s): %v", source, err)
+		r.uncheckedFP, r.uncheckedAttempts, r.uncheckedLogged = hub.Fingerprint{}, 0, false
 		if r.watcher != nil {
 			r.watcher.Refused(fp)
 		}
@@ -2163,7 +2164,7 @@ func (r *authResetter) reset(source authResetSource) {
 	// it now, so that once the hub accepts it, a later credential file
 	// value is compared against its issue time.
 	if source == authResetSignal {
-		if err := r.checkWithHub(newToken); err != nil {
+		if err := r.checkCurrentWithHub(newToken); err != nil {
 			log.Info("AUTH_RESET: Adopted credential %s not confirmed by the hub yet: %v", info.LogID(), err)
 		}
 	}
@@ -2178,6 +2179,18 @@ func (r *authResetter) checkWithHub(token string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	return r.hubClient.CheckCredentialAccepted(ctx, token)
+}
+
+// checkCurrentWithHub is checkWithHub for the credential just adopted: an
+// accepted answer counts only if it is still the in-memory credential.
+func (r *authResetter) checkCurrentWithHub(token string) error {
+	timeout := r.checkTimeout
+	if timeout <= 0 {
+		timeout = credentialCheckTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return r.hubClient.CheckCurrentCredentialAccepted(ctx, token)
 }
 
 // recheckLater keeps the current credential after the hub could not be

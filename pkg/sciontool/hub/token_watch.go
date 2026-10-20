@@ -243,6 +243,31 @@ func (c *Client) directClient() *http.Client {
 // the credential's. Neither the credential nor the response body appears
 // in an error.
 func (c *Client) CheckCredentialAccepted(ctx context.Context, token string) error {
+	if err := c.checkCredential(ctx, token); err != nil {
+		return err
+	}
+	c.noteVerified(token)
+	return nil
+}
+
+// CheckCurrentCredentialAccepted is CheckCredentialAccepted for the
+// client's own credential: the verified issue time is raised only if token
+// is still the in-memory credential when the hub's answer arrives.
+func (c *Client) CheckCurrentCredentialAccepted(ctx context.Context, token string) error {
+	if err := c.checkCredential(ctx, token); err != nil {
+		return err
+	}
+	iat := InspectToken(token).IssuedAt
+	c.tokenMu.Lock()
+	defer c.tokenMu.Unlock()
+	if c.token == token && iat.After(c.verifiedIAT) {
+		c.verifiedIAT = iat
+	}
+	return nil
+}
+
+// checkCredential is CheckCredentialAccepted without recording the result.
+func (c *Client) checkCredential(ctx context.Context, token string) error {
 	if c == nil || c.hubURL == "" || c.agentID == "" || token == "" {
 		return ErrCandidateUnchecked
 	}
@@ -273,7 +298,6 @@ func (c *Client) CheckCredentialAccepted(ctx context.Context, token string) erro
 	if err := json.Unmarshal(body, &record); err != nil || record.ID != c.agentID {
 		return ErrCandidateUnchecked
 	}
-	c.noteVerified(token)
 	return nil
 }
 
