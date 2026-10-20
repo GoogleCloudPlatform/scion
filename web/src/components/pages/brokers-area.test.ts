@@ -84,12 +84,14 @@ describe('scion-page-brokers-area', () => {
         if (summaryStatus !== 200) {
           return jsonResponse({ error: { code: 'forbidden', message: 'no' } }, summaryStatus);
         }
-        return jsonResponse(
-          healthSummary([
-            { id: FLAT_K8S.id },
-            { id: FLAT_DOCKER.id, checks: { runtime: 'unavailable' } },
-          ])
-        );
+        const summary = healthSummary([
+          { id: FLAT_K8S.id },
+          { id: FLAT_DOCKER.id, checks: { runtime: 'unavailable' } },
+          { id: LEGACY.id },
+        ]);
+        // The legacy broker reports itself unhealthy with every check passing.
+        summary.runtime_brokers.items[2].health.status = 'unhealthy';
+        return jsonResponse(summary);
       }
       return jsonResponse({}, 404);
     });
@@ -159,6 +161,14 @@ describe('scion-page-brokers-area', () => {
     expect(row(root, FLAT_DOCKER.id)?.querySelector('.health-warn')?.textContent?.trim()).toBe(
       '1'
     );
+  });
+
+  it('a status-only problem (unhealthy, no failing check) is a warning, never ok', async () => {
+    vi.mocked(loadAdminStatus).mockResolvedValue(adminStatus(true));
+    const root = await mount();
+    const cell = row(root, LEGACY.id)?.querySelector('.health-warn');
+    expect(cell?.textContent?.trim()).toBe('unhealthy');
+    expect(row(root, LEGACY.id)?.querySelector('.health-ok')).toBeNull();
   });
 
   it('a 403 from the summary hides the Health column', async () => {

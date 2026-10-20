@@ -212,7 +212,8 @@ export class ScionBrokerAreaConfigure extends LitElement {
       }
       const fresh = await apiFetch(`/api/v1/runtime-brokers/${this.broker.id}`);
       if (!fresh.ok) {
-        throw new Error(await extractApiError(fresh, 'Saved; reload the page to see the change'));
+        const cause = await extractApiError(fresh, `HTTP ${fresh.status}`);
+        throw new Error(`Saved. Refreshing the broker failed (${cause}); reload the page.`);
       }
       const updated = (await fresh.json()) as RuntimeBroker;
       this.formBrokerId = '';
