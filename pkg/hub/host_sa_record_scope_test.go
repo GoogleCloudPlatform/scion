@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"sync"
 	"testing"
@@ -251,4 +252,72 @@ func TestTranslatedHostSARecord_ExplicitAssignFromOtherProject_NonAdminDenied(t 
 	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
 	_, err := s.GetAgentBySlug(context.Background(), project.ID, "hsr-assign-agent")
 	assert.ErrorIs(t, err, store.ErrNotFound)
+}
+
+// hsrCreateRaceStore simulates a concurrent create: while armed, its first
+// CreateGCPServiceAccount stores racer instead and reports ErrAlreadyExists.
+type hsrCreateRaceStore struct {
+	store.Store
+	fault *storeFaultSwitch
+	mu    sync.Mutex
+	racer *store.GCPServiceAccount
+}
+
+func (r *hsrCreateRaceStore) CreateGCPServiceAccount(ctx context.Context, sa *store.GCPServiceAccount) error {
+	r.mu.Lock()
+	racer := r.racer
+	if r.fault.Active() && racer != nil {
+		r.racer = nil
+	} else {
+		racer = nil
+	}
+	r.mu.Unlock()
+	if racer == nil {
+		return r.Store.CreateGCPServiceAccount(ctx, sa)
+	}
+	if err := r.Store.CreateGCPServiceAccount(ctx, racer); err != nil {
+		return err
+	}
+	return fmt.Errorf("create gcp service account: %w", store.ErrAlreadyExists)
+}
+
+func hsrRaceServer(t *testing.T) (*Server, store.Store, *hsrCreateRaceStore) {
+	t.Helper()
+	srv, s, race, fault := testServerWithStoreFault(t, func(inner store.Store, fault *storeFaultSwitch) *hsrCreateRaceStore {
+		return &hsrCreateRaceStore{Store: inner, fault: fault}
+	})
+	srv.SetGCPTokenGenerator(&probeCountingGenerator{mockGCPTokenGenerator: mockGCPTokenGenerator{email: "hub@test.iam.gserviceaccount.com"}})
+	fault.Arm()
+	return srv, s, race
+}
+
+func TestEnsureHostSARecord_CreateRace_ReusesOwnRecord(t *testing.T) {
+	srv, _, race := hsrRaceServer(t)
+	b := hsrBroker("hsr-race-own")
+	race.racer = &store.GCPServiceAccount{
+		ID: tid("hsr-race-own-sa"), Scope: store.ScopeHub, ScopeID: b.ID, Email: hsrEmail, ProjectID: "hsr-project",
+		Verified: true, VerificationStatus: store.GCPVerificationVerified,
+		CreatedBy: hostSATranslationCreator, CreatedAt: time.Now(),
+	}
+
+	got, err := srv.ensureHostSARecord(context.Background(), b)
+
+	require.NoError(t, err)
+	assert.Equal(t, tid("hsr-race-own-sa"), got.ID, "the concurrently created record for this broker is reused")
+}
+
+func TestEnsureHostSARecord_CreateRace_ForeignRecordRefused(t *testing.T) {
+	srv, _, race := hsrRaceServer(t)
+	b := hsrBroker("hsr-race-foreign")
+	race.racer = &store.GCPServiceAccount{
+		ID: tid("hsr-race-foreign-sa"), Scope: store.ScopeHub, ScopeID: b.ID, Email: hsrEmail, ProjectID: "hsr-project",
+		Verified: true, VerificationStatus: store.GCPVerificationVerified,
+		CreatedBy: tid("some-admin"), CreatedAt: time.Now(),
+	}
+
+	got, err := srv.ensureHostSARecord(context.Background(), b)
+
+	require.Error(t, err, "a record with other provenance is never returned")
+	assert.Nil(t, got)
+	assert.ErrorIs(t, err, store.ErrAlreadyExists)
 }
