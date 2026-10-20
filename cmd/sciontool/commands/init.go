@@ -1391,8 +1391,31 @@ func RunInit(args []string, opts InitRunOptions) int {
 		go watchLimitsTriggerFile(triggerCtx, triggerChan)
 	}
 
-	// Wait for child to exit, duration limit, SIGUSR1, SIGUSR2, or trigger file.
-	// The loop allows SIGUSR2 (auth reset) to be handled without terminating.
+	// Reset path shared by SIGUSR2 and the credential file watcher. Both
+	// run it on this goroutine (the wait loop below), one at a time.
+	authReset := &authResetter{
+		hubClient:          hubClient,
+		tokenRefreshCancel: &tokenRefreshCancel,
+		tokenRefreshDone:   &tokenRefreshDone,
+		statusHandler:      statusHandler,
+		targetUID:          targetUID,
+		targetGID:          targetGID,
+		now:                time.Now,
+	}
+
+	// Watch the credential file, so a credential written there is adopted
+	// even when the reset signal does not arrive (for example, the writer
+	// may not be allowed to signal PID 1).
+	credFileChan := make(chan struct{}, 1)
+	credWatchCtx, credWatchCancel := context.WithCancel(context.Background())
+	defer credWatchCancel()
+	if hubClient != nil && hubClient.IsConfigured() {
+		authReset.watcher = startCredentialFileWatch(credWatchCtx, hubClient, hub.TokenWatchConfig{Notify: credFileChan})
+	}
+
+	// Wait for child to exit, duration limit, SIGUSR1, SIGUSR2, credential
+	// file change, or trigger file. The loop allows SIGUSR2 and credential
+	// file changes (auth reset) to be handled without terminating.
 	var result struct {
 		code int
 		err  error
@@ -1422,8 +1445,12 @@ waitLoop:
 			break waitLoop
 		case <-usr2Chan:
 			// SIGUSR2: auth reset — re-read token file and restart refresh loop.
-			handleAuthReset(hubClient, &tokenRefreshCancel, &tokenRefreshDone, statusHandler, targetUID, targetGID)
+			handleAuthEvent(authReset, authResetSignal)
 			// Continue waiting — this is non-terminal.
+		case <-credFileChan:
+			// The credential file changed: adopt a valid new credential
+			// through the same reset path. Non-terminal.
+			handleAuthEvent(authReset, authResetFileChange)
 		case <-triggerChan:
 			// Trigger file detected from hook handler - limits already set in agent-info.json
 			limitsExceeded = true
@@ -1909,74 +1936,147 @@ func reportHookLimitsExceeded(hubHandler *handlers.HubHandler, triggerPath strin
 	}
 }
 
-// handleAuthReset re-reads the token file, updates the hub client, and
-// restarts the token refresh loop. Called when SIGUSR2 is received from the
-// broker's reset-auth handler.
-func handleAuthReset(hubClient *hub.Client, tokenRefreshCancel *context.CancelFunc, tokenRefreshDone *<-chan struct{}, statusHandler *handlers.StatusHandler, targetUID, targetGID int) {
-	log.TaggedInfo("AUTH_RESET", "Received SIGUSR2: auth reset requested")
+// authResetSource is what triggered an auth reset.
+type authResetSource int
 
+const (
+	// authResetSignal is SIGUSR2 from the reset-auth writer.
+	authResetSignal authResetSource = iota
+	// authResetFileChange is the credential file watcher.
+	authResetFileChange
+)
+
+func (s authResetSource) String() string {
+	if s == authResetFileChange {
+		return "credential file change"
+	}
+	return "reset signal"
+}
+
+// authResetter holds the state an auth reset replaces: the shared hub
+// client's credential and the token refresh loop.
+type authResetter struct {
+	hubClient          *hub.Client
+	tokenRefreshCancel *context.CancelFunc
+	tokenRefreshDone   *<-chan struct{}
+	statusHandler      *handlers.StatusHandler
+	targetUID          int
+	targetGID          int
+	// watcher is told about refused credentials; nil when not watching.
+	watcher *hub.TokenFileWatcher
+	now     func() time.Time
+}
+
+// startCredentialFileWatch starts a watcher on the credential and transport
+// token files that notifies cfg.Notify on a change, until ctx ends. It
+// records the transport token file's current content as known first, so
+// only a later write by another process counts as a transport change.
+func startCredentialFileWatch(ctx context.Context, hubClient *hub.Client, cfg hub.TokenWatchConfig) *hub.TokenFileWatcher {
+	hubClient.NoteTransportTokenFile()
+	w := hub.NewTokenFileWatcher(cfg)
+	w.Run(ctx)
+	log.Info("Watching the credential file for changes (every %s)", hub.DefaultTokenWatchInterval)
+	return w
+}
+
+// handleAuthEvent runs the auth reset path for source. The wait loop calls
+// it for both SIGUSR2 and credential file changes, on one goroutine, so
+// two resets never run at once.
+func handleAuthEvent(r *authResetter, source authResetSource) {
+	r.reset(source)
+}
+
+// reset re-reads the credential file and, if it holds a credential this
+// agent can adopt, puts it in the shared hub client and restarts the token
+// refresh loop. The file is validated before anything is stopped or
+// replaced, so a refused file leaves the working credential and the
+// refresh loop untouched. For a file change, a credential equal to the
+// current one is a silent no-op (this process writes the file after each
+// refresh), and one issued before the current one is refused. The signal
+// path always resets, as an operator may use it to restart the refresh
+// loop. Credential values are never logged; log lines name a credential by
+// its jti or a short fingerprint.
+func (r *authResetter) reset(source authResetSource) {
+	if source == authResetSignal {
+		log.TaggedInfo("AUTH_RESET", "Auth reset requested (%s, SIGUSR2)", source)
+	}
+
+	hubClient := r.hubClient
 	if hubClient == nil {
-		log.Error("AUTH_RESET: Hub client is not configured, cannot reset auth")
+		if source == authResetSignal {
+			log.Error("AUTH_RESET: Hub client is not configured, cannot reset auth")
+		}
 		return
 	}
 
 	newToken := hub.ReadTokenFile()
-	if newToken == "" {
-		log.Error("AUTH_RESET: Token file is empty after SIGUSR2, cannot reset auth")
-		return
+	info, err := hub.ValidateCandidateToken(newToken, hubClient.AgentID(), r.now())
+	if source == authResetFileChange {
+		current := hubClient.CredentialInfo()
+		if newToken != "" && hub.TokenFingerprint(newToken) == current.Fingerprint {
+			// The agent credential is the one in use; only the transport
+			// token file may have changed.
+			r.adoptTransportIfChanged(source)
+			return
+		}
+		if err == nil && !current.IssuedAt.IsZero() && info.IssuedAt.Before(current.IssuedAt) {
+			err = hub.ErrCandidateOlder
+		}
 	}
-
-	tokenExpiry, err := hub.ParseTokenExpiry(newToken)
 	if err != nil {
-		log.Error("AUTH_RESET: Cannot parse new token expiry: %v", err)
+		// err is a fixed hub.ErrCandidate* value; it never quotes the file.
+		log.Error("AUTH_RESET: Not adopting the credential file (%s): %v", source, err)
+		if r.watcher != nil {
+			r.watcher.Refused(hub.TokenFingerprint(newToken))
+		}
+		if source == authResetFileChange {
+			r.adoptTransportIfChanged(source)
+		}
 		return
 	}
+	log.TaggedInfo("AUTH_RESET", "Adopting credential %s (%s)", info.LogID(), source)
 
 	// Cancel the existing token refresh loop if running.
-	if *tokenRefreshCancel != nil {
-		(*tokenRefreshCancel)()
-		if *tokenRefreshDone != nil {
-			<-*tokenRefreshDone
+	if *r.tokenRefreshCancel != nil {
+		(*r.tokenRefreshCancel)()
+		if *r.tokenRefreshDone != nil {
+			<-*r.tokenRefreshDone
 		}
 	}
 
-	// Update the hub client's in-memory token.
-	if hubClient != nil {
-		hubClient.SetToken(newToken)
-	}
+	// Update the hub client's in-memory token. This also wakes every loop
+	// that is waiting after the hub refused the previous credential.
+	hubClient.SetToken(newToken)
 
 	// Reset-auth may also have written a fresh transport token. Adopt it so
 	// this process uses it immediately and the file is owned by the scion
 	// user for every other hub client in the container.
-	if adopted, err := hubClient.AdoptTransportTokenFile(targetUID, targetGID); err != nil {
+	if adopted, err := hubClient.AdoptTransportTokenFile(r.targetUID, r.targetGID); err != nil {
 		log.Error("AUTH_RESET: Failed to adopt transport token file: %v", err)
 	} else if adopted {
 		log.TaggedInfo("AUTH_RESET", "Transport token reloaded")
 	}
 
 	// Clear any AUTH_LOST message from agent-info.json.
-	_ = statusHandler.SetMessage("")
+	_ = r.statusHandler.SetMessage("")
 
-	// Schedule refresh 2 hours before the new token's expiry.
+	// Schedule refresh 2 hours before the new token's expiry; the expiry is
+	// after now (validated above), so a short-lived token refreshes in a
+	// minute.
+	tokenExpiry := info.Expiry
 	refreshAt := tokenExpiry.Add(-2 * time.Hour)
-	if refreshAt.Before(time.Now()) {
-		if time.Now().Before(tokenExpiry) {
-			refreshAt = time.Now().Add(1 * time.Minute)
-		} else {
-			log.Error("AUTH_RESET: New token is already expired at %s", tokenExpiry.Format(time.RFC3339))
-			return
-		}
+	if refreshAt.Before(r.now()) {
+		refreshAt = r.now().Add(1 * time.Minute)
 	}
 
 	// Start a new token refresh loop.
-	var tokenRefreshCtx context.Context
-	var cancel context.CancelFunc
-	tokenRefreshCtx, cancel = context.WithCancel(context.Background())
-	*tokenRefreshCancel = cancel
-	*tokenRefreshDone = hubClient.StartTokenRefresh(tokenRefreshCtx, &hub.TokenRefreshConfig{
+	tokenRefreshCtx, cancel := context.WithCancel(context.Background())
+	*r.tokenRefreshCancel = cancel
+	statusHandler := r.statusHandler
+	*r.tokenRefreshDone = hubClient.StartTokenRefresh(tokenRefreshCtx, &hub.TokenRefreshConfig{
 		RefreshAt: refreshAt,
-		ChownUID:  targetUID,
-		ChownGID:  targetGID,
+		ChownUID:  r.targetUID,
+		ChownGID:  r.targetGID,
 		OnRefreshed: func(newExpiry time.Time) {
 			log.Info("Token refreshed successfully, new expiry: %s", newExpiry.Format(time.RFC3339))
 		},
@@ -1994,7 +2094,7 @@ func handleAuthReset(hubClient *hub.Client, tokenRefreshCancel *context.CancelFu
 		tokenExpiry.Format(time.RFC3339), refreshAt.Format(time.RFC3339))
 
 	// Send an immediate heartbeat with the new token.
-	if hubClient != nil && hubClient.IsConfigured() {
+	if hubClient.IsConfigured() {
 		hubCtx, hubCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		if err := hubClient.Heartbeat(hubCtx); err != nil {
 			log.Error("AUTH_RESET: Post-reset heartbeat failed: %v", err)
@@ -2002,6 +2102,20 @@ func handleAuthReset(hubClient *hub.Client, tokenRefreshCancel *context.CancelFu
 			log.Info("AUTH_RESET: Post-reset heartbeat sent successfully")
 		}
 		hubCancel()
+	}
+}
+
+// adoptTransportIfChanged adopts the transport token file when another
+// process wrote a new value there (reset-auth writes it after the agent
+// credential, so it can land after the agent credential was adopted).
+func (r *authResetter) adoptTransportIfChanged(source authResetSource) {
+	if !r.hubClient.TransportTokenFileChanged() {
+		return
+	}
+	if adopted, err := r.hubClient.AdoptTransportTokenFile(r.targetUID, r.targetGID); err != nil {
+		log.Error("AUTH_RESET: Failed to adopt transport token file (%s): %v", source, err)
+	} else if adopted {
+		log.TaggedInfo("AUTH_RESET", "Transport token reloaded (%s)", source)
 	}
 }
 

@@ -62,6 +62,9 @@ type Manager struct {
 	// that fires after d (time.After). Both are overridable in tests.
 	connect func(ctx context.Context) (connected bool, err error)
 	after   func(d time.Duration) <-chan time.Time
+	// credChanged returns a channel closed when the agent credential
+	// changes (Client.CredentialChanged); overridable in tests.
+	credChanged func() <-chan struct{}
 }
 
 func NewManager(client *scionhub.Client) *Manager {
@@ -78,6 +81,7 @@ func NewManager(client *scionhub.Client) *Manager {
 		after: time.After,
 	}
 	m.connect = m.runOnce
+	m.credChanged = client.CredentialChanged
 	return m
 }
 
@@ -88,7 +92,8 @@ func NewManager(client *scionhub.Client) *Manager {
 // maxReconnectDelay. A 401 on the upgrade request moves straight to
 // maxReconnectDelay: the agent token can be replaced in place while the
 // container runs (by the token refresh loop or a reset-auth), so the tunnel
-// keeps retrying slowly rather than stopping.
+// keeps retrying slowly rather than stopping, and reconnects at once when
+// the credential changes.
 func (m *Manager) Run(ctx context.Context) {
 	if m == nil || m.client == nil || !m.client.IsConfigured() {
 		return
@@ -99,6 +104,13 @@ func (m *Manager) Run(ctx context.Context) {
 func (m *Manager) run(ctx context.Context) {
 	state := tunnelHealthy
 	for {
+		// Take the change channel before connecting, so a credential that
+		// changes while a refused connect is in flight still wakes the
+		// wait below.
+		var changed <-chan struct{}
+		if m.credChanged != nil {
+			changed = m.credChanged()
+		}
 		connected, err := m.connect(ctx)
 		if ctx.Err() != nil {
 			log.Info("Port-forward tunnel disconnected: context cancelled")
@@ -127,10 +139,18 @@ func (m *Manager) run(ctx context.Context) {
 			}
 			state = tunnelBackoff
 		}
+		// Only a refused credential waits on a credential change; other
+		// failures keep their backoff.
+		var wake <-chan struct{}
+		if state == tunnelUnauthorized {
+			wake = changed
+		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-m.after(delay):
+		case <-wake:
+			log.Info("Port-forward tunnel: agent credential changed; reconnecting")
 		}
 	}
 }

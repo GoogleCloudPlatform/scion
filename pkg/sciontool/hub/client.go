@@ -215,6 +215,17 @@ type Client struct {
 	// onKickWait, when set, is called by KickTokenRefreshWait once it has
 	// subscribed and kicked (test hook).
 	onKickWait func()
+	// credChanged is closed, and replaced by a fresh channel, each time the
+	// in-memory agent credential changes (see CredentialChanged). Guarded
+	// by tokenMu; created on first use.
+	credChanged chan struct{}
+	// transportFP is the fingerprint of the last transport token value this
+	// client wrote to, or adopted from, the transport token file, so a
+	// value written there by another process can be told apart from one
+	// written here. transportFPSet reports whether it has been recorded.
+	// Guarded by tokenMu.
+	transportFP    [32]byte
+	transportFPSet bool
 }
 
 // NewClient creates a new Hub client from environment variables.
@@ -847,7 +858,7 @@ func (c *Client) RefreshToken(ctx context.Context) (string, time.Time, error) {
 
 	// Update the client's token under write lock
 	c.tokenMu.Lock()
-	c.token = result.Token
+	c.setTokenLocked(result.Token)
 	chownUID, chownGID := c.tokenChownUID, c.tokenChownGID
 	c.tokenMu.Unlock()
 	c.writes.reset()
@@ -898,6 +909,8 @@ func (c *Client) applyRefreshTokens(tokens []RefreshTokenEntry, uid, gid int) {
 			}
 			if err := WriteTransportTokenFile(entry.Value, uid, gid); err != nil {
 				log.Error("Failed to persist refreshed transport token: %v", err)
+			} else {
+				c.noteTransportFile(entry.Value)
 			}
 			// app/scion_access is already handled via the legacy token field above
 		}
@@ -1327,9 +1340,38 @@ func (c *Client) GetToken() string {
 // auth reset to inject a freshly-issued token without restarting the client.
 func (c *Client) SetToken(token string) {
 	c.tokenMu.Lock()
-	c.token = token
+	c.setTokenLocked(token)
 	c.tokenMu.Unlock()
 	c.writes.reset()
+}
+
+// setTokenLocked stores token as the in-memory credential and wakes every
+// CredentialChanged waiter. It is the one place the in-memory credential
+// changes. The caller holds tokenMu for writing.
+func (c *Client) setTokenLocked(token string) {
+	c.token = token
+	if c.credChanged != nil {
+		close(c.credChanged)
+	}
+	c.credChanged = make(chan struct{})
+}
+
+// CredentialChanged returns a channel that is closed the next time the
+// in-memory agent credential changes (SetToken, or a successful refresh).
+// A loop that backs off after the hub refuses the credential takes the
+// channel before its request and also waits on it, so it retries at once
+// with a new credential instead of waiting out its backoff. Take a fresh
+// channel for each wait: a closed channel stays closed.
+func (c *Client) CredentialChanged() <-chan struct{} {
+	if c == nil {
+		return nil
+	}
+	c.tokenMu.Lock()
+	defer c.tokenMu.Unlock()
+	if c.credChanged == nil {
+		c.credChanged = make(chan struct{})
+	}
+	return c.credChanged
 }
 
 // Environment variable and file path constants for GitHub App token refresh.
@@ -1931,6 +1973,7 @@ func (c *Client) AdoptTransportTokenFile(uid, gid int) (bool, error) {
 	if err := WriteTransportTokenFile(tok, uid, gid); err != nil {
 		return false, err
 	}
+	c.noteTransportFile(tok)
 	c.oidcSource.SetToken(tok, expiry)
 	// Record the reset so doctor does not keep showing an earlier failed
 	// refresh next to the freshly installed credential.
@@ -1967,7 +2010,9 @@ func (c *Client) restoreTransportTokenFile(uid, gid int) {
 	}
 	if err := WriteTransportTokenFile(cur, uid, gid); err != nil {
 		log.Error("Failed to restore transport token file: %v", err)
+		return
 	}
+	c.noteTransportFile(cur)
 }
 
 // RemoveTransportTokenFile removes the transport token file and its refresh
