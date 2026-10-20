@@ -84,9 +84,9 @@ check() {
       { for (i = 1; i <= n; i++) if (p[i] != "" && index($0, p[i]) == 1) next; print }')
 
   local required=() d
-  for d in $(grep / <<<"$gofiles" | cut -d/ -f1 | sort -u); do
+  while IFS= read -r d; do
     [[ " ${excluded[*]} " == *" $d "* ]] || required+=("$d")
-  done
+  done < <(grep / <<<"$gofiles" | cut -d/ -f1 | sort -u)
   if [[ ${#required[@]} -eq 0 ]]; then
     echo "$NAME: found no Go directories of the root module under $root" >&2
     return 2
@@ -101,22 +101,22 @@ check() {
       (cd "$root" && xargs grep -lE "\"$MODULE/$d(/[^\"]*)?\"" 2>/dev/null))
     if [[ -n "$hits" ]]; then
       echo "EXCLUDED BUT IMPORTED: $d/ is in EXCLUDED_DIRS but imported by:"
-      sed 's/^/  /' <<<"$hits"
+      while IFS= read -r line; do echo "  $line"; done <<<"$hits"
       bad=1
     fi
   done
 
   # Dockerfiles that compile the root module.
   local dockerfiles=()
-  for f in $(grep -E '(^|/)Dockerfile[^/]*$' <<<"$files"); do
+  while IFS= read -r f; do
     grep -qE '\bgo build\b' "$root/$f" || continue
     if [[ "$f" == extras/* ]]; then
       local mod=${f#extras/}; mod="extras/${mod%%/*}"
-      grep -qE "^replace[[:space:]]+$MODULE[[:space:]]+=>[[:space:]]+\.\./\.\./?[[:space:]]*$" \
+      grep -qE "^replace[[:space:]]+${MODULE}[[:space:]]+=>[[:space:]]+\.\./\.\./?[[:space:]]*$" \
         "$root/$mod/go.mod" 2>/dev/null || continue
     fi
     dockerfiles+=("$f")
-  done
+  done < <(grep -E '(^|/)Dockerfile[^/]*$' <<<"$files")
   if [[ ${#dockerfiles[@]} -eq 0 ]]; then
     echo "$NAME: found no Dockerfile that builds the root module under $root" >&2
     return 2
@@ -143,7 +143,7 @@ check() {
     done
   done
 
-  for f in $(grep -E '^(\.dockerignore|\.gcloudignore|image-build/gcloudignore-[^/]+)$' <<<"$files"); do
+  while IFS= read -r f; do
     for d in "${required[@]}"; do
       local hit
       hit=$(grep -nE "^/?$d(/|/\*\*)?[[:space:]]*$" "$root/$f")
@@ -152,7 +152,7 @@ check() {
         bad=1
       fi
     done
-  done
+  done < <(grep -E '^(\.dockerignore|\.gcloudignore|image-build/gcloudignore-[^/]+)$' <<<"$files")
 
   if [[ $bad -eq 0 ]]; then
     echo "$NAME: ok (${#dockerfiles[@]} Dockerfiles copy ${required[*]})"
