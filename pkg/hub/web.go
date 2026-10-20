@@ -1243,14 +1243,14 @@ func (ws *WebServer) serveStaticAsset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var fileServer http.Handler
+	var staticFS http.FileSystem
 	if ws.assetsDisk != "" {
 		// Like http.Dir, but nothing outside the directory (by ".." or a
 		// symlink) and no *.br/*.gz sibling is opened.
-		fileServer = http.FileServer(webassets.DirFileSystem(ws.assetsDisk))
+		staticFS = webassets.DirFileSystem(ws.assetsDisk)
 	} else {
 		// Like http.FS, but no *.br/*.gz sibling is opened.
-		fileServer = http.FileServer(webassets.FSFileSystem(ws.assets))
+		staticFS = webassets.FSFileSystem(ws.assets)
 	}
 
 	// Go's built-in MIME table has no entry for these, and the system
@@ -1269,19 +1269,51 @@ func (ws *WebServer) serveStaticAsset(w http.ResponseWriter, r *http.Request) {
 	// refused rather than cleaned, and a precompressed sibling is never
 	// served by its own name, so the name the file server would open is
 	// always the name checked here.
+	// A segment starting with a dot (such as .vite) is never public.
 	clean := cleanStaticPath(r.URL.Path)
-	if clean != r.URL.Path || webassets.IsVariantName(clean) {
+	if clean != r.URL.Path || webassets.IsVariantName(clean) || hasDotSegment(clean) {
 		http.NotFound(w, r)
 		return
 	}
 
 	// Indexed files are served with their precompressed variant (br, gzip)
-	// and an ETag; anything else (directories, unindexed paths) falls back
-	// to the file server below, unchanged.
+	// and an ETag; anything else (unindexed paths) falls back to the file
+	// server below. Directories are never listed.
 	if srv := ws.staticAssets(); srv != nil && srv.Serve(w, r, ws.staticCacheControl) {
 		return
 	}
-	fileServer.ServeHTTP(w, r)
+	if isStaticDir(staticFS, clean) {
+		http.NotFound(w, r)
+		return
+	}
+	http.FileServer(staticFS).ServeHTTP(w, r)
+}
+
+// hasDotSegment reports whether any segment of the slash path p starts
+// with a dot (for example /.vite/manifest.json or /assets/.hidden).
+// A segment starts with a dot exactly when the path does or a "/." occurs
+// in it, so the check scans the path without allocating.
+func hasDotSegment(p string) bool {
+	return strings.HasPrefix(p, ".") || strings.Contains(p, "/.")
+}
+
+// firstSegmentIsDot reports whether the first segment of the URL path p
+// starts with a dot (for example /.vite/manifest.json). No client-side
+// route lives there.
+func firstSegmentIsDot(p string) bool {
+	return strings.HasPrefix(strings.TrimPrefix(p, "/"), ".")
+}
+
+// isStaticDir reports whether the clean request path names a directory of
+// the asset file system.
+func isStaticDir(fsys http.FileSystem, clean string) bool {
+	f, err := fsys.Open(path.Clean(clean))
+	if err != nil {
+		return false
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	return err == nil && info.IsDir()
 }
 
 // cleanStaticPath cleans a URL path the way http.ServeMux does: rooted,
@@ -1301,15 +1333,28 @@ func cleanStaticPath(p string) string {
 	return np
 }
 
+// Cache-Control values of static assets (see staticCacheControl).
+const (
+	cacheControlImmutable = "public, max-age=31536000, immutable"
+	cacheControlOneDay    = "public, max-age=86400"
+	cacheControlNoCache   = "no-cache"
+)
+
 // staticCacheControl is the Cache-Control of a static asset. Files Vite
-// fingerprinted (listed in its build manifest) and other hex-hashed names
-// get long-lived caching; the unhashed entry (assets/main.js) and every
-// other file get revalidation.
+// fingerprinted (listed in its build manifest) are named by their content,
+// so they are cached for a year and never revalidated. A hex-hashed name
+// that the manifest does not list only looks content-addressed, so it is
+// cached for a day. The unhashed entry (assets/main.js) and every other
+// file are revalidated on each use (cheap: they carry an ETag).
 func (ws *WebServer) staticCacheControl(requestPath string) string {
-	if ws.fingerprintedAssets[requestPath] || isHashedAsset(requestPath) {
-		return "public, max-age=86400"
+	switch {
+	case ws.fingerprintedAssets[requestPath]:
+		return cacheControlImmutable
+	case isHashedAsset(requestPath):
+		return cacheControlOneDay
+	default:
+		return cacheControlNoCache
 	}
-	return "no-cache"
 }
 
 // staticContentTypes maps file extensions missing from Go's built-in MIME
@@ -1605,6 +1650,14 @@ func (ws *WebServer) spaHandler() http.HandlerFunc {
 		if r.URL.Path != "/" && ws.tryServeStaticFile(w, r) {
 			return
 		}
+		// A path whose first segment starts with a dot (such as
+		// /.vite/manifest.json) is neither a public file nor a client-side
+		// route. A deeper dot segment can be part of a route, so it still
+		// gets the shell.
+		if firstSegmentIsDot(r.URL.Path) {
+			http.NotFound(w, r)
+			return
+		}
 
 		// When no web assets are available (e.g. binary built via `go install`
 		// without embedded assets), serve a self-contained error page instead
@@ -1646,10 +1699,11 @@ func (ws *WebServer) tryServeStaticFile(w http.ResponseWriter, r *http.Request) 
 	if name == "" {
 		return false
 	}
-	// A non-clean decoded path (dot or empty segments left by %2e or %2f)
-	// and a precompressed sibling (*.br, *.gz, checked on the clean name)
-	// are never files of their own: treat them as missing.
-	if clean := cleanStaticPath(r.URL.Path); clean != r.URL.Path || webassets.IsVariantName(clean) {
+	// A non-clean decoded path (dot or empty segments left by %2e or %2f),
+	// a precompressed sibling (*.br, *.gz, checked on the clean name) and a
+	// path with a segment starting with a dot (such as .vite) are never
+	// public files: treat them as missing.
+	if clean := cleanStaticPath(r.URL.Path); clean != r.URL.Path || webassets.IsVariantName(clean) || hasDotSegment(clean) {
 		return false
 	}
 

@@ -37,16 +37,7 @@ var settingsBypassScanRoots = []string{".", "../../cmd", "../hub", "../hubsync",
 // file directly, as far as this check can see (see its limits below). Each
 // must be a known, tracked exception; an entry that no longer matches fails
 // the test, so the list cannot go stale.
-var settingsBypassAllowed = map[string]string{
-	// Rewritten from a map, without the lock; moved to the locked writer
-	// in a follow-up change (ptone/scion#3918, part B).
-	"integration_config.go:AddSelfManagedPluginWithBrokerType": "part B",
-	"integration_config.go:AddPluginToSettings":                "part B",
-	"integration_config.go:AddPluginToMessageBrokerTypes":      "part B",
-	"admin_settings.go:handlePutServerConfig":                  "part B",
-	"handlers_github_app.go:persistGitHubAppConfig":            "part B",
-	"handlers_projects_core.go:initHubManagedProject":          "part B",
-}
+var settingsBypassAllowed = map[string]string{}
 
 // settingsFileNames are the file names whose writes must use the writer.
 var settingsFileNames = map[string]bool{

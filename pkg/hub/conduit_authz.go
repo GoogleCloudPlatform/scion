@@ -289,7 +289,8 @@ type conduitGrantRequest struct {
 // mintConduitGrant authorizes req and, only if every check passes, mints a
 // single-use grant for it. Errors wrap errConduitDisabled,
 // errConduitInvalid, errConduitForbidden,
-// errConduitStreamRenewalUnavailable (503 stream_renewal_unavailable) or
+// errConduitStreamRenewalUnavailable (503 stream_renewal_unavailable),
+// errConduitAgentUpgradeRequired (409 agent_upgrade_required) or
 // errConduitGrantInternal (500 internal_error, nothing minted).
 func (s *Server) mintConduitGrant(ctx context.Context, req conduitGrantRequest) ([]byte, *grant.Claims, error) {
 	if !s.experimentEnabled(conduitExperiment) {
@@ -356,6 +357,13 @@ func (s *Server) mintConduitGrant(ctx context.Context, req conduitGrantRequest) 
 	// decides this at resolution; this is the backstop for a re-resolution
 	// onto another row after that check. With enforce it also refuses a
 	// renewal-unsupported principal.
+	// Target without stream renewal (contracts, Target lacks stream
+	// renewal): the backstop of the open paths' check on the resolved row,
+	// at the same point, so it precedes the placement guard. Only user
+	// stream origins (tunnel, proxy, pty) are concerned.
+	if req.Via != "" && s.conduitTargetUpgradeRequired(ctx, req.Identity, req.TargetRenews, conduitRouteOf(req.Via), agent.ID) {
+		return nil, nil, errConduitAgentUpgradeRequired
+	}
 	if s.conduitRenewalPathUnavailable(ctx, req.Identity, req.TargetRenews, req.CanRenew, conduitRouteOf(req.Via), agent.ID) {
 		return nil, nil, errConduitStreamRenewalUnavailable
 	}

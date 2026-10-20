@@ -234,8 +234,7 @@ func Spec() []TableFixture {
 		{Table: "templates", Rows: []row{
 			{
 				"id": "7e000000-0000-0000-0000-000000000001", "name": "claude", "slug": "claude",
-				"harness": "claude", "image": "scion/claude:latest", "config": nestedConfigJSON,
-				"scope": "global", "status": "active",
+				"harness": "claude", "scope": "global", "status": "active",
 				"created_at": baseTime, "updated_at": baseTime,
 			},
 		}},

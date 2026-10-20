@@ -23,6 +23,10 @@
  * exceeded:
  *
  *   - files:              raw and gzip byte limits per built file;
+ *   - chunks:             raw and gzip byte limits for every built JS chunk
+ *                         whose name starts with the given prefix (chunk
+ *                         names carry a content hash); at least one chunk
+ *                         must match. Keys starting with $ are comments;
  *   - entryClosure:       gzip limit on the entry chunk plus every chunk and
  *                         stylesheet it imports statically (what every route
  *                         downloads before the first render);
@@ -121,12 +125,7 @@ export function checkBudget({ manifest, budget, readFile, listFiles, readMapModu
   const failures = [];
   const report = [];
 
-  for (const [file, limit] of Object.entries(budget.files ?? {})) {
-    const buf = readFile(file);
-    if (!buf) {
-      failures.push(`${file}: missing from the build`);
-      continue;
-    }
+  const checkSize = (file, buf, limit) => {
     const raw = buf.length;
     const gz = gzipSize(buf);
     report.push(`${file}: raw ${raw} / ${limit.raw}, gzip ${gz} / ${limit.gzip}`);
@@ -135,6 +134,33 @@ export function checkBudget({ manifest, budget, readFile, listFiles, readMapModu
     }
     if (limit.gzip !== undefined && gz > limit.gzip) {
       failures.push(`${file}: gzip ${gz} B exceeds ${limit.gzip} B`);
+    }
+  };
+
+  for (const [file, limit] of Object.entries(budget.files ?? {})) {
+    const buf = readFile(file);
+    if (!buf) {
+      failures.push(`${file}: missing from the build`);
+      continue;
+    }
+    checkSize(file, buf, limit);
+  }
+
+  const built = listFiles();
+  for (const [prefix, limit] of Object.entries(budget.chunks ?? {})) {
+    if (prefix.startsWith('$')) continue; // "$comment" keys
+    const found = built.filter((f) => f.startsWith(prefix) && f.endsWith('.js'));
+    if (!found.length) {
+      failures.push(`no chunk matching ${prefix}*.js`);
+      continue;
+    }
+    for (const file of found) {
+      const buf = readFile(file);
+      if (!buf) {
+        failures.push(`${file}: missing from the build`);
+        continue;
+      }
+      checkSize(file, buf, limit);
     }
   }
 
@@ -155,7 +181,6 @@ export function checkBudget({ manifest, budget, readFile, listFiles, readMapModu
       failures.push(`entry closure of ${entry}: gzip ${total} B exceeds ${limit} B`);
   }
 
-  const built = listFiles();
   for (const prefix of budget.requiredChunks ?? []) {
     const found = built.filter((f) => f.startsWith(prefix) && f.endsWith('.js'));
     report.push(`required chunk ${prefix}*.js: ${found.length ? found.join(', ') : 'none'}`);

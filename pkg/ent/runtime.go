@@ -2225,19 +2225,19 @@ func init() {
 	// schedule.DefaultStatus holds the default value on creation for the status field.
 	schedule.DefaultStatus = scheduleDescStatus.Default.(string)
 	// scheduleDescRunCount is the schema descriptor for run_count field.
-	scheduleDescRunCount := scheduleFields[11].Descriptor()
+	scheduleDescRunCount := scheduleFields[12].Descriptor()
 	// schedule.DefaultRunCount holds the default value on creation for the run_count field.
 	schedule.DefaultRunCount = scheduleDescRunCount.Default.(int)
 	// scheduleDescErrorCount is the schema descriptor for error_count field.
-	scheduleDescErrorCount := scheduleFields[12].Descriptor()
+	scheduleDescErrorCount := scheduleFields[13].Descriptor()
 	// schedule.DefaultErrorCount holds the default value on creation for the error_count field.
 	schedule.DefaultErrorCount = scheduleDescErrorCount.Default.(int)
 	// scheduleDescCreated is the schema descriptor for created field.
-	scheduleDescCreated := scheduleFields[14].Descriptor()
+	scheduleDescCreated := scheduleFields[15].Descriptor()
 	// schedule.DefaultCreated holds the default value on creation for the created field.
 	schedule.DefaultCreated = scheduleDescCreated.Default.(func() time.Time)
 	// scheduleDescUpdated is the schema descriptor for updated field.
-	scheduleDescUpdated := scheduleFields[15].Descriptor()
+	scheduleDescUpdated := scheduleFields[16].Descriptor()
 	// schedule.DefaultUpdated holds the default value on creation for the updated field.
 	schedule.DefaultUpdated = scheduleDescUpdated.Default.(func() time.Time)
 	// schedule.UpdateDefaultUpdated holds the default value on update for the updated field.
@@ -2456,19 +2456,19 @@ func init() {
 	// template.SlugValidator is a validator for the "slug" field. It is called by the builders before save.
 	template.SlugValidator = templateDescSlug.Validators[0].(func(string) error)
 	// templateDescScope is the schema descriptor for scope field.
-	templateDescScope := templateFields[11].Descriptor()
+	templateDescScope := templateFields[9].Descriptor()
 	// template.DefaultScope holds the default value on creation for the scope field.
 	template.DefaultScope = templateDescScope.Default.(string)
 	// templateDescLayout is the schema descriptor for layout field.
-	templateDescLayout := templateFields[17].Descriptor()
+	templateDescLayout := templateFields[15].Descriptor()
 	// template.DefaultLayout holds the default value on creation for the layout field.
 	template.DefaultLayout = templateDescLayout.Default.(string)
 	// templateDescCreated is the schema descriptor for created field.
-	templateDescCreated := templateFields[25].Descriptor()
+	templateDescCreated := templateFields[23].Descriptor()
 	// template.DefaultCreated holds the default value on creation for the created field.
 	template.DefaultCreated = templateDescCreated.Default.(func() time.Time)
 	// templateDescUpdated is the schema descriptor for updated field.
-	templateDescUpdated := templateFields[26].Descriptor()
+	templateDescUpdated := templateFields[24].Descriptor()
 	// template.DefaultUpdated holds the default value on creation for the updated field.
 	template.DefaultUpdated = templateDescUpdated.Default.(func() time.Time)
 	// template.UpdateDefaultUpdated holds the default value on update for the updated field.
@@ -2499,6 +2499,10 @@ func init() {
 	testidentitydelegationDescLabel := testidentitydelegationFields[5].Descriptor()
 	// testidentitydelegation.DefaultLabel holds the default value on creation for the label field.
 	testidentitydelegation.DefaultLabel = testidentitydelegationDescLabel.Default.(string)
+	// testidentitydelegationDescHubID is the schema descriptor for hub_id field.
+	testidentitydelegationDescHubID := testidentitydelegationFields[9].Descriptor()
+	// testidentitydelegation.DefaultHubID holds the default value on creation for the hub_id field.
+	testidentitydelegation.DefaultHubID = testidentitydelegationDescHubID.Default.(string)
 	// testidentitydelegationDescID is the schema descriptor for id field.
 	testidentitydelegationDescID := testidentitydelegationFields[0].Descriptor()
 	// testidentitydelegation.DefaultID holds the default value on creation for the id field.

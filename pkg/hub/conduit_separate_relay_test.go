@@ -85,6 +85,22 @@ func (w *separateRelayWorld) lastAgentStream(t *testing.T) uint32 {
 
 func newSeparateRelayWorld(t *testing.T, mods ...func(*separateRelayWorld)) *separateRelayWorld {
 	t.Helper()
+	return newSeparateRelayWorldWith(t, separateRelayOptions{}, mods...)
+}
+
+// separateRelayOptions adjusts the separate relay world before it serves.
+type separateRelayOptions struct {
+	// enforce sets target_stream_deadlines to enforce on both hubs before
+	// they start.
+	enforce bool
+	// agentWithoutRenewal makes the agent's Hello advertise no protocol
+	// features, as a sciontool without stream renewal does.
+	agentWithoutRenewal bool
+}
+
+// newSeparateRelayWorldWith is newSeparateRelayWorld with opts.
+func newSeparateRelayWorldWith(t *testing.T, opts separateRelayOptions, mods ...func(*separateRelayWorld)) *separateRelayWorld {
+	t.Helper()
 	cf := newConduitFixture(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -129,6 +145,9 @@ func newSeparateRelayWorld(t *testing.T, mods ...func(*separateRelayWorld)) *sep
 	replay := testReplayStore(t) // shared by both hubs, as the database is
 	for id, srv := range map[string]*Server{"hub-a": cf.srv, "hub-b": w.hubB} {
 		srv.config.SharedSigningSecret = testRelaySessionSecret
+		if opts.enforce {
+			enforceTargetDeadlines(srv)
+		}
 		require.NoError(t, srv.StartConduitExternal(ctx, ConduitExternalOptions{
 			InstanceID: id, PeerAuth: externalRelayAuth(t, id), Store: regStore,
 			// The clock also drives the stream re-check and its renewal
@@ -171,6 +190,9 @@ func newSeparateRelayWorld(t *testing.T, mods ...func(*separateRelayWorld)) *sep
 			}
 			return []*conduitv1.Frame{f}
 		}},
+	}
+	if opts.agentWithoutRenewal {
+		stripHelloFeatures(&w.agentSession)
 	}
 	for _, m := range mods {
 		m(w)
@@ -324,4 +346,20 @@ func TestSeparateRelay_AgentReachedThroughAnotherHub(t *testing.T) {
 		t.Fatal("hub B's leaf stayed open after the agent was deleted")
 	}
 	assert.Empty(t, w.trackedOnB(t))
+}
+
+// stripHelloFeatures makes the session's outbound Hello advertise no
+// protocol features (stream renewal among them), as an older sciontool's
+// does, keeping any interceptor already set.
+func stripHelloFeatures(cfg *conduit.Config) {
+	prev := cfg.Interceptor
+	cfg.Interceptor = func(dir conduit.Direction, f *conduitv1.Frame) []*conduitv1.Frame {
+		if h := f.GetHello(); dir == conduit.Outbound && h != nil && h.GetCapabilities() != nil {
+			h.Capabilities.Features = nil
+		}
+		if prev != nil {
+			return prev(dir, f)
+		}
+		return []*conduitv1.Frame{f}
+	}
 }

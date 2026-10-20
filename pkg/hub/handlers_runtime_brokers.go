@@ -170,6 +170,9 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 	// lookupAgentLimitDefinition, so a per-broker cap never costs more than
 	// one extra limit-definition lookup for the whole page.
 	limitDef := s.lookupAgentLimitDefinition(ctx)
+	// One non-blocking snapshot of this process's embedded brokers for the
+	// whole page (hostedByThisServer).
+	embedded := s.embeddedBrokerSnapshot()
 
 	brokersWithCaps := make([]RuntimeBrokerWithCapabilities, 0, len(result.Items))
 	for i, broker := range result.Items {
@@ -177,6 +180,7 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		resp := RuntimeBrokerWithCapabilities{RuntimeBroker: brokerForDisplay(broker)}
+		resp.HostedByThisServer = embedded.has(broker.ID)
 		if caps != nil && i < len(caps) {
 			resp.Cap = caps[i]
 			// Without a project, the project-independent dispatch rule.
@@ -394,6 +398,7 @@ func (s *Server) getRuntimeBroker(w http.ResponseWriter, r *http.Request, id str
 
 	// Compute capabilities for the requesting user
 	resp := RuntimeBrokerWithCapabilities{RuntimeBroker: brokerForDisplay(*broker)}
+	resp.HostedByThisServer = s.embeddedBrokerSnapshot().has(broker.ID)
 	if ident := GetIdentityFromContext(ctx); ident != nil {
 		resp.Cap = s.authzService.ComputeCapabilities(ctx, ident, brokerResource(broker))
 		s.reportBrokerDispatchCapability(ctx, resp.Cap, broker, nil)
@@ -1129,6 +1134,9 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				heartbeat.ProfileSAMappings = nil
 				heartbeat.ProfileSAMappingsHashes = nil
 			}
+			// A broker older than templateTiers ignores the telemetry tiers
+			// dispatch sends; warn once (ptone/scion#4224).
+			s.warnBrokerWithoutTemplateTiers(id, broker.Name, heartbeat.Capabilities)
 			changed := false
 			if heartbeat.Capabilities != nil && !reflect.DeepEqual(broker.Capabilities, heartbeat.Capabilities) {
 				broker.Capabilities = heartbeat.Capabilities

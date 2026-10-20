@@ -278,6 +278,13 @@ func (s *Server) persistGitHubAppConfig(cfg GitHubAppServerConfig) error {
 
 	settingsPath := filepath.Join(globalDir, "settings.yaml")
 
+	// Held from the read to the write (see config.LockSettingsDir).
+	lock, err := config.LockSettingsDir(globalDir)
+	if err != nil {
+		return err
+	}
+	defer lock.Unlock()
+
 	var raw map[string]interface{}
 	if data, err := os.ReadFile(settingsPath); err == nil {
 		if err := yamlv3.Unmarshal(data, &raw); err != nil {
@@ -329,7 +336,7 @@ func (s *Server) persistGitHubAppConfig(cfg GitHubAppServerConfig) error {
 		return fmt.Errorf("failed to marshal settings: %w", err)
 	}
 
-	return os.WriteFile(settingsPath, newData, 0644)
+	return config.WriteSettingsFileLocked(lock, settingsPath, newData)
 }
 
 func (s *Server) handleListGitHubAppInstallations(w http.ResponseWriter, r *http.Request) {

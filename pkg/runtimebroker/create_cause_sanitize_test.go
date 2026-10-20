@@ -18,6 +18,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -34,7 +37,13 @@ func TestSanitizeFailureCause(t *testing.T) {
 			`pods "agent-pod-4555" is forbidden: User "system:serviceaccount:team-ns:scion-sa" cannot get resource "pods"`,
 			`pods "agent-pod-4555" is forbidden: User "system:serviceaccount:team-ns:scion-sa" cannot get resource "pods"`},
 		{"long lower-case name kept", "pod scion-agent-a-rather-long-generated-name-0001 failed", "pod scion-agent-a-rather-long-generated-name-0001 failed"},
-		{"env value blanked, key kept", "run failed: FOO=bar BAZ=qux done", "run failed: FOO=[REDACTED] BAZ=[REDACTED] done"},
+		{"env value blanked, key kept", "run failed: FOO=bar BAZ=qux", "run failed: FOO=[REDACTED] BAZ=[REDACTED]"},
+		{"unquoted value with spaces", "env KEY=a b c, next", "env KEY=[REDACTED], next"},
+		{"prose after a value is blanked", "run failed: FOO=bar BAZ=qux done", "run failed: FOO=[REDACTED] BAZ=[REDACTED]"},
+		{"spaced separator ends a value", "TOKEN=a SECRET =b", "TOKEN=[REDACTED] SECRET =[REDACTED]"},
+		{"separator on the next line ends a value", "TOKEN=a SECRET\n=b", "TOKEN=[REDACTED] SECRET\n=[REDACTED]"},
+		{"spaced colon ends a value", "TOKEN=a value : b", "TOKEN=[REDACTED] value : [REDACTED]"},
+		{"earlier marker inside a value", "FOO=x Bearer abcdefghijkl end", "FOO=[REDACTED]"},
 		{"quoted value blanked", `bad env X="a b c"`, "bad env X=[REDACTED]"},
 		{"flag value blanked", "unknown flag --env=FOO=bar", "unknown flag --env=[REDACTED]"},
 		{"credential-named JSON key", `spec {"DB_PASSWORD": "hunter2-value"}`, `spec {"DB_PASSWORD": [REDACTED]}`},
@@ -47,10 +56,10 @@ func TestSanitizeFailureCause(t *testing.T) {
 		{"long hex run", "container 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef exited", "container [REDACTED] exited"},
 		{"single-quoted key", "spec {'password': 'hunter2-value'}", "spec {'password': [REDACTED]}"},
 		{"passphrase key", "key_passphrase: hunter2-value", "key_passphrase: [REDACTED]"},
-		{"lower-case colon key", "spec password: hunter2-value end", "spec password: [REDACTED] end"},
-		{"hyphenated header key", "header x-api-key: abc123 sent", "header x-api-key: [REDACTED] sent"},
+		{"lower-case colon key", "spec password: hunter2-value; end", "spec password: [REDACTED]; end"},
+		{"hyphenated header key", "header x-api-key: abc123, sent", "header x-api-key: [REDACTED], sent"},
 		{"capitalized key, no space", "Password:hunter2", "Password:[REDACTED]"},
-		{"auth as a whole key word", "auth-header: abc123 and X_AUTH=xyz", "auth-header: [REDACTED] and X_AUTH=[REDACTED]"},
+		{"auth as a whole key word", "auth-header: abc123 X_AUTH=xyz", "auth-header: [REDACTED] X_AUTH=[REDACTED]"},
 		{"registry refusal kept", "unauthorized: authentication required", "unauthorized: authentication required"},
 		{"EnvVar JSON value", `env [{"name":"GITHUB_PAT","value":"hunter2"}]`, `env [{"name":"GITHUB_PAT","value":[REDACTED]}]`},
 		{"EnvVar %+v value", "env {Name:GITHUB_PAT Value:hunter2 ValueFrom:nil}", "env {Name:GITHUB_PAT Value:[REDACTED] ValueFrom:nil}"},
@@ -116,18 +125,25 @@ func credentialShapedStartError() error {
 }
 
 // sanitizedCauseLogSites lists the log records pinned to pass a failure's
-// cause and error text through sanitizeFailureCause: the terminal create
-// failure records (synchronous create and async launch). Each listed site
-// needs a case in TestCreateFailureCause_SanitizedAtEveryLogSite.
+// cause and error text through sanitizeFailureCause: the records of the
+// create and start failures whose client response is the fixed
+// "Failed to <op>" text (synchronous create, async launch, create
+// preflight, start, restart, and start context preparation). Each listed
+// site needs a case in TestCreateFailureCause_SanitizedAtEveryLogSite.
 var sanitizedCauseLogSites = []string{
 	"Agent create failed",
 	"runLaunch: agent start failed",
+	"Agent create failed: preflight",
+	"Agent start failed",
+	"Agent restart failed",
+	"buildStartContext failed",
 }
 
 // assertSanitizedCauseRecord checks logs hold exactly one msg record, that
-// its cause and error fields are sanitized and truncated, and that no
-// record holds any credential-shaped value.
-func assertSanitizedCauseRecord(t *testing.T, logs, msg string) {
+// its agent_id, runtime and profile fields equal want's, that its cause and
+// error fields are sanitized and truncated, and that no record holds any
+// credential-shaped value.
+func assertSanitizedCauseRecord(t *testing.T, logs, msg string, want map[string]string) {
 	t.Helper()
 	var recs []map[string]any
 	for _, line := range strings.Split(strings.TrimSpace(logs), "\n") {
@@ -138,6 +154,11 @@ func assertSanitizedCauseRecord(t *testing.T, logs, msg string) {
 	}
 	if len(recs) != 1 {
 		t.Fatalf("%d %q records, want exactly 1; logs: %s", len(recs), msg, logs)
+	}
+	for _, field := range []string{"agent_id", "runtime", "profile"} {
+		if got, ok := recs[0][field].(string); !ok || got != want[field] {
+			t.Errorf("%s = %#v, want %q", field, recs[0][field], want[field])
+		}
 	}
 	for _, field := range []string{"cause", "error"} {
 		got, ok := recs[0][field].(string)
@@ -160,20 +181,67 @@ func assertSanitizedCauseRecord(t *testing.T, logs, msg string) {
 	}
 }
 
-// TestCreateFailureCause_SanitizedAtEveryLogSite: a create whose runtime
-// start fails with credential-shaped backend text logs one record per
-// failure with that text sanitized and truncated, and the response the
-// client gets is the same fixed body a plain failure gets.
+// asyncPreflightFailure posts an async create whose Manager.Preflight
+// returns preflightErr, and returns the response and the broker's logs.
+func asyncPreflightFailure(t *testing.T, name string, preflightErr error) (int, string, string) {
+	t.Helper()
+	mgr := newAsyncManager()
+	mgr.setPreflightErr(preflightErr)
+	srv, _ := newAsyncTestServer(t, mgr)
+	logs := &syncBuffer{}
+	srv.agentLifecycleLog = slog.New(slog.NewJSONHandler(logs, nil))
+	w := postCreate(t, srv, map[string]any{
+		"id": name, "name": name, "asyncLaunch": true, "launchId": "L-" + name,
+		"projectId": startErrTextProjectID, "runId": startErrTextRunID,
+		"launchTimeoutSeconds": 300, "config": map[string]any{"template": "claude"},
+	})
+	return w.Code, w.Body.String(), logs.String()
+}
+
+// startOpFailure posts op ("start" or "restart") for an agent whose
+// Manager.Start returns startErr, and returns the response and the logs.
+func startOpFailure(t *testing.T, op string, startErr error) (int, string, string) {
+	t.Helper()
+	srv := newTestServer(t)
+	srv.manager.(*mockManager).startErr = startErr
+	logs := &syncBuffer{}
+	srv.agentLifecycleLog = slog.New(slog.NewJSONHandler(logs, nil))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent-1/"+op+"?projectId="+startErrTextProjectID,
+		strings.NewReader(`{"runId":"`+startErrTextRunID+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	return w.Code, w.Body.String(), logs.String()
+}
+
+// assertStartOpSanitized checks a start or restart failing with
+// credential-shaped backend text logs one sanitized msg record and answers
+// with the plain failure's body.
+func assertStartOpSanitized(t *testing.T, op, msg string) {
+	t.Helper()
+	status, body, logs := startOpFailure(t, op, credentialShapedStartError())
+	_, plainBody, _ := startOpFailure(t, op, errors.New("docker run scion-ctr-1: exit status 125"))
+	if status != http.StatusInternalServerError || body != plainBody {
+		t.Errorf("response = %d %s, want the plain failure's body %s", status, body, plainBody)
+	}
+	assertSanitizedCauseRecord(t, logs, msg, map[string]string{"agent_id": "test-agent-1", "runtime": "mock", "profile": ""})
+}
+
+// TestCreateFailureCause_SanitizedAtEveryLogSite: a create, start or
+// restart that fails with credential-shaped backend text logs one record
+// per failure, with the agent id, runtime and profile, and with that text
+// sanitized and truncated; the response the client gets is the same fixed
+// body a plain failure gets.
 func TestCreateFailureCause_SanitizedAtEveryLogSite(t *testing.T) {
 	cases := map[string]func(t *testing.T){
 		"Agent create failed": func(t *testing.T) {
 			const name = "agent-sync-sanitize"
 			status, body, _, logs := postSyncCreateFailure(t, name, credentialShapedStartError())
 			_, plainBody, _, _ := postSyncCreateFailure(t, name, errors.New("docker run scion-ctr-1: exit status 125"))
-			if status != 500 || body != plainBody {
+			if status != http.StatusInternalServerError || body != plainBody {
 				t.Errorf("response = %d %s, want the plain failure's body %s", status, body, plainBody)
 			}
-			assertSanitizedCauseRecord(t, logs, "Agent create failed")
+			assertSanitizedCauseRecord(t, logs, "Agent create failed", map[string]string{"agent_id": name, "runtime": "mock", "profile": ""})
 		},
 		"runLaunch: agent start failed": func(t *testing.T) {
 			const name = "agent-async-sanitize"
@@ -190,7 +258,40 @@ func TestCreateFailureCause_SanitizedAtEveryLogSite(t *testing.T) {
 					t.Errorf("report contains %q", v)
 				}
 			}
-			assertSanitizedCauseRecord(t, logs, "runLaunch: agent start failed")
+			assertSanitizedCauseRecord(t, logs, "runLaunch: agent start failed", map[string]string{"agent_id": name, "runtime": "mock", "profile": ""})
+		},
+		"Agent create failed: preflight": func(t *testing.T) {
+			status, body, logs := asyncPreflightFailure(t, "agent-preflight-sanitize", credentialShapedStartError())
+			_, plainBody, _ := asyncPreflightFailure(t, "agent-preflight-sanitize", errors.New("runtime not ready"))
+			if status != http.StatusInternalServerError || body != plainBody {
+				t.Errorf("response = %d %s, want the plain failure's body %s", status, body, plainBody)
+			}
+			assertSanitizedCauseRecord(t, logs, "Agent create failed: preflight", map[string]string{"agent_id": "agent-preflight-sanitize", "runtime": "mock", "profile": ""})
+		},
+		"Agent start failed": func(t *testing.T) {
+			assertStartOpSanitized(t, "start", "Agent start failed")
+		},
+		"Agent restart failed": func(t *testing.T) {
+			assertStartOpSanitized(t, "restart", "Agent restart failed")
+		},
+		"buildStartContext failed": func(t *testing.T) {
+			for name, err := range map[string]error{
+				"plain error":   credentialShapedStartError(),
+				"runtime error": &startContextError{Status: http.StatusInternalServerError, Message: "curated", OriginalErr: credentialShapedStartError()},
+				"hub error":     &startContextError{IsHubError: true, Message: "curated", OriginalErr: credentialShapedStartError()},
+			} {
+				t.Run(name, func(t *testing.T) {
+					srv := newTestServer(t)
+					logs := &syncBuffer{}
+					srv.agentLifecycleLog = slog.New(slog.NewJSONHandler(logs, nil))
+					w := httptest.NewRecorder()
+					srv.writeStartContextError(w, err, "start agent", "agent_id", "agent-ctx-sanitize", "runtime", "docker", "profile", "default")
+					if w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), `"Failed to start agent"`) {
+						t.Errorf("response = %d %s, want 500 with the fixed text", w.Code, w.Body.String())
+					}
+					assertSanitizedCauseRecord(t, logs.String(), "buildStartContext failed", map[string]string{"agent_id": "agent-ctx-sanitize", "runtime": "docker", "profile": "default"})
+				})
+			}
 		},
 	}
 	for _, site := range sanitizedCauseLogSites {

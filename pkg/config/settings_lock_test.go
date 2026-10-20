@@ -907,6 +907,7 @@ func TestPersistHubIDOnce_MultiProcessAgreeOnOneID(t *testing.T) {
 			ids := []string{"id-a", "id-b", "id-c", "id-d"}
 			cmds := make([]*exec.Cmd, len(ids))
 			outs := make([]*strings.Builder, len(ids))
+			errs := make([]*strings.Builder, len(ids))
 			for i, id := range ids {
 				env := []string{"SCION_TEST_SETTINGS_KEY=" + id}
 				if tc.noLinks {
@@ -914,8 +915,9 @@ func TestPersistHubIDOnce_MultiProcessAgreeOnOneID(t *testing.T) {
 				}
 				cmds[i] = settingsHelper(t, "hubid", dir, env...)
 				outs[i] = &strings.Builder{}
+				errs[i] = &strings.Builder{}
 				cmds[i].Stdout = outs[i]
-				cmds[i].Stderr = outs[i]
+				cmds[i].Stderr = errs[i]
 			}
 			for _, c := range cmds {
 				if err := c.Start(); err != nil {
@@ -924,7 +926,7 @@ func TestPersistHubIDOnce_MultiProcessAgreeOnOneID(t *testing.T) {
 			}
 			for i, c := range cmds {
 				if err := c.Wait(); err != nil {
-					t.Fatalf("helper %s: %v\n%s", ids[i], err, outs[i].String())
+					t.Fatalf("helper %s: %v\nstdout: %s\nstderr: %s", ids[i], err, outs[i].String(), errs[i].String())
 				}
 			}
 			data, err := os.ReadFile(path)
@@ -975,4 +977,62 @@ func TestSettingsLock_UnreadableLockFileIsAClearError(t *testing.T) {
 	if got, _ := readSettingValue(dir, "default_template"); got != "" {
 		t.Errorf("written despite the error: %q", got)
 	}
+}
+
+// CreateSettingsFileIfMissing writes a missing file, never replaces an
+// existing one, creates the target of a dangling symlink (keeping the link),
+// and writes nothing when the lock cannot be taken.
+func TestCreateSettingsFileIfMissing(t *testing.T) {
+	const seed = "schema_version: \"1\"\n"
+	t.Run("missing file is written", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "settings.yaml")
+		if err := CreateSettingsFileIfMissing(path, []byte(seed)); err != nil {
+			t.Fatal(err)
+		}
+		if data, _ := os.ReadFile(path); string(data) != seed {
+			t.Errorf("content = %q", data)
+		}
+	})
+	t.Run("existing file is left byte-identical", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "settings.yaml")
+		if err := os.WriteFile(path, []byte(lockTestSettings), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := CreateSettingsFileIfMissing(path, []byte(seed)); err != nil {
+			t.Fatal(err)
+		}
+		if data, _ := os.ReadFile(path); string(data) != lockTestSettings {
+			t.Errorf("existing file replaced: %q", data)
+		}
+	})
+	t.Run("dangling symlink: target created, link kept", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(t.TempDir(), "real-settings.yaml")
+		path := filepath.Join(dir, "settings.yaml")
+		if err := os.Symlink(target, path); err != nil {
+			t.Fatal(err)
+		}
+		if err := CreateSettingsFileIfMissing(path, []byte(seed)); err != nil {
+			t.Fatal(err)
+		}
+		if fi, err := os.Lstat(path); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			t.Errorf("link not kept: %v %v", fi, err)
+		}
+		if data, _ := os.ReadFile(target); string(data) != seed {
+			t.Errorf("target content = %q", data)
+		}
+	})
+	t.Run("held lock: timeout, nothing written", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "settings.yaml")
+		setSettingsLockWait(t, 100*time.Millisecond)
+		l := mustLockSettingsDir(t, dir)
+		defer l.Unlock()
+		if err := CreateSettingsFileIfMissing(path, []byte(seed)); !errors.Is(err, ErrSettingsLockTimeout) {
+			t.Fatalf("err = %v, want ErrSettingsLockTimeout", err)
+		}
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Errorf("written without the lock: %v", err)
+		}
+	})
 }
