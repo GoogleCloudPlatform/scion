@@ -897,7 +897,7 @@ func TestRestartAgent_ProfileNamespace_PodGone_ProceedsToStart(t *testing.T) {
 	// The start below reads the global settings only. Clear the embedded
 	// default harness config, so it fails on the missing project path and
 	// not on resolving that harness config (whose "not found" error the
-	// handler reports as a missing agent).
+	// handler reports as a missing agent, ptone/scion#5433).
 	globalDir := filepath.Dir(filepath.Dir(filepath.Dir(f.projectDir)))
 	if err := os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte("schema_version: \"1\"\ndefault_harness_config: \"\"\n"), 0o644); err != nil {
 		t.Fatal(err)

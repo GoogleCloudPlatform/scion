@@ -414,6 +414,9 @@ func (svc *ProjectDeletionService) cleanupNFSSharedDirTree(ctx context.Context, 
 	if globalSettings == nil {
 		return
 	}
+	// A legacy-format file is converted with its server block kept
+	// (ptone/scion#3919); this fires only when such a file mentions the key
+	// but no block loaded (for example a misplaced or commented-out block).
 	if (globalSettings.Server == nil || globalSettings.Server.SharedDirStorage == nil) &&
 		config.GlobalSettingsIsLegacyFormat() && config.GlobalSettingsMentions("shared_dir_storage") {
 		svc.logger.ErrorContext(ctx, "global settings mention shared_dir_storage but it was not loaded (legacy format); skipping NFS shared-dir cleanup on project delete",
