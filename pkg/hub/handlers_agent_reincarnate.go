@@ -358,6 +358,10 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		targetBrokerID = dst.ID
 		if dst.ID != agent.RuntimeBrokerID {
 			moveTarget = dst
+		} else if req.ForceMove {
+			writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+				"--force applies only to a move to another broker", nil)
+			return
 		}
 	}
 	if moveTarget != nil && (len(req.SharedDirBackends) > 0 || req.AllowEmptySharedDir) {

@@ -514,8 +514,10 @@ func TestEvaluateMoveEligibility_PlacementCausedTargetProfile(t *testing.T) {
 	}
 }
 
-// A2.6: an nfs target with an unhealthy mount and a docker profile: a
-// recreated workspace does not use the mount, so --force recreates.
+// A2.6: an nfs target with an unhealthy mount and a docker profile. The
+// export checks refuse it at target_profile (the Kubernetes constraint,
+// placement-caused), and the recreate checks do not need the mount on a
+// docker profile, so --force recreates.
 func TestEvaluateMoveEligibility_ForceUnhealthyMountDockerProfile(t *testing.T) {
 	in := forceMoveInput(moveTestProbeCalls{})
 	in.Profile = "local"
@@ -547,6 +549,44 @@ func TestEvaluateMoveEligibility_UnhealthyMountKubernetesProfileStaysRefused(t *
 		}
 		if ref.ForceWouldApply {
 			t.Errorf("force=%v: forceWouldApply set although --force fails the same way", force)
+		}
+	}
+}
+
+// A3 (R1): a target_health failure of the export checks is never waived. A
+// shared-workspace agent on the same export, with an unhealthy target
+// mount, gets the same 503 at target_health with and without --force, and
+// forceWouldApply is not set.
+func TestEvaluateMoveEligibility_UnhealthyMountSharedWorkspaceNotWaived(t *testing.T) {
+	plain := eligibleMoveInput(moveTestProbeCalls{})
+	plain.CloneMode = false
+	plain.Dst.WorkspaceStorage.NFS.Healthy = false
+	_, plainRef := evaluateMoveEligibility(plain)
+	if plainRef == nil || plainRef.Status != http.StatusServiceUnavailable {
+		t.Fatalf("without the force fields: refusal = %+v, want 503", plainRef)
+	}
+	for _, force := range []bool{false, true} {
+		in := forceMoveInput(moveTestProbeCalls{})
+		in.Force = force
+		in.CloneMode = false
+		in.WorkspaceMode = string(store.SharingModeSharedPlain)
+		in.Dst.WorkspaceStorage.NFS.Healthy = false
+		v, ref := evaluateMoveEligibility(in)
+		if ref == nil {
+			t.Fatalf("force=%v: expected a refusal", force)
+		}
+		if ref.Status != plainRef.Status || ref.Code != plainRef.Code || ref.Message != plainRef.Message {
+			t.Errorf("force=%v: refusal %+v, want today's %+v", force, ref, plainRef)
+		}
+		got := checkResults(v)
+		if got[moveCheckTargetHealth] != MoveCheckFailed || got[moveCheckWorkspaceRecreatable] != MoveCheckPassed {
+			t.Errorf("force=%v: checks = %v, want the export verdict failed at target_health", force, got)
+		}
+		if ref.ForceWouldApply {
+			t.Errorf("force=%v: forceWouldApply set", force)
+		}
+		if v.TransferMode != "" {
+			t.Errorf("force=%v: transfer mode %q on a refusal", force, v.TransferMode)
 		}
 	}
 }

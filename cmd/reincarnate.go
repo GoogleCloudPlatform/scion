@@ -634,11 +634,9 @@ const (
 // recreate the agent on the target instead.
 const moveForceHint = "--force recreates the agent on the target instead, giving up its local state (see --dry-run --force)."
 
-// printMoveForceHint prints moveForceHint when the move was refused without
-// --force at a check a forced move re-evaluates (same_export,
-// workspace_on_export, or a placement-caused target_profile or
-// target_health refusal) and the hub says a forced move supports this
-// agent's workspace (error details forceWouldApply).
+// printMoveForceHint prints moveForceHint when a move refused without
+// --force carries forceWouldApply in its error details: the hub decides
+// when a forced move would apply.
 func printMoveForceHint(w io.Writer, err error, force bool) {
 	if force {
 		return
@@ -647,21 +645,8 @@ func printMoveForceHint(w io.Writer, err error, force bool) {
 	if !errors.As(err, &apiErr) || apiErr.Details == nil {
 		return
 	}
-	if would, _ := apiErr.Details["forceWouldApply"].(bool); !would {
-		return
-	}
-	v := moveVerdictFromError(err)
-	if v == nil {
-		return
-	}
-	for _, c := range v.Checks {
-		if c.Result == "failed" {
-			switch c.Name {
-			case "same_export", "workspace_on_export", "target_profile", "target_health":
-				_, _ = fmt.Fprintln(w, moveForceHint)
-			}
-			return
-		}
+	if would, _ := apiErr.Details["forceWouldApply"].(bool); would {
+		_, _ = fmt.Fprintln(w, moveForceHint)
 	}
 }
 

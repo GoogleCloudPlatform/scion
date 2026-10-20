@@ -110,10 +110,13 @@ func TestReincarnateMove_ForceDryRun_RecreateVerdictNoSideEffects(t *testing.T) 
 // forced move itself exists, without any side effect.
 func TestReincarnateMove_ForceReal_RecreateNotEnabled(t *testing.T) {
 	f := setupForceMoveFixture(t, true, nil)
+	reserveBrokerSlot(t, f.s, f.src, f.agent.ID)
 	count := f.agentCount(t)
 	rec := f.reincarnate(t, ReincarnateAgentRequest{Handoff: "h", TargetBroker: f.dst.ID, ForceMove: true})
 	require.Equal(t, http.StatusNotImplemented, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "forced moves are not enabled yet")
+	assert.EqualValues(t, 1, brokerReservationCount(t, f.s, f.src.ID), "the reservation stays on the source")
+	assert.EqualValues(t, 0, brokerReservationCount(t, f.s, f.dst.ID))
 	f.assertNoMoveSideEffects(t, count)
 }
 
@@ -172,6 +175,22 @@ func TestReincarnateMove_ForceWithoutTarget_Returns400(t *testing.T) {
 	rec := f.reincarnate(t, ReincarnateAgentRequest{DryRun: true, ForceMove: true})
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "forceMove needs targetBroker")
+	f.assertNoMoveSideEffects(t, count)
+}
+
+// A3 (O1): forceMove with a target that resolves to the agent's current
+// broker is a 400 before any plan, on a dry run too.
+func TestReincarnateMove_ForceToCurrentBroker_Returns400(t *testing.T) {
+	f := setupForceMoveFixture(t, true, nil)
+	count := f.agentCount(t)
+	for _, dryRun := range []bool{true, false} {
+		for _, target := range []string{f.src.ID, f.src.Slug} {
+			rec := f.reincarnate(t, ReincarnateAgentRequest{DryRun: dryRun, Handoff: "h", TargetBroker: target, ForceMove: true})
+			require.Equal(t, http.StatusBadRequest, rec.Code, "dryRun=%v target=%s: %s", dryRun, target, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), "--force applies only to a move to another broker")
+			assert.NotContains(t, rec.Body.String(), `"plan"`)
+		}
+	}
 	f.assertNoMoveSideEffects(t, count)
 }
 

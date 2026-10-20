@@ -187,6 +187,7 @@ func refusalError(t *testing.T, status int, body string) error {
 	return err
 }
 
+// The hint depends on forceWouldApply alone: the hub decides.
 func TestPrintMoveForceHint(t *testing.T) {
 	refusal := func(check string, would bool) string {
 		w := ""
@@ -205,11 +206,9 @@ func TestPrintMoveForceHint(t *testing.T) {
 	}{
 		{"same_export, would apply", "same_export", true, false, true},
 		{"workspace_on_export, would apply", "workspace_on_export", true, false, true},
+		{"target_profile, would apply", "target_profile", true, false, true},
 		{"already forced", "same_export", true, true, false},
 		{"hub says force would not apply", "same_export", false, false, false},
-		{"placement-caused target_profile", "target_profile", true, false, true},
-		{"placement-caused target_health", "target_health", true, false, true},
-		{"other failing check", "workspace_storage_reported", true, false, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -226,6 +225,29 @@ func TestPrintMoveForceHint(t *testing.T) {
 	var out bytes.Buffer
 	printMoveForceHint(&out, errors.New("plain"), false)
 	assert.Empty(t, out.String())
+}
+
+// A3 (O2): --dry-run --force --json writes the response, with the transfer
+// mode and consequences, as JSON on stdout, and none of the human-only
+// lines.
+func TestReincarnateForce_DryRunJSON(t *testing.T) {
+	withBrokerFlags(t, "b2", true)
+	withForceFlag(t, true)
+	prevFormat := outputFormat
+	t.Cleanup(func() { outputFormat = prevFormat })
+	outputFormat = "json"
+	hubCtx, _ := forceHub(t, http.StatusOK, recreateVerdictBody, http.StatusAccepted, `{}`)
+	var runErr error
+	stdout := captureStdout(t, func() { runErr = reincarnateAgentViaHub(hubCtx, "agent-1", "", false) })
+	require.NoError(t, runErr)
+	var resp hubclient.ReincarnateAgentResponse
+	require.NoError(t, json.Unmarshal([]byte(stdout), &resp), stdout)
+	require.NotNil(t, resp.MoveVerdict)
+	assert.Equal(t, "recreate", resp.MoveVerdict.TransferMode)
+	assert.Len(t, resp.MoveVerdict.Consequences, 4)
+	for _, human := range []string{"Transfer mode:", "Move consequences:", "will not survive", "--force was not needed", "Dry run only"} {
+		assert.NotContains(t, stdout, human)
+	}
 }
 
 // Brokers do not advertise forced moves until the move itself exists.
