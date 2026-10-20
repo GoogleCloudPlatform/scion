@@ -241,7 +241,9 @@ func launchPhase(a *Agent) string {
 // not_launched failures carry a code (dispatch_failed), which ends the wait
 // through launchDone's code rule (pkg/hub/launch_dispatch.go,
 // dispatchLaunching). Without a code the wait follows the agent: running,
-// error or stopped, not found, or the budget (ErrLaunchWaitTimeout).
+// error or stopped, not found, or the budget (ErrLaunchWaitTimeout). The
+// CLI's wait (failedLaunchEndReason in cmd/launch_wait.go) uses the same end
+// reasons.
 func failedLaunchEndReason(reason string) bool {
 	switch reason {
 	case "failed", "timed_out", "lost":
