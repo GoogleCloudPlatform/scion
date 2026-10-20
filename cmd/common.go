@@ -348,10 +348,27 @@ func loadSettingsForTarget(resolvedPath string) (*config.Settings, error) {
 // prompt (see hubsync.EnsureHubReady). There is no per-command agent
 // reconcile.
 func requireHub(projectPath string) (*HubContext, error) {
+	return requireHubWith(projectPath, false)
+}
+
+// requireHubForUpload is requireHub for a command that uploads to, or reads
+// from, the Hub in the scope templateScopeFromGlobalFlag picks. In the
+// global scope (--global) no project ID is read, so the project is not
+// linked to the Hub or registered (ptone/scion#5217); in the project scope
+// it is requireHub.
+func requireHubForUpload(projectPath string) (*HubContext, error) {
+	return requireHubWith(projectPath, templateScopeFromGlobalFlag() == "global")
+}
+
+// requireHubWith is requireHub with skipProjectLink passed to
+// hubsync.EnsureHubReady as SkipProjectLink. A hub profile is handled
+// first, so its refusal of --global applies whatever skipProjectLink is.
+func requireHubWith(projectPath string, skipProjectLink bool) (*HubContext, error) {
 	if hubProfileSelected() {
 		return profileAgentHubContext()
 	}
 	opts := hubsync.EnsureHubReadyOptions{
+		SkipProjectLink:  skipProjectLink,
 		AutoConfirm:      autoConfirm,
 		NonInteractive:   nonInteractive,
 		EndpointOverride: hubEndpoint,
@@ -410,6 +427,23 @@ func detectCrossProjectTarget(cmd *cobra.Command) string {
 		return ""
 	}
 	return projectPath
+}
+
+// localProjectDir returns the project directory whose local files (such as
+// harness-configs) a command reads: the directory named with --project, or
+// the one found from the working directory. A --project value that is a hub
+// project reference names no local directory, so it returns "" and only
+// the global directory is read; the hub call gets the reference itself
+// (ptone/scion#5217).
+func localProjectDir() string {
+	if projectPath != "" && hubsync.IsHubProjectRef(projectPath) {
+		return ""
+	}
+	dir, err := config.GetResolvedProjectDir(projectPath)
+	if err != nil {
+		return ""
+	}
+	return dir
 }
 
 // CheckAgentsGitignore verifies that .scion/agents/ is listed in .gitignore
@@ -1187,9 +1221,18 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 	if debugMode {
 		util.Debugf("[startup] existing-agent check completed in %s (err=%v)", time.Since(existingCheckStart), getErr)
 	}
-	existingPhase := ""
+	// existingPhase is the phase the hub decides from: the resume memory of
+	// a failed start (launch.resumePhase, ptone/scion#4669) when the hub
+	// reports one, else the stored phase. It must match the hub's
+	// store.EffectiveRestingPhase reads in classifyExistingAgent.
+	// existingPhaseText is what the flags warning shows.
+	existingPhase, existingPhaseText := "", ""
 	if getErr == nil && existing != nil {
-		existingPhase = existing.Phase
+		existingPhase, existingPhaseText = existing.Phase, existing.Phase
+		if existing.Launch != nil && existing.Launch.ResumePhase != "" {
+			existingPhase = existing.Launch.ResumePhase
+			existingPhaseText = fmt.Sprintf("%s, resumes as %s", existing.Phase, existing.Launch.ResumePhase)
+		}
 	}
 	if !resume && hubStartImpliesResume(existingPhase) {
 		resume = true
@@ -1226,7 +1269,7 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 		return wrapHubError(fmt.Errorf("failed to start agent via Hub: %w", err))
 	}
 	if reusesExisting {
-		warnFlagsIgnoredForExistingAgent(cmd, agentName, existingPhase)
+		warnFlagsIgnoredForExistingAgent(cmd, agentName, existingPhaseText)
 	}
 
 	// Debug: log the response from Hub
@@ -1446,11 +1489,19 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 		// Ctrl-C (or SIGTERM) stops waiting only; the launch continues on
 		// the Hub.
 		accepted := launchActive(resp.Agent) || workspaceFinalized
+		// A launch the create answer already shows ended is an earlier
+		// attempt (a synchronous answer, or before a finalize's start):
+		// its error must not end this wait.
+		priorLaunchID := ""
+		if resp.Agent != nil && resp.Agent.Launch != nil && !resp.Agent.Launch.Active {
+			priorLaunchID = resp.Agent.Launch.ID
+		}
 		waited, err := waitForAgentLaunchWithSignals(launchWaitOptions{
-			AgentName:  agentName,
-			BudgetFrom: budgetFrom,
-			Accepted:   accepted,
-			LaunchID:   launchID,
+			AgentName:     agentName,
+			BudgetFrom:    budgetFrom,
+			Accepted:      accepted,
+			LaunchID:      launchID,
+			PriorLaunchID: priorLaunchID,
 			Get: func(ctx context.Context) (*hubclient.Agent, error) {
 				return hubCtx.Client.ProjectAgents(projectID).Get(ctx, agentName)
 			},

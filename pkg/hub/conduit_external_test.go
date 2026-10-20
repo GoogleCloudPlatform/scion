@@ -52,7 +52,9 @@ func externalOptions(t *testing.T, f *externalFixture) ConduitExternalOptions {
 	t.Helper()
 	auth, err := relay.NewHMACPeerAuthFromPeerSecret(relay.HMACPeerAuthConfig{Secret: append([]byte(nil), externalPeerSecret...), SelfID: "hub-ext"})
 	require.NoError(t, err)
-	return ConduitExternalOptions{InstanceID: "hub-ext", PeerAuth: auth, Store: f.regStore, Registry: f.reg, Clock: clock.NewFake(time.Now()),
+	// The clock also drives the stream re-check and its renewal driver, so it
+	// starts at the clock the fixture mints grants on (newConduitFixture).
+	return ConduitExternalOptions{InstanceID: "hub-ext", PeerAuth: auth, Store: f.regStore, Registry: f.reg, Clock: clock.NewFake(f.clock.Now()),
 		replayStore: testReplayStore(t)}
 }
 

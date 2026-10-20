@@ -63,9 +63,23 @@ interface MaintenanceOperationWithRun extends MaintenanceOperation {
   lastRun?: MaintenanceRun;
 }
 
+/**
+ * Last systemd unit check of Rebuild from git, from the unitStatus field of
+ * GET /api/v1/admin/maintenance/operations. Only match and drift are stored.
+ */
+interface UnitDriftStatus {
+  status: 'match' | 'drift';
+  checkedAt: string;
+  commit: string;
+  branch: string;
+  service: string;
+  summary?: string[];
+}
+
 interface MaintenanceResponse {
   migrations: MaintenanceOperation[] | null;
   operations: MaintenanceOperationWithRun[] | null;
+  unitStatus?: UnitDriftStatus;
 }
 
 interface UpdateCommitInfo {
@@ -362,6 +376,10 @@ export class ScionPageAdminMaintenance extends LitElement {
   /** Stored update-available notification (from scheduled check). */
   @state()
   private updateAvailable: UpdateAvailableResponse | null = null;
+
+  /** Last systemd unit check of Rebuild from git (null when none). */
+  @state()
+  private unitStatus: UnitDriftStatus | null = null;
 
   /** Whether an update-binary operation is being triggered. */
   @state()
@@ -863,6 +881,26 @@ export class ScionPageAdminMaintenance extends LitElement {
       font-weight: 600;
     }
 
+    .unit-drift-banner {
+      align-items: flex-start;
+      border-color: var(--sl-color-warning-300, #fcd34d);
+      background: var(--sl-color-warning-50, #fffbeb);
+    }
+
+    .unit-drift-banner sl-icon {
+      color: var(--sl-color-warning-600, #d97706);
+    }
+
+    .unit-drift-banner .unit-drift-summary {
+      margin-top: 0.5rem;
+    }
+
+    .unit-drift-banner .unit-drift-note {
+      display: block;
+      margin-top: 0.25rem;
+      font-size: 0.8125rem;
+    }
+
     .update-available-banner .banner-actions {
       display: flex;
       gap: 0.5rem;
@@ -1041,6 +1079,10 @@ export class ScionPageAdminMaintenance extends LitElement {
       }
       if (JSON.stringify(this.operations) !== JSON.stringify(newOperations)) {
         this.operations = newOperations;
+      }
+      const newUnitStatus = data.unitStatus ?? null;
+      if (JSON.stringify(this.unitStatus) !== JSON.stringify(newUnitStatus)) {
+        this.unitStatus = newUnitStatus;
       }
 
       // Start polling if any migration or operation run is active.
@@ -1327,8 +1369,48 @@ export class ScionPageAdminMaintenance extends LitElement {
 
   private renderContent() {
     return html`
-      ${this.renderUpdateAvailableBanner()} ${this.renderMaintenanceMode()}
-      ${this.renderQuickActions()} ${this.renderMigrations()} ${this.renderOperations()}
+      ${this.renderUpdateAvailableBanner()} ${this.renderUnitDriftBanner()}
+      ${this.renderMaintenanceMode()} ${this.renderQuickActions()} ${this.renderMigrations()}
+      ${this.renderOperations()}
+    `;
+  }
+
+  /**
+   * Banner shown while the last Rebuild from git found the installed systemd
+   * unit different from the template. It carries the full remediation, as the
+   * run log may be missing or superseded. All values are text bindings.
+   */
+  private renderUnitDriftBanner() {
+    const st = this.unitStatus;
+    if (!st || st.status !== 'drift') {
+      return nothing;
+    }
+    const where = st.commit ? `commit ${st.commit}` : 'the checked-out commit';
+    const rev = st.branch ? `${where} on branch ${st.branch}` : where;
+    const checked = this.formatDateTime(st.checkedAt) || 'unknown time';
+    const summary = st.summary ?? [];
+    return html`
+      <div class="update-available-banner unit-drift-banner">
+        <sl-icon name="exclamation-triangle"></sl-icon>
+        <span class="banner-text">
+          <strong>Re-provision needed:</strong> the installed systemd unit for ${st.service} differs
+          from the template (checked ${checked}). Rebuild from git updates the binary only.
+          <br />
+          To apply the template, run <code>scripts/starter-hub/gce-start-hub.sh --full</code> from
+          the workstation and checkout used to provision this hub, at ${rev}, with the same flags
+          and environment used at provisioning (for example --no-tls, HUB_BASE_URL). Running it
+          without the original flags can reconfigure the hub (for example enable TLS on a --no-tls
+          hub). --full also re-applies settings.yaml, hub.env, the Caddyfile and the sudoers rules
+          from that workstation, then restarts the hub.
+          <br />
+          Intentional local changes belong in a drop-in (${st.service}.d), which is not compared.
+          This notice clears after a Rebuild from git reports a match.
+          ${summary.length
+            ? html`<div class="result-log unit-drift-summary">${summary.join('\n')}</div>`
+            : nothing}
+          <span class="unit-drift-note">Details may also be in the Rebuild from git run log.</span>
+        </span>
+      </div>
     `;
   }
 

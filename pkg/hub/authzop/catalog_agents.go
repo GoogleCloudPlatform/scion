@@ -24,10 +24,10 @@ var agentOperations = []OperationSpec{
 		Domain:      "agent",
 		Description: "Create an agent in a project",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents", Method: "POST", Response: ResponseCredential},
 			// The project form takes the project from the path; both forms
 			// authorize agent.create on that project (authorizeAgentCreate).
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents", Method: "POST", Response: ResponseCredential},
 		},
 		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
@@ -157,8 +157,8 @@ var agentOperations = []OperationSpec{
 		Domain:      "agent",
 		Description: "Submit environment values to an agent",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/env", Method: "POST"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}/env", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/env", Method: "POST", Response: ResponseCallerSpecific},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}/env", Method: "POST", Response: ResponseCallerSpecific},
 		},
 		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
@@ -236,8 +236,8 @@ var agentOperations = []OperationSpec{
 		Domain:      "agent",
 		Description: "Read a single agent's metadata by ID",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}", Method: "GET"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}", Method: "GET", Response: ResponseCallerSpecific},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}", Method: "GET", Response: ResponseCallerSpecific},
 		},
 		// An agent delegated credential is admitted here behind
 		// hub.agent_delegation (agentDelegationAdmittedRoutes in pkg/hub).
@@ -260,9 +260,10 @@ var agentOperations = []OperationSpec{
 	{
 		ID:          "agent.list",
 		Domain:      "agent",
-		Description: "List agents within the caller's authorized project scope",
+		Description: "List agents within the caller's authorized project scope. A user access token needs agent:list on either boundary: a project token lists only its boundary project's agents. The project form lists one project's agents and decides agent.list on that project",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/agents", Method: "GET"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
@@ -294,7 +295,11 @@ var agentOperations = []OperationSpec{
 			{Package: "pkg/hub", Function: "TestRS2_ConstraintChangeCursorReplay"},
 			{Package: "pkg/hub", Function: "TestRS2_TransitiveGroupAccess"},
 			{Package: "pkg/hub", Function: "TestRS2_FilterCompositionMatrix"},
+			{Package: "pkg/hub", Function: "TestListCaveats_ProjectBoundaryRequiresListPermissionInCeiling"},
+			{Package: "pkg/hub", Function: "TestProjectAgentListToken_RequiresAgentListOnTheProject"},
+			{Package: "pkg/hub", Function: "TestListFilters_CannotEnlargeTokenResults"},
 		},
+		Bearer: AdmitOn(BearerTargetListScope, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
 		ID:          "agent.update",
@@ -303,8 +308,8 @@ var agentOperations = []OperationSpec{
 		EntryPoints: []EntryPoint{
 			// handleAgentByID (handlers_agents_core.go) dispatches the
 			// no-action, no-sub-resource case on r.Method: PATCH, not PUT.
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}", Method: "PATCH"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}", Method: "PATCH"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}", Method: "PATCH", Response: ResponseCallerSpecific},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}", Method: "PATCH", Response: ResponseCallerSpecific},
 		},
 		Principals:  []PrincipalKind{PrincipalUser},
 		Credentials: []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
@@ -370,8 +375,8 @@ var agentOperations = []OperationSpec{
 		Domain:      "agent",
 		Description: "Sync an agent's workspace from or to the agent",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/workspace/sync-from", Method: "POST"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/workspace/sync-to", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/workspace/sync-from", Method: "POST", Response: ResponseCredential},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/workspace/sync-to", Method: "POST", Response: ResponseCredential},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/workspace/sync-to/finalize", Method: "POST"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
@@ -388,15 +393,20 @@ var agentOperations = []OperationSpec{
 	{
 		ID:          "agent.logs.read",
 		Domain:      "agent",
-		Description: "Read an agent's runtime logs and Cloud Logging entries",
+		Description: "Read an agent's runtime logs and Cloud Logging entries, and stream its Cloud Logging entries. A stream opened by a token ends once the token stops validating or loses agent.read",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/logs", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}/logs", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/cloud-logs", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}/cloud-logs", Method: "GET"},
+			{Kind: EntryPointSSE, Pattern: "/api/v1/agents/{id}/cloud-logs/stream", Method: "GET"},
+			{Kind: EntryPointSSE, Pattern: "/api/v1/projects/{projectId}/agents/{id}/cloud-logs/stream", Method: "GET"},
 		},
 		// An agent caller reads only agents of its own project
-		// (checkAgentReadScope and the handlers' project check).
+		// (checkAgentReadScope and the handlers' project check). The log
+		// stream re-checks a user access token on every
+		// streamCredentialRecheckInterval and ends once the token stops
+		// validating or loses agent.read.
 		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
 		ResourceResolver: "agent-from-url",
@@ -411,14 +421,20 @@ var agentOperations = []OperationSpec{
 	{
 		ID:          "agent.messages.read",
 		Domain:      "agent",
-		Description: "Read an agent's message history and message logs",
+		Description: "Read and stream an agent's message history and message logs. agent.attach gives the full history; agent.read alone gives the messages the caller sent or received. A stream opened by a token ends once the token stops validating or loses the permission that admitted it",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/messages", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/message-logs", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}/message-logs", Method: "GET"},
+			{Kind: EntryPointSSE, Pattern: "/api/v1/agents/{id}/messages/stream", Method: "GET"},
+			{Kind: EntryPointSSE, Pattern: "/api/v1/agents/{id}/message-logs/stream", Method: "GET"},
+			{Kind: EntryPointSSE, Pattern: "/api/v1/projects/{projectId}/agents/{id}/message-logs/stream", Method: "GET"},
 		},
 		// agent.attach on the agent gives the full history; agent.read alone
-		// gives only the messages the caller took part in.
+		// gives only the messages the caller took part in. The streams apply
+		// the same rule for every caller, and a stream opened by a user
+		// access token ends once the token stops validating or loses the
+		// permission that admitted it.
 		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
 		ResourceResolver: "agent-from-url",
@@ -506,7 +522,7 @@ var agentOperations = []OperationSpec{
 	{
 		ID:          "agent.attach",
 		Domain:      "agent",
-		Description: "Attach to an agent session via WebSocket",
+		Description: "Attach to an agent session via WebSocket. A session opened by a token closes with 4401 once the token stops validating or loses agent.attach",
 		EntryPoints: []EntryPoint{
 			// The live route dispatches on /pty (pkg/hub/pty_handlers.go
 			// handleAgentPTY, invoked from handlers_agents_core.go's
@@ -670,8 +686,8 @@ var agentOperations = []OperationSpec{
 		Domain:      "agent",
 		Description: "Refresh the calling agent's own hub token",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/token/refresh", Method: "POST"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/refresh-token", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/token/refresh", Method: "POST", Response: ResponseCredential},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/refresh-token", Method: "POST", Response: ResponseCredential},
 		},
 		Principals:       []PrincipalKind{PrincipalAgent},
 		Credentials:      []CredentialKind{CredentialAgentJWT},
@@ -742,7 +758,7 @@ var agentOperations = []OperationSpec{
 		Description: "List, read and write the secrets available to the calling agent: its project's and its creating user's",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/secrets", Method: "GET"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/secrets/{key}", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/secrets/{key}", Method: "GET", Response: ResponseCredential},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/secrets/{key}", Method: "PUT"},
 		},
 		Principals:       []PrincipalKind{PrincipalAgent},

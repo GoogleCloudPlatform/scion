@@ -328,7 +328,7 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 		return errors.New("flat Runtime Broker host: co-located mode requires the Hub")
 	}
 
-	versionedSettings, _, vsErr := config.LoadEffectiveSettings("")
+	versionedSettings, _, vsErr := loadServerEffectiveSettings()
 	var vsBroker *config.V1BrokerConfig
 	if vsErr == nil && versionedSettings != nil && versionedSettings.Server != nil {
 		vsBroker = versionedSettings.Server.Broker
@@ -728,8 +728,8 @@ func colocatedSettingsOverlayEnabled(cfg *config.GlobalConfig, hubSrv *hub.Serve
 
 // installColocatedSettingsOverlay installs the global settings overlay for a
 // co-located DB-backed Hub, so that the broker's config.LoadEffectiveSettings
-// calls pick up the stored runtimes, profiles, harness_configs and
-// image_registry instead of only the settings file. It seeds
+// calls pick up the stored runtimes, profiles, harness_configs and the hub's
+// image_registry layers instead of only the settings file. It seeds
 // the overlay from the current operational settings snapshot so stored
 // values apply from the first dispatch; later changes arrive through
 // hub.ApplySnapshot. Flat instances never read profiles or runtimes from it.
@@ -742,7 +742,10 @@ func installColocatedSettingsOverlay(cfg *config.GlobalConfig, hubSrv *hub.Serve
 	config.SetGlobalSettingsOverlay(overlay)
 	if ops := hubSrv.GetOperationalSettings(); ops != nil {
 		snap := ops.Snapshot()
-		overlay.Update(snap.Runtimes, snap.Profiles, snap.HarnessConfigs, snap.ImageRegistry)
+		overlay.Update(snap.Runtimes, snap.Profiles, snap.HarnessConfigs)
+		// The startup ApplySnapshot ran before this install, so the
+		// image_registry layers are fed here too (ptone/scion#3916).
+		overlay.UpdateImageRegistryInputs(ops.ImageRegistryHubInputs())
 		log.Printf("Settings overlay installed for co-located broker (runtimes=%d, profiles=%d, harness_configs=%d)",
 			len(snap.Runtimes), len(snap.Profiles), len(snap.HarnessConfigs))
 	} else {
@@ -773,7 +776,7 @@ func enableColocatedProfileReferences(ctx context.Context, hubSrv *hub.Server) {
 		return
 	}
 	hubSrv.EnableProfileReferences(ctx, overlay, brokerID, globalDir)
-	_, _, _ = config.LoadEffectiveSettings("")
+	_, _, _ = config.LoadEffectiveSettings(globalDir)
 }
 
 // startFlatColocatedHeartbeat runs the co-located internal heartbeat for one

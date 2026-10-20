@@ -75,6 +75,10 @@ type outFrame struct {
 	size     int64
 	// sent runs on the writer goroutine after the frame was written.
 	sent func()
+	// claim, when set, runs on the writer goroutine before the frame is
+	// handed to the transport. When it returns false the sender has
+	// abandoned the frame, and it is dropped without being written.
+	claim func() bool
 }
 
 // scheduler orders outbound frames: control first, then data round-robin
