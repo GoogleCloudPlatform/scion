@@ -5,6 +5,7 @@ Copyright 2026 The Scion Authors.
 package log
 
 import (
+	"context"
 	"io"
 	stdlog "log"
 	"log/slog"
@@ -138,8 +139,11 @@ func TestSetLogPathBeforeInitStillRunsLazyInit(t *testing.T) {
 	if !debug.Load() {
 		t.Fatal("lazy init did not read SCION_DEBUG")
 	}
-	if _, ok := slog.Default().Handler().(*slogHandler); !ok {
-		t.Fatalf("slog default handler = %T, want *slogHandler", slog.Default().Handler())
+	// Lazy init replaced the discard handler with the package's handler
+	// (slogHandler behind the error-attribute sanitizer), which admits
+	// debug records under SCION_DEBUG.
+	if h := slog.Default().Handler(); h == slog.DiscardHandler || !h.Enabled(context.Background(), slog.LevelDebug) {
+		t.Fatalf("slog default handler = %T, want the package's handler", h)
 	}
 	mu.Lock()
 	gotPath := logPath

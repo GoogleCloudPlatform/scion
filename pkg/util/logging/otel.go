@@ -104,7 +104,7 @@ func NewOTelHandler(component string, lp log.LoggerProvider) slog.Handler {
 	if lp == nil {
 		return nil
 	}
-	return &sanitizingHandler{inner: otelslog.NewHandler(component, otelslog.WithLoggerProvider(lp))}
+	return WithSanitizedErrorAttrs(otelslog.NewHandler(component, otelslog.WithLoggerProvider(lp)))
 }
 
 // SetupWithOTel initializes the global logger with optional OTel bridge.

@@ -110,9 +110,15 @@ func newStdoutHandler(w io.Writer, opts *slog.HandlerOptions, component, hubName
 	return h
 }
 
-// sanitizingHandler wraps a handler that has no ReplaceAttr hook (the
-// OTel log bridge) so that every error-valued attribute it receives,
-// including pre-bound and grouped ones, is already a sanitized string.
+// WithSanitizedErrorAttrs wraps h, a handler with no ReplaceAttr hook of
+// its own (the OTel log bridge, the agent-container log), so that every
+// error-valued attribute it receives, including pre-bound and grouped
+// ones, is already a sanitized string.
+func WithSanitizedErrorAttrs(h slog.Handler) slog.Handler {
+	return &sanitizingHandler{inner: h}
+}
+
+// sanitizingHandler is the handler WithSanitizedErrorAttrs returns.
 type sanitizingHandler struct {
 	inner slog.Handler
 }
