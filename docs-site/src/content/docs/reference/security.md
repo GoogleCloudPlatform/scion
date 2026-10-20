@@ -60,7 +60,7 @@ Runtime Brokers represent high-trust infrastructure. They use HMAC-based request
 
 ### 1.5 Broker Registration and Association Credentials
 
-User-credentialed broker operations admit a fixed set of credential kinds. A Runtime Broker HMAC request that names a user on whose behalf it acts is **not** a user credential for registering, re-registering, rotating, associating a broker with a project or removing an association; broker HMAC on its own is admitted only for the broker's self-maintenance (heartbeat, control channel, rotating its own secret).
+User-credentialed broker operations admit a fixed set of credential kinds. A Runtime Broker HMAC request that names a user on whose behalf it acts is **not** a user credential for registering, re-registering, rotating, associating a broker with a project or removing an association; broker HMAC on its own is admitted only for the broker's self-maintenance (heartbeat, control channel, rotating its own secret, and reading and writing its own env vars and secrets).
 
 | Operation | Endpoint | Admitted credentials | Additional checks |
 |---|---|---|---|
@@ -70,10 +70,10 @@ User-credentialed broker operations admit a fixed set of credential kinds. A Run
 | Associate with a project | `POST /api/v1/projects/{id}/providers`, `brokerId` in `POST /api/v1/projects/register`, explicit broker on agent create | Interactive session, dev credential, or UAT for the project side | `project.update` on the project **and** `broker.update` on the broker (owner or super-admin). No UAT selector carries `broker.update`. |
 | Remove an association | `DELETE /api/v1/projects/{id}/providers/{brokerId}` | Interactive session, dev credential, UAT | `project.update` on the project, or `broker.update` on that broker. |
 | Use an associated broker | Agent creation | As for agent creation | Allowed for auto-provide brokers, for brokers associated with the project with the owner's consent, and for holders of `broker.dispatch` on the broker. |
-| Read env vars and secret metadata | Runtime Broker env and secret routes (read) | Broker HMAC for its own ID; interactive session, dev credential, hub-boundary UAT with `broker:read` | `broker.read` on the broker, plus the owner relationship or `broker.update`. Sensitive values are masked. |
-| Write env vars or secrets, update, deregister | Runtime Broker env and secret routes (write), Runtime Broker update and deregistration | Broker HMAC for its own material; interactive session or dev credential | `broker.update` on the broker (`broker.delete` to deregister). No UAT is admitted. |
-| Send a heartbeat as a user | Runtime Broker heartbeat | Broker HMAC for its own ID; interactive session or dev credential | `broker.update` on the broker from a role binding; the owner relationship does not apply. |
-| Pull or remove an image on a named broker | Harness-config image operations | As for the operation | `broker.dispatch` on that broker is checked first, also for an auto-provide broker. |
+| Read env vars and secret metadata | Runtime Broker env and secret routes (read) | Runtime Broker HMAC for its own ID; interactive session, dev credential, hub-boundary UAT with `broker:read` | `broker.read` on the Runtime Broker, plus the owner relationship or `broker.update`. Sensitive values are masked. |
+| Write env vars or secrets, update, deregister | Runtime Broker env and secret routes (write), Runtime Broker update and deregistration | Runtime Broker HMAC for its own env vars and secrets (not update or deregistration); interactive session or dev credential | `broker.update` on the Runtime Broker (`broker.delete` to deregister). No UAT is admitted. |
+| Send a heartbeat as a user | Runtime Broker heartbeat | Runtime Broker HMAC for its own ID; interactive session or dev credential | `broker.update` on the Runtime Broker from a role binding; the owner relationship does not apply. |
+| Pull or remove an image on a named Runtime Broker | Harness-config image operations | As for the operation | `broker.dispatch` on that Runtime Broker admits any caller. Without it, a user access token is refused, even on an auto-provide Runtime Broker; a session or dev credential falls back to the rule for using an associated Runtime Broker. |
 
 Registration never associates a broker with a project, and a project's default runtime broker must already be one of its providers. Register, re-register, rotate, link and unlink audit events record the credential kind and credential ID (a token ID or broker ID; never a secret) alongside the user.
 

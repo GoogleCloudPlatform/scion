@@ -546,7 +546,7 @@ When using slug-based query paths or addressing agents via `agent:<name>` (e.g.,
 
 #### Notification Delivery Retries
 
-If a notification cannot be delivered to a subscriber agent (for example because its Runtime Broker is not connected), it is not marked as sent. The Hub tries again on a sweep about every 5 minutes, and again when the Runtime Broker reconnects, for up to 24 hours after the notification was created. Each notification records its number of delivery attempts (`dispatchAttempts`) and an outcome (`dispatchOutcome`): `delivered`, or `failed` once the 24 hours have passed or the subscription, subscriber or watched agent is gone. The outcome is empty while delivery is still pending.
+If a notification cannot be delivered to a subscriber agent (for example because its Runtime Broker is not connected), it is not marked as sent. The Hub tries again on a sweep about every 5 minutes, and again when the Runtime Broker reconnects, for up to 24 hours after the notification was created. Each notification records its number of delivery attempts (`dispatchAttempts`) and an outcome (`dispatchOutcome`): `delivered`, or `failed` once the 24 hours have passed or the subscription, subscriber or watched agent is gone. The outcome is empty while delivery is still pending. A subscriber agent that has no Runtime Broker is not attempted, so its notification stays pending and does not reach the 24-hour limit.
 
 ### 4. Subscription Management and Agent Self-Service
 

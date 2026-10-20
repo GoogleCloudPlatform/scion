@@ -158,6 +158,7 @@ For private repositories, Scion resolves skills using the project's configured g
    - uri: gh://acme-corp/partner-skills/my-skill@v1.2.3?token=PARTNER_GITHUB_TOKEN
    ```
    Scion retrieves the secret from the `ProvisionCredentials` channel during provisioning. The secret value is processed completely in memory and is **never** forwarded to the agent's container environment or harness scripts.
+3. **Runtime Broker fallback**: with no default credential, a plain `gh://` URI uses `GITHUB_TOKEN` from the environment of the Runtime Broker process (on a workstation, the `scion server` process).
 
 #### Input validation & auto-normalization
 

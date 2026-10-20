@@ -90,7 +90,7 @@ If you request a branch that is already checked out in another worktree (e.g., b
 - A warning is logged: `Relying on existing worktree for branch '...'`. With the workstation server it appears in `~/.scion/server.log`, not in the CLI.
 - If that worktree is your own checkout (the agent is named after the branch you have checked out), the agent edits your working tree directly.
 - This allows multiple agents to collaborate on the same branch/worktree if desired.
-- An existing worktree is reused only while its directory is still in place. If git still lists the branch in a worktree that no longer exists, the start fails with an error that names that path; run `git worktree remove "<path>"` in the repository and start again. Scion removes only the agent's own worktree entry, when provisioning and when cleaning up, and never prunes other worktrees.
+- An existing worktree is reused only while its directory is still in place. If git still lists the branch in a worktree that no longer exists, the start fails with an error that names that path; run `git worktree remove "<path>"` in the repository and start again. Scion removes only the agent's own worktree entry, when provisioning and when cleaning up, and does not prune other worktrees (except when a Runtime Broker cannot remove a partly created worktree; it then prunes stale entries so the start can be retried).
 
 ---
 

@@ -116,7 +116,6 @@ To continue, run `scion start <agent>`. It starts the agent the way a start from
 
 `scion list` shows the reason next to the phase, for example `halted (preempted)` or `halted (out of memory)`. In Hosted mode, the agent's creator is notified once per halt (unless they chose their own notification triggers by subscribing), and so is anyone subscribed to the `HALTED` notification trigger (see [Messaging & Notifications](/scion/hosted/user/messaging/#halted-agent-notifications)). Lifecycle hooks can use the `halted` trigger (see [Lifecycle Hooks](/scion/hosted/ha/lifecycle-hooks/#triggers)).
 
-
 #### Stalled, offline, and auto-suspend
 
 The `stalled` activity is set by the platform when an agent's heartbeat is still arriving (the process is alive) but no activity events have been seen for a while (default: 5 minutes). It flags an agent that appears hung. Agents that have declared themselves `blocked` are excluded from stalled detection. If `server.hub.auto_suspend_stalled` is on (off by default), the Hub also **auto-suspends** a stalled agent to reclaim its container — see [Auto-Suspend of Stalled Agents](/scion/local/agent-lifecycle/#auto-suspend-of-stalled-agents).

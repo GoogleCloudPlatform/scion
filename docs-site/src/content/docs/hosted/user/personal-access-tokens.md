@@ -266,7 +266,8 @@ The same per-request checks apply, with these limits:
   read state and notification preferences needs `inbox:read`. Both act only on your own records,
   work on a project or a hub token, and still pass the token's boundary.
 - **Limits and quotas.** Reading limit definitions, entitlements and usage needs `quota:read`;
-  creating, updating or deleting them needs `quota:create`, `quota:update` or `quota:delete`.
+  creating, updating or deleting them needs `quota:read` together with `quota:create`,
+  `quota:update` or `quota:delete`.
   These scopes can be selected only on a hub token, and your user must also hold the matching
   hub permission.
 - **Project configuration.** Setting the project messaging policy, and template and project
@@ -376,6 +377,8 @@ To use the CLI from a coding agent running on your machine, see
 Because a UAT is scoped, some operations that must be re-checked later, or that rely on
 owner or administrator shortcuts, require an unscoped sign-in (CLI or Web UI login) instead:
 
+- **Chat scheduled messages**: creating, reading, changing or cancelling a message scheduled in a
+  chat conversation.
 - **Runtime Broker registration**: creating a Runtime Broker (`POST /api/v1/brokers` and the
   embedded Runtime Broker path of project registration) admits a UAT only when it is a
   hub-boundary token carrying `broker:create` and your user holds `broker.create`; any other UAT
