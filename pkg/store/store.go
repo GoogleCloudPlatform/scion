@@ -2981,6 +2981,12 @@ type GCPServiceAccountFilter struct {
 	Email   string // Filter by SA email
 	Managed *bool  // Filter by managed status (nil = no filter)
 
+	// EmailFold filters by SA email ignoring letter case. GCP service account
+	// emails are case-insensitive and not every writer normalizes them, so a
+	// check that must find every record for an account uses this rather than
+	// Email.
+	EmailFold string
+
 	// IncludeHubScoped widens the Scope/ScopeID terms from AND to OR against
 	// hub scope: the result is everything the scope terms select, plus every
 	// hub-scoped account. Other terms (Email, Managed) still apply to the whole

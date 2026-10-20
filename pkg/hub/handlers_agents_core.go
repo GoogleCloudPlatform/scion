@@ -6230,19 +6230,25 @@ func (s *Server) ensureHostSARecord(
 ) (*store.GCPServiceAccount, error) {
 	email := broker.GCPHostServiceAccountEmail
 
-	// Every record with this email, in every scope.
-	all, err := s.store.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{Email: email})
+	// Every record with this email, in every scope. Emails are compared
+	// ignoring letter case: not every writer normalizes them, and a record
+	// that differs only in case is the same account. The store's fold
+	// predicate selects the rows and strings.EqualFold rechecks each one.
+	all, err := s.store.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{EmailFold: email})
 	if err != nil {
 		return nil, fmt.Errorf("lookup SA by email %s: %w", email, err)
 	}
 	for i := range all {
+		if !strings.EqualFold(all[i].Email, email) {
+			continue
+		}
 		if all[i].Scope != store.ScopeHub || all[i].Managed {
 			slog.WarnContext(ctx, "passthrough translation refused: host SA has a project-scoped or managed record",
 				"broker", broker.ID, "sa_id", all[i].ID, "scope", all[i].Scope, "managed", all[i].Managed)
 			return nil, errHostSARecordConflict
 		}
 	}
-	if sa := brokerHostSARecord(all, broker.ID); sa != nil {
+	if sa := brokerHostSARecord(all, email, broker.ID); sa != nil {
 		return sa, nil
 	}
 
@@ -6288,14 +6294,14 @@ func (s *Server) ensureHostSARecord(
 		// Race condition: another request may have created the record
 		// between our lookup and create. Try the broker-bound lookup again.
 		again, lookupErr := s.store.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
-			Email:   email,
-			Scope:   store.ScopeHub,
-			ScopeID: broker.ID,
+			EmailFold: email,
+			Scope:     store.ScopeHub,
+			ScopeID:   broker.ID,
 		})
 		if lookupErr != nil {
 			return nil, fmt.Errorf("create SA %s: %w (retry lookup: %v)", email, err, lookupErr)
 		}
-		if existing := brokerHostSARecord(again, broker.ID); existing != nil {
+		if existing := brokerHostSARecord(again, email, broker.ID); existing != nil {
 			return existing, nil
 		}
 		return nil, fmt.Errorf("create SA %s: %w", email, err)
@@ -6306,11 +6312,12 @@ func (s *Server) ensureHostSARecord(
 	return sa, nil
 }
 
-// brokerHostSARecord returns the record in rows that translation created for
-// brokerID, or nil.
-func brokerHostSARecord(rows []store.GCPServiceAccount, brokerID string) *store.GCPServiceAccount {
+// brokerHostSARecord returns the record in rows for email (ignoring letter
+// case) that translation created for brokerID, or nil.
+func brokerHostSARecord(rows []store.GCPServiceAccount, email, brokerID string) *store.GCPServiceAccount {
 	for i := range rows {
-		if rows[i].Scope == store.ScopeHub && rows[i].ScopeID == brokerID &&
+		if strings.EqualFold(rows[i].Email, email) &&
+			rows[i].Scope == store.ScopeHub && rows[i].ScopeID == brokerID &&
 			rows[i].CreatedBy == hostSATranslationCreator && !rows[i].Managed {
 			return &rows[i]
 		}

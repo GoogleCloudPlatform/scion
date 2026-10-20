@@ -137,6 +137,29 @@ func TestEnsureHostSARecord_ProjectScopedEmail_RefusedNoTwin(t *testing.T) {
 	assert.Equal(t, 0, gen.probeCount())
 }
 
+// TestEnsureHostSARecord_ProjectScopedEmailOtherCase_Refused: a
+// project-scoped record whose email differs only in letter case is the same
+// account, so no hub-scoped twin is created for the lowercased broker email.
+func TestEnsureHostSARecord_ProjectScopedEmailOtherCase_Refused(t *testing.T) {
+	srv, s, gen := hsrServer(t, nil)
+	mixed := &store.GCPServiceAccount{
+		ID: tid("hsr-mixed-case"), Scope: store.ScopeProject, ScopeID: tid("hsr-project-3"),
+		Email: "Shared-Host@HSR-Project.iam.gserviceaccount.com", ProjectID: "hsr-project",
+		CreatedBy: tid("someone"), CreatedAt: time.Now(),
+	}
+	require.NoError(t, s.CreateGCPServiceAccount(context.Background(), mixed))
+
+	_, err := srv.ensureHostSARecord(context.Background(), hsrBroker("hsr-mixed"))
+
+	assert.True(t, errors.Is(err, errHostSARecordConflict), "got %v", err)
+	rows, err := s.ListGCPServiceAccounts(context.Background(), store.GCPServiceAccountFilter{
+		EmailFold: hsrEmail, Scope: store.ScopeHub,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, rows, "no hub-scoped twin is created")
+	assert.Equal(t, 0, gen.probeCount(), "no probe runs")
+}
+
 func TestEnsureHostSARecord_ManagedEmail_Refused(t *testing.T) {
 	srv, s, _ := hsrServer(t, nil)
 	managed := hsrSeed(t, s, "hsr-managed-sa", store.ScopeHub, "hub", "system:provisioner", true)
