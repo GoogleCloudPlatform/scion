@@ -634,7 +634,7 @@ func (s *fillBeforeUpdateStore) SetRuntimeBrokerGCPHost(ctx context.Context, id,
 	if s.failUpdate {
 		return store.GCPHostSetting{}, errors.New("injected GCP host write failure")
 	}
-	if _, err := s.Store.SetRuntimeBrokerGCPHostIfUnset(ctx, id, ownedEmailA, ownedProjectA, store.GCPHostSourceRegistration); err != nil {
+	if _, err := s.SetRuntimeBrokerGCPHostIfUnset(ctx, id, ownedEmailA, ownedProjectA, store.GCPHostSourceRegistration); err != nil {
 		return store.GCPHostSetting{}, err
 	}
 	return s.Store.SetRuntimeBrokerGCPHost(ctx, id, email, project)
