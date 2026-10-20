@@ -66,18 +66,7 @@ func runTemplatesUpdate(cmd *cobra.Command, args []string) error {
 		return newUsageError("--scope must be global, project or user")
 	}
 
-	var gp string
-	if projectPath != "" {
-		resolved, err := config.GetResolvedProjectDir(projectPath)
-		if err != nil {
-			return fmt.Errorf("failed to resolve project path %q: %w", projectPath, err)
-		}
-		gp = resolved
-	} else if projectDir, err := config.GetResolvedProjectDir(""); err == nil {
-		gp = projectDir
-	}
-
-	hubCtx, err := requireHub(gp)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return err
 	}

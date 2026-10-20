@@ -139,9 +139,9 @@ var testAdminAuthorityReadCensus = map[string]string{
 	"access_constraint_governance.go:isConstraintAdmin:GetEffectiveGroups":                          censusClamped,
 	"access_constraint_governance.go:isConstraintAdmin:ListRoleBindingsForPrincipals":               censusClamped,
 	"access_constraint_preview.go:getBasePermissions:ListRoleBindingsForPrincipals":                 censusClamped,
-	"authorize_message.go:CheckEffectiveMembership:GetEffectiveGroups":                              censusClamped,
-	"authorize_message.go:CheckEffectiveMembership:ListRoleBindingsForPrincipal":                    censusClamped,
-	"authorize_message.go:CheckEffectiveMembership:ListRoleBindingsForPrincipals":                   censusClamped,
+	"authorize_message.go:checkEffectiveMembership:GetEffectiveGroups":                              censusClamped,
+	"authorize_message.go:checkEffectiveMembership:ListRoleBindingsForPrincipal":                    censusClamped,
+	"authorize_message.go:checkEffectiveMembership:ListRoleBindingsForPrincipals":                   censusClamped,
 	"authz_list_helpers.go:resolveUserOwnerProjectIDsOrError:ListRoleBindingsForPrincipal":          censusClamped,
 	"chat_membership.go:chatMemberProjectIDs:GetEffectiveGroups":                                    censusClamped,
 	"chat_membership.go:chatMemberProjectIDs:ListRoleBindingsForPrincipal":                          censusClamped,
@@ -174,6 +174,7 @@ var testAdminAuthorityReadCensus = map[string]string{
 	"authz_boundary.go:projectScopedGrants:GetEffectiveGroups":          "authz: group closure fed to the clamped binding read with the user principal",
 	"authz_boundary.go:projectScopedGrants:GetEffectiveGroupsForAgent":  "authz: agent group closure fed to the clamped binding read",
 	"authz_candelegate.go:canDelegateGroupMembership:GetParentGroups":   "delegation: the target group's closure, whose bindings the actor must already hold",
+	"authz_candelegate.go:grantPermissionSet:GetParentGroups":           "delegation: the group closure whose role permissions a test admin's grant would confer (test-admin policy check; counts every binding, so it only refuses more)",
 	"authz.go:buildMembershipPathChains:GetGroupMembership":             "display: decision explain membership paths",
 	"authz.go:buildMembershipPathChains:GetParentGroups":                "display: decision explain membership paths",
 	"authz.go:buildMembershipPathChains:GetUserGroups":                  "display: decision explain membership paths",
@@ -213,7 +214,7 @@ var testAdminAuthorityReadCensus = map[string]string{
 	"handlers_groups.go:authorizeGroupMemberGrant:GetGroupMembership":                  "group governance: the caller's group role (not a role binding); the grant itself goes through CanDelegate with the grantee",
 	"handlers_groups.go:removeGroupMember:GetGroupMembership":                          "group governance: the caller's group role for a removal",
 	"handlers_groups.go:removeGroupMember:CountGroupMembersByRole":                     "guard: last group owner on removal",
-	"handlers_groups.go:groupClosureHasRoleBinding:GetParentGroups":                    "group: whether a group carries bindings (session requirement), not a user's authority",
+	"handlers_groups.go:groupClosureAuthority:GetParentGroups":                         "group: the bindings a group closure carries, read to confirm a token's delegation check in the membership transaction; not a user's authority",
 	"chat_v2_no_recipient.go:projectHumanMembersStrict:ListProjectMembers":             "routing: chat recipients of a project; grants nothing",
 	"handlers_chat_v2.go:resolveProjectHumanMembers:ListProjectMembers":                "routing: chat recipients of a project; grants nothing",
 
@@ -242,11 +243,13 @@ var testAdminAuthorityReadCensus = map[string]string{
 	"handlers_roles.go:listRoleBindingsForPrincipal:GetEffectiveGroups":                           "display: stored bindings of a principal",
 	"handlers_roles.go:listRoleBindingsForPrincipal:ListRoleBindingsForPrincipal":                 "display: stored bindings of a principal",
 	"handlers_roles.go:listRoleBindingsForPrincipal:ListRoleBindingsForPrincipals":                "display: stored bindings of a principal",
+	"handlers_project_visitors.go:handleListProjectVisitors:ListVisitorRoleBindings":              "display: project visitor grant listing for a holder of project.manage_visitors; federated accounts only",
 
 	// Mutation inputs: the bindings being replaced, deleted or migrated.
 	"access_constraint_governance.go:ReplaceRoleBinding:GetRoleBinding":                              "mutation: the binding being replaced",
 	"handlers_auth.go:deleteSuperAdminRoleBinding:ListRoleBindingsForPrincipal":                      "mutation: bindings being deleted",
 	"handlers_roles.go:deleteRoleBinding:GetRoleBinding":                                             "mutation: the binding being deleted",
+	"handlers_roles.go:authorizeRoleBindingDelete:GetRoleBinding":                                    "routing: the binding's scope selects the project check; the authorization service decides",
 	"handlers_users_core.go:deleteSuperAdminBindingTx:ListRoleBindingsForPrincipal":                  "mutation: bindings being deleted",
 	"handlers_users_core.go:guardAndCascadeUserRoleBindingsTx:GetRoleBinding":                        "mutation: user-delete binding cascade",
 	"handlers_users_core.go:guardAndCascadeUserRoleBindingsTx:ListRoleBindingsForPrincipal":          "mutation: user-delete binding cascade",
@@ -255,10 +258,12 @@ var testAdminAuthorityReadCensus = map[string]string{
 	"project_membership_service.go:UpdateMemberRole:GetRoleBinding":                                  "mutation: the binding being changed",
 	"project_membership_service.go:findExistingDirectBindingsFromStore:ListRoleBindingsForPrincipal": "mutation: the target's existing bindings to replace",
 	"project_membership_set.go:loadProjectPrincipalBindings:ListRoleBindingsForPrincipal":            "mutation: the target's existing bindings to plan against",
+	"handlers_project_visitors.go:projectVisitorBinding:ListVisitorRoleBindings":                     "mutation: the visitor grant being changed or revoked; federated accounts only",
+	"federation_visitor.go:missingVisitorRules:ListRoleBindingsForPrincipals":                        "mutation: the linked federated account's own project bindings, to skip a rule's project where it already has a visitor binding or to find the inactive visitor grant by email the rule binding replaces; federated accounts only",
 	"project_fixture_purge.go:purgeFixtureProject:ListRoleBindingsForScope":                          "mutation: test identity purge, the stamped project's bindings to delete; any other owner keeps the project (project scope)",
 	"project_owner_predicates.go:projectOwnerBindingCount:ListRoleBindingsForScope":                  "guard: last-project-owner count (project scope; project bindings are not clamped for any kind)",
 	"project_owner_predicates.go:usableOwnerPrincipals:ListRoleBindingsForScope":                     "guard: last-project-owner count (project scope; project bindings are not clamped for any kind)",
-	"handlers_groups.go:groupClosureHasRoleBinding:ListRoleBindingsForPrincipals":                    "group: whether a group carries bindings (session requirement), not a user's authority",
+	"handlers_groups.go:groupClosureAuthority:ListRoleBindingsForPrincipals":                         "group: the bindings a group closure carries, read to confirm a token's delegation check in the membership transaction; not a user's authority",
 
 	// Sign-in (every sign-in path refuses test identities).
 	"handlers_auth.go:hasUIPromotedBinding:ListRoleBindingsForPrincipal": "sign-in: admin_emails demotion protection; test identities never sign in",
@@ -301,31 +306,33 @@ var testAdminAdminEmailsCensus = map[string]string{
 // user's role (stored or claim) with admin, keyed "file:function". A
 // test_hub_admin's stored role is member and the JWT row block refuses a
 // token whose role claim is not its kind's role, so no role gate admits
-// it; the test_super_admin kind is refused until admin tier A2 classifies
-// these gates.
+// it. A test_super_admin holds the admin role: every "role gate" entry here
+// is classified allow or deny for it in testAdminRoleGatePolicy (admin tier
+// A2, TestTestAdminPolicy_RoleGateCensus).
 var testAdminRoleAdminCensus = map[string]string{
-	"admin_delegation_adoption.go:recheckDelegationAdoptionAdmin": "role gate: admin only",
-	"admin_mode.go:adminModeWebMiddleware":                        "role gate: admin only",
-	"gcp_iam_settings.go:gcpIAMHubAdmin":                          "role gate: admin only",
-	"handlers_env_secrets.go:authorizeHubEnvVarList":              "role gate: admin only",
-	"handlers_env_secrets.go:resolveEnvSecretAccess":              "role gate: admin only",
-	"web.go:authorizeSSESubjects":                                 "role gate: admin only",
-	"federation_auth.go:extractUserClaims":                        "federation: a federated identity is never admin (coerced to viewer); federation is off while the tier is on",
-	"handlers_test_admin_identities.go:canIssueTestAdmin":         "issuer check: the issuer's stored role, read from its row",
-	"handlers_auth.go:determineUserRole":                          "sign-in: test identities never sign in",
-	"handlers_auth.go:getUserRole":                                "sign-in: test identities never sign in",
-	"handlers_auth.go:handleAuthRefresh":                          "sign-in: test identities get no refresh token",
-	"handlers_auth.go:provisionUser":                              "sign-in: test identities never sign in",
-	"handlers_auth.go:signInPolicyDeps":                           "sign-in: test identities never sign in",
-	"sign_in_policy.go:applyLiveSignInPolicy":                     "sign-in: test identities never sign in",
-	"web.go:handleOAuthCallback":                                  "sign-in: test identities never sign in",
-	"web.go:proxyAuthMiddleware":                                  "sign-in: test identities never sign in",
-	"handlers_users_core.go:checkUserPromotePermission":           "mutation: requested new role; test identity targets are refused first",
-	"handlers_users_core.go:executeRoleTransition":                "mutation: requested new role; test identity targets are refused",
-	"handlers_users_core.go:updateUser":                           "mutation: requested new role; test identity targets are refused",
-	"seed.go:ReconcileSuperAdminBindings":                         censusExcludesTestIdentities,
-	"seed.go:backfillUserRoleBindings":                            "startup: a super-admin backfill on an admin-kind row is refused by the store (system bindings on admin kinds are issuance-only)",
-	"internal/principal/identity.go:IsUnscopedLocalPlatformAdmin": "role gate: admin only (the legacy unscoped admin fast path); a test identity's stored role is never admin and the JWT row block refuses a mismatched role claim",
+	"admin_delegation_adoption.go:recheckDelegationAdoptionAdmin":         "role gate: admin only",
+	"admin_mode.go:adminModeWebMiddleware":                                "role gate: admin only",
+	"gcp_iam_settings.go:gcpIAMHubAdmin":                                  "role gate: admin only",
+	"handlers_env_secrets.go:authorizeHubEnvVarList":                      "role gate: admin only",
+	"handlers_env_secrets.go:resolveEnvSecretAccess":                      "role gate: admin only",
+	"web.go:authorizeSSESubjects":                                         "role gate: admin only",
+	"federation_auth.go:extractUserClaims":                                "federation: a federated identity is never admin (coerced to viewer); federation is off while the tier is on",
+	"handlers_test_admin_identities.go:canIssueTestAdmin":                 "issuer check: the issuer's stored role, read from its row",
+	"handlers_test_admin_identities.go:recheckTestAdminDelegationGrantor": "issuer check: a workload delegation grantor's stored role, read from its row through the issuance transaction (X4); its kind must be human first",
+	"handlers_auth.go:determineUserRole":                                  "sign-in: test identities never sign in",
+	"handlers_auth.go:getUserRole":                                        "sign-in: test identities never sign in",
+	"handlers_auth.go:handleAuthRefresh":                                  "sign-in: test identities get no refresh token",
+	"handlers_auth.go:provisionUser":                                      "sign-in: test identities never sign in",
+	"handlers_auth.go:signInPolicyDeps":                                   "sign-in: test identities never sign in",
+	"sign_in_policy.go:applyLiveSignInPolicy":                             "sign-in: test identities never sign in",
+	"web.go:handleOAuthCallback":                                          "sign-in: test identities never sign in",
+	"web.go:proxyAuthMiddleware":                                          "sign-in: test identities never sign in",
+	"handlers_users_core.go:checkUserPromotePermission":                   "mutation: requested new role; test identity targets are refused first",
+	"handlers_users_core.go:executeRoleTransition":                        "mutation: requested new role; test identity targets are refused",
+	"handlers_users_core.go:updateUser":                                   "mutation: requested new role; test identity targets are refused",
+	"seed.go:ReconcileSuperAdminBindings":                                 censusExcludesTestIdentities,
+	"seed.go:backfillUserRoleBindings":                                    "startup: a super-admin backfill on an admin-kind row is refused by the store (system bindings on admin kinds are issuance-only)",
+	"internal/principal/identity.go:IsUnscopedLocalPlatformAdmin":         "role gate: admin only (the legacy unscoped admin fast path); a test_super_admin passes it, so each caller is classified as its own gate in testAdminRoleGatePolicy",
 }
 
 // censusFuncSite is one parsed function of pkg/hub.
@@ -561,6 +568,7 @@ var testAdminActivationCensus = map[string]string{
 	"projectMembershipInputs":    "loader: ProjectMembershipEvidence filters with bindingActivationOK",
 	"projectScopedGrants":        "loader: unionScopedRoleBindingPermissions filters with bindingActivationOK",
 	"canDelegateGroupMembership": "delegation: the group's bindings are what the actor must already hold; an inactive one only makes the check stricter",
+	"grantPermissionSet":         "delegation: permissions a test admin's group grant would confer; inactive bindings are counted on purpose (one becoming active later must not slip past the test-admin policy check), so it only refuses more",
 }
 
 // TestTestAdminDecidePathsApplyActivation (DEC-4 C-b): every binding read

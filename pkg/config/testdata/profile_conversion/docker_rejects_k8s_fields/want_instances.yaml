@@ -1,0 +1,7 @@
+server:
+  broker:
+    instances:
+      - key: docker
+        name: docker
+        runtime_target:
+          type: docker

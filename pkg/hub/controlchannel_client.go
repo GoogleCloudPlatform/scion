@@ -753,6 +753,10 @@ type HybridBrokerClient struct {
 	// only (correctness comes from durable intent + drain); injected so route()
 	// is unit-testable. Nil means "no affinity info" (treated as no owner).
 	affinity func(ctx context.Context, brokerID string) (owner string, alive bool)
+	// routed, when set (SetConduitRouting), sends the transient operations
+	// (logs, exec, images, project cleanup) through the conduit Router
+	// first; the control channel and HTTP paths below are the fallback.
+	routed *ControlChannelBrokerClient
 }
 
 // NewHybridBrokerClient creates a hybrid client that prefers control channel.
@@ -953,6 +957,9 @@ func (c *HybridBrokerClient) CreateAgentWithGather(ctx context.Context, brokerID
 
 // GetAgentLogs retrieves agent.log content, preferring control channel.
 func (c *HybridBrokerClient) GetAgentLogs(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, tail int) (string, error) {
+	if out, done, err := c.routedGetAgentLogs(ctx, brokerID, brokerEndpoint, agentID, projectID, tail); done {
+		return out, err
+	}
 	if c.useControlChannel(brokerID) {
 		return c.controlChannel.GetAgentLogs(ctx, brokerID, brokerEndpoint, agentID, projectID, tail)
 	}
@@ -961,6 +968,9 @@ func (c *HybridBrokerClient) GetAgentLogs(ctx context.Context, brokerID, brokerE
 
 // ExecAgent executes a command in an agent, preferring control channel.
 func (c *HybridBrokerClient) ExecAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, command []string, timeout int) (string, int, error) {
+	if out, code, done, err := c.routedExecAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, command, timeout); done {
+		return out, code, err
+	}
 	if c.useControlChannel(brokerID) {
 		return c.controlChannel.ExecAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, command, timeout)
 	}
@@ -968,6 +978,9 @@ func (c *HybridBrokerClient) ExecAgent(ctx context.Context, brokerID, brokerEndp
 }
 
 func (c *HybridBrokerClient) CleanupProject(ctx context.Context, brokerID, brokerEndpoint, projectSlug, projectID string) error {
+	if done, err := c.routedCleanupProject(ctx, brokerID, brokerEndpoint, projectSlug, projectID); done {
+		return err
+	}
 	if c.useControlChannel(brokerID) {
 		return c.controlChannel.CleanupProject(ctx, brokerID, brokerEndpoint, projectSlug, projectID)
 	}
@@ -984,6 +997,9 @@ type brokerImageClient interface {
 
 // ImageStatus queries a broker's local image state, preferring control channel.
 func (c *HybridBrokerClient) ImageStatus(ctx context.Context, brokerID, brokerEndpoint, shortImage, longImage string) (*BrokerImageStatusResponse, error) {
+	if resp, done, err := c.routedImageStatus(ctx, brokerID, shortImage, longImage); done {
+		return resp, err
+	}
 	if c.useControlChannel(brokerID) {
 		return c.controlChannel.ImageStatus(ctx, brokerID, shortImage, longImage)
 	}
@@ -995,6 +1011,9 @@ func (c *HybridBrokerClient) ImageStatus(ctx context.Context, brokerID, brokerEn
 
 // PullImage asks a broker to pull an image, preferring control channel.
 func (c *HybridBrokerClient) PullImage(ctx context.Context, brokerID, brokerEndpoint, image string) error {
+	if done, err := c.routedPullImage(ctx, brokerID, image); done {
+		return err
+	}
 	if c.useControlChannel(brokerID) {
 		return c.controlChannel.PullImage(ctx, brokerID, image)
 	}
@@ -1006,6 +1025,9 @@ func (c *HybridBrokerClient) PullImage(ctx context.Context, brokerID, brokerEndp
 
 // DeleteImage asks a broker to remove a local image, preferring control channel.
 func (c *HybridBrokerClient) DeleteImage(ctx context.Context, brokerID, brokerEndpoint, image string) error {
+	if done, err := c.routedDeleteImage(ctx, brokerID, image); done {
+		return err
+	}
 	if c.useControlChannel(brokerID) {
 		return c.controlChannel.DeleteImage(ctx, brokerID, image)
 	}

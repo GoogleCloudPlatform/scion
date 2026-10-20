@@ -22,9 +22,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -197,7 +199,7 @@ func NormalizeUTCTimestamps(ctx context.Context, db *sql.DB, dbDialect string, l
 			if err != nil {
 				return n.report, err
 			}
-			if !containsString(cols, jt.column) {
+			if !slices.Contains(cols, jt.column) {
 				continue
 			}
 			if err := n.jsonColumn(ctx, jt); err != nil {
@@ -206,7 +208,7 @@ func NormalizeUTCTimestamps(ctx context.Context, db *sql.DB, dbDialect string, l
 		}
 	} else {
 		for _, jt := range jsonTimeTargets {
-			if len(opts.Tables) > 0 && !containsString(opts.Tables, jt.table) {
+			if len(opts.Tables) > 0 && !slices.Contains(opts.Tables, jt.table) {
 				continue
 			}
 			if err := n.jsonColumn(ctx, jt); err != nil {
@@ -743,7 +745,7 @@ func entTimeTargets(ctx context.Context, db *sql.DB, tables map[string]bool) ([]
 		}
 		var cols []string
 		for _, c := range t.Columns {
-			if c.Type == field.TypeTime && containsString(present, c.Name) {
+			if c.Type == field.TypeTime && slices.Contains(present, c.Name) {
 				cols = append(cols, c.Name)
 			}
 		}
@@ -761,19 +763,10 @@ func restrictTables(tables map[string]bool, only []string) {
 		return
 	}
 	for name := range tables {
-		if !containsString(only, name) {
+		if !slices.Contains(only, name) {
 			delete(tables, name)
 		}
 	}
-}
-
-func containsString(list []string, s string) bool {
-	for _, v := range list {
-		if v == s {
-			return true
-		}
-	}
-	return false
 }
 
 // ErrSnapshotInProgress is returned by SnapshotSQLite when the temporary
@@ -802,14 +795,16 @@ type SQLiteSnapshot struct {
 // If a snapshot with this label already exists it is returned and nothing
 // is written, so repeated calls (a repair retried on every boot) use the
 // disk once; the earliest snapshot holds the values from before the first
-// repair. Otherwise the copy is written with VACUUM INTO to
-// "<file>.<label>.tmp" and renamed into place when it is complete, so a
-// ".bak" file is never partial. The temporary file is created exclusively,
-// with mode snapshotFileMode, before VACUUM INTO fills it (the driver keeps
-// an existing file's mode); on failure only that file is removed. If the
-// temporary file already exists the call fails with ErrSnapshotInProgress.
-// It also fails for an in-memory database. A new copy needs about as much free space as
-// the database file.
+// repair. Reusing a snapshot sets its modification time to now, which
+// PruneSQLiteSnapshots treats as its last use. Otherwise the copy is
+// written with VACUUM INTO to "<file>.<label>.tmp" and renamed into place
+// when it is complete, so a ".bak" file is never partial. The temporary
+// file is created exclusively, with mode snapshotFileMode, before VACUUM
+// INTO fills it (the driver keeps an existing file's mode); on failure only
+// that file is removed. If the temporary file already exists the call
+// fails with ErrSnapshotInProgress. It also fails for an in-memory
+// database. A new copy needs about as much free space as the database
+// file.
 func SnapshotSQLite(ctx context.Context, db *sql.DB, label string, now time.Time) (SQLiteSnapshot, error) {
 	var file string
 	if err := db.QueryRowContext(ctx, "SELECT file FROM pragma_database_list WHERE name = 'main'").Scan(&file); err != nil {
@@ -823,6 +818,13 @@ func SnapshotSQLite(ctx context.Context, db *sql.DB, label string, now time.Time
 		return SQLiteSnapshot{}, err
 	}
 	if existing != "" {
+		// Reusing the snapshot is a use: PruneSQLiteSnapshots counts its
+		// retention from the modification time. A failure only shortens
+		// that period, so it does not fail the call.
+		if err := chtimesSnapshotFile(existing, now, now); err != nil {
+			slog.Warn("database snapshot: cannot update the reused snapshot's last use; "+
+				"it may be removed earlier than the retention period", "path", existing, "error", err)
+		}
 		return SQLiteSnapshot{Path: existing, Reused: true}, nil
 	}
 	const mode = snapshotFileMode

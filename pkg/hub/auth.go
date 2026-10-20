@@ -136,6 +136,14 @@ type AuthConfig struct {
 	// Now is the clock for the test-fixture expiry check. Nil means
 	// time.Now.
 	Now func() time.Time
+	// DriverPrincipals is the hub's auth.proxy.driverPrincipals set
+	// (ptone/scion#4240, phase WS2). A verified proxy assertion for a
+	// driver principal is refused at Step 3a with 403 before any user is
+	// provisioned (a Google identity for one is refused by
+	// GoogleIdentityResolver.Resolve, on the external-bearer path and the
+	// GE exchange alike): a driver principal is a transport for test
+	// identity web sessions, never a user.
+	DriverPrincipals driverPrincipalSet
 	// KindForPrincipal reads a user principal's stored kind
 	// (Server.kindForPrincipal). The JWT arm's row block uses it for the
 	// admin-kind checks (testAdminRejection). Nil reads the kind from the
@@ -157,9 +165,18 @@ type AuthConfig struct {
 	// (Server.resolveFederatedVisitor). It returns (nil, nil) to keep the
 	// verified identity, which it does for every identity that is not a
 	// linked active account and whenever the federation.project_visitors
-	// experiment is off. An error answers 503. Nil keeps every verified
-	// identity.
+	// experiment is off. errFederatedVisitorRefused (a suspended account)
+	// and errFederatedVisitorIssuerNotAccepted (an issuer the hub no longer
+	// accepts visitors from) answer 403; any other error answers 503. Nil
+	// keeps every verified identity.
 	ResolveFederatedVisitor func(ctx context.Context, identity FederatedIdentity) (*VisitorIdentity, error)
+	// FederationHubUserTokensEnabled reports, on each request, whether
+	// user access credentials from hub issuers may be accepted at all
+	// (Server.federationHubUserTokensEnabled: the
+	// federation.project_visitors experiment). The issuer's
+	// accept_user_tokens must also be set. Nil refuses every such
+	// credential; agent tokens are unaffected.
+	FederationHubUserTokensEnabled func() bool
 	// WorkloadIssuer is the workload-bound issuer delegation arm's startup
 	// state (test_identity_workload_issuer.go). Nil when no workload issuer
 	// is configured: a request that names a delegation is then refused.
@@ -371,7 +388,12 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						"federation authentication is not configured", nil)
 					return
 				}
-				identity, err := fedAuth.Authenticate(federationToken)
+				fedOpts := FederationAuthOptions{
+					AcceptHubUserTokens: cfg.FederationHubUserTokensEnabled != nil && cfg.FederationHubUserTokensEnabled(),
+					PlatformAuthSA:      cfg.PlatformAuthSA,
+					DriverPrincipals:    cfg.DriverPrincipals,
+				}
+				identity, err := fedAuth.Authenticate(federationToken, fedOpts)
 				if err != nil {
 					if cfg.Debug {
 						log.Debug("Federation token validation failed", "error", err)
@@ -382,10 +404,21 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				}
 				// A verified user token whose (issuer, subject) is linked
 				// to an active federated account becomes that account's
-				// VisitorIdentity; every other case keeps the verified
-				// identity unchanged.
+				// VisitorIdentity; a suspended account, or one whose issuer
+				// the hub no longer accepts visitors from, is refused; every
+				// other case keeps the verified identity unchanged.
 				if cfg.ResolveFederatedVisitor != nil {
 					visitor, vErr := cfg.ResolveFederatedVisitor(ctx, identity)
+					if errors.Is(vErr, errFederatedVisitorRefused) {
+						writeError(w, http.StatusForbidden, ErrCodeForbidden,
+							visitorAccountRefusedMessage, nil)
+						return
+					}
+					if errors.Is(vErr, errFederatedVisitorIssuerNotAccepted) {
+						writeError(w, http.StatusForbidden, ErrCodeForbidden,
+							visitorRouteRefusalMessage, nil)
+						return
+					}
 					if vErr != nil {
 						log.Error("Federation visitor lookup failed", "issuer", identity.IssuerURL(), "error", vErr)
 						writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
@@ -455,6 +488,16 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						return
 					}
 					if proxyUser != nil {
+						// A driver principal is a transport, never a user
+						// (WS2): refused before provisioning, and never
+						// served as itself.
+						if cfg.DriverPrincipals.contains(proxyUser.Email) {
+							log.Warn("Proxy auth: refusing a driver principal on the API",
+								"reason", driverPrincipalNoSessionReason,
+								"path", logging.RequestPath(r))
+							writeDriverPrincipalRefusal(w)
+							return
+						}
 						// Verified proxy identity — provision the user
 						identity, err := cfg.ProxyUserProvisioner(ctx, proxyUser)
 						if err != nil {
@@ -591,7 +634,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				// See isReservedPlatformIdentity: every credential-acceptance
 				// point checks this too, including a PAT issued under a
 				// reserved-identity user row.
-				if isReservedPlatformIdentity(scopedUser.Email(), cfg.PlatformAuthSA) {
+				if cfg.isTransportIdentity(scopedUser.Email()) {
 					logCredentialRejected(log, ctx, "reserved_identity", true, scopedUser.CredentialID())
 					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 						"invalid access token", nil)
@@ -687,7 +730,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				// identity. Agent, federation, and broker credentials never
 				// reach this arm (see UnifiedAuthMiddleware's earlier steps),
 				// so this cannot deny an agent or broker token.
-				if isReservedPlatformIdentity(claims.Email, cfg.PlatformAuthSA) {
+				if cfg.isTransportIdentity(claims.Email) {
 					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 						"invalid access token", nil)
 					return
@@ -783,7 +826,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 							return
 						}
 						if kind.isTestAdmin() {
-							ctx = contextWithTestAdminActor(ctx, u)
+							ctx = contextWithTestAdminActor(ctx, u, testAdminCredentialFor(claims.ClientType))
 						}
 					}
 				}

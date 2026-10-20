@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -85,9 +86,11 @@ func NewStatusHandler() *StatusHandler {
 
 // activitySourceKey is the agent-info.json field that records which path set
 // the current activity. The Notification path writes it with the value
-// activitySourceNotification, and the release of a sub-agent-held wait on the
-// last owner's SubagentStop writes activitySourceSubagentEnd; every other
-// activity or phase write removes it.
+// activitySourceNotification, the release of a sub-agent-held wait on the
+// last owner's SubagentStop writes activitySourceSubagentEnd, and the release
+// of a notification-set wait by a clear or compact session-start writes
+// activitySourceSessionRestart; every other activity or phase write removes
+// it.
 // That lets tool-end and agent-end clear a waiting_for_input that a harness
 // prompt (permission or elicitation dialog) set, once the prompt is answered,
 // while a waiting_for_input the agent set itself (sciontool status ask_user)
@@ -103,6 +106,12 @@ const activitySourceNotification = "notification"
 // reads it, to report that release (see HubHandler.Handle); every other
 // reader of activitySourceKey checks it only next to waiting_for_input.
 const activitySourceSubagentEnd = "subagent-end"
+
+// activitySourceSessionRestart marks the working activity written when a
+// session-start that restarts the session in place (clear, compact) released
+// a notification-set wait. Like activitySourceSubagentEnd, only the
+// HubHandler reads it, to report that release (see HubHandler.Handle).
+const activitySourceSessionRestart = "session-restart"
 
 // notificationWaitAgentsKey is the agent-info.json field that lists the
 // sub-agents (by agent_id) whose question holds a notification-set
@@ -121,12 +130,14 @@ const activitySourceSubagentEnd = "subagent-end"
 // background work is in flight (see reportsNoBackgroundWork).
 //
 // What still clears a listed wait: the parent's next prompt (Claude Code
-// takes a prompt only when no question dialog is open), session start, any
-// phase write, and any explicit status write (sciontool status). That is the
-// bound for an owner that never sends an end event. The accepted cost: inside
-// a running turn, such a stale owner keeps waiting_for_input through the
-// parent's tool activity until the next prompt, session start or status
-// write.
+// takes a prompt only when no question dialog is open), session start (any
+// source: a clear or compact releases the wait too, but keeps a recorded
+// parent question as an agent-set wait, see
+// releaseNotificationWaitOnRestart), any phase write, and any explicit status
+// write (sciontool status). That is the bound for an owner that never sends an
+// end event. The accepted cost: inside a running turn, such a stale owner
+// keeps waiting_for_input through the parent's tool activity until the next
+// prompt, session start or status write.
 //
 // Every add, remove and clear of the list is part of one locked update of
 // agent-info.json (see update), so hook processes that fire at the same
@@ -158,7 +169,9 @@ const notificationWaitAgentsKey = "notificationWaitAgents"
 // either is left. When the last owner goes and the parent's wait is still
 // open, the info becomes the parent's wait alone (see restoreParentWait)
 // instead of working. The next prompt, session start, phase write and status
-// write clear it with the owner list.
+// write clear it with the owner list. A clear or compact removes it with the
+// owner list but keeps a parentWaitAgent question as an agent-set wait: an
+// in-place restart does not answer it (see releaseNotificationWaitOnRestart).
 const parentWaitKey = "parentWait"
 
 const (
@@ -213,8 +226,17 @@ func (h *StatusHandler) Handle(event *hooks.Event) error {
 		return h.updateActivityIfNotSticky(result.activity, event.Data.ToolName, clearNotificationWaiting, subagentID(event))
 	}
 
-	// New work events (prompt-submit, agent-start, session-start): always
-	// update activity unconditionally — clears any sticky state.
+	// A session-start that restarts the session inside the running harness
+	// (clear, compact) is not new work. It releases only a notification-set
+	// wait, which keeps the stale-owner bound for that wait; every other
+	// activity is kept.
+	if isInPlaceSessionStart(event) {
+		return h.releaseNotificationWaitOnRestart()
+	}
+
+	// New work events (prompt-submit, agent-start, and a session-start of a
+	// new session): always update activity unconditionally — clears any
+	// sticky state.
 	if isNewWorkEvent(event.Name) {
 		return h.UpdateActivity(result.activity, "")
 	}
@@ -311,7 +333,7 @@ func (h *StatusHandler) setWaitingFromNotificationFor(owner string) error {
 			owners = notificationWaitOwners(info)
 			parent = parentWaitOf(info)
 		}
-		if owner != "" && !containsString(owners, owner) && len(owners) < maxNotificationWaitAgents {
+		if owner != "" && !slices.Contains(owners, owner) && len(owners) < maxNotificationWaitAgents {
 			owners = append(owners, owner)
 		}
 		if owner == "" && len(owners) > 0 && parent != parentWaitAgent {
@@ -418,6 +440,41 @@ func (h *StatusHandler) releaseNotificationWaitOwner(owner string) error {
 	})
 }
 
+// releaseNotificationWaitOnRestart handles a session-start that restarts the
+// session in place (clear, compact). A notification-set waiting_for_input,
+// with or without an owner list, is released to working (which removes the
+// owner list) and marked with activitySourceSessionRestart so the HubHandler
+// reports it. When that wait also records the parent's own question
+// (parentWaitAgent), the restart does not answer that question: the owner
+// list, the notification marker and parentWait are removed (stale owners are
+// still released, as for every source) and the parent's agent-set
+// waiting_for_input is kept, with no session-restart marker, so nothing is
+// reported. Everything else is kept and nothing is written: an agent-set
+// wait, blocked, completed, limits_exceeded, crashed, initializing (a restart
+// during init says nothing about readiness) and any non-sticky activity. It
+// is one locked update.
+func (h *StatusHandler) releaseNotificationWaitOnRestart() error {
+	return h.update(func(info map[string]interface{}) bool {
+		if !isNotificationWaiting(info) {
+			return false
+		}
+		if parentWaitOf(info) == parentWaitAgent {
+			restoreParentWait(info)
+			return true
+		}
+		applyActivity(info, state.ActivityWorking, "")
+		info[activitySourceKey] = activitySourceSessionRestart
+		return true
+	})
+}
+
+// isInPlaceSessionStart reports whether event is a session-start that
+// restarts the session inside the running harness (source clear or compact,
+// see hooks.ClassifySessionStart).
+func isInPlaceSessionStart(event *hooks.Event) bool {
+	return event.Name == hooks.EventSessionStart && hooks.ClassifySessionStart(event.Data.Source) == hooks.SessionInPlace
+}
+
 // isHeldNonWaitingActivity reports whether activity is a held status other
 // than waiting_for_input: blocked, completed, limits_exceeded or crashed. A
 // sub-agent's question must not replace it, the same statuses a parent
@@ -502,15 +559,6 @@ func restoreParentWait(info map[string]interface{}) bool {
 	case parentWaitAgent:
 		delete(info, activitySourceKey)
 		return true
-	}
-	return false
-}
-
-func containsString(list []string, s string) bool {
-	for _, v := range list {
-		if v == s {
-			return true
-		}
 	}
 	return false
 }

@@ -568,6 +568,96 @@ func TestFederationConfig_Validate(t *testing.T) {
 			wantErrs:  1,
 			wantSubst: []string{"allowed_projects is not applicable", "use allowed_gcp_projects"},
 		},
+		// --- accept_user_tokens: hub issuers only; it also admits
+		// allowed_domains on a hub issuer, where it constrains user access
+		// credentials.
+		{
+			name: "accept_user_tokens on a hub issuer is valid",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{IssuerURL: "https://hub-a.example.com", IssuerType: "hub", AcceptUserTokens: true},
+				},
+			},
+			wantErrs: 0,
+		},
+		{
+			name: "accept_user_tokens with the default (empty) issuer_type is valid",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{IssuerURL: "https://hub-a.example.com", AcceptUserTokens: true},
+				},
+			},
+			wantErrs: 0,
+		},
+		{
+			name: "accept_user_tokens on a user issuer produces an error",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{IssuerURL: "https://idp.example.com", IssuerType: "user", JWKSURL: "https://idp.example.com/jwks", AcceptUserTokens: true},
+				},
+			},
+			wantErrs:  1,
+			wantSubst: []string{"accept_user_tokens is not applicable for issuer_type \"user\""},
+		},
+		{
+			name: "accept_user_tokens on a service_account issuer produces an error",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{IssuerURL: "https://sa.example.com", IssuerType: "service_account", JWKSURL: "https://sa.example.com/jwks", AcceptUserTokens: true},
+				},
+			},
+			wantErrs:  1,
+			wantSubst: []string{"accept_user_tokens is not applicable for issuer_type \"service_account\""},
+		},
+		{
+			name: "allowed_domains on a hub issuer with accept_user_tokens is valid",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{IssuerURL: "https://hub-a.example.com", IssuerType: "hub", AcceptUserTokens: true, AllowedDomains: []string{"corp.com"}},
+				},
+			},
+			wantErrs: 0,
+		},
+		{
+			name: "allowed_domains on a hub issuer without accept_user_tokens names the flag",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{IssuerURL: "https://hub-a.example.com", IssuerType: "hub", AllowedDomains: []string{"corp.com"}},
+				},
+			},
+			wantErrs:  1,
+			wantSubst: []string{"allowed_domains is only applicable to the Google issuer", "or to a hub issuer with accept_user_tokens"},
+		},
+		{
+			name: "malformed allowed_domains entry on a hub issuer with accept_user_tokens still errors",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{IssuerURL: "https://hub-a.example.com", IssuerType: "hub", AcceptUserTokens: true, AllowedDomains: []string{"*@corp.com"}},
+				},
+			},
+			wantErrs:  1,
+			wantSubst: []string{`allowed_domains[0] "*@corp.com"`},
+		},
+		{
+			// The Google issuer is never a peer hub: accept_user_tokens
+			// does not admit allowed_domains there.
+			name: "allowed_domains on the Google issuer as a hub with accept_user_tokens errors",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{IssuerURL: "https://accounts.google.com", IssuerType: "hub", ExpectedAudience: "client-id", AcceptUserTokens: true, AllowedDomains: []string{"corp.com"}},
+				},
+			},
+			wantErrs:  1,
+			wantSubst: []string{"allowed_domains requires issuer_type"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -657,5 +747,42 @@ func TestFederationConfig_Validate_InvalidDomainEntryShape(t *testing.T) {
 		if !strings.Contains(combined, want) {
 			t.Errorf("expected error messages to contain %q, got: %s", want, combined)
 		}
+	}
+}
+
+// TestFederationConfig_Validate_AllowVisitorGrants checks Rule 12:
+// allow_visitor_grants is accepted on user and hub issuers (empty
+// issuer_type is hub) and refused on a service-account issuer.
+func TestFederationConfig_Validate_AllowVisitorGrants(t *testing.T) {
+	for _, tc := range []struct {
+		issuerType string
+		wantErr    bool
+	}{
+		{issuerType: "", wantErr: false},
+		{issuerType: "hub", wantErr: false},
+		{issuerType: "user", wantErr: false},
+		{issuerType: "service_account", wantErr: true},
+	} {
+		t.Run("type_"+tc.issuerType, func(t *testing.T) {
+			cfg := FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{IssuerURL: "https://idp.example.com", IssuerType: tc.issuerType, AllowVisitorGrants: true},
+				},
+			}
+			errs := cfg.Validate()
+			if !tc.wantErr {
+				if len(errs) != 0 {
+					t.Fatalf("Validate() = %v, want no errors", errs)
+				}
+				return
+			}
+			if len(errs) != 1 || !strings.Contains(errs[0].Error(), "allow_visitor_grants is only applicable") {
+				t.Fatalf("Validate() = %v, want one allow_visitor_grants error", errs)
+			}
+		})
+	}
+	if !IssuerAllowsVisitorGrantsType("user") || IssuerAllowsVisitorGrantsType("service_account") {
+		t.Fatal("IssuerAllowsVisitorGrantsType disagrees with Rule 12")
 	}
 }

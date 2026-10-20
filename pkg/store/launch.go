@@ -16,14 +16,28 @@ package store
 
 import "time"
 
-// LaunchKind values for Agent.LaunchKind / BeginLaunch's kind parameter
-// (design t1-async-create-v11.md §3.3). Only LaunchKindCreate is writable by
-// BeginLaunch in P1a; start/restart land in P6 (§3.13).
+// LaunchKind values for Agent.LaunchKind (design t1-async-create-v11.md
+// §3.3). BeginLaunch writes LaunchKindCreate; BeginStartLaunch writes
+// LaunchKindStart and LaunchKindRestart (ptone/scion#4669).
 const (
 	LaunchKindCreate  = "create"
 	LaunchKindStart   = "start"
 	LaunchKindRestart = "restart"
 )
+
+// BeginLaunchOptions are the start-kind inputs to BeginStartLaunch
+// (ptone/scion#4669).
+type BeginLaunchOptions struct {
+	// PriorPhase is the effective resting phase (EffectiveRestingPhase)
+	// the start was taken from, read before the start dispatch wrote
+	// starting; for a restart, the phase before the restart. A failed
+	// start-kind launch reads it (launch_prior_phase) to choose its end
+	// phase and resume memory.
+	PriorPhase string
+	// RevokeOnFail records whether a failed end of this start revokes the
+	// credential the start issued (launch_revoke_on_fail).
+	RevokeOnFail bool
+}
 
 // LaunchState values for Agent.LaunchState.
 const (
@@ -49,6 +63,12 @@ const (
 	LaunchErrorLaunchStopped  = "launch_stopped"
 	LaunchErrorAgentError     = "agent_error"
 	LaunchErrorHubUnreachable = "hub_unreachable"
+	// LaunchErrorBrokerRestarted: the broker process restarted, or shut
+	// down, while the launch was in flight, and reported the launch failed
+	// itself (from its shutdown drain or, after a crash, from its launch
+	// journal on the next boot; ptone/scion#4668). Broker-confirmed: the
+	// broker reports it only for a launch it ended.
+	LaunchErrorBrokerRestarted = "broker_restarted"
 )
 
 // LaunchReport report-state values (mirrors the broker->Hub wire report's

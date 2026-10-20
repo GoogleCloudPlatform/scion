@@ -34,7 +34,10 @@
     "pages/project-detail-agent-window.test.ts",
     "pages/login.test.ts",
     "pages/admin-server-config-env-keys.test.ts",
-    "pages/broker-capabilities-contract.test.ts"
+    "pages/broker-capabilities-contract.test.ts",
+    "pages/admin-maintenance-reissue-scopes.test.ts",
+    "shared/log-viewer-batching.test.ts",
+    "shared/access-boundary-preview-expiry.test.ts"
   ],
   "exclude": []
 }

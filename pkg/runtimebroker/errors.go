@@ -122,6 +122,11 @@ const (
 	// request, is the reason.
 	ErrCodeRuntimeLogsUnsupported = "runtime_logs_unsupported"
 
+	// ErrCodeStatsNotImplemented marks an agent stats request: this broker
+	// does not collect per-agent resource usage, so the stats action answers
+	// 501 with this code instead of placeholder values.
+	ErrCodeStatsNotImplemented = "stats_not_implemented"
+
 	// ErrCodeRuntimeAttachUnsupported marks an attach request rejected
 	// before the WebSocket upgrade because the target runtime declines
 	// interactive attach outright (pkg/runtime.AttachCapableRuntime,
@@ -335,6 +340,12 @@ func RuntimeLogsUnsupported(w http.ResponseWriter, message string) {
 	writeError(w, http.StatusNotImplemented, ErrCodeRuntimeLogsUnsupported, message, nil)
 }
 
+// StatsNotImplemented writes a 501 Not Implemented response with the stable
+// ErrCodeStatsNotImplemented code for the agent stats action.
+func StatsNotImplemented(w http.ResponseWriter, message string) {
+	writeError(w, http.StatusNotImplemented, ErrCodeStatsNotImplemented, message, nil)
+}
+
 // RuntimeAttachUnsupported writes a 501 Not Implemented response with the
 // stable ErrCodeRuntimeAttachUnsupported code for a runtime that declines
 // interactive attach at all (pkg/runtime.AttachCapableRuntime). message must
@@ -504,15 +515,15 @@ func runtimeFailureCause(err error) (reason metav1.StatusReason, code string, ca
 
 // runtimeFailureLogAttrs returns the log attributes describing err's cause
 // (runtimeFailureCause) for a terminal create failure's ERROR record:
-// cause (the innermost error text), and k8s_reason and cause_code when
-// set. Server logs only: none of these may reach a client body except the
-// fixed code.
+// cause (the innermost error text, through sanitizeFailureCause), and
+// k8s_reason and cause_code when set. Server logs only: none of these may
+// reach a client body except the fixed code.
 func runtimeFailureLogAttrs(err error) []any {
 	reason, code, cause := runtimeFailureCause(err)
 	if cause == nil {
 		return nil
 	}
-	attrs := []any{"cause", cause.Error()}
+	attrs := []any{"cause", sanitizeFailureCause(cause.Error())}
 	if reason != "" {
 		attrs = append(attrs, "k8s_reason", string(reason))
 	}
@@ -671,14 +682,18 @@ func skillResolutionHTTPStatus(code string) int {
 // cause instead of folding the failure into a generic 500/502 (#2546). Every
 // mapped status gets the same {skill, cause} detail payload so the response
 // is actionable without broker logs, including the uncategorized/5xx default.
-func SkillResolutionFailed(w http.ResponseWriter, err *agent.SkillResolutionError) {
-	skillResolutionFailedWithDetails(w, err, nil)
+//
+// The message is fixed text (see skillResolutionPublicText) carrying ref,
+// the correlation id of the server-side log record; the caller logs the
+// full error with logSkillResolutionFailure.
+func SkillResolutionFailed(w http.ResponseWriter, err *agent.SkillResolutionError, ref string) {
+	skillResolutionFailedWithDetails(w, err, ref, nil)
 }
 
 // skillResolutionFailedWithDetails is SkillResolutionFailed with extra error
 // details (for example the start markers from startFailureDetails) merged
 // alongside the skill and cause.
-func skillResolutionFailedWithDetails(w http.ResponseWriter, err *agent.SkillResolutionError, extra map[string]interface{}) {
+func skillResolutionFailedWithDetails(w http.ResponseWriter, err *agent.SkillResolutionError, ref string, extra map[string]interface{}) {
 	if err.Code == agent.SkillErrCodeRateLimited && err.RetryAfter != "" {
 		w.Header().Set("Retry-After", err.RetryAfter)
 	}
@@ -686,10 +701,10 @@ func skillResolutionFailedWithDetails(w http.ResponseWriter, err *agent.SkillRes
 	for k, v := range extra {
 		details[k] = v
 	}
-	details["skill"] = err.URI
+	details["skill"] = publicSkillRef(err.URI)
 	details["cause"] = err.Code
 	writeError(w, skillResolutionHTTPStatus(err.Code), ErrCodeSkillResolution,
-		"Failed to provision agent: "+err.Error(), details)
+		"Failed to provision agent: "+skillResolutionPublicText(err, ref), details)
 }
 
 // writeStartContextError writes the HTTP response for an error returned by

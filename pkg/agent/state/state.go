@@ -360,6 +360,12 @@ const (
 	PhaseStopping     Phase = "stopping"
 	PhaseStopped      Phase = "stopped"
 	PhaseError        Phase = "error"
+	// PhaseHalted is terminal: the platform ended a run that should still
+	// be running (preempted, evicted, OOM-killed, or its container went
+	// missing). The detail is the agent's exit reason. Unlike stopped it is
+	// never a run the user or the agent ended, and unlike error it is not a
+	// harness crash. A start resumes it like a start from stopped.
+	PhaseHalted Phase = "halted"
 )
 
 // allPhases is the internal list; Phases() returns a copy.
@@ -373,6 +379,7 @@ var allPhases = []Phase{
 	PhaseStopping,
 	PhaseStopped,
 	PhaseError,
+	PhaseHalted,
 }
 
 // Phases returns a copy of all valid Phase values.
@@ -384,7 +391,8 @@ func Phases() []Phase {
 
 // Ordinal returns the forward-progress ordering of a phase.
 // Higher values represent later lifecycle stages.
-// Returns 0 for terminal or special phases (stopped, error, suspended, stopping)
+// Returns 0 for terminal or special phases (stopped, error, halted, suspended,
+// stopping)
 // where regression checks do not apply.
 func (p Phase) Ordinal() int {
 	switch p {
@@ -455,8 +463,9 @@ const (
 )
 
 // ExitReason describes why an agent process terminated. Unlike Activity
-// (self-reported by the agent), ExitReason is runtime-derived and set by
-// the platform when it observes a container/process exit.
+// (self-reported by the agent), ExitReason is runtime- or hub-derived and
+// set by the platform when it observes a container/process exit. The one
+// exception is ExitReasonSignaled, which the agent reports.
 type ExitReason string
 
 const (
@@ -477,6 +486,12 @@ const (
 	// reason OOMKilled). It is a crash, not a disruption: the workload
 	// exceeded its own limit, so a relaunch without a change hits it again.
 	ExitReasonOOMKilled ExitReason = "oom_killed"
+	// ExitReasonSignaled is agent-reported: the agent stopped after it
+	// received a termination signal (SIGTERM/SIGINT), without a crash or a
+	// limits stop. It is not halt evidence. It only fills an empty exit
+	// reason, and it is cleared when the agent next moves to starting or
+	// running.
+	ExitReasonSignaled ExitReason = "signaled"
 )
 
 // IsValid reports whether r is a recognised ExitReason value.
@@ -495,8 +510,34 @@ func (r ExitReason) IsValid() bool {
 		return true
 	case ExitReasonOOMKilled:
 		return true
+	case ExitReasonSignaled:
+		return true
 	}
 	return false
+}
+
+// exitReasonLabels are the display labels of the exit reasons a halted
+// agent can carry (and of the other known reasons), so text shown to users
+// names a reason from a fixed set and never repeats a reported value
+// verbatim.
+var exitReasonLabels = map[ExitReason]string{
+	ExitReasonCrashed:          "crashed",
+	ExitReasonLimitsExceeded:   "limits exceeded",
+	ExitReasonPreempted:        "preempted",
+	ExitReasonEvicted:          "evicted",
+	ExitReasonOOMKilled:        "out of memory",
+	ExitReasonContainerMissing: "container lost",
+	ExitReasonSignaled:         "signal",
+}
+
+// Label returns the label of r for display: a fixed phrase
+// for each known reason, and "unknown" for anything else, including no
+// reason (a halt always records one).
+func (r ExitReason) Label() string {
+	if l, ok := exitReasonLabels[r]; ok {
+		return l
+	}
+	return "unknown"
 }
 
 // ExitReasonContainerMissing is set by the Hub when the agent's runtime

@@ -103,7 +103,6 @@ func setupStopSelf(t *testing.T, name, id, ownProjectID string) string {
 	setCurrentAgentEnv(t, name, name, id, ownProjectID)
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
-	noHub = false
 	autoConfirm = true
 	stopRm, stopAll, stopSelf, outputFormat = false, false, false, ""
 

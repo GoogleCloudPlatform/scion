@@ -162,8 +162,9 @@ type conduitUserStream struct {
 	// ViaTunnel marks a stream opened through the tunnel path; its
 	// re-checks also require ActionTunnel, as its open did.
 	ViaTunnel bool
-	// SessionID and StreamID identify the stream on its conduit session
-	// (for logs).
+	// SessionID and StreamID identify the stream on the target's own
+	// session (relay.TargetOf: through another relay, the ids the owner
+	// relay reported), for logs.
 	SessionID string
 	StreamID  uint32
 	// Admitted is when the stream was opened.
@@ -171,11 +172,35 @@ type conduitUserStream struct {
 	// Close ends the stream on both legs with code and reason. It may be
 	// called at most once and must not block on the tracker.
 	Close func(code uint32, reason string)
-	// Renew sends the hub-originated AuthRefresh{stream_id} renewal
-	// notice on the stream's conduit session (nil: the session is not
-	// held by this node, and no notice is sent). It must not block on the
-	// tracker.
-	Renew func() error
+	// Renew sends AuthRefresh{stream_id, grant} toward the stream's target
+	// (nil: no sender, and nothing is sent). For a stream with a
+	// target-side deadline (AuthzUntil set) grant is a renewal grant from
+	// the renewal driver; otherwise the interval check sends a nil grant as
+	// the advisory notice. It must not block on the tracker.
+	Renew func(grant []byte) error
+	// Grant, OpenJTI, AuthzUntil and AuthzInterval describe a stream whose
+	// open grant carried a target-side deadline (design v2.21.36 §3.5,
+	// Target-side deadlines): its latest hub-signed grant, the open
+	// grant's jti, the deadline the target holds and the authorization
+	// interval. AuthzUntil is zero for every other stream. The renewal
+	// driver (conduit_stream_renewal.go) updates Grant and AuthzUntil under
+	// mu.
+	Grant         []byte
+	OpenJTI       string
+	AuthzUntil    time.Time
+	AuthzInterval time.Duration
+	// TargetSessionID and TargetStreamID name the stream on the target's
+	// own session, for renewals, when SessionID and StreamID name another
+	// leg (a tunnel tracks the user's stream); empty means SessionID and
+	// StreamID.
+	TargetSessionID string
+	TargetStreamID  uint32
+	// Bridge is the stream's only internal stream to the owner relay of
+	// the target session, when it reaches the target through a separate
+	// relay (external relay mode; nil otherwise). It is the one stream
+	// renewals for the target will use, so none will need a second stream;
+	// nothing sends renewals on it yet (Renew is nil for such a stream).
+	Bridge relay.Bridge
 
 	// mu serializes checks of this stream; closed is set once a check
 	// closed it.
@@ -190,6 +215,12 @@ type conduitUserStream struct {
 	deadline  time.Time
 	timer     clock.Timer
 	untracked bool
+	// enforced: the target enforces AuthzUntil (target_stream_deadlines
+	// enforce at Track), and the deadline is AuthzUntil. rtimer is the
+	// renewal driver's timer; renewStopped ends the driver for the stream.
+	enforced     bool
+	rtimer       clock.Timer
+	renewStopped bool
 }
 
 // Deadline returns the stream's authorization deadline (zero when it has
@@ -208,6 +239,10 @@ func (st *conduitUserStream) stopDeadline() {
 	if st.timer != nil {
 		st.timer.Stop()
 		st.timer = nil
+	}
+	if st.rtimer != nil {
+		st.rtimer.Stop()
+		st.rtimer = nil
 	}
 }
 
@@ -250,6 +285,15 @@ type conduitStreamAuthzConfig struct {
 	Metrics conduitStreamAuthzMetrics
 	// Logger receives the re-check log lines (nil = slog.Default()).
 	Logger *slog.Logger
+	// Renew re-checks a stream with a target-side deadline from its latest
+	// grant and mints its renewal (renewConduitStream). Nil: no renewal
+	// driver.
+	Renew func(ctx context.Context, st *conduitUserStream) (*conduitRenewal, error)
+	// Enforce reports target_stream_deadlines = enforce; read at Track.
+	Enforce func() bool
+	// Jitter offsets each renewal for an interval (nil: up to plus or
+	// minus 5% of it, defaultConduitRenewalJitter).
+	Jitter func(interval time.Duration) time.Duration
 }
 
 // conduitStreamAuthz tracks the user streams this node owns and re-checks
@@ -379,6 +423,7 @@ func (a *conduitStreamAuthz) Track(st *conduitUserStream) (untrack func()) {
 		a.armDeadlineLocked(st)
 		st.dmu.Unlock()
 	}
+	a.trackTargetDeadline(st)
 	var once sync.Once
 	return func() {
 		once.Do(func() {
@@ -454,6 +499,12 @@ func (a *conduitStreamAuthz) check(ctx context.Context, trigger string, st *cond
 		st.mu.Unlock()
 		return
 	}
+	if trigger == conduitAuthzTriggerInterval && st.isEnforced() {
+		// The target closes at this deadline too, and only a delivered
+		// renewal moves it: the stream ends here, whatever the verdict.
+		a.expireEnforced(ctx, st)
+		return
+	}
 	start := a.cfg.Clock.Now()
 	cctx, cancel := context.WithTimeout(ctx, a.cfg.CheckTimeout)
 	verdict, detail := a.cfg.Check(cctx, st)
@@ -510,7 +561,7 @@ func (a *conduitStreamAuthz) check(ctx context.Context, trigger string, st *cond
 	if outcome == conduitAuthzOutcomeRenewed {
 		notice = conduitAuthzNoticeNotDelivered
 		if st.Renew != nil {
-			if err := st.Renew(); err != nil {
+			if err := st.Renew(nil); err != nil {
 				detail = joinDetail(detail, "renewal notice: "+err.Error())
 			} else {
 				notice = conduitAuthzNoticeLocal

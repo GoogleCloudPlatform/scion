@@ -235,9 +235,6 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		// List permissions covered by the corresponding read operation
 		// but registered as distinct permission IDs in the registry.
 		"agent.list":               "List subset of agent.read operation",
-		"skill.list":               "List subset of skill.read operation",
-		"template.list":            "List subset of template.read operation",
-		"harness_config.list":      "List subset of harnessconfig.read operation",
 		"group.list":               "List subset of group.read operation",
 		"gcp_service_account.list": "List subset of gcp.identity.read operation",
 		"scheduled_event.list":     "List subset of schedule.event.read operation",
@@ -252,8 +249,6 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 
 		// Broker internal operations — broker-HMAC only, not user-facing
 		"broker.create":   "Broker-HMAC only, not user-facing",
-		"broker.update":   "Broker-HMAC only, not user-facing",
-		"broker.delete":   "Broker-HMAC only, not user-facing",
 		"broker.dispatch": "Broker-HMAC dispatch, not user-facing",
 		// Checked in the broker registration handler when a request turns
 		// auto-provide on; no route declares it.
@@ -266,24 +261,18 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		"hub.federation.update":     "Reserved in the permission registry: no route checks it",
 		"hub.teams_manifest.update": "Reserved in the permission registry: no route checks it",
 		// hub.github_app.read and hub.github_app.update: now route-enforced via route_metadata.go
-		"hub.audit.read": "Super-admin audit explain, NonRouteUse only",
 
 		// User/project permissions — NonRouteUse only
-		"user.list":                    "Reserved in the permission registry: no route checks it",
 		"project.clone":                "NonRouteUse only, no route declaration",
-		"project.list":                 "NonRouteUse only, no route declaration",
 		"project.set_messaging_policy": "Inline admin/owner check in project_messaging_policy.go, not route-enforced",
 		"agent.grant_hub_mode":         "Inline authorization in authorize_message_mode_grant.go, not route-enforced",
 		"agent.lifecycle":              "Inline authorization in authorizeAgentLifecycle/handleAgentAction (start, stop, suspend, restart, restore) and authorizeAgentReincarnate (reincarnate), not route-enforced",
-		"project.manage_visitors":      "Held by project owner and admin roles; the visitor grant routes that check it are added separately (ptone/scion#4603)",
 
 		// Admin test identities: the super-admin kind's capability is
-		// checked by testAdminIssuer, whose issuance answers 404 until the
-		// admin tier's policy phase (A2) adds its operation.
-		"test_identity.issue_super_admin": "Reserved in the permission registry until admin tier phase A2 (ptone/scion#4240): test super-admin issuance is refused",
-
-		// Global catalog permissions — handler-enforced, not a standalone route.
-		"skill.create_global": "Handler-enforced via globalWriteAction in skill_handlers.go; catalog operation deferred to Phase 2 (ptone/scion#1713)",
+		// checked by testAdminIssuer inside testidentity.admin.create (whose
+		// base permission is test_identity.issue_admin; the route guard also
+		// admits test_identity.issue_super_admin, RouteMetadata.AlsoPermits).
+		"test_identity.issue_super_admin": "Checked by testAdminIssuer within testidentity.admin.create for adminRole super-admin (ptone/scion#4240)",
 
 		// Agent token scopes — not route-enforced
 		"agent.status_update":  "Agent token scope, not route-enforced",
@@ -299,6 +288,10 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		// PATCH and DELETE are gated by artifact.manage).
 		"artifact.update": "Reserved in the permission registry: no artifact route checks it",
 		"artifact.delete": "Reserved in the permission registry: no artifact route checks it",
+		// artifact.steward is checked by the hub's StewardClause inside the
+		// artifact.manage-gated routes (adminAuthorityWith), not as a route
+		// base permission (design D25, ptone/scion#5144).
+		"artifact.steward": "Checked by StewardClause within the artifact.manage-gated routes, not route-enforced (ptone/scion#5144)",
 
 		// Material delivery and runtime-use permissions — NonRouteUse only
 		// (ptone/scion#2129)

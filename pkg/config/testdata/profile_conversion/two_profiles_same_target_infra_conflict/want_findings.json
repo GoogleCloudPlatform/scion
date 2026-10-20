@@ -1,0 +1,33 @@
+{
+  "profile_map": {},
+  "findings": [
+    {
+      "code": "profile_conflict",
+      "severity": "blocking",
+      "path": "profiles.*.shared_dir_size",
+      "profiles": [
+        "scratch",
+        "shared"
+      ],
+      "message_contains": [
+        "scratch: 50Gi from profiles.scratch.shared_dir_size",
+        "shared: 20Gi from profiles.shared.shared_dir_size",
+        "kubernetes.shared_dir_size"
+      ]
+    },
+    {
+      "code": "profile_conflict",
+      "severity": "blocking",
+      "path": "profiles.*.shared_dir_storage_backend",
+      "profiles": [
+        "scratch",
+        "shared"
+      ],
+      "message_contains": [
+        "scratch: local from profiles.scratch.shared_dir_storage_backend",
+        "shared: nfs from profiles.shared.shared_dir_storage_backend",
+        "declare a second instance with its own key on the same target scope"
+      ]
+    }
+  ]
+}

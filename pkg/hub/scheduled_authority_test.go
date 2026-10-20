@@ -26,6 +26,7 @@ import (
 	"go/token"
 	"log/slog"
 	"net/http"
+	"slices"
 	"testing"
 	"time"
 
@@ -685,7 +686,7 @@ func TestSchedAgentDeliverIDsIntersect(t *testing.T) {
 	// records, since no token selector covers a deliver permission).
 	var noDeliver []string
 	for _, p := range permissions.Registry {
-		if !containsString(hubDeliveryPermissionList, p.ID) {
+		if !slices.Contains(hubDeliveryPermissionList, p.ID) {
 			noDeliver = append(noDeliver, p.ID)
 		}
 	}

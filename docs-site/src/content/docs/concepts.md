@@ -67,7 +67,7 @@ Agent state uses a **layered model** with three dimensions:
 
 - **Phase** — The lifecycle stage of the agent container:
   `created` → `provisioning` → `cloning` → `starting` → `running` → `stopping` → `stopped`
-  with two off-the-happy-path destinations: `suspended` (paused for later resume) and `error` (the agent crashed).
+  with three off-the-happy-path destinations: `suspended` (paused for later resume), `error` (the agent crashed), and `halted` (the platform ended a run that should still be running).
 
 - **Activity** — What the agent is doing within the `running` phase:
   `initializing` (shown as "starting"), `working`, `thinking`, `executing`, `waiting_for_input`, `blocked`, `completed`, `limits_exceeded`, `stalled`, `offline`, `crashed`
@@ -95,6 +95,29 @@ The `error` phase is not limited to runtime crashes — it also covers **setup f
 
 The `error` phase is **restartable**: running `scion start` clears the error and launches a fresh session. See [Crash Recovery](/scion/local/agent-lifecycle/#crash-recovery-the-error-phase).
 
+#### Halted phase (the platform ended the run)
+
+`halted` means the platform, not you and not the agent, ended a run that was meant to keep running. The agent's **exit reason** says why:
+
+| Exit reason | What happened |
+|---|---|
+| `preempted` | The Kubernetes scheduler evicted the pod to make room for a higher-priority one. |
+| `evicted` | The pod was removed by another disruption, such as node-pressure eviction or a node drain. |
+| `oom_killed` | The container was killed for exceeding its memory limit. |
+| `container_missing` | The agent runtime kept reporting a complete inventory without the agent's container. |
+
+A stopped or suspended agent can also carry the exit reason `signaled`. The agent reports it when it stopped after a termination signal (for example `docker stop`, or a host or node shutdown). It is not a halt reason: on its own it never halts an agent, it only fills an empty exit reason, and it is cleared when the agent next starts.
+
+Only the agent runtime's own observations (its reports of the container, and the Hub's check of its inventory) can halt an agent; a status report an agent sends about itself never does, and never sets one of these reasons. An agent is halted only when all of these hold: it was meant to be running (it was started and not stopped since), no start, restart or stop of it is in progress, and its agent runtime is Docker, Podman, Apple container, or Kubernetes. Otherwise the same run ends `stopped` or `error`, as before. While the agent is running, a reason from the table reported by the agent runtime halts it whatever the exit code. If the agent has already reported that it stopped, a later reason from the table reported by the agent runtime with a clean exit (code 0) upgrades it to `halted` only when the agent's report said it stopped after a termination signal.
+
+`halted` is terminal, like `stopped`: the agent has no container and does not count toward the agent quota. It stays `halted` until you act on it. Status reports from the old run do not move it.
+
+To continue, run `scion start <agent>`. It starts the agent the way a start from `stopped` does. Whether the workspace survives depends on where it lives: a workspace on the agent's own pod storage (a Kubernetes EmptyDir) is re-cloned, and other workspaces are kept. `scion stop` on a halted agent records it as `stopped`.
+
+`scion list` shows the reason next to the phase, for example `halted (preempted)` or `halted (out of memory)`. In Hosted mode, the agent's creator is notified once per halt (unless they chose their own notification triggers by subscribing), and so is anyone subscribed to the `HALTED` notification trigger (see [Messaging & Notifications](/scion/hosted/user/messaging/#halted-agent-notifications)). Lifecycle hooks can use the `halted` trigger (see [Lifecycle Hooks](/scion/hosted/ha/lifecycle-hooks/#triggers)).
+
+Local mode never records `halted`.
+
 #### Stalled, offline, and auto-suspend
 
 The `stalled` activity is set by the platform when an agent's heartbeat is still arriving (the process is alive) but no activity events have been seen for a while (default: 5 minutes). It flags an agent that appears hung. Agents that have declared themselves `blocked` are excluded from stalled detection. If `server.hub.auto_suspend_stalled` is on (off by default), the Hub also **auto-suspends** a stalled agent to reclaim its container — see [Auto-Suspend of Stalled Agents](/scion/local/agent-lifecycle/#auto-suspend-of-stalled-agents).
@@ -115,17 +138,21 @@ Furthermore, agent identities are **strictly scoped by their project** (e.g., `p
 
 ### Workspace Sharing Modes
 
-A **Workspace** is the working directory mounted into a single agent's container at `/workspace`. How it is provisioned across a project's agents is set by the project's **workspace sharing mode**, chosen when the project is created. There are four modes:
+A **Workspace** is the working directory mounted into a single agent's container, at `/workspace`; in worktree-per-agent mode the agent instead works in its worktree under `/repo-root` (for a repository linked to the local workstation Hub, `/repo-root/.scion/agents/<name>/workspace`); scripts should use `$PWD` or `git rev-parse --show-toplevel`. How it is provisioned across a project's agents is set by the project's **workspace sharing mode**, chosen when the project is created. There are four modes:
 
 - **Shared-plain** — One workspace directory is mounted into every agent with no per-agent isolation. This is the model used for plain (non-git) projects.
-- **Worktree-per-agent** — Each agent gets its own [git worktree](https://git-scm.com/docs/git-worktree) over a shared checkout, isolating working trees while sharing one clone's history. Supported in local mode and on Hub-managed git projects; requires git 2.48 or later on the broker (on Kubernetes, only with NFS workspace storage).
+- **Worktree-per-agent** — Each agent gets its own [git worktree](https://git-scm.com/docs/git-worktree) over a shared checkout, isolating working trees while sharing one clone's history. Supported on repositories linked to the local workstation Hub (registered with this mode automatically; the worktrees are of your own checkout) and on Hub-managed git projects created with `worktree-per-agent` (see [Linked git projects](/scion/local/workspace/#linked-git-projects)); requires git 2.48 or later on the broker (on Kubernetes, only with NFS workspace storage).
 - **Clone-per-agent** — Each agent gets its own full git clone of the repository.
 - **Empty-per-agent** — For Hub-managed projects without git: each agent gets its own private directory that starts empty. Use [shared directories](/scion/local/workspaces-and-sharing/#2-the-shared-directories-invariant) to share or keep files.
 
-**Worktree-per-agent (local git projects):**
-- A new worktree is created (e.g. at `../.scion_worktrees/<project>/<agent>`) with a dedicated branch, and mounted into the agent's container as `/workspace`.
-- Agents operate on the same repository history but have independent working directories.
-- Work is merged back to the main branch manually (e.g., `git merge <agent-branch>`).
+**Worktree-per-agent (a repository linked to the local workstation Hub):**
+- A new worktree of your checkout is created at `.scion/agents/<agent>/workspace` with a branch named after the agent. Your repository is mounted in the container at `/repo-root`, and the agent works in `/repo-root/.scion/agents/<agent>/workspace` (not `/workspace`).
+- Agents operate on the same repository history as your checkout but have independent working directories.
+- Work is merged back manually (e.g., `git merge <agent-branch>`). See [Linked git projects](/scion/local/workspace/#linked-git-projects) for the checks and cautions.
+
+**Worktree-per-agent (Hub-managed git projects created with that mode):**
+- The Runtime Broker keeps one shared base clone of the repository on its host and creates a worktree per agent in that clone's `worktrees` directory, on a dedicated branch.
+- Work reaches your own checkout by pushing the agent's branch and merging it there (or through a pull request); the base clone is not your checkout.
 
 **Clone-per-agent (Hub-managed git projects):**
 When a Hub manages a git-based project and worktree-per-agent mode is not selected, agents are provisioned with an independent clone via a robust `git init` + `git fetch` strategy rather than a shared worktree.

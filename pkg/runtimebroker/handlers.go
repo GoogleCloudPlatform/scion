@@ -286,7 +286,10 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		Name:     s.config.BrokerName,
 		Version:  s.version,
 		Capabilities: &BrokerCapabilities{
-			WebPTY: false, // TODO: Implement WebSocket PTY
+			// WebPTY, like Attach, reflects the default runtime: the
+			// same webPTYSupported answer the static registration
+			// capabilities carry.
+			WebPTY: webPTYSupported(rt),
 			Sync:   true,
 			// Attach reflects the default runtime's own capability
 			// (scionrt.HasAttachSupport) rather than a blanket true, so a
@@ -344,8 +347,18 @@ func (s *Server) buildInfoProfiles(defaultRuntimeType string) []BrokerProfile {
 		}
 	}
 
+	// Retained built-in profiles (ptone/scion#5113) resolve by name for the
+	// agents and projects that still use them, but are not offered as
+	// selectable profiles: offering them would keep them in use forever.
+	retained := make(map[string]bool)
+	for _, name := range vs.RetainedProfileNames() {
+		retained[name] = true
+	}
 	names := make([]string, 0, len(vs.Profiles))
 	for name := range vs.Profiles {
+		if retained[name] {
+			continue
+		}
 		names = append(names, name)
 	}
 	sort.Strings(names)
@@ -816,6 +829,12 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	if refusal := s.createRuntimeTargetRefusal(&req); refusal != nil {
 		span.SetStatus(codes.Error, refusal.code)
 		refusal.write(w)
+		return
+	}
+
+	// Refused while the broker drains for shutdown, before the dispatch
+	// attempt, the registration and any file work (design wave 3 §1 C-e).
+	if s.refuseIfDraining(w, "create", req.ID) {
 		return
 	}
 
@@ -1461,7 +1480,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		default:
 			// runLaunch completes the ownership mirror only for an accepted
 			// launch; a refused one leaves it to the deferred release.
-			ownedHandoff = s.beginAsyncLaunch(w, r, ctx, req, opts, sc.Manager, ss, sc.ownedStart, attempt, markAttemptFailed, span, createStart)
+			ownedHandoff = s.beginAsyncLaunch(w, r, ctx, req, opts, sc.Manager, sc.RuntimeType, ss, sc.ownedStart, attempt, markAttemptFailed, span, createStart)
 			return
 		}
 	}
@@ -1579,6 +1598,13 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			cfg, err = sc.Manager.Provision(ctx, opts)
 		}
 		if err != nil {
+			// A skill failure anywhere in the error chain has its full text
+			// logged once, with the correlation id its response carries.
+			provisionSkill := skillFailureFrom(err, opts.RunID)
+			if provisionSkill != nil {
+				s.logSkillResolutionFailure(provisionSkill,
+					"agent_id", req.ID, "project_id", req.ProjectID, "run_id", opts.RunID)
+			}
 			if d, ok := harnessPolicyRefusalFrom(err); ok {
 				markAttemptFailed(d.HTTPStatus, d.detail())
 				span.SetStatus(codes.Error, d.detail())
@@ -1592,11 +1618,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			// "refused to run" apart from an actual provisioning error.
 			if errors.Is(err, agent.ErrReprovisionRefused) {
 				markAttemptFailed(http.StatusConflict, "reprovision refused")
-				span.SetStatus(codes.Error, err.Error())
+				span.SetStatus(codes.Error, spanErrorText(err))
 				Conflict(w, "Failed to provision agent: "+err.Error())
 				return
 			}
-			span.SetStatus(codes.Error, err.Error())
+			span.SetStatus(codes.Error, spanErrorText(err))
 			if config.IsAgentStateConflict(err) {
 				markAttemptFailed(http.StatusConflict, "failed to provision agent")
 				writeError(w, http.StatusConflict, ErrCodeConflict, "Failed to provision agent: "+err.Error(), nil)
@@ -1606,8 +1632,9 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				markAttemptFailed(http.StatusNotFound, "failed to provision agent")
 				// Names the resource without err's own text, which can carry
 				// broker paths (ptone/scion#3113); the full error is logged.
-				s.agentLifecycleLog.Warn("Agent provision failed: template or harness-config not found",
-					"agent_id", req.ID, "project_id", req.ProjectID, "run_id", opts.RunID, "error", err)
+				s.agentLifecycleLog.Warn("Agent provision failed: template or harness-config not found", append([]any{
+					"agent_id", req.ID, "project_id", req.ProjectID, "run_id", opts.RunID},
+					failureLogAttrs(err, provisionSkill)...)...)
 				writeError(w, http.StatusNotFound, ErrCodeNotFound, notFoundMessage("provision agent", err, opts.TemplateName), nil)
 				return
 			}
@@ -1618,7 +1645,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			var skillErr *agent.SkillResolutionError
 			if errors.As(err, &skillErr) {
 				markAttemptFailed(skillResolutionHTTPStatus(skillErr.Code), "failed to provision agent")
-				SkillResolutionFailed(w, skillErr)
+				SkillResolutionFailed(w, skillErr, provisionSkill.ref)
 				return
 			}
 			// An unusable harness-config provisioner is a configuration
@@ -1713,10 +1740,15 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			markAttemptFailed(http.StatusInternalServerError, "failed to create agent")
 		}
 
-		s.agentLifecycleLog.Error("Agent create failed", append([]any{
+		createSkill := skillFailureFrom(err, opts.RunID)
+		s.agentLifecycleLog.Error("Agent create failed", append(append([]any{
 			"agent_id", req.ID, "project_id", req.ProjectID, "run_id", opts.RunID,
-			"name", req.Name, "slug", req.Slug,
-			"error", err}, runtimeFailureLogAttrs(err)...)...)
+			"name", req.Name, "slug", req.Slug}, failureLogAttrs(err, createSkill)...),
+			runtimeCauseLogAttrs(err, createSkill)...)...)
+		if createSkill != nil {
+			s.logSkillResolutionFailure(createSkill,
+				"agent_id", req.ID, "project_id", req.ProjectID, "run_id", opts.RunID)
+		}
 
 		// Clean up provisioned agent files so they don't become orphans --
 		// but only while this start still owns the agent name. The files
@@ -1729,7 +1761,9 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// resolution failure above (#2546). It covers broker files only,
 		// not the hub's agent record.
 		// The files must also still be this run's (ptone/scion#2675): a
-		// newer run recorded in agent-info.json owns them otherwise.
+		// newer run recorded in the host state file owns them otherwise,
+		// and an owner that cannot be determined keeps them
+		// (ptone/scion#4771).
 		if opts.ProjectPath != "" {
 			// The ownership checks and the removal run under the
 			// process-wide workspace lock on the agent's files.
@@ -1746,7 +1780,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				if !ss.ownsName() {
 					s.agentLifecycleLog.Info("Skipped agent file cleanup after start failure: the agent name is now owned by a newer start",
 						"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name)
-				} else if owner := agentFilesRunOwner(opts.Name, opts.ProjectPath, opts.RunID); owner != "" {
+				} else if owner, ownerErr := agentFilesRunOwner(agent.RunOwnerTargetFor(opts), opts.RunID); ownerErr != nil {
+					s.agentLifecycleLog.Warn("Skipped agent file cleanup after start failure: the owner of the agent's files is unknown",
+						"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name,
+						"run_id", opts.RunID, "error", ownerErr)
+				} else if owner != "" {
 					s.agentLifecycleLog.Info("Skipped agent file cleanup after start failure: the agent's files belong to another run",
 						"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name,
 						"run_id", opts.RunID, "files_run_id", owner)
@@ -1759,7 +1797,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				}
 			}()
 		}
-		span.SetStatus(codes.Error, err.Error())
+		span.SetStatus(codes.Error, spanErrorText(err))
 		switch {
 		case isPolicyErr:
 			s.writeHarnessPolicyRefusal(w, policyDecision, "create agent", req.ID, nil)
@@ -1779,7 +1817,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			// broker paths (ptone/scion#3113). The full error is logged above.
 			writeError(w, http.StatusNotFound, ErrCodeNotFound, notFoundMessage(opCreateAgent, err, opts.TemplateName), nil)
 		case isSkillErr:
-			SkillResolutionFailed(w, skillErr)
+			SkillResolutionFailed(w, skillErr, createSkill.ref)
 		case config.IsAgentStateConflict(err):
 			writeError(w, http.StatusConflict, ErrCodeConflict, "Failed to create agent: "+err.Error(), nil)
 		default:
@@ -2649,19 +2687,39 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 
 	// Agent files, worktree and leftover per-agent objects are addressed by
 	// name only, so a delete naming a run must not remove those of another
-	// run that reuses the name (ptone/scion#2675): the run recorded in
-	// agent-info.json, or a start of another run still in flight on this
-	// broker (which may not have recorded its run on disk yet). Without a
-	// run ID, or with no run recorded (legacy files), nothing changes.
+	// run that reuses the name (ptone/scion#2675): the run recorded in the
+	// host state file (ptone/scion#4771), or a start of another run still
+	// in flight on this broker (which may not have recorded its run on disk
+	// yet). An owner that cannot be determined (no trusted root, an
+	// unreadable or invalid record) keeps the files too. Without a run ID,
+	// or with no run recorded (legacy files), nothing changes. With no
+	// project path for a project-scoped delete no file is touched (see
+	// filesToDelete above), so there is nothing to check.
 	var filesOwnerRun, inFlightRun string
+	var filesOwnerErr error
 	if runID != "" && isSingleCleanPathElement(target.name) {
-		filesOwnerRun = agentFilesRunOwner(target.name, projectPath, runID)
+		if projectPath != "" || projectID == "" {
+			hubProjectID := projectID
+			if hubProjectID == "" {
+				hubProjectID = agentProjectID
+			}
+			filesOwnerRun, filesOwnerErr = agentFilesRunOwner(agent.RunOwnerTarget{
+				ProjectPath:  projectPath,
+				AgentName:    target.name,
+				HubProjectID: hubProjectID,
+			}, runID)
+		}
 		inFlightRun = s.deleteInFlightRunID(runID,
 			launchKey{ProjectID: projectID, Slug: id},
 			launchKey{ProjectID: agentProjectID, Slug: target.name})
 	}
 	otherRunInFlight := inFlightRun != ""
-	filesOfOtherRun := filesOwnerRun != "" || otherRunInFlight
+	filesOwnerUnknown := filesOwnerErr != nil
+	if filesOwnerUnknown {
+		s.agentLifecycleLog.Warn("Agent delete: the owner of the agent's files is unknown; keeping them",
+			"agent_id", id, "project_id", agentProjectID, "run_id", runID, "error", filesOwnerErr)
+	}
+	filesOfOtherRun := filesOwnerRun != "" || filesOwnerUnknown || otherRunInFlight
 	if filesOfOtherRun {
 		if target.containerID == "" {
 			// Files only: they are the other run's, and so is anything
@@ -2673,14 +2731,14 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 			// as in currentRunID, so the hub may still finalize.
 			s.agentLifecycleLog.Info("Agent delete: the agent's files belong to another run; leaving them untouched",
 				"agent_id", id, "project_id", agentProjectID, "run_id", runID,
-				"files_run_id", filesOwnerRun, "other_run_in_flight", otherRunInFlight, "current_run_id", inFlightRun)
+				"files_run_id", filesOwnerRun, "files_owner_unknown", filesOwnerUnknown, "other_run_in_flight", otherRunInFlight, "current_run_id", inFlightRun)
 			RunMismatch(w, runID, inFlightRun)
 			return
 		}
 		// Remove the requested run's entry, but not the other run's files.
 		s.agentLifecycleLog.Info("Agent delete: the agent's files belong to another run; deleting the runtime entry only",
 			"agent_id", id, "project_id", agentProjectID, "run_id", runID,
-			"files_run_id", filesOwnerRun, "other_run_in_flight", otherRunInFlight,
+			"files_run_id", filesOwnerRun, "files_owner_unknown", filesOwnerUnknown, "other_run_in_flight", otherRunInFlight,
 			"container_id", target.containerID)
 		filesToDelete = false
 	}
@@ -2931,6 +2989,11 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, p
 }
 
 func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectID string) {
+	// Refused while the broker drains for shutdown, before the start is
+	// tracked or registered (design wave 3 §1 C-e).
+	if s.refuseIfDraining(w, "start", id) {
+		return
+	}
 	// Tracked until Manager.Start and Run's deferred cleanup have returned.
 	// The run comes from the runId query parameter when the hub sends it,
 	// so the start carries its run from the moment it is tracked
@@ -3028,7 +3091,8 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		Branch        string              `json:"branch,omitempty"`
 		WorkspaceMode string              `json:"workspaceMode,omitempty"`
 		// HubAgentDefaults carries the hub defaults a start applies at its
-		// lowest tier (today the auto-expose default, for buildAgentEnv).
+		// lowest tiers: the limits, resources, auto-expose default,
+		// experiments and telemetry default (see api.HubAgentDefaults).
 		HubAgentDefaults *api.HubAgentDefaults `json:"hubAgentDefaults,omitempty"`
 		// TelemetryPolicy is the project's enforced telemetry on/off; see
 		// CreateAgentConfig.TelemetryPolicy (ptone/scion#4218).
@@ -3294,7 +3358,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	agentInfo, err := mgr.Start(ctx, opts)
 	err = s.completeOwnedStart(ctx, mgr, opts.RunID, err, true)
 	if err != nil {
-		span.SetStatus(codes.Error, err.Error())
+		span.SetStatus(codes.Error, spanErrorText(err))
 		if d, ok := harnessPolicyRefusalFrom(err); ok {
 			// Raised from inside Manager.Start, which may already have
 			// acted: carry the start-attempted details like any other
@@ -3302,8 +3366,14 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 			s.writeHarnessPolicyRefusal(w, d, "start agent", id, s.startFailureDetails(ctx, mgr, id, projectID, opts.RunID))
 			return
 		}
-		s.agentLifecycleLog.Error("Agent start failed",
-			"agent_id", id, "project_id", projectID, "run_id", opts.RunID, "error", err)
+		startSkill := skillFailureFrom(err, opts.RunID)
+		s.agentLifecycleLog.Error("Agent start failed", append([]any{
+			"agent_id", id, "project_id", projectID, "run_id", opts.RunID},
+			failureLogAttrs(err, startSkill)...)...)
+		if startSkill != nil {
+			s.logSkillResolutionFailure(startSkill,
+				"agent_id", id, "project_id", projectID, "run_id", opts.RunID)
+		}
 		// Manager.Start may have acted (removed the previous entry or
 		// created a new one), so mark the failure for the hub, and report
 		// the run the runtime holds now. Start can also re-provision the
@@ -3325,7 +3395,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 			// wrapped error carries identity (see runtimeOpError).
 			writeError(w, http.StatusConflict, ErrCodeConflict, scionrt.ErrRunConflict.Error(), details)
 		case errors.As(err, &skillErr):
-			skillResolutionFailedWithDetails(w, skillErr, details)
+			skillResolutionFailedWithDetails(w, skillErr, startSkill.ref, details)
 		case config.IsAgentStateConflict(err):
 			writeError(w, http.StatusConflict, ErrCodeConflict, "Failed to start agent: "+err.Error(), details)
 		default:
@@ -3518,16 +3588,18 @@ func isContainerStopTolerable(err error) bool {
 }
 
 // agentsWithoutProjectLabel returns the subset of agents that carry no
-// scion.project_id label. The project-scoped lookups fall back to a
+// project identity: no scion.project_id label and no ProjectID field
+// (agentHasNoProjectIdentity). The project-scoped lookups fall back to a
 // slug-only search for backward compatibility with pre-existing / solo-mode
 // containers that predate project labels; that fallback must only match such
 // genuinely unlabeled containers. A container labeled for a *different*
 // project must never satisfy a project-scoped request, or same-slug agents
-// across projects would collide.
+// across projects would collide. The ProjectID field counts too, because
+// Cloud Run stores the label under its GCP-sanitized key (ptone/scion#5268).
 func agentsWithoutProjectLabel(agents []api.AgentInfo) []api.AgentInfo {
 	filtered := make([]api.AgentInfo, 0, len(agents))
 	for _, a := range agents {
-		if a.Labels["scion.project_id"] == "" {
+		if agentHasNoProjectIdentity(a) {
 			filtered = append(filtered, a)
 		}
 	}
@@ -4055,6 +4127,11 @@ func (s *Server) panicFailureDetails(ctx context.Context, mgr agent.Manager, id,
 }
 
 func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projectID string) {
+	// Refused while the broker drains for shutdown, before the start is
+	// tracked or registered (design wave 3 §1 C-e).
+	if s.refuseIfDraining(w, "restart", id) {
+		return
+	}
 	// Tracked until the start leg, including Run's deferred cleanup, has
 	// returned, with its run from the runId query parameter as on start.
 	queryRunID := r.URL.Query().Get("runId")
@@ -4398,8 +4475,13 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 			s.writeHarnessPolicyRefusal(w, d, "restart agent", id, s.startFailureDetails(ctx, mgr, id, projectID, opts.RunID))
 			return
 		}
-		s.agentLifecycleLog.Error("Agent restart failed",
-			"agent_id", id, "error", err)
+		restartSkill := skillFailureFrom(err, opts.RunID)
+		s.agentLifecycleLog.Error("Agent restart failed", append([]any{
+			"agent_id", id}, failureLogAttrs(err, restartSkill)...)...)
+		if restartSkill != nil {
+			s.logSkillResolutionFailure(restartSkill,
+				"agent_id", id, "project_id", projectID, "run_id", opts.RunID)
+		}
 		// The stop above and Manager.Start may have acted, so mark the
 		// failure for the hub, and report the run the runtime holds now.
 		details := s.startFailureDetails(ctx, mgr, id, projectID, opts.RunID)
@@ -4413,7 +4495,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		// is not reported as a missing agent.
 		var skillErr *agent.SkillResolutionError
 		if errors.As(err, &skillErr) {
-			skillResolutionFailedWithDetails(w, skillErr, details)
+			skillResolutionFailedWithDetails(w, skillErr, restartSkill.ref, details)
 			return
 		}
 		if config.IsAgentStateConflict(err) {
@@ -5257,13 +5339,12 @@ func (s *Server) getLogs(w http.ResponseWriter, r *http.Request, id, projectID s
 	_, _ = w.Write([]byte(logs))
 }
 
+// getStats answers the agent stats action. No runtime reports resource
+// usage yet (the Runtime interface has no stats method), so it returns 501
+// with ErrCodeStatsNotImplemented rather than zero values a caller could
+// mistake for a real reading.
 func (s *Server) getStats(w http.ResponseWriter, r *http.Request, id, projectID string) {
-	// TODO: Implement real stats from runtime
-	// For now, return placeholder data
-	writeJSON(w, http.StatusOK, StatsResponse{
-		CPUUsagePercent:  0.0,
-		MemoryUsageBytes: 0,
-	})
+	StatsNotImplemented(w, "agent resource statistics are not implemented by this broker")
 }
 
 // HasPromptResponse is the response for the has-prompt action.
@@ -5649,7 +5730,9 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 			// ANTHROPIC_API_KEY for claude) always wins over the identity
 			// leg — shared with pkg/agent's Start(), which uses the same
 			// function to select the auth type actually wired into the
-			// container.
+			// container. One exception to file-first: for an api-key
+			// default harness, an API key beats a gcloud-adc (vertex-ai)
+			// file credential (ptone/scion#4559).
 			if detected := harness.AutoDetectAuthType(authMeta, fileSecretNames, resolvedEnvKeys, gcpSAAssigned); detected != "" {
 				authType = detected
 			}
@@ -6982,7 +7065,23 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 	s.startNFSProjectTreeCleanup(r.Context(), slug, r.URL.Query().Get("project_id"))
 
 	if _, err := os.Stat(projectPath); os.IsNotExist(err) {
-		// Already gone — idempotent success
+		// The project directory is already gone (an earlier delete got
+		// this far). Its project-configs entry may remain, so remove it
+		// now: success only once both are gone, so a repeated delete
+		// converges (design §7, CleanupProject convergence).
+		requestedID := r.URL.Query().Get("project_id")
+		dir, err := orphanProjectConfigDir(globalDir, slug, requestedID)
+		if err != nil {
+			s.writeRuntimeOpError(w, r.Context(), opRemoveProjectConfigDir, err, "project_slug", slug, "project_id", requestedID)
+			return
+		}
+		if dir != "" {
+			if err := s.removeProjectConfigs(globalDir, dir); err != nil {
+				s.writeRuntimeOpError(w, r.Context(), opRemoveProjectConfigDir, err, "project_slug", slug, "project_id", requestedID, "path", dir)
+				return
+			}
+			s.agentLifecycleLog.Info("Removed hub-managed project config directory left by an earlier delete", "slug", slug, "path", dir)
+		}
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -7044,14 +7143,14 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 
 	s.agentLifecycleLog.Info("Removed hub-managed project directory", "slug", slug, "path", projectPath)
 	if configDir != "" {
-		// The .scion entry is gone, so a re-run cannot redo this; a failure
-		// is logged for an operator (scion project prune) and does not
-		// change the response.
-		if err := removeProjectConfigsSubtree(globalDir, configDir); err != nil {
-			s.agentLifecycleLog.Warn("project config directory not removed", "slug", slug, "path", configDir, "error", err)
-		} else {
-			s.agentLifecycleLog.Info("Removed hub-managed project config directory", "slug", slug, "path", configDir)
+		// A failure fails the delete: the project directory is gone, so a
+		// repeated delete removes the entry by its canonical name
+		// (orphanProjectConfigDir) and then succeeds.
+		if err := s.removeProjectConfigs(globalDir, configDir); err != nil {
+			s.writeRuntimeOpError(w, r.Context(), opRemoveProjectConfigDir, err, "project_slug", slug, "path", configDir)
+			return
 		}
+		s.agentLifecycleLog.Info("Removed hub-managed project config directory", "slug", slug, "path", configDir)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

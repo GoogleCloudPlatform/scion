@@ -177,6 +177,19 @@ type CompositeStore struct {
 	// schemaShadowLogger receives the shadow check's warning. Nil means
 	// slog.Default().
 	schemaShadowLogger *slog.Logger
+
+	// beforeFKReconcile is passed to entc.AutoMigrate by Migrate; see
+	// SetBeforeFKReconcile.
+	beforeFKReconcile entc.BeforeFKReconcileFunc
+}
+
+// SetBeforeFKReconcile makes Migrate pass fn to entc.AutoMigrate, which
+// calls it on SQLite just before the foreign key reconcile changes rows
+// (after PreMigrate); an error from fn aborts Migrate before the reconcile
+// writes. Hub startup and the cmd maintenance commands use it to snapshot
+// the database first.
+func (c *CompositeStore) SetBeforeFKReconcile(fn entc.BeforeFKReconcileFunc) {
+	c.beforeFKReconcile = fn
 }
 
 // EnableSchemaShadowGuard makes Migrate, on PostgreSQL, first check that the
@@ -330,6 +343,13 @@ func NewCompositeStore(client *ent.Client) *CompositeStore {
 // same order as PurgeDeletedAgents and finalize-hard. Deleting the
 // memberships first would invert that order and could deadlock (40P01)
 // against a concurrent purge or finalize of the same agent.
+//
+// It does not deactivate the agent's delegation edges or service-account
+// assignments: those rows have no foreign key to the agent and outlive it. A
+// caller must deactivate them first, in the same transaction. Agent removal
+// in pkg/hub goes through FinalizeAgentDeletion instead, with a hook that
+// does so in the same transaction (agentHardDeleteWork).
+// hack/check-store-delete-callers.sh fails on a caller outside its allowlist.
 func (c *CompositeStore) DeleteAgent(ctx context.Context, id string) error {
 	if !c.inTx {
 		return c.WithTx(ctx, func(tx store.Store) error { return tx.DeleteAgent(ctx, id) })
@@ -419,6 +439,13 @@ func (c *CompositeStore) deleteAgentDependents(ctx context.Context, id string) e
 // UPDATE it does not conflict with the FK check's FOR KEY SHARE when a
 // membership, child-group edge or binding referencing an owned group is
 // inserted.
+//
+// It does not deactivate the delegation edges or service-account assignments
+// of the project's agents: those rows have no foreign key to the agents and
+// outlive them. A caller must deactivate any that exist first, in the same
+// transaction, as ProjectDeletionService does (cascadeSecurityState, through
+// deactivateProjectAgentEdges). hack/check-store-delete-callers.sh fails on a
+// caller outside its allowlist.
 func (c *CompositeStore) DeleteProject(ctx context.Context, id string) error {
 	if !c.inTx {
 		return c.WithTx(ctx, func(tx store.Store) error { return tx.DeleteProject(ctx, id) })
@@ -529,7 +556,64 @@ var purgeDeletedAgentsTestHook func(tx *ent.Tx, batchCandidateIDs []uuid.UUID)
 // DeleteAgent and DeleteProject, or a purged agent's keys -- including its
 // own slug -- stay reserved forever, blocking any later agent from taking
 // them.
+//
+// Delegation edges and service-account assignments have no FK to agents
+// either. The purge deactivates the removed agents' active ones in the same
+// transaction (deactivatePurgedAgentAuthority), as a hard delete does.
 func (c *CompositeStore) PurgeDeletedAgents(ctx context.Context, cutoff time.Time) (int, error) {
+	return c.purgeDeletedAgents(ctx, cutoff, nil, false)
+}
+
+// PurgeDeletedAgentsByID is PurgeDeletedAgents restricted to the agents in
+// ids (ptone/scion#4744): only those of them still soft-deleted before
+// cutoff are removed, in the same transaction, lock order, eligibility
+// re-check and cascade. IDs that are not UUIDs, unknown, restored or not yet
+// past cutoff are skipped. An empty ids purges nothing.
+func (c *CompositeStore) PurgeDeletedAgentsByID(ctx context.Context, ids []string, cutoff time.Time) (int, error) {
+	only := make([]uuid.UUID, 0, len(ids))
+	for _, id := range ids {
+		if uid, err := parseUUID(id); err == nil {
+			only = append(only, uid)
+		}
+	}
+	if len(only) == 0 {
+		return 0, nil
+	}
+	return c.purgeDeletedAgents(ctx, cutoff, only, true)
+}
+
+// ListSoftDeletedAgentsBefore returns up to limit soft-deleted agents whose
+// deleted_at is before cutoff and whose ID sorts after afterID ("" starts at
+// the lowest), in ascending ID order, so a caller can page through them
+// (ptone/scion#4744). A non-positive limit returns nothing.
+func (c *CompositeStore) ListSoftDeletedAgentsBefore(ctx context.Context, cutoff time.Time, afterID string, limit int) ([]*store.Agent, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	q := c.client.Agent.Query().
+		Where(agent.DeletedAtNotNil(), agent.DeletedAtLT(cutoff))
+	if afterID != "" {
+		uid, err := parseUUID(afterID)
+		if err != nil {
+			return nil, err
+		}
+		q = q.Where(agent.IDGT(uid))
+	}
+	rows, err := q.Order(ent.Asc(agent.FieldID)).Limit(limit).All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	out := make([]*store.Agent, 0, len(rows))
+	for _, a := range rows {
+		out = append(out, entAgentToStore(a))
+	}
+	return out, nil
+}
+
+// purgeDeletedAgents is the purge behind PurgeDeletedAgents and
+// PurgeDeletedAgentsByID. With restrict set, only agents in only are
+// candidates.
+func (c *CompositeStore) purgeDeletedAgents(ctx context.Context, cutoff time.Time, only []uuid.UUID, restrict bool) (int, error) {
 	useLock := c.AgentStore.usesRowLocks()
 	tx, err := c.client.Tx(ctx)
 	if err != nil {
@@ -542,8 +626,12 @@ func (c *CompositeStore) PurgeDeletedAgents(ctx context.Context, cutoff time.Tim
 	// batch. Otherwise a later batch could lock a lower ID than an earlier
 	// one and deadlock against DeleteProject, which locks a project's agents
 	// in one ascending pass.
-	candidateIDs, err := tx.Agent.Query().
-		Where(agent.DeletedAtNotNil(), agent.DeletedAtLT(cutoff)).
+	candidateQuery := tx.Agent.Query().
+		Where(agent.DeletedAtNotNil(), agent.DeletedAtLT(cutoff))
+	if restrict {
+		candidateQuery = candidateQuery.Where(agent.IDIn(only...))
+	}
+	candidateIDs, err := candidateQuery.
 		Order(ent.Asc(agent.FieldID)).
 		IDs(ctx)
 	if err != nil {
@@ -551,6 +639,13 @@ func (c *CompositeStore) PurgeDeletedAgents(ctx context.Context, cutoff time.Tim
 	}
 
 	txStore := newTxCompositeStore(tx)
+	// One deactivation record for every row this purge deactivates.
+	now := time.Now()
+	deactivation := store.Deactivation{
+		Cause: store.EdgeDeactivationAgentHardDelete,
+		At:    &now,
+		OpID:  uuid.New().String(),
+	}
 	var totalDeleted int
 	for _, batch := range chunkUUIDs(candidateIDs, purgeDeletedAgentsBatchSize) {
 		if purgeDeletedAgentsTestHook != nil {
@@ -619,6 +714,9 @@ func (c *CompositeStore) PurgeDeletedAgents(ctx context.Context, cutoff time.Tim
 				Where(agentrecovery.IDIn(removed...)).Exec(ctx); err != nil {
 				return 0, err
 			}
+			if err := deactivatePurgedAgentAuthority(ctx, txStore, removed, deactivation); err != nil {
+				return 0, err
+			}
 		}
 	}
 
@@ -626,6 +724,41 @@ func (c *CompositeStore) PurgeDeletedAgents(ctx context.Context, cutoff time.Tim
 		return 0, err
 	}
 	return totalDeleted, nil
+}
+
+// purgeDeletedAgentsDeactivateTestHook, when non-nil, is called by
+// deactivatePurgedAgentAuthority before it deactivates anything; a non-nil
+// error is returned as the deactivation's error, so a test can check that
+// the purge rolls back. Always nil in production.
+var purgeDeletedAgentsDeactivateTestHook func() error
+
+// deactivatePurgedAgentAuthority deactivates, with d, every active
+// delegation edge whose delegate is one of the purged agents in ids and
+// every active service-account assignment of those agents, the same rows a
+// hard delete of each agent deactivates. Edges and assignments have no
+// foreign key to the agent, so they would otherwise outlive the row. Rows
+// already inactive (normally deactivated by the agent's soft delete) keep
+// their deactivation record. It runs in the purge's transaction, so an error
+// rolls the purge back.
+//
+// As in the hub's hard delete (agentHardDeleteWork in pkg/hub), only the
+// edges where a purged agent is the delegate are deactivated. Edges where it
+// is the delegator are left as they are; that doc comment gives the reason.
+func deactivatePurgedAgentAuthority(ctx context.Context, txStore *CompositeStore, ids []string, d store.Deactivation) error {
+	if h := purgeDeletedAgentsDeactivateTestHook; h != nil {
+		if err := h(); err != nil {
+			return err
+		}
+	}
+	for _, id := range ids {
+		if _, err := txStore.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, id, d); err != nil {
+			return fmt.Errorf("purge: deactivate delegation edges of agent %s: %w", id, err)
+		}
+		if _, err := txStore.DeactivateAgentServiceAccountAssignments(ctx, id, d); err != nil {
+			return fmt.Errorf("purge: deactivate service-account assignments of agent %s: %w", id, err)
+		}
+	}
+	return nil
 }
 
 // chunkUUIDs splits ids into slices of at most size, preserving order. A nil
@@ -685,7 +818,7 @@ func (c *CompositeStore) Migrate(ctx context.Context) error {
 		return err
 	}
 
-	if err := entc.AutoMigrate(ctx, c.client); err != nil {
+	if err := entc.AutoMigrate(ctx, c.client, entc.WithBeforeFKReconcile(c.beforeFKReconcile)); err != nil {
 		return err
 	}
 

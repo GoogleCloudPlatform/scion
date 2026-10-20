@@ -2,66 +2,184 @@
 title: Tutorial
 ---
 
-Once you have installed and configured Scion, you can start using it to run LLM-based code agents. This brief tutorial will guide you through the basics of starting and managing an agent.
+This tutorial takes you from a fresh install to your first running agent. Scion runs agents
+through a **hub**. On your own machine that hub is the workstation server: one process with the
+Hub, a Runtime Broker and the web dashboard, listening on `127.0.0.1`. You start it once, and every
+`scion` command in any repository uses it.
 
-## 1. Start an Agent
+Before you start, [install Scion](/scion/getting-started/install/) and a container runtime
+(Docker, Podman, or Apple Container).
 
-To start an agent, navigate to your project directory (where you ran `scion init`) and use the `scion start` command. You provide a name for the agent and the objective you want it to accomplish.
+## 1. Start the local hub
+
+```bash
+scion server start
+```
+
+The server starts in the background and prints its URL. On the first start it also adds itself to
+your list of hubs as `local`, so later commands find it:
+
+```
+Registered hub 'local' (http://127.0.0.1:8080); rename with 'scion hub rename'.
+```
+
+On the first run your browser opens the [Onboarding Wizard](/scion/getting-started/onboarding/) at
+`http://127.0.0.1:8080/onboarding`. It sets up your machine: runtime, image registry and harness
+images. Its last step, **First workspace**, is optional. You can skip it, because the next step
+links your repository from the command line.
+
+If the browser does not open (over SSH, or with `SCION_NO_BROWSER` set), open the URL yourself.
+
+:::caution[macOS with Apple container]
+On macOS, Scion prefers Podman, then Docker, and uses the Apple `container` runtime only when
+neither is installed or when you select it. With Apple container, agents can reach the hub only
+through a `sudo` DNS rule that must be re-created after each reboot (or installed as a LaunchDaemon). The wizard's runtime step shows the command; run it yourself. See
+[Apple Container DNS](/scion/local/apple-container/), including how to automate it after reboots.
+:::
+
+:::note[No image registry yet?]
+Without an `image_registry`, the server starts the hub and the web UI but not the Runtime Broker,
+and prints how to set the registry. Set it in the wizard (or with
+`scion config set --global image_registry <your-registry>`), then run `scion server restart`;
+the restart picks up a registry saved in the wizard.
+:::
+
+## 2. Initialize your repository
+
+Go to a git repository you want agents to work on and initialize it:
+
+```bash
+cd ~/src/my-repo
+scion init
+```
+
+`scion init` creates the project's `.scion` directory and links the project to the local hub,
+without a prompt:
+
+```
+Linking project 'my-repo' to the local hub at http://127.0.0.1:8080
+```
+
+If the hub is not running, `init` still succeeds and prints a note; the project then links on its
+first `scion` command. `init` adds an untracked `.scion/` and, unless it is already ignored, appends `.scion/agents/` to your
+`.gitignore`.
+
+Agents in this repository get a git worktree of your checkout, so git 2.48 or newer is required
+here; after the first agent, older git can no longer read this checkout.
+
+## 3. Give agents model access
+
+Agents need credentials for their model provider. On the workstation server, the harness login
+files in your home directory (for example after you sign in to Claude Code or Gemini CLI on this
+machine) are given to agents automatically; see
+[Agent Credentials](/scion/local/agent-credentials/#host-credential-files-on-a-workstation).
+Alternatively, export an API key in the shell you run `scion` from:
+
+```bash
+# For Claude
+export ANTHROPIC_API_KEY="your-api-key"
+
+# For Gemini
+export GEMINI_API_KEY="your-api-key"
+```
+
+## 4. Start an agent
+
+In the repository, give the agent a name and a task:
 
 ```bash
 scion start my-first-agent "Write a python script that prints Hello World"
 ```
 
-The agent will be launched in the background. If you are in a git repo, it will automatically create a new git worktree and branch for its workspace, ensuring your main working directory remains clean.
+The agent runs in the background in its own container. It works in a git worktree of your
+checkout at `.scion/agents/my-first-agent/workspace`, on its own branch `my-first-agent`, so your
+working directory stays clean. It starts from your current commit: commits you have not pushed are
+there, uncommitted changes are not. See [Linked git projects](/scion/local/workspace/#linked-git-projects)
+for how agents get their workspace and what is checked first.
 
-## 2. List Agents
+Do not name an agent after the branch you have checked out: that agent would work directly in your
+own checkout.
 
-You can see all agents currently managed by Scion in your project using the `scion list` command:
+## 5. List agents
 
 ```bash
 scion list
 ```
 
-This will display a table showing the agent's name, its current status (e.g., `STARTING`, `THINKING`, `EXECUTING`, `COMPLETED`), and other details like its runtime and the LLM harness it is using.
+The table shows each agent in the project with its template, harness config, Runtime Broker, phase and last activity. The same
+agents appear in the [Web Dashboard](/scion/workstation/dashboard/) at `http://127.0.0.1:8080`.
 
-## 3. Check Agent Progress
+## 6. Check on an agent
 
-If you want to see what an agent is doing, you can view its logs:
+See the agent's recent terminal output, or its logs:
 
 ```bash
+scion look my-first-agent
 scion logs my-first-agent
 ```
 
-If the agent needs your input or confirmation (its status will be `WAITING_FOR_INPUT`), you can attach to its terminal session:
+If the agent needs your input, attach to its terminal session:
 
 ```bash
 scion attach my-first-agent
 ```
 
-When you are done interacting, you can detach from the session to leave the agent running in the background. This is done with tmux control keys, Cntrl-b, then d.
+To detach and leave the agent running, press `Ctrl-b`, then `d` (see
+[Interactive Sessions with Tmux](/scion/local/tmux/)).
 
-See more
-<!-- TODO link to tmux doc -->
-
-
-You can start and attach to an agent in one go with 
+You can also start an agent and attach to it in one go:
 
 ```bash
 scion start --attach my-other-agent
 ```
 
-## 4. Clean Up
+## 7. Clean up
 
-Once the agent has completed its task, you can review the changes it made in its dedicated branch. When you no longer need the agent, you can delete it:
+When the agent has finished, review its changes: its branch `my-first-agent` is in your
+repository, so you can inspect and merge it as usual (for example `git merge my-first-agent`).
+When you no longer need the agent, delete it:
 
 ```bash
 scion delete my-first-agent
 ```
 
-This will stop the agent container and clean up its resources. By default, its git branch is removed, so be sure to merge any changes you want to keep before deleting the agent!
+This stops the agent's container and removes its worktree. It also deletes the branch, including
+commits you have not merged, so merge what you want to keep first, or pass `--preserve-branch`.
 
-This gives you the very basics of the command, you can use `scion --help` and `scion <cmd> --help` to learn more about each of the commands in the tool.
+## Working from outside the repository
+
+Inside a project directory, commands target that project. To work with the project from anywhere
+else, select it once as your current project:
+
+```bash
+scion use my-repo
+scion list
+```
+
+Commands run outside a project directory now target `my-repo` on the local hub. Run `scion use` to
+see what is selected, and `scion use --clear` to forget it. See
+[`scion use`](/scion/reference/cli/#scion-project).
+
+## Keeping the hub running
+
+The server keeps running in the background until you stop it:
+
+- `scion server status` shows whether it is running; `scion server stop` stops it.
+- To start it at login, generate a service file with `scion server install`; see
+  [Workstation Server Mode](/scion/workstation/workstation-server/).
+
+When the hub is not running, commands say so:
+
+```
+Local scion server is not running. Start it with 'scion server start'.
+```
+
+Use `scion --help` and `scion <command> --help` to learn more about each command.
 
 ## Next steps
 
-Want to talk to your agents from your phone? Follow [Setting Up Telegram](/scion/getting-started/telegram/) to message agents and receive their replies over Telegram.
+- [Working with Agents](/scion/local/agent-lifecycle/): the full agent lifecycle.
+- [Choosing a Mode](/scion/choosing-a-mode/): when to move from the workstation to a shared hub.
+- [Setting Up Telegram](/scion/getting-started/telegram/): message your agents from your phone.
+- Upgrading from a release that ran agents without a hub? See the
+  [migration page](/scion/reference/local-mode-removal/).

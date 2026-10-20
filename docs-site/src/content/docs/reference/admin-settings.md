@@ -68,12 +68,18 @@ The environment variable for this key is `SCION_SERVER_HUB_ENDPOINT`, and its se
 - **Layer-1:** a save applies without a restart. The serving node applies it immediately, and other replicas pick it up through the settings event (within about 2 seconds), with a 60-second poll as a backstop. A few Layer-1 keys take effect only after a restart. The schema endpoint (`GET /api/v1/admin/server-config/schema`) lists them per section in `restart_required`: today `server.hub.public_url` and `server.github_app.app_id`.
 - **Layer-0:** changes take effect only when the Hub restarts. On a workstation Hub, a save that changes a Layer-0 key in `settings.yaml` lists it in the response's `reload.requires_restart`. `log_level` is the exception and applies immediately.
 
-Clearing one of these Layer-1 keys returns the running Hub to the value it started with (from `settings.yaml`, the seed or the environment): `soft_delete_retention`, `soft_delete_retain_files`, `image_registry`, `auto_expose_ports.enabled` and `telemetry.enabled`. Two sections revert as a whole:
+Clearing one of these Layer-1 keys returns the running Hub to the value it started with (from `settings.yaml`, the seed or the environment): `soft_delete_retention`, `soft_delete_retain_files`, `auto_expose_ports.enabled` and `telemetry.enabled`. Clearing `image_registry` returns it to the settings-file value (see below). Two sections revert as a whole:
 
 - **GitHub App:** clearing `app_id` returns all the non-secret GitHub App fields to their startup values. While `app_id` is set, clearing another field applies the empty value, except `private_key_path`, which keeps the startup path.
 - **Telemetry:** a telemetry section with no keys returns to the startup telemetry config. Clearing one telemetry key while others remain applies the config without that key, not its startup value.
 
-For `soft_delete_retention`, `soft_delete_retain_files` and `image_registry`, `GET` returns that running value while no value is stored. A save that sends the same value back leaves the key unset: it is not stored and not reported. A retention is compared as a duration, so `72h0m0s` matches `72h`.
+For `soft_delete_retention` and `soft_delete_retain_files`, `GET` returns that running value while no value is stored. A save that sends the same value back leaves the key unset: it is not stored and not reported. A retention is compared as a duration, so `72h0m0s` matches `72h`.
+
+`image_registry` follows one order everywhere; see [Image registry order](/scion/reference/settings-precedence/#image-registry-order). In the admin settings:
+
+- The top-level field shows the saved value, or else this Hub replica's settings-file value (`settings.yaml`, `SCION_SEED_IMAGEREGISTRY` and `SCION_SERVER_IMAGEREGISTRY`). It never shows an environment value such as `SCION_IMAGE_REGISTRY`. A save stores the field only when it differs from the value shown, so saving the page unchanged stores nothing. To pin the settings-file value, change it once.
+- Each profile's field shows only a value saved for that profile. A hint shows what the profile inherits and from where. Typing a value saves it.
+- `image_registry_provenance` in the `GET` response is read-only and tells you where the value in effect comes from: the Hub-wide source and value, every Runtime Broker that reports `SCION_IMAGE_REGISTRY` (which beats every saved or file value for that Runtime Broker's agents), and each profile's value. The page shows it as one badge on the field.
 
 #### Save report
 
@@ -278,7 +284,7 @@ To streamline management of complex environments, the **General** settings tab i
 
 1. **General Card**: Houses central Hub identity, registration endpoints, and core server configurations.
 2. **Agent Defaults Card** (with dedicated sub-tabs):
-   - Configures default resource constraints (`max_turns`, `max_duration`, limits). These fields can be cleared to blank in the UI, which persists them as `null` in the Hub settings database instead of preserving their previous values, allowing administrators to remove default constraints entirely.
+   - Configures default resource constraints (`max_turns`, `max_duration`, limits). These fields can be cleared to blank in the UI, which persists them as `null` in the Hub settings database instead of preserving their previous values, allowing administrators to remove default constraints entirely. A change to the limits (`default_max_turns`, `default_max_model_calls`, `default_max_duration`) or to `default_resources` reaches existing agents at their next start or restart, unless the agent, its template or (for resources) its broker profile sets the value. Agents created before this behaviour was added keep the limits they have stored. See [Where hub `agent_defaults` rank](/scion/reference/settings-precedence/#where-hub-agent_defaults-rank).
    - Introduces **Default Model** (`default_model`), **Default Thinking Level** (`default_thinking_level`), and **Default Agent Role** (`default_agent_role`) fields directly into the agent default pipeline (with the default agent role updated from `baseline` to `full` for usability).
    - Introduces **Default Runtime Broker** (`default_runtime_broker`), a hub-level default that participates in the [broker resolution cascade](/scion/hosted/ha/multi-broker/#broker-selection). When a project has no default broker and no broker is explicitly requested, the hub-level default is used if the broker is online and dispatchable.
    - **Default Timezone** (`agent_defaults.default_timezone`): an IANA zone picker for the `TZ` sent to agent containers that have no pinned timezone and no `TZ` in the Hub environment-variable store. Empty means no default, so those containers use the image default (UTC). Invalid names and `Local` are rejected with `422`. It sets agent containers only, not how the web UI displays times. See [Times and Timezones](/scion/reference/times-and-timezones/#agent-tz-hub-dispatched-agents) for the full chain.
@@ -320,6 +326,8 @@ Furthermore, these database-backed settings are wired directly into the runtime 
 | *Tracking deployment configuration* | Seeded section — re-syncs on restart |
 | ⓘ *Superseded by database value* | Deployment config differs from the admin-set value |
 | Deprecation banner | `SCION_SERVER_*` used for Layer-1 settings |
+
+The superseded notice names the layer each deployment value comes from: `SCION_SERVER_*`, `settings.yaml` (or the `--config` location), `SCION_SEED_*`, or *built-in default* for a value that no setting or variable sets. A layer is named when it sets the key, even to the default value, so a `SCION_SEED_*` value equal to the default is shown as `SCION_SEED_*`. The admin API reports these as `source` in `superseded_keys`: `server_env`, `yaml`, `seed_env`, or `default`.
 
 ### Error Handling
 

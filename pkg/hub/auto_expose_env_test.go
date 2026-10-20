@@ -218,9 +218,8 @@ func TestResolveAutoExposeEnv(t *testing.T) {
 // TestDispatch_AutoExposeDefault_OnCreateStartAndRestart pins the hub default's
 // transport: it rides HubAgentDefaults on create, start and restart, so a
 // change to it reaches an agent at its next start (AC5). Start and restart
-// also carry the hub resources, which the broker applies per start
-// (ptone/scion#4561); the hub limits stay create/provision-only, so start
-// behaviour for limits is unchanged.
+// also carry the hub resources and limits, which the broker applies per start
+// (ptone/scion#4561, ptone/scion#623).
 func TestDispatch_AutoExposeDefault_OnCreateStartAndRestart(t *testing.T) {
 	ctx := context.Background()
 	d, client, ag := autoExposeDispatchFixture(t)
@@ -251,9 +250,9 @@ func TestDispatch_AutoExposeDefault_OnCreateStartAndRestart(t *testing.T) {
 		require.NotNil(t, hd, "%s must carry the hub auto-expose default", label)
 		require.NotNil(t, hd.AutoExposePorts, label)
 		assert.Equal(t, want, *hd.AutoExposePorts, label)
-		assert.Zero(t, hd.MaxTurns, "%s must not carry hub limits", label)
-		assert.Zero(t, hd.MaxModelCalls, "%s must not carry hub limits", label)
-		assert.Empty(t, hd.MaxDuration, "%s must not carry hub limits", label)
+		assert.Equal(t, 7, hd.MaxTurns, "%s must carry the hub limits", label)
+		assert.Equal(t, 70, hd.MaxModelCalls, "%s must carry the hub limits", label)
+		assert.Equal(t, "1h", hd.MaxDuration, "%s must carry the hub limits", label)
 		require.NotNil(t, hd.Resources, "%s must carry the hub resources", label)
 		assert.Equal(t, "2", hd.Resources.Limits.CPU, label)
 	}

@@ -16,10 +16,10 @@ package cmd
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -45,9 +45,10 @@ A grant gives a user, an agent or a project read, write or admin access to
 the artifact; a user can also be given review (publish reviews only).
 Only the artifact's owner, or a user it granted admin, can see or change
 its grants. On an artifact owned by an agent, the user who delegated to
-the agent and the home project's owners and admins (and super-admins)
-may also add a review grant for a user who can already read it, and
-nothing else; they cannot list the grants. Agents cannot manage grants.
+the agent (while they hold a role in its home project) and the home
+project's owners can too, but they cannot give admin or move the
+artifact. The home project's other admins may only add a review grant
+for a user who can already read it. Agents cannot manage grants.
 
 Subjects are written user:<id>, agent:<id> or project:<id>. Adding a grant
 for a subject that already has one changes its permission.
@@ -60,7 +61,7 @@ Examples:
   scion artifact grants scion://artifact/5f1c2d3e-... --remove <grant-id>`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		_, client, err := requireArtifactHubClient()
+		_, client, _, err := requireArtifactHubClient()
 		if err != nil {
 			return err
 		}
@@ -143,7 +144,7 @@ func artifactGrants(ctx context.Context, svc hubclient.ArtifactService, out io.W
 			return err
 		}
 		perm := strings.ToLower(strings.TrimSpace(opts.Permission))
-		if !containsString(grantPermissions, perm) {
+		if !slices.Contains(grantPermissions, perm) {
 			return fmt.Errorf("--permission must be one of %s", strings.Join(grantPermissions, ", "))
 		}
 		g, err := svc.PutGrant(ctx, id, &hubclient.ArtifactGrantRequest{SubjectKind: kind, SubjectRef: subject, Permission: perm})
@@ -196,24 +197,8 @@ func artifactGrants(ctx context.Context, svc hubclient.ArtifactService, out io.W
 // artifact and 404 to non-readers.
 func grantsErrorHint(err error) string {
 	if h := artifactErrorHint(err, false); h != "" {
-		return h + "\nOnly the artifact's owner, or a user it granted admin, can see or change its grants."
+		return h + "\nOnly the artifact's owner, a user it granted admin, or, for an artifact owned by an agent, " +
+			"the user who delegated to the agent or an owner of its home project, can see or change its grants."
 	}
 	return ""
-}
-
-// writeJSONTo writes v to out as indented JSON.
-func writeJSONTo(out io.Writer, v any) error {
-	enc := json.NewEncoder(out)
-	enc.SetIndent("", "  ")
-	return enc.Encode(v)
-}
-
-// containsString reports whether list holds s.
-func containsString(list []string, s string) bool {
-	for _, x := range list {
-		if x == s {
-			return true
-		}
-	}
-	return false
 }

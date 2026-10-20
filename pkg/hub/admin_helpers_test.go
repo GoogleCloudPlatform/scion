@@ -244,6 +244,12 @@ func (s *settingsAuditStore) CreateMutationAudit(_ context.Context, rec *store.M
 	return nil
 }
 
+// ListRuntimeBrokers reports no brokers: the admin settings GET lists them
+// for the image_registry provenance (ptone/scion#3916).
+func (s *settingsAuditStore) ListRuntimeBrokers(context.Context, store.RuntimeBrokerFilter, store.ListOptions) (*store.ListResult[store.RuntimeBroker], error) {
+	return &store.ListResult[store.RuntimeBroker]{}, nil
+}
+
 // records returns the audit records written so far.
 func (s *settingsAuditStore) records() []*store.MutationAuditRecord {
 	s.mu.Lock()

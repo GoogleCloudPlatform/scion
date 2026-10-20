@@ -55,6 +55,13 @@ import {
   settingsErrorStyles,
 } from '../shared/settings-error-views.js';
 import './admin-experiments.js';
+import {
+  type ImageRegistryProvenance,
+  hasOtherProfileEnvOverrides,
+  imageRegistryBadgeLines,
+  profileImageRegistryEnvLine,
+  profileInheritedHint,
+} from './image-registry-provenance.js';
 
 /** GET /api/v1/admin/server-config returns this in place of each secret. */
 const MASKED_VALUE = '********';
@@ -441,6 +448,8 @@ interface ServerConfigResponse {
   env_overrides?: string[];
   public_url_status?: PublicURLStatus;
   observability_export?: HubObservabilityExport;
+  /** Where the image_registry in effect comes from (read-only, ptone/scion#3916). */
+  image_registry_provenance?: ImageRegistryProvenance;
   section_metadata?: Record<string, SectionMetadataInfo>;
   superseded_keys?: Record<string, SupersededKeyInfo[]>;
   deprecated_env_keys?: DeprecatedEnvKeyInfo[];
@@ -529,7 +538,7 @@ interface SectionMetadataInfo {
 /** A bootstrap-material key whose value differs from the DB value in a managed section. */
 interface SupersededKeyInfo {
   key: string;
-  source: string; // "seed_env" | "yaml" | "server_env"
+  source: string; // "seed_env" | "yaml" | "server_env" | "default"
 }
 
 /** A SCION_SERVER_* env var that targets a Layer-1 key (deprecated, migrate to SCION_SEED_*). */
@@ -968,6 +977,7 @@ export class ScionPageAdminServerConfig extends LitElement {
   // ── Settings-DB metadata (DB-backed hubs, any driver) ──
   @state() private envOverrides: string[] = [];
   @state() private publicUrlStatus: PublicURLStatus | null = null;
+  @state() private imageRegistryProvenance: ImageRegistryProvenance | null = null;
   @state() private observabilityExport: HubObservabilityExport | null = null;
 
   // ── Hub observability export switches (ptone/scion#4914) ──
@@ -2067,6 +2077,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.envOverrides = data.env_overrides || [];
     this.envKeys = new Set(this.envOverrides);
     this.publicUrlStatus = data.public_url_status || null;
+    this.imageRegistryProvenance = data.image_registry_provenance || null;
     this.observabilityExport = data.observability_export || null;
     this.sectionMetadata = data.section_metadata || null;
     // The hub leaves a pinned public URL out of superseded_keys
@@ -2574,8 +2585,8 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('server.broker.hub_endpoint')) broker.hub_endpoint = this.brokerHubEndpoint || '';
     if (ok('server.broker.container_hub_endpoint'))
       broker.container_hub_endpoint = this.brokerContainerHubEndpoint || '';
-    if (ok('server.broker.name')) broker.broker_name = this.brokerName || '';
-    if (ok('server.broker.nickname')) broker.broker_nickname = this.brokerNickname || '';
+    if (ok('server.broker.broker_name')) broker.broker_name = this.brokerName || '';
+    if (ok('server.broker.broker_nickname')) broker.broker_nickname = this.brokerNickname || '';
     if (ok('server.broker.auto_provide')) broker.auto_provide = this.brokerAutoProvide;
     if (Object.keys(broker).length > 0) server.broker = broker;
 
@@ -2747,8 +2758,8 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('server.broker.hub_endpoint')) broker.hub_endpoint = this.brokerHubEndpoint || '';
     if (ok('server.broker.container_hub_endpoint'))
       broker.container_hub_endpoint = this.brokerContainerHubEndpoint || '';
-    if (ok('server.broker.name')) broker.broker_name = this.brokerName || '';
-    if (ok('server.broker.nickname')) broker.broker_nickname = this.brokerNickname || '';
+    if (ok('server.broker.broker_name')) broker.broker_name = this.brokerName || '';
+    if (ok('server.broker.broker_nickname')) broker.broker_nickname = this.brokerNickname || '';
     if (ok('server.broker.auto_provide')) broker.auto_provide = this.brokerAutoProvide;
     server.broker = broker;
 
@@ -3143,6 +3154,49 @@ export class ScionPageAdminServerConfig extends LitElement {
     >`;
   }
 
+  /**
+   * The one image_registry badge, from the server's provenance: how an
+   * environment variable sets the hub-wide value, and every Runtime Broker
+   * whose SCION_IMAGE_REGISTRY overrides it for its agents. It replaces the
+   * generic env-override badge for this key (ptone/scion#3916).
+   */
+  private renderImageRegistryBadge(): typeof nothing | ReturnType<typeof html> {
+    const lines = imageRegistryBadgeLines(this.imageRegistryProvenance, this.envOverrides);
+    if (lines.length === 0) return nothing;
+    return html`
+      <span class="env-badge image-registry-badge">
+        <sl-icon name="exclamation-triangle"></sl-icon>
+        ${lines.map((l, i) => html`${i > 0 ? html`<br />` : nothing}${l}`)}
+      </span>
+    `;
+  }
+
+  /**
+   * The profiles section's env badge: profile image_registry keys are
+   * startup values a saved profile value replaces, so they get their own
+   * text; any other overridden profile key keeps the generic badge.
+   */
+  private renderProfilesEnvBadge(): typeof nothing | ReturnType<typeof html> {
+    const registryLine = profileImageRegistryEnvLine(this.envOverrides);
+    const generic = hasOtherProfileEnvOverrides(this.envOverrides)
+      ? this.envBadgeTemplate()
+      : nothing;
+    if (!registryLine) return generic;
+    return html`${generic}<span class="env-badge image-registry-badge">
+        <sl-icon name="exclamation-triangle"></sl-icon>
+        ${registryLine}
+      </span>`;
+  }
+
+  /** What a profile without a saved image_registry inherits, and from where. */
+  private renderProfileInheritedHint(
+    name: string,
+    saved: string | undefined
+  ): typeof nothing | ReturnType<typeof html> {
+    const hint = profileInheritedHint(this.imageRegistryProvenance, name, saved);
+    return hint ? html`<span class="hint image-registry-inherited">${hint}</span>` : nothing;
+  }
+
   /** The env-override badge shared by renderEnvBadge and renderEnvBadgeUnder. */
   private envBadgeTemplate(): ReturnType<typeof html> {
     return html`
@@ -3244,6 +3298,8 @@ export class ScionPageAdminServerConfig extends LitElement {
           return 'settings.yaml';
         case 'server_env':
           return 'SCION_SERVER_*';
+        case 'default':
+          return 'built-in default';
         default:
           return s;
       }
@@ -3795,7 +3851,7 @@ export class ScionPageAdminServerConfig extends LitElement {
             ${this.renderFieldValue(
               'image_registry',
               this.imageRegistry,
-              html`${this.renderEnvBadge('image_registry')}<sl-input
+              html`${this.renderImageRegistryBadge()}<sl-input
                   value=${this.imageRegistry}
                   placeholder="ghcr.io/myorg"
                   @sl-input=${(e: Event) => {
@@ -5285,7 +5341,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       <div class="section">
         ${this.renderSectionHeader('Profiles', 'profiles')} ${this.renderSectionMeta('profiles')}
         ${profileReadOnly ? html`${this.renderReadOnlyBadge(profileReadOnly)}` : nothing}
-        ${this.renderEnvBadgeUnder('profiles')}
+        ${this.renderProfilesEnvBadge()}
         ${profileNames.length === 0
           ? html`<p class="hint">No profiles configured.</p>`
           : profileNames.map((name) =>
@@ -5442,6 +5498,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                 );
               }}
             ></sl-input>
+            ${this.renderProfileInheritedHint(name, profile.image_registry)}
           </div>
           <div class="form-field">
             <label>Default Template</label>
@@ -5865,7 +5922,7 @@ export class ScionPageAdminServerConfig extends LitElement {
           <div class="form-field">
             <label>Broker Name</label>
             ${this.renderFieldValue(
-              'server.broker.name',
+              'server.broker.broker_name',
               this.brokerName || '—',
               html`<sl-input
                 value=${this.brokerName}
@@ -5878,7 +5935,7 @@ export class ScionPageAdminServerConfig extends LitElement {
           <div class="form-field">
             <label>Broker Nickname</label>
             ${this.renderFieldValue(
-              'server.broker.nickname',
+              'server.broker.broker_nickname',
               this.brokerNickname || '—',
               html`<sl-input
                 value=${this.brokerNickname}

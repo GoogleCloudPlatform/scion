@@ -275,6 +275,9 @@ func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, p
 		}
 
 		s.events.PublishProjectUpdated(ctx, project)
+		if present[projectSettingsFieldActiveProfile] {
+			s.onProjectActiveProfileSaved(ctx, project)
+		}
 		writeJSON(w, http.StatusOK, projectSettingsWithWarnings{
 			ProjectSettings: projectSettingsFromAnnotations(project),
 			Warnings:        s.profileDefaultSAWarnings(ctx, project.ID, changedProfileDefaults),
@@ -579,6 +582,7 @@ const (
 	projectSettingsFieldGCPIdentityMode          = "defaultGCPIdentityMode"
 	projectSettingsFieldGCPIdentitySAID          = "defaultGCPIdentityServiceAccountID"
 	projectSettingsFieldGCPIdentitySAIDByProfile = "defaultGCPIdentityServiceAccountIDByProfile"
+	projectSettingsFieldActiveProfile            = "activeProfile"
 )
 
 // projectSettingsNullClearsFields are the fields for which JSON null clears

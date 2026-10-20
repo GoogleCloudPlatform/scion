@@ -139,6 +139,49 @@ func TestFileSource_MissingFileAndNoEnv(t *testing.T) {
 	assert.NoError(t, st.FileError, "a missing file is not a read error")
 }
 
+func TestFileSource_RetriesReadAfterHardlinkRemoval(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tt")
+	first := makeTestJWT(time.Now().Add(10 * time.Minute))
+	writeTokenFile(t, path, first)
+	src := NewFileSource(path, nil)
+	got, err := src.Token()
+	require.NoError(t, err)
+	require.Equal(t, first, got)
+
+	// A replacement with an extra hard link must be rejected, and the
+	// previously cached token must not survive the failed read.
+	second := makeTestJWT(time.Now().Add(time.Hour))
+	writeTokenFile(t, path, second)
+	link := path + ".link"
+	require.NoError(t, os.Link(path, link))
+	before, err := os.Stat(path)
+	require.NoError(t, err)
+
+	got, err = src.Token()
+	require.Error(t, err)
+	assert.Empty(t, got)
+	st := src.Status()
+	assert.False(t, st.FilePresent)
+	assert.ErrorIs(t, st.FileError, dirfd.ErrNotSingleLinkRegular)
+
+	// Removing only the extra link makes the file safe to read without
+	// changing any of the fields used to skip an unchanged file.
+	require.NoError(t, os.Remove(link))
+	after, err := os.Stat(path)
+	require.NoError(t, err)
+	require.True(t, os.SameFile(before, after))
+	require.Equal(t, before.ModTime(), after.ModTime())
+	require.Equal(t, before.Size(), after.Size())
+
+	got, err = src.Token()
+	require.NoError(t, err, "a failed read must be retried even without a file replacement")
+	assert.Equal(t, second, got)
+	st = src.Status()
+	assert.True(t, st.FilePresent)
+	assert.Equal(t, SourceLabelFile, st.InUse)
+	assert.NoError(t, st.FileError)
+}
+
 func TestFileSource_SetTokenUsedUntilFileCatchesUp(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tt")
 	src := NewFileSource(path, nil)
@@ -320,6 +363,103 @@ func TestFileSource_ConcurrentRefreshAndRead(t *testing.T) {
 	got, err := src.Token()
 	require.NoError(t, err)
 	assert.Equal(t, values[writes-1], got)
+}
+
+// A read that opens the file just before a refresh renames a new file over
+// it fails, because the old file has no link left. The source must read the
+// new file instead of dropping the value. The injected reader forces that
+// interleaving deterministically: it replaces the file, then fails the way
+// the default reader does on the unlinked old file. ptone/scion#5038.
+func TestFileSource_ReadRacingReplaceRereadsNewFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tt")
+	first := makeTestJWT(time.Now().Add(10 * time.Minute))
+	second := makeTestJWT(time.Now().Add(20 * time.Minute))
+	third := makeTestJWT(time.Now().Add(30 * time.Minute))
+	writeTokenFile(t, path, first)
+
+	armed := false
+	reads := 0
+	src := NewFileSource(path, func(p string) (string, error) {
+		reads++
+		if armed {
+			armed = false
+			writeTokenFile(t, p, third)
+			return "", fmt.Errorf("credential file %s: %w", p, dirfd.ErrNotSingleLinkRegular)
+		}
+		return ReadTransportTokenFile(p)
+	})
+	got, err := src.Token()
+	require.NoError(t, err)
+	require.Equal(t, first, got)
+
+	writeTokenFile(t, path, second)
+	armed = true
+	reads = 0
+	got, err = src.Token()
+	require.NoError(t, err, "a read racing a replacement must not drop the credential")
+	assert.Equal(t, third, got)
+	assert.Equal(t, 2, reads)
+	st := src.Status()
+	assert.NoError(t, st.FileError)
+	assert.Equal(t, SourceLabelFile, st.InUse)
+}
+
+// A read that fails on a file that was not replaced is a genuine refusal:
+// it is not retried within the call, and the file value is cleared.
+func TestFileSource_ReadFailureWithoutReplaceNotRetried(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tt")
+	writeTokenFile(t, path, makeTestJWT(time.Now().Add(10*time.Minute)))
+	reads := 0
+	src := NewFileSource(path, func(p string) (string, error) {
+		reads++
+		return "", fmt.Errorf("credential file %s: %w", p, dirfd.ErrNotSingleLinkRegular)
+	})
+	got, err := src.Token()
+	assert.Error(t, err)
+	assert.Empty(t, got)
+	assert.Equal(t, 1, reads)
+	st := src.Status()
+	assert.False(t, st.FilePresent)
+	assert.ErrorIs(t, st.FileError, dirfd.ErrNotSingleLinkRegular)
+}
+
+// A read that fails and leaves the path gone is not retried: there is no
+// new file to read, and the read error is the one recorded.
+func TestFileSource_ReadFailureThenPathGoneNotRetried(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tt")
+	writeTokenFile(t, path, makeTestJWT(time.Now().Add(10*time.Minute)))
+	reads := 0
+	src := NewFileSource(path, func(p string) (string, error) {
+		reads++
+		require.NoError(t, os.Remove(p))
+		return "", fmt.Errorf("credential file %s: %w", p, dirfd.ErrNotSingleLinkRegular)
+	})
+	got, err := src.Token()
+	assert.Error(t, err)
+	assert.Empty(t, got)
+	assert.Equal(t, 1, reads)
+	// Status re-checks the path and reports a missing file without an
+	// error, so inspect the error recorded by the Token call directly.
+	assert.ErrorIs(t, src.fileErr, dirfd.ErrNotSingleLinkRegular)
+	assert.Empty(t, src.fileToken)
+}
+
+// A file replaced during every read is read at most three times in
+// one call; then the failure is reported and no value is kept.
+func TestFileSource_ReadRetryIsBounded(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tt")
+	writeTokenFile(t, path, makeTestJWT(time.Now().Add(10*time.Minute)))
+	reads := 0
+	src := NewFileSource(path, func(p string) (string, error) {
+		reads++
+		writeTokenFile(t, p, makeTestJWT(time.Now().Add(time.Duration(reads+10)*time.Minute)))
+		return "", fmt.Errorf("credential file %s: %w", p, dirfd.ErrNotSingleLinkRegular)
+	})
+	got, err := src.Token()
+	assert.Error(t, err)
+	assert.Empty(t, got)
+	assert.Equal(t, 3, reads)
+	assert.ErrorIs(t, src.Status().FileError, dirfd.ErrNotSingleLinkRegular)
 }
 
 // TestReadTransportTokenFile_RefusesNonRegular verifies the default reader

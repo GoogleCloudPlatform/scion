@@ -2370,6 +2370,82 @@ describe('scion-page-admin-server-config', () => {
     });
   });
 
+  // ── image_registry: one badge from the server's provenance (ptone/scion#3916) ──
+
+  describe('image_registry provenance badge and inherited hint', () => {
+    const generic = 'Overridden by environment on this node';
+    function texts(el: HTMLElement, sel: string): string[] {
+      return queryAll(el, sel).map((b) => (b.textContent ?? '').replace(/\s+/g, ' ').trim());
+    }
+
+    it('names the startup env instead of the generic badge', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'db',
+            env_overrides: ['image_registry'],
+            image_registry_provenance: { source: 'file', value: 's.example' },
+          })
+        )
+      );
+      const badges = texts(element, '.image-registry-badge');
+      expect(badges).toHaveLength(1);
+      expect(badges[0]).toContain('SCION_SERVER_IMAGEREGISTRY at startup');
+      expect(texts(element, '.env-badge').some((t) => t.includes(generic))).toBe(false);
+    });
+
+    it('lists a broker that reports a node env', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'db',
+            image_registry_provenance: {
+              source: 'hub_db',
+              value: 'db.example',
+              node_env_overrides: [
+                { broker_id: 'b1', broker_name: 'gpu-pool', value: 'n.example', differs: true },
+              ],
+            },
+          })
+        )
+      );
+      const badges = texts(element, '.image-registry-badge');
+      expect(badges).toHaveLength(1);
+      expect(badges[0]).toContain('Runtime Broker gpu-pool sets SCION_IMAGE_REGISTRY=n.example');
+    });
+
+    it('describes a profile image_registry env value as a startup value', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({ settings_tier: 'db', env_overrides: ['profiles.k8s.image_registry'] })
+        )
+      );
+      const badges = texts(element, '.image-registry-badge');
+      expect(badges).toHaveLength(1);
+      expect(badges[0]).toContain('a saved profile value replaces it');
+      expect(texts(element, '.env-badge').some((t) => t.includes(generic))).toBe(false);
+    });
+
+    it('shows what a profile without a saved registry inherits', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'db',
+            profiles: { k8s: { runtime: 'docker' } },
+            image_registry_provenance: {
+              source: 'hub_db',
+              value: 'db.example',
+              profiles: { k8s: { source: 'hub_db', value: 'db.example' } },
+            },
+          })
+        )
+      );
+      expect(texts(element, '.image-registry-inherited')).toEqual([
+        'Inherited: db.example (saved hub value).',
+      ]);
+    });
+  });
+
   // ── Experiments tab (ptone/scion#2217) ──
 
   describe('Experiments tab', () => {
@@ -3416,6 +3492,30 @@ describe('scion-page-admin-server-config', () => {
       expect(field(element).querySelector('.superseded-badge')).not.toBeNull();
     });
 
+    it('names the layer each superseded value comes from', async () => {
+      // The hub reports a key that only the coded defaults set with source
+      // "default", and a seed value equal to the default with "seed_env"
+      // (ptone/scion#4983).
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'db',
+            superseded_keys: {
+              agent_defaults: [
+                { key: 'default_template', source: 'seed_env' },
+                { key: 'default_harness_config', source: 'yaml' },
+              ],
+              access: [{ key: 'server.hub.admin_emails', source: 'default' }],
+            },
+          })
+        )
+      );
+      const text = panelText(element);
+      expect(text).toContain('(from built-in default)');
+      expect(text).toContain('(from SCION_SEED_*)');
+      expect(text).toContain('(from settings.yaml)');
+    });
+
     it('the Superseded badge goes away after the public URL is cleared', async () => {
       const cfg = makeBaseConfig({
         settings_tier: 'db',
@@ -4204,12 +4304,12 @@ describe('scion-page-admin-server-config', () => {
         clear: (el) => (el.brokerContainerHubEndpoint = ''),
         expected: '',
       },
-      'server.broker.name': {
+      'server.broker.broker_name': {
         clear: (el) => (el.brokerName = ''),
         expected: '',
         bodyPath: ['server', 'broker', 'broker_name'],
       },
-      'server.broker.nickname': {
+      'server.broker.broker_nickname': {
         clear: (el) => (el.brokerNickname = ''),
         expected: '',
         bodyPath: ['server', 'broker', 'broker_nickname'],

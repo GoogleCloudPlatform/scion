@@ -24,6 +24,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -157,10 +158,10 @@ type HubServerConfig struct {
 	// (minimum 11m).
 	StartMaxDuration time.Duration `json:"startMaxDuration" yaml:"startMaxDuration" koanf:"startMaxDuration"`
 	// StartUnconfirmedHold bounds how long a start with an unknown outcome
-	// blocks other starts. Default 13m (minimum 12m40s).
+	// blocks other starts. Default 17m (minimum 16m).
 	StartUnconfirmedHold time.Duration `json:"startUnconfirmedHold" yaml:"startUnconfirmedHold" koanf:"startUnconfirmedHold"`
 	// StartCreateUnconfirmedHold is StartUnconfirmedHold for a new agent's
-	// create-and-start. Default 5m (3m up to StartUnconfirmedHold).
+	// create-and-start. Default 16m (16m up to StartUnconfirmedHold).
 	StartCreateUnconfirmedHold time.Duration `json:"startCreateUnconfirmedHold" yaml:"startCreateUnconfirmedHold" koanf:"startCreateUnconfirmedHold"`
 
 	// DisableLegacyStorageFallback disables the legacy un-namespaced storage
@@ -288,6 +289,11 @@ func PersistentHubID() string {
 	return id
 }
 
+// HubIDEnvVar is the environment equivalent of server.hub.hub_id. Set, it
+// pins the hub id like the settings key does (ResolveHubIDFromEnv reads it
+// directly, and the SCION_SERVER_ overlay also maps it onto HubServerConfig.HubID).
+const HubIDEnvVar = "SCION_SERVER_HUB_HUBID"
+
 // resolvedHubIDOnce guards the one-time computation of the fallback hub ID
 // (from K_SERVICE or hostname). The result is cached because ResolveHubIDFromEnv
 // is called multiple times during startup and the inputs (hostname, K_SERVICE)
@@ -312,7 +318,7 @@ var (
 // additionally checks the struct-level HubID field.
 func ResolveHubIDFromEnv() string {
 	// Explicit env var takes precedence and is not cached (it's a cheap lookup).
-	if v := os.Getenv("SCION_SERVER_HUB_HUBID"); v != "" {
+	if v := os.Getenv(HubIDEnvVar); v != "" {
 		return v
 	}
 	resolvedHubIDOnce.Do(func() {
@@ -352,7 +358,7 @@ func (c *HubServerConfig) ResolveHubID() string {
 // cache: the two are expected to disagree on the first-boot, no-file-yet
 // case, for exactly the reason above.
 func ResolveHubIDFromEnvReadOnly() (id string, ok bool) {
-	if v := os.Getenv("SCION_SERVER_HUB_HUBID"); v != "" {
+	if v := os.Getenv(HubIDEnvVar); v != "" {
 		return v, true
 	}
 	if kService := cloudrunenv.ServiceName(); kService != "" {
@@ -545,6 +551,11 @@ type RuntimeBrokerConfig struct {
 	// host.containers.internal for local development).
 	ContainerHubEndpoint string `json:"containerHubEndpoint" yaml:"containerHubEndpoint" koanf:"containerHubEndpoint"`
 
+	// StateDir is the base directory of the broker's runtime state
+	// (settings server.broker.state_dir); the broker uses
+	// <StateDir>/<broker-id>. Empty means ~/.scion/runtime-broker-state.
+	StateDir string `json:"stateDir" yaml:"stateDir" koanf:"stateDir"`
+
 	// BrokerID is a unique identifier for this runtime broker (auto-generated if empty)
 	BrokerID string `json:"brokerId" yaml:"brokerId" koanf:"brokerId"`
 	// BrokerName is a human-readable name for this runtime broker
@@ -602,6 +613,13 @@ type RuntimeTargetConfig struct {
 	KubernetesServiceAccountMappings map[string]string `json:"kubernetesServiceAccountMappings,omitempty" yaml:"kubernetesServiceAccountMappings,omitempty" koanf:"kubernetesServiceAccountMappings"`
 	SharedDirStorageClass            string            `json:"sharedDirStorageClass,omitempty" yaml:"sharedDirStorageClass,omitempty" koanf:"sharedDirStorageClass"`
 	SharedDirSize                    string            `json:"sharedDirSize,omitempty" yaml:"sharedDirSize,omitempty" koanf:"sharedDirSize"`
+	GKE                              bool              `json:"gke,omitempty" yaml:"gke,omitempty" koanf:"gke"`
+	PriorityClassName                string            `json:"priorityClassName,omitempty" yaml:"priorityClassName,omitempty" koanf:"priorityClassName"`
+	SafeToEvict                      *bool             `json:"safeToEvict,omitempty" yaml:"safeToEvict,omitempty" koanf:"safeToEvict"`
+	SharedDirStorageBackend          string            `json:"sharedDirStorageBackend,omitempty" yaml:"sharedDirStorageBackend,omitempty" koanf:"sharedDirStorageBackend"`
+	SharedDirStorageBackends         map[string]string `json:"sharedDirStorageBackends,omitempty" yaml:"sharedDirStorageBackends,omitempty" koanf:"sharedDirStorageBackends"`
+	HomeStorageBackend               string            `json:"homeStorageBackend,omitempty" yaml:"homeStorageBackend,omitempty" koanf:"homeStorageBackend"`
+	HomeStorageLeaf                  string            `json:"homeStorageLeaf,omitempty" yaml:"homeStorageLeaf,omitempty" koanf:"homeStorageLeaf"`
 }
 
 // DatabaseConfig holds database connection settings.
@@ -735,6 +753,14 @@ type ProxyAuthConfig struct {
 	JWT *JWTAuthConfig `json:"jwt,omitempty" yaml:"jwt,omitempty" koanf:"jwt"`
 	// RequireTrustedProxyIP enables defense-in-depth IP allowlisting.
 	RequireTrustedProxyIP bool `json:"requireTrustedProxyIP,omitempty" yaml:"requireTrustedProxyIP,omitempty" koanf:"requireTrustedProxyIP"`
+	// DriverPrincipals lists the exact emails of the browser drivers that
+	// may carry test identity web sessions through the proxy
+	// (ProxyDriverPrincipalsKey). Startup config only; never API-writable.
+	DriverPrincipals []string `json:"driverPrincipals,omitempty" yaml:"driverPrincipals,omitempty" koanf:"driverPrincipals"`
+	// DriverTokenAudience is the audience (the IAP OAuth client ID) of a
+	// driver's Google ID token (ProxyDriverTokenAudienceKey). Startup config
+	// only; never API-writable.
+	DriverTokenAudience string `json:"driverTokenAudience,omitempty" yaml:"driverTokenAudience,omitempty" koanf:"driverTokenAudience"`
 }
 
 // IAPAuthConfig holds Google IAP-specific settings.
@@ -966,6 +992,10 @@ type GlobalConfig struct {
 
 	// Hub API server settings
 	Hub HubServerConfig `json:"hub" yaml:"hub" koanf:"hub"`
+
+	// Relay holds the settings of a separate relay process (scion server
+	// --role relay; server.relay).
+	Relay RelayServerConfig `json:"relay,omitzero" yaml:"relay,omitempty" koanf:"relay"`
 
 	// Runtime Broker API server settings
 	RuntimeBroker RuntimeBrokerConfig `json:"runtimeBroker" yaml:"runtimeBroker" koanf:"runtimeBroker"`
@@ -1525,12 +1555,11 @@ func loadGlobalConfigLegacy(configPath string, topLevel map[string]interface{}) 
 		_ = k.Set("telemetryEnabled", *enabled)
 	}
 
-	// 4. Load environment variables (SCION_SERVER_ prefix)
-	// Maps: SCION_SERVER_HUB_PORT -> hub.port
-	//       SCION_SERVER_DATABASE_DRIVER -> database.driver
+	// 4. Load environment variables (SCION_SERVER_ prefix) through the env
+	// mapping table (envKeyToConfigKey):
+	//       SCION_SERVER_HUB_PORT -> hub.port
 	//       SCION_SERVER_LOGLEVEL -> logLevel
 	//       SCION_SERVER_OAUTH_CLI_GOOGLE_CLIENTID -> oauth.cli.google.clientId
-	// Underscores become dots for nested keys, with camelCase handling.
 	_ = k.Load(nonEmptyEnvProvider("SCION_SERVER_", envKeyToConfigKey), nil)
 	splitKoanfListKeys(k, envListConfigKeys)
 
@@ -1564,6 +1593,10 @@ func loadGlobalConfigLegacy(configPath string, topLevel map[string]interface{}) 
 		telemetryEnabled := config.TelemetryEnabled
 		applyTopLevelSettingsSections(config, topLevel)
 		config.TelemetryEnabled = telemetryEnabled
+	}
+	// The env overrides the koanf:"-" settings too, above their file values.
+	if err := applyEnvToOutsideKoanfFields(config); err != nil {
+		return nil, err
 	}
 
 	// Apply defaults for database path if not set
@@ -1621,296 +1654,144 @@ func parseCommaSeparatedList(s string) []string {
 	return result
 }
 
-// snakeCaseFields maps flat-lowercased env segments to their snake_case
-// equivalents used by the opsettings registry and settings.yaml. This is
-// the counterpart to camelCaseFields: where camelCaseFields produces keys for
-// Go struct unmarshaling (adminEmails), snakeCaseFields produces keys that
-// match the opsettings keyspace (admin_emails).
-var snakeCaseFields = map[string]string{
-	// Layer-1 compound segments (from opsettings registry)
-	"adminemails":                "admin_emails",
-	"agentsecrets":               "agent_secrets",
-	"agentendpoint":              "agent_endpoint",
-	"agentrunscope":              "agent_run_scope",
-	"agentrunscopelegacyuntil":   "agent_run_scope_legacy_until",
-	"apibaseurl":                 "api_base_url",
-	"appid":                      "app_id",
-	"authorizeddomains":          "authorized_domains",
-	"autoexposeports":            "auto_expose_ports",
-	"autosuspendstalled":         "auto_suspend_stalled",
-	"cafile":                     "ca_file",
-	"certfile":                   "cert_file",
-	"keyfile":                    "key_file",
-	"defaultharnessconfig":       "default_harness_config",
-	"defaultmaxduration":         "default_max_duration",
-	"defaultuserrole":            "default_user_role",
-	"defaultmaxmodelcalls":       "default_max_model_calls",
-	"defaultmaxturns":            "default_max_turns",
-	"enforcebrokerquotas":        "enforce_broker_quotas",
-	"defaultscratchpad":          "default_scratchpad",
-	"defaultresources":           "default_resources",
-	"defaulttemplate":            "default_template",
-	"githubapp":                  "github_app",
-	"homestorage":                "home_storage",
-	"oidclogin":                  "oidc_login",
-	"shareddirstorage":           "shared_dir_storage",
-	"userscopeonly":              "user_scope_only",
-	"harnessconfigs":             "harness_configs",
-	"hubname":                    "hub_name",
-	"imageregistry":              "image_registry",
-	"insecureskipverify":         "insecure_skip_verify",
-	"installationurl":            "installation_url",
-	"maxsize":                    "max_size",
-	"missingagentgrace":          "missing_agent_grace",
-	"membershipsweepreportonly":  "membership_sweep_report_only",
-	"monitoringdashboardurl":     "monitoring_dashboard_url",
-	"metricsenabled":             "metrics_enabled",
-	"tracingenabled":             "tracing_enabled",
-	"grantkeyactivation":         "grant_key_activation",
-	"tcpallowedports":            "tcp_allowed_ports",
-	"internallisten":             "internal_listen",
-	"internaladvertise":          "internal_advertise",
-	"peerauth":                   "peer_auth",
-	"peerserviceaccounts":        "peer_service_accounts",
-	"peeraudience":               "peer_audience",
-	"reconnectwindow":            "reconnect_window",
-	"refreshinterval":            "refresh_interval",
-	"debounceinterval":           "debounce_interval",
-	"authzrecheckinterval":       "authz_recheck_interval",
-	"lifetimecap":                "lifetime_cap",
-	"shutdowngrace":              "shutdown_grace",
-	"proxysessionmaxage":         "proxy_session_max_age",
-	"streamauthzmax":             "stream_authz_max",
-	"portproxy":                  "port_proxy",
-	"responseheadertimeout":      "response_header_timeout",
-	"instanceid":                 "instance_id",
-	"notificationchannels":       "notification_channels",
-	"privatekeypath":             "private_key_path",
-	"projectdefaults":            "project_defaults",
-	"publicurl":                  "public_url",
-	"reportinterval":             "report_interval",
-	"respectdebugmode":           "respect_debug_mode",
-	"slowrequestthreshold":       "slow_request_threshold",
-	"softdeleteretainfiles":      "soft_delete_retain_files",
-	"softdeleteretention":        "soft_delete_retention",
-	"stalledthreshold":           "stalled_threshold",
-	"useraccessmode":             "user_access_mode",
-	"webhooksenabled":            "webhooks_enabled",
-	"startclaimleasettl":         "start_claim_lease_ttl",
-	"startmaxduration":           "start_max_duration",
-	"startunconfirmedhold":       "start_unconfirmed_hold",
-	"startcreateunconfirmedhold": "start_create_unconfirmed_hold",
-	// Layer-0 compound segments (from layer0Prefixes)
-	"adminmode":               "admin_mode",
-	"devmode":                 "dev_mode",
-	"devtoken":                "dev_token",
-	"devtokenfile":            "dev_token_file",
-	"gcpiamdenyunknownpolicy": "gcp_iam_deny_unknown_policy",
-	"gcpiamcheckmode":         "gcp_iam_check_mode",
-	"gcpprojectid":            "gcp_project_id",
-	"gcpreplicationlocations": "gcp_replication_locations",
-	"hubid":                   "hub_id",
-	"logformat":               "log_format",
-	"loglevel":                "log_level",
-	"messagebroker":           "message_broker",
-	"nativechat":              "native_chat",
-	"readtimeout":             "read_timeout",
-	"workspacestorage":        "workspace_storage",
-	"writetimeout":            "write_timeout",
-	// harness_configs.<name>.* leaves (HarnessConfigEntry koanf tags,
-	// ptone/scion#3836)
-	"imagepullpolicy":  "image_pull_policy",
-	"taskflag":         "task_flag",
-	"authselectedtype": "auth_selected_type",
-	"modelaliases":     "model_aliases",
-	"configdir":        "config_dir",
-	"skillsdir":        "skills_dir",
-	"interruptkey":     "interrupt_key",
-	"interruptsignal":  "interrupt_signal",
-	"instructionsfile": "instructions_file",
-	"systempromptfile": "system_prompt_file",
-	"systempromptmode": "system_prompt_mode",
-	"envtemplate":      "env_template",
-	"noauth":           "no_auth",
-	// Maintenance (runtime-only, no yaml, but env detection still needs it)
-	"maintenancemessage": "maintenance_message",
-}
-
-// camelCaseFields maps lowercased environment variable key segments to their
-// camelCase config equivalents. Package-level to avoid re-allocation per call.
-var camelCaseFields = map[string]string{
-	"adminemails":                   "adminEmails",
-	"adminmode":                     "adminMode",
-	"agentendpoint":                 "agentEndpoint",
-	"agentrunscope":                 "agentRunScope",
-	"agentrunscopelegacyuntil":      "agentRunScopeLegacyUntil",
-	"allowcontainerscriptharnesses": "allowContainerScriptHarnesses",
-	"allowshadowedschema":           "allowShadowedSchema",
-	"apibaseurl":                    "apiBaseUrl",
-	"appid":                         "appId",
-	"perftrace":                     "perfTrace",
-	"membershipsweepreportonly":     "membershipSweepReportOnly",
-	"authorizeddomains":             "authorizedDomains",
-	"autosuspendstalled":            "autoSuspendStalled",
-	"brokerid":                      "brokerId",
-	"brokername":                    "brokerName",
-	"clientid":                      "clientId",
-	"clientsecret":                  "clientSecret",
-	"containerhubendpoint":          "containerHubEndpoint",
-	"corsallowedheaders":            "corsAllowedHeaders",
-	"corsallowedmethods":            "corsAllowedMethods",
-	"corsallowedorigins":            "corsAllowedOrigins",
-	"corsenabled":                   "corsEnabled",
-	"corsmaxage":                    "corsMaxAge",
-	"defaultuserrole":               "defaultUserRole",
-	"devmode":                       "devMode",
-	"devtoken":                      "devToken",
-	"devtokenfile":                  "devTokenFile",
-	"disablelegacystoragefallback":  "disableLegacyStorageFallback",
-	"displayname":                   "displayName",
-	"gcpcredentials":                "gcpCredentials",
-	"gcpiamdenyunknownpolicy":       "gcpIamDenyUnknownPolicy",
-	"gcpiamcheckmode":               "gcpIamCheckMode",
-	"gcpprojectid":                  "gcpProjectId",
-	"gcpreplicationlocations":       "gcpReplicationLocations",
-	"githubapp":                     "githubApp",
-	"hubendpoint":                   "hubEndpoint",
-	"hubid":                         "hubId",
-	"hubname":                       "hubName",
-	"installationurl":               "installationUrl",
-	"jwksurl":                       "jwksURL",
-	"launchkeepaliveseconds":        "launchKeepaliveSeconds",
-	"launchtimeout":                 "launchTimeout",
-	"localpath":                     "localPath",
-	"monitoringdashboardurl":        "monitoringDashboardUrl",
-	"metricsenabled":                "metricsEnabled",
-	"tracingenabled":                "tracingEnabled",
-	"loglevel":                      "logLevel",
-	"maintenancemessage":            "maintenanceMessage",
-	"missingagentgrace":             "missingAgentGrace",
-	"grantkeyactivation":            "grantKeyActivation",
-	"tcpallowedports":               "tcpAllowedPorts",
-	"internallisten":                "internalListen",
-	"internaladvertise":             "internalAdvertise",
-	"peerauth":                      "peerAuth",
-	"peerserviceaccounts":           "peerServiceAccounts",
-	"peeraudience":                  "peerAudience",
-	"reconnectwindow":               "reconnectWindow",
-	"authzrecheckinterval":          "authzRecheckInterval",
-	"lifetimecap":                   "lifetimeCap",
-	"shutdowngrace":                 "shutdownGrace",
-	"proxysessionmaxage":            "proxySessionMaxAge",
-	"streamauthzmax":                "streamAuthzMax",
-	"portproxy":                     "portProxy",
-	"responseheadertimeout":         "responseHeaderTimeout",
-	"instanceid":                    "instanceId",
-	"startclaimleasettl":            "startClaimLeaseTtl",
-	"startmaxduration":              "startMaxDuration",
-	"startunconfirmedhold":          "startUnconfirmedHold",
-	"startcreateunconfirmedhold":    "startCreateUnconfirmedHold",
-	"oidcaudience":                  "oidcAudience",
-	"platformauthsa":                "platformAuthSA",
-	"privatekey":                    "privateKey",
-	"privatekeypath":                "privateKeyPath",
-	"readtimeout":                   "readTimeout",
-	"requiretrustedproxyip":         "requireTrustedProxyIP",
-	"runtimebroker":                 "runtimeBroker",
-	"slowrequestthreshold":          "slowRequestThreshold",
-	"softdeleteretainfiles":         "softDeleteRetainFiles",
-	"softdeleteretention":           "softDeleteRetention",
-	"telemetryenabled":              "telemetryEnabled",
-	"useraccessmode":                "userAccessMode",
-	"webhooksenabled":               "webhooksEnabled",
-	"webhooksecret":                 "webhookSecret",
-	"writetimeout":                  "writeTimeout",
-}
-
-// envKeyToConfigKey converts an environment variable key to a config key.
-// Handles camelCase conversion for known fields like clientId, clientSecret.
-// Example: OAUTH_CLI_GOOGLE_CLIENTID -> oauth.cli.google.clientId
+// envKeyToConfigKey maps a SCION_SERVER_* env name (after the prefix) to its
+// GlobalConfig koanf path through the env mapping table (server_env_table.go):
+// a canonical name or an alias lands on the entry's GlobalConfig path, and
+// "" (dropped) when GlobalConfig has no koanf field for the setting or the
+// alias is overridden (resolveServerEnv). A name read directly with
+// os.Getenv (directServerEnvNames) is dropped. Any other name resolves
+// against GlobalConfig's koanf tags one segment per field, else to its
+// lower-case segments joined with ".".
+// Example: HUB_ADMINEMAILS -> hub.adminEmails
 func envKeyToConfigKey(envKey string) string {
-	// Split by underscore, convert each part
-	parts := strings.Split(strings.ToLower(envKey), "_")
-	for i, part := range parts {
-		if replacement, ok := camelCaseFields[part]; ok {
-			parts[i] = replacement
-		}
+	name := serverEnvPrefix + envKey
+	if isServerEnvInert(name) {
+		return ""
 	}
-
-	return strings.Join(parts, ".")
-}
-
-// envKeyToOpsettingsKey converts an env var key (after prefix stripping) to a
-// koanf key using snake_case segments that match the opsettings registry and
-// settings.yaml. This is the snake_case counterpart to envKeyToConfigKey.
-// Example: SERVER_HUB_ADMINEMAILS → server.hub.admin_emails
-func envKeyToOpsettingsKey(envKey string) string {
-	parts := strings.Split(strings.ToLower(envKey), "_")
-	for i, part := range parts {
-		if replacement, ok := snakeCaseFields[part]; ok {
-			parts[i] = replacement
+	if _, _, ok := lookupServerEnv(name); ok {
+		if e, ok := resolveServerEnv(name, false); ok {
+			return e.GlobalConfig
 		}
+		return "" // an alias the canonical name (or an earlier alias) overrides
 	}
-	return strings.Join(parts, ".")
+	if directServerEnvNames[strings.ToUpper(name)] {
+		return "" // read directly with os.Getenv, never a GlobalConfig field
+	}
+	// The residue takes one segment per GlobalConfig field (the collapsed
+	// spelling, as before the table): SCION_SERVER_ADMIN_MODE does not
+	// become adminMode.
+	segs := strings.Split(strings.ToLower(envKey), "_")
+	if p, end, ok := koanfTagPathEnd(reflect.TypeOf(GlobalConfig{}), segs); ok && !isObjectListType(end) &&
+		!ownsGlobalConfigEnvPath(strings.Join(p, ".")) {
+		return strings.Join(p, ".")
+	}
+	return strings.Join(segs, ".")
 }
 
-// serverSubKeys is the set of first-segment koanf keys (after snake_case
-// mapping) that belong under the "server." namespace in settings.yaml.
-// Derived from the V1ServerConfig koanf tags.
-var serverSubKeys = map[string]bool{
-	"hub": true, "broker": true, "database": true,
-	"auth": true, "oauth": true, "storage": true,
-	"workspace_storage": true, "secrets": true,
-	"log_level": true, "log_format": true,
-	"notification_channels": true, "message_broker": true,
-	"native_chat": true, "plugins": true, "github_app": true,
-	"mode": true, "env": true, "federation": true,
-	"shared_dir_storage": true, "home_storage": true, "maintenance": true,
-	"scheduler": true, "oidc_login": true, "oidc": true,
-}
-
-// serverEnvToOpsettingsKey maps a SCION_SERVER_* env var key (after prefix
-// stripping) to the opsettings koanf keyspace. For keys whose first segment
-// belongs to V1ServerConfig (e.g. hub, auth, database), it prepends "server."
-// so that SCION_SERVER_HUB_ADMINEMAILS → server.hub.admin_emails.
-// Non-server keys (e.g. telemetry, default_template) pass through unchanged.
+// serverEnvToOpsettingsKey maps a SCION_SERVER_* env name (after the prefix)
+// to the opsettings koanf keyspace (settings paths) through the env mapping
+// table: HUB_ADMINEMAILS -> server.hub.admin_emails, DEFAULTMODEL ->
+// default_model. A name the table does not hold resolves against
+// V1ServerConfig (under server.) or a map-valued top-level setting
+// (profiles.<name>.*) by koanf tag, else to its lower-case segments joined
+// with "." (under server. when the first segment names a server section).
 func serverEnvToOpsettingsKey(envKey string) string {
-	key := envKeyToOpsettingsKey(envKey)
-	firstSeg := key
-	if dot := strings.Index(key, "."); dot >= 0 {
-		firstSeg = key[:dot]
+	name := serverEnvPrefix + envKey
+	if isServerEnvInert(name) {
+		return ""
 	}
-	if serverSubKeys[firstSeg] {
-		return aliasOpsettingsEnvKey("server." + key)
+	if _, _, ok := lookupServerEnv(name); ok {
+		if e, ok := resolveServerEnv(name, false); ok {
+			return e.Path
+		}
+		return ""
 	}
-	return aliasOpsettingsEnvKey(key)
+	if directServerEnvNames[strings.ToUpper(name)] {
+		return ""
+	}
+	return settingsEnvResidue(strings.Split(strings.ToLower(envKey), "_"), true, true)
 }
 
-// seedEnvToOpsettingsKey maps a SCION_SEED_* env var key (after prefix
-// stripping) to the opsettings koanf keyspace. Server keys carry an explicit
-// SERVER_ segment (SCION_SEED_SERVER_HUB_ADMINEMAILS).
+// seedEnvToOpsettingsKey maps a SCION_SEED_* env name (after the prefix) to
+// the opsettings koanf keyspace. A server setting carries an explicit
+// SERVER_ segment in front of its SCION_SERVER_* name
+// (SCION_SEED_SERVER_HUB_ADMINEMAILS); any other setting takes its
+// SCION_SERVER_* name with SCION_SERVER_ replaced by SCION_SEED_
+// (SCION_SEED_DEFAULTMODEL).
 func seedEnvToOpsettingsKey(envKey string) string {
-	return aliasOpsettingsEnvKey(envKeyToOpsettingsKey(envKey))
+	up := strings.ToUpper(envKey)
+	if rest, ok := strings.CutPrefix(up, "SERVER_"); ok {
+		name := serverEnvPrefix + rest
+		if isServerEnvInert(name) {
+			return ""
+		}
+		if e, _, ok := lookupServerEnv(name); ok && strings.HasPrefix(e.Path, "server.") {
+			if e, ok := resolveServerEnv(seedEnvPrefix+up, true); ok {
+				return e.Path
+			}
+			return ""
+		}
+		return settingsEnvResidue(strings.Split(strings.ToLower(rest), "_"), true, false)
+	}
+	if e, _, ok := lookupServerEnv(serverEnvPrefix + up); ok && !strings.HasPrefix(e.Path, "server.") {
+		if e, ok := resolveServerEnv(seedEnvPrefix+up, true); ok {
+			return e.Path
+		}
+		return ""
+	}
+	return settingsEnvResidue(strings.Split(strings.ToLower(envKey), "_"), false, true)
 }
 
-// opsettingsEnvKeyAliases maps an env-derived opsettings key to the key the
-// variable actually sets, for settings whose env variable name is not the
-// spelling derived from the koanf path. An empty target drops the variable.
-//
-// server.hub.public_url is set by SCION_SERVER_HUB_ENDPOINT, the variable
-// the hub's own endpoint resolution reads (GlobalConfig hub.endpoint), so the
-// opsettings layer and the admin UI see the same variable the hub uses. The
-// derived spelling SCION_SERVER_HUB_PUBLICURL is not read by the hub, so it
-// is dropped here and reported as unmatched at startup. The reverse mapping
-// for display lives in opsettings (koanfKeyToEnvSuffix).
-var opsettingsEnvKeyAliases = map[string]string{
-	"server.hub.endpoint":   PublicURLKey,
-	"server.hub.public_url": "",
-}
-
-func aliasOpsettingsEnvKey(key string) string {
-	if target, ok := opsettingsEnvKeyAliases[key]; ok {
-		return target
+// settingsEnvResidue maps the env segments of a name the table does not
+// hold to a settings path. With server true it tries V1ServerConfig (the
+// result goes under server.); with topLevel true it tries the map-valued
+// top-level settings (profiles, runtimes, harness_configs). A full match
+// (envSegmentsKoanfPath) wins; else the longest matched prefix plus the
+// rest of the segments (SHAREDDIRSTORAGE -> server.shared_dir_storage,
+// HARNESSCONFIGS_CLAUDE_ENV_X -> harness_configs.claude.env.x). With server
+// true and topLevel false the result is always under server. A result that
+// would be a table path or a whole list of objects falls back to the
+// segments joined with ".", so a misspelt name never reaches a table
+// setting.
+func settingsEnvResidue(segs []string, server, topLevel bool) string {
+	key := strings.Join(segs, ".")
+	serverType := reflect.TypeOf(V1ServerConfig{})
+	rootType := reflect.TypeOf(VersionedSettings{})
+	mapRoot := false
+	if f, _, ok := fieldByNormTag(rootType, normEnvKey(segs[0])); ok && derefType(f.Type).Kind() == reflect.Map {
+		mapRoot = topLevel
+	}
+	if server {
+		owned := func(p string) bool { return ownsServerEnvPath("server." + p) }
+		if p, ok := serverEnvResidue(serverType, segs, owned); ok {
+			return "server." + p
+		}
+	}
+	if mapRoot {
+		if p, ok := serverEnvResidue(rootType, segs, ownsServerEnvPath); ok {
+			return p
+		}
+	}
+	// unusable reports a prefix match that must not be used: none, a
+	// table path, or a whole list of objects.
+	unusable := func(tags, rest []string, end reflect.Type, path string) bool {
+		return len(tags) == 0 || ownsServerEnvPath(path) || (len(rest) == 0 && isObjectListType(end))
+	}
+	if server {
+		tags, rest, end := envSegmentsKoanfPrefix(serverType, segs)
+		if len(tags) > 0 || !topLevel {
+			p := strings.Join(append(tags, rest...), ".")
+			if unusable(tags, rest, end, "server."+p) {
+				p = key
+			}
+			return "server." + p
+		}
+	}
+	if mapRoot {
+		tags, rest, end := envSegmentsKoanfPrefix(rootType, segs)
+		if p := strings.Join(append(tags, rest...), "."); !unusable(tags, rest, end, p) {
+			return p
+		}
 	}
 	return key
 }
@@ -1964,17 +1845,17 @@ func nonEmptyEnvProvider(prefix string, mapKey func(string) string) *env.Env {
 // match them against the registry.
 func LoadEnvKoanf() *koanf.Koanf {
 	k := koanf.New(".")
-	_ = k.Load(nonEmptyEnvProvider("SCION_SERVER_", serverEnvToOpsettingsKey), nil)
+	_ = k.Load(nonEmptyTypedEnvProvider("SCION_SERVER_", serverEnvToOpsettingsKey), nil)
 	return k
 }
 
 // LoadSeedEnvKoanf returns a koanf instance loaded with only the SCION_SEED_*
-// environment variables (no file, no defaults). Uses envKeyToOpsettingsKey to
+// environment variables (no file, no defaults). Uses seedEnvToOpsettingsKey to
 // produce snake_case keys matching the opsettings registry and settings.yaml.
 // e.g. SCION_SEED_SERVER_HUB_ADMINEMAILS → server.hub.admin_emails
 func LoadSeedEnvKoanf() *koanf.Koanf {
 	k := koanf.New(".")
-	_ = k.Load(nonEmptyEnvProvider("SCION_SEED_", seedEnvToOpsettingsKey), nil)
+	_ = k.Load(nonEmptyTypedEnvProvider("SCION_SEED_", seedEnvToOpsettingsKey), nil)
 	return k
 }
 
@@ -2005,7 +1886,7 @@ func LoadBootstrapKoanf() *koanf.Koanf {
 // come from the global settings.yaml, as they do in file mode. An empty
 // configPath, or one that resolves to the global directory, changes nothing.
 func LoadBootstrapKoanfWithConfigPath(configPath string) *koanf.Koanf {
-	return loadBootstrapKoanf(configPath, true)
+	return loadBootstrapKoanf(configPath, true, true)
 }
 
 // LoadUnseededBootstrapKoanfWithConfigPath is LoadBootstrapKoanfWithConfigPath
@@ -2015,46 +1896,29 @@ func LoadBootstrapKoanfWithConfigPath(configPath string) *koanf.Koanf {
 // view takes the public URL it shows when none is saved from this merge
 // (ptone/scion#4826).
 func LoadUnseededBootstrapKoanfWithConfigPath(configPath string) *koanf.Koanf {
-	return loadBootstrapKoanf(configPath, false)
+	return loadBootstrapKoanf(configPath, false, true)
+}
+
+// LoadAboveSeedBootstrapKoanfWithConfigPath is the bootstrap merge with only
+// the layers above SCION_SEED_*: settings.yaml (and the --config location)
+// and SCION_SERVER_*, without the coded defaults. A key it has gets its
+// bootstrap value from one of these layers, so the admin view can tell a
+// value from them apart from a coded default or a seed value equal to the
+// default (ptone/scion#4983).
+func LoadAboveSeedBootstrapKoanfWithConfigPath(configPath string) *koanf.Koanf {
+	return loadBootstrapKoanf(configPath, false, false)
 }
 
 // loadBootstrapKoanf builds the bootstrap merge, with the SCION_SEED_*
-// layer when withSeed is true.
-func loadBootstrapKoanf(configPath string, withSeed bool) *koanf.Koanf {
+// layer when withSeed is true and the coded defaults when withDefaults is
+// true.
+func loadBootstrapKoanf(configPath string, withSeed, withDefaults bool) *koanf.Koanf {
 	k := koanf.New(".")
-
-	// 1. Coded defaults in the opsettings keyspace (server.* snake_case).
-	// NOTE: This is a manually maintained subset of GlobalConfig defaults.
-	// If new defaulted keys are added to GlobalConfig (or its nested structs),
-	// they must be added here too, otherwise bootstrap material will be
-	// incomplete for sections that rely on them during initial seeding.
-	defaults := DefaultGlobalConfig()
-	_ = k.Load(confmap.Provider(map[string]interface{}{
-		"server.hub.port":         defaults.Hub.Port,
-		"server.hub.host":         defaults.Hub.Host,
-		"server.hub.admin_emails": defaults.Hub.AdminEmails,
-		"server.database.driver":  defaults.Database.Driver,
-		"server.database.url":     defaults.Database.URL,
-		"server.auth.dev_mode":    defaults.Auth.Enabled,
-		"server.auth.dev_token":   defaults.Auth.Token,
-		"server.storage.provider": defaults.Storage.Provider,
-		"server.secrets.backend":  defaults.Secrets.Backend,
-		"server.log_level":        defaults.LogLevel,
-	}, "."), nil)
-
-	// 1b. Embedded agent-defaults (embeds/default_settings.yaml, or the
-	// tier-specific variant — see GetDefaultSettingsDataYAML). This is the
-	// "coded defaults" layer for default_template/default_harness_config:
-	// without it, an un-seeded instance (no settings.yaml on disk, no
-	// SCION_SEED_* / SCION_SERVER_* env vars) has these keys entirely absent
-	// from bootstrap material, so agent-create requests that omit
-	// harnessConfig resolve to an empty name instead of the product default
-	// (ptone/scion#1306).
-	if agentDefaults := embeddedAgentDefaultsKoanfMap(); len(agentDefaults) > 0 {
-		_ = k.Load(confmap.Provider(agentDefaults, "."), nil)
+	if withDefaults {
+		loadBootstrapDefaults(k)
 	}
 
-	// 2. SCION_SEED_* environment variables (snake_case via envKeyToOpsettingsKey).
+	// 2. SCION_SEED_* environment variables (snake_case via seedEnvToOpsettingsKey).
 	if withSeed {
 		seedK := LoadSeedEnvKoanf()
 		_ = k.Merge(seedK)
@@ -2086,7 +1950,7 @@ func loadBootstrapKoanf(configPath string, withSeed bool) *koanf.Koanf {
 	// 4. SCION_SERVER_* environment variables (highest precedence in bootstrap).
 	// Uses serverEnvToOpsettingsKey which re-adds the "server." prefix for keys
 	// that belong under V1ServerConfig (e.g. HUB_ADMINEMAILS → server.hub.admin_emails).
-	_ = k.Load(nonEmptyEnvProvider("SCION_SERVER_", serverEnvToOpsettingsKey), nil)
+	_ = k.Load(nonEmptyTypedEnvProvider("SCION_SERVER_", serverEnvToOpsettingsKey), nil)
 
 	// 5. Split comma-separated list values from env vars. Koanf's env provider
 	// loads everything as strings; list fields need explicit splitting so
@@ -2094,6 +1958,40 @@ func loadBootstrapKoanf(configPath string, withSeed bool) *koanf.Koanf {
 	splitCommaSeparatedKoanfKeys(k)
 
 	return k
+}
+
+// loadBootstrapDefaults loads the coded defaults of the bootstrap merge into k.
+func loadBootstrapDefaults(k *koanf.Koanf) {
+	// 1. Coded defaults in the opsettings keyspace (server.* snake_case).
+	// NOTE: This is a manually maintained subset of GlobalConfig defaults.
+	// If new defaulted keys are added to GlobalConfig (or its nested structs),
+	// they must be added here too, otherwise bootstrap material will be
+	// incomplete for sections that rely on them during initial seeding.
+	defaults := DefaultGlobalConfig()
+	_ = k.Load(confmap.Provider(map[string]interface{}{
+		"server.hub.port":         defaults.Hub.Port,
+		"server.hub.host":         defaults.Hub.Host,
+		"server.hub.admin_emails": defaults.Hub.AdminEmails,
+		"server.database.driver":  defaults.Database.Driver,
+		"server.database.url":     defaults.Database.URL,
+		"server.auth.dev_mode":    defaults.Auth.Enabled,
+		"server.auth.dev_token":   defaults.Auth.Token,
+		"server.storage.provider": defaults.Storage.Provider,
+		"server.secrets.backend":  defaults.Secrets.Backend,
+		"server.log_level":        defaults.LogLevel,
+	}, "."), nil)
+
+	// 1b. Embedded agent-defaults (embeds/default_settings.yaml, or the
+	// tier-specific variant — see GetDefaultSettingsDataYAML). This is the
+	// "coded defaults" layer for default_template/default_harness_config:
+	// without it, an un-seeded instance (no settings.yaml on disk, no
+	// SCION_SEED_* / SCION_SERVER_* env vars) has these keys entirely absent
+	// from bootstrap material, so agent-create requests that omit
+	// harnessConfig resolve to an empty name instead of the product default
+	// (ptone/scion#1306).
+	if agentDefaults := embeddedAgentDefaultsKoanfMap(); len(agentDefaults) > 0 {
+		_ = k.Load(confmap.Provider(agentDefaults, "."), nil)
+	}
 }
 
 // loadConfigPathFiles layers the --config location over k using the same
@@ -2283,6 +2181,79 @@ func applyEnvOverrides(gc *GlobalConfig) error {
 	// D11-fix: normalize AdminEmails (same as primary config load path).
 	gc.Hub.AdminEmails = SanitizeEmailList(gc.Hub.AdminEmails)
 
+	return applyEnvToOutsideKoanfFields(gc)
+}
+
+// globalConfigEnvOverlay holds the GlobalConfig settings kept in koanf:"-"
+// fields (filled from settings.yaml by applyTopLevelSettingsSections and
+// ConvertV1ServerToGlobalConfig), keyed by their settings paths. Keep it in
+// step with globalConfigOutsideKoanf in the opsettings env contract test.
+type globalConfigEnvOverlay struct {
+	Telemetry       *V1TelemetryConfig `koanf:"telemetry"`
+	ProjectDefaults struct {
+		DefaultScratchpad *bool `koanf:"default_scratchpad"`
+	} `koanf:"project_defaults"`
+	Quotas struct {
+		EnforceBrokerQuotas *bool `koanf:"enforce_broker_quotas"`
+	} `koanf:"quotas"`
+	AgentSecrets struct {
+		UserScopeOnly *bool `koanf:"user_scope_only"`
+	} `koanf:"agent_secrets"`
+	DefaultHarnessConfig               *string `koanf:"default_harness_config"`
+	DefaultTimezone                    *string `koanf:"default_timezone"`
+	DefaultGCPIdentityMode             *string `koanf:"default_gcp_identity_mode"`
+	DefaultGCPIdentityServiceAccountID *string `koanf:"default_gcp_identity_service_account_id"`
+	Server                             struct {
+		WorkspaceStorage *V1WorkspaceStorageConfig `koanf:"workspace_storage"`
+		NativeChat       *V1NativeChatConfig       `koanf:"native_chat"`
+	} `koanf:"server"`
+}
+
+// applyEnvToOutsideKoanfFields applies the SCION_SERVER_* variables of the
+// settings GlobalConfig holds in koanf:"-" fields (globalConfigEnvOverlay)
+// on top of their file values, so the env overrides those settings as it
+// does every koanf field. A variable leaves the rest of its section in
+// place. It runs after the file values are applied.
+func applyEnvToOutsideKoanfFields(gc *GlobalConfig) error {
+	k := koanf.New(".")
+	_ = k.Load(nonEmptyEnvProvider(serverEnvPrefix, func(rest string) string {
+		if e, ok := resolveServerEnv(serverEnvPrefix+rest, false); ok {
+			return e.Path
+		}
+		return ""
+	}), nil)
+	if len(k.Keys()) == 0 {
+		return nil
+	}
+	var ov globalConfigEnvOverlay
+	ov.Telemetry = gc.TelemetryConfig
+	ov.Server.WorkspaceStorage = gc.WorkspaceStorage
+	ov.Server.NativeChat = gc.NativeChat
+	if err := k.Unmarshal("", &ov); err != nil {
+		return fmt.Errorf("SCION_SERVER_* environment: %w", err)
+	}
+	gc.TelemetryConfig = ov.Telemetry
+	gc.WorkspaceStorage = ov.Server.WorkspaceStorage
+	gc.NativeChat = ov.Server.NativeChat
+	if v := ov.ProjectDefaults.DefaultScratchpad; v != nil {
+		gc.DefaultScratchpad = v
+	}
+	if v := ov.Quotas.EnforceBrokerQuotas; v != nil {
+		gc.EnforceBrokerQuotas = v
+	}
+	if v := ov.AgentSecrets.UserScopeOnly; v != nil {
+		gc.AgentSecretsUserScopeOnly = v
+	}
+	for dst, src := range map[*string]*string{
+		&gc.DefaultHarnessConfig:               ov.DefaultHarnessConfig,
+		&gc.DefaultTimezone:                    ov.DefaultTimezone,
+		&gc.DefaultGCPIdentityMode:             ov.DefaultGCPIdentityMode,
+		&gc.DefaultGCPIdentityServiceAccountID: ov.DefaultGCPIdentityServiceAccountID,
+	} {
+		if src != nil {
+			*dst = *src
+		}
+	}
 	return nil
 }
 

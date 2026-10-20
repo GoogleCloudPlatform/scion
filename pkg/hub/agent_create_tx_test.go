@@ -150,10 +150,11 @@ func assertCompensationFailureResponse(t *testing.T, rec *httptest.ResponseRecor
 	return logs[0]
 }
 
-// When the compensation transaction and the fallback edge deactivation both
-// fail, the response is a 500 carrying the request ID as its correlation
-// ID, and the agent row is removed on its own. The edge stays active with a
-// deleted delegate: the documented residual state of this path.
+// When the compensation transaction and every fallback attempt fail on the
+// edge deactivation, the response is a 500 carrying the request ID as its
+// correlation ID, and the fallback row delete rolls back with the
+// deactivation: the row is kept in phase error together with its active
+// edge.
 func TestDispatchCompensationFailureReportsCorrelationID(t *testing.T) {
 	f := newUATCreateFixture(t, "comp-fail")
 	client := f.withDispatcher(t)
@@ -166,18 +167,21 @@ func TestDispatchCompensationFailureReportsCorrelationID(t *testing.T) {
 	agentID := client.lastCreateReq.ID
 	assertCompensationFailureResponse(t, rec, logs, "req-comp-fail", agentID)
 
-	_, err := real.GetAgent(context.Background(), agentID)
-	assert.ErrorIs(t, err, store.ErrNotFound, "the fallback removes the agent row")
+	row, err := real.GetAgent(context.Background(), agentID)
+	require.NoError(t, err, "the row is kept when the deactivation in its delete transaction fails")
+	assert.True(t, row.DeletedAt.IsZero())
+	assert.Equal(t, string(state.PhaseError), row.Phase)
+	assert.Equal(t, createRowRemoveFailedMessage, row.Message)
 	assert.Empty(t, agentAudits(t, real, mutationTypeAgentCreateDispatchFailed, agentID),
 		"the failed compensation wrote no record")
 	edges := activeEdgesFor(t, real, agentID)
-	require.Len(t, edges, 1, "the edge stays active when its deactivation fails")
+	require.Len(t, edges, 1, "the kept row keeps its active edge")
 	assert.Equal(t, agentID, edges[0].DelegateID)
 }
 
 // When the compensation transaction fails on its audit insert, the fallback
-// deactivates the edge on its own with cause create_compensation under the
-// op ID the ERROR record names, and removes the agent row.
+// removes the agent row and, in the same transaction, deactivates the edge
+// with cause create_compensation under the op ID the ERROR record names.
 func TestDispatchCompensationAuditFailureDeactivatesEdge(t *testing.T) {
 	f := newUATCreateFixture(t, "comp-audit-fail")
 	client := f.withDispatcher(t)
@@ -203,7 +207,7 @@ func TestDispatchCompensationAuditFailureDeactivatesEdge(t *testing.T) {
 
 // When the compensation transaction and the fallback row delete both fail,
 // the agent row keeps its active edge: the fallback deactivates the edge
-// only after the row is gone.
+// only in the transaction that removes the row.
 func TestDispatchCompensationDeleteFailureKeepsRowAndEdge(t *testing.T) {
 	f := newUATCreateFixture(t, "comp-delete-fail")
 	client := f.withDispatcher(t)

@@ -117,7 +117,6 @@ var pendingNonRouteRows = map[string]string{
 	"env_var.deliver":         "decision rules exist; no production path requests it yet (ptone/scion#4171)",
 	"skill_injection.deliver": "decision rules exist; no production path requests it yet (ptone/scion#4171)",
 	"gcp_service_account.use": "decision rules exist; token mint checks the per-account token scope (ptone/scion#4171)",
-	"project.manage_visitors": "held by project owner and admin roles; the visitor grant routes that check it are added separately (ptone/scion#4603)",
 }
 
 // parseNonTestGoFiles parses the non-test Go files in dir.
@@ -163,11 +162,7 @@ var nonRouteCallSites = map[string][]permissionCallSite{
 		{"handlers_admin_effective_access.go", "Server.handleAdminEffectiveAccess"},
 		{"handlers_access_constraints.go", "Server.canReadConstraintAudit"},
 	},
-	"project.clone": {{"project_clone.go", "Server.handleProjectClone"}},
-	"project.list": {
-		{"handlers_projects_core.go", "Server.listProjects"},
-		{"skill_handlers.go", "Server.listSkills"},
-	},
+	"project.clone":       {{"project_clone.go", "Server.handleProjectClone"}},
 	"agent.status_update": {{"handlers_agent_lifecycle.go", "Server.updateAgentStatus"}},
 	"project.secret_read": {{"material_runtime.go", "Server.materialRuntimePrecheck"}},
 	"agent.notify":        {{"handlers_notifications.go", "checkAgentNotifyScope"}},

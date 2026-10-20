@@ -42,21 +42,22 @@ type ErrorResponse struct {
 
 // Error codes matching the Hub API specification.
 const (
-	ErrCodeInvalidRequest       = "invalid_request"
-	ErrCodeValidationError      = "validation_error"
-	ErrCodeUnauthorized         = "unauthorized"
-	ErrCodeForbidden            = "forbidden"
-	ErrCodeNotFound             = "not_found"
-	ErrCodeConflict             = "conflict"
-	ErrCodeVersionConflict      = "version_conflict"
-	ErrCodeTemplateConflict     = "template_conflict" // 409: a template commit lost its compare-and-swap (ptone/scion#4221)
-	ErrCodeUnprocessable        = "unprocessable"
-	ErrCodeRateLimited          = "rate_limited"
-	ErrCodeInternalError        = "internal_error"
-	ErrCodeRuntimeError         = "runtime_error"
-	ErrCodeUnavailable          = "unavailable"
-	ErrCodeNoRuntimeBroker      = "no_runtime_broker"
-	ErrCodeRuntimeBrokerUnavail = "runtime_broker_unavailable"
+	ErrCodeInvalidRequest        = "invalid_request"
+	ErrCodeValidationError       = "validation_error"
+	ErrCodeUnauthorized          = "unauthorized"
+	ErrCodeForbidden             = "forbidden"
+	ErrCodeNotFound              = "not_found"
+	ErrCodeConflict              = "conflict"
+	ErrCodeVersionConflict       = "version_conflict"
+	ErrCodeTemplateConflict      = "template_conflict"       // 409: a template commit lost its compare-and-swap (ptone/scion#4221)
+	ErrCodeHarnessConfigConflict = "harness_config_conflict" // 409: a harness-config commit lost its compare-and-swap (ptone/scion#4219)
+	ErrCodeUnprocessable         = "unprocessable"
+	ErrCodeRateLimited           = "rate_limited"
+	ErrCodeInternalError         = "internal_error"
+	ErrCodeRuntimeError          = "runtime_error"
+	ErrCodeUnavailable           = "unavailable"
+	ErrCodeNoRuntimeBroker       = "no_runtime_broker"
+	ErrCodeRuntimeBrokerUnavail  = "runtime_broker_unavailable"
 	// ErrCodeRuntimeBrokerNotFound reports an explicitly requested runtime
 	// broker (by ID, name or slug) that does not exist at all, as opposed to
 	// one that exists but is offline/unreachable (runtime_broker_unavailable).
@@ -132,6 +133,20 @@ const (
 	// delete blocks starting the agent (design ptone/scion#2483 §2.1
 	// deleteBlocksStart).
 	ErrCodeDeleteInProgress = "delete_in_progress"
+
+	// ErrCodeStartOutcomeUnknown is returned (504) by a create or env
+	// submit whose synchronous dispatch to the runtime broker ended without
+	// an answer (the dispatch deadline, or no response to a sent request).
+	// The agent is kept, not rolled back: the broker may still be starting
+	// it. Details carry agentId and phase (ptone/scion#4817).
+	ErrCodeStartOutcomeUnknown = "start_outcome_unknown"
+
+	// ErrCodeOutcomeUnknown is returned (502) by exec when the request was
+	// sent to the runtime broker and its result was not received: the
+	// broker may have executed it. It is never retried. Details carry
+	// operation, broker_id and request_id (contracts §2, "Ambiguous broker
+	// results").
+	ErrCodeOutcomeUnknown = "outcome_unknown"
 
 	// Conversation resolution error codes (Tranche G read-switch)
 
@@ -388,6 +403,19 @@ func WriteErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 		statusCode = http.StatusConflict
 		code = ErrCodeVersionConflict
 		message = "Version conflict - resource was modified"
+	case errors.Is(err, store.ErrTestAdminGrantRefused):
+		// Admin tier A3 grant shaping: a grant a test identity with an
+		// admin role may not make. The fixed sentinel text only: the
+		// wrapped error is not shown.
+		statusCode = http.StatusForbidden
+		code = ErrCodeForbidden
+		message = store.ErrTestAdminGrantRefused.Error()
+	case errors.Is(err, store.ErrTestAdminGrantUnshaped):
+		// Admin tier A3 grant shaping, fail-closed: the store could not
+		// bound the grant by the identity's expiry.
+		statusCode = http.StatusForbidden
+		code = ErrCodeForbidden
+		message = store.ErrTestAdminGrantUnshaped.Error()
 	case errors.Is(err, store.ErrProjectMembersGroupPrincipal):
 		// Must precede ErrInvalidInput, which it wraps.
 		statusCode = http.StatusBadRequest

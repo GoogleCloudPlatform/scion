@@ -85,6 +85,50 @@ func TestAdmitAgentIncarnation(t *testing.T) {
 	}
 }
 
+// TestAdmitBrokerIncarnation: without an authoritative value (the hub
+// keeps none for brokers) a broker Hello must carry its process start id,
+// and one without it is refused with 4400 bad_hello; with an authoritative
+// value the Hello must match it (an empty Hello takes it) or is refused
+// with 4409. Routing asks for exactly the admitted value, and for none
+// without one, so the Router refuses a broker request with no incarnation.
+func TestAdmitBrokerIncarnation(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		authoritative string
+		presented     string
+		want          relay.Incarnation
+		wantCode      uint32
+		wantReason    string
+	}{
+		{name: "presented process start id", presented: "proc-1", want: relay.Incarnation{Value: "proc-1"}},
+		{name: "no incarnation is a protocol error", wantCode: conduit.CloseProtocolError, wantReason: relay.ReasonBadHello},
+		{name: "authoritative value matches", authoritative: "proc-1", presented: "proc-1", want: relay.Incarnation{Value: "proc-1"}},
+		{name: "empty Hello takes the authoritative value", authoritative: "proc-1", want: relay.Incarnation{Value: "proc-1"}},
+		{name: "authoritative value differs", authoritative: "proc-1", presented: "proc-2",
+			wantCode: relay.CloseSupersededIncarnation, wantReason: relay.ReasonSupersededIncarnation},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := relay.AdmitBrokerIncarnation(tc.authoritative, tc.presented)
+			if tc.wantCode != 0 {
+				var ce *conduit.CloseError
+				if !errors.As(err, &ce) || ce.Code != tc.wantCode || !strings.HasPrefix(ce.Reason, tc.wantReason) {
+					t.Fatalf("err = %v, want close %d %s", err, tc.wantCode, tc.wantReason)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("= %+v, %v; want %+v", got, err, tc.want)
+			}
+			if r := relay.RouteBrokerIncarnations(got.Value); len(r) != 1 || r[0] != got {
+				t.Fatalf("RouteBrokerIncarnations(%q) = %+v, want only the admitted %+v", got.Value, r, got)
+			}
+		})
+	}
+	if r := relay.RouteBrokerIncarnations(""); len(r) != 0 {
+		t.Fatalf("RouteBrokerIncarnations(\"\") = %+v, want none", r)
+	}
+}
+
 // TestRouteAgentIncarnationsLaunchIDFirst: the launch id is tried before
 // the interim generation value, so a launch-id session wins lookup order.
 func TestRouteAgentIncarnationsLaunchIDFirst(t *testing.T) {

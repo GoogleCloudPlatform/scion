@@ -44,12 +44,15 @@ const (
 	ErrCodeConflict                         = apierr.ErrCodeConflict
 	ErrCodeConversationNotResolved          = apierr.ErrCodeConversationNotResolved
 	ErrCodeDeleteInProgress                 = apierr.ErrCodeDeleteInProgress
+	ErrCodeStartOutcomeUnknown              = apierr.ErrCodeStartOutcomeUnknown
+	ErrCodeOutcomeUnknown                   = apierr.ErrCodeOutcomeUnknown
 	ErrCodeDeliveryFailed                   = apierr.ErrCodeDeliveryFailed
 	ErrCodeDiscoverFailed                   = apierr.ErrCodeDiscoverFailed
 	ErrCodeEmptyRoleSet                     = apierr.ErrCodeEmptyRoleSet
 	ErrCodeExperimentDisabled               = apierr.ErrCodeExperimentDisabled
 	ErrCodeExpiredJoinToken                 = apierr.ErrCodeExpiredJoinToken
 	ErrCodeForbidden                        = apierr.ErrCodeForbidden
+	ErrCodeHarnessConfigConflict            = apierr.ErrCodeHarnessConfigConflict
 	ErrCodeIdentityAmbiguous                = apierr.ErrCodeIdentityAmbiguous
 	ErrCodeInsufficientRelaxationAuthority  = apierr.ErrCodeInsufficientRelaxationAuthority
 	ErrCodeInternalError                    = apierr.ErrCodeInternalError

@@ -183,8 +183,8 @@ func TestExplainAPI_PermissionCanonicalization(t *testing.T) {
 		wantPermID   string // Expected canonical permission in provenance.
 	}{
 		// Canonical inputs — hub-member has user.read and group.list.
-		// user.list is Reserved, so it is granted by nothing; the request
-		// still resolves to the canonical user.list.
+		// hub-member does not hold user.list; the request still resolves
+		// to the canonical user.list.
 		{"canonical user+read", "user", "read", true, "user.read"},
 		{"canonical user+list", "user", "list", false, "user.list"},
 		{"canonical group+list", "group", "list", true, "group.list"},

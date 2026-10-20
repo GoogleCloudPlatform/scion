@@ -206,23 +206,19 @@ next start.
 To give an existing agent the new setup:
 
 1. **Update the harness-config.**
-   - **Local mode:** run `scion harness-config upgrade <name>`. It changes only the local copy
-     in `~/.scion/harness-configs/<name>/`. It adds missing files and settings, but an existing
-     file that changed in the new defaults (for example `home/.claude/settings.json`) keeps your
-     version. To take the new defaults, run `scion harness-config upgrade <name> --force`. This
-     overwrites every file that ships in the embedded defaults, discarding your edits to those
-     files. Files you added yourself are kept.
-   - **Workstation and hosted:** agents use the Hub's copy, which `upgrade` does not change. The
+   - Agents use the Hub's copy. `scion harness-config upgrade <name>` changes only the local copy
+     in `~/.scion/harness-configs/<name>/` (add `--force` to take every new default file, discarding
+     your edits to them), not the Hub's copy. The
      Hub refreshes its copy of a built-in harness-config from the binary's defaults when it
      restarts. In Workstation mode, that restart also resets the bundled configs in
      `~/.scion/harness-configs/` to the defaults. Publish a harness-config you changed yourself
      with `scion harness-config sync <name>`.
 2. **Rebuild the agent's home.**
-   - **With a Hub:** run [`scion reincarnate <agent>`](/scion/reference/cli/#scion-reincarnate).
+   - Run [`scion reincarnate <agent>`](/scion/reference/cli/#scion-reincarnate).
      It keeps the agent's identity and workspace and copies the harness-config's home files, the
      skills from the template chain (including skill references it declares) and the platform
      skills in again. It overlays files: files that the new version no longer has stay in place.
-   - **Without a Hub, or in a worktree-per-agent project** (where reincarnate is not available):
+   - **In a worktree-per-agent project** (where reincarnate is not available):
      save the agent's work, then delete the agent with `scion delete` and start it again.
 
 ### Deleting
@@ -299,10 +295,11 @@ The `config.yaml` file at the root of a harness-config bundle defines its runtim
 `image` and `image_pull_policy` (the latter is Kubernetes-only; values `Always`, `IfNotPresent`,
 `Never`) can also be set — and, since ptone/scion#2156, overridden by an operator — via Hub
 settings `harness_configs.<name>.image` / `.image_pull_policy`, without editing the bundle. An
-explicit `image` or `kubernetes.imagePullPolicy` in an agent config still outranks the
-Hub setting, which in turn outranks this file's own default; in a template both keys are ignored. An *explicitly set*
+explicit `image` or `kubernetes.imagePullPolicy` in an agent's inline config still outranks the
+Hub setting, which in turn outranks this file's own default; a template's `image` and
+`kubernetes` are ignored. An *explicitly set*
 `profiles.<p>.harness_overrides.<name>.image` (and that override's `image_pull_policy`) is the exception:
-since ptone/scion#1799 it outranks an inline (agent config) value too, and only the user's explicit
+since ptone/scion#1799 it outranks an inline value too, and only the user's explicit
 `--image` (or explicit pull policy) ranks above it. See [Settings
 Precedence](/scion/reference/settings-precedence/#container-image-and-kubernetes-image-pull-policy--a-separate-chain-from-b1)
 for the full chain.

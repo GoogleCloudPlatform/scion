@@ -30,14 +30,12 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
-	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/spf13/cobra"
 )
 
@@ -232,6 +230,11 @@ Examples:
 		if err != nil {
 			return err
 		}
+		// ptone/scion#5132: rewrite "@agent:<slug>" mentions to "@<slug>"
+		// before sending, so the body renders by convention and the
+		// mention extraction below (which reads this same body) resolves
+		// the slug. Code spans and quoted lines are left unchanged.
+		message = messages.RewriteAgentMentions(message)
 
 		// Ensure we have a message body
 		if message == "" && len(msgArtifacts) == 0 {
@@ -383,7 +386,7 @@ Examples:
 		}
 
 		// Stage attachments to shared volume
-		if len(msgAttach) > 0 && hubCtx != nil {
+		if len(msgAttach) > 0 {
 			staged, err := stageAttachments(msgAttach)
 			if err != nil {
 				return fmt.Errorf("attachment staging failed: %w", err)
@@ -394,7 +397,7 @@ Examples:
 		// Cross-project agent addressing: intercept @agent and bare agent
 		// names BEFORE the generic convRef dispatch. When crossProjectTarget
 		// is set, both forms route through the cross-project send path.
-		if hubCtx != nil && crossProjectTarget != "" {
+		if crossProjectTarget != "" {
 			if convRef != nil && convRef.Kind == messaging.RefAgent {
 				return sendCrossProjectMessage(hubCtx, crossProjectTarget, convRef.Value, message, msgInterrupt, msgWake, msgAttach)
 			}
@@ -418,24 +421,7 @@ Examples:
 			return sendOutboundMessageViaHub(hubCtx, userRecipient, message, msgInterrupt)
 		}
 
-		if hubCtx != nil {
-			return sendMessageViaHub(hubCtx, agentName, message, msgInterrupt, msgNotify, msgWake)
-		}
-
-		// Local tail: unreachable, since requireHub never returns a nil
-		// context; removed with the local tails.
-		ctx := context.Background()
-
-		rt := runtime.GetRuntime(projectPath, profile)
-		mgr := agent.NewManager(rt)
-		defer mgr.Close()
-
-		fmt.Printf("Sending message to agent '%s'...\n", agentName)
-		if err := mgr.Message(ctx, agentName, "", message, msgInterrupt); err != nil {
-			return err
-		}
-
-		return nil
+		return sendMessageViaHub(hubCtx, agentName, message, msgInterrupt, msgNotify, msgWake)
 	},
 }
 

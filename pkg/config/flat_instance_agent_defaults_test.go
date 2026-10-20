@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
 // A flat instance's agent_defaults
@@ -103,8 +104,8 @@ func TestFlatAgentDefaults_EveryAccessorReadsOnlyPolicy(t *testing.T) {
 	}
 	const base = "server.broker.instances[docker-1].agent_defaults"
 	for _, profile := range []string{"", "batch"} {
-		if got := view.ResolveImageRegistry(profile); got != "registry.example/instance" {
-			t.Errorf("ResolveImageRegistry(%q) = %q", profile, got)
+		if got := view.SettingsImageRegistry(profile); got != "registry.example/instance" {
+			t.Errorf("SettingsImageRegistry(%q) = %q", profile, got)
 		}
 		if got, src := view.ResolveCloneDepthWithSource(profile); got != "full" || src != base+".clone_depth" {
 			t.Errorf("ResolveCloneDepthWithSource(%q) = (%q, %q)", profile, got, src)
@@ -138,8 +139,8 @@ func TestFlatAgentDefaults_EveryAccessorReadsOnlyPolicy(t *testing.T) {
 	}
 
 	// Control: legacy resolution of the same settings is the profile's.
-	if got := vs.ResolveImageRegistry(""); got != "registry.example/profile" {
-		t.Errorf("legacy ResolveImageRegistry = %q", got)
+	if got := vs.SettingsImageRegistry(""); got != "registry.example/profile" {
+		t.Errorf("legacy SettingsImageRegistry = %q", got)
 	}
 	if got, src := vs.ResolveCloneDepthWithSource(""); got != "7" || src != "profiles.batch.clone_depth" {
 		t.Errorf("legacy ResolveCloneDepthWithSource = (%q, %q)", got, src)
@@ -171,8 +172,8 @@ func TestFlatAgentDefaults_UnsetFallsThroughToLowerRungs(t *testing.T) {
 	for name, d := range map[string]*V1InstanceAgentDefaults{"no block": nil, "empty block": {}} {
 		t.Run(name, func(t *testing.T) {
 			view := legacyAgentDefaultsSettings().ForFlatInstance(agentDefaultsPolicy("docker-1", d))
-			if got := view.ResolveImageRegistry(""); got != "registry.example/global" {
-				t.Errorf("ResolveImageRegistry = %q, want the top-level image_registry", got)
+			if got := view.SettingsImageRegistry(""); got != "registry.example/global" {
+				t.Errorf("SettingsImageRegistry = %q, want the top-level image_registry", got)
 			}
 			hc, err := view.ResolveHarnessConfig("", "claude")
 			if err != nil || !reflect.DeepEqual(hc, legacyAgentDefaultsSettings().HarnessConfigs["claude"]) {
@@ -259,11 +260,11 @@ func TestResolveHarnessConfigName_FlatCallSiteUsesInstanceDefault(t *testing.T) 
 // FC5 `image_registry`: the instance value beats the top-level one.
 func TestFlatAgentDefaults_ImageRegistryRung(t *testing.T) {
 	view := legacyAgentDefaultsSettings().ForFlatInstance(agentDefaultsPolicy("docker-1", &V1InstanceAgentDefaults{ImageRegistry: "registry.example/instance"}))
-	if got := view.ResolveImageRegistry(""); got != "registry.example/instance" {
+	if got := view.SettingsImageRegistry(""); got != "registry.example/instance" {
 		t.Fatalf("got %q, want the instance registry over the top-level one", got)
 	}
-	if !view.IsImageRegistryConfigured("") {
-		t.Fatal("an instance registry counts as configured")
+	if got := ResolveImageRegistryLayers(view.ImageRegistryLayers("", "")); got.Source != ImageRegistrySourceFileProfile {
+		t.Fatalf("source %q, want the instance (file profile/instance) layer", got.Source)
 	}
 }
 
@@ -597,14 +598,44 @@ func TestValidateRuntimeBrokerInstances_AgentDefaultsValues(t *testing.T) {
 }
 
 func TestSettingsPathSuffix(t *testing.T) {
+	doc, err := jsonschema.UnmarshalJSON(strings.NewReader(`{"clone_depth": "x",
+		"harness_overrides": {"claude": {"volumes": [{"type": "x"}]}, "a/b": {"env": {"X~Y": ""}},
+			"7": {"env": {"123": ""}, "volumes": [{}, {"type": "x"}]}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
 	for in, want := range map[string]string{
 		"":            "",
 		"clone_depth": ".clone_depth",
 		"harness_overrides/claude/volumes/0/type": ".harness_overrides.claude.volumes[0].type",
 		"harness_overrides/a~1b/env/X~0Y":         ".harness_overrides.a/b.env.X~Y",
+		// Digits are bracketed only as a list index, never as a map key.
+		"harness_overrides/7/env/123":        ".harness_overrides.7.env.123",
+		"harness_overrides/7/volumes/1/type": ".harness_overrides.7.volumes[1].type",
+		// A pointer past the document keeps dotted segments.
+		"harness_overrides/missing/9": ".harness_overrides.missing.9",
 	} {
-		if got := settingsPathSuffix(in); got != want {
+		if got := settingsPathSuffix(doc, in); got != want {
 			t.Errorf("settingsPathSuffix(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// A schema error under a harness override whose name is made of digits
+// names the override as a map key, not as a list index.
+func TestValidateInstanceAgentDefaults_NumericOverrideNamePath(t *testing.T) {
+	errs := validateInstanceAgentDefaults("p", &V1InstanceAgentDefaults{
+		HarnessOverrides: map[string]V1HarnessOverride{"123": {ImagePullPolicy: "Sometimes"}}})
+	found := false
+	for _, e := range errs {
+		if e.Path == "p.harness_overrides.123.image_pull_policy" {
+			found = true
+		}
+		if strings.Contains(e.Path, "[123]") {
+			t.Errorf("path %q brackets a map key", e.Path)
+		}
+	}
+	if !found {
+		t.Fatalf("no error at p.harness_overrides.123.image_pull_policy: %v", errs)
 	}
 }

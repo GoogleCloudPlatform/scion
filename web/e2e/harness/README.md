@@ -135,6 +135,46 @@ admin (the issuer). The `test-identity-session` suite
 (`e2e/test-identity-session/`, run in the Web E2E workflow) is the
 reference use.
 
+### Hub settings and a co-located broker
+
+Two more `startHub()` options, both off by default:
+
+- `env`: extra environment of the hub process, for supported
+  configuration such as `SCION_SERVER_HUB_ASYNCAGENTLAUNCH: 'true'` or
+  `SCION_IMAGE_REGISTRY`. It is applied over the member-level hub's
+  `SCION_*`-free environment. Keys the harness sets itself
+  (`HARNESS_OWNED_ENV`: `HOME`, `SCION_CLI_MODE`, the hub id and hub class,
+  the broker host) and the test mode and test identity settings
+  (`SCION_SERVER_HUB_TEST*`, `SCION_SERVER_TEST*`) are refused: `startHub()`
+  throws before it starts anything.
+- `runtimeBroker: true` (needs `testIdentities: true`): runs the co-located
+  runtime broker in the hub process on a free loopback port with
+  `--auto-provide`, so a hub-managed project created on the hub gets it as
+  its provider. The broker registers whether or not a container runtime
+  works on the host; agents only start where one does. The broker needs an
+  image registry setting (`SCION_IMAGE_REGISTRY` in `env`).
+
+`E2E_KEEP_HUB_STATE=1` makes `stopHub()` keep the hub's temp dir (the
+SQLite database, the private HOME and the hub's files) and print its
+path, for inspecting a run afterwards. It is off by default. The dir
+contains hub credentials (dev token, session keys, test identity rows):
+do not copy it into evidence or artifacts, and remove it by hand when
+done.
+
+The `harness-selftest` suite (`e2e/harness-selftest/`) checks these
+options against a stand-in binary, without Go or a browser:
+`npm run test:e2e-support` (also run by the ci.yml web job).
+
+```typescript
+const state = await startHub({
+  testLogin: false,
+  testIdentities: true,
+  runtimeBroker: true,
+  env: { SCION_SERVER_HUB_ASYNCAGENTLAUNCH: 'true', SCION_IMAGE_REGISTRY: registry },
+  stateFile,
+});
+```
+
 ### Flow
 
 ```typescript
@@ -169,6 +209,7 @@ await assertTestIdentity(page, { email: issued.identity.email });
 | --- | --- |
 | `redeemTestIdentity(context, opts)` | `POST /auth/test-identity/redeem` with `{code}` from `opts.code` or `opts.codeFile`; expects 204 and leaves the session cookie in the context. With `codeFile`, the file is read and removed after a successful redeem. `opts.baseURL` defaults to the context's baseURL. `opts.proxyAuthorization` is sent as `Proxy-Authorization` (IAP-fronted hubs). Any other answer throws with the status and the hub error code only, never a body. |
 | `assertTestIdentity(target, {email, role?})` | `target` is a page or a request context. Reads `GET /auth/me` and fails on an email mismatch, on a role mismatch when `role` is given, or when the session is not a test identity session; also checks that `GET /api/v1/auth/me` answers for the same email. Returns `{email, role, expiresAt}`. |
+| `installIapDriver(context, {baseURL, token})` (`iap-driver.ts`) | IAP-fronted hubs only. Adds `Authorization: Bearer <token>` to the context's requests to the hub origin (page navigations, `fetch`, XHR, event streams), never to any other origin, and keeps an `Authorization` header a page sets itself. `token` is an async callback that returns the driver's Google OIDC ID token (audience: the IAP OAuth client ID); it is called on first use and again 60 s before the cached token's `exp` (`refreshBeforeMs`), and concurrent requests share one call. The token is never logged and never written to disk, `storageState` or traces by the hook. If the callback fails, the request is aborted rather than sent without the token. `opts.baseURL` (required) is the hub URL; only its origin gets the header. Returns a function that removes the hook. Redeem still goes through `redeemTestIdentity` with `proxyAuthorization`. |
 | `withTracingPaused(context, fn)` | Runs `fn` with trace recording paused (used by the redeem). |
 
 ### Rules
@@ -195,6 +236,43 @@ await assertTestIdentity(page, { email: issued.identity.email });
   logged in as the dev admin again. Close the pages before deleting the
   identity, and check `/auth/me` once.
 - test-login (`createSession()`) is unchanged for the main suite.
+
+### IAP-fronted hubs
+
+On a hub behind IAP, every browser request must carry the driver's Google
+OIDC ID token, and pages cannot send `Proxy-Authorization`. The hub must
+list the driver principal in `auth.proxy.driverPrincipals` and set
+`auth.proxy.driverTokenAudience` to the IAP OAuth client ID (see the
+docs-site how-to "Browser Sessions as Test Identities").
+
+```ts
+import { redeemTestIdentity } from './auth.js';
+import { installIapDriver } from './iap-driver.js';
+
+const context = await browser.newContext({ baseURL: hubURL });
+const driverToken = () => mintDriverIdToken(); // your callback; returns a fresh ID token
+await redeemTestIdentity(context, { codeFile, proxyAuthorization: `Bearer ${await driverToken()}` });
+await installIapDriver(context, { baseURL: hubURL, token: driverToken });
+const page = await context.newPage();
+await page.goto('/', { waitUntil: 'domcontentloaded' });
+```
+
+- Redeem from Node with `proxyAuthorization`, then install the hook before
+  the first navigation.
+- The session works only with the driver that redeemed it: a request with
+  another principal's assertion, or none, clears the session.
+- When the session has ended, the driver never acts as itself: page
+  navigations get `403` with `driver_principal_has_no_session`, and API
+  requests carrying the driver's ID token get `401` (or a plain `403`
+  where the hub trusts Google tokens).
+- `web/e2e/iap-driver/` checks the hook in a real browser against two local
+  servers (no IAP needed).
+- On a Scion runner, `driverIdTokenSource()` in `driver-id-token.ts` is the
+  token callback: it gets the driver's ID token in-process from the metadata
+  emulator (directly, or through IAM Credentials when the runner's account
+  is not the driver), never from a file. `web/e2e/iap-journey/` is the
+  operator-run journey that uses it (see the docs-site guide "IAP Driver
+  Tokens for Browser Journeys").
 
 ## Seeding test data
 

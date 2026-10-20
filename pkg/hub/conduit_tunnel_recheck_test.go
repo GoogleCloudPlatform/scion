@@ -51,6 +51,10 @@ func (f *recheckFixture) openTunnel(t *testing.T, ident UserIdentity, kind strin
 	got, err := f.srv.authorizeConduitTunnel(context.Background(), ident, f.agent, kind, params)
 	require.NoError(t, err, "the tunnel would not be opened")
 	require.Equal(t, port, got)
+	if kind == grant.StreamKindTCP {
+		// The open checks the port after the agent's state.
+		require.NoError(t, f.srv.authorizeConduitTCPTarget(f.agent, port), "the tunnel would not be opened")
+	}
 	w := &streamWatch{closed: make(chan string, 1)}
 	untrack := f.srv.trackConduitUserStream(&conduitUserStream{
 		Kind: kind, Identity: ident, AgentID: f.agent.ID, ProjectID: f.agent.ProjectID,

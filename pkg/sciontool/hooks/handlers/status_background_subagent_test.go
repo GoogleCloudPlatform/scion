@@ -201,32 +201,43 @@ func TestBackgroundSubagentWait_OwnAnswerReleases(t *testing.T) {
 
 // A stale owner (it never sends an end event) holds the wait through the
 // parent's Stop and tool activity, and is released by the parent's next
-// prompt, a session start or a status write. The prompt row runs both
-// handlers and checks the Hub report too. The session start and status
-// write rows call only the StatusHandler, so they check local state only
-// (wantHub is nil and no Hub assertion is made). Each row runs twice: with
-// only the stale owner, and with the parent's own prompt also recorded
-// (parentWait), which the same writes clear.
+// prompt, a session start of any source or a status write. The prompt row
+// and the clear and compact session start rows run both handlers and check
+// the Hub report too; a clear or compact leaves the session-restart marker
+// that the HubHandler reports. The plain session start and status write
+// rows call only the StatusHandler, so they check local state only (wantHub
+// is nil and no Hub assertion is made). Each row runs twice: with only the
+// stale owner, and with the parent's own prompt also recorded (parentWait),
+// which the same writes clear.
 func TestBackgroundSubagentWait_SafetyNetReleasesStaleOwner(t *testing.T) {
 	for _, parentAsks := range []bool{false, true} {
 		for _, tc := range []struct {
-			name      string
-			release   func(*testing.T, *StatusHandler, *HubHandler, func() []string) []string
-			wantLocal string
-			wantHub   []string // nil: local state only
+			name       string
+			release    func(*testing.T, *StatusHandler, *HubHandler, func() []string) []string
+			wantLocal  string
+			wantSource string   // activitySource after the release; "" means none
+			wantHub    []string // nil: local state only
 		}{
 			{"parent prompt", func(t *testing.T, sh *StatusHandler, hh *HubHandler, sent func() []string) []string {
 				got, _ := parentHeldStep(t, sh, hh, sent, parentHeldParent(t, "UserPromptSubmit", ""))
 				return got
-			}, "thinking", []string{parentHeldThinking}},
+			}, "thinking", "", []string{parentHeldThinking}},
 			{"session start", func(t *testing.T, sh *StatusHandler, _ *HubHandler, _ func() []string) []string {
 				require.NoError(t, sh.Handle(parentHeldParent(t, "SessionStart", "")))
 				return nil
-			}, "working", nil},
+			}, "working", "", nil},
+			{"session start (clear)", func(t *testing.T, sh *StatusHandler, hh *HubHandler, sent func() []string) []string {
+				got, _ := parentHeldStep(t, sh, hh, sent, parentHeldSessionStart(t, "clear", ""))
+				return got
+			}, "working", activitySourceSessionRestart, []string{parentHeldWorking}},
+			{"session start (compact)", func(t *testing.T, sh *StatusHandler, hh *HubHandler, sent func() []string) []string {
+				got, _ := parentHeldStep(t, sh, hh, sent, parentHeldSessionStart(t, "compact", ""))
+				return got
+			}, "working", activitySourceSessionRestart, []string{parentHeldWorking}},
 			{"status write", func(t *testing.T, sh *StatusHandler, _ *HubHandler, _ func() []string) []string {
 				require.NoError(t, sh.UpdateActivity(state.ActivityBlocked, ""))
 				return nil
-			}, "blocked", nil},
+			}, "blocked", "", nil},
 		} {
 			name := tc.name
 			if parentAsks {
@@ -247,7 +258,11 @@ func TestBackgroundSubagentWait_SafetyNetReleasesStaleOwner(t *testing.T) {
 				got = tc.release(t, sh, hh, sent)
 				info = readAgentInfoMap(t, sh.StatusPath)
 				assert.Equal(t, tc.wantLocal, info["activity"])
-				assert.NotContains(t, info, activitySourceKey)
+				if tc.wantSource == "" {
+					assert.NotContains(t, info, activitySourceKey)
+				} else {
+					assert.Equal(t, tc.wantSource, info[activitySourceKey])
+				}
 				assert.NotContains(t, info, notificationWaitAgentsKey)
 				assert.NotContains(t, info, parentWaitKey)
 				if tc.wantHub != nil {

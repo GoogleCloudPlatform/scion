@@ -214,11 +214,21 @@ func (nd *NotificationDispatcher) subscriberBrokerID(ctx context.Context, notif 
 // deadline cannot cancel: a delivery attempt can end because that deadline
 // passed, and a revert on the expired context would fail and leave the
 // notification claimed, undelivered and invisible to the sweep.
+//
+// The store refuses the revert when another caller has already recorded an
+// outcome (a primary dispatch that delivered while this retry's attempt was
+// failing, ptone/scion#5030); the row then stays dispatched with that
+// outcome, which is the intended result and not an error.
 func (nd *NotificationDispatcher) revertClaim(ctx context.Context, notificationID string) {
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), revertClaimTimeout)
 	defer cancel()
-	if err := nd.store.UnmarkNotificationDispatched(rctx, notificationID); err != nil {
+	reverted, err := nd.store.UnmarkNotificationDispatched(rctx, notificationID)
+	if err != nil {
 		nd.log.Error("retry: failed to revert claim", "notificationID", notificationID, "error", err)
+		return
+	}
+	if !reverted {
+		nd.log.Debug("retry: claim kept, an outcome is already recorded", "notificationID", notificationID)
 	}
 }
 
@@ -232,13 +242,22 @@ func (nd *NotificationDispatcher) recordAttempt(ctx context.Context, notificatio
 
 // setOutcome stores the notification's terminal dispatch outcome. Like
 // revertClaim it runs on a context the caller's deadline cannot cancel, so an
-// attempt that ended at that deadline still records its outcome.
+// attempt that ended at that deadline still records its outcome. The store
+// keeps the most informative outcome (ptone/scion#5030): delivered replaces
+// failed, and a refused write (failed over any outcome, delivered over
+// delivered) is dropped quietly.
 func (nd *NotificationDispatcher) setOutcome(ctx context.Context, notificationID, outcome string) {
 	octx, cancel := context.WithTimeout(context.WithoutCancel(ctx), revertClaimTimeout)
 	defer cancel()
-	if err := nd.store.SetNotificationDispatchOutcome(octx, notificationID, outcome); err != nil {
+	applied, err := nd.store.SetNotificationDispatchOutcome(octx, notificationID, outcome)
+	if err != nil {
 		nd.log.Error("failed to record notification dispatch outcome",
 			"notificationID", notificationID, "outcome", outcome, "error", err)
+		return
+	}
+	if !applied {
+		nd.log.Debug("notification dispatch outcome already recorded, keeping it",
+			"notificationID", notificationID, "outcome", outcome)
 	}
 }
 
@@ -267,6 +286,22 @@ func (nd *NotificationDispatcher) RetryDispatch(ctx context.Context, notif *stor
 	nd.retryDispatch(ctx, notif)
 }
 
+// retrySubscription returns the subscription a retry delivers notif for:
+// the stored subscription, or, for a notification sent to an agent's
+// creator without one (store.CreatorFallbackSubscriptionID), one rebuilt
+// from the notification's own subscriber and project.
+func retrySubscription(ctx context.Context, s store.Store, notif *store.Notification) (*store.NotificationSubscription, error) {
+	if notif.SubscriptionID == store.CreatorFallbackSubscriptionID {
+		return &store.NotificationSubscription{
+			ID:             notif.SubscriptionID,
+			SubscriberType: notif.SubscriberType,
+			SubscriberID:   notif.SubscriberID,
+			ProjectID:      notif.ProjectID,
+		}, nil
+	}
+	return s.GetNotificationSubscription(ctx, notif.SubscriptionID)
+}
+
 // retryDispatch implements RetryDispatch and reports its outcome. brokerID is
 // the subscriber's RuntimeBrokerID when a delivery was attempted, else "".
 func (nd *NotificationDispatcher) retryDispatch(ctx context.Context, notif *store.Notification) (outcome retryOutcome, brokerID string) {
@@ -280,8 +315,10 @@ func (nd *NotificationDispatcher) retryDispatch(ctx context.Context, notif *stor
 		return retryNotAttempted, "" // another caller (sweep or hook) already claimed this one
 	}
 
-	// 2. Look up subscription context.
-	sub, err := nd.store.GetNotificationSubscription(ctx, notif.SubscriptionID)
+	// 2. Look up subscription context. A creator notification sent with no
+	// subscription (store.CreatorFallbackSubscriptionID) carries its
+	// subscriber itself.
+	sub, err := retrySubscription(ctx, nd.store, notif)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			// Subscription permanently deleted — leave claimed so the sweep

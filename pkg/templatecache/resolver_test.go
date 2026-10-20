@@ -66,7 +66,7 @@ func (m *mockHarnessConfigService) RequestUploadURLs(ctx context.Context, id str
 	return nil, nil
 }
 
-func (m *mockHarnessConfigService) Finalize(ctx context.Context, id string, manifest *hubclient.HarnessConfigManifest, sourceURL string) (*hubclient.HarnessConfig, error) {
+func (m *mockHarnessConfigService) Finalize(ctx context.Context, id string, manifest *hubclient.HarnessConfigManifest, sourceURL, uploadID string) (*hubclient.HarnessConfig, error) {
 	return nil, nil
 }
 
@@ -382,4 +382,41 @@ func TestCacheInvalidate(t *testing.T) {
 // readFileFromDir reads a file from a directory path (test helper).
 func readFileFromDir(dirPath, fileName string) ([]byte, error) {
 	return os.ReadFile(filepath.Join(dirPath, fileName))
+}
+
+// TestHarnessConfigResolve_CachesUnderDownloadContentHash: a harness-config
+// commit that lands between the metadata read and the download URLs is
+// cached under the content hash the download response names, the version
+// the files really are (ptone/scion#4219 part 2), not under the metadata's.
+func TestHarnessConfigResolve_CachesUnderDownloadContentHash(t *testing.T) {
+	cache, err := New(t.TempDir(), DefaultMaxSize)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	v2 := []byte("harness: claude\nimage: example/v2:1\n")
+	h1 := transfer.HashBytes([]byte("version one"))
+	h2 := transfer.ComputeContentHash([]transfer.FileInfo{{Path: "config.yaml", Hash: transfer.HashBytes(v2)}})
+
+	hcSvc := &mockHarnessConfigService{
+		getFunc: func(ctx context.Context, id string) (*hubclient.HarnessConfig, error) {
+			return &hubclient.HarnessConfig{ID: "hc-race", Name: "race", ContentHash: h1}, nil
+		},
+		requestDownloadURLs: func(ctx context.Context, id string) (*hubclient.DownloadResponse, error) {
+			return &hubclient.DownloadResponse{
+				Files:       []hubclient.DownloadURLInfo{{Path: "config.yaml", URL: "u2", Hash: transfer.HashBytes(v2)}},
+				ContentHash: h2,
+			}, nil
+		},
+		downloadFileFunc: func(ctx context.Context, url string) ([]byte, error) { return v2, nil },
+	}
+	resolver := NewHarnessConfigResolver(cache, &mockHubClient{harnessConfigs: hcSvc})
+	if _, err := resolver.Resolve(context.Background(), "hc-race"); err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if _, ok := cache.Get(h1); ok {
+		t.Errorf("version-two files were cached under the metadata hash %s", h1)
+	}
+	if _, ok := cache.Get(h2); !ok {
+		t.Errorf("files not cached under the download response's content hash %s", h2)
+	}
 }
