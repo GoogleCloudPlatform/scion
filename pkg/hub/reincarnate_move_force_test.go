@@ -504,6 +504,15 @@ func TestEvaluateMoveEligibility_PlacementCausedTargetProfile(t *testing.T) {
 	if !ref.ForceWouldApply {
 		t.Error("forceWouldApply not set for a placement-caused target_profile refusal")
 	}
+	// A5 (N1): the same refusal onto a target without forced moves does not
+	// suggest --force.
+	noCap := forceMoveInput(moveTestProbeCalls{})
+	noCap.Profile = "local"
+	noCap.Force = false
+	noCap.Dst.Capabilities.AgentMoveRecreate = false
+	if _, ncRef := evaluateMoveEligibility(noCap); ncRef == nil || ncRef.ForceWouldApply {
+		t.Errorf("target without AgentMoveRecreate: refusal = %+v, want a refusal without forceWouldApply", ncRef)
+	}
 
 	calls := moveTestProbeCalls{}
 	in = forceMoveInput(calls)

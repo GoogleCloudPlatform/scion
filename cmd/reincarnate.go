@@ -625,9 +625,10 @@ func checkHubSupportsForce(force bool, resp *hubclient.ReincarnateAgentResponse)
 
 // Move verdict values the CLI renders specially.
 const (
-	moveCheckResultWaived    = "waived"
-	moveTransferModeExport   = "export"
-	moveTransferModeRecreate = "recreate"
+	moveCheckResultWaived         = "waived"
+	moveCheckWorkspaceRecreatable = "workspace_recreatable"
+	moveTransferModeExport        = "export"
+	moveTransferModeRecreate      = "recreate"
 )
 
 // moveForceHint is printed under a refused move's verdict when --force would
@@ -710,9 +711,16 @@ func printMoveVerdict(w io.Writer, v *hubclient.MoveVerdict) {
 		if result == moveCheckResultWaived {
 			result = "waived (--force)"
 		}
+		msg := c.Message
+		// The hub passes workspace_recreatable without a message when the
+		// workspace is not recreated (an export move, or a refusal before
+		// recreate was considered); say why.
+		if c.Name == moveCheckWorkspaceRecreatable && c.Result == "passed" && msg == "" && v.TransferMode != moveTransferModeRecreate {
+			msg = "not needed (workspace carried by the shared export)"
+		}
 		line := fmt.Sprintf("  %-28s %s", c.Name+":", result)
-		if c.Message != "" {
-			line += " - " + c.Message
+		if msg != "" {
+			line += " - " + msg
 		}
 		_, _ = fmt.Fprintln(w, line)
 	}

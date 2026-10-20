@@ -170,6 +170,32 @@ func TestPrintMoveVerdict_ExportModeHasNoLossLine(t *testing.T) {
 	assert.NotContains(t, out.String(), "will not survive")
 }
 
+// A5 (O1): a message-less workspace_recreatable pass outside recreate mode
+// says why, for a refused shared-agent verdict and an eligible export
+// verdict alike; a recreate verdict keeps the hub's message.
+func TestPrintMoveVerdict_WorkspaceRecreatableNotNeeded(t *testing.T) {
+	const line = "workspace_recreatable:       passed - not needed (workspace carried by the shared export)"
+	refused := &hubclient.MoveVerdict{Checks: []hubclient.MoveCheck{
+		{Name: "workspace_on_export", Result: "passed", Message: "confirmed at move time"},
+		{Name: "workspace_recreatable", Result: "passed"},
+		{Name: "target_health", Result: "failed", Message: "broker b2 reports its NFS export mount unhealthy"},
+	}}
+	eligible := &hubclient.MoveVerdict{Eligible: true, TransferMode: "export", Checks: []hubclient.MoveCheck{
+		{Name: "workspace_recreatable", Result: "passed"},
+	}}
+	for name, v := range map[string]*hubclient.MoveVerdict{"refused shared agent": refused, "eligible export": eligible} {
+		var out bytes.Buffer
+		printMoveVerdict(&out, v)
+		assert.Contains(t, out.String(), line, name)
+	}
+	var out bytes.Buffer
+	printMoveVerdict(&out, &hubclient.MoveVerdict{Eligible: true, TransferMode: "recreate", Checks: []hubclient.MoveCheck{
+		{Name: "workspace_recreatable", Result: "passed", Message: "fresh clone of r on the target"},
+	}})
+	assert.Contains(t, out.String(), "passed - fresh clone of r on the target")
+	assert.NotContains(t, out.String(), "not needed (workspace carried")
+}
+
 // refusalError returns the hub client error for a refusal body.
 func refusalError(t *testing.T, status int, body string) error {
 	t.Helper()
