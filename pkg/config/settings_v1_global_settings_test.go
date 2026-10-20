@@ -409,19 +409,18 @@ func TestGlobalSettingsIsLegacyFormat_LegacyGlobalWithV1ProjectConfigsOverlay(t 
 			"(mutant E3: reverting to detectHierarchyFormat must fail this assertion)")
 	assert.True(t, GlobalSettingsMentions("shared_dir_storage"))
 
-	// Pin loadGlobalSettingsOnly's OWN format decision too (mutant E4),
-	// independent of GlobalSettingsIsLegacyFormat: the legacy Settings
-	// struct has no server.shared_dir_storage field at all, so a correctly
-	// legacy-loaded read must come back with Server == nil. If
-	// loadGlobalSettingsOnly's decision were reverted to
-	// detectHierarchyFormat, it would take the VERSIONED branch instead
-	// (since the project-configs overlay reports hasVersioned=true) and
-	// this well-formed-enough-to-parse-as-v1-too YAML would then load
-	// Server.SharedDirStorage.Backend="nfs" — silently promoting a
-	// legacy-dropped config into a live one instead of failing closed.
+	// loadGlobalSettingsOnly reads the global file alone (mutant E4: a
+	// project-configs overlay must not change what it loads). A
+	// legacy-format file is converted at its own layer with the same
+	// conversion "scion config migrate" applies, which carries the v1-only
+	// server block through unchanged, so the operator's block is loaded
+	// instead of dropped (ptone/scion#3919). The project-configs file's
+	// keys are not merged.
 	vs, _, err := LoadGlobalSettings()
 	require.NoError(t, err)
-	assert.Nil(t, vs.Server, "a legacy-format global file must load via the legacy adapter (Server nil), not the versioned one")
+	require.NotNil(t, vs.Server, "the global file's server block is carried through the legacy conversion")
+	require.NotNil(t, vs.Server.SharedDirStorage)
+	assert.Equal(t, "nfs", vs.Server.SharedDirStorage.Backend)
 }
 
 // TestLoadGlobalSettingsWithOverlay_IgnoresProjectConfigsSettings checks

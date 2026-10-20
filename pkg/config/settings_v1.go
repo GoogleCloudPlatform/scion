@@ -3616,7 +3616,8 @@ type V1ProfileConfig struct {
 }
 
 // resolveEffectiveProjectPath resolves the effective project path for settings loading.
-// Shared by both LoadSettingsKoanf and LoadVersionedSettings.
+// Used by LoadVersionedSettings' layers (and so by LoadSettings and
+// LoadEffectiveSettings).
 // For git projects with split storage, this redirects to the external config dir
 // so that settings are loaded from ~/.scion/project-configs/<slug>__<uuid>/.scion/.
 func resolveEffectiveProjectPath(projectPath string) string {
@@ -3642,29 +3643,13 @@ func resolveEffectiveProjectPath(projectPath string) string {
 // 3. In-repo project settings file (.scion/settings.yaml or .json)
 // 4. External project config settings (for git projects with split storage)
 // 5. Environment variables (SCION_ prefix)
+//
+// A legacy-format file (no schema_version) is converted to the v1 shape at
+// its own layer (loadLegacySettingsLayer), so every format loads through
+// these layers; there is no separate legacy loader.
 func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
-	k, err := loadVersionedSettingsKoanf(projectPath, true)
-	if err != nil {
-		return nil, err
-	}
-
-	// Unmarshal into VersionedSettings struct
-	settings := &VersionedSettings{
-		Runtimes:       make(map[string]V1RuntimeConfig),
-		HarnessConfigs: make(map[string]HarnessConfigEntry),
-		Profiles:       make(map[string]V1ProfileConfig),
-	}
-
-	if err := unmarshalVersionedSettings(k, settings); err != nil {
-		return nil, err
-	}
-	if settings.Telemetry != nil && settings.Telemetry.Cloud != nil && settings.Telemetry.Cloud.TLS != nil {
-		if err := ValidateV1TelemetryTLS(settings.Telemetry.Cloud.TLS); err != nil {
-			return nil, err
-		}
-	}
-
-	return settings, nil
+	vs, _, err := loadVersionedSettings(projectPath, versionedLoadOptions{withDefaults: true})
+	return vs, err
 }
 
 // loadVersionedSettingsKoanf merges LoadVersionedSettings' layers into one
@@ -3672,10 +3657,23 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 // defaults), so ProfileOrigins can tell settings that come from the files
 // and environment from the built-in defaults with the same layer list.
 func loadVersionedSettingsKoanf(projectPath string, withDefaults bool) (*koanf.Koanf, error) {
+	res, err := loadVersionedLayers(projectPath, versionedLoadOptions{withDefaults: withDefaults})
+	if err != nil {
+		return nil, err
+	}
+	return res.k, nil
+}
+
+// loadVersionedLayers merges LoadVersionedSettings' layers into one koanf
+// instance and returns it with what the load found on the way (see
+// versionedLoadResult).
+func loadVersionedLayers(projectPath string, opts versionedLoadOptions) (*versionedLoadResult, error) {
 	k := koanf.New(".")
+	res := &versionedLoadResult{k: k}
+	legacy := &legacyLayerState{}
 
 	// 1. Load embedded defaults (YAML)
-	if withDefaults {
+	if opts.withDefaults {
 		if defaultData, err := GetDefaultSettingsDataYAML(); err == nil {
 			_ = k.Load(rawbytes.Provider(defaultData), yaml.Parser())
 		}
@@ -3686,15 +3684,18 @@ func loadVersionedSettingsKoanf(projectPath string, withDefaults bool) (*koanf.K
 	var globalMigratedHub bool
 	if globalDir != "" {
 		var err error
-		globalMigratedHub, err = loadSettingsFile(k, globalDir)
+		globalMigratedHub, err = loadSettingsFileConverting(k, globalDir, legacy)
 		if err != nil {
 			return nil, err
 		}
 	}
-	// Captured once, right after the global layer loads — see
-	// LoadSettingsKoanf's identical comment for why both step 3 and step 4
-	// compare against this same value, and why a migrated global value is
-	// not compared against at all.
+	// Captured once, right after the global layer loads: the precedence
+	// check below always compares a project layer's newly migrated value
+	// against the global value specifically, regardless of which layer
+	// (in-repo or external) turns out to hold the project's own file — see
+	// logHubProjectIDPrecedenceChange. A global value that was itself
+	// migrated from hub.grove_id in this load is not a pre-existing
+	// canonical value, so no precedence change is reported against it.
 	globalHubProjectID := k.String(projectkeys.ConfigHubProjectIDKey)
 	if globalMigratedHub {
 		globalHubProjectID = ""
@@ -3703,8 +3704,11 @@ func loadVersionedSettingsKoanf(projectPath string, withDefaults bool) (*koanf.K
 	// 3. Load in-repo project settings (.scion/settings.yaml)
 	effectiveProjectPath := resolveEffectiveProjectPath(projectPath)
 	dropInheritedHubProjectID(k, projectPath, effectiveProjectPath, globalDir)
+	if !k.Exists(projectkeys.ConfigHubProjectIDKey) {
+		legacy.hubIDFromCamel = false
+	}
 	if projectPath != "" && projectPath != globalDir {
-		migratedHub, err := loadSettingsFile(k, projectPath)
+		migratedHub, err := loadSettingsFileConverting(k, projectPath, legacy)
 		if err != nil {
 			return nil, err
 		}
@@ -3715,10 +3719,13 @@ func loadVersionedSettingsKoanf(projectPath string, withDefaults bool) (*koanf.K
 	}
 
 	// 4. Load external project config settings (overrides in-repo for split
-	// storage), and where a plain project's settings.yaml is actually loaded
-	// when projectPath is "" (cwd-resolved) — see LoadSettingsKoanf's step 4.
+	// storage). This is also where a plain (non-split-storage) project's own
+	// settings.yaml is actually loaded when projectPath is "" and the
+	// project is found via the current directory (resolveEffectiveProjectPath
+	// -> FindProjectRoot): step 3 above never runs in that case, so the
+	// precedence check must run here too, not only in step 3.
 	if effectiveProjectPath != "" && effectiveProjectPath != globalDir && effectiveProjectPath != projectPath {
-		migratedHub, err := loadSettingsFile(k, effectiveProjectPath)
+		migratedHub, err := loadSettingsFileConverting(k, effectiveProjectPath, legacy)
 		if err != nil {
 			return nil, err
 		}
@@ -3730,8 +3737,20 @@ func loadVersionedSettingsKoanf(projectPath string, withDefaults bool) (*koanf.K
 	// The hub project ID of the settings files, before the environment
 	// overlays it (for the precedence warning below).
 	fileHubProjectID := k.String(projectkeys.ConfigHubProjectIDKey)
+	res.fileHubProjectID = fileHubProjectID
+	res.fileHubProjectIDFromCamel = legacy.hubIDFromCamel
+	res.legacyWarnings = dedupeStrings(legacy.warnings)
 
-	// 4. Load environment variables (SCION_ prefix)
+	// Report keys of the settings files that no setting reads, before the
+	// environment is loaded: SCION_* variables such as SCION_PROJECT or
+	// SCION_CREATOR map to no setting and would be false positives.
+	if opts.withDefaults {
+		if unused, err := decodeCollectingUnused(k, settingsProbeStruct(true)); err == nil {
+			warnUnusedKeysOnce("settings", settingsHierarchySources(globalDir, projectPath, effectiveProjectPath), unused)
+		}
+	}
+
+	// 5. Load environment variables (SCION_ prefix)
 	_ = k.Load(env.ProviderWithValue("SCION_", ".", func(key, value string) (string, interface{}) {
 		// An exported but empty variable is treated as unset, so it never
 		// blanks a value from the settings files.
@@ -3742,6 +3761,9 @@ func loadVersionedSettingsKoanf(projectPath string, withDefaults bool) (*koanf.K
 		// is, a value that is not a bool would stay on tls.enabled and
 		// replace the configured value.
 		if key == "SCION_OTEL_INSECURE" {
+			return "", nil
+		}
+		if opts.ignoreEnvProjectID && (key == projectkeys.EnvProjectID || key == projectkeys.EnvHubProjectID) {
 			return "", nil
 		}
 		return versionedEnvKeyMapper(key), value
@@ -3767,7 +3789,11 @@ func loadVersionedSettingsKoanf(projectPath string, withDefaults bool) (*koanf.K
 	// distinct pair of values. SCION_PROJECT_ID sets the top-level
 	// project_id only and does not compete with them.
 	hubEnv := envHubProjectID()
+	if opts.ignoreEnvProjectID {
+		hubEnv = ""
+	}
 	if hubEnv != "" {
+		res.hubEnvProjectID = hubEnv
 		warnProjectIDOverride(projectkeys.EnvHubProjectID, hubEnv, projectkeys.ConfigHubProjectIDKey, fileHubProjectID)
 	}
 	if projectPath != "" {
@@ -3777,6 +3803,7 @@ func loadVersionedSettingsKoanf(projectPath string, withDefaults bool) (*koanf.K
 				if hubEnv != "" {
 					warnProjectIDOverride(projectkeys.EnvHubProjectID, hubEnv, projectIDFileSource(projectPath), projectID)
 				} else {
+					res.idFileProjectID = projectID
 					_ = k.Load(confmap.Provider(map[string]interface{}{
 						projectkeys.ConfigHubProjectIDKey: projectID,
 					}, "."), nil)
@@ -3785,7 +3812,7 @@ func loadVersionedSettingsKoanf(projectPath string, withDefaults bool) (*koanf.K
 		}
 	}
 
-	return k, nil
+	return res, nil
 }
 
 // warnUnknownLocalExperiments logs, once per name and process, each
@@ -5121,8 +5148,7 @@ func AdaptLegacySettings(legacy *Settings) (*VersionedSettings, []string) {
 }
 
 // convertVersionedToLegacy maps VersionedSettings back to legacy Settings.
-// Used by GetDefaultSettingsData() so the legacy Koanf loader receives valid data
-// after the default file changes format.
+// settingsViewOf builds the LoadSettings view on it.
 func convertVersionedToLegacy(vs *VersionedSettings) *Settings {
 	if vs == nil {
 		return &Settings{}
@@ -5302,11 +5328,12 @@ func settingsCandidateDirs(projectPath string) []string {
 	return dirs
 }
 
-// LoadEffectiveSettings is a unified entry point that detects the settings format
-// and loads using the appropriate path.
-// - If any user file is versioned → uses LoadVersionedSettings
-// - If all user files are legacy or absent → uses LoadSettingsKoanf + AdaptLegacySettings
-// Returns (settings, deprecation_warnings, error).
+// LoadEffectiveSettings loads the effective settings for projectPath through
+// LoadVersionedSettings' layers, whatever the format of each file: a
+// legacy-format file is converted to the v1 shape at its own layer (see
+// loadLegacySettingsLayer). Returns (settings, deprecation_warnings, error):
+// the warnings name a versioned file that lacks schema_version, a file with
+// no recognized format, and every legacy key a converted file still uses.
 func LoadEffectiveSettings(projectPath string) (*VersionedSettings, []string, error) {
 	return loadEffectiveSettings(projectPath, true)
 }
@@ -5316,26 +5343,35 @@ func LoadEffectiveSettings(projectPath string) (*VersionedSettings, []string, er
 // stored set of its own (ProfileCatalogView).
 func loadEffectiveSettings(projectPath string, withGlobalOverlay bool) (*VersionedSettings, []string, error) {
 	hasVersioned, missingSchemaVersion := detectHierarchyFormat(projectPath)
-	if hasVersioned {
-		vs, err := LoadVersionedSettings(projectPath)
-		if err != nil {
-			return nil, nil, fmt.Errorf("loading versioned settings: %w", err)
-		}
-		var warnings []string
-		if missingSchemaVersion {
-			warnings = append(warnings, missingSchemaVersionWarning)
-		}
-		// Apply DB-backed settings overlay (co-located hub+broker mode).
-		// DB values win over file values for runtimes, profiles, harness_configs.
-		if o := globalOverlay; o != nil && withGlobalOverlay {
-			o.Apply(vs)
-		}
-		return vs, warnings, nil
+	vs, res, err := loadVersionedSettings(projectPath, versionedLoadOptions{withDefaults: true})
+	if err != nil {
+		return nil, nil, fmt.Errorf("loading versioned settings: %w", err)
 	}
 
-	// Before falling through to the legacy path, check if any settings file
-	// has real content but lacks schema_version, harnesses key, and v1 runtime
-	// indicators — such files may not load correctly in future versions.
+	var warnings []string
+	if hasVersioned && missingSchemaVersion {
+		warnings = append(warnings, missingSchemaVersionWarning)
+	}
+	if !hasVersioned {
+		// A settings file with real content but no schema_version, no
+		// harnesses key and no v1 runtime indicator may not load correctly
+		// in future versions.
+		warnings = append(warnings, unrecognizedSettingsFormatWarnings(projectPath)...)
+	}
+	warnings = append(warnings, res.legacyWarnings...)
+
+	// Apply DB-backed settings overlay (co-located hub+broker mode).
+	// DB values win over file values for runtimes, profiles, harness_configs.
+	if o := globalOverlay; o != nil && withGlobalOverlay {
+		o.Apply(vs)
+	}
+	return vs, warnings, nil
+}
+
+// unrecognizedSettingsFormatWarnings returns a warning for each settings
+// file of projectPath's hierarchy that has real content but neither
+// schema_version nor any recognized format indicator.
+func unrecognizedSettingsFormatWarnings(projectPath string) []string {
 	var warnings []string
 	for _, dir := range settingsCandidateDirs(projectPath) {
 		path := GetSettingsPath(dir)
@@ -5361,19 +5397,7 @@ func loadEffectiveSettings(projectPath string, withGlobalOverlay bool) (*Version
 			path,
 		))
 	}
-
-	// Legacy path: load via existing loader, then adapt
-	legacy, err := LoadSettingsKoanf(projectPath)
-	if err != nil {
-		return nil, nil, fmt.Errorf("loading legacy settings: %w", err)
-	}
-	vs, legacyWarnings := AdaptLegacySettings(legacy)
-	warnings = append(warnings, legacyWarnings...)
-	// Apply DB-backed settings overlay (co-located hub+broker mode).
-	if o := globalOverlay; o != nil && withGlobalOverlay {
-		o.Apply(vs)
-	}
-	return vs, warnings, nil
+	return warnings
 }
 
 // LoadGlobalSettings loads settings from the broker's global directory
@@ -5399,10 +5423,10 @@ func loadEffectiveSettings(projectPath string, withGlobalOverlay bool) (*Version
 //
 // Round 6 addendum (nfs-gke UAT blocker, hy-em/hy-rev-6/hy-aud-6): this read
 // is now a fully dedicated, standalone loader (loadGlobalSettingsOnly,
-// below) rather than a call into LoadEffectiveSettings/LoadVersionedSettings/
-// LoadSettingsKoanf, for two independent reasons found in the same round:
+// below) rather than a call into LoadEffectiveSettings/LoadVersionedSettings,
+// for two independent reasons found in the same round:
 //
-//  1. Env-free. Those three functions all merge koanf's SCION_ environment
+//  1. Env-free. Those functions all merge koanf's SCION_ environment
 //     provider unconditionally. There is no env mapping for
 //     server.shared_dir_storage itself, so an env-free read of the file is
 //     semantically identical for this setting — but koanf's env provider
@@ -5424,8 +5448,7 @@ func loadEffectiveSettings(projectPath string, withGlobalOverlay bool) (*Version
 //     variable. This is not hypothetical: it reproduces in any shell/agent
 //     container that happens to export SCION_AUTO_EXPOSE_PORTS or similar.
 //  2. Global-only, for real this time. resolveEffectiveProjectPath, called
-//     internally by LoadVersionedSettings/LoadSettingsKoanf/
-//     detectHierarchyFormat, treats WHATEVER path it is given as if it
+//     internally by LoadVersionedSettings and detectHierarchyFormat, treats WHATEVER path it is given as if it
 //     might be a project directory: if ~/.scion itself contains a
 //     project-id file (plausible — a broker's ~/.scion can
 //     double as its own hub-side project identity), it resolves to
@@ -5548,40 +5571,30 @@ func GlobalSettingsIsLegacyFormat() bool {
 // loadGlobalSettingsOnly loads the broker's global settings file — and
 // ONLY that file, GetSettingsPath(globalDir), plus embedded defaults — into
 // a VersionedSettings struct. It is entirely independent of
-// LoadVersionedSettings/LoadSettingsKoanf/LoadEffectiveSettings: no
+// LoadVersionedSettings/LoadEffectiveSettings: no
 // resolveEffectiveProjectPath, no GetProjectConfigDir, no SCION_
 // environment provider, no DB-backed settings overlay. See
-// LoadGlobalSettings' doc comment for why (round 6 addendum). The
-// versioned/legacy format decision is made via detectDirSettingsFormat on
-// this same single file, matching GlobalSettingsIsLegacyFormat exactly.
+// LoadGlobalSettings' doc comment for why (round 6 addendum). A
+// legacy-format file is converted at its own layer (loadLegacySettingsLayer);
+// the missing-schema_version warning is decided by detectDirSettingsFormat
+// on this same single file, matching GlobalSettingsIsLegacyFormat exactly.
 func loadGlobalSettingsOnly(globalDir string) (*VersionedSettings, []string, error) {
 	hasVersioned, missingSchemaVersion := detectDirSettingsFormat(globalDir)
 
-	if hasVersioned {
-		vs, err := loadVersionedSettingsFileOnly(globalDir)
-		if err != nil {
-			return nil, nil, fmt.Errorf("loading versioned settings: %w", err)
-		}
-		var warnings []string
-		if missingSchemaVersion {
-			warnings = append(warnings, missingSchemaVersionWarning)
-		}
-		return vs, warnings, nil
-	}
-
-	legacy, err := loadLegacySettingsFileOnly(globalDir)
+	vs, legacyWarnings, err := loadVersionedSettingsFileOnly(globalDir)
 	if err != nil {
-		return nil, nil, fmt.Errorf("loading legacy settings: %w", err)
+		return nil, nil, fmt.Errorf("loading versioned settings: %w", err)
 	}
-	vs, warnings := AdaptLegacySettings(legacy)
+	var warnings []string
+	if hasVersioned && missingSchemaVersion {
+		warnings = append(warnings, missingSchemaVersionWarning)
+	}
+	warnings = append(warnings, legacyWarnings...)
 	return vs, warnings, nil
 }
 
-// loadVersionedSettingsFileOnly and loadLegacySettingsFileOnly (the two
-// helpers loadGlobalSettingsOnly calls) live in koanf.go, which already
-// imports the koanf JSON parser under the bare name "json" — settings_v1.go
-// imports the standard library "encoding/json" under that name instead, so
-// they cannot both live here without an import alias.
+// loadVersionedSettingsFileOnly (the helper loadGlobalSettingsOnly calls)
+// lives in koanf.go, next to loadSettingsFile.
 
 // MigrationResult reports what happened during a migration.
 type MigrationResult struct {
@@ -5602,6 +5615,13 @@ type MigrationResult struct {
 // It reads only the file at the given directory, which is needed for UpdateVersionedSetting
 // to avoid clobbering other layers.
 func LoadSingleFileVersioned(dir string) (*VersionedSettings, error) {
+	return loadSingleFileVersioned(nil, dir)
+}
+
+// loadSingleFileVersioned is LoadSingleFileVersioned; held is the settings
+// lock for dir when the caller holds it (the legacy-key migration then
+// writes under it), else nil.
+func loadSingleFileVersioned(held *SettingsLock, dir string) (*VersionedSettings, error) {
 	settingsPath := GetSettingsPath(dir)
 	if settingsPath == "" {
 		// No file exists yet — return empty versioned settings
@@ -5612,7 +5632,7 @@ func LoadSingleFileVersioned(dir string) (*VersionedSettings, error) {
 	// reading, so the parse below sees the canonical key directly. override
 	// covers the case where the rewrite could not happen (read-only
 	// filesystem, not owner): the value to use in memory for this call.
-	_, override := migrateProjectSettingsFile(settingsPath)
+	_, override := migrateProjectSettingsFileHeld(settingsPath, held)
 
 	data, err := os.ReadFile(settingsPath)
 	if err != nil {
@@ -5696,7 +5716,7 @@ func updateVersionedSettingLocked(lock *SettingsLock, dir string, key string, va
 		// hub_connections.* is accepted and left unchanged (see
 		// versionedSettingEditFor). Loading still runs the legacy-key
 		// migration and surfaces a malformed file, as before.
-		_, err := LoadSingleFileVersioned(dir)
+		_, err := loadSingleFileVersioned(lock, dir)
 		return err
 	}
 	err = updateVersionedSettingYAML(lock, dir, settingsPath, edit)
@@ -5791,8 +5811,9 @@ func updateVersionedSettingYAML(lock *SettingsLock, dir, settingsPath string, ed
 		}
 		targetPath = newSettingsFilePath(dir)
 	} else {
-		// Same legacy hub.grove_id migration LoadSingleFileVersioned runs.
-		_, override = migrateProjectSettingsFile(targetPath)
+		// Same legacy hub.grove_id migration LoadSingleFileVersioned runs,
+		// under the lock this write holds.
+		_, override = migrateProjectSettingsFileHeld(targetPath, lock)
 		var err error
 		if orig, err = os.ReadFile(targetPath); err != nil {
 			return fmt.Errorf("failed to read %s: %w", targetPath, err)
@@ -6058,7 +6079,7 @@ func physicalParentPath(p string) (string, error) {
 // edit cannot match by name; see hasYAMLOpaqueKey). A YAML file is
 // saved back to the same path (settings.yml stays settings.yml).
 func updateVersionedSettingStruct(lock *SettingsLock, dir string, key string, value string) error {
-	vs, err := LoadSingleFileVersioned(dir)
+	vs, err := loadSingleFileVersioned(lock, dir)
 	if err != nil {
 		return err
 	}

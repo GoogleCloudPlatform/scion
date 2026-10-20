@@ -123,7 +123,7 @@ func TestServerStartupSettings_GlobalOnlyFromProjectDir(t *testing.T) {
 // settings load that resolves the project from the working directory. It is
 // a literal-only tripwire: it flags a call whose project-path argument is
 // the literal "" (a variable holding "" is not caught):
-//   - config.LoadSettings, LoadSettingsKoanf, LoadSettingsIgnoringEnvProjectID,
+//   - config.LoadSettings, LoadSettingsIgnoringEnvProjectID,
 //     LoadVersionedSettings, LoadEffectiveSettings, LoadEffectiveSettingsFor
 //     and GetResolvedProjectDir
 //   - runtime.GetRuntime
@@ -133,7 +133,7 @@ func TestServerStartupSettings_GlobalOnlyFromProjectDir(t *testing.T) {
 // working-directory check).
 func TestServerStartup_NoWorkingDirectorySettingsLoads(t *testing.T) {
 	configFns := map[string]bool{
-		"LoadSettings": true, "LoadSettingsKoanf": true, "LoadSettingsIgnoringEnvProjectID": true,
+		"LoadSettings": true, "LoadSettingsIgnoringEnvProjectID": true,
 		"LoadVersionedSettings": true, "LoadEffectiveSettings": true, "LoadEffectiveSettingsFor": true,
 		"GetResolvedProjectDir": true,
 	}

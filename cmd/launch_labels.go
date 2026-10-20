@@ -73,6 +73,7 @@ var launchCodeLabels = map[string]string{
 	api.LaunchCodeUnschedulable:         "the agent pod cannot be scheduled",
 	api.LaunchCodePodDisrupted:          "the agent pod was preempted, evicted or deleted while starting",
 	api.LaunchCodeBrokerRestarted:       "the runtime broker restarted during the launch",
+	api.LaunchCodeDispatchFailed:        "the runtime broker did not accept the launch",
 }
 
 // launchStepLabel returns the label for a launch step. A step this CLI does

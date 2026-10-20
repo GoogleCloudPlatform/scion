@@ -41,6 +41,7 @@ const WEB_KEYS = {
 const UNDECLARED_ALLOWED: readonly string[] = [
   'agentMove',
   'asyncLaunch',
+  'asyncStart',
   'attachmentDelivery',
   'emptyPerAgentWorkspace',
   'nodeImageRegistry',

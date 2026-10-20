@@ -88,7 +88,7 @@ func startOutcomeOf(err error) startOutcome {
 	case errors.Is(err, ErrLaunchInFlight), errors.As(err, &incomplete), errors.As(err, &stillMissing),
 		errors.Is(err, ErrLaunchInvalidPhase),
 		errors.As(err, &tokenErr), errors.Is(err, errBrokerLacksEmptyPerAgent),
-		isBrokerRuntimeUnavailable(err), errors.Is(err, errStartClaimLost), errors.Is(err, store.ErrDeleteInProgress):
+		isBrokerRuntimeUnavailable(err), isBrokerDraining(err), errors.Is(err, errStartClaimLost), errors.Is(err, store.ErrDeleteInProgress):
 		return startReleased
 	}
 	return startUnconfirmed
@@ -455,7 +455,12 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 		}
 		return err
 	}
-	provisioned := agent.Phase == string(state.PhaseCreated) || agent.Phase == string(state.PhaseProvisioning)
+	// The effective resting phase (ptone/scion#4669): an error row that
+	// remembers a created or provisioning phase a failed asynchronous start
+	// began from is still a provisioned agent that never ran. Read before
+	// the dispatch, while no launch is active.
+	rest := store.EffectiveRestingPhase(agent)
+	provisioned := rest == string(state.PhaseCreated) || rest == string(state.PhaseProvisioning)
 	// Taken before the dispatch, which may record a new placement: a start
 	// replacing a previous run's ephemeral workspace warns about it
 	// (ptone/scion#3819). A provisioned agent has no previous run, and a
