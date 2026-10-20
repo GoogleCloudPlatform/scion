@@ -32,17 +32,18 @@ import (
 var settingsBypassScanRoots = []string{".", "../../cmd", "../hub", "../hubsync", "../runtimebroker", "../agent"}
 
 // settingsBypassAllowed lists the functions ("<file>:<func>", the file
-// relative to its scan root) that still write a settings file directly, as
-// far as this check can see (see its limits below). Each must be a known,
-// tracked exception; an entry that no longer matches fails the test, so the
-// list cannot go stale.
+// relative to its scan root; or "<func>" alone for a package-level function
+// of this package, whose name is unique in it) that still write a settings
+// file directly, as far as this check can see (see its limits below). Each
+// must be a known, tracked exception; an entry that no longer matches fails
+// the test, so the list cannot go stale.
 var settingsBypassAllowed = map[string]string{
-	// The legacy hub.grove_id key migration: it runs from the settings
+	// The legacy project-ID key migration: it runs from the settings
 	// loaders, sometimes while the caller already holds the settings lock,
 	// so it cannot take the (non-re-entrant) lock and uses compare-then-
 	// rename instead (see its comment). Retired with the legacy loader in
 	// ptone/scion#3919.
-	"legacy_grove_migration.go:migrateLegacyYAMLKeysLocked": "ptone/scion#3919",
+	"migrateLegacyYAMLKeysLocked": "ptone/scion#3919",
 }
 
 // settingsFileNames are the file names whose writes must use the writer.
@@ -129,6 +130,11 @@ func TestSettingsWrites_NoBypassOfLockedWriter(t *testing.T) {
 					}
 					for _, pos := range settingsBypassCalls(fn, pkgNames, funcVars) {
 						key := filepath.ToSlash(rel) + ":" + fn.Name.Name
+						if root == "." && fn.Recv == nil {
+							if _, ok := settingsBypassAllowed[fn.Name.Name]; ok {
+								key = fn.Name.Name
+							}
+						}
 						found[key] = true
 						if _, ok := settingsBypassAllowed[key]; !ok {
 							t.Errorf("%s: %s writes a settings file without the locked writer (use writeSettingsFileAtomic under LockSettingsDir)", fset.Position(pos), fn.Name.Name)
