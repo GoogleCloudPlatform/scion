@@ -105,11 +105,19 @@ func (ts *conduitTunnelSession) mintRelayTunnel(ctx context.Context, log *slog.L
 		log.Warn("Conduit tunnel: external relay mode resolved a target that is not a relay-held session")
 		return nil, nil, conduitTunnelOpenError(fmt.Errorf("tunnel target: %w", errConduitLeafNotRelayHeld))
 	}
+	// A target that does not renew stream authorization would hold the
+	// tunnel with no deadline at all: with enforce it is refused on the row
+	// Resolve picked, before anything is minted, and the relay gets no
+	// instruction. The relay's retry onto another row comes back here.
+	renews := conduitTargetRenews(res)
+	if ts.s.conduitTargetUpgradeRequired(ctx, ts.identity, renews, conduitRouteRelayTunnel, agent.ID) {
+		return nil, nil, conduitTunnelOpenError(errConduitAgentUpgradeRequired)
+	}
 	// A relay-held stream is renewed through the relay's re-check, which
 	// this hub does not serve yet: no renewal can be delivered on this
 	// route, so with enforce a stream to a renewal-capable target is
 	// refused here rather than left to end at its first deadline.
-	renews, canRenew := conduitTargetRenews(res), false
+	canRenew := false
 	if ts.s.conduitRenewalPathUnavailable(ctx, ts.identity, renews, canRenew, conduitRouteRelayTunnel, agent.ID) {
 		return nil, nil, conduitTunnelOpenError(errConduitStreamRenewalUnavailable)
 	}

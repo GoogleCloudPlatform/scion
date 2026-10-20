@@ -151,7 +151,7 @@ var requestPathSites = []requestPathSite{
 	{"web.go", "WebServer.sessionAuthMiddleware", "URL.Path", 2, "comparison, and the post-login redirect target stored in the session cookie (not logged)"},
 	{"web.go", "WebServer.sessionToBearerMiddleware", "URL.Path", 1, "comparison, and the post-login redirect target stored in the session cookie (not logged)"},
 	{"web.go", "WebServer.sessionToBearerMiddleware", "URL.RequestURI", 1, "comparison, and the post-login redirect target stored in the session cookie (not logged)"},
-	{"web.go", "WebServer.spaHandler", "URL.Path", 3, "routing: SPA page and login-page checks"},
+	{"web.go", "WebServer.spaHandler", "URL.Path", 4, "routing: SPA page and login-page checks, and the first-segment dot check (not logged)"},
 	{"web.go", "WebServer.tryServeStaticFile", "URL.Path", 3, "routing: serves the static file at the path, after comparing it with its clean form (not logged)"},
 	{"workspace_handlers.go", "Server.handleWorkspaceSyncFrom", "URL(bare)", 1, "not a request URL: a signed storage URL field"},
 	{"workspace_handlers.go", "Server.handleWorkspaceSyncTo", "URL(bare)", 1, "not a request URL: a signed storage URL field"},

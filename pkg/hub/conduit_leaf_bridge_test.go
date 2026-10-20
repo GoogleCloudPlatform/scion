@@ -41,8 +41,14 @@ import (
 // also serves pty streams, with a fake spawner reporting each process.
 func newPTYSeparateRelayWorld(t *testing.T) (*separateRelayWorld, chan *fakePTY) {
 	t.Helper()
+	return newPTYSeparateRelayWorldWith(t, separateRelayOptions{})
+}
+
+// newPTYSeparateRelayWorldWith is newPTYSeparateRelayWorld with opts.
+func newPTYSeparateRelayWorldWith(t *testing.T, opts separateRelayOptions) (*separateRelayWorld, chan *fakePTY) {
+	t.Helper()
 	spawned := make(chan *fakePTY, 4)
-	w := newSeparateRelayWorld(t, func(w *separateRelayWorld) {
+	w := newSeparateRelayWorldWith(t, opts, func(w *separateRelayWorld) {
 		w.spawnPTY = func(_ context.Context, req sconduit.PTYRequest) (sconduit.PTYProcess, error) {
 			p := newFakePTY(req)
 			spawned <- p

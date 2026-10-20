@@ -488,8 +488,8 @@ test-store-postgres-entadapter: test-store-postgres-env-check
 		fi; \
 	fi
 
-# test-store-postgres-tail: the storetest, pkg/store/enttest, pkg/ent/entc
-# and cmd runs of test-store-postgres (after entadapter). The enttest run
+# test-store-postgres-tail: the storetest, pkg/store/enttest, pkg/ent/entc,
+# pkg/testinfra and cmd runs of test-store-postgres (after entadapter). The enttest run
 # includes TestSchemaSnapshot_MatchesAutoMigrate, which checks that the
 # schema snapshot the harness provisions test schemas from matches
 # entc.AutoMigrate.
@@ -537,6 +537,20 @@ test-store-postgres-tail: test-store-postgres-env-check
 	fi; \
 	if ! grep -qE '^--- PASS: TestSkillStore_CreateAgainstOldSchemaWithVisibilityColumn_Postgres ' /tmp/test-launch-store-postgres-entc.log; then \
 		echo "ERROR: the skill-visibility old-schema Postgres test did not run." >&2; \
+		exit 1; \
+	fi
+	@go test -tags integration -count=1 -timeout 10m -v \
+		-run '^TestDelegate_ConcurrentLiveCapHolds_Postgres$$' \
+		./pkg/testinfra/ > /tmp/test-launch-store-postgres-testinfra.log 2>&1; \
+	status=$$?; \
+	cat /tmp/test-launch-store-postgres-testinfra.log; \
+	if [ $$status -ne 0 ]; then exit $$status; fi; \
+	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-launch-store-postgres-testinfra.log; then \
+		echo "ERROR: the pkg/testinfra Postgres test was skipped -- see '--- SKIP' lines above." >&2; \
+		exit 1; \
+	fi; \
+	if ! grep -qE '^--- PASS: TestDelegate_ConcurrentLiveCapHolds_Postgres ' /tmp/test-launch-store-postgres-testinfra.log; then \
+		echo "ERROR: the offline delegation live-cap Postgres test did not run." >&2; \
 		exit 1; \
 	fi
 	@st=$$(mktemp) || exit 1; \

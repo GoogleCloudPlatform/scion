@@ -854,9 +854,9 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 	// Read once, so the broker and the agent see the same set.
 	experiments := d.dispatchExperiments()
 
-	// Telemetry for this dispatch: separate tiers for a templateTiers
-	// broker, the legacy inline merge otherwise (see dispatch_telemetry.go).
-	tel := d.dispatchTelemetry(ctx, agent, projectInfo.telemetryPolicy)
+	// Telemetry for this dispatch: always the separate tiers, never inline
+	// telemetry (see dispatch_telemetry.go).
+	tel := d.dispatchTelemetry(agent, projectInfo.telemetryPolicy)
 
 	// Add configuration if available
 	if agent.AppliedConfig != nil {
@@ -3599,7 +3599,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 	// from the stored InlineConfig: an agent created by an older hub has a
 	// hub-default copy there, and resending it would keep that default at
 	// the top tier (ptone/scion#4222).
-	tel := d.dispatchTelemetry(ctx, agent, projectInfo.telemetryPolicy)
+	tel := d.dispatchTelemetry(agent, projectInfo.telemetryPolicy)
 	tel.injectRequesterEnabled(resolvedEnv, &envClassifications)
 
 	// Thread through updated InlineConfig so the broker can apply config
@@ -3821,10 +3821,9 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	// would. A resolution error is handled there as on start: it is logged
 	// and the restart proceeds without injected secrets.
 	projectInfo := startEnv.projectInfo
-	// Telemetry tiers for a templateTiers broker (see dispatch_telemetry.go).
-	// A restart sends no inline config, so a legacy broker keeps the
-	// telemetry its stored agent config already has.
-	tel := d.dispatchTelemetry(ctx, agent, projectInfo.telemetryPolicy)
+	// Telemetry tiers for this restart (see dispatch_telemetry.go). A restart
+	// sends no inline config, so it never carries inline telemetry.
+	tel := d.dispatchTelemetry(agent, projectInfo.telemetryPolicy)
 	tel.injectRequesterEnabled(resolvedEnv, &envClassifications)
 	extras := StartExtras{
 		HubEndpoint:          d.effectiveAgentHubEndpoint(),

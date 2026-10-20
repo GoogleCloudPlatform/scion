@@ -27,10 +27,6 @@ const (
 	FieldHarness = "harness"
 	// FieldDefaultHarnessConfig holds the string denoting the default_harness_config field in the database.
 	FieldDefaultHarnessConfig = "default_harness_config"
-	// FieldImage holds the string denoting the image field in the database.
-	FieldImage = "image"
-	// FieldConfig holds the string denoting the config field in the database.
-	FieldConfig = "config"
 	// FieldAgentConfig holds the string denoting the agent_config field in the database.
 	FieldAgentConfig = "agent_config"
 	// FieldContentHash holds the string denoting the content_hash field in the database.
@@ -80,8 +76,6 @@ var Columns = []string{
 	FieldDescription,
 	FieldHarness,
 	FieldDefaultHarnessConfig,
-	FieldImage,
-	FieldConfig,
 	FieldAgentConfig,
 	FieldContentHash,
 	FieldScope,
@@ -194,16 +188,6 @@ func ByHarness(opts ...sql.OrderTermOption) OrderOption {
 // ByDefaultHarnessConfig orders the results by the default_harness_config field.
 func ByDefaultHarnessConfig(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldDefaultHarnessConfig, opts...).ToFunc()
-}
-
-// ByImage orders the results by the image field.
-func ByImage(opts ...sql.OrderTermOption) OrderOption {
-	return sql.OrderByField(FieldImage, opts...).ToFunc()
-}
-
-// ByConfig orders the results by the config field.
-func ByConfig(opts ...sql.OrderTermOption) OrderOption {
-	return sql.OrderByField(FieldConfig, opts...).ToFunc()
 }
 
 // ByAgentConfig orders the results by the agent_config field.

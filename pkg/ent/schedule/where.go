@@ -160,6 +160,11 @@ func Status(v string) predicate.Schedule {
 	return predicate.Schedule(sql.FieldEQ(FieldStatus, v))
 }
 
+// StatusReason applies equality check predicate on the "status_reason" field. It's identical to StatusReasonEQ.
+func StatusReason(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEQ(FieldStatusReason, v))
+}
+
 // NextRunAt applies equality check predicate on the "next_run_at" field. It's identical to NextRunAtEQ.
 func NextRunAt(v time.Time) predicate.Schedule {
 	return predicate.Schedule(sql.FieldEQ(FieldNextRunAt, v))
@@ -1503,6 +1508,81 @@ func StatusEqualFold(v string) predicate.Schedule {
 // StatusContainsFold applies the ContainsFold predicate on the "status" field.
 func StatusContainsFold(v string) predicate.Schedule {
 	return predicate.Schedule(sql.FieldContainsFold(FieldStatus, v))
+}
+
+// StatusReasonEQ applies the EQ predicate on the "status_reason" field.
+func StatusReasonEQ(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEQ(FieldStatusReason, v))
+}
+
+// StatusReasonNEQ applies the NEQ predicate on the "status_reason" field.
+func StatusReasonNEQ(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldNEQ(FieldStatusReason, v))
+}
+
+// StatusReasonIn applies the In predicate on the "status_reason" field.
+func StatusReasonIn(vs ...string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldIn(FieldStatusReason, vs...))
+}
+
+// StatusReasonNotIn applies the NotIn predicate on the "status_reason" field.
+func StatusReasonNotIn(vs ...string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldNotIn(FieldStatusReason, vs...))
+}
+
+// StatusReasonGT applies the GT predicate on the "status_reason" field.
+func StatusReasonGT(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldGT(FieldStatusReason, v))
+}
+
+// StatusReasonGTE applies the GTE predicate on the "status_reason" field.
+func StatusReasonGTE(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldGTE(FieldStatusReason, v))
+}
+
+// StatusReasonLT applies the LT predicate on the "status_reason" field.
+func StatusReasonLT(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldLT(FieldStatusReason, v))
+}
+
+// StatusReasonLTE applies the LTE predicate on the "status_reason" field.
+func StatusReasonLTE(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldLTE(FieldStatusReason, v))
+}
+
+// StatusReasonContains applies the Contains predicate on the "status_reason" field.
+func StatusReasonContains(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldContains(FieldStatusReason, v))
+}
+
+// StatusReasonHasPrefix applies the HasPrefix predicate on the "status_reason" field.
+func StatusReasonHasPrefix(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldHasPrefix(FieldStatusReason, v))
+}
+
+// StatusReasonHasSuffix applies the HasSuffix predicate on the "status_reason" field.
+func StatusReasonHasSuffix(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldHasSuffix(FieldStatusReason, v))
+}
+
+// StatusReasonIsNil applies the IsNil predicate on the "status_reason" field.
+func StatusReasonIsNil() predicate.Schedule {
+	return predicate.Schedule(sql.FieldIsNull(FieldStatusReason))
+}
+
+// StatusReasonNotNil applies the NotNil predicate on the "status_reason" field.
+func StatusReasonNotNil() predicate.Schedule {
+	return predicate.Schedule(sql.FieldNotNull(FieldStatusReason))
+}
+
+// StatusReasonEqualFold applies the EqualFold predicate on the "status_reason" field.
+func StatusReasonEqualFold(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEqualFold(FieldStatusReason, v))
+}
+
+// StatusReasonContainsFold applies the ContainsFold predicate on the "status_reason" field.
+func StatusReasonContainsFold(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldContainsFold(FieldStatusReason, v))
 }
 
 // NextRunAtEQ applies the EQ predicate on the "next_run_at" field.

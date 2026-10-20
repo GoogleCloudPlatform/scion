@@ -298,6 +298,9 @@ type Relay struct {
 	// visible as ready (registered, readyCh closed), before Serve acts
 	// on the relay state (the lifetime-arming seam).
 	testHookAfterReady func()
+	// testHookAfterDone runs in Serve once the session has ended, before
+	// it leaves r.sessions, with its session id.
+	testHookAfterDone func(sessionID string)
 
 	// shutdownCap and shutdownCapSet hold the drain-deadline cap of a
 	// capped Shutdown (ShutdownWith with ShutdownOptions.CapDrain), set
@@ -714,6 +717,14 @@ func (r *Relay) Serve(ctx context.Context, conn transport.Conn, p Principal) err
 		delete(r.pending, rec.SessionID)
 	}
 	r.sessions[rec.SessionID] = e
+	// A broker session closes itself when r.sessions holds a live
+	// higher-epoch session of another incarnation of its broker
+	// (broker_incarnation.go). It leaves r.sessions at once, so Local never
+	// returns it.
+	selfClose := r.supersededAtRegistrationLocked(e)
+	if selfClose {
+		delete(r.sessions, rec.SessionID)
+	}
 	state, killed := r.state, r.killed
 	r.mu.Unlock()
 	e.readyOnce.Do(func() { close(e.readyCh) })
@@ -724,6 +735,9 @@ func (r *Relay) Serve(ctx context.Context, conn transport.Conn, p Principal) err
 	case killed:
 		r.stopLifetime(e)
 		_ = ls.Close()
+	case selfClose:
+		r.stopLifetime(e)
+		r.closeSupersededAtRegistration(e)
 	case e.closeForbidden.Load():
 		// A user StreamOpen arrived before sess was set (pipelined
 		// after the Hello); refuseDialerStream could not close it.
@@ -739,6 +753,9 @@ func (r *Relay) Serve(ctx context.Context, conn transport.Conn, p Principal) err
 	}
 
 	<-ls.Done()
+	if h := r.testHookAfterDone; h != nil {
+		h(rec.SessionID)
+	}
 	r.stopLifetime(e)
 
 	r.mu.Lock()

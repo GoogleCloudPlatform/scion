@@ -883,6 +883,17 @@ func migrateLegacyYAMLKeys(file string, renames []legacyYAMLKeyRename, report Re
 	return migrateLegacyYAMLKeysLocked(path, renames, report, st, 0)
 }
 
+// migrateLegacyYAMLKeysLocked does not take the settings lock
+// (LockSettingsDir), unlike every other whole-file settings writer. It runs
+// from the settings loaders, sometimes while the caller already holds that
+// non-re-entrant lock (LoadSingleFileVersioned inside
+// LoadModifySaveVersionedSettings, for example), so taking it here could
+// deadlock until the lock's wait runs out. It coordinates optimistically
+// instead: it re-reads the file just before its atomic rename and retries
+// (once) or gives up if the bytes changed. A locked write landing in the
+// short window between that re-read and the rename can still be lost; the
+// window exists only while a legacy key is present. Retired with the legacy
+// loader (ptone/scion#3919).
 func migrateLegacyYAMLKeysLocked(path string, renames []legacyYAMLKeyRename, report Reporter, st *projectMigrationDirState, attempt int) map[string]string {
 	info, err := os.Stat(path)
 	if err != nil {
