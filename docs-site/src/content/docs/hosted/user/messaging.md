@@ -65,19 +65,31 @@ Do not post credentials, tokens, keys or other sensitive material in a space thr
 :::note[Attachment and shared-directory permissions]
 Shared directories, and the attachment store that holds chat attachments by default, grant access by project, not per conversation or per member. Keep files that only some project members may see out of them.
 
-With the `hub.attachment_artifacts` experiment on, a file uploaded in web chat is stored as an attachment of the message it is sent in, and is exactly as readable as that message at the moment it is read:
+With the `hub.attachment_artifacts` experiment on, a file uploaded in web chat or sent with `scion message --attach` is stored as an attachment of the message it is sent in, and is exactly as readable as that message at the moment it is read:
 
 - **Direct message:** its two participants.
 - **Thread in a project space:** everyone who can read the project.
 - **Group conversation without a project:** its current participants. Someone who joins can read the attachments of earlier messages, and someone who leaves stops being able to read them.
 - **Anyone the message is addressed to.**
 
-When the message goes to an agent, the file is also copied into the project's shared directory so the agent can open it, and there project access applies (until ptone/scion#4597 delivers files to the agent's own home instead).
+When the message goes to an agent, the file is delivered into that agent's own home (see [Attachments for agents](#attachments-for-agents)); it is no longer copied into the project's shared directory.
 
 Until it is sent, only the uploader can read it, and an upload that is not sent within 24 hours is removed. Deleting a message makes its attachments unreadable at once, and their stored bytes are removed after the artifact garbage-collection grace period. Any user who cannot read it gets the same "not found" answer as for an attachment that does not exist. These attachments are read through a signed-in session, such as the web chat; user access tokens do not read, list or send them yet (ptone/scion#4596), and an upload made with a token is stored the previous way. Attachments are read only through their message: they have no share links, grants or versions, and they are not listed among artifacts.
 
 Each file can be up to the artifact file size limit (`artifacts.max_file_bytes`, 32 MiB by default), with up to 10 files per message. The experiment uses the artifact service, with its settings section enabled; `hub.artifacts` can stay off. Attachments stored while the experiment is on stay readable after it is turned off.
 :::
+
+### Attachments for agents
+
+With the `hub.attachment_artifacts` experiment on, agents send and receive attachments as files:
+
+- **Sending:** `scion message --attach <file>` first asks the Hub where uploads go. When the Hub stores attachments as artifacts, the CLI checks the files, uploads them and names them in the send. Each file must be a readable regular file, no two files may have the same name, and HTML and SVG files are refused: publish one with `scion artifact publish` and send it with `--artifact`. With an agent recipient, the files must fit the delivery limit below. Any path works; the files do not need to be in a shared directory. A group send uploads the files once per recipient. If any file fails to upload, nothing is sent. Without the experiment, `--attach` stages files in the shared directory as before.
+- **Receiving:** an agent that may read the message gets each file at `~/.scion/inbox/<message-id>/<name>` before the message text arrives, and the message lists those paths. `<name>` is the file name with every character other than letters, digits, `.`, `_` and `-` replaced by `_`. A file that could not be delivered gets one line after the message text: `Attachment not delivered: <path> (<size>): <reason>. Ask the sender to resend it.`
+- **Which agents get a file:** the agents that may read the message: a participant of its conversation, an agent of the project for a project thread, and an agent the message is addressed to, including an agent @mentioned in it. An agent in another project that is the recipient gets the file; other agents of that project do not.
+- **A snapshot:** a delivered file stays in the agent's home after the message is deleted, until the agent's inbox is pruned (directories older than `messaging.attachment_inbox_retention_days`, 7 days by default) or the agent is deleted.
+- **Kubernetes default pods:** the agent's home lives in the pod, so delivered files are lost when the pod is recreated. Homes on NFS, and runtimes that keep the home on the host, keep them.
+- **Settings:** a Hub administrator sets both in the Hub messaging settings (`GET` and `PUT /api/v1/admin/messaging`; `null` resets one to its default). `attachment_delivery_max_bytes` (32 MiB by default) is the most the attachments of one message to an agent may total; a larger send is refused when it is sent, and with the setting at 0 attachments stored as artifacts cannot be sent to agents. `attachment_inbox_retention_days` (7 by default) is how long delivered files stay in an agent's inbox.
+- **Deferred messages:** a message saved for an agent that is reincarnating is delivered without its files; `scion conversation catch-up` lists them as not delivered.
 
 ---
 
