@@ -496,9 +496,10 @@ func (s *Server) authorizeProjectClone(ctx context.Context, w http.ResponseWrite
 // projectCloneTokenDenial returns a reason when a user access token may not
 // clone a project, and "" otherwise. The token's ceiling must allow
 // project.clone and project.clone must be eligible for the token's boundary
-// kind. The check is the selector only: no built-in role holds
-// project.clone, and the clone's authority comes from project.read on the
-// source and project.create at the hub. Other identities return "".
+// kind. The check reads only the token's ceiling and boundary; it does not
+// look up a project.clone binding. authorizeProjectClone makes the live
+// checks: project.read on the source and project.create at the hub. Other
+// identities return "".
 func projectCloneTokenDenial(identity Identity) string {
 	scoped, ok := identity.(*ScopedUserIdentity)
 	if !ok {
