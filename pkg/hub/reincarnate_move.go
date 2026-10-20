@@ -16,11 +16,9 @@ package hub
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"sort"
 	"strings"
 
@@ -542,24 +540,13 @@ func (s *Server) moveProbesFor(r *http.Request, project *store.Project, ac *stor
 	}
 	if ac != nil && ac.GCPIdentity != nil && ac.GCPIdentity.MetadataMode == store.GCPMetadataModePassthrough {
 		p.Passthrough = func(dst *store.RuntimeBroker) string {
-			rec := httptest.NewRecorder()
-			if s.authorizePassthroughIdentity(rec, r, dst, SurfacePassthroughMove) {
-				return ""
+			if d := s.evaluatePassthroughIdentity(r.Context(), r, dst, SurfacePassthroughMove); d != nil {
+				return d.msg
 			}
-			return recordedErrorMessage(rec)
+			return ""
 		}
 	}
 	return p
-}
-
-// recordedErrorMessage extracts the error message from a recorded error
-// response, falling back to the status text.
-func recordedErrorMessage(rec *httptest.ResponseRecorder) string {
-	var resp ErrorResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err == nil && resp.Error.Message != "" {
-		return resp.Error.Message
-	}
-	return strings.ToLower(http.StatusText(rec.Code))
 }
 
 // writeMoveRefusal writes a move refusal with the verdict in

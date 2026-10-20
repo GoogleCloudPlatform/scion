@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -72,8 +73,38 @@ func isValidServiceAccountEmail(email string) bool {
 }
 
 // authorizePassthroughIdentity gates passthrough mode for a caller against a
-// broker. It enforces TWO INDEPENDENT CHECKS, neither of which alone is
-// sufficient:
+// broker: evaluatePassthroughIdentity, with a refusal written to w.
+//
+// Returns true if passthrough is allowed. On false, the response has been
+// written and the caller must return immediately.
+func (s *Server) authorizePassthroughIdentity(
+	w http.ResponseWriter,
+	r *http.Request,
+	broker *store.RuntimeBroker,
+	surface string,
+) bool {
+	d := s.evaluatePassthroughIdentity(r.Context(), r, broker, surface)
+	if d == nil {
+		return true
+	}
+	d.write(w)
+	return false
+}
+
+// passthroughDenial is a refusal from evaluatePassthroughIdentity. It carries
+// the message the HTTP surface writes (403 forbidden), and satisfies error so
+// callers without a response writer can fail with the same message.
+type passthroughDenial struct {
+	msg string
+}
+
+func (d *passthroughDenial) Error() string { return d.msg }
+
+func (d *passthroughDenial) write(w http.ResponseWriter) { writeForbidden(w, d.msg) }
+
+// evaluatePassthroughIdentity is the transport-independent body of the
+// passthrough gate, with the caller taken from the identity on ctx. It
+// enforces TWO INDEPENDENT CHECKS, neither of which alone is sufficient:
 //
 //  1. Broker-owner/admin restriction — the caller must be the broker owner or
 //     a hub admin.
@@ -88,16 +119,14 @@ func isValidServiceAccountEmail(email string) bool {
 // surface names the call site for audit — SurfacePassthroughCreate or
 // SurfacePassthroughPatch. It affects labelling only, never the decision.
 //
-// Returns true if passthrough is allowed. On false, the response has been
-// written and the caller must return immediately.
-func (s *Server) authorizePassthroughIdentity(
-	w http.ResponseWriter,
+// It returns nil when passthrough is allowed. r is used only to name the
+// request in denial logs and may be nil for callers with no HTTP request.
+func (s *Server) evaluatePassthroughIdentity(
+	ctx context.Context,
 	r *http.Request,
 	broker *store.RuntimeBroker,
 	surface string,
-) bool {
-	ctx := r.Context()
-
+) *passthroughDenial {
 	// -------------------------------------------------------------------
 	// Check 1: Broker-owner/admin restriction.
 	// -------------------------------------------------------------------
@@ -107,10 +136,8 @@ func (s *Server) authorizePassthroughIdentity(
 		logAuthzDenial(r, GetIdentityFromContext(ctx),
 			Resource{Type: "broker", ID: broker.ID}, ActionDispatch,
 			"passthrough is restricted to broker owners and admins")
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"GCP identity passthrough requires broker ownership. "+
-				"Only the broker owner can expose the broker's GCP identity to agents.", nil)
-		return false
+		return &passthroughDenial{msg: "GCP identity passthrough requires broker ownership. " +
+			"Only the broker owner can expose the broker's GCP identity to agents."}
 	}
 
 	// Permission-based admin check via Decide replaces the former
@@ -137,17 +164,15 @@ func (s *Server) authorizePassthroughIdentity(
 	// the co-located host's GCP identity to agents.
 	if !isAdmin && s.isEmbeddedBroker(broker.ID) &&
 		IsUnscopedLocalPlatformAdmin(userIdent) &&
-		!s.testAdminPolicyRefuses(ctx, "passthrough_gate.go:authorizePassthroughIdentity") {
+		!s.testAdminPolicyRefuses(ctx, "passthrough_gate.go:evaluatePassthroughIdentity") {
 		isAdmin = true
 	}
 
 	if !isAdmin && broker.CreatedBy != userIdent.ID() {
 		logAuthzDenial(r, userIdent, brokerResource(broker), ActionDispatch,
 			"not broker owner or admin")
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"GCP identity passthrough requires broker ownership. "+
-				"Only the broker owner can expose the broker's GCP identity to agents.", nil)
-		return false
+		return &passthroughDenial{msg: "GCP identity passthrough requires broker ownership. " +
+			"Only the broker owner can expose the broker's GCP identity to agents."}
 	}
 
 	// -------------------------------------------------------------------
@@ -156,10 +181,8 @@ func (s *Server) authorizePassthroughIdentity(
 	if broker.GCPHostServiceAccountEmail == "" {
 		slog.Warn("passthrough denied: broker has no host service account registered",
 			"surface", surface, "broker", broker.ID)
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"GCP identity passthrough requires the broker's host service account to be "+
-				"registered. Set gcpHostServiceAccountEmail on the broker before using passthrough.", nil)
-		return false
+		return &passthroughDenial{msg: "GCP identity passthrough requires the broker's host service account to be " +
+			"registered. Set gcpHostServiceAccountEmail on the broker before using passthrough."}
 	}
 
 	// -------------------------------------------------------------------
@@ -179,8 +202,7 @@ func (s *Server) authorizePassthroughIdentity(
 		logAuthzDenial(r, GetIdentityFromContext(ctx),
 			Resource{Type: "broker", ID: broker.ID}, ActionDispatch,
 			"caller principal: "+err.Error())
-		writeForbidden(w, "You don't have permission to use passthrough on this broker")
-		return false
+		return &passthroughDenial{msg: "You don't have permission to use passthrough on this broker"}
 	}
 
 	result, err := store.EvaluateActAs(ctx, store.ActAsGate{
@@ -208,23 +230,22 @@ func (s *Server) authorizePassthroughIdentity(
 		// Mirror the mechanism-specific messaging from authorizeSAAssignment.
 		switch result.Mechanism {
 		case store.MechanismNoCallerIdentity:
-			writeForbidden(w, "Your identity cannot be granted permission to use passthrough on this broker")
+			return &passthroughDenial{msg: "Your identity cannot be granted permission to use passthrough on this broker"}
 		case store.MechanismCheckUnwired, store.MechanismCheckUnavailable:
-			writeForbidden(w, "GCP permission checking is not available on this Hub; "+
-				"passthrough is refused until it is configured")
+			return &passthroughDenial{msg: "GCP permission checking is not available on this Hub; " +
+				"passthrough is refused until it is configured"}
 		case store.MechanismCheckFailed:
-			writeForbidden(w, "Could not verify your permission to use passthrough "+
-				"because the check did not complete; try again")
+			return &passthroughDenial{msg: "Could not verify your permission to use passthrough " +
+				"because the check did not complete; try again"}
 		default:
-			writeForbidden(w, "You don't have permission to use passthrough on this broker ("+
-				store.PermissionActAs+" is required on "+target.Email+")")
+			return &passthroughDenial{msg: "You don't have permission to use passthrough on this broker (" +
+				store.PermissionActAs + " is required on " + target.Email + ")"}
 		}
-		return false
 	}
 
 	slog.Info("passthrough allowed",
 		"surface", surface, "callerKind", principal.Kind.String(),
 		"caller", principal.ID, "targetSA", target.Email,
 		"mechanism", result.Mechanism)
-	return true
+	return nil
 }
