@@ -49,7 +49,7 @@ This applies to `SCION_SERVER_*` too. On a Layer-1 key it is only the top of the
 
 `server.hub.public_url` is the one Layer-1 key where an operator setting on the node ranks above the database. The Hub resolves it once at startup, in this order:
 
-1. **Operator pin.** If `SCION_SERVER_HUB_ENDPOINT`, `SCION_SERVER_BASE_URL` or the `--base-url` flag is set, the Hub uses its operator-configured endpoint, resolved as described in [Hub Endpoint Resolution](/scion/reference/server-config/#hub-endpoint-resolution). A value saved in the database is not used.
+1. **Operator pin.** If the `--base-url` flag, `SCION_SERVER_HUB_ENDPOINT` or `SCION_SERVER_BASE_URL` is set, the Hub uses its operator-configured endpoint: the first of them that is set, in that order, as described in [Hub Endpoint Resolution](/scion/reference/server-config/#hub-endpoint-resolution). A value saved in the database is not used.
 2. **Database.** Otherwise a value an admin saved through the admin API or UI is used, even when `settings.yaml` also sets one. A stale bootstrap file therefore does not override a value managed in the UI. Rows the Hub seeds from bootstrap material at startup do not count as saved values, and a save that leaves the Public URL unchanged (or sends back the value shown) does not store it. A public URL stored by a save in an earlier release stays in effect until an admin clears it.
 3. **File.** Otherwise the `settings.yaml` value applies, then the existing fallbacks.
 

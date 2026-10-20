@@ -77,6 +77,16 @@ func brokerIncarnationCounters(t *testing.T, s *Server) func(name, brokerID, pat
 	}
 }
 
+// waitBrokerSessionRegistered waits, at most 10s, until the fixture's relay
+// has registered the session sessionID.
+func waitBrokerSessionRegistered(t *testing.T, f *brokerConduitFixture, sessionID string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, _, ok := f.srv.conduit.Load().relay.Local(ctx, sessionID)
+	require.True(t, ok, "the broker session %s registers on the relay", sessionID)
+}
+
 // TestConduitBroker_NewIncarnationClosesOlderSessions: admitting a broker
 // session with a new incarnation closes the broker's older-incarnation
 // session on this node with 4409 superseded_incarnation, counted with the
@@ -87,10 +97,12 @@ func TestConduitBroker_NewIncarnationClosesOlderSessions(t *testing.T) {
 	f := newBrokerConduitFixture(t, nil, nil)
 	count := brokerIncarnationCounters(t, f.srv)
 
-	old, _, err := f.dial(t, "", "proc-1")
+	old, wOld, err := f.dial(t, "", "proc-1")
 	require.NoError(t, err)
-	cur, _, err := f.dial(t, "", "proc-2")
+	waitBrokerSessionRegistered(t, f, wOld.GetSessionId())
+	cur, wCur, err := f.dial(t, "", "proc-2")
 	require.NoError(t, err)
+	waitBrokerSessionRegistered(t, f, wCur.GetSessionId())
 	assert.Equal(t, relay.CloseSupersededIncarnation, waitSessionClosed(t, old), "%v", old.Err())
 	assertSessionOpen(t, cur)
 	// The relay reports the count before it closes the sessions.
@@ -120,8 +132,9 @@ func TestConduitBrokerRevoke_RecheckClosesOlderIncarnation(t *testing.T) {
 	v := f.srv.conduitBrokerRevoke.Load()
 	require.NotNil(t, v)
 
-	old, _, err := f.dial(t, "", "proc-1")
+	old, wOld, err := f.dial(t, "", "proc-1")
 	require.NoError(t, err)
+	waitBrokerSessionRegistered(t, f.brokerConduitFixture, wOld.GetSessionId())
 	v.authz.Recheck(ctx, conduitAuthzTriggerSweep, conduitBrokerMatch(f.brokerID))
 	assertSessionOpen(t, old)
 
@@ -140,8 +153,9 @@ func TestConduitBrokerRevoke_RecheckClosesOlderIncarnation(t *testing.T) {
 
 	// A session of the reference incarnation admitted here is newer than
 	// hub-b's: a re-check keeps it.
-	cur, _, err := f.dial(t, "", "proc-2")
+	cur, wCur, err := f.dial(t, "", "proc-2")
 	require.NoError(t, err)
+	waitBrokerSessionRegistered(t, f.brokerConduitFixture, wCur.GetSessionId())
 	v.authz.Recheck(ctx, conduitAuthzTriggerSweep, conduitBrokerMatch(f.brokerID))
 	assertSessionOpen(t, cur)
 	assert.Equal(t, int64(1), count(brokerSupersededMetric, f.brokerID, brokerSupersededAtRecheck), "nothing more closed")

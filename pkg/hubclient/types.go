@@ -221,6 +221,11 @@ type ProjectProvider struct {
 }
 
 // ProjectSettings represents project configuration settings.
+//
+// Bucket, Runtimes, Harnesses and Profiles are not stored at the project
+// layer: GET never returns them, and a PUT that sets any of them (to a
+// non-null value) is refused with 400. They are configured in server or
+// Runtime Broker settings.
 type ProjectSettings struct {
 	// ActiveProfile names the broker profile new agents in the project run
 	// under when the request names none. On PUT, an absent (null) field

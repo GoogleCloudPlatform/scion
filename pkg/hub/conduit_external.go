@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/router"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 )
 
@@ -71,6 +72,10 @@ type ConduitExternalOptions struct {
 	// replayStore replaces the shared relay-peer replay store (tests).
 	replayStore relayPeerReplayStore
 
+	// withoutStreamRenewer starts external relay mode without the renewal
+	// path of relay-held streams (tests of the startup check only).
+	withoutStreamRenewer bool
+
 	// Test seams. RegistryNow is the registry clock (nil = time.Now).
 	Registry    *registry.Registry
 	Store       registry.Store
@@ -113,6 +118,20 @@ func (s *Server) StartConduitExternal(ctx context.Context, opts ConduitExternalO
 	// without one the hub internal API would refuse every call.
 	if opts.replayStore == nil && !s.hasRelayPeerReplayStore() {
 		return errors.New("conduit external relay mode: no shared relay-peer replay store (no database client)")
+	}
+	// Relay-held streams renew only through the renewal re-check (design
+	// v2.21.40 §3.9, Startup). Under target_stream_deadlines enforce,
+	// targets end streams at their deadlines, so a relay mode without the
+	// renewal path would end every relay-held stream at its first one.
+	if !opts.withoutStreamRenewer {
+		s.setConduitStreamRenewer(s.renewConduitStream)
+	}
+	if s.streamRenewer() == nil {
+		if s.conduitTargetStreamDeadlines() == config.ConduitTargetStreamDeadlinesEnforce {
+			return errors.New("conduit external relay mode: server.hub.conduit.target_stream_deadlines is enforce, but relay-held streams have no renewal path")
+		}
+		slog.Warn("Conduit external relay mode: relay-held streams have no renewal path; their re-checks are unavailable",
+			"target_stream_deadlines", s.conduitTargetStreamDeadlines())
 	}
 	st := opts.Store
 	if st == nil {

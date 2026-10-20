@@ -192,8 +192,8 @@ func TestUpdateVersionedSetting_NoOpLeavesFileUntouched(t *testing.T) {
 	for _, kv := range [][2]string{
 		{"active_profile", "local"},
 		{"hub.brokerId", "old-id"},
-		{"image_registry", ""}, // deleting an absent key
-		{"hub.token", "ignored"},
+		{"image_registry", ""},                         // deleting an absent key
+		{"hub_connections.foo.endpoint", "left-as-is"}, // accepted and left unchanged
 	} {
 		require.NoError(t, UpdateVersionedSetting(dir, kv[0], kv[1]), kv[0])
 	}
@@ -390,7 +390,9 @@ func TestUpdateVersionedSetting_EdgeCases(t *testing.T) {
 
 // updateVersionedSettingKeys lists every key handled by the switch in
 // updateVersionedSettingStruct (the pre-ptone/scion#1800 behaviour), plus the project
-// ID aliases and the ignored keys.
+// ID aliases and hub_connections.*, which is accepted and left unchanged.
+// The keys ValidateSettingWrite rejects at every layer are covered by
+// TestUpdateVersionedSetting_RejectsNotStoredKeys instead.
 var updateVersionedSettingKeys = []string{
 	"active_profile", "default_template", "default_harness_config", "workspace_path",
 	"image_registry", "cli.autohelp", "hub.enabled", "hub.linked", "hub.endpoint",
@@ -398,8 +400,7 @@ var updateVersionedSettingKeys = []string{
 	"server.auth.display_name", "server.auth.email", "server.auth.username",
 	"use_host_credentials",
 	"project_id", "hub.project_id",
-	"hub.token", "hub.apiKey", "hub.lastSyncedAt",
-	"bucket.provider", "bucket.name", "bucket.prefix", "hub_connections.foo.endpoint",
+	"hub_connections.foo.endpoint",
 }
 
 func TestVersionedSettingKeys_MatchStructSwitch(t *testing.T) {

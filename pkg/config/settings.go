@@ -500,7 +500,19 @@ func MergeSettings(base *Settings, data []byte) error {
 // It reads from existing settings file (YAML or JSON) and writes to YAML format.
 // If the existing file is in v1 versioned format (has schema_version), it delegates
 // to UpdateVersionedSetting to preserve the format.
+//
+// A key that would be accepted and then never read at that layer (see
+// ValidateSettingWrite) is rejected with an error matching
+// ErrSettingNotWritable, and nothing is read or written.
 func UpdateSetting(projectPath string, key string, value string, global bool) error {
+	// Before any read, lock or migration, so a rejected key changes nothing.
+	// A project path that is the global directory itself (for example the
+	// CLI's root --global) writes the global settings file, so it counts as
+	// the global layer.
+	layerGlobal := global || (projectPath != "" && IsGlobalProjectDir(projectPath))
+	if err := ValidateSettingWrite(key, layerGlobal); err != nil {
+		return err
+	}
 	var dir string
 	if global {
 		globalDir, err := GetGlobalDir()
