@@ -25,7 +25,12 @@ package authzop
 // mints web-login codes for the admin-kind identities it issued (phase
 // X4b); list, delete and member issuance refuse it. The delegation
 // operations themselves (create, list, revoke) admit an interactive
-// session only.
+// session only. A member-scope delegation may also have been created
+// offline by the host command `scion server test-infra delegate` (phase
+// DL): it has no human grantor, holds only the member scope, and each
+// request through it passes a live gate (test infrastructure marker, hub id
+// binding, --test-mode member or above, not revoked) and writes a
+// test_identity_delegation_redeem_offline audit row.
 var testIdentityOperations = []OperationSpec{
 	{
 		ID:          "testidentity.create",
