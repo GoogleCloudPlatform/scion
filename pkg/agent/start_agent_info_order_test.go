@@ -114,3 +114,76 @@ func TestStart_ListOK_NoAgentInfoWriteWhileContainerRuns(t *testing.T) {
 		})
 	}
 }
+
+// copiedHomeRuntime is a MockRuntime that declares the
+// runtime.CopiedAgentHomeRuntime capability, as the Kubernetes runtime does.
+type copiedHomeRuntime struct {
+	*runtime.MockRuntime
+}
+
+func (copiedHomeRuntime) CopiesAgentHome() bool { return true }
+
+// On a runtime whose agent home is a one-way copy made during Run
+// (runtime.CopiesAgentHome), Start records "starting" before Run and
+// "running" only once Run has returned, so no reader sees the agent running
+// while the runtime is still preparing it (ptone/scion#5368). The fake lists
+// the container with no phase, the shape of a Running Kubernetes pod whose
+// startup gate is still closed.
+func TestStart_CopiedHome_StartingBeforeRunRunningAfter(t *testing.T) {
+	projectScionDir, agentDir := startTZFixture(t, "", `""`)
+	writeRun1AgentInfo(t, projectScionDir, agentDir)
+	infoPath := filepath.Join(agentDir, "home", "agent-info.json")
+
+	started := false
+	var atRun api.AgentInfo
+	rt := copiedHomeRuntime{&runtime.MockRuntime{
+		NameFunc: func() string { return "fake" },
+		ListFunc: func(context.Context, map[string]string) ([]api.AgentInfo, error) {
+			if !started {
+				return nil, nil
+			}
+			return []api.AgentInfo{{
+				Name: "tz-agent", ContainerID: "cid-run-2", RunID: "run-2",
+				Labels: map[string]string{"scion.name": "tz-agent", api.LabelRunID: "run-2"},
+			}}, nil
+		},
+		RunFunc: func(context.Context, runtime.RunConfig) (string, error) {
+			data, err := os.ReadFile(infoPath)
+			if err != nil {
+				t.Fatalf("agent-info.json missing when the container starts: %v", err)
+			}
+			if err := json.Unmarshal(data, &atRun); err != nil {
+				t.Fatalf("agent-info.json at container start: %v", err)
+			}
+			started = true
+			return "cid-run-2", nil
+		},
+	}}
+	got, err := NewManager(rt).Start(context.Background(), api.StartOptions{
+		Name: "tz-agent", ProjectPath: projectScionDir, BrokerMode: true, NoAuth: true, RunID: "run-2",
+		Template: "default",
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if !started {
+		t.Fatal("Start never started the container")
+	}
+	if atRun.Phase != "starting" || atRun.Runtime != "fake" {
+		t.Errorf("agent-info.json when Run was entered: phase %q runtime %q, want starting/fake", atRun.Phase, atRun.Runtime)
+	}
+	data, err := os.ReadFile(infoPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var after api.AgentInfo
+	if err := json.Unmarshal(data, &after); err != nil {
+		t.Fatal(err)
+	}
+	if after.Phase != "running" {
+		t.Errorf("agent-info.json after Start: phase %q, want running", after.Phase)
+	}
+	if got.Phase != "running" {
+		t.Errorf("Start returned phase %q, want running", got.Phase)
+	}
+}

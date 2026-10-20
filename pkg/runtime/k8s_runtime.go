@@ -172,6 +172,14 @@ func (r *KubernetesRuntime) Name() string {
 	return "kubernetes"
 }
 
+// CopiesAgentHome implements CopiedAgentHomeRuntime. The pod never mounts the
+// host's agent home: Run fills the pod home (local or on the NFS export) by
+// exec-based sync from RunConfig.HomeDir, and the harness starts only after
+// the startup-gate touch, the last step of Run.
+func (r *KubernetesRuntime) CopiesAgentHome() bool {
+	return true
+}
+
 func (r *KubernetesRuntime) ExecUser() string {
 	return "scion"
 }

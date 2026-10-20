@@ -2620,25 +2620,41 @@ authDone:
 	}
 	slog.Info("agent start: pre-runtime provisioning complete", "agent", opts.Name,
 		"elapsed_ms", time.Since(startEntry).Milliseconds())
-	// Record the running phase, runtime and profile before the container
-	// starts rather than after it: some runtimes do not let the host write
-	// files in the container (ptone/scion#4766). Once up, the container
-	// reports its own phase (sciontool init writes "running"). A failed
-	// launch is recorded in the host-owned host state file
-	// (ptone/scion#4815, see setStartFailedRunID); the record is cleared
-	// here, before Run, and set below when Run fails. (The run ID record
-	// after the create, when the pre-start List failed, goes to the same
-	// file, ptone/scion#4771.)
+	// Record the phase, runtime and profile before the container starts
+	// rather than after it: some runtimes do not let the host write files in
+	// the container (ptone/scion#4766). Once up, the container reports its
+	// own phase (sciontool init writes "running"). A failed launch is
+	// recorded in the host-owned host state file (ptone/scion#4815, see
+	// setStartFailedRunID); the record is cleared here, before Run, and set
+	// below when Run fails. (The run ID record after the create, when the
+	// pre-start List failed, goes to the same file, ptone/scion#4771.)
 	//
-	// Phase is always "running" here, for both a fresh start and a resume:
-	// state.Phase has no "resumed" value, and a non-standard phase string
-	// confuses readers that only understand the canonical lifecycle phases
-	// (e.g. the hub's post-wake readiness wait). Resume-specific display
-	// text is derived independently at the CLI layer (see displayStatus in
-	// cmd/common.go), so it does not need to be encoded in Phase.
-	status := string(state.PhaseRunning)
-	if updateErr := UpdateAgentConfig(opts.Name, opts.ProjectPath, status, m.Runtime.Name(), profileName); updateErr != nil {
-		util.Debugf("Start: failed to update local agent status to %q: %v", status, updateErr)
+	// The phase written here is "running" for both a fresh start and a
+	// resume: state.Phase has no "resumed" value, and a non-standard phase
+	// string confuses readers that only understand the canonical lifecycle
+	// phases (e.g. the hub's post-wake readiness wait). Resume-specific
+	// display text is derived independently at the CLI layer (see
+	// displayStatus in cmd/common.go), so it does not need to be encoded in
+	// Phase.
+	//
+	// A runtime whose agent home is a one-way copy made during Run, and
+	// whose harness cannot start before Run returns
+	// (runtime.CopiesAgentHome, e.g. Kubernetes), gets "starting" here
+	// instead, and "running" once Run has returned successfully: Run can
+	// take minutes (scheduling, home and workspace sync), and the list and
+	// the broker heartbeat must not report the agent running before the
+	// harness can start (ptone/scion#5368). The host may write
+	// agent-info.json after Run only on such a runtime, because there the
+	// file is not shared with the container.
+	successPhase := string(state.PhaseRunning)
+	preRunPhase := successPhase
+	copiedHome := runtime.CopiesAgentHome(m.Runtime)
+	if copiedHome {
+		preRunPhase = string(state.PhaseStarting)
+	}
+	if updateErr := UpdateAgentConfig(opts.Name, opts.ProjectPath, preRunPhase, m.Runtime.Name(), profileName); updateErr != nil {
+		slog.Warn("Start: failed to record the agent phase before the runtime launch; list may show a stale phase",
+			"agent", opts.Name, "phase", preRunPhase, "error", updateErr)
 	}
 	if err := setStartFailedRunID(RunOwnerTargetFor(opts), ""); err != nil {
 		slog.Warn("Start: failed to clear the failed-start record in the host state file; list may show this agent as errored",
@@ -2656,8 +2672,8 @@ authDone:
 	}
 	id, err := m.Runtime.Run(ctx, runCfg)
 	if err != nil {
-		// agent-info.json was set to "running" above, before the runtime
-		// launch. If the launch itself fails, keep the provisioned
+		// agent-info.json was set to the pre-run phase above, before the
+		// runtime launch. If the launch itself fails, keep the provisioned
 		// workspace but record the error so list/status do not report a
 		// phantom agent forever. Some runtimes do not let the host write
 		// files in the container, so the failed start is also recorded in
@@ -2676,6 +2692,14 @@ authDone:
 	}
 	slog.Info("agent start: runtime.Run complete", "agent", opts.Name,
 		"total_elapsed_ms", time.Since(startEntry).Milliseconds())
+	if copiedHome {
+		// Run has returned, so the harness may now start. On this runtime
+		// the host's agent-info.json is a host-only copy, not shared with
+		// the container (runtime.CopiesAgentHome), so writing it now keeps
+		// ptone/scion#4766. Compare-and-set: a stop or delete mark written
+		// while Run was in progress wins.
+		advanceAgentPhase(opts.Name, opts.ProjectPath, preRunPhase, successPhase)
+	}
 	// The run is recorded after the create when the pre-start List failed
 	// (see recordAfterCreate). It goes to the host-owned HostStateFile, so
 	// it does not matter that the container may be up; a failure is logged
@@ -2703,13 +2727,24 @@ authDone:
 					// Try to get logs for diagnosis
 					logs, _ := m.Runtime.GetLogs(ctx, id)
 					_ = m.Runtime.Delete(ctx, runtime.RunRef{ID: id, RunID: runID})
+					// Record the failed start as the Run error path does, so
+					// list shows error rather than the pre-run phase. The
+					// container is gone, so the host write keeps
+					// ptone/scion#4766.
+					if recErr := setStartFailedRunID(RunOwnerTargetFor(opts), runID); recErr != nil {
+						slog.Warn("Start: failed to record the failed start in the host state file",
+							"agent", opts.Name, "run_id", runID, "error", recErr)
+					}
+					if updateErr := UpdateAgentConfig(opts.Name, opts.ProjectPath, string(state.PhaseError), m.Runtime.Name(), profileName); updateErr != nil {
+						util.Debugf("Start: failed to mark agent error in local config: %v", updateErr)
+					}
 					return nil, fmt.Errorf("container started but exited immediately (status: %s). Container logs:\n%s", a.ContainerStatus, logs)
 				}
 				a.Detached = detached
 				a.Warnings = warnings
 				a.HubOnlyEnvWarnings = hubOnlyEnvWarnings
 				a.RelayedWarnings = relayedWarnings
-				a.Phase = status
+				a.Phase = successPhase
 				a.HarnessConfig = harnessConfigName
 				a.HarnessConfigRevision = harnessConfigRevision
 				a.HarnessConfigSource = harnessConfigSource
@@ -2727,7 +2762,7 @@ authDone:
 		ID:                    id,
 		RunID:                 runID,
 		Name:                  opts.Name,
-		Phase:                 status,
+		Phase:                 successPhase,
 		Detached:              detached,
 		Warnings:              warnings,
 		HubOnlyEnvWarnings:    hubOnlyEnvWarnings,
