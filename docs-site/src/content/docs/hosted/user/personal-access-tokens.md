@@ -110,6 +110,24 @@ project is a hub-level resource; a project's own groups belong to that project.
   member of the group, adds members, even when you are a super-admin.
 - The members of a project's agents group are the project's agents; no one adds members to it.
 
+### Hub-boundary tokens for user administration
+
+A hub token can change another user's account through `PATCH /api/v1/users/{id}`. Each
+field is checked on the hub-level user record, and your user must also hold the matching
+permission:
+
+| Scope | Boundary | Grants |
+|-------|----------|--------|
+| `user:update` | Hub only | Change another user's display name and preferences. A token PATCH of another user that names no `status` field is checked as a profile update, so it needs this scope. |
+| `user:suspend` | Hub only | Suspend or reactivate another user (the `status` field). |
+
+- A request that names several fields is written only if every field passes its check;
+  otherwise nothing is written.
+- A token that cannot use either scope on that user gets the same `403` for every user ID,
+  including one that does not exist.
+- Changing a user's role, and changing your own profile, still need a sign-in. No credential can
+  change your own status or activate an invited user.
+
 ### Scopes are restrictions, not grants
 
 Selecting a scope only **limits** what a token may ever be used for — it never by itself grants
