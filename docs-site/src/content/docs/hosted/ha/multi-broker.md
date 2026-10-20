@@ -72,6 +72,8 @@ When an agent runs `scion start` or `scion create` inside its container, the CLI
 
 With the `hub.flat_runtime_brokers` [experiment](/scion/reference/experiments/) on (default off), the Hub accepts Runtime Brokers that each serve exactly one runtime target with a stable identity. A new agent placed on such a Runtime Broker is pinned to its runtime target and stays on it across restarts, and the Hub refuses a dispatch for a different target. The agent's record shows the pin as a read-only `pinnedRuntimeTarget`, and the Runtime Broker's record shows its `runtimeTarget` (see the [Agents API](/scion/reference/api/#agents-apiv1agents)). A pinned agent cannot be [moved to another Runtime Broker](#moving-an-agent-to-another-runtime-broker), and an agent cannot be moved onto a flat Runtime Broker (`409 runtime_target_move_unsupported`). Existing profile-based Runtime Brokers are unchanged.
 
+The experiment also switches the web UI's **Brokers** pages to the Brokers area. The list shows each Runtime Broker's kind (flat or legacy) and runtime target, and marks the Runtime Brokers that run in this server's own process. Each Runtime Broker's page has Overview, Agents & projects, Health and Configure tabs. Health is shown only to users who can read the Hub health summary. Configure is shown only to users who can update or unregister the Runtime Broker. With the experiment off, the Brokers pages are unchanged.
+
 To run flat Runtime Brokers, add one entry per instance under `server.broker.instances` in the global `settings.yaml`. Each entry has an immutable local `key`, a `name` that it registers under, and exactly one `runtime_target`: the local Docker daemon, or a Kubernetes cluster and namespace.
 
 ```yaml

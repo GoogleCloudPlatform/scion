@@ -22,6 +22,7 @@
     "./terminal-pane/*.ts",
     "./terminal-workspace/*.ts",
     "./test-hub-banner/*.ts",
+    "./broker-area/*.ts",
     "./test-identity-session/*.ts",
     "./iap-driver/*.ts",
     "./iap-journey/*.ts",
