@@ -1507,12 +1507,12 @@ harness_configs:
 }
 
 func TestLoadSettingsFromDir_V1OnlyKeyInLegacyFile_StillWarns(t *testing.T) {
-	// A legacy-format file ("harnesses" key present, no schema_version) that
-	// also has a v1-only top-level key (image_registry) must still warn about
-	// it: that key is genuinely unused by every loader that will ever read
-	// this file, since LoadEffectiveSettings sends a legacy-format hierarchy
-	// through LoadSettings + AdaptLegacySettings, never
-	// LoadVersionedSettings. Regression test for round-1 review finding 2.
+	// LoadSettingsFromDir decodes a single file into the legacy Settings
+	// shape. A legacy-format file ("harnesses" key present, no
+	// schema_version) that also has a v1-only top-level key
+	// (image_registry) must still warn about it there: the legacy shape has
+	// no such field. (The settings loaders convert such a file and do read
+	// the key.) Regression test for round-1 review finding 2.
 	resetWarnedUnusedKeysCache()
 	var buf bytes.Buffer
 	oldLogger := slog.Default()

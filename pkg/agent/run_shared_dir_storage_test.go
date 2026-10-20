@@ -765,13 +765,13 @@ func TestStartSharedDirStorage_MalformedGlobalSettings_NoKey_SucceedsAsMain(t *t
 	assertLegacyLocalSharedDirBehavior(t, capturedConfig, envMap, f.projectScionDir)
 }
 
-// TestStartSharedDirStorage_LegacyGlobalSettings_MentionsKey_FailsClosed is
+// TestStartSharedDirStorage_LegacyGlobalSettings_MentionsKey_LoadedAndEnforced is
 // round 4 review finding S-L1: a global settings.yaml with no
 // A global settings file without `schema_version: "1"` is converted at its
 // own layer, which keeps its server block (ptone/scion#3919): the operator's
 // shared_dir_storage=nfs config is loaded, not silently dropped, so Start
 // enforces it (here: the export is not mounted) and Run is never called.
-func TestStartSharedDirStorage_LegacyGlobalSettings_MentionsKey_FailsClosed(t *testing.T) {
+func TestStartSharedDirStorage_LegacyGlobalSettings_MentionsKey_LoadedAndEnforced(t *testing.T) {
 	f := newSharedDirStorageRunFixture(t)
 	// Well-formed YAML, but no schema_version/harnesses/v1-runtime
 	// indicators: a legacy-format file.
@@ -812,10 +812,10 @@ server:
 	assert.Equal(t, 0, ranCount, "Run must never be called: the legacy global file's shared_dir_storage is loaded and enforced")
 }
 
-// TestStartSharedDirStorage_LegacyGlobalSettings_V1ProjectConfigsOverlay_StillFailsClosed
+// TestStartSharedDirStorage_LegacyGlobalSettings_V1ProjectConfigsOverlay_GlobalOnlyEnforced
 // is round 6 disposition item 1 (rev L1 = tst L2)'s Start-level half: the
 // same legacy-global-with-block scenario as
-// ..._LegacyGlobalSettings_MentionsKey_FailsClosed above, but with
+// ..._LegacyGlobalSettings_MentionsKey_LoadedAndEnforced above, but with
 // ~/.scion ALSO carrying a project-id file plus a v1-format
 // project-configs settings.yaml — the exact combination that made the
 // pre-fix detectHierarchyFormat-based gate see the global directory as
@@ -823,7 +823,7 @@ server:
 // entirely, silently dropping the operator's nfs config. The global file
 // alone is read (now with its server block, see above), so the nfs config
 // is enforced and Run is still never called.
-func TestStartSharedDirStorage_LegacyGlobalSettings_V1ProjectConfigsOverlay_StillFailsClosed(t *testing.T) {
+func TestStartSharedDirStorage_LegacyGlobalSettings_V1ProjectConfigsOverlay_GlobalOnlyEnforced(t *testing.T) {
 	f := newSharedDirStorageRunFixture(t)
 	require.NoError(t, os.WriteFile(filepath.Join(f.globalScionDir, "settings.yaml"), []byte(`active_profile: local
 server:

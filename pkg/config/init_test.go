@@ -86,8 +86,8 @@ server:
 		t.Fatalf("failed to write minimal settings: %v", err)
 	}
 
-	// LoadSettings merges embedded defaults (now cloudrun-sandbox
-	// template via GetDefaultSettingsData) with the minimal file.
+	// LoadSettings merges the embedded defaults (the cloudrun-sandbox
+	// template, via GetDefaultSettingsDataYAML) with the minimal file.
 	settings, err := LoadSettings(globalScionDir)
 	if err != nil {
 		t.Fatalf("LoadSettings failed: %v", err)

@@ -166,9 +166,10 @@ func TestProjectIDEnvPrecedence(t *testing.T) {
 }
 
 // TestProjectIDEnvPrecedence_LegacyCamelHubProjectID: a camelCase
-// hub.projectId is a legacy key. A versioned file's copy is not read (it is
-// reported as an unrecognized key, not as an overridden project ID source),
-// and GetHubProjectID returns the env value.
+// hub.projectId is a legacy key. A versioned file that also has
+// hub.project_id uses that, and the camel key is reported as an
+// unrecognized key, not as an overridden project ID source; GetHubProjectID
+// returns the env value.
 func TestProjectIDEnvPrecedence_LegacyCamelHubProjectID(t *testing.T) {
 	const camelID = "camel-hub-project-id"
 	projectDir, logs := setupProjectIDEnvTest(t, envIDTestSettings, "")
@@ -189,6 +190,28 @@ func TestProjectIDEnvPrecedence_LegacyCamelHubProjectID(t *testing.T) {
 	assert.Contains(t, logs.String(), projectkeys.ConfigHubProjectIDJSON, "the unread key is reported as unrecognized")
 	assert.NotContains(t, logs.String(), camelID, "the warnings name sources and keys, never project ID values")
 	assertNoProjectIDValues(t, logs)
+}
+
+// TestProjectIDEnvPrecedence_V1CamelOnlyFallback: a versioned file whose
+// only hub project ID is under the legacy camelCase key keeps it (a
+// read-only fallback, warned once): GetHubProjectID returns it, and it is
+// the hub project ID only, as in a legacy file.
+func TestProjectIDEnvPrecedence_V1CamelOnlyFallback(t *testing.T) {
+	const camelID = "camel-only-hub-id"
+	projectDir, logs := setupProjectIDEnvTest(t, "", envIDTestFile)
+	settings := filepath.Join(projectDir, "settings.yaml")
+	data, err := os.ReadFile(settings)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(settings, append(data, []byte("  projectId: \""+camelID+"\"\n")...), 0o644))
+
+	for i := 0; i < 3; i++ {
+		s, err := LoadSettings(projectDir)
+		require.NoError(t, err)
+		assert.Equal(t, camelID, s.GetHubProjectID())
+		assert.Equal(t, envIDTestFile, s.ProjectID, "the project-id file is the project's own ID")
+	}
+	assert.Equal(t, 1, strings.Count(logs.String(), "uses the legacy key hub.projectId"), logs.String())
+	assert.NotContains(t, logs.String(), "unrecognized keys", "the fallback key is read, not unrecognized")
 }
 
 // TestProjectIDEnvPrecedence_PlainVarUnchanged: SCION_PROJECT_ID keeps its

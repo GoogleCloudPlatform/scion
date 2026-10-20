@@ -139,7 +139,7 @@ func TestStartHomeStorage_NFSHome(t *testing.T) {
 // incomplete without allow_incomplete_phases, and a start with shared dirs
 // (which takes the shared-dir settings snapshot) fails instead of recording
 // a local home.
-func TestStartHomeStorage_LegacySettingsWithSharedDirsFailClosed(t *testing.T) {
+func TestStartHomeStorage_LegacySettingsWithSharedDirsEnforced(t *testing.T) {
 	f := newSharedDirStorageRunFixture(t)
 	f.writeRawGlobalSettings(t, `active_profile: local
 server:

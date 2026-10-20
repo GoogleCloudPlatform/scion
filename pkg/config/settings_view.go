@@ -17,6 +17,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 
@@ -97,10 +98,6 @@ func settingsViewOf(vs *VersionedSettings, res *versionedLoadResult, ignoreEnvPr
 
 	s.ProjectID = vs.ProjectID
 	switch {
-	case res == nil:
-		if vs.Hub != nil && vs.Hub.ProjectID != "" {
-			s.ProjectID = vs.Hub.ProjectID
-		}
 	case res.hubEnvProjectID != "":
 		s.ProjectID = res.hubEnvProjectID
 	case res.idFileProjectID != "":
@@ -118,7 +115,7 @@ func settingsViewOf(vs *VersionedSettings, res *versionedLoadResult, ignoreEnvPr
 
 	if s.Hub != nil {
 		s.Hub.ProjectID = ""
-		if res != nil && res.fileHubProjectID != "" {
+		if res.fileHubProjectID != "" {
 			s.Hub.ProjectID = res.fileHubProjectID
 			if hubEnv := envHubProjectID(); hubEnv != "" && !ignoreEnvProjectID {
 				s.Hub.ProjectID = hubEnv
@@ -187,7 +184,19 @@ func loadLegacySettingsLayer(k *koanf.Koanf, path string, parser koanf.Parser, s
 	// hub.projectId key (see legacyLayerState.hubIDFromCamel).
 	camelOnly := !fk.Exists(projectkeys.ConfigHubProjectIDKey) && fk.String(projectkeys.ConfigHubProjectIDJSON) != ""
 	if version, _ := DetectSettingsFormat(data); version != "" {
-		if fk.Exists(projectkeys.ConfigHubProjectIDKey) {
+		if camelOnly {
+			// Read-only fallback: a versioned file whose hub project ID
+			// is under the legacy camelCase key (a hand edit, or an older
+			// writer) keeps it, as the legacy loader read it. It is the
+			// hub project ID only, like a legacy file's.
+			warnUnparseableSettingOnce(projectkeys.ConfigHubProjectIDJSON+"@"+path,
+				"settings: "+path+" uses the legacy key hub.projectId; reading it as hub.project_id (rename the key)")
+			_ = fk.Load(confmap.Provider(map[string]interface{}{
+				projectkeys.ConfigHubProjectIDKey: fk.String(projectkeys.ConfigHubProjectIDJSON),
+			}, "."), nil)
+			fk.Delete(projectkeys.ConfigHubProjectIDJSON)
+			st.hubIDFromCamel = true
+		} else if fk.Exists(projectkeys.ConfigHubProjectIDKey) {
 			st.hubIDFromCamel = false
 		}
 		return k.Merge(fk)
@@ -238,6 +247,7 @@ func convertLegacySettingsLayer(fk *koanf.Koanf) (converted map[string]interface
 		return nil, nil, fmt.Errorf("converting legacy settings: %w", err)
 	}
 	delete(adapted, "schema_version")
+	adapted = keepLegacySourcedLeaves(adapted, fk)
 
 	raw := fk.Raw()
 	delete(raw, "harnesses")
@@ -268,6 +278,59 @@ func convertLegacySettingsLayer(fk *koanf.Koanf) (converted map[string]interface
 	}
 	maps.Merge(adapted, raw)
 	return raw, warnings, nil
+}
+
+// keepLegacySourcedLeaves returns the converted settings with only the
+// leaves whose legacy source key is present in the file (fk): a converted
+// entry the file only partly set must not blank, or replace, what a lower
+// layer sets for its other keys. For example a legacy profile without
+// runtime converts to profiles.NAME.runtime: "" (the field is not
+// omitempty), and every converted runtime entry gets type: NAME; neither
+// was set by the file, so both are dropped here.
+func keepLegacySourcedLeaves(adapted map[string]interface{}, fk *koanf.Koanf) map[string]interface{} {
+	ak := koanf.New(".")
+	if err := ak.Load(confmap.Provider(adapted, ""), nil); err != nil {
+		return adapted
+	}
+	for _, key := range ak.Keys() {
+		if src := legacySourceKey(key); src == "" || !fk.Exists(src) {
+			ak.Delete(key)
+		}
+	}
+	return ak.Raw()
+}
+
+// legacySourceKey returns the key of a legacy-format file that
+// AdaptLegacySettings converts to the v1 key, or "" when no file key is the
+// source (a runtime's type, which the conversion derives from the entry's
+// name). Keys the conversion does not rename are their own source.
+func legacySourceKey(key string) string {
+	parts := strings.Split(key, ".")
+	switch {
+	case key == projectkeys.ConfigHubProjectIDKey:
+		return projectkeys.ConfigHubProjectIDJSON
+	case key == "server.broker.broker_id":
+		return "hub.brokerId"
+	case key == "server.broker.broker_token":
+		return "hub.brokerToken"
+	case key == "server.broker.broker_nickname":
+		return "hub.brokerNickname"
+	case len(parts) == 3 && parts[0] == "runtimes" && parts[2] == "type":
+		return ""
+	case len(parts) >= 3 && parts[0] == "harness_configs":
+		// harness is the entry's name; the other fields keep their names,
+		// except auth_selected_type.
+		if len(parts) == 3 && parts[2] == "harness" {
+			return "harnesses." + parts[1]
+		}
+		if len(parts) == 3 && parts[2] == "auth_selected_type" {
+			return "harnesses." + parts[1] + ".auth_selectedType"
+		}
+		return "harnesses." + strings.Join(parts[1:], ".")
+	case len(parts) == 5 && parts[0] == "profiles" && parts[2] == "harness_overrides" && parts[4] == "auth_selected_type":
+		return strings.Join(parts[:4], ".") + ".auth_selectedType"
+	}
+	return key
 }
 
 // versionedLoadOptions selects the layers loadVersionedLayers merges.

@@ -365,3 +365,85 @@ func TestLoadSettings_LegacyFileWrongTypeFails(t *testing.T) {
 	_, _, err = LoadGlobalSettings()
 	require.Error(t, err)
 }
+
+// A legacy-format file that only partly sets a profile or runtime entry
+// converts only the keys it sets: the lower layer's profile runtime and
+// runtime type survive (the conversion would otherwise emit runtime: "" and
+// type: NAME for the entry).
+func TestLoadSettings_PartialLegacyEntryKeepsLowerLayer(t *testing.T) {
+	partialProject := `profiles:
+  dev:
+    volumes:
+      - source: /src
+        target: /dst
+    harness_overrides:
+      claude:
+        image: example.com/claude:2
+runtimes:
+  gke:
+    namespace: proj-ns
+`
+	for _, tc := range []struct {
+		name, global string
+	}{
+		{name: "v1 global", global: "schema_version: \"1\"\nprofiles:\n  dev:\n    runtime: gke\nruntimes:\n  gke:\n    type: kubernetes\n    namespace: base-ns\n"},
+		{name: "legacy global", global: "harnesses: {}\nprofiles:\n  dev:\n    runtime: gke\nruntimes:\n  gke:\n    namespace: base-ns\n    context: base-ctx\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			projectDir := setupSettingsViewTest(t, tc.global, partialProject)
+
+			vs, _, err := LoadEffectiveSettings(projectDir)
+			require.NoError(t, err)
+			require.Contains(t, vs.Profiles, "dev")
+			assert.Equal(t, "gke", vs.Profiles["dev"].Runtime, "the global profile runtime survives")
+			assert.Len(t, vs.Profiles["dev"].Volumes, 1, "the project's own profile key applies")
+			assert.Equal(t, "example.com/claude:2", vs.Profiles["dev"].HarnessOverrides["claude"].Image)
+			require.Contains(t, vs.Runtimes, "gke")
+			assert.Equal(t, "proj-ns", vs.Runtimes["gke"].Namespace, "the project's own runtime key applies")
+			if tc.name == "v1 global" {
+				assert.Equal(t, "kubernetes", vs.Runtimes["gke"].Type, "the global runtime type survives")
+			} else {
+				assert.Equal(t, "base-ctx", vs.Runtimes["gke"].Context)
+				assert.Empty(t, vs.Runtimes["gke"].Type, "a legacy file sets no runtime type")
+			}
+
+			s, err := LoadSettings(projectDir)
+			require.NoError(t, err)
+			_, name, err := s.ResolveRuntime("dev")
+			require.NoError(t, err)
+			assert.Equal(t, "gke", name)
+		})
+	}
+}
+
+// The embedded defaults' runtime type survives a legacy file that sets
+// other keys of the same runtime.
+func TestLoadSettings_PartialLegacyRuntimeKeepsDefaultType(t *testing.T) {
+	projectDir := setupSettingsViewTest(t, "", "runtimes:\n  kubernetes:\n    namespace: proj-ns\n")
+	vs, _, err := LoadEffectiveSettings(projectDir)
+	require.NoError(t, err)
+	require.Contains(t, vs.Runtimes, "kubernetes")
+	assert.Equal(t, "kubernetes", vs.Runtimes["kubernetes"].Type)
+	assert.Equal(t, "proj-ns", vs.Runtimes["kubernetes"].Namespace)
+}
+
+// legacySourceKey maps each converted v1 key to the legacy file key it comes
+// from.
+func TestLegacySourceKey(t *testing.T) {
+	for key, want := range map[string]string{
+		"hub.project_id":                                      "hub.projectId",
+		"server.broker.broker_id":                             "hub.brokerId",
+		"server.broker.broker_token":                          "hub.brokerToken",
+		"server.broker.broker_nickname":                       "hub.brokerNickname",
+		"runtimes.gke.type":                                   "",
+		"runtimes.gke.namespace":                              "runtimes.gke.namespace",
+		"harness_configs.claude.harness":                      "harnesses.claude",
+		"harness_configs.claude.auth_selected_type":           "harnesses.claude.auth_selectedType",
+		"harness_configs.claude.env.FOO":                      "harnesses.claude.env.FOO",
+		"profiles.dev.harness_overrides.c.auth_selected_type": "profiles.dev.harness_overrides.c.auth_selectedType",
+		"profiles.dev.runtime":                                "profiles.dev.runtime",
+		"cli.mode":                                            "cli.mode",
+	} {
+		assert.Equal(t, want, legacySourceKey(key), key)
+	}
+}
