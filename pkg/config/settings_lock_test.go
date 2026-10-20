@@ -272,7 +272,7 @@ func TestSettingsLock_MultiProcessUpdatesNotLost(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := writeLockTestSettings(t, tc.content)
-			keys := []string{"default_template", "default_harness_config", "image_registry", "server.auth.display_name"}
+			keys := []string{"default_template", "default_harness_config", "image_registry", "hub.endpoint"}
 			const n = 25
 			cmds := make([]*exec.Cmd, len(keys))
 			outs := make([]*strings.Builder, len(keys))
