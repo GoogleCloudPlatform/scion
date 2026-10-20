@@ -627,32 +627,29 @@ type fillBeforeUpdateStore struct {
 	failUpdate bool
 }
 
-func (s *fillBeforeUpdateStore) SetRuntimeBrokerGCPHost(ctx context.Context, id, email, project string) (store.GCPHostSetting, error) {
+func (s *fillBeforeUpdateStore) SetRuntimeBrokerGCPHostIfPrior(ctx context.Context, id, priorEmail, priorProject, email, project string) (store.GCPHostSetting, bool, error) {
 	if !s.fault.Active() {
-		return s.Store.SetRuntimeBrokerGCPHost(ctx, id, email, project)
+		return s.Store.SetRuntimeBrokerGCPHostIfPrior(ctx, id, priorEmail, priorProject, email, project)
 	}
 	if s.failUpdate {
-		return store.GCPHostSetting{}, errors.New("injected GCP host write failure")
+		return store.GCPHostSetting{}, false, errors.New("injected GCP host write failure")
 	}
 	if _, err := s.SetRuntimeBrokerGCPHostIfUnset(ctx, id, ownedEmailA, ownedProjectA, store.GCPHostSourceRegistration); err != nil {
-		return store.GCPHostSetting{}, err
+		return store.GCPHostSetting{}, false, err
 	}
-	return s.Store.SetRuntimeBrokerGCPHost(ctx, id, email, project)
+	return s.Store.SetRuntimeBrokerGCPHostIfPrior(ctx, id, priorEmail, priorProject, email, project)
 }
 
 // TestBrokerUpdate_AuditRecordsReplacedValues: the update audit event's old
-// GCP host values are the ones the write replaced, also when a registration
-// filled them after the update request read the broker.
+// GCP host values are the ones the write replaced: the pair a registration
+// filled, with its source.
 func TestBrokerUpdate_AuditRecordsReplacedValues(t *testing.T) {
 	t.Parallel()
-	var fault *storeFaultSwitch
-	f := newOwnedBrokerFixtureWithStore(t, false, "update-audit-replaced", func(srv *Server) {
-		_, fault = installStoreFault(t, srv, func(inner store.Store, sw *storeFaultSwitch) *fillBeforeUpdateStore {
-			return &fillBeforeUpdateStore{Store: inner, fault: sw}
-		})
-	})
+	f := newOwnedBrokerFixture(t, false, "update-audit-replaced")
+	applied, err := f.s.SetRuntimeBrokerGCPHostIfUnset(context.Background(), f.id, ownedEmailA, ownedProjectA, store.GCPHostSourceRegistration)
+	require.NoError(t, err)
+	require.True(t, applied)
 	audit := installBrokerAuditCapture(f.srv)
-	fault.Arm()
 
 	f.update(t, gcpHostBody(ownedEmailB, ownedProjectB))
 
@@ -664,6 +661,31 @@ func TestBrokerUpdate_AuditRecordsReplacedValues(t *testing.T) {
 	assert.Equal(t, ownedProjectA, d["gcp_host_project_id.old"])
 	assert.Equal(t, store.GCPHostSourceRegistration, d["gcp_host_source.old"])
 	assert.Equal(t, ownedEmailB, d["gcp_host_service_account_email.new"])
+	assert.Equal(t, ownedProjectB, d["gcp_host_project_id.new"])
+	assert.Equal(t, store.GCPHostSourceAdmin, d["gcp_host_source.new"])
+}
+
+// TestBrokerUpdate_StoredPairChangedAfterDecision_Conflict: when a
+// registration fills the GCP host pair after the update's actAs decision and
+// before its write, the update writes nothing and returns 409. The pair is
+// written only over the stored value the decision was made against.
+func TestBrokerUpdate_StoredPairChangedAfterDecision_Conflict(t *testing.T) {
+	t.Parallel()
+	var fault *storeFaultSwitch
+	f := newOwnedBrokerFixtureWithStore(t, false, "update-stale-prior", func(srv *Server) {
+		_, fault = installStoreFault(t, srv, func(inner store.Store, sw *storeFaultSwitch) *fillBeforeUpdateStore {
+			return &fillBeforeUpdateStore{Store: inner, fault: sw}
+		})
+	})
+	audit := installBrokerAuditCapture(f.srv)
+	fault.Arm()
+
+	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPatch, "/api/v1/runtime-brokers/"+f.id, gcpHostBody(ownedEmailB, ownedProjectB))
+
+	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	f.requireGCPHost(t, ownedEmailA, ownedProjectA)
+	assert.Empty(t, brokerAuditEventsOfType(audit, BrokerAuthEventUpdateSettings),
+		"no update event: the update applied nothing")
 }
 
 // TestBrokerUpdate_AuditCoversAppliedPartOfFailedUpdate: when a later write
@@ -722,6 +744,11 @@ func (s *gcpHostWriteSpyStore) SetRuntimeBrokerGCPHostDetected(ctx context.Conte
 func (s *gcpHostWriteSpyStore) SetRuntimeBrokerGCPHost(ctx context.Context, id, email, project string) (store.GCPHostSetting, error) {
 	s.record("SetRuntimeBrokerGCPHost")
 	return s.Store.SetRuntimeBrokerGCPHost(ctx, id, email, project)
+}
+
+func (s *gcpHostWriteSpyStore) SetRuntimeBrokerGCPHostIfPrior(ctx context.Context, id, priorEmail, priorProject, email, project string) (store.GCPHostSetting, bool, error) {
+	s.record("SetRuntimeBrokerGCPHostIfPrior")
+	return s.Store.SetRuntimeBrokerGCPHostIfPrior(ctx, id, priorEmail, priorProject, email, project)
 }
 
 func (s *gcpHostWriteSpyStore) SetRuntimeBrokerGCPHostSource(ctx context.Context, id, source string) (store.GCPHostSetting, error) {

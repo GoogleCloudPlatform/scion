@@ -166,30 +166,13 @@ func (s *Server) authorizePassthroughIdentity(
 	// Check 3: actAs on broker host SA.
 	// -------------------------------------------------------------------
 	//
-	// Synthesize a transient store.GCPServiceAccount target for the broker
-	// host SA. This is not persisted — it exists only as the target shape
-	// required by the frozen checker interface.
-	//
-	// For default Compute Engine SAs (@developer.gserviceaccount.com) and
-	// App Engine default SAs (@appspot.gserviceaccount.com), the project ID
-	// cannot be reliably extracted from the email (Compute SA emails
-	// contain the project NUMBER, not the project ID). The auto-detect
-	// path in registerGlobalProjectAndBroker sets GCPHostProjectID from
-	// the metadata server, which returns the correct project ID.
-	hostProjectID := broker.GCPHostProjectID
-	if hostProjectID == "" {
-		// Derive from the email when the operator did not set it explicitly.
-		// This only works for custom IAM SAs (<name>@<project>.iam.gserviceaccount.com).
-		// Default Compute SAs and App Engine SAs require GCPHostProjectID to be
-		// set explicitly (via auto-detection or manual configuration).
-		hostProjectID = projectIDFromServiceAccountEmail(broker.GCPHostServiceAccountEmail)
-	}
-
-	target := &store.GCPServiceAccount{
+	// The transient actAs target for the broker host SA is shared with the
+	// host service account setters (hostSATarget), so a claim is checked
+	// against the same resource when it is set and when it is used.
+	target := hostSATarget(hostSAClaim{
 		Email:     broker.GCPHostServiceAccountEmail,
-		ProjectID: hostProjectID,
-		Verified:  true, // broker host SA is trusted by registration
-	}
+		ProjectID: broker.GCPHostProjectID,
+	})
 
 	principal, err := s.callerPrincipal(ctx)
 	if err != nil {
