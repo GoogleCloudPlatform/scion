@@ -184,7 +184,8 @@ self_test() {
   printf 'COPY cmd/ cmd/\nCOPY web/ web/\nRUN go build .\n' >"$tmp/extras/plug/Dockerfile"
   printf 'COPY . .\nRUN go build .\n' >"$tmp/extras/solo/Dockerfile"
   printf 'COPY . .\nRUN go build ./cmd/x\n' >"$tmp/Dockerfile"
-  printf '/hack/\n' >"$tmp/.gcloudignore"
+  printf '/hack/\n/internal/\n' >"$tmp/.gcloudignore"
+  printf 'node_modules/\ninternal\n' >"$tmp/.dockerignore"
   printf 'web/node_modules/\n/internal/**\n' >"$tmp/image-build/gcloudignore-extra"
   git -C "$tmp" init -q && git -C "$tmp" add -A || return 2
 
@@ -193,6 +194,8 @@ self_test() {
   for want in "MISSING COPY: img/Dockerfile does not copy internal/" \
               "MISSING COPY: img2/Dockerfile does not copy internal/" \
               "MISSING COPY: extras/plug/Dockerfile does not copy internal/" \
+              "IGNORED: .gcloudignore excludes required Go directory internal/ (line 2)" \
+              "IGNORED: .dockerignore excludes required Go directory internal/ (line 2)" \
               "IGNORED: image-build/gcloudignore-extra excludes required Go directory internal/ (line 2)"; do
     if [[ $rc -ne 1 || "$out" != *"$want"* ]]; then
       echo "$NAME --self-test: FAIL (exit $rc), expected '$want' in:" >&2
@@ -200,16 +203,18 @@ self_test() {
       return 2
     fi
   done
-  if [[ $(grep -c . <<<"$out") -ne 4 ]]; then
+  if [[ $(grep -c . <<<"$out") -ne 6 ]]; then
     echo "$NAME --self-test: FAIL, unexpected extra findings:" >&2
     echo "$out" >&2
     return 2
   fi
 
-  local f
-  for f in img/Dockerfile img2/Dockerfile extras/plug/Dockerfile; do
-    sed -i 's|^RUN go build|COPY internal/ internal/\nRUN go build|' "$tmp/$f"
-  done
+  # Fixed fixture (rewritten with printf, not sed -i, to stay portable).
+  printf 'COPY go.mod ./\nCOPY ./cmd/ ./cmd/\nCOPY web/*.go ./web/\nCOPY internal/ ./internal/\nRUN go build ./cmd/x\n' >"$tmp/img/Dockerfile"
+  printf 'FROM a AS src\nFROM b\nCOPY --from=src internal/ ./internal/\nCOPY cmd/ cmd/\nCOPY web/ web/\nCOPY internal/ internal/\nRUN go build ./cmd/x\n' >"$tmp/img2/Dockerfile"
+  printf 'COPY cmd/ cmd/\nCOPY web/ web/\nCOPY internal/ internal/\nRUN go build .\n' >"$tmp/extras/plug/Dockerfile"
+  printf '/hack/\n' >"$tmp/.gcloudignore"
+  printf 'node_modules/\n' >"$tmp/.dockerignore"
   printf 'web/node_modules/\n' >"$tmp/image-build/gcloudignore-extra"
   printf 'package main\nimport _ "%s/hack/z"\n' "$MODULE" >"$tmp/cmd/x/main.go"
   out=$(check "$tmp"); rc=$?
@@ -227,7 +232,7 @@ self_test() {
     return 2
   fi
 
-  echo "$NAME --self-test: ok (missing COPY, COPY --from, discovered ignore file with dir/**, and imported exclusion flagged; ./dir, dir/*.go, whole-context COPY, test files, testdata and self-contained extras accepted)"
+  echo "$NAME --self-test: ok (missing COPY, COPY --from, dir, /dir/ and dir/** in .dockerignore, .gcloudignore and a discovered ignore file, and imported exclusion flagged; ./dir, dir/*.go, whole-context COPY, test files, testdata and self-contained extras accepted)"
 }
 
 if [[ "${1:-}" == "--self-test" ]]; then
