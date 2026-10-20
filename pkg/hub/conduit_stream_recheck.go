@@ -91,6 +91,11 @@ func (s *Server) evaluateConduitStream(ctx context.Context, in conduitStreamEval
 	case agent.ProjectID != in.ProjectID:
 		return conduitAuthzDenied, "agent moved to another project", fmt.Errorf("%w: agent is no longer in the grant's project", errConduitForbidden)
 	}
+	if in.Identity == nil {
+		// No way to resolve the principal: fail closed as unavailable, never
+		// as an allow, so nothing is renewed and nothing closes early.
+		return conduitAuthzUnavailable, "principal lookup failed", fmt.Errorf("%w: no principal resolver", errConduitAuthzUnavailable)
+	}
 	ident, err := in.Identity()
 	switch {
 	case errors.Is(err, errConduitPrincipalInactive):

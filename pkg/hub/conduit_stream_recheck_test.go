@@ -771,3 +771,21 @@ func (s *devUserMissingStore) GetUser(ctx context.Context, id string) (*store.Us
 	}
 	return s.Store.GetUser(ctx, id)
 }
+
+// TestEvaluateConduitStream_NilIdentityIsUnavailable: an evaluation without
+// a principal resolver fails closed as unavailable. It is never an allow,
+// so no entry point renews or keeps the stream on its account.
+func TestEvaluateConduitStream_NilIdentityIsUnavailable(t *testing.T) {
+	f := newRenewalFixture(t)
+	verdict, reason, err := f.srv.evaluateConduitStream(context.Background(), conduitStreamEval{
+		AgentID:   f.agent.ID,
+		ProjectID: f.agent.ProjectID,
+		Kind:      grant.StreamKindTCP,
+		Port:      3000,
+	})
+	assert.Equal(t, conduitAuthzUnavailable, verdict)
+	assert.NotEqual(t, conduitAuthzAllowed, verdict)
+	assert.Equal(t, "principal lookup failed", reason)
+	assert.ErrorIs(t, err, errConduitAuthzUnavailable)
+	assert.Equal(t, ConduitRenewalUnavailable, ClassifyConduitRenewal(err))
+}
