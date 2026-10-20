@@ -261,8 +261,14 @@ The same per-request checks apply, with these limits:
   the grant's project.
 - **Messages.** A message sent to an agent with a token passes the same boundary, ceiling, and
   live project-access checks before any other rule can allow it.
-- **Inbox and conversations.** Inbox, conversation and notification operations check the token's
-  inbox selectors and its boundary.
+- **Inbox and conversations.** Chat writes made with a token (sending, changing or removing your
+  own inbox items and direct messages) need `inbox:write`. Reading your own direct messages,
+  read state and notification preferences needs `inbox:read`. Both act only on your own records,
+  work on a project or a hub token, and still pass the token's boundary.
+- **Limits and quotas.** Reading limit definitions, entitlements and usage needs `quota:read`;
+  creating, updating or deleting them needs `quota:create`, `quota:update` or `quota:delete`.
+  These scopes can be selected only on a hub token, and your user must also hold the matching
+  hub permission.
 - **Project configuration.** Setting the project messaging policy, and template and project
   configuration operations, each require their own permission; project owners hold
   `project.set_messaging_policy`.

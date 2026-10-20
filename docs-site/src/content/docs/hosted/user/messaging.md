@@ -544,6 +544,10 @@ Each subscriber, including the creator, receives one notification per halt.
 When using slug-based query paths or addressing agents via `agent:<name>` (e.g., `scion message agent:<name>`), Scion strictly scopes all message queries and deliveries by the active `ProjectID`. This ensures that even if different projects contain agents with identical names or slugs, messages are completely isolated within each project and never leak across project boundaries.
 :::
 
+#### Notification Delivery Retries
+
+If a notification cannot be delivered to a subscriber agent (for example because its Runtime Broker is not connected), it is not marked as sent. The Hub tries again on a sweep about every 5 minutes, and again when the Runtime Broker reconnects, for up to 24 hours after the notification was created. Each notification records its number of delivery attempts (`dispatchAttempts`) and an outcome (`dispatchOutcome`): `delivered`, or `failed` once the 24 hours have passed or the subscription, subscriber or watched agent is gone. The outcome is empty while delivery is still pending.
+
 ### 4. Subscription Management and Agent Self-Service
 
 * **Automatic Subscription**: The `--notify` flag on `scion start` is **deprecated**. When you start a sub-agent, Scion automatically registers your subscription via creation ancestry.
