@@ -365,6 +365,11 @@ func TestFileSource_ConcurrentRefreshAndRead(t *testing.T) {
 		t.Error(err)
 	}
 
+	// The readers' last reads can be younger than racyRecheck and would be
+	// reused; move the source's clock past it so this call reads the file.
+	src.mu.Lock()
+	src.now = func() time.Time { return time.Now().Add(racyRecheck) }
+	src.mu.Unlock()
 	got, err := src.Token()
 	require.NoError(t, err)
 	assert.Equal(t, values[writes-1], got)
@@ -663,7 +668,7 @@ func TestFileSource_RetainWarnsOncePerEpisode(t *testing.T) {
 }
 
 // A kept value is never reused without reading: the next call reads the
-// file even though its metadata is unchanged and the last read is young.
+// file even though its metadata is unchanged and the clock has not moved.
 func TestFileSource_RetainedValueIsNotReused(t *testing.T) {
 	f := newRetainFixture(t, makeTestJWT(time.Now().Add(10*time.Minute)), time.Now())
 	f.next("unlinked", "unlinked", "unlinked")
@@ -671,15 +676,20 @@ func TestFileSource_RetainedValueIsNotReused(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, f.src.fileRetained)
 
-	newer := makeTestJWT(time.Now().Add(20 * time.Minute))
-	writeTokenFile(t, f.path, newer)
 	f.script()
 	got, err := f.src.Token()
 	require.NoError(t, err)
-	assert.Equal(t, 1, f.r.reads, "the call after a kept value must read the file")
-	assert.Equal(t, newer, got)
+	assert.Equal(t, 1, f.r.reads, "the call after a kept value must read the unchanged file")
+	assert.Equal(t, f.tok, got)
 	assert.False(t, f.src.fileRetained)
 	assert.NoError(t, f.src.fileErr)
+
+	newer := makeTestJWT(time.Now().Add(20 * time.Minute))
+	writeTokenFile(t, f.path, newer)
+	f.script()
+	got, err = f.src.Token()
+	require.NoError(t, err)
+	assert.Equal(t, newer, got)
 }
 
 // A refusal in the same call clears the value even when the other reads
@@ -695,6 +705,19 @@ func TestFileSource_RetainClearedByRefusalInSameCall(t *testing.T) {
 	assert.False(t, f.src.fileRetained)
 	assert.ErrorIs(t, f.src.fileErr, dirfd.ErrNotSingleLinkRegular)
 	assert.NotErrorIs(t, f.src.fileErr, dirfd.ErrUnlinked)
+}
+
+// A refusal before the reads of a file with no link left also clears the
+// value: every failed read in the call counts, not only the last one.
+func TestFileSource_RetainClearedByEarlierRefusalInSameCall(t *testing.T) {
+	f := newRetainFixture(t, makeTestJWT(time.Now().Add(10*time.Minute)), time.Now())
+	f.next("refuse-replace", "unlinked", "unlinked")
+
+	got, err := f.src.Token()
+	assert.Error(t, err)
+	assert.Empty(t, got, "an earlier refusal in the call must clear the earlier value")
+	assert.Equal(t, 3, f.r.reads)
+	assert.False(t, f.src.fileRetained)
 }
 
 // Reads that are retried because the file was replaced, but fail with a
@@ -787,6 +810,46 @@ func TestFileSource_RetainClearedWhenFileRemoved(t *testing.T) {
 	assert.Empty(t, got)
 	assert.False(t, f.src.fileRetained)
 	assert.False(t, f.src.Status().FilePresent)
+}
+
+// canRetainLocked keeps a value only when there is one from a successful
+// read at most keepMax old, with a parsed expiry that has not passed. Each
+// case changes one input from a state that is kept.
+func TestFileSource_CanRetainLocked(t *testing.T) {
+	t0 := time.Unix(1_700_000_000, 0)
+	tests := []struct {
+		name   string
+		change func(s *FileSource, now *time.Time)
+		want   bool
+	}{
+		{"value read now with a parsed future expiry", func(*FileSource, *time.Time) {}, true},
+		{"expiry not parsed", func(s *FileSource, _ *time.Time) { s.fileExpiryParsed = false }, false},
+		{"no value", func(s *FileSource, _ *time.Time) { s.fileToken = "" }, false},
+		{"no successful read", func(s *FileSource, _ *time.Time) { s.lastGoodAt = time.Time{} }, false},
+		{"read exactly keepMax ago", func(_ *FileSource, now *time.Time) { *now = t0.Add(keepMax) }, true},
+		{"read just over keepMax ago", func(_ *FileSource, now *time.Time) { *now = t0.Add(keepMax + time.Nanosecond) }, false},
+		{"at the expiry", func(s *FileSource, now *time.Time) {
+			s.fileExpiry = t0.Add(time.Second)
+			*now = t0.Add(time.Second)
+		}, false},
+		{"just before the expiry", func(s *FileSource, now *time.Time) {
+			s.fileExpiry = t0.Add(time.Second)
+			*now = t0.Add(time.Second - time.Nanosecond)
+		}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &FileSource{
+				fileToken:        "tok",
+				lastGoodAt:       t0,
+				fileExpiry:       t0.Add(10 * time.Minute),
+				fileExpiryParsed: true,
+			}
+			now := t0
+			tt.change(s, &now)
+			assert.Equal(t, tt.want, s.canRetainLocked(now))
+		})
+	}
 }
 
 // countingReader returns a FileReadFunc that uses the default reader and
