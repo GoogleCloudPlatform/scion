@@ -104,6 +104,9 @@ type separateRelayOptions struct {
 	// relay mode (after enforce), so a test can configure them without
 	// racing serving goroutines.
 	srvMod func(*Server)
+	// noConduitAgent starts no conduit agent: the agent has no conduit
+	// session.
+	noConduitAgent bool
 }
 
 // newSeparateRelayWorldWith is newSeparateRelayWorld with opts.
@@ -209,7 +212,9 @@ func newSeparateRelayWorldWith(t *testing.T, opts separateRelayOptions, mods ...
 	for _, m := range mods {
 		m(w)
 	}
-	w.startAgentDialingRelay(t, addr)
+	if !opts.noConduitAgent {
+		w.startAgentDialingRelay(t, addr)
+	}
 
 	w.publicB = httptest.NewServer(w.hubB.Handler())
 	t.Cleanup(w.publicB.Close)
