@@ -203,7 +203,7 @@ func TestBrokerIncarnation_RegistrationOrder_ClosedOnce(t *testing.T) {
 	close(before.release)
 	requireClosedWith(t, old, relay.CloseSupersededIncarnation, "the proc-1 session")
 	// Serve deletes the session's row before it returns.
-	relaytest.Wait(t, a.Served, "the proc-1 session's Serve returned")
+	_ = relaytest.Wait(t, a.Served, "the proc-1 session's Serve returned")
 	close(after.release)
 	admitted.wait(t, wc.GetSessionId())
 	requireOpen(t, cur, "the proc-2 session")
