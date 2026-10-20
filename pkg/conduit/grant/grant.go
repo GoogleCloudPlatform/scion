@@ -496,61 +496,74 @@ func Verify(ctx context.Context, token []byte, keys KeySet, expect Expectation, 
 // now, and the Ed25519 signature. It returns the signed payload bytes and
 // the kid. Nothing past the header is decoded before the signature holds.
 func verifySigned(token []byte, keys KeySet, typ string, now time.Time) ([]byte, string, error) {
+	payload, kid, _, err := verifySignedKey(token, keys, typ, now, false)
+	return payload, kid, err
+}
+
+// verifySignedKey is verifySigned with a choice for a key past its
+// not_after. Without allowExpiredKey (admission) such a key fails with
+// ErrKeyExpired before the signature is checked. With allowExpiredKey (the
+// re-check mode, design v2.21.36 §3.5) the signature is checked as usual and
+// keyExpired reports the key's state, so the caller can let a bad
+// signature, and every other refusal it decides, take priority over the
+// expired key.
+func verifySignedKey(token []byte, keys KeySet, typ string, now time.Time, allowExpiredKey bool) (payload []byte, kid string, keyExpired bool, err error) {
 	if len(token) == 0 || len(token) > maxTokenSize {
-		return nil, "", ErrMalformed
+		return nil, "", false, ErrMalformed
 	}
 	// Only the base64url alphabet and the segment separator are allowed.
 	// The standard decoder silently skips CR and LF even in strict mode, so
 	// this check keeps token bytes canonical.
 	if !tokenCharsetOK(token) {
-		return nil, "", ErrMalformed
+		return nil, "", false, ErrMalformed
 	}
 	parts := strings.Split(string(token), ".")
 	if len(parts) != 3 {
-		return nil, "", ErrMalformed
+		return nil, "", false, ErrMalformed
 	}
 	hdrBytes, err := b64.DecodeString(parts[0])
 	if err != nil {
-		return nil, "", ErrMalformed
+		return nil, "", false, ErrMalformed
 	}
 	var hdr header
 	if err := decodeStrict(hdrBytes, &hdr); err != nil {
-		return nil, "", ErrMalformed
+		return nil, "", false, ErrMalformed
 	}
 	// encoding/json matches keys case-insensitively and lets a duplicate
 	// key win. Requiring the header bytes to equal the canonical encoding of
 	// the parsed values rejects case variants, duplicates, reordering and
 	// whitespace: the header is exactly {"alg","typ","kid"}.
 	if !canonical(hdrBytes, hdr) {
-		return nil, "", ErrMalformed
+		return nil, "", false, ErrMalformed
 	}
 	if hdr.Alg != Algorithm {
-		return nil, "", ErrAlgorithm
+		return nil, "", false, ErrAlgorithm
 	}
 	if hdr.Typ != typ || hdr.Kid == "" {
-		return nil, "", ErrMalformed
+		return nil, "", false, ErrMalformed
 	}
 	pub, ok := keys.Lookup(hdr.Kid)
 	if !ok || len(pub.Key) != ed25519.PublicKeySize {
-		return nil, "", ErrUnknownKey
+		return nil, "", false, ErrUnknownKey
 	}
-	if !pub.NotAfter.IsZero() && !now.Before(pub.NotAfter) {
-		return nil, "", ErrKeyExpired
+	keyExpired = !pub.NotAfter.IsZero() && !now.Before(pub.NotAfter)
+	if keyExpired && !allowExpiredKey {
+		return nil, "", false, ErrKeyExpired
 	}
 	sig, err := b64.DecodeString(parts[2])
 	if err != nil || len(sig) != ed25519.SignatureSize {
-		return nil, "", ErrSignature
+		return nil, "", false, ErrSignature
 	}
 	if !ed25519.Verify(pub.Key, []byte(parts[0]+"."+parts[1]), sig) {
-		return nil, "", ErrSignature
+		return nil, "", false, ErrSignature
 	}
 
 	// Only signed bytes are decoded past this point.
-	payload, err := b64.DecodeString(parts[1])
+	payload, err = b64.DecodeString(parts[1])
 	if err != nil {
-		return nil, "", ErrMalformed
+		return nil, "", false, ErrMalformed
 	}
-	return payload, hdr.Kid, nil
+	return payload, hdr.Kid, keyExpired, nil
 }
 
 // tokenCharsetOK reports whether token holds only base64url characters and

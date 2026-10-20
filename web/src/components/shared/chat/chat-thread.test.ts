@@ -2438,6 +2438,88 @@ describe('scion-chat-thread SSE message filtering', () => {
     expect(historyCalls()).toBe(0);
   });
 
+  it('event for another conversation does not backfill', async () => {
+    const el = await mount();
+    el.projectId = 'project-mine';
+    await el.updateComplete;
+    apiFetch.mockClear();
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      // Another conversation by key, and a keyless event routed to another
+      // project (no conversation of another project can be this one).
+      emitChatMessage({ threadId: 'some-other-topic', id: 'm1' });
+      emitChatMessage({ projectId: 'project-other', id: 'm2' });
+      await vi.advanceTimersByTimeAsync(3000);
+
+      expect(historyCalls()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a keyless event of its own project still backfills', async () => {
+    const el = await mount();
+    el.projectId = 'project-mine';
+    await el.updateComplete;
+    apiFetch.mockClear();
+
+    emitChatMessage({ projectId: 'project-mine', id: 'm1' });
+    await vi.waitFor(() => expect(historyCalls()).toBe(1));
+  });
+
+  it('a DM thread backfills for a keyless event of another project', async () => {
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = 'dm:agent:agent-1:user:user-me';
+    el.projectId = 'project-inherited';
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await vi.waitFor(() => expect(historyCalls()).toBe(1));
+    await vi.waitFor(() => expect((el as unknown as { loading: boolean }).loading).toBe(false));
+    apiFetch.mockClear();
+
+    emitChatMessage({ projectId: 'project-of-agent', id: 'm1' });
+    await vi.waitFor(() => expect(historyCalls()).toBe(1));
+  });
+
+  it('a keyless event does not throw when the conversation key is unset', async () => {
+    const el = await mount();
+    el.projectId = 'project-mine';
+    await el.updateComplete;
+    // A Lit property can be handed null at runtime despite its type.
+    el.conversationKey = null as unknown as string;
+    const handler = (el as unknown as { handleV2ChatMessage: (e: Event) => void })
+      .handleV2ChatMessage;
+    const event = new CustomEvent('chat-message-received', {
+      detail: { state: {}, data: { projectId: 'project-other', id: 'm1' } },
+    });
+
+    try {
+      expect(() => handler.call(el, event)).not.toThrow();
+    } finally {
+      // Teardown reads the key; give it back a string.
+      el.conversationKey = CONVERSATION_KEY;
+    }
+  });
+
+  it('lightweight event burst issues at most 2 history requests', async () => {
+    await mount();
+    vi.useFakeTimers();
+    try {
+      // 10 lightweight events in 300 ms.
+      for (let i = 0; i < 10; i++) {
+        emitChatMessage({ threadId: CONVERSATION_KEY, id: `m${i}` });
+        await vi.advanceTimersByTimeAsync(30);
+      }
+      await vi.advanceTimersByTimeAsync(3000);
+
+      expect(historyCalls()).toBeGreaterThanOrEqual(1);
+      expect(historyCalls()).toBeLessThanOrEqual(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('refetches history for its own conversation', async () => {
     await mount();
 

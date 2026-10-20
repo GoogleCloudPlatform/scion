@@ -45,7 +45,16 @@ const (
 	IssuerAudience = "scion-test-issuer:hub-t1"
 	Delegation     = "dlg-member-1"
 	AccessToken    = "ACCESS-TOKEN-ASSIGNED-SA"
+
+	// AdminIssuerSA is the target's admin issuer account; the admin
+	// delegations accept only its tokens (X4b).
+	AdminIssuerSA        = "t1-admin-issuer@proj.iam.gserviceaccount.com"
+	HubAdminDelegation   = "dlg-hub-admin-1"
+	SuperAdminDelegation = "dlg-super-admin-1"
 )
+
+// adminDelegations maps each admin delegation to the kind it issues.
+var adminDelegations = map[string]string{HubAdminDelegation: "test_hub_admin", SuperAdminDelegation: "test_super_admin"}
 
 func JWT(claims map[string]any) string {
 	h := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","typ":"JWT"}`))
@@ -140,8 +149,11 @@ func (g *GCP) Env() map[string]string {
 
 type Identity struct {
 	ID, Email, Role, Purpose, Delegation string
-	ExpiresAt                            time.Time
-	deleted                              bool
+	// Kind is test_fixture, or an admin kind for an identity issued
+	// through an admin delegation.
+	Kind      string
+	ExpiresAt time.Time
+	deleted   bool
 }
 
 type Request struct {
@@ -180,6 +192,10 @@ type Target struct {
 	// /api/v1/auth/me, for the fixture identity identityID; it returns
 	// false to fall through to the default answer (set before use).
 	Handle func(w http.ResponseWriter, r *http.Request, identityID string) bool
+	// AdminWebSessions models the hub's admin web session setting: while
+	// false an admin delegation's web-login code answers 404, as WS4 does
+	// (set before use).
+	AdminWebSessions bool
 }
 
 func NewTarget(t testing.TB, clk *Clock, iap bool) *Target {
@@ -318,7 +334,13 @@ func (f *Target) serve(w http.ResponseWriter, r *http.Request) {
 
 func (f *Target) serveIssuance(w http.ResponseWriter, r *http.Request) {
 	c, err := transportauth.DecodeIDTokenClaims(bearerOf(r))
-	if err != nil || c.Email != IssuerSA || !c.HasAudience(IssuerAudience) || r.Header.Get("X-Scion-Issuer-Delegation") != Delegation {
+	dlg := r.Header.Get("X-Scion-Issuer-Delegation")
+	adminKind, isAdmin := adminDelegations[dlg]
+	wantSA := IssuerSA
+	if isAdmin {
+		wantSA = AdminIssuerSA
+	}
+	if err != nil || c.Email != wantSA || !c.HasAudience(IssuerAudience) || (dlg != Delegation && !isAdmin) {
 		apiError(w, http.StatusUnauthorized, "unauthorized", "workload delegation refused")
 		return
 	}
@@ -326,7 +348,14 @@ func (f *Target) serveIssuance(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	rest := strings.TrimPrefix(r.URL.Path, "/api/v1/test-identities")
+	if isAdmin {
+		f.serveAdminDelegationLocked(w, r, rest, dlg, adminKind, now)
+		return
+	}
 	switch {
+	case rest == "/admin":
+		apiError(w, http.StatusForbidden, "forbidden", "requires test_identity.issue_admin permission")
+		return
 	case rest == "" && r.Method == http.MethodPost:
 		var req struct {
 			Role    string `json:"role"`
@@ -334,7 +363,7 @@ func (f *Target) serveIssuance(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		f.nextID++
-		u := &Identity{ID: fmt.Sprintf("fx-%d", f.nextID), Email: fmt.Sprintf("test-identity-%d@scion-fixture.invalid", f.nextID), Role: req.Role, Purpose: req.Purpose, Delegation: Delegation, ExpiresAt: now.Add(f.idLife)}
+		u := &Identity{ID: fmt.Sprintf("fx-%d", f.nextID), Email: fmt.Sprintf("test-identity-%d@scion-fixture.invalid", f.nextID), Role: req.Role, Purpose: req.Purpose, Delegation: Delegation, Kind: "test_fixture", ExpiresAt: now.Add(f.idLife)}
 		f.ids[u.ID] = u
 		writeJSON(w, http.StatusCreated, f.tokenResponseLocked(u, now))
 	case rest == "" && r.Method == http.MethodGet:
@@ -358,7 +387,7 @@ func (f *Target) serveIssuance(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusCreated, map[string]any{"code": wc.Code, "codeId": wc.CodeID, "expiresAt": now.Add(5 * time.Minute)})
 	case strings.HasSuffix(rest, "/token") && r.Method == http.MethodPost:
 		u := f.ids[strings.TrimSuffix(strings.TrimPrefix(rest, "/"), "/token")]
-		if u == nil || u.deleted {
+		if u == nil || u.deleted || u.Delegation != Delegation {
 			apiError(w, http.StatusNotFound, "not_found", "test identity not found")
 			return
 		}
@@ -366,7 +395,7 @@ func (f *Target) serveIssuance(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, f.tokenResponseLocked(u, now))
 	case r.Method == http.MethodDelete:
 		u := f.ids[strings.TrimPrefix(rest, "/")]
-		if u == nil || u.deleted {
+		if u == nil || u.deleted || u.Delegation != Delegation {
 			apiError(w, http.StatusNotFound, "not_found", "test identity not found")
 			return
 		}
@@ -381,8 +410,69 @@ func (f *Target) serveIssuance(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// serveAdminDelegationLocked serves a request of an admin delegation
+// like the hub (X4, X4b): admin issuance of its own kind, token re-issue
+// and (with AdminWebSessions) web-login codes for the identities it
+// issued; 404 for any other identity; 403 for list, delete and member
+// issuance.
+func (f *Target) serveAdminDelegationLocked(w http.ResponseWriter, r *http.Request, rest, dlg, kind string, now time.Time) {
+	own := func(id string) *Identity {
+		u := f.ids[id]
+		if u == nil || u.deleted || u.Delegation != dlg || u.Kind != kind || !now.Before(u.ExpiresAt) {
+			return nil
+		}
+		return u
+	}
+	switch {
+	case rest == "/admin" && r.Method == http.MethodPost:
+		var req struct {
+			AdminRole string `json:"adminRole"`
+			Purpose   string `json:"purpose"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if (kind == "test_hub_admin") != (req.AdminRole == "hub-admin") || len(req.Purpose) < 8 {
+			apiError(w, http.StatusForbidden, "forbidden", "workload delegation does not grant this request")
+			return
+		}
+		f.nextID++
+		role, life, domain := "member", time.Hour, "scion-test-hub-admin.invalid"
+		if kind == "test_super_admin" {
+			role, life, domain = "admin", 30*time.Minute, "scion-test-super-admin.invalid"
+		}
+		u := &Identity{ID: fmt.Sprintf("ad-%d", f.nextID), Email: fmt.Sprintf("test-admin-%d@%s", f.nextID, domain), Role: role, Purpose: req.Purpose, Delegation: dlg, Kind: kind, ExpiresAt: now.Add(life)}
+		f.ids[u.ID] = u
+		writeJSON(w, http.StatusCreated, f.tokenResponseLocked(u, now))
+	case strings.HasSuffix(rest, "/token") && r.Method == http.MethodPost:
+		u := own(strings.TrimSuffix(strings.TrimPrefix(rest, "/"), "/token"))
+		if u == nil {
+			apiError(w, http.StatusNotFound, "not_found", "test identity not found")
+			return
+		}
+		f.tokenHits++
+		writeJSON(w, http.StatusOK, f.tokenResponseLocked(u, now))
+	case strings.HasSuffix(rest, "/web-login-code") && r.Method == http.MethodPost:
+		u := own(strings.TrimSuffix(strings.TrimPrefix(rest, "/"), "/web-login-code"))
+		if u == nil || !f.AdminWebSessions {
+			apiError(w, http.StatusNotFound, "not_found", "test identity not found")
+			return
+		}
+		wc := WebCode{IdentityID: u.ID, Code: fmt.Sprintf("tiwc_FAKE-WEB-CODE-%d", len(f.webCodes)+1), CodeID: fmt.Sprintf("code-%d", len(f.webCodes)+1)}
+		f.webCodes = append(f.webCodes, wc)
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, http.StatusCreated, map[string]any{"code": wc.Code, "codeId": wc.CodeID, "expiresAt": now.Add(5 * time.Minute)})
+	default:
+		apiError(w, http.StatusForbidden, "forbidden", "requires test_identity.issue permission")
+	}
+}
+
 func identityView(u *Identity, now time.Time) map[string]any {
-	return map[string]any{"id": u.ID, "email": u.Email, "role": u.Role, "status": "active", "purpose": u.Purpose, "issuedBy": "grantor-1", "issuerDelegationId": u.Delegation, "expiresAt": u.ExpiresAt, "created": now, "live": now.Before(u.ExpiresAt)}
+	v := map[string]any{"id": u.ID, "email": u.Email, "role": u.Role, "status": "active", "purpose": u.Purpose, "issuedBy": "grantor-1", "issuerDelegationId": u.Delegation, "expiresAt": u.ExpiresAt, "created": now, "live": now.Before(u.ExpiresAt)}
+	if u.Kind != "" && u.Kind != "test_fixture" {
+		v["kind"] = u.Kind
+		v["issuanceId"] = "iss-" + u.ID
+		v["adminRole"] = map[string]string{"test_hub_admin": "hub-admin", "test_super_admin": "super-admin"}[u.Kind]
+	}
+	return v
 }
 
 func (f *Target) tokenResponseLocked(u *Identity, now time.Time) map[string]any {
@@ -451,6 +541,17 @@ func (f *Target) LiveIdentityIDs() []string {
 		}
 	}
 	return out
+}
+
+// IdentityKind returns the kind and issuing delegation of identity id
+// ("" when unknown).
+func (f *Target) IdentityKind(id string) (kind, delegation string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if u := f.ids[id]; u != nil {
+		return u.Kind, u.Delegation
+	}
+	return "", ""
 }
 
 // HealthHub is a hub that serves only GET /healthz, as the agent's own hub

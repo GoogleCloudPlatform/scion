@@ -51,8 +51,14 @@ func TestProfileValidate(t *testing.T) {
 		{"iap without uat sa", func(p *Profile) { p.UATServiceAccount = "" }, "--uat-sa"},
 		{"none with audience", func(p *Profile) { p.Transport = TransportNone }, "needs transport iap"},
 		{"bad issuer sa", func(p *Profile) { p.IssuerServiceAccount = "someone@example.com" }, "--issuer-sa"},
-		{"admin tier", func(p *Profile) { p.IssuerDelegations = map[string]string{"hub-admin": "d"} }, "member tier only"},
-		{"super-admin tier", func(p *Profile) { p.IssuerDelegations = map[string]string{"super-admin": "d"} }, "member tier only"},
+		{"admin tier without the admin issuer sa", func(p *Profile) { p.IssuerDelegations[TierHubAdmin] = "d" }, "--admin-issuer-sa"},
+		{"super-admin tier without the admin issuer sa", func(p *Profile) { p.IssuerDelegations[TierSuperAdmin] = "d" }, "--admin-issuer-sa"},
+		{"admin issuer sa equal to the issuer sa", func(p *Profile) {
+			p.IssuerDelegations[TierHubAdmin] = "d"
+			p.AdminIssuerServiceAccount = testIssuerSA
+		}, "must differ"},
+		{"bad admin issuer sa", func(p *Profile) { p.AdminIssuerServiceAccount = "someone@example.com" }, "--admin-issuer-sa"},
+		{"legacy admin tier name", func(p *Profile) { p.IssuerDelegations = map[string]string{"admin": "d"} }, "invalid issuer delegation tier"},
 		{"unknown tier", func(p *Profile) { p.IssuerDelegations = map[string]string{"viewer": "d"} }, "must be \"member\""},
 		{"bad delegation id", func(p *Profile) { p.IssuerDelegations = map[string]string{TierMember: "a/b"} }, "invalid issuer delegation id"},
 		{"delegation without issuer sa", func(p *Profile) { p.IssuerServiceAccount = "" }, "needs the target's issuer service account"},
@@ -66,6 +72,24 @@ func TestProfileValidate(t *testing.T) {
 			assert.Contains(t, err.Error(), tc.want)
 		})
 	}
+	// Admin delegations (X4b) with the admin issuer account, with or
+	// without a member delegation; each tier is read only by its own name.
+	p0 := validProfile()
+	p0.AdminIssuerServiceAccount = "t1-admin-issuer@proj.iam.gserviceaccount.com"
+	p0.IssuerDelegations[TierHubAdmin] = "dh"
+	p0.IssuerDelegations[TierSuperAdmin] = "ds"
+	require.NoError(t, p0.Validate())
+	assert.Equal(t, "dh", p0.Delegation(TierHubAdmin))
+	assert.Equal(t, "ds", p0.Delegation(TierSuperAdmin))
+	assert.Equal(t, testDelegation, p0.Delegation(TierMember))
+	assert.Empty(t, p0.Delegation("admin"))
+	adminOnly := validProfile()
+	adminOnly.IssuerServiceAccount = ""
+	adminOnly.AdminIssuerServiceAccount = "t1-admin-issuer@proj.iam.gserviceaccount.com"
+	adminOnly.IssuerDelegations = map[string]string{TierHubAdmin: "dh"}
+	require.NoError(t, adminOnly.Validate(), "an admin delegation needs no member issuer account")
+	assert.Empty(t, adminOnly.MemberDelegation())
+
 	// http is accepted on a loopback host (local test hubs).
 	p := validProfile()
 	p.Endpoint = "http://127.0.0.1:8080"

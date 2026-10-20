@@ -59,6 +59,42 @@ Examples:
 	RunE: runHubTestIdentityTeardown,
 }
 
+var hubTestIdentityIssueAdminCmd = &cobra.Command{
+	Use:   "issue-admin --admin-role ROLE --purpose TEXT --as ALIAS --run LABEL",
+	Short: "Issue a test hub-admin or test super-admin through a hub profile's admin delegation",
+	Long: `Issue an admin-kind test identity (a test hub-admin or a test super-admin)
+on the profile's target hub, through the profile's admin issuer delegation
+of --admin-role, and store it in the run cache as --as.
+
+The target must run the test admin tier (--test-mode=admin, or super-admin
+for a test super-admin; systemd test hubs only), and the profile must hold
+the admin delegation of that role (--issuer-delegation hub-admin=<id> or
+super-admin=<id>) and the target's admin issuer service account
+(--admin-issuer-sa). This command needs a hub profile; it never uses your
+own login. In agent mode it runs only with a profile for another hub. It is
+the runner's command, acting through a delegation; a human operator issuing
+on their own session uses 'issue --admin-role' without a profile.
+
+The token goes only to the run cache (mode 0600); only the identity's ID,
+email, kind, role, expiry and the cache file are printed. --purpose is required
+by the hub (8 to 200 characters with the run tag the CLI adds).
+
+Lifetimes are the kind's: a test hub-admin lives at most 60 minutes (token
+at most 30), a test super-admin at most 30 minutes (token at most 15). The
+token of a cached admin identity is re-issued through the same delegation
+('token --as <alias>'), never past the identity's lifetime. A web-login code
+('web-code <id> --admin-role <role>') needs the target's admin web session
+setting. The delegation cannot list or delete admin identities: they end at
+their expiry (teardown drops them from the cache), or a human super-admin
+revokes them.
+
+Examples:
+  scion --hub-profile t9 hub test-identity issue-admin --admin-role hub-admin --purpose "admin journey" --as admin1 --run r1
+  scion --hub-profile t9 hub test-identity issue-admin --admin-role super-admin --purpose "super journey" --as super1 --run r1 --lifetime 15m`,
+	Args: cobra.NoArgs,
+	RunE: runHubTestIdentityIssueAdmin,
+}
+
 var hubTestIdentityDelegateCmd = &cobra.Command{
 	Use:   "delegate",
 	Short: "Manage workload issuer delegations (human only)",
@@ -90,8 +126,9 @@ var hubTestIdentityDelegateCreateCmd = &cobra.Command{
 hub-admin or super-admin. The delegation id it prints is not a secret: it
 is useless without a token for the pinned workload identity. Give a member
 delegation to the runner's hub profile with '--issuer-delegation
-member=<id>'. An admin delegation is presented by the runner on
-POST /api/v1/test-identities/admin (see the target hubs guide).
+member=<id>', and an admin delegation with '--issuer-delegation
+hub-admin=<id>' or 'super-admin=<id>' (plus --admin-issuer-sa); the runner
+then issues with 'scion hub test-identity issue-admin'.
 
 Lifetimes (--ttl): member default 8h, at most 7 days; hub-admin default 4h,
 at most 8h; super-admin default 1h, at most 2h.`,
@@ -114,18 +151,32 @@ var hubTestIdentityDelegateRevokeCmd = &cobra.Command{
 }
 
 var (
-	testIdentityTeardownPurge bool
-	delegateWorkloadSub       string
-	delegateTTL               time.Duration
-	delegateMemberCap         int
-	delegateAdminCap          int
-	delegateScope             string
-	delegateLabel             string
-	delegateJSON              bool
+	// testIdentityIssueAdminRole is issue-admin's --admin-role. It is not
+	// shared with A4's 'issue --admin-role' (testIdentityAdminRole) or
+	// web-code's (testIdentityWebCodeAdminRole), so no command reads another
+	// command's flag value.
+	testIdentityIssueAdminRole string
+	// testIdentityWebCodeAdminRole is web-code's --admin-role.
+	testIdentityWebCodeAdminRole string
+	testIdentityTeardownPurge    bool
+	delegateWorkloadSub          string
+	delegateTTL                  time.Duration
+	delegateMemberCap            int
+	delegateAdminCap             int
+	delegateScope                string
+	delegateLabel                string
+	delegateJSON                 bool
 )
 
 func init() {
-	hubTestIdentityCmd.AddCommand(hubTestIdentityTeardownCmd, hubTestIdentityDelegateCmd)
+	hubTestIdentityCmd.AddCommand(hubTestIdentityTeardownCmd, hubTestIdentityDelegateCmd, hubTestIdentityIssueAdminCmd)
+	af := hubTestIdentityIssueAdminCmd.Flags()
+	af.StringVar(&testIdentityIssueAdminRole, "admin-role", "", `Admin kind to issue: "hub-admin" or "super-admin" (selects the profile's delegation of that tier)`)
+	af.StringVar(&testIdentityPurpose, "purpose", "", "Purpose recorded on the identity and in the audit log (required by the hub)")
+	af.DurationVar(&testIdentityTTL, "ttl", 0, "Token lifetime, e.g. 10m (default: the kind's; at most 30m hub-admin, 15m super-admin)")
+	af.DurationVar(&testIdentityLifetime, "lifetime", 0, "Identity lifetime, e.g. 30m (default: the kind's; at most 60m hub-admin, 30m super-admin)")
+	af.BoolVar(&testIdentityJSON, "json", false, "Print the identity as JSON (never the token)")
+	_ = hubTestIdentityIssueAdminCmd.MarkFlagRequired("admin-role")
 	hubTestIdentityTeardownCmd.Flags().BoolVar(&testIdentityTeardownPurge, "purge", false, "Purge each identity (with what it created) instead of deleting it")
 	hubTestIdentityTeardownCmd.Flags().BoolVar(&testIdentityJSON, "json", false, "Output in JSON format")
 
@@ -177,6 +228,7 @@ func printProfileEntry(out io.Writer, verb string, e *hubprofile.CacheEntry, cac
 	}
 	_, _ = fmt.Fprintf(out, "%s test identity %s as %q (run %s, profile %s)\n", verb, e.IdentityID, e.Alias, e.Run, e.Profile)
 	_, _ = fmt.Fprintf(out, "  Email:         %s\n", e.Email)
+	_, _ = fmt.Fprintf(out, "  Kind:          %s\n", e.Kind)
 	_, _ = fmt.Fprintf(out, "  Role:          %s\n", e.Role)
 	_, _ = fmt.Fprintf(out, "  Expires:       %s\n", formatTestIdentityTime(e.ExpiresAt))
 	_, _ = fmt.Fprintf(out, "  Token expires: %s\n", formatTestIdentityTime(e.TokenExpiresAt))
@@ -225,6 +277,48 @@ func runProfileTestIdentityIssue(cmd *cobra.Command) error {
 	return printProfileEntry(cmd.OutOrStdout(), "Issued", e, cacheFileOf(home, e), testIdentityJSON)
 }
 
+// runHubTestIdentityIssueAdmin issues an admin-kind identity through the
+// profile's admin delegation of --admin-role and caches it as --as in
+// --run. It needs a hub profile: there is no path through the CLI's own
+// hub credential.
+func runHubTestIdentityIssueAdmin(cmd *cobra.Command, _ []string) error {
+	if !hubProfileSelected() {
+		return fmt.Errorf("issue-admin needs a hub profile (--hub-profile or %s) holding an admin issuer delegation", hubprofile.EnvHubProfile)
+	}
+	role := strings.TrimSpace(testIdentityIssueAdminRole)
+	if !hubprofile.IsAdminTier(role) {
+		return newUsageError("invalid --admin-role %q: must be %q or %q", testIdentityIssueAdminRole, hubprofile.TierHubAdmin, hubprofile.TierSuperAdmin)
+	}
+	if hubProfileAs == "" {
+		return newUsageError("name the new identity with --as <alias> (and --run <label>); its token goes to the run cache")
+	}
+	if strings.TrimSpace(testIdentityPurpose) == "" {
+		return newUsageError("--purpose is required: the hub records it on every admin-kind identity")
+	}
+	ttl, err := wholeSeconds("ttl", testIdentityTTL)
+	if err != nil {
+		return err
+	}
+	lifetime, err := wholeSeconds("lifetime", testIdentityLifetime)
+	if err != nil {
+		return err
+	}
+	s, err := openHubProfileIssuerSession()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
+	defer cancel()
+	e, err := hubprofile.IssueAdminToCache(ctx, s, hubprofile.AdminIssueRequest{
+		Alias: hubProfileAs, AdminRole: role, Purpose: testIdentityPurpose, Lifetime: lifetime, TokenTTL: ttl,
+	})
+	if err != nil {
+		return err
+	}
+	home, _ := hubprofile.HomeDir()
+	return printProfileEntry(cmd.OutOrStdout(), "Issued", e, cacheFileOf(home, e), testIdentityJSON)
+}
+
 // runProfileTestIdentityReissue re-issues the token of the --as identity.
 func runProfileTestIdentityReissue(cmd *cobra.Command, args []string) error {
 	if testIdentityOut != "" {
@@ -261,6 +355,9 @@ func runProfileTestIdentityDeleteAlias(cmd *cobra.Command, args []string) error 
 	e := s.Entry()
 	if len(args) == 1 && args[0] != e.IdentityID {
 		return newUsageError("ID %s is not the identity cached as %q (%s)", args[0], hubProfileAs, e.IdentityID)
+	}
+	if e.AdminTier() != "" {
+		return fmt.Errorf("identity %q (kind %s) is not deleted through a delegation: it expires at %s, a human super-admin can revoke it, and 'teardown --run %s' drops it from the cache", e.Alias, e.Kind, formatTestIdentityTime(e.ExpiresAt), e.Run)
 	}
 	client, err := s.IssuerClient()
 	if err != nil {
@@ -436,10 +533,9 @@ func runHubTestIdentityDelegateCreate(cmd *cobra.Command, _ []string) error {
 		_, _ = fmt.Fprintf(out, "  Member cap:   %d\n", d.MemberCap)
 	}
 	_, _ = fmt.Fprintf(out, "  Expires:      %s\n", formatTestIdentityTime(d.ExpiresAt))
-	if delegateScope == delegateScopeMember {
-		_, _ = fmt.Fprintf(out, "Add it to the runner's hub profile with --issuer-delegation member=%s\n", d.ID)
-	} else {
-		_, _ = fmt.Fprintf(out, "The runner presents it in the %s header on POST /api/v1/test-identities/admin.\n", hubprofile.HeaderIssuerDelegation)
+	_, _ = fmt.Fprintf(out, "Add it to the runner's hub profile with --issuer-delegation %s=%s\n", delegateScope, d.ID)
+	if delegateScope != delegateScopeMember {
+		_, _ = fmt.Fprintln(out, "An admin delegation also needs the target's admin issuer service account in the profile (--admin-issuer-sa).")
 	}
 	return nil
 }

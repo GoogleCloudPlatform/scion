@@ -104,6 +104,44 @@ Prompt.
 	assert.Contains(t, err.Error(), "unsupported harness")
 }
 
+func TestParseSingleFile_PrefixedHarnessDirectories(t *testing.T) {
+	tests := []struct {
+		dir         string
+		frontMatter string
+		harness     string
+		tools       []string
+	}{
+		{
+			dir:         "backup.claude",
+			frontMatter: "tools: [read_file, grep_search]\nmax_turns: 7\n",
+			harness:     "gemini",
+			tools:       []string{"read_file", "grep_search"},
+		},
+		{
+			dir:         "backup.gemini",
+			frontMatter: "tools: Read, Grep\nmaxTurns: 7\n",
+			harness:     "claude",
+			tools:       []string{"Read", "Grep"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.dir, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), tt.dir, "agents")
+			require.NoError(t, os.MkdirAll(dir, 0755))
+			file := filepath.Join(dir, "reviewer.md")
+			content := "---\nname: reviewer\n" + tt.frontMatter + "---\n\nReview the code.\n"
+			require.NoError(t, os.WriteFile(file, []byte(content), 0644))
+
+			agent, err := parseSingleFile(file, "")
+			require.NoError(t, err)
+			assert.Equal(t, tt.harness, agent.Harness)
+			assert.Equal(t, tt.tools, agent.Tools)
+			assert.Equal(t, 7, agent.MaxTurns)
+			assert.Equal(t, "Review the code.", agent.SystemPrompt)
+		})
+	}
+}
+
 func TestDiscoverAgents_ProjectRoot(t *testing.T) {
 	dir := t.TempDir()
 
