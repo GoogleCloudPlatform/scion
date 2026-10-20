@@ -77,5 +77,10 @@ localStorage.setItem('scion:feature:web.native_chat', 'false');
 ## Security Settings
 The Go server includes a pre-configured Content Security Policy (CSP) that allows the Hub itself and Google Fonts. Shoelace and its icons are served from the web bundle, not a CDN. Images may also load from `blob:` URLs, which chat uses for image previews. HSTS is automatically enabled in production with a 1-year max-age.
 
+## Compression and Caching
+
+- **API responses.** JSON responses on the web server's `/api/v1/` mount are gzip-compressed when the client sends `Accept-Encoding: gzip` and the body is at least 1 KiB (status `200`, `201` or `203`, type `application/json` or `application/problem+json`). A compressed response carries `Content-Encoding: gzip` and `Vary: Accept-Encoding`, has no `Content-Length`, and any ETag becomes weak. Streams are never compressed: WebSocket upgrades, `text/event-stream` requests, terminal and port routes, and paths ending in `/stream` or `/events`. Neither are responses that can carry credentials, signed object-store URLs or artifact capabilities, for example the authentication, agent-facing, Runtime Broker registration, secrets and env routes, agent records and agent creates, workspace, template, harness-config and skill transfers, and artifact links and views.
+- **Static assets.** The embedded web build is served precompressed: brotli when the client accepts it, then gzip, else uncompressed. Each variant has its own strong ETag, and a matching `If-None-Match` gets `304 Not Modified`. Assets served from `--web-assets-dir` use weak validators based on file size and modification time.
+
 ## Deployment
 The Web Dashboard is served by the same Go binary as the Hub API. In production, enable it with `--enable-web` and ensure the `SCION_SERVER_SESSION_SECRET` environment variable and the OAuth provider variables are configured. Avoid passing the session secret via the `--session-secret` CLI flag, as CLI arguments are visible to other local users via `/proc/pid/cmdline`.
