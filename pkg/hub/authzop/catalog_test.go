@@ -72,6 +72,26 @@ func TestCatalogNoDuplicateEntryPoints(t *testing.T) {
 // Entry point exemption validation
 // ---------------------------------------------------------------------------
 
+// TestPendingEntryResponseSensitivity ensures every pending entry's response
+// sensitivity is a known value, set only on HTTP-like entry points.
+func TestPendingEntryResponseSensitivity(t *testing.T) {
+	tagged := 0
+	for i, pe := range PendingBearerDispositions {
+		if !pe.Response.Valid() {
+			t.Errorf("pending entry [%d] (%s %s): unknown response sensitivity %q", i, pe.Method, pe.Pattern, pe.Response)
+		}
+		if pe.Response != "" {
+			tagged++
+			if !httpLikeEntryPoints[pe.Kind] {
+				t.Errorf("pending entry [%d] (%s): response sensitivity on a %s entry point", i, pe.Pattern, pe.Kind)
+			}
+		}
+	}
+	if tagged == 0 {
+		t.Error("expected at least one pending entry with a response sensitivity")
+	}
+}
+
 // TestEntryPointExemptionsAreValid ensures every exemption has required fields
 // and uses a valid exemption kind.
 func TestEntryPointExemptionsAreValid(t *testing.T) {
@@ -98,6 +118,9 @@ func TestEntryPointExemptionsAreValid(t *testing.T) {
 			t.Errorf("exemption [%d] (%s): duplicate pattern", i, ex.Pattern)
 		}
 		seen[ex.Pattern] = true
+		if !ex.Response.Valid() {
+			t.Errorf("exemption [%d] (%s): unknown response sensitivity %q", i, ex.Pattern, ex.Response)
+		}
 	}
 	t.Logf("entry point exemptions: %d validated", len(EntryPointExemptions))
 }
