@@ -87,7 +87,7 @@ func NewMessageLogger(cfg MessageLoggerConfig) (*slog.Logger, func(), error) {
 	// handler would produce duplicate entries — skip it in that case.
 	onCloudRun := cloudrunenv.IsService()
 	if !onCloudRun || cfg.CloudClient == nil {
-		handlers = append(handlers, newStdoutHandler(logStdout, opts, cfg.Component, cfg.HubName, cfg.UseGCP, true))
+		handlers = append(handlers, newStdoutHandler(stdoutWriter(), opts, cfg.Component, cfg.HubName, cfg.UseGCP, true))
 	}
 
 	if len(handlers) == 0 {

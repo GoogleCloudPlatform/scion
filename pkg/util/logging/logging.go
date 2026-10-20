@@ -125,7 +125,7 @@ func EffectiveLevel(component string) slog.Level {
 // passes every record; callers wrap it with newLevelFilter so the shared
 // level state decides what is emitted.
 func createBaseHandler(component string, useGCP bool, hubName string) slog.Handler {
-	return createBaseHandlerTo(logStdout, component, useGCP, hubName)
+	return createBaseHandlerTo(stdoutWriter(), component, useGCP, hubName)
 }
 
 // createBaseHandlerTo is createBaseHandler writing to w (newStdoutHandler).

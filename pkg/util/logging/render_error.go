@@ -77,8 +77,18 @@ func stdoutReachesCloudLogging(useGCP bool) bool {
 	return useGCP || cloudrunenv.IsService() || os.Getenv("KUBERNETES_SERVICE_HOST") != ""
 }
 
-// logStdout is where the stdout log handlers write. Tests replace it.
-var logStdout io.Writer = os.Stdout
+// logStdout, when set, is where the stdout log handlers write instead of
+// os.Stdout. Tests set it.
+var logStdout io.Writer
+
+// stdoutWriter returns logStdout if set, else os.Stdout as it is now, so a
+// handler built after a caller redirects os.Stdout writes to the redirect.
+func stdoutWriter() io.Writer {
+	if logStdout != nil {
+		return logStdout
+	}
+	return os.Stdout
+}
 
 // newStdoutHandler builds a stdout log handler: the GCP format when useGCP,
 // else JSON (with a component attribute when withComponent). Where stdout

@@ -21,6 +21,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -323,6 +325,32 @@ func TestNewStdoutHandler_CopiesOptions(t *testing.T) {
 		_ = newStdoutHandler(&bytes.Buffer{}, opts, "c", "", useGCP, true)
 		if opts.ReplaceAttr != nil {
 			t.Fatalf("useGCP=%v: caller's ReplaceAttr was set", useGCP)
+		}
+	}
+}
+
+// TestCreateBaseHandler_WritesToCurrentStdout pins that the stdout handler
+// writes to os.Stdout as it is when the handler is built, so a caller that
+// redirects os.Stdout first (as server start-up tests do) gets the output.
+func TestCreateBaseHandler_WritesToCurrentStdout(t *testing.T) {
+	t.Setenv("K_SERVICE", "")
+	t.Setenv("KUBERNETES_SERVICE_HOST", "")
+	for _, useGCP := range []bool{false, true} {
+		f, err := os.Create(filepath.Join(t.TempDir(), "stdout"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		prev := os.Stdout
+		os.Stdout = f
+		slog.New(createBaseHandler("c", useGCP, "")).Info("redirected line")
+		os.Stdout = prev
+		_ = f.Close()
+		data, err := os.ReadFile(f.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(data), "redirected line") {
+			t.Errorf("useGCP=%v: redirected stdout = %q, want the log line", useGCP, data)
 		}
 	}
 }

@@ -83,7 +83,7 @@ func NewArtifactLogger(cfg ArtifactLoggerConfig) (*slog.Logger, func(), error) {
 	// cloud handler is active (the runtime forwards stdout to Cloud
 	// Logging, so it would duplicate every entry).
 	if !cloudrunenv.IsService() || cfg.CloudClient == nil {
-		handlers = append(handlers, newStdoutHandler(logStdout, opts, cfg.Component, cfg.HubName, cfg.UseGCP, true))
+		handlers = append(handlers, newStdoutHandler(stdoutWriter(), opts, cfg.Component, cfg.HubName, cfg.UseGCP, true))
 	}
 
 	var handler slog.Handler
