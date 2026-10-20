@@ -66,12 +66,12 @@ func grantDeadlineClaims(t *testing.T, tok []byte) (until, intervalS int64) {
 // TestRelayTunnel_HintsCopiedFromMintedClaims (design §3.9 "Scheduling
 // hints"): the tunnel open's authz_until and authz_interval_s equal the
 // deadline claims of the open grant the hub just minted for a
-// renewal-capable target.
+// renewal-capable target, forwarded by a relay that lists tunnel_recheck.
 func TestRelayTunnel_HintsCopiedFromMintedClaims(t *testing.T) {
 	cf := newConduitFixture(t)
 	ts := newConduitTunnelSession(cf.srv, cf.owner, time.Time{})
 	_, open, err := ts.mintRelayTunnel(context.Background(), slog.Default(), "user-session", cf.agent, "pty",
-		map[string]string{"cols": "80", "rows": "24", "session": conduitPTYSession}, relayTunnelResolution(cf, conduit.FeatureStreamRenewal))
+		map[string]string{"cols": "80", "rows": "24", "session": conduitPTYSession}, relayTunnelResolution(cf, conduit.FeatureStreamRenewal), true)
 	require.NoError(t, err)
 	require.NotNil(t, open)
 	until, intervalS := grantDeadlineClaims(t, open.Grant)
@@ -87,7 +87,7 @@ func TestRelayTunnel_NoHintsWithoutDeadline(t *testing.T) {
 	cf := newConduitFixture(t)
 	ts := newConduitTunnelSession(cf.srv, cf.owner, time.Time{})
 	_, open, err := ts.mintRelayTunnel(context.Background(), slog.Default(), "user-session", cf.agent, "pty",
-		map[string]string{"cols": "80", "rows": "24", "session": conduitPTYSession}, relayTunnelResolution(cf))
+		map[string]string{"cols": "80", "rows": "24", "session": conduitPTYSession}, relayTunnelResolution(cf), true)
 	require.NoError(t, err)
 	require.NotNil(t, open)
 	until, intervalS := grantDeadlineClaims(t, open.Grant)
