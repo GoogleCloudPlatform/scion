@@ -87,7 +87,7 @@ func settingValueOf(vs *VersionedSettings, res *versionedLoadResult, key string)
 	}
 	sv := SettingValue{Key: key, Value: value}
 	if value != "" {
-		sv.Source = res.sources[settingSourceKey(key)]
+		sv.Source = lookupSource(res.sources, settingSourceKey(key))
 		if IsSecretSettingKey(key) {
 			sv.Value = secretMask
 		}
@@ -125,4 +125,20 @@ func ResolveSettingValue(projectPath, key string) (SettingValue, error) {
 		return SettingValue{}, err
 	}
 	return settingValueOf(vs, res, key)
+}
+
+// lookupSource returns the source recorded for path. The settings decode
+// matches key names case-insensitively, so a key spelt in another case in a
+// file (hub.Endpoint) is found by a case-insensitive match when the exact
+// one misses; "" when no layer recorded it.
+func lookupSource(sources map[string]string, path string) string {
+	if src, ok := sources[path]; ok {
+		return src
+	}
+	for k, src := range sources {
+		if strings.EqualFold(k, path) {
+			return src
+		}
+	}
+	return ""
 }

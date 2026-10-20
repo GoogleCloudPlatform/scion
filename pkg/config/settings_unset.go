@@ -15,6 +15,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -54,7 +55,7 @@ func unsetPathFor(key string) ([]string, error) {
 	if k, ok := versionedSettingKeys[key]; ok {
 		return k.path, nil
 	}
-	return nil, fmt.Errorf("unknown or complex setting key: %s (manual edit recommended for registries)", key)
+	return nil, fmt.Errorf("unknown or complex setting key: %s (config unset takes the keys config set takes)", key)
 }
 
 // UnsetSetting removes key from one settings file: the project's own
@@ -226,6 +227,13 @@ func unsetYAMLSettingLocked(lock *SettingsLock, dir, settingsPath string, data [
 	if !errors.Is(err, errYAMLEditThroughAlias) {
 		return err == nil, err
 	}
+	// An alias, anchor or key the in-place edit cannot match is on the
+	// path: rewrite the file from its data (comments are lost). Read it
+	// again first, still under the lock: the edit attempt may already have
+	// migrated a legacy key in it.
+	if data, err = os.ReadFile(settingsPath); err != nil {
+		return false, fmt.Errorf("failed to read %s: %w", settingsPath, err)
+	}
 	var m map[string]interface{}
 	if err := yamlv3.Unmarshal(data, &m); err != nil {
 		return false, fmt.Errorf("failed to parse YAML settings at %s: %w", settingsPath, err)
@@ -236,6 +244,9 @@ func unsetYAMLSettingLocked(lock *SettingsLock, dir, settingsPath string, data [
 	out, err := yamlv3.Marshal(m)
 	if err != nil {
 		return false, err
+	}
+	if err := decodeVersionedSettingsYAML(out); err != nil {
+		return false, fmt.Errorf("refusing to write %s: the settings would not load without %s: %w; remove it by editing the file", settingsPath, strings.Join(path, "."), err)
 	}
 	return true, writeSettingsFileAtomic(lock, settingsPath, out)
 }
@@ -249,11 +260,17 @@ func unsetJSONSettingLocked(lock *SettingsLock, settingsPath string, data []byte
 	if !deleteMapPath(m, path) {
 		return false, nil
 	}
-	out, err := json.MarshalIndent(m, "", "  ")
-	if err != nil {
+	// Keys come out sorted, as for every struct round trip of a JSON
+	// settings file; values are written as given (no HTML escaping of &,
+	// < and >).
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(m); err != nil {
 		return false, err
 	}
-	return true, writeSettingsFileAtomic(lock, settingsPath, append(out, '\n'))
+	return true, writeSettingsFileAtomic(lock, settingsPath, buf.Bytes())
 }
 
 // deleteMapPath deletes path from m, and every parent map left empty by it

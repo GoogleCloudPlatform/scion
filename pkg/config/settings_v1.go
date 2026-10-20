@@ -3671,8 +3671,8 @@ func loadVersionedLayers(projectPath string, opts versionedLoadOptions) (*versio
 	k := koanf.New(".")
 	res := &versionedLoadResult{k: k}
 	legacy := &legacyLayerState{}
-	// fileLayer runs a settings file load and records the keys it set as
-	// coming from label and the file's path (trackSources only).
+	// With trackSources, res.sources records the layer that set each key:
+	// touched collects the keys each file sets, and setSource records them.
 	var touched []string
 	if opts.trackSources {
 		res.sources = map[string]string{}
@@ -3686,6 +3686,8 @@ func loadVersionedLayers(projectPath string, opts versionedLoadOptions) (*versio
 			res.sources[key] = label
 		}
 	}
+	// fileLayer loads one settings file and records the keys it set as
+	// coming from label and the file's path.
 	fileLayer := func(label, dir string) (bool, error) {
 		touched = touched[:0]
 		migrated, err := loadSettingsFileConverting(k, dir, legacy)
@@ -5925,13 +5927,13 @@ func updateVersionedSettingYAML(lock *SettingsLock, dir, settingsPath string, ed
 		}
 	}
 	if !yamlDecodesTo(out, want) {
-		return fmt.Errorf("refusing to write %s: the re-encoded settings do not round-trip; set %s by editing the file", targetPath, strings.Join(edit.path, "."))
+		return fmt.Errorf("refusing to write %s: the re-encoded settings do not round-trip; change %s by editing the file", targetPath, strings.Join(edit.path, "."))
 	}
 	// Generic data equality is weaker than loadability (an alias key can
 	// duplicate a struct field without a duplicate map key), so the output
 	// must also decode into VersionedSettings without error, as the input did.
 	if err := decodeVersionedSettingsYAML(out); err != nil {
-		return fmt.Errorf("refusing to write %s: the updated settings would not load: %w; set %s by editing the file", targetPath, err, strings.Join(edit.path, "."))
+		return fmt.Errorf("refusing to write %s: the updated settings would not load: %w; change %s by editing the file", targetPath, err, strings.Join(edit.path, "."))
 	}
 	if bytes.Equal(out, orig) {
 		return nil

@@ -71,6 +71,21 @@ func TestResolveSettingValues_SourcesAndAgreement(t *testing.T) {
 			},
 		},
 		{
+			name:    "repeated value takes over the source",
+			global:  "schema_version: \"1\"\nhub:\n  endpoint: https://same.example.com\n",
+			project: "schema_version: \"1\"\nhub:\n  endpoint: https://same.example.com\n",
+			want: map[string][2]string{
+				"hub.endpoint": {"https://same.example.com", "project"},
+			},
+		},
+		{
+			name:    "key in another case",
+			project: "schema_version: \"1\"\nhub:\n  Endpoint: https://case.example.com\n",
+			want: map[string][2]string{
+				"hub.endpoint": {"https://case.example.com", "project"},
+			},
+		},
+		{
 			name:    "env over files",
 			global:  "schema_version: \"1\"\nhub:\n  endpoint: https://g.example.com\n",
 			project: "schema_version: \"1\"\ncli:\n  autohelp: true\n",

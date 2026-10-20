@@ -187,3 +187,35 @@ func TestUnsetSetting_ProjectIDFileStays(t *testing.T) {
 	assert.Equal(t, "file-id", v.Value)
 	assert.True(t, strings.HasPrefix(v.Source, "project-id file "), v.Source)
 }
+
+// When an alias is on the path, the in-place edit refuses and the file is
+// rewritten from its data, read again under the lock, and only when the
+// result still loads.
+func TestUnsetSetting_AliasOnPathRewritesFromData(t *testing.T) {
+	content := "schema_version: \"1\"\nbase: &b\n  autohelp: false\n  mode: agent\ncli: *b\nactive_profile: remote\n"
+	projectDir := setupSettingsViewTest(t, "", content)
+
+	res, err := UnsetSetting(projectDir, "cli.autohelp", false)
+	require.NoError(t, err)
+	assert.True(t, res.Removed)
+	got := readUnsetSettingsFile(t, projectDir)
+	assert.Contains(t, got, "cli:\n    mode: agent\n", "cli keeps its other key, without autohelp")
+	assert.Contains(t, got, "active_profile: remote")
+
+	v, err := ResolveSettingValue(projectDir, "cli.autohelp")
+	require.NoError(t, err)
+	assert.Equal(t, "default", v.Source)
+}
+
+// A JSON settings file keeps the values as written: &, < and > are not
+// HTML-escaped.
+func TestUnsetSetting_JSONKeepsValuesUnescaped(t *testing.T) {
+	projectDir := setupSettingsViewTest(t, "", "")
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.json"),
+		[]byte(`{"schema_version": "1", "cli": {"autohelp": false}, "hub": {"endpoint": "https://h.example.com/?a=1&b=<2>"}}`), 0o644))
+	_, err := UnsetSetting(projectDir, "cli.autohelp", false)
+	require.NoError(t, err)
+	got := readUnsetSettingsFile(t, projectDir)
+	assert.Contains(t, got, "https://h.example.com/?a=1&b=<2>")
+	assert.NotContains(t, got, `\u0026`)
+}

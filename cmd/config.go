@@ -113,13 +113,30 @@ func configReadProjectDir() string {
 	return projectDir
 }
 
+// cliModeAgentNote is printed when config set writes cli.mode agent: agent
+// mode removes the config commands, so config unset cannot undo it.
+const cliModeAgentNote = `Note: agent mode removes the "config" commands, so "scion config unset cli.mode" is not available afterwards.
+To return to human mode, run: SCION_CLI_MODE=human scion config unset cli.mode (add --global for the global setting), or remove "mode" from the "cli" section of the settings file.`
+
+// formatValueSource is a setting's value with its source, as config list
+// and config get --source print it: "<unset>" without a value, and
+// "(unknown source)" for a value whose layer was not recorded (a key spelt
+// in another case, for example).
+func formatValueSource(v config.SettingValue) string {
+	if v.Value == "" {
+		return "<unset>"
+	}
+	source := v.Source
+	if source == "" {
+		source = "unknown source"
+	}
+	return fmt.Sprintf("%s  (%s)", v.Value, source)
+}
+
 // formatSettingValue is one config list line: "key: value  (source)", or
 // "key: <unset>".
 func formatSettingValue(v config.SettingValue) string {
-	if v.Source == "" && v.Value == "" {
-		return v.Key + ": <unset>"
-	}
-	return fmt.Sprintf("%s: %s  (%s)", v.Key, v.Value, v.Source)
+	return v.Key + ": " + formatValueSource(v)
 }
 
 var configSetCmd = &cobra.Command{
@@ -156,12 +173,11 @@ hub.brokerToken) is masked in the output.`,
 		if err := config.ValidateConfigSetKey(key, layerGlobal); err != nil {
 			return err
 		}
-		if err := config.ValidateSettingValue(key, value); err != nil {
-			return err
-		}
-
 		if err := config.UpdateSetting(targetPath, key, value, configGlobal); err != nil {
 			return err
+		}
+		if key == "cli.mode" && value == "agent" {
+			fmt.Fprintln(cmd.ErrOrStderr(), cliModeAgentNote)
 		}
 
 		scope := "local"
@@ -250,11 +266,7 @@ Examples:
 
 		w := cmd.OutOrStdout()
 		if configGetSource {
-			if v.Source == "" {
-				fmt.Fprintln(w, "<unset>")
-			} else {
-				fmt.Fprintf(w, "%s  (%s)\n", v.Value, v.Source)
-			}
+			fmt.Fprintln(w, formatValueSource(v))
 			return nil
 		}
 		fmt.Fprintln(w, v.Value)
@@ -313,11 +325,27 @@ Examples:
 			fmt.Fprintf(errOut, "Note: %s still comes from %s\n", key, strings.TrimPrefix(now.Source, "project-id file "))
 		}
 
+		// A file of the edited layer that still sets the key: a spelling
+		// unset does not edit (another case, a merge key, a legacy key), or
+		// the in-repo file of a project whose settings live in its external
+		// settings directory.
+		stillSetIn := ""
+		if nowErr == nil {
+			if file, ok := strings.CutPrefix(now.Source, configLayerSourcePrefix(scope)); ok {
+				stillSetIn = file
+			}
+		}
+
 		var msg string
-		if res.Removed {
+		switch {
+		case res.Removed && stillSetIn == "":
 			msg = fmt.Sprintf("Removed %s setting '%s'", scope, key)
-		} else {
-			msg = fmt.Sprintf("%s setting '%s' is not set; nothing changed", strings.ToUpper(scope[:1])+scope[1:], key)
+		case res.Removed:
+			msg = fmt.Sprintf("Removed %s setting '%s' from %s, but it is still set in %s; edit that file by hand", scope, key, res.Path, stillSetIn)
+		case stillSetIn != "":
+			msg = fmt.Sprintf("%s setting '%s' was not removed: it is still set in %s in a form config unset does not edit; edit that file by hand", capitalize(scope), key, stillSetIn)
+		default:
+			msg = fmt.Sprintf("%s setting '%s' is not set; nothing changed", capitalize(scope), key)
 		}
 
 		if isJSONOutput() {
@@ -325,6 +353,9 @@ Examples:
 				"key":     key,
 				"scope":   scope,
 				"removed": res.Removed,
+			}
+			if stillSetIn != "" {
+				details["still_set_in"] = stillSetIn
 			}
 			if nowErr == nil {
 				details["value"] = now.Value
@@ -724,6 +755,23 @@ func resolveProjectWorkspace(configDir string) (string, error) {
 		return "", fmt.Errorf("project workspace does not exist: %s", parent)
 	}
 	return parent, nil
+}
+
+// configLayerSourcePrefix is the setting-source prefix of the settings
+// layer config unset edits: "global " or "project ".
+func configLayerSourcePrefix(scope string) string {
+	if scope == "global" {
+		return "global "
+	}
+	return "project "
+}
+
+// capitalize upper-cases the first letter of s.
+func capitalize(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
 }
 
 // execShellInDir changes to the given directory and replaces the current process

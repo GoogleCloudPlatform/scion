@@ -300,3 +300,43 @@ func TestConfigSetCLIModeResolvesMode(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, ModeHuman, resolveMode())
 }
+
+// config set cli.mode agent says that the config commands go away and how
+// to return to human mode (agent mode removes config unset too).
+func TestConfigSetCLIModeAgentPrintsWayBack(t *testing.T) {
+	configTestProject(t, "schema_version: \"1\"\n", "")
+	outputFormat = ""
+
+	_, stderr, err := runConfigSet(t, true, "cli.mode", "agent")
+	require.NoError(t, err)
+	assert.Contains(t, stderr, `agent mode removes the "config" commands`)
+	assert.Contains(t, stderr, "SCION_CLI_MODE=human scion config unset cli.mode")
+
+	_, stderr, err = runConfigSet(t, true, "cli.mode", "human")
+	require.NoError(t, err)
+	assert.NotContains(t, stderr, "agent mode removes")
+}
+
+// config list and config get --source print a value the same way: <unset>
+// without a value, and "(unknown source)" for a value with no recorded
+// layer.
+func TestFormatValueSource(t *testing.T) {
+	assert.Equal(t, "<unset>", formatValueSource(config.SettingValue{Key: "k"}))
+	assert.Equal(t, "x  (global /h/.scion/settings.yaml)", formatValueSource(config.SettingValue{Key: "k", Value: "x", Source: "global /h/.scion/settings.yaml"}))
+	assert.Equal(t, "x  (unknown source)", formatValueSource(config.SettingValue{Key: "k", Value: "x"}))
+	assert.Equal(t, "k: x  (unknown source)", formatSettingValue(config.SettingValue{Key: "k", Value: "x"}))
+}
+
+// When the edited file still sets the key in a form config unset does not
+// edit (here a key spelt in another case), unset says so instead of
+// "nothing changed".
+func TestConfigUnset_ReportsKeyStillSet(t *testing.T) {
+	configTestProject(t, "", "schema_version: \"1\"\nhub:\n  Endpoint: https://case.example.com\n")
+	outputFormat = ""
+
+	stdout, _, err := runConfigUnset(t, false, "hub.endpoint")
+	require.NoError(t, err)
+	assert.NotContains(t, stdout, "nothing changed")
+	assert.Contains(t, stdout, "was not removed: it is still set in")
+	assert.Contains(t, stdout, "edit that file by hand")
+}

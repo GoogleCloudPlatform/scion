@@ -1005,8 +1005,8 @@ credential-like key (for example `hub.brokerToken`) is masked in both. With
 (`{"<key>": {"value": "...", "source": "..."}}`) and `config get` prints
 `{"key": "...", "value": "...", "source": "..."}`.
 
-`config get` supports those keys (including `cli.mode`) plus dotted paths into a named entry of the `profiles` or `runtimes`
-maps: `profiles.<name>.<field>` and `runtimes.<name>.<field>`, where `<field>` is one of
+`config get` supports those keys (including `cli.mode`) plus dotted paths into a named
+entry of the `profiles` or `runtimes` maps: `profiles.<name>.<field>` and `runtimes.<name>.<field>`, where `<field>` is one of
 that entry's scalar settings named by its `settings.yaml` key (e.g.
 `profiles.local.runtime`, `runtimes.kubernetes.namespace`). Within a profiles/runtimes
 entry, structured fields (maps, lists, nested objects — e.g. `env`, `volumes`,
@@ -1025,7 +1025,11 @@ would accept but never read, and leaves the file unchanged:
 project layer (they are read only from the global settings). The error names the key
 and does not include the value. After a successful write, the value of a
 credential-like key (for example `hub.brokerToken`) is shown masked. `cli.mode`
-accepts `human` or `agent`.
+accepts `human` or `agent`. Agent mode removes the `config` commands, so after
+`scion config set cli.mode agent` the way back is
+`SCION_CLI_MODE=human scion config unset [--global] cli.mode` (or removing `mode` from
+the `cli` section of the settings file by hand); `config set` prints this when it writes
+`agent`.
 
 `config unset <key>` removes the key from the project's own settings, or from the
 global settings with `--global`, so the setting takes its value from the layers below
