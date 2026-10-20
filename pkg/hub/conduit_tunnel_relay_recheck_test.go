@@ -129,26 +129,32 @@ func TestRelayTunnel_RecheckListedStampedWithHints(t *testing.T) {
 // stream_renewal.v2 is not gated by tunnel_recheck. With enforce, a relay
 // that does not list the feature gets the tunnel served with an unstamped
 // grant, never the 503, and nothing is counted; with off it is not counted
-// as an unstamped open either.
+// as an unstamped open either. Each case has its own subtest, so each
+// fixture gets its own registry store (the test store is named after the
+// test).
 func TestRelayTunnel_NonV2TargetNotGatedByRecheck(t *testing.T) {
-	o := &openSetup{enforce: true, targetNoRenewal: true}
-	f := newRelayTunnelFixture(t, o)
+	t.Run("enforce", func(t *testing.T) {
+		o := &openSetup{enforce: true, targetNoRenewal: true}
+		f := newRelayTunnelFixture(t, o)
 
-	o.keys.arm(f.cf.srv)
-	resp, open := f.post(t)
-	requireUnstampedRelayTunnel(t, f, resp, open)
-	assert.Empty(t, o.rec.list(), "no stream_renewal_unavailable refusal")
-	assert.Empty(t, o.rec.unstampedList())
+		o.keys.arm(f.cf.srv)
+		resp, open := f.post(t)
+		requireUnstampedRelayTunnel(t, f, resp, open)
+		assert.Empty(t, o.rec.list(), "no stream_renewal_unavailable refusal")
+		assert.Empty(t, o.rec.unstampedList())
+	})
+	t.Run("off", func(t *testing.T) {
+		o := &openSetup{targetNoRenewal: true}
+		f := newRelayTunnelFixture(t, o)
+		gateLines := captureRelayGateLogs(t)
 
-	off := &openSetup{targetNoRenewal: true}
-	g := newRelayTunnelFixture(t, off)
-	gateLines := captureRelayGateLogs(t)
-	off.keys.arm(g.cf.srv)
-	resp, open = g.post(t)
-	requireUnstampedRelayTunnel(t, g, resp, open)
-	assert.Empty(t, off.rec.list())
-	assert.Empty(t, off.rec.unstampedList(), "a target without stream_renewal.v2 is never counted")
-	assert.Empty(t, gateLines(), "nor logged by the relay gate")
+		o.keys.arm(f.cf.srv)
+		resp, open := f.post(t)
+		requireUnstampedRelayTunnel(t, f, resp, open)
+		assert.Empty(t, o.rec.list())
+		assert.Empty(t, o.rec.unstampedList(), "a target without stream_renewal.v2 is never counted")
+		assert.Empty(t, gateLines(), "nor logged by the relay gate")
+	})
 }
 
 // TestRelayTunnel_RecheckUnlistedOffUnstamped: with off, a relay that does
