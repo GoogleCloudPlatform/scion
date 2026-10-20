@@ -1129,6 +1129,9 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				heartbeat.ProfileSAMappings = nil
 				heartbeat.ProfileSAMappingsHashes = nil
 			}
+			// A broker older than templateTiers ignores the telemetry tiers
+			// dispatch sends; warn once (ptone/scion#4224).
+			s.warnBrokerWithoutTemplateTiers(id, broker.Name, heartbeat.Capabilities)
 			changed := false
 			if heartbeat.Capabilities != nil && !reflect.DeepEqual(broker.Capabilities, heartbeat.Capabilities) {
 				broker.Capabilities = heartbeat.Capabilities

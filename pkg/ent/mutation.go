@@ -83538,8 +83538,6 @@ type TemplateMutation struct {
 	description            *string
 	harness                *string
 	default_harness_config *string
-	image                  *string
-	_config                *string
 	agent_config           *string
 	content_hash           *string
 	scope                  *string
@@ -83921,104 +83919,6 @@ func (m *TemplateMutation) DefaultHarnessConfigCleared() bool {
 func (m *TemplateMutation) ResetDefaultHarnessConfig() {
 	m.default_harness_config = nil
 	delete(m.clearedFields, template.FieldDefaultHarnessConfig)
-}
-
-// SetImage sets the "image" field.
-func (m *TemplateMutation) SetImage(s string) {
-	m.image = &s
-}
-
-// Image returns the value of the "image" field in the mutation.
-func (m *TemplateMutation) Image() (r string, exists bool) {
-	v := m.image
-	if v == nil {
-		return
-	}
-	return *v, true
-}
-
-// OldImage returns the old "image" field's value of the Template entity.
-// If the Template object wasn't provided to the builder, the object is fetched from the database.
-// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
-func (m *TemplateMutation) OldImage(ctx context.Context) (v string, err error) {
-	if !m.op.Is(OpUpdateOne) {
-		return v, errors.New("OldImage is only allowed on UpdateOne operations")
-	}
-	if m.id == nil || m.oldValue == nil {
-		return v, errors.New("OldImage requires an ID field in the mutation")
-	}
-	oldValue, err := m.oldValue(ctx)
-	if err != nil {
-		return v, fmt.Errorf("querying old value for OldImage: %w", err)
-	}
-	return oldValue.Image, nil
-}
-
-// ClearImage clears the value of the "image" field.
-func (m *TemplateMutation) ClearImage() {
-	m.image = nil
-	m.clearedFields[template.FieldImage] = struct{}{}
-}
-
-// ImageCleared returns if the "image" field was cleared in this mutation.
-func (m *TemplateMutation) ImageCleared() bool {
-	_, ok := m.clearedFields[template.FieldImage]
-	return ok
-}
-
-// ResetImage resets all changes to the "image" field.
-func (m *TemplateMutation) ResetImage() {
-	m.image = nil
-	delete(m.clearedFields, template.FieldImage)
-}
-
-// SetConfig sets the "config" field.
-func (m *TemplateMutation) SetConfig(s string) {
-	m._config = &s
-}
-
-// Config returns the value of the "config" field in the mutation.
-func (m *TemplateMutation) Config() (r string, exists bool) {
-	v := m._config
-	if v == nil {
-		return
-	}
-	return *v, true
-}
-
-// OldConfig returns the old "config" field's value of the Template entity.
-// If the Template object wasn't provided to the builder, the object is fetched from the database.
-// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
-func (m *TemplateMutation) OldConfig(ctx context.Context) (v string, err error) {
-	if !m.op.Is(OpUpdateOne) {
-		return v, errors.New("OldConfig is only allowed on UpdateOne operations")
-	}
-	if m.id == nil || m.oldValue == nil {
-		return v, errors.New("OldConfig requires an ID field in the mutation")
-	}
-	oldValue, err := m.oldValue(ctx)
-	if err != nil {
-		return v, fmt.Errorf("querying old value for OldConfig: %w", err)
-	}
-	return oldValue.Config, nil
-}
-
-// ClearConfig clears the value of the "config" field.
-func (m *TemplateMutation) ClearConfig() {
-	m._config = nil
-	m.clearedFields[template.FieldConfig] = struct{}{}
-}
-
-// ConfigCleared returns if the "config" field was cleared in this mutation.
-func (m *TemplateMutation) ConfigCleared() bool {
-	_, ok := m.clearedFields[template.FieldConfig]
-	return ok
-}
-
-// ResetConfig resets all changes to the "config" field.
-func (m *TemplateMutation) ResetConfig() {
-	m._config = nil
-	delete(m.clearedFields, template.FieldConfig)
 }
 
 // SetAgentConfig sets the "agent_config" field.
@@ -84885,7 +84785,7 @@ func (m *TemplateMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *TemplateMutation) Fields() []string {
-	fields := make([]string, 0, 26)
+	fields := make([]string, 0, 24)
 	if m.name != nil {
 		fields = append(fields, template.FieldName)
 	}
@@ -84903,12 +84803,6 @@ func (m *TemplateMutation) Fields() []string {
 	}
 	if m.default_harness_config != nil {
 		fields = append(fields, template.FieldDefaultHarnessConfig)
-	}
-	if m.image != nil {
-		fields = append(fields, template.FieldImage)
-	}
-	if m._config != nil {
-		fields = append(fields, template.FieldConfig)
 	}
 	if m.agent_config != nil {
 		fields = append(fields, template.FieldAgentConfig)
@@ -84984,10 +84878,6 @@ func (m *TemplateMutation) Field(name string) (ent.Value, bool) {
 		return m.Harness()
 	case template.FieldDefaultHarnessConfig:
 		return m.DefaultHarnessConfig()
-	case template.FieldImage:
-		return m.Image()
-	case template.FieldConfig:
-		return m.Config()
 	case template.FieldAgentConfig:
 		return m.AgentConfig()
 	case template.FieldContentHash:
@@ -85045,10 +84935,6 @@ func (m *TemplateMutation) OldField(ctx context.Context, name string) (ent.Value
 		return m.OldHarness(ctx)
 	case template.FieldDefaultHarnessConfig:
 		return m.OldDefaultHarnessConfig(ctx)
-	case template.FieldImage:
-		return m.OldImage(ctx)
-	case template.FieldConfig:
-		return m.OldConfig(ctx)
 	case template.FieldAgentConfig:
 		return m.OldAgentConfig(ctx)
 	case template.FieldContentHash:
@@ -85135,20 +85021,6 @@ func (m *TemplateMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetDefaultHarnessConfig(v)
-		return nil
-	case template.FieldImage:
-		v, ok := value.(string)
-		if !ok {
-			return fmt.Errorf("unexpected type %T for field %s", value, name)
-		}
-		m.SetImage(v)
-		return nil
-	case template.FieldConfig:
-		v, ok := value.(string)
-		if !ok {
-			return fmt.Errorf("unexpected type %T for field %s", value, name)
-		}
-		m.SetConfig(v)
 		return nil
 	case template.FieldAgentConfig:
 		v, ok := value.(string)
@@ -85315,12 +85187,6 @@ func (m *TemplateMutation) ClearedFields() []string {
 	if m.FieldCleared(template.FieldDefaultHarnessConfig) {
 		fields = append(fields, template.FieldDefaultHarnessConfig)
 	}
-	if m.FieldCleared(template.FieldImage) {
-		fields = append(fields, template.FieldImage)
-	}
-	if m.FieldCleared(template.FieldConfig) {
-		fields = append(fields, template.FieldConfig)
-	}
 	if m.FieldCleared(template.FieldAgentConfig) {
 		fields = append(fields, template.FieldAgentConfig)
 	}
@@ -85385,12 +85251,6 @@ func (m *TemplateMutation) ClearField(name string) error {
 		return nil
 	case template.FieldDefaultHarnessConfig:
 		m.ClearDefaultHarnessConfig()
-		return nil
-	case template.FieldImage:
-		m.ClearImage()
-		return nil
-	case template.FieldConfig:
-		m.ClearConfig()
 		return nil
 	case template.FieldAgentConfig:
 		m.ClearAgentConfig()
@@ -85459,12 +85319,6 @@ func (m *TemplateMutation) ResetField(name string) error {
 		return nil
 	case template.FieldDefaultHarnessConfig:
 		m.ResetDefaultHarnessConfig()
-		return nil
-	case template.FieldImage:
-		m.ResetImage()
-		return nil
-	case template.FieldConfig:
-		m.ResetConfig()
 		return nil
 	case template.FieldAgentConfig:
 		m.ResetAgentConfig()

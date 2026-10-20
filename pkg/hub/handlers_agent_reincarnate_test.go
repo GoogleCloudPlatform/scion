@@ -974,7 +974,7 @@ func TestReincarnateAgent_DryRun_ShowsDiffAndWritesNothing(t *testing.T) {
 		Scope:       store.TemplateScopeGlobal,
 		Status:      store.TemplateStatusActive,
 		ContentHash: "new-template-hash",
-		Config:      &store.TemplateConfig{Image: "template-image:v2"},
+		AgentConfig: &api.ScionConfig{Image: "template-image:v2"},
 	}
 	require.NoError(t, s.CreateTemplate(context.Background(), template))
 
@@ -1034,7 +1034,7 @@ func TestReincarnateAgent_AC2a_ExplicitImageSurvivesTemplateBump(t *testing.T) {
 		Scope:       store.TemplateScopeGlobal,
 		Status:      store.TemplateStatusActive,
 		ContentHash: "new-template-hash",
-		Config:      &store.TemplateConfig{Image: "template-image:v2"},
+		AgentConfig: &api.ScionConfig{Image: "template-image:v2"},
 	}
 	require.NoError(t, s.CreateTemplate(context.Background(), template))
 
@@ -1121,7 +1121,7 @@ func TestReincarnateAgent_TemplateImageIgnoredHarnessConfigShown(t *testing.T) {
 		Scope:       store.TemplateScopeGlobal,
 		Status:      store.TemplateStatusActive,
 		ContentHash: "template-hash",
-		Config:      &store.TemplateConfig{Image: "template-image:v1"},
+		AgentConfig: &api.ScionConfig{Image: "template-image:v1"},
 	}
 	require.NoError(t, s.CreateTemplate(context.Background(), template))
 
@@ -1793,16 +1793,15 @@ func TestReincarnateAgent_LegacyAgent_DropsSkillsWithWarning(t *testing.T) {
 	assert.True(t, foundDroppedSkillsWarning, "expected dropped-skills warning naming the ref, got %v", resp.Plan.Warnings)
 }
 
-// TestReincarnateAgent_LegacyAgent_TemplateEnvV1ToV2 is the AC-2a test the
-// design's A1 addendum 2 calls for: a legacy
-// agent's InlineConfig.Env is indistinguishable-by-inspection from a mix of
-// explicit keys and template defaults aliased in at create time
-// (buildAppliedConfig aliases AppliedConfig.Env to InlineConfig.Env). The
-// legacy fallback must drop every key the CURRENT template defines — so a
-// template env default that changed from v1 (at create) to v2 (at
-// reincarnate) comes out as v2, not the stale v1 — and keep, with a warning,
-// any key the template does not define.
-func TestReincarnateAgent_LegacyAgent_TemplateEnvV1ToV2(t *testing.T) {
+// TestReincarnateAgent_LegacyAgent_TemplateEnvResidueKept: a legacy agent
+// (no CreateInputs) whose InlineConfig.Env holds a key an older hub aliased
+// in from the template keeps it as explicit env, with the "may be stale"
+// warning, alongside its genuinely explicit keys. The drop-only filter keyed
+// on the template row's stored env is retired with that column, and it is
+// not rekeyed on the template's file env (its AgentConfig snapshot), which
+// would drop a requester's own key that shares a name with it
+// (ptone/scion#4224). The reincarnation still succeeds.
+func TestReincarnateAgent_LegacyAgent_TemplateEnvResidueKept(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
 
@@ -1814,9 +1813,8 @@ func TestReincarnateAgent_LegacyAgent_TemplateEnvV1ToV2(t *testing.T) {
 		Scope:       store.TemplateScopeGlobal,
 		Status:      store.TemplateStatusActive,
 		ContentHash: "template-hash-v2",
-		Config: &store.TemplateConfig{
-			Env: map[string]string{"TEMPLATE_ENV_KEY": "v2"},
-		},
+		// The template's own file defines the same key.
+		AgentConfig: &api.ScionConfig{Env: map[string]string{"TEMPLATE_ENV_KEY": "v2"}},
 	}
 	require.NoError(t, s.CreateTemplate(context.Background(), template))
 
@@ -1848,33 +1846,27 @@ func TestReincarnateAgent_LegacyAgent_TemplateEnvV1ToV2(t *testing.T) {
 	var resp ReincarnateAgentResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 
-	// The plan's env diff must show TEMPLATE_ENV_KEY removed: the legacy
-	// residue is dropped, and the hub no longer copies the template's env
-	// into the agent config (ptone/scion#4222); the template's own file
-	// supplies it on the broker. AGENT_SPECIFIC_KEY survives untouched
-	// (absent from added/removed/changed).
-	assert.Contains(t, resp.Plan.EnvKeys.Removed, "TEMPLATE_ENV_KEY")
-	assert.NotContains(t, resp.Plan.EnvKeys.Changed, "AGENT_SPECIFIC_KEY")
-	assert.NotContains(t, resp.Plan.EnvKeys.Removed, "AGENT_SPECIFIC_KEY")
+	// Both keys are replayed as explicit env, so neither leaves the plan's
+	// env diff.
+	for _, k := range []string{"TEMPLATE_ENV_KEY", "AGENT_SPECIFIC_KEY"} {
+		assert.NotContains(t, resp.Plan.EnvKeys.Removed, k)
+		assert.NotContains(t, resp.Plan.EnvKeys.Changed, k)
+	}
 
-	foundDroppedWarning := false
 	foundKeptWarning := false
 	for _, w := range resp.Plan.Warnings {
-		// The old value ("v1") must NEVER appear in the plan — it
-		// came from a legacy agent's live env, indistinguishable from a
-		// genuine per-agent secret that happens to share this key name. The
-		// template's value is not shown either: the hub no longer supplies it.
-		if containsAll(w, "dropped", "TEMPLATE_ENV_KEY") {
-			assert.NotContains(t, w, "v1", "the old value must be masked, never shown in the plan")
-			assert.NotContains(t, w, "v2", "the template value is not part of the plan")
-			foundDroppedWarning = true
-		}
-		if containsAll(w, "kept", "AGENT_SPECIFIC_KEY") {
+		assert.False(t, containsAll(w, "dropped", "env key"), "no env key is dropped any more, got %q", w)
+		if containsAll(w, "kept 2 env key(s) as explicit", "may be a stale default", "AGENT_SPECIFIC_KEY, TEMPLATE_ENV_KEY") {
+			assert.NotContains(t, w, "v1", "values are never shown in the plan")
 			foundKeptWarning = true
 		}
 	}
-	assert.True(t, foundDroppedWarning, "expected a warning naming dropped TEMPLATE_ENV_KEY, got %v", resp.Plan.Warnings)
-	assert.True(t, foundKeptWarning, "expected a warning flagging AGENT_SPECIFIC_KEY as kept-but-uncertain, got %v", resp.Plan.Warnings)
+	assert.True(t, foundKeptWarning, "expected the kept-as-explicit warning naming both keys, got %v", resp.Plan.Warnings)
+
+	fresh, _, err := srv.buildFreshAppliedConfig(context.Background(), agent, project, "")
+	require.NoError(t, err)
+	assert.Equal(t, "v1", fresh.Env["TEMPLATE_ENV_KEY"], "the residue is replayed as explicit env, not replaced from the template")
+	assert.Equal(t, "keep-me", fresh.Env["AGENT_SPECIFIC_KEY"])
 }
 
 // TestReincarnateAgent_FreshConfigDoesNotAliasEnv proves design §3.3 A1
@@ -1894,7 +1886,7 @@ func TestReincarnateAgent_FreshConfigDoesNotAliasEnv(t *testing.T) {
 		Scope:       store.TemplateScopeGlobal,
 		Status:      store.TemplateStatusActive,
 		ContentHash: "template-hash-noalias",
-		Config: &store.TemplateConfig{
+		AgentConfig: &api.ScionConfig{
 			Env: map[string]string{"TEMPLATE_DEFAULT_KEY": "from-template"},
 		},
 	}
@@ -3496,7 +3488,7 @@ func TestReincarnateAgent_ChangesLineWiring(t *testing.T) {
 			Scope:       store.TemplateScopeGlobal,
 			Status:      store.TemplateStatusActive,
 			ContentHash: "new-template-hash",
-			Config:      &store.TemplateConfig{Image: "template-image:v2"},
+			AgentConfig: &api.ScionConfig{Image: "template-image:v2"},
 		}
 		require.NoError(t, s.CreateTemplate(context.Background(), template))
 
@@ -3557,7 +3549,7 @@ func TestReincarnateAgent_ChangesLineWiring(t *testing.T) {
 			Scope:       store.TemplateScopeGlobal,
 			Status:      store.TemplateStatusActive,
 			ContentHash: "same-template-hash",
-			Config:      &store.TemplateConfig{Image: "old-image:v1"},
+			AgentConfig: &api.ScionConfig{Image: "old-image:v1"},
 		}
 		require.NoError(t, s.CreateTemplate(context.Background(), template))
 
@@ -5704,7 +5696,7 @@ harness_configs:
 				Scope:       store.TemplateScopeGlobal,
 				Status:      store.TemplateStatusActive,
 				ContentHash: "new-template-hash",
-				Config:      &store.TemplateConfig{Image: "template-image:v2"},
+				AgentConfig: &api.ScionConfig{Image: "template-image:v2"},
 			}
 			require.NoError(t, s.CreateTemplate(context.Background(), template))
 

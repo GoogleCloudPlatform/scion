@@ -1859,9 +1859,9 @@ type TemplateStore interface {
 	// StoragePath, StorageBucket, StorageURI, Status, SourceURL, UpdatedBy)
 	// only if the stored row still matches expected (compare-and-swap). It
 	// never writes the metadata UpdateTemplate owns (Name, Slug,
-	// DisplayName, Description, Image, BaseTemplate, OwnerID, Scope,
-	// ScopeID, ProjectID), so neither writer can revert the other
-	// (ptone/scion#4221), and it never writes Config (ptone/scion#4223).
+	// DisplayName, Description, BaseTemplate, OwnerID, Scope, ScopeID,
+	// ProjectID), so neither writer can revert the other
+	// (ptone/scion#4221).
 	// Returns ErrTemplateConflict when the row exists but no longer
 	// matches, and ErrNotFound when it does not exist.
 	UpdateTemplateContent(ctx context.Context, template *Template, expected TemplateContentPrecondition) error
