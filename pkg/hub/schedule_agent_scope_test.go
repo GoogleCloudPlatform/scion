@@ -726,6 +726,7 @@ func TestAgentScheduleScope_HealthNonUUIDProjectClaimIsEmpty(t *testing.T) {
 	sec, err := srv.healthSummarySchedules(r)
 	require.NoError(t, err)
 	require.NotNil(t, sec)
+	require.NotNil(t, sec.Failing, "the section lists no rows as an empty list, not null")
 	assert.Empty(t, sec.Failing)
 	assert.Zero(t, sec.Total)
 	assert.Zero(t, reads.reads, "the store is not read")
