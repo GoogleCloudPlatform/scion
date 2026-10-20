@@ -70,6 +70,10 @@ User-credentialed broker operations admit a fixed set of credential kinds. A Run
 | Associate with a project | `POST /api/v1/projects/{id}/providers`, `brokerId` in `POST /api/v1/projects/register`, explicit broker on agent create | Interactive session, dev credential, or UAT for the project side | `project.update` on the project **and** `broker.update` on the broker (owner or super-admin). No UAT selector carries `broker.update`. |
 | Remove an association | `DELETE /api/v1/projects/{id}/providers/{brokerId}` | Interactive session, dev credential, UAT | `project.update` on the project, or `broker.update` on that broker. |
 | Use an associated broker | Agent creation | As for agent creation | Allowed for auto-provide brokers, for brokers associated with the project with the owner's consent, and for holders of `broker.dispatch` on the broker. |
+| Read env vars and secret metadata | Runtime Broker env and secret routes (read) | Broker HMAC for its own ID; interactive session, dev credential, hub-boundary UAT with `broker:read` | `broker.read` on the broker, plus the owner relationship or `broker.update`. Sensitive values are masked. |
+| Write env vars or secrets, update, deregister | Runtime Broker env and secret routes (write), Runtime Broker update and deregistration | Broker HMAC for its own material; interactive session or dev credential | `broker.update` on the broker (`broker.delete` to deregister). No UAT is admitted. |
+| Send a heartbeat as a user | Runtime Broker heartbeat | Broker HMAC for its own ID; interactive session or dev credential | `broker.update` on the broker from a role binding; the owner relationship does not apply. |
+| Pull or remove an image on a named broker | Harness-config image operations | As for the operation | `broker.dispatch` on that broker is checked first, also for an auto-provide broker. |
 
 Registration never associates a broker with a project, and a project's default runtime broker must already be one of its providers. Register, re-register, rotate, link and unlink audit events record the credential kind and credential ID (a token ID or broker ID; never a secret) alongside the user.
 

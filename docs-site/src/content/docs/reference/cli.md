@@ -160,8 +160,11 @@ provisioning. A synchronous launch runs on the Hub independently of the CLI
 request: if the CLI gives up or you press Ctrl-C mid-dispatch, the Hub keeps
 going instead of rolling the agent back. Each dispatch attempt is bounded at
 120 seconds, so a slow cold start (for example on Kubernetes) can still fail on
-a synchronous launch; enable [asynchronous agent create](/scion/reference/server-config/#asynchronous-agent-create) for those. While waiting, each launch step is printed to stderr (nothing
-extra under `--format json`). If the wait times out, or you press Ctrl-C, only
+a synchronous launch; enable [asynchronous agent create](/scion/reference/server-config/#asynchronous-agent-create) for those. While waiting, each launch step is printed to stderr with a readable label, for example
+`my-agent: provisioning (waiting to be scheduled)` (nothing extra under `--format json`). If the
+launch fails, the error gives the failure code, its label and the step, for example `agent
+'my-agent' did not start (image_pull_failed: the agent image could not be pulled) while pulling the
+image`. A launch that ended with an error ends the wait whatever phase the agent reports. If the wait times out, or you press Ctrl-C, only
 the wait stops: the launch continues on the Hub, and re-running `scion start
 <agent-name>` resumes waiting. When the Hub accepted the launch and the wait
 times out, `start` reports the agent as accepted and launching, says why it

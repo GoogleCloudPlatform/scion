@@ -53,7 +53,7 @@ permissions). Available scopes:
 
 In addition to project and agent scopes, Scion supports UAT scopes for 7 other resource types: `skill`, `template`, `harness_config`, `group`, `user`, `broker`, and `gcp_service_account`. Each resource type provides a `*:manage` convenience alias (e.g., `skill:manage`, `template:manage`) that grants all available actions for that resource.
 
-To change your own injected skills (`scion user skills add` or `scion user skills remove`), a token needs the `user_skill_injection:update` scope on a Hub boundary. Reserved permissions (for example, `hub.federation.read`, `hub.federation.update`, `hub.teams_manifest.update`, `user.list`, and `agent.log_append`) are not offered as token scopes and are not part of any built-in role.
+To change your own injected skills (`scion user skills add` or `scion user skills remove`), a token needs the `user_skill_injection:update` scope on a Hub boundary. Reserved permissions (for example, `hub.federation.read`, `hub.federation.update`, `hub.teams_manifest.update`, and `agent.log_append`) are not offered as token scopes and are not part of any built-in role.
 
 You can dynamically discover all available scopes and their descriptions by querying the API:
 ```bash
@@ -307,6 +307,17 @@ The same per-request checks apply, with these limits:
   project needs `skill:create` on a token whose boundary contains the project; discovering
   them with no project needs `skill:create_global` on a hub token. Resolving `gh://` skill
   references with no project needs `skill:read` on a hub token.
+- **Schedules.** Creating a scheduled event or schedule needs `scheduled_event:create`; updating
+  or resuming a schedule needs `scheduled_event:update`. The request also passes the event type's
+  own target checks, and each fire stays within the recording token's ceiling and boundary. See
+  [Scheduling](/scion/hosted/user/scheduling/#security--authorization).
+- **Identity governance.** Reading role definitions, role bindings and access constraints needs
+  `role:read`, `role_binding:read` or `access_constraint:read`; reading another principal's
+  effective access or explaining its authorization needs `hub_audit:read`. These scopes can be
+  selected only on a hub token, and writes to these records still need a sign-in. Listing users
+  needs `user:list` together with `user:read`, and the list holds only users the token may read;
+  only super-admins hold `user:list`. Redeeming an invitation code and linking a chat account
+  always need a sign-in.
 - **Runtime Broker registration.** The `broker:create` scope can be selected only on a hub token.
   A project token cannot create or re-register a Runtime Broker (see
   [Hub-boundary tokens for broker registration](#hub-boundary-tokens-for-broker-registration)).
@@ -365,9 +376,6 @@ To use the CLI from a coding agent running on your machine, see
 Because a UAT is scoped, some operations that must be re-checked later, or that rely on
 owner or administrator shortcuts, require an unscoped sign-in (CLI or Web UI login) instead:
 
-- **Scheduled work**: creating, updating, re-targeting or resuming scheduled messages and
-  scheduled `dispatch_agent` events or schedules. See
-  [Scheduling](/scion/hosted/user/scheduling/#security--authorization).
 - **Runtime Broker registration**: creating a Runtime Broker (`POST /api/v1/brokers` and the
   embedded Runtime Broker path of project registration) admits a UAT only when it is a
   hub-boundary token carrying `broker:create` and your user holds `broker.create`; any other UAT
