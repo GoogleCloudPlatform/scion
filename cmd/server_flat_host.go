@@ -328,7 +328,7 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 		return errors.New("flat Runtime Broker host: co-located mode requires the Hub")
 	}
 
-	versionedSettings, _, vsErr := config.LoadEffectiveSettings("")
+	versionedSettings, _, vsErr := loadServerEffectiveSettings()
 	var vsBroker *config.V1BrokerConfig
 	if vsErr == nil && versionedSettings != nil && versionedSettings.Server != nil {
 		vsBroker = versionedSettings.Server.Broker
@@ -777,7 +777,7 @@ func enableColocatedProfileReferences(ctx context.Context, hubSrv *hub.Server) {
 		return
 	}
 	hubSrv.EnableProfileReferences(ctx, overlay, brokerID, globalDir)
-	_, _, _ = config.LoadEffectiveSettings("")
+	_, _, _ = config.LoadEffectiveSettings(globalDir)
 }
 
 // startFlatColocatedHeartbeat runs the co-located internal heartbeat for one

@@ -426,6 +426,7 @@ func TestHubTestIdentityCmd_ModeAvailability(t *testing.T) {
 		"hub.test-identity.web-code",
 		"hub.test-identity.cleanup",
 		"hub.test-identity.provenance",
+		"hub.test-identity.issue-admin",
 	}
 	humanOnly := []string{
 		"hub.test-identity.delegate",

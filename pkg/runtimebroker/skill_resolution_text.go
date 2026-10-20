@@ -175,10 +175,10 @@ func (f *skillFailure) publicText() string {
 // failure log record. For a skill resolution failure f they are its
 // user-visible text and correlation id: the full text is in the one record
 // logSkillResolutionFailure writes. For any other error (f nil) they are
-// err itself.
+// err's text, through sanitizeFailureCause.
 func failureLogAttrs(err error, f *skillFailure) []any {
 	if f == nil {
-		return []any{"error", err}
+		return []any{"error", sanitizeFailureCause(err.Error())}
 	}
 	return []any{"error", f.publicText(), "correlation_id", f.ref}
 }

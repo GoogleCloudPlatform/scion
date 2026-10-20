@@ -113,6 +113,7 @@ func NewTransport(baseURL string, opts ...TransportOption) *Transport {
 // rewound (non-empty Body, nil GetBody) is sent exactly once: its first
 // response is returned as-is, and its first transport error is returned
 // wrapped as "request failed: %w".
+// Canceling ctx interrupts the wait between attempts and returns ctx.Err().
 //
 // A retry replays the request, so Do must only be used with retries enabled
 // for idempotent operations. Non-idempotent operations should use DoNoRetry
@@ -129,6 +130,18 @@ func (t *Transport) Do(ctx context.Context, req *http.Request) (*http.Response, 
 	canRewind := bodyRewindable(req)
 	attempts := t.MaxRetries + 1
 	for i := 0; i < attempts; i++ {
+		if i > 0 {
+			timer := time.NewTimer(t.RetryWait)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+			}
+			timer.Stop()
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+
 		attempt := req.WithContext(ctx)
 		if i > 0 && req.GetBody != nil {
 			// The previous attempt drained (and the client closed) the body;
@@ -151,7 +164,6 @@ func (t *Transport) Do(ctx context.Context, req *http.Request) (*http.Response, 
 
 			// Retry on network errors
 			if retry {
-				time.Sleep(t.RetryWait)
 				continue
 			}
 			return nil, fmt.Errorf("request failed: %w", redactURLError(err))
@@ -160,7 +172,6 @@ func (t *Transport) Do(ctx context.Context, req *http.Request) (*http.Response, 
 		// Retry on 5xx errors
 		if resp.StatusCode >= 500 && retry {
 			_ = resp.Body.Close()
-			time.Sleep(t.RetryWait)
 			continue
 		}
 

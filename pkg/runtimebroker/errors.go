@@ -515,15 +515,15 @@ func runtimeFailureCause(err error) (reason metav1.StatusReason, code string, ca
 
 // runtimeFailureLogAttrs returns the log attributes describing err's cause
 // (runtimeFailureCause) for a terminal create failure's ERROR record:
-// cause (the innermost error text), and k8s_reason and cause_code when
-// set. Server logs only: none of these may reach a client body except the
-// fixed code.
+// cause (the innermost error text, through sanitizeFailureCause), and
+// k8s_reason and cause_code when set. Server logs only: none of these may
+// reach a client body except the fixed code.
 func runtimeFailureLogAttrs(err error) []any {
 	reason, code, cause := runtimeFailureCause(err)
 	if cause == nil {
 		return nil
 	}
-	attrs := []any{"cause", cause.Error()}
+	attrs := []any{"cause", sanitizeFailureCause(cause.Error())}
 	if reason != "" {
 		attrs = append(attrs, "k8s_reason", string(reason))
 	}

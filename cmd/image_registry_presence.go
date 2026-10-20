@@ -163,10 +163,12 @@ func bootstrapImageRegistryConfigured(configPath, activeProfile string) bool {
 }
 
 // colocatedActiveProfile returns active_profile as the co-located broker
-// loads it for an agent with no project (settings file plus
-// SCION_ACTIVE_PROFILE; "" when the settings cannot be loaded).
+// loads it for an agent with no project (the global settings file plus
+// SCION_ACTIVE_PROFILE; "" when the settings cannot be loaded). Like the
+// server's other startup loads it never merges a project found from the
+// working directory (ptone/scion#5362).
 func colocatedActiveProfile() string {
-	vs, _, err := config.LoadEffectiveSettings("")
+	vs, _, err := loadServerEffectiveSettings()
 	if err != nil || vs == nil {
 		return ""
 	}

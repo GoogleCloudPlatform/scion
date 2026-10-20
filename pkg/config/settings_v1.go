@@ -1987,6 +1987,14 @@ type V1ServerHubConduitConfig struct {
 	// scion server --role relay, hold the conduit sessions). Read at
 	// startup.
 	RelayMode string `json:"relay_mode,omitempty" yaml:"relay_mode,omitempty" koanf:"relay_mode"`
+	// TargetStreamDeadlines is "off" (default) or "enforce": whether
+	// targets enforce user streams' authorization deadlines locally
+	// (design §3.5, Target-side deadlines). The value is published to
+	// targets with the grant keys. The hub renews hub-held user streams
+	// to renewal-capable targets in both modes; with enforce, an open it
+	// cannot keep renewed is refused (503 unavailable,
+	// stream_renewal_unavailable). Requires the hub.conduit experiment.
+	TargetStreamDeadlines string `json:"target_stream_deadlines,omitempty" yaml:"target_stream_deadlines,omitempty" koanf:"target_stream_deadlines"`
 	// PeerSecret is the dedicated relay-peer secret: raw octets (one
 	// trailing newline removed), at least 32 of them, 16 distinct:
 	// the HMAC key of every relay-peer call is derived from it wherever a
@@ -3719,6 +3727,10 @@ func loadVersionedSettingsKoanf(projectPath string, withDefaults bool) (*koanf.K
 		}
 	}
 
+	// The hub project ID of the settings files, before the environment
+	// overlays it (for the precedence warning below).
+	fileHubProjectID := k.String(projectkeys.ConfigHubProjectIDKey)
+
 	// 4. Load environment variables (SCION_ prefix)
 	_ = k.Load(env.ProviderWithValue("SCION_", ".", func(key, value string) (string, interface{}) {
 		// An exported but empty variable is treated as unset, so it never
@@ -3749,13 +3761,26 @@ func loadVersionedSettingsKoanf(projectPath string, withDefaults bool) (*koanf.K
 	// For git projects, the project_id is stored in a project-id file inside the
 	// .scion directory rather than in the settings file. Read it here so that
 	// it overrides any hub.project_id inherited from global settings.
+	//
+	// SCION_HUB_PROJECT_ID (mapped to hub.project_id above) outranks both
+	// the settings files and this file; a disagreement is logged once per
+	// distinct pair of values. SCION_PROJECT_ID sets the top-level
+	// project_id only and does not compete with them.
+	hubEnv := envHubProjectID()
+	if hubEnv != "" {
+		warnProjectIDOverride(projectkeys.EnvHubProjectID, hubEnv, projectkeys.ConfigHubProjectIDKey, fileHubProjectID)
+	}
 	if projectPath != "" {
 		globalDir, _ := GetGlobalDir()
 		if projectPath != globalDir {
 			if projectID, err := ReadProjectID(projectPath); err == nil && projectID != "" {
-				_ = k.Load(confmap.Provider(map[string]interface{}{
-					projectkeys.ConfigHubProjectIDKey: projectID,
-				}, "."), nil)
+				if hubEnv != "" {
+					warnProjectIDOverride(projectkeys.EnvHubProjectID, hubEnv, projectIDFileSource(projectPath), projectID)
+				} else {
+					_ = k.Load(confmap.Provider(map[string]interface{}{
+						projectkeys.ConfigHubProjectIDKey: projectID,
+					}, "."), nil)
+				}
 			}
 		}
 	}
@@ -4321,21 +4346,22 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		}
 		if c := v1.Hub.Conduit; c != nil {
 			gc.Hub.Conduit = HubConduitConfig{
-				GrantKeyActivation:   c.GrantKeyActivation,
-				TCPAllowedPorts:      append([]int(nil), c.TCPAllowedPorts...),
-				InternalListen:       c.InternalListen,
-				InternalAdvertise:    c.InternalAdvertise,
-				PeerAuth:             c.PeerAuth,
-				PeerServiceAccounts:  append([]string(nil), c.PeerServiceAccounts...),
-				PeerAudience:         c.PeerAudience,
-				ReconnectWindow:      c.ReconnectWindow,
-				InstanceID:           c.InstanceID,
-				AuthzRecheckInterval: c.AuthzRecheckInterval,
-				LifetimeCap:          c.LifetimeCap,
-				ShutdownGrace:        c.ShutdownGrace,
-				ProxySessionMaxAge:   c.ProxySessionMaxAge,
-				RelayMode:            c.RelayMode,
-				PeerSecret:           c.PeerSecret,
+				GrantKeyActivation:    c.GrantKeyActivation,
+				TCPAllowedPorts:       append([]int(nil), c.TCPAllowedPorts...),
+				InternalListen:        c.InternalListen,
+				InternalAdvertise:     c.InternalAdvertise,
+				PeerAuth:              c.PeerAuth,
+				PeerServiceAccounts:   append([]string(nil), c.PeerServiceAccounts...),
+				PeerAudience:          c.PeerAudience,
+				ReconnectWindow:       c.ReconnectWindow,
+				InstanceID:            c.InstanceID,
+				AuthzRecheckInterval:  c.AuthzRecheckInterval,
+				LifetimeCap:           c.LifetimeCap,
+				ShutdownGrace:         c.ShutdownGrace,
+				ProxySessionMaxAge:    c.ProxySessionMaxAge,
+				RelayMode:             c.RelayMode,
+				TargetStreamDeadlines: c.TargetStreamDeadlines,
+				PeerSecret:            c.PeerSecret,
 			}
 			if m := c.StreamAuthzMax; m != nil {
 				gc.Hub.Conduit.StreamAuthzMax = HubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}
@@ -4695,21 +4721,22 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 	if c := gc.Hub.Conduit; !c.IsZero() {
 		v1Hub.Conduit = &V1ServerHubConduitConfig{
-			GrantKeyActivation:   c.GrantKeyActivation,
-			TCPAllowedPorts:      append([]int(nil), c.TCPAllowedPorts...),
-			InternalListen:       c.InternalListen,
-			InternalAdvertise:    c.InternalAdvertise,
-			PeerAuth:             c.PeerAuth,
-			PeerServiceAccounts:  append([]string(nil), c.PeerServiceAccounts...),
-			PeerAudience:         c.PeerAudience,
-			ReconnectWindow:      c.ReconnectWindow,
-			InstanceID:           c.InstanceID,
-			AuthzRecheckInterval: c.AuthzRecheckInterval,
-			LifetimeCap:          c.LifetimeCap,
-			ShutdownGrace:        c.ShutdownGrace,
-			ProxySessionMaxAge:   c.ProxySessionMaxAge,
-			RelayMode:            c.RelayMode,
-			PeerSecret:           c.PeerSecret,
+			GrantKeyActivation:    c.GrantKeyActivation,
+			TCPAllowedPorts:       append([]int(nil), c.TCPAllowedPorts...),
+			InternalListen:        c.InternalListen,
+			InternalAdvertise:     c.InternalAdvertise,
+			PeerAuth:              c.PeerAuth,
+			PeerServiceAccounts:   append([]string(nil), c.PeerServiceAccounts...),
+			PeerAudience:          c.PeerAudience,
+			ReconnectWindow:       c.ReconnectWindow,
+			InstanceID:            c.InstanceID,
+			AuthzRecheckInterval:  c.AuthzRecheckInterval,
+			LifetimeCap:           c.LifetimeCap,
+			ShutdownGrace:         c.ShutdownGrace,
+			ProxySessionMaxAge:    c.ProxySessionMaxAge,
+			RelayMode:             c.RelayMode,
+			TargetStreamDeadlines: c.TargetStreamDeadlines,
+			PeerSecret:            c.PeerSecret,
 		}
 		if m := c.StreamAuthzMax; !m.IsZero() {
 			v1Hub.Conduit.StreamAuthzMax = &V1ServerHubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}
@@ -5637,6 +5664,13 @@ func LoadSingleFileVersioned(dir string) (*VersionedSettings, error) {
 // then rewritten from the struct instead, which loses comments and unknown keys and
 // reorders keys (logged at debug level).
 func UpdateVersionedSetting(dir string, key string, value string) error {
+	// The layer-independent part of the write policy, before any read:
+	// global=true skips the layer rule, which needs the scope only
+	// UpdateSetting knows.
+	if err := ValidateSettingWrite(key, true); err != nil {
+		return err
+	}
+
 	// Held from the first read to the rename (see LockSettingsFile).
 	unlock := LockSettingsFile()
 	defer unlock()
@@ -5650,9 +5684,9 @@ func UpdateVersionedSetting(dir string, key string, value string) error {
 		return err
 	}
 	if edit.noop {
-		// Keys with no v1 equivalent are accepted and ignored. Loading still
-		// runs the legacy-key migration and surfaces a malformed file, as
-		// before.
+		// hub_connections.* is accepted and left unchanged (see
+		// versionedSettingEditFor). Loading still runs the legacy-key
+		// migration and surfaces a malformed file, as before.
 		_, err := LoadSingleFileVersioned(dir)
 		return err
 	}
@@ -5667,7 +5701,8 @@ func UpdateVersionedSetting(dir string, key string, value string) error {
 
 // versionedSettingEdit is the v1 YAML edit that UpdateVersionedSetting makes
 // for one key: set path to value, or delete path when value is nil (an empty
-// string for an omitempty field). noop marks keys with no v1 equivalent.
+// string for an omitempty field). noop marks hub_connections.* keys, which
+// are accepted and left unchanged.
 type versionedSettingEdit struct {
 	path  []string
 	value *yamlv3.Node
@@ -5681,7 +5716,7 @@ type versionedSettingKey struct {
 }
 
 // versionedSettingKeys maps every key UpdateVersionedSetting accepts (other
-// than the project ID aliases and the ignored keys) to its v1 path. It must
+// than the project ID aliases and hub_connections.*) to its v1 path. It must
 // stay in step with the switch in updateVersionedSettingStruct; the
 // TestUpdateVersionedSetting_MatchesStructPath table test enforces that.
 var versionedSettingKeys = map[string]versionedSettingKey{
@@ -5713,10 +5748,11 @@ func versionedSettingEditFor(key, value string) (versionedSettingEdit, error) {
 	switch {
 	case projectkeys.IsProjectIDConfigKey(key) || projectkeys.IsHubProjectIDConfigKey(key):
 		k = versionedSettingKey{path: []string{"hub", "project_id"}}
-	case key == "hub.token", key == "hub.apiKey", key == "hub.lastSyncedAt",
-		key == "bucket.provider", key == "bucket.name", key == "bucket.prefix",
-		strings.HasPrefix(key, "hub_connections."):
-		// Deprecated or unsupported in v1: accepted and ignored.
+	case strings.HasPrefix(key, "hub_connections."):
+		// Not written in v1: accepted and left unchanged. "config set"
+		// rejects these keys itself (ValidateConfigSetKey). Keys with no
+		// place in a v1 file at all are rejected before this point
+		// (ValidateSettingWrite).
 		return versionedSettingEdit{noop: true}, nil
 	default:
 		var ok bool
@@ -6111,18 +6147,9 @@ func updateVersionedSettingStruct(dir string, key string, value string) error {
 		}
 		vs.Server.Auth.Username = value
 
-	// --- Deprecated keys: skip silently in v1 ---
-	case "hub.token", "hub.apiKey", "hub.lastSyncedAt":
-		// These fields don't exist in v1 — skip without error
-		return nil
-
-	// --- Bucket: not present in v1 ---
-	case "bucket.provider", "bucket.name", "bucket.prefix":
-		// Bucket config is deprecated in v1 — skip without error
-		return nil
-
 	default:
-		// Handle hub_connections.* keys: skip in v1 format (not supported)
+		// hub_connections.* keys are left unchanged, as on the YAML path
+		// (versionedSettingEditFor).
 		if strings.HasPrefix(key, "hub_connections.") {
 			return nil
 		}
