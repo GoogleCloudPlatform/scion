@@ -38,11 +38,13 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/httpcompress"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
+	"github.com/GoogleCloudPlatform/scion/pkg/webassets"
 	"github.com/GoogleCloudPlatform/scion/web"
 	"github.com/google/uuid"
 	"github.com/gorilla/sessions"
@@ -291,6 +293,10 @@ type WebServer struct {
 	// are detected (see loadFingerprintedAssets). It is built before the
 	// server starts serving and only read afterwards, so it needs no lock.
 	fingerprintedAssets map[string]bool
+
+	// staticIndex serves static assets with precompressed variants and
+	// ETags (pkg/webassets); see staticAssets in web_static_index.go.
+	staticIndex staticAssetIndex
 
 	// Dedicated request logger (nil = disabled)
 	requestLogger *slog.Logger
@@ -691,7 +697,7 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 		ws.assetsDisk = cfg.AssetsDir
 		ws.logger().Info("Web server using filesystem assets", "dir", cfg.AssetsDir)
 	} else if web.AssetsEmbedded {
-		sub, err := fs.Sub(web.ClientAssets, "dist/client")
+		sub, err := embeddedClientFS()
 		if err != nil {
 			ws.logger().Error("Failed to create sub-filesystem from embedded assets. Run 'make web && make build' to rebuild with web assets included, or use --web-assets-dir.", "error", err)
 		} else if _, err := fs.Stat(sub, "assets/main.js"); err != nil {
@@ -716,6 +722,9 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 	ws.hasAssets = ws.detectWebAssets()
 	if ws.hasAssets {
 		ws.fingerprintedAssets = ws.loadFingerprintedAssets()
+		// Build the precompressed-asset index once, at startup (it hashes
+		// every servable file of the embedded build).
+		ws.staticAssets()
 	}
 
 	ws.registerRoutes()
@@ -902,7 +911,21 @@ func (ws *WebServer) MountHubAPI(hubHandler http.Handler, hubShutdown func(conte
 	// Register the Hub API handler on the mux. Go's ServeMux uses
 	// longest-prefix matching, so /api/v1/ takes priority over /
 	// (the SPA catch-all).
-	ws.mux.Handle("/api/v1/", ws.sessionToBearerMiddleware(hubHandler))
+	// JSON responses are gzipped for clients that accept it; streams,
+	// upgrades, the paths in isCompressBypassPath and non-GET requests to
+	// the create collections (isCreateCollectionPath) are never wrapped.
+	apiHandler := ws.sessionToBearerMiddleware(hubHandler)
+	compressed := httpcompress.Wrap(apiHandler, httpcompress.Options{
+		BypassPath: isCompressBypassPath,
+		MinSize:    httpcompress.DefaultMinSize,
+	})
+	ws.mux.Handle("/api/v1/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && isCreateCollectionPath(r.URL.Path) {
+			apiHandler.ServeHTTP(w, r)
+			return
+		}
+		compressed.ServeHTTP(w, r)
+	}))
 	// Forward OIDC discovery endpoints so they are reachable in combo mode
 	// (hub + web on the same port). Without this, the SPA catch-all "/"
 	// intercepts /.well-known/ requests and returns HTML instead of JSON.
@@ -1220,11 +1243,14 @@ func (ws *WebServer) serveStaticAsset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var fileServer http.Handler
+	var staticFS http.FileSystem
 	if ws.assetsDisk != "" {
-		fileServer = http.FileServer(http.Dir(ws.assetsDisk))
+		// Like http.Dir, but nothing outside the directory (by ".." or a
+		// symlink) and no *.br/*.gz sibling is opened.
+		staticFS = webassets.DirFileSystem(ws.assetsDisk)
 	} else {
-		fileServer = http.FileServer(http.FS(ws.assets))
+		// Like http.FS, but no *.br/*.gz sibling is opened.
+		staticFS = webassets.FSFileSystem(ws.assets)
 	}
 
 	// Go's built-in MIME table has no entry for these, and the system
@@ -1234,15 +1260,101 @@ func (ws *WebServer) serveStaticAsset(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", ct)
 	}
 
-	// Files Vite fingerprinted (listed in its build manifest) and other
-	// hex-hashed names get long-lived caching; the unhashed entry
-	// (assets/main.js) and every other file get revalidation.
-	if ws.fingerprintedAssets[r.URL.Path] || isHashedAsset(r.URL.Path) {
-		w.Header().Set("Cache-Control", "public, max-age=86400")
-	} else {
-		w.Header().Set("Cache-Control", "no-cache")
+	// Set here for the file server fallback (and the 404s below); Serve sets
+	// the same value through the same policy.
+	w.Header().Set("Cache-Control", ws.staticCacheControl(r.URL.Path))
+
+	// The mux cleans only the escaped path, so a decoded path can still
+	// hold dot segments or empty segments (from %2e or %2f). Such a path is
+	// refused rather than cleaned, and a precompressed sibling is never
+	// served by its own name, so the name the file server would open is
+	// always the name checked here.
+	// A segment starting with a dot (such as .vite) is never public.
+	clean := cleanStaticPath(r.URL.Path)
+	if clean != r.URL.Path || webassets.IsVariantName(clean) || hasDotSegment(clean) {
+		http.NotFound(w, r)
+		return
 	}
-	fileServer.ServeHTTP(w, r)
+
+	// Indexed files are served with their precompressed variant (br, gzip)
+	// and an ETag; anything else (unindexed paths) falls back to the file
+	// server below. Directories are never listed.
+	if srv := ws.staticAssets(); srv != nil && srv.Serve(w, r, ws.staticCacheControl) {
+		return
+	}
+	if isStaticDir(staticFS, clean) {
+		http.NotFound(w, r)
+		return
+	}
+	http.FileServer(staticFS).ServeHTTP(w, r)
+}
+
+// hasDotSegment reports whether any segment of the slash path p starts
+// with a dot (for example /.vite/manifest.json or /assets/.hidden).
+// A segment starts with a dot exactly when the path does or a "/." occurs
+// in it, so the check scans the path without allocating.
+func hasDotSegment(p string) bool {
+	return strings.HasPrefix(p, ".") || strings.Contains(p, "/.")
+}
+
+// firstSegmentIsDot reports whether the first segment of the URL path p
+// starts with a dot (for example /.vite/manifest.json). No client-side
+// route lives there.
+func firstSegmentIsDot(p string) bool {
+	return strings.HasPrefix(strings.TrimPrefix(p, "/"), ".")
+}
+
+// isStaticDir reports whether the clean request path names a directory of
+// the asset file system.
+func isStaticDir(fsys http.FileSystem, clean string) bool {
+	f, err := fsys.Open(path.Clean(clean))
+	if err != nil {
+		return false
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	return err == nil && info.IsDir()
+}
+
+// cleanStaticPath cleans a URL path the way http.ServeMux does: rooted,
+// path.Clean, and a trailing slash kept (so directory paths stay as they
+// are).
+func cleanStaticPath(p string) string {
+	if p == "" {
+		return "/"
+	}
+	if p[0] != '/' {
+		p = "/" + p
+	}
+	np := path.Clean(p)
+	if p[len(p)-1] == '/' && np != "/" {
+		np += "/"
+	}
+	return np
+}
+
+// Cache-Control values of static assets (see staticCacheControl).
+const (
+	cacheControlImmutable = "public, max-age=31536000, immutable"
+	cacheControlOneDay    = "public, max-age=86400"
+	cacheControlNoCache   = "no-cache"
+)
+
+// staticCacheControl is the Cache-Control of a static asset. Files Vite
+// fingerprinted (listed in its build manifest) are named by their content,
+// so they are cached for a year and never revalidated. A hex-hashed name
+// that the manifest does not list only looks content-addressed, so it is
+// cached for a day. The unhashed entry (assets/main.js) and every other
+// file are revalidated on each use (cheap: they carry an ETag).
+func (ws *WebServer) staticCacheControl(requestPath string) string {
+	switch {
+	case ws.fingerprintedAssets[requestPath]:
+		return cacheControlImmutable
+	case isHashedAsset(requestPath):
+		return cacheControlOneDay
+	default:
+		return cacheControlNoCache
+	}
 }
 
 // staticContentTypes maps file extensions missing from Go's built-in MIME
@@ -1446,7 +1558,7 @@ func (ws *WebServer) prefetchPageData(r *http.Request) template.JS {
 		}
 		// The session middleware admitted this request; a test identity
 		// row here means a valid test identity web session.
-		if row, ok := r.Context().Value(dbUserContextKey{}).(*store.User); ok && row != nil && row.IsTestFixture() && row.ID == u.UserID {
+		if row, ok := r.Context().Value(dbUserContextKey{}).(*store.User); ok && row != nil && testIdentityRowByKind(row) && row.ID == u.UserID {
 			if m, _ := ws.readTestIdentityMarker(r); m != nil && m.UserID == row.ID {
 				envelope.User.TestIdentity = &webTestIdentityInfo{ExpiresAt: time.UnixMilli(m.Expiry).UTC()}
 			}
@@ -1538,6 +1650,14 @@ func (ws *WebServer) spaHandler() http.HandlerFunc {
 		if r.URL.Path != "/" && ws.tryServeStaticFile(w, r) {
 			return
 		}
+		// A path whose first segment starts with a dot (such as
+		// /.vite/manifest.json) is neither a public file nor a client-side
+		// route. A deeper dot segment can be part of a route, so it still
+		// gets the shell.
+		if firstSegmentIsDot(r.URL.Path) {
+			http.NotFound(w, r)
+			return
+		}
 
 		// When no web assets are available (e.g. binary built via `go install`
 		// without embedded assets), serve a self-contained error page instead
@@ -1577,6 +1697,13 @@ func (ws *WebServer) tryServeStaticFile(w http.ResponseWriter, r *http.Request) 
 	// Clean the path and strip the leading slash for fs.Open.
 	name := strings.TrimPrefix(filepath.ToSlash(r.URL.Path), "/")
 	if name == "" {
+		return false
+	}
+	// A non-clean decoded path (dot or empty segments left by %2e or %2f),
+	// a precompressed sibling (*.br, *.gz, checked on the clean name) and a
+	// path with a segment starting with a dot (such as .vite) are never
+	// public files: treat them as missing.
+	if clean := cleanStaticPath(r.URL.Path); clean != r.URL.Path || webassets.IsVariantName(clean) || hasDotSegment(clean) {
 		return false
 	}
 
@@ -2448,6 +2575,149 @@ func isProxyRoute(path string) bool {
 	}
 	parts := strings.Split(strings.TrimPrefix(path, prefix), "/")
 	return len(parts) >= 4 && parts[1] == "ports" && parts[3] == "proxy"
+}
+
+// isCompressBypassPath reports /api/v1/ paths whose responses are never
+// gzipped by the MountHubAPI compression wrapper (pkg/httpcompress). The
+// wrapper already passes through upgrade and event-stream requests and every
+// non-JSON response; this list adds:
+//   - streaming and connection routes: agent PTY and every port
+//     route (proxy, tunnel, list; see isProxyRoute), and any path ending in
+//     /stream or /events;
+//   - endpoints that return credentials or secret values: /api/v1/auth/,
+//     the agent-facing /api/v1/agent/ endpoints (minted tokens, secret
+//     fetch), agent token refresh, delegation exchange, broker registration,
+//     join and secret rotation, project registration, invite creation, test
+//     identities, and every env or secrets route;
+//   - responses with signed object-store or capability URLs: every agent
+//     workspace route (sync-from, sync-to; the status GET is included as a
+//     fail-safe), template, user template, harness-config and skill upload
+//     and download, skill versions and skill resolve, artifact links,
+//     version views, and the artifact view and shared routes
+//     (isSignedURLPath);
+//   - agent item responses (/api/v1/agents/{id} and
+//     /api/v1/projects/{projectId}/agents/{id}).
+//
+// Keep this list in step with new streaming or credential-returning routes;
+// TestCompressBypass_StreamRoutesFromCatalog fails for an uncovered stream
+// or websocket entry point in the authz catalog.
+func isCompressBypassPath(path string) bool {
+	const api = "/api/v1/"
+	if !strings.HasPrefix(path, api) {
+		return false
+	}
+	for _, prefix := range []string{
+		"/api/v1/auth/",
+		"/api/v1/agent/",
+		"/api/v1/test-identities",
+		"/api/v1/admin/invites",
+		"/api/v1/artifacts/view/",
+		"/api/v1/artifacts/shared/",
+	} {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	trimmed := strings.TrimSuffix(path, "/")
+	switch trimmed {
+	case "/api/v1/auth", "/api/v1/agent", "/api/v1/brokers", "/api/v1/brokers/join", "/api/v1/projects/register":
+		return true
+	}
+	for _, suffix := range []string{
+		"/stream",
+		"/events",
+		"/token/refresh",
+		"/refresh-token",
+		"/exchange",
+		"/rotate-secret",
+	} {
+		if strings.HasSuffix(trimmed, suffix) {
+			return true
+		}
+	}
+	segs := strings.Split(strings.TrimPrefix(trimmed, api), "/")
+	if isSignedURLPath(segs) {
+		return true
+	}
+	for i, seg := range segs {
+		switch seg {
+		case "env", "secrets":
+			return true
+		case "agents":
+			// Agent item responses (GET/PATCH /api/v1/agents/{id} and the
+			// project-scoped form) stay uncompressed.
+			if i+2 == len(segs) {
+				return true
+			}
+			if i+2 < len(segs) {
+				switch segs[i+2] {
+				case "pty", "ports", "workspace":
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// isSignedURLPath reports /api/v1/ routes (as path segments after
+// /api/v1/) whose responses carry signed object-store or capability URLs:
+// template, user template, harness-config and skill upload and download
+// routes, skill versions and skill resolve (the batch POST
+// /api/v1/skills/resolve returns signed download URLs; the per-skill resolve
+// is included as a fail-safe), and artifact links and version views. The upload, download and versions segments match at any depth
+// below the resource (for example a file path starting with download/):
+// that over-match is intentional, as it only leaves more responses
+// uncompressed.
+func isSignedURLPath(segs []string) bool {
+	if len(segs) == 0 {
+		return false
+	}
+	rest := segs[1:]
+	switch {
+	case segs[0] == "templates", segs[0] == "harness-configs", segs[0] == "skills":
+	case len(segs) >= 3 && segs[0] == "users" && segs[1] == "me" && segs[2] == "templates":
+		rest = segs[3:]
+	case segs[0] == "artifacts":
+		for _, seg := range rest {
+			if seg == "links" {
+				return true
+			}
+		}
+		return len(rest) >= 2 && rest[len(rest)-1] == "view"
+	default:
+		return false
+	}
+	for _, seg := range rest {
+		switch seg {
+		case "upload", "download":
+			return true
+		case "versions", "resolve":
+			if segs[0] == "skills" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isCreateCollectionPath reports the collection paths whose create (non-GET)
+// responses MountHubAPI keeps uncompressed, with or without a trailing slash:
+// /api/v1/agents and /api/v1/projects/{projectId}/agents (agent create), and
+// /api/v1/templates, /api/v1/users/me/templates, /api/v1/harness-configs and
+// /api/v1/skills (their create responses carry signed upload URLs). GET lists
+// on them are compressed.
+func isCreateCollectionPath(path string) bool {
+	const api = "/api/v1/"
+	if !strings.HasPrefix(path, api) {
+		return false
+	}
+	switch strings.TrimSuffix(strings.TrimPrefix(path, api), "/") {
+	case "agents", "templates", "users/me/templates", "harness-configs", "skills":
+		return true
+	}
+	segs := strings.Split(strings.TrimSuffix(strings.TrimPrefix(path, api), "/"), "/")
+	return len(segs) == 3 && segs[0] == "projects" && segs[1] != "" && segs[2] == "agents"
 }
 
 // devAuthMiddleware auto-populates the session with the dev user identity

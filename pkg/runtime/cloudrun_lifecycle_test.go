@@ -239,16 +239,31 @@ func newFakeCloudRunRuntime(t *testing.T, fake *fakeInstancesClient) *CloudRunRu
 	rt.newClient = func(ctx context.Context) (cloudrun.InstancesAPI, error) {
 		return fake, nil
 	}
+	rt.provisionNFS = stubCloudRunNFSProvision
 	return rt
 }
 
-// runConfigForTest returns a RunConfig that does not exercise NFS provisioning,
-// so Run reaches the Instances API without touching the filesystem.
+// stubCloudRunNFSProvision stands in for provisionCloudRunNFS: it returns
+// fixed NFS export paths without touching the filesystem, so Run reaches
+// the Instances API on the NFS backend.
+func stubCloudRunNFSProvision(context.Context, RunConfig, string, int, int) (*cloudRunNFSProvisionPaths, error) {
+	return &cloudRunNFSProvisionPaths{
+		server:              "10.0.0.2",
+		workspaceExportPath: "/ws/projects/proj/workspace",
+		homeExportPath:      "/ws/projects/proj/agents/agent-1/home",
+		secretsExportPath:   "/ws/projects/proj/agents/agent-1/staged",
+	}, nil
+}
+
+// runConfigForTest returns a RunConfig on the NFS backend, the only one Run
+// accepts. With newFakeCloudRunRuntime's provisioning stub, Run reaches the
+// Instances API without touching the filesystem.
 func runConfigForTest() RunConfig {
 	return RunConfig{
-		Name:   "test-agent",
-		Image:  "docker.io/scion/agent:latest",
-		Labels: map[string]string{"agent_id": "agent-1"},
+		Name:                 "test-agent",
+		Image:                "docker.io/scion/agent:latest",
+		Labels:               map[string]string{"agent_id": "agent-1"},
+		WorkspaceBackendName: "nfs",
 	}
 }
 

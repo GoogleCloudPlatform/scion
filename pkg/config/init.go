@@ -578,8 +578,7 @@ func ensureProjectSettingsFile(configDir string, opt InitProjectOpts) error {
 		if err != nil {
 			return fmt.Errorf("failed to read default project settings: %w", err)
 		}
-		newSettingsPath := filepath.Join(configDir, "settings.yaml")
-		if err := os.WriteFile(newSettingsPath, defaultSettings, 0644); err != nil {
+		if err := seedSettingsFile(configDir, defaultSettings); err != nil {
 			return fmt.Errorf("failed to seed settings.yaml: %w", err)
 		}
 	}
@@ -606,8 +605,7 @@ func ensureProjectConfigFiles(configDir string, opt InitProjectOpts) error {
 		if err != nil {
 			return fmt.Errorf("failed to read default project settings: %w", err)
 		}
-		newSettingsPath := filepath.Join(configDir, "settings.yaml")
-		if err := os.WriteFile(newSettingsPath, defaultSettings, 0644); err != nil {
+		if err := seedSettingsFile(configDir, defaultSettings); err != nil {
 			return fmt.Errorf("failed to seed settings.yaml: %w", err)
 		}
 	}
@@ -677,12 +675,37 @@ func writeProjectSettings(externalPath, workspacePath, projectID string, opt Ini
 		return fmt.Errorf("failed to marshal project settings: %w", err)
 	}
 
-	settingsFile := filepath.Join(externalPath, "settings.yaml")
-	if err := os.WriteFile(settingsFile, data, 0644); err != nil {
+	if err := replaceSettingsFile(externalPath, filepath.Join(externalPath, "settings.yaml"), data); err != nil {
 		return fmt.Errorf("failed to write project settings.yaml: %w", err)
 	}
 
 	return nil
+}
+
+// seedSettingsFile writes data as settings.yaml in dir unless dir already
+// has a settings file, checked again under the settings lock so that two
+// concurrent seeds cannot replace a file another writer has just created.
+func seedSettingsFile(dir string, data []byte) error {
+	lock, err := LockSettingsDir(dir)
+	if err != nil {
+		return err
+	}
+	defer lock.Unlock()
+	if GetSettingsPath(dir) != "" {
+		return nil
+	}
+	return writeSettingsFileAtomic(lock, filepath.Join(dir, "settings.yaml"), data)
+}
+
+// replaceSettingsFile replaces the settings file at path in dir with data,
+// atomically and under the settings lock for dir.
+func replaceSettingsFile(dir, path string, data []byte) error {
+	lock, err := LockSettingsDir(dir)
+	if err != nil {
+		return err
+	}
+	defer lock.Unlock()
+	return writeSettingsFileAtomic(lock, path, data)
 }
 
 // InitMachineOpts controls optional behavior for InitMachine.
@@ -774,8 +797,7 @@ func InitMachine(harnesses []api.Harness, opts ...InitMachineOpts) error {
 			}
 		}
 
-		newSettingsPath := filepath.Join(globalDir, "settings.yaml")
-		if err := os.WriteFile(newSettingsPath, defaultSettings, 0644); err != nil {
+		if err := seedSettingsFile(globalDir, defaultSettings); err != nil {
 			return fmt.Errorf("failed to seed global settings.yaml: %w", err)
 		}
 	}
@@ -897,4 +919,36 @@ func EnsureScionGitignore(repoRoot string) error {
 	}
 
 	return os.WriteFile(gitignorePath, []byte(newContent), 0644)
+}
+
+// EnsureScionGitExclude ensures that .scion/agents/ is ignored by git at the
+// given repo root without changing the repository's tracked files. If no
+// existing source (any .gitignore, info/exclude or global excludes) already
+// covers the path, it appends .scion/agents/ to the repository's own
+// info/exclude file, which git never tracks.
+//
+// It is for checkouts the hub creates and seeds with an explicit .scion
+// target (InitProject leaves the tracked .gitignore alone there), so that
+// they pass the provisioning check that agent state is git-ignored.
+//
+// A symbolic link or other non-regular file at info or info/exclude is
+// refused rather than followed. If the path is still not ignored once the
+// rule is in place (a tracked negation such as "!.scion/agents/" outranks
+// info/exclude), it returns an error.
+func EnsureScionGitExclude(repoRoot string) error {
+	if util.IsIgnored(repoRoot, ".scion/agents/") {
+		return nil
+	}
+
+	excludePath, err := util.AppendGitExcludeLine(repoRoot, ".scion/agents/")
+	if err != nil {
+		return err
+	}
+
+	// info/exclude has the lowest precedence: a negation such as
+	// "!.scion/agents/" in a tracked .gitignore still wins over it.
+	if !util.IsIgnored(repoRoot, ".scion/agents/") {
+		return fmt.Errorf("the repository at %s un-ignores .scion/agents/; the rule in %s has no effect", repoRoot, excludePath)
+	}
+	return nil
 }

@@ -290,12 +290,13 @@ func (s *Server) resolveOutboundRouting(
 			// Token is a UUID — direct lookup by primary key.
 			u, err := s.store.GetUser(ctx, identifier)
 			if err == nil {
+				// A project visitor this agent may not send to is
+				// answered as an unknown user (visitorRecipientRefusal).
+				err = s.visitorRecipientRefusal(ctx, agent, u)
+			}
+			if err == nil {
 				recipientID = u.ID
-				name := u.Email
-				if name == "" {
-					name = u.ID
-				}
-				recipient = "user:" + name
+				recipient = "user:" + userAddressName(u)
 			} else if errors.Is(err, store.ErrNotFound) {
 				writeError(w, http.StatusBadRequest, ErrCodeAddrUnknown,
 					fmt.Sprintf("user:%s is not a valid addressee. No user exists with that ID.", identifier), nil)
@@ -361,13 +362,14 @@ func (s *Server) resolveOutboundRouting(
 		// security benefit.
 		u, err := s.store.GetUser(ctx, recipientID)
 		if err == nil {
+			// A project visitor this agent may not send to is answered
+			// as an unknown user (visitorRecipientRefusal).
+			err = s.visitorRecipientRefusal(ctx, agent, u)
+		}
+		if err == nil {
 			recipientID = u.ID
 			if recipient == "" {
-				name := u.Email
-				if name == "" {
-					name = u.ID
-				}
-				recipient = "user:" + name
+				recipient = "user:" + userAddressName(u)
 			}
 		} else if errors.Is(err, store.ErrNotFound) {
 			writeError(w, http.StatusBadRequest, ErrCodeAddrUnknown,
@@ -1147,6 +1149,10 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		ValidationError(w, fmt.Sprintf("message exceeds %d character limit (current: %d chars). Consider splitting into multiple messages using multiple scion message invocations", messages.MaxMessageLength, msgLen), nil)
 		return
 	}
+	// Rewrite agent-prefixed mentions once, here, so every branch below
+	// (agent DM, mention fan-out, human mentions, the stored row) sees the
+	// same body.
+	req.Msg = rewriteIncomingAgentMentions(req.Msg)
 
 	// Validate DM key format when the thread_id looks like a DM key.
 	// Non-DM thread IDs (topic UUIDs, etc.) pass through as-is.
@@ -1865,6 +1871,19 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	}
 	messaging.RecordStep(ctx, "request_parsed")
 
+	// A project visitor sends a direct text message only
+	// (visitorMessageRequestRefusal); every other field is refused before
+	// anything is looked up or written. The hub sets the timestamp.
+	if visitor, ok := GetIdentityFromContext(ctx).(*VisitorIdentity); ok && visitor != nil {
+		if field := visitorMessageRequestRefusal(&req); field != "" {
+			ValidationError(w, field+" is not available to visitors", map[string]interface{}{"field": field})
+			return
+		}
+		if req.StructuredMessage != nil {
+			req.StructuredMessage.Timestamp = ""
+		}
+	}
+
 	// The retired end-of-turn assistant-reply type is dropped here too, as
 	// in handleAgentOutboundMessage: accepted with 200 so a caller sees
 	// success, but never persisted, dispatched or published.
@@ -1904,11 +1923,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		structuredMsg.SenderID = ""
 		if user := GetUserIdentityFromContext(ctx); user != nil {
 			structuredMsg.SenderID = user.ID()
-			if email := user.Email(); email != "" {
-				structuredMsg.Sender = "user:" + email
-			} else {
-				structuredMsg.Sender = "user:" + user.ID()
-			}
+			structuredMsg.Sender = userSenderAddress(user)
 		} else if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 			structuredMsg.SenderID = agentIdent.ID()
 			senderSlug := agentIdent.ID() // fallback to UUID
@@ -1930,11 +1945,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		senderID := ""
 		if user := GetUserIdentityFromContext(ctx); user != nil {
 			senderID = user.ID()
-			if email := user.Email(); email != "" {
-				sender = "user:" + email
-			} else {
-				sender = "user:" + user.ID()
-			}
+			sender = userSenderAddress(user)
 		} else if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 			senderID = agentIdent.ID()
 			senderSlug := agentIdent.ID() // fallback to UUID
@@ -1954,6 +1965,11 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		ValidationError(w, "message or structured_message is required", nil)
 		return
 	}
+
+	// Rewrite agent-prefixed mentions once, before validation, so the group,
+	// direct and mention fan-out paths below all see the same body.
+	structuredMsg.Msg = rewriteIncomingAgentMentions(structuredMsg.Msg)
+	plainMessage = structuredMsg.Msg
 
 	// Validate the assembled message through the new envelope choke point.
 	// The structuredMsg is still the primary type during the transition;
@@ -2811,6 +2827,11 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		structuredMsg.Metadata, artifactRefs, artifactWarning = s.admitMessageArtifacts(ctx, structuredMsg.Metadata,
 			directAgentRecipient(agent, groupID))
 		structuredMsg.ArtifactRefsAdmitted = len(artifactRefs) > 0
+		// A project visitor's message carries the hub-set visitor sender
+		// metadata (the strip above removed any client value), so the
+		// envelope rendered below tells the agent that a project visitor
+		// sent it.
+		structuredMsg.Metadata = stampVisitorSender(structuredMsg.Metadata, GetIdentityFromContext(ctx))
 
 		if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 			s.messageLog.Error("Failed to persist message", "error", err)

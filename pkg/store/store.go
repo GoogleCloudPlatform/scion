@@ -221,9 +221,10 @@ type Store interface {
 	// UserKindTestHubAdmin or UserKindTestSuperAdmin. It requires an admin
 	// Kind, the kind's role (TestAdminRole), an email in the kind's domain
 	// (TestAdminEmailDomain), a non-nil ExpiresAt, a non-empty IssuedBy and
-	// IssuanceID, and a system-scoped roleDefinitionID, and refuses a non-nil
-	// IssuerDelegationID (workload issuer delegations issue the member tier
-	// only); it returns ErrInvalidInput otherwise. The binding is created with ExpiresAt equal
+	// IssuanceID, and a system-scoped roleDefinitionID, and refuses an empty
+	// non-nil IssuerDelegationID (a non-empty one, from a workload issuer
+	// delegation of the kind's scope, is written once); it returns
+	// ErrInvalidInput otherwise. The binding is created with ExpiresAt equal
 	// to the identity's expiry and CreatedBy TestIdentityIssuanceCreatedBy,
 	// so it never outlives the identity. It is a Store method because it
 	// spans the user and role-binding sub-stores.
@@ -277,6 +278,84 @@ type Store interface {
 	// account. It is safe to call on the store passed to WithTx.
 	LinkPendingFederatedUser(ctx context.Context, userID, issuer, subject, email string) (*User, error)
 
+	// CreateProjectVisitorRule creates a project visitor rule. It requires
+	// a ProjectID, an Issuer (normalized with NormalizeFederatedIssuer) and
+	// a Domain (normalized with NormalizeVisitorRuleDomain) that passes
+	// ValidVisitorRuleDomain, and, when both bounds are set, an ExpiresAt
+	// after NotBefore; it returns ErrInvalidInput otherwise. It generates
+	// the ID when empty and writes the normalized fields, the ID and
+	// CreatedAt back to rule. A second rule for the same (ProjectID,
+	// Issuer, Domain) returns ErrAlreadyExists. It is safe to call on the
+	// store passed to WithTx.
+	CreateProjectVisitorRule(ctx context.Context, rule *ProjectVisitorRule) error
+
+	// GetProjectVisitorRule returns the project visitor rule id, or
+	// ErrNotFound.
+	GetProjectVisitorRule(ctx context.Context, id string) (*ProjectVisitorRule, error)
+
+	// ListProjectVisitorRules returns the project visitor rules of
+	// projectID, oldest first.
+	ListProjectVisitorRules(ctx context.Context, projectID string) ([]*ProjectVisitorRule, error)
+
+	// ListActiveProjectVisitorRules returns the project visitor rules, of
+	// every project, for issuer and domain (both normalized before the
+	// lookup; the domain matches exactly) whose window contains at
+	// (ProjectVisitorRule.ActiveAt), oldest first.
+	ListActiveProjectVisitorRules(ctx context.Context, issuer, domain string, at time.Time) ([]*ProjectVisitorRule, error)
+
+	// UpdateProjectVisitorRuleWindow replaces the NotBefore and
+	// ExpiresAt of the project visitor rule id (nil clears a bound)
+	// and of every role binding the rule created (SourceRuleID), in
+	// one transaction, and returns the updated rule and the updated
+	// bindings. The project row (as LockProjectForMembership does)
+	// and then the rule row are locked before the bindings are
+	// changed, so a rule binding created concurrently either
+	// is changed too or takes the new window, and a concurrent
+	// deletion of the project runs before or after it. A missing
+	// rule returns ErrNotFound. It is safe to call on the store
+	// passed to WithTx.
+	UpdateProjectVisitorRuleWindow(ctx context.Context, id string, notBefore, expiresAt *time.Time) (*ProjectVisitorRule, []*RoleBinding, error)
+
+	// DeleteProjectVisitorRule deletes the project visitor rule id, every
+	// role binding it created (SourceRuleID) and its exclusions, in one
+	// transaction, and returns the deleted bindings. A binding with no
+	// SourceRuleID (a visitor grant by email) is never deleted. The
+	// project row (as LockProjectForMembership does) and then the rule row
+	// are locked before the bindings are deleted, so a rule binding
+	// created concurrently is either deleted too or refused, and a
+	// concurrent deletion of the project runs before or after it. A missing
+	// rule returns ErrNotFound. It is safe to call on the store passed to
+	// WithTx.
+	DeleteProjectVisitorRule(ctx context.Context, id string) ([]*RoleBinding, error)
+
+	// DeleteProjectVisitorRulesByProject deletes every project visitor
+	// rule of projectID, every role binding they created (SourceRuleID)
+	// and their exclusions, in one transaction, and returns the number of
+	// rules deleted. Project deletion calls it, so no rule of a deleted
+	// project binds anyone afterwards. It is safe to call on the store
+	// passed to WithTx.
+	DeleteProjectVisitorRulesByProject(ctx context.Context, projectID string) (int, error)
+
+	// DeleteInactiveVisitorGrant deletes the project-visitor binding
+	// bindingID when it is a visitor grant by email (no SourceRuleID) whose
+	// window does not contain at (expired, or not started yet), and
+	// reports whether it deleted it. Any other binding, an active grant
+	// and a missing binding are left alone and return false. The binding
+	// is read and checked in the same transaction as the delete. It is
+	// safe to call on the store passed to WithTx.
+	DeleteInactiveVisitorGrant(ctx context.Context, bindingID string, at time.Time) (bool, error)
+
+	// CreateProjectVisitorExclusion records that the project visitor rule
+	// ruleID no longer binds the user userID, so the rule does not create
+	// that binding again. Recording an existing exclusion is not an error.
+	// A missing rule returns ErrNotFound. It is safe to call on the store
+	// passed to WithTx.
+	CreateProjectVisitorExclusion(ctx context.Context, ruleID, userID, createdBy string) error
+
+	// IsProjectVisitorExcluded reports whether the project visitor rule
+	// ruleID has an exclusion for the user userID.
+	IsProjectVisitorExcluded(ctx context.Context, ruleID, userID string) (bool, error)
+
 	// ListFixtureRootedResources returns the agents (soft-deleted ones
 	// included), schedules, groups and projects whose creation-time
 	// provenance stamp has fixture_root_id == rootID (ptone/scion#4240,
@@ -285,6 +364,17 @@ type Store interface {
 	// limit rows of each kind are returned (limit <= 0: no limit), and
 	// Truncated reports whether any kind had more.
 	ListFixtureRootedResources(ctx context.Context, rootID string, limit int) (*FixtureRootedResources, error)
+
+	// ListFixtureRoots returns the distinct creation-time provenance stamps
+	// (fixture_root_id, fixture_issuer_id) carried by agents (soft-deleted
+	// ones included), schedules, groups and projects (ptone/scion#4240,
+	// Phase 3c), ordered by root ID. A non-empty issuerID keeps only the
+	// stamps whose fixture_issuer_id is issuerID; an empty one keeps every
+	// stamp. A non-empty afterRootID is a cursor: only roots ordered after
+	// it are returned. Only the stamp columns select: an unstamped row is
+	// never counted. At most limit stamps are returned (limit <= 0: no
+	// limit), and more reports whether further roots follow the page.
+	ListFixtureRoots(ctx context.Context, issuerID, afterRootID string, limit int) (roots []FixtureProvenance, more bool, err error)
 
 	// ListIssuanceStampedGrants returns the grant rows whose issuance_id is
 	// issuanceID (ptone/scion#4240, admin tier A3 grant shaping): role
@@ -497,6 +587,10 @@ type AgentStore interface {
 	SetAgentSoftDeleteOpID(ctx context.Context, agentID, opID string) error
 
 	// DeleteAgent removes an agent by ID.
+	// It does not deactivate the agent's delegation edges or service-account
+	// assignments, which have no foreign key to the agent. A caller must
+	// deactivate them first, in the same transaction; callers are limited to
+	// the allowlist of hack/check-store-delete-callers.sh.
 	// Returns ErrNotFound if the agent doesn't exist.
 	DeleteAgent(ctx context.Context, id string) error
 
@@ -1436,6 +1530,11 @@ type ProjectStore interface {
 	SetProjectOwnerID(ctx context.Context, projectID, ownerID string) error
 
 	// DeleteProject removes a project by ID.
+	// It does not deactivate the delegation edges or service-account
+	// assignments of the project's agents, which have no foreign key to the
+	// agents. A caller must deactivate any that exist first, in the same
+	// transaction; callers are limited to the allowlist of
+	// hack/check-store-delete-callers.sh.
 	// Returns ErrNotFound if the project doesn't exist.
 	DeleteProject(ctx context.Context, id string) error
 
@@ -1712,6 +1811,15 @@ type BrokerDispatchStore interface {
 	// therefore never accept delivery. Returns the number of messages failed.
 	FailPendingMessagesWithMissingRecipient(ctx context.Context, reason string) (int, error)
 
+	// ExpireAndListStuckPendingMessages does what ExpireStuckPendingMessages
+	// does for at most one page of the oldest rows (entadapter's
+	// expirePageSize; later calls expire the rest) and returns the rows it
+	// expired, oldest first, so the sweep can name them in its log line
+	// (ptone/scion#5211). It runs in one transaction, and a row is returned
+	// only if this call changed it from pending to failed. A row dispatched
+	// concurrently is neither expired nor returned.
+	ExpireAndListStuckPendingMessages(ctx context.Context, before time.Time, reason string) ([]ExpiredPendingMessage, error)
+
 	// BackfillNonAgentDispatchState repairs non-agent-recipient rows left
 	// "pending", or "failed" with reason == expiredReason, by the pre-fix
 	// nc-promote-busy bug (a storeMsg persisted without stamping
@@ -1751,9 +1859,9 @@ type TemplateStore interface {
 	// StoragePath, StorageBucket, StorageURI, Status, SourceURL, UpdatedBy)
 	// only if the stored row still matches expected (compare-and-swap). It
 	// never writes the metadata UpdateTemplate owns (Name, Slug,
-	// DisplayName, Description, Image, BaseTemplate, OwnerID, Scope,
-	// ScopeID, ProjectID), so neither writer can revert the other
-	// (ptone/scion#4221), and it never writes Config (ptone/scion#4223).
+	// DisplayName, Description, BaseTemplate, OwnerID, Scope, ScopeID,
+	// ProjectID), so neither writer can revert the other
+	// (ptone/scion#4221).
 	// Returns ErrTemplateConflict when the row exists but no longer
 	// matches, and ErrNotFound when it does not exist.
 	UpdateTemplateContent(ctx context.Context, template *Template, expected TemplateContentPrecondition) error
@@ -2049,7 +2157,11 @@ type TestIdentityDelegationStore interface {
 	// grantor, a workload subject, exactly one scope, a positive member cap
 	// and an expiry after the creation time, and returns ErrInvalidInput
 	// otherwise. RevokedAt and RevokedBy must be unset. An empty ID is
-	// generated; Created defaults to now.
+	// generated; Created defaults to now. It creates human-grantor
+	// delegations only: any GrantorKind other than empty or
+	// DelegationGrantorHuman, or a set HubID or MarkerCreatedAt, returns
+	// ErrInvalidInput (an offline delegation is written only by the offline
+	// host command `scion server test-infra delegate`).
 	CreateTestIdentityDelegation(ctx context.Context, d *TestIdentityDelegation) error
 
 	// GetTestIdentityDelegation returns a delegation by ID, or ErrNotFound
@@ -2072,10 +2184,23 @@ type TestIdentityDelegationStore interface {
 	// issued through delegationID whose expiry is after now.
 	CountLiveTestFixtureUsersByDelegation(ctx context.Context, delegationID string, now time.Time) (int, error)
 
+	// CountLiveTestAdminUsersByDelegation counts admin-kind test
+	// identities (either kind) issued through delegationID whose expiry is
+	// after now. An empty delegationID returns ErrInvalidInput.
+	CountLiveTestAdminUsersByDelegation(ctx context.Context, delegationID string, now time.Time) (int, error)
+
 	// ListTestFixtureUsersByDelegation returns test fixture users issued
 	// through delegationID, newest first, with ListTestFixtureUsers'
 	// liveAt and limit semantics.
 	ListTestFixtureUsersByDelegation(ctx context.Context, delegationID string, liveAt time.Time, limit int) ([]User, error)
+
+	// GetTestInfraBinding reads the test infrastructure marker's hub
+	// id, class and creation time, live, for the offline delegation redeem
+	// gate (ptone/scion#4240, phase DL). It returns ErrNotFound when there
+	// is no marker. It is read-only and never loads the marker's web
+	// session key or attested facts; only the offline host commands write
+	// the marker.
+	GetTestInfraBinding(ctx context.Context) (*TestInfraBinding, error)
 }
 
 // UserFilter defines criteria for filtering users.
@@ -2732,7 +2857,9 @@ type ScheduleStore interface {
 
 	// UpdateSchedule writes the schedule's mutable fields named by `fields`
 	// (name, cron_expr, event_type, payload, status, next_run_at) from
-	// `schedule`; a field not named in `fields` is left completely untouched
+	// `schedule`; the Status field also writes status_reason from
+	// schedule.StatusReason, so a status and its reason are always written
+	// together. A field not named in `fields` is left completely untouched
 	// in the row, so a struct built from a stale read can never revert a
 	// column this call didn't intend to change.
 	//
@@ -2752,9 +2879,10 @@ type ScheduleStore interface {
 	// exist.
 	UpdateSchedule(ctx context.Context, schedule *Schedule, fields ScheduleFieldMask, prevRevision int, prevRevisionKnown bool, attribution *InitiatorAttribution) error
 
-	// UpdateScheduleStatus updates only the status of a schedule.
+	// UpdateScheduleStatus updates only the status of a schedule and its
+	// status reason (ScheduleStatusReason*; empty clears it).
 	// Returns ErrNotFound if the schedule doesn't exist.
-	UpdateScheduleStatus(ctx context.Context, id string, status string) error
+	UpdateScheduleStatus(ctx context.Context, id string, status string, reason string) error
 
 	// UpdateScheduleAfterRun updates a schedule after a run completes.
 	// Sets last_run_at, next_run_at, run counters, and error status.
@@ -3516,8 +3644,14 @@ type RoleStore interface {
 	// ErrVisitorBindingRefused (a missing user is ErrNotFound). NotBefore
 	// and ExpiresAt are optional and stored as given. RoleDefinitionID may
 	// be empty, in which case the project-visitor role is resolved by
-	// name. Returns ErrAlreadyExists for a duplicate. It is safe to call
-	// on the store passed to WithTx.
+	// name. SourceRuleID, when set, names the project visitor rule that
+	// creates the binding: the rule must exist, be of the binding's
+	// project and of the account's home issuer, and be active now
+	// (ErrVisitorBindingRefused otherwise); the binding then takes the
+	// rule's window, read in the same transaction, in place of NotBefore
+	// and ExpiresAt. Create a rule binding inside WithTx, so the rule
+	// cannot change before the binding commits. Returns ErrAlreadyExists for a duplicate. It is safe to
+	// call on the store passed to WithTx.
 	CreateVisitorRoleBinding(ctx context.Context, rb *RoleBinding) (*RoleBinding, error)
 
 	// ListVisitorRoleBindings returns the project-visitor bindings at the

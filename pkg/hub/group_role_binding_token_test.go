@@ -24,19 +24,19 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// TestGroupChange_TokenRefusedWhenClosureCarriesRoleBinding pins the group
-// rule for user access tokens: updating or deleting a group, and adding or
-// removing a member, are refused for a token (403, session-only reason
-// GOV_PENDING) when the group or a group that contains it is the principal
-// of a role binding. The same token changes a group with no role binding in
-// its closure, and a session changes a group that carries one.
-func TestGroupChange_TokenRefusedWhenClosureCarriesRoleBinding(t *testing.T) {
+// TestGroupChangeToken_RoleBoundGroupFollowsDelegationRule pins the group
+// rule for user access tokens on a group whose closure carries a
+// project-scoped role binding: adding a member is refused (403) unless the
+// token holds every permission the closure carries in that project, while
+// removing a member, updating and deleting the group take only the group
+// selector and live authority. A group with no role binding in its closure
+// accepts every change, and a session adds a member to a role-bound group.
+func TestGroupChangeToken_RoleBoundGroupFollowsDelegationRule(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -106,16 +106,18 @@ func TestGroupChange_TokenRefusedWhenClosureCarriesRoleBinding(t *testing.T) {
 	}
 
 	for _, g := range []*store.Group{bound, nested} {
-		for _, c := range changes {
+		add := changes[0]
+		rec := doRequestWithUAT(t, srv, key, add.method, add.path(g), add.body)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "%s add member: %s", g.Name, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "Cannot grant authority you do not hold", g.Name)
+		_, err := s.GetGroupMembership(ctx, g.ID, store.GroupMemberTypeUser, added)
+		assert.ErrorIs(t, err, store.ErrNotFound, "%s: the refused add adds no member", g.Name)
+		for _, c := range changes[1:] {
 			rec := doRequestWithUAT(t, srv, key, c.method, c.path(g), c.body)
-			requireSessionOnlyRefusal(t, rec, authzop.ReasonGovernancePending, g.Name+" "+c.name)
+			assert.Less(t, rec.Code, 300, "%s %s: a token with the group selector changes a role-bound group: %d %s", g.Name, c.name, rec.Code, rec.Body.String())
 		}
-		_, err := s.GetGroup(ctx, g.ID)
-		assert.NoError(t, err, "%s: the refused delete leaves the group in place", g.Name)
-		_, err = s.GetGroupMembership(ctx, g.ID, store.GroupMemberTypeUser, existing)
-		assert.NoError(t, err, "%s: the refused removal leaves the member in place", g.Name)
-		_, err = s.GetGroupMembership(ctx, g.ID, store.GroupMemberTypeUser, added)
-		assert.Error(t, err, "%s: the refused add adds no member", g.Name)
+		_, err = s.GetGroup(ctx, g.ID)
+		assert.ErrorIs(t, err, store.ErrNotFound, "%s: the token deleted the group", g.Name)
 	}
 
 	for _, c := range changes {
@@ -123,7 +125,9 @@ func TestGroupChange_TokenRefusedWhenClosureCarriesRoleBinding(t *testing.T) {
 		assert.Less(t, rec.Code, 300, "plain %s: a group with no role binding in its closure accepts the token: %d %s", c.name, rec.Code, rec.Body.String())
 	}
 
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groups/"+bound.ID+"/members",
+	sessionGroup := newGroup("session")
+	bind(sessionGroup)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groups/"+sessionGroup.ID+"/members",
 		map[string]interface{}{"memberType": "user", "memberId": added, "role": "member"})
 	assert.Less(t, rec.Code, 300, "a session adds a member to a group that carries a role binding: %d %s", rec.Code, rec.Body.String())
 }
@@ -216,11 +220,11 @@ func (s *groupClosureFailingStore) ListRoleBindingsForPrincipals(ctx context.Con
 	return s.Store.ListRoleBindingsForPrincipals(ctx, principals, scopeTypes, scopeIDs)
 }
 
-// TestGroupChange_ClosureLookupErrorRefusesToken pins that the group rule
-// refuses a user access token with 500 when the group's closure cannot be
-// resolved, and the change does not happen. The failing store serves the
-// handler only; authorization reads the real store, so the token passes
-// every check that runs before the group rule.
+// TestGroupChange_ClosureLookupErrorRefusesToken pins that adding a member
+// with a user access token is refused with 500 when the handler cannot read
+// the group's closure authority, and the member is not added. The failing
+// store serves the handler only; authorization reads the real store, so the
+// token passes every check that runs before the closure read.
 func TestGroupChange_ClosureLookupErrorRefusesToken(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -250,11 +254,12 @@ func TestGroupChange_ClosureLookupErrorRefusesToken(t *testing.T) {
 	}
 }
 
-// TestGroupChange_TokenRefusedAtAnyAncestorDepth pins that the group rule
-// counts a role binding on an ancestor at any nesting depth: a token adding
-// a member to the innermost group of a 40-level chain whose outermost group
-// carries a role binding is refused with the session-only reason.
-func TestGroupChange_TokenRefusedAtAnyAncestorDepth(t *testing.T) {
+// TestGroupMemberAddToken_AncestorBindingAtAnyDepthChecked pins that the
+// delegation check counts a role binding on an ancestor at any nesting
+// depth: a token adding a member to the innermost group of a 40-level chain
+// whose outermost group carries a project role binding the token does not
+// hold is refused.
+func TestGroupMemberAddToken_AncestorBindingAtAnyDepthChecked(t *testing.T) {
 	f := newGroupRuleFixture(t, "gdeep")
 	const depth = 40
 	top := f.group(t, "gdeep-0", "")
@@ -272,17 +277,19 @@ func TestGroupChange_TokenRefusedAtAnyAncestorDepth(t *testing.T) {
 	added := f.user(t, "gdeep-added")
 	rec := doRequestWithUAT(t, f.srv, f.key, http.MethodPost, "/api/v1/groups/"+inner.ID+"/members",
 		map[string]interface{}{"memberType": "user", "memberId": added, "role": "member"})
-	requireSessionOnlyRefusal(t, rec, authzop.ReasonGovernancePending, "innermost group add member")
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "Cannot grant authority you do not hold")
 	_, err = f.s.GetGroupMembership(context.Background(), inner.ID, store.GroupMemberTypeUser, added)
 	assert.ErrorIs(t, err, store.ErrNotFound, "a refused add adds no member")
 }
 
-// TestGroupCreate_ChildOfRoleBoundParentRefusesToken pins that creating a
-// group under a parent applies the group rule to the parent. Group create
-// refuses a user access token at its own authorization check, so the rule
-// is pinned at authorizeChildGroupGrant, the parent check createGroup runs,
-// called with a real minted token authenticated as the middleware does.
-func TestGroupCreate_ChildOfRoleBoundParentRefusesToken(t *testing.T) {
+// TestGroupCreateToken_ChildOfRoleBoundParentRunsDelegationCheck pins that
+// creating a group under a parent runs the member-add delegation check on
+// the parent: a token that does not hold the project authority of the
+// parent's closure is refused at authorizeChildGroupGrant, the parent check
+// createGroup runs, called with a real minted token authenticated as the
+// middleware does. A parent with no role binding in its closure admits it.
+func TestGroupCreateToken_ChildOfRoleBoundParentRunsDelegationCheck(t *testing.T) {
 	f := newGroupRuleFixture(t, "gchild")
 	bound := f.group(t, "gchild-bound", "")
 	f.bind(t, bound)
@@ -290,19 +297,21 @@ func TestGroupCreate_ChildOfRoleBoundParentRefusesToken(t *testing.T) {
 
 	ctx := realTokenContext(t, f.srv, f.key)
 	rec := httptest.NewRecorder()
-	_, _, ok := f.srv.authorizeChildGroupGrant(rec, requestWithContext(ctx, http.MethodPost, "/api/v1/groups", nil), bound)
+	_, ok := f.srv.authorizeChildGroupGrant(rec, requestWithContext(ctx, http.MethodPost, "/api/v1/groups", nil), bound)
 	assert.False(t, ok)
-	requireSessionOnlyRefusal(t, rec, authzop.ReasonGovernancePending, "child of a role-bound parent")
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "Cannot grant authority you do not hold")
 
 	rec = httptest.NewRecorder()
-	_, _, ok = f.srv.authorizeChildGroupGrant(rec, requestWithContext(ctx, http.MethodPost, "/api/v1/groups", nil), plain)
+	grant, ok := f.srv.authorizeChildGroupGrant(rec, requestWithContext(ctx, http.MethodPost, "/api/v1/groups", nil), plain)
 	assert.True(t, ok, "a parent with no role binding in its closure admits the token: %d %s", rec.Code, rec.Body.String())
+	assert.NotEmpty(t, grant.tokenClosure, "a token's grant carries the closure it was checked against")
 }
 
-// TestGroupDelete_SystemManagedRefusalPrecedesGroupRule pins that deleting
-// a role-bound project_agents group with a scoped user access token answers
-// with the system-managed 400 and leaves the group in place.
-func TestGroupDelete_SystemManagedRefusalPrecedesGroupRule(t *testing.T) {
+// TestGroupDeleteToken_SystemManagedGroupRefused pins that deleting a
+// role-bound project_agents group with a user access token answers with the
+// system-managed 400 and leaves the group in place.
+func TestGroupDeleteToken_SystemManagedGroupRefused(t *testing.T) {
 	f := newGroupRuleFixture(t, "gpa")
 	g := f.group(t, "gpa-agents", store.GroupTypeProjectAgents)
 	f.bind(t, g)

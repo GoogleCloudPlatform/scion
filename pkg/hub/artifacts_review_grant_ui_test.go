@@ -69,9 +69,10 @@ func reviewGrantArtifact(t *testing.T, f reviewGrantFixture, st artifacts.Store,
 // grant to a user who can already read the artifact, by the same caller,
 // succeeds exactly when canManage or canGrantReview is true; a caller that
 // cannot read the artifact gets the 404 of a missing one; a review grant
-// by the delegating user to a user who cannot read it, or who holds a read
-// grant, gets 403 review_subject_cannot_read or review_replaces_access
-// (ptone/scion#5119).
+// by a home-project admin who is not an owner (the review-grant path; the
+// delegating user and owners are stewards, design D25) to a user who
+// cannot read it, or who holds a read grant, gets 403
+// review_subject_cannot_read or review_replaces_access (ptone/scion#5119).
 func TestArtifactCanGrantReviewOnRoutes(t *testing.T) {
 	type caller struct {
 		name     string
@@ -104,7 +105,7 @@ func TestArtifactCanGrantReviewOnRoutes(t *testing.T) {
 			if tc.adminGrant {
 				_, err := st.PutGrant(context.Background(), &artifacts.Grant{ID: tid("rg-ui-admin-" + tc.name), ArtifactID: id,
 					SubjectKind: artifacts.SubjectPrincipal, SubjectRef: artifacts.PrincipalRef(artifacts.PrincipalKindUser, identity.ID()),
-					Permission: artifacts.GrantAdmin, CreatedAt: time.Now()}, artifacts.MaxGrantsPerArtifact, true)
+					Permission: artifacts.GrantAdmin, CreatedAt: time.Now()}, artifacts.MaxGrantsPerArtifact, true, &artifacts.Actor{Kind: artifacts.PrincipalKindUser, Ref: "test-setup", Authority: artifacts.AuthorityOwner})
 				require.NoError(t, err)
 			}
 			var resp artifacts.ArtifactResponse
@@ -155,12 +156,12 @@ func TestArtifactCanGrantReviewOnRoutes(t *testing.T) {
 		baseline := identityArtifactRequest(t, f.srv, f.user(f.member), http.MethodPost, "/api/v1/artifacts/"+id+"/grants", []byte("junk"))
 		require.Equal(t, http.StatusForbidden, baseline.Code)
 		// outside is a member of another project only; the second subject
-		// does not exist. The delegating user, who holds review-grant
-		// authority, learns why (ptone/scion#5119); a member, who does not,
-		// gets the uniform 403.
+		// does not exist. A home-project admin who is not an owner holds
+		// review-grant authority and learns why (ptone/scion#5119); a
+		// member, who does not, gets the uniform 403.
 		for _, subject := range []string{f.outside, tid("rg-ui-nobody")} {
 			body := `{"subjectKind":"principal","subjectRef":"user:` + subject + `","permission":"review"}`
-			post := identityArtifactRequest(t, f.srv, f.user(f.delegator), http.MethodPost, "/api/v1/artifacts/"+id+"/grants", []byte(body))
+			post := identityArtifactRequest(t, f.srv, f.user(f.admin), http.MethodPost, "/api/v1/artifacts/"+id+"/grants", []byte(body))
 			require.Equal(t, http.StatusForbidden, post.Code, "subject %s: %s", subject, post.Body.String())
 			var e struct {
 				Error struct{ Code, Message string } `json:"error"`
@@ -187,10 +188,10 @@ func TestArtifactCanGrantReviewOnRoutes(t *testing.T) {
 		subject := artifacts.PrincipalRef(artifacts.PrincipalKindUser, f.member)
 		_, err := st.PutGrant(context.Background(), &artifacts.Grant{ID: tid("rg-ui-read"), ArtifactID: id,
 			SubjectKind: artifacts.SubjectPrincipal, SubjectRef: subject, Permission: artifacts.GrantRead,
-			CreatedAt: time.Now()}, artifacts.MaxGrantsPerArtifact, false)
+			CreatedAt: time.Now()}, artifacts.MaxGrantsPerArtifact, false, &artifacts.Actor{Kind: artifacts.PrincipalKindUser, Ref: "test-setup", Authority: artifacts.AuthorityOwner})
 		require.NoError(t, err)
 		body := `{"subjectKind":"principal","subjectRef":"` + subject + `","permission":"review"}`
-		post := identityArtifactRequest(t, f.srv, f.user(f.delegator), http.MethodPost, "/api/v1/artifacts/"+id+"/grants", []byte(body))
+		post := identityArtifactRequest(t, f.srv, f.user(f.admin), http.MethodPost, "/api/v1/artifacts/"+id+"/grants", []byte(body))
 		require.Equal(t, http.StatusForbidden, post.Code, post.Body.String())
 		var e struct {
 			Error struct{ Code string } `json:"error"`

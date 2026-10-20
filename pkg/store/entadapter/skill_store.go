@@ -256,9 +256,13 @@ func (s *SkillStore) ListSkills(ctx context.Context, filter store.SkillFilter, o
 		query.Where(pred)
 	}
 
-	totalCount, err := query.Clone().Count(ctx)
-	if err != nil {
-		return nil, err
+	totalCount := 0
+	if !opts.SkipTotalCount {
+		var err error
+		totalCount, err = query.Clone().Count(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	limit := opts.Limit

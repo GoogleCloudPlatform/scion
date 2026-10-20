@@ -35,13 +35,92 @@ func TestProjectVisitorsCommand_Wiring(t *testing.T) {
 	}
 	sort.Strings(names)
 	assert.Equal(t, []string{"add", "extend", "list", "remove"}, names)
-	assert.Nil(t, projectVisitorsCmd.Flags().Lookup("domain"), "domain grants are not part of this command yet")
-	assert.Nil(t, projectVisitorsAddCmd.Flags().Lookup("domain"), "domain grants are not part of this command yet")
-	for _, flag := range []string{"issuer", "email"} {
+	issuer := projectVisitorsAddCmd.Flags().Lookup("issuer")
+	require.NotNil(t, issuer)
+	assert.Equal(t, []string{"true"}, issuer.Annotations[cobra.BashCompOneRequiredFlag], "--issuer is required")
+	for _, flag := range []string{"email", "domain"} {
 		f := projectVisitorsAddCmd.Flags().Lookup(flag)
 		require.NotNil(t, f, flag)
-		assert.Equal(t, []string{"true"}, f.Annotations[cobra.BashCompOneRequiredFlag], "--%s is required", flag)
+		assert.Nil(t, f.Annotations[cobra.BashCompOneRequiredFlag], "--%s alone is not required", flag)
 	}
+	require.NotNil(t, projectVisitorsRemoveCmd.Flags().Lookup("domain"), "remove names a rule by --domain")
+}
+
+// add takes exactly one of --email and --domain.
+func TestProjectVisitorsCommand_AddEmailOrDomain(t *testing.T) {
+	for name, args := range map[string][]string{
+		"neither": {"--issuer", "https://hub-a.example.com"},
+		"both":    {"--issuer", "https://hub-a.example.com", "--email", "ann@corp.example", "--domain", "corp.example"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cmd := &cobra.Command{Use: "add", RunE: func(*cobra.Command, []string) error { return nil }}
+			var issuer, email, domain string
+			cmd.Flags().StringVar(&issuer, "issuer", "", "")
+			cmd.Flags().StringVar(&email, "email", "", "")
+			cmd.Flags().StringVar(&domain, "domain", "", "")
+			_ = cmd.MarkFlagRequired("issuer")
+			cmd.MarkFlagsOneRequired("email", "domain")
+			cmd.MarkFlagsMutuallyExclusive("email", "domain")
+			cmd.SetArgs(args)
+			cmd.SilenceUsage, cmd.SilenceErrors = true, true
+			assert.Error(t, cmd.Execute())
+		})
+	}
+	// The real command declares the same groups.
+	email := projectVisitorsAddCmd.Flags().Lookup("email")
+	domain := projectVisitorsAddCmd.Flags().Lookup("domain")
+	require.NotNil(t, email)
+	require.NotNil(t, domain)
+	assert.Contains(t, email.Annotations["cobra_annotation_one_required"], "email domain")
+	assert.Contains(t, email.Annotations["cobra_annotation_mutually_exclusive"], "email domain")
+	assert.Contains(t, domain.Annotations["cobra_annotation_one_required"], "email domain")
+}
+
+func TestPrintProjectVisitors_SourcesAndRules(t *testing.T) {
+	rules := []hubclient.ProjectVisitorRule{
+		{ID: "rule-1", Issuer: "https://hub-a.example.com", Domain: "corp.example", IssuerAccepted: true},
+		{ID: "rule-2", Issuer: "https://hub-b.example.com", Domain: "other.example"},
+	}
+	list := []hubclient.ProjectVisitor{
+		{ID: "id-1", Email: "ann@corp.example", Issuer: "https://hub-a.example.com", Status: "active", IssuerAccepted: true, Source: "rule", SourceRuleID: "rule-1"},
+		{ID: "id-2", Email: "bob@elsewhere.example", Issuer: "https://hub-a.example.com", Status: "pending", IssuerAccepted: true, Source: "email"},
+	}
+	var out strings.Builder
+	require.NoError(t, printProjectVisitors(&out, list, rules))
+	text := out.String()
+	assert.Contains(t, text, "SOURCE")
+	assert.Regexp(t, `ann@corp\.example\s+\S+\s+active\s+domain corp\.example`, text)
+	assert.Regexp(t, `bob@elsewhere\.example\s+\S+\s+pending\s+email`, text)
+	assert.Regexp(t, `corp\.example\s+https://hub-a\.example\.com\s+1\s+never\s+rule-1`, text)
+	assert.Contains(t, text, "other.example (issuer not accepted)")
+
+	out.Reset()
+	require.NoError(t, printProjectVisitors(&out, nil, nil))
+	assert.Equal(t, "No visitors.\n", out.String())
+}
+
+func TestMatchProjectVisitorRule(t *testing.T) {
+	rules := []hubclient.ProjectVisitorRule{
+		{ID: "rule-1", Issuer: "https://hub-a.example.com", Domain: "corp.example"},
+		{ID: "rule-2", Issuer: "https://hub-b.example.com", Domain: "corp.example"},
+		{ID: "rule-3", Issuer: "https://hub-a.example.com", Domain: "other.example"},
+	}
+	r, err := matchProjectVisitorRule(rules, "Other.Example", "")
+	require.NoError(t, err)
+	assert.Equal(t, "rule-3", r.ID)
+
+	_, err = matchProjectVisitorRule(rules, "corp.example", "")
+	var usage *usageError
+	require.True(t, errors.As(err, &usage), "a domain with rules from two issuers needs --issuer: %v", err)
+
+	r, err = matchProjectVisitorRule(rules, "corp.example", "https://hub-b.example.com/")
+	require.NoError(t, err)
+	assert.Equal(t, "rule-2", r.ID)
+
+	_, err = matchProjectVisitorRule(rules, "sub.corp.example", "")
+	assert.ErrorContains(t, err, "no visitor rule")
+	assert.True(t, visitorListHasID([]hubclient.ProjectVisitor{{ID: "id-1"}}, " id-1 "))
+	assert.False(t, visitorListHasID([]hubclient.ProjectVisitor{{ID: "id-1"}}, "rule-1"))
 }
 
 // The visitor commands are human mode only: no agentAllowed entry names

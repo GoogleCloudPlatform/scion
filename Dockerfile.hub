@@ -4,7 +4,7 @@ WORKDIR /web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci --ignore-scripts
 COPY web/ .
-# npm run build already runs copy:shoelace-icons, vite build, and copy:client
+# npm run build runs the prebuild clean, copy:shoelace-icons and vite build
 RUN npm run build
 
 # Stage 2: Build the Scion Hub binary (with embedded web assets)

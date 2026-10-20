@@ -57,7 +57,7 @@ type Agent struct {
 	ContainerStatus string `json:"containerStatus,omitempty"` // Container-level status
 	RuntimeState    string `json:"runtimeState,omitempty"`    // Low-level runtime state
 	ExitCode        *int   `json:"exitCode,omitempty"`        // Structured exit code from runtime (nil = unknown)
-	ExitReason      string `json:"exitReason,omitempty"`      // Terminal reason (see state.ExitReason), e.g. "crashed", "preempted", "oom_killed"
+	ExitReason      string `json:"exitReason,omitempty"`      // Terminal reason (see state.ExitReason), e.g. "crashed", "preempted", "oom_killed"; "signaled" is agent-reported
 
 	// Limits tracking (updated by sciontool status reports)
 	CurrentTurns      int       `json:"currentTurns,omitempty"`
@@ -1177,6 +1177,12 @@ type BrokerCapabilities struct {
 	// does the hub stop writing those values into InlineConfig
 	// (ptone/scion#4222). Refreshed by every heartbeat.
 	TemplateTiers bool `json:"templateTiers,omitempty"`
+	// NodeImageRegistry is the broker's SCION_IMAGE_REGISTRY: the node env
+	// layer the hub resolves this broker's dispatches with
+	// (ptone/scion#3916). It is a node configuration value, not a feature
+	// flag. Sent at registration and in every heartbeat with capabilities;
+	// empty (an old broker, or none set) means no node env.
+	NodeImageRegistry string `json:"nodeImageRegistry,omitempty"`
 }
 
 // BrokerProfile describes a runtime profile available on a broker.
@@ -1272,10 +1278,8 @@ type Template struct {
 	Description string `json:"description,omitempty"` // Optional description
 
 	// Configuration
-	Harness              string          `json:"harness"`                        // claude, gemini, opencode, codex, generic
-	DefaultHarnessConfig string          `json:"defaultHarnessConfig,omitempty"` // default_harness_config name from template config (e.g. "claude-web")
-	Image                string          `json:"image"`                          // Default container image
-	Config               *TemplateConfig `json:"config,omitempty"`
+	Harness              string `json:"harness"`                        // claude, gemini, opencode, codex, generic
+	DefaultHarnessConfig string `json:"defaultHarnessConfig,omitempty"` // default_harness_config name from template config (e.g. "claude-web")
 
 	// AgentConfig is a derived, read-only snapshot of the template's own
 	// scion-agent.{yaml,yml,json}, with per-agent fields cleared. Only the
@@ -1461,39 +1465,6 @@ const (
 	HarnessConfigScopeUser    = "user"
 )
 
-// TemplateConfig holds template configuration details.
-type TemplateConfig struct {
-	Harness     string               `json:"harness,omitempty"`
-	Image       string               `json:"image,omitempty"`
-	ConfigDir   string               `json:"configDir,omitempty"`
-	Env         map[string]string    `json:"env,omitempty"`
-	Detached    bool                 `json:"detached,omitempty"`
-	CommandArgs []string             `json:"commandArgs,omitempty"`
-	Model       string               `json:"model,omitempty"`
-	Kubernetes  *KubernetesConfig    `json:"kubernetes,omitempty"`
-	HubAccess   *HubAccessConfig     `json:"hubAccess,omitempty"`
-	Secrets     []api.RequiredSecret `json:"secrets,omitempty"`
-	Telemetry   *api.TelemetryConfig `json:"telemetry,omitempty"`
-	MessageMode string               `json:"messageMode,omitempty"` // none, lineage, branch, project, hub
-}
-
-// HubAccessConfig defines what Hub API scopes an agent created from this template receives.
-type HubAccessConfig struct {
-	Scopes []string `json:"scopes,omitempty"`
-}
-
-// KubernetesConfig holds Kubernetes-specific configuration for templates.
-type KubernetesConfig struct {
-	Resources    *ResourceRequirements `json:"resources,omitempty"`
-	NodeSelector map[string]string     `json:"nodeSelector,omitempty"`
-}
-
-// ResourceRequirements defines compute resource requirements.
-type ResourceRequirements struct {
-	Limits   map[string]string `json:"limits,omitempty"`
-	Requests map[string]string `json:"requests,omitempty"`
-}
-
 // User represents a registered user in the Hub database.
 type User struct {
 	// Identity
@@ -1543,9 +1514,10 @@ type User struct {
 	// Never bound from a request body (json:"-").
 	FederatedEmail *string `json:"-"`
 	HomeIssuer     *string `json:"-"`
-	// IssuerDelegationID is set only on a test-fixture row issued through
-	// a workload-bound issuer delegation (TestIdentityDelegation), at
-	// create, and never changes. Nil for session and PAT issuance.
+	// IssuerDelegationID is set only on a test identity row (test fixture,
+	// or an admin kind since phase X4) issued through a workload-bound
+	// issuer delegation (TestIdentityDelegation), at create, and never
+	// changes. Nil for session and PAT issuance.
 	IssuerDelegationID *string `json:"-"`
 
 	// Timestamps
@@ -1780,16 +1752,110 @@ type TestIdentityDelegation struct {
 	ID          string
 	GrantorID   string
 	WorkloadSub string
-	// Scope is the single delegated scope (test_identity:issue).
+	// Scope is the single delegated scope: test_identity:issue, or
+	// test_identity:issue_admin or test_identity:issue_super_admin (X4).
 	Scope string
 	// MemberCap is the number of live test identities the delegation may
-	// hold at once.
+	// hold at once: member and viewer identities for test_identity:issue,
+	// identities of the scope's admin kind for an admin scope (the API
+	// calls it adminCap there).
 	MemberCap int
 	Label     string
 	Created   time.Time
 	ExpiresAt time.Time
 	RevokedAt *time.Time
 	RevokedBy *string
+	// GrantorKind is DelegationGrantorHuman (the API path) or
+	// DelegationGrantorTestInfraOffline (phase DL: written only by the
+	// offline host command, member scope only). An empty value reads as
+	// human (the column default).
+	GrantorKind string
+	// HubID is the hub id an offline delegation is bound to; empty for a
+	// human grantor.
+	HubID string
+	// MarkerCreatedAt is the created_at of the test infrastructure marker
+	// an offline delegation is bound to; nil for a human grantor.
+	MarkerCreatedAt *time.Time
+}
+
+// Delegation grantor kinds (TestIdentityDelegation.GrantorKind). Every site
+// that reads a grantor switches on these explicitly and denies any other
+// value.
+const (
+	// DelegationGrantorHuman is a live human issuer who created the
+	// delegation through the hub API.
+	DelegationGrantorHuman = "human"
+	// DelegationGrantorTestInfraOffline is the offline host command
+	// `scion server test-infra delegate` (ptone/scion#4240, phase DL). It
+	// is not a principal: the delegation's GrantorID is
+	// TestInfraOfflineGrantorID(HubID), a reserved id that names no user.
+	DelegationGrantorTestInfraOffline = "test_infra_offline"
+)
+
+// Bounds of an offline (DelegationGrantorTestInfraOffline) delegation
+// (phase DL). The offline writer (`scion server test-infra delegate`) and the redeem gate
+// (pkg/hub) both enforce them.
+const (
+	// TestInfraOfflineDelegationScope is the only scope an offline
+	// delegation can hold: member and viewer test identity issuance.
+	TestInfraOfflineDelegationScope = "test_identity:issue"
+	// TestInfraOfflineDelegationMaxTTL is the longest lifetime of an
+	// offline delegation (a human member delegation allows 7 days; with no
+	// human grantor whose deactivation would end it, an offline one is
+	// capped at three default 8 h test identity lifetimes).
+	TestInfraOfflineDelegationMaxTTL = 24 * time.Hour
+	// TestInfraOfflineDelegationDefaultTTL is the default lifetime.
+	TestInfraOfflineDelegationDefaultTTL = 8 * time.Hour
+	// TestInfraOfflineDelegationMinTTL is the shortest lifetime.
+	TestInfraOfflineDelegationMinTTL = time.Minute
+	// TestInfraOfflineDelegationMaxMemberCap is the largest per-delegation
+	// identity cap (the member per-issuer cap; the hub-wide cap applies on
+	// top).
+	TestInfraOfflineDelegationMaxMemberCap = 5
+	// TestInfraOfflineMaxLiveDelegations is the most live offline
+	// delegations one hub may hold at once (4 x 5 = the hub-wide cap of 20).
+	TestInfraOfflineMaxLiveDelegations = 4
+)
+
+// testInfraOfflineGrantorNamespace is the UUID namespace of the reserved
+// grantor id of an offline delegation (a fixed, random v4 UUID).
+var testInfraOfflineGrantorNamespace = uuid.MustParse("6a0c55e2-3d5f-4c1b-9a47-0e8f2b7d91c4")
+
+// TestInfraOfflineGrantorID returns the reserved grantor id of an offline
+// delegation bound to hubID: a name-based (version 5) UUID of the hub id,
+// or "" for an empty hub id. It is a UUID so the generic principal paths
+// (group closure, binding lookup, kind read) treat it as an ordinary user id
+// that names no row: user ids are server-generated random (version 4)
+// UUIDs, so no user row can have it, and the offline redeem gate refuses a
+// delegation whose reserved id ever resolves to a user row.
+func TestInfraOfflineGrantorID(hubID string) string {
+	if hubID == "" {
+		return ""
+	}
+	return uuid.NewSHA1(testInfraOfflineGrantorNamespace, []byte("test-infra-offline:"+hubID)).String()
+}
+
+// EffectiveGrantorKind returns d's grantor kind, reading an empty value as
+// DelegationGrantorHuman (the column default). Any other value is returned
+// unchanged, so callers that switch on it deny an unknown kind.
+func (d *TestIdentityDelegation) EffectiveGrantorKind() string {
+	if d == nil {
+		return ""
+	}
+	if d.GrantorKind == "" {
+		return DelegationGrantorHuman
+	}
+	return d.GrantorKind
+}
+
+// TestInfraBinding is the read-only view of the test infrastructure
+// marker that the offline delegation redeem gate reads live (phase DL): the
+// hub id, class and creation time only. It never carries the marker's web
+// session key or attested facts.
+type TestInfraBinding struct {
+	HubID     string
+	Class     string
+	CreatedAt time.Time
 }
 
 // LiveAt reports whether d is neither revoked nor expired at now.
@@ -2093,6 +2159,16 @@ const (
 // pkg/store/models_test.go — if this literal ever needs to change, that
 // change must ship together with a data migration for existing rows.
 const MessageExpiredStuckPendingReason = "expired: stuck in pending state beyond TTL"
+
+// ExpiredPendingMessage names one message that
+// ExpireAndListStuckPendingMessages moved from "pending" to "failed" at the
+// stuck-pending TTL. It holds only identifiers and the routing target, never
+// the body, so the sweep can log what it expired (ptone/scion#5211).
+type ExpiredPendingMessage struct {
+	ID        string    // message UUID
+	Recipient string    // target, e.g. "agent:<slug>"
+	CreatedAt time.Time // when the row was written; pending since then
+}
 
 // =============================================================================
 // Notifications (Agent Status Notification System)
@@ -3160,10 +3236,11 @@ type Schedule struct {
 	ID            string     `json:"id"`
 	ProjectID     string     `json:"projectId"`
 	Name          string     `json:"name"`
-	CronExpr      string     `json:"cronExpr"`  // Standard 5-field cron expression (UTC)
-	EventType     string     `json:"eventType"` // "message" (future: "dispatch_agent")
-	Payload       string     `json:"payload"`   // JSON: handler-specific configuration
-	Status        string     `json:"status"`    // active, paused, deleted
+	CronExpr      string     `json:"cronExpr"`               // Standard 5-field cron expression (UTC)
+	EventType     string     `json:"eventType"`              // "message" (future: "dispatch_agent")
+	Payload       string     `json:"payload"`                // JSON: handler-specific configuration
+	Status        string     `json:"status"`                 // active, paused, deleted
+	StatusReason  string     `json:"statusReason,omitempty"` // system pause reason (ScheduleStatusReason*); empty otherwise
 	NextRunAt     *time.Time `json:"nextRunAt,omitempty"`
 	LastRunAt     *time.Time `json:"lastRunAt,omitempty"`
 	LastRunStatus string     `json:"lastRunStatus,omitempty"` // success, error
@@ -3201,6 +3278,23 @@ const (
 	ScheduleStatusDeleted = "deleted"
 )
 
+// ScheduleStatusReason* are the values Schedule.StatusReason may hold. Only
+// a pause made by the system sets a reason; every status write made by a
+// user (pause, resume, edit) clears it, so an empty reason on a paused
+// schedule means a user paused it.
+const (
+	// ScheduleStatusReasonNone: active, or paused by a user.
+	ScheduleStatusReasonNone = ""
+	// ScheduleStatusReasonCreatorDeleted: paused because the agent the
+	// schedule's authority resolves to was deleted. Resuming re-records the
+	// authority to the resumer and clears the reason.
+	ScheduleStatusReasonCreatorDeleted = "creator_deleted"
+	// ScheduleStatusReasonCronZoneUnsupported: paused because the cron
+	// expression carries a zone prefix (CRON_TZ= or TZ=), which is not
+	// supported. The expression must be edited to UTC before resuming.
+	ScheduleStatusReasonCronZoneUnsupported = "cron_zone_unsupported"
+)
+
 // ScheduleRunStatus constants
 const (
 	ScheduleRunSuccess = "success"
@@ -3212,6 +3306,9 @@ type ScheduleFilter struct {
 	ProjectID string
 	Status    string
 	Name      string
+	// LastRunStatus, when set, keeps only schedules whose most recent run
+	// ended with this status (ScheduleRunSuccess or ScheduleRunError).
+	LastRunStatus string
 }
 
 // ToAPI converts a store.Agent to an api.AgentInfo for external consumption.
@@ -3680,6 +3777,10 @@ type RoleBinding struct {
 	ExpiresAt        *time.Time `json:"expiresAt"` // Binding is inactive after this time (kernel evaluates)
 	CreatedBy        string     `json:"createdBy"`
 	CreatedAt        time.Time  `json:"createdAt"`
+	// SourceRuleID is set only on a project-visitor binding created by a
+	// project visitor rule (ProjectVisitorRule.ID); removing the rule
+	// deletes the binding. Only CreateVisitorRoleBinding sets it.
+	SourceRuleID *string `json:"sourceRuleId,omitempty"`
 	// IssuanceID is the issuance ID of the admin-kind test identity whose
 	// request created the row (admin tier A3 grant shaping). The store sets
 	// it only from the context's GrantShaping; a value supplied by the
@@ -3906,8 +4007,12 @@ type AuthorityProvenance struct {
 type EdgeDeactivationCause string
 
 const (
-	EdgeDeactivationAgentSoftDelete     EdgeDeactivationCause = "agent_soft_delete"
-	EdgeDeactivationAgentHardDelete     EdgeDeactivationCause = "agent_hard_delete"
+	EdgeDeactivationAgentSoftDelete EdgeDeactivationCause = "agent_soft_delete"
+	EdgeDeactivationAgentHardDelete EdgeDeactivationCause = "agent_hard_delete"
+	// EdgeDeactivationDelegatorDeleted is reserved: no path records it.
+	// Agent deletes deactivate only the edges where the agent is the
+	// delegate, and a project delete records agent_hard_delete on both
+	// sides. ValidEdgeDeactivationCause accepts it.
 	EdgeDeactivationDelegatorDeleted    EdgeDeactivationCause = "delegator_deleted"
 	EdgeDeactivationCreateCompensation  EdgeDeactivationCause = "create_compensation"
 	EdgeDeactivationReincarnateReplaced EdgeDeactivationCause = "reincarnate_replaced"
@@ -4488,6 +4593,12 @@ type MutationAuditRecord struct {
 	ExchangeAgentCredentialID string
 	ActorKind                 string
 	AgentDelegationCode       string
+
+	// ProvenanceBasis is the JSON provenance basis of a delete made by the
+	// test identity purge (3b), the purge of admin kinds (A3) or the
+	// issuer cleanup (3c, ptone/scion#4240): the creation-time stamp the
+	// delete relied on and its run. Empty for every other record.
+	ProvenanceBasis string
 }
 
 // MutationAuditFilter defines query parameters for listing mutation audit records.

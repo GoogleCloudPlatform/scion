@@ -42,6 +42,7 @@ import (
 	"cloud.google.com/go/run/apiv2/runpb"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime/cloudrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/startuplistener"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -74,6 +75,10 @@ type CloudRunRuntime struct {
 	// production (the real Cloud Run Admin API); tests inject a fake so the
 	// lifecycle can be exercised without GCP credentials.
 	newClient func(ctx context.Context) (cloudrun.InstancesAPI, error)
+	// provisionNFS overrides how Run prepares the agent's NFS directories.
+	// Nil in production (provisionCloudRunNFS); tests inject a stub so Run
+	// can reach the Instances API without a mounted NFS export.
+	provisionNFS func(ctx context.Context, cfg RunConfig, agentID string, uid, gid int) (*cloudRunNFSProvisionPaths, error)
 
 	// resolveMu protects the resolution of GCP metadata. When ProjectID
 	// and Location are both empty (auto-detected Cloud Run environment),
@@ -126,6 +131,20 @@ func NewCloudRunRuntimeFromInstances(cfg *config.V1CloudRunInstancesConfig) (*Cl
 		},
 		exec: execConn,
 	}, nil
+}
+
+// NewCloudRunRuntimeForTest builds a CloudRunRuntime for cfg whose Instances
+// API client comes from newClient. Exported so tests in other packages (e.g.
+// pkg/agent, pkg/runtimebroker) can drive the real runtime through a fake
+// Instances client, as NewCloudRunSandboxRuntimeForTest does for the
+// sandbox runtime.
+func NewCloudRunRuntimeForTest(cfg *config.CloudRunConfig, newClient func(ctx context.Context) (cloudrun.InstancesAPI, error)) (*CloudRunRuntime, error) {
+	rt, err := NewCloudRunRuntime(cfg)
+	if err != nil {
+		return nil, err
+	}
+	rt.newClient = newClient
+	return rt, nil
 }
 
 // resolveConfig ensures that ProjectID and Location are populated. When both
@@ -203,17 +222,6 @@ func (r *CloudRunRuntime) SupportsAttach() bool { return false }
 
 var _ AttachCapableRuntime = (*CloudRunRuntime)(nil)
 
-// AsyncLaunchUnsupported implements AsyncLaunchUnsupportedRuntime. Run
-// calls both async launch hooks and DeleteResource cleans up a reported
-// instance (ptone/scion#4761), but how the Instances API behaves for a
-// cut-off create, a delete during the create operation and a NotFound is
-// not yet verified against the live API (ptone/scion#4760). Until it is,
-// the broker creates agents on this runtime synchronously; the opt-out is
-// lifted by ptone/scion#4762.
-func (r *CloudRunRuntime) AsyncLaunchUnsupported() bool { return true }
-
-var _ AsyncLaunchUnsupportedRuntime = (*CloudRunRuntime)(nil)
-
 func (r *CloudRunRuntime) ExecUser() string {
 	return "scion"
 }
@@ -255,6 +263,15 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 	if err := rejectEmptyPerAgentOnCloudRun(cfg); err != nil {
 		return "", err
 	}
+	// Also checked up front: buildCloudRunInstance mounts the workspace,
+	// agent home and staged files only from the NFS share, so an instance
+	// on any other backend has none of them and can never run.
+	if err := rejectNonNFSOnCloudRun(cfg); err != nil {
+		return "", err
+	}
+	if err := r.checkOwnerLabel(cfg); err != nil {
+		return "", err
+	}
 	// Deliver resolved secrets through the instance env: env-type secrets as
 	// plain variables, file/variable secrets as the staged blob that
 	// sciontool init writes out. Done before any provisioning so an
@@ -282,7 +299,11 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 		return "", err
 	}
 
-	nfsPaths, err := r.provisionCloudRunNFS(ctx, cfg, agentID, uid, gid)
+	provision := r.provisionCloudRunNFS
+	if r.provisionNFS != nil {
+		provision = r.provisionNFS
+	}
+	nfsPaths, err := provision(ctx, cfg, agentID, uid, gid)
 	if err != nil {
 		return "", err
 	}
@@ -1038,13 +1059,28 @@ func (r *CloudRunRuntime) List(ctx context.Context, labelFilter map[string]strin
 			ID:              inst.Labels["agent_id"],
 			ContainerID:     cloudRunShortInstanceID(inst.Name),
 			RunID:           inst.Labels[sanitizeGCPLabelKey(api.LabelRunID)], // Run stored scion.run_id under its GCP-sanitized key
-			Name:            inst.Name,
+			Name:            cloudRunAgentName(inst),
+			ProjectID:       inst.Labels[sanitizeGCPLabelKey(projectkeys.LabelProjectID)],
 			ContainerStatus: status,
 			Labels:          inst.Labels,
 		})
 	}
 
 	return agents, nil
+}
+
+// cloudRunAgentName is the agent name List reports for inst: the agent slug
+// from the scion.name label (stored under its GCP-sanitized key), as
+// DockerRuntime.List reports it, not the instance resource name. The
+// broker's delete and stop resolution and AgentManager match the hub-side
+// agent name against Name, so a resource-name Name never matches and the
+// instance is left behind (ptone/scion#5268). An instance without the label
+// falls back to its resource name.
+func cloudRunAgentName(inst *runpb.Instance) string {
+	if name := inst.GetLabels()[sanitizeGCPLabelKey("scion.name")]; name != "" {
+		return name
+	}
+	return inst.GetName()
 }
 
 func (r *CloudRunRuntime) GetLogs(ctx context.Context, id string) (string, error) {
@@ -1229,6 +1265,26 @@ func sanitizeGCPLabelValue(value string) string {
 // empty-per-agent agent (design #2703).
 var errEmptyPerAgentCloudRun = errors.New("cloudrun: \"Empty directory per agent\" (empty-per-agent) workspaces are not supported on the Cloud Run runtime, " +
 	"which always mounts the project's shared workspace; use a Docker, Podman, Apple or Kubernetes broker for this project")
+
+// errCloudRunNeedsNFSWorkspace is returned, wrapped with the backend name,
+// by CloudRunRuntime.Run for a workspace backend other than "nfs"
+// (ptone/scion#5264).
+var errCloudRunNeedsNFSWorkspace = errors.New("cloudrun: the Cloud Run runtime needs an NFS (Filestore) workspace share: " +
+	"it mounts the agent's workspace and home only from that share. Set server.workspace_storage.backend to \"nfs\" " +
+	"with the Filestore share in server.workspace_storage.nfs.shares[0] (server and export), mounted on the broker " +
+	"under server.workspace_storage.nfs.mount_root, or use a Docker, Podman, Apple or Kubernetes broker for this project")
+
+// rejectNonNFSOnCloudRun fails when cfg's workspace backend is not "nfs".
+func rejectNonNFSOnCloudRun(cfg RunConfig) error {
+	if cfg.WorkspaceBackendName == "nfs" {
+		return nil
+	}
+	backend := cfg.WorkspaceBackendName
+	if backend == "" {
+		backend = "none"
+	}
+	return fmt.Errorf("%w (workspace backend: %s)", errCloudRunNeedsNFSWorkspace, backend)
+}
 
 // isEmptyPerAgentRun reports whether cfg starts an empty-per-agent agent,
 // identified by SCION_WORKSPACE_MODE in its env. Runtimes that cannot

@@ -26,6 +26,13 @@
  * Integration items are linked only when the summary says it carries
  * integration identity (integrations_detail true) and the item has an ID;
  * the server already omits the ID otherwise, this is a second check.
+ *
+ * A failing schedule item (ptone/scion#5404) links to its project's
+ * schedules page and, when the summary's schedules section has a row for
+ * it, shows a detail line: target, failed runs, last failure time and the
+ * stored last error. The error is stored text: it is rendered only through
+ * Lit text and attribute bindings (never as HTML) and shortened with
+ * truncateText.
  */
 
 import { LitElement, html, css, type TemplateResult } from 'lit';
@@ -33,16 +40,58 @@ import { customElement, property } from 'lit/decorators.js';
 
 import { INTEGRATIONS_PAGE } from './health-integrations.js';
 import { followHubInstanceLink, hubInstanceAnchor } from './health-hub-card.js';
+import { formatInstantWithZone } from '../../utils/time.js';
 
 /** One entry of the summary's ranked "Needs attention" list (server-composed). */
 export interface HealthAttentionItem {
   severity: 'critical' | 'warning';
-  /** hub_check | hub_instance | broker_offline | broker_degraded | broker_nfs | integration | dispatch | agents */
+  /** hub_check | hub_instance | broker_offline | broker_degraded | broker_nfs | integration | dispatch | agents | schedule */
   kind: string;
   /** What the item is about; fields that do not apply are omitted. */
   subject: { type: string; id?: string; name?: string; project_id?: string };
   /** Fixed, server-composed sentence. */
   message: string;
+}
+
+/** One active schedule whose last run failed (summary schedules.failing). */
+export interface HealthFailingSchedule {
+  id: string;
+  name: string;
+  project_id: string;
+  /** Empty when the hub could not resolve the project. */
+  project_slug: string;
+  event_type: string;
+  /** The agent the schedule addresses; empty when the payload names none. */
+  target: string;
+  run_count: number;
+  error_count: number;
+  /** RFC 3339; null when not recorded. */
+  last_failure_at: string | null;
+  /** Stored error text of the last run, capped by the hub. */
+  last_error: string;
+}
+
+/** The schedules section of the summary; null when it could not be read. */
+export interface HealthSummarySchedules {
+  failing: HealthFailingSchedule[];
+  /** Failing schedules visible to the caller; a lower bound when scan_limited. */
+  total: number;
+  truncated: boolean;
+  /** True when the hub read only part of the failing schedules. */
+  scan_limited: boolean;
+}
+
+/** Longest last error, in characters, a schedule detail line shows. */
+export const SCHEDULE_ERROR_MAX_CHARS = 160;
+
+/**
+ * Cuts text to at most max characters (code points, so a character is never
+ * split), appending an ellipsis when it was longer.
+ */
+export function truncateText(text: string, max: number): string {
+  const chars = Array.from(text);
+  if (chars.length <= max) return text;
+  return chars.slice(0, max).join('') + '\u2026';
 }
 
 /**
@@ -70,6 +119,10 @@ export function attentionHref(
     case 'integration':
       if (!integrationsDetail) return null;
       return `${INTEGRATIONS_PAGE}/${encodeURIComponent(id)}`;
+    case 'schedule':
+      // Schedules have no page of their own: link to the project's list.
+      if (!item.subject.project_id) return null;
+      return `/projects/${encodeURIComponent(item.subject.project_id)}/schedules`;
     default:
       return null;
   }
@@ -91,6 +144,10 @@ export class ScionHealthAttention extends LitElement {
   /** The summary's integrations_detail; integration items link only when true. */
   @property({ attribute: false })
   integrationsDetail = false;
+
+  /** The summary's schedules.failing; detail lines for schedule items. */
+  @property({ attribute: false })
+  failingSchedules: HealthFailingSchedule[] | null = null;
 
   static override styles = css`
     :host {
@@ -159,6 +216,22 @@ export class ScionHealthAttention extends LitElement {
       text-decoration-color: currentColor;
     }
 
+    .body {
+      display: flex;
+      flex-direction: column;
+      gap: 0.125rem;
+      min-width: 0;
+    }
+
+    .detail {
+      font-size: 0.8125rem;
+      color: var(--scion-text-muted);
+    }
+
+    .last-error {
+      font-family: var(--scion-font-mono, monospace);
+    }
+
     .empty {
       display: flex;
       align-items: center;
@@ -205,8 +278,35 @@ export class ScionHealthAttention extends LitElement {
       data-kind=${it.kind}
     >
       <sl-icon name=${icon.name} label=${icon.label}></sl-icon>
-      <span class="message">${href ? this.renderLink(it, href) : it.message}</span>
+      <span class="body">
+        <span class="message">${href ? this.renderLink(it, href) : it.message}</span>
+        ${this.renderScheduleDetail(it)}
+      </span>
     </li>`;
+  }
+
+  /**
+   * The detail line of a failing schedule item, or nothing when the item is
+   * not about one schedule or the section has no row for it. Every value is
+   * bound as text or as an attribute value.
+   */
+  private renderScheduleDetail(it: HealthAttentionItem): TemplateResult | null {
+    if (it.subject?.type !== 'schedule' || !it.subject.id) return null;
+    const row = this.failingSchedules?.find((s) => s.id === it.subject.id);
+    if (!row) return null;
+    const parts: string[] = [];
+    if (row.target) parts.push(`Target: ${row.target}`);
+    parts.push(`${row.error_count} of ${row.run_count} runs failed`);
+    const when = row.last_failure_at ? formatInstantWithZone(row.last_failure_at) : '';
+    if (when) parts.push(`last failure ${when}`);
+    const err = row.last_error ?? '';
+    return html`<span class="detail"
+      >${parts.join(' \u00b7 ')}${err
+        ? html`<br /><span class="last-error" title=${err}
+              >Last error: ${truncateText(err, SCHEDULE_ERROR_MAX_CHARS)}</span
+            >`
+        : null}</span
+    >`;
   }
 
   /** A hub instance link moves within the page (followHubInstanceLink). */

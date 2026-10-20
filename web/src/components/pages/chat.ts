@@ -65,6 +65,8 @@ import {
 } from '../../client/chat-list-cache.js';
 import type { SharedLoadOptions } from '../../client/chat-list-cache.js';
 import { ResumeRefresh } from '../../client/resume-refresh.js';
+import { coalescedRefresh, type CoalescedRefresh } from '../../client/coalesced-refresh.js';
+import { visibleInterval } from '../../client/visible-interval.js';
 import type { RailRefreshDetail } from '../shared/chat/chat-space-rail.js';
 import { TouchPrimaryController } from '../../utils/input-modality.js';
 import { isMacTextFieldCtrlKey } from '../shared/text-field-keys.js';
@@ -204,6 +206,18 @@ const FALLBACK_POLL_INTERVAL_MS = 60_000;
  */
 function realTimestamp(value?: string): string {
   return value && !value.startsWith('0001') ? value : '';
+}
+
+/**
+ * Whether a chat message event can change DM unread state (the members'
+ * unread dots). DM keys, user-to-user and agent alike, start with `dm:`; a
+ * space thread's message cannot change a DM. An event with no key at all (a
+ * lightweight one) might be a DM, so it counts.
+ */
+export function mayChangeDMUnread(eventData: Record<string, unknown> | undefined): boolean {
+  const key = eventData?.threadId || eventData?.conversationKey || eventData?.topicId;
+  if (typeof key !== 'string' || key === '') return true;
+  return key.startsWith('dm:');
 }
 
 /**
@@ -443,8 +457,44 @@ export class ScionPageChat extends LitElement {
   @property({ type: String, attribute: 'data-density', reflect: true })
   private density: 'dense' | 'comfy' = 'dense';
 
-  /** Debounce handle shared by rail-refresh triggers (e.g. a new chat message). */
-  private _refreshTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * The rail reload after chat messages: trailing, so a burst costs one
+   * reload, and capped so a steady stream of messages cannot postpone it
+   * forever. The reload only needs a spaces list requested after the newest
+   * message of the burst, so it can share another owner's refresh for the
+   * same messages rather than asking the server a second time.
+   */
+  private _railReload: CoalescedRefresh = coalescedRefresh(
+    (startedAfter) => {
+      const rail = this.shadowRoot?.querySelector('scion-chat-space-rail') as
+        | import('../shared/chat/chat-space-rail.js').ScionChatSpaceRail
+        | null;
+      if (rail) void rail.reload({ startedAfter });
+    },
+    { waitMs: 2000, maxWaitMs: 6000, leading: false }
+  );
+  /**
+   * The DM unread dots after DM messages: the first message of a burst
+   * refreshes at once, the rest collapse into one trailing refresh that
+   * joins a `/chat/dms` load started after the newest of them.
+   */
+  private _dmDotsRefresh: CoalescedRefresh = coalescedRefresh(
+    (startedAfter) => this.loadUnreadDMPeers({ startedAfter }),
+    { waitMs: 500, maxWaitMs: 2000, leading: true }
+  );
+  /**
+   * The rail catch-up after an SSE reconnect or a return from the
+   * background. Both typically fire together on a PWA resume, so they share
+   * one coalescer and cost one rail refresh. Trailing: a refresh started on
+   * the resume, before the feed reconnected, could miss events published
+   * in between, so the one refresh starts after both. The 250 ms this adds
+   * to an isolated catch-up is not noticeable.
+   */
+  private _railCatchUp: CoalescedRefresh = coalescedRefresh(() => this.refreshRail(), {
+    waitMs: 250,
+    maxWaitMs: 1000,
+    leading: false,
+  });
 
   // ---- V2 state ----
   @state() private v2Conversation: V2ConversationState | null = null;
@@ -621,8 +671,6 @@ export class ScionPageChat extends LitElement {
    * token is current when its response lands.
    */
   private _membersSeed: { token: SeedEpochToken } | null = null;
-  /** Newest chat message (event time) the pending debounced rail reload must reflect. */
-  private _railReloadAfter = -Infinity;
   /**
    * The {@link _hubMembersGeneration} hub presence was last fetched for (or
    * is being fetched for). Presence then stays current over SSE, so a rail
@@ -951,9 +999,12 @@ export class ScionPageChat extends LitElement {
   /** Tracked project IDs for presence heartbeat. */
   private _presenceProjectIds: string[] = [];
   /** Slow fallback poll for what SSE does not cover (see FALLBACK_POLL_INTERVAL_MS). */
-  private _fallbackPollInterval: ReturnType<typeof setInterval> | null = null;
-  /** Debounced re-fetch of members after a new agent appears via SSE. */
-  private _canAttachRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  private _stopFallbackPoll: (() => void) | null = null;
+  /**
+   * Coalesced re-fetch of members after a new agent appears via SSE, one
+   * per project, so a stream of new agents cannot postpone it forever.
+   */
+  private _canAttachRefresh = new Map<string, CoalescedRefresh>();
   // IDs an authoritative members fetch has just left out (see loadV2Members
   // reconciliation). Blocks _handleAgentsUpdated from re-adding a stale
   // stateManager entry the server has already rejected, breaking the
@@ -1790,24 +1841,19 @@ export class ScionPageChat extends LitElement {
     this._resumeRefresh = null;
     this.stopPresenceHeartbeat();
     // Clean up the fallback poll
-    if (this._fallbackPollInterval) {
-      clearInterval(this._fallbackPollInterval);
-      this._fallbackPollInterval = null;
-    }
-    // Clean up the canAttach refresh timer
-    if (this._canAttachRefreshTimer != null) {
-      clearTimeout(this._canAttachRefreshTimer);
-      this._canAttachRefreshTimer = null;
-    }
+    this._stopFallbackPoll?.();
+    this._stopFallbackPoll = null;
+    // Clean up the canAttach refreshes
+    for (const refresh of this._canAttachRefresh.values()) refresh.cancel();
+    this._canAttachRefresh.clear();
     // Clean up typing timers
     for (const timer of this._typingTimers.values()) {
       clearTimeout(timer);
     }
     this._typingTimers.clear();
-    if (this._refreshTimer) {
-      clearTimeout(this._refreshTimer);
-      this._refreshTimer = null;
-    }
+    this._railReload.cancel();
+    this._dmDotsRefresh.cancel();
+    this._railCatchUp.cancel();
     // Nothing is on screen any more, so nothing is being actively read.
     chatNotifications.setActiveConversation(null);
   }
@@ -1996,7 +2042,7 @@ export class ScionPageChat extends LitElement {
     // suspended there, and its feed may never have been seen to drop).
     stateManager.addEventListener('agents-resync', this._onSseResync);
     this._resumeRefresh?.stop();
-    this._resumeRefresh = new ResumeRefresh(() => this.refreshRail());
+    this._resumeRefresh = new ResumeRefresh(() => this._railCatchUp.schedule());
     this._resumeRefresh.start();
 
     // Agent membership and status badges are SSE-driven: the chat scope
@@ -2008,7 +2054,13 @@ export class ScionPageChat extends LitElement {
     // membership of a space — so a slow fallback poll covers them and
     // re-syncs a space's member list if an SSE event was ever missed. Unread state
     // is additionally refreshed on every inbound chat message.
-    this._fallbackPollInterval = setInterval(() => {
+    // It pauses while the tab is hidden and catches up once on return.
+    this._stopFallbackPoll = visibleInterval(() => {
+      // After 60 s or more hidden, the resume rail refresh also loads the DM
+      // list on return, so this catch-up sends a second /chat/dms request.
+      // Accepted: which of the two starts first is up to the rail catch-up's
+      // timing, which is not this poll's to rely on, so sharing one request
+      // could not be made reliable.
       void this.loadUnreadDMPeers();
       // A DM has no membership of its own, so re-syncing here would silently
       // swap the member list the user was just looking at. Leave the sidebar on
@@ -2051,7 +2103,7 @@ export class ScionPageChat extends LitElement {
 
   /** The SSE feed reconnected after a drop: events sent meanwhile were lost. */
   private _handleSseResync(): void {
-    this.refreshRail();
+    this._railCatchUp.schedule();
   }
 
   /**
@@ -2668,15 +2720,21 @@ export class ScionPageChat extends LitElement {
     // appears without waiting for the 60-second fallback poll.
     if (hasNewAgent && this.v2Conversation && !this.v2Conversation.isDM) {
       const projectId = this.v2Conversation.projectId;
-      if (this._canAttachRefreshTimer != null) {
-        clearTimeout(this._canAttachRefreshTimer);
-      }
-      this._canAttachRefreshTimer = setTimeout(() => {
-        this._canAttachRefreshTimer = null;
-        if (projectId && this.v2Conversation?.projectId === projectId) {
-          void this.loadV2Members(projectId);
+      if (projectId) {
+        let refresh = this._canAttachRefresh.get(projectId);
+        if (!refresh) {
+          refresh = coalescedRefresh(
+            () => {
+              if (this.v2Conversation?.projectId === projectId) {
+                void this.loadV2Members(projectId);
+              }
+            },
+            { waitMs: 1000, maxWaitMs: 4000, leading: false }
+          );
+          this._canAttachRefresh.set(projectId, refresh);
         }
-      }, 1000);
+        refresh.schedule();
+      }
     }
 
     // A deleted agent cannot remain the thread default. The server clears the
@@ -2868,26 +2926,16 @@ export class ScionPageChat extends LitElement {
     const eventData = (detail?.data ?? detail) as Record<string, unknown> | undefined;
     this.clearTypingForUser(eventData?.senderId as string | undefined);
 
-    // A new message may create an unread DM or clear one — refresh the dots.
-    void this.loadUnreadDMPeers();
-
-    // Debounce: reload the rail + backfill conversation. The reload only
-    // needs a spaces list requested after the newest message of the burst,
-    // so it can share another owner's refresh for the same messages rather
-    // than asking the server a second time.
     // A synthetic event stamped 0 would share any request: fall back to now.
     const eventAt = e.timeStamp > 0 ? e.timeStamp : chatLoadClock();
-    this._railReloadAfter = Math.max(this._railReloadAfter, eventAt);
-    if (this._refreshTimer) clearTimeout(this._refreshTimer);
-    this._refreshTimer = setTimeout(() => {
-      this._refreshTimer = null;
-      const startedAfter = this._railReloadAfter;
-      this._railReloadAfter = -Infinity;
-      const rail = this.shadowRoot?.querySelector('scion-chat-space-rail') as
-        | import('../shared/chat/chat-space-rail.js').ScionChatSpaceRail
-        | null;
-      if (rail) void rail.reload({ startedAfter });
-    }, 2000);
+
+    // A DM message may create an unread DM or clear one — refresh the dots.
+    // A space message cannot change DM unread state; an event without a key
+    // (a lightweight one) might be a DM, so it refreshes too.
+    if (mayChangeDMUnread(eventData)) this._dmDotsRefresh.schedule(eventAt);
+
+    // Reload the rail (trailing and capped, see _railReload).
+    this._railReload.schedule(eventAt);
   }
 
   private handleChatTopic(e: Event): void {

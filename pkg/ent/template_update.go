@@ -130,46 +130,6 @@ func (_u *TemplateUpdate) ClearDefaultHarnessConfig() *TemplateUpdate {
 	return _u
 }
 
-// SetImage sets the "image" field.
-func (_u *TemplateUpdate) SetImage(v string) *TemplateUpdate {
-	_u.mutation.SetImage(v)
-	return _u
-}
-
-// SetNillableImage sets the "image" field if the given value is not nil.
-func (_u *TemplateUpdate) SetNillableImage(v *string) *TemplateUpdate {
-	if v != nil {
-		_u.SetImage(*v)
-	}
-	return _u
-}
-
-// ClearImage clears the value of the "image" field.
-func (_u *TemplateUpdate) ClearImage() *TemplateUpdate {
-	_u.mutation.ClearImage()
-	return _u
-}
-
-// SetConfig sets the "config" field.
-func (_u *TemplateUpdate) SetConfig(v string) *TemplateUpdate {
-	_u.mutation.SetConfig(v)
-	return _u
-}
-
-// SetNillableConfig sets the "config" field if the given value is not nil.
-func (_u *TemplateUpdate) SetNillableConfig(v *string) *TemplateUpdate {
-	if v != nil {
-		_u.SetConfig(*v)
-	}
-	return _u
-}
-
-// ClearConfig clears the value of the "config" field.
-func (_u *TemplateUpdate) ClearConfig() *TemplateUpdate {
-	_u.mutation.ClearConfig()
-	return _u
-}
-
 // SetAgentConfig sets the "agent_config" field.
 func (_u *TemplateUpdate) SetAgentConfig(v string) *TemplateUpdate {
 	_u.mutation.SetAgentConfig(v)
@@ -584,18 +544,6 @@ func (_u *TemplateUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	if _u.mutation.DefaultHarnessConfigCleared() {
 		_spec.ClearField(template.FieldDefaultHarnessConfig, field.TypeString)
 	}
-	if value, ok := _u.mutation.Image(); ok {
-		_spec.SetField(template.FieldImage, field.TypeString, value)
-	}
-	if _u.mutation.ImageCleared() {
-		_spec.ClearField(template.FieldImage, field.TypeString)
-	}
-	if value, ok := _u.mutation.Config(); ok {
-		_spec.SetField(template.FieldConfig, field.TypeString, value)
-	}
-	if _u.mutation.ConfigCleared() {
-		_spec.ClearField(template.FieldConfig, field.TypeString)
-	}
 	if value, ok := _u.mutation.AgentConfig(); ok {
 		_spec.SetField(template.FieldAgentConfig, field.TypeString, value)
 	}
@@ -808,46 +756,6 @@ func (_u *TemplateUpdateOne) SetNillableDefaultHarnessConfig(v *string) *Templat
 // ClearDefaultHarnessConfig clears the value of the "default_harness_config" field.
 func (_u *TemplateUpdateOne) ClearDefaultHarnessConfig() *TemplateUpdateOne {
 	_u.mutation.ClearDefaultHarnessConfig()
-	return _u
-}
-
-// SetImage sets the "image" field.
-func (_u *TemplateUpdateOne) SetImage(v string) *TemplateUpdateOne {
-	_u.mutation.SetImage(v)
-	return _u
-}
-
-// SetNillableImage sets the "image" field if the given value is not nil.
-func (_u *TemplateUpdateOne) SetNillableImage(v *string) *TemplateUpdateOne {
-	if v != nil {
-		_u.SetImage(*v)
-	}
-	return _u
-}
-
-// ClearImage clears the value of the "image" field.
-func (_u *TemplateUpdateOne) ClearImage() *TemplateUpdateOne {
-	_u.mutation.ClearImage()
-	return _u
-}
-
-// SetConfig sets the "config" field.
-func (_u *TemplateUpdateOne) SetConfig(v string) *TemplateUpdateOne {
-	_u.mutation.SetConfig(v)
-	return _u
-}
-
-// SetNillableConfig sets the "config" field if the given value is not nil.
-func (_u *TemplateUpdateOne) SetNillableConfig(v *string) *TemplateUpdateOne {
-	if v != nil {
-		_u.SetConfig(*v)
-	}
-	return _u
-}
-
-// ClearConfig clears the value of the "config" field.
-func (_u *TemplateUpdateOne) ClearConfig() *TemplateUpdateOne {
-	_u.mutation.ClearConfig()
 	return _u
 }
 
@@ -1294,18 +1202,6 @@ func (_u *TemplateUpdateOne) sqlSave(ctx context.Context) (_node *Template, err 
 	}
 	if _u.mutation.DefaultHarnessConfigCleared() {
 		_spec.ClearField(template.FieldDefaultHarnessConfig, field.TypeString)
-	}
-	if value, ok := _u.mutation.Image(); ok {
-		_spec.SetField(template.FieldImage, field.TypeString, value)
-	}
-	if _u.mutation.ImageCleared() {
-		_spec.ClearField(template.FieldImage, field.TypeString)
-	}
-	if value, ok := _u.mutation.Config(); ok {
-		_spec.SetField(template.FieldConfig, field.TypeString, value)
-	}
-	if _u.mutation.ConfigCleared() {
-		_spec.ClearField(template.FieldConfig, field.TypeString)
 	}
 	if value, ok := _u.mutation.AgentConfig(); ok {
 		_spec.SetField(template.FieldAgentConfig, field.TypeString, value)

@@ -123,13 +123,16 @@ func TestEmbeddedHarnessConfigs_ValuesMatchLegacyTable(t *testing.T) {
 }
 
 // TestEmbeddedHarnessConfigs_AgentPluginsCapability pins the agent_plugins
-// capability of the bundles that declare it: codex installs natively
-// (partial: sse skipped), copilot installs natively (yes); the harnesses
-// without native support say no.
+// capability of the bundles, declared in each bundle's agent-plugins.yaml
+// sidecar (config.yaml must not carry it; ptone/scion#5196): codex installs
+// natively (partial: sse skipped), copilot installs natively (yes), muse-code
+// installs natively (partial), claude installs a skills-dir plugin (partial:
+// wrapper and skip rule); the harnesses without native support say no.
 func TestEmbeddedHarnessConfigs_AgentPluginsCapability(t *testing.T) {
 	want := map[string]api.SupportLevel{
 		"codex":       api.SupportPartial,
 		"copilot":     api.SupportYes,
+		"claude":      api.SupportPartial,
 		"muse-code":   api.SupportPartial,
 		"gemini-cli":  api.SupportNo,
 		"grok-build":  api.SupportNo,
@@ -139,16 +142,31 @@ func TestEmbeddedHarnessConfigs_AgentPluginsCapability(t *testing.T) {
 	}
 	for name, level := range want {
 		_, entry := loadEmbeddedEntry(t, name)
-		if entry.Capabilities == nil {
-			t.Errorf("%s: no capabilities block", name)
+		if entry.Capabilities != nil && entry.Capabilities.AgentPlugins != (api.CapabilityField{}) {
+			t.Errorf("%s: config.yaml declares capabilities.agent_plugins; it belongs in %s", name, config.AgentPluginsSidecarFile)
+		}
+		// Strict parse: the loaders degrade an invalid sidecar to "no", so
+		// this is what catches a bad bundled file.
+		data, err := fs.ReadFile(harnessesEmbed.FS, name+"/"+config.AgentPluginsSidecarFile)
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
 			continue
 		}
-		c := entry.Capabilities.AgentPlugins
+		c, err := config.ParseAgentPluginsSidecar(data)
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+			continue
+		}
 		if c.Support != level {
 			t.Errorf("%s: agent_plugins support = %q, want %q", name, c.Support, level)
 		}
 		if c.Reason == "" && level != api.SupportYes {
 			t.Errorf("%s: agent_plugins has no reason", name)
+		}
+		// The built-in harness (harness.New, used when no harness-config dir
+		// resolves) reads the same sidecar.
+		if got := New(name).AdvancedCapabilities().AgentPlugins; got != c {
+			t.Errorf("%s: New().AdvancedCapabilities().AgentPlugins = %+v, want %+v", name, got, c)
 		}
 	}
 }

@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -27,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/router"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
@@ -173,12 +175,17 @@ func (s *Server) resolvePTYPath(ctx context.Context, identity Identity, agent *s
 	if !s.experimentEnabled(conduitExperiment) {
 		return s.brokerPTYPath(ctx, agent, false)
 	}
-	if !s.brokerAttachUnsupported(ctx, agent) {
+	// Targets without stream renewal (contracts, Target lacks stream
+	// renewal): in external relay mode with enforce, a broker session never
+	// renews, so a user attach skips the broker branch and falls through to
+	// the agent path, after the placement check and the 422 above.
+	brokerSkipped := s.conduitTargetUpgradeRequiredFor(identity, false)
+	if !brokerSkipped && !s.brokerAttachUnsupported(ctx, agent) {
 		d := s.brokerPTYPath(ctx, agent, true)
 		d.reportPath = true
 		return d
 	}
-	d := s.agentPTYPath(ctx, identity, agent)
+	d := s.agentPTYPath(ctx, identity, agent, brokerSkipped)
 	d.reportPath = true
 	return d
 }
@@ -218,7 +225,7 @@ func (s *Server) brokerPTYPath(ctx context.Context, agent *store.Agent, viaRoute
 // returned unchanged.
 func (s *Server) managedPTYPath(ctx context.Context, identity Identity, agent *store.Agent) ptyPathDecision {
 	if s.experimentEnabled(conduitExperiment) {
-		d := s.agentPTYPath(ctx, identity, agent)
+		d := s.agentPTYPath(ctx, identity, agent, false)
 		if d.Path == ptyPathAgent {
 			d.reportPath = true
 			return d
@@ -233,7 +240,11 @@ func (s *Server) managedPTYPath(ctx context.Context, identity Identity, agent *s
 
 // agentPTYPath is the agent path when the agent has a conduit session
 // advertising pty that this node can reach, else a 503 with the reason.
-func (s *Server) agentPTYPath(ctx context.Context, identity Identity, agent *store.Agent) ptyPathDecision {
+// brokerSkipped reports that resolvePTYPath skipped the broker branch for
+// lack of stream renewal: with no agent pty session left, the attach is
+// then refused with the temporary registry_unavailable rather than
+// agent_pty_unavailable. Temporary refusals keep their retryable reasons.
+func (s *Server) agentPTYPath(ctx context.Context, identity Identity, agent *store.Agent, brokerSkipped bool) ptyPathDecision {
 	rtr := s.conduitRouter()
 	if rtr == nil {
 		return ptyRefusal(http.StatusServiceUnavailable, ErrCodeUnavailable,
@@ -243,11 +254,34 @@ func (s *Server) agentPTYPath(ctx context.Context, identity Identity, agent *sto
 		return ptyRefusal(http.StatusServiceUnavailable, ErrCodeUnavailable,
 			"The agent's runtime does not support attach, and stream authorization checks are not running", ptyReasonStreamAuthzDown)
 	}
-	_, err := rtr.Resolve(ctx, agentPTYRequest(agent), nil)
+	res, err := rtr.Resolve(ctx, agentPTYRequest(agent), nil)
 	switch {
 	case err == nil:
+		// Target without stream renewal (contracts, Target lacks stream
+		// renewal): the agent path is skipped on the resolved row, and no
+		// path is left.
+		renews := conduitTargetRenews(res)
+		if s.conduitTargetUpgradeRequired(ctx, identity, renews, conduitRoutePTY, agent.ID) {
+			return ptyUpgradeRequiredRefusal()
+		}
+		// Renewal path (contracts, Renewal path unavailable): decided on
+		// the resolved row, for the preflight and the WebSocket open alike,
+		// before any upgrade. A temporary failure, never
+		// runtime_attach_unsupported.
+		if s.conduitRenewalPathUnavailable(ctx, identity, renews, s.conduitRouteCanRenew(res), conduitRoutePTY, agent.ID) {
+			return ptyRefusal(http.StatusServiceUnavailable, ErrCodeUnavailable,
+				conduitStreamRenewalUnavailableMessage, conduitReasonStreamRenewalUnavailable)
+		}
 		return ptyPathDecision{Path: ptyPathAgent}
 	case errors.Is(err, router.ErrRegistryUnavailable):
+		return ptyRefusal(http.StatusServiceUnavailable, ErrCodeUnavailable,
+			"Conduit routing is unavailable", ptyReasonRegistryUnavailable)
+	case brokerSkipped:
+		// The broker path was skipped for lack of stream renewal and the
+		// agent has no pty session. Without a session the hub cannot tell
+		// an agent image without conduit from a session that is briefly
+		// reconnecting, so this is the temporary failure, never
+		// stream_renewal_unsupported (design v2.21.46 §3.5 Q14).
 		return ptyRefusal(http.StatusServiceUnavailable, ErrCodeUnavailable,
 			"Conduit routing is unavailable", ptyReasonRegistryUnavailable)
 	default:
@@ -255,6 +289,15 @@ func (s *Server) agentPTYPath(ctx context.Context, identity Identity, agent *sto
 			"The agent's runtime does not support attach, and the agent has no conduit session that serves PTY",
 			ptyReasonAgentPTYUnavailable)
 	}
+}
+
+// ptyUpgradeRequiredRefusal is the PTY refusal when no path with stream
+// renewal is left (contracts, Target lacks stream renewal): 503
+// runtime_attach_unsupported, reason stream_renewal_unsupported, before
+// any upgrade, for the preflight and the WebSocket open alike.
+func ptyUpgradeRequiredRefusal() ptyPathDecision {
+	return ptyRefusal(http.StatusServiceUnavailable, wsprotocol.ErrCodeRuntimeAttachUnsupported,
+		conduitAgentUpgradeRequiredMessage, conduitReasonStreamRenewalUnsupported)
 }
 
 // ptyStreamTrackable reports whether a PTY stream opened for identity can
@@ -429,6 +472,7 @@ func (s *Server) runAgentPTY(ctx context.Context, conn *websocket.Conn, identity
 	cols, rows := ptyInitialSize(q)
 	up := &agentPTYUpstream{s: s, identity: identity, agent: agent}
 	session := newPTYSessionWithUpstream(ctx, agent.Slug, conn, up, cols, rows)
+	session.credentialCheck = s.ptyTokenCredentialCheck(ctx, agent)
 	defer session.Close()
 
 	slog.Info("PTY session started", "agent_id", agent.ID, "slug", agent.Slug, "user", identity.ID(), "path", string(ptyPathAgent))
@@ -473,8 +517,18 @@ func (u *agentPTYUpstream) Open(ctx context.Context, cols, rows int) error {
 		return errConduitNoRoute
 	}
 	params := ptyStreamParams(cols, rows)
+	// skipped is set when a re-resolution after the upgrade landed on a row
+	// without stream renewal (contracts, Target lacks stream renewal): that
+	// row is skipped like a stale one, so resolution continues on the
+	// remaining rows within the re-resolution budget, and the attach closes
+	// only when no row is left.
+	skipped := false
 	err := rtr.Do(ctx, agentPTYRequest(u.agent), func(ctx context.Context, res router.Resolved) error {
-		tok, _, err := u.s.mintConduitGrant(ctx, conduitGrantRequest{
+		if u.s.conduitTargetUpgradeRequiredFor(u.identity, conduitTargetRenews(res)) {
+			skipped = true
+			return fmt.Errorf("%w: %w", relay.ErrStaleRoute, errConduitAgentUpgradeRequired)
+		}
+		tok, claims, err := u.s.mintConduitGrant(ctx, conduitGrantRequest{
 			Identity: u.identity,
 			Agent:    u.agent,
 			Stream:   grant.StreamHeader{Kind: grant.StreamKindPTY, Params: params},
@@ -485,11 +539,14 @@ func (u *agentPTYUpstream) Open(ctx context.Context, cols, rows int) error {
 				SessionID:           res.Record.SessionID,
 				ConnectionEpoch:     res.Record.ConnectionEpoch,
 			},
+			Via:          grant.ViaPTY,
+			TargetRenews: conduitTargetRenews(res),
+			CanRenew:     u.s.conduitRouteCanRenew(res),
 		})
 		if err != nil {
 			return err
 		}
-		st, err := res.Session.OpenStream(ctx, &conduitv1.StreamOpen{
+		st, bridge, err := u.s.openConduitTargetStream(ctx, res, &conduitv1.StreamOpen{
 			Kind:   conduitv1.StreamKind_STREAM_KIND_PTY,
 			Params: params,
 			Grant:  tok,
@@ -499,8 +556,8 @@ func (u *agentPTYUpstream) Open(ctx context.Context, cols, rows int) error {
 		}
 		u.st = st
 		u.sessionID = res.Record.SessionID
-		target := conduitTargetOf(res, st)
-		u.untrack = u.s.trackConduitUserStream(&conduitUserStream{
+		target := conduitLeafTarget(res, st, bridge)
+		tracked := &conduitUserStream{
 			Kind:      grant.StreamKindPTY,
 			Identity:  u.identity,
 			AgentID:   u.agent.ID,
@@ -508,11 +565,20 @@ func (u *agentPTYUpstream) Open(ctx context.Context, cols, rows int) error {
 			SessionID: target.SessionID,
 			StreamID:  target.StreamID,
 			Close:     u.closeWithCode,
-			Renew:     conduitStreamRenewal(res, st.ID()),
-		})
+			Bridge:    bridge,
+		}
+		applyConduitOpenGrant(tracked, tok, claims)
+		tracked.Renew = conduitStreamRenewal(res, st, !tracked.AuthzUntil.IsZero())
+		u.untrack = u.s.trackConduitUserStream(tracked)
 		return nil
 	})
 	if err != nil {
+		if skipped && errors.Is(err, router.ErrNoSession) {
+			// Every row left lacked stream renewal (or none was left after
+			// one that did): no path is left.
+			u.s.recordConduitUpgradeRefused(ctx, conduitRoutePTY, u.agent.ID)
+			err = errConduitAgentUpgradeRequired
+		}
 		return ptyAgentOpenError(err)
 	}
 	u.buf = make([]byte, ptyAgentReadBuffer)
@@ -581,6 +647,21 @@ func ptyAgentOpenError(err error) error {
 		return &StreamClosedError{Code: code, Reason: reason}
 	case errors.Is(err, errConduitForbidden):
 		return &StreamClosedError{Code: wsprotocol.ClosePTYForbidden, Reason: ptyCloseReasonForbidden}
+	case errors.Is(err, errConduitStreamRenewalUnavailable):
+		// The mint's backstop for a re-resolution after the pre-upgrade
+		// check: a temporary failure (design v2.21.36 §3.3.1, 4504), so the client
+		// retries with backoff and may land on a route that can renew.
+		return &StreamClosedError{Code: wsprotocol.ClosePTYUpstreamTimeout, Reason: conduitReasonStreamRenewalUnavailable}
+	case errors.Is(err, errConduitAgentUpgradeRequired):
+		// After the upgrade no path with stream renewal is left: 4504 with
+		// the stream-only reason. The client's retry reaches the preflight,
+		// which gives the final 503 runtime_attach_unsupported.
+		return &StreamClosedError{Code: wsprotocol.ClosePTYUpstreamTimeout, Reason: conduitReasonStreamRenewalUnsupported}
+	case errors.Is(err, errConduitLeafNotRelayHeld), errors.Is(err, errConduitGrantInternal):
+		// An internal invariant broke (external relay mode resolved to a
+		// session that is not relay-held), or the open grant was not
+		// minted for an internal reason: the internal error close.
+		return &StreamClosedError{Code: wsprotocol.ClosePTYInternalError, Reason: wsprotocol.CloseReasonInternalError}
 	default:
 		return err
 	}

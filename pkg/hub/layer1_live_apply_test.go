@@ -187,21 +187,22 @@ func TestNotificationChannels_FileSnapshotKeepsRegistry(t *testing.T) {
 	assert.Same(t, reg, srv.currentChannelRegistry())
 }
 
-// Clearing image_registry makes the next agent use the startup registry.
+// Clearing image_registry makes the next agent use the file-tier registry;
+// a saved value applies to the next dispatch with no apply step, since
+// every read resolves from the operational settings (ptone/scion#3916).
 func TestImageRegistry_ClearRevertsToStartupValue(t *testing.T) {
-	srv, _ := testServer(t)
-	srv.mu.Lock()
-	srv.config.MaintenanceConfig.ImageRegistry = "boot.example.com/scion"
-	srv.mu.Unlock()
-	srv.recordStartupLayer1Values()
-	dispatcher := srv.CreateAuthenticatedDispatcher()
+	ctx := context.Background()
+	srv, _, ops := newTestDBServer(t)
+	setTestImageRegistryFileTier(t, ops, "boot.example.com/scion", nil)
 
-	ApplySnapshot(srv, dbSnap(Layer1Snapshot{ImageRegistry: "db.example.com/scion"}))
-	assert.Equal(t, "db.example.com/scion", dispatcher.ImageRegistry(), "a saved registry applies to the next dispatch")
+	_, err := ops.Update(ctx, "endpoints", json.RawMessage(`{"image_registry":"db.example.com/scion"}`), "admin", -1, "managed")
+	require.NoError(t, err)
+	assert.Equal(t, "db.example.com/scion", srv.dispatchImageRegistryFor("", ""), "a saved registry applies to the next dispatch")
+	assert.Equal(t, "db.example.com/scion", srv.resolveImageRegistry())
 
-	res := ApplySnapshot(srv, dbSnap(Layer1Snapshot{}))
-	assert.Contains(t, res["applied"], "image_registry")
-	assert.Equal(t, "boot.example.com/scion", dispatcher.ImageRegistry(), "a cleared registry returns to the startup value")
+	_, err = ops.Update(ctx, "endpoints", json.RawMessage(`{}`), "admin", -1, "managed")
+	require.NoError(t, err)
+	assert.Equal(t, "boot.example.com/scion", srv.dispatchImageRegistryFor("", ""), "a cleared registry returns to the file tier")
 	assert.Equal(t, "boot.example.com/scion", srv.resolveImageRegistry())
 }
 
@@ -211,7 +212,6 @@ func TestImageRegistry_ClearRevertsToStartupValue(t *testing.T) {
 func TestImageRegistry_FileModeReloadKeepsSystemRegistry(t *testing.T) {
 	tempSettingsHome(t)
 	srv := &Server{maintenance: NewMaintenanceState(false, "")}
-	srv.config.MaintenanceConfig.ImageRegistry = "boot.example.com/scion"
 	srv.recordStartupLayer1Values()
 
 	rr := httptest.NewRecorder()

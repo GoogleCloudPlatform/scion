@@ -30,10 +30,6 @@ type Template struct {
 	Harness string `json:"harness,omitempty"`
 	// DefaultHarnessConfig holds the value of the "default_harness_config" field.
 	DefaultHarnessConfig string `json:"default_harness_config,omitempty"`
-	// Image holds the value of the "image" field.
-	Image string `json:"image,omitempty"`
-	// Config holds the value of the "config" field.
-	Config string `json:"config,omitempty"`
 	// AgentConfig holds the value of the "agent_config" field.
 	AgentConfig string `json:"agent_config,omitempty"`
 	// ContentHash holds the value of the "content_hash" field.
@@ -78,7 +74,7 @@ func (*Template) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case template.FieldName, template.FieldSlug, template.FieldDisplayName, template.FieldDescription, template.FieldHarness, template.FieldDefaultHarnessConfig, template.FieldImage, template.FieldConfig, template.FieldAgentConfig, template.FieldContentHash, template.FieldScope, template.FieldScopeID, template.FieldProjectID, template.FieldStorageURI, template.FieldStorageBucket, template.FieldStoragePath, template.FieldLayout, template.FieldFiles, template.FieldBaseTemplate, template.FieldStatus, template.FieldOwnerID, template.FieldCreatedBy, template.FieldUpdatedBy, template.FieldSourceURL:
+		case template.FieldName, template.FieldSlug, template.FieldDisplayName, template.FieldDescription, template.FieldHarness, template.FieldDefaultHarnessConfig, template.FieldAgentConfig, template.FieldContentHash, template.FieldScope, template.FieldScopeID, template.FieldProjectID, template.FieldStorageURI, template.FieldStorageBucket, template.FieldStoragePath, template.FieldLayout, template.FieldFiles, template.FieldBaseTemplate, template.FieldStatus, template.FieldOwnerID, template.FieldCreatedBy, template.FieldUpdatedBy, template.FieldSourceURL:
 			values[i] = new(sql.NullString)
 		case template.FieldCreated, template.FieldUpdated:
 			values[i] = new(sql.NullTime)
@@ -140,18 +136,6 @@ func (_m *Template) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field default_harness_config", values[i])
 			} else if value.Valid {
 				_m.DefaultHarnessConfig = value.String
-			}
-		case template.FieldImage:
-			if value, ok := values[i].(*sql.NullString); !ok {
-				return fmt.Errorf("unexpected type %T for field image", values[i])
-			} else if value.Valid {
-				_m.Image = value.String
-			}
-		case template.FieldConfig:
-			if value, ok := values[i].(*sql.NullString); !ok {
-				return fmt.Errorf("unexpected type %T for field config", values[i])
-			} else if value.Valid {
-				_m.Config = value.String
 			}
 		case template.FieldAgentConfig:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -314,12 +298,6 @@ func (_m *Template) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("default_harness_config=")
 	builder.WriteString(_m.DefaultHarnessConfig)
-	builder.WriteString(", ")
-	builder.WriteString("image=")
-	builder.WriteString(_m.Image)
-	builder.WriteString(", ")
-	builder.WriteString("config=")
-	builder.WriteString(_m.Config)
 	builder.WriteString(", ")
 	builder.WriteString("agent_config=")
 	builder.WriteString(_m.AgentConfig)

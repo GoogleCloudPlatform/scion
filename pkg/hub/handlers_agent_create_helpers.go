@@ -533,8 +533,8 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 //
 // Exceptions — these ignore whether the slot is already set:
 //   - TemplateID and TemplateHash are replaced whenever resolvedTemplate is
-//     non-nil; HubAccessScopes too, but only when the template declares
-//     hubAccess (otherwise an existing value is left as-is).
+//     non-nil. A template no longer sets HubAccessScopes (ptone/scion#4224);
+//     an existing value is left as-is.
 //   - Model-alias resolution: when AppliedConfig.Model is an alias, rewrites
 //     it to the resolved concrete name, and overwrites a non-empty
 //     InlineConfig.Model with that same resolved value (InlineConfig.Model
@@ -591,22 +591,11 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 // design §3.3) — those are populated by populateAgentConfig above this call,
 // before AppliedConfig is handed here.
 func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, project *store.Project, resolvedTemplate *store.Template) {
-	// Populate template ID, hash, and hub access scopes if template was resolved.
+	// Populate template ID and hash if template was resolved. The agent role
+	// determines hub access scopes; a template sets none (ptone/scion#4224).
 	if resolvedTemplate != nil {
 		agent.AppliedConfig.TemplateID = resolvedTemplate.ID
 		agent.AppliedConfig.TemplateHash = resolvedTemplate.ContentHash
-		if resolvedTemplate.Config != nil && resolvedTemplate.Config.HubAccess != nil {
-			// Still store the scopes on AppliedConfig for backward-compat visibility,
-			// but they are no longer used for token generation (replaced by AgentRole).
-			agent.AppliedConfig.HubAccessScopes = resolvedTemplate.Config.HubAccess.Scopes
-			if len(resolvedTemplate.Config.HubAccess.Scopes) > 0 {
-				slog.Warn("Template uses deprecated hubAccess.scopes; agent role determines scopes instead",
-					"template", resolvedTemplate.Slug,
-					"scopes", resolvedTemplate.Config.HubAccess.Scopes,
-					"agent_role", agent.AppliedConfig.AgentRole,
-				)
-			}
-		}
 
 		// The template's job keys are not copied here. Its model is filled
 		// by deriveAgentConfig's template rung, from the AgentConfig
@@ -2236,6 +2225,34 @@ func (s *Server) canDispatchToBroker(ctx context.Context, broker *store.RuntimeB
 	return s.brokerDispatchAllowed(ctx, broker, func(user UserIdentity) bool {
 		return s.userHoldsBrokerDispatch(ctx, user, broker)
 	})
+}
+
+// canRunBrokerImageOps reports whether the caller may pull or remove an
+// image on broker (the harness-config image operations with broker_id). It
+// writes no HTTP response.
+//
+// Dispatch authority is checked first: a user or dev caller holding
+// broker.dispatch on the broker passes. A user or dev caller whose
+// credential is not an interactive session or dev credential
+// (sessionCredentialAllowed) is then refused, so the broker's auto-provide
+// setting never admits a user access token or any other non-session
+// credential. Every other caller is decided by canDispatchToBroker, the
+// shared-broker rule agent creation uses. Agent creation itself keeps
+// canUseBrokerForProject.
+func (s *Server) canRunBrokerImageOps(ctx context.Context, broker *store.RuntimeBroker) bool {
+	identity := GetIdentityFromContext(ctx)
+	if isNilIdentity(identity) || broker == nil {
+		return false
+	}
+	if user, ok := identity.(UserIdentity); ok && (identity.Type() == "user" || identity.Type() == "dev") {
+		if s.userHoldsBrokerDispatch(ctx, user, broker) {
+			return true
+		}
+		if !sessionCredentialAllowed(ctx) {
+			return false
+		}
+	}
+	return s.canDispatchToBroker(ctx, broker)
 }
 
 // canUseBrokerForProject reports whether the caller, already authorized to

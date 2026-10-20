@@ -295,10 +295,11 @@ The `config.yaml` file at the root of a harness-config bundle defines its runtim
 `image` and `image_pull_policy` (the latter is Kubernetes-only; values `Always`, `IfNotPresent`,
 `Never`) can also be set — and, since ptone/scion#2156, overridden by an operator — via Hub
 settings `harness_configs.<name>.image` / `.image_pull_policy`, without editing the bundle. An
-explicit `image` or `kubernetes.imagePullPolicy` in an agent config still outranks the
-Hub setting, which in turn outranks this file's own default; in a template both keys are ignored. An *explicitly set*
+explicit `image` or `kubernetes.imagePullPolicy` in an agent's inline config still outranks the
+Hub setting, which in turn outranks this file's own default; a template's `image` and
+`kubernetes` are ignored. An *explicitly set*
 `profiles.<p>.harness_overrides.<name>.image` (and that override's `image_pull_policy`) is the exception:
-since ptone/scion#1799 it outranks an inline (agent config) value too, and only the user's explicit
+since ptone/scion#1799 it outranks an inline value too, and only the user's explicit
 `--image` (or explicit pull policy) ranks above it. See [Settings
 Precedence](/scion/reference/settings-precedence/#container-image-and-kubernetes-image-pull-policy--a-separate-chain-from-b1)
 for the full chain.

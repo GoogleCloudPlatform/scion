@@ -319,11 +319,11 @@ func TestCreateSubAgent_NoEscalationEnforced(t *testing.T) {
 	assert.Error(t, err, "escalated sub-agent should not be persisted")
 }
 
-// TestTemplateHubAccessScopes_StoredButIgnoredForToken verifies that
-// hubAccess.scopes from a template are stored on the agent's AppliedConfig for
-// backward-compatibility visibility, but are NOT used for JWT token generation.
-// Token scopes are derived solely from the agent role (Phase 2 change).
-func TestTemplateHubAccessScopes_StoredButIgnoredForToken(t *testing.T) {
+// TestTemplateHubAccess_NotStampedTokenFromRole verifies that a template
+// stamps no hub access scopes on the agent's AppliedConfig (the template row's
+// deprecated hubAccess.scopes is gone, ptone/scion#4224) and that JWT token
+// scopes are derived solely from the agent role.
+func TestTemplateHubAccess_NotStampedTokenFromRole(t *testing.T) {
 	// Use a non-dev-auth server so the role is not auto-upgraded to full.
 	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
@@ -350,7 +350,7 @@ func TestTemplateHubAccessScopes_StoredButIgnoredForToken(t *testing.T) {
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 
-	// Create a template with legacy hubAccess.scopes that include elevated permissions
+	// Create a template. It has no way to carry hub access scopes.
 	tmpl := &store.Template{
 		ID:      tid("tmpl-hub-scopes"),
 		Name:    "hub-scopes-template",
@@ -358,11 +358,6 @@ func TestTemplateHubAccessScopes_StoredButIgnoredForToken(t *testing.T) {
 		Scope:   "project",
 		ScopeID: project.ID,
 		Status:  store.TemplateStatusActive,
-		Config: &store.TemplateConfig{
-			HubAccess: &store.HubAccessConfig{
-				Scopes: []string{"project:read", "agent:create", "agent:lifecycle", "secret:read"},
-			},
-		},
 	}
 	require.NoError(t, s.CreateTemplate(ctx, tmpl))
 
@@ -381,11 +376,10 @@ func TestTemplateHubAccessScopes_StoredButIgnoredForToken(t *testing.T) {
 	// Call populateAgentConfig to simulate the real code path
 	require.NoError(t, srv.populateAgentConfig(ctx, agent, project, tmpl))
 
-	// Verify the template scopes are stored on AppliedConfig for visibility
+	// No hub access scopes are stamped from the template.
 	require.NotNil(t, agent.AppliedConfig, "AppliedConfig should be set")
-	assert.Equal(t, []string{"project:read", "agent:create", "agent:lifecycle", "secret:read"},
-		agent.AppliedConfig.HubAccessScopes,
-		"template hubAccess.scopes should be preserved on AppliedConfig for visibility")
+	assert.Empty(t, agent.AppliedConfig.HubAccessScopes,
+		"a template stamps no hub access scopes (ptone/scion#4224)")
 	assert.Equal(t, tmpl.ID, agent.AppliedConfig.TemplateID,
 		"template ID should be set on AppliedConfig")
 
@@ -409,13 +403,13 @@ func TestTemplateHubAccessScopes_StoredButIgnoredForToken(t *testing.T) {
 	assert.True(t, claims.HasScope(ScopeAgentStatusUpdate), "baseline should have agent:status-update")
 	assert.True(t, claims.HasScope(ScopeAgentTokenRefresh), "baseline should have agent:token-refresh")
 
-	// These scopes were in the template's hubAccess but must NOT leak into the token
+	// Elevated scopes must NOT appear in a baseline token
 	assert.False(t, claims.HasScope(ScopeAgentCreate),
-		"agent:create from template scopes should NOT appear in baseline token")
+		"agent:create should NOT appear in baseline token")
 	assert.False(t, claims.HasScope(ScopeAgentLifecycle),
-		"agent:lifecycle from template scopes should NOT appear in baseline token")
+		"agent:lifecycle should NOT appear in baseline token")
 	assert.False(t, claims.HasScope(ScopeProjectSecretRead),
-		"secret:read from template scopes should NOT appear in baseline token")
+		"secret:read should NOT appear in baseline token")
 }
 
 func TestAgentRoleAndScopes_EmptyRoleDefaultsToNone(t *testing.T) {
@@ -428,38 +422,6 @@ func TestAgentRoleAndScopes_EmptyRoleDefaultsToNone(t *testing.T) {
 	assert.Equal(t, AgentRoleNone, role)
 	assert.Empty(t, additionalScopes)
 	assert.Nil(t, ScopesForRole(role))
-}
-
-// TestTemplateHubAccessScopes_EmptyDoesNotWarn verifies that a template with
-// an empty hubAccess.scopes array does not trigger the deprecation warning.
-func TestTemplateHubAccessScopes_EmptyDoesNotWarn(t *testing.T) {
-	// An agent whose template config has hubAccess with empty scopes should
-	// not modify HubAccessScopes and should behave identically to a template
-	// without any hubAccess block.
-	agent := &store.Agent{
-		ID:   tid("agent-empty-scopes"),
-		Name: "empty-scopes-agent",
-		AppliedConfig: &store.AgentAppliedConfig{
-			AgentRole: string(AgentRoleBaseline),
-		},
-	}
-
-	tmpl := &store.Template{
-		ID:   tid("tmpl-empty-scopes"),
-		Name: "empty-scopes-template",
-		Slug: "empty-scopes-template",
-		Config: &store.TemplateConfig{
-			HubAccess: &store.HubAccessConfig{
-				Scopes: []string{},
-			},
-		},
-	}
-
-	srv, _ := testServer(t)
-	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, nil, tmpl))
-
-	assert.Empty(t, agent.AppliedConfig.HubAccessScopes,
-		"empty scopes array should not populate HubAccessScopes")
 }
 
 func TestCreateAgent_ProjectMaxCapsRole(t *testing.T) {

@@ -394,7 +394,11 @@ func TestMigratedLegacyKeys_SurviveLaterWrites(t *testing.T) {
 			vs.DefaultTemplate = "fourth"
 			return SaveVersionedSettings(dir, vs)
 		}},
-		{"updateVersionedSettingStruct", func() error { return updateVersionedSettingStruct(dir, "default_template", "fifth") }},
+		{"updateVersionedSettingStruct", func() error {
+			return withSettingsLock(dir, func(lock *SettingsLock) error {
+				return updateVersionedSettingStruct(lock, dir, "default_template", "fifth")
+			})
+		}},
 	} {
 		if err := w.write(); err != nil {
 			t.Fatalf("%s: %v", w.name, err)

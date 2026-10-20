@@ -253,17 +253,19 @@ func cacheControlOf(t *testing.T, ws *WebServer, p string) string {
 }
 
 // TestStaticAssetFingerprintedCaching pins ptone/scion#3789: the files Vite
-// fingerprinted, read from its build manifest, get the long cache lifetime,
-// from the disk and the embedded asset source alike; the entry, source maps,
-// public files and unlisted names stay no-cache; hex names keep working.
+// fingerprinted, read from its build manifest, get the immutable one-year
+// lifetime (ptone/scion#5348), from the disk and the embedded asset source
+// alike; the entry, source maps, public files and unlisted names stay
+// no-cache; hex names not in the manifest keep the one-day lifetime.
 func TestStaticAssetFingerprintedCaching(t *testing.T) {
-	const long = "public, max-age=86400"
+	const long = "public, max-age=31536000, immutable"
+	const day = "public, max-age=86400"
 	want := map[string]string{
 		"/assets/shoelace-B3-XBhED.js":              long,       // chunk
 		"/assets/project-detail-CeCkJL--.js":        long,       // dynamic entry chunk, hash ends in --
 		"/assets/model-utils-UsxIS_8q.js":           long,       // hash contains _
 		"/assets/shoelace-BZzytDYN.css":             long,       // css listed by a chunk
-		"/assets/chunk-abc12345.js":                 long,       // hex name, not in the manifest
+		"/assets/chunk-abc12345.js":                 day,        // hex name, not in the manifest
 		"/assets/font-Xy_z9-Ab.woff2":               long,       // listed in a chunk's assets
 		"/assets/main.js":                           "no-cache", // the unhashed entry
 		"/assets/entry-AbCdEfGh.js":                 "no-cache", // an entry, even with a hash-like name

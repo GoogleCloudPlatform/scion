@@ -141,6 +141,20 @@ func (_c *RoleBindingCreate) SetNillableMembershipKind(v *string) *RoleBindingCr
 	return _c
 }
 
+// SetSourceRuleID sets the "source_rule_id" field.
+func (_c *RoleBindingCreate) SetSourceRuleID(v uuid.UUID) *RoleBindingCreate {
+	_c.mutation.SetSourceRuleID(v)
+	return _c
+}
+
+// SetNillableSourceRuleID sets the "source_rule_id" field if the given value is not nil.
+func (_c *RoleBindingCreate) SetNillableSourceRuleID(v *uuid.UUID) *RoleBindingCreate {
+	if v != nil {
+		_c.SetSourceRuleID(*v)
+	}
+	return _c
+}
+
 // SetIssuanceID sets the "issuance_id" field.
 func (_c *RoleBindingCreate) SetIssuanceID(v string) *RoleBindingCreate {
 	_c.mutation.SetIssuanceID(v)
@@ -326,6 +340,10 @@ func (_c *RoleBindingCreate) createSpec() (*RoleBinding, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.MembershipKind(); ok {
 		_spec.SetField(rolebinding.FieldMembershipKind, field.TypeString, value)
 		_node.MembershipKind = &value
+	}
+	if value, ok := _c.mutation.SourceRuleID(); ok {
+		_spec.SetField(rolebinding.FieldSourceRuleID, field.TypeUUID, value)
+		_node.SourceRuleID = &value
 	}
 	if value, ok := _c.mutation.IssuanceID(); ok {
 		_spec.SetField(rolebinding.FieldIssuanceID, field.TypeString, value)
@@ -557,6 +575,9 @@ func (u *RoleBindingUpsertOne) UpdateNewValues() *RoleBindingUpsertOne {
 		}
 		if _, exists := u.create.mutation.Created(); exists {
 			s.SetIgnore(rolebinding.FieldCreated)
+		}
+		if _, exists := u.create.mutation.SourceRuleID(); exists {
+			s.SetIgnore(rolebinding.FieldSourceRuleID)
 		}
 		if _, exists := u.create.mutation.IssuanceID(); exists {
 			s.SetIgnore(rolebinding.FieldIssuanceID)
@@ -938,6 +959,9 @@ func (u *RoleBindingUpsertBulk) UpdateNewValues() *RoleBindingUpsertBulk {
 			}
 			if _, exists := b.mutation.Created(); exists {
 				s.SetIgnore(rolebinding.FieldCreated)
+			}
+			if _, exists := b.mutation.SourceRuleID(); exists {
+				s.SetIgnore(rolebinding.FieldSourceRuleID)
 			}
 			if _, exists := b.mutation.IssuanceID(); exists {
 				s.SetIgnore(rolebinding.FieldIssuanceID)

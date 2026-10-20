@@ -60,6 +60,8 @@ type Schedule struct {
 	Payload string `json:"payload,omitempty"`
 	// Status holds the value of the "status" field.
 	Status string `json:"status,omitempty"`
+	// StatusReason holds the value of the "status_reason" field.
+	StatusReason string `json:"status_reason,omitempty"`
 	// NextRunAt holds the value of the "next_run_at" field.
 	NextRunAt *time.Time `json:"next_run_at,omitempty"`
 	// LastRunAt holds the value of the "last_run_at" field.
@@ -90,7 +92,7 @@ func (*Schedule) scanValues(columns []string) ([]any, error) {
 			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
 		case schedule.FieldAttributionVersion, schedule.FieldAuthorizationRevision, schedule.FieldAuthorityCeilingVersion, schedule.FieldRunCount, schedule.FieldErrorCount:
 			values[i] = new(sql.NullInt64)
-		case schedule.FieldInitiatorPrincipalKind, schedule.FieldInitiatorPrincipalID, schedule.FieldInitiatorCredentialKind, schedule.FieldInitiatorCredentialID, schedule.FieldInitiatorCredentialSnapshot, schedule.FieldAuthorityCeilingKind, schedule.FieldAuthorityCeilingPermissionIds, schedule.FieldAuthorityCeilingBoundaryKind, schedule.FieldAuthorityCeilingBoundaryProjectID, schedule.FieldName, schedule.FieldCronExpr, schedule.FieldEventType, schedule.FieldPayload, schedule.FieldStatus, schedule.FieldLastRunStatus, schedule.FieldLastRunError, schedule.FieldCreatedBy:
+		case schedule.FieldInitiatorPrincipalKind, schedule.FieldInitiatorPrincipalID, schedule.FieldInitiatorCredentialKind, schedule.FieldInitiatorCredentialID, schedule.FieldInitiatorCredentialSnapshot, schedule.FieldAuthorityCeilingKind, schedule.FieldAuthorityCeilingPermissionIds, schedule.FieldAuthorityCeilingBoundaryKind, schedule.FieldAuthorityCeilingBoundaryProjectID, schedule.FieldName, schedule.FieldCronExpr, schedule.FieldEventType, schedule.FieldPayload, schedule.FieldStatus, schedule.FieldStatusReason, schedule.FieldLastRunStatus, schedule.FieldLastRunError, schedule.FieldCreatedBy:
 			values[i] = new(sql.NullString)
 		case schedule.FieldAuthorityCeilingSourceExpiresAt, schedule.FieldNextRunAt, schedule.FieldLastRunAt, schedule.FieldCreated, schedule.FieldUpdated:
 			values[i] = new(sql.NullTime)
@@ -253,6 +255,12 @@ func (_m *Schedule) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field status", values[i])
 			} else if value.Valid {
 				_m.Status = value.String
+			}
+		case schedule.FieldStatusReason:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field status_reason", values[i])
+			} else if value.Valid {
+				_m.StatusReason = value.String
 			}
 		case schedule.FieldNextRunAt:
 			if value, ok := values[i].(*sql.NullTime); !ok {
@@ -430,6 +438,9 @@ func (_m *Schedule) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("status=")
 	builder.WriteString(_m.Status)
+	builder.WriteString(", ")
+	builder.WriteString("status_reason=")
+	builder.WriteString(_m.StatusReason)
 	builder.WriteString(", ")
 	if v := _m.NextRunAt; v != nil {
 		builder.WriteString("next_run_at=")

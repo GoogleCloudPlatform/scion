@@ -105,7 +105,17 @@ var errRenewalQueueFull = errors.New("too many renewals waiting for a key fetch"
 // hook.
 func (a *Agent) renewalDone(streamID uint32, err error) {
 	if err != nil {
-		log.Warn("Conduit: renewal for stream %d refused: %v", streamID, err)
+		reason := reasonRenewalRefused
+		switch {
+		case errors.Is(err, grant.ErrUnknownKey) && a.keysStale():
+			// In enforce mode a key set not refreshed within
+			// KeyStaleAfter holds no key (freshKeys), so every kid reads
+			// as unknown. That is a stale key set, not an unknown key.
+			err, reason = errKeysStale, reasonKeysStale
+		case errors.Is(err, grant.ErrUnknownKey):
+			reason = reasonUnknownKey
+		}
+		log.Warn("Conduit: renewal for stream %d refused (%s): %v", streamID, reason, err)
 	}
 	if a.opts.onRenewal != nil {
 		a.opts.onRenewal(streamID, err)
@@ -131,3 +141,11 @@ func (a *Agent) renewalWorker(ctx context.Context) {
 		}
 	}
 }
+
+// Log reasons of a refused renewal.
+const (
+	reasonRenewalRefused = "refused"
+	// reasonKeysStale: the key set is stale in enforce mode (errKeysStale).
+	reasonKeysStale  = "keys_stale"
+	reasonUnknownKey = "unknown_key"
+)
