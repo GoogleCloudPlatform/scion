@@ -155,6 +155,11 @@ func GcpHostProjectID(v string) predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldEQ(FieldGcpHostProjectID, v))
 }
 
+// GcpHostSource applies equality check predicate on the "gcp_host_source" field. It's identical to GcpHostSourceEQ.
+func GcpHostSource(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldGcpHostSource, v))
+}
+
 // ConnectedHubID applies equality check predicate on the "connected_hub_id" field. It's identical to ConnectedHubIDEQ.
 func ConnectedHubID(v string) predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldEQ(FieldConnectedHubID, v))
@@ -1538,6 +1543,81 @@ func GcpHostProjectIDEqualFold(v string) predicate.RuntimeBroker {
 // GcpHostProjectIDContainsFold applies the ContainsFold predicate on the "gcp_host_project_id" field.
 func GcpHostProjectIDContainsFold(v string) predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldContainsFold(FieldGcpHostProjectID, v))
+}
+
+// GcpHostSourceEQ applies the EQ predicate on the "gcp_host_source" field.
+func GcpHostSourceEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldGcpHostSource, v))
+}
+
+// GcpHostSourceNEQ applies the NEQ predicate on the "gcp_host_source" field.
+func GcpHostSourceNEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNEQ(FieldGcpHostSource, v))
+}
+
+// GcpHostSourceIn applies the In predicate on the "gcp_host_source" field.
+func GcpHostSourceIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIn(FieldGcpHostSource, vs...))
+}
+
+// GcpHostSourceNotIn applies the NotIn predicate on the "gcp_host_source" field.
+func GcpHostSourceNotIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotIn(FieldGcpHostSource, vs...))
+}
+
+// GcpHostSourceGT applies the GT predicate on the "gcp_host_source" field.
+func GcpHostSourceGT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGT(FieldGcpHostSource, v))
+}
+
+// GcpHostSourceGTE applies the GTE predicate on the "gcp_host_source" field.
+func GcpHostSourceGTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGTE(FieldGcpHostSource, v))
+}
+
+// GcpHostSourceLT applies the LT predicate on the "gcp_host_source" field.
+func GcpHostSourceLT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLT(FieldGcpHostSource, v))
+}
+
+// GcpHostSourceLTE applies the LTE predicate on the "gcp_host_source" field.
+func GcpHostSourceLTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLTE(FieldGcpHostSource, v))
+}
+
+// GcpHostSourceContains applies the Contains predicate on the "gcp_host_source" field.
+func GcpHostSourceContains(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContains(FieldGcpHostSource, v))
+}
+
+// GcpHostSourceHasPrefix applies the HasPrefix predicate on the "gcp_host_source" field.
+func GcpHostSourceHasPrefix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasPrefix(FieldGcpHostSource, v))
+}
+
+// GcpHostSourceHasSuffix applies the HasSuffix predicate on the "gcp_host_source" field.
+func GcpHostSourceHasSuffix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasSuffix(FieldGcpHostSource, v))
+}
+
+// GcpHostSourceIsNil applies the IsNil predicate on the "gcp_host_source" field.
+func GcpHostSourceIsNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIsNull(FieldGcpHostSource))
+}
+
+// GcpHostSourceNotNil applies the NotNil predicate on the "gcp_host_source" field.
+func GcpHostSourceNotNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotNull(FieldGcpHostSource))
+}
+
+// GcpHostSourceEqualFold applies the EqualFold predicate on the "gcp_host_source" field.
+func GcpHostSourceEqualFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEqualFold(FieldGcpHostSource, v))
+}
+
+// GcpHostSourceContainsFold applies the ContainsFold predicate on the "gcp_host_source" field.
+func GcpHostSourceContainsFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContainsFold(FieldGcpHostSource, v))
 }
 
 // ConnectedHubIDEQ applies the EQ predicate on the "connected_hub_id" field.

@@ -1126,12 +1126,48 @@ type RuntimeBroker struct {
 	// host machine. Set by the operator at registration/update time so the Hub
 	// can gate passthrough mode on an actAs check against this identity.
 	// Optional: brokers that never serve passthrough agents need not set them.
+	//
+	// The pair is written together, only by CreateRuntimeBroker and the
+	// dedicated SetRuntimeBrokerGCPHost* store methods. UpdateRuntimeBroker
+	// leaves the stored values unchanged whatever this copy carries.
 	GCPHostServiceAccountEmail string `json:"gcp_host_service_account_email,omitempty"`
 	GCPHostProjectID           string `json:"gcp_host_project_id,omitempty"`
+	// GCPHostSource records how the GCP host pair was last set; see the
+	// GCPHostSource* constants. Empty means not recorded. Not serialized.
+	GCPHostSource string `json:"-"`
 
 	// Ownership - tracks who registered this broker
 	CreatedBy     string `json:"createdBy,omitempty"`
 	CreatedByName string `json:"createdByName,omitempty"` // Enriched: resolved from CreatedBy
+}
+
+// Values of RuntimeBroker.GCPHostSource.
+const (
+	// GCPHostSourceRegistration: filled by a registration while unset.
+	GCPHostSourceRegistration = "registration"
+	// GCPHostSourceDetected: read by a co-located server from the GCE
+	// metadata server.
+	GCPHostSourceDetected = "detected"
+	// GCPHostSourceAdmin: set or cleared through the update API. Registration
+	// and detection leave the pair unchanged until the next update.
+	GCPHostSourceAdmin = "admin"
+)
+
+// BrokerRoleLabel describes how a runtime broker is hosted:
+// BrokerRoleEmbedded for the co-located broker, BrokerRoleRemote otherwise.
+// BrokerTypeLabel is the broker type label (for example "external").
+const (
+	BrokerRoleLabel    = "scion.io/broker-role"
+	BrokerRoleEmbedded = "embedded"
+	BrokerRoleRemote   = "remote"
+	BrokerTypeLabel    = "scion.io/broker-type"
+)
+
+// GCPHostSetting is a stored GCP host service account, project and source.
+type GCPHostSetting struct {
+	Email   string
+	Project string
+	Source  string
 }
 
 // BrokerCapabilities describes what a runtime broker can do.

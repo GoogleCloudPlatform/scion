@@ -1664,6 +1664,31 @@ type RuntimeBrokerStore interface {
 	// capabilities.
 	SetRuntimeBrokerCreatedByIfEmpty(ctx context.Context, id, createdBy string) (applied bool, err error)
 
+	// SetRuntimeBrokerGCPHostIfUnset writes the GCP host service account and
+	// project together, with source, but only while the stored email and
+	// project are both empty and the source is not GCPHostSourceAdmin.
+	// Returns applied=false (not an error) otherwise, or when the row does
+	// not exist. Registration uses it to fill the pair.
+	SetRuntimeBrokerGCPHostIfUnset(ctx context.Context, id, email, project, source string) (applied bool, err error)
+
+	// SetRuntimeBrokerGCPHostDetected writes the GCP host pair with source
+	// GCPHostSourceDetected unless the stored source is GCPHostSourceAdmin.
+	// Returns applied=false (not an error) otherwise, or when the row does
+	// not exist. Only the co-located server's metadata detection uses it.
+	SetRuntimeBrokerGCPHostDetected(ctx context.Context, id, email, project string) (applied bool, err error)
+
+	// SetRuntimeBrokerGCPHost writes the GCP host pair unconditionally (empty
+	// values clear) and sets the source to GCPHostSourceAdmin. It returns the
+	// values it replaced (read and written atomically). Only the update API
+	// uses it. Returns ErrNotFound if the broker doesn't exist.
+	SetRuntimeBrokerGCPHost(ctx context.Context, id, email, project string) (prev GCPHostSetting, err error)
+
+	// SetRuntimeBrokerGCPHostSource sets only the GCP host source, leaving
+	// the pair unchanged, and returns the values it replaced. The update API
+	// uses it to hand the pair back to registration and detection (source
+	// ""). Returns ErrNotFound if the broker doesn't exist.
+	SetRuntimeBrokerGCPHostSource(ctx context.Context, id, source string) (prev GCPHostSetting, err error)
+
 	// DeleteRuntimeBroker removes a runtime broker by ID.
 	// Returns ErrNotFound if the broker doesn't exist.
 	DeleteRuntimeBroker(ctx context.Context, id string) error

@@ -109,6 +109,15 @@ func (RuntimeBroker) Fields() []ent.Field {
 		field.String("gcp_host_project_id").
 			Optional().
 			Nillable(),
+		// gcp_host_source records how the GCP host service account and
+		// project were last set: "registration", "detected" or "admin" (set
+		// through the update API). Empty means not recorded. The GCP host
+		// pair and this column are written only by CreateRuntimeBroker and
+		// the dedicated SetRuntimeBrokerGCPHost* store methods, never by
+		// UpdateRuntimeBroker.
+		field.String("gcp_host_source").
+			Optional().
+			Default(""),
 		field.String("connected_hub_id").
 			Optional().
 			Nillable(),

@@ -300,6 +300,20 @@ func (_c *RuntimeBrokerCreate) SetNillableGcpHostProjectID(v *string) *RuntimeBr
 	return _c
 }
 
+// SetGcpHostSource sets the "gcp_host_source" field.
+func (_c *RuntimeBrokerCreate) SetGcpHostSource(v string) *RuntimeBrokerCreate {
+	_c.mutation.SetGcpHostSource(v)
+	return _c
+}
+
+// SetNillableGcpHostSource sets the "gcp_host_source" field if the given value is not nil.
+func (_c *RuntimeBrokerCreate) SetNillableGcpHostSource(v *string) *RuntimeBrokerCreate {
+	if v != nil {
+		_c.SetGcpHostSource(*v)
+	}
+	return _c
+}
+
 // SetConnectedHubID sets the "connected_hub_id" field.
 func (_c *RuntimeBrokerCreate) SetConnectedHubID(v string) *RuntimeBrokerCreate {
 	_c.mutation.SetConnectedHubID(v)
@@ -480,6 +494,10 @@ func (_c *RuntimeBrokerCreate) defaults() {
 	if _, ok := _c.mutation.AutoProvide(); !ok {
 		v := runtimebroker.DefaultAutoProvide
 		_c.mutation.SetAutoProvide(v)
+	}
+	if _, ok := _c.mutation.GcpHostSource(); !ok {
+		v := runtimebroker.DefaultGcpHostSource
+		_c.mutation.SetGcpHostSource(v)
 	}
 	if _, ok := _c.mutation.RuntimeTargetType(); !ok {
 		v := runtimebroker.DefaultRuntimeTargetType
@@ -665,6 +683,10 @@ func (_c *RuntimeBrokerCreate) createSpec() (*RuntimeBroker, *sqlgraph.CreateSpe
 	if value, ok := _c.mutation.GcpHostProjectID(); ok {
 		_spec.SetField(runtimebroker.FieldGcpHostProjectID, field.TypeString, value)
 		_node.GcpHostProjectID = &value
+	}
+	if value, ok := _c.mutation.GcpHostSource(); ok {
+		_spec.SetField(runtimebroker.FieldGcpHostSource, field.TypeString, value)
+		_node.GcpHostSource = value
 	}
 	if value, ok := _c.mutation.ConnectedHubID(); ok {
 		_spec.SetField(runtimebroker.FieldConnectedHubID, field.TypeString, value)
@@ -1107,6 +1129,24 @@ func (u *RuntimeBrokerUpsert) UpdateGcpHostProjectID() *RuntimeBrokerUpsert {
 // ClearGcpHostProjectID clears the value of the "gcp_host_project_id" field.
 func (u *RuntimeBrokerUpsert) ClearGcpHostProjectID() *RuntimeBrokerUpsert {
 	u.SetNull(runtimebroker.FieldGcpHostProjectID)
+	return u
+}
+
+// SetGcpHostSource sets the "gcp_host_source" field.
+func (u *RuntimeBrokerUpsert) SetGcpHostSource(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldGcpHostSource, v)
+	return u
+}
+
+// UpdateGcpHostSource sets the "gcp_host_source" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateGcpHostSource() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldGcpHostSource)
+	return u
+}
+
+// ClearGcpHostSource clears the value of the "gcp_host_source" field.
+func (u *RuntimeBrokerUpsert) ClearGcpHostSource() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldGcpHostSource)
 	return u
 }
 
@@ -1698,6 +1738,27 @@ func (u *RuntimeBrokerUpsertOne) UpdateGcpHostProjectID() *RuntimeBrokerUpsertOn
 func (u *RuntimeBrokerUpsertOne) ClearGcpHostProjectID() *RuntimeBrokerUpsertOne {
 	return u.Update(func(s *RuntimeBrokerUpsert) {
 		s.ClearGcpHostProjectID()
+	})
+}
+
+// SetGcpHostSource sets the "gcp_host_source" field.
+func (u *RuntimeBrokerUpsertOne) SetGcpHostSource(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetGcpHostSource(v)
+	})
+}
+
+// UpdateGcpHostSource sets the "gcp_host_source" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateGcpHostSource() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateGcpHostSource()
+	})
+}
+
+// ClearGcpHostSource clears the value of the "gcp_host_source" field.
+func (u *RuntimeBrokerUpsertOne) ClearGcpHostSource() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearGcpHostSource()
 	})
 }
 
@@ -2476,6 +2537,27 @@ func (u *RuntimeBrokerUpsertBulk) UpdateGcpHostProjectID() *RuntimeBrokerUpsertB
 func (u *RuntimeBrokerUpsertBulk) ClearGcpHostProjectID() *RuntimeBrokerUpsertBulk {
 	return u.Update(func(s *RuntimeBrokerUpsert) {
 		s.ClearGcpHostProjectID()
+	})
+}
+
+// SetGcpHostSource sets the "gcp_host_source" field.
+func (u *RuntimeBrokerUpsertBulk) SetGcpHostSource(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetGcpHostSource(v)
+	})
+}
+
+// UpdateGcpHostSource sets the "gcp_host_source" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateGcpHostSource() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateGcpHostSource()
+	})
+}
+
+// ClearGcpHostSource clears the value of the "gcp_host_source" field.
+func (u *RuntimeBrokerUpsertBulk) ClearGcpHostSource() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearGcpHostSource()
 	})
 }
 

@@ -436,6 +436,11 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 		Labels                     map[string]string `json:"labels,omitempty"`
 		GCPHostServiceAccountEmail *string           `json:"gcpHostServiceAccountEmail,omitempty"`
 		GCPHostProjectID           *string           `json:"gcpHostProjectId,omitempty"`
+		// GCPHostPinned false hands the GCP host pair back to registration
+		// and detection (the values are unchanged); true keeps the current
+		// values until the next update. Setting either GCP host field
+		// implies true unless false is sent with it.
+		GCPHostPinned *bool `json:"gcpHostPinned,omitempty"`
 	}
 
 	if err := readJSON(r, &updates); err != nil {
@@ -447,6 +452,13 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 
+	before := *broker
+	before.Labels = make(map[string]string, len(broker.Labels))
+	for k, v := range broker.Labels {
+		before.Labels[k] = v
+	}
+
+	recordChanged := false
 	if updates.Name != "" {
 		// A rename may not make a flat row's name or slug collide with
 		// another row, or another row's with a flat row (flat contract
@@ -464,18 +476,25 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 			}
 		}
 		broker.Name = updates.Name
+		recordChanged = true
 	}
 	if updates.Labels != nil {
-		// The hub-reserved plugin label is never taken from the client: it
-		// is dropped from the request and the stored value, if any, kept.
+		// Hub-managed labels are never taken from the client: they are
+		// dropped from the request and the stored values, if any, kept.
 		labels := stripReservedBrokerLabels(updates.Labels)
-		if v, ok := broker.Labels[pluginBrokerLabel]; ok {
-			labels[pluginBrokerLabel] = v
+		for _, k := range reservedBrokerLabels {
+			if v, ok := broker.Labels[k]; ok {
+				labels[k] = v
+			}
 		}
 		broker.Labels = labels
+		recordChanged = true
 	}
+
+	setGCPHost := updates.GCPHostServiceAccountEmail != nil || updates.GCPHostProjectID != nil
+	email, project := broker.GCPHostServiceAccountEmail, broker.GCPHostProjectID
 	if updates.GCPHostServiceAccountEmail != nil {
-		email := strings.ToLower(*updates.GCPHostServiceAccountEmail)
+		email = strings.ToLower(*updates.GCPHostServiceAccountEmail)
 		if email != "" && !isValidServiceAccountEmail(email) {
 			ValidationError(w, "gcpHostServiceAccountEmail must be a valid GCP service account email "+
 				"(name@project.iam.gserviceaccount.com)", map[string]interface{}{
@@ -483,18 +502,71 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 			})
 			return
 		}
-		broker.GCPHostServiceAccountEmail = email
 	}
 	if updates.GCPHostProjectID != nil {
-		broker.GCPHostProjectID = *updates.GCPHostProjectID
+		project = *updates.GCPHostProjectID
 	}
 
-	if err := s.store.UpdateRuntimeBroker(ctx, broker); err != nil {
+	// The GCP host pair is written only through the dedicated store
+	// writers: a value set or cleared here is kept by registration and
+	// detection until the next update. The writers return the values they
+	// replaced, which the audit event records as the old values.
+	var gcpPrev *store.GCPHostSetting
+	writeErr := func() error {
+		if recordChanged {
+			if err := s.store.UpdateRuntimeBroker(ctx, broker); err != nil {
+				return err
+			}
+		}
+		if setGCPHost {
+			prev, err := s.store.SetRuntimeBrokerGCPHost(ctx, broker.ID, email, project)
+			if err != nil {
+				return err
+			}
+			gcpPrev = &prev
+		}
+		if updates.GCPHostPinned != nil {
+			source := store.GCPHostSourceAdmin
+			if !*updates.GCPHostPinned {
+				source = ""
+			}
+			prev, err := s.store.SetRuntimeBrokerGCPHostSource(ctx, broker.ID, source)
+			if err != nil {
+				return err
+			}
+			if gcpPrev == nil {
+				gcpPrev = &prev
+			}
+		}
+		return nil
+	}()
+
+	// The update audit event covers what was applied, also when a later
+	// write failed.
+	after, err := s.store.GetRuntimeBroker(ctx, broker.ID)
+	if err == nil {
+		old := before
+		if gcpPrev != nil {
+			old.GCPHostServiceAccountEmail, old.GCPHostProjectID, old.GCPHostSource = gcpPrev.Email, gcpPrev.Project, gcpPrev.Source
+		} else {
+			// No GCP host writer ran: any difference is not this update's.
+			old.GCPHostServiceAccountEmail, old.GCPHostProjectID, old.GCPHostSource = after.GCPHostServiceAccountEmail, after.GCPHostProjectID, after.GCPHostSource
+		}
+		if details := brokerSettingsChangeDetails(&old, after); details != nil {
+			LogBrokerSettingsEvent(ctx, s.auditLogger, after.ID, after.Name, actor.ID(), getClientIP(r),
+				mergeBrokerAuditDetails(brokerAuditCredentialDetails(ctx), details...))
+		}
+	}
+	if writeErr != nil {
+		writeErrorFromErr(w, writeErr, "")
+		return
+	}
+	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, brokerForDisplay(*broker))
+	writeJSON(w, http.StatusOK, brokerForDisplay(*after))
 }
 
 func (s *Server) deleteRuntimeBroker(w http.ResponseWriter, r *http.Request, id string) {

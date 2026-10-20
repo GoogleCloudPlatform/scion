@@ -417,6 +417,26 @@ func (_u *RuntimeBrokerUpdate) ClearGcpHostProjectID() *RuntimeBrokerUpdate {
 	return _u
 }
 
+// SetGcpHostSource sets the "gcp_host_source" field.
+func (_u *RuntimeBrokerUpdate) SetGcpHostSource(v string) *RuntimeBrokerUpdate {
+	_u.mutation.SetGcpHostSource(v)
+	return _u
+}
+
+// SetNillableGcpHostSource sets the "gcp_host_source" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdate) SetNillableGcpHostSource(v *string) *RuntimeBrokerUpdate {
+	if v != nil {
+		_u.SetGcpHostSource(*v)
+	}
+	return _u
+}
+
+// ClearGcpHostSource clears the value of the "gcp_host_source" field.
+func (_u *RuntimeBrokerUpdate) ClearGcpHostSource() *RuntimeBrokerUpdate {
+	_u.mutation.ClearGcpHostSource()
+	return _u
+}
+
 // SetConnectedHubID sets the "connected_hub_id" field.
 func (_u *RuntimeBrokerUpdate) SetConnectedHubID(v string) *RuntimeBrokerUpdate {
 	_u.mutation.SetConnectedHubID(v)
@@ -724,6 +744,12 @@ func (_u *RuntimeBrokerUpdate) sqlSave(ctx context.Context) (_node int, err erro
 	}
 	if _u.mutation.GcpHostProjectIDCleared() {
 		_spec.ClearField(runtimebroker.FieldGcpHostProjectID, field.TypeString)
+	}
+	if value, ok := _u.mutation.GcpHostSource(); ok {
+		_spec.SetField(runtimebroker.FieldGcpHostSource, field.TypeString, value)
+	}
+	if _u.mutation.GcpHostSourceCleared() {
+		_spec.ClearField(runtimebroker.FieldGcpHostSource, field.TypeString)
 	}
 	if value, ok := _u.mutation.ConnectedHubID(); ok {
 		_spec.SetField(runtimebroker.FieldConnectedHubID, field.TypeString, value)
@@ -1173,6 +1199,26 @@ func (_u *RuntimeBrokerUpdateOne) ClearGcpHostProjectID() *RuntimeBrokerUpdateOn
 	return _u
 }
 
+// SetGcpHostSource sets the "gcp_host_source" field.
+func (_u *RuntimeBrokerUpdateOne) SetGcpHostSource(v string) *RuntimeBrokerUpdateOne {
+	_u.mutation.SetGcpHostSource(v)
+	return _u
+}
+
+// SetNillableGcpHostSource sets the "gcp_host_source" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdateOne) SetNillableGcpHostSource(v *string) *RuntimeBrokerUpdateOne {
+	if v != nil {
+		_u.SetGcpHostSource(*v)
+	}
+	return _u
+}
+
+// ClearGcpHostSource clears the value of the "gcp_host_source" field.
+func (_u *RuntimeBrokerUpdateOne) ClearGcpHostSource() *RuntimeBrokerUpdateOne {
+	_u.mutation.ClearGcpHostSource()
+	return _u
+}
+
 // SetConnectedHubID sets the "connected_hub_id" field.
 func (_u *RuntimeBrokerUpdateOne) SetConnectedHubID(v string) *RuntimeBrokerUpdateOne {
 	_u.mutation.SetConnectedHubID(v)
@@ -1510,6 +1556,12 @@ func (_u *RuntimeBrokerUpdateOne) sqlSave(ctx context.Context) (_node *RuntimeBr
 	}
 	if _u.mutation.GcpHostProjectIDCleared() {
 		_spec.ClearField(runtimebroker.FieldGcpHostProjectID, field.TypeString)
+	}
+	if value, ok := _u.mutation.GcpHostSource(); ok {
+		_spec.SetField(runtimebroker.FieldGcpHostSource, field.TypeString, value)
+	}
+	if _u.mutation.GcpHostSourceCleared() {
+		_spec.ClearField(runtimebroker.FieldGcpHostSource, field.TypeString)
 	}
 	if value, ok := _u.mutation.ConnectedHubID(); ok {
 		_spec.SetField(runtimebroker.FieldConnectedHubID, field.TypeString, value)

@@ -71099,6 +71099,7 @@ type RuntimeBrokerMutation struct {
 	auto_provide                   *bool
 	gcp_host_service_account_email *string
 	gcp_host_project_id            *string
+	gcp_host_source                *string
 	connected_hub_id               *string
 	connected_session_id           *string
 	connected_at                   *time.Time
@@ -72224,6 +72225,55 @@ func (m *RuntimeBrokerMutation) ResetGcpHostProjectID() {
 	delete(m.clearedFields, runtimebroker.FieldGcpHostProjectID)
 }
 
+// SetGcpHostSource sets the "gcp_host_source" field.
+func (m *RuntimeBrokerMutation) SetGcpHostSource(s string) {
+	m.gcp_host_source = &s
+}
+
+// GcpHostSource returns the value of the "gcp_host_source" field in the mutation.
+func (m *RuntimeBrokerMutation) GcpHostSource() (r string, exists bool) {
+	v := m.gcp_host_source
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldGcpHostSource returns the old "gcp_host_source" field's value of the RuntimeBroker entity.
+// If the RuntimeBroker object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeBrokerMutation) OldGcpHostSource(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldGcpHostSource is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldGcpHostSource requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldGcpHostSource: %w", err)
+	}
+	return oldValue.GcpHostSource, nil
+}
+
+// ClearGcpHostSource clears the value of the "gcp_host_source" field.
+func (m *RuntimeBrokerMutation) ClearGcpHostSource() {
+	m.gcp_host_source = nil
+	m.clearedFields[runtimebroker.FieldGcpHostSource] = struct{}{}
+}
+
+// GcpHostSourceCleared returns if the "gcp_host_source" field was cleared in this mutation.
+func (m *RuntimeBrokerMutation) GcpHostSourceCleared() bool {
+	_, ok := m.clearedFields[runtimebroker.FieldGcpHostSource]
+	return ok
+}
+
+// ResetGcpHostSource resets all changes to the "gcp_host_source" field.
+func (m *RuntimeBrokerMutation) ResetGcpHostSource() {
+	m.gcp_host_source = nil
+	delete(m.clearedFields, runtimebroker.FieldGcpHostSource)
+}
+
 // SetConnectedHubID sets the "connected_hub_id" field.
 func (m *RuntimeBrokerMutation) SetConnectedHubID(s string) {
 	m.connected_hub_id = &s
@@ -72624,7 +72674,7 @@ func (m *RuntimeBrokerMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *RuntimeBrokerMutation) Fields() []string {
-	fields := make([]string, 0, 30)
+	fields := make([]string, 0, 31)
 	if m.name != nil {
 		fields = append(fields, runtimebroker.FieldName)
 	}
@@ -72690,6 +72740,9 @@ func (m *RuntimeBrokerMutation) Fields() []string {
 	}
 	if m.gcp_host_project_id != nil {
 		fields = append(fields, runtimebroker.FieldGcpHostProjectID)
+	}
+	if m.gcp_host_source != nil {
+		fields = append(fields, runtimebroker.FieldGcpHostSource)
 	}
 	if m.connected_hub_id != nil {
 		fields = append(fields, runtimebroker.FieldConnectedHubID)
@@ -72767,6 +72820,8 @@ func (m *RuntimeBrokerMutation) Field(name string) (ent.Value, bool) {
 		return m.GcpHostServiceAccountEmail()
 	case runtimebroker.FieldGcpHostProjectID:
 		return m.GcpHostProjectID()
+	case runtimebroker.FieldGcpHostSource:
+		return m.GcpHostSource()
 	case runtimebroker.FieldConnectedHubID:
 		return m.ConnectedHubID()
 	case runtimebroker.FieldConnectedSessionID:
@@ -72836,6 +72891,8 @@ func (m *RuntimeBrokerMutation) OldField(ctx context.Context, name string) (ent.
 		return m.OldGcpHostServiceAccountEmail(ctx)
 	case runtimebroker.FieldGcpHostProjectID:
 		return m.OldGcpHostProjectID(ctx)
+	case runtimebroker.FieldGcpHostSource:
+		return m.OldGcpHostSource(ctx)
 	case runtimebroker.FieldConnectedHubID:
 		return m.OldConnectedHubID(ctx)
 	case runtimebroker.FieldConnectedSessionID:
@@ -73015,6 +73072,13 @@ func (m *RuntimeBrokerMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetGcpHostProjectID(v)
 		return nil
+	case runtimebroker.FieldGcpHostSource:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetGcpHostSource(v)
+		return nil
 	case runtimebroker.FieldConnectedHubID:
 		v, ok := value.(string)
 		if !ok {
@@ -73161,6 +73225,9 @@ func (m *RuntimeBrokerMutation) ClearedFields() []string {
 	if m.FieldCleared(runtimebroker.FieldGcpHostProjectID) {
 		fields = append(fields, runtimebroker.FieldGcpHostProjectID)
 	}
+	if m.FieldCleared(runtimebroker.FieldGcpHostSource) {
+		fields = append(fields, runtimebroker.FieldGcpHostSource)
+	}
 	if m.FieldCleared(runtimebroker.FieldConnectedHubID) {
 		fields = append(fields, runtimebroker.FieldConnectedHubID)
 	}
@@ -73237,6 +73304,9 @@ func (m *RuntimeBrokerMutation) ClearField(name string) error {
 		return nil
 	case runtimebroker.FieldGcpHostProjectID:
 		m.ClearGcpHostProjectID()
+		return nil
+	case runtimebroker.FieldGcpHostSource:
+		m.ClearGcpHostSource()
 		return nil
 	case runtimebroker.FieldConnectedHubID:
 		m.ClearConnectedHubID()
@@ -73329,6 +73399,9 @@ func (m *RuntimeBrokerMutation) ResetField(name string) error {
 		return nil
 	case runtimebroker.FieldGcpHostProjectID:
 		m.ResetGcpHostProjectID()
+		return nil
+	case runtimebroker.FieldGcpHostSource:
+		m.ResetGcpHostSource()
 		return nil
 	case runtimebroker.FieldConnectedHubID:
 		m.ResetConnectedHubID()
