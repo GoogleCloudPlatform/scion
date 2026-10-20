@@ -187,6 +187,10 @@ func (h *messageCloudHandler) handleWithLabels(ctx context.Context, r slog.Recor
 		Timestamp: r.Time,
 	}
 
+	if h.logHook != nil {
+		h.logHook(entry)
+		return nil
+	}
 	h.logger.Log(entry)
 	return nil
 }
