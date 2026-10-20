@@ -170,7 +170,7 @@ active_profile: local
 	assert.Equal(t, "token-xyz", vs.Server.Broker.BrokerToken)
 }
 
-func TestUpdateSetting_V1DeprecatedKeysSkipSilently(t *testing.T) {
+func TestUpdateSetting_V1DeprecatedKeysRejected(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
@@ -185,18 +185,17 @@ active_profile: local
 `
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(v1Content), 0644))
 
-	// These keys are deprecated in v1 and should be silently skipped
+	// v1 has no field for these keys, so a write is rejected rather than
+	// accepted and dropped.
 	for _, key := range []string{"hub.token", "hub.apiKey", "hub.lastSyncedAt"} {
 		err := UpdateSetting(projectDir, key, "some-value", false)
-		assert.NoError(t, err, "deprecated key %s should not error", key)
+		assert.ErrorIs(t, err, ErrSettingNotWritable, "deprecated key %s", key)
 	}
 
-	// File should be unchanged (besides schema_version being preserved)
+	// The file is unchanged.
 	data, err := os.ReadFile(filepath.Join(projectDir, "settings.yaml"))
 	require.NoError(t, err)
-
-	version, _ := DetectSettingsFormat(data)
-	assert.Equal(t, "1", version)
+	assert.Equal(t, v1Content, string(data))
 }
 
 func TestUpdateSetting_V1MultipleUpdatesPreserveFormat(t *testing.T) {

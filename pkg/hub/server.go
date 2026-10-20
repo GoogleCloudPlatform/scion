@@ -1705,9 +1705,9 @@ type Server struct {
 	conduitAdmissionKeyOnce sync.Once
 	conduitAdmissionAEADv   cipher.AEAD
 	conduitAdmissionKeyErr  error
-	// conduitRenewal verifies latest grants and mints renewal grants for
-	// relay stream re-checks (conduit_renewal.go); nil until set.
-	conduitRenewal atomic.Pointer[conduitRenewalGrants]
+	// conduitStreamRenewer is the renewal path of relay-held streams
+	// (conduit_renewal.go); nil until StartConduitExternal installs it.
+	conduitStreamRenewer atomic.Pointer[conduitStreamRenewer]
 	// conduitAuthz re-checks the user streams this node owns (nil while
 	// no relay runs); conduitAuthzMetrics is its counter.
 	conduitAuthz        atomic.Pointer[conduitStreamAuthz]
