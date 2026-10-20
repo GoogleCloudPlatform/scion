@@ -18,7 +18,11 @@ the C3/C4/C7 reviews. Config only; no change to tests or production code.
   with the upstream C3 merge (#3828) were added the same way:
   `main-terminal-hides-outlet`, `main-terminal-loading`,
   `main-terminal-loading-handoff`, `main-terminal-loading-teardown`. That
-  makes all eleven `main-*.test.ts` suites covered. They were type-clean too.
+  made all eleven `main-*.test.ts` suites at that point covered. They were
+  type-clean too.
+- After the restack onto upstream main with C4 (#3868) and C7 (#3892)
+  merged, `main-onboarding-base-path` (from the C4 merge) was added too, so
+  all twelve `main-*.test.ts` suites are covered. It was type-clean as well.
 - The suites and fixtures were already type-clean under the strict root
   options (`exactOptionalPropertyTypes`, `noUnused*`), so no cast or fixture
   type change was needed. They went into the existing client-tests project:
@@ -33,7 +37,8 @@ the C3/C4/C7 reviews. Config only; no change to tests or production code.
   files) with the new config. With the old config, the same edits pass
   typecheck. The edits were not committed.
 - Clean `npm run typecheck` passes; vitest of the seven suites passes (8 tests).
-  On the restacked base, vitest of all eleven suites passes.
+  On the restacked base, vitest of all eleven suites passes; after the final
+  restack onto main, all twelve pass.
 
 ## Learned / follow-ups
 
