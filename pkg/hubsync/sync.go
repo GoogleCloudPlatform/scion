@@ -490,7 +490,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 		} else {
 			// Generate project_id for projects that don't have one
 			projectID = config.GenerateProjectID()
-			if err := config.UpdateSetting(resolvedPath, "project_id", projectID, isGlobal); err != nil {
+			if err := config.UpdateSetting(resolvedPath, projectkeys.ConfigProjectIDKey, projectID, isGlobal); err != nil {
 				return nil, fmt.Errorf("failed to save project_id: %w", err)
 			}
 			// Reload settings to get the updated project_id
@@ -647,7 +647,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 					case ProjectChoiceLink:
 						// Store the hub project ID separately — don't overwrite
 						// the local project_id.
-						if err := config.UpdateSetting(resolvedPath, "hub.projectId", selectedID, isGlobal); err != nil {
+						if err := config.UpdateSetting(resolvedPath, projectkeys.ConfigHubProjectIDKey, selectedID, isGlobal); err != nil {
 							return nil, fmt.Errorf("failed to save hub project ID: %w", err)
 						}
 						hubCtx.ProjectID = selectedID
@@ -1898,7 +1898,7 @@ func registerProject(ctx context.Context, hubCtx *HubContext, projectName string
 	// project_id: changing it shifts the external config directory,
 	// orphaning settings.
 	if resp.Project.ID != "" {
-		if err := config.UpdateSetting(hubCtx.ProjectPath, "hub.projectId", resp.Project.ID, isGlobal); err != nil {
+		if err := config.UpdateSetting(hubCtx.ProjectPath, projectkeys.ConfigHubProjectIDKey, resp.Project.ID, isGlobal); err != nil {
 			_, _ = fmt.Fprintf(promptOut, "Warning: failed to save hub project ID: %v\n", err)
 		} else {
 			hubCtx.ProjectID = resp.Project.ID
