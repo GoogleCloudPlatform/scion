@@ -42,6 +42,19 @@ func TestFileStatExtra_Linux(t *testing.T) {
 	assert.True(t, ctime.Equal(time.Unix(st.Ctim.Unix())))
 	assert.Equal(t, uint64(1), nlink)
 
+	// Move the modification time an hour into the past. The change time is
+	// set to the time of that call, so it must differ from the modification
+	// time and be close to now; reading the wrong timestamp would fail here.
+	past := time.Now().Add(-time.Hour).Truncate(time.Second)
+	require.NoError(t, os.Chtimes(path, past, past))
+	fi, err = os.Lstat(path)
+	require.NoError(t, err)
+	require.True(t, fi.ModTime().Equal(past))
+	ctime, _, ok = fileStatExtra(fi)
+	require.True(t, ok)
+	assert.False(t, ctime.Equal(fi.ModTime()), "change time must not be the modification time")
+	assert.WithinDuration(t, time.Now(), ctime, time.Minute)
+
 	require.NoError(t, os.Link(path, filepath.Join(dir, "other")))
 	fi, err = os.Lstat(path)
 	require.NoError(t, err)
