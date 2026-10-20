@@ -226,8 +226,9 @@ func TestBuildRecord_BR1_SwapRuntimeReplacesDefaultRecord(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		// Startup: resolved before the overlay is installed.
-		startRT, startRec := scionrt.GetRuntimeWithRecord("", "")
+		// Startup: resolved before the overlay is installed, with the global
+		// project path the server passes (cmd serverRuntimeProjectPath).
+		startRT, startRec := scionrt.GetRuntimeWithRecord("global", "")
 		if startRec.EntryName != "file-rt" {
 			t.Fatalf("startup record EntryName = %q, want file-rt (file view)", startRec.EntryName)
 		}
@@ -239,7 +240,7 @@ func TestBuildRecord_BR1_SwapRuntimeReplacesDefaultRecord(t *testing.T) {
 		o.Update(map[string]config.V1RuntimeConfig{"stored-rt": {Type: "docker"}},
 			map[string]config.V1ProfileConfig{"main": {Runtime: "stored-rt"}}, nil)
 		config.SetGlobalSettingsOverlay(o)
-		newRT, rec := scionrt.GetRuntimeWithRecord("", "")
+		newRT, rec := scionrt.GetRuntimeWithRecord("global", "")
 		srv.SwapRuntime(newRT, rec)
 
 		_, rt, got := srv.defaultPair()

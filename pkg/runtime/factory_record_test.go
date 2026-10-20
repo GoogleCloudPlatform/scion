@@ -154,15 +154,15 @@ func TestGetRuntimeWithRecord_BR4(t *testing.T) {
 	t.Run("startup default record is taken from the file view", func(t *testing.T) {
 		br4Setup(t)
 		// Resolved before the overlay is installed, as the agent runtime's
-		// startup default is.
-		_, startup := GetRuntimeWithRecord("", "")
+		// startup default is, with the global project path the server passes.
+		_, startup := GetRuntimeWithRecord("global", "")
 		if startup.EntryName != "main-rt" {
 			t.Errorf("startup record: EntryName = %q, want main-rt (file view)", startup.EntryName)
 		}
 		installBR4Overlay(t,
 			map[string]config.V1RuntimeConfig{"ov-rt": {Type: "docker"}},
 			map[string]config.V1ProfileConfig{"main": {Runtime: "ov-rt"}})
-		if _, after := GetRuntimeWithRecord("", ""); after.EntryName != "ov-rt" {
+		if _, after := GetRuntimeWithRecord("global", ""); after.EntryName != "ov-rt" {
 			t.Errorf("after the overlay: EntryName = %q, want ov-rt", after.EntryName)
 		}
 	})
