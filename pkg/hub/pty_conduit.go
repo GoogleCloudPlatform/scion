@@ -242,7 +242,7 @@ func (s *Server) managedPTYPath(ctx context.Context, identity Identity, agent *s
 // advertising pty that this node can reach, else a 503 with the reason.
 // brokerSkipped reports that resolvePTYPath skipped the broker branch for
 // lack of stream renewal: with no agent pty session left, the attach is
-// then refused with reason stream_renewal_unsupported rather than
+// then refused with the temporary registry_unavailable rather than
 // agent_pty_unavailable. Temporary refusals keep their retryable reasons.
 func (s *Server) agentPTYPath(ctx context.Context, identity Identity, agent *store.Agent, brokerSkipped bool) ptyPathDecision {
 	rtr := s.conduitRouter()
@@ -278,9 +278,12 @@ func (s *Server) agentPTYPath(ctx context.Context, identity Identity, agent *sto
 			"Conduit routing is unavailable", ptyReasonRegistryUnavailable)
 	case brokerSkipped:
 		// The broker path was skipped for lack of stream renewal and the
-		// agent has no pty session: no path is left.
-		s.recordConduitUpgradeRefused(ctx, conduitRoutePTY, agent.ID)
-		return ptyUpgradeRequiredRefusal()
+		// agent has no pty session. Without a session the hub cannot tell
+		// an agent image without conduit from a session that is briefly
+		// reconnecting, so this is the temporary failure, never
+		// stream_renewal_unsupported (design v2.21.46 §3.5 Q14).
+		return ptyRefusal(http.StatusServiceUnavailable, ErrCodeUnavailable,
+			"Conduit routing is unavailable", ptyReasonRegistryUnavailable)
 	default:
 		return ptyRefusal(http.StatusServiceUnavailable, wsprotocol.ErrCodeRuntimeAttachUnsupported,
 			"The agent's runtime does not support attach, and the agent has no conduit session that serves PTY",

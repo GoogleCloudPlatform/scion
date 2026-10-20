@@ -35,7 +35,9 @@ import (
 //     agent_upgrade_required, reason stream_renewal_unsupported;
 //   - PTY: the path is skipped in resolvePTYPath, and with no path left the
 //     attach is 503 runtime_attach_unsupported, reason
-//     stream_renewal_unsupported, with no WebSocket upgrade.
+//     stream_renewal_unsupported, with no WebSocket upgrade. An agent with
+//     no pty session (Resolve finds none) gets the temporary 503
+//     registry_unavailable instead (design v2.21.46).
 //
 // The decision is conduitTargetUpgradeRequired, separate from the
 // renewal-path decision (conduitRenewalPathUnavailable), which applies only

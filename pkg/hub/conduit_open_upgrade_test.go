@@ -367,12 +367,17 @@ func TestConduitOpen_UpgradeRequired_PTYPath(t *testing.T) {
 	ctx := context.Background()
 	pty := []string{grant.StreamKindPTY}
 
-	t.Run("broker skipped, no agent pty session", func(t *testing.T) {
+	t.Run("broker skipped, no agent pty session is temporary", func(t *testing.T) {
 		o := &openSetup{enforce: true}
 		f := newUpgradeFixture(t, o)
 		d := f.cf.srv.resolvePTYPath(ctx, f.cf.owner, f.withBroker(t))
-		requirePTYUpgradeRequired(t, d)
-		assert.Equal(t, []string{upgradeRefusal(conduitRoutePTY)}, o.rec.list())
+		// No session: the temporary failure, never the renewal refusal
+		// (design v2.21.46).
+		assert.Equal(t, ptyPathNone, d.Path)
+		assert.Equal(t, http.StatusServiceUnavailable, d.Status)
+		assert.Equal(t, ErrCodeUnavailable, d.Code)
+		assert.Equal(t, ptyReasonRegistryUnavailable, d.Reason)
+		assert.Empty(t, o.rec.list(), "not counted as a renewal refusal")
 	})
 	t.Run("broker skipped, agent pty session without renewal", func(t *testing.T) {
 		o := &openSetup{enforce: true}
