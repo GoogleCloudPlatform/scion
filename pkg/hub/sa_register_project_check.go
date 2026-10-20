@@ -17,9 +17,11 @@ package hub
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"time"
 
 	policytroubleshooterpb "cloud.google.com/go/policytroubleshooter/iam/apiv3/iampb"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -115,12 +117,33 @@ func (s *Server) saProjectAccessWarning(ctx context.Context, sa *store.GCPServic
 
 // saProjectProbeRefused reports whether err, from ProbeProjectAccess, gets
 // the warning: a plain permission-denied refusal of the hub's identity
-// (hubIdentityRefusedIAMRead), or a not-found answer. The probe names
-// only the GCP project, so not-found can only be about that project; it
-// is treated as a refusal so the response is the same whether or not the
-// project exists.
+// (hubIdentityRefusedIAMRead), or a plain not-found answer. The resource
+// the probe asks about is the GCP project, so a not-found answer most
+// likely means that project does not exist (the request also names the
+// hub's principal, and the client its quota project); it is treated as a
+// refusal so the response is the same whether or not the project exists.
+// A not-found answer is plain only without any ErrorInfo or
+// PreconditionFailure detail and without a VPC Service Controls marker in
+// its message, so, as for the refusal, a disabled API or a VPC Service
+// Controls answer adds no warning.
 func saProjectProbeRefused(err error) bool {
-	return hubIdentityRefusedIAMRead(err) || status.Code(err) == codes.NotFound
+	if hubIdentityRefusedIAMRead(err) {
+		return true
+	}
+	if status.Code(err) != codes.NotFound {
+		return false
+	}
+	st, ok := status.FromError(err)
+	if !ok || strings.Contains(st.Message(), "vpcServiceControlsUniqueIdentifier") {
+		return false
+	}
+	for _, d := range st.Details() {
+		switch d.(type) {
+		case *errdetails.ErrorInfo, *errdetails.PreconditionFailure:
+			return false
+		}
+	}
+	return true
 }
 
 // withSAProjectAccessWarning appends saProjectAccessWarning for sa to

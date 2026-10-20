@@ -171,6 +171,13 @@ func TestSARegisterProjectCheck_WarningByErrorClass(t *testing.T) {
 			&errdetails.ErrorInfo{Reason: "SOMETHING_ELSE", Domain: "googleapis.com"}), false},
 		{"unavailable", status.Error(codes.Unavailable, regUpstream), false},
 		{"not found", status.Error(codes.NotFound, regUpstream), true},
+		{"not found api disabled", saCheckStatusErr(t, codes.NotFound, regUpstream,
+			&errdetails.ErrorInfo{Reason: "SERVICE_DISABLED", Domain: "googleapis.com"}), false},
+		{"not found vpc service controls precondition", saCheckStatusErr(t, codes.NotFound, regUpstream,
+			&errdetails.PreconditionFailure{Violations: []*errdetails.PreconditionFailure_Violation{
+				{Type: "VPC_SERVICE_CONTROLS"}}}), false},
+		{"not found vpc service controls message", status.Error(codes.NotFound,
+			"Request is prohibited by organization's policy. vpcServiceControlsUniqueIdentifier: x"), false},
 		{"deadline exceeded", status.Error(codes.DeadlineExceeded, regUpstream), false},
 		{"non-grpc error", errors.New(regUpstream), false},
 		{"success", nil, false},
