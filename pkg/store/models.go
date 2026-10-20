@@ -3180,10 +3180,11 @@ type Schedule struct {
 	ID            string     `json:"id"`
 	ProjectID     string     `json:"projectId"`
 	Name          string     `json:"name"`
-	CronExpr      string     `json:"cronExpr"`  // Standard 5-field cron expression (UTC)
-	EventType     string     `json:"eventType"` // "message" (future: "dispatch_agent")
-	Payload       string     `json:"payload"`   // JSON: handler-specific configuration
-	Status        string     `json:"status"`    // active, paused, deleted
+	CronExpr      string     `json:"cronExpr"`               // Standard 5-field cron expression (UTC)
+	EventType     string     `json:"eventType"`              // "message" (future: "dispatch_agent")
+	Payload       string     `json:"payload"`                // JSON: handler-specific configuration
+	Status        string     `json:"status"`                 // active, paused, deleted
+	StatusReason  string     `json:"statusReason,omitempty"` // system pause reason (ScheduleStatusReason*); empty otherwise
 	NextRunAt     *time.Time `json:"nextRunAt,omitempty"`
 	LastRunAt     *time.Time `json:"lastRunAt,omitempty"`
 	LastRunStatus string     `json:"lastRunStatus,omitempty"` // success, error
@@ -3219,6 +3220,23 @@ const (
 	ScheduleStatusActive  = "active"
 	ScheduleStatusPaused  = "paused"
 	ScheduleStatusDeleted = "deleted"
+)
+
+// ScheduleStatusReason* are the values Schedule.StatusReason may hold. Only
+// a pause made by the system sets a reason; every status write made by a
+// user (pause, resume, edit) clears it, so an empty reason on a paused
+// schedule means a user paused it.
+const (
+	// ScheduleStatusReasonNone: active, or paused by a user.
+	ScheduleStatusReasonNone = ""
+	// ScheduleStatusReasonCreatorDeleted: paused because the agent the
+	// schedule's authority resolves to was deleted. Resuming re-records the
+	// authority to the resumer and clears the reason.
+	ScheduleStatusReasonCreatorDeleted = "creator_deleted"
+	// ScheduleStatusReasonCronZoneUnsupported: paused because the cron
+	// expression carries a zone prefix (CRON_TZ= or TZ=), which is not
+	// supported. The expression must be edited to UTC before resuming.
+	ScheduleStatusReasonCronZoneUnsupported = "cron_zone_unsupported"
 )
 
 // ScheduleRunStatus constants

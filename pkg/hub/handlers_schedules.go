@@ -513,7 +513,10 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 		fields.Payload = true
 	}
 	if req.Status != "" {
+		// A status written by a user carries no system reason: the write
+		// clears any stored status_reason.
 		schedule.Status = req.Status
+		schedule.StatusReason = store.ScheduleStatusReasonNone
 		fields.Status = true
 	}
 
@@ -638,7 +641,7 @@ func (s *Server) pauseSchedule(w http.ResponseWriter, r *http.Request, projectID
 	// transaction as the status change.
 	audit := newScheduleAudit(r.Context(), mutationTypeSchedulePause, scheduleID)
 	if err := s.store.WithTx(r.Context(), func(tx store.Store) error {
-		if err := tx.UpdateScheduleStatus(r.Context(), scheduleID, store.ScheduleStatusPaused); err != nil {
+		if err := tx.UpdateScheduleStatus(r.Context(), scheduleID, store.ScheduleStatusPaused, store.ScheduleStatusReasonNone); err != nil {
 			return err
 		}
 		return tx.CreateMutationAudit(r.Context(), audit)
@@ -648,6 +651,7 @@ func (s *Server) pauseSchedule(w http.ResponseWriter, r *http.Request, projectID
 	}
 
 	schedule.Status = store.ScheduleStatusPaused
+	schedule.StatusReason = store.ScheduleStatusReasonNone
 	writeJSON(w, http.StatusOK, schedule)
 }
 
@@ -713,6 +717,9 @@ func (s *Server) resumeSchedule(w http.ResponseWriter, r *http.Request, projectI
 	prevRevision := schedule.AuthorizationRevision
 	prevRevisionKnown := schedule.AuthorizationRevision != 0
 	schedule.Status = store.ScheduleStatusActive
+	// Resuming clears any system pause reason (for example
+	// creator_deleted) in the same write that re-records the authority.
+	schedule.StatusReason = store.ScheduleStatusReasonNone
 	schedule.NextRunAt = &nextRunAt
 	newAttr := reattributeInitiator(r.Context(), schedule.InitiatorAttribution)
 	schedule.InitiatorAttribution = newAttr

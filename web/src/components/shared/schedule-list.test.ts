@@ -760,3 +760,52 @@ describe('scion-schedule-list edit dialog while saving', () => {
     expect(i.editError).toBeNull();
   });
 });
+
+describe('scion-schedule-list status reason', () => {
+  beforeAll(async () => {
+    mod = await import('./schedule-list.js');
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it('labels each known reason and shows an unknown one as stored', () => {
+    expect(mod.scheduleStatusReasonLabel(undefined)).toBe('');
+    expect(mod.scheduleStatusReasonLabel('')).toBe('');
+    expect(mod.scheduleStatusReasonLabel('creator_deleted')).toContain('Creator deleted');
+    expect(mod.scheduleStatusReasonLabel('cron_zone_unsupported')).toContain('Zone prefix');
+    expect(mod.scheduleStatusReasonLabel('something_new')).toBe('something_new');
+  });
+
+  it('shows the reason under the status of a paused row, and none otherwise', async () => {
+    const el = await mount([
+      schedule({ id: 'a', name: 'orphaned', status: 'paused', statusReason: 'creator_deleted' }),
+      schedule({ id: 'b', name: 'user-paused', status: 'paused' }),
+      schedule({ id: 'c', name: 'running', status: 'active' }),
+    ]);
+
+    const reason = rowFor(el, 'orphaned').querySelector('.status-reason');
+    expect(reason).not.toBeNull();
+    expect(reason?.getAttribute('data-reason')).toBe('creator_deleted');
+    expect(reason?.textContent?.trim()).toBe(mod.scheduleStatusReasonLabel('creator_deleted'));
+    // Positive control above uses the same selector that must find nothing here.
+    expect(rowFor(el, 'user-paused').querySelector('.status-reason')).toBeNull();
+    expect(rowFor(el, 'running').querySelector('.status-reason')).toBeNull();
+  });
+
+  it('shows the reason in the detail dialog', async () => {
+    const el = await mount([
+      schedule({ id: 'a', name: 'orphaned', status: 'paused', statusReason: 'creator_deleted' }),
+    ]);
+    rowFor(el, 'orphaned').click();
+    await settle(el as unknown as { updateComplete: Promise<unknown> });
+    const dialog = (el.shadowRoot as ShadowRoot).querySelector('sl-dialog[label^="Schedule:"]');
+    expect(dialog).not.toBeNull();
+    expect(dialog?.querySelector('.status-reason')?.getAttribute('data-reason')).toBe(
+      'creator_deleted'
+    );
+  });
+});

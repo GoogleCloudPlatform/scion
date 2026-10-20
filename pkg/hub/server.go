@@ -6167,13 +6167,20 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 	// replica): pause the row instead of recording an invalid-expression
 	// error on every tick.
 	if hasCronZonePrefix(sched.CronExpr) {
-		if err := s.store.UpdateScheduleStatus(ctx, sched.ID, store.ScheduleStatusPaused); err != nil {
+		if err := s.store.UpdateScheduleStatus(ctx, sched.ID, store.ScheduleStatusPaused, store.ScheduleStatusReasonCronZoneUnsupported); err != nil {
 			log.Error("schedule-evaluator: failed to pause schedule with unsupported zone prefix",
 				"cron_expr", sched.CronExpr, "error", err)
 			return
 		}
 		log.Warn("schedule paused: cron zone prefixes are not supported; edit the expression to UTC and resume",
 			"cron_expr", sched.CronExpr)
+		return
+	}
+
+	// Backstop for a schedule whose authority agent was deleted by a path
+	// that did not pause it (ptone/scion#5403): pause it with status reason
+	// creator_deleted instead of firing it to be refused.
+	if s.pauseScheduleIfAuthorityAgentGone(ctx, sched, log) {
 		return
 	}
 

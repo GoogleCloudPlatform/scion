@@ -39,6 +39,8 @@ interface Schedule {
   eventType: string;
   payload: string;
   status: string;
+  /** System reason a paused schedule was paused; absent when none (active, or paused by a user). */
+  statusReason?: string;
   nextRunAt?: string;
   lastRunAt?: string;
   lastRunStatus?: string;
@@ -55,6 +57,21 @@ interface Schedule {
  * pauses existing rows that use one.
  */
 export const ZONE_PREFIX_BADGE_LABEL = 'Zone prefix not supported — edit to UTC';
+
+/**
+ * Text shown for each system pause reason the hub stores in
+ * `statusReason`. An unknown reason is shown as stored.
+ */
+const STATUS_REASON_LABELS: Record<string, string> = {
+  creator_deleted: 'Creator deleted: resume to run it under your authority',
+  cron_zone_unsupported: 'Zone prefix not supported: edit to UTC, then resume',
+};
+
+/** Returns the text shown for a schedule's status reason, or '' when it has none. */
+export function scheduleStatusReasonLabel(reason: string | undefined): string {
+  if (!reason) return '';
+  return STATUS_REASON_LABELS[reason] ?? reason;
+}
 
 /**
  * Reports whether a cron expression begins with a CRON_TZ= or TZ= zone prefix.
@@ -157,6 +174,11 @@ export class ScionScheduleList extends LitElement {
         color: var(--sl-color-warning-700, #b45309);
         margin-left: 0.375rem;
         white-space: nowrap;
+      }
+
+      .status-reason {
+        font-size: 0.75rem;
+        margin-top: 0.125rem;
       }
 
       .detail-row {
@@ -453,6 +475,16 @@ export class ScionScheduleList extends LitElement {
     }
   }
 
+  private renderStatusReason(sched: Schedule, inline = false) {
+    const label = sched.status === 'paused' ? scheduleStatusReasonLabel(sched.statusReason) : '';
+    if (!label) return nothing;
+    const reason = sched.statusReason ?? '';
+    const cls = 'meta-text status-reason';
+    return inline
+      ? html`<span class=${cls} data-reason=${reason}>${label}</span>`
+      : html`<div class=${cls} data-reason=${reason}>${label}</div>`;
+  }
+
   private renderZonePrefixBadge(sched: Schedule) {
     if (!hasCronZonePrefix(sched.cronExpr)) return nothing;
     return html`<span class="badge zone-prefix" title="Cron expressions are evaluated in UTC"
@@ -604,7 +636,10 @@ export class ScionScheduleList extends LitElement {
             ? html`<div class="meta-text next-run-absolute">${nextRunAbsolute}</div>`
             : nothing}
         </td>
-        <td><span class="badge ${this.statusBadgeClass(sched.status)}">${sched.status}</span></td>
+        <td>
+          <span class="badge ${this.statusBadgeClass(sched.status)}">${sched.status}</span>
+          ${this.renderStatusReason(sched)}
+        </td>
         <td class="hide-mobile">
           <span class="meta-text"
             >${sched.runCount}${sched.errorCount > 0 ? ` (${sched.errorCount} err)` : ''}</span
@@ -875,6 +910,7 @@ export class ScionScheduleList extends LitElement {
           <div class="detail-row">
             <strong>Status:</strong>
             <span class="badge ${this.statusBadgeClass(sched.status)}">${sched.status}</span>
+            ${this.renderStatusReason(sched, true)}
           </div>
           <div class="detail-row">
             <strong>Cron (UTC):</strong> ${sched.cronExpr} ${this.renderZonePrefixBadge(sched)}
