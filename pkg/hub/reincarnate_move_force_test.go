@@ -172,7 +172,7 @@ func TestEvaluateMoveEligibility_ForceRecreatesWhenExportCannotCarry(t *testing.
 				if c.Result != want {
 					t.Errorf("check %s = %s, want %s", c.Name, c.Result, want)
 				}
-				if c.Name == moveCheckWorkspaceRecreatable && !strings.Contains(c.Message, "fresh clone of https://example.com/repo.git") {
+				if c.Name == moveCheckWorkspaceRecreatable && !strings.Contains(c.Message, "fresh clone of example.com/repo") {
 					t.Errorf("workspace_recreatable message = %q", c.Message)
 				}
 			}
@@ -604,6 +604,81 @@ func TestEvaluateMoveEligibility_UnhealthyMountSharedWorkspaceNotWaived(t *testi
 		}
 		if v.TransferMode != "" {
 			t.Errorf("force=%v: transfer mode %q on a refusal", force, v.TransferMode)
+		}
+	}
+}
+
+// A14: a forced move onto a target with no capabilities at all is refused
+// at the capability check (412), without a panic.
+func TestEvaluateMoveEligibility_ForceTargetWithoutCapabilities(t *testing.T) {
+	in := forceMoveInput(moveTestProbeCalls{})
+	breakSameExport(&in)
+	in.Dst.Capabilities = nil
+	v, ref := evaluateMoveEligibility(in)
+	if ref == nil || ref.Status != http.StatusPreconditionFailed || ref.Code != ErrCodeUnsupportedCapability {
+		t.Fatalf("refusal = %+v, want 412 unsupported capability", ref)
+	}
+	if checkResults(v)[moveCheckCapability] != MoveCheckFailed {
+		t.Errorf("capability = %s, want failed", checkResults(v)[moveCheckCapability])
+	}
+}
+
+// A14: the git remote is normalized for display, so a remote carrying
+// userinfo shows none, in the workspace_recreatable message and in the
+// workspace consequence.
+func TestEvaluateMoveEligibility_ForceGitRemoteNormalizedForDisplay(t *testing.T) {
+	for _, remote := range []string{
+		"https://user:pass@example.com/org/repo.git",
+		"https://x-access-token:tok123@github.com/org/repo",
+	} {
+		in := forceMoveInput(moveTestProbeCalls{})
+		breakSameExport(&in)
+		in.GitRemote = remote
+		v, ref := evaluateMoveEligibility(in)
+		if ref != nil {
+			t.Fatalf("%s: unexpected refusal %+v", remote, ref)
+		}
+		var shown []string
+		for _, c := range v.Checks {
+			if c.Name == moveCheckWorkspaceRecreatable {
+				shown = append(shown, c.Message)
+			}
+		}
+		for _, c := range v.Consequences {
+			if c.Item == "workspace" {
+				shown = append(shown, c.Text)
+			}
+		}
+		if len(shown) != 2 {
+			t.Fatalf("%s: got %d texts, want the check message and the consequence", remote, len(shown))
+		}
+		for _, text := range shown {
+			if strings.Contains(text, "@") || strings.Contains(text, "pass") || strings.Contains(text, "tok123") {
+				t.Errorf("%s: shown text %q carries userinfo", remote, text)
+			}
+			if !strings.Contains(text, "/org/repo") {
+				t.Errorf("%s: shown text %q does not name the repository", remote, text)
+			}
+		}
+	}
+}
+
+// A14: a target without an NFS descriptor reads as an unhealthy export
+// mount, so a move that needs the mount is refused (503), never a panic.
+// The export pass cannot reach target_health with no descriptor
+// (same_export requires one), so the decision is pinned on its helper.
+func TestTargetExportMountHealthy_MissingDescriptorIsUnhealthy(t *testing.T) {
+	healthy := moveTestBroker("dst")
+	noNFS := moveTestBroker("dst")
+	noNFS.WorkspaceStorage = &api.BrokerWorkspaceStorage{Backend: api.WorkspaceStorageBackendNFS}
+	noStorage := moveTestBroker("dst")
+	noStorage.WorkspaceStorage = nil
+	for name, tc := range map[string]struct {
+		b    *store.RuntimeBroker
+		want bool
+	}{"healthy": {healthy, true}, "nil NFS": {noNFS, false}, "nil descriptor": {noStorage, false}} {
+		if got := targetExportMountHealthy(tc.b); got != tc.want {
+			t.Errorf("%s: targetExportMountHealthy = %v, want %v", name, got, tc.want)
 		}
 	}
 }

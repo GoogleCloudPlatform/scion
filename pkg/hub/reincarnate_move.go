@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 // Move eligibility checks for `scion reincarnate --broker` (moving an agent
@@ -295,13 +296,19 @@ func moveWorkspaceRecreatable(in moveEligibilityInput) (passMsg, failMsg string)
 		return "fresh empty workspace on the target", ""
 	case in.CloneMode && in.GitRemote != "":
 		return fmt.Sprintf("fresh clone of %s on the target; branch %s is checked out if it was pushed, otherwise created from %s",
-			in.GitRemote, valueOrUnknown(in.Branch), valueOrUnknown(in.DefaultBranch)), ""
+			displayGitRemote(in.GitRemote), valueOrUnknown(in.Branch), valueOrUnknown(in.DefaultBranch)), ""
 	case in.CloneMode:
 		return "", "--force recreates a clone-per-agent workspace from the project's git remote; this project has no git remote"
 	default:
 		return "", fmt.Sprintf("--force supports clone-per-agent and empty-per-agent workspaces; this agent's workspace is %s",
 			valueOrUnknown(in.WorkspaceMode))
 	}
+}
+
+// displayGitRemote is the project's git remote as move verdicts show it,
+// normalized for display (util.NormalizeGitRemote).
+func displayGitRemote(remote string) string {
+	return util.NormalizeGitRemote(remote)
 }
 
 func valueOrUnknown(s string) string {
@@ -454,7 +461,7 @@ func evaluateMoveChecks(in moveEligibilityInput, recreate bool) (MoveVerdict, *m
 	// A recreated workspace depends on the export mount only when the target
 	// places the agent directory on it (an agent-directory workspace under a
 	// Kubernetes profile, on an nfs backend).
-	if moveNeedsTargetExportMount(dst, recreate, in.CloneMode, profileType) && !dst.WorkspaceStorage.NFS.Healthy {
+	if moveNeedsTargetExportMount(dst, recreate, in.CloneMode, profileType) && !targetExportMountHealthy(dst) {
 		return fail(http.StatusServiceUnavailable, ErrCodeRuntimeBrokerUnavail,
 			fmt.Sprintf("broker %s reports its NFS export mount unhealthy", dstName))
 	}
@@ -508,7 +515,7 @@ func evaluateMoveChecks(in moveEligibilityInput, recreate bool) (MoveVerdict, *m
 	// A forced move needs a target that refuses to provision over files
 	// already there (source cleanup is a localOnly delete, which AgentMove
 	// covers).
-	if recreate && !dst.Capabilities.AgentMoveRecreate {
+	if recreate && (dst.Capabilities == nil || !dst.Capabilities.AgentMoveRecreate) {
 		return fail(http.StatusPreconditionFailed, ErrCodeUnsupportedCapability,
 			fmt.Sprintf("broker %s does not support forced moves; upgrade it", dstName))
 	}
@@ -542,6 +549,13 @@ func moveNeedsTargetExportMount(dst *store.RuntimeBroker, recreate, agentDir boo
 		agentDir && isKubernetesRuntimeType(profileType)
 }
 
+// targetExportMountHealthy reports whether dst reports a healthy NFS export
+// mount. A missing descriptor reads as unhealthy.
+func targetExportMountHealthy(dst *store.RuntimeBroker) bool {
+	ws := dst.WorkspaceStorage
+	return ws != nil && ws.NFS != nil && ws.NFS.Healthy
+}
+
 // buildMoveConsequences lists what an eligible move keeps, carries,
 // recreates and loses, grouped by kind in display order. Tests pin the item
 // keys; the text is for people.
@@ -564,7 +578,7 @@ func buildMoveConsequences(mode string, in moveEligibilityInput) []MoveConsequen
 	}
 	out = append(out, c(MoveConsequenceCarried, "handoff", "the handoff (if given) is delivered as the new generation's first task, with the reincarnation preamble"))
 	if mode == MoveTransferModeRecreate {
-		ws := fmt.Sprintf("fresh clone of %s on %s", valueOrUnknown(in.GitRemote), dstName)
+		ws := fmt.Sprintf("fresh clone of %s on %s", valueOrUnknown(displayGitRemote(in.GitRemote)), dstName)
 		if in.EmptyPerAgent {
 			ws = fmt.Sprintf("fresh empty directory on %s", dstName)
 		}
