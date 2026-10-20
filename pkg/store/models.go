@@ -1126,12 +1126,89 @@ type RuntimeBroker struct {
 	// host machine. Set by the operator at registration/update time so the Hub
 	// can gate passthrough mode on an actAs check against this identity.
 	// Optional: brokers that never serve passthrough agents need not set them.
+	//
+	// The pair is written together, only by CreateRuntimeBroker and the
+	// dedicated SetRuntimeBrokerGCPHost* store methods. UpdateRuntimeBroker
+	// leaves the stored values unchanged whatever this copy carries.
 	GCPHostServiceAccountEmail string `json:"gcp_host_service_account_email,omitempty"`
 	GCPHostProjectID           string `json:"gcp_host_project_id,omitempty"`
+	// GCPHostSource records how the GCP host pair was last set; see the
+	// GCPHostSource* constants. Empty means not recorded. Not serialized.
+	GCPHostSource string `json:"-"`
+	// HostObservation is the last GCP identity a co-located server read
+	// from the metadata server for its own broker; nil when never observed
+	// (every remote broker). Written only by
+	// RecordRuntimeBrokerHostObservation. It is not serialized: the Hub
+	// shows the derived HostIdentity instead.
+	HostObservation *HostIdentityObservation `json:"-"`
+	// HostIdentity is the derived host identity state, filled in by the
+	// Hub for display. It is never stored.
+	HostIdentity *HostIdentityStatus `json:"hostIdentity,omitempty"`
 
 	// Ownership - tracks who registered this broker
 	CreatedBy     string `json:"createdBy,omitempty"`
 	CreatedByName string `json:"createdByName,omitempty"` // Enriched: resolved from CreatedBy
+}
+
+// Values of RuntimeBroker.GCPHostSource.
+const (
+	// GCPHostSourceRegistration: filled by a registration while unset.
+	GCPHostSourceRegistration = "registration"
+	// GCPHostSourceDetected: read by a co-located server from the GCE
+	// metadata server.
+	GCPHostSourceDetected = "detected"
+	// GCPHostSourceAdmin: set or cleared through the update API. Registration
+	// and detection leave the pair unchanged until the next update.
+	GCPHostSourceAdmin = "admin"
+)
+
+// BrokerRoleLabel describes how a runtime broker is hosted:
+// BrokerRoleEmbedded for the co-located broker, BrokerRoleRemote otherwise.
+// BrokerTypeLabel is the broker type label (for example "external").
+const (
+	BrokerRoleLabel    = "scion.io/broker-role"
+	BrokerRoleEmbedded = "embedded"
+	BrokerRoleRemote   = "remote"
+	BrokerTypeLabel    = "scion.io/broker-type"
+)
+
+// Outcomes of a HostIdentityObservation.
+const (
+	// HostObservationPresent: the metadata server reported an account.
+	HostObservationPresent = "present"
+	// HostObservationAbsent: the metadata server is reachable but reports
+	// no default account (or an empty email).
+	HostObservationAbsent = "absent"
+	// HostObservationUnavailable: not on GCE, or the metadata server could
+	// not be read.
+	HostObservationUnavailable = "unavailable"
+)
+
+// HostIdentityObservation is what a co-located server read from the GCE
+// metadata server about its host's GCP identity.
+type HostIdentityObservation struct {
+	// Outcome is one of the HostObservation* constants.
+	Outcome string
+	// Email is the reported account (lowercased) when Outcome is present.
+	Email string
+	// ObservedAt is when the observation was made.
+	ObservedAt time.Time
+}
+
+// HostIdentityStatus is the derived host identity state of a broker, for
+// display. ObservedEmail and ObservedAt are set only for callers allowed to
+// update the broker.
+type HostIdentityStatus struct {
+	State         string     `json:"state"`
+	ObservedEmail string     `json:"observedEmail,omitempty"`
+	ObservedAt    *time.Time `json:"observedAt,omitempty"`
+}
+
+// GCPHostSetting is a stored GCP host service account, project and source.
+type GCPHostSetting struct {
+	Email   string
+	Project string
+	Source  string
 }
 
 // BrokerCapabilities describes what a runtime broker can do.

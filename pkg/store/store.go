@@ -1664,6 +1664,36 @@ type RuntimeBrokerStore interface {
 	// capabilities.
 	SetRuntimeBrokerCreatedByIfEmpty(ctx context.Context, id, createdBy string) (applied bool, err error)
 
+	// SetRuntimeBrokerGCPHostIfUnset writes the GCP host service account and
+	// project together, with source, but only while the stored email and
+	// project are both empty and the source is not GCPHostSourceAdmin.
+	// Returns applied=false (not an error) otherwise, or when the row does
+	// not exist. Registration uses it to fill the pair.
+	SetRuntimeBrokerGCPHostIfUnset(ctx context.Context, id, email, project, source string) (applied bool, err error)
+
+	// SetRuntimeBrokerGCPHostDetected writes the GCP host pair with source
+	// GCPHostSourceDetected unless the stored source is GCPHostSourceAdmin.
+	// Returns applied=false (not an error) otherwise, or when the row does
+	// not exist. Only the co-located server's metadata detection uses it.
+	SetRuntimeBrokerGCPHostDetected(ctx context.Context, id, email, project string) (applied bool, err error)
+
+	// SetRuntimeBrokerGCPHost writes the GCP host pair unconditionally (empty
+	// values clear) and sets the source to GCPHostSourceAdmin. It returns the
+	// values it replaced (read and written atomically). Only the update API
+	// uses it. Returns ErrNotFound if the broker doesn't exist.
+	SetRuntimeBrokerGCPHost(ctx context.Context, id, email, project string) (prev GCPHostSetting, err error)
+
+	// SetRuntimeBrokerGCPHostSource sets only the GCP host source, leaving
+	// the pair unchanged, and returns the values it replaced. The update API
+	// uses it to hand the pair back to registration and detection (source
+	// ""). Returns ErrNotFound if the broker doesn't exist.
+	SetRuntimeBrokerGCPHostSource(ctx context.Context, id, source string) (prev GCPHostSetting, err error)
+
+	// RecordRuntimeBrokerHostObservation stores the latest host identity
+	// observation of a co-located broker. Returns ErrNotFound if the broker
+	// doesn't exist. UpdateRuntimeBroker never writes these columns.
+	RecordRuntimeBrokerHostObservation(ctx context.Context, id string, obs HostIdentityObservation) error
+
 	// DeleteRuntimeBroker removes a runtime broker by ID.
 	// Returns ErrNotFound if the broker doesn't exist.
 	DeleteRuntimeBroker(ctx context.Context, id string) error
@@ -1675,8 +1705,8 @@ type RuntimeBrokerStore interface {
 	// exists, or nil if zero or multiple embedded brokers are found (ambiguous).
 	// "Embedded" means the broker's labels contain {"scion.io/broker-role": "embedded"}.
 	// Used to recover the legacy broker ID from DB when settings are lost;
-	// rows with a stored runtime target (flat Runtime Brokers) are never
-	// candidates.
+	// rows with a stored runtime target (flat Runtime Brokers) and rows with
+	// a recorded owner (CreatedBy) are never candidates.
 	FindEmbeddedBroker(ctx context.Context) (*RuntimeBroker, error)
 
 	// UpdateRuntimeBrokerHeartbeat updates the last heartbeat and status.
