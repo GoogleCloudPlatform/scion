@@ -190,8 +190,8 @@
 - [role.binding.create](#rolebindingcreate) — Create a role binding (grant authority to a principal)
 - [role.binding.delete](#rolebindingdelete) — Delete a role binding (revoke authority from a principal)
 - [group.member.add](#groupmemberadd) — Add a member to a group. A user access token needs group:addMember on a hub boundary, and the group's closure may carry no authority beyond the token's own
-- [group.member.remove](#groupmemberremove) — Remove a member from a group
-- [group.delete](#groupdelete) — Delete a group
+- [group.member.remove](#groupmemberremove) — Remove a member from a group. A user access token needs group:removeMember on a hub boundary. Removing a member from a group that is the subject of an access constraint is session only
+- [group.delete](#groupdelete) — Delete a group. A user access token needs group:delete on a hub boundary. Deleting a group that is the subject of an access constraint is session only
 - [access.constraint.create](#accessconstraintcreate) — Create an access constraint (tighten boundary)
 - [access.constraint.update](#accessconstraintupdate) — Update an access constraint (may relax or tighten boundary)
 - [access.constraint.delete](#accessconstraintdelete) — Delete an access constraint (relax boundary)
@@ -7172,7 +7172,7 @@
 
 **Domain:** group
 
-**Description:** Remove a member from a group
+**Description:** Remove a member from a group. A user access token needs group:removeMember on a hub boundary. Removing a member from a group that is the subject of an access constraint is session only
 
 ### Entry Points
 
@@ -7210,6 +7210,8 @@
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestGroupChangeToken_SelectorAndBoundaryPerRoute`
+- `pkg/hub:TestConstraintSubjectGroupToken_MemberRemoveSessionOnly`
+- `pkg/hub:TestConstraintSubjectGroupSession_MemberRemoveAndDeleteAdmitted`
 
 ---
 
@@ -7217,7 +7219,7 @@
 
 **Domain:** group
 
-**Description:** Delete a group
+**Description:** Delete a group. A user access token needs group:delete on a hub boundary. Deleting a group that is the subject of an access constraint is session only
 
 ### Entry Points
 
@@ -7250,6 +7252,8 @@
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestGroupChangeToken_SelectorAndBoundaryPerRoute`
+- `pkg/hub:TestConstraintSubjectGroupToken_DeleteSessionOnly`
+- `pkg/hub:TestConstraintSubjectGroupSession_MemberRemoveAndDeleteAdmitted`
 
 ---
 
