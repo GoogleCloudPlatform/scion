@@ -328,7 +328,9 @@ Examples:
 		// A file of the edited layer that still sets the key: a spelling
 		// unset does not edit (another case, a merge key, a legacy key), or
 		// the in-repo file of a project whose settings live in its external
-		// settings directory.
+		// settings directory. Only a source the loader recorded
+		// unambiguously is named (see config.ResolveSettingValue); a value
+		// of unknown source is not attributed to any file.
 		stillSetIn := ""
 		if nowErr == nil {
 			if file, ok := strings.CutPrefix(now.Source, configLayerSourcePrefix(scope)); ok {
@@ -342,6 +344,8 @@ Examples:
 			msg = fmt.Sprintf("Removed %s setting '%s'", scope, key)
 		case res.Removed:
 			msg = fmt.Sprintf("Removed %s setting '%s' from %s, but it is still set in %s; edit that file by hand", scope, key, res.Path, stillSetIn)
+		case stillSetIn != "" && stillSetIn != res.Path:
+			msg = fmt.Sprintf("%s setting '%s' was not removed: it is still set in %s, which config unset does not edit; edit that file by hand", capitalize(scope), key, stillSetIn)
 		case stillSetIn != "":
 			msg = fmt.Sprintf("%s setting '%s' was not removed: it is still set in %s in a form config unset does not edit; edit that file by hand", capitalize(scope), key, stillSetIn)
 		default:

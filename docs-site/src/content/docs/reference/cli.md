@@ -1037,8 +1037,12 @@ instead of, for example, a boolean being written `false`. It accepts the keys
 `config set` accepts, under the same rules. A key that is not in the file changes
 nothing (a legacy-format file is then not migrated). A YAML file is edited in place,
 and a section left empty is removed with the key. An environment variable that sets
-the key still applies, and the command warns about it. `config unset` is available
-in human mode only, like `config set`.
+the key still applies, and the command warns about it. When a file of the edited
+layer still sets the key afterwards (a spelling `config unset` does not edit, or the
+in-repo `.scion/settings.yaml` of a project whose settings are kept in its external
+settings directory), the command names that file instead of reporting success, and
+`--format json` adds it as `still_set_in`. `config unset` is available in human mode
+only, like `config set`.
 
 ### `scion cd-config`
 

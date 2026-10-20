@@ -129,16 +129,23 @@ func ResolveSettingValue(projectPath, key string) (SettingValue, error) {
 
 // lookupSource returns the source recorded for path. The settings decode
 // matches key names case-insensitively, so a key spelt in another case in a
-// file (hub.Endpoint) is found by a case-insensitive match when the exact
-// one misses; "" when no layer recorded it.
+// file (hub.Endpoint) is looked up case-insensitively when the exact match
+// misses. That lookup only answers when it is unambiguous: when layers spell
+// the key differently, which spelling the decode used is not known here,
+// so "" is returned rather than a guess.
 func lookupSource(sources map[string]string, path string) string {
 	if src, ok := sources[path]; ok {
 		return src
 	}
+	found := ""
 	for k, src := range sources {
-		if strings.EqualFold(k, path) {
-			return src
+		if !strings.EqualFold(k, path) {
+			continue
 		}
+		if found != "" && found != src {
+			return ""
+		}
+		found = src
 	}
-	return ""
+	return found
 }

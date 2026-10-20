@@ -217,3 +217,23 @@ func TestUpdateSetting_CLIMode(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, v.Value)
 }
+
+// When layers spell a key in different cases, which spelling the decode
+// used is not recorded, so no source is named rather than a possibly wrong
+// layer. A single spelling still finds its layer.
+func TestResolveSettingValue_DifferentSpellingsInTwoLayersHaveNoSource(t *testing.T) {
+	projectDir := setupSettingsViewTest(t,
+		"schema_version: \"1\"\nhub:\n  Endpoint: https://a.example.com\n",
+		"schema_version: \"1\"\nHub:\n  endpoint: https://b.example.com\n")
+	for i := 0; i < 20; i++ {
+		v, err := ResolveSettingValue(projectDir, "hub.endpoint")
+		require.NoError(t, err)
+		require.NotEmpty(t, v.Value)
+		assert.Empty(t, v.Source, "two spellings in two layers: the source must not be guessed")
+	}
+
+	assert.Equal(t, "global f", lookupSource(map[string]string{"hub.Endpoint": "global f"}, "hub.endpoint"))
+	assert.Equal(t, "global f", lookupSource(map[string]string{"hub.Endpoint": "global f", "HUB.endpoint": "global f"}, "hub.endpoint"))
+	assert.Equal(t, "", lookupSource(map[string]string{"hub.Endpoint": "global f", "Hub.endpoint": "project g"}, "hub.endpoint"))
+	assert.Equal(t, "project g", lookupSource(map[string]string{"hub.endpoint": "project g", "Hub.Endpoint": "global f"}, "hub.endpoint"))
+}
