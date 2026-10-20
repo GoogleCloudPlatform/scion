@@ -210,6 +210,59 @@ func TestListSchedulesFiltersByLastRunStatus(t *testing.T) {
 	assert.Equal(t, 3, res.TotalCount)
 }
 
+// TestListSchedulesFiltersSystemPaused covers ScheduleFilter.SystemPausedOnly
+// (ptone/scion#5404): only paused schedules with a non-empty status reason
+// are listed, whatever the reason value. A user pause (empty reason), an
+// active schedule and an active schedule that still carries a reason are
+// left out. Runs on SQLite and, under the integration tag, on Postgres.
+func TestListSchedulesFiltersSystemPaused(t *testing.T) {
+	s := newTestScheduleStore(t)
+	ctx := context.Background()
+	projectID := uuid.NewString()
+
+	create := func(name, status, reason string) *store.Schedule {
+		sc := newTestSchedule(projectID, name)
+		require.NoError(t, s.CreateSchedule(ctx, sc))
+		if status != store.ScheduleStatusActive || reason != "" {
+			require.NoError(t, s.UpdateScheduleStatus(ctx, sc.ID, status, reason))
+		}
+		return sc
+	}
+	creator := create("creator", store.ScheduleStatusPaused, store.ScheduleStatusReasonCreatorDeleted)
+	zone := create("zone", store.ScheduleStatusPaused, store.ScheduleStatusReasonCronZoneUnsupported)
+	other := create("other-reason", store.ScheduleStatusPaused, "some_later_reason")
+	create("user-paused", store.ScheduleStatusPaused, store.ScheduleStatusReasonNone)
+	create("active", store.ScheduleStatusActive, store.ScheduleStatusReasonNone)
+	create("active-with-reason", store.ScheduleStatusActive, store.ScheduleStatusReasonCreatorDeleted)
+	create("deleted-with-reason", store.ScheduleStatusDeleted, store.ScheduleStatusReasonCreatorDeleted)
+
+	res, err := s.ListSchedules(ctx, store.ScheduleFilter{SystemPausedOnly: true}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, 3, res.TotalCount)
+	got := []string{}
+	for _, sc := range res.Items {
+		got = append(got, sc.ID)
+		assert.Equal(t, store.ScheduleStatusPaused, sc.Status)
+		assert.NotEmpty(t, sc.StatusReason)
+	}
+	assert.ElementsMatch(t, []string{creator.ID, zone.ID, other.ID}, got)
+
+	// Paging keeps the filter.
+	page, err := s.ListSchedules(ctx, store.ScheduleFilter{SystemPausedOnly: true}, store.ListOptions{Limit: 2})
+	require.NoError(t, err)
+	assert.Len(t, page.Items, 2)
+	assert.Equal(t, 3, page.TotalCount)
+	require.NotEmpty(t, page.NextCursor)
+	rest, err := s.ListSchedules(ctx, store.ScheduleFilter{SystemPausedOnly: true}, store.ListOptions{Limit: 2, Cursor: page.NextCursor})
+	require.NoError(t, err)
+	assert.Len(t, rest.Items, 1)
+
+	// Without the flag, the user-paused schedule is listed too.
+	res, err = s.ListSchedules(ctx, store.ScheduleFilter{Status: store.ScheduleStatusPaused}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, 4, res.TotalCount)
+}
+
 // TestListDueSchedulesClaimPath exercises the dialect-aware SKIP LOCKED claim
 // helper. On SQLite it degrades to a plain SELECT, so this verifies the
 // functional contract of the claim query: only active, already-due schedules

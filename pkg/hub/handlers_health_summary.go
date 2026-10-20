@@ -76,8 +76,9 @@ type HealthSummaryResponse struct {
 	// health_summary_hub_instances.go.
 	HubInstances *HealthSummaryHubInstances `json:"hub_instances"`
 
-	// Schedules lists the failing schedules the caller may read; nil when
-	// they could not be listed. See health_summary_schedules.go.
+	// Schedules lists the failing and hub-paused schedules the caller may
+	// read; nil when they could not be listed. See
+	// health_summary_schedules.go.
 	Schedules *HealthSummarySchedules `json:"schedules"`
 
 	// Links holds operator-configured links for the Health page. It is
