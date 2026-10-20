@@ -15,6 +15,7 @@
 package transportauth
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
@@ -317,6 +318,10 @@ func TestFileSource_ConcurrentRefreshAndRead(t *testing.T) {
 	writeTokenFile(t, path, makeTestJWT(time.Now().Add(time.Minute)))
 
 	src := NewFileSource(path, nil)
+	// Setup: one read before any replacement, so every reader below has an
+	// earlier value from this source.
+	_, err := src.Token()
+	require.NoError(t, err)
 	const writes = 50
 	values := make([]string, writes)
 	for i := range values {
@@ -495,42 +500,293 @@ func TestFileSource_UnlinkedReadRetriedWhenIdentityMatches(t *testing.T) {
 }
 
 // A file that is reported unlinked on every read is read at most three
-// times in one call. Then the source refuses: no value (not even the one
-// from an earlier successful read) and the error is recorded, so the
-// caller gets an empty token and an error.
+// times in one call. With no earlier successful read there is nothing to
+// keep, so the source refuses: an empty token and an error, with the read
+// error recorded.
 func TestFileSource_UnlinkedReadRetryIsBoundedAndRefuses(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tt")
-	first := makeTestJWT(time.Now().Add(10 * time.Minute))
-	writeTokenFile(t, path, first)
+	writeTokenFile(t, path, makeTestJWT(time.Now().Add(10*time.Minute)))
 
-	failing := false
 	reads := 0
 	src := NewFileSource(path, func(p string) (string, error) {
 		reads++
-		if failing {
-			return "", unlinkedReadErr(p)
-		}
-		return ReadTransportTokenFile(p)
+		return "", unlinkedReadErr(p)
 	})
 	got, err := src.Token()
-	require.NoError(t, err)
-	require.Equal(t, first, got)
-
-	writeTokenFile(t, path, makeTestJWT(time.Now().Add(20*time.Minute)))
-	failing = true
-	reads = 0
-	got, err = src.Token()
 	assert.Error(t, err)
 	assert.Empty(t, got)
 	assert.Equal(t, 3, reads)
 	assert.Empty(t, src.fileToken)
+	assert.False(t, src.fileRetained)
 	assert.ErrorIs(t, src.fileErr, dirfd.ErrUnlinked)
 	assert.ErrorIs(t, src.fileErr, dirfd.ErrNotSingleLinkRegular)
 
 	st := src.Status()
 	assert.False(t, st.FilePresent)
+	assert.False(t, st.FileRetained)
 	assert.Equal(t, "", st.InUse)
 	assert.ErrorIs(t, st.FileError, dirfd.ErrNotSingleLinkRegular)
+}
+
+// readScript is a FileReadFunc whose reads follow modes, one per read:
+// "unlinked" fails the way the default reader does on a file with no link
+// left, "refuse" fails with a hardlink refusal, "refuse-replace" replaces
+// the file and then fails with a hardlink refusal, and "file" (also used
+// once modes runs out) reads the file with the default reader.
+type readScript struct {
+	t     *testing.T
+	modes []string
+	reads int
+}
+
+func (r *readScript) read(p string) (string, error) {
+	r.reads++
+	mode := "file"
+	if len(r.modes) > 0 {
+		mode, r.modes = r.modes[0], r.modes[1:]
+	}
+	switch mode {
+	case "unlinked":
+		return "", unlinkedReadErr(p)
+	case "refuse":
+		return "", fmt.Errorf("transport token file %s: dirfd: tt: %w", p, dirfd.ErrNotSingleLinkRegular)
+	case "refuse-replace":
+		writeTokenFile(r.t, p, makeTestJWT(time.Now().Add(time.Duration(r.reads+20)*time.Minute)))
+		return "", fmt.Errorf("transport token file %s: dirfd: tt: %w", p, dirfd.ErrNotSingleLinkRegular)
+	default:
+		return ReadTransportTokenFile(p)
+	}
+}
+
+// retainFixture is a FileSource on a fake clock that has read tok once, at
+// clock0. The file's modification time is clock0, so every later call that
+// is at least racyRecheck after the last read reads the file again.
+type retainFixture struct {
+	path  string
+	tok   string
+	src   *FileSource
+	r     *readScript
+	clock time.Time
+	warns []string
+}
+
+func newRetainFixture(t *testing.T, tok string, clock0 time.Time) *retainFixture {
+	t.Helper()
+	f := &retainFixture{path: filepath.Join(t.TempDir(), "tt"), tok: tok, clock: clock0}
+	writeTokenFile(t, f.path, tok)
+	setModTime(t, f.path, clock0)
+	f.r = &readScript{t: t}
+	f.src = NewFileSource(f.path, f.r.read)
+	f.src.now = func() time.Time { return f.clock }
+	f.src.WarnLog = func(format string, args ...interface{}) {
+		f.warns = append(f.warns, fmt.Sprintf(format, args...))
+	}
+	got, err := f.src.Token()
+	require.NoError(t, err)
+	require.Equal(t, tok, got)
+	return f
+}
+
+// next advances the clock by racyRecheck, so the next call reads the file,
+// and scripts the reads of that call.
+func (f *retainFixture) next(modes ...string) {
+	f.clock = f.clock.Add(racyRecheck)
+	f.script(modes...)
+}
+
+// script sets the reads of the next call without moving the clock.
+func (f *retainFixture) script(modes ...string) {
+	f.r.modes = append([]string(nil), modes...)
+	f.r.reads = 0
+}
+
+func (f *retainFixture) retainWarnings() int {
+	n := 0
+	for _, w := range f.warns {
+		if strings.Contains(w, "is being replaced") {
+			n++
+		}
+	}
+	return n
+}
+
+// makeTestJWTNoExp returns a JWT whose claims have no exp.
+func makeTestJWTNoExp() string {
+	enc := func(v string) string { return base64.RawURLEncoding.EncodeToString([]byte(v)) }
+	return enc(`{"alg":"none","typ":"JWT"}`) + "." + enc(`{"iss":"test"}`) + "." + enc("fakesig")
+}
+
+// When every read in a call opens a file that had no link left, the value
+// from the earlier successful read is kept: Token returns it with no error,
+// and Status reports FileRetained with the read error.
+func TestFileSource_RetainsLastGoodValueWhileReplaced(t *testing.T) {
+	f := newRetainFixture(t, makeTestJWT(time.Now().Add(10*time.Minute)), time.Now())
+	f.next("unlinked", "unlinked", "unlinked", "unlinked", "unlinked", "unlinked")
+
+	got, err := f.src.Token()
+	require.NoError(t, err, "the earlier value must be kept while the file is being replaced")
+	assert.Equal(t, f.tok, got)
+	assert.Equal(t, 3, f.r.reads)
+
+	st := f.src.Status()
+	assert.Equal(t, 6, f.r.reads)
+	assert.True(t, st.FileRetained)
+	assert.True(t, st.FilePresent)
+	assert.Equal(t, SourceLabelFile, st.InUse)
+	assert.ErrorIs(t, st.FileError, dirfd.ErrUnlinked)
+	assert.Equal(t, 1, f.retainWarnings())
+}
+
+// The warning is logged once per retained episode: again only after a
+// successful read has ended the previous one.
+func TestFileSource_RetainWarnsOncePerEpisode(t *testing.T) {
+	f := newRetainFixture(t, makeTestJWT(time.Now().Add(10*time.Minute)), time.Now())
+	f.next("unlinked", "unlinked", "unlinked")
+	_, err := f.src.Token()
+	require.NoError(t, err)
+	f.next("unlinked", "unlinked", "unlinked")
+	_, err = f.src.Token()
+	require.NoError(t, err)
+	assert.Equal(t, 1, f.retainWarnings(), "one warning per episode")
+	require.True(t, f.src.fileRetained)
+
+	f.next()
+	_, err = f.src.Token()
+	require.NoError(t, err)
+	assert.False(t, f.src.fileRetained, "a successful read ends the episode")
+
+	f.next("unlinked", "unlinked", "unlinked")
+	_, err = f.src.Token()
+	require.NoError(t, err)
+	assert.Equal(t, 2, f.retainWarnings(), "a new episode warns again")
+	assert.Contains(t, f.warns[len(f.warns)-1], f.path)
+}
+
+// A kept value is never reused without reading: the next call reads the
+// file even though its metadata is unchanged and the last read is young.
+func TestFileSource_RetainedValueIsNotReused(t *testing.T) {
+	f := newRetainFixture(t, makeTestJWT(time.Now().Add(10*time.Minute)), time.Now())
+	f.next("unlinked", "unlinked", "unlinked")
+	_, err := f.src.Token()
+	require.NoError(t, err)
+	require.True(t, f.src.fileRetained)
+
+	newer := makeTestJWT(time.Now().Add(20 * time.Minute))
+	writeTokenFile(t, f.path, newer)
+	f.script()
+	got, err := f.src.Token()
+	require.NoError(t, err)
+	assert.Equal(t, 1, f.r.reads, "the call after a kept value must read the file")
+	assert.Equal(t, newer, got)
+	assert.False(t, f.src.fileRetained)
+	assert.NoError(t, f.src.fileErr)
+}
+
+// A refusal in the same call clears the value even when the other reads
+// failed only because the file was being replaced.
+func TestFileSource_RetainClearedByRefusalInSameCall(t *testing.T) {
+	f := newRetainFixture(t, makeTestJWT(time.Now().Add(10*time.Minute)), time.Now())
+	f.next("unlinked", "unlinked", "refuse")
+
+	got, err := f.src.Token()
+	assert.Error(t, err)
+	assert.Empty(t, got, "a refusal in the call must clear the earlier value")
+	assert.Equal(t, 3, f.r.reads)
+	assert.False(t, f.src.fileRetained)
+	assert.ErrorIs(t, f.src.fileErr, dirfd.ErrNotSingleLinkRegular)
+	assert.NotErrorIs(t, f.src.fileErr, dirfd.ErrUnlinked)
+}
+
+// Reads that are retried because the file was replaced, but fail with a
+// refusal, do not keep the earlier value.
+func TestFileSource_IdentityChangeAloneDoesNotRetain(t *testing.T) {
+	f := newRetainFixture(t, makeTestJWT(time.Now().Add(10*time.Minute)), time.Now())
+	f.next("refuse-replace", "refuse-replace", "refuse-replace")
+
+	got, err := f.src.Token()
+	assert.Error(t, err)
+	assert.Empty(t, got, "only reads of a file with no link left may keep the earlier value")
+	assert.Equal(t, 3, f.r.reads)
+	assert.False(t, f.src.fileRetained)
+}
+
+// The earlier value is kept for at most keepMax after the read that
+// produced it.
+func TestFileSource_RetainBoundedByKeepMax(t *testing.T) {
+	clock0 := time.Now()
+	f := newRetainFixture(t, makeTestJWT(time.Now().Add(10*time.Minute)), clock0)
+
+	f.clock = clock0.Add(keepMax)
+	f.script("unlinked", "unlinked", "unlinked")
+	got, err := f.src.Token()
+	require.NoError(t, err, "kept at exactly keepMax after the read")
+	assert.Equal(t, f.tok, got)
+
+	f.clock = clock0.Add(keepMax + time.Nanosecond)
+	f.script("unlinked", "unlinked", "unlinked")
+	got, err = f.src.Token()
+	assert.Error(t, err)
+	assert.Empty(t, got, "the earlier value must not be kept beyond keepMax")
+	assert.False(t, f.src.fileRetained)
+}
+
+// The earlier value is not kept once its expiry has passed.
+func TestFileSource_RetainNotPastExpiry(t *testing.T) {
+	exp := time.Unix(time.Now().Add(time.Hour).Unix(), 0)
+	f := newRetainFixture(t, makeTestJWT(exp), exp.Add(-time.Second))
+
+	f.clock = exp.Add(-time.Nanosecond)
+	f.script("unlinked", "unlinked", "unlinked")
+	got, err := f.src.Token()
+	require.NoError(t, err, "kept just before its expiry")
+	assert.Equal(t, f.tok, got)
+
+	f.clock = exp
+	f.script("unlinked", "unlinked", "unlinked")
+	got, err = f.src.Token()
+	assert.Error(t, err)
+	assert.Empty(t, got, "an expired value must not be kept")
+	assert.False(t, f.src.fileRetained)
+}
+
+// A value whose expiry cannot be parsed is served by a fresh read but is
+// never kept while the file is being replaced.
+func TestFileSource_RetainRefusedForUnparseableExpiry(t *testing.T) {
+	f := newRetainFixture(t, "header.payload.sig", time.Now())
+	f.next("unlinked", "unlinked", "unlinked")
+
+	got, err := f.src.Token()
+	assert.Error(t, err)
+	assert.Empty(t, got, "a value without a parsed expiry must not be kept")
+	assert.False(t, f.src.fileRetained)
+}
+
+// A JWT with no expiry claim is served by a fresh read but is never kept.
+func TestFileSource_RetainRefusedWithoutExpiryClaim(t *testing.T) {
+	f := newRetainFixture(t, makeTestJWTNoExp(), time.Now())
+	f.next("unlinked", "unlinked", "unlinked")
+
+	got, err := f.src.Token()
+	assert.Error(t, err)
+	assert.Empty(t, got, "a value without a parsed expiry must not be kept")
+	assert.False(t, f.src.fileRetained)
+}
+
+// Removing the file clears a kept value.
+func TestFileSource_RetainClearedWhenFileRemoved(t *testing.T) {
+	f := newRetainFixture(t, makeTestJWT(time.Now().Add(10*time.Minute)), time.Now())
+	f.next("unlinked", "unlinked", "unlinked")
+	_, err := f.src.Token()
+	require.NoError(t, err)
+	require.True(t, f.src.fileRetained)
+
+	require.NoError(t, os.Remove(f.path))
+	f.next()
+	got, err := f.src.Token()
+	assert.Error(t, err)
+	assert.Empty(t, got)
+	assert.False(t, f.src.fileRetained)
+	assert.False(t, f.src.Status().FilePresent)
 }
 
 // countingReader returns a FileReadFunc that uses the default reader and
@@ -553,9 +809,10 @@ func setModTime(t *testing.T, path string, mtime time.Time) time.Time {
 }
 
 // A file modified within racyModTimeWindow of the last read is read again
-// on every call: a write in the same timestamp tick could have left all the
-// metadata unchanged. Once the modification time is safely before the start
-// of a read, that read is reused.
+// once that read is racyRecheck old: a write in the same timestamp tick
+// could have left all the metadata unchanged. A racy read younger than
+// racyRecheck is reused, and once the modification time is safely before
+// the start of a read, that read is reused.
 func TestFileSource_RacyModTimeIsReread(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tt")
 	writeTokenFile(t, path, makeTestJWT(time.Now().Add(10*time.Minute)))
@@ -568,6 +825,14 @@ func TestFileSource_RacyModTimeIsReread(t *testing.T) {
 
 	_, err := src.Token()
 	require.NoError(t, err)
+	require.Equal(t, 1, reads)
+
+	clock = clock.Add(racyRecheck / 2)
+	_, err = src.Token()
+	require.NoError(t, err)
+	assert.Equal(t, 1, reads, "a racy read less than racyRecheck old is reused")
+
+	clock = clock.Add(racyRecheck)
 	_, err = src.Token()
 	require.NoError(t, err)
 	assert.Equal(t, 2, reads, "a file modified close to the read must be read again")
@@ -585,7 +850,8 @@ func TestFileSource_RacyModTimeIsReread(t *testing.T) {
 
 // cachedReadValidLocked reuses an earlier read only when every piece of
 // metadata matches and the modification time is safely before the start of
-// that read. Each case changes one input from a state that is reused. The
+// that read, or that read is less than racyRecheck old. Each case changes
+// one input from a state that is reused. The
 // identities are real Lstat results (os.SameFile only compares results from
 // os.Stat or os.Lstat); the other inputs are plain values, so the table
 // needs no clock or kernel timing.
@@ -610,6 +876,7 @@ func TestFileSource_CachedReadValidLocked(t *testing.T) {
 		ctime     time.Time
 		nlink     uint64
 		haveExtra bool
+		age       time.Duration // how long after fileReadAt the call is made
 	}
 	// reusable returns the state in which the earlier read is reused.
 	reusable := func() input {
@@ -626,6 +893,7 @@ func TestFileSource_CachedReadValidLocked(t *testing.T) {
 			ctime:     ctime,
 			nlink:     nlink,
 			haveExtra: true,
+			age:       racyRecheck,
 		}
 	}
 	tests := []struct {
@@ -642,6 +910,23 @@ func TestFileSource_CachedReadValidLocked(t *testing.T) {
 		{"modified inside the racy window", func(in *input) { in.src.fileReadAt = mtime.Add(racyModTimeWindow / 2) }, false},
 		{"modified exactly at the window boundary", func(in *input) { in.src.fileReadAt = mtime.Add(racyModTimeWindow) }, false},
 		{"modified after the read started", func(in *input) { in.src.fileReadAt = mtime.Add(-time.Second) }, false},
+		{"racy read younger than racyRecheck", func(in *input) {
+			in.src.fileReadAt = mtime.Add(racyModTimeWindow / 2)
+			in.age = racyRecheck - time.Nanosecond
+		}, true},
+		{"racy read exactly racyRecheck old", func(in *input) {
+			in.src.fileReadAt = mtime.Add(racyModTimeWindow / 2)
+			in.age = racyRecheck
+		}, false},
+		{"racy read young but size differs", func(in *input) {
+			in.src.fileReadAt = mtime.Add(racyModTimeWindow / 2)
+			in.age = 0
+			in.src.fileSize++
+		}, false},
+		{"read young but last read failed", func(in *input) {
+			in.age = 0
+			in.src.fileErr = errors.New("read failed")
+		}, false},
 		{"change time and link count unavailable", func(in *input) { in.haveExtra = false }, false},
 		{"last read failed", func(in *input) { in.src.fileErr = errors.New("read failed") }, false},
 		{"no earlier read", func(in *input) { in.src.fileInfo = nil }, false},
@@ -650,7 +935,7 @@ func TestFileSource_CachedReadValidLocked(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			in := reusable()
 			tt.change(&in)
-			got := in.src.cachedReadValidLocked(fi, in.ctime, in.nlink, in.haveExtra)
+			got := in.src.cachedReadValidLocked(fi, in.ctime, in.nlink, in.haveExtra, in.src.fileReadAt.Add(in.age))
 			assert.Equal(t, tt.want, got)
 		})
 	}
