@@ -2899,6 +2899,15 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 		// the soft-delete mark was attempted, since the pod is gone), the
 		// entry may still be there and no mark was written; the hub
 		// retries or reports the failure.
+		if errors.Is(err, agent.ErrAgentFilesDeleteRefused) {
+			// The files delete refused a path that is, or resolves into,
+			// a project workspace (agent deletion never removes one). The
+			// hub gets that reason; the paths stay in the log.
+			s.agentLifecycleLog.Error("runtime op failed", "op", "delete agent", "agent_id", id, "project_id", projectID, "error", err)
+			span.SetStatus(codes.Error, err.Error())
+			RuntimeError(w, agentFilesDeleteRefusedMessage)
+			return
+		}
 		s.writeRuntimeOpError(w, ctx, "delete agent", err, "agent_id", id, "project_id", projectID)
 		return
 	}

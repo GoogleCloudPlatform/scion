@@ -102,6 +102,10 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 	// provision.WorktreePathIsScionCreated's doc comment on why this must be
 	// the actual resolved project directory, not derived from repoRoot.
 	var resolvedProjectDir string
+	// localProjectRoot and externalAgentsRoot anchor the guard's agent
+	// directories (see agentFilesGuard): the directory holding the
+	// worktree-per-agent shared base, and the external agents root.
+	var localProjectRoot, externalAgentsRoot string
 	if projectDir, err := config.GetResolvedProjectDir(projectPath); err == nil {
 		resolvedProjectDir = projectDir
 		agentsDirs = append(agentsDirs, filepath.Join(projectDir, "agents"))
@@ -127,6 +131,7 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 		if filepath.Base(projectDir) == config.DotScion {
 			projectRoot = filepath.Dir(projectDir)
 		}
+		localProjectRoot = projectRoot
 		sharedBase := filepath.Join(projectRoot, "workspace")
 		// Accept .git as either a directory (normal clone) or a file (gitdir
 		// pointer, e.g. if the base is itself a linked worktree/submodule) —
@@ -153,9 +158,28 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 
 		// Check for external agent home (git project split storage)
 		if extDir, err := config.GetGitProjectExternalAgentsDir(projectDir); err == nil && extDir != "" {
+			externalAgentsRoot = extDir
 			externalAgentDir = filepath.Join(extDir, agentName)
 		}
 	}
+
+	// Every removal below passes the guard: only the agent's own
+	// directories may be removed, never a project workspace (the project
+	// root as provision resolves it, a plain project's parent directory it
+	// mounts, or the repository the project is in).
+	var projectWorkspaces []string
+	if resolvedProjectDir != "" {
+		settings, _, _ := config.LoadEffectiveSettingsFor(context.Background(), resolvedProjectDir)
+		projectWorkspaces = append(projectWorkspaces, resolveProjectRoot(settings, resolvedProjectDir), repoRoot)
+		if !config.IsGlobalProjectDir(resolvedProjectDir) {
+			projectWorkspaces = append(projectWorkspaces, plainProjectWorkspaceSource(resolvedProjectDir))
+		}
+	}
+	agentRoots := []string{externalAgentDir, globalWorkspaceDir, sharedBaseWorktree}
+	for _, dir := range agentsDirs {
+		agentRoots = append(agentRoots, filepath.Join(dir, agentName))
+	}
+	guard := newAgentFilesGuard(agentName, []string{resolvedProjectDir, localProjectRoot, externalAgentsRoot}, agentRoots, projectWorkspaces)
 	// Empty-per-agent (design #2703): the agent's workspace is a private,
 	// non-git directory that owns no worktree or branch. Even when the
 	// agent ran `git init` in it, or the project sits inside an enclosing
@@ -231,6 +255,12 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 						"agent_id", agentName, "branch", branch)
 				} else {
 					util.Debugf("delete: last sharer for branch %s, removing worktree at %s", branch, wtPath)
+					// The last sharer removes the shared worktree, which
+					// the registry and the shape check above establish is
+					// scion's, not the project's.
+					if err := guard.check(wtPath, wtPath); err != nil {
+						return branchDeleted, fmt.Errorf("delete: %w", err)
+					}
 					worktreeStart := time.Now()
 					if deleted, err := util.RemoveWorktree(repoRoot, wtPath, removeBranch); err == nil {
 						if deleted {
@@ -282,6 +312,9 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 	// separate from the agent config dir under agents/.
 	// Skip when the refcount path already handled removal/detach.
 	if worktreeDir != "" && !refcountHandled {
+		if err := guard.check(worktreeDir); err != nil {
+			return branchDeleted, fmt.Errorf("delete: %w", err)
+		}
 		if _, err := os.Stat(filepath.Join(worktreeDir, ".git")); err == nil {
 			util.Debugf("delete: removing worktree-per-agent workspace at %s", worktreeDir)
 			worktreeStart := time.Now()
@@ -316,6 +349,9 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 		// the shared worktree must not be removed while other sharers remain.
 		if !refcountHandled && !emptyPerAgent {
 			if _, err := os.Stat(filepath.Join(agentWorkspace, ".git")); err == nil {
+				if err := guard.check(agentWorkspace); err != nil {
+					return branchDeleted, fmt.Errorf("delete: %w", err)
+				}
 				util.Debugf("delete: removing workspace at %s", agentWorkspace)
 				worktreeStart := time.Now()
 				if deleted, err := util.RemoveWorktree(agentDir, agentWorkspace, removeBranch); err == nil {
@@ -371,6 +407,9 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 
 	// Phase 2: directory removal.
 	for _, agentDir := range dirsToDelete {
+		if err := guard.check(agentDir); err != nil {
+			return branchDeleted, fmt.Errorf("delete: %w", err)
+		}
 		// ProvisionAgent's worktree-mode layout nests an agent's worktree at
 		// agentDir/workspace — for the creator of a shared branch (the
 		// ProvisionAgent attach-to-existing-worktree case), this is the SAME
@@ -396,6 +435,9 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 			for _, e := range entries {
 				if e.Name() == "workspace" {
 					continue
+				}
+				if err := guard.check(filepath.Join(agentDir, e.Name())); err != nil {
+					return branchDeleted, fmt.Errorf("delete: %w", err)
 				}
 				if err := util.RemoveAllSafe(filepath.Join(agentDir, e.Name())); err != nil {
 					return branchDeleted, fmt.Errorf("failed to remove agent directory entry: %w", err)
@@ -426,6 +468,9 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 	// which enters the user namespace where the mapped UIDs are accessible.
 	if externalAgentDir != "" {
 		if _, err := os.Stat(externalAgentDir); err == nil {
+			if err := guard.check(externalAgentDir); err != nil {
+				return branchDeleted, fmt.Errorf("delete: %w", err)
+			}
 			util.Debugf("delete: removing external agent state dir: %s", externalAgentDir)
 			if err := util.RemoveAllSafe(externalAgentDir); err != nil {
 				util.Debugf("delete: standard removal failed, trying podman unshare: %v", err)
@@ -1163,6 +1208,14 @@ func PreflightResolve(ctx context.Context, opts api.StartOptions) error {
 
 // resolveProjectRoot determines the project root directory on this broker.
 // Used for resolving relative --workspace paths against the project's logical root.
+// plainProjectWorkspaceSource is the directory a plain non-git project's
+// agents mount as their workspace (ProvisionAgent's Case 3 fallback): the
+// directory that holds the project directory. DeleteAgentFiles protects it
+// from removal through the same function.
+func plainProjectWorkspaceSource(projectDir string) string {
+	return filepath.Dir(projectDir)
+}
+
 func resolveProjectRoot(settings *config.VersionedSettings, projectDir string) string {
 	if settings != nil && settings.WorkspacePath != "" {
 		return settings.WorkspacePath
@@ -1731,7 +1784,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 				return "", "", nil, fmt.Errorf("failed to create workspace directory: %w", err)
 			}
 		} else {
-			workspaceSource = filepath.Dir(projectDir)
+			workspaceSource = plainProjectWorkspaceSource(projectDir)
 		}
 	}
 

@@ -139,6 +139,11 @@ func (m *AgentManager) removeNFSAgentWorkspace(ctx context.Context, projectPath,
 	if real, err := filepath.EvalSymlinks(agentDir); err != nil || real != agentDir {
 		return agentDir, fmt.Errorf("workspace_storage nfs: %s is not a plain directory on the export; left in place", agentDir)
 	}
+	// The agent directory is the agent's; the project's shared checkout
+	// next to it is never removed (agentFilesGuard).
+	if err := newAgentFilesGuard(agentName, []string{resolvedHostBase}, []string{agentDir}, []string{filepath.Join(resolvedHostBase, rel)}).check(agentDir); err != nil {
+		return agentDir, fmt.Errorf("workspace_storage nfs: %w", err)
+	}
 	if err := provision.RemoveAgentWorkspace(ctx, agentDir, nfsAgentDirLockWait); err != nil {
 		return agentDir, err
 	}
