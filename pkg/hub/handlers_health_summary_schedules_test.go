@@ -84,7 +84,7 @@ func TestHandleHealthSummary_FailingSchedulesListed(t *testing.T) {
 	createHealthSchedule(t, s, p.ID, "recovered", ranAt, "an error", "")
 	createHealthSchedule(t, s, p.ID, "never-run", ranAt)
 	paused := createHealthSchedule(t, s, p.ID, "paused", ranAt, "an error")
-	require.NoError(t, s.UpdateScheduleStatus(context.Background(), paused.ID, store.ScheduleStatusPaused))
+	require.NoError(t, s.UpdateScheduleStatus(context.Background(), paused.ID, store.ScheduleStatusPaused, store.ScheduleStatusReasonNone))
 
 	rr := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
