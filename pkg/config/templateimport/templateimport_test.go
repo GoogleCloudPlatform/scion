@@ -808,6 +808,86 @@ func TestCopyScionTemplate_ForceOverwrite(t *testing.T) {
 	assert.FileExists(t, filepath.Join(destDir, "scion-agent.yaml"))
 }
 
+func TestCopyScionTemplate_SameDirectory(t *testing.T) {
+	for _, spelling := range []string{"same_path", "relative_source", "symlinked_parent"} {
+		for _, force := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/force=%t", spelling, force), func(t *testing.T) {
+				base := t.TempDir()
+				dest := filepath.Join(base, "templates", "existing")
+				require.NoError(t, os.MkdirAll(filepath.Join(dest, "home"), 0755))
+				files := map[string]string{
+					"scion-agent.yaml":                 "schema_version: \"1\"\nmodel: original-model\n",
+					filepath.Join("home", "CLAUDE.md"): "Keep these instructions.\n",
+				}
+				for name, content := range files {
+					require.NoError(t, os.WriteFile(filepath.Join(dest, name), []byte(content), 0644))
+				}
+
+				src := dest
+				switch spelling {
+				case "relative_source":
+					cwd, err := os.Getwd()
+					require.NoError(t, err)
+					src, err = filepath.Rel(cwd, dest)
+					require.NoError(t, err)
+				case "symlinked_parent":
+					alias := filepath.Join(base, "linked-templates")
+					require.NoError(t, os.Symlink(filepath.Dir(dest), alias))
+					src = filepath.Join(alias, filepath.Base(dest))
+				}
+
+				path, err := CopyScionTemplate(src, dest, force)
+				assert.Error(t, err)
+				assert.Empty(t, path)
+				for name, want := range files {
+					got, err := os.ReadFile(filepath.Join(dest, name))
+					assert.NoError(t, err)
+					assert.Equal(t, want, string(got))
+				}
+			})
+		}
+	}
+}
+
+func TestCopyScionTemplate_MissingSource(t *testing.T) {
+	for _, force := range []bool{false, true} {
+		t.Run(fmt.Sprintf("force=%t", force), func(t *testing.T) {
+			base := t.TempDir()
+			source := filepath.Join(base, "missing")
+			dest := filepath.Join(base, "existing")
+			require.NoError(t, os.MkdirAll(dest, 0755))
+			configPath := filepath.Join(dest, "scion-agent.yaml")
+			content := "schema_version: \"1\"\nmodel: original-model\n"
+			require.NoError(t, os.WriteFile(configPath, []byte(content), 0644))
+
+			path, err := CopyScionTemplate(source, dest, force)
+			assert.Error(t, err)
+			assert.Empty(t, path)
+			got, err := os.ReadFile(configPath)
+			assert.NoError(t, err)
+			assert.Equal(t, content, string(got))
+		})
+	}
+}
+
+func TestWriteTemplate_ScionSelfImport(t *testing.T) {
+	templatesDir := t.TempDir()
+	source := filepath.Join(templatesDir, "existing")
+	require.NoError(t, os.MkdirAll(source, 0755))
+	configPath := filepath.Join(source, "scion-agent.yaml")
+	content := "schema_version: \"1\"\nmodel: original-model\n"
+	require.NoError(t, os.WriteFile(configPath, []byte(content), 0644))
+	agent, err := ParseScionTemplate(source)
+	require.NoError(t, err)
+
+	path, err := WriteTemplate(agent, templatesDir, true)
+	assert.Error(t, err)
+	assert.Empty(t, path)
+	got, err := os.ReadFile(configPath)
+	assert.NoError(t, err)
+	assert.Equal(t, content, string(got))
+}
+
 func TestWriteTemplate_ScionFormat(t *testing.T) {
 	// Create source scion template
 	srcDir := t.TempDir()
