@@ -746,7 +746,7 @@ func TestRenewalDriver_NonAdvancingUntilNeverLoops(t *testing.T) {
 // conduitScopeOfTest, conduitAuthorizeActionTestHook and
 // conduitRouteCanRenewTest.
 func TestConduitTestSeamsNeverSetInProduction(t *testing.T) {
-	seams := map[string]bool{"AuthzClock": true, "conduitScopeOfTest": true, "conduitAuthorizeActionTestHook": true, "conduitRouteCanRenewTest": true}
+	seams := map[string]bool{"AuthzClock": true, "conduitScopeOfTest": true, "conduitAuthorizeActionTestHook": true, "conduitRouteCanRenewTest": true, "withoutStreamRenewer": true}
 	for _, dir := range []string{".", filepath.Join("..", "..", "cmd")} {
 		files, err := filepath.Glob(filepath.Join(dir, "*.go"))
 		require.NoError(t, err)
