@@ -33,6 +33,7 @@ import {
   BROKER_FILTERS,
   HEALTH_READ_PERMISSION,
   failingChecks,
+  healthProblem,
   matchesBrokerFilter,
   parseBrokerFilter,
   type BrokerFilter,
@@ -287,10 +288,11 @@ export class ScionPageBrokersArea extends LitElement {
   private renderHealth(broker: RuntimeBroker): TemplateResult {
     const h = this.health?.get(broker.id);
     if (!h) return html`<span class="meta-text">–</span>`;
+    if (!healthProblem(h)) return html`<span class="health-ok">ok</span>`;
     const failing = failingChecks(h);
-    if (failing.length === 0) return html`<span class="health-ok">ok</span>`;
-    return html`<span class="health-warn" title=${failing.join(', ')}
-      ><sl-icon name="exclamation-triangle"></sl-icon> ${failing.length}</span
+    const text = failing.length > 0 ? String(failing.length) : h.status || 'problem';
+    return html`<span class="health-warn" title=${failing.join(', ') || (h.status ?? '')}
+      ><sl-icon name="exclamation-triangle"></sl-icon> ${text}</span
     >`;
   }
 

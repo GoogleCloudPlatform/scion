@@ -20,6 +20,7 @@ import { describe, it, expect } from 'vitest';
 
 import {
   failingChecks,
+  healthProblem,
   matchesBrokerFilter,
   needsAttention,
   parseBrokerFilter,
@@ -64,6 +65,13 @@ describe('broker area filters', () => {
     expect(matchesBrokerFilter(broker({}), 'attention', { checks: { nfs: 'degraded' } })).toBe(
       true
     );
+  });
+
+  it('a self-reported degraded or unhealthy status is a problem even with no failing check', () => {
+    expect(healthProblem({ status: 'unhealthy', checks: {} })).toBe(true);
+    expect(healthProblem({ status: 'degraded' })).toBe(true);
+    expect(healthProblem({ status: 'healthy', checks: { runtime: 'available' } })).toBe(false);
+    expect(needsAttention(broker({}), { status: 'unhealthy' })).toBe(true);
   });
 
   it('lists failing checks sorted, and parses ?filter=', () => {

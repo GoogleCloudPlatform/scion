@@ -51,6 +51,9 @@ import './broker-area-agents.js';
 import './broker-area-health.js';
 import './broker-area-configure.js';
 
+/** Parallel project reads for the Default-for-project marker. */
+const DEFAULTS_CONCURRENCY = 4;
+
 export type BrokerAreaTab = 'overview' | 'agents' | 'health' | 'configure';
 
 /** Parses ?tab=; anything unknown is "overview". */
@@ -160,20 +163,27 @@ export class ScionPageBrokerAreaDetail extends LitElement {
     }
   }
 
-  /** Marks the projects whose default Runtime Broker is this broker. */
+  /**
+   * Marks the projects whose default Runtime Broker is this broker: one GET per
+   * project, at most DEFAULTS_CONCURRENCY at a time (the providers listing does not
+   * carry the default; adding it there is a hub follow-up).
+   */
   private async loadDefaults(): Promise<void> {
-    const results = await Promise.allSettled(
-      this.projects.map(async (p) => {
-        const res = await fetch(`/api/v1/projects/${p.projectId}`, { credentials: 'include' });
-        if (!res.ok) return null;
-        const project = (await res.json()) as { id?: string; defaultRuntimeBrokerId?: string };
-        return project.defaultRuntimeBrokerId === this.brokerId ? p.projectId : null;
-      })
-    );
+    const queue = this.projects.map((p) => p.projectId);
     const ids = new Set<string>();
-    for (const r of results) {
-      if (r.status === 'fulfilled' && r.value) ids.add(r.value);
-    }
+    const worker = async (): Promise<void> => {
+      for (let id = queue.shift(); id !== undefined; id = queue.shift()) {
+        try {
+          const res = await fetch(`/api/v1/projects/${id}`, { credentials: 'include' });
+          if (!res.ok) continue;
+          const project = (await res.json()) as { defaultRuntimeBrokerId?: string };
+          if (project.defaultRuntimeBrokerId === this.brokerId) ids.add(id);
+        } catch {
+          // A project that cannot be read simply gets no marker.
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: DEFAULTS_CONCURRENCY }, () => worker()));
     this.defaultFor = ids;
   }
 
@@ -217,14 +227,29 @@ export class ScionPageBrokerAreaDetail extends LitElement {
     window.history.replaceState(window.history.state, '', url.toString());
   }
 
-  private onBrokerUpdated(e: CustomEvent<Partial<RuntimeBroker>>): void {
+  /** Configure saved and re-read the broker: the fresh record replaces the row. */
+  private onBrokerUpdated(e: CustomEvent<RuntimeBroker>): void {
     if (!this.broker) return;
-    this.broker = { ...this.broker, ...e.detail };
+    this.broker = e.detail;
+    stateManager.seedBrokers([this.broker]);
     dispatchPageTitle(this, this.broker.name || this.brokerId, 'Brokers');
   }
 
   private onSettingsUpdated(e: CustomEvent<BrokerSettingsResponse>): void {
     this.settings = e.detail;
+  }
+
+  /**
+   * A deep link to ?tab=health: the Health tab exists only once the health load
+   * resolves, after the first render, so show it then.
+   */
+  override updated(changed: Map<PropertyKey, unknown>): void {
+    if (changed.has('healthAvailable') && this.healthAvailable && this.tab === 'health') {
+      const group = this.shadowRoot?.querySelector('sl-tab-group') as
+        | (HTMLElement & { show?: (panel: string) => void })
+        | null;
+      group?.show?.('health');
+    }
   }
 
   private getStatusVariant(status: string): 'success' | 'warning' | 'danger' | 'neutral' {

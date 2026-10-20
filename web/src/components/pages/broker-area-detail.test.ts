@@ -18,9 +18,10 @@
  * V3 and V4: the Brokers area detail page (broker UI Option A, slice A1).
  * The Health tab appears only with hub.health.read and a readable summary;
  * Configure only with the broker's update or delete capability; Unregister
- * only with delete. A PATCH from Configure is merged into the page's
- * broker: the new name shows, and fields the PATCH response lacks (such as
- * hostedByThisServer) are kept.
+ * only with delete. After a PATCH, Configure re-reads the broker and the
+ * page takes that record: the new name shows in the header and the form,
+ * hostedByThisServer (carried by GET) stays, and cleared labels and GCP
+ * fields stay cleared.
  */
 
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
@@ -64,6 +65,8 @@ let broker: RuntimeBroker;
 let summaryStatus = 200;
 let summaryItems: { id: string }[] = [];
 let patchResponse: Partial<RuntimeBroker> = {};
+/** What GET returns after a PATCH (the stored record); null = unchanged. */
+let afterPatch: RuntimeBroker | null = null;
 let fetchMock: ReturnType<typeof vi.fn>;
 const mounted: HTMLElement[] = [];
 
@@ -97,9 +100,11 @@ describe('scion-page-broker-area-detail', () => {
     summaryStatus = 200;
     summaryItems = [];
     patchResponse = {};
+    afterPatch = null;
     fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       const id = broker.id;
       if (url === `/api/v1/runtime-brokers/${id}` && init?.method === 'PATCH') {
+        if (afterPatch) broker = afterPatch;
         return jsonResponse(patchResponse);
       }
       if (url === `/api/v1/runtime-brokers/${id}`) return jsonResponse(broker);
@@ -182,10 +187,11 @@ describe('scion-page-broker-area-detail', () => {
     const el = await mount({ ...FLAT_K8S, _capabilities: { actions: ['read', 'update'] } });
     const cfg = configure(el)! as Page & { name: string };
     await cfg.updateComplete;
-    // The PATCH response carries no hostedByThisServer (the hub returns the
-    // plain broker record there).
+    // The PATCH response is the plain record (no hostedByThisServer); the
+    // re-read GET carries it.
     const { hostedByThisServer: _omit, ...plain } = FLAT_K8S;
     patchResponse = { ...plain, name: 'renamed' };
+    afterPatch = { ...FLAT_K8S, name: 'renamed', _capabilities: { actions: ['read', 'update'] } };
     cfg.name = 'renamed';
     await cfg.updateComplete;
     (cfg.shadowRoot!.querySelector('sl-button.save-identity') as HTMLElement).click();
@@ -198,6 +204,43 @@ describe('scion-page-broker-area-detail', () => {
     expect(header?.getAttribute('heading')).toBe('renamed');
     const marker = el.shadowRoot!.querySelector('scion-detail-header sl-icon.hosted-marker');
     expect(marker).not.toBeNull();
+    const cfgAfter = configure(el)!;
+    await cfgAfter.updateComplete;
+    const nameInput = cfgAfter.shadowRoot!.querySelector('sl-input[name="name"]') as HTMLElement & {
+      value: string;
+    };
+    expect(nameInput.value).toBe('renamed');
+  });
+
+  it('Configure PATCH: cleared labels and SA email stay cleared after the save', async () => {
+    const start = {
+      ...LEGACY,
+      labels: { team: 'a' },
+      gcp_host_service_account_email: 'sa@p.iam.gserviceaccount.com',
+      _capabilities: { actions: ['read', 'update'] },
+    } as RuntimeBroker;
+    const el = await mount(start);
+    const cfg = configure(el)! as Page & { labelsText: string; saEmail: string };
+    await cfg.updateComplete;
+    expect(cfg.labelsText).toBe('team=a');
+    // The hub omits empty labels and SA fields from both PATCH and GET.
+    patchResponse = { ...LEGACY };
+    afterPatch = { ...LEGACY, _capabilities: { actions: ['read', 'update'] } } as RuntimeBroker;
+    cfg.labelsText = '';
+    cfg.saEmail = '';
+    await cfg.updateComplete;
+    (cfg.shadowRoot!.querySelector('sl-button.save-identity') as HTMLElement).click();
+    await settle(el);
+
+    const patchCall = fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH');
+    expect(JSON.parse(String(patchCall![1].body))).toEqual({
+      labels: {},
+      gcpHostServiceAccountEmail: '',
+    });
+    const after = configure(el)! as Page & { labelsText: string; saEmail: string };
+    await after.updateComplete;
+    expect(after.labelsText).toBe('');
+    expect(after.saEmail).toBe('');
   });
 
   it('Configure: the registration hint on flat rows only, and the instance key', async () => {

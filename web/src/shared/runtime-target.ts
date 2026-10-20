@@ -217,9 +217,15 @@ export function placementRows(
   const t = presentation?.target;
   if (!t) return [];
   const rows: DisplayRow[] = [];
-  push(rows, 'Node selector', sortedPairs(t.nodeSelector));
+  // Defensive (the payload is JSON from the Hub): a node selector only when it is a plain object,
+  // tolerations only when they are objects.
+  const ns = t.nodeSelector;
+  if (ns && typeof ns === 'object' && !Array.isArray(ns)) {
+    push(rows, 'Node selector', sortedPairs(ns));
+  }
   const tolerations = Array.isArray(t.tolerations) ? t.tolerations : [];
-  push(rows, 'Tolerations', tolerations.map(tolerationLabel).join('; '));
+  const objects = tolerations.filter((x) => !!x && typeof x === 'object' && !Array.isArray(x));
+  push(rows, 'Tolerations', objects.map(tolerationLabel).join('; '));
   push(rows, 'Runtime class', t.runtimeClassName);
   return rows;
 }

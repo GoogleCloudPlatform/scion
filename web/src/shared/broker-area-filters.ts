@@ -53,15 +53,26 @@ export function failingChecks(health: BrokerHealthInfo | null | undefined): stri
 }
 
 /**
+ * Whether a self-reported health is a problem: the broker reports itself
+ * degraded or unhealthy, or a check fails. The same rule as the health
+ * dashboard's table (a status that is not healthy is never shown as ok); kept
+ * here because shared/ code does not import page components.
+ */
+export function healthProblem(health: BrokerHealthInfo | null | undefined): boolean {
+  if (health?.status === 'degraded' || health?.status === 'unhealthy') return true;
+  return failingChecks(health).length > 0;
+}
+
+/**
  * Whether a broker needs attention: it is offline or degraded, or (when its
- * health is known) at least one check fails.
+ * health is known) its self-reported health is a problem.
  */
 export function needsAttention(
   broker: Pick<RuntimeBroker, 'status'>,
   health?: BrokerHealthInfo | null
 ): boolean {
   if (broker.status === 'offline' || broker.status === 'degraded') return true;
-  return failingChecks(health).length > 0;
+  return healthProblem(health);
 }
 
 /** Parses a ?filter= value; anything unknown is "all". */

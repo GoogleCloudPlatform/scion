@@ -41,8 +41,11 @@ const BROKER = {
   _capabilities: { actions: ['read'] },
 };
 
-export async function setupHub(page: Page, options: { flatBrokers: boolean }): Promise<void> {
-  const { flatBrokers } = options;
+export async function setupHub(
+  page: Page,
+  options: { flatBrokers: boolean; canReadHealth?: boolean }
+): Promise<void> {
+  const { flatBrokers, canReadHealth = false } = options;
 
   await page.addInitScript((enabled: boolean) => {
     window.__SCION_FEATURES__ = { 'hub.flat_runtime_brokers': enabled };
@@ -82,7 +85,38 @@ export async function setupHub(page: Page, options: { flatBrokers: boolean }): P
     route.fulfill({ json: { complete: true } })
   );
   await page.route('**/api/v1/auth/admin-status', (route) =>
-    route.fulfill({ json: { isAdmin: false, isSuperAdmin: false, permissions: [] } })
+    route.fulfill({
+      json: {
+        isAdmin: canReadHealth,
+        isSuperAdmin: false,
+        permissions: canReadHealth ? ['hub.health.read'] : [],
+      },
+    })
+  );
+  await page.route('**/api/v1/admin/health/summary', (route) =>
+    canReadHealth
+      ? route.fulfill({
+          json: {
+            runtime_brokers: {
+              items: [
+                {
+                  id: BROKER_ID,
+                  name: BROKER.name,
+                  version: '1.0.0',
+                  status: 'online',
+                  last_heartbeat: '2026-10-20T00:00:00Z',
+                  runtime: null,
+                  workspace_storage: { backend: 'local' },
+                  health: { status: 'healthy', checks: { runtime: 'available' } },
+                  agents: { running: 0, attention: 0 },
+                },
+              ],
+              total: 1,
+              truncated: false,
+            },
+          },
+        })
+      : route.fulfill({ status: 403, json: { error: { code: 'forbidden', message: 'no' } } })
   );
   await page.route('**/api/v1/runtime-brokers', (route) =>
     route.fulfill({ json: { brokers: [BROKER], totalCount: 1 } })

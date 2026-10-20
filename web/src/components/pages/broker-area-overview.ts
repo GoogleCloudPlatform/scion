@@ -29,14 +29,9 @@ import type {
   BrokerSettingsResponse,
   RuntimeBroker,
 } from '../../shared/types.js';
+import { effectiveLimitText, limitSourceLabel } from '../../shared/broker-capacity.js';
 import { brokerAreaStyles } from '../shared/broker-area-styles.js';
 import '../shared/broker-runtime-target-card.js';
-
-/** The effective agent limit as text: "unlimited", a number or "unknown". */
-export function effectiveLimitText(value: number | null | undefined): string {
-  if (value === null || value === undefined) return 'unknown';
-  return value === 0 ? 'unlimited' : String(value);
-}
 
 @customElement('scion-broker-area-overview')
 export class ScionBrokerAreaOverview extends LitElement {
@@ -57,7 +52,8 @@ export class ScionBrokerAreaOverview extends LitElement {
           <h2>Capacity</h2>
         </div>
         <p class="tab-note">
-          Max concurrent agents: ${effectiveLimitText(effective.value)}
+          Max concurrent agents: ${effectiveLimitText(effective.value)} (from
+          ${limitSourceLabel(effective.source)})
           ${effective.count === undefined || effective.count === null
             ? nothing
             : html`· ${effective.count} counted now`}

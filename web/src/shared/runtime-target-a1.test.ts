@@ -31,6 +31,8 @@ import {
 import type { PresentedToleration, RuntimeTargetPresentation } from './types.js';
 import { fullPresentation } from './__fixtures__/runtime-target-presentation.js';
 
+type Tol = PresentedToleration;
+
 const k8s = { id: 'rt-1', type: 'kubernetes', displayName: 'Cluster A' };
 const docker = { id: 'rt-2', type: 'docker' };
 
@@ -97,6 +99,18 @@ describe('placementRows', () => {
       { label: 'Node selector', value: 'cloud.google.com/gke-nodepool=agents, disk/type=ssd' },
       { label: 'Tolerations', value: 'dedicated=agents:NoSchedule' },
       { label: 'Runtime class', value: 'gvisor' },
+    ]);
+  });
+
+  it('skips a non-object toleration entry and a non-object node selector', () => {
+    const p = fullPresentation();
+    p.target = {
+      ...p.target!,
+      nodeSelector: 'ab' as unknown as Record<string, string>,
+      tolerations: [null, 'x', { key: 'gpu', operator: 'Exists' }] as unknown as Tol[],
+    };
+    expect(placementRows(k8s, p)).toEqual([
+      { label: 'Tolerations', value: 'gpu Exists (any effect)' },
     ]);
   });
 

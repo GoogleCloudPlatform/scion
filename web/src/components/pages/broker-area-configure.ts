@@ -27,8 +27,10 @@
  * - Danger zone: Unregister (DELETE), gated on the broker's delete
  *   capability.
  *
- * After a PATCH the tab fires `broker-updated` with the response body, and
- * the page merges it into its broker.
+ * After a successful PATCH the tab re-reads the broker (GET) and fires
+ * `broker-updated` with that record, which the page takes as its broker. The
+ * PATCH response is not merged: it omits cleared (empty) labels and GCP
+ * fields, so a merge would keep the old values.
  */
 
 import { LitElement, html, css, nothing, type PropertyValues } from 'lit';
@@ -40,7 +42,7 @@ import { apiFetch, extractApiError } from '../../client/api.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 import { showToast } from '../../utils/toast.js';
 import { brokerAreaStyles } from '../shared/broker-area-styles.js';
-import { effectiveLimitText } from './broker-area-overview.js';
+import { effectiveLimitText, limitSourceLabel } from '../../shared/broker-capacity.js';
 
 /** The neutral hint shown on registration-managed fields of a flat broker. */
 export const REGISTRATION_HINT = 'Set by the broker on registration.';
@@ -208,10 +210,14 @@ export class ScionBrokerAreaConfigure extends LitElement {
       if (!res.ok) {
         throw new Error(await extractApiError(res, 'Failed to save the broker'));
       }
-      const updated = (await res.json()) as Partial<RuntimeBroker>;
+      const fresh = await apiFetch(`/api/v1/runtime-brokers/${this.broker.id}`);
+      if (!fresh.ok) {
+        throw new Error(await extractApiError(fresh, 'Saved; reload the page to see the change'));
+      }
+      const updated = (await fresh.json()) as RuntimeBroker;
       this.formBrokerId = '';
       this.dispatchEvent(
-        new CustomEvent<Partial<RuntimeBroker>>('broker-updated', {
+        new CustomEvent<RuntimeBroker>('broker-updated', {
           detail: updated,
           bubbles: true,
           composed: true,
@@ -408,7 +414,10 @@ export class ScionBrokerAreaConfigure extends LitElement {
               @sl-input=${(e: Event) => (this.capacityValue = (e.target as HTMLInputElement).value)}
             ></sl-input>`
           : nothing}
-        <p class="tab-note">Effective limit: ${effectiveLimitText(effective.value)}.</p>
+        <p class="tab-note effective-limit">
+          Effective limit: ${effectiveLimitText(effective.value)} (from
+          ${limitSourceLabel(effective.source)}).
+        </p>
         ${canEdit
           ? html`<sl-button
               class="save-capacity"

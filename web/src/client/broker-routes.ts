@@ -74,7 +74,6 @@ export const AREA_BROKER_ROUTES: readonly BrokerRouteConfig[] = [
  * `enabled` is the value of the hub.flat_runtime_brokers experiment.
  */
 export function resolveBrokerRoute(path: string, enabled: boolean): BrokerRouteConfig | null {
-  let routes = AREA_BROKER_ROUTES;
-  if (!enabled) routes = LEGACY_BROKER_ROUTES;
+  const routes = enabled ? AREA_BROKER_ROUTES : LEGACY_BROKER_ROUTES;
   return routes.find((r) => r.pattern.test(path)) ?? null;
 }

@@ -62,4 +62,11 @@ test.describe('hub.flat_runtime_brokers on', () => {
     await expect(page.locator(`${NEW_DETAIL} sl-tab[panel="overview"]`)).toHaveCount(1);
     expect(await page.locator(OLD_DETAIL).count()).toBe(0);
   });
+
+  test('a deep link to ?tab=health opens the Health tab after health loads', async ({ page }) => {
+    await setupHub(page, { flatBrokers: true, canReadHealth: true });
+    await page.goto(`/brokers/${BROKER_ID}?tab=health`, { waitUntil: 'domcontentloaded' });
+    await expect(page.locator(`${NEW_DETAIL} sl-tab[panel="health"]`)).toHaveCount(1);
+    await expect(page.locator(`${NEW_DETAIL} sl-tab[panel="health"][active]`)).toHaveCount(1);
+  });
 });
