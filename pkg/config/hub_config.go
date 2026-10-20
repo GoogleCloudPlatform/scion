@@ -19,6 +19,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/url"
@@ -278,15 +279,121 @@ func PersistentHubID() string {
 		return id
 	}
 
-	if err := os.WriteFile(filePath, []byte(id+"\n"), 0600); err != nil {
+	if stored, err := persistHubIDOnce(filePath, id); err != nil {
 		slog.Warn("hub_id: failed to persist hub_id; future hostname changes may re-namespace secrets",
 			"path", filePath, "error", err)
+	} else if stored != id {
+		// Another process persisted an id first; use it.
+		return stored
 	} else {
 		slog.Info("hub_id: persisted auto-generated hub_id for workstation stability",
 			"hub_id", id, "path", filePath)
 	}
 
 	return id
+}
+
+// persistHubIDOnce writes id to path unless another process has already
+// written a non-empty id there, and returns the id that is now persisted.
+// It runs under the settings lock for path's directory (LockSettingsDir), so
+// two first runs agree on one id even where hard links are not supported or
+// an earlier interrupted write left an empty file. The content is written
+// to a temporary file and then linked into place (where hard links are not
+// supported, the file is created exclusively instead), so a reader never
+// sees a partial file in the usual case; an existing empty file is replaced
+// atomically. PersistentHubID, its only caller, never holds the settings
+// lock.
+func persistHubIDOnce(path, id string) (string, error) {
+	dir := filepath.Dir(path)
+	lock, err := LockSettingsDir(dir)
+	if err != nil {
+		return "", err
+	}
+	defer lock.Unlock()
+
+	if stored, err := readStoredHubID(path); err != nil || stored != "" {
+		return stored, err
+	}
+	data := []byte(id + "\n")
+	if _, err := os.Lstat(path); err == nil {
+		// An empty file from an earlier interrupted write: replace it.
+		if err := writeFileAtomicMode(path, data, 0600); err != nil {
+			return "", err
+		}
+		return id, nil
+	}
+	tmp, err := createTempFile(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return "", err
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return "", err
+	}
+	if err := tmp.Chmod(0600); err != nil {
+		_ = tmp.Close()
+		return "", err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return "", err
+	}
+	if err := tmp.Close(); err != nil {
+		return "", err
+	}
+	err = linkFile(tmpName, path)
+	if err != nil && !errors.Is(err, fs.ErrExist) {
+		// No hard links here: create the file exclusively instead.
+		err = createFileExclusive(path, data, 0600)
+	}
+	if errors.Is(err, fs.ErrExist) {
+		// Written meanwhile by a writer outside the lock (a hand edit):
+		// keep what is there.
+		return readStoredHubID(path)
+	}
+	if err != nil {
+		return "", err
+	}
+	return id, syncDir(dir)
+}
+
+// readStoredHubID returns the trimmed id in the hub id file at path, or ""
+// when the file is missing or empty.
+func readStoredHubID(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(data)), nil
+}
+
+// linkFile is os.Link. It is a variable so tests can simulate a file
+// system without hard links.
+var linkFile = os.Link
+
+// createFileExclusive writes data to a new file at path, failing with an
+// error wrapping fs.ErrExist if path already exists.
+func createFileExclusive(path string, data []byte, mode os.FileMode) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return err
+	}
+	return f.Close()
 }
 
 // HubIDEnvVar is the environment equivalent of server.hub.hub_id. Set, it
@@ -2371,49 +2478,6 @@ func GetServerConfigPath(dir string) string {
 // MarshalV1ServerConfig marshals a V1ServerConfig to YAML bytes.
 func MarshalV1ServerConfig(v1 *V1ServerConfig) ([]byte, error) {
 	return yamlv3.Marshal(v1)
-}
-
-// MergeServerIntoSettings merges a V1ServerConfig into the settings.yaml file
-// in the given directory under the "server" key.
-func MergeServerIntoSettings(dir string, v1 *V1ServerConfig) error {
-	settingsPath := filepath.Join(dir, "settings.yaml")
-
-	// Load existing settings.yaml if it exists
-	var raw map[string]interface{}
-	if data, err := os.ReadFile(settingsPath); err == nil {
-		if err := yamlv3.Unmarshal(data, &raw); err != nil {
-			return fmt.Errorf("failed to parse existing settings.yaml: %w", err)
-		}
-	}
-	if raw == nil {
-		raw = make(map[string]interface{})
-	}
-
-	// Marshal the V1ServerConfig to get it as a map
-	serverData, err := yamlv3.Marshal(v1)
-	if err != nil {
-		return fmt.Errorf("failed to marshal server config: %w", err)
-	}
-
-	var serverMap interface{}
-	if err := yamlv3.Unmarshal(serverData, &serverMap); err != nil {
-		return fmt.Errorf("failed to unmarshal server config: %w", err)
-	}
-
-	raw["server"] = serverMap
-
-	// Ensure schema_version is set
-	if _, ok := raw["schema_version"]; !ok {
-		raw["schema_version"] = "1"
-	}
-
-	// Write back
-	newData, err := yamlv3.Marshal(raw)
-	if err != nil {
-		return fmt.Errorf("failed to marshal settings: %w", err)
-	}
-
-	return os.WriteFile(settingsPath, newData, 0644)
 }
 
 // loadServerConfigFile loads server config from a directory's server.yaml file.

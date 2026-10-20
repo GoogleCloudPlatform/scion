@@ -592,7 +592,7 @@ func assertDirUntouched(t *testing.T, dir, content string) {
 	}
 	entries, _ := os.ReadDir(dir)
 	for _, e := range entries {
-		if e.Name() != "settings.yaml" {
+		if e.Name() != "settings.yaml" && e.Name() != settingsLockFileName {
 			t.Errorf("unexpected file %s written", e.Name())
 		}
 	}
@@ -682,22 +682,43 @@ func TestLegacySettingsTopLevelKeys_NoEmbeddedFields(t *testing.T) {
 	}
 }
 
-// scion broker deregister holds LockSettingsFile while it calls
-// DeleteHubConnection for a legacy file, so DeleteHubConnection must not
-// take the (non-reentrant) lock itself.
-func TestDeleteHubConnection_CallableUnderSettingsLock(t *testing.T) {
+// scion broker deregister holds the settings lock while it removes the
+// entry from a legacy file, so it calls DeleteHubConnectionLocked, which
+// must not take the (non-reentrant) lock again.
+func TestDeleteHubConnectionLocked_CallableUnderSettingsLock(t *testing.T) {
 	dir := carryTestDir(t, "settings.yaml", legacyWithV1KeysYAML)
-	unlock := LockSettingsFile()
-	defer unlock()
+	lock := mustLockSettingsDir(t, dir)
+	defer lock.Unlock()
+	done := make(chan error, 1)
+	go func() { done <- DeleteHubConnectionLocked(lock, "hub-prod") }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("DeleteHubConnectionLocked: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("DeleteHubConnectionLocked blocked on the settings lock its caller holds")
+	}
+	assertV1KeysKept(t, readSettingsMap(t, filepath.Join(dir, "settings.yaml")))
+}
+
+// DeleteHubConnection takes the settings lock itself: while another writer
+// holds it, the file is not touched.
+func TestDeleteHubConnection_WaitsForSettingsLock(t *testing.T) {
+	dir := carryTestDir(t, "settings.yaml", legacyWithV1KeysYAML)
+	lock := mustLockSettingsDir(t, dir)
 	done := make(chan error, 1)
 	go func() { done <- DeleteHubConnection(dir, "hub-prod", false) }()
 	select {
 	case err := <-done:
-		if err != nil {
-			t.Fatalf("DeleteHubConnection: %v", err)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("DeleteHubConnection blocked on the settings lock its caller holds")
+		lock.Unlock()
+		t.Fatalf("DeleteHubConnection ran while the settings lock was held (err=%v)", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	assertDirUntouched(t, dir, legacyWithV1KeysYAML)
+	lock.Unlock()
+	if err := <-done; err != nil {
+		t.Fatalf("DeleteHubConnection: %v", err)
 	}
 	assertV1KeysKept(t, readSettingsMap(t, filepath.Join(dir, "settings.yaml")))
 }
@@ -707,7 +728,7 @@ func TestDeleteHubConnection_CallableUnderSettingsLock(t *testing.T) {
 // backs up nor writes the file.
 func TestMigrateSettingsFile_ReadsUnderLock(t *testing.T) {
 	dir := carryTestDir(t, "settings.yaml", legacyWithV1KeysYAML)
-	unlock := LockSettingsFile()
+	unlock := mustLockSettingsDir(t, dir).Unlock
 	done := make(chan error, 1)
 	go func() {
 		_, err := MigrateSettingsFile(dir, false)
