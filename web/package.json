@@ -20,7 +20,7 @@
     "lint:fix": "eslint src --fix",
     "lint:e2e": "eslint e2e",
     "lint:e2e-perf": "eslint e2e-perf",
-    "test:build-scripts": "node --test scripts/clean-public-generated.test.mjs scripts/check-orphans.test.mjs",
+    "test:build-scripts": "node --test scripts/clean-public-generated.test.mjs scripts/check-orphans.test.mjs scripts/precompress.test.mjs",
     "test:e2e-perf": "node --test e2e-perf/lib.test.mjs e2e-perf/budgets/fixture.test.mjs",
     "test:e2e-support": "playwright test -c e2e/harness-selftest/playwright.config.ts",
     "format": "prettier --write \"src/**/*.{ts,tsx,css,json}\"",

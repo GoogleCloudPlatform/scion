@@ -115,7 +115,15 @@ var configListCmd = &cobra.Command{
 var configSetCmd = &cobra.Command{
 	Use:   "set <key> <value>",
 	Short: "Set a configuration value",
-	Args:  cobra.ExactArgs(2),
+	Long: `Set a configuration value in the project's own settings, or in the global
+settings (~/.scion/settings.yaml) with --global.
+
+A key the settings file would accept but never read is refused and the file is
+left unchanged: hub.token, hub.apiKey, hub.lastSyncedAt, bucket.* and
+hub_connections.* at either layer, and server.auth.* at the project layer (read
+only from the global settings). The value of a credential-like key (for example
+hub.brokerToken) is masked in the output.`,
+	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		key := args[0]
 		value := args[1]
@@ -129,6 +137,16 @@ var configSetCmd = &cobra.Command{
 			targetPath = projectDir
 		}
 
+		// Rejects keys that would be accepted and then never read at this
+		// layer, before any settings file is read or written. The root
+		// --global (or -g global) resolves the project to the global
+		// directory itself, which is the global layer. The error never
+		// contains the value.
+		layerGlobal := configGlobal || config.IsGlobalProjectDir(targetPath)
+		if err := config.ValidateConfigSetKey(key, layerGlobal); err != nil {
+			return err
+		}
+
 		if err := config.UpdateSetting(targetPath, key, value, configGlobal); err != nil {
 			return err
 		}
@@ -138,22 +156,33 @@ var configSetCmd = &cobra.Command{
 			scope = "global"
 		}
 
+		shown := configSetDisplayValue(key, value)
 		if isJSONOutput() {
 			return outputJSON(ActionResult{
 				Status:  "success",
 				Command: "config set",
-				Message: fmt.Sprintf("Updated %s setting '%s' to '%s'", scope, key, value),
+				Message: fmt.Sprintf("Updated %s setting '%s' to '%s'", scope, key, shown),
 				Details: map[string]interface{}{
 					"key":   key,
-					"value": value,
+					"value": shown,
 					"scope": scope,
 				},
 			})
 		}
 
-		fmt.Printf("Updated %s setting '%s' to '%s'\n", scope, key, value)
+		fmt.Printf("Updated %s setting '%s' to '%s'\n", scope, key, shown)
 		return nil
 	},
+}
+
+// configSetDisplayValue is the value "config set" prints after a write: the
+// value itself, or a mask for a credential key (config.IsSecretSettingKey).
+// An empty value (which clears the key) is shown as is.
+func configSetDisplayValue(key, value string) string {
+	if value != "" && config.IsSecretSettingKey(key) {
+		return "********"
+	}
+	return value
 }
 
 var configGetCmd = &cobra.Command{

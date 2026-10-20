@@ -27,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/spf13/cobra"
 )
@@ -188,7 +189,7 @@ With --global, it initializes in the user's home folder.`,
 			if projectID == "" {
 				projectID = config.GenerateProjectID()
 			}
-			if err := config.UpdateSetting(targetDir, "project_id", projectID, false); err != nil {
+			if err := config.UpdateSetting(targetDir, projectkeys.ConfigProjectIDKey, projectID, false); err != nil {
 				if !isJSONOutput() {
 					fmt.Printf("Warning: failed to save project_id: %v\n", err)
 				}

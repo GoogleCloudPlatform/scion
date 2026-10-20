@@ -48,7 +48,7 @@ var catalogResourceOperations = []OperationSpec{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills/{id}", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills/{id}/versions", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills/{id}/versions/{vid}", Method: "GET"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills/{id}/download", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills/{id}/download", Method: "GET", Response: ResponseCredential},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills/{id}/resolve", Method: "GET"},
 			// A file read without signature parameters; a signed read is
 			// skill.file.signedread.
@@ -70,7 +70,7 @@ var catalogResourceOperations = []OperationSpec{
 		Domain:      "skill",
 		Description: "Create a skill in a project named by the request body. A user access token needs skill:create on a boundary that contains the project",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills", Method: "POST", Variant: "scope=project"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills", Method: "POST", Variant: "scope=project", Response: ResponseCredential},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
@@ -94,9 +94,9 @@ var catalogResourceOperations = []OperationSpec{
 			// handleSkillByID (skill_handlers.go) dispatches on r.Method:
 			// PATCH, not PUT.
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills/{id}", Method: "PATCH"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills/{id}/versions", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills/{id}/versions", Method: "POST", Response: ResponseCredential},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills/{id}/versions/{vid}/deprecate", Method: "POST"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills/{id}/upload", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills/{id}/upload", Method: "POST", Response: ResponseCredential},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills/{id}/finalize", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills/{id}/files/{path}", Method: "PUT"},
 		},
@@ -207,7 +207,7 @@ var catalogResourceOperations = []OperationSpec{
 		Description: "Read a template, its download URLs, its storage validation and its files. A record the caller may not read answers as not found",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/templates/{id}", Method: "GET"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/templates/{id}/download", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/templates/{id}/download", Method: "GET", Response: ResponseCredential},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/templates/{id}/validate", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/templates/{id}/files", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/templates/{id}/files/{path}", Method: "GET"},
@@ -228,7 +228,7 @@ var catalogResourceOperations = []OperationSpec{
 		Domain:      "template",
 		Description: "Create a template in the global, project or caller's own user scope the request body names. A user-scope create refuses a federated caller (requireProfileWriter)",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/templates", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/templates", Method: "POST", Response: ResponseCredential},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
@@ -251,7 +251,7 @@ var catalogResourceOperations = []OperationSpec{
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/templates/{id}", Method: "PUT"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/templates/{id}", Method: "PATCH"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/templates/{id}/upload", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/templates/{id}/upload", Method: "POST", Response: ResponseCredential},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/templates/{id}/finalize", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/templates/{id}/files", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/templates/{id}/files/{path}", Method: "PUT"},
@@ -329,7 +329,7 @@ var catalogResourceOperations = []OperationSpec{
 		Description: "Read a harness configuration, its download URLs, its storage validation, its image status and its files. A record the caller may not read answers as not found",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/harness-configs/{id}", Method: "GET"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/harness-configs/{id}/download", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/harness-configs/{id}/download", Method: "GET", Response: ResponseCredential},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/harness-configs/{id}/validate", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/harness-configs/{id}/image-status", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/harness-configs/{id}/files", Method: "GET"},
@@ -351,7 +351,7 @@ var catalogResourceOperations = []OperationSpec{
 		Domain:      "harnessconfig",
 		Description: "Create a harness configuration in the global, project or caller's own user scope the request body names; a user-scope config's scope and owner are the caller. A user-scope harness config refuses a federated caller (requireProfileWriter)",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/harness-configs", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/harness-configs", Method: "POST", Response: ResponseCredential},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
@@ -374,7 +374,7 @@ var catalogResourceOperations = []OperationSpec{
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/harness-configs/{id}", Method: "PUT"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/harness-configs/{id}", Method: "PATCH"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/harness-configs/{id}/upload", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/harness-configs/{id}/upload", Method: "POST", Response: ResponseCredential},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/harness-configs/{id}/finalize", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/harness-configs/{id}/check-image", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/harness-configs/{id}/files", Method: "POST"},
@@ -436,7 +436,7 @@ var catalogResourceOperations = []OperationSpec{
 		Domain:      "skill",
 		Description: "Create a skill in the global catalog (global or core scope). The check is skill.create_global on a collection-level request at the hub scope, so a user access token needs skill:create_global on a hub boundary",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills", Method: "POST", Variant: "scope=global"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills", Method: "POST", Variant: "scope=global", Response: ResponseCredential},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
@@ -496,7 +496,7 @@ var catalogResourceOperations = []OperationSpec{
 		Domain:      "skill",
 		Description: "Resolve skill:// references against the hub catalog. Each candidate is checked for skill read; a candidate the caller may not read answers as not found",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills/resolve", Method: "POST", Variant: "ref=skill"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills/resolve", Method: "POST", Variant: "ref=skill", Response: ResponseCredential},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
@@ -516,7 +516,7 @@ var catalogResourceOperations = []OperationSpec{
 		Domain:      "skill",
 		Description: "Resolve gh:// references with a project named by the request body, using that project's GitHub credentials. The caller needs skill read on the project, so a user access token needs skill:read on a boundary that contains the project; a refused reference answers forbidden",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills/resolve", Method: "POST", Variant: "ref=gh,project=named"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills/resolve", Method: "POST", Variant: "ref=gh,project=named", Response: ResponseCredential},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
@@ -536,7 +536,7 @@ var catalogResourceOperations = []OperationSpec{
 		Domain:      "skill",
 		Description: "Resolve gh:// references from public repositories with no project named; the hub fetches them and writes its resolution cache. A user access token needs skill:read on the global catalog, on a hub boundary; a refused reference answers forbidden",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills/resolve", Method: "POST", Variant: "ref=gh,project=none"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills/resolve", Method: "POST", Variant: "ref=gh,project=none", Response: ResponseCredential},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
@@ -789,7 +789,7 @@ var catalogResourceOperations = []OperationSpec{
 		Domain:      "skill",
 		Description: "Create a skill in the caller's own user scope; the scope and owner are the caller. A user access token needs skill:create on a hub boundary",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills", Method: "POST", Variant: "scope=user"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills", Method: "POST", Variant: "scope=user", Response: ResponseCredential},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},

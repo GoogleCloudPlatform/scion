@@ -202,11 +202,13 @@ jobs:
       # The build must not write output into public/ (Vite's publicDir copies
       # it into the next build), and every .js in dist/client/assets must be
       # referenced by the Vite manifest. Also runs the node:test suites of the
-      # build helper scripts.
+      # build helper scripts; REQUIRE_BUILD=1 makes the precompress suite's
+      # real-build checks (sibling decoding, byte budgets) fail instead of
+      # skip if the build output is missing.
       - name: Check Web Build Orphans
         working-directory: ./web
         run: |
-          npm run test:build-scripts
+          REQUIRE_BUILD=1 npm run test:build-scripts
           test ! -e public/assets || { echo "public/assets must not exist after the build (#3842)"; exit 1; }
           npm run check:orphans
 
