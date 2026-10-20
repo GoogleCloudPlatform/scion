@@ -206,8 +206,18 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 		}
 		// A failed start of a provisioned agent returns it to rest, as a
 		// synchronous failed start does (ptone/scion#4669, design D-c "Run
-		// intent").
-		s.settleFailedStartLaunch(ctx, &updated)
+		// intent"). Only on the report that ended the launch (end reason
+		// failed): a failed report that refines a launch the reaper had
+		// already ended (timed_out/lost, settled then) must not settle
+		// again, since a newer start may hold the intent now; it only
+		// restores the message shape.
+		if updated.LaunchEndReason == store.LaunchEndReasonFailed {
+			if s.settleFailedStartLaunch(ctx, &updated) {
+				defer s.publishAgentStatusByID(ctx, agentID)
+			}
+		} else {
+			s.reapplyStartLaunchFailureMessage(ctx, &updated)
+		}
 	}
 
 	// An applied succeeded report settles the run the launch started

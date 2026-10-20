@@ -820,6 +820,7 @@ var d9Priors = []d9Prior{
 	{"created memory (retry)", state.PhaseCreated, state.PhaseCreated},
 	{"provisioning memory (retry)", state.PhaseProvisioning, state.PhaseProvisioning},
 	{"suspended memory (retry)", state.PhaseSuspended, state.PhaseSuspended},
+	{"halted memory (retry)", state.PhaseHalted, state.PhaseHalted},
 }
 
 // newD9Agent makes the prior's row: a plain row in its phase, or an error
@@ -904,24 +905,119 @@ func TestAsyncStart_D9SyncAsyncParity(t *testing.T) {
 	}
 }
 
-// TestAsyncStart_ReapedProvisionedStartRests pins the reaper side of the
-// D-c run-intent hook: a start launch from a created memory row that the
-// launch reaper times out returns the agent to rest (run intent stopped,
-// the provisioned note), as an applied failed report does.
-func TestAsyncStart_ReapedProvisionedStartRests(t *testing.T) {
-	f, d := newAsyncStartFixture(t)
+// failAsyncStart starts a's async start (opted in, accepted) and fails it
+// with an applied failed report carrying step and message, and returns the
+// row the failure left.
+func failAsyncStart(t *testing.T, f *reconcileFixture, a *store.Agent, step, message string) *store.Agent {
+	t.Helper()
+	code, body := lifecycleWithBody(t, f, a.ID, "start", map[string]bool{"acceptAsyncLaunch": true})
+	require.Equal(t, http.StatusOK, code, body)
+	row := getAgent(t, f.s, a.ID)
+	require.Equal(t, store.LaunchStateActive, row.LaunchState)
+	rec := postLaunchReport(t, f.srv, f.brokerID, a.ID, f.brokerID, AgentLaunchReport{
+		LaunchID: row.LaunchID, InstanceID: "inst-1", State: "failed", ErrorCode: "boom", Step: step, Message: message,
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), store.LaunchReportResultApplied)
+	return getAgent(t, f.s, a.ID)
+}
+
+// reapAsyncStart starts a's async start with a launch budget of 1 ms and
+// runs the launch reaper until it ends the launch; returns the row.
+func reapAsyncStart(t *testing.T, f *reconcileFixture, d *asyncHubDispatcher, a *store.Agent) *store.Agent {
+	t.Helper()
 	d.launchTimeout = time.Millisecond
-	a := newD9Agent(t, f, "d9-reaped", d9Prior{"created memory", state.PhaseCreated, state.PhaseCreated})
+	defer func() { d.launchTimeout = 0 }()
 	code, body := lifecycleWithBody(t, f, a.ID, "start", map[string]bool{"acceptAsyncLaunch": true})
 	require.Equal(t, http.StatusOK, code, body)
 	require.Eventually(t, func() bool {
 		f.srv.launchReaperTickHandler()(context.Background())
 		return getAgent(t, f.s, a.ID).LaunchState == store.LaunchStateEnded
 	}, 10*time.Second, 50*time.Millisecond, "the reaper ends the launch past its deadline")
-	got := getAgent(t, f.s, a.ID)
+	return getAgent(t, f.s, a.ID)
+}
+
+// TestAsyncStart_ReapedProvisionedStartRests pins the reaper side of the
+// D-c run-intent hook, and review pm R2: a retry from a created memory row
+// whose previous async attempt failed (so the row carries that attempt's
+// "Start failed" message) and which the reaper times out returns the agent
+// to rest with a message naming the timeout, exactly once, not nesting the
+// previous failure.
+func TestAsyncStart_ReapedProvisionedStartRests(t *testing.T) {
+	f, d := newAsyncStartFixture(t)
+	a := newD9Agent(t, f, "d9-reaped", d9Prior{"created memory", state.PhaseCreated, state.PhaseCreated})
+	first := failAsyncStart(t, f, a, "pull", "image pull failed.")
+	require.Equal(t, "Start failed: pull: image pull failed. "+provisionedRestingNote, first.Message, "one period, from the failed report")
+	require.Equal(t, store.RunIntentStopped, first.RunIntent)
+
+	events := recordStatusEvents(t, f.srv)
+	got := reapAsyncStart(t, f, d, a)
 	assert.Equal(t, store.LaunchEndReasonTimedOut, got.LaunchEndReason)
 	assert.Equal(t, store.RunIntentStopped, got.RunIntent, "a reaped provisioned start returns the agent to rest")
-	assert.True(t, strings.HasSuffix(got.Message, provisionedRestingNote), "message: %q", got.Message)
+	assert.Equal(t, "Start failed: "+store.LaunchErrorLaunchTimeout+". "+provisionedRestingNote, got.Message,
+		"the reaped retry names its own timeout, once")
+	pub := events.forAgent(a.ID)
+	require.NotEmpty(t, pub)
+	last := pub[len(pub)-1]
+	assert.Equal(t, got.Message, last.Message, "watchers get the settled row, not the reaped copy")
+	assert.Equal(t, store.RunIntentStopped, last.RunIntent)
+}
+
+// TestAsyncStart_FailedReportWithoutMessageUsesLaunchError pins the
+// fallback (review pm O3): a failed report with no step and no message
+// leaves "Start failed: <its launch error>. <note>".
+func TestAsyncStart_FailedReportWithoutMessageUsesLaunchError(t *testing.T) {
+	f, _ := newAsyncStartFixture(t)
+	a := newD9Agent(t, f, "d9-nomsg", d9Prior{"created memory", state.PhaseCreated, state.PhaseCreated})
+	got := failAsyncStart(t, f, a, "", "")
+	assert.Equal(t, store.RunIntentStopped, got.RunIntent)
+	assert.Equal(t, "Start failed: boom. "+provisionedRestingNote, got.Message, "the launch error names the failure")
+}
+
+// TestAsyncStart_LateFailedReportAfterReap pins review pm R1 and O1: a
+// failed report that arrives after the reaper ended the start launch (the
+// store refines the ended launch and answers applied) never settles the
+// run intent again, so a newer start's intent is kept; while the reap's
+// settle still holds (intent stopped), the refined broker detail is put
+// back in the failure message shape.
+func TestAsyncStart_LateFailedReportAfterReap(t *testing.T) {
+	late := func(t *testing.T, f *reconcileFixture, row *store.Agent) {
+		t.Helper()
+		rec := postLaunchReport(t, f.srv, f.brokerID, row.ID, f.brokerID, AgentLaunchReport{
+			LaunchID: row.LaunchID, InstanceID: "inst-1", State: "failed", ErrorCode: "boom", Step: "pull", Message: "image pull failed",
+		})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		require.Contains(t, rec.Body.String(), store.LaunchReportResultApplied, "the store refines the ended launch")
+	}
+	t.Run("newer start intent kept", func(t *testing.T) {
+		f, d := newAsyncStartFixture(t)
+		a := newD9Agent(t, f, "d9-late-newer", d9Prior{"created memory", state.PhaseCreated, state.PhaseCreated})
+		row := reapAsyncStart(t, f, d, a)
+		require.Equal(t, store.RunIntentStopped, row.RunIntent)
+		// A newer start records its intent (as a synchronous start whose
+		// dispatch failed ambiguously leaves it).
+		fresh := getAgent(t, f.s, a.ID)
+		_, err := f.srv.recordRunIntent(context.Background(), fresh, store.RunIntentRunning)
+		require.NoError(t, err)
+		newer := getAgent(t, f.s, a.ID)
+		require.Equal(t, store.RunIntentRunning, newer.RunIntent)
+
+		late(t, f, row)
+		got := getAgent(t, f.s, a.ID)
+		assert.Equal(t, store.RunIntentRunning, got.RunIntent, "a late report for the old launch keeps the newer start's intent")
+		require.NotNil(t, got.RunIntentAt)
+		assert.True(t, got.RunIntentAt.Equal(*newer.RunIntentAt), "the newer intent's time is unchanged")
+	})
+	t.Run("message shape restored", func(t *testing.T) {
+		f, d := newAsyncStartFixture(t)
+		a := newD9Agent(t, f, "d9-late-shape", d9Prior{"created memory", state.PhaseCreated, state.PhaseCreated})
+		row := reapAsyncStart(t, f, d, a)
+		late(t, f, row)
+		got := getAgent(t, f.s, a.ID)
+		assert.Equal(t, store.RunIntentStopped, got.RunIntent)
+		assert.Equal(t, "Start failed: pull: image pull failed. "+provisionedRestingNote, got.Message,
+			"the refined detail is put back in the failure message shape")
+	})
 }
 
 // TestAsyncStart_CreateEndpointCreatedStaysSync pins design D-b's phase

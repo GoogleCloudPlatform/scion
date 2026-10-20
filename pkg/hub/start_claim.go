@@ -685,21 +685,23 @@ func startDidNotHappen(err error) bool {
 // whose start definitely did not happen to its resting state: run intent
 // goes back to stopped, compare-and-set on the intent the start recorded at
 // intentAt, and only when that wins the message says why. A newer start or
-// stop since keeps its intent and gets no message.
-func (s *Server) settleFailedProvisionedStart(ctx context.Context, agentID string, intentAt time.Time, message string) {
+// stop since keeps its intent and gets no message. It reports whether the
+// intent was reverted.
+func (s *Server) settleFailedProvisionedStart(ctx context.Context, agentID string, intentAt time.Time, message string) bool {
 	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	reverted, err := s.store.RevertRunIntent(sctx, agentID, store.RunIntentRunning, intentAt, store.RunIntentStopped)
 	if err != nil {
 		slog.Warn("Failed provisioned start: intent revert failed", "agent_id", agentID, "error", err)
-		return
+		return false
 	}
 	if !reverted {
-		return
+		return false
 	}
 	if err := s.store.UpdateAgentStatus(sctx, agentID, store.AgentStatusUpdate{Message: message}); err != nil {
 		slog.Warn("Failed provisioned start: message write failed", "agent_id", agentID, "error", err)
 	}
+	return true
 }
 
 // settleFailedStartLaunch is the run-intent hook of a start launch's
@@ -709,30 +711,82 @@ func (s *Server) settleFailedProvisionedStart(ctx context.Context, agentID strin
 // (launch_prior_phase created or provisioning, which covers a retry from a
 // resume-memory row), it calls settleFailedProvisionedStart as the
 // synchronous failed start does (startAgentCore). The run intent returns to
-// stopped and the message, "Start failed: <the failure>. <the provisioned
-// note>", says why. a is the row the failure end wrote. It is the shared
-// call site for every start-launch failure end: the applied failed report,
-// the launch reaper's ends and any later failure branch (kr-5368 PR 2's
-// failure after running_observed reuses it). Start launches exist only
-// while hub.async_agent_start is on; one begun before the experiment was
-// turned off still settles here when it ends.
-func (s *Server) settleFailedStartLaunch(ctx context.Context, a *store.Agent) {
-	if a == nil || a.LaunchKind != store.LaunchKindStart || a.LaunchState != store.LaunchStateEnded || a.RunIntentAt == nil {
-		return
+// stopped and the message, startLaunchFailureMessage, says why. It reports
+// whether it settled.
+//
+// a is the row the failure end itself wrote, and the caller calls this only
+// on the write that ended the launch: an applied failed report that ended
+// an active launch (end reason failed), or a row the launch reaper ended.
+// Never on a later refine of an already-ended launch: the CAS key is the
+// row's current RunIntentAt, so a second call could revert a newer start's
+// intent. It is the shared call site for every start-launch failure end
+// (kr-5368 PR 2's failure after running_observed reuses it). Start launches
+// exist only while hub.async_agent_start is on; one begun before the
+// experiment was turned off still settles here when it ends.
+func (s *Server) settleFailedStartLaunch(ctx context.Context, a *store.Agent) bool {
+	if !isProvisionedStartLaunchEnd(a) || a.RunIntentAt == nil {
+		return false
+	}
+	return s.settleFailedProvisionedStart(ctx, a.ID, *a.RunIntentAt, startLaunchFailureMessage(a))
+}
+
+// isProvisionedStartLaunchEnd reports whether a's launch is a start launch
+// from a provisioned prior that ended in failure (failed, timed_out or
+// lost).
+func isProvisionedStartLaunchEnd(a *store.Agent) bool {
+	if a == nil || a.LaunchKind != store.LaunchKindStart || a.LaunchState != store.LaunchStateEnded {
+		return false
 	}
 	switch a.LaunchEndReason {
 	case store.LaunchEndReasonFailed, store.LaunchEndReasonTimedOut, store.LaunchEndReasonLost:
 	default:
-		return
+		return false
 	}
-	if prior := state.Phase(a.LaunchPriorPhase); prior != state.PhaseCreated && prior != state.PhaseProvisioning {
-		return
+	prior := state.Phase(a.LaunchPriorPhase)
+	return prior == state.PhaseCreated || prior == state.PhaseProvisioning
+}
+
+// startLaunchFailureMessage is the message a failed provisioned start
+// launch leaves, in the synchronous path's shape: "Start failed: <the
+// failure>. <provisionedRestingNote>". The failure is the launch's own end:
+// for a failed report, the message that report just wrote ("<step>:
+// <message>"; its launch error when it carried none); for a reaper end
+// (timed_out, lost), which writes no message, its launch error
+// (launch_timeout, broker_lost), never the row's older message (on a
+// memory-row retry that is the previous attempt's failure). A trailing
+// period is dropped so the text has one.
+func startLaunchFailureMessage(a *store.Agent) string {
+	failure := ""
+	if a.LaunchEndReason == store.LaunchEndReasonFailed {
+		failure = strings.TrimRight(strings.TrimSpace(a.Message), ".")
 	}
-	failure := a.Message
 	if failure == "" {
 		failure = a.LaunchError
 	}
-	s.settleFailedProvisionedStart(ctx, a.ID, *a.RunIntentAt, "Start failed: "+failure+". "+provisionedRestingNote)
+	return "Start failed: " + failure + ". " + provisionedRestingNote
+}
+
+// reapplyStartLaunchFailureMessage restores the failure message shape after
+// a failed report refined an already-ended provisioned start launch (the
+// reaper ended it first; review O1): the refine wrote the broker's detail
+// as the message, so it is rewritten as "Start failed: <detail>. <note>"
+// with a narrow message write, no intent change. Only while the run intent
+// is still stopped (the reap's settle won and nothing started since) and
+// the message is not already in that shape.
+func (s *Server) reapplyStartLaunchFailureMessage(ctx context.Context, a *store.Agent) {
+	if !isProvisionedStartLaunchEnd(a) || a.LaunchEndReason == store.LaunchEndReasonFailed ||
+		a.RunIntent != store.RunIntentStopped || strings.HasSuffix(a.Message, provisionedRestingNote) {
+		return
+	}
+	failure := strings.TrimRight(strings.TrimSpace(a.Message), ".")
+	if failure == "" {
+		failure = a.LaunchError
+	}
+	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if err := s.store.UpdateAgentStatus(wctx, a.ID, store.AgentStatusUpdate{Message: "Start failed: " + failure + ". " + provisionedRestingNote}); err != nil {
+		slog.Warn("Failed provisioned start: message write after a refined report failed", "agent_id", a.ID, "error", err)
+	}
 }
 
 // writeStartedStatus is startAgentCore's default post-start write: the
