@@ -191,7 +191,10 @@ func (s *AgentStore) applyLaunchReportEnded(ctx context.Context, ltx *launchTx, 
 			}
 			return store.LaunchReportAnswer{Result: store.LaunchReportResultCompleted, Changed: true}, updated, true, nil
 		}
-		if r.State == store.LaunchReportStateFailed {
+		// The run check comes first so that a report that can never apply
+		// (an older broker's, with no run ID, or another run's) costs no
+		// clock read; failedAfterRunningObservedApplies repeats it.
+		if r.State == store.LaunchReportStateFailed && r.RunID != "" && r.RunID == current.RunID {
 			// A failed report for the recorded run, from a broker that saw
 			// that run's Start fail, ends the launch failed when nothing
 			// else holds the row and the agent shows no sign that its
