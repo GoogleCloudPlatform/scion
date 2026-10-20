@@ -21,18 +21,26 @@
 
 import { describe, it, expect, afterEach } from 'vitest';
 
-import { attentionHref, type HealthAttentionItem } from './health-attention.js';
+import {
+  attentionHref,
+  truncateText,
+  SCHEDULE_ERROR_MAX_CHARS,
+  type HealthAttentionItem,
+  type HealthFailingSchedule,
+} from './health-attention.js';
 import './health-attention.js';
 import { hasInPageState } from '../../client/route-history.js';
 import { elementStyleRules } from './__fixtures__/css-rules.js';
 
 async function mount(
   items: HealthAttentionItem[] | null,
-  integrationsDetail = true
+  integrationsDetail = true,
+  failingSchedules: HealthFailingSchedule[] | null = null
 ): Promise<ShadowRoot> {
   const el = document.createElement('scion-health-attention');
   el.items = items;
   el.integrationsDetail = integrationsDetail;
+  el.failingSchedules = failingSchedules;
   document.body.appendChild(el);
   await el.updateComplete;
   return el.shadowRoot!;
@@ -197,6 +205,99 @@ describe('scion-health-attention', () => {
   });
 });
 
+const scheduleItem: HealthAttentionItem = {
+  severity: 'warning',
+  kind: 'schedule',
+  subject: { type: 'schedule', id: 'sc 1', name: 'nightly', project_id: 'p 1' },
+  message: 'Scheduled event alpha / nightly failed its last run',
+};
+
+const failingRow: HealthFailingSchedule = {
+  id: 'sc 1',
+  name: 'nightly',
+  project_id: 'p 1',
+  project_slug: 'alpha',
+  event_type: 'message',
+  target: 'worker',
+  run_count: 7,
+  error_count: 3,
+  last_failure_at: '2026-10-19T08:00:00Z',
+  last_error: 'schedule authority denied',
+};
+
+describe('scion-health-attention failing schedules', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('links a schedule item to its project schedules page and shows the detail line', async () => {
+    const root = await mount([scheduleItem], true, [failingRow]);
+    const li = root.querySelector('li[data-kind="schedule"]')!;
+    expect(li.querySelector('a')!.getAttribute('href')).toBe('/projects/p%201/schedules');
+    expect(li.querySelector('a')!.textContent).toBe(scheduleItem.message);
+    const detail = li.querySelector('.detail')!.textContent!;
+    expect(detail).toContain('Target: worker');
+    expect(detail).toContain('3 of 7 runs failed');
+    expect(detail).toContain('last failure ');
+    expect(li.querySelector('.last-error')!.textContent).toBe(
+      'Last error: schedule authority denied'
+    );
+  });
+
+  it('shows no detail line without a matching row', async () => {
+    const root = await mount([scheduleItem], true, []);
+    expect(root.querySelector('.detail')).toBeNull();
+    const none = await mount([scheduleItem], true, null);
+    expect(none.querySelector('.detail')).toBeNull();
+  });
+
+  it('omits the target and the last error when the row has none', async () => {
+    const root = await mount([scheduleItem], true, [
+      { ...failingRow, target: '', last_error: '', last_failure_at: null },
+    ]);
+    const detail = root.querySelector('.detail')!;
+    expect(detail.textContent!.trim()).toBe('3 of 7 runs failed');
+    expect(detail.querySelector('.last-error')).toBeNull();
+  });
+
+  it('shortens a long last error and keeps the full text in the title', async () => {
+    const long = 'e'.repeat(SCHEDULE_ERROR_MAX_CHARS + 40);
+    const root = await mount([scheduleItem], true, [{ ...failingRow, last_error: long }]);
+    const el = root.querySelector('.last-error')!;
+    expect(el.textContent).toBe('Last error: ' + 'e'.repeat(SCHEDULE_ERROR_MAX_CHARS) + '\u2026');
+    expect(el.getAttribute('title')).toBe(long);
+  });
+
+  it('renders markup in the last error and target as text, never as elements', async () => {
+    const markup = '<img src=x onerror="window.__scheduleErr=1"><b>bold</b>';
+    const root = await mount([scheduleItem], true, [
+      { ...failingRow, target: '<i>agent</i>', last_error: markup },
+    ]);
+    const detail = root.querySelector('.detail')!;
+    expect(detail.querySelector('img')).toBeNull();
+    expect(detail.querySelector('b')).toBeNull();
+    expect(detail.querySelector('i')).toBeNull();
+    expect(detail.textContent).toContain('Target: <i>agent</i>');
+    expect(root.querySelector('.last-error')!.textContent).toBe('Last error: ' + markup);
+    expect(root.querySelector('.last-error')!.getAttribute('title')).toBe(markup);
+    expect((window as unknown as { __scheduleErr?: number }).__scheduleErr).toBeUndefined();
+  });
+});
+
+describe('truncateText', () => {
+  it('keeps text at or under the limit', () => {
+    expect(truncateText('', 3)).toBe('');
+    expect(truncateText('abc', 3)).toBe('abc');
+  });
+
+  it('cuts by characters, never splitting one, and adds an ellipsis', () => {
+    expect(truncateText('abcd', 3)).toBe('abc\u2026');
+    expect(truncateText('\u{1F600}\u{1F600}\u{1F600}\u{1F600}', 2)).toBe(
+      '\u{1F600}\u{1F600}\u2026'
+    );
+  });
+});
+
 describe('attentionHref', () => {
   it('returns null for subjects without an ID or of other types', () => {
     for (const subject of [
@@ -207,6 +308,8 @@ describe('attentionHref', () => {
       { type: 'hub', id: 'x' },
       { type: 'dispatch', id: 'x' },
       { type: 'agents', id: 'x' },
+      { type: 'schedule', id: 'x' },
+      { type: 'schedules' },
     ]) {
       expect(attentionHref({ ...items[2]!, subject }, true)).toBeNull();
     }
@@ -216,6 +319,10 @@ describe('attentionHref', () => {
     expect(
       attentionHref({ ...items[0]!, subject: { type: 'hub', id: 'hub/a', name: 'a' } }, false)
     ).toBe('#hub-instance-hub%2Fa');
+  });
+
+  it('links a schedule to its project schedules page', () => {
+    expect(attentionHref(scheduleItem, false)).toBe('/projects/p%201/schedules');
   });
 
   it('links an integration only when the summary carries integration identity', () => {
