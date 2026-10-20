@@ -69,7 +69,7 @@ func listingServers(t *testing.T) map[string][2]*WebServer {
 		ws.assets = listingAssets()
 		ws.assetsDisk = ""
 		ws.hasAssets = ws.detectWebAssets()
-		ws.fingerprintedAssets = ws.loadFingerprintedAssets()
+		ws.fingerprintedAssets = fingerprintedAssetsOf(ws)
 		require.True(t, ws.hasAssets)
 		return ws
 	}
@@ -237,7 +237,7 @@ func TestFingerprintedAssets_StillLoadedFromManifest(t *testing.T) {
 			for i, ws := range servers {
 				// The hub reads the manifest from the asset source even
 				// though the manifest is no longer served.
-				fp := ws.loadFingerprintedAssets()
+				fp := fingerprintedAssetsOf(ws)
 				assert.Equal(t, map[string]bool{"/assets/view-QwErTyUi.js": true}, fp)
 				assert.True(t, ws.fingerprintedAssets["/assets/view-QwErTyUi.js"])
 

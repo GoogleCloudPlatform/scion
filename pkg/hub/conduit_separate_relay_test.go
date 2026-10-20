@@ -69,6 +69,10 @@ type separateRelayWorld struct {
 	// spawnPTY, when set, makes the agent serve pty streams with it.
 	spawnPTY func(context.Context, sconduit.PTYRequest) (sconduit.PTYProcess, error)
 
+	// authzClocks are the hubs' stream re-check clocks, by hub id ("hub-a",
+	// "hub-b"); each starts at the clock grants are minted on.
+	authzClocks map[string]*clock.Fake
+
 	mu          sync.Mutex
 	agentOpened []uint32 // ids of the streams opened on the agent's session
 }
@@ -96,6 +100,10 @@ type separateRelayOptions struct {
 	// agentWithoutRenewal makes the agent's Hello advertise no protocol
 	// features, as a sciontool without stream renewal does.
 	agentWithoutRenewal bool
+	// srvMod, when set, is applied to both hubs before they start external
+	// relay mode (after enforce), so a test can configure them without
+	// racing serving goroutines.
+	srvMod func(*Server)
 }
 
 // newSeparateRelayWorldWith is newSeparateRelayWorld with opts.
@@ -104,7 +112,7 @@ func newSeparateRelayWorldWith(t *testing.T, opts separateRelayOptions, mods ...
 	cf := newConduitFixture(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	w := &separateRelayWorld{release: make(chan struct{})}
+	w := &separateRelayWorld{release: make(chan struct{}), authzClocks: map[string]*clock.Fake{}}
 
 	// The app inside the agent: /events holds an event stream open until
 	// the test feeds it; everything else answers hello.
@@ -148,11 +156,15 @@ func newSeparateRelayWorldWith(t *testing.T, opts separateRelayOptions, mods ...
 		if opts.enforce {
 			enforceTargetDeadlines(srv)
 		}
+		if opts.srvMod != nil {
+			opts.srvMod(srv)
+		}
+		w.authzClocks[id] = clock.NewFake(cf.clock.Now())
 		require.NoError(t, srv.StartConduitExternal(ctx, ConduitExternalOptions{
 			InstanceID: id, PeerAuth: externalRelayAuth(t, id), Store: regStore,
 			// The clock also drives the stream re-check and its renewal
 			// driver, so it starts at the clock grants are minted on.
-			Registry: registry.New(regStore, registry.Config{}), Clock: clock.NewFake(cf.clock.Now()),
+			Registry: registry.New(regStore, registry.Config{}), Clock: w.authzClocks[id],
 			replayStore: replay,
 		}))
 	}

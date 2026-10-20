@@ -90,16 +90,21 @@ func (ts *conduitTunnelSession) openForRelay(ctx context.Context, rt *conduitExt
 	if err != nil {
 		return nil, nil, conduitTunnelOpenError(err)
 	}
-	return ts.mintRelayTunnel(ctx, log, sessionID, agent, kind, params, res)
+	// tunnel_recheck counts only as the forwarding relay lists it on this
+	// relay-peer-authenticated request, never from the client's body.
+	recheck := slices.Contains(in.Features, relay.HubFeatureTunnelRecheck)
+	return ts.mintRelayTunnel(ctx, log, sessionID, agent, kind, params, res, recheck)
 }
 
 // mintRelayTunnel mints the open grant for res, the target session the
 // router resolved, and builds the instruction to open the tunnel and the
-// success answer. A resolution that is not a relay-held session (external
-// relay mode resolves only to those; a nil session is treated the same way)
-// is an internal invariant breaking: it is logged at Warn and answered 500
-// internal error (contracts §2), before anything is minted.
-func (ts *conduitTunnelSession) mintRelayTunnel(ctx context.Context, log *slog.Logger, sessionID string, agent *store.Agent, kind string, params map[string]string, res router.Resolved) (*conduitTunnelResponse, *relay.HubTunnelOpen, error) {
+// success answer. recheck is whether the forwarding relay lists
+// relay.HubFeatureTunnelRecheck. A resolution that is not a relay-held
+// session (external relay mode resolves only to those; a nil session is
+// treated the same way) is an internal invariant breaking: it is logged at
+// Warn and answered 500 internal error (contracts §2), before anything is
+// minted.
+func (ts *conduitTunnelSession) mintRelayTunnel(ctx context.Context, log *slog.Logger, sessionID string, agent *store.Agent, kind string, params map[string]string, res router.Resolved, recheck bool) (*conduitTunnelResponse, *relay.HubTunnelOpen, error) {
 	rs, ok := relayHeldSession(res)
 	if !ok {
 		log.Warn("Conduit tunnel: external relay mode resolved a target that is not a relay-held session")
@@ -113,13 +118,30 @@ func (ts *conduitTunnelSession) mintRelayTunnel(ctx context.Context, log *slog.L
 	if ts.s.conduitTargetUpgradeRequired(ctx, ts.identity, renews, conduitRouteRelayTunnel, agent.ID) {
 		return nil, nil, conduitTunnelOpenError(errConduitAgentUpgradeRequired)
 	}
-	// A relay-held stream is renewed through the relay's re-check, which
-	// this hub does not serve yet: no renewal can be delivered on this
-	// route, so with enforce a stream to a renewal-capable target is
-	// refused here rather than left to end at its first deadline.
-	canRenew := false
+	// A relay-held tunnel is renewed through the forwarding relay's
+	// re-checks, so its grant is stamped for renewal only when that relay
+	// lists tunnel_recheck (design v2.21.46 §3.9, "Relay feature
+	// tunnel_recheck"; contracts dc2f4f22 §3). Decided here, after session
+	// resolution, and only for a target with stream_renewal.v2: with
+	// enforce an unlisted relay's tunnel is refused before any mint, so no
+	// jti is spent.
+	canRenew := recheck
 	if ts.s.conduitRenewalPathUnavailable(ctx, ts.identity, renews, canRenew, conduitRouteRelayTunnel, agent.ID) {
 		return nil, nil, conduitTunnelOpenError(errConduitStreamRenewalUnavailable)
+	}
+	if !canRenew && conduitStampsDeadline(ts.identity, renews) {
+		// off: served as before, with an unstamped grant (no via, scope
+		// or authz_until) and so no scheduling hints. A renewal-unsupported
+		// principal is left to the mint, which decides and counts it.
+		// The open is logged and counted with the cause, for a
+		// stream_renewal.v2 target only.
+		if _, unsupported := conduitRenewalUnsupportedPrincipal(ts.identity); !unsupported {
+			principalKind := conduitPrincipalKind(ts.identity)
+			log.Info("Conduit relay tunnel served unstamped: the forwarding relay does not re-check tunnels",
+				"route", conduitRouteRelayTunnel, "principal_kind", principalKind, "cause", conduitCauseRenewalRouteUnavailable)
+			ts.s.recordConduitOpenUnstampedCause(conduitRouteRelayTunnel, principalKind, conduitCauseRenewalRouteUnavailable)
+			renews = false
+		}
 	}
 	// The grant binds the row Resolve picked: its session, connection
 	// epoch and incarnation.
@@ -168,6 +190,12 @@ func (ts *conduitTunnelSession) mintRelayTunnel(ctx context.Context, log *slog.L
 	}
 	if claims != nil {
 		open.OpenJTI = claims.JTI
+		// Scheduling hints for the relay, copied from the claims just
+		// minted (never from the request): both or neither.
+		if !claims.AuthzUntil.IsZero() && claims.AuthzInterval > 0 {
+			open.AuthzUntil = claims.AuthzUntil.Unix()
+			open.AuthzIntervalS = int64(claims.AuthzInterval / time.Second)
+		}
 	}
 	log.Info("Conduit tunnel authorized for a relay-held session", "target_session_id", res.Record.SessionID, "owner_relay", res.Record.RelayInstanceID)
 	return &conduitTunnelResponse{

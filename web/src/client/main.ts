@@ -28,7 +28,7 @@ import type { AuthMeResponse, PageData, User } from '../shared/types.js';
 import { stateManager } from './state.js';
 import { debugLog } from './debug-log.js';
 import { setDocumentTitle } from './page-title.js';
-import { setInitialPageData, takeInitialPageData } from './ssr-page-data.js';
+import { readInitialPageData, setInitialPageData, takeInitialPageData } from './ssr-page-data.js';
 import { configureReadinessMarks, readinessNavigationStarted } from './readiness-marks.js';
 import { CHAT_DM_ROUTE, CHAT_SPACE_ROUTE, CHAT_THREAD_ROUTE } from './chat-routes.js';
 import { chatNotifications } from './chat-notifications.js';
@@ -1112,18 +1112,7 @@ async function init(): Promise<void> {
  * Retrieves initial page data from SSR-injected script tag
  */
 function getInitialData(): PageData | null {
-  const script = document.getElementById('__SCION_DATA__');
-  if (!script) {
-    console.warn('[Scion] No initial data found');
-    return null;
-  }
-
-  try {
-    return JSON.parse(script.textContent || '{}') as PageData;
-  } catch (e) {
-    console.error('[Scion] Failed to parse initial data:', e);
-    return null;
-  }
+  return readInitialPageData(document);
 }
 
 /** Fallback route for unmatched paths */

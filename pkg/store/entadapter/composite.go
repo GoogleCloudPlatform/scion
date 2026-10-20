@@ -891,6 +891,9 @@ func (c *CompositeStore) Migrate(ctx context.Context) error {
 	if err := c.BackfillGCPVerificationStatus(ctx); err != nil {
 		return err
 	}
+	if err := c.BackfillRuntimeBrokerGCPHostSource(ctx); err != nil {
+		return fmt.Errorf("runtime broker gcp host source backfill: %w", err)
+	}
 	if err := c.MigrateGitHubTokenInjectionMode(ctx); err != nil {
 		return fmt.Errorf("github token injection mode migration: %w", err)
 	}

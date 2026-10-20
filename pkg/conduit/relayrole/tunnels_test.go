@@ -389,8 +389,8 @@ func TestRoleTunnel_ReportsOpenTunnelsForCap(t *testing.T) {
 	}
 	var last relay.HubRPCRequest
 	f.hub.last("rpc", &last)
-	if len(last.Features) != 1 || last.Features[0] != relay.HubFeatureTunnels {
-		t.Fatalf("forwarded features %v, want [%s]", last.Features, relay.HubFeatureTunnels)
+	if len(last.Features) != 2 || last.Features[0] != relay.HubFeatureTunnels || last.Features[1] != relay.HubFeatureTunnelRecheck {
+		t.Fatalf("forwarded features %v, want [%s %s]", last.Features, relay.HubFeatureTunnels, relay.HubFeatureTunnelRecheck)
 	}
 }
 
