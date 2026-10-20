@@ -127,21 +127,28 @@ func TestRelayTunnel_RecheckListedStampedWithHints(t *testing.T) {
 
 // TestRelayTunnel_NonV2TargetNotGatedByRecheck: a target without
 // stream_renewal.v2 is not gated by tunnel_recheck. With enforce, a relay
-// that does not list the feature gets the tunnel served with an unstamped
-// grant, never the 503, and nothing is counted; with off it is not counted
-// as an unstamped open either. Each case has its own subtest, so each
-// fixture gets its own registry store (the test store is named after the
-// test).
+// that does not list the feature gets 409 agent_upgrade_required, reason
+// stream_renewal_unsupported, never the 503 stream_renewal_unavailable:
+// nothing is signed, the relay gets no instruction, and only the upgrade
+// refusal is counted. With off the tunnel is served with an unstamped
+// grant and is not counted as an unstamped open. Each case has its own
+// subtest, so each fixture gets its own registry store (the test store is
+// named after the test).
 func TestRelayTunnel_NonV2TargetNotGatedByRecheck(t *testing.T) {
 	t.Run("enforce", func(t *testing.T) {
 		o := &openSetup{enforce: true, targetNoRenewal: true}
 		f := newRelayTunnelFixture(t, o)
+		gateLines := captureRelayGateLogs(t)
 
 		o.keys.arm(f.cf.srv)
 		resp, open := f.post(t)
-		requireUnstampedRelayTunnel(t, f, resp, open)
-		assert.Empty(t, o.rec.list(), "no stream_renewal_unavailable refusal")
+		require.Equal(t, int32(http.StatusConflict), resp.GetStatus(), string(resp.GetBody()))
+		requireUpgradeRequiredBody(t, resp.GetBody())
+		assert.Nil(t, open, "no instruction to open the tunnel")
+		assert.Zero(t, o.keys.reads.Load(), "nothing was signed")
+		assert.Equal(t, []string{upgradeRefusal(conduitRouteRelayTunnel)}, o.rec.list(), "the upgrade refusal, not stream_renewal_unavailable")
 		assert.Empty(t, o.rec.unstampedList())
+		assert.Empty(t, gateLines(), "the relay gate is not reached")
 	})
 	t.Run("off", func(t *testing.T) {
 		o := &openSetup{targetNoRenewal: true}
