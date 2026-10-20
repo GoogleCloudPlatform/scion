@@ -67,6 +67,12 @@ func TestDirectoryTransfersSkipSpecialFiles(t *testing.T) {
 		return
 	}
 
+	// os.Args[0] may be relative and stop resolving after t.Chdir below.
+	testBinary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	for _, operation := range []string{"collect", "normalize"} {
 		for _, kind := range []string{"fifo", "socket", "symlink"} {
 			t.Run(operation+"/"+kind, func(t *testing.T) {
@@ -109,7 +115,7 @@ func TestDirectoryTransfersSkipSpecialFiles(t *testing.T) {
 				// process so a regression cannot hang or leak a goroutine.
 				ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 				defer cancel()
-				cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestDirectoryTransfersSkipSpecialFiles$", "-test.v")
+				cmd := exec.CommandContext(ctx, testBinary, "-test.run=^TestDirectoryTransfersSkipSpecialFiles$", "-test.v")
 				cmd.Env = append(os.Environ(), dirEnv+"="+dir, operationEnv+"="+operation)
 				output, err := cmd.CombinedOutput()
 				if ctx.Err() != nil {
