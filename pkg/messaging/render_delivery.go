@@ -266,6 +266,15 @@ func appendPlanLines(body string, plan []messages.AttachmentPlanEntry, paths boo
 	return body + "\n\n" + strings.Join(lines, "\n")
 }
 
+// Reasons a broker gives for an attachment that did not land in the
+// recipient's home (ptone/scion#4596): in the not-delivered line the agent
+// reads, and in the per-file outcomes the hub counts.
+const (
+	AttachmentReasonNotDownloaded = "could not be downloaded"
+	AttachmentReasonVerification  = "failed verification"
+	AttachmentReasonNotWritten    = "could not be written to your home"
+)
+
 // AttachmentNotDeliveredLine is the line a recipient reads for an
 // attachment that did not reach its home (ptone/scion#4596): what it is
 // (its name or inbox path, and size), why, and what to do. It names no

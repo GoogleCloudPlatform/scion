@@ -290,6 +290,9 @@ func (c *ControlChannelBrokerClient) MessageAgent(ctx context.Context, brokerID,
 	// the agent's home before delivering the text.
 	if wire := dispatchAttachmentsFromContext(ctx); len(wire) > 0 {
 		reqBody["attachments"] = wire
+		if days := dispatchRetentionFromContext(ctx); days > 0 {
+			reqBody["attachment_retention_days"] = days
+		}
 	}
 
 	body, err := json.Marshal(reqBody)

@@ -4627,7 +4627,17 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, project
 			go s.reportMessageFailure(connName, f)
 		})
 	}
+	// Attachments (ptone/scion#4596): their capabilities are redeemed now,
+	// at receipt, on a context detached from this request; the files are
+	// written into the agent's home right before the text is delivered.
+	inbox := s.startInboxDelivery(r.Header.Get("X-Scion-Hub-Connection"), id, req.MessageID, req.AttachmentRetentionDays, req.Attachments)
+	if inbox != nil {
+		msgCtx = agent.WithPreDelivery(msgCtx, inbox)
+	}
 	if err := mgr.Message(msgCtx, id, projectID, deliveryText, req.Interrupt); err != nil {
+		if inbox != nil {
+			inbox.Discard()
+		}
 		if strings.Contains(err.Error(), "not found") {
 			span.SetStatus(codes.Error, err.Error())
 			NotFound(w, "Agent")

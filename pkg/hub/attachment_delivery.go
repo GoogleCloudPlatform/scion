@@ -505,3 +505,34 @@ func (s *Server) noteDeferredAttachments(ctx context.Context, items []store.Mess
 		}
 	}
 }
+
+// InboxRetentionDays returns messaging.attachment_inbox_retention_days, sent
+// to the broker with a message's attachments so it prunes the agent's
+// inbox (ptone/scion#4596).
+func (d *attachmentDelivery) InboxRetentionDays() int {
+	if ops := d.s.GetOperationalSettings(); ops != nil {
+		return ops.AttachmentInboxRetentionDays()
+	}
+	return DefaultAttachmentInboxRetentionDays
+}
+
+// dispatchRetentionKey carries the inbox retention of one dispatch attempt.
+type dispatchRetentionKey struct{}
+
+// withDispatchRetention attaches the inbox retention to ctx.
+func withDispatchRetention(ctx context.Context, days int) context.Context {
+	if days <= 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, dispatchRetentionKey{}, days)
+}
+
+// dispatchRetentionFromContext returns the inbox retention attached with
+// withDispatchRetention, or 0.
+func dispatchRetentionFromContext(ctx context.Context) int {
+	if ctx == nil {
+		return 0
+	}
+	days, _ := ctx.Value(dispatchRetentionKey{}).(int)
+	return days
+}

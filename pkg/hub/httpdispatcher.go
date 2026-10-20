@@ -4110,6 +4110,9 @@ func (d *HTTPAgentDispatcher) DispatchAgentMessage(ctx context.Context, agent *s
 	structuredMsg = legacyAttachmentCopy(structuredMsg)
 	if d.attachmentIssuer != nil && structuredMsg != nil && len(structuredMsg.AttachmentPlan) > 0 {
 		ctx = withDispatchAttachments(ctx, d.attachmentIssuer.Issue(ctx, agent, agent.RuntimeBrokerID, structuredMsg.AttachmentPlan))
+		if r, ok := d.attachmentIssuer.(interface{ InboxRetentionDays() int }); ok {
+			ctx = withDispatchRetention(ctx, r.InboxRetentionDays())
+		}
 	}
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)

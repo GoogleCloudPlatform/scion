@@ -394,6 +394,11 @@ type Server struct {
 
 	stateDir string
 
+	// inbox holds the attachment delivery state (ptone/scion#4596): the
+	// spool root downloads are verified in, and the last inbox prune per
+	// agent.
+	inbox inboxState
+
 	// ownership is a flat instance's durable ownership record store
 	// (ownership.go); nil for a legacy Runtime Broker.
 	ownership *OwnershipStore
@@ -657,6 +662,9 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 			slog.Warn("Failed to initialize runtime broker state store", "error", err, "stateDir", srv.stateDir)
 		}
 	}
+	// Remove attachment spools a crash left behind, before any message is
+	// accepted (ptone/scion#4596).
+	srv.initInboxSpool()
 
 	// A host-bind instance of a host with a single NFS mount owner uses
 	// that owner's reconciler (registered requirement, shared status, one
