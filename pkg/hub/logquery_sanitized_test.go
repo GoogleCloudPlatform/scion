@@ -31,8 +31,8 @@ import (
 // as that same string, adding nothing, for both payload shapes the
 // Cloud Logging client can return.
 func TestConvertLogEntry_SanitizedErrorAttrPassesThrough(t *testing.T) {
-	const credentialShaped = "sk-live-0123456789abcdefABCDEF"
-	stored := logging.SanitizeText("request failed: env FOO_API_KEY=" + credentialShaped + " " +
+	const keyShaped = "sk-live-0123456789abcdefABCDEF"
+	stored := logging.SanitizeText("request failed: env FOO_API_KEY=" + keyShaped + " " +
 		strings.Repeat("output line\n", 150))
 	if !strings.Contains(stored, "FOO_API_KEY=[REDACTED]") || !strings.Contains(stored, "...[truncated, ") {
 		t.Fatalf("stored text is not sanitized and truncated: %q", stored)
@@ -60,8 +60,8 @@ func TestConvertLogEntry_SanitizedErrorAttrPassesThrough(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if strings.Contains(string(out), credentialShaped) {
-				t.Errorf("endpoint output holds the credential-shaped value: %s", out)
+			if strings.Contains(string(out), keyShaped) {
+				t.Errorf("endpoint output holds the key-shaped value: %s", out)
 			}
 		})
 	}

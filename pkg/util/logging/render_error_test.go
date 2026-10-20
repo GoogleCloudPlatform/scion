@@ -31,18 +31,18 @@ import (
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 )
 
-// credentialShapedValues are the values credentialShapedError embeds; no
+// keyShapedValues are the values keyShapedError embeds; no
 // sink may write any of them.
-var credentialShapedValues = []string{
+var keyShapedValues = []string{
 	"sk-live-0123456789abcdefABCDEF",
 	"hunter2-value",
 	"pw-value-123",
 	"eyJhbGciOiJIUzI1NiJ9",
 }
 
-// credentialShapedError returns an error whose text holds credential-shaped
+// keyShapedError returns an error whose text holds key-shaped
 // values and runs past MaxSanitizedTextBytes.
-func credentialShapedError() error {
+func keyShapedError() error {
 	return fmt.Errorf("request failed: %w", errors.New(
 		"env FOO_API_KEY=sk-live-0123456789abcdefABCDEF "+
 			`spec {"DB_PASSWORD": "hunter2-value"} `+
@@ -62,7 +62,7 @@ type nilPtrError struct{ msg string }
 func (e *nilPtrError) Error() string { return e.msg }
 
 // assertSanitizedText checks got is a sanitized, truncated rendering of
-// credentialShapedError.
+// keyShapedError.
 func assertSanitizedText(t *testing.T, field string, got any) {
 	t.Helper()
 	s, ok := got.(string)
@@ -79,10 +79,10 @@ func assertSanitizedText(t *testing.T, field string, got any) {
 	}
 }
 
-// assertNoCredentialValues checks out holds none of credentialShapedValues.
-func assertNoCredentialValues(t *testing.T, sink, out string) {
+// assertNoKeyShapedValues checks out holds none of keyShapedValues.
+func assertNoKeyShapedValues(t *testing.T, sink, out string) {
 	t.Helper()
-	for _, v := range credentialShapedValues {
+	for _, v := range keyShapedValues {
 		if strings.Contains(out, v) {
 			t.Errorf("%s output contains %q", sink, v)
 		}
@@ -92,10 +92,10 @@ func assertNoCredentialValues(t *testing.T, sink, out string) {
 // logEveryShape writes one record carrying an error as a pre-bound attr,
 // a record attr, a grouped attr and a LogValuer.
 func logEveryShape(h slog.Handler) {
-	slog.New(h).With("bound", credentialShapedError()).Error("op failed",
-		"error", credentialShapedError(),
-		slog.Group("detail", slog.Any("inner", credentialShapedError())),
-		"valuer", valuerError{credentialShapedError()})
+	slog.New(h).With("bound", keyShapedError()).Error("op failed",
+		"error", keyShapedError(),
+		slog.Group("detail", slog.Any("inner", keyShapedError())),
+		"valuer", valuerError{keyShapedError()})
 }
 
 // TestCloudLoggingSinks_RenderErrorsSanitized is the Cloud Logging
@@ -135,7 +135,7 @@ func TestCloudLoggingSinks_RenderErrorsSanitized(t *testing.T) {
 			if err != nil {
 				t.Fatalf("payload does not encode: %v", err)
 			}
-			assertNoCredentialValues(t, name, string(raw))
+			assertNoKeyShapedValues(t, name, string(raw))
 		})
 	}
 }
@@ -209,7 +209,7 @@ func TestStdoutSink_RenderErrorsSanitized(t *testing.T) {
 				t.Fatalf("detail = %#v, want a group object", rec["detail"])
 			}
 			assertSanitizedText(t, "detail.inner", detail["inner"])
-			assertNoCredentialValues(t, tc.name, buf.String())
+			assertNoKeyShapedValues(t, tc.name, buf.String())
 		})
 	}
 }
@@ -263,7 +263,7 @@ func TestOTelSink_RenderErrorsSanitized(t *testing.T) {
 	for k, v := range proc.attrs {
 		all.WriteString(k + "=" + v + "\n")
 	}
-	assertNoCredentialValues(t, "otel", all.String())
+	assertNoKeyShapedValues(t, "otel", all.String())
 }
 
 // TestDedicatedLoggerStdout_RenderErrorsSanitized is the stdout guard for
@@ -307,7 +307,7 @@ func TestDedicatedLoggerStdout_RenderErrorsSanitized(t *testing.T) {
 				assertSanitizedText(t, "bound", rec["bound"])
 				assertSanitizedText(t, "error", rec["error"])
 				assertSanitizedText(t, "valuer", rec["valuer"])
-				assertNoCredentialValues(t, name, buf.String())
+				assertNoKeyShapedValues(t, name, buf.String())
 			})
 		}
 	}

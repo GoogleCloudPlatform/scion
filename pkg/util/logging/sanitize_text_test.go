@@ -95,10 +95,10 @@ func TestSanitizeText_Truncates(t *testing.T) {
 // every key regex has exactly three groups (key, separator, value).
 func TestSanitizeText_KeyRegexGroups(t *testing.T) {
 	for name, re := range map[string]interface{ NumSubexp() int }{
-		"bare credential key":   textBareCredentialKeyRe,
-		"quoted credential key": textQuotedCredentialKeyRe,
-		"value key":             textValueKeyRe,
-		"key=value":             textKeyValueRe,
+		"bare key-name":   textBareCredentialKeyRe,
+		"quoted key-name": textQuotedCredentialKeyRe,
+		"value key":       textValueKeyRe,
+		"key=value":       textKeyValueRe,
 	} {
 		if n := re.NumSubexp(); n != 3 {
 			t.Errorf("%s regex has %d groups, want 3", name, n)

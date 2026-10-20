@@ -17,13 +17,14 @@ import (
 // TestDefaultSlogHandler_SanitizesErrorAttrs is the agent-log guard: an
 // error attribute logged through the default slog handler, as a record
 // attr or a WithAttrs-bound one, reaches agent.log sanitized and
-// truncated, with none of its credential-shaped values.
+// truncated, with none of its key-shaped values.
 func TestDefaultSlogHandler_SanitizesErrorAttrs(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "agent.log")
 	cleanup := setLogPathForTest(t, path)
 	defer cleanup()
+	origQuiet := quiet.Load()
 	SetQuiet(true)
-	defer SetQuiet(false)
+	defer SetQuiet(origQuiet)
 
 	err := fmt.Errorf("request failed: %w", errors.New(
 		"env FOO_API_KEY=sk-live-0123456789abcdefABCDEF "+

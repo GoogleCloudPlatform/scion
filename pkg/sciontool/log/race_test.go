@@ -145,6 +145,7 @@ func TestSetLogPathBeforeInitStillRunsLazyInit(t *testing.T) {
 	if h := slog.Default().Handler(); h == slog.DiscardHandler || !h.Enabled(context.Background(), slog.LevelDebug) {
 		t.Fatalf("slog default handler = %T, want the package's handler", h)
 	}
+	slog.Debug("slog check line")
 	mu.Lock()
 	gotPath := logPath
 	mu.Unlock()
@@ -157,5 +158,8 @@ func TestSetLogPathBeforeInitStillRunsLazyInit(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "first line") {
 		t.Fatalf("log file = %q, want it to contain the first line", data)
+	}
+	if !strings.Contains(string(data), "slog check line") {
+		t.Fatalf("log file = %q, want the slog check line (written through the default handler)", data)
 	}
 }
