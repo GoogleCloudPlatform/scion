@@ -78,6 +78,17 @@ func patternServesMethod(patternMethod, method string) bool {
 	return method == patternMethod || (patternMethod == http.MethodGet && method == http.MethodHead)
 }
 
+// visitorSubRouteListed reports whether visitorAdmittedSubRoutes has an
+// entry for pattern and method.
+func visitorSubRouteListed(pattern, method string) bool {
+	for _, sub := range visitorAdmittedSubRoutes {
+		if sub.Pattern == pattern && sub.Method == method {
+			return true
+		}
+	}
+	return false
+}
+
 // validateVisitorRoutes checks every route that lists VisitorMethods. A
 // visitor admitted by routeGuard still passes the route's classification
 // guard, so a list is accepted only on an authenticated or policy route,
@@ -85,8 +96,10 @@ func patternServesMethod(patternMethod, method string) bool {
 // (Session-only routes are hub-admin routes, so they are excluded too.)
 // Each method must be a known method, listed once, and served by the
 // pattern: a method-qualified pattern ("GET /x") serves only its method
-// (and HEAD for GET). It returns every violation, sorted by pattern; New
-// refuses to start on any.
+// (and HEAD for GET). On a subtree pattern (routePatternIsSubtree) each
+// listed method must also have an entry in visitorAdmittedSubRoutes for
+// the pattern, since admitVisitorSubRoute refuses every other sub-path. It
+// returns every violation, sorted by pattern; New refuses to start on any.
 func validateVisitorRoutes(table map[string]RouteMetadata) error {
 	patterns := make([]string, 0, len(table))
 	for p, meta := range table {
@@ -113,6 +126,9 @@ func validateVisitorRoutes(table map[string]RouteMetadata) error {
 			case qualified && !patternServesMethod(patternMethod, m):
 				errs = append(errs, fmt.Errorf("route %q (%s): visitor methods: method %q is not served by the pattern's method %q",
 					p, meta.RouteID, m, patternMethod))
+			case routePatternIsSubtree(p) && !visitorSubRouteListed(p, m):
+				errs = append(errs, fmt.Errorf("route %q (%s): visitor methods: method %q on a subtree pattern has no admitted sub-route",
+					p, meta.RouteID, m))
 			}
 			seen[m] = true
 		}
