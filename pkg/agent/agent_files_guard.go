@@ -15,12 +15,17 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 // ErrAgentFilesDeleteRefused is returned when an agent files delete would
@@ -121,7 +126,7 @@ func (g *agentFilesGuard) verifiedAgentRoot(root string) (string, bool, error) {
 	abs = filepath.Clean(abs)
 	anchor := ""
 	for _, a := range g.anchors {
-		if pathWithin(abs, a) && len(a) > len(anchor) {
+		if guardPathWithin(abs, a) && len(a) > len(anchor) {
 			anchor = a
 		}
 	}
@@ -155,19 +160,172 @@ func (g *agentFilesGuard) verifiedAgentRoot(root string) (string, bool, error) {
 	return real, true, nil
 }
 
-// check returns nil when path, an existing path about to be removed, lies
-// inside one of the agent's own directories (or one of extraAgentRoots,
-// directories this delete has already established are the agent's to
-// remove, verified against the anchors like the agent's own), and
-// ErrAgentFilesDeleteRefused otherwise. A refusal is logged.
-func (g *agentFilesGuard) check(path string, extraAgentRoots ...string) error {
+// check decides whether path, an existing path about to be removed, may be
+// removed: it must lie inside one of the agent's own directories (or one of
+// extraAgentRoots, directories this delete has already established are the
+// agent's to remove, verified against the anchors like the agent's own).
+// Otherwise it returns ErrAgentFilesDeleteRefused, and the refusal is
+// logged.
+//
+// On success it returns the path to remove: the real location of path's
+// parent directory joined with path's last element. The caller removes that
+// path, not path itself, so a symlink in a parent directory that changes
+// after the check cannot redirect the removal. The last element is kept as
+// it is, so a symlink there is unlinked, never followed. (Callers that hand
+// a path to git, such as git worktree remove, pass git's own path instead:
+// git looks the worktree up by the path it registered.)
+func (g *agentFilesGuard) check(path string, extraAgentRoots ...string) (string, error) {
 	if err := g.classify(path, extraAgentRoots); err != nil {
 		err = fmt.Errorf("%w %s for agent %s: %w", ErrAgentFilesDeleteRefused, path, g.agentName, err)
 		slog.Warn("Agent files delete refused; agent deletion never removes a shared project workspace",
 			"agent", g.agentName, "path", path, "error", err)
-		return err
+		return "", err
 	}
-	return nil
+	parent, err := resolveRealPath(filepath.Dir(path))
+	if err != nil {
+		err = fmt.Errorf("%w %s for agent %s: cannot resolve its directory: %w", ErrAgentFilesDeleteRefused, path, g.agentName, err)
+		slog.Warn("Agent files delete refused; agent deletion never removes a shared project workspace",
+			"agent", g.agentName, "path", path, "error", err)
+		return "", err
+	}
+	return filepath.Join(parent, filepath.Base(path)), nil
+}
+
+// agentProjectLayout is where an agent's project keeps the directories
+// DeleteAgentFiles and the guard work with.
+type agentProjectLayout struct {
+	// projectRoot is the project directory without a trailing .scion.
+	projectRoot string
+	// sharedBase is the worktree-per-agent shared base,
+	// <projectRoot>/workspace; sharedBaseIsRepo reports whether it holds a
+	// repository (.git as a directory or a file).
+	sharedBase       string
+	sharedBaseIsRepo bool
+	// repoRoot is the repository the project's worktrees belong to: the
+	// shared base when it is one, else the repository holding projectDir
+	// ("" when there is none).
+	repoRoot string
+	// externalAgentsRoot is the external agents root of a git project with
+	// split storage ("" when there is none).
+	externalAgentsRoot string
+}
+
+// resolveAgentProjectLayout resolves agentProjectLayout for projectDir.
+func resolveAgentProjectLayout(projectDir string) agentProjectLayout {
+	var l agentProjectLayout
+	// GetResolvedProjectDir may have appended .scion (e.g. hub-managed
+	// projects), so strip that suffix to match the path the workspace
+	// backend used during provisioning.
+	l.projectRoot = projectDir
+	if filepath.Base(projectDir) == config.DotScion {
+		l.projectRoot = filepath.Dir(projectDir)
+	}
+	l.sharedBase = filepath.Join(l.projectRoot, "workspace")
+	// Accept .git as either a directory (normal clone) or a file (gitdir
+	// pointer, e.g. if the base is itself a linked worktree/submodule) —
+	// existence is enough to identify a valid repo root. (upstream #351 review)
+	if _, err := os.Stat(filepath.Join(l.sharedBase, ".git")); err == nil {
+		l.sharedBaseIsRepo = true
+		l.repoRoot = l.sharedBase
+	} else if root, err := util.RepoRootDir(projectDir); err == nil {
+		// Passing projectDir (not its parent) is robust for both local
+		// projects (where projectDir is the repo root) and hub-managed
+		// projects (where it is the .scion subdir). MUST match the base
+		// used at sharer registration (ProvisionAgent).
+		l.repoRoot = root
+	}
+	if extDir, err := config.GetGitProjectExternalAgentsDir(projectDir); err == nil && extDir != "" {
+		l.externalAgentsRoot = extDir
+	}
+	return l
+}
+
+// projectAgentFilesGuard prepares the check for agentName's files in the
+// project at projectDir:
+//   - anchors: projectDir, the project root, the repository the project is
+//     in and the external agents root;
+//   - the agent's own directories: <projectDir>/agents/<name>, the external
+//     agent directory, the global project's per-agent workspace and the
+//     worktree-per-agent worktree, plus extraRoots (agent directories the
+//     caller resolved through provision's own resolver, such as the agent
+//     state directory and home); an extra root outside every anchor is
+//     anchored at its parent directory;
+//   - the project workspaces that are never removed: the project root as
+//     provision resolves it (resolveProjectRoot, with the project's
+//     effective settings), a plain project's mounted parent directory
+//     (plainProjectWorkspaceSource) and the repository.
+//
+// It fails closed: when the project directory is unknown or its settings
+// cannot be loaded, every check refuses.
+func projectAgentFilesGuard(ctx context.Context, projectDir, agentName string, extraRoots ...string) *agentFilesGuard {
+	if projectDir == "" {
+		return &agentFilesGuard{agentName: agentName, err: errors.New("the agent's project directory is unknown")}
+	}
+	l := resolveAgentProjectLayout(projectDir)
+	anchors := []string{projectDir, l.projectRoot, l.repoRoot, l.externalAgentsRoot}
+	roots := []string{filepath.Join(projectDir, "agents", agentName)}
+	if l.externalAgentsRoot != "" {
+		roots = append(roots, filepath.Join(l.externalAgentsRoot, agentName))
+	}
+	if config.IsGlobalProjectDir(projectDir) {
+		roots = append(roots, filepath.Join(projectDir, "workspace", agentName))
+	}
+	if l.sharedBaseIsRepo {
+		roots = append(roots, filepath.Join(l.sharedBase, "worktrees", agentName))
+	}
+	strong := append([]string(nil), anchors...)
+	for _, r := range extraRoots {
+		if r == "" {
+			continue
+		}
+		roots = append(roots, r)
+		anchored := false
+		for _, a := range strong {
+			if a != "" && guardPathWithin(filepath.Clean(r), filepath.Clean(a)) {
+				anchored = true
+				break
+			}
+		}
+		if !anchored {
+			anchors = append(anchors, filepath.Dir(r))
+		}
+	}
+	settings, _, settingsErr := config.LoadEffectiveSettingsFor(ctx, projectDir)
+	projectRoots := []string{l.repoRoot}
+	if settingsErr == nil {
+		projectRoots = append(projectRoots, resolveProjectRoot(settings, projectDir))
+	}
+	if !config.IsGlobalProjectDir(projectDir) {
+		projectRoots = append(projectRoots, plainProjectWorkspaceSource(projectDir))
+	}
+	g := newAgentFilesGuard(agentName, anchors, roots, projectRoots)
+	if settingsErr != nil && g.err == nil {
+		g.err = fmt.Errorf("cannot load the project settings to find its workspace: %w", settingsErr)
+	}
+	return g
+}
+
+// localAgentDirGuard prepares the check for an agent directory known only
+// by its path, agentsRoot/<name>: the agent root is agentDir (and
+// extraRoots), anchored at the directory holding agentsRoot, so an agents
+// root that is a symlink is caught; no project workspace is known, so
+// everything outside the agent's directories is refused.
+func localAgentDirGuard(agentName, agentDir string, extraRoots ...string) *agentFilesGuard {
+	anchors := []string{filepath.Dir(filepath.Dir(agentDir))}
+	for _, r := range extraRoots {
+		if r != "" && !guardPathWithin(filepath.Clean(r), filepath.Clean(anchors[0])) {
+			anchors = append(anchors, filepath.Dir(r))
+		}
+	}
+	return newAgentFilesGuard(agentName, anchors, append([]string{agentDir}, extraRoots...), nil)
+}
+
+// CheckAgentWorktreeRemoval applies the agent files guard to the removal of
+// agentName's worktree at worktreePath, under the project checkout base:
+// the worktree must really be where it says inside base, and base itself is
+// never removed. It returns the path to remove (see agentFilesGuard.check).
+func CheckAgentWorktreeRemoval(agentName, base, worktreePath string) (string, error) {
+	return newAgentFilesGuard(agentName, []string{base}, []string{worktreePath}, []string{base}).check(worktreePath)
 }
 
 func (g *agentFilesGuard) classify(path string, extraAgentRoots []string) error {
@@ -182,7 +340,7 @@ func (g *agentFilesGuard) classify(path string, extraAgentRoots []string) error 
 		return fmt.Errorf("cannot resolve its real location: %w", err)
 	}
 	for _, root := range g.projectRoots {
-		if pathWithin(root, real) {
+		if guardPathWithin(root, real) {
 			return fmt.Errorf("it resolves to %s, which is or contains the project workspace %s", real, root)
 		}
 	}
@@ -200,12 +358,12 @@ func (g *agentFilesGuard) classify(path string, extraAgentRoots []string) error 
 		}
 	}
 	for _, root := range agentRoots {
-		if pathWithin(real, root) {
+		if guardPathWithin(real, root) {
 			return nil
 		}
 	}
 	for _, root := range g.projectRoots {
-		if pathWithin(real, root) {
+		if guardPathWithin(real, root) {
 			return fmt.Errorf("it resolves to %s, inside the project workspace %s and outside the agent's own directories", real, root)
 		}
 	}
@@ -226,9 +384,9 @@ func resolveRealPath(path string) (string, error) {
 	return filepath.Clean(real), nil
 }
 
-// pathWithin reports whether path is dir or lies under it, comparing whole
+// guardPathWithin reports whether path is dir or lies under it, comparing whole
 // path elements. Both must be clean absolute paths.
-func pathWithin(path, dir string) bool {
+func guardPathWithin(path, dir string) bool {
 	rel, err := filepath.Rel(dir, path)
 	if err != nil || filepath.IsAbs(rel) {
 		return false

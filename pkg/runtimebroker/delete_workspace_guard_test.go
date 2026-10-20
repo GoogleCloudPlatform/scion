@@ -15,6 +15,8 @@
 package runtimebroker
 
 import (
+	"bytes"
+	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -92,11 +94,19 @@ func TestDeleteAgent_RefusesAgentDirResolvingIntoProjectWorkspace(t *testing.T) 
 			}}
 
 			rec := doDelete(t, srv, "dev", "projectId="+scopeProjB+"&"+mode)
-			if rec.Code == http.StatusNoContent {
-				t.Fatalf("expected the delete to fail, got 204")
+			if rec.Code != http.StatusInternalServerError {
+				t.Fatalf("expected 500, got %d: %s", rec.Code, rec.Body.String())
 			}
-			if !strings.Contains(rec.Body.String(), "refusing to delete agent files") {
-				t.Errorf("response does not carry the refusal: %d %s", rec.Code, rec.Body.String())
+			// The exact fixed body: the reason, no path.
+			var want bytes.Buffer
+			if err := json.NewEncoder(&want).Encode(ErrorResponse{Error: APIError{
+				Code:    ErrCodeRuntimeError,
+				Message: "Failed to delete agent: refused to remove a path outside the agent's own directories, or one that could not be resolved; nothing was removed there",
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			if got := rec.Body.String(); got != want.String() {
+				t.Errorf("response body = %q, want %q", got, want.String())
 			}
 			if strings.Contains(rec.Body.String(), projectRoot) {
 				t.Errorf("response names a path: %s", rec.Body.String())

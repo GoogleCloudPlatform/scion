@@ -140,14 +140,16 @@ func (m *AgentManager) removeNFSAgentWorkspace(ctx context.Context, projectPath,
 		return agentDir, fmt.Errorf("workspace_storage nfs: %s is not a plain directory on the export; left in place", agentDir)
 	}
 	// The agent directory is the agent's; the project's shared checkout
-	// next to it is never removed (agentFilesGuard).
-	if err := newAgentFilesGuard(agentName, []string{resolvedHostBase}, []string{agentDir}, []string{filepath.Join(resolvedHostBase, rel)}).check(agentDir); err != nil {
+	// next to it is never removed (agentFilesGuard). The removal acts on
+	// the path the guard returns.
+	checkedDir, err := newAgentFilesGuard(agentName, []string{resolvedHostBase}, []string{agentDir}, []string{filepath.Join(resolvedHostBase, rel)}).check(agentDir)
+	if err != nil {
 		return agentDir, fmt.Errorf("workspace_storage nfs: %w", err)
 	}
-	if err := provision.RemoveAgentWorkspace(ctx, agentDir, nfsAgentDirLockWait); err != nil {
+	if err := provision.RemoveAgentWorkspace(ctx, checkedDir, nfsAgentDirLockWait); err != nil {
 		return agentDir, err
 	}
-	purgeRemovedAgentWorkspaces(agentDir)
+	purgeRemovedAgentWorkspaces(checkedDir)
 	slog.Info("workspace_storage nfs: removed the agent's workspace", "path", filepath.Join(agentDir, provision.AgentWorkspaceDir))
 	return agentDir, nil
 }

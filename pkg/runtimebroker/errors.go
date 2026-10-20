@@ -409,7 +409,7 @@ func runtimeOpError(op string, err error) *OpaqueError {
 // agentFilesDeleteRefusedMessage is the client message for an agent delete
 // whose files delete was refused (agent.ErrAgentFilesDeleteRefused). Like
 // every runtime-op message it names no path; the log has them.
-const agentFilesDeleteRefusedMessage = "Failed to delete agent: refusing to delete agent files: a path to remove is, or resolves into, a project workspace, or its real location cannot be established; agent deletion never removes a shared project workspace, and nothing was removed there"
+const agentFilesDeleteRefusedMessage = "Failed to delete agent: refused to remove a path outside the agent's own directories, or one that could not be resolved; nothing was removed there"
 
 // failedOpText is the fixed "Failed to <op>" lead every runtime-op error
 // message starts with (runtimeOpError, notFoundMessage).

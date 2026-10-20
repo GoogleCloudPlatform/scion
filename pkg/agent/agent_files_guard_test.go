@@ -15,6 +15,7 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -56,6 +57,9 @@ func mustSymlink(t *testing.T, target, link string) {
 	}
 }
 
+// checkErr returns check's error, for assertRefused.
+func checkErr(_ string, err error) error { return err }
+
 func assertRefused(t *testing.T, err error, what string) {
 	t.Helper()
 	if !errors.Is(err, ErrAgentFilesDeleteRefused) {
@@ -67,7 +71,7 @@ func TestAgentFilesGuard_AllowsTheAgentsOwnDirectory(t *testing.T) {
 	tr := newGuardTestTree(t)
 	g := tr.guard()
 	for _, p := range []string{tr.agentDir, filepath.Join(tr.agentDir, "home")} {
-		if err := g.check(p); err != nil {
+		if _, err := g.check(p); err != nil {
 			t.Errorf("check(%s) = %v, want allowed", p, err)
 		}
 	}
@@ -83,7 +87,7 @@ func TestAgentFilesGuard_RefusesTheProjectWorkspace(t *testing.T) {
 		"the .scion directory":             tr.scion,
 		"another agent's directory":        mkdirReturn(t, filepath.Join(tr.scion, "agents", "b")),
 	} {
-		assertRefused(t, g.check(p), what)
+		assertRefused(t, checkErr(g.check(p)), what)
 	}
 }
 
@@ -99,12 +103,12 @@ func TestAgentFilesGuard_RefusesSymlinkIntoProject(t *testing.T) {
 	tr := newGuardTestTree(t)
 	link := filepath.Join(tr.agentDir, "workspace")
 	mustSymlink(t, tr.proj, link)
-	assertRefused(t, tr.guard().check(link), "symlink to the project root")
+	assertRefused(t, checkErr(tr.guard().check(link)), "symlink to the project root")
 
 	linkedAgent := filepath.Join(tr.scion, "agents", "b")
 	mustSymlink(t, filepath.Dir(tr.projectFile), linkedAgent)
 	g := newAgentFilesGuard("b", []string{tr.scion}, []string{linkedAgent}, []string{tr.proj})
-	assertRefused(t, g.check(linkedAgent), "agent directory symlinked into the project")
+	assertRefused(t, checkErr(g.check(linkedAgent)), "agent directory symlinked into the project")
 }
 
 // An agents directory that is a symlink into the project makes the agent's
@@ -120,7 +124,7 @@ func TestAgentFilesGuard_RefusesSymlinkedAgentsDir(t *testing.T) {
 	agentDir := filepath.Join(scion, "agents", "docs")
 
 	g := newAgentFilesGuard("docs", []string{scion}, []string{agentDir}, []string{proj})
-	assertRefused(t, g.check(agentDir), "agent directory reached through a symlinked agents dir")
+	assertRefused(t, checkErr(g.check(agentDir)), "agent directory reached through a symlinked agents dir")
 }
 
 func TestAgentFilesGuard_RefusesUnresolvablePaths(t *testing.T) {
@@ -137,13 +141,13 @@ func TestAgentFilesGuard_RefusesUnresolvablePaths(t *testing.T) {
 		"relative path":    "agents/a",
 		"empty path":       "",
 	} {
-		assertRefused(t, g.check(p), what)
+		assertRefused(t, checkErr(g.check(p)), what)
 	}
 
 	// A project workspace that cannot be resolved (not merely missing)
 	// refuses every path.
 	bad := newAgentFilesGuard("a", []string{tr.scion}, []string{tr.agentDir}, []string{loop})
-	assertRefused(t, bad.check(tr.agentDir), "unresolvable project workspace")
+	assertRefused(t, checkErr(bad.check(tr.agentDir)), "unresolvable project workspace")
 }
 
 // Containment compares whole path elements: /x/proj does not contain
@@ -153,7 +157,7 @@ func TestAgentFilesGuard_PathElementBoundary(t *testing.T) {
 	proj := mkdirReturn(t, filepath.Join(root, "proj"))
 	project2 := mkdirReturn(t, filepath.Join(root, "project2"))
 	g := newAgentFilesGuard("proj", []string{root}, []string{proj}, []string{project2})
-	if err := g.check(proj); err != nil {
+	if _, err := g.check(proj); err != nil {
 		t.Errorf("check(%s) with project workspace %s = %v, want allowed", proj, project2, err)
 	}
 
@@ -161,7 +165,7 @@ func TestAgentFilesGuard_PathElementBoundary(t *testing.T) {
 	a := mkdirReturn(t, filepath.Join(agents, "a"))
 	ab := mkdirReturn(t, filepath.Join(agents, "ab"))
 	g = newAgentFilesGuard("a", []string{agents}, []string{a}, nil)
-	assertRefused(t, g.check(ab), "sibling whose name extends the agent's")
+	assertRefused(t, checkErr(g.check(ab)), "sibling whose name extends the agent's")
 }
 
 // An extra agent root is verified like the agent's own: a symlink there
@@ -170,12 +174,12 @@ func TestAgentFilesGuard_ExtraRootIsVerified(t *testing.T) {
 	tr := newGuardTestTree(t)
 	g := tr.guard()
 	creator := mkdirReturn(t, filepath.Join(tr.scion, "agents", "creator", "workspace"))
-	if err := g.check(creator, creator); err != nil {
+	if _, err := g.check(creator, creator); err != nil {
 		t.Errorf("check of a verified extra root = %v, want allowed", err)
 	}
 	linked := filepath.Join(tr.scion, "agents", "other")
 	mustSymlink(t, filepath.Dir(tr.projectFile), linked)
-	assertRefused(t, g.check(linked, linked), "extra root symlinked into the project")
+	assertRefused(t, checkErr(g.check(linked, linked)), "extra root symlinked into the project")
 }
 
 // DeleteAgentFiles refuses an agent directory that is a symlink into the
@@ -272,4 +276,115 @@ func TestDeleteAgentFiles_SiblingAndProjectSurvive(t *testing.T) {
 			}
 		}
 	})
+}
+
+// check returns the path to remove: the real location of the parent
+// directory joined with the last element, which is kept as it is, so a
+// symlink there is unlinked, not followed.
+func TestAgentFilesGuard_CheckReturnsRealParentPath(t *testing.T) {
+	tr := newGuardTestTree(t)
+	linkRoot := filepath.Join(t.TempDir(), "via-link")
+	mustSymlink(t, tr.root, linkRoot)
+	lexScion := filepath.Join(linkRoot, "proj", config.DotScion)
+	lexAgent := filepath.Join(lexScion, "agents", "a")
+	g := newAgentFilesGuard("a", []string{lexScion}, []string{lexAgent}, []string{filepath.Join(linkRoot, "proj")})
+	realAgent, err := resolveRealPath(tr.agentDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := g.check(lexAgent)
+	if err != nil || got != realAgent {
+		t.Errorf("check(%s) = %q, %v; want %q", lexAgent, got, err, realAgent)
+	}
+
+	leaf := filepath.Join(tr.agentDir, "home-link")
+	mustSymlink(t, filepath.Join(tr.agentDir, "home"), leaf)
+	got, err = tr.guard().check(leaf)
+	if want := filepath.Join(realAgent, "home-link"); err != nil || got != want {
+		t.Errorf("check(%s) = %q, %v; want %q (the link itself)", leaf, got, err, want)
+	}
+}
+
+// A13 (R1): the stale-directory removal (GetAgent) refuses an agent
+// directory reached through an agents directory that is a symlink into the
+// project, with the project's guard and with the guard that knows only the
+// agent directory; the project directory with the agent's name survives.
+func TestHandleAgentDirWithoutConfig_RefusesSymlinkedAgentsDir(t *testing.T) {
+	for _, which := range []string{"project guard", "agent directory guard"} {
+		t.Run(which, func(t *testing.T) {
+			root := t.TempDir()
+			t.Setenv("HOME", root)
+			proj := filepath.Join(root, "proj")
+			scion := filepath.Join(proj, config.DotScion)
+			docs := filepath.Join(proj, "docs", "guide.md")
+			mustMkdir(t, filepath.Dir(docs))
+			mustWrite(t, docs, "# guide")
+			mustMkdir(t, scion)
+			mustSymlink(t, proj, filepath.Join(scion, "agents"))
+			agentDir := filepath.Join(scion, "agents", "docs")
+			home := filepath.Join(agentDir, "home")
+			ws := filepath.Join(agentDir, "workspace")
+
+			var err error
+			if which == "project guard" {
+				err = handleAgentDirWithoutConfigGuarded(projectAgentFilesGuard(context.Background(), scion, "docs", agentDir), "docs", agentDir, home, ws)
+			} else {
+				err = handleAgentDirWithoutConfig("docs", agentDir, home, ws)
+			}
+			assertRefused(t, err, "stale-directory removal")
+			if _, err := os.Stat(docs); err != nil {
+				t.Errorf("project directory with the agent's name was removed: %v", err)
+			}
+		})
+	}
+}
+
+// A12 (O3): the repository holding a project in a subdirectory anchors the
+// last sharer's worktree, which lies in the repository outside the project
+// directory.
+func TestProjectAgentFilesGuard_RepoRootAnchorsWorktreeOutsideProject(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	repo := filepath.Join(root, "repo")
+	mustMkdir(t, repo)
+	setupGitRepo(t, repo)
+	scion := filepath.Join(repo, "nested", "project", config.DotScion)
+	mustMkdir(t, scion)
+	wt := mkdirReturn(t, filepath.Join(repo, ".scion-worktrees", "branch-a"))
+
+	g := projectAgentFilesGuard(context.Background(), scion, "a")
+	if _, err := g.check(wt, wt); err != nil {
+		t.Errorf("check of the last sharer's worktree in the repository = %v, want allowed", err)
+	}
+	src := mkdirReturn(t, filepath.Join(repo, "src"))
+	assertRefused(t, checkErr(g.check(src)), "repository directory outside the agent's directories")
+}
+
+// A12 (O4): when the project's settings cannot be loaded, the delete path
+// refuses every removal rather than fall back to defaults.
+func TestDeleteAgentFiles_RefusesWhenSettingsCannotBeLoaded(t *testing.T) {
+	tr := newGuardTestTree(t)
+	t.Setenv("HOME", tr.root)
+	mustWrite(t, filepath.Join(tr.scion, "settings.yaml"), "runtimes: [unclosed\n")
+
+	_, err := DeleteAgentFiles("a", tr.scion, false)
+	assertRefused(t, err, "DeleteAgentFiles with unreadable settings")
+	if _, err := os.Stat(tr.agentDir); err != nil {
+		t.Errorf("agent directory removed although the guard could not be prepared: %v", err)
+	}
+}
+
+// The partial-worktree cleanup's check: a worktree that is really inside
+// the checkout's worktrees directory may be removed; one that is a symlink
+// to the checkout is refused, and so is the checkout itself.
+func TestCheckAgentWorktreeRemoval(t *testing.T) {
+	base := t.TempDir()
+	wt := mkdirReturn(t, filepath.Join(base, "worktrees", "a"))
+	if _, err := CheckAgentWorktreeRemoval("a", base, wt); err != nil {
+		t.Errorf("worktree inside the checkout: %v, want allowed", err)
+	}
+	linked := filepath.Join(base, "worktrees", "b")
+	mustSymlink(t, base, linked)
+	assertRefused(t, checkErr(CheckAgentWorktreeRemoval("b", base, linked)), "worktree symlinked to the checkout")
+	assertRefused(t, checkErr(CheckAgentWorktreeRemoval("a", base, base)), "the checkout itself")
 }

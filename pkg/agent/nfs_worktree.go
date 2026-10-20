@@ -379,8 +379,9 @@ func (m *AgentManager) RemoveNFSWorktree(ctx context.Context, projectPath, proje
 	}
 
 	// The worktree is the agent's; the project's shared checkout around it
-	// is never removed (agentFilesGuard).
-	if err := newAgentFilesGuard(agentName, []string{resolvedHostBase}, []string{worktree}, []string{workspace}).check(worktree); err != nil {
+	// is never removed (agentFilesGuard). RemoveMountedWorktree removes
+	// the worktree by name under the checkout checked here.
+	if _, err := newAgentFilesGuard(agentName, []string{resolvedHostBase}, []string{worktree}, []string{workspace}).check(worktree); err != nil {
 		return worktree, fmt.Errorf("workspace_storage nfs: %w", err)
 	}
 
