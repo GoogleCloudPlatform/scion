@@ -164,7 +164,13 @@ type FileSource struct {
 	fileModTime time.Time
 	fileSize    int64
 	fileInfo    os.FileInfo // identity of the last file read (inode on Unix)
+	fileCtime   time.Time   // change time of the last file read
+	fileNlink   uint64      // link count of the last file read
+	fileReadAt  time.Time   // when the last read started
 	fileErr     error
+
+	// now returns the current time; tests replace it.
+	now func() time.Time
 }
 
 // NewFileSource creates a FileSource for path. read may be nil, in which
@@ -173,7 +179,7 @@ func NewFileSource(path string, read FileReadFunc) *FileSource {
 	if read == nil {
 		read = ReadTransportTokenFile
 	}
-	return &FileSource{path: path, read: read}
+	return &FileSource{path: path, read: read, now: time.Now}
 }
 
 // Path returns the file this source reads.
@@ -277,15 +283,28 @@ func (s *FileSource) Status() FileSourceStatus {
 // call when the file keeps being replaced during the read.
 const reloadAttempts = 3
 
-// reloadLocked re-reads the file when it has been replaced or its
-// modification time or size has changed since the last read.
+// racyModTimeWindow is how close to the start of the last read a file's
+// modification time may be before that read is not reused. A write that
+// lands within the same timestamp tick as an earlier one can leave the
+// metadata unchanged (the kernel stamps files from a coarse clock, and some
+// filesystems store whole seconds), so a file modified that close to the
+// read is read again until its modification time is safely in the past.
+const racyModTimeWindow = 2 * time.Second
+
+// reloadLocked re-reads the file unless the last read succeeded and the
+// file's metadata (identity, modification and change time, size and link
+// count) is unchanged since then and was not modified within
+// racyModTimeWindow of that read.
 //
 // Each write replaces the file by rename. A read that opens the file just
 // before it is replaced sees the old file with no link left, and the reader
-// refuses it. When a read fails and the path now names a different file, the
-// new file is read through the same reader, up to reloadAttempts reads in
-// total. A read that fails on a file that was not replaced, or the last
-// allowed read failing, clears the file value and records the error.
+// refuses it. When a read fails because the opened file had no link left
+// (dirfd.ErrUnlinked), or the path now names a different file, the path is
+// read again through the same reader, up to reloadAttempts reads in total.
+// The unlinked check is needed because a filesystem can give the new file
+// the inode number of a file it just freed, so the identity alone can match.
+// A read that fails for any other reason, or the last allowed read failing,
+// clears the file value and records the error.
 func (s *FileSource) reloadLocked() {
 	if s.path == "" {
 		return
@@ -293,33 +312,30 @@ func (s *FileSource) reloadLocked() {
 	// Iterates only via the continue below (a read that failed because the
 	// file was replaced).
 	for attempt := 1; attempt <= reloadAttempts; attempt++ {
+		readAt := s.now()
 		fi, err := os.Lstat(s.path)
 		if err != nil {
 			s.fileToken, s.fileExpiry = "", time.Time{}
 			s.fileModTime, s.fileSize, s.fileInfo = time.Time{}, 0, nil
+			s.fileCtime, s.fileNlink, s.fileReadAt = time.Time{}, 0, time.Time{}
 			s.fileErr = err
 			return
 		}
-		// Only reuse successful reads: a failure can be caused by properties
-		// such as the link count that are not part of this metadata check.
-		if s.fileErr == nil && s.fileInfo != nil && os.SameFile(s.fileInfo, fi) &&
-			fi.ModTime().Equal(s.fileModTime) && fi.Size() == s.fileSize {
+		ctime, nlink, haveExtra := fileStatExtra(fi)
+		if s.cachedReadValidLocked(fi, ctime, nlink, haveExtra) {
 			return
 		}
 		s.fileInfo = fi
 		s.fileModTime = fi.ModTime()
 		s.fileSize = fi.Size()
+		s.fileCtime, s.fileNlink = ctime, nlink
+		s.fileReadAt = readAt
 
 		data, err := s.read(s.path)
 		if err != nil {
 			s.fileToken, s.fileExpiry, s.fileErr = "", time.Time{}, err
-			// Retry only when the path was replaced during the read. Both
-			// identities come from Lstat, which does not follow a link at the
-			// final path component.
-			if attempt < reloadAttempts {
-				if now, lerr := os.Lstat(s.path); lerr == nil && !os.SameFile(fi, now) {
-					continue
-				}
+			if attempt < reloadAttempts && s.replacedDuringRead(fi, err) {
+				continue
 			}
 			return
 		}
@@ -336,6 +352,36 @@ func (s *FileSource) reloadLocked() {
 		}
 		return
 	}
+}
+
+// cachedReadValidLocked reports whether the value from the last read can be
+// reused for a file whose current Lstat is fi. Only a successful read is
+// reused: a failure can be caused by properties such as the link count that
+// the reader checks on the open file.
+func (s *FileSource) cachedReadValidLocked(fi os.FileInfo, ctime time.Time, nlink uint64, haveExtra bool) bool {
+	if s.fileErr != nil || s.fileInfo == nil || !haveExtra {
+		return false
+	}
+	if !os.SameFile(s.fileInfo, fi) || !fi.ModTime().Equal(s.fileModTime) ||
+		fi.Size() != s.fileSize || !ctime.Equal(s.fileCtime) || nlink != s.fileNlink {
+		return false
+	}
+	// A file modified within racyModTimeWindow of the last read could have
+	// been changed again after that read without changing its metadata.
+	return s.fileModTime.Before(s.fileReadAt.Add(-racyModTimeWindow))
+}
+
+// replacedDuringRead reports whether a read that failed with err should be
+// retried because the file was replaced while it was being read: the reader
+// found the opened file had no link left, or the path, checked again with
+// Lstat (which does not follow a link at the final component), now names a
+// different file than fi.
+func (s *FileSource) replacedDuringRead(fi os.FileInfo, err error) bool {
+	if errors.Is(err, dirfd.ErrUnlinked) {
+		return true
+	}
+	now, lerr := os.Lstat(s.path)
+	return lerr == nil && !os.SameFile(fi, now)
 }
 
 // pickLocked returns the candidate with the latest expiry. On a tie the

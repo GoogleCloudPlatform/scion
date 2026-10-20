@@ -462,6 +462,192 @@ func TestFileSource_ReadRetryIsBounded(t *testing.T) {
 	assert.ErrorIs(t, src.Status().FileError, dirfd.ErrNotSingleLinkRegular)
 }
 
+// unlinkedReadErr is the error the default reader returns for a file that
+// had no link left when it was checked: both dirfd sentinels, wrapped.
+func unlinkedReadErr(p string) error {
+	return fmt.Errorf("transport token file %s: dirfd: tt: %w: %w", p, dirfd.ErrNotSingleLinkRegular, dirfd.ErrUnlinked)
+}
+
+// A read that fails because the opened file had no link left is retried
+// even when the path names a file with the same identity before and after
+// the read. That happens when two renames land during the read and the
+// filesystem gives the newest file the inode number of the one it freed.
+// The injected reader reports the unlinked file without changing the path,
+// which is what the source sees in that case. ptone/scion#5038.
+func TestFileSource_UnlinkedReadRetriedWhenIdentityMatches(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tt")
+	want := makeTestJWT(time.Now().Add(10 * time.Minute))
+	writeTokenFile(t, path, want)
+
+	reads := 0
+	src := NewFileSource(path, func(p string) (string, error) {
+		reads++
+		if reads == 1 {
+			return "", unlinkedReadErr(p)
+		}
+		return ReadTransportTokenFile(p)
+	})
+	got, err := src.Token()
+	require.NoError(t, err, "a read of an unlinked file must be retried")
+	assert.Equal(t, want, got)
+	assert.Equal(t, 2, reads)
+	assert.NoError(t, src.fileErr)
+}
+
+// A file that is reported unlinked on every read is read at most three
+// times in one call. Then the source refuses: no value (not even the one
+// from an earlier successful read) and the error is recorded, so the
+// caller gets an empty token and an error.
+func TestFileSource_UnlinkedReadRetryIsBoundedAndRefuses(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tt")
+	first := makeTestJWT(time.Now().Add(10 * time.Minute))
+	writeTokenFile(t, path, first)
+
+	failing := false
+	reads := 0
+	src := NewFileSource(path, func(p string) (string, error) {
+		reads++
+		if failing {
+			return "", unlinkedReadErr(p)
+		}
+		return ReadTransportTokenFile(p)
+	})
+	got, err := src.Token()
+	require.NoError(t, err)
+	require.Equal(t, first, got)
+
+	writeTokenFile(t, path, makeTestJWT(time.Now().Add(20*time.Minute)))
+	failing = true
+	reads = 0
+	got, err = src.Token()
+	assert.Error(t, err)
+	assert.Empty(t, got)
+	assert.Equal(t, 3, reads)
+	assert.Empty(t, src.fileToken)
+	assert.ErrorIs(t, src.fileErr, dirfd.ErrUnlinked)
+	assert.ErrorIs(t, src.fileErr, dirfd.ErrNotSingleLinkRegular)
+
+	st := src.Status()
+	assert.False(t, st.FilePresent)
+	assert.Equal(t, "", st.InUse)
+	assert.ErrorIs(t, st.FileError, dirfd.ErrNotSingleLinkRegular)
+}
+
+// countingReader returns a FileReadFunc that uses the default reader and
+// counts its calls.
+func countingReader(reads *int) FileReadFunc {
+	return func(p string) (string, error) {
+		*reads++
+		return ReadTransportTokenFile(p)
+	}
+}
+
+// setModTime sets path's modification time to mtime and returns it as the
+// filesystem stores it.
+func setModTime(t *testing.T, path string, mtime time.Time) time.Time {
+	t.Helper()
+	require.NoError(t, os.Chtimes(path, mtime, mtime))
+	fi, err := os.Lstat(path)
+	require.NoError(t, err)
+	return fi.ModTime()
+}
+
+// A file modified within racyModTimeWindow of the last read is read again
+// on every call: a write in the same timestamp tick could have left all the
+// metadata unchanged. Once the modification time is safely before the start
+// of a read, that read is reused.
+func TestFileSource_RacyModTimeIsReread(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tt")
+	writeTokenFile(t, path, makeTestJWT(time.Now().Add(10*time.Minute)))
+	mtime := setModTime(t, path, time.Now().Add(-time.Hour).Truncate(time.Second))
+
+	clock := mtime.Add(racyModTimeWindow / 4)
+	reads := 0
+	src := NewFileSource(path, countingReader(&reads))
+	src.now = func() time.Time { return clock }
+
+	_, err := src.Token()
+	require.NoError(t, err)
+	_, err = src.Token()
+	require.NoError(t, err)
+	assert.Equal(t, 2, reads, "a file modified close to the read must be read again")
+
+	// The last read started close to the modification time, so the next
+	// call still reads; from then on the read is reused.
+	clock = mtime.Add(racyModTimeWindow + 5*time.Second)
+	_, err = src.Token()
+	require.NoError(t, err)
+	assert.Equal(t, 3, reads)
+	_, err = src.Token()
+	require.NoError(t, err)
+	assert.Equal(t, 3, reads, "a read that started well after the modification time is reused")
+}
+
+// A change to the file that leaves its identity, size and modification time
+// as they were still changes its change time, and the file is read again.
+func TestFileSource_ChangeTimeInvalidatesCachedRead(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tt")
+	writeTokenFile(t, path, makeTestJWT(time.Now().Add(10*time.Minute)))
+	mtime := setModTime(t, path, time.Now().Add(-time.Hour).Truncate(time.Second))
+
+	reads := 0
+	src := NewFileSource(path, countingReader(&reads))
+	_, err := src.Token()
+	require.NoError(t, err)
+	_, err = src.Token()
+	require.NoError(t, err)
+	require.Equal(t, 1, reads, "an unchanged file well past the racy window is not read again")
+
+	before, err := os.Lstat(path)
+	require.NoError(t, err)
+	ctime0, _, ok := fileStatExtra(before)
+	require.True(t, ok)
+	// Change only the change time: chmod to the same mode updates it. The
+	// kernel stamps it from a coarse clock, so repeat until it moves.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		require.NoError(t, os.Chmod(path, 0o600))
+		after, err := os.Lstat(path)
+		require.NoError(t, err)
+		ctime1, _, _ := fileStatExtra(after)
+		if !ctime1.Equal(ctime0) {
+			require.True(t, os.SameFile(before, after))
+			require.Equal(t, before.Size(), after.Size())
+			require.True(t, after.ModTime().Equal(mtime))
+			break
+		}
+		require.True(t, time.Now().Before(deadline), "change time did not move")
+		time.Sleep(time.Millisecond)
+	}
+
+	_, err = src.Token()
+	require.NoError(t, err)
+	assert.Equal(t, 2, reads, "a changed change time must cause a new read")
+}
+
+// A hard link added after a successful read changes the link count, so the
+// file is read again and the reader refuses it; the earlier value is not
+// served.
+func TestFileSource_LinkAddedAfterReadIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tt")
+	writeTokenFile(t, path, makeTestJWT(time.Now().Add(10*time.Minute)))
+	setModTime(t, path, time.Now().Add(-time.Hour).Truncate(time.Second))
+
+	reads := 0
+	src := NewFileSource(path, countingReader(&reads))
+	_, err := src.Token()
+	require.NoError(t, err)
+
+	require.NoError(t, os.Link(path, filepath.Join(dir, "other")))
+	got, err := src.Token()
+	assert.Error(t, err)
+	assert.Empty(t, got)
+	assert.Equal(t, 2, reads)
+	assert.ErrorIs(t, src.fileErr, dirfd.ErrNotSingleLinkRegular)
+	assert.NotErrorIs(t, src.fileErr, dirfd.ErrUnlinked)
+}
+
 // TestReadTransportTokenFile_RefusesNonRegular verifies the default reader
 // refuses a symlink at the leaf (at open time, not via a separate check), a
 // FIFO (without blocking), and a directory, and reads a regular file.
