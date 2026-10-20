@@ -35,11 +35,12 @@ type loadRingResult struct {
 }
 
 // loadRingScriptStore answers Load from a script (the last answer repeats),
-// Create with createErr, and CompareAndSwap with success.
+// Create with createErr, and CompareAndSwap with success unless casLost.
 type loadRingScriptStore struct {
 	mu        sync.Mutex
 	loads     []loadRingResult
 	createErr error
+	casLost   bool
 }
 
 func (s *loadRingScriptStore) Load(context.Context) (*grant.KeyRing, int, error) {
@@ -60,7 +61,7 @@ func (s *loadRingScriptStore) Create(context.Context, *grant.KeyRing) error {
 }
 
 func (s *loadRingScriptStore) CompareAndSwap(context.Context, *grant.KeyRing, int) (bool, error) {
-	return true, nil
+	return !s.casLost, nil
 }
 
 // TestConduitGrantKeys_NoRingErrorsPerReadSite: at every ring read site, a
@@ -73,6 +74,11 @@ func TestConduitGrantKeys_NoRingErrorsPerReadSite(t *testing.T) {
 	key, err := grant.NewRingKey(now, now)
 	require.NoError(t, err)
 	good := &grant.KeyRing{Keys: []grant.RingKey{key}}
+	expired, err := grant.NewRingKey(now.Add(-2*time.Hour), now.Add(-2*time.Hour))
+	require.NoError(t, err)
+	expired.NotAfter = now.Add(-time.Hour)
+	unsettled := &grant.KeyRing{Keys: []grant.RingKey{key, expired}}
+	require.True(t, cloneKeyRing(unsettled).Settle(now, time.Hour), "the ring needs settling")
 	noRing := errConduitGrantRingUnreadable.Error() + ": the store returned no ring"
 	ctx := context.Background()
 
@@ -85,6 +91,12 @@ func TestConduitGrantKeys_NoRingErrorsPerReadSite(t *testing.T) {
 		{
 			name:  "settled read",
 			store: &loadRingScriptStore{loads: []loadRingResult{{}}},
+			call:  func(k *conduitGrantKeys) error { _, err := k.loadSettled(ctx); return err },
+			want:  noRing,
+		},
+		{
+			name:  "settled read after a lost settle",
+			store: &loadRingScriptStore{loads: []loadRingResult{{ring: unsettled}, {}}, casLost: true},
 			call:  func(k *conduitGrantKeys) error { _, err := k.loadSettled(ctx); return err },
 			want:  noRing,
 		},
