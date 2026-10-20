@@ -146,7 +146,7 @@ The `@version` suffix accepts:
 
 The `gh://` scheme retrieves skill files directly from a GitHub repository. It works out-of-the-box for public repositories, and supports secure private repository resolution.
 
-If GitHub rejects the credential sent with a file download (`401`, `403` or `404`, for example because the token expired or was revoked), Scion retries that file once without credentials, so skills from public repositories still install. Hash checks apply to the result as usual.
+If GitHub rejects the credential sent with a skill file download at install time (`401`, `403` or `404`, for example because the token expired or was revoked), as can happen when the skill's resolution was cached, Scion retries that file once without credentials. Hash checks apply to the result as usual. A fresh resolution with a rejected token still fails.
 
 #### Private repository resolution
 

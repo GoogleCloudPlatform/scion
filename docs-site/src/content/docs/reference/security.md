@@ -60,7 +60,7 @@ Runtime Brokers represent high-trust infrastructure. They use HMAC-based request
 
 ### 1.5 Broker Registration and Association Credentials
 
-User-credentialed Runtime Broker operations admit a fixed set of credential kinds. A Runtime Broker HMAC request that names a user on whose behalf it acts is **not** a user credential for registering, re-registering, rotating, associating a Runtime Broker with a project or removing an association; Runtime Broker HMAC on its own is admitted only for the Runtime Broker's self-maintenance (heartbeat, control channel, rotating its own secret, and reading and writing its own env vars and secrets).
+User-credentialed Runtime Broker operations admit a fixed set of credential kinds. A Runtime Broker HMAC request that names a user on whose behalf it acts is **not** a user credential for registering, re-registering, rotating, associating a Runtime Broker with a project or removing an association; Runtime Broker HMAC on its own is admitted only for the Runtime Broker's self-maintenance (heartbeat, control channel, rotating its own secret, reading and writing its own env vars and secrets, and reporting launches and message-delivery failures).
 
 | Operation | Endpoint | Admitted credentials | Additional checks |
 |---|---|---|---|

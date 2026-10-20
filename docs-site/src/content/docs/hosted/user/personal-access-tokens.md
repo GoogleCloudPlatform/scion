@@ -51,7 +51,7 @@ permissions). Available scopes:
 | `agent:set_message_mode` | Change an agent's message mode, under the same owner rules as a signed-in session. Granting `hub` mode (by setting it, by a cascade, or when creating an agent) needs a hub-bound token |
 | `agent:manage` | All agent scopes except `agent:attach`, `agent:port_access`, `agent:update`, `agent:stop_all` and `agent:set_message_mode` (convenience alias) |
 
-In addition to project and agent scopes, Scion supports UAT scopes for 7 other resource types: `skill`, `template`, `harness_config`, `group`, `user`, `broker`, and `gcp_service_account`. Each resource type provides a `*:manage` convenience alias (e.g., `skill:manage`, `template:manage`) that grants all available actions for that resource.
+In addition to project and agent scopes, Scion supports UAT scopes for other resource types, among them `skill`, `template`, `harness_config`, `group`, `user`, `broker`, and `gcp_service_account`. Each resource type provides a `*:manage` convenience alias (e.g., `skill:manage`, `template:manage`) that grants all available actions for that resource.
 
 To change your own injected skills (`scion user skills add` or `scion user skills remove`), a token needs the `user_skill_injection:update` scope on a Hub boundary. Reserved permissions (for example, `hub.federation.read`, `hub.federation.update`, `hub.teams_manifest.update`, and `agent.log_append`) are not offered as token scopes and are not part of any built-in role.
 
@@ -232,7 +232,9 @@ The web UI's **Create Token** form always mints project tokens. Through the API,
 boundary never means hub: a request that names neither `projectId` nor `boundary` is rejected
 with `400` (`details.reason` `boundary_required`). A hub boundary that also names a project, or a
 `boundary` that disagrees with `projectId`, is rejected with `400` (`boundary_invalid`). Token
-management requires a signed-in session credential; a UAT cannot mint another token:
+management requires a signed-in session credential; a UAT cannot mint another token. Every caller
+without an interactive session or dev credential gets the same `403` from `POST /api/v1/auth/tokens`,
+decided before the request body is read:
 
 ```bash
 curl -X POST -H "Authorization: Bearer $SESSION_TOKEN" \
@@ -263,12 +265,14 @@ The same per-request checks apply, with these limits:
   live project-access checks before any other rule can allow it.
 - **Inbox and conversations.** Chat writes made with a token (sending, changing or removing your
   own inbox items, notifications, conversations and direct messages) need `inbox:write`. Reading
-  your own inbox, notifications, conversations, direct messages, read state and chat
-  preferences needs `inbox:read`. Both act only on your own records. A project token reaches only
-  records of its project, and only while you are a member; a record with no project, such as a
-  direct message between users, needs a hub token.
-- **Limits and quotas.** Reading limit definitions, entitlements and usage needs `quota:read`;
-  creating, updating or deleting them needs `quota:read` together with `quota:create`,
+  your own inbox, notifications, direct messages, direct-message read state and chat preferences
+  needs `inbox:read`. Both scopes act only on your own records. Reading a project chat thread (its
+  messages, read state or members) needs `project:read` on its project, and posting to one needs
+  `inbox:write` as well. A project token reaches only records of its project, and only while you
+  are a member; a record with no project, such as a direct message between users, needs a hub
+  token.
+- **Limits and quotas.** Reading hub-wide limit definitions, entitlements and usage needs
+  `quota:read`; creating, updating or deleting them needs `quota:read` together with `quota:create`,
   `quota:update` or `quota:delete`.
   These scopes can be selected only on a hub token, and your user must also hold the matching
   hub permission.
@@ -312,12 +316,15 @@ The same per-request checks apply, with these limits:
   references with no project needs `skill:read` on a hub token.
 - **Schedules.** Creating a scheduled event or schedule needs `scheduled_event:create`; updating,
   re-targeting, pausing or resuming a schedule needs `scheduled_event:update`. The request also passes the event type's
-  own target checks, and each fire stays within the recording token's ceiling and boundary. See
-  [Scheduling](/scion/hosted/user/scheduling/#security--authorization).
+  own target checks, and each fire stays within the recording token's ceiling and boundary. A fire fails
+  once that token is revoked or has expired, so a recurring schedule authored with a token stops
+  firing at the token's expiry; pause and resume it with a sign-in or a newer token to record new
+  authority. See [Scheduling](/scion/hosted/user/scheduling/#security--authorization).
 - **Identity governance.** Reading role definitions, role bindings and access constraints needs
-  `role:read`, `role_binding:read` or `access_constraint:read`; reading another principal's
-  effective access, explaining its authorization, or reading an access constraint's audit history
-  needs `hub_audit:read`. These scopes can be
+  `role:read`, `role_binding:read` or `access_constraint:read`; reading a principal's
+  effective access (the admin effective-access view), explaining another principal's
+  authorization, or reading an access constraint's audit history needs `hub_audit:read`; among the
+  built-in roles, only super-admin holds the `hub.audit.read` permission. These scopes can be
   selected only on a hub token, and writes to these records still need a sign-in. Listing users
   needs `user:list` together with `user:read`, and the list holds only users the token may read;
   among the built-in roles, only super-admin holds the `user.list` permission. Redeeming an invitation code and linking a chat account
