@@ -54,8 +54,8 @@ var brokerOperations = []OperationSpec{
 		Domain:      "broker",
 		Description: "Read a runtime broker's environment variables (sensitive values masked) and secret metadata. A user needs broker.read on the broker and, beyond it, the owner relationship or broker.update; the broker reads its own material",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/runtime-brokers/{id}/env", Method: "GET"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/runtime-brokers/{id}/env/{key}", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/runtime-brokers/{id}/env", Method: "GET", Response: ResponseCredential},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/runtime-brokers/{id}/env/{key}", Method: "GET", Response: ResponseCredential},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/runtime-brokers/{id}/secrets", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/runtime-brokers/{id}/secrets/{key}", Method: "GET"},
 		},
@@ -78,7 +78,7 @@ var brokerOperations = []OperationSpec{
 		Domain:      "broker",
 		Description: "Set, patch or delete a runtime broker's environment variables and secrets. A user needs an interactive session and broker.update on the broker; the broker writes its own material",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/runtime-brokers/{id}/env/{key}", Method: "PUT"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/runtime-brokers/{id}/env/{key}", Method: "PUT", Response: ResponseCredential},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/runtime-brokers/{id}/env/{key}", Method: "DELETE"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/runtime-brokers/{id}/secrets/{key}", Method: "PUT"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/runtime-brokers/{id}/secrets/{key}", Method: "PATCH"},

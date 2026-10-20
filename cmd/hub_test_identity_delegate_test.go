@@ -21,6 +21,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -200,6 +201,9 @@ func TestHubTestIdentityDelegate_AdminScopes(t *testing.T) {
 		}
 		r, err := runProfileRoot(t, args...)
 		require.NoError(t, err, r.stderr)
+		// X4b: every scope goes into the runner's profile by its tier name.
+		assert.Contains(t, r.stdout, "--issuer-delegation "+tc.scope+"=", tc.scope)
+		assert.Equal(t, tc.scope != "member", strings.Contains(r.stdout, "--admin-issuer-sa"), tc.scope)
 		hub.mu.Lock()
 		body := hub.body
 		hub.body = nil

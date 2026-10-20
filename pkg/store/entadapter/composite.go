@@ -343,6 +343,13 @@ func NewCompositeStore(client *ent.Client) *CompositeStore {
 // same order as PurgeDeletedAgents and finalize-hard. Deleting the
 // memberships first would invert that order and could deadlock (40P01)
 // against a concurrent purge or finalize of the same agent.
+//
+// It does not deactivate the agent's delegation edges or service-account
+// assignments: those rows have no foreign key to the agent and outlive it. A
+// caller must deactivate them first, in the same transaction. Agent removal
+// in pkg/hub goes through FinalizeAgentDeletion instead, with a hook that
+// does so in the same transaction (agentHardDeleteWork).
+// hack/check-store-delete-callers.sh fails on a caller outside its allowlist.
 func (c *CompositeStore) DeleteAgent(ctx context.Context, id string) error {
 	if !c.inTx {
 		return c.WithTx(ctx, func(tx store.Store) error { return tx.DeleteAgent(ctx, id) })
@@ -432,6 +439,13 @@ func (c *CompositeStore) deleteAgentDependents(ctx context.Context, id string) e
 // UPDATE it does not conflict with the FK check's FOR KEY SHARE when a
 // membership, child-group edge or binding referencing an owned group is
 // inserted.
+//
+// It does not deactivate the delegation edges or service-account assignments
+// of the project's agents: those rows have no foreign key to the agents and
+// outlive them. A caller must deactivate any that exist first, in the same
+// transaction, as ProjectDeletionService does (cascadeSecurityState, through
+// deactivateProjectAgentEdges). hack/check-store-delete-callers.sh fails on a
+// caller outside its allowlist.
 func (c *CompositeStore) DeleteProject(ctx context.Context, id string) error {
 	if !c.inTx {
 		return c.WithTx(ctx, func(tx store.Store) error { return tx.DeleteProject(ctx, id) })
@@ -726,6 +740,10 @@ var purgeDeletedAgentsDeactivateTestHook func() error
 // already inactive (normally deactivated by the agent's soft delete) keep
 // their deactivation record. It runs in the purge's transaction, so an error
 // rolls the purge back.
+//
+// As in the hub's hard delete (agentHardDeleteWork in pkg/hub), only the
+// edges where a purged agent is the delegate are deactivated. Edges where it
+// is the delegator are left as they are; that doc comment gives the reason.
 func deactivatePurgedAgentAuthority(ctx context.Context, txStore *CompositeStore, ids []string, d store.Deactivation) error {
 	if h := purgeDeletedAgentsDeactivateTestHook; h != nil {
 		if err := h(); err != nil {

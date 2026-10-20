@@ -115,6 +115,7 @@ import { ComposerRoomController, type RoomComposer } from './composer-room.js';
 import { PinOnResizeController } from './pin-on-resize.js';
 import { focusElement } from '../focus-moved.js';
 import { findDefaultAgent } from './default-agent.js';
+import { coalescedRefresh, type CoalescedRefresh } from '../../../client/coalesced-refresh.js';
 
 /** Result from server-side mention fan-out. */
 interface MentionResult {
@@ -363,6 +364,46 @@ const TYPING_EXPIRY_MS = 6000;
  * receipt on every conversation is noise, not information.
  */
 const SEEN_VISIBLE_MS = 5 * 60 * 1000;
+
+/** Epoch milliseconds and date label of a message, as the row model uses them. */
+interface RowTime {
+  /** The `createdAt` these were derived from. */
+  iso: string;
+  time: number;
+  dateLabel: string;
+}
+
+/** A message sender's display name and whether it is an agent. */
+interface SenderInfo {
+  name: string;
+  isAgent: boolean;
+  /** The message fields these were derived from. */
+  sender: string;
+  senderId: string | undefined;
+  type: string;
+}
+
+/** Index into `members` by member id and by email (first occurrence wins). */
+interface MemberIndex {
+  byId: Map<string, number>;
+  byEmail: Map<string, number>;
+}
+
+/**
+ * Reactive properties that only drive controls around the transcript (the
+ * context menu, the file preview, the composer's reply and edit bars), never
+ * the message rows, so changing them must not rebuild the row model. Their
+ * writers never mutate row metadata in place without also assigning
+ * `messages`, which does rebuild.
+ */
+const ROW_INDEPENDENT_UI_KEYS: ReadonlySet<PropertyKey> = new Set([
+  'contextMenuMessage',
+  'contextMenuPosition',
+  'contextMenuAsSheet',
+  'filePreview',
+  'composerReplyTo',
+  'composerEditMessage',
+]);
 
 /** Match the store's ascending (created, UUID) order, not arrival order. */
 function compareMessageOrder(a: Message, b: Message): number {
@@ -614,16 +655,41 @@ export class ScionChatThread extends LitElement {
           key !== 'agents' &&
           key !== 'pinnedToBottom' &&
           key !== 'sendErrorExpanded' &&
-          key !== 'sendErrorTruncated'
+          key !== 'sendErrorTruncated' &&
+          !ROW_INDEPENDENT_UI_KEYS.has(key)
       )
     ) {
       this.messageRowsVersion++;
     }
+    // Sender names and kinds come from `members`: drop what was resolved
+    // against the previous list (the row rebuild above re-resolves them).
+    if (changedProperties.has('members')) {
+      this._memberIndex = null;
+      this._senderCache = new WeakMap();
+    }
   }
+
+  /**
+   * Per-message values the row model needs, derived once per message rather
+   * than on every rebuild (webperf C9a). Keyed by the Message object: an edit
+   * mutates the body in place but never `createdAt` or the sender, and a
+   * replaced object simply derives again.
+   */
+  private _rowTimeCache = new WeakMap<Message, RowTime>();
+  /** The display zone `_rowTimeCache`'s date labels were formatted in. */
+  private _rowTimeZone = '';
+  /** Sender name and kind per message, resolved against `members`. */
+  private _senderCache = new WeakMap<Message, SenderInfo>();
+  /** `members` indexed by id and by email; null until first needed. */
+  private _memberIndex: MemberIndex | null = null;
   /** Mention results keyed by message ID (for "also notified" footer per message). */
   @state() private mentionResultsByMessageId = new Map<string, MentionResult[]>();
 
-  /** Raw inter-agent messages to render as inline markers in agent DMs. */
+  /**
+   * Raw inter-agent messages to render as inline markers in agent DMs.
+   * Invariant: kept in compareMessageOrder order. Every writer sorts (or
+   * clears) it, and renderMessages() relies on that and does not re-sort.
+   */
   @state() private interagentMessages: Message[] = [];
 
   /** Global expand/collapse state for all inter-agent markers. */
@@ -890,6 +956,19 @@ export class ScionChatThread extends LitElement {
 
   /** Backfill single-flight guard: another backfill was requested while one was running. */
   private _backfillPending = false;
+
+  /**
+   * Backfills asked for by lightweight message events (no full payload).
+   * The first of a burst backfills at once; the rest collapse into one
+   * trailing backfill, capped so a steady stream cannot postpone it. In
+   * front of backfillV2's single-flight, a burst of N events costs at most
+   * two history requests per window.
+   */
+  private _eventBackfill: CoalescedRefresh = coalescedRefresh(() => this.backfillV2(), {
+    waitMs: 300,
+    maxWaitMs: 1500,
+    leading: true,
+  });
 
   /** Idempotency keys of currently in-flight optimistic messages. */
   private _pendingIdempotencyKeys = new Set<string>();
@@ -1523,6 +1602,9 @@ export class ScionChatThread extends LitElement {
     this.lastReadMessageId = '';
     this.showUnreadDivider = false;
 
+    // A backfill queued by the previous conversation's events is not owed.
+    this._eventBackfill.cancel();
+
     // Clear message state
     this._pendingIdempotencyKeys.clear();
     this.messageMap.clear();
@@ -1583,6 +1665,7 @@ export class ScionChatThread extends LitElement {
     // Cancel any pending jump-to-message scrollend re-check and its listeners/timers.
     this.cancelJumpScrollWatch();
     this.cancelArtifactRefresh();
+    this._eventBackfill.cancel();
     // Clean up v2 SSE listeners
     stateManager.removeEventListener('connected', this._sseReconnectHandler);
     stateManager.removeEventListener('chat-message-received', this._v2MessageHandler);
@@ -1679,23 +1762,92 @@ export class ScionChatThread extends LitElement {
 
   /** Check if a message sender is an agent (v2 multi-sender). */
   private isSenderAgent(msg: Message): boolean {
-    // Agent messages have sender like "agent:slug" or recipient patterns
-    if (msg.sender.startsWith('agent:')) return true;
-    // Check against known members
-    const member = this.members.find((m) => m.id === msg.senderId || m.email === msg.sender);
-    if (member) return member.kind === 'agent';
-    // If sender is not in the current user's perspective, check the type
-    return msg.type === 'assistant-reply' || msg.type === 'mention-reply';
+    return this.senderInfo(msg).isAgent;
   }
 
   /** Get display name for a message sender (v2 multi-sender). */
   private getSenderDisplayName(msg: Message): string {
-    const member = this.members.find((m) => m.id === msg.senderId || m.email === msg.sender);
-    if (member) return member.name;
-    // Fall back to parsing the sender string
-    if (msg.sender.startsWith('agent:')) return msg.sender.slice(6);
-    if (msg.sender.startsWith('user:')) return msg.sender.slice(5);
-    return msg.sender;
+    return this.senderInfo(msg).name;
+  }
+
+  /** The member who sent `msg`, as `members.find` by id or email would pick. */
+  private findSenderMember(msg: Message): ScionChatThread['members'][number] | undefined {
+    if (!this._memberIndex) {
+      const byId = new Map<string, number>();
+      const byEmail = new Map<string, number>();
+      this.members.forEach((m, i) => {
+        if (!byId.has(m.id)) byId.set(m.id, i);
+        if (!byEmail.has(m.email)) byEmail.set(m.email, i);
+      });
+      this._memberIndex = { byId, byEmail };
+    }
+    const { byId, byEmail } = this._memberIndex;
+    const idIdx = msg.senderId !== undefined ? byId.get(msg.senderId) : undefined;
+    const emailIdx = byEmail.get(msg.sender);
+    // The first member matching either way wins, as in a linear find.
+    const idx =
+      idIdx === undefined ? emailIdx : emailIdx === undefined ? idIdx : Math.min(idIdx, emailIdx);
+    return idx === undefined ? undefined : this.members[idx];
+  }
+
+  /** Sender name and kind for `msg`, cached until `members` changes. */
+  private senderInfo(msg: Message): SenderInfo {
+    const cached = this._senderCache.get(msg);
+    if (
+      cached &&
+      cached.sender === msg.sender &&
+      cached.senderId === msg.senderId &&
+      cached.type === msg.type
+    ) {
+      return cached;
+    }
+    const member = this.findSenderMember(msg);
+    let name: string;
+    if (member) name = member.name;
+    else if (msg.sender.startsWith('agent:')) name = msg.sender.slice(6);
+    else if (msg.sender.startsWith('user:')) name = msg.sender.slice(5);
+    else name = msg.sender;
+    // Agent messages have sender like "agent:slug"; otherwise ask the member
+    // list, and failing that, the message type.
+    const isAgent = msg.sender.startsWith('agent:')
+      ? true
+      : member
+        ? member.kind === 'agent'
+        : msg.type === 'assistant-reply' || msg.type === 'mention-reply';
+    const info = { name, isAgent, sender: msg.sender, senderId: msg.senderId, type: msg.type };
+    this._senderCache.set(msg, info);
+    return info;
+  }
+
+  /**
+   * Epoch milliseconds and calendar-date label for `msg`, cached per message.
+   * The cache is dropped when the effective display zone changes, since the
+   * label (and so the date dividers) depends on it.
+   */
+  private rowTime(msg: Message): RowTime {
+    const zone = effectiveTimeZone();
+    if (zone !== this._rowTimeZone) {
+      this._rowTimeZone = zone;
+      this._rowTimeCache = new WeakMap();
+    }
+    let cached = this._rowTimeCache.get(msg);
+    if (!cached || cached.iso !== msg.createdAt) {
+      cached = {
+        iso: msg.createdAt,
+        time: new Date(msg.createdAt).getTime(),
+        dateLabel: formatChatDate(msg.createdAt),
+      };
+      this._rowTimeCache.set(msg, cached);
+    }
+    return cached;
+  }
+
+  /** Derive the row-model values for newly ingested messages up front. */
+  private deriveRowValues(msgs: readonly Message[]): void {
+    for (const msg of msgs) {
+      this.rowTime(msg);
+      this.senderInfo(msg);
+    }
   }
 
   /** Stop the SSE stream. Called on tab hide / disconnect. */
@@ -1797,6 +1949,8 @@ export class ScionChatThread extends LitElement {
   }
 
   private mergeMessages(newMessages: Message[]): void {
+    // The objects this merge stores, for deriving their row values below.
+    const ingested: Message[] = [];
     for (const msg of newMessages) {
       const existing = this.messageMap.get(msg.id);
       // Preserve agent recipient from existing message if incoming lacks it
@@ -1826,6 +1980,7 @@ export class ScionChatThread extends LitElement {
         );
       }
       this.messageMap.set(msg.id, toStore);
+      if (toStore.type !== 'mention') ingested.push(toStore);
     }
 
     // Match the server's (created, id) order so the displayed tail is also
@@ -1849,6 +2004,8 @@ export class ScionChatThread extends LitElement {
     // remain in messageMap so ID-based dedup prevents a later backfill from
     // re-inserting them as real messages.
     this.messages = sorted.filter((m) => m.type !== 'mention');
+    // Only this batch: earlier messages were derived when they arrived.
+    this.deriveRowValues(ingested);
 
     // Track last known timestamp for backfill
     if (sorted.length > 0) {
@@ -2164,7 +2321,8 @@ export class ScionChatThread extends LitElement {
     // stateManager wraps SSE payloads as { state, data }; tolerate a flat detail too.
     const eventData: ChatEventData | undefined = detail?.data ?? detail;
     if (!eventData) {
-      void this.backfillV2();
+      // No routing data at all: it may be for this conversation.
+      this._eventBackfill.schedule();
       return;
     }
 
@@ -2172,6 +2330,19 @@ export class ScionChatThread extends LitElement {
     const eventKey = eventData.threadId || eventData.conversationKey || eventData.topicId || '';
     if (eventKey && eventKey !== this.conversationKey) {
       return; // Not for this conversation
+    }
+    // No conversation key, but routed to another project: a space thread
+    // belongs to one project, so it cannot be this one. Not applied to a DM:
+    // its projectId is inherited from the view it was opened from, while
+    // its messages carry the sender agent's project (or none).
+    if (
+      !eventKey &&
+      eventData.projectId &&
+      this.projectId &&
+      !this.conversationKey?.startsWith('dm:') &&
+      eventData.projectId !== this.projectId
+    ) {
+      return;
     }
     if (this.viewingAroundMessage) return;
 
@@ -2274,7 +2445,7 @@ export class ScionChatThread extends LitElement {
     }
 
     // Lightweight notification (no full message) — fall back to backfill.
-    void this.backfillV2();
+    this._eventBackfill.schedule();
   }
 
   /**
@@ -2756,7 +2927,9 @@ export class ScionChatThread extends LitElement {
       if (currentId !== this.fetchId) return;
       const msgs = data?.messages ?? [];
       // Store sorted flat list — grouping by DM gaps happens in renderMessages().
+      // Sorted once here; renderMessages() relies on this order.
       this.interagentMessages = [...msgs].sort(compareMessageOrder);
+      for (const msg of this.interagentMessages) this.rowTime(msg);
     } catch {
       // Non-critical
     }
@@ -5717,8 +5890,8 @@ export class ScionChatThread extends LitElement {
     let prevSender = '';
     let prevTimestamp = 0;
 
-    // Pre-sort inter-agent messages by time for gap-based grouping.
-    const iaMessages = [...this.interagentMessages].sort(compareMessageOrder);
+    // Inter-agent messages are sorted at ingest (fetchInteragentExchanges).
+    const iaMessages = this.interagentMessages;
     let iaIdx = 0;
     const hasIA = this.hasInteragentMessages;
 
@@ -5744,9 +5917,9 @@ export class ScionChatThread extends LitElement {
       let groupStart = 0;
       // Cache the current group's date string rather than recomputing it
       // from msgs[groupStart] on every iteration of a long run.
-      let groupDateStr = msgs.length > 0 ? formatChatDate(msgs[0].createdAt) : '';
+      let groupDateStr = msgs.length > 0 ? this.rowTime(msgs[0]).dateLabel : '';
       for (let i = 1; i <= msgs.length; i++) {
-        const atBoundary = i === msgs.length || formatChatDate(msgs[i].createdAt) !== groupDateStr;
+        const atBoundary = i === msgs.length || this.rowTime(msgs[i]).dateLabel !== groupDateStr;
         if (!atBoundary) continue;
         const group = msgs.slice(groupStart, i);
         // Only a visible marker actually occupies a day in the timeline —
@@ -5777,7 +5950,7 @@ export class ScionChatThread extends LitElement {
         prevSender = '';
         prevTimestamp = 0;
         groupStart = i;
-        if (i < msgs.length) groupDateStr = formatChatDate(msgs[i].createdAt);
+        if (i < msgs.length) groupDateStr = this.rowTime(msgs[i]).dateLabel;
       }
     };
 
@@ -5785,17 +5958,14 @@ export class ScionChatThread extends LitElement {
       const msg = this.messages[mi];
       // Used for both the inter-agent cutoff below and the sender-grouping
       // window further down — not tied to any single one of them.
-      const msgTime = new Date(msg.createdAt).getTime();
-      const dateStr = formatChatDate(msg.createdAt) || 'Invalid Date';
+      const { time: msgTime, dateLabel } = this.rowTime(msg);
+      const dateStr = dateLabel || 'Invalid Date';
 
       // Collect all inter-agent messages that fall before this DM message
       // and split them into one marker per day.
       if (hasIA) {
         const pendingIA: Message[] = [];
-        while (
-          iaIdx < iaMessages.length &&
-          new Date(iaMessages[iaIdx].createdAt).getTime() < msgTime
-        ) {
+        while (iaIdx < iaMessages.length && this.rowTime(iaMessages[iaIdx]).time < msgTime) {
           pendingIA.push(iaMessages[iaIdx]);
           iaIdx++;
         }

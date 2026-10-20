@@ -250,7 +250,7 @@ func (s *Server) agentPTYPath(ctx context.Context, identity Identity, agent *sto
 		// the resolved row, for the preflight and the WebSocket open alike,
 		// before any upgrade. A temporary failure, never
 		// runtime_attach_unsupported.
-		if s.conduitRenewalPathUnavailable(ctx, identity, conduitTargetRenews(res), conduitRouteCanRenew(res), conduitRoutePTY, agent.ID) {
+		if s.conduitRenewalPathUnavailable(ctx, identity, conduitTargetRenews(res), s.conduitRouteCanRenew(res), conduitRoutePTY, agent.ID) {
 			return ptyRefusal(http.StatusServiceUnavailable, ErrCodeUnavailable,
 				conduitStreamRenewalUnavailableMessage, conduitReasonStreamRenewalUnavailable)
 		}
@@ -483,7 +483,7 @@ func (u *agentPTYUpstream) Open(ctx context.Context, cols, rows int) error {
 	}
 	params := ptyStreamParams(cols, rows)
 	err := rtr.Do(ctx, agentPTYRequest(u.agent), func(ctx context.Context, res router.Resolved) error {
-		tok, _, err := u.s.mintConduitGrant(ctx, conduitGrantRequest{
+		tok, claims, err := u.s.mintConduitGrant(ctx, conduitGrantRequest{
 			Identity: u.identity,
 			Agent:    u.agent,
 			Stream:   grant.StreamHeader{Kind: grant.StreamKindPTY, Params: params},
@@ -496,7 +496,7 @@ func (u *agentPTYUpstream) Open(ctx context.Context, cols, rows int) error {
 			},
 			Via:          grant.ViaPTY,
 			TargetRenews: conduitTargetRenews(res),
-			CanRenew:     conduitRouteCanRenew(res),
+			CanRenew:     u.s.conduitRouteCanRenew(res),
 		})
 		if err != nil {
 			return err
@@ -512,7 +512,7 @@ func (u *agentPTYUpstream) Open(ctx context.Context, cols, rows int) error {
 		u.st = st
 		u.sessionID = res.Record.SessionID
 		target := conduitLeafTarget(res, st, bridge)
-		u.untrack = u.s.trackConduitUserStream(&conduitUserStream{
+		tracked := &conduitUserStream{
 			Kind:      grant.StreamKindPTY,
 			Identity:  u.identity,
 			AgentID:   u.agent.ID,
@@ -520,9 +520,11 @@ func (u *agentPTYUpstream) Open(ctx context.Context, cols, rows int) error {
 			SessionID: target.SessionID,
 			StreamID:  target.StreamID,
 			Close:     u.closeWithCode,
-			Renew:     conduitStreamRenewal(res, st.ID()),
 			Bridge:    bridge,
-		})
+		}
+		applyConduitOpenGrant(tracked, tok, claims)
+		tracked.Renew = conduitStreamRenewal(res, st, !tracked.AuthzUntil.IsZero())
+		u.untrack = u.s.trackConduitUserStream(tracked)
 		return nil
 	})
 	if err != nil {

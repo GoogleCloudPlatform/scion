@@ -67,6 +67,9 @@ type ptyConduitFixture struct {
 	// regFault, while set, fails every conduit registry operation on this
 	// hub node (the relay's and the router's).
 	regFault atomic.Bool
+	// agentClock fires the timers of the sciontool agent started last
+	// (startSciontoolAgent); its time reads f.clock.
+	agentClock *clock.Fake
 }
 
 // newPTYConduitFixture builds the fixture; mods adjust the relay options
@@ -302,9 +305,15 @@ func (f *ptyConduitFixture) startSciontoolAgent(t *testing.T, hubURL string, noP
 		Token:     func() string { return tok },
 		OnSession: func(w *conduitv1.Welcome) { admitted <- w },
 		Backoff:   &conduit.Backoff{Rand: func(int64) int64 { return 0 }},
-		Clock:     fixtureClock{Fake: clock.NewFake(f.clock.Now()), now: f.clock.Now},
 		NoPTY:     noPTY,
 	}
+	f.agentClock = clock.NewFake(f.clock.Now())
+	opts.Clock = fixtureClock{Fake: f.agentClock, now: f.clock.Now}
+	// Keepalive and write timers far out, so a test that advances
+	// f.agentClock fires only the timers under test.
+	opts.Session.PingInterval = time.Hour
+	opts.Session.PongWait = 24 * time.Hour
+	opts.Session.WriteWait = time.Hour
 	if !noPTY {
 		opts.SpawnPTY = func(_ context.Context, req sconduit.PTYRequest) (sconduit.PTYProcess, error) {
 			p := newFakePTY(req)

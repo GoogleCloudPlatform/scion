@@ -39,6 +39,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -2516,7 +2517,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 	projectID := settings.ProjectID
 	if projectID == "" {
 		projectID = config.GenerateProjectID()
-		if err := config.UpdateSetting(resolvedPath, "project_id", projectID, isGlobal); err != nil {
+		if err := config.UpdateSetting(resolvedPath, projectkeys.ConfigProjectIDKey, projectID, isGlobal); err != nil {
 			return fmt.Errorf("failed to save project_id: %w", err)
 		}
 	}
@@ -2565,8 +2566,8 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 				projectName, hubProject.Name, hubLookupID)
 
 			// Clear the stale hub project ID
-			if err := config.UpdateSetting(resolvedPath, "hub.projectId", "", isGlobal); err != nil {
-				util.Debugf("Failed to clear stale hub.projectId: %v", err)
+			if err := config.UpdateSetting(resolvedPath, projectkeys.ConfigHubProjectIDKey, "", isGlobal); err != nil {
+				util.Debugf("Failed to clear stale %s: %v", projectkeys.ConfigHubProjectIDKey, err)
 			}
 
 			// Regenerate the local project ID from the marker file or directory
@@ -2575,7 +2576,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 			} else {
 				projectID = config.GenerateProjectID()
 			}
-			if err := config.UpdateSetting(resolvedPath, "project_id", projectID, isGlobal); err != nil {
+			if err := config.UpdateSetting(resolvedPath, projectkeys.ConfigProjectIDKey, projectID, isGlobal); err != nil {
 				return fmt.Errorf("failed to save project_id: %w", err)
 			}
 		} else if hubProject != nil {
@@ -2625,7 +2626,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 				}
 				// Store the hub project ID separately — don't overwrite the
 				// local project_id (which drives config-dir paths).
-				if err := config.UpdateSetting(resolvedPath, "hub.projectId", selectedID, isGlobal); err != nil {
+				if err := config.UpdateSetting(resolvedPath, projectkeys.ConfigHubProjectIDKey, selectedID, isGlobal); err != nil {
 					return fmt.Errorf("failed to save hub project ID: %w", err)
 				}
 				hubLookupID = selectedID
@@ -2638,7 +2639,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 				}
 				// Store the hub project ID if it differs from the local one
 				if hubProjectID != "" && hubProjectID != projectID {
-					if err := config.UpdateSetting(resolvedPath, "hub.projectId", hubProjectID, isGlobal); err != nil {
+					if err := config.UpdateSetting(resolvedPath, projectkeys.ConfigHubProjectIDKey, hubProjectID, isGlobal); err != nil {
 						return fmt.Errorf("failed to save hub project ID: %w", err)
 					}
 				}
@@ -2652,7 +2653,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 			}
 			// Store the hub project ID if it differs from the local one
 			if hubProjectID != "" && hubProjectID != projectID {
-				if err := config.UpdateSetting(resolvedPath, "hub.projectId", hubProjectID, isGlobal); err != nil {
+				if err := config.UpdateSetting(resolvedPath, projectkeys.ConfigHubProjectIDKey, hubProjectID, isGlobal); err != nil {
 					return fmt.Errorf("failed to save hub project ID: %w", err)
 				}
 			}
@@ -2683,7 +2684,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 	// Always record the hub project ID in this project's own settings, even
 	// when it equals the local project_id, so the link never depends on a
 	// value inherited from another settings file.
-	if err := config.UpdateSetting(resolvedPath, "hub.projectId", effectiveHubProjectID, isGlobal); err != nil {
+	if err := config.UpdateSetting(resolvedPath, projectkeys.ConfigHubProjectIDKey, effectiveHubProjectID, isGlobal); err != nil {
 		return fmt.Errorf("failed to save hub project ID: %w", err)
 	}
 
@@ -2939,8 +2940,8 @@ func markProjectUnlinked(stderr io.Writer, resolvedPath string, isGlobal bool) e
 	if err := config.UpdateSetting(resolvedPath, "hub.linked", "false", isGlobal); err != nil {
 		return fmt.Errorf("failed to save linked state: %w", err)
 	}
-	if err := config.UpdateSetting(resolvedPath, "hub.projectId", "", isGlobal); err != nil {
-		util.Debugf("Failed to clear hub.projectId: %v", err)
+	if err := config.UpdateSetting(resolvedPath, projectkeys.ConfigHubProjectIDKey, "", isGlobal); err != nil {
+		util.Debugf("Failed to clear %s: %v", projectkeys.ConfigHubProjectIDKey, err)
 	}
 	removeLinkEntry(stderr, resolvedPath)
 	return nil

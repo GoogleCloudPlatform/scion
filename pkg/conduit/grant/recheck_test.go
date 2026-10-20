@@ -15,7 +15,10 @@
 package grant
 
 import (
+	"context"
+	"crypto/ed25519"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -159,4 +162,61 @@ func mustKeySet(t *testing.T, keys []PublicKey) KeySet {
 		t.Fatal(err)
 	}
 	return ks
+}
+
+// TestVerifyRecheck_ExpiredKeyReportedLast (design v2.21.36 §3.5): a key
+// past its not_after never masks another refusal in the re-check mode. A
+// bad signature, a passed acceptance window and a binding mismatch are
+// reported as such; ErrKeyExpired is reported only for an otherwise valid
+// grant.
+func TestVerifyRecheck_ExpiredKeyReportedLast(t *testing.T) {
+	f := newFixture(t)
+	open := f.mint(t, recheckOpenClaims())
+	pub, _ := f.keys.Lookup(f.signer.KeyID)
+	pub.NotAfter = t0.Add(10 * time.Second)
+	expired := mustKeySet(t, []PublicKey{pub})
+	at := t0.Add(time.Minute) // past the key's not_after, within the window
+	until := recheckOpenClaims().AuthzUntil
+
+	if _, err := VerifyRecheck(open, expired, recheckExpect(), at); !errors.Is(err, ErrKeyExpired) {
+		t.Fatalf("otherwise valid grant: err = %v, want ErrKeyExpired", err)
+	}
+	if _, err := VerifyRecheck(forgeSignature(t, open), expired, recheckExpect(), at); !errors.Is(err, ErrSignature) || errors.Is(err, ErrKeyExpired) {
+		t.Fatalf("expired key and bad signature: err = %v, want ErrSignature", err)
+	}
+	if _, err := VerifyRecheck(open, expired, recheckExpect(), until.Add(RecheckAllowance+time.Second)); !errors.Is(err, ErrRecheckWindow) {
+		t.Fatalf("expired key and window passed: err = %v, want ErrRecheckWindow", err)
+	}
+	other := recheckExpect()
+	other.Target.SessionID = "sess-2"
+	if _, err := VerifyRecheck(open, expired, other, at); !errors.Is(err, ErrTarget) {
+		t.Fatalf("expired key and binding mismatch: err = %v, want ErrTarget", err)
+	}
+}
+
+// TestVerify_AdmissionExpiredKeyBeforeSignature: admission verification is
+// unchanged: a key past its not_after is refused with ErrKeyExpired before
+// the signature is checked, even for a token whose signature is bad.
+func TestVerify_AdmissionExpiredKeyBeforeSignature(t *testing.T) {
+	f := newFixture(t)
+	tok := forgeSignature(t, f.mint(t, baseClaims()))
+	pub, _ := f.keys.Lookup(f.signer.KeyID)
+	pub.NotAfter = t0.Add(-time.Second)
+	keys := mustKeySet(t, []PublicKey{pub})
+	cache := NewMemoryReplayCache(func() time.Time { return t0 }, 0)
+	if _, err := Verify(context.Background(), tok, keys, baseExpect(), cache, t0); !errors.Is(err, ErrKeyExpired) {
+		t.Fatalf("admission: err = %v, want ErrKeyExpired before the signature", err)
+	}
+}
+
+// forgeSignature returns tok with its signature replaced by a well-formed
+// but wrong one.
+func forgeSignature(t *testing.T, tok []byte) []byte {
+	t.Helper()
+	parts := strings.Split(string(tok), ".")
+	if len(parts) != 3 {
+		t.Fatalf("token %q is not a compact JWS", tok)
+	}
+	sig := make([]byte, ed25519.SignatureSize)
+	return []byte(parts[0] + "." + parts[1] + "." + b64.EncodeToString(sig))
 }

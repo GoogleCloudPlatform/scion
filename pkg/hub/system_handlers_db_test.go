@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -346,5 +347,80 @@ func TestSystemRuntime_DBBackedValidationFailure400(t *testing.T) {
 	rr := putSystem(t, srv, "/api/v1/system/runtime", `{"runtime":"container"}`)
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestSystemRuntime_GlobalActiveProfileFromProjectDir checks that the
+// system runtime handlers resolve the global settings, not a project found
+// from the server's working directory (ptone/scion#5362): with the server
+// started inside a project whose active_profile differs, the PUT writes the
+// global active profile and the GET reports it, as the co-located broker
+// (which resolves its default runtime from the global settings) sees it.
+func TestSystemRuntime_GlobalActiveProfileFromProjectDir(t *testing.T) {
+	settingsPath := tempSettingsHome(t)
+	t.Setenv("SCION_ACTIVE_PROFILE", "")
+	if err := os.WriteFile(settingsPath, []byte(
+		"schema_version: \"1\"\nactive_profile: global-profile\nprofiles:\n  global-profile:\n    runtime: docker\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	project := t.TempDir()
+	projectScion := filepath.Join(project, ".scion")
+	if err := os.MkdirAll(projectScion, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectScion, "settings.yaml"), []byte(
+		"schema_version: \"1\"\nactive_profile: project-profile\nprofiles:\n  project-profile:\n    runtime: docker\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(project)
+
+	// The project layer is really there: a cwd-resolved load merges it.
+	merged, _, err := config.LoadEffectiveSettings("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := merged.ConfiguredActiveProfile(); got != "project-profile" {
+		t.Fatalf("test setup: cwd-resolved active profile = %q, want project-profile", got)
+	}
+	if got := activeProfileName(); got != "global-profile" {
+		t.Fatalf("activeProfileName() = %q, want global-profile", got)
+	}
+
+	srv, st, _ := newSQLiteOpsServer(t, nil, map[string]string{
+		"profiles": `{"global-profile":{"runtime":"docker"},"project-profile":{"runtime":"docker"}}`,
+	})
+	srv.imageChecker = imagecheck.NewChecker()
+
+	rr := httptest.NewRecorder()
+	req := adminRequest(http.MethodPut, "/api/v1/system/runtime", `{"runtime":"container"}`)
+	req.RemoteAddr = "127.0.0.1:1234"
+	srv.handleSystemRuntime(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("runtime PUT: %d %s", rr.Code, rr.Body.String())
+	}
+
+	_, doc := hubSettingDocMap(t, st, "profiles")
+	globalDoc, _ := doc["global-profile"].(map[string]interface{})
+	if globalDoc["runtime"] != "container" {
+		t.Errorf("profiles.global-profile.runtime = %v, want container", globalDoc["runtime"])
+	}
+	projectDoc, _ := doc["project-profile"].(map[string]interface{})
+	if projectDoc["runtime"] != "docker" {
+		t.Errorf("profiles.project-profile.runtime = %v, want docker (unchanged)", projectDoc["runtime"])
+	}
+
+	rr = httptest.NewRecorder()
+	req = adminRequest(http.MethodGet, "/api/v1/system/runtime", "")
+	req.RemoteAddr = "127.0.0.1:1234"
+	srv.handleSystemRuntime(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("runtime GET: %d %s", rr.Code, rr.Body.String())
+	}
+	var resp systemRuntimeResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Configured != "container" {
+		t.Errorf("GET configured = %q, want container (the global active profile)", resp.Configured)
 	}
 }

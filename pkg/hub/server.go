@@ -1705,9 +1705,9 @@ type Server struct {
 	conduitAdmissionKeyOnce sync.Once
 	conduitAdmissionAEADv   cipher.AEAD
 	conduitAdmissionKeyErr  error
-	// conduitRenewal verifies latest grants and mints renewal grants for
-	// relay stream re-checks (conduit_renewal.go); nil until set.
-	conduitRenewal atomic.Pointer[conduitRenewalGrants]
+	// conduitStreamRenewer is the renewal path of relay-held streams
+	// (conduit_renewal.go); nil until StartConduitExternal installs it.
+	conduitStreamRenewer atomic.Pointer[conduitStreamRenewer]
 	// conduitAuthz re-checks the user streams this node owns (nil while
 	// no relay runs); conduitAuthzMetrics is its counter.
 	conduitAuthz        atomic.Pointer[conduitStreamAuthz]
@@ -1717,8 +1717,11 @@ type Server struct {
 	conduitOpenRefusedMetrics atomic.Pointer[conduitOpenRefusedMetrics]
 	// conduitScopeOfTest, when set (tests only, never in production),
 	// replaces conduitScopeFor in the open mint (conduitScopeOf).
-	conduitScopeOfTest  conduitScopeFunc
-	conduitBrokerRevoke atomic.Pointer[conduitBrokerRevoker] // broker session re-check (conduit_broker_revoke.go)
+	conduitScopeOfTest conduitScopeFunc
+	// conduitRouteCanRenewTest, when set (tests only, never in production),
+	// replaces conduitRouteCanRenew's decision.
+	conduitRouteCanRenewTest conduitRouteRenewFunc
+	conduitBrokerRevoke      atomic.Pointer[conduitBrokerRevoker] // broker session re-check (conduit_broker_revoke.go)
 	// portProxyMetrics counts agent port proxy upstream header timeouts
 	// (port_proxy_metrics.go); nil until SetPortProxyMetrics.
 	portProxyMetrics atomic.Pointer[portProxyMetrics]

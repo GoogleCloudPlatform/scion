@@ -171,6 +171,9 @@ var agentAllowed = map[string]bool{
 	// an agent runner can verify a run by absence on a target hub.
 	"hub.test-identity.cleanup":    true,
 	"hub.test-identity.provenance": true,
+	// issue-admin (X4b, DEC-7) issues through the profile's admin
+	// delegation; it needs a profile in every mode.
+	"hub.test-identity.issue-admin": true,
 
 	// Project thread groups (ptone/scion#4424, design section 4 and
 	// decision Q3): agents may list, read, create, rename and re-file

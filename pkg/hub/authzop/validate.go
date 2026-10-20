@@ -75,6 +75,11 @@ func (s *OperationSpec) Validate() error {
 		if !httpLikeEntryPoints[ep.Kind] && ep.Method != "" {
 			errs = append(errs, fmt.Errorf("entry point [%d]: method must be empty for %s entry points", i, ep.Kind))
 		}
+		if !ep.Response.Valid() {
+			errs = append(errs, fmt.Errorf("entry point [%d]: unknown response sensitivity %q", i, ep.Response))
+		} else if ep.Response != "" && !httpLikeEntryPoints[ep.Kind] {
+			errs = append(errs, fmt.Errorf("entry point [%d]: response sensitivity is only valid on HTTP-like entry points, not %s", i, ep.Kind))
+		}
 		key := string(ep.Kind) + ":" + ep.Method + ":" + ep.Pattern + "#" + ep.Variant
 		if epSeen[key] {
 			errs = append(errs, fmt.Errorf("entry point [%d]: duplicate entry point %s", i, key))

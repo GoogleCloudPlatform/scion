@@ -178,9 +178,11 @@ type HubConduitConfig struct {
 	// whether targets enforce user streams' authorization deadlines
 	// locally (design §3.5, Target-side deadlines). The value is published
 	// to targets with the grant keys (GET /api/v1/conduit/grant-keys).
-	// Enforce requires the hub's renewal driver, which lands in a
-	// follow-up change; until then, enforce refuses user streams to
-	// renewal-capable targets (503 unavailable, stream_renewal_unavailable).
+	// The hub renews hub-held user streams to renewal-capable targets in
+	// both modes. With enforce, an open the hub cannot keep renewed (a
+	// relay-held tunnel or an external-relay hub-held stream until relay
+	// renewals land, or a principal without a renewal path) is refused
+	// (503 unavailable, stream_renewal_unavailable).
 	TargetStreamDeadlines string `json:"targetStreamDeadlines,omitempty" yaml:"targetStreamDeadlines,omitempty" koanf:"targetStreamDeadlines"`
 	// PeerSecret is the dedicated relay-peer secret (design §3.9): the
 	// HMAC key of every relay-peer call is derived from it wherever a
