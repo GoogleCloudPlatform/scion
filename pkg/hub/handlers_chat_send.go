@@ -411,9 +411,7 @@ func (s *Server) validateChatSendInputMode(ctx context.Context, user UserIdentit
 					return "", nil, chatSendValidationError(fmt.Sprintf("attachment %q is not available in this conversation", aid))
 				}
 				if state == artifacts.AttachmentUsable {
-					attachmentRefs = append(attachmentRefs, AttachmentRef{
-						ID: info.ID, Name: info.Name, MimeType: info.MediaType, Size: info.Size, artifact: true,
-					})
+					attachmentRefs = append(attachmentRefs, newArtifactAttachmentRef(info))
 					continue
 				}
 			}

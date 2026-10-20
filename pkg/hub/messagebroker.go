@@ -826,6 +826,20 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 		return
 	}
 
+	// Attachment handling on this re-publish path runs in three steps, in
+	// this order (ptone/scion#4596):
+	//  1. link the AttachmentStore refs parsed from the transport metadata
+	//     (sender-owned files only, below);
+	//  2. delete the transport key from the metadata;
+	//  3. parse the metadata again for the SSE event and the member fan-out.
+	// Step 3 runs after step 2 on purpose: refs that came in transport
+	// metadata are never re-published from here, and parseAttachmentRefs can
+	// never build a reference marked as an artifact attachment. Attachments
+	// stored as artifacts never travel in transport metadata: the sending
+	// handler validates them from its request, binds them to the message it
+	// stores itself, and publishes them; this path never binds or publishes
+	// one. Pinned by TestDeliverToUser_RepublishCarriesNoArtifactAttachments.
+
 	// W7: Link the sender's attachments, recorded before publish, to the message
 	// row created here — the ID they need exists nowhere else. Done before the
 	// SSE event so a client refetching on it already sees them. Only files the

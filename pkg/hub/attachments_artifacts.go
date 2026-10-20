@@ -102,6 +102,18 @@ func (s *Server) bindChatAttachments(ctx context.Context, user UserIdentity, mes
 	return out
 }
 
+// newArtifactAttachmentRef returns the reference to artifact attachment
+// info, marked as stored in the artifact service. It is the only place
+// that sets AttachmentRef.artifact (pinned by
+// TestArtifactAttachmentRef_OnlyConstructorSetsFlag): every other
+// reference, in particular one decoded from message metadata, from JSON or
+// built for history, leaves the flag false, so only refs that send
+// validation built from a usable upload reach the chat subjects and the
+// bind step.
+func newArtifactAttachmentRef(info artifacts.AttachmentInfo) AttachmentRef {
+	return AttachmentRef{ID: info.ID, Name: info.Name, MimeType: info.MediaType, Size: info.Size, artifact: true}
+}
+
 // legacyAttachmentRefs returns the AttachmentStore references of refs.
 func legacyAttachmentRefs(refs []AttachmentRef) []AttachmentRef {
 	var out []AttachmentRef

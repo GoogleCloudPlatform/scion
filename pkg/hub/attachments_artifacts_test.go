@@ -21,6 +21,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -36,6 +37,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -857,4 +859,81 @@ func TestAttachmentArtifacts_NoLegacyStoreAnswersNotFound(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, missing.status, missing.body)
 	requireSameAnswer(t, missing, f.download(t, f.ub, id))
 	require.Equal(t, http.StatusOK, f.download(t, f.uc, id).status)
+}
+
+// TestArtifactAttachmentRef_HistoryNeverFlags: the history merge builds
+// plain references (design section 3); history applies the read decision
+// itself, and its refs never reach the chat subjects or the bind step.
+func TestArtifactAttachmentRef_HistoryNeverFlags(t *testing.T) {
+	f := newRefFixture(t)
+	enableAttachmentArtifacts(t, f)
+	id := f.uploadAs(t, f.ua, f.projA.ID, "notes.txt", "history")
+	resp := f.sendWith(t, f.ua, f.topicA, id)
+	merged := f.srv.mergeArtifactAttachments(f.sessionContext(f.ua), []string{resp.ID}, nil)
+	require.Len(t, merged[resp.ID], 1)
+	require.Equal(t, id, merged[resp.ID][0].ID)
+	require.False(t, merged[resp.ID][0].artifact, "history references are never flagged")
+}
+
+// TestDeliverToUser_RepublishCarriesNoArtifactAttachments pins the order of
+// the three attachment steps of deliverToUser (design section 4): a bus
+// message whose transport metadata names a legacy attachment of the sender
+// and an artifact attachment id links the legacy one, leaves the artifact
+// row in its upload scope, publishes no reference that names the artifact
+// id or is flagged, and leaves no transport key behind.
+func TestDeliverToUser_RepublishCarriesNoArtifactAttachments(t *testing.T) {
+	f := newRefFixture(t)
+	st := enableAttachmentArtifacts(t, f)
+	ctx := context.Background()
+	legacy := f.attach(t, f.projA.ID, f.aa.ID, "legacy.txt")
+	artifactID := f.uploadAs(t, f.ua, f.projA.ID, "stored.txt", "stored as an artifact")
+	encoded, ok := attachmentRefsMetadata([]AttachmentRef{
+		{ID: legacy, Name: "legacy.txt"},
+		{ID: artifactID, Name: "stored.txt"},
+	})
+	require.True(t, ok)
+
+	events := NewChannelEventPublisher()
+	t.Cleanup(events.Close)
+	ch, unsubscribe := events.Subscribe("user." + f.ub.ID + ".message")
+	t.Cleanup(unsubscribe)
+	proxy := NewMessageBrokerProxy(nil, f.st, events, func() AgentDispatcher { return &brokerMockDispatcher{} }, slog.Default())
+	proxy.webChatStore = f.wcs
+	var fanned [][]AttachmentRef
+	proxy.memberFanout = func(_ context.Context, _ *store.Message, refs []AttachmentRef, _ []artifacts.MessageRef) {
+		fanned = append(fanned, refs)
+	}
+
+	msg := messages.NewInstruction("agent:aa", "user:bob", "here are the files")
+	msg.SenderID = f.aa.ID
+	msg.RecipientID = f.ub.ID
+	msg.Metadata = map[string]string{attachmentsMetadataKey: encoded}
+	proxy.deliverToUser(ctx, f.projA.ID, "project."+f.projA.ID+".user.message", msg)
+
+	result, err := f.st.ListMessages(ctx, store.MessageFilter{RecipientID: f.ub.ID}, store.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, result.Items, 1)
+	linked, err := f.wcs.GetAttachmentsByMessage(ctx, result.Items[0].ID)
+	require.NoError(t, err)
+	require.Len(t, linked, 1)
+	require.Equal(t, legacy, linked[0].ID, "the sender's legacy attachment is linked")
+
+	a, err := st.GetAttachment(ctx, artifactID)
+	require.NoError(t, err)
+	require.Equal(t, artifacts.ScopeKindUpload, a.ScopeKind, "this path never binds an artifact attachment")
+
+	select {
+	case evt := <-ch:
+		require.NotContains(t, string(evt.Data), artifactID, "the SSE event names no artifact attachment")
+	case <-time.After(5 * time.Second):
+		t.Fatal("no SSE event")
+	}
+	for _, refs := range fanned {
+		for _, ref := range refs {
+			require.NotEqual(t, artifactID, ref.ID, "the member fan-out names no artifact attachment")
+			require.False(t, ref.artifact)
+		}
+	}
+	_, present := msg.Metadata[attachmentsMetadataKey]
+	require.False(t, present, "the transport key is stripped")
 }
