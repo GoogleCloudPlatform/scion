@@ -57,6 +57,7 @@ const (
 func tiaGateServerConfig() ServerConfig {
 	cfg := testServerConfig()
 	cfg.HubID = tiaHubID
+	cfg.HubIDPinned = true
 	cfg.EnableTestIdentities = true
 	cfg.Workstation = false
 	cfg.WebSessionKeySource = signingKeySourceGenerated
@@ -398,8 +399,12 @@ func TestTestInfraMarker_NoRouteOrHubCodeTouchesIt(t *testing.T) {
 	}
 	// The enforcing half: no production file in pkg/hub (any subpackage) or
 	// pkg/store references the marker's ent entity or the pkg/testinfra
-	// writer, so no handler can reach it. The hub never reads it either: cmd
-	// reads it once at startup and passes the result in ServerConfig.
+	// writers (Mark, Unmark, Delegate), so no handler can reach them. The
+	// one exception is the read-only binding read of the offline delegation
+	// redeem gate (phase DL), pinned below: it may name the entity, and
+	// nothing else may.
+	const bindingReader = "../store/entadapter/test_infra_binding_read.go"
+	sawBindingReader := false
 	for _, dir := range []string{".", "../store"} {
 		// pkgmove:scan-covers pkg/hub/maintenance
 		// recursive walk of "." already includes pkg/hub/maintenance (no SkipDir).
@@ -415,6 +420,21 @@ func TestTestInfraMarker_NoRouteOrHubCodeTouchesIt(t *testing.T) {
 				return err
 			}
 			src := string(data)
+			// The offline-delegation writer's enum value never appears in
+			// hub or store production code: only pkg/testinfra writes an
+			// offline delegation.
+			assert.False(t, strings.Contains(src, "GrantorKindTestInfraOffline"), "%s references the offline grantor kind enum (only pkg/testinfra writes it)", path)
+			if filepath.ToSlash(path) == bindingReader {
+				sawBindingReader = true
+				// Read-only, and never the web session key or attested
+				// facts (DL advisor condition (b)).
+				for _, banned := range []string{"pkg/testinfra", "WebSessionKey", "Attested", "Create()", "Update()", "UpdateOne", "Delete()", "DeleteOne", "Exec("} {
+					assert.False(t, strings.Contains(src, banned), "%s must stay a read-only binding read; it references %s", path, banned)
+				}
+				assert.Contains(t, src, "Select(testinframarker.FieldHubID, testinframarker.FieldClass, testinframarker.FieldCreatedAt)",
+					"%s selects exactly the hub id, class and creation time", path)
+				return nil
+			}
 			for _, banned := range []string{"TestInfraMarker", "testinframarker", "pkg/testinfra"} {
 				assert.False(t, strings.Contains(src, banned), "%s references %s", path, banned)
 			}
@@ -422,6 +442,7 @@ func TestTestInfraMarker_NoRouteOrHubCodeTouchesIt(t *testing.T) {
 		})
 		require.NoError(t, err)
 	}
+	assert.True(t, sawBindingReader, "the binding reader %s exists and was scanned", bindingReader)
 }
 
 // --- G4 / G8: settings write paths -------------------------------------------

@@ -368,7 +368,7 @@ func TestFlatBranches_NeverReachProfileTier(t *testing.T) {
 		// agent_defaults
 		"VersionedSettings.ResolveHarnessConfig",
 		"VersionedSettings.ResolveCloneDepthWithSource",
-		"VersionedSettings.ResolveImageRegistry",
+		"VersionedSettings.ImageRegistryLayers",
 		"VersionedSettings.ProfileHarnessOverrideImage",
 		"VersionedSettings.ProfileHarnessOverrideImagePullPolicy",
 		"VersionedSettings.TierResources",

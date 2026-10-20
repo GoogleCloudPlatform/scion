@@ -16,6 +16,7 @@ package hub
 
 import (
 	"sort"
+	"strings"
 
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
@@ -144,3 +145,108 @@ func healthSummarySACheck(list *HealthSummaryHubInstances) *HealthSummarySACheck
 		Instances: labels,
 	}
 }
+
+// saAssignIAMReadRole is the role the hub's identity needs in a service
+// account's GCP project to run the assignment check for that account.
+const saAssignIAMReadRole = "roles/iam.securityReviewer"
+
+// hubIdentityRefusedIAMRead reports whether err, from a failed assignment
+// check, is a plain permission-denied refusal of the hub's own identity.
+// Only that case gets the detailed end-user text: a disabled API, a VPC
+// Service Controls refusal, any other ErrorInfo reason, any precondition
+// detail and every other error code return false and keep the generic
+// text. err is only classified; none of its text is shown to the caller.
+func hubIdentityRefusedIAMRead(err error) bool {
+	if err == nil || status.Code(err) != codes.PermissionDenied {
+		return false
+	}
+	st, ok := status.FromError(err)
+	if !ok {
+		return false
+	}
+	if strings.Contains(st.Message(), "vpcServiceControlsUniqueIdentifier") {
+		return false
+	}
+	for _, d := range st.Details() {
+		switch v := d.(type) {
+		case *errdetails.ErrorInfo:
+			if v.GetReason() != "IAM_PERMISSION_DENIED" {
+				return false
+			}
+		case *errdetails.PreconditionFailure:
+			return false
+		}
+	}
+	return true
+}
+
+// saAssignIAMReadDeniedMessage is the end-user text when the assignment
+// check failed because the hub's identity may not read IAM policy in the
+// service account's GCP project. Its only inputs are that project ID and
+// the hub's service account email; it returns "" when either is empty or
+// is not shaped like a GCP project ID or account email (see
+// saAssignSafeProjectID and saAssignSafeEmail), so the caller falls back
+// to the generic text. It never names the target
+// account, so it reads the same whether or not that account exists.
+func saAssignIAMReadDeniedMessage(gcpProjectID, hubSAEmail string) string {
+	if !saAssignSafeProjectID(gcpProjectID) || !saAssignSafeEmail(hubSAEmail) {
+		return ""
+	}
+	return "Could not verify your permission to use this GCP service account: " +
+		"the Hub could not read IAM policy in GCP project " + gcpProjectID + ". " +
+		"The Hub's service account " + hubSAEmail + " needs the IAM Security Reviewer " +
+		"role (" + saAssignIAMReadRole + ") on that project. A GCP project admin can " +
+		"grant it with: gcloud projects add-iam-policy-binding " + gcpProjectID +
+		` --member="serviceAccount:` + hubSAEmail + `" --role="` + saAssignIAMReadRole + `"`
+}
+
+// saAssignSafeProjectID reports whether s can be shown as a GCP project
+// ID in the suggested command: non-empty, at most 254 bytes, and each
+// ':'-separated segment (domain-scoped IDs have two) non-empty, starting
+// with a lowercase letter and using only lowercase letters, digits, '-'
+// and '.'. A value starting with '-' would read as a gcloud flag.
+func saAssignSafeProjectID(s string) bool {
+	if s == "" || len(s) > 254 {
+		return false
+	}
+	for _, seg := range strings.Split(s, ":") {
+		if seg == "" || seg[0] < 'a' || seg[0] > 'z' || !saAssignIdentChars(seg, false) {
+			return false
+		}
+	}
+	return true
+}
+
+// saAssignSafeEmail reports whether s can be shown as the hub's service
+// account email in the suggested command: at most 254 bytes, exactly one
+// '@', both parts non-empty and starting with a lowercase letter or digit,
+// and only lowercase letters, digits, '-', '.' and '_'.
+func saAssignSafeEmail(s string) bool {
+	if len(s) > 254 || strings.Count(s, "@") != 1 {
+		return false
+	}
+	local, domain, _ := strings.Cut(s, "@")
+	for _, part := range []string{local, domain} {
+		if part == "" || !saAssignAlnum(part[0]) || !saAssignIdentChars(part, true) {
+			return false
+		}
+	}
+	return true
+}
+
+// saAssignIdentChars reports whether s uses only lowercase letters,
+// digits, '-' and '.', plus '_' when underscore is set.
+func saAssignIdentChars(s string, underscore bool) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case saAssignAlnum(c), c == '-', c == '.':
+		case underscore && c == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func saAssignAlnum(c byte) bool { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') }

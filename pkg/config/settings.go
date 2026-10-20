@@ -15,7 +15,6 @@
 package config
 
 import (
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -25,7 +24,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
-	"gopkg.in/yaml.v3"
 )
 
 // Note: Settings files support YAML (preferred) and JSONC formats.
@@ -281,13 +279,6 @@ func mergeMaps(base, override map[string]string) map[string]string {
 	return result
 }
 
-// LoadSettings loads and merges settings from the hierarchy using Koanf.
-// Priority: Env vars > Project > Global > Defaults
-// Supports both YAML (.yaml/.yml) and JSON (.json) files, preferring YAML.
-func LoadSettings(projectPath string) (*Settings, error) {
-	return LoadSettingsKoanf(projectPath)
-}
-
 func expandEnvMap(m map[string]string) map[string]string {
 	if m == nil {
 		return nil
@@ -498,70 +489,23 @@ func MergeSettings(base *Settings, data []byte) error {
 	return nil
 }
 
-// SaveSettings saves the settings to the specified location in YAML format.
-func SaveSettings(projectPath string, settings *Settings, global bool) error {
-	var targetPath string
-	if global {
-		globalDir, err := GetGlobalDir()
-		if err != nil {
-			return err
-		}
-		targetPath = filepath.Join(globalDir, "settings.yaml")
-	} else {
-		if projectPath == "" {
-			return fmt.Errorf("project path required for local settings")
-		}
-		targetPath = filepath.Join(projectPath, "settings.yaml")
-	}
-
-	dir := filepath.Dir(targetPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-
-	data, err := yaml.Marshal(settings)
-	if err != nil {
-		return err
-	}
-
-	return os.WriteFile(targetPath, data, 0644)
-}
-
-// SaveSettingsJSON saves the settings to the specified location in JSON format.
-// This is provided for backward compatibility.
-func SaveSettingsJSON(projectPath string, settings *Settings, global bool) error {
-	var targetPath string
-	if global {
-		globalDir, err := GetGlobalDir()
-		if err != nil {
-			return err
-		}
-		targetPath = filepath.Join(globalDir, "settings.json")
-	} else {
-		if projectPath == "" {
-			return fmt.Errorf("project path required for local settings")
-		}
-		targetPath = filepath.Join(projectPath, "settings.json")
-	}
-
-	dir := filepath.Dir(targetPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-
-	data, err := json.MarshalIndent(settings, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	return os.WriteFile(targetPath, data, 0644)
-}
-
 // UpdateSetting updates a specific setting key in the specified scope (global or local).
 // It reads from existing settings file (YAML or JSON) and writes to YAML format.
 // If the existing file is in v1 versioned format (has schema_version), it delegates
 // to UpdateVersionedSetting to preserve the format.
+//
+// A key that would be accepted and then never read at that layer (see
+// ValidateSettingWrite) is rejected with an error matching
+// ErrSettingNotWritable, and nothing is read or written.
 func UpdateSetting(projectPath string, key string, value string, global bool) error {
+	// Before any read, lock or migration, so a rejected key changes nothing.
+	// A project path that is the global directory itself (for example the
+	// CLI's root --global) writes the global settings file, so it counts as
+	// the global layer.
+	layerGlobal := global || (projectPath != "" && IsGlobalProjectDir(projectPath))
+	if err := ValidateSettingWrite(key, layerGlobal); err != nil {
+		return err
+	}
 	var dir string
 	if global {
 		globalDir, err := GetGlobalDir()
@@ -575,11 +519,20 @@ func UpdateSetting(projectPath string, key string, value string, global bool) er
 		}
 		// Resolve through GetProjectConfigDir so that git projects with split
 		// storage write to the external config dir (~/.scion/project-configs/…)
-		// — the same location LoadSettingsKoanf reads from. This also
+		// — the same location the settings loader reads from. This also
 		// migrates a project's legacy id file to its canonical name as a
 		// side effect, via ReadProjectID.
 		dir = GetProjectConfigDir(projectPath)
 	}
+
+	// One settings lock from the format check through any auto-migration
+	// to the update, so no other writer runs in between (see
+	// LockSettingsDir).
+	lock, err := LockSettingsDir(dir)
+	if err != nil {
+		return err
+	}
+	defer lock.Unlock()
 
 	// Find existing settings file (YAML or JSON)
 	existingPath := GetSettingsPath(dir)
@@ -590,24 +543,24 @@ func UpdateSetting(projectPath string, key string, value string, global bool) er
 		if err == nil {
 			if version, _ := DetectSettingsFormat(data); version != "" {
 				// Delegate to versioned handler to preserve v1 format
-				return UpdateVersionedSetting(dir, key, value)
+				return updateVersionedSettingLocked(lock, dir, key, value)
 			}
 			// Legacy format detected — auto-migrate to v1 before updating
 			fmt.Fprintf(os.Stderr, "Warning: settings file %s uses legacy format. Auto-migrating to v1 schema.\n", existingPath)
 			fmt.Fprintf(os.Stderr, "  You can also run 'scion config migrate' to migrate manually.\n")
-			result, err := MigrateSettingsFile(dir, false)
+			result, err := migrateSettingsFileLocked(lock, dir, false)
 			if err != nil {
 				return fmt.Errorf("auto-migration of legacy settings failed: %w\n  Run 'scion config migrate' to migrate manually", err)
 			}
 			for _, w := range result.Warnings {
 				fmt.Fprintf(os.Stderr, "  Migration warning: %s\n", w)
 			}
-			return UpdateVersionedSetting(dir, key, value)
+			return updateVersionedSettingLocked(lock, dir, key, value)
 		}
 	}
 
 	// No existing file — create a new v1 settings file via the versioned handler
-	return UpdateVersionedSetting(dir, key, value)
+	return updateVersionedSettingLocked(lock, dir, key, value)
 }
 
 func GetSettingValue(s *Settings, key string) (string, error) {
@@ -866,8 +819,9 @@ func (s *Settings) IsHubExplicitlyDisabled() bool {
 // the whole content of a versioned file (ptone/scion#3497). A JSON file is
 // converted to settings.yaml, as before. A missing file is left missing.
 //
-// It does not take LockSettingsFile, as before; a caller that needs the
-// read-modify-write serialised holds the lock around the call.
+// It takes the settings lock for the settings directory (see
+// LockSettingsDir); a caller that already holds it, for a read-modify-write
+// of its own, uses DeleteHubConnectionLocked.
 func DeleteHubConnection(projectPath string, name string, global bool) error {
 	var dir string
 	if global {
@@ -882,9 +836,23 @@ func DeleteHubConnection(projectPath string, name string, global bool) error {
 		}
 		// Resolve through GetProjectConfigDir so that git projects with split
 		// storage write to the external config dir (~/.scion/project-configs/…)
-		// — the same location LoadSettingsKoanf reads from.
+		// — the same location the settings loader reads from.
 		dir = GetProjectConfigDir(projectPath)
 	}
 
-	return deleteHubConnectionFromFile(dir, name)
+	lock, err := LockSettingsDir(dir)
+	if err != nil {
+		return err
+	}
+	defer lock.Unlock()
+	return deleteHubConnectionFromFile(lock, dir, name)
+}
+
+// DeleteHubConnectionLocked is DeleteHubConnection for the settings
+// directory whose settings lock the caller holds.
+func DeleteHubConnectionLocked(lock *SettingsLock, name string) error {
+	if err := lock.checkFor(filepath.Join(lock.dir, "settings.yaml")); err != nil {
+		return err
+	}
+	return deleteHubConnectionFromFile(lock, lock.dir, name)
 }

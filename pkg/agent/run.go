@@ -826,7 +826,10 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		if provenance != nil {
 			registryProfile = provenance.Profile
 		}
-		imageRegistry := settings.ResolveImageRegistry(registryProfile)
+		// The node env (this broker's SCION_IMAGE_REGISTRY) beats every
+		// settings layer (ptone/scion#3916).
+		imageRegistry := config.ResolveImageRegistryLayers(
+			settings.ImageRegistryLayers(registryProfile, config.ImageRegistryFromEnv())).Value
 		if imageRegistry != "" && imagecheck.IsBareImageName(resolvedImage) {
 			runtimeName := ""
 			if m.Runtime != nil {
@@ -847,14 +850,14 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			} else {
 				rewritten := config.RewriteImageRegistry(resolvedImage, imageRegistry)
 				if rewritten != resolvedImage {
-					util.Debugf("image resolution: image_registry rewrite %s -> %s", resolvedImage, rewritten)
+					util.Debugf("image resolution: image_registry rewrite %s -> %s", resolvedImage, config.RedactImageRegistry(rewritten))
 					resolvedImage = rewritten
 				}
 			}
 		} else if imageRegistry != "" {
 			rewritten := config.RewriteImageRegistry(resolvedImage, imageRegistry)
 			if rewritten != resolvedImage {
-				util.Debugf("image resolution: image_registry rewrite %s -> %s", resolvedImage, rewritten)
+				util.Debugf("image resolution: image_registry rewrite %s -> %s", resolvedImage, config.RedactImageRegistry(rewritten))
 				resolvedImage = rewritten
 			}
 		}
@@ -1855,14 +1858,15 @@ authDone:
 		} else if globalSettings != nil && (globalSettings.Server == nil || globalSettings.Server.SharedDirStorage == nil) &&
 			config.GlobalSettingsIsLegacyFormat() && config.GlobalSettingsMentions("shared_dir_storage") {
 			// Round 4 review finding S-L1: a global settings.yaml with no
-			// "schema_version: \"1\"" takes the LEGACY loader path, which
-			// silently drops the entire server block — LoadGlobalSettings
-			// returns err == nil with Server == nil, so the gErr != nil
-			// branch above never runs. Without this check, an operator's
-			// shared_dir_storage config would vanish with only a generic
-			// "unrecognized keys" WARN, which is a worse silent failure
-			// than the malformed-YAML case, and contradicts G5 fail-closed
-			// for an operator who plausibly intended to configure it.
+			// "schema_version: \"1\"" used to take a legacy loader path
+			// that dropped the entire server block. Such a file is now
+			// converted with its server block kept (ptone/scion#3919), so
+			// a real block loads and is enforced below. This check still
+			// fails closed when a legacy-format file mentions the key but
+			// no block loads (for example a misplaced or commented-out
+			// block): LoadGlobalSettings returns err == nil with no block,
+			// so the gErr != nil branch above never runs, and the
+			// operator plausibly intended to configure it (G5).
 			//
 			// Round 5 review finding C1=T1=S-L2: GlobalSettingsMentions is a
 			// raw substring check, so it also fires on a well-formed v1 file
@@ -1872,11 +1876,9 @@ authDone:
 			// successfully as v1, the loader above is authoritative — no
 			// parsed block means it genuinely was not configured, exactly
 			// like main. The GlobalSettingsIsLegacyFormat() gate restricts
-			// this fail-closed substring check to files that actually took
-			// the legacy loader path, where there is no parsed struct to
-			// trust and the substring is the only available signal; the
-			// "(missing schema_version...)" wording below is therefore
-			// always accurate when this branch fires.
+			// this fail-closed substring check to files without
+			// schema_version, where the substring is the only signal that
+			// a block was intended.
 			return nil, fmt.Errorf(
 				"global settings mention server.shared_dir_storage but it was not loaded (missing schema_version: \"1\"?)")
 		} else if globalSettings != nil {

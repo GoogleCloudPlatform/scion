@@ -64,7 +64,7 @@ type ArtifactListItem struct {
 	// exists (deleting a project never deletes its artifacts).
 	ScopeDeleted bool `json:"scopeDeleted,omitempty"`
 	// CanManage is set only on rows with ScopeDeleted: true when the
-	// caller may move the artifact to another project (see canAdminister)
+	// caller may move the artifact to another project (see canAdministerWith)
 	// and moves are turned on (cross-project sharing).
 	CanManage bool `json:"canManage,omitempty"`
 

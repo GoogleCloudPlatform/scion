@@ -31,10 +31,12 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// Workload-bound issuer delegation (ptone/scion#4240, phase X2).
+// Workload-bound issuer delegation (ptone/scion#4240, phases X2 and X4).
 //
-// A human issuer can delegate member-tier test identity issuance to one
-// pinned workload identity (a Google service account). The delegation
+// A human issuer can delegate test identity issuance to one pinned workload
+// identity (a Google service account): the member tier (X2), and on a hub
+// running the admin tiers, test hub-admin or test super-admin issuance (X4,
+// one scope per delegation). The delegation
 // (store.TestIdentityDelegation, created by the human on
 // /api/v1/test-identity-delegations) is the credential. A request proves it
 // with:
@@ -54,8 +56,21 @@ import (
 // scope is the delegation's scope and whose CredentialID is the delegation
 // id. Authorization then runs as for an issuer PAT: the grantor's live
 // bindings intersected with the delegation's frozen scope, at every request.
+// An admin-kind mint also re-checks, inside its transaction, that the
+// grantor is still a live super-admin holding the scope's capability
+// (DEC-3 C1, recheckTestAdminDelegationGrantor).
 // The request credential context carries CredentialKindWorkloadDelegation,
 // which testIdentityCaller admits and the mutation audit records.
+//
+// Offline delegations (phase DL). A delegation whose grantor kind is
+// store.DelegationGrantorTestInfraOffline was written by the offline host
+// command `scion server test-infra delegate`, not by a human. It holds only
+// the member scope. Its grantor id is a reserved id that names no user, so
+// it has no bindings: the live-human-grantor check is replaced, for this
+// kind only, by offlineGrantorGate (marker, hub id binding, test-mode, not
+// revoked or expired, all read live), and its authority is a request-local
+// synthetic grant of exactly test_identity.issue that Decide adds only for a
+// request whose gate passed (offlineDelegationBinding, Decide Step 5b4).
 
 const (
 	// testIssuerDelegationHeader names the delegation a workload request
@@ -71,6 +86,9 @@ const (
 	// testIdentityIssuanceRoutePath is the only route namespace a workload
 	// token is accepted on.
 	testIdentityIssuanceRoutePath = "/api/v1/test-identities"
+	// testIdentityAdminIssuanceRoutePath is the admin-kind issuance route
+	// (POST only; revoke-all is never reachable by a workload token).
+	testIdentityAdminIssuanceRoutePath = testIdentityIssuanceRoutePath + "/admin"
 )
 
 // CredentialKindWorkloadDelegation is the request credential kind of a
@@ -81,27 +99,72 @@ const CredentialKindWorkloadDelegation = credentialmeta.KindWorkloadDelegation
 // delegation arm.
 const AuthTypeWorkloadDelegation = "workload-delegation"
 
-// testIdentityDelegationMaxAge is the longest a member-tier delegation may
-// live, measured server-side from its creation.
-const testIdentityDelegationMaxAge = 7 * 24 * time.Hour
+// Delegation scopes. Each delegation holds exactly one.
+const (
+	// testIdentityDelegationScope covers member and viewer issuance.
+	testIdentityDelegationScope = "test_identity:issue"
+	// testIdentityDelegationAdminScope covers test hub-admin issuance
+	// (phase X4).
+	testIdentityDelegationAdminScope = uatScopeTestIdentityIssueAdmin
+	// testIdentityDelegationSuperAdminScope covers test super-admin
+	// issuance (phase X4).
+	testIdentityDelegationSuperAdminScope = uatScopeTestIdentityIssueSuperAdmin
+)
 
-// testIdentityDelegationScope is the only delegation scope in this release:
-// member and viewer issuance.
-const testIdentityDelegationScope = "test_identity:issue"
+// Delegation lifetimes, measured server-side from a delegation's creation
+// (DEC-3 C2). The member tier keeps the X2 values. The admin tiers are
+// shorter (xhub-issuer-design.md section 3, C2: at most 8 h for admin; the
+// advisor's condition (c): the shortest delegations for super-admin).
+const (
+	testIdentityDelegationMaxAge           = 7 * 24 * time.Hour
+	testIdentityDelegationDefaultTTL       = 8 * time.Hour
+	testHubAdminDelegationMaxAge           = 8 * time.Hour
+	testHubAdminDelegationDefaultTTL       = 4 * time.Hour
+	testSuperAdminDelegationMaxAge         = 2 * time.Hour
+	testSuperAdminDelegationDefaultTTL     = time.Hour
+	testIdentityDelegationMinTTL           = time.Minute
+	testHubAdminDelegationMaxIdentityCap   = 2
+	testSuperAdminDelegationMaxIdentityCap = 1
+)
 
-// testIdentityDelegationScopeTiers maps each delegation scope this hub knows
-// to the workload issuer tier it needs. Admin scopes are recognised only to
-// refuse them with a clear reason; they map to no tier.
-var testIdentityDelegationScopeTiers = map[string]string{
-	testIdentityDelegationScope: config.WorkloadIssuerTierMember,
+// testIdentityDelegationScopeSpec is what one delegation scope means: the
+// workload issuer tier its pinned subject needs, the one permission it
+// resolves to (its frozen ceiling), the admin kind it issues (empty for the
+// member tier), its lifetimes and its per-delegation identity cap.
+type testIdentityDelegationScopeSpec struct {
+	tier       string
+	permission string
+	adminKind  testAdminKind
+	defaultTTL time.Duration
+	maxAge     time.Duration
+	// maxCap is the largest per-delegation cap; defaultCap applies when the
+	// request names none.
+	maxCap     int
+	defaultCap int
 }
 
-// testIdentityDelegationAdminScopes are the admin-tier delegation scopes. A
-// delegation create naming one gets 422 until the admin tiers support
-// workload delegation.
-var testIdentityDelegationAdminScopes = map[string]bool{
-	"test_identity:issue_admin":       true,
-	"test_identity:issue_super_admin": true,
+// isAdmin reports whether the scope issues an admin kind.
+func (sp testIdentityDelegationScopeSpec) isAdmin() bool { return sp.adminKind != "" }
+
+// testIdentityDelegationScopes maps every delegation scope this hub knows to
+// its spec. The admin scopes (phase X4) are usable only while the matching
+// admin kind is available (Server.workloadAdminScopeAvailable).
+var testIdentityDelegationScopes = map[string]testIdentityDelegationScopeSpec{
+	testIdentityDelegationScope: {
+		tier: config.WorkloadIssuerTierMember, permission: permissionTestIdentityIssue,
+		defaultTTL: testIdentityDelegationDefaultTTL, maxAge: testIdentityDelegationMaxAge,
+		maxCap: testIdentityPerIssuerCap, defaultCap: testIdentityPerIssuerCap,
+	},
+	testIdentityDelegationAdminScope: {
+		tier: config.WorkloadIssuerTierAdmin, permission: permissionTestIdentityIssueAdmin, adminKind: testAdminKindHubAdmin,
+		defaultTTL: testHubAdminDelegationDefaultTTL, maxAge: testHubAdminDelegationMaxAge,
+		maxCap: testHubAdminDelegationMaxIdentityCap, defaultCap: testHubAdminDelegationMaxIdentityCap,
+	},
+	testIdentityDelegationSuperAdminScope: {
+		tier: config.WorkloadIssuerTierAdmin, permission: permissionTestIdentityIssueSuperAdmin, adminKind: testAdminKindSuperAdmin,
+		defaultTTL: testSuperAdminDelegationDefaultTTL, maxAge: testSuperAdminDelegationMaxAge,
+		maxCap: testSuperAdminDelegationMaxIdentityCap, defaultCap: testSuperAdminDelegationMaxIdentityCap,
+	},
 }
 
 // testIssuerAudience returns the issuer audience of the hub with id hubID.
@@ -116,10 +179,15 @@ func testIssuerAudience(hubID string) string {
 var (
 	errWorkloadIssuerNoHubID          = errors.New("test identity workload issuers need a resolved hub id to compute the issuer audience")
 	errWorkloadIssuerAudienceConflict = errors.New("the test identity issuer audience must differ from every other configured token audience")
+	// errWorkloadIssuerAdminTierOff refuses a workload_issuers entry with
+	// max_tier "admin" on a hub that does not run an admin level: the hub
+	// refuses to start rather than silently narrowing the entry (DEC-5 C3).
+	errWorkloadIssuerAdminTierOff = errors.New(`a test identity workload issuer with max_tier "admin" requires --test-mode=admin or above`)
 )
 
 // validateTestIdentityWorkloadIssuers checks the workload issuer startup
 // settings in cfg: the allowlist itself (config.ValidateTestIdentityWorkloadIssuers),
+// no max_tier "admin" entry unless the hub runs --test-mode=admin or above,
 // a resolved hub id, and that the issuer audience equals none of the other
 // token audiences this hub accepts (the external-bearer expected_audience of
 // every trusted issuer, the IAP audience, and the transport audience).
@@ -130,6 +198,13 @@ func validateTestIdentityWorkloadIssuers(cfg ServerConfig) error {
 	}
 	if err := config.ValidateTestIdentityWorkloadIssuers(cfg.TestIdentityWorkloadIssuers); err != nil {
 		return err
+	}
+	if !cfg.TestAdminGate.HubAdmin {
+		for i, e := range cfg.TestIdentityWorkloadIssuers {
+			if e.MaxTier == config.WorkloadIssuerTierAdmin {
+				return fmt.Errorf("%w (%s.workload_issuers[%d])", errWorkloadIssuerAdminTierOff, config.TestIdentitiesKey, i)
+			}
+		}
 	}
 	aud := testIssuerAudience(cfg.HubID)
 	if aud == "" {
@@ -174,11 +249,25 @@ type workloadIssuerAuthenticator struct {
 	validator GoogleCredentialValidator
 	store     store.Store
 	now       func() time.Time
+	// adminScopes reports whether the delegation scopes of an admin kind
+	// are available on this hub (Server.workloadAdminScopeAvailable). Nil
+	// makes every admin scope unavailable.
+	adminScopes func(testAdminKind) bool
+	// hubID is the hub's resolved (pinned) hub id, fixed at New. The
+	// offline delegation gate binds every offline delegation to it.
+	hubID string
+	// testModeLevel returns the running hub's --test-mode level
+	// (Server.TestModeLevel), read at every offline redeem. Nil denies
+	// every offline delegation.
+	testModeLevel func() TestMode
+	// writeAudit writes the per-redeem audit row of an offline delegation
+	// (the test identity audit hook). Nil denies every offline delegation.
+	writeAudit func(ctx context.Context, st store.Store, record *store.MutationAuditRecord) error
 }
 
 // newWorkloadIssuerAuthenticator builds the arm's state from validated
 // config. It returns nil when no workload issuer is configured.
-func newWorkloadIssuerAuthenticator(cfg ServerConfig, st store.Store, now func() time.Time) *workloadIssuerAuthenticator {
+func newWorkloadIssuerAuthenticator(cfg ServerConfig, st store.Store, now func() time.Time, adminScopes func(testAdminKind) bool) *workloadIssuerAuthenticator {
 	if len(cfg.TestIdentityWorkloadIssuers) == 0 || st == nil {
 		return nil
 	}
@@ -191,11 +280,13 @@ func newWorkloadIssuerAuthenticator(cfg ServerConfig, st store.Store, now func()
 		v = NewGoogleCredentialValidator(nil)
 	}
 	return &workloadIssuerAuthenticator{
-		audience:  testIssuerAudience(cfg.HubID),
-		allowlist: allow,
-		validator: v,
-		store:     st,
-		now:       now,
+		audience:    testIssuerAudience(cfg.HubID),
+		allowlist:   allow,
+		validator:   v,
+		store:       st,
+		now:         now,
+		adminScopes: adminScopes,
+		hubID:       cfg.HubID,
 	}
 }
 
@@ -207,8 +298,7 @@ func (a *workloadIssuerAuthenticator) clock() time.Time {
 }
 
 // subCovers reports whether sub is allow-listed with a max_tier that covers
-// the tier scope needs. The admin tier covers the member tier; no admin
-// entry is accepted at startup in this release.
+// the tier scope needs. The admin tier covers the member tier.
 func (a *workloadIssuerAuthenticator) subCovers(sub, scope string) bool {
 	if a == nil {
 		return false
@@ -217,16 +307,43 @@ func (a *workloadIssuerAuthenticator) subCovers(sub, scope string) bool {
 	if !ok {
 		return false
 	}
-	need, ok := testIdentityDelegationScopeTiers[scope]
+	spec, ok := testIdentityDelegationScopes[scope]
 	if !ok {
 		return false
 	}
-	switch need {
+	switch spec.tier {
 	case config.WorkloadIssuerTierMember:
 		return maxTier == config.WorkloadIssuerTierMember || maxTier == config.WorkloadIssuerTierAdmin
+	case config.WorkloadIssuerTierAdmin:
+		return maxTier == config.WorkloadIssuerTierAdmin
 	default:
 		return false
 	}
+}
+
+// scopeAvailable reports whether delegations of scope may be created and
+// used on this hub: the member scope always, an admin scope only while its
+// admin kind is available (the matching --test-mode level and A2).
+func (a *workloadIssuerAuthenticator) scopeAvailable(scope string) bool {
+	spec, ok := testIdentityDelegationScopes[scope]
+	if !ok {
+		return false
+	}
+	if !spec.isAdmin() {
+		return true
+	}
+	return a != nil && a.adminScopes != nil && a.adminScopes(spec.adminKind)
+}
+
+// workloadAdminScopeAvailable reports whether the workload delegation
+// scope of the admin kind may be created and used on this hub: the kind is
+// enabled by the hub's --test-mode level (admin for test hub-admin,
+// super-admin for test super-admin) and A2 is in place, that is the test
+// admin audit sink is configured and New found the test-admin policy
+// classification complete. It reads only state New fixed.
+func (s *Server) workloadAdminScopeAvailable(kind testAdminKind) bool {
+	return s.testAdminTierEnabled(kind) && s.testAdminPolicyClassified &&
+		s.testAdminAudit != nil && s.testAdminAudit.out != nil
 }
 
 // unverifiedJWTClaims is the subset of an unverified JWT payload the arm
@@ -304,9 +421,12 @@ func isWorkloadDelegationRequest(r *http.Request, a *workloadIssuerAuthenticator
 
 // isTestIdentityIssuanceRoute reports whether r targets one of the test
 // identity routes a workload token is accepted on: issue and list, token
-// re-issue, delete, and the web-login code (ptone/scion#4240, X3b). The
-// handlers scope each one to the identities the same delegation issued.
-// The match is exact on the decoded path; an escaped path is refused.
+// re-issue, delete, the web-login code (ptone/scion#4240, X3b), admin-kind
+// issuance (X4), and the issuer cleanup and provenance (Phase 3c). The
+// handlers scope each one to the identities the same delegation issued,
+// and the route guard admits each only for the delegation scope whose
+// permission it needs. The match is exact on the decoded path; an escaped
+// path is refused.
 func isTestIdentityIssuanceRoute(r *http.Request) bool {
 	if r.URL.RawPath != "" {
 		return false
@@ -315,6 +435,14 @@ func isTestIdentityIssuanceRoute(r *http.Request) bool {
 	switch {
 	case p == testIdentityIssuanceRoutePath:
 		return r.Method == http.MethodPost || r.Method == http.MethodGet
+	case p == testIdentityAdminIssuanceRoutePath:
+		return r.Method == http.MethodPost
+	case p == testIdentityIssuanceRoutePath+"/cleanup":
+		// The issuer cleanup (Phase 3c): a delegation reaches only the
+		// identities issued through it (resolveFixturePurgeRun).
+		return r.Method == http.MethodPost
+	case p == testIdentityIssuanceRoutePath+"/provenance":
+		return r.Method == http.MethodGet
 	case strings.HasPrefix(p, testIdentityIssuanceRoutePath+"/"):
 		rest := strings.TrimPrefix(p, testIdentityIssuanceRoutePath+"/")
 		if id, ok := strings.CutSuffix(rest, "/token"); ok {
@@ -340,6 +468,15 @@ type workloadDelegationState struct {
 	sub        string
 	tokenIAT   time.Time
 	runLabel   string
+	// offlineGatePassed is true only on the state authenticate builds for
+	// THIS request after offlineGrantorGate passed for an offline
+	// delegation. It is never set anywhere else, the state lives only in
+	// this request's context, and Decide Step 5b4 adds the offline
+	// synthetic grant only when it is true.
+	offlineGatePassed bool
+	// offline holds the facts the offline gate read for this request, for
+	// the issuance audit. Nil for a human-grantor delegation.
+	offline *offlineGateFacts
 }
 
 type workloadDelegationStateKey struct{}
@@ -481,41 +618,80 @@ func (a *workloadIssuerAuthenticator) authenticate(ctx context.Context, r *http.
 		return nil, refusal
 	}
 
-	grantor, refusal := a.liveHumanGrantor(ctx, d.GrantorID)
+	// The grantor check, by grantor kind. Every kind is named; any other
+	// value is refused (no fallthrough to the human path).
+	var (
+		grantor     *store.User
+		offlineSeen *offlineGateFacts
+	)
+	switch d.EffectiveGrantorKind() {
+	case store.DelegationGrantorHuman:
+		grantor, refusal = a.liveHumanGrantor(ctx, d)
+	case store.DelegationGrantorTestInfraOffline:
+		offlineSeen, refusal = a.offlineGrantorGate(ctx, a.store, d)
+		if refusal == nil {
+			refusal = a.auditOfflineRedeem(ctx, r, d, sub, runLabel, offlineSeen, now)
+		}
+		if refusal == nil {
+			grantor = offlineGrantorUser(d)
+		}
+	default:
+		refusal = refuse403("delegation grantor kind not accepted")
+	}
 	if refusal != nil {
 		return nil, refusal
 	}
 
+	spec := testIdentityDelegationScopes[d.Scope]
 	ceiling, ok := permissions.BuildCeilingFromSelectors([]string{d.Scope})
-	if !ok || len(ceiling.PermissionIDs) != 1 || ceiling.PermissionIDs[0] != permissionTestIdentityIssue {
-		return nil, refuse403("delegation scope does not resolve to test_identity.issue")
+	if !ok || spec.permission == "" || len(ceiling.PermissionIDs) != 1 || ceiling.PermissionIDs[0] != spec.permission {
+		return nil, refuse403("delegation scope does not resolve to its one permission")
 	}
 	base := NewAuthenticatedUser(grantor.ID, grantor.Email, grantor.DisplayName, grantor.Role, string(ClientTypeAPI))
 	identity := NewScopedUserIdentityWithBoundary(base, TokenBoundary{Kind: BoundaryKindHub}, []string{d.Scope}, d.ID, ceiling)
 	cred := credentialContextForIdentity(identity)
 	cred.Kind = CredentialKindWorkloadDelegation
 	cred.Type = string(CredentialKindWorkloadDelegation)
+	state := &workloadDelegationState{delegation: d, sub: sub, tokenIAT: iat, runLabel: runLabel}
+	if offlineSeen != nil {
+		// Only here, after offlineGrantorGate passed for this request.
+		state.offlineGatePassed = true
+		state.offline = offlineSeen
+	}
 	return &workloadDelegationAuth{
 		identity:   identity,
 		credential: cred,
-		state:      &workloadDelegationState{delegation: d, sub: sub, tokenIAT: iat, runLabel: runLabel},
+		state:      state,
 	}, nil
 }
 
 // checkDelegationLive applies DEC-3 C2/C3 to a loaded delegation: not
-// revoked, within its server-side age (its stored expiry and the hard
-// maximum age from its creation time), exactly one known scope, and a
-// pinned subject the startup allowlist still covers for that scope.
+// revoked, within its server-side age (its stored expiry and its scope's
+// hard maximum age from its creation time; for an offline delegation also
+// the offline maximum age), exactly one known scope that is available on
+// this hub (an admin scope only at the matching --test-mode level, with
+// A2; an offline delegation only the member scope), and a pinned subject
+// the startup allowlist still covers for that scope. It does not check the
+// grantor; see liveHumanGrantor and offlineGrantorGate.
 func (a *workloadIssuerAuthenticator) checkDelegationLive(d *store.TestIdentityDelegation, now time.Time) *workloadDelegationRefusal {
+	spec, known := testIdentityDelegationScopes[d.Scope]
 	switch {
 	case d.RevokedAt != nil:
 		return refuse403("delegation revoked")
 	case !now.Before(d.ExpiresAt):
 		return refuse403("delegation expired")
-	case !now.Before(d.Created.Add(testIdentityDelegationMaxAge)):
-		return refuse403("delegation past its maximum age")
-	case d.Scope != testIdentityDelegationScope:
+	case !known:
 		return refuse403("delegation scope not accepted")
+	case !now.Before(d.Created.Add(spec.maxAge)):
+		return refuse403("delegation past its maximum age")
+	case d.EffectiveGrantorKind() == store.DelegationGrantorTestInfraOffline && d.Scope != store.TestInfraOfflineDelegationScope:
+		// Structural (phase DL): an offline delegation never holds an
+		// admin scope, whatever its row says.
+		return refuse403("offline delegation holds a scope other than the member scope")
+	case d.EffectiveGrantorKind() == store.DelegationGrantorTestInfraOffline && !now.Before(d.Created.Add(store.TestInfraOfflineDelegationMaxTTL)):
+		return refuse403("offline delegation past its maximum age")
+	case !a.scopeAvailable(d.Scope):
+		return refuse403("delegation scope not available on this hub")
 	case !a.subCovers(d.WorkloadSub, d.Scope):
 		return refuse403("workload subject not allow-listed for the delegation's tier")
 	}
@@ -523,10 +699,15 @@ func (a *workloadIssuerAuthenticator) checkDelegationLive(d *store.TestIdentityD
 }
 
 // liveHumanGrantor reads the grantor's row from the store on every
-// request and fails closed unless it is an active human user outside the
-// reserved test-identity domain.
-func (a *workloadIssuerAuthenticator) liveHumanGrantor(ctx context.Context, grantorID string) (*store.User, *workloadDelegationRefusal) {
-	u, err := a.store.GetUser(ctx, grantorID)
+// request and fails closed unless the delegation's grantor kind is human and
+// the row is an active human user outside the reserved test-identity
+// domain. A delegation of any other grantor kind is refused even if a
+// caller reaches this path.
+func (a *workloadIssuerAuthenticator) liveHumanGrantor(ctx context.Context, d *store.TestIdentityDelegation) (*store.User, *workloadDelegationRefusal) {
+	if d == nil || d.EffectiveGrantorKind() != store.DelegationGrantorHuman {
+		return nil, refuse403("delegation grantor kind is not human")
+	}
+	u, err := a.store.GetUser(ctx, d.GrantorID)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		return nil, refuse403("delegation grantor no longer exists")

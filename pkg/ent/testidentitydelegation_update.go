@@ -109,6 +109,9 @@ func (_u *TestIdentityDelegationUpdate) sqlSave(ctx context.Context) (_node int,
 			}
 		}
 	}
+	if _u.mutation.MarkerCreatedAtCleared() {
+		_spec.ClearField(testidentitydelegation.FieldMarkerCreatedAt, field.TypeTime)
+	}
 	if value, ok := _u.mutation.RevokedAt(); ok {
 		_spec.SetField(testidentitydelegation.FieldRevokedAt, field.TypeTime, value)
 	}
@@ -251,6 +254,9 @@ func (_u *TestIdentityDelegationUpdateOne) sqlSave(ctx context.Context) (_node *
 				ps[i](selector)
 			}
 		}
+	}
+	if _u.mutation.MarkerCreatedAtCleared() {
+		_spec.ClearField(testidentitydelegation.FieldMarkerCreatedAt, field.TypeTime)
 	}
 	if value, ok := _u.mutation.RevokedAt(); ok {
 		_spec.SetField(testidentitydelegation.FieldRevokedAt, field.TypeTime, value)

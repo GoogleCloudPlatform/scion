@@ -19,6 +19,8 @@ All three commands are for human operators only:
 - They do not run with a hub profile (`--hub-profile` or `SCION_HUB_PROFILE`).
 - They use your own hub sign-in on the hub itself.
 
+A test runner (for example an agent driving journeys on another test hub) does not use these commands. It issues admin test identities through an admin issuer delegation with `scion hub test-identity issue-admin` and a target-hub profile; see [Which command issues admin test identities](/scion/hosted/user/test-identity-target-hubs/#which-command-issues-admin-test-identities).
+
 ## Before you start: the hub
 
 A hub issues test identities with admin roles only when it was started for that. There is no runtime switch.
@@ -31,6 +33,8 @@ A hub issues test identities with admin roles only when it was started for that.
    ```
 
    There is no hub route for the marker, and `scion server` is not available in agent mode.
+
+   The command refuses, and writes nothing, unless the hub id is pinned: `server.hub.hub_id` (or `SCION_SERVER_HUB_HUBID`) must be set in the configuration it reads, and `--hub-id` must equal that id. If the id is not pinned, the error names `server.hub.hub_id` and, when `~/.scion/hub-id` exists or on Cloud Run (`K_SERVICE`), prints the hub's current resolved id; otherwise it points to the `hub_id` that `GET /healthz` reports. The printed id comes from the environment of the user running `mark`, so confirm it against `GET /healthz`. Pin that value, never a new one.
 
 2. **Set `server.hub.class: test`** in the settings file or environment.
 
@@ -66,9 +70,9 @@ scion hub test-identity issue --admin-role hub-admin \
 
 The hub also limits issuance:
 
-- one live identity with an admin role per issuer;
-- two per hub, of which at most one is a super-admin;
-- per issuer, six hub-admin and two super-admin issuances per hour.
+- one live identity with an admin role per issuer; for a [workload issuer delegation](/scion/hosted/user/test-identity-target-hubs/#admin-tier-delegations-systemd-test-hubs) instead, its admin cap (at most two hub-admins, or one super-admin);
+- four per hub, of which at most one is a super-admin, counted across every issuer, access token and delegation (identities issued through a delegation count too);
+- per issuer (or per delegation), six hub-admin and two super-admin issuances per hour.
 
 ## Inspect what an identity left: residue
 

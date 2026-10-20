@@ -4474,7 +4474,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		canAttachEnv := canViewAgentEnv(ctx, s, agent)
 		if agent.AppliedConfig.CreateInputs != nil {
 			recordExplicitEdits(agent.AppliedConfig.CreateInputs, &old, cfg, presentConfigKeys,
-				dispatchImageRegistry(s.GetDispatcher()), canAttachEnv)
+				dispatchImageRegistry(s.GetDispatcher(), agent), canAttachEnv)
 		}
 
 		if cfg.Image != "" {
@@ -4506,7 +4506,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 			}
 			applyPatchAutoExposeEnv(agent.AppliedConfig, &old, project, cfg.Env)
 		}
-		dropEchoedInlineImage(cfg, &old, dispatchImageRegistry(s.GetDispatcher()))
+		dropEchoedInlineImage(cfg, &old, dispatchImageRegistry(s.GetDispatcher(), agent))
 		// Start from the live InlineConfig and overlay only the keys the
 		// request names (ptone/scion#3901). The configure page does not
 		// render volumes, skills, MCP servers, services, command args or
@@ -5272,6 +5272,12 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 
 		targetAgent, err := s.store.GetAgent(r.Context(), id)
 		if err != nil {
+			// A visitor gets the one refusal for an unknown agent too
+			// (admitVisitorSubRoute already refused it before here).
+			if isVisitorIdentity(identity) && errors.Is(err, store.ErrNotFound) {
+				writeVisitorRefusal(w)
+				return
+			}
 			writeErrorFromErr(w, err, "")
 			return
 		}
@@ -5289,6 +5295,11 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 
 		allowed, reason, decision := s.authorizeAgentMessage(r.Context(), identity, targetAgent, isSystemPlane)
 		messaging.RecordStep(r.Context(), "message_authorized")
+		if !allowed && isVisitorIdentity(identity) {
+			// A visitor's refusal names no reason or message mode.
+			writeVisitorRefusal(w)
+			return
+		}
 		if !allowed {
 			// Use typed denial code from the decision (agent path) or
 			// fall back to reason-based mapping (user path).
@@ -5481,6 +5492,9 @@ func (s *Server) handleAgentExec(w http.ResponseWriter, r *http.Request, id stri
 			return
 		}
 		if writeBrokerRuntimeUnavailable(w, err, agent.Runtime) {
+			return
+		}
+		if writeBrokerOutcomeUnknown(w, err) {
 			return
 		}
 		RuntimeError(w, "Failed to execute command on runtime broker: "+err.Error())

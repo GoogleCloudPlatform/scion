@@ -33,7 +33,11 @@ import (
 //
 // Only the store's dedicated delegation methods write this table: create
 // and revoke. Every field except revoked_at and revoked_by is immutable;
-// revocation sets those once.
+// revocation sets those once. A delegation whose grantor_kind is
+// test_infra_offline (ptone/scion#4240, phase DL) has no human grantor: it
+// is written only by the offline host command (pkg/testinfra.Delegate),
+// holds only the member scope, and is bound to one hub id and one marker
+// instance; the store's create method refuses that kind.
 type TestIdentityDelegation struct {
 	ent.Schema
 }
@@ -69,6 +73,20 @@ func (TestIdentityDelegation) Fields() []ent.Field {
 		field.Time("expires_at").
 			Immutable().
 			Comment("Server-computed end of the delegation's lifetime"),
+		field.Enum("grantor_kind").
+			Values("human", "test_infra_offline").
+			Default("human").
+			Immutable().
+			Comment("Kind of grantor: a live human issuer, or the offline test-infra host command (member scope only)"),
+		field.String("hub_id").
+			Default("").
+			Immutable().
+			Comment("Hub id an offline (test_infra_offline) delegation is bound to; empty for a human grantor"),
+		field.Time("marker_created_at").
+			Optional().
+			Nillable().
+			Immutable().
+			Comment("created_at of the test infrastructure marker an offline delegation is bound to; nil for a human grantor"),
 		field.Time("revoked_at").
 			Optional().
 			Nillable(),

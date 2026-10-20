@@ -532,7 +532,7 @@ func TestRuntimeBrokerInstances_OverlayDoesNotTouchInstances(t *testing.T) {
 	inst := []V1RuntimeBrokerInstanceConfig{dockerInstance("local-docker", "example-docker")}
 	vs := &VersionedSettings{SchemaVersion: "1", Server: &V1ServerConfig{Broker: &V1BrokerConfig{Instances: inst}}}
 	o := NewSettingsOverlay()
-	o.Update(map[string]V1RuntimeConfig{"docker": {Type: "docker"}}, map[string]V1ProfileConfig{"local": {Runtime: "docker"}}, map[string]HarnessConfigEntry{}, "reg.example")
+	o.Update(map[string]V1RuntimeConfig{"docker": {Type: "docker"}}, map[string]V1ProfileConfig{"local": {Runtime: "docker"}}, map[string]HarnessConfigEntry{})
 	o.Apply(vs)
 	if !reflect.DeepEqual(vs.Server.Broker.Instances, inst) {
 		t.Fatalf("overlay changed instances: %+v", vs.Server.Broker.Instances)

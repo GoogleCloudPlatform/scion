@@ -194,6 +194,18 @@ func (s *Server) saAssignCheckerFor() store.CallerPermissionChecker {
 	return s.saAssignChecker
 }
 
+// hubSAEmail returns the hub's own GCP service account email, or "" when
+// no GCP token generator is configured.
+func (s *Server) hubSAEmail() string {
+	s.mu.RLock()
+	gen := s.gcpTokenGenerator
+	s.mu.RUnlock()
+	if gen == nil {
+		return ""
+	}
+	return gen.ServiceAccountEmail()
+}
+
 // hookIdentityCheckerFor resolves the caller-permission checker for one
 // lifecycle-hook validation. Same three cases and same reasoning as
 // saAssignCheckerFor — read that first — against this surface's own mode and
@@ -670,6 +682,15 @@ func (s *Server) evaluateSAAssignment(ctx context.Context, r *http.Request, sa *
 			// them to request a grant they may already hold.
 			msg = "Could not verify your permission to use this GCP service " +
 				"account because the check did not complete; try again"
+			// One exception: the hub's own identity was refused reading IAM
+			// policy in the account's GCP project. Retrying cannot help, so
+			// say what to grant. Built from fixed text, the account's project
+			// ID and the hub's email only; never from the error's text.
+			if hubIdentityRefusedIAMRead(err) {
+				if m := saAssignIAMReadDeniedMessage(sa.ProjectID, s.hubSAEmail()); m != "" {
+					msg = m
+				}
+			}
 		case store.MechanismUnattributableAllow:
 			// A checker bug, not a caller problem. Says nothing actionable to
 			// the caller because there is nothing they can do about it.

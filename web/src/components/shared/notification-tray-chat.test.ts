@@ -358,7 +358,7 @@ describe('notification tray: loading for the signed-in user', () => {
     stateManager.dispatchEvent(new CustomEvent('notification-created', { detail: {} }));
     await vi.advanceTimersByTimeAsync(0);
     expect(listRequests()).toBe(2);
-    expect(tray.pollTimer).not.toBeNull();
+    expect(tray.stopPollTimer).not.toBeNull();
   });
 
   it('sends one request when the user arrives after mount', async () => {
@@ -377,13 +377,13 @@ describe('notification tray: loading for the signed-in user', () => {
 
   it('does not refetch for a new object of the same user', async () => {
     const tray = await mount(user('u1'));
-    const timer = tray.pollTimer;
+    const timer = tray.stopPollTimer;
 
     await setUser(tray, user('u1'));
 
     expect(listRequests()).toBe(1);
     // Polling was not restarted either.
-    expect(tray.pollTimer).toBe(timer);
+    expect(tray.stopPollTimer).toBe(timer);
   });
 
   it('refetches once when a different user signs in', async () => {
@@ -403,7 +403,7 @@ describe('notification tray: loading for the signed-in user', () => {
     await setUser(tray, null);
 
     expect(tray.notifications).toEqual([]);
-    expect(tray.pollTimer).toBeNull();
+    expect(tray.stopPollTimer).toBeNull();
     expect(vi.getTimerCount()).toBe(0);
     stateManager.dispatchEvent(new CustomEvent('notification-created', { detail: {} }));
     await vi.advanceTimersByTimeAsync(POLL_MS * 2);

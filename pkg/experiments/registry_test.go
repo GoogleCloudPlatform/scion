@@ -363,8 +363,11 @@ func TestFlatRuntimeBrokersExperimentRegistered(t *testing.T) {
 	if e.Default {
 		t.Fatal("flat Runtime Brokers must default to off")
 	}
-	if !e.HasLayer(LayerServer) || e.HasLayer(LayerWeb) {
-		t.Fatalf("must be a server-layer (only) experiment, got %v", e.Layers)
+	// LayerServer gates every hub check. LayerWeb was added only so the
+	// browser can read the flag and switch to the Brokers area (delivery
+	// lead ruling, 2026-10-20): it is presentation only.
+	if !e.HasLayer(LayerServer) || !e.HasLayer(LayerWeb) {
+		t.Fatalf("must be a server- and web-layer experiment, got %v", e.Layers)
 	}
 	if e.Title == "" || e.Description == "" || e.Issue != "ptone/scion#2926" || e.Owner == "" || e.Stage != StageAlpha {
 		t.Fatalf("incomplete registration: %+v", e)

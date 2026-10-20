@@ -152,17 +152,17 @@ var identityOperations = []OperationSpec{
 	{
 		ID:          "group.member.add",
 		Domain:      "group",
-		Description: "Add a member to a group",
+		Description: "Add a member to a group. A user access token needs group:addMember on a hub boundary, and the group's closure may carry no authority beyond the token's own",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/groups/{id}/members", Method: "POST"},
 		},
 		Principals:            []PrincipalKind{PrincipalUser},
-		Credentials:           []CredentialKind{CredentialSessionJWT},
+		Credentials:           []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
 		ResourceResolver:      "group-from-url",
 		BasePermission:        "group.addMember",
 		Effects:               []SecurityEffect{EffectGrantAuthority},
 		DelegationKind:        DelegationNonAmplification,
-		DelegationDescription: "Adding a member to a role-bearing group effectively grants authority; actor must hold the group's role permissions",
+		DelegationDescription: "Adding a member to a role-bearing group effectively grants authority; actor must hold the group's role permissions. A user access token is refused when the closure carries a system-scoped binding, and must hold, in each project the closure binds, every permission those bindings carry",
 		AuthorityEval:         AuthorityEvalNone,
 		AuditObligation: &AuditObligation{
 			EventType:     "group_member_add",
@@ -171,7 +171,13 @@ var identityOperations = []OperationSpec{
 			Atomic:        true,
 		},
 		DenialCodes: []DenialCode{DenialForbidden},
-		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestGroupMemberAddToken_ProjectBindingsOnClosureRequireCallerAuthority"},
+			{Package: "pkg/hub", Function: "TestGroupMemberAddToken_SystemBindingsOnClosureDenied"},
+			{Package: "pkg/hub", Function: "TestGroupChangeToken_SelectorAndBoundaryPerRoute"},
+		},
+		Bearer: AdmitOn(BearerTargetGroupRecord, BearerBoundaryHub),
 	},
 	{
 		ID:          "group.member.remove",
@@ -184,7 +190,7 @@ var identityOperations = []OperationSpec{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/groups/{id}/members/{memberType}/{memberId}", Method: "DELETE"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
 		ResourceResolver: "group-from-url",
 		BasePermission:   "group.removeMember",
 		Effects:          []SecurityEffect{EffectRevokeAuthority},
@@ -201,7 +207,11 @@ var identityOperations = []OperationSpec{
 			Atomic:        true,
 		},
 		DenialCodes: []DenialCode{DenialForbidden},
-		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestGroupChangeToken_SelectorAndBoundaryPerRoute"},
+		},
+		Bearer: AdmitOn(BearerTargetGroupRecord, BearerBoundaryHub),
 	},
 	{
 		ID:          "group.delete",
@@ -211,7 +221,7 @@ var identityOperations = []OperationSpec{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/groups/{id}", Method: "DELETE"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
 		ResourceResolver: "group-from-url",
 		BasePermission:   "group.delete",
 		Effects:          []SecurityEffect{EffectDeleteResource},
@@ -224,7 +234,11 @@ var identityOperations = []OperationSpec{
 			Atomic:        true,
 		},
 		DenialCodes: []DenialCode{DenialForbidden},
-		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestGroupChangeToken_SelectorAndBoundaryPerRoute"},
+		},
+		Bearer: AdmitOn(BearerTargetGroupRecord, BearerBoundaryHub),
 	},
 
 	// =====================================================================
@@ -351,7 +365,7 @@ var identityOperations = []OperationSpec{
 		Domain:      "credential",
 		Description: "Create a user access token (UAT)",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/auth/tokens", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/auth/tokens", Method: "POST", Response: ResponseCredential},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT},
@@ -430,7 +444,7 @@ var identityOperations = []OperationSpec{
 		Domain:      "federation",
 		Description: "Obtain a short-lived user access credential for the caller, signed with the hub's OIDC key, for one peer hub audience listed in server.oidc.user_token_audiences. Only a local human user with status active; a user access token needs federation_token:mint on a hub boundary. 404 while federation.project_visitors is off",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/auth/federation-token", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/auth/federation-token", Method: "POST", Response: ResponseCredential},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
@@ -468,12 +482,12 @@ var identityOperations = []OperationSpec{
 	{
 		ID:          "user.admin.suspend",
 		Domain:      "user.admin",
-		Description: "Suspend or reactivate a user account (dispatched from PATCH /api/v1/users/{id} when status field is present)",
+		Description: "Suspend or reactivate a user account (dispatched from PATCH /api/v1/users/{id} when status field is present). A token needs user:suspend on a hub boundary, checked on the hub-level user record. The caller's own status and activating an invited user are refused for every credential",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointInternalDispatch, Pattern: "updateUser:status-field"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
 		ResourceResolver: "user-from-url",
 		BasePermission:   "user.suspend",
 		Effects:          []SecurityEffect{EffectChangePrincipalStatus},
@@ -487,7 +501,12 @@ var identityOperations = []OperationSpec{
 			Atomic:        true,
 		},
 		DenialCodes: []DenialCode{DenialForbidden},
-		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestUserPatchToken_StatusRequiresSuspendSelector"},
+			{Package: "pkg/hub", Function: "TestUserPatchToken_SelfStatusGuardStillApplies"},
+		},
+		Bearer: BearerDisposition{Kind: BearerAdmit, Target: BearerTargetHubInstance, Boundaries: []BearerBoundary{BearerBoundaryHub}, Pin: "TestUserPatchToken_StatusRequiresSuspendSelector"},
 	},
 
 	// =====================================================================
@@ -496,16 +515,21 @@ var identityOperations = []OperationSpec{
 	{
 		ID:          "user.admin.invite",
 		Domain:      "user.admin",
-		Description: "Invite a user to the platform",
+		Description: "Invite users to the platform (single or bulk) and manage invitation codes (list, create, read stats, read, revoke, delete). The invited record has status invited, the placeholder role member and no role binding or group membership; an invitation code names no role. A token needs user:invite on the hub boundary and the holder's live user.invite authority",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/users/invite", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/users/invite/bulk", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/invites", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/invites", Method: "POST", Response: ResponseCredential},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/invites/stats", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/invites/{id}", Method: "GET"},
+			// Revoke is listed before delete: the live checks address one
+			// invitation fixture, which the delete removes.
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/invites/{id}/revoke", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/invites/{id}", Method: "DELETE"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
 		ResourceResolver: "hub-scoped",
 		BasePermission:   "user.invite",
 		Effects:          []SecurityEffect{EffectIssueCredential},
@@ -522,7 +546,12 @@ var identityOperations = []OperationSpec{
 			Atomic:        true,
 		},
 		DenialCodes: []DenialCode{DenialForbidden},
-		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestInviteToken_RequiresInviteSelectorAndHubBoundary"},
+			{Package: "pkg/hub", Function: "TestInvitationToken_CreatesNoRoleBindingOrGroupMembership"},
+		},
+		Bearer: AdmitOn(BearerTargetHubInstance, BearerBoundaryHub),
 	},
 	{
 		ID:          "user.admin.provision",
@@ -625,14 +654,13 @@ var identityOperations = []OperationSpec{
 	},
 
 	// =====================================================================
-	// Domain: group — group read, create, update
+	// Domain: group — group read, list, create, update
 	// =====================================================================
 	{
 		ID:          "group.read",
 		Domain:      "group",
-		Description: "Read group details or list groups",
+		Description: "Read group details",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/groups", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/groups/{id}", Method: "GET"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
@@ -646,9 +674,30 @@ var identityOperations = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
+		ID:          "group.list",
+		Domain:      "group",
+		Description: "List groups. Each row is shown only when the caller may read it (group.read); a user access token needs group:read on a hub boundary, and a group with no project resolves to the hub",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/groups", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "group-per-row",
+		BasePermission:   "group.read",
+		Effects:          []SecurityEffect{EffectListScoped},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestExplicitGroupToken_ResolvesHubTarget"},
+		},
+		Bearer: AdmitOn(BearerTargetGroupRecord, BearerBoundaryHub),
+	},
+	{
 		ID:          "group.create",
 		Domain:      "group",
-		Description: "Create a new group",
+		Description: "Create a new group. A user access token needs group:create on a hub boundary; the target is the hub's group collection. Creating under a parent group runs the member-add delegation check on the parent",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/groups", Method: "POST"},
 		},
@@ -660,12 +709,16 @@ var identityOperations = []OperationSpec{
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
-		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestGroupCreateToken_RequiresCreateSelectorOnHubBoundary"},
+		},
+		Bearer: AdmitOn(BearerTargetHubCollection, BearerBoundaryHub),
 	},
 	{
 		ID:          "group.update",
 		Domain:      "group",
-		Description: "Update group metadata",
+		Description: "Update group metadata. A user access token that changes the owner needs group:update and live update access on the group, and for the new owner it must pass the delegation check of a member add on the group's role bindings; group:addMember and the group role hierarchy do not apply. A refused owner change returns one fixed 403, including for a group that does not exist",
 		EntryPoints: []EntryPoint{
 			// handleGroupRoutes (handlers_groups.go) dispatches on
 			// r.Method: PATCH, not PUT.
@@ -679,7 +732,12 @@ var identityOperations = []OperationSpec{
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
-		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestGroupChangeToken_SelectorAndBoundaryPerRoute"},
+			{Package: "pkg/hub", Function: "TestGroupOwnerChangeToken_RequiresDelegationForNewOwner"},
+		},
+		Bearer: AdmitOn(BearerTargetGroupRecord, BearerBoundaryHub),
 	},
 
 	// =====================================================================
@@ -688,9 +746,8 @@ var identityOperations = []OperationSpec{
 	{
 		ID:          "user.read",
 		Domain:      "user",
-		Description: "Read user profile or list users",
+		Description: "Read a user profile",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/{id}", Method: "GET"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
@@ -704,21 +761,70 @@ var identityOperations = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
-		ID:          "user.update",
+		ID:          "user.list",
 		Domain:      "user",
-		Description: "Update user profile or settings (PATCH may also dispatch user.admin.suspend/promote per field)",
+		Description: "List users. A session sees the users it may read. A token needs user:list at the hub collection on a hub boundary, and then sees only the users it may read, each checked as a hub-level user record, so it also needs user:read",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/{id}", Method: "PATCH"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users", Method: "GET"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "user.list",
+		Effects:          []SecurityEffect{EffectListScoped},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestUserListToken_RequiresUserListAndHubBoundary"}},
+		Bearer:           AdmitOn(BearerTargetHubCollection, BearerBoundaryHub),
+	},
+	{
+		ID:          "user.update",
+		Domain:      "user",
+		Description: "Update another user's profile (display name and preferences). The same PATCH dispatches user.admin.suspend for a status field and user.admin.promote for a role field, and every field's check passes before any write. A token needs user:update on a hub boundary, checked on the hub-level user record; a token PATCH that names no status field is checked as a profile update",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/{id}", Method: "PATCH", Variant: "cross_user"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
 		ResourceResolver: "user-from-url",
 		BasePermission:   "user.update",
 		Effects:          []SecurityEffect{EffectUpdateResource},
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
-		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestUserPatchToken_CrossUserProfileRequiresUpdateSelector"},
+			{Package: "pkg/hub", Function: "TestUserPatchToken_MixedFieldsAllOrNothing"},
+		},
+		Bearer: AdmitOn(BearerTargetHubInstance, BearerBoundaryHub),
+	},
+	{
+		ID:          "user.self.update",
+		Domain:      "user",
+		Description: "Update the caller's own profile (display name and preferences) through PATCH /api/v1/users/{id} naming the caller's own record. A status field on the caller's own record is refused by the self-status guard",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/{id}", Method: "PATCH", Variant: "self"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "self-principal",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestUserPatchToken_SelfProfileSessionOnly"},
+		},
+		Exemptions: []Exemption{{
+			Kind:   ExemptionAuthenticationOnly,
+			Reason: "The path names the caller's own record, so no resource permission applies to the caller's own profile",
+			Scope:  "caller's own profile fields",
+			Waives: []WaivedObligation{WaiveBasePermission},
+		}},
+		Bearer: SessionOnly(ReasonInteractiveState),
 	},
 
 	// =====================================================================
@@ -727,23 +833,30 @@ var identityOperations = []OperationSpec{
 	{
 		ID:          "role.read",
 		Domain:      "role",
-		Description: "Read role definitions and permission registry",
+		Description: "Read role definitions and the permission registry. A token needs role:read on a hub boundary; the write methods on the same routes stay refused to every token",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/roles", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/roles/{id}", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/roles/export", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/roles/export", Method: "HEAD"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/roles/{id}/export", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/roles/{id}/export", Method: "HEAD"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/permissions", Method: "GET"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
 		ResourceResolver: "hub-scoped",
 		BasePermission:   "role.read",
 		Effects:          []SecurityEffect{EffectReadOne, EffectListScoped},
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
-		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestRoleReadToken_DoesNotAdmitRoleWrites"},
+			{Package: "pkg/hub", Function: "TestRoleRoutesToken_WriteMethodsStillDenied"},
+		},
+		Bearer: AdmitOn(BearerTargetHubInstance, BearerBoundaryHub),
 	},
 	{
 		ID:          "role.binding.read",
@@ -757,32 +870,62 @@ var identityOperations = []OperationSpec{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/role-bindings/user/{userId}", Method: "GET"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
 		ResourceResolver: "hub-scoped",
 		BasePermission:   "role_binding.read",
 		Effects:          []SecurityEffect{EffectReadOne, EffectListScoped},
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
-		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestRoleReadToken_DoesNotAdmitRoleWrites"},
+		},
+		Bearer: AdmitOn(BearerTargetHubInstance, BearerBoundaryHub),
 	},
 	{
 		ID:          "access.constraint.read",
 		Domain:      "access.constraint",
-		Description: "Read access constraint definitions",
+		Description: "Read access constraint definitions and the principals a constraint affects. A token needs access_constraint:read on a hub boundary; the write methods on the same routes stay refused to every token",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/access-constraints", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/access-constraints/{id}", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/access-constraints/{id}/affected-principals", Method: "GET"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
 		ResourceResolver: "hub-scoped",
 		BasePermission:   "access_constraint.read",
 		Effects:          []SecurityEffect{EffectReadOne, EffectListScoped},
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
-		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestConstraintReadToken_DoesNotAdmitConstraintAdmin"},
+			{Package: "pkg/hub", Function: "TestConstraintWriteRoutesToken_WriteMethodsStillDenied"},
+		},
+		Bearer: AdmitOn(BearerTargetHubInstance, BearerBoundaryHub),
+	},
+	{
+		ID:          "hub.audit.constraint",
+		Domain:      "hub",
+		Description: "Read one access constraint's audit history. hub.audit.read is a hub-level permission: a token needs hub_audit:read on a hub boundary and is checked against the hub-level constraint record; a denied caller gets the same not-found answer as for a missing constraint",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/access-constraints/{id}/audit", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "hub.audit.read",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialResourceNotFound},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestConstraintAuditToken_RequiresHubAuditReadOnHubBoundary"},
+		},
+		Bearer: AdmitOn(BearerTargetHubInstance, BearerBoundaryHub),
 	},
 	{
 		ID:          "user.session.logout",
@@ -930,7 +1073,7 @@ var identityOperations = []OperationSpec{
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/templates", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/templates/{id}", Method: "GET"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/templates/{id}/download", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/templates/{id}/download", Method: "GET", Response: ResponseCredential},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
@@ -950,7 +1093,7 @@ var identityOperations = []OperationSpec{
 		Domain:      "template",
 		Description: "Create a template in the caller's own user scope; the scope and owner are the caller. A user access token needs template:create on a hub boundary",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/templates", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/templates", Method: "POST", Response: ResponseCredential},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
@@ -972,7 +1115,7 @@ var identityOperations = []OperationSpec{
 		Description: "Update, upload to or finalize one of the caller's own user-scope templates. A user access token needs template:update on a hub boundary",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/templates/{id}", Method: "PUT"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/templates/{id}/upload", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/templates/{id}/upload", Method: "POST", Response: ResponseCredential},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/templates/{id}/finalize", Method: "POST"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
@@ -1016,5 +1159,238 @@ var identityOperations = []OperationSpec{
 			{Package: "pkg/hub", Function: "TestUserTemplateWrites_FederatedUserRefused"},
 		},
 		Bearer: AdmitOn(BearerTargetCatalogRecord, BearerBoundaryHub),
+	},
+
+	// =====================================================================
+	// Domain: hub — hub audit reads; user — the caller's own explain
+	// =====================================================================
+	{
+		ID:          "hub.audit.effectiveaccess",
+		Domain:      "hub",
+		Description: "Read any principal's effective access composition at the system scope. A token needs hub_audit:read on a hub boundary; HEAD answers whether the caller may read it",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/effective-access", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/effective-access", Method: "HEAD"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "hub.audit.read",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestHubAuditToken_EffectiveAccessAndCrossPrincipalExplain"},
+		},
+		Bearer: AdmitOn(BearerTargetHubInstance, BearerBoundaryHub),
+	},
+	{
+		ID:          "hub.audit.explain",
+		Domain:      "hub",
+		Description: "Explain another principal's authorization, or compare two principals' effective permissions. A token needs hub_audit:read on a hub boundary; grant details of the other principal are redacted",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/authz/explain", Method: "POST", Variant: "cross_principal"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "hub.audit.read",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestHubAuditToken_EffectiveAccessAndCrossPrincipalExplain"},
+		},
+		Bearer: AdmitOn(BearerTargetHubInstance, BearerBoundaryHub),
+	},
+	{
+		ID:          "user.self.explain",
+		Domain:      "user",
+		Description: "Explain the caller's own authorization. A token's decisions apply its ceiling and boundary, and its effective permission list holds only the permissions it may use; a project-boundary token explains only targets in its boundary project, while its holder is a current member of that project",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/authz/explain", Method: "POST", Variant: "self"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		ResourceResolver: "self-principal",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestExplainSelfToken_ProjectBoundaryLimitedToItsProject"},
+		},
+		Exemptions: []Exemption{{
+			Kind:   ExemptionAuthenticationOnly,
+			Reason: "Explains the caller's own authorization; every explained decision runs with the caller's own credential",
+			Scope:  "caller's own authorization only",
+			Waives: []WaivedObligation{WaiveBasePermission},
+		}},
+		Bearer: BearerDisposition{Kind: BearerAdmitSelf, SelfFilter: BearerSelfFilterBoundaryProject, Pin: "TestExplainSelfToken_ProjectBoundaryLimitedToItsProject"},
+	},
+
+	// =====================================================================
+	// Domain: user — the caller's own identity reads
+	// =====================================================================
+	{
+		ID:          "user.self.profile",
+		Domain:      "user",
+		Description: "Read the caller's own profile and preferences. Any token reads its holder's own profile. A visitor reads its own federated account; an unlinked federated user is refused",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/auth/me", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT, CredentialFederatedUser},
+		ResourceResolver: "self-principal",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestSelfIdentityReadsToken_AnyTokenReads"},
+			{Package: "pkg/hub", Function: "TestSelfReadCredential_VisitorIdentityOnly"},
+			{Package: "pkg/hub", Function: "TestVisitorRoute_AuthMeReturnsVisitorOwnProfile"},
+			{Package: "pkg/hub", Function: "TestVisitorRoute_UnlinkedFederatedUserUnchanged"},
+		},
+		Exemptions: []Exemption{{
+			Kind:   ExemptionAuthenticationOnly,
+			Reason: "Reads the caller's own profile; carries no authority",
+			Scope:  "caller's own profile only",
+			Waives: []WaivedObligation{WaiveBasePermission},
+		}},
+		Bearer: BearerDisposition{Kind: BearerAdmitSelf, SelfFilter: BearerSelfFilterNone, Pin: "TestSelfIdentityReadsToken_AnyTokenReads"},
+	},
+	{
+		ID:          "user.self.scopes",
+		Domain:      "user",
+		Description: "List the token selectors and, for a requested boundary, the caller's own mint eligibility for each. Any token reads it",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/auth/scopes", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "self-principal",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestSelfIdentityReadsToken_AnyTokenReads"},
+		},
+		Exemptions: []Exemption{{
+			Kind:   ExemptionAuthenticationOnly,
+			Reason: "Lists the selector catalog and the caller's own mint eligibility; carries no authority",
+			Scope:  "selector catalog and caller's own eligibility only",
+			Waives: []WaivedObligation{WaiveBasePermission},
+		}},
+		Bearer: BearerDisposition{Kind: BearerAdmitSelf, SelfFilter: BearerSelfFilterNone, Pin: "TestSelfIdentityReadsToken_AnyTokenReads"},
+	},
+	{
+		ID:          "user.self.adminstatus",
+		Domain:      "user",
+		Description: "Read the caller's own admin status and system-scope permissions. For a token the permission list holds only the permissions its ceiling allows that are eligible for its boundary kind",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/auth/admin-status", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "self-principal",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestAdminStatusToken_ReportsCeilingIntersection"},
+		},
+		Exemptions: []Exemption{{
+			Kind:   ExemptionAuthenticationOnly,
+			Reason: "Reads the caller's own admin status; a token's permission list is limited to its ceiling and boundary",
+			Scope:  "caller's own admin status only",
+			Waives: []WaivedObligation{WaiveBasePermission},
+		}},
+		Bearer: BearerDisposition{Kind: BearerAdmitSelf, SelfFilter: BearerSelfFilterNone, Pin: "TestAdminStatusToken_ReportsCeilingIntersection"},
+	},
+	{
+		ID:          "user.self.groups",
+		Domain:      "user",
+		Description: "List the caller's own effective groups. A project-boundary token lists groups that belong to no project and the groups of its boundary project, the latter only while its holder is a current member of that project",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/groups", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "self-principal",
+		Effects:          []SecurityEffect{EffectListScoped},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestMyGroupsToken_ProjectBoundaryFiltersProjectGroups"},
+		},
+		Exemptions: []Exemption{{
+			Kind:   ExemptionAuthenticationOnly,
+			Reason: "Lists the caller's own group memberships; a project token sees only its boundary project's groups and groups with no project",
+			Scope:  "caller's own groups only",
+			Waives: []WaivedObligation{WaiveBasePermission},
+		}},
+		Bearer: BearerDisposition{Kind: BearerAdmitSelf, SelfFilter: BearerSelfFilterBoundaryProject, Pin: "TestMyGroupsToken_ProjectBoundaryFiltersProjectGroups"},
+	},
+
+	// =====================================================================
+	// Domain: user — identity binding (session-only)
+	// =====================================================================
+	{
+		ID:          "user.invite.redeem",
+		Domain:      "user",
+		Description: "Redeem an invitation code for the caller's identity. Session-only: a token does not bind an invitation to its holder",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/auth/invite/redeem", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "self-principal",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestInviteRedeem_SessionOnly"},
+		},
+		Exemptions: []Exemption{{
+			Kind:   ExemptionAuthenticationOnly,
+			Reason: "Redeems an invitation for the caller's own identity; the handler requires an interactive session and refuses a federated caller",
+			Scope:  "caller's own identity only",
+			Waives: []WaivedObligation{WaiveBasePermission},
+		}},
+		Bearer: SessionOnly(ReasonIdentityBinding),
+	},
+	{
+		ID:          "user.chatlink.verify",
+		Domain:      "user",
+		Description: "Link a pending chat account to the caller's identity with a verification code. Session-only: a token does not bind an external account to its holder",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/telegram/link/verify", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/discord/link/verify", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/teams/link/verify", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "self-principal",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestChatLinkVerify_SessionOnly"},
+		},
+		Exemptions: []Exemption{{
+			Kind:   ExemptionAuthenticationOnly,
+			Reason: "Links an external chat account to the caller's own identity; the handler requires an interactive session and refuses a federated caller",
+			Scope:  "caller's own identity only",
+			Waives: []WaivedObligation{WaiveBasePermission},
+		}},
+		Bearer: SessionOnly(ReasonIdentityBinding),
 	},
 }

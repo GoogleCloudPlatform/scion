@@ -1022,7 +1022,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 					}
 					markAttemptFailed(http.StatusInternalServerError, sce.Message)
 					span.SetStatus(codes.Error, startContextSpanText(sce))
-					s.writeStartContextError(w, sce, "create agent")
+					s.writeStartContextError(w, sce, "create agent", "agent_id", req.ID, "profile", createRequestProfile(req))
 					return
 				}
 				hydratedTemplatePath = tplPath
@@ -1213,7 +1213,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				}
 				markAttemptFailed(http.StatusInternalServerError, sce.Message)
 				span.SetStatus(codes.Error, startContextSpanText(sce))
-				s.writeStartContextError(w, sce, "create agent")
+				s.writeStartContextError(w, sce, "create agent", "agent_id", req.ID, "profile", createRequestProfile(req))
 			}
 			if !tplHydrated && (req.Config.TemplateID != "" || req.Config.TemplateHash != "") {
 				tplPath, err := s.hydrateTemplate(ctx, req.Config, hubConn)
@@ -1414,7 +1414,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		span.SetStatus(codes.Error, startContextSpanText(err))
-		status := s.writeStartContextError(w, err, "create agent")
+		status := s.writeStartContextError(w, err, "create agent", "agent_id", req.ID, "profile", createRequestProfile(req))
 		markAttemptFailed(status, err.Error())
 		return
 	}
@@ -1743,7 +1743,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		createSkill := skillFailureFrom(err, opts.RunID)
 		s.agentLifecycleLog.Error("Agent create failed", append(append([]any{
 			"agent_id", req.ID, "project_id", req.ProjectID, "run_id", opts.RunID,
-			"name", req.Name, "slug", req.Slug}, failureLogAttrs(err, createSkill)...),
+			"name", req.Name, "slug", req.Slug, "runtime", sc.RuntimeType, "profile", opts.Profile},
+			failureLogAttrs(err, createSkill)...),
 			runtimeCauseLogAttrs(err, createSkill)...)...)
 		if createSkill != nil {
 			s.logSkillResolutionFailure(createSkill,
@@ -3255,7 +3256,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	})
 	if err != nil {
 		span.SetStatus(codes.Error, startContextSpanText(err))
-		s.writeStartContextError(w, err, "start agent")
+		s.writeStartContextError(w, err, "start agent", "agent_id", id)
 		return
 	}
 	opts := sc.Opts
@@ -3309,20 +3310,20 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	if sce := rejectKubernetesAssignRuntimeChange(runtimeOpts, sc.AssignSelection, resolvedRuntimeType, func() dispatchProfileSelection {
 		return s.resolveDispatchProfileSelection(runtimeOpts)
 	}); sce != nil {
-		s.writeStartContextError(w, sce, "start agent")
+		s.writeStartContextError(w, sce, "start agent", "agent_id", id, "runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile)
 		return
 	}
 	if sce := rejectKubernetesBlockRuntimeChange(runtimeOpts, sc.BlockSelection, resolvedRuntimeType, func() dispatchProfileSelection {
 		return s.resolveDispatchProfileSelection(runtimeOpts)
 	}); sce != nil {
-		s.writeStartContextError(w, sce, "start agent")
+		s.writeStartContextError(w, sce, "start agent", "agent_id", id, "runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile)
 		return
 	}
 	// Belt and braces: the preliminary classification (buildStartContext)
 	// must agree with this authoritative runtime; the specific rejections
 	// above report their own, more actionable errors first.
 	if sce := rejectRuntimeClassificationMismatch(sc.RuntimeType, resolvedRuntimeType); sce != nil {
-		s.writeStartContextError(w, sce, "start agent")
+		s.writeStartContextError(w, sce, "start agent", "agent_id", id, "runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile)
 		return
 	}
 
@@ -3367,9 +3368,10 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 			return
 		}
 		startSkill := skillFailureFrom(err, opts.RunID)
-		s.agentLifecycleLog.Error("Agent start failed", append([]any{
-			"agent_id", id, "project_id", projectID, "run_id", opts.RunID},
-			failureLogAttrs(err, startSkill)...)...)
+		s.agentLifecycleLog.Error("Agent start failed", append(append([]any{
+			"agent_id", id, "project_id", projectID, "run_id", opts.RunID,
+			"runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile},
+			failureLogAttrs(err, startSkill)...), runtimeCauseLogAttrs(err, startSkill)...)...)
 		if startSkill != nil {
 			s.logSkillResolutionFailure(startSkill,
 				"agent_id", id, "project_id", projectID, "run_id", opts.RunID)
@@ -3588,16 +3590,18 @@ func isContainerStopTolerable(err error) bool {
 }
 
 // agentsWithoutProjectLabel returns the subset of agents that carry no
-// scion.project_id label. The project-scoped lookups fall back to a
+// project identity: no scion.project_id label and no ProjectID field
+// (agentHasNoProjectIdentity). The project-scoped lookups fall back to a
 // slug-only search for backward compatibility with pre-existing / solo-mode
 // containers that predate project labels; that fallback must only match such
 // genuinely unlabeled containers. A container labeled for a *different*
 // project must never satisfy a project-scoped request, or same-slug agents
-// across projects would collide.
+// across projects would collide. The ProjectID field counts too, because
+// Cloud Run stores the label under its GCP-sanitized key (ptone/scion#5268).
 func agentsWithoutProjectLabel(agents []api.AgentInfo) []api.AgentInfo {
 	filtered := make([]api.AgentInfo, 0, len(agents))
 	for _, a := range agents {
-		if a.Labels["scion.project_id"] == "" {
+		if agentHasNoProjectIdentity(a) {
 			filtered = append(filtered, a)
 		}
 	}
@@ -4360,7 +4364,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		OwnershipAgentID: restartReq.ResolvedEnv["SCION_AGENT_ID"],
 	})
 	if err != nil {
-		s.writeStartContextError(w, err, "restart agent")
+		s.writeStartContextError(w, err, "restart agent", "agent_id", id)
 		return
 	}
 	opts := sc.Opts
@@ -4398,20 +4402,20 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	if sce := rejectKubernetesAssignRuntimeChange(runtimeOpts, sc.AssignSelection, resolvedRuntimeType, func() dispatchProfileSelection {
 		return s.resolveDispatchProfileSelection(runtimeOpts)
 	}); sce != nil {
-		s.writeStartContextError(w, sce, "restart agent")
+		s.writeStartContextError(w, sce, "restart agent", "agent_id", id, "runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile)
 		return
 	}
 	if sce := rejectKubernetesBlockRuntimeChange(runtimeOpts, sc.BlockSelection, resolvedRuntimeType, func() dispatchProfileSelection {
 		return s.resolveDispatchProfileSelection(runtimeOpts)
 	}); sce != nil {
-		s.writeStartContextError(w, sce, "restart agent")
+		s.writeStartContextError(w, sce, "restart agent", "agent_id", id, "runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile)
 		return
 	}
 	// Belt and braces: the preliminary classification (buildStartContext)
 	// must agree with this authoritative runtime; the specific rejections
 	// above report their own, more actionable errors first.
 	if sce := rejectRuntimeClassificationMismatch(sc.RuntimeType, resolvedRuntimeType); sce != nil {
-		s.writeStartContextError(w, sce, "restart agent")
+		s.writeStartContextError(w, sce, "restart agent", "agent_id", id, "runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile)
 		return
 	}
 
@@ -4474,8 +4478,10 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 			return
 		}
 		restartSkill := skillFailureFrom(err, opts.RunID)
-		s.agentLifecycleLog.Error("Agent restart failed", append([]any{
-			"agent_id", id}, failureLogAttrs(err, restartSkill)...)...)
+		s.agentLifecycleLog.Error("Agent restart failed", append(append([]any{
+			"agent_id", id, "project_id", projectID, "run_id", opts.RunID,
+			"runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile},
+			failureLogAttrs(err, restartSkill)...), runtimeCauseLogAttrs(err, restartSkill)...)...)
 		if restartSkill != nil {
 			s.logSkillResolutionFailure(restartSkill,
 				"agent_id", id, "project_id", projectID, "run_id", opts.RunID)
@@ -7063,7 +7069,23 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 	s.startNFSProjectTreeCleanup(r.Context(), slug, r.URL.Query().Get("project_id"))
 
 	if _, err := os.Stat(projectPath); os.IsNotExist(err) {
-		// Already gone — idempotent success
+		// The project directory is already gone (an earlier delete got
+		// this far). Its project-configs entry may remain, so remove it
+		// now: success only once both are gone, so a repeated delete
+		// converges (design §7, CleanupProject convergence).
+		requestedID := r.URL.Query().Get("project_id")
+		dir, err := orphanProjectConfigDir(globalDir, slug, requestedID)
+		if err != nil {
+			s.writeRuntimeOpError(w, r.Context(), opRemoveProjectConfigDir, err, "project_slug", slug, "project_id", requestedID)
+			return
+		}
+		if dir != "" {
+			if err := s.removeProjectConfigs(globalDir, dir); err != nil {
+				s.writeRuntimeOpError(w, r.Context(), opRemoveProjectConfigDir, err, "project_slug", slug, "project_id", requestedID, "path", dir)
+				return
+			}
+			s.agentLifecycleLog.Info("Removed hub-managed project config directory left by an earlier delete", "slug", slug, "path", dir)
+		}
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -7125,14 +7147,14 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 
 	s.agentLifecycleLog.Info("Removed hub-managed project directory", "slug", slug, "path", projectPath)
 	if configDir != "" {
-		// The .scion entry is gone, so a re-run cannot redo this; a failure
-		// is logged for an operator (scion project prune) and does not
-		// change the response.
-		if err := removeProjectConfigsSubtree(globalDir, configDir); err != nil {
-			s.agentLifecycleLog.Warn("project config directory not removed", "slug", slug, "path", configDir, "error", err)
-		} else {
-			s.agentLifecycleLog.Info("Removed hub-managed project config directory", "slug", slug, "path", configDir)
+		// A failure fails the delete: the project directory is gone, so a
+		// repeated delete removes the entry by its canonical name
+		// (orphanProjectConfigDir) and then succeeds.
+		if err := s.removeProjectConfigs(globalDir, configDir); err != nil {
+			s.writeRuntimeOpError(w, r.Context(), opRemoveProjectConfigDir, err, "project_slug", slug, "path", configDir)
+			return
 		}
+		s.agentLifecycleLog.Info("Removed hub-managed project config directory", "slug", slug, "path", configDir)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

@@ -15,7 +15,9 @@ The pieces:
   issuer audience in the public `GET /api/v1/test-infra/status` (`testIssuerAudience`).
 - **A human issuer on the target** creates a *workload issuer delegation*. This is the consent
   step: it lets the target's issuer service account issue member and viewer identities within
-  that person's own live `test_identity.issue` authority.
+  that person's own live `test_identity.issue` authority. On a systemd test hub running the
+  admin tier, a super-admin can also delegate admin test identities (see
+  [Admin-tier delegations](#admin-tier-delegations-systemd-test-hubs)).
 - **The runner** holds a profile naming the target, its service accounts and the delegation id.
   It obtains short-lived ID tokens through its assigned service account, so it needs no key
   file or long-lived credential.
@@ -62,6 +64,54 @@ The command prints the delegation id, which is not a secret. Use `delegate list`
 `delegate revoke <id>` to manage delegations. These commands take a human sign-in only, and
 are not available in agent mode.
 
+### Alternative: an offline delegation (operator, on the target host)
+
+On a test-designated target hub, an operator with shell access to the hub host can create a
+member-tier delegation without a human sign-in. This lets the hub be bootstrapped for test
+runners with no action from a human issuer. The command runs offline against the hub's
+configured database, like `scion server test-infra mark`, and is not available in agent mode:
+
+```bash
+scion server test-infra delegate --hub-id <hub id> \
+  --workload-sub 123456789012345678901 --ttl 8h --member-cap 5 --label "bootstrap"
+```
+
+It refuses, writing nothing, unless all of these hold:
+
+- the hub id is pinned (`server.hub.hub_id` or `SCION_SERVER_HUB_HUBID`) and `--hub-id` equals
+  it, as for `test-infra mark`;
+- `server.hub.class` is `test`;
+- the test infrastructure marker is present and names `--hub-id`;
+- `--workload-sub` is on `server.hub.test_identities.workload_issuers` (with `max_tier`
+  `member` or `admin`);
+- `--ttl` is between 1 minute and 24 hours (default 8 hours), `--member-cap` is between 1 and 5
+  (default 5), and the hub holds fewer than 4 live offline delegations.
+
+The delegation covers **member and viewer identities only**. There is no option for an admin
+tier: admin-tier delegations still need a live human super-admin (see
+[Admin-tier delegations](#admin-tier-delegations-systemd-test-hubs)). The command writes a
+`test_identity_delegation_create_offline` audit record (operator, host, time) and prints the
+delegation id, which is not a secret. It never prints a token. Use the id in the profile as in
+step 2.
+
+The running hub honours an offline delegation only while all of these hold. It checks them
+again on every request, with no cache:
+
+- the marker is present, names the hub's own pinned hub id, and is the same marker the
+  delegation was created against;
+- the hub runs with `--test-mode` at `member` or above;
+- the delegation is neither revoked nor expired, and its subject is still allow-listed.
+
+So any of these ends it at the next request: `scion server test-infra unmark` (and a later
+`mark` does not revive it), restarting the hub with `--test-mode` off, revoking it, letting it
+expire, or removing the subject from `workload_issuers` (at a restart). Revoke it offline with
+`scion server test-infra delegate revoke --hub-id <hub id> --id <delegation id>`, or as an
+unscoped platform admin through `DELETE /api/v1/test-identity-delegations/<id>`. Every request
+the hub admits through an offline delegation writes a `test_identity_delegation_redeem_offline`
+audit record (grantor kind, hub id, marker, test-mode level, delegation, subject, route, time).
+Identities it issued are ordinary member-tier test identities: they expire on their own and can
+be torn down as in step 8.
+
 ## 2. Add the profile (runner)
 
 ```bash
@@ -89,10 +139,21 @@ A profile must name another hub. The CLI refuses a profile whose endpoint names 
 hub (`SCION_HUB_ENDPOINT` or `SCION_HUB_URL`), and refuses every profile when either of those is
 set but is not an absolute URL. The check compares parsed host names and ports: lowercase,
 without a trailing dot, IP literals in canonical form, and loopback and container bridge host
-names (such as `host.docker.internal`) treated as one host. It does not resolve DNS aliases, so
-a profile naming another name for the agent's own hub, such as its public URL while
-`SCION_HUB_ENDPOINT` holds a bridge address, is not detected. The target hub's own delegation
-remains the boundary.
+names (such as `host.docker.internal`) treated as one host. This name check runs offline, when a
+profile is added or selected.
+
+Before a command mints or sends a profile bearer (the issuer ID token or a cached identity's
+token), the CLI also compares hub identities. It reads the target hub's persistent hub id from the
+target's public health route (`GET /healthz`, with at most the profile's IAP transport token, none
+for `--transport none`, and no bearer) and the agent's own hub id from the
+own hub's health route (with no credential at all), and refuses the profile when the two ids are
+equal. This catches another name for the agent's own hub, such as its public URL while
+`SCION_HUB_ENDPOINT` holds a bridge address, or a DNS alias. When either id is unavailable (the
+health route does not answer `200` with a hub id, for example because the agent's own hub is
+reached through IAP), the name check is the only check. `hub status` reports the outcome as its "not this agent's own
+hub" check (passed by hub id, by name only with the reason, or refused), and `--debug` logs it. A lookup can only add a
+refusal: the name check always runs first. Replicas of one hub share its hub id and count as one
+hub. The target hub's own delegation remains the boundary.
 :::
 
 ## 3. Issue identities into the run cache
@@ -107,7 +168,9 @@ Each identity is kept at `~/.scion/hub-profiles/t1/run-r1/<alias>.json`. The fil
 exclusively with mode `0600`, an existing file or a symlink is refused, and the alias must be
 new in the run. The token is never printed. The file also holds `tokenExpiresAt`, so a
 journey can mark a step as blocked when its token expired instead of failing for an unclear
-reason. Only member and viewer identities can be issued through a profile.
+reason. `issue` issues member and viewer identities; admin test identities go through
+`issue-admin` and an admin delegation (see
+[Admin-tier delegations](#admin-tier-delegations-systemd-test-hubs)).
 
 ## 4. Act as an identity
 
@@ -159,11 +222,14 @@ The code goes **only** to the file named by `--out`, exactly as without a profil
 not exist yet (an existing file, a symlink, or a path under a symlinked directory is refused
 before any request is sent), the file is created with mode `0600`, and the code is never
 printed. A browser redeems it at `POST /auth/test-identity/redeem` on the target (see
-[Browser Sessions as Test Identities](/scion/contributing/test-identity-browser-sessions/)).
+[Browser Sessions as Test Identities](/scion/contributing/test-identity-browser-sessions/), and
+for an IAP-fronted target [IAP Driver Tokens for Browser Journeys](/scion/contributing/test-identity-iap-driver/)).
 `--as` does not apply: the issuer delegation mints the code. The target mints codes only for
 member and viewer identities issued through the same delegation, and only where its own test
 identity web sessions are available; for any other identity it answers `404`. `hub test-identity
-list` shows the ids of the delegation's identities.
+list` shows the ids of the delegation's identities. For an admin test identity, add
+`--admin-role hub-admin` or `super-admin` (see
+[Admin-tier delegations](#admin-tier-delegations-systemd-test-hubs)).
 
 ## 6. Agents on the target
 
@@ -245,7 +311,7 @@ Inside an agent (`SCION_CLI_MODE=agent`), these commands are available:
 
 - `hub status`
 - `hub profile`
-- `hub test-identity` `issue`, `token`, `list`, `delete`, `teardown` and `web-code`
+- `hub test-identity` `issue`, `issue-admin`, `token`, `list`, `delete`, `teardown` and `web-code`
 - `artifact publish`, `get` and `versions` (agent commands with or without a profile)
 - `create`, `start`, `list`, `stop`, `delete`, `look` and `logs` (agent commands with or without
   a profile)
@@ -257,6 +323,176 @@ behaviour on the agent's own hub without a profile. With a profile selected they
 target as the `--as` identity, and a profile for the agent's own hub is refused for them too.
 `hub test-identity delegate` (the human consent step), the other `hub` commands and
 `hub projects` are not available in agent mode.
+
+## Admin-tier delegations (systemd test hubs)
+
+A target hub that runs the test admin tier (`--test-mode=admin`, or `super-admin`) also accepts
+delegations for admin test identities. The admin tier runs only on systemd test hubs. One
+delegation holds one scope:
+
+| `--scope` | Issues | Hub level | Lifetime (`--ttl`) | Per-delegation cap (`--admin-cap`) |
+|---|---|---|---|---|
+| `member` (default) | member and viewer identities | `member` or above | default 8h, at most 7 days | `--member-cap` 1-5 |
+| `hub-admin` | test hub-admins | `admin` or above | default 4h, at most 8h | 1-2 (default 2) |
+| `super-admin` | test super-admins | `super-admin` | default 1h, at most 2h | 1 |
+
+The lifetime is checked at create and again, from the creation time, at every issuance. The
+per-delegation caps are sub-limits: the hub never holds more than four live admin test
+identities, of which at most one test super-admin, across every delegation, access token and
+session. Over a cap, issuance answers `429` (`admin_delegation_cap_reached`,
+`admin_hub_cap_reached` or `super_admin_hub_cap_reached`).
+
+**Allowlist.** The issuer's entry needs `max_tier: admin` in the target's settings file. A hub
+started below `--test-mode=admin` with such an entry refuses to start.
+
+```yaml
+server:
+  hub:
+    test_identities:
+      workload_issuers:
+        - sub: "<T>-admin-issuer unique id"
+          max_tier: admin
+```
+
+**Create (a live super-admin, interactive sign-in only).**
+
+```bash
+scion --hub https://t9.example.com hub test-identity delegate create \
+  --workload-sub 123456789012345678902 --scope hub-admin --ttl 2h --admin-cap 1 --label "admin journey"
+```
+
+Only a human super-admin's interactive session creates an admin delegation. An access token,
+a dev credential, an agent, a workload delegation and every test identity are refused; the test
+admin identities are refused by the test-admin policy.
+
+### Which command issues admin test identities
+
+Two commands issue test hub-admins and test super-admins. They are for different callers and never stand in for each other:
+
+| Caller | Command | Credential | Where the token goes |
+|---|---|---|---|
+| A human operator, on the hub itself | `scion hub test-identity issue --admin-role ... --out <file>` | your own sign-in as a live super-admin (no hub profile, not in agent mode) | the `--out` file only |
+| A runner on another hub, for example an agent | `scion hub test-identity issue-admin --admin-role ... --as <alias> --run <label>` | the profile's admin issuer delegation (a hub profile is required; in agent mode only for a profile of another hub) | the run cache file `~/.scion/hub-profiles/<profile>/run-<label>/<alias>.json` only |
+
+The human command uses your session, so the authority is yours at that moment. The runner command acts through a delegation that a super-admin created on the target, so the hub re-checks the delegation and its grantor at every mint. `issue --admin-role` refuses a hub profile and agent mode, and `issue-admin` refuses to run without a target-hub profile. The run cache file is created exclusively with mode `0600`, symlinks are refused, an alias that already exists is refused before any request, and the token is never printed. `teardown --run <label>` removes the file.
+
+### Admin delegations through a profile
+
+**Add the admin delegations to the runner's profile.** An admin delegation pins the target's
+admin issuer service account, `<T>-admin-issuer` (see the prerequisites below), so the profile
+names that account with `--admin-issuer-sa`. It must differ from `--issuer-sa`, and is required
+with an admin delegation. A profile can hold the member delegation and both admin delegations,
+each under its own tier name; there is no fallback from one tier to another.
+
+```bash
+scion hub profile add t9 \
+  --endpoint https://t9.example.com \
+  --transport iap \
+  --iap-audience 1234567890-def.apps.googleusercontent.com \
+  --uat-sa t9-uat@my-project.iam.gserviceaccount.com \
+  --issuer-sa t9-issuer@my-project.iam.gserviceaccount.com \
+  --admin-issuer-sa t9-admin-issuer@my-project.iam.gserviceaccount.com \
+  --issuer-delegation member=<member delegation id>,hub-admin=<hub-admin delegation id>
+```
+
+**Issue.** `issue-admin` issues through the profile's admin delegation of `--admin-role`, with
+an issuer ID token minted in memory as the admin issuer account, and stores the identity in the
+run cache like `issue` does:
+
+```bash
+export SCION_HUB_PROFILE=t9 SCION_HUB_RUN=r1
+scion hub test-identity issue-admin --admin-role hub-admin --purpose "admin journey" --as admin1
+```
+
+It needs a hub profile in every mode: there is no path through your own sign-in. In agent mode
+it runs only with a profile for another hub. The token goes only to the run cache (mode
+`0600`); the output carries the identity's ID, email, kind, role and expiry and the cache file, never
+the token. `--purpose` is required (the hub records it on every admin identity). `--lifetime`
+and `--ttl` follow the kind's limits: a test hub-admin lives at most 60 minutes (token at most
+30), a test super-admin at most 30 minutes (token at most 15). A delegation issues only its own
+scope's kind.
+
+On the wire this is `POST /api/v1/test-identities/admin` with
+`Authorization: Bearer <ID token of <T>-admin-issuer, aud = the target's testIssuerAudience>`,
+`X-Scion-Issuer-Delegation: <delegation id>`, an optional `X-Scion-Run-Label`, and a body such as
+`{"adminRole": "hub-admin", "purpose": "admin journey r1"}`.
+
+**Token re-issue.** `scion hub test-identity token --as admin1` re-issues the cached identity's
+token through the admin delegation that issued it, and commands that act `--as admin1`
+re-issue it within 5 minutes of its expiry. The target re-issues only for identities the same
+delegation issued (any other identity gets `404`), within the kind's token limit and never past
+the identity's expiry or its kind's maximum lifetime: re-issue never extends an identity. If
+the profile no longer holds that delegation, the token is used until it expires. Re-issue is
+bounded by the delegation's test identity rate limit only (there is no separate admin limit).
+Each re-issue adds a live token, and earlier tokens stay valid until they expire, but no token
+outlives the identity's kind lifetime (at most an hour).
+
+**Web-login code.** `scion hub test-identity web-code <id> --admin-role hub-admin --out
+<file>` mints a code through the admin delegation, under the same rules as the member flow
+(the code goes only to `--out`). The target mints it only when it runs with
+`server.hub.test_identities.admin_web_sessions` set to its own hub id, at the kind's
+`--test-mode` level, and only for an identity the same delegation issued; otherwise it
+answers `404`. The browser session is capped at the identity's expiry and the kind's maximum
+lifetime.
+
+**Grantor and delegation re-checked at every mint.** Issuance, token re-issue and web-login
+codes each re-check, inside their own transaction, that the delegation is live and that the
+grantor is still an active human super-admin holding the scope's capability. If the grantor is
+demoted or suspended, or the delegation is revoked, the next mint gets `403` and nothing is
+created.
+
+**Not through a delegation.** An admin delegation does not list, delete or purge identities, does
+not run the issuer cleanup or the provenance route, and does not issue member identities (`403`). A member delegation reaches no admin identity. So
+`delete --as <admin alias>` is refused by the CLI, and `teardown` reports an admin alias as
+`left-to-expire` and removes its cache file: the identity ends at its expiry (at most an hour),
+or earlier through `POST /api/v1/test-identities/admin/revoke-all` by a human super-admin, a
+purge (`delete --purge`) by the grantor (on its own sign-in or access token) or a human
+super-admin, or a restart without the admin level.
+
+**Audit.** The identity records the delegation id. The `test_admin_issue` audit record names the
+delegation, the grantor, the issuer account's subject, the token's issue time and the run
+label, and the `[scion-test-admin-audit]` line carries `issuer_delegation_id` and
+`workload_sub`. A token re-issue writes a `test_identity_token_issue` record with the same
+delegation part and a `test_admin_token_issue` line; a web-login code writes a
+`test_identity_web_code_issue` record and a `test_admin_web_code_issue` line, each with the
+delegation id. No record or line holds a token or code.
+
+### Operator prerequisites for the admin tier
+
+Admin delegations use their own issuer service account per target, `<T>-admin-issuer`. It is
+separate from `<T>-issuer` (the member tier) so that the principal able to mint admin issuer
+tokens for a target is distinct from the one that mints member issuer tokens.
+
+- **One impersonator per target.** Grant `roles/iam.serviceAccountOpenIdTokenCreator` on
+  `<T>-admin-issuer` to exactly one principal dedicated to that target: for runners on the
+  community Kubernetes broker, a per-target Kubernetes service account bound through Workload
+  Identity (`roles/iam.workloadIdentityUser`), in its own namespace. Do not grant it to the
+  community hub's runtime service account, nor to any service account shared with member-tier
+  runners or with other targets. Scion does not configure or check these grants.
+- **Narrow assignment.** Whoever can run a workload as that per-target principal can mint the
+  target's admin issuer tokens while an admin delegation is live. Keep the namespace and its
+  service account restricted to the admin runners for that target.
+- **Allowlist only `<T>-admin-issuer` with `max_tier: admin`**; keep `<T>-issuer` at
+  `max_tier: member`.
+- **Data access logs.** Turn on IAM Credentials data access logs in the project of
+  `<T>-admin-issuer`: they record which principal minted each token.
+
+**Operator check (do this after setting up each target, and after IAM changes).** Confirm that
+the community hub's runtime service account cannot mint `<T>-admin-issuer` tokens:
+
+1. The IAM policy of `<T>-admin-issuer` (`gcloud iam service-accounts get-iam-policy`) lists no
+   binding for the community hub's runtime service account, and the per-target principal is
+   the only holder of `roles/iam.serviceAccountOpenIdTokenCreator`.
+2. A `generateIdToken` call for `<T>-admin-issuer` made as the community hub's runtime service
+   account fails with a permission error.
+3. The same call made as the per-target principal succeeds.
+
+Record the result with the target's setup notes. Scion has no test for this: it depends only on
+the IAM configuration.
+
+**Revocation, fastest first:** revoke the delegation on the target; remove the IAM grant of the
+per-target principal; `POST /api/v1/test-identities/admin/revoke-all` for identities already
+issued; restart the target without the admin level.
 
 ## Troubleshooting
 

@@ -217,14 +217,11 @@ func TestCanDelegate_FullCredentials_SystemGroup_Allowed(t *testing.T) {
 
 // --- R-3: Cross-project UAT group delegation gap ---
 
-// TestCanDelegate_GroupMembership_ScopedUAT_CrossProject_Denied verifies that
-// a project-scoped UAT cannot delegate group membership when the group carries
-// role bindings for a DIFFERENT project.
-//
-// R-3 fix: previously, the group-membership GrantDescriptor had no ScopeType,
-// so enforceUATDelegation no-oped, and intersectCredentialCaveats filtered by
-// permission ID but not by project. A UAT scoped to project A could delegate
-// a group carrying project-B-scoped bindings.
+// TestCanDelegate_GroupMembership_ScopedUAT_CrossProject_Denied pins that a
+// project-boundary token cannot delegate membership of a group whose closure
+// carries a role binding for a different project, even when its holder
+// holds that authority there; a hub-boundary token of the same holder with
+// the binding's selectors can. A session delegates it.
 func TestCanDelegate_GroupMembership_ScopedUAT_CrossProject_Denied(t *testing.T) {
 	authz, s := setupCanDelegateTest(t)
 	ctx := context.Background()
@@ -282,14 +279,20 @@ func TestCanDelegate_GroupMembership_ScopedUAT_CrossProject_Denied(t *testing.T)
 	assert.True(t, decision.Allowed,
 		"full-session owner should delegate cross-project group membership")
 
-	// RS1 D3: project-scoped bindings are excluded from the group membership
-	// delegation check. A scoped UAT is allowed because there are no
-	// system-scoped bindings on the group.
 	scopedOwner := NewScopedUserIdentity(owner, projectA, []string{"agent:read"})
 	decision = authz.CanDelegate(ctx, scopedOwner, GrantDescriptor{
 		Type:    GrantTypeGroupMembership,
 		GroupID: groupID,
 	})
+	assert.False(t, decision.Allowed,
+		"a project-A token cannot delegate a group carrying a project-B binding")
+	assert.Contains(t, decision.Reason, "outside its boundary")
+
+	hubOwner := NewScopedUserIdentityWithBoundaryAndDecoration(owner, hubBoundary(), []string{"agent:read"}, tid("r3-hub-cred"), bearerCeiling(t, "agent:read"), nil)
+	decision = authz.CanDelegate(ctx, hubOwner, GrantDescriptor{
+		Type:    GrantTypeGroupMembership,
+		GroupID: groupID,
+	})
 	assert.True(t, decision.Allowed,
-		"RS1 D3: project-scoped bindings excluded — scoped UAT allowed for group with only project bindings")
+		"a hub token holding the binding's permission in project B delegates: %s", decision.Reason)
 }

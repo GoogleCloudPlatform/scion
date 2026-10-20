@@ -5,6 +5,7 @@
     "asyncStart",
     "attach",
     "emptyPerAgentWorkspace",
+    "nodeImageRegistry",
     "reprovision",
     "reprovisionEmptyPerAgent",
     "startsInFlight",

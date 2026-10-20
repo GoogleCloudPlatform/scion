@@ -45,10 +45,6 @@ func init() {
 	hubInternalOps[relay.HubSessionRecheckPath] = (*Server).hubRelaySessionRecheck
 }
 
-// conduitRelayTunnelsMessage refuses POST /v1/tunnels on a relay-held
-// session.
-const conduitRelayTunnelsMessage = "Tunnels are not available on sessions held by a separate relay"
-
 // newConduitRelayRPCHandler builds the RPC handler of a relay-held user
 // session: the unchanged in-process handler, for the identity the
 // admission token names (a test seam).
@@ -256,14 +252,19 @@ func (s *Server) hubRelayRPC(w http.ResponseWriter, r *http.Request, peer, sessi
 		http.Error(w, "malformed rpc", http.StatusBadRequest)
 		return
 	}
-	var resp *conduitv1.RpcResponse
+	var credExpiry time.Time
+	if c.CredentialExpiry > 0 {
+		credExpiry = time.Unix(c.CredentialExpiry, 0)
+	}
+	var (
+		resp   *conduitv1.RpcResponse
+		tunnel *relay.HubTunnelOpen
+	)
 	if rpc.GetPath() == conduitTunnelsPath {
-		resp = tunnelRefusal(tunnelConduitNotServing, conduitRelayTunnelsMessage).response()
+		// The relay holding the session opens the tunnel the hub
+		// authorizes (conduit_tunnel_relay.go).
+		resp, tunnel = s.relayTunnelRPC(r.Context(), rt, v.identity, credExpiry, sessionID, rpc, req)
 	} else {
-		var credExpiry time.Time
-		if c.CredentialExpiry > 0 {
-			credExpiry = time.Unix(c.CredentialExpiry, 0)
-		}
 		resp = newConduitRelayRPCHandler(s, v.identity, credExpiry).HandleRPC(r.Context(), rpc)
 	}
 	resp.RequestId = rpc.GetRequestId()
@@ -273,7 +274,7 @@ func (s *Server) hubRelayRPC(w http.ResponseWriter, r *http.Request, peer, sessi
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(relay.HubRPCResponse{RPC: out})
+	_ = json.NewEncoder(w).Encode(relay.HubRPCResponse{RPC: out, Tunnel: tunnel})
 }
 
 // hubRelayRefresh serves POST sessions/{id}/refresh: an agent's in-band
@@ -381,6 +382,10 @@ func (s *Server) hubRelaySessionRecheck(w http.ResponseWriter, r *http.Request, 
 		v := s.recheckRelayAdmission(r.Context(), c)
 		switch v.verdict {
 		case conduitAuthzAllowed:
+			if c.Kind == registry.PrincipalBroker && s.relayBrokerSessionSuperseded(r.Context(), rt.registry, now, c) {
+				res.Close, res.CloseCode, res.Reason = true, relay.CloseSupersededIncarnation, relay.SupersededIncarnationReason()
+				break
+			}
 			res.OK = true
 			// Re-issued only while the credential itself is valid.
 			if admissionHalfLifeLeft(c, now) && (c.CredentialExpiry == 0 || now.Unix() < c.CredentialExpiry) {

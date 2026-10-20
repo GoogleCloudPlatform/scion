@@ -116,6 +116,23 @@ func TestReincarnateMove_CompletesOnTarget(t *testing.T) {
 	assert.EqualValues(t, 1, brokerReservationCount(t, f.s, f.dst.ID))
 }
 
+// A move goes through the same worker: it clears the previous run's exit
+// code and reason when it begins (ptone/scion#5282). The reason here is a
+// disruption recorded while the source pod still ran.
+func TestReincarnateMove_ClearsPreviousRunExitFields(t *testing.T) {
+	f := setupMoveFixture(t, true, nil)
+	prepareMoveWorkerFixture(t, f)
+	recordPreviousRunExit(t, f.s, f.agent.ID, "running", "preempted", 143)
+	obs := observeExitFieldsAtStop(t, f.s, f.disp, f.agent.ID)
+
+	r, a := startMove(t, f)
+	require.Equal(t, store.AgentReincarnationStateCompleted, r.State, r.Error)
+	obs.assertCleared(t)
+	assert.Equal(t, f.dst.ID, a.RuntimeBrokerID)
+	assert.Empty(t, a.ExitReason, "the moved agent does not carry the previous run's exit reason")
+	assert.Nil(t, a.ExitCode, "the moved agent does not carry the previous run's exit code")
+}
+
 // A failed source cleanup is recorded and never fails the move.
 func TestReincarnateMove_SourceCleanupFailureRecorded(t *testing.T) {
 	f := setupMoveFixture(t, true, nil)
