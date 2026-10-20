@@ -843,3 +843,26 @@ func TestCredentialReload_SignalCheckSetsVerifiedIssuedAt(t *testing.T) {
 		t.Fatal("an older credential was adopted after the signal check")
 	}
 }
+
+// A refused value resets the re-check pacing, so a value that returns
+// later starts again from the first delay.
+func TestCredentialReload_RefusalResetsRecheckDelay(t *testing.T) {
+	h := newResetHarness(t)
+	h.hub.set(func(c *credHub) { c.checkStatus = http.StatusInternalServerError })
+	h.write(h.newTok)
+	h.r.reset(authResetFileChange)
+	h.r.reset(authResetFileChange)
+	if h.r.uncheckedAttempts != 2 {
+		t.Fatalf("setup: unchecked attempts = %d, want 2", h.r.uncheckedAttempts)
+	}
+	h.write("malformed")
+	h.r.reset(authResetFileChange)
+	if h.r.uncheckedAttempts != 0 || h.r.uncheckedFP != (hub.Fingerprint{}) {
+		t.Fatalf("a refusal left the re-check pacing at %d attempts", h.r.uncheckedAttempts)
+	}
+	h.write(h.newTok)
+	h.r.reset(authResetFileChange)
+	if h.r.uncheckedAttempts != 1 {
+		t.Fatalf("unchecked attempts = %d, want 1 after the value returned", h.r.uncheckedAttempts)
+	}
+}

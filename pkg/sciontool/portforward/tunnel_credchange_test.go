@@ -119,9 +119,11 @@ func TestRun_UnauthorizedWakesOnLaterCredentialChange(t *testing.T) {
 	<-done
 }
 
-// A credential change does not cut a backoff for a failure other than 401:
-// the loop must take the (unbuffered) backoff timer before it connects
-// again, so a loop woken by the change connects first and is caught.
+// A credential change does not cut a backoff for a failure other than 401,
+// end to end: correct code always takes the backoff timer before it
+// connects again. A loop that also waited on the credential change could
+// still take the timer when both are ready at its select, so this test
+// alone does not always catch that; TestCredentialWake pins the decision.
 func TestRun_CredentialChangeDoesNotCutOtherBackoff(t *testing.T) {
 	client := scionhub.NewClientWithConfig("http://127.0.0.1:1", "old-credential", "agent-1")
 	m := NewManager(client)
@@ -164,4 +166,19 @@ func TestRun_CredentialChangeDoesNotCutOtherBackoff(t *testing.T) {
 	}
 	cancel()
 	<-done
+}
+
+// The reconnect wait wakes on a credential change only after a 401.
+func TestCredentialWake(t *testing.T) {
+	changed := make(chan struct{})
+	close(changed)
+	for _, tc := range []struct {
+		state tunnelState
+		wake  bool
+	}{{tunnelHealthy, false}, {tunnelBackoff, false}, {tunnelUnauthorized, true}} {
+		got := credentialWake(tc.state, changed)
+		if (got != nil) != tc.wake {
+			t.Fatalf("state %d: wakes on a credential change = %v, want %v", tc.state, got != nil, tc.wake)
+		}
+	}
 }

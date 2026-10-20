@@ -429,6 +429,13 @@ type acceptHub struct {
 	elsewhere int
 }
 
+// setAccept sets the credential that gets a 200, under the lock.
+func (h *acceptHub) setAccept(tok string) {
+	h.mu.Lock()
+	h.accept = tok
+	h.mu.Unlock()
+}
+
 func newAcceptHub(t *testing.T) *acceptHub {
 	t.Helper()
 	h := &acceptHub{}
@@ -494,7 +501,9 @@ func TestCheckCredentialAccepted(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			h := newAcceptHub(t)
+			h.mu.Lock()
 			h.status, h.location, h.body, h.accept = tt.status, tt.location, tt.body, tt.accept
+			h.mu.Unlock()
 			c := NewClientWithConfig(h.srv.URL, "in-memory-credential", "agent-1")
 			err := c.CheckCredentialAccepted(context.Background(), candidate)
 			if !errors.Is(err, tt.want) {
@@ -546,7 +555,7 @@ func TestCheckCredentialAcceptedSendsTransportCredential(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := newAcceptHub(t)
-	h.accept = candidate
+	h.setAccept(candidate)
 	t.Setenv(EnvHubEndpoint, h.srv.URL)
 	t.Setenv(EnvHubURL, "")
 	t.Setenv(EnvAgentID, "agent-1")
@@ -575,13 +584,11 @@ func TestVerifiedIssuedAtNeverDecreases(t *testing.T) {
 	older := agentCredential(t, "HS256", validClaims(now.Add(-time.Hour), "older"), 32)
 	h := newAcceptHub(t)
 	c := NewClientWithConfig(h.srv.URL, newer, "agent-1")
-	h.accept = newer
+	h.setAccept(newer)
 	if err := c.CheckCredentialAccepted(context.Background(), newer); err != nil {
 		t.Fatal(err)
 	}
-	h.mu.Lock()
-	h.accept = older
-	h.mu.Unlock()
+	h.setAccept(older)
 	if err := c.CheckCredentialAccepted(context.Background(), older); err != nil {
 		t.Fatal(err)
 	}
@@ -727,16 +734,14 @@ func TestCheckCurrentCredentialAccepted(t *testing.T) {
 	other := agentCredential(t, "HS256", validClaims(now.Add(time.Hour), "other"), 32)
 	h := newAcceptHub(t)
 	c := NewClientWithConfig(h.srv.URL, current, "agent-1")
-	h.accept = other
+	h.setAccept(other)
 	if err := c.CheckCurrentCredentialAccepted(context.Background(), other); err != nil {
 		t.Fatal(err)
 	}
 	if !c.VerifiedIssuedAt().IsZero() {
 		t.Fatal("a credential that is not current moved the verified issue time")
 	}
-	h.mu.Lock()
-	h.accept = current
-	h.mu.Unlock()
+	h.setAccept(current)
 	if err := c.CheckCurrentCredentialAccepted(context.Background(), current); err != nil {
 		t.Fatal(err)
 	}

@@ -2069,7 +2069,7 @@ func (r *authResetter) reset(source authResetSource) {
 			}
 		}
 		if err == nil {
-			err = r.checkWithHub(newToken)
+			err = r.checkWithHub(newToken, false)
 			if errors.Is(err, hub.ErrCandidateUnchecked) {
 				r.recheckLater(fp, info)
 				r.adoptTransportIfChanged(source)
@@ -2164,33 +2164,26 @@ func (r *authResetter) reset(source authResetSource) {
 	// it now, so that once the hub accepts it, a later credential file
 	// value is compared against its issue time.
 	if source == authResetSignal {
-		if err := r.checkCurrentWithHub(newToken); err != nil {
+		if err := r.checkWithHub(newToken, true); err != nil {
 			log.Info("AUTH_RESET: Adopted credential %s not confirmed by the hub yet: %v", info.LogID(), err)
 		}
 	}
 }
 
 // checkWithHub asks the hub whether it accepts token, within checkTimeout.
-func (r *authResetter) checkWithHub(token string) error {
+// With current, token is the credential just adopted, and an accepted
+// answer counts only if it is still the in-memory credential.
+func (r *authResetter) checkWithHub(token string, current bool) error {
 	timeout := r.checkTimeout
 	if timeout <= 0 {
 		timeout = credentialCheckTimeout
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+	if current {
+		return r.hubClient.CheckCurrentCredentialAccepted(ctx, token)
+	}
 	return r.hubClient.CheckCredentialAccepted(ctx, token)
-}
-
-// checkCurrentWithHub is checkWithHub for the credential just adopted: an
-// accepted answer counts only if it is still the in-memory credential.
-func (r *authResetter) checkCurrentWithHub(token string) error {
-	timeout := r.checkTimeout
-	if timeout <= 0 {
-		timeout = credentialCheckTimeout
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	return r.hubClient.CheckCurrentCredentialAccepted(ctx, token)
 }
 
 // recheckLater keeps the current credential after the hub could not be

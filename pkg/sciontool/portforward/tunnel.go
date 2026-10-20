@@ -139,12 +139,7 @@ func (m *Manager) run(ctx context.Context) {
 			}
 			state = tunnelBackoff
 		}
-		// Only a refused credential waits on a credential change; other
-		// failures keep their backoff.
-		var wake <-chan struct{}
-		if state == tunnelUnauthorized {
-			wake = changed
-		}
+		wake := credentialWake(state, changed)
 		select {
 		case <-ctx.Done():
 			return
@@ -153,6 +148,17 @@ func (m *Manager) run(ctx context.Context) {
 			log.Info("Port-forward tunnel: agent credential changed; reconnecting")
 		}
 	}
+}
+
+// credentialWake returns the channel the reconnect wait also wakes on:
+// changed while the hub refuses the credential, so a new credential is
+// tried at once, and nil (never ready) otherwise, so other failures keep
+// their backoff.
+func credentialWake(state tunnelState, changed <-chan struct{}) <-chan struct{} {
+	if state == tunnelUnauthorized {
+		return changed
+	}
+	return nil
 }
 
 // tunnelState is the health of the reconnect loop, used to log only on

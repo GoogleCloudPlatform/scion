@@ -872,7 +872,7 @@ func (c *Client) RefreshToken(ctx context.Context) (string, time.Time, error) {
 	// only when the client made that request on the hub's instruction to
 	// go elsewhere.
 	if resp.Request != nil && resp.Request.Response == nil {
-		c.noteVerified(result.Token)
+		c.noteVerified(result.Token, false)
 	}
 
 	// Persist the new token to a file so child processes can read it.

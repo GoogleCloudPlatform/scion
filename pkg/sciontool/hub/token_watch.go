@@ -188,23 +188,29 @@ func ValidateCandidateToken(token, agentID string, now time.Time) (TokenInfo, er
 }
 
 // noteVerified raises the verified issue time to token's iat, if later.
-// Call it only for a credential the hub has accepted.
-func (c *Client) noteVerified(token string) {
+// Call it only for a credential the hub has accepted. With onlyIfCurrent,
+// it changes nothing unless token is the in-memory credential.
+func (c *Client) noteVerified(token string, onlyIfCurrent bool) {
 	iat := InspectToken(token).IssuedAt
 	if iat.IsZero() {
 		return
 	}
 	c.tokenMu.Lock()
+	defer c.tokenMu.Unlock()
+	if onlyIfCurrent && c.token != token {
+		return
+	}
 	if iat.After(c.verifiedIAT) {
 		c.verifiedIAT = iat
 	}
-	c.tokenMu.Unlock()
 }
 
 // VerifiedIssuedAt returns the newest issue time among agent credentials
 // the hub has accepted from this client: a credential returned by a token
-// refresh answered directly by the hub, or one CheckCredentialAccepted
-// confirmed. It is zero until one is accepted and never decreases. A
+// refresh the hub URL itself answered, one CheckCredentialAccepted
+// confirmed, or the in-memory credential once CheckCurrentCredentialAccepted
+// confirmed it (if still in memory then). It is zero until one is accepted
+// and never decreases. A
 // credential read from the credential file must be newer than it to be
 // adopted from the file.
 func (c *Client) VerifiedIssuedAt() time.Time {
@@ -246,7 +252,7 @@ func (c *Client) CheckCredentialAccepted(ctx context.Context, token string) erro
 	if err := c.checkCredential(ctx, token); err != nil {
 		return err
 	}
-	c.noteVerified(token)
+	c.noteVerified(token, false)
 	return nil
 }
 
@@ -257,12 +263,7 @@ func (c *Client) CheckCurrentCredentialAccepted(ctx context.Context, token strin
 	if err := c.checkCredential(ctx, token); err != nil {
 		return err
 	}
-	iat := InspectToken(token).IssuedAt
-	c.tokenMu.Lock()
-	defer c.tokenMu.Unlock()
-	if c.token == token && iat.After(c.verifiedIAT) {
-		c.verifiedIAT = iat
-	}
+	c.noteVerified(token, true)
 	return nil
 }
 

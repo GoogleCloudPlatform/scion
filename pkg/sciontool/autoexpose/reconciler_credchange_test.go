@@ -127,9 +127,11 @@ func TestRun_UnauthorizedWakesOnLaterCredentialChange(t *testing.T) {
 	runNeverFiring(t, r, c, func() { go c.creds.SetToken("new-credential") })
 }
 
-// A credential change does not cut a backoff for a failure other than 401:
-// the loop must take the (unbuffered) backoff timer before its next pass,
-// so a loop woken by the change starts the next pass first and is caught.
+// A credential change does not cut a backoff for a failure other than 401,
+// end to end: correct code always takes the backoff timer before its next
+// pass. A loop that also waited on the credential change could still take
+// the timer when both are ready at its select, so this test alone does not
+// always catch that; TestCredentialWake pins the decision.
 func TestRun_CredentialChangeDoesNotCutOtherBackoff(t *testing.T) {
 	var c *notifyingHubClient
 	c = newNotifyingClient(func(int) ([]scionhub.ExposedPort, error) {
@@ -172,4 +174,19 @@ func TestRun_CredentialChangeDoesNotCutOtherBackoff(t *testing.T) {
 	}
 	cancel()
 	<-done
+}
+
+// The wait between passes wakes on a credential change only after a 401.
+func TestCredentialWake(t *testing.T) {
+	changed := make(chan struct{})
+	close(changed)
+	for _, tc := range []struct {
+		state loopState
+		wake  bool
+	}{{stateHealthy, false}, {stateBackoff, false}, {stateUnauthorized, true}} {
+		got := credentialWake(tc.state, changed)
+		if (got != nil) != tc.wake {
+			t.Fatalf("state %d: wakes on a credential change = %v, want %v", tc.state, got != nil, tc.wake)
+		}
+	}
 }

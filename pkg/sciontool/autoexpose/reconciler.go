@@ -177,12 +177,7 @@ func (r *Reconciler) Run(ctx context.Context) {
 			changed = r.credChanged()
 		}
 		delay := r.nextDelay(r.reconcileOnce(ctx))
-		// Only a refused credential waits on a credential change; other
-		// failures keep their backoff.
-		var wake <-chan struct{}
-		if r.state == stateUnauthorized {
-			wake = changed
-		}
+		wake := credentialWake(r.state, changed)
 		select {
 		case <-ctx.Done():
 			return
@@ -191,6 +186,17 @@ func (r *Reconciler) Run(ctx context.Context) {
 			logInfo("auto-expose: agent credential changed; retrying now")
 		}
 	}
+}
+
+// credentialWake returns the channel the wait between passes also wakes
+// on: changed while the hub refuses the credential, so a new credential is
+// tried at once, and nil (never ready) otherwise, so other failures keep
+// their backoff.
+func credentialWake(state loopState, changed <-chan struct{}) <-chan struct{} {
+	if state == stateUnauthorized {
+		return changed
+	}
+	return nil
 }
 
 // nextDelay records the outcome of a reconcile, logs state changes, and
