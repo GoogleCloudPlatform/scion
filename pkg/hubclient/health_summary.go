@@ -155,6 +155,15 @@ type HealthSummaryBroker struct {
 	// broker never reported it.
 	Health *HealthBrokerSelf  `json:"health"`
 	Agents HealthBrokerAgents `json:"agents"`
+	// HostIdentity is a co-located broker's host identity state; nil while
+	// unobserved.
+	HostIdentity *HealthBrokerHostIdentity `json:"host_identity,omitempty"`
+}
+
+// HealthBrokerHostIdentity is a runtime broker's host identity state (for
+// example match, mismatch or pinned_absent).
+type HealthBrokerHostIdentity struct {
+	State string `json:"state"`
 }
 
 // HealthBrokerSelf is a runtime broker's self-reported health.
