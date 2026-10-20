@@ -338,5 +338,22 @@ func TestConfigUnset_ReportsKeyStillSet(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, stdout, "nothing changed")
 	assert.Contains(t, stdout, "was not removed: it is still set in")
+	assert.Contains(t, stdout, "in a form config unset does not edit")
 	assert.Contains(t, stdout, "edit that file by hand")
+}
+
+// In a project whose settings are kept in its external settings directory
+// (it has a project-id file), config unset edits that directory; a key set
+// only in the in-repo settings file is reported as set in a file config
+// unset does not edit.
+func TestConfigUnset_ReportsInRepoFileNotEdited(t *testing.T) {
+	root, _ := configTestProject(t, "", "schema_version: \"1\"\nhub:\n  endpoint: https://in-repo.example.com\n")
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".scion", "project-id"), []byte("split-project-id\n"), 0o644))
+	outputFormat = ""
+
+	stdout, _, err := runConfigUnset(t, false, "hub.endpoint")
+	require.NoError(t, err)
+	assert.NotContains(t, stdout, "nothing changed")
+	assert.Contains(t, stdout, "which config unset does not edit")
+	assert.Contains(t, stdout, filepath.Join(root, ".scion", "settings.yaml"))
 }

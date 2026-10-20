@@ -228,7 +228,7 @@ func TestResolveSettingValue_DifferentSpellingsInTwoLayersHaveNoSource(t *testin
 	for i := 0; i < 20; i++ {
 		v, err := ResolveSettingValue(projectDir, "hub.endpoint")
 		require.NoError(t, err)
-		require.NotEmpty(t, v.Value)
+		assert.Equal(t, "https://a.example.com", v.Value, "the decode takes the exactly spelt hub section")
 		assert.Empty(t, v.Source, "two spellings in two layers: the source must not be guessed")
 	}
 

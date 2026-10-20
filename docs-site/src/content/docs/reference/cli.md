@@ -1040,8 +1040,8 @@ and a section left empty is removed with the key. An environment variable that s
 the key still applies, and the command warns about it. When a file of the edited
 layer still sets the key afterwards (a spelling `config unset` does not edit, or the
 in-repo `.scion/settings.yaml` of a project whose settings are kept in its external
-settings directory), the command names that file instead of reporting success, and
-`--format json` adds it as `still_set_in`. `config unset` is available in human mode
+settings directory), the command names that file, and `--format json` adds it as
+`still_set_in`. `config unset` is available in human mode
 only, like `config set`.
 
 ### `scion cd-config`
