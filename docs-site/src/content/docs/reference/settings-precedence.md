@@ -184,6 +184,11 @@ Key names are mapped by `versionedEnvKeyMapper`: the `SCION_` prefix is stripped
 lowercased, and `_` becomes a settings path separator — so `SCION_HUB_PROJECT_ID` sets
 `hub.project_id`.
 
+`SCION_HUB_PROJECT_ID` also outranks the project's `.scion/project-id` file, in both settings
+loaders, and a warning names both sources when they disagree. `SCION_PROJECT_ID` ranks lower: it
+sets the top-level `project_id`, and a `hub.project_id` from the settings files or the
+`project-id` file wins over it. When both variables are set, `SCION_HUB_PROJECT_ID` wins.
+
 :::caution[Same prefix, unrelated mechanism]
 Bucket 1 and [Bucket 2](#bucket-2--scion_-variables-that-scion-injects-into-agents) both use the
 `SCION_` prefix and are otherwise unrelated. Bucket 1 is *the broker reading its own
@@ -628,6 +633,8 @@ measurement, with a discriminator key set in **both** the global and the project
 `profiles.<name>.env` has been removed from the `ProfileConfig` structs and the JSON schema.
 Schema validation now **rejects** settings files that include this field. If your settings
 files still contain `profiles.<name>.env`, you will receive a validation error on startup.
+Saving the profiles section of the Hub's admin server settings also rejects it, along with any
+other key a profile has no field for.
 Search your settings files and migrate any remaining values before upgrading.
 :::
 

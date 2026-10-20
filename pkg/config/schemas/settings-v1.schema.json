@@ -1547,7 +1547,7 @@
             "target_stream_deadlines": {
               "type": "string",
               "enum": ["off", "enforce"],
-              "description": "Whether targets enforce user streams' authorization deadlines locally: 'off' (default) or 'enforce'. Published to targets with the grant keys. Enforce requires the hub's renewal driver, which lands in a follow-up change; until then, enforce refuses user streams to renewal-capable targets (503 unavailable, stream_renewal_unavailable). Requires the hub.conduit experiment.",
+              "description": "Whether targets enforce user streams' authorization deadlines locally: 'off' (default) or 'enforce'. Published to targets with the grant keys. The hub renews hub-held user streams to renewal-capable targets in both modes; with 'enforce', an open it cannot keep renewed is refused (503 unavailable, stream_renewal_unavailable). Requires the hub.conduit experiment.",
               "x-env-var": "SCION_SERVER_HUB_CONDUIT_TARGETSTREAMDEADLINES",
               "x-since": "1"
             },

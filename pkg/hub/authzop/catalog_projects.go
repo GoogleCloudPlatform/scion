@@ -722,7 +722,7 @@ var projectOperations = []OperationSpec{
 		Domain:      "project",
 		Description: "Register a project from an external source",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/register", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/register", Method: "POST", Response: ResponseCredential},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT},
@@ -843,12 +843,27 @@ var projectOperations = []OperationSpec{
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
 		ResourceResolver: "project-from-url",
 		BasePermission:   "scheduled_event.update",
-		Effects:          []SecurityEffect{EffectUpdateResource},
-		DelegationKind:   DelegationNone,
+		Effects:          []SecurityEffect{EffectUpdateResource, EffectGrantAuthority},
+		DelegationKind:   DelegationNonAmplification,
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestScheduleResumeToken_RechecksTarget"}},
 		Bearer:           AdmitOn(BearerTargetProjectPath, BearerBoundaryProject, BearerBoundaryHub),
+		DelegationDescription: "Only the dispatch_agent event type grants authority. A resume, and an update that changes the event type, payload, " +
+			"cron expression or enables the schedule, records the caller's initiator attribution and frozen effect ceiling (revisionAuthorityCeiling) " +
+			"in place of the stored ones; an update that changes none of those fields records neither. An update can switch a schedule to dispatch_agent. " +
+			"A dispatch_agent schedule then creates an agent at fire time, with a delegation edge from the recorded principal, " +
+			"after CanDelegate for that principal. A message schedule grants no authority. " +
+			"Effects are listed per operation, not per event type, so grant-authority is listed for the whole operation",
+		AuditObligation: &AuditObligation{
+			EventType:     "agent_delegation",
+			ContextFields: []string{"actor_id"},
+			AfterFields:   []string{"agent_id", "can_delegate_result"},
+			Atomic:        false,
+			NonAtomicJustification: "The update or resume write records no mutation audit record: it stores the initiator attribution and the frozen effect ceiling " +
+				"on the schedule row in the same conditional update that bumps its authorization revision. The agent_delegation record is written " +
+				"when a dispatch_agent schedule fires, in the agent-create transaction with the agent row and its delegation edge. A message schedule writes none",
+		},
 	},
 	{
 		ID:          "schedule.event.pause",
@@ -1167,7 +1182,7 @@ var projectOperations = []OperationSpec{
 		Domain:      "artifact",
 		Description: "Create a share link: an unguessable token, shown once, that lets anyone holding it read the artifact's current version without signing in until it expires (at most the hub's maximum lifetime, never past the artifact's own expiry) or is revoked",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/links", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/links", Method: "POST", Response: ResponseCredential},
 		},
 		Principals:            []PrincipalKind{PrincipalUser},
 		Credentials:           []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
@@ -1330,7 +1345,7 @@ var projectOperations = []OperationSpec{
 		Domain:      "artifact",
 		Description: "Get a view URL for a ready version whose entry is HTML: a capability, valid for a limited time, that serves only that version's files under /api/v1/artifacts/view/ in the sandboxed viewer (see the view exemption); the caller needs only the read check",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/versions/{seq}/view", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/versions/{seq}/view", Method: "POST", Response: ResponseCredential},
 		},
 		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
@@ -1380,8 +1395,8 @@ var projectOperations = []OperationSpec{
 		Domain:      "project",
 		Description: "Read a project's environment variables (list or one key)",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/env", Method: "GET"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/env/{key}", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/env", Method: "GET", Response: ResponseCredential},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/env/{key}", Method: "GET", Response: ResponseCredential},
 		},
 		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
@@ -1399,7 +1414,7 @@ var projectOperations = []OperationSpec{
 		Domain:      "project",
 		Description: "Set or delete a project environment variable",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/env/{key}", Method: "PUT"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/env/{key}", Method: "PUT", Response: ResponseCredential},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/env/{key}", Method: "DELETE"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},

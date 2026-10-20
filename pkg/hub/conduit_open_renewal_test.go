@@ -44,6 +44,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/router"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -145,8 +146,11 @@ type openSetup struct {
 	enforce  bool
 	scopeErr bool
 	allowAll bool
-	rec      *openRefusedRecorder
-	keys     *countingGrantKeyStore
+	// noRenewalRoute makes every route one this node cannot renew on
+	// (conduitRouteCanRenewTest), as a bridged leaf is until 6.6b-3.
+	noRenewalRoute bool
+	rec            *openRefusedRecorder
+	keys           *countingGrantKeyStore
 }
 
 func (o *openSetup) mod(srv *Server) {
@@ -158,6 +162,9 @@ func (o *openSetup) mod(srv *Server) {
 	}
 	if o.allowAll {
 		allowAllConduitActions(srv)
+	}
+	if o.noRenewalRoute {
+		srv.conduitRouteCanRenewTest = func(router.Resolved) bool { return false }
 	}
 	o.rec = recordOpenRefusals(srv)
 	o.keys = countSigning(srv)
@@ -342,6 +349,7 @@ func TestConduitScopeOfTestUnsetInProduction(t *testing.T) {
 	srv, _ := testServer(t)
 	assert.Nil(t, srv.conduitScopeOfTest)
 	assert.Nil(t, srv.conduitAuthorizeActionTestHook)
+	assert.Nil(t, srv.conduitRouteCanRenewTest)
 
 	files, err := filepath.Glob("*.go")
 	require.NoError(t, err)
@@ -359,13 +367,13 @@ func TestConduitScopeOfTestUnsetInProduction(t *testing.T) {
 				return true
 			}
 			for _, lhs := range as.Lhs {
-				if sel, ok := lhs.(*ast.SelectorExpr); ok && (sel.Sel.Name == "conduitScopeOfTest" || sel.Sel.Name == "conduitAuthorizeActionTestHook") {
+				if sel, ok := lhs.(*ast.SelectorExpr); ok && (sel.Sel.Name == "conduitScopeOfTest" || sel.Sel.Name == "conduitAuthorizeActionTestHook" || sel.Sel.Name == "conduitRouteCanRenewTest") {
 					t.Errorf("%s assigns %s", name, sel.Sel.Name)
 				}
 			}
 			return true
 		})
-		for _, field := range []string{"conduitScopeOfTest:", "conduitAuthorizeActionTestHook:"} {
+		for _, field := range []string{"conduitScopeOfTest:", "conduitAuthorizeActionTestHook:", "conduitRouteCanRenewTest:"} {
 			if strings.Contains(string(src), field) {
 				t.Errorf("%s sets %s in a composite literal", name, strings.TrimSuffix(field, ":"))
 			}
@@ -586,12 +594,13 @@ func requireRenewalUnavailableBody(t *testing.T, er ErrorResponse) {
 	assert.Equal(t, conduitReasonStreamRenewalUnavailable, er.Error.Details["reason"])
 }
 
-// TestConduitOpen_RenewalUnavailable_Tunnel (C5, tunnel): with enforce, a
-// tunnel to a stream_renewal.v2 agent is refused with 503 unavailable,
+// TestConduitOpen_RenewalUnavailable_Tunnel (C5, tunnel): with enforce, on
+// a route this node cannot renew on (conduitRouteCanRenewTest), a tunnel to
+// a stream_renewal.v2 agent is refused with 503 unavailable,
 // reason stream_renewal_unavailable; nothing is signed, nothing reaches
 // the agent and the refusal is counted.
 func TestConduitOpen_RenewalUnavailable_Tunnel(t *testing.T) {
-	o := &openSetup{enforce: true}
+	o := &openSetup{enforce: true, noRenewalRoute: true}
 	tf := newTunnelFixtureServer(t, o.mod)
 	tf.startAgent(t, tf.public.URL, tf.launched)
 	owner := tf.ownerClient(t)
@@ -624,11 +633,11 @@ func TestConduitOpen_ScopeError_Tunnel(t *testing.T) {
 }
 
 // TestConduitOpen_RenewalUnavailable_Proxy (C5, port proxy): with
-// enforce, the port proxy to a stream_renewal.v2 agent answers 503
+// enforce, on a route this node cannot renew on, the port proxy to a stream_renewal.v2 agent answers 503
 // unavailable, reason stream_renewal_unavailable; nothing is signed and
 // the app is never reached.
 func TestConduitOpen_RenewalUnavailable_Proxy(t *testing.T) {
-	o := &openSetup{enforce: true}
+	o := &openSetup{enforce: true, noRenewalRoute: true}
 	f := newConduitProxyFixtureServer(t, nil, o.mod)
 	f.startAgent(t)
 
@@ -664,12 +673,13 @@ func TestConduitOpen_ScopeError_Proxy(t *testing.T) {
 }
 
 // TestConduitOpen_RenewalUnavailable_PTY (C5 and Q6, PTY preflight and
-// WebSocket open): with enforce, the agent path to a stream_renewal.v2
+// WebSocket open): with enforce, on a route this node cannot renew on, the
+// agent path to a stream_renewal.v2
 // agent is refused before any upgrade with 503 unavailable, reason
 // stream_renewal_unavailable, by the preflight and the WebSocket open
 // alike; nothing is signed or spawned.
 func TestConduitOpen_RenewalUnavailable_PTY(t *testing.T) {
-	o := &openSetup{enforce: true}
+	o := &openSetup{enforce: true, noRenewalRoute: true}
 	f := newPTYConduitFixtureServer(t, o.mod)
 	f.setBrokerRow(t, attachCaps(false), "")
 	f.startPTYAgent(t, f.public.URL)
@@ -728,7 +738,7 @@ func TestConduitOpen_ScopeError_PTY(t *testing.T) {
 // is closed with 4504 stream_renewal_unavailable; nothing is signed, no
 // stream is opened and the refusal is counted.
 func TestConduitOpen_RenewalUnavailable_PTYBackstop(t *testing.T) {
-	o := &openSetup{enforce: true}
+	o := &openSetup{enforce: true, noRenewalRoute: true}
 	f := newPTYConduitFixtureServer(t, o.mod)
 	f.setBrokerRow(t, attachCaps(false), "")
 	f.startPTYAgent(t, f.public.URL)

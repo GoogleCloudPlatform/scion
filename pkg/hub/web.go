@@ -44,6 +44,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
+	"github.com/GoogleCloudPlatform/scion/pkg/webassets"
 	"github.com/GoogleCloudPlatform/scion/web"
 	"github.com/google/uuid"
 	"github.com/gorilla/sessions"
@@ -292,6 +293,10 @@ type WebServer struct {
 	// are detected (see loadFingerprintedAssets). It is built before the
 	// server starts serving and only read afterwards, so it needs no lock.
 	fingerprintedAssets map[string]bool
+
+	// staticIndex serves static assets with precompressed variants and
+	// ETags (pkg/webassets); see staticAssets in web_static_index.go.
+	staticIndex staticAssetIndex
 
 	// Dedicated request logger (nil = disabled)
 	requestLogger *slog.Logger
@@ -692,7 +697,7 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 		ws.assetsDisk = cfg.AssetsDir
 		ws.logger().Info("Web server using filesystem assets", "dir", cfg.AssetsDir)
 	} else if web.AssetsEmbedded {
-		sub, err := fs.Sub(web.ClientAssets, "dist/client")
+		sub, err := embeddedClientFS()
 		if err != nil {
 			ws.logger().Error("Failed to create sub-filesystem from embedded assets. Run 'make web && make build' to rebuild with web assets included, or use --web-assets-dir.", "error", err)
 		} else if _, err := fs.Stat(sub, "assets/main.js"); err != nil {
@@ -717,6 +722,9 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 	ws.hasAssets = ws.detectWebAssets()
 	if ws.hasAssets {
 		ws.fingerprintedAssets = ws.loadFingerprintedAssets()
+		// Build the precompressed-asset index once, at startup (it hashes
+		// every servable file of the embedded build).
+		ws.staticAssets()
 	}
 
 	ws.registerRoutes()
@@ -1237,9 +1245,12 @@ func (ws *WebServer) serveStaticAsset(w http.ResponseWriter, r *http.Request) {
 
 	var fileServer http.Handler
 	if ws.assetsDisk != "" {
-		fileServer = http.FileServer(http.Dir(ws.assetsDisk))
+		// Like http.Dir, but nothing outside the directory (by ".." or a
+		// symlink) and no *.br/*.gz sibling is opened.
+		fileServer = http.FileServer(webassets.DirFileSystem(ws.assetsDisk))
 	} else {
-		fileServer = http.FileServer(http.FS(ws.assets))
+		// Like http.FS, but no *.br/*.gz sibling is opened.
+		fileServer = http.FileServer(webassets.FSFileSystem(ws.assets))
 	}
 
 	// Go's built-in MIME table has no entry for these, and the system
@@ -1249,15 +1260,56 @@ func (ws *WebServer) serveStaticAsset(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", ct)
 	}
 
-	// Files Vite fingerprinted (listed in its build manifest) and other
-	// hex-hashed names get long-lived caching; the unhashed entry
-	// (assets/main.js) and every other file get revalidation.
-	if ws.fingerprintedAssets[r.URL.Path] || isHashedAsset(r.URL.Path) {
-		w.Header().Set("Cache-Control", "public, max-age=86400")
-	} else {
-		w.Header().Set("Cache-Control", "no-cache")
+	// Set here for the file server fallback (and the 404s below); Serve sets
+	// the same value through the same policy.
+	w.Header().Set("Cache-Control", ws.staticCacheControl(r.URL.Path))
+
+	// The mux cleans only the escaped path, so a decoded path can still
+	// hold dot segments or empty segments (from %2e or %2f). Such a path is
+	// refused rather than cleaned, and a precompressed sibling is never
+	// served by its own name, so the name the file server would open is
+	// always the name checked here.
+	clean := cleanStaticPath(r.URL.Path)
+	if clean != r.URL.Path || webassets.IsVariantName(clean) {
+		http.NotFound(w, r)
+		return
+	}
+
+	// Indexed files are served with their precompressed variant (br, gzip)
+	// and an ETag; anything else (directories, unindexed paths) falls back
+	// to the file server below, unchanged.
+	if srv := ws.staticAssets(); srv != nil && srv.Serve(w, r, ws.staticCacheControl) {
+		return
 	}
 	fileServer.ServeHTTP(w, r)
+}
+
+// cleanStaticPath cleans a URL path the way http.ServeMux does: rooted,
+// path.Clean, and a trailing slash kept (so directory paths stay as they
+// are).
+func cleanStaticPath(p string) string {
+	if p == "" {
+		return "/"
+	}
+	if p[0] != '/' {
+		p = "/" + p
+	}
+	np := path.Clean(p)
+	if p[len(p)-1] == '/' && np != "/" {
+		np += "/"
+	}
+	return np
+}
+
+// staticCacheControl is the Cache-Control of a static asset. Files Vite
+// fingerprinted (listed in its build manifest) and other hex-hashed names
+// get long-lived caching; the unhashed entry (assets/main.js) and every
+// other file get revalidation.
+func (ws *WebServer) staticCacheControl(requestPath string) string {
+	if ws.fingerprintedAssets[requestPath] || isHashedAsset(requestPath) {
+		return "public, max-age=86400"
+	}
+	return "no-cache"
 }
 
 // staticContentTypes maps file extensions missing from Go's built-in MIME
@@ -1592,6 +1644,12 @@ func (ws *WebServer) tryServeStaticFile(w http.ResponseWriter, r *http.Request) 
 	// Clean the path and strip the leading slash for fs.Open.
 	name := strings.TrimPrefix(filepath.ToSlash(r.URL.Path), "/")
 	if name == "" {
+		return false
+	}
+	// A non-clean decoded path (dot or empty segments left by %2e or %2f)
+	// and a precompressed sibling (*.br, *.gz, checked on the clean name)
+	// are never files of their own: treat them as missing.
+	if clean := cleanStaticPath(r.URL.Path); clean != r.URL.Path || webassets.IsVariantName(clean) {
 		return false
 	}
 

@@ -82,7 +82,10 @@ type RecheckExpectation struct {
 // session, epoch and incarnation, open_jti, and stream_id for a renewal. A
 // grant whose exp has passed is accepted while now is at most its
 // authz_until plus RecheckAllowance; nbf may be at most RecheckAllowance in
-// the future. No jti is consumed: a re-check is not an admission.
+// the future. No jti is consumed: a re-check is not an admission. A
+// signing key past its not_after is reported (ErrKeyExpired) only for a
+// grant that passes every other check, so it never masks a bad signature,
+// a passed window or a binding mismatch (design v2.21.36 §3.5).
 func VerifyRecheck(token []byte, keys KeySet, expect RecheckExpectation, now time.Time) (*RecheckClaims, error) {
 	if keys == nil || expect.Issuer == "" || !expect.Target.complete() || expect.OpenJTI == "" || expect.StreamID == 0 {
 		return nil, ErrExpectation
@@ -91,7 +94,10 @@ func VerifyRecheck(token []byte, keys KeySet, expect RecheckExpectation, now tim
 	if err != nil {
 		return nil, err
 	}
-	payload, kid, err := verifySigned(token, keys, typ, now)
+	// A key past its not_after does not fail here: a bad signature and every
+	// refusal below take priority, and the expired key is reported only for
+	// an otherwise valid grant (design v2.21.36 §3.5).
+	payload, kid, keyExpired, err := verifySignedKey(token, keys, typ, now, true)
 	if err != nil {
 		return nil, err
 	}
@@ -171,6 +177,9 @@ func VerifyRecheck(token []byte, keys KeySet, expect RecheckExpectation, now tim
 	}
 	if c.OpenJTI != expect.OpenJTI {
 		return nil, ErrStreamBinding
+	}
+	if keyExpired {
+		return nil, ErrKeyExpired
 	}
 	return c, nil
 }
