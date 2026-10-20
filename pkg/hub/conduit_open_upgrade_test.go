@@ -322,6 +322,20 @@ func TestConduitOpen_UpgradeRequired_RelayTunnelRetry(t *testing.T) {
 	requireUpgradeRequiredBody(t, resp.GetBody())
 	assert.Nil(t, open)
 	assert.Zero(t, o.keys.reads.Load(), "nothing was signed")
+
+	// The exclusion decides the row the check reads: excluding the row the
+	// retry above was refused on (only an agent's newest connection is
+	// eligible) leaves no row, so the answer differs: no session, not the
+	// renewal refusal, and still nothing signed.
+	o.keys.arm(f.cf.srv)
+	resp, open = f.postTunnel(t, "s-old", "s-new")
+	require.Equal(t, int32(http.StatusServiceUnavailable), resp.GetStatus(), string(resp.GetBody()))
+	var er ErrorResponse
+	require.NoError(t, json.Unmarshal(resp.GetBody(), &er))
+	assert.Equal(t, ErrCodeAgentSessionUnavailable, er.Error.Code)
+	assert.Nil(t, open)
+	assert.Zero(t, o.keys.reads.Load(), "nothing was signed")
+	assert.Equal(t, []string{upgradeRefusal(conduitRouteRelayTunnel)}, o.rec.list(), "only the first retry was refused for lack of renewal")
 }
 
 // TestConduitOpen_UpgradeRequired_Proxy (T4): the port proxy refuses with
