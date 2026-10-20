@@ -41,6 +41,7 @@ const conduitPath = "/api/v1/conduit"
 const (
 	codeAgentNotFound            = "agent_not_found"
 	codeAgentNotRunning          = "agent_not_running"
+	codeAgentUpgradeRequired     = "agent_upgrade_required"
 	codeRateLimited              = "rate_limited"
 	codeRuntimeBrokerUnavailable = "runtime_broker_unavailable"
 	codeAgentSessionUnavailable  = "agent_session_unavailable"
@@ -285,6 +286,11 @@ func classify(resp *conduitv1.RpcResponse) (outcome, *tunnelResponse, string, er
 	case http.StatusConflict:
 		if code == codeAgentNotRunning {
 			return fail(ExitAgentNotRunning, "the agent is not running (%s)", code)
+		}
+		if code == codeAgentUpgradeRequired {
+			// The agent session does not support stream renewal, which
+			// the hub requires: final, no retry and no fresh session.
+			return fail(ExitError, "the agent must be restarted on an image whose sciontool supports stream renewal (%s)", code)
 		}
 	case http.StatusTooManyRequests:
 		return fail(ExitCapReached, "too many tunnels on this session (%s)", reasonOr(code, codeRateLimited))

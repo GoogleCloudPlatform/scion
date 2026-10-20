@@ -762,8 +762,8 @@ type StartExtras struct {
 	// HubAgentDefaults carries the hub defaults a start applies at the
 	// broker's lowest tier (see startHubAgentDefaults). Nil = none.
 	HubAgentDefaults *RemoteHubAgentDefaults
-	// TelemetryPolicy is the project's enforced telemetry on/off, set only
-	// for a broker that reports TemplateTiers (wire key telemetryPolicy;
+	// TelemetryPolicy is the project's enforced telemetry on/off, sent to
+	// every broker (wire key telemetryPolicy;
 	// see RemoteAgentConfig.TelemetryPolicy). Nil = none.
 	TelemetryPolicy *bool
 	// Image is the user's explicit image (explicitDispatchImage), already
@@ -1493,8 +1493,8 @@ type RemoteAgentConfig struct {
 	HubAgentDefaults *RemoteHubAgentDefaults `json:"hubAgentDefaults,omitempty"`
 
 	// TelemetryPolicy is the project's enforced telemetry on/off
-	// (projectSettingTelemetryEnabled), sent only to a broker that reports
-	// TemplateTiers. The broker applies it last, above the agent's config
+	// (projectSettingTelemetryEnabled), sent to every broker; one older than
+	// templateTiers ignores it. The broker applies it last, above the agent's config
 	// and the requester's SCION_TELEMETRY_ENABLED flag (ptone/scion#4218).
 	// Nil = no policy.
 	TelemetryPolicy *bool `json:"telemetryPolicy,omitempty"`
@@ -1525,10 +1525,10 @@ type RemoteHubAgentDefaults struct {
 	AutoExposePorts *bool             `json:"autoExposePorts,omitempty"`
 	Experiments     []string          `json:"experiments,omitempty"`
 	// Telemetry is the hub's telemetry default (settings telemetry), sent
-	// only to a broker that reports TemplateTiers. The broker applies it per
+	// to every broker; one older than templateTiers ignores it. The broker applies it per
 	// start below the agent's own config telemetry and never persists it
-	// (ptone/scion#4218). A legacy broker gets it inline instead
-	// (dispatchTelemetry, ptone/scion#4222).
+	// (ptone/scion#4218). It is never sent inline (dispatchTelemetry,
+	// ptone/scion#4224).
 	Telemetry *api.TelemetryConfig `json:"telemetry,omitempty"`
 }
 
@@ -1636,6 +1636,12 @@ type Server struct {
 	// open) logs later failures at Debug. Cleared on success.
 	generalTopicWarned sync.Map
 
+	// brokerTemplateTiersWarned records broker IDs the heartbeat handler
+	// already warned about for lacking the templateTiers capability, so the
+	// WARN is logged once per broker per process
+	// (warnBrokerWithoutTemplateTiers).
+	brokerTemplateTiersWarned sync.Map
+
 	// hubSAMappingCache holds the hub-wide Kubernetes mapping view behind
 	// hubSAMappingWarnings for a short window (see gcp_sa_mapping_warnings.go).
 	hubSAMappingCache hubSAMappingViewCache
@@ -1705,9 +1711,9 @@ type Server struct {
 	conduitAdmissionKeyOnce sync.Once
 	conduitAdmissionAEADv   cipher.AEAD
 	conduitAdmissionKeyErr  error
-	// conduitRenewal verifies latest grants and mints renewal grants for
-	// relay stream re-checks (conduit_renewal.go); nil until set.
-	conduitRenewal atomic.Pointer[conduitRenewalGrants]
+	// conduitStreamRenewer is the renewal path of relay-held streams
+	// (conduit_renewal.go); nil until StartConduitExternal installs it.
+	conduitStreamRenewer atomic.Pointer[conduitStreamRenewer]
 	// conduitAuthz re-checks the user streams this node owns (nil while
 	// no relay runs); conduitAuthzMetrics is its counter.
 	conduitAuthz        atomic.Pointer[conduitStreamAuthz]
@@ -2683,6 +2689,16 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	srv.logTestIdentityWebSessionState()
 	srv.testAdminIssuance = newTestAdminIssuanceState()
 	srv.workloadIssuer = newWorkloadIssuerAuthenticator(cfg, s, func() time.Time { return srv.testIdentities.clock() }, srv.workloadAdminScopeAvailable)
+	if srv.workloadIssuer != nil {
+		// Offline delegations (phase DL): the gate reads the running
+		// level at every redeem (srv.testMode is set below, before the hub
+		// serves), and the per-redeem audit goes through the test
+		// identity audit hook.
+		srv.workloadIssuer.testModeLevel = srv.TestModeLevel
+		srv.workloadIssuer.writeAudit = func(ctx context.Context, st store.Store, record *store.MutationAuditRecord) error {
+			return srv.testIdentities.hooks.writeAudit(ctx, st, record)
+		}
+	}
 	if srv.workloadIssuer != nil && !cfg.EnableTestIdentities {
 		slog.Warn("Test identity workload issuers are configured but test identities are off; workload delegation stays unavailable")
 	}
@@ -6171,13 +6187,20 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 	// replica): pause the row instead of recording an invalid-expression
 	// error on every tick.
 	if hasCronZonePrefix(sched.CronExpr) {
-		if err := s.store.UpdateScheduleStatus(ctx, sched.ID, store.ScheduleStatusPaused); err != nil {
+		if err := s.store.UpdateScheduleStatus(ctx, sched.ID, store.ScheduleStatusPaused, store.ScheduleStatusReasonCronZoneUnsupported); err != nil {
 			log.Error("schedule-evaluator: failed to pause schedule with unsupported zone prefix",
 				"cron_expr", sched.CronExpr, "error", err)
 			return
 		}
 		log.Warn("schedule paused: cron zone prefixes are not supported; edit the expression to UTC and resume",
 			"cron_expr", sched.CronExpr)
+		return
+	}
+
+	// Backstop for a schedule whose authority agent was deleted by a path
+	// that did not pause it (ptone/scion#5403): pause it with status reason
+	// creator_deleted instead of firing it to be refused.
+	if s.pauseScheduleIfAuthorityAgentGone(ctx, sched, log) {
 		return
 	}
 

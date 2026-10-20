@@ -87,6 +87,10 @@ type reincarnationStepUpdate struct {
 	// cross-broker move, and its rollback). nil = leave untouched.
 	runtimeBrokerID *string
 	runtime         *string
+	// clearExit clears ExitCode and ExitReason. The stopping step sets it:
+	// once a reincarnation has begun, the recorded exit fields describe
+	// the run it replaces, not the new generation (ptone/scion#5282).
+	clearExit bool
 }
 
 // updateReincarnationStep re-reads the agent and writes back reincarnation-
@@ -152,6 +156,10 @@ func (s *Server) updateReincarnationStep(ctx context.Context, agentID string, up
 		}
 		if upd.runtime != nil {
 			agent.Runtime = *upd.runtime
+		}
+		if upd.clearExit {
+			agent.ExitCode = nil
+			agent.ExitReason = ""
 		}
 		if upd.message != nil {
 			agent.Message = *upd.message
@@ -569,11 +577,19 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	// every reincarnation (self or not) makes the in-flight status
 	// mode-neutral and informative for a coordinator watching a child, not
 	// just self-migration.
+	//
+	// The exit code and reason are cleared here too, where the
+	// reincarnation begins: from this write on they would describe the run
+	// being replaced, and the whole-row steps below would otherwise carry
+	// them onto the new generation, where a later stop could be classified
+	// with them (ptone/scion#5282). A failure from here on records its own
+	// phase and message.
 	agent, err := s.updateReincarnationStep(ctx, agentID, reincarnationStepUpdate{
 		reincarnationState: store.ReincarnationStateStopping,
 		phase:              string(state.PhaseStopping),
 		activity:           reincarnateStrPtr(""),
 		message:            reincarnateStrPtr(reincarnationMigratingMessage(toGeneration)),
+		clearExit:          true,
 		now:                stoppingNow,
 	}, reincarnationStepMaxAttempts)
 	if err != nil {

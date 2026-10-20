@@ -533,8 +533,8 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 //
 // Exceptions — these ignore whether the slot is already set:
 //   - TemplateID and TemplateHash are replaced whenever resolvedTemplate is
-//     non-nil; HubAccessScopes too, but only when the template declares
-//     hubAccess (otherwise an existing value is left as-is).
+//     non-nil. A template no longer sets HubAccessScopes (ptone/scion#4224);
+//     an existing value is left as-is.
 //   - Model-alias resolution: when AppliedConfig.Model is an alias, rewrites
 //     it to the resolved concrete name, and overwrites a non-empty
 //     InlineConfig.Model with that same resolved value (InlineConfig.Model
@@ -591,22 +591,11 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 // design §3.3) — those are populated by populateAgentConfig above this call,
 // before AppliedConfig is handed here.
 func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, project *store.Project, resolvedTemplate *store.Template) {
-	// Populate template ID, hash, and hub access scopes if template was resolved.
+	// Populate template ID and hash if template was resolved. The agent role
+	// determines hub access scopes; a template sets none (ptone/scion#4224).
 	if resolvedTemplate != nil {
 		agent.AppliedConfig.TemplateID = resolvedTemplate.ID
 		agent.AppliedConfig.TemplateHash = resolvedTemplate.ContentHash
-		if resolvedTemplate.Config != nil && resolvedTemplate.Config.HubAccess != nil {
-			// Still store the scopes on AppliedConfig for backward-compat visibility,
-			// but they are no longer used for token generation (replaced by AgentRole).
-			agent.AppliedConfig.HubAccessScopes = resolvedTemplate.Config.HubAccess.Scopes
-			if len(resolvedTemplate.Config.HubAccess.Scopes) > 0 {
-				slog.Warn("Template uses deprecated hubAccess.scopes; agent role determines scopes instead",
-					"template", resolvedTemplate.Slug,
-					"scopes", resolvedTemplate.Config.HubAccess.Scopes,
-					"agent_role", agent.AppliedConfig.AgentRole,
-				)
-			}
-		}
 
 		// The template's job keys are not copied here. Its model is filled
 		// by deriveAgentConfig's template rung, from the AgentConfig

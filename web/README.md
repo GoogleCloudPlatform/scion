@@ -188,7 +188,8 @@ Wildcards: `*` matches a single token, `>` matches the remainder.
 | `npm run build` | Build client assets for production |
 | `npm run build:dev` | Build client assets in development mode |
 | `npm run check:orphans` | After a build, fail if `dist/client/assets` holds a `.js` file the Vite manifest does not reference |
-| `npm run test:build-scripts` | Run the node:test suites for the build helper scripts in `scripts/` |
+| `npm run test:build-scripts` | Run the node:test suites for the build helper scripts in `scripts/`; the precompress suite also checks the output of a prior build (and skips those checks when there is none) |
+| `npm run test:move-sourcemaps` | Test `scripts/move-sourcemaps.mjs`, which the builds run to move source maps from `dist/client` (embedded and served) to `dist/sourcemaps` (not served) |
 | `npm run lint` | Run ESLint |
 | `npm run lint:fix` | Run ESLint with auto-fix |
 | `npm run format` | Format code with Prettier |

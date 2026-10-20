@@ -52,6 +52,11 @@ func entTestIdentityDelegationToStore(d *ent.TestIdentityDelegation) *store.Test
 		ExpiresAt:   d.ExpiresAt,
 		RevokedAt:   d.RevokedAt,
 		RevokedBy:   d.RevokedBy,
+		// The stored enum value, verbatim: readers switch on it and deny
+		// any value they do not know.
+		GrantorKind:     string(d.GrantorKind),
+		HubID:           d.HubID,
+		MarkerCreatedAt: d.MarkerCreatedAt,
 	}
 }
 
@@ -72,6 +77,13 @@ func (s *TestIdentityDelegationStore) CreateTestIdentityDelegation(ctx context.C
 		return fmt.Errorf("%w: a delegation requires a positive member cap", store.ErrInvalidInput)
 	case d.RevokedAt != nil || d.RevokedBy != nil:
 		return fmt.Errorf("%w: a new delegation cannot be revoked", store.ErrInvalidInput)
+	case d.GrantorKind != "" && d.GrantorKind != store.DelegationGrantorHuman:
+		// Structural (ptone/scion#4240, phase DL): the API path creates
+		// human-grantor delegations only. An offline delegation is
+		// written only by the offline host command.
+		return fmt.Errorf("%w: only a human grantor can create a delegation through the store", store.ErrInvalidInput)
+	case d.HubID != "" || d.MarkerCreatedAt != nil:
+		return fmt.Errorf("%w: a human-grantor delegation carries no hub or marker binding", store.ErrInvalidInput)
 	}
 	if d.ID == "" {
 		d.ID = uuid.NewString()
@@ -95,7 +107,11 @@ func (s *TestIdentityDelegationStore) CreateTestIdentityDelegation(ctx context.C
 		SetLabel(d.Label).
 		SetCreatedAt(d.Created).
 		SetExpiresAt(d.ExpiresAt).
+		SetGrantorKind(testidentitydelegation.GrantorKindHuman).
 		Save(ctx)
+	if err == nil {
+		d.GrantorKind = store.DelegationGrantorHuman
+	}
 	return mapError(err)
 }
 

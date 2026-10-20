@@ -2873,9 +2873,11 @@ func resolveBrokerRestartOptions(cmd *cobra.Command, saved []string) (port int, 
 func removeHubConnectionSetting(dir, name string) error {
 	// Held from the read to the write, so the entry check and the
 	// last-entry decision below use the file as it is written back.
-	// (config.LockSettingsFile serialises writers in this process only.)
-	unlock := config.LockSettingsFile()
-	defer unlock()
+	lock, err := config.LockSettingsDir(dir)
+	if err != nil {
+		return err
+	}
+	defer lock.Unlock()
 
 	path := config.GetSettingsPath(dir)
 	if path == "" {
@@ -2913,7 +2915,7 @@ func removeHubConnectionSetting(dir, name string) error {
 		versioned = version != ""
 	}
 	if !versioned {
-		return config.DeleteHubConnection(dir, name, false)
+		return config.DeleteHubConnectionLocked(lock, name)
 	}
 	if isJSON {
 		return fmt.Errorf("%s is JSON and cannot be edited in place; remove hub_connections.%s from it by hand", path, name)
@@ -2929,5 +2931,5 @@ func removeHubConnectionSetting(dir, name string) error {
 	if err != nil {
 		return fmt.Errorf("%w; remove hub_connections.%s from %s by hand", err, name, path)
 	}
-	return staged.Commit()
+	return staged.Commit(lock)
 }

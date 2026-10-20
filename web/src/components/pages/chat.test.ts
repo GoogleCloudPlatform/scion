@@ -57,6 +57,28 @@ import { RESUME_REFRESH_AFTER_MS } from '../../client/resume-refresh.js';
 
 vi.mock('../../client/main.js', () => import('../../client/__fixtures__/main-stub.js'));
 
+/**
+ * Stop functions visibleInterval has handed out and nobody has called yet:
+ * the page's live polls, whatever timers the helper uses underneath.
+ */
+const { livePolls } = vi.hoisted(() => ({ livePolls: new Set<() => void>() }));
+
+vi.mock('../../client/visible-interval.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../client/visible-interval.js')>();
+  return {
+    ...actual,
+    visibleInterval: (...args: Parameters<typeof actual.visibleInterval>): (() => void) => {
+      const stop = actual.visibleInterval(...args);
+      const tracked = (): void => {
+        livePolls.delete(tracked);
+        stop();
+      };
+      livePolls.add(tracked);
+      return tracked;
+    },
+  };
+});
+
 vi.mock('../../client/api.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../client/api.js')>();
   return {
@@ -2914,6 +2936,7 @@ describe('chat page — startup after the page is removed', () => {
 
   it('a page removed before its lazy imports resolve loads nothing and starts no poll', async () => {
     vi.mocked(apiFetch).mockClear();
+    livePolls.clear();
     const intervals = trackIntervals();
     await loadLazyModules();
     const el = createUnrenderedPage();
@@ -2928,13 +2951,16 @@ describe('chat page — startup after the page is removed', () => {
     await startups.settled();
 
     expect(dmListLoads()).toBe(0);
-    expect(el._fallbackPollInterval).toBeNull();
+    expect(el._stopFallbackPoll).toBeNull();
+    expect(livePolls.size).toBe(0);
+    // No raw setInterval left running either (livePolls covers the poll).
     expect(intervals.live()).toEqual([]);
     expect(el.v2SpaceRailLoaded).toBe(false);
   });
 
   it('a page removed and connected again before its imports resolve initialises once', async () => {
     vi.mocked(apiFetch).mockClear();
+    livePolls.clear();
     const intervals = trackIntervals();
     await loadLazyModules();
     const el = createUnrenderedPage();
@@ -2951,12 +2977,16 @@ describe('chat page — startup after the page is removed', () => {
 
       expect(el.v2SpaceRailLoaded).toBe(true);
       expect(dmListLoads()).toBe(1);
-      // Exactly one live interval, and it is the connected page's poll: the
-      // first initV2 started nothing its disconnect could no longer clear.
-      expect(el._fallbackPollInterval).not.toBeNull();
-      expect(intervals.live()).toEqual([el._fallbackPollInterval]);
+      // Exactly one live poll, and it is the connected page's: the first
+      // initV2 started nothing its disconnect could no longer clear.
+      expect(el._stopFallbackPoll).not.toBeNull();
+      expect(livePolls.size).toBe(1);
+      // ...and that poll is the page's: stopping the page's poll ends it.
+      el._stopFallbackPoll();
+      expect(livePolls.size).toBe(0);
 
       el.remove();
+      // No raw setInterval left running either (livePolls covers the poll).
       expect(intervals.live()).toEqual([]);
     } finally {
       el.remove();
@@ -3150,6 +3180,7 @@ describe('chat page — startup after the page is removed', () => {
 
     it('logs the error, starts nothing, and flags the rail as failed', async () => {
       vi.mocked(apiFetch).mockClear();
+      livePolls.clear();
       const intervals = trackIntervals();
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       const el = createUnrenderedPage();
@@ -3163,7 +3194,9 @@ describe('chat page — startup after the page is removed', () => {
         expect(el.v2SpaceRailLoaded).toBe(false);
         expect(el.v2SpaceRailLoadFailed).toBe(true);
         expect(dmListLoads()).toBe(0);
-        expect(el._fallbackPollInterval).toBeNull();
+        expect(el._stopFallbackPoll).toBeNull();
+        expect(livePolls.size).toBe(0);
+        // No raw setInterval left running either (livePolls covers the poll).
         expect(intervals.live()).toEqual([]);
       } finally {
         el.remove();

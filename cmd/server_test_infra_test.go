@@ -140,6 +140,20 @@ func TestTestInfraMark_RefusesUnpinnedHubID(t *testing.T) {
 		assertNoTestInfraMarkWritten(t, client)
 	})
 
+	t.Run("hub id checked before attested", func(t *testing.T) {
+		// Check-first order: an unpinned id is refused before the
+		// (invalid) --attested value is parsed.
+		isolateTestInfraMarkHubIDEnv(t)
+		cfg, client := tiaMarkDB(t)
+		t.Cleanup(func() { testInfraMarkAttested = "" })
+		testInfraMarkAttested = "[]"
+		var out bytes.Buffer
+		err := markTestInfra(ctx, client, cfg, &out)
+		require.ErrorIs(t, err, ErrTestInfraMarkHubIDNotPinned)
+		assert.NotContains(t, err.Error(), "--attested")
+		assertNoTestInfraMarkWritten(t, client)
+	})
+
 	t.Run("refused before the database is opened", func(t *testing.T) {
 		isolateTestInfraMarkHubIDEnv(t)
 		t.Chdir(t.TempDir())

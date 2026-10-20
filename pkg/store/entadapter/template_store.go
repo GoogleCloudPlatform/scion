@@ -94,7 +94,6 @@ func entTemplateRowToStore(e *ent.Template) *store.Template {
 		Description:          e.Description,
 		Harness:              e.Harness,
 		DefaultHarnessConfig: e.DefaultHarnessConfig,
-		Image:                e.Image,
 		ContentHash:          e.ContentHash,
 		Scope:                e.Scope,
 		ScopeID:              e.ScopeID,
@@ -112,7 +111,6 @@ func entTemplateRowToStore(e *ent.Template) *store.Template {
 		Created:              e.Created,
 		Updated:              e.Updated,
 	}
-	unmarshalJSONString(e.Config, &t.Config)
 	unmarshalJSONString(e.AgentConfig, &t.AgentConfig)
 	unmarshalJSONString(e.Files, &t.Files)
 	return t
@@ -141,8 +139,6 @@ func (s *TemplateStore) CreateTemplate(ctx context.Context, template *store.Temp
 		SetDescription(template.Description).
 		SetHarness(template.Harness).
 		SetDefaultHarnessConfig(template.DefaultHarnessConfig).
-		SetImage(template.Image).
-		SetConfig(marshalJSONString(template.Config)).
 		SetAgentConfig(marshalAgentConfig(template.AgentConfig)).
 		SetContentHash(template.ContentHash).
 		SetScope(template.Scope).
@@ -224,8 +220,6 @@ func (s *TemplateStore) UpdateTemplate(ctx context.Context, template *store.Temp
 		SetSlug(template.Slug).
 		SetDisplayName(template.DisplayName).
 		SetDescription(template.Description).
-		SetImage(template.Image).
-		SetConfig(marshalJSONString(template.Config)).
 		SetScope(template.Scope).
 		SetScopeID(template.ScopeID).
 		SetProjectID(template.ProjectID).

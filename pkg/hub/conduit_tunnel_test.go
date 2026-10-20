@@ -969,6 +969,7 @@ func TestConduitTunnel_ErrorTable(t *testing.T) {
 		tunnelGrantKeysUnavailable:     {http.StatusServiceUnavailable, "unavailable", "grant_keys_unavailable"},
 		tunnelConduitNotServing:        {http.StatusServiceUnavailable, "unavailable", "conduit_not_serving"},
 		tunnelStreamRenewalUnavailable: {http.StatusServiceUnavailable, "unavailable", "stream_renewal_unavailable"},
+		tunnelAgentUpgradeRequired:     {http.StatusConflict, "agent_upgrade_required", "stream_renewal_unsupported"},
 		tunnelInternal:                 {http.StatusInternalServerError, "internal_error", ""},
 		tunnelPlacementPinStale:        {http.StatusConflict, "runtime_target_pin_stale", ""},
 		tunnelPlacementBrokerMissing:   {http.StatusConflict, "runtime_broker_missing", ""},

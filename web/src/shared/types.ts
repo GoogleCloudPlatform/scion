@@ -1065,7 +1065,6 @@ export interface Template {
   description?: string;
   harness: string;
   defaultHarnessConfig?: string;
-  image?: string;
   status: string;
   scope: string;
   scopeId?: string;

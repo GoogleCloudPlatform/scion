@@ -399,8 +399,8 @@ To prevent security bypasses via sub-agent creation, Scion enforces strict no-es
 To ensure security policies stay up-to-date and to support legacy agents created prior to the tiered role rollout, the Hub re-derives permissions from the agent's stored role during token refresh (`RefreshAgentToken`), rather than copying old JWT scopes verbatim.
 - **Legacy Agent Compatibility**: Legacy agents that do not have a stored role default to the `full` role. This prevents production regressions where standing agents lose modern required scopes (such as `project:read`, `project:agent:lifecycle`, or secret access) after a token refresh.
 
-#### Deprecation of Raw Template Scopes
-With the introduction of tiered agent roles, the raw template field `hubAccess.scopes` has been **deprecated**. Agent permissions must be configured via the named roles.
+#### Raw Template Scopes Removed
+With the introduction of tiered agent roles, the raw template field `hubAccess.scopes` no longer has any effect: the Hub does not read it from templates or record it on agents ([ptone/scion#4224](https://github.com/ptone/scion/issues/4224)), and the CLI warns when a local template file still sets it. Agent permissions are configured via the named roles.
 
 ## Implementation Status
 

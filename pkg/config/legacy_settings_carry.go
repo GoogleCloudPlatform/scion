@@ -15,7 +15,6 @@
 package config
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -269,22 +268,6 @@ func checkCarriedSettingsDecode(vs *VersionedSettings, carried map[string]interf
 	return fmt.Errorf("top-level key(s) %s would not load as v1 settings: %w", strings.Join(bad, ", "), mergedErr)
 }
 
-// saveVersionedSettingsData writes already-marshalled v1 settings YAML to dir
-// the way SaveVersionedSettings writes a struct: to newSettingsFilePath(dir),
-// atomically, and not at all when the bytes would not change. The caller
-// (MigrateSettingsFile) holds the settings-file lock across its whole
-// read-rename-write.
-func saveVersionedSettingsData(dir string, data []byte) error {
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("failed to create directory %s: %w", dir, err)
-	}
-	targetPath := newSettingsFilePath(dir)
-	if existing, err := os.ReadFile(targetPath); err == nil && bytes.Equal(existing, data) {
-		return nil
-	}
-	return writeSettingsFileAtomic(targetPath, data)
-}
-
 // deleteHubConnectionFromFile removes hub_connections.<name> from the
 // settings file in dir, editing the parsed YAML tree so every other key
 // (including v1-only keys such as server and image_registry, and the whole
@@ -293,10 +276,9 @@ func saveVersionedSettingsData(dir string, data []byte) error {
 // JSON file is converted to YAML in newSettingsFilePath(dir) and removed, as
 // before. A missing file is left missing.
 //
-// It does not take LockSettingsFile: its caller (scion broker deregister,
-// via DeleteHubConnection) already holds it from its own read to this
-// write, and the lock is not reentrant.
-func deleteHubConnectionFromFile(dir, name string) error {
+// lock is the settings lock for dir: its caller (scion broker deregister,
+// via DeleteHubConnection) holds it from its own read to this write.
+func deleteHubConnectionFromFile(lock *SettingsLock, dir, name string) error {
 	existingPath := GetSettingsPath(dir)
 	if existingPath == "" {
 		return nil
@@ -349,9 +331,9 @@ func deleteHubConnectionFromFile(dir, name string) error {
 		return fmt.Errorf("failed to marshal settings: %w", err)
 	}
 	if !isJSON {
-		return writeSettingsFileAtomic(existingPath, out)
+		return writeSettingsFileAtomic(lock, existingPath, out)
 	}
-	if err := writeSettingsFileAtomic(newSettingsFilePath(dir), out); err != nil {
+	if err := writeSettingsFileAtomic(lock, newSettingsFilePath(dir), out); err != nil {
 		return err
 	}
 	_ = os.Remove(existingPath)

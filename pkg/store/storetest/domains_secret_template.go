@@ -51,7 +51,6 @@ func TemplateDomain() Domain[store.Template] {
 				Name:        fmt.Sprintf("Template %d", seq),
 				Slug:        fmt.Sprintf("template-%d-%s", seq, id[:8]),
 				Harness:     "claude",
-				Image:       "img:latest",
 				Scope:       store.TemplateScopeGlobal,
 				Status:      store.TemplateStatusActive,
 				ContentHash: fmt.Sprintf("hash-%d", seq),

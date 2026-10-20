@@ -73436,6 +73436,7 @@ type ScheduleMutation struct {
 	event_type                            *string
 	payload                               *string
 	status                                *string
+	status_reason                         *string
 	next_run_at                           *time.Time
 	last_run_at                           *time.Time
 	last_run_status                       *string
@@ -74518,6 +74519,55 @@ func (m *ScheduleMutation) ResetStatus() {
 	m.status = nil
 }
 
+// SetStatusReason sets the "status_reason" field.
+func (m *ScheduleMutation) SetStatusReason(s string) {
+	m.status_reason = &s
+}
+
+// StatusReason returns the value of the "status_reason" field in the mutation.
+func (m *ScheduleMutation) StatusReason() (r string, exists bool) {
+	v := m.status_reason
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStatusReason returns the old "status_reason" field's value of the Schedule entity.
+// If the Schedule object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduleMutation) OldStatusReason(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStatusReason is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStatusReason requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStatusReason: %w", err)
+	}
+	return oldValue.StatusReason, nil
+}
+
+// ClearStatusReason clears the value of the "status_reason" field.
+func (m *ScheduleMutation) ClearStatusReason() {
+	m.status_reason = nil
+	m.clearedFields[schedule.FieldStatusReason] = struct{}{}
+}
+
+// StatusReasonCleared returns if the "status_reason" field was cleared in this mutation.
+func (m *ScheduleMutation) StatusReasonCleared() bool {
+	_, ok := m.clearedFields[schedule.FieldStatusReason]
+	return ok
+}
+
+// ResetStatusReason resets all changes to the "status_reason" field.
+func (m *ScheduleMutation) ResetStatusReason() {
+	m.status_reason = nil
+	delete(m.clearedFields, schedule.FieldStatusReason)
+}
+
 // SetNextRunAt sets the "next_run_at" field.
 func (m *ScheduleMutation) SetNextRunAt(t time.Time) {
 	m.next_run_at = &t
@@ -74981,7 +75031,7 @@ func (m *ScheduleMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *ScheduleMutation) Fields() []string {
-	fields := make([]string, 0, 30)
+	fields := make([]string, 0, 31)
 	if m.initiator_principal_kind != nil {
 		fields = append(fields, schedule.FieldInitiatorPrincipalKind)
 	}
@@ -75044,6 +75094,9 @@ func (m *ScheduleMutation) Fields() []string {
 	}
 	if m.status != nil {
 		fields = append(fields, schedule.FieldStatus)
+	}
+	if m.status_reason != nil {
+		fields = append(fields, schedule.FieldStatusReason)
 	}
 	if m.next_run_at != nil {
 		fields = append(fields, schedule.FieldNextRunAt)
@@ -75122,6 +75175,8 @@ func (m *ScheduleMutation) Field(name string) (ent.Value, bool) {
 		return m.Payload()
 	case schedule.FieldStatus:
 		return m.Status()
+	case schedule.FieldStatusReason:
+		return m.StatusReason()
 	case schedule.FieldNextRunAt:
 		return m.NextRunAt()
 	case schedule.FieldLastRunAt:
@@ -75191,6 +75246,8 @@ func (m *ScheduleMutation) OldField(ctx context.Context, name string) (ent.Value
 		return m.OldPayload(ctx)
 	case schedule.FieldStatus:
 		return m.OldStatus(ctx)
+	case schedule.FieldStatusReason:
+		return m.OldStatusReason(ctx)
 	case schedule.FieldNextRunAt:
 		return m.OldNextRunAt(ctx)
 	case schedule.FieldLastRunAt:
@@ -75364,6 +75421,13 @@ func (m *ScheduleMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetStatus(v)
+		return nil
+	case schedule.FieldStatusReason:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStatusReason(v)
 		return nil
 	case schedule.FieldNextRunAt:
 		v, ok := value.(time.Time)
@@ -75554,6 +75618,9 @@ func (m *ScheduleMutation) ClearedFields() []string {
 	if m.FieldCleared(schedule.FieldFixtureIssuerID) {
 		fields = append(fields, schedule.FieldFixtureIssuerID)
 	}
+	if m.FieldCleared(schedule.FieldStatusReason) {
+		fields = append(fields, schedule.FieldStatusReason)
+	}
 	if m.FieldCleared(schedule.FieldNextRunAt) {
 		fields = append(fields, schedule.FieldNextRunAt)
 	}
@@ -75615,6 +75682,9 @@ func (m *ScheduleMutation) ClearField(name string) error {
 		return nil
 	case schedule.FieldFixtureIssuerID:
 		m.ClearFixtureIssuerID()
+		return nil
+	case schedule.FieldStatusReason:
+		m.ClearStatusReason()
 		return nil
 	case schedule.FieldNextRunAt:
 		m.ClearNextRunAt()
@@ -75701,6 +75771,9 @@ func (m *ScheduleMutation) ResetField(name string) error {
 		return nil
 	case schedule.FieldStatus:
 		m.ResetStatus()
+		return nil
+	case schedule.FieldStatusReason:
+		m.ResetStatusReason()
 		return nil
 	case schedule.FieldNextRunAt:
 		m.ResetNextRunAt()
@@ -83538,8 +83611,6 @@ type TemplateMutation struct {
 	description            *string
 	harness                *string
 	default_harness_config *string
-	image                  *string
-	_config                *string
 	agent_config           *string
 	content_hash           *string
 	scope                  *string
@@ -83921,104 +83992,6 @@ func (m *TemplateMutation) DefaultHarnessConfigCleared() bool {
 func (m *TemplateMutation) ResetDefaultHarnessConfig() {
 	m.default_harness_config = nil
 	delete(m.clearedFields, template.FieldDefaultHarnessConfig)
-}
-
-// SetImage sets the "image" field.
-func (m *TemplateMutation) SetImage(s string) {
-	m.image = &s
-}
-
-// Image returns the value of the "image" field in the mutation.
-func (m *TemplateMutation) Image() (r string, exists bool) {
-	v := m.image
-	if v == nil {
-		return
-	}
-	return *v, true
-}
-
-// OldImage returns the old "image" field's value of the Template entity.
-// If the Template object wasn't provided to the builder, the object is fetched from the database.
-// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
-func (m *TemplateMutation) OldImage(ctx context.Context) (v string, err error) {
-	if !m.op.Is(OpUpdateOne) {
-		return v, errors.New("OldImage is only allowed on UpdateOne operations")
-	}
-	if m.id == nil || m.oldValue == nil {
-		return v, errors.New("OldImage requires an ID field in the mutation")
-	}
-	oldValue, err := m.oldValue(ctx)
-	if err != nil {
-		return v, fmt.Errorf("querying old value for OldImage: %w", err)
-	}
-	return oldValue.Image, nil
-}
-
-// ClearImage clears the value of the "image" field.
-func (m *TemplateMutation) ClearImage() {
-	m.image = nil
-	m.clearedFields[template.FieldImage] = struct{}{}
-}
-
-// ImageCleared returns if the "image" field was cleared in this mutation.
-func (m *TemplateMutation) ImageCleared() bool {
-	_, ok := m.clearedFields[template.FieldImage]
-	return ok
-}
-
-// ResetImage resets all changes to the "image" field.
-func (m *TemplateMutation) ResetImage() {
-	m.image = nil
-	delete(m.clearedFields, template.FieldImage)
-}
-
-// SetConfig sets the "config" field.
-func (m *TemplateMutation) SetConfig(s string) {
-	m._config = &s
-}
-
-// Config returns the value of the "config" field in the mutation.
-func (m *TemplateMutation) Config() (r string, exists bool) {
-	v := m._config
-	if v == nil {
-		return
-	}
-	return *v, true
-}
-
-// OldConfig returns the old "config" field's value of the Template entity.
-// If the Template object wasn't provided to the builder, the object is fetched from the database.
-// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
-func (m *TemplateMutation) OldConfig(ctx context.Context) (v string, err error) {
-	if !m.op.Is(OpUpdateOne) {
-		return v, errors.New("OldConfig is only allowed on UpdateOne operations")
-	}
-	if m.id == nil || m.oldValue == nil {
-		return v, errors.New("OldConfig requires an ID field in the mutation")
-	}
-	oldValue, err := m.oldValue(ctx)
-	if err != nil {
-		return v, fmt.Errorf("querying old value for OldConfig: %w", err)
-	}
-	return oldValue.Config, nil
-}
-
-// ClearConfig clears the value of the "config" field.
-func (m *TemplateMutation) ClearConfig() {
-	m._config = nil
-	m.clearedFields[template.FieldConfig] = struct{}{}
-}
-
-// ConfigCleared returns if the "config" field was cleared in this mutation.
-func (m *TemplateMutation) ConfigCleared() bool {
-	_, ok := m.clearedFields[template.FieldConfig]
-	return ok
-}
-
-// ResetConfig resets all changes to the "config" field.
-func (m *TemplateMutation) ResetConfig() {
-	m._config = nil
-	delete(m.clearedFields, template.FieldConfig)
 }
 
 // SetAgentConfig sets the "agent_config" field.
@@ -84885,7 +84858,7 @@ func (m *TemplateMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *TemplateMutation) Fields() []string {
-	fields := make([]string, 0, 26)
+	fields := make([]string, 0, 24)
 	if m.name != nil {
 		fields = append(fields, template.FieldName)
 	}
@@ -84903,12 +84876,6 @@ func (m *TemplateMutation) Fields() []string {
 	}
 	if m.default_harness_config != nil {
 		fields = append(fields, template.FieldDefaultHarnessConfig)
-	}
-	if m.image != nil {
-		fields = append(fields, template.FieldImage)
-	}
-	if m._config != nil {
-		fields = append(fields, template.FieldConfig)
 	}
 	if m.agent_config != nil {
 		fields = append(fields, template.FieldAgentConfig)
@@ -84984,10 +84951,6 @@ func (m *TemplateMutation) Field(name string) (ent.Value, bool) {
 		return m.Harness()
 	case template.FieldDefaultHarnessConfig:
 		return m.DefaultHarnessConfig()
-	case template.FieldImage:
-		return m.Image()
-	case template.FieldConfig:
-		return m.Config()
 	case template.FieldAgentConfig:
 		return m.AgentConfig()
 	case template.FieldContentHash:
@@ -85045,10 +85008,6 @@ func (m *TemplateMutation) OldField(ctx context.Context, name string) (ent.Value
 		return m.OldHarness(ctx)
 	case template.FieldDefaultHarnessConfig:
 		return m.OldDefaultHarnessConfig(ctx)
-	case template.FieldImage:
-		return m.OldImage(ctx)
-	case template.FieldConfig:
-		return m.OldConfig(ctx)
 	case template.FieldAgentConfig:
 		return m.OldAgentConfig(ctx)
 	case template.FieldContentHash:
@@ -85135,20 +85094,6 @@ func (m *TemplateMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetDefaultHarnessConfig(v)
-		return nil
-	case template.FieldImage:
-		v, ok := value.(string)
-		if !ok {
-			return fmt.Errorf("unexpected type %T for field %s", value, name)
-		}
-		m.SetImage(v)
-		return nil
-	case template.FieldConfig:
-		v, ok := value.(string)
-		if !ok {
-			return fmt.Errorf("unexpected type %T for field %s", value, name)
-		}
-		m.SetConfig(v)
 		return nil
 	case template.FieldAgentConfig:
 		v, ok := value.(string)
@@ -85315,12 +85260,6 @@ func (m *TemplateMutation) ClearedFields() []string {
 	if m.FieldCleared(template.FieldDefaultHarnessConfig) {
 		fields = append(fields, template.FieldDefaultHarnessConfig)
 	}
-	if m.FieldCleared(template.FieldImage) {
-		fields = append(fields, template.FieldImage)
-	}
-	if m.FieldCleared(template.FieldConfig) {
-		fields = append(fields, template.FieldConfig)
-	}
 	if m.FieldCleared(template.FieldAgentConfig) {
 		fields = append(fields, template.FieldAgentConfig)
 	}
@@ -85385,12 +85324,6 @@ func (m *TemplateMutation) ClearField(name string) error {
 		return nil
 	case template.FieldDefaultHarnessConfig:
 		m.ClearDefaultHarnessConfig()
-		return nil
-	case template.FieldImage:
-		m.ClearImage()
-		return nil
-	case template.FieldConfig:
-		m.ClearConfig()
 		return nil
 	case template.FieldAgentConfig:
 		m.ClearAgentConfig()
@@ -85459,12 +85392,6 @@ func (m *TemplateMutation) ResetField(name string) error {
 		return nil
 	case template.FieldDefaultHarnessConfig:
 		m.ResetDefaultHarnessConfig()
-		return nil
-	case template.FieldImage:
-		m.ResetImage()
-		return nil
-	case template.FieldConfig:
-		m.ResetConfig()
 		return nil
 	case template.FieldAgentConfig:
 		m.ResetAgentConfig()
@@ -85575,23 +85502,26 @@ func (m *TemplateMutation) ResetEdge(name string) error {
 // TestIdentityDelegationMutation represents an operation that mutates the TestIdentityDelegation nodes in the graph.
 type TestIdentityDelegationMutation struct {
 	config
-	op            Op
-	typ           string
-	id            *uuid.UUID
-	grantor_id    *string
-	workload_sub  *string
-	scope         *string
-	member_cap    *int
-	addmember_cap *int
-	label         *string
-	created_at    *time.Time
-	expires_at    *time.Time
-	revoked_at    *time.Time
-	revoked_by    *string
-	clearedFields map[string]struct{}
-	done          bool
-	oldValue      func(context.Context) (*TestIdentityDelegation, error)
-	predicates    []predicate.TestIdentityDelegation
+	op                Op
+	typ               string
+	id                *uuid.UUID
+	grantor_id        *string
+	workload_sub      *string
+	scope             *string
+	member_cap        *int
+	addmember_cap     *int
+	label             *string
+	created_at        *time.Time
+	expires_at        *time.Time
+	grantor_kind      *testidentitydelegation.GrantorKind
+	hub_id            *string
+	marker_created_at *time.Time
+	revoked_at        *time.Time
+	revoked_by        *string
+	clearedFields     map[string]struct{}
+	done              bool
+	oldValue          func(context.Context) (*TestIdentityDelegation, error)
+	predicates        []predicate.TestIdentityDelegation
 }
 
 var _ ent.Mutation = (*TestIdentityDelegationMutation)(nil)
@@ -85970,6 +85900,127 @@ func (m *TestIdentityDelegationMutation) ResetExpiresAt() {
 	m.expires_at = nil
 }
 
+// SetGrantorKind sets the "grantor_kind" field.
+func (m *TestIdentityDelegationMutation) SetGrantorKind(tk testidentitydelegation.GrantorKind) {
+	m.grantor_kind = &tk
+}
+
+// GrantorKind returns the value of the "grantor_kind" field in the mutation.
+func (m *TestIdentityDelegationMutation) GrantorKind() (r testidentitydelegation.GrantorKind, exists bool) {
+	v := m.grantor_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldGrantorKind returns the old "grantor_kind" field's value of the TestIdentityDelegation entity.
+// If the TestIdentityDelegation object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TestIdentityDelegationMutation) OldGrantorKind(ctx context.Context) (v testidentitydelegation.GrantorKind, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldGrantorKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldGrantorKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldGrantorKind: %w", err)
+	}
+	return oldValue.GrantorKind, nil
+}
+
+// ResetGrantorKind resets all changes to the "grantor_kind" field.
+func (m *TestIdentityDelegationMutation) ResetGrantorKind() {
+	m.grantor_kind = nil
+}
+
+// SetHubID sets the "hub_id" field.
+func (m *TestIdentityDelegationMutation) SetHubID(s string) {
+	m.hub_id = &s
+}
+
+// HubID returns the value of the "hub_id" field in the mutation.
+func (m *TestIdentityDelegationMutation) HubID() (r string, exists bool) {
+	v := m.hub_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldHubID returns the old "hub_id" field's value of the TestIdentityDelegation entity.
+// If the TestIdentityDelegation object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TestIdentityDelegationMutation) OldHubID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldHubID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldHubID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldHubID: %w", err)
+	}
+	return oldValue.HubID, nil
+}
+
+// ResetHubID resets all changes to the "hub_id" field.
+func (m *TestIdentityDelegationMutation) ResetHubID() {
+	m.hub_id = nil
+}
+
+// SetMarkerCreatedAt sets the "marker_created_at" field.
+func (m *TestIdentityDelegationMutation) SetMarkerCreatedAt(t time.Time) {
+	m.marker_created_at = &t
+}
+
+// MarkerCreatedAt returns the value of the "marker_created_at" field in the mutation.
+func (m *TestIdentityDelegationMutation) MarkerCreatedAt() (r time.Time, exists bool) {
+	v := m.marker_created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldMarkerCreatedAt returns the old "marker_created_at" field's value of the TestIdentityDelegation entity.
+// If the TestIdentityDelegation object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TestIdentityDelegationMutation) OldMarkerCreatedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldMarkerCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldMarkerCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldMarkerCreatedAt: %w", err)
+	}
+	return oldValue.MarkerCreatedAt, nil
+}
+
+// ClearMarkerCreatedAt clears the value of the "marker_created_at" field.
+func (m *TestIdentityDelegationMutation) ClearMarkerCreatedAt() {
+	m.marker_created_at = nil
+	m.clearedFields[testidentitydelegation.FieldMarkerCreatedAt] = struct{}{}
+}
+
+// MarkerCreatedAtCleared returns if the "marker_created_at" field was cleared in this mutation.
+func (m *TestIdentityDelegationMutation) MarkerCreatedAtCleared() bool {
+	_, ok := m.clearedFields[testidentitydelegation.FieldMarkerCreatedAt]
+	return ok
+}
+
+// ResetMarkerCreatedAt resets all changes to the "marker_created_at" field.
+func (m *TestIdentityDelegationMutation) ResetMarkerCreatedAt() {
+	m.marker_created_at = nil
+	delete(m.clearedFields, testidentitydelegation.FieldMarkerCreatedAt)
+}
+
 // SetRevokedAt sets the "revoked_at" field.
 func (m *TestIdentityDelegationMutation) SetRevokedAt(t time.Time) {
 	m.revoked_at = &t
@@ -86102,7 +86153,7 @@ func (m *TestIdentityDelegationMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *TestIdentityDelegationMutation) Fields() []string {
-	fields := make([]string, 0, 9)
+	fields := make([]string, 0, 12)
 	if m.grantor_id != nil {
 		fields = append(fields, testidentitydelegation.FieldGrantorID)
 	}
@@ -86123,6 +86174,15 @@ func (m *TestIdentityDelegationMutation) Fields() []string {
 	}
 	if m.expires_at != nil {
 		fields = append(fields, testidentitydelegation.FieldExpiresAt)
+	}
+	if m.grantor_kind != nil {
+		fields = append(fields, testidentitydelegation.FieldGrantorKind)
+	}
+	if m.hub_id != nil {
+		fields = append(fields, testidentitydelegation.FieldHubID)
+	}
+	if m.marker_created_at != nil {
+		fields = append(fields, testidentitydelegation.FieldMarkerCreatedAt)
 	}
 	if m.revoked_at != nil {
 		fields = append(fields, testidentitydelegation.FieldRevokedAt)
@@ -86152,6 +86212,12 @@ func (m *TestIdentityDelegationMutation) Field(name string) (ent.Value, bool) {
 		return m.CreatedAt()
 	case testidentitydelegation.FieldExpiresAt:
 		return m.ExpiresAt()
+	case testidentitydelegation.FieldGrantorKind:
+		return m.GrantorKind()
+	case testidentitydelegation.FieldHubID:
+		return m.HubID()
+	case testidentitydelegation.FieldMarkerCreatedAt:
+		return m.MarkerCreatedAt()
 	case testidentitydelegation.FieldRevokedAt:
 		return m.RevokedAt()
 	case testidentitydelegation.FieldRevokedBy:
@@ -86179,6 +86245,12 @@ func (m *TestIdentityDelegationMutation) OldField(ctx context.Context, name stri
 		return m.OldCreatedAt(ctx)
 	case testidentitydelegation.FieldExpiresAt:
 		return m.OldExpiresAt(ctx)
+	case testidentitydelegation.FieldGrantorKind:
+		return m.OldGrantorKind(ctx)
+	case testidentitydelegation.FieldHubID:
+		return m.OldHubID(ctx)
+	case testidentitydelegation.FieldMarkerCreatedAt:
+		return m.OldMarkerCreatedAt(ctx)
 	case testidentitydelegation.FieldRevokedAt:
 		return m.OldRevokedAt(ctx)
 	case testidentitydelegation.FieldRevokedBy:
@@ -86241,6 +86313,27 @@ func (m *TestIdentityDelegationMutation) SetField(name string, value ent.Value) 
 		}
 		m.SetExpiresAt(v)
 		return nil
+	case testidentitydelegation.FieldGrantorKind:
+		v, ok := value.(testidentitydelegation.GrantorKind)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetGrantorKind(v)
+		return nil
+	case testidentitydelegation.FieldHubID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetHubID(v)
+		return nil
+	case testidentitydelegation.FieldMarkerCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetMarkerCreatedAt(v)
+		return nil
 	case testidentitydelegation.FieldRevokedAt:
 		v, ok := value.(time.Time)
 		if !ok {
@@ -86300,6 +86393,9 @@ func (m *TestIdentityDelegationMutation) AddField(name string, value ent.Value) 
 // mutation.
 func (m *TestIdentityDelegationMutation) ClearedFields() []string {
 	var fields []string
+	if m.FieldCleared(testidentitydelegation.FieldMarkerCreatedAt) {
+		fields = append(fields, testidentitydelegation.FieldMarkerCreatedAt)
+	}
 	if m.FieldCleared(testidentitydelegation.FieldRevokedAt) {
 		fields = append(fields, testidentitydelegation.FieldRevokedAt)
 	}
@@ -86320,6 +86416,9 @@ func (m *TestIdentityDelegationMutation) FieldCleared(name string) bool {
 // error if the field is not defined in the schema.
 func (m *TestIdentityDelegationMutation) ClearField(name string) error {
 	switch name {
+	case testidentitydelegation.FieldMarkerCreatedAt:
+		m.ClearMarkerCreatedAt()
+		return nil
 	case testidentitydelegation.FieldRevokedAt:
 		m.ClearRevokedAt()
 		return nil
@@ -86354,6 +86453,15 @@ func (m *TestIdentityDelegationMutation) ResetField(name string) error {
 		return nil
 	case testidentitydelegation.FieldExpiresAt:
 		m.ResetExpiresAt()
+		return nil
+	case testidentitydelegation.FieldGrantorKind:
+		m.ResetGrantorKind()
+		return nil
+	case testidentitydelegation.FieldHubID:
+		m.ResetHubID()
+		return nil
+	case testidentitydelegation.FieldMarkerCreatedAt:
+		m.ResetMarkerCreatedAt()
 		return nil
 	case testidentitydelegation.FieldRevokedAt:
 		m.ResetRevokedAt()

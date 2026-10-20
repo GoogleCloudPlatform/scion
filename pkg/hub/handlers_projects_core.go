@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -1251,17 +1252,20 @@ func (s *Server) initHubManagedProject(project *store.Project) error {
 		if err != nil {
 			return fmt.Errorf("failed to read default project settings: %w", err)
 		}
-		if err := os.WriteFile(settingsPath, defaultSettings, 0644); err != nil {
+		// Checked again under the settings lock, so a file another writer
+		// has just created is not replaced.
+		if err := config.CreateSettingsFileIfMissing(settingsPath, defaultSettings); err != nil {
 			return fmt.Errorf("failed to seed settings.yaml: %w", err)
 		}
 	}
 
 	// Write hub connection settings into the seeded settings file.
+	// hub.project_id is the one v1 key for the project ID (the other
+	// project-ID key names map to it).
 	settingsUpdates := map[string]string{
-		"hub.enabled":   "true",
-		"hub.endpoint":  s.HubEndpointFor(HubEndpointForProjectSettings),
-		"hub.projectId": project.ID,
-		"project_id":    project.ID,
+		"hub.enabled":                     "true",
+		"hub.endpoint":                    s.HubEndpointFor(HubEndpointForProjectSettings),
+		projectkeys.ConfigHubProjectIDKey: project.ID,
 	}
 	for key, value := range settingsUpdates {
 		if err := config.UpdateSetting(scionDir, key, value, false); err != nil {
@@ -1331,11 +1335,12 @@ func (s *Server) cloneSharedWorkspaceProject(ctx context.Context, project *store
 	}
 
 	// Write hub connection settings
+	// hub.project_id is the one v1 key for the project ID (the other
+	// project-ID key names map to it).
 	settingsUpdates := map[string]string{
-		"hub.enabled":   "true",
-		"hub.endpoint":  s.HubEndpointFor(HubEndpointForProjectSettings),
-		"hub.projectId": project.ID,
-		"project_id":    project.ID,
+		"hub.enabled":                     "true",
+		"hub.endpoint":                    s.HubEndpointFor(HubEndpointForProjectSettings),
+		projectkeys.ConfigHubProjectIDKey: project.ID,
 	}
 	for key, value := range settingsUpdates {
 		if err := config.UpdateSetting(scionDir, key, value, false); err != nil {
@@ -2967,6 +2972,12 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		if err == store.ErrNotFound {
 			agent, err = s.store.GetAgent(ctx, agentID)
+			if (errors.Is(err, store.ErrNotFound) || (err == nil && agent.ProjectID != projectID)) && isVisitorIdentity(GetIdentityFromContext(ctx)) {
+				// A visitor gets the one refusal for an unknown agent too
+				// (admitVisitorSubRoute already refused it before here).
+				writeVisitorRefusal(w)
+				return
+			}
 			if err != nil {
 				writeError(w, http.StatusNotFound, ErrCodeAgentNotFound,
 					fmt.Sprintf("Agent %q not found in project", agentID),
@@ -3018,6 +3029,11 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 		isSystemPlane := false
 		allowed, reason, decision := s.authorizeAgentMessage(r.Context(), identity, agent, isSystemPlane)
 		messaging.RecordStep(r.Context(), "message_authorized")
+		if !allowed && isVisitorIdentity(identity) {
+			// A visitor's refusal names no reason or message mode.
+			writeVisitorRefusal(w)
+			return
+		}
 		if !allowed {
 			// Use typed denial code from the decision (agent path) or
 			// fall back to generic forbidden code (user path).

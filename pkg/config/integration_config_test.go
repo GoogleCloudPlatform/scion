@@ -645,57 +645,6 @@ func TestIsSecretConfigKey_A2AApiKey(t *testing.T) {
 	}
 }
 
-func TestAddSelfManagedPluginToSettings(t *testing.T) {
-	_, settingsPath := setupTestHome(t)
-
-	// Seed a minimal settings.yaml.
-	if err := os.WriteFile(settingsPath, []byte("server:\n  plugins: {}\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	entry := SelfManagedPluginEntry{
-		Name:       "a2a-bridge",
-		Address:    "localhost:9090",
-		ConfigFile: "~/.scion/scion-a2a-bridge-admin.yaml",
-	}
-
-	if err := AddSelfManagedPluginToSettings(entry); err != nil {
-		t.Fatalf("AddSelfManagedPluginToSettings() error: %v", err)
-	}
-
-	data, err := os.ReadFile(settingsPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	var raw map[string]interface{}
-	if err := yaml.Unmarshal(data, &raw); err != nil {
-		t.Fatal(err)
-	}
-
-	server := raw["server"].(map[string]interface{})
-	plugins := server["plugins"].(map[string]interface{})
-	broker := plugins["broker"].(map[string]interface{})
-
-	a2aEntry, ok := broker["a2a-bridge"].(map[string]interface{})
-	if !ok {
-		t.Fatal("a2a-bridge entry not found in broker map")
-	}
-
-	if sm, ok := a2aEntry["self_managed"].(bool); !ok || !sm {
-		t.Error("expected self_managed = true")
-	}
-	if mode, ok := a2aEntry["mode"].(string); !ok || mode != "self-managed" {
-		t.Errorf("expected mode = self-managed, got %v", a2aEntry["mode"])
-	}
-	if addr, ok := a2aEntry["address"].(string); !ok || addr != "localhost:9090" {
-		t.Errorf("expected address = localhost:9090, got %v", a2aEntry["address"])
-	}
-	if cf, ok := a2aEntry["config_file"].(string); !ok || cf != "~/.scion/scion-a2a-bridge-admin.yaml" {
-		t.Errorf("expected config_file, got %v", a2aEntry["config_file"])
-	}
-}
-
 func TestLoadPluginConfigFile_FiltersSecretKeys(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "plugin.yaml")

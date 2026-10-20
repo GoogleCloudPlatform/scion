@@ -66,6 +66,7 @@ import {
 import type { SharedLoadOptions } from '../../client/chat-list-cache.js';
 import { ResumeRefresh } from '../../client/resume-refresh.js';
 import { coalescedRefresh, type CoalescedRefresh } from '../../client/coalesced-refresh.js';
+import { visibleInterval } from '../../client/visible-interval.js';
 import type { RailRefreshDetail } from '../shared/chat/chat-space-rail.js';
 import { TouchPrimaryController } from '../../utils/input-modality.js';
 import { isMacTextFieldCtrlKey } from '../shared/text-field-keys.js';
@@ -998,7 +999,7 @@ export class ScionPageChat extends LitElement {
   /** Tracked project IDs for presence heartbeat. */
   private _presenceProjectIds: string[] = [];
   /** Slow fallback poll for what SSE does not cover (see FALLBACK_POLL_INTERVAL_MS). */
-  private _fallbackPollInterval: ReturnType<typeof setInterval> | null = null;
+  private _stopFallbackPoll: (() => void) | null = null;
   /**
    * Coalesced re-fetch of members after a new agent appears via SSE, one
    * per project, so a stream of new agents cannot postpone it forever.
@@ -1840,10 +1841,8 @@ export class ScionPageChat extends LitElement {
     this._resumeRefresh = null;
     this.stopPresenceHeartbeat();
     // Clean up the fallback poll
-    if (this._fallbackPollInterval) {
-      clearInterval(this._fallbackPollInterval);
-      this._fallbackPollInterval = null;
-    }
+    this._stopFallbackPoll?.();
+    this._stopFallbackPoll = null;
     // Clean up the canAttach refreshes
     for (const refresh of this._canAttachRefresh.values()) refresh.cancel();
     this._canAttachRefresh.clear();
@@ -2055,7 +2054,13 @@ export class ScionPageChat extends LitElement {
     // membership of a space — so a slow fallback poll covers them and
     // re-syncs a space's member list if an SSE event was ever missed. Unread state
     // is additionally refreshed on every inbound chat message.
-    this._fallbackPollInterval = setInterval(() => {
+    // It pauses while the tab is hidden and catches up once on return.
+    this._stopFallbackPoll = visibleInterval(() => {
+      // After 60 s or more hidden, the resume rail refresh also loads the DM
+      // list on return, so this catch-up sends a second /chat/dms request.
+      // Accepted: which of the two starts first is up to the rail catch-up's
+      // timing, which is not this poll's to rely on, so sharing one request
+      // could not be made reliable.
       void this.loadUnreadDMPeers();
       // A DM has no membership of its own, so re-syncing here would silently
       // swap the member list the user was just looking at. Leave the sidebar on
