@@ -1236,7 +1236,9 @@ func TestApplyLaunchReport_FailedAfterRunningObserved_ResendAfterApplied_409Fail
 
 	answer, _, err := s.ApplyLaunchReport(ctx, a.ID, a.RuntimeBrokerID, r)
 	require.NoError(t, err)
-	require.Equal(t, store.LaunchReportResultApplied, answer.Result, "the first send applies")
+	if !assert.Equal(t, store.LaunchReportResultApplied, answer.Result, "the first send applies") {
+		return
+	}
 	afterFirst, err := s.GetAgent(ctx, a.ID)
 	require.NoError(t, err)
 
