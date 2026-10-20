@@ -299,6 +299,8 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			Exec:        true,
 			Reprovision: true,
 			AsyncLaunch: true,
+			// Starts of existing agents can be async too (ptone/scion#4669).
+			AsyncStart: true,
 			// EmptyPerAgentWorkspace, like Attach, reflects the default
 			// runtime (false for Cloud Run, which rejects the mode).
 			EmptyPerAgentWorkspace: scionrt.HasEmptyPerAgentSupport(rt),

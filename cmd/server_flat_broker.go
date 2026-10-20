@@ -171,6 +171,7 @@ func storeBrokerCapabilities(c *hubclient.BrokerCapabilities) *store.BrokerCapab
 		Attach:                   c.Attach,
 		Reprovision:              c.Reprovision,
 		AsyncLaunch:              c.AsyncLaunch,
+		AsyncStart:               c.AsyncStart,
 		EmptyPerAgentWorkspace:   c.EmptyPerAgentWorkspace,
 		AgentMove:                c.AgentMove,
 		ReprovisionEmptyPerAgent: c.ReprovisionEmptyPerAgent,
