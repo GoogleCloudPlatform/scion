@@ -113,21 +113,21 @@ func conduitTargetRenews(res router.Resolved) bool {
 // session this node holds, AuthRefresh goes on that session; on a session
 // another hub node's relay holds, the stream's renewer sends it across the
 // internal hop, and the owner relay forwards it to the target stream. In
-// external relay mode a hub-held leaf reaches the target through a bridge
-// to a separate relay. Renewal delivery over that bridge is not proven end
-// to end yet, so it reports false there until 6.6b-3: with enforce such a
-// stream is refused (503 stream_renewal_unavailable) rather than left to
-// end at its first deadline. A legacy broker session never renews.
-// Relay-held streams (openForRelay) never call it; their renewals are the
-// relay's (6.6b-3).
+// external relay mode a hub-held leaf reaches the target through its bridge
+// to the separate relay that holds the target's session
+// (openConduitTargetStream), and the renewer sends AuthRefresh on that
+// bridge (relay.Bridge is a conduit.StreamRenewer), which the owner relay
+// forwards unchanged (design §3.9, Hub-held leaves). Only a resolution
+// with no session, or a legacy broker session, has no renewal path; with
+// enforce a renewal-capable stream on it is refused (503
+// stream_renewal_unavailable) rather than left to end at its first
+// deadline. Relay-held streams (openForRelay) never call it; their
+// renewals are the relay's.
 func (s *Server) conduitRouteCanRenew(res router.Resolved) bool {
 	if f := s.conduitRouteCanRenewTest; f != nil {
 		return f(res)
 	}
-	if res.Session == nil || res.Legacy != nil {
-		return false
-	}
-	return s.conduitExternal.Load() == nil
+	return res.Session != nil && res.Legacy == nil
 }
 
 // conduitTargetStreamDeadlines returns the configured target-side stream

@@ -147,7 +147,7 @@ type openSetup struct {
 	scopeErr bool
 	allowAll bool
 	// noRenewalRoute makes every route one this node cannot renew on
-	// (conduitRouteCanRenewTest), as a bridged leaf is until 6.6b-3.
+	// (conduitRouteCanRenewTest), as a session-less or legacy route is.
 	noRenewalRoute bool
 	rec            *openRefusedRecorder
 	keys           *countingGrantKeyStore
