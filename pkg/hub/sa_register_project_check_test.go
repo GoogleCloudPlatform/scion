@@ -26,6 +26,7 @@ import (
 	"testing"
 
 	policytroubleshooterpb "cloud.google.com/go/policytroubleshooter/iam/apiv3/iampb"
+	"github.com/googleapis/gax-go/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
@@ -169,7 +170,7 @@ func TestSARegisterProjectCheck_WarningByErrorClass(t *testing.T) {
 		{"other error info reason", saCheckStatusErr(t, codes.PermissionDenied, regUpstream,
 			&errdetails.ErrorInfo{Reason: "SOMETHING_ELSE", Domain: "googleapis.com"}), false},
 		{"unavailable", status.Error(codes.Unavailable, regUpstream), false},
-		{"not found", status.Error(codes.NotFound, regUpstream), false},
+		{"not found", status.Error(codes.NotFound, regUpstream), true},
 		{"deadline exceeded", status.Error(codes.DeadlineExceeded, regUpstream), false},
 		{"non-grpc error", errors.New(regUpstream), false},
 		{"success", nil, false},
@@ -193,30 +194,75 @@ func TestSARegisterProjectCheck_WarningByErrorClass(t *testing.T) {
 	}
 }
 
+// regProjectPTClient stands in for Policy Troubleshooter when the hub's
+// identity has no IAM read access, keyed by what the probe asks about: the
+// GCP project resource. A project in existing is refused with one upstream
+// text; any other project is answered with missing (a PermissionDenied or
+// a NotFound with different text). It records every resource asked about.
+type regProjectPTClient struct {
+	existing map[string]bool
+	missing  error
+	asked    []string
+}
+
+func (c *regProjectPTClient) TroubleshootIamPolicy(
+	_ context.Context,
+	req *policytroubleshooterpb.TroubleshootIamPolicyRequest,
+	_ ...gax.CallOption,
+) (*policytroubleshooterpb.TroubleshootIamPolicyResponse, error) {
+	name := req.GetAccessTuple().GetFullResourceName()
+	c.asked = append(c.asked, name)
+	if c.existing[name] {
+		return nil, status.Error(codes.PermissionDenied, "permission denied on existing project")
+	}
+	return nil, c.missing
+}
+
 func TestSARegisterProjectCheck_SameWhetherTargetExists(t *testing.T) {
-	pt := &existencePTClient{existing: map[string]bool{
-		"//iam.googleapis.com/projects/other-proj/serviceAccounts/exists@other-proj.iam.gserviceaccount.com": true,
-	}}
-	srv, _, projectID := regServer(t, NewPTProjectAccessProbe(pt))
+	const existingProject = "//cloudresourcemanager.googleapis.com/projects/other-proj"
+	for _, tc := range []struct {
+		name    string
+		missing error
+	}{
+		{"missing project refused", status.Error(codes.PermissionDenied, "permission denied (or it may not exist)")},
+		{"missing project not found", status.Error(codes.NotFound, "project no-such-proj not found")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pt := &regProjectPTClient{existing: map[string]bool{existingProject: true}, missing: tc.missing}
+			srv, _, projectID := regServer(t, NewPTProjectAccessProbe(pt))
 
-	existing, _ := regRegister(t, srv, projectID,
-		map[string]string{"email": "exists@other-proj.iam.gserviceaccount.com"})
-	missing, _ := regRegister(t, srv, projectID,
-		map[string]string{"email": "missing@other-proj.iam.gserviceaccount.com"})
-	require.Equal(t, []string{saCheckIAMReadDeniedMsg("other-proj")}, existing.Warnings)
+			existing, existingBody := regRegister(t, srv, projectID,
+				map[string]string{"email": "exists@other-proj.iam.gserviceaccount.com"})
+			missing, _ := regRegister(t, srv, projectID,
+				map[string]string{"email": "missing@other-proj.iam.gserviceaccount.com"})
+			noProject, noProjectBody := regRegister(t, srv, projectID,
+				map[string]string{"email": "any@no-such-proj.iam.gserviceaccount.com"})
+			require.Equal(t, []string{saCheckIAMReadDeniedMsg("other-proj")}, existing.Warnings)
 
-	assert.Equal(t, existing.Warnings, missing.Warnings, "same warnings for an existing and a missing account")
-	assert.Equal(t, existing.Verified, missing.Verified)
-	assert.Equal(t, existing.VerificationFailed, missing.VerificationFailed)
-	assert.Equal(t, existing.VerificationStatus, missing.VerificationStatus)
+			// The fake answered the two projects differently.
+			assert.Equal(t, []string{existingProject, existingProject,
+				"//cloudresourcemanager.googleapis.com/projects/no-such-proj"}, pt.asked)
 
-	// A GCP project that does not exist differs only by the project ID the
-	// caller registered.
-	noProject, _ := regRegister(t, srv, projectID,
-		map[string]string{"email": "any@no-such-proj.iam.gserviceaccount.com"})
-	require.Len(t, noProject.Warnings, 1)
-	assert.Equal(t, existing.Warnings[0], strings.ReplaceAll(noProject.Warnings[0], "no-such-proj", "other-proj"))
-	assert.Equal(t, existing.Verified, noProject.Verified)
+			// Any account in the same project gets the same response.
+			assert.Equal(t, existing.Warnings, missing.Warnings)
+			assert.Equal(t, existing.Verified, missing.Verified)
+			assert.Equal(t, existing.VerificationFailed, missing.VerificationFailed)
+			assert.Equal(t, existing.VerificationStatus, missing.VerificationStatus)
+
+			// A GCP project that does not exist reads the same as one the
+			// hub may not read, apart from the project ID the caller sent.
+			require.Len(t, noProject.Warnings, 1)
+			assert.Equal(t, existing.Warnings[0], strings.ReplaceAll(noProject.Warnings[0], "no-such-proj", "other-proj"))
+			assert.Equal(t, existing.Verified, noProject.Verified)
+			assert.Equal(t, existing.VerificationFailed, noProject.VerificationFailed)
+			assert.Equal(t, existing.VerificationStatus, noProject.VerificationStatus)
+			for _, body := range []string{existingBody, noProjectBody} {
+				assert.NotContains(t, body, "existing project")
+				assert.NotContains(t, body, "not found")
+				assert.NotContains(t, body, "may not exist")
+			}
+		})
+	}
 }
 
 func TestSARegisterProjectCheck_HubProjectUnchanged(t *testing.T) {

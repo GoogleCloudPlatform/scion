@@ -20,6 +20,7 @@ import (
 	"time"
 
 	policytroubleshooterpb "cloud.google.com/go/policytroubleshooter/iam/apiv3/iampb"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -28,7 +29,7 @@ import (
 // SAProjectAccessProbe reports whether the hub can run the service account
 // assignment check in a GCP project: the check needs the hub's identity to
 // read IAM policy there. The returned error is only classified (see
-// hubIdentityRefusedIAMRead); none of its text reaches a caller.
+// saProjectProbeRefused); none of its text reaches a caller.
 type SAProjectAccessProbe interface {
 	ProbeProjectAccess(ctx context.Context, gcpProjectID, hubSAEmail string) error
 }
@@ -77,8 +78,10 @@ func (s *Server) SetSAProjectAccessProbe(probe SAProjectAccessProbe, hubGCPProje
 // verified service account whose GCP project differs from the hub's when
 // the hub's identity is refused reading IAM policy there, or "" otherwise.
 // The text is saAssignIAMReadDeniedMessage, the one the assignment check
-// shows when it fails for the same reason. Only a plain permission-denied
-// refusal produces it; every other outcome, including success, adds
+// shows when it fails for the same reason. A plain permission-denied
+// refusal produces it, and so does a not-found answer, so a GCP project
+// that does not exist reads the same as one the hub may not read (see
+// saProjectProbeRefused); every other outcome, including success, adds
 // nothing. Accounts in the hub's own project, and every account while the
 // assignment check is not enforced, are not probed at all. It only reports:
 // registration, verification and the stored account are unaffected.
@@ -100,7 +103,7 @@ func (s *Server) saProjectAccessWarning(ctx context.Context, sa *store.GCPServic
 	ctx, cancel := context.WithTimeout(ctx, saProjectProbeTimeout)
 	defer cancel()
 	err := probe.ProbeProjectAccess(ctx, sa.ProjectID, hubEmail)
-	if !hubIdentityRefusedIAMRead(err) {
+	if !saProjectProbeRefused(err) {
 		if err != nil {
 			slog.Debug("service account project access probe did not complete",
 				"sa_id", sa.ID, "code", status.Code(err).String())
@@ -108,6 +111,16 @@ func (s *Server) saProjectAccessWarning(ctx context.Context, sa *store.GCPServic
 		return ""
 	}
 	return msg
+}
+
+// saProjectProbeRefused reports whether err, from ProbeProjectAccess, gets
+// the warning: a plain permission-denied refusal of the hub's identity
+// (hubIdentityRefusedIAMRead), or a not-found answer. The probe names
+// only the GCP project, so not-found can only be about that project; it
+// is treated as a refusal so the response is the same whether or not the
+// project exists.
+func saProjectProbeRefused(err error) bool {
+	return hubIdentityRefusedIAMRead(err) || status.Code(err) == codes.NotFound
 }
 
 // withSAProjectAccessWarning appends saProjectAccessWarning for sa to
