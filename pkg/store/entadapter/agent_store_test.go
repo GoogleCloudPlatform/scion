@@ -1901,7 +1901,8 @@ func TestUpdateAgentStatus_ClearTerminalRemnants(t *testing.T) {
 	row.StalledFromActivity = "working"
 	require.NoError(t, s.UpdateAgent(ctx, row))
 
-	// Without the flag, starting -> running keeps them.
+	// Without the flag, starting -> running keeps the message (the exit
+	// fields are cleared by the pre-running to running rule).
 	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "running"}))
 	got, err := s.GetAgent(ctx, a.ID)
 	require.NoError(t, err)
@@ -1920,6 +1921,86 @@ func TestUpdateAgentStatus_ClearTerminalRemnants(t *testing.T) {
 	got, err = s.GetAgent(ctx, a.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "fresh", got.Message)
+}
+
+// seedExitedAgent creates an agent in phase stopped carrying a previous
+// run's exit code and reason.
+func seedExitedAgent(t *testing.T, ctx context.Context, s *AgentStore, projectID, slug string) *store.Agent {
+	t.Helper()
+	a := makeAgent(projectID, slug)
+	a.Phase = "stopped"
+	a.Activity = ""
+	require.NoError(t, s.CreateAgent(ctx, a))
+	code := 137
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{ExitCode: &code, ExitReason: "crashed"}))
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.ExitCode)
+	require.Equal(t, "crashed", got.ExitReason)
+	return a
+}
+
+// A start whose provisional starting write landed but whose started-status
+// write did not: the new run's first running report clears the previous
+// run's exit code and reason (ptone/scion#5384).
+func TestUpdateAgentStatus_PreRunningToRunningClearsExit(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	a := seedExitedAgent(t, ctx, s, projectID, "pre-running-clear")
+
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "starting", IfPhase: "stopped"}))
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.ExitCode, "the provisional starting write keeps the exit code")
+	assert.Equal(t, "crashed", got.ExitReason, "the provisional starting write keeps the exit reason")
+
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+		Phase: "running", ReportSource: store.StatusReportSourceRuntime,
+	}))
+	got, err = s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "running", got.Phase)
+	assert.Nil(t, got.ExitCode, "the first running write clears the previous run's exit code")
+	assert.Empty(t, got.ExitReason, "the first running write clears the previous run's exit reason")
+}
+
+// A running to running write keeps a disruption reason recorded on the
+// live agent.
+func TestUpdateAgentStatus_RunningToRunningKeepsDisruptionReason(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	a := makeAgent(projectID, "running-keeps-reason")
+	require.NoError(t, s.CreateAgent(ctx, a))
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+		ExitReason: "preempted", ReportSource: store.StatusReportSourceRuntime,
+	}))
+
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+		Phase: "running", ReportSource: store.StatusReportSourceRuntime,
+	}))
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "running", got.Phase)
+	assert.Equal(t, "preempted", got.ExitReason)
+}
+
+// A start rolled back after its provisional starting write restores the
+// prior phase with the previous run's exit fields intact.
+func TestUpdateAgentStatus_RollbackAfterProvisionalStartingKeepsExit(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	a := seedExitedAgent(t, ctx, s, projectID, "rollback-keeps-exit")
+
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "starting", IfPhase: "stopped"}))
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+		Phase: "stopped", IfPhase: "starting", Restore: true,
+	}))
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "stopped", got.Phase)
+	require.NotNil(t, got.ExitCode)
+	assert.Equal(t, 137, *got.ExitCode)
+	assert.Equal(t, "crashed", got.ExitReason)
 }
 
 // SetAgentWorkspacePlacement writes a live row, and leaves a soft-deleted
