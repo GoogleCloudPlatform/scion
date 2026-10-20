@@ -18,10 +18,15 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // guardTestTree is a project at <root>/proj with its .scion directory and
@@ -307,35 +312,24 @@ func TestAgentFilesGuard_CheckReturnsRealParentPath(t *testing.T) {
 
 // A13 (R1): the stale-directory removal (GetAgent) refuses an agent
 // directory reached through an agents directory that is a symlink into the
-// project, with the project's guard and with the guard that knows only the
-// agent directory; the project directory with the agent's name survives.
+// project; the project directory with the agent's name survives.
 func TestHandleAgentDirWithoutConfig_RefusesSymlinkedAgentsDir(t *testing.T) {
-	for _, which := range []string{"project guard", "agent directory guard"} {
-		t.Run(which, func(t *testing.T) {
-			root := t.TempDir()
-			t.Setenv("HOME", root)
-			proj := filepath.Join(root, "proj")
-			scion := filepath.Join(proj, config.DotScion)
-			docs := filepath.Join(proj, "docs", "guide.md")
-			mustMkdir(t, filepath.Dir(docs))
-			mustWrite(t, docs, "# guide")
-			mustMkdir(t, scion)
-			mustSymlink(t, proj, filepath.Join(scion, "agents"))
-			agentDir := filepath.Join(scion, "agents", "docs")
-			home := filepath.Join(agentDir, "home")
-			ws := filepath.Join(agentDir, "workspace")
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	proj := filepath.Join(root, "proj")
+	scion := filepath.Join(proj, config.DotScion)
+	docs := filepath.Join(proj, "docs", "guide.md")
+	mustMkdir(t, filepath.Dir(docs))
+	mustWrite(t, docs, "# guide")
+	mustMkdir(t, scion)
+	mustSymlink(t, proj, filepath.Join(scion, "agents"))
+	agentDir := filepath.Join(scion, "agents", "docs")
 
-			var err error
-			if which == "project guard" {
-				err = handleAgentDirWithoutConfigGuarded(projectAgentFilesGuard(context.Background(), scion, "docs", agentDir), "docs", agentDir, home, ws)
-			} else {
-				err = handleAgentDirWithoutConfig("docs", agentDir, home, ws)
-			}
-			assertRefused(t, err, "stale-directory removal")
-			if _, err := os.Stat(docs); err != nil {
-				t.Errorf("project directory with the agent's name was removed: %v", err)
-			}
-		})
+	err := handleAgentDirWithoutConfigGuarded(projectAgentFilesGuard(context.Background(), scion, "docs", agentDir),
+		"docs", agentDir, filepath.Join(agentDir, "home"), filepath.Join(agentDir, "workspace"))
+	assertRefused(t, err, "stale-directory removal")
+	if _, err := os.Stat(docs); err != nil {
+		t.Errorf("project directory with the agent's name was removed: %v", err)
 	}
 }
 
@@ -387,4 +381,112 @@ func TestCheckAgentWorktreeRemoval(t *testing.T) {
 	mustSymlink(t, base, linked)
 	assertRefused(t, checkErr(CheckAgentWorktreeRemoval("b", base, linked)), "worktree symlinked to the checkout")
 	assertRefused(t, checkErr(CheckAgentWorktreeRemoval("a", base, base)), "the checkout itself")
+}
+
+// testAgentDirGuard is the production guard (projectAgentFilesGuard) for an
+// agent directory agentsRoot/<name> in a test tree, taking the directory
+// holding agentsRoot as the project directory.
+func testAgentDirGuard(agentName, agentDir string) *agentFilesGuard {
+	return projectAgentFilesGuard(context.Background(), filepath.Dir(filepath.Dir(agentDir)), agentName, agentDir)
+}
+
+// testSweepExpiredKeptAgentDirs runs sweepExpiredKeptAgentDirsGuarded with
+// testAgentDirGuard for each agent.
+func testSweepExpiredKeptAgentDirs(agentsRoot, skipName string, homeOf func(name string) string) {
+	sweepExpiredKeptAgentDirsGuarded(agentsRoot, skipName, homeOf, func(name string) *agentFilesGuard {
+		return testAgentDirGuard(name, filepath.Join(agentsRoot, name))
+	})
+}
+
+// testRemoveAgentDir runs removeAgentDirGuarded with testAgentDirGuard and
+// fails the test on a refusal.
+func testRemoveAgentDir(t *testing.T, agentDir, agentWorkspace string) {
+	t.Helper()
+	if err := removeAgentDirGuarded(testAgentDirGuard(filepath.Base(agentDir), agentDir), agentDir, agentWorkspace); err != nil {
+		t.Fatalf("removeAgentDirGuarded(%s): %v", agentDir, err)
+	}
+}
+
+// A15 (R1): the last sharer's worktree directory is already gone: the
+// delete still succeeds, git's entry for it is removed, and a second
+// delete is clean.
+func TestDeleteAgentFiles_LastSharerWorktreeDirMissing(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	t.Setenv("HOME", tmpDir)
+
+	bare := initBareRepo(t)
+	gc := &api.GitCloneConfig{URL: bare, Branch: "main", Depth: intPtr(0)}
+	projectPath := filepath.Join(tmpDir, "proj")
+	scionDir := filepath.Join(projectPath, config.DotScion)
+	mustMkdir(t, filepath.Join(scionDir, "agents", "solo-agent"))
+	base := filepath.Join(projectPath, "workspace")
+	if err := provision.ProvisionShared(provision.ProvisionInput{
+		Resolved: provision.ResolvedWorkspace{HostPath: base, Backend: "local"}, Mode: store.SharingModeWorktreePerAgent,
+		ProjectID: "p1", AgentID: "solo-agent", AgentName: "solo-agent", GitClone: gc,
+	}); err != nil {
+		t.Fatalf("provision solo-agent: %v", err)
+	}
+	wtPath := provision.WorktreePath(base, "solo-agent")
+	if err := os.RemoveAll(wtPath); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := DeleteAgentFiles("solo-agent", projectPath, true); err != nil {
+		t.Fatalf("DeleteAgentFiles with the worktree directory missing: %v", err)
+	}
+	if strings.Contains(listWorktrees(t, base), wtPath) {
+		t.Errorf("git still lists the removed worktree %s:\n%s", wtPath, listWorktrees(t, base))
+	}
+	if _, err := DeleteAgentFiles("solo-agent", projectPath, true); err != nil {
+		t.Errorf("second DeleteAgentFiles: %v", err)
+	}
+}
+
+// A15 (O1): entries beside a live shared worktree are removed as they are:
+// a dangling symlink and a symlink to a file outside the agent directory
+// are unlinked, their targets are untouched, and the delete succeeds; the
+// shared worktree stays for the remaining sharer.
+func TestDeleteAgentFiles_LinksBesideLiveWorktreeAreUnlinked(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	root := t.TempDir()
+	t.Chdir(root)
+	t.Setenv("HOME", root)
+	proj := filepath.Join(root, "proj")
+	mustMkdir(t, proj)
+	setupGitRepo(t, proj)
+	scion := filepath.Join(proj, config.DotScion)
+	agentDir := filepath.Join(scion, "agents", "a")
+	ws := filepath.Join(agentDir, "workspace")
+	mustMkdir(t, agentDir)
+	if out, err := exec.Command("git", "-C", proj, "worktree", "add", "-q", "-b", "b1", ws).CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %v\n%s", err, out)
+	}
+	for _, agent := range []string{"a", "other"} {
+		if err := provision.RegisterSharer(proj, scion, "b1", ws, agent); err != nil {
+			t.Fatalf("RegisterSharer(%s): %v", agent, err)
+		}
+	}
+	outside := filepath.Join(root, "outside.txt")
+	mustWrite(t, outside, "keep")
+	dangling := filepath.Join(agentDir, "dangling")
+	mustSymlink(t, filepath.Join(root, "missing"), dangling)
+	toOutside := filepath.Join(agentDir, "to-outside")
+	mustSymlink(t, outside, toOutside)
+
+	if _, err := DeleteAgentFiles("a", scion, false); err != nil {
+		t.Fatalf("DeleteAgentFiles beside a live worktree: %v", err)
+	}
+	for _, link := range []string{dangling, toOutside} {
+		if _, err := os.Lstat(link); !os.IsNotExist(err) {
+			t.Errorf("link %s not removed (lstat err %v)", link, err)
+		}
+	}
+	if data, err := os.ReadFile(outside); err != nil || string(data) != "keep" {
+		t.Errorf("link target changed: %q, %v", data, err)
+	}
+	if _, err := os.Stat(filepath.Join(ws, ".git")); err != nil {
+		t.Errorf("shared worktree removed while another sharer remains: %v", err)
+	}
 }

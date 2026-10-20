@@ -102,6 +102,8 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 	// provision.WorktreePathIsScionCreated's doc comment on why this must be
 	// the actual resolved project directory, not derived from repoRoot.
 	var resolvedProjectDir string
+	// layout is resolved once and shared with the guard.
+	var layout agentProjectLayout
 	if projectDir, err := config.GetResolvedProjectDir(projectPath); err == nil {
 		resolvedProjectDir = projectDir
 		agentsDirs = append(agentsDirs, filepath.Join(projectDir, "agents"))
@@ -123,7 +125,7 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 		// is resolved from projectDir itself, which MUST match the base
 		// used at sharer registration (ProvisionAgent), or the refcount
 		// lookup (FindBranchForAgent/UnregisterSharer) would miss.
-		layout := resolveAgentProjectLayout(projectDir)
+		layout = resolveAgentProjectLayout(projectDir)
 		repoRoot = layout.repoRoot
 		if layout.sharedBaseIsRepo {
 			wtPath := filepath.Join(layout.sharedBase, "worktrees", agentName)
@@ -142,7 +144,7 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 	// Every removal below passes the guard (projectAgentFilesGuard): only
 	// the agent's own directories may be removed, never a project
 	// workspace. Each removal acts on the path the guard returns.
-	guard := projectAgentFilesGuard(context.Background(), resolvedProjectDir, agentName)
+	guard := projectAgentFilesGuardWithLayout(context.Background(), resolvedProjectDir, layout, agentName)
 	// Empty-per-agent (design #2703): the agent's workspace is a private,
 	// non-git directory that owns no worktree or branch. Even when the
 	// agent ran `git init` in it, or the project sits inside an enclosing
@@ -221,9 +223,17 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 					// The last sharer removes the shared worktree, which
 					// the registry and the shape check above establish is
 					// scion's, not the project's.
-					wtRemove, err := guard.check(wtPath, wtPath)
-					if err != nil {
-						return branchDeleted, fmt.Errorf("delete: %w", err)
+					// A worktree directory that is already gone has
+					// nothing on disk to check or remove; RemoveWorktree
+					// still runs (it returns at once) and git's entry is
+					// removed below. Any other Lstat result goes through
+					// the guard.
+					var wtRemove string
+					if _, lerr := os.Lstat(wtPath); !errors.Is(lerr, fs.ErrNotExist) {
+						var err error
+						if wtRemove, err = guard.check(wtPath, wtPath); err != nil {
+							return branchDeleted, fmt.Errorf("delete: %w", err)
+						}
 					}
 					worktreeStart := time.Now()
 					if deleted, err := util.RemoveWorktree(repoRoot, wtPath, removeBranch); err == nil {
@@ -244,7 +254,9 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 							slog.Warn("delete: refusing fallback removal; worktree path does not resolve under repo root",
 								"agent_id", agentName, "branch", branch, "path", wtPath, "repo_root", repoRoot)
 						} else {
-							_ = util.RemoveAllSafe(wtRemove)
+							if wtRemove != "" {
+								_ = util.RemoveAllSafe(wtRemove)
+							}
 						}
 						// Worktree removal failed, so the branch wasn't deleted by it —
 						// fall back to deleting the branch by name (like the legacy path).
@@ -403,7 +415,9 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 				if e.Name() == "workspace" {
 					continue
 				}
-				entryRemove, err := guard.check(filepath.Join(agentDir, e.Name()))
+				// Classified by its directory and name: a symlink
+				// here is unlinked, never followed (checkLeaf).
+				entryRemove, err := guard.checkLeaf(filepath.Join(agentDir, e.Name()))
 				if err != nil {
 					return branchDeleted, fmt.Errorf("delete: %w", err)
 				}
@@ -3305,7 +3319,7 @@ func UpdateAgentDeletedAt(agentName string, projectPath string, deletedAt time.T
 	})
 }
 
-// handleAgentDirWithoutConfig deals with an agent directory that exists but
+// handleAgentDirWithoutConfigGuarded deals with an agent directory that exists but
 // holds no scion-agent config file (ptone/scion#4438). Such a dir is either
 // left by a provisioning attempt that failed before writing
 // scion-agent.json, or belongs to an agent created before scion-agent.json
@@ -3331,15 +3345,8 @@ func UpdateAgentDeletedAt(agentName string, projectPath string, deletedAt time.T
 //   - Any other dir with no home state is stale: it is removed, with git's
 //     entry for its own worktree, so the caller re-provisions it.
 //
-// Every removal passes the agent files guard: here one that knows only the
-// agent directory (localAgentDirGuard); GetAgent passes the project's guard
-// to handleAgentDirWithoutConfigGuarded.
-func handleAgentDirWithoutConfig(agentName, agentDir, agentHome, agentWorkspace string) error {
-	return handleAgentDirWithoutConfigGuarded(localAgentDirGuard(agentName, agentDir), agentName, agentDir, agentHome, agentWorkspace)
-}
-
-// handleAgentDirWithoutConfigGuarded is handleAgentDirWithoutConfig with
-// the agent files guard g for its removals.
+// Every removal passes the agent files guard g (GetAgent passes the
+// project's guard, projectAgentFilesGuard).
 func handleAgentDirWithoutConfigGuarded(g *agentFilesGuard, agentName, agentDir, agentHome, agentWorkspace string) error {
 	if _, err := os.Stat(agentDir); err != nil {
 		return nil
@@ -3976,13 +3983,6 @@ func worktreeGitEnv() []string {
 	return append(env, "LC_ALL=C")
 }
 
-// removeAgentDirAndWorktreeEntry is removeAgentDirGuarded with a guard that
-// knows only the agent directory (localAgentDirGuard). A refusal is logged
-// by the guard, and nothing is removed.
-func removeAgentDirAndWorktreeEntry(agentDir, agentWorkspace string) {
-	_ = removeAgentDirGuarded(localAgentDirGuard(filepath.Base(agentDir), agentDir), agentDir, agentWorkspace)
-}
-
 // removeAgentDirGuarded removes agentDir, once the guard g allows it
 // (removeCheckedAgentDir does the removal, at the path the guard returns),
 // and returns the guard's refusal otherwise.
@@ -4095,7 +4095,7 @@ func readStoredAgentRecord(agentHome string) *api.AgentInfo {
 }
 
 // minimalAgentConfigFromRecord builds the scion-agent.json written for an
-// agent adopted by handleAgentDirWithoutConfig. It records only the
+// agent adopted by handleAgentDirWithoutConfigGuarded. It records only the
 // harness-config; GetAgent layers the template named in agent-info.json
 // beneath it as for any existing agent.
 func minimalAgentConfigFromRecord(info *api.AgentInfo) *api.ScionConfig {
@@ -4139,7 +4139,7 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	})
 
 	// Handle an agent directory that exists but has no config file. See
-	// handleAgentDirWithoutConfig: a populated home is kept (adopted from
+	// handleAgentDirWithoutConfigGuarded: a populated home is kept (adopted from
 	// agent-info.json, or refused), and only a dir with no home state is
 	// removed so it can be re-provisioned.
 	if err := handleAgentDirWithoutConfigGuarded(projectAgentFilesGuard(ctx, projectDir, agentName, agentDir), agentName, agentDir, agentHome, agentWorkspace); err != nil {

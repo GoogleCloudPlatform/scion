@@ -32,7 +32,7 @@ import (
 
 // Kept stale agent directories (ptone/scion#4742).
 //
-// handleAgentDirWithoutConfig keeps an agent directory that has no config
+// handleAgentDirWithoutConfigGuarded keeps an agent directory that has no config
 // file when its workspace may hold work, or when that cannot be checked.
 // Such a directory is treated like a soft-deleted agent: a marker file in it
 // records when it was first kept and why, and once the soft-delete retention
@@ -206,7 +206,7 @@ func keptAgentDirExpired(agentDir string, retention time.Duration, now time.Time
 // in-dir home under agentDir and, when it lies outside agentDir, agentHome.
 // A home that cannot be read counts as holding data. A kept directory is
 // only ever recorded with empty homes; one that has home data since is left
-// to handleAgentDirWithoutConfig's home rules.
+// to handleAgentDirWithoutConfigGuarded's home rules.
 func keptAgentHomesEmpty(agentDir, agentHome string) bool {
 	homes := []string{filepath.Join(agentDir, "home")}
 	if agentHome != "" && !pathWithin(agentHome, agentDir) {
@@ -220,19 +220,15 @@ func keptAgentHomesEmpty(agentDir, agentHome string) bool {
 	return true
 }
 
-// purgeExpiredKeptAgentDir removes agentDir when keptAgentDirExpired holds
+// purgeExpiredKeptAgentDirGuarded removes agentDir when keptAgentDirExpired holds
 // for it and its homes are empty, and reports whether it did. agentHome is
 // the agent's home path (it may lie outside agentDir; it is checked, not
 // removed). The directory is first renamed to a unique name in the same
 // parent and checked again there, so a directory that another process
 // re-provisioned under the same name in the meantime (it has no marker) is
 // put back instead of removed.
-func purgeExpiredKeptAgentDir(agentName, agentDir, agentHome string, retention time.Duration) bool {
-	return purgeExpiredKeptAgentDirGuarded(localAgentDirGuard(agentName, agentDir), agentName, agentDir, agentHome, retention)
-}
-
-// purgeExpiredKeptAgentDirGuarded is purgeExpiredKeptAgentDir with the
-// agent files guard g, which must allow agentDir before it is moved.
+//
+// The agent files guard g must allow agentDir before it is moved.
 func purgeExpiredKeptAgentDirGuarded(g *agentFilesGuard, agentName, agentDir, agentHome string, retention time.Duration) bool {
 	now := keptAgentDirNow()
 	if _, ok := keptAgentDirExpired(agentDir, retention, now); !ok || !keptAgentHomesEmpty(agentDir, agentHome) {
@@ -281,21 +277,15 @@ func purgeExpiredKeptAgentDirGuarded(g *agentFilesGuard, agentName, agentDir, ag
 	return true
 }
 
-// sweepExpiredKeptAgentDirs removes the expired kept directories in
+// sweepExpiredKeptAgentDirsGuarded removes the expired kept directories in
 // agentsRoot other than skipName's (GetAgent handles that one itself).
 // homeOf returns an agent's home path. Only plain directories holding a
 // marker are considered. With no retention window (0 or unset) it returns
 // before reading agentsRoot.
 // Entries named like a directory being removed are skipped: they may belong
 // to another process's removal in progress.
-func sweepExpiredKeptAgentDirs(agentsRoot, skipName string, homeOf func(name string) string) {
-	sweepExpiredKeptAgentDirsGuarded(agentsRoot, skipName, homeOf, func(name string) *agentFilesGuard {
-		return localAgentDirGuard(name, filepath.Join(agentsRoot, name))
-	})
-}
-
-// sweepExpiredKeptAgentDirsGuarded is sweepExpiredKeptAgentDirs with
-// guardFor giving each agent's files guard.
+//
+// guardFor gives each agent's files guard.
 func sweepExpiredKeptAgentDirsGuarded(agentsRoot, skipName string, homeOf func(name string) string, guardFor func(name string) *agentFilesGuard) {
 	retention := keptAgentDirRetention()
 	if retention <= 0 {

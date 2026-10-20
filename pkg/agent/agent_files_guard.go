@@ -60,6 +60,12 @@ var ErrAgentFilesDeleteRefused = errors.New("refusing to delete agent files")
 // Containment compares path elements (filepath.Rel), so /proj never
 // contains /project2.
 type agentFilesGuard struct {
+	// lazy, when set, builds the guard on its first check (see
+	// projectAgentFilesGuard), so a caller that removes nothing pays
+	// nothing; resolved holds the result.
+	lazy     func() *agentFilesGuard
+	resolved *agentFilesGuard
+
 	agentName    string
 	anchors      []string // lexical, cleaned absolute
 	agentRoots   []string // resolved and verified against an anchor
@@ -175,7 +181,10 @@ func (g *agentFilesGuard) verifiedAgentRoot(root string) (string, bool, error) {
 // a path to git, such as git worktree remove, pass git's own path instead:
 // git looks the worktree up by the path it registered.)
 func (g *agentFilesGuard) check(path string, extraAgentRoots ...string) (string, error) {
-	if err := g.classify(path, extraAgentRoots); err != nil {
+	if g.lazy != nil {
+		return g.built().check(path, extraAgentRoots...)
+	}
+	if err := g.classify(path, extraAgentRoots, false); err != nil {
 		err = fmt.Errorf("%w %s for agent %s: %w", ErrAgentFilesDeleteRefused, path, g.agentName, err)
 		slog.Warn("Agent files delete refused; agent deletion never removes a shared project workspace",
 			"agent", g.agentName, "path", path, "error", err)
@@ -189,6 +198,35 @@ func (g *agentFilesGuard) check(path string, extraAgentRoots ...string) (string,
 		return "", err
 	}
 	return filepath.Join(parent, filepath.Base(path)), nil
+}
+
+// checkLeaf is check for a directory entry that is removed as it is: it is
+// classified by its parent's real location joined with its name, without
+// resolving the entry itself, so a symlink there (dangling or not) is
+// unlinked, never followed, and never makes the delete fail.
+func (g *agentFilesGuard) checkLeaf(path string) (string, error) {
+	if g.lazy != nil {
+		return g.built().checkLeaf(path)
+	}
+	if err := g.classify(path, nil, true); err != nil {
+		err = fmt.Errorf("%w %s for agent %s: %w", ErrAgentFilesDeleteRefused, path, g.agentName, err)
+		slog.Warn("Agent files delete refused; agent deletion never removes a shared project workspace",
+			"agent", g.agentName, "path", path, "error", err)
+		return "", err
+	}
+	parent, err := resolveRealPath(filepath.Dir(path))
+	if err != nil {
+		return "", fmt.Errorf("%w %s for agent %s: cannot resolve its directory: %w", ErrAgentFilesDeleteRefused, path, g.agentName, err)
+	}
+	return filepath.Join(parent, filepath.Base(path)), nil
+}
+
+// built returns the guard a lazy guard stands for, building it once.
+func (g *agentFilesGuard) built() *agentFilesGuard {
+	if g.resolved == nil {
+		g.resolved = g.lazy()
+	}
+	return g.resolved
 }
 
 // agentProjectLayout is where an agent's project keeps the directories
@@ -257,11 +295,32 @@ func resolveAgentProjectLayout(projectDir string) agentProjectLayout {
 //
 // It fails closed: when the project directory is unknown or its settings
 // cannot be loaded, every check refuses.
+//
+// The guard is built on its first check, so a caller that removes nothing
+// (most creates and starts) neither pays for it nor can fail on it.
 func projectAgentFilesGuard(ctx context.Context, projectDir, agentName string, extraRoots ...string) *agentFilesGuard {
-	if projectDir == "" {
-		return &agentFilesGuard{agentName: agentName, err: errors.New("the agent's project directory is unknown")}
-	}
-	l := resolveAgentProjectLayout(projectDir)
+	return &agentFilesGuard{agentName: agentName, lazy: func() *agentFilesGuard {
+		if projectDir == "" {
+			return &agentFilesGuard{agentName: agentName, err: errors.New("the agent's project directory is unknown")}
+		}
+		return buildProjectAgentFilesGuard(ctx, projectDir, resolveAgentProjectLayout(projectDir), agentName, extraRoots...)
+	}}
+}
+
+// projectAgentFilesGuardWithLayout is projectAgentFilesGuard for a caller
+// that already resolved the project's layout l.
+func projectAgentFilesGuardWithLayout(ctx context.Context, projectDir string, l agentProjectLayout, agentName string, extraRoots ...string) *agentFilesGuard {
+	return &agentFilesGuard{agentName: agentName, lazy: func() *agentFilesGuard {
+		if projectDir == "" {
+			return &agentFilesGuard{agentName: agentName, err: errors.New("the agent's project directory is unknown")}
+		}
+		return buildProjectAgentFilesGuard(ctx, projectDir, l, agentName, extraRoots...)
+	}}
+}
+
+// buildProjectAgentFilesGuard builds the guard projectAgentFilesGuard
+// describes, for the project at projectDir with layout l.
+func buildProjectAgentFilesGuard(ctx context.Context, projectDir string, l agentProjectLayout, agentName string, extraRoots ...string) *agentFilesGuard {
 	anchors := []string{projectDir, l.projectRoot, l.repoRoot, l.externalAgentsRoot}
 	roots := []string{filepath.Join(projectDir, "agents", agentName)}
 	if l.externalAgentsRoot != "" {
@@ -305,21 +364,6 @@ func projectAgentFilesGuard(ctx context.Context, projectDir, agentName string, e
 	return g
 }
 
-// localAgentDirGuard prepares the check for an agent directory known only
-// by its path, agentsRoot/<name>: the agent root is agentDir (and
-// extraRoots), anchored at the directory holding agentsRoot, so an agents
-// root that is a symlink is caught; no project workspace is known, so
-// everything outside the agent's directories is refused.
-func localAgentDirGuard(agentName, agentDir string, extraRoots ...string) *agentFilesGuard {
-	anchors := []string{filepath.Dir(filepath.Dir(agentDir))}
-	for _, r := range extraRoots {
-		if r != "" && !guardPathWithin(filepath.Clean(r), filepath.Clean(anchors[0])) {
-			anchors = append(anchors, filepath.Dir(r))
-		}
-	}
-	return newAgentFilesGuard(agentName, anchors, append([]string{agentDir}, extraRoots...), nil)
-}
-
 // CheckAgentWorktreeRemoval applies the agent files guard to the removal of
 // agentName's worktree at worktreePath, under the project checkout base:
 // the worktree must really be where it says inside base, and base itself is
@@ -328,14 +372,26 @@ func CheckAgentWorktreeRemoval(agentName, base, worktreePath string) (string, er
 	return newAgentFilesGuard(agentName, []string{base}, []string{worktreePath}, []string{base}).check(worktreePath)
 }
 
-func (g *agentFilesGuard) classify(path string, extraAgentRoots []string) error {
+// classify decides path's place: leaf false classifies its real location
+// (every symlink resolved), leaf true its parent's real location joined
+// with its name (the entry itself is not resolved).
+func (g *agentFilesGuard) classify(path string, extraAgentRoots []string, leaf bool) error {
 	if g.err != nil {
 		return g.err
 	}
 	if path == "" || !filepath.IsAbs(path) {
 		return fmt.Errorf("the path is not absolute")
 	}
-	real, err := resolveRealPath(path)
+	var real string
+	var err error
+	if leaf {
+		var parent string
+		if parent, err = resolveRealPath(filepath.Dir(path)); err == nil {
+			real = filepath.Join(parent, filepath.Base(path))
+		}
+	} else {
+		real, err = resolveRealPath(path)
+	}
 	if err != nil {
 		return fmt.Errorf("cannot resolve its real location: %w", err)
 	}
