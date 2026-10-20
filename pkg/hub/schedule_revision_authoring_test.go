@@ -334,6 +334,7 @@ func TestMessageScheduleWriteDeniedWhenCeilingUnrecordable(t *testing.T) {
 				if c.identity.Type() == "agent" {
 					// Agent callers do not edit schedule definitions.
 					require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+					assert.JSONEq(t, agentScopeForbiddenBody, rec.Body.String())
 				} else {
 					assertCeilingDenial(t, c, rec)
 				}

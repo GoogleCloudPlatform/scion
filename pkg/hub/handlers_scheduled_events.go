@@ -83,6 +83,12 @@ func (s *Server) authorizeScheduledEventRow(w http.ResponseWriter, r *http.Reque
 		Unauthorized(w)
 		return false
 	}
+	if row != nil && identity.Type() != "agent" {
+		// Only an agent caller's decision depends on the row. For every
+		// other caller the router gate already decided this action for
+		// this request, so it is not decided (or audited) a second time.
+		return true
+	}
 	d := s.scheduledEventAccessDecision(r.Context(), projectID, action, row)
 	if d.allowed {
 		return true
@@ -475,6 +481,8 @@ func (s *Server) listScheduledEvents(w http.ResponseWriter, r *http.Request, pro
 		ProjectID: projectID,
 		EventType: query.Get("eventType"),
 		Status:    query.Get("status"),
+		// An agent caller lists only the events it holds.
+		InitiatorAgentID: agentListFilterID(r.Context()),
 	}
 
 	result, err := s.store.ListScheduledEvents(r.Context(), filter, listOptionsFromQuery(query))
@@ -483,7 +491,7 @@ func (s *Server) listScheduledEvents(w http.ResponseWriter, r *http.Request, pro
 		return
 	}
 
-	events, totalCount := s.visibleScheduledEvents(r.Context(), projectID, result.Items, result.TotalCount)
+	events, totalCount := visibleScheduledRows(r.Context(), s, projectID, result.Items, result.TotalCount, scheduledEventRowOf)
 	writeJSON(w, http.StatusOK, ListScheduledEventsResponse{
 		Events:     events,
 		NextCursor: result.NextCursor,
@@ -492,22 +500,35 @@ func (s *Server) listScheduledEvents(w http.ResponseWriter, r *http.Request, pro
 	})
 }
 
-// visibleScheduledEvents keeps the events of one list page that the caller
-// may see, each decided by scheduledEventAccessDecision for ActionList. A
-// user caller's decision does not depend on the row, so its page and count
-// are returned as listed. For an agent caller the store's total count also
-// counts rows the agent may not see, so it is omitted.
-func (s *Server) visibleScheduledEvents(ctx context.Context, projectID string, items []store.ScheduledEvent, totalCount int) ([]store.ScheduledEvent, int) {
+// visibleScheduledRows keeps the rows of one list page that the caller may
+// see, each decided by scheduledEventAccessDecision for ActionList. A user
+// caller's decision does not depend on the row, so its page and count are
+// returned as listed. An agent caller's list is already narrowed in the
+// store to the rows it holds (agentListFilterID); the decision is still made
+// per row, and if it drops any row the store's count is omitted.
+func visibleScheduledRows[T any](ctx context.Context, s *Server, projectID string, items []T, totalCount int, rowOf func(*T) *scheduledEventRow) ([]T, int) {
 	if !isAgentCaller(ctx) {
 		return items, totalCount
 	}
-	visible := make([]store.ScheduledEvent, 0, len(items))
+	visible := make([]T, 0, len(items))
 	for i := range items {
-		if s.scheduledEventAccessDecision(ctx, projectID, ActionList, scheduledEventRowOf(&items[i])).allowed {
+		if s.scheduledEventAccessDecision(ctx, projectID, ActionList, rowOf(&items[i])).allowed {
 			visible = append(visible, items[i])
 		}
 	}
-	return visible, 0
+	if len(visible) != len(items) {
+		totalCount = 0
+	}
+	return visible, totalCount
+}
+
+// agentListFilterID is the agent ID an agent caller's list is narrowed to in
+// the store, so its pages fill with the rows it holds; "" for other callers.
+func agentListFilterID(ctx context.Context) string {
+	if !isAgentCaller(ctx) {
+		return ""
+	}
+	return GetIdentityFromContext(ctx).ID()
 }
 
 // getScheduledEvent handles GET /api/v1/projects/{projectId}/scheduled-events/{id}

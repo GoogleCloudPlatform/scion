@@ -15,7 +15,6 @@
 package hub
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -359,6 +358,8 @@ func (s *Server) listSchedules(w http.ResponseWriter, r *http.Request, projectID
 		ProjectID: projectID,
 		Status:    query.Get("status"),
 		Name:      query.Get("name"),
+		// An agent caller lists only the schedules it holds.
+		InitiatorAgentID: agentListFilterID(r.Context()),
 	}
 
 	result, err := s.store.ListSchedules(r.Context(), filter, listOptionsFromQuery(query))
@@ -367,31 +368,13 @@ func (s *Server) listSchedules(w http.ResponseWriter, r *http.Request, projectID
 		return
 	}
 
-	schedules, totalCount := s.visibleSchedules(r.Context(), projectID, result.Items, result.TotalCount)
+	schedules, totalCount := visibleScheduledRows(r.Context(), s, projectID, result.Items, result.TotalCount, scheduleRow)
 	writeJSON(w, http.StatusOK, ListSchedulesResponse{
 		Schedules:  schedules,
 		NextCursor: result.NextCursor,
 		TotalCount: totalCount,
 		ServerTime: time.Now().UTC(),
 	})
-}
-
-// visibleSchedules keeps the schedules of one list page that the caller may
-// see, each decided by scheduledEventAccessDecision for ActionList. A user
-// caller's decision does not depend on the row, so its page and count are
-// returned as listed. For an agent caller the store's total count also
-// counts rows the agent may not see, so it is omitted.
-func (s *Server) visibleSchedules(ctx context.Context, projectID string, items []store.Schedule, totalCount int) ([]store.Schedule, int) {
-	if !isAgentCaller(ctx) {
-		return items, totalCount
-	}
-	visible := make([]store.Schedule, 0, len(items))
-	for i := range items {
-		if s.scheduledEventAccessDecision(ctx, projectID, ActionList, scheduleRow(&items[i])).allowed {
-			visible = append(visible, items[i])
-		}
-	}
-	return visible, 0
 }
 
 // getSchedule handles GET /api/v1/projects/{projectId}/schedules/{id}

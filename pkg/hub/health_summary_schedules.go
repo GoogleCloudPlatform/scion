@@ -97,6 +97,10 @@ type HealthFailingSchedule struct {
 func (s *Server) healthSummarySchedules(r *http.Request) (*HealthSummarySchedules, error) {
 	ctx := r.Context()
 	out := &HealthSummarySchedules{Failing: []HealthFailingSchedule{}}
+	// A user caller's read decision depends on the project only, so it is
+	// made once per project; an agent caller's depends on each row.
+	agentCaller := isAgentCaller(ctx)
+	allowed := map[string]bool{}
 	var visible []store.Schedule
 	scanned := 0
 	opts := store.ListOptions{Limit: healthSummarySchedulePageSize}
@@ -118,7 +122,12 @@ func (s *Server) healthSummarySchedules(r *http.Request) (*HealthSummarySchedule
 			if sc.Status != store.ScheduleStatusActive || sc.LastRunStatus != store.ScheduleRunError {
 				continue
 			}
-			if s.healthSummaryCanReadSchedules(r, &sc) {
+			ok, seen := allowed[sc.ProjectID]
+			if agentCaller || !seen {
+				ok = s.healthSummaryCanReadSchedules(r, &sc)
+				allowed[sc.ProjectID] = ok
+			}
+			if ok {
 				visible = append(visible, sc)
 			}
 		}
@@ -193,6 +202,7 @@ func (s *Server) healthSummaryCanReadSchedules(r *http.Request, sc *store.Schedu
 	return s.scheduledEventAccessDecision(r.Context(), sc.ProjectID, ActionRead, scheduleRow(sc)).allowed
 }
 
+// scheduleLastRunAt is the schedule's last run time, or the zero time.
 func scheduleLastRunAt(sc store.Schedule) time.Time {
 	if sc.LastRunAt == nil {
 		return time.Time{}
