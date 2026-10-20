@@ -5773,6 +5773,11 @@ func (s *Server) handleAgentResetAuth(w http.ResponseWriter, r *http.Request, id
 		if writeBrokerRuntimeUnavailable(w, err, agent.Runtime) {
 			return
 		}
+		// The credential was written but the running agent did not confirm
+		// the reload: the caller sees a failure with its own code.
+		if writeBrokerReloadUnconfirmed(w, err) {
+			return
+		}
 		if writeAgentTokenIssueError(w, err) {
 			return
 		}

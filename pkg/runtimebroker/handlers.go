@@ -5237,35 +5237,50 @@ func (s *Server) resetAuth(w http.ResponseWriter, r *http.Request, id, projectID
 		}
 	}
 
-	// Signal sciontool init (PID 1) to re-read the token and restart its refresh
-	// loop immediately. The token was already written above, and the agent also
-	// polls the token file as a UID-safe fallback, so it recovers within a few
-	// seconds even if this signal fails. In rootless containers the broker execs
-	// as the scion user and `kill -USR2 1` against the root-owned PID 1 fails
-	// with EPERM — this is expected and not an error since the token is on disk.
-	signalCmd := []string{"kill", "-USR2", "1"}
-	signaled := true
-	if _, err := rt.Exec(ctx, target, signalCmd); err != nil {
-		signaled = false
-		s.agentLifecycleLog.Warn("reset-auth: failed to signal PID 1 (token still written, poller will reload)", "agent_id", id, "error", err)
+	// Ask sciontool init (PID 1) to re-read the credential file and restart
+	// its refresh loop. This signal is the only reload the broker can
+	// confirm. (Where init also watches the credential file, it may reload
+	// on its own as well; a second reload is harmless.)
+	//
+	// The signal goes to the runtime paired with the target above. A runtime
+	// that implements InitSignaler delivers it from the runtime side to the
+	// container's main process (docker, podman and Apple container: PID 1
+	// usually runs as a different user than exec's scion user, so an
+	// in-container kill as scion does not reach it). Other runtimes
+	// (Kubernetes, where the pod runs init and exec as the same user, and the
+	// remaining backends) keep the in-container `kill -USR2 1`.
+	var signalErr error
+	if sig, ok := rt.(scionrt.InitSignaler); ok {
+		signalErr = sig.SignalInitReload(ctx, target)
+	} else {
+		_, signalErr = rt.Exec(ctx, target, []string{"kill", "-USR2", "1"})
 	}
 
-	s.agentLifecycleLog.Info("Auth reset completed", "agent_id", id, "signaled", signaled,
-		"transport_token_written", transportWritten)
+	transportNote := ""
+	if transportWritten {
+		transportNote = "; transport token written"
+	} else if transportFailed {
+		transportNote = "; transport token write failed"
+	}
 
 	s.forceHeartbeatAll("reset-auth", id)
 
-	msg := "Auth reset: token written and init signaled"
-	if !signaled {
-		msg = "Auth reset: token written; signal failed (poller will reload)"
+	if signalErr != nil {
+		// The credential is on disk, but the running agent did not confirm
+		// the reload: report that to the caller as a failure. The raw error
+		// stays in the log only.
+		s.agentLifecycleLog.Warn("reset-auth: credential written but the reload signal was not delivered",
+			"agent_id", id, "transport_token_written", transportWritten, "error", signalErr)
+		writeError(w, http.StatusBadGateway, api.BrokerErrCodeReloadUnconfirmed,
+			api.ReloadUnconfirmedMessage+transportNote, nil)
+		return
 	}
-	if transportWritten {
-		msg += "; transport token written"
-	} else if transportFailed {
-		msg += "; transport token write failed"
-	}
+
+	s.agentLifecycleLog.Info("Auth reset completed", "agent_id", id, "signaled", true,
+		"transport_token_written", transportWritten)
+
 	writeJSON(w, http.StatusOK, ResetAuthResponse{
-		Message: msg,
+		Message: "Auth reset: token written and init signaled" + transportNote,
 	})
 }
 
