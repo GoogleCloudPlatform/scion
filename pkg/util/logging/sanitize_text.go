@@ -77,9 +77,10 @@ var (
 // The result is then truncated to MaxSanitizedTextBytes, with a marker giving
 // the sanitized length.
 //
-// Every log sink renders error-valued attributes through this (see
-// sanitizedErrorText), and the runtime broker passes its create and start
-// failure causes through it.
+// The hosted log sinks (Cloud Logging, stdout where it is collected into
+// Cloud Logging, and the OTel log bridge) render error-valued attributes
+// through this (see sanitizedErrorText), and the runtime broker passes its
+// create and start failure causes through it.
 func SanitizeText(text string) string {
 	s := textPEMRe.ReplaceAllString(text, RedactedMarker)
 	s = textURLUserInfoRe.ReplaceAllString(s, "${1}"+RedactedMarker+"@")

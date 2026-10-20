@@ -17,7 +17,6 @@ package logging
 import (
 	"context"
 	"log/slog"
-	"os"
 
 	gcplog "cloud.google.com/go/logging"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
@@ -88,13 +87,7 @@ func NewMessageLogger(cfg MessageLoggerConfig) (*slog.Logger, func(), error) {
 	// handler would produce duplicate entries — skip it in that case.
 	onCloudRun := cloudrunenv.IsService()
 	if !onCloudRun || cfg.CloudClient == nil {
-		if cfg.UseGCP {
-			handlers = append(handlers, NewGCPHandler(os.Stdout, opts, cfg.Component, cfg.HubName))
-		} else {
-			handlers = append(handlers, slog.NewJSONHandler(os.Stdout, opts).WithAttrs([]slog.Attr{
-				slog.String(AttrComponent, cfg.Component),
-			}))
-		}
+		handlers = append(handlers, newStdoutHandler(logStdout, opts, cfg.Component, cfg.HubName, cfg.UseGCP, true))
 	}
 
 	if len(handlers) == 0 {

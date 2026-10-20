@@ -242,11 +242,7 @@ func NewRequestLogger(cfg RequestLoggerConfig) (*slog.Logger, func(), error) {
 
 	// Stdout fallback: only if NOT foreground AND no other targets configured
 	if !cfg.Foreground && len(handlers) == 0 {
-		if cfg.UseGCP {
-			handlers = append(handlers, NewGCPHandler(os.Stdout, opts, cfg.Component, cfg.HubName))
-		} else {
-			handlers = append(handlers, slog.NewJSONHandler(os.Stdout, opts))
-		}
+		handlers = append(handlers, newStdoutHandler(logStdout, opts, cfg.Component, cfg.HubName, cfg.UseGCP, false))
 	}
 
 	// If no handlers at all (foreground with no file/cloud), use discard

@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 
@@ -46,6 +47,10 @@ func cloudAttrValue(v slog.Value) any {
 	if err, ok := a.(error); ok {
 		return sanitizedErrorText(err)
 	}
+	switch a.(type) {
+	case string, bool, []string, map[string]string:
+		return a // always encodes; skip the trial encoding below
+	}
 	if _, err := json.Marshal(a); err != nil {
 		return SanitizeText(fmt.Sprint(a))
 	}
@@ -66,10 +71,43 @@ func sanitizeErrorAttr(_ []string, a slog.Attr) slog.Attr {
 // stdoutReachesCloudLogging reports whether this process's stdout is
 // likely collected into Cloud Logging: the GCP log format was chosen, or
 // the process runs on Cloud Run or in a Kubernetes pod, whose platforms
-// collect container output. createBaseHandler sanitizes error attributes
-// on stdout in that case.
+// collect container output. Every stdout log handler (newStdoutHandler)
+// sanitizes error attributes in that case.
 func stdoutReachesCloudLogging(useGCP bool) bool {
 	return useGCP || cloudrunenv.IsService() || os.Getenv("KUBERNETES_SERVICE_HOST") != ""
+}
+
+// logStdout is where the stdout log handlers write. Tests replace it.
+var logStdout io.Writer = os.Stdout
+
+// newStdoutHandler builds a stdout log handler: the GCP format when useGCP,
+// else JSON (with a component attribute when withComponent). Where stdout
+// is likely collected into Cloud Logging (stdoutReachesCloudLogging), error
+// attributes are rendered as sanitized strings. opts is copied, never
+// modified: NewGCPHandler rewrites ReplaceAttr in place, and a caller may
+// share opts with another handler.
+func newStdoutHandler(w io.Writer, opts *slog.HandlerOptions, component, hubName string, useGCP, withComponent bool) slog.Handler {
+	var o slog.HandlerOptions
+	if opts != nil {
+		o = *opts
+	}
+	if stdoutReachesCloudLogging(useGCP) {
+		prev := o.ReplaceAttr
+		o.ReplaceAttr = func(groups []string, a slog.Attr) slog.Attr {
+			if prev != nil {
+				a = prev(groups, a)
+			}
+			return sanitizeErrorAttr(groups, a)
+		}
+	}
+	if useGCP {
+		return NewGCPHandler(w, &o, component, hubName)
+	}
+	h := slog.NewJSONHandler(w, &o)
+	if withComponent {
+		return h.WithAttrs([]slog.Attr{slog.String(AttrComponent, component)})
+	}
+	return h
 }
 
 // sanitizingHandler wraps a handler that has no ReplaceAttr hook (the

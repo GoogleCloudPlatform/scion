@@ -265,3 +265,64 @@ func TestOTelSink_RenderErrorsSanitized(t *testing.T) {
 	}
 	assertNoCredentialValues(t, "otel", all.String())
 }
+
+// TestDedicatedLoggerStdout_RenderErrorsSanitized is the stdout guard for
+// the message, artifact and request loggers, which build their own stdout
+// handlers: in a Kubernetes pod (stdout collected) every error attribute is
+// a sanitized, truncated string, in both output formats.
+func TestDedicatedLoggerStdout_RenderErrorsSanitized(t *testing.T) {
+	for name, mk := range map[string]func(useGCP bool) (*slog.Logger, func(), error){
+		"message": func(useGCP bool) (*slog.Logger, func(), error) {
+			return NewMessageLogger(MessageLoggerConfig{Component: "c", UseGCP: useGCP})
+		},
+		"artifact": func(useGCP bool) (*slog.Logger, func(), error) {
+			return NewArtifactLogger(ArtifactLoggerConfig{Component: "c", UseGCP: useGCP})
+		},
+		"request": func(useGCP bool) (*slog.Logger, func(), error) {
+			return NewRequestLogger(RequestLoggerConfig{Component: "c", UseGCP: useGCP})
+		},
+	} {
+		for _, useGCP := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/gcp=%v", name, useGCP), func(t *testing.T) {
+				t.Setenv("K_SERVICE", "")
+				t.Setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+				var buf bytes.Buffer
+				orig := logStdout
+				logStdout = &buf
+				t.Cleanup(func() { logStdout = orig })
+
+				logger, cleanup, err := mk(useGCP)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if cleanup != nil {
+					t.Cleanup(cleanup)
+				}
+				logEveryShape(logger.Handler())
+
+				var rec map[string]any
+				if err := json.Unmarshal(buf.Bytes(), &rec); err != nil {
+					t.Fatalf("decode %q: %v", buf.String(), err)
+				}
+				assertSanitizedText(t, "bound", rec["bound"])
+				assertSanitizedText(t, "error", rec["error"])
+				assertSanitizedText(t, "valuer", rec["valuer"])
+				assertNoCredentialValues(t, name, buf.String())
+			})
+		}
+	}
+}
+
+// TestNewStdoutHandler_CopiesOptions pins that the stdout handler leaves
+// the caller's options untouched, since a caller may share them with
+// another handler.
+func TestNewStdoutHandler_CopiesOptions(t *testing.T) {
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+	opts := &slog.HandlerOptions{Level: slog.LevelInfo}
+	for _, useGCP := range []bool{false, true} {
+		_ = newStdoutHandler(&bytes.Buffer{}, opts, "c", "", useGCP, true)
+		if opts.ReplaceAttr != nil {
+			t.Fatalf("useGCP=%v: caller's ReplaceAttr was set", useGCP)
+		}
+	}
+}

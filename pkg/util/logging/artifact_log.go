@@ -17,7 +17,6 @@ package logging
 import (
 	"context"
 	"log/slog"
-	"os"
 
 	gcplog "cloud.google.com/go/logging"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
@@ -84,13 +83,7 @@ func NewArtifactLogger(cfg ArtifactLoggerConfig) (*slog.Logger, func(), error) {
 	// cloud handler is active (the runtime forwards stdout to Cloud
 	// Logging, so it would duplicate every entry).
 	if !cloudrunenv.IsService() || cfg.CloudClient == nil {
-		if cfg.UseGCP {
-			handlers = append(handlers, NewGCPHandler(os.Stdout, opts, cfg.Component, cfg.HubName))
-		} else {
-			handlers = append(handlers, slog.NewJSONHandler(os.Stdout, opts).WithAttrs([]slog.Attr{
-				slog.String(AttrComponent, cfg.Component),
-			}))
-		}
+		handlers = append(handlers, newStdoutHandler(logStdout, opts, cfg.Component, cfg.HubName, cfg.UseGCP, true))
 	}
 
 	var handler slog.Handler
