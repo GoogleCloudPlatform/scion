@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 345
+**Operations:** 344
 
 ## Table of Contents
 
@@ -55,13 +55,12 @@
 - [project.visitors.rules.add](#projectvisitorsrulesadd) — Add a visitor rule: visitor access to a project for every user of a trusted issuer whose verified email is in a domain, bound per user on the user's first matching request
 - [project.visitors.rules.update](#projectvisitorsrulesupdate) — Replace the window (not before, expires at) of a project visitor rule and of every visitor binding it created
 - [project.visitors.rules.remove](#projectvisitorsrulesremove) — Remove a project visitor rule; every visitor binding it created and its exclusions are deleted in the same transaction, and grants by email are unchanged
-- [project.lifecycle.create](#projectlifecyclecreate) — Create a new project. project.create is checked as a collection-level create at the hub scope; a token needs project:create on a hub boundary. Naming an existing project by id needs project.update on it
+- [project.lifecycle.create](#projectlifecyclecreate) — Create a new project
 - [project.lifecycle.delete](#projectlifecycledelete) — Delete a project with cascading security state cleanup and atomic audit
 - [project.read](#projectread) — Read a single project's metadata by ID or slug
 - [project.list](#projectlist) — List projects within the caller's authorized scope. A user access token needs project:list on either boundary: a project token lists only its boundary project
 - [project.update](#projectupdate) — Update project settings and metadata
-- [project.register](#projectregister) — Register a project from an external source. Register checks project.create as a collection-level create at the hub scope; a token needs project:create on a hub boundary. An existing project named by id or matched by slug needs project.update on it. The embedded-broker form (a broker in the request body) is session-only (CREDENTIAL_MANAGEMENT): a token or any other non-session credential is refused before any lookup or write
-- [project.clone](#projectclone) — Clone a project into a new project owned by the caller. The caller needs project.read on the source and project.create as a collection-level create at the hub scope; a token also needs the project:clone selector
+- [project.register](#projectregister) — Register a project from an external source
 - [schedule.event.list](#scheduleeventlist) — List scheduled events or recurring schedules in a project
 - [schedule.event.read](#scheduleeventread) — Read a scheduled event, a recurring schedule or a schedule's run history
 - [schedule.event.create](#scheduleeventcreate) — Create a scheduled event or recurring schedule of any event type. A user access token needs scheduled_event:create and passes the event type's target checks
@@ -334,8 +333,8 @@
 - [env.hub.list](#envhublist) — List hub-level environment variables (scope=hub), without secret entries
 - [testidentity.create](#testidentitycreate) — Issue a short-lived synthetic member or viewer test identity and one access token for it (no refresh token, no cookie)
 - [testidentity.list](#testidentitylist) — List test identities: the caller's own, or every identity for an unscoped platform admin session
-- [testidentity.token.issue](#testidentitytokenissue) — Re-issue one access token for a live test identity, for its issuer or an unscoped platform admin session
-- [testidentity.webcode.issue](#testidentitywebcodeissue) — Mint a single-use, five-minute web-login code for a live test identity, for its issuer, a workload issuer delegation on the member-tier identities it issued, or an unscoped platform admin session; only on hubs where test identity web sessions are available. Kind test_fixture needs test_identity.issue; an admin kind (test_hub_admin, test_super_admin) only while server.hub.test_identities.admin_web_sessions is on at an admin --test-mode level, and only with the issuer checks of that kind's issuance (its capability, a live super-admin through current bindings, an access token with exactly the kind's scope)
+- [testidentity.token.issue](#testidentitytokenissue) — Re-issue one access token for a live test identity, for its issuer or an unscoped platform admin session; an admin-kind identity's token is re-issued only through the admin-scope workload delegation that issued it (phase X4b)
+- [testidentity.webcode.issue](#testidentitywebcodeissue) — Mint a single-use, five-minute web-login code for a live test identity, for its issuer, a workload issuer delegation on the identities it issued (member scope: member-tier identities; admin scope, phase X4b: admin-kind identities of its kind), or an unscoped platform admin session; only on hubs where test identity web sessions are available. Kind test_fixture needs test_identity.issue; an admin kind (test_hub_admin, test_super_admin) only while server.hub.test_identities.admin_web_sessions is on at an admin --test-mode level, and only with the issuer checks of that kind's issuance (its capability, a live super-admin through current bindings, an access token with exactly the kind's scope)
 - [testidentity.delete](#testidentitydelete) — Delete a test identity (its role bindings, group memberships and user-scope data go with it), for its issuer, an unscoped platform admin session, or a holder of test_identity.issue and user.delete; refused with 409 while it owns agents or is a project's last owner. With ?purge=true it also removes the agents, schedules, groups and projects stamped as created under the identity (the identity ID is the only input), keeps stamped projects that have another owner or other resources, and reports unstamped agents as unproven; for an admin-kind identity (purged by its issuer or a super-admin) it first removes every grant stamped with its issuance and reports its residue
 - [testidentity.cleanup](#testidentitycleanup) — Remove the agents, schedules, groups and projects stamped as created under the caller's expired or deleted test identities (and the expired identities themselves), with the purge engine; the hub selects the targets from the provenance stamps, the request names none (no body; ?dryRun=true lists the targets and writes nothing). An issuer reaches its own identities, a workload delegation only the identities issued through it, an unscoped platform admin session every issuer's; a live identity is never touched
 - [testidentity.provenance](#testidentityprovenance) — Explain whether the hub recorded one agent, project, schedule or group as created under a test identity of the caller's issuer scope (its own, its own delegation's, or every issuer's for an unscoped platform admin session): proven with the stamp and the identity's state, proven deleted by an in-scope deletion record for a resource that is gone, or unproven with only the reason (a missing resource and another issuer's stamp get the same answer, and no owner or creator data is returned)
@@ -2367,7 +2366,7 @@
 
 **Domain:** project
 
-**Description:** Create a new project. project.create is checked as a collection-level create at the hub scope; a token needs project:create on a hub boundary. Naming an existing project by id needs project.update on it
+**Description:** Create a new project
 
 ### Entry Points
 
@@ -2377,9 +2376,7 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `hub_collection`; boundaries `hub`; pinned by `TestProjectCreateToken_RequiresCreateSelectorAndHubBoundary`)
+**Credentials:** `session_jwt`
 
 **Base Permission:** `project.create`
 
@@ -2406,8 +2403,6 @@
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestOwnerGrantCoverageCheck`
 - `pkg/hub:TestOwnerBindingAuditFailureRollsBack`
-- `pkg/hub:TestProjectCreateToken_RequiresCreateSelectorAndHubBoundary`
-- `pkg/hub:TestProjectCreateToken_IdempotentPathRequiresUpdate`
 
 ---
 
@@ -2602,7 +2597,7 @@
 
 **Domain:** project
 
-**Description:** Register a project from an external source. Register checks project.create as a collection-level create at the hub scope; a token needs project:create on a hub boundary. An existing project named by id or matched by slug needs project.update on it. The embedded-broker form (a broker in the request body) is session-only (CREDENTIAL_MANAGEMENT): a token or any other non-session credential is refused before any lookup or write
+**Description:** Register a project from an external source
 
 ### Entry Points
 
@@ -2612,11 +2607,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
+**Credentials:** `session_jwt`
 
-**Bearer:** `admit` (target `hub_collection`; boundaries `hub`; pinned by `TestProjectRegisterToken_EnforcesProjectCreate`)
-
-**Base Permission:** `project.create`
+**Base Permission:** `project.register`
 
 **Resource Resolver:** project-from-body
 
@@ -2625,7 +2618,7 @@
 ### Delegation
 
 - **Kind:** `non_amplification`
-- When the call creates the project, the creator is bound to the project-owner role on it; registering an existing project binds no owner. A credential with a permission ceiling must cover every permission of that role before any write (projectOwnerGrantDenial); for other callers project.create gates the grant
+- When the call creates the project, the creator is bound to the project-owner role on it; registering an existing project binds no owner. A credential with a permission ceiling must cover every permission of that role before any write (projectOwnerGrantDenial); for other callers project.register gates the grant
 
 ### Audit
 
@@ -2641,54 +2634,6 @@
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestOwnerGrantCoverageCheck`
 - `pkg/hub:TestOwnerBindingAuditFailureRollsBack`
-- `pkg/hub:TestProjectRegisterToken_EnforcesProjectCreate`
-- `pkg/hub:TestProjectRegisterToken_EmbeddedBrokerFormIsSessionOnly`
-
----
-
-## project.clone
-
-**Domain:** project
-
-**Description:** Clone a project into a new project owned by the caller. The caller needs project.read on the source and project.create as a collection-level create at the hub scope; a token also needs the project:clone selector
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | POST | `/api/v1/projects/{id}/clone` |
-
-**Principals:** `user`
-
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `hub_collection`; boundaries `hub`; pinned by `TestProjectCloneToken_RequiresSourceReadCloneAndCreate`)
-
-**Base Permission:** `project.create`
-
-**Resource Resolver:** project-from-url
-
-**Effects:** `create-resource`, `grant-authority`
-
-### Delegation
-
-- **Kind:** `non_amplification`
-- The caller is bound to the project-owner role on the clone. A credential with a permission ceiling must cover every permission of that role before any write (projectOwnerGrantDenial); for other callers project.create gates the grant
-
-### Audit
-
-- **Event Type:** `project_member_add`
-- **Context Fields:** actor_id, project_id
-- **After Fields:** user_id, role
-- **Atomic:** Yes
-
-**Denial Codes:** `forbidden`, `not_found`
-
-### Tests
-
-- `pkg/hub/authzop:TestCatalogValidation`
-- `pkg/hub:TestOwnerBindingRequiresCanDelegate`
-- `pkg/hub:TestProjectCloneToken_RequiresSourceReadCloneAndCreate`
 
 ---
 
@@ -2828,7 +2773,20 @@
 
 **Resource Resolver:** project-from-url
 
-**Effects:** `update-resource`
+**Effects:** `update-resource`, `grant-authority`
+
+### Delegation
+
+- **Kind:** `non_amplification`
+- Only the dispatch_agent event type grants authority. A resume, and an update that changes the event type, payload, cron expression or enables the schedule, records the caller's initiator attribution and frozen effect ceiling (revisionAuthorityCeiling) in place of the stored ones; an update that changes none of those fields records neither. An update can switch a schedule to dispatch_agent. A dispatch_agent schedule then creates an agent at fire time, with a delegation edge from the recorded principal, after CanDelegate for that principal. A message schedule grants no authority. Effects are listed per operation, not per event type, so grant-authority is listed for the whole operation
+
+### Audit
+
+- **Event Type:** `agent_delegation`
+- **Context Fields:** actor_id
+- **After Fields:** agent_id, can_delegate_result
+- **Atomic:** No
+- **Non-Atomic Justification:** The update or resume write records no mutation audit record: it stores the initiator attribution and the frozen effect ceiling on the schedule row in the same conditional update that bumps its authorization revision. The agent_delegation record is written when a dispatch_agent schedule fires, in the agent-create transaction with the agent row and its delegation edge. A message schedule writes none
 
 **Denial Codes:** `forbidden`
 
@@ -12387,7 +12345,7 @@
 
 **Domain:** testidentity
 
-**Description:** Re-issue one access token for a live test identity, for its issuer or an unscoped platform admin session
+**Description:** Re-issue one access token for a live test identity, for its issuer or an unscoped platform admin session; an admin-kind identity's token is re-issued only through the admin-scope workload delegation that issued it (phase X4b)
 
 ### Entry Points
 
@@ -12410,7 +12368,7 @@
 ### Governance
 
 - **Kind:** issuer_credential
-- Only the identity's issuer (or an unscoped platform admin session) re-issues; the token never outlives the identity
+- Only the identity's issuer (or an unscoped platform admin session) re-issues a member-tier token, with test_identity.issue; the token never outlives the identity. An admin-kind identity's token (no re-issue for any other caller: 409) is re-issued only through the admin-scope workload delegation that issued it, of the identity's kind, with that kind's issuer checks (its capability, a live super-admin grantor through current bindings), at most the kind's token lifetime and never past the identity's expiry or its creation plus the kind's maximum lifetime; the delegation, the grantor and the identity are re-checked inside the mint transaction, and a test admin audit sink line carries the delegation id. Admin token re-issue is bounded only by the per-delegation test identity rate limiter, not by an admin-specific limit; each re-issue adds a live token (earlier ones stay valid until they expire), and every token ends no later than the identity's kind lifetime
 
 ### Audit
 
@@ -12425,6 +12383,8 @@
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestTestIdentity_TokenReissue`
+- `pkg/hub:TestWorkloadAdminCredentials_TokenReissueOwnIdentity`
+- `pkg/hub:TestWorkloadAdminCredentials_TokenReissueRefusals`
 
 ---
 
@@ -12432,7 +12392,7 @@
 
 **Domain:** testidentity
 
-**Description:** Mint a single-use, five-minute web-login code for a live test identity, for its issuer, a workload issuer delegation on the member-tier identities it issued, or an unscoped platform admin session; only on hubs where test identity web sessions are available. Kind test_fixture needs test_identity.issue; an admin kind (test_hub_admin, test_super_admin) only while server.hub.test_identities.admin_web_sessions is on at an admin --test-mode level, and only with the issuer checks of that kind's issuance (its capability, a live super-admin through current bindings, an access token with exactly the kind's scope)
+**Description:** Mint a single-use, five-minute web-login code for a live test identity, for its issuer, a workload issuer delegation on the identities it issued (member scope: member-tier identities; admin scope, phase X4b: admin-kind identities of its kind), or an unscoped platform admin session; only on hubs where test identity web sessions are available. Kind test_fixture needs test_identity.issue; an admin kind (test_hub_admin, test_super_admin) only while server.hub.test_identities.admin_web_sessions is on at an admin --test-mode level, and only with the issuer checks of that kind's issuance (its capability, a live super-admin through current bindings, an access token with exactly the kind's scope)
 
 ### Entry Points
 
@@ -12455,7 +12415,7 @@
 ### Governance
 
 - **Kind:** issuer_credential
-- Only the identity's issuer (or a workload delegation, for the member-tier identities issued through it, or an unscoped platform admin session) mints a code; for an admin-kind identity the caller also passes that kind's issuer checks; at most one unredeemed code per identity, redeemable once, never past the identity's expiry
+- Only the identity's issuer (or a workload delegation, for the identities of its tier issued through it, or an unscoped platform admin session) mints a code; for an admin-kind identity the caller also passes that kind's issuer checks, and through an admin-scope delegation the delegation, the grantor and the identity are re-checked inside the mint transaction and a test admin audit sink line carries the delegation id; at most one unredeemed code per identity, redeemable once, never past the identity's expiry (for an admin kind, nor its creation plus the kind's maximum lifetime)
 
 ### Audit
 
@@ -12475,6 +12435,8 @@
 - `pkg/hub:TestWorkloadDelegation_WebLoginCodeForOwnIdentity`
 - `pkg/hub:TestWorkloadDelegation_WebLoginCodeRefusedOutsideOwnMemberIdentities`
 - `pkg/hub:TestWorkloadDelegation_RevokedAfterAuthMintsNothing`
+- `pkg/hub:TestWorkloadAdminCredentials_WebCodeOwnIdentity`
+- `pkg/hub:TestWorkloadAdminCredentials_WebCodeRefusals`
 
 ---
 
@@ -12645,7 +12607,7 @@
 ### Governance
 
 - **Kind:** issuer_credential
-- The issuer is a human, live super-admin through its own current bindings; an access token issuer presents a hub-boundary token with exactly the requested kind's scope (test_identity:issue_admin or test_identity:issue_super_admin), at most 8 h old, loaded and checked on every issuance. A workload delegation issuer is admitted only with its delegation's admin scope available at the hub's --test-mode level, and is issue-only. One live admin-kind identity per issuer, or per workload delegation its admin cap (at most 2 test hub-admins or 1 test super-admin); four per hub of which at most one test super-admin, counted across every issuer, access token and delegation under the issuance lock; issuance is rate limited per issuer or delegation (6/h hub-admin, 2/h super-admin)
+- The issuer is a human, live super-admin through its own current bindings; an access token issuer presents a hub-boundary token with exactly the requested kind's scope (test_identity:issue_admin or test_identity:issue_super_admin), at most 8 h old, loaded and checked on every issuance. A workload delegation issuer is admitted only with its delegation's admin scope available at the hub's --test-mode level; besides issuance it re-issues tokens for and mints web-login codes for the identities it issued (phase X4b), and nothing else. One live admin-kind identity per issuer, or per workload delegation its admin cap (at most 2 test hub-admins or 1 test super-admin); four per hub of which at most one test super-admin, counted across every issuer, access token and delegation under the issuance lock; issuance is rate limited per issuer or delegation (6/h hub-admin, 2/h super-admin)
 
 ### Audit
 

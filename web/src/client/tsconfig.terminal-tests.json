@@ -26,7 +26,8 @@
     "terminal-palette-open.test.ts",
     "terminal-layout-open.test.ts",
     "terminal-connect.smoke.test.ts",
-    "terminal-move.test.ts"
+    "terminal-move.test.ts",
+    "terminal-workspace-loader.test.ts"
   ],
   "exclude": []
 }
