@@ -25,6 +25,7 @@ import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { requestUrl } from '../../client/__fixtures__/request-url.js';
 import { createInternals, formField, formRoot } from './__fixtures__/agent-create-internals.js';
 import { KUBERNETES_BLOCK_HINT } from '../../shared/gcp-identity-state.js';
+import { invalidatePublicSettings } from '../../client/server-feature-flags.js';
 
 interface ProfileFixture {
   name: string;
@@ -132,6 +133,8 @@ beforeAll(async () => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  // Each test serves its own hub settings; drop the per-page cache.
+  invalidatePublicSettings();
   document.body.innerHTML = '';
   projectDefaultMode = '';
   projectDefaultAccount = 'sa-a';

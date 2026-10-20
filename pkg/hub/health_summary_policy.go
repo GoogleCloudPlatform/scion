@@ -58,6 +58,11 @@ const (
 	HealthAttentionSchedule       = "schedule"
 )
 
+// HealthAttentionBrokerHostIdentity is the attention item kind for a
+// co-located broker whose configured GCP host service account differs from,
+// or is missing on, the host.
+const HealthAttentionBrokerHostIdentity = "broker_host_identity"
+
 // Attention subject types.
 const (
 	HealthSubjectHub         = "hub"
@@ -76,7 +81,7 @@ type HealthAttentionItem struct {
 	// Severity is critical or warning.
 	Severity string `json:"severity"`
 	// Kind is hub_check, hub_instance, broker_offline, broker_degraded,
-	// broker_nfs, integration, dispatch, agents or schedule.
+	// broker_nfs, broker_host_identity, integration, dispatch, agents or schedule.
 	Kind    string                 `json:"kind"`
 	Subject HealthAttentionSubject `json:"subject"`
 	// Message is a fixed, server-composed sentence.
@@ -98,7 +103,8 @@ type HealthAttentionSubject struct {
 // Status is the worst of:
 //   - the fleet hub status (fleetHubStatus over the live hub instances);
 //   - degraded when a runtime broker is not online, reports its own health
-//     as degraded or unhealthy, or reports an unhealthy NFS workspace share;
+//     as degraded or unhealthy, reports an unhealthy NFS workspace share, or
+//     has a host identity state of mismatch or pinned_absent;
 //   - degraded when dispatch has stuck messages or stuck broker dispatches;
 //   - degraded when a managed integration reports unhealthy;
 //   - degraded when at least agentErrorDegradedRatio of the considered
@@ -114,9 +120,10 @@ type HealthAttentionSubject struct {
 // warning for hubInstanceStoppedReportingWindow after its last write and
 // does not change the status. A stopped hub instance adds nothing.
 // Stalled agents are never counted. Offline agents, and error or crashed
-// agents below the ratio, add warning items only. Failing schedules add
-// warning items only (scheduleAttention): the schedules section holds only
-// what the caller may read, so it must not change the status.
+// agents below the ratio, add warning items only. Failing and hub-paused
+// schedules add warning items only (scheduleAttention): the schedules
+// section holds only what the caller may read, so it must not change the
+// status.
 //
 // Hub check items, one per non-healthy check per live hub instance, are
 // critical only when the fleet status is unhealthy, otherwise warnings.
@@ -125,7 +132,8 @@ type HealthAttentionSubject struct {
 // is reporting" or "Hub instance data not available"), hub check items
 // (critical checks first), then broker warnings, "stopped reporting" hub instance warnings, integration
 // and dispatch warnings, then the agent error ratio item, then agent items
-// (errored, crashed, offline), then failing schedule items.
+// (errored, crashed, offline), then failing schedule items, then
+// hub-paused schedule items.
 func deriveHealthSummaryStatus(resp *HealthSummaryResponse) (string, []HealthAttentionItem) {
 	status := HealthStatusHealthy
 	degrade := func() { status = worseHealthStatus(status, HealthStatusDegraded) }
@@ -182,6 +190,16 @@ func deriveHealthSummaryStatus(resp *HealthSummaryResponse) (string, []HealthAtt
 					Message: "Runtime broker " + label + " reports its NFS workspace storage unhealthy",
 				})
 			}
+		}
+		if hi := b.HostIdentity; hi != nil && hostIdentityIsProblem(hi.State) {
+			degrade()
+			msg := "Runtime broker " + label + ": the configured GCP host service account differs from the host's identity"
+			if hi.State == HostIdentityPinnedAbsent {
+				msg = "Runtime broker " + label + ": the configured GCP host service account is not present on the host"
+			}
+			items = append(items, HealthAttentionItem{
+				Severity: HealthAttentionWarning, Kind: HealthAttentionBrokerHostIdentity, Subject: subject, Message: msg,
+			})
 		}
 	}
 

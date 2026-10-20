@@ -332,6 +332,10 @@ func (s *ScheduleStore) ListSchedules(ctx context.Context, filter store.Schedule
 	if filter.LastRunStatus != "" {
 		query.Where(schedule.LastRunStatusEQ(filter.LastRunStatus))
 	}
+	if filter.SystemPausedOnly {
+		query.Where(schedule.StatusEQ(store.ScheduleStatusPaused))
+		query.Where(schedule.StatusReasonNotNil(), schedule.StatusReasonNEQ(store.ScheduleStatusReasonNone))
+	}
 
 	// TotalCount covers the whole filtered set, not the rows after the
 	// cursor, so it is taken before the keyset predicate is added.

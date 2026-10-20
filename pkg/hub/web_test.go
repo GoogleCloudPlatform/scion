@@ -289,7 +289,7 @@ func TestStaticAssetFingerprintedCaching(t *testing.T) {
 		ws.assets = os.DirFS(dir)
 		ws.assetsDisk = ""
 		ws.hasAssets = ws.detectWebAssets()
-		ws.fingerprintedAssets = ws.loadFingerprintedAssets()
+		ws.fingerprintedAssets = fingerprintedAssetsOf(ws)
 		assert.Len(t, ws.fingerprintedAssets, 5)
 		for p, cc := range want {
 			assert.Equal(t, cc, cacheControlOf(t, ws, p), p)

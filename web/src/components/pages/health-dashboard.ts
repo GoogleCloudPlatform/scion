@@ -67,6 +67,7 @@ export { formatHeartbeatAge } from './health-broker-table.js';
 export type {
   HealthAttentionItem,
   HealthFailingSchedule,
+  HealthPausedSchedule,
   HealthSummarySchedules,
 } from './health-attention.js';
 export type { HealthSummaryIntegrationCounts } from './health-integrations.js';
@@ -106,7 +107,7 @@ export interface HealthSummary {
   /** Operator-configured links; absent when none is configured. */
   links?: HealthSummaryLinks;
   /**
-   * Failing schedules the caller may read. Absent when an older hub served
+   * Failing and hub-paused schedules the caller may read. Absent when an older hub served
    * the summary; null when the hub could not list them.
    */
   schedules?: HealthSummarySchedules | null;
@@ -345,6 +346,7 @@ export class ScionPageHealthDashboard extends LitElement {
           .items=${d.attention ?? null}
           .integrationsDetail=${d.integrations_detail === true}
           .failingSchedules=${d.schedules?.failing ?? null}
+          .pausedSchedules=${d.schedules?.paused ?? null}
         ></scion-health-attention>
       </div>
 

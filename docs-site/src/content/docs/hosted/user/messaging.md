@@ -168,6 +168,7 @@ When writing instructions, you can easily pull other agents into the thread:
 - **Autocomplete Popup**: Typing `@` in the chat input opens a dropdown list of active agents in the project. The list supports fuzzy-matching as you type, and full keyboard navigation (arrow keys to select, `Enter` to insert).
 - **Code-Fence Guard**: The mention autocomplete is smart — it automatically disables itself when typing inside Markdown code fences (e.g., ` ``` ` blocks) so code snippets don't trigger unwanted dropdowns.
 - **Mention Leak Protection**: Direct mentions are safely partitioned, resolving a previous bug where mentions would leak into the default agent tab.
+- **Recipient-Form Mentions**: A mention written in recipient syntax, such as `@agent:hub-ops`, is rewritten to `@hub-ops` in the message body before the Hub stores it, so the mention reaches the named agent. The Hub does this for web, chat and CLI sends alike (`scion message` applies the same rewrite before sending). Code spans, fenced code blocks and quoted (`>`) lines are left as written, and an address such as `ops@agent:foo` is not a mention.
 - **Fan-Out Restrictions**: For platform stability, a single message is fanned out to a maximum of **10 recipients** per `@-mention` broadcast.
 - **Bidirectional Mention Translation**: Mentions are automatically translated between the formats used by agents and the web chat. In the chat UI, mentions display as `@firstname-lastname`; when delivered to agents, they are translated to `@email` format, and vice versa. This ensures both humans and agents see the most natural identifier for their context.
 - **Composer Default-Agent Disambiguation**: When sending messages in collaborative project spaces with multiple active agents, typing a message without an explicit target or `@-mention` triggers a smart disambiguation interface. This guides the user to select which agent the message should target (or fall back to the project's configured default agent), keeping routing unambiguous and conversations clear.
@@ -550,6 +551,10 @@ Who receives it:
 * **Subscribers with only the `ERROR` trigger**, when the halt replaced what would have been an `error` (for example a preempted pod whose workspace did not survive). They receive it with status `ERROR`, as they would have without the halt.
 
 Each subscriber, including the creator, receives one notification per halt.
+
+#### Notification Delivery Retries
+
+If a notification cannot be delivered to a subscriber agent (for example because its Runtime Broker is not connected), it is not marked as sent. The Hub tries again on a sweep about every 5 minutes, and again when the Runtime Broker reconnects, for up to 24 hours after the notification was created. Each notification records its number of delivery attempts (`dispatchAttempts`) and an outcome (`dispatchOutcome`): `delivered`, or `failed` once the 24 hours have passed or the subscription, subscriber or watched agent is gone. The outcome is empty while delivery is still pending. A subscriber agent that has no Runtime Broker is not attempted, so its notification stays pending and does not reach the 24-hour limit.
 
 :::tip[Project-Scoped Message Isolation]
 When using slug-based query paths or addressing agents via `agent:<name>` (e.g., `scion message agent:<name>`), Scion strictly scopes all message queries and deliveries by the active `ProjectID`. This ensures that even if different projects contain agents with identical names or slugs, messages are completely isolated within each project and never leak across project boundaries.
