@@ -19,7 +19,9 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -74,6 +76,30 @@ func requireUnstampedRelayTunnel(t *testing.T, f *relayTunnelFixture, resp *cond
 	assert.Zero(t, open.AuthzIntervalS)
 }
 
+// relayGateUnstampedMessage is the log message of the relay gate's off
+// branch (mintRelayTunnel).
+const relayGateUnstampedMessage = "Conduit relay tunnel served unstamped: the forwarding relay does not re-check tunnels"
+
+// captureRelayGateLogs sends slog's default logger to a buffer until the
+// test ends, and returns a function listing the relay gate's off-branch
+// lines written so far.
+func captureRelayGateLogs(t *testing.T) func() []string {
+	t.Helper()
+	logs := &syncBuffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return func() []string {
+		var out []string
+		for _, line := range strings.Split(logs.String(), "\n") {
+			if strings.Contains(line, relayGateUnstampedMessage) {
+				out = append(out, line)
+			}
+		}
+		return out
+	}
+}
+
 // TestRelayTunnel_RecheckListedStampedWithHints: with enforce, a relay that
 // lists tunnel_recheck gets a tunnel to a stream_renewal.v2 target with a
 // grant stamped for renewal (via=tunnel, authz_until) and the scheduling
@@ -81,6 +107,7 @@ func requireUnstampedRelayTunnel(t *testing.T, f *relayTunnelFixture, resp *cond
 func TestRelayTunnel_RecheckListedStampedWithHints(t *testing.T) {
 	o := &openSetup{enforce: true}
 	f := newRelayTunnelFixture(t, o)
+	gateLines := captureRelayGateLogs(t)
 
 	o.keys.arm(f.cf.srv)
 	resp, open := f.postWith(t, recheckFeatures, nil)
@@ -94,6 +121,7 @@ func TestRelayTunnel_RecheckListedStampedWithHints(t *testing.T) {
 	assert.NotZero(t, open.AuthzIntervalS)
 	assert.Empty(t, o.rec.list(), "nothing refused")
 	assert.Empty(t, o.rec.unstampedList())
+	assert.Empty(t, gateLines())
 }
 
 // TestRelayTunnel_NonV2TargetNotGatedByRecheck: a target without
@@ -113,27 +141,34 @@ func TestRelayTunnel_NonV2TargetNotGatedByRecheck(t *testing.T) {
 
 	off := &openSetup{targetNoRenewal: true}
 	g := newRelayTunnelFixture(t, off)
+	gateLines := captureRelayGateLogs(t)
 	off.keys.arm(g.cf.srv)
 	resp, open = g.post(t)
 	requireUnstampedRelayTunnel(t, g, resp, open)
 	assert.Empty(t, off.rec.list())
 	assert.Empty(t, off.rec.unstampedList(), "a target without stream_renewal.v2 is never counted")
+	assert.Empty(t, gateLines(), "nor logged by the relay gate")
 }
 
 // TestRelayTunnel_RecheckUnlistedOffUnstamped: with off, a relay that does
 // not list tunnel_recheck gets a tunnel to a stream_renewal.v2 target
 // served as before, with an unstamped grant and no hints; nothing is
-// refused, and the open is counted as unstamped with cause
-// renewal_route_unavailable.
+// refused, and the open is logged once and counted as unstamped, both with
+// route relay_tunnel and cause renewal_route_unavailable.
 func TestRelayTunnel_RecheckUnlistedOffUnstamped(t *testing.T) {
 	o := &openSetup{}
 	f := newRelayTunnelFixture(t, o)
+	gateLines := captureRelayGateLogs(t)
 
 	o.keys.arm(f.cf.srv)
 	resp, open := f.post(t)
 	requireUnstampedRelayTunnel(t, f, resp, open)
 	assert.Empty(t, o.rec.list(), "nothing refused")
 	assert.Equal(t, []string{conduitRouteRelayTunnel + "/" + string(PrincipalKindUser) + "/" + conduitCauseRenewalRouteUnavailable}, o.rec.unstampedList())
+	lines := gateLines()
+	require.Len(t, lines, 1)
+	assert.Contains(t, lines[0], "route="+conduitRouteRelayTunnel)
+	assert.Contains(t, lines[0], "cause="+conduitCauseRenewalRouteUnavailable)
 }
 
 // TestRelayTunnel_RecheckFromClientIgnored: the hub reads tunnel_recheck
