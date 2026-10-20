@@ -149,11 +149,18 @@ type moveRefusal struct {
 	Status  int
 	Code    string
 	Message string
-	// ForceWouldApply is set on a refusal without --force whose failing
-	// check is same_export or workspace_on_export, for an agent whose
-	// workspace mode a forced move supports. It is written to the error
-	// details as forceWouldApply.
+	// ForceWouldApply is set on a refusal without --force that only the
+	// workspace placement caused (same_export, workspace_on_export, or a
+	// placementCaused target_profile or target_health refusal), for an
+	// agent whose workspace mode a forced move supports. It is written to
+	// the error details as forceWouldApply.
 	ForceWouldApply bool
+	// placementCaused marks a target_profile or target_health refusal of
+	// the export checks that exists only to keep the workspace on the
+	// export (the Kubernetes constraint for agent-directory workspaces, the
+	// target's NFS mount health). A forced move re-evaluates it with the
+	// recreate rules. Internal; never on the wire.
+	placementCaused bool
 }
 
 // moveProbes are the eligibility inputs that need the server (store,
@@ -222,9 +229,12 @@ type moveEligibilityInput struct {
 // The export checks run first, whether or not the move is forced, so a move
 // they allow always carries the workspace (transfer mode export). Only when
 // they fail on workspace_storage_reported, same_export or
-// workspace_on_export, and the move is forced, are the checks run again for
-// a recreated workspace: those three are waived, workspace_recreatable
-// decides, and every other check still applies.
+// workspace_on_export, or on a target_profile or target_health rule that
+// only keeps the workspace on the export (placementCaused), and the move is
+// forced, are the checks run again for a recreated workspace: those three
+// are waived, workspace_recreatable decides, target_profile and
+// target_health apply their recreate rules, and every other check still
+// applies.
 func evaluateMoveEligibility(in moveEligibilityInput) (MoveVerdict, *moveRefusal) {
 	v, ref := evaluateMoveChecks(in, false)
 	if ref == nil {
@@ -233,12 +243,13 @@ func evaluateMoveEligibility(in moveEligibilityInput) (MoveVerdict, *moveRefusal
 		return v, nil
 	}
 	failed := firstFailedMoveCheck(v)
-	if !moveCheckWaivableByForce(failed) {
+	if !moveCheckWaivableByForce(failed) && !ref.placementCaused {
 		return v, ref
 	}
 	if !in.Force {
 		_, notRecreatable := moveWorkspaceRecreatable(in)
-		ref.ForceWouldApply = (failed == moveCheckSameExport || failed == moveCheckWorkspaceOnExport) && notRecreatable == ""
+		ref.ForceWouldApply = (failed == moveCheckSameExport || failed == moveCheckWorkspaceOnExport || ref.placementCaused) &&
+			notRecreatable == ""
 		return v, ref
 	}
 	v, ref = evaluateMoveChecks(in, true)
@@ -427,9 +438,11 @@ func evaluateMoveChecks(in moveEligibilityInput, recreate bool) (MoveVerdict, *m
 	// The Kubernetes constraint only keeps the workspace on the export; a
 	// recreated workspace does not need it.
 	if !recreate && in.CloneMode && !isKubernetesRuntimeType(profileType) {
-		return fail(http.StatusConflict, ErrCodeConflict, fmt.Sprintf(
+		v, ref := fail(http.StatusConflict, ErrCodeConflict, fmt.Sprintf(
 			"profile %q on broker %s has runtime type %q; clone-per-agent workspaces are on the NFS export only on Kubernetes",
 			profileName, dstName, profileType))
+		ref.placementCaused = true
+		return v, ref
 	}
 	pass()
 
@@ -438,8 +451,13 @@ func evaluateMoveChecks(in moveEligibilityInput, recreate bool) (MoveVerdict, *m
 	// places the agent directory on it (an agent-directory workspace under a
 	// Kubernetes profile, on an nfs backend).
 	if moveNeedsTargetExportMount(dst, recreate, in.CloneMode, profileType) && !dst.WorkspaceStorage.NFS.Healthy {
-		return fail(http.StatusServiceUnavailable, ErrCodeRuntimeBrokerUnavail,
+		v, ref := fail(http.StatusServiceUnavailable, ErrCodeRuntimeBrokerUnavail,
 			fmt.Sprintf("broker %s reports its NFS export mount unhealthy", dstName))
+		// In the export mode the mount carries the workspace. It is
+		// placement-caused only when a recreated workspace would not need
+		// the mount; otherwise a forced move fails here too.
+		ref.placementCaused = !recreate && !moveNeedsTargetExportMount(dst, true, in.CloneMode, profileType)
+		return v, ref
 	}
 	if !in.Probes.Reachable(dst) {
 		return fail(http.StatusServiceUnavailable, ErrCodeRuntimeBrokerUnavail,

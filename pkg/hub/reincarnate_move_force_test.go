@@ -467,3 +467,86 @@ func TestAgentMoveRecreateCapabilityIngest(t *testing.T) {
 		t.Errorf("heartbeat capabilities = %+v, want AgentMoveRecreate", hb.Capabilities)
 	}
 }
+
+// A2.6: a Kubernetes, export-placed clone-per-agent agent moving to a
+// broker whose profile is docker. The export checks refuse it at
+// target_profile only because of placement: --force recreates it, and
+// without --force the refusal is unchanged with forceWouldApply set.
+func TestEvaluateMoveEligibility_PlacementCausedTargetProfile(t *testing.T) {
+	plain := eligibleMoveInput(moveTestProbeCalls{})
+	plain.Profile = "local"
+	_, plainRef := evaluateMoveEligibility(plain)
+	if plainRef == nil {
+		t.Fatal("expected the export checks to refuse a docker profile")
+	}
+
+	in := forceMoveInput(moveTestProbeCalls{})
+	in.Profile = "local"
+	in.Force = false
+	v, ref := evaluateMoveEligibility(in)
+	if ref == nil {
+		t.Fatal("expected a refusal without --force")
+	}
+	if ref.Status != plainRef.Status || ref.Code != plainRef.Code || ref.Message != plainRef.Message {
+		t.Errorf("refusal %+v differs from today's %+v", ref, plainRef)
+	}
+	if checkResults(v)[moveCheckTargetProfile] != MoveCheckFailed {
+		t.Errorf("target_profile = %s, want failed", checkResults(v)[moveCheckTargetProfile])
+	}
+	if !ref.ForceWouldApply {
+		t.Error("forceWouldApply not set for a placement-caused target_profile refusal")
+	}
+
+	calls := moveTestProbeCalls{}
+	in = forceMoveInput(calls)
+	in.Profile = "local"
+	v, ref = evaluateMoveEligibility(in)
+	if ref != nil {
+		t.Fatalf("--force: unexpected refusal %+v", ref)
+	}
+	if v.TransferMode != MoveTransferModeRecreate || v.RuntimeType != "docker" {
+		t.Errorf("--force: mode=%q runtime=%q, want recreate on docker", v.TransferMode, v.RuntimeType)
+	}
+	for _, k := range []string{"reachable:dst", "reachable:src", "dispatch", "provider", "capacity"} {
+		if calls[k] != 1 {
+			t.Errorf("probe %s called %d times, want 1", k, calls[k])
+		}
+	}
+}
+
+// A2.6: an nfs target with an unhealthy mount and a docker profile: a
+// recreated workspace does not use the mount, so --force recreates.
+func TestEvaluateMoveEligibility_ForceUnhealthyMountDockerProfile(t *testing.T) {
+	in := forceMoveInput(moveTestProbeCalls{})
+	in.Profile = "local"
+	in.Dst.WorkspaceStorage.NFS.Healthy = false
+	v, ref := evaluateMoveEligibility(in)
+	if ref != nil {
+		t.Fatalf("unexpected refusal: %+v", ref)
+	}
+	if v.TransferMode != MoveTransferModeRecreate {
+		t.Errorf("mode = %q, want recreate", v.TransferMode)
+	}
+}
+
+// A2.6: an nfs target with an unhealthy mount and a Kubernetes profile for
+// a clone-per-agent workspace: the recreated agent directory would be on
+// the export too, so the move is refused 503 with --force as without it,
+// and forceWouldApply is not set.
+func TestEvaluateMoveEligibility_UnhealthyMountKubernetesProfileStaysRefused(t *testing.T) {
+	for _, force := range []bool{false, true} {
+		in := forceMoveInput(moveTestProbeCalls{})
+		in.Force = force
+		in.Dst.WorkspaceStorage.NFS.Healthy = false
+		v, ref := evaluateMoveEligibility(in)
+		if ref == nil || ref.Status != http.StatusServiceUnavailable || !strings.Contains(ref.Message, "NFS export mount unhealthy") {
+			t.Fatalf("force=%v: refusal = %+v, want 503 unhealthy mount", force, ref)
+		}
+		if checkResults(v)[moveCheckTargetHealth] != MoveCheckFailed {
+			t.Errorf("force=%v: target_health = %s", force, checkResults(v)[moveCheckTargetHealth])
+		}
+		if ref.ForceWouldApply {
+			t.Errorf("force=%v: forceWouldApply set although --force fails the same way", force)
+		}
+	}
+}

@@ -207,6 +207,8 @@ func TestPrintMoveForceHint(t *testing.T) {
 		{"workspace_on_export, would apply", "workspace_on_export", true, false, true},
 		{"already forced", "same_export", true, true, false},
 		{"hub says force would not apply", "same_export", false, false, false},
+		{"placement-caused target_profile", "target_profile", true, false, true},
+		{"placement-caused target_health", "target_health", true, false, true},
 		{"other failing check", "workspace_storage_reported", true, false, false},
 	}
 	for _, tc := range cases {
