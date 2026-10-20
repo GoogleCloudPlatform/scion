@@ -1901,12 +1901,22 @@ func TestUpdateAgentStatus_ClearTerminalRemnants(t *testing.T) {
 	row.StalledFromActivity = "working"
 	require.NoError(t, s.UpdateAgent(ctx, row))
 
-	// Without the flag, starting -> running keeps the message (the exit
-	// fields are cleared by the pre-running to running rule).
+	// Without the flag, starting -> running keeps the message; the exit
+	// fields are cleared by the pre-running to running rule.
 	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "running"}))
 	got, err := s.GetAgent(ctx, a.ID)
 	require.NoError(t, err)
 	assert.NotEmpty(t, got.Message)
+	assert.Nil(t, got.ExitCode)
+	assert.Empty(t, got.ExitReason)
+
+	// Seed the exit fields again on the running row, so the flag's own
+	// clear is what the next step checks.
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{ExitCode: &code, ExitReason: "crashed"}))
+	got, err = s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.ExitCode)
+	require.Equal(t, "crashed", got.ExitReason)
 
 	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "running", ClearTerminalRemnants: true}))
 	got, err = s.GetAgent(ctx, a.ID)
@@ -2001,6 +2011,52 @@ func TestUpdateAgentStatus_RollbackAfterProvisionalStartingKeepsExit(t *testing.
 	require.NotNil(t, got.ExitCode)
 	assert.Equal(t, 137, *got.ExitCode)
 	assert.Equal(t, "crashed", got.ExitReason)
+}
+
+// TestUpdateAgentStatus_ExitFieldsKeptOutsidePreRunningToRunning pins the
+// writes the pre-running to running clear leaves alone: a running write
+// from stopping or suspended, an exit code or reason given in the same
+// update, and a broker heartbeat that halts a starting row.
+func TestUpdateAgentStatus_ExitFieldsKeptOutsidePreRunningToRunning(t *testing.T) {
+	exited := func(phase string) haltRow {
+		r := defaultHaltRow()
+		r.phase, r.activity = phase, ""
+		r.exitCode, r.exitReason = intp(137), "crashed"
+		return r
+	}
+	cases := []struct {
+		name       string
+		row        haltRow
+		su         store.AgentStatusUpdate
+		wantPhase  string
+		wantCode   *int // nil: the code is not checked
+		wantReason string
+	}{
+		{"stopping to running", exited("stopping"), heartbeat("running", "", nil), "running", intp(137), "crashed"},
+		{"suspended to running", exited("suspended"), heartbeat("running", "", nil), "running", intp(137), "crashed"},
+		{"explicit code and reason", exited("starting"), heartbeat("running", "limits_exceeded", intp(2)), "running", intp(2), "limits_exceeded"},
+		{"explicit code", exited("starting"), heartbeat("running", "", intp(2)), "running", intp(2), ""},
+		{"explicit reason", exited("starting"), heartbeat("running", "limits_exceeded", nil), "running", nil, "limits_exceeded"},
+		{"heartbeat halts a starting row", exited("starting"), heartbeat("stopped", "preempted", intp(143)), "halted", intp(143), "preempted"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			s, projectID := newTestAgentStore(t)
+			id := newHaltAgent(t, ctx, s, projectID, "exit-kept", tc.row)
+			apply(t, ctx, s, id, tc.su)
+			got, err := s.GetAgent(ctx, id)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantPhase, got.Phase)
+			if tc.wantCode != nil {
+				require.NotNil(t, got.ExitCode)
+				assert.Equal(t, *tc.wantCode, *got.ExitCode)
+			}
+			if tc.wantReason != "" {
+				assert.Equal(t, tc.wantReason, got.ExitReason)
+			}
+		})
+	}
 }
 
 // SetAgentWorkspacePlacement writes a live row, and leaves a soft-deleted
