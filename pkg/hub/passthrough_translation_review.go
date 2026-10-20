@@ -60,6 +60,8 @@ type translationReviewEntry struct {
 	SAID          string
 	SAEmail       string
 	RecordBound   bool      // the assigned record is this broker's translation record
+	RecordScopeID string    // the assigned record's ScopeID (the broker it is bound to)
+	RecordUnbound bool      // a translation record with no broker binding (empty ScopeID)
 	RecordCreated time.Time // when the assigned record was created
 	Outcome       string
 	Reason        string
@@ -102,8 +104,11 @@ func (e *PassthroughTranslationReviewExecutor) Run(ctx context.Context, logger i
 	counts := map[string]int{}
 	blocked := 0
 	for _, en := range entries {
-		line := fmt.Sprintf("agent=%s project=%s broker=%s principal=%s sa=%s record_bound=%t outcome=%s",
-			en.AgentID, en.ProjectID, en.BrokerID, en.PrincipalID, en.SAEmail, en.RecordBound, en.Outcome)
+		line := fmt.Sprintf("agent=%s project=%s broker=%s principal=%s sa=%s scope_id=%s record_bound=%t outcome=%s",
+			en.AgentID, en.ProjectID, en.BrokerID, en.PrincipalID, en.SAEmail, en.RecordScopeID, en.RecordBound, en.Outcome)
+		if en.RecordUnbound {
+			line += " record_unbound=true"
+		}
 		if !en.RecordCreated.IsZero() {
 			line += " record_created=" + en.RecordCreated.UTC().Format(time.RFC3339)
 		}
@@ -200,7 +205,7 @@ func (s *Server) reviewTranslatedAgent(ctx context.Context, a *store.Agent) tran
 			translatedRow = true
 		}
 	}
-	translationRecord := sa != nil && sa.Scope == store.ScopeHub && sa.CreatedBy == hostSATranslationCreator
+	translationRecord := store.IsHostSATranslationRecord(sa)
 	if !translationRecord && !translatedRow {
 		en.Outcome, en.Reason = translationReviewSkipped,
 			"neither the assigned service account record nor its assignment was made by passthrough translation"
@@ -209,6 +214,8 @@ func (s *Server) reviewTranslatedAgent(ctx context.Context, a *store.Agent) tran
 	if sa != nil {
 		en.RecordCreated = sa.CreatedAt
 		en.RecordBound = translationRecord && sa.ScopeID == a.RuntimeBrokerID && !sa.Managed
+		en.RecordScopeID = sa.ScopeID
+		en.RecordUnbound = translationRecord && sa.ScopeID == ""
 	}
 
 	if a.RuntimeBrokerID == "" {

@@ -6192,7 +6192,7 @@ func writePassthroughTranslationError(w http.ResponseWriter, err error) {
 
 // hostSATranslationCreator is the CreatedBy of the hub-scoped records that
 // translatePassthroughForSandbox creates for a broker's host service account.
-const hostSATranslationCreator = "system:passthrough-translation"
+const hostSATranslationCreator = store.HostSATranslationCreator
 
 // errHostSARecordConflict: the broker's host service account is registered at
 // project scope or managed by the Hub, so a hub-scoped record for it would
@@ -6316,9 +6316,8 @@ func (s *Server) ensureHostSARecord(
 // case) that translation created for brokerID, or nil.
 func brokerHostSARecord(rows []store.GCPServiceAccount, email, brokerID string) *store.GCPServiceAccount {
 	for i := range rows {
-		if strings.EqualFold(rows[i].Email, email) &&
-			rows[i].Scope == store.ScopeHub && rows[i].ScopeID == brokerID &&
-			rows[i].CreatedBy == hostSATranslationCreator && !rows[i].Managed {
+		if strings.EqualFold(rows[i].Email, email) && store.IsHostSATranslationRecord(&rows[i]) &&
+			rows[i].ScopeID == brokerID && !rows[i].Managed {
 			return &rows[i]
 		}
 	}

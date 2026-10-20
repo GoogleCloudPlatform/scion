@@ -235,10 +235,10 @@ func TestPassthroughTranslation_ProjectScopedHostSA_Create409(t *testing.T) {
 	assert.Empty(t, hsrHubRecords(t, s))
 }
 
-// TestTranslatedHostSARecord_ExplicitAssignFromOtherProject_NonAdminDenied:
-// a translation record cannot be assigned explicitly by a non-admin from a
-// project of their own.
-func TestTranslatedHostSARecord_ExplicitAssignFromOtherProject_NonAdminDenied(t *testing.T) {
+// TestTranslatedHostSARecord_ExplicitAssign_Refused: a translation record
+// cannot be assigned explicitly, even by a hub member who holds actAs on its
+// account (which the hub-member assign rule would otherwise admit).
+func TestTranslatedHostSARecord_ExplicitAssign_Refused(t *testing.T) {
 	owner := ptUser(tid("hsr-assign-owner"), "hsr-assign-owner@test.com", store.UserRoleMember)
 	srv, s, project, _ := setupPassthroughSandboxServer(t, owner, "", "")
 	enforceSAAssign(srv, store.NewFakeCallerPermissionChecker().AllowTarget(hsrEmail))
@@ -250,6 +250,7 @@ func TestTranslatedHostSARecord_ExplicitAssignFromOtherProject_NonAdminDenied(t 
 	})
 
 	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "cannot be assigned directly")
 	_, err := s.GetAgentBySlug(context.Background(), project.ID, "hsr-assign-agent")
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }

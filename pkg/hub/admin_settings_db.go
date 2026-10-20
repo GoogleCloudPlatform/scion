@@ -1910,6 +1910,11 @@ func (s *Server) validateHubDefaultGCPIdentity(w http.ResponseWriter, ctx contex
 		return false
 	}
 
+	if saReferencePreconditions(sa) != nil {
+		writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, saAssignTranslationRecordMsg, nil)
+		return false
+	}
+
 	s.mu.RLock()
 	mode := s.saAssignCheckMode
 	s.mu.RUnlock()

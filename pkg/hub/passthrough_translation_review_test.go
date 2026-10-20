@@ -423,3 +423,18 @@ func TestPassthroughTranslationReview_PrincipalFromReviewedAccountRow(t *testing
 	assert.Equal(t, f.other.ID, en.PrincipalID, "a row for another account is not used")
 	assert.Equal(t, translationReviewFail, en.Outcome)
 }
+
+// TestPassthroughTranslationReview_ReportLineCarriesScopeID: the report line
+// names the assigned record's binding (scope_id); a broker-bound record is not
+// reported as unbound.
+func TestPassthroughTranslationReview_ReportLineCarriesScopeID(t *testing.T) {
+	f := setupPTR(t, "ptr-scopeid")
+	a := f.translatedAgent(t, "ptr-scopeid-agent", f.owner.ID, true)
+
+	out, err := f.run(t, map[string]string{})
+
+	require.NoError(t, err)
+	assert.Contains(t, out, "agent="+a.ID)
+	assert.Contains(t, out, "scope_id="+f.broker.ID+" ")
+	assert.NotContains(t, out, "record_unbound=true")
+}
