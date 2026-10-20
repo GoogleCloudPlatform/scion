@@ -207,7 +207,7 @@ To skip the Caddy/TLS step entirely, for example when TLS is terminated upstream
 
 ### Set `SCION_SERVER_BASE_URL`
 
-The Hub uses `SCION_SERVER_BASE_URL` to construct OAuth redirect URIs and set the session cookie's `Secure` flag. When step 4 is skipped, you must set this variable yourself. It also outranks a `server.hub.public_url` in `settings.yaml`, so keep the two in agreement or remove the one you do not want (see [Hub Endpoint Resolution](/scion/reference/server-config/#hub-endpoint-resolution)).
+The Hub uses `SCION_SERVER_BASE_URL` to construct OAuth redirect URIs and set the session cookie's `Secure` flag. When step 4 is skipped, you must set this variable yourself. It also outranks a `server.hub.public_url` in `settings.yaml` (but not `SCION_SERVER_HUB_ENDPOINT` or `--base-url`), so keep them in agreement or remove the ones you do not want (see [Hub Endpoint Resolution](/scion/reference/server-config/#hub-endpoint-resolution)).
 
 In your `hub.env` file (see `scripts/starter-hub/hub.env.sample`):
 

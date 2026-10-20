@@ -502,7 +502,7 @@ secrets:    hub  <  user  <  project  <  runtime_broker           (project wins)
 For environment variables, **`user` beats `project`**. For secrets, **`project` beats `user`** —
 and `runtime_broker` is still highest for secrets.
 
-This is a **filed difference, not a documented design**. Nobody has established that the
+This is a **known difference, not a documented design**. Nobody has established that the
 divergence is intentional, so this page does not present it as a second designed ladder.
 
 :::note[Related: two code comments state the secret order without `hub`]
@@ -1137,16 +1137,16 @@ ignored), so re-create the agent to change a create-time image.
 Separately: if an agent's **template** can no longer be resolved at all on a restart
 (renamed or deleted since the agent was created), the restart falls back to the image/pull-policy
 recorded at its last provision, with a warning, rather than falling through to Hub settings or the
-file default — matching the behavior before this change. Since GoogleCloudPlatform/scion#2646 that recorded
-value is the template's own, recorded in broker-side agent state (`image-provenance.json`), not the
+file default — matching the behavior before this change. Since GoogleCloudPlatform/scion#2646
+that recorded value is the template's own, recorded in broker-side agent state (`image-provenance.json`), not the
 merged `scion-agent.json` value, for agents provisioned at that version or later. A template's
 `image` is now ignored, so new agents record no template value; values recorded for older agents
 are still replayed.
 
 ### Image registry order
 
-Introduced by GoogleCloudPlatform/scion#3786. A bare image name (one without a registry host, such as `scion-claude:latest`) is rewritten to
-`<image_registry>/<name>`. Every place that resolves `image_registry` uses one order: the source
+Introduced by GoogleCloudPlatform/scion#3786. A bare image name (one without a registry host,
+such as `scion-claude:latest`) is rewritten to `<image_registry>/<name>`. Every place that resolves `image_registry` uses one order: the source
 decides first, and within a source the more specific scope wins.
 
 | Rank | Layer | Where it comes from |
@@ -1216,8 +1216,8 @@ equivalent to "set to the hub default value" gets this backwards.
 
 ### Where hub `agent_defaults` rank
 
-**`Changed in this release`** (this settles the precedence question for job keys). Hub `agent_defaults` are a **low-priority fallback**: for every
-job key they sit below the template and the project, and above only the broker's own
+**`Changed in this release`**: Hub `agent_defaults` are a **low-priority fallback**: for every job
+key they sit below the template and the project, and above only the broker's own
 `settings.yaml` defaults and the harness-config base (see [the job-key
 ladder](#the-job-key-ladder)). Before, a hub `default_model` or `default_thinking_level` was
 stamped into the agent's applied config at create, where it beat the template.
