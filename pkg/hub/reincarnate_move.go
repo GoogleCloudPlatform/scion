@@ -539,13 +539,18 @@ func evaluateMoveChecks(in moveEligibilityInput, recreate bool) (MoveVerdict, *m
 // require a healthy NFS export mount on dst. An export move always does. A
 // recreated workspace does only when dst places the agent directory on the
 // export: an agent-directory workspace (clone-per-agent, empty-per-agent)
-// under a Kubernetes profile, with an nfs workspace storage backend.
+// under a Kubernetes profile, with an nfs workspace storage backend. An nfs
+// backend with no NFS details still requires the mount, and
+// targetExportMountHealthy reads it as unhealthy (503). A target that reports
+// no workspace storage at all does not: a forced move waives
+// workspace_storage_reported for it, and requiring the mount here would undo
+// that waiver.
 func moveNeedsTargetExportMount(dst *store.RuntimeBroker, recreate, agentDir bool, profileType string) bool {
 	if !recreate {
 		return true
 	}
 	ws := dst.WorkspaceStorage
-	return ws != nil && ws.Backend == api.WorkspaceStorageBackendNFS && ws.NFS != nil &&
+	return ws != nil && ws.Backend == api.WorkspaceStorageBackendNFS &&
 		agentDir && isKubernetesRuntimeType(profileType)
 }
 

@@ -609,7 +609,9 @@ func TestEvaluateMoveEligibility_UnhealthyMountSharedWorkspaceNotWaived(t *testi
 }
 
 // A14: a forced move onto a target with no capabilities at all is refused
-// at the capability check (412), without a panic.
+// at the capability check (412), without a panic. The AgentMove check
+// refuses it first; the nil guard on the forced-move capability behind it
+// is defence in depth and cannot be reached.
 func TestEvaluateMoveEligibility_ForceTargetWithoutCapabilities(t *testing.T) {
 	in := forceMoveInput(moveTestProbeCalls{})
 	breakSameExport(&in)
@@ -617,6 +619,9 @@ func TestEvaluateMoveEligibility_ForceTargetWithoutCapabilities(t *testing.T) {
 	v, ref := evaluateMoveEligibility(in)
 	if ref == nil || ref.Status != http.StatusPreconditionFailed || ref.Code != ErrCodeUnsupportedCapability {
 		t.Fatalf("refusal = %+v, want 412 unsupported capability", ref)
+	}
+	if !strings.Contains(ref.Message, "does not support agent move") {
+		t.Errorf("refusal message %q, want the AgentMove refusal", ref.Message)
 	}
 	if checkResults(v)[moveCheckCapability] != MoveCheckFailed {
 		t.Errorf("capability = %s, want failed", checkResults(v)[moveCheckCapability])
@@ -627,9 +632,11 @@ func TestEvaluateMoveEligibility_ForceTargetWithoutCapabilities(t *testing.T) {
 // userinfo shows none, in the workspace_recreatable message and in the
 // workspace consequence.
 func TestEvaluateMoveEligibility_ForceGitRemoteNormalizedForDisplay(t *testing.T) {
-	for _, remote := range []string{
-		"https://user:pass@example.com/org/repo.git",
-		"https://x-access-token:tok123@github.com/org/repo",
+	for remote, secret := range map[string]string{
+		"https://user:pass@example.com/org/repo.git":        "pass",
+		"https://x-access-token:tok123@github.com/org/repo": "tok123",
+		"deploy@host:org/repo":                              "deploy",
+		"x-access-token:t@github.com/org/repo":              "x-access-token",
 	} {
 		in := forceMoveInput(moveTestProbeCalls{})
 		breakSameExport(&in)
@@ -653,10 +660,10 @@ func TestEvaluateMoveEligibility_ForceGitRemoteNormalizedForDisplay(t *testing.T
 			t.Fatalf("%s: got %d texts, want the check message and the consequence", remote, len(shown))
 		}
 		for _, text := range shown {
-			if strings.Contains(text, "@") || strings.Contains(text, "pass") || strings.Contains(text, "tok123") {
+			if strings.Contains(text, "@") || strings.Contains(text, secret) {
 				t.Errorf("%s: shown text %q carries userinfo", remote, text)
 			}
-			if !strings.Contains(text, "/org/repo") {
+			if !strings.Contains(text, "org/repo") {
 				t.Errorf("%s: shown text %q does not name the repository", remote, text)
 			}
 		}
@@ -681,4 +688,34 @@ func TestTargetExportMountHealthy_MissingDescriptorIsUnhealthy(t *testing.T) {
 			t.Errorf("%s: targetExportMountHealthy = %v, want %v", name, got, tc.want)
 		}
 	}
+}
+
+// A16: in the recreate pass, an nfs target with no NFS details needs the
+// export mount for a Kubernetes clone-per-agent workspace, reads as
+// unhealthy, and is refused 503 at target_health; a target that reports no
+// workspace storage at all is not refused there (workspace_storage_reported
+// is waived for it).
+func TestEvaluateMoveEligibility_ForceTargetHealthWithoutNFSDetails(t *testing.T) {
+	t.Run("nfs backend without NFS details", func(t *testing.T) {
+		in := forceMoveInput(moveTestProbeCalls{})
+		in.Dst.WorkspaceStorage = &api.BrokerWorkspaceStorage{Backend: api.WorkspaceStorageBackendNFS}
+		v, ref := evaluateMoveEligibility(in)
+		if ref == nil || ref.Status != http.StatusServiceUnavailable || ref.Code != ErrCodeRuntimeBrokerUnavail {
+			t.Fatalf("refusal = %+v, want 503 runtime broker unavailable", ref)
+		}
+		if got := checkResults(v); got[moveCheckTargetHealth] != MoveCheckFailed || got[moveCheckSameExport] != MoveCheckWaived {
+			t.Errorf("checks = %v, want the recreate pass refused at target_health", got)
+		}
+	})
+	t.Run("no workspace storage reported", func(t *testing.T) {
+		in := forceMoveInput(moveTestProbeCalls{})
+		in.Dst.WorkspaceStorage = nil
+		v, ref := evaluateMoveEligibility(in)
+		if ref != nil && checkResults(v)[moveCheckTargetHealth] == MoveCheckFailed {
+			t.Fatalf("refused at target_health: %+v", ref)
+		}
+		if got := checkResults(v)[moveCheckTargetHealth]; got != MoveCheckPassed {
+			t.Errorf("target_health = %s, want passed", got)
+		}
+	})
 }
