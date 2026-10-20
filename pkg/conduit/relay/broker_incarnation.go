@@ -49,22 +49,28 @@ func SupersededIncarnationReason() string {
 // admitted per broker, for the flap report. The zero value is ready.
 type brokerIncarnations struct {
 	mu sync.Mutex
-	// last is the incarnation of each broker's latest admission here.
-	last map[string]string
+	// last is the incarnation of each broker's latest recorded admission
+	// here, and lastEpoch its connection epoch.
+	last      map[string]string
+	lastEpoch map[string]int64
 	// seen is, per broker, when each incarnation was last admitted here.
 	seen map[string]map[string]time.Time
 }
 
-// admit records that broker id was admitted with incarnation inc at now.
-// It reports a flap: inc differs from the broker's previous admission here
-// and was admitted here within BrokerIncarnationFlapWindow. Entries older
-// than the window are forgotten.
-func (b *brokerIncarnations) admit(id, inc string, now time.Time) bool {
+// admit records that broker id was admitted with incarnation inc and
+// connection epoch epoch at now. It reports a flap: inc differs from the
+// broker's previous recorded admission here and was admitted here within
+// BrokerIncarnationFlapWindow. The memory is updated in connection_epoch
+// order: an admission with an epoch below the broker's recorded one records
+// nothing and reports no flap. Entries older than BrokerIncarnationFlapWindow
+// are forgotten.
+func (b *brokerIncarnations) admit(id, inc string, epoch int64, now time.Time) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.seen == nil {
 		b.seen = map[string]map[string]time.Time{}
 		b.last = map[string]string{}
+		b.lastEpoch = map[string]int64{}
 	}
 	for bid, incs := range b.seen {
 		for i, at := range incs {
@@ -75,7 +81,14 @@ func (b *brokerIncarnations) admit(id, inc string, now time.Time) bool {
 		if len(incs) == 0 {
 			delete(b.seen, bid)
 			delete(b.last, bid)
+			delete(b.lastEpoch, bid)
 		}
+	}
+	// The memory is updated in connection_epoch order: an admission below
+	// the epoch already recorded for the broker records nothing and is no
+	// flap.
+	if last, ok := b.lastEpoch[id]; ok && epoch < last {
+		return false
 	}
 	incs := b.seen[id]
 	_, recent := incs[inc]
@@ -86,6 +99,7 @@ func (b *brokerIncarnations) admit(id, inc string, now time.Time) bool {
 	}
 	incs[inc] = now
 	b.last[id] = inc
+	b.lastEpoch[id] = epoch
 	return flap
 }
 
@@ -132,6 +146,52 @@ func (r *Relay) CloseOlderIncarnationSessions(kind, id, inc string, epoch int64,
 	return len(hit)
 }
 
+// supersededAtRegistrationLocked reports whether e, a broker session just
+// registered in r.sessions, is superseded by a live session already there:
+// one of the same broker with another endpoint incarnation and a higher
+// connection epoch, which has not ended (a draining session counts). When
+// it is, it claims e's close (supersededClosed), so
+// e is closed and counted once. Sessions of the same incarnation are left
+// as they are. r.mu must be held.
+func (r *Relay) supersededAtRegistrationLocked(e *entry) bool {
+	rec := e.rec
+	if rec.PrincipalKind != registry.PrincipalBroker || rec.EndpointIncarnation == "" {
+		return false
+	}
+	for _, o := range r.sessions {
+		if o == e || o.rec.PrincipalKind != registry.PrincipalBroker || o.rec.PrincipalID != rec.PrincipalID {
+			continue
+		}
+		if o.rec.EndpointIncarnation == rec.EndpointIncarnation || o.rec.ConnectionEpoch <= rec.ConnectionEpoch {
+			continue
+		}
+		// An ended session is not live: it supersedes nothing. A draining
+		// session is still live.
+		select {
+		case <-o.sess.Done():
+			continue
+		default:
+		}
+		return e.supersededClosed.CompareAndSwap(false, true)
+	}
+	return false
+}
+
+// closeSupersededAtRegistration closes e, a broker session that
+// supersededAtRegistrationLocked found superseded, with 4409
+// superseded_incarnation. The count is reported before the close. The
+// broker's flap memory is not updated and no flap is reported.
+func (r *Relay) closeSupersededAtRegistration(e *entry) {
+	rec := e.rec
+	r.log.Info("Conduit: closing a broker session of an older incarnation (4409 superseded_incarnation)",
+		"broker_id", rec.PrincipalID, "incarnation", rec.EndpointIncarnation, "session_id", rec.SessionID,
+		"cause", "registered_after_newer_incarnation")
+	if f := r.cfg.OnBrokerSessionsSuperseded; f != nil {
+		f(rec.PrincipalID, 1)
+	}
+	_ = e.sess.CloseWithCode(CloseSupersededIncarnation, SupersededIncarnationReason())
+}
+
 // admittedBroker applies the broker incarnation rules to e, a newly
 // registered session that passed its post-registration check.
 func (r *Relay) admittedBroker(e *entry) {
@@ -150,7 +210,7 @@ func (r *Relay) admittedBroker(e *entry) {
 		return
 	default:
 	}
-	if r.brokerIncs.admit(rec.PrincipalID, rec.EndpointIncarnation, r.clk.Now()) {
+	if r.brokerIncs.admit(rec.PrincipalID, rec.EndpointIncarnation, rec.ConnectionEpoch, r.clk.Now()) {
 		r.log.Warn("broker_incarnation_flap: a broker returned to an incarnation admitted within the last 10 minutes; two processes may be running with one broker credential",
 			"broker_id", rec.PrincipalID, "incarnation", rec.EndpointIncarnation, "session_id", rec.SessionID)
 		if f := r.cfg.OnBrokerIncarnationFlap; f != nil {
