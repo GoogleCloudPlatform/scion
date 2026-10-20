@@ -194,7 +194,7 @@ func (s *Server) recordConduitOpenUnstamped(route, principalKind string) {
 // under off, by route, principal kind and cause: one of
 // renewal_principal_unsupported (recordConduitOpenUnstamped) and
 // renewal_route_unavailable (a relay-held tunnel forwarded by a relay that
-// does not list tunnel_recheck).
+// does not list tunnel_recheck; contracts dc2f4f22 §3).
 func (s *Server) recordConduitOpenUnstampedCause(route, principalKind, cause string) {
 	if r := s.conduitOpenRefusedMetrics.Load(); r != nil {
 		(*r).RecordConduitOpenUnstamped(route, principalKind, cause)

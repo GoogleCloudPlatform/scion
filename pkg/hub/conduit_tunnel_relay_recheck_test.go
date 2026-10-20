@@ -33,9 +33,10 @@ import (
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
-// Relay feature tunnel_recheck (design v2.21.46 §3.9): the hub stamps a
-// relay-held tunnel's grant for renewal only when the forwarding relay
-// lists the feature on its relay-peer-authenticated request.
+// Relay feature tunnel_recheck (design v2.21.46 §3.9; contracts dc2f4f22
+// §3): the hub stamps a relay-held tunnel's grant for renewal only when the
+// forwarding relay lists the feature on its relay-peer-authenticated
+// request.
 
 // recheckFeatures are the features of a relay that re-checks every tunnel
 // it opens.

@@ -121,9 +121,10 @@ func (ts *conduitTunnelSession) mintRelayTunnel(ctx context.Context, log *slog.L
 	// A relay-held tunnel is renewed through the forwarding relay's
 	// re-checks, so its grant is stamped for renewal only when that relay
 	// lists tunnel_recheck (design v2.21.46 §3.9, "Relay feature
-	// tunnel_recheck"). Decided here, after session resolution, and only
-	// for a target with stream_renewal.v2: with enforce an unlisted
-	// relay's tunnel is refused before any mint, so no jti is spent.
+	// tunnel_recheck"; contracts dc2f4f22 §3). Decided here, after session
+	// resolution, and only for a target with stream_renewal.v2: with
+	// enforce an unlisted relay's tunnel is refused before any mint, so no
+	// jti is spent.
 	canRenew := recheck
 	if ts.s.conduitRenewalPathUnavailable(ctx, ts.identity, renews, canRenew, conduitRouteRelayTunnel, agent.ID) {
 		return nil, nil, conduitTunnelOpenError(errConduitStreamRenewalUnavailable)
