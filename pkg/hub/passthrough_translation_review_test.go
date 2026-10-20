@@ -438,3 +438,80 @@ func TestPassthroughTranslationReview_ReportLineCarriesScopeID(t *testing.T) {
 	assert.Contains(t, out, "scope_id="+f.broker.ID+" ")
 	assert.NotContains(t, out, "record_unbound=true")
 }
+
+// TestPassthroughTranslationReview_RecordNotBoundToAgentBroker_Fails: a
+// translation record bound to a broker other than the agent's is reported as
+// a failure, since it is refused at start, token mint and move.
+func TestPassthroughTranslationReview_RecordNotBoundToAgentBroker_Fails(t *testing.T) {
+	f := setupPTR(t, "ptr-notbound")
+	other := &store.GCPServiceAccount{
+		ID: tid("ptr-notbound-other-record"), Scope: store.ScopeHub, ScopeID: tid("ptr-other-broker"), Email: ptrHostSA,
+		ProjectID: "ptr-project", Verified: true, VerifiedAt: time.Now(), VerificationStatus: store.GCPVerificationVerified,
+		CreatedBy: store.HostSATranslationCreator, CreatedAt: time.Now(),
+	}
+	require.NoError(t, f.store.CreateGCPServiceAccount(context.Background(), other))
+	a := f.translatedAgent(t, "ptr-notbound-agent", f.owner.ID, true)
+	got := mustGetAgent(t, f.store, a.ID)
+	got.AppliedConfig.GCPIdentity.ServiceAccountID = other.ID
+	require.NoError(t, f.store.UpdateAgent(context.Background(), got))
+
+	en := f.reviewOf(t, a.ID)
+
+	assert.Equal(t, translationReviewFail, en.Outcome)
+	assert.Contains(t, en.Reason, "bound to broker "+other.ScopeID)
+	assert.False(t, en.RecordBound)
+}
+
+// TestPassthroughTranslationReview_UnboundRecord_Fails: a translation record
+// with no broker binding is reported as a failure with record_unbound=true.
+// The store refuses to write an empty scope_id, so the record is presented
+// through blankScopeIDStore. With the binding check treating an empty
+// ScopeID as usable, the owner would pass and the outcome would be pass.
+func TestPassthroughTranslationReview_UnboundRecord_Fails(t *testing.T) {
+	srv, s, blank, fault := testServerWithStoreFault(t, func(inner store.Store, fault *storeFaultSwitch) *blankScopeIDStore {
+		return &blankScopeIDStore{Store: inner, fault: fault}
+	})
+	owner := ptUser(tid("ptr-unbound-owner"), "ptr-unbound-owner@test.com", store.UserRoleMember)
+	project, broker := seedPassthroughSandboxServer(t, srv, s, owner, ptrHostSA, "ptr-project")
+	enforceSAAssign(srv, store.NewFakeCallerPermissionChecker().AllowTarget(ptrHostSA))
+	record := &store.GCPServiceAccount{
+		ID: tid("ptr-unbound-record"), Scope: store.ScopeHub, ScopeID: broker.ID, Email: ptrHostSA, ProjectID: "ptr-project",
+		Verified: true, VerifiedAt: time.Now(), VerificationStatus: store.GCPVerificationVerified,
+		CreatedBy: store.HostSATranslationCreator, CreatedAt: time.Now(),
+	}
+	require.NoError(t, s.CreateGCPServiceAccount(context.Background(), record))
+	a := &store.Agent{
+		ID: tid("ptr-unbound-agent"), Slug: "ptr-unbound-agent", Name: "ptr-unbound-agent", ProjectID: project.ID,
+		RuntimeBrokerID: broker.ID, Phase: string(state.PhaseCreated), CreatedBy: owner.ID, OwnerID: owner.ID,
+		Created: time.Now(), Updated: time.Now(),
+		Annotations: map[string]string{annotationGCPIdentityTranslatedFrom: "passthrough"},
+		AppliedConfig: &store.AgentAppliedConfig{GCPIdentity: &store.GCPIdentityConfig{
+			MetadataMode: store.GCPMetadataModeAssign, ServiceAccountID: record.ID,
+			ServiceAccountEmail: record.Email, ProjectID: record.ProjectID,
+		}},
+	}
+	require.NoError(t, s.CreateAgent(context.Background(), a))
+	seedAssignment(t, s, a, owner.ID, record.ID)
+	blank.id = record.ID
+	fault.Arm()
+
+	entries, err := srv.reviewTranslatedAgents(context.Background(), false)
+	require.NoError(t, err)
+	var en *translationReviewEntry
+	for i := range entries {
+		if entries[i].AgentID == a.ID {
+			en = &entries[i]
+		}
+	}
+	require.NotNil(t, en, "the agent is reviewed")
+	assert.Equal(t, translationReviewFail, en.Outcome)
+	assert.Contains(t, en.Reason, "no broker binding")
+	assert.True(t, en.RecordUnbound)
+
+	exec, err := srv.resolveMaintenanceExecutor(entadapter.PassthroughTranslationReviewKey)
+	require.NoError(t, err)
+	var buf bytes.Buffer
+	require.NoError(t, exec.Run(context.Background(), &buf, map[string]string{}))
+	assert.Contains(t, buf.String(), "agent="+a.ID)
+	assert.Contains(t, buf.String(), "record_unbound=true")
+}

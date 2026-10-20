@@ -227,6 +227,19 @@ func (s *Server) reviewTranslatedAgent(ctx context.Context, a *store.Agent) tran
 		en.Outcome, en.Reason = translationReviewError, "load broker: "+err.Error()
 		return en
 	}
+	// A translation record not bound to the agent's broker (bound to another
+	// broker, or with no binding) is refused at start, token mint and move,
+	// so the agent cannot use it whatever the principal's permissions.
+	if translationRecord && store.HostSATranslationRecordNotBoundTo(sa, broker.ID) {
+		en.Outcome = translationReviewFail
+		if sa.ScopeID == "" {
+			en.Reason = "the assigned record has no broker binding; it is refused at start, token mint and move"
+		} else {
+			en.Reason = "the assigned record is bound to broker " + sa.ScopeID +
+				", not the agent's broker; it is refused at start, token mint and move"
+		}
+		return en
+	}
 
 	principalID, refused := translationReviewPrincipal(a, reviewedRows)
 	en.PrincipalID = principalID

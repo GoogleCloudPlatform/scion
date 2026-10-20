@@ -224,7 +224,7 @@ func TestTranslationRecord_HolderOnAnotherBroker_RefusedAtStartAndMint(t *testin
 	rec := httptest.NewRecorder()
 	assert.True(t, srv.gcpIdentityStartRefusal(context.Background(), rec, agent, "start"), "the start is refused")
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Contains(t, rec.Body.String(), "host service account of another broker")
+	assert.Contains(t, rec.Body.String(), "not bound to this agent's broker")
 }
 
 // TestTranslationRecord_ReincarnateRepairKeepsIdentityWithWarning: a
@@ -360,4 +360,64 @@ func TestTranslationRecord_MoveWorkerRecheck_Refused(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "host service account of broker "+f.src.ID)
+}
+
+// blankScopeIDStore returns the record with ID id with an empty ScopeID while
+// armed. The store refuses to write an empty scope_id, so this is how a test
+// presents an unbound translation record to the code that reads it.
+type blankScopeIDStore struct {
+	store.Store
+	fault *storeFaultSwitch
+	id    string
+}
+
+func (b *blankScopeIDStore) GetGCPServiceAccount(ctx context.Context, id string) (*store.GCPServiceAccount, error) {
+	sa, err := b.Store.GetGCPServiceAccount(ctx, id)
+	if err == nil && sa != nil && id == b.id && b.fault.Active() {
+		c := *sa
+		c.ScopeID = ""
+		return &c, nil
+	}
+	return sa, err
+}
+
+// TestTranslationRecord_UnboundRecord_RefusedAtStartMintAndMove: an agent
+// holding a translation record with no broker binding is refused at start,
+// at token mint and at move, even on the broker the record was made for.
+// With the binding present (wrapper disarmed) the same agent is admitted,
+// so the refusal comes from the missing binding alone.
+func TestTranslationRecord_UnboundRecord_RefusedAtStartMintAndMove(t *testing.T) {
+	srv, s, blank, fault := testServerWithStoreFault(t, func(inner store.Store, fault *storeFaultSwitch) *blankScopeIDStore {
+		return &blankScopeIDStore{Store: inner, fault: fault}
+	})
+	brokerID := tid("trr-unbound-broker")
+	sa := trrRecord(t, s, "trr-unbound-rec", brokerID)
+	blank.id = sa.ID
+	enforceSAAssign(srv, store.NewFakeCallerPermissionChecker())
+	ctx := context.Background()
+	gcpID := &store.GCPIdentityConfig{
+		MetadataMode: store.GCPMetadataModeAssign, ServiceAccountID: sa.ID, ServiceAccountEmail: sa.Email,
+	}
+	agent := &store.Agent{
+		ID: tid("trr-unbound-agent"), ProjectID: tid("trr-unbound-project"), RuntimeBrokerID: brokerID,
+		AppliedConfig: &store.AgentAppliedConfig{GCPIdentity: gcpID},
+	}
+	dst := &store.RuntimeBroker{ID: brokerID, Name: "trr-unbound-broker"}
+
+	// Bound: admitted, and the move probe has no objection.
+	_, err := srv.admissibleGCPServiceAccount(ctx, gcpID, agent.ProjectID, agent.RuntimeBrokerID)
+	require.NoError(t, err)
+	assert.Empty(t, srv.hostSARecordMoveProbe(ctx, agent.AppliedConfig)(dst))
+
+	fault.Arm()
+
+	_, err = srv.admissibleGCPServiceAccount(ctx, gcpID, agent.ProjectID, agent.RuntimeBrokerID)
+	assert.ErrorIs(t, err, errGCPSABrokerMismatch)
+	assert.False(t, srv.resolveAgentGCPMintFacts(ctx, gcpID, agent.ProjectID, agent.RuntimeBrokerID), "no token is minted")
+	rec := httptest.NewRecorder()
+	assert.True(t, srv.gcpIdentityStartRefusal(ctx, rec, agent, "start"), "the start is refused")
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "not bound to this agent's broker")
+	assert.Contains(t, srv.hostSARecordMoveProbe(ctx, agent.AppliedConfig)(dst), "no broker binding",
+		"the move probe used by the move handler and the move worker refuses")
 }

@@ -582,7 +582,12 @@ func (s *Server) hostSARecordMoveProbe(ctx context.Context, ac *store.AgentAppli
 		if err != nil {
 			return "the agent's GCP identity could not be checked; retry later"
 		}
-		if store.HostSATranslationRecordBoundElsewhere(sa, dst.ID) {
+		if store.HostSATranslationRecordNotBoundTo(sa, dst.ID) {
+			if sa.ScopeID == "" {
+				return fmt.Sprintf("this agent's GCP identity is a broker host service account record with no broker "+
+					"binding and cannot move to broker %s; recreate the agent there with GCP identity passthrough",
+					brokerDisplayName(dst))
+			}
 			return fmt.Sprintf("this agent's GCP identity is the host service account of broker %s (the broker it was "+
 				"created for) and cannot move to broker %s; recreate the agent there with GCP identity passthrough",
 				sa.ScopeID, brokerDisplayName(dst))

@@ -1261,9 +1261,10 @@ var (
 	errGCPSANotVerified  = errors.New("the assigned GCP service account is not verified")
 	errGCPSAEmailChanged = errors.New("the assigned GCP service account's email no longer matches the agent's assignment")
 	errGCPSAHubModeOff   = errors.New("hub-scoped GCP service account assignment requires gcpIamCheckMode=enforce")
-	// errGCPSABrokerMismatch: the account is the host service account record
-	// of a broker other than the one the agent runs on.
-	errGCPSABrokerMismatch = errors.New("the assigned GCP service account is the host service account of another broker")
+	// errGCPSABrokerMismatch: the account is a broker host service account
+	// record that is not bound to the broker the agent runs on (bound to
+	// another broker, or carrying no broker binding).
+	errGCPSABrokerMismatch = errors.New("the assigned GCP service account is a broker host service account that is not bound to this agent's broker")
 )
 
 // isGCPAssignmentInadmissible reports whether err is one of the refusal
@@ -1300,7 +1301,8 @@ func (s *Server) checkGCPAssignmentAdmissible(ctx context.Context, gcpID *store.
 //
 // agentBrokerID is the RuntimeBrokerID of the agent's stored row. A broker
 // host service account record is admissible only for an agent on the broker
-// it is bound to (its ScopeID); a record with no binding is not checked.
+// it is bound to (its ScopeID); a record with no binding is admissible for no
+// agent.
 func (s *Server) admissibleGCPServiceAccount(ctx context.Context, gcpID *store.GCPIdentityConfig, agentProjectID, agentBrokerID string) (*store.GCPServiceAccount, error) {
 	if gcpID == nil {
 		return nil, errGCPSANotAvailable
@@ -1324,7 +1326,7 @@ func (s *Server) admissibleGCPServiceAccount(ctx context.Context, gcpID *store.G
 	if !sa.ReachableFromProject(agentProjectID) {
 		return nil, errGCPSANotAvailable
 	}
-	if store.HostSATranslationRecordBoundElsewhere(sa, agentBrokerID) {
+	if store.HostSATranslationRecordNotBoundTo(sa, agentBrokerID) {
 		return nil, errGCPSABrokerMismatch
 	}
 	if sa.Scope == store.ScopeHub {

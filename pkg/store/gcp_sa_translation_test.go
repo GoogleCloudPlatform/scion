@@ -34,23 +34,29 @@ func TestIsHostSATranslationRecord(t *testing.T) {
 	}
 }
 
-func TestHostSATranslationRecordBoundElsewhere(t *testing.T) {
+func TestHostSATranslationRecordNotBoundTo(t *testing.T) {
 	rec := func(scopeID string) *GCPServiceAccount {
 		return &GCPServiceAccount{Scope: ScopeHub, ScopeID: scopeID, CreatedBy: HostSATranslationCreator}
 	}
-	if HostSATranslationRecordBoundElsewhere(rec("broker-a"), "broker-a") {
-		t.Error("a record on its own broker is not bound elsewhere")
+	if HostSATranslationRecordNotBoundTo(rec("broker-a"), "broker-a") {
+		t.Error("a record is usable on the broker it is bound to")
 	}
-	if !HostSATranslationRecordBoundElsewhere(rec("broker-a"), "broker-b") {
-		t.Error("a record bound to another broker is bound elsewhere")
+	if !HostSATranslationRecordNotBoundTo(rec("broker-a"), "broker-b") {
+		t.Error("a record bound to another broker is not usable")
 	}
-	if !HostSATranslationRecordBoundElsewhere(rec("broker-a"), "") {
+	if !HostSATranslationRecordNotBoundTo(rec("broker-a"), "") {
 		t.Error("an agent without a broker is not on the record's broker")
 	}
-	if HostSATranslationRecordBoundElsewhere(rec(""), "broker-b") {
-		t.Error("a record with no binding is never bound elsewhere")
+	if !HostSATranslationRecordNotBoundTo(rec(""), "broker-b") {
+		t.Error("a record with no broker binding is usable on no broker")
 	}
-	if HostSATranslationRecordBoundElsewhere(&GCPServiceAccount{Scope: ScopeHub, ScopeID: "x", CreatedBy: "user-1"}, "broker-b") {
-		t.Error("only translation records carry a broker binding")
+	if !HostSATranslationRecordNotBoundTo(rec(""), "") {
+		t.Error("a record with no broker binding is not usable even without a broker")
+	}
+	if HostSATranslationRecordNotBoundTo(&GCPServiceAccount{Scope: ScopeHub, ScopeID: "", CreatedBy: "user-1"}, "broker-b") {
+		t.Error("only translation records are checked")
+	}
+	if HostSATranslationRecordNotBoundTo(&GCPServiceAccount{Scope: ScopeProject, ScopeID: "p1", CreatedBy: HostSATranslationCreator}, "broker-b") {
+		t.Error("a project record is not a translation record")
 	}
 }

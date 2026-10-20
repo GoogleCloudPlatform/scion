@@ -29,12 +29,12 @@ func IsHostSATranslationRecord(sa *GCPServiceAccount) bool {
 	return sa != nil && sa.Scope == ScopeHub && sa.CreatedBy == HostSATranslationCreator
 }
 
-// HostSATranslationRecordBoundElsewhere reports whether sa is a translation
-// record bound to a broker other than brokerID. The binding is the record's
-// ScopeID, which holds the broker it was created for. A record with an empty
-// ScopeID carries no binding and is never reported as bound elsewhere. The
-// store does not accept an empty ScopeID (the schema requires a non-empty
-// scope_id), so that branch is defensive.
-func HostSATranslationRecordBoundElsewhere(sa *GCPServiceAccount, brokerID string) bool {
-	return IsHostSATranslationRecord(sa) && sa.ScopeID != "" && sa.ScopeID != brokerID
+// HostSATranslationRecordNotBoundTo reports whether sa is a translation record
+// that may not be used on brokerID. The binding is the record's ScopeID, which
+// holds the broker it was created for; the record is usable only on that
+// broker. A translation record with an empty ScopeID carries no binding and is
+// usable on no broker. Records that are not translation records are never
+// reported.
+func HostSATranslationRecordNotBoundTo(sa *GCPServiceAccount, brokerID string) bool {
+	return IsHostSATranslationRecord(sa) && (sa.ScopeID == "" || sa.ScopeID != brokerID)
 }
