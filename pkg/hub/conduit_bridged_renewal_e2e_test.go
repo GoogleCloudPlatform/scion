@@ -90,7 +90,7 @@ func (e *bridgedRenewalE2E) openPTY(t *testing.T) *agentPTYUpstream {
 	u := &agentPTYUpstream{s: e.w.hubB, identity: e.w.owner, agent: e.w.launched}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	require.NoError(t, u.Open(ctx, 80, 24), "the open is not refused (503 stream_renewal_unavailable before 6.6b-3b-1)")
+	require.NoError(t, u.Open(ctx, 80, 24), "the open is not refused with 503 stream_renewal_unavailable")
 	t.Cleanup(u.Close)
 	waitSpawn(t, e.spawned)
 	_, isBridge := u.st.(relay.Bridge)
@@ -116,7 +116,7 @@ func ptyEcho(t *testing.T, u *agentPTYUpstream, s string) {
 func (e *bridgedRenewalE2E) openPort(t *testing.T) conduit.Stream {
 	t.Helper()
 	conn, err := e.w.hubB.openConduitPort(context.Background(), e.w.owner, e.w.launched, e.w.app.port)
-	require.NoError(t, err, "the open is not refused (503 stream_renewal_unavailable before 6.6b-3b-1)")
+	require.NoError(t, err, "the open is not refused with 503 stream_renewal_unavailable")
 	t.Cleanup(func() { _ = conn.Close() })
 	st, ok := conn.(conduit.Stream)
 	require.True(t, ok, "the proxy connection is a conduit stream")
@@ -186,7 +186,11 @@ func TestBridgedRenewalE2E_NoSenderClosesAtDeadline(t *testing.T) {
 	e := newBridgedRenewalE2E(t)
 	u := e.openPTY(t)
 	st := e.soleBridgedLeaf(t)
-	st.Renew = nil // the driver mints, but nothing is delivered
+	// The driver mints, but nothing is delivered. The driver reads Renew
+	// under st.mu.
+	st.mu.Lock()
+	st.Renew = nil
+	st.mu.Unlock()
 	e.advance(st.AuthzUntil.Sub(e.w.clock.Now()) + time.Second)
 
 	var err error

@@ -131,5 +131,5 @@ func TestRelayTunnel_GrantBindsResolvedRow(t *testing.T) {
 	assert.Equal(t, rowB, c.Target)
 	assert.Equal(t, c.JTI, open.OpenJTI)
 	_, err = verifyRelayTunnelGrant(t, f, open.Grant, rowA)
-	assert.Error(t, err, "the re-minted grant does not verify for row A")
+	assert.ErrorIs(t, err, grant.ErrTarget, "the re-minted grant does not verify for row A")
 }
