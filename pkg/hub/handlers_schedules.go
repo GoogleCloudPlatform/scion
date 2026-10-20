@@ -354,12 +354,17 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, projectI
 func (s *Server) listSchedules(w http.ResponseWriter, r *http.Request, projectID string) {
 	query := r.URL.Query()
 
+	// An agent caller lists only the schedules it holds.
+	agentID, ok := agentListFilter(r.Context())
+	if !ok {
+		writeJSON(w, http.StatusOK, ListSchedulesResponse{Schedules: []store.Schedule{}, ServerTime: time.Now().UTC()})
+		return
+	}
 	filter := store.ScheduleFilter{
-		ProjectID: projectID,
-		Status:    query.Get("status"),
-		Name:      query.Get("name"),
-		// An agent caller lists only the schedules it holds.
-		InitiatorAgentID: agentListFilterID(r.Context()),
+		ProjectID:        projectID,
+		Status:           query.Get("status"),
+		Name:             query.Get("name"),
+		InitiatorAgentID: agentID,
 	}
 
 	result, err := s.store.ListSchedules(r.Context(), filter, listOptionsFromQuery(query))

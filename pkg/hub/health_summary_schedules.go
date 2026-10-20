@@ -105,6 +105,18 @@ func (s *Server) healthSummarySchedules(r *http.Request) (*HealthSummarySchedule
 	scanned := 0
 	opts := store.ListOptions{Limit: healthSummarySchedulePageSize}
 	filter := store.ScheduleFilter{Status: store.ScheduleStatusActive, LastRunStatus: store.ScheduleRunError}
+	if agentCaller {
+		// An agent caller's scan reads only the rows it holds, in its own
+		// project, so rows it cannot see do not use up the scan limit.
+		agentID, ok := agentListFilter(ctx)
+		if !ok {
+			return out, nil
+		}
+		filter.InitiatorAgentID = agentID
+		if agent := GetAgentIdentityFromContext(ctx); agent != nil {
+			filter.ProjectID = agent.ProjectID()
+		}
+	}
 	for {
 		page, err := s.store.ListSchedules(ctx, filter, opts)
 		if err != nil {
@@ -123,7 +135,9 @@ func (s *Server) healthSummarySchedules(r *http.Request) (*HealthSummarySchedule
 				continue
 			}
 			ok, seen := allowed[sc.ProjectID]
-			if agentCaller || !seen {
+			if agentCaller {
+				ok = s.healthSummaryCanReadSchedules(r, &sc)
+			} else if !seen {
 				ok = s.healthSummaryCanReadSchedules(r, &sc)
 				allowed[sc.ProjectID] = ok
 			}

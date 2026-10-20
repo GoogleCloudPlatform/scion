@@ -477,12 +477,17 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 func (s *Server) listScheduledEvents(w http.ResponseWriter, r *http.Request, projectID string) {
 	query := r.URL.Query()
 
+	// An agent caller lists only the events it holds.
+	agentID, ok := agentListFilter(r.Context())
+	if !ok {
+		writeJSON(w, http.StatusOK, ListScheduledEventsResponse{Events: []store.ScheduledEvent{}, ServerTime: time.Now().UTC()})
+		return
+	}
 	filter := store.ScheduledEventFilter{
-		ProjectID: projectID,
-		EventType: query.Get("eventType"),
-		Status:    query.Get("status"),
-		// An agent caller lists only the events it holds.
-		InitiatorAgentID: agentListFilterID(r.Context()),
+		ProjectID:        projectID,
+		EventType:        query.Get("eventType"),
+		Status:           query.Get("status"),
+		InitiatorAgentID: agentID,
 	}
 
 	result, err := s.store.ListScheduledEvents(r.Context(), filter, listOptionsFromQuery(query))
@@ -504,7 +509,7 @@ func (s *Server) listScheduledEvents(w http.ResponseWriter, r *http.Request, pro
 // see, each decided by scheduledEventAccessDecision for ActionList. A user
 // caller's decision does not depend on the row, so its page and count are
 // returned as listed. An agent caller's list is already narrowed in the
-// store to the rows it holds (agentListFilterID); the decision is still made
+// store to the rows it holds (agentListFilter); the decision is still made
 // per row, and if it drops any row the store's count is omitted.
 func visibleScheduledRows[T any](ctx context.Context, s *Server, projectID string, items []T, totalCount int, rowOf func(*T) *scheduledEventRow) ([]T, int) {
 	if !isAgentCaller(ctx) {
@@ -522,13 +527,16 @@ func visibleScheduledRows[T any](ctx context.Context, s *Server, projectID strin
 	return visible, totalCount
 }
 
-// agentListFilterID is the agent ID an agent caller's list is narrowed to in
-// the store, so its pages fill with the rows it holds; "" for other callers.
-func agentListFilterID(ctx context.Context) string {
+// agentListFilter returns the agent ID an agent caller's list is narrowed
+// to in the store, so its pages fill with the rows it holds ("" for any
+// other caller). ok is false for an agent caller with an empty ID, which
+// holds no rows: its list is empty and the store is not read.
+func agentListFilter(ctx context.Context) (agentID string, ok bool) {
 	if !isAgentCaller(ctx) {
-		return ""
+		return "", true
 	}
-	return GetIdentityFromContext(ctx).ID()
+	agentID = GetIdentityFromContext(ctx).ID()
+	return agentID, agentID != ""
 }
 
 // getScheduledEvent handles GET /api/v1/projects/{projectId}/scheduled-events/{id}

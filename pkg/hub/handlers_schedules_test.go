@@ -97,6 +97,7 @@ func TestSchedule_UpdateToDispatchAgentRefusedForAgentCaller(t *testing.T) {
 	rec := doScheduleAgentRequest(t, srv, authzHelperAgent(projectID, ScopeProjectRead), projectID, sched.ID, http.MethodPatch,
 		UpdateScheduleRequest{EventType: "dispatch_agent", Payload: `{"agentName":"scheduled-worker"}`})
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.JSONEq(t, agentScopeForbiddenBody, rec.Body.String())
 	stored, err := s.GetSchedule(context.Background(), sched.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "message", stored.EventType)

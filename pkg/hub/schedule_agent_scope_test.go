@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -27,6 +28,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -567,4 +569,88 @@ func TestAgentScheduleScope_ListPagesHeldRowsFirst(t *testing.T) {
 	require.Len(t, events.Events, 1)
 	assert.Equal(t, heldEvt.ID, events.Events[0].ID)
 	assert.Equal(t, 1, events.TotalCount)
+}
+
+// scheduledListReadStore fails every schedule and scheduled-event list read
+// and counts them.
+type scheduledListReadStore struct {
+	store.Store
+	reads int
+}
+
+func (f *scheduledListReadStore) ListSchedules(context.Context, store.ScheduleFilter, store.ListOptions) (*store.ListResult[store.Schedule], error) {
+	f.reads++
+	return nil, errors.New("schedule list read")
+}
+
+func (f *scheduledListReadStore) ListScheduledEvents(context.Context, store.ScheduledEventFilter, store.ListOptions) (*store.ListResult[store.ScheduledEvent], error) {
+	f.reads++
+	return nil, errors.New("scheduled event list read")
+}
+
+// An agent caller with an empty ID holds no rows: its schedule and
+// scheduled-event lists and its health summary section are empty, carry no
+// cursor or count, and do not read the store.
+func TestAgentScheduleScope_EmptyAgentIDListsNothing(t *testing.T) {
+	srv, s, projectID := setupScheduleTest(t)
+	storeAgentScopeSchedule(t, s, projectID, "scope-empty-id-legacy", holderLegacy, store.ScheduleStatusActive)
+	noID := &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: ""},
+		ProjectID: projectID,
+		Scopes:    []AgentTokenScope{ScopeProjectRead},
+	}}
+	reads := &scheduledListReadStore{Store: s}
+	srv.store = reads
+	t.Cleanup(func() { srv.store = s })
+
+	rec := doAuthoredScheduleRequest(t, srv, noID, projectID, "", http.MethodGet, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var list ListSchedulesResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&list))
+	assert.Empty(t, list.Schedules)
+	assert.Empty(t, list.NextCursor)
+	assert.Zero(t, list.TotalCount)
+
+	rec = doAgentScopeEventRequest(t, srv, noID, projectID, "", http.MethodGet)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var events ListScheduledEventsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&events))
+	assert.Empty(t, events.Events)
+	assert.Empty(t, events.NextCursor)
+	assert.Zero(t, events.TotalCount)
+
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/admin/health/summary", nil)
+	r = r.WithContext(contextWithIdentity(r.Context(), noID))
+	sec, err := srv.healthSummarySchedules(r)
+	require.NoError(t, err)
+	assert.Empty(t, sec.Failing)
+	assert.Zero(t, sec.Total)
+
+	assert.Zero(t, reads.reads, "an agent caller with an empty ID does not read the store")
+}
+
+// An agent's health summary scan reads only the failing schedules it holds
+// in its own project, so rows it cannot see do not use up the scan limit.
+func TestAgentScheduleScope_HealthScanSkipsUnheldRows(t *testing.T) {
+	srv, s, projectID := setupScheduleTest(t)
+	ctx := context.Background()
+	base := time.Now().UTC().Add(-time.Hour)
+	held := storeAgentScopeScheduleAt(t, s, projectID, "scope-scan-held", holderCallerAgent, store.ScheduleStatusActive, base)
+	require.NoError(t, s.UpdateScheduleAfterRun(ctx, held.ID, base, base.Add(time.Hour), "run failed"))
+	for i, h := range []agentScopeHolder{holderOtherAgent, holderUser, holderLegacy} {
+		at := base.Add(time.Duration(i+1) * time.Minute)
+		sc := storeAgentScopeScheduleAt(t, s, projectID, "scope-scan-"+string(h), h, store.ScheduleStatusActive, at)
+		require.NoError(t, s.UpdateScheduleAfterRun(ctx, sc.ID, at, at.Add(time.Hour), "run failed"))
+	}
+	prevScan, prevPage := healthSummaryScheduleScanLimit, healthSummarySchedulePageSize
+	healthSummaryScheduleScanLimit, healthSummarySchedulePageSize = 1, 1
+	t.Cleanup(func() { healthSummaryScheduleScanLimit, healthSummarySchedulePageSize = prevScan, prevPage })
+
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/admin/health/summary", nil)
+	r = r.WithContext(contextWithIdentity(r.Context(), agentScopeCaller(projectID)))
+	sec, err := srv.healthSummarySchedules(r)
+	require.NoError(t, err)
+	assert.Equal(t, []string{held.ID}, failingScheduleIDs(sec))
+	assert.Equal(t, 1, sec.Total)
+	assert.False(t, sec.ScanLimited)
 }
