@@ -117,7 +117,16 @@ func (s *Server) pauseSchedulesAuthoredByAgent(ctx context.Context, agent *store
 	}
 
 	paused := 0
-	for _, sched := range matches {
+	for i, sched := range matches {
+		// Stop once the step's context is done (cancelled, or past the
+		// delete step timeout): every further write would fail and log.
+		// The schedules left active are paused by the evaluator backstop
+		// (pauseScheduleIfAuthorityAgentGone) when they come due.
+		if err := ctx.Err(); err != nil {
+			log.Warn("Stopped pausing schedules authored by deleted agent: context done",
+				"unpaused", len(matches)-i, "error", err)
+			break
+		}
 		err := s.pauseScheduleWithReason(ctx, sched, store.ScheduleStatusReasonCreatorDeleted)
 		switch {
 		case err == nil:

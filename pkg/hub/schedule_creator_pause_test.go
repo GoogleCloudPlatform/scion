@@ -22,7 +22,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -400,4 +402,119 @@ func TestScheduleCreatorPause_AgentDeletePagesAllSchedules(t *testing.T) {
 	for _, id := range others {
 		assert.Equal(t, store.ScheduleStatusActive, mustGetSchedule(t, s, id).Status, "user schedule %s stays active", id)
 	}
+}
+
+// cancelAfterFirstPauseStore counts UpdateSchedule calls and cancels the
+// test's context once the first one has been written, standing in for the
+// delete step's context being cancelled or timing out mid-loop. It is passed
+// to the Server constructor and forwards DB and Dialect, as
+// failingUpdateScheduleStore does.
+type cancelAfterFirstPauseStore struct {
+	store.Store
+	cancel  context.CancelFunc
+	mu      sync.Mutex
+	updates int
+}
+
+func (c *cancelAfterFirstPauseStore) DB() *sql.DB {
+	if p, ok := c.Store.(interface{ DB() *sql.DB }); ok {
+		return p.DB()
+	}
+	return nil
+}
+
+func (c *cancelAfterFirstPauseStore) Dialect() string {
+	if p, ok := c.Store.(interface{ Dialect() string }); ok {
+		return p.Dialect()
+	}
+	return ""
+}
+
+func (c *cancelAfterFirstPauseStore) UpdateSchedule(ctx context.Context, sched *store.Schedule, fields store.ScheduleFieldMask, prevRevision int, prevRevisionKnown bool, attr *store.InitiatorAttribution) error {
+	c.mu.Lock()
+	c.updates++
+	first := c.updates == 1
+	c.mu.Unlock()
+	err := c.Store.UpdateSchedule(ctx, sched, fields, prevRevision, prevRevisionKnown, attr)
+	if first && c.cancel != nil {
+		c.cancel()
+	}
+	return err
+}
+
+func (c *cancelAfterFirstPauseStore) updateCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.updates
+}
+
+// warnRecordHandler records the records logged at warn level or above.
+type warnRecordHandler struct {
+	mu   sync.Mutex
+	recs []slog.Record
+}
+
+func (h *warnRecordHandler) Enabled(_ context.Context, l slog.Level) bool {
+	return l >= slog.LevelWarn
+}
+
+func (h *warnRecordHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.recs = append(h.recs, r.Clone())
+	return nil
+}
+
+func (h *warnRecordHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *warnRecordHandler) WithGroup(string) slog.Handler      { return h }
+
+func (h *warnRecordHandler) records() []slog.Record {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]slog.Record(nil), h.recs...)
+}
+
+// When the delete step's context is done partway through pausing, the
+// delete hook stops: no further schedule write is attempted after the
+// cancel, and it logs one warning with the number of schedules left
+// unpaused (the evaluator backstop pauses those when they come due).
+func TestScheduleCreatorPause_AgentDeleteStopsOnDoneContext(t *testing.T) {
+	base, err := newTestStore(t, ":memory:")
+	require.NoError(t, err)
+	wrapped := &cancelAfterFirstPauseStore{Store: base}
+	srv, s := testServerOnMigratedStore(t, wrapped)
+	srv, s, projectID := initScheduleTest(t, srv, s)
+	const total = 4
+	var ids []string
+	for i := 0; i < total; i++ {
+		sc := creatorPauseSchedule(fmt.Sprintf("done-ctx-%d", i), projectID, authzHelperAgentID, store.ScheduleStatusActive)
+		require.NoError(t, s.CreateSchedule(context.Background(), sc))
+		ids = append(ids, sc.ID)
+	}
+	logs := &warnRecordHandler{}
+	srv.agentLifecycleLog = slog.New(logs)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	wrapped.cancel = cancel
+	srv.pauseSchedulesAuthoredByAgent(ctx, &store.Agent{ID: authzHelperAgentID, ProjectID: projectID})
+
+	assert.Equal(t, 1, wrapped.updateCount(), "no schedule write is attempted after the context is done")
+	paused := 0
+	for _, id := range ids {
+		if mustGetSchedule(t, s, id).Status == store.ScheduleStatusPaused {
+			paused++
+		}
+	}
+	assert.Equal(t, 1, paused, "only the write before the cancel pauses a schedule")
+	recs := logs.records()
+	require.Len(t, recs, 1, "one warning is logged for the stopped loop")
+	var unpaused int64 = -1
+	recs[0].Attrs(func(a slog.Attr) bool {
+		if a.Key == "unpaused" {
+			unpaused = a.Value.Int64()
+		}
+		return true
+	})
+	assert.Equal(t, int64(total-1), unpaused, "the warning counts the schedules left unpaused")
 }
