@@ -351,8 +351,8 @@ type createGCPServiceAccountResponse struct {
 	store.GCPServiceAccount
 	VerificationFailed  bool                       `json:"verificationFailed,omitempty"`
 	VerificationDetails *verificationFailedDetails `json:"verificationDetails,omitempty"`
-	// Warnings are advisory only (see projectSAMappingWarnings and
-	// hubSAMappingWarnings).
+	// Warnings are advisory only (see projectSAMappingWarnings,
+	// hubSAMappingWarnings and saProjectAccessWarning).
 	Warnings []string `json:"warnings,omitempty"`
 }
 
@@ -467,6 +467,7 @@ func (s *Server) createGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 		}
 	}
 	resp.Warnings = s.projectSAMappingWarnings(r.Context(), projectID, sa)
+	resp.Warnings = s.withSAProjectAccessWarning(r.Context(), resp.Warnings, sa)
 	s.logGCPServiceAccountRegisterAudit(r.Context(), sa)
 
 	writeJSON(w, http.StatusCreated, resp)
@@ -798,7 +799,8 @@ func (s *Server) runGCPServiceAccountVerification(w http.ResponseWriter, r *http
 
 	writeJSON(w, http.StatusOK, gcpServiceAccountWithWarnings{
 		GCPServiceAccount: *sa,
-		Warnings:          s.verificationWarnings(r.Context(), warnProjectID, sa),
+		Warnings: s.withSAProjectAccessWarning(r.Context(),
+			s.verificationWarnings(r.Context(), warnProjectID, sa), sa),
 	})
 }
 

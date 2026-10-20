@@ -2017,6 +2017,10 @@ type Server struct {
 	// somebody has to construct and pass. See saAssignCheckerFor.
 	saAssignChecker   store.CallerPermissionChecker
 	saAssignCheckMode string
+	// saProjectProbe and saProjectProbeHubProject are set by
+	// SetSAProjectAccessProbe under s.mu; see saProjectAccessWarning.
+	saProjectProbe           SAProjectAccessProbe
+	saProjectProbeHubProject string
 	// denyUnknownFailOpen is written with saAssignCheckMode under s.mu
 	// (applyGCPIAMSettingsLocked) and read lock-free by the checker.
 	denyUnknownFailOpen atomic.Bool
