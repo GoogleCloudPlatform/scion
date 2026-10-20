@@ -19,102 +19,54 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"strconv"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
-	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // Stream re-checks for separate relays (design §3.9 "Active
-// authorization", §3.5 "Re-check (hub side)"). The relay holding a user's
-// session schedules re-checks of the streams it holds and presents each
-// stream's latest hub-signed grant. The hub verifies that grant in the
-// re-check mode, takes the principal, target, kind and params only from
-// its signed claims, re-evaluates authorization with the in-process rules
-// (authorizeConduitUserStream) and either mints a renewal grant or refuses.
-// The relay forwards a renewal unchanged to the target as
-// AuthRefresh{target stream id}; on a refusal it closes the stream (4401).
-// When the hub cannot evaluate, nothing is renewed and the stream ends at
-// its deadline.
-//
-// Verifying grants in the re-check mode and minting renewal grants belong
-// to the target-side deadlines work (conduitRenewalGrants); until a
-// conduitRenewalGrants is set, every re-check is unavailable.
+// authorization"; v2.21.40 "One evaluation, three entry points"). The
+// relay holding a user's session schedules re-checks of the streams it
+// holds and presents each stream's latest hub-signed grant. The hub
+// evaluates it exactly as it evaluates a hub-held stream:
+// recheckRelayStream is the relay-held entry point, a decision-free
+// adapter over the renewal re-check (renewConduitStream). It builds the
+// request from the relay's call, with the admitted principal of the
+// session holding the stream as the principal the grant must name, and
+// maps the typed result back: a renewal grant, which the relay forwards
+// unchanged to the target as AuthRefresh{target stream id}; a close (4401
+// on a deny, 4404 when the agent is gone); or neither, when the hub
+// cannot evaluate: nothing is renewed and the stream ends at its deadline.
 
 func init() {
 	hubInternalOps[relay.HubStreamRecheckPath] = (*Server).hubRelayStreamRecheck
 }
 
-// conduitRenewalBinding is what the relay says a latest grant is for: the
-// stream on the target's session and the open grant's jti. Verification
-// checks the grant's signed claims against it; it never replaces them.
-type conduitRenewalBinding struct {
-	TargetSessionID string
-	TargetStreamID  uint32
-	OpenJTI         string
-}
+// errConduitRenewalUnavailable marks a renewal the hub declines for a
+// reason other than an authorization deny: nothing is renewed, nothing
+// closes, and the stream keeps its current deadline.
+var errConduitRenewalUnavailable = errors.New("renewal unavailable")
 
-// conduitRecheckClaims are the claims of a verified latest grant that a
-// re-check decides on.
-type conduitRecheckClaims struct {
-	// UserID is the grant's principal (sub).
-	UserID string
-	// AgentID and ProjectID name the target agent.
-	AgentID   string
-	ProjectID string
-	// Kind and Params are the stream's kind and params.
-	Kind   string
-	Params map[string]string
-	// ViaTunnel marks a stream opened through the tunnel path.
-	ViaTunnel bool
-}
+// conduitStreamRenewer is the renewal path of relay-held streams: the
+// renewal re-check (renewConduitStream). StartConduitExternal installs it;
+// without it every relay stream re-check is unavailable, so with
+// target_stream_deadlines enforce external relay mode refuses to start
+// without it (design v2.21.40 §3.9, Startup).
+type conduitStreamRenewer func(ctx context.Context, req conduitRenewalRequest) (*conduitRenewal, error)
 
-// conduitRenewalMint is the input to a renewal grant.
-type conduitRenewalMint struct {
-	UserID          string
-	UserSessionID   string
-	TargetSessionID string
-	TargetStreamID  uint32
-	OpenJTI         string
-	Kind            string
-	Params          map[string]string
-	// LatestGrant is the grant the re-check verified.
-	LatestGrant []byte
-}
-
-// Renewal failures. errConduitRenewalRefused (wrapped with the reason) is a
-// refusal: the stream closes. errConduitRenewalUnavailable is a failure to
-// evaluate: nothing is renewed, nothing closes.
-var (
-	errConduitRenewalRefused     = errors.New("renewal refused")
-	errConduitRenewalUnavailable = errors.New("renewal unavailable")
-)
-
-// conduitRenewalGrants verifies latest grants in the re-check mode and
-// mints renewal grants (design §3.5). VerifyForRecheck checks the grant's
-// signature, issuer and audience, its binding to b, and the re-check
-// mode's expiry rule, and returns its claims; a grant that fails is
-// errConduitRenewalRefused. Mint returns the compact renewal JWS and its
-// authz_until.
-type conduitRenewalGrants interface {
-	VerifyForRecheck(ctx context.Context, latestGrant []byte, b conduitRenewalBinding) (conduitRecheckClaims, error)
-	Mint(ctx context.Context, in conduitRenewalMint) (renewalJWS []byte, authzUntil time.Time, err error)
-}
-
-// setConduitRenewalGrants installs the renewal grant source.
-func (s *Server) setConduitRenewalGrants(g conduitRenewalGrants) {
-	if g == nil {
-		s.conduitRenewal.Store(nil)
+// setConduitStreamRenewer installs the renewal path of relay-held streams
+// (nil removes it).
+func (s *Server) setConduitStreamRenewer(r conduitStreamRenewer) {
+	if r == nil {
+		s.conduitStreamRenewer.Store(nil)
 		return
 	}
-	s.conduitRenewal.Store(&g)
+	s.conduitStreamRenewer.Store(&r)
 }
 
-func (s *Server) renewalGrants() conduitRenewalGrants {
-	if p := s.conduitRenewal.Load(); p != nil {
+func (s *Server) streamRenewer() conduitStreamRenewer {
+	if p := s.conduitStreamRenewer.Load(); p != nil {
 		return *p
 	}
 	return nil
@@ -150,73 +102,43 @@ func (s *Server) hubRelayStreamRecheck(w http.ResponseWriter, r *http.Request, p
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// recheckRelayStream re-checks one relay-held user stream.
+// recheckRelayStream is the relay-held entry point of the stream
+// re-check. The admission token names the principal of the user session
+// holding the stream (an expired token is accepted, with its MAC, session
+// and relay binding still checked, because the re-check evaluates current
+// state; design v2.21.40 §3.9, Lifetime). Everything else is decided by
+// renewConduitStream and classified by ClassifyConduitRenewal.
 func (s *Server) recheckRelayStream(ctx context.Context, peer string, relayGen int64, it relay.HubStreamRecheckItem) relay.HubStreamRecheckResult {
 	refuse := func(code uint32, reason string) relay.HubStreamRecheckResult {
 		return relay.HubStreamRecheckResult{Close: true, CloseCode: code, Reason: reason}
 	}
 	unavailable := relay.HubStreamRecheckResult{Reason: "unavailable"}
 
-	// The user session the stream's leaf is on: its admission names the
-	// principal the grant must name too.
 	c, err := s.verifyAdmissionToken(it.AdmissionToken, admissionCheck{sessionID: it.UserSessionID, relay: peer, relayGen: relayGen, allowExpired: true}, conduitRelayNow())
-	if err != nil || c.Kind != "user" {
+	if err != nil || c.Kind != registry.PrincipalUser {
 		return refuse(conduit.CloseUnauthenticated, conduitReasonAuthzExpired)
 	}
-	g := s.renewalGrants()
-	if g == nil {
+	renew := s.streamRenewer()
+	if renew == nil {
 		return unavailable
 	}
-	claims, err := g.VerifyForRecheck(ctx, it.LatestGrant, conduitRenewalBinding{TargetSessionID: it.TargetSessionID, TargetStreamID: it.TargetStreamID, OpenJTI: it.OpenJTI})
-	switch {
-	case errors.Is(err, errConduitRenewalRefused):
-		return refuse(conduit.CloseUnauthenticated, conduitReasonAuthzExpired)
-	case err != nil:
-		return unavailable
-	case claims.UserID != c.ID:
-		// The grant was issued to another principal than the session's.
-		return refuse(conduit.CloseUnauthenticated, conduitReasonAuthzExpired)
-	}
-	identity, verdict, _ := s.relayUserIdentity(ctx, c)
-	switch verdict {
-	case conduitAuthzAllowed:
-	case conduitAuthzUnavailable:
-		return unavailable
-	default:
-		return refuse(conduit.CloseUnauthenticated, conduitReasonAuthzExpired)
-	}
-	agent, err := s.store.GetAgent(ctx, claims.AgentID)
-	switch {
-	case errors.Is(err, store.ErrNotFound):
-		return refuse(relay.CloseTargetNotFound, "target_not_found")
-	case err != nil:
-		return unavailable
-	case !agent.DeletedAt.IsZero():
-		return refuse(relay.CloseTargetNotFound, "target_not_found")
-	}
-	port := 0
-	if claims.Kind == grant.StreamKindTCP {
-		port, _ = strconv.Atoi(claims.Params[grant.ParamPort])
-	}
-	switch verdict, _, _ := s.authorizeConduitUserStream(ctx, conduitUserStreamAuthz{
-		Identity: identity, Agent: agent, Kind: claims.Kind, ViaTunnel: claims.ViaTunnel, Port: port,
-	}); verdict {
-	case conduitAuthzAllowed:
-	case conduitAuthzUnavailable:
-		return unavailable
-	default:
-		return refuse(conduit.CloseUnauthenticated, conduitReasonAuthzExpired)
-	}
-	jws, until, err := g.Mint(ctx, conduitRenewalMint{
-		UserID: c.ID, UserSessionID: it.UserSessionID,
-		TargetSessionID: it.TargetSessionID, TargetStreamID: it.TargetStreamID, OpenJTI: it.OpenJTI,
-		Kind: claims.Kind, Params: claims.Params, LatestGrant: it.LatestGrant,
+	r, err := renew(ctx, conduitRenewalRequest{
+		LatestGrant:     it.LatestGrant,
+		TargetSessionID: it.TargetSessionID,
+		TargetStreamID:  it.TargetStreamID,
+		OpenJTI:         it.OpenJTI,
+		PrincipalID:     c.ID,
+		RelayHeld:       true,
 	})
-	switch {
-	case errors.Is(err, errConduitRenewalRefused):
+	if err == nil {
+		return relay.HubStreamRecheckResult{Renew: true, RenewalGrant: r.Token, AuthzUntil: r.AuthzUntil}
+	}
+	switch ClassifyConduitRenewal(err) {
+	case ConduitRenewalDeny:
 		return refuse(conduit.CloseUnauthenticated, conduitReasonAuthzExpired)
-	case err != nil:
+	case ConduitRenewalTargetGone:
+		return refuse(relay.CloseTargetNotFound, relay.ReasonTargetNotFound)
+	default:
 		return unavailable
 	}
-	return relay.HubStreamRecheckResult{Renew: true, RenewalGrant: jws, AuthzUntil: until}
 }
