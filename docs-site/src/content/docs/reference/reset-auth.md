@@ -47,8 +47,8 @@ and `failed_by_code`, the count of failures per code. A failure that carries no 
 | `reload_unconfirmed` | The new token was written, but the running agent did not confirm the reload. | If the agent keeps failing to authenticate, restart it. |
 
 For the `delegation_*` codes the entry also holds `cause`, the deny cause. For these codes,
-`agent_not_in_standing` and `internal_error`, `error` is a fixed plain reason; the raw error is
-written to the Hub log only.
+`agent_not_in_standing`, `internal_error` and `reload_unconfirmed`, `error` is a fixed plain
+reason; the raw error is written to the Hub log only.
 
 ## Scope re-issue
 

@@ -18,6 +18,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
 // InitSignaler is implemented by runtimes that can deliver the credential
@@ -48,10 +50,9 @@ func initReloadKillArgs(id string) ([]string, error) {
 	return []string{"kill", "--signal", initReloadSignal, id}, nil
 }
 
-// signalInitReloadWithCLI resolves id against the runtime's listed agents
-// (as Exec does) and sends the reload signal with `<command> kill`.
-func signalInitReloadWithCLI(ctx context.Context, command, id string, resolve func(context.Context, string) string) error {
-	id = resolve(ctx, id)
+// signalInitReloadWithCLI sends the reload signal to container id (already
+// resolved against the runtime's listed agents) with `<command> kill`.
+func signalInitReloadWithCLI(ctx context.Context, command, id string) error {
 	args, err := initReloadKillArgs(id)
 	if err != nil {
 		return err
@@ -62,38 +63,24 @@ func signalInitReloadWithCLI(ctx context.Context, command, id string, resolve fu
 
 // SignalInitReload implements InitSignaler with `docker kill --signal`.
 func (r *DockerRuntime) SignalInitReload(ctx context.Context, id string) error {
-	return signalInitReloadWithCLI(ctx, r.Command, id, r.resolveListedID)
+	return signalInitReloadWithCLI(ctx, r.Command, resolveListedID(ctx, r.List, id))
 }
 
 // SignalInitReload implements InitSignaler with `podman kill --signal`.
 func (r *PodmanRuntime) SignalInitReload(ctx context.Context, id string) error {
-	return signalInitReloadWithCLI(ctx, r.Command, id, r.resolveListedID)
+	return signalInitReloadWithCLI(ctx, r.Command, resolveListedID(ctx, r.List, id))
 }
 
 // SignalInitReload implements InitSignaler with `container kill --signal`.
 func (r *AppleContainerRuntime) SignalInitReload(ctx context.Context, id string) error {
-	return signalInitReloadWithCLI(ctx, r.Command, id, r.resolveListedID)
+	return signalInitReloadWithCLI(ctx, r.Command, resolveListedID(ctx, r.List, id))
 }
 
 // resolveListedID maps a slug or name to the listed container ID, falling
 // back to id when the list fails or has no match (the same resolution Exec
 // uses).
-func (r *DockerRuntime) resolveListedID(ctx context.Context, id string) string {
-	if agents, err := r.List(ctx, nil); err == nil {
-		return resolveContainerID(agents, id)
-	}
-	return id
-}
-
-func (r *PodmanRuntime) resolveListedID(ctx context.Context, id string) string {
-	if agents, err := r.List(ctx, nil); err == nil {
-		return resolveContainerID(agents, id)
-	}
-	return id
-}
-
-func (r *AppleContainerRuntime) resolveListedID(ctx context.Context, id string) string {
-	if agents, err := r.List(ctx, nil); err == nil {
+func resolveListedID(ctx context.Context, list func(context.Context, map[string]string) ([]api.AgentInfo, error), id string) string {
+	if agents, err := list(ctx, nil); err == nil {
 		return resolveContainerID(agents, id)
 	}
 	return id

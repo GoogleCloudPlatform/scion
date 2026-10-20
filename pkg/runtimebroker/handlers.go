@@ -5238,9 +5238,10 @@ func (s *Server) resetAuth(w http.ResponseWriter, r *http.Request, id, projectID
 	}
 
 	// Ask sciontool init (PID 1) to re-read the credential file and restart
-	// its refresh loop. This signal is the only reload the broker can
-	// confirm. (Where init also watches the credential file, it may reload
-	// on its own as well; a second reload is harmless.)
+	// its refresh loop. This signal is the only reload trigger whose
+	// delivery the broker can confirm. (Where init also watches the
+	// credential file, it may reload on its own as well; a second reload is
+	// harmless.)
 	//
 	// The signal goes to the runtime paired with the target above. A runtime
 	// that implements InitSignaler delivers it from the runtime side to the
@@ -5276,7 +5277,7 @@ func (s *Server) resetAuth(w http.ResponseWriter, r *http.Request, id, projectID
 		return
 	}
 
-	s.agentLifecycleLog.Info("Auth reset completed", "agent_id", id, "signaled", true,
+	s.agentLifecycleLog.Info("Auth reset completed", "agent_id", id,
 		"transport_token_written", transportWritten)
 
 	writeJSON(w, http.StatusOK, ResetAuthResponse{
