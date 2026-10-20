@@ -27,7 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestLoadSettingsKoanf(t *testing.T) {
+func TestLoadSettings_Layers(t *testing.T) {
 	// Create temporary directories for global and project settings
 	tmpDir := t.TempDir()
 
@@ -42,9 +42,9 @@ func TestLoadSettingsKoanf(t *testing.T) {
 	}
 
 	// 1. Test defaults
-	s, err := LoadSettingsKoanf(projectScionDir)
+	s, err := LoadSettings(projectScionDir)
 	if err != nil {
-		t.Fatalf("LoadSettingsKoanf failed: %v", err)
+		t.Fatalf("LoadSettings failed: %v", err)
 	}
 	if s.ActiveProfile != "local" {
 		t.Errorf("expected active profile 'local', got '%s'", s.ActiveProfile)
@@ -54,7 +54,7 @@ func TestLoadSettingsKoanf(t *testing.T) {
 	}
 }
 
-func TestLoadSettingsKoanfWithYAML(t *testing.T) {
+func TestLoadSettingsWithYAML(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
@@ -88,9 +88,9 @@ profiles:
 		t.Fatal(err)
 	}
 
-	s, err := LoadSettingsKoanf(projectScionDir)
+	s, err := LoadSettings(projectScionDir)
 	if err != nil {
-		t.Fatalf("LoadSettingsKoanf failed: %v", err)
+		t.Fatalf("LoadSettings failed: %v", err)
 	}
 	if s.ActiveProfile != "prod" {
 		t.Errorf("expected global override active_profile 'prod', got '%s'", s.ActiveProfile)
@@ -103,7 +103,7 @@ profiles:
 	}
 }
 
-func TestLoadSettingsKoanfWithProjectOverride(t *testing.T) {
+func TestLoadSettingsWithProjectOverride(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
@@ -142,9 +142,9 @@ profiles:
 		t.Fatal(err)
 	}
 
-	s, err := LoadSettingsKoanf(projectScionDir)
+	s, err := LoadSettings(projectScionDir)
 	if err != nil {
-		t.Fatalf("LoadSettingsKoanf failed: %v", err)
+		t.Fatalf("LoadSettings failed: %v", err)
 	}
 	if s.ActiveProfile != "local-dev" {
 		t.Errorf("expected project override active_profile 'local-dev', got '%s'", s.ActiveProfile)
@@ -155,7 +155,7 @@ profiles:
 	}
 }
 
-func TestLoadSettingsKoanfWithEnvOverride(t *testing.T) {
+func TestLoadSettingsWithEnvOverride(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
@@ -175,9 +175,9 @@ func TestLoadSettingsKoanfWithEnvOverride(t *testing.T) {
 	_ = os.Setenv("SCION_DEFAULT_TEMPLATE", "opencode")
 	defer func() { _ = os.Unsetenv("SCION_DEFAULT_TEMPLATE") }()
 
-	s, err := LoadSettingsKoanf(projectScionDir)
+	s, err := LoadSettings(projectScionDir)
 	if err != nil {
-		t.Fatalf("LoadSettingsKoanf failed: %v", err)
+		t.Fatalf("LoadSettings failed: %v", err)
 	}
 	if s.ActiveProfile != "remote" {
 		t.Errorf("expected env override active_profile 'remote', got '%s'", s.ActiveProfile)
@@ -187,7 +187,7 @@ func TestLoadSettingsKoanfWithEnvOverride(t *testing.T) {
 	}
 }
 
-func TestLoadSettingsKoanfWithAutoExposePortsEnvSet(t *testing.T) {
+func TestLoadSettingsWithAutoExposePortsEnvSet(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
 
@@ -207,49 +207,32 @@ func TestLoadSettingsKoanfWithAutoExposePortsEnvSet(t *testing.T) {
 	t.Setenv("SCION_AUTO_EXPOSE_PORTS_LIST", "8000,8080,3000")
 	t.Setenv("SCION_ACTIVE_PROFILE", "remote")
 
-	s, err := LoadSettingsKoanf(projectScionDir)
-	require.NoError(t, err, "SCION_AUTO_EXPOSE_PORTS/_LIST must never break LoadSettingsKoanf decoding")
+	s, err := LoadSettings(projectScionDir)
+	require.NoError(t, err, "SCION_AUTO_EXPOSE_PORTS/_LIST must never break LoadSettings decoding")
 	assert.Equal(t, "remote", s.ActiveProfile)
 }
 
-func TestLoadSettingsKoanfWithBucketEnvOverride(t *testing.T) {
+// TestLoadSettingsWithBucketEnvOverride: the deprecated bucket settings are
+// not read by the one settings loader (ptone/scion#3919), so SCION_BUCKET_*
+// no longer reaches the Settings view.
+func TestLoadSettingsWithBucketEnvOverride(t *testing.T) {
 	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
 
-	originalHome := os.Getenv("HOME")
-	defer func() { _ = os.Setenv("HOME", originalHome) }()
-	_ = os.Setenv("HOME", tmpDir)
-
-	projectDir := filepath.Join(tmpDir, "my-project")
-	projectScionDir := filepath.Join(projectDir, ".scion")
+	projectScionDir := filepath.Join(tmpDir, "my-project", ".scion")
 	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("SCION_BUCKET_PROVIDER", "GCS")
+	t.Setenv("SCION_BUCKET_NAME", "my-bucket")
+	t.Setenv("SCION_BUCKET_PREFIX", "agents")
 
-	// Set bucket environment variable overrides
-	_ = os.Setenv("SCION_BUCKET_PROVIDER", "GCS")
-	defer func() { _ = os.Unsetenv("SCION_BUCKET_PROVIDER") }()
-
-	_ = os.Setenv("SCION_BUCKET_NAME", "my-bucket")
-	defer func() { _ = os.Unsetenv("SCION_BUCKET_NAME") }()
-
-	_ = os.Setenv("SCION_BUCKET_PREFIX", "agents")
-	defer func() { _ = os.Unsetenv("SCION_BUCKET_PREFIX") }()
-
-	s, err := LoadSettingsKoanf(projectScionDir)
+	s, err := LoadSettings(projectScionDir)
 	if err != nil {
-		t.Fatalf("LoadSettingsKoanf failed: %v", err)
+		t.Fatalf("LoadSettings failed: %v", err)
 	}
-	if s.Bucket == nil {
-		t.Fatal("expected bucket config to be set from env vars")
-	}
-	if s.Bucket.Provider != "GCS" {
-		t.Errorf("expected bucket provider 'GCS', got '%s'", s.Bucket.Provider)
-	}
-	if s.Bucket.Name != "my-bucket" {
-		t.Errorf("expected bucket name 'my-bucket', got '%s'", s.Bucket.Name)
-	}
-	if s.Bucket.Prefix != "agents" {
-		t.Errorf("expected bucket prefix 'agents', got '%s'", s.Bucket.Prefix)
+	if s.Bucket != nil {
+		t.Fatalf("Bucket = %+v, want nil: SCION_BUCKET_* is not a setting", s.Bucket)
 	}
 }
 
@@ -333,7 +316,7 @@ func TestGetScionAgentConfigPath(t *testing.T) {
 	}
 }
 
-func TestLoadSettingsKoanfV1ProjectID(t *testing.T) {
+func TestLoadSettingsV1ProjectID(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
@@ -363,9 +346,9 @@ hub:
 		t.Fatal(err)
 	}
 
-	s, err := LoadSettingsKoanf(projectScionDir)
+	s, err := LoadSettings(projectScionDir)
 	if err != nil {
-		t.Fatalf("LoadSettingsKoanf failed: %v", err)
+		t.Fatalf("LoadSettings failed: %v", err)
 	}
 
 	// The v1 hub.grove_id should be normalized to the top-level ProjectID
@@ -385,7 +368,7 @@ hub:
 	}
 }
 
-func TestLoadSettingsKoanfV1ProjectIDHubWinsOverTopLevel(t *testing.T) {
+func TestLoadSettingsV1ProjectIDHubWinsOverTopLevel(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
@@ -411,9 +394,9 @@ hub:
 		t.Fatal(err)
 	}
 
-	s, err := LoadSettingsKoanf(projectScionDir)
+	s, err := LoadSettings(projectScionDir)
 	if err != nil {
-		t.Fatalf("LoadSettingsKoanf failed: %v", err)
+		t.Fatalf("LoadSettings failed: %v", err)
 	}
 
 	// hub.grove_id (legacy v1 hub key) should win
@@ -422,7 +405,7 @@ hub:
 	}
 }
 
-func TestLoadSettingsKoanfV1ProjectIDFromEnv(t *testing.T) {
+func TestLoadSettingsV1ProjectIDFromEnv(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	t.Setenv("HOME", tmpDir)
@@ -439,9 +422,9 @@ func TestLoadSettingsKoanfV1ProjectIDFromEnv(t *testing.T) {
 	// Set SCION_HUB_PROJECT_ID env var — should map to top-level project_id
 	t.Setenv("SCION_HUB_PROJECT_ID", "env-project-uuid")
 
-	s, err := LoadSettingsKoanf(projectScionDir)
+	s, err := LoadSettings(projectScionDir)
 	if err != nil {
-		t.Fatalf("LoadSettingsKoanf failed: %v", err)
+		t.Fatalf("LoadSettings failed: %v", err)
 	}
 
 	if s.ProjectID != "env-project-uuid" {
@@ -449,13 +432,13 @@ func TestLoadSettingsKoanfV1ProjectIDFromEnv(t *testing.T) {
 	}
 }
 
-// TestLoadSettingsKoanfV1LegacyEnvNeverAdopted is the negative half of
-// TestLoadSettingsKoanfV1ProjectIDFromEnv: SCION_HUB_GROVE_ID must
+// TestLoadSettingsV1LegacyEnvNeverAdopted is the negative half of
+// TestLoadSettingsV1ProjectIDFromEnv: SCION_HUB_GROVE_ID must
 // never resolve to a project ID, even though it maps to the same hub.grove_id
 // koanf key as the *file*-based fallback. Guards against the generic
 // "hub_" env mapper reviving the variable via hub.grove_id when only the
 // EnvHubGroveID special case is removed.
-func TestLoadSettingsKoanfV1LegacyEnvNeverAdopted(t *testing.T) {
+func TestLoadSettingsV1LegacyEnvNeverAdopted(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	t.Setenv("HOME", tmpDir)
@@ -473,9 +456,9 @@ func TestLoadSettingsKoanfV1LegacyEnvNeverAdopted(t *testing.T) {
 
 	t.Setenv("SCION_HUB_GROVE_ID", "legacy-env-uuid")
 
-	s, err := LoadSettingsKoanf(projectScionDir)
+	s, err := LoadSettings(projectScionDir)
 	if err != nil {
-		t.Fatalf("LoadSettingsKoanf failed: %v", err)
+		t.Fatalf("LoadSettings failed: %v", err)
 	}
 
 	if s.ProjectID != "" {
@@ -483,12 +466,12 @@ func TestLoadSettingsKoanfV1LegacyEnvNeverAdopted(t *testing.T) {
 	}
 }
 
-// TestLoadSettingsKoanfV1LegacyEnvDoesNotOverrideFile pins that the
+// TestLoadSettingsV1LegacyEnvDoesNotOverrideFile pins that the
 // file-based hub.grove_id fallback is unaffected by the
 // env var's removal: a legacy file value still resolves, and a legacy env
 // var set alongside it changes nothing (it is dropped entirely, not merely
 // out-ranked).
-func TestLoadSettingsKoanfV1LegacyEnvDoesNotOverrideFile(t *testing.T) {
+func TestLoadSettingsV1LegacyEnvDoesNotOverrideFile(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	t.Setenv("HOME", tmpDir)
@@ -511,9 +494,9 @@ func TestLoadSettingsKoanfV1LegacyEnvDoesNotOverrideFile(t *testing.T) {
 
 	t.Setenv("SCION_HUB_GROVE_ID", "legacy-env-uuid")
 
-	s, err := LoadSettingsKoanf(projectScionDir)
+	s, err := LoadSettings(projectScionDir)
 	if err != nil {
-		t.Fatalf("LoadSettingsKoanf failed: %v", err)
+		t.Fatalf("LoadSettings failed: %v", err)
 	}
 
 	if s.ProjectID != "file-grove" {
@@ -521,7 +504,7 @@ func TestLoadSettingsKoanfV1LegacyEnvDoesNotOverrideFile(t *testing.T) {
 	}
 }
 
-func TestLoadSettingsKoanfV1BrokerFields(t *testing.T) {
+func TestLoadSettingsV1BrokerFields(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
@@ -549,9 +532,9 @@ server:
 		t.Fatal(err)
 	}
 
-	s, err := LoadSettingsKoanf(projectScionDir)
+	s, err := LoadSettings(projectScionDir)
 	if err != nil {
-		t.Fatalf("LoadSettingsKoanf failed: %v", err)
+		t.Fatalf("LoadSettings failed: %v", err)
 	}
 
 	// The v1 server.broker fields should be remapped to legacy hub fields
@@ -569,7 +552,7 @@ server:
 	}
 }
 
-func TestLoadSettingsKoanfV1BrokerFieldsNoOverrideExisting(t *testing.T) {
+func TestLoadSettingsV1BrokerFieldsNoOverrideExisting(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
@@ -596,9 +579,9 @@ server:
 		t.Fatal(err)
 	}
 
-	s, err := LoadSettingsKoanf(projectScionDir)
+	s, err := LoadSettings(projectScionDir)
 	if err != nil {
-		t.Fatalf("LoadSettingsKoanf failed: %v", err)
+		t.Fatalf("LoadSettings failed: %v", err)
 	}
 
 	// Legacy hub fields should take precedence
@@ -610,7 +593,7 @@ server:
 	}
 }
 
-func TestLoadSettingsKoanfWithJSONFallback(t *testing.T) {
+func TestLoadSettingsWithJSONFallback(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
@@ -637,9 +620,9 @@ func TestLoadSettingsKoanfWithJSONFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s, err := LoadSettingsKoanf(projectScionDir)
+	s, err := LoadSettings(projectScionDir)
 	if err != nil {
-		t.Fatalf("LoadSettingsKoanf failed: %v", err)
+		t.Fatalf("LoadSettings failed: %v", err)
 	}
 	if s.ActiveProfile != "json-profile" {
 		t.Errorf("expected JSON fallback active_profile 'json-profile', got '%s'", s.ActiveProfile)
@@ -695,7 +678,7 @@ workspace_path: /tmp/my-project
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(projectSettings), 0644))
 
 	// Verify the grove_id loads correctly before any updates.
-	s, err := LoadSettingsKoanf(projectDir)
+	s, err := LoadSettings(projectDir)
 	require.NoError(t, err)
 	assert.Equal(t, "local-grove-id-12345", s.ProjectID, "grove_id should come from local settings, not global")
 
@@ -705,13 +688,13 @@ workspace_path: /tmp/my-project
 	require.NoError(t, UpdateSetting(projectDir, "hub.endpoint", "https://hub.new.example.com", false))
 
 	// Reload and verify grove_id survived the round-trip.
-	s2, err := LoadSettingsKoanf(projectDir)
+	s2, err := LoadSettings(projectDir)
 	require.NoError(t, err)
 	assert.Equal(t, "local-grove-id-12345", s2.ProjectID, "grove_id must survive UpdateSetting round-trip")
 	assert.Equal(t, "https://hub.new.example.com", s2.Hub.Endpoint, "hub endpoint should be updated")
 }
 
-func TestLoadSettingsKoanf_ProjectIDFileOverridesGlobal(t *testing.T) {
+func TestLoadSettings_ProjectIDFileOverridesGlobal(t *testing.T) {
 	// Simulates a git project where the project ID is stored in a project-id file
 	// rather than in the settings file. The global settings have a different
 	// hub.grove_id that should NOT bleed into the project.
@@ -758,7 +741,7 @@ active_profile: local
 	require.NoError(t, os.WriteFile(filepath.Join(projectConfigDir, "settings.yaml"), []byte(projectSettings), 0644))
 
 	// Load settings for the project
-	s, err := LoadSettingsKoanf(projectScionDir)
+	s, err := LoadSettings(projectScionDir)
 	require.NoError(t, err)
 
 	// The project-id file should take precedence over global hub.grove_id
@@ -766,7 +749,7 @@ active_profile: local
 		"project ID should come from the project-id file, not global settings")
 }
 
-func TestLoadSettingsKoanf_GlobalProjectIDDoesNotBleedIntoProject(t *testing.T) {
+func TestLoadSettings_GlobalProjectIDDoesNotBleedIntoProject(t *testing.T) {
 	// Verifies that when global settings have hub.grove_id set (from linking
 	// the global project) and a project also has its own hub.grove_id,
 	// the project's value is used — not the global's.
@@ -802,7 +785,7 @@ hub:
 `
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(projectSettings), 0644))
 
-	s, err := LoadSettingsKoanf(projectDir)
+	s, err := LoadSettings(projectDir)
 	require.NoError(t, err)
 
 	// Project's hub.grove_id should override global's top-level grove_id
@@ -810,7 +793,7 @@ hub:
 		"grove_id should come from project hub.grove_id, not global top-level grove_id")
 }
 
-func TestLoadSettingsKoanf_V1HubProjectIDPopulatesGetHubProjectID(t *testing.T) {
+func TestLoadSettings_V1HubProjectIDPopulatesGetHubProjectID(t *testing.T) {
 	// Verifies that hub.grove_id (snake_case, V1 format) is remapped to
 	// Hub.ProjectID so that GetHubProjectID() returns the correct
 	// value. Without this remapping, EnsureHubReady falls back to the local
@@ -828,7 +811,7 @@ func TestLoadSettingsKoanf_V1HubProjectIDPopulatesGetHubProjectID(t *testing.T) 
 		}
 	}
 
-	// Create global dir to satisfy LoadSettingsKoanf
+	// Create global dir to satisfy LoadSettings
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
 
@@ -844,7 +827,7 @@ hub:
 `
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(projectSettings), 0644))
 
-	s, err := LoadSettingsKoanf(projectDir)
+	s, err := LoadSettings(projectDir)
 	require.NoError(t, err)
 
 	// GetHubProjectID() must return the hub project ID from V1's hub.grove_id
@@ -852,7 +835,7 @@ hub:
 		"GetHubProjectID() should return the value from V1 hub.grove_id")
 }
 
-func TestLoadSettingsKoanf_V1HubProjectIDWithMarkerFile(t *testing.T) {
+func TestLoadSettings_V1HubProjectIDWithMarkerFile(t *testing.T) {
 	// When a git project has both a project-id file (local deterministic ID)
 	// and hub.grove_id in V1 settings (hub project ID), the two must be distinct:
 	// - settings.ProjectID should be the local ID (from the marker file)
@@ -893,7 +876,7 @@ hub:
 `
 	require.NoError(t, os.WriteFile(filepath.Join(projectConfigDir, "settings.yaml"), []byte(projectSettings), 0644))
 
-	s, err := LoadSettingsKoanf(projectScionDir)
+	s, err := LoadSettings(projectScionDir)
 	require.NoError(t, err)
 
 	// ProjectID should come from the marker file (local deterministic ID)
@@ -905,7 +888,7 @@ hub:
 		"GetHubProjectID() should return the hub project ID, distinct from the local project ID")
 }
 
-func TestLoadSettingsKoanf_InRepoSettingsLayered(t *testing.T) {
+func TestLoadSettings_InRepoSettingsLayered(t *testing.T) {
 	// Verifies that when a git project has split storage (project-id file),
 	// the in-repo .scion/settings.yaml is loaded as a layer between global
 	// and external config settings.
@@ -957,7 +940,7 @@ profiles:
 	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(projectConfigDir, 0755))
 
-	s, err := LoadSettingsKoanf(projectScionDir)
+	s, err := LoadSettings(projectScionDir)
 	require.NoError(t, err)
 
 	// In-repo settings should override global: runtime should be "container", not "podman"
@@ -1181,7 +1164,7 @@ server:
 		"workstation runtime 'docker' must not exist on cloudrun-sandbox tier")
 }
 
-func TestLoadSettingsKoanf_ExternalOverridesInRepo(t *testing.T) {
+func TestLoadSettings_ExternalOverridesInRepo(t *testing.T) {
 	// Verifies that external project config settings override in-repo settings
 	// when both exist (external has highest project-level precedence).
 	tmpDir := t.TempDir()
@@ -1243,7 +1226,7 @@ profiles:
 `
 	require.NoError(t, os.WriteFile(filepath.Join(projectConfigDir, "settings.yaml"), []byte(externalSettings), 0644))
 
-	s, err := LoadSettingsKoanf(projectScionDir)
+	s, err := LoadSettings(projectScionDir)
 	require.NoError(t, err)
 
 	// External config should override in-repo
@@ -1356,9 +1339,9 @@ profiles:
     image_registry: ghcr.io/example/local
 `
 
-func TestLoadSettingsKoanf_V1KnownKeys_NoWarning(t *testing.T) {
+func TestLoadSettings_V1KnownKeys_NoWarning(t *testing.T) {
 	// A v1 settings file that only uses valid, documented v1 fields must not
-	// produce an unrecognized-keys warning, even though LoadSettingsKoanf
+	// produce an unrecognized-keys warning, even though LoadSettings
 	// decodes into the legacy Settings struct, which does not itself carry
 	// these v1-only fields. Regression test for ptone/scion#2258.
 	resetWarnedUnusedKeysCache()
@@ -1372,7 +1355,7 @@ func TestLoadSettingsKoanf_V1KnownKeys_NoWarning(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte(v1SettingsWithAllKnownFields), 0644))
 
-	_, err := LoadSettingsKoanf(dir)
+	_, err := LoadSettings(dir)
 	require.NoError(t, err)
 
 	logged := buf.String()
@@ -1385,7 +1368,7 @@ func TestLoadSettingsKoanf_V1KnownKeys_NoWarning(t *testing.T) {
 	assert.Empty(t, validationErrs, "expected v1SettingsWithAllKnownFields to be schema-valid, got: %v", validationErrs)
 }
 
-func TestLoadSettingsKoanf_V1UnknownKey_StillWarnsAndNamesIt(t *testing.T) {
+func TestLoadSettings_V1UnknownKey_StillWarnsAndNamesIt(t *testing.T) {
 	// A genuinely unknown key in an otherwise-valid v1 settings file — both
 	// at the top level and nested inside a map-of-structs field — must still
 	// produce a warning naming it. The false-positive fix must not swallow
@@ -1417,7 +1400,7 @@ totally_bogus_top_level_key: value
 `
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte(settingsYAML), 0644))
 
-	_, err := LoadSettingsKoanf(dir)
+	_, err := LoadSettings(dir)
 	require.NoError(t, err)
 
 	logged := buf.String()
@@ -1488,7 +1471,7 @@ bucket:
 	assert.Contains(t, logged, "bucket.nmae", "expected warning to name the nested typo's leaf key, not just \"bucket\"")
 }
 
-func TestLoadSettingsKoanf_V1NestedTypoUnderV1OnlySection_StillWarnsAndNamesLeaf(t *testing.T) {
+func TestLoadSettings_V1NestedTypoUnderV1OnlySection_StillWarnsAndNamesLeaf(t *testing.T) {
 	// A v1-format file with typos nested under sections legacy Settings does
 	// not have at all (server, harness_configs) must still warn and name the
 	// leaf key. Regression test for round-1 review finding 1b: a coarse
@@ -1514,7 +1497,7 @@ harness_configs:
 `
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte(settingsYAML), 0644))
 
-	_, err := LoadSettingsKoanf(dir)
+	_, err := LoadSettings(dir)
 	require.NoError(t, err)
 
 	logged := buf.String()
@@ -1528,7 +1511,7 @@ func TestLoadSettingsFromDir_V1OnlyKeyInLegacyFile_StillWarns(t *testing.T) {
 	// also has a v1-only top-level key (image_registry) must still warn about
 	// it: that key is genuinely unused by every loader that will ever read
 	// this file, since LoadEffectiveSettings sends a legacy-format hierarchy
-	// through LoadSettingsKoanf + AdaptLegacySettings, never
+	// through LoadSettings + AdaptLegacySettings, never
 	// LoadVersionedSettings. Regression test for round-1 review finding 2.
 	resetWarnedUnusedKeysCache()
 	var buf bytes.Buffer
@@ -1616,7 +1599,7 @@ func TestIsSettingsKeyPrefix(t *testing.T) {
 	}
 }
 
-func TestLoadSettingsKoanf_V1ImageTypoNextToImageRegistry_WarnsOnlyTypo(t *testing.T) {
+func TestLoadSettings_V1ImageTypoNextToImageRegistry_WarnsOnlyTypo(t *testing.T) {
 	// A v1 file with a genuine typo ("image") sitting next to the real valid
 	// key it was probably meant to be close to ("image_registry") must warn
 	// about the typo only. Without the path-separator check in
@@ -1639,7 +1622,7 @@ image_registry: ghcr.io/example
 `
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte(settingsYAML), 0644))
 
-	_, err := LoadSettingsKoanf(dir)
+	_, err := LoadSettings(dir)
 	require.NoError(t, err)
 
 	logged := buf.String()

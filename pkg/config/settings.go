@@ -279,13 +279,6 @@ func mergeMaps(base, override map[string]string) map[string]string {
 	return result
 }
 
-// LoadSettings loads and merges settings from the hierarchy using Koanf.
-// Priority: Env vars > Project > Global > Defaults
-// Supports both YAML (.yaml/.yml) and JSON (.json) files, preferring YAML.
-func LoadSettings(projectPath string) (*Settings, error) {
-	return LoadSettingsKoanf(projectPath)
-}
-
 func expandEnvMap(m map[string]string) map[string]string {
 	if m == nil {
 		return nil
@@ -526,7 +519,7 @@ func UpdateSetting(projectPath string, key string, value string, global bool) er
 		}
 		// Resolve through GetProjectConfigDir so that git projects with split
 		// storage write to the external config dir (~/.scion/project-configs/…)
-		// — the same location LoadSettingsKoanf reads from. This also
+		// — the same location the settings loader reads from. This also
 		// migrates a project's legacy id file to its canonical name as a
 		// side effect, via ReadProjectID.
 		dir = GetProjectConfigDir(projectPath)
@@ -843,7 +836,7 @@ func DeleteHubConnection(projectPath string, name string, global bool) error {
 		}
 		// Resolve through GetProjectConfigDir so that git projects with split
 		// storage write to the external config dir (~/.scion/project-configs/…)
-		// — the same location LoadSettingsKoanf reads from.
+		// — the same location the settings loader reads from.
 		dir = GetProjectConfigDir(projectPath)
 	}
 

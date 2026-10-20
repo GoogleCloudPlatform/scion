@@ -106,7 +106,7 @@ func expectedFor(state envState, fileValue, envValue string) string {
 	return fileValue
 }
 
-func TestLoadSettingsKoanf_EmptyEnvTreatedAsUnset(t *testing.T) {
+func TestLoadSettings_EmptyEnvTreatedAsUnset(t *testing.T) {
 	vars := []struct {
 		env, fileValue, envValue string
 		get                      func(*Settings) string
@@ -120,7 +120,7 @@ func TestLoadSettingsKoanf_EmptyEnvTreatedAsUnset(t *testing.T) {
 				projectDir := setupEmptyEnvProject(t)
 				applyEnvState(t, v.env, c.state, v.envValue)
 
-				s, err := LoadSettingsKoanf(projectDir)
+				s, err := LoadSettings(projectDir)
 				require.NoError(t, err)
 				assert.Equal(t, expectedFor(c.state, v.fileValue, v.envValue), v.get(s))
 			})
@@ -128,12 +128,12 @@ func TestLoadSettingsKoanf_EmptyEnvTreatedAsUnset(t *testing.T) {
 	}
 }
 
-// TestLoadSettingsKoanf_EmptyProjectIDEnvTreatedAsUnset covers the
+// TestLoadSettings_EmptyProjectIDEnvTreatedAsUnset covers the
 // project-ID branch of the legacy env callback, the one key it maps
 // specially: SCION_PROJECT_ID and SCION_HUB_PROJECT_ID both land on the
 // top-level project_id, and an empty value must leave the file's
 // project_id in place.
-func TestLoadSettingsKoanf_EmptyProjectIDEnvTreatedAsUnset(t *testing.T) {
+func TestLoadSettings_EmptyProjectIDEnvTreatedAsUnset(t *testing.T) {
 	const fileValue, envValue = "file-project-id", "env-project-id"
 	for _, name := range []string{"SCION_PROJECT_ID", "SCION_HUB_PROJECT_ID"} {
 		for _, c := range envOverlayCases {
@@ -141,7 +141,7 @@ func TestLoadSettingsKoanf_EmptyProjectIDEnvTreatedAsUnset(t *testing.T) {
 				projectDir := setupEmptyEnvProjectWith(t, "project_id: "+fileValue+"\n")
 				applyEnvState(t, name, c.state, envValue)
 
-				s, err := LoadSettingsKoanf(projectDir)
+				s, err := LoadSettings(projectDir)
 				require.NoError(t, err)
 				assert.Equal(t, expectedFor(c.state, fileValue, envValue), s.ProjectID)
 			})

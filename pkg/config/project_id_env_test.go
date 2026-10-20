@@ -145,7 +145,7 @@ func TestProjectIDEnvPrecedence(t *testing.T) {
 		t.Run(tc.name+"/legacy", func(t *testing.T) {
 			projectDir, logs := setupProjectIDEnvTest(t, tc.settingsHubID, tc.fileID)
 			t.Setenv(projectkeys.EnvHubProjectID, envIDTestEnvHub)
-			s, err := LoadSettingsKoanf(projectDir)
+			s, err := LoadSettings(projectDir)
 			require.NoError(t, err)
 			assert.Equal(t, envIDTestEnvHub, s.ProjectID)
 			if tc.settingsHubID != "" {
@@ -165,10 +165,10 @@ func TestProjectIDEnvPrecedence(t *testing.T) {
 	}
 }
 
-// TestProjectIDEnvPrecedence_LegacyCamelHubProjectID: in the legacy
-// loader, a settings hub.projectId that differs from hub.project_id is its
-// own overridden source: one warning names it, and GetHubProjectID returns
-// the env value.
+// TestProjectIDEnvPrecedence_LegacyCamelHubProjectID: a camelCase
+// hub.projectId is a legacy key. A versioned file's copy is not read (it is
+// reported as an unrecognized key, not as an overridden project ID source),
+// and GetHubProjectID returns the env value.
 func TestProjectIDEnvPrecedence_LegacyCamelHubProjectID(t *testing.T) {
 	const camelID = "camel-hub-project-id"
 	projectDir, logs := setupProjectIDEnvTest(t, envIDTestSettings, "")
@@ -178,20 +178,16 @@ func TestProjectIDEnvPrecedence_LegacyCamelHubProjectID(t *testing.T) {
 	require.NoError(t, os.WriteFile(settings, append(data, []byte("  projectId: \""+camelID+"\"\n")...), 0o644))
 	t.Setenv(projectkeys.EnvHubProjectID, envIDTestEnvHub)
 
-	s, err := LoadSettingsKoanf(projectDir)
+	s, err := LoadSettings(projectDir)
 	require.NoError(t, err)
 	assert.Equal(t, envIDTestEnvHub, s.ProjectID)
 	assert.Equal(t, envIDTestEnvHub, s.GetHubProjectID())
 
-	var camel []string
 	for _, w := range overrideWarnings(logs) {
-		if strings.Contains(w, "overridden="+projectkeys.ConfigHubProjectIDJSON) {
-			camel = append(camel, w)
-		}
+		assert.NotContains(t, w, "overridden="+projectkeys.ConfigHubProjectIDJSON, "an unread key is not an overridden source")
 	}
-	require.Len(t, camel, 1, logs.String())
-	assert.Contains(t, camel[0], "source="+projectkeys.EnvHubProjectID)
-	assert.NotContains(t, logs.String(), camelID, "the warning names sources, never project ID values")
+	assert.Contains(t, logs.String(), projectkeys.ConfigHubProjectIDJSON, "the unread key is reported as unrecognized")
+	assert.NotContains(t, logs.String(), camelID, "the warnings name sources and keys, never project ID values")
 	assertNoProjectIDValues(t, logs)
 }
 
@@ -210,7 +206,7 @@ func TestProjectIDEnvPrecedence_PlainVarUnchanged(t *testing.T) {
 		t.Run(tc.name+"/legacy", func(t *testing.T) {
 			projectDir, logs := setupProjectIDEnvTest(t, tc.settingsHubID, tc.fileID)
 			t.Setenv(projectkeys.EnvProjectID, envIDTestEnvPlain)
-			s, err := LoadSettingsKoanf(projectDir)
+			s, err := LoadSettings(projectDir)
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, s.ProjectID)
 			assert.Empty(t, overrideWarnings(logs))
@@ -231,7 +227,7 @@ func TestProjectIDEnvPrecedence_PlainVarUnchanged(t *testing.T) {
 	t.Run("env only/legacy", func(t *testing.T) {
 		projectDir, _ := setupProjectIDEnvTest(t, "", "")
 		t.Setenv(projectkeys.EnvProjectID, envIDTestEnvPlain)
-		s, err := LoadSettingsKoanf(projectDir)
+		s, err := LoadSettings(projectDir)
 		require.NoError(t, err)
 		assert.Equal(t, envIDTestEnvPlain, s.ProjectID)
 	})
@@ -246,7 +242,7 @@ func TestProjectIDEnvPrecedence_HubVarBeatsPlainVar(t *testing.T) {
 	t.Setenv(projectkeys.EnvProjectID, envIDTestEnvPlain)
 	t.Setenv(projectkeys.EnvHubProjectID, envIDTestEnvHub)
 	for i := 0; i < 5; i++ {
-		s, err := LoadSettingsKoanf(projectDir)
+		s, err := LoadSettings(projectDir)
 		require.NoError(t, err)
 		assert.Equal(t, envIDTestEnvHub, s.ProjectID)
 	}
@@ -278,7 +274,7 @@ func TestProjectIDEnvPrecedence_WarningDedup(t *testing.T) {
 
 	load := func() {
 		t.Helper()
-		_, err := LoadSettingsKoanf(projectDir)
+		_, err := LoadSettings(projectDir)
 		require.NoError(t, err)
 		_, err = LoadVersionedSettings(projectDir)
 		require.NoError(t, err)

@@ -46,12 +46,6 @@ var settingsBypassAllowed = map[string]string{
 	"admin_settings.go:handlePutServerConfig":                  "part B",
 	"handlers_github_app.go:persistGitHubAppConfig":            "part B",
 	"handlers_projects_core.go:initHubManagedProject":          "part B",
-	// The legacy project-ID key migration: it runs from the settings
-	// loaders, sometimes while the caller already holds the settings lock,
-	// so it cannot take the (non-re-entrant) lock and uses compare-then-
-	// rename instead (see its comment). Retired with the legacy loader in
-	// ptone/scion#3919, or else moved to the locked writer in part B.
-	"migrateLegacyYAMLKeysLocked": "ptone/scion#3919",
 }
 
 // settingsFileNames are the file names whose writes must use the writer.
