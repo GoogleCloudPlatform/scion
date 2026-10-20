@@ -39,7 +39,7 @@ import (
 // kind-keyed storage.ResourceStoragePath) behind one kind-generic Bootstrap.
 //
 // The two store models (store.Template / store.HarnessConfig) keep their typed
-// payloads (TemplateConfig / HarnessConfigData) — ResourceRecord is a shared
+// payloads (AgentConfig / HarnessConfigData) — ResourceRecord is a shared
 // *view* over their common fields, and a per-kind resourcePersistence bridges
 // the record to the concrete model so the typed payload survives a round-trip.
 

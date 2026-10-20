@@ -24,9 +24,10 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/internal/settingslockhook"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/filelock"
 	"gopkg.in/yaml.v3"
 )
 
@@ -305,20 +306,17 @@ func updateCLIContext(fn func(*CLIContext) error, force bool) error {
 }
 
 // lockCLIContext takes an exclusive advisory lock on path, which works
-// across processes.
+// across processes, waiting at most as long as the settings lock does (see
+// LockSettingsDir). The lock file is never removed.
 func lockCLIContext(path string) (func(), error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, cliContextFileMode)
+	l, err := filelock.Acquire(path, cliContextFileMode, settingslockhook.Wait(defaultSettingsLockWait))
 	if err != nil {
-		return nil, fmt.Errorf("open context lock: %w", err)
-	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		_ = f.Close()
+		if errors.Is(err, filelock.ErrTimeout) {
+			return nil, fmt.Errorf("%w: another process may be updating %s; try again", err, filepath.Join(filepath.Dir(path), cliContextFileName))
+		}
 		return nil, fmt.Errorf("lock context file: %w", err)
 	}
-	return func() {
-		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-		_ = f.Close()
-	}, nil
+	return l.Unlock, nil
 }
 
 // ValidHubName reports whether name is a valid hub nickname.

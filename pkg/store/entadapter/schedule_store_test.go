@@ -182,6 +182,34 @@ func TestListSchedulesExcludesDeletedByDefault(t *testing.T) {
 	assert.Equal(t, active.ID, res.Items[0].ID)
 }
 
+func TestListSchedulesFiltersByLastRunStatus(t *testing.T) {
+	s := newTestScheduleStore(t)
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	ranAt := time.Now().UTC().Truncate(time.Second)
+	next := ranAt.Add(time.Hour)
+
+	failing := newTestSchedule(projectID, "failing")
+	require.NoError(t, s.CreateSchedule(ctx, failing))
+	require.NoError(t, s.UpdateScheduleAfterRun(ctx, failing.ID, ranAt, next, "refused"))
+	recovered := newTestSchedule(projectID, "recovered")
+	require.NoError(t, s.CreateSchedule(ctx, recovered))
+	require.NoError(t, s.UpdateScheduleAfterRun(ctx, recovered.ID, ranAt, next, "refused"))
+	require.NoError(t, s.UpdateScheduleAfterRun(ctx, recovered.ID, ranAt, next, ""))
+	neverRun := newTestSchedule(projectID, "never-run")
+	require.NoError(t, s.CreateSchedule(ctx, neverRun))
+
+	res, err := s.ListSchedules(ctx, store.ScheduleFilter{LastRunStatus: store.ScheduleRunError}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.TotalCount)
+	require.Len(t, res.Items, 1)
+	assert.Equal(t, failing.ID, res.Items[0].ID)
+
+	res, err = s.ListSchedules(ctx, store.ScheduleFilter{}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, 3, res.TotalCount)
+}
+
 // TestListDueSchedulesClaimPath exercises the dialect-aware SKIP LOCKED claim
 // helper. On SQLite it degrades to a plain SELECT, so this verifies the
 // functional contract of the claim query: only active, already-due schedules

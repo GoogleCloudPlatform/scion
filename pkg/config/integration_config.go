@@ -339,68 +339,9 @@ type SelfManagedPluginEntry struct {
 	ConfigFile string // path to the Hub-side admin config file
 }
 
-// AddSelfManagedPluginToSettings adds a self-managed broker plugin entry to
-// the global settings.yaml with mode, address, and config_file fields.
-func AddSelfManagedPluginToSettings(entry SelfManagedPluginEntry) error {
-	globalDir, err := GetGlobalDir()
-	if err != nil {
-		return fmt.Errorf("resolve global dir: %w", err)
-	}
-
-	settingsPath := filepath.Join(globalDir, "settings.yaml")
-
-	var raw map[string]interface{}
-	data, err := os.ReadFile(settingsPath)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			return fmt.Errorf("read settings file: %w", err)
-		}
-		raw = make(map[string]interface{})
-	} else {
-		if err := yamlv3.Unmarshal(data, &raw); err != nil {
-			return fmt.Errorf("parse settings file: %w", err)
-		}
-		if raw == nil {
-			raw = make(map[string]interface{})
-		}
-	}
-
-	server, _ := raw["server"].(map[string]interface{})
-	if server == nil {
-		server = make(map[string]interface{})
-		raw["server"] = server
-	}
-
-	plugins, _ := server["plugins"].(map[string]interface{})
-	if plugins == nil {
-		plugins = make(map[string]interface{})
-		server["plugins"] = plugins
-	}
-
-	broker, _ := plugins["broker"].(map[string]interface{})
-	if broker == nil {
-		broker = make(map[string]interface{})
-		plugins["broker"] = broker
-	}
-
-	broker[entry.Name] = map[string]interface{}{
-		"self_managed": true,
-		"mode":         "self-managed",
-		"address":      entry.Address,
-		"config_file":  entry.ConfigFile,
-	}
-
-	out, err := yamlv3.Marshal(raw)
-	if err != nil {
-		return fmt.Errorf("marshal settings: %w", err)
-	}
-
-	return os.WriteFile(settingsPath, out, 0644)
-}
-
-// AddSelfManagedPluginWithBrokerType combines AddSelfManagedPluginToSettings and
-// AddPluginToMessageBrokerTypes into a single read-modify-write cycle, avoiding
-// the redundant file I/O of calling them separately.
+// AddSelfManagedPluginWithBrokerType adds a self-managed broker plugin entry
+// (mode, address and config_file) to the global settings.yaml and adds the
+// plugin to the message broker types, in a single read-modify-write cycle.
 func AddSelfManagedPluginWithBrokerType(entry SelfManagedPluginEntry) error {
 	globalDir, err := GetGlobalDir()
 	if err != nil {
@@ -408,6 +349,13 @@ func AddSelfManagedPluginWithBrokerType(entry SelfManagedPluginEntry) error {
 	}
 
 	settingsPath := filepath.Join(globalDir, "settings.yaml")
+
+	// Held from the read to the write (see LockSettingsDir).
+	lock, err := LockSettingsDir(globalDir)
+	if err != nil {
+		return err
+	}
+	defer lock.Unlock()
 
 	var raw map[string]interface{}
 	data, err := os.ReadFile(settingsPath)
@@ -493,7 +441,7 @@ func AddSelfManagedPluginWithBrokerType(entry SelfManagedPluginEntry) error {
 		return fmt.Errorf("marshal settings: %w", err)
 	}
 
-	return os.WriteFile(settingsPath, out, 0644)
+	return writeSettingsFileAtomic(lock, settingsPath, out)
 }
 
 // AddPluginToSettings adds a broker plugin entry to the global settings.yaml.
@@ -504,6 +452,13 @@ func AddPluginToSettings(pluginName, configFilePath string) error {
 	}
 
 	settingsPath := filepath.Join(globalDir, "settings.yaml")
+
+	// Held from the read to the write (see LockSettingsDir).
+	lock, err := LockSettingsDir(globalDir)
+	if err != nil {
+		return err
+	}
+	defer lock.Unlock()
 
 	var raw map[string]interface{}
 	data, err := os.ReadFile(settingsPath)
@@ -548,13 +503,13 @@ func AddPluginToSettings(pluginName, configFilePath string) error {
 		return fmt.Errorf("marshal settings: %w", err)
 	}
 
-	return os.WriteFile(settingsPath, out, 0644)
+	return writeSettingsFileAtomic(lock, settingsPath, out)
 }
 
 // AddPluginToMessageBrokerTypes appends pluginName to
 // server.message_broker.types in the global settings.yaml if it is not already
-// present. It also ensures that message_broker.enabled is true. The caller is
-// responsible for serialising concurrent writes (hub.SettingsWriteMu).
+// present. It also ensures that message_broker.enabled is true. It holds the
+// settings lock (LockSettingsDir) from its read to its write.
 func AddPluginToMessageBrokerTypes(pluginName string) error {
 	globalDir, err := GetGlobalDir()
 	if err != nil {
@@ -562,6 +517,13 @@ func AddPluginToMessageBrokerTypes(pluginName string) error {
 	}
 
 	settingsPath := filepath.Join(globalDir, "settings.yaml")
+
+	// Held from the read to the write (see LockSettingsDir).
+	lock, err := LockSettingsDir(globalDir)
+	if err != nil {
+		return err
+	}
+	defer lock.Unlock()
 
 	var raw map[string]interface{}
 	data, err := os.ReadFile(settingsPath)
@@ -637,7 +599,7 @@ func AddPluginToMessageBrokerTypes(pluginName string) error {
 		return fmt.Errorf("marshal settings: %w", err)
 	}
 
-	return os.WriteFile(settingsPath, out, 0644)
+	return writeSettingsFileAtomic(lock, settingsPath, out)
 }
 
 // CreatePluginConfigFile creates a default config file for a newly installed plugin.

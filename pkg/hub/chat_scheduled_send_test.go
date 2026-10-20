@@ -1367,23 +1367,32 @@ func TestScheduledSend_AbortBeforeSend_Released(t *testing.T) {
 }
 
 // abortingTopicStore aborts the sweeper's deliveries during the send's own
-// topic lookup (the second GetTopic of a fire), after the fire-time checks
-// passed.
+// topic lookup (the second GetTopic made by the delivery of row id), after
+// the fire-time checks passed, and refuses that lookup once the abort has
+// reached the delivery context. Calls from anything else are not counted.
 type abortingTopicStore struct {
 	WebChatStore
 	ScheduledMessageStore
 	srv   *Server
+	id    string
 	calls atomic.Int32
 }
 
 func (w *abortingTopicStore) GetTopic(ctx context.Context, id string) (*WebChatTopic, error) {
-	if w.calls.Add(1) == 2 {
-		w.srv.scheduledRuntime().abort()
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
+	exec, _ := ExecutorContextFromContext(ctx)
+	if exec.Kind != scheduledSendClientType || exec.ID != "scheduled_message:"+w.id || w.calls.Add(1) != 2 {
+		return w.WebChatStore.GetTopic(ctx, id)
 	}
-	return w.WebChatStore.GetTopic(ctx, id)
+	w.srv.scheduledRuntime().abort()
+	// The abort reaches the delivery context through context.AfterFunc,
+	// which runs on its own goroutine: wait until it has (ptone/scion#5395).
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-time.After(5 * time.Second):
+		// Never reached: answer the lookup, so the test fails on "sent".
+		return w.WebChatStore.GetTopic(ctx, id)
+	}
 }
 
 // A send refused because it was cut short is recorded as a delivery error,
@@ -1392,9 +1401,11 @@ func TestScheduledSend_AbortDuringSend_DeliveryError(t *testing.T) {
 	f := newScheduledSendFixture(t)
 	fireAt := time.Now().Add(2 * time.Minute)
 	sm := f.schedule(t, f.bob, "cut short", fireAt)
-	f.srv.SetWebChatStore(&abortingTopicStore{WebChatStore: f.wcs, ScheduledMessageStore: f.sms, srv: f.srv})
+	wrapped := &abortingTopicStore{WebChatStore: f.wcs, ScheduledMessageStore: f.sms, srv: f.srv, id: sm.ID}
+	f.srv.SetWebChatStore(wrapped)
 
 	assert.Equal(t, 1, f.srv.sweepScheduledMessages(context.Background(), fireAt.Add(time.Second)))
+	assert.Equal(t, int32(2), wrapped.calls.Load(), "aborted inside the send's GetTopic")
 	got := f.row(t, f.bob, sm.ID)
 	assert.Equal(t, ScheduledMessageFailed, got.Status)
 	assert.Equal(t, ScheduledFailureDeliveryError, got.FailureReason)

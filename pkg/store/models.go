@@ -1278,10 +1278,8 @@ type Template struct {
 	Description string `json:"description,omitempty"` // Optional description
 
 	// Configuration
-	Harness              string          `json:"harness"`                        // claude, gemini, opencode, codex, generic
-	DefaultHarnessConfig string          `json:"defaultHarnessConfig,omitempty"` // default_harness_config name from template config (e.g. "claude-web")
-	Image                string          `json:"image"`                          // Default container image
-	Config               *TemplateConfig `json:"config,omitempty"`
+	Harness              string `json:"harness"`                        // claude, gemini, opencode, codex, generic
+	DefaultHarnessConfig string `json:"defaultHarnessConfig,omitempty"` // default_harness_config name from template config (e.g. "claude-web")
 
 	// AgentConfig is a derived, read-only snapshot of the template's own
 	// scion-agent.{yaml,yml,json}, with per-agent fields cleared. Only the
@@ -1466,39 +1464,6 @@ const (
 	HarnessConfigScopeProject = "project"
 	HarnessConfigScopeUser    = "user"
 )
-
-// TemplateConfig holds template configuration details.
-type TemplateConfig struct {
-	Harness     string               `json:"harness,omitempty"`
-	Image       string               `json:"image,omitempty"`
-	ConfigDir   string               `json:"configDir,omitempty"`
-	Env         map[string]string    `json:"env,omitempty"`
-	Detached    bool                 `json:"detached,omitempty"`
-	CommandArgs []string             `json:"commandArgs,omitempty"`
-	Model       string               `json:"model,omitempty"`
-	Kubernetes  *KubernetesConfig    `json:"kubernetes,omitempty"`
-	HubAccess   *HubAccessConfig     `json:"hubAccess,omitempty"`
-	Secrets     []api.RequiredSecret `json:"secrets,omitempty"`
-	Telemetry   *api.TelemetryConfig `json:"telemetry,omitempty"`
-	MessageMode string               `json:"messageMode,omitempty"` // none, lineage, branch, project, hub
-}
-
-// HubAccessConfig defines what Hub API scopes an agent created from this template receives.
-type HubAccessConfig struct {
-	Scopes []string `json:"scopes,omitempty"`
-}
-
-// KubernetesConfig holds Kubernetes-specific configuration for templates.
-type KubernetesConfig struct {
-	Resources    *ResourceRequirements `json:"resources,omitempty"`
-	NodeSelector map[string]string     `json:"nodeSelector,omitempty"`
-}
-
-// ResourceRequirements defines compute resource requirements.
-type ResourceRequirements struct {
-	Limits   map[string]string `json:"limits,omitempty"`
-	Requests map[string]string `json:"requests,omitempty"`
-}
 
 // User represents a registered user in the Hub database.
 type User struct {
@@ -3232,6 +3197,9 @@ type ScheduleFilter struct {
 	ProjectID string
 	Status    string
 	Name      string
+	// LastRunStatus, when set, keeps only schedules whose most recent run
+	// ended with this status (ScheduleRunSuccess or ScheduleRunError).
+	LastRunStatus string
 }
 
 // ToAPI converts a store.Agent to an api.AgentInfo for external consumption.

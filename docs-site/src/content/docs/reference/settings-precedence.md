@@ -79,7 +79,10 @@ broker settings (settings.yaml telemetry)
 - Project telemetry policy beats `--enable-telemetry` / `--disable-telemetry` and
   `SCION_TELEMETRY_ENABLED`.
 - Hub telemetry defaults and project policy travel to the broker as separate tiers on every
-  create, start and restart. They are never written into the agent's inline config.
+  create, start and restart, to every broker. They are never written into the agent's inline
+  config or sent inline. A broker older than the `templateTiers` capability ignores both tiers,
+  so its agents get only its own settings telemetry plus the requester's on/off; the hub logs a
+  warning once per such broker.
 - Broker settings telemetry is applied at each start and is not persisted in the agent's
   `scion-agent.json`.
 

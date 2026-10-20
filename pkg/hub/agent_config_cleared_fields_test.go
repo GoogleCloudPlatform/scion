@@ -113,7 +113,7 @@ func TestLegacyCreateInputsDropClearedFields(t *testing.T) {
 		MaxTurns:      4,
 		ClearedFields: []string{"env.FOO", "resources"},
 	}}
-	ci, _ := legacyCreateInputsFromAppliedConfig(old, nil)
+	ci, _ := legacyCreateInputsFromAppliedConfig(old)
 	require.NotNil(t, ci)
 	require.NotNil(t, ci.InlineConfig)
 	assert.Nil(t, ci.InlineConfig.ClearedFields)

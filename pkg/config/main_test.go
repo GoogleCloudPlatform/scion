@@ -52,6 +52,11 @@ func TestMain(m *testing.M) {
 		_ = os.Unsetenv(name)
 	}
 	clearAmbientSettingsEnv()
+	// A re-exec'd copy of this test binary acting as a separate settings
+	// writer process (see settings_lock_test.go).
+	if mode := os.Getenv(settingsHelperEnv); mode != "" {
+		os.Exit(runSettingsHelper(mode))
+	}
 	os.Exit(m.Run())
 }
 

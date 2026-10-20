@@ -111,7 +111,7 @@ func TestDispatch_TemplateImageNotSentAsTopTier(t *testing.T) {
 		ID: tid("img-template"), Name: "Img Template", Slug: "img-template",
 		Harness: "claude", Scope: store.TemplateScopeGlobal, Status: store.TemplateStatusActive,
 		ContentHash: "img-tmpl-hash",
-		Config:      &store.TemplateConfig{Image: "template-image:v1"},
+		AgentConfig: &api.ScionConfig{Image: "template-image:v1"},
 	}
 	require.NoError(t, s.CreateTemplate(ctx, template))
 

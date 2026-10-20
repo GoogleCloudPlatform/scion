@@ -1127,8 +1127,6 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 		Slug:         api.Slugify(req.Name),
 		DisplayName:  source.DisplayName,
 		Description:  source.Description,
-		Image:        source.Image,
-		Config:       source.Config,
 		Scope:        destScope,
 		ScopeID:      scopeID,
 		ProjectID:    scopeID,
