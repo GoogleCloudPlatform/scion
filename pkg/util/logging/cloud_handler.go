@@ -360,7 +360,8 @@ func slogLevelToSeverity(level slog.Level) gcplog.Severity {
 	}
 }
 
-// addAttrToMap adds a slog.Attr to a map, handling nested groups.
+// addAttrToMap adds a slog.Attr to a map, handling nested groups. Every
+// Cloud Logging handler renders its attributes here, through cloudAttrValue.
 func addAttrToMap(m map[string]any, a slog.Attr) {
 	val := a.Value.Resolve()
 	if val.Kind() == slog.KindGroup {
@@ -378,7 +379,7 @@ func addAttrToMap(m map[string]any, a slog.Attr) {
 		}
 		return
 	}
-	m[a.Key] = val.Any()
+	m[a.Key] = cloudAttrValue(val)
 }
 
 // promoteAttrToLabels checks if a slog.Attr should be promoted to a GCP label.

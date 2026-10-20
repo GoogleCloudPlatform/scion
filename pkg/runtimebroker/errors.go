@@ -782,7 +782,7 @@ func (s *Server) writeStartContextError(w http.ResponseWriter, err error, op str
 		// through the templatecache.HubConnectivityError the resolver wraps
 		// such a failure in, via its Unwrap method.
 		if errors.Is(sce.OriginalErr, fs.ErrNotExist) {
-			s.agentLifecycleLog.Warn("buildStartContext failed: local file missing", append(append([]any{"op", op}, extra...), "error", startContextDiagnostic(sce))...)
+			s.logStartContextFailure("buildStartContext failed: local file missing", op, startContextDiagnostic(sce), extra)
 			writeMissingLocalFileError(w, sce.OriginalErr, op)
 			return http.StatusUnprocessableEntity
 		}
