@@ -227,7 +227,7 @@ func TestAsyncStart_StopBeforeTransfer(t *testing.T) {
 	mgr := newAsyncManager()
 	srv, rtb := newAsyncTestServer(t, mgr)
 	key := launchKey{Slug: "agent-i"}
-	setHook(t, &testHookAsyncLaunchBeforeHandOff, func(_ context.Context, k launchKey) {
+	setHook(t, &testHookAsyncLaunchBeforeHandOff, func(_ context.Context, k launchKey, _ *launchRecord, _ launchCtx) {
 		if k == key {
 			srv.cancelLocalLaunch(key, asyncStartHubAgentID)
 		}
@@ -258,7 +258,7 @@ func TestAsyncStart_StopBetweenCancels(t *testing.T) {
 
 	atHandOff := make(chan struct{})
 	releaseStart := make(chan struct{})
-	setHook(t, &testHookAsyncLaunchBeforeHandOff, func(_ context.Context, k launchKey) {
+	setHook(t, &testHookAsyncLaunchBeforeHandOff, func(_ context.Context, k launchKey, _ *launchRecord, _ launchCtx) {
 		if k == key {
 			close(atHandOff)
 			<-releaseStart
@@ -384,7 +384,7 @@ func TestAsyncStart_RegistryCancelBeforeBegin_TrackerBeforeHandoff(t *testing.T)
 	for name, stopQuery := range map[string]string{"legacy": legacyStopQuery, "run-scoped": runScopedStopQuery} {
 		t.Run(name, func(t *testing.T) {
 			f := newStartIVFixture(t, "agent-iva", stopQuery)
-			setHook(t, &testHookAsyncLaunchBeforeHandOff, func(ctx context.Context, k launchKey) {
+			setHook(t, &testHookAsyncLaunchBeforeHandOff, func(ctx context.Context, k launchKey, _ *launchRecord, _ launchCtx) {
 				if k != f.key {
 					return
 				}
@@ -453,7 +453,7 @@ func TestAsyncStart_ScopedCancelsLeaveRegistration(t *testing.T) {
 	srv, _ := newAsyncTestServer(t, mgr)
 	key := launchKey{Slug: "agent-sc"}
 	var otherRun, otherAgent bool
-	setHook(t, &testHookAsyncLaunchBeforeHandOff, func(_ context.Context, k launchKey) {
+	setHook(t, &testHookAsyncLaunchBeforeHandOff, func(_ context.Context, k launchKey, _ *launchRecord, _ launchCtx) {
 		if k == key {
 			otherRun = srv.cancelLocalLaunchForRun(key, asyncStartHubAgentID, "run-other")
 			otherAgent = srv.cancelLocalLaunchForRun(key, "hub-agent-other", "")
@@ -712,5 +712,95 @@ func TestAsyncStart_CancelDuringAdmissionAnswers409(t *testing.T) {
 	w = postAsyncStart(t, srv, "agent-adm", asyncStartQuery(), asyncStartBody("L-adm2"))
 	if w.Code == http.StatusConflict {
 		t.Fatalf("an admission failure without a cancel answered 409: %s", w.Body.String())
+	}
+}
+
+// TestAsyncStart_LaunchWiring: the async start's launch takes the request's
+// budget from the moment it was received (deadline = receipt +
+// launchTimeoutSeconds), the hub's keepalive interval, and the request's
+// project ID, as a create's does.
+func TestAsyncStart_LaunchWiring(t *testing.T) {
+	mgr := newAsyncManager()
+	mgr.startBlock = make(chan struct{})
+	t.Cleanup(func() { close(mgr.startBlock) })
+	srv, _ := newAsyncTestServer(t, mgr)
+	key := launchKey{ProjectID: "proj-w", Slug: "agent-w"}
+	var deadline time.Time
+	var keepalive time.Duration
+	var projectID string
+	var seen bool
+	setHook(t, &testHookAsyncLaunchBeforeHandOff, func(_ context.Context, k launchKey, rec *launchRecord, lc launchCtx) {
+		if k == key {
+			deadline, keepalive, projectID, seen = rec.Deadline, lc.keepalive, lc.projectID, true
+		}
+	})
+
+	body := asyncStartBody("L-w")
+	body["launchKeepaliveSeconds"] = 7
+	before := time.Now()
+	w := postAsyncStart(t, srv, "agent-w", "projectId=proj-w&"+asyncStartQuery(), body)
+	after := time.Now()
+	if w.Code != http.StatusAccepted || !decodeStartResponse(t, w).LaunchPending {
+		t.Fatalf("expected an accepted async start, got %d: %s", w.Code, w.Body.String())
+	}
+	if !seen {
+		t.Fatal("the transfer hook did not run")
+	}
+	if lo, hi := before.Add(300*time.Second), after.Add(300*time.Second); deadline.Before(lo) || deadline.After(hi) {
+		t.Errorf("launch deadline = %v, want receipt + 300s, within [%v, %v]", deadline, lo, hi)
+	}
+	if keepalive != 7*time.Second {
+		t.Errorf("launch keepalive = %v, want the request's 7s", keepalive)
+	}
+	if projectID != "proj-w" {
+		t.Errorf("launch project ID = %q, want the request's proj-w", projectID)
+	}
+}
+
+// listCancelRuntimeManager is a manager on a runtime without async launch
+// support whose List runs onList (and then lists nothing), so a test can
+// cancel the start's registration during admission without failing it.
+type listCancelRuntimeManager struct {
+	*runtimeAsyncManager
+	onList func()
+}
+
+func (m *listCancelRuntimeManager) List(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+	if m.onList != nil {
+		m.onList()
+	}
+	return nil, nil
+}
+
+// TestAsyncStart_SyncFallbackCancelledAnswers409: on a runtime without async
+// launch support, an eligible start runs synchronously under its
+// registration; a stop that cancels the registration before Start is
+// answered 409 start_cancelled, and Manager.Start is never called. Control:
+// the same start without the cancel starts synchronously.
+func TestAsyncStart_SyncFallbackCancelledAnswers409(t *testing.T) {
+	mgr := &listCancelRuntimeManager{runtimeAsyncManager: &runtimeAsyncManager{asyncManager: newAsyncManager(), rt: newTestSubstrateRuntime()}}
+	srv, _ := newAsyncTestServer(t, mgr)
+	key := launchKey{Slug: "agent-sf"}
+	mgr.onList = func() { srv.cancelLocalLaunch(key, asyncStartHubAgentID) }
+
+	w := postAsyncStart(t, srv, "agent-sf", asyncStartQuery(), asyncStartBody("L-sf"))
+	assertErrorCode(t, w, http.StatusConflict, api.BrokerErrCodeStartCancelled)
+	if n := mgr.StartCallCount(); n != 0 {
+		t.Fatalf("a cancelled synchronous fallback called Manager.Start %d time(s)", n)
+	}
+	if !registryEmptyFor(srv, key) {
+		t.Fatal("the cancelled fallback left its registration behind")
+	}
+
+	mgr.onList = nil
+	w = postAsyncStart(t, srv, "agent-sf", asyncStartQuery(), asyncStartBody("L-sf2"))
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("control: status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if resp := decodeStartResponse(t, w); resp.LaunchPending || resp.Agent == nil {
+		t.Fatalf("control: expected the synchronous start answer, got %+v", resp)
+	}
+	if n := mgr.StartCallCount(); n != 1 {
+		t.Fatalf("control: expected one synchronous Start, got %d", n)
 	}
 }

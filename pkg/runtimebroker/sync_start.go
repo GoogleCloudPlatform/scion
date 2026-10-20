@@ -128,7 +128,7 @@ func (s *Server) beginCreateRegistration(ctx context.Context, req CreateAgentReq
 // request's, or for a start the start tracker's (startsInFlight.beginRun),
 // so a tracker cancel (cancelInFlightStart, from a stop) that lands before
 // handOff makes cancelled true and handOff refuses (design wave 3 §2 D-f
-// step 2, Optional-1a).
+// step 2).
 //
 // If an earlier start of the same name is still running here, it is
 // cancelled and waited for (bounded by ctx and the supersede wait) before
@@ -360,7 +360,7 @@ func (s *Server) cancelLocalLaunchRecord(key launchKey, agentID, runID string) *
 // launch registered since then, leaving alone woken, the record the first
 // cancel already woke. An async start whose registration began after the
 // first cancel, and handed over to its launch before the tracker cancel
-// reached it, is ended here (design wave 3 §2 D-f, Optional-1 case iv). It
+// reached it, is ended here (design wave 3 §2 D-f). It
 // reports whether it woke a launch.
 func (s *Server) recancelLocalLaunch(key launchKey, agentID, runID string, woken *launchRecord) bool {
 	if s.launchRegistry == nil {

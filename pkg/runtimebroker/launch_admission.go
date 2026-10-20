@@ -248,7 +248,7 @@ func (s *Server) acceptAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx c
 	// a stop, delete or newer start took the name in the meantime, refuse
 	// with the 409 the wait itself gives, before accepting anything.
 	if testHookAsyncLaunchBeforeHandOff != nil {
-		testHookAsyncLaunchBeforeHandOff(ctx, key)
+		testHookAsyncLaunchBeforeHandOff(ctx, key, rec, a.lc)
 	}
 	if !ss.handOff(rec) {
 		s.untrackAsyncLaunch(rec)
@@ -286,8 +286,9 @@ func (s *Server) acceptAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx c
 
 // testHookAsyncLaunchBeforeHandOff, when set (tests only), runs in
 // acceptAsyncLaunch immediately before the registration is handed over to
-// the launch, with the admission context.
-var testHookAsyncLaunchBeforeHandOff func(ctx context.Context, key launchKey)
+// the launch, with the admission context, the launch record and the launch
+// context the launch will run with.
+var testHookAsyncLaunchBeforeHandOff func(ctx context.Context, key launchKey, rec *launchRecord, lc launchCtx)
 
 // asyncStartInputs are an async start's identity, budget and resolved
 // runtime, as startAgent read and resolved them.

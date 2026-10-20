@@ -3153,7 +3153,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	// work, so a stop or delete of the agent, or a newer start of the
 	// name, cancels it, and a newer create waits for it. The registration
 	// follows ctx, the start tracker's context, so a tracker cancel before
-	// the transfer also refuses it (Optional-1a).
+	// the transfer also refuses it.
 	hubAgentID := r.URL.Query().Get(api.AgentIDQueryParam)
 	var ss *syncStart
 	if startReq.AsyncLaunch {
@@ -3901,7 +3901,7 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 		// Then wake a launch again: an async start that registered after
 		// the first cancel and handed over to its launch before the tracker
 		// cancel reached it has a launch record by now, since its handler
-		// has returned (design wave 3 §2 D-f, Optional-1 case iv). Same
+		// has returned (design wave 3 §2 D-f). Same
 		// agent scope as the first cancel; the record that cancel already
 		// woke is left alone.
 		s.recancelLocalLaunch(key, hubAgentID, "", woken)
@@ -3928,7 +3928,7 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 		}
 		cancelledOwn = s.cancelInFlightStartRun(ctx, key, runID)
 		// Again after the tracker wait, as for a legacy stop above
-		// (Optional-1 case iv), with the same agent and run scope.
+		// with the same agent and run scope.
 		wokeLaunch := woken != nil
 		if s.recancelLocalLaunch(key, hubAgentID, runID, woken) {
 			wokeLaunch = true

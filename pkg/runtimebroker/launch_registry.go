@@ -250,7 +250,7 @@ func (r *launchRegistry) CancelLocalFor(key launchKey, agentID, runID string) bo
 // after its start tracker wait, passes the record its first cancel woke, so
 // it reaches only a record registered in between: an async start that
 // registered after the first cancel and handed over to its launch (design
-// wave 3 §2 D-f, Optional-1 case iv).
+// wave 3 §2 D-f).
 func (r *launchRegistry) cancelLocalForExcept(key launchKey, agentID, runID string, skip *launchRecord) *launchRecord {
 	if r == nil {
 		// A *Server built directly (e.g. by a test that does not go through
