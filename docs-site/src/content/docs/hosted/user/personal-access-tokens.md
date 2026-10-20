@@ -263,7 +263,7 @@ The same per-request checks apply, with these limits:
   live project-access checks before any other rule can allow it.
 - **Inbox and conversations.** Chat writes made with a token (sending, changing or removing your
   own inbox items, notifications, conversations and direct messages) need `inbox:write`. Reading
-  your own inbox, notifications, conversations, direct messages, read state and notification
+  your own inbox, notifications, conversations, direct messages, read state and chat
   preferences needs `inbox:read`. Both act only on your own records. A project token reaches only
   records of its project, and only while you are a member; a record with no project, such as a
   direct message between users, needs a hub token.
@@ -316,10 +316,11 @@ The same per-request checks apply, with these limits:
   [Scheduling](/scion/hosted/user/scheduling/#security--authorization).
 - **Identity governance.** Reading role definitions, role bindings and access constraints needs
   `role:read`, `role_binding:read` or `access_constraint:read`; reading another principal's
-  effective access or explaining its authorization needs `hub_audit:read`. These scopes can be
+  effective access, explaining its authorization, or reading an access constraint's audit history
+  needs `hub_audit:read`. These scopes can be
   selected only on a hub token, and writes to these records still need a sign-in. Listing users
   needs `user:list` together with `user:read`, and the list holds only users the token may read;
-  only super-admins hold `user:list`. Redeeming an invitation code and linking a chat account
+  among the built-in roles, only super-admin holds the `user.list` permission. Redeeming an invitation code and linking a chat account
   always need a sign-in.
 - **Runtime Broker registration.** The `broker:create` scope can be selected only on a hub token.
   A project token cannot create or re-register a Runtime Broker (see

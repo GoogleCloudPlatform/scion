@@ -40,8 +40,9 @@ re-link it. See [Linked git projects](/scion/local/workspace/#linked-git-project
 | --- | --- |
 | Running agents with no hub | Start the local hub once with `scion server start` (its first run opens the [onboarding wizard](/scion/getting-started/onboarding/)). To start it at login, install the service file that `scion server install` prints. |
 | `--no-hub` flag | Removed. It stays for one release as a hidden flag that fails with a pointer to this page. Every command uses the hub. |
-| `scion hub enable` | Removed. A configured hub endpoint is used automatically. The hidden command fails with guidance. |
+| `scion hub enable` | Removed. The hub the CLI selects (from the hub list) is used automatically. The hidden command fails with guidance. |
 | `scion hub disable` | Removed. To stop the local hub, run `scion server stop`. The hidden command fails with guidance. |
+| `local_experiments` setting | No effect: every agent starts through a hub, and the hub's experiments decide (**Admin → Server Config → Experiments**; see [Experiments](/scion/reference/experiments/)). |
 | `hub.enabled`, `hub.local_only` settings | Deprecated and ignored. They are still accepted so existing settings files validate. `scion hub status` notes it when a settings file still sets them. |
 | `scion hub link` before using a repository with the local hub | Not needed. A repository links itself to the local workstation hub on its first command, without a prompt. A remote hub still asks before linking. |
 | `scion --no-hub delete <name>` to finish a failed local cleanup | `scion delete --cleanup-only <name>` (add `--preserve-branch` to keep the branch). |
@@ -140,9 +141,10 @@ project's own settings are read; a value in your global settings does not mark o
 
 ### Users with a remote hub endpoint
 
-If your settings already had a remote `hub.endpoint` but you kept the hub turned off, that hub is
-now used. `scion hub status` shows the endpoint and where it came from. Nothing is linked to a
-remote hub without a prompt.
+If your global settings already had a remote `hub.endpoint` but you kept the hub turned off, that
+hub is imported into the hub list and becomes the current hub if none is current. `scion hub
+status` shows the endpoint and where it came from. Nothing is linked to a remote hub without a
+prompt.
 
 ## Missing image registry
 

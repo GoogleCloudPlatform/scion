@@ -13,7 +13,7 @@ Scion supports two ways to deliver skills to agents:
 This page covers the Skill Bank: how to author, publish, version, and consume skills with the `scion skills` command group. For Hub-side registry administration and federation, see [Skill Registry & Federation](/scion/hosted/single-node/skill-registry/).
 
 :::note
-The `scion skills` commands (except `create`) talk to a Hub. Make sure a Hub endpoint is configured — see [Connecting to a Hub](/scion/hosted/user/hosted-user/).
+The `scion skills` commands (except `create`) talk to a Hub. Make sure a Hub is selected (from your hub list, or with `--hub`) — see [Connecting to a Hub](/scion/hosted/user/hosted-user/).
 :::
 
 ## Anatomy of a skill

@@ -35,7 +35,7 @@ To allow the Hub to dispatch agents to your machine, you must start a Runtime Br
   scion hub auth login
   ```
 - `scion runtime-broker register`, `join` and the other Runtime Broker administration commands talk to the Hub the CLI selects, like any other command: `--hub` (a URL or a hub list nickname), `SCION_HUB_ENDPOINT` or `SCION_HUB_URL`, then, inside a linked project directory, its link entry, then the current Hub. `scion runtime-broker start` does not use the current Hub: the Runtime Broker process reports to the Hub named in its server settings (next item). A Runtime Broker started without a Hub endpoint does not connect after a later `register`; stop and start it again. `register` and `join` refuse a Hub URL with user info, a query or a fragment; pass a plain `http(s)` URL.
-- The Runtime Broker process itself reports to the Hub named by `server.broker.hub_endpoint` (or `SCION_SERVER_RUNTIMEBROKER_HUBENDPOINT`). `register` and `join` save that setting when it is unset. While it is unset, the Runtime Broker falls back to `hub.endpoint` and logs a deprecation warning at startup; set `server.broker.hub_endpoint` in `~/.scion/settings.yaml` to avoid it. See [The server's own hub endpoint](/scion/hosted/user/multiple-hubs/#the-servers-own-hub-endpoint).
+- The Runtime Broker process itself reports to the Hub named by `server.broker.hub_endpoint` (or `SCION_SERVER_RUNTIMEBROKER_HUBENDPOINT`). `register` and `join` save that setting when it is unset (except on a host that runs a workstation Hub). While it is unset, the Runtime Broker falls back to `hub.endpoint` and logs a deprecation warning at startup; set `server.broker.hub_endpoint` in `~/.scion/settings.yaml` to avoid it. See [The server's own hub endpoint](/scion/hosted/user/multiple-hubs/#the-servers-own-hub-endpoint).
 - Configure an image registry (`scion config set --global image_registry <registry>`): `scion runtime-broker start` refuses to start without one.
 - `scion runtime-broker start`, `register` and `join` work outside a project directory; no `--global` is needed.
 
@@ -117,7 +117,7 @@ scion runtime-broker join --broker-id <broker-id> --token-file /path/to/token
 - The token is read from `--token-file` (`-` reads it from stdin), or else from the `SCION_BROKER_JOIN_TOKEN` environment variable. There is no flag that takes the token on the command line. If the file has any group or other permissions, `join` prints a warning and still uses it.
 - `--broker-id` can also come from `SCION_BROKER_ID`.
 - The broker server does not have to be running yet; `join` only warns if it is not.
-- `join` saves the credentials to `~/.scion/hub-credentials/<name>.json` and records the Hub endpoint and broker ID in global settings, as `register` does.
+- `join` saves the credentials to `~/.scion/hub-credentials/<name>.json` and records the broker ID and, when unset, `server.broker.hub_endpoint` in global settings (not on a host that runs a workstation Hub), as `register` does.
 - If the host already has credentials for this Hub connection, or its settings name a different broker ID, `join` stops. Pass `--force` to replace them.
 - `--name`, `--transport-mode` and `--transport-audience` work as for `register`.
 
@@ -270,7 +270,7 @@ fs.inotify.max_user_instances=8192
 fs.inotify.max_user_watches=524288
 ```
 
-The new limits apply without restarting the Runtime Broker or the agents. A VS Code window opened with [`scion vscode`](/scion/reference/cli/#scion-vscode) runs its file watcher inside the agent container too, so it uses an instance of the same limit; when none is left, files created outside the explorer stop appearing in that window. See [Troubleshooting: new files do not appear in the explorer](/scion/reference/cli/#troubleshooting-new-files-do-not-appear-in-the-explorer).
+The new limits apply to new watchers without restarting the Runtime Broker or the agents; the Runtime Broker's startup warning is re-evaluated only at its next start. A VS Code window opened with [`scion vscode`](/scion/reference/cli/#scion-vscode) runs its file watcher inside the agent container too, so it uses an instance of the same limit; when none is left, files created outside the explorer stop appearing in that window. See [Troubleshooting: new files do not appear in the explorer](/scion/reference/cli/#troubleshooting-new-files-do-not-appear-in-the-explorer).
 
 ## Broker Health Monitoring
 

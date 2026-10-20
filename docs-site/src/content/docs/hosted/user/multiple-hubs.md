@@ -166,11 +166,11 @@ Auth:     Dev auth (<dev token source>), not verified; run 'scion hub status' to
 Saved context (applies outside scion project directories): prod / web
 ```
 
-The source labels are `--hub flag`, `SCION_HUB_ENDPOINT` (or `SCION_HUB_URL`), `directory link`, `project settings: <path>`, `global settings` and `current context` for the hub, and `--project flag`, `directory: <path>`, `current context` and `global project` for the project; `none` means nothing chose one. A hub that is not in the hub list shows `-` as its name. `scion hub status` uses the same labels for its endpoint.
+The source labels are `--hub flag`, `SCION_HUB_ENDPOINT` (or `SCION_HUB_URL`), `directory link` and `current context` for the hub, and `--project flag`, `directory: <path>`, `current context` and `global project` for the project; `none` means nothing chose one. A hub that is not in the hub list shows `-` as its name. `scion hub status` uses the same labels for its endpoint.
 
 With no hub at all, `scion use` prints `No hub selected. Add one with 'scion hub add <name> <url>' or start a local hub with 'scion server start'.` and exits 0.
 
-With `--format json`, the output has `effective` (`hub` with `name`, `endpoint` and `source`; `project` with `id`, `slug`, `name`, `path` and `source`; and `auth` with `method` and `user`), `context` (the saved hub and project), and `overridden`, which is `true` when the effective target differs from the saved context. The JSON `source` values are `flag`, `env`, `directory`, `project_settings`, `context`, `global_settings`, `global` and `none`. A script can check its target this way before it acts.
+With `--format json`, the output has `effective` (`hub` with `name`, `endpoint` and `source`; `project` with `id`, `slug`, `name`, `path` and `source`; and `auth` with `method` and `user`), `context` (the saved hub and project), and `overridden`, which is `true` when the effective target differs from the saved context. The JSON `source` values are `flag`, `env`, `directory`, `context`, `global` and `none`. A script can check its target this way before it acts.
 
 ## List projects across hubs
 

@@ -28,18 +28,7 @@ You declare plugins in a template. When Scion provisions an agent from that temp
 
 ## Turning the experiment on
 
-The setting depends on whether a Hub dispatches the agent.
-
-**Hosted and workstation modes.** When agents are started through a Hub (this includes the workstation [combo server](/scion/workstation/workstation-server/)), only the Hub decides. An admin turns on **Agent Plugins (native install)** (`hub.agent_plugins`) under **Admin → Server Config → Experiments**; see [Experiments](/scion/reference/experiments/). The Hub sends the value to the Runtime Broker with every create and start. A Runtime Broker never reads its own `settings.yaml` for this, so a broker operator cannot turn the feature on for a Hub that has it off.
-
-**Local mode (no Hub).** Add the experiment to `local_experiments` in your global (`~/.scion/settings.yaml`) or project (`.scion/settings.yaml`) settings:
-
-```yaml
-local_experiments:
-  - hub.agent_plugins
-```
-
-`local_experiments` only affects experiments that the local provisioning path consults. In this release there is exactly one, `hub.agent_plugins`. Listing any other experiment there has no effect: it does not turn on Hub features. A name that is not a registered experiment is logged once and ignored.
+Agents are started through a Hub (this includes the workstation [combo server](/scion/workstation/workstation-server/)), and only the Hub decides. An admin turns on **Agent Plugins (native install)** (`hub.agent_plugins`) under **Admin → Server Config → Experiments**; see [Experiments](/scion/reference/experiments/). The Hub sends the value to the Runtime Broker with every create and start. A Runtime Broker never reads its own `settings.yaml` for this, so a Runtime Broker operator cannot turn the feature on for a Hub that has it off. The `local_experiments` setting of the removed local-only mode has no effect (see [Local-only mode removal](/scion/reference/local-mode-removal/)).
 
 **Turning it off.** Scion checks the experiment when it provisions an agent **and at every start**. If it is off at a start, Scion stages no plugins for that start, and the harness removes the plugins that Scion installed earlier. The start prints:
 
