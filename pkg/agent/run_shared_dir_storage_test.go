@@ -765,9 +765,9 @@ func TestStartSharedDirStorage_MalformedGlobalSettings_NoKey_SucceedsAsMain(t *t
 	assertLegacyLocalSharedDirBehavior(t, capturedConfig, envMap, f.projectScionDir)
 }
 
-// TestStartSharedDirStorage_LegacyGlobalSettings_MentionsKey_LoadedAndEnforced is
-// round 4 review finding S-L1: a global settings.yaml with no
-// A global settings file without `schema_version: "1"` is converted at its
+// TestStartSharedDirStorage_LegacyGlobalSettings_MentionsKey_LoadedAndEnforced
+// (round 4 review finding S-L1, updated for ptone/scion#3919): a global
+// settings file without `schema_version: "1"` is converted at its
 // own layer, which keeps its server block (ptone/scion#3919): the operator's
 // shared_dir_storage=nfs config is loaded, not silently dropped, so Start
 // enforces it (here: the export is not mounted) and Run is never called.

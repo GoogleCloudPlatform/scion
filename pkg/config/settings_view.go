@@ -182,7 +182,10 @@ func loadLegacySettingsLayer(k *koanf.Koanf, path string, parser koanf.Parser, s
 	}
 	// Whether this layer's hub.project_id comes only from a legacy
 	// hub.projectId key (see legacyLayerState.hubIDFromCamel).
-	camelOnly := !fk.Exists(projectkeys.ConfigHubProjectIDKey) && fk.String(projectkeys.ConfigHubProjectIDJSON) != ""
+	paths := foldedKeyPaths(fk)
+	camelKey, hasCamel := paths[strings.ToLower(projectkeys.ConfigHubProjectIDJSON)]
+	_, hasSnake := paths[strings.ToLower(projectkeys.ConfigHubProjectIDKey)]
+	camelOnly := !hasSnake && hasCamel && fk.String(camelKey) != ""
 	if version, _ := DetectSettingsFormat(data); version != "" {
 		if camelOnly {
 			// Read-only fallback: a versioned file whose hub project ID
@@ -192,9 +195,9 @@ func loadLegacySettingsLayer(k *koanf.Koanf, path string, parser koanf.Parser, s
 			warnUnparseableSettingOnce(projectkeys.ConfigHubProjectIDJSON+"@"+path,
 				"settings: "+path+" uses the legacy key hub.projectId; reading it as hub.project_id (rename the key)")
 			_ = fk.Load(confmap.Provider(map[string]interface{}{
-				projectkeys.ConfigHubProjectIDKey: fk.String(projectkeys.ConfigHubProjectIDJSON),
+				projectkeys.ConfigHubProjectIDKey: fk.String(camelKey),
 			}, "."), nil)
-			fk.Delete(projectkeys.ConfigHubProjectIDJSON)
+			fk.Delete(camelKey)
 			st.hubIDFromCamel = true
 		} else if fk.Exists(projectkeys.ConfigHubProjectIDKey) {
 			st.hubIDFromCamel = false
@@ -202,7 +205,7 @@ func loadLegacySettingsLayer(k *koanf.Koanf, path string, parser koanf.Parser, s
 		return k.Merge(fk)
 	}
 
-	converted, w, err := convertLegacySettingsLayer(fk)
+	converted, w, err := convertLegacySettingsLayer(fk, k)
 	if err != nil {
 		return fmt.Errorf("%s: %w", path, err)
 	}
@@ -231,7 +234,7 @@ type legacyLayerState struct {
 // already loaded into fk: the file's own keys, with every key the legacy
 // Settings shape decodes replaced by its AdaptLegacySettings conversion.
 // It is an error when the legacy shape cannot decode the file.
-func convertLegacySettingsLayer(fk *koanf.Koanf) (converted map[string]interface{}, warnings []string, err error) {
+func convertLegacySettingsLayer(fk, lower *koanf.Koanf) (converted map[string]interface{}, warnings []string, err error) {
 	legacy := &Settings{}
 	if err := fk.Unmarshal("", legacy); err != nil {
 		return nil, nil, fmt.Errorf("decoding legacy settings: %w", err)
@@ -247,14 +250,18 @@ func convertLegacySettingsLayer(fk *koanf.Koanf) (converted map[string]interface
 		return nil, nil, fmt.Errorf("converting legacy settings: %w", err)
 	}
 	delete(adapted, "schema_version")
-	adapted = keepLegacySourcedLeaves(adapted, fk)
+	adapted = keepLegacySourcedLeaves(adapted, fk, lower)
 
 	raw := fk.Raw()
 	delete(raw, "harnesses")
 	delete(raw, "bucket")
 	if hub, isMap := raw["hub"].(map[string]interface{}); isMap {
-		for _, key := range legacyOnlyHubKeys {
-			delete(hub, key)
+		for key := range hub {
+			for _, legacyKey := range legacyOnlyHubKeys {
+				if strings.EqualFold(key, legacyKey) {
+					delete(hub, key)
+				}
+			}
 		}
 	}
 	// A legacy harness override spells auth_selected_type in camelCase;
@@ -271,7 +278,11 @@ func convertLegacySettingsLayer(fk *koanf.Koanf) (converted map[string]interface
 			}
 			for _, o := range overrides {
 				if override, isMap := o.(map[string]interface{}); isMap {
-					delete(override, "auth_selectedType")
+					for key := range override {
+						if strings.EqualFold(key, "auth_selectedType") {
+							delete(override, key)
+						}
+					}
 				}
 			}
 		}
@@ -287,17 +298,54 @@ func convertLegacySettingsLayer(fk *koanf.Koanf) (converted map[string]interface
 // runtime converts to profiles.NAME.runtime: "" (the field is not
 // omitempty), and every converted runtime entry gets type: NAME; neither
 // was set by the file, so both are dropped here.
-func keepLegacySourcedLeaves(adapted map[string]interface{}, fk *koanf.Koanf) map[string]interface{} {
+//
+// Source keys match case-insensitively, as the legacy decode does (a
+// hand-edited hub.projectID converts like hub.projectId).
+//
+// A harness config's harness is derived from the entry's name, like a
+// runtime's type, but its consumers do not fall back to the name when it is
+// empty, so the derived value is kept unless a lower layer (lower) already
+// sets that entry's harness.
+func keepLegacySourcedLeaves(adapted map[string]interface{}, fk, lower *koanf.Koanf) map[string]interface{} {
 	ak := koanf.New(".")
 	if err := ak.Load(confmap.Provider(adapted, ""), nil); err != nil {
 		return adapted
 	}
+	paths := foldedKeyPaths(fk)
 	for _, key := range ak.Keys() {
-		if src := legacySourceKey(key); src == "" || !fk.Exists(src) {
+		src := legacySourceKey(key)
+		if _, ok := paths[strings.ToLower(src)]; src == "" || !ok {
+			ak.Delete(key)
+			continue
+		}
+		if isDerivedHarnessKey(key) && lower != nil && lower.Exists(key) {
 			ak.Delete(key)
 		}
 	}
 	return ak.Raw()
+}
+
+// isDerivedHarnessKey reports whether key is harness_configs.NAME.harness,
+// which AdaptLegacySettings derives from the entry's name.
+func isDerivedHarnessKey(key string) bool {
+	parts := strings.Split(key, ".")
+	return len(parts) == 3 && parts[0] == "harness_configs" && parts[2] == "harness"
+}
+
+// foldedKeyPaths returns every key path of k (each leaf key and each of its
+// parent paths), lower-cased, mapped to the path as k spells it.
+func foldedKeyPaths(k *koanf.Koanf) map[string]string {
+	paths := map[string]string{}
+	for _, key := range k.Keys() {
+		parts := strings.Split(key, ".")
+		for i := 1; i <= len(parts); i++ {
+			p := strings.Join(parts[:i], ".")
+			if _, seen := paths[strings.ToLower(p)]; !seen {
+				paths[strings.ToLower(p)] = p
+			}
+		}
+	}
+	return paths
 }
 
 // legacySourceKey returns the key of a legacy-format file that

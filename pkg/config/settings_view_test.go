@@ -447,3 +447,42 @@ func TestLegacySourceKey(t *testing.T) {
 		assert.Equal(t, want, legacySourceKey(key), key)
 	}
 }
+
+// A legacy entry's harness, derived from the entry's name, does not replace
+// the harness a lower layer sets for the same entry; with no lower entry it
+// is set from the name, as before.
+func TestLoadSettings_LegacyHarnessEntryKeepsLowerHarness(t *testing.T) {
+	legacyProject := "harnesses:\n  claude-vertex:\n    image: example.com/claude:3\n  gemini:\n    image: example.com/gemini:3\n"
+	projectDir := setupSettingsViewTest(t,
+		"schema_version: \"1\"\nharness_configs:\n  claude-vertex:\n    harness: claude\n    user: scion\n", legacyProject)
+
+	vs, _, err := LoadEffectiveSettings(projectDir)
+	require.NoError(t, err)
+	require.Contains(t, vs.HarnessConfigs, "claude-vertex")
+	assert.Equal(t, "claude", vs.HarnessConfigs["claude-vertex"].Harness, "the lower layer's harness survives")
+	assert.Equal(t, "example.com/claude:3", vs.HarnessConfigs["claude-vertex"].Image)
+	assert.Equal(t, "scion", vs.HarnessConfigs["claude-vertex"].User)
+	require.Contains(t, vs.HarnessConfigs, "gemini")
+	assert.Equal(t, "gemini", vs.HarnessConfigs["gemini"].Harness, "with no lower entry the harness comes from the name")
+}
+
+// Legacy keys that differ only in case convert, as the legacy decode reads
+// them case-insensitively.
+func TestLoadSettings_LegacyKeysMatchCaseInsensitively(t *testing.T) {
+	projectDir := setupSettingsViewTest(t, "",
+		"project_id: local-id\nhub:\n  projectID: hub-ci\n  brokerID: broker-ci\nprofiles:\n  dev:\n    runtime: docker\n    harness_overrides:\n      claude:\n        auth_selectedtype: vertex-ai\n")
+
+	vs, _, err := LoadEffectiveSettings(projectDir)
+	require.NoError(t, err)
+	require.NotNil(t, vs.Hub)
+	assert.Equal(t, "hub-ci", vs.Hub.ProjectID)
+	require.NotNil(t, vs.Server)
+	require.NotNil(t, vs.Server.Broker)
+	assert.Equal(t, "broker-ci", vs.Server.Broker.BrokerID)
+	assert.Equal(t, "vertex-ai", vs.Profiles["dev"].HarnessOverrides["claude"].AuthSelectedType)
+
+	s, err := LoadSettings(projectDir)
+	require.NoError(t, err)
+	assert.Equal(t, "hub-ci", s.GetHubProjectID(), "a case-variant hub.projectId is the hub ID only")
+	assert.Equal(t, "local-id", s.ProjectID)
+}

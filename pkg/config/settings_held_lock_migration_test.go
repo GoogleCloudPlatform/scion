@@ -15,6 +15,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -65,8 +66,12 @@ func TestLoadModifySaveVersionedSettings_MigratesUnderHeldLock(t *testing.T) {
 	t.Run("save", func(t *testing.T) {
 		dir := writeGroveIDSettings(t)
 		err := runWithin(t, 5*time.Second, func() error {
+			// Runs on runWithin's goroutine: report with assert and an
+			// error, never require (FailNow would end that goroutine).
 			return LoadModifySaveVersionedSettings(dir, func(vs *VersionedSettings) error {
-				require.NotNil(t, vs.Hub)
+				if !assert.NotNil(t, vs.Hub) {
+					return errors.New("no hub settings loaded")
+				}
 				assert.Equal(t, "p1", vs.Hub.ProjectID)
 				vs.ActiveProfile = "dev"
 				return nil
