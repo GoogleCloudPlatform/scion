@@ -370,6 +370,26 @@ func (_u *ScheduleUpdate) SetNillableStatus(v *string) *ScheduleUpdate {
 	return _u
 }
 
+// SetStatusReason sets the "status_reason" field.
+func (_u *ScheduleUpdate) SetStatusReason(v string) *ScheduleUpdate {
+	_u.mutation.SetStatusReason(v)
+	return _u
+}
+
+// SetNillableStatusReason sets the "status_reason" field if the given value is not nil.
+func (_u *ScheduleUpdate) SetNillableStatusReason(v *string) *ScheduleUpdate {
+	if v != nil {
+		_u.SetStatusReason(*v)
+	}
+	return _u
+}
+
+// ClearStatusReason clears the value of the "status_reason" field.
+func (_u *ScheduleUpdate) ClearStatusReason() *ScheduleUpdate {
+	_u.mutation.ClearStatusReason()
+	return _u
+}
+
 // SetNextRunAt sets the "next_run_at" field.
 func (_u *ScheduleUpdate) SetNextRunAt(v time.Time) *ScheduleUpdate {
 	_u.mutation.SetNextRunAt(v)
@@ -689,6 +709,12 @@ func (_u *ScheduleUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(schedule.FieldStatus, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.StatusReason(); ok {
+		_spec.SetField(schedule.FieldStatusReason, field.TypeString, value)
+	}
+	if _u.mutation.StatusReasonCleared() {
+		_spec.ClearField(schedule.FieldStatusReason, field.TypeString)
 	}
 	if value, ok := _u.mutation.NextRunAt(); ok {
 		_spec.SetField(schedule.FieldNextRunAt, field.TypeTime, value)
@@ -1096,6 +1122,26 @@ func (_u *ScheduleUpdateOne) SetNillableStatus(v *string) *ScheduleUpdateOne {
 	return _u
 }
 
+// SetStatusReason sets the "status_reason" field.
+func (_u *ScheduleUpdateOne) SetStatusReason(v string) *ScheduleUpdateOne {
+	_u.mutation.SetStatusReason(v)
+	return _u
+}
+
+// SetNillableStatusReason sets the "status_reason" field if the given value is not nil.
+func (_u *ScheduleUpdateOne) SetNillableStatusReason(v *string) *ScheduleUpdateOne {
+	if v != nil {
+		_u.SetStatusReason(*v)
+	}
+	return _u
+}
+
+// ClearStatusReason clears the value of the "status_reason" field.
+func (_u *ScheduleUpdateOne) ClearStatusReason() *ScheduleUpdateOne {
+	_u.mutation.ClearStatusReason()
+	return _u
+}
+
 // SetNextRunAt sets the "next_run_at" field.
 func (_u *ScheduleUpdateOne) SetNextRunAt(v time.Time) *ScheduleUpdateOne {
 	_u.mutation.SetNextRunAt(v)
@@ -1445,6 +1491,12 @@ func (_u *ScheduleUpdateOne) sqlSave(ctx context.Context) (_node *Schedule, err 
 	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(schedule.FieldStatus, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.StatusReason(); ok {
+		_spec.SetField(schedule.FieldStatusReason, field.TypeString, value)
+	}
+	if _u.mutation.StatusReasonCleared() {
+		_spec.ClearField(schedule.FieldStatusReason, field.TypeString)
 	}
 	if value, ok := _u.mutation.NextRunAt(); ok {
 		_spec.SetField(schedule.FieldNextRunAt, field.TypeTime, value)

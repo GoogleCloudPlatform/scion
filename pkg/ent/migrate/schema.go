@@ -2535,6 +2535,7 @@ var (
 		{Name: "event_type", Type: field.TypeString},
 		{Name: "payload", Type: field.TypeString, Default: "{}"},
 		{Name: "status", Type: field.TypeString, Default: "active"},
+		{Name: "status_reason", Type: field.TypeString, Nullable: true},
 		{Name: "next_run_at", Type: field.TypeTime, Nullable: true},
 		{Name: "last_run_at", Type: field.TypeTime, Nullable: true},
 		{Name: "last_run_status", Type: field.TypeString, Nullable: true},
@@ -2569,7 +2570,7 @@ var (
 			{
 				Name:    "schedule_next_run_at",
 				Unique:  false,
-				Columns: []*schema.Column{SchedulesColumns[22]},
+				Columns: []*schema.Column{SchedulesColumns[23]},
 			},
 		},
 	}
@@ -2887,6 +2888,9 @@ var (
 		{Name: "label", Type: field.TypeString, Default: ""},
 		{Name: "created_at", Type: field.TypeTime},
 		{Name: "expires_at", Type: field.TypeTime},
+		{Name: "grantor_kind", Type: field.TypeEnum, Enums: []string{"human", "test_infra_offline"}, Default: "human"},
+		{Name: "hub_id", Type: field.TypeString, Default: ""},
+		{Name: "marker_created_at", Type: field.TypeTime, Nullable: true},
 		{Name: "revoked_at", Type: field.TypeTime, Nullable: true},
 		{Name: "revoked_by", Type: field.TypeString, Nullable: true},
 	}

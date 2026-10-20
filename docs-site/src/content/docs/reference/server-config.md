@@ -1107,11 +1107,11 @@ Both health keys are non-critical: they can make `/healthz` report `degraded`, n
 
 ### Boolean Environment Variable Parsing (`parseBoolEnv`)
 
-For server and infrastructure configurations, Scion parses several boolean environment variables using a robust, operator-friendly `parseBoolEnv` parser:
+The server reads the variables listed under [Tracked Boolean Variables](#tracked-boolean-variables) directly, with the `parseBoolEnv` parser. These rules apply only to them; a `SCION_SERVER_*` or `SCION_SEED_*` variable for a boolean setting takes only `true`/`false`, `1`/`0` or `t`/`f`, and a value that does not parse stops the server at startup (see [Environment Variables](#environment-variables)).
 
 - **Supported Truthy Values:** `true`, `1`, `t`, `yes`, `y`, `on` (case-insensitive, whitespace-trimmed).
 - **Supported Falsy Values:** `false`, `0`, `f`, `no`, `n`, `off` (case-insensitive, whitespace-trimmed).
-- **Safety Warnings:** Unset, empty, or unparseable values default to `false`. However, to prevent configuration typos from silently disabling critical features, any **unrecognized non-empty value** (e.g., `SCION_LOG_GCP=trur`) will trigger an explicit **warning at startup** and default to `false`.
+- **Safety Warnings:** Unset or empty values are `false`, except for `SCION_SERVER_ADMIN_MODE`: when it is unset or empty, the server keeps the admin mode from its settings (a value of only whitespace turns admin mode off). An **unrecognized non-empty value** (e.g., `SCION_LOG_GCP=trur`) triggers a **warning at startup** and is treated as `false`, except for `SCION_SERVER_ADMIN_MODE`, where it stops the server at startup.
 
 #### Tracked Boolean Variables:
 
