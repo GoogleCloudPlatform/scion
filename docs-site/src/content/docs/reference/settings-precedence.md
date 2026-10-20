@@ -1146,7 +1146,7 @@ are still replayed.
 
 ### Image registry order
 
-Introduced by ptone/scion#3916. A bare image name (one without a registry host, such as `scion-claude:latest`) is rewritten to
+Introduced by GoogleCloudPlatform/scion#3786. A bare image name (one without a registry host, such as `scion-claude:latest`) is rewritten to
 `<image_registry>/<name>`. Every place that resolves `image_registry` uses one order: the source
 decides first, and within a source the more specific scope wins.
 
