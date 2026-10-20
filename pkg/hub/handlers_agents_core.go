@@ -6170,89 +6170,150 @@ func (d *passthroughTranslationDenied) write(w http.ResponseWriter) {
 }
 
 // writePassthroughTranslationError writes a translation failure: a refusal
-// with its own status, anything else as a 500.
+// with its own status, a host record conflict as 409, a failed impersonation
+// probe as 502, anything else as a 500.
 func writePassthroughTranslationError(w http.ResponseWriter, err error) {
 	var denied *passthroughTranslationDenied
 	if errors.As(err, &denied) {
 		denied.write(w)
 		return
 	}
+	if errors.Is(err, errHostSARecordConflict) {
+		Conflict(w, errHostSARecordConflict.Error())
+		return
+	}
+	if errors.Is(err, errHostSARecordUnverifiable) {
+		writeError(w, http.StatusBadGateway, "gcp_verification_failed", errHostSARecordUnverifiable.Error(), nil)
+		return
+	}
 	writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError,
 		"failed to configure GCP identity for sandbox runtime: "+err.Error(), nil)
 }
 
-// ensureHostSARecord looks up or creates a hub-scoped GCPServiceAccount
-// record for the broker's host service account. This is needed so that the
-// assign flow (JWT scope minting, gcp-token endpoint) works with a real
-// ServiceAccountID foreign key.
+// hostSATranslationCreator is the CreatedBy of the hub-scoped records that
+// translatePassthroughForSandbox creates for a broker's host service account.
+const hostSATranslationCreator = "system:passthrough-translation"
+
+// errHostSARecordConflict: the broker's host service account is registered at
+// project scope or managed by the Hub, so a hub-scoped record for it would
+// make it reachable from every project.
+var errHostSARecordConflict = errors.New("the broker's host service account is registered as a " +
+	"project-scoped or Hub-managed service account; it cannot be used through sandbox passthrough translation")
+
+// errHostSARecordUnverifiable: the Hub could not confirm it can impersonate
+// the broker's host service account, so no record is created for it.
+var errHostSARecordUnverifiable = errors.New("the Hub could not verify that it can impersonate the " +
+	"broker's host service account")
+
+// ensureHostSARecord looks up or creates the hub-scoped GCPServiceAccount
+// record that sandbox passthrough translation assigns for a broker's host
+// service account. The assign flow (JWT scope minting, gcp-token endpoint)
+// needs a real ServiceAccountID foreign key.
 //
-// The record is hub-scoped because the broker's host SA is an infrastructure
-// identity, not project-specific — any project dispatching to this broker
-// should be able to use it for passthrough translation.
+// The record is bound to the broker: only a record this function created for
+// the same broker (ScopeID == broker.ID, CreatedBy ==
+// hostSATranslationCreator) is reused. ScopeID selects the record here and is
+// never a reachability input; a hub-scoped record is reachable from every
+// project either way. Two brokers sharing a host service account each get
+// their own record.
+//
+// An email that has any project-scoped or Hub-managed record is refused
+// (errHostSARecordConflict), on reuse as well as on create, so translation
+// never widens such an account to hub scope.
+//
+// A new record is marked verified only after the Hub's impersonation probe
+// succeeds (VerifyImpersonation); with no token generator, or when the probe
+// fails, nothing is created (errHostSARecordUnverifiable).
 func (s *Server) ensureHostSARecord(
 	ctx context.Context,
 	broker *store.RuntimeBroker,
 ) (*store.GCPServiceAccount, error) {
-	// Look up by email first.
-	existing, err := s.store.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
-		Email: broker.GCPHostServiceAccountEmail,
-		Scope: store.ScopeHub,
-	})
+	email := broker.GCPHostServiceAccountEmail
+
+	// Every record with this email, in every scope.
+	all, err := s.store.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{Email: email})
 	if err != nil {
-		return nil, fmt.Errorf("lookup SA by email %s: %w", broker.GCPHostServiceAccountEmail, err)
+		return nil, fmt.Errorf("lookup SA by email %s: %w", email, err)
 	}
-	if len(existing) > 0 {
-		return &existing[0], nil
+	for i := range all {
+		if all[i].Scope != store.ScopeHub || all[i].Managed {
+			slog.WarnContext(ctx, "passthrough translation refused: host SA has a project-scoped or managed record",
+				"broker", broker.ID, "sa_id", all[i].ID, "scope", all[i].Scope, "managed", all[i].Managed)
+			return nil, errHostSARecordConflict
+		}
+	}
+	if sa := brokerHostSARecord(all, broker.ID); sa != nil {
+		return sa, nil
 	}
 
-	// Create a new hub-scoped record for the broker's host SA.
-	// ScopeID is provenance for hub-scoped accounts (which hub instance
-	// registered it). Use the broker ID as provenance — more specific than
-	// the hub ID and stable across redeployments.
+	s.mu.RLock()
+	gen := s.gcpTokenGenerator
+	s.mu.RUnlock()
+	if gen == nil {
+		return nil, errHostSARecordUnverifiable
+	}
+	if verifyErr := gen.VerifyImpersonation(ctx, email); verifyErr != nil {
+		slog.WarnContext(ctx, "passthrough translation refused: impersonation probe failed",
+			"broker", broker.ID, "sa_email", email, "error", verifyErr)
+		return nil, errHostSARecordUnverifiable
+	}
+
+	// ScopeID is provenance for hub-scoped accounts; the broker ID binds the
+	// record to this broker (see brokerHostSARecord).
 	projectID := broker.GCPHostProjectID
 	if projectID == "" {
-		projectID = projectIDFromServiceAccountEmail(broker.GCPHostServiceAccountEmail)
+		projectID = projectIDFromServiceAccountEmail(email)
 	}
-
+	now := time.Now()
 	sa := &store.GCPServiceAccount{
 		ID:          gouuid.New().String(),
 		Scope:       store.ScopeHub,
 		ScopeID:     broker.ID,
-		Email:       broker.GCPHostServiceAccountEmail,
+		Email:       email,
 		ProjectID:   projectID,
 		DisplayName: fmt.Sprintf("Broker host SA (%s)", broker.Name),
 		DefaultScopes: []string{
 			"https://www.googleapis.com/auth/cloud-platform",
 		},
-		// The hub can already impersonate this SA (it's the broker's host
-		// identity), so mark as verified. The actAs check already passed
-		// in authorizePassthroughIdentity for explicit passthrough requests.
+		// Verified by the impersonation probe above.
 		Verified:           true,
-		VerifiedAt:         time.Now(),
+		VerifiedAt:         now,
 		VerificationStatus: store.GCPVerificationVerified,
-		CreatedBy:          "system:passthrough-translation",
-		CreatedAt:          time.Now(),
+		CreatedBy:          hostSATranslationCreator,
+		CreatedAt:          now,
 		Managed:            false, // not created by Hub SA provisioning
 	}
 
 	if err := s.store.CreateGCPServiceAccount(ctx, sa); err != nil {
 		// Race condition: another request may have created the record
-		// between our lookup and create. Try the lookup again.
-		existing, lookupErr := s.store.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
-			Email: broker.GCPHostServiceAccountEmail,
-			Scope: store.ScopeHub,
+		// between our lookup and create. Try the broker-bound lookup again.
+		again, lookupErr := s.store.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
+			Email:   email,
+			Scope:   store.ScopeHub,
+			ScopeID: broker.ID,
 		})
 		if lookupErr != nil {
-			return nil, fmt.Errorf("create SA %s: %w (retry lookup: %v)",
-				broker.GCPHostServiceAccountEmail, err, lookupErr)
+			return nil, fmt.Errorf("create SA %s: %w (retry lookup: %v)", email, err, lookupErr)
 		}
-		if len(existing) > 0 {
-			return &existing[0], nil
+		if existing := brokerHostSARecord(again, broker.ID); existing != nil {
+			return existing, nil
 		}
-		return nil, fmt.Errorf("create SA %s: %w", broker.GCPHostServiceAccountEmail, err)
+		return nil, fmt.Errorf("create SA %s: %w", email, err)
 	}
 
 	slog.InfoContext(ctx, "created hub-scoped GCPServiceAccount for broker host SA",
 		"sa_id", sa.ID, "sa_email", sa.Email, "broker", broker.Name)
 	return sa, nil
+}
+
+// brokerHostSARecord returns the record in rows that translation created for
+// brokerID, or nil.
+func brokerHostSARecord(rows []store.GCPServiceAccount, brokerID string) *store.GCPServiceAccount {
+	for i := range rows {
+		if rows[i].Scope == store.ScopeHub && rows[i].ScopeID == brokerID &&
+			rows[i].CreatedBy == hostSATranslationCreator && !rows[i].Managed {
+			return &rows[i]
+		}
+	}
+	return nil
 }
