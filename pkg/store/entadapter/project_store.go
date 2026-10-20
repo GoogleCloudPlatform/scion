@@ -799,6 +799,16 @@ func entBrokerToStore(b *ent.RuntimeBroker) *store.RuntimeBroker {
 		sb.GCPHostProjectID = *b.GcpHostProjectID
 	}
 	sb.GCPHostSource = b.GcpHostSource
+	if b.HostIdentityObservation != nil && *b.HostIdentityObservation != "" {
+		obs := &store.HostIdentityObservation{Outcome: *b.HostIdentityObservation}
+		if b.HostIdentityObservedEmail != nil {
+			obs.Email = *b.HostIdentityObservedEmail
+		}
+		if b.HostIdentityObservedAt != nil {
+			obs.ObservedAt = *b.HostIdentityObservedAt
+		}
+		sb.HostObservation = obs
+	}
 	unmarshalRawJSON(b.Capabilities, &sb.Capabilities)
 	// Profiles are persisted in the "runtimes" column (legacy naming).
 	unmarshalRawJSON(b.Runtimes, &sb.Profiles)
@@ -1171,6 +1181,36 @@ func (s *ProjectStore) SetRuntimeBrokerGCPHostSource(ctx context.Context, id, so
 	return s.casGCPHostWrite(ctx, id, func(u *ent.RuntimeBrokerUpdate) {
 		u.SetGcpHostSource(source)
 	})
+}
+
+// RecordRuntimeBrokerHostObservation stores the latest host identity
+// observation. It writes only the host_identity_* columns.
+func (s *ProjectStore) RecordRuntimeBrokerHostObservation(ctx context.Context, id string, obs store.HostIdentityObservation) error {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return err
+	}
+	at := obs.ObservedAt
+	if at.IsZero() {
+		at = time.Now()
+	}
+	u := s.client.RuntimeBroker.Update().
+		Where(runtimebroker.IDEQ(uid)).
+		SetHostIdentityObservation(obs.Outcome).
+		SetHostIdentityObservedAt(at)
+	if obs.Email != "" {
+		u.SetHostIdentityObservedEmail(strings.ToLower(obs.Email))
+	} else {
+		u.ClearHostIdentityObservedEmail()
+	}
+	affected, err := u.Save(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	if affected == 0 {
+		return store.ErrNotFound
+	}
+	return nil
 }
 
 // DeleteRuntimeBroker removes a runtime broker by ID. runtime_brokers has no

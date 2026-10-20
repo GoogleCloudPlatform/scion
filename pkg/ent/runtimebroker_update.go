@@ -437,6 +437,66 @@ func (_u *RuntimeBrokerUpdate) ClearGcpHostSource() *RuntimeBrokerUpdate {
 	return _u
 }
 
+// SetHostIdentityObservedEmail sets the "host_identity_observed_email" field.
+func (_u *RuntimeBrokerUpdate) SetHostIdentityObservedEmail(v string) *RuntimeBrokerUpdate {
+	_u.mutation.SetHostIdentityObservedEmail(v)
+	return _u
+}
+
+// SetNillableHostIdentityObservedEmail sets the "host_identity_observed_email" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdate) SetNillableHostIdentityObservedEmail(v *string) *RuntimeBrokerUpdate {
+	if v != nil {
+		_u.SetHostIdentityObservedEmail(*v)
+	}
+	return _u
+}
+
+// ClearHostIdentityObservedEmail clears the value of the "host_identity_observed_email" field.
+func (_u *RuntimeBrokerUpdate) ClearHostIdentityObservedEmail() *RuntimeBrokerUpdate {
+	_u.mutation.ClearHostIdentityObservedEmail()
+	return _u
+}
+
+// SetHostIdentityObservation sets the "host_identity_observation" field.
+func (_u *RuntimeBrokerUpdate) SetHostIdentityObservation(v string) *RuntimeBrokerUpdate {
+	_u.mutation.SetHostIdentityObservation(v)
+	return _u
+}
+
+// SetNillableHostIdentityObservation sets the "host_identity_observation" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdate) SetNillableHostIdentityObservation(v *string) *RuntimeBrokerUpdate {
+	if v != nil {
+		_u.SetHostIdentityObservation(*v)
+	}
+	return _u
+}
+
+// ClearHostIdentityObservation clears the value of the "host_identity_observation" field.
+func (_u *RuntimeBrokerUpdate) ClearHostIdentityObservation() *RuntimeBrokerUpdate {
+	_u.mutation.ClearHostIdentityObservation()
+	return _u
+}
+
+// SetHostIdentityObservedAt sets the "host_identity_observed_at" field.
+func (_u *RuntimeBrokerUpdate) SetHostIdentityObservedAt(v time.Time) *RuntimeBrokerUpdate {
+	_u.mutation.SetHostIdentityObservedAt(v)
+	return _u
+}
+
+// SetNillableHostIdentityObservedAt sets the "host_identity_observed_at" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdate) SetNillableHostIdentityObservedAt(v *time.Time) *RuntimeBrokerUpdate {
+	if v != nil {
+		_u.SetHostIdentityObservedAt(*v)
+	}
+	return _u
+}
+
+// ClearHostIdentityObservedAt clears the value of the "host_identity_observed_at" field.
+func (_u *RuntimeBrokerUpdate) ClearHostIdentityObservedAt() *RuntimeBrokerUpdate {
+	_u.mutation.ClearHostIdentityObservedAt()
+	return _u
+}
+
 // SetConnectedHubID sets the "connected_hub_id" field.
 func (_u *RuntimeBrokerUpdate) SetConnectedHubID(v string) *RuntimeBrokerUpdate {
 	_u.mutation.SetConnectedHubID(v)
@@ -750,6 +810,24 @@ func (_u *RuntimeBrokerUpdate) sqlSave(ctx context.Context) (_node int, err erro
 	}
 	if _u.mutation.GcpHostSourceCleared() {
 		_spec.ClearField(runtimebroker.FieldGcpHostSource, field.TypeString)
+	}
+	if value, ok := _u.mutation.HostIdentityObservedEmail(); ok {
+		_spec.SetField(runtimebroker.FieldHostIdentityObservedEmail, field.TypeString, value)
+	}
+	if _u.mutation.HostIdentityObservedEmailCleared() {
+		_spec.ClearField(runtimebroker.FieldHostIdentityObservedEmail, field.TypeString)
+	}
+	if value, ok := _u.mutation.HostIdentityObservation(); ok {
+		_spec.SetField(runtimebroker.FieldHostIdentityObservation, field.TypeString, value)
+	}
+	if _u.mutation.HostIdentityObservationCleared() {
+		_spec.ClearField(runtimebroker.FieldHostIdentityObservation, field.TypeString)
+	}
+	if value, ok := _u.mutation.HostIdentityObservedAt(); ok {
+		_spec.SetField(runtimebroker.FieldHostIdentityObservedAt, field.TypeTime, value)
+	}
+	if _u.mutation.HostIdentityObservedAtCleared() {
+		_spec.ClearField(runtimebroker.FieldHostIdentityObservedAt, field.TypeTime)
 	}
 	if value, ok := _u.mutation.ConnectedHubID(); ok {
 		_spec.SetField(runtimebroker.FieldConnectedHubID, field.TypeString, value)
@@ -1219,6 +1297,66 @@ func (_u *RuntimeBrokerUpdateOne) ClearGcpHostSource() *RuntimeBrokerUpdateOne {
 	return _u
 }
 
+// SetHostIdentityObservedEmail sets the "host_identity_observed_email" field.
+func (_u *RuntimeBrokerUpdateOne) SetHostIdentityObservedEmail(v string) *RuntimeBrokerUpdateOne {
+	_u.mutation.SetHostIdentityObservedEmail(v)
+	return _u
+}
+
+// SetNillableHostIdentityObservedEmail sets the "host_identity_observed_email" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdateOne) SetNillableHostIdentityObservedEmail(v *string) *RuntimeBrokerUpdateOne {
+	if v != nil {
+		_u.SetHostIdentityObservedEmail(*v)
+	}
+	return _u
+}
+
+// ClearHostIdentityObservedEmail clears the value of the "host_identity_observed_email" field.
+func (_u *RuntimeBrokerUpdateOne) ClearHostIdentityObservedEmail() *RuntimeBrokerUpdateOne {
+	_u.mutation.ClearHostIdentityObservedEmail()
+	return _u
+}
+
+// SetHostIdentityObservation sets the "host_identity_observation" field.
+func (_u *RuntimeBrokerUpdateOne) SetHostIdentityObservation(v string) *RuntimeBrokerUpdateOne {
+	_u.mutation.SetHostIdentityObservation(v)
+	return _u
+}
+
+// SetNillableHostIdentityObservation sets the "host_identity_observation" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdateOne) SetNillableHostIdentityObservation(v *string) *RuntimeBrokerUpdateOne {
+	if v != nil {
+		_u.SetHostIdentityObservation(*v)
+	}
+	return _u
+}
+
+// ClearHostIdentityObservation clears the value of the "host_identity_observation" field.
+func (_u *RuntimeBrokerUpdateOne) ClearHostIdentityObservation() *RuntimeBrokerUpdateOne {
+	_u.mutation.ClearHostIdentityObservation()
+	return _u
+}
+
+// SetHostIdentityObservedAt sets the "host_identity_observed_at" field.
+func (_u *RuntimeBrokerUpdateOne) SetHostIdentityObservedAt(v time.Time) *RuntimeBrokerUpdateOne {
+	_u.mutation.SetHostIdentityObservedAt(v)
+	return _u
+}
+
+// SetNillableHostIdentityObservedAt sets the "host_identity_observed_at" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdateOne) SetNillableHostIdentityObservedAt(v *time.Time) *RuntimeBrokerUpdateOne {
+	if v != nil {
+		_u.SetHostIdentityObservedAt(*v)
+	}
+	return _u
+}
+
+// ClearHostIdentityObservedAt clears the value of the "host_identity_observed_at" field.
+func (_u *RuntimeBrokerUpdateOne) ClearHostIdentityObservedAt() *RuntimeBrokerUpdateOne {
+	_u.mutation.ClearHostIdentityObservedAt()
+	return _u
+}
+
 // SetConnectedHubID sets the "connected_hub_id" field.
 func (_u *RuntimeBrokerUpdateOne) SetConnectedHubID(v string) *RuntimeBrokerUpdateOne {
 	_u.mutation.SetConnectedHubID(v)
@@ -1562,6 +1700,24 @@ func (_u *RuntimeBrokerUpdateOne) sqlSave(ctx context.Context) (_node *RuntimeBr
 	}
 	if _u.mutation.GcpHostSourceCleared() {
 		_spec.ClearField(runtimebroker.FieldGcpHostSource, field.TypeString)
+	}
+	if value, ok := _u.mutation.HostIdentityObservedEmail(); ok {
+		_spec.SetField(runtimebroker.FieldHostIdentityObservedEmail, field.TypeString, value)
+	}
+	if _u.mutation.HostIdentityObservedEmailCleared() {
+		_spec.ClearField(runtimebroker.FieldHostIdentityObservedEmail, field.TypeString)
+	}
+	if value, ok := _u.mutation.HostIdentityObservation(); ok {
+		_spec.SetField(runtimebroker.FieldHostIdentityObservation, field.TypeString, value)
+	}
+	if _u.mutation.HostIdentityObservationCleared() {
+		_spec.ClearField(runtimebroker.FieldHostIdentityObservation, field.TypeString)
+	}
+	if value, ok := _u.mutation.HostIdentityObservedAt(); ok {
+		_spec.SetField(runtimebroker.FieldHostIdentityObservedAt, field.TypeTime, value)
+	}
+	if _u.mutation.HostIdentityObservedAtCleared() {
+		_spec.ClearField(runtimebroker.FieldHostIdentityObservedAt, field.TypeTime)
 	}
 	if value, ok := _u.mutation.ConnectedHubID(); ok {
 		_spec.SetField(runtimebroker.FieldConnectedHubID, field.TypeString, value)

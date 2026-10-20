@@ -37,7 +37,7 @@ import { followHubInstanceLink, hubInstanceAnchor } from './health-hub-card.js';
 /** One entry of the summary's ranked "Needs attention" list (server-composed). */
 export interface HealthAttentionItem {
   severity: 'critical' | 'warning';
-  /** hub_check | hub_instance | broker_offline | broker_degraded | broker_nfs | integration | dispatch | agents */
+  /** hub_check | hub_instance | broker_offline | broker_degraded | broker_nfs | broker_host_identity | integration | dispatch | agents */
   kind: string;
   /** What the item is about; fields that do not apply are omitted. */
   subject: { type: string; id?: string; name?: string; project_id?: string };

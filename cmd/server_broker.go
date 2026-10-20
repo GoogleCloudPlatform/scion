@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -38,16 +39,47 @@ type hostDetection struct {
 	Email string
 	// ProjectID is the host's GCP project, when reported.
 	ProjectID string
+	// Outcome is the store.HostObservation* outcome; empty is derived from
+	// Email (present when set, otherwise unavailable).
+	Outcome string
+	// ObservedAt is when the metadata server was read.
+	ObservedAt time.Time
+}
+
+// Observation is the host identity observation for the broker record.
+func (d hostDetection) Observation() store.HostIdentityObservation {
+	outcome := d.Outcome
+	if outcome == "" {
+		outcome = store.HostObservationUnavailable
+		if d.Email != "" {
+			outcome = store.HostObservationPresent
+		}
+	}
+	at := d.ObservedAt
+	if at.IsZero() {
+		at = time.Now()
+	}
+	return store.HostIdentityObservation{Outcome: outcome, Email: d.Email, ObservedAt: at}
 }
 
 // detectHostGCPIdentity reads the host's GCP identity from the GCE metadata
 // server (GCE, Cloud Run and GKE). A variable so tests can replace it.
 var detectHostGCPIdentity = func(ctx context.Context) hostDetection {
-	var d hostDetection
+	d := hostDetection{Outcome: store.HostObservationUnavailable, ObservedAt: time.Now()}
 	if !metadata.OnGCE() {
 		return d
 	}
-	if email, err := metadata.EmailWithContext(ctx, "default"); err == nil && email != "" {
+	email, err := metadata.EmailWithContext(ctx, "default")
+	switch {
+	case err != nil:
+		var notDefined metadata.NotDefinedError
+		if errors.As(err, &notDefined) {
+			d.Outcome = store.HostObservationAbsent
+		}
+	case email == "":
+		d.Outcome = store.HostObservationAbsent
+	default:
+		d.Outcome = store.HostObservationPresent
 		d.Email = strings.ToLower(email)
 		log.Printf("Auto-detected GCP host service account: %s", d.Email)
 	}
@@ -263,6 +295,7 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 			return brokerID, err
 		}
 	}
+	hub.RecordHostObservation(ctx, s, brokerID, detected.Observation())
 
 	// Re-assign agents orphaned by broker ID changes.
 	// An agent is orphaned when its RuntimeBrokerID points to a broker that

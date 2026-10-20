@@ -159,3 +159,30 @@ func TestLegacyEmbedded_AdoptsOnlyHubManagedRowByName(t *testing.T) {
 		assert.Equal(t, tid("colocated-old"), effectiveID)
 	})
 }
+
+func TestLegacyEmbedded_PinnedMismatchRecordsObservation(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	settings := &config.Settings{}
+	stubHostDetection(t, hostDetection{Outcome: store.HostObservationPresent, Email: detectedHostEmail, ProjectID: "proj"})
+
+	_, err := registerGlobalProjectAndBroker(ctx, s, tid("embedded-observed"), "embedded-observed", "http://localhost:9800", nil, false, settings, nil, nil)
+	require.NoError(t, err)
+	got, err := s.GetRuntimeBroker(ctx, tid("embedded-observed"))
+	require.NoError(t, err)
+	assert.Equal(t, detectedHostEmail, got.GCPHostServiceAccountEmail, "a new row takes the detected value")
+	assert.Equal(t, store.GCPHostSourceDetected, got.GCPHostSource)
+	require.NotNil(t, got.HostObservation)
+
+	_, err = s.SetRuntimeBrokerGCPHost(ctx, tid("embedded-observed"), updateHostEmail, "proj")
+	require.NoError(t, err)
+	_, err = registerGlobalProjectAndBroker(ctx, s, tid("embedded-observed"), "embedded-observed", "http://localhost:9800", nil, false, settings, nil, nil)
+	require.NoError(t, err)
+
+	got, err = s.GetRuntimeBroker(ctx, tid("embedded-observed"))
+	require.NoError(t, err)
+	assert.Equal(t, updateHostEmail, got.GCPHostServiceAccountEmail, "the update-API value is kept")
+	require.NotNil(t, got.HostObservation)
+	assert.Equal(t, store.HostObservationPresent, got.HostObservation.Outcome)
+	assert.Equal(t, detectedHostEmail, got.HostObservation.Email, "the host's identity is recorded")
+}

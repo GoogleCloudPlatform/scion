@@ -17,6 +17,7 @@ package storetest
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -212,6 +213,51 @@ func RuntimeBrokerGCPHostWritersConformance(t *testing.T, factory Factory) {
 			assert.True(t, applied)
 
 			_, err = s.SetRuntimeBrokerGCPHostSource(ctx, uuid.NewString(), "")
+			assert.ErrorIs(t, err, store.ErrNotFound)
+		})
+	})
+
+	t.Run("RecordHostObservation", func(t *testing.T) {
+		t.Run("records, replaces and survives a generic update", func(t *testing.T) {
+			s := factory(t)
+			b := newGCPHostBroker(t, ctx, s, gcpHostEmailA, gcpHostProjectA, store.GCPHostSourceAdmin)
+			got, err := s.GetRuntimeBroker(ctx, b.ID)
+			require.NoError(t, err)
+			assert.Nil(t, got.HostObservation, "no observation until one is recorded")
+			stale := got
+
+			at := time.Now().Add(-time.Minute).UTC().Truncate(time.Second)
+			require.NoError(t, s.RecordRuntimeBrokerHostObservation(ctx, b.ID, store.HostIdentityObservation{
+				Outcome: store.HostObservationPresent, Email: "Host-B@Proj-B.iam.gserviceaccount.com", ObservedAt: at,
+			}))
+			got, err = s.GetRuntimeBroker(ctx, b.ID)
+			require.NoError(t, err)
+			require.NotNil(t, got.HostObservation)
+			assert.Equal(t, store.HostObservationPresent, got.HostObservation.Outcome)
+			assert.Equal(t, gcpHostEmailB, got.HostObservation.Email)
+			assert.True(t, at.Equal(got.HostObservation.ObservedAt.UTC().Truncate(time.Second)), "observed at")
+			assert.Equal(t, gcpHostEmailA, got.GCPHostServiceAccountEmail, "the GCP host pair is unchanged")
+
+			// A writer holding a copy read before the observation leaves it.
+			stale.Version = "3.0.0"
+			require.NoError(t, s.UpdateRuntimeBroker(ctx, stale))
+			got, err = s.GetRuntimeBroker(ctx, b.ID)
+			require.NoError(t, err)
+			require.NotNil(t, got.HostObservation)
+			assert.Equal(t, gcpHostEmailB, got.HostObservation.Email)
+
+			require.NoError(t, s.RecordRuntimeBrokerHostObservation(ctx, b.ID, store.HostIdentityObservation{Outcome: store.HostObservationAbsent}))
+			got, err = s.GetRuntimeBroker(ctx, b.ID)
+			require.NoError(t, err)
+			require.NotNil(t, got.HostObservation)
+			assert.Equal(t, store.HostObservationAbsent, got.HostObservation.Outcome)
+			assert.Empty(t, got.HostObservation.Email)
+			assert.False(t, got.HostObservation.ObservedAt.IsZero())
+		})
+
+		t.Run("missing row", func(t *testing.T) {
+			s := factory(t)
+			err := s.RecordRuntimeBrokerHostObservation(ctx, uuid.NewString(), store.HostIdentityObservation{Outcome: store.HostObservationAbsent})
 			assert.ErrorIs(t, err, store.ErrNotFound)
 		})
 	})

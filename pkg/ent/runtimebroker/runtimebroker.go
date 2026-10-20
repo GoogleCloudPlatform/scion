@@ -60,6 +60,12 @@ const (
 	FieldGcpHostProjectID = "gcp_host_project_id"
 	// FieldGcpHostSource holds the string denoting the gcp_host_source field in the database.
 	FieldGcpHostSource = "gcp_host_source"
+	// FieldHostIdentityObservedEmail holds the string denoting the host_identity_observed_email field in the database.
+	FieldHostIdentityObservedEmail = "host_identity_observed_email"
+	// FieldHostIdentityObservation holds the string denoting the host_identity_observation field in the database.
+	FieldHostIdentityObservation = "host_identity_observation"
+	// FieldHostIdentityObservedAt holds the string denoting the host_identity_observed_at field in the database.
+	FieldHostIdentityObservedAt = "host_identity_observed_at"
 	// FieldConnectedHubID holds the string denoting the connected_hub_id field in the database.
 	FieldConnectedHubID = "connected_hub_id"
 	// FieldConnectedSessionID holds the string denoting the connected_session_id field in the database.
@@ -106,6 +112,9 @@ var Columns = []string{
 	FieldGcpHostServiceAccountEmail,
 	FieldGcpHostProjectID,
 	FieldGcpHostSource,
+	FieldHostIdentityObservedEmail,
+	FieldHostIdentityObservation,
+	FieldHostIdentityObservedAt,
 	FieldConnectedHubID,
 	FieldConnectedSessionID,
 	FieldConnectedAt,
@@ -268,6 +277,21 @@ func ByGcpHostProjectID(opts ...sql.OrderTermOption) OrderOption {
 // ByGcpHostSource orders the results by the gcp_host_source field.
 func ByGcpHostSource(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldGcpHostSource, opts...).ToFunc()
+}
+
+// ByHostIdentityObservedEmail orders the results by the host_identity_observed_email field.
+func ByHostIdentityObservedEmail(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldHostIdentityObservedEmail, opts...).ToFunc()
+}
+
+// ByHostIdentityObservation orders the results by the host_identity_observation field.
+func ByHostIdentityObservation(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldHostIdentityObservation, opts...).ToFunc()
+}
+
+// ByHostIdentityObservedAt orders the results by the host_identity_observed_at field.
+func ByHostIdentityObservedAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldHostIdentityObservedAt, opts...).ToFunc()
 }
 
 // ByConnectedHubID orders the results by the connected_hub_id field.

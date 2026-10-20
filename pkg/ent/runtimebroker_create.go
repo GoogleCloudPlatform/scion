@@ -314,6 +314,48 @@ func (_c *RuntimeBrokerCreate) SetNillableGcpHostSource(v *string) *RuntimeBroke
 	return _c
 }
 
+// SetHostIdentityObservedEmail sets the "host_identity_observed_email" field.
+func (_c *RuntimeBrokerCreate) SetHostIdentityObservedEmail(v string) *RuntimeBrokerCreate {
+	_c.mutation.SetHostIdentityObservedEmail(v)
+	return _c
+}
+
+// SetNillableHostIdentityObservedEmail sets the "host_identity_observed_email" field if the given value is not nil.
+func (_c *RuntimeBrokerCreate) SetNillableHostIdentityObservedEmail(v *string) *RuntimeBrokerCreate {
+	if v != nil {
+		_c.SetHostIdentityObservedEmail(*v)
+	}
+	return _c
+}
+
+// SetHostIdentityObservation sets the "host_identity_observation" field.
+func (_c *RuntimeBrokerCreate) SetHostIdentityObservation(v string) *RuntimeBrokerCreate {
+	_c.mutation.SetHostIdentityObservation(v)
+	return _c
+}
+
+// SetNillableHostIdentityObservation sets the "host_identity_observation" field if the given value is not nil.
+func (_c *RuntimeBrokerCreate) SetNillableHostIdentityObservation(v *string) *RuntimeBrokerCreate {
+	if v != nil {
+		_c.SetHostIdentityObservation(*v)
+	}
+	return _c
+}
+
+// SetHostIdentityObservedAt sets the "host_identity_observed_at" field.
+func (_c *RuntimeBrokerCreate) SetHostIdentityObservedAt(v time.Time) *RuntimeBrokerCreate {
+	_c.mutation.SetHostIdentityObservedAt(v)
+	return _c
+}
+
+// SetNillableHostIdentityObservedAt sets the "host_identity_observed_at" field if the given value is not nil.
+func (_c *RuntimeBrokerCreate) SetNillableHostIdentityObservedAt(v *time.Time) *RuntimeBrokerCreate {
+	if v != nil {
+		_c.SetHostIdentityObservedAt(*v)
+	}
+	return _c
+}
+
 // SetConnectedHubID sets the "connected_hub_id" field.
 func (_c *RuntimeBrokerCreate) SetConnectedHubID(v string) *RuntimeBrokerCreate {
 	_c.mutation.SetConnectedHubID(v)
@@ -687,6 +729,18 @@ func (_c *RuntimeBrokerCreate) createSpec() (*RuntimeBroker, *sqlgraph.CreateSpe
 	if value, ok := _c.mutation.GcpHostSource(); ok {
 		_spec.SetField(runtimebroker.FieldGcpHostSource, field.TypeString, value)
 		_node.GcpHostSource = value
+	}
+	if value, ok := _c.mutation.HostIdentityObservedEmail(); ok {
+		_spec.SetField(runtimebroker.FieldHostIdentityObservedEmail, field.TypeString, value)
+		_node.HostIdentityObservedEmail = &value
+	}
+	if value, ok := _c.mutation.HostIdentityObservation(); ok {
+		_spec.SetField(runtimebroker.FieldHostIdentityObservation, field.TypeString, value)
+		_node.HostIdentityObservation = &value
+	}
+	if value, ok := _c.mutation.HostIdentityObservedAt(); ok {
+		_spec.SetField(runtimebroker.FieldHostIdentityObservedAt, field.TypeTime, value)
+		_node.HostIdentityObservedAt = &value
 	}
 	if value, ok := _c.mutation.ConnectedHubID(); ok {
 		_spec.SetField(runtimebroker.FieldConnectedHubID, field.TypeString, value)
@@ -1147,6 +1201,60 @@ func (u *RuntimeBrokerUpsert) UpdateGcpHostSource() *RuntimeBrokerUpsert {
 // ClearGcpHostSource clears the value of the "gcp_host_source" field.
 func (u *RuntimeBrokerUpsert) ClearGcpHostSource() *RuntimeBrokerUpsert {
 	u.SetNull(runtimebroker.FieldGcpHostSource)
+	return u
+}
+
+// SetHostIdentityObservedEmail sets the "host_identity_observed_email" field.
+func (u *RuntimeBrokerUpsert) SetHostIdentityObservedEmail(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldHostIdentityObservedEmail, v)
+	return u
+}
+
+// UpdateHostIdentityObservedEmail sets the "host_identity_observed_email" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateHostIdentityObservedEmail() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldHostIdentityObservedEmail)
+	return u
+}
+
+// ClearHostIdentityObservedEmail clears the value of the "host_identity_observed_email" field.
+func (u *RuntimeBrokerUpsert) ClearHostIdentityObservedEmail() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldHostIdentityObservedEmail)
+	return u
+}
+
+// SetHostIdentityObservation sets the "host_identity_observation" field.
+func (u *RuntimeBrokerUpsert) SetHostIdentityObservation(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldHostIdentityObservation, v)
+	return u
+}
+
+// UpdateHostIdentityObservation sets the "host_identity_observation" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateHostIdentityObservation() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldHostIdentityObservation)
+	return u
+}
+
+// ClearHostIdentityObservation clears the value of the "host_identity_observation" field.
+func (u *RuntimeBrokerUpsert) ClearHostIdentityObservation() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldHostIdentityObservation)
+	return u
+}
+
+// SetHostIdentityObservedAt sets the "host_identity_observed_at" field.
+func (u *RuntimeBrokerUpsert) SetHostIdentityObservedAt(v time.Time) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldHostIdentityObservedAt, v)
+	return u
+}
+
+// UpdateHostIdentityObservedAt sets the "host_identity_observed_at" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateHostIdentityObservedAt() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldHostIdentityObservedAt)
+	return u
+}
+
+// ClearHostIdentityObservedAt clears the value of the "host_identity_observed_at" field.
+func (u *RuntimeBrokerUpsert) ClearHostIdentityObservedAt() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldHostIdentityObservedAt)
 	return u
 }
 
@@ -1759,6 +1867,69 @@ func (u *RuntimeBrokerUpsertOne) UpdateGcpHostSource() *RuntimeBrokerUpsertOne {
 func (u *RuntimeBrokerUpsertOne) ClearGcpHostSource() *RuntimeBrokerUpsertOne {
 	return u.Update(func(s *RuntimeBrokerUpsert) {
 		s.ClearGcpHostSource()
+	})
+}
+
+// SetHostIdentityObservedEmail sets the "host_identity_observed_email" field.
+func (u *RuntimeBrokerUpsertOne) SetHostIdentityObservedEmail(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetHostIdentityObservedEmail(v)
+	})
+}
+
+// UpdateHostIdentityObservedEmail sets the "host_identity_observed_email" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateHostIdentityObservedEmail() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateHostIdentityObservedEmail()
+	})
+}
+
+// ClearHostIdentityObservedEmail clears the value of the "host_identity_observed_email" field.
+func (u *RuntimeBrokerUpsertOne) ClearHostIdentityObservedEmail() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearHostIdentityObservedEmail()
+	})
+}
+
+// SetHostIdentityObservation sets the "host_identity_observation" field.
+func (u *RuntimeBrokerUpsertOne) SetHostIdentityObservation(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetHostIdentityObservation(v)
+	})
+}
+
+// UpdateHostIdentityObservation sets the "host_identity_observation" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateHostIdentityObservation() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateHostIdentityObservation()
+	})
+}
+
+// ClearHostIdentityObservation clears the value of the "host_identity_observation" field.
+func (u *RuntimeBrokerUpsertOne) ClearHostIdentityObservation() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearHostIdentityObservation()
+	})
+}
+
+// SetHostIdentityObservedAt sets the "host_identity_observed_at" field.
+func (u *RuntimeBrokerUpsertOne) SetHostIdentityObservedAt(v time.Time) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetHostIdentityObservedAt(v)
+	})
+}
+
+// UpdateHostIdentityObservedAt sets the "host_identity_observed_at" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateHostIdentityObservedAt() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateHostIdentityObservedAt()
+	})
+}
+
+// ClearHostIdentityObservedAt clears the value of the "host_identity_observed_at" field.
+func (u *RuntimeBrokerUpsertOne) ClearHostIdentityObservedAt() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearHostIdentityObservedAt()
 	})
 }
 
@@ -2558,6 +2729,69 @@ func (u *RuntimeBrokerUpsertBulk) UpdateGcpHostSource() *RuntimeBrokerUpsertBulk
 func (u *RuntimeBrokerUpsertBulk) ClearGcpHostSource() *RuntimeBrokerUpsertBulk {
 	return u.Update(func(s *RuntimeBrokerUpsert) {
 		s.ClearGcpHostSource()
+	})
+}
+
+// SetHostIdentityObservedEmail sets the "host_identity_observed_email" field.
+func (u *RuntimeBrokerUpsertBulk) SetHostIdentityObservedEmail(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetHostIdentityObservedEmail(v)
+	})
+}
+
+// UpdateHostIdentityObservedEmail sets the "host_identity_observed_email" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateHostIdentityObservedEmail() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateHostIdentityObservedEmail()
+	})
+}
+
+// ClearHostIdentityObservedEmail clears the value of the "host_identity_observed_email" field.
+func (u *RuntimeBrokerUpsertBulk) ClearHostIdentityObservedEmail() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearHostIdentityObservedEmail()
+	})
+}
+
+// SetHostIdentityObservation sets the "host_identity_observation" field.
+func (u *RuntimeBrokerUpsertBulk) SetHostIdentityObservation(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetHostIdentityObservation(v)
+	})
+}
+
+// UpdateHostIdentityObservation sets the "host_identity_observation" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateHostIdentityObservation() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateHostIdentityObservation()
+	})
+}
+
+// ClearHostIdentityObservation clears the value of the "host_identity_observation" field.
+func (u *RuntimeBrokerUpsertBulk) ClearHostIdentityObservation() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearHostIdentityObservation()
+	})
+}
+
+// SetHostIdentityObservedAt sets the "host_identity_observed_at" field.
+func (u *RuntimeBrokerUpsertBulk) SetHostIdentityObservedAt(v time.Time) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetHostIdentityObservedAt(v)
+	})
+}
+
+// UpdateHostIdentityObservedAt sets the "host_identity_observed_at" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateHostIdentityObservedAt() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateHostIdentityObservedAt()
+	})
+}
+
+// ClearHostIdentityObservedAt clears the value of the "host_identity_observed_at" field.
+func (u *RuntimeBrokerUpsertBulk) ClearHostIdentityObservedAt() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearHostIdentityObservedAt()
 	})
 }
 

@@ -353,6 +353,10 @@ type EmbeddedFlatRegistrationOptions struct {
 	// WorkspaceStorage is the workspace storage descriptor (nil keeps the
 	// stored one).
 	WorkspaceStorage *api.BrokerWorkspaceStorage
+	// HostIdentity is the host's GCP identity as read from the metadata
+	// server; nil records nothing. It is recorded as an observation only
+	// and never written to the GCP host fields.
+	HostIdentity *store.HostIdentityObservation
 }
 
 // embeddedGlobalProjectSlug is the slug of the Hub's global project.
@@ -434,6 +438,12 @@ func (s *Server) registerEmbeddedFlat(ctx context.Context, id *brokeridentity.Id
 	// R10: activation only on a bound result.
 	if err := brokeridentity.CheckActivationAck(id, "embedded", row.ID, row.RuntimeTarget); err != nil {
 		return nil, err
+	}
+	if o.HostIdentity != nil {
+		s.recordHostObservation(ctx, row.ID, *o.HostIdentity)
+		if stored, err := s.store.GetRuntimeBroker(ctx, row.ID); err == nil {
+			row = stored
+		}
 	}
 	return row, nil
 }

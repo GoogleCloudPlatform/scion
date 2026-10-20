@@ -145,7 +145,9 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 				RuntimeBroker: brokerForDisplay(broker),
 				LocalPath:     brokerLocalPaths[broker.ID],
 			}
+			eb.RuntimeBroker = withHostIdentity(eb.RuntimeBroker, false)
 			if caps != nil && i < len(caps) {
+				eb.RuntimeBroker = brokerForDisplayWithCap(broker, caps[i])
 				eb.Cap = caps[i]
 				s.reportBrokerDispatchCapability(ctx, eb.Cap, &result.Items[i], project)
 			}
@@ -176,8 +178,9 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 		if caps != nil && !capabilityAllows(caps[i], ActionRead) {
 			continue
 		}
-		resp := RuntimeBrokerWithCapabilities{RuntimeBroker: brokerForDisplay(broker)}
+		resp := RuntimeBrokerWithCapabilities{RuntimeBroker: withHostIdentity(brokerForDisplay(broker), false)}
 		if caps != nil && i < len(caps) {
+			resp.RuntimeBroker = brokerForDisplayWithCap(broker, caps[i])
 			resp.Cap = caps[i]
 			// Without a project, the project-independent dispatch rule.
 			s.reportBrokerDispatchCapability(ctx, resp.Cap, &result.Items[i], nil)
@@ -393,9 +396,10 @@ func (s *Server) getRuntimeBroker(w http.ResponseWriter, r *http.Request, id str
 	}
 
 	// Compute capabilities for the requesting user
-	resp := RuntimeBrokerWithCapabilities{RuntimeBroker: brokerForDisplay(*broker)}
+	resp := RuntimeBrokerWithCapabilities{RuntimeBroker: withHostIdentity(brokerForDisplay(*broker), false)}
 	if ident := GetIdentityFromContext(ctx); ident != nil {
 		resp.Cap = s.authzService.ComputeCapabilities(ctx, ident, brokerResource(broker))
+		resp.RuntimeBroker = brokerForDisplayWithCap(*broker, resp.Cap)
 		s.reportBrokerDispatchCapability(ctx, resp.Cap, broker, nil)
 	}
 
@@ -566,7 +570,8 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 
-	writeJSON(w, http.StatusOK, brokerForDisplay(*after))
+	// The caller holds broker.update (checked above).
+	writeJSON(w, http.StatusOK, withHostIdentity(brokerForDisplay(*after), true))
 }
 
 func (s *Server) deleteRuntimeBroker(w http.ResponseWriter, r *http.Request, id string) {

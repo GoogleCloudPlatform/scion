@@ -1689,6 +1689,11 @@ type RuntimeBrokerStore interface {
 	// ""). Returns ErrNotFound if the broker doesn't exist.
 	SetRuntimeBrokerGCPHostSource(ctx context.Context, id, source string) (prev GCPHostSetting, err error)
 
+	// RecordRuntimeBrokerHostObservation stores the latest host identity
+	// observation of a co-located broker. Returns ErrNotFound if the broker
+	// doesn't exist. UpdateRuntimeBroker never writes these columns.
+	RecordRuntimeBrokerHostObservation(ctx context.Context, id string, obs HostIdentityObservation) error
+
 	// DeleteRuntimeBroker removes a runtime broker by ID.
 	// Returns ErrNotFound if the broker doesn't exist.
 	DeleteRuntimeBroker(ctx context.Context, id string) error

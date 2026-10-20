@@ -34,7 +34,7 @@ import (
 
 // brokerColumnsAddedForGCPHost are the runtime_brokers columns this change
 // adds; dropping them reproduces the pre-change table shape.
-var brokerColumnsAddedForGCPHost = []string{"gcp_host_source"}
+var brokerColumnsAddedForGCPHost = []string{"gcp_host_source", "host_identity_observed_email", "host_identity_observation", "host_identity_observed_at"}
 
 // runBrokerColumnsAdditiveUpgrade writes rows, drops the new columns to
 // reproduce the pre-change shape, re-runs AutoMigrate, and checks that the
@@ -71,6 +71,7 @@ func runBrokerColumnsAdditiveUpgrade(t *testing.T, client *ent.Client, raw *sql.
 		got, err := cs.GetRuntimeBroker(ctx, id)
 		require.NoError(t, err)
 		assert.Empty(t, got.GCPHostSource, "%s: new column reads empty", got.Name)
+		assert.Nil(t, got.HostObservation, "%s: no host identity observation", got.Name)
 	}
 	got, err := cs.GetRuntimeBroker(ctx, remote)
 	require.NoError(t, err)
@@ -91,6 +92,11 @@ func runBrokerColumnsAdditiveUpgrade(t *testing.T, client *ent.Client, raw *sql.
 	applied, err = cs.SetRuntimeBrokerGCPHostIfUnset(ctx, remote, "other@proj.iam.gserviceaccount.com", "proj", store.GCPHostSourceRegistration)
 	require.NoError(t, err)
 	assert.False(t, applied, "the backfilled admin source keeps the existing value")
+	require.NoError(t, cs.RecordRuntimeBrokerHostObservation(ctx, colocated, store.HostIdentityObservation{Outcome: store.HostObservationAbsent}))
+	got, err = cs.GetRuntimeBroker(ctx, colocated)
+	require.NoError(t, err)
+	require.NotNil(t, got.HostObservation)
+	assert.Equal(t, store.HostObservationAbsent, got.HostObservation.Outcome)
 }
 
 func TestRuntimeBrokerGCPHostColumns_AdditiveUpgrade_SQLite(t *testing.T) {

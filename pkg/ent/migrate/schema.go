@@ -2476,6 +2476,9 @@ var (
 		{Name: "gcp_host_service_account_email", Type: field.TypeString, Nullable: true},
 		{Name: "gcp_host_project_id", Type: field.TypeString, Nullable: true},
 		{Name: "gcp_host_source", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "host_identity_observed_email", Type: field.TypeString, Nullable: true},
+		{Name: "host_identity_observation", Type: field.TypeString, Nullable: true},
+		{Name: "host_identity_observed_at", Type: field.TypeTime, Nullable: true},
 		{Name: "connected_hub_id", Type: field.TypeString, Nullable: true},
 		{Name: "connected_session_id", Type: field.TypeString, Nullable: true},
 		{Name: "connected_at", Type: field.TypeTime, Nullable: true},
@@ -2504,7 +2507,7 @@ var (
 			{
 				Name:    "runtimebroker_runtime_target_id",
 				Unique:  true,
-				Columns: []*schema.Column{RuntimeBrokersColumns[27]},
+				Columns: []*schema.Column{RuntimeBrokersColumns[30]},
 			},
 		},
 	}
