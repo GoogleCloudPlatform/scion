@@ -232,9 +232,10 @@ The web UI's **Create Token** form always mints project tokens. Through the API,
 boundary never means hub: a request that names neither `projectId` nor `boundary` is rejected
 with `400` (`details.reason` `boundary_required`). A hub boundary that also names a project, or a
 `boundary` that disagrees with `projectId`, is rejected with `400` (`boundary_invalid`). Token
-management requires a signed-in session credential; a UAT cannot mint another token. Every caller
-without an interactive session or dev credential gets the same `403` from `POST /api/v1/auth/tokens`,
-decided before the request body is read:
+management requires a signed-in session credential; a UAT cannot mint another token. Every other authenticated caller
+(a UAT, an agent, a Runtime Broker or any other credential that is not a user's session or dev
+credential) gets the same `403` from `POST /api/v1/auth/tokens`, decided before the request body is
+read. With a session credential:
 
 ```bash
 curl -X POST -H "Authorization: Bearer $SESSION_TOKEN" \
@@ -266,9 +267,9 @@ The same per-request checks apply, with these limits:
 - **Inbox and conversations.** Chat writes made with a token (sending, changing or removing your
   own inbox items, notifications, conversations and direct messages) need `inbox:write`. Reading
   your own inbox, notifications, direct messages, direct-message read state and chat preferences
-  needs `inbox:read`. Both scopes act only on your own records. Reading a project chat thread (its
-  messages, read state or members) needs `project:read` on its project, and posting to one needs
-  `inbox:write` as well. A project token reaches only records of its project, and only while you
+  needs `inbox:read`. Both scopes act only on your own records. Reading a project chat thread (the
+  thread, its messages and your read state on it) or the members of its chat space needs
+  `project:read` on its project, and posting to a thread needs `inbox:write` as well. A project token reaches only records of its project, and only while you
   are a member; a record with no project, such as a direct message between users, needs a hub
   token.
 - **Limits and quotas.** Reading hub-wide limit definitions, entitlements and usage needs
@@ -317,7 +318,7 @@ The same per-request checks apply, with these limits:
 - **Schedules.** Creating a scheduled event or schedule needs `scheduled_event:create`; updating,
   re-targeting, pausing or resuming a schedule needs `scheduled_event:update`. The request also passes the event type's
   own target checks, and each fire stays within the recording token's ceiling and boundary. A fire fails
-  once that token is revoked or has expired, so a recurring schedule authored with a token stops
+  once that token is revoked, deleted or has expired, so a recurring schedule authored with a token stops
   firing at the token's expiry; pause and resume it with a sign-in or a newer token to record new
   authority. See [Scheduling](/scion/hosted/user/scheduling/#security--authorization).
 - **Identity governance.** Reading role definitions, role bindings and access constraints needs
