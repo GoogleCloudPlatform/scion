@@ -96,6 +96,12 @@ func (s *Server) authorizePassthroughIdentity(
 // callers without a response writer can fail with the same message.
 type passthroughDenial struct {
 	msg string
+	// retryable marks a refusal that is not a policy decision about the
+	// caller: the permission check could not be made (unavailable, not
+	// wired, did not complete) or the caller could not be resolved. The
+	// response is the same; callers that act on refusals treat these as
+	// undecided.
+	retryable bool
 }
 
 func (d *passthroughDenial) Error() string { return d.msg }
@@ -202,7 +208,7 @@ func (s *Server) evaluatePassthroughIdentity(
 		logAuthzDenial(r, GetIdentityFromContext(ctx),
 			Resource{Type: "broker", ID: broker.ID}, ActionDispatch,
 			"caller principal: "+err.Error())
-		return &passthroughDenial{msg: "You don't have permission to use passthrough on this broker"}
+		return &passthroughDenial{msg: "You don't have permission to use passthrough on this broker", retryable: true}
 	}
 
 	result, err := store.EvaluateActAs(ctx, store.ActAsGate{
@@ -233,10 +239,10 @@ func (s *Server) evaluatePassthroughIdentity(
 			return &passthroughDenial{msg: "Your identity cannot be granted permission to use passthrough on this broker"}
 		case store.MechanismCheckUnwired, store.MechanismCheckUnavailable:
 			return &passthroughDenial{msg: "GCP permission checking is not available on this Hub; " +
-				"passthrough is refused until it is configured"}
+				"passthrough is refused until it is configured", retryable: true}
 		case store.MechanismCheckFailed:
 			return &passthroughDenial{msg: "Could not verify your permission to use passthrough " +
-				"because the check did not complete; try again"}
+				"because the check did not complete; try again", retryable: true}
 		default:
 			return &passthroughDenial{msg: "You don't have permission to use passthrough on this broker (" +
 				store.PermissionActAs + " is required on " + target.Email + ")"}
