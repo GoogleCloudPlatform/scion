@@ -85502,23 +85502,26 @@ func (m *TemplateMutation) ResetEdge(name string) error {
 // TestIdentityDelegationMutation represents an operation that mutates the TestIdentityDelegation nodes in the graph.
 type TestIdentityDelegationMutation struct {
 	config
-	op            Op
-	typ           string
-	id            *uuid.UUID
-	grantor_id    *string
-	workload_sub  *string
-	scope         *string
-	member_cap    *int
-	addmember_cap *int
-	label         *string
-	created_at    *time.Time
-	expires_at    *time.Time
-	revoked_at    *time.Time
-	revoked_by    *string
-	clearedFields map[string]struct{}
-	done          bool
-	oldValue      func(context.Context) (*TestIdentityDelegation, error)
-	predicates    []predicate.TestIdentityDelegation
+	op                Op
+	typ               string
+	id                *uuid.UUID
+	grantor_id        *string
+	workload_sub      *string
+	scope             *string
+	member_cap        *int
+	addmember_cap     *int
+	label             *string
+	created_at        *time.Time
+	expires_at        *time.Time
+	grantor_kind      *testidentitydelegation.GrantorKind
+	hub_id            *string
+	marker_created_at *time.Time
+	revoked_at        *time.Time
+	revoked_by        *string
+	clearedFields     map[string]struct{}
+	done              bool
+	oldValue          func(context.Context) (*TestIdentityDelegation, error)
+	predicates        []predicate.TestIdentityDelegation
 }
 
 var _ ent.Mutation = (*TestIdentityDelegationMutation)(nil)
@@ -85897,6 +85900,127 @@ func (m *TestIdentityDelegationMutation) ResetExpiresAt() {
 	m.expires_at = nil
 }
 
+// SetGrantorKind sets the "grantor_kind" field.
+func (m *TestIdentityDelegationMutation) SetGrantorKind(tk testidentitydelegation.GrantorKind) {
+	m.grantor_kind = &tk
+}
+
+// GrantorKind returns the value of the "grantor_kind" field in the mutation.
+func (m *TestIdentityDelegationMutation) GrantorKind() (r testidentitydelegation.GrantorKind, exists bool) {
+	v := m.grantor_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldGrantorKind returns the old "grantor_kind" field's value of the TestIdentityDelegation entity.
+// If the TestIdentityDelegation object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TestIdentityDelegationMutation) OldGrantorKind(ctx context.Context) (v testidentitydelegation.GrantorKind, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldGrantorKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldGrantorKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldGrantorKind: %w", err)
+	}
+	return oldValue.GrantorKind, nil
+}
+
+// ResetGrantorKind resets all changes to the "grantor_kind" field.
+func (m *TestIdentityDelegationMutation) ResetGrantorKind() {
+	m.grantor_kind = nil
+}
+
+// SetHubID sets the "hub_id" field.
+func (m *TestIdentityDelegationMutation) SetHubID(s string) {
+	m.hub_id = &s
+}
+
+// HubID returns the value of the "hub_id" field in the mutation.
+func (m *TestIdentityDelegationMutation) HubID() (r string, exists bool) {
+	v := m.hub_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldHubID returns the old "hub_id" field's value of the TestIdentityDelegation entity.
+// If the TestIdentityDelegation object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TestIdentityDelegationMutation) OldHubID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldHubID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldHubID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldHubID: %w", err)
+	}
+	return oldValue.HubID, nil
+}
+
+// ResetHubID resets all changes to the "hub_id" field.
+func (m *TestIdentityDelegationMutation) ResetHubID() {
+	m.hub_id = nil
+}
+
+// SetMarkerCreatedAt sets the "marker_created_at" field.
+func (m *TestIdentityDelegationMutation) SetMarkerCreatedAt(t time.Time) {
+	m.marker_created_at = &t
+}
+
+// MarkerCreatedAt returns the value of the "marker_created_at" field in the mutation.
+func (m *TestIdentityDelegationMutation) MarkerCreatedAt() (r time.Time, exists bool) {
+	v := m.marker_created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldMarkerCreatedAt returns the old "marker_created_at" field's value of the TestIdentityDelegation entity.
+// If the TestIdentityDelegation object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TestIdentityDelegationMutation) OldMarkerCreatedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldMarkerCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldMarkerCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldMarkerCreatedAt: %w", err)
+	}
+	return oldValue.MarkerCreatedAt, nil
+}
+
+// ClearMarkerCreatedAt clears the value of the "marker_created_at" field.
+func (m *TestIdentityDelegationMutation) ClearMarkerCreatedAt() {
+	m.marker_created_at = nil
+	m.clearedFields[testidentitydelegation.FieldMarkerCreatedAt] = struct{}{}
+}
+
+// MarkerCreatedAtCleared returns if the "marker_created_at" field was cleared in this mutation.
+func (m *TestIdentityDelegationMutation) MarkerCreatedAtCleared() bool {
+	_, ok := m.clearedFields[testidentitydelegation.FieldMarkerCreatedAt]
+	return ok
+}
+
+// ResetMarkerCreatedAt resets all changes to the "marker_created_at" field.
+func (m *TestIdentityDelegationMutation) ResetMarkerCreatedAt() {
+	m.marker_created_at = nil
+	delete(m.clearedFields, testidentitydelegation.FieldMarkerCreatedAt)
+}
+
 // SetRevokedAt sets the "revoked_at" field.
 func (m *TestIdentityDelegationMutation) SetRevokedAt(t time.Time) {
 	m.revoked_at = &t
@@ -86029,7 +86153,7 @@ func (m *TestIdentityDelegationMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *TestIdentityDelegationMutation) Fields() []string {
-	fields := make([]string, 0, 9)
+	fields := make([]string, 0, 12)
 	if m.grantor_id != nil {
 		fields = append(fields, testidentitydelegation.FieldGrantorID)
 	}
@@ -86050,6 +86174,15 @@ func (m *TestIdentityDelegationMutation) Fields() []string {
 	}
 	if m.expires_at != nil {
 		fields = append(fields, testidentitydelegation.FieldExpiresAt)
+	}
+	if m.grantor_kind != nil {
+		fields = append(fields, testidentitydelegation.FieldGrantorKind)
+	}
+	if m.hub_id != nil {
+		fields = append(fields, testidentitydelegation.FieldHubID)
+	}
+	if m.marker_created_at != nil {
+		fields = append(fields, testidentitydelegation.FieldMarkerCreatedAt)
 	}
 	if m.revoked_at != nil {
 		fields = append(fields, testidentitydelegation.FieldRevokedAt)
@@ -86079,6 +86212,12 @@ func (m *TestIdentityDelegationMutation) Field(name string) (ent.Value, bool) {
 		return m.CreatedAt()
 	case testidentitydelegation.FieldExpiresAt:
 		return m.ExpiresAt()
+	case testidentitydelegation.FieldGrantorKind:
+		return m.GrantorKind()
+	case testidentitydelegation.FieldHubID:
+		return m.HubID()
+	case testidentitydelegation.FieldMarkerCreatedAt:
+		return m.MarkerCreatedAt()
 	case testidentitydelegation.FieldRevokedAt:
 		return m.RevokedAt()
 	case testidentitydelegation.FieldRevokedBy:
@@ -86106,6 +86245,12 @@ func (m *TestIdentityDelegationMutation) OldField(ctx context.Context, name stri
 		return m.OldCreatedAt(ctx)
 	case testidentitydelegation.FieldExpiresAt:
 		return m.OldExpiresAt(ctx)
+	case testidentitydelegation.FieldGrantorKind:
+		return m.OldGrantorKind(ctx)
+	case testidentitydelegation.FieldHubID:
+		return m.OldHubID(ctx)
+	case testidentitydelegation.FieldMarkerCreatedAt:
+		return m.OldMarkerCreatedAt(ctx)
 	case testidentitydelegation.FieldRevokedAt:
 		return m.OldRevokedAt(ctx)
 	case testidentitydelegation.FieldRevokedBy:
@@ -86168,6 +86313,27 @@ func (m *TestIdentityDelegationMutation) SetField(name string, value ent.Value) 
 		}
 		m.SetExpiresAt(v)
 		return nil
+	case testidentitydelegation.FieldGrantorKind:
+		v, ok := value.(testidentitydelegation.GrantorKind)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetGrantorKind(v)
+		return nil
+	case testidentitydelegation.FieldHubID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetHubID(v)
+		return nil
+	case testidentitydelegation.FieldMarkerCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetMarkerCreatedAt(v)
+		return nil
 	case testidentitydelegation.FieldRevokedAt:
 		v, ok := value.(time.Time)
 		if !ok {
@@ -86227,6 +86393,9 @@ func (m *TestIdentityDelegationMutation) AddField(name string, value ent.Value) 
 // mutation.
 func (m *TestIdentityDelegationMutation) ClearedFields() []string {
 	var fields []string
+	if m.FieldCleared(testidentitydelegation.FieldMarkerCreatedAt) {
+		fields = append(fields, testidentitydelegation.FieldMarkerCreatedAt)
+	}
 	if m.FieldCleared(testidentitydelegation.FieldRevokedAt) {
 		fields = append(fields, testidentitydelegation.FieldRevokedAt)
 	}
@@ -86247,6 +86416,9 @@ func (m *TestIdentityDelegationMutation) FieldCleared(name string) bool {
 // error if the field is not defined in the schema.
 func (m *TestIdentityDelegationMutation) ClearField(name string) error {
 	switch name {
+	case testidentitydelegation.FieldMarkerCreatedAt:
+		m.ClearMarkerCreatedAt()
+		return nil
 	case testidentitydelegation.FieldRevokedAt:
 		m.ClearRevokedAt()
 		return nil
@@ -86281,6 +86453,15 @@ func (m *TestIdentityDelegationMutation) ResetField(name string) error {
 		return nil
 	case testidentitydelegation.FieldExpiresAt:
 		m.ResetExpiresAt()
+		return nil
+	case testidentitydelegation.FieldGrantorKind:
+		m.ResetGrantorKind()
+		return nil
+	case testidentitydelegation.FieldHubID:
+		m.ResetHubID()
+		return nil
+	case testidentitydelegation.FieldMarkerCreatedAt:
+		m.ResetMarkerCreatedAt()
 		return nil
 	case testidentitydelegation.FieldRevokedAt:
 		m.ResetRevokedAt()

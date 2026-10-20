@@ -2685,6 +2685,16 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	srv.logTestIdentityWebSessionState()
 	srv.testAdminIssuance = newTestAdminIssuanceState()
 	srv.workloadIssuer = newWorkloadIssuerAuthenticator(cfg, s, func() time.Time { return srv.testIdentities.clock() }, srv.workloadAdminScopeAvailable)
+	if srv.workloadIssuer != nil {
+		// Offline delegations (phase DL): the gate reads the running
+		// level at every redeem (srv.testMode is set below, before the hub
+		// serves), and the per-redeem audit goes through the test
+		// identity audit hook.
+		srv.workloadIssuer.testModeLevel = srv.TestModeLevel
+		srv.workloadIssuer.writeAudit = func(ctx context.Context, st store.Store, record *store.MutationAuditRecord) error {
+			return srv.testIdentities.hooks.writeAudit(ctx, st, record)
+		}
+	}
 	if srv.workloadIssuer != nil && !cfg.EnableTestIdentities {
 		slog.Warn("Test identity workload issuers are configured but test identities are off; workload delegation stays unavailable")
 	}

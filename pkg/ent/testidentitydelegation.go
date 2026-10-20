@@ -32,6 +32,12 @@ type TestIdentityDelegation struct {
 	CreatedAt time.Time `json:"created_at,omitempty"`
 	// Server-computed end of the delegation's lifetime
 	ExpiresAt time.Time `json:"expires_at,omitempty"`
+	// Kind of grantor: a live human issuer, or the offline test-infra host command (member scope only)
+	GrantorKind testidentitydelegation.GrantorKind `json:"grantor_kind,omitempty"`
+	// Hub id an offline (test_infra_offline) delegation is bound to; empty for a human grantor
+	HubID string `json:"hub_id,omitempty"`
+	// created_at of the test infrastructure marker an offline delegation is bound to; nil for a human grantor
+	MarkerCreatedAt *time.Time `json:"marker_created_at,omitempty"`
 	// RevokedAt holds the value of the "revoked_at" field.
 	RevokedAt *time.Time `json:"revoked_at,omitempty"`
 	// RevokedBy holds the value of the "revoked_by" field.
@@ -46,9 +52,9 @@ func (*TestIdentityDelegation) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case testidentitydelegation.FieldMemberCap:
 			values[i] = new(sql.NullInt64)
-		case testidentitydelegation.FieldGrantorID, testidentitydelegation.FieldWorkloadSub, testidentitydelegation.FieldScope, testidentitydelegation.FieldLabel, testidentitydelegation.FieldRevokedBy:
+		case testidentitydelegation.FieldGrantorID, testidentitydelegation.FieldWorkloadSub, testidentitydelegation.FieldScope, testidentitydelegation.FieldLabel, testidentitydelegation.FieldGrantorKind, testidentitydelegation.FieldHubID, testidentitydelegation.FieldRevokedBy:
 			values[i] = new(sql.NullString)
-		case testidentitydelegation.FieldCreatedAt, testidentitydelegation.FieldExpiresAt, testidentitydelegation.FieldRevokedAt:
+		case testidentitydelegation.FieldCreatedAt, testidentitydelegation.FieldExpiresAt, testidentitydelegation.FieldMarkerCreatedAt, testidentitydelegation.FieldRevokedAt:
 			values[i] = new(sql.NullTime)
 		case testidentitydelegation.FieldID:
 			values[i] = new(uuid.UUID)
@@ -114,6 +120,25 @@ func (_m *TestIdentityDelegation) assignValues(columns []string, values []any) e
 				return fmt.Errorf("unexpected type %T for field expires_at", values[i])
 			} else if value.Valid {
 				_m.ExpiresAt = value.Time
+			}
+		case testidentitydelegation.FieldGrantorKind:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field grantor_kind", values[i])
+			} else if value.Valid {
+				_m.GrantorKind = testidentitydelegation.GrantorKind(value.String)
+			}
+		case testidentitydelegation.FieldHubID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field hub_id", values[i])
+			} else if value.Valid {
+				_m.HubID = value.String
+			}
+		case testidentitydelegation.FieldMarkerCreatedAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field marker_created_at", values[i])
+			} else if value.Valid {
+				_m.MarkerCreatedAt = new(time.Time)
+				*_m.MarkerCreatedAt = value.Time
 			}
 		case testidentitydelegation.FieldRevokedAt:
 			if value, ok := values[i].(*sql.NullTime); !ok {
@@ -185,6 +210,17 @@ func (_m *TestIdentityDelegation) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("expires_at=")
 	builder.WriteString(_m.ExpiresAt.Format(time.ANSIC))
+	builder.WriteString(", ")
+	builder.WriteString("grantor_kind=")
+	builder.WriteString(fmt.Sprintf("%v", _m.GrantorKind))
+	builder.WriteString(", ")
+	builder.WriteString("hub_id=")
+	builder.WriteString(_m.HubID)
+	builder.WriteString(", ")
+	if v := _m.MarkerCreatedAt; v != nil {
+		builder.WriteString("marker_created_at=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
 	builder.WriteString(", ")
 	if v := _m.RevokedAt; v != nil {
 		builder.WriteString("revoked_at=")
