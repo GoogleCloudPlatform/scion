@@ -409,6 +409,14 @@ func TestEvaluateMoveEligibility_WithoutForceUnchanged(t *testing.T) {
 			breakSameExport(in)
 			in.GitRemote = ""
 		}, moveCheckSameExport, false},
+		{"same_export, target without forced moves", func(in *moveEligibilityInput) {
+			breakSameExport(in)
+			in.Dst.Capabilities.AgentMoveRecreate = false
+		}, moveCheckSameExport, false},
+		{"workspace_on_export, target without forced moves", func(in *moveEligibilityInput) {
+			breakWorkspaceOnExport(in)
+			in.Dst.Capabilities.AgentMoveRecreate = false
+		}, moveCheckWorkspaceOnExport, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

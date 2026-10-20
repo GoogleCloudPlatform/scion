@@ -207,6 +207,7 @@ func TestPrintMoveForceHint(t *testing.T) {
 		{"same_export, would apply", "same_export", true, false, true},
 		{"workspace_on_export, would apply", "workspace_on_export", true, false, true},
 		{"target_profile, would apply", "target_profile", true, false, true},
+		{"any other check, would apply", "capacity", true, false, true},
 		{"already forced", "same_export", true, true, false},
 		{"hub says force would not apply", "same_export", false, false, false},
 	}
@@ -248,6 +249,22 @@ func TestReincarnateForce_DryRunJSON(t *testing.T) {
 	for _, human := range []string{"Transfer mode:", "Move consequences:", "will not survive", "--force was not needed", "Dry run only"} {
 		assert.NotContains(t, stdout, human)
 	}
+}
+
+// F2 in human output: an export verdict under --force says --force was
+// not needed.
+func TestReincarnateForce_ExportVerdictSaysForceNotNeeded(t *testing.T) {
+	withBrokerFlags(t, "b2", true)
+	withForceFlag(t, true)
+	hubCtx, _ := forceHub(t, http.StatusOK,
+		`{"agentId":"agent-1","generation":2,"state":"planned","plan":{},"sourceBrokerId":"b1","targetBrokerId":"b2","moveVerdict":{"eligible":true,"sourceBroker":{"id":"b1"},"targetBroker":{"id":"b2"},"transferMode":"export","checks":[{"name":"same_export","result":"passed"}]}}`,
+		http.StatusAccepted, `{}`)
+	var runErr error
+	stdout := captureStdout(t, func() { runErr = reincarnateAgentViaHub(hubCtx, "agent-1", "", false) })
+	require.NoError(t, runErr)
+	assert.Contains(t, stdout, "--force was not needed: the workspace is carried through the shared NFS export.")
+	assert.Contains(t, stdout, "export (the workspace is carried through the shared NFS export)")
+	assert.NotContains(t, stdout, "will not survive")
 }
 
 // Brokers do not advertise forced moves until the move itself exists.

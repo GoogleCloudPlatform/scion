@@ -152,8 +152,9 @@ type moveRefusal struct {
 	// ForceWouldApply is set on a refusal without --force that only the
 	// workspace placement caused (same_export, workspace_on_export, or the
 	// placementCaused target_profile refusal), for an agent whose
-	// workspace mode a forced move supports. It is written to the error
-	// details as forceWouldApply.
+	// workspace mode a forced move supports, onto a target that advertises
+	// AgentMoveRecreate. It is written to the error details as
+	// forceWouldApply.
 	ForceWouldApply bool
 	// placementCaused marks the export checks' target_profile refusal that
 	// exists only to keep the workspace on the export: the Kubernetes
@@ -249,8 +250,10 @@ func evaluateMoveEligibility(in moveEligibilityInput) (MoveVerdict, *moveRefusal
 	}
 	if !in.Force {
 		_, notRecreatable := moveWorkspaceRecreatable(in)
+		// The hint points only at a --force the target can accept.
+		dstRecreates := in.Dst.Capabilities != nil && in.Dst.Capabilities.AgentMoveRecreate
 		ref.ForceWouldApply = (failed == moveCheckSameExport || failed == moveCheckWorkspaceOnExport || ref.placementCaused) &&
-			notRecreatable == ""
+			notRecreatable == "" && dstRecreates
 		return v, ref
 	}
 	v, ref = evaluateMoveChecks(in, true)
