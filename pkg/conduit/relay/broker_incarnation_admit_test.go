@@ -17,9 +17,11 @@
 package relay_test
 
 import (
+	"sort"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
@@ -60,21 +62,48 @@ func (ev *brokerIncarnationEvents) snapshot() (map[string]int, []string) {
 	return out, append([]string(nil), ev.flaps...)
 }
 
-// admissions returns a channel that receives the session id of every
-// broker session whose admission step on n has finished. Install it
-// before n serves sessions.
-func admissions(n *relaytest.Node) <-chan string {
-	ch := make(chan string, 64)
-	n.Relay.SetAfterBrokerAdmissionHookForTest(func(sessionID string) { ch <- sessionID })
-	return ch
+// admissionLog records the admission steps of one relay for one test: ch
+// receives the session id of every broker session whose admission step has
+// finished, and seen keeps every id read from ch, so an id read while
+// waiting for others is still there for a later wait.
+type admissionLog struct {
+	ch   chan string
+	seen map[string]bool
 }
 
-// waitAdmission waits until the admission step of sessionID has finished.
-func waitAdmission(t *testing.T, ch <-chan string, sessionID string) {
+// admissions returns the admission log of n. Install it before n serves
+// sessions.
+func admissions(n *relaytest.Node) *admissionLog {
+	l := &admissionLog{ch: make(chan string, 64), seen: map[string]bool{}}
+	n.Relay.SetAfterBrokerAdmissionHookForTest(func(sessionID string) { l.ch <- sessionID })
+	return l
+}
+
+// waitAdmission waits until the admission step of every session in
+// sessionIDs has finished, in any order, within 10s overall. Ids read along
+// the way are kept in the log, so a later call still sees them. The hook
+// fires when a session has completed admission (is registered).
+func waitAdmission(t *testing.T, l *admissionLog, sessionIDs ...string) {
 	t.Helper()
-	for {
-		if relaytest.Wait(t, ch, "admission step of "+sessionID) == sessionID {
-			return
+	want := make(map[string]bool, len(sessionIDs))
+	for _, id := range sessionIDs {
+		if !l.seen[id] {
+			want[id] = true
+		}
+	}
+	deadline := time.After(10 * time.Second)
+	for len(want) > 0 {
+		select {
+		case id := <-l.ch:
+			l.seen[id] = true
+			delete(want, id)
+		case <-deadline:
+			missing := make([]string, 0, len(want))
+			for id := range want {
+				missing = append(missing, id)
+			}
+			sort.Strings(missing)
+			t.Fatalf("timed out waiting for the admission step of %v", missing)
 		}
 	}
 }
@@ -113,12 +142,14 @@ func TestBrokerAdmissionClosesOlderIncarnation(t *testing.T) {
 	w.SetPrincipal("b1", relay.Principal{Kind: registry.PrincipalBroker, ID: "broker-1"})
 	w.SetPrincipal("b2", relay.Principal{Kind: registry.PrincipalBroker, ID: "broker-2"})
 
-	old1, _ := a.MustDial("b1", relaytest.BrokerHello("broker-1", "proc-1"), conduit.Config{})
+	old1, w1 := a.MustDial("b1", relaytest.BrokerHello("broker-1", "proc-1"), conduit.Config{})
 	old2, w2 := a.MustDial("b1", relaytest.BrokerHello("broker-1", "proc-1"), conduit.Config{})
 	remote, _ := b.MustDial("b1", relaytest.BrokerHello("broker-1", "proc-1"), conduit.Config{})
 	other, wo := a.MustDial("b2", relaytest.BrokerHello("broker-2", "proc-1"), conduit.Config{})
-	waitAdmission(t, admittedA, w2.GetSessionId())
-	waitAdmission(t, admittedA, wo.GetSessionId())
+	// The test waits until each earlier session has completed admission
+	// (is registered) before the next dial. The admission steps may finish
+	// in any order.
+	waitAdmission(t, admittedA, w1.GetSessionId(), w2.GetSessionId(), wo.GetSessionId())
 	if got, _ := evA.snapshot(); len(got) != 0 {
 		t.Fatalf("superseded before any new incarnation: %v", got)
 	}
@@ -162,7 +193,10 @@ func TestBrokerIncarnationFlapReported(t *testing.T) {
 	admitted := admissions(a)
 	w.SetPrincipal("b1", relay.Principal{Kind: registry.PrincipalBroker, ID: "broker-1"})
 
-	first, _ := a.MustDial("b1", relaytest.BrokerHello("broker-1", "proc-1"), conduit.Config{})
+	first, w1 := a.MustDial("b1", relaytest.BrokerHello("broker-1", "proc-1"), conduit.Config{})
+	// The test waits until first has completed admission (is registered)
+	// before the next dial.
+	waitAdmission(t, admitted, w1.GetSessionId())
 	second, w2 := a.MustDial("b1", relaytest.BrokerHello("broker-1", "proc-2"), conduit.Config{})
 	requireClosedWith(t, first, relay.CloseSupersededIncarnation, "proc-1 session")
 	waitAdmission(t, admitted, w2.GetSessionId())
