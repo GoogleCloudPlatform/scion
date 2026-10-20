@@ -25,6 +25,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -503,6 +504,84 @@ func TestDo_RetryResendsFullBodyOnTransportError(t *testing.T) {
 	for i, b := range rt.bodies {
 		if b != want {
 			t.Errorf("attempt %d carried body %q, want %q", i+1, b, want)
+		}
+	}
+}
+
+// Use fake time so cancellation is checked against a long retry wait without
+// depending on wall-clock timing or network scheduling.
+func TestDo_RetryWaitContext(t *testing.T) {
+	for _, failure := range []struct {
+		name   string
+		status int
+	}{
+		{name: "network_error"},
+		{name: "server_error", status: http.StatusServiceUnavailable},
+	} {
+		for _, mode := range []string{"cancel", "deadline", "retry"} {
+			t.Run(failure.name+"/"+mode, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					const retryWait = time.Minute
+					ctx, cancel := context.WithCancel(t.Context())
+					defer cancel()
+					var wantErr error
+					wantElapsed := retryWait
+					wantCalls, wantRewinds := 2, 1
+					switch mode {
+					case "cancel":
+						timer := time.AfterFunc(time.Second, cancel)
+						defer timer.Stop()
+						wantErr = context.Canceled
+					case "deadline":
+						var stop context.CancelFunc
+						ctx, stop = context.WithTimeout(ctx, time.Second)
+						defer stop()
+						wantErr = context.DeadlineExceeded
+					}
+					if wantErr != nil {
+						wantElapsed = time.Second
+						wantCalls, wantRewinds = 1, 0
+					}
+
+					rt := &flakyBodyRoundTripper{failures: 1, failStatus: failure.status}
+					tr := NewTransport("http://hub.invalid",
+						WithHTTPClient(&http.Client{Transport: rt}),
+						WithRetry(1, retryWait))
+					req, err := http.NewRequest(http.MethodPut, "http://hub.invalid/api/v1/resources/test",
+						strings.NewReader(`{"name":"test"}`))
+					if err != nil {
+						t.Fatal(err)
+					}
+					getBody := req.GetBody
+					rewinds := 0
+					req.GetBody = func() (io.ReadCloser, error) {
+						rewinds++
+						return getBody()
+					}
+
+					start := time.Now()
+					resp, err := tr.Do(ctx, req)
+					elapsed := time.Since(start)
+					if resp != nil {
+						defer func() { _ = resp.Body.Close() }()
+					}
+					if !errors.Is(err, wantErr) {
+						t.Errorf("Do error = %v, want %v", err, wantErr)
+					}
+					if wantErr != nil && resp != nil {
+						t.Error("canceled request returned a response")
+					}
+					if wantErr == nil && (resp == nil || resp.StatusCode != http.StatusOK) {
+						t.Errorf("retry response = %v, want HTTP 200", resp)
+					}
+					if elapsed != wantElapsed {
+						t.Errorf("Do took %v, want %v", elapsed, wantElapsed)
+					}
+					if rt.calls != wantCalls || rewinds != wantRewinds {
+						t.Errorf("attempts = %d, body rewinds = %d; want %d, %d", rt.calls, rewinds, wantCalls, wantRewinds)
+					}
+				})
+			})
 		}
 	}
 }

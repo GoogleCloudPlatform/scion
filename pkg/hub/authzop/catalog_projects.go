@@ -722,7 +722,7 @@ var projectOperations = []OperationSpec{
 		Domain:      "project",
 		Description: "Register a project from an external source",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/register", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/register", Method: "POST", Response: ResponseCredential},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT},
@@ -1182,7 +1182,7 @@ var projectOperations = []OperationSpec{
 		Domain:      "artifact",
 		Description: "Create a share link: an unguessable token, shown once, that lets anyone holding it read the artifact's current version without signing in until it expires (at most the hub's maximum lifetime, never past the artifact's own expiry) or is revoked",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/links", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/links", Method: "POST", Response: ResponseCredential},
 		},
 		Principals:            []PrincipalKind{PrincipalUser},
 		Credentials:           []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
@@ -1345,7 +1345,7 @@ var projectOperations = []OperationSpec{
 		Domain:      "artifact",
 		Description: "Get a view URL for a ready version whose entry is HTML: a capability, valid for a limited time, that serves only that version's files under /api/v1/artifacts/view/ in the sandboxed viewer (see the view exemption); the caller needs only the read check",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/versions/{seq}/view", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/versions/{seq}/view", Method: "POST", Response: ResponseCredential},
 		},
 		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
@@ -1395,8 +1395,8 @@ var projectOperations = []OperationSpec{
 		Domain:      "project",
 		Description: "Read a project's environment variables (list or one key)",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/env", Method: "GET"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/env/{key}", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/env", Method: "GET", Response: ResponseCredential},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/env/{key}", Method: "GET", Response: ResponseCredential},
 		},
 		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
@@ -1414,7 +1414,7 @@ var projectOperations = []OperationSpec{
 		Domain:      "project",
 		Description: "Set or delete a project environment variable",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/env/{key}", Method: "PUT"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/env/{key}", Method: "PUT", Response: ResponseCredential},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/env/{key}", Method: "DELETE"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
