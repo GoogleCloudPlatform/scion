@@ -111,7 +111,7 @@ func TestMintRelayTunnel_NilRemoteSessionRefused(t *testing.T) {
 				err  error
 			)
 			require.NotPanics(t, func() {
-				resp, open, err = ts.mintRelayTunnel(context.Background(), slog.Default(), "user-session", agent, "tcp", map[string]string{"port": "3000"}, router.Resolved{Session: sess})
+				resp, open, err = ts.mintRelayTunnel(context.Background(), slog.Default(), "user-session", agent, "tcp", map[string]string{"port": "3000"}, router.Resolved{Session: sess}, false)
 			})
 			var te *conduitTunnelError
 			require.ErrorAs(t, err, &te)

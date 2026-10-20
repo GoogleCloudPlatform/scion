@@ -2041,10 +2041,9 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 
 		if existingBroker != nil {
 			registerOperation = "reregister"
-			// Update existing broker
+			// Update existing broker. The name and slug are set at
+			// creation or through the update API, so they are kept.
 			broker = existingBroker
-			broker.Name = req.Broker.Name
-			broker.Slug = api.Slugify(req.Broker.Name)
 			broker.Version = req.Broker.Version
 			broker.Status = store.BrokerStatusOnline
 			broker.ConnectionState = "connected"

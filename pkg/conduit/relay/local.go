@@ -34,30 +34,37 @@ import (
 // stale route (ErrStaleRoute): the caller re-resolves. A registry read
 // error fails closed with 4504 registry_unavailable.
 func (r *Relay) OpenLocal(ctx context.Context, sessionID string, want registry.Want, open *conduitv1.StreamOpen) (conduit.Stream, TargetStream, error) {
+	st, ids, _, err := r.OpenLocalWithSession(ctx, sessionID, want, open)
+	return st, ids, err
+}
+
+// OpenLocalWithSession is OpenLocal that also returns the target's session,
+// on which renewals for the stream are delivered (AuthRefresh{stream_id}).
+func (r *Relay) OpenLocalWithSession(ctx context.Context, sessionID string, want registry.Want, open *conduitv1.StreamOpen) (conduit.Stream, TargetStream, conduit.LocalSession, error) {
 	kind, err := conduit.StreamKindFromProto(open.GetKind())
 	if err != nil {
-		return nil, TargetStream{}, closeErr(conduit.CloseProtocolError, ReasonBadFrame, err.Error())
+		return nil, TargetStream{}, nil, closeErr(conduit.CloseProtocolError, ReasonBadFrame, err.Error())
 	}
 	want.Capability = string(kind)
 	if !r.serving() {
-		return nil, TargetStream{}, &StaleRouteError{Reason: "relay_not_serving"}
+		return nil, TargetStream{}, nil, &StaleRouteError{Reason: "relay_not_serving"}
 	}
 	ls, rec, ok := r.Local(ctx, sessionID)
 	if !ok {
-		return nil, TargetStream{}, &StaleRouteError{Reason: "not_local"}
+		return nil, TargetStream{}, nil, &StaleRouteError{Reason: "not_local"}
 	}
 	if rec.PrincipalKind == registry.PrincipalUser {
 		// User sessions are never a routing target (design §3.10).
-		return nil, TargetStream{}, closeErr(conduit.CloseForbidden, ReasonForbidden, "user sessions are not routable")
+		return nil, TargetStream{}, nil, closeErr(conduit.CloseForbidden, ReasonForbidden, "user sessions are not routable")
 	}
 	d, err := r.cfg.Registry.Admission(ctx, sessionID, want)
 	switch {
 	case err != nil && d.Reason == registry.ReasonReadError:
-		return nil, TargetStream{}, closeErr(conduit.CloseRelayTimeout, ReasonRegistryUnavailable, "")
+		return nil, TargetStream{}, nil, closeErr(conduit.CloseRelayTimeout, ReasonRegistryUnavailable, "")
 	case err != nil:
-		return nil, TargetStream{}, err
+		return nil, TargetStream{}, nil, err
 	case !d.Admissible:
-		return nil, TargetStream{}, &StaleRouteError{Reason: string(d.Reason)}
+		return nil, TargetStream{}, nil, &StaleRouteError{Reason: string(d.Reason)}
 	}
 	st, err := ls.OpenStream(ctx, &conduitv1.StreamOpen{
 		Kind:          open.GetKind(),
@@ -67,11 +74,11 @@ func (r *Relay) OpenLocal(ctx context.Context, sessionID string, want registry.W
 	})
 	if err != nil {
 		if errors.Is(err, conduit.ErrDraining) {
-			return nil, TargetStream{}, closeErr(conduit.CloseRelayRestart, ReasonDraining, "")
+			return nil, TargetStream{}, nil, closeErr(conduit.CloseRelayRestart, ReasonDraining, "")
 		}
-		return nil, TargetStream{}, err
+		return nil, TargetStream{}, nil, err
 	}
-	return st, TargetStream{SessionID: ls.Info().SessionID, StreamID: st.ID()}, nil
+	return st, TargetStream{SessionID: ls.Info().SessionID, StreamID: st.ID()}, ls, nil
 }
 
 // Splice copies between two streams until both directions finish, as an
