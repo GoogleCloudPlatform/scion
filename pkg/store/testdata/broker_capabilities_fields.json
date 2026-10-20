@@ -1,6 +1,7 @@
 {
   "fields": [
     "agentMove",
+    "agentMoveRecreate",
     "asyncLaunch",
     "attach",
     "emptyPerAgentWorkspace",
