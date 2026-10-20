@@ -129,6 +129,7 @@ type launchCtx struct {
 	req             CreateAgentRequest
 	opts            api.StartOptions
 	mgr             agent.Manager
+	runtimeName     string
 	key             launchKey
 	sharedWorkspace bool
 	// owned is the flat instance's ownership mirror for this run, handed
@@ -423,7 +424,8 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 		launchSkill := skillFailureFrom(sr.err, lc.opts.RunID)
 		s.agentLifecycleLog.Error("runLaunch: agent start failed", append(append([]any{
 			"agent_id", rec.AgentID, "project_id", lc.req.ProjectID, "run_id", lc.opts.RunID,
-			"launch_id", rec.ID, "error_code", code}, failureLogAttrs(sr.err, launchSkill)...),
+			"launch_id", rec.ID, "error_code", code, "runtime", lc.runtimeName, "profile", lc.opts.Profile},
+			failureLogAttrs(sr.err, launchSkill)...),
 			runtimeCauseLogAttrs(sr.err, launchSkill)...)...)
 		if launchSkill != nil {
 			s.logSkillResolutionFailure(launchSkill,
