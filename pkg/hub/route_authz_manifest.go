@@ -258,8 +258,8 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/chat/user-prefs":     "authenticated", // Chat user preferences
 	"/api/v1/chat/presence":       "authenticated", // Chat presence
 	"/api/v1/chat/search":         "authenticated", // Chat search
-	"/api/v1/chat/attachments":    "authenticated", // Chat attachments
-	"/api/v1/chat/attachments/":   "authenticated", // Chat attachment by ID
+	"/api/v1/chat/attachments":    "authenticated", // Chat attachments (agents: POST upload and GET probe only, chatAttachmentRoute)
+	"/api/v1/chat/attachments/":   "authenticated", // Chat attachment by ID (never agents)
 
 	// ── gs:// link fetch (native chat) ─────────────────────────────────
 	"/api/v1/gcs/object": "authenticated", // GET: user identity only (handler); access derived from message readability, never client-supplied SA

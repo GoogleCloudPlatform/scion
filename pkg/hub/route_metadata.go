@@ -676,6 +676,12 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RoutePolicy,
 		Permission:     "project.read", Resource: "project", Action: "read",
 	},
+	// chat.attachments.list and chat.attachments.byId are wrapped by
+	// chatAttachmentRoute: an agent credential is admitted on the collection
+	// only, for POST (upload) and GET (the capability probe), and must pass
+	// agentMaySend there; the by-id route stays session and token only
+	// (ptone/scion#4596). Neither route is on the delegated-agent admission
+	// list.
 	"/api/v1/chat/attachments": {
 		Pattern: "/api/v1/chat/attachments", RouteID: "chat.attachments.list",
 		Classification: RoutePolicy,

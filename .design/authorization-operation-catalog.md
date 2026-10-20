@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 344
+**Operations:** 346
 
 ## Table of Contents
 
@@ -182,6 +182,8 @@
 - [chat.search.dm](#chatsearchdm) — Search the messages of one of the caller's DMs. A token needs inbox:read under the DM rule
 - [chat.attachment.upload.project](#chatattachmentuploadproject) — Upload chat attachments to a space. Needs project:read on the space's project; a token also needs inbox:write for it
 - [chat.attachment.upload.noproject](#chatattachmentuploadnoproject) — Upload project-less chat attachments, reachable only through the messages that reference them. A federated caller is refused. A token needs inbox:write on a hub boundary
+- [chat.attachment.upload.agent](#chatattachmentuploadagent) — Upload attachments as the calling agent, stored as artifacts in the agent's own upload scope (ptone/scion#4596). The agent must be in good standing (agentMaySend); the upload is readable only by the agent until a send binds it
+- [chat.attachment.probe](#chatattachmentprobe) — Answer where the caller's attachment uploads go (artifact or legacy) and the delivery budget (ptone/scion#4596). Reads and writes nothing
 - [chat.attachment.download.project](#chatattachmentdownloadproject) — Download a chat attachment of a project. Needs project:read on the project; a session also reads its own uploads and files attached to messages it can read
 - [chat.conversation.promote](#chatconversationpromote) — Promote one of the caller's DMs with an agent into a thread of the agent's space. Needs DM participation and project:read on the agent's project; a token also needs inbox:write under the DM rule
 - [role.definition.create](#roledefinitioncreate) — Create a custom role definition
@@ -6858,6 +6860,75 @@
 
 - `pkg/hub:TestChatProjectlessUpload_RequiresHubBoundary`
 - `pkg/hub:TestChatProfileWrites_FederatedUserRefused`
+
+---
+
+## chat.attachment.upload.agent
+
+**Domain:** chat
+
+**Description:** Upload attachments as the calling agent, stored as artifacts in the agent's own upload scope (ptone/scion#4596). The agent must be in good standing (agentMaySend); the upload is readable only by the agent until a send binds it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/chat/attachments` |
+
+**Principals:** `agent`
+
+**Credentials:** `agent_jwt`
+
+**Bearer:** `non_user`
+
+**Resource Resolver:** agent-self
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestAgentUpload_RefusedWhenAgentMaySendFalse`
+- `pkg/hub:TestAgentUpload_NotInStandingRefused`
+
+### Exemptions
+
+- **internal_only:** The agent uploads into its own upload scope with its own agent JWT; the gate is the agent's standing (the target-independent part of sending), no user permission applies (scope: agent self access) — waives: `base_permission`
+
+---
+
+## chat.attachment.probe
+
+**Domain:** chat
+
+**Description:** Answer where the caller's attachment uploads go (artifact or legacy) and the delivery budget (ptone/scion#4596). Reads and writes nothing
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/chat/attachments` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit_self` (self filter `none`; pinned by `TestAttachmentProbe_AnyTokenReads`)
+
+**Resource Resolver:** self-principal
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestAttachmentProbe_AnswersPerCredential`
+
+### Exemptions
+
+- **authentication_only:** Describes the caller's own upload capability (the experiment state for its credential class and the delivery budget); carries no user records (scope: caller self description only) — waives: `base_permission`
 
 ---
 

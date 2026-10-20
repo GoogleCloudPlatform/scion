@@ -5865,13 +5865,15 @@ type chatMemberEntry struct {
 // ---------------------------------------------------------------------------
 
 // handleChatAttachments dispatches /api/v1/chat/attachments.
-// POST = upload, GET with /{id} = download.
+// POST = upload, GET = the upload capability probe (ptone/scion#4596).
 func (s *Server) handleChatAttachments(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPost:
 		s.handleAttachmentUpload(w, r)
+	case http.MethodGet:
+		s.handleAttachmentProbe(w, r)
 	default:
-		MethodNotAllowed(w, http.MethodPost)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -5895,6 +5897,12 @@ func (s *Server) handleChatAttachmentByID(w http.ResponseWriter, r *http.Request
 
 // handleAttachmentUpload handles POST /api/v1/chat/attachments (multipart form).
 func (s *Server) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) {
+	// An agent first, before the nil-user refusal and every check of a user
+	// upload (ptone/scion#4596).
+	if agent := GetAgentIdentityFromContext(r.Context()); agent != nil {
+		s.handleAgentAttachmentUpload(w, r)
+		return
+	}
 	user := GetUserIdentityFromContext(r.Context())
 	if user == nil {
 		Forbidden(w)
