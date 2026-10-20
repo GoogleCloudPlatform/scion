@@ -2696,8 +2696,9 @@ authDone:
 		// Run has returned, so the harness may now start. On this runtime
 		// the host's agent-info.json is a host-only copy, not shared with
 		// the container (runtime.CopiesAgentHome), so writing it now keeps
-		// ptone/scion#4766. Compare-and-set: a stop or delete mark written
-		// while Run was in progress wins.
+		// the ptone/scion#4766 invariant (no host write while the container
+		// may read the file). Compare-and-set: a stop or delete mark
+		// written while Run was in progress wins.
 		advanceAgentPhase(opts.Name, opts.ProjectPath, preRunPhase, successPhase)
 	}
 	// The run is recorded after the create when the pre-start List failed
@@ -2729,8 +2730,9 @@ authDone:
 					_ = m.Runtime.Delete(ctx, runtime.RunRef{ID: id, RunID: runID})
 					// Record the failed start as the Run error path does, so
 					// list shows error rather than the pre-run phase. The
-					// container is gone, so the host write keeps
-					// ptone/scion#4766.
+					// container is gone, so the host write keeps the
+					// ptone/scion#4766 invariant (no host write while the
+					// container may read the file).
 					if recErr := setStartFailedRunID(RunOwnerTargetFor(opts), runID); recErr != nil {
 						slog.Warn("Start: failed to record the failed start in the host state file",
 							"agent", opts.Name, "run_id", runID, "error", recErr)

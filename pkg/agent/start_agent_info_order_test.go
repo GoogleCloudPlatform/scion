@@ -119,6 +119,15 @@ func TestStart_ListOK_NoAgentInfoWriteWhileContainerRuns(t *testing.T) {
 	}
 }
 
+// clearLeakedScionEnv clears SCION_* variables an agent container exports
+// that a broker-mode Start reads, so these tests do not depend on where
+// they run.
+func clearLeakedScionEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("SCION_HOST_UID", "")
+	t.Setenv("SCION_PROJECT", "")
+}
+
 // copiedHomeRuntime is a MockRuntime that declares the
 // runtime.CopiedAgentHomeRuntime capability, as the Kubernetes runtime does.
 type copiedHomeRuntime struct {
@@ -134,6 +143,7 @@ func (copiedHomeRuntime) CopiesAgentHome() bool { return true }
 // the container with no phase, the shape of a Running Kubernetes pod whose
 // startup gate is still closed.
 func TestStart_CopiedHome_StartingBeforeRunRunningAfter(t *testing.T) {
+	clearLeakedScionEnv(t)
 	projectScionDir, agentDir := startTZFixture(t, "", `""`)
 	writeRun1AgentInfo(t, projectScionDir, agentDir)
 	infoPath := filepath.Join(agentDir, "home", "agent-info.json")
@@ -194,10 +204,10 @@ func TestStart_CopiedHome_StartingBeforeRunRunningAfter(t *testing.T) {
 
 // copiedHomeContainer is a fake runtime that declares
 // runtime.CopiedAgentHomeRuntime and, once Run has been entered, lists the
-// agent's container with the given phase ("" is a Running Kubernetes pod
-// whose startup gate is still closed). run runs inside Run; a nil run
-// starts the container.
-func copiedHomeContainer(projectScionDir, phase string, run func() error) copiedHomeRuntime {
+// agent's container with no phase (a Running Kubernetes pod whose startup
+// gate is still closed). run runs inside Run; a nil run starts the
+// container.
+func copiedHomeContainer(projectScionDir string, run func() error) copiedHomeRuntime {
 	started := false
 	return copiedHomeRuntime{&runtime.MockRuntime{
 		NameFunc: func() string { return "fake" },
@@ -206,7 +216,7 @@ func copiedHomeContainer(projectScionDir, phase string, run func() error) copied
 				return nil, nil
 			}
 			return []api.AgentInfo{{
-				Name: "tz-agent", ContainerID: "cid-run-2", RunID: "run-2", Phase: phase, ProjectPath: projectScionDir,
+				Name: "tz-agent", ContainerID: "cid-run-2", RunID: "run-2", ProjectPath: projectScionDir,
 				Labels: map[string]string{"scion.name": "tz-agent", api.LabelRunID: "run-2"},
 			}}, nil
 		},
@@ -228,9 +238,10 @@ func copiedHomeContainer(projectScionDir, phase string, run func() error) copied
 // (a Running pod), so the result does not depend on how List treats a
 // runtime that reports starting for a failed start.
 func TestStart_CopiedHome_RunFailsLeavesError(t *testing.T) {
+	clearLeakedScionEnv(t)
 	projectScionDir, agentDir := startTZFixture(t, "", `""`)
 	writeRun1AgentInfo(t, projectScionDir, agentDir)
-	rt := copiedHomeContainer(projectScionDir, "", func() error { return errLaunchFailed })
+	rt := copiedHomeContainer(projectScionDir, func() error { return errLaunchFailed })
 
 	if err := startTZ(t, rt, projectScionDir, "run-2"); err == nil {
 		t.Fatal("Start succeeded although the launch failed")
@@ -258,9 +269,10 @@ func TestStart_CopiedHome_ConcurrentStopMarkWins(t *testing.T) {
 		{"soft-deleted", func(p string) error { return MarkAgentSoftDeleted("tz-agent", p, time.Now()) }, softDeletedPhase},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			clearLeakedScionEnv(t)
 			projectScionDir, agentDir := startTZFixture(t, "", `""`)
 			writeRun1AgentInfo(t, projectScionDir, agentDir)
-			rt := copiedHomeContainer(projectScionDir, "", func() error { return tc.mark(projectScionDir) })
+			rt := copiedHomeContainer(projectScionDir, func() error { return tc.mark(projectScionDir) })
 
 			if err := startTZ(t, rt, projectScionDir, "run-2"); err != nil {
 				t.Fatalf("Start: %v", err)
@@ -275,6 +287,7 @@ func TestStart_CopiedHome_ConcurrentStopMarkWins(t *testing.T) {
 // advanceAgentPhase writes only while the phase is still the expected one,
 // and never creates a missing agent-info.json.
 func TestAdvanceAgentPhase_OnlyFromExpected(t *testing.T) {
+	clearLeakedScionEnv(t)
 	projectScionDir, agentDir := startTZFixture(t, "", `""`)
 	infoPath := filepath.Join(agentDir, "home", "agent-info.json")
 
@@ -302,7 +315,7 @@ func TestAdvanceAgentPhase_OnlyFromExpected(t *testing.T) {
 		}
 	})
 	t.Run("file missing", func(t *testing.T) {
-		if err := os.Remove(infoPath); err != nil {
+		if err := os.Remove(infoPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			t.Fatal(err)
 		}
 		advanceAgentPhase("tz-agent", projectScionDir, "starting", "running")
@@ -312,11 +325,42 @@ func TestAdvanceAgentPhase_OnlyFromExpected(t *testing.T) {
 	})
 }
 
+// A phase written after advanceAgentPhase's first read, but before its
+// locked update, is kept: the update checks the expected phase again under
+// the agent-info lock.
+func TestAdvanceAgentPhase_PhaseChangedAfterReadIsKept(t *testing.T) {
+	clearLeakedScionEnv(t)
+	projectScionDir, agentDir := startTZFixture(t, "", `""`)
+	infoPath := filepath.Join(agentDir, "home", "agent-info.json")
+	if err := os.WriteFile(infoPath, []byte(`{"name":"tz-agent","phase":"starting","runtime":"fake"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	hookRan := false
+	old := afterAdvanceRead
+	t.Cleanup(func() { afterAdvanceRead = old })
+	afterAdvanceRead = func() {
+		hookRan = true
+		if err := UpdateAgentConfig("tz-agent", projectScionDir, "stopped", "", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	advanceAgentPhase("tz-agent", projectScionDir, "starting", "running")
+	if !hookRan {
+		t.Fatal("advanceAgentPhase returned before its locked update")
+	}
+	if got := agentInfoPhase(t, agentDir); got != "stopped" {
+		t.Errorf("phase = %q, want the stopped written after the first read kept", got)
+	}
+}
+
 // On every runtime, a container that exits immediately after Run is
 // deleted and the start fails; the failed start is now recorded as on the
 // Run error path, so agent-info.json and List show error rather than the
 // phase written before Run. MockRuntime declares no capability.
 func TestStart_ExitedImmediately_RecordsFailedStart(t *testing.T) {
+	clearLeakedScionEnv(t)
 	projectScionDir, agentDir := startTZFixture(t, "", `""`)
 	writeRun1AgentInfo(t, projectScionDir, agentDir)
 
@@ -363,6 +407,7 @@ func TestStart_ExitedImmediately_RecordsFailedStart(t *testing.T) {
 // records running before Run, as ptone/scion#4766 requires, and the host
 // does not write agent-info.json after Run.
 func TestStart_SharedHome_StillWritesRunningBeforeRun(t *testing.T) {
+	clearLeakedScionEnv(t)
 	projectScionDir, agentDir := startTZFixture(t, "", `""`)
 	writeRun1AgentInfo(t, projectScionDir, agentDir)
 
@@ -403,6 +448,7 @@ func TestStart_SharedHome_StillWritesRunningBeforeRun(t *testing.T) {
 // file then keeps an earlier phase that the post-Run write will not
 // advance. An unparsable agent-info.json makes the write fail.
 func TestStart_PreRunWriteFailure_LogsWarn(t *testing.T) {
+	clearLeakedScionEnv(t)
 	projectScionDir, agentDir := startTZFixture(t, "", `""`)
 	writeRun1AgentInfo(t, projectScionDir, agentDir)
 	if err := os.WriteFile(filepath.Join(agentDir, "home", "agent-info.json"), []byte("not json"), 0o644); err != nil {
@@ -414,7 +460,7 @@ func TestStart_PreRunWriteFailure_LogsWarn(t *testing.T) {
 	slog.SetDefault(slog.New(&collectHandler{records: &records}))
 	t.Cleanup(func() { slog.SetDefault(old) })
 
-	if err := startTZ(t, copiedHomeContainer(projectScionDir, "", nil), projectScionDir, "run-2"); err != nil {
+	if err := startTZ(t, copiedHomeContainer(projectScionDir, nil), projectScionDir, "run-2"); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	slog.SetDefault(old)

@@ -85,7 +85,8 @@ func HasPerProfileInstances(rt Runtime) bool {
 // until Run has returned successfully. For such a runtime the host's
 // agent-info.json is not shared with the container while it runs (only an
 // explicit user `scion sync from` copies the container home back), so the
-// host may write it after Run returns without breaking ptone/scion#4766.
+// host may write it after Run returns and still keep the ptone/scion#4766
+// invariant (no host write while the container may read the file).
 // Start then records "starting" before Run and "running" once Run returns,
 // so no reader sees "running" while the runtime is still preparing the
 // container.

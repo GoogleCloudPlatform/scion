@@ -33,11 +33,14 @@ import (
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 )
 
-// TestListKubernetesPendingPodIsStarting (ptone/scion#5365): Start writes
-// phase "running" to agent-info.json before the pod exists. Through the real
-// Kubernetes runtime, Manager.List (which the broker heartbeat uses) lists an
-// agent whose pod is still Pending as starting, not as that "running"; once
-// the pod is Running it lists as running.
+// TestListKubernetesPendingPodIsStarting (ptone/scion#5365): before
+// ptone/scion#5368, Start wrote phase "running" to agent-info.json before the
+// pod existed; on Kubernetes it now writes "starting" until Run returns.
+// Through the real Kubernetes runtime, Manager.List (which the broker
+// heartbeat uses) lists an agent whose pod is still Pending as starting,
+// whatever agent-info.json holds; a Running pod lists agent-info.json's
+// phase, so "running" once Run has returned and "starting" while the startup
+// gate is still closed.
 func TestListKubernetesPendingPodIsStarting(t *testing.T) {
 	tests := []struct {
 		name         string

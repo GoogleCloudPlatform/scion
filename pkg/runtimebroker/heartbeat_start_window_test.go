@@ -43,6 +43,9 @@ func (startWindowRuntime) CopiesAgentHome() bool { return true }
 // It returns the project's .scion dir.
 func writeStartWindowFixture(t *testing.T, agentName string) string {
 	t.Helper()
+	// The container exports SCION_* variables a broker-mode Start reads.
+	t.Setenv("SCION_HOST_UID", "")
+	t.Setenv("SCION_PROJECT", "")
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 	t.Setenv("HOME", tmpDir)
