@@ -161,6 +161,9 @@ type StatusUpdate struct {
 
 	// Exit tracking
 	ExitCode *int `json:"exitCode,omitempty"`
+	// ExitReason is set to "signaled" on the final stop report when the
+	// agent stopped after a termination signal (see state.ExitReason).
+	ExitReason string `json:"exitReason,omitempty"`
 
 	// SSHHostKey is the public key (authorized_keys line) of the agent's
 	// conduit SSH server host key. The hub records it with the conduit

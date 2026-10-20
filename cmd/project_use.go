@@ -178,23 +178,11 @@ type useTarget struct {
 // calls.
 func describeUseTarget(c *config.CLIContext) useTarget {
 	var t useTarget
-	envHub, envName := envHubEndpoint()
 	dir, inDir := filesystemProject()
 	dirIsGlobal := inDir && config.IsGlobalProjectDir(dir)
 
-	switch {
-	case hubSource == targetSourceContext:
-		t.HubEndpoint, t.HubSource, t.HubLabel = hubEndpoint, useSourceContext, "current context"
-	case hubSource == targetSourceDirectory:
-		t.HubEndpoint, t.HubSource, t.HubLabel = hubEndpoint, useSourceDirectory, "directory link"
-	case hubEndpoint != "":
-		t.HubEndpoint, t.HubSource, t.HubLabel = hubEndpoint, useSourceFlag, "--hub flag"
-	case envHub != "":
-		t.HubEndpoint, t.HubSource, t.HubLabel = envHub, useSourceEnv, envName
-	}
-	if t.HubEndpoint == "" {
-		t.HubSource, t.HubLabel = useSourceNone, "none"
-	}
+	h := resolveCLIHub()
+	t.HubEndpoint, t.HubSource, t.HubLabel = h.Endpoint, h.Source, h.Label
 
 	switch {
 	case projectSource == targetSourceContext:

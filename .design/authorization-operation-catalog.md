@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 345
+**Operations:** 344
 
 ## Table of Contents
 
@@ -184,18 +184,17 @@
 - [chat.attachment.upload.noproject](#chatattachmentuploadnoproject) — Upload project-less chat attachments, reachable only through the messages that reference them. A federated caller is refused. A token needs inbox:write on a hub boundary
 - [chat.attachment.download.project](#chatattachmentdownloadproject) — Download a chat attachment of a project. Needs project:read on the project; a session also reads its own uploads and files attached to messages it can read
 - [chat.conversation.promote](#chatconversationpromote) — Promote one of the caller's DMs with an agent into a thread of the agent's space. Needs DM participation and project:read on the agent's project; a token also needs inbox:write under the DM rule
-- [role.definition.create](#roledefinitioncreate) — Create a custom role definition (create, import, duplicate). A token needs role:create and role:read on a hub boundary and the holder's live role.create authority; the holder must hold every permission of the role within the token's selectors. A project-scoped definition can be bound in every project, so it is judged on the holder's system-scope authority; a system-scoped definition is refused to every token
-- [role.definition.update](#roledefinitionupdate) — Update a custom role definition. A token needs role:update and role:read on a hub boundary and the holder's live role.update authority; the holder must hold every permission of the updated role within the token's selectors, judged as for create
-- [role.definition.delete](#roledefinitiondelete) — Delete a custom role definition. A token needs role:delete and role:read on a hub boundary and the holder's live role.delete authority; system roles and roles that are still bound are kept
-- [role.binding.create](#rolebindingcreate) — Create a role binding (grant authority to a principal) for a custom project role or at system scope. A token needs role_binding:create on a hub boundary and the holder's live role_binding.create authority. A system-scoped binding is refused to every token. For a custom project role the holder must also have current project.manage access to the binding's project and hold every permission of the role in that project within the token's selectors
-- [role.binding.delete](#rolebindingdelete) — Delete a system-scoped role binding (revoke authority from a principal). A token needs role_binding:delete on a hub boundary and the holder's live role_binding.delete authority; the constraint-admin lockout guard applies. Deleting a super-admin binding is refused to every token (session only)
+- [role.definition.create](#roledefinitioncreate) — Create a custom role definition
+- [role.definition.update](#roledefinitionupdate) — Update a custom role definition
+- [role.definition.delete](#roledefinitiondelete) — Delete a custom role definition
+- [role.binding.create](#rolebindingcreate) — Create a role binding (grant authority to a principal)
+- [role.binding.delete](#rolebindingdelete) — Delete a role binding (revoke authority from a principal)
 - [group.member.add](#groupmemberadd) — Add a member to a group. A user access token needs group:addMember on a hub boundary, and the group's closure may carry no authority beyond the token's own
 - [group.member.remove](#groupmemberremove) — Remove a member from a group
 - [group.delete](#groupdelete) — Delete a group
-- [access.constraint.create](#accessconstraintcreate) — Create an access constraint (tighten boundary). A token needs access_constraint:admin and access_constraint:read on a hub boundary and the holder's live access_constraint.admin authority; the preview token and governance checks apply, and the commit re-checks judge the holder's authority within the token's selectors
-- [access.constraint.update](#accessconstraintupdate) — Update an access constraint (may relax or tighten boundary). A token needs access_constraint:admin and access_constraint:read on a hub boundary and the holder's live access_constraint.admin authority, and may only tighten: an update that relaxes the boundary (adds permissions, changes subject or scope, or narrows or adds its time window) is session only. The commit re-checks judge the holder's authority within the token's selectors
-- [access.constraint.delete](#accessconstraintdelete) — Delete an access constraint (relax boundary). Session only: deleting a boundary relaxes it, and a user access token is refused before the preview token is used
-- [access.constraint.preview](#accessconstraintpreview) — Generate an access constraint preview and read a preview job and its result. A token needs access_constraint:admin on a hub boundary and the holder's live access_constraint.admin authority
+- [access.constraint.create](#accessconstraintcreate) — Create an access constraint (tighten boundary)
+- [access.constraint.update](#accessconstraintupdate) — Update an access constraint (may relax or tighten boundary)
+- [access.constraint.delete](#accessconstraintdelete) — Delete an access constraint (relax boundary)
 - [credential.token.read](#credentialtokenread) — List or read the caller's own user access tokens
 - [credential.token.create](#credentialtokencreate) — Create a user access token (UAT)
 - [credential.token.revoke](#credentialtokenrevoke) — Revoke or delete a user access token
@@ -213,9 +212,9 @@
 - [user.list](#userlist) — List users. A session sees the users it may read. A token needs user:list at the hub collection on a hub boundary, and then sees only the users it may read, each checked as a hub-level user record, so it also needs user:read
 - [user.update](#userupdate) — Update another user's profile (display name and preferences). The same PATCH dispatches user.admin.suspend for a status field and user.admin.promote for a role field, and every field's check passes before any write. A token needs user:update on a hub boundary, checked on the hub-level user record; a token PATCH that names no status field is checked as a profile update
 - [user.self.update](#userselfupdate) — Update the caller's own profile (display name and preferences) through PATCH /api/v1/users/{id} naming the caller's own record. A status field on the caller's own record is refused by the self-status guard
-- [role.read](#roleread) — Read role definitions and the permission registry. A token needs role:read on a hub boundary; the write methods on the same routes also need their own selector
+- [role.read](#roleread) — Read role definitions and the permission registry. A token needs role:read on a hub boundary; the write methods on the same routes stay refused to every token
 - [role.binding.read](#rolebindingread) — Read role binding assignments
-- [access.constraint.read](#accessconstraintread) — Read access constraint definitions and the principals a constraint affects. A token needs access_constraint:read on a hub boundary; the write methods on the same routes also need access_constraint:admin
+- [access.constraint.read](#accessconstraintread) — Read access constraint definitions and the principals a constraint affects. A token needs access_constraint:read on a hub boundary; the write methods on the same routes stay refused to every token
 - [hub.audit.constraint](#hubauditconstraint) — Read one access constraint's audit history. hub.audit.read is a hub-level permission: a token needs hub_audit:read on a hub boundary and is checked against the hub-level constraint record; a denied caller gets the same not-found answer as for a missing constraint
 - [user.session.logout](#usersessionlogout) — Sign-in flow logout step; the hub holds no server-side session state for it to change
 - [user.session.revoke](#usersessionrevoke) — Revoke every cookie session of a user (platform admin only)
@@ -334,8 +333,8 @@
 - [env.hub.list](#envhublist) — List hub-level environment variables (scope=hub), without secret entries
 - [testidentity.create](#testidentitycreate) — Issue a short-lived synthetic member or viewer test identity and one access token for it (no refresh token, no cookie)
 - [testidentity.list](#testidentitylist) — List test identities: the caller's own, or every identity for an unscoped platform admin session
-- [testidentity.token.issue](#testidentitytokenissue) — Re-issue one access token for a live test identity, for its issuer or an unscoped platform admin session
-- [testidentity.webcode.issue](#testidentitywebcodeissue) — Mint a single-use, five-minute web-login code for a live test identity, for its issuer, a workload issuer delegation on the member-tier identities it issued, or an unscoped platform admin session; only on hubs where test identity web sessions are available. Kind test_fixture needs test_identity.issue; an admin kind (test_hub_admin, test_super_admin) only while server.hub.test_identities.admin_web_sessions is on at an admin --test-mode level, and only with the issuer checks of that kind's issuance (its capability, a live super-admin through current bindings, an access token with exactly the kind's scope)
+- [testidentity.token.issue](#testidentitytokenissue) — Re-issue one access token for a live test identity, for its issuer or an unscoped platform admin session; an admin-kind identity's token is re-issued only through the admin-scope workload delegation that issued it (phase X4b)
+- [testidentity.webcode.issue](#testidentitywebcodeissue) — Mint a single-use, five-minute web-login code for a live test identity, for its issuer, a workload issuer delegation on the identities it issued (member scope: member-tier identities; admin scope, phase X4b: admin-kind identities of its kind), or an unscoped platform admin session; only on hubs where test identity web sessions are available. Kind test_fixture needs test_identity.issue; an admin kind (test_hub_admin, test_super_admin) only while server.hub.test_identities.admin_web_sessions is on at an admin --test-mode level, and only with the issuer checks of that kind's issuance (its capability, a live super-admin through current bindings, an access token with exactly the kind's scope)
 - [testidentity.delete](#testidentitydelete) — Delete a test identity (its role bindings, group memberships and user-scope data go with it), for its issuer, an unscoped platform admin session, or a holder of test_identity.issue and user.delete; refused with 409 while it owns agents or is a project's last owner. With ?purge=true it also removes the agents, schedules, groups and projects stamped as created under the identity (the identity ID is the only input), keeps stamped projects that have another owner or other resources, and reports unstamped agents as unproven; for an admin-kind identity (purged by its issuer or a super-admin) it first removes every grant stamped with its issuance and reports its residue
 - [testidentity.cleanup](#testidentitycleanup) — Remove the agents, schedules, groups and projects stamped as created under the caller's expired or deleted test identities (and the expired identities themselves), with the purge engine; the hub selects the targets from the provenance stamps, the request names none (no body; ?dryRun=true lists the targets and writes nothing). An issuer reaches its own identities, a workload delegation only the identities issued through it, an unscoped platform admin session every issuer's; a live identity is never touched
 - [testidentity.provenance](#testidentityprovenance) — Explain whether the hub recorded one agent, project, schedule or group as created under a test identity of the caller's issuer scope (its own, its own delegation's, or every issuer's for an unscoped platform admin session): proven with the stamp and the identity's state, proven deleted by an in-scope deletion record for a resource that is gone, or unproven with only the reason (a missing resource and another issuer's stamp get the same answer, and no owner or creator data is returned)
@@ -2774,7 +2773,20 @@
 
 **Resource Resolver:** project-from-url
 
-**Effects:** `update-resource`
+**Effects:** `update-resource`, `grant-authority`
+
+### Delegation
+
+- **Kind:** `non_amplification`
+- Only the dispatch_agent event type grants authority. A resume, and an update that changes the event type, payload, cron expression or enables the schedule, records the caller's initiator attribution and frozen effect ceiling (revisionAuthorityCeiling) in place of the stored ones; an update that changes none of those fields records neither. An update can switch a schedule to dispatch_agent. A dispatch_agent schedule then creates an agent at fire time, with a delegation edge from the recorded principal, after CanDelegate for that principal. A message schedule grants no authority. Effects are listed per operation, not per event type, so grant-authority is listed for the whole operation
+
+### Audit
+
+- **Event Type:** `agent_delegation`
+- **Context Fields:** actor_id
+- **After Fields:** agent_id, can_delegate_result
+- **Atomic:** No
+- **Non-Atomic Justification:** The update or resume write records no mutation audit record: it stores the initiator attribution and the frozen effect ceiling on the schedule row in the same conditional update that bumps its authorization revision. The agent_delegation record is written when a dispatch_agent schedule fires, in the agent-create transaction with the agent row and its delegation edge. A message schedule writes none
 
 **Denial Codes:** `forbidden`
 
@@ -6917,7 +6929,7 @@
 
 **Domain:** role
 
-**Description:** Create a custom role definition (create, import, duplicate). A token needs role:create and role:read on a hub boundary and the holder's live role.create authority; the holder must hold every permission of the role within the token's selectors. A project-scoped definition can be bound in every project, so it is judged on the holder's system-scope authority; a system-scoped definition is refused to every token
+**Description:** Create a custom role definition
 
 ### Entry Points
 
@@ -6929,9 +6941,7 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+**Credentials:** `session_jwt`
 
 **Base Permission:** `role.create`
 
@@ -6951,12 +6961,10 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
-- `pkg/hub:TestCustomRoleCreateToken_ProjectScopeJudgedOnHubAuthority`
-- `pkg/hub:TestRoleDefinitionWriteToken_SelectorAndBoundaryPerRoute`
 
 ### Exemptions
 
-- **authentication_only:** audit obligation waived; full operation contract deferred to AH1 (scope: AF1 catalog only) — waives: `audit_obligation`
+- **authentication_only:** Role CRUD currently requires hub-admin via route guard; full operation contract deferred to AH1 (scope: AF1 catalog only) — waives: `audit_obligation`
 
 ---
 
@@ -6964,7 +6972,7 @@
 
 **Domain:** role
 
-**Description:** Update a custom role definition. A token needs role:update and role:read on a hub boundary and the holder's live role.update authority; the holder must hold every permission of the updated role within the token's selectors, judged as for create
+**Description:** Update a custom role definition
 
 ### Entry Points
 
@@ -6974,9 +6982,7 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+**Credentials:** `session_jwt`
 
 **Base Permission:** `role.update`
 
@@ -6989,7 +6995,6 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
-- `pkg/hub:TestRoleDefinitionWriteToken_SelectorAndBoundaryPerRoute`
 
 ---
 
@@ -6997,7 +7002,7 @@
 
 **Domain:** role
 
-**Description:** Delete a custom role definition. A token needs role:delete and role:read on a hub boundary and the holder's live role.delete authority; system roles and roles that are still bound are kept
+**Description:** Delete a custom role definition
 
 ### Entry Points
 
@@ -7007,9 +7012,7 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+**Credentials:** `session_jwt`
 
 **Base Permission:** `role.delete`
 
@@ -7029,7 +7032,6 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
-- `pkg/hub:TestRoleDefinitionWriteToken_SelectorAndBoundaryPerRoute`
 
 ---
 
@@ -7037,7 +7039,7 @@
 
 **Domain:** role.binding
 
-**Description:** Create a role binding (grant authority to a principal) for a custom project role or at system scope. A token needs role_binding:create on a hub boundary and the holder's live role_binding.create authority. A system-scoped binding is refused to every token. For a custom project role the holder must also have current project.manage access to the binding's project and hold every permission of the role in that project within the token's selectors
+**Description:** Create a role binding (grant authority to a principal)
 
 ### Entry Points
 
@@ -7047,9 +7049,7 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+**Credentials:** `session_jwt`
 
 **Base Permission:** `role_binding.create`
 
@@ -7074,8 +7074,6 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
-- `pkg/hub:TestRoleBindingCreateToken_SystemScopeAlwaysDenied`
-- `pkg/hub:TestCustomRoleBindingToken_NeedsCreateSelectorAndProjectAccess`
 
 ---
 
@@ -7083,7 +7081,7 @@
 
 **Domain:** role.binding
 
-**Description:** Delete a system-scoped role binding (revoke authority from a principal). A token needs role_binding:delete on a hub boundary and the holder's live role_binding.delete authority; the constraint-admin lockout guard applies. Deleting a super-admin binding is refused to every token (session only)
+**Description:** Delete a role binding (revoke authority from a principal)
 
 ### Entry Points
 
@@ -7093,9 +7091,7 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+**Credentials:** `session_jwt`
 
 **Base Permission:** `role_binding.delete`
 
@@ -7122,8 +7118,6 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
-- `pkg/hub:TestRoleBindingDeleteToken_SuperAdminBindingDenied`
-- `pkg/hub:TestRoleBindingDeleteToken_SystemBindingNeedsDeleteSelector`
 
 ---
 
@@ -7263,7 +7257,7 @@
 
 **Domain:** access.constraint
 
-**Description:** Create an access constraint (tighten boundary). A token needs access_constraint:admin and access_constraint:read on a hub boundary and the holder's live access_constraint.admin authority; the preview token and governance checks apply, and the commit re-checks judge the holder's authority within the token's selectors
+**Description:** Create an access constraint (tighten boundary)
 
 ### Entry Points
 
@@ -7273,9 +7267,7 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+**Credentials:** `session_jwt`
 
 **Base Permission:** `access_constraint.admin`
 
@@ -7303,8 +7295,6 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
-- `pkg/hub:TestConstraintAdminToken_RequiresConstraintAdminSelector`
-- `pkg/hub:TestConstraintCommit_AppliesTokenSelectors`
 
 ---
 
@@ -7312,7 +7302,7 @@
 
 **Domain:** access.constraint
 
-**Description:** Update an access constraint (may relax or tighten boundary). A token needs access_constraint:admin and access_constraint:read on a hub boundary and the holder's live access_constraint.admin authority, and may only tighten: an update that relaxes the boundary (adds permissions, changes subject or scope, or narrows or adds its time window) is session only. The commit re-checks judge the holder's authority within the token's selectors
+**Description:** Update an access constraint (may relax or tighten boundary)
 
 ### Entry Points
 
@@ -7322,9 +7312,7 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+**Credentials:** `session_jwt`
 
 **Base Permission:** `access_constraint.admin`
 
@@ -7352,9 +7340,6 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
-- `pkg/hub:TestConstraintAdminToken_RequiresConstraintAdminSelector`
-- `pkg/hub:TestConstraintRelaxToken_SessionOnly`
-- `pkg/hub:TestConstraintCommit_AppliesTokenSelectors`
 
 ---
 
@@ -7362,7 +7347,7 @@
 
 **Domain:** access.constraint
 
-**Description:** Delete an access constraint (relax boundary). Session only: deleting a boundary relaxes it, and a user access token is refused before the preview token is used
+**Description:** Delete an access constraint (relax boundary)
 
 ### Entry Points
 
@@ -7373,8 +7358,6 @@
 **Principals:** `user`
 
 **Credentials:** `session_jwt`
-
-**Bearer:** `session_only` (reason `GOV_PENDING`)
 
 **Base Permission:** `access_constraint.admin`
 
@@ -7402,42 +7385,6 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
-- `pkg/hub:TestConstraintRelaxToken_SessionOnly`
-
----
-
-## access.constraint.preview
-
-**Domain:** access.constraint
-
-**Description:** Generate an access constraint preview and read a preview job and its result. A token needs access_constraint:admin on a hub boundary and the holder's live access_constraint.admin authority
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | POST | `/api/v1/admin/access-constraint-previews` |
-| http_route | GET | `/api/v1/admin/access-constraint-previews/{jobId}` |
-| http_route | GET | `/api/v1/admin/access-constraint-previews/{jobId}/result` |
-
-**Principals:** `user`
-
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
-
-**Base Permission:** `access_constraint.admin`
-
-**Resource Resolver:** hub-scoped
-
-**Effects:** `read-one`
-
-**Denial Codes:** `forbidden`
-
-### Tests
-
-- `pkg/hub/authzop:TestCatalogValidation`
-- `pkg/hub:TestConstraintAdminToken_RequiresConstraintAdminSelector`
 
 ---
 
@@ -8122,7 +8069,7 @@
 
 **Domain:** role
 
-**Description:** Read role definitions and the permission registry. A token needs role:read on a hub boundary; the write methods on the same routes also need their own selector
+**Description:** Read role definitions and the permission registry. A token needs role:read on a hub boundary; the write methods on the same routes stay refused to every token
 
 ### Entry Points
 
@@ -8154,7 +8101,7 @@
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestRoleReadToken_DoesNotAdmitRoleWrites`
-- `pkg/hub:TestRoleRoutesToken_WriteMethodsNeedWriteSelectors`
+- `pkg/hub:TestRoleRoutesToken_WriteMethodsStillDenied`
 
 ---
 
@@ -8196,7 +8143,7 @@
 
 **Domain:** access.constraint
 
-**Description:** Read access constraint definitions and the principals a constraint affects. A token needs access_constraint:read on a hub boundary; the write methods on the same routes also need access_constraint:admin
+**Description:** Read access constraint definitions and the principals a constraint affects. A token needs access_constraint:read on a hub boundary; the write methods on the same routes stay refused to every token
 
 ### Entry Points
 
@@ -8224,7 +8171,7 @@
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestConstraintReadToken_DoesNotAdmitConstraintAdmin`
-- `pkg/hub:TestConstraintWriteRoutesToken_WriteMethodsNeedAdminSelector`
+- `pkg/hub:TestConstraintWriteRoutesToken_WriteMethodsStillDenied`
 
 ---
 
@@ -12398,7 +12345,7 @@
 
 **Domain:** testidentity
 
-**Description:** Re-issue one access token for a live test identity, for its issuer or an unscoped platform admin session
+**Description:** Re-issue one access token for a live test identity, for its issuer or an unscoped platform admin session; an admin-kind identity's token is re-issued only through the admin-scope workload delegation that issued it (phase X4b)
 
 ### Entry Points
 
@@ -12421,7 +12368,7 @@
 ### Governance
 
 - **Kind:** issuer_credential
-- Only the identity's issuer (or an unscoped platform admin session) re-issues; the token never outlives the identity
+- Only the identity's issuer (or an unscoped platform admin session) re-issues a member-tier token, with test_identity.issue; the token never outlives the identity. An admin-kind identity's token (no re-issue for any other caller: 409) is re-issued only through the admin-scope workload delegation that issued it, of the identity's kind, with that kind's issuer checks (its capability, a live super-admin grantor through current bindings), at most the kind's token lifetime and never past the identity's expiry or its creation plus the kind's maximum lifetime; the delegation, the grantor and the identity are re-checked inside the mint transaction, and a test admin audit sink line carries the delegation id. Admin token re-issue is bounded only by the per-delegation test identity rate limiter, not by an admin-specific limit; each re-issue adds a live token (earlier ones stay valid until they expire), and every token ends no later than the identity's kind lifetime
 
 ### Audit
 
@@ -12436,6 +12383,8 @@
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestTestIdentity_TokenReissue`
+- `pkg/hub:TestWorkloadAdminCredentials_TokenReissueOwnIdentity`
+- `pkg/hub:TestWorkloadAdminCredentials_TokenReissueRefusals`
 
 ---
 
@@ -12443,7 +12392,7 @@
 
 **Domain:** testidentity
 
-**Description:** Mint a single-use, five-minute web-login code for a live test identity, for its issuer, a workload issuer delegation on the member-tier identities it issued, or an unscoped platform admin session; only on hubs where test identity web sessions are available. Kind test_fixture needs test_identity.issue; an admin kind (test_hub_admin, test_super_admin) only while server.hub.test_identities.admin_web_sessions is on at an admin --test-mode level, and only with the issuer checks of that kind's issuance (its capability, a live super-admin through current bindings, an access token with exactly the kind's scope)
+**Description:** Mint a single-use, five-minute web-login code for a live test identity, for its issuer, a workload issuer delegation on the identities it issued (member scope: member-tier identities; admin scope, phase X4b: admin-kind identities of its kind), or an unscoped platform admin session; only on hubs where test identity web sessions are available. Kind test_fixture needs test_identity.issue; an admin kind (test_hub_admin, test_super_admin) only while server.hub.test_identities.admin_web_sessions is on at an admin --test-mode level, and only with the issuer checks of that kind's issuance (its capability, a live super-admin through current bindings, an access token with exactly the kind's scope)
 
 ### Entry Points
 
@@ -12466,7 +12415,7 @@
 ### Governance
 
 - **Kind:** issuer_credential
-- Only the identity's issuer (or a workload delegation, for the member-tier identities issued through it, or an unscoped platform admin session) mints a code; for an admin-kind identity the caller also passes that kind's issuer checks; at most one unredeemed code per identity, redeemable once, never past the identity's expiry
+- Only the identity's issuer (or a workload delegation, for the identities of its tier issued through it, or an unscoped platform admin session) mints a code; for an admin-kind identity the caller also passes that kind's issuer checks, and through an admin-scope delegation the delegation, the grantor and the identity are re-checked inside the mint transaction and a test admin audit sink line carries the delegation id; at most one unredeemed code per identity, redeemable once, never past the identity's expiry (for an admin kind, nor its creation plus the kind's maximum lifetime)
 
 ### Audit
 
@@ -12486,6 +12435,8 @@
 - `pkg/hub:TestWorkloadDelegation_WebLoginCodeForOwnIdentity`
 - `pkg/hub:TestWorkloadDelegation_WebLoginCodeRefusedOutsideOwnMemberIdentities`
 - `pkg/hub:TestWorkloadDelegation_RevokedAfterAuthMintsNothing`
+- `pkg/hub:TestWorkloadAdminCredentials_WebCodeOwnIdentity`
+- `pkg/hub:TestWorkloadAdminCredentials_WebCodeRefusals`
 
 ---
 
@@ -12656,7 +12607,7 @@
 ### Governance
 
 - **Kind:** issuer_credential
-- The issuer is a human, live super-admin through its own current bindings; an access token issuer presents a hub-boundary token with exactly the requested kind's scope (test_identity:issue_admin or test_identity:issue_super_admin), at most 8 h old, loaded and checked on every issuance. A workload delegation issuer is admitted only with its delegation's admin scope available at the hub's --test-mode level, and is issue-only. One live admin-kind identity per issuer, or per workload delegation its admin cap (at most 2 test hub-admins or 1 test super-admin); four per hub of which at most one test super-admin, counted across every issuer, access token and delegation under the issuance lock; issuance is rate limited per issuer or delegation (6/h hub-admin, 2/h super-admin)
+- The issuer is a human, live super-admin through its own current bindings; an access token issuer presents a hub-boundary token with exactly the requested kind's scope (test_identity:issue_admin or test_identity:issue_super_admin), at most 8 h old, loaded and checked on every issuance. A workload delegation issuer is admitted only with its delegation's admin scope available at the hub's --test-mode level; besides issuance it re-issues tokens for and mints web-login codes for the identities it issued (phase X4b), and nothing else. One live admin-kind identity per issuer, or per workload delegation its admin cap (at most 2 test hub-admins or 1 test super-admin); four per hub of which at most one test super-admin, counted across every issuer, access token and delegation under the issuance lock; issuance is rate limited per issuer or delegation (6/h hub-admin, 2/h super-admin)
 
 ### Audit
 

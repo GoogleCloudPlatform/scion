@@ -141,15 +141,15 @@ When run outside an agent container, falls back to the system whoami command.`,
 		}
 
 		if rootOptions(cmd).JSONOutput() {
-			return outputJSON(result)
+			return writeJSONTo(cmd.OutOrStdout(), result)
 		}
 
 		if whoamiFull {
 			return printFullPlainText(cmd.OutOrStdout(), result)
 		}
 
-		fmt.Println(slug)
-		return nil
+		_, err := fmt.Fprintln(cmd.OutOrStdout(), slug)
+		return err
 	},
 }
 

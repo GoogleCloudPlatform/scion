@@ -142,6 +142,7 @@ type Session struct {
 	issuerMu       sync.Mutex
 	issuerAudience string
 	issuer         *transportauth.IAMIDTokenSource
+	adminIssuer    *transportauth.IAMIDTokenSource
 
 	entryMu sync.Mutex
 	entry   *CacheEntry
@@ -212,8 +213,8 @@ func Open(opts Options, deps Deps) (*Session, error) {
 			return nil, fmt.Errorf("cached identity %q was issued on another hub (%s), not %s", opts.Alias, e.Endpoint, endpoint)
 		}
 		s.entry = e
-	} else if p.MemberDelegation() == "" {
-		return nil, fmt.Errorf("hub profile %q has no member issuer delegation and no --as identity was given: no profile credential applies (this command never falls back to another credential)", p.Name)
+	} else if len(p.IssuerDelegations) == 0 {
+		return nil, fmt.Errorf("hub profile %q has no issuer delegation and no --as identity was given: no profile credential applies (this command never falls back to another credential)", p.Name)
 	}
 	return s, nil
 }
@@ -269,6 +270,25 @@ func (s *Session) Client() (hubclient.Client, error) {
 	return s.clientAs(s.opts.Alias != "")
 }
 
+// IssuerClientFor returns the hub client that acts as the issuer
+// delegation of the cached entry e's tier: the member delegation for a
+// member-tier identity, and for an admin-kind identity the profile's admin
+// delegation of its tier, only when that is the delegation that issued it
+// (adminReissueDelegation).
+func (s *Session) IssuerClientFor(e *CacheEntry) (hubclient.Client, error) {
+	if e == nil {
+		return nil, errors.New("no cached identity")
+	}
+	if e.IsMemberTier() {
+		return s.IssuerClient()
+	}
+	tier, err := s.adminReissueDelegation(e)
+	if err != nil {
+		return nil, fmt.Errorf("identity %q (kind %s): %w", e.Alias, e.Kind, err)
+	}
+	return s.AdminIssuerClient(tier)
+}
+
 // IssuerClient returns a hub client that acts as the profile's member
 // issuer delegation, whatever the session's alias.
 func (s *Session) IssuerClient() (hubclient.Client, error) {
@@ -278,12 +298,30 @@ func (s *Session) IssuerClient() (hubclient.Client, error) {
 	return s.clientAs(false)
 }
 
+// AdminIssuerClient returns a hub client that acts as the profile's admin
+// issuer delegation of tier (TierHubAdmin or TierSuperAdmin), whatever the
+// session's alias (ptone/scion#4240, X4b). It never falls back to another
+// delegation or credential.
+func (s *Session) AdminIssuerClient(tier string) (hubclient.Client, error) {
+	if !IsAdminTier(tier) {
+		return nil, fmt.Errorf("invalid admin delegation tier %q: must be %q or %q", tier, TierHubAdmin, TierSuperAdmin)
+	}
+	if s.opts.Profile.Delegation(tier) == "" {
+		return nil, fmt.Errorf("hub profile %q has no %s issuer delegation (add one with --issuer-delegation %s=<id>)", s.opts.Profile.Name, tier, tier)
+	}
+	return s.clientWith(&bearerAuth{s: s, tier: tier})
+}
+
 func (s *Session) clientAs(alias bool) (hubclient.Client, error) {
+	return s.clientWith(&bearerAuth{s: s, alias: alias})
+}
+
+func (s *Session) clientWith(auth *bearerAuth) (hubclient.Client, error) {
 	hc := &http.Client{Transport: s.hc.Transport, Timeout: 30 * time.Second}
 	return hubclient.New(s.Endpoint(),
 		hubclient.WithHTTPClient(hc),
 		hubclient.WithTransportAuth(nil, transportauth.HeaderAuthorization),
-		hubclient.WithAuthenticator(&bearerAuth{s: s, alias: alias}),
+		hubclient.WithAuthenticator(auth),
 	)
 }
 
@@ -346,13 +384,30 @@ func (s *Session) IssuerAudience(ctx context.Context) (string, error) {
 	return s.issuerAudience, nil
 }
 
-func (s *Session) issuerSource(ctx context.Context) (*transportauth.IAMIDTokenSource, error) {
+// issuerSourceFor returns the issuer ID token source of a delegation
+// tier: the issuer service account for the member tier, the admin issuer
+// service account for an admin tier (each for the target's issuer
+// audience). There is no fallback from one account to the other.
+func (s *Session) issuerSourceFor(ctx context.Context, tier string) (*transportauth.IAMIDTokenSource, error) {
 	aud, err := s.IssuerAudience(ctx)
 	if err != nil {
 		return nil, err
 	}
 	s.issuerMu.Lock()
 	defer s.issuerMu.Unlock()
+	if IsAdminTier(tier) {
+		if s.opts.Profile.AdminIssuerServiceAccount == "" {
+			return nil, fmt.Errorf("hub profile %q has no admin issuer service account (--admin-issuer-sa)", s.opts.Profile.Name)
+		}
+		if s.adminIssuer == nil {
+			src, err := transportauth.NewIAMIDTokenSource(s.opts.Profile.AdminIssuerServiceAccount, aud, lazyAccess{s}, s.iamOpts()...)
+			if err != nil {
+				return nil, err
+			}
+			s.adminIssuer = src
+		}
+		return s.adminIssuer, nil
+	}
 	if s.issuer == nil {
 		src, err := transportauth.NewIAMIDTokenSource(s.opts.Profile.IssuerServiceAccount, aud, lazyAccess{s}, s.iamOpts()...)
 		if err != nil {
@@ -364,8 +419,15 @@ func (s *Session) issuerSource(ctx context.Context) (*transportauth.IAMIDTokenSo
 }
 
 // bearer returns the Authorization token and extra headers for a request
-// to the target, acting as the alias (alias true) or the issuer.
+// to the target, acting as the alias (alias true) or the member issuer.
 func (s *Session) bearer(ctx context.Context, alias bool) (string, map[string]string, error) {
+	return s.bearerFor(ctx, alias, "")
+}
+
+// bearerFor is bearer with a delegation tier: "" or TierMember acts as the
+// member issuer delegation, an admin tier as that admin delegation. Each
+// uses only its own delegation id; there is no fallback between tiers.
+func (s *Session) bearerFor(ctx context.Context, alias bool, tier string) (string, map[string]string, error) {
 	if alias {
 		e, err := s.freshEntry(ctx)
 		if err != nil {
@@ -373,10 +435,14 @@ func (s *Session) bearer(ctx context.Context, alias bool) (string, map[string]st
 		}
 		return e.Token, nil, nil
 	}
-	if s.opts.Profile.MemberDelegation() == "" {
-		return "", nil, fmt.Errorf("hub profile %q has no member issuer delegation: no profile credential applies", s.opts.Profile.Name)
+	if tier == "" {
+		tier = TierMember
 	}
-	src, err := s.issuerSource(ctx)
+	delegationID := s.opts.Profile.Delegation(tier)
+	if delegationID == "" {
+		return "", nil, fmt.Errorf("hub profile %q has no %s issuer delegation: no profile credential applies", s.opts.Profile.Name, tier)
+	}
+	src, err := s.issuerSourceFor(ctx, tier)
 	if err != nil {
 		return "", nil, err
 	}
@@ -384,17 +450,18 @@ func (s *Session) bearer(ctx context.Context, alias bool) (string, map[string]st
 	if err != nil {
 		return "", nil, err
 	}
-	extra := map[string]string{HeaderIssuerDelegation: s.opts.Profile.MemberDelegation()}
+	extra := map[string]string{HeaderIssuerDelegation: delegationID}
 	if s.opts.Run != "" {
 		extra[HeaderRunLabel] = s.opts.Run
 	}
 	return tok, extra, nil
 }
 
-// freshEntry returns the cached identity, re-issuing a member-tier token
-// through the issuer delegation when it is within ReissueMargin of its
-// expiry. An expired identity, or an admin-tier identity whose token is
-// expiring, is refused.
+// freshEntry returns the cached identity, re-issuing its token through the
+// issuer delegation of its tier when it is within ReissueMargin of its
+// expiry. An admin-kind identity is re-issued only through the profile's
+// admin delegation that issued it (adminReissueDelegation); without one
+// its token is used until it expires. An expired identity is refused.
 func (s *Session) freshEntry(ctx context.Context) (*CacheEntry, error) {
 	s.entryMu.Lock()
 	defer s.entryMu.Unlock()
@@ -410,10 +477,12 @@ func (s *Session) freshEntry(ctx context.Context) (*CacheEntry, error) {
 		return e, nil
 	}
 	if !e.IsMemberTier() {
-		if now.Before(e.TokenExpiresAt) {
-			return e, nil
+		if _, err := s.adminReissueDelegation(e); err != nil {
+			if now.Before(e.TokenExpiresAt) {
+				return e, nil
+			}
+			return nil, fmt.Errorf("identity %q (kind %s) has an expired token: %w", e.Alias, e.Kind, err)
 		}
-		return nil, fmt.Errorf("identity %q (role %s) has an expired token; admin-tier tokens are not re-issued, issue a new identity", e.Alias, e.Role)
 	}
 	// A new token cannot outlive the identity: once the token already
 	// reaches the identity's expiry, keep it until it expires.
@@ -434,8 +503,9 @@ func (s *Session) freshEntry(ctx context.Context) (*CacheEntry, error) {
 }
 
 // Reissue re-issues the token of the cached identity now, through the
-// issuer delegation, and stores it in the cache. Admin-tier identities are
-// refused. ttlSeconds 0 means the hub default.
+// issuer delegation of its tier, and stores it in the cache. An admin-kind
+// identity is re-issued only through the profile's admin delegation that
+// issued it (adminReissueDelegation). ttlSeconds 0 means the hub default.
 func (s *Session) Reissue(ctx context.Context, ttlSeconds int64) (*CacheEntry, error) {
 	s.entryMu.Lock()
 	defer s.entryMu.Unlock()
@@ -444,7 +514,9 @@ func (s *Session) Reissue(ctx context.Context, ttlSeconds int64) (*CacheEntry, e
 		return nil, errors.New("no cached identity: name one with --as <alias>")
 	}
 	if !e.IsMemberTier() {
-		return nil, fmt.Errorf("identity %q (role %s): admin-tier tokens are not re-issued, issue a new identity", e.Alias, e.Role)
+		if _, err := s.adminReissueDelegation(e); err != nil {
+			return nil, fmt.Errorf("identity %q (kind %s): %w", e.Alias, e.Kind, err)
+		}
 	}
 	if !s.deps.Now().Before(e.ExpiresAt) {
 		return nil, fmt.Errorf("identity %q expired at %s; issue a new one", e.Alias, e.ExpiresAt.UTC().Format(time.RFC3339))
@@ -452,10 +524,30 @@ func (s *Session) Reissue(ctx context.Context, ttlSeconds int64) (*CacheEntry, e
 	return s.reissueLocked(ctx, e, ttlSeconds)
 }
 
-// reissueLocked calls the token route as the issuer and replaces the cache
-// entry. s.entryMu must be held.
+// adminReissueDelegation returns the admin tier through which the token
+// of the admin-kind entry e may be re-issued: the profile's delegation of
+// e's tier, which must be the delegation that issued e. Any other entry,
+// or a profile whose delegation of that tier is missing or another one, is
+// refused.
+func (s *Session) adminReissueDelegation(e *CacheEntry) (string, error) {
+	tier := e.AdminTier()
+	if tier == "" {
+		return "", errors.New("not an admin-kind identity")
+	}
+	id := s.opts.Profile.Delegation(tier)
+	if id == "" {
+		return "", fmt.Errorf("the profile has no %s issuer delegation to re-issue it; issue a new identity", tier)
+	}
+	if e.DelegationID == "" || e.DelegationID != id {
+		return "", fmt.Errorf("it was issued through another %s delegation than the profile's; issue a new identity", tier)
+	}
+	return tier, nil
+}
+
+// reissueLocked calls the token route as the issuer delegation of e's tier
+// and replaces the cache entry. s.entryMu must be held.
 func (s *Session) reissueLocked(ctx context.Context, e *CacheEntry, ttlSeconds int64) (*CacheEntry, error) {
-	client, err := s.IssuerClient()
+	client, err := s.IssuerClientFor(e)
 	if err != nil {
 		return nil, err
 	}
@@ -498,6 +590,9 @@ func (s *Session) Entry() *CacheEntry {
 type bearerAuth struct {
 	s     *Session
 	alias bool
+	// tier is the issuer delegation tier when alias is false: "" for the
+	// member tier, or an admin tier.
+	tier string
 }
 
 func (a *bearerAuth) ApplyAuth(req *http.Request) error {
@@ -515,7 +610,7 @@ func (a *bearerAuth) ApplyAuth(req *http.Request) error {
 	if err := a.s.CheckNotOwnHubByID(req.Context()); err != nil {
 		return err
 	}
-	tok, extra, err := a.s.bearer(req.Context(), a.alias)
+	tok, extra, err := a.s.bearerFor(req.Context(), a.alias, a.tier)
 	if err != nil {
 		return err
 	}
