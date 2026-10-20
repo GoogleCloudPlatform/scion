@@ -1886,7 +1886,9 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 
 	// Attachments stored as artifacts move to the message's scope now that
 	// it is stored; one that cannot be bound is left out of the message.
-	attachmentRefs = s.bindChatAttachments(ctx, user, storeMsg.ID, s.bindProject(ctx, storeMsg, attachmentRefs), attachmentRefs)
+	attachmentRefs = s.bindChatAttachments(ctx, artifacts.PrincipalKindUser, user.ID(), storeMsg.ID, s.bindProject(ctx, storeMsg, attachmentRefs), attachmentRefs)
+	// The bound ones are delivered into the agent's home (ptone/scion#4596).
+	msg.AttachmentDeliveries = attachmentDeliveries(storeMsg.ID, attachmentRefs)
 
 	// Attachment files are copied to the agent's scratchpad only now: every
 	// check that can refuse the send (authorization, validation, wake,
@@ -2169,6 +2171,17 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 				}
 				mentionConvResult = convResult
 			}
+			// The primary's attachments stored as artifacts go with this copy
+			// into the mentioned agent's home (ptone/scion#4596), which is
+			// recorded as an addressee of the primary for them: after the
+			// per-mention authorization and the conversation resolution,
+			// before the copy is stored and dispatched. A deferred copy is
+			// never dispatched, so it records nothing.
+			mentionAddressee := ""
+			if deliveries := attachmentDeliveries(storeMsg.ID, attachmentRefs); len(deliveries) > 0 && !mentionDeferred {
+				mentionAddressee = s.recordAttachmentAddressee(ctx, storeMsg.ID, mentionAgent.ID, "body-mention")
+				mentionMsg.AttachmentDeliveries = deliveries
+			}
 			mentionPersisted := true
 			if err := s.store.CreateMessage(ctx, mentionStoreMsg); err != nil {
 				s.messageLog.Error("Failed to persist mention message", "slug", mentionAgent.Slug, "error", err)
@@ -2227,6 +2240,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 			// A held secondary (ptone/scion#3433) keeps its row but is
 			// never dispatched to; a lookup fault is treated the same.
 			if held, holdErr := s.agentHeld(ctx, mentionAgent.ID); holdErr != nil || held {
+				s.finishAttachmentAddressee(context.WithoutCancel(ctx), mentionAddressee, errors.New("agent unreachable"))
 				if mentionPersisted {
 					_ = s.markFailed(ctx, mentionStoreMsg.ID, "Agent unreachable (suspended)")
 				}
@@ -2251,6 +2265,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 				mentionInterrupt := interrupt && state.Phase(mentionAgent.Phase) == state.PhaseRunning
 				if err := dispatchWithBrokerRetry(retryCtx, nil, dispatcher, mentionAgent, agentContent, mentionInterrupt, mentionMsg); err != nil {
 					s.messageLog.Error("Failed to dispatch mention", "slug", mentionAgent.Slug, "error", err)
+					s.finishAttachmentAddressee(context.WithoutCancel(ctx), mentionAddressee, err)
 					mentionDispatchOK = false
 					// Like the primary: a synchronous dispatch failure must
 					// not leave the row "dispatched" or the client told
@@ -2271,6 +2286,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 			}
 			if mentionDispatchOK {
 				dispatchedAgents = append(dispatchedAgents, mentionAgent)
+				s.finishAttachmentAddressee(context.WithoutCancel(ctx), mentionAddressee, nil)
 			}
 		}
 	}
@@ -2498,7 +2514,7 @@ func (s *Server) sendHumanToHuman(ctx context.Context, key, projectID string, us
 
 	// Attachments stored as artifacts move to the message's scope now that
 	// it is stored; one that cannot be bound is left out of the message.
-	attachmentRefs = s.bindChatAttachments(ctx, user, storeMsg.ID, s.bindProject(ctx, storeMsg, attachmentRefs), attachmentRefs)
+	attachmentRefs = s.bindChatAttachments(ctx, artifacts.PrincipalKindUser, user.ID(), storeMsg.ID, s.bindProject(ctx, storeMsg, attachmentRefs), attachmentRefs)
 
 	// W7: Link attachments to the persisted message.
 	if wcs != nil && len(attachmentRefs) > 0 {

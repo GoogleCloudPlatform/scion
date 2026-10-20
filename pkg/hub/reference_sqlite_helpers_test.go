@@ -66,7 +66,7 @@ func newRefFixture(t *testing.T) *refFixture {
 	t.Helper()
 	srv, st, _, _, projA, faults, fault := setupDemoPolicyTestWithFault(t,
 		func(inner store.Store, fault *storeFaultSwitch) *refFaultStore {
-			return &refFaultStore{Store: inner, fault: fault, gets: map[string]int{}}
+			return &refFaultStore{Store: inner, fault: fault, gets: map[string]int{}, creates: map[string]int{}}
 		})
 	db := openTestMemorySQLite(t, "sqlite")
 	wcs := NewWebChatStore(db, "sqlite")
@@ -347,6 +347,9 @@ type refFaultStore struct {
 	conversationCalls   int
 	// failGetAgent fails GetAgent while the switch is armed.
 	failGetAgent bool
+	// failUpsertConv fails UpsertConversationByExternalRef while the switch
+	// is armed.
+	failUpsertConv bool
 	// failGetProjectID, when set, fails GetProject for that project only.
 	failGetProjectID string
 	// getsMu guards gets, which counts GetMessage calls by message id; it is
@@ -354,6 +357,26 @@ type refFaultStore struct {
 	// server's store.
 	getsMu sync.Mutex
 	gets   map[string]int
+	// creates counts CreateMessage calls by message body (guarded by
+	// getsMu), set when the fixture is built.
+	creates map[string]int
+}
+
+// messageCreates returns how many times CreateMessage was called for a
+// message with body text.
+func (r *refFaultStore) messageCreates(text string) int {
+	r.getsMu.Lock()
+	defer r.getsMu.Unlock()
+	return r.creates[text]
+}
+
+func (r *refFaultStore) CreateMessage(ctx context.Context, m *store.Message) error {
+	r.getsMu.Lock()
+	if r.creates != nil && m != nil {
+		r.creates[m.Msg]++
+	}
+	r.getsMu.Unlock()
+	return r.Store.CreateMessage(ctx, m)
 }
 
 // messageGets returns how many times GetMessage was called for id.
@@ -401,6 +424,13 @@ func (r *refFaultStore) GetConversationByExternalRef(ctx context.Context, surfac
 		return nil, errRefStoreFault
 	}
 	return r.Store.GetConversationByExternalRef(ctx, surface, ref)
+}
+
+func (r *refFaultStore) UpsertConversationByExternalRef(ctx context.Context, c *store.Conversation) (*store.Conversation, error) {
+	if r.failUpsertConv && r.fault.Active() {
+		return nil, errRefStoreFault
+	}
+	return r.Store.UpsertConversationByExternalRef(ctx, c)
 }
 
 func (r *refFaultStore) GetProject(ctx context.Context, id string) (*store.Project, error) {

@@ -104,14 +104,15 @@ func (s *Server) attachmentMaxBytes(ctx context.Context, toArtifacts bool) int64
 }
 
 // bindChatAttachments binds each artifact attachment of refs to the stored
-// message messageID, sent by user, under the attachment's row lock,
+// message messageID, sent by (senderKind, senderID), under the
+// attachment's row lock,
 // recording project as the message's project (bindProject; nil when it
 // could not be derived, and then no attachment is bound). It returns refs
 // without those that could not be bound (one sent meanwhile in another
 // message, for example), so the message never names an attachment it does
 // not hold. AttachmentStore references are returned as they are. A failure
 // is logged with the attachment id only.
-func (s *Server) bindChatAttachments(ctx context.Context, user UserIdentity, messageID string, project *string, refs []AttachmentRef) []AttachmentRef {
+func (s *Server) bindChatAttachments(ctx context.Context, senderKind, senderID, messageID string, project *string, refs []AttachmentRef) []AttachmentRef {
 	if len(refs) == 0 {
 		return refs
 	}
@@ -130,7 +131,7 @@ func (s *Server) bindChatAttachments(ctx context.Context, user UserIdentity, mes
 		if svc == nil {
 			svc = s.attachmentService()
 		}
-		if err := svc.BindAttachment(ctx, ref.ID, artifacts.PrincipalKindUser, user.ID(), messageID, *project); err != nil {
+		if err := svc.BindAttachment(ctx, ref.ID, senderKind, senderID, messageID, *project); err != nil {
 			s.messageLog.Error("Failed to bind attachment to message; dropped from the message",
 				"attachment", ref.ID, "message", messageID, "error", err)
 			continue
@@ -172,7 +173,7 @@ func (s *Server) bindProject(ctx context.Context, msg *store.Message, refs []Att
 // validation built from a usable upload reach the chat subjects and the
 // bind step.
 func newArtifactAttachmentRef(info artifacts.AttachmentInfo) AttachmentRef {
-	return AttachmentRef{ID: info.ID, Name: info.Name, MimeType: info.MediaType, Size: info.Size, artifact: true}
+	return AttachmentRef{ID: info.ID, Name: info.Name, MimeType: info.MediaType, Size: info.Size, artifact: true, sha256: info.SHA256}
 }
 
 // legacyAttachmentRefs returns the AttachmentStore references of refs.

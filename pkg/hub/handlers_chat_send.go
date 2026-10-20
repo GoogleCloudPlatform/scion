@@ -437,6 +437,12 @@ func (s *Server) validateChatSendInputMode(ctx context.Context, user UserIdentit
 			})
 		}
 	}
+	// Delivery writes the attachments of one message into one directory
+	// under their names, so two attachments may not share a name, artifact
+	// and AttachmentStore ones alike (ptone/scion#4596).
+	if name := duplicateAttachmentName(attachmentRefs); name != "" {
+		return "", nil, chatSendValidationError(duplicateAttachmentMessage(name))
+	}
 	return content, attachmentRefs, nil
 }
 
@@ -604,6 +610,11 @@ func (s *Server) sendChatMessage(ctx context.Context, user UserIdentity, key str
 
 	// --- Agent routing ---
 	if len(plan.Agents) > 0 {
+		// The send reaches agents: its attachments stored as artifacts must
+		// fit the delivery budget (ptone/scion#4596).
+		if msg := s.checkAttachmentDeliveryBudget(attachmentRefs); msg != "" {
+			return nil, chatSendValidationError(msg)
+		}
 		// DM registration happens inside sendAgentRouted, before its
 		// watermark update — see the comment there.
 		return s.sendAgentRouted(ctx, key, projectID, user, content, senderLabel, plan.Agents, plan.MentionNames, plan.MentionResults, attachmentRefs, now, in.ReplyToID, in.Metadata,

@@ -162,6 +162,21 @@ type StructuredMessage struct {
 	// the value otherwise.
 	ArtifactRefsAdmitted bool `json:"-"`
 
+	// StoredMessageID, when set, is the id of the row the sending handler
+	// already stored for this message (ptone/scion#4596, decision D2): the
+	// persisting subscriber then runs only its post-persist steps and stores
+	// no second row. Hub-internal like ConversationAsserted: never rendered,
+	// never accepted from request JSON. Empty means the subscriber persists
+	// the message as before.
+	StoredMessageID string `json:"-"`
+
+	// AttachmentDeliveries are the attachments stored as artifacts, bound to
+	// a stored message, that the hub delivers into the recipient agent's
+	// home with this dispatch (ptone/scion#4596). Set by the hub's send path
+	// after binding, from references it built itself; never read from a
+	// request, never serialized, and cleared on observer copies.
+	AttachmentDeliveries []AttachmentDelivery `json:"-"`
+
 	// DeliveryText is the fully rendered agent-facing envelope, produced by
 	// the hub. When set, the broker delivers it verbatim and performs no
 	// formatting. Phase 13 deletes this field along with the rest of
@@ -353,4 +368,16 @@ func SenderPrefix(identity string) string {
 		}
 	}
 	return identity
+}
+
+// AttachmentDelivery names one attachment stored as an artifact, bound to
+// message MessageID, for delivery into a recipient agent's home
+// (ptone/scion#4596). Hub-internal: it travels only in process.
+type AttachmentDelivery struct {
+	ArtifactID string
+	MessageID  string
+	Name       string
+	MimeType   string
+	Size       int64
+	SHA256     string
 }

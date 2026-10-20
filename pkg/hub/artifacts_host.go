@@ -872,4 +872,5 @@ func (s *Server) attachmentAgentAddressee(ctx context.Context, msg *store.Messag
 const (
 	addresseePending   = "pending"
 	addresseeDelivered = "delivered"
+	addresseeFailed    = "failed"
 )

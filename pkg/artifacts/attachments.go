@@ -65,6 +65,9 @@ type AttachmentInfo struct {
 	Name      string
 	MediaType string
 	Size      int64
+	// SHA256 is the hex digest of the file, set by UsableAttachment and
+	// MessageAttachments.
+	SHA256 string
 	// MessageProjectID is the project recorded at bind time
 	// (Artifact.MessageProjectID), set by MessageAttachments.
 	MessageProjectID *string
@@ -183,7 +186,7 @@ func (s *Service) UsableAttachment(ctx context.Context, id, senderKind, senderRe
 	if err != nil {
 		return AttachmentInfo{}, AttachmentAbsent, err
 	}
-	return AttachmentInfo{ID: a.ID, Name: f.Path, MediaType: f.MediaType, Size: f.Size}, AttachmentUsable, nil
+	return AttachmentInfo{ID: a.ID, Name: f.Path, MediaType: f.MediaType, Size: f.Size, SHA256: f.SHA256}, AttachmentUsable, nil
 }
 
 // BindAttachment moves the upload artifactID of the sender (senderKind,
@@ -292,7 +295,7 @@ func (s *Service) MessageAttachments(ctx context.Context, messageIDs []string) (
 			}
 			out[msgID] = append(out[msgID], AttachmentInfo{
 				ID: row.Artifact.ID, Name: row.File.Path, MediaType: row.File.MediaType, Size: row.File.Size,
-				MessageProjectID: row.Artifact.MessageProjectID,
+				SHA256: row.File.SHA256, MessageProjectID: row.Artifact.MessageProjectID,
 			})
 		}
 	}

@@ -159,6 +159,10 @@ func (s *Server) handleAgentAttachmentUpload(w http.ResponseWriter, r *http.Requ
 // "legacy" means today's path (staged files, or the AttachmentStore).
 type attachmentUploadProbe struct {
 	Uploads string `json:"uploads"`
+	// DeliveryMaxBytes, with "artifact", is the delivery budget for a
+	// message with an agent recipient (messaging.attachment_delivery_max_bytes;
+	// 0 means delivery is off).
+	DeliveryMaxBytes *int64 `json:"delivery_max_bytes,omitempty"`
 }
 
 // handleAttachmentProbe answers GET /api/v1/chat/attachments. It uploads and
@@ -168,6 +172,8 @@ func (s *Server) handleAttachmentProbe(w http.ResponseWriter, r *http.Request) {
 	answer := attachmentUploadProbe{Uploads: "legacy"}
 	if s.experimentEnabled(experiments.AttachmentArtifacts) && s.attachmentArtifactsReady() && s.attachmentWriterKind(ctx) != "" {
 		answer.Uploads = "artifact"
+		limit := s.attachmentDeliveryMaxBytes()
+		answer.DeliveryMaxBytes = &limit
 	}
 	writeJSON(w, http.StatusOK, answer)
 }
