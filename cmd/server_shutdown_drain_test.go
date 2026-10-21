@@ -284,12 +284,14 @@ func TestColocatedShutdown_FlatHostInBrokerWait(t *testing.T) {
 			return len(states) == 2 && states[0] == string(brokerhost.StateStopped) && states[1] == string(brokerhost.StateStopped)
 		}, drainTestWait, 20*time.Millisecond, "flat instances did not stop during the hub front's broker wait")
 	})
+	// Every broker goroutine has returned (each sends its error before
+	// its Done), so errCh holds any error they reported.
+	brokerWG.Wait()
 	select {
 	case err := <-errCh:
 		t.Fatalf("broker error: %v", err)
 	default:
 	}
-	brokerWG.Wait()
 }
 
 // TestColocatedShutdown_FlatServersDrainBeforeHubHTTPDrain: every active
@@ -431,7 +433,8 @@ func TestColocatedShutdown_LegacyBrokerDrainsBeforeHubHTTPDrain(t *testing.T) {
 // server's /healthz broker section (nil when it cannot be read; it runs
 // inside require.Eventually, so it must not fail the test itself).
 func drainTestHealthStates(addr string) []string {
-	resp, err := http.Get("http://" + addr + "/healthz")
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get("http://" + addr + "/healthz")
 	if err != nil {
 		return nil
 	}
