@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -351,4 +352,41 @@ func TestPublishExternal(t *testing.T) {
 		defer mu.Unlock()
 		return received == 1
 	}, time.Second, 10*time.Millisecond)
+}
+
+// TestHubAPIDelivery_PrefersHubAPIURL checks that inbound delivery calls
+// hub_api_url when the hub injects one, not hub_url.
+func TestHubAPIDelivery_PrefersHubAPIURL(t *testing.T) {
+	var publicCalls, apiCalls atomic.Int32
+	public := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		publicCalls.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer public.Close()
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/v1/broker/inbound", r.URL.Path)
+		apiCalls.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer api.Close()
+
+	b := New(slog.Default())
+	defer func() { _ = b.Close() }()
+	require.NoError(t, b.Configure(map[string]string{
+		"hub_url":     public.URL,
+		"hub_api_url": api.URL,
+		"plugin_name": "test-ref",
+	}))
+	require.NoError(t, b.Subscribe("scion.project.g1.agent.*.messages"))
+
+	msg := messages.NewInstruction("user:alice", "agent:coder", "via hub api url")
+	require.NoError(t, b.Publish(context.Background(), "scion.project.g1.agent.coder.messages", msg))
+
+	require.Eventually(t, func() bool { return apiCalls.Load() == 1 }, 2*time.Second, 10*time.Millisecond)
+	assert.Zero(t, publicCalls.Load(), "no API call goes to hub_url")
+
+	health, err := b.HealthCheck()
+	require.NoError(t, err)
+	assert.Equal(t, public.URL, health.Details["hub_url"])
+	assert.Equal(t, api.URL, health.Details["hub_api_url"])
 }

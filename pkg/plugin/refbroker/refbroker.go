@@ -67,6 +67,7 @@ type RefBroker struct {
 
 	// Hub API callback config (set via Configure)
 	hubURL     string // e.g. "http://localhost:8080"
+	hubAPIURL  string // hub_api_url: the URL for API calls; "" means hubURL
 	hmacKey    string // HMAC key for hub API auth (base64-encoded)
 	brokerID   string // Broker ID for HMAC signing
 	pluginName string // X-Scion-Plugin-Name header value
@@ -104,13 +105,19 @@ func New(log *slog.Logger) *RefBroker {
 }
 
 // Configure sets up the reference broker from the provided config map.
-// Recognized keys: hub_url, hmac_key, broker_id, plugin_name.
+// Recognized keys: hub_url, hub_api_url, hmac_key, broker_id, plugin_name.
+// Calls to the hub go to hub_api_url when set, else hub_url.
 func (b *RefBroker) Configure(config map[string]string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	if v, ok := config["hub_url"]; ok {
+	if v, ok := config[plugin.ConfigKeyHubURL]; ok {
 		b.hubURL = v
+		// hub_api_url comes with hub_url: a configuration that names hub_url
+		// without it calls hub_url.
+		b.hubAPIURL = config[plugin.ConfigKeyHubAPIURL]
+	} else if v, ok := config[plugin.ConfigKeyHubAPIURL]; ok {
+		b.hubAPIURL = v
 	}
 	if v, ok := config["hmac_key"]; ok {
 		b.hmacKey = v
@@ -124,6 +131,7 @@ func (b *RefBroker) Configure(config map[string]string) error {
 
 	b.log.Info("Reference broker configured",
 		"hub_url", b.hubURL,
+		"hub_api_url", b.hubAPIURL,
 		"broker_id", b.brokerID,
 		"plugin_name", b.pluginName,
 	)
@@ -219,7 +227,7 @@ func (b *RefBroker) deliverInbound(topic string, msg *messages.StructuredMessage
 	}
 
 	b.mu.RLock()
-	hubURL := b.hubURL
+	hubURL := plugin.HubAPIURL(b.hubURL, b.hubAPIURL)
 	hmacKey := b.hmacKey
 	brokerID := b.brokerID
 	pluginName := b.pluginName
@@ -352,6 +360,9 @@ func (b *RefBroker) HealthCheck() (*plugin.HealthStatus, error) {
 	}
 	if b.hubURL != "" {
 		details["hub_url"] = b.hubURL
+	}
+	if b.hubAPIURL != "" {
+		details["hub_api_url"] = b.hubAPIURL
 	}
 
 	return &plugin.HealthStatus{
