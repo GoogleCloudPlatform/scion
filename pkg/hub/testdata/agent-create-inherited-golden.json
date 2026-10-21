@@ -26,8 +26,8 @@
       },
       "dispatched": {
         "config.model": "template-model",
-        "messageMode": "lineage",
-        "harnessConfig": "template-hc"
+        "harnessConfig": "template-hc",
+        "messageMode": "lineage"
       }
     },
     {

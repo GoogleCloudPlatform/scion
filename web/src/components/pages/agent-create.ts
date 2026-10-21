@@ -675,10 +675,26 @@ export class ScionPageAgentCreate extends LitElement {
         this.harnessConfigs = (data.harnessConfigs || []).sort((a, b) =>
           (a.displayName || a.name).localeCompare(b.displayName || b.name)
         );
+        this.dropUnavailableHarnessPick();
       }
     } catch (err) {
       console.error('Failed to load harness configs:', err);
     }
+  }
+
+  /**
+   * Clears a picked harness config the reloaded list no longer offers (for
+   * example a project-scoped config of the previous project). Kept, it would
+   * be sent while the picker shows the inherited placeholder. A custom
+   * ("Other...") name is the user's own and is kept.
+   */
+  private dropUnavailableHarnessPick(): void {
+    if (!this.harness || this.harness === '__other__') return;
+    const names: readonly string[] =
+      this.harnessConfigs.length > 0
+        ? this.harnessConfigs.map((hc) => hc.name)
+        : KNOWN_HARNESS_NAMES;
+    if (!names.includes(this.harness)) this.harness = '';
   }
 
   /**

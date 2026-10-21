@@ -74,13 +74,24 @@ function stubFetch(): void {
       if (url.includes('/settings/public')) {
         body = { ...hubSettings };
       } else if (url.includes('/api/v1/projects?')) {
-        body = { projects: [{ id: 'p1', name: 'P1' }] };
+        body = {
+          projects: [
+            { id: 'p1', name: 'P1' },
+            { id: 'p2', name: 'P2' },
+          ],
+        };
       } else if (url.includes('/api/v1/projects/p1/settings')) {
         body = { ...projectSettings };
+      } else if (url.includes('/api/v1/projects/p2/settings')) {
+        body = {};
       } else if (url.includes('/api/v1/templates')) {
         body = { templates };
       } else if (url.includes('/api/v1/harness-configs')) {
-        body = { harnessConfigs: [{ name: 'claude' }, { name: 'gemini' }] };
+        body = {
+          harnessConfigs: url.includes('projectId=p1')
+            ? [{ name: 'claude' }, { name: 'gemini' }, { name: 'p1-only' }]
+            : [{ name: 'claude' }, { name: 'gemini' }],
+        };
       } else if (url.includes('/gcp-service-accounts')) {
         body = { items: [] };
       }
@@ -132,10 +143,22 @@ async function mount(): Promise<CreatePrivate> {
   return c;
 }
 
+function select(c: CreatePrivate, id: string): HTMLElement & { value: string } {
+  const el = c.shadowRoot?.querySelector(`#${id}`);
+  expect(el).toBeTruthy();
+  return el as HTMLElement & { value: string };
+}
+
 function harnessSelect(c: CreatePrivate): HTMLElement & { value: string } {
-  const select = c.shadowRoot?.querySelector('#harness');
-  expect(select).toBeTruthy();
-  return select as HTMLElement & { value: string };
+  return select(c, 'harness');
+}
+
+/** Operates a page select the way a user does: set the value, fire sl-change. */
+async function choose(c: CreatePrivate, id: string, value: string): Promise<void> {
+  const el = select(c, id);
+  el.value = value;
+  el.dispatchEvent(new Event('sl-change'));
+  await c.updateComplete;
 }
 
 async function submit(c: CreatePrivate): Promise<Record<string, unknown>> {
@@ -201,10 +224,7 @@ describe('Create Agent: harness config is sent only when picked', () => {
     projectSettings = { defaultHarnessConfig: 'project-hc' };
     templates = [template({ defaultHarnessConfig: 'template-hc' })];
     const c = await mount();
-    const select = harnessSelect(c);
-    select.value = 'gemini';
-    select.dispatchEvent(new Event('sl-change'));
-    await c.updateComplete;
+    await choose(c, 'harness', 'gemini');
     expect((await submit(c)).harnessConfig).toBe('gemini');
   });
 
@@ -214,12 +234,55 @@ describe('Create Agent: harness config is sent only when picked', () => {
       template({ id: 't2', name: 'other', slug: 'other', defaultHarnessConfig: 'other-hc' }),
     ];
     const c = await mount();
-    const select = harnessSelect(c);
-    select.value = 'claude';
-    select.dispatchEvent(new Event('sl-change'));
-    await c.updateComplete;
-    c.templateId = 't2';
-    await c.updateComplete;
+    await choose(c, 'harness', 'claude');
+    await choose(c, 'template', 't2');
+    expect(c.templateId).toBe('t2');
+    expect(c.harness).toBe('claude');
     expect((await submit(c)).harnessConfig).toBe('claude');
+  });
+
+  it("changing the template with no pick shows the new template's default", async () => {
+    templates = [
+      template({ defaultHarnessConfig: 'template-hc' }),
+      template({ id: 't2', name: 'other', slug: 'other', defaultHarnessConfig: 'other-hc' }),
+    ];
+    const c = await mount();
+    await choose(c, 'template', 't2');
+    expect(c.harness).toBe('');
+    expect(harnessSelect(c).getAttribute('placeholder')).toBe(
+      'other-hc (inherited from the template)'
+    );
+    expect(await submit(c)).not.toHaveProperty('harnessConfig');
+  });
+
+  it('clearing the picker goes back to inheriting', async () => {
+    projectSettings = { defaultHarnessConfig: 'project-hc' };
+    templates = [template({})];
+    const c = await mount();
+    await choose(c, 'harness', 'gemini');
+    await choose(c, 'harness', '');
+    expect(c.harness).toBe('');
+    expect(await submit(c)).not.toHaveProperty('harnessConfig');
+  });
+
+  it("drops a pick the new project's harness-config list does not offer", async () => {
+    templates = [template({})];
+    const c = await mount();
+    await choose(c, 'harness', 'p1-only');
+    expect(c.harness).toBe('p1-only');
+    await choose(c, 'project', 'p2');
+    await settle(c);
+    expect(c.projectId).toBe('p2');
+    expect(c.harness).toBe('');
+    expect(await submit(c)).not.toHaveProperty('harnessConfig');
+  });
+
+  it('keeps a pick the new project also offers', async () => {
+    templates = [template({})];
+    const c = await mount();
+    await choose(c, 'harness', 'gemini');
+    await choose(c, 'project', 'p2');
+    await settle(c);
+    expect((await submit(c)).harnessConfig).toBe('gemini');
   });
 });

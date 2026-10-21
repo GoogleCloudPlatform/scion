@@ -167,15 +167,14 @@ func dispatchInheritedCase(t *testing.T, tier string, src inheritedSources) map[
 
 	// Template tier.
 	tmpl := &store.Template{
-		ID:          tid("template-inherited-" + tier),
-		Name:        "inherited-" + tier,
-		Slug:        "inherited-" + tier,
-		Harness:     "claude",
-		ContentHash: "d00dfeed",
-		Scope:       store.TemplateScopeGlobal,
-		Status:      store.TemplateStatusActive,
-		AgentConfig: src.Template.AgentConfig,
-
+		ID:                   tid("template-inherited-" + tier),
+		Name:                 "inherited-" + tier,
+		Slug:                 "inherited-" + tier,
+		Harness:              "claude",
+		ContentHash:          "d00dfeed",
+		Scope:                store.TemplateScopeGlobal,
+		Status:               store.TemplateStatusActive,
+		AgentConfig:          src.Template.AgentConfig,
 		DefaultHarnessConfig: src.Template.DefaultHarnessConfig,
 	}
 	require.NoError(t, s.CreateTemplate(ctx, tmpl))
