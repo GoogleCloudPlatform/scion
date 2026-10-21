@@ -48,7 +48,10 @@ Jobs opt in through the `runs-on` expression, which reads the Actions variable
 `ubuntu-latest` immediately, with no commit (the
 [fallback toggle](docs/architecture.md#fallback-toggle)). Everything is driven
 by [`config.example.env`](config.example.env), so the same artifacts serve the
-fork (`ptone/scion`), upstream (`GoogleCloudPlatform/scion`) or both.
+fork (`ptone/scion`), upstream (`GoogleCloudPlatform/scion`) or both. **Current
+scope: `ptone/scion` only** (ptone, 2026-10-21); upstream needs a
+GoogleCloudPlatform org owner and is future work
+([permissions matrix](docs/permissions-matrix.md#0-summary-for-the-fork-vs-upstream-decision)).
 
 ## Quick start
 
@@ -74,11 +77,12 @@ each step needs are in [docs/permissions-matrix.md](docs/permissions-matrix.md).
 8. **Mediator.** `scripts/deploy-mediator.sh`. It warns if the deployed URL
    differs from `MEDIATOR_URL`.
 9. **Scheduler.** `scripts/deploy-scheduler.sh` (`/reconcile`).
-10. **Install the App** on each target and check the webhook
-    ([steps 4 and 5](docs/github-setup.md#4-install-the-app)). Upstream needs a
-    GoogleCloudPlatform org owner.
+10. **Install the App** on `ptone/scion` and check the webhook
+    ([steps 4 and 5](docs/github-setup.md#4-install-the-app)). The current
+    scope is the fork only; upstream would need a GoogleCloudPlatform org
+    owner (future).
 11. **Preconditions.** "Require approval for all external contributors" on
-    every target ([step 6](docs/github-setup.md#6-deploy-precondition-fork-pr-approval-g8);
+    the repository ([step 6](docs/github-setup.md#6-deploy-precondition-fork-pr-approval-g8);
     all preconditions in [architecture.md](docs/architecture.md#deploy-preconditions)).
 12. **PoC.** Work through [docs/poc-checklist.md](docs/poc-checklist.md), which
     includes running [`workflows/cr-runner-poc.yml`](workflows/cr-runner-poc.yml)

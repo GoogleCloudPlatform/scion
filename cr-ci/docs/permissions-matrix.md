@@ -11,7 +11,7 @@ who controls the GCP project named by `GCP_PROJECT`.
 
 The page is written so that someone who holds the rights can carry out a step
 without reading the rest of cr-ci. A ready-to-send request for a
-GoogleCloudPlatform org owner is at the end ([section 6](#6-request-to-a-googlecloudplatform-org-owner)).
+GoogleCloudPlatform org owner is at the end ([section 6](#6-request-to-a-googlecloudplatform-org-owner-future)).
 
 - **Status:** complete for P1. GitHub requirements were checked against
   docs.github.com on 2026-10-21. For GCP, the Cloud Run, Cloud Build and Cloud
@@ -30,6 +30,14 @@ GoogleCloudPlatform org owner is at the end ([section 6](#6-request-to-a-googlec
   one. [Section 5](#5-design-corrections-and-open-items) lists the differences.
 
 ## 0. Summary for the fork-vs-upstream decision
+
+> **Decision (ptone, 2026-10-21): cr-ci is installed on `ptone/scion` only.**
+> Upstream (`GoogleCloudPlatform/scion`) is out of scope for now, because the
+> org permissions it needs are likely not available. The upstream columns and
+> sections below are kept for the future; they require a GoogleCloudPlatform
+> org owner. [Section 4.3](#43-upstream-alternative-not-implemented-repo-webhook-plus-a-pat-from-a-repo-admin)
+> describes the PAT-based alternative that would avoid the org owner, and why
+> it is not implemented.
 
 | Question | Fork (`ptone/scion`) | Upstream (`GoogleCloudPlatform/scion`) |
 | :--- | :--- | :--- |
@@ -197,6 +205,46 @@ Administration permission. Mitigations: the installation is limited to the
 target repo, the key lives only in Secret Manager, and only `MEDIATOR_SA_NAME`
 can read it.
 
+### 4.3 Upstream alternative (NOT implemented): repo webhook plus a PAT from a repo admin
+
+An org owner is needed only because an App that requests *Repository
+administration* cannot be installed by a repo admin [GH3]. The alternative
+avoids the App: a repo admin of `GoogleCloudPlatform/scion` creates a
+repository webhook and a personal access token (PAT), and the mediator uses
+that token instead of App installation tokens. **cr-ci does not implement
+this.** The mediator has no PAT auth mode.
+
+What it would need:
+
+| Piece | Requirement | Who | Sources |
+| :--- | :--- | :--- | :--- |
+| Webhook | A repository webhook on `workflow_job`, pointing at `MEDIATOR_URL/webhook`, with the webhook secret | Repo admin ("Manage webhooks": Admin) | [GH11][GH12][GH10] |
+| Runner registrations | `generate-jitconfig`, list and delete runners on the repo: a fine-grained PAT with repository **Administration: read and write** (plus **Actions: read** for runs and jobs), or a classic PAT with the `repo` scope. The token's user must have admin access to the repo | Repo admin creates the token under their own account | [GH1] ("The authenticated user must have admin access to the repository"; fine-grained token permissions) |
+| Org PAT policy | By default an org **requires owner approval** for fine-grained PATs that access its resources, and owners can **block classic PATs** from org resources entirely. Owners can also cap fine-grained PAT lifetime (default: must expire within 366 days) | An org owner must approve the token, or have chosen not to require approval | [GH20] |
+| SAML SSO | If the org enforces SAML single sign-on, the token must also be authorized for SSO by its user. **UNVERIFIED** whether GoogleCloudPlatform enforces SAML SSO | Token's user | [GH21] |
+| Mediator | A PAT auth mode: read the token from Secret Manager instead of minting installation tokens, skip the installation lookup, and alert before the token expires | cr-ci code change (not done) | `mediator/internal/githubapp` |
+
+Why it is weaker than an App:
+
+- **Tied to a person.** The token acts as the repo admin who created it. It
+  stops working when that person loses admin access or leaves, and their
+  name is on every runner registration.
+- **Long-lived and broad.** A PAT lives up to its expiry (months), not one
+  hour like an installation token [GH17], and a classic `repo` token reaches
+  every repository its user can. A leaked App key can be revoked by the App
+  owner, and its tokens are limited to one installation.
+- **Manual rotation** before every expiry, through the person who owns the
+  token.
+- **Likely still needs an org owner anyway.** Under the default policy a
+  fine-grained PAT needs owner approval [GH20]. So the alternative removes the
+  org owner only where the org has relaxed its policy. **UNVERIFIED** for
+  GoogleCloudPlatform.
+
+Verdict: if upstream comes into scope, ask the org owner to install the App
+([section 6](#6-request-to-a-googlecloudplatform-org-owner-future)). Consider
+the PAT path only if the org owner refuses the App but approves a
+fine-grained PAT, and accept the costs above.
+
 ## 5. Design corrections and open items
 
 Corrections to the cr-runners design (verified):
@@ -300,7 +348,10 @@ Still UNVERIFIED (to settle in P2, P4 or P6). Each item's runtime check is in
   `BUILD_SA_NAME` `roles/storage.objectViewer` on it only, and the builds pass
   `--gcs-source-staging-dir` (row C19). Confirm on the first P6 build.
 
-## 6. Request to a GoogleCloudPlatform org owner
+## 6. Request to a GoogleCloudPlatform org owner (future)
+
+Not needed for the current fork-only scope. Kept ready for the day upstream
+is in scope.
 
 Only needed if upstream is chosen. Ready to send as written; fill in the
 bracketed parts.
@@ -367,6 +418,8 @@ GitHub (docs.github.com, read 2026-10-21):
 - [GH16] Managing larger runners (org owners add them) and about larger runners (always billed per minute): https://docs.github.com/en/actions/using-github-hosted-runners/using-larger-runners/managing-larger-runners , https://docs.github.com/en/actions/using-github-hosted-runners/using-larger-runners/about-larger-runners
 - [GH17] Generating an installation access token (expires after 1 hour): https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-an-installation-access-token-for-a-github-app
 - [GH18] Generating a JWT for a GitHub App (`exp` at most 10 minutes ahead): https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-json-web-token-jwt-for-a-github-app
+- [GH20] Setting a personal access token policy for your organization (fine-grained PATs: "Require administrator approval" by default; classic PATs can be restricted; fine-grained default maximum lifetime 366 days): https://docs.github.com/en/organizations/managing-programmatic-access-to-your-organization/setting-a-personal-access-token-policy-for-your-organization
+- [GH21] Authorizing a personal access token for use with SAML single sign-on: https://docs.github.com/en/authentication/authenticating-with-saml-single-sign-on/authorizing-a-personal-access-token-for-use-with-saml-single-sign-on
 - [GH19] Removing self-hosted runners (unused JIT runners auto-removed; ephemeral removed after 1 day offline): https://docs.github.com/en/actions/hosting-your-own-runners/managing-self-hosted-runners/removing-self-hosted-runners
 - Security hardening for GitHub Actions ("Self-hosted runners should almost never be used for public repositories…"; JIT runners "perform at most one job"): https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions
 

@@ -2,8 +2,14 @@
 
 This page takes you from nothing to a working cr-ci GitHub App. At the end the
 App is installed and verified, and routing is ready but off until you set the
-Actions variable (step 8). It covers the fork (`ptone/scion`, a personal
-account) and upstream (`GoogleCloudPlatform/scion`, an organization).
+Actions variable (step 8).
+
+**Current scope: the fork, `ptone/scion` (a personal account), only**
+(ptone's decision, 2026-10-21). ptone can do every step on this page alone.
+Upstream (`GoogleCloudPlatform/scion`, an organization) is out of scope for
+now, because it needs a GoogleCloudPlatform org owner. Its notes are kept,
+marked *future*, and the PAT-based alternative that is not implemented is in
+[matrix 4.3](permissions-matrix.md#43-upstream-alternative-not-implemented-repo-webhook-plus-a-pat-from-a-repo-admin).
 
 The roles each step needs, and where they differ between the two targets,
 are in [permissions-matrix.md](permissions-matrix.md#1-github-steps). Step
@@ -28,9 +34,9 @@ Never paste them into a chat, ticket, shell argument or commit.
 
 | Decision | Options | Guidance |
 | :--- | :--- | :--- |
-| Target(s) | fork, upstream, or both (`TARGET_REPOS`) | The fork can be done by ptone alone. Upstream needs a GoogleCloudPlatform org owner for the install ([matrix 0](permissions-matrix.md#0-summary-for-the-fork-vs-upstream-decision)). |
-| Installation scope | `repo` (recommended) or `org` (`GITHUB_APP_INSTALLATION_SCOPE`) | `repo` works for both targets ([matrix 4.2](permissions-matrix.md#42-repo-vs-org-installation-scope-for-upstream)). `org` is upstream only and needs a runner group (G7). |
-| App owner | ptone's account, or the GoogleCloudPlatform org | One App owned by ptone, made public, can serve both targets. An org-owned App needs an org owner or App manager to create it ([matrix 4.1](permissions-matrix.md#41-who-should-own-the-github-app-for-upstream)). |
+| Target (`TARGET_REPOS`) | **`ptone/scion`** | The current scope. Upstream (future) needs a GoogleCloudPlatform org owner for the install ([matrix 0](permissions-matrix.md#0-summary-for-the-fork-vs-upstream-decision)). |
+| Installation scope (`GITHUB_APP_INSTALLATION_SCOPE`) | **`repo`** | The only scope a personal account has. `org` would be upstream only (future) and needs a runner group (G7). |
+| App owner | **ptone's account**, private (`PUBLIC=false`) | To add upstream later, the same App can be made public, or the org can own its own App ([matrix 4.1](permissions-matrix.md#41-who-should-own-the-github-app-for-upstream)). |
 
 **Tools.** A browser logged in as the App owner, plus `bash`, `jq`, `curl`
 and `openssl`. `gh` (authenticated, with write access to each target repo) is
@@ -102,7 +108,7 @@ HOMEPAGE=https://github.com/ptone/scion/tree/main/cr-ci
 PUBLIC=false                           # true only if this one App must also be installed on another account (both targets)
 # Personal account:
 ACTION=https://github.com/settings/apps/new
-# Org-owned App instead: ACTION=https://github.com/organizations/GoogleCloudPlatform/settings/apps/new
+# Org-owned App instead (future, upstream): ACTION=https://github.com/organizations/GoogleCloudPlatform/settings/apps/new
 
 jq --arg name "$APP_NAME" --arg home "$HOMEPAGE" \
    --arg hook "${MEDIATOR_URL}/webhook" --argjson public "$PUBLIC" \
@@ -116,7 +122,7 @@ jq -r --arg action "$ACTION" --arg state "$state" \
 echo "open file://$work/create-app.html ; expected state: $state"
 ```
 
-For `org` scope (upstream only, not recommended), change the permissions
+For `org` scope (future, upstream only, not recommended), change the permissions
 before creating the form. Org *Self-hosted runners* replaces repo
 *Administration*; *Actions* and *Metadata* stay
 ([matrix 1](permissions-matrix.md#1-github-steps)):
@@ -269,7 +275,11 @@ ptone, as account owner:
 3. Review the permissions (Actions read, Administration read and write,
    Metadata read) and click **Install**.
 
-### 4.2 Upstream: `GoogleCloudPlatform/scion` (org owner)
+### 4.2 Future: `GoogleCloudPlatform/scion` (requires a GoogleCloudPlatform org owner)
+
+Out of the current scope (fork only). Kept for when upstream is in scope. A
+token-based alternative without an App, not implemented, is described in
+[matrix 4.3](permissions-matrix.md#43-upstream-alternative-not-implemented-repo-webhook-plus-a-pat-from-a-repo-admin).
 
 Only a GoogleCloudPlatform **organization owner** can install this App. A
 repo admin cannot install an App that requests *Repository administration*
@@ -279,7 +289,7 @@ the org owners ([matrix X1, G4, G5](permissions-matrix.md#5-design-corrections-a
 - If the App is owned by ptone's account, it must be public (`PUBLIC=true` in
   2.1, or **Any account** in section 3) so that it can be installed on the org.
 - Send the org owner the ready-made request in
-  [matrix section 6](permissions-matrix.md#6-request-to-a-googlecloudplatform-org-owner).
+  [matrix section 6](permissions-matrix.md#6-request-to-a-googlecloudplatform-org-owner-future).
   It asks them to install the App on **Only select repositories**, `scion`,
   and to allow repository-level self-hosted runners for `scion` (G6).
 - **`org` scope only:** the org owner installs the App on the org (G5), and
