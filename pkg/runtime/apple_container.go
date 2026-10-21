@@ -21,7 +21,11 @@ import (
 	"io"
 	"log/slog"
 	"os/exec"
+	"regexp"
+	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -40,8 +44,12 @@ func NewAppleContainerRuntime() *AppleContainerRuntime {
 	}
 }
 
+// appleContainerRuntimeName is the Apple runtime's name, and its
+// RunConfig.RuntimeName.
+const appleContainerRuntimeName = "container"
+
 func (r *AppleContainerRuntime) Name() string {
-	return "container"
+	return appleContainerRuntimeName
 }
 
 func (r *AppleContainerRuntime) ExecUser() string {
@@ -53,6 +61,19 @@ func (r *AppleContainerRuntime) Run(ctx context.Context, config RunConfig) (stri
 		return "", err
 	}
 
+	// buildCommonRunArgs emits the Apple-supported --tmpfs flag for the
+	// shared workspace agents mask when it sees this name, and only when
+	// <workspace>/.scion/agents already exists, so the runtime never
+	// creates that mount point in the host checkout. The Apple
+	// "container" CLI has accepted --tmpfs since its first release, 0.1.0
+	// (https://github.com/apple/container/blob/0.1.0/Sources/ContainerClient/Flags.swift,
+	// applied in Sources/ContainerClient/Utility.swift); the current
+	// docs/command-reference.md lists it under "container run". The CLI
+	// lists tmpfs mounts before -v volumes, so the mask takes effect only
+	// where mounts are applied by destination depth: apple/containerization
+	// 0.31.0 (apple/containerization#601), first used by apple/container
+	// 0.12.0.
+	config.RuntimeName = r.Name()
 	args, err := buildCommonRunArgs(config)
 	if err != nil {
 		return "", err
@@ -98,6 +119,9 @@ func (r *AppleContainerRuntime) Run(ctx context.Context, config RunConfig) (stri
 	// Apple's container CLI has no --group-add: warn and start unchanged.
 	newArgs = appendSharedDirGroupArgs(newArgs, config, "container", false)
 	newArgs = append(newArgs, stripUnsupportedAppleFlags(args[3:])...)
+	if slices.Contains(newArgs, "--tmpfs") {
+		appleMaskVersionOnce.Do(func() { appleMaskVersionCheck(ctx, r.Command) })
+	}
 
 	WriteRuntimeDebugFile(config, r.Command, newArgs)
 
@@ -400,6 +424,46 @@ func (r *AppleContainerRuntime) ExecWithStdin(ctx context.Context, id string, cm
 	}
 	args := append([]string{"exec", "-i", "--user", "scion", id}, cmd...)
 	return runSimpleCommandWithStdin(ctx, stdin, r.Command, args...)
+}
+
+// appleMaskMinVersion is the first apple/container release whose nested
+// mount ordering lets the --tmpfs agents mask take effect (see Run).
+var appleMaskMinVersion = [3]int{0, 12, 0}
+
+// appleVersionTimeout bounds "container --version", so a CLI that hangs
+// cannot hold up a start.
+const appleVersionTimeout = 5 * time.Second
+
+var (
+	// appleMaskVersionOnce and appleMaskVersionCheck run the version check
+	// once per process; tests replace both.
+	appleMaskVersionOnce  = &sync.Once{}
+	appleMaskVersionCheck = warnAppleMaskVersion
+	appleVersionPattern   = regexp.MustCompile(`version (\d+)\.(\d+)\.(\d+)`)
+)
+
+// warnAppleMaskVersion runs "container --version" and logs one warning when
+// the CLI is older than appleMaskMinVersion. It reports whether it warned;
+// it never changes the start. Output such as
+// "container CLI version 0.12.0 (build: release, commit: ...)".
+func warnAppleMaskVersion(ctx context.Context, command string) bool {
+	ctx, cancel := context.WithTimeout(ctx, appleVersionTimeout)
+	defer cancel()
+	out, err := runSimpleCommand(ctx, command, "--version")
+	m := appleVersionPattern.FindStringSubmatch(out)
+	if err != nil || m == nil {
+		runtimeLog().Debug("Could not read the container CLI version", "error", err)
+		return false
+	}
+	var v [3]int
+	for i := range v {
+		v[i], _ = strconv.Atoi(m[i+1])
+	}
+	if slices.Compare(v[:], appleMaskMinVersion[:]) >= 0 {
+		return false
+	}
+	runtimeLog().Warn("container CLI is older than 0.12.0; the .scion/agents mask may not take effect", "version", m[0])
+	return true
 }
 
 // stripUnsupportedAppleFlags removes flag-value pairs that the Apple
