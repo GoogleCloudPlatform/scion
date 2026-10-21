@@ -240,30 +240,103 @@ func (t *Transport) DoNoRetry(ctx context.Context, req *http.Request) (*http.Res
 }
 
 // AuthenticatedHTTPClient returns an *http.Client that applies this transport's
-// authentication to every request. This is useful for code paths that need a
-// raw *http.Client (e.g. the transfer client for signed URL uploads/downloads)
-// but still need to authenticate with the hub when signed URLs are HTTP proxy
-// URLs rather than GCS signed URLs or file:// URLs.
+// authentication to requests sent to the hub's own origin (the scheme, host
+// and port of BaseURL). This is useful for code paths that need a raw
+// *http.Client (e.g. the transfer client for signed URL uploads/downloads)
+// and still need to authenticate with the hub when signed URLs are HTTP proxy
+// URLs on the hub rather than storage signed URLs or file:// URLs. Requests to
+// any other origin, such as a storage host's signed URL, are sent without the
+// hub credential.
+//
+// The client follows redirects like http.DefaultClient (up to 10 hops), but
+// each hop to another origin is sent without the hub credential and without
+// an Authorization header; same-origin hops keep it.
 func (t *Transport) AuthenticatedHTTPClient() *http.Client {
 	base := t.HTTPClient
 	if base == nil {
 		base = http.DefaultClient
 	}
+	hub := parseOrigin(t.BaseURL)
 	return &http.Client{
 		Timeout: base.Timeout,
 		Transport: &authRoundTripper{
 			base: base.Transport,
 			auth: t.Auth,
 			ua:   t.UserAgent,
+			hub:  hub,
+		},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= maxRedirects {
+				return fmt.Errorf("stopped after %d redirects", maxRedirects)
+			}
+			if !sameOrigin(req.URL, hub) {
+				req.Header.Del("Authorization")
+			}
+			return nil
 		},
 	}
 }
 
-// authRoundTripper is an http.RoundTripper that applies authentication headers.
+// maxRedirects matches the hop limit of net/http's default redirect policy.
+const maxRedirects = 10
+
+// origin is the scheme, host and effective port of a URL.
+type origin struct {
+	scheme string
+	host   string
+	port   string
+}
+
+// parseOrigin returns the origin of rawURL, or the zero origin, which
+// sameOrigin never matches, when rawURL has no http or https scheme or no
+// host.
+func parseOrigin(rawURL string) origin {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return origin{}
+	}
+	o, _ := originOf(u)
+	return o
+}
+
+// originOf returns the origin of u, with the scheme and host lower-cased and
+// the default port (80 for http, 443 for https) filled in when u has none.
+func originOf(u *url.URL) (o origin, ok bool) {
+	if u == nil {
+		return origin{}, false
+	}
+	o.scheme = strings.ToLower(u.Scheme)
+	o.host = strings.ToLower(u.Hostname())
+	o.port = u.Port()
+	if o.port == "" {
+		switch o.scheme {
+		case "http":
+			o.port = "80"
+		case "https":
+			o.port = "443"
+		}
+	}
+	if (o.scheme != "http" && o.scheme != "https") || o.host == "" {
+		return origin{}, false
+	}
+	return o, true
+}
+
+// sameOrigin reports whether u has the origin want.
+func sameOrigin(u *url.URL, want origin) bool {
+	got, ok := originOf(u)
+	return ok && got == want
+}
+
+// authRoundTripper is an http.RoundTripper that applies authentication headers
+// to requests for the hub origin.
 type authRoundTripper struct {
 	base http.RoundTripper
 	auth Authenticator
 	ua   string
+	// hub is the only origin that receives auth. It is the zero origin,
+	// which matches no request, when the BaseURL has no usable origin.
+	hub origin
 }
 
 func (rt *authRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -271,7 +344,7 @@ func (rt *authRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 	if rt.ua != "" && clone.Header.Get("User-Agent") == "" {
 		clone.Header.Set("User-Agent", rt.ua)
 	}
-	if rt.auth != nil {
+	if rt.auth != nil && sameOrigin(clone.URL, rt.hub) {
 		if err := rt.auth.ApplyAuth(clone); err != nil {
 			return nil, fmt.Errorf("failed to apply auth: %w", err)
 		}
