@@ -47,6 +47,22 @@ func TestIsolateForTest_ClearsAfterTest(t *testing.T) {
 	}
 }
 
+// TestIsolateForTest_NestedRestoresParent checks that a nested isolate
+// restores the parent's value when the subtest ends.
+func TestIsolateForTest_NestedRestoresParent(t *testing.T) {
+	IsolateForTest(t)
+	Set()
+	t.Run("nested", func(t *testing.T) {
+		IsolateForTest(t)
+		if Disabled() {
+			t.Fatal("the nested isolate did not turn the switch off")
+		}
+	})
+	if !Disabled() {
+		t.Fatal("the nested isolate cleared the parent's Set")
+	}
+}
+
 // isolateCallRE matches a call of IsolateForTest, qualified or not.
 var isolateCallRE = regexp.MustCompile(`\bIsolateForTest\(`)
 

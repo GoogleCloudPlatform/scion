@@ -431,7 +431,14 @@ var migrateLegacyGlobalLayoutOnce sync.Once
 // but only the first call in the process has any effect. Mirrors
 // WarnRemovedLegacyEnvOnce, which the same two boot hooks already share for
 // the same reason.
+//
+// While internal/writesonread is set it returns without using up the
+// Once, so a process that sets the switch never makes a later boot
+// migration in the same process a silent no-op.
 func MigrateLegacyGlobalLayoutOnce(scionHome string, report Reporter) {
+	if writesonread.Disabled() {
+		return
+	}
 	migrateLegacyGlobalLayoutOnce.Do(func() {
 		MigrateLegacyGlobalLayout(scionHome, report)
 	})

@@ -41,11 +41,13 @@ type TB interface {
 	Cleanup(func())
 }
 
-// IsolateForTest turns the switch off, and turns it off again when t ends,
-// so a test that sets it does not hand it to the next test. For tests only:
-// production code never calls it (TestIsolateForTest_NoProductionCallers).
+// IsolateForTest turns the switch off for t, and when t ends restores the
+// value it had before, so a test that sets it does not hand it to the next
+// test, and a nested isolate in a subtest does not clear its parent's Set.
+// For tests only: production code never calls it
+// (TestIsolateForTest_NoProductionCallers).
 func IsolateForTest(t TB) {
 	t.Helper()
-	disabled.Store(false)
-	t.Cleanup(func() { disabled.Store(false) })
+	prev := disabled.Swap(false)
+	t.Cleanup(func() { disabled.Store(prev) })
 }
