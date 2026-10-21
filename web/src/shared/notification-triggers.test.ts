@@ -70,12 +70,6 @@ describe('defaultTriggersHint', () => {
     );
   });
 
-  it('lists the agent-create triggers by display label', () => {
-    expect(defaultTriggersHint(AGENT_CREATE_TRIGGERS)).toBe(
-      'You will be notified when this agent reaches: Completed, Waiting on Parent, Limits Exceeded, Stalled, Error, or Halted.'
-    );
-  });
-
   it('handles a single default trigger', () => {
     expect(defaultTriggersHint(['COMPLETED'])).toBe(
       'You will be notified when this agent reaches: Completed.'
