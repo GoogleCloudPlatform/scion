@@ -84,6 +84,7 @@ With --format json the output is an object keyed by setting:
 		if err != nil {
 			return err
 		}
+		values = replaceHubSetting(values)
 
 		if isJSONOutput() {
 			out := make(map[string]map[string]string, len(values))
@@ -149,7 +150,14 @@ A key the settings file would accept but never read is refused and the file is
 left unchanged: hub.token, hub.apiKey, hub.lastSyncedAt, bucket.* and
 hub_connections.* at either layer, and server.auth.* at the project layer (read
 only from the global settings). The value of a credential-like key (for example
-hub.brokerToken) is masked in the output.`,
+hub.brokerToken) is masked in the output.
+
+hub.endpoint is kept in the hub list (~/.scion/context.yaml), never in a
+settings file. With --global, "config set --global hub.endpoint <url>" adds the
+hub to the hub list, as "scion hub add" does (an existing entry with that URL
+is reused; a new one is named from the host), and makes it the current hub.
+In a project, "config set hub.endpoint <url>" links the project directory to
+that hub instead.`,
 	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		key := args[0]
@@ -170,6 +178,9 @@ hub.brokerToken) is masked in the output.`,
 		// directory itself, which is the global layer. The error never
 		// contains the value.
 		layerGlobal := configGlobal || config.IsGlobalProjectDir(targetPath)
+		if key == configHubEndpointKey {
+			return configSetHubEndpoint(cmd.OutOrStdout(), cmd.ErrOrStderr(), value, layerGlobal, targetPath)
+		}
 		if err := config.ValidateConfigSetKey(key, layerGlobal); err != nil {
 			return err
 		}
@@ -237,7 +248,9 @@ resolved from on-disk harness-config directories, not from settings.yaml alone.
 Use "scion harness-config" to inspect them.
 
 With --source the value is followed by the layer it comes from, the same
-source "config list" shows. With --format json the output is
+source "config list" shows. hub.endpoint is the hub this command would use,
+as "scion hub status" reports it, with its source: the --hub flag, an
+environment variable, the project's link to a hub, or the current hub. With --format json the output is
 {"key": "...", "value": "...", "source": "..."}. The value of a
 credential-like setting is masked.
 
@@ -251,9 +264,15 @@ Examples:
 	RunE: func(cmd *cobra.Command, args []string) error {
 		key := args[0]
 
-		v, err := config.ResolveSettingValue(configReadProjectDir(), key)
-		if err != nil {
-			return err
+		var v config.SettingValue
+		if key == configHubEndpointKey {
+			v = effectiveHubSetting()
+		} else {
+			var err error
+			v, err = config.ResolveSettingValue(configReadProjectDir(), key)
+			if err != nil {
+				return err
+			}
 		}
 
 		if isJSONOutput() {
@@ -286,6 +305,11 @@ It accepts the keys "config set" accepts, with the same write rules. A key
 that is not in the settings file changes nothing. An environment variable
 that sets the key still applies after it is removed from the file.
 
+hub.endpoint is kept in the hub list, not in a settings file: with --global,
+"config unset --global hub.endpoint" makes no hub current (the hub stays in the
+hub list, with its stored login); in a project, it removes the project's link
+to a hub.
+
 Examples:
   scion config unset cli.autohelp
   scion config unset --global hub.endpoint`,
@@ -300,6 +324,10 @@ Examples:
 				return fmt.Errorf("cannot unset local setting: not inside a project or project path invalid: %w", err)
 			}
 			targetPath = projectDir
+		}
+		if key == configHubEndpointKey {
+			return configUnsetHubEndpoint(cmd.OutOrStdout(), cmd.ErrOrStderr(),
+				configUnsetGlobal || config.IsGlobalProjectDir(targetPath), targetPath)
 		}
 
 		res, err := config.UnsetSetting(targetPath, key, configUnsetGlobal)

@@ -75,7 +75,7 @@ func (c *CLIContext) SetLinkEntry(hubName string, p KnownProject, localPath stri
 		return fmt.Errorf("no hub named %q", hubName)
 	}
 	if p.ID == "" {
-		return errors.New("project has no ID")
+		return ErrLinkNoProjectID
 	}
 	if localPath == "" {
 		return errors.New("link has no local path")
@@ -104,6 +104,49 @@ func (c *CLIContext) SetLinkEntry(hubName string, p KnownProject, localPath stri
 	p.LastUsed = stamp
 	c.Projects = append(c.Projects, p)
 	return nil
+}
+
+// ErrLinkNoProjectID is returned for a link entry without a project ID.
+var ErrLinkNoProjectID = errors.New("project has no ID")
+
+// LinkPathToHubURL links the project at localPath to the hub at endpoint,
+// adding a hub entry for it as EnsureHubURL does. A link entry that already
+// points at that hub is kept as it is (with its project ID); otherwise the
+// link entry for localPath is replaced by one for projectID on that hub.
+// It returns the hub entry's name.
+func (c *CLIContext) LinkPathToHubURL(endpoint, baseName, projectID, localPath string, now time.Time) (name string, created bool, err error) {
+	if err := ValidateHubURL(endpoint); err != nil {
+		return "", false, err
+	}
+	if localPath == "" {
+		return "", false, errors.New("link has no local path")
+	}
+	if p, h := c.LinkEntryFor(localPath); h != nil && NormalizeEndpoint(h.Endpoint) == NormalizeEndpoint(endpoint) {
+		return p.Hub, false, nil
+	}
+	if projectID == "" {
+		return "", false, ErrLinkNoProjectID
+	}
+	name, created = c.EnsureHub(endpoint, baseName)
+	if err := c.SetLinkEntry(name, KnownProject{ID: projectID}, localPath, now); err != nil {
+		return "", false, err
+	}
+	return name, created, nil
+}
+
+// ProjectLinkID returns the ID a link entry records for the project at
+// projectDir: its hub project ID, else its project ID, from its settings
+// (SCION_PROJECT_ID in the environment does not apply). It returns "" when
+// the settings cannot be read or hold neither.
+func ProjectLinkID(projectDir string) string {
+	s, err := LoadSettingsIgnoringEnvProjectID(projectDir)
+	if err != nil || s == nil {
+		return ""
+	}
+	if id := s.GetHubProjectID(); id != "" {
+		return id
+	}
+	return s.ProjectID
 }
 
 // RemoveLinkEntry removes the link entry for localPath and reports whether

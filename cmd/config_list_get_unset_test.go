@@ -58,8 +58,15 @@ func configTestProject(t *testing.T, globalYAML, projectYAML string) (root, glob
 		require.NoError(t, os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte(projectYAML), 0o644))
 	}
 	origProjectPath, origFormat := projectPath, outputFormat
-	t.Cleanup(func() { projectPath, outputFormat = origProjectPath, origFormat })
+	origHubEndpoint, origHubSource, origHubFlagName := hubEndpoint, hubSource, hubFlagName
+	t.Cleanup(func() {
+		projectPath, outputFormat = origProjectPath, origFormat
+		hubEndpoint, hubSource, hubFlagName = origHubEndpoint, origHubSource, origHubFlagName
+	})
 	projectPath = root
+	// No hub from an earlier test's resolution: hub.endpoint reports the
+	// hub of this invocation (resolveCLIHub).
+	hubEndpoint, hubSource, hubFlagName = "", "", ""
 	return root, globalDir
 }
 
@@ -99,7 +106,8 @@ func TestConfigListGetAgree(t *testing.T) {
 		{name: "defaults only",
 			check: map[string][2]string{"cli.autohelp": {"true", "default"}, "active_profile": {"local", "default"}}},
 		{name: "global file", global: "schema_version: \"1\"\nhub:\n  endpoint: https://g.example.com\n",
-			check: map[string][2]string{"hub.endpoint": {"https://g.example.com", "global "}}},
+			// A settings file is not a hub source.
+			check: map[string][2]string{"hub.endpoint": {"", ""}}},
 		{name: "project over global",
 			global:  "schema_version: \"1\"\ncli:\n  autohelp: false\n",
 			project: "schema_version: \"1\"\ncli:\n  autohelp: true\nactive_profile: remote\n",
@@ -110,7 +118,7 @@ func TestConfigListGetAgree(t *testing.T) {
 			check:   map[string][2]string{"hub.endpoint": {"https://env.example.com", "env SCION_HUB_ENDPOINT"}}},
 		{name: "legacy-format project file",
 			project: "harnesses: {}\nhub:\n  endpoint: https://legacy.example.com\n",
-			check:   map[string][2]string{"hub.endpoint": {"https://legacy.example.com", "project "}}},
+			check:   map[string][2]string{"hub.endpoint": {"", ""}}},
 		{name: "masked broker token",
 			global: "schema_version: \"1\"\nserver:\n  broker:\n    broker_token: do-not-print\n",
 			check:  map[string][2]string{"hub.brokerToken": {"********", "global "}}},
@@ -331,10 +339,10 @@ func TestFormatValueSource(t *testing.T) {
 // edit (here a key spelt in another case), unset says so instead of
 // "nothing changed".
 func TestConfigUnset_ReportsKeyStillSet(t *testing.T) {
-	configTestProject(t, "", "schema_version: \"1\"\nhub:\n  Endpoint: https://case.example.com\n")
+	configTestProject(t, "", "schema_version: \"1\"\nhub:\n  Linked: true\n")
 	outputFormat = ""
 
-	stdout, _, err := runConfigUnset(t, false, "hub.endpoint")
+	stdout, _, err := runConfigUnset(t, false, "hub.linked")
 	require.NoError(t, err)
 	assert.NotContains(t, stdout, "nothing changed")
 	assert.Contains(t, stdout, "was not removed: it is still set in")
@@ -347,11 +355,11 @@ func TestConfigUnset_ReportsKeyStillSet(t *testing.T) {
 // only in the in-repo settings file is reported as set in a file config
 // unset does not edit.
 func TestConfigUnset_ReportsInRepoFileNotEdited(t *testing.T) {
-	root, _ := configTestProject(t, "", "schema_version: \"1\"\nhub:\n  endpoint: https://in-repo.example.com\n")
+	root, _ := configTestProject(t, "", "schema_version: \"1\"\nimage_registry: registry.example.test/in-repo\n")
 	require.NoError(t, os.WriteFile(filepath.Join(root, ".scion", "project-id"), []byte("split-project-id\n"), 0o644))
 	outputFormat = ""
 
-	stdout, _, err := runConfigUnset(t, false, "hub.endpoint")
+	stdout, _, err := runConfigUnset(t, false, "image_registry")
 	require.NoError(t, err)
 	assert.NotContains(t, stdout, "nothing changed")
 	assert.Contains(t, stdout, "which config unset does not edit")

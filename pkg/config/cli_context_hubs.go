@@ -33,6 +33,11 @@ import (
 // holds the import, so callers can warn and carry on.
 var ErrCLIContextImport = errors.New("could not save the imported hub settings to context.yaml")
 
+// HubEndpointConfigKey is the config key ('scion config set|get|unset')
+// that names the hub. The config commands map it to the hub list (the
+// current hub, or a project's link entry); no settings file holds it.
+const HubEndpointConfigKey = "hub.endpoint"
+
 // HubNames returns the names of the hub entries, sorted.
 func (c *CLIContext) HubNames() []string {
 	names := make([]string, 0, len(c.Hubs))
@@ -125,6 +130,37 @@ func (c *CLIContext) AddHub(name, endpoint string) error {
 	}
 	c.Hubs[name] = &HubEntry{Endpoint: NormalizeEndpoint(endpoint)}
 	return nil
+}
+
+// EnsureHubURL returns the name of the hub entry for endpoint, adding one
+// named baseName (with -2, -3, ... on a collision) when no entry has that
+// normalised endpoint. endpoint must pass ValidateHubURL, the rule 'scion
+// hub add' applies.
+func (c *CLIContext) EnsureHubURL(endpoint, baseName string) (name string, created bool, err error) {
+	if err := ValidateHubURL(endpoint); err != nil {
+		return "", false, err
+	}
+	name, created = c.EnsureHub(endpoint, baseName)
+	return name, created, nil
+}
+
+// SelectHubURL makes the hub at endpoint the current hub, adding an entry
+// for it as EnsureHubURL does. It returns the entry's name.
+func (c *CLIContext) SelectHubURL(endpoint, baseName string) (name string, created bool, err error) {
+	name, created, err = c.EnsureHubURL(endpoint, baseName)
+	if err != nil {
+		return "", false, err
+	}
+	c.CurrentHub = name
+	return name, created, nil
+}
+
+// ClearCurrentHub makes no hub current and returns the name of the hub
+// that was current, or "". The hub entry itself is kept.
+func (c *CLIContext) ClearCurrentHub() string {
+	name := c.CurrentHub
+	c.CurrentHub = ""
+	return name
 }
 
 // RenameHub renames the hub entry oldName to newName and rewrites every

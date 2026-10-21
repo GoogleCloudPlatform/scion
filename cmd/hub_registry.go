@@ -281,7 +281,7 @@ func hubAdd(out, stderr io.Writer, name, url string, use bool) error {
 		_, _ = fmt.Fprintf(out, "Now using hub '%s'.\n", name)
 	}
 	if healthErr != nil {
-		_, _ = fmt.Fprintf(stderr, "Warning: the hub at %s did not respond: %v\n", endpoint, healthErr)
+		printUnreachableHub(stderr, endpoint, healthErr)
 	}
 	if info.MethodType == "none" {
 		_, _ = fmt.Fprintf(out, "Not logged in to hub '%s'. Run: scion hub auth login --hub %s\n", name, name)
