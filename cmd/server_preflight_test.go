@@ -513,7 +513,7 @@ func TestServerPreflight_NoFileChangeNoListener(t *testing.T) {
 	delete(dbAfter, ".")
 	delete(dbBefore, ".")
 	assert.Equal(t, dbBefore, dbAfter, "nothing but SQLite's sidecars appears beside the database")
-	// A listener or a leaked connection only adds sockets; another test's
+	// A listener or a connection left open only adds sockets; another test's
 	// socket closing meanwhile must not fail this check.
 	assert.LessOrEqual(t, socketFDs(t), sockets, "the preflight must leave no socket open")
 
