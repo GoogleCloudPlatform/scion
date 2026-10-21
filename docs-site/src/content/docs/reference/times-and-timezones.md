@@ -124,9 +124,9 @@ An agent created by an older Hub may have a `TZ` saved in its applied config env
 Recurring schedules are evaluated in UTC, and there is no schedule timezone setting.
 
 - An expression that starts with `CRON_TZ=` or `TZ=` is rejected with `400`.
-- Schedules saved with such a prefix by an older Hub are paused at Hub start, with one warning per schedule in the Hub log. To resume one, edit its expression to UTC first.
+- Schedules saved with such a prefix by an older Hub are paused with `statusReason` `cron_zone_unsupported` at Hub start (and if the evaluator encounters one at run time), with one warning per schedule in the Hub log. To resume one, edit its expression to UTC first.
 
-See [Scheduling](/scion/hosted/user/scheduling/#recurring-schedules).
+See [Scheduling](/scion/hosted/user/scheduling/#schedules-paused-by-the-hub).
 
 ## Operator steps
 
