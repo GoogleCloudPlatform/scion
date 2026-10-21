@@ -320,9 +320,10 @@ func TestGlobalSettingsMentionPlacementKeys(t *testing.T) {
 	}
 }
 
-// ConfiguredRuntimeNames: the global file's runtimes keys plus the active
-// overlay's stored runtimes; never entries that exist only in the embedded
-// defaults; not known (fail closed) when the file cannot be read.
+// ConfiguredRuntimeNames: the active overlay's stored runtimes when it
+// supplies the runtimes section, otherwise the global file's runtimes;
+// never entries that exist only in the embedded defaults; not known (fail
+// closed) when the file cannot be stat'd, read or decoded.
 func TestConfiguredRuntimeNames(t *testing.T) {
 	writePlacementGlobalSettings(t, "schema_version: \"1\"\nruntimes:\n  gke:\n    type: kubernetes\n")
 	names, ok := ConfiguredRuntimeNames()
