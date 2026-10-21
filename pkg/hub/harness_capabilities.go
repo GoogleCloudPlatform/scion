@@ -204,15 +204,25 @@ func storedAgentHarness(agent *store.Agent) string {
 	return inlineHarnessType(agent.AppliedConfig)
 }
 
-// stampAgentHarness records the agent's resolved harness type on
-// AppliedConfig.Harness at create, unless already set. A harness that does
-// not resolve (the "generic" fallback) is not stamped, so a later read
-// resolves it again.
-func (s *Server) stampAgentHarness(ctx context.Context, agent *store.Agent) {
+// stampAgentHarness records the agent's harness type on
+// AppliedConfig.Harness at create, unless already set: an inline harness
+// first (as resolveAgentHarnessType), then the harness of resolvedHC, the
+// hub harness-config create resolved and stamped by ID (the one the broker
+// hydrates, possibly from the template default), then
+// resolveAgentHarnessType. A harness that does not resolve (the "generic"
+// fallback) is not stamped, so a later read resolves it again.
+func (s *Server) stampAgentHarness(ctx context.Context, agent *store.Agent, resolvedHC *store.HarnessConfig) {
 	if agent == nil || agent.AppliedConfig == nil || agent.AppliedConfig.Harness != "" {
 		return
 	}
-	if h := s.resolveAgentHarnessType(ctx, agent); h != "generic" {
+	h := inlineHarnessType(agent.AppliedConfig)
+	if h == "" {
+		h = harnessTypeOfConfig(resolvedHC, nil)
+	}
+	if h == "" {
+		h = s.resolveAgentHarnessType(ctx, agent)
+	}
+	if h != "generic" {
 		agent.AppliedConfig.Harness = h
 	}
 }
@@ -247,14 +257,14 @@ func (s *Server) setAgentListBadges(ctx context.Context, agents []AgentWithCapab
 	var memo *harnessTypeMemo
 	for i := range agents {
 		a := &agents[i].Agent
-		h := storedAgentHarness(a)
-		if h == "" {
+		var resolved string
+		if storedAgentHarness(a) == "" {
 			if memo == nil {
 				memo = newHarnessTypeMemo()
 			}
-			h = s.resolveAgentHarnessTypeMemo(ctx, a, memo)
+			resolved = s.resolveAgentHarnessTypeMemo(ctx, a, memo)
 		}
-		agents[i].HarnessVendor = harness.Vendor(h)
+		agents[i].HarnessVendor = harness.Vendor(agentBadgeHarness(a, resolved))
 		agents[i].ModelSize = agentModelSize(a)
 	}
 }

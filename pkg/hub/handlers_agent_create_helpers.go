@@ -786,7 +786,7 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 
 	// Record the resolved harness type for agent lists and events, which
 	// derive the harness vendor from it without a harness-config lookup.
-	s.stampAgentHarness(ctx, agent)
+	s.stampAgentHarness(ctx, agent, resolvedHC)
 
 	// Record the model size alias before it is resolved below. Every
 	// precedence layer (request > project > template > hub) has already
