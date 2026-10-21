@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -117,10 +118,14 @@ func checkMoveMarker(dir, id string) error {
 // project's agents/<name>, the external agents root's <name>, the global
 // project's per-agent workspace) and the agent's own directory on the NFS
 // export that RemoveNFSAgentFiles removes. A directory that does not
-// exist is fine. The check is all or nothing: any present directory
-// without the marker, or with another ID, or that cannot be checked, is
-// ErrMoveMarkerMismatch, and the delete must remove nothing. It returns
-// the directories it checked, and changes nothing.
+// exist is fine. The worktrees the same delete removes (the
+// worktree-per-agent worktree under the shared base, a shared worktree the
+// agent is registered on, the agent's worktree on the NFS export) must not
+// exist at all: a forced move never creates one. The check is all or
+// nothing: any present directory without the marker, or with another ID,
+// any present worktree or registration, or anything that cannot be
+// checked, is ErrMoveMarkerMismatch, and the delete must remove nothing. It
+// returns the paths it checked, and changes nothing.
 func (m *AgentManager) CheckMoveMarkers(ctx context.Context, projectPath, projectID, agentName, moveID string) ([]string, error) {
 	if moveID == "" {
 		return nil, fmt.Errorf("%w: no move reincarnation ID", ErrMoveMarkerMismatch)
@@ -128,14 +133,33 @@ func (m *AgentManager) CheckMoveMarkers(ctx context.Context, projectPath, projec
 	if _, err := checkAgentDirContained(projectPath, agentName, false); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrMoveMarkerMismatch, err)
 	}
-	var dirs []string
+	// dirs must each be absent or carry this move's marker; worktrees must
+	// each be absent (a recreate never creates a worktree, so one that
+	// exists predates the move).
+	var dirs, worktrees []string
 	if projectDir, err := config.GetResolvedProjectDir(projectPath); err == nil {
 		dirs = append(dirs, filepath.Join(projectDir, "agents", agentName))
 		if config.IsGlobalProjectDir(projectDir) {
 			dirs = append(dirs, filepath.Join(projectDir, "workspace", agentName))
 		}
-		if layout := resolveAgentProjectLayout(projectDir); layout.externalAgentsRoot != "" {
+		layout := resolveAgentProjectLayout(projectDir)
+		if layout.externalAgentsRoot != "" {
 			dirs = append(dirs, filepath.Join(layout.externalAgentsRoot, agentName))
+		}
+		// DeleteAgentFiles removes the worktree-per-agent worktree under
+		// the shared base, and a shared worktree the agent is registered
+		// on; a forced move creates neither.
+		if layout.sharedBaseIsRepo {
+			worktrees = append(worktrees, filepath.Join(layout.sharedBase, "worktrees", agentName))
+		}
+		if layout.repoRoot != "" {
+			_, _, found, findErr := provision.FindBranchForAgent(layout.repoRoot, projectDir, agentName)
+			if findErr != nil {
+				return dirs, fmt.Errorf("%w: read the worktree sharer registry: %v", ErrMoveMarkerMismatch, findErr)
+			}
+			if found {
+				return dirs, fmt.Errorf("%w: the agent is registered on a shared worktree", ErrMoveMarkerMismatch)
+			}
 		}
 	}
 	hostBase, rel, err := m.nfsExportWorkspace(projectPath, projectID, agentName)
@@ -148,28 +172,36 @@ func (m *AgentManager) CheckMoveMarkers(ctx context.Context, projectPath, projec
 			return dirs, fmt.Errorf("%w: workspace_storage nfs: %v", ErrMoveMarkerMismatch, err)
 		}
 		dirs = append(dirs, filepath.Join(hostBase, agentRel))
+		// RemoveNFSAgentFiles also removes the agent's worktree under the
+		// project's shared checkout on the export.
+		worktrees = append(worktrees, filepath.Join(hostBase, nfsWorktreeSubPath(rel, agentName)))
 	}
+	checked := append(append([]string(nil), dirs...), worktrees...)
 	for _, dir := range dirs {
 		if err := checkMoveMarker(dir, moveID); err != nil {
-			return dirs, err
+			return checked, err
 		}
 	}
-	return dirs, nil
+	for _, wt := range worktrees {
+		if _, err := os.Lstat(wt); err == nil {
+			return checked, fmt.Errorf("%w: a worktree exists at %s", ErrMoveMarkerMismatch, wt)
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return checked, fmt.Errorf("%w: stat %s: %v", ErrMoveMarkerMismatch, wt, err)
+		}
+	}
+	return checked, nil
 }
 
 // markMoveExportAgentDir marks the agent's own directory on the NFS export,
-// exportDir, with the move marker of its local agent directory, agentDir,
-// when this start has just created exportDir (existedBefore is false) and
-// agentDir carries a move marker: the start of a forced move's agent
-// creates that directory just before its pod, so nothing else has written
-// there yet. An agent without a local move marker is not affected. A
-// directory that already existed, or that this start did not create (the
-// node creates it at pod start), is left unmarked; a rollback delete then
+// exportDir, which this start has just created (the caller's atomic claim),
+// with the move marker of its local agent directory, agentDir, when agentDir
+// carries one: the start of a forced move's agent creates that directory
+// just before its pod, so nothing else has written there yet. An agent
+// without a local move marker is not affected. A directory that already
+// existed, or that this start did not create (the node creates it at pod
+// start), is never passed here and stays unmarked; a rollback delete then
 // refuses it.
-func markMoveExportAgentDir(agentDir, exportDir string, existedBefore bool) error {
-	if existedBefore {
-		return nil
-	}
+func markMoveExportAgentDir(agentDir, exportDir string) error {
 	moveID, err := readMoveMarker(agentDir)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil

@@ -19,7 +19,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -2113,22 +2112,11 @@ authDone:
 					agentEnv = withEnvValue(agentEnv, "SCION_WORKSPACE_MODE", string(store.SharingModeSharedPlain))
 				}
 			}
-			// The agent's own directory on the export, when this start uses
-			// one, and whether it existed before this start: a forced
-			// move's start marks it as the move's only when it creates it
-			// (markMoveExportAgentDir).
-			ownDirName := emptyAgentDirName
-			if ownDirName == "" && agentDirName != "" && mount.PVClaimName != "" {
-				ownDirName = agentDirName
-			}
-			ownDirPath, ownDirExisted := "", true
-			if ownDirName != "" {
-				if p, perr := nfsOwnAgentDirPath(resolvedWorkspace, ownDirName); perr == nil {
-					ownDirPath = p
-					_, statErr := os.Lstat(p)
-					ownDirExisted = !errors.Is(statErr, fs.ErrNotExist)
-				}
-			}
+			// ownDirCreated reports whether this start created the agent's
+			// own directory on the export (an atomic claim in the leaf
+			// helper): a forced move's start marks it as the move's only
+			// then (markMoveExportAgentDir).
+			ownDirName, ownDirCreated := "", false
 			if emptyAgentDirName != "" {
 				// Empty-per-agent: only the agent's own directory is ever
 				// mounted, never the project's workspace path resolved
@@ -2137,11 +2125,13 @@ authDone:
 				if mount.PVClaimName == "" {
 					return nil, errEmptyPerAgentNFSNoClaim
 				}
-				nfsWorkspacePreCreated, err = ensureNFSAgentWorkspaceLeaf(m.Runtime.Name(), projectID, resolvedWorkspace, mount.PVClaimName, claimSharedDirNames, emptyAgentDirName)
+				nfsWorkspacePreCreated, ownDirCreated, err = ensureNFSAgentWorkspaceLeafClaim(m.Runtime.Name(), projectID, resolvedWorkspace, mount.PVClaimName, claimSharedDirNames, emptyAgentDirName)
+				ownDirName = emptyAgentDirName
 				nfsAgentDirName = emptyAgentDirName
 				nfsAgentDirEmpty = true
 			} else if agentDirName != "" && mount.PVClaimName != "" {
-				nfsWorkspacePreCreated, err = ensureNFSAgentWorkspaceLeaf(m.Runtime.Name(), projectID, resolvedWorkspace, mount.PVClaimName, claimSharedDirNames, agentDirName)
+				nfsWorkspacePreCreated, ownDirCreated, err = ensureNFSAgentWorkspaceLeafClaim(m.Runtime.Name(), projectID, resolvedWorkspace, mount.PVClaimName, claimSharedDirNames, agentDirName)
+				ownDirName = agentDirName
 				nfsAgentDirName = agentDirName
 				nfsAgentBranch = agentBranch
 			} else {
@@ -2150,8 +2140,12 @@ authDone:
 			if err != nil {
 				return nil, err
 			}
-			if ownDirPath != "" {
-				if err := markMoveExportAgentDir(agentDir, ownDirPath, ownDirExisted); err != nil {
+			if ownDirCreated {
+				ownDirPath, perr := nfsOwnAgentDirPath(resolvedWorkspace, ownDirName)
+				if perr != nil {
+					return nil, perr
+				}
+				if err := markMoveExportAgentDir(agentDir, ownDirPath); err != nil {
 					return nil, err
 				}
 			}

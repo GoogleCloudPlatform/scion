@@ -262,29 +262,37 @@ func TestCreateAgentProvisionOnly_FreshAgentDir_ReincarnationID(t *testing.T) {
 // A forced move's rollback delete, through the real delete handler and
 // manager, removes the agent's directory only when it carries that move's
 // marker. An unmarked directory or another move's marker is refused with
-// 409 move_marker_mismatch, a path-free body, and nothing removed; an agent
+// 409 move_marker_mismatch, a path-free body, and nothing removed: not the
+// files, and not the agent's runtime entry (seeded in those rows). An agent
 // with no files is a plain no-op (404). A sibling agent is never touched.
 func TestDeleteAgent_ForcedMoveRollbackNeedsMoveMarker(t *testing.T) {
 	const moveID = "reincarnation-1"
 	for _, tc := range []struct {
-		name     string
-		marker   string // "" = no marker
-		noFiles  bool
-		wantCode int
-		removed  bool
+		name      string
+		marker    string // "" = no marker
+		noFiles   bool
+		container bool // seed a runtime entry for the agent
+		wantCode  int
+		removed   bool
 	}{
 		{name: "marked by this move", marker: moveID, wantCode: http.StatusNoContent, removed: true},
-		{name: "unmarked", wantCode: http.StatusConflict},
-		{name: "marked by another move", marker: "reincarnation-0", wantCode: http.StatusConflict},
+		{name: "unmarked", wantCode: http.StatusConflict, container: true},
+		{name: "marked by another move", marker: "reincarnation-0", wantCode: http.StatusConflict, container: true},
 		{name: "no files", noFiles: true, wantCode: http.StatusNotFound},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var entries []api.AgentInfo
 			var deleted []string
 			srv, home := newProvisionDirsServer(t, &entries, &deleted)
-			var agentDir string
+			var agentDir, extDir string
 			if !tc.noFiles {
-				_, agentDir = makeHubNativeMarkerProject(t, home, "proj-b", scopeProjB, "dev")
+				extDir, agentDir = makeHubNativeMarkerProject(t, home, "proj-b", scopeProjB, "dev")
+			}
+			if tc.container {
+				entries = []api.AgentInfo{{
+					Name: "dev", ContainerID: "cid-b", ProjectID: scopeProjB, ProjectPath: extDir,
+					Labels: map[string]string{"scion.agent": "true", "scion.name": "dev", "scion.project_id": scopeProjB},
+				}}
 			}
 			_, siblingDir := makeHubNativeMarkerProject(t, home, "proj-b", scopeProjB, "sib")
 			if tc.marker != "" {
@@ -298,6 +306,9 @@ func TestDeleteAgent_ForcedMoveRollbackNeedsMoveMarker(t *testing.T) {
 				t.Fatalf("expected %d, got %d: %s", tc.wantCode, rec.Code, rec.Body.String())
 			}
 			if tc.wantCode == http.StatusConflict {
+				if len(deleted) != 0 {
+					t.Fatalf("runtime entries deleted on a refused rollback delete: %v", deleted)
+				}
 				if !strings.Contains(rec.Body.String(), `"code":"`+api.BrokerErrCodeMoveMarkerMismatch+`"`) {
 					t.Fatalf("body = %s, want code %s", rec.Body.String(), api.BrokerErrCodeMoveMarkerMismatch)
 				}

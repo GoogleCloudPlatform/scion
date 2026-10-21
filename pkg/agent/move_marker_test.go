@@ -21,6 +21,9 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -202,5 +205,76 @@ func TestStart_MarksMoveExportAgentDir(t *testing.T) {
 		fx, export := run(t, false, false)
 		assert.NoFileExists(t, filepath.Join(export, MoveMarkerFile))
 		assert.NoFileExists(t, filepath.Join(fx.projectPath, "agents", "test-agent", MoveMarkerFile))
+	})
+}
+
+// A failed marker write fails the forced move's provision, and the
+// provision removes only the agent directory it claimed: a sibling agent's
+// directory and the project are untouched.
+func TestProvision_MoveMarkerWriteFailureRemovesOnlyClaimedDir(t *testing.T) {
+	fx := newMoveAbsentFixture(t, "docker", false)
+	sibling := filepath.Join(fx.projectPath, "agents", "other-agent")
+	require.NoError(t, os.MkdirAll(sibling, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(sibling, "keep.txt"), []byte("keep"), 0o644))
+	opts := moveAbsentOpts(fx.projectPath, "test-agent", false)
+	opts.MoveReincarnationID = "bad\nid" // writeMoveMarker refuses it
+	_, err := fx.mgr.Provision(context.Background(), opts)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "move marker")
+	assert.NoDirExists(t, filepath.Join(fx.projectPath, "agents", "test-agent"), "the claimed directory is removed")
+	assert.FileExists(t, filepath.Join(sibling, "keep.txt"), "a sibling agent's directory is untouched")
+}
+
+// The guarded delete also refuses when a worktree the same delete would
+// remove exists, though every agent directory is marked by this move: a
+// forced move never creates a worktree. Nothing is changed.
+func TestCheckMoveMarkers_RefusesWorktreesTheMoveNeverCreates(t *testing.T) {
+	t.Run("NFS worktree on the export", func(t *testing.T) {
+		fx := newMoveAbsentFixture(t, "kubernetes", true)
+		local := filepath.Join(fx.projectPath, "agents", "test-agent")
+		require.NoError(t, os.MkdirAll(local, 0o755))
+		require.NoError(t, writeMoveMarker(local, testMoveID))
+		export := nfsTestAgentDir(fx.mountRoot, "test-agent")
+		require.NoError(t, os.MkdirAll(export, 0o755))
+		require.NoError(t, writeMoveMarker(export, testMoveID))
+		wt := filepath.Join(fx.mountRoot, "share-1", nfsWorktreeSubPath(filepath.Join("projects", testNFSWorkspaceProjectID, "workspace"), "test-agent"))
+		require.NoError(t, os.MkdirAll(wt, 0o755))
+		paths, err := fx.mgr.CheckMoveMarkers(context.Background(), fx.projectPath, testNFSWorkspaceProjectID, "test-agent", testMoveID)
+		require.True(t, errors.Is(err, ErrMoveMarkerMismatch), "want ErrMoveMarkerMismatch, got %v", err)
+		assert.Contains(t, err.Error(), "a worktree exists")
+		assert.Contains(t, paths, wt)
+		assert.DirExists(t, wt)
+	})
+	t.Run("worktree under the project's shared base", func(t *testing.T) {
+		fx := newMoveAbsentFixture(t, "docker", false)
+		local := filepath.Join(fx.projectPath, "agents", "test-agent")
+		require.NoError(t, os.MkdirAll(local, 0o755))
+		require.NoError(t, writeMoveMarker(local, testMoveID))
+		base := filepath.Join(filepath.Dir(fx.projectPath), "workspace")
+		require.NoError(t, os.MkdirAll(filepath.Join(base, ".git"), 0o755))
+		wt := filepath.Join(base, "worktrees", "test-agent")
+		require.NoError(t, os.MkdirAll(wt, 0o755))
+		_, err := fx.mgr.CheckMoveMarkers(context.Background(), fx.projectPath, testNFSWorkspaceProjectID, "test-agent", testMoveID)
+		require.True(t, errors.Is(err, ErrMoveMarkerMismatch), "want ErrMoveMarkerMismatch, got %v", err)
+		assert.Contains(t, err.Error(), "a worktree exists")
+		assert.DirExists(t, wt)
+	})
+	t.Run("sharer registration", func(t *testing.T) {
+		root := t.TempDir()
+		t.Chdir(root)
+		t.Setenv("HOME", root)
+		proj := filepath.Join(root, "proj")
+		mustMkdir(t, proj)
+		setupGitRepo(t, proj)
+		scion := filepath.Join(proj, config.DotScion)
+		local := filepath.Join(scion, "agents", "test-agent")
+		mustMkdir(t, local)
+		require.NoError(t, writeMoveMarker(local, testMoveID))
+		require.NoError(t, provision.RegisterSharer(proj, scion, "b1", "", "test-agent"))
+		mgr := NewManager(&runtime.MockRuntime{NameFunc: func() string { return "docker" }}).(*AgentManager)
+		_, err := mgr.CheckMoveMarkers(context.Background(), scion, testNFSWorkspaceProjectID, "test-agent", testMoveID)
+		require.True(t, errors.Is(err, ErrMoveMarkerMismatch), "want ErrMoveMarkerMismatch, got %v", err)
+		assert.Contains(t, err.Error(), "registered on a shared worktree")
+		assert.DirExists(t, local)
 	})
 }
