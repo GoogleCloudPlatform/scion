@@ -424,6 +424,15 @@ func TestConfiguredRuntimeNames_SectionShape(t *testing.T) {
 	writePlacementGlobalSettings(t, "schema_version: \"1\"\nruntimes: 5\n")
 	_, ok = ConfiguredRuntimeNames()
 	assert.False(t, ok, "a scalar runtimes section fails closed")
+
+	writePlacementGlobalSettings(t, "schema_version: \"1\"\nruntimes: {}\n")
+	names, ok = ConfiguredRuntimeNames()
+	assert.True(t, ok, "an empty runtimes map is not a decoding problem")
+	assert.Empty(t, names)
+
+	writePlacementGlobalSettings(t, "schema_version: \"1\"\nruntimes: [a]\n")
+	_, ok = ConfiguredRuntimeNames()
+	assert.False(t, ok, "a list runtimes section fails closed")
 }
 
 // GlobalSettingsFileUnstatable: only a stat error other than not-exist.

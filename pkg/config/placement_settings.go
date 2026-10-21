@@ -299,11 +299,12 @@ func GlobalSettingsMentionPlacementKeys() bool {
 //     (the file over the defaults) has them too. A missing file contributes
 //     no names.
 //
-// ok is false when the global settings file exists but cannot be stat'd,
-// read or decoded, when its top-level runtimes section is neither a map nor
-// null, or when the global settings load fails; callers then treat every
-// entry as configured (fail closed). It does not write any file beyond what every settings load does
-// (the loader's legacy hub key migration).
+// ok is false when the global directory cannot be resolved, when the
+// global settings file exists but cannot be stat'd, read or decoded, when
+// its top-level runtimes section is neither a map nor null, or when the
+// global settings load fails; callers then treat every entry as configured
+// (fail closed). It does not write any file beyond what every settings load
+// does (the loader's legacy hub key migration).
 func ConfiguredRuntimeNames() (names map[string]bool, ok bool) {
 	names = map[string]bool{}
 	if o := GetGlobalSettingsOverlay(); o != nil {
