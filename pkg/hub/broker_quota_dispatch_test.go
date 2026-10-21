@@ -244,13 +244,19 @@ func TestStartDispatch_FailedDispatchRestoresPhaseAndReleases(t *testing.T) {
 
 		got, err := s.GetAgent(ctx, agentID)
 		require.NoError(t, err)
-		want := before.Phase
 		if site.name == "restart" {
-			// The stop leg succeeded: a restart records the agent stopped,
-			// as before ptone/scion#2014.
-			want = string(state.PhaseStopped)
+			// The stop leg succeeded and the start leg's failure is an
+			// unknown outcome ("simulated broker start failure"): the
+			// restart keeps the reservation its hold created and rests the
+			// agent at stopped until the start-claim reaper settles its
+			// claim (ptone/scion#5143, erratum E-33c-1).
+			assert.Equal(t, string(state.PhaseStopped), got.Phase, "an ambiguous restart rests at stopped")
+			assert.True(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, agentID), "an ambiguous restart keeps the reservation its hold created")
+			assert.True(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, other.ID), "another agent's reservation is untouched")
+			assert.EqualValues(t, 2, brokerReservationCount(t, s, broker.ID))
+			return
 		}
-		assert.Equal(t, want, got.Phase, "phase restored")
+		assert.Equal(t, before.Phase, got.Phase, "phase restored")
 		assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, agentID), "the start's reservation is released")
 		assert.True(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, other.ID), "another agent's reservation is untouched")
 		assert.EqualValues(t, 1, brokerReservationCount(t, s, broker.ID))
@@ -1133,10 +1139,11 @@ func TestRestart_DyingContainerStoppedReportKeepsReservation(t *testing.T) {
 }
 
 // ptone/scion#2010, ptone/scion#2014: when the restart's start leg then
-// fails, the agent's reservation is released exactly once, whichever
-// failure branch runs (stop leg succeeded: release and record stopped; both
-// legs failed: rollback; a delete claimed the row: rollback, answered
-// delete_in_progress), and another agent's slot is untouched.
+// fails definitely, the agent's reservation is released exactly once,
+// whichever failure branch runs (stop leg succeeded: release and record
+// stopped; both legs failed: rollback; a delete claimed the row: rollback,
+// answered delete_in_progress); an ambiguous start leg keeps it (below).
+// Another agent's slot is untouched.
 //
 // stop-ok's start leg fails before it is sent (errStartRequestNotSent, a
 // confirmed not-acted-on error: startOutcomeOf returns startReleased). The
@@ -1144,18 +1151,17 @@ func TestRestart_DyingContainerStoppedReportKeepsReservation(t *testing.T) {
 // branch, or by the claim's idle release when no run is recorded).
 //
 // An ambiguous start leg (an unclassified error, startUnconfirmed) may have
-// reached the runtime; the restart claim is kept, unconfirmed.
+// reached the runtime: the restart claim is kept, unconfirmed, and so is the
+// slot, until the start-claim reaper settles the claim (design r7 §4.3's
+// "start times out or is ambiguous" row; ptone/scion#5143, erratum
+// E-33c-1, which superseded the earlier exception E-43-1). The dying
+// container's stopped report does not release the slot under the restart
+// claim (P3.3-b).
 //   - stop-ok-ambiguous (the agent has a run ID, as in production): the
-//     failure branch records the agent stopped and releases its slot at
-//     once. That is pre-existing main behaviour and an exception to design
-//     r7 §4.3's "start times out or is ambiguous" row (keep the slot until
-//     the reaper settles the claim) until the follow-up.
-//   - stop-ok-ambiguous-no-runid: with no run recorded the failure branch
-//     records nothing and releases nothing (restartStoppedRecordable), and
-//     the dying container's stopped report no longer releases the slot
-//     under the restart claim (P3.3-b), so the slot is held until the
-//     start-claim reaper settles the claim
-//     (TestAbandonedRestartClaim_ReaperReleases_ThenSlotFrees).
+//     failure branch records nothing stopped and releases nothing.
+//   - stop-ok-ambiguous-no-runid: the same, with no run recorded
+//     (TestAbandonedRestartClaim_ReaperReleases_ThenSlotFrees covers the
+//     reaper's release).
 func TestRestart_DyingContainerStoppedReportFailedStartReleasesOnce(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
@@ -1214,8 +1220,8 @@ func TestRestart_DyingContainerStoppedReportFailedStartReleasesOnce(t *testing.T
 			if tc.ambiguous {
 				assert.Equal(t, store.StartClaimUnconfirmed, got.StartClaimState, "the ambiguous start keeps its claim, unconfirmed")
 			}
-			if tc.ambiguous && !tc.runID {
-				assert.True(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, a.ID), "no run recorded: held until the reaper settles the claim")
+			if tc.ambiguous {
+				assert.True(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, a.ID), "an ambiguous restart keeps the reservation until the reaper settles the claim")
 				assert.EqualValues(t, 2, brokerReservationCount(t, s, broker.ID))
 				return
 			}
