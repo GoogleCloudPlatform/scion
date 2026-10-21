@@ -111,8 +111,8 @@ type CredentialIdentity struct {
 	// JTI is the jti claim, if it is short and plain (see safeJTI).
 	JTI string `json:"jti,omitempty"`
 	// IssuedAt and Expiry are the iat and exp claims; zero if absent.
-	IssuedAt time.Time `json:"iat,omitempty"`
-	Expiry   time.Time `json:"exp,omitempty"`
+	IssuedAt time.Time `json:"iat,omitzero"`
+	Expiry   time.Time `json:"exp,omitzero"`
 	// FP is the first 8 hex digits of the value's SHA-256.
 	FP string `json:"fp,omitempty"`
 }
@@ -135,7 +135,7 @@ type OutcomeRecord struct {
 type CredentialState struct {
 	Version       int                `json:"version"`
 	Instance      string             `json:"instance,omitempty"`
-	InitStartedAt time.Time          `json:"init_started_at,omitempty"`
+	InitStartedAt time.Time          `json:"init_started_at,omitzero"`
 	UpdatedAt     time.Time          `json:"updated_at"`
 	Seq           uint64             `json:"seq"`
 	Credential    CredentialIdentity `json:"credential"`
@@ -499,7 +499,7 @@ func PublishCredentialState(ctx context.Context, c *Client) bool {
 	changed := c.credentialStateChanged()
 	w := &credentialStateWriter{client: c}
 	if !w.writeLatest() {
-		log.Error("Could not publish the credential state for sciontool doctor; it reports the state as unavailable")
+		log.Error("Could not publish the credential state; sciontool doctor will report it as unavailable")
 	}
 	go func() {
 		for {

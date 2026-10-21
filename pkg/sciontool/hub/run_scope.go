@@ -85,13 +85,9 @@ func (g *writeGate) allow() error {
 	return nil
 }
 
-// observe records the status of a sent write.
-func (g *writeGate) observe(status int) {
-	g.observeFrom(status, "", RefusedByNone)
-}
-
-// observeFrom is observe for a write that presented the credential with
-// short fingerprint fp and, when refused, was refused by refusedBy.
+// observeFrom records the status of a sent write that presented the
+// credential with short fingerprint fp and, when refused, was refused by
+// refusedBy.
 func (g *writeGate) observeFrom(status int, fp, refusedBy string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()

@@ -149,13 +149,13 @@ func TestEvaluateInitCredential_VerdictTable(t *testing.T) {
 		{name: "13 check refused, lookup hub-refused", cur: idC1, check: rec(hub.OutcomeRefused, 0, idC1, hub.RefusedByUnknown), fileOK: true, file: idC1, lookup: lookupHubRefused,
 			fails: 1, outcome: initOutcomeHint, want: []string{failRefused + " by the hub or proxy"}},
 		{name: "14a check refused superseded", cur: idC1, check: rec(hub.OutcomeRefused, 0, idC1, hub.RefusedByUnknown), fileOK: true, file: idC1, lookup: lookupAccepted,
-			want: []string{warnSuperset, okNoRefusal}, notWant: []string{"[FAIL]"}},
+			want: []string{warnSuperset, okNoRefusal, "Init start-up check: refused by the hub or proxy at"}, notWant: []string{"[FAIL]", "refused (0)"}},
 		{name: "14b check refused, mismatch", cur: idC1, check: rec(hub.OutcomeRefused, 0, idC1, hub.RefusedByUnknown), fileOK: true, file: idC2, age: age30, lookup: lookupAccepted,
-			fails: 1, outcome: initOutcomeNone, want: []string{failRefused}},
+			fails: 1, outcome: initOutcomeQuiet, want: []string{failRefused}},
 		{name: "15 check refused, lookup unchecked", cur: idC1, check: rec(hub.OutcomeRefused, 0, idC1, hub.RefusedByUnknown), fileOK: true, file: idC1, lookup: lookupUnchecked,
-			fails: 1, outcome: initOutcomeNone, want: []string{failRefused}},
+			fails: 1, outcome: initOutcomeQuiet, want: []string{failRefused}},
 		{name: "16 check refused, lookup not run", cur: idC1, check: rec(hub.OutcomeRefused, 0, idC1, hub.RefusedByUnknown), fileOK: true, file: idC1, lookup: lookupNotRun,
-			fails: 1, outcome: initOutcomeNone, want: []string{failRefused}},
+			fails: 1, outcome: initOutcomeQuiet, want: []string{failRefused}},
 		{name: "17 paused current", cur: idC1, hb: rec(hub.OutcomePaused, 0, idC1, hub.RefusedByHub), fileOK: true, file: idC1, lookup: lookupAccepted,
 			fails: 1, outcome: initOutcomeHint, want: []string{failRefused, "paused after the credential was refused"}},
 		{name: "17b paused previous", cur: idC1, hb: rec(hub.OutcomePaused, 0, idPrev, hub.RefusedByHub), fileOK: true, file: idC1, lookup: lookupAccepted,
@@ -164,6 +164,8 @@ func TestEvaluateInitCredential_VerdictTable(t *testing.T) {
 			want: []string{okNoRefusal}, notWant: []string{"[FAIL]"}},
 		{name: "19 refresh refused", cur: idC1, refresh: rec(hub.OutcomeRefused, 401, idC1, hub.RefusedByHub), fileOK: true, file: idC1, lookup: lookupAccepted,
 			fails: 1, outcome: initOutcomeHint, want: []string{failRefused}},
+		{name: "19c refreshed shown without previous", cur: idC1, refresh: rec(hub.OutcomeRefreshed, 200, idPrev, ""), fileOK: true, file: idC1, lookup: lookupAccepted,
+			want: []string{"Init last refresh: new credential received at", okNoRefusal}, notWant: []string{"previous credential"}},
 		{name: "19b refresh failed", cur: idC1, refresh: rec(hub.OutcomeFailed, 502, idC1, ""), fileOK: true, file: idC1, lookup: lookupAccepted,
 			want: []string{"[WARN] Init last refresh: failed (status 502)", okNoRefusal}},
 		{name: "20a expired", cur: expired, fileOK: true, file: expired, lookup: lookupAccepted,
@@ -238,10 +240,11 @@ func TestInitRemediationAndGCPHint_FollowTheOutcome(t *testing.T) {
 		{"hint match", initAuthResult{outcome: initOutcomeHint, initID: "jti=c1", fileID: "jti=c1", match: true}, true, "is expired or refused"},
 		{"quiet window", initAuthResult{outcome: initOutcomeQuiet, window: true}, false, "See Init Process Credential above"},
 		{"quiet proxy", initAuthResult{outcome: initOutcomeQuiet, proxy: true}, false, "See Init Process Credential above"},
+		{"quiet unclear", initAuthResult{outcome: initOutcomeQuiet, unclear: true}, false, "See Init Process Credential above"},
 		{"none", initAuthResult{}, true, "scion reset-auth <agent-name>"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			out := captureStdout(t, func() { printGCPInitHint(tc.r) })
+			out := captureStdout(t, func() { printGCPInitHint(tc.r); printInitRemediation(tc.r) })
 			if !strings.Contains(out, tc.want) {
 				t.Errorf("GCP hint missing %q:\n%s", tc.want, out)
 			}
@@ -355,6 +358,9 @@ type doctorScenario struct {
 	fileTok  string
 	fileAge  time.Duration
 	metadata bool
+	// checkOnly: init records its start-up check of initTok instead of a
+	// heartbeat.
+	checkOnly bool
 }
 
 func (s doctorScenario) setup(t *testing.T) {
@@ -384,7 +390,11 @@ func (s doctorScenario) setup(t *testing.T) {
 		initURL = "http://127.0.0.1:1"
 	}
 	c := hub.NewClientWithConfig(initURL, s.initTok, "agent-1")
-	_ = c.Heartbeat(context.Background())
+	if s.checkOnly {
+		_ = c.CheckCurrentCredentialAccepted(context.Background(), s.initTok)
+	} else {
+		_ = c.Heartbeat(context.Background())
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	if !hub.PublishCredentialState(ctx, c) {
@@ -489,6 +499,52 @@ func TestRunDoctor_ProxyRefusalNeverSuggestsResetAuth(t *testing.T) {
 	}
 	if strings.Contains(out, "reset-auth") {
 		t.Errorf("reset-auth suggested for a proxy refusal:\n%s", out)
+	}
+}
+
+// Rows 14b-16 with a GCP 502: init's start-up check was refused, by the
+// hub or a proxy, and nothing shows it was the hub. No reset-auth text
+// appears anywhere.
+func TestRunDoctor_UnclearRefusalNeverSuggestsResetAuth(t *testing.T) {
+	c1 := agentJWT(t, "jti-c1", time.Now().Add(time.Hour))
+	c2 := agentJWT(t, "jti-c2", time.Now().Add(2*time.Hour))
+	srv := httptest.NewServer(&doctorHub{accept: map[string]bool{c2: true}})
+	defer srv.Close()
+	doctorScenario{hubURL: srv.URL, initTok: c1, fileTok: c2, fileAge: 30 * time.Second, metadata: true, checkOnly: true}.setup(t)
+
+	out, rc := runDoctorCaptured(t)
+	if rc == 0 {
+		t.Errorf("expected a failure:\n%s", out)
+	}
+	for _, want := range []string{failRefused + " by the hub or proxy", "not clearly by the hub", "See Init Process Credential above"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "reset-auth") {
+		t.Errorf("reset-auth suggested for a refusal not known to be by the hub:\n%s", out)
+	}
+}
+
+// The init block compares the token file as read for the Authentication
+// section, not a second read.
+func TestCheckInitCredential_UsesTheSingleRead(t *testing.T) {
+	c1 := agentJWT(t, "jti-c1", time.Now().Add(time.Hour))
+	c2 := agentJWT(t, "jti-c2", time.Now().Add(2*time.Hour))
+	srv := httptest.NewServer(&doctorHub{accept: map[string]bool{c1: true}})
+	defer srv.Close()
+	doctorScenario{hubURL: srv.URL, initTok: c1, fileTok: c1, fileAge: time.Hour}.setup(t)
+	// The file on disk holds c1; the read doctor made holds c2.
+	diag := doctorDiag{lookup: lookupAccepted, file: doctorTokenFile{read: true, ok: true, token: c2, modTime: time.Now().Add(-time.Hour)}}
+	var res initAuthResult
+	out := captureStdout(t, func() { res = checkInitCredential(&diag) })
+	if res.fileID != "jti=jti-c2" || !strings.Contains(out, "file: jti=jti-c2") {
+		t.Errorf("init block did not use doctor's read (fileID %q):\n%s", res.fileID, out)
+	}
+	diag.file = doctorTokenFile{read: true}
+	out = captureStdout(t, func() { res = checkInitCredential(&diag) })
+	if !strings.Contains(out, warnMissing) {
+		t.Errorf("a missing file in doctor's read must not be re-read:\n%s", out)
 	}
 }
 

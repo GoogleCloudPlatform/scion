@@ -75,8 +75,9 @@ const (
 	// initOutcomeHint: init's credential is expired or refused by the hub;
 	// show how to reload it.
 	initOutcomeHint
-	// initOutcomeQuiet: a reload is in progress, or a proxy refused init's
-	// requests; point at the init lines and do not suggest reset-auth.
+	// initOutcomeQuiet: a reload is in progress, a proxy refused init's
+	// requests, or a refusal's source is not known; point at the init
+	// lines and do not suggest reset-auth.
 	initOutcomeQuiet
 )
 
@@ -116,6 +117,9 @@ type initAuthResult struct {
 	// window is true when the outcome is quiet because init is switching
 	// to a newly written credential file.
 	window bool
+	// unclear is true when the outcome is quiet because init's credential
+	// was refused but not known to be by the hub.
+	unclear bool
 	// initID and fileID name the two credentials for hints.
 	initID, fileID string
 	match          bool
@@ -160,6 +164,9 @@ func describeRecord(r *hub.OutcomeRecord) string {
 	case hub.OutcomeSent:
 		return fmt.Sprintf("sent (hub answered %d)", r.Status)
 	case hub.OutcomeRefused:
+		if r.Status == 0 {
+			return "refused" + by
+		}
 		return fmt.Sprintf("refused (%d)%s", r.Status, by)
 	case hub.OutcomePaused:
 		return "paused after the credential was refused" + by
@@ -244,6 +251,10 @@ func evaluateInitCredential(in initAuthInput) initAuthResult {
 			if rec.label != "start-up check" {
 				add("[INFO] Init %s: none yet", rec.label)
 			}
+		case rec.r.Outcome == hub.OutcomeRefreshed:
+			// Recorded for the credential presented, which the refresh
+			// replaced.
+			add("[INFO] Init %s: %s at %s", rec.label, describeRecord(rec.r), fmtWhen(rec.r.At))
 		case !matched(rec.r):
 			add("[INFO] Init %s: %s at %s (for a previous credential)", rec.label, describeRecord(rec.r), fmtWhen(rec.r.At))
 		case rec.r.Outcome == hub.OutcomeFailed || rec.r.Outcome == hub.OutcomeUnchecked:
@@ -332,6 +343,9 @@ func evaluateInitCredential(in initAuthInput) initAuthResult {
 			res.outcome, res.proxy = initOutcomeQuiet, true
 		case hubSeen || (unknownSeen && in.lookup == lookupHubRefused):
 			res.outcome = initOutcomeHint
+		default:
+			// Refused, but not known to be by the hub: no reload advice.
+			res.outcome, res.unclear = initOutcomeQuiet, true
 		}
 	case res.match && in.lookup == lookupHubRefused:
 		// Counted by the agent lookup line in the Authentication section.
@@ -344,15 +358,18 @@ func evaluateInitCredential(in initAuthInput) initAuthResult {
 
 // checkInitCredential reads the published state and the credential file,
 // prints the init credential lines and returns the result.
-func checkInitCredential(lookup lookupVerdict) initAuthResult {
+// The credential file is the one read for the Authentication section
+// (diag.file), so the lookup verdict and the file compared are always the
+// same value.
+func checkInitCredential(diag *doctorDiag) initAuthResult {
 	fmt.Println("\n--- Init Process Credential ---")
-	in := initAuthInput{lookup: lookup, now: time.Now()}
+	in := initAuthInput{lookup: diag.lookup, now: time.Now()}
 	in.state, in.stateStatus, in.stateReason = hub.ReadCredentialState()
-	if token, mod, ok := hub.ReadTokenFileWithModTime(); ok {
+	if diag.file.ok {
 		in.fileOK = true
-		in.file = hub.CredentialIdentityOf(token)
-		in.fileAge = in.now.Sub(mod)
-	} else if lookup != lookupNotRun {
+		in.file = hub.CredentialIdentityOf(diag.file.token)
+		in.fileAge = in.now.Sub(diag.file.modTime)
+	} else {
 		in.lookup = lookupNotRun
 	}
 	res := evaluateInitCredential(in)
@@ -378,6 +395,9 @@ func printInitRemediation(r initAuthResult) bool {
 		printInitReloadHint()
 	case r.outcome == initOutcomeQuiet && r.window:
 		fmt.Println("[!] Init is switching to the new credential file. Run doctor again in about 20s.")
+	case r.outcome == initOutcomeQuiet && r.unclear:
+		fmt.Println("[!] Init's credential was refused (401/403), but not clearly by the hub. See Init Process Credential above, " +
+			"and run doctor again once the hub is reachable.")
 	case r.outcome == initOutcomeQuiet && r.proxy:
 		fmt.Println("[!] Init's requests are refused by the platform proxy (IAP / Cloud Run invoker), so its credential does not reach the hub.")
 		fmt.Println("[!] Check the transport credential above, that SCION_TRANSPORT_MODE and the audience match the proxy, " +

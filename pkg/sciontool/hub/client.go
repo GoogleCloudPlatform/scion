@@ -297,7 +297,7 @@ func NewClientWithConfig(hubURL, token, agentID string) *Client {
 			Timeout: DefaultTimeout,
 		},
 	}
-	c.recordCredential(token)
+	c.recordCredential(c.token)
 	return c
 }
 

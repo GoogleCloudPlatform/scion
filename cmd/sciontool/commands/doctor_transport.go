@@ -57,6 +57,18 @@ type doctorDiag struct {
 	lookup lookupVerdict
 	// init is the outcome of the init process credential check.
 	init initAuthResult
+	// file is the token file as read once by runDoctor (read is false when
+	// a section runs on its own, as in tests).
+	file doctorTokenFile
+}
+
+// doctorTokenFile is one read of the token file. It holds the value in
+// memory only; doctor never prints it.
+type doctorTokenFile struct {
+	read    bool
+	ok      bool
+	token   string
+	modTime time.Time
 }
 
 // transportFailed reports whether the transport section found a failure.

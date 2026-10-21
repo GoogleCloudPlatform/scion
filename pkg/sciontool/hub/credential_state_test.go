@@ -350,8 +350,8 @@ func assertKeys(t *testing.T, m map[string]json.RawMessage, allowed ...string) {
 		}
 	}
 	sort.Strings(keys)
-	if len(keys) == 0 {
-		t.Error("no keys")
+	if len(keys) == 0 || t.Failed() {
+		t.Errorf("keys: %v", keys)
 	}
 }
 

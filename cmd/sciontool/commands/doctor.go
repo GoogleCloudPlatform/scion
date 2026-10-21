@@ -85,6 +85,10 @@ func runDoctor() int {
 	}
 
 	// --- Authentication ---
+	// The token file is read once here; the Authentication and Init
+	// Process Credential sections both use this read.
+	diag.file.token, diag.file.modTime, diag.file.ok = hub.ReadTokenFileWithModTime()
+	diag.file.read = true
 	tokenValid := false
 	if hubURL != "" && hubReachable {
 		tokenValid = checkAuthentication(hubURL, &failures, transportSrc, &diag)
@@ -95,7 +99,7 @@ func runDoctor() int {
 	// reachable: it reports what sciontool init itself recorded.
 	var initRes initAuthResult
 	if agentIDForInitCheck() != "" {
-		initRes = checkInitCredential(diag.lookup)
+		initRes = checkInitCredential(&diag)
 		failures += initRes.failures
 	}
 	diag.init = initRes
@@ -383,7 +387,10 @@ func checkAuthentication(hubURL string, failures *int, transportSrc transportaut
 	fmt.Println("\n--- Authentication ---")
 
 	agentID := os.Getenv("SCION_AGENT_ID")
-	token := hub.ReadTokenFile()
+	token := diag.file.token
+	if !diag.file.read {
+		token = hub.ReadTokenFile()
+	}
 
 	if token == "" || agentID == "" {
 		diag.lookup = lookupNotRun
