@@ -129,10 +129,11 @@ const (
 // inconsistent with its own remote, which SharingMode() and its callers would
 // then evaluate against mismatched state.
 //
-// Finally, do not try to "complete" this list from hubclient.ProjectSettings.
-// That struct also carries Bucket, Runtimes, Harnesses and Profiles, which the
-// settings endpoint refuses on PUT (projectSettingsNotStoredFields) and never
-// returns on GET. They are not annotation-backed, so their absence here is
+// Finally, do not try to "complete" this list from the settings endpoint's
+// keys. It also knows bucket, runtimes, harnesses and profiles, which it
+// refuses on PUT (projectSettingsNotStoredFields) and never returns on GET
+// (hubclient.ProjectSettings no longer has fields for them,
+// ptone/scion#5360). They are not annotation-backed, so their absence here is
 // correct and loses nothing on clone.
 var projectSettingKeys = []string{
 	projectSettingDefaultTemplate,
