@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -900,6 +901,11 @@ func TestMessageBrokerProxy_UserMessageLinksAttachments(t *testing.T) {
 	proxy.messageLog, _ = newCapturingMessageLogger()
 	published, unsubscribe := events.Subscribe("user." + tid("user-bob") + ".message")
 	defer unsubscribe()
+	// The member fan-out gets the same refs as the live event.
+	var fanouts [][]AttachmentRef
+	proxy.memberFanout = func(_ context.Context, _ *store.Message, attachments []AttachmentRef, _ []artifacts.MessageRef) {
+		fanouts = append(fanouts, attachments)
+	}
 
 	msg := messages.NewInstruction("agent:sending-agent", "user:bob", "here is the screenshot")
 	msg.SenderID = tid("agent-sending")
@@ -946,6 +952,9 @@ func TestMessageBrokerProxy_UserMessageLinksAttachments(t *testing.T) {
 	if payload.ID != result.Items[0].ID || !reflect.DeepEqual(payload.Attachments, want) {
 		t.Fatalf("event for message %s carries attachments %+v, want %+v on %s",
 			payload.ID, payload.Attachments, want, result.Items[0].ID)
+	}
+	if len(fanouts) != 1 || !reflect.DeepEqual(fanouts[0], want) {
+		t.Fatalf("member fan-out got attachments %+v, want one call with %+v", fanouts, want)
 	}
 }
 

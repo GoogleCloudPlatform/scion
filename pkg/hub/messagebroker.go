@@ -834,7 +834,7 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 	// readers. The live event below carries exactly the linked refs, the
 	// files history lists (ptone/scion#5504). msg is shared with the bus's
 	// other subscribers, so its metadata, transport key included, is left
-	// as it is: nothing below reads or forwards it.
+	// as it is: nothing below reads the attachments key.
 	linkedRefs := linkSenderOwnedAttachmentRefs(ctx, p.webChatStore, storeMsg.ID, projectID, msg.SenderID, parseAttachmentRefs(msg.Metadata), p.log)
 
 	// Artifact references are recorded only when the hub's admission step
