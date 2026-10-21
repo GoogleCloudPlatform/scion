@@ -93,7 +93,8 @@ func drainTestAwaitListening(t *testing.T, addr, what string) {
 // (closeIdleConns). It does not depend on the handler, which, once the
 // server is shutting down, answers without waiting for a request body.
 // The hold lasts well under 5s: the order checks end within about a second
-// of the accept.
+// of the accept. A hold lost before the 300 ms wait check fails the test,
+// never passes it; one lost after that check is harmless.
 //
 // A connection still in the listen backlog when Shutdown closes the
 // listener is never tracked, so the hold must be accepted before the
