@@ -36,10 +36,10 @@ func assertNoContextFiles(t *testing.T) {
 	}
 }
 
-// The read-only config commands resolve the invocation target without the
-// one-time import of the global hub.endpoint, so they never create
+// The read-only config commands apply the one-time import of the global
+// hub.endpoint in memory only: they see the imported hub, and never create
 // context.yaml or its lock (ptone/scion#5483). A command that writes
-// settings still runs the import.
+// settings still saves the import.
 func TestReadOnlyConfigCommands_DoNotWriteContext(t *testing.T) {
 	paths := make([]string, 0, len(contextReadOnlyCommands))
 	for path := range contextReadOnlyCommands {
@@ -57,6 +57,10 @@ func TestReadOnlyConfigCommands_DoNotWriteContext(t *testing.T) {
 
 			require.NoError(t, resolveInvocationTarget(c, ModeHuman))
 			assertNoContextFiles(t)
+			// The import applies in memory: the command sees the hub the
+			// next saving command imports.
+			assert.Equal(t, "https://global.example.com", hubEndpoint)
+			assert.Equal(t, targetSourceContext, hubSource)
 		})
 	}
 

@@ -198,9 +198,9 @@ var contextSkippedCommands = map[string]bool{
 }
 
 // contextReadOnlyCommands are the commands, by command path, that only read
-// settings. They read the hub list as it is, without the one-time imports
-// of hub settings, so a read never creates or rewrites context.yaml or its
-// lock (ptone/scion#5483). The context still applies to them as usual.
+// settings. The one-time imports of hub settings apply to them in memory
+// only, so a read never creates or rewrites context.yaml or its lock
+// (ptone/scion#5483), and they still see the hub the import gives.
 var contextReadOnlyCommands = map[string]bool{
 	"scion config list":       true,
 	"scion config get":        true,
@@ -236,6 +236,10 @@ var importGlobalHubSettings = true
 type targetResolution struct {
 	stderr  io.Writer
 	imports bool
+	// noSave applies the one-time imports in memory only, for the
+	// read-only commands (contextReadOnlyCommands): they see the imported
+	// hub, and nothing is written.
+	noSave bool
 }
 
 // invocationResolution is the resolution of a command invocation: warnings
@@ -259,6 +263,9 @@ func (r targetResolution) loadContext() (*config.CLIContext, error) {
 	if !r.imports {
 		return config.LoadCLIContext()
 	}
+	if r.noSave {
+		return config.LoadCLIContextImportedInMemory(useHubBaseName)
+	}
 	c, err := config.LoadCLIContextImported(useHubBaseName)
 	if errors.Is(err, config.ErrCLIContextImport) {
 		_, _ = fmt.Fprintf(r.stderr, "Warning: %v\n", err)
@@ -275,6 +282,9 @@ func (r targetResolution) loadContext() (*config.CLIContext, error) {
 func (r targetResolution) linkEntry(c *config.CLIContext, dir string) (*config.KnownProject, *config.HubEntry) {
 	if !r.imports {
 		return c.LinkEntryFor(config.LinkPathForProject(dir))
+	}
+	if r.noSave {
+		return config.LinkEntryForProjectInMemory(c, dir, useHubBaseName)
 	}
 	p, h, err := config.LinkEntryForProject(c, dir, useHubBaseName)
 	if err != nil {
@@ -389,9 +399,9 @@ func resolveInvocationTargetWith(cmd *cobra.Command, mode CLIMode, r targetResol
 		r = targetResolution{stderr: stderr}
 	}
 	if contextReadOnlyCommands[cmd.CommandPath()] {
-		// Read the hub list as it is: no one-time import, so nothing is
-		// written. Import warnings cannot occur either.
-		r.imports = false
+		// The one-time imports apply in memory only: the command sees the
+		// hub the next saving command will import, and nothing is written.
+		r.noSave = true
 	}
 	ctx, err := r.loadContext()
 	if err != nil {
