@@ -2,8 +2,9 @@
 // workflow_job webhooks into Cloud Run Job executions running one ephemeral
 // GitHub Actions runner each.
 //
-// P1 STUB: it only validates the config contract and serves /healthz. The
-// webhook, claim and reconcile endpoints arrive in P2 (see cr-ci/README.md).
+// P1 STUB: it only validates the config contract and serves /health (not
+// /healthz, which Cloud Run reserves). The webhook, claim and reconcile
+// endpoints arrive in P2 (see cr-ci/README.md).
 package main
 
 import (
@@ -12,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -44,30 +46,41 @@ func run(getenv func(string) string, logOut io.Writer) error {
 		port = "8080"
 	}
 	srv := &http.Server{
-		Addr:              ":" + port,
 		Handler:           newMux(),
 		ReadHeaderTimeout: 10 * time.Second,
+	}
+	ln, err := net.Listen("tcp", ":"+port)
+	if err != nil {
+		return err
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	return serve(ctx, srv, ln, logger)
+}
+
+// serve runs srv until ctx is cancelled, then drains in-flight requests
+// (Cloud Run sends SIGTERM and allows 10 s) before returning.
+func serve(ctx context.Context, srv *http.Server, ln net.Listener, logger *slog.Logger) error {
+	drained := make(chan error, 1)
 	go func() {
 		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 9*time.Second)
 		defer cancel()
-		_ = srv.Shutdown(shutdownCtx)
+		drained <- srv.Shutdown(shutdownCtx)
 	}()
 
-	logger.Info("listening", "port", port)
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	logger.Info("listening", "addr", ln.Addr().String())
+	if err := srv.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
-	return nil
+	// Serve returns as soon as Shutdown starts; wait for the drain.
+	return <-drained
 }
 
 func newMux() *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = io.WriteString(w, "ok\n")
 	})

@@ -22,7 +22,9 @@ script must meet, so that P4 can be reviewed against it.
 
 - **Config:** reads only `cr-ci/config.env` (a copy of `config.example.env`),
   or the file given with `--config FILE`, and validates the same rules as
-  `mediator/config.go`. No hard-coded repo, org, project or region.
+  `mediator/config.go`. `lib.sh` parses the file line by line (`KEY=value`,
+  comments and blank lines skipped) and **never sources it**, so values such
+  as `RECONCILE_SCHEDULE` may contain spaces and nothing in it is executed. No hard-coded repo, org, project or region.
 - **`--dry-run`:** prints every `gcloud` or `gh` command it would run, one per
   line, fully expanded and shell-quoted, then exits 0 without calling any API
   that changes state. Read-only describe or list calls used to decide

@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"regexp"
 	"sort"
 	"strconv"
@@ -13,33 +14,37 @@ import (
 // Environment variable names. They form the cr-ci config contract and must
 // match cr-ci/config.example.env one to one (enforced by a test).
 const (
-	EnvTargetRepos          = "TARGET_REPOS"
-	EnvGitHubAppID          = "GITHUB_APP_ID"
-	EnvGitHubInstallScope   = "GITHUB_APP_INSTALLATION_SCOPE"
-	EnvGCPProject           = "GCP_PROJECT"
-	EnvRegion               = "REGION"
-	EnvRunnerLabel          = "RUNNER_LABEL"
-	EnvRunnerJobName        = "RUNNER_JOB_NAME"
-	EnvRunnerImageName      = "RUNNER_IMAGE_NAME"
-	EnvRunnerCPU            = "RUNNER_CPU"
-	EnvRunnerMemory         = "RUNNER_MEMORY"
-	EnvRunnerDiskGi         = "RUNNER_DISK_GI"
-	EnvMaxConcurrentRunners = "MAX_CONCURRENT_RUNNERS"
-	EnvTaskTimeout          = "TASK_TIMEOUT"
-	EnvArtifactRepo         = "ARTIFACT_REPO"
-	EnvMediatorServiceName  = "MEDIATOR_SERVICE_NAME"
-	EnvReconcilerJobName    = "RECONCILER_JOB_NAME"
-	EnvRoutingVariableName  = "ROUTING_VARIABLE_NAME"
-	EnvBuildSAName          = "BUILD_SA_NAME"
-	EnvMediatorSAName       = "MEDIATOR_SA_NAME"
-	EnvSchedulerSAName      = "SCHEDULER_SA_NAME"
-	EnvExecSAName           = "EXEC_SA_NAME"
-	EnvAppPrivateKeySecret  = "GITHUB_APP_PRIVATE_KEY_SECRET_NAME"
-	EnvWebhookSecretSecret  = "GITHUB_WEBHOOK_SECRET_NAME"
+	EnvTargetRepos             = "TARGET_REPOS"
+	EnvGitHubAppID             = "GITHUB_APP_ID"
+	EnvGitHubInstallScope      = "GITHUB_APP_INSTALLATION_SCOPE"
+	EnvGCPProject              = "GCP_PROJECT"
+	EnvRegion                  = "REGION"
+	EnvRunnerLabel             = "RUNNER_LABEL"
+	EnvRunnerJobName           = "RUNNER_JOB_NAME"
+	EnvRunnerImageName         = "RUNNER_IMAGE_NAME"
+	EnvRunnerCPU               = "RUNNER_CPU"
+	EnvRunnerMemory            = "RUNNER_MEMORY"
+	EnvRunnerDiskGi            = "RUNNER_DISK_GI"
+	EnvMaxConcurrentRunners    = "MAX_CONCURRENT_RUNNERS"
+	EnvTaskTimeout             = "TASK_TIMEOUT"
+	EnvArtifactRepo            = "ARTIFACT_REPO"
+	EnvMediatorServiceName     = "MEDIATOR_SERVICE_NAME"
+	EnvReconcilerJobName       = "RECONCILER_JOB_NAME"
+	EnvReconcileSchedule       = "RECONCILE_SCHEDULE"
+	EnvMediatorURL             = "MEDIATOR_URL"
+	EnvRunnerGroupID           = "GITHUB_RUNNER_GROUP_ID"
+	EnvRoutingVariableName     = "ROUTING_VARIABLE_NAME"
+	EnvBuildSAName             = "BUILD_SA_NAME"
+	EnvMediatorSAName          = "MEDIATOR_SA_NAME"
+	EnvSchedulerSAName         = "SCHEDULER_SA_NAME"
+	EnvExecSAName              = "EXEC_SA_NAME"
+	EnvAppPrivateKeySecretName = "GITHUB_APP_PRIVATE_KEY_SECRET_NAME"
+	EnvWebhookSecretName       = "GITHUB_WEBHOOK_SECRET_NAME"
 )
 
 // Cloud Run limits and contract defaults.
 const (
+	maxOwnerLen              = 39
 	maxCloudRunTaskTimeout   = 168 * time.Hour
 	maxEphemeralDiskGi       = 100
 	maxCloudRunMemoryMi      = 32 * 1024
@@ -55,6 +60,8 @@ const (
 	defaultArtifactRepo      = "cr-runners"
 	defaultMediatorService   = "cr-runner-mediator"
 	defaultReconcilerJobName = "cr-runner-reconciler"
+	defaultReconcileSchedule = "*/5 * * * *"
+	defaultRunnerGroupID     = "1"
 	defaultRoutingVariable   = "SCION_LARGE_RUNNER"
 	defaultBuildSA           = "cr-runner-build-sa"
 	defaultMediatorSA        = "cr-runner-mediator-sa"
@@ -84,59 +91,65 @@ func (r Repo) String() string { return r.Owner + "/" + r.Name }
 // Config is the validated cr-ci configuration. It holds resource NAMES only;
 // secret values are never part of the configuration.
 type Config struct {
-	TargetRepos          []Repo
-	GitHubAppID          int64
-	InstallScope         InstallScope
-	GCPProject           string
-	Region               string
-	RunnerLabel          string
-	RunnerJobName        string
-	RunnerImageName      string
-	RunnerCPU            int
-	RunnerMemory         string
-	RunnerMemoryMi       int
-	RunnerDiskGi         int
-	MaxConcurrentRunners int
-	TaskTimeout          time.Duration
-	ArtifactRepo         string
-	MediatorServiceName  string
-	ReconcilerJobName    string
-	RoutingVariableName  string
-	BuildSAName          string
-	MediatorSAName       string
-	SchedulerSAName      string
-	ExecSAName           string
-	AppPrivateKeySecret  string
-	WebhookSecretName    string
+	TargetRepos             []Repo
+	GitHubAppID             int64
+	InstallScope            InstallScope
+	GCPProject              string
+	Region                  string
+	RunnerLabel             string
+	RunnerJobName           string
+	RunnerImageName         string
+	RunnerCPU               int
+	RunnerMemory            string
+	RunnerMemoryMi          int
+	RunnerDiskGi            int
+	MaxConcurrentRunners    int
+	TaskTimeout             time.Duration
+	ArtifactRepo            string
+	MediatorServiceName     string
+	ReconcilerJobName       string
+	ReconcileSchedule       string
+	MediatorURL             string // empty until the first deploy assigns one
+	RunnerGroupID           int64
+	RoutingVariableName     string
+	BuildSAName             string
+	MediatorSAName          string
+	SchedulerSAName         string
+	ExecSAName              string
+	AppPrivateKeySecretName string
+	WebhookSecretName       string
 }
 
 // Defaults returns the default value of every optional variable. Required
 // variables (no safe default) map to "".
 func Defaults() map[string]string {
 	return map[string]string{
-		EnvTargetRepos:          "",
-		EnvGitHubAppID:          "",
-		EnvGitHubInstallScope:   "",
-		EnvGCPProject:           "",
-		EnvRegion:               "",
-		EnvRunnerLabel:          defaultRunnerLabel,
-		EnvRunnerJobName:        defaultRunnerJobName,
-		EnvRunnerImageName:      defaultRunnerImageName,
-		EnvRunnerCPU:            defaultRunnerCPU,
-		EnvRunnerMemory:         defaultRunnerMemory,
-		EnvRunnerDiskGi:         defaultRunnerDiskGi,
-		EnvMaxConcurrentRunners: defaultMaxConcurrent,
-		EnvTaskTimeout:          defaultTaskTimeout,
-		EnvArtifactRepo:         defaultArtifactRepo,
-		EnvMediatorServiceName:  defaultMediatorService,
-		EnvReconcilerJobName:    defaultReconcilerJobName,
-		EnvRoutingVariableName:  defaultRoutingVariable,
-		EnvBuildSAName:          defaultBuildSA,
-		EnvMediatorSAName:       defaultMediatorSA,
-		EnvSchedulerSAName:      defaultSchedulerSA,
-		EnvExecSAName:           defaultExecSA,
-		EnvAppPrivateKeySecret:  defaultAppKeySecret,
-		EnvWebhookSecretSecret:  defaultWebhookSecret,
+		EnvTargetRepos:             "",
+		EnvGitHubAppID:             "",
+		EnvGitHubInstallScope:      "",
+		EnvGCPProject:              "",
+		EnvRegion:                  "",
+		EnvRunnerLabel:             defaultRunnerLabel,
+		EnvRunnerJobName:           defaultRunnerJobName,
+		EnvRunnerImageName:         defaultRunnerImageName,
+		EnvRunnerCPU:               defaultRunnerCPU,
+		EnvRunnerMemory:            defaultRunnerMemory,
+		EnvRunnerDiskGi:            defaultRunnerDiskGi,
+		EnvMaxConcurrentRunners:    defaultMaxConcurrent,
+		EnvTaskTimeout:             defaultTaskTimeout,
+		EnvArtifactRepo:            defaultArtifactRepo,
+		EnvMediatorServiceName:     defaultMediatorService,
+		EnvReconcilerJobName:       defaultReconcilerJobName,
+		EnvReconcileSchedule:       defaultReconcileSchedule,
+		EnvMediatorURL:             "",
+		EnvRunnerGroupID:           defaultRunnerGroupID,
+		EnvRoutingVariableName:     defaultRoutingVariable,
+		EnvBuildSAName:             defaultBuildSA,
+		EnvMediatorSAName:          defaultMediatorSA,
+		EnvSchedulerSAName:         defaultSchedulerSA,
+		EnvExecSAName:              defaultExecSA,
+		EnvAppPrivateKeySecretName: defaultAppKeySecret,
+		EnvWebhookSecretName:       defaultWebhookSecret,
 	}
 }
 
@@ -152,8 +165,9 @@ func Keys() []string {
 }
 
 var (
-	// GitHub user/org names: alphanumerics and single hyphens, max 39 chars.
-	ownerRE = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9]|-[A-Za-z0-9]){0,38}$`)
+	// GitHub user/org names: alphanumerics and single hyphens, no leading or
+	// trailing hyphen. The 39-character limit is checked separately.
+	ownerRE = regexp.MustCompile(`^[A-Za-z0-9](?:-?[A-Za-z0-9])*$`)
 	repoRE  = regexp.MustCompile(`^[A-Za-z0-9._-]{1,100}$`)
 	// GCP project IDs: 6-30 chars, lowercase letter first, no trailing hyphen.
 	projectRE = regexp.MustCompile(`^[a-z][a-z0-9-]{4,28}[a-z0-9]$`)
@@ -174,6 +188,8 @@ var (
 	// GitHub Actions configuration variable names.
 	variableRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 	memoryRE   = regexp.MustCompile(`^([0-9]+)(Mi|Gi)$`)
+	// Unix cron: five fields of digits and * , - / (no names or macros).
+	cronRE = regexp.MustCompile(`^[0-9*,/-]+( [0-9*,/-]+){4}$`)
 )
 
 // reservedLabels are the default labels every self-hosted runner carries.
@@ -304,6 +320,22 @@ func Load(getenv func(string) string) (*Config, error) {
 	c.ArtifactRepo = match(EnvArtifactRepo, resourceIDRE, "Artifact Registry repository ID")
 	c.MediatorServiceName = match(EnvMediatorServiceName, cloudRunNameRE, "Cloud Run service name")
 	c.ReconcilerJobName = match(EnvReconcilerJobName, resourceIDRE, "Cloud Scheduler job ID")
+	c.ReconcileSchedule = match(EnvReconcileSchedule, cronRE, "five-field cron schedule")
+	if raw := get(EnvMediatorURL); raw != "" {
+		if u, err := url.Parse(raw); err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil ||
+			(u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+			fail(EnvMediatorURL, "%q must be a bare https:// origin such as https://cr-runner-mediator-abc123-uc.a.run.app", raw)
+		} else {
+			c.MediatorURL = strings.TrimSuffix(raw, "/")
+		}
+	}
+	if raw := get(EnvRunnerGroupID); raw != "" {
+		id, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || id < 1 {
+			fail(EnvRunnerGroupID, "%q is not a positive integer", raw)
+		}
+		c.RunnerGroupID = id
+	}
 	c.RoutingVariableName = match(EnvRoutingVariableName, variableRE, "GitHub Actions variable name")
 	if strings.HasPrefix(strings.ToUpper(c.RoutingVariableName), "GITHUB_") {
 		fail(EnvRoutingVariableName, "%q: names starting with GITHUB_ are reserved by GitHub", c.RoutingVariableName)
@@ -318,10 +350,10 @@ func Load(getenv func(string) string) (*Config, error) {
 		EnvSchedulerSAName: c.SchedulerSAName, EnvExecSAName: c.ExecSAName,
 	})
 
-	c.AppPrivateKeySecret = match(EnvAppPrivateKeySecret, secretRE, "Secret Manager secret name")
-	c.WebhookSecretName = match(EnvWebhookSecretSecret, secretRE, "Secret Manager secret name")
+	c.AppPrivateKeySecretName = match(EnvAppPrivateKeySecretName, secretRE, "Secret Manager secret name")
+	c.WebhookSecretName = match(EnvWebhookSecretName, secretRE, "Secret Manager secret name")
 	checkDistinct(fail, "secret", map[string]string{
-		EnvAppPrivateKeySecret: c.AppPrivateKeySecret, EnvWebhookSecretSecret: c.WebhookSecretName,
+		EnvAppPrivateKeySecretName: c.AppPrivateKeySecretName, EnvWebhookSecretName: c.WebhookSecretName,
 	})
 
 	if len(errs) > 0 {
@@ -340,7 +372,7 @@ func parseRepos(raw string, fail func(string, ...any)) []Repo {
 			continue
 		}
 		owner, name, ok := strings.Cut(part, "/")
-		if !ok || !ownerRE.MatchString(owner) || !repoRE.MatchString(name) || name == "." || name == ".." {
+		if !ok || len(owner) > maxOwnerLen || !ownerRE.MatchString(owner) || !repoRE.MatchString(name) || name == "." || name == ".." {
 			fail("%q is not owner/repo", part)
 			continue
 		}
@@ -361,13 +393,15 @@ func parseMemoryMi(v string) (int, error) {
 		return 0, fmt.Errorf("%q must be an integer followed by Mi or Gi (for example 32Gi)", v)
 	}
 	n, err := strconv.Atoi(m[1])
-	if err != nil {
-		return 0, fmt.Errorf("%q is out of range", v)
+	if m[2] == "Gi" && err == nil {
+		// Bound before multiplying so huge values cannot overflow into range.
+		if n > maxCloudRunMemoryMi/1024 {
+			n = maxCloudRunMemoryMi + 1
+		} else {
+			n *= 1024
+		}
 	}
-	if m[2] == "Gi" {
-		n *= 1024
-	}
-	if n < minCloudRunMemoryMi || n > maxCloudRunMemoryMi {
+	if err != nil || n < minCloudRunMemoryMi || n > maxCloudRunMemoryMi {
 		return 0, fmt.Errorf("%q must be between 512Mi and 32Gi", v)
 	}
 	return n, nil

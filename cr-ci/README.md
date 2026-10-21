@@ -2,7 +2,7 @@
 
 > **Status: P1 skeleton. Not deployable yet.** The config contract, the
 > permissions matrix and the doc structure exist. The mediator is a stub that
-> validates config and serves `/healthz`; the runner image and the scripts are
+> validates config and serves `/health`; the runner image and the scripts are
 > placeholders. See [Phases](#phases).
 
 cr-ci contains the documentation, scripts and code to run selected GitHub
@@ -52,7 +52,7 @@ fork (`ptone/scion`), upstream (`GoogleCloudPlatform/scion`) or both.
 | Path | Contents |
 | :--- | :--- |
 | [`config.example.env`](config.example.env) | The single config contract (names only, never secret values) |
-| [`mediator/`](mediator/) | Go Cloud Run service. P1: config loader + tests, `/healthz` stub |
+| [`mediator/`](mediator/) | Go Cloud Run service. P1: config loader + tests, `/health` stub |
 | [`runner/`](runner/) | Runner image (`Dockerfile`, `entrypoint.sh`). P1: placeholders (P3) |
 | [`scripts/`](scripts/) | Deploy and teardown scripts (P4). P1: planned list and the `--dry-run` contract |
 | [`workflows/`](workflows/) | Workflow templates, not active (P5). P1: README |
@@ -69,7 +69,7 @@ Go 1.26.1), like `extras/*`. It does not import the scion product packages, and
 the root module's `./...` does not include it. From `cr-ci/`:
 
 ```bash
-go build ./... && go vet ./... && go test ./... && gofmt -l .
+go build -o /dev/null ./... && go vet ./... && go test ./... && gofmt -l .
 ```
 
 ## Phases

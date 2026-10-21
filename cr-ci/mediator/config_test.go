@@ -32,30 +32,32 @@ func TestLoadDefaults(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	want := &Config{
-		TargetRepos:          []Repo{{Owner: "example-owner", Name: "example-repo"}},
-		GitHubAppID:          123456,
-		InstallScope:         ScopeRepo,
-		GCPProject:           "example-project",
-		Region:               "us-central1",
-		RunnerLabel:          "scion-cr-8c32g",
-		RunnerJobName:        "cr-gh-runner-8c32g",
-		RunnerImageName:      "gh-runner",
-		RunnerCPU:            8,
-		RunnerMemory:         "32Gi",
-		RunnerMemoryMi:       32 * 1024,
-		RunnerDiskGi:         20,
-		MaxConcurrentRunners: 5,
-		TaskTimeout:          45 * time.Minute,
-		ArtifactRepo:         "cr-runners",
-		MediatorServiceName:  "cr-runner-mediator",
-		ReconcilerJobName:    "cr-runner-reconciler",
-		RoutingVariableName:  "SCION_LARGE_RUNNER",
-		BuildSAName:          "cr-runner-build-sa",
-		MediatorSAName:       "cr-runner-mediator-sa",
-		SchedulerSAName:      "cr-runner-scheduler-sa",
-		ExecSAName:           "cr-runner-exec-sa",
-		AppPrivateKeySecret:  "cr-runner-gh-app-private-key",
-		WebhookSecretName:    "cr-runner-gh-webhook-secret",
+		TargetRepos:             []Repo{{Owner: "example-owner", Name: "example-repo"}},
+		GitHubAppID:             123456,
+		InstallScope:            ScopeRepo,
+		GCPProject:              "example-project",
+		Region:                  "us-central1",
+		RunnerLabel:             "scion-cr-8c32g",
+		RunnerJobName:           "cr-gh-runner-8c32g",
+		RunnerImageName:         "gh-runner",
+		RunnerCPU:               8,
+		RunnerMemory:            "32Gi",
+		RunnerMemoryMi:          32 * 1024,
+		RunnerDiskGi:            20,
+		MaxConcurrentRunners:    5,
+		TaskTimeout:             45 * time.Minute,
+		ArtifactRepo:            "cr-runners",
+		MediatorServiceName:     "cr-runner-mediator",
+		ReconcilerJobName:       "cr-runner-reconciler",
+		ReconcileSchedule:       "*/5 * * * *",
+		RunnerGroupID:           1,
+		RoutingVariableName:     "SCION_LARGE_RUNNER",
+		BuildSAName:             "cr-runner-build-sa",
+		MediatorSAName:          "cr-runner-mediator-sa",
+		SchedulerSAName:         "cr-runner-scheduler-sa",
+		ExecSAName:              "cr-runner-exec-sa",
+		AppPrivateKeySecretName: "cr-runner-gh-app-private-key",
+		WebhookSecretName:       "cr-runner-gh-webhook-secret",
 	}
 	if !reflect.DeepEqual(c, want) {
 		t.Errorf("Load defaults:\n got %+v\nwant %+v", c, want)
@@ -80,6 +82,26 @@ func TestLoadOverridesAndMultipleRepos(t *testing.T) {
 	}
 	if c.RunnerCPU != 4 || c.RunnerMemoryMi != 16384 || c.RunnerDiskGi != 100 || c.TaskTimeout != 2*time.Hour || c.MaxConcurrentRunners != 20 {
 		t.Errorf("overrides not applied: %+v", c)
+	}
+}
+
+func TestLoadOwnerLength(t *testing.T) {
+	env := validEnv()
+	env[EnvTargetRepos] = strings.Repeat("a", 39) + "/repo," + strings.Repeat("a-", 19) + "a/repo"
+	if _, err := Load(getenvFrom(env)); err != nil {
+		t.Fatalf("39-char owners should load: %v", err)
+	}
+}
+
+func TestLoadMediatorURL(t *testing.T) {
+	env := validEnv()
+	env[EnvMediatorURL] = "https://cr-runner-mediator-abc123-uc.a.run.app/"
+	c, err := Load(getenvFrom(env))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if want := "https://cr-runner-mediator-abc123-uc.a.run.app"; c.MediatorURL != want {
+		t.Errorf("MediatorURL = %q, want %q (trailing slash trimmed)", c.MediatorURL, want)
 	}
 }
 
@@ -119,6 +141,10 @@ func TestLoadInvalid(t *testing.T) {
 		{EnvTargetRepos, "-bad/repo"},
 		{EnvTargetRepos, "owner/.."},
 		{EnvTargetRepos, "owner/re po"},
+		{EnvTargetRepos, "a--b/repo"},
+		{EnvTargetRepos, "owner-/repo"},
+		{EnvTargetRepos, strings.Repeat("a", 40) + "/repo"},
+		{EnvTargetRepos, strings.Repeat("a-", 20) + "a/repo"}, // 41 chars, alternating hyphens
 		{EnvGitHubAppID, "abc"},
 		{EnvGitHubAppID, "0"},
 		{EnvGitHubInstallScope, "enterprise"},
@@ -138,6 +164,8 @@ func TestLoadInvalid(t *testing.T) {
 		{EnvRunnerMemory, "32G"},
 		{EnvRunnerMemory, "33Gi"},
 		{EnvRunnerMemory, "256Mi"},
+		{EnvRunnerMemory, "18014398509481985Gi"}, // overflows to 1024Mi if multiplied first
+		{EnvRunnerMemory, "99999999999999999999Mi"},
 		{EnvRunnerMemory, "2Gi"}, // below the 8-CPU floor of 4Gi
 		{EnvRunnerDiskGi, "0"},
 		{EnvRunnerDiskGi, "101"},
@@ -148,12 +176,22 @@ func TestLoadInvalid(t *testing.T) {
 		{EnvArtifactRepo, "Repo"},
 		{EnvMediatorServiceName, "1abc"},
 		{EnvReconcilerJobName, "has_underscore"},
+		{EnvReconcileSchedule, "@every 5m"},
+		{EnvReconcileSchedule, "*/5 * * *"},
+		{EnvReconcileSchedule, "*/5 * * * * *"},
+		{EnvMediatorURL, "http://mediator.example.com"},
+		{EnvMediatorURL, "https://"},
+		{EnvMediatorURL, "https://mediator.example.com/webhook"},
+		{EnvMediatorURL, "https://user@mediator.example.com"},
+		{EnvMediatorURL, "https://mediator.example.com?x=1"},
+		{EnvRunnerGroupID, "0"},
+		{EnvRunnerGroupID, "default"},
 		{EnvRoutingVariableName, "1VAR"},
 		{EnvRoutingVariableName, "GITHUB_RUNNER"},
 		{EnvBuildSAName, "sa"},
 		{EnvExecSAName, "cr-runner-mediator-sa"}, // duplicates the mediator SA
-		{EnvAppPrivateKeySecret, "bad/name"},
-		{EnvWebhookSecretSecret, "cr-runner-gh-app-private-key"}, // duplicates the key secret
+		{EnvAppPrivateKeySecretName, "bad/name"},
+		{EnvWebhookSecretName, "cr-runner-gh-app-private-key"}, // duplicates the key secret
 	}
 	for _, tt := range tests {
 		t.Run(tt.key+"="+tt.value, func(t *testing.T) {
@@ -218,7 +256,7 @@ func TestExampleEnvMatchesContract(t *testing.T) {
 			if !commented {
 				t.Errorf("%s has no comment directly above it", k)
 			}
-			example[k] = strings.Trim(v, `"`)
+			example[k] = v
 			order = append(order, k)
 			commented = false
 		}
