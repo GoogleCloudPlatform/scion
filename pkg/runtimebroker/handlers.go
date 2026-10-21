@@ -1443,6 +1443,22 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	s.agentLifecycleLog.Info("Agent dispatch: buildStartContext complete",
 		"agent_id", req.ID, "name", req.Name, "elapsed", time.Since(buildCtxStart).String())
 
+	// Kubernetes placement defaults, resolved once for the runtime
+	// buildStartContext chose, before any 201 (sync or async). The async
+	// worker uses this result and does not resolve again. Provision-only
+	// creates start no pod and skip it; a reprovision is always
+	// provision-only.
+	if !req.ProvisionOnly {
+		rp, perr := s.placementForStart(ctx, sc.Resolution, opts.ProjectPath)
+		if perr != nil {
+			span.SetStatus(codes.Error, perr.Error())
+			status := s.writeStartContextError(w, perr, "create agent", "agent_id", req.ID, "profile", createRequestProfile(req))
+			markAttemptFailed(status, perr.Error())
+			return
+		}
+		opts.ResolvedPlacement, opts.PlacementResolved = rp, true
+	}
+
 	// Inject skill resolver from Hub connection for skill provisioning.
 	ctx = s.attachSkillResolver(ctx, r, skillResolverInputs{
 		HubEndpoint:          req.HubEndpoint,
@@ -3460,6 +3476,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	// on the default runtime (ptone/scion#2709). buildStartContext already
 	// logged any recorded-runtime fallback at Warn, so log it at Debug here.
 	res, err := s.resolveManagerForOptsStrict(runtimeOpts, existingAgentProfileResolution(runtimeOpts.Profile, provisioned), slog.LevelDebug)
+	res = res.forExistingAgent(id)
 	mgr, resolvedRuntimeType := res.Manager, res.RuntimeType
 	if err != nil {
 		if s.refuseCancelledStart(w, span, ss, id, projectID, trackedRunID) {
@@ -3510,6 +3527,23 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		s.writeHarnessPolicyRefusal(w, d, "start agent", id, nil)
 		return
 	}
+
+	// Kubernetes placement defaults for the runtime this start uses, and
+	// the agent's own kubernetes block as the inline update below would
+	// leave it, checked before that update writes anything.
+	rp, perr := s.placementForStart(ctx, res, opts.ProjectPath)
+	if perr == nil {
+		perr = s.checkStartLegacyPlacement(id, opts.ProjectPath, startReq.InlineConfig, startReq.SharedWorkspace, rp)
+	}
+	if perr != nil {
+		if s.refuseCancelledStart(w, span, ss, id, projectID, trackedRunID) {
+			return
+		}
+		span.SetStatus(codes.Error, perr.Error())
+		s.writeStartContextError(w, perr, "start agent", "agent_id", id, "runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile)
+		return
+	}
+	opts.ResolvedPlacement, opts.PlacementResolved = rp, true
 
 	// Apply updated InlineConfig to scion-agent.json before starting.
 	if startReq.InlineConfig != nil && opts.ProjectPath != "" {
@@ -3650,6 +3684,37 @@ func restartAgentConfig(namesProject bool, harnessConfig, harnessConfigID, harne
 	}
 }
 
+// loadedAgentConfig is readAgentScionConfig's result: the parsed config,
+// the resolved project directory and the file's path, or, on error, the
+// stage that failed ("resolve", "read" or "parse").
+type loadedAgentConfig struct {
+	cfg        *api.ScionConfig
+	projectDir string
+	path       string
+	stage      string
+}
+
+// readAgentScionConfig reads and parses the agent's persisted
+// scion-agent.json, the file applyInlineConfigUpdate updates:
+// config.GetAgentDir(projectDir, agentName, sharedWorkspace)/scion-agent.json,
+// with projectDir resolved from projectPath.
+func readAgentScionConfig(agentName, projectPath string, sharedWorkspace bool) (loadedAgentConfig, error) {
+	projectDir, err := config.GetResolvedProjectDir(projectPath)
+	if err != nil {
+		return loadedAgentConfig{stage: "resolve"}, err
+	}
+	cfgPath := filepath.Join(config.GetAgentDir(projectDir, agentName, sharedWorkspace), "scion-agent.json")
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		return loadedAgentConfig{projectDir: projectDir, path: cfgPath, stage: "read"}, err
+	}
+	var existing api.ScionConfig
+	if err := json.Unmarshal(data, &existing); err != nil {
+		return loadedAgentConfig{projectDir: projectDir, path: cfgPath, stage: "parse"}, err
+	}
+	return loadedAgentConfig{cfg: &existing, projectDir: projectDir, path: cfgPath}, nil
+}
+
 // applyInlineConfigUpdate merges the updated InlineConfig into the agent's
 // scion-agent.json. This ensures config changes made via the Hub (e.g. limits
 // set in the web configure form) are applied before the agent starts.
@@ -3658,25 +3723,20 @@ func restartAgentConfig(namesProject bool, harnessConfig, harnessConfigID, harne
 // scion-agent.json externally (~/.scion.project-configs/<slug>__<uuid>/.scion/
 // agents/<name>/) so siblings cannot read it via /workspace.
 func (s *Server) applyInlineConfigUpdate(ctx context.Context, agentName, projectPath string, inlineConfig *api.ScionConfig, sharedWorkspace bool) {
-	projectDir, err := config.GetResolvedProjectDir(projectPath)
-	if err != nil {
-		s.agentLifecycleLog.Warn("applyInlineConfigUpdate: failed to resolve project dir", "agent", agentName, "error", err)
-		return
-	}
-	agentDir := config.GetAgentDir(projectDir, agentName, sharedWorkspace)
-	cfgPath := filepath.Join(agentDir, "scion-agent.json")
-
 	// Load existing config
-	data, err := os.ReadFile(cfgPath)
+	loaded, err := readAgentScionConfig(agentName, projectPath, sharedWorkspace)
 	if err != nil {
-		s.agentLifecycleLog.Warn("applyInlineConfigUpdate: failed to read scion-agent.json", "agent", agentName, "path", cfgPath, "error", err)
+		switch loaded.stage {
+		case "resolve":
+			s.agentLifecycleLog.Warn("applyInlineConfigUpdate: failed to resolve project dir", "agent", agentName, "error", err)
+		case "read":
+			s.agentLifecycleLog.Warn("applyInlineConfigUpdate: failed to read scion-agent.json", "agent", agentName, "path", loaded.path, "error", err)
+		default:
+			s.agentLifecycleLog.Warn("applyInlineConfigUpdate: failed to parse scion-agent.json", "agent", agentName, "error", err)
+		}
 		return
 	}
-	var existing api.ScionConfig
-	if err := json.Unmarshal(data, &existing); err != nil {
-		s.agentLifecycleLog.Warn("applyInlineConfigUpdate: failed to parse scion-agent.json", "agent", agentName, "error", err)
-		return
-	}
+	projectDir, cfgPath, existing := loaded.projectDir, loaded.path, *loaded.cfg
 
 	// The Hub sends the agent's complete list of hub-, user- and
 	// project-scoped skills whenever it sends skills at all, so drop the
@@ -4624,6 +4684,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	// the fallback cannot fire and the 503 is returned, which fails safe.
 	// buildStartContext already logged any fallback at Warn; Debug here.
 	res, err := s.resolveExistingAgentManager(runtimeOpts, existingAgentProfileResolution(runtimeOpts.Profile, provisioned), slog.LevelDebug, pin)
+	res = res.forExistingAgent(id)
 	mgr, resolvedRuntimeType := res.Manager, res.RuntimeType
 	if err != nil {
 		writeProfileUnresolved(w, err)
@@ -4658,6 +4719,20 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		s.writeHarnessPolicyRefusal(w, d, "restart agent", id, nil)
 		return
 	}
+
+	// Kubernetes placement defaults for the runtime the restart starts on,
+	// and the agent's persisted kubernetes block, checked before the stop:
+	// a refusal leaves the agent running.
+	rp, perr := s.placementForStart(ctx, res, opts.ProjectPath)
+	if perr == nil {
+		perr = s.checkRestartLegacyPlacement(id, opts.ProjectPath, restartReq.SharedWorkspace, rp)
+	}
+	if perr != nil {
+		trace.SpanFromContext(ctx).SetStatus(codes.Error, perr.Error())
+		s.writeStartContextError(w, perr, "restart agent", "agent_id", id, "runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile)
+		return
+	}
+	opts.ResolvedPlacement, opts.PlacementResolved = rp, true
 
 	// Stop then start — tolerate stop errors since the container may already
 	// be exited and the subsequent start will handle cleanup.
@@ -6833,6 +6908,10 @@ type runtimeResolution struct {
 	// profile was resolved from settings. Cause is reserved for a fixed
 	// cause and is not set yet.
 	Profile, DispatchEntry, Cause string
+	// Agent names the agent in placement fixed causes; set by forCreate
+	// and forExistingAgent (placement_resolve.go), which also settle How
+	// for a profile resolution with an empty selection profile.
+	Agent string
 }
 
 // defaultResolution is a resolution to the default holder from one
