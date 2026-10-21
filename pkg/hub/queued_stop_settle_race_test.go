@@ -260,7 +260,7 @@ func TestSettle_SupersedingStart_KeepsReservation(t *testing.T) {
 
 // The settle's release commits first; a start that comes after finds no
 // reservation and is admitted with the cap check: at a full instance it is
-// refused, and the agent's stop is still confirmed.
+// refused and puts the queued stop's intent back (ptone/scion#5070).
 func TestSettle_ReleaseCommitsFirst_StartGetsCheckedAdmission(t *testing.T) {
 	t.Run("room", func(t *testing.T) {
 		sf := newSettleFixture(t, "commit-room")
@@ -297,8 +297,8 @@ func TestSettle_ReleaseCommitsFirst_StartGetsCheckedAdmission(t *testing.T) {
 		assert.Nil(t, sf.held(t), "no unchecked re-assert after the settle's own release")
 		assert.EqualValues(t, 1, brokerReservationCount(t, sf.s, sf.brokerID))
 		got := getAgent(t, sf.s, sf.agent.ID)
-		assert.Equal(t, store.RunIntentRunning, got.RunIntent, "the refused start left its run intent")
-		assert.Equal(t, containerStatusStopQueued, got.ContainerStatus, "a superseded stop is not confirmed")
+		assert.Equal(t, store.RunIntentStopped, got.RunIntent, "the refused start restored the stopped intent")
+		assert.Equal(t, containerStatusStopQueued, got.ContainerStatus, "the next settle confirms the stop, not this one")
 		assert.Zero(t, sf.backstops(backstopSiteSettle))
 	})
 }

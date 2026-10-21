@@ -205,7 +205,7 @@ func (w *intentAfterReleaseStore) ReleaseAgentStart(ctx context.Context, agentID
 // compare-and-set on the refused start's intent time, so nothing is
 // reverted and no message is written.
 func TestRefusedStartAfterQueuedStop_NewerIntentKept(t *testing.T) {
-	q := newRefusedStartFixture(t, true)
+	q := newRefusedStartFixture(t, true) // its setup writes through the raw store, before the wrapper
 	w, fault := installStoreFault(t, q.srv, func(inner store.Store, fs *storeFaultSwitch) *intentAfterReleaseStore {
 		return &intentAfterReleaseStore{Store: inner, fault: fs, agentID: q.agent.ID}
 	})
