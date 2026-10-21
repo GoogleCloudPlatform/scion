@@ -494,8 +494,8 @@ func (s *Server) runAgentPTY(ctx context.Context, conn *websocket.Conn, identity
 		slog.Error("PTY session error", "agent_id", agent.ID, "slug", agent.Slug, "path", string(ptyPathAgent), "error", err)
 	}
 	code, reason := session.CloseCause()
-	slog.Info("PTY session ended", "agent_id", agent.ID, "slug", agent.Slug, "path", string(ptyPathAgent),
-		"conduit_session_id", up.sessionID, "close_code", code, "close_reason", reason)
+	slog.Info("PTY session ended", append([]any{"agent_id", agent.ID, "slug", agent.Slug, "path", string(ptyPathAgent),
+		"conduit_session_id", up.sessionID, "close_code", code, "close_reason", reason}, up.route...)...)
 }
 
 // ptyAgentReadBuffer is the size of one terminal output read from a
@@ -513,8 +513,11 @@ type agentPTYUpstream struct {
 
 	st        conduit.Stream
 	sessionID string
-	untrack   func()
-	buf       []byte
+	// route holds the routing log fields of the open stream
+	// (conduitRouteLogAttrs).
+	route   []any
+	untrack func()
+	buf     []byte
 	// authzClose is set when the re-check closed the stream.
 	authzClose atomic.Pointer[StreamClosedError]
 }
@@ -570,6 +573,7 @@ func (u *agentPTYUpstream) Open(ctx context.Context, cols, rows int) error {
 		}
 		u.st = st
 		u.sessionID = res.Record.SessionID
+		u.route = conduitRouteLogAttrs(res)
 		target := conduitLeafTarget(res, st, bridge)
 		tracked := &conduitUserStream{
 			Kind:      grant.StreamKindPTY,
@@ -595,6 +599,7 @@ func (u *agentPTYUpstream) Open(ctx context.Context, cols, rows int) error {
 		}
 		return ptyAgentOpenError(err)
 	}
+	slog.Info("Conduit PTY stream opened", append([]any{"agent_id", u.agent.ID, "conduit_session_id", u.sessionID}, u.route...)...)
 	u.buf = make([]byte, ptyAgentReadBuffer)
 	return nil
 }
