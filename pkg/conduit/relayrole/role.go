@@ -322,14 +322,15 @@ func (ro *Role) serve(w http.ResponseWriter, r *http.Request, arrival, ingressIn
 		return
 	}
 	p := relay.Principal{
-		Kind:        adm.PrincipalKind,
-		ID:          adm.PrincipalID,
-		ProjectID:   adm.ProjectID,
-		ExecScope:   adm.ExecScope,
-		Agent:       relay.AgentIncarnationFacts{LaunchID: adm.AgentLaunchID, Generation: adm.AgentGeneration},
-		SessionID:   sessionID,
-		GrantKeys:   relay.WelcomeGrantKeys(adm.GrantKeys),
-		LifetimeCap: lifetimeCap,
+		Kind:            adm.PrincipalKind,
+		ID:              adm.PrincipalID,
+		ProjectID:       adm.ProjectID,
+		ExecScope:       adm.ExecScope,
+		Agent:           relay.AgentIncarnationFacts{LaunchID: adm.AgentLaunchID, Generation: adm.AgentGeneration},
+		SessionID:       sessionID,
+		GrantKeys:       relay.WelcomeGrantKeys(adm.GrantKeys),
+		LifetimeCap:     lifetimeCap,
+		IngressInstance: ingressInstance,
 	}
 	if adm.TokenRunID != "" {
 		p.TokenRun = &relay.TokenRunBinding{RunID: adm.TokenRunID, Enforce: adm.TokenRunEnforce}

@@ -223,6 +223,12 @@ var (
 	conduitSetShutdownGrace = func(hubSrv *hub.Server, grace time.Duration) {
 		hubSrv.SetConduitShutdownGrace(grace)
 	}
+	// conduitIngressShutdownDrain is the trap's drain in external relay
+	// mode: stop proxying, then ask the relays to drain this hub's
+	// proxied sessions, bounded by the configured grace.
+	conduitIngressShutdownDrain = func(hubSrv *hub.Server, grace time.Duration, graceSet bool) {
+		hubSrv.DrainConduitIngressForShutdown(grace, graceSet)
+	}
 	// serveConduitInternalListenerFn opens the internal listener that
 	// serves the internal relay API (serveConduitInternalListener).
 	serveConduitInternalListenerFn = serveConduitInternalListener

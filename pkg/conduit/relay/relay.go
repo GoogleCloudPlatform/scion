@@ -124,6 +124,12 @@ type Principal struct {
 	// sets it from the trusted ingress lifetime cap header (design §3.9
 	// "Source of the cap").
 	LifetimeCap time.Duration
+	// IngressInstance is the hub instance whose ingress proxied this
+	// session's dial ("" for a direct dial). A separate relay sets it from
+	// the trusted ingress instance header; it is held in relay memory only
+	// and selects the sessions of a drain(ingress_instance) (design §3.9
+	// "Drain through the proxy").
+	IngressInstance string
 }
 
 // TokenRunBinding compares the run an agent's credential was issued for

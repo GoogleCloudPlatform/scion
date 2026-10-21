@@ -115,6 +115,11 @@ func (s *Server) serveConduitIngress(w http.ResponseWriter, r *http.Request, rt 
 	}
 	excluded := map[string]bool{}
 	for attempt := 0; attempt <= router.MaxReResolves; attempt++ {
+		if rt.terminating.Load() {
+			// SIGTERM arrived while this dial was being placed: no
+			// further byte goes to a relay (cause ingress_terminating).
+			break
+		}
 		target, ok := s.pickConduitIngressRelay(r.Context(), rt, excluded)
 		if !ok {
 			break

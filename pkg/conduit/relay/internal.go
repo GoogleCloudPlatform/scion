@@ -195,6 +195,10 @@ func (r *Relay) serveInternal(w http.ResponseWriter, req *http.Request) {
 		_ = json.NewEncoder(w).Encode(selfResponse{InstanceID: r.cfg.InstanceID, Generation: r.Generation()})
 		return
 	}
+	if path == internalDrainPath {
+		r.serveDrain(w, req, peer)
+		return
+	}
 	rest, ok := strings.CutPrefix(path, internalSessions)
 	if !ok {
 		http.NotFound(w, req)

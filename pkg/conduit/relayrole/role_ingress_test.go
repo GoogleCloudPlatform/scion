@@ -293,3 +293,29 @@ func TestRoleIngressLifetimeCap(t *testing.T) {
 		}
 	})
 }
+
+// TestRoleIngressSessionsCarryTheInstance (design §3.9 "Drain through the
+// proxy"): a session admitted over a trusted ingress leg carries the
+// ingress instance, so a drain for that instance reaches it; a direct
+// session carries none.
+func TestRoleIngressSessionsCarryTheInstance(t *testing.T) {
+	f := newRoleFixture(t)
+	f.admitAs(registry.PrincipalAgent, "tok-1", nil)
+	const peer = "hub-a"
+	ingress := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.role.ServeIngress(w, r, peer)
+	}))
+	t.Cleanup(ingress.Close)
+
+	dialWelcome(t, f.front.URL, nil)
+	if n := f.node.Relay.DrainIngress(peer, 0); n != 0 {
+		t.Fatalf("drain matched %d direct sessions, want 0", n)
+	}
+	dialWelcome(t, ingress.URL, http.Header{http.CanonicalHeaderKey(relay.HeaderIngressInstance): {peer}})
+	if n := f.node.Relay.DrainIngress("hub-b", 0); n != 0 {
+		t.Fatalf("a drain for another hub matched %d sessions, want 0", n)
+	}
+	if n := f.node.Relay.DrainIngress(peer, 0); n != 1 {
+		t.Fatalf("drain matched %d sessions, want the 1 ingress session", n)
+	}
+}
