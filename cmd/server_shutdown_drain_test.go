@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -80,8 +81,9 @@ func drainTestAwaitListening(t *testing.T, addr, what string) {
 }
 
 // drainTestHold opens a connection to a broker listener and sends a
-// request whose body never fully arrives: the server answers, then waits
-// to read the rest of the body, so the connection stays active and the
+// request whose body never fully arrives: before it answers, the server
+// waits to read (and discard) the rest of the body, so the connection
+// stays active and the
 // broker's http.Server.Shutdown keeps waiting for it until the test closes
 // it. The broker's shutdown, and so its goroutine in the broker WaitGroup,
 // cannot finish while the hold is open. (A request cut inside its headers
@@ -100,7 +102,11 @@ func drainTestHold(t *testing.T, addr string) net.Conn {
 // drainTestFront is the hub front of a co-located process, wired as
 // runServerStart wires it: the mark step on the shutdown sequence, and
 // ShutdownHooks whose BeforeHTTPDrain is colocatedBrokerStop's wait. The
-// hook is wrapped only to observe it.
+// hook is wrapped only to observe it. This wiring is a test-side mirror of
+// runServerStart (cmd/server_foreground.go: frontShutdownHooks :359-364,
+// webSrv.SetShutdownHooks and the mark step :661-662, markStarted :704,
+// the brokerWG wait and markStopped :706-711); those lines themselves are
+// not covered by these tests.
 type drainTestFront struct {
 	addr       string
 	web        *hub.WebServer
@@ -228,10 +234,18 @@ func drainTestDockerInstances() []config.V1RuntimeBrokerInstanceConfig {
 // TestColocatedShutdown_FlatHostInBrokerWait: the production flat host
 // (startFlatRuntimeBrokerHost) joins the broker WaitGroup the hub front
 // waits on, so the front's HTTP drain begins only after the flat host's
-// shutdown, which stops every active instance (Server.Shutdown, which
-// runs DrainLaunches first), has finished; the front serves throughout.
+// shutdown (its instance shutdown included) has finished; the front's
+// listener stays open throughout. That each instance's shutdown runs
+// DrainLaunches is pinned by
+// TestColocatedShutdown_FlatServersDrainBeforeHubHTTPDrain.
 func TestColocatedShutdown_FlatHostInBrokerWait(t *testing.T) {
 	_, globalDir := brokerTestHome(t)
+	// startFlatRuntimeBrokerHost builds real docker runtimes and runs the
+	// ownership preflight (docker ps): a docker that lists nothing makes
+	// the test independent of the host's docker and its containers.
+	fakeBin := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(fakeBin, "docker"), []byte("#!/bin/sh\nexit 0\n"), 0o755))
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	origHub, origSim, origProber := enableHub, simulateRemoteBroker, flatScopeProber
 	t.Cleanup(func() { enableHub, simulateRemoteBroker, flatScopeProber = origHub, origSim, origProber })
 	enableHub, simulateRemoteBroker = true, false

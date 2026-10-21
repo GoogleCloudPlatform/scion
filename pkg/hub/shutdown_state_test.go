@@ -24,6 +24,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -342,6 +343,11 @@ func TestWebServerShutdown_BrokerThenListenerThenHubTeardown(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}), ReadHeaderTimeout: 5 * time.Second}
 	go func() { _ = hs.Serve(ln) }()
+	var releaseOnce sync.Once
+	t.Cleanup(func() {
+		releaseOnce.Do(func() { close(release) })
+		_ = hs.Close()
+	})
 
 	ws := NewWebServer(WebServerConfig{Host: "127.0.0.1"})
 	var hubTornDown atomic.Bool
@@ -361,12 +367,16 @@ func TestWebServerShutdown_BrokerThenListenerThenHubTeardown(t *testing.T) {
 		_ = resp.Body.Close()
 		reqDone <- resp.StatusCode
 	}()
-	<-inFlight
+	select {
+	case <-inFlight:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the request never reached the handler")
+	}
 
 	var brokerWaited, listenerOpenInWait, tornDownInWait atomic.Bool
 	ws.SetShutdownHooks(ShutdownHooks{
 		BeforeHTTPDrain: func(context.Context) {
-			listenerOpenInWait.Store(dialable(addr))
+			listenerOpenInWait.Store(shutdownTestDialable(addr))
 			tornDownInWait.Store(hubTornDown.Load())
 			brokerWaited.Store(true)
 		},
@@ -377,13 +387,13 @@ func TestWebServerShutdown_BrokerThenListenerThenHubTeardown(t *testing.T) {
 		close(shutdownDone)
 	}()
 
-	require.Eventually(t, func() bool { return !dialable(addr) }, 5*time.Second, 10*time.Millisecond, "the web listener did not close")
+	require.Eventually(t, func() bool { return !shutdownTestDialable(addr) }, 5*time.Second, 10*time.Millisecond, "the web listener did not close")
 	assert.True(t, brokerWaited.Load(), "web BeforeHTTPDrain did not run before the listener closed")
 	assert.True(t, listenerOpenInWait.Load(), "web listener closed before the broker wait")
 	assert.False(t, tornDownInWait.Load(), "the mounted hub was torn down before the broker wait")
 	assert.False(t, hubTornDown.Load(), "the mounted hub was torn down while a request was still draining")
 
-	close(release)
+	releaseOnce.Do(func() { close(release) })
 	assert.Equal(t, http.StatusOK, <-reqDone, "the in-flight request completes")
 	select {
 	case <-shutdownDone:
@@ -393,8 +403,8 @@ func TestWebServerShutdown_BrokerThenListenerThenHubTeardown(t *testing.T) {
 	assert.True(t, hubTornDown.Load(), "the mounted hub's teardown ran after the drain")
 }
 
-// dialable reports whether addr accepts a TCP connection.
-func dialable(addr string) bool {
+// shutdownTestDialable reports whether addr accepts a TCP connection.
+func shutdownTestDialable(addr string) bool {
 	conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
 	if err != nil {
 		return false
