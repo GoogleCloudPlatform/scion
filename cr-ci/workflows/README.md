@@ -45,11 +45,14 @@ P7 is a separate pull request outside `cr-ci/`, and it needs ptone's word. It
 changes only the `lint` job of `.github/workflows/ci.yml`:
 
 1. Replace `runs-on: ubuntu-latest` with the expression above.
-2. In the **golangci-lint** step, replace the `env:` block with the one in
+2. Add the snippet's first step, "Keep caches under HOME on /scratch (cr-ci
+   runner only)", as the job's first step. It runs only when
+   `runner.environment == 'self-hosted'`.
+3. In the **golangci-lint** step, replace the `env:` block with the one in
    the snippet. The throttles stay on GitHub-hosted runners and are lifted
    only when `runner.environment == 'self-hosted'`.
-3. In the same step, change `--concurrency=2` to `--concurrency="$LINT_CONCURRENCY"`.
-4. Update the step's comment block to say that the throttles apply to the
+4. In the same step, change `--concurrency=2` to `--concurrency="$LINT_CONCURRENCY"`.
+5. Update the step's comment block to say that the throttles apply to the
    16 GB runner only.
 
 The change is inert until `SCION_LARGE_RUNNER` is set on a repository
@@ -70,14 +73,19 @@ v1 routes `lint` only.
   using the action's v2.15.0, so CI results do not change. The PoC uses the
   image's binary. Bring the image pin in step with CI before relying on the
   pre-installed tool.
-- **`~/.cache` is in memory.** `ci.yml` exports
-  `GOLANGCI_LINT_CACHE=$HOME/.cache/golangci-lint`, the path the action
-  restores. On a cr-ci runner, `$HOME` is on Cloud Run's in-memory root
-  filesystem, not on `/scratch`. The PoC's report step prints
-  `du -sh ~/.cache`. If the analysis cache turns out large, P7 should point
-  it at `/scratch` (the entrypoint already exports
-  `GOLANGCI_LINT_CACHE=/scratch/golangci-lint-cache`), and accept that the
-  action's cache restore then misses.
+- **`~/.cache` is linked to `/scratch`.** On a cr-ci runner, `$HOME` is on
+  Cloud Run's in-memory root filesystem. `ci.yml` exports
+  `GOLANGCI_LINT_CACHE=$HOME/.cache/golangci-lint`, which is the path
+  `golangci-lint-action` restores and saves; the action derives it from
+  `$HOME` itself. Pointing the variable straight at `/scratch` would
+  therefore break the action's cache. Instead, the snippet's first step
+  (cr-ci runner only) links `~/.cache` to `/scratch/cache`, the entrypoint's
+  `XDG_CACHE_HOME`, so the same path resolves to the disk. It links the
+  *parent* directory: tar replaces a symlink that sits at an archived path,
+  but follows one in a parent component. The PoC does the same, and its
+  report shows where `~/.cache` points and how much of `$HOME` stayed on the
+  root filesystem (`du -shx ~`). P6 confirms that the action's restore lands
+  on `/scratch`.
 - The Go build and module caches restored by `setup-go-cache` land on
   `/scratch`, because the entrypoint exports `GOCACHE` and `GOMODCACHE`
   there and `go env` reports them.
@@ -111,6 +119,8 @@ mediator log and the execution log
   default label equals `RUNNER_LABEL`'s default in `config.example.env`.
   It contains no `-c=1` throttle, and it reports `memory.peak` and
   `df -h /scratch`.
+- Both templates link `~/.cache` to `/scratch` in their first step, on the
+  self-hosted runner only.
 - Every `uses:` is pinned to a full commit SHA. No tabs.
 - `scripts/github-app-manifest.json` requests exactly Actions read,
   Administration write and Metadata read, and the `workflow_job` event. The

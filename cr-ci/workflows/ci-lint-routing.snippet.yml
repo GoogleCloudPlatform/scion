@@ -1,6 +1,6 @@
 # cr-ci routing snippet for the `lint` job of .github/workflows/ci.yml
 # (TEMPLATE, not a workflow). P7 applies it in a separate PR; see
-# cr-ci/workflows/README.md. Only the lines below change; everything else in
+# cr-ci/workflows/README.md. Only the lines below change (plus one new step); everything else in
 # the job (checkout, setup-go-cache, the golangci-lint-action install, the
 # memory sampler, save-go-cache) stays exactly as it is.
 #
@@ -22,7 +22,14 @@
 #    PoC has measured the headroom. On any GitHub-hosted runner, including a
 #    larger one used as the fallback, the current values apply unchanged.
 #
-# 3. The golangci-lint command line reads LINT_CONCURRENCY instead of the
+# 3. A new FIRST step, on the cr-ci runner only, links ~/.cache to /scratch,
+#    so golangci-lint's analysis cache (and anything else under ~/.cache)
+#    stays off Cloud Run's in-memory root filesystem. ci.yml's other caches
+#    already land on /scratch: setup-go-cache uses `go env GOCACHE` and
+#    GOMODCACHE, which the runner entrypoint points at /scratch, and the
+#    tool cache is under the runner's work folder on /scratch.
+#
+# 4. The golangci-lint command line reads LINT_CONCURRENCY instead of the
 #    literal 2:
 #      golangci-lint run --new-from-merge-base=origin/main --concurrency="$LINT_CONCURRENCY" || rc=$?
 
@@ -31,7 +38,25 @@ lint:
   runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
   timeout-minutes: 60
   steps:
-    # ... unchanged steps up to and including "Install golangci-lint" ...
+    - name: Keep caches under HOME on /scratch (cr-ci runner only)
+      if: runner.environment == 'self-hosted'
+      shell: bash
+      run: |
+        # Cloud Run's root filesystem, including $HOME, is in memory. Link
+        # ~/.cache to the ephemeral disk (the entrypoint's XDG_CACHE_HOME), so
+        # GOLANGCI_LINT_CACHE=$HOME/.cache/golangci-lint, the path
+        # golangci-lint-action restores and saves, resolves to /scratch and
+        # still matches the action's cache path. The PARENT is linked: tar
+        # would replace a symlink at the archived path itself.
+        set -euo pipefail
+        mkdir -p /scratch/cache
+        if [ -d "$HOME/.cache" ] && [ ! -L "$HOME/.cache" ]; then
+          cp -a "$HOME/.cache/." /scratch/cache/
+          rm -rf "$HOME/.cache"
+        fi
+        ln -sfn /scratch/cache "$HOME/.cache"
+        echo "~/.cache -> $(readlink -f "$HOME/.cache")"
+    # ... unchanged steps: "Checkout code", "Setup Go", "Install golangci-lint" ...
     - name: golangci-lint
       shell: bash
       env:
@@ -40,6 +65,6 @@ lint:
         GOFLAGS: ${{ runner.environment != 'self-hosted' && '-gcflags=github.com/GoogleCloudPlatform/scion/pkg/hub=-c=1' || '' }}
         LINT_CONCURRENCY: ${{ runner.environment == 'self-hosted' && '4' || '2' }}
       run: |
-        # ... unchanged, except the golangci-lint line (see note 3) ...
+        # ... unchanged, except the golangci-lint line (see note 4) ...
         golangci-lint run --new-from-merge-base=origin/main --concurrency="$LINT_CONCURRENCY" || rc=$?
     # ... unchanged "Save Go cache" step ...

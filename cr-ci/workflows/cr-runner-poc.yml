@@ -44,6 +44,25 @@ jobs:
     # cancels a hung job before Cloud Run kills the container.
     timeout-minutes: 40
     steps:
+      - name: Keep caches under HOME on /scratch (cr-ci runner only)
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        run: |
+          # Cloud Run's root filesystem, including $HOME, is in memory. Link
+          # ~/.cache to the ephemeral disk (the entrypoint's XDG_CACHE_HOME), so
+          # GOLANGCI_LINT_CACHE=$HOME/.cache/golangci-lint, the path
+          # golangci-lint-action restores and saves, resolves to /scratch and
+          # still matches the action's cache path. The PARENT is linked: tar
+          # would replace a symlink at the archived path itself.
+          set -euo pipefail
+          mkdir -p /scratch/cache
+          if [ -d "$HOME/.cache" ] && [ ! -L "$HOME/.cache" ]; then
+            cp -a "$HOME/.cache/." /scratch/cache/
+            rm -rf "$HOME/.cache"
+          fi
+          ln -sfn /scratch/cache "$HOME/.cache"
+          echo "~/.cache -> $(readlink -f "$HOME/.cache")"
+
       - name: Runner facts
         shell: bash
         run: |
@@ -119,4 +138,6 @@ jobs:
           grep -E '^(MemTotal|MemAvailable):' /proc/meminfo || true
           df -h /scratch
           du -sh /scratch/* 2>/dev/null || true
-          du -sh "$HOME/.cache" 2>/dev/null || true
+          ls -ld "$HOME/.cache" 2>/dev/null || true
+          du -sh "$HOME/.cache/" 2>/dev/null || true      # trailing slash: follows the link to /scratch
+          du -shx "$HOME" 2>/dev/null || true             # what stayed on the in-memory root filesystem

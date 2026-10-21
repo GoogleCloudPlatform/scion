@@ -167,6 +167,31 @@ func TestPoCWorkflow(t *testing.T) {
 	}
 }
 
+// TestHomeCachesOnScratch: on the cr-ci runner, $HOME is in memory, so both
+// templates link ~/.cache to /scratch in their first step, and only there.
+func TestHomeCachesOnScratch(t *testing.T) {
+	for _, f := range []string{"cr-runner-poc.yml", "ci-lint-routing.snippet.yml"} {
+		s := readFile(t, f)
+		first := regexp.MustCompile(`(?m)^ *steps:\n *- name: (.*)\n *if: (.*)$`).FindStringSubmatch(s)
+		if first == nil || first[1] != "Keep caches under HOME on /scratch (cr-ci runner only)" ||
+			first[2] != "runner.environment == 'self-hosted'" {
+			t.Errorf("%s: the first step must be the self-hosted-only ~/.cache link step, got %q", f, first)
+		}
+		for _, want := range []string{
+			`ln -sfn /scratch/cache "$HOME/.cache"`,
+			`[ ! -L "$HOME/.cache" ]`,
+		} {
+			if !strings.Contains(s, want) {
+				t.Errorf("%s lacks %q", f, want)
+			}
+		}
+		// Linking the cache dir itself would be replaced by tar on restore.
+		if regexp.MustCompile(`ln -sfn? \S+ "\$HOME/\.cache/golangci-lint"`).MatchString(s) {
+			t.Errorf("%s links ~/.cache/golangci-lint itself; link the parent", f)
+		}
+	}
+}
+
 var pinnedUses = regexp.MustCompile(`^uses: (\./\S+|[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40})( #.*)?$`)
 
 func TestTemplatesHygiene(t *testing.T) {
