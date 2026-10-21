@@ -644,10 +644,11 @@ func (s *Server) replaceQueuedStop(ctx context.Context, agent *store.Agent, cont
 // be begun before the request was sent (errStartRunNotBegun; not when a
 // delete refused the run-ID write, since the delete then owns the row), a
 // broker without the required capability, a create left incomplete, a phase
-// that no longer allows a launch, or a broker that confirmed it did not act. Anything else,
-// including a start that succeeded but whose status write failed, an
-// ambiguous dispatch error, a claim refusal (the earlier claimant owns the
-// intent) or a launch in flight (which may still start a container), is not.
+// that no longer allows a launch, or a broker that confirmed it did not
+// act. Anything else, including a start that succeeded but whose status
+// write failed, an ambiguous dispatch error, a claim refusal (the earlier
+// claimant owns the intent) or a launch in flight (which may still start a
+// container), is not.
 func startDidNotHappen(err error) bool {
 	if err == nil || errors.Is(err, errStartedStatusWrite) || errors.Is(err, errStartClaimLost) {
 		return false
