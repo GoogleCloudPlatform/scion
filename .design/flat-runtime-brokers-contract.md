@@ -650,7 +650,7 @@ GoogleCloudPlatform/scion#2479 and GoogleCloudPlatform/scion#2483 are in flight 
 - **Name: `hub.flat_runtime_brokers`**, exported as `experiments.FlatRuntimeBrokers`.
 - **Fields:**
   - Title: "Flat Runtime Brokers"
-  - Description: "Lets a Runtime Broker serve exactly one runtime target with a stable identity: the hub accepts single-target Runtime Broker registrations, pins new agents to that target and rejects mismatched dispatches. Existing profile-based Runtime Brokers are unchanged. The web layer only lets the web UI read the flag (presentation only); every hub check is LayerServer."
+  - Description: "Lets a Runtime Broker serve exactly one runtime target with a stable identity: the hub accepts single-target Runtime Broker registrations, pins new agents to that target and rejects mismatched dispatches. Existing profile-based Runtime Brokers are unchanged. The web layer only lets the web UI read the flag (presentation only); every hub check is LayerServer. With it on, the web UI shows the Brokers area."
   - Layers `[LayerServer, LayerWeb]`, Default `false`, Stage `alpha`, Issue `ptone/scion#2926` (the delivery tracker, which outlives P1.1 until the experiment graduates or is retired), Owner `runtime-broker`, ReviewBy `2027-03-31`.
 - **Web layer:** `LayerWeb` lets the browser read the flag to select the Brokers UI. It is presentation only; every Hub check below is unchanged, and `Default` stays `false` (not in `DEFAULT_ON_FLAGS`).
 - **Enforcement:** in Hub code with `s.experimentEnabled(experiments.FlatRuntimeBrokers)`, at registration (R1, including the embedded wrapper) and at agent create (section 10).

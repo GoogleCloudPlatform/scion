@@ -22,6 +22,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"log/slog"
+	"maps"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -771,12 +772,13 @@ func TestArtifactAttachmentRef_HistoryNeverFlags(t *testing.T) {
 	require.False(t, merged[resp.ID][0].artifact, "history references are never flagged")
 }
 
-// TestDeliverToUser_RepublishCarriesNoArtifactAttachments pins the order of
-// the three attachment steps of deliverToUser (design section 4): a bus
-// message whose transport metadata names a legacy attachment of the sender
-// and an artifact attachment id links the legacy one, leaves the artifact
-// row in its upload scope, publishes no reference that names the artifact
-// id or is flagged, and leaves no transport key behind.
+// TestDeliverToUser_RepublishCarriesNoArtifactAttachments pins the attachment
+// handling of deliverToUser's re-publish path (design section 4,
+// ptone/scion#5504): a bus message whose transport metadata names a legacy
+// attachment of the sender and an artifact attachment id links the legacy
+// one, leaves the artifact row in its upload scope, carries exactly the
+// linked file on the SSE event and the member fan-out (never the artifact id,
+// never a flagged reference), and leaves the shared message unchanged.
 func TestDeliverToUser_RepublishCarriesNoArtifactAttachments(t *testing.T) {
 	f := newRefFixture(t)
 	st := enableAttachmentArtifacts(t, f)
@@ -804,6 +806,8 @@ func TestDeliverToUser_RepublishCarriesNoArtifactAttachments(t *testing.T) {
 	msg.SenderID = f.aa.ID
 	msg.RecipientID = f.ub.ID
 	msg.Metadata = map[string]string{attachmentsMetadataKey: encoded}
+	before := *msg
+	before.Metadata = maps.Clone(msg.Metadata)
 	proxy.deliverToUser(ctx, f.projA.ID, "project."+f.projA.ID+".user.message", msg)
 
 	result, err := f.st.ListMessages(ctx, store.MessageFilter{RecipientID: f.ub.ID}, store.ListOptions{})
@@ -821,15 +825,16 @@ func TestDeliverToUser_RepublishCarriesNoArtifactAttachments(t *testing.T) {
 	select {
 	case evt := <-ch:
 		require.NotContains(t, string(evt.Data), artifactID, "the SSE event names no artifact attachment")
+		var payload UserMessageEvent
+		require.NoError(t, json.Unmarshal(evt.Data, &payload))
+		require.Len(t, payload.Attachments, 1, "the SSE event carries the linked file (ptone/scion#5504)")
+		require.Equal(t, legacy, payload.Attachments[0].ID)
 	case <-time.After(5 * time.Second):
 		t.Fatal("no SSE event")
 	}
-	for _, refs := range fanned {
-		for _, ref := range refs {
-			require.NotEqual(t, artifactID, ref.ID, "the member fan-out names no artifact attachment")
-			require.False(t, ref.artifact)
-		}
-	}
-	_, present := msg.Metadata[attachmentsMetadataKey]
-	require.False(t, present, "the transport key is stripped")
+	require.Len(t, fanned, 1, "one member fan-out")
+	require.Len(t, fanned[0], 1, "the member fan-out carries the linked file only")
+	require.Equal(t, legacy, fanned[0][0].ID)
+	require.False(t, fanned[0][0].artifact)
+	require.Equal(t, before, *msg, "the shared message, its metadata included, is unchanged")
 }

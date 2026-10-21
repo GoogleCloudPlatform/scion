@@ -703,10 +703,10 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 	// A message the sending handler already stored (StoredMessageID,
 	// ptone/scion#4596 decision D2): the handler resolved its conversation,
 	// stored, linked and bound its attachments, stamped the watermarks and
-	// published the SSE event. Only the transport-key strip and the message
-	// record run here, so no second row and no second event exist.
+	// published the SSE event. Only the message record runs here, so no
+	// second row and no second event exist; msg is shared with the bus's
+	// other subscribers and is left unchanged (ptone/scion#5504).
 	if msg.StoredMessageID != "" {
-		delete(msg.Metadata, attachmentsMetadataKey)
 		if msg.ConversationID != "" {
 			storeMsg.ConversationID = msg.ConversationID
 		}
@@ -728,28 +728,27 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 		return
 	}
 
-	// Attachment handling on this re-publish path runs in three steps, in
-	// this order (ptone/scion#4596):
-	//  1. link the AttachmentStore refs parsed from the transport metadata
-	//     (sender-owned files only, below);
-	//  2. delete the transport key from the metadata;
-	//  3. parse the metadata again for the SSE event and the member fan-out.
-	// Step 3 runs after step 2 on purpose: refs that came in transport
-	// metadata are never re-published from here, and parseAttachmentRefs can
-	// never build a reference marked as an artifact attachment. Attachments
-	// stored as artifacts never travel in transport metadata: the sending
-	// handler validates them from its request, binds them to the message it
-	// stores itself, and publishes them; this path never binds or publishes
-	// one. Pinned by TestDeliverToUser_RepublishCarriesNoArtifactAttachments.
+	// Attachment handling on this re-publish path (ptone/scion#4596,
+	// ptone/scion#5504): the AttachmentStore refs parsed from the transport
+	// metadata are linked (sender-owned files only, below), and the SSE event
+	// and the member fan-out carry exactly the refs that were linked. msg is
+	// shared with the bus's other subscribers and is not modified. A linked
+	// ref is always an AttachmentStore file: attachments stored as artifacts
+	// never travel in transport metadata (the sending handler validates them
+	// from its request, binds them to the message it stores itself, and
+	// publishes them), so this path never binds or publishes one. Pinned by
+	// TestDeliverToUser_RepublishCarriesNoArtifactAttachments.
 
 	// W7: Link the sender's attachments, recorded before publish, to the message
 	// row created here — the ID they need exists nowhere else. Done before the
 	// SSE event so a client refetching on it already sees them. Only files the
 	// sender owns are linked (linkSenderOwnedAttachmentRefs): the refs come
 	// from message metadata, and a linked file downloads for the message's
-	// readers.
-	linkSenderOwnedAttachmentRefs(ctx, p.webChatStore, storeMsg.ID, projectID, msg.SenderID, parseAttachmentRefs(msg.Metadata), p.log)
-	delete(msg.Metadata, attachmentsMetadataKey) // strip internal transport key
+	// readers. The live event below carries exactly the linked refs, the
+	// files history lists (ptone/scion#5504). msg is shared with the bus's
+	// other subscribers, so its metadata, transport key included, is left
+	// as it is: nothing below reads the attachments key.
+	linkedRefs := linkSenderOwnedAttachmentRefs(ctx, p.webChatStore, storeMsg.ID, projectID, msg.SenderID, parseAttachmentRefs(msg.Metadata), p.log)
 
 	// Artifact references are recorded only when the hub's admission step
 	// set them on this in-process message. Any other value is ignored: it
@@ -766,10 +765,9 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 	p.afterUserMessagePersisted(ctx, storeMsg)
 
 	// Publish SSE event so connected browser clients receive real-time inbox updates.
-	refs := parseAttachmentRefs(msg.Metadata)
-	p.events.PublishUserMessage(ctx, storeMsg, refs, artifactRefs)
+	p.events.PublishUserMessage(ctx, storeMsg, linkedRefs, artifactRefs)
 	if p.memberFanout != nil {
-		p.memberFanout(ctx, storeMsg, refs, artifactRefs)
+		p.memberFanout(ctx, storeMsg, linkedRefs, artifactRefs)
 	}
 
 	p.logUserMessageDelivered(projectID, topic, storeMsg, msg)
@@ -845,10 +843,12 @@ func (p *MessageBrokerProxy) logUserMessageDelivered(projectID, topic string, st
 			"topic", topic,
 			"source", "broker",
 		}
+		// A copy: msg is shared with the bus's other subscribers.
+		logged := *msg
 		if storeMsg.ConversationID != "" {
-			msg.ConversationID = storeMsg.ConversationID
+			logged.ConversationID = storeMsg.ConversationID
 		}
-		logAttrs = append(logAttrs, msg.LogAttrs()...)
+		logAttrs = append(logAttrs, logged.LogAttrs()...)
 		p.messageLog.Info("user message delivered via broker", logAttrs...)
 	}
 }

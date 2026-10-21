@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -60,7 +61,9 @@ func TestStoredMessageID_NotSettableFromWire(t *testing.T) {
 }
 
 // TestDeliverToUser_SkipsCreateForStoredMessage (K13): with StoredMessageID
-// set, deliverToUser stores no row and publishes no SSE event.
+// set, deliverToUser stores no row and publishes no SSE event, and leaves the
+// message, which the bus shares with its other subscribers, unchanged
+// (ptone/scion#5504).
 func TestDeliverToUser_SkipsCreateForStoredMessage(t *testing.T) {
 	f := newSendFixture(t)
 	events := NewChannelEventPublisher()
@@ -72,6 +75,8 @@ func TestDeliverToUser_SkipsCreateForStoredMessage(t *testing.T) {
 	msg.SenderID, msg.RecipientID = f.sender.ID, f.ua.ID
 	msg.StoredMessageID = uuid.NewString()
 	msg.Metadata = map[string]string{attachmentsMetadataKey: "[]"}
+	before := *msg
+	before.Metadata = maps.Clone(msg.Metadata)
 	proxy.deliverToUser(context.Background(), f.projA.ID, "project."+f.projA.ID+".user.message", msg)
 	require.Equal(t, 0, f.countStored(t, "already stored"), "no second row")
 	select {
@@ -79,8 +84,7 @@ func TestDeliverToUser_SkipsCreateForStoredMessage(t *testing.T) {
 		t.Fatalf("unexpected SSE event: %s", evt.Data)
 	case <-time.After(200 * time.Millisecond):
 	}
-	_, present := msg.Metadata[attachmentsMetadataKey]
-	require.False(t, present, "the transport key is still stripped")
+	require.Equal(t, before, *msg, "the shared message, its metadata included, is unchanged")
 }
 
 // TestDeliverToUser_PersistsOnceWithoutStoredID: without StoredMessageID,

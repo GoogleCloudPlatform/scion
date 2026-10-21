@@ -172,11 +172,15 @@ These are read by the Scion broker (or CLI) **to configure itself as a process**
 part of the agent settings chain at all, and an agent never sees them by this route.
 
 They enter through the koanf environment layer in `LoadVersionedSettings`
-(`pkg/config/settings_v1.go`), which is loaded **last** — after the embedded defaults, the global
+(`pkg/config/settings_v1.go`; `LoadSettings` and `LoadEffectiveSettings` both read through its layers via `loadVersionedSettings` in `pkg/config/settings_view.go`), loaded **last** — after the embedded defaults, the global
 `~/.scion/settings.yaml`, the in-repo `.scion/settings.yaml`, and any external project config.
-Loaded last means **highest priority**: a `SCION_*` variable in the broker's process environment
-overrides every settings file. An exported but empty `SCION_*` variable counts as unset, so it never
-clears a value from a settings file.
+Legacy-format settings files (those without `schema_version`) are converted to the v1 shape at
+their own layer when read, keeping only keys whose legacy source key the file sets, and a versioned file's legacy camelCase `hub.projectId` is read as a fallback when
+`hub.project_id` is absent. Loaded last means **highest priority**: a `SCION_*` variable in the
+broker's process environment overrides every settings file. An exported but empty `SCION_*`
+variable counts as unset, so it never clears a value from a settings file. Inside a Hub-managed agent container (`SCION_AGENT_ID` set), `SCION_WORKSPACE_PATH` and `SCION_RUNTIME`, which the runtime sets for the agent, are ignored as settings overrides, so they do not override `workspace_path` or `runtime`. The retired
+`SCION_HUB_BROKER_ID`, `SCION_HUB_BROKER_TOKEN`, `SCION_HUB_BROKER_NICKNAME`, and `SCION_BUCKET_*`
+variables are not read.
 
 ```
 embedded defaults  <  ~/.scion/settings.yaml  <  .scion/settings.yaml
@@ -187,10 +191,10 @@ Key names are mapped by `versionedEnvKeyMapper`: the `SCION_` prefix is stripped
 lowercased, and `_` becomes a settings path separator — so `SCION_HUB_PROJECT_ID` sets
 `hub.project_id`.
 
-`SCION_HUB_PROJECT_ID` also outranks the project's `.scion/project-id` file, in both settings
-loaders, and a warning names both sources when they disagree. `SCION_PROJECT_ID` ranks lower: it
-sets the top-level `project_id`, and a `hub.project_id` from the settings files or the
-`project-id` file wins over it. When both variables are set, `SCION_HUB_PROJECT_ID` wins.
+`SCION_HUB_PROJECT_ID` also outranks the project's `.scion/project-id` file, and a warning names
+both sources when they disagree. `SCION_PROJECT_ID` ranks lower: it sets the top-level
+`project_id`, and a `hub.project_id` from the settings files or the `project-id` file wins over it.
+When both variables are set, `SCION_HUB_PROJECT_ID` wins.
 
 :::caution[Same prefix, unrelated mechanism]
 Bucket 1 and [Bucket 2](#bucket-2--scion_-variables-that-scion-injects-into-agents) both use the

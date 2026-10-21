@@ -275,6 +275,8 @@ Inside the agent, `sciontool doctor` has a **Transport Auth** section that shows
 - the expiry of the bootstrap value and of the file side by side, and when the file was last written;
 - the transport outcome of the last refresh, or of the last `reset-auth`.
 
+When `~/.scion/transport-token` is replaced by rename during a read, the file reader retries up to three reads in total; if all three encounter an unlinked file during back-to-back refreshes, it keeps the value from its last successful read if that read is at most two seconds old and has a parsed expiry in the future, and `sciontool doctor` reports that state (`FileRetained`).
+
 Doctor never prints token values. Its authentication checks tell a rejection by the platform proxy (a non-JSON 401/403, or a redirect to Google sign-in) apart from a rejection by the Hub (a JSON error), and the remediation differs: for a proxy rejection, run `reset-auth` and check the transport mode and audience; for a Hub rejection, the agent token itself is invalid. Doctor does not follow redirects. Redirects are shown only as their scheme and host, never with their query string. A redirect to any other host means authentication could not be confirmed, and it counts as a failed check; it usually means `SCION_HUB_ENDPOINT` is not the hub's final URL. A 404 on `/healthz` can come from the platform rather than the Hub, since some platforms (for example Cloud Run) reserve that path.
 
 ### Agent-side token source selection

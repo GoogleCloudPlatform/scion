@@ -242,7 +242,7 @@ Hub administrators can set a hub-wide default GCP identity in **Admin > Server C
 4. The hub default. An explicit hub default of **Block** counts as set too.
 5. Nothing configured at any rung: the Hub leaves the agent's GCP identity unset and sends no mode, so the Runtime Broker applies its runtime default: **Block** on every runtime except Kubernetes, **Passthrough** on Kubernetes.
 
-This ladder applies the same way whether the agent is created interactively/via the API or dispatched by a schedule (ptone/scion#1927): a scheduled dispatch starts at rung 2, and a hub default with no project-level override reaches it exactly as it would an interactive create.
+This ladder applies the same way whether the agent is created interactively/via the API or dispatched by a schedule: a scheduled dispatch starts at rung 2, and a hub default with no project-level override reaches it exactly as it would an interactive create.
 
 **Kubernetes runtime note**: on the Kubernetes runtime, **Block** runs the agent pod as a zero-privilege identity rather than refusing it: the operator's block Kubernetes ServiceAccount (`kubernetes_block_service_account`), or the namespace's default ServiceAccount when none is configured, with no Kubernetes API token mounted and only on Workload Identity nodes. This applies whether **Block** comes from the create request, an explicit project default, an explicit hub default, or a project or hub default of **Assign** with no service account selected. Zero privilege depends on IAM preconditions the operator must keep true; see [block on Kubernetes](/scion/hosted/ha/kubernetes/#block). Rung 5 (nothing configured) and a denied hub-default **Passthrough** (below) are not **Block**: they get the Kubernetes runtime default, **Passthrough**.
 
@@ -400,7 +400,7 @@ To ensure security policies stay up-to-date and to support legacy agents created
 - **Legacy Agent Compatibility**: Legacy agents that do not have a stored role default to the `full` role. This prevents production regressions where standing agents lose modern required scopes (such as `project:read`, `project:agent:lifecycle`, or secret access) after a token refresh.
 
 #### Raw Template Scopes Removed
-With the introduction of tiered agent roles, the raw template field `hubAccess.scopes` no longer has any effect: the Hub does not read it from templates or record it on agents ([ptone/scion#4224](https://github.com/ptone/scion/issues/4224)), and the CLI warns when a local template file still sets it. Agent permissions are configured via the named roles.
+With the introduction of tiered agent roles, the raw template field `hubAccess.scopes` no longer has any effect: the Hub does not read it from templates or record it on agents, and the CLI warns when a local template file still sets it. Agent permissions are configured via the named roles.
 
 ## Implementation Status
 

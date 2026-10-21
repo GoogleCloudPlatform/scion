@@ -1691,6 +1691,18 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		upd.SetExitReason("")
 	}
 
+	// A move from a pre-running phase to running is the new run's first
+	// running write: the exit code and reason describe the previous run, so
+	// they are cleared, whichever path brings running (ptone/scion#5384).
+	// The provisional starting write keeps them, since a rollback restores
+	// the prior stopped or error phase, which still needs them. A running to
+	// running write keeps them too: a disruption reason can be recorded on a
+	// live agent. This reads the final phase, after every guard above.
+	if su.Phase == string(state.PhaseRunning) && isPreRunningPhase(current.Phase) {
+		upd.ClearExitCode()
+		upd.SetExitReason("")
+	}
+
 	// A stored signaled reason describes the run that ended; it is cleared
 	// when the agent next moves to starting or running, by any path (a
 	// reincarnation, or a start whose started-status write failed). This
@@ -1773,6 +1785,16 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 // start path) leave ReportSource empty.
 func isAgentReport(su store.AgentStatusUpdate) bool {
 	return su.ReportSource != ""
+}
+
+// isPreRunningPhase reports whether phase is one a run passes through
+// before it first reaches running.
+func isPreRunningPhase(phase string) bool {
+	switch state.Phase(phase) {
+	case state.PhaseCreated, state.PhaseProvisioning, state.PhaseCloning, state.PhaseStarting:
+		return true
+	}
+	return false
 }
 
 // isBrokerHeartbeat reports whether su is a broker heartbeat: the agent

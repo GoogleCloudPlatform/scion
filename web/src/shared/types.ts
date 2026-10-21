@@ -1221,6 +1221,104 @@ export interface RuntimeTargetDescriptor {
   displayName?: string;
 }
 
+/**
+ * The publishable configuration a flat Runtime Broker instance last
+ * reported (Go `api.RuntimeTargetPresentation`, the frozen FC4-a
+ * "published" set). It is read-only, shown as the instance's defaults for
+ * new agents: not the configuration of any agent and not a check of cluster
+ * permissions. Fields FC4-a never publishes (kubeconfig context, service
+ * account policy, volume sources, secret targets, env values) have no field
+ * here; a client must render only the fields named below.
+ */
+export interface RuntimeTargetPresentation {
+  schemaVersion: number;
+  key: string;
+  name: string;
+  target?: PresentedTarget;
+  agentDefaults?: PresentedAgentDefaults;
+}
+
+/** The publishable part of an instance's runtime_target. */
+export interface PresentedTarget {
+  type: string;
+  displayName?: string;
+  namespace?: string;
+  gke?: boolean;
+  priorityClassName?: string;
+  sharedDirStorageClass?: string;
+  sharedDirSize?: string;
+  /** Tri-state: absent (or null) = unset; true and false are distinct. */
+  safeToEvict?: boolean | null;
+  sharedDirStorageBackend?: string;
+  sharedDirStorageBackends?: Record<string, string>;
+  homeStorageBackend?: string;
+  /**
+   * Kubernetes placement defaults (ptone/scion#5085). Optional: a Hub that
+   * does not publish them sends none, and the card then shows no
+   * Placement group.
+   */
+  nodeSelector?: Record<string, string>;
+  tolerations?: PresentedToleration[];
+  runtimeClassName?: string;
+}
+
+/**
+ * One Kubernetes toleration as presented. Only these four fields are ever
+ * rendered; any other key on the object is ignored.
+ */
+export interface PresentedToleration {
+  key?: string;
+  /** "Equal" or "Exists"; empty means Equal. */
+  operator?: string;
+  /** Empty for Exists. */
+  value?: string;
+  /** NoSchedule, PreferNoSchedule, NoExecute, or empty for any effect. */
+  effect?: string;
+}
+
+/** Resource quantities as the Hub sends them (Go `api.ResourceSpec`). */
+export interface PresentedResourceSpec {
+  requests?: { cpu?: string; memory?: string };
+  limits?: { cpu?: string; memory?: string };
+  disk?: string;
+}
+
+/** A volume mount's mount target, read-only flag and kind (never its source). */
+export interface PresentedVolume {
+  target: string;
+  readOnly?: boolean;
+  type?: string;
+}
+
+/** A secret declaration's key, kind and description (never a value or target). */
+export interface PresentedSecretDecl {
+  key: string;
+  type?: string;
+  description?: string;
+}
+
+/** One harness override; its environment is published as variable names only. */
+export interface PresentedHarnessOverride {
+  image?: string;
+  imagePullPolicy?: string;
+  authSelectedType?: string;
+  user?: string;
+  envKeys?: string[];
+  volumes?: PresentedVolume[];
+  resources?: PresentedResourceSpec;
+}
+
+/** The publishable part of an instance's agent_defaults. */
+export interface PresentedAgentDefaults {
+  defaultHarnessConfig?: string;
+  imageRegistry?: string;
+  cloneDepth?: string;
+  resources?: PresentedResourceSpec;
+  volumes?: PresentedVolume[];
+  secrets?: PresentedSecretDecl[];
+  harnessOverrides?: Record<string, PresentedHarnessOverride>;
+}
+
 /** Read-only view of an agent's pinned placement (Hub `pinnedRuntimeTarget`). */
 export interface PinnedRuntimeTarget {
   id: string;
@@ -1243,6 +1341,16 @@ export interface RuntimeBroker {
   profiles?: BrokerProfile[];
   /** Present only for a flat Runtime Broker (single runtime target). */
   runtimeTarget?: RuntimeTargetDescriptor;
+  /** What a flat Runtime Broker instance last reported; absent when none was. */
+  runtimeTargetPresentation?: RuntimeTargetPresentation;
+  /** When the Hub last saw runtimeTargetPresentation ("as reported at"). */
+  runtimeTargetPresentationObservedAt?: string;
+  /**
+   * True when the broker runs in the process that answered the request
+   * (this server's co-located broker or one of its flat instances).
+   * Read-only and display-only; absent otherwise.
+   */
+  hostedByThisServer?: boolean;
   autoProvide: boolean;
   endpoint?: string;
   labels?: Record<string, string>;
@@ -1250,6 +1358,8 @@ export interface RuntimeBroker {
   createdByName?: string;
   /** Configured GCP host service account (Go JSON tag is snake_case). */
   gcp_host_service_account_email?: string;
+  /** Configured GCP host project (read in snake_case; PATCH takes camelCase). */
+  gcp_host_project_id?: string;
   /** Creation and last-update times, as the hub sends them. */
   created?: string;
   updated?: string;

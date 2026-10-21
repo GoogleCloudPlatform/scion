@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
@@ -276,7 +277,7 @@ func TestStartAgentAfterCreate_WorktreePerAgent_RealManagerPreservesWorkspace(t 
 		},
 	})
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, realMgr, rt)
+	srv := New(cfg, realMgr, rt, config.RuntimeBuildRecord{})
 
 	createBody := fmt.Sprintf(`{
 		"id": "agent-hub-uuid-1",
@@ -489,7 +490,7 @@ func TestStartAgentAfterCreate_EnvAgentNameIgnored(t *testing.T) {
 		},
 	})
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, realMgr, rt)
+	srv := New(cfg, realMgr, rt, config.RuntimeBuildRecord{})
 
 	// Start a different agent, "other-agent", with a distinct value under
 	// SCION_AGENT_NAME in resolvedEnv. If the handler ever used that value
