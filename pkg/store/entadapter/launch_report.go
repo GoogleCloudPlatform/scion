@@ -342,7 +342,7 @@ func (s *AgentStore) applyLaunchReportActive(ctx context.Context, ltx *launchTx,
 		}
 		if r.State == store.LaunchReportStateFailed {
 			// The agent never ran: the broker must clean up.
-			if err := releaseBrokerQuotaTx(ctx, ltx.client, current.ID, now); err != nil {
+			if err := releaseBrokerQuotaTx(ctx, ltx.client, current, now); err != nil {
 				return store.LaunchReportAnswer{}, nil, err
 			}
 			return store.LaunchReportAnswer{Result: store.LaunchReportResultApplied, Changed: true}, updated, nil
@@ -411,7 +411,7 @@ func (s *AgentStore) applyLaunchReportPreRunning(ctx context.Context, ltx *launc
 		if err != nil {
 			return store.LaunchReportAnswer{}, nil, mapError(err)
 		}
-		if err := releaseBrokerQuotaTx(ctx, ltx.client, current.ID, now); err != nil {
+		if err := releaseBrokerQuotaTx(ctx, ltx.client, current, now); err != nil {
 			return store.LaunchReportAnswer{}, nil, err
 		}
 		return store.LaunchReportAnswer{Result: store.LaunchReportResultApplied, Changed: true}, updated, nil
