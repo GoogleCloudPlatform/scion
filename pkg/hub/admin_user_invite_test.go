@@ -925,6 +925,7 @@ func TestAdminUserInviteBulk_TransientRetriedOnce(t *testing.T) {
 		assert.Equal(t, inviteBatchStatusCreated, resp.Results[1].Status)
 		assert.False(t, resp.Complete)
 		assert.Equal(t, 1, resp.Counts.Failed)
+		assert.Equal(t, 3, flaky.calls, "two failed attempts for the first address, then one for the second")
 		_, err := s.GetUserByEmail(context.Background(), "unlucky@example.com")
 		assert.ErrorIs(t, err, store.ErrNotFound)
 	})
