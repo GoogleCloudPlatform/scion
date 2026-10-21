@@ -276,9 +276,11 @@ func TestConduitExternal_ForgetAgentDeletesRelayRows(t *testing.T) {
 	assert.Zero(t, ps.CurrentEpoch, "epoch row deleted")
 }
 
-// TestConduitExternal_DialReadsNoStore: a conduit dial in external relay
-// mode is answered from the cached eligible-relay count; it never reads the
-// registry.
+// TestConduitExternal_DialReadsNoStore: a conduit dial that a hub in
+// external relay mode does not proxy (here the ingress proxy is off) is
+// answered from the cached eligible-relay count; it never reads the
+// registry. A proxied dial reads it for relay selection
+// (conduit_ingress_test.go).
 func TestConduitExternal_DialReadsNoStore(t *testing.T) {
 	f := &externalFixture{conduitFixture: newConduitFixture(t)}
 	var reads atomic.Int64
@@ -293,7 +295,9 @@ func TestConduitExternal_DialReadsNoStore(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	f.srv.config.SharedSigningSecret = testRelaySessionSecret
-	require.NoError(t, f.srv.StartConduitExternal(ctx, externalOptions(t, f)))
+	opts := externalOptions(t, f)
+	opts.IngressOffCause = ConduitIngressCauseRequiresHMAC
+	require.NoError(t, f.srv.StartConduitExternal(ctx, opts))
 	before := reads.Load()
 	for i := 0; i < 3; i++ {
 		rec := httptest.NewRecorder()
@@ -348,7 +352,9 @@ func TestConduitExternal_IngressOffWithoutHMAC(t *testing.T) {
 				w.WriteHeader(http.StatusAccepted)
 			}))
 			t.Cleanup(relaySrv.Close)
-			now := f.clock.Now()
+			// Relay staleness is judged against the hub's registry clock
+			// (RegistryNow, the wall clock here), not the fixture clock.
+			now := time.Now()
 			_, err := f.regStore.RegisterRelay(ctx, registry.RelayInstance{InstanceID: "relay-0", InternalEndpoint: relaySrv.URL, StartedAt: now, LastSeen: now})
 			require.NoError(t, err)
 
