@@ -58,6 +58,8 @@ var ProjectTargetApplicability = map[string]bool{
 	"project.delete": true, "project.manage": true, "project.register": false,
 	"project.set_messaging_policy": true, "project.clone": false, "project.list": false,
 	"project.manage_visitors": true,
+	// project.chat_post targets an existing project's chat threads.
+	"project.chat_post": true,
 
 	// skill.* — create/read/update/delete/list can target a project-scoped
 	// skill; create_global and register are explicitly hub-catalog actions.

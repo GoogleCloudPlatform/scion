@@ -2851,6 +2851,10 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 
 	// Authorize.
 	isDM := strings.HasPrefix(key, "dm:")
+	// canPost tells the client whether the caller's account may post in a
+	// topic (chatMayPost), so the composer can show a read-only state
+	// before a send. It is left out for a DM.
+	var canPost *bool
 	if isDM {
 		// A DM is the caller's own record: a token needs inbox:read.
 		token, ok := s.requireChatSelector(w, r, permInboxRead)
@@ -2896,6 +2900,8 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		if !s.authorizeRead(w, r, projectResource(project), "Thread") {
 			return
 		}
+		allowed := s.chatMayPost(ctx, user, project).Allowed
+		canPost = &allowed
 	}
 
 	// Parse query params.
@@ -3205,6 +3211,7 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		Messages:                    result.Items,
 		NextCursor:                  result.NextCursor,
 		TotalCount:                  result.TotalCount,
+		CanPost:                     canPost,
 		MessageAttachments:          messageAttachments,
 		MessageArtifacts:            messageArtifacts,
 		MessageArtifactsUnavailable: messageArtifactsUnavailable,
@@ -3908,6 +3915,13 @@ func (s *Server) handleConversationPromote(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if !s.authorize(w, r, projectResource(project), ActionRead) {
+		return
+	}
+	// Promotion moves the DM's messages into a new thread of the project,
+	// so the caller's account must be able to post there (chatMayPost).
+	if decision := s.chatMayPost(ctx, user, project); !decision.Allowed {
+		logAuthzDenial(r, user, projectResource(project), chatPostAction, decision.Reason)
+		chatSendPostDenied().write(w)
 		return
 	}
 	// A token also needs inbox:write under the DM rule: the agent's project
@@ -5765,9 +5779,12 @@ type chatMessageResponse struct {
 }
 
 type chatHistoryResponse struct {
-	Messages           []store.Message            `json:"messages"`
-	NextCursor         string                     `json:"nextCursor,omitempty"`
-	TotalCount         int                        `json:"totalCount"`
+	Messages   []store.Message `json:"messages"`
+	NextCursor string          `json:"nextCursor,omitempty"`
+	TotalCount int             `json:"totalCount"`
+	// CanPost reports, for a topic, whether the caller's account may post
+	// in it (project.chat_post). Omitted for a DM.
+	CanPost            *bool                      `json:"canPost,omitempty"`
 	MessageAttachments map[string][]AttachmentRef `json:"messageAttachments,omitempty"` // W7: keyed by message ID
 	// MessageArtifacts are artifact references keyed by message ID, as the
 	// viewer sees them (ptone/scion#3224).
