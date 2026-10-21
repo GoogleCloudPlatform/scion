@@ -33,9 +33,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/supervisor"
 )
 
-// envProjectID is the agent's project id, set by the broker.
-const envProjectID = projectkeys.EnvProjectID
-
 // envSSHMaxChannels overrides the SSH server's per-connection channel
 // cap (default sshd.DefaultMaxChannels).
 const envSSHMaxChannels = "SCION_CONDUIT_SSH_MAX_CHANNELS"

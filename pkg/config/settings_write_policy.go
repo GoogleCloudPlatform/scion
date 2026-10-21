@@ -97,7 +97,7 @@ func ValidateSettingWrite(key string, global bool) error {
 		// there. Any other key under the prefix is unknown at both layers,
 		// and is refused as such here, before any I/O (ptone/scion#5481).
 		if _, ok := versionedSettingKeys[key]; !ok {
-			return fmt.Errorf("unknown or complex setting key: %s (manual edit recommended for registries)", key)
+			return fmt.Errorf("unknown or complex setting key: %s", key)
 		}
 		if !global {
 			return &SettingNotWritableError{Key: key, Reason: reasonGlobalOnly}

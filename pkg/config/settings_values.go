@@ -136,7 +136,7 @@ func ResolveSettingValue(projectPath, key string) (SettingValue, error) {
 }
 
 // ResolveSettingValueIgnoringEnv is ResolveSettingValue as if the
-// environment variable envName were not set: the value and source key
+// environment variable envName were not set: the value and source the key
 // would have without it. config unset uses it to say what a key falls
 // back to when the variable that sets it applies to one command only.
 func ResolveSettingValueIgnoringEnv(projectPath, key, envName string) (SettingValue, error) {
