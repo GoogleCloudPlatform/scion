@@ -251,3 +251,39 @@ func TestPresentation_APISharesNothing(t *testing.T) {
 		t.Fatalf("got %+v", empty)
 	}
 }
+
+// TestPresentInstance_ImageRegistryRedactedForDisplay: presented agent
+// defaults use the same image-registry display redaction as the broker
+// record (RedactImageRegistry), in the published form and on the wire; the
+// configuration keeps the configured value, and a registry without userinfo
+// is presented unchanged.
+func TestPresentInstance_ImageRegistryRedactedForDisplay(t *testing.T) {
+	const configured = "https://user:s3cret@registry.example/team"
+	const want = "https://***@registry.example/team"
+	inst := V1RuntimeBrokerInstanceConfig{
+		Key: "k", Name: "n",
+		RuntimeTarget: &V1RuntimeTargetConfig{Type: "docker"},
+		AgentDefaults: &V1InstanceAgentDefaults{ImageRegistry: configured},
+	}
+	p := PresentInstance(inst)
+	if p.AgentDefaults == nil {
+		t.Fatalf("no presented agent defaults")
+	}
+	if got := p.AgentDefaults.ImageRegistry; got != want {
+		t.Errorf("presented image registry = %q, want %q (the broker record's display redaction)", got, want)
+	}
+	raw, err := json.Marshal(p.API())
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(raw), "s3cret") {
+		t.Errorf("the wire presentation carries the registry's userinfo: %s", raw)
+	}
+	if inst.AgentDefaults.ImageRegistry != configured {
+		t.Errorf("configured image registry = %q, want it unchanged (%q)", inst.AgentDefaults.ImageRegistry, configured)
+	}
+	inst.AgentDefaults.ImageRegistry = "registry.example/team"
+	if got := PresentInstance(inst).AgentDefaults.ImageRegistry; got != "registry.example/team" {
+		t.Errorf("presented image registry without userinfo = %q, want it unchanged", got)
+	}
+}

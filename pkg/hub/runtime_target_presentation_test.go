@@ -570,3 +570,30 @@ server:
 		})
 	}
 }
+
+// TestPresentation_ImageRegistryRedactedOnBrokerRead: presented agent
+// defaults use the same image-registry display redaction as the broker
+// record, so a broker read never returns the userinfo of the configured
+// image registry.
+func TestPresentation_ImageRegistryRedactedOnBrokerRead(t *testing.T) {
+	f := newPresentationFixture(t, true)
+	grantDevUserRuntimeBrokerAccess(t, f.s)
+	inst := config.V1RuntimeBrokerInstanceConfig{
+		Key: "local-docker", Name: "example-docker",
+		RuntimeTarget: &config.V1RuntimeTargetConfig{Type: "docker"},
+		AgentDefaults: &config.V1InstanceAgentDefaults{ImageRegistry: "https://user:s3cret@registry.example/team"},
+	}
+	p := config.PresentInstance(inst).API()
+	sendAsBroker(t, f.srv, f.flat.ID, presentationBeat(&p, f.flat.RuntimeTarget.ID, 100, 1, nil))
+
+	rec := doRequest(t, f.srv, http.MethodGet, "/api/v1/runtime-brokers/"+f.flat.ID, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), "s3cret", "a broker read never returns the registry's userinfo")
+	var got struct {
+		RuntimeTargetPresentation *api.RuntimeTargetPresentation `json:"runtimeTargetPresentation"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.NotNil(t, got.RuntimeTargetPresentation)
+	require.NotNil(t, got.RuntimeTargetPresentation.AgentDefaults)
+	assert.Equal(t, "https://***@registry.example/team", got.RuntimeTargetPresentation.AgentDefaults.ImageRegistry)
+}

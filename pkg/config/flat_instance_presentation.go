@@ -102,7 +102,9 @@ type FlatHarnessOverridePresentation struct {
 
 // PresentInstance returns the publishable form of inst (FC4-a). The result
 // shares no map, slice or pointer with inst, so changing one never changes
-// the other.
+// the other. Presented agent defaults use the same image-registry display
+// redaction as the broker record (RedactImageRegistry); the redaction applies
+// to the published form only, and inst keeps the configured value.
 func PresentInstance(inst V1RuntimeBrokerInstanceConfig) FlatInstancePresentation {
 	out := FlatInstancePresentation{Key: inst.Key, Name: inst.Name}
 	if t := inst.RuntimeTarget; t != nil {
@@ -123,7 +125,7 @@ func PresentInstance(inst V1RuntimeBrokerInstanceConfig) FlatInstancePresentatio
 	if d := inst.AgentDefaults; d != nil {
 		ad := &FlatAgentDefaultsPresentation{
 			DefaultHarnessConfig: d.DefaultHarnessConfig,
-			ImageRegistry:        d.ImageRegistry,
+			ImageRegistry:        RedactImageRegistry(d.ImageRegistry),
 			CloneDepth:           d.CloneDepth,
 			Resources:            copyResourceSpec(d.Resources),
 			Volumes:              presentVolumes(d.Volumes),
