@@ -270,13 +270,18 @@ def _model_settings(ctx: sh.ProvisionContext) -> dict[str, str]:
     """defaultProvider/defaultModel from SCION_PI_PROVIDER and a concrete SCION_MODEL.
 
     The host resolves a size alias (small/medium/large/extra-large) through
-    config.yaml's model_aliases before it sets SCION_MODEL, so a "medium"
-    agent arrives here as SCION_MODEL=anthropic/sonnet and that is written as
+    config.yaml's model_aliases before SCION_MODEL reaches the container
+    (and re-resolves an alias injected through the env), so a "medium" agent
+    arrives here as SCION_MODEL=anthropic/sonnet and that is written as
     defaultProvider=anthropic, defaultModel=sonnet, even though the alias
     value is a pi --model pattern rather than an exact model ID. Only an
-    unresolved tier name that reaches this point is skipped. Scion always
-    starts pi with --model <resolved value>, which takes precedence over
-    defaultModel; the setting matters only for a manual `pi` in the container.
+    unresolved tier name that reaches this point is skipped.
+
+    Scion prepends --model <resolved value> to pi's command only when the
+    agent's configuration has a model (pkg/agent/run.go); pi then starts on
+    that model rather than the defaultModel startup setting. When SCION_MODEL
+    comes only from the environment, no --model is passed and the
+    defaultProvider/defaultModel written here are what pi starts with.
     """
     out: dict[str, str] = {}
     provider = os.environ.get(PROVIDER_ENV, "").strip()

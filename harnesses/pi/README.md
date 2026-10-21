@@ -34,7 +34,7 @@ Everything has a safe default and is overridable per agent through env
 |---------|---------|---------|-------|
 | Project trust | `SCION_PI_PROJECT_TRUST` = `never` \| `ask` \| `always` | `never` | Wins over `SCION_PI_SETTINGS` and over a value left in `settings.json`; recomputed on every start (unset means `never`). Invalid values fail provisioning |
 | Provider | `SCION_PI_PROVIDER` | unset | Sets `defaultProvider` |
-| Model | `SCION_MODEL` | unset | A `provider/id[:thinking]` value sets `defaultProvider`/`defaultModel`. Scion resolves size tiers (`small`/`medium`/`large`/`extra-large`) through `model_aliases` in `config.yaml` before the agent starts, so the resolved pattern (e.g. `anthropic/sonnet`) is written the same way. pi is always started with `--model <resolved>`, which wins over `defaultModel` |
+| Model | `SCION_MODEL` | unset | A `provider/id[:thinking]` value sets `defaultProvider`/`defaultModel`. Scion resolves size tiers (`small`/`medium`/`large`/`extra-large`) through `model_aliases` in `config.yaml` before the agent starts, so the resolved pattern (e.g. `anthropic/sonnet`) is written the same way. When the agent's configuration has a model, Scion also starts pi with `--model <resolved>`, which pi uses instead of `defaultModel`; a `SCION_MODEL` set only in the environment gets no `--model`, so `defaultProvider`/`defaultModel` decide the model |
 | Other pi settings | `SCION_PI_SETTINGS` (JSON object) | unset | Deep-merged into `settings.json`. Keys that look like credentials are rejected; it cannot change auth handling |
 | Auto task completion | `SCION_PI_NO_AUTO_COMPLETE=1` | off | Bridge stops signalling `task_completed` on settle |
 | Bridge debug | `SCION_HOOK_DEBUG=1` | off | Logs bridge failures to stderr |

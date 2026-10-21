@@ -55,7 +55,8 @@ const defaultRun = makeRunner();
 // line, after ; & | (so && and ||), ( { $( or a backtick, optionally after
 // then/do/else, and optionally with a path (/usr/local/bin/sciontool). A
 // command that only mentions it (grep "sciontool status blocked", echo ...)
-// does not count. Text after ; or | inside quotes is not parsed as shell.
+// does not count. Shell quoting is not parsed: a separator inside quotes
+// still matches, e.g. echo "x; sciontool status blocked" counts.
 const STICKY_STATUS_RE =
   /(?:^|[;&|\n({`])\s*(?:(?:then|do|else)\s+)?(?:[^\s;&|()`'"]*\/)?sciontool\s+status\s+(?:ask_user|blocked|limits_exceeded|task_completed)\b/;
 
@@ -110,7 +111,7 @@ export function createHandlers({ run = defaultRun, env = process.env } = {}) {
   let lastRunFailed = false;
   let lastMessages;
   // Set when the agent ran `sciontool status ask_user|blocked|limits_exceeded|task_completed`
-  // this turn.
+  // since the last human/RPC input (reset in input()).
   let agentSetStatus = false;
 
   const safe = (what, fn) => {
