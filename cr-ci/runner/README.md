@@ -29,21 +29,36 @@ curl, zstd and the runner's .NET dependencies (installed by the runner's own
 `bin/installdependencies.sh`) come from the Ubuntu archive, and apt verifies
 their signatures.
 
-**Cache parity with ubuntu-latest.** `actions/cache` (and `setup-go-cache`)
-derives a cache's version from its paths and its compression method. So a job
-restores the same cache on both runner types only if the two match:
+**Cache parity with ubuntu-latest.** The contract is
+`gs://scion-xproject-exchange/cr-ci/cache-parity.md`. `actions/cache` (and
+`setup-go-cache`) derives a cache's version from its paths and its
+compression method. It stores entries relative to `GITHUB_WORKSPACE` and
+extracts them with `tar -P -C "$GITHUB_WORKSPACE"`. A cache entry is
+therefore shared in both directions only if all of these hold:
 - **zstd:** the image has `zstd` on `PATH`, so `actions/cache` picks zstd, as
   on ubuntu-latest.
 - **`HOME=/home/runner` and uid 1001:** both match ubuntu-latest. `HOME` is
-  set in the image config, and the entrypoint does not change it.
-- **`~/.cache` and `~/go`:** the workflow templates' first self-hosted step
-  links them into `/scratch` (`/scratch/cache`, the entrypoint's
-  `XDG_CACHE_HOME`, and `/scratch/gopath`, its `GOPATH`). It then sets
-  `GOCACHE=$HOME/.cache/go-build` and `GOMODCACHE=$HOME/go/pkg/mod`, so the
-  cache paths read exactly as on ubuntu-latest while the bytes land on the
-  ephemeral disk. That step is owned by `workflows/`. If `XDG_CACHE_HOME` or
-  `GOPATH` in `entrypoint.sh` ever changes, the link targets there must change
-  with it.
+  set in the image config, and the entrypoint refuses any other `HOME`
+  (exit 2).
+- **Work folder `/home/runner/work`:** the mediator's JIT `work_folder`, so
+  `GITHUB_WORKSPACE` reads `/home/runner/work/<repo>/<repo>`, as on
+  ubuntu-latest.
+- **Go paths as on ubuntu-latest:** the entrypoint exports
+  `GOCACHE=$HOME/.cache/go-build`, `GOMODCACHE=$HOME/go/pkg/mod`,
+  `GOPATH=$HOME/go` and `GOLANGCI_LINT_CACHE=$HOME/.cache/golangci-lint`, and
+  leaves `XDG_CACHE_HOME` unset.
+- **Bytes on the disk:** the entrypoint links `~/work`, `~/.cache` and `~/go`
+  into `/scratch` (step 3). The link targets mirror `$HOME` under `/scratch`
+  (`/scratch/_work`, `/scratch/.cache`, `/scratch/go`), because the kernel
+  resolves `..` physically. From the physical workspace
+  `/scratch/_work/<repo>/<repo>`, an entry `../../../.cache/X` lands in
+  `/scratch/.cache/X`, which is exactly where `~/.cache/X` points. A
+  non-mirrored target such as `/scratch/cache` would restore entries next to
+  Go's cache, not into it. `TestEntrypointCacheTarRoundTrip` reproduces the
+  round trip in both directions.
+
+The workflow templates' self-hosted step only verifies this layout; it
+creates nothing. Parity holds for any routed workflow.
 
 The image is built for linux/amd64 only. The build context is this directory:
 `docker build -t <ref> cr-ci/runner`. `scripts/build-runner-image.sh` (P4)
@@ -69,7 +84,8 @@ The mediator sets these env overrides on each execution (see
 The JIT config is never passed in env, args or labels. The entrypoint does
 this, in order:
 
-1. **Checks the env.** All four variables must be set. The token must be
+1. **Checks the env.** All four variables and `HOME` must be set, and `HOME`
+   must be `/home/runner`. The token must be
    exactly 32 lowercase hex chars (the mediator uses `hex.EncodeToString`;
    uppercase is rejected). `MEDIATOR_URL` must be an https origin; plain http is
    accepted only for `127.0.0.1` and `localhost`, which the test harness uses.
@@ -87,18 +103,32 @@ this, in order:
    Confirm from the execution log that one of them matches the ephemeral-disk
    at `/scratch` (ideally `listed in /proc/self/mountinfo`). If neither does,
    every execution exits 2.
-3. **Redirects to `/scratch`.** It exports `RUNNER_WORKSPACE=/scratch/_work`,
-   `RUNNER_TEMP` and `TMPDIR=/scratch/_temp`, `GOPATH=/scratch/gopath`,
-   `GOCACHE=/scratch/gocache`, `GOMODCACHE=/scratch/gomodcache`,
-   `GOLANGCI_LINT_CACHE=/scratch/golangci-lint-cache` and
-   `XDG_CACHE_HOME=/scratch/cache`, and creates those directories. The
-   runner's `_work` and `_diag` directories are symlinks to `/scratch/_work`
-   and `/scratch/_diag`, so the work folder lands on the disk whether the JIT
-   config names `_work` or `/scratch/_work` (the mediator sends
-   `/scratch/_work`). The symlinks are what carry the runner's own
-   redirection: for job steps, the runner sets `RUNNER_WORKSPACE` and
-   `RUNNER_TEMP` itself, under its work folder. The exported values matter
-   mainly to the listener and to anything that runs before the job.
+3. **Links HOME into `/scratch`** (see "Cache parity" above). Each link is
+   handled as follows: a correct link is kept; a missing path is created as
+   the link; a real file or directory, or a link to anywhere else, exits 2
+   before the token is spent. The links are the parents of the cached paths,
+   so tar never replaces one.
+
+   | Link | Target | Holds |
+   | :--- | :--- | :--- |
+   | `~/work` | `/scratch/_work` | the runner work folder (`work_folder` = `/home/runner/work`) |
+   | `~/.cache` | `/scratch/.cache` | `GOCACHE`, `GOLANGCI_LINT_CACHE`, any XDG cache |
+   | `~/go` | `/scratch/go` | `GOPATH`, `GOMODCACHE` |
+
+   It exports `GOCACHE`, `GOMODCACHE`, `GOPATH` and `GOLANGCI_LINT_CACHE` as
+   on ubuntu-latest, leaves `XDG_CACHE_HOME` unset, and exports
+   `RUNNER_WORKSPACE=$HOME/work` and `RUNNER_TEMP`/`TMPDIR=/scratch/_temp`.
+   For job steps, the runner sets `RUNNER_WORKSPACE` and `RUNNER_TEMP` itself,
+   under its work folder. The runner's `_diag` directory is a symlink to
+   `/scratch/_diag`, so its logs land on the disk too. The image also keeps a
+   `_work` symlink to `/scratch/_work` in the runner directory, for a JIT
+   config that names the default `_work`.
+
+   **P6 PoC checkpoint:** the runner builds the work directory with
+   `Path.GetFullPath(Path.Combine(root, work_folder))`, which on Unix does not
+   resolve symlinks, so `GITHUB_WORKSPACE` should read
+   `/home/runner/work/...`. Confirm it in the PoC log, and confirm
+   `go env GOCACHE` is `/home/runner/.cache/go-build`.
 4. **Claims the JIT config** (claim contract v2,
    `gs://scion-xproject-exchange/cr-ci/claim-contract-v2.md`). The claim is
    bound to the execution's workload identity, so a principal that can read
@@ -151,7 +181,7 @@ this, in order:
    modes.
 
 Exit codes before `run.sh` starts: **2** for a configuration error (env,
-`/scratch`, missing `run.sh`) and **3** for a failed claim. Neither path starts
+`HOME`, `/scratch`, a HOME link, missing `run.sh`) and **3** for a failed claim. Neither path starts
 `run.sh`. If a claim is lost (for example, the mediator restarted and its
 in-memory claims are gone), the runner exits 3. `/reconcile` then deletes the
 orphaned `cr-job-*` registration and relaunches the job if it is still queued.
@@ -171,12 +201,13 @@ with the execution.
 cd cr-ci && go test ./runner/
 ```
 
-The harness needs `bash`, `curl`, `jq` and `awk`, and no network or GCP
+The harness needs `bash`, `curl`, `jq`, `awk` and `tar`, and no network or GCP
 access. It uses throwaway random tokens and configs. Test-only overrides
 point the script at a temp scratch directory, a fake mount table, a stub
 runner directory, a zero retry backoff, and a fake metadata server on
 loopback: `CR_SCRATCH_DIR`, `CR_MOUNTINFO`, `CR_RUNNER_DIR`,
-`CR_CLAIM_BACKOFF_SECONDS` and `CR_METADATA_URL`. `CR_METADATA_URL` defaults
+`CR_CLAIM_BACKOFF_SECONDS` and `CR_METADATA_URL`. `CR_EXPECTED_HOME` (default
+`/home/runner`) lets the harness use a temp dir as `HOME`. `CR_METADATA_URL` defaults
 to `http://metadata.google.internal` and accepts only that value or a
 loopback http origin. Production leaves them all unset.
 Some tests also put stub `stat` and `sleep` commands first on `PATH`. Every
@@ -212,6 +243,16 @@ covers:
   contacting the mediator. tmpfs only logs a warning. The device fallback
   accepts a mount that is missing from the table, or used when the table is
   unreadable (checked with a `stat` stub).
+- **Cache parity.** Success leaves `~/work`, `~/.cache` and `~/go` linked to
+  their mirrored targets, and `run.sh` sees the ubuntu-latest Go paths and no
+  `XDG_CACHE_HOME`. Correct existing links are kept. A real `~/.cache` or
+  `~/work`, a `~/go` link elsewhere, a `~/.cache` link to the old
+  non-mirrored target, a wrong `HOME` or an unset `HOME` exits 2 without
+  contacting the mediator. A tar round trip with actions/cache's scheme
+  (`-P -C` the workspace, entries `../../../.cache/...` and
+  `../../../go/pkg/mod/...`) restores an ubuntu-latest archive to where Go
+  reads, with the bytes on the scratch disk and the links intact. The same
+  round trip restores a cr-ci archive under a plain ubuntu `HOME`.
 - **Bad env.** Any missing variable, a malformed (short or uppercase) token,
   a non-numeric job ID, a non-https or path-bearing URL, a non-loopback
   `CR_METADATA_URL`, or a missing `run.sh` exits 2 without contacting the

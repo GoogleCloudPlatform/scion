@@ -39,6 +39,7 @@ pwd > "$out/cwd"
   echo "GOCACHE=${GOCACHE:-}"
   echo "GOMODCACHE=${GOMODCACHE:-}"
   echo "GOLANGCI_LINT_CACHE=${GOLANGCI_LINT_CACHE:-}"
+  echo "XDG_CACHE_HOME_SET=${XDG_CACHE_HOME+yes}"
   echo "TOKEN_SET=${RUNNER_CLAIM_TOKEN+yes}"
 } > "$out/env"
 echo "stub run.sh started"
@@ -46,7 +47,7 @@ echo "stub run.sh started"
 
 func requireTools(t *testing.T) {
 	t.Helper()
-	for _, tool := range []string{"bash", "curl", "jq", "awk"} {
+	for _, tool := range []string{"bash", "curl", "jq", "awk", "tar"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			t.Fatalf("entrypoint harness needs %s on PATH: %v", tool, err)
 		}
@@ -201,6 +202,7 @@ type harness struct {
 	runnerDir, stubOut string
 	token, jit         string
 	idToken, audience  string
+	home               string       // HOME of the entrypoint run (and CR_EXPECTED_HOME)
 	meta               *claimServer // fake metadata server, wired by default
 	env                map[string]string
 }
@@ -218,6 +220,7 @@ func newHarness(t *testing.T, mediatorURL string) *harness {
 		token:     randomHex(t, 16),
 		jit:       fakeJITConfig(t),
 		idToken:   fakeIDToken(t),
+		home:      root,
 		audience:  strings.TrimSuffix(mediatorURL, "/"),
 	}
 	h.meta = newMetadataServer(t, h.audience, respondIDToken(h.idToken))
@@ -238,6 +241,7 @@ func newHarness(t *testing.T, mediatorURL string) *harness {
 	h.env = map[string]string{
 		"PATH":                     os.Getenv("PATH"),
 		"HOME":                     root,
+		"CR_EXPECTED_HOME":         root,
 		"RUNNER_CLAIM_TOKEN":       h.token,
 		"MEDIATOR_URL":             mediatorURL,
 		"GH_JOB_ID":                "4242",
@@ -362,20 +366,22 @@ func TestEntrypointSuccess(t *testing.T) {
 
 	env := h.stubFile("env")
 	for _, want := range []string{
-		"RUNNER_WORKSPACE=" + h.scratch + "/_work",
+		"RUNNER_WORKSPACE=" + h.home + "/work",
 		"RUNNER_TEMP=" + h.scratch + "/_temp",
 		"TMPDIR=" + h.scratch + "/_temp",
-		"GOPATH=" + h.scratch + "/gopath",
-		"GOCACHE=" + h.scratch + "/gocache",
-		"GOMODCACHE=" + h.scratch + "/gomodcache",
-		"GOLANGCI_LINT_CACHE=" + h.scratch + "/golangci-lint-cache",
+		"GOPATH=" + h.home + "/go",
+		"GOCACHE=" + h.home + "/.cache/go-build",
+		"GOMODCACHE=" + h.home + "/go/pkg/mod",
+		"GOLANGCI_LINT_CACHE=" + h.home + "/.cache/golangci-lint",
+		"XDG_CACHE_HOME_SET=",
 		"TOKEN_SET=",
 	} {
 		if !strings.Contains(env+"\n", want+"\n") {
 			t.Errorf("run.sh env lacks %q; got:\n%s", want, env)
 		}
 	}
-	for _, d := range []string{"_work", "_temp", "_diag", "gopath", "gocache", "gomodcache", "golangci-lint-cache"} {
+	h.checkHomeLinks()
+	for _, d := range []string{"_work", "_temp", "_diag", ".cache/go-build", ".cache/golangci-lint", "go/pkg/mod"} {
 		if fi, err := os.Stat(filepath.Join(h.scratch, d)); err != nil || !fi.IsDir() {
 			t.Errorf("%s/%s was not created: %v", h.scratch, d, err)
 		}
@@ -844,5 +850,172 @@ func TestEntrypointIDTokenTrailingNewline(t *testing.T) {
 				t.Error("claim did not carry the ID token without its trailing line ending")
 			}
 		})
+	}
+}
+
+// checkHomeLinks asserts the cache-parity layout: ~/work, ~/.cache and ~/go are
+// symlinks whose literal targets mirror HOME under the scratch dir.
+func (h *harness) checkHomeLinks() {
+	h.t.Helper()
+	for link, target := range map[string]string{
+		"work":   h.scratch + "/_work",
+		".cache": h.scratch + "/.cache",
+		"go":     h.scratch + "/go",
+	} {
+		got, err := os.Readlink(filepath.Join(h.home, link))
+		if err != nil || got != target {
+			h.t.Errorf("~/%s -> %q (err %v), want a symlink to %s", link, got, err, target)
+		}
+	}
+}
+
+func TestEntrypointHomeLinksKeptWhenCorrect(t *testing.T) {
+	var h *harness
+	cs := newClaimServer(t, func(w http.ResponseWriter) { respondJIT(h.jit)(w) })
+	h = newHarness(t, cs.URL)
+	for link, target := range map[string]string{"work": "/_work", ".cache": "/.cache", "go": "/go"} {
+		if err := os.Symlink(h.scratch+target, filepath.Join(h.home, link)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if res := h.run(); res.exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr:\n%s", res.exitCode, res.stderr)
+	}
+	h.checkHomeLinks()
+}
+
+func TestEntrypointHomeLinkConflicts(t *testing.T) {
+	cases := []struct {
+		name    string
+		mutate  func(h *harness)
+		wantMsg string
+	}{
+		{"real ~/.cache dir", func(h *harness) {
+			if err := os.Mkdir(filepath.Join(h.home, ".cache"), 0o755); err != nil {
+				h.t.Fatal(err)
+			}
+		}, ".cache exists and is not a symlink"},
+		{"real ~/work dir", func(h *harness) {
+			if err := os.Mkdir(filepath.Join(h.home, "work"), 0o755); err != nil {
+				h.t.Fatal(err)
+			}
+		}, "work exists and is not a symlink"},
+		{"~/go links elsewhere", func(h *harness) {
+			if err := os.Symlink(h.scratch+"/gopath", filepath.Join(h.home, "go")); err != nil {
+				h.t.Fatal(err)
+			}
+		}, "go is a symlink to "},
+		{"~/.cache links to the old non-mirrored target", func(h *harness) {
+			if err := os.Symlink(h.scratch+"/cache", filepath.Join(h.home, ".cache")); err != nil {
+				h.t.Fatal(err)
+			}
+		}, ".cache is a symlink to "},
+		{"HOME is not the expected home", func(h *harness) { h.env["CR_EXPECTED_HOME"] = "/home/runner" }, "want /home/runner"},
+		{"HOME unset", func(h *harness) { delete(h.env, "HOME") }, "HOME is not set"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cs := newClaimServer(t, respondStatus(http.StatusOK))
+			h := newHarness(t, cs.URL)
+			tc.mutate(h)
+			res := h.run()
+			expectFailure(t, h, res, 2, tc.wantMsg)
+			if n := len(cs.recorded()); n != 0 {
+				t.Errorf("claim requests = %d, want 0 (token must not be spent)", n)
+			}
+		})
+	}
+}
+
+// TestEntrypointCacheTarRoundTrip reproduces actions/cache's archive scheme
+// (entries relative to GITHUB_WORKSPACE, tar -P -C "$GITHUB_WORKSPACE") between
+// an ubuntu-latest layout and the layout the entrypoint leaves behind, in both
+// directions. GITHUB_WORKSPACE is <home>/work/scion/scion on both.
+func TestEntrypointCacheTarRoundTrip(t *testing.T) {
+	var h *harness
+	cs := newClaimServer(t, func(w http.ResponseWriter) { respondJIT(h.jit)(w) })
+	h = newHarness(t, cs.URL)
+	if res := h.run(); res.exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr:\n%s", res.exitCode, res.stderr)
+	}
+	crWorkspace := filepath.Join(h.home, "work", "scion", "scion")
+	if err := os.MkdirAll(crWorkspace, 0o755); err != nil { // creates it under scratch/_work
+		t.Fatal(err)
+	}
+	entries := []string{"../../../.cache/go-build/ab/obj", "../../../go/pkg/mod/cache/download/m/@v/v1.zip", "../../../.cache/golangci-lint/x"}
+
+	tarRun := func(args ...string) {
+		t.Helper()
+		out, err := exec.Command("tar", args...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("tar %v: %v\n%s", args, err, out)
+		}
+	}
+	// writeEntries and readEntry go through filepath.Join, which cleans ".." LEXICALLY:
+	// <workspace>/../../../.cache/... becomes <home>/.cache/..., the logical path that Go
+	// and golangci-lint use (through the links on the cr-ci layout). Only tar, run with
+	// -C <workspace>, resolves ".." physically, exactly as actions/cache does.
+	writeEntries := func(workspace, content string) {
+		t.Helper()
+		for _, e := range entries {
+			p := filepath.Join(workspace, e)
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	readEntry := func(workspace, entry string) string {
+		b, err := os.ReadFile(filepath.Join(workspace, entry))
+		if err != nil {
+			return ""
+		}
+		return string(b)
+	}
+
+	// ubuntu-latest -> cr-ci: an archive saved on a plain HOME restores where Go reads.
+	ubuntuHome := filepath.Join(t.TempDir(), "home", "runner")
+	ubuntuWorkspace := filepath.Join(ubuntuHome, "work", "scion", "scion")
+	if err := os.MkdirAll(ubuntuWorkspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeEntries(ubuntuWorkspace, "from-ubuntu")
+	ubuntuTar := filepath.Join(t.TempDir(), "ubuntu.tar")
+	tarRun(append([]string{"-cPf", ubuntuTar, "-C", ubuntuWorkspace}, entries...)...)
+	tarRun("-xPf", ubuntuTar, "-C", crWorkspace)
+	for logical, physical := range map[string]string{
+		filepath.Join(h.home, ".cache/go-build/ab/obj"):                filepath.Join(h.scratch, ".cache/go-build/ab/obj"),
+		filepath.Join(h.home, "go/pkg/mod/cache/download/m/@v/v1.zip"): filepath.Join(h.scratch, "go/pkg/mod/cache/download/m/@v/v1.zip"),
+		filepath.Join(h.home, ".cache/golangci-lint/x"):                filepath.Join(h.scratch, ".cache/golangci-lint/x"),
+	} {
+		if b, err := os.ReadFile(logical); err != nil || string(b) != "from-ubuntu" {
+			t.Errorf("ubuntu archive did not restore to %s (what Go reads): %v", logical, err)
+		}
+		if _, err := os.Lstat(physical); err != nil {
+			t.Errorf("restored bytes are not on the scratch disk at %s: %v", physical, err)
+		}
+	}
+	h.checkHomeLinks() // tar must not have replaced a link
+
+	// cr-ci -> ubuntu-latest: an archive saved through the links restores under the
+	// plain HOME, not under /home/home/... or next to it.
+	writeEntries(crWorkspace, "from-cr-ci")
+	crTar := filepath.Join(t.TempDir(), "crci.tar")
+	tarRun(append([]string{"-cPf", crTar, "-C", crWorkspace}, entries...)...)
+	ubuntuHome2 := filepath.Join(t.TempDir(), "home", "runner")
+	ubuntuWorkspace2 := filepath.Join(ubuntuHome2, "work", "scion", "scion")
+	if err := os.MkdirAll(ubuntuWorkspace2, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tarRun("-xPf", crTar, "-C", ubuntuWorkspace2)
+	for _, e := range entries {
+		if got := readEntry(ubuntuWorkspace2, e); got != "from-cr-ci" {
+			t.Errorf("cr-ci archive entry %s did not restore under the ubuntu HOME (got %q)", e, got)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(ubuntuHome2, ".cache", "go-build", "ab", "obj")); err != nil {
+		t.Errorf("cr-ci archive did not land in ~/.cache/go-build on the ubuntu layout: %v", err)
 	}
 }

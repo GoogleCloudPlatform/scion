@@ -4,7 +4,9 @@
 #   1. Verify that /scratch is a mounted, writable volume (the Cloud Run
 #      ephemeral-disk). The container root filesystem is in memory on Cloud
 #      Run, so running without /scratch would silently eat RAM. Fail loudly.
-#   2. Point the runner workspace, temp dirs and Go caches at /scratch.
+#   2. Link ~/work, ~/.cache and ~/go into /scratch and export ubuntu-latest's cache
+#      paths, so actions/cache entries restore identically on both runner types while
+#      the bytes land on the ephemeral disk (see section 3).
 #   3. Exchange the one-time RUNNER_CLAIM_TOKEN with the mediator for the JIT
 #      runner config (claim contract v2): fetch this execution's Google ID
 #      token (audience MEDIATOR_URL) from the metadata server, then
@@ -27,7 +29,8 @@
 #   RUNNER_NAME         cr-job-<GH_JOB_ID> (logging only)
 #
 # Exit codes (run.sh's own exit code once it is exec'd):
-#   2  configuration error: missing or invalid env, /scratch missing or not writable
+#   2  configuration error: missing or invalid env (HOME included), /scratch missing or
+#      not writable, a HOME link (~/work, ~/.cache, ~/go) that is not the expected symlink
 #   3  claim failed: 401, 410, other non-retryable response (mediator or
 #      metadata server), or retries exhausted; run.sh not started
 #
@@ -37,6 +40,7 @@
 #   CR_MOUNTINFO             mount table to check against (default /proc/self/mountinfo)
 #   CR_RUNNER_DIR            directory holding run.sh     (default /home/runner/actions-runner)
 #   CR_CLAIM_BACKOFF_SECONDS first retry delay, doubled per retry (default 1)
+#   CR_EXPECTED_HOME         required value of HOME       (default /home/runner)
 #   CR_METADATA_URL          metadata server origin       (default http://metadata.google.internal;
 #                            otherwise only http://127.0.0.1[:port] or http://localhost[:port])
 # The harness also puts stub `stat` and `sleep` commands first on PATH.
@@ -51,6 +55,7 @@ mountinfo=${CR_MOUNTINFO:-/proc/self/mountinfo}
 runner_dir=${CR_RUNNER_DIR:-/home/runner/actions-runner}
 backoff=${CR_CLAIM_BACKOFF_SECONDS:-1}
 metadata_base=${CR_METADATA_URL:-http://metadata.google.internal}
+expected_home=${CR_EXPECTED_HOME:-/home/runner}
 
 log() { printf 'cr-ci-entrypoint: %s\n' "$*" >&2; }
 die() {
@@ -62,7 +67,7 @@ die() {
 
 # --- 1. Required env ----------------------------------------------------------
 
-for var in RUNNER_CLAIM_TOKEN MEDIATOR_URL GH_JOB_ID RUNNER_NAME; do
+for var in RUNNER_CLAIM_TOKEN MEDIATOR_URL GH_JOB_ID RUNNER_NAME HOME; do
   if [[ -z ${!var:-} ]]; then
     die "$EXIT_CONFIG" "required environment variable $var is not set"
   fi
@@ -71,6 +76,10 @@ done
 if [[ ! $RUNNER_CLAIM_TOKEN =~ ^[0-9a-f]{32}$ ]]; then
   # Never echo the value, not even a malformed one.
   die "$EXIT_CONFIG" "RUNNER_CLAIM_TOKEN is not 32 lowercase hex characters"
+fi
+# Cache parity needs ubuntu-latest's HOME (set in the image config).
+if [[ $HOME != "$expected_home" ]]; then
+  die "$EXIT_CONFIG" "HOME is '$HOME', want $expected_home (cache paths must match ubuntu-latest)"
 fi
 if [[ ! $GH_JOB_ID =~ ^[0-9]+$ ]]; then
   die "$EXIT_CONFIG" "GH_JOB_ID must be numeric"
@@ -151,24 +160,57 @@ fi
 rm -f -- "$probe"
 
 # --- 3. Redirect workspace, temp dirs and caches to /scratch ------------------
-# The runner sets its own RUNNER_WORKSPACE and RUNNER_TEMP for job steps
-# (under its work folder, i.e. the _work symlink into /scratch). The exports
-# here cover the listener and anything that runs before the job; the _work
-# and _diag symlinks in the image are what carry the runner's own redirection.
+# Cache parity with ubuntu-latest (gs://scion-xproject-exchange/cr-ci/cache-parity.md).
+# actions/cache stores paths relative to GITHUB_WORKSPACE and extracts them with
+# tar -P -C "$GITHUB_WORKSPACE". So the work folder must read /home/runner/work, and
+# GOCACHE, GOMODCACHE and GOPATH must read as on ubuntu-latest ($HOME/.cache/go-build,
+# $HOME/go/pkg/mod, $HOME/go). The bytes must still land on /scratch, which is why the
+# three HOME entries are symlinks into /scratch. Their targets MIRROR $HOME under
+# /scratch: the kernel resolves ".." physically, so from the physical workspace
+# /scratch/_work/<repo>/<repo>, an archive entry ../../../.cache/X lands in
+# /scratch/.cache/X, which therefore has to be what ~/.cache points to.
+#   ~/work   -> /scratch/_work   (the mediator's JIT work_folder is /home/runner/work)
+#   ~/.cache -> /scratch/.cache  (GOCACHE, GOLANGCI_LINT_CACHE, any XDG cache)
+#   ~/go     -> /scratch/go      (GOPATH, GOMODCACHE)
+# The links are the parents of the cached paths, so tar never replaces a link.
+# XDG_CACHE_HOME stays unset, as on ubuntu-latest; tools then default to ~/.cache.
+# The runner sets its own RUNNER_WORKSPACE and RUNNER_TEMP for job steps; the
+# exports below cover the listener and anything that runs before the job.
 
-export RUNNER_WORKSPACE="$scratch/_work"
+# ensure_link <path> <target>: <path> must end up a symlink whose literal target is
+# <target>. A correct link is kept, an absent path is created, and anything else (a
+# real file or dir, or a link elsewhere) exits 2 before the claim token is spent.
+ensure_link() {
+  local path=$1 target=$2
+  mkdir -p -- "$target"
+  if [[ -L $path ]]; then
+    local current
+    current=$(readlink -- "$path")
+    [[ $current == "$target" ]] ||
+      die "$EXIT_CONFIG" "$path is a symlink to $current, want $target (cache parity)"
+  elif [[ -e $path ]]; then
+    die "$EXIT_CONFIG" "$path exists and is not a symlink; want a symlink to $target (cache parity)"
+  else
+    ln -s -- "$target" "$path" || die "$EXIT_CONFIG" "cannot create symlink $path -> $target"
+  fi
+}
+
+ensure_link "$HOME/work" "$scratch/_work"
+ensure_link "$HOME/.cache" "$scratch/.cache"
+ensure_link "$HOME/go" "$scratch/go"
+unset XDG_CACHE_HOME
+
+export RUNNER_WORKSPACE="$HOME/work"
 export RUNNER_TEMP="$scratch/_temp"
 export TMPDIR="$scratch/_temp"
-export GOPATH="$scratch/gopath"
-export GOCACHE="$scratch/gocache"
-export GOMODCACHE="$scratch/gomodcache"
-export GOLANGCI_LINT_CACHE="$scratch/golangci-lint-cache"
-export XDG_CACHE_HOME="$scratch/cache"
+export GOPATH="$HOME/go"
+export GOCACHE="$HOME/.cache/go-build"
+export GOMODCACHE="$HOME/go/pkg/mod"
+export GOLANGCI_LINT_CACHE="$HOME/.cache/golangci-lint"
 
 # _diag is the target of the runner's _diag symlink (runner logs; see Dockerfile).
-mkdir -p -- "$RUNNER_WORKSPACE" "$RUNNER_TEMP" "$GOPATH" "$GOCACHE" \
-  "$GOMODCACHE" "$GOLANGCI_LINT_CACHE" "$XDG_CACHE_HOME" "$scratch/_diag"
-log "workspace, temp and caches redirected to $scratch ($scratch_fstype)"
+mkdir -p -- "$RUNNER_TEMP" "$GOCACHE" "$GOMODCACHE" "$GOLANGCI_LINT_CACHE" "$scratch/_diag"
+log "work folder, temp and caches on $scratch ($scratch_fstype) via $HOME/{work,.cache,go}"
 
 # Check the runner before spending the single-use token.
 if [[ ! -x $runner_dir/run.sh ]]; then
