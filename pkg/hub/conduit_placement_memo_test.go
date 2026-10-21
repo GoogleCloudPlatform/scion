@@ -266,6 +266,8 @@ func TestConduitBrokerMemo_SharedReads(t *testing.T) {
 			}
 			return row, nil
 		}
+		var parked atomic.Int32
+		m.brokerMemoWaitTestHook = func() { parked.Add(1) }
 		var wg sync.WaitGroup
 		results := make([]*store.RuntimeBroker, 8)
 		wg.Add(1)
@@ -275,7 +277,8 @@ func TestConduitBrokerMemo_SharedReads(t *testing.T) {
 			wg.Add(1)
 			go func() { defer wg.Done(); results[i], _ = m.getRuntimeBroker(ctx, "broker-1", read) }()
 		}
-		time.Sleep(50 * time.Millisecond) // let the waiters reach the shared read
+		require.Eventually(t, func() bool { return parked.Load() == int32(len(results)-1) }, recheckWait, time.Millisecond,
+			"every other caller joins the first read")
 		close(release)
 		wg.Wait()
 		assert.Equal(t, int64(1), reads.Load())
@@ -297,12 +300,15 @@ func TestConduitBrokerMemo_SharedReads(t *testing.T) {
 			}
 			return row, nil
 		}
+		var parked atomic.Int32
+		m.brokerMemoWaitTestHook = func() { parked.Add(1) }
 		leader := make(chan error, 1)
 		go func() { _, err := m.getRuntimeBroker(ctx, "broker-1", read); leader <- err }()
 		<-entered
 		waiter := make(chan error, 1)
 		go func() { _, err := m.getRuntimeBroker(ctx, "broker-1", read); waiter <- err }()
-		time.Sleep(50 * time.Millisecond) // let the waiter reach the shared read
+		require.Eventually(t, func() bool { return parked.Load() == 1 }, recheckWait, time.Millisecond,
+			"the waiter has joined the leader's read")
 		close(release)
 		assert.ErrorIs(t, <-leader, boom)
 		assert.ErrorIs(t, <-waiter, boom, "the waiter gets the failure, without a read of its own")
@@ -348,8 +354,9 @@ func TestConduitPlacementMemo_NoMemoWithoutPass(t *testing.T) {
 }
 
 // TestConduitSweepContext_OnlyTheUserStreamReCheck: production code sets
-// SweepContext only on the user-stream re-check (startConduitStreamAuthz);
-// the broker-session re-check, which shares the tracker, has none.
+// SweepContext only on the user-stream re-check (startConduitStreamAuthz),
+// as a composite-literal key, and never assigns it; the broker-session
+// re-check, which shares the tracker, has none.
 func TestConduitSweepContext_OnlyTheUserStreamReCheck(t *testing.T) {
 	var sites []string
 	for name, file := range productionFiles(t) {
@@ -371,6 +378,18 @@ func TestConduitSweepContext_OnlyTheUserStreamReCheck(t *testing.T) {
 						if k, ok := kv.Key.(*ast.Ident); ok && k.Name == "SweepContext" {
 							sites = append(sites, name+":"+fn.Name.Name)
 						}
+					}
+				}
+				return true
+			})
+			ast.Inspect(fn, func(n ast.Node) bool {
+				as, ok := n.(*ast.AssignStmt)
+				if !ok {
+					return true
+				}
+				for _, lhs := range as.Lhs {
+					if sel, ok := lhs.(*ast.SelectorExpr); ok && sel.Sel.Name == "SweepContext" {
+						sites = append(sites, name+":"+fn.Name.Name+" (assignment)")
 					}
 				}
 				return true

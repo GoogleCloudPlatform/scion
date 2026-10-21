@@ -226,6 +226,10 @@ func (s *Server) checkLegacyPortRequest(ctx context.Context, st *conduitUserStre
 type conduitBrokerMemo struct {
 	mu    sync.Mutex
 	reads map[string]*conduitBrokerRead
+
+	// brokerMemoWaitTestHook, when set, runs in a check that has joined
+	// another check's read, before it waits. Only tests set it.
+	brokerMemoWaitTestHook func()
 }
 
 // conduitBrokerRead is one shared broker read. done closes when it is
@@ -258,7 +262,11 @@ func conduitBrokerMemoFrom(ctx context.Context) *conduitBrokerMemo {
 func (m *conduitBrokerMemo) getRuntimeBroker(ctx context.Context, id string, read func(context.Context, string) (*store.RuntimeBroker, error)) (*store.RuntimeBroker, error) {
 	m.mu.Lock()
 	if r, ok := m.reads[id]; ok {
+		hook := m.brokerMemoWaitTestHook
 		m.mu.Unlock()
+		if hook != nil {
+			hook()
+		}
 		select {
 		case <-r.done:
 		case <-ctx.Done():
