@@ -627,11 +627,16 @@ func printDeleteInProgressWarnings(w io.Writer, err error) {
 }
 
 // shouldSuggestHubCheck reports whether the hub-check hint is relevant for
-// err: true for connectivity failures (no structured API response) and 5xx.
+// err: true for connectivity failures (no structured API response) and 5xx,
+// except a reload_unconfirmed answer, where the hub answered normally and
+// only the running agent did not confirm a credential reload.
 func shouldSuggestHubCheck(err error) bool {
 	var apiErr *apiclient.APIError
 	if !errors.As(err, &apiErr) {
 		return true
+	}
+	if apiErr.Code == api.BrokerErrCodeReloadUnconfirmed {
+		return false
 	}
 	return apiErr.IsServerError()
 }
