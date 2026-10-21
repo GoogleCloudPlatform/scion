@@ -302,7 +302,7 @@ These keys go in `plugins.broker.discord.config` in `settings.yaml`:
 | `send_min_delay` | No | `50ms` | Minimum delay between sends (rate-limit protection) |
 | `agent_cache_ttl` | No | `5m` | TTL for cached agent lists from the hub |
 | `async_create` | No | `true` | `/scion thread` asks the hub for an asynchronous create. When the hub's `hub.async_agent_launch` experiment is on, the hub answers as soon as the broker accepts the create; the bot then edits the thread's status message with each launch step (shown as its code, for example `image_pull`). It ends with "✅ Ready — agent `<slug>`" once the agent is running, "❌ Agent `<slug>` failed to start (`<code>`): <message>" when the launch fails, or "⚠️ Couldn't confirm that agent `<slug>` started: <reason>." when the wait ends first (the launch budget ran out, the agent was deleted, the hub refused the status read, or it gave up 13 minutes after the command, the limit of the Discord interaction; the agent may still start). The thread is bound and the kickoff is sent only once the agent is running; after a failure or an unconfirmed start the thread stays unbound (bind it later with `/scion default <agent>`). A hub without async launch answers synchronously, as before. `false` always uses the synchronous create. |
-| `register_url` | No | `hub_url` | Public URL for user-facing registration links. Used instead of internal `hub_url` to fix broken links behind auth proxies. |
+| `register_url` | No | `hub_url` | Public URL for user-facing registration links. Used instead of `hub_url` to fix broken links behind auth proxies. Never falls back to `hub_api_url`. |
 | `send_search_root` | No | `/scion-volumes/` | Configurable base directory for file searches when executing `/scion send` commands. |
 
 ### Example settings.yaml (Complete)
@@ -415,7 +415,8 @@ docker run -e DATABASE_URL=... -e DISCORD_BOT_TOKEN=... scion-discord
 | `DISCORD_BOT_TOKEN` | **Yes** | — | Discord bot token from Developer Portal |
 | `DISCORD_APPLICATION_ID` | Recommended | — | For slash command registration |
 | `DISCORD_PUBLIC_KEY` | No | — | For interaction verification |
-| `DISCORD_HUB_URL` | **Yes** | — | Hub base URL for registration API / inbound delivery |
+| `DISCORD_HUB_URL` | **Yes** | — | Hub base URL. Used for the hub API calls when `DISCORD_HUB_API_URL` is not set, and for registration links when `register_url` is not set |
+| `DISCORD_HUB_API_URL` | No | `DISCORD_HUB_URL` | URL for the plugin's own hub API calls (registration API, inbound delivery, hub client). In plugin mode the hub sets `hub_api_url` to its loopback URL itself |
 | `DISCORD_BROKER_ID` | **Yes** | — | Registered broker ID (UUID) |
 | `DISCORD_HMAC_KEY` | **Yes** | — | Base64-encoded HMAC secret for hub authentication |
 | `DISCORD_GUILD_IDS` | No | — | Comma-separated guild IDs for per-guild commands |

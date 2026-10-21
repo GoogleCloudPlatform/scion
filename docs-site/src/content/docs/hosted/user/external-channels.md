@@ -7,6 +7,17 @@ description: Connect Scion to Telegram, Discord, and A2A for external messaging 
 
 Scion can relay agent messages and notifications to external platforms, extending communication beyond the CLI and Web Dashboard. Multiple external channels are supported: **Telegram** (bidirectional group chat), **Discord** (bidirectional chat and outbound notifications), **Google Chat** (comprehensive bidirectional workspace integration), **Microsoft Teams** (enterprise-grade bidirectional channel messaging), and the **A2A protocol** (exposing agents as programmatically queryable endpoints).
 
+### Hub URLs for plugins the Hub runs
+
+The Telegram, Discord, Slack and Microsoft Teams plugins can run as child processes of the Hub, on the Hub's own host. When the Hub starts or reconfigures such a plugin, it gives the plugin two Hub URLs:
+
+| Key | Value | Used for |
+| :--- | :--- | :--- |
+| `hub_url` | The Hub's public URL | Links people open, such as the account-linking button that `/register` sends and agent terminal links. |
+| `hub_api_url` | The Hub's loopback URL, `http://localhost:<port>` | The plugin's own API calls to the Hub: account linking, inbound messages, project and agent lists. |
+
+These calls stay on the Hub's host, so they still work when an authentication proxy such as IAP protects the public URL. The proxy would reject them, because the plugin signs them with its broker HMAC key and has no proxy credentials. The Hub does not set `hub_api_url` for self-managed or HA plugins, because they run on another host. Those plugins, and plugins talking to an older Hub, send their API calls to `hub_url`. In standalone mode, you can set `hub_api_url` yourself (for example `TELEGRAM_HUB_API_URL`). Both keys are set by the Hub and are not shown in the Integration Settings.
+
 ## Telegram
 
 The Telegram integration provides **bidirectional messaging** — users can message agents from Telegram groups and receive replies directly in the chat.

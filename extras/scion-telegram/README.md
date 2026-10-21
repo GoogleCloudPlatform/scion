@@ -342,7 +342,8 @@ Standalone mode runs the Telegram broker as an independent service with Postgres
 | `TELEGRAM_WEBHOOK_URL` | **Yes** | — | Public HTTPS URL for webhook delivery |
 | `TELEGRAM_WEBHOOK_SECRET` | **Yes** | — | Secret token for webhook validation. The listener uses it to verify every inbound request |
 | `TELEGRAM_WEBHOOK_LISTEN` | No | `:9094` | Listen address for webhook HTTP server |
-| `TELEGRAM_HUB_URL` | No | — | Hub API URL for inbound message delivery |
+| `TELEGRAM_HUB_URL` | No | — | Hub public URL. Used for the links people open (for example the "Link Telegram account" button), and for the hub API calls when `TELEGRAM_HUB_API_URL` is not set |
+| `TELEGRAM_HUB_API_URL` | No | `TELEGRAM_HUB_URL` | URL for the plugin's own hub API calls (inbound delivery, account linking, project and agent lists). In plugin mode the hub sets `hub_api_url` to its loopback URL itself |
 | `TELEGRAM_HMAC_KEY` | No | — | HMAC key for hub authentication |
 | `TELEGRAM_BROKER_ID` | No | — | Broker identifier for HMAC signing |
 | `GRPC_PORT` | No | `50051` | gRPC server listen port |

@@ -367,7 +367,8 @@ These are set automatically in plugin mode (the hub injects them). In standalone
 
 | Key / Env Var | Description |
 |---------------|-------------|
-| `hub_url` / `TEAMS_HUB_URL` | Scion Hub API URL |
+| `hub_url` / `TEAMS_HUB_URL` | Scion Hub public URL. Used for the links people open (for example the identity-linking link), and for the hub API calls when `hub_api_url` is not set |
+| `hub_api_url` / `TEAMS_HUB_API_URL` | Optional. URL for the plugin's own hub API calls (inbound delivery, identity linking, project and agent lists). In plugin mode the hub sets it to its loopback URL (`http://localhost:<port>`), so these calls do not go through a proxy such as IAP in front of the public URL. Defaults to `hub_url` |
 | `hmac_key` / `TEAMS_HMAC_KEY` | Base64-encoded HMAC key for hub authentication |
 | `broker_id` / `TEAMS_BROKER_ID` | Broker identity string for HMAC signing |
 
