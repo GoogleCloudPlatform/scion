@@ -178,9 +178,11 @@ marks as left the active agent rows in group conversations whose agent is
 in `none`, `lineage` or `branch` mode (or an unrecognized mode), or is
 deleted or missing. Older rows do not record who added them, so `lineage`
 and `branch` rows a human added are removed as well. A human allowed to
-message the agent adds it back with
-`scion conversation join conv:<conversation-id> agent <agent-id>`. The
-migration only reports until it is run with `{"params":{"apply":"true"}}`.
+message a `lineage` or `branch` agent adds it back with
+`scion conversation join conv:<conversation-id> agent <agent-id>`; `none`
+mode and deleted agents cannot be added back. The migration only reports
+until it is run with `{"params":{"apply":"true"}}` (`apply` must be the
+string `"true"`; a boolean `true` is ignored).
 
 ### System to Agent
 
