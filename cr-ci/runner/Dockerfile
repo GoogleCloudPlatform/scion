@@ -19,9 +19,10 @@ ARG ACTIONS_RUNNER_SHA256=af4b794c1bc41d73d40535e3fe092a39f9679cd8d965954c2aca25
 # https://go.dev/dl/ (linux-amd64 archive).
 ARG GO_VERSION=1.26.1
 ARG GO_SHA256=031f088e5d955bab8657ede27ad4e3bc5b7c1ba281f05f245bcc304f327c987a
-# https://github.com/golangci/golangci-lint/releases (golangci-lint-<v>-checksums.txt).
-ARG GOLANGCI_LINT_VERSION=2.11.4
-ARG GOLANGCI_LINT_SHA256=200c5b7503f67b59a6743ccf32133026c174e272b930ee79aa2aa6f37aca7ef1
+# https://github.com/golangci/golangci-lint/releases (golangci-lint-<v>-checksums.txt); keep
+# in step with the version .github/workflows/ci.yml installs.
+ARG GOLANGCI_LINT_VERSION=2.15.0
+ARG GOLANGCI_LINT_SHA256=9b7fe6a6bf6334b98decf8d86b11415ea7889afdabdd1959fdce23af2a9ebcea
 # -------------------------------------------------------------------------------
 
 FROM ${UBUNTU_IMAGE}
