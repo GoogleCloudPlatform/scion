@@ -44,14 +44,20 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
-# Base tools from the Ubuntu archive (apt verifies the archive signatures).
+# Base tools from the Ubuntu archive (apt verifies the archive signatures). zstd: with
+# it on PATH, actions/cache compresses with zstd as on ubuntu-latest, so cache versions
+# (which include the compression method) match across the two runner types.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      ca-certificates curl git jq tar gzip unzip \
+      ca-certificates curl git jq tar gzip unzip zstd \
  && rm -rf /var/lib/apt/lists/*
 
-# Non-root runner user. The runner, its work dir and all caches belong to it.
-RUN useradd --create-home --uid 1001 --shell /bin/bash runner
+# Non-root runner user. The runner, its work dir and all caches belong to it. uid 1001
+# and HOME=/home/runner as on ubuntu-latest: actions/cache keys its cache version on
+# the cache paths, so ~/... must resolve to the same absolute paths on both runner types.
+# HOME is set explicitly (below, before USER) rather than left to the runtime: Docker
+# derives it from /etc/passwd, but the image config is what Cloud Run is sure to pass on.
+RUN useradd --create-home --home-dir /home/runner --uid 1001 --shell /bin/bash runner
 
 # Go toolchain.
 RUN curl -fsSL -o /tmp/go.tgz "https://dl.google.com/go/go${GO_VERSION}.linux-amd64.tar.gz" \
@@ -86,5 +92,6 @@ RUN curl -fsSL -o /tmp/actions-runner.tgz \
 
 COPY --chmod=0755 entrypoint.sh /usr/local/bin/entrypoint.sh
 
+ENV HOME=/home/runner
 USER runner
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

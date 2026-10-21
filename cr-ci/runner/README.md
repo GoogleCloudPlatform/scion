@@ -5,7 +5,7 @@ ephemeral GitHub Actions JIT runner. That runner takes one job and then exits.
 
 | File | Purpose |
 | :--- | :--- |
-| [`Dockerfile`](Dockerfile) | Image: Ubuntu 24.04, GitHub Actions runner, Go, golangci-lint, git, jq, curl, ca-certificates; non-root `runner` user (uid 1001) |
+| [`Dockerfile`](Dockerfile) | Image: Ubuntu 24.04, GitHub Actions runner, Go, golangci-lint, git, jq, curl, zstd, ca-certificates; non-root `runner` user (uid 1001, `HOME=/home/runner`) |
 | [`entrypoint.sh`](entrypoint.sh) | PID 1: checks `/scratch`, redirects caches, does the claim exchange, then `exec ./run.sh --jitconfig` |
 | [`entrypoint_test.go`](entrypoint_test.go) | Offline harness: runs `entrypoint.sh` against a fake claim server on loopback with a stub `run.sh` |
 
@@ -25,9 +25,25 @@ the values. Read them there.
 Every download is checked with `sha256sum -c`, and a mismatch fails the build.
 To override a pin, pass the version **and** its checksum with `--build-arg`,
 for example `--build-arg GO_VERSION=<v> --build-arg GO_SHA256=<sha>`. git, jq,
-curl and the runner's .NET dependencies (installed by the runner's own
+curl, zstd and the runner's .NET dependencies (installed by the runner's own
 `bin/installdependencies.sh`) come from the Ubuntu archive, and apt verifies
 their signatures.
+
+**Cache parity with ubuntu-latest.** `actions/cache` (and `setup-go-cache`)
+derives a cache's version from its paths and its compression method. So a job
+restores the same cache on both runner types only if the two match:
+- **zstd:** the image has `zstd` on `PATH`, so `actions/cache` picks zstd, as
+  on ubuntu-latest.
+- **`HOME=/home/runner` and uid 1001:** both match ubuntu-latest. `HOME` is
+  set in the image config, and the entrypoint does not change it.
+- **`~/.cache` and `~/go`:** the workflow templates' first self-hosted step
+  links them into `/scratch` (`/scratch/cache`, the entrypoint's
+  `XDG_CACHE_HOME`, and `/scratch/gopath`, its `GOPATH`). It then sets
+  `GOCACHE=$HOME/.cache/go-build` and `GOMODCACHE=$HOME/go/pkg/mod`, so the
+  cache paths read exactly as on ubuntu-latest while the bytes land on the
+  ephemeral disk. That step is owned by `workflows/`. If `XDG_CACHE_HOME` or
+  `GOPATH` in `entrypoint.sh` ever changes, the link targets there must change
+  with it.
 
 The image is built for linux/amd64 only. The build context is this directory:
 `docker build -t <ref> cr-ci/runner`. `scripts/build-runner-image.sh` (P4)
