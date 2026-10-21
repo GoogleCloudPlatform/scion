@@ -58,6 +58,7 @@ func TestLoadDefaults(t *testing.T) {
 		ExecSAName:              "cr-runner-exec-sa",
 		AppPrivateKeySecretName: "cr-runner-gh-app-private-key",
 		WebhookSecretName:       "cr-runner-gh-webhook-secret",
+		ClaimTTL:                300 * time.Second,
 	}
 	if !reflect.DeepEqual(c, want) {
 		t.Errorf("Load defaults:\n got %+v\nwant %+v", c, want)
@@ -173,6 +174,9 @@ func TestLoadInvalid(t *testing.T) {
 		{EnvTaskTimeout, "45"},
 		{EnvTaskTimeout, "30s"},
 		{EnvTaskTimeout, "169h"},
+		{EnvClaimTTL, "300"},
+		{EnvClaimTTL, "10s"},
+		{EnvClaimTTL, "2h"},
 		{EnvArtifactRepo, "Repo"},
 		{EnvMediatorServiceName, "1abc"},
 		{EnvReconcilerJobName, "has_underscore"},

@@ -40,6 +40,7 @@ const (
 	EnvExecSAName              = "EXEC_SA_NAME"
 	EnvAppPrivateKeySecretName = "GITHUB_APP_PRIVATE_KEY_SECRET_NAME"
 	EnvWebhookSecretName       = "GITHUB_WEBHOOK_SECRET_NAME"
+	EnvClaimTTL                = "CLAIM_TTL"
 )
 
 // Cloud Run limits and contract defaults.
@@ -69,6 +70,9 @@ const (
 	defaultExecSA            = "cr-runner-exec-sa"
 	defaultAppKeySecret      = "cr-runner-gh-app-private-key"
 	defaultWebhookSecret     = "cr-runner-gh-webhook-secret"
+	defaultClaimTTL          = "300s"
+	minClaimTTL              = 30 * time.Second
+	maxClaimTTL              = time.Hour
 )
 
 // InstallScope is where the GitHub App is installed and, therefore, which
@@ -118,6 +122,7 @@ type Config struct {
 	ExecSAName              string
 	AppPrivateKeySecretName string
 	WebhookSecretName       string
+	ClaimTTL                time.Duration
 }
 
 // Defaults returns the default value of every optional variable. Required
@@ -150,6 +155,7 @@ func Defaults() map[string]string {
 		EnvExecSAName:              defaultExecSA,
 		EnvAppPrivateKeySecretName: defaultAppKeySecret,
 		EnvWebhookSecretName:       defaultWebhookSecret,
+		EnvClaimTTL:                defaultClaimTTL,
 	}
 }
 
@@ -314,6 +320,18 @@ func Load(getenv func(string) string) (*Config, error) {
 			fail(EnvTaskTimeout, "%s must be between 1m and %s", d, maxCloudRunTaskTimeout)
 		default:
 			c.TaskTimeout = d
+		}
+	}
+
+	if raw := get(EnvClaimTTL); raw != "" {
+		d, err := time.ParseDuration(raw)
+		switch {
+		case err != nil:
+			fail(EnvClaimTTL, "%q is not a duration (for example 300s)", raw)
+		case d < minClaimTTL || d > maxClaimTTL:
+			fail(EnvClaimTTL, "%s must be between %s and %s", d, minClaimTTL, maxClaimTTL)
+		default:
+			c.ClaimTTL = d
 		}
 	}
 

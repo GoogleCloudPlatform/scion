@@ -13,7 +13,11 @@ import (
 )
 
 func TestHealth(t *testing.T) {
-	srv := httptest.NewServer(newMux())
+	cfg, err := Load(getenvFrom(validEnv()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(newServer(cfg, endpoints{}, slog.New(slog.NewTextHandler(io.Discard, nil))).Handler())
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/health")
@@ -26,13 +30,15 @@ func TestHealth(t *testing.T) {
 		t.Errorf("GET /health = %d %q, want 200 \"ok\\n\"", resp.StatusCode, body)
 	}
 
-	resp2, err := http.Get(srv.URL + "/webhook")
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp2.Body.Close()
-	if resp2.StatusCode != http.StatusNotFound {
-		t.Errorf("GET /webhook = %d, want 404 until P2", resp2.StatusCode)
+	for _, path := range []string{"/webhook", "/internal/claim", "/reconcile"} {
+		resp, err := http.Get(srv.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusMethodNotAllowed {
+			t.Errorf("GET %s = %d, want 405 (POST only)", path, resp.StatusCode)
+		}
 	}
 }
 
