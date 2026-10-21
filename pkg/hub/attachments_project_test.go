@@ -139,10 +139,12 @@ func TestMessageProjectForBind_IgnoresRequestProject(t *testing.T) {
 func TestMessageProjectForBind_NilConversationNotFound(t *testing.T) {
 	f := newRefFixture(t)
 	conv := seedGroupConversation(t, f.st, f.projA.ID, "g1")
+	msg := &store.Message{ID: uuid.NewString(), ConversationID: conv, SenderID: f.ua.ID}
+	got, err := f.srv.messageProjectForBind(context.Background(), msg)
+	require.NoError(t, err, "control: the bind succeeds with the real store")
+	require.Equal(t, f.projA.ID, got)
 	f.faults.nilGetConversation = true
 	f.fault.Arm()
-	_, err := f.srv.messageProjectForBind(context.Background(), &store.Message{
-		ID: uuid.NewString(), ConversationID: conv, SenderID: f.ua.ID,
-	})
+	_, err = f.srv.messageProjectForBind(context.Background(), msg)
 	require.ErrorIs(t, err, store.ErrNotFound)
 }

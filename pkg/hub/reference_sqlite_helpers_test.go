@@ -350,6 +350,10 @@ type refFaultStore struct {
 	// nilGetAgent answers GetAgent with (nil, nil) while the switch is armed,
 	// which no real store does; with nilGetAgentMax > 0 only the first
 	// nilGetAgentMax armed calls do (nilGetAgentN counts them).
+	// Neither nil switch is scoped to an id: while armed, every GetAgent
+	// (or GetConversation) answers (nil, nil), whatever the id, and
+	// nilGetAgentMax is the only narrowing. Arm them only around a call
+	// that makes the one lookup the test means.
 	nilGetAgent    bool
 	nilGetAgentMax int
 	nilGetAgentN   int
