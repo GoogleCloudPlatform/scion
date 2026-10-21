@@ -1327,6 +1327,12 @@ jobs:
   lint:
     name: golangci-lint
     runs-on: ubuntu-latest
+    # Bounds a hang only; the runner shutdowns in ptone/scion#4208 were not
+    # timeouts. Passing lint steps took up to ~22 min at the default
+    # concurrency (4); --concurrency=2 below can make that up to ~2x slower
+    # in the worst case, plus checkout and cache restore, so 60 leaves margin
+    # without falling back to the 360-minute default.
+    timeout-minutes: 60
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -1345,16 +1351,61 @@ jobs:
         with:
           workload: lint
 
-      - name: golangci-lint
-        # Bound golangci-lint memory so type-checking the module (pkg/hub in
-        # particular) cannot exhaust the ~16 GB runner, which shows up as
-        # "The runner has received a shutdown signal" (ptone/scion#4208).
-        env:
-          GOGC: '50'
-          GOMEMLIMIT: 8GiB
+      # The action only restores its analysis cache and installs the binary
+      # here (its post step still saves the cache); lint runs in the next
+      # step so that a memory sampler can log alongside it. The version is
+      # pinned so that a new golangci-lint release cannot change memory use
+      # unnoticed; bump it deliberately.
+      - name: Install golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
-          args: '--new-from-merge-base=origin/main'
+          version: v2.15.0
+          install-only: true
+
+      # Bound golangci-lint memory so type-checking the module (pkg/hub in
+      # particular) cannot exhaust the ~16 GB runner, which shows up as
+      # "The runner has received a shutdown signal" with no lint output
+      # (ptone/scion#4208).
+      # - --concurrency=2 (default: CPU count, 4) halves the packages
+      #   analysed at once. This is the main limit on peak memory; it costs
+      #   lint time.
+      # - GOGC=25 sets the heap target to 1.25x the live heap (default 2x;
+      #   previously 1.5x), trading GC CPU for a lower peak.
+      # - GOMEMLIMIT=10GiB is a soft limit: it makes the GC run harder near
+      #   that size but does not cap the heap if the live set is larger. At
+      #   10 GiB it leaves ~5 GiB of the runner for the OS, the runner agent
+      #   and the go list processes that package loading starts.
+      # The sampler prints memory every 30 s to the live log, so the last
+      # lines before a runner shutdown show how close memory was to the
+      # limit, and prints a peak summary at the end. It does not affect the
+      # step's result; the step exits with golangci-lint's exit code.
+      - name: golangci-lint
+        shell: bash
+        env:
+          GOGC: '25'
+          GOMEMLIMIT: 10GiB
+        run: |
+          samples="$RUNNER_TEMP/lint-mem.log"
+          : > "$samples"
+          (
+            trap 'kill "$nap" 2>/dev/null; exit 0' TERM
+            while :; do
+              line="$(date -u +%H:%M:%S) $(free -m | awk 'NR==2{printf "used=%s avail=%s total=%s", $3, $7, $2}') top_rss_mb=$(ps -eo rss=,comm= --sort=-rss | awk 'NR==1{printf "%s:%d", $2, $1/1024}')"
+              echo "mem: $line"
+              echo "$line" >> "$samples"
+              sleep 30 & nap=$!
+              wait "$nap"
+            done
+          ) &
+          sampler=$!
+          trap 'kill "$sampler" 2>/dev/null || true' EXIT
+          rc=0
+          golangci-lint run --new-from-merge-base=origin/main --concurrency=2 || rc=$?
+          kill "$sampler" 2>/dev/null || true
+          wait "$sampler" 2>/dev/null || true
+          awk '{split($2,u,"="); split($3,a,"="); if (u[2]>max) max=u[2]; if (min=="" || a[2]<min) min=a[2]; n++}
+            END {printf "mem summary: %d samples, peak used=%d MB, min avail=%d MB\n", n, max, min}' "$samples"
+          exit "$rc"
 
       - name: Save Go cache
         uses: ./.github/actions/save-go-cache
