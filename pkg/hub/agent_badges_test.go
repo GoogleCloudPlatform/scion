@@ -387,3 +387,45 @@ func TestAgentBadges_ReincarnateRederivesHarnessAndSize(t *testing.T) {
 		})
 	}
 }
+
+// TestAgentBadges_StampPrecedence pins where create's harness stamp comes
+// from: an inline harness first, then the harness of the harness-config
+// create resolved (whichever layer named it: request, project, template
+// default), then the live resolve; a harness that does not resolve is not
+// stamped.
+func TestAgentBadges_StampPrecedence(t *testing.T) {
+	cases := []struct {
+		name            string
+		req             *api.ScionConfig
+		projectHC       string
+		templateDefault string
+		want            string
+	}{
+		{name: "template default only", templateDefault: "team-x", want: "gemini-cli"},
+		{name: "request names the config", req: &api.ScionConfig{HarnessConfig: "team-x"}, want: "gemini-cli"},
+		{name: "project annotation names the config", projectHC: "team-x", want: "gemini-cli"},
+		{name: "inline harness beats a resolved config of another harness", req: &api.ScionConfig{Harness: "claude", HarnessConfig: "team-x"}, want: "claude"},
+		{name: "unresolvable config leaves no stamp", req: &api.ScionConfig{HarnessConfig: "no-such-config"}, want: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newTiersFixture(t, tiersCapable)
+			ctx := t.Context()
+			require.NoError(t, f.s.CreateHarnessConfig(ctx, &store.HarnessConfig{
+				ID: tid("stamp-team-x"), Name: "team-x", Slug: "team-x", Harness: "gemini-cli",
+				Scope: store.HarnessConfigScopeGlobal, Status: store.HarnessConfigStatusActive,
+				Config: &store.HarnessConfigData{Harness: "gemini-cli"},
+			}))
+			f.project.Annotations = map[string]string{}
+			if tc.projectHC != "" {
+				f.project.Annotations[projectSettingDefaultHarnessConfig] = tc.projectHC
+			}
+			f.template.DefaultHarnessConfig = tc.templateDefault
+			agent := f.newAgent(t, ctx, "stamp-order", tc.req)
+			assert.Equal(t, tc.want, agent.AppliedConfig.Harness)
+			if tc.want == "gemini-cli" {
+				assert.Equal(t, tid("stamp-team-x"), agent.AppliedConfig.HarnessConfigID, "the stamp comes from the config create resolved")
+			}
+		})
+	}
+}
