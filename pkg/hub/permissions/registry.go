@@ -72,6 +72,7 @@ const (
 	ActionDelete         = "delete"
 	ActionList           = "list"
 	ActionManage         = "manage"
+	ActionAdmin          = "admin"   // access_constraint.admin: administer access constraints
 	ActionSteward        = "steward" // artifact.steward: share and retire an agent's artifact within bounds (design D25)
 	ActionAttach         = "attach"
 	ActionPortAccess     = "port_access"
@@ -355,15 +356,15 @@ var Registry = []Permission{
 
 	// Role management (Phase 2 PR-C1)
 	{ID: "role.read", Resource: ResourceRole, Action: ActionRead, CapabilityKind: CapabilityScope, UATScope: "role:read", Description: "Read role definitions", Enforcement: []string{"pkg/hub/handlers_roles.go"}},
-	{ID: "role.create", Resource: ResourceRole, Action: ActionCreate, CapabilityKind: CapabilityScope, Description: "Create custom role definitions", Enforcement: []string{"pkg/hub/handlers_roles.go"}},
-	{ID: "role.update", Resource: ResourceRole, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Update custom role definitions", Enforcement: []string{"pkg/hub/handlers_roles.go"}},
-	{ID: "role.delete", Resource: ResourceRole, Action: ActionDelete, CapabilityKind: CapabilityScope, Description: "Delete custom role definitions", Enforcement: []string{"pkg/hub/handlers_roles.go"}},
+	{ID: "role.create", Resource: ResourceRole, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "role:create", Description: "Create custom role definitions", Enforcement: []string{"pkg/hub/handlers_roles.go"}},
+	{ID: "role.update", Resource: ResourceRole, Action: ActionUpdate, CapabilityKind: CapabilityScope, UATScope: "role:update", Description: "Update custom role definitions", Enforcement: []string{"pkg/hub/handlers_roles.go"}},
+	{ID: "role.delete", Resource: ResourceRole, Action: ActionDelete, CapabilityKind: CapabilityScope, UATScope: "role:delete", Description: "Delete custom role definitions", Enforcement: []string{"pkg/hub/handlers_roles.go"}},
 	{ID: "role_binding.read", Resource: ResourceRoleBinding, Action: ActionRead, CapabilityKind: CapabilityScope, UATScope: "role_binding:read", Description: "Read role bindings", Enforcement: []string{"pkg/hub/handlers_roles.go"}},
-	{ID: "role_binding.create", Resource: ResourceRoleBinding, Action: ActionCreate, CapabilityKind: CapabilityScope, Description: "Create role bindings", Enforcement: []string{"pkg/hub/handlers_roles.go"}},
-	{ID: "role_binding.delete", Resource: ResourceRoleBinding, Action: ActionDelete, CapabilityKind: CapabilityScope, Description: "Delete role bindings", Enforcement: []string{"pkg/hub/handlers_roles.go"}},
+	{ID: "role_binding.create", Resource: ResourceRoleBinding, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "role_binding:create", Description: "Create role bindings", Enforcement: []string{"pkg/hub/handlers_roles.go"}},
+	{ID: "role_binding.delete", Resource: ResourceRoleBinding, Action: ActionDelete, CapabilityKind: CapabilityScope, UATScope: "role_binding:delete", Description: "Delete role bindings", Enforcement: []string{"pkg/hub/handlers_roles.go"}},
 
 	// Access constraint management (AC1 — Operator Access Constraint Backend)
-	{ID: "access_constraint.admin", Resource: ResourceAccessConstraint, Action: ActionManage, CapabilityKind: CapabilityScope, Description: "Administer access constraints (create, update, delete)", Enforcement: []string{"pkg/hub/handlers_access_constraints.go"}},
+	{ID: "access_constraint.admin", Resource: ResourceAccessConstraint, Action: ActionAdmin, CapabilityKind: CapabilityScope, UATScope: "access_constraint:admin", Description: "Administer access constraints (create, update, delete)", Enforcement: []string{"pkg/hub/handlers_access_constraints.go"}},
 	{ID: "access_constraint.read", Resource: ResourceAccessConstraint, Action: ActionRead, CapabilityKind: CapabilityScope, UATScope: "access_constraint:read", Description: "Read access constraints", Enforcement: []string{"pkg/hub/handlers_access_constraints.go"}},
 
 	// Scheduled event / recurring schedule permissions (project-scoped)

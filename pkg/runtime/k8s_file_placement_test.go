@@ -324,7 +324,7 @@ func modeOf(t *testing.T, p string) os.FileMode {
 }
 
 func TestK8sFilePlacementScript(t *testing.T) {
-	requireTools(t, "sh", "cp", "mkdir", "chmod", "rm")
+	requireTools(t, "sh", "cp", "mkdir", "chmod", "rm", "mv")
 	root := t.TempDir()
 	staging := filepath.Join(root, "run", "auth-files")
 	home := filepath.Join(root, "home")
@@ -437,6 +437,115 @@ func TestK8sFilePlacementScript_QuotesPaths(t *testing.T) {
 	}
 }
 
+// placementTempFiles returns the placement temporary files left in dir.
+func placementTempFiles(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var left []string
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".scion-place.") {
+			left = append(left, e.Name())
+		}
+	}
+	return left
+}
+
+// TestK8sFilePlacementScript_FailedCopyKeepsTarget checks that a placement
+// whose copy fails leaves the existing target as it was and removes its
+// temporary file, so a retried placement never sees a half-written file.
+func TestK8sFilePlacementScript_FailedCopyKeepsTarget(t *testing.T) {
+	requireTools(t, "sh", "cp", "mkdir", "chmod", "rm", "mv")
+	root, home, _ := placementFixture(t)
+	dir := filepath.Join(home, ".gemini")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "oauth_creds.json")
+	if err := os.WriteFile(target, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stderr, err := runPlacement(t, home, []k8sFilePlacement{{Source: filepath.Join(root, "missing"), Target: target, Mode: 0o600}})
+	if err == nil {
+		t.Fatal("expected placement to fail for a missing source")
+	}
+	if !strings.Contains(stderr, "cannot copy file") {
+		t.Errorf("stderr = %q, want the copy failure named", stderr)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("existing target lost after a failed copy: %v", err)
+	}
+	if string(got) != "old" {
+		t.Errorf("target = %q after a failed copy, want the previous content", got)
+	}
+	if left := placementTempFiles(t, dir); len(left) != 0 {
+		t.Errorf("temporary files left after a failed placement: %q", left)
+	}
+}
+
+// TestK8sFilePlacementScript_RepeatIsIdempotent checks that running the same
+// placement twice, as a retry does, overwrites rather than appends and
+// leaves the same content and mode with no temporary files.
+func TestK8sFilePlacementScript_RepeatIsIdempotent(t *testing.T) {
+	requireTools(t, "sh", "cp", "mkdir", "chmod", "rm", "mv")
+	_, home, src := placementFixture(t)
+	target := filepath.Join(home, ".config", "gcloud", "adc.json")
+	placements := []k8sFilePlacement{{Source: src, Target: target, Mode: 0o640}}
+	for i := 0; i < 2; i++ {
+		if stderr, err := runPlacement(t, home, placements); err != nil {
+			t.Fatalf("run %d failed: %v (stderr: %s)", i+1, err, stderr)
+		}
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "staged-content" {
+		t.Errorf("target = %q, want the staged content once", got)
+	}
+	if m := modeOf(t, target); !m.IsRegular() || m.Perm() != 0o640 {
+		t.Errorf("target mode = %v, want regular 0640", m)
+	}
+	if left := placementTempFiles(t, filepath.Dir(target)); len(left) != 0 {
+		t.Errorf("temporary files left: %q", left)
+	}
+}
+
+// TestK8sFilePlacementScript_StaleTempNotFollowed checks that a temporary
+// file left by an interrupted placement is removed, not written through:
+// a symlink at the temporary name must not redirect the copy.
+func TestK8sFilePlacementScript_StaleTempNotFollowed(t *testing.T) {
+	requireTools(t, "sh", "cp", "mkdir", "chmod", "rm", "mv")
+	root, home, src := placementFixture(t)
+	dir := filepath.Join(home, ".gemini")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(root, "outside")
+	if err := os.WriteFile(outside, []byte("untouched"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, ".scion-place.tmp")); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "oauth_creds.json")
+	if stderr, err := runPlacement(t, home, []k8sFilePlacement{{Source: src, Target: target, Mode: 0o600}}); err != nil {
+		t.Fatalf("placement failed: %v (stderr: %s)", err, stderr)
+	}
+	if got, err := os.ReadFile(outside); err != nil || string(got) != "untouched" {
+		t.Errorf("file behind the stale temporary symlink = %q (%v), want it untouched", got, err)
+	}
+	if m := modeOf(t, target); !m.IsRegular() || m.Perm() != 0o600 {
+		t.Errorf("target mode = %v, want regular 0600", m)
+	}
+	if left := placementTempFiles(t, dir); len(left) != 0 {
+		t.Errorf("temporary files left: %q", left)
+	}
+}
+
 // placementFixture creates a home and one staged source file.
 func placementFixture(t *testing.T) (root, home, src string) {
 	t.Helper()
@@ -453,7 +562,7 @@ func placementFixture(t *testing.T) (root, home, src string) {
 }
 
 func TestK8sFilePlacementScript_RefusesSymlinks(t *testing.T) {
-	requireTools(t, "sh", "cp", "mkdir", "chmod", "rm")
+	requireTools(t, "sh", "cp", "mkdir", "chmod", "rm", "mv")
 
 	t.Run("symlinked_parent_outside_home", func(t *testing.T) {
 		root, home, src := placementFixture(t)
@@ -615,7 +724,7 @@ func TestK8sFilePlacementScript_RefusesSymlinks(t *testing.T) {
 
 func TestK8sFilePlacementScript_UnwritableDirNamed(t *testing.T) {
 	skipIfRoot(t)
-	requireTools(t, "sh", "cp", "mkdir", "chmod", "rm")
+	requireTools(t, "sh", "cp", "mkdir", "chmod", "rm", "mv")
 	_, home, src := placementFixture(t)
 	dir := filepath.Join(home, ".gemini")
 	if err := os.Mkdir(dir, 0o500); err != nil {

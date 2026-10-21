@@ -395,7 +395,7 @@ func TestUpdateVersionedSetting_EdgeCases(t *testing.T) {
 // TestUpdateVersionedSetting_RejectsNotStoredKeys instead.
 var updateVersionedSettingKeys = []string{
 	"active_profile", "default_template", "default_harness_config", "workspace_path",
-	"image_registry", "cli.autohelp", "hub.enabled", "hub.linked", "hub.endpoint",
+	"image_registry", "cli.autohelp", "cli.mode", "hub.enabled", "hub.linked", "hub.endpoint",
 	"hub.local_only", "hub.brokerId", "hub.brokerToken", "hub.brokerNickname",
 	"server.auth.display_name", "server.auth.email", "server.auth.username",
 	"use_host_credentials",

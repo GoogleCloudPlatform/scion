@@ -324,10 +324,14 @@ func capabilitiesFromStrings(names []string) *store.BrokerCapabilities {
 			caps.Reprovision = true
 		case "asynclaunch", "async_launch":
 			caps.AsyncLaunch = true
+		case "asyncstart", "async_start":
+			caps.AsyncStart = true
 		case "emptyperagentworkspace", "empty_per_agent_workspace":
 			caps.EmptyPerAgentWorkspace = true
 		case "agentmove", "agent_move":
 			caps.AgentMove = true
+		case "agentmoverecreate", "agent_move_recreate":
+			caps.AgentMoveRecreate = true
 		case "reprovisionemptyperagent", "reprovision_empty_per_agent":
 			caps.ReprovisionEmptyPerAgent = true
 		case "startsinflight", "starts_in_flight":

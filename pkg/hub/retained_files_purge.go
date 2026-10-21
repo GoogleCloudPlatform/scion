@@ -144,7 +144,7 @@ func (s *Server) settleRetainedFiles(ctx context.Context, a *store.Agent, cutoff
 		log.Warn("Purge: could not read the agent's broker; will retry", "error", err)
 		return s.retainedPurgeKeepOrGiveUp(log, a, cutoff, "broker lookup failed")
 	}
-	if !s.brokerRecordReachable(broker) {
+	if !s.brokerRecordReachable(ctx, broker) {
 		log.Debug("Purge: the agent's broker is not reachable; will retry")
 		return s.retainedPurgeKeepOrGiveUp(log, a, cutoff, "broker not reachable")
 	}

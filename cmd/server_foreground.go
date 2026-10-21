@@ -2758,6 +2758,9 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 	if err := hubSrv.RegisterConduitRelayReadinessGauge(mp); err != nil {
 		log.Printf("WARNING: hub conduit relay readiness gauge disabled: %v", err)
 	}
+	if err := hubSrv.RegisterBrokerPresenceMetrics(mp); err != nil {
+		log.Printf("WARNING: hub broker presence metrics disabled: %v", err)
+	}
 
 	if refreshRec, err := hub.NewOTelConduitAgentRefreshMetrics(mp); err != nil {
 		log.Printf("WARNING: hub conduit agent refresh metrics disabled: %v", err)
@@ -2781,6 +2784,12 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 		log.Printf("WARNING: hub quota scope conflict metrics disabled: %v", err)
 	} else {
 		hubSrv.SetQuotaScopeConflictMetrics(conflictRec)
+	}
+
+	if capacityRec, err := hub.NewOTelQuotaCapacityMetrics(mp); err != nil {
+		log.Printf("WARNING: hub quota capacity metrics disabled: %v", err)
+	} else {
+		hubSrv.SetQuotaCapacityMetrics(capacityRec)
 	}
 
 	if portProxyRec, err := hub.NewOTelPortProxyMetrics(mp); err != nil {
@@ -4081,6 +4090,9 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 				brokerID = effectiveID
 			}
 			log.Printf("Registered global project with runtime broker %s (endpoint: %s, autoProvide: %v)", brokerName, rhEndpoint, serverAutoProvide)
+			// Record the reservations of the agents the co-located broker
+			// still runs (its row may have been re-created); idempotent.
+			hubSrv.BackfillBrokerOnRegistration(ctx, brokerID)
 			if statelessCloudRunBroker {
 				hubSrv.SetStatelessEmbeddedBrokerID(brokerID)
 			} else {

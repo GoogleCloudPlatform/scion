@@ -150,7 +150,7 @@ func setProjectTypeGit(configDir string) error {
 			return err
 		}
 	}
-	vs, err := LoadSingleFileVersioned(configDir)
+	vs, err := loadSingleFileVersioned(lock, configDir)
 	if err != nil {
 		return err
 	}

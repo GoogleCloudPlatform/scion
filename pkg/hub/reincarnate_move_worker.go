@@ -82,7 +82,7 @@ func (s *Server) recheckMoveEligibility(ctx context.Context, agentID string, mv 
 		Profile:   mv.Profile,
 		SelfMove:  mv.SelfMove,
 		Probes: moveProbes{
-			Reachable:        s.brokerRecordReachable,
+			Reachable:        func(b *store.RuntimeBroker) bool { return s.brokerRecordReachable(ctx, b) },
 			CanDispatch:      allowed,
 			CanUseAsProvider: allowed,
 			ServesProject: func(b *store.RuntimeBroker) bool {
@@ -116,7 +116,7 @@ func (s *Server) moveBrokerQuota(ctx context.Context, a *store.Agent, mv *reinca
 	src := withBroker(a, mv.SourceBrokerID)
 	s.releaseBrokerQuota(ctx, src)
 	if _, err := s.checkAndReserveBrokerQuota(ctx, withBroker(a, mv.TargetBrokerID)); err != nil {
-		s.reassertBrokerReservation(ctx, src)
+		s.restoreBrokerReservation(ctx, src)
 		return err
 	}
 	return nil
@@ -206,7 +206,7 @@ func (s *Server) rollbackMove(ctx context.Context, md agentMoveDispatcher, agent
 		}
 	}
 	s.releaseBrokerQuota(ctx, cur)
-	s.reassertBrokerReservation(ctx, withBroker(cur, mv.SourceBrokerID))
+	s.restoreBrokerReservation(ctx, withBroker(cur, mv.SourceBrokerID))
 }
 
 // cleanUpMoveSource removes the agent's broker-local state from the source
@@ -258,7 +258,7 @@ func (s *Server) reconcileFailedMove(ctx context.Context, reincarnationID string
 			"agent_id", rec.AgentID, "reincarnation_id", rec.ID, "error", err)
 	} else if a.RuntimeBrokerID == rec.SourceBrokerID {
 		s.releaseBrokerQuota(ctx, a)
-		s.reassertBrokerReservation(ctx, a)
+		s.restoreBrokerReservation(ctx, a)
 	}
 	if rec.SourceCleanup == "" {
 		if err := s.store.SetAgentReincarnationSourceCleanup(ctx, rec.ID, sourceCleanupSkippedInterrupted); err != nil {

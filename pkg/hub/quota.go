@@ -54,6 +54,17 @@ type QuotaService struct {
 	// scopeConflictMetrics counts reservation scope conflicts; nil until
 	// Server.SetQuotaScopeConflictMetrics.
 	scopeConflictMetrics atomic.Pointer[OTelQuotaScopeConflictMetrics]
+
+	// capacityMetrics counts backstop re-asserts and releases on
+	// deregistered Runtime Broker scopes; nil until
+	// Server.SetQuotaCapacityMetrics.
+	capacityMetrics atomic.Pointer[OTelQuotaCapacityMetrics]
+
+	// brokerBackfillPending holds, per Runtime Broker ID, a
+	// *brokerBackfillRetry for a broker whose registration backfill skipped an
+	// agent on this replica (Server.BackfillBrokerOnRegistration); its heartbeats
+	// retry it (Server.retryBrokerBackfill).
+	brokerBackfillPending sync.Map
 }
 
 // Sites of a reservation scope conflict, the site attribute of
@@ -174,6 +185,30 @@ func (e *ReservationScopeConflictError) Error() string {
 }
 
 func (e *ReservationScopeConflictError) Unwrap() error { return ErrReservationScopeConflict }
+
+// QuotaExceededError is the store.ErrQuotaExceeded refusal of Reserve,
+// naming the exhausted scope. It unwraps to store.ErrQuotaExceeded, so
+// errors.Is callers are unchanged, and its message is that sentinel's.
+type QuotaExceededError struct {
+	Limit     string
+	ScopeType string
+	ScopeID   string
+}
+
+func (e *QuotaExceededError) Error() string { return store.ErrQuotaExceeded.Error() }
+
+func (e *QuotaExceededError) Unwrap() error { return store.ErrQuotaExceeded }
+
+// quotaExceededDetails returns the API error details of err when it is a
+// broker-scoped QuotaExceededError: {runtimeBrokerId}. The broker's name is
+// omitted, so the error path makes no broker read. nil otherwise.
+func quotaExceededDetails(err error) map[string]interface{} {
+	var exceeded *QuotaExceededError
+	if !errors.As(err, &exceeded) || exceeded.ScopeType != store.QuotaScopeBroker || exceeded.ScopeID == "" {
+		return nil
+	}
+	return map[string]interface{}{"runtimeBrokerId": exceeded.ScopeID}
+}
 
 // ErrQuotaLockContention is returned when the advisory lock cannot be acquired,
 // indicating another concurrent request is checking the same quota scope.
@@ -319,7 +354,7 @@ func (qs *QuotaService) Reserve(ctx context.Context, limitName string, subjectID
 				"limit", limitName, "scope_type", scopeType, "scope_id", scopeID,
 				"count", count, "effective_limit", effectiveLimit)
 		} else {
-			return false, store.ErrQuotaExceeded
+			return false, &QuotaExceededError{Limit: limitName, ScopeType: scopeType, ScopeID: scopeID}
 		}
 	}
 
