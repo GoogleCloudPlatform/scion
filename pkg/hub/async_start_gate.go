@@ -27,21 +27,21 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 )
 
-// The all-live-hubs check for asynchronous start (ptone/scion#4669, design
-// wave 3 D-a(6)). Asynchronous start relies on code every hub node must
-// run (the kind-aware launch report, claim settlement and the self-report
-// guard), so a start is sent asynchronously only while every live hub
-// instance advertises api.HubInstanceFeatureAsyncStartV1 in its registry
-// row. The answer is cached: a start reads the cached value (false until
-// the first refresh) and, when it is older than asyncStartGateTTL, starts
-// one refresh in the background, so a slow registry read never delays a
-// start. An answer older than asyncStartGateMaxAge (two TTLs: an idle gate)
-// is not used: the start runs synchronously while the refresh runs, as for
-// a fresh process. Stale and stopped rows are ignored: a node whose registry writes
-// fail stops blocking after hubInstanceStaleAfter. The check fails safe:
-// on any doubt the start runs synchronously. It does not replace the
-// rollback rule (turn the experiment off, then wait launch_timeout plus
-// 15 seconds before downgrading any node).
+// The all-live-hubs check for asynchronous start (ptone/scion#4669).
+// Asynchronous start relies on code every hub node must run (the kind-aware
+// launch report, claim settlement and the self-report guard), so a start is
+// sent asynchronously only while every live hub instance advertises
+// api.HubInstanceFeatureAsyncStartV1 in its registry row. The answer is
+// cached: a start reads the cached value (false until the first refresh) and,
+// when it is older than asyncStartGateTTL, starts one refresh in the
+// background, so a slow registry read never delays a start. An answer older
+// than asyncStartGateMaxAge (two TTLs: an idle gate) is not used: the start
+// runs synchronously while the refresh runs, as for a fresh process. Stale
+// and stopped rows are ignored: a node whose registry writes fail stops
+// blocking after hubInstanceStaleAfter. The check fails safe: on any doubt
+// the start runs synchronously. It does not replace the rollback rule (turn
+// the experiment off, then wait launch_timeout plus 15 seconds before
+// downgrading any node).
 
 const (
 	// asyncStartGateTTL is how long a computed answer is used before a

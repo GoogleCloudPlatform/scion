@@ -16,7 +16,8 @@
 
 // Design wave 3 phase D3b (ptone/scion#4669), store-backed: the async
 // start branch of the dispatcher, of startAgentCore and of its callers, the
-// cross-node start, and the D3a follow-ups.
+// cross-node start, the Guard 0f no-op reason and the plain-dispatcher
+// start error.
 package hub
 
 import (
@@ -341,10 +342,9 @@ func (d *deleteHeldStartDispatcher) DispatchAgentStart(_ context.Context, a *sto
 // TestStartDidNotHappen_DeleteHeldKeepsIntent pins the delete-hold rule: a
 // start refused because a delete holds the row (ErrLaunchInvalidPhase
 // wrapping store.ErrDeleteInProgress) leaves the run intent to the delete
-// engine. A provisioned agent's start runs no
-// provisioned settle (intent unchanged, no message), and a queued-stop
-// agent's start runs no ptone/scion#5070 revert (intent unchanged,
-// stop_queued untouched).
+// engine. A provisioned agent's start runs no provisioned settle (intent
+// unchanged, no message), and a queued-stop agent's start runs no
+// ptone/scion#5070 revert (intent unchanged, stop_queued untouched).
 func TestStartDidNotHappen_DeleteHeldKeepsIntent(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -1463,7 +1463,7 @@ func ownerOf(t *testing.T, d *HTTPAgentDispatcher) *Server {
 	return bus.owner
 }
 
-// ---- D3a follow-ups ---------------------------------------------------------
+// ---- Guard 0f reason and plain-dispatcher error -----------------------------
 
 // postAgentStatusAsAgentRun posts a status report with an agent token of
 // runID.
@@ -1485,7 +1485,7 @@ func postAgentStatusAsAgentRun(t *testing.T, srv *Server, agent *store.Agent, ru
 	return out
 }
 
-// TestAsyncStartGuard0f_NoopReason pins the D3a follow-up: while a start
+// TestAsyncStartGuard0f_NoopReason pins the no-op reason: while a start
 // launch is active, a phase-only report whose token names no run, or a run
 // other than the row's (recorded with SetAgentRunID), is answered
 // {"applied":false,"reason":"start_launch_other_run"} and changes nothing; a
@@ -1518,9 +1518,9 @@ func TestAsyncStartGuard0f_NoopReason(t *testing.T) {
 	assert.Equal(t, string(state.PhaseRunning), getAgent(t, s, a.ID).Phase, "the launched run's own report applies")
 }
 
-// TestAsyncStartExecDispatchStart_PlainDispatcherError pins the D3a
-// follow-up: an owner whose dispatcher takes no start options returns its
-// synchronous start's error.
+// TestAsyncStartExecDispatchStart_PlainDispatcherError pins the plain
+// dispatcher case: an owner whose dispatcher takes no start options returns
+// its synchronous start's error.
 func TestAsyncStartExecDispatchStart_PlainDispatcherError(t *testing.T) {
 	f, _, a := newClaimFixture(t)
 	args, err := MarshalDispatchArgs(&StartDispatchArgs{Async: true})
@@ -1550,14 +1550,14 @@ func TestAsyncStartExecDispatchStart_PassesKindAndPriorPhase(t *testing.T) {
 	assert.Equal(t, StartDispatchOptions{Async: true, Kind: store.LaunchKindRestart, PriorPhase: "running"}, od.lastOpts, "the owner passes the intent's Kind and PriorPhase")
 }
 
-// ---- D2 wire contract -------------------------------------------------------
+// ---- Broker start wire contract ---------------------------------------------
 
-// d2Broker is an HTTP broker answering a start as the D2 broker does
-// (agreed with as-d2-dev): it takes the asynchronous branch only when the
+// d2Broker is an HTTP broker answering a start as the broker does (matching
+// the broker start contract): it takes the asynchronous branch only when the
 // agentId query parameter is present and the body carries asyncLaunch, a
 // launchId and launchTimeoutSeconds above 20, and then answers 202
-// {launchPending, launchId (echo), launchInstanceId} with no agent;
-// otherwise it answers the synchronous 202 {agent, created:false}.
+// {launchPending, launchId (echo), launchInstanceId} with no agent; otherwise
+// it answers the synchronous 202 {agent, created:false}.
 type d2Broker struct {
 	mu     sync.Mutex
 	asyncs int
@@ -1585,8 +1585,8 @@ func (b *d2Broker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{"created": false, "agent": map[string]interface{}{"id": "x", "name": "x", "phase": "running"}})
 }
 
-// TestAsyncStartD2Contract pins the hub side of the start contract agreed
-// with D2 (the broker's async startAgent) over the real HTTP transport: the
+// TestAsyncStartD2Contract pins the hub side of the start contract shared
+// with the broker (its async startAgent) over the real HTTP transport: the
 // URL carries agentId; an async start's body carries asyncLaunch, launchId,
 // launchTimeoutSeconds (> 20) and launchKeepaliveSeconds; the broker's 202
 // launchPending echo is an accepted launch owned by launchInstanceId; its
@@ -1641,7 +1641,7 @@ func TestAsyncStartD2Contract(t *testing.T) {
 	}
 
 	t.Run("sync 202 answers an async request", func(t *testing.T) {
-		// A runtime that cannot launch asynchronously (D2: substrate,
+		// A runtime that cannot launch asynchronously (substrate,
 		// cloudrun) answers the plain 202 even to an async request.
 		f := newAsyncDispatchFixture(t, "d2c-syncanswer", string(state.PhaseStopped), true, nil, asyncOn)
 		f.client.mode = "sync"

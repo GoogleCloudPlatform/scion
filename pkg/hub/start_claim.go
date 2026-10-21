@@ -780,14 +780,15 @@ func (s *Server) settleFailedProvisionedStart(ctx context.Context, agentID strin
 // whether it settled.
 //
 // a is the row the failure end itself wrote, and the caller calls this only
-// on the write that ended the launch: an applied failed report that ended
-// an active launch (end reason failed), or a row the launch reaper ended.
-// Never on a later refine of an already-ended launch: the CAS key is the
-// row's current RunIntentAt, so a second call could revert a newer start's
-// intent. It is the shared call site for every start-launch failure end
-// (kr-5368 PR 2's failure after running_observed reuses it). Start launches
-// exist only while hub.async_agent_start is on; one begun before the
-// experiment was turned off still settles here when it ends.
+// on the write that ended the launch: an applied failed report that ended an
+// active launch (end reason failed), or a row the launch reaper ended. Never
+// on a later refine of an already-ended launch: the CAS key is the row's
+// current RunIntentAt, so a second call could revert a newer start's intent.
+// It is the shared call site for every start-launch failure end (the
+// ptone/scion#5368 follow-up, a failure applied after running_observed,
+// reuses it). Start launches exist only while hub.async_agent_start is on;
+// one begun before the experiment was turned off still settles here when it
+// ends.
 func (s *Server) settleFailedStartLaunch(ctx context.Context, a *store.Agent) bool {
 	if !isProvisionedStartLaunchEnd(a) || a.RunIntentAt == nil {
 		return false
