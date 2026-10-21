@@ -25,3 +25,5 @@ Once you believe you have completed your task, you must summarize and report bac
       `sciontool status task_completed "<task title>"`
 
 Do not follow this completion step with asking the user another question like "what would you like to do now?" just stop.
+
+Before serving a web page or app for a person to open through `scion expose`, read the `scion-web-serving` skill.

@@ -152,6 +152,54 @@ func TestPlatformSkillsFS_ScionAgentManageLifecycleDescribesMove(t *testing.T) {
 	}
 }
 
+// TestPlatformSkillsFS_ScionWebServing pins the scion-web-serving platform
+// skill (ptone/scion#5567). It reads the embedded copy, the one agents get,
+// so it fails if the skill is missing from go:embed, gated to a subset of
+// agents, or loses the guidance for how pages behave today: one
+// self-contained file, scion tunnel for full apps, the URL as printed and an
+// honest browser check.
+func TestPlatformSkillsFS_ScionWebServing(t *testing.T) {
+	data, err := fs.ReadFile(PlatformSkillsFS(), "scion-web-serving/SKILL.md")
+	if err != nil {
+		t.Fatalf("reading embedded scion-web-serving skill: %v", err)
+	}
+	raw := string(data)
+
+	front, _, ok := strings.Cut(strings.TrimPrefix(raw, "---\n"), "\n---\n")
+	if !strings.HasPrefix(raw, "---\n") || !ok {
+		t.Fatalf("embedded scion-web-serving/SKILL.md has no frontmatter block")
+	}
+	if !strings.Contains(front, "\nname: scion-web-serving\n") && !strings.HasPrefix(front, "name: scion-web-serving\n") {
+		t.Errorf("frontmatter does not declare name: scion-web-serving:\n%s", front)
+	}
+	if !strings.Contains(front, "description:") {
+		t.Errorf("frontmatter has no description")
+	}
+	if strings.Contains(front, "inject_when") {
+		t.Errorf("scion-web-serving must reach every agent; frontmatter sets inject_when:\n%s", front)
+	}
+
+	// Compare with whitespace collapsed, so a reflow does not break the pins.
+	content := strings.Join(strings.Fields(raw), " ")
+	for _, want := range []string{
+		"one self-contained HTML file",
+		"vite-plugin-singlefile",
+		"data:",
+		"scion expose <port>",
+		"exactly as printed",
+		"trailing `/`",
+		"scion tunnel <agent> --port <port>",
+		"https://googlecloudplatform.github.io/scion/hosted/user/port-forwarding/#multi-file-apps",
+		"is NOT proof",
+		"headless browser",
+		"If you could not run a browser, say so",
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("embedded scion-web-serving/SKILL.md does not contain %q", want)
+		}
+	}
+}
+
 func TestSourceURLFormat(t *testing.T) {
 	const harnessPrefix = "https://github.com/GoogleCloudPlatform/scion/harnesses/"
 	const builtinPrefix = "builtin://scion/"
