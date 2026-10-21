@@ -40,10 +40,10 @@ func RedactEndpoint(endpoint string) string {
 // NormalizeEndpoint returns the form of a hub endpoint used to identify a
 // session locally: the redacted endpoint (RedactEndpoint) with the ASCII
 // letters of scheme and host lowercased and the scheme's default port
-// dropped. It follows the
-// CLI's rule for comparing hub URLs. Input that is not a URL with a host
-// gives "invalid:" and a short digest of the input, so different invalid
-// inputs never compare equal and no input text is kept.
+// dropped. It follows the CLI's rule for comparing hub URLs. Input that is
+// not a URL with a host gives "invalid:" and a short digest of the input,
+// so different invalid inputs never compare equal and no input text is
+// kept.
 //
 // Normalisation here is for session reuse and comparison. The CLI's
 // credential lookup normalises endpoints with config.NormalizeEndpoint;

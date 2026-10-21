@@ -377,19 +377,28 @@ func TestConfigSetGlobalHubEndpoint_JSON(t *testing.T) {
 	assert.Equal(t, true, res.Details["reachable"])
 }
 
-// In a project with no link entry, config unset hub.endpoint marks the
-// project as imported, so a later run never links it from the project's
-// settings; a second unset changes nothing.
+// In a linked project whose link was never imported, config unset
+// hub.endpoint (run while the environment chooses the hub, so the import does
+// not run first) marks the project as imported: a later plain run, with the
+// import on, does not link it to the hub its settings name (a hub in the hub
+// list), and the current hub applies. A second unset changes nothing.
 func TestConfigUnsetProjectHubEndpoint_StopsTheImport(t *testing.T) {
 	setupConfigHubTest(t)
+	enableGlobalHubImport(t)
 	saveTestContext(t, ctxTestHub, "")
-	root := makeDirProject(t, "https://settings.example.org")
-	linkPath := config.LinkPathForProject(filepath.Join(root, ".scion"))
+	// The project's hub is in the hub list, so without the mark a plain run
+	// would link the project to it.
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		return c.AddHub("settings", "https://settings.example.org")
+	}))
+	dotScion := makeLinkedDirProject(t, "https://settings.example.org")
+	linkPath := config.LinkPathForProject(dotScion)
 
+	t.Setenv("SCION_HUB_ENDPOINT", "https://env.example.org")
 	stdout, _, err := runConfig(t, "config", "unset", "hub.endpoint")
 	require.NoError(t, err)
 	assert.Contains(t, stdout, "This project is not linked to a hub; nothing changed.")
-	assert.True(t, readTestContext(t).ProjectImported(linkPath), "the project's settings are never imported into a link")
+	assert.True(t, readTestContext(t).ProjectImported(linkPath), "the project is marked as imported")
 
 	before, err := os.ReadFile(contextFilePath())
 	require.NoError(t, err)
@@ -398,4 +407,22 @@ func TestConfigUnsetProjectHubEndpoint_StopsTheImport(t *testing.T) {
 	after, err := os.ReadFile(contextFilePath())
 	require.NoError(t, err)
 	assert.Equal(t, string(before), string(after), "context.yaml is not rewritten")
+
+	t.Setenv("SCION_HUB_ENDPOINT", "")
+	stdout, _, err = runConfig(t, "config", "get", "--source", "hub.endpoint")
+	require.NoError(t, err)
+	assert.Equal(t, ctxTestHub+"  (current hub 'prod')\n", stdout, "the project's settings were not imported into a link")
+	p, _ := readTestContext(t).LinkEntryFor(linkPath)
+	assert.Nil(t, p, "no link entry was imported")
+}
+
+// When the global settings still spell hub.endpoint in a form config unset
+// does not edit, the global unset says so and names the file.
+func TestConfigUnsetGlobalHubEndpoint_WarnsAboutAFormItCannotEdit(t *testing.T) {
+	setupConfigHubTest(t)
+	writeHomeGlobalSettings(t, "schema_version: \"1\"\nhub:\n  Endpoint: https://legacy-case.example.org\n")
+
+	_, stderr, err := runConfig(t, "config", "unset", "--global", "hub.endpoint")
+	require.NoError(t, err)
+	assert.Contains(t, stderr, "Warning: hub.endpoint is still set in "+globalSettingsPath()+" in a form config unset does not edit; remove it by hand")
 }

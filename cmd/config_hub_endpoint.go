@@ -202,12 +202,12 @@ func removeLegacyGlobalHubSetting(stderr io.Writer) bool {
 		_, _ = fmt.Fprintf(stderr, "  Migration warning: %s\n", w)
 	}
 	if res.Removed {
-		_, _ = fmt.Fprintf(stderr, "Removed the legacy %s from %s (the server and the broker still fell back to it).\n", configHubEndpointKey, res.Path)
+		_, _ = fmt.Fprintf(stderr, "Removed the legacy %s from %s (the server and the Runtime Broker no longer fall back to it).\n", configHubEndpointKey, res.Path)
 	}
 	if globalDir, err := config.GetGlobalDir(); err == nil {
 		if v, err := config.ResolveSettingValue(globalDir, configHubEndpointKey); err == nil {
 			if file, ok := strings.CutPrefix(v.Source, "global "); ok {
-				_, _ = fmt.Fprintf(stderr, "Warning: %s is still set in %s in a form config unset does not edit; remove it by hand (the server and the broker still fall back to it).\n", configHubEndpointKey, file)
+				_, _ = fmt.Fprintf(stderr, "Warning: %s is still set in %s in a form config unset does not edit; remove it by hand (the server and the Runtime Broker still fall back to it).\n", configHubEndpointKey, file)
 			}
 		}
 	}
