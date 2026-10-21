@@ -80,8 +80,9 @@ func TestConduitIngress_NoRepickAfterTerminating(t *testing.T) {
 }
 
 // TestConduitIngressDrainDeadline: the drain deadline sent is
-// max(1ms, min(min(30s, grace - 2s) from the signal, step deadline - now -
-// 1s)); with no grace it is still sent, at most step deadline - now - 1s.
+// max(1ms, min(min(30s, grace - 2s) from the signal, hold end - now - 1s)),
+// and the hold ends at the step deadline (conduitIngressHoldEnd); with no
+// grace it is still sent, at most step deadline - now - 1s.
 func TestConduitIngressDrainDeadline(t *testing.T) {
 	t0 := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
 	for _, tc := range []struct {
@@ -102,7 +103,10 @@ func TestConduitIngressDrainDeadline(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			now := t0.Add(tc.sinceSig)
-			got := conduitIngressDrainDeadline(now, t0, now.Add(tc.stepLeft), tc.grace, tc.set)
+			o := ConduitIngressDrainOptions{SignalAt: t0, StepDeadline: now.Add(tc.stepLeft), Grace: tc.grace, GraceSet: tc.set}
+			holdEnd := conduitIngressHoldEnd(o)
+			assert.Equal(t, o.StepDeadline, holdEnd, "the hold ends at the step deadline")
+			got := conduitIngressDrainDeadline(now, t0, holdEnd, tc.grace, tc.set)
 			assert.Equal(t, tc.want, got)
 			if tc.stepLeft > 2*time.Second {
 				assert.LessOrEqual(t, got, tc.stepLeft-time.Second, "never more than step deadline - now - 1s")
@@ -310,19 +314,23 @@ func TestDrainConduitIngressForShutdown_ProxyOffAsksNoRelay(t *testing.T) {
 	assert.Zero(t, f.relays["relay-a"].hits.Load(), "no relay is asked to drain")
 }
 
-// TestBeginShutdown_StopsConduitIngressProxying: the shutdown's mark phase
-// (BeginShutdown) stops proxying. Behind the hub's shutdown refusal, a
-// broker-signed dial reaches the conduit handler and gets 503
-// conduit_not_serving with the terminating message; a user dial, a broker
-// dial on behalf of a user and a dial with no broker identity (an agent)
-// get the generic shutdown 503. No relay is contacted.
-func TestBeginShutdown_StopsConduitIngressProxying(t *testing.T) {
+// TestConduitIngress_DialBetweenMarkAndDrain: the shutdown stops proxying
+// (BeginConduitIngressShutdown, the step before the marks), then marks the
+// hub (BeginShutdown); the drain step has not run yet. In that window,
+// behind the hub's shutdown refusal, a broker-signed dial reaches the
+// conduit handler and gets 503 conduit_not_serving with the terminating
+// message (cause ingress_terminating) and is not proxied; a user dial, a
+// broker dial on behalf of a user and a dial with no broker identity (an
+// agent) get the generic shutdown 503. No relay is contacted.
+func TestConduitIngress_DialBetweenMarkAndDrain(t *testing.T) {
 	f := newIngressFixture(t, "relay-a")
 	srv, _ := testServer(t)
 	srv.conduitExternal.Store(f.rt)
 	setConduitExperiment(t, srv, true)
+	srv.BeginConduitIngressShutdown()
 	srv.BeginShutdown()
-	assert.True(t, f.rt.terminating.Load(), "terminating is set in the mark phase")
+	assert.True(t, f.rt.terminating.Load(), "proxying stopped before the mark")
+	assert.False(t, f.rt.drainStarted.Load(), "the drain step has not run")
 	h := srv.shutdownMark.refuseDuringShutdown(http.HandlerFunc(srv.handleConduit), isBrokerRequest)
 	upgrade := func(ctx context.Context) *http.Request {
 		req := httptest.NewRequest(http.MethodGet, "http://hub.example.com/api/v1/conduit", nil)
@@ -353,6 +361,7 @@ func TestBeginShutdown_StopsConduitIngressProxying(t *testing.T) {
 		assert.NotContains(t, rec.Body.String(), ptyReasonConduitNotServing, name)
 	}
 	assert.Zero(t, f.relays["relay-a"].hits.Load(), "no relay is contacted after the mark")
+	assert.Zero(t, f.rt.legs.count(), "no proxied leg is open")
 }
 
 // TestConduitIngress_NoLegAfterTerminatingAtSend: a dial whose relay was
@@ -408,10 +417,11 @@ func openUpgradedLeg(t *testing.T, f *ingressFixture, hubURL, id string) *upgrad
 	return leg
 }
 
-// TestDrainConduitIngressForShutdown_HoldsLegsUntilClosed: after the
-// fan-out the step holds while a proxied leg is open and returns as soon
-// as the last one closes, before the step deadline.
-func TestDrainConduitIngressForShutdown_HoldsLegsUntilClosed(t *testing.T) {
+// TestDrainConduitIngressForShutdown_ReturnsEarlyWhenLastLegCloses: after
+// the fan-out the step holds while a proxied leg is open and returns as
+// soon as the last one closes, well before the step deadline (the fake
+// clock never moves): the step deadline is only the backstop.
+func TestDrainConduitIngressForShutdown_ReturnsEarlyWhenLastLegCloses(t *testing.T) {
 	f := newIngressFixture(t, "relay-a")
 	f.s.conduitExternal.Store(f.rt)
 	f.rt.peers = &relay.PeerClient{HTTP: http.DefaultClient, Auth: f.rt.peerAuth}
@@ -439,13 +449,24 @@ func TestDrainConduitIngressForShutdown_HoldsLegsUntilClosed(t *testing.T) {
 		t.Fatal("the step returned while a proxied leg was open")
 	default:
 	}
+	select {
+	case <-leg.relayClosed:
+		t.Fatal("the leg was closed before it ended on its own")
+	default:
+	}
+	assert.Equal(t, 1, f.rt.legs.count(), "the leg is still open during the hold")
 	_ = leg.client.Close() // the client moved after its GoAway
 	select {
 	case <-returned:
 	case <-time.After(10 * time.Second):
 		t.Fatal("the step did not return when the last leg closed")
 	}
-	assert.Equal(t, t0, clk.Now(), "returned before the step deadline")
+	assert.Equal(t, t0, clk.Now(), "returned before the step deadline, with the clock not moved")
+	select {
+	case <-leg.relayClosed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the relay side of the leg did not end")
+	}
 	assert.Zero(t, f.rt.legs.count())
 }
 
@@ -485,6 +506,18 @@ func TestDrainConduitIngressForShutdown_ClosesLegsAtDeadline(t *testing.T) {
 		t.Fatal("the relay was not asked to drain")
 	}
 	require.True(t, clk.WaitForTimer(10*time.Second, t0.Add(12*time.Second)), "the step deadline is armed")
+	require.Eventually(t, func() bool { return f.relays["relay-a"].hits.Load() == 2 }, 10*time.Second, 10*time.Millisecond, "the drain call was answered")
+	select {
+	case <-returned:
+		t.Fatal("the step returned before its deadline with a leg open")
+	default:
+	}
+	select {
+	case <-leg.relayClosed:
+		t.Fatal("the leg was closed before the step deadline")
+	default:
+	}
+	assert.Equal(t, 1, f.rt.legs.count(), "the leg is still open until the step deadline")
 	clk.Advance(12 * time.Second)
 	select {
 	case <-returned:

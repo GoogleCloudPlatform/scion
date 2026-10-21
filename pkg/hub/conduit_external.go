@@ -126,9 +126,9 @@ type conduitExternalRuntime struct {
 	ingressCountFailures atomic.Int64
 	// peers calls the relays' internal API (the drain fan-out).
 	peers *relay.PeerClient
-	// terminating is set once, in the shutdown's mark phase
-	// (BeginShutdown): from then on no conduit dial is proxied (cause
-	// ingress_terminating).
+	// terminating is set once, before the shutdown marks any server
+	// (BeginConduitIngressShutdown): from then on no conduit dial is
+	// proxied (cause ingress_terminating).
 	terminating atomic.Bool
 	// drainStarted makes the ingress drain step run once.
 	drainStarted atomic.Bool

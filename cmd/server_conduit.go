@@ -235,6 +235,11 @@ var (
 	conduitIngressProxyActive = func(hubSrv *hub.Server) bool {
 		return hubSrv.ConduitIngressProxyActive()
 	}
+	// conduitIngressStop stops the hub proxying conduit dials (the
+	// ingress stop step).
+	conduitIngressStop = func(hubSrv *hub.Server) {
+		hubSrv.BeginConduitIngressShutdown()
+	}
 	// serveConduitInternalListenerFn opens the internal listener that
 	// serves the internal relay API (serveConduitInternalListener).
 	serveConduitInternalListenerFn = serveConduitInternalListener
@@ -296,6 +301,14 @@ func conduitDrainStepBound(b serverShutdownBudget) time.Duration {
 func registerConduitShutdownDrain(q *serverShutdownSequence, bound time.Duration, drain func()) bool {
 	return q.addStep(shutdownPhaseDrain, boundedShutdownStep(q.clk, bound, "conduit drain", drain))
 }
+
+// shutdownPhaseIngressStop is the phase of the step that stops the hub
+// proxying conduit dials. It sorts before shutdownPhaseMark (the shutdown
+// runs steps in phase order), so the stop runs before the hub's mark
+// step: after the mark a broker-signed dial still passes the hub's
+// shutdown refusal, and it must already find proxying stopped (cause
+// ingress_terminating), whatever the registration order of the steps.
+const shutdownPhaseIngressStop = shutdownPhaseMark - 1
 
 // registerConduitIngressShutdownDrain makes the ingress drain a pre-cancel
 // step of the process's single graceful shutdown, in the same phase and
@@ -432,17 +445,19 @@ func startConduit(ctx context.Context, q *serverShutdownSequence, cfg *config.Gl
 		// External relay mode: no relay here, so no relay drain and no
 		// grace recorded. Its configuration was chosen explicitly, so
 		// every failure is fatal, in and outside hosted HA. With the
-		// ingress proxy serving, the shutdown's mark phase stops proxying
-		// (hub BeginShutdown) and the ingress drain step asks the relays
-		// to drain the sessions this hub proxied, holds the proxied legs
-		// and closes the ones left at its deadline (design §3.9 "Drain
-		// through the proxy"). With the proxy off there is no step.
+		// ingress proxy serving, the shutdown stops proxying before it
+		// marks any server (shutdownPhaseIngressStop), and the ingress
+		// drain step asks the relays to drain the sessions this hub
+		// proxied, holds the proxied legs and closes the ones left at its
+		// deadline (design §3.9 "Drain through the proxy"). With the
+		// proxy off there are no steps.
 		if err := startConduitExternalFn(ctx, cfg, hubSrv, wg, errCh); err != nil {
 			return fmt.Errorf("conduit external relay mode: %w", err)
 		}
 		if conduitIngressProxyActive(hubSrv) {
 			grace, graceSet := conduitShutdownDrainSetting(cfg)
 			bound := conduitDrainStepBound(serverShutdownBudgetFor(cfg))
+			q.addStep(shutdownPhaseIngressStop, func() { conduitIngressStop(hubSrv) })
 			registerConduitIngressShutdownDrain(q, bound, func(signalAt, stepDeadline time.Time) {
 				conduitIngressShutdownDrain(hubSrv, hub.ConduitIngressDrainOptions{
 					Clock:        q.clk,

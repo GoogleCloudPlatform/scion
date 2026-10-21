@@ -145,11 +145,7 @@ func writeShuttingDown(w http.ResponseWriter) {
 // handlers and event timers), the scheduled-send sweeper loop and the
 // auto-suspend worker. Work already running finishes or is joined by
 // the background teardown, as before.
-//
-// In external relay mode it first stops proxying conduit dials
-// (beginConduitIngressShutdown), so no dial reaches a relay after the mark.
 func (s *Server) BeginShutdown() {
-	s.beginConduitIngressShutdown()
 	s.shutdownMark.begin()
 	s.brokerWork.closeAdmission()
 	s.haltDispatchProducers()

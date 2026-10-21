@@ -202,12 +202,14 @@ func TestStartConduit_ExternalRelayNeedsExperiment(t *testing.T) {
 
 // TestStartConduit_ExternalRelayMode: with hub.conduit on, external relay
 // mode starts the external runtime instead of a relay and records no
-// shutdown grace. With the ingress proxy serving it registers exactly one
-// shutdown step, the ingress drain, which runs before cancel with the
-// signal time and the absolute step deadline (step start plus the conduit
-// drain-step bound on the shutdown clock); with the proxy off, or after a
-// failed start, it registers none. Any failure is fatal, outside hosted HA
-// too (design §3.9 "Drain through the proxy", v2.21.57).
+// shutdown grace. With the ingress proxy serving it registers two shutdown
+// steps: the ingress stop, which runs before the hub's mark step although
+// that step was registered first (as in runServerStart), and the ingress
+// drain, which runs after the marks and before cancel with the signal time
+// and the absolute step deadline (step start plus the conduit drain-step
+// bound on the shutdown clock). With the proxy off, or after a failed
+// start, it registers none. Any failure is fatal, outside hosted HA too
+// (design §3.9 "Drain through the proxy", v2.21.57).
 func TestStartConduit_ExternalRelayMode(t *testing.T) {
 	t.Cleanup(resetServerFlags)
 	captureStdLog(t)
@@ -217,10 +219,10 @@ func TestStartConduit_ExternalRelayMode(t *testing.T) {
 	cfg.Hub.Conduit.ShutdownGrace = "10s"
 
 	prevExt, prevRelay, prevSetGrace := startConduitExternalFn, startConduitRelayFn, conduitSetShutdownGrace
-	prevDrain, prevActive := conduitIngressShutdownDrain, conduitIngressProxyActive
+	prevDrain, prevActive, prevStop := conduitIngressShutdownDrain, conduitIngressProxyActive, conduitIngressStop
 	t.Cleanup(func() {
 		startConduitExternalFn, startConduitRelayFn, conduitSetShutdownGrace = prevExt, prevRelay, prevSetGrace
-		conduitIngressShutdownDrain, conduitIngressProxyActive = prevDrain, prevActive
+		conduitIngressShutdownDrain, conduitIngressProxyActive, conduitIngressStop = prevDrain, prevActive, prevStop
 	})
 	relayStarted, graceRecorded := false, false
 	startConduitRelayFn = func(context.Context, *config.GlobalConfig, *hub.Server, string, *sync.WaitGroup, chan<- error, bool) error {
@@ -246,8 +248,21 @@ func TestStartConduit_ExternalRelayMode(t *testing.T) {
 		opts   hub.ConduitIngressDrainOptions
 		ctxErr error
 	}
+	var orderMu sync.Mutex
+	var order []string
+	record := func(step string) {
+		orderMu.Lock()
+		defer orderMu.Unlock()
+		order = append(order, step)
+	}
+	stopped := make(chan *hub.Server, 1)
+	conduitIngressStop = func(s *hub.Server) {
+		record("ingress stop")
+		stopped <- s
+	}
 	drained := make(chan drainCall, 1)
 	conduitIngressShutdownDrain = func(s *hub.Server, opts hub.ConduitIngressDrainOptions) {
+		record("ingress drain")
 		drained <- drainCall{srv: s, opts: opts, ctxErr: ctx.Err()}
 	}
 	steps := func(q *serverShutdownSequence) int {
@@ -257,11 +272,15 @@ func TestStartConduit_ExternalRelayMode(t *testing.T) {
 	}
 
 	clk := clock.NewFake(shutdownTestT0)
-	q := newServerShutdownSequence(cancel, clk)
+	q := newServerShutdownSequence(func() {
+		record("cancel")
+		cancel()
+	}, clk)
+	q.addStep(shutdownPhaseMark, func() { record("hub mark") }) // registered first, as in runServerStart
 	require.NoError(t, startConduit(ctx, q, cfg, srv, "https://hub.example.com", &wg, make(chan error, 1)))
 	assert.Equal(t, 1, externalCalls)
 	assert.False(t, relayStarted, "no in-process relay in external mode")
-	assert.Equal(t, 1, steps(q), "one shutdown step, the ingress drain, with the proxy serving")
+	assert.Equal(t, 3, steps(q), "the hub mark plus the ingress stop and drain steps, with the proxy serving")
 	assert.False(t, graceRecorded, "no shutdown grace recorded without a relay")
 
 	proxyActive = false
@@ -279,6 +298,12 @@ func TestStartConduit_ExternalRelayMode(t *testing.T) {
 
 	q.begin(syscall.SIGTERM)
 	select {
+	case s := <-stopped:
+		assert.Same(t, srv, s, "the ingress stop runs on this hub")
+	case <-time.After(shutdownTestWait):
+		t.Fatal("the shutdown did not stop the ingress")
+	}
+	select {
 	case call := <-drained:
 		assert.Same(t, srv, call.srv, "the ingress drain runs on this hub")
 		assert.NoError(t, call.ctxErr, "the ingress drain runs before cancel")
@@ -292,6 +317,10 @@ func TestStartConduit_ExternalRelayMode(t *testing.T) {
 		t.Fatal("the shutdown did not run the ingress drain")
 	}
 	assert.Error(t, ctx.Err(), "the server context is cancelled after the drain")
+	orderMu.Lock()
+	assert.Equal(t, []string{"ingress stop", "hub mark", "ingress drain", "cancel"}, order,
+		"proxying stops before the hub's mark; the drain runs after the marks and before cancel")
+	orderMu.Unlock()
 }
 
 // TestRegisterConduitIngressShutdownDrain_BoundedWait: an ingress drain

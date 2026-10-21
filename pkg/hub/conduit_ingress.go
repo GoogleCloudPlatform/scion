@@ -125,7 +125,7 @@ func (s *Server) serveConduitIngress(w http.ResponseWriter, r *http.Request, rt 
 	excluded := map[string]bool{}
 	for attempt := 0; attempt <= router.MaxReResolves; attempt++ {
 		if rt.terminating.Load() {
-			// The shutdown's mark phase began while this dial was being
+			// The shutdown stopped proxying while this dial was being
 			// placed: no further byte goes to a relay (cause
 			// ingress_terminating).
 			break
@@ -136,6 +136,9 @@ func (s *Server) serveConduitIngress(w http.ResponseWriter, r *http.Request, rt 
 		}
 		if !s.proxyConduitDial(w, r, rt, target) {
 			return
+		}
+		if rt.terminating.Load() {
+			break // refused below with cause ingress_terminating, no re-pick
 		}
 		excluded[target.InstanceID] = true
 		slog.Info("Conduit ingress: re-picking a relay", "relay_instance_id", target.InstanceID, "attempt", attempt+1)
@@ -319,7 +322,7 @@ func (s *Server) proxyConduitDial(w http.ResponseWriter, r *http.Request, rt *co
 			pr.Out.Header.Set(relay.HeaderIngressLifetimeCap, strconv.FormatInt(int64(rt.lifetimeCap/time.Second), 10))
 			relay.SetPeerTarget(pr.Out, target.InstanceID, target.Generation)
 			if rt.terminating.Load() {
-				// The mark phase began after the relay was picked: the leg
+				// Proxying stopped after the relay was picked: the leg
 				// is never sent (the empty host fails the round trip before
 				// any byte, and the caller refuses the dial).
 				pr.Out.URL.Host = ""
@@ -347,7 +350,13 @@ func (s *Server) proxyConduitDial(w http.ResponseWriter, r *http.Request, rt *co
 				}
 				return
 			}
-			slog.Warn("Conduit ingress: proxying the dial failed", "relay_instance_id", target.InstanceID, "error", err)
+			if rt.terminating.Load() {
+				// The drain step closed the leg (or the shutdown cut it
+				// short): expected, not a relay fault.
+				slog.Debug("Conduit ingress: proxied dial ended while shutting down", "relay_instance_id", target.InstanceID, "cause", conduitIngressCauseTerminating, "error", err)
+			} else {
+				slog.Warn("Conduit ingress: proxying the dial failed", "relay_instance_id", target.InstanceID, "error", err)
+			}
 			writeError(w, http.StatusBadGateway, ErrCodeRuntimeError, "Conduit relay connection failed", nil)
 		},
 		ErrorLog: slog.NewLogLogger(slog.Default().Handler(), slog.LevelDebug),
