@@ -66,24 +66,25 @@ var errBrokerLacksAgentMove = errors.New("runtime broker does not advertise the 
 // the fresh-agent-dir expectation must never be relied on to refuse it.
 var errBrokerLacksAgentMoveRecreate = errors.New("runtime broker does not advertise the forced agent move capability; refusing to send it a forced move request")
 
-// errProvisionNotSent marks a provision that failed on the hub before any
-// request was sent to the broker (dispatchProvision's checks, the request
-// build, the agent token). errors.Is matches it through
-// provisionNotSentError, which keeps the wrapped error's text and chain.
-var errProvisionNotSent = errors.New("provision not sent to the broker")
+// errProvisionSent marks a provision error returned after the request may
+// have reached the broker: dispatchProvision's send boundary and every step
+// after it. errors.Is matches it through provisionSentError, which keeps
+// the wrapped error's text and chain. An unmarked provision error was
+// returned before anything was sent.
+var errProvisionSent = errors.New("provision sent to the broker")
 
-// provisionNotSentError wraps a pre-send provision failure: its text and
-// Unwrap are the wrapped error's, and errors.Is(err, errProvisionNotSent)
-// holds.
-type provisionNotSentError struct{ err error }
+// provisionSentError wraps a provision error returned at or after the send
+// boundary: its text and Unwrap are the wrapped error's, and
+// errors.Is(err, errProvisionSent) holds.
+type provisionSentError struct{ err error }
 
-func (e provisionNotSentError) Error() string        { return e.err.Error() }
-func (e provisionNotSentError) Unwrap() error        { return e.err }
-func (e provisionNotSentError) Is(target error) bool { return target == errProvisionNotSent }
+func (e provisionSentError) Error() string        { return e.err.Error() }
+func (e provisionSentError) Unwrap() error        { return e.err }
+func (e provisionSentError) Is(target error) bool { return target == errProvisionSent }
 
-// provisionNotSent marks err (non-nil) as a pre-send provision failure.
-func provisionNotSent(err error) error {
-	return provisionNotSentError{err: err}
+// provisionSent marks err (non-nil) as returned after the send boundary.
+func provisionSent(err error) error {
+	return provisionSentError{err: err}
 }
 
 // requireMoveCapability loads agent.RuntimeBrokerID and returns
@@ -110,7 +111,7 @@ func (d *HTTPAgentDispatcher) requireMoveCapability(ctx context.Context, agent *
 // DispatchAgentProvisionForMove implements agentMoveDispatcher.
 func (d *HTTPAgentDispatcher) DispatchAgentProvisionForMove(ctx context.Context, agent *store.Agent, expectNFSWorkspace string) error {
 	if expectNFSWorkspace == "" {
-		return provisionNotSent(errors.New("DispatchAgentProvisionForMove: the expected NFS workspace is required"))
+		return errors.New("DispatchAgentProvisionForMove: the expected NFS workspace is required")
 	}
 	// A broker without AgentMove would ignore the expected workspace and
 	// provision an empty one, and one without AgentMoveRecreate is not
@@ -204,14 +205,17 @@ func (d *HTTPAgentDispatcher) DispatchAgentDeleteRecreated(ctx context.Context, 
 }
 
 // moveTargetUntouched reports whether a forced move's provision failed
-// before the target created anything for the agent: nothing was sent (the
-// target lacks the move capabilities, or the provision failed on the hub
-// before sending, errProvisionNotSent), or the target refused with
-// BrokerErrCodeMoveTargetNotFresh because it already has files for the
-// agent, or cannot confirm it has none. A rollback then removes nothing on
-// the target, whose files (if any) the move did not create.
+// before the target created anything for the agent. That is every provision
+// error not marked errProvisionSent (it was returned before the request was
+// sent: a move-capability refusal, a hub-side check, a deferred route), and
+// a sent one that is the target's own refusal, a 409 whose broker error
+// code is exactly api.BrokerErrCodeMoveTargetNotFresh (it already has files
+// for the agent, or cannot confirm it has none). A rollback then removes
+// nothing on the target, whose files (if any) the move did not create. The
+// default is untouched, so a provision error that is not explicitly marked
+// sent never causes a target delete.
 func moveTargetUntouched(err error) bool {
-	if errors.Is(err, errProvisionNotSent) || errors.Is(err, errBrokerLacksAgentMove) || errors.Is(err, errBrokerLacksAgentMoveRecreate) {
+	if !errors.Is(err, errProvisionSent) {
 		return true
 	}
 	var se *brokerStatusError

@@ -167,16 +167,33 @@ func TestReincarnateForceMove_TargetHasFilesRefused(t *testing.T) {
 // moveTargetUntouched recognises the refusals that leave the target
 // untouched, and nothing else.
 func TestMoveTargetUntouched(t *testing.T) {
-	assert.True(t, moveTargetUntouched(errBrokerLacksAgentMove))
-	assert.True(t, moveTargetUntouched(fmt.Errorf("provision: %w", errBrokerLacksAgentMoveRecreate)))
-	assert.True(t, moveTargetUntouched(fmt.Errorf("provision: %w", &brokerStatusError{StatusCode: http.StatusConflict, Body: freshAgentDirConflictBody})))
-	assert.False(t, moveTargetUntouched(&brokerStatusError{StatusCode: http.StatusConflict, Body: `{"error":{"code":"conflict","message":"x"}}`}))
-	assert.False(t, moveTargetUntouched(&brokerStatusError{StatusCode: http.StatusInternalServerError, Body: freshAgentDirConflictBody}))
-	assert.False(t, moveTargetUntouched(errors.New("broker returned 500: provision failed")))
-	notSent := provisionNotSent(errors.New("identity not mapped on the target profile"))
-	assert.True(t, moveTargetUntouched(fmt.Errorf("provision: %w", notSent)), "a provision that failed before sending")
-	assert.Equal(t, "identity not mapped on the target profile", notSent.Error(), "the wrapper keeps the text")
-	assert.True(t, errors.Is(provisionNotSent(errNoRuntimeBrokerAssigned), errNoRuntimeBrokerAssigned), "the wrapper keeps the chain")
+	conflict := &brokerStatusError{StatusCode: http.StatusConflict, Body: `{"error":{"code":"conflict","message":"x"}}`}
+	notFresh := &brokerStatusError{StatusCode: http.StatusConflict, Body: freshAgentDirConflictBody}
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		// Not marked sent: returned before the request left the hub.
+		{"capability refusal", errBrokerLacksAgentMove, true},
+		{"wrapped capability refusal", fmt.Errorf("provision: %w", errBrokerLacksAgentMoveRecreate), true},
+		{"unmarked error", errors.New("identity not mapped on the target profile"), true},
+		{"unmarked broker status", conflict, true},
+		// Marked sent: the target may have created files, unless it refused.
+		{"sent: target refused, not fresh", provisionSent(notFresh), true},
+		{"sent: wrapped refusal", fmt.Errorf("provision: %w", provisionSent(notFresh)), true},
+		{"sent: other 409 code", provisionSent(conflict), false},
+		{"sent: the not-fresh code on a 500", provisionSent(&brokerStatusError{StatusCode: http.StatusInternalServerError, Body: freshAgentDirConflictBody}), false},
+		{"sent: transport error", provisionSent(errors.New("dial tcp 10.0.0.9:9800: connection refused")), false},
+		{"sent, then wrapped", fmt.Errorf("provision: %w", provisionSent(errors.New("broker returned 500"))), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, moveTargetUntouched(tc.err))
+		})
+	}
+	marked := provisionSent(errNoRuntimeBrokerAssigned)
+	assert.Equal(t, errNoRuntimeBrokerAssigned.Error(), marked.Error(), "the mark keeps the text")
+	assert.True(t, errors.Is(marked, errNoRuntimeBrokerAssigned), "the mark keeps the chain")
 }
 
 // A failure at the target's provision (after it created files, with no run
@@ -187,7 +204,7 @@ func TestReincarnateForceMove_ProvisionFailureRollsBackAndRetrySucceeds(t *testi
 	f := setupForceMoveFixture(t, true, nil)
 	prepareForceMoveWorker(t, f)
 	f.disp.mu.Lock()
-	f.disp.moveProvisionErr = errors.New("broker returned 500: provision failed")
+	f.disp.moveProvisionErr = provisionSent(errors.New("broker returned 500: provision failed"))
 	f.disp.mu.Unlock()
 
 	r, a := startForceMove(t, f)
@@ -512,15 +529,16 @@ func TestRecheckMoveEligibility_WorkspaceGate(t *testing.T) {
 }
 
 // A forced move's provision that fails on the hub before its request is
-// sent (errProvisionNotSent: for example the target's GCP identity check)
-// removes nothing on the target: the rollback sends no delete, and files
-// the target holds for the agent stay. The source is restored.
+// sent (an error not marked errProvisionSent: for example the target's GCP
+// identity check) removes nothing on the target: the rollback sends no
+// delete, and files the target holds for the agent stay. The source is
+// restored.
 func TestReincarnateForceMove_ProvisionNotSentSendsNoTargetDelete(t *testing.T) {
 	f := setupForceMoveFixture(t, true, nil)
 	prepareForceMoveWorker(t, f)
 	f.disp.mu.Lock()
 	f.disp.recreateFiles[f.dst.ID] = true
-	f.disp.moveProvisionErr = provisionNotSent(errors.New("GCP service account not mapped on the target profile"))
+	f.disp.moveProvisionErr = errors.New("GCP service account not mapped on the target profile")
 	f.disp.mu.Unlock()
 
 	r, a := startForceMove(t, f)

@@ -543,21 +543,20 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		}
 		srcAgent = a
 	}
-	// provisionSent records that the worker has called the move's provision
-	// dispatch. Before that call the target has been sent nothing, so a
-	// forced move's rollback removes nothing there: its absence check never
-	// ran, and any files it holds for the agent are not this move's. The
-	// dispatch can still fail before its request leaves the hub; that
-	// failure is marked errProvisionNotSent and treated the same way
-	// (moveTargetUntouched).
-	provisionSent := false
+	// provisionDispatched records that the move's provision dispatch
+	// succeeded, so the target has created the agent's files. Until then a
+	// forced move's rollback removes nothing there: a failure before the
+	// dispatch sent the target nothing, and a failed dispatch is judged by
+	// moveTargetUntouched (only an error marked sent, other than the
+	// target's own refusal, deletes).
+	provisionDispatched := false
 	// failAfterProvision fails the reincarnation once the new config has
 	// been provisioned (or a move assigned the agent to the target): a
 	// move is rolled back to the source broker; a plain reincarnation
 	// re-renders the previous config on its broker.
 	failAfterProvision := func(fromState, errMsg string) {
 		if move != nil {
-			s.failMoveAndRollBack(ctx, md, agentID, reincarnationID, fromState, errMsg, previous, move, srcAgent, move.recreates() && !provisionSent)
+			s.failMoveAndRollBack(ctx, md, agentID, reincarnationID, fromState, errMsg, previous, move, srcAgent, move.recreates() && !provisionDispatched)
 			return
 		}
 		s.failAfterReprovision(ctx, dispatcher, agentID, reincarnationID, fromState, errMsg, previous)
@@ -690,18 +689,18 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 			failAfterProvision(store.AgentReincarnationStateProvisioning, "failed to link the target broker to the project: "+err.Error())
 			return
 		}
-		provisionSent = true
 		if err := md.DispatchAgentProvisionForMove(ctx, agent, move.expectedNFSWorkspace()); err != nil {
-			errMsg := "provision on the target broker failed: " + dispatchFailureText(err)
-			if move.recreates() && moveTargetUntouched(err) {
-				// The target refused before creating anything: any files
-				// it holds for the agent predate this move and stay.
-				s.failMoveAndRollBack(ctx, md, agentID, reincarnationID, store.AgentReincarnationStateProvisioning, errMsg, previous, move, srcAgent, true)
-				return
-			}
-			failAfterProvision(store.AgentReincarnationStateProvisioning, errMsg)
+			// A forced move removes the target's files only when the
+			// provision may have created them: an error marked sent that
+			// is not the target's own refusal (moveTargetUntouched).
+			// Otherwise any files it holds for the agent predate this
+			// move and stay.
+			s.failMoveAndRollBack(ctx, md, agentID, reincarnationID, store.AgentReincarnationStateProvisioning,
+				"provision on the target broker failed: "+dispatchFailureText(err), previous, move, srcAgent,
+				move.recreates() && moveTargetUntouched(err))
 			return
 		}
+		provisionDispatched = true
 	}
 
 	// Step: reprovision (re-render scion-agent.json/agent-info.json, re-inject

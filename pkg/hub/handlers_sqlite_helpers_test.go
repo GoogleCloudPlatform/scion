@@ -588,9 +588,11 @@ type reincarnateTestDispatcher struct {
 	recreatedDeleteErr   error
 	// recreateFiles, when non-nil, models each broker's files for the
 	// moved agent as a forced move sees them: a fresh-agent-dir provision
-	// to a broker holding some is refused with the broker's 409; one that
-	// proceeds creates them, even when it then fails with
-	// moveProvisionErr (a partial provision); a recreated-files delete
+	// to a broker holding some is refused with the broker's 409 (marked
+	// sent); one that proceeds creates them, even when it then fails with
+	// a moveProvisionErr marked sent (a partial provision); a
+	// moveProvisionErr not marked sent is returned before any of this,
+	// as a pre-send failure; a recreated-files delete
 	// removes them, and a localOnly delete does not (it leaves the
 	// workspace a move created on the export).
 	recreateFiles map[string]bool
@@ -5198,14 +5200,15 @@ func (d *reincarnateTestDispatcher) DispatchAgentProvisionForMove(_ context.Cont
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.moveProvisionCalls = append(d.moveProvisionCalls, agent.RuntimeBrokerID+"|"+expect)
-	if errors.Is(d.moveProvisionErr, errProvisionNotSent) {
-		// Failed on the hub before the request was sent: the broker
+	if d.moveProvisionErr != nil && !errors.Is(d.moveProvisionErr, errProvisionSent) {
+		// Failed on the hub before the request was sent (the real
+		// dispatcher marks only errors at or after the send): the broker
 		// sees nothing.
 		return d.moveProvisionErr
 	}
 	if d.recreateFiles != nil && expect == "fresh-agent-dir" {
 		if d.recreateFiles[agent.RuntimeBrokerID] {
-			return &brokerStatusError{StatusCode: http.StatusConflict, Body: freshAgentDirConflictBody}
+			return provisionSent(&brokerStatusError{StatusCode: http.StatusConflict, Body: freshAgentDirConflictBody})
 		}
 		d.recreateFiles[agent.RuntimeBrokerID] = true
 	}
