@@ -327,16 +327,7 @@ func (s *Server) trackConduitUserStream(st *conduitUserStream) (untrack func()) 
 // deny is acted on only while the store answers for the agent
 // (conduitConfirmAgentPresent).
 func (s *Server) checkConduitUserStream(ctx context.Context, st *conduitUserStream) (conduitAuthzVerdict, string) {
-	verdict, reason, _ := s.evaluateConduitStream(ctx, conduitStreamEval{
-		AgentID:     st.AgentID,
-		ProjectID:   st.ProjectID,
-		Identity:    func() (Identity, error) { return st.Identity, nil },
-		Kind:        st.Kind,
-		ViaTunnel:   st.ViaTunnel,
-		Port:        st.Port,
-		ConfirmDeny: func(agent *store.Agent) bool { return s.conduitConfirmAgentPresent(ctx, agent.ID) },
-		LogAttrs:    []any{"session_id", st.SessionID, "stream_id", st.StreamID},
-	})
+	verdict, reason, _ := s.evaluateConduitStream(ctx, s.recordedStreamEval(ctx, st))
 	return verdict, reason
 }
 
