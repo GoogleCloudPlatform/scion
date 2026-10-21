@@ -1252,6 +1252,28 @@ export interface PresentedTarget {
   sharedDirStorageBackend?: string;
   sharedDirStorageBackends?: Record<string, string>;
   homeStorageBackend?: string;
+  /**
+   * Kubernetes placement defaults (ptone/scion#5085). Optional: a Hub that
+   * does not publish them sends none, and the card then shows no
+   * Placement group.
+   */
+  nodeSelector?: Record<string, string>;
+  tolerations?: PresentedToleration[];
+  runtimeClassName?: string;
+}
+
+/**
+ * One Kubernetes toleration as presented. Only these four fields are ever
+ * rendered; any other key on the object is ignored.
+ */
+export interface PresentedToleration {
+  key?: string;
+  /** "Equal" or "Exists"; empty means Equal. */
+  operator?: string;
+  /** Empty for Exists. */
+  value?: string;
+  /** NoSchedule, PreferNoSchedule, NoExecute, or empty for any effect. */
+  effect?: string;
 }
 
 /** Resource quantities as the Hub sends them (Go `api.ResourceSpec`). */
@@ -1323,6 +1345,12 @@ export interface RuntimeBroker {
   runtimeTargetPresentation?: RuntimeTargetPresentation;
   /** When the Hub last saw runtimeTargetPresentation ("as reported at"). */
   runtimeTargetPresentationObservedAt?: string;
+  /**
+   * True when the broker runs in the process that answered the request
+   * (this server's co-located broker or one of its flat instances).
+   * Read-only and display-only; absent otherwise.
+   */
+  hostedByThisServer?: boolean;
   autoProvide: boolean;
   endpoint?: string;
   labels?: Record<string, string>;
@@ -1330,6 +1358,8 @@ export interface RuntimeBroker {
   createdByName?: string;
   /** Configured GCP host service account (Go JSON tag is snake_case). */
   gcp_host_service_account_email?: string;
+  /** Configured GCP host project (read in snake_case; PATCH takes camelCase). */
+  gcp_host_project_id?: string;
   /** Creation and last-update times, as the hub sends them. */
   created?: string;
   updated?: string;
