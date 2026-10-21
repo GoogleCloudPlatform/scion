@@ -661,12 +661,23 @@ func (m *AgentManager) finishProvision(opts api.StartOptions, agentDir, agentHom
 // Reprovision's running-container precondition check (design §3.4 Amendment
 // A2). A List error is not treated as "not running" by the caller — see the
 // call site's comment.
-func (m *AgentManager) containerIsRunning(ctx context.Context, name string) (bool, error) {
+//
+// Agent names are unique only within a project, so entries that belong to
+// another project on the same broker are skipped: otherwise a running agent
+// with the same name elsewhere would make every reprovision of this one
+// refuse. The scoping is a post-filter (matchAgentProject), not a runtime
+// label filter, so it fails closed: an entry whose project cannot be told
+// (legacy labels, project ID only on AgentInfo, or no project info at all)
+// still counts as this agent's container.
+func (m *AgentManager) containerIsRunning(ctx context.Context, name, projectName, projectID string) (bool, error) {
 	agents, err := m.listRuntime(ctx, map[string]string{"scion.name": name})
 	if err != nil {
 		return false, err
 	}
 	for _, a := range agents {
+		if !matchAgentProject(a, projectName, projectID) {
+			continue
+		}
 		if a.Name == name || strings.TrimPrefix(a.Name, "/") == name || strings.EqualFold(a.Name, name) {
 			if strings.EqualFold(a.Phase, "running") {
 				return true, nil
@@ -849,7 +860,14 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 	// (proceeding is the pre-fail-closed behavior; the hub is expected to
 	// have stopped the container already), but an affirmative "yes, still
 	// running" answer is always honored.
-	if running, err := m.containerIsRunning(ctx, opts.Name); err != nil {
+	// Scope the check to this agent's project (ptone/scion#5510). The ID
+	// comes from the dispatch, as in Start; the name is the fallback for
+	// entries or requests without one.
+	reprovisionProjectID := opts.HubProjectID
+	if reprovisionProjectID == "" && opts.Env != nil {
+		reprovisionProjectID = opts.Env["SCION_PROJECT_ID"]
+	}
+	if running, err := m.containerIsRunning(ctx, opts.Name, config.GetProjectName(projectDir), reprovisionProjectID); err != nil {
 		util.Debugf("reprovision: failed to check running state for %s, proceeding: %v", opts.Name, err)
 	} else if running {
 		return nil, fmt.Errorf("%w: agent %q container is still running; stop it first", ErrReprovisionRefused, opts.Name)
