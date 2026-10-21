@@ -164,3 +164,38 @@ func TestResolveSettingValueIgnoringEnv(t *testing.T) {
 		t.Errorf("hub.endpoint = %+v, want the SCION_HUB_ENDPOINT value", other)
 	}
 }
+
+// An unversioned file with a snake-case hub.project_id (the shape the
+// hub.grove_id migration leaves) and a top-level project_id is converted as
+// a legacy file. The view, like LoadSettings, takes both ProjectID and
+// Hub.ProjectID from hub.project_id: only a legacy camelCase hub.projectId
+// is kept out of ProjectID (ptone/scion#5427 review).
+func TestLoadSettingsFromDir_UnversionedSnakeHubProjectID(t *testing.T) {
+	dir := fromDirTestDir(t, "hub:\n  endpoint: https://hub.example.com\n  project_id: hub-snake-id\nproject_id: own-id\n")
+	s, err := LoadSettingsFromDir(dir)
+	if err != nil {
+		t.Fatalf("LoadSettingsFromDir: %v", err)
+	}
+	if got := s.GetHubProjectID(); got != "hub-snake-id" {
+		t.Errorf("GetHubProjectID() = %q, want hub-snake-id", got)
+	}
+	if s.ProjectID != "hub-snake-id" {
+		t.Errorf("ProjectID = %q, want hub-snake-id (hub.project_id outranks the top-level project_id in the view)", s.ProjectID)
+	}
+}
+
+// The unused-key warning is only a warning: a file the legacy probe cannot
+// decode, but the view reads, still loads (ptone/scion#5427 review).
+func TestLoadSettingsFromDir_LegacyProbeDecodeFailureStillLoads(t *testing.T) {
+	// A scalar "harnesses" key in a v1 file: the v1 view has no such key
+	// and ignores it, but the legacy Settings probe's Harnesses map cannot
+	// decode a string.
+	dir := fromDirTestDir(t, "schema_version: \"1\"\nhub:\n  endpoint: https://hub.example.com\n  project_id: hub-proj-1\nharnesses: not-a-map\n")
+	s, err := LoadSettingsFromDir(dir)
+	if err != nil {
+		t.Fatalf("LoadSettingsFromDir: %v", err)
+	}
+	if got := s.GetHubProjectID(); got != "hub-proj-1" {
+		t.Errorf("GetHubProjectID() = %q, want hub-proj-1", got)
+	}
+}
