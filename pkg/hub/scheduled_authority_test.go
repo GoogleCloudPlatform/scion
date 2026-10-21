@@ -911,85 +911,115 @@ func TestSchedStartClaimOutcomes(t *testing.T) {
 
 // --- account status of a user principal --------------------------------------
 
-// userRowStubStore serves GetUser from get and everything else from Store.
-type userRowStubStore struct {
-	store.Store
-	get func(ctx context.Context, id string) (*store.User, error)
+// schedUserReader is a userRowReader returning row, err, or (nilRow) neither.
+type schedUserReader struct {
+	row    *store.User
+	err    error
+	nilRow bool
 }
 
-func (s userRowStubStore) GetUser(ctx context.Context, id string) (*store.User, error) {
-	return s.get(ctx, id)
+func (r schedUserReader) GetUser(_ context.Context, id string) (*store.User, error) {
+	switch {
+	case r.err != nil:
+		return nil, r.err
+	case r.nilRow:
+		return nil, nil
+	case r.row == nil || r.row.ID != id:
+		return nil, store.ErrNotFound
+	}
+	return r.row, nil
 }
 
-// withUserRow makes f.srv's users-row lookup for the creator return row
-// (with the creator's identity) or err, and restores the store afterwards.
-func withUserRow(t *testing.T, f *schedFire, get func(ctx context.Context, id string) (*store.User, error)) {
-	t.Helper()
-	orig := f.srv.store
-	f.srv.store = userRowStubStore{Store: orig, get: get}
-	t.Cleanup(func() { f.srv.store = orig })
+// scheduledUserAccount holds a scheduled run's user principal to the
+// account-status rule: an active row passes; every other defined status, a
+// status added later, a missing row and a lookup that returns neither a row
+// nor an error are refused with reasonPrincipalInactive; a lookup error is
+// the shared lookup fault, not a refusal of the principal.
+func TestScheduledUserAccount_Outcomes(t *testing.T) {
+	ctx := context.Background()
+	row := func(status string) schedUserReader {
+		return schedUserReader{row: &store.User{ID: "u1", Status: status}}
+	}
+
+	u, err := scheduledUserAccount(ctx, row(store.UserStatusActive), "u1")
+	require.NoError(t, err)
+	require.NotNil(t, u)
+	assert.Equal(t, "u1", u.ID)
+
+	refused := map[string]schedUserReader{
+		"suspended":        row(store.UserStatusSuspended),
+		"invited":          row(store.UserStatusInvited),
+		"pending":          row(store.UserStatusPending),
+		"added_later":      row("status-added-later"),
+		"empty_status":     row(""),
+		"missing_row":      {},
+		"nil_row_no_error": {nilRow: true},
+	}
+	for name, r := range refused {
+		u, err := scheduledUserAccount(ctx, r, "u1")
+		assert.Nil(t, u, name)
+		require.ErrorIs(t, err, errScheduledAuthorityDenied, name)
+		assert.Contains(t, err.Error(), reasonPrincipalInactive, name)
+		assert.False(t, isProjectAccessLookupFault(err), name)
+	}
+
+	storeErr := errors.New("users table unavailable")
+	u, err = scheduledUserAccount(ctx, schedUserReader{err: storeErr}, "u1")
+	assert.Nil(t, u)
+	require.ErrorIs(t, err, storeErr)
+	assert.NotErrorIs(t, err, errScheduledAuthorityDenied)
+	assert.True(t, isProjectAccessLookupFault(err), "store error is the shared lookup fault")
 }
 
-// A scheduled run's user principal is held to the account-status rule: an
-// active row passes; every other defined status, a status added later, a
-// missing row and a lookup that returns neither a row nor an error are
+// A scheduled run's user principal is checked against its current users
+// row: an active row fires; a suspended or invited row, or no row, is
 // refused with reasonPrincipalInactive.
 func TestSchedUserAccountStatusOutcomes(t *testing.T) {
 	f := newSchedFire(t, "sched-acct")
 	ctx := context.Background()
-	rowWithStatus := func(status string) func(context.Context, string) (*store.User, error) {
-		return func(_ context.Context, id string) (*store.User, error) {
-			if id != f.creator.ID {
-				return nil, store.ErrNotFound
-			}
-			u := *f.creator
-			u.Status = status
-			return &u, nil
-		}
+
+	_, identity, err := f.srv.resolveScheduledAuthority(ctx, withSessionRevision(f.event("sched-acct-active"), f.creator.ID))
+	require.NoError(t, err)
+	assert.True(t, identity != nil, "active principal has an identity")
+
+	for _, status := range []string{store.UserStatusSuspended, store.UserStatusInvited} {
+		u := hubMemberUser(t, f.store, "sched-acct-"+status)
+		grantFixtureRole(t, f.bypassAgentsFixture, u.ID, store.ProjectRoleMember)
+		u.Status = status
+		require.NoError(t, f.store.UpdateUser(ctx, u))
+		_, _, err := f.srv.resolveScheduledAuthority(ctx, withSessionRevision(f.event("sched-acct-"+status), u.ID))
+		require.ErrorIs(t, err, errScheduledAuthorityDenied, status)
+		assert.Contains(t, err.Error(), reasonPrincipalInactive, status)
 	}
 
-	t.Run("active", func(t *testing.T) {
-		withUserRow(t, f, rowWithStatus(store.UserStatusActive))
-		auth, identity, err := f.srv.resolveScheduledAuthority(ctx, withSessionRevision(f.event("sched-acct-active"), f.creator.ID))
-		require.NoError(t, err)
-		require.NotNil(t, identity)
-		require.NotNil(t, auth.user)
-		assert.Equal(t, f.creator.ID, auth.user.ID)
-	})
-
-	refused := map[string]func(context.Context, string) (*store.User, error){
-		"suspended":    rowWithStatus(store.UserStatusSuspended),
-		"invited":      rowWithStatus(store.UserStatusInvited),
-		"pending":      rowWithStatus(store.UserStatusPending),
-		"added_later":  rowWithStatus("status-added-later"),
-		"empty_status": rowWithStatus(""),
-		"missing_row": func(context.Context, string) (*store.User, error) {
-			return nil, store.ErrNotFound
-		},
-		"nil_row_no_error": func(context.Context, string) (*store.User, error) {
-			return nil, nil
-		},
-	}
-	for name, get := range refused {
-		t.Run(name, func(t *testing.T) {
-			withUserRow(t, f, get)
-			_, identity, err := f.srv.resolveScheduledAuthority(ctx, withSessionRevision(f.event("sched-acct-"+name), f.creator.ID))
-			require.ErrorIs(t, err, errScheduledAuthorityDenied)
-			assert.Contains(t, err.Error(), reasonPrincipalInactive)
-			assert.Nil(t, identity)
-		})
-	}
+	_, _, err = f.srv.resolveScheduledAuthority(ctx, withSessionRevision(f.event("sched-acct-missing"), "no-such-user"))
+	require.ErrorIs(t, err, errScheduledAuthorityDenied)
+	assert.Contains(t, err.Error(), reasonPrincipalInactive)
 }
 
-// A users-row lookup error on a scheduled run is reported as the shared
-// account check's lookup fault (not as a refusal of the principal), and
-// keeps the store error.
-func TestSchedUserLookupFaultUsesAccountCheck(t *testing.T) {
-	f := newSchedFire(t, "sched-acct-fault")
-	storeErr := errors.New("users table unavailable")
-	withUserRow(t, f, func(context.Context, string) (*store.User, error) { return nil, storeErr })
+// userLookupErrStore fails every users-row lookup with err; no other method
+// is used.
+type userLookupErrStore struct {
+	store.Store
+	err error
+}
 
-	_, identity, err := f.srv.resolveScheduledAuthority(context.Background(), withSessionRevision(f.event("sched-acct-fault"), f.creator.ID))
+func (s userLookupErrStore) GetUser(context.Context, string) (*store.User, error) {
+	return nil, s.err
+}
+
+// resolveScheduledUser checks the principal through the shared account
+// check: a users-row lookup error comes back as checkUserAccount's lookup
+// fault (keeping the store error), not as a refusal of the principal.
+func TestSchedUserLookupFaultUsesAccountCheck(t *testing.T) {
+	storeErr := errors.New("users table unavailable")
+	srv := &Server{store: userLookupErrStore{err: storeErr}}
+	auth := &ScheduledAuthority{
+		PrincipalKind:  store.DelegationPrincipalUser,
+		PrincipalID:    "u1",
+		CredentialKind: store.InitiatorCredentialKindSession,
+	}
+	identity, err := srv.resolveScheduledUser(context.Background(), auth, "p1", "agent.create")
 	require.Error(t, err)
 	assert.Nil(t, identity)
 	assert.ErrorIs(t, err, storeErr)
