@@ -16,8 +16,6 @@ package hub
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -29,19 +27,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"golang.org/x/net/webdav"
 )
-
-// syncExcludePatterns defines directory/file prefixes excluded from WebDAV sync.
-// These are matched against the first path component.
-var syncExcludePatterns = []string{
-	".git",
-	".scion",
-	"node_modules",
-}
-
-// syncExcludeExtensions defines file extensions excluded from WebDAV sync.
-var syncExcludeExtensions = []string{
-	".env",
-}
 
 // handleProjectWebDAV serves a WebDAV endpoint for project workspace file sync.
 // It mounts at /api/v1/projects/{projectId}/dav/ and serves the project's workspace
@@ -55,7 +40,7 @@ func (s *Server) handleProjectWebDAV(w http.ResponseWriter, r *http.Request, pro
 	ctx := r.Context()
 
 	// Determine workspace path based on project type
-	workspacePath, err := s.resolveProjectWebDAVPath(ctx, project)
+	workspacePath, err := s.resolveProjectWorkspacePath(ctx, project)
 	if err != nil {
 		if !writeWorkspaceStorageUnavailable(w, err) {
 			Conflict(w, err.Error())
@@ -166,123 +151,6 @@ func (s *Server) updateProjectSyncState(projectID, workspacePath string) {
 	if err := s.store.UpsertProjectSyncState(context.Background(), state); err != nil {
 		slog.Warn("failed to update project sync state", "project_id", projectID, "error", err)
 	}
-}
-
-// resolveProjectWebDAVPath determines the filesystem path to serve via WebDAV
-// for a given project. For hub-managed and shared-workspace projects, this is the
-// hub-managed workspace directory. For linked projects (workspace on a remote
-// broker), this is the hub's cached copy of that workspace.
-//
-// Empty-per-agent projects (design #2703) also resolve to the hub project
-// directory here, although their agents never mount it: each agent gets a
-// private, broker-local directory. This is intentionally left unguarded in
-// P1; the web UI hides the Files tab for this mode (P5).
-func (s *Server) resolveProjectWebDAVPath(ctx context.Context, project *store.Project) (string, error) {
-	// Hub-managed projects (no git remote) always have a managed workspace
-	if project.GitRemote == "" {
-		path, err := s.hubManagedProjectPath(project.Slug)
-		if err != nil {
-			return "", projectPathResolveError(err, "failed to resolve project path")
-		}
-		return path, nil
-	}
-
-	// Shared-workspace git projects have a managed workspace on the hub
-	if project.IsSharedWorkspace() {
-		path, err := s.hubManagedProjectPath(project.Slug)
-		if err != nil {
-			return "", projectPathResolveError(err, "failed to resolve project path")
-		}
-		return path, nil
-	}
-
-	// Linked projects: check if there's a co-located broker with a local path
-	providers, err := s.store.GetProjectProviders(ctx, project.ID)
-	if err != nil {
-		return "", fmt.Errorf("failed to resolve project providers")
-	}
-
-	// Git projects with no providers have no accessible workspace — the workspace
-	// lives on broker machines and no broker has registered for this project yet.
-	if len(providers) == 0 {
-		return "", fmt.Errorf("workspace is not available for git-anchored projects without a registered provider")
-	}
-
-	// Check for co-located (embedded) broker with a local path
-	for _, p := range providers {
-		if s.isEmbeddedBroker(p.BrokerID) && p.LocalPath != "" {
-			// Co-located broker: serve from local filesystem directly
-			return p.LocalPath, nil
-		}
-	}
-
-	// Remote linked project: serve from the hub's cached copy.
-	// The cache is populated via cache/refresh or cache/notify endpoints.
-	cachePath, err := s.hubManagedProjectPath(project.Slug)
-	if err != nil {
-		return "", projectPathResolveError(err, "failed to resolve project cache path")
-	}
-
-	// If cache doesn't exist yet, return the path anyway (MkdirAll will create it).
-	// The client should trigger a cache/refresh to populate it.
-	if !s.hasProjectCache(project.Slug) {
-		slog.Debug("linked project cache not yet populated",
-			"project_id", project.ID, "slug", project.Slug)
-	}
-
-	return cachePath, nil
-}
-
-// projectPathResolveError returns a generic error for a failed project path
-// resolution. Callers show its text to clients, so it does not include the
-// filesystem path. A workspace storage timeout is still wrapped
-// (errWorkspaceContentTimeout) so callers can map it to 503.
-func projectPathResolveError(err error, msg string) error {
-	if errors.Is(err, errWorkspaceContentTimeout) {
-		return fmt.Errorf("%s: %w", msg, errWorkspaceContentTimeout)
-	}
-	return errors.New(msg)
-}
-
-// walkFilteredDir walks a directory, calling fn for each non-excluded file.
-func walkFilteredDir(root string, fn func(relPath string, info os.FileInfo)) error {
-	return walkFilteredDirRecursive(root, "", fn)
-}
-
-func walkFilteredDirRecursive(root, prefix string, fn func(relPath string, info os.FileInfo)) error {
-	fullDir := root
-	if prefix != "" {
-		fullDir = root + "/" + prefix
-	}
-
-	entries, err := os.ReadDir(fullDir)
-	if err != nil {
-		return err
-	}
-
-	for _, entry := range entries {
-		name := entry.Name()
-		relPath := name
-		if prefix != "" {
-			relPath = prefix + "/" + name
-		}
-
-		if isExcluded(relPath) {
-			continue
-		}
-
-		if entry.IsDir() {
-			_ = walkFilteredDirRecursive(root, relPath, fn)
-			continue
-		}
-
-		info, err := entry.Info()
-		if err != nil {
-			continue
-		}
-		fn(relPath, info)
-	}
-	return nil
 }
 
 // confinedDavFS serves a directory over WebDAV through an *os.Root, so that
@@ -473,75 +341,4 @@ func (d *filteredDir) Readdir(count int) ([]os.FileInfo, error) {
 		}
 	}
 	return filtered, nil
-}
-
-// isExcluded returns true if a path should be excluded from sync.
-// name is a slash-separated path relative to the workspace root (may have a leading /).
-func isExcluded(name string) bool {
-	// Normalize: strip leading slash
-	clean := strings.TrimPrefix(path.Clean(name), "/")
-	if clean == "" || clean == "." {
-		return false
-	}
-
-	// Get the top-level component
-	topLevel := clean
-	if idx := strings.IndexByte(clean, '/'); idx >= 0 {
-		topLevel = clean[:idx]
-	}
-
-	// Check directory prefix exclusions
-	for _, pattern := range syncExcludePatterns {
-		if topLevel == pattern {
-			return true
-		}
-	}
-
-	// Check extension exclusions (on the full filename, not just top-level)
-	baseName := path.Base(clean)
-	for _, ext := range syncExcludeExtensions {
-		if strings.HasSuffix(baseName, ext) {
-			return true
-		}
-	}
-
-	return false
-}
-
-// ProjectSyncStatusResponse is the response for the sync status endpoint.
-type ProjectSyncStatusResponse struct {
-	ProjectID  string                   `json:"projectId"`
-	States     []store.ProjectSyncState `json:"states"`
-	TotalFiles int                      `json:"totalFiles"`
-	TotalBytes int64                    `json:"totalBytes"`
-}
-
-// handleProjectSyncStatus returns the sync status for a project.
-func (s *Server) handleProjectSyncStatus(w http.ResponseWriter, r *http.Request, project *store.Project) {
-	if r.Method != http.MethodGet {
-		MethodNotAllowed(w, http.MethodGet)
-		return
-	}
-
-	ctx := r.Context()
-
-	states, err := s.store.ListProjectSyncStates(ctx, project.ID)
-	if err != nil {
-		InternalError(w)
-		return
-	}
-
-	var totalFiles int
-	var totalBytes int64
-	for _, st := range states {
-		totalFiles += st.FileCount
-		totalBytes += st.TotalBytes
-	}
-
-	writeJSON(w, http.StatusOK, ProjectSyncStatusResponse{
-		ProjectID:  project.ID,
-		States:     states,
-		TotalFiles: totalFiles,
-		TotalBytes: totalBytes,
-	})
 }

@@ -364,6 +364,83 @@ func openConfinedBase(base string, createIfMissing bool) (*os.Root, error) {
 	return os.OpenRoot(base)
 }
 
+// resolveProjectWorkspacePath determines the filesystem path of a project's
+// workspace as the hub serves it (file API, archive, resource import). For
+// hub-managed and shared-workspace projects, this is the hub-managed workspace
+// directory. For linked projects it is the co-located broker's local path when
+// there is one, and otherwise the hub's cached copy of the remote workspace.
+//
+// Empty-per-agent projects (design #2703) also resolve to the hub project
+// directory here, although their agents never mount it: each agent gets a
+// private, broker-local directory. This is intentionally left unguarded in
+// P1; the web UI hides the Files tab for this mode (P5).
+func (s *Server) resolveProjectWorkspacePath(ctx context.Context, project *store.Project) (string, error) {
+	// Hub-managed projects (no git remote) always have a managed workspace
+	if project.GitRemote == "" {
+		path, err := s.hubManagedProjectPath(project.Slug)
+		if err != nil {
+			return "", projectPathResolveError(err, "failed to resolve project path")
+		}
+		return path, nil
+	}
+
+	// Shared-workspace git projects have a managed workspace on the hub
+	if project.IsSharedWorkspace() {
+		path, err := s.hubManagedProjectPath(project.Slug)
+		if err != nil {
+			return "", projectPathResolveError(err, "failed to resolve project path")
+		}
+		return path, nil
+	}
+
+	// Linked projects: check if there's a co-located broker with a local path
+	providers, err := s.store.GetProjectProviders(ctx, project.ID)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve project providers")
+	}
+
+	// Git projects with no providers have no accessible workspace — the workspace
+	// lives on broker machines and no broker has registered for this project yet.
+	if len(providers) == 0 {
+		return "", fmt.Errorf("workspace is not available for git-anchored projects without a registered provider")
+	}
+
+	// Check for co-located (embedded) broker with a local path
+	for _, p := range providers {
+		if s.isEmbeddedBroker(p.BrokerID) && p.LocalPath != "" {
+			// Co-located broker: serve from local filesystem directly
+			return p.LocalPath, nil
+		}
+	}
+
+	// Remote linked project: serve from the hub's cached copy.
+	// The cache is populated via cache/refresh or cache/notify endpoints.
+	cachePath, err := s.hubManagedProjectPath(project.Slug)
+	if err != nil {
+		return "", projectPathResolveError(err, "failed to resolve project cache path")
+	}
+
+	// If cache doesn't exist yet, return the path anyway (MkdirAll will create it).
+	// The client should trigger a cache/refresh to populate it.
+	if !s.hasProjectCache(project.Slug) {
+		slog.Debug("linked project cache not yet populated",
+			"project_id", project.ID, "slug", project.Slug)
+	}
+
+	return cachePath, nil
+}
+
+// projectPathResolveError returns a generic error for a failed project path
+// resolution. Callers show its text to clients, so it does not include the
+// filesystem path. A workspace storage timeout is still wrapped
+// (errWorkspaceContentTimeout) so callers can map it to 503.
+func projectPathResolveError(err error, msg string) error {
+	if errors.Is(err, errWorkspaceContentTimeout) {
+		return fmt.Errorf("%s: %w", msg, errWorkspaceContentTimeout)
+	}
+	return errors.New(msg)
+}
+
 // notAccessible responds to a path that os.Root refused to resolve.
 //
 // os.Root reports a refused symlink escape as a *fs.PathError that is
@@ -385,13 +462,13 @@ func notAccessible(w http.ResponseWriter, what string, path string, err error) {
 //   - DELETE (filePath!="") → delete file
 //
 // For empty-per-agent projects (design #2703) this serves the hub project
-// directory, which their agents do not see (see resolveProjectWebDAVPath).
+// directory, which their agents do not see (see resolveProjectWorkspacePath).
 // Unguarded in P1; the web UI hides the Files tab for this mode (P5).
 func (s *Server) handleProjectWorkspace(w http.ResponseWriter, r *http.Request, project *store.Project, filePath string) {
 	ctx := r.Context()
 
 	// Resolve workspace path — supports hub-managed, shared-workspace, and linked projects
-	workspacePath, err := s.resolveProjectWebDAVPath(ctx, project)
+	workspacePath, err := s.resolveProjectWorkspacePath(ctx, project)
 	if err != nil {
 		if !writeWorkspaceStorageUnavailable(w, err) {
 			Conflict(w, err.Error())
@@ -755,7 +832,7 @@ func (s *Server) handleProjectWorkspaceArchive(w http.ResponseWriter, r *http.Re
 	}
 
 	// Resolve workspace path — supports hub-managed, shared-workspace, and linked projects
-	workspacePath, err := s.resolveProjectWebDAVPath(ctx, project)
+	workspacePath, err := s.resolveProjectWorkspacePath(ctx, project)
 	if err != nil {
 		if !writeWorkspaceStorageUnavailable(w, err) {
 			Conflict(w, err.Error())
