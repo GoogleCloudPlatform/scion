@@ -741,7 +741,11 @@ describe('integrationSettingsPayload (ptone/scion#3913)', () => {
 
   it('sends null for a cleared or reset stored key, and keeps a stored empty value', () => {
     expect(
-      integrationSettingsPayload({ listen: '', name: '' }, { listen: ':1', name: '', mode: 'x' }, fields)
+      integrationSettingsPayload(
+        { listen: '', name: '' },
+        { listen: ':1', name: '', mode: 'x' },
+        fields
+      )
     ).toEqual({ listen: null, mode: null });
   });
 

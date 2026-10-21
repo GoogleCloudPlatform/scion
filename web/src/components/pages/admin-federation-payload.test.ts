@@ -83,7 +83,9 @@ describe('scion-page-admin-federation save payload (ptone/scion#3924)', () => {
   });
 
   /** Renders the page, applies mutate, clicks Save and returns the PUT bodies. */
-  async function renderAndSaveAll(mutate: (el: any) => void): Promise<Array<Record<string, unknown>>> {
+  async function renderAndSaveAll(
+    mutate: (el: any) => void
+  ): Promise<Array<Record<string, unknown>>> {
     vi.stubGlobal('fetch', vi.fn(fetchHandler));
     element = document.createElement('scion-page-admin-federation');
     document.body.appendChild(element);
