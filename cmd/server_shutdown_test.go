@@ -260,7 +260,8 @@ func TestShutdownExitSequence_WithinGrace(t *testing.T) {
 		t.Fatal("the process did not exit")
 	}
 	select {
-	case <-returned:
+	case err := <-returned:
+		assert.NoError(t, err, "awaitServerExit returns nil after the (stubbed) exit")
 	case <-time.After(shutdownTestWait):
 		t.Fatal("awaitServerExit did not return after the (stubbed) exit")
 	}
@@ -359,7 +360,7 @@ func TestAwaitServerExit_ForcedExitsWithoutWaiting(t *testing.T) {
 	case <-time.After(shutdownTestWait):
 		t.Fatal("the forced shutdown did not exit")
 	}
-	<-returned
+	assert.NoError(t, <-returned, "awaitServerExit returns nil after the forced exit")
 	select {
 	case <-closeCtxEnded:
 	case <-time.After(shutdownTestWait):
