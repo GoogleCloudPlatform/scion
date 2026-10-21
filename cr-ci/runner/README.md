@@ -90,14 +90,22 @@ this, in order:
    1. **Gets an ID token.** It sends `GET
       http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience=<MEDIATOR_URL>&format=full`
       with `Metadata-Flavor: Google`, with no proxy and `MEDIATOR_URL` URL-encoded.
-      Fetching its own identity token needs no IAM role. Only a JWT-shaped
-      response (three base64url segments) is accepted. The token is fetched
+      Fetching its own identity token needs no IAM role. Trailing CR/LF is
+      stripped, then only a JWT-shaped response (three base64url segments)
+      is accepted. The token is fetched
       once and reused for claim retries.
    2. **Claims.** It sends `POST ${MEDIATOR_URL}/internal/claim` with
       `Authorization: Bearer <ID token>`, `X-Runner-Claim: <RUNNER_CLAIM_TOKEN>`
       and an empty body. The mediator checks the identity
       (`EXEC_SA_NAME@GCP_PROJECT`, `aud` = `MEDIATOR_URL`) before it looks up
       the claim, so a bad identity does not consume the claim.
+
+   **P6 PoC checkpoint:** the real metadata server has not been called yet.
+   Confirm on Cloud Run that the identity response is a bare JWT (possibly
+   with a trailing line ending, which is stripped), that the mediator accepts
+   it (no 401), and that the log shows `claim succeeded on attempt 1`. If the
+   body format differs, every execution exits 3 with "metadata server
+   returned 200 without an ID token".
 
    Metadata and claim failures share one budget of 5 attempts:
 
@@ -173,7 +181,8 @@ covers:
   responses and then a token leads to a normal start on attempt 3. Five
   metadata 5xx responses, or an unreachable metadata server, exit 3 without
   any claim request. Metadata 404 or 403, an empty body, a non-JWT body, or
-  a header-injection attempt exits 3 without retrying. Two metadata failures
+  a header-injection attempt exits 3 without retrying. A token followed by
+  LF, CRLF or two LFs is accepted with the line ending stripped. Two metadata failures
   plus three claim failures use up the shared budget of 5. The ID token is
   fetched once and reused when the claim is retried.
 - **Claim failures.** A 410 exits 3 without retrying. Two 5xx responses and

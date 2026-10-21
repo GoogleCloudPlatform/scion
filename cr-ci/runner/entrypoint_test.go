@@ -828,3 +828,21 @@ func TestEntrypointRunnerNameMismatchOnlyWarns(t *testing.T) {
 		t.Errorf("no RUNNER_NAME mismatch warning in stderr:\n%s", res.stderr)
 	}
 }
+
+func TestEntrypointIDTokenTrailingNewline(t *testing.T) {
+	for name, suffix := range map[string]string{"LF": "\n", "CRLF": "\r\n", "two LFs": "\n\n"} {
+		t.Run(name, func(t *testing.T) {
+			var h *harness
+			cs := newClaimServer(t, func(w http.ResponseWriter) { respondJIT(h.jit)(w) })
+			h = newHarness(t, cs.URL)
+			h.meta.setScript(respondIDToken(h.idToken + suffix))
+			res := h.run()
+			if res.exitCode != 0 {
+				t.Fatalf("exit code = %d, want 0; stderr:\n%s", res.exitCode, res.stderr)
+			}
+			if reqs := cs.recorded(); len(reqs) != 1 || reqs[0].auth != "Bearer "+h.idToken {
+				t.Error("claim did not carry the ID token without its trailing line ending")
+			}
+		})
+	}
+}

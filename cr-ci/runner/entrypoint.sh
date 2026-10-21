@@ -260,7 +260,9 @@ while :; do
     identity_once
     case $http_code in
       200)
-        # A JWT: three base64url segments. Anything else is not sent anywhere.
+        # Tolerate trailing CR/LF after the token, then require a JWT: three
+        # base64url segments. Anything else is not sent anywhere.
+        while [[ $body == *$'\n' || $body == *$'\r' ]]; do body=${body%?}; done
         if [[ ! $body =~ ^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$ ]]; then
           body=""
           die "$EXIT_CLAIM" "metadata server returned 200 without an ID token; not starting the runner"
