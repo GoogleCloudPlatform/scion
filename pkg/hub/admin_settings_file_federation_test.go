@@ -23,12 +23,14 @@ import (
 
 // fileFederationSeed is a settings.yaml with every federation key set,
 // next to another server section that a federation save must not touch.
+// Federation is stored disabled so the reload after the save installs no
+// authenticator.
 const fileFederationSeed = `schema_version: "1"
 server:
   hub:
     public_url: https://hub.example.com
   federation:
-    enabled: true
+    enabled: false
     trusted_issuers:
       - issuer_url: https://issuer-a.example.com
         issuer_type: hub
@@ -60,7 +62,7 @@ func TestPutServerConfig_FileMode_FederationSaveKeepsOmittedKeys(t *testing.T) {
 	require.NotNil(t, fed)
 
 	assert.Equal(t, "3h", fed["refresh_interval"])
-	assert.Equal(t, true, fed["enabled"])
+	assert.Equal(t, false, fed["enabled"])
 	assert.Equal(t, []interface{}{"RS256", "ES256"}, fed["algorithms"])
 	assert.Equal(t, "10s", fed["debounce_interval"])
 	issuers, ok := fed["trusted_issuers"].([]interface{})
@@ -85,11 +87,11 @@ func TestPutServerConfig_FileMode_FederationIssuersReplacedWhole(t *testing.T) {
 	require.Len(t, issuers, 1)
 	assert.Equal(t, "https://issuer-c.example.com", issuers[0].(map[string]interface{})["issuer_url"])
 	assert.Equal(t, "2h", fed["refresh_interval"])
-	assert.Equal(t, true, fed["enabled"])
+	assert.Equal(t, false, fed["enabled"])
 }
 
-// An explicit false is stored; a zero value or null clears the key and
-// leaves the others.
+// A sent false is stored, not dropped; a zero value or null clears the key
+// and leaves the others.
 func TestPutServerConfig_FileMode_FederationExplicitFalseAndClears(t *testing.T) {
 	doc := putFileSettings(t, fileFederationSeed,
 		`{"federation":{"enabled":false,"algorithms":[],"debounce_interval":null,"refresh_interval":""}}`)
@@ -111,7 +113,7 @@ func TestPutServerConfig_FileMode_FederationNotSentUnchanged(t *testing.T) {
 	fed := storedFileFederation(t, doc)
 	require.NotNil(t, fed)
 
-	assert.Equal(t, true, fed["enabled"])
+	assert.Equal(t, false, fed["enabled"])
 	assert.Equal(t, "2h", fed["refresh_interval"])
 	assert.Equal(t, "10s", fed["debounce_interval"])
 	assert.Equal(t, []interface{}{"RS256", "ES256"}, fed["algorithms"])
@@ -120,9 +122,9 @@ func TestPutServerConfig_FileMode_FederationNotSentUnchanged(t *testing.T) {
 // A federation save on a settings.yaml with no federation section stores
 // only the keys sent.
 func TestPutServerConfig_FileMode_FederationSaveWithNoStoredSection(t *testing.T) {
-	doc := putFileSettings(t, "schema_version: \"1\"\n", `{"federation":{"enabled":true}}`)
+	doc := putFileSettings(t, "schema_version: \"1\"\n", `{"federation":{"refresh_interval":"2h"}}`)
 	fed := storedFileFederation(t, doc)
 	require.NotNil(t, fed)
 
-	assert.Equal(t, map[string]interface{}{"enabled": true}, fed)
+	assert.Equal(t, map[string]interface{}{"refresh_interval": "2h"}, fed)
 }
