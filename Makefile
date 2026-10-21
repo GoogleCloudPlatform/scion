@@ -582,10 +582,13 @@ test-launch-store-postgres: test-store-postgres
 # HUB_INTEGRATION_POSTGRES_TESTS are the pkg/hub Postgres tests that need
 # -tags integration (the integration TestMain sets up the ent test
 # database): the project-delete lock-order test, the two-replica scheduled
-# send test, and the membership loss and test identity concurrency tests.
+# send test, the membership loss and test identity concurrency tests, and
+# the broker presence registry test (its conduit registry runs on the ent
+# test database).
 # Each must print a PASS line, and any skip fails (shard.sh postgres).
 HUB_INTEGRATION_POSTGRES_TESTS := TestProjectDeletionService_LockOrderNoDeadlock \
 	TestScheduledSend_TwoHubReplicasPostgres_OneDelivery \
+	TestBrokerPresence_LiveRegistrySession \
 	$(MEMBERSHIP_LOSS_POSTGRES_TESTS) \
 	$(TEST_IDENTITY_POSTGRES_TESTS) \
 	TestHubInternal_ReplayAcrossHubReplicas

@@ -497,6 +497,18 @@ func (s *ConduitRegistryStore) ListRelays(ctx context.Context) ([]registry.Relay
 	return out, nil
 }
 
+// CountRelaySessions implements registry.Store: one COUNT over the
+// (relay_instance_id, relay_generation) index.
+func (s *ConduitRegistryStore) CountRelaySessions(ctx context.Context, instanceID string, generation int64) (int, error) {
+	n, err := s.client.ConduitSession.Query().
+		Where(conduitsession.RelayInstanceID(instanceID), conduitsession.RelayGeneration(generation)).
+		Count(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("conduit registry store: count relay sessions: %w", err)
+	}
+	return n, nil
+}
+
 // DeleteSessionsOfStaleRelays implements registry.Store. It is a single
 // DELETE whose relay-staleness condition is a subquery, so a relay cannot be
 // judged stale and then have sessions it re-touched deleted by a separate

@@ -16,11 +16,9 @@ package hub
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"sort"
 	"strings"
 
@@ -183,6 +181,11 @@ type moveProbes struct {
 	// Capacity reports a non-empty message when dst has no room for
 	// another agent under its agent limit.
 	Capacity func(dst *store.RuntimeBroker) string
+	// HostSARecord reports a non-empty message when the agent's assigned
+	// GCP service account is a broker host service account record bound to
+	// a broker other than dst. Nil when the agent has no assign-mode
+	// identity.
+	HostSARecord func(dst *store.RuntimeBroker) string
 }
 
 // moveEligibilityInput is everything evaluateMoveEligibility decides on.
@@ -502,6 +505,13 @@ func evaluateMoveChecks(in moveEligibilityInput, recreate bool) (MoveVerdict, *m
 			}
 		}
 	}
+	// A broker host service account record stays with its broker, for
+	// every caller.
+	if in.Probes.HostSARecord != nil {
+		if msg := in.Probes.HostSARecord(dst); msg != "" {
+			return fail(http.StatusConflict, ErrCodeConflict, msg)
+		}
+	}
 	pass()
 
 	// 8. Both brokers support agent move, and the source is online so it
@@ -760,8 +770,9 @@ func (s *Server) moveTargetVisible(ctx context.Context, dst *store.RuntimeBroker
 }
 
 // writeMoveTargetNotFound writes the 404 for an unknown or not visible
-// --broker value, listing the project's online brokers. The body depends
-// only on the request and the project, never on the broker matched.
+// --broker value, listing the project's available brokers (online provider
+// rows whose broker is present, getAvailableBrokersForProject). The body
+// depends only on the request and the project, never on the broker matched.
 func (s *Server) writeMoveTargetNotFound(ctx context.Context, w http.ResponseWriter, target string, project *store.Project) {
 	summaries := []RuntimeBrokerSummary{}
 	if brokers, err := s.getAvailableBrokersForProject(ctx, project.ID); err == nil {
@@ -784,7 +795,7 @@ func (s *Server) moveProbesFor(r *http.Request, project *store.Project, ac *stor
 	p := moveProbes{
 		// The loaded record decides; unlike brokerReachable this never fails
 		// open, because a move refused here leaves the agent untouched.
-		Reachable: s.brokerRecordReachable,
+		Reachable: func(b *store.RuntimeBroker) bool { return s.brokerRecordReachable(ctx, b) },
 		CanDispatch: func(dst *store.RuntimeBroker) bool {
 			return s.canDispatchToBroker(ctx, dst)
 		},
@@ -816,26 +827,50 @@ func (s *Server) moveProbesFor(r *http.Request, project *store.Project, ac *stor
 			return fmt.Sprintf("broker %s is at its agent limit (%d of %d)", brokerDisplayName(dst), *c.Count, *c.Limit)
 		},
 	}
+	p.HostSARecord = s.hostSARecordMoveProbe(ctx, ac)
 	if ac != nil && ac.GCPIdentity != nil && ac.GCPIdentity.MetadataMode == store.GCPMetadataModePassthrough {
 		p.Passthrough = func(dst *store.RuntimeBroker) string {
-			rec := httptest.NewRecorder()
-			if s.authorizePassthroughIdentity(rec, r, dst, SurfacePassthroughMove) {
-				return ""
+			if d := s.evaluatePassthroughIdentity(r.Context(), r, dst, SurfacePassthroughMove); d != nil {
+				return d.msg
 			}
-			return recordedErrorMessage(rec)
+			return ""
 		}
 	}
 	return p
 }
 
-// recordedErrorMessage extracts the error message from a recorded error
-// response, falling back to the status text.
-func recordedErrorMessage(rec *httptest.ResponseRecorder) string {
-	var resp ErrorResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err == nil && resp.Error.Message != "" {
-		return resp.Error.Message
+// hostSARecordMoveProbe returns the move probe that refuses a target broker
+// other than the one the agent's broker host service account record is bound
+// to, or nil when the agent has no assign-mode identity. The move handler and
+// the move worker's recheck both use it. A record that cannot be read refuses
+// the move (fails closed); like the other eligibility probes it answers with
+// the probe's own status rather than a store-fault code.
+func (s *Server) hostSARecordMoveProbe(ctx context.Context, ac *store.AgentAppliedConfig) func(dst *store.RuntimeBroker) string {
+	if ac == nil || ac.GCPIdentity == nil || ac.GCPIdentity.MetadataMode != store.GCPMetadataModeAssign ||
+		ac.GCPIdentity.ServiceAccountID == "" {
+		return nil
 	}
-	return strings.ToLower(http.StatusText(rec.Code))
+	saID := ac.GCPIdentity.ServiceAccountID
+	return func(dst *store.RuntimeBroker) string {
+		sa, err := s.store.GetGCPServiceAccount(ctx, saID)
+		if errors.Is(err, store.ErrNotFound) {
+			return ""
+		}
+		if err != nil {
+			return "the agent's GCP identity could not be checked; retry later"
+		}
+		if store.HostSATranslationRecordNotBoundTo(sa, dst.ID) {
+			if sa.ScopeID == "" {
+				return fmt.Sprintf("this agent's GCP identity is a broker host service account record with no broker "+
+					"binding and cannot move to broker %s; recreate the agent there with GCP identity passthrough",
+					brokerDisplayName(dst))
+			}
+			return fmt.Sprintf("this agent's GCP identity is the host service account of broker %s (the broker it was "+
+				"created for) and cannot move to broker %s; recreate the agent there with GCP identity passthrough",
+				sa.ScopeID, brokerDisplayName(dst))
+		}
+		return ""
+	}
 }
 
 // writeMoveRefusal writes a move refusal with the verdict in

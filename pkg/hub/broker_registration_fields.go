@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -29,7 +30,10 @@ import (
 //     are set at creation, or through the update API. A registration fills
 //     them only while both are unset and they were not set or cleared
 //     through the update API (store.SetRuntimeBrokerGCPHostIfUnset). An
-//     empty request value never clears them.
+//     empty request value never clears them. A fill needs actAs for the
+//     registering user on the requested pair (registrationFillsGCPHost,
+//     registrationFillAuthorized); a request that would not be written is
+//     kept without a check.
 //   - A registration adds labels whose key is absent and keeps the stored
 //     value of existing keys. It never removes a key.
 //   - A non-empty requested value that is not applied is reported in the
@@ -121,16 +125,71 @@ type registrationGCPHostResult struct {
 	Kept    []KeptSetting
 }
 
+// registrationFillsGCPHost reports whether a registration requesting email
+// would write the GCP host pair of the existing row b: the request carries an
+// email, b has no pair, and the pair was not set or cleared through the
+// update API. It is the condition of store.SetRuntimeBrokerGCPHostIfUnset,
+// evaluated on the row the handler read, and it selects the requests whose
+// host service account needs an actAs decision.
+func registrationFillsGCPHost(b *store.RuntimeBroker, email string) bool {
+	return b != nil && email != "" &&
+		b.GCPHostServiceAccountEmail == "" && b.GCPHostProjectID == "" &&
+		b.GCPHostSource != store.GCPHostSourceAdmin
+}
+
+// registrationFillAuthorized reports whether verdict v lets a registration
+// fill an unset GCP host pair with requested. nil means the pair may be
+// written; the stored pair is unset when it is written (the conditional
+// UPDATE), which is the value the decision was made against.
+// ErrHostSAClaimNotAuthorized means the decision for exactly this pair did
+// not allow it. ErrHostSAClaimStale means no decision covers the pair: the
+// handler made none because the row it read would not be filled.
+func registrationFillAuthorized(requested hostSAClaim, v hostSAClaimVerdict) error {
+	if hostSAClaimWriteAllowed(hostSAClaim{}, requested, v) == nil {
+		return nil
+	}
+	if v.Claim == requested {
+		return ErrHostSAClaimNotAuthorized
+	}
+	return ErrHostSAClaimStale
+}
+
+// registrationFillDenied returns ErrHostSAClaimNotAuthorized when the
+// handler decided a fill of the requested pair and refused it, so the
+// registration is refused before any write. Otherwise it returns nil;
+// fillRegistrationGCPHost applies the remaining rules.
+func registrationFillDenied(email, project string, v hostSAClaimVerdict) error {
+	if email == "" {
+		return nil
+	}
+	err := registrationFillAuthorized(hostSAClaim{Email: strings.ToLower(email), ProjectID: project}, v)
+	if errors.Is(err, ErrHostSAClaimNotAuthorized) {
+		return err
+	}
+	return nil
+}
+
 // fillRegistrationGCPHost applies the registration rule for the GCP host
 // pair on an existing row: a request with an email fills the pair only
-// while it is unset and not set through the update API. email must already
-// be lowercased.
-func fillRegistrationGCPHost(ctx context.Context, st store.Store, brokerID, email, project string) (registrationGCPHostResult, error) {
+// while it is unset and not set through the update API, and only with an
+// allowed verdict for exactly the requested pair (hostSA, see
+// registrationFillAuthorized). Without such a verdict nothing is written:
+// the requested values are kept, or, when the row became fillable after the
+// handler read it, the request is refused with ErrHostSAClaimStale. email
+// must already be lowercased.
+func fillRegistrationGCPHost(ctx context.Context, st store.Store, brokerID, email, project string, hostSA hostSAClaimVerdict) (registrationGCPHostResult, error) {
 	var res registrationGCPHostResult
 	if email == "" && project == "" {
 		return res, nil
 	}
+	requested := hostSAClaim{Email: strings.ToLower(email), ProjectID: project}
+	authorized := email != "" && registrationFillAuthorized(requested, hostSA) == nil
 	if email != "" {
+		if err := registrationFillDenied(email, project, hostSA); err != nil {
+			return res, err
+		}
+	}
+	if authorized {
 		applied, err := st.SetRuntimeBrokerGCPHostIfUnset(ctx, brokerID, email, project, store.GCPHostSourceRegistration)
 		if err != nil {
 			return res, fmt.Errorf("failed to set GCP host fields: %w", err)
@@ -143,6 +202,9 @@ func fillRegistrationGCPHost(ctx context.Context, st store.Store, brokerID, emai
 	row, err := st.GetRuntimeBroker(ctx, brokerID)
 	if err != nil {
 		return res, fmt.Errorf("failed to read runtime broker: %w", err)
+	}
+	if !authorized && registrationFillsGCPHost(row, email) {
+		return res, ErrHostSAClaimStale
 	}
 	res.Kept = gcpHostKept(row, email, project)
 	if email == "" && row.GCPHostServiceAccountEmail == "" && row.GCPHostSource != store.GCPHostSourceAdmin {

@@ -449,24 +449,36 @@ func TestStartClaimWiring_FailedStartReleasesIdlePreheldCapacity(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		phase state.Phase
-		kept  bool
-		why   string
+		// queued: the agent's stop is queued for its offline broker
+		// (container status stop_queued, run intent stopped).
+		queued bool
+		kept   bool
+		why    string
 	}{
 		// Pins design r7 §4.3, clearing-paths row "start fails, confirmed
 		// not acted on": "releaseSlotIfIdle covers any hold the dispatch
 		// did not create". A stopped agent holds no capacity, so its
 		// pre-held reservation is an orphan and is released once the claim
 		// clears, without waiting for the sweep.
-		{"stopped", state.PhaseStopped, false, "a stopped agent's pre-held reservation is released once the claim clears"},
+		{"stopped", state.PhaseStopped, false, false, "a stopped agent's pre-held reservation is released once the claim clears"},
 		// Pins the same row's limit: releaseSlotIfIdle releases only an agent
 		// that holds no capacity (NotCounted). A failed start never takes a
 		// running agent's reservation.
-		{"running", state.PhaseRunning, true, "a running agent keeps the reservation it held before the failed start"},
+		{"running", state.PhaseRunning, false, true, "a running agent keeps the reservation it held before the failed start"},
+		// Pins NotCounted's second arm (store.AgentHoldsBrokerCapacity): a
+		// stopped agent whose stop is queued still holds its capacity (the
+		// queued stop is not a release, design §4.3), so the idle release
+		// keeps its reservation.
+		{"stop_queued", state.PhaseStopped, true, true, "a queued-stop agent keeps the reservation it held before the failed start"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f, d, a := newClaimFixture(t) // a is stopped
 			if tc.phase != state.PhaseStopped {
 				a = f.addAgent("claimed-"+tc.name, string(tc.phase), "")
+			}
+			if tc.queued {
+				queueStop(t, f, a, "")
+				a = getAgent(t, f.s, a.ID)
 			}
 			ctx := context.Background()
 			setBrokerAgentCeiling(t, f.s, 5)

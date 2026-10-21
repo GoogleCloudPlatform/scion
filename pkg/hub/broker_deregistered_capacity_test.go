@@ -433,6 +433,9 @@ func TestReRegistered_BackfillRestoresRunningAgents(t *testing.T) {
 // errReservationRead is returned by reservationReadFaultStore while armed.
 var errReservationRead = errors.New("injected reservation read fault")
 
+// errReservationWrite is returned by reservationWriteFaultStore while armed.
+var errReservationWrite = errors.New("injected reservation write fault")
+
 // reservationReadFaultStore fails GetActiveReservation of agentID while armed.
 type reservationReadFaultStore struct {
 	store.Store
@@ -486,7 +489,7 @@ type reservationWriteFaultStore struct {
 
 func (r *reservationWriteFaultStore) CreateUsageReservation(ctx context.Context, res *store.UsageReservation) (*store.UsageReservation, error) {
 	if r.fault.Active() && res.ResourceID == r.agentID {
-		return nil, errReservationRead
+		return nil, errReservationWrite
 	}
 	return r.Store.CreateUsageReservation(ctx, res)
 }

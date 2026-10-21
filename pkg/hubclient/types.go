@@ -396,9 +396,9 @@ type BrokerCapabilities struct {
 	// §3.2, §7 P1b-1).
 	AsyncLaunch bool `json:"asyncLaunch"`
 	// AsyncStart indicates the broker can run a start or restart of an
-	// existing agent as an asynchronous launch (ptone/scion#4669). No broker
-	// sets it yet; brokers advertise it once they implement the async start
-	// (design wave 3, D2). Mirrors store.BrokerCapabilities.AsyncStart.
+	// existing agent as an asynchronous launch (ptone/scion#4669). Brokers
+	// that implement the async start (design wave 3, D2) set it in their
+	// heartbeat and registration. Mirrors store.BrokerCapabilities.AsyncStart.
 	AsyncStart bool `json:"asyncStart,omitempty"`
 	// EmptyPerAgentWorkspace indicates the broker can provision the
 	// empty-per-agent workspace sharing mode (design #2703;

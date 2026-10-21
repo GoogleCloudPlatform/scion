@@ -390,6 +390,15 @@ func (s *Scheduler) Start(ctx context.Context) {
 // flight, bounded by the store's 10s tick timeout plus its up-to-2s
 // best-effort disarm write. It is safe to call Stop multiple times.
 func (s *Scheduler) Stop() {
+	s.halt()
+	s.wg.Wait()
+}
+
+// halt is Stop without the wait: the scheduler starts no new handler run
+// and every one-shot timer is cancelled; runs in flight go on until Stop
+// waits for them. The hub calls it when it begins shutting down
+// (Server.BeginShutdown, ptone/scion#5054). It is idempotent.
+func (s *Scheduler) halt() {
 	s.stopOnce.Do(func() {
 		close(s.stopCh)
 
@@ -404,8 +413,6 @@ func (s *Scheduler) Stop() {
 		s.timers = make(map[string]*scheduledTimer)
 		s.mu.Unlock()
 	})
-
-	s.wg.Wait()
 }
 
 // maxJitter is the upper bound on random delay added before each recurring

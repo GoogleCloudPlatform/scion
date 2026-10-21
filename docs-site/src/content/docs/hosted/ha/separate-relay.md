@@ -27,6 +27,17 @@ The relay keeps each session's hub admission token and presents it unchanged. It
 - **Hub decisions.** Admission, RPCs, refreshes and re-checks are decided by a hub. When the hub cannot be reached, the relay admits nothing new and closes nothing on its own, and each stream still ends at the authorization deadline the hub set.
 - **Database access.** The relay reaches the database only for the conduit registry, the `experiments` settings row, and the hub's dedicated `scion_ev_conduit` event channel, which carries identifiers only. Run it under a least-privilege database role. See [Relay database access](/scion/reference/server-config/#relay-settings-serverrelay).
 
+## Hub ingress
+
+Clients and Runtime Brokers keep dialing the hub's own `GET /api/v1/conduit`. With `server.hub.conduit.ingress: proxy` (the default), the hub passes each dial on to a relay:
+
+- **Selection.** The hub samples two eligible relays (recently seen and not draining) and picks the one holding fewer sessions. If the session count cannot be read, it picks one of the two at random.
+- **The proxied dial.** The hub forwards only the WebSocket upgrade, to the relay's internal listener, authenticated as `relay-peer`. The client's credential headers, path, query and `Host` pass unchanged, so a Runtime Broker's signature verifies as sent. The hub removes any relay-peer or ingress header the client sent, and names itself in an ingress header that the relay trusts only on that authenticated leg.
+- **Host binding.** The relay tells the hub how a dial arrived. A dial that came through a hub must name one of the hub's public hosts. A dial made directly to a relay must name that relay's public host. Any other combination is refused with `403`.
+- **Retries.** The hub tries another relay only when the first refused the dial before admission: a connection failure before any answer, a relay that was not the one the leg was signed for, or a relay that is draining or not ready (`503` with reason `relay_not_admitting`). Every other answer reaches the client unchanged. When no relay is left, the dial gets `503` with reason `conduit_not_serving`.
+
+Proxy ingress needs HMAC relay-peer authentication (`server.hub.conduit.peer_auth: hmac`), because on the proxied dial `Authorization` belongs to the client. Under any other resolved peer-auth mode (an explicit `oidc`, or the default `auto`, which resolves to `oidc` on GCP), the hub still starts, but its ingress proxy stays off. Conduit dials then get `503` with reason `conduit_not_serving` and no request reaches a relay. The hub logs a warning once at startup with the cause `ingress_requires_hmac`, and the readiness gauge `scion.hub.conduit.eligible_relays` carries the attribute `cause`. The HTTP readiness endpoint is not affected. To serve dials, set `peer_auth: hmac`. `redirect` is not supported yet; the hub refuses to start with it.
+
 ## Running a relay
 
 A relay reads its own configuration file, never the hub's. It needs:

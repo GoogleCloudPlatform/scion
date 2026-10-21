@@ -1895,7 +1895,8 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 		return "", err
 	}
 
-	// Get available (online) brokers for fallback logic
+	// Get available brokers (online provider rows whose broker is present)
+	// for fallback logic
 	availableBrokers, err := s.getAvailableBrokersForProject(ctx, project.ID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
@@ -1947,7 +1948,7 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 		// broker record cannot be read (rec == nil), let it through, as
 		// brokerReachable does.
 		acceptProvider := func(brokerID string, rec *store.RuntimeBroker) (string, error) {
-			if rec != nil && !s.brokerRecordReachable(rec) {
+			if rec != nil && !s.brokerRecordReachable(ctx, rec) {
 				// The broker exists but is offline: refuse at resolution,
 				// before any agent row is created (ptone/scion#2715).
 				slog.Warn("Requested broker is offline during agent creation",
@@ -2063,7 +2064,7 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 
 			// Do not link (or dispatch to) a broker that exists but is
 			// offline: 503 before anything is written (ptone/scion#2715).
-			if !s.brokerRecordReachable(broker) {
+			if !s.brokerRecordReachable(ctx, broker) {
 				slog.Warn("Requested broker is offline during agent creation",
 					"requestedBrokerID", requestedBrokerID, "brokerID", broker.ID,
 					"status", broker.Status, "project_id", project.ID)
@@ -2154,13 +2155,15 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 	}
 
 	// Case 3: No default and no explicit broker - auto-select only when there is
-	// exactly one provider and its broker is online and dispatchable.
+	// exactly one provider and its broker is present (brokerPresence) and
+	// dispatchable.
 	if len(allProviders) == 1 {
 		broker, brokerErr := s.store.GetRuntimeBroker(ctx, allProviders[0].BrokerID)
-		if brokerErr == nil && broker.Status == store.BrokerStatusOnline && s.canUseBrokerForProject(ctx, broker, project) {
+		present := brokerErr == nil && s.brokerPresence(ctx, broker).Connected
+		if present && s.canUseBrokerForProject(ctx, broker, project) {
 			return allProviders[0].BrokerID, nil
 		}
-		if brokerErr == nil && broker.Status == store.BrokerStatusOnline {
+		if present {
 			NoRuntimeBroker(w, "No runtime brokers available for this project that you have permission to use", usableBrokers())
 		} else {
 			NoRuntimeBroker(w, "This project's only runtime broker is offline", usableBrokers())
@@ -2384,7 +2387,9 @@ func (s *Server) brokerProviderHasOwnerConsent(ctx context.Context, broker *stor
 	return s.authzService.IsSystemAdmin(ctx, provider.LinkedBy)
 }
 
-// getAvailableBrokersForProject returns online runtime brokers that are providers to the project.
+// getAvailableBrokersForProject returns the runtime brokers that are online
+// providers to the project and are present (brokerPresence, design v2.21.50
+// §3.4). The provider row must still be online.
 func (s *Server) getAvailableBrokersForProject(ctx context.Context, projectID string) ([]store.RuntimeBroker, error) {
 	// Get providers for this project
 	providers, err := s.store.GetProjectProviders(ctx, projectID)
@@ -2392,7 +2397,7 @@ func (s *Server) getAvailableBrokersForProject(ctx context.Context, projectID st
 		return nil, err
 	}
 
-	// Filter to online brokers and fetch their full details
+	// Filter to online provider rows whose broker is present
 	var availableBrokers []store.RuntimeBroker
 	for _, provider := range providers {
 		if provider.Status == store.BrokerStatusOnline {
@@ -2400,7 +2405,7 @@ func (s *Server) getAvailableBrokersForProject(ctx context.Context, projectID st
 			if err != nil {
 				continue // Skip brokers we can't fetch
 			}
-			if broker.Status == store.BrokerStatusOnline {
+			if s.brokerPresence(ctx, broker).Connected {
 				availableBrokers = append(availableBrokers, *broker)
 			}
 		}

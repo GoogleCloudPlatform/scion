@@ -55,6 +55,14 @@ const (
 	// ProfileFindingProfileRuntimeMissing: a referenced profile resolves,
 	// but the runtime it names does not (ptone/scion#4889).
 	ProfileFindingProfileRuntimeMissing ProfileCatalogFindingKind = "profile_runtime_missing"
+	// ProfileFindingRetainedBuiltinProfile: the after set keeps a built-in
+	// default profile beside the stored profiles because it is referenced
+	// or is the active_profile (ptone/scion#5113).
+	ProfileFindingRetainedBuiltinProfile ProfileCatalogFindingKind = "retained_builtin_profile"
+	// ProfileFindingRetainedBuiltinRuntime: the after set keeps a built-in
+	// default runtime beside the stored runtimes because an effective
+	// profile names it (ptone/scion#5113). Profile holds the runtime name.
+	ProfileFindingRetainedBuiltinRuntime ProfileCatalogFindingKind = "retained_builtin_runtime"
 )
 
 // ProfileSource says where a profile name resolved before the change.
@@ -77,13 +85,18 @@ const (
 // It carries names, a count and labels only, never settings values.
 type ProfileCatalogFinding struct {
 	Kind ProfileCatalogFindingKind
-	// Profile is the profile name ("" when active_profile is unset).
+	// Profile is the profile name ("" when active_profile is unset); for
+	// retained_builtin_runtime, the runtime name.
 	Profile string
 	// Project is the project ID, for project_active_profile only.
 	Project string
 	// Agents is, for agent_saved_profile, the agents whose saved profile is
 	// Profile; for active_profile and active_profile_fallback, the agents
-	// with no saved profile, which dispatch on active_profile; else 0.
+	// with no saved profile, which dispatch on active_profile; for
+	// profile_runtime_missing and retained_builtin_profile, the agents using
+	// the profile (those without a saved profile included when it is the
+	// default); for retained_builtin_runtime, that sum over the after
+	// profiles naming the runtime; else 0.
 	Agents int
 	// Source is where Profile resolved before the change.
 	Source ProfileSource
@@ -100,8 +113,10 @@ type ProfileCatalogFinding struct {
 }
 
 // CheckProfileCatalog reports the profile references that do not resolve in
-// after, the profiles that before has and after drops unused, and the
-// single-stored-profile fallback of active_profile.
+// after, the profiles that before has and after drops unused, the
+// single-stored-profile fallback of active_profile, changes of the default
+// profile, and the built-in profiles and runtimes after retains
+// (ptone/scion#5113).
 //
 // after and before are effective settings as the system resolves them, each
 // built with ProfileCatalogView from the stored set it reflects: before from
@@ -244,6 +259,33 @@ func CheckProfileCatalog(after, before *VersionedSettings, origins map[string]Pr
 			Profile: name, Agents: n, Source: source(name), PreExisting: pre})
 	}
 
+	// Built-in profiles and runtimes the after set retains. The runtime
+	// count sums the agents of every after profile naming the runtime.
+	profileAgents := func(name string) int {
+		n := agents[name]
+		if name == "" {
+			n = 0
+		}
+		if name == afterDefault {
+			n += agents[""]
+		}
+		return n
+	}
+	for _, name := range after.RetainedProfileNames() {
+		out = append(out, ProfileCatalogFinding{Kind: ProfileFindingRetainedBuiltinProfile,
+			Profile: name, Agents: profileAgents(name), Source: ProfileSourceBuiltin})
+	}
+	for _, rt := range after.RetainedRuntimeNames() {
+		n := 0
+		for name, p := range after.Profiles {
+			if p.Runtime == rt {
+				n += profileAgents(name)
+			}
+		}
+		out = append(out, ProfileCatalogFinding{Kind: ProfileFindingRetainedBuiltinRuntime,
+			Profile: rt, Agents: n, Source: ProfileSourceBuiltin})
+	}
+
 	// Profiles before has and after drops, with no reference.
 	if before != nil {
 		for name := range before.Profiles {
@@ -275,14 +317,24 @@ func CheckProfileCatalog(after, before *VersionedSettings, origins map[string]Pr
 // effect (ptone/scion#5007), so a caller passes the FULL stored state it
 // evaluates, runtimes included: a nil storedRuntimes means the runtimes are
 // not managed in the hub. The fresh overlay is never installed globally;
-// Apply may log its single-profile fallback.
-func ProfileCatalogView(projectPath string, storedRuntimes map[string]V1RuntimeConfig, storedProfiles map[string]V1ProfileConfig) (*VersionedSettings, error) {
+// Apply may log its single-profile fallback and its retention.
+//
+// refs, when non-nil, enables built-in retention (ptone/scion#5113) with
+// those references, as the hub's overlay does once its reference count
+// succeeds (SettingsOverlay.SetProfileReferences): the view then keeps the
+// referenced built-in profiles and runtimes, as a restarted hub does. The
+// fresh overlay holds no retention from earlier loads. nil leaves retention
+// off, as on a hub that predates it.
+func ProfileCatalogView(projectPath string, storedRuntimes map[string]V1RuntimeConfig, storedProfiles map[string]V1ProfileConfig, refs *ProfileReferences) (*VersionedSettings, error) {
 	vs, _, err := loadEffectiveSettings(projectPath, false)
 	if err != nil {
 		return nil, err
 	}
 	o := NewSettingsOverlay()
 	o.Update(storedRuntimes, storedProfiles, nil)
+	if refs != nil {
+		o.SetProfileReferences(*refs)
+	}
 	o.Apply(vs)
 	return vs, nil
 }

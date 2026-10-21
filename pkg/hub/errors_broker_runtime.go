@@ -50,6 +50,28 @@ const brokerCodeRuntimeUnavailable = "runtime_unavailable"
 // relayed runtime_unavailable 503 when the broker gave no usable value.
 const defaultBrokerRuntimeRetryAfter = "30"
 
+// isBrokerReloadUnconfirmed reports whether err is a runtime broker's 502
+// answer with error code reload_unconfirmed: a reset-auth wrote the new
+// credential into the agent container, but the running agent did not
+// confirm the reload (ptone/scion#5460).
+func isBrokerReloadUnconfirmed(err error) bool {
+	var se *brokerStatusError
+	return errors.As(err, &se) && se.StatusCode == http.StatusBadGateway &&
+		se.brokerErrorCode() == api.BrokerErrCodeReloadUnconfirmed
+}
+
+// writeBrokerReloadUnconfirmed writes the hub's 502 reload_unconfirmed answer
+// for err when it is a broker's reload_unconfirmed answer, and reports
+// whether it did. The message is the fixed shared text; the broker's body is
+// not echoed.
+func writeBrokerReloadUnconfirmed(w http.ResponseWriter, err error) bool {
+	if !isBrokerReloadUnconfirmed(err) {
+		return false
+	}
+	writeError(w, http.StatusBadGateway, api.BrokerErrCodeReloadUnconfirmed, api.ReloadUnconfirmedMessage, nil)
+	return true
+}
+
 // isBrokerRuntimeUnavailable reports whether err is a runtime broker's 503
 // answer with error code runtime_unavailable.
 func isBrokerRuntimeUnavailable(err error) bool {

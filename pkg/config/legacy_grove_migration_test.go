@@ -3197,3 +3197,20 @@ func TestSetProjectTypeGit_MigratesUnderHeldLock(t *testing.T) {
 	got := assertMigratedOnce(t, dir)
 	assert.Contains(t, got, "project_type: git")
 }
+
+// --- config unset (ptone/scion#3919) and the key migration. ---
+
+// The alias fallback starts from the file as the edit attempt left it, so
+// a legacy hub.grove_id the attempt migrated stays migrated.
+func TestUnsetSetting_AliasFallbackKeepsKeyMigration(t *testing.T) {
+	content := "schema_version: \"1\"\nhub:\n  grove_id: p-legacy\nbase: &b\n  autohelp: false\n  mode: agent\ncli: *b\n"
+	projectDir := setupSettingsViewTest(t, "", content)
+
+	res, err := UnsetSetting(projectDir, "cli.autohelp", false)
+	require.NoError(t, err)
+	assert.True(t, res.Removed)
+	got := readUnsetSettingsFile(t, projectDir)
+	assert.Contains(t, got, "cli:\n    mode: agent\n")
+	assert.NotContains(t, got, "grove_id")
+	assert.Contains(t, got, "project_id: p-legacy")
+}

@@ -128,13 +128,14 @@ func (s *Server) recheckMoveEligibility(ctx context.Context, agentID string, mv 
 		WorkspaceMode:      string(project.SharingMode()),
 		GitRemote:          project.GitRemote,
 		Probes: moveProbes{
-			Reachable:        s.brokerRecordReachable,
+			Reachable:        func(b *store.RuntimeBroker) bool { return s.brokerRecordReachable(ctx, b) },
 			CanDispatch:      allowed,
 			CanUseAsProvider: allowed,
 			ServesProject: func(b *store.RuntimeBroker) bool {
 				return s.brokerServesProject(ctx, b.ID, mv.ProjectID)
 			},
-			Capacity: func(*store.RuntimeBroker) string { return "" },
+			Capacity:     func(*store.RuntimeBroker) string { return "" },
+			HostSARecord: s.hostSARecordMoveProbe(ctx, a.AppliedConfig),
 		},
 	})
 	if ref != nil {

@@ -460,7 +460,7 @@ func reapRow(ctx context.Context, txClient *ent.Client, isPG bool, id uuid.UUID,
 		if err != nil {
 			return nil, err
 		}
-		if err := releaseBrokerQuotaTx(ctx, txClient, id, now); err != nil {
+		if err := releaseBrokerQuotaTx(ctx, txClient, row, now); err != nil {
 			return nil, err
 		}
 		return entAgentToStore(updated), nil
@@ -480,7 +480,7 @@ func reapRow(ctx context.Context, txClient *ent.Client, isPG bool, id uuid.UUID,
 		if err != nil {
 			return nil, err
 		}
-		if err := releaseBrokerQuotaTx(ctx, txClient, id, now); err != nil {
+		if err := releaseBrokerQuotaTx(ctx, txClient, row, now); err != nil {
 			return nil, err
 		}
 		return entAgentToStore(updated), nil
