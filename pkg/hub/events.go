@@ -208,10 +208,16 @@ type AgentStatusEvent struct {
 	// No omitempty: false must reach the web to clear a merged true.
 	ProvisionedOnly bool `json:"provisionedOnly"`
 	// HarnessVendor and ModelSize are the agent list's badge fields, with
-	// the same names and values (see agentEventBadges). Both are fixed
-	// after create, so omitempty never needs to clear a merged value.
+	// the same names and values (see agentEventBadges).
+	// HarnessVendor is omitempty: the harness cannot change after create,
+	// and an event cannot resolve the vendor of an older agent that names
+	// its harness only through a harness-config reference, so an omitted
+	// key keeps the value merged from a list fetch.
+	// ModelSize has no omitempty: a model PATCH or a reincarnation can
+	// change or clear it, and it is always known from the record, so ""
+	// must reach the web to clear a merged size.
 	HarnessVendor string `json:"harnessVendor,omitempty"`
-	ModelSize     string `json:"modelSize,omitempty"`
+	ModelSize     string `json:"modelSize"`
 }
 
 // AgentCreatedEvent is published when an agent is created.

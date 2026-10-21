@@ -792,8 +792,7 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 	// precedence layer (request > project > template > hub) has already
 	// written AppliedConfig.Model by now, so this is the alias of whichever
 	// layer supplied the model. An explicit model ID or no model records
-	// no size. A Model that is already a concrete ID leaves a recorded
-	// size alone.
+	// no size.
 	if size := config.ModelSizeAlias(agent.AppliedConfig.Model); size != "" {
 		agent.AppliedConfig.ModelSize = size
 	}

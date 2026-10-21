@@ -156,16 +156,18 @@ func (c *harnessLookupCountingStore) GetHarnessConfig(ctx context.Context, id st
 	return c.Store.GetHarnessConfig(ctx, id)
 }
 
-// badgeFixture holds a project with one agent of each badge shape.
+// badgeFixture holds a project with one agent of each badge shape, and a
+// second project whose older agents share the first project's global
+// harness-config reference.
 type badgeFixture struct {
 	srv     *Server
 	counter *harnessLookupCountingStore
 	project *store.Project
 	// want maps agent ID to its expected harnessVendor and modelSize.
 	want map[string][2]string
-	// legacyIDs are agents with no stamped harness that name it only
-	// through a harness-config reference.
-	legacyIDs []string
+	// inProject is the set of agent IDs in project (the rest are in the
+	// second project).
+	inProject map[string]bool
 }
 
 func newBadgeFixture(t *testing.T) *badgeFixture {
@@ -174,6 +176,8 @@ func newBadgeFixture(t *testing.T) *badgeFixture {
 	ctx := context.Background()
 	project := &store.Project{ID: tid("badges-project"), Name: "Badges", Slug: "badges-project"}
 	require.NoError(t, s.CreateProject(ctx, project))
+	other := &store.Project{ID: tid("badges-project-2"), Name: "Badges 2", Slug: "badges-project-2"}
+	require.NoError(t, s.CreateProject(ctx, other))
 	// An opaque slug, so the harness is known only from the record.
 	require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{
 		ID: tid("badges-hc"), Name: "team-default", Slug: "team-default", Harness: "gemini-cli",
@@ -181,22 +185,30 @@ func newBadgeFixture(t *testing.T) *badgeFixture {
 		Config: &store.HarnessConfigData{Harness: "gemini-cli"},
 	}))
 
-	f := &badgeFixture{srv: srv, project: project, want: map[string][2]string{}}
-	add := func(id string, ac *store.AgentAppliedConfig, vendor, size string) string {
+	f := &badgeFixture{srv: srv, project: project, want: map[string][2]string{}, inProject: map[string]bool{}}
+	addIn := func(p *store.Project, id string, ac *store.AgentAppliedConfig, vendor, size string) {
 		a := &store.Agent{
-			ID: tid(id), Slug: id, Name: id, ProjectID: project.ID,
+			ID: tid(id), Slug: id, Name: id, ProjectID: p.ID,
 			Phase: string(state.PhaseCreated), AppliedConfig: ac,
 		}
 		require.NoError(t, s.CreateAgent(ctx, a))
 		f.want[a.ID] = [2]string{vendor, size}
-		return a.ID
+		if p == project {
+			f.inProject[a.ID] = true
+		}
+	}
+	add := func(id string, ac *store.AgentAppliedConfig, vendor, size string) {
+		addIn(project, id, ac, vendor, size)
 	}
 	add("badge-stamped", &store.AgentAppliedConfig{Harness: "codex", ModelSize: "medium"}, harness.VendorOpenAI, "medium")
 	add("badge-inline", &store.AgentAppliedConfig{InlineConfig: &api.ScionConfig{Harness: "opencode"}, ModelSize: "extra-large"}, "opencode", "extra-large")
 	add("badge-custom", &store.AgentAppliedConfig{Harness: "my-harness"}, "", "")
 	add("badge-none", &store.AgentAppliedConfig{}, "", "")
 	for _, id := range []string{"badge-legacy-1", "badge-legacy-2", "badge-legacy-3", "badge-legacy-4"} {
-		f.legacyIDs = append(f.legacyIDs, add(id, &store.AgentAppliedConfig{HarnessConfig: "team-default"}, harness.VendorGoogle, ""))
+		add(id, &store.AgentAppliedConfig{HarnessConfig: "team-default"}, harness.VendorGoogle, "")
+	}
+	for _, id := range []string{"badge-other-legacy-1", "badge-other-legacy-2"} {
+		addIn(other, id, &store.AgentAppliedConfig{HarnessConfig: "team-default"}, harness.VendorGoogle, "")
 	}
 
 	f.counter = &harnessLookupCountingStore{Store: s}
@@ -204,9 +216,10 @@ func newBadgeFixture(t *testing.T) *badgeFixture {
 	return f
 }
 
-// checkItems asserts every fixture agent's badge keys in a decoded list
-// body: present with the expected value, or absent when empty.
-func (f *badgeFixture) checkItems(t *testing.T, label string, body []byte) {
+// checkItems asserts the badge keys of every fixture agent in a decoded
+// list body (all of them, or only project's when projectOnly): present with
+// the expected value, or absent when empty.
+func (f *badgeFixture) checkItems(t *testing.T, label string, body []byte, projectOnly bool) {
 	t.Helper()
 	seen := 0
 	for _, item := range decodeItems(t, decodeObject(t, body)["agents"]) {
@@ -226,20 +239,30 @@ func (f *badgeFixture) checkItems(t *testing.T, label string, body []byte) {
 			assert.JSONEq(t, `"`+want[i]+`"`, string(raw), "%s %s: %s", label, id, key)
 		}
 	}
-	assert.Equal(t, len(f.want), seen, "%s: every fixture agent listed", label)
+	wantSeen := len(f.want)
+	if projectOnly {
+		wantSeen = len(f.inProject)
+	}
+	assert.Equal(t, wantSeen, seen, "%s: every fixture agent listed", label)
 }
 
 // TestAgentBadges_ListViewsCarryBadgesWithBoundedLookups pins that every
 // agent list path (global and project, legacy and sorted, full and compact)
 // carries harnessVendor and modelSize, and that the harness of agents with
-// no stamped harness is resolved with one harness-config lookup chain per
-// distinct reference per request, not one per agent.
+// no stamped harness is resolved with per-request memoized lookups: one
+// project-scope read per (project, reference) and one global-scope read per
+// reference, not one per agent.
 func TestAgentBadges_ListViewsCarryBadgesWithBoundedLookups(t *testing.T) {
 	f := newBadgeFixture(t)
 	bases := map[string]string{
 		"global":  "/api/v1/agents",
 		"project": "/api/v1/projects/" + f.project.ID + "/agents",
 	}
+	// "team-default" is global. The project list: one project-scope miss
+	// and one global hit, shared by its four older agents. The global
+	// list: a project-scope miss in each of the two projects, and one
+	// global hit shared by all six older agents.
+	wantLookups := map[string]int64{"global": 3, "project": 2}
 	for epName, base := range bases {
 		for _, mode := range []string{"", "sort=updated&fit=500", "sort=updated&dir=desc&limit=50"} {
 			for _, view := range []string{"", "view=compact"} {
@@ -247,10 +270,8 @@ func TestAgentBadges_ListViewsCarryBadgesWithBoundedLookups(t *testing.T) {
 				f.counter.lookups.Store(0)
 				rec := doRequest(t, f.srv, http.MethodGet, withQuery(base, mode, view), nil)
 				require.Equal(t, http.StatusOK, rec.Code, "%s: %s", label, rec.Body.String())
-				f.checkItems(t, label, rec.Body.Bytes())
-				// "team-default" is global: one project-scope miss and one
-				// global hit, shared by all four legacy agents.
-				assert.Equal(t, int64(2), f.counter.lookups.Load(), "%s: harness-config lookups", label)
+				f.checkItems(t, label, rec.Body.Bytes(), epName == "project")
+				assert.Equal(t, wantLookups[epName], f.counter.lookups.Load(), "%s: harness-config lookups", label)
 			}
 		}
 	}
@@ -267,5 +288,60 @@ func TestAgentBadges_SingleAgentGet(t *testing.T) {
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
 		assert.Equal(t, want[0], got.HarnessVendor, "%s harnessVendor", id)
 		assert.Equal(t, want[1], got.ModelSize, "%s modelSize", id)
+	}
+}
+
+// TestAgentBadges_AgentJWTListCarriesBadges pins the badges on the project
+// agent list read with an agent token (listProjectAgentsSortedAgentJWT),
+// full and compact.
+func TestAgentBadges_AgentJWTListCarriesBadges(t *testing.T) {
+	f := sortedListSetup(t)
+	ctx := context.Background()
+	require.NoError(t, f.store.CreateHarnessConfig(ctx, &store.HarnessConfig{
+		ID: tid("badges-jwt-hc"), Name: "team-default", Slug: "team-default", Harness: "gemini-cli",
+		Scope: store.HarnessConfigScopeGlobal, Status: store.HarnessConfigStatusActive,
+		Config: &store.HarnessConfigData{Harness: "gemini-cli"},
+	}))
+	self := f.createAgent(t, "badge-jwt-self", string(state.PhaseRunning), nil)
+	want := map[string][2]string{self.ID: {"", ""}}
+	for slug, c := range map[string]struct {
+		ac   *store.AgentAppliedConfig
+		want [2]string
+	}{
+		"badge-jwt-stamped": {&store.AgentAppliedConfig{Harness: "claude", ModelSize: "large"}, [2]string{harness.VendorAnthropic, "large"}},
+		"badge-jwt-legacy":  {&store.AgentAppliedConfig{HarnessConfig: "team-default"}, [2]string{harness.VendorGoogle, ""}},
+	} {
+		a := &store.Agent{
+			ID: tid(slug), Slug: slug, Name: slug, ProjectID: f.project.ID,
+			Phase: string(state.PhaseRunning), CreatedBy: f.owner.ID, OwnerID: f.owner.ID,
+			AppliedConfig: c.ac,
+		}
+		require.NoError(t, f.store.CreateAgent(ctx, a))
+		want[a.ID] = c.want
+	}
+	tok := f.agentJWTFor(t, self.ID)
+
+	for _, query := range []string{"sort=updated&fit=500", "sort=updated&fit=500&view=compact"} {
+		rec := doRequestWithAgentToken(t, f.srv, http.MethodGet, f.listPath(query), nil, tok)
+		require.Equal(t, http.StatusOK, rec.Code, "%s: %s", query, rec.Body.String())
+		seen := 0
+		for _, item := range decodeItems(t, decodeObject(t, rec.Body.Bytes())["agents"]) {
+			var id string
+			require.NoError(t, json.Unmarshal(item["id"], &id))
+			w, ok := want[id]
+			if !ok {
+				continue
+			}
+			seen++
+			for i, key := range []string{"harnessVendor", "modelSize"} {
+				raw, present := item[key]
+				if w[i] == "" {
+					assert.False(t, present, "%s %s: %s must be omitted, got %s", query, id, key, raw)
+					continue
+				}
+				assert.JSONEq(t, `"`+w[i]+`"`, string(raw), "%s %s: %s", query, id, key)
+			}
+		}
+		assert.Equal(t, len(want), seen, "%s: every agent listed", query)
 	}
 }

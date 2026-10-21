@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -42,18 +43,27 @@ var badgeEventCases = []struct {
 	{"no applied config", nil, "", ""},
 }
 
-func assertBadgeKeys(t *testing.T, data []byte, vendor, size string) {
+// assertBadgeKeys checks the badge keys of one event payload. An empty
+// harnessVendor is always omitted. An empty modelSize is omitted on a
+// created event, and sent as "" on a status event (sizeAlwaysSent), so the
+// web's delta merge clears a size a PATCH or reincarnation removed.
+func assertBadgeKeys(t *testing.T, data []byte, vendor, size string, sizeAlwaysSent bool) {
 	t.Helper()
 	var m map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(data, &m))
-	for key, want := range map[string]string{"harnessVendor": vendor, "modelSize": size} {
-		raw, present := m[key]
-		if want == "" {
-			assert.False(t, present, "%s must be omitted, got %s", key, raw)
-			continue
-		}
-		assert.JSONEq(t, `"`+want+`"`, string(raw), key)
+	raw, present := m["harnessVendor"]
+	if vendor == "" {
+		assert.False(t, present, "harnessVendor must be omitted, got %s", raw)
+	} else {
+		assert.JSONEq(t, `"`+vendor+`"`, string(raw), "harnessVendor")
 	}
+	raw, present = m["modelSize"]
+	if size == "" && !sizeAlwaysSent {
+		assert.False(t, present, "modelSize must be omitted, got %s", raw)
+		return
+	}
+	require.True(t, present, "modelSize must be sent")
+	assert.JSONEq(t, `"`+size+`"`, string(raw), "modelSize")
 }
 
 func receiveBadgeEvent(t *testing.T, ch <-chan Event) Event {
@@ -85,11 +95,27 @@ func TestAgentBadges_CreatedAndStatusEventsCarryBadges(t *testing.T) {
 			for i := 0; i < 6; i++ {
 				evt := receiveBadgeEvent(t, ch)
 				t.Run(evt.Subject, func(t *testing.T) {
-					assertBadgeKeys(t, evt.Data, tc.vendor, tc.size)
+					assertBadgeKeys(t, evt.Data, tc.vendor, tc.size, strings.HasSuffix(evt.Subject, ".status"))
 				})
 			}
 		})
 	}
+}
+
+// TestAgentBadges_StatusEventClearsModelSize pins that a status event for
+// an agent with no size carries "modelSize":"" verbatim, so a size the web
+// merged earlier is cleared.
+func TestAgentBadges_StatusEventClearsModelSize(t *testing.T) {
+	pub := NewChannelEventPublisher()
+	defer pub.Close()
+	ch, unsub := pub.Subscribe("agent.a1.status")
+	defer unsub()
+	agent := &store.Agent{ID: "a1", ProjectID: "p1", Phase: "running",
+		AppliedConfig: &store.AgentAppliedConfig{Harness: "claude", Model: "claude-opus-4-8"}}
+	pub.PublishAgentStatus(context.Background(), agent)
+	evt := receiveBadgeEvent(t, ch)
+	assert.Contains(t, string(evt.Data), `"modelSize":""`)
+	assert.Contains(t, string(evt.Data), `"harnessVendor":"anthropic"`)
 }
 
 // TestAgentBadges_ListBadgesNeedNoStoreForRecordHarness pins that list

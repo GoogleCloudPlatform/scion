@@ -4449,7 +4449,11 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 			// carries the resolved value.
 			// The size alias, if any, is taken first: it replaces the
 			// recorded size with the model below, so an explicit ID
-			// clears it.
+			// clears it. Declined limitation (#5502 review M2):
+			// CreateInputs records the resolved model, not the alias, so
+			// a reincarnation after this PATCH re-derives no size. The
+			// badge is display-only, and keeping the alias would change
+			// the reincarnate explicit-input contract.
 			modelSize = config.ModelSizeAlias(cfg.Model)
 			cfg.Model = s.resolveModelAliasForAgent(ctx, agent, cfg.Model)
 		}
