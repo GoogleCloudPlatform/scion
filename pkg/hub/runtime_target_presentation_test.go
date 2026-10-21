@@ -624,3 +624,32 @@ func TestPresentationHeartbeat_StoresImageRegistryRedacted(t *testing.T) {
 	sendAsBroker(t, f.srv, f.flat.ID, presentationBeat(plain, target, 100, 2, nil))
 	assert.Equal(t, plain, f.row(t, f.flat.ID).RuntimeTargetPresentation, "a plain image registry is stored unchanged")
 }
+
+// TestPresentation_StoredFormMatchesPresentInstanceOutput: a presentation
+// built by config.PresentInstance (whose image registry is already redacted)
+// is stored by ApplyRuntimeTargetPresentation unchanged: the stored value and
+// the stored hash equal the presentation sent and its hash.
+func TestPresentation_StoredFormMatchesPresentInstanceOutput(t *testing.T) {
+	f := newPresentationFixture(t, true)
+	inst := config.V1RuntimeBrokerInstanceConfig{
+		Key: "local-docker", Name: "example-docker",
+		RuntimeTarget: &config.V1RuntimeTargetConfig{Type: "docker"},
+		AgentDefaults: &config.V1InstanceAgentDefaults{ImageRegistry: "https://user:s3cret@registry.example/team"},
+	}
+	sent := config.PresentInstance(inst).API()
+	require.NotNil(t, sent.AgentDefaults)
+	require.Equal(t, "https://***@registry.example/team", sent.AgentDefaults.ImageRegistry, "PresentInstance redacts the image registry")
+	want := config.PresentInstance(inst).API()
+
+	res, err := f.srv.ApplyRuntimeTargetPresentation(context.Background(), f.flat.ID, f.flat.RuntimeTarget.ID, &sent, 100, 1, time.Now())
+	require.NoError(t, err)
+	require.Equal(t, store.PresentationWritten, res.Outcome, "ignored: %q", res.Ignored)
+	assert.Equal(t, want, sent, "the presentation sent is not modified")
+
+	row := f.row(t, f.flat.ID)
+	assert.Equal(t, &want, row.RuntimeTargetPresentation, "the stored value equals the presentation sent")
+	assert.Equal(t, mustHash(t, &want), row.RuntimeTargetPresentationHash, "the stored hash is the hash of the presentation sent")
+	calls := f.rec.snapshot()
+	require.Len(t, calls, 1)
+	assert.Equal(t, mustHash(t, &want), calls[0].hash, "the store receives the hash of the presentation sent")
+}
