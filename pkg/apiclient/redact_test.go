@@ -95,8 +95,8 @@ func TestRedactURLError(t *testing.T) {
 		"https://tok3n@hub.example.com":          "https://xxxxx@hub.example.com",
 		"https://a@s3cret@hub example.com/%zz":   "https://xxxxx@hub example.com/%zz",
 	} {
-		if got := redactURLUserInfo(in); got != want {
-			t.Errorf("redactURLUserInfo(%q) = %q, want %q", in, got, want)
+		if got := redactURLCredentials(in); got != want {
+			t.Errorf("redactURLCredentials(%q) = %q, want %q", in, got, want)
 		}
 	}
 }
@@ -120,5 +120,50 @@ func TestTransportRequestErrors_BaseURL(t *testing.T) {
 		if strings.Contains(err.Error(), password[i:i+4]) {
 			t.Errorf("error %q shows %q", err.Error(), password[i:i+4])
 		}
+	}
+}
+
+// urlCredentialCases is the table of config's redact_urls_test.go: this
+// package keeps a copy of config.RedactURL's rules (ptone/scion#5356).
+var urlCredentialCases = []struct{ name, in, want string }{
+	{"no query", "https://hub.example.com/api", "https://hub.example.com/api"},
+	{"plain params kept", "https://hub.example.com/api?limit=5&sort=name", "https://hub.example.com/api?limit=5&sort=name"},
+	{"token", "https://hub.example.com/x?token=tok3n", "https://hub.example.com/x?token=xxxxx"},
+	{"access_token among others", "https://hub.example.com/x?a=1&access_token=tok3n&b=2", "https://hub.example.com/x?a=1&access_token=xxxxx&b=2"},
+	{"key", "https://hub.example.com/x?key=s3cret", "https://hub.example.com/x?key=xxxxx"},
+	{"api_key", "https://hub.example.com/x?api_key=s3cret", "https://hub.example.com/x?api_key=xxxxx"},
+	{"secret", "https://hub.example.com/x?client_secret=s3cret", "https://hub.example.com/x?client_secret=xxxxx"},
+	{"signature", "https://hub.example.com/x?signature=s1gnat", "https://hub.example.com/x?signature=xxxxx"},
+	{"sig", "https://hub.example.com/x?sig=s1gnat", "https://hub.example.com/x?sig=xxxxx"},
+	{"signed URL", "https://storage.example.com/b/o?X-Goog-Algorithm=A&X-Goog-Credential=s3cret&X-Goog-Signature=s1gnat", "https://storage.example.com/b/o?X-Goog-Algorithm=A&X-Goog-Credential=xxxxx&X-Goog-Signature=xxxxx"},
+	{"amz security token", "https://s3.example.com/o?X-Amz-Security-Token=tok3n&X-Amz-Date=1", "https://s3.example.com/o?X-Amz-Security-Token=xxxxx&X-Amz-Date=1"},
+	{"case-insensitive name", "https://hub.example.com/x?TOKEN=tok3n", "https://hub.example.com/x?TOKEN=xxxxx"},
+	{"escaped name", "https://hub.example.com/x?acc%65ss_token=tok3n", "https://hub.example.com/x?acc%65ss_token=xxxxx"},
+	{"repeated param", "https://hub.example.com/x?token=tok3n&token=s3cret", "https://hub.example.com/x?token=xxxxx&token=xxxxx"},
+	{"empty value", "https://hub.example.com/x?token=", "https://hub.example.com/x?token=xxxxx"},
+	{"name without value", "https://hub.example.com/x?token", "https://hub.example.com/x?token"},
+	{"fragment", "https://hub.example.com/cb#access_token=tok3n&state=s", "https://hub.example.com/cb#access_token=xxxxx&state=s"},
+	{"plain fragment", "https://hub.example.com/docs#section-2", "https://hub.example.com/docs#section-2"},
+	{"user info and query", "https://alice:s3cret@hub.example.com/x?token=tok3n", "https://alice:xxxxx@hub.example.com/x?token=xxxxx"},
+	{"unparsable URL", "https://alice:s3cret@hub example.com/%zz?token=tok3n", "https://xxxxx@hub example.com/%zz?token=xxxxx"},
+}
+
+func TestRedactURLCredentials_Query(t *testing.T) {
+	for _, tc := range urlCredentialCases {
+		got := redactURLCredentials(tc.in)
+		if got != tc.want {
+			t.Errorf("%s: redactURLCredentials(%q) = %q, want %q", tc.name, tc.in, got, tc.want)
+		}
+	}
+}
+
+// A transport error for a request whose path carries a credential query
+// parameter shows the URL without its value.
+func TestTransportErrors_RedactQueryCredentials(t *testing.T) {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	srv.Close()
+	_, err := NewTransport(srv.URL).Get(context.Background(), "/api/v1/x?token=tok3n&limit=5", nil)
+	if err == nil || strings.Contains(err.Error(), "tok3n") || !strings.Contains(err.Error(), "token=xxxxx&limit=5") {
+		t.Errorf("error = %v, want the query token masked", err)
 	}
 }

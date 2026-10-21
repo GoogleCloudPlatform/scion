@@ -65,7 +65,7 @@ func ValidateHubURL(endpoint string) error {
 
 // userInfoRe matches the user info of a URL that url.Parse rejects, up to
 // the last '@' before the host.
-// pkg/apiclient keeps a copy of these rules (redactURLUserInfo), since it
+// pkg/apiclient keeps a copy of these rules (redactURLCredentials), since it
 // imports no scion package; change both together.
 var userInfoRe = regexp.MustCompile(`^([A-Za-z][A-Za-z0-9+.-]*://)?[^/?#]*@`)
 
@@ -75,32 +75,48 @@ var userInfoRe = regexp.MustCompile(`^([A-Za-z][A-Za-z0-9+.-]*://)?[^/?#]*@`)
 // user info.
 var textURLRe = regexp.MustCompile("(?i)\\bhttps?://(?:[^\\s/?#\"<>`\\\\]|\\\\.)*")
 
-// RedactURL returns raw for display with any credential in its user info
-// replaced: the password (see url.URL.Redacted), or a user name given
-// without a password, which may itself be a token. A URL that does not
-// parse has its whole user info replaced.
+// textFullURLRe matches each http(s) URL in a text: textURLRe's scheme and
+// authority, then its path, query and fragment, which end at white space,
+// a quote, an angle bracket, a backtick or a backslash.
+var textFullURLRe = regexp.MustCompile(textURLRe.String() + "(?:[/?#][^\\s\"<>`\\\\]*)?")
+
+// RedactURL returns raw for display with any credential in it replaced:
+// in its user info, the password (see url.URL.Redacted), or a user name
+// given without a password, which may itself be a token; in its query and
+// fragment, the value of every parameter with a credential-like name (see
+// isURLCredentialParam). A URL that does not parse has its whole user info
+// replaced. A URL with nothing to mask is returned as given.
 func RedactURL(raw string) string {
+	s := raw
 	if u, err := url.Parse(raw); err == nil {
-		if u.User == nil {
-			return raw
+		if u.User != nil {
+			if _, hasPassword := u.User.Password(); hasPassword {
+				s = u.Redacted()
+			} else {
+				u.User = url.User("xxxxx")
+				s = u.String()
+			}
 		}
-		if _, hasPassword := u.User.Password(); hasPassword {
-			return u.Redacted()
-		}
-		u.User = url.User("xxxxx")
-		return u.String()
+	} else {
+		s = userInfoRe.ReplaceAllString(raw, "${1}xxxxx@")
 	}
-	return userInfoRe.ReplaceAllString(raw, "${1}xxxxx@")
+	return redactURLParams(s)
 }
 
-// RedactURLsIn returns text (for example an error message) with the user
-// info of every http(s) URL in it replaced as RedactURL does.
+// RedactURLsIn returns text (for example an error message) with every
+// http(s) URL in it redacted as RedactURL does: its user info, and the
+// credential parameters of its query and fragment.
 func RedactURLsIn(text string) string {
-	return textURLRe.ReplaceAllStringFunc(text, func(m string) string {
-		if !strings.Contains(m, "@") {
-			return m
+	return textFullURLRe.ReplaceAllStringFunc(text, func(m string) string {
+		authority := textURLRe.FindString(m)
+		rest := m[len(authority):]
+		// Punctuation that ends a sentence is not part of the URL.
+		trimmed := strings.TrimRight(rest, ".,;:!?)]}'")
+		tail := rest[len(trimmed):]
+		if strings.Contains(authority, "@") {
+			authority = RedactURL(authority)
 		}
-		return RedactURL(m)
+		return authority + redactURLParams(trimmed) + tail
 	})
 }
 

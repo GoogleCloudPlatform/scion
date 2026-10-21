@@ -108,3 +108,70 @@ func TestRedactURLsIn_UserInfoCharacters(t *testing.T) {
 		}
 	}
 }
+
+// urlCredentialCases are the query and fragment cases of RedactURL
+// (ptone/scion#5356). pkg/apiclient's redact_test.go has the same table
+// for its copy of the rules.
+var urlCredentialCases = []struct{ name, in, want string }{
+	{"no query", "https://hub.example.com/api", "https://hub.example.com/api"},
+	{"plain params kept", "https://hub.example.com/api?limit=5&sort=name", "https://hub.example.com/api?limit=5&sort=name"},
+	{"token", "https://hub.example.com/x?token=tok3n", "https://hub.example.com/x?token=xxxxx"},
+	{"access_token among others", "https://hub.example.com/x?a=1&access_token=tok3n&b=2", "https://hub.example.com/x?a=1&access_token=xxxxx&b=2"},
+	{"key", "https://hub.example.com/x?key=s3cret", "https://hub.example.com/x?key=xxxxx"},
+	{"api_key", "https://hub.example.com/x?api_key=s3cret", "https://hub.example.com/x?api_key=xxxxx"},
+	{"secret", "https://hub.example.com/x?client_secret=s3cret", "https://hub.example.com/x?client_secret=xxxxx"},
+	{"signature", "https://hub.example.com/x?signature=s1gnat", "https://hub.example.com/x?signature=xxxxx"},
+	{"sig", "https://hub.example.com/x?sig=s1gnat", "https://hub.example.com/x?sig=xxxxx"},
+	{"signed URL", "https://storage.example.com/b/o?X-Goog-Algorithm=A&X-Goog-Credential=s3cret&X-Goog-Signature=s1gnat", "https://storage.example.com/b/o?X-Goog-Algorithm=A&X-Goog-Credential=xxxxx&X-Goog-Signature=xxxxx"},
+	{"amz security token", "https://s3.example.com/o?X-Amz-Security-Token=tok3n&X-Amz-Date=1", "https://s3.example.com/o?X-Amz-Security-Token=xxxxx&X-Amz-Date=1"},
+	{"case-insensitive name", "https://hub.example.com/x?TOKEN=tok3n", "https://hub.example.com/x?TOKEN=xxxxx"},
+	{"escaped name", "https://hub.example.com/x?acc%65ss_token=tok3n", "https://hub.example.com/x?acc%65ss_token=xxxxx"},
+	{"repeated param", "https://hub.example.com/x?token=tok3n&token=s3cret", "https://hub.example.com/x?token=xxxxx&token=xxxxx"},
+	{"empty value", "https://hub.example.com/x?token=", "https://hub.example.com/x?token=xxxxx"},
+	{"name without value", "https://hub.example.com/x?token", "https://hub.example.com/x?token"},
+	{"fragment", "https://hub.example.com/cb#access_token=tok3n&state=s", "https://hub.example.com/cb#access_token=xxxxx&state=s"},
+	{"plain fragment", "https://hub.example.com/docs#section-2", "https://hub.example.com/docs#section-2"},
+	{"user info and query", "https://alice:s3cret@hub.example.com/x?token=tok3n", "https://alice:xxxxx@hub.example.com/x?token=xxxxx"},
+	{"unparsable URL", "https://alice:s3cret@hub example.com/%zz?token=tok3n", "https://xxxxx@hub example.com/%zz?token=xxxxx"},
+}
+
+func TestRedactURL_QueryCredentials(t *testing.T) {
+	for _, tc := range urlCredentialCases {
+		got := RedactURL(tc.in)
+		if got != tc.want {
+			t.Errorf("%s: RedactURL(%q) = %q, want %q", tc.name, tc.in, got, tc.want)
+		}
+		for _, secret := range []string{"tok3n", "s3cret", "s1gnat"} {
+			if strings.Contains(got, secret) {
+				t.Errorf("%s: RedactURL(%q) = %q, still shows %q", tc.name, tc.in, got, secret)
+			}
+		}
+	}
+}
+
+// In a text, the query of each URL is redacted too, and the punctuation
+// after a URL is kept.
+func TestRedactURLsIn_QueryCredentials(t *testing.T) {
+	tests := []struct{ name, in, want string }{
+		{"error text", `Get "https://hub.example.com/api?token=tok3n": refused`, `Get "https://hub.example.com/api?token=xxxxx": refused`},
+		{"sentence end", "see https://hub.example.com/x?key=s3cret.", "see https://hub.example.com/x?key=xxxxx."},
+		{"comma and paren", "(https://hub.example.com/x?sig=s1gnat), then", "(https://hub.example.com/x?sig=xxxxx), then"},
+		{"two URLs", "https://a.example.com/?token=tok3n and http://u:s3cret@b.example.com/p?q=1", "https://a.example.com/?token=xxxxx and http://u:xxxxx@b.example.com/p?q=1"},
+		{"no query untouched", "dial https://hub.example.com/path/to/x: refused", "dial https://hub.example.com/path/to/x: refused"},
+		{"fragment", "redirected to https://hub.example.com/cb#access_token=tok3n", "redirected to https://hub.example.com/cb#access_token=xxxxx"},
+	}
+	for _, tc := range tests {
+		got := RedactURLsIn(tc.in)
+		if got != tc.want {
+			t.Errorf("%s: RedactURLsIn(%q) = %q, want %q", tc.name, tc.in, got, tc.want)
+		}
+	}
+	for _, tc := range urlCredentialCases {
+		if tc.name == "unparsable URL" {
+			continue // a space ends a URL in a text
+		}
+		if got := RedactURLsIn("at " + tc.in + " now"); got != "at "+tc.want+" now" {
+			t.Errorf("%s: RedactURLsIn = %q, want %q", tc.name, got, "at "+tc.want+" now")
+		}
+	}
+}
