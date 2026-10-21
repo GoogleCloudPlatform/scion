@@ -7,6 +7,12 @@
 Goal: take a repo admin (fork) or an org owner (upstream) from nothing to a
 working App installation, with routing ready but switched off.
 
+**Precondition (required, not optional):** set fork pull request workflows to
+"Require approval for **all** external contributors" (not only first-time
+contributors) on every target repo or its org before routing any job
+([matrix G8](permissions-matrix.md#1-github-steps); why:
+[architecture.md](architecture.md#deploy-preconditions)).
+
 ## 1. Decide the target and scope
 
 - TODO(P5): fork, upstream or both; `GITHUB_APP_INSTALLATION_SCOPE` `repo` vs

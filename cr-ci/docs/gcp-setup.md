@@ -6,6 +6,12 @@
 
 ## 1. Prerequisites
 
+- **Deploy preconditions** (required): see
+  [architecture.md](architecture.md#deploy-preconditions). In particular the
+  target repo (or org) requires approval of fork PR workflows for **all**
+  external contributors, `EXEC_SA_NAME` gets no roles, and `roles/run.viewer`
+  stays narrow.
+
 - TODO(P4): choose `GCP_PROJECT` and `REGION` (design suggests
   `deploy-demo-test` / `us-central1` for the PoC; a dedicated project for
   production); deployer roles

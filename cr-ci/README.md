@@ -30,14 +30,15 @@ sequenceDiagram
     participant CR as Cloud Run Jobs API
     participant Run as Runner execution (8 vCPU / 32 GiB, /scratch disk)
     GH->>Med: workflow_job queued (HMAC-signed webhook)
-    Med->>Med: verify signature, repo in TARGET_REPOS, label is RUNNER_LABEL, not a fork PR, capacity free
+    Med->>Med: verify signature, repo in TARGET_REPOS, labels = RUNNER_LABEL, not a fork PR, job still queued, capacity free
     Med->>SM: App private key (cached)
     Med->>GH: generate-jitconfig (App installation token)
-    Med->>CR: RunJob(RUNNER_JOB_NAME, env: one-time claim nonce)
+    Med->>CR: RunJob(RUNNER_JOB_NAME, env: one-time claim token)
     CR-->>Run: start execution as EXEC_SA_NAME (zero IAM roles)
-    Run->>Med: exchange claim token for the JIT config (single use, CLAIM_TTL, default 300 s)
+    Run->>Med: claim token + its own Google ID token for the JIT config (single use, CLAIM_TTL, default 300 s)
     Run->>GH: run.sh --jitconfig: one job, then exit (execution ends, billing stops)
-    Note over Med: Cloud Scheduler calls /reconcile every few minutes:<br/>backfill missed jobs and reap stale registrations
+    GH->>Med: workflow_job in_progress (runner_name): kill the runner if an untrusted job took it
+    Note over Med: Cloud Scheduler calls /reconcile every few minutes:<br/>backfill missed jobs, re-check jobs on cr-ci runners, reap stale registrations
 ```
 
 Jobs opt in through the `runs-on` expression, which reads the Actions variable

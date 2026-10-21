@@ -110,7 +110,7 @@ step says otherwise. Resource names come from `config.example.env`.
 | C13 | Grant `SCHEDULER_SA_NAME` `roles/run.invoker` on `MEDIATOR_SERVICE_NAME` only | `roles/run.admin` (service) | `/reconcile` additionally checks the OIDC token in code (P2), because the service is public | [GC1] |
 | C14 | Create the Cloud Scheduler job `RECONCILER_JOB_NAME` with an OIDC token for `SCHEDULER_SA_NAME` | `roles/cloudscheduler.admin` (project) + `roles/iam.serviceAccountUser` on `SCHEDULER_SA_NAME` | | [GC8] |
 | C15 | **Quota increase**: Cloud Run regional ephemeral-disk (default 100 GiB, auto-granted) to cover `RUNNER_DISK_GI` x `MAX_CONCURRENT_RUNNERS`, plus regional CPU and memory if needed | `roles/cloudquotas.admin` (project), or the legacy `roles/servicemanagement.quotaAdmin`; Google approves the request | Only needed when raising `MAX_CONCURRENT_RUNNERS` above the default 5 (at 20 GiB each) | [GC9] |
-| C16 | Read logs, executions and metrics (operations) | `roles/logging.viewer` + `roles/run.viewer` (project) | `roles/run.viewer` can see execution env overrides. That is why the JIT config is passed by a claim nonce, never as an env override (design 3.2). | [GC1] |
+| C16 | Read logs, executions and metrics (operations) | `roles/logging.viewer` + `roles/run.viewer` (project) | `roles/run.viewer` can see execution env overrides. That is why the JIT config is passed by a claim token, never as an env override (design 3.2), and why the claim also requires the runner identity's ID token (claim contract v2). Grant it narrowly. | [GC1] |
 | C17 | Create alerting policies (launch failures, queue starvation) | `roles/monitoring.alertPolicyEditor` (project) | P4 or operations | [GC10] |
 | C18 | Teardown (delete everything above) | The admin role for each resource above (C2-C14) | `scripts/teardown.sh` (P4) | Same sources as C2-C14 |
 
@@ -264,6 +264,15 @@ Still UNVERIFIED (to settle in P2, P4 or P6):
   HMAC, and `/reconcile` by the in-code OIDC check (audience `MEDIATOR_URL`).
   **UNVERIFIED** for the actual project. Changing org policy needs
   `roles/orgpolicy.policyAdmin` at org level, which is outside cr-ci's reach.
+- **U7. Default labels on JIT runners.** cr-ci calls `generate-jitconfig` with
+  `labels: [RUNNER_LABEL]`, assuming GitHub adds no default labels. GitHub
+  describes `labels` as custom labels "to add", and its example JIT response
+  shows `self-hosted` and `X64`, so JIT runners may carry the default labels
+  too. If they do, a job with `runs-on: self-hosted` could also be assigned to
+  a cr-ci runner. **UNVERIFIED**; check in the P6 PoC (list the runner's
+  labels after a mint). Either way the mediator's hijack guard keys on
+  `runner_name`, not labels, so cr-ci does not rely on the label choice as a
+  defence.
 
 ## 6. Request to a GoogleCloudPlatform org owner
 

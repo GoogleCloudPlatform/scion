@@ -14,6 +14,12 @@
 - TODO: clear or reset `ROUTING_VARIABLE_NAME` (needs write); re-run queued
   jobs; emergency stop by suspending the App.
 
+## Deploy preconditions
+
+Before setting the routing variable on any repository, check the
+[deploy preconditions](architecture.md#deploy-preconditions), above all
+"Require approval for **all** external contributors" for fork PR workflows.
+
 ## Mediator: single instance
 
 The mediator keeps pending claims and its launch records in memory. Deploy it
@@ -28,12 +34,14 @@ reconcile intervals of extra latency for such a job, and no manual action.
 
 ## Secret rotation
 
-- **Webhook secret:** add the new value as a new Secret Manager version
-  first, then change it in the GitHub App settings. No restart is needed: on
-  a signature mismatch the mediator re-reads the secret, at most once a
-  minute, so deliveries signed with the new secret are accepted within about
-  a minute. Deliveries rejected in that minute (401) can be redelivered from
-  the App's "Advanced" page, and `/reconcile` backfills their jobs anyway.
+- **Webhook secret:** add the new value as a new Secret Manager version,
+  then change it in the GitHub App settings, back to back. No restart is
+  needed: on a signature mismatch the mediator re-reads the secret (at most
+  once a minute), and the secret it replaces stays valid for one hour, so
+  deliveries signed with either secret are accepted during the switch. If
+  the two steps are more than an hour apart, deliveries with the old secret
+  start failing (401); redeliver them from the App's "Advanced" page, and
+  `/reconcile` backfills their jobs anyway.
 - **App private key:** generate a new key in the App settings, add it as a
   new Secret Manager version, restart the mediator (it caches the parsed key
   for its lifetime), then delete the old key in GitHub. Installation tokens
@@ -62,13 +70,13 @@ logged (a unit test enforces this).
 | `dispatch_skip` | INFO | Duplicate delivery or job already has a runner (`reason`) |
 | `capacity_full` | INFO | `MAX_CONCURRENT_RUNNERS` reached; job left queued |
 | `launch_failed` | ERROR | `jobs.run` failed; registration deleted, job retried by reconcile |
-| `cancel` | INFO | Cancelled job: execution cancelled, registration deleted |
-| `claim_consumed` / `claim_rejected` | INFO / WARNING | Runner fetched its JIT config / presented an unknown, used or expired token |
+| `cancel` | INFO | Job finished while queued: its idle runner stopped, or left alone because it runs another job (`action=none_busy`) |
+| `claim_consumed` / `claim_rejected` | INFO / WARNING | Runner fetched its JIT config / was refused: `identity_missing` or `identity_invalid` (401, claim kept; repeated ones from outside the runner are worth a look), or an unknown, used or expired token (410) |
 | `SECURITY_REJECT_FORK_PR` | WARNING | Fork-PR or `pull_request_target` run refused a runner. **Alert on this.** |
 | `SECURITY_KILL_HIJACKED_RUNNER` | ERROR | An untrusted job started on a cr-ci runner minted for another job; the execution was cancelled and the registration deleted ([architecture](architecture.md#residual-risk-label-matched-job-assignment)). **Alert on this and review the run.** |
 | `runner_swap` | INFO | A runner started a different legitimate job; harmless |
 | `webhook_rejected` | WARNING | Bad signature, malformed payload or repo outside `TARGET_REPOS` |
-| `webhook_ignored` | INFO / DEBUG | Not `workflow_job`, or job without `RUNNER_LABEL` |
+| `webhook_ignored` | INFO / DEBUG / WARNING | Not `workflow_job`, or job without `RUNNER_LABEL`; WARNING with `reason=labels_unservable` when a job has `RUNNER_LABEL` plus other labels a cr-ci runner cannot satisfy (fix its `runs-on`) |
 | `reconcile` | INFO | Reconcile summary (reaped, backfilled, left queued, errors) |
 | `reconcile_denied` | WARNING | `/reconcile` called without a valid scheduler ID token |
 | `runner_reaped` / `execution_reaped` | WARNING | Stale registration deleted / execution past the task timeout cancelled |
@@ -85,7 +93,7 @@ logged (a unit test enforces this).
 
 - **Job stuck "waiting for a runner":** look for its `job_id` in the mediator
   logs. `capacity_full` means it is waiting for a slot; `SECURITY_REJECT_FORK_PR`
-  means it will never get one; no line at all means the webhook was not
+  or `labels_unservable` means it will never get one; no line at all means the webhook was not
   delivered (App settings, "Recent deliveries") and the next `/reconcile`
   should pick it up.
 - **Webhook deliveries failing with 401:** the webhook secret in Secret
