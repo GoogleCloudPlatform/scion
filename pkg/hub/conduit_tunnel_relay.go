@@ -159,6 +159,9 @@ func (ts *conduitTunnelSession) mintRelayTunnel(ctx context.Context, log *slog.L
 		Via:          grant.ViaTunnel,
 		TargetRenews: renews,
 		CanRenew:     canRenew,
+		// A relay-held tunnel's refusals and counts carry route
+		// relay_tunnel; Via stays tunnel.
+		Route: conduitRouteRelayTunnel,
 	})
 	if err != nil {
 		if !conduitTunnelMintErrPassesThrough(err) {
