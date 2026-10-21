@@ -32,6 +32,7 @@ import (
 // runtime server.
 const (
 	placementGlobalUnreadableCause = "the agent runtime's global settings could not be read; Kubernetes placement cannot be determined"
+	placementLegacyGlobalCause     = "the agent runtime's global settings use the legacy format and mention Kubernetes placement keys; set schema_version: \"1\" so Kubernetes placement can be determined"
 	placementUnresolvedCause       = "placement must be resolved by the agent runtime server"
 )
 
@@ -52,7 +53,7 @@ const legacyPlacementNotice = "kubernetes placement fields in the agent config a
 func (m *AgentManager) applyStartPlacement(opts api.StartOptions, agentK8s *api.KubernetesConfig) (*api.KubernetesConfig, []string, error) {
 	isKubernetes := m.Runtime != nil && m.Runtime.Name() == "kubernetes"
 	if isKubernetes && hasLegacyPlacement(agentK8s) {
-		slog.Warn(legacyPlacementNotice, "agent", opts.Name)
+		slog.Info(legacyPlacementNotice, "agent", opts.Name)
 	}
 	if !opts.PlacementResolved {
 		if isKubernetes {
@@ -104,9 +105,10 @@ func hasLegacyPlacement(k *api.KubernetesConfig) bool {
 
 // checkUnresolvedPlacement is the check for a Kubernetes start whose
 // placement the agent runtime server did not resolve: it fails when the
-// global settings cannot be read (or are in the legacy format and mention a
-// placement key), or configure placement on a Kubernetes runtime entry or
-// on a profile of one (a profile whose runtime entry is not defined counts).
+// global settings cannot be read (including a settings file that cannot be
+// stat'd), when they are in the legacy format and mention a placement key,
+// or when they configure placement on a Kubernetes runtime entry or on a
+// profile of one (a profile whose runtime entry is not defined counts).
 func checkUnresolvedPlacement(agentName string) error {
 	gs, _, err := config.LoadGlobalSettingsWithOverlay()
 	if err != nil {
@@ -114,23 +116,30 @@ func checkUnresolvedPlacement(agentName string) error {
 			"agent", agentName, "error", err)
 		return errors.New(placementGlobalUnreadableCause)
 	}
+	// The loader treats a settings file it cannot stat as missing; placement
+	// fails closed on it.
+	if config.GlobalSettingsFileUnstatable() {
+		slog.Warn("Start: the global settings file cannot be stat'd; refusing a Kubernetes start without resolved placement",
+			"agent", agentName)
+		return errors.New(placementGlobalUnreadableCause)
+	}
 	if config.GlobalSettingsIsLegacyFormat() && config.GlobalSettingsMentionPlacementKeys() {
 		slog.Warn("Start: legacy-format global settings mention a placement key; refusing a Kubernetes start without resolved placement",
 			"agent", agentName)
-		return errors.New(placementUnresolvedCause)
+		return errors.New(placementLegacyGlobalCause)
 	}
 	if gs == nil {
 		return nil
 	}
 	for name, rt := range gs.Runtimes {
-		if config.IsKubernetesRuntimeEntry(name, rt) && (len(rt.NodeSelector) > 0 || len(rt.Tolerations) > 0 || rt.RuntimeClassName != "") {
+		if config.IsKubernetesRuntimeEntry(name, rt) && config.RuntimeEntryHasPlacement(rt) {
 			slog.Warn("Start: placement is configured but was not resolved by the agent runtime server",
 				"agent", agentName, "runtime_entry", name)
 			return errors.New(placementUnresolvedCause)
 		}
 	}
 	for name, p := range gs.Profiles {
-		if len(p.NodeSelector) == 0 && len(p.Tolerations) == 0 && p.RuntimeClassName == "" {
+		if !config.ProfileHasPlacement(p) {
 			continue
 		}
 		if rt, ok := gs.Runtimes[p.Runtime]; !ok || config.IsKubernetesRuntimeEntry(p.Runtime, rt) {

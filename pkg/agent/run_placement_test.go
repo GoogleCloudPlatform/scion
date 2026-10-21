@@ -97,6 +97,22 @@ func TestApplyStartPlacement_NilHandOffUnreadableGlobal_12b(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+// A global settings file that cannot be stat'd (the loader treats it as
+// missing) fails closed with the same fixed cause; a legacy-format file that
+// mentions a placement key gets the legacy cause.
+func TestApplyStartPlacement_NilHandOffUnstatableAndLegacy(t *testing.T) {
+	dir := placementGlobalHome(t, "")
+	require.NoError(t, os.Symlink("settings.yaml", filepath.Join(dir, "settings.yaml")))
+	_, _, err := managerOn("kubernetes").applyStartPlacement(api.StartOptions{Name: "a"}, nil)
+	require.Error(t, err)
+	assert.Equal(t, placementGlobalUnreadableCause, err.Error())
+
+	placementGlobalHome(t, "harnesses:\n  claude:\n    image: x\n# runtimeClassName: set here\n")
+	_, _, err = managerOn("kubernetes").applyStartPlacement(api.StartOptions{Name: "a"}, nil)
+	require.Error(t, err)
+	assert.Equal(t, placementLegacyGlobalCause, err.Error())
+}
+
 // A resolved placement is applied over the agent's block on Kubernetes,
 // with the integrity checks as a backstop, and dropped elsewhere.
 func TestApplyStartPlacement_Resolved(t *testing.T) {
