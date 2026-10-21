@@ -82,6 +82,7 @@ func assertForceRolledBack(t *testing.T, f *moveFixture, r *store.AgentReincarna
 		"the source agent's Task carries the recovery handoff")
 	assert.Contains(t, a.AppliedConfig.Task, fmt.Sprintf("You remain generation %d.", r.ToGeneration-1))
 	require.NotNil(t, r.PreviousAppliedConfig)
+	require.NotEmpty(t, beforeTask)
 	assert.Equal(t, beforeTask, r.PreviousAppliedConfig.Task, "the record's PreviousAppliedConfig is not changed")
 	assert.Equal(t, "run-src", a.RunID, "the source's run is restored")
 	assert.EqualValues(t, 1, brokerReservationCount(t, f.s, f.src.ID), "the reservation is back on the source")
@@ -96,6 +97,23 @@ func assertForceRolledBack(t *testing.T, f *moveFixture, r *store.AgentReincarna
 	assert.Equal(t, 1, f.disp.stopCalls, "the source only sees the stop")
 	assert.False(t, f.disp.recreateFiles[f.dst.ID], "the target has no files for the agent after the rollback")
 	f.disp.mu.Unlock()
+}
+
+// seedGenerationOneTask gives the fixture agent a non-empty generation 1
+// Task and returns the agent as stored, so a rollback test can tell the
+// record's PreviousAppliedConfig Task from a blanked one.
+func seedGenerationOneTask(t *testing.T, f *moveFixture) *store.Agent {
+	t.Helper()
+	ctx := context.Background()
+	a, err := f.s.GetAgent(ctx, f.agent.ID)
+	require.NoError(t, err)
+	require.NotNil(t, a.AppliedConfig)
+	a.AppliedConfig.Task = "generation 1 task: keep the build green"
+	require.NoError(t, f.s.UpdateAgent(ctx, a))
+	a, err = f.s.GetAgent(ctx, f.agent.ID)
+	require.NoError(t, err)
+	require.Equal(t, "generation 1 task: keep the build green", a.AppliedConfig.Task)
+	return a
 }
 
 // A completed forced move: the target is asked to confirm it has nothing
@@ -220,9 +238,7 @@ func TestReincarnateForceMove_ProvisionFailureRollsBackAndRetrySucceeds(t *testi
 	f.disp.moveProvisionErr = provisionSent(errors.New("broker returned 500: provision failed"))
 	f.disp.mu.Unlock()
 
-	before, err := f.s.GetAgent(context.Background(), f.agent.ID)
-	require.NoError(t, err)
-	require.NotNil(t, before.AppliedConfig)
+	before := seedGenerationOneTask(t, f)
 
 	r, a := startForceMove(t, f)
 	assertForceRolledBack(t, f, r, a, "", store.AgentReincarnationStateProvisioning, before.AppliedConfig.Task)
@@ -246,9 +262,7 @@ func TestReincarnateForceMove_DefinitiveStartFailureRollsBackAndRetrySucceeds(t 
 	f.disp.startErr = fmt.Errorf("clone failed on the target: %w", errStartRequestNotSent)
 	f.disp.mu.Unlock()
 
-	before, err := f.s.GetAgent(context.Background(), f.agent.ID)
-	require.NoError(t, err)
-	require.NotNil(t, before.AppliedConfig)
+	before := seedGenerationOneTask(t, f)
 
 	r, a := startForceMove(t, f)
 	assertForceRolledBack(t, f, r, a, "run-"+f.dst.ID+"-1", store.AgentReincarnationStateStarting, before.AppliedConfig.Task)
@@ -372,8 +386,8 @@ func TestReincarnationWorker_TransferModeMismatchFailsBeforeAnySideEffect(t *tes
 			assert.Equal(t, store.AgentReincarnationStateFailed, got.State)
 			assert.Contains(t, got.Error, "transfer mode changed")
 			// A pending-site failure restores the recovery config
-			// (ptone/scion#5511): the row stays on the source and its config
-			// changes only in its Task.
+			// (ptone/scion#5511): the row's Task is the recovery Task and the
+			// row is still on the source broker.
 			after, err := f.s.GetAgent(ctx, a.ID)
 			require.NoError(t, err)
 			require.NotNil(t, after.AppliedConfig)
