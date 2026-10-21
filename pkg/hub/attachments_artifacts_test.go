@@ -797,6 +797,9 @@ func TestDeliverToUser_RepublishCarriesNoArtifactAttachments(t *testing.T) {
 	t.Cleanup(unsubscribe)
 	proxy := NewMessageBrokerProxy(nil, f.st, events, func() AgentDispatcher { return &brokerMockDispatcher{} }, slog.Default())
 	proxy.webChatStore = f.wcs
+	// A message log, so the record branch runs on this path too.
+	logger, logBuf := newCapturingMessageLogger()
+	proxy.messageLog = logger
 	var fanned [][]AttachmentRef
 	proxy.memberFanout = func(_ context.Context, _ *store.Message, refs []AttachmentRef, _ []artifacts.MessageRef) {
 		fanned = append(fanned, refs)
@@ -813,6 +816,11 @@ func TestDeliverToUser_RepublishCarriesNoArtifactAttachments(t *testing.T) {
 	result, err := f.st.ListMessages(ctx, store.MessageFilter{RecipientID: f.ub.ID}, store.ListOptions{})
 	require.NoError(t, err)
 	require.Len(t, result.Items, 1)
+	// The message has a conversation, and the record names it, so a record
+	// that set it on the shared message instead of a copy shows in the
+	// unchanged-message check below.
+	require.NotEmpty(t, result.Items[0].ConversationID, "the re-published message has a conversation")
+	assertLogHasConversationID(t, logBuf, "user message delivered via broker", result.Items[0].ConversationID)
 	linked, err := f.wcs.GetAttachmentsByMessage(ctx, result.Items[0].ID)
 	require.NoError(t, err)
 	require.Len(t, linked, 1)

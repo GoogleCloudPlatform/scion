@@ -728,33 +728,26 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 		return
 	}
 
-	// Attachment handling on this re-publish path (ptone/scion#4596,
-	// ptone/scion#5504): the AttachmentStore refs parsed from the transport
-	// metadata are linked (sender-owned files only, below), and the SSE event
-	// and the member fan-out carry exactly the refs that were linked. msg is
-	// shared with the bus's other subscribers and is not modified. A linked
-	// ref is always an AttachmentStore file: attachments stored as artifacts
-	// never travel in transport metadata (the sending handler validates them
-	// from its request, binds them to the message it stores itself, and
-	// publishes them), so this path never binds or publishes one. Pinned by
+	// Attachments on this re-publish path (ptone/scion#4596, ptone/scion#5504;
+	// W7). msg is shared with the bus's other subscribers: nothing here
+	// modifies it, its metadata (transport key included) or the maps it holds.
+	// The AttachmentStore refs parsed from the transport metadata are linked
+	// to the row created here, the only place their message ID exists, before
+	// the SSE event, so a client refetching on it already sees them. A ref is
+	// linked only after it passes the AttachmentStore lookup and the sender
+	// ownership check (linkSenderOwnedAttachmentRefs), and the SSE event and
+	// the member fan-out carry exactly the linked refs, the files history
+	// lists. An attachment stored as an artifact is not an AttachmentStore
+	// file, so an artifact id that appears in transport metadata fails the
+	// lookup and is dropped: this path never binds or publishes one (artifact
+	// references come only from the admitted references below). Pinned by
 	// TestDeliverToUser_RepublishCarriesNoArtifactAttachments.
-
-	// W7: Link the sender's attachments, recorded before publish, to the message
-	// row created here — the ID they need exists nowhere else. Done before the
-	// SSE event so a client refetching on it already sees them. Only files the
-	// sender owns are linked (linkSenderOwnedAttachmentRefs): the refs come
-	// from message metadata, and a linked file downloads for the message's
-	// readers. The live event below carries exactly the linked refs, the
-	// files history lists (ptone/scion#5504). msg is shared with the bus's
-	// other subscribers, so its metadata, transport key included, is left
-	// as it is: nothing below reads the attachments key.
 	linkedRefs := linkSenderOwnedAttachmentRefs(ctx, p.webChatStore, storeMsg.ID, projectID, msg.SenderID, parseAttachmentRefs(msg.Metadata), p.log)
 
 	// Artifact references are recorded only when the hub's admission step
 	// set them on this in-process message. Any other value is ignored: it
-	// is never recorded, and nothing below reads it. msg is shared with the
-	// bus's other subscribers, so it is not modified here. The live chat
-	// event carries exactly the references recorded here.
+	// is never recorded, and nothing below reads it. The live chat event
+	// carries exactly the references recorded here.
 	var artifactRefs []artifacts.MessageRef
 	if msg.ArtifactRefsAdmitted && p.recordArtifactRefs != nil {
 		if refs, _ := artifacts.ParseMessageRefs(msg.Metadata[artifacts.MessageMetadataKey]); len(refs) > 0 {
@@ -843,7 +836,9 @@ func (p *MessageBrokerProxy) logUserMessageDelivered(projectID, topic string, st
 			"topic", topic,
 			"source", "broker",
 		}
-		// A copy: msg is shared with the bus's other subscribers.
+		// A shallow copy, so ConversationID can be set for the record: msg is
+		// shared with the bus's other subscribers. Metadata is the same map as
+		// msg's; do not modify it here.
 		logged := *msg
 		if storeMsg.ConversationID != "" {
 			logged.ConversationID = storeMsg.ConversationID
