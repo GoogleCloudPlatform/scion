@@ -760,8 +760,9 @@ func (s *Server) moveTargetVisible(ctx context.Context, dst *store.RuntimeBroker
 }
 
 // writeMoveTargetNotFound writes the 404 for an unknown or not visible
-// --broker value, listing the project's online brokers. The body depends
-// only on the request and the project, never on the broker matched.
+// --broker value, listing the project's available brokers (online provider
+// rows whose broker is present, getAvailableBrokersForProject). The body
+// depends only on the request and the project, never on the broker matched.
 func (s *Server) writeMoveTargetNotFound(ctx context.Context, w http.ResponseWriter, target string, project *store.Project) {
 	summaries := []RuntimeBrokerSummary{}
 	if brokers, err := s.getAvailableBrokersForProject(ctx, project.ID); err == nil {

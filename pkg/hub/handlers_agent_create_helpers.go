@@ -1895,7 +1895,8 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 		return "", err
 	}
 
-	// Get available (online) brokers for fallback logic
+	// Get available brokers (online provider rows whose broker is present)
+	// for fallback logic
 	availableBrokers, err := s.getAvailableBrokersForProject(ctx, project.ID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
