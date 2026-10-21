@@ -34,11 +34,14 @@ skills_dir: .pi/agent/skills
 # pi cancels the running turn on Escape.
 interrupt_key: Escape
 # Readiness and message delivery; see the authoring guide. These match the
-# repo-wide defaults pinned by the embedded-bundle tests. A hook-based ready
-# (strategy: hook, settle: 1.5s, timeout: 90s) would need the bridge's
-# session_start event wired to the ready marker and the legacy-table tests
-# updated; left as a follow-up. pi treats Enter while busy as a steering
-# message, so extra_submits may need lowering once tested against a live pi.
+# repo-wide defaults pinned by the embedded-bundle tests. The bridge's
+# session_start already writes the ready marker (see the pi row in
+# TestProcessHookData_DialectSessionStartReadiness). What remains for a
+# hook-based ready (strategy: hook, settle: 1.5s, timeout: 90s): switch the
+# strategy here, update the legacy-table tests, check it against a live pi,
+# and classify /reload as in place (ptone/scion#5527). pi treats Enter while
+# busy as a steering message, so extra_submits may need lowering once tested
+# against a live pi.
 ready:
   strategy: delay
   settle: 8s

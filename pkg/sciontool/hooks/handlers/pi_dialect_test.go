@@ -92,8 +92,10 @@ func TestPiDialect_BridgePayloads(t *testing.T) {
 		{name: hooks.EventAgentEnd, errMsg: "429 rate limited: retry later", activity: state.ActivityWorking},
 		{name: hooks.EventSessionStart, source: "resume", activity: state.ActivityWorking},
 		// pi's /reload restarts in place, but the readiness classifier
-		// knows no "reload" source, so it counts as a new session (a
-		// documented known limit; harmless under ready=delay).
+		// knows no "reload" source, so it counts as a new session: no
+		// readiness effect under ready=delay, but a completed or waiting
+		// status becomes working until the next run (a documented known
+		// limit; ptone/scion#5527).
 		{name: hooks.EventSessionStart, source: "reload", activity: state.ActivityWorking},
 	}
 
