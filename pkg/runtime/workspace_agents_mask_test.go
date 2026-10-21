@@ -148,31 +148,53 @@ func TestStripUnsupportedAppleFlags_KeepsTmpfs(t *testing.T) {
 	}
 }
 
+// appleGateOpts describes the mock container CLI's answers: version for
+// --version; for exec (the mask check), statOut with exit code statRC,
+// after failFirst failing calls (exit 1, "exec failed"); hang makes every
+// exec hang in a child that keeps the output pipe open; rmFail makes rm
+// fail.
+type appleGateOpts struct {
+	version, statOut  string
+	statRC, failFirst int
+	hang, rmFail      bool
+}
+
 // appleGateMock writes a mock container CLI that records each subcommand
-// in calls, prints version for --version, prints cid for run, and answers
-// exec (the mask check) with statOut and exit code statRC. A statRC of -1
-// makes exec hang in a child that keeps the output pipe open.
-func appleGateMock(t *testing.T, version, statOut string, statRC int) (command, calls string) {
+// in calls, prints cid for run and answers as opts says.
+func appleGateMock(t *testing.T, o appleGateOpts) (command, calls string) {
 	t.Helper()
 	dir := t.TempDir()
 	calls = filepath.Join(dir, "calls")
 	command = filepath.Join(dir, "mock-container")
+	hang, rmRC := 0, 0
+	if o.hang {
+		hang = 1
+	}
+	if o.rmFail {
+		rmRC = 1
+	}
 	script := fmt.Sprintf(`#!/bin/sh
 echo "$*" >> %q
 case "$1" in
 --version) printf '%%s\n' %q ;;
 run) echo cid ;;
-exec) [ %d -lt 0 ] && sleep 5; printf '%%b\n' %q; exit %d ;;
+exec)
+	[ %d -eq 1 ] && sleep 5
+	n=$(grep -c '^exec' %q)
+	if [ "$n" -le %d ]; then echo "exec failed"; exit 1; fi
+	printf '%%b\n' %q; exit %d ;;
+rm) exit %d ;;
 esac
 exit 0
-`, calls, version, statRC, statOut, max(statRC, 0))
+`, calls, o.version, hang, calls, o.failFirst, o.statOut, o.statRC, rmRC)
 	if err := os.WriteFile(command, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	return command, calls
 }
 
-// readAppleGateCalls returns the subcommands the mock recorded, one per call.
+// readAppleGateCalls returns the subcommands the mock recorded, one per
+// call.
 func readAppleGateCalls(t *testing.T, calls string) []string {
 	t.Helper()
 	b, err := os.ReadFile(calls)
@@ -193,7 +215,8 @@ func readAppleGateCalls(t *testing.T, calls string) []string {
 // that directory already exists. It then refuses a CLI older than 0.12.0
 // before the run, and after the run checks that the mask is mounted
 // (different device from /workspace/.scion), removing the container and
-// failing the start otherwise.
+// failing the start otherwise. The check is retried only when it could not
+// run; a result (equal devices, unparseable output) is never retried.
 func TestAppleContainerRuntime_Run_AgentsMaskGate(t *testing.T) {
 	const (
 		v011  = "container CLI version 0.11.0 (build: release, commit: abc1234)"
@@ -202,44 +225,61 @@ func TestAppleContainerRuntime_Run_AgentsMaskGate(t *testing.T) {
 		vBad  = "container CLI version unknown"
 		mount = "41\n40"
 	)
+	prevDelay := appleMaskCheckRetryDelay
+	appleMaskCheckRetryDelay = 10 * time.Millisecond
+	t.Cleanup(func() { appleMaskCheckRetryDelay = prevDelay })
 	withAgents := sharedRepoWithScionDir(t)
 	noAgents := filepath.Join(t.TempDir(), "repo")
 	if err := os.MkdirAll(filepath.Join(noAgents, ".scion"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	removed := []string{"kill", "rm"}
+	calls := func(c ...string) []string { return c }
 	for _, tt := range []struct {
-		name, root, version, statOut string
-		statRC                       int
-		wantErr                      []string // substrings; nil means the start succeeds
-		wantCalls                    []string
+		name      string
+		root      string
+		opts      appleGateOpts
+		wantErr   []string // substrings; nil means the start succeeds
+		wantCalls []string
 	}{
-		{"below the floor refuses before run", withAgents, v011, mount, 0,
-			[]string{"0.11.0", "older than 0.12.0", "nested mount ordering"}, []string{"--version"}},
-		{"at the floor, mask mounted", withAgents, v012, mount, 0, nil, []string{"--version", "run", "exec"}},
-		{"above the floor, mask mounted", withAgents, v160, mount, 0, nil, []string{"--version", "run", "exec"}},
-		{"unparseable version, mask mounted", withAgents, vBad, mount, 0, nil, []string{"--version", "run", "exec"}},
-		{"same device fails", withAgents, v160, "40\n40", 0,
-			[]string{"mask is not mounted", "version 1.6.0"}, []string{"--version", "run", "exec", "kill", "rm"}},
-		{"same device, unknown version", withAgents, vBad, "40\n40", 0,
-			[]string{"mask is not mounted", "version unknown"}, []string{"--version", "run", "exec", "kill", "rm"}},
-		{"stat failure fails", withAgents, v160, "stat: cannot stat", 1,
-			[]string{"could not check that the mask is mounted"}, []string{"--version", "run", "exec", "kill", "rm"}},
-		{"garbage output fails", withAgents, v160, "not a device", 0,
-			[]string{"unexpected stat output"}, []string{"--version", "run", "exec", "kill", "rm"}},
-		{"mask check hangs fails", withAgents, v160, mount, -1,
-			[]string{"could not check that the mask is mounted"}, []string{"--version", "run", "exec", "kill", "rm"}},
-		{"one value fails", withAgents, v160, "41", 0,
-			[]string{"unexpected stat output"}, []string{"--version", "run", "exec", "kill", "rm"}},
-		{"no mask: no version or exec call", noAgents, v011, "40\n40", 0, nil, []string{"run"}},
+		{"below the floor refuses before run", withAgents, appleGateOpts{version: v011, statOut: mount},
+			[]string{"0.11.0", "older than 0.12.0", "nested mount ordering", "0.12.0 or later"}, calls("--version")},
+		{"at the floor, mask mounted", withAgents, appleGateOpts{version: v012, statOut: mount}, nil, calls("--version", "run", "exec")},
+		{"above the floor, mask mounted", withAgents, appleGateOpts{version: v160, statOut: mount}, nil, calls("--version", "run", "exec")},
+		{"unparseable version, mask mounted", withAgents, appleGateOpts{version: vBad, statOut: mount}, nil, calls("--version", "run", "exec")},
+		{"exec fails once, then mask mounted", withAgents, appleGateOpts{version: v160, statOut: mount, failFirst: 1}, nil,
+			calls("--version", "run", "exec", "exec")},
+		{"exec fails every time", withAgents, appleGateOpts{version: v160, statOut: mount, failFirst: 99},
+			[]string{"could not check that the mask is mounted", "exec failed", "version 1.6.0"},
+			append(calls("--version", "run", "exec", "exec", "exec"), removed...)},
+		{"stat exits non-zero every time", withAgents, appleGateOpts{version: v160, statOut: "stat: cannot stat", statRC: 1},
+			[]string{"could not check that the mask is mounted", "cannot stat"},
+			append(calls("--version", "run", "exec", "exec", "exec"), removed...)},
+		{"same device fails at once", withAgents, appleGateOpts{version: v160, statOut: "40\n40"},
+			[]string{"mask is not mounted", "version 1.6.0"}, append(calls("--version", "run", "exec"), removed...)},
+		{"same device, unknown version", withAgents, appleGateOpts{version: vBad, statOut: "40\n40"},
+			[]string{"mask is not mounted", "version unknown"}, append(calls("--version", "run", "exec"), removed...)},
+		{"garbage output fails at once", withAgents, appleGateOpts{version: v160, statOut: "not a device"},
+			[]string{"unexpected stat output"}, append(calls("--version", "run", "exec"), removed...)},
+		{"two non-numeric values fail at once", withAgents, appleGateOpts{version: v160, statOut: "a\nb"},
+			[]string{"unexpected stat output"}, append(calls("--version", "run", "exec"), removed...)},
+		{"one value fails at once", withAgents, appleGateOpts{version: v160, statOut: "41"},
+			[]string{"unexpected stat output"}, append(calls("--version", "run", "exec"), removed...)},
+		{"mask check hangs fails", withAgents, appleGateOpts{version: v160, statOut: mount, hang: true},
+			[]string{"could not check that the mask is mounted"}, append(calls("--version", "run", "exec"), removed...)},
+		{"removal failure is reported", withAgents, appleGateOpts{version: v160, statOut: "40\n40", rmFail: true},
+			[]string{"mask is not mounted", "removing container cid", "the container may still exist"},
+			calls("--version", "run", "exec", "kill", "rm", "rm", "rm", "rm", "rm")},
+		{"no mask: no version or exec call", noAgents, appleGateOpts{version: v011, statOut: "40\n40"}, nil, calls("run")},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
-			if tt.statRC < 0 {
+			if tt.opts.hang {
 				prev := appleMaskCheckTimeout
-				appleMaskCheckTimeout = 50 * time.Millisecond
+				appleMaskCheckTimeout = 500 * time.Millisecond
 				t.Cleanup(func() { appleMaskCheckTimeout = prev })
 			}
-			command, calls := appleGateMock(t, tt.version, tt.statOut, tt.statRC)
+			command, callsFile := appleGateMock(t, tt.opts)
 			rt := &AppleContainerRuntime{Command: command}
 			id, err := rt.Run(context.Background(), RunConfig{
 				Harness:      &harness.Generic{},
@@ -263,10 +303,20 @@ func TestAppleContainerRuntime_Run_AgentsMaskGate(t *testing.T) {
 					}
 				}
 			}
-			if got := readAppleGateCalls(t, calls); !slices.Equal(got, tt.wantCalls) {
+			if got := readAppleGateCalls(t, callsFile); !slices.Equal(got, tt.wantCalls) {
 				t.Errorf("CLI calls = %q, want %q", got, tt.wantCalls)
 			}
 		})
+	}
+}
+
+func TestTruncateCheckOutput(t *testing.T) {
+	long := strings.Repeat("x", 300)
+	if got := truncateCheckOutput("  " + long + "\n"); got != strings.Repeat("x", 200)+"..." {
+		t.Errorf("truncateCheckOutput(300 bytes) = %d bytes %q", len(got), got[len(got)-5:])
+	}
+	if got := truncateCheckOutput(" short\n"); got != "short" {
+		t.Errorf("truncateCheckOutput = %q, want short", got)
 	}
 }
 
@@ -274,7 +324,7 @@ func TestAppleContainerRuntime_Run_AgentsMaskGate(t *testing.T) {
 // check stats the agents dir and its parent in the started container.
 func TestAppleContainerRuntime_Run_AgentsMaskArgs(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	command, calls := appleGateMock(t, "container CLI version 1.6.0", "41\n40", 0)
+	command, calls := appleGateMock(t, appleGateOpts{version: "container CLI version 1.6.0", statOut: "41\n40"})
 	rt := &AppleContainerRuntime{Command: command}
 	root := sharedRepoWithScionDir(t)
 	if _, err := rt.Run(context.Background(), RunConfig{
@@ -291,7 +341,7 @@ func TestAppleContainerRuntime_Run_AgentsMaskArgs(t *testing.T) {
 	if !strings.Contains(log, "--tmpfs /workspace/.scion/agents") || strings.Contains(log, "type=tmpfs") {
 		t.Errorf("run args: %s", log)
 	}
-	if !strings.Contains(log, "exec --user scion cid stat -c %d /workspace/.scion/agents /workspace/.scion") {
+	if !strings.Contains(log, "\nexec cid stat -c %d /workspace/.scion/agents /workspace/.scion\n") {
 		t.Errorf("mask check call missing: %s", log)
 	}
 }

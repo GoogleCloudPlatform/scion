@@ -17,6 +17,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -127,7 +128,8 @@ func (r *AppleContainerRuntime) Run(ctx context.Context, config RunConfig) (stri
 	if masked {
 		v, below, ok := appleCLIVersion(ctx, r.Command)
 		if ok && below {
-			return "", fmt.Errorf("container CLI %s is older than 0.12.0: the .scion/agents mask relies on nested mount ordering that needs apple/container 0.12.0 or later", v)
+			floor := appleMaskMinVersionString()
+			return "", fmt.Errorf("container CLI %s is older than %s: the .scion/agents mask relies on nested mount ordering that needs apple/container %s or later", v, floor, floor)
 		}
 		if ok {
 			cliVersion = v
@@ -159,48 +161,84 @@ func (r *AppleContainerRuntime) Run(ctx context.Context, config RunConfig) (stri
 	reportAppleContainerCreated(hooks, config.Name, id)
 	if masked {
 		if err := r.verifyAgentsMask(ctx, id); err != nil {
+			checkErr := fmt.Errorf("%w (container CLI version %s)", err, cliVersion)
 			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 			defer cancel()
 			if derr := r.Delete(cleanupCtx, RunRef{ID: id}); derr != nil {
-				runtimeLog().Warn("Failed to remove container after the agents mask check", "container", id, "error", derr)
+				return "", errors.Join(checkErr, fmt.Errorf("removing container %s: %w; the container may still exist", id, derr))
 			}
-			return "", fmt.Errorf("%w (container CLI version %s)", err, cliVersion)
+			return "", checkErr
 		}
 	}
 	return id, nil
 }
 
-// appleMaskCheckTimeout bounds the exec that checks the agents mask.
-var appleMaskCheckTimeout = 10 * time.Second
+var (
+	// appleMaskCheckTimeout bounds the whole agents mask check, retries
+	// included.
+	appleMaskCheckTimeout = 10 * time.Second
+	// appleMaskCheckAttempts and appleMaskCheckRetryDelay: how often, and
+	// how far apart, the check runs when it could not run (see
+	// verifyAgentsMask).
+	appleMaskCheckAttempts   = 3
+	appleMaskCheckRetryDelay = 500 * time.Millisecond
+)
 
 // verifyAgentsMask checks, in the started container, that the agents mask
 // is mounted: /workspace/.scion/agents must be on a different device from
 // its parent /workspace/.scion. This tests that the mount exists, not that
 // the directory looks empty, since an existing directory that happens to
 // be empty would pass an emptiness check with no mask. stat compares the
-// exact path with no mount table parsing. A failed or unparseable result
-// fails the check.
+// exact path with no mount table parsing; it runs as the container's
+// default user (root), since it reads metadata only.
+//
+// Retry rule: the check is retried, up to appleMaskCheckAttempts runs in
+// all within appleMaskCheckTimeout, only when it could not run (the exec
+// failed or stat exited non-zero). A result is never retried: equal
+// devices, or output that does not parse, fail closed at once.
 func (r *AppleContainerRuntime) verifyAgentsMask(ctx context.Context, id string) error {
 	ctx, cancel := context.WithTimeout(ctx, appleMaskCheckTimeout)
 	defer cancel()
 	agents := "/workspace/" + sharedWorkspaceAgentsDir
-	out, err := appleBoundedCommand(ctx, r.Command, "exec", "--user", "scion", id, "stat", "-c", "%d", agents, path.Dir(agents))
+	var out string
+	var err error
+	for attempt := 1; ; attempt++ {
+		out, err = appleBoundedCommand(ctx, r.Command, "exec", id, "stat", "-c", "%d", agents, path.Dir(agents))
+		if err == nil || attempt >= appleMaskCheckAttempts || ctx.Err() != nil {
+			break
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(appleMaskCheckRetryDelay):
+		}
+	}
 	if err != nil {
-		return fmt.Errorf("could not check that the mask is mounted at %s in the container: %w", agents, err)
+		return fmt.Errorf("could not check that the mask is mounted at %s in the container: %w (output: %q)", agents, err, truncateCheckOutput(out))
 	}
 	devs := strings.Fields(out)
-	if len(devs) != 2 {
-		return fmt.Errorf("could not check that the mask is mounted at %s in the container: unexpected stat output %q", agents, out)
-	}
+	numeric := len(devs) == 2
 	for _, d := range devs {
-		if _, err := strconv.ParseUint(d, 10, 64); err != nil {
-			return fmt.Errorf("could not check that the mask is mounted at %s in the container: unexpected stat output %q", agents, out)
+		if _, perr := strconv.ParseUint(d, 10, 64); perr != nil {
+			numeric = false
 		}
+	}
+	if !numeric {
+		return fmt.Errorf("could not check that the mask is mounted at %s in the container: unexpected stat output %q", agents, truncateCheckOutput(out))
 	}
 	if devs[0] == devs[1] {
 		return fmt.Errorf("the mask is not mounted at %s in the container", agents)
 	}
 	return nil
+}
+
+// truncateCheckOutput trims s and cuts it to at most 200 bytes, for an
+// error message.
+func truncateCheckOutput(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) > 200 {
+		return s[:200] + "..."
+	}
+	return s
 }
 
 // appleBoundedCommand runs the container CLI and returns its combined
@@ -493,6 +531,11 @@ func (r *AppleContainerRuntime) ExecWithStdin(ctx context.Context, id string, cm
 // appleMaskMinVersion is the first apple/container release whose nested
 // mount ordering lets the --tmpfs agents mask take effect (see Run).
 var appleMaskMinVersion = [3]int{0, 12, 0}
+
+// appleMaskMinVersionString formats appleMaskMinVersion, e.g. "0.12.0".
+func appleMaskMinVersionString() string {
+	return fmt.Sprintf("%d.%d.%d", appleMaskMinVersion[0], appleMaskMinVersion[1], appleMaskMinVersion[2])
+}
 
 // appleVersionTimeout bounds "container --version", so a CLI that hangs
 // cannot hold up a start. Tests shorten it.
