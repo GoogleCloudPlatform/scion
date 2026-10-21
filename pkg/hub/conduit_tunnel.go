@@ -448,7 +448,7 @@ func (ts *conduitTunnelSession) open(ctx context.Context, ls conduit.LocalSessio
 	ts.commit(t)
 	committed = true
 	go t.run(ts)
-	log.Info("Conduit tunnel opened", "stream_id", user.ID())
+	log.Info("Conduit tunnel opened", append([]any{"stream_id", user.ID(), "target_session_id", opened.target.SessionID}, opened.route...)...)
 	return resp, nil
 }
 
@@ -705,6 +705,7 @@ func (ts *conduitTunnelSession) openTarget(ctx context.Context, rtr *router.Rout
 		opened.grant, opened.claims = tok, claims
 		opened.target = conduitLeafTarget(res, st, bridge)
 		opened.renew = conduitStreamRenewal(res, st, claims != nil && !claims.AuthzUntil.IsZero())
+		opened.route = conduitRouteLogAttrs(res)
 		return nil
 	})
 	if err != nil {
@@ -721,6 +722,8 @@ type conduitTunnelOpened struct {
 	claims *grant.Claims
 	target relay.TargetStream
 	renew  func(grant []byte) error
+	// route holds the routing log fields (conduitRouteLogAttrs).
+	route []any
 }
 
 // conduitTunnelMintErrPassesThrough reports whether a mintConduitGrant
