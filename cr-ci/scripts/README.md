@@ -1,41 +1,86 @@
-# cr-ci scripts (planned, P4)
+# cr-ci scripts
 
-No scripts exist yet. This page fixes the list and the contract that every
-script must meet, so that P4 can be reviewed against it.
+Deploy, operate and tear down cr-ci on GCP and GitHub. Every script defaults to
+a **dry run** that prints the exact commands; only `--apply` changes anything.
+The step-by-step order is in [docs/gcp-setup.md](../docs/gcp-setup.md) and the
+[README quick start](../README.md#quick-start).
 
-## Planned scripts
-
-| Script | Purpose | Main permissions ([matrix](../docs/permissions-matrix.md)) |
+| Script | Purpose | Permissions ([matrix](../docs/permissions-matrix.md)) |
 | :--- | :--- | :--- |
-| `lib.sh` | Shared helpers: load and validate `config.env`, the `run` wrapper behind `--dry-run`, logging | none |
-| `bootstrap-gcp.sh` | Enable APIs, create the service accounts, the Artifact Registry repo, the empty secrets, and the IAM bindings of design section 3.5 | C1-C6, C10, C11 |
-| `build-runner-image.sh` | Build and push the runner image (`runner/`) with Cloud Build as `BUILD_SA_NAME` | C7 |
-| `deploy-job.sh` | Create or update the Cloud Run Job `RUNNER_JOB_NAME` (CPU, memory, ephemeral disk, `--max-retries=0`, `--task-timeout`) | C8 |
-| `deploy-mediator.sh` | Build and deploy the mediator service with the config contract as env vars and secret references | C12, C13 |
-| `deploy-scheduler.sh` | Create or update the Cloud Scheduler job `RECONCILER_JOB_NAME` (OIDC as `SCHEDULER_SA_NAME`) | C14 |
-| `put-secret.sh` | Add a secret version from a file or stdin (initial creation and rotation) | C5, C9 |
-| `github-app-manifest.json` + `create-github-app.md` | GitHub App manifest (permissions from the matrix) and the manifest-flow steps (P5) | G1-G3 |
-| `set-routing-variable.sh` | Set or clear `ROUTING_VARIABLE_NAME` on each target repo (rollout and fallback) | G10, G11 |
-| `teardown.sh` | Delete everything the scripts above created, in reverse order | C18 |
+| `lib.sh` | Shared helpers (sourced): config parser and validator, `run` wrapper, idempotency checks, tool version checks | none |
+| `check-config.sh` | Validate `config.env` (same rules as the mediator) and print the resolved values; read-only | none |
+| `bootstrap-gcp.sh` | Enable APIs; create the 4 service accounts, the Artifact Registry repo and the 2 secret containers (no versions); IAM bindings C4, C6, C7, C11 | C1-C7, C11 |
+| `set-secrets.sh` | Add secret versions from a file (0600) or stdin: App private key, webhook secret, or a generated webhook secret | C5, C9 |
+| `build-runner-image.sh` | Build `runner/` with Cloud Build (or `--local` docker) as `BUILD_SA_NAME` and push it to `ARTIFACT_REPO` | C7 |
+| `deploy-job.sh` | Create or update the Cloud Run Job `RUNNER_JOB_NAME` (shape, `/scratch` ephemeral disk, no retries, task timeout, `EXEC_SA_NAME`); binding C10 | C8, C10 |
+| `deploy-mediator.sh` | Build `mediator/Dockerfile` and deploy `MEDIATOR_SERVICE_NAME` (`max-instances=1`, env from the config, secrets by name); binding C13; prints the URL for `MEDIATOR_URL` | C12, C13 |
+| `deploy-scheduler.sh` | Create or update `RECONCILER_JOB_NAME` (POST `/reconcile`, OIDC as `SCHEDULER_SA_NAME`, audience `MEDIATOR_URL`) | C14 |
+| `set-routing-variable.sh` | Set or clear `ROUTING_VARIABLE_NAME` on `TARGET_REPOS` (gh only; `--repo`, `--clear`, `--value`) (P5) | G10, G11 |
+| `teardown.sh` | Delete everything above in reverse order (typed confirmation; `--keep-secrets`, `--keep-images`) | C18 |
+| `cloudbuild.yaml` | Cloud Build config for both images (pinned builder, `CLOUD_LOGGING_ONLY`) | |
+| `github-app-manifest.json` | GitHub App manifest (P5, see [github-setup.md](../docs/github-setup.md)) | G1-G3 |
 
 ## Contract (every script)
 
-- **Config:** reads only `cr-ci/config.env` (a copy of `config.example.env`),
-  or the file given with `--config FILE`, and validates the same rules as
-  `mediator/config.go`. `lib.sh` parses the file line by line (`KEY=value`,
-  comments and blank lines skipped) and **never sources it**, so values such
-  as `RECONCILE_SCHEDULE` may contain spaces and nothing in it is executed.
-  No hard-coded repo, org, project or region.
-- **`--dry-run`:** prints every `gcloud` or `gh` command it would run, one per
-  line, fully expanded and shell-quoted, then exits 0 without calling any API
-  that changes state. Read-only describe or list calls used to decide
-  idempotent behaviour are also printed rather than run, and the script
-  assumes that nothing exists yet. Dry-run transcripts are attached to the P4 PR.
-- **Idempotent:** a second run with the same config changes nothing and
-  succeeds (create-if-missing, update-in-place).
-- **No secret values:** never in arguments, never echoed, never in dry-run
-  output. Secret values enter only through stdin or a file path given to
-  `gcloud secrets versions add --data-file`.
-- **Shell:** `bash`, `set -euo pipefail`, shellcheck clean, and `--help`.
-- **Failure:** exits non-zero with the failing step named. It stops on a
-  permission denial instead of retrying with other credentials.
+- **Config:** `cr-ci/config.env` (a filled-in copy of `config.example.env`), or
+  `--config FILE`. `lib.sh` parses it line by line (`KEY=value`; blank lines
+  and `#` comments skipped; surrounding spaces trimmed) and **never sources
+  it**: values may contain spaces, quotes are not interpreted and nothing is
+  expanded or executed. Unknown and duplicate keys are rejected. Keys and
+  defaults come from `config.example.env`, and validation follows
+  `mediator/config.go` exactly (`TestScriptValidatorMatchesLoad` keeps the two
+  in lockstep). Every key is validated by every script, so `GITHUB_APP_ID` and
+  `TARGET_REPOS` are needed from the first step (a placeholder App ID such as
+  `1` is fine until the App exists).
+- **Dry run is the default.** Each command is printed on one line, shell-quoted:
+  - `+ <command>`: a command that changes something (run only with `--apply`);
+  - `? <command>`: a read-only check (describe, list); a dry run does not run
+    it and assumes the resource does not exist yet, so it shows the create path;
+  - `# <text>`: a note.
+
+  A dry run calls no tool at all (the tests run the scripts with recording
+  stubs and assert zero calls). Golden transcripts are in
+  [`testdata/golden/`](testdata/golden/).
+- **`--apply`** runs the commands. It checks tool versions first (gcloud >=
+  `CRCI_MIN_GCLOUD` in `lib.sh`; docker for `--local`; gh for
+  `set-routing-variable.sh`). Every command passes `--project` explicitly; the
+  gcloud default project is never used.
+- **Idempotent:** resources are created only if a check says they are
+  missing; updates are in place (`run jobs update`, `run deploy`,
+  `scheduler jobs update`); IAM bindings are additive; an image tag that
+  already exists is not rebuilt; teardown skips what is gone.
+- **Failure:** a failing step stops the script with the command named. A
+  check that fails for any reason other than "not found" (for example
+  `PERMISSION_DENIED`) stops it too; nothing is retried with other credentials.
+- **No secret values** in argv, output or files. Secrets enter only through
+  stdin or a file given to `set-secrets.sh`, and reach gcloud on stdin
+  (`gcloud secrets versions add --data-file=-`). The `--local` image push gets
+  the build SA's access token into `docker login --password-stdin` the same
+  way. The tests check argv, output and goldens for the throwaway values.
+- **Image tags:** default `git-<12 hex>` from the git tree hash of the image's
+  source at HEAD (`runner/`; `mediator/` plus `go.mod`), so an unchanged source
+  keeps its tag. With `--apply`, uncommitted changes there are refused; pass
+  `--tag TAG` to override (and to build outside a git checkout).
+- **Shell:** bash >= 4, `set -euo pipefail`, `shellcheck --norc -x` clean,
+  `--help` on every script.
+
+## Tests
+
+```bash
+cd cr-ci && go test ./scripts/ ./mediator/   # -update rewrites the goldens
+```
+
+[`scripts_test.go`](scripts_test.go) runs each script with stub `gcloud`,
+`docker` and `gh` ([`testdata/stubs/`](testdata/stubs/)) first on `PATH`. The
+stubs record argv (and the stdin of secret and login calls) and answer checks
+from a per-test state file; they never contact anything. It asserts:
+
+- the dry-run goldens, and that a dry run calls nothing;
+- that `--apply` runs exactly the transcript's commands;
+- an idempotent second run;
+- that a permission denial stops the script;
+- that secrets travel on stdin only;
+- `max-instances=1`;
+- that the IAM bindings equal the permissions matrix;
+- teardown confirmation and order;
+- the default tag.

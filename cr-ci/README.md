@@ -100,7 +100,7 @@ proven on a manually dispatched job before any CI job depends on it.
 | [`config.example.env`](config.example.env) | The single config contract (names only, never secret values) |
 | [`mediator/`](mediator/) | Go Cloud Run service: `/webhook`, `/internal/claim`, `/reconcile`, `/health`; standard library only. Must run with `max-instances=1` |
 | [`runner/`](runner/) | Runner image (`Dockerfile`, `entrypoint.sh`, offline harness); see [`runner/README.md`](runner/README.md) |
-| [`scripts/`](scripts/) | Deploy and teardown scripts (P4). P1: planned list and the `--dry-run` contract |
+| [`scripts/`](scripts/) | Deploy, secret and teardown scripts (dry-run by default, `--apply` to execute), their test harness and golden transcripts; see [`scripts/README.md`](scripts/README.md) |
 | [`workflows/`](workflows/) | Workflow templates, not active: the PoC workflow and the `ci.yml` lint routing snippet, with static checks; see [`workflows/README.md`](workflows/README.md) |
 | [`docs/architecture.md`](docs/architecture.md) | Flow, security model, failure modes, fallback |
 | [`docs/permissions-matrix.md`](docs/permissions-matrix.md) | **Who needs which GitHub or GCP role for every step, fork vs upstream** |
@@ -125,7 +125,7 @@ go build -o /dev/null ./... && go vet ./... && go test ./... && gofmt -l .
 | P1 | Skeleton, config contract, docs outline, complete permissions matrix | done |
 | P2 | Mediator: HMAC, fork guard, idempotency, JIT, RunJob, claim endpoint, `/reconcile`, backpressure | implemented (in review) |
 | P3 | Runner image and entrypoint (`/scratch` redirection, claim exchange) | implemented (in review) |
-| P4 | Idempotent deploy and teardown scripts with `--dry-run` | planned |
+| P4 | Idempotent deploy and teardown scripts with `--dry-run` | implemented (in review) |
 | P5 | GitHub setup guide, App manifest, workflow templates | implemented (in review) |
 | P6 | Live PoC on the chosen target (needs ptone's go-ahead) | gated |
 | P7 | `ci.yml` `runs-on` change (separate PR, outside `cr-ci/`) | gated |

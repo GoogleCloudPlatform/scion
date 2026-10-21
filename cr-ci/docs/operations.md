@@ -1,8 +1,8 @@
-# Operations (outline)
+# Operations
 
-> **TODO(P4/P5/P6):** partly an outline; procedures are filled in as the
-> scripts and the PoC land. The mediator behaviour described here (P2) is
-> final. Roles for every operation:
+> Procedures use the P4 scripts and the P5 GitHub setup; items marked
+> TODO(P6) are filled in after the PoC. The mediator behaviour described here
+> (P2) is final. Roles for every operation:
 > [permissions-matrix.md, section 3](permissions-matrix.md#3-operations-at-a-glance).
 
 ## Rollout
@@ -56,10 +56,35 @@ next `/reconcile` deletes its offline `cr-job-*` registration once it is five
 minutes old and relaunches the still-queued job. Expect up to about two
 reconcile intervals of extra latency for such a job, and no manual action.
 
+## Deploy and upgrade
+
+First deployment: [gcp-setup.md](gcp-setup.md), in the order of the
+[README quick start](../README.md#quick-start). Every script prints its
+commands without `--apply`; read that transcript before applying.
+
+| Change | Command |
+| :--- | :--- |
+| Any config value the mediator uses (`TARGET_REPOS`, `MAX_CONCURRENT_RUNNERS`, `CLAIM_TTL`, ...) | edit `config.env`, `scripts/deploy-mediator.sh --apply` |
+| Mediator code | commit, then `scripts/deploy-mediator.sh --apply` (new tag from the source tree hash) |
+| Runner shape (`RUNNER_CPU`, `RUNNER_MEMORY`, `RUNNER_DISK_GI`, `TASK_TIMEOUT`) | edit `config.env`, `scripts/deploy-job.sh --apply` |
+| Runner image | see [Runner image updates](#runner-image-updates) |
+| `RECONCILE_SCHEDULE` or `MEDIATOR_URL` | `scripts/deploy-scheduler.sh --apply` (after `deploy-mediator.sh` for `MEDIATOR_URL`) |
+
+Every script is idempotent, so re-running one after a partial failure is the
+recovery. A mediator deploy restarts the single instance and loses pending
+claims; affected jobs are relaunched by the next reconcile
+([single instance](#mediator-single-instance)). Deploy outside busy CI
+periods when possible.
+
 ## Secret rotation
 
-- **Webhook secret:** add the new value as a new Secret Manager version,
-  then change it in the GitHub App settings, back to back. No restart is
+All values go through `scripts/set-secrets.sh` (file at mode 0600, or stdin),
+never as an argument ([gcp-setup.md, step 6](gcp-setup.md#6-secrets-scriptsset-secretssh)).
+
+- **Webhook secret:** add the new value as a new Secret Manager version
+  (`scripts/set-secrets.sh --webhook-secret-file F --apply`, or
+  `--generate-webhook-secret OUT --apply`), then change it in the GitHub App
+  settings, back to back. No restart is
   needed: on a signature mismatch the mediator re-reads the secret (at most
   once a minute), and the secret it replaces stays valid for one hour, so
   deliveries signed with either secret are accepted during the switch. If
@@ -67,18 +92,57 @@ reconcile intervals of extra latency for such a job, and no manual action.
   start failing (401); redeliver them from the App's "Advanced" page, and
   `/reconcile` backfills their jobs anyway.
 - **App private key:** generate a new key in the App settings, add it as a
-  new Secret Manager version, restart the mediator (it caches the parsed key
-  for its lifetime), then delete the old key in GitHub. Installation tokens
-  are cached in memory only and refreshed five minutes before they expire.
+  new Secret Manager version (`scripts/set-secrets.sh --app-key-file F --apply`),
+  restart the mediator with `scripts/deploy-mediator.sh --apply` (it caches
+  the parsed key for its lifetime), then delete the old key in GitHub.
+  Installation tokens are cached in memory only and refreshed five minutes
+  before they expire.
+- **Old versions:** after the switch, disable the previous version
+  (`gcloud secrets versions disable VERSION --secret NAME --project GCP_PROJECT`,
+  C9 `secretVersionManager`). The mediator always reads `latest`.
 
 ## Runner image updates
 
-- TODO: bumping Go, golangci-lint or the actions runner (one pinned place);
-  rebuild and redeploy the job; rollback to the previous tag.
+All tool versions and checksums are pinned in one place, the `ARG` block of
+[`runner/Dockerfile`](../runner/Dockerfile) ([runner/README.md](../runner/README.md#build-arguments)).
+
+1. Change the version **and** its sha256 there, and commit.
+2. `scripts/build-runner-image.sh --apply`: builds and pushes a new tag
+   (`git-<tree hash of runner/>`), as `BUILD_SA_NAME`.
+3. `scripts/deploy-job.sh --apply`: points the job at the new tag. New
+   executions use it; running ones finish on the old image.
+
+**Rollback:** `scripts/deploy-job.sh --tag <previous tag> --apply`. Old tags
+stay in `ARTIFACT_REPO` (list them with
+`gcloud artifacts docker tags list REGION-docker.pkg.dev/GCP_PROJECT/ARTIFACT_REPO/RUNNER_IMAGE_NAME`).
+
+**Bump the actions runner regularly.** GitHub stops sending jobs to runner
+versions it considers outdated, and an outdated runner tries to update
+itself at start-up on every execution. Check
+<https://github.com/actions/runner/releases> at least monthly and bump
+`ACTIONS_RUNNER_VERSION` soon after each release. Keep `GO_VERSION` in step
+with `go.mod` and `GOLANGCI_LINT_VERSION` with the version CI pins.
 
 ## Capacity and quotas
 
-- TODO: raising `MAX_CONCURRENT_RUNNERS` together with the ephemeral-disk quota.
+`MAX_CONCURRENT_RUNNERS` caps running executions; jobs above it stay queued
+and are dispatched first in, first out as executions finish. Each execution
+uses `RUNNER_DISK_GI` of the regional ephemeral-disk quota (default 100 GiB:
+5 x 20 GiB). To raise the cap, first request the quota increase
+([gcp-setup.md, step 9](gcp-setup.md#9-quotas)), then raise
+`MAX_CONCURRENT_RUNNERS` and run `scripts/deploy-mediator.sh --apply`. A
+persistent `capacity_full` with few jobs actually running points to stuck
+executions; see the troubleshooting section.
+
+## Teardown
+
+To remove cr-ci from a repository, clear its routing variable and uninstall
+the App ([github-setup.md, step 10](github-setup.md#10-removing-cr-ci-from-a-repository)).
+To remove the GCP side, run `scripts/teardown.sh` and read its transcript,
+then run it with `--apply` (it asks you to type `GCP_PROJECT`;
+`--keep-secrets` and `--keep-images` retain those). It deletes in reverse
+order and skips what is gone; APIs stay enabled
+([gcp-setup.md, step 10](gcp-setup.md#10-teardown-scriptsteardownsh)).
 
 ## Monitoring and alerts
 
@@ -139,7 +203,11 @@ logged (a unit test enforces this).
   Manager and in the App settings differ (see rotation above).
 - **503 from `/webhook` and `/reconcile` with `not_configured`:** `MEDIATOR_URL`
   is empty; set it and redeploy.
-- TODO: OOM in a runner; quota errors.
+- **Quota errors:** `launch_failed` with `RESOURCE_EXHAUSTED` (or `429`)
+  from `jobs.run` means a regional Cloud Run quota (ephemeral disk, CPU or
+  memory) is used up. The job stays queued and is retried by reconcile; lower
+  `MAX_CONCURRENT_RUNNERS` or raise the quota ([Capacity and quotas](#capacity-and-quotas)).
+- TODO(P6): OOM in a runner.
 
 ## Cost
 

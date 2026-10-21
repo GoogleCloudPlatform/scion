@@ -130,6 +130,9 @@ these roles on the project:
 - `roles/cloudscheduler.admin`
 - `roles/monitoring.alertPolicyEditor` (only for the alerting policies, C17)
 - `roles/cloudquotas.admin` (only when requesting the quota increase)
+- `roles/iam.serviceAccountTokenCreator` on `BUILD_SA_NAME` (only for
+  `build-runner-image.sh --local` / `deploy-mediator.sh --local`, which push
+  with a token of the build SA)
 
 ### 2.2 Runtime identities (what the deployed system holds)
 
@@ -273,6 +276,26 @@ Still UNVERIFIED (to settle in P2, P4 or P6):
   labels after a mint). Either way the mediator's hijack guard keys on
   `runner_name`, not labels, so cr-ci does not rely on the label choice as a
   defence.
+- **U8. gcloud version floor.** The scripts require gcloud >=
+  `CRCI_MIN_GCLOUD` (`scripts/lib.sh`, 530.0.0) for `--apply`. The oldest
+  release that has every flag used (`--no-invoker-iam-check`, ephemeral-disk
+  volumes on jobs, `run jobs deploy/update` volume flags) was not looked up;
+  the floor is a recent release. **UNVERIFIED**; lower or raise it once
+  checked against the gcloud release notes.
+- **U9. Job volume flags.** `deploy-job.sh` creates the job with
+  `--add-volume=name=scratch,type=ephemeral-disk,size=<n>Gi` plus
+  `--add-volume-mount`, and updates it with `--clear-volumes
+  --clear-volume-mounts` followed by the same flags. **UNVERIFIED** that the
+  GA `gcloud run jobs` group accepts `type=ephemeral-disk` (it may still need
+  `gcloud beta`) and that clear and add combine in one update. Check in the
+  P6 PoC with the dry-run transcript.
+- **U10. Cloud Build staging bucket.** `gcloud builds submit` uploads the
+  source to `gs://GCP_PROJECT_cloudbuild`. With a user-specified build SA, that
+  SA may need read access to the uploaded object, which section 2.2 does not
+  grant (`BUILD_SA_NAME` holds only `artifactregistry.writer` on the repo and
+  `logging.logWriter`). **UNVERIFIED**; if the P6 build fails with a storage
+  403, grant `roles/storage.objectViewer` on that bucket only, or use
+  `--local`.
 
 ## 6. Request to a GoogleCloudPlatform org owner
 
