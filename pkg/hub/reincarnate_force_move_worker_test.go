@@ -512,8 +512,11 @@ func TestRecheckMoveEligibility_WorkspaceGate(t *testing.T) {
 		if p.Labels == nil {
 			p.Labels = map[string]string{}
 		}
+		// Worktree-per-agent needs a git remote (Project.IsWorktreePerAgent).
+		p.GitRemote = forceMoveTestRemote
 		p.Labels[store.LabelWorkspaceMode] = string(store.SharingModeWorktreePerAgent)
 		require.NoError(t, f.s.UpdateProject(ctx, p))
+		require.True(t, p.IsWorktreePerAgent())
 		_, err = f.srv.recheckMoveEligibility(ctx, f.agent.ID, mv(f, true))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "worktree-per-agent")
