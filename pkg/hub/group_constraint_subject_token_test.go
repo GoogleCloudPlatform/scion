@@ -32,9 +32,9 @@ import (
 // access_constraint.admin and every group permission at system scope, and
 // owns each group.
 
-// constraintSubjectTokenScopes are the scopes of the pin token.
-// TODO: add access_constraint:admin once that selector exists.
-var constraintSubjectTokenScopes = []string{"group:removeMember", "group:delete"}
+// constraintSubjectTokenScopes are the scopes of the pin token: the group
+// selectors of both routes and access_constraint:admin.
+var constraintSubjectTokenScopes = []string{"group:removeMember", "group:delete", "access_constraint:admin"}
 
 // newConstraintSubjectFixture is the group token fixture whose caller also
 // holds access_constraint.admin through a system-scoped custom role.
