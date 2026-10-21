@@ -396,8 +396,8 @@ func printInitRemediation(r initAuthResult) bool {
 	case r.outcome == initOutcomeQuiet && r.window:
 		fmt.Println("[!] Init is switching to the new credential file. Run doctor again in about 20s.")
 	case r.outcome == initOutcomeQuiet && r.unclear:
-		fmt.Println("[!] Init's credential was refused (401/403), but not clearly by the hub. See Init Process Credential above, " +
-			"and run doctor again once the hub is reachable.")
+		fmt.Println("[!] Init's credential was refused (401/403), but not clearly by the hub. See Init Process Credential above.")
+		fmt.Println("[!] Run doctor again; if this persists, check the transport settings above and the hub's logs.")
 	case r.outcome == initOutcomeQuiet && r.proxy:
 		fmt.Println("[!] Init's requests are refused by the platform proxy (IAP / Cloud Run invoker), so its credential does not reach the hub.")
 		fmt.Println("[!] Check the transport credential above, that SCION_TRANSPORT_MODE and the audience match the proxy, " +

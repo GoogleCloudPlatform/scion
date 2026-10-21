@@ -343,15 +343,16 @@ func assertKeys(t *testing.T, m map[string]json.RawMessage, allowed ...string) {
 		ok[k] = true
 	}
 	var keys []string
+	bad := false
 	for k := range m {
 		keys = append(keys, k)
 		if !ok[k] {
-			t.Errorf("unexpected key %q", k)
+			bad = true
 		}
 	}
 	sort.Strings(keys)
-	if len(keys) == 0 || t.Failed() {
-		t.Errorf("keys: %v", keys)
+	if len(keys) == 0 || bad {
+		t.Errorf("keys %v, allowed %v", keys, allowed)
 	}
 }
 
@@ -607,6 +608,25 @@ func TestClassifyRejection(t *testing.T) {
 		if got := ClassifyRejection(tc.resp, []byte(tc.body)); got != tc.want {
 			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
 		}
+	}
+}
+
+func TestReadTokenFileWithModTime_WarnsOnOversizedFile(t *testing.T) {
+	home := t.TempDir()
+	t.Cleanup(SetTokenHome(home))
+	var warnings []string
+	orig := warnTokenFile
+	warnTokenFile = func(format string, args ...any) { warnings = append(warnings, fmt.Sprintf(format, args...)) }
+	t.Cleanup(func() { warnTokenFile = orig })
+	_ = os.MkdirAll(filepath.Join(home, ".scion"), 0o700)
+	if err := os.WriteFile(TokenFilePath(), []byte(strings.Repeat("a", tokenFileMaxBytes+1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok := ReadTokenFileWithModTime(); ok {
+		t.Fatal("an oversized file was read")
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], TokenFile) {
+		t.Fatalf("warnings %q, want one naming the token file", warnings)
 	}
 }
 

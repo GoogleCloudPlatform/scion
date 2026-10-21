@@ -548,6 +548,31 @@ func TestCheckInitCredential_UsesTheSingleRead(t *testing.T) {
 	}
 }
 
+// checkAuthentication presents the token file as doctor read it once
+// (diag.file), not a second read.
+func TestCheckAuthentication_UsesTheSingleRead(t *testing.T) {
+	c1 := agentJWT(t, "jti-c1", time.Now().Add(time.Hour))
+	c2 := agentJWT(t, "jti-c2", time.Now().Add(2*time.Hour))
+	var presented []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		presented = append(presented, r.Header.Get("X-Scion-Agent-Token"))
+		_, _ = fmt.Fprint(w, `{"id":"agent-1"}`)
+	}))
+	defer srv.Close()
+	home := isolateDoctorTransport(t)
+	_ = os.MkdirAll(filepath.Join(home, ".scion"), 0o700)
+	_ = os.WriteFile(filepath.Join(home, ".scion", "scion-token"), []byte(c1), 0o600)
+	t.Setenv("SCION_AGENT_ID", "agent-1")
+	t.Setenv(hub.EnvLaunchID, "")
+	failures := 0
+	diag := doctorDiag{file: doctorTokenFile{read: true, ok: true, token: c2}}
+	_ = captureStdout(t, func() { checkAuthentication(srv.URL, &failures, nil, &diag) })
+	if len(presented) != 2 || presented[0] != c2 || presented[1] != c2 {
+		t.Fatalf("checkAuthentication presented %d values; want doctor's read twice", len(presented))
+	}
+	assertNoTokenValues(t, strings.Join(presented, ""), c1)
+}
+
 // The init block runs when the hub is unreachable or not configured.
 func TestRunDoctor_InitBlockRunsWithoutTheHub(t *testing.T) {
 	c1 := agentJWT(t, "jti-c1", time.Now().Add(time.Hour))

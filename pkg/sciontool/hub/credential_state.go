@@ -600,7 +600,8 @@ func ReadCredentialState() (st CredentialState, status, reason string) {
 
 // ReadTokenFileWithModTime is ReadTokenFile that also returns the file's
 // modification time, from the same guarded read. ok is false when there is
-// no usable value.
+// no usable value. An oversized file is warned about, as ReadTokenFile
+// does.
 func ReadTokenFileWithModTime() (token string, modTime time.Time, ok bool) {
 	path := TokenFilePath()
 	dirFd, leaf, err := dirfd.OpenParentNoFollow(path)
@@ -610,6 +611,10 @@ func ReadTokenFileWithModTime() (token string, modTime time.Time, ok bool) {
 	defer func() { _ = syscall.Close(dirFd) }()
 	value, st, err := readTokenAtStat(dirFd, leaf, path)
 	if err != nil {
+		if errors.Is(err, dirfd.ErrTooLarge) {
+			// As ReadTokenFile; err already names the path.
+			warnTokenFile("Ignoring token file: %v", err)
+		}
 		return "", time.Time{}, false
 	}
 	value = strings.TrimSpace(value)
