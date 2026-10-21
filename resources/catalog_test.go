@@ -198,6 +198,22 @@ func TestPlatformSkillsFS_ScionWebServing(t *testing.T) {
 			t.Errorf("embedded scion-web-serving/SKILL.md does not contain %q", want)
 		}
 	}
+
+	// Pages served through the link cannot load separate files today, so
+	// the skill must not tell agents that relative URLs or a relative base
+	// make a multi-file app work.
+	lower := strings.ToLower(content)
+	for _, unwanted := range []string{
+		"relative urls work",
+		"only what the page can reach with relative urls",
+		"base './'",
+		"--base ./",
+		`"homepage": "."`,
+	} {
+		if strings.Contains(lower, unwanted) {
+			t.Errorf("embedded scion-web-serving/SKILL.md contains %q, guidance that does not hold for pages opened through the link today", unwanted)
+		}
+	}
 }
 
 func TestSourceURLFormat(t *testing.T) {

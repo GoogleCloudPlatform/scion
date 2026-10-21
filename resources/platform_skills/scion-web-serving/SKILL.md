@@ -54,15 +54,19 @@ https://googlecloudplatform.github.io/scion/hosted/user/port-forwarding/#multi-f
 - **Vite** (React, Vue, Svelte, plain): add `vite-plugin-singlefile`
   (`npm i -D vite-plugin-singlefile`, then `plugins: [..., viteSingleFile()]`
   in `vite.config.*`) and run `vite build`. `dist/index.html` is the whole
-  app. Serve `dist`. Check that nothing was left as a separate file that the
-  page still loads (large images or fonts may need inlining by hand).
+  app: everything your code imports (CSS, images, fonts) is inlined. Serve
+  `dist`. Files in `public/` that the page refers to by URL (for example
+  `/favicon.svg` or `/data.json`) are NOT inlined and will not load through
+  the link: import them from your code instead, or inline them by hand.
 - **Plain HTML**: put the CSS in `<style>` and the JS in `<script>`. Turn
   images into data URLs, for example
   `echo "data:image/png;base64,$(base64 -w0 logo.png)"`.
-- **Other bundlers** (webpack, Create React App, Parcel, esbuild): use the
-  bundler's inline option or plugin so the output is one HTML file with no
-  separate assets; if that is not practical, rebuild the page with Vite and
-  `vite-plugin-singlefile`.
+- **Create React App, webpack, Parcel, esbuild**: none of them produce a
+  single file without extra setup. The dependable route is to build the app
+  with Vite and `vite-plugin-singlefile` (a React, Vue or Svelte app usually
+  moves over with little change). For a small app, you can instead paste the
+  built JS into a `<script>` and the CSS into a `<style>` in the HTML, turn
+  images into data URLs, and check the result as below.
 - **Next.js, server-rendered apps, apps with an API**: not supported through
   the link. Use `scion tunnel`, or produce a static single-file page with the
   data inlined.
@@ -80,9 +84,26 @@ https://googlecloudplatform.github.io/scion/hosted/user/port-forwarding/#multi-f
   points at your server or at browser storage will not work through the link.
 - Load the page in a headless browser (for example Playwright Chromium) from
   `http://127.0.0.1:<port>/`, with every request other than the page itself
-  blocked (in Playwright: `page.route('**/*', r => r.request().isNavigationRequest() ? r.continue() : r.abort())`).
-  Check that the page renders what it should, that the console has no
-  errors, and that no request was blocked.
+  blocked and recorded. In Playwright:
+
+  ```js
+  const blocked = [];
+  await page.route('**/*', route => {
+    const req = route.request();
+    if (req.isNavigationRequest() && req.frame() === page.mainFrame()) return route.continue();
+    blocked.push(req.url());
+    return route.abort();
+  });
+  const errors = [];
+  page.on('console', m => { if (m.type() === 'error') errors.push(m.text()); });
+  page.on('pageerror', e => errors.push(String(e)));
+  await page.goto('http://127.0.0.1:<port>/');
+  // then: check what the page shows, and that blocked and errors are both empty
+  ```
+
+  Check that the page renders what it should, that `errors` is empty, and
+  that `blocked` is empty. Anything in `blocked` is something the page needs
+  that will not load through the link.
 - Report what you verified and how (which checks, which browser). If you
   could not run a browser, say so plainly instead of reporting the page as
   working.
