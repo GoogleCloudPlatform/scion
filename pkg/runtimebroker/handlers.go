@@ -306,8 +306,12 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			EmptyPerAgentWorkspace: scionrt.HasEmptyPerAgentSupport(rt),
 			// This broker honours localOnly deletes and confirms a moved
 			// agent's NFS workspace before provisioning it (agent move).
-			AgentMove:      true,
-			StartsInFlight: s.startsInFlight != nil,
+			AgentMove: true,
+			// This broker can be the target of a forced move: it confirms
+			// it has no files for the agent before provisioning it with a
+			// fresh workspace (ptone/scion#5441).
+			AgentMoveRecreate: true,
+			StartsInFlight:    s.startsInFlight != nil,
 			// This broker's reprovision reuses an empty-per-agent
 			// workspace in place (miller79/scion#167).
 			ReprovisionEmptyPerAgent: true,
@@ -822,6 +826,12 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// path element.
 	if req.Slug != "" && !isSingleCleanPathElement(req.Slug) {
 		ValidationError(w, "invalid slug", nil)
+		return
+	}
+	// A forced move's reincarnation ID belongs only on its provision-only
+	// request (checked again there with the fresh-agent-dir expectation).
+	if req.MoveReincarnationID != "" && !req.ProvisionOnly {
+		ValidationError(w, "moveReincarnationId is only valid on a provision-only request", nil)
 		return
 	}
 
@@ -1578,7 +1588,38 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// config instead of reusing what's persisted — see Manager.Reprovision.
 		var cfg *api.ScionConfig
 		var err error
-		if req.ExpectExistingNFSWorkspace != "" {
+		if (req.MoveReincarnationID != "") != (req.ExpectExistingNFSWorkspace == agent.MoveWorkspaceFreshAgentDir) || req.Reprovision && req.MoveReincarnationID != "" {
+			markAttemptFailed(http.StatusBadRequest, "invalid forced move provision")
+			BadRequest(w, "a forced move's provision needs both the fresh-agent-dir expectation and the move reincarnation ID, on a provision that is not a reprovision")
+			return
+		}
+		if req.ExpectExistingNFSWorkspace == agent.MoveWorkspaceFreshAgentDir {
+			// A forced move recreates the workspace here: nothing for the
+			// agent may exist on this broker yet, so provision never adopts
+			// files it did not create. The provision marks the directory it
+			// creates with the move's reincarnation ID.
+			opts.MoveReincarnationID = req.MoveReincarnationID
+			checker, ok := sc.Manager.(moveWorkspaceAbsenceChecker)
+			if !ok {
+				markAttemptFailed(http.StatusConflict, "moved agent workspace not confirmed")
+				writeError(w, http.StatusConflict, api.BrokerErrCodeMoveTargetNotFresh, "this broker cannot confirm that a moved agent has no files here", nil)
+				return
+			}
+			if paths, chkErr := checker.CheckMoveWorkspaceAbsent(ctx, opts); chkErr != nil {
+				s.agentLifecycleLog.Warn("Agent move: refusing to recreate the agent over files on this broker",
+					"agent_id", req.ID, "project_id", req.ProjectID, "paths", paths, "error", chkErr)
+				markAttemptFailed(http.StatusConflict, "moved agent has files on this broker")
+				span.SetStatus(codes.Error, "moved agent has files on this broker")
+				// Fixed text: the paths are logged above, never returned
+				// (ptone/scion#3113).
+				msg := "Failed to provision moved agent: the agent already has files on this broker; refusing to recreate over them"
+				if !errors.Is(chkErr, agent.ErrMoveWorkspacePresent) {
+					msg = "Failed to provision moved agent: could not confirm that the agent has no files on this broker"
+				}
+				writeError(w, http.StatusConflict, api.BrokerErrCodeMoveTargetNotFresh, msg, nil)
+				return
+			}
+		} else if req.ExpectExistingNFSWorkspace != "" {
 			checker, ok := sc.Manager.(nfsMoveWorkspaceChecker)
 			if !ok {
 				markAttemptFailed(http.StatusConflict, "moved agent workspace not confirmed")
@@ -2472,6 +2513,16 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	if localOnly {
 		removeBranch = false
 	}
+	// moveReincarnationID marks a forced move's rollback delete: it removes
+	// nothing unless every agent directory that exists carries that move's
+	// marker (see the check after the target is resolved).
+	moveReincarnationID := query.Get(api.MoveReincarnationIDQueryParam)
+	if moveReincarnationID != "" && (!deleteFiles || localOnly || softDelete || projectID == "" ||
+		query.Get(api.PurgeRetainedQueryParam) == "true") {
+		span.SetStatus(codes.Error, "invalid forced move rollback delete")
+		ValidationError(w, "moveReincarnationId needs deleteFiles and projectId, without localOnly, softDelete or purgeRetained", nil)
+		return
+	}
 	// purgeRetained removes the retained files of a soft-deleted agent once
 	// the soft-delete retention window has passed (ptone/scion#4744). It is
 	// a files delete, never a soft one, and it removes nothing unless the
@@ -2665,6 +2716,30 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 			"agent_id", id, "project_id", ownedProject, "error", ownErr)
 		NotFound(w, "Agent")
 		return
+	}
+
+	// A forced move's rollback delete removes nothing unless every agent
+	// directory it would remove that exists carries that move's marker,
+	// checked under the files lock taken above. Anything else was not
+	// created by the move: 409, with a fixed message (the paths are
+	// logged here only).
+	if moveReincarnationID != "" {
+		checker, ok := target.mgr.(moveMarkerChecker)
+		var paths []string
+		chkErr := errors.New("this broker cannot check move markers")
+		if ok && projectPath != "" {
+			paths, chkErr = checker.CheckMoveMarkers(ctx, projectPath, agentProjectID, target.name, moveReincarnationID)
+		} else if ok {
+			chkErr = errors.New("no project path to check the move markers in")
+		}
+		if chkErr != nil {
+			s.agentLifecycleLog.Warn("Agent delete: refusing a forced move's rollback delete of files the move did not create",
+				"agent_id", id, "project_id", agentProjectID, "paths", paths, "error", chkErr)
+			span.SetStatus(codes.Error, "move marker mismatch")
+			writeError(w, http.StatusConflict, api.BrokerErrCodeMoveMarkerMismatch,
+				"Failed to delete agent: its files on this broker were not created by this move; nothing was removed", nil)
+			return
+		}
 	}
 
 	// Wake any local launch waiting on this agent (design §3.8.1): purely a
@@ -7905,6 +7980,24 @@ type nfsMoveWorkspaceChecker interface {
 }
 
 var _ nfsMoveWorkspaceChecker = (*agent.AgentManager)(nil)
+
+// moveWorkspaceAbsenceChecker is implemented by managers that can confirm,
+// before a forced move provisions an agent, that the broker has no files
+// for it yet (agent.AgentManager).
+type moveWorkspaceAbsenceChecker interface {
+	CheckMoveWorkspaceAbsent(ctx context.Context, opts api.StartOptions) ([]string, error)
+}
+
+var _ moveWorkspaceAbsenceChecker = (*agent.AgentManager)(nil)
+
+// moveMarkerChecker is implemented by managers that can confirm a forced
+// move's marker on the agent's directories before its rollback delete
+// (agent.AgentManager).
+type moveMarkerChecker interface {
+	CheckMoveMarkers(ctx context.Context, projectPath, projectID, agentName, moveID string) ([]string, error)
+}
+
+var _ moveMarkerChecker = (*agent.AgentManager)(nil)
 
 // errAgentIdentityUnknown means a runtime process restart dropped the
 // in-memory record a runtime needs to tell "not found" apart from "exists,

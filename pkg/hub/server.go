@@ -1023,6 +1023,10 @@ type DeleteAgentOptions struct {
 	// retained files after the retention window (api.PurgeRetainedQueryParam,
 	// ptone/scion#4744). Set by the purge job through withPurgeRetained.
 	PurgeRetained bool
+	// MoveReincarnationID marks a forced move's rollback delete
+	// (api.MoveReincarnationIDQueryParam): the broker removes nothing
+	// unless every agent directory that exists carries that move's marker.
+	MoveReincarnationID string
 }
 
 // deleteAgentQuery renders opts (and the context's linked-project path) as
@@ -1049,6 +1053,9 @@ func deleteAgentQuery(ctx context.Context, projectID string, opts DeleteAgentOpt
 	}
 	if opts.PurgeRetained {
 		query += "&" + api.PurgeRetainedQueryParam + "=true"
+	}
+	if opts.MoveReincarnationID != "" {
+		query += "&" + api.MoveReincarnationIDQueryParam + "=" + url.QueryEscape(opts.MoveReincarnationID)
 	}
 	// The recorded runtime (GoogleCloudPlatform/scion#2423) rides on ctx, as
 	// for every other existing-agent operation, so both transports send it
@@ -1365,6 +1372,10 @@ type RemoteCreateAgentRequest struct {
 	// ProvisionOnly request for an agent moved from another broker, the
 	// broker confirms the workspace on its mount of the export first.
 	ExpectExistingNFSWorkspace string `json:"expectExistingNfsWorkspace,omitempty"`
+	// MoveReincarnationID mirrors
+	// runtimebroker.CreateAgentRequest.MoveReincarnationID: a forced move's
+	// reincarnation ID, sent with the fresh-agent-dir expectation.
+	MoveReincarnationID string `json:"moveReincarnationId,omitempty"`
 	// AsyncLaunch, LaunchID, LaunchTimeoutSeconds and LaunchKeepaliveSeconds
 	// mirror runtimebroker.CreateAgentRequest's async launch fields. They are
 	// set only by dispatchLaunching. LaunchTimeoutSeconds is the remaining
