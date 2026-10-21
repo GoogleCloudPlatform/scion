@@ -155,6 +155,7 @@ func TestOrphanRepair_StartupLegacySignalsDecide(t *testing.T) {
 	_, err = ops.Refresh(ctx)
 	require.NoError(t, err)
 	srv.SetOperationalSettings(ops)
+	require.True(t, srv.ConduitEnabled(), "hub.conduit is on")
 
 	newID := f.register(t, srv.BrokerPresent)
 	assert.Equal(t, f.presentID, f.agentBroker(t, f.presentAgent))
