@@ -4,7 +4,8 @@ description: >-
   How to serve a web app or page from inside an agent so a human can open it
   through scion expose: ship one self-contained HTML file, the build settings
   each common tool needs for that, how to hand over the right URL, and how to
-  verify it honestly.
+  verify it honestly. Use before running scion expose for a page or app a
+  person will open.
 ---
 
 # Serving web apps through scion expose
@@ -52,8 +53,9 @@ https://googlecloudplatform.github.io/scion/hosted/user/port-forwarding/#multi-f
 ## Build settings (single-file output)
 
 - **Vite** (React, Vue, Svelte, plain): add `vite-plugin-singlefile`
-  (`npm i -D vite-plugin-singlefile`, then `plugins: [..., viteSingleFile()]`
-  in `vite.config.*`) and run `vite build`. `dist/index.html` is the whole
+  (`npm i -D vite-plugin-singlefile`, then in `vite.config.*`
+  `import { viteSingleFile } from 'vite-plugin-singlefile'` and
+  `plugins: [..., viteSingleFile()]`) and run `vite build`. `dist/index.html` is the whole
   app: everything your code imports (CSS, images, fonts) is inlined. Serve
   `dist`. Files in `public/` that the page refers to by URL (for example
   `/favicon.svg` or `/data.json`) are NOT inlined and will not load through
@@ -80,8 +82,12 @@ https://googlecloudplatform.github.io/scion/hosted/user/port-forwarding/#multi-f
   file is served; it does not behave like a person's browser and will succeed
   for pages that are broken for them.
 - Search the built HTML for `src=`, `href=`, `url(`, `fetch(`, `XMLHttpRequest`,
-  `EventSource`, `WebSocket`, `import(` and `localStorage`. Anything that
-  points at your server or at browser storage will not work through the link.
+  `EventSource`, `WebSocket`, `import(`, `localStorage`, `sessionStorage`,
+  `indexedDB`, `document.cookie`, `new Worker`, `SharedWorker` and
+  `serviceWorker`. Anything that points at your server, or uses browser
+  storage, cookies or workers, will not work through the link. This search
+  is the only check for storage, cookies and workers: they work on
+  `127.0.0.1`, so the browser check below does not catch them.
 - Load the page in a headless browser (for example Playwright Chromium) from
   `http://127.0.0.1:<port>/`, with every request other than the page itself
   blocked and recorded. In Playwright:
@@ -102,8 +108,8 @@ https://googlecloudplatform.github.io/scion/hosted/user/port-forwarding/#multi-f
   ```
 
   Check that the page renders what it should, that `errors` is empty, and
-  that `blocked` is empty. Anything in `blocked` is something the page needs
-  that will not load through the link.
+  that `blocked` is empty. Anything in `blocked` is something the page loads
+  from outside itself; inline it.
 - Report what you verified and how (which checks, which browser). If you
   could not run a browser, say so plainly instead of reporting the page as
   working.
