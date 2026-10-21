@@ -74,6 +74,8 @@ import '../shared/deletion-banner.js';
 import { runAgentDelete, lifecycleActionErrorMessage } from '../../client/agent-delete.js';
 import type { AgentDeleteRequest } from '../../client/agent-delete.js';
 import '../shared/message-mode-badge.js';
+import { agentBadges } from '../shared/agent-badges.js';
+import { AGENT_BADGES_FLAG, isFeatureEnabled } from '../../utils/feature-flags.js';
 import '../shared/messageability-indicator.js';
 import '../shared/view-toggle.js';
 import '../shared/agent-tree-view.js';
@@ -186,6 +188,9 @@ export class ScionPageAgents extends LitElement {
    * One lease timer for this page's deleting agents (ptone/scion#2483 N4).
    * While paged, `this.agents` is empty and the rows are the window's page.
    */
+  /** Whether web.agent_badges is on, read once at the start of each render. */
+  private badgesOn = false;
+
   private readonly deletionLease = new DeletionLeaseController(this, () =>
     this.agentWindow.state === 'paged' ? this.agentWindow.items : this.agents
   );
@@ -1368,6 +1373,8 @@ export class ScionPageAgents extends LitElement {
   }
 
   override render() {
+    // Read once per render, not per row (web.agent_badges, ptone/scion#5503).
+    this.badgesOn = isFeatureEnabled(AGENT_BADGES_FLAG);
     return html`
       <div class="header">
         <h1>Agents</h1>
@@ -2015,7 +2022,7 @@ export class ScionPageAgents extends LitElement {
         <div class="agent-header">
           <div>
             <h3 class="resource-name">
-              <sl-icon name="cpu"></sl-icon>
+              ${this.badgesOn ? agentBadges(agent) : html`<sl-icon name="cpu"></sl-icon>`}
               <a href="/agents/${agent.id}" style="color: inherit; text-decoration: none;">
                 ${agent.name}
               </a>
@@ -2128,7 +2135,7 @@ export class ScionPageAgents extends LitElement {
       <tr>
         <td>
           <span class="name-cell">
-            <sl-icon name="cpu"></sl-icon>
+            ${this.badgesOn ? agentBadges(agent) : html`<sl-icon name="cpu"></sl-icon>`}
             <a href="/agents/${agent.id}">${agent.name}</a>
           </span>
         </td>

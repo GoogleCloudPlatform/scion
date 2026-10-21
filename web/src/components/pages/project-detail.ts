@@ -111,7 +111,8 @@ import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { formatNumber } from '../../utils/format-number.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import { navigateTo } from '../../client/navigation.js';
-import { isFeatureEnabled } from '../../utils/feature-flags.js';
+import { AGENT_BADGES_FLAG, isFeatureEnabled } from '../../utils/feature-flags.js';
+import { agentBadges } from '../shared/agent-badges.js';
 import { ARTIFACTS_FLAG } from '../../client/artifacts.js';
 import '../shared/artifact-list.js';
 
@@ -406,6 +407,9 @@ export class ScionPageProjectDetail extends LitElement {
   private windowTick = 0;
 
   /** One lease timer for the agents this page shows (ptone/scion#2483 N4). */
+  /** Whether web.agent_badges is on, read once at the start of each render. */
+  private badgesOn = false;
+
   private readonly deletionLease = new DeletionLeaseController(this, () =>
     this.agentWindow.state === 'paged' ? this.agentWindow.items : this.agents
   );
@@ -2683,6 +2687,8 @@ export class ScionPageProjectDetail extends LitElement {
   }
 
   override render() {
+    // Read once per render, not per row (web.agent_badges, ptone/scion#5503).
+    this.badgesOn = isFeatureEnabled(AGENT_BADGES_FLAG);
     if (this.loading) {
       return this.renderLoading();
     }
@@ -3445,7 +3451,7 @@ export class ScionPageProjectDetail extends LitElement {
       <tr>
         <td>
           <span class="name-cell">
-            <sl-icon name="cpu"></sl-icon>
+            ${this.badgesOn ? agentBadges(agent) : html`<sl-icon name="cpu"></sl-icon>`}
             <a href="/agents/${agent.id}">${agent.name}</a>
           </span>
         </td>
@@ -3619,7 +3625,7 @@ export class ScionPageProjectDetail extends LitElement {
         <div class="agent-header">
           <div>
             <h3 class="agent-name">
-              <sl-icon name="cpu"></sl-icon>
+              ${this.badgesOn ? agentBadges(agent) : html`<sl-icon name="cpu"></sl-icon>`}
               <a href="/agents/${agent.id}" style="color: inherit; text-decoration: none;">
                 ${agent.name}
               </a>
