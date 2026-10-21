@@ -70,30 +70,40 @@ func TestActiveTerminateReap(t *testing.T) {
 	l, cr := newLauncher(t)
 	now := time.Unix(1_700_000_000, 0)
 	l.Now = func() time.Time { return now }
-	cr.AddExecution(fakes.Execution{Created: now.Add(-time.Hour), Completed: true, Env: map[string]string{EnvJobID: "1"}})
-	cr.AddExecution(fakes.Execution{Created: now.Add(-2 * time.Minute), Env: map[string]string{EnvJobID: "2"}})
-	cr.AddExecution(fakes.Execution{Created: now.Add(-2 * time.Hour), Env: map[string]string{EnvJobID: "3"}})
+	cr.AddExecution(fakes.Execution{Created: now.Add(-time.Hour), Completed: true, Env: map[string]string{EnvJobID: "1", EnvRunnerName: "cr-job-1"}})
+	cr.AddExecution(fakes.Execution{Created: now.Add(-2 * time.Minute), Env: map[string]string{EnvJobID: "2", EnvRunnerName: "cr-job-2"}})
+	cr.AddExecution(fakes.Execution{Created: now.Add(-2 * time.Hour), Env: map[string]string{EnvJobID: "3", EnvRunnerName: "cr-job-9"}})
 	ctx := context.Background()
 	active, err := l.Active(ctx)
 	if err != nil || len(active) != 2 {
 		t.Fatalf("Active = %+v %v, want 2", active, err)
 	}
-	if active[0].JobID != 2 || active[1].JobID != 3 {
-		t.Errorf("job IDs from env = %d %d", active[0].JobID, active[1].JobID)
+	if active[0].JobID != 2 || active[1].JobID != 3 || active[1].RunnerName != "cr-job-9" {
+		t.Errorf("env not parsed: %+v", active)
 	}
-	// Terminate by job ID lookup.
-	if err := l.Terminate(ctx, 2, ""); err != nil {
+	// Terminate looks the execution up by runner name, not job ID.
+	if err := l.Terminate(ctx, "cr-job-3", ""); err != nil {
 		t.Fatal(err)
 	}
-	// Already finished, and unknown job: both fine.
-	if err := l.Terminate(ctx, 2, active[0].Ref); err != nil {
+	if len(cr.CancelCalls) != 0 {
+		t.Errorf("cancelled by job ID: %v", cr.CancelCalls)
+	}
+	if err := l.Terminate(ctx, "cr-job-2", ""); err != nil {
+		t.Fatal(err)
+	}
+	// Already finished, and unknown runner: both fine.
+	if err := l.Terminate(ctx, "cr-job-2", active[0].Ref); err != nil {
 		t.Errorf("terminating a finished execution: %v", err)
 	}
-	if err := l.Terminate(ctx, 999, ""); err != nil {
-		t.Errorf("terminating an unknown job: %v", err)
+	if err := l.Terminate(ctx, "cr-job-999", ""); err != nil {
+		t.Errorf("terminating an unknown runner: %v", err)
 	}
-	if err := l.Terminate(ctx, 1, "projects/other/locations/x/jobs/y/executions/z"); err == nil {
+	if err := l.Terminate(ctx, "cr-job-1", "projects/other/locations/x/jobs/y/executions/z"); err == nil {
 		t.Error("cancelled an execution of another job")
+	}
+	all, err := l.Executions(ctx)
+	if err != nil || len(all) != 3 || !all[0].Done || !all[1].Done || all[2].Done {
+		t.Errorf("Executions = %+v %v, want 3, only the last running", all, err)
 	}
 	n, err := l.ReapOrphans(ctx, 50*time.Minute)
 	if err != nil || n != 1 {

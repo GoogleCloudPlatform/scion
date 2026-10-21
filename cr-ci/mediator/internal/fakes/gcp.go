@@ -40,7 +40,9 @@ type CloudRun struct {
 	executions []*Execution
 	seq        int
 
-	FailRun     bool // jobs.run answers 429 RESOURCE_EXHAUSTED
+	FailRun     bool          // jobs.run answers 429 RESOURCE_EXHAUSTED
+	OnRun       func()        // called when jobs.run is received (before it is processed)
+	ListLag     time.Duration // executions younger than this are not listed yet
 	RunBodies   []string
 	CancelCalls []string
 	ListCalls   int
@@ -98,6 +100,9 @@ func (c *CloudRun) serve(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/v2/")
 	switch {
 	case r.Method == http.MethodPost && path == c.JobName+":run":
+		if c.OnRun != nil {
+			c.OnRun()
+		}
 		var body struct {
 			Overrides struct {
 				ContainerOverrides []struct {
@@ -132,6 +137,9 @@ func (c *CloudRun) serve(w http.ResponseWriter, r *http.Request) {
 		c.ListCalls++
 		var list []any
 		for _, e := range c.executions {
+			if c.ListLag > 0 && e.Created.After(c.Now().Add(-c.ListLag)) {
+				continue
+			}
 			m := map[string]any{"name": e.Name, "createTime": e.Created.UTC().Format(time.RFC3339Nano)}
 			if e.Completed {
 				m["completionTime"] = e.Created.Add(time.Minute).UTC().Format(time.RFC3339Nano)
@@ -187,12 +195,13 @@ type GoogleAPIs struct {
 	seq          int
 	TokenFetches int
 	Accesses     map[string]int
+	Misses       map[string]int
 	IssuedTokens []string
 }
 
 // NewGoogleAPIs starts the fake with the given secret payloads.
 func NewGoogleAPIs(project string, secrets map[string][]byte) *GoogleAPIs {
-	g := &GoogleAPIs{Project: project, secrets: map[string][]byte{}, Accesses: map[string]int{}}
+	g := &GoogleAPIs{Project: project, secrets: map[string][]byte{}, Accesses: map[string]int{}, Misses: map[string]int{}}
 	for k, v := range secrets {
 		g.secrets[k] = v
 	}
@@ -208,6 +217,27 @@ func (g *GoogleAPIs) SetSecret(name string, v []byte) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.secrets[name] = v
+}
+
+// DeleteSecret removes secret name.
+func (g *GoogleAPIs) DeleteSecret(name string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.secrets, name)
+}
+
+// AccessCount and MissCount report successful and not-found accesses.
+func (g *GoogleAPIs) AccessCount(name string) int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.Accesses[name]
+}
+
+// MissCount reports not-found accesses of secret name.
+func (g *GoogleAPIs) MissCount(name string) int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.Misses[name]
 }
 
 func (g *GoogleAPIs) serve(w http.ResponseWriter, r *http.Request) {
@@ -239,6 +269,7 @@ func (g *GoogleAPIs) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		v, ok := g.secrets[name]
 		if !ok {
+			g.Misses[name]++
 			writeJSON(w, http.StatusNotFound, map[string]any{"error": map[string]any{"code": 404}})
 			return
 		}
@@ -269,6 +300,7 @@ type Google struct {
 
 	mu      sync.Mutex
 	Fetches int
+	Fail    bool // JWKS endpoint answers 500
 }
 
 // NewGoogle starts a JWKS server for key.
@@ -277,7 +309,12 @@ func NewGoogle(key *rsa.PrivateKey) *Google {
 	g.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		g.mu.Lock()
 		g.Fetches++
+		fail := g.Fail
 		g.mu.Unlock()
+		if fail {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		w.Header().Set("Cache-Control", "public, max-age=3600")
 		writeJSON(w, http.StatusOK, map[string]any{"keys": []any{map[string]string{
 			"kid": g.Kid, "kty": "RSA", "alg": "RS256", "use": "sig",

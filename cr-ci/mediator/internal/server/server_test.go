@@ -34,6 +34,7 @@ const (
 	testProject     = "example-project"
 	testJob         = "projects/example-project/locations/us-central1/jobs/cr-gh-runner-8c32g"
 	schedulerEmail  = "cr-runner-scheduler-sa@example-project.iam.gserviceaccount.com"
+	execEmail       = "cr-runner-exec-sa@example-project.iam.gserviceaccount.com"
 	webhookSecretID = "cr-runner-gh-webhook-secret"
 	appKeySecretID  = "cr-runner-gh-app-private-key"
 	fakeHookSecret  = "FAKE-webhook-secret-6d1f0c"
@@ -158,10 +159,11 @@ func newHarness(t *testing.T, o harnessOpts) *harness {
 			BaseURL: h.cr.Server.URL, Tokens: tokens, Project: testProject, Region: "us-central1",
 			Job: "cr-gh-runner-8c32g", MediatorURL: o.mediator, Now: h.clock.Now,
 		},
-		Claims: h.claims,
-		OIDC:   &oidc.Verifier{CertsURL: h.google.Server.URL, Audience: o.mediator, Email: schedulerEmail, Now: h.clock.Now},
-		Logger: logging.New(h.logs, slog.LevelDebug),
-		Now:    h.clock.Now,
+		Claims:        h.claims,
+		ReconcileOIDC: &oidc.Verifier{CertsURL: h.google.Server.URL, Audience: o.mediator, Email: schedulerEmail, Now: h.clock.Now},
+		RunnerOIDC:    &oidc.Verifier{CertsURL: h.google.Server.URL, Audience: o.mediator, Email: execEmail, Now: h.clock.Now},
+		Logger:        logging.New(h.logs, slog.LevelDebug),
+		Now:           h.clock.Now,
 	})
 	h.http = httptest.NewServer(h.srv.Handler())
 	t.Cleanup(h.http.Close)
@@ -213,6 +215,7 @@ func (h *harness) webhook(body []byte) (int, string) {
 }
 
 func (h *harness) queued(jobID, runID int64) (int, string) {
+	h.gh.EnsureJob(runID, fakes.GitHubJob{ID: jobID, Status: "queued", Labels: []string{testLabel}, CreatedAt: h.clock.Now()})
 	return h.webhook(jobPayload("queued", jobID, runID, testRepo, []string{testLabel}, ""))
 }
 
@@ -220,8 +223,21 @@ func (h *harness) addSameRepoRun(runID int64, jobs ...fakes.GitHubJob) {
 	h.gh.AddRun(fakes.GitHubRun{ID: runID, Repo: testRepo, HeadRepo: testRepo, Event: "pull_request", Status: "queued", Jobs: jobs})
 }
 
+// claim presents a valid runner identity and the claim token (contract v2).
 func (h *harness) claim(token string) (int, string, http.Header) {
-	return h.post("/internal/claim", map[string]string{"Authorization": "Bearer " + token}, nil)
+	return h.claimAs(h.google.IDToken(testMediatorURL, execEmail, h.clock.Now()), token)
+}
+
+func (h *harness) claimAs(idToken, token string) (int, string, http.Header) {
+	hdr := map[string]string{}
+	if idToken != "" {
+		hdr["Authorization"] = "Bearer " + idToken
+		h.oidcTokens = append(h.oidcTokens, idToken)
+	}
+	if token != "" {
+		hdr[ClaimHeader] = token
+	}
+	return h.post("/internal/claim", hdr, nil)
 }
 
 func (h *harness) reconcileWith(token string) (int, ReconcileResult) {
@@ -313,8 +329,41 @@ func TestWebhookSecretRotation(t *testing.T) {
 	if code, _ := h.webhookWith("FAKE-rotated-secret", "ping", ping); code != http.StatusOK {
 		t.Errorf("rotated secret not picked up after the backoff: %d", code)
 	}
+	// The replaced secret stays valid for the grace period, so the order of
+	// the two rotation steps does not matter.
+	if code, _ := h.webhookWith(fakeHookSecret, "ping", ping); code != http.StatusOK {
+		t.Errorf("old secret rejected within the grace period: %d", code)
+	}
+	h.clock.Add(time.Hour)
 	if code, _ := h.webhookWith(fakeHookSecret, "ping", ping); code != http.StatusUnauthorized {
-		t.Errorf("old secret still accepted after rotation: %d", code)
+		t.Errorf("old secret still accepted after the grace period: %d", code)
+	}
+	if code, _ := h.webhookWith("FAKE-rotated-secret", "ping", ping); code != http.StatusOK {
+		t.Errorf("current secret rejected: %d", code)
+	}
+}
+
+// TestWebhookSecretUnavailable: while no secret could be loaded, deliveries
+// get 503, and Secret Manager is retried at most every 10 s.
+func TestWebhookSecretUnavailable(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	h.gapis.DeleteSecret(webhookSecretID)
+	ping := []byte(`{"zen":"hi"}`)
+	for i := 0; i < 3; i++ {
+		if code, _ := h.webhookWith(fakeHookSecret, "ping", ping); code != http.StatusServiceUnavailable {
+			t.Fatalf("no secret: %d, want 503", code)
+		}
+	}
+	if n := h.gapis.AccessCount(webhookSecretID); n != 0 {
+		t.Fatalf("missing secret counted as accessed: %d", n)
+	}
+	if n := h.gapis.MissCount(webhookSecretID); n != 1 {
+		t.Errorf("Secret Manager asked %d times within 10 s, want 1", n)
+	}
+	h.gapis.SetSecret(webhookSecretID, []byte(fakeHookSecret))
+	h.clock.Add(11 * time.Second)
+	if code, _ := h.webhookWith(fakeHookSecret, "ping", ping); code != http.StatusOK {
+		t.Errorf("after the secret appeared: %d", code)
 	}
 }
 
@@ -343,6 +392,7 @@ func TestWebhookLabelFiltering(t *testing.T) {
 		t.Error("unlabelled job dispatched")
 	}
 	// Label match is case-insensitive, like GitHub's.
+	h.gh.SetJob(10, fakes.GitHubJob{ID: 100, Status: "queued", Labels: []string{"SCION-CR-8C32G"}})
 	if code, _ := h.webhook(jobPayload("queued", 100, 10, testRepo, []string{"SCION-CR-8C32G"}, "")); code != http.StatusOK || h.jitCount() != 1 {
 		t.Errorf("label match should be case-insensitive: %d jit=%d", code, h.jitCount())
 	}
@@ -383,6 +433,7 @@ func TestForkGuard(t *testing.T) {
 	}{
 		{"head repository differs", "contributor/example-repo", "pull_request"},
 		{"pull_request_target", testRepo, "pull_request_target"},
+		{"workflow_run", testRepo, "workflow_run"},
 		{"head repository missing", "", "pull_request"},
 	}
 	for _, tt := range tests {
@@ -566,32 +617,50 @@ func TestClaimContract(t *testing.T) {
 			t.Fatalf("claim token %q is not 32 lowercase hex chars", tok)
 		}
 	}
+	now := h.clock.Now()
 
-	for name, auth := range map[string]string{
-		"no header":     "",
-		"unknown token": "Bearer 0123456789abcdef0123456789abcdef",
-		"wrong scheme":  "Basic " + tokA,
-		"short":         "Bearer abc",
+	// Identity first: a missing or invalid runner identity is 401 and does
+	// not consume the claim.
+	for name, id := range map[string]string{
+		"no identity":     "",
+		"wrong audience":  h.google.IDToken("https://elsewhere.example.com", execEmail, now),
+		"wrong email":     h.google.IDToken(testMediatorURL, schedulerEmail, now),
+		"expired":         h.google.IDToken(testMediatorURL, execEmail, now.Add(-3*time.Hour)),
+		"forged":          fakes.Mint(fakes.Key(2), h.google.Kid, map[string]any{"iss": "https://accounts.google.com", "aud": testMediatorURL, "email": execEmail, "email_verified": true, "iat": now.Unix(), "exp": now.Add(time.Hour).Unix()}),
+		"not a jwt token": "0123456789abcdef0123456789abcdef",
 	} {
-		hdr := map[string]string{}
-		if auth != "" {
-			hdr["Authorization"] = auth
+		if code, _, _ := h.claimAs(id, tokA); code != http.StatusUnauthorized {
+			t.Errorf("%s: %d, want 401", name, code)
 		}
-		if code, _, _ := h.post("/internal/claim", hdr, nil); code != http.StatusGone {
+	}
+	h.wantLog(logging.EventClaimRejected)
+
+	// Valid identity, bad claim header: 410.
+	id := h.google.IDToken(testMediatorURL, execEmail, now)
+	for name, tok := range map[string]string{
+		"no claim header": "",
+		"unknown token":   "0123456789abcdef0123456789abcdef",
+		"short":           "abc",
+	} {
+		if code, _, _ := h.claimAs(id, tok); code != http.StatusGone {
 			t.Errorf("%s: %d, want 410", name, code)
 		}
 	}
 
+	// The claim survived every rejected attempt above.
 	h.clock.Add(299 * time.Second)
-	if code, _, _ := h.claim(tokA); code != http.StatusOK {
-		t.Errorf("claim within TTL: %d", code)
+	code, body, hdr := h.claim(tokA)
+	if code != http.StatusOK || hdr.Get("Content-Type") != "application/json" {
+		t.Fatalf("claim within TTL after rejected attempts: %d %q", code, body)
+	}
+	if code, _, _ := h.claim(tokA); code != http.StatusGone {
+		t.Errorf("used claim: %d, want 410", code)
 	}
 	h.clock.Add(time.Second)
 	if code, _, _ := h.claim(tokB); code != http.StatusGone {
 		t.Errorf("claim at TTL: %d, want 410", code)
 	}
 	h.wantLog(logging.EventClaimConsumed)
-	h.wantLog(logging.EventClaimRejected)
 }
 
 // ---- completed / cancellation ------------------------------------------------
@@ -603,16 +672,17 @@ func TestCancellation(t *testing.T) {
 	h.queued(100, 10)
 	h.queued(101, 11)
 
-	// Normal completion: nothing to cancel.
-	if code, _ := h.webhook(jobPayload("completed", 101, 11, testRepo, []string{testLabel}, "success")); code != http.StatusOK {
+	// Normal completion on its runner: nothing to cancel.
+	if code, _ := h.webhook(jobEvent("completed", 101, 11, testRepo, "success", "cr-job-101")); code != http.StatusOK {
 		t.Fatalf("completed: %d", code)
 	}
 	if len(h.cr.CancelCalls) != 0 || len(h.gh.Deleted) != 0 {
 		t.Error("successful completion cancelled or deleted something")
 	}
 
+	// Cancelled while queued (no runner_name): its idle runner is stopped.
 	code, out := h.webhook(jobPayload("completed", 100, 10, testRepo, []string{testLabel}, "cancelled"))
-	if code != http.StatusOK || !strings.Contains(out, "cancelled") {
+	if code != http.StatusOK {
 		t.Fatalf("cancelled: %d %q", code, out)
 	}
 	if len(h.cr.CancelCalls) != 1 || !strings.HasSuffix(h.cr.CancelCalls[0], "/exec-1") {
@@ -701,8 +771,9 @@ func TestReconcileReapsStaleRunners(t *testing.T) {
 // aged from its launch, but not reaped while its claim is still pending.
 func TestReconcileKeepsColdStartingRunners(t *testing.T) {
 	h := newHarness(t, harnessOpts{claimTTL: 10 * time.Minute})
-	h.addSameRepoRun(10, fakes.GitHubJob{ID: 100, Status: "in_progress", Labels: []string{testLabel}})
+	h.addSameRepoRun(10, fakes.GitHubJob{ID: 100, Status: "queued", Labels: []string{testLabel}})
 	h.queued(100, 10)
+	h.gh.SetJob(10, fakes.GitHubJob{ID: 100, Status: "in_progress", Labels: []string{testLabel}})
 	h.reconcile()
 	h.clock.Add(6 * time.Minute)
 	if res := h.reconcile(); res.RunnersReaped != 0 {

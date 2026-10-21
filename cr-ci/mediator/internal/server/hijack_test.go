@@ -1,10 +1,14 @@
 package server
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/cr-ci/mediator/internal/fakes"
 	"github.com/GoogleCloudPlatform/scion/cr-ci/mediator/internal/logging"
@@ -22,15 +26,172 @@ func jobEvent(action string, jobID, runID int64, repo, conclusion, runnerName st
 	return b
 }
 
-func execFor(h *harness, jobID string) []fakes.Execution {
+func execFor(h *harness, runnerName string) []fakes.Execution {
 	var out []fakes.Execution
 	for _, e := range h.executions() {
-		if e.Env["GH_JOB_ID"] == jobID {
+		if e.Env["RUNNER_NAME"] == runnerName {
 			out = append(out, e)
 		}
 	}
 	return out
 }
+
+func (h *harness) activeFor(runnerName string) int {
+	n := 0
+	for _, e := range execFor(h, runnerName) {
+		if !e.Completed {
+			n++
+		}
+	}
+	return n
+}
+
+// ---- C1: cancellation keyed on runner_name and busy state --------------------
+
+func TestCancelledWhileQueuedLeavesBusyRunnerAlone(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	h.addSameRepoRun(10)
+	h.addSameRepoRun(11)
+	h.queued(100, 10)
+	// GitHub gave cr-job-100 to job 101; job 100 is then superseded while
+	// still queued.
+	h.gh.SetRunnerState("cr-job-100", "online", true)
+	code, _ := h.webhook(jobEvent("completed", 100, 10, testRepo, "cancelled", ""))
+	if code != http.StatusOK {
+		t.Fatalf("completed: %d, want 200", code)
+	}
+	if len(h.cr.CancelCalls) != 0 || len(h.gh.Deleted) != 0 {
+		t.Errorf("busy runner touched: cancels=%v deleted=%v", h.cr.CancelCalls, h.gh.Deleted)
+	}
+}
+
+func TestCancelledOnRunnerTakesNoAction(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	h.addSameRepoRun(10)
+	h.queued(100, 10)
+	h.gh.SetRunnerState("cr-job-100", "online", true)
+	code, _ := h.webhook(jobEvent("completed", 100, 10, testRepo, "cancelled", "cr-job-100"))
+	if code != http.StatusOK {
+		t.Fatalf("completed: %d", code)
+	}
+	// GitHub stops the job itself and the ephemeral runner exits.
+	if len(h.cr.CancelCalls) != 0 || len(h.gh.Deleted) != 0 {
+		t.Errorf("cancel on runner stopped something: cancels=%v deleted=%v", h.cr.CancelCalls, h.gh.Deleted)
+	}
+	if h.claims.Pending(100) {
+		t.Error("claim of the finished runner kept")
+	}
+}
+
+// TestCancelledWhileQueuedRaceToBusy: the idle runner picks up a job between
+// the runner list and the delete; GitHub answers 422 and it is left alone.
+func TestCancelledWhileQueuedSkippedWhenDeleteSaysBusy(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	h.addSameRepoRun(10)
+	h.queued(100, 10)
+	h.gh.SetRunnerState("cr-job-100", "offline", false)
+	h.gh.BusyOnDelete = true
+	if code, _ := h.webhook(jobEvent("completed", 100, 10, testRepo, "cancelled", "")); code != http.StatusOK {
+		t.Fatalf("completed: %d", code)
+	}
+	if len(h.cr.CancelCalls) != 0 {
+		t.Errorf("execution cancelled although the runner turned busy: %v", h.cr.CancelCalls)
+	}
+}
+
+// ---- R1: webhook work survives the delivery being dropped --------------------
+
+func (h *harness) serveDirect(ctx context.Context, body []byte) int {
+	req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/webhook", bytes.NewReader(body))
+	req.Header.Set("X-GitHub-Event", "workflow_job")
+	req.Header.Set("X-Hub-Signature-256", sign(fakeHookSecret, body))
+	rec := httptest.NewRecorder()
+	h.srv.Handler().ServeHTTP(rec, req)
+	return rec.Code
+}
+
+func TestDispatchSurvivesDroppedDelivery(t *testing.T) {
+	t.Run("launch completes", func(t *testing.T) {
+		h := newHarness(t, harnessOpts{})
+		h.addSameRepoRun(10, fakes.GitHubJob{ID: 100, Status: "queued", Labels: []string{testLabel}})
+		ctx, cancel := context.WithCancel(context.Background())
+		h.cr.OnRun = cancel // GitHub gives up right after the mint
+		h.serveDirect(ctx, jobPayload("queued", 100, 10, testRepo, []string{testLabel}, ""))
+		_, registered := h.gh.RunnerByName("cr-job-100")
+		if h.activeFor("cr-job-100") != 1 || !registered || !h.claims.Pending(100) {
+			t.Errorf("launch abandoned with the delivery: registered=%v claim=%v executions=%+v", registered, h.claims.Pending(100), h.executions())
+		}
+	})
+	t.Run("cleanup completes", func(t *testing.T) {
+		h := newHarness(t, harnessOpts{})
+		h.addSameRepoRun(10, fakes.GitHubJob{ID: 100, Status: "queued", Labels: []string{testLabel}})
+		ctx, cancel := context.WithCancel(context.Background())
+		h.cr.OnRun = cancel
+		h.cr.FailRun = true
+		h.serveDirect(ctx, jobPayload("queued", 100, 10, testRepo, []string{testLabel}, ""))
+		if len(h.gh.Runners()) != 0 {
+			t.Errorf("registration left behind after a failed launch on a dropped delivery: %v", h.gh.Runners())
+		}
+	})
+}
+
+// ---- R2: replayed queued event ----------------------------------------------
+
+func TestReplayedQueuedEventDoesNotLaunch(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	h.addSameRepoRun(10)
+	body := jobPayload("queued", 100, 10, testRepo, []string{testLabel}, "")
+	h.queued(100, 10)
+	// The job runs and finishes; GitHub removes the ephemeral runner.
+	h.gh.SetJob(10, fakes.GitHubJob{ID: 100, Status: "completed", Labels: []string{testLabel}, RunnerName: "cr-job-100"})
+	h.webhook(jobEvent("completed", 100, 10, testRepo, "success", "cr-job-100"))
+	h.gh.RemoveRunner("cr-job-100")
+	h.cr.Complete("100")
+
+	code, out := h.webhook(body) // redelivered or replayed
+	if code != http.StatusOK || !strings.Contains(out, "not queued") {
+		t.Errorf("replay: %d %q", code, out)
+	}
+	if h.jitCount() != 1 || len(h.executions()) != 1 {
+		t.Errorf("replay launched an orphan: jit=%d executions=%d", h.jitCount(), len(h.executions()))
+	}
+}
+
+// ---- R3: labels a cr-ci runner cannot satisfy --------------------------------
+
+func TestUnservableLabels(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	labels := []string{"self-hosted", testLabel}
+	h.addSameRepoRun(10, fakes.GitHubJob{ID: 100, Status: "queued", Labels: labels, CreatedAt: h.clock.Now()})
+	code, _ := h.webhook(jobPayload("queued", 100, 10, testRepo, labels, ""))
+	if code != http.StatusOK || h.jitCount() != 0 {
+		t.Errorf("unservable job minted: %d jit=%d", code, h.jitCount())
+	}
+	if !strings.Contains(h.logs.String(), "labels_unservable") {
+		t.Error("no labels_unservable log")
+	}
+	if res := h.reconcile(); res.Backfilled != 0 || h.jitCount() != 0 {
+		t.Errorf("backfill minted for an unservable job: %+v", res)
+	}
+}
+
+// ---- O4: capacity counts launches the list does not show yet -----------------
+
+func TestCapacityCountsUnlistedLaunches(t *testing.T) {
+	h := newHarness(t, harnessOpts{max: 1})
+	h.cr.ListLag = time.Minute
+	h.addSameRepoRun(10)
+	h.addSameRepoRun(11)
+	h.queued(100, 10)
+	if code, out := h.queued(101, 11); code != http.StatusOK || !strings.Contains(out, "capacity") {
+		t.Errorf("second launch within the list lag: %d %q, want capacity full", code, out)
+	}
+	if len(h.executions()) != 1 {
+		t.Errorf("executions = %d, want 1", len(h.executions()))
+	}
+}
+
+// ---- R4: hijack guard ---------------------------------------------------------
 
 func TestInProgressNormalMatch(t *testing.T) {
 	h := newHarness(t, harnessOpts{})
@@ -44,73 +205,130 @@ func TestInProgressNormalMatch(t *testing.T) {
 	if h.gh.RunGets != gets || len(h.cr.CancelCalls) != 0 || len(h.gh.Deleted) != 0 {
 		t.Error("a runner running its own job was re-checked or stopped")
 	}
-	// Runners that are not ours are ignored.
 	if code, _ := h.webhook(inProgress(300, 30, testRepo, "some-other-runner")); code != http.StatusOK || len(h.cr.CancelCalls) != 0 {
 		t.Error("foreign runner handled")
 	}
 }
 
-func TestInProgressHijackKill(t *testing.T) {
+func TestHijackKill(t *testing.T) {
 	tests := []struct {
-		name     string
-		run      *fakes.GitHubRun // the hijacking job's run; nil = not found
-		repo     string           // repository of the hijacking job
-		wantGone bool             // registration deleted (repo scope cannot address it through an unserved repo)
+		name      string
+		run       *fakes.GitHubRun // the hijacking job's run; nil = not found
+		repo      string           // repository of the hijacking job
+		busy      bool             // registration still busy: GitHub refuses the delete
+		reNamedTo string           // name of the replacement runner for job 100; "" = none
 	}{
-		{"fork PR", &fakes.GitHubRun{ID: 12, Repo: testRepo, HeadRepo: "contributor/example-repo", Event: "pull_request", Status: "in_progress"}, testRepo, true},
-		{"pull_request_target", &fakes.GitHubRun{ID: 12, Repo: testRepo, HeadRepo: testRepo, Event: "pull_request_target", Status: "in_progress"}, testRepo, true},
-		{"run lookup fails (fail closed)", nil, testRepo, true},
-		{"repo not served", nil, "other-owner/other-repo", false},
+		{"fork PR", &fakes.GitHubRun{ID: 12, Repo: testRepo, HeadRepo: "contributor/example-repo", Event: "pull_request", Status: "in_progress"}, testRepo, false, "cr-job-120"},
+		{"fork PR, busy registration", &fakes.GitHubRun{ID: 12, Repo: testRepo, HeadRepo: "contributor/example-repo", Event: "pull_request", Status: "in_progress"}, testRepo, true, "cr-job-120"},
+		{"pull_request_target", &fakes.GitHubRun{ID: 12, Repo: testRepo, HeadRepo: testRepo, Event: "pull_request_target", Status: "in_progress"}, testRepo, false, "cr-job-120"},
+		{"workflow_run", &fakes.GitHubRun{ID: 12, Repo: testRepo, HeadRepo: testRepo, Event: "workflow_run", Status: "in_progress"}, testRepo, false, "cr-job-120"},
+		{"run lookup fails (fail closed)", nil, testRepo, false, "cr-job-120"},
+		{"repo not served", nil, "other-owner/other-repo", false, "cr-job-120"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			h := newHarness(t, harnessOpts{})
-			h.addSameRepoRun(10, fakes.GitHubJob{ID: 100, Status: "queued", Labels: []string{testLabel}})
+			h.addSameRepoRun(10)
 			if tt.run != nil {
 				h.gh.AddRun(*tt.run)
 			}
 			h.queued(100, 10)
-			first := execFor(h, "100")[0]
+			first := execFor(h, "cr-job-100")[0]
+			if tt.busy {
+				h.gh.SetRunnerState("cr-job-100", "online", true)
+			}
 
 			code, out := h.webhook(inProgress(120, 12, tt.repo, "cr-job-100"))
 			if code != http.StatusOK || !strings.Contains(out, "killed") {
 				t.Fatalf("in_progress: %d %q", code, out)
 			}
 			if len(h.cr.CancelCalls) != 1 || h.cr.CancelCalls[0] != first.Name {
-				t.Errorf("cancel calls = %v, want [%s]", h.cr.CancelCalls, first.Name)
-			}
-			if tt.wantGone && len(h.gh.Deleted) != 1 {
-				t.Errorf("hijacked registration not deleted: %v", h.gh.Deleted)
+				t.Errorf("cancel calls = %v, want [%s] (looked up by runner name)", h.cr.CancelCalls, first.Name)
 			}
 			h.wantLog(logging.EventKillHijacked)
-
-			if tt.wantGone {
-				// The legitimate job is re-dispatched at once with a fresh runner.
-				ex := execFor(h, "100")
-				if len(ex) != 2 || ex[1].Completed {
-					t.Fatalf("job 100 not re-dispatched: %+v", ex)
+			// Job 100 is served again at once, under a free name.
+			var replacement []fakes.Execution
+			for _, e := range h.executions() {
+				if e.Env["GH_JOB_ID"] == "100" && !e.Completed {
+					replacement = append(replacement, e)
 				}
-				if _, ok := h.gh.RunnerByName("cr-job-100"); !ok {
-					t.Error("no new cr-job-100 registration")
-				}
-				if ex[1].Env["RUNNER_CLAIM_TOKEN"] == first.Env["RUNNER_CLAIM_TOKEN"] {
-					t.Error("claim token reused")
-				}
+			}
+			if len(replacement) != 1 || replacement[0].Env["RUNNER_NAME"] != tt.reNamedTo {
+				t.Fatalf("replacement for job 100 = %+v, want one named %s", replacement, tt.reNamedTo)
+			}
+			if _, ok := h.gh.RunnerByName(tt.reNamedTo); !ok {
+				t.Errorf("no %s registration", tt.reNamedTo)
 			}
 		})
 	}
 }
 
-// TestInProgressLegitimateSwap: a runner minted for job 100 starts job 101,
-// which is just as legitimate. Nothing is killed, and the job that took the
-// runner gets a runner named for it, which then serves job 100.
-func TestInProgressLegitimateSwap(t *testing.T) {
+// TestHijackLaterEventsSpareReplacement: the hijacking job's completed
+// event, which still names the hijacked runner, must not touch the runner
+// that replaced it.
+func TestHijackLaterEventsSpareReplacement(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	h.addSameRepoRun(10)
+	h.gh.AddRun(fakes.GitHubRun{ID: 12, Repo: testRepo, HeadRepo: "contributor/example-repo", Event: "pull_request", Status: "in_progress"})
+	h.queued(100, 10)
+	h.webhook(inProgress(120, 12, testRepo, "cr-job-100"))
+	repl := execFor(h, "cr-job-120")
+	if len(repl) != 1 {
+		t.Fatalf("no replacement: %+v", h.executions())
+	}
+	h.webhook(jobEvent("completed", 120, 12, testRepo, "failure", "cr-job-100"))
+	if h.activeFor("cr-job-120") != 1 || !h.claims.Pending(120) {
+		t.Errorf("replacement runner stopped or its claim dropped by the hijacker's completed event")
+	}
+	if code, _, _ := h.claim(repl[0].Env["RUNNER_CLAIM_TOKEN"]); code != http.StatusOK {
+		t.Errorf("replacement claim: %d", code)
+	}
+}
+
+func TestHijackOnCompletedAndInReconcile(t *testing.T) {
+	fork := fakes.GitHubRun{ID: 12, Repo: testRepo, HeadRepo: "contributor/example-repo", Event: "pull_request", Status: "in_progress"}
+	t.Run("completed event", func(t *testing.T) {
+		h := newHarness(t, harnessOpts{})
+		h.addSameRepoRun(10)
+		h.gh.AddRun(fork)
+		h.queued(100, 10)
+		if code, out := h.webhook(jobEvent("completed", 120, 12, testRepo, "success", "cr-job-100")); code != http.StatusOK || !strings.Contains(out, "killed") {
+			t.Fatalf("completed: %d %q", code, out)
+		}
+		h.wantLog(logging.EventKillHijacked)
+	})
+	t.Run("missed webhook, found by reconcile", func(t *testing.T) {
+		h := newHarness(t, harnessOpts{})
+		h.addSameRepoRun(10)
+		h.queued(100, 10)
+		fork.Jobs = []fakes.GitHubJob{{ID: 120, Status: "in_progress", Labels: []string{testLabel}, RunnerName: "cr-job-100"}}
+		h.gh.AddRun(fork)
+		res := h.reconcile()
+		if res.HijacksKilled != 1 || h.activeFor("cr-job-100") != 0 {
+			t.Fatalf("result %+v; cr-job-100 active = %d, want the hijacked one killed", res, h.activeFor("cr-job-100"))
+		}
+		if len(h.cr.CancelCalls) != 1 {
+			t.Errorf("cancel calls = %v", h.cr.CancelCalls)
+		}
+		if h.activeFor("cr-job-120") != 1 {
+			t.Errorf("no replacement named cr-job-120: %+v", h.executions())
+		}
+		// The next pass does not kill again.
+		h.gh.SetJob(12, fakes.GitHubJob{ID: 120, Status: "completed", Labels: []string{testLabel}, RunnerName: "cr-job-100"})
+		if res := h.reconcile(); res.HijacksKilled != 0 {
+			t.Errorf("second pass killed %d", res.HijacksKilled)
+		}
+	})
+}
+
+// TestLegitimateSwap: the runner launched for job 100 starts job 101, which
+// is just as legitimate. Nothing is killed, and job 100 is still served.
+func TestLegitimateSwap(t *testing.T) {
 	t.Run("taker had no runner", func(t *testing.T) {
 		h := newHarness(t, harnessOpts{})
-		h.addSameRepoRun(10, fakes.GitHubJob{ID: 100, Status: "queued", Labels: []string{testLabel}})
-		h.addSameRepoRun(11, fakes.GitHubJob{ID: 101, Status: "in_progress", Labels: []string{testLabel}})
+		h.addSameRepoRun(10)
+		h.addSameRepoRun(11, fakes.GitHubJob{ID: 101, Status: "in_progress", Labels: []string{testLabel}, RunnerName: "cr-job-100"})
 		h.queued(100, 10) // job 101's webhook was missed
-
 		code, out := h.webhook(inProgress(101, 11, testRepo, "cr-job-100"))
 		if code != http.StatusOK || !strings.Contains(out, "swap") {
 			t.Fatalf("in_progress: %d %q", code, out)
@@ -118,14 +336,16 @@ func TestInProgressLegitimateSwap(t *testing.T) {
 		if len(h.cr.CancelCalls) != 0 || len(h.gh.Deleted) != 0 {
 			t.Error("legitimate swap killed a runner")
 		}
-		if len(execFor(h, "101")) != 1 {
-			t.Errorf("no replacement runner for the swap: %+v", h.executions())
+		ex := execFor(h, "cr-job-101")
+		if len(ex) != 1 || ex[0].Env["GH_JOB_ID"] != "100" {
+			t.Fatalf("no runner serving job 100 under the free name cr-job-101: %+v", h.executions())
 		}
 		h.wantLog(logging.EventRunnerSwap)
-		// Job 100 is still queued; its minted registration is busy with 101
-		// and cr-job-101 is idle for it, so reconcile must not launch more.
-		if res := h.reconcile(); res.Backfilled != 0 {
-			t.Errorf("reconcile launched %d extra runners", res.Backfilled)
+		// Reconcile sees job 100 queued: served, so nothing more; and the
+		// swap seen again in reconcile changes nothing.
+		h.gh.SetRunnerState("cr-job-100", "online", true)
+		if res := h.reconcile(); res.Backfilled != 0 || res.HijacksKilled != 0 || len(h.executions()) != 2 {
+			t.Errorf("reconcile after swap: %+v, executions %d", res, len(h.executions()))
 		}
 	})
 	t.Run("taker had its own runner", func(t *testing.T) {
@@ -140,36 +360,27 @@ func TestInProgressLegitimateSwap(t *testing.T) {
 		if len(h.executions()) != 2 || len(h.cr.CancelCalls) != 0 {
 			t.Errorf("executions = %d, cancels = %v; want 2 and none (cr-job-101 serves job 100)", len(h.executions()), h.cr.CancelCalls)
 		}
-	})
-}
-
-// TestCancelSwappedJob: cancelling a job that runs on a runner minted for
-// another job stops that runner, not the runner minted for the cancelled job.
-func TestCancelSwappedJob(t *testing.T) {
-	h := newHarness(t, harnessOpts{})
-	h.addSameRepoRun(10)
-	h.addSameRepoRun(11)
-	h.queued(100, 10)
-	h.queued(101, 11)
-	ran, idle := execFor(h, "100")[0], execFor(h, "101")[0]
-	h.webhook(inProgress(101, 11, testRepo, "cr-job-100"))
-
-	code, _ := h.webhook(jobEvent("completed", 101, 11, testRepo, "cancelled", "cr-job-100"))
-	if code != http.StatusOK {
-		t.Fatalf("completed: %d", code)
-	}
-	if len(h.cr.CancelCalls) != 1 || h.cr.CancelCalls[0] != ran.Name {
-		t.Errorf("cancel calls = %v, want only %s (the runner that ran job 101)", h.cr.CancelCalls, ran.Name)
-	}
-	for _, e := range h.executions() {
-		if e.Name == idle.Name && e.Completed {
-			t.Error("cancelled cr-job-101, which is now waiting to serve job 100")
+		// Job 100 then starts on cr-job-101: that runner was launched for
+		// 101, which is running elsewhere, so it is another swap with
+		// nothing left to serve.
+		h.gh.SetJob(10, fakes.GitHubJob{ID: 100, Status: "in_progress", Labels: []string{testLabel}, RunnerName: "cr-job-101"})
+		if code, _ := h.webhook(inProgress(100, 10, testRepo, "cr-job-101")); code != http.StatusOK || len(h.executions()) != 2 {
+			t.Errorf("second swap launched more runners: %d", len(h.executions()))
 		}
-	}
-	if _, ok := h.gh.RunnerByName("cr-job-100"); ok {
-		t.Error("registration of the runner that ran the cancelled job not deleted")
-	}
-	if _, ok := h.gh.RunnerByName("cr-job-101"); !ok {
-		t.Error("idle cr-job-101 deleted")
-	}
+	})
+	t.Run("cancel after swap stops nothing", func(t *testing.T) {
+		h := newHarness(t, harnessOpts{})
+		h.addSameRepoRun(10)
+		h.addSameRepoRun(11)
+		h.queued(100, 10)
+		h.queued(101, 11)
+		h.webhook(inProgress(101, 11, testRepo, "cr-job-100"))
+		h.gh.SetRunnerState("cr-job-100", "online", true)
+		if code, _ := h.webhook(jobEvent("completed", 101, 11, testRepo, "cancelled", "cr-job-100")); code != http.StatusOK {
+			t.Fatalf("completed: %d", code)
+		}
+		if len(h.cr.CancelCalls) != 0 || len(h.gh.Deleted) != 0 {
+			t.Errorf("cancel of a job on a runner touched runners: cancels=%v deleted=%v", h.cr.CancelCalls, h.gh.Deleted)
+		}
+	})
 }

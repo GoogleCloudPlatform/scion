@@ -93,13 +93,23 @@ func newServer(cfg *Config, ep endpoints, logger *slog.Logger) *server.Server {
 			MediatorURL: cfg.MediatorURL,
 		},
 		Claims: claim.NewStore(cfg.ClaimTTL, nil),
-		OIDC: &oidc.Verifier{
+		ReconcileOIDC: &oidc.Verifier{
 			CertsURL: ep.GoogleCerts,
 			Audience: cfg.MediatorURL,
-			Email:    cfg.SchedulerSAName + "@" + cfg.GCPProject + ".iam.gserviceaccount.com",
+			Email:    saEmail(cfg.SchedulerSAName, cfg.GCPProject),
+		},
+		// Claim contract v2: the runner proves it runs as EXEC_SA_NAME.
+		RunnerOIDC: &oidc.Verifier{
+			CertsURL: ep.GoogleCerts,
+			Audience: cfg.MediatorURL,
+			Email:    saEmail(cfg.ExecSAName, cfg.GCPProject),
 		},
 		Logger: logger,
 	})
+}
+
+func saEmail(name, project string) string {
+	return name + "@" + project + ".iam.gserviceaccount.com"
 }
 
 // cachedKey loads and parses the App private key once; a failed load is

@@ -199,3 +199,21 @@ func TestKeyErrorPropagates(t *testing.T) {
 		t.Errorf("err = %v", err)
 	}
 }
+
+// TestReinstallRelooksUpInstallation: after the App is reinstalled under a
+// new installation ID, the cached ID is dropped and looked up again.
+func TestReinstallRelooksUpInstallation(t *testing.T) {
+	c, gh, ck := newTestClient(t, ScopeRepo)
+	ctx := context.Background()
+	if _, err := c.ListRunners(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	gh.InstallationID = 78
+	ck.add(56 * time.Minute) // cached token needs a refresh
+	if _, err := c.ListRunners(ctx, repo); !IsStatus(err, 404) {
+		t.Fatalf("first call after reinstall: %v, want 404", err)
+	}
+	if _, err := c.ListRunners(ctx, repo); err != nil {
+		t.Fatalf("installation ID not looked up again: %v", err)
+	}
+}

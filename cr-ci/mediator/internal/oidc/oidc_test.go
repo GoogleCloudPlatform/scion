@@ -85,3 +85,27 @@ func with(m map[string]any, k string, v any) map[string]any {
 	m[k] = v
 	return m
 }
+
+// TestJWKSOutageBackoff: with no key set and a failing JWKS endpoint,
+// unauthenticated callers cannot drive more than one fetch a minute.
+func TestJWKSOutageBackoff(t *testing.T) {
+	g := fakes.NewGoogle(fakes.Key(1))
+	defer g.Close()
+	g.Fail = true
+	now := time.Unix(1_700_000_000, 0)
+	v := &Verifier{CertsURL: g.Server.URL, Audience: aud, Email: email, Now: func() time.Time { return now }}
+	tok := g.IDToken(aud, email, now)
+	for i := 0; i < 5; i++ {
+		if err := v.Verify(context.Background(), tok); err == nil {
+			t.Fatal("verified without keys")
+		}
+	}
+	if g.Fetches != 1 {
+		t.Errorf("JWKS fetched %d times during an outage, want 1", g.Fetches)
+	}
+	g.Fail = false
+	now = now.Add(61 * time.Second)
+	if err := v.Verify(context.Background(), g.IDToken(aud, email, now)); err != nil {
+		t.Errorf("after the outage: %v", err)
+	}
+}

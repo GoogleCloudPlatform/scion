@@ -2,24 +2,24 @@
 //
 //	POST /webhook         GitHub workflow_job webhooks (HMAC-verified)
 //	POST /internal/claim  runner exchanges its claim token for its JIT config
-//	POST /reconcile       Cloud Scheduler (Google OIDC): reap and backfill
+//	                      (Google ID token of the runner identity required)
+//	POST /reconcile       Cloud Scheduler (Google ID token): reap and backfill
 //	GET  /health          liveness
 //
-// State (claims, launched jobs, first-seen-offline times) lives in memory,
+// State (claims, runner records, first-seen-offline times) lives in memory,
 // so the service must run with max-instances=1.
+//
+// Runners and jobs are not one to one. GitHub gives a queued job to any idle
+// runner whose labels match, so the runner cr-job-X launched for job X may run
+// job Y. The mediator therefore keys its state on the runner name and learns
+// which job a runner actually runs from workflow_job.runner_name.
 package server
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
-	"errors"
 	"io"
 	"log/slog"
 	"net/http"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,7 +28,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/cr-ci/mediator/internal/claim"
 	"github.com/GoogleCloudPlatform/scion/cr-ci/mediator/internal/githubapp"
 	"github.com/GoogleCloudPlatform/scion/cr-ci/mediator/internal/launcher"
-	"github.com/GoogleCloudPlatform/scion/cr-ci/mediator/internal/logging"
 )
 
 const (
@@ -37,15 +36,25 @@ const (
 	// WorkFolder is the runner work folder, on the /scratch ephemeral disk.
 	WorkFolder = "/scratch/_work"
 
-	maxWebhookBody       = 5 << 20
-	secretRefetchBackoff = time.Minute
-	defaultReapAfter     = 5 * time.Minute
+	maxWebhookBody          = 5 << 20
+	secretRefetchBackoff    = time.Minute      // between refetches while a secret is cached
+	secretRetryBackoff      = 10 * time.Second // between attempts while none is cached
+	secretGrace             = time.Hour        // a replaced webhook secret stays valid this long
+	defaultReapAfter        = 5 * time.Minute
+	defaultRequestTimeout   = 60 * time.Second
+	defaultReconcileTimeout = 4 * time.Minute
+	cleanupTimeout          = 30 * time.Second
+	// launchListLag covers executions that jobs.run created but
+	// executions.list does not show yet.
+	launchListLag = 2 * time.Minute
+	cancelledTTL  = time.Hour
 )
 
 // GitHub is the subset of the GitHub API the server needs
 // (*githubapp.Client implements it).
 type GitHub interface {
 	GetRun(ctx context.Context, r githubapp.Repo, runID int64) (*githubapp.Run, error)
+	GetJob(ctx context.Context, r githubapp.Repo, jobID int64) (*githubapp.Job, error)
 	ListRuns(ctx context.Context, r githubapp.Repo, status string) ([]githubapp.Run, error)
 	ListJobs(ctx context.Context, r githubapp.Repo, runID int64) ([]githubapp.Job, error)
 	ListRunners(ctx context.Context, r githubapp.Repo) ([]githubapp.Runner, error)
@@ -56,10 +65,10 @@ type GitHub interface {
 // Launcher starts, stops and counts runner executions.
 type Launcher interface {
 	launcher.RunnerLauncher
-	launcher.ActiveLister
+	launcher.ExecutionLister
 }
 
-// TokenVerifier verifies the reconciler's Google ID token.
+// TokenVerifier verifies a Google ID token.
 type TokenVerifier interface {
 	Verify(ctx context.Context, token string) error
 }
@@ -77,22 +86,33 @@ type Options struct {
 	TaskTimeout time.Duration
 	ReapAfter   time.Duration // offline cr-job-* runners older than this are deleted (default 5m)
 
+	RequestTimeout   time.Duration // budget for webhook work, detached from the delivery (default 60s)
+	ReconcileTimeout time.Duration // budget for one reconcile (default 4m)
+
 	// WebhookSecret fetches the webhook HMAC secret (Secret Manager).
 	WebhookSecret func(ctx context.Context) ([]byte, error)
 	GitHub        GitHub
 	Launcher      Launcher
 	Claims        *claim.Store
-	OIDC          TokenVerifier
-	Logger        *slog.Logger
-	Now           func() time.Time
+	// ReconcileOIDC verifies the Cloud Scheduler identity on /reconcile.
+	ReconcileOIDC TokenVerifier
+	// RunnerOIDC verifies the runner identity (EXEC_SA_NAME) on /internal/claim.
+	RunnerOIDC TokenVerifier
+	Logger     *slog.Logger
+	Now        func() time.Time
 }
 
-type launchRecord struct {
+// runnerRecord is what this process knows about a runner it launched.
+type runnerRecord struct {
 	repo     githubapp.Repo
+	serve    int64 // the job it was launched to serve (GH_JOB_ID)
 	runID    int64
 	ref      string
 	runnerID int64
 	at       time.Time
+	// reassigned: GitHub gave the runner another legitimate job, so it no
+	// longer counts as serving `serve`.
+	reassigned bool
 }
 
 // Server is the mediator HTTP server.
@@ -101,14 +121,18 @@ type Server struct {
 
 	secretMu      sync.Mutex
 	secret        []byte
-	secretFetched time.Time
+	prevSecret    []byte
+	prevUntil     time.Time
+	secretAttempt time.Time
 
-	// dispatchMu serialises dispatch, cancellation and reconcile so that the
-	// capacity and idempotency checks cannot race (single instance).
+	// dispatchMu serialises dispatch, runner stops and the mutating part of
+	// reconcile so that capacity and idempotency checks cannot race (single
+	// instance).
 	dispatchMu  sync.Mutex
-	launched    map[int64]launchRecord
-	offlineSeen map[string]time.Time // runner name -> first seen offline
-	forkLogged  map[int64]bool       // run IDs already logged as fork rejections by reconcile
+	runners     map[string]*runnerRecord // runner name -> record
+	cancelled   map[string]time.Time     // execution refs this process cancelled
+	offlineSeen map[string]time.Time     // runner name -> first seen offline
+	noticed     map[string]bool          // reconcile notices already logged (pruned each pass)
 }
 
 // New returns a Server.
@@ -119,14 +143,21 @@ func New(o Options) *Server {
 	if o.ReapAfter == 0 {
 		o.ReapAfter = defaultReapAfter
 	}
+	if o.RequestTimeout == 0 {
+		o.RequestTimeout = defaultRequestTimeout
+	}
+	if o.ReconcileTimeout == 0 {
+		o.ReconcileTimeout = defaultReconcileTimeout
+	}
 	if o.Logger == nil {
 		o.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
 	return &Server{
 		o:           o,
-		launched:    map[int64]launchRecord{},
+		runners:     map[string]*runnerRecord{},
+		cancelled:   map[string]time.Time{},
 		offlineSeen: map[string]time.Time{},
-		forkLogged:  map[int64]bool{},
+		noticed:     map[string]bool{},
 	}
 }
 
@@ -151,257 +182,70 @@ func plain(w http.ResponseWriter, status int, msg string) {
 	_, _ = io.WriteString(w, msg+"\n")
 }
 
-// RunnerName is the deterministic runner name for a GitHub job.
+// detached returns a context that outlives the HTTP request (GitHub drops a
+// delivery after 10 s, which cancels the request context) but is bounded.
+func detached(parent context.Context, d time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(parent), d)
+}
+
+// cleanupContext is a fresh, bounded context for compensating actions, so
+// they run even if the operation they undo ran out of time.
+func cleanupContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), cleanupTimeout)
+}
+
+// RunnerName is the runner name for a GitHub job ID.
 func RunnerName(jobID int64) string { return RunnerPrefix + strconv.FormatInt(jobID, 10) }
 
-// ---- webhook -----------------------------------------------------------------
-
-type webhookPayload struct {
-	Action      string `json:"action"`
-	WorkflowJob struct {
-		ID         int64    `json:"id"`
-		RunID      int64    `json:"run_id"`
-		Labels     []string `json:"labels"`
-		Conclusion string   `json:"conclusion"`
-		RunnerName string   `json:"runner_name"`
-	} `json:"workflow_job"`
-	Repository struct {
-		FullName string `json:"full_name"`
-	} `json:"repository"`
-}
-
-func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
-	delivery := r.Header.Get("X-GitHub-Delivery")
-	event := r.Header.Get("X-GitHub-Event")
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxWebhookBody))
-	if err != nil {
-		s.log().Warn("webhook body unreadable", "event", logging.EventWebhookRejected, "delivery", delivery, "reason", "body")
-		plain(w, http.StatusRequestEntityTooLarge, "body too large")
-		return
-	}
-	ok, err := s.verifySignature(r.Context(), body, r.Header.Get("X-Hub-Signature-256"))
-	if err != nil {
-		s.log().Error("webhook secret unavailable", "event", logging.EventError, "delivery", delivery, "error", err.Error())
-		plain(w, http.StatusServiceUnavailable, "unavailable")
-		return
-	}
+func parseRunnerName(name string) (int64, bool) {
+	rest, ok := strings.CutPrefix(name, RunnerPrefix)
 	if !ok {
-		s.log().Warn("webhook signature mismatch", "event", logging.EventWebhookRejected, "delivery", delivery, "reason", "signature")
-		plain(w, http.StatusUnauthorized, "bad signature")
-		return
+		return 0, false
 	}
-	if event != "workflow_job" {
-		s.log().Info("webhook ignored", "event", logging.EventWebhookIgnored, "delivery", delivery, "github_event", event, "reason", "event_type")
-		plain(w, http.StatusOK, "ignored")
-		return
-	}
-	var p webhookPayload
-	if err := json.Unmarshal(body, &p); err != nil || p.WorkflowJob.ID == 0 {
-		s.log().Warn("webhook payload malformed", "event", logging.EventWebhookRejected, "delivery", delivery, "reason", "payload")
-		plain(w, http.StatusBadRequest, "malformed payload")
-		return
-	}
-	attrs := []any{"delivery", delivery, "action", p.Action, "job_id", p.WorkflowJob.ID, "run_id", p.WorkflowJob.RunID, "repo", p.Repository.FullName}
-	if !hasLabel(p.WorkflowJob.Labels, s.o.RunnerLabel) {
-		s.log().Debug("webhook ignored", append(attrs, "event", logging.EventWebhookIgnored, "reason", "label")...)
-		plain(w, http.StatusOK, "ignored")
-		return
-	}
-	if p.Action == "in_progress" {
-		s.onInProgress(w, r.Context(), p, attrs)
-		return
-	}
-	repo, ok := s.targetRepo(p.Repository.FullName)
-	if !ok {
-		s.log().Warn("webhook rejected", append(attrs, "event", logging.EventWebhookRejected, "reason", "repo_not_allowed")...)
-		plain(w, http.StatusOK, "ignored")
-		return
-	}
-	if s.o.MediatorURL == "" {
-		s.log().Error("MEDIATOR_URL is not set; cannot launch runners", append(attrs, "event", logging.EventError, "reason", "not_configured")...)
-		plain(w, http.StatusServiceUnavailable, "not configured")
-		return
-	}
-
-	switch p.Action {
-	case "queued":
-		s.onQueued(w, r.Context(), repo, p, attrs)
-	case "completed":
-		s.onCompleted(w, r.Context(), repo, p, attrs)
-	default:
-		plain(w, http.StatusOK, "ignored")
-	}
+	id, err := strconv.ParseInt(rest, 10, 64)
+	return id, err == nil && id > 0
 }
 
-func (s *Server) onQueued(w http.ResponseWriter, ctx context.Context, repo githubapp.Repo, p webhookPayload, attrs []any) {
-	// Fork guard from the API, not the payload.
-	run, err := s.o.GitHub.GetRun(ctx, repo, p.WorkflowJob.RunID)
-	if err != nil {
-		s.log().Error("fetching workflow run failed", append(attrs, "event", logging.EventError, "error", err.Error())...)
-		plain(w, http.StatusServiceUnavailable, "github unavailable")
-		return
-	}
-	if reason := forkReason(run, repo); reason != "" {
-		s.log().Warn("refusing to launch a runner for a fork or pull_request_target run",
-			append(attrs, "event", logging.EventRejectFork, "reason", reason, "run_event", run.Event, "head_repository", headRepo(run))...)
-		plain(w, http.StatusOK, "rejected")
-		return
-	}
-	out, err := s.dispatch(ctx, repo, p.WorkflowJob.ID, p.WorkflowJob.RunID, "webhook")
-	if err != nil {
-		plain(w, http.StatusServiceUnavailable, "dispatch failed")
-		return
-	}
-	plain(w, http.StatusOK, string(out))
-}
-
-func (s *Server) onCompleted(w http.ResponseWriter, ctx context.Context, repo githubapp.Repo, p webhookPayload, attrs []any) {
-	jobID := p.WorkflowJob.ID
-	s.dispatchMu.Lock()
-	defer s.dispatchMu.Unlock()
-	s.o.Claims.DropJob(jobID)
-	if p.WorkflowJob.Conclusion != "cancelled" {
-		delete(s.launched, jobID)
-		plain(w, http.StatusOK, "ok")
-		return
-	}
-	// The runner that ran the job is named in runner_name. Runners can swap
-	// jobs (GitHub assigns any label-matching idle runner), so it may have
-	// been minted for another job. Without a runner_name the job never
-	// started: stop the runner minted for it.
-	target := jobID
-	if minted, ok := parseRunnerName(p.WorkflowJob.RunnerName); ok {
-		target = minted
-	}
-	if target != jobID {
-		attrs = append(attrs, "minted_job_id", target)
-	}
-	rec, err := s.stopRunner(ctx, repo, target)
-	delete(s.launched, jobID)
-	if err != nil {
-		s.log().Error("cancelling runner failed", append(attrs, "event", logging.EventError, "error", err.Error())...)
-		plain(w, http.StatusServiceUnavailable, "cancel failed")
-		return
-	}
-	s.log().Info("job cancelled; execution cancelled and registration removed", append(attrs, "event", logging.EventCancel, "execution", rec.ref)...)
-	plain(w, http.StatusOK, "cancelled")
-}
-
-// stopRunner cancels the execution of runner cr-job-<minted>, deletes its
-// registration and forgets its launch record and claim. The caller holds
-// dispatchMu.
-func (s *Server) stopRunner(ctx context.Context, repo githubapp.Repo, minted int64) (launchRecord, error) {
-	rec, known := s.launched[minted]
-	delete(s.launched, minted)
-	s.o.Claims.DropJob(minted)
-	if known {
-		repo = rec.repo
-	}
-	var errs []error
-	if err := s.o.Launcher.Terminate(ctx, minted, rec.ref); err != nil {
-		errs = append(errs, err)
-	}
-	runnerID := rec.runnerID
-	if runnerID == 0 {
-		if rn, err := s.findRunner(ctx, repo, RunnerName(minted)); err != nil {
-			errs = append(errs, err)
-		} else if rn != nil {
-			runnerID = rn.ID
+func hasLabel(labels []string, want string) bool {
+	for _, l := range labels {
+		if strings.EqualFold(l, want) {
+			return true
 		}
 	}
-	if runnerID != 0 {
-		if err := s.o.GitHub.DeleteRunner(ctx, repo, runnerID); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	return rec, errors.Join(errs...)
+	return false
 }
 
-// onInProgress guards against runner hijacking. GitHub assigns a queued job
-// to any idle runner whose labels match, so a job the mediator refused (a
-// fork PR that targets RUNNER_LABEL) can still be picked up by a runner
-// minted for another job. When a cr-job-* runner starts a job other than the
-// one it was minted for, the job is checked again: if it fails the fork guard
-// (or its repo is not served), the runner's execution is cancelled and its
-// registration deleted. A swap between two legitimate jobs is harmless; the
-// mediator then makes sure the job that took the runner has a runner named
-// for it, so the job the runner was minted for is still served.
-func (s *Server) onInProgress(w http.ResponseWriter, ctx context.Context, p webhookPayload, attrs []any) {
-	minted, ok := parseRunnerName(p.WorkflowJob.RunnerName)
-	jobID := p.WorkflowJob.ID
-	if !ok || minted == jobID {
-		// Not our runner, or the runner runs the job it was minted for (that
-		// job passed the fork guard at dispatch).
-		plain(w, http.StatusOK, "ok")
-		return
+// servable reports whether a cr-ci runner can take a job with these labels:
+// GitHub requires every job label on the runner, and cr-ci runners are
+// registered with RUNNER_LABEL only.
+func (s *Server) servable(labels []string) bool {
+	if len(labels) == 0 {
+		return false
 	}
-	attrs = append(attrs, "runner", p.WorkflowJob.RunnerName, "minted_job_id", minted)
-
-	repo, targeted := s.targetRepo(p.Repository.FullName)
-	reason := ""
-	var run *githubapp.Run
-	if !targeted {
-		reason = "repo_not_allowed"
-		repo = s.runnerRepo(p.Repository.FullName)
-	} else {
-		var err error
-		run, err = s.o.GitHub.GetRun(ctx, repo, p.WorkflowJob.RunID)
-		if err != nil {
-			// Fail closed: a runner we cannot vouch for is stopped.
-			s.log().Error("fetching workflow run failed", append(attrs, "event", logging.EventError, "error", err.Error())...)
-			reason = "run_lookup_failed"
-		} else {
-			reason = forkReason(run, repo)
+	for _, l := range labels {
+		if !strings.EqualFold(l, s.o.RunnerLabel) {
+			return false
 		}
 	}
-
-	s.dispatchMu.Lock()
-	defer s.dispatchMu.Unlock()
-	if reason == "" {
-		s.log().Info("runner picked up another legitimate job", append(attrs, "event", logging.EventRunnerSwap)...)
-		// The job that took the runner gets a runner named for it (a no-op
-		// if it has one); whichever runner is idle serves the minted job.
-		if _, err := s.dispatchLocked(ctx, repo, jobID, p.WorkflowJob.RunID, "swap"); err != nil {
-			plain(w, http.StatusServiceUnavailable, "dispatch failed")
-			return
-		}
-		plain(w, http.StatusOK, "swap")
-		return
-	}
-
-	kill := append(attrs, "event", logging.EventKillHijacked, "reason", reason)
-	if run != nil {
-		kill = append(kill, "run_event", run.Event, "head_repository", headRepo(run))
-	}
-	var stopped launchRecord
-	var err error
-	if repo != (githubapp.Repo{}) {
-		stopped, err = s.stopRunner(ctx, repo, minted)
-	} else {
-		// No served repo to address the runner through; cancel the
-		// execution at least.
-		stopped = s.launched[minted]
-		delete(s.launched, minted)
-		s.o.Claims.DropJob(minted)
-		err = s.o.Launcher.Terminate(ctx, minted, stopped.ref)
-	}
-	if err != nil {
-		s.log().Error("runner hijacked by an untrusted job; stopping it failed", append(kill, "error", err.Error())...)
-		plain(w, http.StatusServiceUnavailable, "kill failed")
-		return
-	}
-	s.log().Error("runner hijacked by an untrusted job; execution cancelled and registration removed", append(kill, "execution", stopped.ref)...)
-	// Serve the job the runner was minted for right away if we know its run;
-	// otherwise /reconcile backfills it.
-	if stopped.runID != 0 {
-		_, _ = s.dispatchLocked(ctx, stopped.repo, minted, stopped.runID, "hijack_recovery")
-	}
-	plain(w, http.StatusOK, "killed")
+	return true
 }
 
-// runnerRepo returns a served repo through which runners of fullName's owner
-// can be addressed (org scope only), or the zero Repo.
+func (s *Server) targetRepo(fullName string) (githubapp.Repo, bool) {
+	for _, r := range s.o.TargetRepos {
+		if strings.EqualFold(r.String(), fullName) {
+			return r, true
+		}
+	}
+	return githubapp.Repo{}, false
+}
+
+// runnerRepo returns a served repo through which the runners visible to
+// fullName can be addressed: the repo itself if served, otherwise (org scope
+// only) a served repo of the same owner, otherwise the zero Repo.
 func (s *Server) runnerRepo(fullName string) githubapp.Repo {
+	if r, ok := s.targetRepo(fullName); ok {
+		return r
+	}
 	if !s.o.OrgScope {
 		return githubapp.Repo{}
 	}
@@ -414,58 +258,12 @@ func (s *Server) runnerRepo(fullName string) githubapp.Repo {
 	return githubapp.Repo{}
 }
 
-// verifySignature checks X-Hub-Signature-256 in constant time. On a mismatch
-// it re-reads the secret (at most once a minute), so a rotated secret takes
-// effect without a restart.
-func (s *Server) verifySignature(ctx context.Context, body []byte, header string) (bool, error) {
-	sigHex, ok := strings.CutPrefix(header, "sha256=")
-	if !ok {
-		return false, nil
+// scopeKey identifies the runner list a repo's runners live in.
+func (s *Server) scopeKey(r githubapp.Repo) string {
+	if s.o.OrgScope {
+		return "org:" + strings.ToLower(r.Owner)
 	}
-	sig, err := hex.DecodeString(sigHex)
-	if err != nil || len(sig) != sha256.Size {
-		return false, nil
-	}
-	check := func(secret []byte) bool {
-		m := hmac.New(sha256.New, secret)
-		m.Write(body)
-		return hmac.Equal(m.Sum(nil), sig)
-	}
-	s.secretMu.Lock()
-	defer s.secretMu.Unlock()
-	if s.secret != nil && check(s.secret) {
-		return true, nil
-	}
-	if s.secret != nil && s.o.Now().Sub(s.secretFetched) < secretRefetchBackoff {
-		return false, nil
-	}
-	secret, err := s.o.WebhookSecret(ctx)
-	if err != nil {
-		if s.secret != nil {
-			return false, nil
-		}
-		return false, err
-	}
-	s.secret, s.secretFetched = secret, s.o.Now()
-	return check(secret), nil
-}
-
-func hasLabel(labels []string, want string) bool {
-	for _, l := range labels {
-		if strings.EqualFold(l, want) {
-			return true
-		}
-	}
-	return false
-}
-
-func (s *Server) targetRepo(fullName string) (githubapp.Repo, bool) {
-	for _, r := range s.o.TargetRepos {
-		if strings.EqualFold(r.String(), fullName) {
-			return r, true
-		}
-	}
-	return githubapp.Repo{}, false
+	return "repo:" + strings.ToLower(r.String())
 }
 
 func headRepo(run *githubapp.Run) string {
@@ -476,10 +274,12 @@ func headRepo(run *githubapp.Run) string {
 }
 
 // forkReason returns why run must not get a runner, or "" if it may.
+// pull_request_target and workflow_run runs execute with the base repo's
+// privileges, typically on behalf of fork PRs, so both are refused.
 func forkReason(run *githubapp.Run, repo githubapp.Repo) string {
 	switch {
-	case run.Event == "pull_request_target":
-		return "pull_request_target"
+	case run.Event == "pull_request_target" || run.Event == "workflow_run":
+		return run.Event
 	case run.Repository == nil || !strings.EqualFold(run.Repository.FullName, repo.String()):
 		return "repository_mismatch"
 	case run.HeadRepository == nil:
@@ -488,378 +288,4 @@ func forkReason(run *githubapp.Run, repo githubapp.Repo) string {
 		return "head_repository_differs"
 	}
 	return ""
-}
-
-// ---- dispatch ----------------------------------------------------------------
-
-type outcome string
-
-const (
-	outLaunched outcome = "launched"
-	outSkipped  outcome = "already launched"
-	outQueued   outcome = "capacity full; left queued"
-)
-
-// dispatch launches a runner for jobID unless one exists or capacity is full.
-// The order is fixed: idempotency, capacity, mint, store claim, run.
-func (s *Server) dispatch(ctx context.Context, repo githubapp.Repo, jobID, runID int64, source string) (outcome, error) {
-	s.dispatchMu.Lock()
-	defer s.dispatchMu.Unlock()
-	return s.dispatchLocked(ctx, repo, jobID, runID, source)
-}
-
-func (s *Server) dispatchLocked(ctx context.Context, repo githubapp.Repo, jobID, runID int64, source string) (outcome, error) {
-	name := RunnerName(jobID)
-	attrs := []any{"source", source, "repo", repo.String(), "job_id", jobID, "run_id", runID, "runner", name}
-	fail := func(stage string, err error) (outcome, error) {
-		s.log().Error("dispatch failed", append(attrs, "event", logging.EventError, "stage", stage, "error", err.Error())...)
-		return "", err
-	}
-
-	// Idempotency rests on GitHub and Cloud Run state, not on s.launched: a
-	// runner minted for this job may have run another job (swap), and then
-	// this job needs a new runner once that registration is gone.
-	rn, err := s.findRunner(ctx, repo, name)
-	if err != nil {
-		return fail("list_runners", err)
-	}
-	if rn != nil {
-		s.log().Info("runner already registered", append(attrs, "event", logging.EventDispatchSkip, "reason", "registered")...)
-		return outSkipped, nil
-	}
-	active, err := s.o.Launcher.Active(ctx)
-	if err != nil {
-		return fail("list_executions", err)
-	}
-	for _, e := range active {
-		if e.JobID == jobID {
-			s.launched[jobID] = launchRecord{repo: repo, runID: runID, ref: e.Ref, at: s.o.Now()}
-			s.log().Info("execution already running", append(attrs, "event", logging.EventDispatchSkip, "reason", "execution", "execution", e.Ref)...)
-			return outSkipped, nil
-		}
-	}
-	if len(active) >= s.o.MaxConcurrent {
-		s.log().Info("capacity full; job left queued", append(attrs, "event", logging.EventCapacityFull, "active", len(active), "max", s.o.MaxConcurrent)...)
-		return outQueued, nil
-	}
-
-	// Labels: only RUNNER_LABEL, deliberately without self-hosted/Linux/X64,
-	// so a job that targets generic self-hosted labels can never be
-	// assigned to this runner.
-	runnerID, jit, err := s.o.GitHub.GenerateJITConfig(ctx, repo, githubapp.JITRequest{
-		Name: name, RunnerGroupID: s.o.RunnerGroupID, Labels: []string{s.o.RunnerLabel}, WorkFolder: WorkFolder,
-	})
-	if err != nil {
-		if runnerID != 0 {
-			_ = s.o.GitHub.DeleteRunner(ctx, repo, runnerID)
-		}
-		return fail("generate_jitconfig", err)
-	}
-	token, err := s.o.Claims.Issue(jobID, jit)
-	if err != nil {
-		s.deleteAfterFailure(ctx, repo, runnerID, attrs)
-		return fail("issue_claim", err)
-	}
-	ref, err := s.o.Launcher.Launch(ctx, launcher.LaunchSpec{
-		JobID: jobID, RunID: runID, Repo: repo.String(), RunnerName: name, ClaimToken: token,
-	})
-	if err != nil {
-		s.o.Claims.DropJob(jobID)
-		s.deleteAfterFailure(ctx, repo, runnerID, attrs)
-		s.log().Error("launching runner execution failed; registration removed", append(attrs, "event", logging.EventLaunchFailed, "error", err.Error())...)
-		return "", err
-	}
-	s.launched[jobID] = launchRecord{repo: repo, runID: runID, ref: ref, runnerID: runnerID, at: s.o.Now()}
-	s.log().Info("runner launched", append(attrs, "event", logging.EventDispatch, "execution", ref, "runner_id", runnerID, "active", len(active)+1)...)
-	return outLaunched, nil
-}
-
-func (s *Server) deleteAfterFailure(ctx context.Context, repo githubapp.Repo, runnerID int64, attrs []any) {
-	if err := s.o.GitHub.DeleteRunner(ctx, repo, runnerID); err != nil {
-		// /reconcile reaps it once it has been offline long enough.
-		s.log().Error("deleting runner registration after failure failed", append(attrs, "event", logging.EventError, "runner_id", runnerID, "error", err.Error())...)
-	}
-}
-
-func (s *Server) findRunner(ctx context.Context, repo githubapp.Repo, name string) (*githubapp.Runner, error) {
-	runners, err := s.o.GitHub.ListRunners(ctx, repo)
-	if err != nil {
-		return nil, err
-	}
-	for i := range runners {
-		if runners[i].Name == name {
-			return &runners[i], nil
-		}
-	}
-	return nil, nil
-}
-
-// ---- claim -------------------------------------------------------------------
-
-func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Cache-Control", "no-store")
-	token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if !ok || len(token) != claim.TokenLen {
-		s.log().Warn("claim rejected", "event", logging.EventClaimRejected, "reason", "malformed")
-		plain(w, http.StatusGone, "gone")
-		return
-	}
-	jit, jobID, ok := s.o.Claims.Consume(token)
-	if !ok {
-		s.log().Warn("claim rejected", "event", logging.EventClaimRejected, "reason", "unknown_expired_or_used")
-		plain(w, http.StatusGone, "gone")
-		return
-	}
-	b, err := json.Marshal(struct {
-		JITConfig string `json:"jit_config"`
-	}{jit})
-	if err != nil {
-		plain(w, http.StatusInternalServerError, "internal error")
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(b)
-	s.log().Info("claim consumed", "event", logging.EventClaimConsumed, "job_id", jobID, "runner", RunnerName(jobID))
-}
-
-// ---- reconcile ---------------------------------------------------------------
-
-// ReconcileResult is the /reconcile response body.
-type ReconcileResult struct {
-	ClaimsExpired      int      `json:"claims_expired"`
-	RunnersReaped      int      `json:"runners_reaped"`
-	ExecutionsReaped   int      `json:"executions_reaped"`
-	Backfilled         int      `json:"backfilled"`
-	LeftQueued         int      `json:"left_queued"`
-	ForkRunsRejected   int      `json:"fork_runs_rejected"`
-	Errors             []string `json:"errors,omitempty"`
-	CapacityFullAtStop bool     `json:"capacity_full,omitempty"`
-}
-
-func (s *Server) handleReconcile(w http.ResponseWriter, r *http.Request) {
-	if s.o.MediatorURL == "" {
-		s.log().Error("MEDIATOR_URL is not set; cannot verify the reconciler", "event", logging.EventError, "reason", "not_configured")
-		plain(w, http.StatusServiceUnavailable, "not configured")
-		return
-	}
-	token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if !ok || token == "" {
-		s.log().Warn("reconcile denied", "event", logging.EventReconcileDenied, "reason", "no bearer token")
-		plain(w, http.StatusUnauthorized, "unauthorized")
-		return
-	}
-	if err := s.o.OIDC.Verify(r.Context(), token); err != nil {
-		s.log().Warn("reconcile denied", "event", logging.EventReconcileDenied, "reason", err.Error())
-		plain(w, http.StatusUnauthorized, "unauthorized")
-		return
-	}
-	res := s.Reconcile(r.Context())
-	status := http.StatusOK
-	if len(res.Errors) > 0 {
-		status = http.StatusInternalServerError
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(res)
-}
-
-// Reconcile expires claims, reaps stale registrations and executions, and
-// backfills queued labelled jobs that have no runner, within capacity.
-func (s *Server) Reconcile(ctx context.Context) ReconcileResult {
-	s.dispatchMu.Lock()
-	defer s.dispatchMu.Unlock()
-	var res ReconcileResult
-	addErr := func(stage string, err error) {
-		res.Errors = append(res.Errors, stage+": "+err.Error())
-		s.log().Error("reconcile step failed", "event", logging.EventError, "stage", stage, "error", err.Error())
-	}
-	now := s.o.Now()
-
-	res.ClaimsExpired = s.o.Claims.Sweep()
-	for id, rec := range s.launched {
-		if now.Sub(rec.at) > s.o.TaskTimeout+s.o.ReapAfter {
-			delete(s.launched, id)
-		}
-	}
-
-	s.reapRunners(ctx, now, &res, addErr)
-
-	n, err := s.o.Launcher.ReapOrphans(ctx, s.o.TaskTimeout+s.o.ReapAfter)
-	res.ExecutionsReaped = n
-	if n > 0 {
-		s.log().Warn("cancelled executions past the task timeout", "event", logging.EventExecutionReaped, "count", n)
-	}
-	if err != nil {
-		addErr("reap_executions", err)
-	}
-
-	s.backfill(ctx, &res, addErr)
-
-	s.log().Info("reconcile finished", "event", logging.EventReconcile,
-		"claims_expired", res.ClaimsExpired, "runners_reaped", res.RunnersReaped, "executions_reaped", res.ExecutionsReaped,
-		"backfilled", res.Backfilled, "left_queued", res.LeftQueued, "fork_runs_rejected", res.ForkRunsRejected, "errors", len(res.Errors))
-	return res
-}
-
-// runnerScopes returns one repo per distinct runner list: every repo with
-// repo scope, one repo per owner with org scope.
-func (s *Server) runnerScopes() []githubapp.Repo {
-	if !s.o.OrgScope {
-		return s.o.TargetRepos
-	}
-	seen := map[string]bool{}
-	var out []githubapp.Repo
-	for _, r := range s.o.TargetRepos {
-		k := strings.ToLower(r.Owner)
-		if !seen[k] {
-			seen[k] = true
-			out = append(out, r)
-		}
-	}
-	return out
-}
-
-// reapRunners deletes offline cr-job-* registrations older than ReapAfter.
-// Age is measured from the launch when this process launched the runner,
-// otherwise from when reconcile first saw it offline. Runners whose claim is
-// still pending (cold start) are kept.
-func (s *Server) reapRunners(ctx context.Context, now time.Time, res *ReconcileResult, addErr func(string, error)) {
-	stillOffline := map[string]bool{}
-	for _, repo := range s.runnerScopes() {
-		runners, err := s.o.GitHub.ListRunners(ctx, repo)
-		if err != nil {
-			addErr("list_runners "+repo.String(), err)
-			// Keep first-seen times we could not re-check.
-			for name := range s.offlineSeen {
-				stillOffline[name] = true
-			}
-			continue
-		}
-		for _, rn := range runners {
-			jobID, ok := parseRunnerName(rn.Name)
-			if !ok || rn.Status != "offline" || rn.Busy {
-				continue
-			}
-			stillOffline[rn.Name] = true
-			since, seen := s.offlineSeen[rn.Name]
-			if !seen {
-				since = now
-				s.offlineSeen[rn.Name] = now
-			}
-			if rec, ok := s.launched[jobID]; ok && rec.at.Before(since) {
-				since = rec.at
-			}
-			if now.Sub(since) < s.o.ReapAfter || s.o.Claims.Pending(jobID) {
-				continue
-			}
-			if err := s.o.GitHub.DeleteRunner(ctx, repo, rn.ID); err != nil {
-				addErr("delete_runner "+rn.Name, err)
-				continue
-			}
-			delete(s.offlineSeen, rn.Name)
-			delete(s.launched, jobID)
-			res.RunnersReaped++
-			s.log().Warn("deleted stale offline runner registration", "event", logging.EventRunnerReaped,
-				"repo", repo.String(), "runner", rn.Name, "runner_id", rn.ID, "offline_for", now.Sub(since).String())
-		}
-	}
-	for name := range s.offlineSeen {
-		if !stillOffline[name] {
-			delete(s.offlineSeen, name)
-		}
-	}
-}
-
-func parseRunnerName(name string) (int64, bool) {
-	rest, ok := strings.CutPrefix(name, RunnerPrefix)
-	if !ok {
-		return 0, false
-	}
-	id, err := strconv.ParseInt(rest, 10, 64)
-	return id, err == nil && id > 0
-}
-
-type candidate struct {
-	repo    githubapp.Repo
-	job     githubapp.Job
-	created time.Time
-}
-
-// backfill dispatches queued labelled jobs, oldest first, until capacity is
-// full.
-func (s *Server) backfill(ctx context.Context, res *ReconcileResult, addErr func(string, error)) {
-	var cands []candidate
-	for _, repo := range s.o.TargetRepos {
-		for _, status := range []string{"queued", "in_progress"} {
-			runs, err := s.o.GitHub.ListRuns(ctx, repo, status)
-			if err != nil {
-				addErr("list_runs "+repo.String(), err)
-				continue
-			}
-			for i := range runs {
-				run := &runs[i]
-				jobs, err := s.o.GitHub.ListJobs(ctx, repo, run.ID)
-				if err != nil {
-					addErr("list_jobs "+repo.String(), err)
-					continue
-				}
-				var labelled []githubapp.Job
-				for _, j := range jobs {
-					if j.Status == "queued" && hasLabel(j.Labels, s.o.RunnerLabel) {
-						labelled = append(labelled, j)
-					}
-				}
-				if len(labelled) == 0 {
-					continue
-				}
-				if reason := forkReason(run, repo); reason != "" {
-					res.ForkRunsRejected++
-					if !s.forkLogged[run.ID] {
-						s.forkLogged[run.ID] = true
-						s.log().Warn("refusing to backfill a fork or pull_request_target run", "event", logging.EventRejectFork,
-							"source", "reconcile", "repo", repo.String(), "run_id", run.ID, "reason", reason, "run_event", run.Event, "head_repository", headRepo(run))
-					}
-					continue
-				}
-				for _, j := range labelled {
-					cands = append(cands, candidate{repo: repo, job: j, created: j.CreatedAt})
-				}
-			}
-		}
-	}
-	cands = sortCandidates(cands)
-	for i, c := range cands {
-		out, err := s.dispatchLocked(ctx, c.repo, c.job.ID, c.job.RunID, "reconcile")
-		switch {
-		case err != nil:
-			addErr("dispatch", err)
-		case out == outLaunched:
-			res.Backfilled++
-		case out == outQueued:
-			res.LeftQueued = len(cands) - i
-			res.CapacityFullAtStop = true
-			return
-		}
-	}
-}
-
-// sortCandidates orders oldest first (FIFO) and drops duplicate job IDs (a
-// run can move from queued to in_progress between the two list calls).
-func sortCandidates(c []candidate) []candidate {
-	sort.Slice(c, func(i, j int) bool {
-		if !c[i].created.Equal(c[j].created) {
-			return c[i].created.Before(c[j].created)
-		}
-		return c[i].job.ID < c[j].job.ID
-	})
-	out := c[:0]
-	seen := map[int64]bool{}
-	for _, x := range c {
-		if !seen[x.job.ID] {
-			seen[x.job.ID] = true
-			out = append(out, x)
-		}
-	}
-	return out
 }

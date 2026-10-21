@@ -32,10 +32,11 @@ type GitHubRun struct {
 
 // GitHubJob is a workflow job in the fake.
 type GitHubJob struct {
-	ID        int64
-	Status    string
-	Labels    []string
-	CreatedAt time.Time
+	ID         int64
+	Status     string
+	Labels     []string
+	RunnerName string
+	CreatedAt  time.Time
 }
 
 // GitHubRunner is a registered runner in the fake.
@@ -63,9 +64,14 @@ type GitHub struct {
 	jitSeq     int
 	tokens     map[string]time.Time // issued installation tokens -> expiry
 
+	// InstallationID is what the installation lookup returns (default 77);
+	// access tokens for any other ID answer 404.
+	InstallationID int64
+
 	// Failure injection.
 	FailJIT       bool
 	FailDelete    bool
+	BusyOnDelete  bool          // DELETE answers 422 as if the runner just picked up a job
 	TokenLifetime time.Duration // default 1 h
 
 	// Observations.
@@ -76,6 +82,7 @@ type GitHub struct {
 	IssuedTokens []string
 	IssuedJIT    []string
 	RunGets      int
+	JobGets      int
 	AuthFailures int
 }
 
@@ -83,13 +90,14 @@ type GitHub struct {
 // matching appKey.
 func NewGitHub(appID int64, appKey *rsa.PublicKey) *GitHub {
 	g := &GitHub{
-		AppID:      appID,
-		AppKey:     appKey,
-		Now:        time.Now,
-		runs:       map[int64]*GitHubRun{},
-		runners:    map[int64]*GitHubRunner{},
-		nextRunner: 1000,
-		tokens:     map[string]time.Time{},
+		AppID:          appID,
+		AppKey:         appKey,
+		Now:            time.Now,
+		runs:           map[int64]*GitHubRun{},
+		runners:        map[int64]*GitHubRunner{},
+		nextRunner:     1000,
+		tokens:         map[string]time.Time{},
+		InstallationID: 77,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /repos/{owner}/{repo}/installation", g.jwtOnly(g.installation))
@@ -98,6 +106,7 @@ func NewGitHub(appID int64, appKey *rsa.PublicKey) *GitHub {
 	mux.HandleFunc("GET /repos/{owner}/{repo}/actions/runs/{id}", g.tokenOnly(g.getRun))
 	mux.HandleFunc("GET /repos/{owner}/{repo}/actions/runs", g.tokenOnly(g.listRuns))
 	mux.HandleFunc("GET /repos/{owner}/{repo}/actions/runs/{id}/jobs", g.tokenOnly(g.listJobs))
+	mux.HandleFunc("GET /repos/{owner}/{repo}/actions/jobs/{id}", g.tokenOnly(g.getJob))
 	mux.HandleFunc("GET /repos/{owner}/{repo}/actions/runners", g.tokenOnly(g.listRunners))
 	mux.HandleFunc("GET /orgs/{org}/actions/runners", g.tokenOnly(g.listRunners))
 	mux.HandleFunc("POST /repos/{owner}/{repo}/actions/runners/generate-jitconfig", g.tokenOnly(g.jit))
@@ -117,6 +126,66 @@ func (g *GitHub) AddRun(r GitHubRun) {
 	defer g.mu.Unlock()
 	cp := r
 	g.runs[r.ID] = &cp
+}
+
+// SetJob adds job to run runID, or replaces the job with the same ID.
+func (g *GitHub) SetJob(runID int64, job GitHubJob) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	run, ok := g.runs[runID]
+	if !ok {
+		panic(fmt.Sprintf("fakes: no run %d", runID))
+	}
+	for i := range run.Jobs {
+		if run.Jobs[i].ID == job.ID {
+			run.Jobs[i] = job
+			return
+		}
+	}
+	run.Jobs = append(run.Jobs, job)
+}
+
+// EnsureJob adds job to run runID unless a job with its ID exists.
+func (g *GitHub) EnsureJob(runID int64, job GitHubJob) {
+	g.mu.Lock()
+	run, ok := g.runs[runID]
+	if ok {
+		for _, j := range run.Jobs {
+			if j.ID == job.ID {
+				g.mu.Unlock()
+				return
+			}
+		}
+	}
+	g.mu.Unlock()
+	if ok {
+		g.SetJob(runID, job)
+	}
+}
+
+// RemoveRunner deletes runner name, as GitHub does when an ephemeral runner
+// finishes its job.
+func (g *GitHub) RemoveRunner(name string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for id, r := range g.runners {
+		if r.Name == name {
+			delete(g.runners, id)
+		}
+	}
+}
+
+// SetRunnerState sets the status and busy flag of runner name.
+func (g *GitHub) SetRunnerState(name, status string, busy bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, r := range g.runners {
+		if r.Name == name {
+			r.Status, r.Busy = status, busy
+			return
+		}
+	}
+	panic("fakes: no runner " + name)
 }
 
 // AddRunner registers a runner directly (as if left over from earlier).
@@ -243,11 +312,19 @@ func (g *GitHub) tokenOnly(h http.HandlerFunc) http.HandlerFunc {
 }
 
 func (g *GitHub) installation(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"id": 77})
+	g.mu.Lock()
+	id := g.InstallationID
+	g.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{"id": id})
 }
 
 func (g *GitHub) accessToken(w http.ResponseWriter, r *http.Request) {
 	g.mu.Lock()
+	if r.PathValue("id") != strconv.FormatInt(g.InstallationID, 10) {
+		g.mu.Unlock()
+		writeJSON(w, http.StatusNotFound, map[string]string{"message": "Not Found"})
+		return
+	}
 	g.nextToken++
 	g.TokenMints++
 	tok := fmt.Sprintf("ghs_FAKEinstalltoken%04d", g.nextToken)
@@ -320,12 +397,36 @@ func (g *GitHub) listJobs(w http.ResponseWriter, r *http.Request) {
 	}
 	jobs := []any{}
 	for _, j := range run.Jobs {
-		jobs = append(jobs, map[string]any{
-			"id": j.ID, "run_id": run.ID, "status": j.Status, "labels": j.Labels,
-			"created_at": j.CreatedAt.UTC().Format(time.RFC3339),
-		})
+		jobs = append(jobs, jobJSON(run.ID, j))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"total_count": len(jobs), "jobs": jobs})
+}
+
+func jobJSON(runID int64, j GitHubJob) map[string]any {
+	return map[string]any{
+		"id": j.ID, "run_id": runID, "status": j.Status, "labels": j.Labels, "runner_name": j.RunnerName,
+		"created_at": j.CreatedAt.UTC().Format(time.RFC3339),
+	}
+}
+
+func (g *GitHub) getJob(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	full := r.PathValue("owner") + "/" + r.PathValue("repo")
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.JobGets++
+	for _, run := range g.runs {
+		if !strings.EqualFold(run.Repo, full) {
+			continue
+		}
+		for _, j := range run.Jobs {
+			if j.ID == id {
+				writeJSON(w, http.StatusOK, jobJSON(run.ID, j))
+				return
+			}
+		}
+	}
+	writeJSON(w, http.StatusNotFound, map[string]string{"message": "Not Found"})
 }
 
 func scopeOf(r *http.Request) string {
@@ -401,8 +502,13 @@ func (g *GitHub) deleteRunner(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"message": "boom"})
 		return
 	}
-	if _, ok := g.runners[id]; !ok {
+	rn, ok := g.runners[id]
+	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"message": "Not Found"})
+		return
+	}
+	if rn.Busy || g.BusyOnDelete {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"message": "Bad request - Runner is still running a job"})
 		return
 	}
 	delete(g.runners, id)

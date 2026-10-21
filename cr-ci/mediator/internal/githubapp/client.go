@@ -189,6 +189,14 @@ func (c *Client) installationToken(ctx context.Context, r Repo) (string, int64, 
 	}
 	path := "/app/installations/" + strconv.FormatInt(id, 10) + "/access_tokens"
 	if err := c.do(ctx, http.MethodPost, path, jwt, nil, &out); err != nil {
+		if IsStatus(err, http.StatusNotFound) || IsStatus(err, http.StatusUnauthorized) {
+			// The App may have been reinstalled under a new installation
+			// ID: look it up again on the next call.
+			c.mu.Lock()
+			delete(c.installIDs, c.installKey(r))
+			delete(c.tokens, id)
+			c.mu.Unlock()
+		}
 		return "", 0, err
 	}
 	if out.Token == "" || out.ExpiresAt.IsZero() {
@@ -320,6 +328,15 @@ func (c *Client) GetRun(ctx context.Context, r Repo, runID int64) (*Run, error) 
 		return nil, err
 	}
 	return &run, nil
+}
+
+// GetJob returns workflow job jobID of r.
+func (c *Client) GetJob(ctx context.Context, r Repo, jobID int64) (*Job, error) {
+	var j Job
+	if err := c.api(ctx, r, http.MethodGet, repoPath(r)+"/actions/jobs/"+strconv.FormatInt(jobID, 10), nil, &j); err != nil {
+		return nil, err
+	}
+	return &j, nil
 }
 
 // ListRuns returns the workflow runs of r with the given status (for

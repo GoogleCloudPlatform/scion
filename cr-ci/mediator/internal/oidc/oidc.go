@@ -167,7 +167,9 @@ func (v *Verifier) key(ctx context.Context, kid string) (*rsa.PublicKey, error) 
 	if k, ok := v.keys[kid]; ok && now.Before(v.keysExpire) {
 		return k, nil
 	}
-	if v.keys == nil || !now.Before(v.keysExpire) || now.Sub(v.lastFetched) >= minRefetchDelay {
+	// Fetch at most once a minute, whether the key set is missing, stale or
+	// lacks kid, so unauthenticated callers cannot drive a fetch per request.
+	if v.lastFetched.IsZero() || now.Sub(v.lastFetched) >= minRefetchDelay {
 		if err := v.fetch(ctx, now); err != nil {
 			if k, ok := v.keys[kid]; ok {
 				return k, nil // keep serving the last good key set

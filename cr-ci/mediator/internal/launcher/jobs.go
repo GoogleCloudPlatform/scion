@@ -43,8 +43,8 @@ type JobsLauncher struct {
 }
 
 var (
-	_ RunnerLauncher = (*JobsLauncher)(nil)
-	_ ActiveLister   = (*JobsLauncher)(nil)
+	_ RunnerLauncher  = (*JobsLauncher)(nil)
+	_ ExecutionLister = (*JobsLauncher)(nil)
 )
 
 func (l *JobsLauncher) jobName() string {
@@ -99,15 +99,15 @@ func (l *JobsLauncher) Launch(ctx context.Context, spec LaunchSpec) (string, err
 	return op.Metadata.Name, nil
 }
 
-// Terminate cancels the execution for jobID.
-func (l *JobsLauncher) Terminate(ctx context.Context, jobID int64, ref string) error {
+// Terminate cancels the execution of runner runnerName.
+func (l *JobsLauncher) Terminate(ctx context.Context, runnerName, ref string) error {
 	if ref == "" {
 		active, err := l.Active(ctx)
 		if err != nil {
 			return err
 		}
 		for _, e := range active {
-			if e.JobID == jobID {
+			if e.RunnerName == runnerName {
 				ref = e.Ref
 				break
 			}
@@ -157,6 +157,21 @@ func (l *JobsLauncher) ReapOrphans(ctx context.Context, maxAge time.Duration) (i
 
 // Active lists the job's executions that have no completion time.
 func (l *JobsLauncher) Active(ctx context.Context) ([]Execution, error) {
+	all, err := l.Executions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var active []Execution
+	for _, e := range all {
+		if !e.Done {
+			active = append(active, e)
+		}
+	}
+	return active, nil
+}
+
+// Executions lists all of the job's executions.
+func (l *JobsLauncher) Executions(ctx context.Context) ([]Execution, error) {
 	var active []Execution
 	pageToken := ""
 	for page := 0; page < maxExecPages; page++ {
@@ -181,14 +196,14 @@ func (l *JobsLauncher) Active(ctx context.Context) ([]Execution, error) {
 			return nil, err
 		}
 		for _, e := range out.Executions {
-			if e.CompletionTime != "" {
-				continue
-			}
-			ex := Execution{Ref: e.Name, Created: e.CreateTime}
+			ex := Execution{Ref: e.Name, Created: e.CreateTime, Done: e.CompletionTime != ""}
 			for _, c := range e.Template.Containers {
 				for _, v := range c.Env {
-					if v.Name == EnvJobID {
+					switch v.Name {
+					case EnvJobID:
 						ex.JobID, _ = strconv.ParseInt(v.Value, 10, 64)
+					case EnvRunnerName:
+						ex.RunnerName = v.Value
 					}
 				}
 			}
@@ -199,7 +214,7 @@ func (l *JobsLauncher) Active(ctx context.Context) ([]Execution, error) {
 		}
 		pageToken = out.NextPageToken
 	}
-	// Fail closed: an incomplete count could exceed capacity.
+	// Fail closed: an incomplete list could exceed capacity.
 	return nil, fmt.Errorf("cloud run: more than %d pages of executions for %s", maxExecPages, l.jobName())
 }
 
