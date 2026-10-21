@@ -2215,12 +2215,13 @@ authDone:
 	// where the workspace is mounted: the Kubernetes runtime builds its
 	// workspace mounts from containerWorkspace and the NFS* fields above.
 	// It reads RepoRoot only to decide whether the shared workspace's
-	// in-project agents dir is kept out of the pod (k8sWorkspaceAgentsExcluded). The
-	// repoRoot computed earlier was validated against the PRE-backend path,
-	// so if the backend actually changed it, re-resolve against the value
-	// RunConfig will use, through the same validatedWorktreeRepoRoot
-	// comparison used above and in the persistence gate — not a separate,
-	// inline comparison of this layout's own.
+	// in-project agents dir is kept out of the pod (see
+	// k8sWorkspaceAgentsExcluded). The repoRoot computed earlier was
+	// validated against the PRE-backend path, so if the backend actually
+	// changed it, re-resolve against the value RunConfig will use, through
+	// the same validatedWorktreeRepoRoot comparison used above and in the
+	// persistence gate — not a separate, inline comparison of this layout's
+	// own.
 	if effectiveWorkspace != preBackendWorkspace && !emptyPerAgent {
 		repoRoot = validatedWorktreeRepoRoot(candidateRepoRoot, effectiveWorkspace)
 		if repoRoot == "" {

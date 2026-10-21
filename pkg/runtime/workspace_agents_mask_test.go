@@ -16,12 +16,12 @@ package runtime
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -148,86 +148,165 @@ func TestStripUnsupportedAppleFlags_KeepsTmpfs(t *testing.T) {
 	}
 }
 
-// stubAppleMaskVersionCheck replaces the once and the version check for
-// the test and returns a pointer to the number of checks run.
-func stubAppleMaskVersionCheck(t *testing.T) *int {
+// appleGateMock writes a mock container CLI that records each subcommand
+// in calls, prints version for --version, prints cid for run, and answers
+// exec (the mask check) with statOut and exit code statRC. A statRC of -1
+// makes exec hang in a child that keeps the output pipe open.
+func appleGateMock(t *testing.T, version, statOut string, statRC int) (command, calls string) {
 	t.Helper()
-	prevOnce, prevCheck := appleMaskVersionOnce, appleMaskVersionCheck
-	calls := 0
-	appleMaskVersionOnce = &sync.Once{}
-	appleMaskVersionCheck = func(context.Context, string) bool { calls++; return false }
-	t.Cleanup(func() { appleMaskVersionOnce, appleMaskVersionCheck = prevOnce, prevCheck })
-	return &calls
-}
-
-// The Apple runtime masks the in-project agents root with --tmpfs only
-// when that directory already exists, and checks the CLI version once per
-// process when it does.
-func TestAppleContainerRuntime_Run_SharedWorkspaceAgentsMask(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	mockContainer := filepath.Join(t.TempDir(), "mock-container")
-	if err := os.WriteFile(mockContainer, []byte("#!/bin/sh\necho \"$@\"\n"), 0o755); err != nil {
+	dir := t.TempDir()
+	calls = filepath.Join(dir, "calls")
+	command = filepath.Join(dir, "mock-container")
+	script := fmt.Sprintf(`#!/bin/sh
+echo "$*" >> %q
+case "$1" in
+--version) printf '%%s\n' %q ;;
+run) echo cid ;;
+exec) [ %d -lt 0 ] && sleep 5; printf '%%b\n' %q; exit %d ;;
+esac
+exit 0
+`, calls, version, statRC, statOut, max(statRC, 0))
+	if err := os.WriteFile(command, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	rt := &AppleContainerRuntime{Command: mockContainer}
-	run := func(t *testing.T, root string) string {
-		t.Helper()
-		out, err := rt.Run(context.Background(), RunConfig{
-			Harness:      &harness.Generic{},
-			Name:         "test-agent",
-			UnixUsername: "scion",
-			Image:        "scion-agent:latest",
-			RepoRoot:     root,
-			Workspace:    root,
-		})
-		if err != nil {
-			t.Fatalf("Run: %v", err)
-		}
-		return out
-	}
-
-	t.Run("agents dir exists", func(t *testing.T) {
-		calls := stubAppleMaskVersionCheck(t)
-		root := sharedRepoWithScionDir(t)
-		for i := 0; i < 2; i++ {
-			out := run(t, root)
-			if !strings.Contains(out, "--tmpfs /workspace/.scion/agents") {
-				t.Errorf("Apple run args have no --tmpfs mask of /workspace/.scion/agents: %q", out)
-			}
-			if strings.Contains(out, "type=tmpfs") {
-				t.Errorf("Apple run args keep a --mount tmpfs value: %q", out)
-			}
-		}
-		if *calls != 1 {
-			t.Errorf("version check ran %d times across two Runs, want 1", *calls)
-		}
-	})
-
-	t.Run("no agents dir", func(t *testing.T) {
-		calls := stubAppleMaskVersionCheck(t)
-		root := filepath.Join(t.TempDir(), "repo")
-		if err := os.MkdirAll(filepath.Join(root, ".scion"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		out := run(t, root)
-		if strings.Contains(out, "--tmpfs") || strings.Contains(out, "type=tmpfs") {
-			t.Errorf("Apple run args mask a missing agents dir: %q", out)
-		}
-		if *calls != 0 {
-			t.Errorf("version check ran %d times with no mask, want 0", *calls)
-		}
-	})
+	return command, calls
 }
 
-func TestWarnAppleMaskVersion(t *testing.T) {
+// readAppleGateCalls returns the subcommands the mock recorded, one per call.
+func readAppleGateCalls(t *testing.T, calls string) []string {
+	t.Helper()
+	b, err := os.ReadFile(calls)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		out = append(out, strings.Fields(line)[0])
+	}
+	return out
+}
+
+// The Apple runtime masks the in-project agents root with --tmpfs only when
+// that directory already exists. It then refuses a CLI older than 0.12.0
+// before the run, and after the run checks that the mask is mounted
+// (different device from /workspace/.scion), removing the container and
+// failing the start otherwise.
+func TestAppleContainerRuntime_Run_AgentsMaskGate(t *testing.T) {
+	const (
+		v011  = "container CLI version 0.11.0 (build: release, commit: abc1234)"
+		v012  = "container CLI version 0.12.0 (build: release, commit: abc1234)"
+		v160  = "container CLI version 1.6.0 (build: release, commit: abc1234)"
+		vBad  = "container CLI version unknown"
+		mount = "41\n40"
+	)
+	withAgents := sharedRepoWithScionDir(t)
+	noAgents := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(filepath.Join(noAgents, ".scion"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	for _, tt := range []struct {
-		name, output     string
-		fail, warn, hang bool
+		name, root, version, statOut string
+		statRC                       int
+		wantErr                      []string // substrings; nil means the start succeeds
+		wantCalls                    []string
 	}{
-		{name: "below the floor", output: "container CLI version 0.11.0 (build: release, commit: abc1234)", warn: true},
-		{name: "dev build below the floor", output: "container CLI version 0.10.0-27-g9fd15f0 (build: debug, commit: 9fd15f0)", warn: true},
-		{name: "at the floor", output: "container CLI version 0.12.0 (build: release, commit: abc1234)"},
-		{name: "above the floor", output: "container CLI version 1.6.0 (build: release, commit: abc1234)"},
+		{"below the floor refuses before run", withAgents, v011, mount, 0,
+			[]string{"0.11.0", "older than 0.12.0", "nested mount ordering"}, []string{"--version"}},
+		{"at the floor, mask mounted", withAgents, v012, mount, 0, nil, []string{"--version", "run", "exec"}},
+		{"above the floor, mask mounted", withAgents, v160, mount, 0, nil, []string{"--version", "run", "exec"}},
+		{"unparseable version, mask mounted", withAgents, vBad, mount, 0, nil, []string{"--version", "run", "exec"}},
+		{"same device fails", withAgents, v160, "40\n40", 0,
+			[]string{"mask is not mounted", "version 1.6.0"}, []string{"--version", "run", "exec", "kill", "rm"}},
+		{"same device, unknown version", withAgents, vBad, "40\n40", 0,
+			[]string{"mask is not mounted", "version unknown"}, []string{"--version", "run", "exec", "kill", "rm"}},
+		{"stat failure fails", withAgents, v160, "stat: cannot stat", 1,
+			[]string{"could not check that the mask is mounted"}, []string{"--version", "run", "exec", "kill", "rm"}},
+		{"garbage output fails", withAgents, v160, "not a device", 0,
+			[]string{"unexpected stat output"}, []string{"--version", "run", "exec", "kill", "rm"}},
+		{"mask check hangs fails", withAgents, v160, mount, -1,
+			[]string{"could not check that the mask is mounted"}, []string{"--version", "run", "exec", "kill", "rm"}},
+		{"one value fails", withAgents, v160, "41", 0,
+			[]string{"unexpected stat output"}, []string{"--version", "run", "exec", "kill", "rm"}},
+		{"no mask: no version or exec call", noAgents, v011, "40\n40", 0, nil, []string{"run"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			if tt.statRC < 0 {
+				prev := appleMaskCheckTimeout
+				appleMaskCheckTimeout = 50 * time.Millisecond
+				t.Cleanup(func() { appleMaskCheckTimeout = prev })
+			}
+			command, calls := appleGateMock(t, tt.version, tt.statOut, tt.statRC)
+			rt := &AppleContainerRuntime{Command: command}
+			id, err := rt.Run(context.Background(), RunConfig{
+				Harness:      &harness.Generic{},
+				Name:         "test-agent",
+				UnixUsername: "scion",
+				Image:        "scion-agent:latest",
+				RepoRoot:     tt.root,
+				Workspace:    tt.root,
+			})
+			if tt.wantErr == nil {
+				if err != nil || id != "cid" {
+					t.Fatalf("Run = (%q, %v), want (cid, nil)", id, err)
+				}
+			} else {
+				if err == nil {
+					t.Fatalf("Run succeeded (%q), want an error", id)
+				}
+				for _, w := range tt.wantErr {
+					if !strings.Contains(err.Error(), w) {
+						t.Errorf("error %q does not contain %q", err, w)
+					}
+				}
+			}
+			if got := readAppleGateCalls(t, calls); !slices.Equal(got, tt.wantCalls) {
+				t.Errorf("CLI calls = %q, want %q", got, tt.wantCalls)
+			}
+		})
+	}
+}
+
+// The run args carry the --tmpfs mask, not a --mount value, and the mask
+// check stats the agents dir and its parent in the started container.
+func TestAppleContainerRuntime_Run_AgentsMaskArgs(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	command, calls := appleGateMock(t, "container CLI version 1.6.0", "41\n40", 0)
+	rt := &AppleContainerRuntime{Command: command}
+	root := sharedRepoWithScionDir(t)
+	if _, err := rt.Run(context.Background(), RunConfig{
+		Harness: &harness.Generic{}, Name: "test-agent", UnixUsername: "scion",
+		Image: "scion-agent:latest", RepoRoot: root, Workspace: root,
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	b, err := os.ReadFile(calls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(b)
+	if !strings.Contains(log, "--tmpfs /workspace/.scion/agents") || strings.Contains(log, "type=tmpfs") {
+		t.Errorf("run args: %s", log)
+	}
+	if !strings.Contains(log, "exec --user scion cid stat -c %d /workspace/.scion/agents /workspace/.scion") {
+		t.Errorf("mask check call missing: %s", log)
+	}
+}
+
+func TestAppleCLIVersion(t *testing.T) {
+	for _, tt := range []struct {
+		name, output string
+		fail, hang   bool
+		version      string
+		below, ok    bool
+	}{
+		{name: "below the floor", output: "container CLI version 0.11.0 (build: release, commit: abc1234)", version: "0.11.0", below: true, ok: true},
+		{name: "dev build below the floor", output: "container CLI version 0.10.0-27-g9fd15f0 (build: debug, commit: 9fd15f0)", version: "0.10.0", below: true, ok: true},
+		{name: "at the floor", output: "container CLI version 0.12.0 (build: release, commit: abc1234)", version: "0.12.0", ok: true},
+		{name: "above the floor", output: "container CLI version 1.6.0 (build: release, commit: abc1234)", version: "1.6.0", ok: true},
 		{name: "unparseable", output: "container CLI version unknown"},
 		{name: "command fails", output: "container CLI version 0.1.0", fail: true},
 		{name: "command hangs", output: "container CLI version 0.1.0", hang: true},
@@ -240,40 +319,31 @@ func TestWarnAppleMaskVersion(t *testing.T) {
 				script += "exit 1\n"
 			}
 			if tt.hang {
-				// exec, so the timeout kills the process holding the pipe.
-				script = "#!/bin/sh\nexec sleep 5\n"
+				// A child that keeps the output pipe open: WaitDelay must
+				// still bound the call.
+				script = "#!/bin/sh\nsleep 5\n"
 				prev := appleVersionTimeout
 				appleVersionTimeout = 50 * time.Millisecond
 				t.Cleanup(func() { appleVersionTimeout = prev })
 			}
-			start := time.Now()
-			defer func() {
-				if d := time.Since(start); d > 2*time.Second {
-					t.Errorf("version check took %v, want it bounded by the timeout", d)
-				}
-			}()
 			mock := filepath.Join(t.TempDir(), "mock-container")
 			if err := os.WriteFile(mock, []byte(script), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			if got := warnAppleMaskVersion(context.Background(), mock); got != tt.warn {
-				t.Errorf("warnAppleMaskVersion = %v, want %v", got, tt.warn)
+			start := time.Now()
+			version, below, ok := appleCLIVersion(context.Background(), mock)
+			if d := time.Since(start); d > 4*time.Second {
+				t.Errorf("version check took %v, want it bounded", d)
 			}
-			var warns int
+			if version != tt.version || below != tt.below || ok != tt.ok {
+				t.Errorf("appleCLIVersion = (%q, %v, %v), want (%q, %v, %v)", version, below, ok, tt.version, tt.below, tt.ok)
+			}
+			if _, logged := h.findRecord("Could not read the container CLI version"); logged == tt.ok {
+				t.Errorf("debug record present = %v, want %v", logged, !tt.ok)
+			}
 			for _, r := range h.records() {
-				if r.level == slog.LevelWarn {
-					warns++
-					if !strings.Contains(r.msg, "0.12.0") {
-						t.Errorf("warning %q does not name the 0.12.0 floor", r.msg)
-					}
-				}
-			}
-			if want := map[bool]int{true: 1}[tt.warn]; warns != want {
-				t.Errorf("%d warnings, want %d", warns, want)
-			}
-			if !tt.warn {
-				if _, ok := h.findRecord("Could not read the container CLI version"); ok != (tt.fail || tt.hang || tt.name == "unparseable") {
-					t.Errorf("debug record present = %v", ok)
+				if r.level >= slog.LevelWarn {
+					t.Errorf("unexpected %v record %q", r.level, r.msg)
 				}
 			}
 		})
