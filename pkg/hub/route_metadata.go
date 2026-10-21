@@ -993,10 +993,11 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 
 	// -------------------------------------------------------------------------
-	// Hub admin: Role management (PR-C1). The read routes admit a
-	// hub-boundary token carrying role:read; every write method on them is
-	// checked again inline with its own permission, which no token selector
-	// admits.
+	// Hub admin: Role management (PR-C1). The route guard checks role.read
+	// on the hub-level role records for every method, so a hub-boundary
+	// token needs role:read; every write method is checked again inline with
+	// its own permission (role:create, role:update or role:delete on the
+	// same records) and the delegation check on the role's permissions.
 	// -------------------------------------------------------------------------
 	"/api/v1/admin/roles": {
 		Pattern: "/api/v1/admin/roles", RouteID: "admin.roles",
@@ -1014,6 +1015,7 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/admin/roles/import", RouteID: "admin.roles.import",
 		Classification: RouteHubAdmin,
 		Permission:     "role.read", Resource: "role", Action: "read",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/roles/": {
 		Pattern: "/api/v1/admin/roles/", RouteID: "admin.roles.byId",
@@ -1027,8 +1029,9 @@ var routeMetadataTable = map[string]RouteMetadata{
 		// inline. GET checks role_binding.read at hub scope. POST defers
 		// to the membership service for project-scoped requests (project
 		// owners need only project.manage, not hub-level role_binding.create)
-		// and checks role_binding.create at hub scope for system-scoped
-		// requests.
+		// for built-in project roles, and checks role_binding.create on the
+		// hub-level binding records for custom project roles and
+		// system-scoped requests.
 		Classification: RouteAuthenticated,
 	},
 	"/api/v1/admin/role-bindings/": {
@@ -1050,10 +1053,12 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 
 	// -------------------------------------------------------------------------
-	// Hub admin: Access Constraints (AC1). The read routes admit a
-	// hub-boundary token carrying access_constraint:read; every write method
-	// on them is checked again inline with access_constraint.admin, which no
-	// token selector admits.
+	// Hub admin: Access Constraints (AC1). The route guard checks
+	// access_constraint.read on the hub-level constraint records for every
+	// method, so a hub-boundary token needs access_constraint:read; every
+	// write method is checked again inline with access_constraint.admin on
+	// the same records (access_constraint:admin). The preview routes check
+	// access_constraint.admin in the guard.
 	// -------------------------------------------------------------------------
 	"/api/v1/admin/access-constraints": {
 		Pattern: "/api/v1/admin/access-constraints", RouteID: "admin.accessConstraints",
@@ -1076,11 +1081,13 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/admin/access-constraint-previews", RouteID: "admin.accessConstraintPreviews",
 		Classification: RouteHubAdmin,
 		Permission:     "access_constraint.admin", Resource: "access_constraint", Action: "preview",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/access-constraint-previews/": {
 		Pattern: "/api/v1/admin/access-constraint-previews/", RouteID: "admin.accessConstraintPreviews.byId",
 		Classification: RouteHubAdmin,
 		Permission:     "access_constraint.admin", Resource: "access_constraint", Action: "preview",
+		BearerTarget: "hub_instance",
 	},
 
 	"/api/v1/admin/effective-access": {

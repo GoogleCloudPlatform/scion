@@ -299,6 +299,21 @@ The same per-request checks apply, with these limits:
   Removing an allow-list entry deletes the invited user together with that user's role bindings
   and group memberships, and is refused with `409` while the invited user is a project's last
   owner.
+- **Roles, role bindings and access constraints.** These admit only a hub token. Creating,
+  importing or duplicating a custom role needs `role:create`, updating one `role:update`, and
+  deleting one `role:delete`, each together with `role:read`. Creating or updating a role needs
+  your user to hold every permission of the role at hub level, and the token must carry a scope
+  for each of them; a
+  project-scoped custom role can be bound in every project, so a project role does not count.
+  A token cannot create a system-scoped custom role. Binding a custom project role needs
+  `role_binding:create`, current project management access to that project, and every
+  permission of the role in that project within the token's scopes. Deleting a system-scoped
+  binding needs `role_binding:delete`. A token can never create a system-scoped binding or
+  delete a super-admin binding. Constraint previews need `access_constraint:admin`; creating a
+  constraint, or an update that tightens it (removes permissions from its maximum set, or
+  widens or removes its time window), also needs `access_constraint:read`. Deleting a
+  constraint, or an update that relaxes it (adds permissions, changes its subject or scope, or
+  narrows or adds its time window), needs an interactive sign-in.
 - **Your own user scope.** Templates, skills and harness configurations in your own user scope
   admit only a hub token carrying the selector of the action. Your templates need
   `template:read` to list, read or download, `template:create` to create or to clone into your

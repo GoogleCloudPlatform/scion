@@ -53,19 +53,21 @@ func doResetAuth(t *testing.T, srv *Server, token string) *httptest.ResponseReco
 	return w
 }
 
-// TestResetAuth_SignalFailureStillReturns200 verifies that when the SIGUSR2
-// signal to PID 1 fails (e.g. EPERM in rootless containers), the handler still
-// returns 200 OK because the token was successfully written — the agent's
-// file poller will pick it up within seconds.
-func TestResetAuth_SignalFailureStillReturns200(t *testing.T) {
+// TestResetAuth_SignalFailureReturnsReloadUnconfirmed verifies that when the
+// reload signal to PID 1 cannot be delivered, the handler still writes the
+// token but reports 502 reload_unconfirmed to the caller (ptone/scion#5460),
+// with the shared neutral message and without the raw runtime error.
+func TestResetAuth_SignalFailureReturnsReloadUnconfirmed(t *testing.T) {
 	mgr := resetAuthAgents()
 
+	const rawErr = "kill: (1) - Operation not permitted"
+	const token = "fresh-token-5460"
 	var wroteToken bool
 	rt := &scionrt.MockRuntime{
 		NameFunc: func() string { return "docker" },
 		ExecFunc: func(_ context.Context, _ string, cmd []string) (string, error) {
 			if len(cmd) > 0 && cmd[0] == "kill" {
-				return "", fmt.Errorf("kill: (1) - Operation not permitted")
+				return "", fmt.Errorf("%s", rawErr)
 			}
 			wroteToken = true
 			return "", nil
@@ -73,16 +75,127 @@ func TestResetAuth_SignalFailureStillReturns200(t *testing.T) {
 	}
 	srv := New(DefaultServerConfig(), mgr, rt)
 
+	w := doResetAuth(t, srv, token)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502 when the reload signal fails, got %d (%s)", w.Code, w.Body.String())
+	}
+	if !wroteToken {
+		t.Error("token should still be written even when the signal fails")
+	}
+	var resp ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode error response %q: %v", w.Body.String(), err)
+	}
+	if resp.Error.Code != api.BrokerErrCodeReloadUnconfirmed {
+		t.Errorf("expected code %q, got %q", api.BrokerErrCodeReloadUnconfirmed, resp.Error.Code)
+	}
+	if resp.Error.Message != api.ReloadUnconfirmedMessage {
+		t.Errorf("expected message %q, got %q", api.ReloadUnconfirmedMessage, resp.Error.Message)
+	}
+	for _, leaked := range []string{rawErr, token, "poller"} {
+		if strings.Contains(w.Body.String(), leaked) {
+			t.Errorf("response body must not contain %q: %s", leaked, w.Body.String())
+		}
+	}
+}
+
+// TestResetAuth_SignalFailureKeepsTransportNote verifies the transport token
+// outcome is still reported on the reload_unconfirmed path.
+func TestResetAuth_SignalFailureKeepsTransportNote(t *testing.T) {
+	mgr := resetAuthAgents()
+	rt := &scionrt.MockRuntime{
+		NameFunc: func() string { return "docker" },
+		ExecFunc: func(_ context.Context, _ string, cmd []string) (string, error) {
+			if len(cmd) > 0 && cmd[0] == "kill" {
+				return "", fmt.Errorf("refused")
+			}
+			return "", nil
+		},
+	}
+	srv := New(DefaultServerConfig(), mgr, rt)
+
+	body, _ := json.Marshal(ResetAuthRequest{Token: "t", TransportToken: "tt"})
+	r := httptest.NewRequest(http.MethodPost,
+		"/api/v1/agents/coordinator/reset-auth?projectId=project-A", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.handleAgentByID(w, r)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d (%s)", w.Code, w.Body.String())
+	}
+	var resp ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if want := api.ReloadUnconfirmedMessage + "; transport token written"; resp.Error.Message != want {
+		t.Errorf("message = %q, want %q", resp.Error.Message, want)
+	}
+}
+
+// signalingMockRuntime is a MockRuntime that also implements
+// scionrt.InitSignaler, recording the targets it was asked to signal.
+type signalingMockRuntime struct {
+	*scionrt.MockRuntime
+	signalErr error
+	signaled  []string
+}
+
+func (m *signalingMockRuntime) SignalInitReload(_ context.Context, id string) error {
+	m.signaled = append(m.signaled, id)
+	return m.signalErr
+}
+
+// TestResetAuth_PrefersInitSignaler verifies a runtime implementing
+// InitSignaler receives the reload signal for the looked-up target, and no
+// in-container kill is executed.
+func TestResetAuth_PrefersInitSignaler(t *testing.T) {
+	mgr := resetAuthAgents()
+	rt := &signalingMockRuntime{MockRuntime: &scionrt.MockRuntime{
+		NameFunc: func() string { return "docker" },
+		ExecFunc: func(_ context.Context, _ string, cmd []string) (string, error) {
+			if len(cmd) > 0 && cmd[0] == "kill" {
+				t.Error("in-container kill must not run when the runtime implements InitSignaler")
+			}
+			return "", nil
+		},
+	}}
+	srv := New(DefaultServerConfig(), mgr, rt)
+
 	w := doResetAuth(t, srv, "fresh-token")
 
 	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200 even when the reset signal fails, got %d (%s)", w.Code, w.Body.String())
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
 	}
-	if !wroteToken {
-		t.Error("token should still be written to disk even when the signal fails")
+	if len(rt.signaled) != 1 || rt.signaled[0] != "container-A" {
+		t.Errorf("expected one reload signal to container-A, got %v", rt.signaled)
 	}
-	if !strings.Contains(w.Body.String(), "signal failed") {
-		t.Errorf("response should mention signal failure, got %q", w.Body.String())
+}
+
+// TestResetAuth_InitSignalerFailureReturnsReloadUnconfirmed verifies a
+// failed runtime-side signal is reported like a failed in-container kill.
+func TestResetAuth_InitSignalerFailureReturnsReloadUnconfirmed(t *testing.T) {
+	mgr := resetAuthAgents()
+	rt := &signalingMockRuntime{
+		MockRuntime: &scionrt.MockRuntime{NameFunc: func() string { return "docker" }},
+		signalErr:   fmt.Errorf("docker kill failed: exit status 1"),
+	}
+	srv := New(DefaultServerConfig(), mgr, rt)
+
+	w := doResetAuth(t, srv, "fresh-token")
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d (%s)", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "docker kill failed") {
+		t.Errorf("raw runtime error leaked into body: %s", w.Body.String())
+	}
+	var resp ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Error.Code != api.BrokerErrCodeReloadUnconfirmed {
+		t.Errorf("code = %q, want %q", resp.Error.Code, api.BrokerErrCodeReloadUnconfirmed)
 	}
 }
 

@@ -207,6 +207,11 @@ var suffixCheckExclusions = map[liveInventoryKey]string{
 	// segment on a file write names a new file below {path}.
 	{OperationID: "template.update", Method: "PUT", Pattern: "/api/v1/templates/{id}/files/{path}"}:            "handleTemplateFiles takes everything after files/ as the file path, so the write creates the nested file",
 	{OperationID: "harnessconfig.update", Method: "PUT", Pattern: "/api/v1/harness-configs/{id}/files/{path}"}: "handleHarnessConfigFiles takes everything after files/ as the file path, so the write creates the nested file",
+	// handleAdminAccessConstraintPreviews (handlers_access_constraints.go)
+	// splits the path after the prefix into at most two parts and reads the
+	// job for any second part other than "result".
+	{OperationID: "access.constraint.preview", Method: "GET", Pattern: "/api/v1/admin/access-constraint-previews/{jobId}"}:        "a trailing segment on the job path is a second part other than \"result\", so the request answers the job read",
+	{OperationID: "access.constraint.preview", Method: "GET", Pattern: "/api/v1/admin/access-constraint-previews/{jobId}/result"}: "a trailing segment joins \"result\" into one second part that is not \"result\", so the request answers the job read",
 }
 
 // catalogHTTPEntryPoints returns every (operationID, EntryPoint) pair in

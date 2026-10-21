@@ -93,6 +93,12 @@ type BrokerCapabilities struct {
 	// BeginLaunch for a broker known to lack support; the create response's
 	// LaunchPending echo is authoritative either way.
 	AsyncLaunch bool `json:"asyncLaunch"`
+	// AsyncStart indicates this broker runs a start of an existing agent
+	// (the start request's asyncLaunch, launchId, launchTimeoutSeconds and
+	// launchKeepaliveSeconds, with the agentId query parameter) as an async
+	// launch (design wave 3 §2 D-f; ptone/scion#4669). As for AsyncLaunch,
+	// the start response's LaunchPending echo is authoritative.
+	AsyncStart bool `json:"asyncStart,omitempty"`
 	// EmptyPerAgentWorkspace indicates this broker provisions the
 	// empty-per-agent workspace sharing mode: a private, initially empty
 	// directory at <projectDir>/agents/<slug>/workspace (design #2703). The
@@ -103,6 +109,10 @@ type BrokerCapabilities struct {
 	// reincarnate --broker`). The hub refuses a move unless both brokers
 	// report it (412).
 	AgentMove bool `json:"agentMove"`
+	// AgentMoveRecreate indicates this broker can be the target of a forced
+	// move: it provisions the agent with a fresh workspace after confirming
+	// it has no files for the agent. Not advertised yet.
+	AgentMoveRecreate bool `json:"agentMoveRecreate,omitempty"`
 	// ReprovisionEmptyPerAgent indicates this broker's reprovision reuses an
 	// empty-per-agent agent's private workspace in place (same-broker
 	// `scion reincarnate`, miller79/scion#167). Set on every runtime: the

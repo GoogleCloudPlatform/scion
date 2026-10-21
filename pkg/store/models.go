@@ -1241,6 +1241,11 @@ type BrokerCapabilities struct {
 	// --broker`). The hub refuses a move unless both the source and the
 	// target broker report it (412).
 	AgentMove bool `json:"agentMove"`
+	// AgentMoveRecreate indicates the broker can be the target of a forced
+	// move (`scion reincarnate --broker --force`): it provisions the agent
+	// with a fresh workspace after confirming it has no files for the agent.
+	// The hub refuses a forced move onto a broker without it (412).
+	AgentMoveRecreate bool `json:"agentMoveRecreate,omitempty"`
 	// AttachmentDelivery indicates the broker can receive attachment
 	// deliveries: it redeems the capabilities of a message request's
 	// attachments field and writes the files into the agent's home before

@@ -1729,6 +1729,10 @@ type Server struct {
 	// conduitEligibleRelays is the number of eligible separate relays at
 	// the last check (-1: not checked yet), read by the readiness gauge.
 	conduitEligibleRelays atomic.Int64
+	// brokerPresenceRegistryFallbacks counts broker presence reads whose
+	// conduit registry read failed and fell back to the legacy signals
+	// (broker_presence.go).
+	brokerPresenceRegistryFallbacks atomic.Int64
 	// conduitAdmissionAEADv is the admission token cipher
 	// (conduit_admission.go), derived once; conduitAdmissionKeyErr is why
 	// it could not be.
@@ -2342,6 +2346,11 @@ type Server struct {
 	// authorizeConduitUserStream instead of authorizeConduitAction. Only
 	// tests set it, on their own Server; production code never does.
 	conduitAuthorizeActionTestHook func(ctx context.Context, identity Identity, agent *store.Agent, action Action) error
+
+	// legacyPortTunnelReturnedTestHook, when non-nil, runs in the port
+	// proxy right after the port-forward tunnel returns, before the
+	// answer is written. Only tests set it, on their own Server.
+	legacyPortTunnelReturnedTestHook func()
 }
 
 // groupsLogger returns the groups subsystem logger, falling back to

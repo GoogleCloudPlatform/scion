@@ -642,6 +642,7 @@ func (s *Server) deleteRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 		writeErrorFromErr(w, err, "")
 		return
 	}
+	s.forgetBrokerBackfill(id)
 
 	// Clean up the broker's HMAC secret (best-effort, post-delete).
 	if err := s.store.DeleteBrokerSecret(ctx, id); err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -1768,6 +1769,11 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	// ones its complete inventory shows terminated, and apply the rest.
 	s.settleQueuedStops(ctx, id, prevBroker, &heartbeat, report)
 	s.drainQueuedStopsFromHeartbeat(ctx, id, prevBroker, &heartbeat, report)
+
+	// Retry a registration reservation backfill that skipped an agent on this
+	// replica (BackfillBrokerOnRegistration). Without a pending one this reads
+	// nothing: a heartbeat that needs nothing does not read the broker row.
+	s.retryBrokerBackfill(ctx, id)
 
 	writeJSON(w, http.StatusOK, heartbeatResp)
 }

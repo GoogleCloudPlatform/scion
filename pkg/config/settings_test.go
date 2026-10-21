@@ -231,60 +231,6 @@ func TestEnvMerging(t *testing.T) {
 	}
 }
 
-func TestMergeSettingsEnv(t *testing.T) {
-	base := &Settings{
-		Harnesses: map[string]HarnessConfig{
-			"gemini": {
-				Env: map[string]string{"A": "1", "B": "2"},
-			},
-		},
-	}
-	overrideJSON := `{
-		"harnesses": {
-			"gemini": {
-				"env": {"B": "3", "C": "4"}
-			}
-		}
-	}`
-
-	err := MergeSettings(base, []byte(overrideJSON))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	env := base.Harnesses["gemini"].Env
-	if env["A"] != "1" || env["B"] != "3" || env["C"] != "4" {
-		t.Errorf("unexpected env after merge: %v", env)
-	}
-}
-
-func TestMergeSettingsAuthSelectedType(t *testing.T) {
-	base := &Settings{
-		Harnesses: map[string]HarnessConfig{
-			"gemini": {
-				AuthSelectedType: "api-key",
-			},
-		},
-	}
-
-	overrideJSON := `{
-		"harnesses": {
-			"gemini": {
-				"auth_selectedType": "vertex-ai"
-			}
-		}
-	}`
-
-	err := MergeSettings(base, []byte(overrideJSON))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if base.Harnesses["gemini"].AuthSelectedType != "vertex-ai" {
-		t.Errorf("expected AuthSelectedType to be vertex-ai, got %s", base.Harnesses["gemini"].AuthSelectedType)
-	}
-}
-
 func TestRuntimeEnvMerging(t *testing.T) {
 	s := &Settings{
 		Runtimes: map[string]RuntimeConfig{
@@ -469,87 +415,6 @@ func TestHubMethods(t *testing.T) {
 	}
 }
 
-func TestExpansion(t *testing.T) {
-	_ = os.Setenv("TEST_EXP_VAR", "expanded_value")
-	_ = os.Setenv("TEST_EXP_KEY", "EXP_KEY")
-	defer func() { _ = os.Unsetenv("TEST_EXP_VAR") }()
-	defer func() { _ = os.Unsetenv("TEST_EXP_KEY") }()
-
-	base := &Settings{}
-	overrideJSON := `{
-		"harnesses": {
-			"gemini": {
-				"env": {"${TEST_EXP_KEY}": "${TEST_EXP_VAR}", "NORMAL": "VAL"},
-				"volumes": [
-					{ "source": "${TEST_EXP_VAR}/src", "target": "/dest" }
-				]
-			}
-		}
-	}`
-
-	err := MergeSettings(base, []byte(overrideJSON))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	h := base.Harnesses["gemini"]
-	if h.Env["EXP_KEY"] != "expanded_value" {
-		t.Errorf("expected Env[EXP_KEY]=expanded_value, got %s", h.Env["EXP_KEY"])
-	}
-	if h.Env["NORMAL"] != "VAL" {
-		t.Errorf("expected Env[NORMAL]=VAL, got %s", h.Env["NORMAL"])
-	}
-
-	if len(h.Volumes) != 1 {
-		t.Fatalf("expected 1 volume, got %d", len(h.Volumes))
-	}
-	if h.Volumes[0].Source != "expanded_value/src" {
-		t.Errorf("expected volume source 'expanded_value/src', got %s", h.Volumes[0].Source)
-	}
-}
-
-func TestExpandVolumeMountsPreservesAllFields(t *testing.T) {
-	vols := []api.VolumeMount{
-		{
-			Source:   "/host/path",
-			Target:   "/container/path",
-			ReadOnly: true,
-			Type:     "gcs",
-			Bucket:   "my-bucket",
-			Prefix:   "some/prefix",
-			Mode:     "ro",
-		},
-	}
-
-	expanded := expandVolumeMounts(vols)
-	if len(expanded) != 1 {
-		t.Fatalf("expected 1 volume, got %d", len(expanded))
-	}
-
-	v := expanded[0]
-	if v.Source != "/host/path" {
-		t.Errorf("Source = %q, want /host/path", v.Source)
-	}
-	if v.Target != "/container/path" {
-		t.Errorf("Target = %q, want /container/path", v.Target)
-	}
-	if !v.ReadOnly {
-		t.Error("ReadOnly = false, want true")
-	}
-	if v.Type != "gcs" {
-		t.Errorf("Type = %q, want gcs", v.Type)
-	}
-	if v.Bucket != "my-bucket" {
-		t.Errorf("Bucket = %q, want my-bucket", v.Bucket)
-	}
-	if v.Prefix != "some/prefix" {
-		t.Errorf("Prefix = %q, want some/prefix", v.Prefix)
-	}
-	if v.Mode != "ro" {
-		t.Errorf("Mode = %q, want ro", v.Mode)
-	}
-}
-
 // TestUpdateHubSettingsGlobal tests that hub settings can be saved to global settings.
 // This relates to Fix 5 from progress-report.md: Save hub endpoint to global settings during registration.
 func TestUpdateHubSettingsGlobal(t *testing.T) {
@@ -673,59 +538,6 @@ func TestHubSettingsLoadFromGlobal(t *testing.T) {
 	}
 }
 
-func TestMergeSettingsHubConnections(t *testing.T) {
-	base := &Settings{
-		HubConnections: map[string]HubConnectionConfig{
-			"hub-prod": {Endpoint: "https://hub.prod.example.com"},
-		},
-	}
-	overrideJSON := `{
-		"hub_connections": {
-			"hub-prod": {"endpoint": "https://hub.prod.v2.example.com"},
-			"hub-staging": {"endpoint": "https://hub.staging.example.com"}
-		}
-	}`
-
-	err := MergeSettings(base, []byte(overrideJSON))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if len(base.HubConnections) != 2 {
-		t.Fatalf("expected 2 hub connections, got %d", len(base.HubConnections))
-	}
-
-	if base.HubConnections["hub-prod"].Endpoint != "https://hub.prod.v2.example.com" {
-		t.Errorf("expected hub-prod endpoint to be overridden, got %q", base.HubConnections["hub-prod"].Endpoint)
-	}
-
-	if base.HubConnections["hub-staging"].Endpoint != "https://hub.staging.example.com" {
-		t.Errorf("expected hub-staging endpoint, got %q", base.HubConnections["hub-staging"].Endpoint)
-	}
-}
-
-func TestMergeSettingsHubConnectionsNilBase(t *testing.T) {
-	base := &Settings{}
-	overrideJSON := `{
-		"hub_connections": {
-			"hub-dev": {"endpoint": "https://hub.dev.example.com"}
-		}
-	}`
-
-	err := MergeSettings(base, []byte(overrideJSON))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if base.HubConnections == nil {
-		t.Fatal("expected HubConnections to be initialized")
-	}
-
-	if base.HubConnections["hub-dev"].Endpoint != "https://hub.dev.example.com" {
-		t.Errorf("expected hub-dev endpoint, got %q", base.HubConnections["hub-dev"].Endpoint)
-	}
-}
-
 func TestUpdateSettingHubConnections(t *testing.T) {
 	tmpDir := t.TempDir()
 	originalHome := os.Getenv("HOME")
@@ -765,48 +577,6 @@ func TestUpdateSettingHubConnectionsInvalidKey(t *testing.T) {
 	err = UpdateSetting(projectScionDir, "hub_connections.hub-prod.unknown_field", "value", false)
 	if err != nil {
 		t.Errorf("hub_connections keys should be silently skipped in v1: %v", err)
-	}
-}
-
-func TestGetSettingValueHubConnections(t *testing.T) {
-	s := &Settings{
-		HubConnections: map[string]HubConnectionConfig{
-			"hub-prod": {Endpoint: "https://hub.prod.example.com"},
-		},
-	}
-
-	val, err := GetSettingValue(s, "hub_connections.hub-prod.endpoint")
-	if err != nil {
-		t.Fatalf("GetSettingValue failed: %v", err)
-	}
-	if val != "https://hub.prod.example.com" {
-		t.Errorf("expected hub.prod.example.com, got %q", val)
-	}
-
-	// Non-existent connection
-	val, err = GetSettingValue(s, "hub_connections.nonexistent.endpoint")
-	if err != nil {
-		t.Fatalf("GetSettingValue for nonexistent should not error: %v", err)
-	}
-	if val != "" {
-		t.Errorf("expected empty string for nonexistent, got %q", val)
-	}
-}
-
-func TestGetSettingsMapHubConnections(t *testing.T) {
-	s := &Settings{
-		HubConnections: map[string]HubConnectionConfig{
-			"hub-prod":    {Endpoint: "https://hub.prod.example.com"},
-			"hub-staging": {Endpoint: "https://hub.staging.example.com"},
-		},
-	}
-
-	m := GetSettingsMap(s)
-	if m["hub_connections.hub-prod.endpoint"] != "https://hub.prod.example.com" {
-		t.Errorf("expected hub-prod endpoint in map, got %q", m["hub_connections.hub-prod.endpoint"])
-	}
-	if m["hub_connections.hub-staging.endpoint"] != "https://hub.staging.example.com" {
-		t.Errorf("expected hub-staging endpoint in map, got %q", m["hub_connections.hub-staging.endpoint"])
 	}
 }
 

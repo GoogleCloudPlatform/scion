@@ -217,7 +217,7 @@ existing value.
 | `SCION_AGENT_NAME` | agent name | **Unconditional** — overwrites |
 | `SCION_PROJECT` | project name | **Unconditional** — overwrites |
 | `SCION_TEMPLATE_NAME` | resolved template slug, or `custom` | **Unconditional** — overwrites |
-| `SCION_CLI_MODE` | always `agent` inside a container | **Unconditional** — overwrites |
+| `SCION_CLI_MODE` | always `agent` inside a container (outside one, it outranks the `cli.mode` setting; see below) | **Unconditional** — overwrites |
 | `SCION_MAX_TURNS` | from the resolved `ScionConfig` | **Unconditional** — overwrites the hub-supplied value |
 | `SCION_MAX_MODEL_CALLS` | from the resolved `ScionConfig` | **Unconditional** — overwrites the hub-supplied value |
 | `SCION_MAX_DURATION` | from the resolved `ScionConfig` | **Unconditional** — overwrites the hub-supplied value |
@@ -276,6 +276,13 @@ change that must not ride along in a precedence change. Adding an entry to a mis
 outbound-only filter would look like a fix and would not be one.
 
 ---
+
+The CLI mode itself is chosen as `SCION_CLI_MODE`, then the `cli.mode` setting (from the
+merged settings files), then `human`. `scion config set cli.mode agent` therefore switches
+every later command on that machine (or in that project) to agent mode, and agent mode removes
+the `config` commands, so `scion config unset cli.mode` is then unavailable. To return, run
+`SCION_CLI_MODE=human scion config unset [--global] cli.mode`, or remove `mode` from the `cli`
+section of the settings file by hand.
 
 ## Bucket 3 — end-user settings
 
@@ -689,14 +696,10 @@ over-collection is recorded separately under
 deliberately stops short of calling it a bug rather than a wart.
 
 **There is no third channel — and specifically, there is no settings-file *layering* channel.**
-This matters because it looks as though there is one. `MergeSettings` composes a whole
-`harness_overrides` block when layering one settings file over another: it merges `Env` per key,
-appends `Volumes`, and runs `MergeResourceSpec` over `Resources`. It reads as thoroughly
-load-bearing. **It is dead code.** Renaming its declaration leaves `go build ./...` green, which
-is the type checker asserting that no production caller exists — a claim grep cannot make, because
-`go build` excludes `_test.go` by definition and so cannot be satisfied by a fixture. Under the
-identical procedure, renaming `ResolveHarnessConfig` turns the build red. So do not infer a
-file-layering precedence rule for this key from reading `MergeSettings`; nothing reaches it.
+Settings files are merged by the one settings loader as plain data, and no code composes a
+`harness_overrides` block across files (the former `MergeSettings` layering helper, which never
+had a production caller, has been removed). So there is no file-layering precedence rule for this
+key beyond the ordinary last-layer-wins merge of the loader.
 
 :::caution[If you go looking for this in the source, two of the three matches are decoys]
 The line `if override.Env != nil {` appears at **three** sites, and one grep finds all three:
