@@ -279,7 +279,20 @@ export async function setupApiMocks(
       });
     }
     if (path === '/api/v1/users') {
-      return route.fulfill({ json: { users: overrides.users ?? [] } });
+      // The palette reads the recent-users page (`sort=lastSeen`) and, while
+      // typing, the hub's `?search=` (case-insensitive substring of display
+      // name or email), both bounded by `limit`.
+      const all = overrides.users ?? [];
+      const search = url.searchParams.get('search')?.toLowerCase();
+      const matched = search
+        ? all.filter(
+            (u) =>
+              u.displayName.toLowerCase().includes(search) ||
+              (u.email ?? '').toLowerCase().includes(search)
+          )
+        : all;
+      const limit = Number(url.searchParams.get('limit')) || matched.length;
+      return route.fulfill({ json: { users: matched.slice(0, limit) } });
     }
     if (path === '/api/v1/notifications') {
       // scion-notification-tray, mounted by the real header in the
