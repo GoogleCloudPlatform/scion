@@ -167,9 +167,9 @@ export interface PaletteRetryDetail {
 /**
  * Detail for the `palette-query` event, fired whenever the query text
  * changes, including the reset to `''` when the palette reopens with a
- * non-empty query. A host that loads results
- * for a query (chat's People search) listens for it; ranking still happens
- * in the palette, so other hosts can ignore it.
+ * non-empty query. A host that loads results for a query (chat's People
+ * search) listens for it; ranking still happens in the palette, so other
+ * hosts can ignore it.
  */
 export interface PaletteQueryDetail {
   query: string;

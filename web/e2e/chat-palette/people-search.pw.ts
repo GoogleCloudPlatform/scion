@@ -42,6 +42,7 @@ test('a person outside the recent-users page is found by search and Enter opens 
   await expect(input).toBeFocused();
   await expect(peopleOptions(page)).toHaveCount(1);
   await expect(peopleOptions(page)).toContainText(USER_WITH_DM.displayName);
+  await expect(peopleOptions(page)).not.toContainText(USER_WITHOUT_DM.displayName);
 
   await input.fill(USER_WITHOUT_DM.displayName);
   await expect(peopleOptions(page)).toHaveCount(1);
