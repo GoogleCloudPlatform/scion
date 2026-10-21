@@ -218,7 +218,7 @@ func TestStartLaunch_FailurePhaseRule(t *testing.T) {
 				// A stale memory from an earlier failure: every failure end
 				// rewrites it.
 				a, launchID := beginStartKindLaunch(t, ctx, s, projectID, "fpr", tc.kind, tc.prior, "created")
-				quota, ldID := seedBrokerQuotaReservation(t, ctx, s, a.ID)
+				quota, ldID := seedBrokerQuotaReservation(t, ctx, s, a)
 
 				endStartLaunchByFailure(t, ctx, s, a, launchID, how)
 

@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -954,11 +955,13 @@ func TestTestAdminA3_StampedRoleBoundByPersonKept(t *testing.T) {
 // (enforceRoutePermission) answers every refusal with the generic
 // structured 403 for the route's permission, whatever the decision's
 // cause. Driven deterministically: an authorization service whose user
-// reads fail and whose admin tier is on (as Server.New wires it), and a
-// request that has not passed the JWT row block (which would otherwise
-// warm the kind cache from the real store). The decision is the test-admin
-// policy's fail-closed kind-error refusal, and the person still sees only
-// the neutral body: no test-identity wording, no reason, no denied_by.
+// reads after the account-status gate's users-row read fail
+// (a3LaterReadFaultStore) and whose admin tier is on (as Server.New wires
+// it), and a request that has not passed the JWT row block (which would
+// otherwise warm the kind cache from the real store). The decision is the
+// test-admin policy's fail-closed kind-error refusal, and the person still
+// sees only the neutral body: no test-identity wording, no reason, no
+// denied_by.
 // (The earlier end-to-end version never reached the failing read: the row
 // block cached the kind through the real store first, and the swapped
 // service had no tier switch; see the AC map.)
@@ -971,17 +974,23 @@ func TestTestAdminA3_UnverifiedKindGuardAnswerIsNeutral(t *testing.T) {
 	require.True(t, ok)
 
 	saved := srv.authzService
-	svc := NewAuthzService(kindErrStore{Store: s}, saved.logger)
+	later := &a3LaterReadFaultStore{Store: s}
+	svc := NewAuthzService(later, saved.logger)
 	setAuthzTestAdminTier(svc, func(string) bool { return true }, time.Now)
 	srv.authzService = svc
 	t.Cleanup(func() { srv.authzService = saved })
 
+	// The account-status gate's users-row read succeeds; the step 0c kind
+	// read after it fails.
+	later.budget(1)
 	d := svc.Decide(ctx, AuthzRequest{Principal: principalContextForIdentity(ident), Credential: credentialContextForIdentity(ident),
 		Resource: Resource{Type: meta.Resource}, Action: Action(meta.Action), Permission: meta.Permission, TargetEvidence: hubCollectionEvidence(meta.Permission)})
 	require.False(t, d.Allowed)
 	require.Equal(t, DeniedByTestAdminPolicy, d.DeniedBy)
 	require.Equal(t, testAdminPolicyKindErrorReason, d.Reason, "the cause is the unreadable kind")
+	require.Equal(t, int32(2), later.calls.Load(), "user reads in decide: the status gate's row, then the step 0c kind")
 
+	later.budget(1)
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/test-identities/"+generateID()+"?purge=true", nil)
 	req = req.WithContext(contextWithIdentityAndUser(ident))
 	rec := httptest.NewRecorder()
@@ -1003,7 +1012,10 @@ func TestTestAdminA3_UnverifiedKindGuardAnswerIsNeutral(t *testing.T) {
 // Kind-read fail-closed diagnostic (ti-adm-em, after the shard-2 run at
 // df5e33dea): with the authorization service's user reads failing and no
 // kind cached, a person holding test_identity.issue through a system-scope
-// binding is refused, both (i) with the admin tier on (decide step 0c
+// binding is refused: (0) with every user read failing, at the
+// account-status gate, the first user read in decide; then, with that read
+// succeeding and later user reads failing (a3LaterReadFaultStore), both
+// (i) with the admin tier on (decide step 0c
 // refuses on the unreadable kind) and (ii) with it off (step 0c is skipped;
 // the grant clamp's kind read in step 3 refuses). (iii) No principal-inputs
 // memo is in the context, so the bindings come from the store, through the
@@ -1030,18 +1042,36 @@ func TestTestAdminA3_KindReadFailClosedDiagnostic(t *testing.T) {
 	d := srv.authzService.Decide(ctx, req)
 	require.True(t, d.Allowed, "control: %s", d.Reason)
 
-	// (i) admin tier on, user reads failing, cold cache.
-	on := NewAuthzService(kindErrStore{Store: s}, srv.authzService.logger)
+	// (0) admin tier on, every user read failing: the account-status gate's
+	// users-row read is the first user read in decide, and it refuses
+	// before step 0c.
+	unread := NewAuthzService(kindErrStore{Store: s}, srv.authzService.logger)
+	setAuthzTestAdminTier(unread, func(string) bool { return true }, time.Now)
+	d = unread.Decide(ctx, req)
+	t.Logf("(0) user row unreadable, tier on: allowed=%v denied_by=%q reason=%q deny_cause=%q", d.Allowed, d.DeniedBy, d.Reason, d.DenyCause)
+	assert.False(t, d.Allowed)
+	assert.Equal(t, principalStatusLookupReason, d.Reason, "(0) refused at the account-status gate")
+	assert.Equal(t, DenyCauseResolutionError, d.DenyCause)
+	assert.Equal(t, DeniedBy(""), d.DeniedBy, "(0) the status gate refuses before step 0c")
+
+	// (i) admin tier on, cold cache: the status gate's users-row read
+	// succeeds and the step 0c kind read after it fails.
+	laterOn := &a3LaterReadFaultStore{Store: s}
+	on := NewAuthzService(laterOn, srv.authzService.logger)
 	setAuthzTestAdminTier(on, func(string) bool { return true }, time.Now)
+	laterOn.budget(1)
 	d = on.Decide(ctx, req)
 	t.Logf("(i) tier on: allowed=%v denied_by=%q reason=%q", d.Allowed, d.DeniedBy, d.Reason)
 	assert.False(t, d.Allowed)
 	assert.Equal(t, DeniedByTestAdminPolicy, d.DeniedBy)
 	assert.Equal(t, testAdminPolicyKindErrorReason, d.Reason)
+	assert.Equal(t, int32(2), laterOn.calls.Load(), "(i) user reads: the status gate's row, then the step 0c kind")
 
-	// (ii) admin tier off (step 0c skipped), user reads failing, cold cache:
-	// only the clamp's kind read can refuse.
-	off := NewAuthzService(kindErrStore{Store: s}, srv.authzService.logger)
+	// (ii) admin tier off (step 0c skipped), cold cache: the status gate's
+	// read succeeds and only the clamp's kind read can refuse.
+	laterOff := &a3LaterReadFaultStore{Store: s}
+	off := NewAuthzService(laterOff, srv.authzService.logger)
+	laterOff.budget(1)
 	d = off.Decide(ctx, req)
 	t.Logf("(ii) tier off: allowed=%v denied_by=%q reason=%q deny_cause=%q", d.Allowed, d.DeniedBy, d.Reason, d.DenyCause)
 	if d.Provenance != nil {
@@ -1049,17 +1079,21 @@ func TestTestAdminA3_KindReadFailClosedDiagnostic(t *testing.T) {
 	}
 	assert.False(t, d.Allowed, "(ii) an unreadable kind must refuse at the clamp (fail-closed)")
 	assert.Equal(t, DenyCauseResolutionError, d.DenyCause, "(ii) refused as a binding resolution error")
+	assert.Equal(t, int32(2), laterOff.calls.Load(), "(ii) user reads: the status gate's row, then the clamp's kind")
 
 	// (iv) the artefact: a successful kind read through the real store into
 	// the same cache (as the row block does) turns the clamp's read into a
-	// cache hit; the failing store is never consulted.
-	warm := NewAuthzService(kindErrStore{Store: s}, srv.authzService.logger)
+	// cache hit; the status gate's users-row read is the only store read.
+	laterWarm := &a3LaterReadFaultStore{Store: s}
+	warm := NewAuthzService(laterWarm, srv.authzService.logger)
 	k, err := kindForPrincipalVia(ctx, s, warm.kindCache(), human.ID)
 	require.NoError(t, err)
 	require.True(t, k.isHuman())
+	laterWarm.budget(1)
 	d = warm.Decide(ctx, req)
 	t.Logf("(iv) warmed cache, tier off: allowed=%v denied_by=%q reason=%q", d.Allowed, d.DeniedBy, d.Reason)
 	assert.True(t, d.Allowed, "(iv) a kind cached from a successful read of the real store admits: the earlier test's setup, not a fail-open")
+	assert.Equal(t, int32(1), laterWarm.calls.Load(), "(iv) user reads: the status gate's row only; the kind is a cache hit")
 }
 
 // a3KindFaultStore is the server's own store with GetUser failing for one
@@ -1070,18 +1104,51 @@ type a3KindFaultStore struct {
 	store.Store
 	mu   sync.Mutex
 	fail string
+	// allow is the number of reads of the armed user that still succeed;
+	// calls counts every read of the armed user.
+	allow atomic.Int32
+	calls atomic.Int32
 }
 
 func (f *a3KindFaultStore) arm(userID string) { f.mu.Lock(); f.fail = userID; f.mu.Unlock() }
+
+// budget lets the next n reads of the armed user succeed and resets calls.
+func (f *a3KindFaultStore) budget(n int32) { f.allow.Store(n); f.calls.Store(0) }
 
 func (f *a3KindFaultStore) GetUser(ctx context.Context, id string) (*store.User, error) {
 	f.mu.Lock()
 	fail := f.fail
 	f.mu.Unlock()
 	if fail != "" && id == fail {
+		f.calls.Add(1)
+		if f.allow.Add(-1) >= 0 {
+			return f.Store.GetUser(ctx, id)
+		}
 		return nil, errors.New("injected user read failure")
 	}
 	return f.Store.GetUser(ctx, id)
+}
+
+// a3LaterReadFaultStore lets the first allow user reads succeed and fails
+// every later one; calls counts all of them. With allow=1 before a
+// decision, the account-status gate's users-row read (the first user read
+// in decide) succeeds and the next user read (the step 0c or step 3 clamp
+// kind read) fails.
+type a3LaterReadFaultStore struct {
+	store.Store
+	allow atomic.Int32
+	calls atomic.Int32
+}
+
+// budget lets the next n user reads succeed and resets calls.
+func (f *a3LaterReadFaultStore) budget(n int32) { f.allow.Store(n); f.calls.Store(0) }
+
+func (f *a3LaterReadFaultStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+	f.calls.Add(1)
+	if f.allow.Add(-1) >= 0 {
+		return f.Store.GetUser(ctx, id)
+	}
+	return nil, errors.New("injected later user read failure")
 }
 
 func (f *a3KindFaultStore) DB() *sql.DB {
@@ -1104,8 +1171,9 @@ func (f *a3KindFaultStore) Dialect() string {
 // test_identity.issue through a system-scope binding:
 //   - on the purge route over HTTP is refused (the JWT row block fails
 //     closed on the unreadable kind before any handler);
-//   - in decide with the tier on is refused by step 0c (test-admin policy,
-//     kind-error reason);
+//   - in decide, where the account-status gate's users-row read succeeds
+//     and the next read of the person fails, with the tier on is refused
+//     by step 0c (test-admin policy, kind-error reason);
 //   - in decide with the tier off (step 0c skipped) is refused by the grant
 //     clamp's kind read in step 3 (binding resolution error).
 //
@@ -1133,24 +1201,31 @@ func TestTestAdminA3_KindReadFailClosedRealWiring(t *testing.T) {
 	require.NotNil(t, srv.authzService.kindCache(), "the server's authorization service has the shared kind cache")
 
 	f.arm(human.ID)
+	f.budget(0)
 	rec := doRequestAsUser(t, srv, human, http.MethodDelete, "/api/v1/test-identities/"+generateID()+"?purge=true", nil)
 	t.Logf("HTTP purge route, kind unreadable: status=%d body=%s", rec.Code, rec.Body.String())
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, "refused over HTTP: the JWT row block cannot verify the user")
 	assert.Contains(t, rec.Body.String(), `"code":"store_error"`, "the row block's fail-closed answer")
 	assert.NotContains(t, rec.Body.String(), `"identityId"`, "no purge report: the request never reached the handler")
 
+	// In decide, the account-status gate's users-row read succeeds and the
+	// next read of the person (step 0c or the clamp's kind read) fails.
+	f.budget(1)
 	d := srv.authzService.Decide(ctx, req)
 	t.Logf("decide, tier on: allowed=%v denied_by=%q reason=%q deny_cause=%q", d.Allowed, d.DeniedBy, d.Reason, d.DenyCause)
 	assert.False(t, d.Allowed, "tier on: refused")
 	assert.Equal(t, DeniedByTestAdminPolicy, d.DeniedBy)
 	assert.Equal(t, testAdminPolicyKindErrorReason, d.Reason)
+	assert.Equal(t, int32(2), f.calls.Load(), "tier on: user reads, the status gate's row then the step 0c kind")
 
 	srv.testAdminGate = testAdminGate{}
 	require.False(t, srv.testAdminTierOn())
+	f.budget(1)
 	d = srv.authzService.Decide(ctx, req)
 	t.Logf("decide, tier off (step 3 clamp only): allowed=%v denied_by=%q reason=%q deny_cause=%q", d.Allowed, d.DeniedBy, d.Reason, d.DenyCause)
 	assert.False(t, d.Allowed, "tier off: the clamp's kind read refuses")
 	assert.Equal(t, DenyCauseResolutionError, d.DenyCause)
+	assert.Equal(t, int32(2), f.calls.Load(), "tier off: user reads, the status gate's row then the clamp's kind")
 
 	f.arm("")
 	d = srv.authzService.Decide(ctx, req)

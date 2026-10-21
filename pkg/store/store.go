@@ -918,6 +918,13 @@ type AgentStore interface {
 	// dispatcher's not_launched cases (design §3.4).
 	EndLaunch(ctx context.Context, agentID, launchID, reason string) error
 
+	// EndLaunchWithCode is EndLaunch that also records code as the launch
+	// error (launch_error), under the same conditions and in the same
+	// write. It does not change the phase. The dispatcher uses it for the
+	// not_launched cases that are failures, so a client following the
+	// launch sees why it ended.
+	EndLaunchWithCode(ctx context.Context, agentID, launchID, reason, code string) error
+
 	// ApplyLaunchReport evaluates a broker's launch report against the
 	// current row and applies the resulting state transition, per the
 	// ordered rule list in design §3.7. Bumps state_version only on a
@@ -1679,9 +1686,24 @@ type RuntimeBrokerStore interface {
 
 	// SetRuntimeBrokerGCPHost writes the GCP host pair unconditionally (empty
 	// values clear) and sets the source to GCPHostSourceAdmin. It returns the
-	// values it replaced (read and written atomically). Only the update API
-	// uses it. Returns ErrNotFound if the broker doesn't exist.
+	// values it replaced (read and written atomically). It is for test
+	// fixtures and maintenance only: a request path must not use it, and
+	// writes the pair through SetRuntimeBrokerGCPHostIfPrior (update API) or
+	// SetRuntimeBrokerGCPHostIfUnset (registration), so that the pair is
+	// written only over the value its permission decision was made against.
+	// Returns ErrNotFound if the broker doesn't exist.
 	SetRuntimeBrokerGCPHost(ctx context.Context, id, email, project string) (prev GCPHostSetting, err error)
+
+	// SetRuntimeBrokerGCPHostIfPrior is SetRuntimeBrokerGCPHost with a
+	// precondition: it writes only while the stored pair is
+	// priorEmail/priorProject (the email compared ignoring letter case),
+	// checked in the same compare-and-set as the write. It returns the
+	// values it replaced and applied=true, or the stored values and
+	// applied=false (not an error) when the stored pair differs. The update
+	// API uses it so that a pair is written only over the value its
+	// permission decision was made against. Returns ErrNotFound if the
+	// broker doesn't exist.
+	SetRuntimeBrokerGCPHostIfPrior(ctx context.Context, id, priorEmail, priorProject, email, project string) (prev GCPHostSetting, applied bool, err error)
 
 	// SetRuntimeBrokerGCPHostSource sets only the GCP host source, leaving
 	// the pair unchanged, and returns the values it replaced. The update API
@@ -2965,6 +2987,12 @@ type GCPServiceAccountFilter struct {
 	ScopeID string // Filter by scope ID
 	Email   string // Filter by SA email
 	Managed *bool  // Filter by managed status (nil = no filter)
+
+	// EmailFold filters by SA email ignoring letter case. GCP service account
+	// emails are case-insensitive and not every writer normalizes them, so a
+	// check that must find every record for an account uses this rather than
+	// Email.
+	EmailFold string
 
 	// IncludeHubScoped widens the Scope/ScopeID terms from AND to OR against
 	// hub scope: the result is everything the scope terms select, plus every
@@ -4259,6 +4287,23 @@ type QuotaStore interface {
 	// caller acting on an earlier read never releases a newer reservation
 	// of the same resource.
 	ReleaseReservationByID(ctx context.Context, reservationID string) error
+
+	// ReleaseReservationIfAgent releases agentID's active reservation for
+	// the limit only if cond holds on the agent row, in one transaction: it
+	// locks the agent row (SELECT ... FOR UPDATE on Postgres; writers are
+	// serialized on SQLite), evaluates cond on it and releases in the same
+	// transaction. released is false when cond does not hold or no active
+	// row matches. A missing agent row returns ErrNotFound. Must not be
+	// called from inside WithTx.
+	ReleaseReservationIfAgent(ctx context.Context, limitDefinitionID, agentID string, cond AgentReleaseCond) (released bool, err error)
+
+	// ReleaseReservationIfScopeBrokerAbsent releases the active reservation
+	// reservationID only while no Runtime Broker row has the ID scopeID, in
+	// one conditional write. An unparseable scopeID matches no broker, so
+	// the row is released. A broker registered with that ID before the
+	// write keeps the row. A missing or already released reservation
+	// reports false with no error.
+	ReleaseReservationIfScopeBrokerAbsent(ctx context.Context, reservationID, scopeID string) (released bool, err error)
 
 	// ReleaseReservationsByResource releases all reservations for a given resource ID.
 	ReleaseReservationsByResource(ctx context.Context, resourceID string) error

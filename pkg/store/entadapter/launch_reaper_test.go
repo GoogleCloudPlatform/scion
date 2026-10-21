@@ -362,8 +362,9 @@ func TestReaper_ReleasesReservationOnDeadlineReap(t *testing.T) {
 	ctx := context.Background()
 	s, projectID := newTestAgentStore(t)
 	a := createLaunchableAgent(t, ctx, s, projectID, "reaper-quota")
-	a.RuntimeBrokerID = "broker-1"
-	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{}))
+	// The reaper releases only a reservation on the agent's own broker
+	// (ptone/scion#5137): record it on the row.
+	setAgentRuntimeBroker(t, ctx, s, a, testQuotaBroker)
 
 	quota := NewQuotaStore(s.client)
 	ld, err := quota.CreateLimitDefinition(ctx, &store.LimitDefinition{
@@ -789,8 +790,9 @@ func TestReaper_R10_2_ReleasesReservationOnPGWithSingleConnection(t *testing.T) 
 	s, projectID := newPGTestAgentStore(t, 1)
 	ctx := context.Background()
 	a := createLaunchableAgent(t, ctx, s, projectID, "reaper-quota-pg-single-conn")
-	a.RuntimeBrokerID = "broker-1"
-	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{}))
+	// The reaper releases only a reservation on the agent's own broker
+	// (ptone/scion#5137): record it on the row.
+	setAgentRuntimeBroker(t, ctx, s, a, testQuotaBroker)
 
 	quota := NewQuotaStore(s.client)
 	ld, err := quota.CreateLimitDefinition(ctx, &store.LimitDefinition{

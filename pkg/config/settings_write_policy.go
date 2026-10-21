@@ -116,3 +116,24 @@ func ValidateConfigSetKey(key string, global bool) error {
 func IsSecretSettingKey(key string) bool {
 	return isSecretKey(key)
 }
+
+// ValidateSettingValue rejects a value a setting does not accept, before any
+// settings file is read or written. An empty value (which clears the key) is
+// always accepted.
+func ValidateSettingValue(key, value string) error {
+	if value == "" {
+		return nil
+	}
+	switch key {
+	case "cli.mode":
+		switch value {
+		case "human", "agent":
+			return nil
+		case "assistant":
+			return fmt.Errorf("cli.mode %q: the assistant mode has been removed; use human or agent", value)
+		default:
+			return fmt.Errorf("cli.mode %q: must be human or agent", value)
+		}
+	}
+	return nil
+}

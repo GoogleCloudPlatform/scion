@@ -164,11 +164,46 @@ func (c *HubClient) post(ctx context.Context, path string, body []byte) ([]byte,
 	}
 }
 
+// Ingress headers (design §3.9 "Ingress"; contracts §3). A hub in external
+// relay mode sets both, and only on the relay-peer leg it proxies a conduit
+// dial over, after stripping any copy the client sent. A relay trusts them
+// only on that leg.
+const (
+	// HeaderIngressInstance names the hub instance the dial entered
+	// through: the hub's instance id, at most MaxIngressInstanceLen bytes.
+	HeaderIngressInstance = "X-Scion-Conduit-Ingress-Instance"
+	// HeaderIngressLifetimeCap carries the hub's conduit lifetime cap in
+	// whole seconds (decimal).
+	HeaderIngressLifetimeCap = "X-Scion-Conduit-Ingress-Lifetime-Cap-S"
+	// MaxIngressInstanceLen bounds HeaderIngressInstance and
+	// HubAdmitRequest.IngressInstance.
+	MaxIngressInstanceLen = 128
+)
+
+// How a dial reached the relay (HubAdmitRequest.Arrival).
+const (
+	// ArrivalDirect: the client dialed the relay's public listener.
+	ArrivalDirect = "direct"
+	// ArrivalIngress: a hub ingress proxied the dial over a relay-peer
+	// leg that named the ingress instance.
+	ArrivalIngress = "ingress"
+)
+
+// ReasonRelayNotAdmitting is the reason of the 503 a relay answers a conduit
+// upgrade with while it is draining or not ready (design §3.9 "Relay
+// selection", v2.21.51). It is sent only before Admit runs, so a hub
+// ingress may re-pick another relay on it.
+const ReasonRelayNotAdmitting = "relay_not_admitting"
+
 // HubAdmitRequest asks the hub to admit a dialer the relay received
 // (design §3.9 "Admission"). Headers are the dialer's credential headers
 // (ForwardCredentialHeaders), passed unchanged, and Host and RawQuery are
 // the ones the relay received, so a signed request (broker HMAC) verifies
 // as sent. SessionID is the id the relay will admit the session under.
+// Arrival is how the dial reached the relay (ArrivalDirect or
+// ArrivalIngress; "" from an older relay means direct), and
+// IngressInstance names the hub instance of an ingress arrival (empty for
+// a direct one). The hub binds Host to the arrival.
 type HubAdmitRequest struct {
 	RelayInstanceID string              `json:"relay_instance_id"`
 	RelayGeneration int64               `json:"relay_generation"`
@@ -176,6 +211,8 @@ type HubAdmitRequest struct {
 	Host            string              `json:"host"`
 	RawQuery        string              `json:"raw_query,omitempty"`
 	Headers         map[string][]string `json:"headers"`
+	Arrival         string              `json:"arrival,omitempty"`
+	IngressInstance string              `json:"ingress_instance,omitempty"`
 }
 
 // HubAdmitResponse is an admitted dialer: the principal to serve the

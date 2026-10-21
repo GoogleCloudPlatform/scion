@@ -46,6 +46,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
@@ -804,6 +805,15 @@ type StartExtras struct {
 	// this restart, the same set DispatchAgentStart sends as its
 	// resolvedSecrets parameter. Values are never logged.
 	ResolvedSecrets []ResolvedSecret
+	// AsyncLaunch, LaunchID, LaunchTimeoutSeconds and LaunchKeepaliveSeconds
+	// are a start's asynchronous launch fields (ptone/scion#4669), sent
+	// under the same wire keys as a create's (RemoteCreateAgentRequest).
+	// Zero values send nothing; this release never sets them, so every
+	// start is sent synchronously.
+	AsyncLaunch            bool
+	LaunchID               string
+	LaunchTimeoutSeconds   int
+	LaunchKeepaliveSeconds int
 }
 
 // applyStartExtras writes extras onto payload as flat top-level wire keys.
@@ -883,6 +893,18 @@ func applyStartExtras(payload map[string]interface{}, extras StartExtras) {
 	}
 	if len(extras.ResolvedSecrets) > 0 {
 		payload["resolvedSecrets"] = extras.ResolvedSecrets
+	}
+	if extras.AsyncLaunch {
+		payload["asyncLaunch"] = true
+	}
+	if extras.LaunchID != "" {
+		payload["launchId"] = extras.LaunchID
+	}
+	if extras.LaunchTimeoutSeconds > 0 {
+		payload["launchTimeoutSeconds"] = extras.LaunchTimeoutSeconds
+	}
+	if extras.LaunchKeepaliveSeconds > 0 {
+		payload["launchKeepaliveSeconds"] = extras.LaunchKeepaliveSeconds
 	}
 }
 
@@ -1705,6 +1727,10 @@ type Server struct {
 	// conduitEligibleRelays is the number of eligible separate relays at
 	// the last check (-1: not checked yet), read by the readiness gauge.
 	conduitEligibleRelays atomic.Int64
+	// brokerPresenceRegistryFallbacks counts broker presence reads whose
+	// conduit registry read failed and fell back to the legacy signals
+	// (broker_presence.go).
+	brokerPresenceRegistryFallbacks atomic.Int64
 	// conduitAdmissionAEADv is the admission token cipher
 	// (conduit_admission.go), derived once; conduitAdmissionKeyErr is why
 	// it could not be.
@@ -1828,6 +1854,19 @@ type Server struct {
 	cleanupOnce sync.Once          // Ensures CleanupResources runs only once
 	ctx         context.Context    // Server-lifetime context; cancelled on Shutdown
 	ctxCancel   context.CancelFunc // Cancels ctx
+
+	// shutdownMark is the "shutting down" mark (BeginShutdown,
+	// ptone/scion#5054): /readyz fails, new requests are refused and
+	// streams end before any listener or background service stops.
+	shutdownMark shutdownState
+	// shutdownHooks are the optional shutdown seams cmd sets
+	// (SetShutdownHooks); zero value: today's behaviour.
+	shutdownHooks ShutdownHooks
+	// conduitShutdownGrace is server.hub.conduit.shutdown_grace when set
+	// (SetConduitShutdownGrace), so every relay shutdown path caps the
+	// GoAway drain deadline the same way (ptone/scion#5105 timing).
+	conduitShutdownGrace    time.Duration
+	conduitShutdownGraceSet bool
 
 	// brokerWork admits and joins broker connection work (connect,
 	// disconnect, reconcile and notification drains), so shutdown stops
@@ -2318,6 +2357,16 @@ type Server struct {
 	// authorizeConduitUserStream instead of authorizeConduitAction. Only
 	// tests set it, on their own Server; production code never does.
 	conduitAuthorizeActionTestHook func(ctx context.Context, identity Identity, agent *store.Agent, action Action) error
+
+	// conduitIngressSampleTestHook, when non-nil, replaces the conduit
+	// ingress's random sample of the eligible relays (one or two of them)
+	// for relay selection. Only tests set it, on their own Server.
+	conduitIngressSampleTestHook func(eligible []registry.RelayInstance) []registry.RelayInstance
+
+	// legacyPortTunnelReturnedTestHook, when non-nil, runs in the port
+	// proxy right after the port-forward tunnel returns, before the
+	// answer is written. Only tests set it, on their own Server.
+	legacyPortTunnelReturnedTestHook func()
 }
 
 // groupsLogger returns the groups subsystem logger, falling back to
@@ -3724,6 +3773,7 @@ func signingKeySecretID(keyName, hubID string) string {
 func (s *Server) SetDispatcher(d AgentDispatcher) {
 	if hd, ok := d.(*HTTPAgentDispatcher); ok && hd != nil {
 		hd.SetRequiredStandingCheck(s.dispatchStandingCheck)
+		hd.SetShutdownGate(s.dispatchShutdownGate)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -4880,6 +4930,7 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	// standing before any broker call (ptone/scion#3433). SetDispatcher
 	// installs it too, for every dispatcher attached to the server.
 	dispatcher.SetRequiredStandingCheck(s.dispatchStandingCheck)
+	dispatcher.SetShutdownGate(s.dispatchShutdownGate)
 
 	// Wire the hub's operational agent_defaults so dispatch can carry the
 	// limit/resource ones to the broker's low-precedence tier. The accessor
@@ -5563,7 +5614,7 @@ func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, ag
 			MetadataMode: store.GCPMetadataModePassthrough,
 		}
 		if agent.RuntimeBrokerID != "" {
-			if err := s.translatePassthroughForSandbox(ctx, agent, agent.RuntimeBrokerID, project); err != nil {
+			if err := s.translatePassthroughForSandbox(ctx, nil, agent, agent.RuntimeBrokerID, project); err != nil {
 				return "", fmt.Errorf("failed to configure GCP identity for sandbox runtime: %w", err)
 			}
 			if agentHasAssignModeIdentity(agent) {
@@ -5638,7 +5689,7 @@ func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, ag
 				}
 				// The mode follows the pinned profile's type, as on every passthrough surface.
 				if agent.RuntimeBrokerID != "" {
-					if err := s.translatePassthroughForSandbox(ctx, agent, agent.RuntimeBrokerID, project); err != nil {
+					if err := s.translatePassthroughForSandbox(ctx, nil, agent, agent.RuntimeBrokerID, project); err != nil {
 						return "", fmt.Errorf("failed to configure GCP identity for sandbox runtime: %w", err)
 					}
 					if agentHasAssignModeIdentity(agent) {
@@ -6446,10 +6497,10 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	if s.config.SchedulerMaxConcurrency != nil {
 		schedOpts = append(schedOpts, WithMaxConcurrency(*s.config.SchedulerMaxConcurrency))
 	}
-	// Written under s.mu: in combined mode the CleanupResources goroutine
-	// (cmd/server_foreground.go) is already running and reads s.scheduler
-	// under s.mu.RLock. The reads in registerSchedulerHandlers below run on
-	// this goroutine, after this write, so they need no lock.
+	// Written under s.mu: a shutdown that begins during startup reads
+	// s.scheduler under s.mu.RLock (BeginShutdown, CleanupResources).
+	// The reads in registerSchedulerHandlers below run on this
+	// goroutine, after this write, so they need no lock.
 	sched := NewScheduler(s.store, logging.Subsystem("hub.scheduler"), schedOpts...)
 	s.mu.Lock()
 	s.scheduler = sched
@@ -6574,39 +6625,53 @@ func (s *Server) Start(ctx context.Context) error {
 	case err := <-errCh:
 		return err
 	case <-ctx.Done():
-		return s.Shutdown(context.Background())
+		s.mu.RLock()
+		hooks := s.shutdownHooks
+		s.mu.RUnlock()
+		sctx, cancel := hooks.shutdownContext()
+		defer cancel()
+		return s.Shutdown(sctx)
 	}
 }
 
 // Shutdown gracefully shuts down the server. It is safe to call even when
 // the Server was never started (e.g. New() followed directly by Shutdown()):
 // the background-service teardown below always runs via
-// CleanupBackgroundResources, and only the final HTTP listener shutdown is
-// skipped when there is no listener to shut down. It is also safe to call
-// more than once, or together with CleanupResources, since both are
-// idempotent and http.Server.Shutdown tolerates repeated calls. The order
-// is: background teardown, then the HTTP drain, then CloseAuditWriter, so
-// audit records emitted by requests still draining are written rather
-// than dropped as closed (remaining-audit P1, AC P1-9).
+// CleanupBackgroundResources, and only the HTTP listener drain is skipped
+// when there is no listener. It is also safe to call more than once, or
+// together with CleanupResources, since both are idempotent and
+// http.Server.Shutdown tolerates repeated calls.
+//
+// The order (ptone/scion#5054) is: mark shutting down (BeginShutdown, a
+// no-op if cmd already did it), wait for the co-located broker
+// (ShutdownHooks.BeforeHTTPDrain), close the listener and drain HTTP
+// (bounded by ctx and 30s), then the background teardown, then
+// CloseAuditWriter, so audit records emitted by requests still draining
+// are written rather than dropped as closed (remaining-audit P1, AC
+// P1-9). Background work is joined inside the teardown, before the audit
+// writer and the store close (ptone/scion#4869).
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.RLock()
 	srv := s.httpServer
+	hooks := s.shutdownHooks
 	s.mu.RUnlock()
 
 	slog.Info("Hub API server shutting down...")
+	s.BeginShutdown()
+
+	var err error
+	if srv != nil {
+		hooks.beforeHTTPDrain(ctx)
+		dctx, cancelDrain := hooks.httpDrainContext(ctx)
+		err = drainHTTPServer(dctx, srv)
+		cancelDrain()
+	}
 
 	// Run the shared background-service teardown (control channel, broker
 	// auth, scheduler, dispatchers, preview service, link services, event
 	// publisher, command bus, etc). It is sync.Once-guarded, so this is a
 	// no-op if it already ran.
 	_ = s.CleanupBackgroundResources(ctx)
-
-	var err error
-	if srv != nil {
-		shutdownCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		err = srv.Shutdown(shutdownCtx)
-		cancel()
-	}
 
 	// After the drain: close the audit writer (bounded by its own drain
 	// timeout; idempotent).
@@ -7307,6 +7372,11 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	}
 
 	h = s.recoveryMiddleware(h)
+
+	// Refuse new work once shutdown has begun (ptone/scion#5054). Inside
+	// the broker auth below, so requests from a Runtime Broker (which
+	// reports to the hub while it shuts down) are let through.
+	h = s.shutdownMark.refuseDuringShutdown(h, isBrokerRequest)
 
 	// Apply broker auth middleware (checks X-Scion-Broker-ID header for HMAC auth)
 	// This runs after unified auth but before the handler, allowing hosts to authenticate

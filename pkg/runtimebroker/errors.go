@@ -406,6 +406,11 @@ func runtimeOpError(op string, err error) *OpaqueError {
 	return NewOpaqueError(failedOpText(op), err)
 }
 
+// agentFilesDeleteRefusedMessage is the client message for an agent delete
+// whose files delete was refused (agent.ErrAgentFilesDeleteRefused). Like
+// every runtime-op message it names no path; the log has them.
+const agentFilesDeleteRefusedMessage = "Failed to delete agent: refused to remove a path outside the agent's own directories, or one that could not be resolved; nothing was removed there"
+
 // failedOpText is the fixed "Failed to <op>" lead every runtime-op error
 // message starts with (runtimeOpError, notFoundMessage).
 func failedOpText(op string) string {
@@ -782,7 +787,7 @@ func (s *Server) writeStartContextError(w http.ResponseWriter, err error, op str
 		// through the templatecache.HubConnectivityError the resolver wraps
 		// such a failure in, via its Unwrap method.
 		if errors.Is(sce.OriginalErr, fs.ErrNotExist) {
-			s.agentLifecycleLog.Warn("buildStartContext failed: local file missing", append(append([]any{"op", op}, extra...), "error", startContextDiagnostic(sce))...)
+			s.logStartContextFailure("buildStartContext failed: local file missing", op, startContextDiagnostic(sce), extra)
 			writeMissingLocalFileError(w, sce.OriginalErr, op)
 			return http.StatusUnprocessableEntity
 		}

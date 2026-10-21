@@ -255,6 +255,12 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	// which list every scope's records.
 	"role.read": {BoundaryKindHub}, "role_binding.read": {BoundaryKindHub},
 	"access_constraint.read": {BoundaryKindHub},
+	// Role definition, role binding and access constraint administration
+	// is hub-only: the definitions, bindings and constraints are written
+	// through the hub-level admin routes.
+	"role.create": {BoundaryKindHub}, "role.update": {BoundaryKindHub}, "role.delete": {BoundaryKindHub},
+	"role_binding.create": {BoundaryKindHub}, "role_binding.delete": {BoundaryKindHub},
+	"access_constraint.admin": {BoundaryKindHub},
 
 	// Self-scoped permissions. inbox.* may be selected on either boundary;
 	// a project token sees only its boundary project's records.
@@ -466,6 +472,11 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	// the hub-level records.
 	"role.read": {TargetClassKindHubResource}, "role_binding.read": {TargetClassKindHubResource},
 	"access_constraint.read": {TargetClassKindHubResource},
+	// Their administration targets the same hub-level records.
+	"role.create": {TargetClassKindHubResource}, "role.update": {TargetClassKindHubResource},
+	"role.delete":         {TargetClassKindHubResource},
+	"role_binding.create": {TargetClassKindHubResource}, "role_binding.delete": {TargetClassKindHubResource},
+	"access_constraint.admin": {TargetClassKindHubResource},
 
 	// Self-scoped permissions.
 	"inbox.read": {TargetClassKindSelf}, "inbox.write": {TargetClassKindSelf},

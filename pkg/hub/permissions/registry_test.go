@@ -146,6 +146,14 @@ var expectedSelectorRegistry = map[string][]string{
 	"access_constraint:read": {"access_constraint.read"},
 	"hub_audit:read":         {"hub.audit.read"},
 
+	// Identity governance administration (hub boundary only).
+	"role:create":             {"role.create"},
+	"role:update":             {"role.update"},
+	"role:delete":             {"role.delete"},
+	"role_binding:create":     {"role_binding.create"},
+	"role_binding:delete":     {"role_binding.delete"},
+	"access_constraint:admin": {"access_constraint.admin"},
+
 	// agent selectors outside the agent:manage alias.
 	"agent:set_message_mode": {"agent.set_message_mode"},
 	"agent:stop_all":         {"agent.stop_all"},

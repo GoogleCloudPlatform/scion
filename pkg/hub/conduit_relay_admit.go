@@ -88,9 +88,13 @@ func (s *Server) hubAdmit(w http.ResponseWriter, r *http.Request, peer string, b
 		http.Error(w, "session id already in use", http.StatusConflict)
 		return
 	}
-	// The dialer reached this relay at its registered public URL; a
-	// request naming another host is not one this relay received.
-	if !relayServesHost(row.PublicEndpoint, req.Host) {
+	// The dial's Host is bound to how it arrived (design §3.9, Host
+	// binding by arrival path): a direct dial names the relay's public
+	// host, an ingress dial one of this hub's public hosts. Every other
+	// combination is refused, with the cause in logs only.
+	if cause := s.conduitAdmitArrivalRefusal(row.PublicEndpoint, req); cause != "" {
+		slog.Info("Conduit relay admission refused for its arrival", "cause", cause, "relay_instance_id", peer,
+			"arrival", req.Arrival, "ingress_instance", req.IngressInstance)
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "The relay does not serve this host", nil)
 		return
 	}
@@ -231,6 +235,42 @@ func (s *Server) relayIAPPinned() bool {
 	iap, ok := s.authConfig.ProxyAuthenticator.(*IAPAuthenticator)
 	return ok && iap != nil && iap.Audience != "" &&
 		iap.resolveIssuer() == DefaultIAPIssuer && iap.resolveJWKSURL() == conduitRelayIAPJWKSURL
+}
+
+// conduitAdmitArrivalRefusal checks an Admit request's arrival and Host
+// against each other (design §3.9, Host binding by arrival path; contracts
+// "Addition (6.2 (a3))") and returns the refusal cause, or "" when the
+// combination is admitted:
+//   - direct (or "" from an older relay): no ingress instance, and Host is
+//     the host of the relay's registered public endpoint;
+//   - ingress: an ingress instance of at most relay.MaxIngressInstanceLen
+//     bytes, and Host is the host of one of this hub's public endpoints.
+//
+// Any other arrival is refused.
+func (s *Server) conduitAdmitArrivalRefusal(relayPublicEndpoint string, req relay.HubAdmitRequest) string {
+	switch req.Arrival {
+	case "", relay.ArrivalDirect:
+		if req.IngressInstance != "" {
+			return "ingress_instance_on_direct"
+		}
+		if !relayServesHost(relayPublicEndpoint, req.Host) {
+			return "host_not_relay"
+		}
+		return ""
+	case relay.ArrivalIngress:
+		if req.IngressInstance == "" || len(req.IngressInstance) > relay.MaxIngressInstanceLen {
+			return "ingress_instance_invalid"
+		}
+		eps := s.HubEndpoints()
+		for _, ep := range []string{eps.Public, eps.Operator} {
+			if relayServesHost(ep, req.Host) {
+				return ""
+			}
+		}
+		return "host_not_hub"
+	default:
+		return "arrival_unknown"
+	}
 }
 
 // relayServesHost reports whether host (as the dialer sent it) is the host

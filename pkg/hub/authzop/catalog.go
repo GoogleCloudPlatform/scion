@@ -320,9 +320,6 @@ var EntryPointExemptions = []EntryPointExemption{
 	// (hub.githubapp.read, hub.githubapp.update) with method-aware route guard
 	// enforcement. Exemptions removed; see Catalog OperationSpec entries.
 
-	// Access constraint preview endpoints — hub-admin, access_constraint.admin permission
-	{Pattern: "/api/v1/admin/access-constraint-previews", Kind: ExemptionHubAdmin, Reason: "Access constraint previews, hub-admin with access_constraint.admin; a preview precedes each governed boundary commit", Owner: "route_metadata.go"},
-	{Pattern: "/api/v1/admin/access-constraint-previews/", Kind: ExemptionHubAdmin, Reason: "Access constraint preview by ID, hub-admin with access_constraint.admin; a preview precedes each governed boundary commit", Owner: "route_metadata.go"},
 }
 
 // MutationClassifications maps every discovered security-relevant mutation
@@ -786,6 +783,8 @@ var MutationClassifications = []MutationClassification{
 	// pkg/store/storetest/ — store interface conformance test fixtures
 	// -----------------------------------------------------------------------
 	{File: "pkg/store/storetest/domains.go", Function: "AgentDomain", Symbol: "DeleteAgent", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: agent domain setup", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains.go", Function: "GCPServiceAccountDomain", Symbol: "CreateGCPServiceAccount", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: GCP SA domain setup", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains.go", Function: "GCPServiceAccountDomain", Symbol: "CreateGCPServiceAccount", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: GCP SA domain setup", Scope: "pkg/store/storetest"}},
 	{File: "pkg/store/storetest/domains.go", Function: "GCPServiceAccountDomain", Symbol: "CreateGCPServiceAccount", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: GCP SA domain setup", Scope: "pkg/store/storetest"}},
 	{File: "pkg/store/storetest/domains.go", Function: "GCPServiceAccountDomain", Symbol: "CreateGCPServiceAccount", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: GCP SA domain setup", Scope: "pkg/store/storetest"}},
 	{File: "pkg/store/storetest/domains.go", Function: "GCPServiceAccountDomain", Symbol: "CreateGCPServiceAccount", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: GCP SA domain setup", Scope: "pkg/store/storetest"}},

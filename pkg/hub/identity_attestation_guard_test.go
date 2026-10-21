@@ -885,7 +885,7 @@ var principalContextSetterFiles = map[string]map[string]bool{
 		"auth.go": true, "auth_external_bearer.go": true, "brokerauth.go": true,
 		// In-process identity substitution for deferred or internal work.
 		"authz.go": true, "capabilities.go": true, "chat_scheduled_send.go": true,
-		"pty_handlers.go": true, "server.go": true,
+		"passthrough_translation_review.go": true, "pty_handlers.go": true, "server.go": true,
 	},
 	"contextWithCredentialContext": {
 		"internal/principal/identity.go": true, "zz_alias_principal.go": true,

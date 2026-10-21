@@ -1261,13 +1261,18 @@ var (
 	errGCPSANotVerified  = errors.New("the assigned GCP service account is not verified")
 	errGCPSAEmailChanged = errors.New("the assigned GCP service account's email no longer matches the agent's assignment")
 	errGCPSAHubModeOff   = errors.New("hub-scoped GCP service account assignment requires gcpIamCheckMode=enforce")
+	// errGCPSABrokerMismatch: the account is a broker host service account
+	// record that is not bound to the broker the agent runs on (bound to
+	// another broker, or carrying no broker binding).
+	errGCPSABrokerMismatch = errors.New("the assigned GCP service account is a broker host service account that is not bound to this agent's broker")
 )
 
 // isGCPAssignmentInadmissible reports whether err is one of the refusal
 // reasons above, as opposed to a store failure while checking.
 func isGCPAssignmentInadmissible(err error) bool {
 	return errors.Is(err, errGCPSANotAvailable) || errors.Is(err, errGCPSANotVerified) ||
-		errors.Is(err, errGCPSAEmailChanged) || errors.Is(err, errGCPSAHubModeOff)
+		errors.Is(err, errGCPSAEmailChanged) || errors.Is(err, errGCPSAHubModeOff) ||
+		errors.Is(err, errGCPSABrokerMismatch)
 }
 
 // checkGCPAssignmentAdmissible is the admissibility rule for an agent's
@@ -1281,8 +1286,8 @@ func isGCPAssignmentInadmissible(err error) bool {
 // could not be completed. The token-mint gate (resolveAgentGCPMintFacts)
 // and the start/restart gate (gcpIdentityStartRefusal) both apply it, so an
 // agent that would be refused a token is refused at start instead.
-func (s *Server) checkGCPAssignmentAdmissible(ctx context.Context, gcpID *store.GCPIdentityConfig, agentProjectID string) error {
-	_, err := s.admissibleGCPServiceAccount(ctx, gcpID, agentProjectID)
+func (s *Server) checkGCPAssignmentAdmissible(ctx context.Context, gcpID *store.GCPIdentityConfig, agentProjectID, agentBrokerID string) error {
+	_, err := s.admissibleGCPServiceAccount(ctx, gcpID, agentProjectID, agentBrokerID)
 	return err
 }
 
@@ -1293,7 +1298,12 @@ func (s *Server) checkGCPAssignmentAdmissible(ctx context.Context, gcpID *store.
 // store error when the check could not be completed. Besides the token-mint
 // and start gates, the gs:// link fetch (resolveCurrentSA) uses it, so a
 // link opens only through an account the agent could mint a token for.
-func (s *Server) admissibleGCPServiceAccount(ctx context.Context, gcpID *store.GCPIdentityConfig, agentProjectID string) (*store.GCPServiceAccount, error) {
+//
+// agentBrokerID is the RuntimeBrokerID of the agent's stored row. A broker
+// host service account record is admissible only for an agent on the broker
+// it is bound to (its ScopeID); a record with no binding is admissible for no
+// agent.
+func (s *Server) admissibleGCPServiceAccount(ctx context.Context, gcpID *store.GCPIdentityConfig, agentProjectID, agentBrokerID string) (*store.GCPServiceAccount, error) {
 	if gcpID == nil {
 		return nil, errGCPSANotAvailable
 	}
@@ -1315,6 +1325,9 @@ func (s *Server) admissibleGCPServiceAccount(ctx context.Context, gcpID *store.G
 	}
 	if !sa.ReachableFromProject(agentProjectID) {
 		return nil, errGCPSANotAvailable
+	}
+	if store.HostSATranslationRecordNotBoundTo(sa, agentBrokerID) {
+		return nil, errGCPSABrokerMismatch
 	}
 	if sa.Scope == store.ScopeHub {
 		s.mu.RLock()
@@ -1338,11 +1351,11 @@ func (s *Server) admissibleGCPServiceAccount(ctx context.Context, gcpID *store.G
 // lookup error, so the caller renders the same "no GCP identity assigned" denial
 // it uses when no GCP identity is assigned -- a refusal here discloses nothing
 // beyond what that denial discloses.
-func (s *Server) resolveAgentGCPMintFacts(ctx context.Context, gcpID *store.GCPIdentityConfig, agentProjectID string) bool {
+func (s *Server) resolveAgentGCPMintFacts(ctx context.Context, gcpID *store.GCPIdentityConfig, agentProjectID, agentBrokerID string) bool {
 	if gcpID == nil {
 		return false
 	}
-	return s.checkGCPAssignmentAdmissible(ctx, gcpID, agentProjectID) == nil
+	return s.checkGCPAssignmentAdmissible(ctx, gcpID, agentProjectID, agentBrokerID) == nil
 }
 
 // gcpIdentityStartRefusal applies the token-mint admissibility rule at
@@ -1362,7 +1375,7 @@ func (s *Server) gcpIdentityStartRefusal(ctx context.Context, w http.ResponseWri
 	if !ok {
 		return false
 	}
-	err := s.checkGCPAssignmentAdmissible(ctx, gcpID, agent.ProjectID)
+	err := s.checkGCPAssignmentAdmissible(ctx, gcpID, agent.ProjectID, agent.RuntimeBrokerID)
 	if err == nil {
 		return false
 	}
@@ -1393,6 +1406,10 @@ func gcpIdentityStartRefusalText(action string, err error) (int, string, string)
 			"Cannot %s agent: %s: the hub cannot obtain tokens for it. %s "+
 				"Or assign the agent a different GCP identity, then retry.",
 			action, err.Error(), identityVerifyRemedy(""))
+	case errors.Is(err, errGCPSABrokerMismatch):
+		return http.StatusBadRequest, ErrCodeValidationError, fmt.Sprintf(
+			"Cannot %s agent: %s. Recreate the agent with GCP identity passthrough on its broker, "+
+				"or assign it a different GCP identity, then retry.", action, err.Error())
 	case errors.Is(err, errGCPSAHubModeOff):
 		return http.StatusForbidden, ErrCodeIdentityAssignDenied, fmt.Sprintf(
 			"Cannot %s agent: %s. %s Or assign the agent a project-scoped GCP identity, then retry.",
@@ -1460,7 +1477,7 @@ func (s *Server) handleAgentGCPToken(w http.ResponseWriter, r *http.Request) {
 
 	// Recheck the service account row's verification, reachability and mode
 	// facts from the store on every mint request.
-	if !s.resolveAgentGCPMintFacts(r.Context(), gcpID, agentRecord.ProjectID) {
+	if !s.resolveAgentGCPMintFacts(r.Context(), gcpID, agentRecord.ProjectID, agentRecord.RuntimeBrokerID) {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "no GCP identity assigned", nil)
 		return
 	}
@@ -1554,7 +1571,7 @@ func (s *Server) handleAgentGCPIdentityToken(w http.ResponseWriter, r *http.Requ
 
 	// Recheck the service account row's verification, reachability and mode
 	// facts from the store on every mint request.
-	if !s.resolveAgentGCPMintFacts(r.Context(), gcpID, agentRecord.ProjectID) {
+	if !s.resolveAgentGCPMintFacts(r.Context(), gcpID, agentRecord.ProjectID, agentRecord.RuntimeBrokerID) {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "no GCP identity assigned", nil)
 		return
 	}

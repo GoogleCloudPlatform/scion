@@ -97,13 +97,14 @@ type OTelConfig struct {
 	ProjectID string
 }
 
-// NewOTelHandler creates an slog handler that bridges to OTel logs.
-// Returns nil if lp is nil.
+// NewOTelHandler creates an slog handler that bridges to OTel logs, with
+// error-valued attributes rendered as sanitized strings. Returns nil if lp
+// is nil.
 func NewOTelHandler(component string, lp log.LoggerProvider) slog.Handler {
 	if lp == nil {
 		return nil
 	}
-	return otelslog.NewHandler(component, otelslog.WithLoggerProvider(lp))
+	return WithSanitizedErrorAttrs(otelslog.NewHandler(component, otelslog.WithLoggerProvider(lp)))
 }
 
 // SetupWithOTel initializes the global logger with optional OTel bridge.

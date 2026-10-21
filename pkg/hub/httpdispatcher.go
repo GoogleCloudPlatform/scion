@@ -212,6 +212,13 @@ type HTTPAgentDispatcher struct {
 	// drive a dispatcher without a hub server.
 	requiredStandingCheck func(ctx context.Context, agent *store.Agent) error
 
+	// shutdownGate refuses every dispatch once the hub has begun shutting
+	// down (ErrHubShuttingDown, ptone/scion#5054). It runs where each
+	// dispatch resolves its broker (getBrokerEndpoint,
+	// getProvisioningBrokerEndpoint). Server.SetDispatcher installs it;
+	// nil = no gate (store-only unit tests).
+	shutdownGate func() error
+
 	// hubAgentDefaultsProvider returns the hub's operational agent_defaults at
 	// dispatch time. A callback rather than a snapshot because the settings
 	// propagation goroutine rewrites them while the hub runs; the Server's
@@ -518,6 +525,22 @@ func (d *HTTPAgentDispatcher) SetRequiredStandingCheck(fn func(ctx context.Conte
 	d.requiredStandingCheck = fn
 }
 
+// SetShutdownGate registers the check every dispatch runs when it
+// resolves its broker: a non-nil error refuses the dispatch before any
+// broker call (ptone/scion#5054). Server.SetDispatcher installs the hub's
+// (Server.dispatchShutdownGate).
+func (d *HTTPAgentDispatcher) SetShutdownGate(fn func() error) {
+	d.shutdownGate = fn
+}
+
+// checkShutdownGate runs the installed shutdown gate.
+func (d *HTTPAgentDispatcher) checkShutdownGate() error {
+	if d.shutdownGate == nil {
+		return nil
+	}
+	return d.shutdownGate()
+}
+
 // dispatchStandingError runs the installed standing check.
 func (d *HTTPAgentDispatcher) dispatchStandingError(ctx context.Context, agent *store.Agent) error {
 	if d.requiredStandingCheck == nil {
@@ -614,6 +637,9 @@ func (d *HTTPAgentDispatcher) repairTemplate(ctx context.Context, agent *store.A
 // The HybridBrokerClient will route through the control channel when
 // available; only the HTTP fallback path requires a non-empty endpoint.
 func (d *HTTPAgentDispatcher) getBrokerEndpoint(ctx context.Context, brokerID string) (string, error) {
+	if err := d.checkShutdownGate(); err != nil {
+		return "", err
+	}
 	broker, err := d.store.GetRuntimeBroker(ctx, brokerID)
 	if err != nil {
 		return "", fmt.Errorf("failed to get runtime broker: %w", err)
@@ -631,6 +657,9 @@ func (d *HTTPAgentDispatcher) getBrokerEndpoint(ctx context.Context, brokerID st
 // missing project skips the check. Stop, delete and other non-provisioning
 // dispatches keep using getBrokerEndpoint.
 func (d *HTTPAgentDispatcher) getProvisioningBrokerEndpoint(ctx context.Context, agent *store.Agent) (string, error) {
+	if err := d.checkShutdownGate(); err != nil {
+		return "", err
+	}
 	broker, err := d.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
 	if err != nil {
 		return "", fmt.Errorf("failed to get runtime broker: %w", err)
@@ -3442,8 +3471,24 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 // true, the harness is asked to continue its prior session (e.g. Claude
 // --continue) instead of starting a fresh conversation. The hub is the source
 // of truth for resume: callers compute it from the agent's stored phase
-// (suspended → resume).
-func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool) (err error) {
+// (suspended → resume). It is DispatchAgentStartWithOptions with no options;
+// both call the synchronous dispatchAgentStart directly, so neither is a
+// guarded call site of the other.
+func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool) error {
+	return d.dispatchAgentStart(ctx, agent, task, resume)
+}
+
+// DispatchAgentStartWithOptions is DispatchAgentStart with per-call options
+// (ptone/scion#4669). This release accepts opts but does not act on them:
+// the start is always synchronous and the result is nil. Asynchronous start
+// adds its branch here.
+func (d *HTTPAgentDispatcher) DispatchAgentStartWithOptions(ctx context.Context, agent *store.Agent, task string, resume bool, _ StartDispatchOptions) (*StartDispatchResult, error) {
+	return nil, d.dispatchAgentStart(ctx, agent, task, resume)
+}
+
+// dispatchAgentStart is the synchronous start dispatch behind
+// DispatchAgentStart and DispatchAgentStartWithOptions.
+func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool) (err error) {
 	ctx, span := tracer.Start(ctx, "hub.dispatch.start")
 	defer span.End()
 	span.SetAttributes(
@@ -3649,7 +3694,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 	runID, previousRunID, token, recorded, err := d.beginRun(ctx, agent, startEnv.tokenGrant)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
-		return err
+		// Nothing was sent: the claim releases the start (errStartRunNotBegun).
+		return fmt.Errorf("%w: %w", errStartRunNotBegun, err)
 	}
 	extras.RunID = runID
 	setStartEnvToken(resolvedEnv, &envClassifications, token)

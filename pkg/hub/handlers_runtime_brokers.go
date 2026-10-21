@@ -499,6 +499,7 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 		broker.Labels = labels
 		recordChanged = true
 	}
+	priorHostSA := hostSAClaimOf(broker)
 
 	setGCPHost := updates.GCPHostServiceAccountEmail != nil || updates.GCPHostProjectID != nil
 	email, project := broker.GCPHostServiceAccountEmail, broker.GCPHostProjectID
@@ -516,10 +517,22 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 		project = *updates.GCPHostProjectID
 	}
 
+	// A changed host service account needs actAs for the requesting user on
+	// the new value; an unchanged or cleared one needs no check.
+	nextHostSA := hostSAClaim{Email: strings.ToLower(email), ProjectID: project}
+	hostSAVerdict := s.evaluateHostSAClaim(ctx, priorHostSA, nextHostSA, SurfaceBrokerHostSAUpdate)
+	if hostSAClaimWriteAllowed(priorHostSA, nextHostSA, hostSAVerdict) != nil {
+		writeHostSAClaimDenied(w, hostSAVerdict)
+		return
+	}
+
 	// The GCP host pair is written only through the dedicated store
 	// writers: a value set or cleared here is kept by registration and
 	// detection until the next update. The writers return the values they
-	// replaced, which the audit event records as the old values.
+	// replaced, which the audit event records as the old values. The pair
+	// is written only over the stored value the actAs decision above was
+	// made against (priorHostSA); if a registration or another update
+	// changed it in between, nothing is written and the request gets 409.
 	var gcpPrev *store.GCPHostSetting
 	writeErr := func() error {
 		if recordChanged {
@@ -528,9 +541,13 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 			}
 		}
 		if setGCPHost {
-			prev, err := s.store.SetRuntimeBrokerGCPHost(ctx, broker.ID, email, project)
+			prev, applied, err := s.store.SetRuntimeBrokerGCPHostIfPrior(ctx, broker.ID,
+				priorHostSA.Email, priorHostSA.ProjectID, email, project)
 			if err != nil {
 				return err
+			}
+			if !applied {
+				return ErrHostSAClaimStale
 			}
 			gcpPrev = &prev
 		}
@@ -565,6 +582,10 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 			LogBrokerSettingsEvent(ctx, s.auditLogger, after.ID, after.Name, actor.ID(), getClientIP(r),
 				mergeBrokerAuditDetails(brokerAuditCredentialDetails(ctx), details...))
 		}
+	}
+	if errors.Is(writeErr, ErrHostSAClaimStale) {
+		Conflict(w, "the broker's host service account changed during the update; retry")
+		return
 	}
 	if writeErr != nil {
 		writeErrorFromErr(w, writeErr, "")
@@ -642,6 +663,7 @@ func (s *Server) deleteRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 		writeErrorFromErr(w, err, "")
 		return
 	}
+	s.forgetBrokerBackfill(id)
 
 	// Clean up the broker's HMAC secret (best-effort, post-delete).
 	if err := s.store.DeleteBrokerSecret(ctx, id); err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -1768,6 +1790,11 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	// ones its complete inventory shows terminated, and apply the rest.
 	s.settleQueuedStops(ctx, id, prevBroker, &heartbeat, report)
 	s.drainQueuedStopsFromHeartbeat(ctx, id, prevBroker, &heartbeat, report)
+
+	// Retry a registration reservation backfill that skipped an agent on this
+	// replica (BackfillBrokerOnRegistration). Without a pending one this reads
+	// nothing: a heartbeat that needs nothing does not read the broker row.
+	s.retryBrokerBackfill(ctx, id)
 
 	writeJSON(w, http.StatusOK, heartbeatResp)
 }

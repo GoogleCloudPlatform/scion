@@ -330,6 +330,17 @@ func (s *AgentStore) MarkLaunchAccepted(ctx context.Context, agentID, launchID, 
 
 // EndLaunch implements store.AgentStore.EndLaunch.
 func (s *AgentStore) EndLaunch(ctx context.Context, agentID, launchID, reason string) error {
+	return s.endLaunch(ctx, agentID, launchID, reason, "")
+}
+
+// EndLaunchWithCode implements store.AgentStore.EndLaunchWithCode.
+func (s *AgentStore) EndLaunchWithCode(ctx context.Context, agentID, launchID, reason, code string) error {
+	return s.endLaunch(ctx, agentID, launchID, reason, code)
+}
+
+// endLaunch ends launchID with reason, and records code as the launch
+// error when it is not empty.
+func (s *AgentStore) endLaunch(ctx context.Context, agentID, launchID, reason, code string) error {
 	uid, err := parseUUID(agentID)
 	if err != nil {
 		return err
@@ -370,9 +381,13 @@ func (s *AgentStore) EndLaunch(ctx context.Context, agentID, launchID, reason st
 	if err != nil {
 		return err
 	}
-	if _, err := withLaunchEndSettlement(ltx.client.Agent.UpdateOneID(uid).
+	upd := ltx.client.Agent.UpdateOneID(uid).
 		SetLaunchState(store.LaunchStateEnded).
-		SetLaunchEndReason(reason), current, reason, now).
+		SetLaunchEndReason(reason)
+	if code != "" {
+		upd.SetLaunchError(code)
+	}
+	if _, err := withLaunchEndSettlement(upd, current, reason, now).
 		Save(ctx); err != nil {
 		return mapError(err)
 	}
@@ -384,16 +399,23 @@ func (s *AgentStore) EndLaunch(ctx context.Context, agentID, launchID, reason st
 	return nil
 }
 
-// releaseBrokerQuotaTx releases agentID's max_agents_per_broker reservation,
-// if any, through txClient. This must run through the
-// tick's/report's own transaction client, never QuotaService.Release
-// (pkg/hub/quota.go) or the ambient QuotaStore (quota_store.go) — on
-// Postgres those take a second connection outside this transaction/savepoint,
-// and on SQLite (pool forced to MaxOpenConns=1) that self-deadlocks until the
-// caller's timeout. Zero rows matched, or no such limit definition at all
-// (e.g. an unseeded test store), is success — not store.ErrNotFound, unlike
+// releaseBrokerQuotaTx releases row's max_agents_per_broker reservation,
+// if any, through txClient, only when it is scoped to row's Runtime Broker
+// (ptone/scion#5137). row is the agent row the caller read under its launch
+// transaction's lock: its runtime_broker_id is the broker the launch was
+// claimed for (a launch report is accepted only from that broker). A
+// reservation on another broker is left as it is (the sweep owns it), and
+// an agent with no broker releases nothing. The unique active
+// (limit, resource) index means the one conditional write names at most one
+// row. This must run through the tick's/report's own transaction client,
+// never QuotaService.Release (pkg/hub/quota.go) or the ambient QuotaStore
+// (quota_store.go) — on Postgres those take a second connection outside
+// this transaction/savepoint, and on SQLite (pool forced to
+// MaxOpenConns=1) that self-deadlocks until the caller's timeout. Zero rows
+// matched, or no such limit definition at all (e.g. an unseeded test
+// store), is success — not store.ErrNotFound, unlike
 // QuotaStore.ReleaseReservation.
-func releaseBrokerQuotaTx(ctx context.Context, txClient *ent.Client, agentID uuid.UUID, now time.Time) error {
+func releaseBrokerQuotaTx(ctx context.Context, txClient *ent.Client, row *ent.Agent, now time.Time) error {
 	ld, err := txClient.LimitDefinition.Query().
 		Where(limitdefinition.NameEQ(store.LimitMaxAgentsPerBroker)).
 		Only(ctx)
@@ -406,8 +428,9 @@ func releaseBrokerQuotaTx(ctx context.Context, txClient *ent.Client, agentID uui
 	_, err = txClient.UsageReservation.Update().
 		Where(
 			usagereservation.LimitDefinitionIDEQ(ld.ID),
-			usagereservation.ResourceIDEQ(agentID.String()),
+			usagereservation.ResourceIDEQ(row.ID.String()),
 			usagereservation.ReleasedAtIsNil(),
+			usagereservation.ScopeTypeEQ(usagereservation.ScopeType(store.QuotaScopeBroker)), usagereservation.ScopeIDEQ(row.RuntimeBrokerID),
 		).
 		SetReleasedAt(now).
 		Save(ctx)

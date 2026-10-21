@@ -339,6 +339,10 @@ type Server struct {
 	credLastScan    time.Time
 	credWatcherStop chan struct{}
 
+	// shutdownContext, when set (SetShutdownContext), returns the context
+	// Start passes to Shutdown once its ctx ends (ptone/scion#5054).
+	shutdownContext func() (context.Context, context.CancelFunc)
+
 	// dispatchAttempts tracks request-id based create-attempt state for
 	// idempotency and auditability.
 	dispatchAttempts   map[string]*dispatchAttempt
@@ -1387,8 +1391,27 @@ func (s *Server) Start(ctx context.Context) error {
 	case err := <-errCh:
 		return err
 	case <-ctx.Done():
-		return s.Shutdown(context.Background())
+		s.mu.RLock()
+		shutdownContext := s.shutdownContext
+		s.mu.RUnlock()
+		sctx, cancel := context.Background(), context.CancelFunc(func() {})
+		if shutdownContext != nil {
+			sctx, cancel = shutdownContext()
+		}
+		defer cancel()
+		return s.Shutdown(sctx)
 	}
+}
+
+// SetShutdownContext sets the function that returns the context Start
+// passes to Shutdown once its ctx ends, so the process can bound the
+// broker's shutdown by its own shutdown budget (ptone/scion#5054);
+// Shutdown's ShutdownDeadline still applies within it. Nil (the default):
+// context.Background(). Call it before Start.
+func (s *Server) SetShutdownContext(fn func() (context.Context, context.CancelFunc)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.shutdownContext = fn
 }
 
 // Started reports whether the server's services were started.
