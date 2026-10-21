@@ -1675,7 +1675,9 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 			upd.SetMessage("")
 		}
 		upd.SetStalledFromActivity("")
-		upd.ClearExitCode()
+		if su.ExitCode == nil {
+			upd.ClearExitCode()
+		}
 		upd.SetExitReason("")
 	}
 
@@ -1689,7 +1691,9 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	// A provisional start or reincarnation can retain old exits until the
 	// first running report; clear only after the guards accept that transition.
 	if su.ClearExit || (current.Phase == string(state.PhaseStarting) && su.Phase == string(state.PhaseRunning)) {
-		upd.ClearExitCode()
+		if su.ExitCode == nil {
+			upd.ClearExitCode()
+		}
 		upd.SetExitReason("")
 	}
 
