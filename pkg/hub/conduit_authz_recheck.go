@@ -79,6 +79,8 @@ func (s *Server) startConduitStreamAuthz(ctx context.Context, clk clock.Clock, i
 		Enforce: func() bool {
 			return s.conduitTargetStreamDeadlines() == config.ConduitTargetStreamDeadlinesEnforce
 		},
+		// A sweep shares broker reads among its checks (conduitBrokerMemo).
+		SweepContext: withConduitBrokerMemo,
 	})
 	if !s.conduitAuthz.CompareAndSwap(nil, a) {
 		return nil, nil, errors.New("conduit stream re-check already started")
@@ -124,7 +126,7 @@ func (s *Server) bindConduitAuthzEvents() {
 	var removeListen func()
 	if ln, ok := events.(conduitListenNotifier); ok {
 		removeListen = ln.AddOnListen(func() {
-			a.Recheck(ctx, conduitAuthzTriggerResync, conduitAuthzMatch{})
+			a.Recheck(withConduitBrokerMemo(ctx), conduitAuthzTriggerResync, conduitAuthzMatch{})
 		})
 	}
 	ch, unsubscribe := events.Subscribe(conduitAuthzEventPatterns...)
@@ -150,7 +152,8 @@ func (s *Server) bindConduitAuthzEvents() {
 		go q.receive(ctx, ch)
 		go q.work(ctx, a)
 	}
-	a.Recheck(ctx, conduitAuthzTriggerResync, conduitAuthzMatch{})
+	// A resync is a full pass: like a sweep, it shares broker reads.
+	a.Recheck(withConduitBrokerMemo(ctx), conduitAuthzTriggerResync, conduitAuthzMatch{})
 }
 
 // conduitNotifyMaxPending bounds the distinct pending notify matches; past
@@ -327,16 +330,7 @@ func (s *Server) trackConduitUserStream(st *conduitUserStream) (untrack func()) 
 // deny is acted on only while the store answers for the agent
 // (conduitConfirmAgentPresent).
 func (s *Server) checkConduitUserStream(ctx context.Context, st *conduitUserStream) (conduitAuthzVerdict, string) {
-	verdict, reason, _ := s.evaluateConduitStream(ctx, conduitStreamEval{
-		AgentID:     st.AgentID,
-		ProjectID:   st.ProjectID,
-		Identity:    func() (Identity, error) { return st.Identity, nil },
-		Kind:        st.Kind,
-		ViaTunnel:   st.ViaTunnel,
-		Port:        st.Port,
-		ConfirmDeny: func(agent *store.Agent) bool { return s.conduitConfirmAgentPresent(ctx, agent.ID) },
-		LogAttrs:    []any{"session_id", st.SessionID, "stream_id", st.StreamID},
-	})
+	verdict, reason, _ := s.evaluateConduitStream(ctx, s.recordedStreamEval(ctx, st))
 	return verdict, reason
 }
 

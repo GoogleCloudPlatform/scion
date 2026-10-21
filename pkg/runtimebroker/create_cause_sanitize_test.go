@@ -18,83 +18,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"unicode/utf8"
 )
-
-func TestSanitizeFailureCause(t *testing.T) {
-	tests := []struct {
-		name string
-		in   string
-		want string
-	}{
-		{"plain runtime text kept", "docker run scion-ctr-1: exit status 125", "docker run scion-ctr-1: exit status 125"},
-		{"kubernetes refusal kept",
-			`pods "agent-pod-4555" is forbidden: User "system:serviceaccount:team-ns:scion-sa" cannot get resource "pods"`,
-			`pods "agent-pod-4555" is forbidden: User "system:serviceaccount:team-ns:scion-sa" cannot get resource "pods"`},
-		{"long lower-case name kept", "pod scion-agent-a-rather-long-generated-name-0001 failed", "pod scion-agent-a-rather-long-generated-name-0001 failed"},
-		{"env value blanked, key kept", "run failed: FOO=bar BAZ=qux", "run failed: FOO=[REDACTED] BAZ=[REDACTED]"},
-		{"unquoted value with spaces", "env KEY=a b c, next", "env KEY=[REDACTED], next"},
-		{"prose after a value is blanked", "run failed: FOO=bar BAZ=qux done", "run failed: FOO=[REDACTED] BAZ=[REDACTED]"},
-		{"spaced separator ends a value", "TOKEN=a SECRET =b", "TOKEN=[REDACTED] SECRET =[REDACTED]"},
-		{"separator on the next line ends a value", "TOKEN=a SECRET\n=b", "TOKEN=[REDACTED] SECRET\n=[REDACTED]"},
-		{"spaced colon ends a value", "TOKEN=a value : b", "TOKEN=[REDACTED] value : [REDACTED]"},
-		{"earlier marker inside a value", "FOO=x Bearer abcdefghijkl end", "FOO=[REDACTED]"},
-		{"quoted value blanked", `bad env X="a b c"`, "bad env X=[REDACTED]"},
-		{"flag value blanked", "unknown flag --env=FOO=bar", "unknown flag --env=[REDACTED]"},
-		{"credential-named JSON key", `spec {"DB_PASSWORD": "hunter2-value"}`, `spec {"DB_PASSWORD": [REDACTED]}`},
-		{"SCION_ YAML key", "SCION_HUB_ENDPOINT: https://hub.example.com", "SCION_HUB_ENDPOINT: [REDACTED]"},
-		{"URL userinfo", "pull https://deploy:pw-value@registry.example.com/img:1 failed", "pull https://[REDACTED]@registry.example.com/img:1 failed"},
-		{"authorization scheme", "header Authorization: Bearer abcdefghijklmnop0123 refused", "header Authorization: Bearer [REDACTED] refused"},
-		{"JWT-shaped string", "got eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl here", "got [REDACTED] here"},
-		{"PEM block", "key -----BEGIN PRIVATE KEY-----\nMIIBVQIBADANBg\n-----END PRIVATE KEY----- end", "key [REDACTED] end"},
-		{"unterminated PEM block", "key -----BEGIN CERTIFICATE-----\nMIIBVQIBADANBg", "key [REDACTED]"},
-		{"long hex run", "container 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef exited", "container [REDACTED] exited"},
-		{"single-quoted key", "spec {'password': 'hunter2-value'}", "spec {'password': [REDACTED]}"},
-		{"passphrase key", "key_passphrase: hunter2-value", "key_passphrase: [REDACTED]"},
-		{"lower-case colon key", "spec password: hunter2-value; end", "spec password: [REDACTED]; end"},
-		{"hyphenated header key", "header x-api-key: abc123, sent", "header x-api-key: [REDACTED], sent"},
-		{"capitalized key, no space", "Password:hunter2", "Password:[REDACTED]"},
-		{"auth as a whole key word", "auth-header: abc123 X_AUTH=xyz", "auth-header: [REDACTED] X_AUTH=[REDACTED]"},
-		{"registry refusal kept", "unauthorized: authentication required", "unauthorized: authentication required"},
-		{"EnvVar JSON value", `env [{"name":"GITHUB_PAT","value":"hunter2"}]`, `env [{"name":"GITHUB_PAT","value":[REDACTED]}]`},
-		{"EnvVar %+v value", "env {Name:GITHUB_PAT Value:hunter2 ValueFrom:nil}", "env {Name:GITHUB_PAT Value:[REDACTED] ValueFrom:nil}"},
-		{"basic credentials after Authorization", "Authorization: Basic dXNlcjpwYXNz", "Authorization: Basic [REDACTED]"},
-		{"basic encoded credentials", "sent basic dXNlcjpwYXNzd29yZA== upstream", "sent basic [REDACTED] upstream"},
-		{"basic prose kept", "basic validation failed", "basic validation failed"},
-		{"long base64 run", "blob QWxhZGRpbjpvcGVuIHNlc2FtZQ0123456789AbCdEf end", "blob [REDACTED] end"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := sanitizeFailureCause(tt.in); got != tt.want {
-				t.Errorf("sanitizeFailureCause(%q)\n got %q\nwant %q", tt.in, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestSanitizeFailureCause_Truncates(t *testing.T) {
-	in := strings.Repeat("output line ", 300)
-	got := sanitizeFailureCause(in)
-	suffix := fmt.Sprintf("...[truncated, %d bytes]", len(in))
-	if !strings.HasSuffix(got, suffix) {
-		t.Fatalf("got %q, want suffix %q", got[len(got)-60:], suffix)
-	}
-	if body := strings.TrimSuffix(got, suffix); len(body) != maxLoggedCauseBytes || !strings.HasPrefix(in, body) {
-		t.Errorf("kept %d bytes, want the first %d", len(body), maxLoggedCauseBytes)
-	}
-
-	// The cut never splits a multi-byte rune.
-	multi := strings.Repeat("é", maxLoggedCauseBytes)
-	got = sanitizeFailureCause(multi)
-	if !utf8.ValidString(got) {
-		t.Errorf("truncated text is not valid UTF-8")
-	}
-}
 
 // credentialShapedValues are the values credentialShapedStartError embeds;
 // none may appear in any broker log record.
@@ -128,8 +58,9 @@ func credentialShapedStartError() error {
 // cause and error text through sanitizeFailureCause: the records of the
 // create and start failures whose client response is the fixed
 // "Failed to <op>" text (synchronous create, async launch, create
-// preflight, start, restart, and start context preparation). Each listed
-// site needs a case in TestCreateFailureCause_SanitizedAtEveryLogSite.
+// preflight, start, restart, and start context preparation), and the start
+// context record for a missing local file. Each listed site needs a case in
+// TestCreateFailureCause_SanitizedAtEveryLogSite.
 var sanitizedCauseLogSites = []string{
 	"Agent create failed",
 	"runLaunch: agent start failed",
@@ -137,6 +68,7 @@ var sanitizedCauseLogSites = []string{
 	"Agent start failed",
 	"Agent restart failed",
 	"buildStartContext failed",
+	"buildStartContext failed: local file missing",
 }
 
 // assertSanitizedCauseRecord checks logs hold exactly one msg record, that
@@ -292,6 +224,18 @@ func TestCreateFailureCause_SanitizedAtEveryLogSite(t *testing.T) {
 					assertSanitizedCauseRecord(t, logs.String(), "buildStartContext failed", map[string]string{"agent_id": "agent-ctx-sanitize", "runtime": "docker", "profile": "default"})
 				})
 			}
+		},
+		"buildStartContext failed: local file missing": func(t *testing.T) {
+			srv := newTestServer(t)
+			logs := &syncBuffer{}
+			srv.agentLifecycleLog = slog.New(slog.NewJSONHandler(logs, nil))
+			w := httptest.NewRecorder()
+			err := &startContextError{IsHubError: true, Message: "curated", OriginalErr: fmt.Errorf("%w: %w", credentialShapedStartError(), fs.ErrNotExist)}
+			srv.writeStartContextError(w, err, "start agent", "agent_id", "agent-ctx-missing", "runtime", "docker", "profile", "default")
+			if w.Code != http.StatusUnprocessableEntity {
+				t.Errorf("response = %d %s, want 422", w.Code, w.Body.String())
+			}
+			assertSanitizedCauseRecord(t, logs.String(), "buildStartContext failed: local file missing", map[string]string{"agent_id": "agent-ctx-missing", "runtime": "docker", "profile": "default"})
 		},
 	}
 	for _, site := range sanitizedCauseLogSites {

@@ -439,12 +439,23 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 		writeError(w, http.StatusNotImplemented, ErrCodeInvalidRequest, "WebSocket port forwarding is not supported in this revision", nil)
 		return
 	}
+	// A user request is evaluated as a conduit port stream is, and while
+	// it is open the in-process re-check can end it
+	// (port_forward_legacy_recheck.go).
+	legacy, ok := s.startLegacyPortRequest(w, r, identity, agent, exposed.Port)
+	if !ok {
+		return
+	}
+	defer legacy.end()
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxProxyRequestBody))
 	if err != nil {
 		writeError(w, http.StatusRequestEntityTooLarge, ErrCodeInvalidRequest, "Request body too large", nil)
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), portForwardTimeout)
+	if legacy.refused(w, r) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(legacy.context(r), portForwardTimeout)
 	defer cancel()
 	reqPath := "/" + strings.TrimPrefix(proxyPath, "/")
 	resp, err := s.portTunnels.Do(ctx, agent.ID, portforward.Request{
@@ -457,6 +468,14 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 		Header:   cloneForwardHeaders(r.Header),
 		Body:     body,
 	})
+	if hook := s.legacyPortTunnelReturnedTestHook; hook != nil {
+		hook()
+	}
+	// A re-check that ended the request while the tunnel served it, or
+	// since, wins over the tunnel's answer, which is dropped.
+	if legacy.refused(w, r) {
+		return
+	}
 	if err != nil {
 		if errors.Is(err, errNoPortTunnel) {
 			if conduitOn {

@@ -141,9 +141,8 @@ func (s *Server) launchReaperTickHandler() func(ctx context.Context) {
 			// provisioned prior returns the agent to rest, as an applied
 			// failed report does (ptone/scion#4669).
 			if s.settleFailedStartLaunch(ctx, &result.Reaped[i]) {
-				// Publish the settled row (intent, message), not the
-				// reaped copy.
-				s.publishAgentStatusByID(ctx, result.Reaped[i].ID)
+				// The settle published the settled row (intent,
+				// message); the reaped copy is not published.
 				continue
 			}
 			s.events.PublishAgentStatus(ctx, &result.Reaped[i])

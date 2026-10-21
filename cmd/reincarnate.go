@@ -22,6 +22,7 @@ import (
 	"io"
 	"maps"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -39,6 +40,7 @@ var (
 	reincarnateDryRun          bool
 	reincarnateHandoffTemplate bool
 	reincarnateBroker          string
+	reincarnateForce           bool
 	reincarnateSharedDirs      []string
 	reincarnateAllowEmptySD    bool
 
@@ -225,6 +227,9 @@ run these broker checks.`,
 		if err := validateReincarnatePatchFlags(); err != nil {
 			return err
 		}
+		if err := validateReincarnateForceFlag(reincarnateForce, reincarnateBroker); err != nil {
+			return err
+		}
 
 		agentName, isSelf, err := resolveReincarnateTarget(args, os.Getenv("SCION_AGENT_NAME"), reincarnateHandoffFile != "", reincarnateDryRun)
 		if err != nil {
@@ -299,6 +304,7 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 		Handoff:             handoff,
 		DryRun:              reincarnateDryRun,
 		TargetBroker:        reincarnateBroker,
+		ForceMove:           reincarnateForce,
 		SharedDirBackends:   sharedDirBackends,
 		AllowEmptySharedDir: reincarnateAllowEmptySD,
 	}
@@ -326,6 +332,7 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 		if err != nil {
 			if v := moveVerdictFromError(err); v != nil && !isJSONOutput() {
 				printMoveVerdict(os.Stderr, v)
+				printMoveForceHint(os.Stderr, err, reincarnateForce)
 			}
 			if perr := patchNeedsUpdateError(err, wantPatched, hubCtx.CredentialKind); perr != nil {
 				return wrapHubError(perr)
@@ -344,6 +351,9 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 		if err := checkMoveHandshakeResponse(reincarnateBroker, probeResp); err != nil {
 			return err
 		}
+		if err := checkHubSupportsForce(reincarnateForce, probeResp); err != nil {
+			return err
+		}
 	}
 
 	if reincarnateDryRun {
@@ -358,6 +368,7 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 	if err != nil {
 		if v := moveVerdictFromError(err); v != nil && !isJSONOutput() {
 			printMoveVerdict(os.Stderr, v)
+			printMoveForceHint(os.Stderr, err, reincarnateForce)
 		}
 		if apiclient.IsConflictError(err) && moveVerdictFromError(err) == nil {
 			return wrapHubError(fmt.Errorf("a reincarnation is already pending for '%s': %w", agentName, err))
@@ -370,6 +381,12 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 
 	if err := checkHubSupportsMove(reincarnateBroker, resp); err != nil {
 		return err
+	}
+	// A dry run is its own handshake: an old hub ignores --force.
+	if reincarnateDryRun {
+		if err := checkHubSupportsForce(reincarnateForce, resp); err != nil {
+			return err
+		}
 	}
 	if err := checkHubAppliedPatch(wantPatched, resp); err != nil {
 		if !reincarnateDryRun {
@@ -396,6 +413,9 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 
 	if resp.MoveVerdict != nil {
 		printMoveVerdict(os.Stdout, resp.MoveVerdict)
+		if reincarnateForce && resp.MoveVerdict.TransferMode == moveTransferModeExport {
+			fmt.Println("--force was not needed: the workspace is carried through the shared NFS export.")
+		}
 	}
 	printReincarnationPlan(resp.Plan)
 
@@ -579,6 +599,58 @@ func checkMoveHandshakeResponse(broker string, resp *hubclient.ReincarnateAgentR
 	return nil
 }
 
+// validateReincarnateForceFlag checks --force locally, before any request:
+// it only applies to a move to another broker.
+func validateReincarnateForceFlag(force bool, broker string) error {
+	if force && broker == "" {
+		return newUsageError("--force needs --broker: it only applies to a move to another broker")
+	}
+	return nil
+}
+
+// checkHubSupportsForce checks a --force dry run answered for a target
+// other than the agent's current broker: the verdict must name a transfer
+// mode. A hub that predates --force ignores it and never sets one, so a
+// move it allows would be an ordinary export move without the caller
+// knowing whether --force was understood.
+func checkHubSupportsForce(force bool, resp *hubclient.ReincarnateAgentResponse) error {
+	if !force || resp == nil || resp.SourceBrokerID == resp.TargetBrokerID {
+		return nil
+	}
+	if resp.MoveVerdict == nil || resp.MoveVerdict.TransferMode == "" {
+		return fmt.Errorf("this hub does not support --force; upgrade the hub")
+	}
+	return nil
+}
+
+// Move verdict values the CLI renders specially.
+const (
+	moveCheckResultWaived         = "waived"
+	moveCheckWorkspaceRecreatable = "workspace_recreatable"
+	moveTransferModeExport        = "export"
+	moveTransferModeRecreate      = "recreate"
+)
+
+// moveForceHint is printed under a refused move's verdict when --force would
+// recreate the agent on the target instead.
+const moveForceHint = "--force recreates the agent on the target instead, giving up its local state (see --dry-run --force)."
+
+// printMoveForceHint prints moveForceHint when a move refused without
+// --force carries forceWouldApply in its error details: the hub decides
+// when a forced move would apply.
+func printMoveForceHint(w io.Writer, err error, force bool) {
+	if force {
+		return
+	}
+	var apiErr *apiclient.APIError
+	if !errors.As(err, &apiErr) || apiErr.Details == nil {
+		return
+	}
+	if would, _ := apiErr.Details["forceWouldApply"].(bool); would {
+		_, _ = fmt.Fprintln(w, moveForceHint)
+	}
+}
+
 // checkHubSupportsMove fails a --broker request whose response has no
 // target broker: the hub ignored --broker, so its plan is for the current
 // broker, not the requested one.
@@ -612,7 +684,8 @@ func moveVerdictFromError(err error) *hubclient.MoveVerdict {
 }
 
 // printMoveVerdict renders a move eligibility verdict: the brokers, the
-// resolved target profile, and each check's result.
+// resolved target profile, the transfer mode, each check's result, and what
+// the move keeps, carries, recreates and loses.
 func printMoveVerdict(w io.Writer, v *hubclient.MoveVerdict) {
 	ref := func(b hubclient.MoveBrokerRef) string {
 		if b.Name != "" {
@@ -624,12 +697,58 @@ func printMoveVerdict(w io.Writer, v *hubclient.MoveVerdict) {
 	if v.Profile != "" {
 		_, _ = fmt.Fprintf(w, "  %-28s %s (%s)\n", "Target profile:", v.Profile, valueOrNone(v.RuntimeType))
 	}
+	switch v.TransferMode {
+	case "":
+	case moveTransferModeExport:
+		_, _ = fmt.Fprintf(w, "  %-28s %s\n", "Transfer mode:", "export (the workspace is carried through the shared NFS export)")
+	case moveTransferModeRecreate:
+		_, _ = fmt.Fprintf(w, "  %-28s %s\n", "Transfer mode:", "recreate (the workspace is recreated on the target)")
+	default:
+		_, _ = fmt.Fprintf(w, "  %-28s %s\n", "Transfer mode:", v.TransferMode)
+	}
 	for _, c := range v.Checks {
-		line := fmt.Sprintf("  %-28s %s", c.Name+":", c.Result)
-		if c.Message != "" {
-			line += " - " + c.Message
+		result := c.Result
+		if result == moveCheckResultWaived {
+			result = "waived (--force)"
+		}
+		msg := c.Message
+		// The hub passes workspace_recreatable without a message when the
+		// workspace is not recreated (an export move, or a refusal before
+		// recreate was considered); say why.
+		if c.Name == moveCheckWorkspaceRecreatable && c.Result == "passed" && msg == "" && v.TransferMode != moveTransferModeRecreate {
+			msg = "not needed (workspace carried by the shared export)"
+		}
+		line := fmt.Sprintf("  %-28s %s", c.Name+":", result)
+		if msg != "" {
+			line += " - " + msg
 		}
 		_, _ = fmt.Fprintln(w, line)
+	}
+	printMoveConsequences(w, v.Consequences)
+	if v.TransferMode == moveTransferModeRecreate {
+		_, _ = fmt.Fprintln(w, "Uncommitted and unpushed work in the agent's workspace will not survive this move.")
+	}
+}
+
+// printMoveConsequences prints a verdict's consequences grouped by kind:
+// kept, carried, recreated, lost, then any kind this CLI does not know.
+func printMoveConsequences(w io.Writer, cs []hubclient.MoveConsequence) {
+	if len(cs) == 0 {
+		return
+	}
+	order := []string{"kept", "carried", "recreated", "lost"}
+	for _, c := range cs {
+		if !slices.Contains(order, c.Kind) {
+			order = append(order, c.Kind)
+		}
+	}
+	_, _ = fmt.Fprintln(w, "Move consequences:")
+	for _, kind := range order {
+		for _, c := range cs {
+			if c.Kind == kind {
+				_, _ = fmt.Fprintf(w, "  %-10s %s: %s\n", kind, c.Item, c.Text)
+			}
+		}
 	}
 }
 
@@ -706,6 +825,7 @@ func init() {
 	reincarnateCmd.Flags().StringVar(&reincarnateHandoffFile, "handoff-file", "", "File whose content becomes the new generation's first task (required for self-migration)")
 	reincarnateCmd.Flags().BoolVar(&reincarnateDryRun, "dry-run", false, "Print the resolved reincarnation plan without migrating anything")
 	reincarnateCmd.Flags().StringVar(&reincarnateBroker, "broker", "", "Move the agent to this runtime broker (name or ID); both brokers must mount the same NFS export. The move is dry-run first and refused if not eligible")
+	reincarnateCmd.Flags().BoolVar(&reincarnateForce, "force", false, "With --broker, move even when the workspace cannot travel through a shared NFS export: the workspace is recreated on the target and uncommitted or unpushed work, the home and the harness session are lost. Run with --dry-run first to see exactly what is kept and lost")
 	reincarnateCmd.Flags().BoolVar(&reincarnateHandoffTemplate, "handoff-template", false, "Print the handoff template and exit")
 	reincarnateCmd.Flags().StringArrayVar(&reincarnateSharedDirs, "shared-dir-backend", nil, "Change a shared dir's recorded storage backend, as NAME=nfs or NAME=local (repeatable). Only the record changes; copy the data to the new backend first")
 	reincarnateCmd.Flags().BoolVar(&reincarnateAllowEmptySD, "allow-empty-shared-dir", false, "With --shared-dir-backend, start even if the directory on the new backend is empty while the previous one is not")

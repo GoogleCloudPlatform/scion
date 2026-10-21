@@ -72,6 +72,7 @@ func newCrossRelayWorldWith(t *testing.T, opts separateRelayOptions) *crossRelay
 		InstanceID: "relay-1", PublicURL: "http://" + cw.relay1Addr, HubInternalURL: internalB.URL,
 		PublicListener: ln, InternalListen: "127.0.0.1:0",
 		PeerAuth: externalRelayAuth(t, "relay-1"), Registry: entadapter.NewConduitRegistryStore(cw.regClient), Experiment: conduitAlwaysOn{},
+		Clock: cw.relayClockFor("relay-1", cw.clock), RecheckInterval: opts.relayRecheckInterval,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() {

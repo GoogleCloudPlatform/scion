@@ -284,6 +284,22 @@ type conduitGrantRequest struct {
 	// CanRenew reports that this node can deliver renewals for the stream
 	// on the resolved route.
 	CanRenew bool
+	// Route is the metric and log route label of the open
+	// (conduitRouteRelayTunnel for a relay-held tunnel; contracts
+	// 1bbe35f0 §2, Renewal path unavailable, Message and observability).
+	// Empty means conduitRouteOf(Via). It is hub-internal: only the hub's
+	// own caller sets it, never from a request or relay field; it is never
+	// in the grant, an instruction or any wire field, and never an input to
+	// authorization or the re-check (Via is).
+	Route string
+}
+
+// route is req's metric and log route label: Route, or the label of Via.
+func (req conduitGrantRequest) route() string {
+	if req.Route != "" {
+		return req.Route
+	}
+	return conduitRouteOf(req.Via)
 }
 
 // mintConduitGrant authorizes req and, only if every check passes, mints a
@@ -361,10 +377,10 @@ func (s *Server) mintConduitGrant(ctx context.Context, req conduitGrantRequest) 
 	// renewal): the backstop of the open paths' check on the resolved row,
 	// at the same point, so it precedes the placement guard. Only user
 	// stream origins (tunnel, proxy, pty) are concerned.
-	if req.Via != "" && s.conduitTargetUpgradeRequired(ctx, req.Identity, req.TargetRenews, conduitRouteOf(req.Via), agent.ID) {
+	if req.Via != "" && s.conduitTargetUpgradeRequired(ctx, req.Identity, req.TargetRenews, req.route(), agent.ID) {
 		return nil, nil, errConduitAgentUpgradeRequired
 	}
-	if s.conduitRenewalPathUnavailable(ctx, req.Identity, req.TargetRenews, req.CanRenew, conduitRouteOf(req.Via), agent.ID) {
+	if s.conduitRenewalPathUnavailable(ctx, req.Identity, req.TargetRenews, req.CanRenew, req.route(), agent.ID) {
 		return nil, nil, errConduitStreamRenewalUnavailable
 	}
 	// Design v2.21.36 §3.5, Principals without a renewal path: with off, a
@@ -478,7 +494,7 @@ func (s *Server) mintConduitGrant(ctx context.Context, req conduitGrantRequest) 
 	if unstampedKind != "" {
 		slog.InfoContext(ctx, "Conduit open grant minted without a deadline: the principal has no renewal path",
 			"agent_id", agent.ID, "kind", req.Stream.Kind, "via", req.Via, "principal_kind", unstampedKind)
-		s.recordConduitOpenUnstamped(conduitRouteOf(req.Via), unstampedKind)
+		s.recordConduitOpenUnstamped(req.route(), unstampedKind)
 	}
 	return tok, &claims, nil
 }

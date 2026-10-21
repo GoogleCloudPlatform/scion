@@ -174,6 +174,11 @@ interface ScopeReissueAgent {
   role_after?: string;
   op_id?: string;
   dispatch_error?: string;
+  /**
+   * Set on a changed agent whose new credential was delivered but whose
+   * running agent did not confirm the reload.
+   */
+  reload_unconfirmed?: string;
 }
 
 /** An agent named in one of the bulk scope re-issue result lists. */
@@ -200,13 +205,19 @@ interface ScopeReissueAllResult {
   batch_audit_recorded: boolean;
 }
 
+/** The number of agents whose reload the running agent did not confirm. */
+function reloadUnconfirmedCount(r: ScopeReissueAllResult): number {
+  return (r.agents ?? []).filter((a) => !!a.reload_unconfirmed).length;
+}
+
 /** The counts line of a scope re-issue result, worded as the CLI does. */
 function scopeReissueSummary(r: ScopeReissueAllResult): string {
   const verb = r.dry_run ? 'would change' : 'changed';
   return (
     `${r.total} agents: ${r.succeeded?.length ?? 0} ${verb}, ` +
     `${r.noop?.length ?? 0} unchanged, ${r.refused?.length ?? 0} refused, ` +
-    `${r.push_failed?.length ?? 0} token not delivered`
+    `${r.push_failed?.length ?? 0} token not delivered, ` +
+    `${reloadUnconfirmedCount(r)} reload unconfirmed`
   );
 }
 
@@ -222,6 +233,7 @@ function scopeReissueAgentLines(r: ScopeReissueAllResult): string {
     if (a.added?.length) lines.push(`  added:    ${a.added.join(', ')}`);
     if (a.removed?.length) lines.push(`  removed:  ${a.removed.join(', ')}`);
     if (a.dispatch_error) lines.push(`  token not delivered: ${a.dispatch_error}`);
+    if (a.reload_unconfirmed) lines.push(`  reload unconfirmed: ${a.reload_unconfirmed}`);
   }
   return lines.join('\n');
 }
@@ -241,6 +253,7 @@ const RESET_AUTH_CODE_LABELS: Record<string, string> = {
   delegation_ceiling: 'Delegation chain invalid',
   agent_not_in_standing: 'Not in good standing',
   runtime_unavailable: 'Runtime unavailable',
+  reload_unconfirmed: 'Reload unconfirmed',
   internal_error: 'Internal error',
   unclassified: 'Other',
 };
@@ -1592,6 +1605,13 @@ export class ScionPageAdminMaintenance extends LitElement {
     if (pushFailed > 0) {
       warnings.push(
         `${pushFailed} agents did not receive their new token; run reset-auth for each.`
+      );
+    }
+    const reloadUnconfirmed = reloadUnconfirmedCount(r);
+    if (reloadUnconfirmed > 0) {
+      warnings.push(
+        `${reloadUnconfirmed} agents received their new token but did not confirm the reload; ` +
+          'if one keeps failing to authenticate, restart it.'
       );
     }
     return html`

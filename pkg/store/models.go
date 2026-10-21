@@ -154,9 +154,10 @@ type Agent struct {
 	// UpdateAgent (the whole-row CAS writer) never sets any of these from the
 	// caller's struct: they are absent from its Ent builder chain entirely.
 	// The only writers are BeginLaunch, BeginStartLaunch, MarkLaunchAccepted,
-	// EndLaunch, ApplyLaunchReport and RunLaunchReaperTick, plus the narrow "clear
-	// launch_error / end an active launch" rule inside UpdateAgent and
-	// UpdateAgentStatus when the written phase is "running" (§3.3).
+	// EndLaunch, EndLaunchWithCode, ApplyLaunchReport and RunLaunchReaperTick,
+	// plus the narrow "clear launch_error / end an active launch" rule inside
+	// UpdateAgent and UpdateAgentStatus when the written phase is "running"
+	// (§3.3).
 	LaunchAsyncOptIn   bool      `json:"-"`
 	LaunchID           string    `json:"-"`
 	LaunchState        string    `json:"-"` // "" | "active" | "ended"
@@ -1240,6 +1241,11 @@ type BrokerCapabilities struct {
 	// --broker`). The hub refuses a move unless both the source and the
 	// target broker report it (412).
 	AgentMove bool `json:"agentMove"`
+	// AgentMoveRecreate indicates the broker can be the target of a forced
+	// move (`scion reincarnate --broker --force`): it provisions the agent
+	// with a fresh workspace after confirming it has no files for the agent.
+	// The hub refuses a forced move onto a broker without it (412).
+	AgentMoveRecreate bool `json:"agentMoveRecreate,omitempty"`
 	// ReprovisionEmptyPerAgent indicates the broker's reprovision reuses an
 	// empty-per-agent agent's private workspace in place (same-broker
 	// `scion reincarnate`, miller79/scion#167). The hub refuses same-broker

@@ -163,6 +163,7 @@ export const KNOWN_LAUNCH_ERROR_CODES = [
   'unschedulable',
   'pod_disrupted',
   'broker_restarted',
+  'dispatch_failed',
 ] as const;
 
 /**

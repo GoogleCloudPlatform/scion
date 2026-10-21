@@ -466,8 +466,10 @@ scion reset-auth <agent-name>
 ```
 
 This generates a new token on the Hub, pushes it into the running container, and signals the agent
-to restart its token-refresh loop. It requires Hub connectivity and only works on a **running**
-agent (a stopped agent gets a fresh token on its next start). The same action is available as a
+to restart its token-refresh loop. If the signal does not reach the agent, it still picks up the new
+token: the agent checks its token file every few seconds and adopts a new token the Hub accepts
+through the same reset. It requires Hub connectivity and only works on a **running** agent (a
+stopped agent gets a fresh token on its next start). The same action is available as a
 **Reset Auth** button in the web UI. See [Diagnostics](#diagnostics) to identify when this is
 needed.
 

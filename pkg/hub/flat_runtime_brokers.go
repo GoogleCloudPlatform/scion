@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"strings"
 	"time"
@@ -207,6 +208,14 @@ type flatRegistration struct {
 	GateAutoProvide       bool
 	RequestedAutoProvide  bool
 	AutoProvideAuthorized bool
+	// HostSAClaim is the caller's actAs decision for the host service
+	// account Apply sets (Server.evaluateHostSAClaim). A row whose host
+	// service account Apply changes to a non-empty value is written only
+	// when HostSAClaim allows exactly that value; otherwise the registration
+	// is refused with ErrHostSAClaimNotAuthorized before anything is
+	// written. The zero value allows only writes that leave it unchanged,
+	// which is all the embedded registration does.
+	HostSAClaim hostSAClaimVerdict
 }
 
 // refuseRuntimeTargetInUse returns a runtime_target_in_use refusal when a
@@ -284,6 +293,9 @@ func (s *Server) registerFlatRuntimeBroker(ctx context.Context, reg flatRegistra
 		}
 		b.ID, b.Name, b.Slug, b.RuntimeTarget = reg.BrokerID, reg.Name, slug, &target
 		b.Profiles, b.DefaultProfile = nil, ""
+		if err := hostSAClaimWriteAllowed(hostSAClaim{}, hostSAClaimOf(b), reg.HostSAClaim); err != nil {
+			return nil, false, err
+		}
 		if err := s.store.CreateRuntimeBroker(ctx, b); err != nil {
 			// A row that took the target after the check above.
 			var refusal *RuntimeTargetRefusal
@@ -296,6 +308,9 @@ func (s *Server) registerFlatRuntimeBroker(ctx context.Context, reg flatRegistra
 		if err != nil {
 			return nil, false, fmt.Errorf("failed to read flat Runtime Broker: %w", err)
 		}
+		// A row created (or re-created after a deregistration) here gets its
+		// agents' reservations back before the registration returns.
+		s.BackfillBrokerOnRegistration(ctx, reg.BrokerID)
 		return stored, true, nil
 	}
 
@@ -308,6 +323,19 @@ func (s *Server) registerFlatRuntimeBroker(ctx context.Context, reg flatRegistra
 	}
 	if !sameRuntimeTarget(current.RuntimeTarget, &reg.Target) {
 		return nil, false, runtimeTargetChangedRefusal(current.ID, current.RuntimeTarget.ID, reg.Target.ID)
+	}
+	// The host service account decision is checked before the first write
+	// (the display name below), on a copy with Apply's changes, so a refusal
+	// leaves the row unchanged. It is checked again on the row itself
+	// immediately before the update.
+	priorHostSA := hostSAClaimOf(current)
+	if reg.Apply != nil {
+		probe := *current
+		probe.Labels = maps.Clone(current.Labels)
+		reg.Apply(&probe, false)
+		if err := hostSAClaimWriteAllowed(priorHostSA, hostSAClaimOf(&probe), reg.HostSAClaim); err != nil {
+			return nil, false, err
+		}
 	}
 	// R2: name and slug are set only at creation; a re-registration matched
 	// by ID is never refused for a name collision.
@@ -330,6 +358,9 @@ func (s *Server) registerFlatRuntimeBroker(ctx context.Context, reg flatRegistra
 	if reg.Apply != nil {
 		reg.Apply(current, false)
 		current.Updated = time.Now()
+		if err := hostSAClaimWriteAllowed(priorHostSA, hostSAClaimOf(current), reg.HostSAClaim); err != nil {
+			return nil, false, err
+		}
 		if err := s.store.UpdateRuntimeBroker(ctx, current); err != nil {
 			return nil, false, fmt.Errorf("failed to update flat Runtime Broker: %w", err)
 		}
@@ -920,17 +951,25 @@ func runtimeTargetDMError(err error) *AgentDMError {
 	return &AgentDMError{Code: ErrCodeInternalError, Message: "Failed to wake agent: " + err.Error(), HTTPStatus: http.StatusInternalServerError}
 }
 
+// runtimeTargetRefusalMessage returns the message of a flat Runtime Broker
+// refusal returned by a start (the hub's own pre-check refusal, or the
+// broker's), or "" for any other error.
+func runtimeTargetRefusalMessage(err error) string {
+	var refusal *RuntimeTargetRefusal
+	if errors.As(err, &refusal) {
+		return refusal.Message
+	}
+	if se, _, _, ok := brokerRuntimeTargetRefusal(err); ok {
+		return se.brokerErrorMessage()
+	}
+	return ""
+}
+
 // settleRuntimeTargetRefusal records a flat Runtime Broker refusal returned
 // by a start as a definite start failure: the agent's message is set to the
 // refusal message. Nothing retries a refusal. Any other error is ignored.
 func (s *Server) settleRuntimeTargetRefusal(ctx context.Context, agent *store.Agent, err error) {
-	msg := ""
-	var refusal *RuntimeTargetRefusal
-	if errors.As(err, &refusal) {
-		msg = refusal.Message
-	} else if se, _, _, ok := brokerRuntimeTargetRefusal(err); ok {
-		msg = se.brokerErrorMessage()
-	}
+	msg := runtimeTargetRefusalMessage(err)
 	if msg == "" || agent == nil {
 		return
 	}

@@ -200,6 +200,10 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 	// HTTPStatus — in both of those cases the agent may still be relying on
 	// its current credential. The launch kind decides the rule
 	// (launchFailureRevokeReason).
+	// settled: the run-intent hook settled this report's start launch and
+	// published the settled row (settleFailedProvisionedStart publishes), so
+	// the handler's own publish of the pre-settle row is skipped.
+	settled := false
 	if sr.State == store.LaunchReportStateFailed && answer.HTTPStatus == 0 && answer.Result == store.LaunchReportResultApplied {
 		if reason := launchFailureRevokeReason(&updated); reason != "" {
 			revokeAgentCredentialsBestEffort(ctx, s.store, agentID, reason)
@@ -212,9 +216,7 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 		// again, since a newer start may hold the intent now; it only
 		// restores the message shape.
 		if updated.LaunchEndReason == store.LaunchEndReasonFailed {
-			if s.settleFailedStartLaunch(ctx, &updated) {
-				defer s.publishAgentStatusByID(ctx, agentID)
-			}
+			settled = s.settleFailedStartLaunch(ctx, &updated)
 		} else {
 			s.reapplyStartLaunchFailureMessage(ctx, &updated)
 		}
@@ -236,6 +238,17 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 		s.settleLaunchedRun(ctx, &updated, req.Agent)
 	}
 
+	// A write that changed the row (applied, or a 409 stale_launch that
+	// still ended the launch) may have released the launch's claim (a
+	// create, start or restart claim) with the agent already out of a
+	// counted phase: an exit observed during the launch skipped its release
+	// while the claim was held. Free the slot now if the agent holds no
+	// capacity and no start-kind claim; a no-op otherwise (a running agent,
+	// or a write that released quota itself).
+	if answer.Changed {
+		s.releaseSlotIfIdle(ctx, agentID)
+	}
+
 	if answer.HTTPStatus != 0 {
 		if answer.HTTPStatus == http.StatusForbidden {
 			Forbidden(w)
@@ -248,8 +261,9 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 
 	// design §3.7 step 7: publish after every applied change to step, phase,
 	// message or launch state. Keepalive-only writes (Changed == false) are
-	// not published.
-	if answer.Changed {
+	// not published. A settled start launch was published by the settle,
+	// with its settled intent and message.
+	if answer.Changed && !settled {
 		s.events.PublishAgentStatus(ctx, &updated)
 	}
 }

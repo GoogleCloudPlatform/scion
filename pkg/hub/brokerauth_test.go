@@ -1498,7 +1498,7 @@ func TestBrokerRegistration_HostSAEmail_NormalizedToLowercase(t *testing.T) {
 		GCPHostServiceAccountEmail: "Broker-SA@My-Project.iam.gserviceaccount.com",
 	}
 
-	resp, err := svc.CreateBrokerRegistration(ctx, req, "admin")
+	resp, err := createBrokerRegistrationWithHostSA(ctx, svc, req, "admin")
 	if err != nil {
 		t.Fatalf("CreateBrokerRegistration failed: %v", err)
 	}
@@ -1536,7 +1536,7 @@ func TestBrokerReregistration_HostSAEmail_NormalizedToLowercase(t *testing.T) {
 	}
 
 	for _, email := range []string{"MixedCase@Proj.iam.gserviceaccount.com", "Other@Proj.iam.gserviceaccount.com"} {
-		resp, err := svc.CreateBrokerRegistration(ctx, CreateBrokerRegistrationRequest{
+		resp, err := createBrokerRegistrationWithHostSA(ctx, svc, CreateBrokerRegistrationRequest{
 			Name:                       "rereg-host",
 			GCPHostServiceAccountEmail: email,
 			GCPHostProjectID:           "proj",
@@ -1591,7 +1591,7 @@ func TestCreateBrokerRegistrationForAuthorizedMatch_IDMismatchRefused(t *testing
 	_, err = svc.CreateBrokerRegistrationForAuthorizedMatch(ctx, CreateBrokerRegistrationRequest{
 		Name:        "pin-mismatch-host",
 		AutoProvide: !beforeAutoProvide,
-	}, "someone-else", "a-different-broker-id-than-was-matched", true)
+	}, "someone-else", "a-different-broker-id-than-was-matched", true, hostSAClaimVerdict{})
 	if !errors.Is(err, ErrBrokerRegistrationAuthorizationStale) {
 		t.Fatalf("expected ErrBrokerRegistrationAuthorizationStale, got: %v", err)
 	}
@@ -1642,7 +1642,7 @@ func TestCreateBrokerRegistrationForAuthorizedMatch_AutoProvidePin(t *testing.T)
 			_, err := svc.CreateBrokerRegistrationForAuthorizedMatch(ctx, CreateBrokerRegistrationRequest{
 				Name:        "pin-autoprovide-host",
 				AutoProvide: tc.requestedOn,
-			}, "owner", broker.ID, tc.authorized)
+			}, "owner", broker.ID, tc.authorized, hostSAClaimVerdict{})
 			if tc.wantStale {
 				if !errors.Is(err, ErrBrokerRegistrationAuthorizationStale) {
 					t.Fatalf("expected ErrBrokerRegistrationAuthorizationStale, got: %v", err)
@@ -1682,7 +1682,7 @@ func TestCreateBrokerRegistrationForAuthorizedMatch_EmptyIDRefused(t *testing.T)
 	_, err = svc.CreateBrokerRegistrationForAuthorizedMatch(ctx, CreateBrokerRegistrationRequest{
 		Name:        "pin-empty-host",
 		AutoProvide: !beforeAutoProvide,
-	}, "someone-else", "", true)
+	}, "someone-else", "", true, hostSAClaimVerdict{})
 	if err == nil {
 		t.Fatal("expected an error for an empty expectedExistingBrokerID, got nil")
 	}
@@ -1719,7 +1719,7 @@ func TestCreateBrokerRegistrationForAuthorizedNew_ExistingMatchRefused(t *testin
 	_, err = svc.CreateBrokerRegistrationForAuthorizedNew(ctx, CreateBrokerRegistrationRequest{
 		Name:        "pin-new-host",
 		AutoProvide: !beforeAutoProvide,
-	}, "late-arriving-caller")
+	}, "late-arriving-caller", hostSAClaimVerdict{})
 	if !errors.Is(err, ErrBrokerRegistrationAuthorizationStale) {
 		t.Fatalf("expected ErrBrokerRegistrationAuthorizationStale, got: %v", err)
 	}
