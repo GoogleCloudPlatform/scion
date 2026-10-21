@@ -33,11 +33,11 @@ import (
 //
 // Personal groups live in webchat_user_prefs.thread_groups, a JSON document
 // {"<projectId>": [{"id", "name", "threadIds": [<topic ID>...]}]}. A
-// background sweeper copies them into project thread groups. A pass reads every row whose
-// thread_groups is non-empty and whose thread_groups_migrated_at is NULL,
-// handles the rows one project at a time, then marks each user done. A
-// user's entries for a project count only if the user may read that project
-// now (rule 0, design section 3).
+// background sweeper copies them into project thread groups. A pass reads
+// every row whose thread_groups is non-empty and whose
+// thread_groups_migrated_at is NULL, handles the rows one project at a time,
+// then marks each user done. A user's entries for a project count only if
+// the user may read that project now (rule 0, design section 3).
 //
 // Every pass is deterministic and idempotent, so several hubs may run passes
 // at once: groups are matched on the unique (project_id, name_key) index,

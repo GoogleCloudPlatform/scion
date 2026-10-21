@@ -236,13 +236,20 @@ func retiredOverridesDoc(t *testing.T, value bool) string {
 
 // A hub built with an injected registry that has no thread groups entry
 // (as the experiments API tests build one) starts, and the thread group
-// routes reach their handlers instead of a gate.
+// routes reach their handlers: the collection answers a user's missing
+// projectId with 400, and an unknown group ID is the handler's 404, not the
+// "route not found" of a gate.
 func TestThreadGroups_RegistryWithoutExperimentServesRoutes(t *testing.T) {
 	srv, _ := testServerWithOps(t, testRegistry(t))
-	for _, path := range []string{"/api/v1/thread-groups?projectId=" + uuid.NewString(), "/api/v1/thread-groups/" + uuid.NewString()} {
-		rec := doRequest(t, srv, http.MethodGet, path, nil)
-		assert.NotContains(t, rec.Body.String(), "route not found", "%s must reach the handler", path)
-	}
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/thread-groups", nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "projectId is required")
+
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/thread-groups/"+uuid.NewString(), nil)
+	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "Thread group not found")
+	assert.NotContains(t, rec.Body.String(), "route not found")
 }
 
 // A project member user can do every operation, and each mutation

@@ -582,10 +582,10 @@ func (s *Server) handleRemoveThreadGroupThread(w http.ResponseWriter, r *http.Re
 
 // threadGroupForNewConversation validates the threadGroupId of a
 // POST /api/v1/conversations before the conversation is minted (design
-// section 2): the group must exist in projectID (404 otherwise, so another project's group is not
-// disclosed), and it must have room for one more thread (422). An agent
-// must belong to projectID (403). The caller has already authorized
-// projectID.
+// section 2): the group must exist in projectID (404 otherwise, so another
+// project's group is not disclosed), and it must have room for one more
+// thread (422). An agent must belong to projectID (403). The caller has
+// already authorized projectID.
 func (s *Server) threadGroupForNewConversation(ctx context.Context, threadGroupID, projectID string) (*store.ThreadGroup, *apiError) {
 	// The strict agent same-project rule of every thread group mutation
 	// (design section 3): handleCreateConversation authorizes only

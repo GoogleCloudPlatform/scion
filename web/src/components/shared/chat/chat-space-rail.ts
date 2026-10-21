@@ -203,10 +203,9 @@ function safeJsonParse(value: unknown): unknown {
 /**
  * localStorage key for persisted thread-group collapse state (#1698 follow-up).
  *
- * Group IDs (`generateGroupId`) mix `Math.random()` with a timestamp, so they
- * are already unique across every space, not just within one — a flat set of
- * IDs is enough and there is no need to nest the key under a project/space
- * id.
+ * Project group IDs are hub-assigned UUIDs, so they are already unique
+ * across every space, not just within one — a flat set of IDs is enough and
+ * there is no need to nest the key under a project/space id.
  */
 const GROUP_COLLAPSE_STORAGE_KEY = 'scion-chat-group-collapse';
 
@@ -374,10 +373,11 @@ async function readGroupResponse(res: Response): Promise<ProjectThreadGroup | nu
  * The stored personal `threadGroups` document exactly as the server sent
  * it: '' when the field is absent or null (the hub omits an empty value,
  * and stores '' back as NULL), or undefined when it arrived as something
- * other than a string. The rail writes this back byte for byte on every preferences save: the hub clears the
- * migration marker of a user whose stored `thread_groups` changes (design
- * section 5a), so even a re-serialisation of the same groups, or '{}' for
- * none, would queue them for migration again.
+ * other than a string. The rail writes this back byte for byte on every
+ * preferences save: the hub clears the migration marker of a user whose
+ * stored `thread_groups` changes (design section 5a), so even a
+ * re-serialisation of the same groups, or '{}' for none, would queue them
+ * for migration again.
  */
 function rawThreadGroups(payload: unknown): string | undefined {
   const value = (payload as { threadGroups?: unknown } | null | undefined)?.threadGroups;
@@ -592,10 +592,10 @@ export class ScionChatSpaceRail extends LitElement {
    * Whether `loadPrefs` has completed successfully at least once. On a cold
    * deep link, `selectedKey` is set as an attribute before `connectedCallback`
    * (chat.ts binds it that way), so the very first `updated()` fires and
-   * would otherwise lock in "no override" while `prefs.threadGroups` is
-   * simply not loaded yet — not "this user has no groups". Gating on this
-   * flag, rather than on `threadGroups` being defined, avoids that false
-   * signal (round-3 review, R4).
+   * would otherwise lock in "no override" while the preferences are simply
+   * not loaded yet. The auto-expand decision waits for this flag and for the
+   * selected thread's space's project groups (`groupsKnownForSelection`)
+   * (round-3 review, R4). `savePrefs` also never writes before it is set.
    */
   private _prefsLoaded = false;
   /** Group header id the drag is hovering over. */
@@ -3061,9 +3061,9 @@ export class ScionChatSpaceRail extends LitElement {
 
   /**
    * Read the preferences again before an order change is computed if they
-   * may be stale (see `_prefsStale`). Resolves
-   * to false, after a toast, if they are stale and cannot be read: the
-   * caller must then not save (fail closed).
+   * may be stale (see `_prefsStale`). Resolves to false, after a toast, if
+   * they are stale and cannot be read: the caller must then not save (fail
+   * closed).
    */
   private async freshPrefsForOrder(): Promise<boolean> {
     if (!this._prefsStale) return true;
@@ -3129,7 +3129,7 @@ export class ScionChatSpaceRail extends LitElement {
       {
         fallback: 'Couldn’t create the group',
         hub400: true,
-        404: 'Thread groups are not enabled on this hub',
+        404: 'Couldn’t create the group: this hub doesn’t serve thread groups',
         409: 'A group with that name already exists in this space',
         422: 'This space has reached its group limit',
       }
@@ -3166,9 +3166,9 @@ export class ScionChatSpaceRail extends LitElement {
    * File a thread into a project group; the hub moves it out of any other
    * group. In a space with its own order the thread joins the end of the
    * group: unless the caller records the order itself (`recordOrder` false,
-   * a row drop), its ID moves to just after
-   * the group's last member in `threadOrder`, once the hub has accepted
-   * the change. `optimistic` replaces the default local change (append).
+   * a row drop), its ID moves to just after the group's last member in
+   * `threadOrder`, once the hub has accepted the change. `optimistic`
+   * replaces the default local change (append).
    * Resolves to whether the hub accepted it (or it was already done).
    */
   private async addThreadToProjectGroup(
