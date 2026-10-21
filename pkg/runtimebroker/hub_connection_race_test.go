@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
@@ -70,7 +71,7 @@ func TestHubConnection_ReinitializeConcurrentReaders(t *testing.T) {
 		cfg.HeartbeatEnabled = false
 		cfg.ControlChannelEnabled = false
 		cfg.BrokerAuthEnabled = false
-		srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+		srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 		srv.multiCredStore = brokercredentials.NewMultiStore(credDir)
 
 		conn, err := srv.createHubConnection(name, creds)

@@ -67,7 +67,7 @@ func newProberBroker(t *testing.T, list func(context.Context, map[string]string)
 	}}
 	mgr := agent.NewManager(rt)
 	t.Cleanup(mgr.Close)
-	return New(DefaultServerConfig(), mgr, rt)
+	return New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 }
 
 // Any List failure while the lookup runs must come back wrapping
@@ -255,7 +255,7 @@ func TestProberAsAuxiliaryRuntime_StopFailsClosed(t *testing.T) {
 		rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }, ListFunc: defaultList}
 		mgr := agent.NewManager(rt)
 		t.Cleanup(mgr.Close)
-		srv := New(DefaultServerConfig(), mgr, rt)
+		srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 		addAuxRuntime(t, srv, "substrate", &proberMockRuntime{
 			MockRuntime: &runtime.MockRuntime{
 				NameFunc: func() string { return "substrate" },
@@ -304,7 +304,7 @@ func TestNonProberRuntime_StopPrimaryListError_PropagatesAsUpstream(t *testing.T
 	}
 	mgr := agent.NewManager(rt)
 	t.Cleanup(mgr.Close)
-	srv := New(DefaultServerConfig(), mgr, rt)
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	w := httptest.NewRecorder()
 	srv.stopAgent(w, httptest.NewRequest(http.MethodPost, "/api/v1/agents/dev/stop", nil), "dev", gapProjBID)
@@ -328,7 +328,7 @@ func TestNonProberRuntime_ProjectBlindStop_PassesIDThrough(t *testing.T) {
 	}
 	mgr := agent.NewManager(rt)
 	t.Cleanup(mgr.Close)
-	srv := New(DefaultServerConfig(), mgr, rt)
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	w := httptest.NewRecorder()
 	srv.stopAgent(w, httptest.NewRequest(http.MethodPost, "/api/v1/agents/abc123/stop", nil), "abc123", "")

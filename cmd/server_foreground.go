@@ -4050,19 +4050,21 @@ func refuseErrorRuntimeAtStartup(rt runtime.Runtime) error {
 	return fmt.Errorf("runtime broker: configured substrate runtime failed config validation: %w", er.Err)
 }
 
-// resolveBrokerDefaultRuntime resolves the broker's default runtime with
-// getRuntime (runtime.GetRuntime in production), applies
-// refuseErrorRuntimeAtStartup, and logs the runtime the broker will use. It
-// is the first step of startRuntimeBroker; the returned runtime is the one
-// the broker's manager is built on, so the refusal cannot be skipped without
-// also losing the runtime itself.
-func resolveBrokerDefaultRuntime(getRuntime func(projectPath, profileName string) runtime.Runtime, logf func(format string, args ...interface{})) (runtime.Runtime, error) {
-	rt := getRuntime(serverRuntimeProjectPath, "")
+// resolveBrokerDefaultRuntime resolves the broker's default runtime and its
+// build record with getRuntime (runtime.GetRuntimeWithRecord in
+// production), applies refuseErrorRuntimeAtStartup, and logs the runtime
+// the broker will use. It is the first step of startRuntimeBroker; the
+// returned runtime is the one the broker's manager is built on, so the
+// refusal cannot be skipped without also losing the runtime itself. A
+// refused runtime returns a nil runtime and the zero record; otherwise the
+// record is getRuntime's, unchanged.
+func resolveBrokerDefaultRuntime(getRuntime func(projectPath, profileName string) (runtime.Runtime, config.RuntimeBuildRecord), logf func(format string, args ...interface{})) (runtime.Runtime, config.RuntimeBuildRecord, error) {
+	rt, rec := getRuntime(serverRuntimeProjectPath, "")
 	if err := refuseErrorRuntimeAtStartup(rt); err != nil {
-		return nil, err
+		return nil, config.RuntimeBuildRecord{}, err
 	}
 	logf("Runtime broker using runtime: %s", rt.Name())
-	return rt, nil
+	return rt, rec, nil
 }
 
 func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.GlobalConfig, hubSrv *hub.Server, webSrv *hub.WebServer, s store.Store, hubEndpoint string, hubEndpointSrc hubEndpointSource, devAuthToken string, brokerSettings *config.Settings, brokerDefaultProfile *string, globalDir string, requestLogger, messageLogger *slog.Logger, wg *sync.WaitGroup, errCh chan error, shutdownContext func() (context.Context, context.CancelFunc)) error {
@@ -4094,7 +4096,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		})
 	}
 	warnUnhostedFlatIdentities(globalDir)
-	rt, err := resolveBrokerDefaultRuntime(runtime.GetRuntime, log.Printf)
+	rt, rtRecord, err := resolveBrokerDefaultRuntime(runtime.GetRuntimeWithRecord, log.Printf)
 	if err != nil {
 		return err
 	}
@@ -4342,7 +4344,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		enableColocatedProfileReferences(ctx, hubSrv)
 	}
 
-	rhSrv := runtimebroker.New(rhCfg, mgr, rt)
+	rhSrv := runtimebroker.New(rhCfg, mgr, rt, rtRecord)
 	// The broker phase of the process's graceful shutdown bounds the
 	// broker's own (ptone/scion#5054).
 	rhSrv.SetShutdownContext(shutdownContext)
@@ -4355,11 +4357,11 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 	// engine without a full server restart (fixes onboarding wizard flow).
 	if hubSrv != nil && colocatedBrokerRegistered {
 		hubSrv.SetRuntimeReloadFunc(func() bool {
-			newRT := runtime.GetRuntime(serverRuntimeProjectPath, "")
+			newRT, rec := runtime.GetRuntimeWithRecord(serverRuntimeProjectPath, "")
 			if newRT.Name() == rhSrv.RuntimeName() {
 				return false
 			}
-			rhSrv.SwapRuntime(newRT)
+			rhSrv.SwapRuntime(newRT, rec)
 			hubSrv.SetLocalImageChecker(newRT)
 			return true
 		})

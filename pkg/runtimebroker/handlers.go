@@ -3384,7 +3384,8 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	// on; if settings cannot resolve it, fail rather than start the agent
 	// on the default runtime (ptone/scion#2709). buildStartContext already
 	// logged any recorded-runtime fallback at Warn, so log it at Debug here.
-	mgr, resolvedRuntimeType, err := s.resolveManagerForOptsStrict(runtimeOpts, existingAgentProfileResolution(runtimeOpts.Profile, provisioned), slog.LevelDebug)
+	res, err := s.resolveManagerForOptsStrict(runtimeOpts, existingAgentProfileResolution(runtimeOpts.Profile, provisioned), slog.LevelDebug)
+	mgr, resolvedRuntimeType := res.Manager, res.RuntimeType
 	if err != nil {
 		if s.refuseCancelledStart(w, span, ss, id, projectID, trackedRunID) {
 			return
@@ -4424,12 +4425,14 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 			// below reads its saved profile from; nothing is stopped for it.
 			if !match.matched && len(cands) == 1 {
 				c := cands[0]
+				// Paired through runtimeOfManager, so no record: the
+				// zero value.
 				match = agentMatch{manager: c.mgr, runtime: s.runtimeOfManager(c.mgr), entry: c.entry, matched: true}
 				matchErr = &agentNotFoundError{slug: strings.ToLower(id)}
 			}
 		case 1:
 			c := containers[0]
-			if m, err := agentMatchFrom(strings.ToLower(id), []api.AgentInfo{c.entry}, c.mgr, s.runtimeOfManager(c.mgr)); err == nil {
+			if m, err := s.otherRuntimeMatch(strings.ToLower(id), c); err == nil {
 				match, matchErr = m, nil
 			}
 		default:
@@ -4469,7 +4472,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	// another.
 	var pin pinnedRuntime
 	if matchErr == nil && match.containerID != "" && match.manager != nil {
-		pin = pinnedRuntimeOf(match.manager, match.runtime, s.runtimeOfManager(match.manager))
+		pin = s.restartPin(match)
 	}
 
 	// A flat instance's ownership mirror installed by buildStartContext is
@@ -4545,7 +4548,8 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	// agent-info.json by opts.Name (the container's name). If they differ
 	// the fallback cannot fire and the 503 is returned, which fails safe.
 	// buildStartContext already logged any fallback at Warn; Debug here.
-	mgr, resolvedRuntimeType, err := s.resolveExistingAgentManager(runtimeOpts, existingAgentProfileResolution(runtimeOpts.Profile, provisioned), slog.LevelDebug, pin)
+	res, err := s.resolveExistingAgentManager(runtimeOpts, existingAgentProfileResolution(runtimeOpts.Profile, provisioned), slog.LevelDebug, pin)
+	mgr, resolvedRuntimeType := res.Manager, res.RuntimeType
 	if err != nil {
 		writeProfileUnresolved(w, err)
 		return
@@ -6456,7 +6460,8 @@ func (s *Server) resolveAgentRuntimeTarget(ctx context.Context, id, projectID st
 			return auxRuntimes[0].Manager, auxRuntimes[0].Runtime
 		}
 	}
-	return s.defaultPair()
+	mgr, rt, _ := s.defaultPair()
+	return mgr, rt
 }
 
 // findAgentRuntimeTarget searches the runtimes a request carrying ctx may
@@ -6488,7 +6493,7 @@ func (s *Server) findAgentRuntimeTarget(ctx context.Context, id, projectID strin
 	// A recorded runtime type (ptone/scion#2748) restricts the search to
 	// runtimes of that type; without one every runtime is searched.
 	useDefault := s.defaultRuntimeAllowed(ctx)
-	defMgr, defRT := s.defaultPair()
+	defMgr, defRT, _ := s.defaultPair()
 
 	// Try the default runtime first.
 	if useDefault {
@@ -6667,27 +6672,140 @@ func (s *Server) resolveRuntimeNameForOpts(opts api.StartOptions) string {
 // When opts.Profile is empty, the project's active profile (from settings.yaml)
 // is used. This ensures the broker respects the project's configured runtime
 // even when no explicit --profile flag is passed.
-func (s *Server) resolveManagerForOpts(opts api.StartOptions) (agent.Manager, string) {
-	mgr, runtimeType, _ := s.resolveManagerForOptsStrict(opts, profileLenient, slog.LevelWarn)
-	return mgr, runtimeType
+//
+// The result is resolveManagerForOptsStrict's, with its error dropped: on
+// the error-carrying returns it still holds the agent runtime's default manager.
+func (s *Server) resolveManagerForOpts(opts api.StartOptions) runtimeResolution {
+	res, _ := s.resolveManagerForOptsStrict(opts, profileLenient, slog.LevelWarn)
+	return res
+}
+
+// resolutionKind classifies the branch a runtime resolver returned
+// (Kubernetes placement defaults, ptone/scion#5085). It is carried in
+// runtimeResolution and not consulted by the resolvers or their callers.
+type resolutionKind int
+
+const (
+	// resolutionUnset: not classified. Profile resolution for an empty
+	// opts.Profile is left unset: the resolver cannot tell a create (whose
+	// project active profile is its selection profile) from an existing
+	// agent with no recorded profile. Choosing that signal is deferred to
+	// the change that consumes How.
+	resolutionUnset resolutionKind = iota
+	// resolutionProfile: a profile found in settings was resolved for a
+	// non-empty opts.Profile.
+	resolutionProfile
+	// resolutionUnrecorded: an existing agent with no recorded profile,
+	// started on the runtime its container was found on (the pin).
+	resolutionUnrecorded
+	// resolutionForced: the forced runtime (ServerConfig.ForceRuntime)
+	// resolved to a registered runtime.
+	resolutionForced
+	// resolutionFlat: a flat instance's single runtime.
+	resolutionFlat
+	// resolutionDefaultFallback: the agent runtime's default runtime, because
+	// there were no project settings (non-strict) or the default or
+	// requested profile did not resolve.
+	resolutionDefaultFallback
+	// resolutionStrictFallback: the strict recorded-runtime fallback to the
+	// default runtime (savedProfileUnresolved).
+	resolutionStrictFallback
+	// resolutionErrorRuntime: the profile's runtime failed to build; the
+	// manager wraps the error runtime and is stored in no holder.
+	resolutionErrorRuntime
+)
+
+// String returns the kind's name.
+func (k resolutionKind) String() string {
+	switch k {
+	case resolutionProfile:
+		return "profile"
+	case resolutionUnrecorded:
+		return "unrecorded"
+	case resolutionForced:
+		return "forced"
+	case resolutionFlat:
+		return "flat"
+	case resolutionDefaultFallback:
+		return "defaultFallback"
+	case resolutionStrictFallback:
+		return "strictFallback"
+	case resolutionErrorRuntime:
+		return "errorRuntime"
+	default:
+		return "unset"
+	}
+}
+
+// runtimeResolution is a runtime resolver's result: the manager, the
+// runtime and the runtime's build record, all from one holder (a
+// defaultPair snapshot, an auxiliary runtime, the pin, or a fresh build),
+// with the runtime type name callers use. How, Profile and DispatchEntry
+// describe how it was chosen (Kubernetes placement defaults,
+// ptone/scion#5085); they are carried, not consulted.
+type runtimeResolution struct {
+	Manager agent.Manager
+	Runtime scionrt.Runtime
+	Record  config.RuntimeBuildRecord
+
+	// RuntimeType is the resolved runtime's name (runtime.Runtime.Name()).
+	RuntimeType string
+
+	How resolutionKind
+	// Profile is the selection profile resolved: opts.Profile, else the
+	// settings' active profile. DispatchEntry is the runtimes key that
+	// profile names, from the same settings read. Both are empty when no
+	// profile was resolved from settings. Cause is reserved for a fixed
+	// cause and is not set yet.
+	Profile, DispatchEntry, Cause string
+}
+
+// defaultResolution is a resolution to the default holder from one
+// defaultPair snapshot.
+func defaultResolution(mgr agent.Manager, rt scionrt.Runtime, rec config.RuntimeBuildRecord, how resolutionKind) runtimeResolution {
+	return runtimeResolution{Manager: mgr, Runtime: rt, Record: rec, RuntimeType: rt.Name(), How: how}
 }
 
 // pinnedRuntime is the runtime an existing agent's container was found
-// on, as a manager and its runtime name. The zero value pins nothing.
+// on, as a manager, its runtime, the runtime's name, and the runtime's
+// build record. The zero value pins nothing.
 type pinnedRuntime struct {
-	mgr  agent.Manager
-	name string
+	mgr    agent.Manager
+	rt     scionrt.Runtime
+	name   string
+	record config.RuntimeBuildRecord
 }
 
-// pinnedRuntimeOf returns the pin for mgr, named after the first non-nil
-// runtime given; the zero value when none is.
-func pinnedRuntimeOf(mgr agent.Manager, runtimes ...scionrt.Runtime) pinnedRuntime {
-	for _, rt := range runtimes {
-		if rt != nil {
-			return pinnedRuntime{mgr: mgr, name: rt.Name()}
-		}
+// pinnedRuntimeOf returns the pin for mgr on rt, with rt's build record;
+// the zero value when rt is nil. Restart passes match.runtime and
+// match.record; when match.runtime is nil it keeps today's fallback
+// rt = runtimeOfManager(mgr) (name from it) with a ZERO record, and the
+// zero pin when both are nil, as today (restartPin).
+func pinnedRuntimeOf(mgr agent.Manager, rt scionrt.Runtime, rec config.RuntimeBuildRecord) pinnedRuntime {
+	if rt == nil {
+		return pinnedRuntime{}
 	}
-	return pinnedRuntime{}
+	return pinnedRuntime{mgr: mgr, rt: rt, name: rt.Name(), record: rec}
+}
+
+// otherRuntimeMatch is the agent match a restart builds for the one
+// container its walk of the other runtimes found. The runtime is paired
+// with the candidate's manager through runtimeOfManager, so the record is
+// the zero value: a record is never paired through runtimeOfManager, and a
+// pin taken from this match carries no build record.
+func (s *Server) otherRuntimeMatch(slug string, c agentCandidate) (agentMatch, error) {
+	return agentMatchFrom(slug, []api.AgentInfo{c.entry}, c.mgr, s.runtimeOfManager(c.mgr), config.RuntimeBuildRecord{})
+}
+
+// restartPin is the pin a restart takes for the agent match it stops: the
+// match's runtime and record, or, when the match has no runtime, the
+// runtime behind its manager (runtimeOfManager) with a zero record, since a
+// record is never paired through runtimeOfManager. Both nil: the zero pin.
+func (s *Server) restartPin(match agentMatch) pinnedRuntime {
+	if match.runtime != nil {
+		return pinnedRuntimeOf(match.manager, match.runtime, match.record)
+	}
+	return pinnedRuntimeOf(match.manager, s.runtimeOfManager(match.manager), config.RuntimeBuildRecord{})
 }
 
 // resolveExistingAgentManager is resolveManagerForOptsStrict for an
@@ -6698,10 +6816,10 @@ func pinnedRuntimeOf(mgr agent.Manager, runtimes ...scionrt.Runtime) pinnedRunti
 // (ServerConfig.ForceRuntime) still takes precedence when it resolves to a
 // registered runtime; one that resolves to none is ignored by
 // resolveManagerForOptsStrict, so it does not drop the pin either.
-func (s *Server) resolveExistingAgentManager(opts api.StartOptions, mode profileResolution, fallbackLevel slog.Level, pin pinnedRuntime) (agent.Manager, string, error) {
+func (s *Server) resolveExistingAgentManager(opts api.StartOptions, mode profileResolution, fallbackLevel slog.Level, pin pinnedRuntime) (runtimeResolution, error) {
 	if opts.Profile == "" && pin.mgr != nil && pin.name != "" {
 		if _, forced := s.forcedRuntime(); !forced {
-			return pin.mgr, pin.name, nil
+			return runtimeResolution{Manager: pin.mgr, Runtime: pin.rt, Record: pin.record, RuntimeType: pin.name, How: resolutionUnrecorded}, nil
 		}
 	}
 	return s.resolveManagerForOptsStrict(opts, mode, fallbackLevel)
@@ -6799,13 +6917,15 @@ func (s *Server) loadRuntimeSettings(projectDir string) (*config.VersionedSettin
 // the profile and a fixed cause; it does not include file paths or
 // settings content. The full detail is logged here at Warn, once per
 // failure.
-func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profileResolution, fallbackLevel slog.Level) (agent.Manager, string, error) {
-	defMgr, defRT := s.defaultPair()
+func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profileResolution, fallbackLevel slog.Level) (runtimeResolution, error) {
+	// Every default-holder return below uses this one snapshot, so its
+	// manager, runtime and record belong together.
+	defMgr, defRT, defRec := s.defaultPair()
 	// A flat instance serves exactly one runtime target: it never consults
 	// the saved agent profile or the settings active_profile, so it never
 	// fails strict saved-profile resolution either.
 	if s.isFlat() {
-		return defMgr, defRT.Name(), nil
+		return defaultResolution(defMgr, defRT, defRec, resolutionFlat), nil
 	}
 	strict := mode != profileLenient
 	if s.config.ForceRuntime != "" {
@@ -6814,10 +6934,10 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profile
 			// here, bypassing the per-profile resolution below entirely —
 			// a second profile of the same runtime type with its own
 			// runtime config is not reachable under ForceRuntime.
-			return defMgr, defRT.Name(), nil
+			return defaultResolution(defMgr, defRT, defRec, resolutionForced), nil
 		}
 		if aux, ok := s.findAuxiliaryRuntimeByType(s.config.ForceRuntime); ok {
-			return aux.Manager, aux.Runtime.Name(), nil
+			return runtimeResolution{Manager: aux.Manager, Runtime: aux.Runtime, Record: aux.Record, RuntimeType: aux.Runtime.Name(), How: resolutionForced}, nil
 		}
 		s.agentLifecycleLog.Warn("ForceRuntime does not match default runtime, falling back to settings resolution", "force", s.config.ForceRuntime, "default", defRT.Name())
 	}
@@ -6848,7 +6968,7 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profile
 				fmt.Errorf("%w: agent %q profile %q: no project settings found",
 					errSavedProfileUnresolved, opts.Name, opts.Profile))
 		}
-		return defMgr, defRT.Name(), nil
+		return defaultResolution(defMgr, defRT, defRec, resolutionDefaultFallback), nil
 	}
 
 	// ResolveRuntime("") uses vs.ActiveProfile as the fallback. The
@@ -6877,7 +6997,7 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profile
 		if opts.Profile == "" && errors.As(err, &ape) {
 			s.agentLifecycleLog.Warn("default profile cannot be resolved for this dispatch",
 				"agent", opts.Name, "projectDir", projectDir, "error", err)
-			return defMgr, defRT.Name(), fmt.Errorf("%w: agent %q: %v", errDefaultProfileUnresolved, opts.Name, err)
+			return defaultResolution(defMgr, defRT, defRec, resolutionDefaultFallback), fmt.Errorf("%w: agent %q: %v", errDefaultProfileUnresolved, opts.Name, err)
 		}
 		// The same for a profile named on a dispatch that is not an
 		// existing agent's saved one (a create): it is not one of the
@@ -6888,7 +7008,7 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profile
 		if !strict && opts.Profile != "" && errors.As(err, &spe) {
 			s.agentLifecycleLog.Warn("requested profile is not one of the hub's stored profiles",
 				"agent", opts.Name, "profile", opts.Profile, "projectDir", projectDir, "error", err)
-			return defMgr, defRT.Name(), fmt.Errorf("%w: agent %q: %v", errProfileUnresolved, opts.Name, err)
+			return defaultResolution(defMgr, defRT, defRec, resolutionDefaultFallback), fmt.Errorf("%w: agent %q: %v", errProfileUnresolved, opts.Name, err)
 		}
 		if strict {
 			// ResolveRuntime's errors name only the profile and runtime
@@ -6897,7 +7017,24 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profile
 				fmt.Errorf("%w: agent %q: %v", errSavedProfileUnresolved, opts.Name, err))
 		}
 		// Profile or its runtime not found in settings; use default
-		return defMgr, defRT.Name(), nil
+		return defaultResolution(defMgr, defRT, defRec, resolutionDefaultFallback), nil
+	}
+
+	// The selection profile and the runtimes entry it names, from the same
+	// settings read: carried in the result, not consulted. With an empty
+	// opts.Profile, How stays unset (see resolutionUnset).
+	selProfile := opts.Profile
+	if selProfile == "" {
+		selProfile = vs.ActiveProfile
+	}
+	selEntry := vs.Profiles[selProfile].Runtime
+	selHow := resolutionUnset
+	if opts.Profile != "" {
+		selHow = resolutionProfile
+	}
+	fromProfile := func(res runtimeResolution) runtimeResolution {
+		res.Profile, res.DispatchEntry = selProfile, selEntry
+		return res
 	}
 
 	// Cheap pre-check: a profile matching the broker's own default runtime
@@ -6921,7 +7058,7 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profile
 	// requested profile is the one the default runtime was built from; it
 	// relies on the capability instead.
 	if s.defaultRuntimeMatchesProfile(runtimeType, rtConfig) && !scionrt.HasPerProfileInstances(defRT) {
-		return defMgr, defRT.Name(), nil
+		return fromProfile(defaultResolution(defMgr, defRT, defRec, selHow)), nil
 	}
 
 	// Resolve the profile's runtime so its true identity can be compared
@@ -6942,15 +7079,15 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profile
 	// that was just checked. When empty, GetRuntime falls back to settings
 	// the same way ResolveRuntime does.
 	//
-	// resolveAuxiliaryRuntime is set to agent.ResolveRuntime by New() and
+	// resolveAuxiliaryRuntime is set to agent.ResolveRuntimeWithRecord by New() and
 	// should never be nil in production; this falls back to the same
 	// function so a Server built without New() (e.g. a test literal)
 	// resolves identically to production instead of panicking.
 	resolver := s.resolveAuxiliaryRuntime
 	if resolver == nil {
-		resolver = agent.ResolveRuntime
+		resolver = agent.ResolveRuntimeWithRecord
 	}
-	resolved := resolver(opts.ProjectPath, opts.Name, opts.Profile)
+	resolved, rec := resolver(opts.ProjectPath, opts.Name, opts.Profile)
 
 	if s.config.Debug {
 		s.agentLifecycleLog.Debug("Resolved runtime for start options",
@@ -6965,8 +7102,9 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profile
 		// Resolution failed outright (e.g. cluster unreachable): there is no
 		// identity to compare or register. Wrap it in a manager so the
 		// caller's calls surface the underlying error, the same contract
-		// callers get for any other runtime construction failure.
-		return agent.NewManager(resolved), resolved.Name(), nil
+		// callers get for any other runtime construction failure. The
+		// manager is stored in no holder, so its record is the zero value.
+		return fromProfile(runtimeResolution{Manager: agent.NewManager(resolved), Runtime: resolved, RuntimeType: resolved.Name(), How: resolutionErrorRuntime}), nil
 	}
 
 	// A PerProfileInstancesRuntime default never short-circuits here either,
@@ -6976,7 +7114,7 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profile
 	// a runtime would otherwise collapse to one identity and incorrectly
 	// share the default manager.
 	if !scionrt.HasPerProfileInstances(defRT) && auxiliaryRuntimeIdentity(resolved) == auxiliaryRuntimeIdentity(defRT) {
-		return defMgr, defRT.Name(), nil
+		return fromProfile(defaultResolution(defMgr, defRT, defRec, selHow)), nil
 	}
 
 	// Keyed by resolved IDENTITY, not type (see auxiliaryRuntimeIdentity):
@@ -6985,10 +7123,10 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profile
 	identity := auxiliaryRuntimeIdentity(resolved)
 	mgr := agent.NewManager(resolved)
 	s.auxiliaryRuntimesMu.Lock()
-	s.auxiliaryRuntimes[identity] = auxiliaryRuntime{Runtime: resolved, Manager: mgr}
+	s.auxiliaryRuntimes[identity] = auxiliaryRuntime{Runtime: resolved, Manager: mgr, Record: rec}
 	s.auxiliaryRuntimesMu.Unlock()
 
-	return mgr, resolved.Name(), nil
+	return fromProfile(runtimeResolution{Manager: mgr, Runtime: resolved, Record: rec, RuntimeType: resolved.Name(), How: selHow}), nil
 }
 
 // savedProfileUnresolved handles a strict resolution failure. If the
@@ -7011,16 +7149,18 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profile
 // stored profiles are authoritative, so the request gets the 503 naming the
 // available profiles rather than running on the default runtime
 // (ptone/scion#3907). Brokers without stored profiles keep the fallback.
-func (s *Server) savedProfileUnresolved(opts api.StartOptions, projectDir string, mode profileResolution, level slog.Level, cause, clientErr error) (agent.Manager, string, error) {
-	defMgr, defRT := s.defaultPair()
+func (s *Server) savedProfileUnresolved(opts api.StartOptions, projectDir string, mode profileResolution, level slog.Level, cause, clientErr error) (runtimeResolution, error) {
+	// Its own snapshot: the fallback's manager, runtime and record belong
+	// together.
+	defMgr, defRT, defRec := s.defaultPair()
 	if mode == profileStrictProvisioned {
 		s.logSavedProfileUnresolved(opts, projectDir, cause)
-		return nil, "", fmt.Errorf("%w; it is the profile the agent was provisioned with, which no longer resolves on this broker: restore the profile in settings, or re-provision the agent (scion reincarnate, or delete and re-create it)", clientErr)
+		return runtimeResolution{}, fmt.Errorf("%w; it is the profile the agent was provisioned with, which no longer resolves on this broker: restore the profile in settings, or re-provision the agent (scion reincarnate, or delete and re-create it)", clientErr)
 	}
 	var spe *config.StoredProfileNotFoundError
 	if errors.As(cause, &spe) {
 		s.logSavedProfileUnresolved(opts, projectDir, cause)
-		return nil, "", clientErr
+		return runtimeResolution{}, clientErr
 	}
 	if recorded := agent.GetSavedRuntime(opts.Name, opts.ProjectPath); recorded != "" &&
 		recorded == defRT.Name() &&
@@ -7028,10 +7168,10 @@ func (s *Server) savedProfileUnresolved(opts api.StartOptions, projectDir string
 		auxiliaryRuntimeIdentity(defRT) == defRT.Name() {
 		s.agentLifecycleLog.Log(context.Background(), level, "saved runtime profile cannot be resolved; agent last ran on the broker default runtime, using it",
 			"agent", opts.Name, "profile", opts.Profile, "runtime", recorded, "projectDir", projectDir, "error", cause)
-		return defMgr, defRT.Name(), nil
+		return defaultResolution(defMgr, defRT, defRec, resolutionStrictFallback), nil
 	}
 	s.logSavedProfileUnresolved(opts, projectDir, cause)
-	return nil, "", clientErr
+	return runtimeResolution{}, clientErr
 }
 
 // logSavedProfileUnresolved records why a saved profile could not be
@@ -8593,11 +8733,11 @@ func (s *Server) checkNFSForDispatch(ctx context.Context, name, projectPath, pro
 	// (runtime.NFSWorkspaceBackend), so that is the share a dispatch needs.
 	shareID := nfsCfg.Shares[0].ID
 
-	_, runtimeType := s.resolveManagerForOpts(api.StartOptions{
+	runtimeType := s.resolveManagerForOpts(api.StartOptions{
 		Name:        name,
 		ProjectPath: projectDir,
 		Profile:     profile,
-	})
+	}).RuntimeType
 	if NFSWarnOnlyRuntime(runtimeType) {
 		if st, ok := r.ShareStatus(shareID); !ok || !st.Healthy {
 			detail := "not checked yet"

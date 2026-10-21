@@ -408,7 +408,7 @@ func newRealFilesServer(t *testing.T, rt *runtime.MockRuntime) (*Server, string)
 	cfg := DefaultServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
-	return New(cfg, agent.NewManager(rt), rt), home
+	return New(cfg, agent.NewManager(rt), rt, config.RuntimeBuildRecord{}), home
 }
 
 func branchExists(t *testing.T, repo, branch string) bool {
