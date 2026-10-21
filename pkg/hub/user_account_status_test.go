@@ -405,35 +405,44 @@ func TestUserAccessToken_RequiresActiveAccount(t *testing.T) {
 	}
 }
 
-// countingReader is a userRowReader that counts calls made through a nil
-// receiver in nilReceiverCalls.
-type countingReader struct{ row store.User }
+// errNilReceiverCalled is returned by a nil *ptrReader's GetUser.
+var errNilReceiverCalled = errors.New("nil receiver called")
 
-var nilReceiverCalls int
+// ptrReader is a userRowReader with a pointer receiver. Through a nil
+// receiver it returns errNilReceiverCalled, so a caller that reaches it
+// shows that error in its result.
+type ptrReader struct{ row store.User }
 
-func (r *countingReader) GetUser(context.Context, string) (*store.User, error) {
+func (r *ptrReader) GetUser(context.Context, string) (*store.User, error) {
 	if r == nil {
-		nilReceiverCalls++
-		return nil, nil
+		return nil, errNilReceiverCalled
 	}
 	u := r.row
 	return &u, nil
 }
 
-// A typed nil pointer held in the userRowReader interface is treated as no
-// reader: checkUserAccount reports a lookup fault and never calls it.
+// funcReader is a func-typed userRowReader.
+type funcReader func(ctx context.Context, id string) (*store.User, error)
+
+func (f funcReader) GetUser(ctx context.Context, id string) (*store.User, error) { return f(ctx, id) }
+
+// A typed nil held in the userRowReader interface (a nil pointer or a nil
+// func) is treated as no reader: checkUserAccount reports a lookup fault
+// and never calls it.
 func TestIsNilUserRowReader_TypedNilPointer(t *testing.T) {
-	var typedNil *countingReader
+	var typedNil *ptrReader
 	var r userRowReader = typedNil
 	require.NotNil(t, r, "the interface holds a typed nil")
 	assert.True(t, isNilUserRowReader(r), "typed nil pointer reader detected")
+	var nilFunc funcReader
+	assert.True(t, isNilUserRowReader(nilFunc), "typed nil func reader detected")
 	assert.True(t, isNilUserRowReader(nil))
-	assert.False(t, isNilUserRowReader(&countingReader{}))
+	assert.False(t, isNilUserRowReader(&ptrReader{}))
+	assert.False(t, isNilUserRowReader(funcReader(func(context.Context, string) (*store.User, error) { return nil, nil })))
 	assert.False(t, isNilUserRowReader(statusReader{}))
 
-	nilReceiverCalls = 0
 	u, err := checkUserAccount(context.Background(), r, PrincipalContext{Kind: PrincipalKindUser, ID: "u1"})
 	assert.Nil(t, u)
 	assert.Equal(t, accountLookupFault, classifyUserAccount(u, err))
-	assert.Zero(t, nilReceiverCalls, "typed nil pointer reader was called")
+	assert.NotErrorIs(t, err, errNilReceiverCalled, "typed nil pointer reader was called")
 }

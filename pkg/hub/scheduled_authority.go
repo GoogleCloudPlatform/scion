@@ -278,6 +278,9 @@ func scheduledUserAccount(ctx context.Context, users userRowReader, principalID 
 	case err == nil:
 		return user, nil
 	case errors.Is(err, errUserLookupNoRow):
+		// Must precede the fault case: checkUserAccount reports a lookup
+		// with neither a row nor an error as a lookup fault, which the
+		// scheduled path refuses as an inactive principal.
 		return nil, fmt.Errorf("%w: %s", errScheduledAuthorityDenied, reasonPrincipalInactive)
 	case isProjectAccessLookupFault(err):
 		return nil, fmt.Errorf("scheduled authority: %w", err)

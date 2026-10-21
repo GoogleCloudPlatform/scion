@@ -42,8 +42,8 @@ import (
 //   - the scheduled-run principal check (scheduledUserAccount, called by
 //     resolveScheduledUser).
 //
-// checkUserAccount is the one implementation of the rule: code that needs
-// a user's account status calls it rather than reading the status itself.
+// For the checks listed above, checkUserAccount is the one implementation
+// of the rule: none of them reads the account status itself.
 //
 // The rule: an existing users row with status active passes. A missing row
 // denies a local user (user, dev); a federated user with no row passes
@@ -91,14 +91,16 @@ var errUserLookupNoRow = errors.New("user lookup returned no user")
 // interface, or an interface it is asserted to, with nil does not detect a
 // typed nil, because the interface still carries the dynamic type; the
 // readers passed here are of arbitrary concrete types, so reflection is
-// used rather than a list of known types.
+// used rather than a list of known types. reflect.ValueOf yields the
+// dynamic (concrete) kind, never reflect.Interface, so that kind is not
+// listed.
 func isNilUserRowReader(r userRowReader) bool {
 	if r == nil {
 		return true
 	}
 	v := reflect.ValueOf(r)
 	switch v.Kind() {
-	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan, reflect.Interface:
+	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan:
 		return v.IsNil()
 	}
 	return false
