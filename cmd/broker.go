@@ -2346,7 +2346,7 @@ func brokerRegistrationCapabilities() []string {
 	// asyncLaunch matches the broker's heartbeat (runtimebroker.StaticCapabilities),
 	// so the Hub knows it from the join on, before the first heartbeat
 	// (ptone/scion#2918).
-	return []string{"sync", "attach", "reprovision", "asyncLaunch", "emptyPerAgentWorkspace", "agentMove", "reprovisionEmptyPerAgent"}
+	return []string{"sync", "attach", "reprovision", "asyncLaunch", "emptyPerAgentWorkspace", "agentMove", "agentMoveRecreate", "reprovisionEmptyPerAgent"}
 }
 
 // buildBrokerProfiles builds BrokerProfile objects from settings.Profiles.

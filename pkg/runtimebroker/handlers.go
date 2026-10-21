@@ -304,8 +304,12 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			EmptyPerAgentWorkspace: scionrt.HasEmptyPerAgentSupport(rt),
 			// This broker honours localOnly deletes and confirms a moved
 			// agent's NFS workspace before provisioning it (agent move).
-			AgentMove:      true,
-			StartsInFlight: s.startsInFlight != nil,
+			AgentMove: true,
+			// This broker can be the target of a forced move: it confirms
+			// it has no files for the agent before provisioning it with a
+			// fresh workspace (ptone/scion#5441).
+			AgentMoveRecreate: true,
+			StartsInFlight:    s.startsInFlight != nil,
 			// This broker's reprovision reuses an empty-per-agent
 			// workspace in place (miller79/scion#167).
 			ReprovisionEmptyPerAgent: true,
@@ -1576,7 +1580,31 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// config instead of reusing what's persisted — see Manager.Reprovision.
 		var cfg *api.ScionConfig
 		var err error
-		if req.ExpectExistingNFSWorkspace != "" {
+		if req.ExpectExistingNFSWorkspace == agent.MoveWorkspaceFreshAgentDir {
+			// A forced move recreates the workspace here: nothing for the
+			// agent may exist on this broker yet, so provision never adopts
+			// files it did not create.
+			checker, ok := sc.Manager.(moveWorkspaceAbsenceChecker)
+			if !ok {
+				markAttemptFailed(http.StatusConflict, "moved agent workspace not confirmed")
+				Conflict(w, "this broker cannot confirm that a moved agent has no files here")
+				return
+			}
+			if paths, chkErr := checker.CheckMoveWorkspaceAbsent(ctx, opts); chkErr != nil {
+				s.agentLifecycleLog.Warn("Agent move: refusing to recreate the agent over files on this broker",
+					"agent_id", req.ID, "project_id", req.ProjectID, "paths", paths, "error", chkErr)
+				markAttemptFailed(http.StatusConflict, "moved agent has files on this broker")
+				span.SetStatus(codes.Error, "moved agent has files on this broker")
+				// Fixed text: the paths are logged above, never returned
+				// (ptone/scion#3113).
+				msg := "Failed to provision moved agent: the agent already has files on this broker; refusing to recreate over them"
+				if !errors.Is(chkErr, agent.ErrMoveWorkspacePresent) {
+					msg = "Failed to provision moved agent: could not confirm that the agent has no files on this broker"
+				}
+				Conflict(w, msg)
+				return
+			}
+		} else if req.ExpectExistingNFSWorkspace != "" {
 			checker, ok := sc.Manager.(nfsMoveWorkspaceChecker)
 			if !ok {
 				markAttemptFailed(http.StatusConflict, "moved agent workspace not confirmed")
@@ -7606,6 +7634,15 @@ type nfsMoveWorkspaceChecker interface {
 }
 
 var _ nfsMoveWorkspaceChecker = (*agent.AgentManager)(nil)
+
+// moveWorkspaceAbsenceChecker is implemented by managers that can confirm,
+// before a forced move provisions an agent, that the broker has no files
+// for it yet (agent.AgentManager).
+type moveWorkspaceAbsenceChecker interface {
+	CheckMoveWorkspaceAbsent(ctx context.Context, opts api.StartOptions) ([]string, error)
+}
+
+var _ moveWorkspaceAbsenceChecker = (*agent.AgentManager)(nil)
 
 // errAgentIdentityUnknown means a runtime process restart dropped the
 // in-memory record a runtime needs to tell "not found" apart from "exists,

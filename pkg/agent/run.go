@@ -2030,32 +2030,24 @@ authDone:
 		// pod-local EmptyDir on Kubernetes). With NFS storage it gets its
 		// own agent directory on the export (design #2703 P3), which only
 		// the Kubernetes runtime can mount: see nfsEmptyAgentDirSelection.
-		var emptyAgentDirName string
 		if emptyPerAgent {
 			sharingMode = store.SharingModeEmptyPerAgent
-			var selErr error
-			emptyAgentDirName, selErr = nfsEmptyAgentDirSelection(m.Runtime.Name(), settings.Server.WorkspaceStorage, opts.Name)
-			if selErr != nil {
-				return nil, selErr
-			}
+		}
+		// The agent's own directory on the export, if it gets one
+		// (nfsOwnAgentDirSelection): empty-per-agent, or a git project
+		// dispatched in clone-per-agent mode on Kubernetes, with a
+		// workspace the agent container clones into. Paths are still
+		// resolved from the project's workspace path (shared-plain).
+		emptyAgentDirName, agentDirName, agentBranch, selErr := nfsOwnAgentDirSelection(m.Runtime.Name(), settings.Server.WorkspaceStorage, emptyPerAgent, opts.Env, opts.GitClone, opts.Name)
+		if selErr != nil {
+			return nil, selErr
 		}
 		// On Kubernetes, a git project dispatched in worktree-per-agent mode
 		// gets its own worktree under the shared checkout. Shared-plain and
 		// every other runtime keep the layout above.
-		// A git project dispatched in clone-per-agent mode gets its own
-		// agent directory next to the project's workspace path instead,
-		// with a workspace the agent container clones into. Paths are
-		// still resolved from the project's workspace path (shared-plain).
-		var worktreeName, worktreeBranch, agentDirName, agentBranch string
+		var worktreeName, worktreeBranch string
 		if isKubernetesRuntime(m.Runtime.Name()) && !emptyPerAgent {
 			worktreeName, worktreeBranch = nfsWorktreeSelection(opts.Env, opts.GitClone, opts.Name)
-			if settings.Server.WorkspaceStorage.Backend == "nfs" {
-				var selErr error
-				agentDirName, agentBranch, selErr = nfsAgentDirSelection(opts.Env, opts.GitClone, opts.Name)
-				if selErr != nil {
-					return nil, selErr
-				}
-			}
 		}
 		if worktreeName != "" {
 			sharingMode = store.SharingModeWorktreePerAgent

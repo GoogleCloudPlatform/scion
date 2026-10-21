@@ -1372,16 +1372,27 @@ func withAgentStateDir(ctx context.Context, projectDir, agentName string) (conte
 // (broker mode, shared workspace, Hub project ID). It reads the filesystem
 // only and changes nothing.
 func AgentNeedsProvision(ctx context.Context, opts api.StartOptions) (bool, error) {
-	projectDir, err := config.GetResolvedProjectDir(opts.ProjectPath)
-	if err != nil {
-		return false, err
-	}
-	ctx, _ = buildProvisionContext(ctx, opts)
-	_, agentDir, _, err := withAgentStateDir(ctx, projectDir, opts.Name)
+	agentDir, err := provisionAgentStateDir(ctx, opts)
 	if err != nil {
 		return false, err
 	}
 	return !agentStateProvisioned(agentDir), nil
+}
+
+// provisionAgentStateDir resolves the broker-side state directory of the
+// agent opts names exactly as Provision and Start resolve it: from the
+// resolved project dir and the provisioning context (broker mode, shared
+// workspace, Hub project ID). It reads the filesystem only and changes
+// nothing. AgentNeedsProvision and CheckMoveWorkspaceAbsent share it, so
+// neither computes the directory a second way.
+func provisionAgentStateDir(ctx context.Context, opts api.StartOptions) (string, error) {
+	projectDir, err := config.GetResolvedProjectDir(opts.ProjectPath)
+	if err != nil {
+		return "", err
+	}
+	ctx, _ = buildProvisionContext(ctx, opts)
+	_, agentDir, _, err := withAgentStateDir(ctx, projectDir, opts.Name)
+	return agentDir, err
 }
 
 // agentStateProvisioned reports whether agentDir holds a provisioned agent:
