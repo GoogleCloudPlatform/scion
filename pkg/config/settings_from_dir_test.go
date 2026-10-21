@@ -133,3 +133,34 @@ func TestLoadSettingsFromDir_NoFile(t *testing.T) {
 		t.Errorf("maps = %v/%v/%v, want non-nil", s.Runtimes, s.Harnesses, s.Profiles)
 	}
 }
+
+// ResolveSettingValueIgnoringEnv leaves out only the named variable: the
+// value and source come from the files, and other variables still apply
+// (ptone/scion#5483).
+func TestResolveSettingValueIgnoringEnv(t *testing.T) {
+	dir := fromDirTestDir(t, "schema_version: \"1\"\ncli:\n  mode: agent\n")
+	t.Setenv("SCION_CLI_MODE", "human")
+	t.Setenv("SCION_HUB_ENDPOINT", "https://env.example.com")
+
+	with, err := ResolveSettingValue(dir, "cli.mode")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if with.Value != "human" || with.Source != "env SCION_CLI_MODE" {
+		t.Fatalf("ResolveSettingValue = %+v, want human from env SCION_CLI_MODE", with)
+	}
+	without, err := ResolveSettingValueIgnoringEnv(dir, "cli.mode", "SCION_CLI_MODE")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "project " + GetSettingsPath(dir); without.Value != "agent" || without.Source != want {
+		t.Errorf("ResolveSettingValueIgnoringEnv = %+v, want agent from %q", without, want)
+	}
+	other, err := ResolveSettingValueIgnoringEnv(dir, "hub.endpoint", "SCION_CLI_MODE")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other.Value != "https://env.example.com" || other.Source != "env SCION_HUB_ENDPOINT" {
+		t.Errorf("hub.endpoint = %+v, want the SCION_HUB_ENDPOINT value", other)
+	}
+}

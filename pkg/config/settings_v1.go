@@ -3799,6 +3799,9 @@ func loadVersionedLayers(projectPath string, opts versionedLoadOptions) (*versio
 		if opts.ignoreEnvProjectID && (key == projectkeys.EnvProjectID || key == projectkeys.EnvHubProjectID) {
 			return "", nil
 		}
+		if opts.skipEnv[key] {
+			return "", nil
+		}
 		mapped := versionedEnvKeyMapper(key)
 		if mapped != "" {
 			envNames[mapped] = key

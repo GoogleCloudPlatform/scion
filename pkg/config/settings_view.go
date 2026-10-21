@@ -453,6 +453,9 @@ type versionedLoadOptions struct {
 	// trackSources records which layer set each key
 	// (versionedLoadResult.sources).
 	trackSources bool
+	// skipEnv names SCION_* environment variables the load leaves out
+	// (see ResolveSettingValueIgnoringEnv).
+	skipEnv map[string]bool
 }
 
 // versionedLoadResult is what loadVersionedLayers found besides the merged
