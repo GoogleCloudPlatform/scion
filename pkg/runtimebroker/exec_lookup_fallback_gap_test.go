@@ -334,7 +334,7 @@ func TestResetAuth_SignalerOnDefaultOnly_AuxTargetUsesExecKill(t *testing.T) {
 	rt := &signalingRecordingRuntime{MockRuntime: recordingRuntime("docker", nil, defRec), rec: defRec}
 	mgr := agent.NewManager(rt)
 	t.Cleanup(mgr.Close)
-	srv := New(DefaultServerConfig(), mgr, rt)
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 	addAuxRuntime(t, srv, "aux-b", recordingRuntime("aux-b", labelledDev("c-b"), recB))
 
 	w := doResetAuthLookupTest(srv)
@@ -358,7 +358,7 @@ func TestResetAuth_SignalerOnPairedAux_UsesSignalInitReload(t *testing.T) {
 	rt := recordingRuntime("docker", nil, defRec)
 	mgr := agent.NewManager(rt)
 	t.Cleanup(mgr.Close)
-	srv := New(DefaultServerConfig(), mgr, rt)
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 	addAuxRuntime(t, srv, "aux-b", &signalingRecordingRuntime{
 		MockRuntime: recordingRuntime("aux-b", labelledDev("c-b"), recB), rec: recB})
 
