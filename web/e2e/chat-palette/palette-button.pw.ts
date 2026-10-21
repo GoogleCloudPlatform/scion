@@ -336,16 +336,6 @@ test('a double-click before the first-open lazy import settles leaves the palett
 });
 
 /**
- * Walks the real hit-test chain at the button's screen position through
- * every shadow boundary (`elementFromPoint` only reports the host at each
- * boundary, not what's inside it, so this calls it again on that host's own
- * `shadowRoot` and repeats), returning one `TAGNAME.class.names` string per
- * level. Identifies the palette's own `<sl-dialog class="palette-dialog">`
- * specifically once it is open, not just "some element inside
- * scion-page-chat": several real dialogs (the document preview, a future
- * modal) live in that shadow tree.
- */
-/**
  * Whether the topmost element at the button's centre, within the chat
  * page's own shadow tree, is the button or something inside it (its icon
  * or label), i.e. nothing else covers the button there.
@@ -361,6 +351,16 @@ async function buttonOwnsItsCenter(page: Page): Promise<boolean> {
   }, RAIL_BUTTON_IN_PAGE);
 }
 
+/**
+ * Walks the real hit-test chain at the button's screen position through
+ * every shadow boundary (`elementFromPoint` only reports the host at each
+ * boundary, not what's inside it, so this calls it again on that host's own
+ * `shadowRoot` and repeats), returning one `TAGNAME.class.names` string per
+ * level. Identifies the palette's own `<sl-dialog class="palette-dialog">`
+ * specifically once it is open, not just "some element inside
+ * scion-page-chat": several real dialogs (the document preview, a future
+ * modal) live in that shadow tree.
+ */
 async function deepHitChainAtButton(page: Page): Promise<string[]> {
   return page.evaluate((sel) => {
     const btn = document.querySelector('scion-page-chat')?.shadowRoot?.querySelector(sel);
