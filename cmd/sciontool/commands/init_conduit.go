@@ -22,6 +22,7 @@ import (
 	"time"
 
 	core "github.com/GoogleCloudPlatform/scion/pkg/conduit"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/hostkey"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/sshd"
@@ -33,7 +34,7 @@ import (
 )
 
 // envProjectID is the agent's project id, set by the broker.
-const envProjectID = "SCION_PROJECT_ID"
+const envProjectID = projectkeys.EnvProjectID
 
 // envSSHMaxChannels overrides the SSH server's per-connection channel
 // cap (default sshd.DefaultMaxChannels).
@@ -96,7 +97,7 @@ func newPortForwarding(c *hub.Client, disableConduit bool, ptyUser conduit.PTYUs
 			a, err := conduit.New(conduit.Options{
 				HubURL:                c.HubURL(),
 				AgentID:               c.AgentID(),
-				ProjectID:             getenv(envProjectID),
+				ProjectID:             projectkeys.ProjectIDFromEnv(getenv),
 				LaunchID:              getenv(conduit.EnvLaunchID),
 				Token:                 c.AuthToken,
 				ApplyTransportHeaders: c.ApplyTransportHeaders,
