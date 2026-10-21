@@ -62,8 +62,7 @@ const maxPreviewFileSize = 50 * 1024 * 1024
 // untrustedContentSandboxCSP is sent on hub responses whose bytes are written
 // by users or agents rather than by the hub: workspace and shared-dir files
 // (above all ?view=true HTML and SVG, which would otherwise render on the
-// hub's origin with the viewer's session), the project WebDAV endpoint that
-// serves the same workspace, and chat attachments. Anything that
+// hub's origin with the viewer's session), and chat attachments. Anything that
 // can write into a project, including its agents, could otherwise act as
 // whoever opens the file. A sandboxed document gets an opaque origin: its
 // scripts still run, so generated reports and visualisations keep working,
@@ -1667,14 +1666,8 @@ func cleanEmptyDirs(root *os.Root, targetDir string) {
 // isProjectWorkspaceSubPath reports whether a project subpath addresses the
 // project workspace. Membership in this set is what routes a request through
 // handleProjectWorkspaceRoutes, and therefore through its authorization gate.
-//
-// The "dav" arm is a prefix match rather than an exact-or-slash match because
-// that is what this dispatcher has always done. It is wider than it looks —
-// "davos" routes to WebDAV too — but narrowing it here would change routing in
-// the same change that adds a security gate, and those want separate review.
 func isProjectWorkspaceSubPath(subPath string) bool {
-	return strings.HasPrefix(subPath, "dav") ||
-		subPath == "sync/status" ||
+	return subPath == "sync/status" ||
 		subPath == "workspace" ||
 		strings.HasPrefix(subPath, "workspace/")
 }
@@ -1683,18 +1676,12 @@ func isProjectWorkspaceSubPath(subPath string) bool {
 // request needs.
 //
 // Anything that is not a plain read is treated as a write. That is deliberately
-// the blunt choice: WebDAV's verb set is open-ended, and a verb this function
-// has never heard of is far more likely to be a mutation than a read. Being
-// wrong in the restrictive direction returns a 403 to someone who should have
-// been allowed; being wrong in the permissive direction is the bug this change
-// exists to fix.
-//
-// Every WebDAV verb (PROPFIND, PROPPATCH, MKCOL, COPY, MOVE, LOCK, UNLOCK) is
-// deliberately a write, including PROPFIND and LOCK. This was a
-// maintainer decision. The cost is that a read-only principal cannot mount or
-// browse the workspace over WebDAV; it can still read through GET on
-// workspace/files and the archive endpoint. Reclassifying a verb as a read is
-// a one-line change here and in TestProjectWorkspaceAction.
+// the blunt choice: a verb this function has never heard of is far more likely
+// to be a mutation than a read. Being wrong in the restrictive direction
+// returns a 403 to someone who should have been allowed; being wrong in the
+// permissive direction lets a read-only principal change the workspace.
+// Reclassifying a verb as a read is a one-line change here and in
+// TestProjectWorkspaceAction.
 func projectWorkspaceAction(method string) Action {
 	switch method {
 	case http.MethodGet, http.MethodHead, http.MethodOptions:
@@ -1727,11 +1714,6 @@ func (s *Server) handleProjectWorkspaceRoutes(w http.ResponseWriter, r *http.Req
 	}
 
 	switch {
-	case strings.HasPrefix(subPath, "dav"):
-		davPath := strings.TrimPrefix(subPath, "dav")
-		davPath = strings.TrimPrefix(davPath, "/")
-		s.handleProjectWebDAV(w, r, project, davPath)
-
 	case subPath == "sync/status":
 		s.handleProjectSyncStatus(w, r, project)
 

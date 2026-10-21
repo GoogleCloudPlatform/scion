@@ -239,37 +239,6 @@ func TestProjectCacheStatus_MethodNotAllowed(t *testing.T) {
 }
 
 // ============================================================================
-// WebDAV Access for Linked Projects
-// ============================================================================
-
-func TestProjectWebDAV_LinkedProject_ServesFromCache(t *testing.T) {
-	srv, s := testServer(t)
-	project, _ := createTestLinkedProject(t, srv, s, "WebDAV Linked Serve", "https://github.com/org/dav-linked.git")
-
-	// Populate the cache directory
-	cachePath, err := hubManagedProjectPath(project.Slug)
-	require.NoError(t, err)
-	require.NoError(t, os.MkdirAll(cachePath, 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(cachePath, "hello.txt"), []byte("hello from cache"), 0644))
-
-	// WebDAV PROPFIND should work for linked projects (serves from cache)
-	rec := doRequestWithMethod(t, srv, "PROPFIND",
-		fmt.Sprintf("/api/v1/projects/%s/dav/", project.ID))
-	// WebDAV PROPFIND returns 207 Multi-Status on success
-	assert.Equal(t, http.StatusMultiStatus, rec.Code, "body: %s", rec.Body.String())
-}
-
-func TestProjectWebDAV_LinkedProject_EmptyCache(t *testing.T) {
-	srv, s := testServer(t)
-	project, _ := createTestLinkedProject(t, srv, s, "WebDAV Linked Empty", "https://github.com/org/dav-empty.git")
-
-	// WebDAV PROPFIND on empty cache should still work (creates the directory)
-	rec := doRequestWithMethod(t, srv, "PROPFIND",
-		fmt.Sprintf("/api/v1/projects/%s/dav/", project.ID))
-	assert.Equal(t, http.StatusMultiStatus, rec.Code, "body: %s", rec.Body.String())
-}
-
-// ============================================================================
 // Workspace File API for Linked Projects
 // ============================================================================
 
@@ -409,24 +378,6 @@ func TestHasProjectCache(t *testing.T) {
 	srv, _ := testServer(t)
 	// Non-existent slug should return false
 	assert.False(t, srv.hasProjectCache("non-existent-slug-12345"))
-}
-
-// ============================================================================
-// Helpers
-// ============================================================================
-
-// doRequestWithMethod performs a raw HTTP request with a custom method (e.g., PROPFIND).
-func doRequestWithMethod(t *testing.T, srv *Server, method, path string) *httptest.ResponseRecorder {
-	t.Helper()
-	req := httptest.NewRequest(method, path, nil)
-	req.Header.Set("Authorization", "Bearer "+testDevToken)
-	// WebDAV PROPFIND requires a Depth header
-	if method == "PROPFIND" {
-		req.Header.Set("Depth", "1")
-	}
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-	return rec
 }
 
 // ============================================================================
