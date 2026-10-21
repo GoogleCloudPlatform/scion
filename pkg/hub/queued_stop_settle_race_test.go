@@ -549,6 +549,33 @@ func TestSettle_RefusedStartRevertsInsideReleaseWindow_NoReassert(t *testing.T) 
 	assert.Zero(t, sf.backstops(backstopSiteSettle))
 }
 
+// The no-re-assert rule skips only a newer start (intent running) or a queued
+// stop intended again at a newer time. A newer stop that is neither (here
+// it holds a stop-kind claim, so it is not a still-intended queued stop, and
+// its intent time is not the queued stop's, so the drain is not applying
+// this stop) keeps the backstop re-assert: the settle cannot tell that its
+// container is gone for that stop.
+func TestSettle_NewerStopAfterRelease_Reasserts(t *testing.T) {
+	sf := newSettleFixture(t, "newer-stop")
+	ctx := context.Background()
+	sf.hook.afterRelease = func() {
+		at, err := sf.s.SetRunIntent(ctx, sf.agent.ID, store.RunIntentStopped)
+		require.NoError(t, err)
+		_, err = sf.s.ClaimAgentStop(ctx, sf.agent.ID, "other-hub", at, time.Minute)
+		require.NoError(t, err)
+	}
+	sf.fault.Arm()
+
+	sf.settle()
+
+	require.Nil(t, sf.hook.afterRelease, "the newer stop ran after the settle's release")
+	got := getAgent(t, sf.s, sf.agent.ID)
+	require.Equal(t, store.StartClaimStop, got.StartClaimKind, "setup: the newer stop holds its claim")
+	require.True(t, supersededAfter(got.RunIntentAt, sf.agent.RunIntentAt), "setup: a newer stop intent")
+	assert.NotNil(t, sf.held(t), "a newer stop after the release is re-asserted")
+	assert.EqualValues(t, 1, sf.backstops(backstopSiteSettle), "a newer stop after the release is re-asserted")
+}
+
 // The two conjuncts of the settle's no-re-assert rule: the intent goes back
 // to running at the SAME time as the stop (a revert, as a failed
 // system-initiated stop does), not a newer start. The settle released
