@@ -721,10 +721,7 @@ export class ScionChatSpaceRail extends LitElement {
          viewport-fit=cover); the inset is 0 elsewhere. A host that pins
          its own footer below this list, which takes the inset, sets
          --chat-list-inset-bottom to 0px (see chat.ts's .palette-footer). */
-      padding-bottom: max(
-        0.25rem,
-        var(--chat-list-inset-bottom, env(safe-area-inset-bottom, 0px))
-      );
+      padding-bottom: max(0.25rem, var(--chat-list-inset-bottom, env(safe-area-inset-bottom, 0px)));
     }
 
     /* Space section */

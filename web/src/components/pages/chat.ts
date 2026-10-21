@@ -6046,8 +6046,7 @@ export class ScionPageChat extends LitElement {
         @scroll=${this._handleV2PanelsScroll}
       >
         <div class="v2-rail" ?inert=${this.isMobileLayout && this.mobilePanel !== 'left'}>
-          ${this.renderV2Rail()}
-          ${this.renderPaletteFooter()}
+          ${this.renderV2Rail()} ${this.renderPaletteFooter()}
         </div>
 
         <div

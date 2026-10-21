@@ -167,12 +167,15 @@ test('wide layout: the header and the members column have no quick-switcher butt
   await expect(page.locator('scion-page-chat .palette-footer-btn')).toHaveCount(1);
 });
 
-test('the button is absent on a non-chat route, in the header too', async ({ page }) => {
+test('the header has no quick-switcher button on a non-chat route', async ({ page }) => {
+  // This fixture mounts the chat page whatever the route, so only the
+  // header is meaningful here; the app itself unmounts the page off chat.
   await setupApiMocks(page);
   await page.goto('/e2e/chat-palette/fixture.html?shell=1&route=%2Fprojects%2Fabc', {
     waitUntil: 'domcontentloaded',
   });
-  await expect(paletteButton(page)).toHaveCount(0);
+  await page.waitForFunction(() => !!document.querySelector('scion-page-chat'));
+  await expect(page.locator('scion-header')).toBeVisible();
   await expect(headerPaletteButton(page)).toHaveCount(0);
 });
 
@@ -337,12 +340,27 @@ test('a double-click before the first-open lazy import settles leaves the palett
  * every shadow boundary (`elementFromPoint` only reports the host at each
  * boundary, not what's inside it, so this calls it again on that host's own
  * `shadowRoot` and repeats), returning one `TAGNAME.class.names` string per
- * level. Identifies the button itself before the palette opens, and the
- * palette's own `<sl-dialog class="palette-dialog">` specifically once it
- * is open, not just "some element inside scion-page-chat": the button and
- * several real dialogs (the document preview, a future modal) all live in
- * that shadow tree.
+ * level. Identifies the palette's own `<sl-dialog class="palette-dialog">`
+ * specifically once it is open, not just "some element inside
+ * scion-page-chat": several real dialogs (the document preview, a future
+ * modal) live in that shadow tree.
  */
+/**
+ * Whether the topmost element at the button's centre, within the chat
+ * page's own shadow tree, is the button or something inside it (its icon
+ * or label), i.e. nothing else covers the button there.
+ */
+async function buttonOwnsItsCenter(page: Page): Promise<boolean> {
+  return page.evaluate((sel) => {
+    const root = document.querySelector('scion-page-chat')?.shadowRoot;
+    const btn = root?.querySelector(sel);
+    if (!root || !(btn instanceof Element)) return false;
+    const rect = btn.getBoundingClientRect();
+    const el = root.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
+    return !!el && btn.contains(el);
+  }, RAIL_BUTTON_IN_PAGE);
+}
+
 async function deepHitChainAtButton(page: Page): Promise<string[]> {
   return page.evaluate((sel) => {
     const btn = document.querySelector('scion-page-chat')?.shadowRoot?.querySelector(sel);
@@ -371,10 +389,7 @@ test('once open, the palette dialog itself intercepts pointer events at the butt
   // genuinely belongs to the button, not some other always-covering
   // element — without this, the dialog check after open would be
   // meaningless.
-  const baseline = await deepHitChainAtButton(page);
-  expect(
-    baseline.some((tag) => tag.startsWith('BUTTON.') && tag.includes('palette-footer-btn'))
-  ).toBe(true);
+  expect(await buttonOwnsItsCenter(page)).toBe(true);
 
   await paletteButton(page).click();
   await expect(paletteDialog(page)).toBeVisible();
