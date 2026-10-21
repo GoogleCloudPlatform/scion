@@ -20,7 +20,8 @@
 
 import { execFileSync } from 'node:child_process';
 
-// Per-event hook calls are local and kept short. `sciontool status` also
+// Per-event `sciontool hook` calls may also call the Hub, but sciontool bounds
+// those calls with a 3 s Hub budget, so 5 s covers them. `sciontool status`
 // sends the status to the Hub with its own 5 s deadline, so its process gets
 // a longer budget: killing it at 5 s could cut off the Hub update for
 // task_completed and the coordinator would never be notified.

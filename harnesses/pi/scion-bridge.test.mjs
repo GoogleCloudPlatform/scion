@@ -277,6 +277,10 @@ test('a status call in command position (plain or compound) suppresses the autom
     '/usr/local/bin/sciontool status blocked "y"',
     'out=$(sciontool status task_completed "z")',
     '(sciontool status task_completed "subshell")',
+    '{ sciontool status blocked "group"; }',
+    'echo `sciontool status task_completed "backtick"`',
+    'for i in 1; do sciontool status ask_user "loop"; done',
+    'if false; then :; else sciontool status blocked "else"; fi',
     '  sciontool  status  task_completed  "spaced"',
   ]) {
     assert.equal(settledStatusCalls(cmd), 0, cmd);
@@ -297,6 +301,26 @@ test('commands that only mention a status call, other sciontool commands and non
     ['sciontool status task_completed "x"', 'write'],
   ]) {
     assert.equal(settledStatusCalls(cmd, tool), 1, `${tool}: ${cmd}`);
+  }
+});
+
+// Known limits of text matching, pinned so a change is deliberate (README
+// "Lifecycle signals" documents them).
+test('known limits: quoted separators and heredoc lines count; wrapped calls do not', () => {
+  for (const cmd of [
+    'git commit -m "fix (sciontool status blocked handling)"',
+    'echo "x; sciontool status blocked"',
+    "cat <<'EOF' > notes.md\nsciontool status task_completed \"later\"\nEOF",
+  ]) {
+    assert.equal(settledStatusCalls(cmd), 0, `false positive: ${cmd}`);
+  }
+  for (const cmd of [
+    'env X=1 sciontool status blocked "x"',
+    'timeout 10 sciontool status blocked "x"',
+    'sudo sciontool status blocked "x"',
+    "bash -c 'sciontool status blocked x'",
+  ]) {
+    assert.equal(settledStatusCalls(cmd), 1, `false negative: ${cmd}`);
   }
 });
 

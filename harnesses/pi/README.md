@@ -34,7 +34,7 @@ Everything has a safe default and is overridable per agent through env
 |---------|---------|---------|-------|
 | Project trust | `SCION_PI_PROJECT_TRUST` = `never` \| `ask` \| `always` | `never` | Wins over `SCION_PI_SETTINGS` and over a value left in `settings.json`; recomputed on every start (unset means `never`). Invalid values fail provisioning |
 | Provider | `SCION_PI_PROVIDER` | unset | Sets `defaultProvider` |
-| Model | `SCION_MODEL` | unset | A concrete `provider/id[:thinking]` sets `defaultProvider`/`defaultModel`. Size tiers (`small`/`medium`/`large`/`extra-large`) resolve via `model_aliases` in `config.yaml` and are passed with `--model` |
+| Model | `SCION_MODEL` | unset | A `provider/id[:thinking]` value sets `defaultProvider`/`defaultModel`. Scion resolves size tiers (`small`/`medium`/`large`/`extra-large`) through `model_aliases` in `config.yaml` before the agent starts, so the resolved pattern (e.g. `anthropic/sonnet`) is written the same way. pi is always started with `--model <resolved>`, which wins over `defaultModel` |
 | Other pi settings | `SCION_PI_SETTINGS` (JSON object) | unset | Deep-merged into `settings.json`. Keys that look like credentials are rejected; it cannot change auth handling |
 | Auto task completion | `SCION_PI_NO_AUTO_COMPLETE=1` | off | Bridge stops signalling `task_completed` on settle |
 | Bridge debug | `SCION_HOOK_DEBUG=1` | off | Logs bridge failures to stderr |
@@ -95,7 +95,7 @@ What the policy does and does not cover (pi v1.3.0,
 | `input` (human/RPC) | `prompt-submit` |
 | `tool_execution_start` / `_end` | `tool-start` / `tool-end` |
 | `agent_end` | `agent-end` (carries a provider error) |
-| `agent_settled`, not aborted, no error, and the agent did not run `sciontool status` `ask_user`/`blocked`/`limits_exceeded`/`task_completed` itself this turn | `sciontool status task_completed -- <summary>` |
+| `agent_settled`, not aborted, no error, and the agent has not run `sciontool status` `ask_user`/`blocked`/`limits_exceeded`/`task_completed` itself since the last human input | `sciontool status task_completed -- <summary>` |
 
 `ask_user` and `blocked` are not pi events. Instruct the agent to run
 `sciontool status ask_user "<question>"` or `sciontool status blocked "<reason>"`
@@ -103,10 +103,22 @@ through its bash tool; the bridge sees that command on `tool_execution_start`
 and skips the automatic `task_completed` until the next human input.
 The same applies when the agent runs `sciontool status task_completed "<summary>"`
 itself: the bridge skips its own call, so the agent's summary is kept.
-The call must be in command position (plain, or after `;`, `&&`, `||`, `|`,
-`&`, `then`, a newline, `(` or `$(`); a command that only mentions it, such
-as `grep "sciontool status blocked"`, does not count. The bridge does not
-parse shell quoting, so `echo "x; sciontool status blocked"` still counts.
+The call must be in command position: at the start of the command or of a
+line, or after `;`, `&` (so `&&`), `|` (so `||`), `(` (so `$(`), `{` or a
+backtick, optionally after `then`, `do` or `else`, and optionally with a
+path (`/usr/local/bin/sciontool`). A command that only mentions it, such as
+`grep "sciontool status blocked"`, does not count. The bridge matches text,
+not parsed shell, so:
+
+- False positives (count although nothing ran, so the automatic
+  `task_completed` is skipped and the coordinator is not notified): one of
+  those characters inside quotes, e.g. `git commit -m "fix (sciontool status
+  blocked handling)"` or `echo "x; sciontool status blocked"`, and a heredoc
+  or multi-line string with a line that starts with a status call.
+- False negatives (a real call that does not count, so the bridge's
+  `task_completed` overwrites it): wrapped calls such as
+  `env X=1 sciontool status blocked ...`, `timeout 10 sciontool ...`,
+  `sudo sciontool ...` or `bash -c 'sciontool ...'`.
 
 ## Bundle Layout
 
@@ -165,11 +177,12 @@ SCIONTOOL_BIN=/path/to/sciontool node --test scion-bridge.test.mjs
   ptone/scion#5527.
 - **Synchronous bridge calls:** the bridge runs `sciontool` with
   `execFileSync`, so pi's event loop (and its TUI) waits for each call: up to
-  5 s per hook event (session start, input, each tool start and end) and up to
-  15 s for the `task_completed` status call, which waits on the Hub. Normally
-  each call takes milliseconds; a slow or unreachable Hub makes the pause
-  visible. This matches how Claude's command hooks block; switching to async
-  calls is a possible follow-up.
+  5 s per hook event (session start, human/RPC input, each tool start and
+  end, agent end; sciontool bounds its own Hub calls for a hook at 3 s) and
+  up to 15 s for the `task_completed` status call, which waits on the Hub.
+  A slow or unreachable Hub makes the pause visible. This matches how
+  Claude's command hooks block; switching to async calls is a possible
+  follow-up.
 - **Provider errors:** the bridge suppresses `task_completed` when the last
   assistant message has an error stop reason. This is untested against a live
   provider.
