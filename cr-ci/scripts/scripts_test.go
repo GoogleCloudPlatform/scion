@@ -112,7 +112,8 @@ type result struct {
 type call struct {
 	argv  []string
 	stdin string
-	has   bool // stdin recorded
+	has   bool   // stdin recorded
+	env   string // recorded environment (docker build: DOCKER_BUILDKIT)
 }
 
 func (c call) String() string { return quote(c.argv) }
@@ -168,6 +169,9 @@ func (e *env) calls() []call {
 		if in, err := os.ReadFile(strings.TrimSuffix(f, ".args") + ".stdin"); err == nil {
 			c.stdin, c.has = string(in), true
 		}
+		if env, err := os.ReadFile(strings.TrimSuffix(f, ".args") + ".env"); err == nil {
+			c.env = string(env)
+		}
 		cs = append(cs, c)
 	}
 	return cs
@@ -201,6 +205,14 @@ func lines(out, prefix string) []string {
 			l = l[:i] // input redirection is shown, not part of argv
 		}
 		for _, p := range strings.Split(l, " | ") {
+			// "env VAR=value cmd ..." runs cmd; the stubs record cmd.
+			for strings.HasPrefix(p, "env ") {
+				f := strings.SplitN(p, " ", 3)
+				if len(f) < 3 || !strings.Contains(f[1], "=") {
+					break
+				}
+				p = f[2]
+			}
 			ls = append(ls, p)
 		}
 	}

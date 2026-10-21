@@ -664,7 +664,9 @@ crci_build_image() {
   fi
   if [[ $local_build == 1 ]]; then
     [[ $CRCI_MODE == apply ]] && crci_require_tool docker "$CRCI_MIN_DOCKER"
-    crci_run docker build --platform=linux/amd64 -f "$dockerfile" -t "$ref" "$context"
+    # BuildKit explicitly: the Dockerfiles may use BuildKit-only syntax
+    # (COPY --chmod), and older daemons still default to the legacy builder.
+    crci_run env DOCKER_BUILDKIT=1 docker build --platform=linux/amd64 -f "$dockerfile" -t "$ref" "$context"
     # Push as the build SA: its short-lived token goes from gcloud to docker
     # through a pipe, never through argv.
     local reg

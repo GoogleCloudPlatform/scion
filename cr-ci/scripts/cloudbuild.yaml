@@ -3,8 +3,11 @@
 # (path relative to the uploaded source). The build runs as BUILD_SA_NAME,
 # which needs CLOUD_LOGGING_ONLY (permissions-matrix C7).
 # Builder pinned by digest (gcr.io/cloud-builders/docker:latest, read 2026-10-21).
+# DOCKER_BUILDKIT=1: that builder defaults to the legacy builder, which rejects
+# BuildKit-only syntax such as COPY --chmod (runner/Dockerfile).
 steps:
   - name: gcr.io/cloud-builders/docker@sha256:f772ab459889c67835bd959c2b9e9351f2c0752c4f989710ecda20c229f0733e
+    env: ['DOCKER_BUILDKIT=1']
     args: ['build', '--platform=linux/amd64', '-f', '${_DOCKERFILE}', '-t', '${_IMAGE}', '.']
 images: ['${_IMAGE}']
 options:

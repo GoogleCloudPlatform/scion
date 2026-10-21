@@ -212,6 +212,15 @@ logged (a unit test enforces this).
   Manager and in the App settings differ (see rotation above).
 - **503 from `/webhook` and `/reconcile` with `not_configured`:** `MEDIATOR_URL`
   is empty; set it and redeploy.
+- **Image build fails with "the --chmod option requires BuildKit":** the
+  build ran with the legacy Docker builder. `scripts/cloudbuild.yaml` sets
+  `DOCKER_BUILDKIT=1` on its docker step, and the `--local` path runs
+  `env DOCKER_BUILDKIT=1 docker build`; check that a modified or custom build
+  config keeps it.
+- **First build after bootstrap fails or has no logs:** the new IAM bindings
+  (for example `BUILD_SA_NAME`'s `logging.logWriter`, needed by
+  `CLOUD_LOGGING_ONLY`) can take a minute or more to propagate. Wait about
+  60 s and re-run the build script; it is idempotent.
 - **Quota errors:** `launch_failed` with `RESOURCE_EXHAUSTED` (or `429`)
   from `jobs.run` means a regional Cloud Run quota (ephemeral disk, CPU or
   memory) is used up. The job stays queued and is retried by reconcile; lower

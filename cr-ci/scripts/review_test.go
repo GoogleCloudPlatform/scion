@@ -219,3 +219,56 @@ func TestBootstrapEnablesOnlyMissingAPIs(t *testing.T) {
 		t.Errorf("enabled APIs after a failed list: %v", got)
 	}
 }
+
+// TestBuildKitEverywhere: both images, on both build paths, are built with
+// BuildKit (runner/Dockerfile uses COPY --chmod, which the legacy builder of
+// gcr.io/cloud-builders/docker rejects).
+func TestBuildKitEverywhere(t *testing.T) {
+	cb, err := os.ReadFile("cloudbuild.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(cb), "env: ['DOCKER_BUILDKIT=1']") {
+		t.Errorf("scripts/cloudbuild.yaml does not set DOCKER_BUILDKIT=1 on the docker step:\n%s", cb)
+	}
+	for _, s := range []struct{ script, image string }{
+		{"build-runner-image.sh", "gh-runner"},
+		{"deploy-mediator.sh", "cr-runner-mediator"},
+	} {
+		e := newEnv(t, baseConfig())
+		e.state("exists", "cr-runner-mediator", "cr-gh-runner-8c32g")
+		// Cloud Build: the shared config (with BuildKit) is the only one used.
+		r := e.run(s.script, "", "--config", "config.env", "--apply", "--tag", "golden")
+		wantCode(t, r, 0)
+		n := 0
+		for _, c := range r.calls {
+			if str := c.String(); strings.Contains(str, "builds submit") {
+				n++
+				if !strings.Contains(str, "--config=scripts/cloudbuild.yaml") {
+					t.Errorf("%s: Cloud Build without the shared config: %s", s.script, str)
+				}
+			}
+		}
+		if n != 1 {
+			t.Errorf("%s: %d Cloud Build submissions, want 1", s.script, n)
+		}
+		// Local: docker build runs with DOCKER_BUILDKIT=1.
+		r = e.run(s.script, "", "--config", "config.env", "--apply", "--tag", "golden", "--local")
+		wantCode(t, r, 0)
+		builds := 0
+		for _, c := range r.calls {
+			if c.argv[0] == "docker" && len(c.argv) > 1 && c.argv[1] == "build" {
+				builds++
+				if strings.TrimSpace(c.env) != "DOCKER_BUILDKIT=1" {
+					t.Errorf("%s --local: docker build ran with %q, want DOCKER_BUILDKIT=1", s.script, c.env)
+				}
+				if !strings.Contains(c.String(), "/"+s.image+":golden") {
+					t.Errorf("%s --local: built %s", s.script, c)
+				}
+			}
+		}
+		if builds != 1 {
+			t.Errorf("%s --local: %d docker builds, want 1", s.script, builds)
+		}
+	}
+}

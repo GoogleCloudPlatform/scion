@@ -105,6 +105,15 @@ scripts/build-runner-image.sh --apply --local # or: local docker, pushed as BUIL
   `docker login --password-stdin` without touching argv. It then logs out.
   The deployer needs `roles/iam.serviceAccountTokenCreator` on
   `BUILD_SA_NAME` for this.
+- **IAM propagation:** bindings made by `bootstrap-gcp.sh` take effect after
+  a short delay. A build started right after bootstrap can fail, or lose its
+  logs, because `BUILD_SA_NAME`'s `logging.logWriter` (required by
+  `CLOUD_LOGGING_ONLY`) or its staging-bucket access is still propagating.
+  Wait about 60 s after bootstrap, or simply re-run the build script (an
+  existing tag is not rebuilt; a failed one is retried).
+- **BuildKit:** both build paths use BuildKit (`DOCKER_BUILDKIT=1` in
+  `scripts/cloudbuild.yaml` and on the local `docker build`), which
+  `runner/Dockerfile` needs for `COPY --chmod`.
 
 ## 4. Runner job: `scripts/deploy-job.sh`
 
