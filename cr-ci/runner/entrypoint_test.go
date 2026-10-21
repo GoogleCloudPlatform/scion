@@ -504,18 +504,18 @@ func TestEntrypointScratchChecks(t *testing.T) {
 		{"missing", func(h *harness) { os.RemoveAll(h.scratch) }, "does not exist"},
 		{"not a mount point", func(h *harness) {
 			if err := os.WriteFile(h.mountinfo, []byte("22 1 0:21 / / rw - overlay overlay rw\n"), 0o644); err != nil {
-				t.Fatal(err)
+				h.t.Fatal(err)
 			}
 		}, "is not a mount point"},
 		{"mount table unreadable, same device as parent", func(h *harness) { h.env["CR_MOUNTINFO"] = filepath.Join(h.scratch, "no-such-file") }, "is not a mount point"},
 		{"not writable", func(h *harness) {
 			if os.Geteuid() == 0 {
-				t.Skip("root ignores directory permissions")
+				h.t.Skip("root ignores directory permissions")
 			}
 			if err := os.Chmod(h.scratch, 0o555); err != nil {
-				t.Fatal(err)
+				h.t.Fatal(err)
 			}
-			t.Cleanup(func() { os.Chmod(h.scratch, 0o755) })
+			h.t.Cleanup(func() { os.Chmod(h.scratch, 0o755) })
 		}, "not writable"},
 	}
 	for _, tc := range cases {
@@ -604,7 +604,7 @@ func TestEntrypointScratchDeviceFallback(t *testing.T) {
 	}{
 		{"not in mount table", func(h *harness) {
 			if err := os.WriteFile(h.mountinfo, []byte("22 1 0:21 / / rw - overlay overlay rw\n"), 0o644); err != nil {
-				t.Fatal(err)
+				h.t.Fatal(err)
 			}
 		}},
 		{"mount table unreadable", func(h *harness) { h.env["CR_MOUNTINFO"] = filepath.Join(h.scratch, "no-such-file") }},
