@@ -115,6 +115,7 @@ func (s *Server) handleAgentAttachmentUpload(w http.ResponseWriter, r *http.Requ
 		BadRequest(w, "invalid multipart form or request too large")
 		return
 	}
+	defer removeUploadForm(r)
 	files := r.MultipartForm.File["files"]
 	if len(files) == 0 {
 		ValidationError(w, "no files uploaded", nil)
