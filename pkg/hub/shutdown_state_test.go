@@ -360,8 +360,8 @@ func TestWebServerShutdown_BrokerThenListenerThenHubTeardown(t *testing.T) {
 	reqDone := make(chan int, 1)
 	go func() {
 		// Bounded, but well past the test's own waits (the listener
-		// close and the drain), so the timeout never cuts the in-flight
-		// request the drain is waiting for.
+		// close and the drain), so the timeout never fails the in-flight
+		// request before the test releases it.
 		client := &http.Client{Timeout: 30 * time.Second}
 		resp, err := client.Get("http://" + addr + "/")
 		if err != nil {
