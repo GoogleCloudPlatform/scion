@@ -78,6 +78,10 @@ type sfOptions struct {
 	// localCancel holds Start and cancels the launch locally once Start
 	// is reached.
 	localCancel bool
+	// shutdownCancel holds Start and, once Start is reached, cancels the
+	// launch's ctx' with errBrokerShutdown as its cause, as the shutdown
+	// drain does (the drain's wait has not ended).
+	shutdownCancel bool
 }
 
 // startFailedLaunch is the outcome of runStartFailedLaunch.
@@ -112,7 +116,7 @@ func runStartFailedLaunch(t *testing.T, id string, o sfOptions) *startFailedLaun
 	t.Helper()
 	mgr := &handleRecordingManager{failingCleanupManager: &failingCleanupManager{recFakeManager: newRecFakeManager(), cleanupErr: o.cleanupErr}}
 	mgr.setStartErr(errors.New("runtime refused"))
-	if o.keepaliveCompleted || o.localCancel {
+	if o.keepaliveCompleted || o.localCancel || o.shutdownCancel {
 		mgr.startBlock = make(chan struct{})
 	}
 	srv, rtb := newAsyncTestServer(t, mgr)
@@ -136,9 +140,9 @@ func runStartFailedLaunch(t *testing.T, id string, o sfOptions) *startFailedLaun
 	if o.deadlinePassed {
 		deadline = time.Now().Add(-15 * time.Minute)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	rec := newLaunchRecord(launchID, "agent-id-"+id, store.LaunchKindCreate, "", deadline, cancel)
+	ctx, cancelCause := context.WithCancelCause(context.Background())
+	defer cancelCause(nil)
+	rec := newLaunchRecord(launchID, "agent-id-"+id, store.LaunchKindCreate, "", deadline, func() { cancelCause(nil) })
 	rec.RunID = "run-" + id
 	rec.AddHandle(agent.ResourceHandle{Kind: "Pod", Namespace: "ns", Name: slug, UID: "uid-" + id})
 	rec.journal = srv.launchJournal.admit(rec, journalRecord{Slug: slug, AgentName: slug, ProjectPath: projectDir,
@@ -216,6 +220,11 @@ func runStartFailedLaunch(t *testing.T, id string, o sfOptions) *startFailedLaun
 			t.Fatal("Start was never reached")
 		}
 		rec.CancelLocal()
+	case o.shutdownCancel:
+		if !waitUntil(t, 5*time.Second, func() bool { return mgr.StartCallCount() >= 1 }) {
+			t.Fatal("Start was never reached")
+		}
+		cancelCause(errBrokerShutdown)
 	}
 	select {
 	case <-done:
@@ -463,6 +472,32 @@ func TestRunLaunch_PostCompleted_NoAnswerDuringDrain_SkipsCleanup(t *testing.T) 
 	l := runPostCompletedDrainLaunch(t, "pcdrain")
 	if n := len(l.mgr.Cleaned()); n != 0 {
 		t.Fatalf("no clean-up may run once the shutdown drain has ended, got %d", n)
+	}
+	assertDrainKeptRecord(t, l)
+}
+
+// TestRunLaunch_PostCompleted_NoAnswerDuringShutdown_SkipsCleanup covers
+// the other half of the drain skip: the shutdown drain cancels the
+// launch's ctx' while its wait is still running, and the failed report
+// gets no answer within its TTL.
+func TestRunLaunch_PostCompleted_NoAnswerDuringShutdown_SkipsCleanup(t *testing.T) {
+	l := runStartFailedLaunch(t, "pcshut", sfOptions{
+		claimCompleted: true,
+		shutdownCancel: true,
+		deadlinePassed: true,
+		terminal: func(int) (*hubclient.AgentLaunchReportResult, error) {
+			return nil, errors.New("simulated unreachable")
+		},
+	})
+	if l.srv.drainExpired() {
+		t.Fatal("test setup: the drain must not have expired")
+	}
+	reports := failedReports(l.rtb)
+	if len(reports) == 0 || reports[0].ErrorCode != api.LaunchCodeBrokerRestarted {
+		t.Fatalf("expected a broker_restarted failed report, got %+v", reports)
+	}
+	if n := len(l.mgr.Cleaned()); n != 0 {
+		t.Fatalf("no clean-up may run while the broker shuts down, got %d", n)
 	}
 	assertDrainKeptRecord(t, l)
 }
