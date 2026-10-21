@@ -61,8 +61,11 @@ func startForceMove(t *testing.T, f *moveFixture) (*store.AgentReincarnation, *s
 // on the source exactly as before (broker, runtime, run, placement, applied
 // config, reservation), removed the target's files with the recreated-files
 // delete (run-scoped only with targetRun), and sent the source nothing
-// after the stop: no delete of any kind.
-func assertForceRolledBack(t *testing.T, f *moveFixture, r *store.AgentReincarnation, a *store.Agent, targetRun string) {
+// after the stop: no delete of any kind. The restored config carries the
+// recovery Task for a failure out of fromState (ptone/scion#5511): the new
+// handoff behind the recovery addendum, while the record's
+// PreviousAppliedConfig keeps the generation N Task.
+func assertForceRolledBack(t *testing.T, f *moveFixture, r *store.AgentReincarnation, a *store.Agent, targetRun, fromState string) {
 	t.Helper()
 	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
 	r = waitForMoveSourceCleanup(t, f.s, r.ID)
@@ -73,6 +76,12 @@ func assertForceRolledBack(t *testing.T, f *moveFixture, r *store.AgentReincarna
 	assert.Equal(t, 1, a.Generation)
 	require.NotNil(t, a.AppliedConfig)
 	assert.Equal(t, "old-image:v1", a.AppliedConfig.Image, "the previous applied config is restored")
+	require.NotEmpty(t, r.Handoff)
+	assert.Equal(t, reincarnationRecoveryTask(r.ToGeneration, r.Handoff, fromState), a.AppliedConfig.Task,
+		"the source agent's Task carries the recovery handoff")
+	assert.Contains(t, a.AppliedConfig.Task, fmt.Sprintf("You remain generation %d.", r.ToGeneration-1))
+	require.NotNil(t, r.PreviousAppliedConfig)
+	assert.NotEqual(t, a.AppliedConfig.Task, r.PreviousAppliedConfig.Task, "the record's PreviousAppliedConfig is not changed")
 	assert.Equal(t, "run-src", a.RunID, "the source's run is restored")
 	assert.EqualValues(t, 1, brokerReservationCount(t, f.s, f.src.ID), "the reservation is back on the source")
 	assert.EqualValues(t, 0, brokerReservationCount(t, f.s, f.dst.ID))
@@ -211,7 +220,7 @@ func TestReincarnateForceMove_ProvisionFailureRollsBackAndRetrySucceeds(t *testi
 	f.disp.mu.Unlock()
 
 	r, a := startForceMove(t, f)
-	assertForceRolledBack(t, f, r, a, "")
+	assertForceRolledBack(t, f, r, a, "", store.AgentReincarnationStateProvisioning)
 	assert.Contains(t, r.Error, "provision on the target broker failed")
 
 	f.disp.mu.Lock()
@@ -233,7 +242,7 @@ func TestReincarnateForceMove_DefinitiveStartFailureRollsBackAndRetrySucceeds(t 
 	f.disp.mu.Unlock()
 
 	r, a := startForceMove(t, f)
-	assertForceRolledBack(t, f, r, a, "run-"+f.dst.ID+"-1")
+	assertForceRolledBack(t, f, r, a, "run-"+f.dst.ID+"-1", store.AgentReincarnationStateStarting)
 	assert.Contains(t, r.Error, "start failed")
 
 	f.disp.mu.Lock()
