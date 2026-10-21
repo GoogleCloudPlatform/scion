@@ -242,7 +242,8 @@ Still UNVERIFIED (to settle in P2, P4 or P6):
 - **U2. JIT config lifetime before first use.** GitHub documents that an unused
   JIT runner is removed automatically, and that ephemeral runners are removed
   after one day offline [GH19]. It does not document how long the encoded config
-  stays valid. The claim nonce's 60 s TTL bounds the cr-ci side regardless.
+  stays valid. The claim token's `CLAIM_TTL` (default 300 s) bounds the cr-ci
+  side regardless.
 - **U3. Narrower mediator role.** Whether `roles/run.jobsExecutorWithOverrides`,
   plus a role for listing and cancelling executions, can replace
   `roles/run.developer` on the job; and whether executing (not deploying) a job

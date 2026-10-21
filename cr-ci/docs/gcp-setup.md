@@ -35,6 +35,14 @@
 
 ## 6. Mediator (`scripts/deploy-mediator.sh`)
 
+- **`--max-instances=1` is required.** Pending claims live in the mediator's
+  memory; a second instance would reject claims issued by the first (see
+  [operations.md](operations.md#mediator-single-instance)). `--min-instances=0`
+  is fine: a restart only delays affected jobs until the next reconcile.
+- Env: every key of `config.example.env` (including `CLAIM_TTL` and, after the
+  first deploy, `MEDIATOR_URL`). Until `MEDIATOR_URL` is set, `/webhook` and
+  `/reconcile` answer 503.
+
 - TODO(P4): env from the config contract, secrets by reference; public ingress
   (`allUsers` invoker, or `--no-invoker-iam-check` where org policy forbids
   `allUsers`: matrix item U6); print the service URL for `MEDIATOR_URL`.
