@@ -17,14 +17,21 @@
 package relayrole
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay/relaytest"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/transport/ws"
+	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
 // Arrival of a dial (design §3.9 "Ingress"): the public listener always
@@ -179,4 +186,110 @@ func TestRoleAnswersAfterAdmitAreNotRepickable(t *testing.T) {
 			}
 		})
 	}
+}
+
+// dialWelcome opens a conduit session at url as an agent with the extra
+// headers and returns its Welcome.
+func dialWelcome(t *testing.T, url string, extra http.Header) *conduitv1.Welcome {
+	t.Helper()
+	d := &ws.Dialer{
+		URL: "ws" + strings.TrimPrefix(url, "http") + ConduitPath,
+		Header: func(context.Context) (http.Header, error) {
+			h := http.Header{"Authorization": {"Bearer dialer-credential"}}
+			for k, v := range extra {
+				h[k] = v
+			}
+			return h, nil
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	s, wel, err := conduit.Dial(ctx, d, conduit.Config{Clock: clock.Real()}, relaytest.AgentHello(testAgentID, "L1", "", "pty"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	return wel
+}
+
+// TestRoleIngressLifetimeCap (design §3.9 "Source of the cap", v2.21.53):
+// on a trusted ingress leg a valid cap header lowers the session's
+// lifetime cap and never raises it; an absent or invalid one leaves the
+// relay's cap and is counted (ingress_cap_invalid). The header is not
+// read on an untrusted leg or on a direct dial.
+func TestRoleIngressLifetimeCap(t *testing.T) {
+	const relayCap = 3500 * time.Second
+	f := newRoleFixtureWith(t, func(c *relay.Config) { c.LifetimeCap = relayCap })
+	f.admitAs(registry.PrincipalAgent, "tok-1", nil)
+	const peer = "hub-a"
+	ingress := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.role.ServeIngress(w, r, peer)
+	}))
+	t.Cleanup(ingress.Close)
+	relayHint := uint32((relayCap - relay.LifetimeGoAwayLead) / time.Second)
+	instanceKey, capKey := http.CanonicalHeaderKey(relay.HeaderIngressInstance), http.CanonicalHeaderKey(relay.HeaderIngressLifetimeCap)
+
+	for _, tc := range []struct {
+		name     string
+		header   []string // nil: no cap header
+		wantHint uint32
+		invalid  bool
+	}{
+		{name: "lower cap", header: []string{"600"}, wantHint: 540},
+		{name: "the 90s floor", header: []string{"90"}, wantHint: 30},
+		{name: "above the relay cap never extends", header: []string{"7200"}, wantHint: relayHint},
+		{name: "the 24h ceiling, above the relay cap", header: []string{"86400"}, wantHint: relayHint},
+		{name: "absent", wantHint: relayHint, invalid: true},
+		{name: "empty", header: []string{""}, wantHint: relayHint, invalid: true},
+		{name: "not a number", header: []string{"abc"}, wantHint: relayHint, invalid: true},
+		{name: "signed", header: []string{"+600"}, wantHint: relayHint, invalid: true},
+		{name: "negative", header: []string{"-5"}, wantHint: relayHint, invalid: true},
+		{name: "fraction", header: []string{"90.5"}, wantHint: relayHint, invalid: true},
+		{name: "below 90s", header: []string{"89"}, wantHint: relayHint, invalid: true},
+		{name: "above 24h", header: []string{"86401"}, wantHint: relayHint, invalid: true},
+		{name: "too many digits", header: []string{"000600"}, wantHint: relayHint, invalid: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := f.role.IngressCapInvalidCount()
+			extra := http.Header{instanceKey: {peer}}
+			if tc.header != nil {
+				extra[capKey] = tc.header
+			}
+			wel := dialWelcome(t, ingress.URL, extra)
+			if got := wel.GetLifetimeHintS(); got != tc.wantHint {
+				t.Fatalf("Welcome.lifetime_hint_s = %d, want %d", got, tc.wantHint)
+			}
+			want := before
+			if tc.invalid {
+				want++
+			}
+			if got := f.role.IngressCapInvalidCount(); got != want {
+				t.Fatalf("ingress_cap_invalid count = %d, want %d", got, want)
+			}
+		})
+	}
+
+	t.Run("untrusted instance: refused, the cap is not read", func(t *testing.T) {
+		before := f.role.IngressCapInvalidCount()
+		if status := upgradeTo(t, ingress.URL+ConduitPath, http.Header{instanceKey: {"hub-b"}, capKey: {"abc"}}); status != http.StatusForbidden {
+			t.Fatalf("status %d, want 403", status)
+		}
+		if f.role.IngressCapInvalidCount() != before {
+			t.Fatal("the cap header was read on an untrusted leg")
+		}
+	})
+
+	t.Run("direct dial: the header is ignored", func(t *testing.T) {
+		before, untrusted := f.role.IngressCapInvalidCount(), f.role.IngressHeaderUntrustedCount()
+		wel := dialWelcome(t, f.front.URL, http.Header{capKey: {"600"}})
+		if got := wel.GetLifetimeHintS(); got != relayHint {
+			t.Fatalf("Welcome.lifetime_hint_s = %d, want the relay's %d", got, relayHint)
+		}
+		if f.role.IngressCapInvalidCount() != before {
+			t.Fatal("the cap header was read on a direct dial")
+		}
+		if f.role.IngressHeaderUntrustedCount() != untrusted+1 {
+			t.Fatal("the header on a direct dial was not counted as untrusted")
+		}
+	})
 }

@@ -41,6 +41,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/transport/ws"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
@@ -101,6 +102,9 @@ type Role struct {
 
 	// untrustedIngress counts dials whose ingress headers were not trusted.
 	untrustedIngress atomic.Uint64
+	// invalidIngressCap counts trusted ingress dials whose lifetime cap
+	// header was absent or invalid (cause ingress_cap_invalid).
+	invalidIngressCap atomic.Uint64
 
 	// tunnels are the tunnels this relay opened for its user sessions.
 	tunnels tunnelTable
@@ -191,7 +195,7 @@ func (ro *Role) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get(relay.HeaderIngressInstance) != "" || r.Header.Get(relay.HeaderIngressLifetimeCap) != "" {
 		ro.ingressHeaderUntrusted("public listener")
 	}
-	ro.serve(w, r, relay.ArrivalDirect, "")
+	ro.serve(w, r, relay.ArrivalDirect, "", 0)
 }
 
 // ServeIngress serves GET /api/v1/conduit proxied by a hub ingress over a
@@ -199,7 +203,12 @@ func (ro *Role) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // caller already authenticated as (relay.Relay.AuthenticatePeer). The dial
 // is an ingress arrival only when the ingress instance header names that
 // same peer; otherwise it is refused with 403 (cause
-// ingress_header_untrusted), never served as direct.
+// ingress_header_untrusted), never served as direct. Only then is the
+// ingress lifetime cap header read: a valid value lowers the session's
+// lifetime cap (never raises it); an absent or invalid one leaves the
+// relay's own cap (cause ingress_cap_invalid). The header is not covered
+// by the relay-peer MAC, and needs not be, since it can only shorten a
+// session (design §3.9, v2.21.53).
 func (ro *Role) ServeIngress(w http.ResponseWriter, r *http.Request, peer string) {
 	instance := r.Header.Get(relay.HeaderIngressInstance)
 	if instance == "" || len(instance) > relay.MaxIngressInstanceLen || instance != peer {
@@ -207,7 +216,37 @@ func (ro *Role) ServeIngress(w http.ResponseWriter, r *http.Request, peer string
 		http.Error(w, "ingress instance missing or not the authenticated peer", http.StatusForbidden)
 		return
 	}
-	ro.serve(w, r, relay.ArrivalIngress, instance)
+	lifetimeCap, ok := ingressLifetimeCap(r.Header.Get(relay.HeaderIngressLifetimeCap))
+	if !ok {
+		n := ro.invalidIngressCap.Add(1)
+		ro.log.Warn("Conduit relay: ingress lifetime cap header absent or invalid; using this relay's cap",
+			"cause", "ingress_cap_invalid", "ingress_instance", instance, "count", n)
+	}
+	ro.serve(w, r, relay.ArrivalIngress, instance, lifetimeCap)
+}
+
+// ingressLifetimeCap parses the ingress lifetime cap header: a decimal
+// count of whole seconds (ASCII digits only, no sign) within
+// config.ConduitMinLifetimeCap and config.ConduitMaxLifetimeCap. It
+// reports false, with 0, for an absent or invalid value.
+func ingressLifetimeCap(v string) (time.Duration, bool) {
+	if v == "" || len(v) > 5 {
+		return 0, false
+	}
+	for i := 0; i < len(v); i++ {
+		if v[i] < '0' || v[i] > '9' {
+			return 0, false
+		}
+	}
+	secs, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, false
+	}
+	d := time.Duration(secs) * time.Second
+	if d < config.ConduitMinLifetimeCap || d > config.ConduitMaxLifetimeCap {
+		return 0, false
+	}
+	return d, true
 }
 
 // ingressHeaderUntrusted logs and counts ingress headers this relay did
@@ -221,11 +260,16 @@ func (ro *Role) ingressHeaderUntrusted(where string) {
 // headers this relay did not trust.
 func (ro *Role) IngressHeaderUntrustedCount() uint64 { return ro.untrustedIngress.Load() }
 
+// IngressCapInvalidCount returns how many trusted ingress dials carried
+// an absent or invalid lifetime cap header.
+func (ro *Role) IngressCapInvalidCount() uint64 { return ro.invalidIngressCap.Load() }
+
 // serve admits a dial: the relay asks the hub to admit the dialer with the
 // credential headers it presented and how the dial arrived, and serves the
-// session as the principal the hub admitted. A hub refusal is passed on
+// session as the principal the hub admitted, with lifetimeCap (0: the
+// relay's own cap) lowering the session's lifetime cap. A hub refusal is passed on
 // unchanged; an unreachable hub is 503.
-func (ro *Role) serve(w http.ResponseWriter, r *http.Request, arrival, ingressInstance string) {
+func (ro *Role) serve(w http.ResponseWriter, r *http.Request, arrival, ingressInstance string, lifetimeCap time.Duration) {
 	if r.URL.Path != ConduitPath {
 		http.NotFound(w, r)
 		return
@@ -278,13 +322,14 @@ func (ro *Role) serve(w http.ResponseWriter, r *http.Request, arrival, ingressIn
 		return
 	}
 	p := relay.Principal{
-		Kind:      adm.PrincipalKind,
-		ID:        adm.PrincipalID,
-		ProjectID: adm.ProjectID,
-		ExecScope: adm.ExecScope,
-		Agent:     relay.AgentIncarnationFacts{LaunchID: adm.AgentLaunchID, Generation: adm.AgentGeneration},
-		SessionID: sessionID,
-		GrantKeys: relay.WelcomeGrantKeys(adm.GrantKeys),
+		Kind:        adm.PrincipalKind,
+		ID:          adm.PrincipalID,
+		ProjectID:   adm.ProjectID,
+		ExecScope:   adm.ExecScope,
+		Agent:       relay.AgentIncarnationFacts{LaunchID: adm.AgentLaunchID, Generation: adm.AgentGeneration},
+		SessionID:   sessionID,
+		GrantKeys:   relay.WelcomeGrantKeys(adm.GrantKeys),
+		LifetimeCap: lifetimeCap,
 	}
 	if adm.TokenRunID != "" {
 		p.TokenRun = &relay.TokenRunBinding{RunID: adm.TokenRunID, Enforce: adm.TokenRunEnforce}
