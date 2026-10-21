@@ -244,7 +244,9 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	s.InternalAddr = internalLn.Addr()
 	// The internal listener also serves the conduit dials a hub ingress
 	// proxies (design §3.9 "Ingress"): GET /api/v1/conduit, after the same
-	// relay-peer checks as every internal-API call. It has the public
+	// relay-peer checks as every internal-API call, except that a relay
+	// that no longer serves answers 503 relay_not_admitting, which the
+	// ingress may re-pick on (AuthenticateIngressPeer). It has the public
 	// listener's header timeout and size limit; admission is the same
 	// code path (relayrole.Role), with the ingress arrival.
 	var currentRole atomic.Pointer[relayrole.Role]
@@ -260,7 +262,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 				http.Error(w, "conduit relay not running", http.StatusServiceUnavailable)
 				return
 			}
-			peer, ok := r.AuthenticatePeer(w, req)
+			peer, ok := r.AuthenticateIngressPeer(w, req)
 			if !ok {
 				return
 			}

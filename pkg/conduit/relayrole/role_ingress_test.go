@@ -20,6 +20,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
@@ -120,4 +121,62 @@ func TestRoleIngressNeedsTheAuthenticatedPeer(t *testing.T) {
 			t.Fatalf("admit arrival %q instance %q, want ingress and %q", req.Arrival, req.IngressInstance, peer)
 		}
 	})
+}
+
+// TestRoleAnswersAfterAdmitAreNotRepickable pins what a hub ingress relies
+// on (design §3.9 "Relay selection"): no answer the relay gives after its
+// admission call to the hub carries the refusal reason header, and none is
+// a 503 relay_not_admitting, even when the hub's answer carries either. So
+// an ingress never re-picks a dial the hub may have admitted.
+func TestRoleAnswersAfterAdmitAreNotRepickable(t *testing.T) {
+	notAdmitting := map[string]any{"error": map[string]any{
+		"code": "unavailable", "message": "unavailable", "details": map[string]string{"reason": relay.ReasonRelayNotAdmitting},
+	}}
+	reasonHeader := http.Header{http.CanonicalHeaderKey(relay.HeaderRefusalReason): {relay.ReasonNotServing}}
+	for _, tc := range []struct {
+		name   string
+		answer *hubAnswer // nil: the hub is unreachable
+	}{
+		{name: "hub 503 with the reason header and body", answer: &hubAnswer{status: http.StatusServiceUnavailable, header: reasonHeader, body: notAdmitting}},
+		{name: "hub 401 with the reason header", answer: &hubAnswer{status: http.StatusUnauthorized, header: reasonHeader, body: notAdmitting}},
+		{name: "hub 409 with the reason header", answer: &hubAnswer{status: http.StatusConflict, header: reasonHeader, body: notAdmitting}},
+		{name: "hub 429 with the reason header", answer: &hubAnswer{status: http.StatusTooManyRequests, header: reasonHeader, body: notAdmitting}},
+		{name: "hub unreachable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRoleFixture(t)
+			if tc.answer == nil {
+				f.hub.srv.Close()
+			} else {
+				a := *tc.answer
+				f.hub.setAnswer(func(string, []byte) hubAnswer { return a })
+			}
+			req, err := http.NewRequest(http.MethodGet, f.front.URL+ConduitPath, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Connection", "Upgrade")
+			req.Header.Set("Upgrade", "websocket")
+			req.Header.Set("Sec-WebSocket-Version", "13")
+			req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			body, _ := io.ReadAll(resp.Body)
+			if tc.answer != nil && f.hub.count("admit") != 1 {
+				t.Fatalf("admit calls %d, want 1", f.hub.count("admit"))
+			}
+			if got := resp.Header.Get(relay.HeaderRefusalReason); got != "" {
+				t.Fatalf("answer %d carries %s %q after the admission call", resp.StatusCode, relay.HeaderRefusalReason, got)
+			}
+			if resp.StatusCode == http.StatusServiceUnavailable && strings.Contains(string(body), relay.ReasonRelayNotAdmitting) {
+				t.Fatalf("answer 503 %s after the admission call", body)
+			}
+			if resp.StatusCode == http.StatusSwitchingProtocols {
+				t.Fatalf("the dial was admitted")
+			}
+		})
+	}
 }

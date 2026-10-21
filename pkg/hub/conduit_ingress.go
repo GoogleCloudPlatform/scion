@@ -53,9 +53,9 @@ import (
 // current generation holds fewer sessions; when a count fails it picks one
 // of the two at random. A dial is re-picked, within router.MaxReResolves,
 // only when it failed before the relay could have run Admit: a transport
-// error before the request was written, 409 relay_target_mismatch, 503
-// relay_not_admitting, or 503 not_serving from a stopped relay's relay-peer
-// check. Every other answer, and a transport error after the request was
+// error before the request was written, 409 relay_target_mismatch, or 503
+// relay_not_admitting (which a stopped relay also answers on the ingress
+// route). Every other answer, and a transport error after the request was
 // written, goes to the client unchanged (502 for the error), since a second
 // Admit would replay a broker's request nonce.
 
@@ -210,9 +210,8 @@ func newConduitIngressTransport(base http.RoundTripper, headerTimeout time.Durat
 
 // conduitIngressRepickResponse reports whether a relay's answer to a
 // proxied dial was given before admission: 409 relay_target_mismatch (the
-// relay-peer check), 503 not_serving in the refusal reason header (the
-// relay-peer check of a stopped relay), or 503 relay_not_admitting
-// (draining or not ready). It reads at most conduitIngressRefusalBodyMax
+// relay-peer check) or 503 relay_not_admitting (draining, not ready, or
+// stopped). It reads at most conduitIngressRefusalBodyMax
 // bytes of a 503 body; the body of an answer that is not re-picked is
 // restored for the client.
 func conduitIngressRepickResponse(resp *http.Response) bool {
@@ -220,9 +219,6 @@ func conduitIngressRepickResponse(resp *http.Response) bool {
 	case http.StatusConflict:
 		return resp.Header.Get(relay.HeaderStaleReason) == "relay_target_mismatch"
 	case http.StatusServiceUnavailable:
-		if resp.Header.Get(relay.HeaderRefusalReason) == relay.ReasonNotServing {
-			return true
-		}
 		body, err := io.ReadAll(io.LimitReader(resp.Body, conduitIngressRefusalBodyMax))
 		resp.Body = struct {
 			io.Reader

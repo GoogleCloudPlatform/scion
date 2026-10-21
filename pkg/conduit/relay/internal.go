@@ -120,6 +120,35 @@ func (r *Relay) InternalHandler() http.Handler {
 // relay_target_mismatch, or 503 when the relay no longer serves) and
 // returns false.
 func (r *Relay) AuthenticatePeer(w http.ResponseWriter, req *http.Request) (peer string, ok bool) {
+	return r.authenticatePeer(w, req, func(w http.ResponseWriter) {
+		refuseUnavailable(w, ReasonNotServing, "relay unavailable")
+	})
+}
+
+// AuthenticateIngressPeer is AuthenticatePeer for the conduit dials a hub
+// ingress proxies to the internal listener: a relay that no longer serves
+// answers 503 with reason relay_not_admitting (the relayrole refusal
+// shape), since the refusal comes before Admit and the ingress may re-pick
+// on that reason (design §3.9 "Relay selection").
+func (r *Relay) AuthenticateIngressPeer(w http.ResponseWriter, req *http.Request) (peer string, ok bool) {
+	return r.authenticatePeer(w, req, WriteNotAdmitting)
+}
+
+// WriteNotAdmitting answers 503 with reason relay_not_admitting in the
+// JSON error body: the refusal a relay gives before Admit when it does not
+// take new sessions, which a hub ingress re-picks on.
+func WriteNotAdmitting(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{
+		"code": "unavailable", "message": "This relay is not admitting conduit sessions",
+		"details": map[string]string{"reason": ReasonRelayNotAdmitting},
+	}})
+}
+
+// authenticatePeer runs the checks of AuthenticatePeer; refuseStopped
+// answers a relay that no longer serves.
+func (r *Relay) authenticatePeer(w http.ResponseWriter, req *http.Request, refuseStopped func(http.ResponseWriter)) (peer string, ok bool) {
 	if r.cfg.PeerAuth == nil {
 		http.Error(w, "relay-peer auth not configured", http.StatusUnauthorized)
 		return "", false
@@ -145,7 +174,7 @@ func (r *Relay) AuthenticatePeer(w http.ResponseWriter, req *http.Request) (peer
 		return "", false
 	}
 	if killed {
-		refuseUnavailable(w, ReasonNotServing, "relay unavailable")
+		refuseStopped(w)
 		return "", false
 	}
 	return peer, true

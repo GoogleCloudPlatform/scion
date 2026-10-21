@@ -190,9 +190,9 @@ func TestConduitIngress_ProxyLeg(t *testing.T) {
 
 // TestConduitIngress_RepicksOnlyBeforeAdmission: another relay is picked
 // only after a transport failure before the request was written, 409
-// relay_target_mismatch, 503 relay_not_admitting, or a stopped relay's 503
-// not_serving; any other answer, including a 503 given after admission or a
-// 401, reaches the client unchanged, and a connection lost after the request
+// relay_target_mismatch, or 503 relay_not_admitting; any other answer,
+// including a 503 given after admission, a 503 not_serving or a 401,
+// reaches the client unchanged, and a connection lost after the request
 // was written is 502, with no second relay contacted.
 func TestConduitIngress_RepicksOnlyBeforeAdmission(t *testing.T) {
 	for _, tc := range []struct {
@@ -210,9 +210,8 @@ func TestConduitIngress_RepicksOnlyBeforeAdmission(t *testing.T) {
 			w.Header().Set(relay.HeaderStaleReason, "relay_target_mismatch")
 			http.Error(w, "stale", http.StatusConflict)
 		}, repick: true},
-		{name: "stopped relay not serving", first: func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set(relay.HeaderRefusalReason, relay.ReasonNotServing)
-			http.Error(w, "relay unavailable", http.StatusServiceUnavailable)
+		{name: "stopped relay on the ingress route", first: func(w http.ResponseWriter, _ *http.Request) {
+			relay.WriteNotAdmitting(w) // what Relay.AuthenticateIngressPeer answers for a stopped relay
 		}, repick: true},
 		{name: "transport failure before any answer", down: true, repick: true},
 		{name: "connection lost after the request was written", first: func(w http.ResponseWriter, _ *http.Request) {
@@ -224,6 +223,10 @@ func TestConduitIngress_RepicksOnlyBeforeAdmission(t *testing.T) {
 		{name: "503 after admission", first: func(w http.ResponseWriter, _ *http.Request) {
 			writeRelayUnavailable(w, relay.ReasonUpstreamUnreachable)
 		}, status: http.StatusServiceUnavailable, contain: relay.ReasonUpstreamUnreachable},
+		{name: "503 not_serving is not in the re-pick set", first: func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set(relay.HeaderRefusalReason, relay.ReasonNotServing)
+			http.Error(w, "relay unavailable", http.StatusServiceUnavailable)
+		}, status: http.StatusServiceUnavailable, contain: "relay unavailable"},
 		{name: "409 without the stale reason", first: func(w http.ResponseWriter, _ *http.Request) {
 			http.Error(w, "session id already in use", http.StatusConflict)
 		}, status: http.StatusConflict, contain: "session id already in use"},
