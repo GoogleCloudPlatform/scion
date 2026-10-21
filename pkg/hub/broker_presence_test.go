@@ -471,14 +471,18 @@ func TestPlacement_SingleProviderAutoSelectUsesPresence(t *testing.T) {
 // returns.
 var errBrokerRecordRead = errors.New("forced broker record read error")
 
-// brokerReadFailStore fails every broker record read: with the caller's
-// context error once that context has ended, otherwise with
-// errBrokerRecordRead.
+// brokerReadFailStore fails every broker record read while its fault switch
+// is armed: with the caller's context error once that context has ended,
+// otherwise with errBrokerRecordRead. Disarmed, it delegates.
 type brokerReadFailStore struct {
 	store.Store
+	fault *storeFaultSwitch
 }
 
-func (brokerReadFailStore) GetRuntimeBroker(ctx context.Context, _ string) (*store.RuntimeBroker, error) {
+func (w *brokerReadFailStore) GetRuntimeBroker(ctx context.Context, id string) (*store.RuntimeBroker, error) {
+	if !w.fault.Active() {
+		return w.Store.GetRuntimeBroker(ctx, id)
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -491,10 +495,12 @@ func (brokerReadFailStore) GetRuntimeBroker(ctx context.Context, _ string) (*sto
 // scion.hub.broker.presence_registry_fallbacks. A read cut short by the
 // caller's own context is returned with no log and no count.
 func TestBrokerPresent_ReadErrorLoggedAndCounted(t *testing.T) {
-	srv, _ := testServer(t)
+	srv, _, _, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *brokerReadFailStore {
+		return &brokerReadFailStore{Store: inner, fault: f}
+	})
 	reader := sdkmetric.NewManualReader()
 	require.NoError(t, srv.RegisterBrokerPresenceMetrics(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))))
-	srv.store = brokerReadFailStore{srv.store}
+	fault.Arm()
 	logs := captureSlog(t)
 	id := tid("present-read-error")
 	const line = "the broker record could not be read"
