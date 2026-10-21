@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/spf13/cobra"
 )
@@ -398,6 +399,29 @@ func inviteHubUsers(ctx context.Context, out io.Writer, client hubclient.Client,
 	resp, err := client.Users().InviteBatch(ctx, req)
 	if err != nil {
 		var be *hubclient.InviteBatchError
+		if errors.As(err, &be) && opts.JSON {
+			enc := json.NewEncoder(out)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(struct {
+				Error    string                                `json:"error"`
+				Reason   string                                `json:"reason"`
+				BatchID  string                                `json:"batchId,omitempty"`
+				Projects []hubclient.InviteBatchProjectRefusal `json:"projects"`
+			}{Error: be.Message, Reason: hubclient.InviteBatchReasonProjectsNotGrantable, BatchID: be.BatchID, Projects: be.Projects})
+			return fmt.Errorf("invite refused: %s", be.Message)
+		}
+		var apiErr *apiclient.APIError
+		if opts.JSON && errors.As(err, &apiErr) {
+			enc := json.NewEncoder(out)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(struct {
+				Error   string                 `json:"error"`
+				Code    string                 `json:"code,omitempty"`
+				Status  int                    `json:"status"`
+				Details map[string]interface{} `json:"details,omitempty"`
+			}{Error: apiErr.Message, Code: apiErr.Code, Status: apiErr.StatusCode, Details: apiErr.Details})
+			return fmt.Errorf("failed to invite users: %w", err)
+		}
 		if errors.As(err, &be) {
 			_, _ = fmt.Fprintln(out, "The hub refused the request; no one was invited. Refused project entries:")
 			for _, r := range be.Projects {

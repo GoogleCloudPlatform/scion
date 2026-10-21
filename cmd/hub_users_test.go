@@ -349,6 +349,23 @@ func TestInviteHubUsers_RefusedRequest(t *testing.T) {
 	assert.Contains(t, err.Error(), "invite refused")
 	assert.Contains(t, out.String(), "no one was invited")
 	assert.Contains(t, out.String(), "web: role_not_grantable (role r-member) [role_assignment_forbidden]")
+
+	// With --json the refusal is printed as JSON too.
+	out.Reset()
+	err = inviteHubUsers(context.Background(), &out, hub.client(t), hubUsersInviteOptions{
+		Args: []string{"alice@example.com"}, Projects: []string{"web=project-member"}, JSON: true,
+	})
+	require.Error(t, err)
+	var refused struct {
+		Reason   string                                `json:"reason"`
+		BatchID  string                                `json:"batchId"`
+		Projects []hubclient.InviteBatchProjectRefusal `json:"projects"`
+	}
+	require.NoError(t, json.Unmarshal(out.Bytes(), &refused), out.String())
+	assert.Equal(t, "batch_projects_not_grantable", refused.Reason)
+	assert.Equal(t, "b3", refused.BatchID)
+	require.Len(t, refused.Projects, 1)
+	assert.Equal(t, "role_assignment_forbidden", refused.Projects[0].DenialCode)
 }
 
 // TestInviteHubUsers_LocalCaps refuses more than 1000 addresses, or more
@@ -388,4 +405,24 @@ func TestParseImportCSV_KeepsAllowListBehavior(t *testing.T) {
 		{Email: "#b@example.com"},
 		{Email: "c@example.com"},
 	}, got)
+}
+
+// TestInviteHubUsers_JSONErrorResponse: with --json any hub error response
+// is printed as JSON (status, code, message, details).
+func TestInviteHubUsers_JSONErrorResponse(t *testing.T) {
+	hub := &inviteTestHub{bulkStatus: http.StatusBadRequest, bulkBody: `{"error":{"code":"invalid_request","message":"unknown field \"x\"","details":{"field":"x"}}}`}
+	var out bytes.Buffer
+	err := inviteHubUsers(context.Background(), &out, hub.client(t), hubUsersInviteOptions{Args: []string{"alice@example.com"}, JSON: true})
+	require.Error(t, err)
+	var got struct {
+		Error   string                 `json:"error"`
+		Code    string                 `json:"code"`
+		Status  int                    `json:"status"`
+		Details map[string]interface{} `json:"details"`
+	}
+	require.NoError(t, json.Unmarshal(out.Bytes(), &got), out.String())
+	assert.Equal(t, http.StatusBadRequest, got.Status)
+	assert.Equal(t, "invalid_request", got.Code)
+	assert.Equal(t, `unknown field "x"`, got.Error)
+	assert.Equal(t, "x", got.Details["field"])
 }

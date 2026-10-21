@@ -128,6 +128,9 @@ const (
 	inviteBatchReasonProjectNotManageable = "project_not_manageable"
 	inviteBatchReasonRoleNotAssignable    = "role_not_assignable"
 	inviteBatchReasonRoleNotGrantable     = "role_not_grantable"
+	// inviteBatchReasonUserReadRequired: project memberships were
+	// requested by a caller without user.read.
+	inviteBatchReasonUserReadRequired = "user_read_required"
 )
 
 // inviteBulkRoleLikeFields are top-level fields that would select a hub
@@ -876,7 +879,8 @@ func (s *Server) runInviteBatch(ctx context.Context, actor UserIdentity, batchID
 
 		u, outcome, err := s.inviteBatchUserStep(ctx, actor, a.email, a.note)
 		if err != nil {
-			slog.ErrorContext(ctx, "bulk invite: failed to create invited user", "batch_id", batchID, "email", a.email, "error", err)
+			// The index, not the address: the response maps it back.
+			slog.ErrorContext(ctx, "bulk invite: failed to create invited user", "batch_id", batchID, "index", i, "error", err)
 			res.Status, res.Reason = inviteBatchStatusFailed, inviteBatchReasonInternalError
 			if ctx.Err() != nil {
 				res.Reason = inviteBatchReasonNotProcessed
@@ -1008,6 +1012,20 @@ func (s *Server) logInviteBatchRun(ctx context.Context, actor UserIdentity, batc
 	if err := logger.LogInviteAuditEvent(ctx, event); err != nil {
 		slog.WarnContext(ctx, "bulk invite: the aggregate audit event failed", "batch_id", batchID, "error", err)
 	}
+}
+
+// refuseInviteBatch refuses the whole request with 403
+// batch_projects_not_grantable listing refusals, after writing the one
+// audit record of the refused run. Nothing else has been written.
+func (s *Server) refuseInviteBatch(ctx context.Context, w http.ResponseWriter, actor UserIdentity, batchID string, total int, refusals []InviteBatchProjectRefusal) {
+	s.logInviteBatchRefused(context.WithoutCancel(ctx), actor, batchID, total, refusals)
+	writeError(w, http.StatusForbidden, ErrCodeForbidden,
+		"one or more requested project memberships cannot be granted by the caller; nothing was created",
+		map[string]interface{}{
+			"reason":   inviteBatchReasonProjectsNotGrantable,
+			"batchId":  batchID,
+			"projects": refusals,
+		})
 }
 
 // logInviteBatchRefused writes the one user_invited_bulk record of a run

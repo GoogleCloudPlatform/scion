@@ -480,3 +480,39 @@ func TestInviteBatch_DecodeRefusalWritesNoAudit(t *testing.T) {
 	defer f.audit.mu.Unlock()
 	assert.Empty(t, f.audit.invite, "no audit record for a malformed request")
 }
+
+// TestInviteBatch_ProjectsRequireUserRead: a caller without user.read who
+// names project memberships is refused before any write, in the shape of
+// a preflight refusal and with its one audit record, because membership
+// results would tell invited rows from active or suspended ones. Without
+// projects the same caller still invites, with the collapsed rows.
+func TestInviteBatch_ProjectsRequireUserRead(t *testing.T) {
+	f := newBatchFixture(t)
+	caller := grpUser(t, f.store, t.Name()+"-inviter", "Inviter")
+	batchGrantHubPerms(t, f.store, caller.ID, "user.invite")
+	grpBind(t, f.store, store.RoleBindingPrincipalUser, caller.ID, f.ownerRD.ID, f.projectID)
+	pending := newInvitedUser(t, f.store, tid(t.Name()+"-pending"), "noread-pending@example.com")
+
+	rec := f.post(t, caller, UserInviteBulkRequest{
+		Emails:   batchEmails("noread-new@example.com", pending.Email),
+		Projects: []UserInviteBulkProject{{ProjectID: f.projectID, RoleDefinitionIDs: []string{f.memberRD.ID}}},
+	})
+	batchID, refusals := batchRefusal(t, rec)
+	assert.Equal(t, []InviteBatchProjectRefusal{{Index: 0, ProjectID: f.projectID, Reason: inviteBatchReasonUserReadRequired}}, refusals)
+	f.noUser(t, "noread-new@example.com")
+	assert.Empty(t, mmrBindingsFor(t, f.store, store.RoleBindingPrincipalUser, pending.ID, f.projectID), "no binding for the existing row")
+	bulk := f.events(InviteAuditUserInvitedBulk)
+	require.Len(t, bulk, 1, "one audit record for the refused run")
+	assert.False(t, bulk[0].Success)
+	assert.Equal(t, inviteBatchReasonProjectsNotGrantable, bulk[0].FailReason)
+	assert.Equal(t, batchID, bulk[0].Details["batch_id"])
+	assert.Equal(t, fmt.Sprintf("0:%s:%s", f.projectID, inviteBatchReasonUserReadRequired), bulk[0].Details["refusals"])
+	assert.Empty(t, f.events(InviteAuditUserInvited))
+
+	resp := f.ok(t, caller, UserInviteBulkRequest{Emails: batchEmails("noread-new@example.com", pending.Email)})
+	require.Len(t, resp.Results, 2)
+	assert.Equal(t, inviteBatchStatusCreated, resp.Results[0].Status)
+	assert.Equal(t, inviteBatchStatusExists, resp.Results[1].Status, "collapsed row without user.read")
+	assert.Empty(t, resp.Results[1].UserID)
+	assert.Empty(t, resp.Results[1].Memberships)
+}

@@ -47,7 +47,9 @@ type UserInviteResponse struct {
 
 // UserInviteBulkRequest is the JSON request body for bulk invite. The
 // handler decodes the body strictly (decodeInviteBatchJSON); this type is
-// the shape callers in Go build.
+// the shape callers in Go build. A role-like top-level field (role, roles,
+// hubRole, hubRoles) is refused with 422, except that an explicit null is
+// read as absent.
 type UserInviteBulkRequest struct {
 	Emails   []UserInviteRequest     `json:"emails"`
 	Projects []UserInviteBulkProject `json:"projects,omitempty"`
@@ -163,6 +165,32 @@ func (s *Server) handleAdminUserInviteBulk(w http.ResponseWriter, r *http.Reques
 	ctx := r.Context()
 	batchID := uuid.New().String()
 
+	// Detail authority (the provision rule): user.read at hub scope, once.
+	// It selects the view of existing rows, and below it decides whether
+	// project memberships may be requested at all.
+	detail := s.authzService.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(actor),
+		Credential: credentialContextForIdentity(actor),
+		Resource:   hubScopedResource("user", "hub"),
+		Action:     ActionRead,
+		Permission: "user.read",
+	}).Allowed
+
+	if len(req.projects) > 0 && !detail {
+		// Project memberships need user.read. Without it existing rows are
+		// shown as "exists", but their membership results (applied or
+		// already_member for an invited row, skipped for an active or
+		// suspended one) would still tell those states apart. So the
+		// whole request is refused before any write, in the shape of a
+		// preflight refusal, with its one audit record.
+		refusals := make([]InviteBatchProjectRefusal, len(req.projects))
+		for i, p := range req.projects {
+			refusals[i] = InviteBatchProjectRefusal{Index: i, ProjectID: p.ProjectID, Reason: inviteBatchReasonUserReadRequired}
+		}
+		s.refuseInviteBatch(ctx, w, actor, batchID, len(req.entries), refusals)
+		return
+	}
+
 	if len(req.projects) > 0 {
 		if s.membershipService == nil {
 			slog.ErrorContext(ctx, "bulk invite: membership service not configured", "batch_id", batchID)
@@ -182,29 +210,12 @@ func (s *Server) handleAdminUserInviteBulk(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		if len(refusals) > 0 {
-			s.logInviteBatchRefused(context.WithoutCancel(ctx), actor, batchID, len(req.entries), refusals)
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"one or more requested project memberships cannot be granted by the caller; nothing was created",
-				map[string]interface{}{
-					"reason":   inviteBatchReasonProjectsNotGrantable,
-					"batchId":  batchID,
-					"projects": refusals,
-				})
+			s.refuseInviteBatch(ctx, w, actor, batchID, len(req.entries), refusals)
 			return
 		}
 	}
 
 	addrs := s.validateInviteBatchAddresses(actor.ID(), req.entries)
-
-	// Detail authority (the provision rule): user.read at hub scope, once.
-	// It selects the view of existing rows; it never admits or denies.
-	detail := s.authzService.Decide(ctx, AuthzRequest{
-		Principal:  principalContextForIdentity(actor),
-		Credential: credentialContextForIdentity(actor),
-		Resource:   hubScopedResource("user", "hub"),
-		Action:     ActionRead,
-		Permission: "user.read",
-	}).Allowed
 
 	// The apply steps and their side effects are not cut short by a client
 	// disconnect, but are bounded by the run deadline.
