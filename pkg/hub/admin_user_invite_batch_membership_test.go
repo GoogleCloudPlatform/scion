@@ -177,11 +177,13 @@ func TestInviteBatch_MixedBatchRefusedCreatesNothing(t *testing.T) {
 			{ProjectID: f.otherProjectID, RoleDefinitionIDs: []string{f.memberRD.ID}},
 		},
 	})
-	_, refusals := batchRefusal(t, rec)
-	require.Equal(t, []InviteBatchProjectRefusal{{Index: 1, ProjectID: f.otherProjectID, Reason: inviteBatchReasonProjectNotManageable}}, refusals)
+	// Rows first, so a missing preflight is reported as the rows it let
+	// through.
 	f.noUser(t, "mixed-a@example.com")
 	f.noUser(t, "mixed-b@example.com")
 	assert.Empty(t, f.events(InviteAuditUserInvited), "no user_invited for a refused run")
+	_, refusals := batchRefusal(t, rec)
+	require.Equal(t, []InviteBatchProjectRefusal{{Index: 1, ProjectID: f.otherProjectID, Reason: inviteBatchReasonProjectNotManageable}}, refusals)
 }
 
 // TestInviteBatch_RoleNotGrantableRefusedWithDenialCode: a role the caller
