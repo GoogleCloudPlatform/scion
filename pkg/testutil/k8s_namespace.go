@@ -38,8 +38,12 @@ const KubernetesTestNamespace = "default"
 //
 // Tests that exercise a specific namespace still override it with
 // t.Setenv("SCION_K8S_NAMESPACE", ...); Go restores the pinned value once such
-// a test finishes. Setting it to "" would fall through to the host sources
-// again, so tests should not do that.
+// a test finishes. Unsetting it or setting it to "" falls through to the host
+// sources again. The helpers that scrub every SCION_* variable for a test
+// (clearSCIONEnv in pkg/runtimebroker, isolateTestEnv in pkg/agent, and
+// similar inline loops) do exactly that, so they lift the pin for the length
+// of their test. A test that scrubs SCION_* and also resolves the default
+// namespace must set SCION_K8S_NAMESPACE itself.
 //
 // Call it once from TestMain, before m.Run(). Any failure exits the process.
 func PinKubernetesNamespace() {
