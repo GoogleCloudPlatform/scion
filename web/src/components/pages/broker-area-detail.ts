@@ -35,6 +35,7 @@ import { can } from '../../shared/types.js';
 import type { Agent, BrokerSettingsResponse, PageData, RuntimeBroker } from '../../shared/types.js';
 import type { HealthSummaryBroker } from './health-broker-table.js';
 import { isFlatBroker } from '../../shared/runtime-target.js';
+import { hostIdentityWarning } from '../../shared/broker-host-identity.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { loadAdminStatus } from '../../client/admin-status.js';
 import { hasAnyPermission } from '../../lib/admin-permissions.js';
@@ -274,6 +275,26 @@ export class ScionPageBrokerAreaDetail extends LitElement {
     return html`<span class=${cssClass}>${label}</span>`;
   }
 
+  /**
+   * The host identity warning (mismatch or pinned_absent), shown above the
+   * tabs whatever tab is open; account names only for callers allowed to
+   * update (hostIdentityWarning).
+   */
+  private renderHostIdentityAlert(broker: RuntimeBroker) {
+    const warning = hostIdentityWarning(broker);
+    if (!warning) return nothing;
+    const where = can(broker._capabilities, 'update') ? ' Change it on the Configure tab.' : '';
+    return html`
+      <sl-alert variant="warning" open class="host-identity-alert">
+        <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+        <strong>${warning.message}</strong>
+        ${warning.configured ? html`<div>Configured: ${warning.configured}</div>` : nothing}
+        ${warning.observed ? html`<div>Host reports: ${warning.observed}</div>` : nothing}
+        <div>The configured value is used.${where}</div>
+      </sl-alert>
+    `;
+  }
+
   override render() {
     if (this.loading) {
       return html`<div class="loading-state">
@@ -326,6 +347,8 @@ export class ScionPageBrokerAreaDetail extends LitElement {
         ></scion-status-badge>
         ${subtitle ? html`<div slot="meta" class="header-subtitle">${subtitle}</div>` : nothing}
       </scion-detail-header>
+
+      ${this.renderHostIdentityAlert(broker)}
 
       <sl-tab-group @sl-tab-show=${this.onTabShow}>
         <sl-tab slot="nav" panel="overview" ?active=${tab === 'overview'}>Overview</sl-tab>

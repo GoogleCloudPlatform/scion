@@ -35,6 +35,11 @@ export const brokerAreaStyles = css`
     word-break: break-all;
   }
 
+  .host-identity-alert {
+    display: block;
+    margin-bottom: 1rem;
+  }
+
   .stats-row {
     display: flex;
     gap: 2rem;

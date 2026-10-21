@@ -1351,11 +1351,6 @@ export interface RuntimeBroker {
    * Read-only and display-only; absent otherwise.
    */
   hostedByThisServer?: boolean;
-  /**
-   * GCP host project (read in snake_case; PATCH takes camelCase). The
-   * host service account, gcp_host_service_account_email, is declared below.
-   */
-  gcp_host_project_id?: string;
   autoProvide: boolean;
   endpoint?: string;
   labels?: Record<string, string>;
@@ -1363,6 +1358,8 @@ export interface RuntimeBroker {
   createdByName?: string;
   /** Configured GCP host service account (Go JSON tag is snake_case). */
   gcp_host_service_account_email?: string;
+  /** Configured GCP host project (read in snake_case; PATCH takes camelCase). */
+  gcp_host_project_id?: string;
   /** Creation and last-update times, as the hub sends them. */
   created?: string;
   updated?: string;
