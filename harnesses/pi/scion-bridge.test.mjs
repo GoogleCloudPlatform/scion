@@ -19,9 +19,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import scionBridge, {
   createHandlers,
   trustPolicy,
@@ -130,6 +131,50 @@ test('empty final answer falls back to a default message', () => {
   h.agent_end({ messages: [] });
   h.agent_settled({ aborted: false });
   assert.equal(calls[calls.length - 1].argv[3], 'Task completed');
+});
+
+// --- sciontool dialect fixture ----------------------------------------------------
+//
+// pkg/sciontool/hooks/dialects/testdata/pi/bridge-payloads.jsonl holds the
+// exact stdin this bridge writes to `sciontool hook --dialect=pi` for the
+// scripted session below. The pi event objects are synthetic, shaped like pi
+// 1.3.0's extension event types (not captured from a live pi). The Go test
+// pkg/sciontool/hooks/handlers/pi_dialect_test.go parses the same file
+// through harnesses/pi/dialect.yaml, so a change to the bridge's payloads
+// fails here until the fixture is regenerated, and then fails there if the
+// dialect no longer maps it. Regenerate with:
+//   SCION_PI_UPDATE_FIXTURE=1 node --test scion-bridge.test.mjs
+
+const FIXTURE = join(
+  dirname(fileURLToPath(import.meta.url)),
+  '..', '..', 'pkg', 'sciontool', 'hooks', 'dialects', 'testdata', 'pi', 'bridge-payloads.jsonl',
+);
+
+const BRIDGE_SESSION = [
+  ['session_start', { type: 'session_start', reason: 'startup' }],
+  ['input', { type: 'input', text: 'list the files', source: 'interactive' }],
+  ['tool_execution_start', { type: 'tool_execution_start', toolCallId: 't1', toolName: 'bash', args: { command: 'ls -la', timeout: 30 } }],
+  ['tool_execution_end', { type: 'tool_execution_end', toolCallId: 't1', toolName: 'bash', result: {}, isError: false }],
+  ['tool_execution_start', { type: 'tool_execution_start', toolCallId: 't2', toolName: 'read', args: { path: 'missing.txt' } }],
+  ['tool_execution_end', { type: 'tool_execution_end', toolCallId: 't2', toolName: 'read', result: {}, isError: true }],
+  ['agent_end', { type: 'agent_end', messages: [asst('Here are the files.')] }],
+  ['input', { type: 'input', text: 'again', source: 'rpc' }],
+  ['agent_end', { type: 'agent_end', messages: [asst('', { stopReason: 'error', errorMessage: '429 rate limited: retry later' })] }],
+  ['session_start', { type: 'session_start', reason: 'resume' }],
+];
+
+test('bridge hook payloads match the sciontool dialect fixture', () => {
+  const lines = [];
+  const h = createHandlers({
+    run: (argv, stdin) => {
+      if (argv[0] === 'hook') lines.push(stdin);
+    },
+    env: {},
+  });
+  for (const [ev, payload] of BRIDGE_SESSION) h[ev](payload);
+  const got = lines.join('\n') + '\n';
+  if (process.env.SCION_PI_UPDATE_FIXTURE === '1') writeFileSync(FIXTURE, got);
+  assert.equal(readFileSync(FIXTURE, 'utf8'), got);
 });
 
 // --- timeouts ------------------------------------------------------------------
