@@ -129,6 +129,17 @@ archive names would differ again. That is unverified at runtime until P6;
 the parity check fails the job in that case, and the PoC's "Runner facts"
 step prints both the reported and the physical path.
 
+**P6 checkpoints for cache sharing** (runtime assumptions no step proves):
+
+- `GITHUB_WORKSPACE` is reported lexically (`/home/runner/work/...`). The
+  parity step fails the job if it is not.
+- When cr-ci *saves*, actions/cache (through `@actions/glob`) archives the
+  logical `$HOME/...` paths, not their `/scratch/...` realpaths. The source
+  says so, but nothing checks it at run time. Confirm it once: let a routed
+  `main` run on cr-ci save the lint cache under a fresh key, then restore
+  that key on ubuntu-latest and check that the entries land in
+  `/home/runner/.cache/go-build`.
+
 ## PoC success criteria
 
 From design section 7, phase 1. Read them from the PoC run's log, the
