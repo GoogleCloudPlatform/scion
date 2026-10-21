@@ -24,74 +24,152 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
 // Drain through the proxy, hub side (design §3.9 "Drain through the
-// proxy", v2.21.53; contracts "Addition (6.2 (a3))"). On SIGTERM a hub in
-// external relay mode first stops proxying conduit dials (503
-// conduit_not_serving, cause ingress_terminating, before any byte to a
-// relay), then asks every live relay to send GoAway to the sessions it
-// proxied. The fan-out is bounded and best effort: a failed call is logged
-// and counted and never blocks shutdown.
+// proxy", v2.21.57; contracts "Addition (6.2 (a3))"). In external relay
+// mode the hub's one graceful shutdown stops proxying conduit dials in its
+// mark phase (BeginShutdown: 503 conduit_not_serving, cause
+// ingress_terminating, before any byte to a relay). Its pre-cancel drain
+// step then asks every live relay to send GoAway to the sessions this hub
+// proxied, holds the hub's open proxied legs until they close, and at the
+// step deadline closes the legs left. HTTP server shutdown does not close
+// hijacked legs, so without the close they would end only at process
+// exit. Every wait is bounded by the step deadline; a failed call is
+// logged and counted and never extends the step.
 
 // conduitIngressCauseTerminating is the cause logged for conduit dials
 // refused while the hub shuts down.
 const conduitIngressCauseTerminating = "ingress_terminating"
 
-// conduitIngressDrainUnsetBound bounds the drain fan-out when
-// server.hub.conduit.shutdown_grace is unset.
-const conduitIngressDrainUnsetBound = 10 * time.Second
+// conduitIngressSendMargin is how much earlier than the step deadline the
+// drain deadline sent to the relays ends, so the sessions they drain have
+// closed their legs before the hub closes what is left.
+const conduitIngressSendMargin = time.Second
 
-// conduitIngressDrainBound is the time the drain fan-out may take: with a
-// set shutdown_grace, max(grace - 1s, grace/2), so a grace of 1s or less
-// still leaves time to send; unset, conduitIngressDrainUnsetBound.
-func conduitIngressDrainBound(grace time.Duration, graceSet bool) time.Duration {
-	if !graceSet {
-		return conduitIngressDrainUnsetBound
+// conduitIngressMinDrainDeadline is the shortest drain deadline sent
+// (design §3.3's 1ms floor).
+const conduitIngressMinDrainDeadline = time.Millisecond
+
+// conduitIngressDrainDeadline is the drain deadline sent to the relays at
+// now: max(1ms, min(§3.3's min(drain deadline, shutdown_grace - 2s)
+// measured from the signal, stepDeadline - now - 1s)). With shutdown_grace
+// unset the first term is the session drain deadline (30s), so the value
+// is in practice stepDeadline - now - 1s. It is always sent, never left to
+// the relay's default, so no relay promises a client more time than the
+// hub keeps the legs open.
+func conduitIngressDrainDeadline(now, signalAt, stepDeadline time.Time, grace time.Duration, graceSet bool) time.Duration {
+	fromSignal := conduit.DefaultDrainDeadline
+	if graceSet {
+		fromSignal = min(fromSignal, relay.ShutdownDrainCap(grace))
 	}
-	return max(grace-time.Second, grace/2)
+	d := min(signalAt.Add(fromSignal).Sub(now), stepDeadline.Sub(now)-conduitIngressSendMargin)
+	return max(d, conduitIngressMinDrainDeadline)
 }
 
-// conduitIngressDrainDeadline is the drain deadline the hub asks the
-// relays for: with a set shutdown_grace, max(shutdown_grace - 2s, 1ms), as
-// the in-process SIGTERM drain sends (a grace of 2s or less gives 1ms,
-// never the relay default); unset, 0 (field omitted: the relay's own).
-func conduitIngressDrainDeadline(grace time.Duration, graceSet bool) time.Duration {
-	if !graceSet {
-		return 0
-	}
-	return max(relay.ShutdownDrainCap(grace), time.Millisecond)
+// ConduitIngressDrainOptions are the inputs of the ingress drain step,
+// all on the shutdown's clock.
+type ConduitIngressDrainOptions struct {
+	// Clock is the shutdown's clock (nil: the real clock).
+	Clock clock.Clock
+	// SignalAt is when the shutdown began (the signal).
+	SignalAt time.Time
+	// StepDeadline is the step's absolute deadline: step start plus the
+	// shutdown's conduit drain-step bound. Every wait ends by it.
+	StepDeadline time.Time
+	// Grace is server.hub.conduit.shutdown_grace, and GraceSet whether it
+	// is set.
+	Grace    time.Duration
+	GraceSet bool
 }
 
-// DrainConduitIngressForShutdown is the SIGTERM step of external relay
-// mode: it stops proxying new conduit dials, then fans out drain to every
-// live relay (draining ones included) and returns when every call has
-// answered or failed, within conduitIngressDrainBound. With the ingress
-// proxy off (IngressOffCause) no session was proxied, so there is no
-// fan-out. It runs once; later calls, and calls outside external mode,
-// return at once.
-func (s *Server) DrainConduitIngressForShutdown(grace time.Duration, graceSet bool) {
+// ConduitIngressProxyActive reports whether this hub proxies conduit dials
+// to relays: external relay mode with proxy ingress serving. Only then
+// does the shutdown need the ingress drain step; with the proxy off no leg
+// or relay session came through this hub.
+func (s *Server) ConduitIngressProxyActive() bool {
+	rt := s.conduitExternal.Load()
+	return rt != nil && rt.ingress == config.ConduitIngressProxy && rt.ingressOffCause == ""
+}
+
+// beginConduitIngressShutdown stops proxying conduit dials, once (the
+// shutdown's mark phase, from BeginShutdown). It does nothing outside
+// external relay mode.
+func (s *Server) beginConduitIngressShutdown() {
 	rt := s.conduitExternal.Load()
 	if rt == nil || !rt.terminating.CompareAndSwap(false, true) {
 		return
 	}
-	if rt.ingressOffCause != "" {
-		// The ingress proxy was never on, so this hub proxied no session:
-		// there is nothing to drain.
-		slog.Info("Conduit ingress: shutting down; the ingress proxy was off, so no relay is asked to drain",
-			"cause", rt.ingressOffCause)
+	slog.Info("Conduit ingress: shutting down; new conduit dials are not proxied", "cause", conduitIngressCauseTerminating, "ingress_instance", rt.instanceID)
+}
+
+// DrainConduitIngressForShutdown is the ingress drain step of the
+// shutdown: it fans out drain to every live relay (draining ones included)
+// with the drain deadline of conduitIngressDrainDeadline, then holds until
+// the hub's last open proxied leg closes, and at o.StepDeadline closes the
+// legs left and returns. The live-relay read, the fan-out and the hold all
+// end by o.StepDeadline. Proxying has normally stopped in the mark phase;
+// if not, it stops here first. It runs once; later calls, calls outside
+// external mode and calls with the proxy off return at once.
+func (s *Server) DrainConduitIngressForShutdown(o ConduitIngressDrainOptions) {
+	rt := s.conduitExternal.Load()
+	if rt == nil || !rt.drainStarted.CompareAndSwap(false, true) {
 		return
 	}
-	bound := conduitIngressDrainBound(grace, graceSet)
-	deadline := conduitIngressDrainDeadline(grace, graceSet)
-	slog.Warn("Conduit ingress: shutting down; new conduit dials are refused, draining the sessions this hub proxied",
-		"cause", conduitIngressCauseTerminating, "ingress_instance", rt.instanceID, "bound", bound, "drain_deadline", deadline)
-	ctx, cancel := context.WithTimeout(context.Background(), bound)
+	s.beginConduitIngressShutdown()
+	if !s.ConduitIngressProxyActive() {
+		// The ingress proxy was never on, so this hub proxied no session:
+		// there is nothing to drain.
+		slog.Info("Conduit ingress: the ingress proxy was off, so no relay is asked to drain", "cause", rt.ingressOffCause)
+		return
+	}
+	clk := o.Clock
+	if clk == nil {
+		clk = clock.Real()
+	}
+	ctx, cancel := conduitIngressStepContext(clk, o.StepDeadline)
 	defer cancel()
+	deadline := conduitIngressDrainDeadline(clk.Now(), o.SignalAt, o.StepDeadline, o.Grace, o.GraceSet)
+	slog.Warn("Conduit ingress: draining the sessions this hub proxied",
+		"cause", conduitIngressCauseTerminating, "ingress_instance", rt.instanceID, "step_deadline", o.StepDeadline, "drain_deadline", deadline)
+	s.fanOutConduitIngressDrain(ctx, rt, deadline)
+
+	select {
+	case <-rt.legs.idle():
+		slog.Info("Conduit ingress: every proxied leg closed")
+	case <-ctx.Done():
+		if n := rt.legs.closeAll(); n > 0 {
+			slog.Warn("Conduit ingress: closed the proxied legs left at the drain step deadline", "legs", n)
+		}
+	}
+}
+
+// conduitIngressStepContext returns a context cancelled at deadline on clk.
+func conduitIngressStepContext(clk clock.Clock, deadline time.Time) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+	d := deadline.Sub(clk.Now())
+	if d <= 0 {
+		cancel()
+		return ctx, cancel
+	}
+	t := clk.AfterFunc(d, cancel)
+	return ctx, func() {
+		t.Stop()
+		cancel()
+	}
+}
+
+// fanOutConduitIngressDrain calls drain on every live relay as this hub's
+// instance and returns when every call has answered or failed, or when ctx
+// ends, whichever is first.
+func (s *Server) fanOutConduitIngressDrain(ctx context.Context, rt *conduitExternalRuntime, deadline time.Duration) {
 	relays, err := rt.registry.LiveRelays(ctx, rt.now())
 	if err != nil {
-		slog.Warn("Conduit ingress: listing live relays for the drain failed; sessions end when this hub exits", "error", err)
+		slog.Warn("Conduit ingress: listing live relays for the drain failed; the proxied legs are still held and closed at the step deadline", "error", err)
 		return
 	}
 	var wg sync.WaitGroup
@@ -113,7 +191,87 @@ func (s *Server) DrainConduitIngressForShutdown(grace time.Duration, graceSet bo
 			slog.Info("Conduit ingress: relay drained this hub's sessions", "relay_instance_id", ri.InstanceID, "goaway_sent", n)
 		}()
 	}
-	wg.Wait()
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
+}
+
+// conduitIngressLegs counts the hub's open proxied legs (a conduit dial
+// being proxied, upgraded session included) and can close them. The zero
+// value is ready to use.
+type conduitIngressLegs struct {
+	mu   sync.Mutex
+	next uint64
+	open map[uint64]context.CancelFunc
+	// idleCh is closed when the last open leg ends; nil while nobody waits.
+	idleCh chan struct{}
+}
+
+// add counts a leg; closeLeg closes it. It returns the id done takes.
+func (l *conduitIngressLegs) add(closeLeg context.CancelFunc) uint64 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.open == nil {
+		l.open = map[uint64]context.CancelFunc{}
+	}
+	l.next++
+	l.open[l.next] = closeLeg
+	return l.next
+}
+
+// done ends the count of leg id.
+func (l *conduitIngressLegs) done(id uint64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.open, id)
+	if len(l.open) == 0 && l.idleCh != nil {
+		close(l.idleCh)
+		l.idleCh = nil
+	}
+}
+
+// count returns the number of open legs.
+func (l *conduitIngressLegs) count() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.open)
+}
+
+// idle returns a channel closed once no leg is open (already closed when
+// none is).
+func (l *conduitIngressLegs) idle() <-chan struct{} {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.open) == 0 {
+		ch := make(chan struct{})
+		close(ch)
+		return ch
+	}
+	if l.idleCh == nil {
+		l.idleCh = make(chan struct{})
+	}
+	return l.idleCh
+}
+
+// closeAll closes every open leg and returns how many there were. Each
+// leg's dial returns and ends its own count.
+func (l *conduitIngressLegs) closeAll() int {
+	l.mu.Lock()
+	closers := make([]context.CancelFunc, 0, len(l.open))
+	for _, c := range l.open {
+		closers = append(closers, c)
+	}
+	l.mu.Unlock()
+	for _, c := range closers {
+		c()
+	}
+	return len(closers)
 }
 
 // OTelConduitIngressDrainMetrics counts failed drain calls of a

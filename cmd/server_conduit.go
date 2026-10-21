@@ -223,11 +223,17 @@ var (
 	conduitSetShutdownGrace = func(hubSrv *hub.Server, grace time.Duration) {
 		hubSrv.SetConduitShutdownGrace(grace)
 	}
-	// conduitIngressShutdownDrain is the trap's drain in external relay
-	// mode: stop proxying, then ask the relays to drain this hub's
-	// proxied sessions, bounded by the configured grace.
-	conduitIngressShutdownDrain = func(hubSrv *hub.Server, grace time.Duration, graceSet bool) {
-		hubSrv.DrainConduitIngressForShutdown(grace, graceSet)
+	// conduitIngressShutdownDrain is the ingress drain step's drain in
+	// external relay mode: ask the relays to drain this hub's proxied
+	// sessions, hold the proxied legs and close the ones left at the step
+	// deadline.
+	conduitIngressShutdownDrain = func(hubSrv *hub.Server, opts hub.ConduitIngressDrainOptions) {
+		hubSrv.DrainConduitIngressForShutdown(opts)
+	}
+	// conduitIngressProxyActive reports whether the hub proxies conduit
+	// dials to relays (external mode with proxy ingress serving).
+	conduitIngressProxyActive = func(hubSrv *hub.Server) bool {
+		return hubSrv.ConduitIngressProxyActive()
 	}
 	// serveConduitInternalListenerFn opens the internal listener that
 	// serves the internal relay API (serveConduitInternalListener).
@@ -289,6 +295,22 @@ func conduitDrainStepBound(b serverShutdownBudget) time.Duration {
 // the drain never runs from here, when the shutdown has already begun.
 func registerConduitShutdownDrain(q *serverShutdownSequence, bound time.Duration, drain func()) bool {
 	return q.addStep(shutdownPhaseDrain, boundedShutdownStep(q.clk, bound, "conduit drain", drain))
+}
+
+// registerConduitIngressShutdownDrain makes the ingress drain a pre-cancel
+// step of the process's single graceful shutdown, in the same phase and
+// with the same bound as the relay drain (registerConduitShutdownDrain);
+// a process registers one of the two. drain gets when the shutdown began
+// and the step's absolute deadline (step start plus bound on q's clock),
+// by which it must end every wait. The step waits for drain at most bound.
+// It returns false, and the drain never runs from here, when the shutdown
+// has already begun.
+func registerConduitIngressShutdownDrain(q *serverShutdownSequence, bound time.Duration, drain func(signalAt, stepDeadline time.Time)) bool {
+	return q.addStep(shutdownPhaseDrain, func() {
+		start := q.clk.Now()
+		signalAt, _ := q.startedAt()
+		boundedShutdownStep(q.clk, bound, "conduit ingress drain", func() { drain(signalAt, start.Add(bound)) })()
+	})
 }
 
 // boundedShutdownStep returns step bounded to bound on clk: it runs step
@@ -407,12 +429,29 @@ func startConduit(ctx context.Context, q *serverShutdownSequence, cfg *config.Gl
 		return nil
 	}
 	if cfg.Hub.Conduit.ExternalRelay() {
-		// External relay mode: no relay here, so nothing to drain on
-		// shutdown (no step on q, no grace recorded). Its configuration
-		// was chosen explicitly, so every failure is fatal, in and
-		// outside hosted HA.
+		// External relay mode: no relay here, so no relay drain and no
+		// grace recorded. Its configuration was chosen explicitly, so
+		// every failure is fatal, in and outside hosted HA. With the
+		// ingress proxy serving, the shutdown's mark phase stops proxying
+		// (hub BeginShutdown) and the ingress drain step asks the relays
+		// to drain the sessions this hub proxied, holds the proxied legs
+		// and closes the ones left at its deadline (design §3.9 "Drain
+		// through the proxy"). With the proxy off there is no step.
 		if err := startConduitExternalFn(ctx, cfg, hubSrv, wg, errCh); err != nil {
 			return fmt.Errorf("conduit external relay mode: %w", err)
+		}
+		if conduitIngressProxyActive(hubSrv) {
+			grace, graceSet := conduitShutdownDrainSetting(cfg)
+			bound := conduitDrainStepBound(serverShutdownBudgetFor(cfg))
+			registerConduitIngressShutdownDrain(q, bound, func(signalAt, stepDeadline time.Time) {
+				conduitIngressShutdownDrain(hubSrv, hub.ConduitIngressDrainOptions{
+					Clock:        q.clk,
+					SignalAt:     signalAt,
+					StepDeadline: stepDeadline,
+					Grace:        grace,
+					GraceSet:     graceSet,
+				})
+			})
 		}
 		return nil
 	}
