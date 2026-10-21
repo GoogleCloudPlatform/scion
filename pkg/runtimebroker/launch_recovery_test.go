@@ -846,6 +846,34 @@ func TestRecoverLaunch_PostCompletedTerminal_UsesPostCompletedClassifier(t *test
 		}
 	})
 
+	t.Run("start failed only, no answer: no clean-up, kept for the resend", func(t *testing.T) {
+		// No completed answer reached the live broker, so recovery keeps
+		// #3763's rule: nothing is removed until the hub answers.
+		mgr := newRecFakeManager()
+		srv, rtb := newAsyncTestServer(t, mgr)
+		rtb.launchReportFunc = unanswered
+		useUnansweredRecoveryTimings(srv)
+		jr, agentDir := startFailedTerminalRecord(t, "RPS", "")
+		path := writeFlaggedDeadRecord(t, srv, jr, "startFailed")
+
+		runRecovery(t, srv)
+
+		if n := mgr.CleanupCallCount(); n != 0 {
+			t.Fatalf("an unanswered StartFailed-only report must remove nothing, got %d handle clean-ups", n)
+		}
+		if !filesExist(agentDir) {
+			t.Fatal("an unanswered report must keep the files")
+		}
+		raw := rawFile(t, path)
+		rec := rawRecord(t, raw)
+		if rec["state"] != "terminal_pending" || rec["reportAttempts"] != float64(1) {
+			t.Fatalf("the record was not kept as terminal_pending with 1 attempt: %s", raw)
+		}
+		if _, ok := rec["cleanupScope"]; ok {
+			t.Fatalf("a terminal_pending record must carry no clean-up scope: %s", raw)
+		}
+	})
+
 	t.Run("no answer and the clean-up fails", func(t *testing.T) {
 		mgr := &failingCleanupManager{recFakeManager: newRecFakeManager(), cleanupErr: errors.New("delete pod: refused")}
 		srv, rtb := newAsyncTestServer(t, mgr)
