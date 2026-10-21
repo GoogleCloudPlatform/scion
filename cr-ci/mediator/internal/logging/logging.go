@@ -21,6 +21,8 @@ const (
 	EventWebhookIgnored  = "webhook_ignored"
 	EventWebhookRejected = "webhook_rejected"
 	EventRejectFork      = "SECURITY_REJECT_FORK_PR"
+	EventKillHijacked    = "SECURITY_KILL_HIJACKED_RUNNER"
+	EventRunnerSwap      = "runner_swap"
 	EventDispatch        = "dispatch"
 	EventDispatchSkip    = "dispatch_skip"
 	EventCapacityFull    = "capacity_full"

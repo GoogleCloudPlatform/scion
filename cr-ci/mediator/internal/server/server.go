@@ -89,6 +89,7 @@ type Options struct {
 
 type launchRecord struct {
 	repo     githubapp.Repo
+	runID    int64
 	ref      string
 	runnerID int64
 	at       time.Time
@@ -162,6 +163,7 @@ type webhookPayload struct {
 		RunID      int64    `json:"run_id"`
 		Labels     []string `json:"labels"`
 		Conclusion string   `json:"conclusion"`
+		RunnerName string   `json:"runner_name"`
 	} `json:"workflow_job"`
 	Repository struct {
 		FullName string `json:"full_name"`
@@ -203,6 +205,10 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	if !hasLabel(p.WorkflowJob.Labels, s.o.RunnerLabel) {
 		s.log().Debug("webhook ignored", append(attrs, "event", logging.EventWebhookIgnored, "reason", "label")...)
 		plain(w, http.StatusOK, "ignored")
+		return
+	}
+	if p.Action == "in_progress" {
+		s.onInProgress(w, r.Context(), p, attrs)
 		return
 	}
 	repo, ok := s.targetRepo(p.Repository.FullName)
@@ -253,20 +259,51 @@ func (s *Server) onCompleted(w http.ResponseWriter, ctx context.Context, repo gi
 	jobID := p.WorkflowJob.ID
 	s.dispatchMu.Lock()
 	defer s.dispatchMu.Unlock()
-	rec, known := s.launched[jobID]
-	delete(s.launched, jobID)
 	s.o.Claims.DropJob(jobID)
 	if p.WorkflowJob.Conclusion != "cancelled" {
+		delete(s.launched, jobID)
 		plain(w, http.StatusOK, "ok")
 		return
 	}
+	// The runner that ran the job is named in runner_name. Runners can swap
+	// jobs (GitHub assigns any label-matching idle runner), so it may have
+	// been minted for another job. Without a runner_name the job never
+	// started: stop the runner minted for it.
+	target := jobID
+	if minted, ok := parseRunnerName(p.WorkflowJob.RunnerName); ok {
+		target = minted
+	}
+	if target != jobID {
+		attrs = append(attrs, "minted_job_id", target)
+	}
+	rec, err := s.stopRunner(ctx, repo, target)
+	delete(s.launched, jobID)
+	if err != nil {
+		s.log().Error("cancelling runner failed", append(attrs, "event", logging.EventError, "error", err.Error())...)
+		plain(w, http.StatusServiceUnavailable, "cancel failed")
+		return
+	}
+	s.log().Info("job cancelled; execution cancelled and registration removed", append(attrs, "event", logging.EventCancel, "execution", rec.ref)...)
+	plain(w, http.StatusOK, "cancelled")
+}
+
+// stopRunner cancels the execution of runner cr-job-<minted>, deletes its
+// registration and forgets its launch record and claim. The caller holds
+// dispatchMu.
+func (s *Server) stopRunner(ctx context.Context, repo githubapp.Repo, minted int64) (launchRecord, error) {
+	rec, known := s.launched[minted]
+	delete(s.launched, minted)
+	s.o.Claims.DropJob(minted)
+	if known {
+		repo = rec.repo
+	}
 	var errs []error
-	if err := s.o.Launcher.Terminate(ctx, jobID, rec.ref); err != nil {
+	if err := s.o.Launcher.Terminate(ctx, minted, rec.ref); err != nil {
 		errs = append(errs, err)
 	}
 	runnerID := rec.runnerID
-	if !known || runnerID == 0 {
-		if rn, err := s.findRunner(ctx, repo, RunnerName(jobID)); err != nil {
+	if runnerID == 0 {
+		if rn, err := s.findRunner(ctx, repo, RunnerName(minted)); err != nil {
 			errs = append(errs, err)
 		} else if rn != nil {
 			runnerID = rn.ID
@@ -277,13 +314,104 @@ func (s *Server) onCompleted(w http.ResponseWriter, ctx context.Context, repo gi
 			errs = append(errs, err)
 		}
 	}
-	if err := errors.Join(errs...); err != nil {
-		s.log().Error("cancelling runner failed", append(attrs, "event", logging.EventError, "error", err.Error())...)
-		plain(w, http.StatusServiceUnavailable, "cancel failed")
+	return rec, errors.Join(errs...)
+}
+
+// onInProgress guards against runner hijacking. GitHub assigns a queued job
+// to any idle runner whose labels match, so a job the mediator refused (a
+// fork PR that targets RUNNER_LABEL) can still be picked up by a runner
+// minted for another job. When a cr-job-* runner starts a job other than the
+// one it was minted for, the job is checked again: if it fails the fork guard
+// (or its repo is not served), the runner's execution is cancelled and its
+// registration deleted. A swap between two legitimate jobs is harmless; the
+// mediator then makes sure the job that took the runner has a runner named
+// for it, so the job the runner was minted for is still served.
+func (s *Server) onInProgress(w http.ResponseWriter, ctx context.Context, p webhookPayload, attrs []any) {
+	minted, ok := parseRunnerName(p.WorkflowJob.RunnerName)
+	jobID := p.WorkflowJob.ID
+	if !ok || minted == jobID {
+		// Not our runner, or the runner runs the job it was minted for (that
+		// job passed the fork guard at dispatch).
+		plain(w, http.StatusOK, "ok")
 		return
 	}
-	s.log().Info("job cancelled; execution cancelled and registration removed", append(attrs, "event", logging.EventCancel, "execution", rec.ref)...)
-	plain(w, http.StatusOK, "cancelled")
+	attrs = append(attrs, "runner", p.WorkflowJob.RunnerName, "minted_job_id", minted)
+
+	repo, targeted := s.targetRepo(p.Repository.FullName)
+	reason := ""
+	var run *githubapp.Run
+	if !targeted {
+		reason = "repo_not_allowed"
+		repo = s.runnerRepo(p.Repository.FullName)
+	} else {
+		var err error
+		run, err = s.o.GitHub.GetRun(ctx, repo, p.WorkflowJob.RunID)
+		if err != nil {
+			// Fail closed: a runner we cannot vouch for is stopped.
+			s.log().Error("fetching workflow run failed", append(attrs, "event", logging.EventError, "error", err.Error())...)
+			reason = "run_lookup_failed"
+		} else {
+			reason = forkReason(run, repo)
+		}
+	}
+
+	s.dispatchMu.Lock()
+	defer s.dispatchMu.Unlock()
+	if reason == "" {
+		s.log().Info("runner picked up another legitimate job", append(attrs, "event", logging.EventRunnerSwap)...)
+		// The job that took the runner gets a runner named for it (a no-op
+		// if it has one); whichever runner is idle serves the minted job.
+		if _, err := s.dispatchLocked(ctx, repo, jobID, p.WorkflowJob.RunID, "swap"); err != nil {
+			plain(w, http.StatusServiceUnavailable, "dispatch failed")
+			return
+		}
+		plain(w, http.StatusOK, "swap")
+		return
+	}
+
+	kill := append(attrs, "event", logging.EventKillHijacked, "reason", reason)
+	if run != nil {
+		kill = append(kill, "run_event", run.Event, "head_repository", headRepo(run))
+	}
+	var stopped launchRecord
+	var err error
+	if repo != (githubapp.Repo{}) {
+		stopped, err = s.stopRunner(ctx, repo, minted)
+	} else {
+		// No served repo to address the runner through; cancel the
+		// execution at least.
+		stopped = s.launched[minted]
+		delete(s.launched, minted)
+		s.o.Claims.DropJob(minted)
+		err = s.o.Launcher.Terminate(ctx, minted, stopped.ref)
+	}
+	if err != nil {
+		s.log().Error("runner hijacked by an untrusted job; stopping it failed", append(kill, "error", err.Error())...)
+		plain(w, http.StatusServiceUnavailable, "kill failed")
+		return
+	}
+	s.log().Error("runner hijacked by an untrusted job; execution cancelled and registration removed", append(kill, "execution", stopped.ref)...)
+	// Serve the job the runner was minted for right away if we know its run;
+	// otherwise /reconcile backfills it.
+	if stopped.runID != 0 {
+		_, _ = s.dispatchLocked(ctx, stopped.repo, minted, stopped.runID, "hijack_recovery")
+	}
+	plain(w, http.StatusOK, "killed")
+}
+
+// runnerRepo returns a served repo through which runners of fullName's owner
+// can be addressed (org scope only), or the zero Repo.
+func (s *Server) runnerRepo(fullName string) githubapp.Repo {
+	if !s.o.OrgScope {
+		return githubapp.Repo{}
+	}
+	owner, _, _ := strings.Cut(fullName, "/")
+	for _, r := range s.o.TargetRepos {
+		if strings.EqualFold(r.Owner, owner) {
+			return r
+		}
+	}
+	return githubapp.Repo{}
 }
 
 // verifySignature checks X-Hub-Signature-256 in constant time. On a mismatch
@@ -388,10 +516,9 @@ func (s *Server) dispatchLocked(ctx context.Context, repo githubapp.Repo, jobID,
 		return "", err
 	}
 
-	if _, ok := s.launched[jobID]; ok {
-		s.log().Info("runner already launched", append(attrs, "event", logging.EventDispatchSkip, "reason", "launched")...)
-		return outSkipped, nil
-	}
+	// Idempotency rests on GitHub and Cloud Run state, not on s.launched: a
+	// runner minted for this job may have run another job (swap), and then
+	// this job needs a new runner once that registration is gone.
 	rn, err := s.findRunner(ctx, repo, name)
 	if err != nil {
 		return fail("list_runners", err)
@@ -406,7 +533,7 @@ func (s *Server) dispatchLocked(ctx context.Context, repo githubapp.Repo, jobID,
 	}
 	for _, e := range active {
 		if e.JobID == jobID {
-			s.launched[jobID] = launchRecord{repo: repo, ref: e.Ref, at: s.o.Now()}
+			s.launched[jobID] = launchRecord{repo: repo, runID: runID, ref: e.Ref, at: s.o.Now()}
 			s.log().Info("execution already running", append(attrs, "event", logging.EventDispatchSkip, "reason", "execution", "execution", e.Ref)...)
 			return outSkipped, nil
 		}
@@ -442,7 +569,7 @@ func (s *Server) dispatchLocked(ctx context.Context, repo githubapp.Repo, jobID,
 		s.log().Error("launching runner execution failed; registration removed", append(attrs, "event", logging.EventLaunchFailed, "error", err.Error())...)
 		return "", err
 	}
-	s.launched[jobID] = launchRecord{repo: repo, ref: ref, runnerID: runnerID, at: s.o.Now()}
+	s.launched[jobID] = launchRecord{repo: repo, runID: runID, ref: ref, runnerID: runnerID, at: s.o.Now()}
 	s.log().Info("runner launched", append(attrs, "event", logging.EventDispatch, "execution", ref, "runner_id", runnerID, "active", len(active)+1)...)
 	return outLaunched, nil
 }

@@ -65,6 +65,8 @@ logged (a unit test enforces this).
 | `cancel` | INFO | Cancelled job: execution cancelled, registration deleted |
 | `claim_consumed` / `claim_rejected` | INFO / WARNING | Runner fetched its JIT config / presented an unknown, used or expired token |
 | `SECURITY_REJECT_FORK_PR` | WARNING | Fork-PR or `pull_request_target` run refused a runner. **Alert on this.** |
+| `SECURITY_KILL_HIJACKED_RUNNER` | ERROR | An untrusted job started on a cr-ci runner minted for another job; the execution was cancelled and the registration deleted ([architecture](architecture.md#residual-risk-label-matched-job-assignment)). **Alert on this and review the run.** |
+| `runner_swap` | INFO | A runner started a different legitimate job; harmless |
 | `webhook_rejected` | WARNING | Bad signature, malformed payload or repo outside `TARGET_REPOS` |
 | `webhook_ignored` | INFO / DEBUG | Not `workflow_job`, or job without `RUNNER_LABEL` |
 | `reconcile` | INFO | Reconcile summary (reaped, backfilled, left queued, errors) |
@@ -72,7 +74,8 @@ logged (a unit test enforces this).
 | `runner_reaped` / `execution_reaped` | WARNING | Stale registration deleted / execution past the task timeout cancelled |
 | `error` | ERROR | A GitHub, Cloud Run or Secret Manager call failed (`stage`, `error`) |
 
-- Suggested alerts: any `SECURITY_REJECT_FORK_PR`; repeated `launch_failed`
+- Suggested alerts: any `SECURITY_REJECT_FORK_PR` or
+  `SECURITY_KILL_HIJACKED_RUNNER`; repeated `launch_failed`
   or `error`; `capacity_full` persisting across several reconciles (raise
   capacity or check for stuck executions); missing `reconcile` lines for
   more than two intervals (scheduler broken).

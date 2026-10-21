@@ -46,9 +46,10 @@ idempotency checks cannot race.
      the run's event is `pull_request_target`, its `head_repository` differs
      from its `repository` (or is missing), or its repository is not the
      webhook's repository.
-   - **Idempotency:** no action (200) if this process already launched job
-     `<job_id>`, a runner named `cr-job-<job_id>` is registered, or an active
-     execution carries `GH_JOB_ID=<job_id>`.
+   - **Idempotency:** no action (200) if a runner named `cr-job-<job_id>` is
+     registered or an active execution carries `GH_JOB_ID=<job_id>`. This
+     rests on GitHub and Cloud Run state, not on mediator memory, so it
+     survives restarts and runner swaps (below).
    - **Capacity check:** active executions are the job's executions without a
      completion time. At `MAX_CONCURRENT_RUNNERS` or more, the job is left
      queued (`capacity_full`, 200). **No JIT config is minted** before
@@ -68,12 +69,28 @@ idempotency checks cannot race.
    JIT config (contract below) and `exec`s `run.sh --jitconfig` as PID 1.
    GitHub assigns exactly one job; the process exits; the execution ends and
    billing stops.
-4. **Completed.** Any `completed` event drops the job's claim and launch
-   record. With `conclusion: cancelled`, the mediator also cancels the
-   execution (found by `GH_JOB_ID` if this process did not launch it) and
-   deletes any leftover `cr-job-<job_id>` registration (`cancel`). Other
+4. **In progress (hijack guard).** GitHub assigns a queued job to *any* idle
+   runner whose labels match, so the runner `cr-job-<X>` minted for job X may
+   start job Y. The `in_progress` event names the runner (`runner_name`).
+   When Y differs from X, the mediator runs the fork guard on Y's run (and
+   treats a repo outside `TARGET_REPOS`, or a failed run lookup, as a
+   failure: fail closed):
+   - **Guard fails (hijack):** cancel runner X's execution, delete its
+     registration, forget its claim and launch record, and log
+     `SECURITY_KILL_HIJACKED_RUNNER`. Job X, still queued, is re-dispatched at
+     once with a fresh runner (or by `/reconcile` if its run is unknown after
+     a restart).
+   - **Guard passes (swap):** harmless; log `runner_swap`, and dispatch for Y
+     so that Y has a runner named for it (a no-op if it already has one).
+     That runner, idle, serves job X. Runners and queued jobs stay one to one.
+5. **Completed.** Any `completed` event drops the job's claim. With
+   `conclusion: cancelled`, the mediator stops the runner named in
+   `runner_name` (the one that actually ran the job, which after a swap was
+   minted for another job), or the runner minted for the job if it never
+   started: it cancels the execution (found by `GH_JOB_ID` if this process
+   did not launch it) and deletes the registration (`cancel`). Other
    conclusions need no action: Jobs executions stop when the runner exits.
-5. **Reconcile (`POST /reconcile`).** Cloud Scheduler calls it with a Google
+6. **Reconcile (`POST /reconcile`).** Cloud Scheduler calls it with a Google
    ID token. The mediator verifies the token itself (RS256 against Google's
    JWKS, issuer `accounts.google.com`, audience `MEDIATOR_URL`, not expired,
    `email` = `SCHEDULER_SA_NAME@GCP_PROJECT.iam.gserviceaccount.com`,
@@ -115,14 +132,37 @@ idempotency checks cannot race.
   `/reconcile` deletes the orphaned `cr-job-*` registration and relaunches
   the still-queued job.
 
-### Known gap: label-matched job assignment
+### Residual risk: label-matched job assignment
 
-GitHub assigns a queued job to *any* idle runner whose labels match, not to
-the runner minted for it. A fork-PR job that targets `RUNNER_LABEL` is
-refused a runner of its own, but it stays queued and could be picked up by a
-cr-ci runner minted for another job. The mediator cannot prevent this; the
-defence is layer 1 below (approval required for fork PR workflows) together
-with the `runs-on` fork guard. Keep the approval setting on.
+A fork-PR job that targets `RUNNER_LABEL` is refused a runner of its own, but
+it stays queued, and GitHub may hand it to an idle cr-ci runner minted for
+another job. The hijack guard (step 4) kills that runner as soon as GitHub
+reports the job `in_progress`, with no extra App permissions. The kill lands
+within seconds, but **after** the job may have started, so a few steps of
+untrusted code can run. That window is bounded by the other layers:
+
+- the job only exists if a maintainer approved the fork PR's workflows
+  (layer 1 below), and the `runs-on` expression already routes cross-repo PRs
+  to `ubuntu-latest` (layer 2), so the PR must also have edited the workflow;
+- the runner's identity `EXEC_SA_NAME` holds no IAM roles, so its
+  metadata-server token is worthless;
+- GitHub gives fork-PR workflows a read-only `GITHUB_TOKEN` and no secrets;
+- the execution is ephemeral: nothing it writes survives the kill.
+
+Alternatives considered (with cr-runners-arch): giving the App
+*Actions: write* to cancel rejected fork runs widens the token for every
+repository and still races; org runner groups restricted to selected
+workflows do not exist at repo scope and block `pull_request` runs when
+pinned to a ref.
+
+**Future hardening: per-run composite label.** Workflows would target
+`<RUNNER_LABEL>-run-<run_id>` (for example
+`format('{0}-run-{1}', vars.SCION_LARGE_RUNNER, github.run_id)` in the
+`runs-on` expression), and the mediator would require that label on the job
+and mint each runner with only that label. A job of another run, including a
+fork run, could then never match a cr-ci runner, closing the window
+entirely. It costs a dynamic label in workflows, logs and reconcile matching,
+so it is deferred.
 
 ## Security model
 
@@ -139,7 +179,9 @@ with the `runs-on` fork guard. Keep the approval setting on.
   1. The repo or org setting requires approval for all external contributors.
   2. The `runs-on` expression routes cross-repo PRs to `ubuntu-latest`.
   3. The mediator independently refuses fork-PR and `pull_request_target` runs,
-     even if a PR edits the workflow to target the label.
+     even if a PR edits the workflow to target the label, and kills any cr-ci
+     runner such a job manages to start on (the hijack guard; see the
+     [residual risk](#residual-risk-label-matched-job-assignment)).
 
   GitHub warns that self-hosted runners on public repos are risky. The layered
   guard plus ephemeral, unprivileged runners is how cr-ci answers that warning.
