@@ -1,6 +1,8 @@
 # cr-ci bootstrap-gcp.sh (dry-run) project=example-project region=us-central1
 # dry-run: nothing is changed; '?' lines are read-only checks, assumed to find nothing
-# C1: APIs
+# C1: APIs (only the missing ones are enabled, so serviceusage.services.enable is needed only then)
+? gcloud services list --enabled --project=example-project '--format=value(config.name)'
+# dry-run lists every API; --apply enables only those the check above does not report
 + gcloud services enable run.googleapis.com artifactregistry.googleapis.com secretmanager.googleapis.com cloudscheduler.googleapis.com cloudbuild.googleapis.com iam.googleapis.com storage.googleapis.com --project=example-project
 # C2: service accounts (EXEC_SA_NAME must stay at zero roles)
 ? gcloud iam service-accounts describe cr-runner-build-sa@example-project.iam.gserviceaccount.com --project=example-project '--format=value(email)'

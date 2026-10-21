@@ -380,6 +380,8 @@ var allExisting = []string{
 func TestIdempotentSecondRun(t *testing.T) {
 	e := newEnv(t, baseConfig())
 	e.state("exists", allExisting...)
+	e.extra = []string{"STUB_ENABLED_APIS=run.googleapis.com artifactregistry.googleapis.com secretmanager.googleapis.com " +
+		"cloudscheduler.googleapis.com cloudbuild.googleapis.com iam.googleapis.com storage.googleapis.com"}
 	for _, s := range []struct {
 		script string
 		args   []string
@@ -394,7 +396,7 @@ func TestIdempotentSecondRun(t *testing.T) {
 		r := e.run(s.script, "", append([]string{"--config", "config.env", "--apply"}, s.args...)...)
 		wantCode(t, r, 0)
 		all := strings.Join(callStrings(r.calls), "\n")
-		for _, bad := range []string{" create ", "builds submit", "docker build"} {
+		for _, bad := range []string{" create ", "builds submit", "docker build", "services enable"} {
 			if strings.Contains(all, bad) {
 				t.Errorf("%s re-created something (%q) on a second run:\n%s", s.script, bad, all)
 			}

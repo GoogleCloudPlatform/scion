@@ -173,3 +173,49 @@ func TestMediatorRefusesPlaceholderAppID(t *testing.T) {
 	r = e.run("bootstrap-gcp.sh", "", "--config", "config.env", "--apply")
 	wantCode(t, r, 0)
 }
+
+// TestBootstrapEnablesOnlyMissingAPIs: C1 lists the enabled APIs and enables
+// only the missing ones; with all enabled it makes no enable call (so the
+// deployer does not need serviceusage.services.enable), and a list error stops.
+func TestBootstrapEnablesOnlyMissingAPIs(t *testing.T) {
+	all := "run.googleapis.com artifactregistry.googleapis.com secretmanager.googleapis.com " +
+		"cloudscheduler.googleapis.com cloudbuild.googleapis.com iam.googleapis.com storage.googleapis.com"
+	enableCalls := func(r result) []string {
+		var out []string
+		for _, c := range r.calls {
+			if s := c.String(); strings.Contains(s, "services enable") {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	e := newEnv(t, baseConfig())
+
+	e.extra = []string{"STUB_ENABLED_APIS=" + all + " compute.googleapis.com"}
+	r := e.run("bootstrap-gcp.sh", "", "--config", "config.env", "--apply")
+	wantCode(t, r, 0)
+	if got := enableCalls(r); len(got) != 0 {
+		t.Errorf("all APIs enabled, but enable was called: %v", got)
+	}
+	if !strings.Contains(r.stdout, "all required APIs are enabled") {
+		t.Errorf("no note for the skipped enable:\n%s", r.stdout)
+	}
+
+	e.extra = []string{"STUB_ENABLED_APIS=run.googleapis.com iam.googleapis.com storage.googleapis.com"}
+	r = e.run("bootstrap-gcp.sh", "", "--config", "config.env", "--apply")
+	wantCode(t, r, 0)
+	want := "gcloud services enable artifactregistry.googleapis.com secretmanager.googleapis.com " +
+		"cloudscheduler.googleapis.com cloudbuild.googleapis.com --project=example-project"
+	if got := enableCalls(r); len(got) != 1 || got[0] != want {
+		t.Errorf("enable calls = %v, want only the missing APIs:\n%s", got, want)
+	}
+
+	e.extra = []string{"STUB_SERVICES_LIST_DENIED=1"}
+	r = e.run("bootstrap-gcp.sh", "", "--config", "config.env", "--apply")
+	if r.code == 0 || !strings.Contains(r.stderr, "query failed") {
+		t.Errorf("a failed API list did not stop the script: %d %q", r.code, r.stderr)
+	}
+	if got := enableCalls(r); len(got) != 0 {
+		t.Errorf("enabled APIs after a failed list: %v", got)
+	}
+}

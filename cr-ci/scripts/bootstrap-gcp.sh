@@ -31,10 +31,21 @@ BUILD=$(crci_sa_email "${CFG[BUILD_SA_NAME]}")
 MEDIATOR=$(crci_sa_email "${CFG[MEDIATOR_SA_NAME]}")
 EXEC=$(crci_sa_email "${CFG[EXEC_SA_NAME]}")
 
-crci_note "C1: APIs"
-crci_run gcloud services enable run.googleapis.com artifactregistry.googleapis.com \
-  secretmanager.googleapis.com cloudscheduler.googleapis.com cloudbuild.googleapis.com \
-  iam.googleapis.com storage.googleapis.com --project="$P"
+crci_note "C1: APIs (only the missing ones are enabled, so serviceusage.services.enable is needed only then)"
+APIS=(run.googleapis.com artifactregistry.googleapis.com secretmanager.googleapis.com
+  cloudscheduler.googleapis.com cloudbuild.googleapis.com iam.googleapis.com storage.googleapis.com)
+# Listing needs only serviceusage.services.list; a list error stops the script.
+crci_read ENABLED_APIS "" gcloud services list --enabled --project="$P" --format='value(config.name)'
+MISSING_APIS=()
+for api in "${APIS[@]}"; do
+  grep -qxF -- "$api" <<<"$ENABLED_APIS" || MISSING_APIS+=("$api")
+done
+if ((${#MISSING_APIS[@]} == 0)); then
+  crci_note "all required APIs are enabled"
+else
+  [[ $CRCI_MODE == apply ]] || crci_note "dry-run lists every API; --apply enables only those the check above does not report"
+  crci_run gcloud services enable "${MISSING_APIS[@]}" --project="$P"
+fi
 
 crci_note "C2: service accounts (EXEC_SA_NAME must stay at zero roles)"
 create_sa() { # NAME DESCRIPTION

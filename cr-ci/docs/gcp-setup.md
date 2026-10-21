@@ -50,8 +50,14 @@ scripts/bootstrap-gcp.sh --apply
 It does the following (each create only if the resource is missing; bindings
 are additive, so a re-run is harmless):
 
-1. Enables the Cloud Run, Artifact Registry, Secret Manager, Cloud Scheduler,
-   Cloud Build, IAM and Cloud Storage APIs (C1).
+1. Lists the enabled APIs and enables only the missing ones among Cloud Run,
+   Artifact Registry, Secret Manager, Cloud Scheduler, Cloud Build, IAM and
+   Cloud Storage (C1). If all are enabled, no enable call is made, so
+   `serviceusage.services.enable` is only needed when an API is missing; the
+   list itself needs `serviceusage.services.list` (for example
+   `roles/serviceusage.serviceUsageConsumer`). A dry run shows the check and
+   an enable of all seven; `--apply` enables only what the check does not
+   report.
 2. Creates `BUILD_SA_NAME`, `MEDIATOR_SA_NAME`, `SCHEDULER_SA_NAME` and
    `EXEC_SA_NAME` (C2).
 3. Creates the Docker repository `ARTIFACT_REPO` in `REGION` (C3), and the

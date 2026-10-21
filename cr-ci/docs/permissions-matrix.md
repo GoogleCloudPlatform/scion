@@ -103,7 +103,7 @@ step says otherwise. Resource names come from `config.example.env`.
 
 | # | Step | Minimum role (resource) | Notes | Sources |
 | :-- | :--- | :--- | :--- | :--- |
-| C1 | Enable APIs: Cloud Run, Artifact Registry, Secret Manager, Cloud Scheduler, Cloud Build, IAM, Cloud Storage | `roles/serviceusage.serviceUsageAdmin` (project) | One time | [GC6] |
+| C1 | Enable APIs: Cloud Run, Artifact Registry, Secret Manager, Cloud Scheduler, Cloud Build, IAM, Cloud Storage | Listing: `roles/serviceusage.serviceUsageConsumer` or `roles/serviceusage.serviceUsageViewer` (project; `serviceusage.services.list`). Enabling: `roles/serviceusage.serviceUsageAdmin` (project; `serviceusage.services.enable`), **only if an API is missing** | `bootstrap-gcp.sh` lists the enabled APIs first and enables only the missing ones; when all are enabled it makes no enable call, so a deployer on a shared project where an admin already enabled them needs no `serviceusage.services.enable`. A list error stops the script. | [GC6] |
 | C2 | Create the four service accounts (`BUILD_SA_NAME`, `MEDIATOR_SA_NAME`, `SCHEDULER_SA_NAME`, `EXEC_SA_NAME`) | `roles/iam.serviceAccountAdmin` (project) | `EXEC_SA_NAME` must stay at **zero** roles | [GC5] |
 | C3 | Create the Artifact Registry Docker repo `ARTIFACT_REPO` in `REGION` | `roles/artifactregistry.admin` (project) | | [GC4] |
 | C4 | Grant `BUILD_SA_NAME` `roles/artifactregistry.writer` on `ARTIFACT_REPO` | `roles/artifactregistry.admin` (repo) | Repository-level binding, not project-level | [GC4] |
@@ -129,7 +129,9 @@ On a **dedicated** project, `roles/owner` covers everything and is the simplest
 choice. For a shared project such as `deploy-demo-test`, the deployer needs
 these roles on the project:
 
-- `roles/serviceusage.serviceUsageAdmin`
+- `roles/serviceusage.serviceUsageConsumer` (to list the enabled APIs), plus
+  `roles/serviceusage.serviceUsageAdmin` only if an API in C1 is not yet
+  enabled (otherwise ask a project admin to enable the missing ones)
 - `roles/iam.serviceAccountAdmin`
 - `roles/iam.serviceAccountUser` (or the same role granted only on the four cr-ci service accounts)
 - `roles/artifactregistry.admin`

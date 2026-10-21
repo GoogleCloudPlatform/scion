@@ -64,6 +64,13 @@ if [[ $args == *" describe "* ]]; then
 fi
 
 case $args in
+  *" services list "*)
+    if [[ -n ${STUB_SERVICES_LIST_DENIED:-} ]]; then
+      echo "ERROR: (gcloud.services.list) PERMISSION_DENIED: Permission denied to list services for consumer container [projects/123456789]" >&2
+      exit 1
+    fi
+    [[ -n ${STUB_ENABLED_APIS:-} ]] && tr ' ' '\n' <<<"$STUB_ENABLED_APIS"
+    ;;
   *" remove-iam-policy-binding "*)
     if [[ -n ${STUB_REMOVE_MISSING:-} ]]; then
       echo "ERROR: Policy binding with the specified principal, role, and condition not found!" >&2
