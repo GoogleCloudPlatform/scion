@@ -121,6 +121,10 @@ type startClaimRun struct {
 	owner string
 	claim store.StartClaim
 	cfg   StartClaimSettings
+	// broker is the Runtime Broker the claim's start targets (the agent
+	// row's RuntimeBrokerID when the claim was taken). The idle release
+	// after the claim clears frees only a reservation on it.
+	broker string
 
 	ctx    context.Context // the start runs under it: deadline, cancelled when lost
 	cancel context.CancelFunc
@@ -173,15 +177,15 @@ func (s *Server) acquireStartClaim(ctx context.Context, agent *store.Agent, kind
 	agent.RunIntent = store.RunIntentRunning
 	at := claim.RunIntentAt
 	agent.RunIntentAt = &at
-	return s.runStartClaim(ctx, agent.ID, claim, cfg, sent), nil
+	return s.runStartClaim(ctx, agent.ID, agent.RuntimeBrokerID, claim, cfg, sent), nil
 }
 
-// runStartClaim starts the lease renewal of an acquired claim. sent is the
-// time the claim request was sent: the first fence deadline is measured
-// from it.
-func (s *Server) runStartClaim(parent context.Context, agentID string, claim store.StartClaim, cfg StartClaimSettings, sent time.Time) *startClaimRun {
+// runStartClaim starts the lease renewal of an acquired claim. broker is the
+// Runtime Broker the claim's start targets. sent is the time the claim
+// request was sent: the first fence deadline is measured from it.
+func (s *Server) runStartClaim(parent context.Context, agentID, broker string, claim store.StartClaim, cfg StartClaimSettings, sent time.Time) *startClaimRun {
 	r := &startClaimRun{
-		s: s, agent: agentID, owner: claim.Owner, claim: claim, cfg: cfg,
+		s: s, agent: agentID, broker: broker, owner: claim.Owner, claim: claim, cfg: cfg,
 		fenceAt:    sent.Add(cfg.LeaseTTL - cfg.LeaseTTL/3),
 		stop:       make(chan struct{}),
 		done:       make(chan struct{}),
@@ -293,11 +297,21 @@ func (r *startClaimRun) renewLoop() {
 
 // finish stops the renewal and settles the claim by outcome. A lost claim
 // writes nothing: whoever took it (a stop or the reaper) owns its next
-// state. It reports whether the claim was still held.
+// state. It reports whether the claim was still held. For every outcome
+// except a handoff, success and a lost claim included, it then frees the
+// agent's slot on the broker the claim's start targeted if the agent holds
+// no capacity and no start-kind claim (releaseSlotIfIdle, which never frees
+// a reservation on another broker): an exit observed while the claim was
+// held skipped its release (for example a synchronous create whose
+// container exited during the dispatch keeps its terminal phase). That is a
+// no-op for a running agent and while a start-kind claim is still held.
 func (r *startClaimRun) finish(outcome startOutcome) bool {
 	close(r.stop)
 	<-r.done
 	defer r.cancel()
+	if outcome != startHandedOff {
+		defer r.releaseSlotIfIdle()
+	}
 	if r.isLost() {
 		return false
 	}
@@ -317,6 +331,15 @@ func (r *startClaimRun) finish(outcome startOutcome) bool {
 		slog.Warn("Start claim: settling the claim failed; the reaper will settle it", "agent_id", r.agent, "claim_id", r.claim.ID, "error", err)
 	}
 	return held
+}
+
+// releaseSlotIfIdle runs Server.releaseSlotIfIdleOn for the run's agent and
+// the broker its start targeted, once the claim is settled, on a context
+// detached from the run's.
+func (r *startClaimRun) releaseSlotIfIdle() {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.ctx), 10*time.Second)
+	defer cancel()
+	r.s.releaseSlotIfIdleOn(ctx, r.agent, r.broker)
 }
 
 // claimedDispatch runs a start under its claim's context. fence reports
