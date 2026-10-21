@@ -730,6 +730,10 @@ is a Hub-built preamble plus the handoff you provide. Requires a Hub connection.
 
 The Hub accepts the request with `202 Accepted` and completes the migration in the background. If
 the new generation cannot be provisioned, the Hub restores the previous generation's configuration.
+If you supplied a handoff, the restored configuration's task is that handoff, headed by a note that
+the migration failed and the agent remains at its current generation. The next fresh start delivers
+it, so the agent is not handed the previous generation's handoff. With no handoff, the previous
+task is kept.
 
 While the migration is in progress, messages to the agent are saved to its history rather than
 delivered or dropped (the send returns `202` with status `deferred`); scheduled messages fail
@@ -749,8 +753,8 @@ An interrupted migration is not resumed. For example, if the Hub restarts in the
 migration, the Hub marks it failed and puts the agent in the `error` phase with the reason in its
 status message. Run `scion reincarnate` again with the same flags: the Hub does not keep a failed
 migration's patch flags. A migration that had not started yet fails within about 10 minutes with
-"reincarnation failed: did not start, so no changes were applied; run reincarnate again". None of
-its patch flags are applied. A migration that had started fails after 30 minutes without progress.
+"reincarnation failed: did not start, so no changes were applied except that any handoff is
+carried forward for recovery; run reincarnate again". None of its patch flags are applied. A migration that had started fails after 30 minutes without progress.
 The Hub restores the previous configuration unless the new generation had already been provisioned.
 Until the migration fails, a new request for the agent is refused with `409`.
 

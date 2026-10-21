@@ -518,9 +518,17 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		}
 	}()
 
+	// recovery is what every failure path below restores or re-renders in
+	// place of previous: previous with the recovery Task (the new handoff
+	// behind a recovery addendum), or previous unchanged when there is no
+	// handoff (ptone/scion#5511). previous itself is never changed.
+	recovery := func(fromState string) *store.AgentAppliedConfig {
+		return reincarnationRecoveryConfig(previous, toGeneration, handoff, fromState)
+	}
+
 	dispatcher := s.GetDispatcher()
 	if dispatcher == nil {
-		s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStatePending, "no dispatcher available", previous)
+		s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStatePending, "no dispatcher available", recovery(store.AgentReincarnationStatePending))
 		return
 	}
 
@@ -533,12 +541,12 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	if move != nil {
 		var ok bool
 		if md, ok = dispatcher.(agentMoveDispatcher); !ok {
-			s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStatePending, "the dispatcher cannot move agents between brokers", previous)
+			s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStatePending, "the dispatcher cannot move agents between brokers", recovery(store.AgentReincarnationStatePending))
 			return
 		}
 		a, err := s.recheckMoveEligibility(ctx, agentID, move)
 		if err != nil {
-			s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStatePending, err.Error(), previous)
+			s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStatePending, err.Error(), recovery(store.AgentReincarnationStatePending))
 			return
 		}
 		srcAgent = a
@@ -549,15 +557,15 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	// re-renders the previous config on its broker.
 	failAfterProvision := func(fromState, errMsg string) {
 		if move != nil {
-			s.failMoveAndRollBack(ctx, md, agentID, reincarnationID, fromState, errMsg, previous, move, srcAgent)
+			s.failMoveAndRollBack(ctx, md, agentID, reincarnationID, fromState, errMsg, recovery(fromState), move, srcAgent)
 			return
 		}
-		s.failAfterReprovision(ctx, dispatcher, agentID, reincarnationID, fromState, errMsg, previous)
+		s.failAfterReprovision(ctx, dispatcher, agentID, reincarnationID, fromState, errMsg, recovery(fromState))
 	}
 
 	stoppingNow, ok, err := s.tryAdvanceReincarnation(ctx, reincarnationID, store.AgentReincarnationStatePending, store.AgentReincarnationStateStopping, reincarnationStepMaxAttempts, nil)
 	if err != nil {
-		s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStatePending, "failed to advance record to stopping: "+err.Error(), previous)
+		s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStatePending, "failed to advance record to stopping: "+err.Error(), recovery(store.AgentReincarnationStatePending))
 		return
 	}
 	if !ok {
@@ -593,7 +601,7 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		now:                stoppingNow,
 	}, reincarnationStepMaxAttempts)
 	if err != nil {
-		s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateStopping, "failed to record stopping state: "+err.Error(), previous)
+		s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateStopping, "failed to record stopping state: "+err.Error(), recovery(store.AgentReincarnationStateStopping))
 		return
 	}
 
@@ -607,7 +615,7 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	// ptone/scion#2550) fails here too: the entry holding the name belongs
 	// to another run, which the broker left running.
 	if err := dispatcher.DispatchAgentStop(ctx, agent); err != nil {
-		s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateStopping, "stop failed: "+err.Error(), previous)
+		s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateStopping, "stop failed: "+err.Error(), recovery(store.AgentReincarnationStateStopping))
 		return
 	}
 	if move != nil {
@@ -617,7 +625,7 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 
 	provisioningNow, ok, err := s.tryAdvanceReincarnation(ctx, reincarnationID, store.AgentReincarnationStateStopping, store.AgentReincarnationStateProvisioning, reincarnationStepMaxAttempts, nil)
 	if err != nil {
-		s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateStopping, "failed to advance record to provisioning: "+err.Error(), previous)
+		s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateStopping, "failed to advance record to provisioning: "+err.Error(), recovery(store.AgentReincarnationStateStopping))
 		return
 	}
 	if !ok {
@@ -629,7 +637,7 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		// target has no room the source reservation is restored and the
 		// agent stays stopped on the source.
 		if err := s.moveBrokerQuota(ctx, agent, move); err != nil {
-			s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateProvisioning, "target broker quota: "+err.Error(), previous)
+			s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateProvisioning, "target broker quota: "+err.Error(), recovery(store.AgentReincarnationStateProvisioning))
 			return
 		}
 	}
@@ -661,10 +669,10 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		return
 	}
 	if err != nil {
-		// The write itself failed, so the store still holds `previous`
-		// (this call is a no-op restore, kept for consistency with every
-		// other pre-reprovision failure site).
-		s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateProvisioning, "failed to persist new applied config: "+err.Error(), previous)
+		// The write itself failed, so the store still holds `previous`;
+		// the restore only replaces its Task with the recovery Task, as at
+		// every other pre-reprovision failure site.
+		s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateProvisioning, "failed to persist new applied config: "+err.Error(), recovery(store.AgentReincarnationStateProvisioning))
 		return
 	}
 
@@ -700,8 +708,8 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		// reprovision has already revoked the agent's credentials if it
 		// minted one, so a refused re-render changes nothing there.
 		errMsg := "reprovision failed: " + dispatchFailureText(err)
-		s.rerenderPreviousConfig(ctx, dispatcher, agentID, reincarnationID, store.AgentReincarnationStateProvisioning, errMsg, previous)
-		s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateProvisioning, errMsg, previous)
+		s.rerenderPreviousConfig(ctx, dispatcher, agentID, reincarnationID, store.AgentReincarnationStateProvisioning, errMsg, recovery(store.AgentReincarnationStateProvisioning))
+		s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateProvisioning, errMsg, recovery(store.AgentReincarnationStateProvisioning))
 		return
 	}
 
@@ -1557,8 +1565,15 @@ const reincarnationPendingStaleAfter = 2 * time.Minute
 // reincarnation swept under reincarnationPendingStaleAfter. It must be true
 // whatever left the record pending — a hub restart, or (a false positive) a
 // worker too slow to take its first step — so it says what is known: the
-// worker never started, so nothing was changed.
-const reincarnationDidNotStartReason = "did not start, so no changes were applied; run reincarnate again"
+// worker never started, so nothing was changed except the Task: a handoff
+// supplied with the request is carried forward for recovery
+// (ptone/scion#5511).
+const reincarnationDidNotStartReason = "did not start, so no changes were applied except that any handoff is carried forward for recovery; run reincarnate again"
+
+// reincarnationOrphanDidNotStartReason is reincarnationDidNotStartReason for
+// an orphaned pending agent state, which has no record and so no handoff to
+// carry forward: nothing at all was changed.
+const reincarnationOrphanDidNotStartReason = "did not start, so no changes were applied; run reincarnate again"
 
 // sweepFailStaleRecord decides, per stale record, whether and how to fail it
 // (design §3.4 Amendment A6/A7). The restore decision comes from
@@ -1610,7 +1625,10 @@ func (s *Server) sweepFailStaleRecord(ctx context.Context, rec *store.AgentReinc
 
 	var restoreConfig *store.AgentAppliedConfig
 	if rec.State != store.AgentReincarnationStateStarting {
-		restoreConfig = rec.PreviousAppliedConfig
+		// The recovery config, as the worker's own failure paths restore
+		// (ptone/scion#5511); the record's PreviousAppliedConfig is not
+		// changed.
+		restoreConfig = reincarnationRecoveryConfig(rec.PreviousAppliedConfig, rec.ToGeneration, rec.Handoff, rec.State)
 	}
 	return s.failListedReincarnation(ctx, rec, reason, restoreConfig, cutoff)
 }
@@ -1697,7 +1715,7 @@ func (s *Server) sweepStaleReincarnationsWithCutoffs(ctx context.Context, cutoff
 	for _, orphan := range orphans {
 		orphanCutoff, orphanReason := cutoff, reason
 		if orphan.ReincarnationState == store.ReincarnationStatePending {
-			orphanCutoff, orphanReason = pendingCutoff, reincarnationDidNotStartReason
+			orphanCutoff, orphanReason = pendingCutoff, reincarnationOrphanDidNotStartReason
 		}
 		// A nil reincarnation_updated_at is always eligible (see
 		// ListAgentsWithStaleNonTerminalReincarnationState).
