@@ -1019,3 +1019,69 @@ func TestEntrypointCacheTarRoundTrip(t *testing.T) {
 		t.Errorf("cr-ci archive did not land in ~/.cache/go-build on the ubuntu layout: %v", err)
 	}
 }
+
+// A whole-directory cache path (actions/cache path: ~/.cache) archives directory
+// entries such as ../../../.cache/ itself. Extracting them must not replace the
+// ~/.cache link with a real directory: tar resolves ".." physically, so the entry
+// lands on /scratch/.cache (a real dir), and the link is never walked.
+func TestEntrypointCacheTarWholeDirectory(t *testing.T) {
+	var h *harness
+	cs := newClaimServer(t, func(w http.ResponseWriter) { respondJIT(h.jit)(w) })
+	h = newHarness(t, cs.URL)
+	if res := h.run(); res.exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr:\n%s", res.exitCode, res.stderr)
+	}
+	crWorkspace := filepath.Join(h.home, "work", "scion", "scion")
+	if err := os.MkdirAll(crWorkspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ubuntuHome := filepath.Join(t.TempDir(), "home", "runner")
+	ubuntuWorkspace := filepath.Join(ubuntuHome, "work", "scion", "scion")
+	for _, d := range []string{ubuntuWorkspace, filepath.Join(ubuntuHome, ".cache", "go-build", "ab")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(ubuntuHome, ".cache", "go-build", "ab", "obj"), []byte("whole-dir"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	archive := filepath.Join(t.TempDir(), "whole.tar")
+	for _, args := range [][]string{
+		{"-cPf", archive, "-C", ubuntuWorkspace, "../../../.cache"},
+		{"-xPf", archive, "-C", crWorkspace},
+	} {
+		if out, err := exec.Command("tar", args...).CombinedOutput(); err != nil {
+			t.Fatalf("tar %v: %v\n%s", args, err, out)
+		}
+	}
+	if out, err := exec.Command("tar", "-tPf", archive).Output(); err != nil || !strings.Contains(string(out), "../../../.cache/\n") {
+		t.Fatalf("archive lacks the ../../../.cache/ directory entry (err %v):\n%s", err, out)
+	}
+	h.checkHomeLinks() // the directory entry must not have replaced the link
+	if b, err := os.ReadFile(filepath.Join(h.home, ".cache", "go-build", "ab", "obj")); err != nil || string(b) != "whole-dir" {
+		t.Errorf("whole-directory archive did not restore to ~/.cache/go-build: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(h.scratch, ".cache", "go-build", "ab", "obj")); err != nil {
+		t.Errorf("restored bytes are not on the scratch disk: %v", err)
+	}
+}
+
+// If a HOME link cannot be created, the entrypoint exits 2 before the claim.
+func TestEntrypointHomeLinkCreateFails(t *testing.T) {
+	cs := newClaimServer(t, respondStatus(http.StatusOK))
+	h := newHarness(t, cs.URL)
+	if os.Geteuid() == 0 {
+		h.t.Skip("root ignores directory permissions")
+	}
+	// HOME read-only: ln -s into it fails, while the scratch dir (a subdirectory with
+	// its own permissions) stays writable for the earlier checks.
+	if err := os.Chmod(h.home, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	h.t.Cleanup(func() { os.Chmod(h.home, 0o755) })
+	res := h.run()
+	expectFailure(t, h, res, 2, "cannot create symlink "+h.home+"/work -> "+h.scratch+"/_work")
+	if n := len(cs.recorded()); n != 0 {
+		t.Errorf("claim requests = %d, want 0 (token must not be spent)", n)
+	}
+}

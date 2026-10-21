@@ -252,7 +252,10 @@ covers:
   (`-P -C` the workspace, entries `../../../.cache/...` and
   `../../../go/pkg/mod/...`) restores an ubuntu-latest archive to where Go
   reads, with the bytes on the scratch disk and the links intact. The same
-  round trip restores a cr-ci archive under a plain ubuntu `HOME`.
+  round trip restores a cr-ci archive under a plain ubuntu `HOME`. A
+  whole-directory archive (`../../../.cache`, directory entries included)
+  restores into `~/.cache` without replacing the link. A `HOME` where the
+  links cannot be created exits 2 without contacting the mediator.
 - **Bad env.** Any missing variable, a malformed (short or uppercase) token,
   a non-numeric job ID, a non-https or path-bearing URL, a non-loopback
   `CR_METADATA_URL`, or a missing `run.sh` exits 2 without contacting the
