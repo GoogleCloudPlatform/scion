@@ -34,7 +34,8 @@ import (
 // Routing and ownership log fields (ptone/scion#5076): the stream open
 // lines show whether a stream was routed to a session this node holds
 // (route=local) or to another relay (route=remote), and which relay holds
-// it (owner_instance); the owning relay logs each internal stream it opens.
+// it (owner_instance); the owning relay logs each internal stream it opens
+// at debug level.
 
 // routeLogCapture collects the JSON log records written through
 // slog.Default while it is installed. Writes and reads are serialized, so
@@ -100,13 +101,17 @@ func (c *routeLogCapture) waitWith(t *testing.T, msg string, n int) []map[string
 var routeLogMessages = []string{"Conduit tunnel opened", "Conduit internal stream opened", "Conduit PTY stream opened", "PTY session ended", "Proxy request"}
 
 // assertNoCredentials fails if any captured line carries the caller's
-// bearer token, or a routing line has a credential-looking field.
+// bearer token, or a routing line has a credential-looking field or a
+// JWS-shaped value (a grant, or any signed token, starts with "eyJ").
 func assertNoCredentials(t *testing.T, c *routeLogCapture, bearer string) {
 	t.Helper()
 	assert.NotContains(t, c.raw(), bearer, "no log line carries the caller's token")
 	for _, msg := range routeLogMessages {
 		for _, rec := range c.with(t, msg) {
-			for k := range rec {
+			for k, v := range rec {
+				if str, ok := v.(string); ok {
+					assert.NotContains(t, str, "eyJ", "%q field %q holds a JWS-shaped value", msg, k)
+				}
 				lk := strings.ToLower(k)
 				for _, bad := range []string{"token", "grant", "authorization", "secret", "credential"} {
 					assert.NotContains(t, lk, bad, "%q carries field %q", msg, k)
@@ -145,9 +150,9 @@ func TestConduitRouteLog_TunnelLocal(t *testing.T) {
 
 // TestConduitRouteLog_TunnelCrossNode: a tunnel to a session another
 // relay holds logs route=remote with that relay as owner_instance on the
-// node that took the request, and the owning relay logs one "Conduit
-// internal stream opened" line per stream, with its session, the stream
-// kind and the calling peer.
+// node that took the request, and the owning relay logs one debug-level
+// "Conduit internal stream opened" line per stream, with its session, the
+// stream kind and the calling peer.
 func TestConduitRouteLog_TunnelCrossNode(t *testing.T) {
 	logs := captureRouteLogs(t)
 	tf := newTunnelFixture(t)
@@ -167,10 +172,12 @@ func TestConduitRouteLog_TunnelCrossNode(t *testing.T) {
 	require.Len(t, opened, 1)
 	assert.Equal(t, conduitRouteRemote, opened[0]["route"])
 	assert.Equal(t, "hub-b", opened[0]["owner_instance"])
+	assert.Equal(t, "INFO", opened[0]["level"], "the requesting node logs the open at info")
 
 	internal := logs.waitWith(t, "Conduit internal stream opened", 1)
 	require.Len(t, internal, 1, "one line per internal stream, not per frame")
 	assert.Equal(t, "hub-b", internal[0]["relay_instance_id"], "logged by the owning relay")
+	assert.Equal(t, "DEBUG", internal[0]["level"], "the owner's line is debug")
 	assert.Equal(t, recs[0].SessionID, internal[0]["session_id"])
 	assert.Equal(t, "STREAM_KIND_TCP", internal[0]["kind"])
 	assert.Equal(t, "hub-a", internal[0]["peer"])
@@ -183,6 +190,7 @@ func TestConduitRouteLog_TunnelCrossNode(t *testing.T) {
 	internal = logs.waitWith(t, "Conduit internal stream opened", 2)
 	require.Len(t, internal, 2, "one more line for the second stream")
 	assert.Equal(t, "STREAM_KIND_PTY", internal[1]["kind"])
+	assert.Equal(t, "DEBUG", internal[1]["level"])
 	assertNoCredentials(t, logs, tf.userToken)
 }
 
@@ -235,4 +243,38 @@ func TestConduitRouteLog_ProxyRequestDebug(t *testing.T) {
 	}
 	assert.Empty(t, logs.with(t, "Conduit tunnel opened"))
 	assertNoCredentials(t, logs, f.userToken)
+}
+
+// TestConduitRouteLog_ProxyCrossNodeOwnerDebug: a port-proxy request
+// through hub B to an agent whose session a separate relay holds: hub B's
+// per-request line is at debug with route=remote and the relay as
+// owner_instance, and the owning relay logs its internal stream at debug,
+// never at info.
+func TestConduitRouteLog_ProxyCrossNodeOwnerDebug(t *testing.T) {
+	logs := captureRouteLogs(t)
+	w := newSeparateRelayWorld(t)
+	sessions := w.agentSessions(t)
+	require.Len(t, sessions, 1)
+	owner := sessions[0].RelayInstanceID
+	require.Equal(t, "relay-0", owner)
+
+	for range 2 {
+		resp := w.getB(t, "/route")
+		require.Equal(t, 200, resp.StatusCode)
+	}
+
+	internal := logs.waitWith(t, "Conduit internal stream opened", 2)
+	for _, rec := range internal {
+		assert.Equal(t, "DEBUG", rec["level"], "the owner logs proxy streams at debug")
+		assert.Equal(t, owner, rec["relay_instance_id"])
+		assert.Equal(t, sessions[0].SessionID, rec["session_id"])
+		assert.Equal(t, "STREAM_KIND_TCP", rec["kind"])
+	}
+	for _, rec := range logs.with(t, "Proxy request") {
+		assert.Equal(t, "DEBUG", rec["level"])
+		assert.Equal(t, conduitRouteRemote, rec["route"])
+		assert.Equal(t, owner, rec["owner_instance"])
+	}
+	require.NotEmpty(t, logs.with(t, "Proxy request"))
+	assertNoCredentials(t, logs, w.userTokenB)
 }
