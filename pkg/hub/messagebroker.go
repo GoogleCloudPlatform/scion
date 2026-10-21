@@ -738,10 +738,11 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 	// ownership check (linkSenderOwnedAttachmentRefs), and the SSE event and
 	// the member fan-out carry exactly the linked refs, the files history
 	// lists. A linked file downloads for the message's readers, so naming it
-	// to them discloses nothing they may not read. An attachment stored as an artifact is not an AttachmentStore
-	// file, so an artifact id that appears in transport metadata fails the
-	// lookup and is dropped: this path never binds or publishes one (artifact
-	// references come only from the admitted references below). Pinned by
+	// to them discloses nothing they may not read. An attachment stored as an
+	// artifact is not an AttachmentStore file, so an artifact id that appears
+	// in transport metadata fails the lookup and is dropped: this path never
+	// binds or publishes one (artifact references come only from the admitted
+	// references below). Pinned by
 	// TestDeliverToUser_RepublishCarriesNoArtifactAttachments.
 	linkedRefs := linkSenderOwnedAttachmentRefs(ctx, p.webChatStore, storeMsg.ID, projectID, msg.SenderID, parseAttachmentRefs(msg.Metadata), p.log)
 
