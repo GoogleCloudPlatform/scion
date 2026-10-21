@@ -31,25 +31,25 @@ import (
 )
 
 // Drain through the proxy, hub side (design §3.9 "Drain through the
-// proxy", v2.21.57; contracts "Addition (6.2 (a3))"). In external relay
+// proxy", v2.21.58; contracts "Addition (6.2 (a3))"). In external relay
 // mode the hub's one graceful shutdown stops proxying conduit dials before
 // it marks any server (BeginConduitIngressShutdown: 503
 // conduit_not_serving, cause ingress_terminating, before any byte to a
 // relay). Its pre-cancel drain step then asks every live relay to send
 // GoAway to the sessions this hub proxied, holds the hub's open proxied
-// legs until they close, and at the end of the hold (the step deadline,
-// conduitIngressHoldEnd) closes the legs left. The legs normally close at
-// about the drain deadline sent, when the relays end the drained sessions;
-// the end of the hold, at least 1s later, is the backstop. HTTP server shutdown does not close
-// hijacked legs, so without the close they would end only at process
-// exit. Every wait is bounded by the step deadline; a failed call is
-// logged and counted and never extends the step.
+// legs until they close, and at the hold deadline (computed by the
+// shutdown) closes the legs left. The legs normally close at about the
+// drain deadline sent, when the relays end the drained sessions; the hold
+// deadline, at least 1s later, is the backstop. HTTP server shutdown does
+// not close hijacked legs, so without the close they would end only at
+// process exit. Every wait is bounded by the hold deadline; a failed call
+// is logged and counted and never extends the step.
 
 // conduitIngressCauseTerminating is the cause logged for conduit dials
 // refused while the hub shuts down.
 const conduitIngressCauseTerminating = "ingress_terminating"
 
-// conduitIngressSendMargin is how much earlier than the step deadline the
+// conduitIngressSendMargin is how much earlier than the hold deadline the
 // drain deadline sent to the relays ends, so the sessions they drain have
 // closed their legs before the hub closes what is left.
 const conduitIngressSendMargin = time.Second
@@ -58,29 +58,20 @@ const conduitIngressSendMargin = time.Second
 // (design §3.3's 1ms floor).
 const conduitIngressMinDrainDeadline = time.Millisecond
 
-// conduitIngressHoldEnd is when the drain step stops waiting: the
-// live-relay read, the fan-out and the hold end by it, and the legs still
-// open then are closed. It is the one place that decides the hold's end
-// from the shutdown budget (o.Grace, o.GraceSet), the signal time and the
-// step deadline; today it is the step deadline (design v2.21.57 "One
-// budget": the hold may use all of the step bound).
-func conduitIngressHoldEnd(o ConduitIngressDrainOptions) time.Time {
-	return o.StepDeadline
-}
-
 // conduitIngressDrainDeadline is the drain deadline sent to the relays at
 // now: max(1ms, min(§3.3's min(drain deadline, shutdown_grace - 2s)
-// measured from the signal, holdEnd - now - 1s)). With shutdown_grace
-// unset the first term is the session drain deadline (30s), so the value
-// is in practice holdEnd - now - 1s. It is always sent, never left to the
+// measured from the signal, holdDeadline - now - 1s)). With
+// shutdown_grace unset the first term is the session drain deadline (30s),
+// so the value is in practice holdDeadline - now - 1s; with 1s or less
+// left it is the 1ms floor. It is always sent, never left to the
 // relay's default, so no relay promises a client more time than the hub
 // keeps the legs open.
-func conduitIngressDrainDeadline(now, signalAt, holdEnd time.Time, grace time.Duration, graceSet bool) time.Duration {
+func conduitIngressDrainDeadline(now, signalAt, holdDeadline time.Time, grace time.Duration, graceSet bool) time.Duration {
 	fromSignal := conduit.DefaultDrainDeadline
 	if graceSet {
 		fromSignal = min(fromSignal, relay.ShutdownDrainCap(grace))
 	}
-	d := min(signalAt.Add(fromSignal).Sub(now), holdEnd.Sub(now)-conduitIngressSendMargin)
+	d := min(signalAt.Add(fromSignal).Sub(now), holdDeadline.Sub(now)-conduitIngressSendMargin)
 	return max(d, conduitIngressMinDrainDeadline)
 }
 
@@ -91,9 +82,12 @@ type ConduitIngressDrainOptions struct {
 	Clock clock.Clock
 	// SignalAt is when the shutdown began (the signal).
 	SignalAt time.Time
-	// StepDeadline is the step's absolute deadline: step start plus the
-	// shutdown's conduit drain-step bound. Every wait ends by it.
-	StepDeadline time.Time
+	// HoldDeadline is the drain's absolute deadline, computed by the
+	// shutdown (design v2.21.58: min(step deadline, HTTP-drain deadline -
+	// 1s), or the step deadline). The live-relay read, the fan-out and the
+	// hold end by it; the legs still open then are closed and the step
+	// returns.
+	HoldDeadline time.Time
 	// Grace is server.hub.conduit.shutdown_grace, and GraceSet whether it
 	// is set.
 	Grace    time.Duration
@@ -125,11 +119,12 @@ func (s *Server) BeginConduitIngressShutdown() {
 // DrainConduitIngressForShutdown is the ingress drain step of the
 // shutdown: it fans out drain to every live relay (draining ones included)
 // with the drain deadline of conduitIngressDrainDeadline, then holds until
-// the hub's last open proxied leg closes, and at o.StepDeadline closes the
+// the hub's last open proxied leg closes, and at o.HoldDeadline closes the
 // legs left and returns. The live-relay read, the fan-out and the hold all
-// end by o.StepDeadline. Proxying has normally stopped before the mark
-// phase; if not, it stops here first. It runs once; later calls, calls outside
-// external mode and calls with the proxy off return at once.
+// end by o.HoldDeadline; if it has already passed, the step closes the
+// legs and returns without a fan-out. Proxying has normally stopped before
+// the mark phase; if not, it stops here first. It runs once; later calls,
+// calls outside external mode and calls with the proxy off return at once.
 func (s *Server) DrainConduitIngressForShutdown(o ConduitIngressDrainOptions) {
 	rt := s.conduitExternal.Load()
 	if rt == nil || !rt.drainStarted.CompareAndSwap(false, true) {
@@ -146,12 +141,18 @@ func (s *Server) DrainConduitIngressForShutdown(o ConduitIngressDrainOptions) {
 	if clk == nil {
 		clk = clock.Real()
 	}
-	holdEnd := conduitIngressHoldEnd(o)
-	ctx, cancel := conduitIngressStepContext(clk, holdEnd)
+	now := clk.Now()
+	if !o.HoldDeadline.After(now) {
+		// No time left to hold: close the legs now, without a fan-out.
+		n := rt.legs.closeAll()
+		slog.Warn("Conduit ingress: the drain hold deadline had passed; closed the proxied legs without a drain", "legs", n, "hold_deadline", o.HoldDeadline)
+		return
+	}
+	ctx, cancel := conduitIngressStepContext(clk, o.HoldDeadline)
 	defer cancel()
-	deadline := conduitIngressDrainDeadline(clk.Now(), o.SignalAt, holdEnd, o.Grace, o.GraceSet)
+	deadline := conduitIngressDrainDeadline(now, o.SignalAt, o.HoldDeadline, o.Grace, o.GraceSet)
 	slog.Info("Conduit ingress: draining the sessions this hub proxied",
-		"ingress_instance", rt.instanceID, "step_deadline", o.StepDeadline, "hold_end", holdEnd, "drain_deadline", deadline)
+		"ingress_instance", rt.instanceID, "hold_deadline", o.HoldDeadline, "drain_deadline", deadline)
 	s.fanOutConduitIngressDrain(ctx, rt, deadline)
 
 	select {
@@ -185,7 +186,7 @@ func conduitIngressStepContext(clk clock.Clock, deadline time.Time) (context.Con
 func (s *Server) fanOutConduitIngressDrain(ctx context.Context, rt *conduitExternalRuntime, deadline time.Duration) {
 	relays, err := rt.registry.LiveRelays(ctx, rt.now())
 	if err != nil {
-		slog.Warn("Conduit ingress: listing live relays for the drain failed; the proxied legs are still held and closed at the step deadline", "error", err)
+		slog.Warn("Conduit ingress: listing live relays for the drain failed; the proxied legs are still held and closed at the hold deadline", "error", err)
 		return
 	}
 	var wg sync.WaitGroup

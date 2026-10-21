@@ -79,37 +79,36 @@ func TestConduitIngress_NoRepickAfterTerminating(t *testing.T) {
 	assert.Zero(t, f.relays["relay-b"].hits.Load(), "no second relay after SIGTERM")
 }
 
-// TestConduitIngressDrainDeadline: the drain deadline sent is
-// max(1ms, min(min(30s, grace - 2s) from the signal, hold end - now - 1s)),
-// and the hold ends at the step deadline (conduitIngressHoldEnd); with no
-// grace it is still sent, at most step deadline - now - 1s.
+// TestConduitIngressDrainDeadline: the drain deadline sent is max(1ms,
+// min(min(30s, grace - 2s) from the signal, H - now - 1s)), H being the
+// hold deadline; with no grace it is still sent, at most H - now - 1s, and
+// with 1s or less left it is the 1ms floor.
 func TestConduitIngressDrainDeadline(t *testing.T) {
 	t0 := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
 	for _, tc := range []struct {
 		name     string
 		sinceSig time.Duration // now - signal
-		stepLeft time.Duration // step deadline - now
+		holdLeft time.Duration // H - now
 		grace    time.Duration
 		set      bool
 		want     time.Duration
 	}{
-		{name: "grace unset: the step bound less 1s", stepLeft: 12 * time.Second, want: 11 * time.Second},
-		{name: "grace unset, long step: the 30s session drain deadline", stepLeft: 40 * time.Second, want: 30 * time.Second},
-		{name: "grace 30s: the step bound less 1s", stepLeft: 12 * time.Second, grace: 30 * time.Second, set: true, want: 11 * time.Second},
-		{name: "grace 10s, step 9s: grace - 2s", stepLeft: 9 * time.Second, grace: 10 * time.Second, set: true, want: 8 * time.Second},
-		{name: "measured from the signal", sinceSig: 5 * time.Second, stepLeft: 12 * time.Second, grace: 10 * time.Second, set: true, want: 3 * time.Second},
-		{name: "grace 2s: the 1ms floor", stepLeft: 2 * time.Second, grace: 2 * time.Second, set: true, want: time.Millisecond},
-		{name: "step deadline passed: the 1ms floor", stepLeft: -time.Second, want: time.Millisecond},
+		{name: "grace unset: H less 1s", holdLeft: 12 * time.Second, want: 11 * time.Second},
+		{name: "grace unset, far H: the 30s session drain deadline", holdLeft: 40 * time.Second, want: 30 * time.Second},
+		{name: "grace 30s: H less 1s", holdLeft: 12 * time.Second, grace: 30 * time.Second, set: true, want: 11 * time.Second},
+		{name: "grace 10s, H 9s away: grace - 2s", holdLeft: 9 * time.Second, grace: 10 * time.Second, set: true, want: 8 * time.Second},
+		{name: "measured from the signal", sinceSig: 5 * time.Second, holdLeft: 12 * time.Second, grace: 10 * time.Second, set: true, want: 3 * time.Second},
+		{name: "grace 2s: the 1ms floor", holdLeft: 2 * time.Second, grace: 2 * time.Second, set: true, want: time.Millisecond},
+		{name: "G = 10s at T0: H = T0+5s gives about 4s", holdLeft: 5 * time.Second, grace: 10 * time.Second, set: true, want: 4 * time.Second},
+		{name: "1s or less left: the 1ms floor", holdLeft: time.Second, grace: 10 * time.Second, set: true, want: time.Millisecond},
+		{name: "H passed: the 1ms floor", holdLeft: -time.Second, want: time.Millisecond},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			now := t0.Add(tc.sinceSig)
-			o := ConduitIngressDrainOptions{SignalAt: t0, StepDeadline: now.Add(tc.stepLeft), Grace: tc.grace, GraceSet: tc.set}
-			holdEnd := conduitIngressHoldEnd(o)
-			assert.Equal(t, o.StepDeadline, holdEnd, "the hold ends at the step deadline")
-			got := conduitIngressDrainDeadline(now, t0, holdEnd, tc.grace, tc.set)
+			got := conduitIngressDrainDeadline(now, t0, now.Add(tc.holdLeft), tc.grace, tc.set)
 			assert.Equal(t, tc.want, got)
-			if tc.stepLeft > 2*time.Second {
-				assert.LessOrEqual(t, got, tc.stepLeft-time.Second, "never more than step deadline - now - 1s")
+			if tc.holdLeft > 2*time.Second {
+				assert.LessOrEqual(t, got, tc.holdLeft-time.Second, "never more than H - now - 1s")
 			}
 		})
 	}
@@ -201,7 +200,7 @@ func TestDrainConduitIngressForShutdown_FanOut(t *testing.T) {
 
 	t0 := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
 	clk := clock.NewFake(t0)
-	opts := ConduitIngressDrainOptions{Clock: clk, SignalAt: t0, StepDeadline: t0.Add(time.Second), Grace: 2 * time.Second, GraceSet: true}
+	opts := ConduitIngressDrainOptions{Clock: clk, SignalAt: t0, HoldDeadline: t0.Add(time.Second), Grace: 2 * time.Second, GraceSet: true}
 	returned := make(chan struct{})
 	go func() {
 		defer close(returned)
@@ -309,7 +308,7 @@ func TestDrainConduitIngressForShutdown_ProxyOffAsksNoRelay(t *testing.T) {
 	assert.False(t, f.s.ConduitIngressProxyActive(), "the proxy is off")
 	assert.False(t, (&Server{}).ConduitIngressProxyActive(), "not in external relay mode")
 	now := time.Now()
-	f.s.DrainConduitIngressForShutdown(ConduitIngressDrainOptions{SignalAt: now, StepDeadline: now.Add(30 * time.Second), Grace: 30 * time.Second, GraceSet: true})
+	f.s.DrainConduitIngressForShutdown(ConduitIngressDrainOptions{SignalAt: now, HoldDeadline: now.Add(30 * time.Second), Grace: 30 * time.Second, GraceSet: true})
 	assert.True(t, f.rt.terminating.Load())
 	assert.Zero(t, f.relays["relay-a"].hits.Load(), "no relay is asked to drain")
 }
@@ -440,7 +439,7 @@ func TestDrainConduitIngressForShutdown_ReturnsEarlyWhenLastLegCloses(t *testing
 	returned := make(chan struct{})
 	go func() {
 		defer close(returned)
-		f.s.DrainConduitIngressForShutdown(ConduitIngressDrainOptions{Clock: clk, SignalAt: t0, StepDeadline: t0.Add(12 * time.Second)})
+		f.s.DrainConduitIngressForShutdown(ConduitIngressDrainOptions{Clock: clk, SignalAt: t0, HoldDeadline: t0.Add(12 * time.Second)})
 	}()
 	require.True(t, clk.WaitForTimer(10*time.Second, t0.Add(12*time.Second)), "the step deadline is armed")
 	require.Eventually(t, func() bool { return f.relays["relay-a"].hits.Load() == 2 }, 10*time.Second, 10*time.Millisecond, "the relay was asked to drain")
@@ -497,7 +496,7 @@ func TestDrainConduitIngressForShutdown_ClosesLegsAtDeadline(t *testing.T) {
 	returned := make(chan struct{})
 	go func() {
 		defer close(returned)
-		f.s.DrainConduitIngressForShutdown(ConduitIngressDrainOptions{Clock: clk, SignalAt: t0, StepDeadline: t0.Add(12 * time.Second)})
+		f.s.DrainConduitIngressForShutdown(ConduitIngressDrainOptions{Clock: clk, SignalAt: t0, HoldDeadline: t0.Add(12 * time.Second)})
 	}()
 	select {
 	case dr := <-sent:
@@ -533,6 +532,41 @@ func TestDrainConduitIngressForShutdown_ClosesLegsAtDeadline(t *testing.T) {
 	_, err := leg.client.Read(make([]byte, 1))
 	assert.ErrorIs(t, err, io.EOF, "the client side of the leg was closed")
 	require.Eventually(t, func() bool { return f.rt.legs.count() == 0 }, 10*time.Second, 10*time.Millisecond)
+}
+
+// TestDrainConduitIngressForShutdown_HoldDeadlinePassed: with the hold
+// deadline already past at step start there is no hold and no fan-out: the
+// open legs are closed and the step returns at once.
+func TestDrainConduitIngressForShutdown_HoldDeadlinePassed(t *testing.T) {
+	f := newIngressFixture(t, "relay-a")
+	f.s.conduitExternal.Store(f.rt)
+	f.rt.peers = &relay.PeerClient{HTTP: http.DefaultClient, Auth: f.rt.peerAuth}
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.s.serveConduitIngress(w, r, f.rt)
+	}))
+	t.Cleanup(hub.Close)
+	leg := openUpgradedLeg(t, f, hub.URL, "relay-a")
+	require.EqualValues(t, 1, f.relays["relay-a"].hits.Load())
+
+	t0 := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	clk := clock.NewFake(t0.Add(6 * time.Second))
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		f.s.DrainConduitIngressForShutdown(ConduitIngressDrainOptions{Clock: clk, SignalAt: t0, HoldDeadline: t0.Add(5 * time.Second), Grace: 10 * time.Second, GraceSet: true})
+	}()
+	select {
+	case <-returned:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the step did not return at once with the hold deadline past")
+	}
+	select {
+	case <-leg.relayClosed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the open leg was not closed")
+	}
+	assert.EqualValues(t, 1, f.relays["relay-a"].hits.Load(), "no drain call with the hold deadline past")
+	assert.Zero(t, clk.Pending(), "no timer was armed")
 }
 
 // TestConduitIngressLegs: the leg set counts, reports idle when empty and

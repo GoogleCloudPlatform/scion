@@ -206,10 +206,11 @@ func TestStartConduit_ExternalRelayNeedsExperiment(t *testing.T) {
 // steps: the ingress stop, which runs before the hub's mark step although
 // that step was registered first (as in runServerStart), and the ingress
 // drain, which runs after the marks and before cancel with the signal time
-// and the absolute step deadline (step start plus the conduit drain-step
-// bound on the shutdown clock). With the proxy off, or after a failed
-// start, it registers none. Any failure is fatal, outside hosted HA too
-// (design §3.9 "Drain through the proxy", v2.21.57).
+// and the hold deadline H (with G = 10s, T0+5s: 1s before the HTTP-drain
+// deadline T0+6s, earlier than the step deadline T0+8s), so cancel starts
+// at H. With the proxy off, or after a failed start, it registers none.
+// Any failure is fatal, outside hosted HA too (design §3.9 "Drain through
+// the proxy", v2.21.58).
 func TestStartConduit_ExternalRelayMode(t *testing.T) {
 	t.Cleanup(resetServerFlags)
 	captureStdLog(t)
@@ -264,6 +265,11 @@ func TestStartConduit_ExternalRelayMode(t *testing.T) {
 	conduitIngressShutdownDrain = func(s *hub.Server, opts hub.ConduitIngressDrainOptions) {
 		record("ingress drain")
 		drained <- drainCall{srv: s, opts: opts, ctxErr: ctx.Err()}
+		// Like the hub drain with a leg that never closes: return at the
+		// hold deadline.
+		fire, stop := clock.After(opts.Clock, opts.HoldDeadline.Sub(opts.Clock.Now()))
+		defer stop()
+		<-fire
 	}
 	steps := func(q *serverShutdownSequence) int {
 		q.mu.Lock()
@@ -272,8 +278,10 @@ func TestStartConduit_ExternalRelayMode(t *testing.T) {
 	}
 
 	clk := clock.NewFake(shutdownTestT0)
+	cancelledAt := make(chan time.Time, 1)
 	q := newServerShutdownSequence(func() {
 		record("cancel")
+		cancelledAt <- clk.Now()
 		cancel()
 	}, clk)
 	q.addStep(shutdownPhaseMark, func() { record("hub mark") }) // registered first, as in runServerStart
@@ -296,7 +304,7 @@ func TestStartConduit_ExternalRelayMode(t *testing.T) {
 	assert.Contains(t, err.Error(), "conduit external relay mode")
 	assert.Zero(t, steps(qFail), "no shutdown step after a failed start")
 
-	q.begin(syscall.SIGTERM)
+	go q.begin(syscall.SIGTERM)
 	select {
 	case s := <-stopped:
 		assert.Same(t, srv, s, "the ingress stop runs on this hub")
@@ -307,20 +315,57 @@ func TestStartConduit_ExternalRelayMode(t *testing.T) {
 	case call := <-drained:
 		assert.Same(t, srv, call.srv, "the ingress drain runs on this hub")
 		assert.NoError(t, call.ctxErr, "the ingress drain runs before cancel")
-		bound := conduitDrainStepBound(serverShutdownBudget{grace: 10 * time.Second, set: true})
 		assert.Equal(t, shutdownTestT0, call.opts.SignalAt, "the signal time")
-		assert.Equal(t, shutdownTestT0.Add(bound), call.opts.StepDeadline, "the step deadline is step start plus the drain-step bound")
+		assert.Equal(t, shutdownTestT0.Add(5*time.Second), call.opts.HoldDeadline,
+			"G = 10s: H = min(step deadline T0+8s, HTTP-drain deadline T0+6s - 1s)")
 		assert.Equal(t, 10*time.Second, call.opts.Grace)
 		assert.True(t, call.opts.GraceSet)
 		assert.NotNil(t, call.opts.Clock, "the drain runs on the shutdown clock")
 	case <-time.After(shutdownTestWait):
 		t.Fatal("the shutdown did not run the ingress drain")
 	}
+	require.True(t, clk.WaitForTimer(shutdownTestWait, shutdownTestT0.Add(5*time.Second)), "the hold deadline is armed")
+	clk.Advance(5 * time.Second)
+	select {
+	case at := <-cancelledAt:
+		httpDrainEnd := serverShutdownBudget{grace: 10 * time.Second, set: true}.httpDrainEnd(shutdownTestT0)
+		assert.Equal(t, shutdownTestT0.Add(6*time.Second), httpDrainEnd)
+		assert.Equal(t, shutdownTestT0.Add(5*time.Second), at, "cancel starts at H")
+		assert.False(t, at.After(httpDrainEnd.Add(-time.Second)), "cancel starts with at least 1s of the HTTP drain left")
+	case <-time.After(shutdownTestWait):
+		t.Fatal("the shutdown was not cancelled after the ingress drain")
+	}
 	assert.Error(t, ctx.Err(), "the server context is cancelled after the drain")
 	orderMu.Lock()
 	assert.Equal(t, []string{"ingress stop", "hub mark", "ingress drain", "cancel"}, order,
 		"proxying stops before the hub's mark; the drain runs after the marks and before cancel")
 	orderMu.Unlock()
+}
+
+// TestConduitIngressHoldDeadline (design v2.21.58): H = min(step deadline,
+// HTTP-drain deadline - 1s); without a budget, the step deadline.
+func TestConduitIngressHoldDeadline(t *testing.T) {
+	t0 := shutdownTestT0
+	for _, tc := range []struct {
+		name string
+		b    serverShutdownBudget
+		want time.Duration // H - T0
+	}{
+		{name: "G = 10s: the HTTP-drain deadline binds", b: serverShutdownBudget{grace: 10 * time.Second, set: true}, want: 5 * time.Second},
+		{name: "G = 30s: the step deadline", b: serverShutdownBudget{grace: 30 * time.Second, set: true}, want: 12 * time.Second},
+		{name: "G = 19s: the HTTP-drain deadline binds", b: serverShutdownBudget{grace: 19 * time.Second, set: true}, want: 11750 * time.Millisecond},
+		{name: "no budget: no HTTP-drain deadline, the step deadline", b: serverShutdownBudget{}, want: 12 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			step := t0.Add(conduitDrainStepBound(tc.b))
+			h := conduitIngressHoldDeadline(tc.b, t0, step)
+			assert.Equal(t, t0.Add(tc.want), h)
+			assert.False(t, h.After(step), "never after the step deadline")
+			if tc.b.set {
+				assert.False(t, h.After(tc.b.httpDrainEnd(t0).Add(-conduitIngressHTTPDrainMargin)), "at least 1s before the HTTP-drain deadline")
+			}
+		})
+	}
 }
 
 // TestRegisterConduitIngressShutdownDrain_BoundedWait: an ingress drain
