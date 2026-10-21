@@ -17,9 +17,11 @@
 package cmd
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -80,21 +82,38 @@ func drainTestAwaitListening(t *testing.T, addr, what string) {
 	require.Eventually(t, func() bool { return drainTestDialable(addr) }, drainTestWait, 10*time.Millisecond, "%s never listened on %s", what, addr)
 }
 
-// drainTestHold opens a connection to a broker listener and sends a
-// request whose body never fully arrives: before it answers, the server
-// waits to read (and discard) the rest of the body, so the connection
-// stays active and the broker's http.Server.Shutdown keeps waiting for it
-// until the test closes it. The broker's shutdown, and so its goroutine in the broker WaitGroup,
-// cannot finish while the hold is open. (A request cut inside its headers
-// would not do: a connection still reading its first request counts as
-// new, and Shutdown closes new connections older than 5s as idle.)
+// drainTestHold opens a connection to a broker listener and holds it in
+// the broker's http.Server, so the broker's Shutdown keeps waiting for it
+// until the test closes it: the broker's shutdown, and so its goroutine in
+// the broker WaitGroup, cannot finish while the hold is open.
+//
+// It writes two pipelined requests at once. The first is complete, and
+// reading its answer proves the server has accepted the connection and is
+// serving it (a connection still in the listen backlog when Shutdown closes
+// the listener is never tracked, so Shutdown would not wait for it). The
+// second has a body that never fully arrives: it is already buffered when
+// the first is answered, so the server parses it at once and then waits to
+// read (and discard) the rest of its body before answering, which keeps the
+// connection active. (A request cut inside its headers would not do:
+// Shutdown closes a connection that has read no request for 5s as idle.)
+// The short settle after the first answer leaves the server time to parse
+// the second; if it ever lost that race the test would FAIL, never pass.
 func drainTestHold(t *testing.T, addr string) net.Conn {
 	t.Helper()
 	c, err := net.DialTimeout("tcp", addr, 2*time.Second)
 	require.NoError(t, err)
-	_, err = c.Write([]byte("GET /healthz HTTP/1.1\r\nHost: hold\r\nContent-Length: 100\r\n\r\nx"))
-	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
+	_, err = c.Write([]byte("GET /healthz HTTP/1.1\r\nHost: hold\r\n\r\n" +
+		"GET /healthz HTTP/1.1\r\nHost: hold\r\nContent-Length: 100\r\n\r\nx"))
+	require.NoError(t, err)
+	require.NoError(t, c.SetReadDeadline(time.Now().Add(drainTestWait)))
+	resp, err := http.ReadResponse(bufio.NewReader(c), nil)
+	require.NoError(t, err, "the broker did not answer the hold's first request")
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	require.False(t, resp.Close, "the broker closes the hold's connection after its first request")
+	require.NoError(t, c.SetReadDeadline(time.Time{}))
+	time.Sleep(200 * time.Millisecond)
 	return c
 }
 
