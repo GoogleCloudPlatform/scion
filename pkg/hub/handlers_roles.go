@@ -345,12 +345,17 @@ func (s *Server) createRoleBindingScopeAware(w http.ResponseWriter, r *http.Requ
 	requireHubAuth := peek.ScopeType != store.RoleScopeProject
 	if peek.ScopeType == store.RoleScopeProject && peek.RoleDefinitionID != "" {
 		// Check if this is a built-in project role.
+		// A missing role is refused by createRoleBinding; any other lookup
+		// error answers 500 before an admission decision.
 		roleDef, err := s.store.GetRoleDefinition(r.Context(), peek.RoleDefinitionID)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusInternalServerError, "internal_error", "failed to load role definition", nil)
+			return
+		}
 		if err == nil && !store.IsBuiltInProjectMembershipRole(roleDef.Name) {
 			// Custom project role — require hub-level auth.
 			requireHubAuth = true
 		}
-		// If role lookup fails, createRoleBinding will handle the error.
 	}
 
 	if requireHubAuth {
@@ -358,7 +363,7 @@ func (s *Server) createRoleBindingScopeAware(w http.ResponseWriter, r *http.Requ
 			decision := s.authzService.Decide(r.Context(), AuthzRequest{
 				Principal:  principalContextForIdentity(user),
 				Credential: credentialContextForIdentity(user),
-				Resource:   Resource{Type: "role_binding", ID: "hub"},
+				Resource:   hubScopedResource("role_binding", "hub"),
 				Action:     Action("create"),
 				Permission: "role_binding.create",
 			})
@@ -1939,7 +1944,7 @@ func (s *Server) requireWritePermissionForRole(w http.ResponseWriter, r *http.Re
 	decision := s.authzService.Decide(r.Context(), AuthzRequest{
 		Principal:  principalContextForIdentity(user),
 		Credential: credentialContextForIdentity(user),
-		Resource:   Resource{Type: "role", ID: "hub"},
+		Resource:   hubScopedResource("role", "hub"),
 		Action:     Action(action),
 		Permission: permission,
 	})
@@ -1970,7 +1975,7 @@ func (s *Server) requireWritePermissionForRoleBinding(w http.ResponseWriter, r *
 	decision := s.authzService.Decide(r.Context(), AuthzRequest{
 		Principal:  principalContextForIdentity(user),
 		Credential: credentialContextForIdentity(user),
-		Resource:   Resource{Type: "role_binding", ID: "hub"},
+		Resource:   hubScopedResource("role_binding", "hub"),
 		Action:     Action(action),
 		Permission: permission,
 	})

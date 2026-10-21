@@ -143,6 +143,11 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 
 		oldPhase := agent.Phase
 		guardAgentPhaseTransition(agent, &status)
+		// Guard 0f applies to the agent's own reports only; a user or
+		// service with update access is not a container of some run.
+		if _, isAgent := identity.(AgentIdentity); isAgent {
+			guardStartLaunchSelfReport(agent, &status, presentedAgentTokenRunID(ctx))
+		}
 		// Guarded no-op: when a guard that owns the agent's status (Guard 0c,
 		// a delete in progress or a soft-deleted row; Guard 0b, an in-flight
 		// `scion reincarnate` migration) has blanked the report and nothing
@@ -404,6 +409,36 @@ func guardAgentPhaseTransition(agent *store.Agent, status *store.AgentStatusUpda
 			status.Phase = string(state.PhaseRunning)
 		}
 	}
+}
+
+// guardStartLaunchSelfReport is Guard 0f (design wave 3 D-e, there named
+// "Guard 0d"; renamed because 0d and 0e were taken), applied to the
+// agent's own status report after guardAgentPhaseTransition: while an
+// asynchronous start or restart launch is active on the row, a report whose
+// agent token names no run, or a run other than the row's (the run the hub
+// recorded for the new start before sending it), comes from the previous
+// container, not the one being launched. Its Phase, Activity, ExitCode,
+// ExitReason and Message are dropped, as Guards 0b and 0c drop them, so an
+// old container's "stopped" cannot end the launch as stopped during
+// launch. Other fields apply. A report from the new run's container passes.
+// The store already drops any report of another run (the run check in
+// UpdateAgentStatus); this guard adds the run-less token, and keeps the
+// quota reconcile from acting on such a report. Once the launch has ended
+// it no longer applies. No start-kind launch exists until asynchronous
+// start ships, so it never applies yet.
+func guardStartLaunchSelfReport(agent *store.Agent, status *store.AgentStatusUpdate, tokenRunID string) {
+	if agent.LaunchState != store.LaunchStateActive ||
+		(agent.LaunchKind != store.LaunchKindStart && agent.LaunchKind != store.LaunchKindRestart) {
+		return
+	}
+	if tokenRunID != "" && tokenRunID == agent.RunID {
+		return
+	}
+	status.Phase = ""
+	status.Activity = ""
+	status.ExitCode = nil
+	status.ExitReason = ""
+	status.Message = ""
 }
 
 // disruptionSettled reports whether agent is stopped or in error with a
@@ -732,12 +767,17 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 					return
 				}
 			}
-			forcedRecovery := agent.Phase == string(state.PhaseError) && startReq.ForceResume
+			// rest is the effective resting phase (ptone/scion#4669): an error
+			// row that remembers the phase a failed asynchronous start began
+			// from resumes as that phase would (a suspended memory resumes
+			// its session). It is a local only; agent.Phase is not changed.
+			rest := store.EffectiveRestingPhase(agent)
+			forcedRecovery := agent.Phase == string(state.PhaseError) && rest == string(state.PhaseError) && startReq.ForceResume
 			if forcedRecovery {
 				s.agentLifecycleLog.Warn("Force-resuming agent from error phase via lifecycle start",
 					"agent_id", agent.ID, "agent", agent.Name, "container_status", agent.ContainerStatus)
 			}
-			resume := agent.Phase == string(state.PhaseSuspended) || forcedRecovery
+			resume := rest == string(state.PhaseSuspended) || forcedRecovery
 			// Flat placement pre-check: a stale pin is refused before the
 			// reservation, the run intent and any credential or run-ID
 			// write.

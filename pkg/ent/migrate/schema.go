@@ -2475,6 +2475,10 @@ var (
 		{Name: "auto_provide", Type: field.TypeBool, Default: false},
 		{Name: "gcp_host_service_account_email", Type: field.TypeString, Nullable: true},
 		{Name: "gcp_host_project_id", Type: field.TypeString, Nullable: true},
+		{Name: "gcp_host_source", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "host_identity_observed_email", Type: field.TypeString, Nullable: true},
+		{Name: "host_identity_observation", Type: field.TypeString, Nullable: true},
+		{Name: "host_identity_observed_at", Type: field.TypeTime, Nullable: true},
 		{Name: "connected_hub_id", Type: field.TypeString, Nullable: true},
 		{Name: "connected_session_id", Type: field.TypeString, Nullable: true},
 		{Name: "connected_at", Type: field.TypeTime, Nullable: true},
@@ -2503,7 +2507,7 @@ var (
 			{
 				Name:    "runtimebroker_runtime_target_id",
 				Unique:  true,
-				Columns: []*schema.Column{RuntimeBrokersColumns[26]},
+				Columns: []*schema.Column{RuntimeBrokersColumns[30]},
 			},
 		},
 	}
@@ -2531,6 +2535,7 @@ var (
 		{Name: "event_type", Type: field.TypeString},
 		{Name: "payload", Type: field.TypeString, Default: "{}"},
 		{Name: "status", Type: field.TypeString, Default: "active"},
+		{Name: "status_reason", Type: field.TypeString, Nullable: true},
 		{Name: "next_run_at", Type: field.TypeTime, Nullable: true},
 		{Name: "last_run_at", Type: field.TypeTime, Nullable: true},
 		{Name: "last_run_status", Type: field.TypeString, Nullable: true},
@@ -2565,7 +2570,7 @@ var (
 			{
 				Name:    "schedule_next_run_at",
 				Unique:  false,
-				Columns: []*schema.Column{SchedulesColumns[22]},
+				Columns: []*schema.Column{SchedulesColumns[23]},
 			},
 		},
 	}
@@ -2826,8 +2831,6 @@ var (
 		{Name: "description", Type: field.TypeString, Nullable: true},
 		{Name: "harness", Type: field.TypeString},
 		{Name: "default_harness_config", Type: field.TypeString, Nullable: true},
-		{Name: "image", Type: field.TypeString, Nullable: true},
-		{Name: "config", Type: field.TypeString, Nullable: true},
 		{Name: "agent_config", Type: field.TypeString, Nullable: true},
 		{Name: "content_hash", Type: field.TypeString, Nullable: true},
 		{Name: "scope", Type: field.TypeString, Default: "global"},
@@ -2856,7 +2859,7 @@ var (
 			{
 				Name:    "template_slug_scope_scope_id",
 				Unique:  true,
-				Columns: []*schema.Column{TemplatesColumns[2], TemplatesColumns[11], TemplatesColumns[12]},
+				Columns: []*schema.Column{TemplatesColumns[2], TemplatesColumns[9], TemplatesColumns[10]},
 			},
 			{
 				Name:    "template_harness",
@@ -2866,12 +2869,12 @@ var (
 			{
 				Name:    "template_status",
 				Unique:  false,
-				Columns: []*schema.Column{TemplatesColumns[20]},
+				Columns: []*schema.Column{TemplatesColumns[18]},
 			},
 			{
 				Name:    "template_content_hash",
 				Unique:  false,
-				Columns: []*schema.Column{TemplatesColumns[10]},
+				Columns: []*schema.Column{TemplatesColumns[8]},
 			},
 		},
 	}
@@ -2885,6 +2888,9 @@ var (
 		{Name: "label", Type: field.TypeString, Default: ""},
 		{Name: "created_at", Type: field.TypeTime},
 		{Name: "expires_at", Type: field.TypeTime},
+		{Name: "grantor_kind", Type: field.TypeEnum, Enums: []string{"human", "test_infra_offline"}, Default: "human"},
+		{Name: "hub_id", Type: field.TypeString, Default: ""},
+		{Name: "marker_created_at", Type: field.TypeTime, Nullable: true},
 		{Name: "revoked_at", Type: field.TypeTime, Nullable: true},
 		{Name: "revoked_by", Type: field.TypeString, Nullable: true},
 	}

@@ -40,18 +40,22 @@ import (
 //     InlineConfig, which older hubs filled with a hub-default copy.
 //
 // Requester telemetry is on/off only, for every broker: its other fields
-// are dropped with a create warning (warnRequesterTelemetryDropped). Only the
-// delivery channel depends on the broker's templateTiers capability:
+// are dropped with a create warning (warnRequesterTelemetryDropped). Every
+// broker receives the same delivery, as separate tiers (ptone/scion#4224):
 //
-//   - capable broker: the hub default in HubAgentDefaults.Telemetry (added
-//     by the hub-defaults builder, see wireTelemetry), the
-//     policy in TelemetryPolicy, and the requester's on/off as
-//     SCION_TELEMETRY_ENABLED (the requester flag tier, below policy).
-//     InlineConfig.Telemetry is not sent. The ladder is broker settings <
-//     hub default < requester on/off < project policy.
-//   - legacy broker: the same ladder folded into InlineConfig.Telemetry: a
-//     copy of the hub default, the requester's Enabled over it, then the
-//     policy over Enabled. Removed in ptone/scion#4224.
+//   - the hub default in HubAgentDefaults.Telemetry (added by the
+//     hub-defaults builder, see wireTelemetry);
+//   - the policy in TelemetryPolicy;
+//   - the requester's on/off as SCION_TELEMETRY_ENABLED (the requester flag
+//     tier, below policy).
+//
+// InlineConfig.Telemetry is never sent. The ladder is broker settings < hub
+// default < requester on/off < project policy. A broker older than the
+// templateTiers capability (TS-2a) ignores the two unknown fields, so its
+// agents get only the broker's own settings telemetry plus the requester's
+// on/off (it maps SCION_TELEMETRY_ENABLED to its override); dispatch is not
+// refused, and the heartbeat handler warns once per broker
+// (warnBrokerWithoutTemplateTiers).
 //
 // Template telemetry reaches no broker by any hub path (ptone/scion#4524).
 
@@ -60,9 +64,6 @@ const envTelemetryEnabled = "SCION_TELEMETRY_ENABLED"
 
 // telemetryDispatch is the telemetry one dispatch delivers.
 type telemetryDispatch struct {
-	// templateTiers reports that the target broker takes the hub default
-	// and the policy as separate tiers.
-	templateTiers bool
 	// hubDefault is the hub's settings telemetry; nil when none.
 	hubDefault *api.TelemetryConfig
 	// policy is the project's telemetry on/off; nil when none.
@@ -133,27 +134,12 @@ func requesterTelemetryDroppedWarning(fields []string) string {
 		strings.Join(fields, ", "))
 }
 
-// brokerTemplateTiers reports whether brokerID reports the templateTiers
-// capability. A lookup failure reads as a legacy broker: the legacy payload
-// is still understood by a capable broker.
-func (d *HTTPAgentDispatcher) brokerTemplateTiers(ctx context.Context, brokerID string) bool {
-	if brokerID == "" || d.store == nil {
-		return false
-	}
-	broker, err := d.store.GetRuntimeBroker(ctx, brokerID)
-	if err != nil || broker == nil || broker.Capabilities == nil {
-		return false
-	}
-	return broker.Capabilities.TemplateTiers
-}
-
 // dispatchTelemetry resolves the telemetry for one dispatch of agent.
 // policy is the project policy (projectDispatchInfo.telemetryPolicy).
-func (d *HTTPAgentDispatcher) dispatchTelemetry(ctx context.Context, agent *store.Agent, policy *bool) telemetryDispatch {
+func (d *HTTPAgentDispatcher) dispatchTelemetry(agent *store.Agent, policy *bool) telemetryDispatch {
 	t := telemetryDispatch{
-		templateTiers: d.brokerTemplateTiers(ctx, agent.RuntimeBrokerID),
-		policy:        policy,
-		requester:     requesterTelemetry(agent.AppliedConfig),
+		policy:    policy,
+		requester: requesterTelemetry(agent.AppliedConfig),
 	}
 	if d.hubTelemetryProvider != nil {
 		t.hubDefault = d.hubTelemetryProvider()
@@ -161,83 +147,46 @@ func (d *HTTPAgentDispatcher) dispatchTelemetry(ctx context.Context, agent *stor
 	return t
 }
 
-// inlineTelemetry is the InlineConfig.Telemetry this dispatch sends: nil for
-// a templateTiers broker; for a legacy broker the hub default, the
-// requester's Enabled over it, then the policy over Enabled. The requester's
-// other fields are never sent. The result never aliases the hub default or
-// the requester's record.
-func (t telemetryDispatch) inlineTelemetry() *api.TelemetryConfig {
-	if t.templateTiers {
-		return nil
-	}
-	var out *api.TelemetryConfig
-	if t.hubDefault != nil {
-		c := *t.hubDefault
-		out = &c
-	}
-	if t.requester != nil && t.requester.Enabled != nil {
-		if out == nil {
-			out = &api.TelemetryConfig{}
-		}
-		v := *t.requester.Enabled
-		out.Enabled = &v
-	}
-	if t.policy != nil {
-		if out == nil {
-			out = &api.TelemetryConfig{}
-		}
-		v := *t.policy
-		out.Enabled = &v
-	}
-	return out
-}
-
 // inlineConfig returns the InlineConfig to send for stored (the agent's
-// AppliedConfig.InlineConfig): a shallow copy with Telemetry replaced by
-// inlineTelemetry. stored is never modified. Nil when stored is nil and
-// there is no telemetry to send.
+// AppliedConfig.InlineConfig): a shallow copy with Telemetry cleared, since
+// telemetry travels only as tiers. stored is never modified. Nil when stored
+// is nil.
 func (t telemetryDispatch) inlineConfig(stored *api.ScionConfig) *api.ScionConfig {
-	tel := t.inlineTelemetry()
-	if stored == nil && tel == nil {
+	if stored == nil {
 		return nil
 	}
-	out := &api.ScionConfig{}
-	if stored != nil {
-		c := *stored
-		out = &c
-	}
-	out.Telemetry = tel
-	return out
+	out := *stored
+	out.Telemetry = nil
+	return &out
 }
 
 // wireTelemetry is the hub telemetry default the hub-defaults builder
 // (remoteHubAgentDefaults / startHubAgentDefaults) puts in
-// HubAgentDefaults.Telemetry: a copy for a templateTiers broker, nil for a
-// legacy broker, which gets it inline (inlineTelemetry).
+// HubAgentDefaults.Telemetry: a copy, nil when there is none.
 func (t telemetryDispatch) wireTelemetry() *api.TelemetryConfig {
-	if !t.templateTiers || t.hubDefault == nil {
+	if t.hubDefault == nil {
 		return nil
 	}
 	c := *t.hubDefault
 	return &c
 }
 
-// telemetryPolicy is the TelemetryPolicy wire value: the project policy for
-// a templateTiers broker, nil otherwise.
+// telemetryPolicy is the TelemetryPolicy wire value: a copy of the project
+// policy, nil when there is none.
 func (t telemetryDispatch) telemetryPolicy() *bool {
-	if !t.templateTiers || t.policy == nil {
+	if t.policy == nil {
 		return nil
 	}
 	v := *t.policy
 	return &v
 }
 
-// injectRequesterEnabled delivers the requester's telemetry on/off to a
-// templateTiers broker as SCION_TELEMETRY_ENABLED, unless env already sets
-// the key (an explicit env flag from the requester). The broker ranks it
-// below the project policy.
+// injectRequesterEnabled delivers the requester's telemetry on/off as
+// SCION_TELEMETRY_ENABLED, unless env already sets the key (an explicit env
+// flag from the requester). The broker ranks it below the project policy; a
+// broker older than templateTiers maps it to its own telemetry override.
 func (t telemetryDispatch) injectRequesterEnabled(env map[string]string, classifications *map[string]api.EnvKind) {
-	if !t.templateTiers || t.requester == nil || t.requester.Enabled == nil || env == nil {
+	if t.requester == nil || t.requester.Enabled == nil || env == nil {
 		return
 	}
 	if _, ok := env[envTelemetryEnabled]; ok {
@@ -262,7 +211,7 @@ func (s *Server) hubTelemetryDefault() *api.TelemetryConfig {
 
 // warnRequesterTelemetryDropped adds a create warning when the requester's
 // telemetry sets fields other than enabled: no broker receives them, only
-// the on/off (inlineTelemetry, injectRequesterEnabled).
+// the on/off (injectRequesterEnabled).
 func (s *Server) warnRequesterTelemetryDropped(ctx context.Context, agent *store.Agent) {
 	if agent == nil {
 		return
@@ -270,4 +219,33 @@ func (s *Server) warnRequesterTelemetryDropped(ctx context.Context, agent *store
 	if fields := requesterTelemetryDroppedFields(requesterTelemetry(agent.AppliedConfig)); len(fields) > 0 {
 		addDispatchWarnings(ctx, requesterTelemetryDroppedWarning(fields))
 	}
+}
+
+// brokerWithoutTemplateTiersWarning is the WARN for a broker whose heartbeat
+// capabilities lack templateTiers.
+func brokerWithoutTemplateTiersWarning(name string) string {
+	return fmt.Sprintf("runtime broker %s does not report the templateTiers capability; hub telemetry defaults and project telemetry policy are not applied to its agents. Upgrade the broker.", name)
+}
+
+// warnBrokerWithoutTemplateTiers logs, at WARN and once per broker per
+// process, that the broker's heartbeat capabilities lack templateTiers: such
+// a broker (older than TS-2a) ignores the telemetry tiers every dispatch
+// sends, and its agents get only its own settings telemetry. It is called
+// from the heartbeat handler, where the evidence arrives (on a multi-replica
+// hub, heartbeats and dispatches can reach different replicas). A heartbeat
+// without capabilities says nothing and is not warned about; neither is
+// registration, which never carries templateTiers. Dispatch is never refused
+// (ptone/scion#4224).
+func (s *Server) warnBrokerWithoutTemplateTiers(brokerID, brokerName string, caps *store.BrokerCapabilities) {
+	if caps == nil || caps.TemplateTiers || brokerID == "" {
+		return
+	}
+	if _, warned := s.brokerTemplateTiersWarned.LoadOrStore(brokerID, struct{}{}); warned {
+		return
+	}
+	name := brokerName
+	if name == "" {
+		name = brokerID
+	}
+	s.agentLifecycleLog.Warn(brokerWithoutTemplateTiersWarning(name), "broker_id", brokerID)
 }

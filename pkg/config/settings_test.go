@@ -864,7 +864,7 @@ func TestDeleteHubConnection(t *testing.T) {
 func TestUpdateSetting_SplitStorageWritesToExternalDir(t *testing.T) {
 	// When a project has split storage (project-id file), UpdateSetting should
 	// write to the external config dir (~/.scion/project-configs/…), not the
-	// local .scion/ directory, so that LoadSettingsKoanf reads the same values.
+	// local .scion/ directory, so that LoadSettings reads the same values.
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
 	_ = os.Setenv("HOME", tmpHome)
@@ -911,10 +911,10 @@ func TestUpdateSetting_SplitStorageWritesToExternalDir(t *testing.T) {
 		t.Errorf("expected no settings.yaml in local .scion/ dir, but file exists")
 	}
 
-	// Verify LoadSettingsKoanf reads the value correctly
-	settings, err := LoadSettingsKoanf(scionDir)
+	// Verify LoadSettings reads the value correctly
+	settings, err := LoadSettings(scionDir)
 	if err != nil {
-		t.Fatalf("LoadSettingsKoanf failed: %v", err)
+		t.Fatalf("LoadSettings failed: %v", err)
 	}
 	if !settings.IsHubEnabled() {
 		t.Errorf("expected hub.enabled=true from effective settings, got false")

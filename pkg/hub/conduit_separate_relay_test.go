@@ -69,6 +69,10 @@ type separateRelayWorld struct {
 	// spawnPTY, when set, makes the agent serve pty streams with it.
 	spawnPTY func(context.Context, sconduit.PTYRequest) (sconduit.PTYProcess, error)
 
+	// authzClocks are the hubs' stream re-check clocks, by hub id ("hub-a",
+	// "hub-b"); each starts at the clock grants are minted on.
+	authzClocks map[string]*clock.Fake
+
 	mu          sync.Mutex
 	agentOpened []uint32 // ids of the streams opened on the agent's session
 }
@@ -85,10 +89,33 @@ func (w *separateRelayWorld) lastAgentStream(t *testing.T) uint32 {
 
 func newSeparateRelayWorld(t *testing.T, mods ...func(*separateRelayWorld)) *separateRelayWorld {
 	t.Helper()
+	return newSeparateRelayWorldWith(t, separateRelayOptions{}, mods...)
+}
+
+// separateRelayOptions adjusts the separate relay world before it serves.
+type separateRelayOptions struct {
+	// enforce sets target_stream_deadlines to enforce on both hubs before
+	// they start.
+	enforce bool
+	// agentWithoutRenewal makes the agent's Hello advertise no protocol
+	// features, as a sciontool without stream renewal does.
+	agentWithoutRenewal bool
+	// srvMod, when set, is applied to both hubs before they start external
+	// relay mode (after enforce), so a test can configure them without
+	// racing serving goroutines.
+	srvMod func(*Server)
+	// noConduitAgent starts no conduit agent: the agent has no conduit
+	// session.
+	noConduitAgent bool
+}
+
+// newSeparateRelayWorldWith is newSeparateRelayWorld with opts.
+func newSeparateRelayWorldWith(t *testing.T, opts separateRelayOptions, mods ...func(*separateRelayWorld)) *separateRelayWorld {
+	t.Helper()
 	cf := newConduitFixture(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	w := &separateRelayWorld{release: make(chan struct{})}
+	w := &separateRelayWorld{release: make(chan struct{}), authzClocks: map[string]*clock.Fake{}}
 
 	// The app inside the agent: /events holds an event stream open until
 	// the test feeds it; everything else answers hello.
@@ -129,11 +156,18 @@ func newSeparateRelayWorld(t *testing.T, mods ...func(*separateRelayWorld)) *sep
 	replay := testReplayStore(t) // shared by both hubs, as the database is
 	for id, srv := range map[string]*Server{"hub-a": cf.srv, "hub-b": w.hubB} {
 		srv.config.SharedSigningSecret = testRelaySessionSecret
+		if opts.enforce {
+			enforceTargetDeadlines(srv)
+		}
+		if opts.srvMod != nil {
+			opts.srvMod(srv)
+		}
+		w.authzClocks[id] = clock.NewFake(cf.clock.Now())
 		require.NoError(t, srv.StartConduitExternal(ctx, ConduitExternalOptions{
 			InstanceID: id, PeerAuth: externalRelayAuth(t, id), Store: regStore,
 			// The clock also drives the stream re-check and its renewal
 			// driver, so it starts at the clock grants are minted on.
-			Registry: registry.New(regStore, registry.Config{}), Clock: clock.NewFake(cf.clock.Now()),
+			Registry: registry.New(regStore, registry.Config{}), Clock: w.authzClocks[id],
 			replayStore: replay,
 		}))
 	}
@@ -172,10 +206,15 @@ func newSeparateRelayWorld(t *testing.T, mods ...func(*separateRelayWorld)) *sep
 			return []*conduitv1.Frame{f}
 		}},
 	}
+	if opts.agentWithoutRenewal {
+		stripHelloFeatures(&w.agentSession)
+	}
 	for _, m := range mods {
 		m(w)
 	}
-	w.startAgentDialingRelay(t, addr)
+	if !opts.noConduitAgent {
+		w.startAgentDialingRelay(t, addr)
+	}
 
 	w.publicB = httptest.NewServer(w.hubB.Handler())
 	t.Cleanup(w.publicB.Close)
@@ -324,4 +363,20 @@ func TestSeparateRelay_AgentReachedThroughAnotherHub(t *testing.T) {
 		t.Fatal("hub B's leaf stayed open after the agent was deleted")
 	}
 	assert.Empty(t, w.trackedOnB(t))
+}
+
+// stripHelloFeatures makes the session's outbound Hello advertise no
+// protocol features (stream renewal among them), as an older sciontool's
+// does, keeping any interceptor already set.
+func stripHelloFeatures(cfg *conduit.Config) {
+	prev := cfg.Interceptor
+	cfg.Interceptor = func(dir conduit.Direction, f *conduitv1.Frame) []*conduitv1.Frame {
+		if h := f.GetHello(); dir == conduit.Outbound && h != nil && h.GetCapabilities() != nil {
+			h.Capabilities.Features = nil
+		}
+		if prev != nil {
+			return prev(dir, f)
+		}
+		return []*conduitv1.Frame{f}
+	}
 }

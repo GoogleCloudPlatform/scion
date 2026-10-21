@@ -131,40 +131,20 @@ func TestGitUtils(t *testing.T) {
 			t.Errorf("worktree dir still exists after removal")
 		}
 
-		// Test PruneWorktrees
-		prunePath := filepath.Join(repoDir, "prune-test")
-		pruneBranch := "prune-branch"
-		if err := CreateWorktree(prunePath, pruneBranch); err != nil {
-			t.Fatalf("CreateWorktree for prune failed: %v", err)
-		}
-		// Manually remove directory to simulate stale worktree
-		if err := os.RemoveAll(prunePath); err != nil {
-			t.Fatalf("Failed to remove prune path: %v", err)
-		}
-		// Prune
-		if err := PruneWorktrees(); err != nil {
-			t.Fatalf("PruneWorktrees failed: %v", err)
-		}
-		// Verify we can create it again (if prune failed, this might fail with 'already exists')
-		if err := CreateWorktree(prunePath, pruneBranch); err != nil {
-			t.Errorf("Failed to recreate worktree after prune: %v", err)
-		}
-		// Clean up
-		_, _ = RemoveWorktree(repoDir, prunePath, true)
 	})
 
-	t.Run("PruneWorktreesIn", func(t *testing.T) {
-		prunePath := filepath.Join(repoDir, "prune-in-test")
-		pruneBranch := "prune-in-branch"
-		if err := CreateWorktree(prunePath, pruneBranch); err != nil {
+	t.Run("RemoveWorktreeEntryIn", func(t *testing.T) {
+		stalePath := filepath.Join(repoDir, "stale-entry-test")
+		staleBranch := "stale-entry-branch"
+		if err := CreateWorktree(stalePath, staleBranch); err != nil {
 			t.Fatalf("CreateWorktree failed: %v", err)
 		}
 		// Manually remove directory to simulate stale worktree
-		if err := os.RemoveAll(prunePath); err != nil {
-			t.Fatalf("Failed to remove prune path: %v", err)
+		if err := os.RemoveAll(stalePath); err != nil {
+			t.Fatalf("Failed to remove stale path: %v", err)
 		}
 
-		// PruneWorktreesIn should work even when CWD is outside the repo
+		// RemoveWorktreeEntryIn works even when CWD is outside the repo
 		outsideDir := t.TempDir()
 		prevWd, _ := os.Getwd()
 		if err := os.Chdir(outsideDir); err != nil {
@@ -172,19 +152,19 @@ func TestGitUtils(t *testing.T) {
 		}
 		defer func() { _ = os.Chdir(prevWd) }()
 
-		if err := PruneWorktreesIn(repoDir); err != nil {
-			t.Fatalf("PruneWorktreesIn failed: %v", err)
+		if err := RemoveWorktreeEntryIn(repoDir, stalePath); err != nil {
+			t.Fatalf("RemoveWorktreeEntryIn failed: %v", err)
 		}
 
-		// Verify we can create the worktree again (prune cleared the stale record)
+		// Verify we can create the worktree again (the stale entry is gone)
 		if err := os.Chdir(prevWd); err != nil {
 			t.Fatal(err)
 		}
-		if err := CreateWorktree(prunePath, pruneBranch); err != nil {
-			t.Errorf("Failed to recreate worktree after PruneWorktreesIn: %v", err)
+		if err := CreateWorktree(stalePath, staleBranch); err != nil {
+			t.Errorf("Failed to recreate worktree after RemoveWorktreeEntryIn: %v", err)
 		}
 		// Clean up
-		_, _ = RemoveWorktree(repoDir, prunePath, true)
+		_, _ = RemoveWorktree(repoDir, stalePath, true)
 	})
 
 	t.Run("DeleteBranchIn", func(t *testing.T) {
@@ -651,8 +631,6 @@ func TestIsRegisteredWorktree_PrunableRecreatedPathRejected(t *testing.T) {
 	if ok {
 		t.Error("expected a prunable (stale) worktree registration, now a plain recreated directory, to be rejected")
 	}
-
-	_ = PruneWorktreesIn(mainRepo)
 }
 
 // TestIsRegisteredWorktree_RecreatedWithForeignGitDirRefused covers a
@@ -713,8 +691,6 @@ func TestIsRegisteredWorktree_RecreatedWithForeignGitDirRefused(t *testing.T) {
 	if ok {
 		t.Error("expected a worktree path recreated with a foreign repo's own .git dir to be rejected against a linked worktree repoRoot")
 	}
-
-	_ = PruneWorktreesIn(mainRepo)
 }
 
 // TestIsLinkedWorktreeOf_RejectsGitdirEqualToWorktreesDir covers a real
@@ -762,21 +738,6 @@ func TestIsLinkedWorktreeOf_RejectsGitdirEqualToWorktreesDir(t *testing.T) {
 	}
 	if !isLinkedWorktreeOf(wtPath2, worktreesDir) {
 		t.Error("expected a gitdir naming a real entry under worktreesDir to be accepted, got false")
-	}
-}
-
-func TestPruneWorktrees_SkipsInsideContainer(t *testing.T) {
-	// When SCION_HOST_UID is set (agent container), pruning should be a no-op
-	// to prevent destroying sibling worktree metadata that appears stale from
-	// the container's mount layout.
-	t.Setenv("SCION_HOST_UID", "1000")
-
-	// Both prune functions should return nil without running git at all.
-	if err := PruneWorktrees(); err != nil {
-		t.Errorf("PruneWorktrees should no-op inside container, got: %v", err)
-	}
-	if err := PruneWorktreesIn("/nonexistent/path"); err != nil {
-		t.Errorf("PruneWorktreesIn should no-op inside container, got: %v", err)
 	}
 }
 

@@ -154,9 +154,10 @@ type Agent struct {
 	// UpdateAgent (the whole-row CAS writer) never sets any of these from the
 	// caller's struct: they are absent from its Ent builder chain entirely.
 	// The only writers are BeginLaunch, BeginStartLaunch, MarkLaunchAccepted,
-	// EndLaunch, ApplyLaunchReport and RunLaunchReaperTick, plus the narrow "clear
-	// launch_error / end an active launch" rule inside UpdateAgent and
-	// UpdateAgentStatus when the written phase is "running" (§3.3).
+	// EndLaunch, EndLaunchWithCode, ApplyLaunchReport and RunLaunchReaperTick,
+	// plus the narrow "clear launch_error / end an active launch" rule inside
+	// UpdateAgent and UpdateAgentStatus when the written phase is "running"
+	// (§3.3).
 	LaunchAsyncOptIn   bool      `json:"-"`
 	LaunchID           string    `json:"-"`
 	LaunchState        string    `json:"-"` // "" | "active" | "ended"
@@ -1126,12 +1127,89 @@ type RuntimeBroker struct {
 	// host machine. Set by the operator at registration/update time so the Hub
 	// can gate passthrough mode on an actAs check against this identity.
 	// Optional: brokers that never serve passthrough agents need not set them.
+	//
+	// The pair is written together, only by CreateRuntimeBroker and the
+	// dedicated SetRuntimeBrokerGCPHost* store methods. UpdateRuntimeBroker
+	// leaves the stored values unchanged whatever this copy carries.
 	GCPHostServiceAccountEmail string `json:"gcp_host_service_account_email,omitempty"`
 	GCPHostProjectID           string `json:"gcp_host_project_id,omitempty"`
+	// GCPHostSource records how the GCP host pair was last set; see the
+	// GCPHostSource* constants. Empty means not recorded. Not serialized.
+	GCPHostSource string `json:"-"`
+	// HostObservation is the last GCP identity a co-located server read
+	// from the metadata server for its own broker; nil when never observed
+	// (every remote broker). Written only by
+	// RecordRuntimeBrokerHostObservation. It is not serialized: the Hub
+	// shows the derived HostIdentity instead.
+	HostObservation *HostIdentityObservation `json:"-"`
+	// HostIdentity is the derived host identity state, filled in by the
+	// Hub for display. It is never stored.
+	HostIdentity *HostIdentityStatus `json:"hostIdentity,omitempty"`
 
 	// Ownership - tracks who registered this broker
 	CreatedBy     string `json:"createdBy,omitempty"`
 	CreatedByName string `json:"createdByName,omitempty"` // Enriched: resolved from CreatedBy
+}
+
+// Values of RuntimeBroker.GCPHostSource.
+const (
+	// GCPHostSourceRegistration: filled by a registration while unset.
+	GCPHostSourceRegistration = "registration"
+	// GCPHostSourceDetected: read by a co-located server from the GCE
+	// metadata server.
+	GCPHostSourceDetected = "detected"
+	// GCPHostSourceAdmin: set or cleared through the update API. Registration
+	// and detection leave the pair unchanged until the next update.
+	GCPHostSourceAdmin = "admin"
+)
+
+// BrokerRoleLabel describes how a runtime broker is hosted:
+// BrokerRoleEmbedded for the co-located broker, BrokerRoleRemote otherwise.
+// BrokerTypeLabel is the broker type label (for example "external").
+const (
+	BrokerRoleLabel    = "scion.io/broker-role"
+	BrokerRoleEmbedded = "embedded"
+	BrokerRoleRemote   = "remote"
+	BrokerTypeLabel    = "scion.io/broker-type"
+)
+
+// Outcomes of a HostIdentityObservation.
+const (
+	// HostObservationPresent: the metadata server reported an account.
+	HostObservationPresent = "present"
+	// HostObservationAbsent: the metadata server is reachable but reports
+	// no default account (or an empty email).
+	HostObservationAbsent = "absent"
+	// HostObservationUnavailable: not on GCE, or the metadata server could
+	// not be read.
+	HostObservationUnavailable = "unavailable"
+)
+
+// HostIdentityObservation is what a co-located server read from the GCE
+// metadata server about its host's GCP identity.
+type HostIdentityObservation struct {
+	// Outcome is one of the HostObservation* constants.
+	Outcome string
+	// Email is the reported account (lowercased) when Outcome is present.
+	Email string
+	// ObservedAt is when the observation was made.
+	ObservedAt time.Time
+}
+
+// HostIdentityStatus is the derived host identity state of a broker, for
+// display. ObservedEmail and ObservedAt are set only for callers allowed to
+// update the broker.
+type HostIdentityStatus struct {
+	State         string     `json:"state"`
+	ObservedEmail string     `json:"observedEmail,omitempty"`
+	ObservedAt    *time.Time `json:"observedAt,omitempty"`
+}
+
+// GCPHostSetting is a stored GCP host service account, project and source.
+type GCPHostSetting struct {
+	Email   string
+	Project string
+	Source  string
 }
 
 // BrokerCapabilities describes what a runtime broker can do.
@@ -1148,6 +1226,11 @@ type BrokerCapabilities struct {
 	// create path and the launch-report protocol (design t1-async-create-v11.md
 	// §3.2, §7 P1b-1).
 	AsyncLaunch bool `json:"asyncLaunch"`
+	// AsyncStart indicates the broker can run a start or restart of an
+	// existing agent as an asynchronous launch (ptone/scion#4669). The hub
+	// sends start launch fields only to a broker that is not known to lack
+	// it.
+	AsyncStart bool `json:"asyncStart,omitempty"`
 	// EmptyPerAgentWorkspace indicates the broker can provision the
 	// empty-per-agent workspace sharing mode (private empty directory per
 	// agent on non-git projects). The hub refuses to dispatch such agents to
@@ -1278,10 +1361,8 @@ type Template struct {
 	Description string `json:"description,omitempty"` // Optional description
 
 	// Configuration
-	Harness              string          `json:"harness"`                        // claude, gemini, opencode, codex, generic
-	DefaultHarnessConfig string          `json:"defaultHarnessConfig,omitempty"` // default_harness_config name from template config (e.g. "claude-web")
-	Image                string          `json:"image"`                          // Default container image
-	Config               *TemplateConfig `json:"config,omitempty"`
+	Harness              string `json:"harness"`                        // claude, gemini, opencode, codex, generic
+	DefaultHarnessConfig string `json:"defaultHarnessConfig,omitempty"` // default_harness_config name from template config (e.g. "claude-web")
 
 	// AgentConfig is a derived, read-only snapshot of the template's own
 	// scion-agent.{yaml,yml,json}, with per-agent fields cleared. Only the
@@ -1466,39 +1547,6 @@ const (
 	HarnessConfigScopeProject = "project"
 	HarnessConfigScopeUser    = "user"
 )
-
-// TemplateConfig holds template configuration details.
-type TemplateConfig struct {
-	Harness     string               `json:"harness,omitempty"`
-	Image       string               `json:"image,omitempty"`
-	ConfigDir   string               `json:"configDir,omitempty"`
-	Env         map[string]string    `json:"env,omitempty"`
-	Detached    bool                 `json:"detached,omitempty"`
-	CommandArgs []string             `json:"commandArgs,omitempty"`
-	Model       string               `json:"model,omitempty"`
-	Kubernetes  *KubernetesConfig    `json:"kubernetes,omitempty"`
-	HubAccess   *HubAccessConfig     `json:"hubAccess,omitempty"`
-	Secrets     []api.RequiredSecret `json:"secrets,omitempty"`
-	Telemetry   *api.TelemetryConfig `json:"telemetry,omitempty"`
-	MessageMode string               `json:"messageMode,omitempty"` // none, lineage, branch, project, hub
-}
-
-// HubAccessConfig defines what Hub API scopes an agent created from this template receives.
-type HubAccessConfig struct {
-	Scopes []string `json:"scopes,omitempty"`
-}
-
-// KubernetesConfig holds Kubernetes-specific configuration for templates.
-type KubernetesConfig struct {
-	Resources    *ResourceRequirements `json:"resources,omitempty"`
-	NodeSelector map[string]string     `json:"nodeSelector,omitempty"`
-}
-
-// ResourceRequirements defines compute resource requirements.
-type ResourceRequirements struct {
-	Limits   map[string]string `json:"limits,omitempty"`
-	Requests map[string]string `json:"requests,omitempty"`
-}
 
 // User represents a registered user in the Hub database.
 type User struct {
@@ -1800,6 +1848,97 @@ type TestIdentityDelegation struct {
 	ExpiresAt time.Time
 	RevokedAt *time.Time
 	RevokedBy *string
+	// GrantorKind is DelegationGrantorHuman (the API path) or
+	// DelegationGrantorTestInfraOffline (phase DL: written only by the
+	// offline host command, member scope only). An empty value reads as
+	// human (the column default).
+	GrantorKind string
+	// HubID is the hub id an offline delegation is bound to; empty for a
+	// human grantor.
+	HubID string
+	// MarkerCreatedAt is the created_at of the test infrastructure marker
+	// an offline delegation is bound to; nil for a human grantor.
+	MarkerCreatedAt *time.Time
+}
+
+// Delegation grantor kinds (TestIdentityDelegation.GrantorKind). Every site
+// that reads a grantor switches on these explicitly and denies any other
+// value.
+const (
+	// DelegationGrantorHuman is a live human issuer who created the
+	// delegation through the hub API.
+	DelegationGrantorHuman = "human"
+	// DelegationGrantorTestInfraOffline is the offline host command
+	// `scion server test-infra delegate` (ptone/scion#4240, phase DL). It
+	// is not a principal: the delegation's GrantorID is
+	// TestInfraOfflineGrantorID(HubID), a reserved id that names no user.
+	DelegationGrantorTestInfraOffline = "test_infra_offline"
+)
+
+// Bounds of an offline (DelegationGrantorTestInfraOffline) delegation
+// (phase DL). The offline writer (`scion server test-infra delegate`) and the redeem gate
+// (pkg/hub) both enforce them.
+const (
+	// TestInfraOfflineDelegationScope is the only scope an offline
+	// delegation can hold: member and viewer test identity issuance.
+	TestInfraOfflineDelegationScope = "test_identity:issue"
+	// TestInfraOfflineDelegationMaxTTL is the longest lifetime of an
+	// offline delegation (a human member delegation allows 7 days; with no
+	// human grantor whose deactivation would end it, an offline one is
+	// capped at three default 8 h test identity lifetimes).
+	TestInfraOfflineDelegationMaxTTL = 24 * time.Hour
+	// TestInfraOfflineDelegationDefaultTTL is the default lifetime.
+	TestInfraOfflineDelegationDefaultTTL = 8 * time.Hour
+	// TestInfraOfflineDelegationMinTTL is the shortest lifetime.
+	TestInfraOfflineDelegationMinTTL = time.Minute
+	// TestInfraOfflineDelegationMaxMemberCap is the largest per-delegation
+	// identity cap (the member per-issuer cap; the hub-wide cap applies on
+	// top).
+	TestInfraOfflineDelegationMaxMemberCap = 5
+	// TestInfraOfflineMaxLiveDelegations is the most live offline
+	// delegations one hub may hold at once (4 x 5 = the hub-wide cap of 20).
+	TestInfraOfflineMaxLiveDelegations = 4
+)
+
+// testInfraOfflineGrantorNamespace is the UUID namespace of the reserved
+// grantor id of an offline delegation (a fixed, random v4 UUID).
+var testInfraOfflineGrantorNamespace = uuid.MustParse("6a0c55e2-3d5f-4c1b-9a47-0e8f2b7d91c4")
+
+// TestInfraOfflineGrantorID returns the reserved grantor id of an offline
+// delegation bound to hubID: a name-based (version 5) UUID of the hub id,
+// or "" for an empty hub id. It is a UUID so the generic principal paths
+// (group closure, binding lookup, kind read) treat it as an ordinary user id
+// that names no row: user ids are server-generated random (version 4)
+// UUIDs, so no user row can have it, and the offline redeem gate refuses a
+// delegation whose reserved id ever resolves to a user row.
+func TestInfraOfflineGrantorID(hubID string) string {
+	if hubID == "" {
+		return ""
+	}
+	return uuid.NewSHA1(testInfraOfflineGrantorNamespace, []byte("test-infra-offline:"+hubID)).String()
+}
+
+// EffectiveGrantorKind returns d's grantor kind, reading an empty value as
+// DelegationGrantorHuman (the column default). Any other value is returned
+// unchanged, so callers that switch on it deny an unknown kind.
+func (d *TestIdentityDelegation) EffectiveGrantorKind() string {
+	if d == nil {
+		return ""
+	}
+	if d.GrantorKind == "" {
+		return DelegationGrantorHuman
+	}
+	return d.GrantorKind
+}
+
+// TestInfraBinding is the read-only view of the test infrastructure
+// marker that the offline delegation redeem gate reads live (phase DL): the
+// hub id, class and creation time only. It never carries the marker's web
+// session key or attested facts.
+type TestInfraBinding struct {
+	HubID     string
+	Class     string
+	CreatedAt time.Time
 }
 
 // LiveAt reports whether d is neither revoked nor expired at now.
@@ -3180,10 +3319,11 @@ type Schedule struct {
 	ID            string     `json:"id"`
 	ProjectID     string     `json:"projectId"`
 	Name          string     `json:"name"`
-	CronExpr      string     `json:"cronExpr"`  // Standard 5-field cron expression (UTC)
-	EventType     string     `json:"eventType"` // "message" (future: "dispatch_agent")
-	Payload       string     `json:"payload"`   // JSON: handler-specific configuration
-	Status        string     `json:"status"`    // active, paused, deleted
+	CronExpr      string     `json:"cronExpr"`               // Standard 5-field cron expression (UTC)
+	EventType     string     `json:"eventType"`              // "message" (future: "dispatch_agent")
+	Payload       string     `json:"payload"`                // JSON: handler-specific configuration
+	Status        string     `json:"status"`                 // active, paused, deleted
+	StatusReason  string     `json:"statusReason,omitempty"` // system pause reason (ScheduleStatusReason*); empty otherwise
 	NextRunAt     *time.Time `json:"nextRunAt,omitempty"`
 	LastRunAt     *time.Time `json:"lastRunAt,omitempty"`
 	LastRunStatus string     `json:"lastRunStatus,omitempty"` // success, error
@@ -3221,6 +3361,23 @@ const (
 	ScheduleStatusDeleted = "deleted"
 )
 
+// ScheduleStatusReason* are the values Schedule.StatusReason may hold. Only
+// a pause made by the system sets a reason; every status write made by a
+// user (pause, resume, edit) clears it, so an empty reason on a paused
+// schedule means a user paused it.
+const (
+	// ScheduleStatusReasonNone: active, or paused by a user.
+	ScheduleStatusReasonNone = ""
+	// ScheduleStatusReasonCreatorDeleted: paused because the agent the
+	// schedule's authority resolves to was deleted. Resuming re-records the
+	// authority to the resumer and clears the reason.
+	ScheduleStatusReasonCreatorDeleted = "creator_deleted"
+	// ScheduleStatusReasonCronZoneUnsupported: paused because the cron
+	// expression carries a zone prefix (CRON_TZ= or TZ=), which is not
+	// supported. The expression must be edited to UTC before resuming.
+	ScheduleStatusReasonCronZoneUnsupported = "cron_zone_unsupported"
+)
+
 // ScheduleRunStatus constants
 const (
 	ScheduleRunSuccess = "success"
@@ -3232,6 +3389,13 @@ type ScheduleFilter struct {
 	ProjectID string
 	Status    string
 	Name      string
+	// LastRunStatus, when set, keeps only schedules whose most recent run
+	// ended with this status (ScheduleRunSuccess or ScheduleRunError).
+	LastRunStatus string
+	// SystemPausedOnly, when true, keeps only paused schedules with a
+	// non-empty StatusReason: schedules the hub paused itself. A schedule a
+	// user paused (empty reason) is left out.
+	SystemPausedOnly bool
 }
 
 // ToAPI converts a store.Agent to an api.AgentInfo for external consumption.

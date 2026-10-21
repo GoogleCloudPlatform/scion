@@ -198,9 +198,12 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 	// Result=Completed (the agent did start; nothing to revoke), and a
 	// failed report arriving during a stop/suspend returns a Conflict
 	// HTTPStatus — in both of those cases the agent may still be relying on
-	// its current credential.
+	// its current credential. The launch kind decides the rule
+	// (launchFailureRevokeReason).
 	if sr.State == store.LaunchReportStateFailed && answer.HTTPStatus == 0 && answer.Result == store.LaunchReportResultApplied {
-		revokeAgentCredentialsBestEffort(ctx, s.store, agentID, agentCredentialRevokeReasonCreateFailed)
+		if reason := launchFailureRevokeReason(&updated); reason != "" {
+			revokeAgentCredentialsBestEffort(ctx, s.store, agentID, reason)
+		}
 	}
 
 	// An applied succeeded report settles the run the launch started
@@ -285,5 +288,34 @@ func (s *Server) settleLaunchedRun(ctx context.Context, row *store.Agent, info *
 	if info.RunID != minted {
 		s.agentLifecycleLog.Info("Launch report: adopted the broker's run ID",
 			"agent_id", row.ID, "agent", row.Slug, "minted_run_id", minted, "run_id", info.RunID)
+	}
+}
+
+// launchFailureRevokeReason is the credential revoke an applied failed
+// launch report triggers, by launch kind (ptone/scion#4669, design D-c L6),
+// or "" for none:
+//   - a create (or a row from before launch kinds) revokes create_failed,
+//     as before;
+//   - a start revokes start_failed only when the hub decided so when it
+//     began the launch (LaunchRevokeOnFail: the same rule a synchronous
+//     DispatchAgentStart failure applies);
+//   - a restart never revokes: its stop leg tolerates a "not running" stop,
+//     so the hub cannot be sure no old container still holds the
+//     credential. This differs on purpose from a synchronous restart of a
+//     stopped agent, which can revoke through DispatchAgentStart.
+//
+// Only create launches exist until asynchronous start ships, so the start
+// and restart rules are not reached yet.
+func launchFailureRevokeReason(a *store.Agent) string {
+	switch a.LaunchKind {
+	case store.LaunchKindStart:
+		if a.LaunchRevokeOnFail {
+			return agentCredentialRevokeReasonStartFailed
+		}
+		return ""
+	case store.LaunchKindRestart:
+		return ""
+	default:
+		return agentCredentialRevokeReasonCreateFailed
 	}
 }

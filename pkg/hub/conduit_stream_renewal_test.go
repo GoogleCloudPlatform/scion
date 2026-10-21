@@ -341,19 +341,33 @@ func TestRenewalJitterBounds(t *testing.T) {
 	assert.Zero(t, defaultConduitRenewalJitter(0))
 }
 
-// TestConduitRouteCanRenew: in-process hub-held routes deliver renewals;
-// external relay mode (bridged leaves, until 6.6b-3) and legacy sessions do
-// not.
+// canRenewLegacy is a legacy broker session for TestConduitRouteCanRenew.
+type canRenewLegacy struct{}
+
+func (canRenewLegacy) LegacyTarget() (string, string) { return registry.PrincipalBroker, "broker-1" }
+
+// TestConduitRouteCanRenew: a hub-held route delivers renewals whenever it
+// resolved a conduit session, in-process (on the session or across the
+// hop) and in external relay mode (on the leaf's bridge to the owner
+// relay, design §3.9 Hub-held leaves). A resolution with no session, and a
+// legacy broker session, have no renewal path in either mode.
 func TestConduitRouteCanRenew(t *testing.T) {
 	rec := registry.SessionRecord{SessionID: "s-1", PrincipalKind: registry.PrincipalAgent, RelayInstanceID: "hub-x", RelayGeneration: 1}
-	res := router.Resolved{Session: relay.NewRemoteSession(&relay.PeerClient{}, "http://hub-x", rec, registry.Want{ProjectID: "p"}), Record: rec}
+	session := relay.NewRemoteSession(&relay.PeerClient{}, "http://hub-x", rec, registry.Want{ProjectID: "p"})
 
 	f := newConduitFixture(t)
-	assert.True(t, f.srv.conduitRouteCanRenew(res), "in-process: renewals cross the hop")
-	assert.False(t, f.srv.conduitRouteCanRenew(router.Resolved{}), "no session")
-
 	_, cf := newUserRelayOps(t)
-	assert.False(t, cf.srv.conduitRouteCanRenew(res), "external relay mode: bridged leaves do not renew until 6.6b-3")
+	require.Nil(t, f.srv.conduitExternal.Load(), "the fixture is in-process")
+	require.NotNil(t, cf.srv.conduitExternal.Load(), "the relay-ops fixture is in external relay mode")
+	for mode, srv := range map[string]*Server{"in-process": f.srv, "external relay mode": cf.srv} {
+		t.Run(mode, func(t *testing.T) {
+			assert.True(t, srv.conduitRouteCanRenew(router.Resolved{Session: session, Record: rec}), "a conduit session renews")
+			assert.False(t, srv.conduitRouteCanRenew(router.Resolved{}), "no session")
+			assert.False(t, srv.conduitRouteCanRenew(router.Resolved{Legacy: canRenewLegacy{}}), "a legacy broker session")
+			assert.False(t, srv.conduitRouteCanRenew(router.Resolved{Session: session, Record: rec, Legacy: canRenewLegacy{}}),
+				"a resolution carrying a legacy session never renews, even with a session set")
+		})
+	}
 }
 
 // pinInconsistently pins the agent to its own Runtime Broker, which has no
@@ -746,7 +760,7 @@ func TestRenewalDriver_NonAdvancingUntilNeverLoops(t *testing.T) {
 // conduitScopeOfTest, conduitAuthorizeActionTestHook and
 // conduitRouteCanRenewTest.
 func TestConduitTestSeamsNeverSetInProduction(t *testing.T) {
-	seams := map[string]bool{"AuthzClock": true, "conduitScopeOfTest": true, "conduitAuthorizeActionTestHook": true, "conduitRouteCanRenewTest": true}
+	seams := map[string]bool{"AuthzClock": true, "conduitScopeOfTest": true, "conduitAuthorizeActionTestHook": true, "conduitRouteCanRenewTest": true, "withoutStreamRenewer": true}
 	for _, dir := range []string{".", filepath.Join("..", "..", "cmd")} {
 		files, err := filepath.Glob(filepath.Join(dir, "*.go"))
 		require.NoError(t, err)

@@ -330,6 +330,17 @@ func (s *AgentStore) MarkLaunchAccepted(ctx context.Context, agentID, launchID, 
 
 // EndLaunch implements store.AgentStore.EndLaunch.
 func (s *AgentStore) EndLaunch(ctx context.Context, agentID, launchID, reason string) error {
+	return s.endLaunch(ctx, agentID, launchID, reason, "")
+}
+
+// EndLaunchWithCode implements store.AgentStore.EndLaunchWithCode.
+func (s *AgentStore) EndLaunchWithCode(ctx context.Context, agentID, launchID, reason, code string) error {
+	return s.endLaunch(ctx, agentID, launchID, reason, code)
+}
+
+// endLaunch ends launchID with reason, and records code as the launch
+// error when it is not empty.
+func (s *AgentStore) endLaunch(ctx context.Context, agentID, launchID, reason, code string) error {
 	uid, err := parseUUID(agentID)
 	if err != nil {
 		return err
@@ -370,9 +381,13 @@ func (s *AgentStore) EndLaunch(ctx context.Context, agentID, launchID, reason st
 	if err != nil {
 		return err
 	}
-	if _, err := withLaunchEndSettlement(ltx.client.Agent.UpdateOneID(uid).
+	upd := ltx.client.Agent.UpdateOneID(uid).
 		SetLaunchState(store.LaunchStateEnded).
-		SetLaunchEndReason(reason), current, reason, now).
+		SetLaunchEndReason(reason)
+	if code != "" {
+		upd.SetLaunchError(code)
+	}
+	if _, err := withLaunchEndSettlement(upd, current, reason, now).
 		Save(ctx); err != nil {
 		return mapError(err)
 	}

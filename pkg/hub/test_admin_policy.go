@@ -546,6 +546,7 @@ var testAdminFileLiveKeyPolicy = map[string]testAdminPolicy{
 var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.FederationProjectVisitors:    testAdminPolicyDeny,
 	experiments.AsyncAgentLaunch:             testAdminPolicyDeny,
+	experiments.AsyncAgentStart:              testAdminPolicyDeny,
 	experiments.AgentDelegation:              testAdminPolicyDeny,
 	experiments.AuthorizationDecisionAuditV2: testAdminPolicyDeny,
 	"web.gcs_links":                          testAdminPolicyDeny,

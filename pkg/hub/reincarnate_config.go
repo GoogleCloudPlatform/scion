@@ -94,10 +94,8 @@ func (s *Server) buildPatchedAppliedConfig(ctx context.Context, agent *store.Age
 		return nil, nil, fmt.Errorf("agent %s has no applied config", agent.ID)
 	}
 
-	// Resolve the template FIRST: the legacy-fallback env reconstruction
-	// (A1 addendum 2) needs to know the current template's env keys to strip
-	// them from a legacy agent's InlineConfig.Env before they're
-	// misclassified as explicit.
+	// Resolve the template (no template row field feeds the legacy-fallback
+	// env reconstruction below; ptone/scion#4224).
 	var resolvedTemplate *store.Template
 	if agent.Template != "" {
 		tmpl, err := s.resolveTemplate(ctx, agent.Template, agent.ProjectID)
@@ -108,15 +106,6 @@ func (s *Server) buildPatchedAppliedConfig(ctx context.Context, agent *store.Age
 			resolvedTemplate = tmpl
 		}
 	}
-	// templateEnv is a legacy read-only filter: its keys are used only to
-	// DROP residue an older hub merged into a legacy agent's env (see
-	// legacyCreateInputsFromAppliedConfig). No template env value is copied
-	// into the fresh config (ptone/scion#4222). Retire or rekey it when the
-	// template row's config column goes (ptone/scion#4224).
-	var templateEnv map[string]string
-	if resolvedTemplate != nil && resolvedTemplate.Config != nil {
-		templateEnv = resolvedTemplate.Config.Env
-	}
 
 	// Adopt a legacy env TZ into ExplicitTimezone before anything reads
 	// old's env: legacyCreateInputsFromAppliedConfig below would otherwise
@@ -126,7 +115,7 @@ func (s *Server) buildPatchedAppliedConfig(ctx context.Context, agent *store.Age
 	createInputs := old.CreateInputs
 	var warnings []string
 	if createInputs == nil {
-		createInputs, warnings = legacyCreateInputsFromAppliedConfig(old, templateEnv)
+		createInputs, warnings = legacyCreateInputsFromAppliedConfig(old)
 	}
 	if patch != nil {
 		// A copy: createInputs may be the outgoing generation's own record
@@ -474,20 +463,15 @@ func reincarnateImageRegistry(dispatcher AgentDispatcher, brokerID string) image
 //     there, and cannot be told apart from an explicit value. The caller then
 //     re-derives the project and template tiers through deriveAgentConfig
 //     (resolveAutoExposeEnv), exactly as for an agent with CreateInputs.
-//   - Every other key InlineConfig.Env shares with templateEnv (the CURRENT
-//     template's env map) is also dropped, whatever its value (A1 addendum
-//     2, rule 2): the hub that created a legacy agent aliased
-//     AppliedConfig.Env to InlineConfig.Env, so its InlineConfig.Env is
-//     indistinguishable-by-inspection from a mix of explicit keys and
-//     template defaults merged in at create time. Assuming "the template
-//     still owns this key" errs toward template freshness — reincarnate's
-//     whole purpose — at the cost of resetting a genuinely explicit
-//     per-agent override that happens to share a name with a template key.
-//     Each dropped key is surfaced in the plan by name only.
-//     Keys InlineConfig.Env has that templateEnv does NOT define are kept as
-//     explicit, but flagged: they may equally be a stale default the
-//     requester never asked for, left over from an earlier version of the
-//     template that did define them.
+//   - Every other InlineConfig.Env key is kept as explicit, but flagged: it
+//     may equally be a stale default the requester never asked for. The hub
+//     that created a legacy agent aliased AppliedConfig.Env to
+//     InlineConfig.Env, so residue an older hub copied from the template
+//     row's stored env is replayed as explicit env too. The drop-only
+//     filter that once removed keys the template row's env defined is
+//     retired with that column (ptone/scion#4224): rekeying it on the
+//     template's file env would drop a requester's own keys that share a
+//     name with it, which is worse.
 //   - Everything else (HarnessConfig name, HarnessAuth, Profile,
 //     ThinkingLevel, Branch, Workspace, and any InlineConfig.Env key not
 //     covered above) is taken from the live AppliedConfig verbatim. These are
@@ -495,7 +479,7 @@ func reincarnateImageRegistry(dispatcher AgentDispatcher, brokerID string) image
 //     set (HarnessAuth aside, whose auto-no-auth fallback Phase 1 does not
 //     attempt to distinguish from an explicit "none" for a legacy agent), so
 //     reading them from the live config carries no staleness risk.
-func legacyCreateInputsFromAppliedConfig(old *store.AgentAppliedConfig, templateEnv map[string]string) (*store.AgentCreateInputs, []string) {
+func legacyCreateInputsFromAppliedConfig(old *store.AgentAppliedConfig) (*store.AgentCreateInputs, []string) {
 	warnings := []string{"explicit inputs reconstructed heuristically (agent predates CreateInputs)"}
 
 	var inline *api.ScionConfig
@@ -525,30 +509,12 @@ func legacyCreateInputsFromAppliedConfig(old *store.AgentAppliedConfig, template
 				warnings = append(warnings, "stripped SCION_AUTO_EXPOSE_PORTS (a project/hub default, not an explicit input) from the reconstructed config")
 			}
 
-			var dropped, kept []string
+			// Every other key is kept as explicit, but flagged. The
+			// drop-only filter keyed on the template row's stored env is
+			// retired with that column (ptone/scion#4224).
+			var kept []string
 			for k := range inline.Env {
-				if _, definedByTemplate := templateEnv[k]; definedByTemplate {
-					// Never surface the OLD value (design §3.4 Amendment
-					// A3.9). It came from a
-					// legacy agent's live InlineConfig.Env, which is
-					// indistinguishable-by-inspection from an explicit
-					// per-agent override — and that override could be a
-					// secret that merely happens to share a key name with a
-					// template default. No new value is shown either: the
-					// hub no longer copies template env into the agent; the
-					// template's own file supplies it on the broker
-					// (ptone/scion#4222).
-					dropped = append(dropped, k)
-					delete(inline.Env, k)
-				} else {
-					kept = append(kept, k)
-				}
-			}
-			if len(dropped) > 0 {
-				sort.Strings(dropped)
-				warnings = append(warnings, fmt.Sprintf(
-					"dropped %d env key(s) assumed template-derived (the template supplies them from its own file): %s",
-					len(dropped), strings.Join(dropped, ", ")))
+				kept = append(kept, k)
 			}
 			if len(kept) > 0 {
 				sort.Strings(kept)

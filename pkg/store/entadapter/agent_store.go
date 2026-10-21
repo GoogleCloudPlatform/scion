@@ -328,8 +328,8 @@ func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) error {
 		// launch_* field CreateAgent sets — the rest start at their column
 		// defaults ("", false, 0) because a freshly created agent has no
 		// launch yet. Every other launch_* column is written only by
-		// BeginLaunch/MarkLaunchAccepted/EndLaunch/ApplyLaunchReport/
-		// RunLaunchReaperTick (§3.3).
+		// BeginLaunch/MarkLaunchAccepted/EndLaunch(WithCode)/
+		// ApplyLaunchReport/RunLaunchReaperTick (§3.3).
 		SetLaunchAsyncOptIn(a.LaunchAsyncOptIn)
 
 	if a.MessageMode != "" {

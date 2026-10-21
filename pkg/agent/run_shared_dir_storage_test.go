@@ -765,21 +765,16 @@ func TestStartSharedDirStorage_MalformedGlobalSettings_NoKey_SucceedsAsMain(t *t
 	assertLegacyLocalSharedDirBehavior(t, capturedConfig, envMap, f.projectScionDir)
 }
 
-// TestStartSharedDirStorage_LegacyGlobalSettings_MentionsKey_FailsClosed is
-// round 4 review finding S-L1: a global settings.yaml with no
-// `schema_version: "1"` takes the LEGACY loader path, which silently drops
-// the entire `server` block — LoadGlobalSettings returns err == nil with
-// Server == nil, so the gErr != nil / GlobalSettingsMentions fail-closed
-// branch (6') never even runs. Without an explicit check, an operator's
-// shared_dir_storage=nfs config would vanish with only a generic
-// "unrecognized keys" WARN, which is a worse silent failure than the
-// malformed-YAML case 6' already covers. Start must error and Run must
-// never be called.
-func TestStartSharedDirStorage_LegacyGlobalSettings_MentionsKey_FailsClosed(t *testing.T) {
+// TestStartSharedDirStorage_LegacyGlobalSettings_MentionsKey_LoadedAndEnforced
+// (round 4 review finding S-L1, updated for ptone/scion#3919): a global
+// settings file without `schema_version: "1"` is converted at its
+// own layer, which keeps its server block (ptone/scion#3919): the operator's
+// shared_dir_storage=nfs config is loaded, not silently dropped, so Start
+// enforces it (here: the export is not mounted) and Run is never called.
+func TestStartSharedDirStorage_LegacyGlobalSettings_MentionsKey_LoadedAndEnforced(t *testing.T) {
 	f := newSharedDirStorageRunFixture(t)
 	// Well-formed YAML, but no schema_version/harnesses/v1-runtime
-	// indicators, so it takes the legacy path — which has no "server" field
-	// at all, silently dropping this whole block.
+	// indicators: a legacy-format file.
 	require.NoError(t, os.WriteFile(filepath.Join(f.globalScionDir, "settings.yaml"), []byte(`active_profile: local
 server:
   shared_dir_storage:
@@ -813,22 +808,22 @@ server:
 		SharedDirs: []api.SharedDir{{Name: "scratchpad"}},
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "server.shared_dir_storage")
-	assert.Contains(t, err.Error(), "schema_version")
-	assert.Equal(t, 0, ranCount, "Run must never be called when a legacy global file silently dropped a configured shared_dir_storage")
+	assert.Contains(t, err.Error(), "server.shared_dir_storage=nfs requires")
+	assert.Equal(t, 0, ranCount, "Run must never be called: the legacy global file's shared_dir_storage is loaded and enforced")
 }
 
-// TestStartSharedDirStorage_LegacyGlobalSettings_V1ProjectConfigsOverlay_StillFailsClosed
+// TestStartSharedDirStorage_LegacyGlobalSettings_V1ProjectConfigsOverlay_GlobalOnlyEnforced
 // is round 6 disposition item 1 (rev L1 = tst L2)'s Start-level half: the
 // same legacy-global-with-block scenario as
-// ..._LegacyGlobalSettings_MentionsKey_FailsClosed above, but with
+// ..._LegacyGlobalSettings_MentionsKey_LoadedAndEnforced above, but with
 // ~/.scion ALSO carrying a project-id file plus a v1-format
 // project-configs settings.yaml — the exact combination that made the
 // pre-fix detectHierarchyFormat-based gate see the global directory as
 // "versioned" (via the project layer) and skip the fail-closed check
-// entirely, silently dropping the operator's nfs config. Run must still
-// never be called.
-func TestStartSharedDirStorage_LegacyGlobalSettings_V1ProjectConfigsOverlay_StillFailsClosed(t *testing.T) {
+// entirely, silently dropping the operator's nfs config. The global file
+// alone is read (now with its server block, see above), so the nfs config
+// is enforced and Run is still never called.
+func TestStartSharedDirStorage_LegacyGlobalSettings_V1ProjectConfigsOverlay_GlobalOnlyEnforced(t *testing.T) {
 	f := newSharedDirStorageRunFixture(t)
 	require.NoError(t, os.WriteFile(filepath.Join(f.globalScionDir, "settings.yaml"), []byte(`active_profile: local
 server:
@@ -875,8 +870,7 @@ server:
 		SharedDirs: []api.SharedDir{{Name: "scratchpad"}},
 	})
 	require.Error(t, startErr)
-	assert.Contains(t, startErr.Error(), "server.shared_dir_storage")
-	assert.Contains(t, startErr.Error(), "schema_version")
+	assert.Contains(t, startErr.Error(), "server.shared_dir_storage=nfs requires")
 	assert.Equal(t, 0, ranCount,
 		"Run must never be called: a v1 project-configs overlay must not make the global-only legacy gate think the global file is versioned")
 }

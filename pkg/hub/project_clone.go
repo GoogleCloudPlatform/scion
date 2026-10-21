@@ -647,7 +647,6 @@ func (s *Server) cloneProjectTemplates(ctx context.Context, srcProjectID string,
 			Slug:         srcTmpl.Slug, // SAME slug — critical for annotation references
 			DisplayName:  srcTmpl.DisplayName,
 			Description:  srcTmpl.Description,
-			Config:       srcTmpl.Config,
 			Scope:        store.TemplateScopeProject,
 			ScopeID:      clone.ID,
 			Status:       srcTmpl.Status,

@@ -379,7 +379,10 @@ func TestMethodNotAllowed_AllowHeaderPerRoute(t *testing.T) {
 // as a connectivity failure. It must be a 422 template_error that names the
 // missing file's base name without leaking its full path.
 func TestWriteStartContextError_MissingLocalFileIsNotHubUnreachable(t *testing.T) {
-	missing := filepath.Join(t.TempDir(), "hub-host-only", "storage", "harness-configs", "claude", "settings.json")
+	// A fixed, absent path rather than one under t.TempDir: the log record
+	// passes the path through the cause sanitizer, which blanks a
+	// generated test directory name as an encoded-looking run.
+	missing := filepath.Join(string(filepath.Separator), "nonexistent-scion-hub-host", "hub-host-only", "storage", "harness-configs", "claude", "settings.json")
 	_, readErr := os.ReadFile(missing)
 	if !errors.Is(readErr, os.ErrNotExist) {
 		t.Fatalf("expected a not-exist error reading %s, got %v", missing, readErr)

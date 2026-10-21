@@ -39,6 +39,7 @@ import type { User, Notification } from '../../shared/types.js';
 import { formatRelative } from '../../utils/time.js';
 import { navigateTo } from '../../client/navigation.js';
 import { coalescedRefresh, type CoalescedRefresh } from '../../client/coalesced-refresh.js';
+import { visibleInterval } from '../../client/visible-interval.js';
 
 /**
  * A scheduled dispatch blocked by an agent row in phase error. The row's
@@ -112,7 +113,8 @@ export class ScionNotificationTray extends LitElement {
   @state() private pushEnabled = false;
   @state() private pushPermission: PushPermissionState = 'default';
 
-  private pollTimer: ReturnType<typeof setInterval> | null = null;
+  /** Stops the fallback poll; paused while the tab is hidden. */
+  private stopPollTimer: (() => void) | null = null;
   /** The user id loading was started for; null when nothing is running. */
   private activeUserId: string | null = null;
   private boundOnClickOutside = this.onClickOutside.bind(this);
@@ -302,14 +304,12 @@ export class ScionNotificationTray extends LitElement {
 
   private startPolling(): void {
     this.stopPolling();
-    this.pollTimer = setInterval(() => void this.fetchNotifications(), POLL_INTERVAL_MS);
+    this.stopPollTimer = visibleInterval(() => void this.fetchNotifications(), POLL_INTERVAL_MS);
   }
 
   private stopPolling(): void {
-    if (this.pollTimer) {
-      clearInterval(this.pollTimer);
-      this.pollTimer = null;
-    }
+    this.stopPollTimer?.();
+    this.stopPollTimer = null;
   }
 
   // ---------------------------------------------------------------------------

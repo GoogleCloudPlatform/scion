@@ -204,6 +204,7 @@ func (a *colocatedFlatActivator) Activate(ctx context.Context, c brokerhost.Cand
 		AutoProvide:      a.autoProvide,
 		Capabilities:     flatInstanceCapabilities(c.Runtime),
 		WorkspaceStorage: loadBrokerRegistrationWorkspaceStorage(),
+		HostIdentity:     hostObservationPtr(detectHostGCPIdentity(ctx)),
 	})
 	if err != nil {
 		a.reportedMu.Lock()
@@ -328,7 +329,7 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 		return errors.New("flat Runtime Broker host: co-located mode requires the Hub")
 	}
 
-	versionedSettings, _, vsErr := config.LoadEffectiveSettings("")
+	versionedSettings, _, vsErr := loadServerEffectiveSettings()
 	var vsBroker *config.V1BrokerConfig
 	if vsErr == nil && versionedSettings != nil && versionedSettings.Server != nil {
 		vsBroker = versionedSettings.Server.Broker
@@ -776,7 +777,7 @@ func enableColocatedProfileReferences(ctx context.Context, hubSrv *hub.Server) {
 		return
 	}
 	hubSrv.EnableProfileReferences(ctx, overlay, brokerID, globalDir)
-	_, _, _ = config.LoadEffectiveSettings("")
+	_, _, _ = config.LoadEffectiveSettings(globalDir)
 }
 
 // startFlatColocatedHeartbeat runs the co-located internal heartbeat for one
@@ -810,4 +811,11 @@ func startFlatColocatedHeartbeat(ctx context.Context, wg *sync.WaitGroup, s stor
 			}
 		}
 	}()
+}
+
+// hostObservationPtr returns the detection's observation for
+// EmbeddedFlatRegistrationOptions.HostIdentity.
+func hostObservationPtr(d hostDetection) *store.HostIdentityObservation {
+	obs := d.Observation()
+	return &obs
 }

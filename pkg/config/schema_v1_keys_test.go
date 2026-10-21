@@ -171,7 +171,7 @@ func TestValidateSettings_DriftKeysValidate(t *testing.T) {
 	// intact, so the schema keys are the keys the loader actually reads.
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte(schemaV1DriftKeysDoc), 0o644))
-	vs, err := loadVersionedSettingsFileOnly(dir)
+	vs, _, err := loadVersionedSettingsFileOnly(dir)
 	require.NoError(t, err)
 	require.NotNil(t, vs.AutoExposePorts)
 	require.NotNil(t, vs.AutoExposePorts.Enabled)

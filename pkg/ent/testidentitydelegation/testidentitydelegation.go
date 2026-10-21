@@ -3,6 +3,8 @@
 package testidentitydelegation
 
 import (
+	"fmt"
+
 	"entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
 )
@@ -26,6 +28,12 @@ const (
 	FieldCreatedAt = "created_at"
 	// FieldExpiresAt holds the string denoting the expires_at field in the database.
 	FieldExpiresAt = "expires_at"
+	// FieldGrantorKind holds the string denoting the grantor_kind field in the database.
+	FieldGrantorKind = "grantor_kind"
+	// FieldHubID holds the string denoting the hub_id field in the database.
+	FieldHubID = "hub_id"
+	// FieldMarkerCreatedAt holds the string denoting the marker_created_at field in the database.
+	FieldMarkerCreatedAt = "marker_created_at"
 	// FieldRevokedAt holds the string denoting the revoked_at field in the database.
 	FieldRevokedAt = "revoked_at"
 	// FieldRevokedBy holds the string denoting the revoked_by field in the database.
@@ -44,6 +52,9 @@ var Columns = []string{
 	FieldLabel,
 	FieldCreatedAt,
 	FieldExpiresAt,
+	FieldGrantorKind,
+	FieldHubID,
+	FieldMarkerCreatedAt,
 	FieldRevokedAt,
 	FieldRevokedBy,
 }
@@ -69,9 +80,37 @@ var (
 	MemberCapValidator func(int) error
 	// DefaultLabel holds the default value on creation for the "label" field.
 	DefaultLabel string
+	// DefaultHubID holds the default value on creation for the "hub_id" field.
+	DefaultHubID string
 	// DefaultID holds the default value on creation for the "id" field.
 	DefaultID func() uuid.UUID
 )
+
+// GrantorKind defines the type for the "grantor_kind" enum field.
+type GrantorKind string
+
+// GrantorKindHuman is the default value of the GrantorKind enum.
+const DefaultGrantorKind = GrantorKindHuman
+
+// GrantorKind values.
+const (
+	GrantorKindHuman            GrantorKind = "human"
+	GrantorKindTestInfraOffline GrantorKind = "test_infra_offline"
+)
+
+func (gk GrantorKind) String() string {
+	return string(gk)
+}
+
+// GrantorKindValidator is a validator for the "grantor_kind" field enum values. It is called by the builders before save.
+func GrantorKindValidator(gk GrantorKind) error {
+	switch gk {
+	case GrantorKindHuman, GrantorKindTestInfraOffline:
+		return nil
+	default:
+		return fmt.Errorf("testidentitydelegation: invalid enum value for grantor_kind field: %q", gk)
+	}
+}
 
 // OrderOption defines the ordering options for the TestIdentityDelegation queries.
 type OrderOption func(*sql.Selector)
@@ -114,6 +153,21 @@ func ByCreatedAt(opts ...sql.OrderTermOption) OrderOption {
 // ByExpiresAt orders the results by the expires_at field.
 func ByExpiresAt(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldExpiresAt, opts...).ToFunc()
+}
+
+// ByGrantorKind orders the results by the grantor_kind field.
+func ByGrantorKind(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldGrantorKind, opts...).ToFunc()
+}
+
+// ByHubID orders the results by the hub_id field.
+func ByHubID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldHubID, opts...).ToFunc()
+}
+
+// ByMarkerCreatedAt orders the results by the marker_created_at field.
+func ByMarkerCreatedAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldMarkerCreatedAt, opts...).ToFunc()
 }
 
 // ByRevokedAt orders the results by the revoked_at field.

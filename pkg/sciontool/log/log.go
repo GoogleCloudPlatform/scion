@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
 )
 
@@ -130,7 +131,7 @@ func initLocked() {
 	syncLevelFromShared()
 
 	// Set as default slog handler to capture all debug lines from shared packages
-	slog.SetDefault(slog.New(newHandler()))
+	slog.SetDefault(slog.New(defaultSlogHandler()))
 
 	initialized.Store(true)
 }
@@ -414,6 +415,12 @@ type slogHandler struct {
 
 func newHandler() *slogHandler {
 	return &slogHandler{}
+}
+
+// defaultSlogHandler is the default slog handler: slogHandler with every
+// error-valued attribute rendered as a sanitized string.
+func defaultSlogHandler() slog.Handler {
+	return logging.WithSanitizedErrorAttrs(newHandler())
 }
 
 func (h *slogHandler) Enabled(_ context.Context, level slog.Level) bool {
