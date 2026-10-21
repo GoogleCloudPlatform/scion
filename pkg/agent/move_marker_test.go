@@ -338,3 +338,56 @@ func TestStart_MarksMoveExportAgentDirBeforeLaterFailure(t *testing.T) {
 	require.DirExists(t, export)
 	assertMarker(t, export, testMoveID)
 }
+
+// When the project directory cannot be resolved, the guarded delete's check
+// refuses (fail closed) without naming a path, and changes nothing.
+func TestCheckMoveMarkers_ProjectDirUnresolvedRefuses(t *testing.T) {
+	fx := newMoveAbsentFixture(t, "docker", false)
+	dir := filepath.Join(fx.projectPath, "agents", "test-agent")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, writeMoveMarker(dir, testMoveID))
+	prev := moveMarkerProjectDir
+	t.Cleanup(func() { moveMarkerProjectDir = prev })
+	moveMarkerProjectDir = func(string) (string, error) { return "", errors.New("injected resolver failure") }
+
+	_, err := fx.mgr.CheckMoveMarkers(context.Background(), fx.projectPath, testNFSWorkspaceProjectID, "test-agent", testMoveID)
+	require.True(t, errors.Is(err, ErrMoveMarkerMismatch), "want ErrMoveMarkerMismatch, got %v", err)
+	assert.Contains(t, err.Error(), "resolve the project directory")
+	assert.NotContains(t, err.Error(), fx.projectPath, "the refusal names no path")
+	assertMarker(t, dir, testMoveID)
+}
+
+// In a split-storage layout, a failed home claim after the move claimed (and
+// marked) the home's parent removes that parent and its marker with the rest
+// of what the provision created; a parent that existed before is untouched.
+func TestProvision_HomeClaimFailureRemovesClaimedHomeParent(t *testing.T) {
+	failHomeClaim := func(t *testing.T) {
+		prev := claimAgentHome
+		t.Cleanup(func() { claimAgentHome = prev })
+		claimAgentHome = func(string) (bool, error) { return false, errors.New("injected home claim failure") }
+	}
+	t.Run("parent claimed by the move", func(t *testing.T) {
+		agentName := "split-claim-fail"
+		scionDir, agentDir, agentHome := setupSplitStorageFailedProvision(t, agentName)
+		failHomeClaim(t)
+		ctx := withMoveReincarnationID(api.ContextWithGitClone(context.Background(), &api.GitCloneConfig{URL: "https://example.com/o/r.git"}), testMoveID)
+		_, _, _, err := ProvisionAgent(ctx, agentName, "default", "", "", scionDir, "", "", "", "")
+		require.Error(t, err)
+		assert.NoFileExists(t, filepath.Join(filepath.Dir(agentHome), MoveMarkerFile), "the parent's marker is removed")
+		assert.NoDirExists(t, filepath.Dir(agentHome), "the parent this provision claimed is removed")
+		assert.NoDirExists(t, agentDir)
+	})
+	t.Run("pre-existing parent", func(t *testing.T) {
+		agentName := "split-claim-keep"
+		scionDir, _, agentHome := setupSplitStorageFailedProvision(t, agentName)
+		parent := filepath.Dir(agentHome)
+		require.NoError(t, os.MkdirAll(parent, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(parent, "keep.txt"), []byte("keep"), 0o644))
+		failHomeClaim(t)
+		ctx := withMoveReincarnationID(api.ContextWithGitClone(context.Background(), &api.GitCloneConfig{URL: "https://example.com/o/r.git"}), testMoveID)
+		_, _, _, err := ProvisionAgent(ctx, agentName, "default", "", "", scionDir, "", "", "", "")
+		require.Error(t, err)
+		assert.FileExists(t, filepath.Join(parent, "keep.txt"), "a parent that existed before is untouched")
+		assert.NoFileExists(t, filepath.Join(parent, MoveMarkerFile), "a parent the move did not create is never marked")
+	})
+}

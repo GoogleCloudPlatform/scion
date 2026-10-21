@@ -38,6 +38,10 @@ import (
 // move has a new reincarnation ID.
 const MoveMarkerFile = ".scion-move"
 
+// moveMarkerProjectDir resolves CheckMoveMarkers' project directory
+// (config.GetResolvedProjectDir); a variable so a test can make it fail.
+var moveMarkerProjectDir = config.GetResolvedProjectDir
+
 // ErrMoveMarkerMismatch is returned by CheckMoveMarkers when an agent
 // directory exists without the move marker, or with another move's ID, or
 // cannot be checked: those files were not created by this move.
@@ -137,29 +141,34 @@ func (m *AgentManager) CheckMoveMarkers(ctx context.Context, projectPath, projec
 	// each be absent (a recreate never creates a worktree, so one that
 	// exists predates the move).
 	var dirs, worktrees []string
-	if projectDir, err := config.GetResolvedProjectDir(projectPath); err == nil {
-		dirs = append(dirs, filepath.Join(projectDir, "agents", agentName))
-		if config.IsGlobalProjectDir(projectDir) {
-			dirs = append(dirs, filepath.Join(projectDir, "workspace", agentName))
+	// The project directory decides most of what the delete removes: one
+	// that cannot be resolved refuses (fail closed), like any other lookup
+	// error here.
+	projectDir, err := moveMarkerProjectDir(projectPath)
+	if err != nil {
+		return nil, fmt.Errorf("%w: resolve the project directory", ErrMoveMarkerMismatch)
+	}
+	dirs = append(dirs, filepath.Join(projectDir, "agents", agentName))
+	if config.IsGlobalProjectDir(projectDir) {
+		dirs = append(dirs, filepath.Join(projectDir, "workspace", agentName))
+	}
+	layout := resolveAgentProjectLayout(projectDir)
+	if layout.externalAgentsRoot != "" {
+		dirs = append(dirs, filepath.Join(layout.externalAgentsRoot, agentName))
+	}
+	// DeleteAgentFiles removes the worktree-per-agent worktree under
+	// the shared base, and a shared worktree the agent is registered
+	// on; a forced move creates neither.
+	if layout.sharedBaseIsRepo {
+		worktrees = append(worktrees, filepath.Join(layout.sharedBase, "worktrees", agentName))
+	}
+	if layout.repoRoot != "" {
+		_, _, found, findErr := provision.FindBranchForAgent(layout.repoRoot, projectDir, agentName)
+		if findErr != nil {
+			return dirs, fmt.Errorf("%w: read the worktree sharer registry: %v", ErrMoveMarkerMismatch, findErr)
 		}
-		layout := resolveAgentProjectLayout(projectDir)
-		if layout.externalAgentsRoot != "" {
-			dirs = append(dirs, filepath.Join(layout.externalAgentsRoot, agentName))
-		}
-		// DeleteAgentFiles removes the worktree-per-agent worktree under
-		// the shared base, and a shared worktree the agent is registered
-		// on; a forced move creates neither.
-		if layout.sharedBaseIsRepo {
-			worktrees = append(worktrees, filepath.Join(layout.sharedBase, "worktrees", agentName))
-		}
-		if layout.repoRoot != "" {
-			_, _, found, findErr := provision.FindBranchForAgent(layout.repoRoot, projectDir, agentName)
-			if findErr != nil {
-				return dirs, fmt.Errorf("%w: read the worktree sharer registry: %v", ErrMoveMarkerMismatch, findErr)
-			}
-			if found {
-				return dirs, fmt.Errorf("%w: the agent is registered on a shared worktree", ErrMoveMarkerMismatch)
-			}
+		if found {
+			return dirs, fmt.Errorf("%w: the agent is registered on a shared worktree", ErrMoveMarkerMismatch)
 		}
 	}
 	hostBase, rel, err := m.nfsExportWorkspace(projectPath, projectID, agentName)

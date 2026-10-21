@@ -1597,14 +1597,16 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			_ = removeAgentDirGuarded(filesGuard(), agentDir, agentWorkspace)
 			if newAgentHome && !pathWithin(agentHome, agentDir) {
 				_ = removeAgentDirGuarded(filesGuard(), agentHome, "")
-				if newAgentHomeParent {
-					if moveID != "" {
-						// The move marker this call wrote there.
-						_ = os.Remove(filepath.Join(filepath.Dir(agentHome), MoveMarkerFile))
-					}
-					// os.Remove only removes an empty directory.
-					_ = os.Remove(filepath.Dir(agentHome))
+			}
+			// The home's parent this call claimed, whether or not the home
+			// itself was claimed (the home claim can fail after it).
+			if homeParent := filepath.Dir(agentHome); newAgentHomeParent && !pathWithin(homeParent, agentDir) {
+				if moveID != "" {
+					// The move marker this call wrote there.
+					_ = os.Remove(filepath.Join(homeParent, MoveMarkerFile))
 				}
+				// os.Remove only removes an empty directory.
+				_ = os.Remove(homeParent)
 			}
 		}()
 	}
@@ -1646,7 +1648,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			return "", "", nil, fmt.Errorf("failed to write the move marker: %w", err)
 		}
 	}
-	if newAgentHome, err = claimDir(agentHome); err != nil {
+	if newAgentHome, err = claimAgentHome(agentHome); err != nil {
 		return "", "", nil, fmt.Errorf("failed to create agent home: %w", err)
 	}
 	if err := os.MkdirAll(agentHome, 0755); err != nil {
@@ -4099,6 +4101,10 @@ func removeWorkspaceWorktreeEntry(agentWorkspace string) {
 		slog.Warn("could not remove the worktree entry", "path", agentWorkspace, "error", err)
 	}
 }
+
+// claimAgentHome is claimDir for ProvisionAgent's agent home; a variable
+// so a test can make the home claim fail.
+var claimAgentHome = claimDir
 
 // claimDir creates dir with os.Mkdir and reports whether this call created
 // it. A dir that already exists is not an error and reports false.
