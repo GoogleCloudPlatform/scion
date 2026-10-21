@@ -436,7 +436,7 @@ func TestTIWebIAP_TransportIdentityInvariant(t *testing.T) {
 	}
 	// Helpers whose callers carry the check, with every caller listed.
 	helperCallers := map[string][]string{
-		"createPendingUserTx": {"handleAdminUserInvite", "handleProvisionUser"},
+		"createPendingUserTx": {"handleAdminUserInvite", "handleProvisionUser", "inviteBatchUserStep"},
 		"provisionNewUser":    {"Resolve"},
 		"grantProjectVisitor": {"handleAddProjectVisitor"},
 	}
@@ -447,7 +447,7 @@ func TestTIWebIAP_TransportIdentityInvariant(t *testing.T) {
 		}
 	}
 	assert.Equal(t, map[string]bool{
-		"handleAdminAllowListAdd": true, "handleAdminAllowListImport": true, "handleAdminUserInviteBulk": true,
+		"handleAdminAllowListAdd": true, "handleAdminAllowListImport": true,
 		"createPendingUserTx": true, "provisionNewUser": true, "provisionUser": true, "handleTestLogin": true,
 		"seedDevUser": true, "proxyAuthMiddleware": true, "handleOAuthCallback": true,
 		"grantProjectVisitor": true, "linkPendingVisitor": true,
