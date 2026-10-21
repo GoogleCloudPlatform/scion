@@ -399,6 +399,31 @@ func TestConfiguredRuntimeNames_KeyCase(t *testing.T) {
 	names, ok = ConfiguredRuntimeNames()
 	require.True(t, ok)
 	assert.Empty(t, names, "entries under Runtimes: (gke, and kubernetes, which is loaded from the defaults) are not configured")
+
+	// An entry name that differs from a default entry only in letter case is
+	// its own entry: the load holds both, and only the file's is configured.
+	writePlacementGlobalSettings(t, "schema_version: \"1\"\nruntimes:\n  Kubernetes:\n    type: kubernetes\n")
+	vs, _, err = LoadGlobalSettingsWithOverlay()
+	require.NoError(t, err)
+	_, upper := vs.Runtimes["Kubernetes"]
+	_, lower := vs.Runtimes["kubernetes"]
+	require.True(t, upper && lower, "precondition: the load holds both Kubernetes (file) and kubernetes (defaults); runtimes %v", vs.Runtimes)
+	names, ok = ConfiguredRuntimeNames()
+	require.True(t, ok)
+	assert.Equal(t, map[string]bool{"Kubernetes": true}, names)
+}
+
+// A null top-level runtimes section is like an absent one (known, no
+// names); any other value that is not a map fails closed.
+func TestConfiguredRuntimeNames_SectionShape(t *testing.T) {
+	writePlacementGlobalSettings(t, "schema_version: \"1\"\nruntimes:\n")
+	names, ok := ConfiguredRuntimeNames()
+	assert.True(t, ok, "a null runtimes section is not a decoding problem")
+	assert.Empty(t, names)
+
+	writePlacementGlobalSettings(t, "schema_version: \"1\"\nruntimes: 5\n")
+	_, ok = ConfiguredRuntimeNames()
+	assert.False(t, ok, "a scalar runtimes section fails closed")
 }
 
 // GlobalSettingsFileUnstatable: only a stat error other than not-exist.

@@ -300,8 +300,9 @@ func GlobalSettingsMentionPlacementKeys() bool {
 //     no names.
 //
 // ok is false when the global settings file exists but cannot be stat'd,
-// read or decoded; callers then treat every entry as configured (fail
-// closed). It does not write any file beyond what every settings load does
+// read or decoded, when its top-level runtimes section is neither a map nor
+// null, or when the global settings load fails; callers then treat every
+// entry as configured (fail closed). It does not write any file beyond what every settings load does
 // (the loader's legacy hub key migration).
 func ConfiguredRuntimeNames() (names map[string]bool, ok bool) {
 	names = map[string]bool{}
@@ -333,12 +334,14 @@ func ConfiguredRuntimeNames() (names map[string]bool, ok bool) {
 		return names, false
 	}
 	// The file layer's runtimes section, by the exact top-level key
-	// "runtimes": the settings load takes that key only (a top-level key in
-	// another letter case, such as "Runtimes:", is not loaded next to the
-	// embedded defaults' "runtimes"; observed in a dev-time run). A section
+	// "runtimes". The settings decoder matches a field's exact key first and
+	// falls back to a case-insensitive match only when the exact key is
+	// absent; the embedded defaults always supply "runtimes", so the settings
+	// load never takes a top-level key in another letter case (such as
+	// "Runtimes:"). A null section is like an absent one; any other value
 	// that is not a map fails closed.
 	var fileNames []string
-	if section, present := k.Raw()["runtimes"]; present {
+	if section, present := k.Raw()["runtimes"]; present && section != nil {
 		m, isMap := section.(map[string]interface{})
 		if !isMap {
 			return names, false
