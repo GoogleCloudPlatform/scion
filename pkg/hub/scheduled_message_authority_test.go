@@ -29,7 +29,6 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -483,11 +482,11 @@ func TestScheduledMessageAuthority(t *testing.T) {
 	})
 }
 
-// The scheduled-message authoring function refuses a scoped access token
-// with the session-only GOV_PENDING refusal, before the target is resolved.
-// The revision ceiling a token's credential would record is the token's
-// bounded ceiling.
-func TestScheduledMessageAuthoringRefusesScopedToken(t *testing.T) {
+// The scheduled-message authoring function admits a scoped access token
+// that may message the target, and the revision ceiling the token's
+// credential records is the token's bounded ceiling, which carries
+// agent.message.
+func TestScheduledMessageAuthoringAdmitsScopedToken(t *testing.T) {
 	f := newSchedMsg(t, "smsg-author-uat")
 	tok := f.storedUAT(t, messageSelectors(t)...)
 	scoped := NewScopedUserIdentityWithBoundary(authUser(f.creator),
@@ -496,9 +495,7 @@ func TestScheduledMessageAuthoringRefusesScopedToken(t *testing.T) {
 	req := authoredRequest(t, scoped, http.MethodPost, "/api/v1/projects/"+f.proj.ID+"/scheduled-events", nil)
 	w := httptest.NewRecorder()
 	ok := f.srv.authorizeScheduledMessageAuthoring(w, req, f.proj.ID, `{"agentId":"`+f.target.ID+`","message":"x"}`, "", "")
-	assert.False(t, ok, w.Body.String())
-	requireSessionOnlyRefusal(t, w, authzop.ReasonGovernancePending, "scheduled message authoring")
-	assert.Contains(t, w.Body.String(), scheduleAuthoringCredentialRefusedMessage)
+	assert.True(t, ok, w.Body.String())
 
 	ceiling, ok, rec := fireRevisionCeiling(f.srv, scoped, f.proj.ID)
 	require.True(t, ok, rec.Body.String())

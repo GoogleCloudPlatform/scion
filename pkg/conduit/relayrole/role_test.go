@@ -218,7 +218,7 @@ func TestFrontNotAdmittingRefuses(t *testing.T) {
 	f.admitAs(registry.PrincipalAgent, "tok-1", nil)
 	f.node.Relay.SetAdmitting(false)
 	status, got := f.rawDial(t)
-	if status != http.StatusServiceUnavailable || !strings.Contains(got, "conduit_not_serving") {
+	if status != http.StatusServiceUnavailable || !strings.Contains(got, relay.ReasonRelayNotAdmitting) {
 		t.Fatalf("answer %d %s", status, got)
 	}
 	if n := f.hub.count("admit"); n != 0 {

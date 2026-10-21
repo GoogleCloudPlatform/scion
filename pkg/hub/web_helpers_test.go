@@ -17,6 +17,7 @@ package hub
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"os"
@@ -38,6 +39,32 @@ func renderSPAShell(t *testing.T) string {
 	var buf bytes.Buffer
 	require.NoError(t, ws.shellTmpl.Execute(&buf, spaShellData{}))
 	return buf.String()
+}
+
+// fingerprintedAssetsOf reads ws's Vite build manifest and returns the
+// fingerprinted request paths it lists, as NewWebServer does at startup, or
+// nil when there is no usable manifest. Tests call it after swapping the
+// asset source of a server that NewWebServer already built.
+func fingerprintedAssetsOf(ws *WebServer) map[string]bool {
+	manifest, ok := ws.readViteManifest()
+	if !ok {
+		return nil
+	}
+	return fingerprintedAssetsFromManifest(manifest)
+}
+
+// shellInitialData returns the raw fields of the shell's initial data.
+func shellInitialData(t *testing.T, html string) map[string]json.RawMessage {
+	t.Helper()
+	const open = `<script id="__SCION_DATA__" type="application/json">`
+	start := strings.Index(html, open)
+	require.GreaterOrEqual(t, start, 0, "no initial data in the shell")
+	start += len(open)
+	end := strings.Index(html[start:], "</script>")
+	require.Greater(t, end, 0)
+	var fields map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(html[start:start+end]), &fields))
+	return fields
 }
 
 // extractBetween returns the substring from the first occurrence of start up

@@ -52,9 +52,9 @@ import (
 // HTTPAgentDispatcher.dispatchExperiments); like the auto-expose default it is
 // sent in every mode, since the hub is the only place it is decided.
 //
-// telemetry is the hub telemetry default for a broker that reports
-// templateTiers (telemetryDispatch.wireTelemetry), nil otherwise; a legacy
-// broker gets it inline instead (ptone/scion#4222). It is not a file-mode
+// telemetry is the hub telemetry default (telemetryDispatch.wireTelemetry),
+// sent to every broker; a broker older than templateTiers ignores it
+// (ptone/scion#4224). It is not a file-mode
 // limit, so it is sent whenever it is set, even when nothing else is.
 func remoteHubAgentDefaults(d opsettings.AgentDefaultsSettings, autoExposePorts *bool, experiments []string, telemetry *api.TelemetryConfig) *RemoteHubAgentDefaults {
 	if d.DefaultMaxTurns == 0 && d.DefaultMaxModelCalls == 0 &&
@@ -87,7 +87,7 @@ func remoteHubAgentDefaults(d opsettings.AgentDefaultsSettings, autoExposePorts 
 // dispatch, built by remoteHubAgentDefaults like the create wire so the two
 // cannot drift: start and restart carry the same hub defaults as create (the
 // limits, resources, the auto-expose default, the dispatch experiments, and
-// the hub telemetry default for a templateTiers broker).
+// the hub telemetry default).
 //
 // The broker applies the limits and resources per start, below the agent's
 // own (template or explicit) values, and does not persist them into the agent

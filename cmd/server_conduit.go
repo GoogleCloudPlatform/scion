@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"cloud.google.com/go/compute/metadata"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
@@ -146,6 +147,19 @@ func conduitAuthzRecheckIntervalSetting(cfg *config.GlobalConfig) time.Duration 
 	return d
 }
 
+// warnConduitTargetStreamDeadlines logs a startup warning when
+// server.hub.conduit.target_stream_deadlines is enforce in external relay
+// mode: renewals for streams held by or bridged through a separate relay
+// land later, so until then user streams to renewal-capable agents are
+// refused (503 stream_renewal_unavailable) on those routes.
+func warnConduitTargetStreamDeadlines(c config.HubConduitConfig) {
+	if c.TargetStreamDeadlinesValue() != config.ConduitTargetStreamDeadlinesEnforce || !c.ExternalRelay() {
+		return
+	}
+	slog.Warn("server.hub.conduit.target_stream_deadlines is enforce with relay_mode external: " +
+		"user streams to renewal-capable agents are refused (503 stream_renewal_unavailable) until relay renewals land")
+}
+
 // conduitLifetimeCapSetting returns the configured conduit session lifetime
 // cap (default 3500s). validateServerPreflight has already rejected a
 // malformed or out-of-range value.
@@ -206,6 +220,22 @@ var (
 	// with the configured grace.
 	conduitShutdownDrain = func(hubSrv *hub.Server, grace time.Duration, capDrain bool) {
 		hubSrv.DrainConduitForShutdown(grace, capDrain)
+	}
+	// serveConduitInternalListenerFn opens the internal listener that
+	// serves the internal relay API (serveConduitInternalListener).
+	serveConduitInternalListenerFn = serveConduitInternalListener
+	// conduitRecordStartFailure records a failed relay start on the hub,
+	// with the failing setting's key or "".
+	conduitRecordStartFailure = func(hubSrv *hub.Server, setting string) {
+		hubSrv.SetConduitRelayStartFailure(setting)
+	}
+	// conduitOnGCE reports whether this node runs on GCE, where relay-peer
+	// auth may use the node's own service account (metadata.OnGCE).
+	conduitOnGCE = metadata.OnGCE
+	// conduitStartHubRelay starts the hub's in-process relay
+	// (hub.Server.StartConduitRelay).
+	conduitStartHubRelay = func(ctx context.Context, hubSrv *hub.Server, opts hub.ConduitRelayOptions) error {
+		return hubSrv.StartConduitRelay(ctx, opts)
 	}
 )
 
@@ -294,6 +324,15 @@ func validateConduitPeerSecret(c config.HubConduitConfig, relayRole bool, sessio
 	return nil
 }
 
+// conduitInternalRelayAPIServed reports whether this node serves the
+// internal relay API, the only thing relay-peer auth guards inbound: true
+// when an internal listener is configured, and always in hosted HA, where
+// a node without one cannot start a relay anyway. When false the relay
+// starts with relay.NoPeerAuth instead of building relay-peer auth.
+func conduitInternalRelayAPIServed(cfg *config.GlobalConfig, requireHA bool) bool {
+	return requireHA || cfg.Hub.Conduit.InternalListen != ""
+}
+
 // errConduitExternalNeedsExperiment refuses external relay mode on a hub
 // where hub.conduit is off (design §3.9 startup check).
 var errConduitExternalNeedsExperiment = errors.New("server.hub.conduit.relay_mode is external, which requires the hub.conduit experiment; turn it on or remove relay_mode")
@@ -334,7 +373,16 @@ func startConduit(ctx context.Context, cancel context.CancelFunc, cfg *config.Gl
 	if requireHA {
 		return fmt.Errorf("conduit relay startup failed (hosted HA): %w", err)
 	}
+	// The setting key goes to the log and to the relay-not-running response;
+	// a SettingError message holds only fixed text and setting names.
+	var se *relay.SettingError
+	if errors.As(err, &se) {
+		slog.Error("Conduit relay not started; agent conduit sessions are unavailable on this node", "setting", se.Key, "error", err)
+		conduitRecordStartFailure(hubSrv, se.Key)
+		return nil
+	}
 	slog.Error("Conduit relay not started; agent conduit sessions are unavailable on this node", "error", err)
+	conduitRecordStartFailure(hubSrv, "")
 	return nil
 }
 
@@ -355,15 +403,27 @@ func startConduitRelay(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hu
 			return err
 		}
 	}
+	if cfg.Hub.Conduit.InternalListen == "" && cfg.Hub.Conduit.InternalAdvertise != "" {
+		return &relay.SettingError{Key: "server.hub.conduit.internal_advertise", Err: errors.New("server.hub.conduit.internal_advertise is set but internal_listen is not")}
+	}
 	id := hub.ConduitInstanceID(cfg.Hub.Conduit.InstanceID)
-	auth, mode, err := hub.NewConduitPeerAuth(conduitPeerAuthOptions(ctx, cfg, id, metadata.OnGCE()))
-	if err != nil {
-		return err
+	var auth relay.PeerAuth
+	var mode string
+	if conduitInternalRelayAPIServed(cfg, requireHA) {
+		auth, mode, err = hub.NewConduitPeerAuth(conduitPeerAuthOptions(ctx, cfg, id, conduitOnGCE()))
+		if err != nil {
+			return err
+		}
+	} else {
+		// No internal listener: no relay peer can reach this node, so it
+		// needs no relay-peer credential. NoPeerAuth refuses both ways.
+		auth, mode = relay.NoPeerAuth{}, "none"
+		slog.Info("Conduit relay: internal relay API not served on this node (server.hub.conduit.internal_listen is unset); requests to other relays are refused")
 	}
 
 	var endpoint string
 	if listen := cfg.Hub.Conduit.InternalListen; listen != "" {
-		addr, closeListener, lerr := serveConduitInternalListener(ctx, listen, hubSrv.ConduitInternalHandler(), wg, errCh)
+		addr, closeListener, lerr := serveConduitInternalListenerFn(ctx, listen, hubSrv.ConduitInternalHandler(), wg, errCh)
 		if lerr != nil {
 			return lerr
 		}
@@ -375,11 +435,9 @@ func startConduitRelay(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hu
 		}()
 		endpoint = conduitAdvertiseEndpoint(cfg.Hub.Conduit.InternalAdvertise, addr, os.Getenv("POD_IP"))
 		slog.Info("Conduit internal listener started", "addr", addr.String(), "advertise", endpoint)
-	} else if cfg.Hub.Conduit.InternalAdvertise != "" {
-		return errors.New("server.hub.conduit.internal_advertise is set but internal_listen is not")
 	}
 
-	if err := hubSrv.StartConduitRelay(ctx, hub.ConduitRelayOptions{
+	if err := conduitStartHubRelay(ctx, hubSrv, hub.ConduitRelayOptions{
 		InstanceID:       id,
 		InternalEndpoint: endpoint,
 		RequireHA:        requireHA,
@@ -431,15 +489,50 @@ func startConduitExternal(ctx context.Context, cfg *config.GlobalConfig, hubSrv 
 	if err != nil {
 		return err
 	}
-	if err := hubSrv.StartConduitExternal(ctx, hub.ConduitExternalOptions{InstanceID: id, PeerAuth: auth}); err != nil {
+	ingressOff, err := validateConduitIngress(cfg.Hub.Conduit, mode)
+	if err != nil {
 		return err
 	}
-	addr, _, err := serveConduitInternalListener(ctx, cfg.Hub.Conduit.InternalListen, hubSrv.ConduitInternalHandler(), wg, errCh)
+	if ingressOff != "" {
+		slog.Warn("Conduit ingress proxy is off: it requires HMAC relay-peer authentication; conduit dials get 503 conduit_not_serving",
+			"cause", ingressOff, "peer_auth", mode, "fix", "set server.hub.conduit.peer_auth to hmac, or upgrade to the release with the relay-peer ingress header")
+	}
+	if err := hubSrv.StartConduitExternal(ctx, hub.ConduitExternalOptions{
+		InstanceID:      id,
+		PeerAuth:        auth,
+		Ingress:         cfg.Hub.Conduit.IngressValue(),
+		IngressOffCause: ingressOff,
+		LifetimeCap:     conduitLifetimeCapSetting(cfg),
+	}); err != nil {
+		return err
+	}
+	addr, _, err := serveConduitInternalListenerFn(ctx, cfg.Hub.Conduit.InternalListen, hubSrv.ConduitInternalHandler(), wg, errCh)
 	if err != nil {
 		return err
 	}
 	slog.Info("Conduit external relay mode started: this hub runs no relay", "instance_id", id, "peer_auth", mode, "internal_listen", addr.String())
 	return nil
+}
+
+// validateConduitIngress applies the startup rules of the conduit ingress
+// in external relay mode (design §3.9 "Ingress", v2.21.52): redirect is not
+// served yet (an error naming the setting). Proxy needs HMAC relay-peer
+// authentication, because the OIDC modes carry the peer token in
+// Authorization, which on the proxy leg is the client's own credential;
+// under any other resolved mode (explicit, or auto resolving to oidc) the
+// hub still starts with its ingress proxy off, and ingressOff is the cause
+// (hub.ConduitIngressCauseRequiresHMAC). peerAuthMode is the resolved
+// peer-auth mode.
+func validateConduitIngress(c config.HubConduitConfig, peerAuthMode string) (ingressOff string, err error) {
+	switch c.IngressValue() {
+	case config.ConduitIngressRedirect:
+		return "", errors.New("server.hub.conduit.ingress is redirect, which is not supported yet; use proxy")
+	case config.ConduitIngressProxy:
+		if peerAuthMode != config.ConduitPeerAuthHMAC {
+			return hub.ConduitIngressCauseRequiresHMAC, nil
+		}
+	}
+	return "", nil
 }
 
 // externalPeerAuthOptions is the hub's relay-peer auth configuration in

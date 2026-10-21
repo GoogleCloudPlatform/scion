@@ -32,6 +32,8 @@ const (
 	FieldCreated = "created"
 	// FieldUpdated holds the string denoting the updated field in the database.
 	FieldUpdated = "updated"
+	// FieldIssuanceID holds the string denoting the issuance_id field in the database.
+	FieldIssuanceID = "issuance_id"
 	// EdgeRoleBindings holds the string denoting the role_bindings edge name in mutations.
 	EdgeRoleBindings = "role_bindings"
 	// Table holds the table name of the roledefinition in the database.
@@ -56,6 +58,7 @@ var Columns = []string{
 	FieldConfersMembership,
 	FieldCreated,
 	FieldUpdated,
+	FieldIssuanceID,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -149,6 +152,11 @@ func ByCreated(opts ...sql.OrderTermOption) OrderOption {
 // ByUpdated orders the results by the updated field.
 func ByUpdated(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldUpdated, opts...).ToFunc()
+}
+
+// ByIssuanceID orders the results by the issuance_id field.
+func ByIssuanceID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldIssuanceID, opts...).ToFunc()
 }
 
 // ByRoleBindingsCount orders the results by role_bindings count.

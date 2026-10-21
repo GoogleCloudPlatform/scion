@@ -536,26 +536,25 @@ func (s *Server) cloneProjectHarnessConfigs(ctx context.Context, srcProjectID st
 			Status:      srcHC.Status,
 		}
 
-		storagePath := storage.HarnessConfigStoragePath(s.HubID(), newHC.Scope, newHC.ScopeID, newHC.Slug)
+		// The clone is created in the blob layout with a row-unique path
+		// (ptone/scion#4219). It sits in the clone project's scope
+		// directory, so the rollback prefix above covers it.
+		newHC.Layout = store.HarnessConfigLayoutBlobs
+		storagePath := s.harnessConfigBlobStoragePath(newHC)
 		newHC.StoragePath = storagePath
 
 		if stor != nil {
 			newHC.StorageBucket = stor.Bucket()
-			newHC.StorageURI = storage.HarnessConfigStorageURI(s.HubID(), stor.Bucket(), newHC.Scope, newHC.ScopeID, newHC.Slug)
+			newHC.StorageURI = storage.StorageURIForPath(stor.Bucket(), storagePath)
 		}
 
-		// Copy storage files, then create the row through the commit path.
+		// Create the row through the commit path, which copies each file
+		// the source references into the clone's blobs and re-derives
+		// Harness and Config from them.
 		var createErr error
 		if stor != nil && len(srcHC.Files) > 0 && srcHC.StoragePath != "" {
-			for _, file := range srcHC.Files {
-				srcPath := srcHC.StoragePath + "/" + file.Path
-				dstPath := storagePath + "/" + file.Path
-				if _, err := stor.Copy(ctx, srcPath, dstPath); err != nil {
-					_ = stor.DeletePrefix(ctx, storage.DirPrefix(storagePath))
-					return err
-				}
-			}
-			createErr = s.commitHarnessConfigFiles(ctx, newHC, srcHC.Files, harnessConfigCommitOpts{create: true})
+			src := srcHC
+			createErr = s.commitHarnessConfigFiles(ctx, newHC, srcHC.Files, harnessConfigCommitOpts{create: true, copyFrom: &src})
 		} else {
 			// No stored content to copy and derive from: create the row
 			// without files, pending, as a harness-config clone does. Files
@@ -567,7 +566,7 @@ func (s *Server) cloneProjectHarnessConfigs(ctx context.Context, srcProjectID st
 
 		if err := createErr; err != nil {
 			if stor != nil {
-				_ = stor.DeletePrefix(ctx, storage.DirPrefix(storagePath))
+				_ = stor.DeletePrefix(ctx, templateBlobPrefix(storagePath))
 			}
 			return err
 		}
@@ -617,7 +616,6 @@ func (s *Server) cloneProjectTemplates(ctx context.Context, srcProjectID string,
 			Slug:         srcTmpl.Slug, // SAME slug — critical for annotation references
 			DisplayName:  srcTmpl.DisplayName,
 			Description:  srcTmpl.Description,
-			Config:       srcTmpl.Config,
 			Scope:        store.TemplateScopeProject,
 			ScopeID:      clone.ID,
 			Status:       srcTmpl.Status,

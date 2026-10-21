@@ -49,11 +49,11 @@ func profileGateEnv(t *testing.T, name string) {
 	if name != "" {
 		t.Setenv(hubprofile.EnvHubProfile, name)
 	}
-	origFlag, origAs, origRun, origHub, origNoHub := hubProfileFlag, hubProfileAs, hubProfileRun, hubEndpoint, noHub
+	origFlag, origAs, origRun, origHub := hubProfileFlag, hubProfileAs, hubProfileRun, hubEndpoint
 	t.Cleanup(func() {
-		hubProfileFlag, hubProfileAs, hubProfileRun, hubEndpoint, noHub = origFlag, origAs, origRun, origHub, origNoHub
+		hubProfileFlag, hubProfileAs, hubProfileRun, hubEndpoint = origFlag, origAs, origRun, origHub
 	})
-	hubProfileFlag, hubProfileAs, hubProfileRun, hubEndpoint, noHub = "", "", "", "", false
+	hubProfileFlag, hubProfileAs, hubProfileRun, hubEndpoint = "", "", "", ""
 }
 
 func realCommand(t *testing.T, path string) *cobra.Command {
@@ -83,6 +83,8 @@ func TestHubProfileGate_UnlistedCommandsRefused(t *testing.T) {
 		"hub.status", "hub.profile.add", "hub.profile.list", "hub.profile.show", "hub.profile.remove",
 		"hub.test-identity.issue", "hub.test-identity.token", "hub.test-identity.list",
 		"hub.test-identity.delete", "hub.test-identity.teardown", "hub.test-identity.web-code",
+		"hub.test-identity.cleanup", "hub.test-identity.provenance",
+		"hub.test-identity.issue-admin",
 		"hub.projects", "hub.projects.info", "hub.projects.create", "hub.projects.delete",
 		"artifact.publish", "artifact.get", "artifact.versions", "artifact.delete",
 		"create", "start", "list", "stop", "delete", "look", "logs",
@@ -107,6 +109,8 @@ func TestHubProfileGate_UnlistedCommandsRefused(t *testing.T) {
 // too: root checks it before the hub-profile gate.
 func TestHubProfileGate_NoHubGetsRemovalError(t *testing.T) {
 	profileGateEnv(t, "t1")
+	// Parsing --no-hub sets the flag variable; clear it for later tests.
+	t.Cleanup(func() { noHub = false })
 	_, err := runProfileRoot(t, "hub", "status", "--no-hub")
 	require.ErrorIs(t, err, errNoHubRemoved)
 }
@@ -157,7 +161,8 @@ func TestHubProfileGate_AgentModeRule(t *testing.T) {
 	profileGateEnv(t, "")
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	runtime := []string{"hub.status", "hub.test-identity.issue", "hub.test-identity.token", "hub.test-identity.list", "hub.test-identity.delete", "hub.test-identity.teardown", "hub.test-identity.web-code"}
+	runtime := []string{"hub.status", "hub.test-identity.issue", "hub.test-identity.token", "hub.test-identity.list", "hub.test-identity.delete", "hub.test-identity.teardown", "hub.test-identity.web-code",
+		"hub.test-identity.cleanup", "hub.test-identity.provenance", "hub.test-identity.issue-admin"}
 
 	t.Run("no profile", func(t *testing.T) {
 		for _, p := range runtime {

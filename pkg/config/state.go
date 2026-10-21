@@ -15,6 +15,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 
@@ -49,8 +50,21 @@ func LoadProjectState(projectPath string) (*ProjectState, error) {
 	return &state, nil
 }
 
-// SaveProjectState writes project state to state.yaml in the given project path.
+// SaveProjectState writes project state to state.yaml in the given project
+// path, atomically and under the settings lock for that directory (see
+// LockSettingsDir).
 func SaveProjectState(projectPath string, state *ProjectState) error {
+	lock, err := LockSettingsDir(projectPath)
+	if err != nil {
+		return err
+	}
+	defer lock.Unlock()
+	return saveProjectStateLocked(lock, projectPath, state)
+}
+
+// saveProjectStateLocked is SaveProjectState for a caller that holds the
+// settings lock for projectPath.
+func saveProjectStateLocked(lock *SettingsLock, projectPath string, state *ProjectState) error {
 	statePath := filepath.Join(projectPath, "state.yaml")
 
 	if err := os.MkdirAll(filepath.Dir(statePath), 0755); err != nil {
@@ -62,5 +76,31 @@ func SaveProjectState(projectPath string, state *ProjectState) error {
 		return err
 	}
 
-	return os.WriteFile(statePath, data, 0644)
+	return writeSettingsFileAtomic(lock, statePath, data)
+}
+
+// UpdateProjectState loads state.yaml in projectPath, calls modify and saves
+// the result, under the settings lock for projectPath from the read to the
+// write (see LockSettingsDir), so a concurrent update from another process
+// is not lost. When state.yaml cannot be read or parsed, modify gets an
+// empty state and the error as loadErr and decides: return ErrSkipSave to
+// write nothing, or nil to replace the file. ErrSkipSave from modify ends
+// the update without writing and without error.
+func UpdateProjectState(projectPath string, modify func(state *ProjectState, loadErr error) error) error {
+	lock, err := LockSettingsDir(projectPath)
+	if err != nil {
+		return err
+	}
+	defer lock.Unlock()
+	state, loadErr := LoadProjectState(projectPath)
+	if loadErr != nil {
+		state = &ProjectState{}
+	}
+	if err := modify(state, loadErr); err != nil {
+		if errors.Is(err, ErrSkipSave) {
+			return nil
+		}
+		return err
+	}
+	return saveProjectStateLocked(lock, projectPath, state)
 }

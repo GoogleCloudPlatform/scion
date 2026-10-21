@@ -296,6 +296,9 @@ func (s *Server) registerFlatRuntimeBroker(ctx context.Context, reg flatRegistra
 		if err != nil {
 			return nil, false, fmt.Errorf("failed to read flat Runtime Broker: %w", err)
 		}
+		// A row created (or re-created after a deregistration) here gets its
+		// agents' reservations back before the registration returns.
+		s.BackfillBrokerOnRegistration(ctx, reg.BrokerID)
 		return stored, true, nil
 	}
 
@@ -353,6 +356,10 @@ type EmbeddedFlatRegistrationOptions struct {
 	// WorkspaceStorage is the workspace storage descriptor (nil keeps the
 	// stored one).
 	WorkspaceStorage *api.BrokerWorkspaceStorage
+	// HostIdentity is the host's GCP identity as read from the metadata
+	// server; nil records nothing. It is recorded as an observation only
+	// and never written to the GCP host fields.
+	HostIdentity *store.HostIdentityObservation
 }
 
 // embeddedGlobalProjectSlug is the slug of the Hub's global project.
@@ -434,6 +441,12 @@ func (s *Server) registerEmbeddedFlat(ctx context.Context, id *brokeridentity.Id
 	// R10: activation only on a bound result.
 	if err := brokeridentity.CheckActivationAck(id, "embedded", row.ID, row.RuntimeTarget); err != nil {
 		return nil, err
+	}
+	if o.HostIdentity != nil {
+		s.recordHostObservation(ctx, row.ID, *o.HostIdentity)
+		if stored, err := s.store.GetRuntimeBroker(ctx, row.ID); err == nil {
+			row = stored
+		}
 	}
 	return row, nil
 }
@@ -910,17 +923,25 @@ func runtimeTargetDMError(err error) *AgentDMError {
 	return &AgentDMError{Code: ErrCodeInternalError, Message: "Failed to wake agent: " + err.Error(), HTTPStatus: http.StatusInternalServerError}
 }
 
+// runtimeTargetRefusalMessage returns the message of a flat Runtime Broker
+// refusal returned by a start (the hub's own pre-check refusal, or the
+// broker's), or "" for any other error.
+func runtimeTargetRefusalMessage(err error) string {
+	var refusal *RuntimeTargetRefusal
+	if errors.As(err, &refusal) {
+		return refusal.Message
+	}
+	if se, _, _, ok := brokerRuntimeTargetRefusal(err); ok {
+		return se.brokerErrorMessage()
+	}
+	return ""
+}
+
 // settleRuntimeTargetRefusal records a flat Runtime Broker refusal returned
 // by a start as a definite start failure: the agent's message is set to the
 // refusal message. Nothing retries a refusal. Any other error is ignored.
 func (s *Server) settleRuntimeTargetRefusal(ctx context.Context, agent *store.Agent, err error) {
-	msg := ""
-	var refusal *RuntimeTargetRefusal
-	if errors.As(err, &refusal) {
-		msg = refusal.Message
-	} else if se, _, _, ok := brokerRuntimeTargetRefusal(err); ok {
-		msg = se.brokerErrorMessage()
-	}
+	msg := runtimeTargetRefusalMessage(err)
 	if msg == "" || agent == nil {
 		return
 	}

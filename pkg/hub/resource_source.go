@@ -393,7 +393,7 @@ func (rs *ResourceStore) bootstrapSourceUpdate(
 		storagePath = storage.ResourceStoragePath(rs.hubID, kind, existing.Scope, existing.ScopeID, existing.Slug)
 	}
 
-	uploaded, written, err := rs.uploadFiles(ctx, stor, storagePath, files)
+	uploaded, _, err := rs.uploadFiles(ctx, stor, storagePath, files)
 	if err != nil {
 		result.Failed++
 		return *result, err
@@ -403,7 +403,7 @@ func (rs *ResourceStore) bootstrapSourceUpdate(
 	existing.ContentHash = computeContentHash(uploaded)
 	existing.SourceURL = meta.SourceURL
 	existing.Status = resourceStatusActive
-	if err := rs.commitUploaded(ctx, stor, storagePath, existing.Name, written, existing, dir); err != nil {
+	if err := rs.commitUploaded(ctx, existing, dir); err != nil {
 		result.Failed++
 		return *result, err
 	}
@@ -444,7 +444,7 @@ func (rs *ResourceStore) repairStorageIfNeeded(
 	srv.resourceLog.Info(p.Label()+": repairing storage",
 		"name", rec.Name, "issues", len(report.Issues))
 
-	uploaded, written, err := rs.uploadFiles(ctx, stor, storagePath, files)
+	uploaded, _, err := rs.uploadFiles(ctx, stor, storagePath, files)
 	if err != nil {
 		return false, fmt.Errorf("repair upload: %w", err)
 	}
@@ -452,7 +452,7 @@ func (rs *ResourceStore) repairStorageIfNeeded(
 	rec.Files = uploaded
 	rec.ContentHash = computeContentHash(uploaded)
 	rec.Status = resourceStatusActive
-	if err := rs.commitUploaded(ctx, stor, storagePath, rec.Name, written, rec, dir); err != nil {
+	if err := rs.commitUploaded(ctx, rec, dir); err != nil {
 		return false, fmt.Errorf("repair update: %w", err)
 	}
 

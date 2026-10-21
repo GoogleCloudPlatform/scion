@@ -58,6 +58,7 @@
 
 import { apiFetch } from './api.js';
 import { chatLoadClock } from './chat-list-cache.js';
+import { coalescedRefresh, type CoalescedRefresh } from './coalesced-refresh.js';
 import { setUnreadBadge } from './page-title.js';
 import { stateManager } from './state.js';
 
@@ -80,6 +81,13 @@ export interface ChatUnreadCountDetail {
  * Matches the debounce the chat page uses for its own reloads.
  */
 export const UNREAD_REFRESH_DEBOUNCE_MS = 500;
+
+/**
+ * Longest a scheduled refresh waits, however steady the events: without a
+ * cap, a busy thread raising an event every few hundred milliseconds would
+ * postpone the badge refresh for as long as it stays busy.
+ */
+export const UNREAD_REFRESH_MAX_WAIT_MS = 4000;
 
 /**
  * How long a deferred first refresh waits for the page's first idle period
@@ -250,7 +258,11 @@ function idleCallbacks(): Pick<Window, 'requestIdleCallback' | 'cancelIdleCallba
  */
 export class ChatUnreadCounter {
   private current = 0;
-  private timer: ReturnType<typeof setTimeout> | null = null;
+  private readonly debounced: CoalescedRefresh = coalescedRefresh(() => this.refresh(), {
+    waitMs: UNREAD_REFRESH_DEBOUNCE_MS,
+    maxWaitMs: UNREAD_REFRESH_MAX_WAIT_MS,
+    leading: false,
+  });
   private listening = false;
   private stopped = false;
   /** Incrementing counter to detect stale refresh results. */
@@ -330,11 +342,7 @@ export class ChatUnreadCounter {
     this.noteTrigger(eventAt);
     // This refresh supersedes a pending first refresh.
     this.cancelInitialRefresh();
-    if (this.timer) clearTimeout(this.timer);
-    this.timer = setTimeout(() => {
-      this.timer = null;
-      void this.refresh();
-    }, UNREAD_REFRESH_DEBOUNCE_MS);
+    this.debounced.schedule();
   }
 
   /**
@@ -454,10 +462,7 @@ export class ChatUnreadCounter {
   }
 
   private cancelPending(): void {
-    if (this.timer) {
-      clearTimeout(this.timer);
-      this.timer = null;
-    }
+    this.debounced.cancel();
   }
 
   private publish(count: number): void {

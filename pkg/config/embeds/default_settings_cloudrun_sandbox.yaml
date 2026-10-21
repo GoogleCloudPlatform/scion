@@ -36,7 +36,8 @@ default_template: default
 default_harness_config: antigravity
 
 # Container image registry path (REQUIRED)
-# Env: SCION_IMAGE_REGISTRY
+# SCION_IMAGE_REGISTRY in the environment is a node override: it beats this
+# value and any value saved in the hub (it is not written to this file).
 image_registry: ""
 
 # CLI behavior settings

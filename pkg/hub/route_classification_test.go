@@ -134,6 +134,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/admin/project-defaults":                 "hub-admin:project-defaults",
 	"/api/v1/admin/agents/reset-auth-all":            "hub-admin:agent-reset",
 	"/api/v1/admin/conduit/grant-keys/rotate":        "hub-admin:conduit-grant-keys",
+	"/api/v1/admin/conduit/grant-keys/revoke":        "hub-admin:conduit-grant-keys",
 	"/api/v1/admin/gcp-quota":                        "hub-admin:gcp-quota",
 	"/api/v1/admin/delegation-adoption":              "hub-admin:delegation-adoption",
 	"/api/v1/admin/delegation-adoption/previews":     "hub-admin:delegation-adoption",
@@ -188,8 +189,11 @@ var routePermissionClassifications = map[string]string{
 	"GET /api/v1/test-identities":                    "hub-admin:test-identity",
 	"POST /api/v1/test-identities/{id}/token":        "hub-admin:test-identity",
 	"DELETE /api/v1/test-identities/{id}":            "hub-admin:test-identity",
+	"POST /api/v1/test-identities/cleanup":           "hub-admin:test-identity",
+	"GET /api/v1/test-identities/provenance":         "hub-admin:test-identity",
 	"POST /api/v1/test-identities/admin":             "hub-admin:test-identity",
 	"POST /api/v1/test-identities/admin/revoke-all":  "hub-admin:test-identity",
+	"GET /api/v1/test-identities/admin/{id}/residue": "hub-admin:test-identity",
 	"POST /api/v1/test-identity-delegations":         "hub-admin:test-identity",
 	"GET /api/v1/test-identity-delegations":          "hub-admin:test-identity",
 	"DELETE /api/v1/test-identity-delegations/{id}":  "hub-admin:test-identity",
@@ -570,7 +574,8 @@ func scopedAdminUATRouteRequest(route string) (string, string, *bytes.Reader) {
 	case "/api/v1/admin/users/invite", "/api/v1/admin/users/invite/bulk",
 		"/api/v1/admin/agents/reset-auth-all", "/api/v1/admin/maintenance/check-updates",
 		"/api/v1/admin/maintenance/restart", "/api/v1/admin/delegation-adoption/previews",
-		"/api/v1/admin/delegation-adoption/commits", "/api/v1/admin/conduit/grant-keys/rotate":
+		"/api/v1/admin/delegation-adoption/commits", "/api/v1/admin/conduit/grant-keys/rotate",
+		"/api/v1/admin/conduit/grant-keys/revoke":
 		method = http.MethodPost
 	case "/api/v1/admin/server-config", "/api/v1/admin/project-defaults",
 		"/api/v1/admin/messaging":

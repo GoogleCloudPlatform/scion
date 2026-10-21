@@ -91,6 +91,9 @@ func TestHostInfo(t *testing.T) {
 	if !resp.Capabilities.EmptyPerAgentWorkspace {
 		t.Error("expected capabilities.emptyPerAgentWorkspace to be true (design #2703 P2)")
 	}
+	if !resp.Capabilities.AsyncStart {
+		t.Error("expected capabilities.asyncStart to be true (ptone/scion#4669), as the heartbeat reports")
+	}
 }
 
 // TestHostInfo_EmptyPerAgentFollowsDefaultRuntime pins that /api/v1/info

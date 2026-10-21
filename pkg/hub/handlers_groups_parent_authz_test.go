@@ -360,15 +360,12 @@ func TestCreateGroup_ParentID_AllowedForParentAdmin(t *testing.T) {
 	refCode, refBody := f.addSpareAsMember(t, actor)
 	require.Equal(t, http.StatusCreated, refCode, refBody)
 	var ref *store.MutationAuditRecord
-	require.Eventually(t, func() bool {
-		for _, r := range f.groupMembershipAudits(t, f.parent.ID) {
-			if r.ID != rec.ID {
-				ref = r
-				return true
-			}
+	for _, r := range f.groupMembershipAudits(t, f.parent.ID) {
+		if r.ID != rec.ID {
+			ref = r
 		}
-		return false
-	}, 2*time.Second, 10*time.Millisecond)
+	}
+	require.NotNil(t, ref, "addGroupMember writes its record before it returns")
 	assert.Equal(t, ref.MutationType, rec.MutationType)
 	assert.Equal(t, ref.TargetType, rec.TargetType)
 	assert.Equal(t, ref.CanDelegateResult, rec.CanDelegateResult)
@@ -602,8 +599,8 @@ func TestCreateGroup_ParentID_SlugConflict_NoAudit(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, spare.ParentID, "the group holding the slug is unchanged")
 
-	// Audit records are written asynchronously: give a record time to land.
-	time.Sleep(200 * time.Millisecond)
+	// The audit records commit with the group, so the rolled-back create
+	// leaves none.
 	assert.Empty(t, f.groupMembershipAudits(t, f.parent.ID), "a failed create writes no audit record")
 }
 

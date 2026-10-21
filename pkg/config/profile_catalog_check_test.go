@@ -343,7 +343,7 @@ func TestCheckProfileCatalog_Fixtures(t *testing.T) {
 func TestProfileCatalogView_IgnoresGlobalOverlay(t *testing.T) {
 	globalDir := catalogHome(t, "local", "gke", "local-nfs")
 	running := NewSettingsOverlay()
-	running.Update(nil, storedProfiles([]string{"gke"}), nil, "")
+	running.Update(nil, storedProfiles([]string{"gke"}), nil)
 	SetGlobalSettingsOverlay(running) // catalogHome restores the previous overlay
 
 	oneStored := catalogView(t, globalDir, []string{"gke"})
@@ -403,7 +403,8 @@ func TestProfileOrigins_Versioned(t *testing.T) {
 	}
 }
 
-// A legacy hierarchy labels every profile "settings".
+// A legacy-format file is converted at its own layer, so a legacy hierarchy
+// tells file profiles from built-in defaults like a versioned one.
 func TestProfileOrigins_Legacy(t *testing.T) {
 	old := GetGlobalSettingsOverlay()
 	t.Cleanup(func() { SetGlobalSettingsOverlay(old) })
@@ -425,13 +426,11 @@ profiles:
 
 	got, err := ProfileOrigins(projectDir)
 	require.NoError(t, err)
-	if got["legacy-profile"] != ProfileSourceSettings {
-		t.Fatalf("origins = %v, want legacy-profile labelled settings", got)
+	if got["legacy-profile"] != ProfileSourceFile {
+		t.Fatalf("origins = %v, want legacy-profile labelled file", got)
 	}
-	for name, src := range got {
-		if src != ProfileSourceSettings {
-			t.Fatalf("legacy origin %q = %q, want settings", name, src)
-		}
+	if got["local"] != ProfileSourceBuiltin {
+		t.Fatalf("origins = %v, want the default local profile labelled builtin", got)
 	}
 }
 

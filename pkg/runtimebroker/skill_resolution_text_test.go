@@ -56,8 +56,10 @@ func TestSkillResolutionPublicText(t *testing.T) {
 			"r", `required skill "gh://o/r/s@v" could not be resolved: skill source unreachable (ref r)`},
 		{"invalid uri", agent.SkillResolutionError{URI: uri, Code: agent.SkillErrCodeInvalidURI, Message: "x"},
 			"r", `required skill "gh://o/r/s@v" could not be resolved: invalid skill URI (ref r)`},
+		{"hub federation_error with status", agent.SkillResolutionError{URI: uri, Code: "federation_error", Status: 502, Message: "x"},
+			"r", `required skill "gh://o/r/s@v" could not be resolved: skill registry request failed (status 502) (ref r)`},
 		{"hub storage_error", agent.SkillResolutionError{URI: uri, Code: "storage_error", Message: "x"},
-			"r", `required skill "gh://o/r/s@v" could not be resolved: resolver error (ref r)`},
+			"r", `required skill "gh://o/r/s@v" could not be resolved: skill files unavailable (ref r)`},
 		{"install failure keeps its public text",
 			agent.SkillResolutionError{URI: uri, Code: agent.SkillErrCodeInstallFailed, Message: "download failed with status 404"},
 			"r", `required skill "gh://o/r/s@v" could not be installed: download failed with status 404`},
@@ -137,7 +139,7 @@ func TestSkillLogText_RefWithRawSpaceInPassword(t *testing.T) {
 func TestRedactURLsInText(t *testing.T) {
 	in := `GCP API error (500): {"see":"https://u:pw-1@api.example.test/v1/x?sig=qv-1&token=qv-2&qv-3#qv-4"} and http://plain.example.test/p ok`
 	want := `GCP API error (500): {"see":"https://(redacted URL) and http://plain.example.test/p ok`
-	if got := redactURLsInText(in); got != want {
+	if got := agent.RedactURLsInText(in); got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
@@ -242,8 +244,8 @@ func TestRedactURLsInText_Forms(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := redactURLsInText(tt.in); got != tt.want {
-				t.Errorf("redactURLsInText(%q) = %q, want %q", tt.in, got, tt.want)
+			if got := agent.RedactURLsInText(tt.in); got != tt.want {
+				t.Errorf("agent.RedactURLsInText(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
 	}
@@ -394,21 +396,6 @@ func TestSkillLogText_BareSchemeRefLeavesMessageAlone(t *testing.T) {
 	e := &agent.SkillResolutionError{URI: "http:", Code: agent.SkillErrCodeResolveFailed, Message: "net/http: request canceled"}
 	if got, want := skillLogText(e), `required skill "http://" could not be resolved: (resolver message withheld)`; got != want {
 		t.Errorf("skillLogText = %q, want %q", got, want)
-	}
-}
-
-func TestSkillSchemeRest_ASCIIOnly(t *testing.T) {
-	if _, ok := skillSchemeRest("SKILL://scope/name"); !ok {
-		t.Error("upper-case ASCII scheme not recognised")
-	}
-	if _, ok := skillSchemeRest("s\u212aill://scope/name"); ok {
-		t.Error("a Kelvin sign matched the ASCII k of skill://")
-	}
-	if got := redactSkillRef("s\u212aill://scope/name"); got != redactedURL {
-		t.Errorf("redactSkillRef(Kelvin-sign scheme) = %q, want %q", got, redactedURL)
-	}
-	if got := redactSkillRef("gh://u%3Apw-1@o/r/s"); got != redactedURL {
-		t.Errorf("redactSkillRef(percent-encoded colon) = %q, want %q", got, redactedURL)
 	}
 }
 

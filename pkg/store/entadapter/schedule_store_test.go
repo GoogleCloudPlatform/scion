@@ -82,7 +82,7 @@ func TestScheduleCRUD(t *testing.T) {
 	assert.Equal(t, "0 9 * * 1", updated.CronExpr)
 
 	// Status
-	require.NoError(t, s.UpdateScheduleStatus(ctx, sc.ID, store.ScheduleStatusPaused))
+	require.NoError(t, s.UpdateScheduleStatus(ctx, sc.ID, store.ScheduleStatusPaused, store.ScheduleStatusReasonNone))
 	paused, err := s.GetSchedule(ctx, sc.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.ScheduleStatusPaused, paused.Status)
@@ -174,12 +174,93 @@ func TestListSchedulesExcludesDeletedByDefault(t *testing.T) {
 	require.NoError(t, s.CreateSchedule(ctx, active))
 	deleted := newTestSchedule(projectID, "deleted")
 	require.NoError(t, s.CreateSchedule(ctx, deleted))
-	require.NoError(t, s.UpdateScheduleStatus(ctx, deleted.ID, store.ScheduleStatusDeleted))
+	require.NoError(t, s.UpdateScheduleStatus(ctx, deleted.ID, store.ScheduleStatusDeleted, store.ScheduleStatusReasonNone))
 
 	res, err := s.ListSchedules(ctx, store.ScheduleFilter{ProjectID: projectID}, store.ListOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, 1, res.TotalCount)
 	assert.Equal(t, active.ID, res.Items[0].ID)
+}
+
+func TestListSchedulesFiltersByLastRunStatus(t *testing.T) {
+	s := newTestScheduleStore(t)
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	ranAt := time.Now().UTC().Truncate(time.Second)
+	next := ranAt.Add(time.Hour)
+
+	failing := newTestSchedule(projectID, "failing")
+	require.NoError(t, s.CreateSchedule(ctx, failing))
+	require.NoError(t, s.UpdateScheduleAfterRun(ctx, failing.ID, ranAt, next, "refused"))
+	recovered := newTestSchedule(projectID, "recovered")
+	require.NoError(t, s.CreateSchedule(ctx, recovered))
+	require.NoError(t, s.UpdateScheduleAfterRun(ctx, recovered.ID, ranAt, next, "refused"))
+	require.NoError(t, s.UpdateScheduleAfterRun(ctx, recovered.ID, ranAt, next, ""))
+	neverRun := newTestSchedule(projectID, "never-run")
+	require.NoError(t, s.CreateSchedule(ctx, neverRun))
+
+	res, err := s.ListSchedules(ctx, store.ScheduleFilter{LastRunStatus: store.ScheduleRunError}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.TotalCount)
+	require.Len(t, res.Items, 1)
+	assert.Equal(t, failing.ID, res.Items[0].ID)
+
+	res, err = s.ListSchedules(ctx, store.ScheduleFilter{}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, 3, res.TotalCount)
+}
+
+// TestListSchedulesFiltersSystemPaused covers ScheduleFilter.SystemPausedOnly
+// (ptone/scion#5404): only paused schedules with a non-empty status reason
+// are listed, whatever the reason value. A user pause (empty reason), an
+// active schedule and an active schedule that still carries a reason are
+// left out. Runs on SQLite and, under the integration tag, on Postgres.
+func TestListSchedulesFiltersSystemPaused(t *testing.T) {
+	s := newTestScheduleStore(t)
+	ctx := context.Background()
+	projectID := uuid.NewString()
+
+	create := func(name, status, reason string) *store.Schedule {
+		sc := newTestSchedule(projectID, name)
+		require.NoError(t, s.CreateSchedule(ctx, sc))
+		if status != store.ScheduleStatusActive || reason != "" {
+			require.NoError(t, s.UpdateScheduleStatus(ctx, sc.ID, status, reason))
+		}
+		return sc
+	}
+	creator := create("creator", store.ScheduleStatusPaused, store.ScheduleStatusReasonCreatorDeleted)
+	zone := create("zone", store.ScheduleStatusPaused, store.ScheduleStatusReasonCronZoneUnsupported)
+	other := create("other-reason", store.ScheduleStatusPaused, "some_later_reason")
+	create("user-paused", store.ScheduleStatusPaused, store.ScheduleStatusReasonNone)
+	create("active", store.ScheduleStatusActive, store.ScheduleStatusReasonNone)
+	create("active-with-reason", store.ScheduleStatusActive, store.ScheduleStatusReasonCreatorDeleted)
+	create("deleted-with-reason", store.ScheduleStatusDeleted, store.ScheduleStatusReasonCreatorDeleted)
+
+	res, err := s.ListSchedules(ctx, store.ScheduleFilter{SystemPausedOnly: true}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, 3, res.TotalCount)
+	got := []string{}
+	for _, sc := range res.Items {
+		got = append(got, sc.ID)
+		assert.Equal(t, store.ScheduleStatusPaused, sc.Status)
+		assert.NotEmpty(t, sc.StatusReason)
+	}
+	assert.ElementsMatch(t, []string{creator.ID, zone.ID, other.ID}, got)
+
+	// Paging keeps the filter.
+	page, err := s.ListSchedules(ctx, store.ScheduleFilter{SystemPausedOnly: true}, store.ListOptions{Limit: 2})
+	require.NoError(t, err)
+	assert.Len(t, page.Items, 2)
+	assert.Equal(t, 3, page.TotalCount)
+	require.NotEmpty(t, page.NextCursor)
+	rest, err := s.ListSchedules(ctx, store.ScheduleFilter{SystemPausedOnly: true}, store.ListOptions{Limit: 2, Cursor: page.NextCursor})
+	require.NoError(t, err)
+	assert.Len(t, rest.Items, 1)
+
+	// Without the flag, the user-paused schedule is listed too.
+	res, err = s.ListSchedules(ctx, store.ScheduleFilter{Status: store.ScheduleStatusPaused}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, 4, res.TotalCount)
 }
 
 // TestListDueSchedulesClaimPath exercises the dialect-aware SKIP LOCKED claim
@@ -213,7 +294,7 @@ func TestListDueSchedulesClaimPath(t *testing.T) {
 	paused := newTestSchedule(projectID, "paused")
 	paused.NextRunAt = &early
 	require.NoError(t, s.CreateSchedule(ctx, paused))
-	require.NoError(t, s.UpdateScheduleStatus(ctx, paused.ID, store.ScheduleStatusPaused))
+	require.NoError(t, s.UpdateScheduleStatus(ctx, paused.ID, store.ScheduleStatusPaused, store.ScheduleStatusReasonNone))
 
 	due, err := s.ListDueSchedules(ctx, now)
 	require.NoError(t, err)

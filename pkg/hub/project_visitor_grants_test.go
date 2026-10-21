@@ -807,6 +807,118 @@ func TestProjectVisitors_VisitorIsRefusedOnTheRoutes(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), visitorRouteRefusalMessage)
 }
 
+// federatedGet sends GET path with the issuer token as the federation credential
+// through the full server handler.
+func (f *visitorGrantFixture) federatedGet(t *testing.T, path, token string) *httptest.ResponseRecorder {
+	t.Helper()
+	return f.federatedRequest(t, http.MethodGet, path, token)
+}
+
+// federatedRequest sends method path with the issuer token as the
+// federation credential through the full server handler.
+func (f *visitorGrantFixture) federatedRequest(t *testing.T, method, path, token string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, path, nil)
+	req.Header.Set(FederationTokenHeader, token)
+	rec := httptest.NewRecorder()
+	f.srv.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+// A linked visitor reads its own profile on GET /api/v1/auth/me (a method
+// the route lists in VisitorMethods): the federated account's ID and the
+// email the issuer verified. The same credential is refused on a route
+// with no VisitorMethods.
+func TestVisitorRoute_AuthMeReturnsVisitorOwnProfile(t *testing.T) {
+	f := newVisitorGrantFixture(t)
+	v := f.grantOK(t, grantTestIssuer, "ada@corp.example")
+	token := f.token(t, grantTestIssuer, "sub-ada", "ada@corp.example", boolPtr(true))
+
+	rec := f.federatedGet(t, "/api/v1/auth/me", token)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var me UserResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &me))
+	assert.Equal(t, v.ID, me.ID, "the visitor's own federated account")
+	assert.Equal(t, "ada@corp.example", me.Email)
+	assert.Equal(t, "viewer", me.Role)
+
+	rec = f.federatedGet(t, "/api/v1/users/me/groups", token)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), visitorRouteRefusalMessage)
+}
+
+// With allow_visitor_grants off for the issuer, a linked visitor is
+// refused on /api/v1/auth/me GET too, with the uniform refusal.
+func TestVisitorRoute_AuthMeRefusedWhileIssuerFlagOff(t *testing.T) {
+	f := newVisitorGrantFixture(t)
+	f.grantOK(t, grantTestIssuer, "bea@corp.example")
+	token := f.token(t, grantTestIssuer, "sub-bea", "bea@corp.example", boolPtr(true))
+	rec := f.federatedGet(t, "/api/v1/auth/me", token)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	f.setIssuerAcceptsVisitors(t, grantTestIssuer, false)
+	rec = f.federatedGet(t, "/api/v1/auth/me", token)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, ErrCodeForbidden, resp.Error.Code)
+	assert.Equal(t, visitorRouteRefusalMessage, resp.Error.Message, "the uniform refusal")
+}
+
+// An unlinked federated user (no grant, so no federated account) is not a
+// visitor: it gets the same responses with the visitor experiment on as
+// with it off, on /api/v1/auth/me and on a route with no VisitorMethods.
+// On /api/v1/auth/me that is the profile read's credential refusal (403,
+// not the visitor refusal), as on a hub without visitors: the
+// user.self.profile credentials name only a visitor's federation
+// credential.
+func TestVisitorRoute_UnlinkedFederatedUserUnchanged(t *testing.T) {
+	f := newVisitorGrantFixture(t)
+	token := f.token(t, grantTestOtherIssuer, "sub-cyd", "cyd@other.example", boolPtr(true))
+	identity, _, code := f.identityThroughMiddleware(t, token)
+	require.Equal(t, http.StatusOK, code)
+	require.IsType(t, &FederatedUserIdentity{}, identity)
+
+	for _, path := range []string{"/api/v1/auth/me", "/api/v1/users/me/groups"} {
+		visitorSetExperiment(t, f.srv, true)
+		on := f.federatedGet(t, path, token)
+		visitorSetExperiment(t, f.srv, false)
+		off := f.federatedGet(t, path, token)
+		assert.Equal(t, off.Code, on.Code, "%s", path)
+		assert.Equal(t, off.Body.String(), on.Body.String(), "%s", path)
+		assert.NotContains(t, on.Body.String(), visitorRouteRefusalMessage, "%s", path)
+	}
+
+	for _, on := range []bool{true, false} {
+		visitorSetExperiment(t, f.srv, on)
+		rec := f.federatedGet(t, "/api/v1/auth/me", token)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "experiment on=%v: %s", on, rec.Body.String())
+	}
+}
+
+// On /api/v1/auth/me a linked visitor is admitted on GET and HEAD only:
+// GET reads its profile, and HEAD reaches the handler, which answers 405
+// as it does for every caller. POST, PUT, PATCH and DELETE answer the
+// uniform refusal before the handler runs.
+func TestVisitorRoute_AuthMeAdmitsReadMethodsOnly(t *testing.T) {
+	f := newVisitorGrantFixture(t)
+	f.grantOK(t, grantTestIssuer, "dee@corp.example")
+	token := f.token(t, grantTestIssuer, "sub-dee", "dee@corp.example", boolPtr(true))
+
+	rec := f.federatedRequest(t, http.MethodGet, "/api/v1/auth/me", token)
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rec = f.federatedRequest(t, http.MethodHead, "/api/v1/auth/me", token)
+	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code, "HEAD: the handler's method check")
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
+		rec := f.federatedRequest(t, method, "/api/v1/auth/me", token)
+		require.Equal(t, http.StatusForbidden, rec.Code, "%s: %s", method, rec.Body.String())
+		var resp ErrorResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), "%s", method)
+		assert.Equal(t, ErrCodeForbidden, resp.Error.Code, "%s", method)
+		assert.Equal(t, visitorRouteRefusalMessage, resp.Error.Message, "%s: the uniform refusal", method)
+	}
+}
+
 // allow_visitor_grants is checked on every visitor request: turning it off
 // refuses a linked, granted visitor with the uniform refusal and keeps the
 // grant; turning it back on admits the visitor again with no grant change.

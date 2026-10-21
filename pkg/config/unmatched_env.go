@@ -63,42 +63,28 @@ func DirectServerEnvNameList() []string {
 // generic match would accept (see serverEnvMatches), so they are flagged
 // explicitly.
 var knownInertServerEnvNames = map[string]string{
-	"SCION_SERVER_HUB_ADMINEMAIL":                       "SCION_SERVER_HUB_ADMINEMAILS",
-	"SCION_SERVER_HUB_SOFT_DELETE_RETENTION":            "SCION_SERVER_HUB_SOFTDELETERETENTION",
-	"SCION_SERVER_HUB_SOFT_DELETE_RETAIN_FILES":         "SCION_SERVER_HUB_SOFTDELETERETAINFILES",
-	"SCION_SERVER_HUB_AUTO_SUSPEND_STALLED":             "SCION_SERVER_HUB_AUTOSUSPENDSTALLED",
-	"SCION_SERVER_HUB_STALLED_THRESHOLD":                "SCION_SERVER_HUB_STALLEDTHRESHOLD",
-	"SCION_SERVER_AUTH_USER_ACCESS_MODE":                "SCION_SERVER_AUTH_USERACCESSMODE",
-	"SCION_SERVER_SCHEDULER_INTERVAL_SECONDS":           "SCION_SERVER_SCHEDULER_INTERVALSECONDS",
-	"SCION_SERVER_SCHEDULER_MAX_CONCURRENCY":            "SCION_SERVER_SCHEDULER_MAXCONCURRENCY",
-	"SCION_SERVER_BROKER_ENABLED":                       "SCION_SERVER_RUNTIMEBROKER_ENABLED",
-	"SCION_SERVER_BROKER_PORT":                          "SCION_SERVER_RUNTIMEBROKER_PORT",
-	"SCION_SERVER_BROKER_HOST":                          "SCION_SERVER_RUNTIMEBROKER_HOST",
-	"SCION_SERVER_BROKER_READTIMEOUT":                   "SCION_SERVER_RUNTIMEBROKER_READTIMEOUT",
-	"SCION_SERVER_BROKER_READ_TIMEOUT":                  "SCION_SERVER_RUNTIMEBROKER_READTIMEOUT",
-	"SCION_SERVER_BROKER_WRITETIMEOUT":                  "SCION_SERVER_RUNTIMEBROKER_WRITETIMEOUT",
-	"SCION_SERVER_BROKER_WRITE_TIMEOUT":                 "SCION_SERVER_RUNTIMEBROKER_WRITETIMEOUT",
-	"SCION_SERVER_BROKER_HUBENDPOINT":                   "SCION_SERVER_RUNTIMEBROKER_HUBENDPOINT",
-	"SCION_SERVER_BROKER_HUB_ENDPOINT":                  "SCION_SERVER_RUNTIMEBROKER_HUBENDPOINT",
-	"SCION_SERVER_BROKER_CONTAINERHUBENDPOINT":          "SCION_SERVER_RUNTIMEBROKER_CONTAINERHUBENDPOINT",
-	"SCION_SERVER_BROKER_CONTAINER_HUB_ENDPOINT":        "SCION_SERVER_RUNTIMEBROKER_CONTAINERHUBENDPOINT",
-	"SCION_SERVER_BROKER_ALLOWCONTAINERSCRIPTHARNESSES": "SCION_SERVER_RUNTIMEBROKER_ALLOWCONTAINERSCRIPTHARNESSES",
-	"SCION_SERVER_BROKER_BROKERID":                      "SCION_SERVER_BROKER_BROKER_ID",
-	"SCION_SERVER_BROKER_BROKERNAME":                    "SCION_SERVER_BROKER_BROKER_NAME",
-	"SCION_SERVER_BROKER_BROKERNICKNAME":                "SCION_SERVER_BROKER_BROKER_NICKNAME",
-	"SCION_SERVER_BROKER_BROKERTOKEN":                   "SCION_SERVER_BROKER_BROKER_TOKEN",
-	"SCION_SERVER_BROKER_AUTOPROVIDE":                   "SCION_SERVER_BROKER_AUTO_PROVIDE",
-	"SCION_SERVER_HUB_PUBLIC_URL":                       "SCION_SERVER_HUB_ENDPOINT",
-	"SCION_SERVER_HUB_PUBLICURL":                        "SCION_SERVER_HUB_ENDPOINT",
+	"SCION_SERVER_HUB_ADMINEMAIL": "SCION_SERVER_HUB_ADMINEMAILS",
+	// server.hub.public_url is set only by SCION_SERVER_HUB_ENDPOINT
+	// (serverEnvInertNames).
+	"SCION_SERVER_HUB_PUBLIC_URL": "SCION_SERVER_HUB_ENDPOINT",
+	"SCION_SERVER_HUB_PUBLICURL":  "SCION_SERVER_HUB_ENDPOINT",
 	// Named by an old storage-migration error message.
 	"SCION_SERVER_HUB_ID": "SCION_SERVER_HUB_HUBID",
-	// The server.log_level spelling is SCION_SERVER_LOGLEVEL; nothing sets
-	// the log format. See knownInertServerEnvNotes.
-	"SCION_SERVER_LOG_LEVEL":  "SCION_SERVER_LOGLEVEL",
+	// server.log_format binds in VersionedSettings, but nothing reads it.
+	// See knownInertServerEnvNotes.
 	"SCION_SERVER_LOG_FORMAT": "",
 	"SCION_SERVER_LOGFORMAT":  "",
 	// server.env binds in VersionedSettings, but nothing reads it.
 	"SCION_SERVER_ENV": "",
+}
+
+// serverEnvInertNames lists SCION_SERVER_* names that set nothing in any
+// consumer although a generic spelling rule would land them on a setting.
+var serverEnvInertNames = map[string]bool{
+	// server.hub.public_url is set only by SCION_SERVER_HUB_ENDPOINT
+	// (ptone/scion#3905).
+	"SCION_SERVER_HUB_PUBLICURL":  true,
+	"SCION_SERVER_HUB_PUBLIC_URL": true,
 }
 
 // knownInertSeedEnvNames maps SCION_SEED_* names that set nothing to the
@@ -112,7 +98,6 @@ var knownInertSeedEnvNames = map[string]string{
 // knownInertServerEnvNotes adds a short explanation to the warning for
 // known-inert names whose suggestion alone would mislead.
 var knownInertServerEnvNotes = map[string]string{
-	"SCION_SERVER_LOG_LEVEL":  "SCION_SERVER_LOGLEVEL sets server.log_level, applied at startup and on file-mode reload; SCION_LOG_LEVEL and --debug take precedence over it",
 	"SCION_SERVER_LOG_FORMAT": "server.log_format is not read by the hub",
 	"SCION_SERVER_LOGFORMAT":  "server.log_format is not read by the hub",
 	"SCION_SERVER_ENV":        "server.env is informational and not read by the hub",
@@ -230,6 +215,12 @@ func serverEnvMatches(name string, isLayer1 func(string) bool) bool {
 	if rest == "" {
 		return false
 	}
+	// A name the env mapping table holds (canonical or alias) sets a
+	// setting. An alias that another spelling of the same setting
+	// overrides is reported by WarnDeprecatedServerEnvAliases, not here.
+	if _, _, ok := lookupServerEnv(name); ok && !isServerEnvInert(name) {
+		return true
+	}
 	if isLayer1(serverEnvToOpsettingsKey(rest)) {
 		return true
 	}
@@ -238,9 +229,9 @@ func serverEnvMatches(name string, isLayer1 func(string) bool) bool {
 	}
 	// A VersionedSettings match is accepted unless the hub is known to read
 	// that key from GlobalConfig or the opsettings snapshot instead (accept
-	// by default). Underscored spellings such as
-	// SCION_SERVER_HUB_ADMIN_EMAILS bind in VersionedSettings, but the hub
-	// takes that key from the snapshot, so they do nothing and are flagged.
+	// by default). Every consumer resolves a name through the same env
+	// mapping table, so this only rejects names the table does not hold
+	// that bind to a VersionedSettings field the hub ignores.
 	if vsKey := versionedEnvKeyMapper(name); vsKey != "" {
 		if structPathExists(reflect.TypeOf(VersionedSettings{}), strings.Split(vsKey, "."), matchExact) {
 			return VersionedSettingsReadServerKeys[vsKey] || !hubReadsKeyElsewhere(vsKey, isLayer1)
@@ -292,6 +283,11 @@ func seedEnvMatches(name string, isLayer1 func(string) bool) bool {
 	rest := strings.TrimPrefix(name, seedEnvPrefix)
 	if rest == "" {
 		return false
+	}
+	// As in serverEnvMatches: a table name matches whether or not another
+	// spelling overrides it, if the setting is one seed values seed.
+	if e, _, _, ok := lookupSettingsEnv(name); ok {
+		return isLayer1(e.Path)
 	}
 	return isLayer1(seedEnvToOpsettingsKey(rest))
 }

@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -1251,17 +1252,20 @@ func (s *Server) initHubManagedProject(project *store.Project) error {
 		if err != nil {
 			return fmt.Errorf("failed to read default project settings: %w", err)
 		}
-		if err := os.WriteFile(settingsPath, defaultSettings, 0644); err != nil {
+		// Checked again under the settings lock, so a file another writer
+		// has just created is not replaced.
+		if err := config.CreateSettingsFileIfMissing(settingsPath, defaultSettings); err != nil {
 			return fmt.Errorf("failed to seed settings.yaml: %w", err)
 		}
 	}
 
 	// Write hub connection settings into the seeded settings file.
+	// hub.project_id is the one v1 key for the project ID (the other
+	// project-ID key names map to it).
 	settingsUpdates := map[string]string{
-		"hub.enabled":   "true",
-		"hub.endpoint":  s.HubEndpointFor(HubEndpointForProjectSettings),
-		"hub.projectId": project.ID,
-		"project_id":    project.ID,
+		"hub.enabled":                     "true",
+		"hub.endpoint":                    s.HubEndpointFor(HubEndpointForProjectSettings),
+		projectkeys.ConfigHubProjectIDKey: project.ID,
 	}
 	for key, value := range settingsUpdates {
 		if err := config.UpdateSetting(scionDir, key, value, false); err != nil {
@@ -1303,6 +1307,20 @@ func (s *Server) cloneSharedWorkspaceProject(ctx context.Context, project *store
 		return fmt.Errorf("shared workspace clone failed: %w", err)
 	}
 
+	// Agents provision from this clone, and provisioning requires
+	// .scion/agents/ to be git-ignored. The explicit-target InitProject
+	// below leaves the tracked .gitignore alone, so add the rule to the
+	// clone's own exclude file instead. Without it no agent can start, so
+	// a failure here fails the clone. The detailed error names host paths,
+	// so it is logged here and the returned error (which reaches the API
+	// response) is fixed text.
+	if err := config.EnsureScionGitExclude(workspacePath); err != nil {
+		s.projectsLogger().Warn("failed to set up the .scion/agents/ ignore rule in the shared workspace clone",
+			"project_id", project.ID, "error", err.Error())
+		_ = util.RemoveAllSafe(workspacePath)
+		return errors.New("shared workspace clone failed: could not set up the .scion/agents/ ignore rule")
+	}
+
 	// Seed the .scion project on top of the cloned workspace, with the hub
 	// project ID as the workspace project identity (replacing any identity
 	// the repository carries).
@@ -1317,11 +1335,12 @@ func (s *Server) cloneSharedWorkspaceProject(ctx context.Context, project *store
 	}
 
 	// Write hub connection settings
+	// hub.project_id is the one v1 key for the project ID (the other
+	// project-ID key names map to it).
 	settingsUpdates := map[string]string{
-		"hub.enabled":   "true",
-		"hub.endpoint":  s.HubEndpointFor(HubEndpointForProjectSettings),
-		"hub.projectId": project.ID,
-		"project_id":    project.ID,
+		"hub.enabled":                     "true",
+		"hub.endpoint":                    s.HubEndpointFor(HubEndpointForProjectSettings),
+		projectkeys.ConfigHubProjectIDKey: project.ID,
 	}
 	for key, value := range settingsUpdates {
 		if err := config.UpdateSetting(scionDir, key, value, false); err != nil {
@@ -1974,7 +1993,7 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			LinkedBy:   linkedByForProvider(GetUserIdentityFromContext(ctx)),
 		}
 
-		if err := s.store.AddProjectProvider(ctx, provider); err != nil {
+		if err := s.linkProjectProvider(ctx, provider); err != nil {
 			writeErrorFromErr(w, err, "")
 			return
 		}
@@ -2022,10 +2041,9 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 
 		if existingBroker != nil {
 			registerOperation = "reregister"
-			// Update existing broker
+			// Update existing broker. The name and slug are set at
+			// creation or through the update API, so they are kept.
 			broker = existingBroker
-			broker.Name = req.Broker.Name
-			broker.Slug = api.Slugify(req.Broker.Name)
 			broker.Version = req.Broker.Version
 			broker.Status = store.BrokerStatusOnline
 			broker.ConnectionState = "connected"
@@ -2065,6 +2083,9 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 				writeErrorFromErr(w, err, "")
 				return
 			}
+			// A row created (or re-created after a deregistration) here gets
+			// its agents' reservations back before the registration answers.
+			s.BackfillBrokerOnRegistration(ctx, broker.ID)
 		}
 		LogRegistrationEvent(ctx, s.auditLogger, broker.ID, broker.Name, linkedByForProvider(callerUser), getClientIP(r),
 			mergeBrokerAuditDetails(brokerAuditCredentialDetails(ctx), "operation", registerOperation, "path", "embedded"))
@@ -2089,7 +2110,7 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			LinkedBy:   linkedByForProvider(callerUser),
 		}
 
-		if err := s.store.AddProjectProvider(ctx, provider); err != nil {
+		if err := s.linkProjectProvider(ctx, provider); err != nil {
 			writeErrorFromErr(w, err, "")
 			return
 		}
@@ -2137,6 +2158,11 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// The node image registry is shown redacted (ptone/scion#3916).
+	if broker != nil {
+		shown := brokerForDisplay(*broker)
+		broker = &shown
+	}
 	writeJSON(w, http.StatusOK, RegisterProjectResponse{
 		Project:     project,
 		Broker:      broker,
@@ -2948,6 +2974,12 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		if err == store.ErrNotFound {
 			agent, err = s.store.GetAgent(ctx, agentID)
+			if (errors.Is(err, store.ErrNotFound) || (err == nil && agent.ProjectID != projectID)) && isVisitorIdentity(GetIdentityFromContext(ctx)) {
+				// A visitor gets the one refusal for an unknown agent too
+				// (admitVisitorSubRoute already refused it before here).
+				writeVisitorRefusal(w)
+				return
+			}
 			if err != nil {
 				writeError(w, http.StatusNotFound, ErrCodeAgentNotFound,
 					fmt.Sprintf("Agent %q not found in project", agentID),
@@ -2999,6 +3031,11 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 		isSystemPlane := false
 		allowed, reason, decision := s.authorizeAgentMessage(r.Context(), identity, agent, isSystemPlane)
 		messaging.RecordStep(r.Context(), "message_authorized")
+		if !allowed && isVisitorIdentity(identity) {
+			// A visitor's refusal names no reason or message mode.
+			writeVisitorRefusal(w)
+			return
+		}
 		if !allowed {
 			// Use typed denial code from the decision (agent path) or
 			// fall back to generic forbidden code (user path).
@@ -3710,9 +3747,10 @@ func (s *Server) deleteStorageFiles(ctx context.Context, projectID string, templ
 			}
 		}
 	}
-	for _, hc := range harnesses {
+	for i := range harnesses {
+		hc := &harnesses[i]
 		if hc.StoragePath != "" {
-			if err := stor.DeletePrefix(ctx, storage.DirPrefix(hc.StoragePath)); err != nil {
+			if err := s.deleteHarnessConfigStorage(ctx, stor, hc); err != nil {
 				s.projectsLogger().Warn("failed to delete harness config storage files",
 					"project_id", projectID, "harnessConfig", hc.ID, "path", hc.StoragePath, "error", err)
 			}

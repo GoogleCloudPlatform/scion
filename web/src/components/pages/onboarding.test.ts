@@ -16,7 +16,7 @@
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { apiFetch } from '../../client/api.js';
-import { BROKER_RESTART_HINT } from './onboarding.js';
+import { BROKER_RESTART_HINT, registryPrefill } from './onboarding.js';
 import {
   MEMBERSHIP_CHANGED_EVENT,
   type MembershipChangedDetail,
@@ -264,5 +264,43 @@ describe('onboarding registry step: broker restart hint', () => {
 
     expect(el.error).toBe(`No embedded broker available. ${BROKER_RESTART_HINT}`);
     expect(vi.mocked(apiFetch)).not.toHaveBeenCalled();
+  });
+});
+
+describe('onboarding registry step: pre-fill', () => {
+  it('never pre-fills the server node env, and needs no save for it', () => {
+    const p = registryPrefill({
+      imageRegistry: 'node.example/scion',
+      imageRegistrySource: 'node_env',
+      imageRegistrySaveable: 'file.example/scion',
+    });
+    expect(p.effective).toBe('node.example/scion');
+    expect(p.input).toBe('file.example/scion');
+    expect(p.fromNodeEnv).toBe(true);
+  });
+
+  it('pre-fills the saveable value for a saved or file registry', () => {
+    const p = registryPrefill({
+      imageRegistry: 'db.example/scion',
+      imageRegistrySource: 'hub_db',
+      imageRegistrySaveable: 'db.example/scion',
+    });
+    expect(p.input).toBe('db.example/scion');
+    expect(p.fromNodeEnv).toBe(false);
+  });
+
+  it('suggests the default when nothing is saveable', () => {
+    const p = registryPrefill({
+      imageRegistry: 'node.example/scion',
+      imageRegistrySource: 'node_env',
+    });
+    expect(p.input).toBe('ghcr.io/homebrew-scion');
+    expect(registryPrefill(null).input).toBe('ghcr.io/homebrew-scion');
+  });
+
+  it('falls back to imageRegistry for a hub that does not report the source', () => {
+    const p = registryPrefill({ imageRegistry: 'old.example/scion' });
+    expect(p.input).toBe('old.example/scion');
+    expect(p.fromNodeEnv).toBe(false);
   });
 });

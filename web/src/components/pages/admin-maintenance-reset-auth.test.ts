@@ -36,13 +36,15 @@ const RESET_AUTH_RESULT = {
     },
     { id: 'rt-1', name: 'rt', error: 'runtime not available', code: 'runtime_unavailable' },
     { id: 'held-1', name: 'held', error: 'not in standing', code: 'agent_not_in_standing' },
+    { id: 'rl-1', name: 'rl', error: 'reload not confirmed', code: 'reload_unconfirmed' },
     { id: 'x-1', name: 'x', error: 'broker unreachable' },
   ],
-  total: 5,
+  total: 6,
   failed_by_code: {
     delegation_creator_missing: 1,
     runtime_unavailable: 1,
     agent_not_in_standing: 1,
+    reload_unconfirmed: 1,
     unclassified: 1,
   },
 };
@@ -96,12 +98,14 @@ describe('admin maintenance reset auth result', () => {
     expect(categories).toContain('Creator delegation missing: 1');
     expect(categories).toContain('Runtime unavailable: 1');
     expect(categories).toContain('Not in good standing: 1');
+    expect(categories).toContain('Reload unconfirmed: 1');
     expect(categories).toContain('Other: 1');
 
     const log = el.shadowRoot?.querySelector('.result-log.result-error')?.textContent ?? '';
     expect(log).toContain(`child: ${CREATOR_REASON} [Creator delegation missing]`);
     expect(log).toContain('rt: runtime not available [Runtime unavailable]');
     expect(log).toContain('held: not in standing [Not in good standing]');
+    expect(log).toContain('rl: reload not confirmed [Reload unconfirmed]');
     expect(log).toContain('x: broker unreachable');
     expect(log).not.toContain('x: broker unreachable [');
   });

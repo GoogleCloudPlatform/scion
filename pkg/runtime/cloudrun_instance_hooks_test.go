@@ -148,38 +148,44 @@ func ciCleanup(rt *CloudRunRuntime) (time.Duration, error) {
 // StartInstance), reporting no handle.
 func TestCloudRunInstanceHooks_CheckpointAbort(t *testing.T) {
 	cases := []struct {
-		step      string
-		setup     func(f *fakeInstancesClient, cfg *RunConfig)
-		wantSteps []string
-		wantGets  int
+		step           string
+		setup          func(f *fakeInstancesClient, cfg *RunConfig)
+		wantSteps      []string
+		wantGets       int
+		wantProvisions int
 	}{
 		{
-			// The NFS backend with no NFS server configured: provisioning,
-			// if reached, fails with its own error.
-			step: CheckpointStepWorkspaceProvision,
-			setup: func(f *fakeInstancesClient, cfg *RunConfig) {
-				cfg.WorkspaceBackendName = "nfs"
-				f.getErr = notFoundErr()
-			},
-			wantSteps: []string{CheckpointStepWorkspaceProvision},
-			wantGets:  0,
+			// Provisioning is counted below: an abort here must not
+			// reach it.
+			step:           CheckpointStepWorkspaceProvision,
+			setup:          func(f *fakeInstancesClient, _ *RunConfig) { f.getErr = notFoundErr() },
+			wantSteps:      []string{CheckpointStepWorkspaceProvision},
+			wantGets:       0,
+			wantProvisions: 0,
 		},
 		{
-			step:      CheckpointStepInstanceCreate,
-			setup:     func(f *fakeInstancesClient, _ *RunConfig) { f.getErr = notFoundErr() },
-			wantSteps: []string{CheckpointStepWorkspaceProvision, CheckpointStepInstanceCreate},
-			wantGets:  1,
+			step:           CheckpointStepInstanceCreate,
+			setup:          func(f *fakeInstancesClient, _ *RunConfig) { f.getErr = notFoundErr() },
+			wantSteps:      []string{CheckpointStepWorkspaceProvision, CheckpointStepInstanceCreate},
+			wantGets:       1,
+			wantProvisions: 1,
 		},
 		{
-			step:      CheckpointStepInstanceStart,
-			setup:     func(f *fakeInstancesClient, _ *RunConfig) { f.getInstance = ciInstance(ciRunA) },
-			wantSteps: []string{CheckpointStepWorkspaceProvision, CheckpointStepInstanceStart},
-			wantGets:  1,
+			step:           CheckpointStepInstanceStart,
+			setup:          func(f *fakeInstancesClient, _ *RunConfig) { f.getInstance = ciInstance(ciRunA) },
+			wantSteps:      []string{CheckpointStepWorkspaceProvision, CheckpointStepInstanceStart},
+			wantGets:       1,
+			wantProvisions: 1,
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.step, func(t *testing.T) {
 			fake, rt := ciSetup(t)
+			provisions := 0
+			rt.provisionNFS = func(ctx context.Context, cfg RunConfig, agentID string, uid, gid int) (*cloudRunNFSProvisionPaths, error) {
+				provisions++
+				return stubCloudRunNFSProvision(ctx, cfg, agentID, uid, gid)
+			}
 			rec := &sandboxHookRecorder{abortAt: tc.step}
 			cfg := ciCfg(ciRunA, rec)
 			tc.setup(fake, &cfg)
@@ -187,6 +193,9 @@ func TestCloudRunInstanceHooks_CheckpointAbort(t *testing.T) {
 			_, err := rt.Run(context.Background(), cfg)
 			if !errors.Is(err, errTestAbort) {
 				t.Fatalf("Run = %v, want the checkpoint's error", err)
+			}
+			if provisions != tc.wantProvisions {
+				t.Errorf("NFS provisioning ran %d times, want %d", provisions, tc.wantProvisions)
 			}
 			if got := rec.gotSteps(); !reflect.DeepEqual(got, tc.wantSteps) {
 				t.Errorf("steps = %v, want %v", got, tc.wantSteps)

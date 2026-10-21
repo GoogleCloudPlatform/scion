@@ -69,6 +69,12 @@ type ConduitRelayOptions struct {
 	// testHookAdmission, when set, runs during admission (before the
 	// session is registered). Tests only.
 	testHookAdmission func()
+	// sessionWriteWait, when positive, is the per-write deadline of every
+	// relay session (conduit.Config.WriteWait; 0 = conduit.DefaultWriteWait).
+	// It runs on Clock, so tests that advance a fake Clock set it above
+	// their largest advance. It also stretches the backstop a session arms
+	// when the peer sends GoAway (drain deadline + WriteWait). Tests only.
+	sessionWriteWait time.Duration
 	// InternalEndpoint is the advertised base URL of this process's
 	// internal listener ("" = unaddressable).
 	InternalEndpoint string
@@ -96,6 +102,10 @@ type ConduitRelayOptions struct {
 	Store       registry.Store
 	Clock       clock.Clock
 	RegistryNow func() time.Time
+	// AuthzClock, when set, drives the user-stream re-check and its renewal
+	// driver instead of Clock, so a test can move stream deadlines without
+	// moving the relay's session timers.
+	AuthzClock clock.Clock
 }
 
 // conduitRuntime is the running relay and what it was built from.
@@ -131,6 +141,30 @@ func (s *Server) conduitServingIn(snap ExperimentsSnapshot) bool {
 // in-memory ring, which hosted HA refuses (C8).
 func (s *Server) ConduitGrantRingShared() bool {
 	return len(s.encryptionKey) > 0
+}
+
+// SetConduitRelayStartFailure records that the in-process relay failed to
+// start. setting is the key of the setting that caused it, or "" when the
+// cause was not one setting; it is shown in the relay-not-running response
+// (writeConduitRelayNotRunning), so it must be a key, never a value.
+func (s *Server) SetConduitRelayStartFailure(setting string) {
+	s.conduitStartFailure.Store(&setting)
+}
+
+// writeConduitRelayNotRunning answers a conduit handshake on a node with no
+// relay running (503). It names the failing setting when startup recorded
+// one, and otherwise the only other cause: hub.conduit was turned on after
+// startup.
+func (s *Server) writeConduitRelayNotRunning(w http.ResponseWriter) {
+	msg := "Conduit relay is not running on this hub node (hub.conduit was enabled after startup; restart required)"
+	if p := s.conduitStartFailure.Load(); p != nil {
+		if *p != "" {
+			msg = "Conduit relay is not running on this hub node: startup failed on " + *p + "; see the startup log"
+		} else {
+			msg = "Conduit relay is not running on this hub node: startup failed; see the startup log"
+		}
+	}
+	writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, msg, nil)
 }
 
 // StartConduitRelay builds and starts the in-process relay when hub.conduit
@@ -196,9 +230,14 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 		PeerAuth:         opts.PeerAuth,
 		HTTPClient:       opts.HTTPClient,
 		Clock:            opts.Clock,
+		Session:          conduit.Config{WriteWait: opts.sessionWriteWait},
 		ReconnectWindow:  opts.ReconnectWindow,
 		LifetimeCap:      lifetimeCap,
-		Logger:           slog.Default().With("subsystem", "hub.conduit"),
+		OnBrokerSessionsSuperseded: func(brokerID string, closed int) {
+			s.recordBrokerSessionsSuperseded(brokerID, brokerSupersededAtAdmission, closed)
+		},
+		OnBrokerIncarnationFlap: s.recordBrokerIncarnationFlap,
+		Logger:                  slog.Default().With("subsystem", "hub.conduit"),
 	})
 	if err != nil {
 		return fmt.Errorf("conduit relay: %w", err)
@@ -221,7 +260,11 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 	if interval == 0 {
 		interval = s.config.ConduitAuthzRecheckInterval
 	}
-	_, stopAuthz, err := s.startConduitStreamAuthz(ctx, opts.Clock, interval)
+	authzClock := opts.Clock
+	if opts.AuthzClock != nil {
+		authzClock = opts.AuthzClock
+	}
+	_, stopAuthz, err := s.startConduitStreamAuthz(ctx, authzClock, interval)
 	if err != nil {
 		return err
 	}
@@ -295,7 +338,7 @@ func (s *Server) conduitWelcomeGrantKeys(ctx context.Context) ([]*conduitv1.Gran
 // token-refresh response, or nil when the experiment is off or the keys are
 // unavailable (the refresh itself must not fail over them).
 func (s *Server) conduitRefreshGrantKeys(ctx context.Context) []grant.WireKey {
-	keys, err := s.ConduitGrantPublicKeys(ctx)
+	keys, err := s.conduitHubDirectGrantKeys(ctx)
 	if err != nil {
 		if !errors.Is(err, errConduitDisabled) {
 			slog.Warn("Conduit grant keys unavailable for the token-refresh response", "error", err)
@@ -482,6 +525,8 @@ func (s *Server) handleConduit(w http.ResponseWriter, r *http.Request) {
 			NotFound(w, "route")
 		case r.Method != http.MethodGet:
 			MethodNotAllowed(w, http.MethodGet)
+		case rt.ingress == config.ConduitIngressProxy && rt.ingressOffCause == "":
+			s.serveConduitIngress(w, r, rt)
 		default:
 			s.refuseConduitExternal(w, r, rt)
 		}
@@ -541,7 +586,7 @@ func (s *Server) decideConduitAgent(w http.ResponseWriter, r *http.Request, iden
 	}
 	rt := s.conduit.Load()
 	if rt == nil && !forRelay {
-		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "Conduit relay is not running on this hub node (hub.conduit was enabled after startup; restart required)", nil)
+		s.writeConduitRelayNotRunning(w)
 		return conduitAdmission{}, false
 	}
 	agent, err := s.conduitAgentRowCheck(r.Context(), ident)
