@@ -172,17 +172,13 @@ These are read by the Scion broker (or CLI) **to configure itself as a process**
 part of the agent settings chain at all, and an agent never sees them by this route.
 
 They enter through the koanf environment layer in `LoadVersionedSettings`
-(`pkg/config/settings_v1.go`, which `LoadSettings` and `LoadEffectiveSettings` both call through
-`pkg/config/settings_view.go`), loaded **last** — after the embedded defaults, the global
+(`pkg/config/settings_v1.go`; `LoadSettings` and `LoadEffectiveSettings` both read through its layers via `loadVersionedSettings` in `pkg/config/settings_view.go`), loaded **last** — after the embedded defaults, the global
 `~/.scion/settings.yaml`, the in-repo `.scion/settings.yaml`, and any external project config.
 Legacy-format settings files (those without `schema_version`) are converted to the v1 shape at
-their own layer when read, keeping only keys whose legacy source key the file sets (plus any
-`server` block), and a versioned file's legacy camelCase `hub.projectId` is read as a fallback when
+their own layer when read, keeping only keys whose legacy source key the file sets, and a versioned file's legacy camelCase `hub.projectId` is read as a fallback when
 `hub.project_id` is absent. Loaded last means **highest priority**: a `SCION_*` variable in the
 broker's process environment overrides every settings file. An exported but empty `SCION_*`
-variable counts as unset, so it never clears a value from a settings file. Inside a Hub-managed
-agent container (`SCION_CLI_MODE=agent` with `SCION_HUB_ENDPOINT` or `SCION_HUB_URL` set),
-`SCION_WORKSPACE_PATH` is ignored so it does not override `workspace_path`. The retired
+variable counts as unset, so it never clears a value from a settings file. Inside a Hub-managed agent container (`SCION_AGENT_ID` set), `SCION_WORKSPACE_PATH` and `SCION_RUNTIME`, which the runtime sets for the agent, are ignored as settings overrides, so they do not override `workspace_path` or `runtime`. The retired
 `SCION_HUB_BROKER_ID`, `SCION_HUB_BROKER_TOKEN`, `SCION_HUB_BROKER_NICKNAME`, and `SCION_BUCKET_*`
 variables are not read.
 

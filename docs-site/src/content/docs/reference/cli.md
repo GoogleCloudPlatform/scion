@@ -836,7 +836,7 @@ The CLI first sends the same request as a dry run. The Hub runs eleven checks in
 `runtime_target`, `workspace_mode`, `workspace_storage_reported`, `same_export`, `workspace_on_export`,
 `workspace_recreatable`, `target_profile`, `target_health`, `access`, `capability` (on both Runtime
 Brokers, with the source online), and `capacity`. The first failing check decides the answer, with `400`, `403`, `409`, `412`,
-`429`, or `503`, and the CLI prints the transfer mode (`export` or `recreate`), every check (`passed`, `failed`, `not_evaluated`, or `waived`), and the move's `consequences` (`kept`, `carried`, `recreated`, and `lost`). When a move without `--force` fails only because the workspace cannot travel through a shared export and a forced move onto the target would apply, the CLI also prints a hint pointing at `--dry-run --force`. A refused move
+`429`, or `503`, and the CLI prints the transfer mode of an eligible move (`export` or `recreate`), every check (`passed`, `failed`, `not_evaluated`, or `waived`), and the move's `consequences` (`kept`, `carried`, `recreated`, and `lost`). When a move without `--force` fails only because the workspace cannot travel through a shared export and a forced move onto the target would apply, the CLI also prints a hint pointing at `--dry-run --force`. A refused move
 stops there, before anything changes. With `--dry-run` (or `--dry-run --force`) the CLI only prints the verdict and plan.
 
 When the checks pass, the Hub accepts the move with `202 Accepted` and runs it in the background. It
