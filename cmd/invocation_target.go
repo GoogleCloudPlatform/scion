@@ -197,6 +197,20 @@ var contextSkippedCommands = map[string]bool{
 	"scion runtime-broker start": true,
 }
 
+// contextReadOnlyCommands are the commands, by command path, that only read
+// settings. They read the hub list as it is, without the one-time imports
+// of hub settings, so a read never creates or rewrites context.yaml or its
+// lock (ptone/scion#5483). The context still applies to them as usual.
+var contextReadOnlyCommands = map[string]bool{
+	"scion config list":       true,
+	"scion config get":        true,
+	"scion config validate":   true,
+	"scion config schema":     true,
+	"scion config dir":        true,
+	"scion config cd-config":  true,
+	"scion config cd-project": true,
+}
+
 // contextProjectCommands are hub-only commands (see hubOnlyCommands), by
 // command path, that take the context's project like the project-scoped
 // commands do, although they need no local project. expose and unexpose
@@ -373,6 +387,11 @@ func resolveInvocationTargetWith(cmd *cobra.Command, mode CLIMode, r targetResol
 		// Read the hub list as it is: no one-time import, so nothing is
 		// written, and stderr gets no import warning.
 		r = targetResolution{stderr: stderr}
+	}
+	if contextReadOnlyCommands[cmd.CommandPath()] {
+		// Read the hub list as it is: no one-time import, so nothing is
+		// written. Import warnings cannot occur either.
+		r.imports = false
 	}
 	ctx, err := r.loadContext()
 	if err != nil {
