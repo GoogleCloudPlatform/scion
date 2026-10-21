@@ -295,6 +295,10 @@ func TestRunLaunch_StartFailsAfterCompletedKeepalive_ReportsAndCleansUp(t *testi
 	if got := reportJSON(t, r)["runId"]; got != "run-pcka" {
 		t.Fatalf("failed report runId = %v, want the launch's run run-pcka", got)
 	}
+	// The keepalive's completed answer makes this the post-completed path.
+	if term := rawTerminal(t, l.JournalAtTerminal()); term == nil || term["startFailed"] != true || term["postCompleted"] != true {
+		t.Fatalf("the failed terminal was not journalled startFailed and postCompleted: %s", l.JournalAtTerminal())
+	}
 	cleaned := l.mgr.Cleaned()
 	if len(cleaned) != 1 || len(cleaned[0]) != 1 || cleaned[0][0].UID != "uid-pcka" {
 		t.Fatalf("the journalled pod handle was not cleaned up: %+v", cleaned)
