@@ -7,12 +7,36 @@
 
 ## Rollout
 
-- TODO: PoC workflow first; then set the routing variable per repo; watch 48 h.
+Per repository, in this order (details in
+[github-setup.md](github-setup.md)):
+
+1. The App is installed on the repo, the repo is in `TARGET_REPOS`, and a
+   redelivered `ping` gets 200 ([step 5](github-setup.md#5-check-the-webhook)).
+2. The [deploy preconditions](architecture.md#deploy-preconditions) hold,
+   above all "Require approval for **all** external contributors".
+3. The PoC workflow passed on this target (P6; [criteria](../workflows/README.md#poc-success-criteria)).
+4. `ci.yml` carries the routing expression (P7). Until then, the variable
+   changes nothing.
+5. `scripts/set-routing-variable.sh --repo <owner/repo> --apply` sets
+   `ROUTING_VARIABLE_NAME` to `RUNNER_LABEL` (needs write access).
+6. Watch for 48 hours: `dispatch` and `claim_consumed` for every routed job,
+   no `launch_failed`, no `SECURITY_*` events, no `capacity_full` lasting
+   across reconciles, and lint durations and memory as in the PoC. Roll out
+   the fork first, then upstream.
 
 ## Fallback
 
-- TODO: clear or reset `ROUTING_VARIABLE_NAME` (needs write); re-run queued
-  jobs; emergency stop by suspending the App.
+- **Back to GitHub-hosted runners (seconds, no commit):**
+  `scripts/set-routing-variable.sh --repo <owner/repo> --clear --apply`
+  (same as `gh variable delete SCION_LARGE_RUNNER --repo <owner/repo>`).
+  This needs write access. It affects newly queued jobs only. Cancel and
+  re-run any job still queued on the label: it waits for a cr-ci runner, and
+  GitHub drops it after 24 h.
+- **To a larger GitHub-hosted runner** (if the org has one): set the variable
+  to that runner's label instead of clearing it.
+- **Emergency stop:** suspend or uninstall the App (G17). The mediator then
+  receives no webhooks and cannot mint runners. Clear the variable as well,
+  or routed jobs stay queued.
 
 ## Deploy preconditions
 

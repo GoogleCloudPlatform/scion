@@ -1,9 +1,11 @@
 # cr-ci: GitHub Actions runners on Cloud Run Jobs
 
-> **Status: not deployable yet.** The config contract, the permissions matrix
-> and the doc structure exist. The mediator (P2, in review) and the runner
-> image and entrypoint (P3, in review) are implemented and tested offline; the
-> deploy scripts are placeholders. See [Phases](#phases).
+> **Status: implemented and tested offline; not yet deployed anywhere.** The
+> mediator (P2), the runner image and entrypoint (P3), the GitHub setup guide,
+> App manifest and workflow templates (P5) are done and tested offline. The
+> deploy scripts (P4) are in progress. Nothing has run against real GitHub or
+> GCP yet: that is the P6 PoC, which needs ptone's go-ahead. See
+> [Phases](#phases).
 
 cr-ci contains the documentation, scripts and code to run selected GitHub
 Actions jobs of the scion repository on **ephemeral 8 vCPU / 32 GiB Cloud Run
@@ -48,6 +50,48 @@ Jobs opt in through the `runs-on` expression, which reads the Actions variable
 by [`config.example.env`](config.example.env), so the same artifacts serve the
 fork (`ptone/scion`), upstream (`GoogleCloudPlatform/scion`) or both.
 
+## Quick start
+
+Do the steps in this order. Each `scripts/*.sh` defaults to a dry run that
+prints its `gcloud` or `gh` commands; add `--apply` to execute. The roles
+each step needs are in [docs/permissions-matrix.md](docs/permissions-matrix.md).
+
+1. **Config.** `cp config.example.env config.env` and fill in the REQUIRED
+   keys. Until the App exists, use the placeholder `GITHUB_APP_ID=1`; every
+   script validates the whole config, and the GCP-side ones ignore the value.
+2. **GCP bootstrap.** `scripts/bootstrap-gcp.sh`: APIs, service accounts,
+   Artifact Registry, empty secrets, IAM ([gcp-setup.md](docs/gcp-setup.md)).
+3. **Runner image.** `scripts/build-runner-image.sh`.
+4. **Runner job.** `scripts/deploy-job.sh`.
+5. **Mediator URL.** Compute the deterministic Cloud Run URL and set
+   `MEDIATOR_URL` ([github-setup.md, step 1](docs/github-setup.md#1-fix-the-mediator-url)).
+6. **GitHub App.** Create it from the manifest, and set `GITHUB_APP_ID`
+   ([step 2](docs/github-setup.md#2-create-the-github-app-from-the-manifest-recommended);
+   manual fallback in step 3).
+7. **Secrets.** `scripts/set-secrets.sh` with the App key and webhook secret
+   from step 6 ([step 2.4](docs/github-setup.md#24-store-the-key-and-the-webhook-secret-in-secret-manager)).
+8. **Mediator.** `scripts/deploy-mediator.sh`. It warns if the deployed URL
+   differs from `MEDIATOR_URL`.
+9. **Scheduler.** `scripts/deploy-scheduler.sh` (`/reconcile`).
+10. **Install the App** on each target and check the webhook
+    ([steps 4 and 5](docs/github-setup.md#4-install-the-app)). Upstream needs a
+    GoogleCloudPlatform org owner.
+11. **Preconditions.** "Require approval for all external contributors" on
+    every target ([step 6](docs/github-setup.md#6-deploy-precondition-fork-pr-approval-g8);
+    all preconditions in [architecture.md](docs/architecture.md#deploy-preconditions)).
+12. **PoC.** Run [`workflows/cr-runner-poc.yml`](workflows/cr-runner-poc.yml)
+    ([step 7](docs/github-setup.md#7-poc-run-before-any-routing); P6, needs
+    ptone's go-ahead).
+13. **Route.** `scripts/set-routing-variable.sh --repo <owner/repo> --apply`
+    sets `SCION_LARGE_RUNNER`. It has no effect on CI until P7 puts the routing
+    expression into `ci.yml`. Fallback: `--clear --apply`
+    ([step 8](docs/github-setup.md#8-route-jobs-the-actions-variable-scion_large_runner-g10)).
+
+Two orderings matter. The App comes before the mediator, because the mediator
+needs `GITHUB_APP_ID` to start while the App only needs the predictable
+webhook URL. The PoC comes before the routing variable, so the path is
+proven on a manually dispatched job before any CI job depends on it.
+
 ## Directory map
 
 | Path | Contents |
@@ -56,10 +100,10 @@ fork (`ptone/scion`), upstream (`GoogleCloudPlatform/scion`) or both.
 | [`mediator/`](mediator/) | Go Cloud Run service: `/webhook`, `/internal/claim`, `/reconcile`, `/health`; standard library only. Must run with `max-instances=1` |
 | [`runner/`](runner/) | Runner image (`Dockerfile`, `entrypoint.sh`, offline harness); see [`runner/README.md`](runner/README.md) |
 | [`scripts/`](scripts/) | Deploy and teardown scripts (P4). P1: planned list and the `--dry-run` contract |
-| [`workflows/`](workflows/) | Workflow templates, not active (P5). P1: README |
+| [`workflows/`](workflows/) | Workflow templates, not active: the PoC workflow and the `ci.yml` lint routing snippet, with static checks; see [`workflows/README.md`](workflows/README.md) |
 | [`docs/architecture.md`](docs/architecture.md) | Flow, security model, failure modes, fallback |
 | [`docs/permissions-matrix.md`](docs/permissions-matrix.md) | **Who needs which GitHub or GCP role for every step, fork vs upstream** |
-| [`docs/github-setup.md`](docs/github-setup.md) | GitHub App, installation, settings (outline; P5) |
+| [`docs/github-setup.md`](docs/github-setup.md) | GitHub App (manifest at [`scripts/github-app-manifest.json`](scripts/github-app-manifest.json)), installation on the fork and upstream, webhook check, fork-PR precondition, routing variable and fallback |
 | [`docs/gcp-setup.md`](docs/gcp-setup.md) | GCP project, IAM, secrets, deploy (outline; P4) |
 | [`docs/operations.md`](docs/operations.md) | Rollout, fallback, rotation, quotas, troubleshooting (outline) |
 
@@ -81,7 +125,7 @@ go build -o /dev/null ./... && go vet ./... && go test ./... && gofmt -l .
 | P2 | Mediator: HMAC, fork guard, idempotency, JIT, RunJob, claim endpoint, `/reconcile`, backpressure | implemented (in review) |
 | P3 | Runner image and entrypoint (`/scratch` redirection, claim exchange) | implemented (in review) |
 | P4 | Idempotent deploy and teardown scripts with `--dry-run` | planned |
-| P5 | GitHub setup guide, App manifest, workflow templates | planned |
+| P5 | GitHub setup guide, App manifest, workflow templates | implemented (in review) |
 | P6 | Live PoC on the chosen target (needs ptone's go-ahead) | gated |
 | P7 | `ci.yml` `runs-on` change (separate PR, outside `cr-ci/`) | gated |
 

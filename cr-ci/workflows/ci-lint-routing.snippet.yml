@@ -1,0 +1,45 @@
+# cr-ci routing snippet for the `lint` job of .github/workflows/ci.yml
+# (TEMPLATE, not a workflow). P7 applies it in a separate PR; see
+# cr-ci/workflows/README.md. Only the lines below change; everything else in
+# the job (checkout, setup-go-cache, the golangci-lint-action install, the
+# memory sampler, save-go-cache) stays exactly as it is.
+#
+# 1. runs-on: the routing expression. It routes to the Actions variable
+#    SCION_LARGE_RUNNER (ROUTING_VARIABLE_NAME; set it to RUNNER_LABEL) only
+#    for pushes and same-repo pull requests (the fork guard), and to
+#    ubuntu-latest for everything else, including any repo where the variable
+#    is unset (vars.* is then the empty string, which is falsy). Events the
+#    mediator refuses (pull_request_target, workflow_run, fork PRs) therefore
+#    never queue a job on the label; they would otherwise wait up to 24 h.
+#    Keep this line byte-identical to docs/architecture.md and
+#    docs/github-setup.md (a test checks it).
+#
+# 2. The golangci-lint step's env: the memory throttles exist for the 16 GB
+#    ubuntu-latest runner (ptone/scion#4208). On the 32 GiB cr-ci runner
+#    (runner.environment == 'self-hosted') the pkg/hub -c=1 throttle is
+#    dropped, the soft memory limit is raised, and golangci-lint analyses 4
+#    packages at once instead of 2. GOGC stays at 25 on both until the P6
+#    PoC has measured the headroom. On any GitHub-hosted runner, including a
+#    larger one used as the fallback, the current values apply unchanged.
+#
+# 3. The golangci-lint command line reads LINT_CONCURRENCY instead of the
+#    literal 2:
+#      golangci-lint run --new-from-merge-base=origin/main --concurrency="$LINT_CONCURRENCY" || rc=$?
+
+lint:
+  name: golangci-lint
+  runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
+  timeout-minutes: 60
+  steps:
+    # ... unchanged steps up to and including "Install golangci-lint" ...
+    - name: golangci-lint
+      shell: bash
+      env:
+        GOGC: '25'
+        GOMEMLIMIT: ${{ runner.environment == 'self-hosted' && '24GiB' || '8GiB' }}
+        GOFLAGS: ${{ runner.environment != 'self-hosted' && '-gcflags=github.com/GoogleCloudPlatform/scion/pkg/hub=-c=1' || '' }}
+        LINT_CONCURRENCY: ${{ runner.environment == 'self-hosted' && '4' || '2' }}
+      run: |
+        # ... unchanged, except the golangci-lint line (see note 3) ...
+        golangci-lint run --new-from-merge-base=origin/main --concurrency="$LINT_CONCURRENCY" || rc=$?
+    # ... unchanged "Save Go cache" step ...

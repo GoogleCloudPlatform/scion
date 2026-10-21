@@ -317,11 +317,17 @@ so it is deferred.
 Workflows choose the runner with:
 
 ```yaml
-runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
+runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
 ```
 
 - **Unset variable** (any unconfigured fork, or before rollout): `ubuntu-latest`.
 - **Set to `RUNNER_LABEL`:** same-repo PRs and pushes go to Cloud Run.
+- **Fork PRs and every other event** (`pull_request_target`, `workflow_run`,
+  ...): `ubuntu-latest`. This allow-list replaces the design's
+  `github.event_name != 'pull_request' || ...`, which would also route
+  `pull_request_target` and `workflow_run` jobs to the label, where the
+  mediator refuses them and they would wait up to 24 h
+  ([workflows/README.md](../workflows/README.md#the-routing-expression)).
 - **Fall back:** delete the variable, or set it to `ubuntu-latest` (or to a
   larger GitHub-hosted runner label). This takes effect for newly queued jobs
   with no commit. Already-queued jobs need a re-run.

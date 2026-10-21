@@ -1,0 +1,122 @@
+# cr-ci PoC workflow (TEMPLATE). GitHub ignores this copy: only files under
+# .github/workflows/ run. Copying it there (on the default branch, because
+# workflow_dispatch only lists workflows from the default branch) is a P6
+# step that needs ptone's go-ahead. See cr-ci/workflows/README.md.
+#
+# What it measures (design section 7, phase 1): queue-to-start latency, the
+# golangci-lint duration on the Cloud Run runner without the pkg/hub -c=1
+# compiler throttle, peak memory, and how much of /scratch the job uses.
+#
+# runs-on is the runner label ALONE: the mediator only serves jobs whose
+# labels are all RUNNER_LABEL (docs/architecture.md, "Labels"); a list such
+# as [self-hosted, Linux, X64, <label>] would be logged as labels_unservable
+# and never get a runner. The input defaults to RUNNER_LABEL's default in
+# cr-ci/config.example.env (a test keeps them equal).
+#
+# The tools come from the runner image (runner/Dockerfile): Go and
+# golangci-lint are pre-installed, which is part of what the PoC measures.
+# Only people with write access can dispatch a workflow, so the fork guard of
+# the routing expression is not needed here; the mediator applies its own
+# fork guard to every run anyway.
+
+name: cr-ci runner PoC
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner-label:
+        description: Runner label to target (must equal the mediator's RUNNER_LABEL)
+        required: true
+        default: scion-cr-8c32g
+      lint-concurrency:
+        description: golangci-lint --concurrency (0 = golangci-lint's default, the CPU count)
+        required: true
+        default: '4'
+
+permissions:
+  contents: read
+
+jobs:
+  lint-on-cloud-run:
+    name: golangci-lint on the cr-ci runner
+    runs-on: ${{ inputs.runner-label }}
+    # Below the Cloud Run task timeout (TASK_TIMEOUT, default 45m), so GitHub
+    # cancels a hung job before Cloud Run kills the container.
+    timeout-minutes: 40
+    steps:
+      - name: Runner facts
+        shell: bash
+        run: |
+          echo "runner.environment=${RUNNER_ENVIRONMENT:-unset} runner.name=${RUNNER_NAME:-unset}"
+          echo "nproc=$(nproc)"
+          go version
+          golangci-lint version
+          for v in GOCACHE GOMODCACHE GOLANGCI_LINT_CACHE TMPDIR RUNNER_TEMP; do echo "$v=${!v:-unset}"; done
+          echo "go env GOCACHE=$(go env GOCACHE)"
+          cat /sys/fs/cgroup/memory.max 2>/dev/null | sed 's/^/memory.max=/' || echo "memory.max unavailable"
+          df -h /scratch
+
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      # Restore (never save) the lint workload's Go cache that ci.yml saves on
+      # main, using the same key scheme as .github/actions/setup-go-cache, so
+      # the PoC lint is as warm as a CI lint. The paths come from go env,
+      # which the runner entrypoint points at /scratch.
+      - name: Compute the Go cache key
+        id: key
+        shell: bash
+        env:
+          GO_SUM_HASH: ${{ hashFiles('go.sum') }}
+        run: |
+          set -euo pipefail
+          go_version=$(go env GOVERSION)
+          prefix="go-${RUNNER_OS}-${RUNNER_ARCH}-${go_version#go}-lint-"
+          {
+            echo "prefix=${prefix}"
+            echo "prefix-sum=${prefix}${GO_SUM_HASH}-"
+            echo "key=${prefix}${GO_SUM_HASH}-$(date -u +%Y%m%d)"
+            echo "gocache=$(go env GOCACHE)"
+            echo "gomoddownload=$(go env GOMODCACHE)/cache/download"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Restore the Go cache (on /scratch)
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ steps.key.outputs.gomoddownload }}
+            ${{ steps.key.outputs.gocache }}
+          key: ${{ steps.key.outputs.key }}
+          restore-keys: |
+            ${{ steps.key.outputs.prefix-sum }}
+            ${{ steps.key.outputs.prefix }}
+
+      # Same lint as ci.yml, but WITHOUT the pkg/hub -c=1 compiler throttle and
+      # with more analysis concurrency. GOGC stays at 25 until the PoC shows
+      # the headroom (design: pkg/hub's compile peaks near 15 GiB).
+      - name: golangci-lint (no pkg/hub compiler throttle)
+        shell: bash
+        env:
+          GOGC: '25'
+          LINT_CONCURRENCY: ${{ inputs.lint-concurrency }}
+        run: |
+          set -uo pipefail
+          start=$(date +%s)
+          rc=0
+          golangci-lint run --new-from-merge-base=origin/main --concurrency="$LINT_CONCURRENCY" || rc=$?
+          echo "golangci-lint exit=$rc duration=$(( $(date +%s) - start ))s"
+          exit "$rc"
+
+      - name: Memory and disk report
+        if: always()
+        shell: bash
+        run: |
+          echo "memory.peak (bytes):"
+          cat /sys/fs/cgroup/memory.peak 2>/dev/null || echo "unavailable (no cgroup v2 memory.peak in this sandbox)"
+          grep -E '^(MemTotal|MemAvailable):' /proc/meminfo || true
+          df -h /scratch
+          du -sh /scratch/* 2>/dev/null || true
+          du -sh "$HOME/.cache" 2>/dev/null || true
