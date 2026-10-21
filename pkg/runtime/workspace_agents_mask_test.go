@@ -152,7 +152,8 @@ func TestStripUnsupportedAppleFlags_KeepsTmpfs(t *testing.T) {
 // --version; for exec (the mask check), statOut with exit code statRC,
 // after failFirst failing calls (exit 1, "exec failed"); hang makes every
 // exec hang in a child that keeps the output pipe open; rmFail makes rm
-// fail. The mock ignores backoffPastDeadline, which the test applies.
+// fail. The mock ignores backoffPastDeadline and shadowStat, which the
+// test applies.
 type appleGateOpts struct {
 	version, statOut  string
 	statRC, failFirst int
@@ -160,6 +161,9 @@ type appleGateOpts struct {
 	// backoffPastDeadline sets a retry delay longer than the check's
 	// timeout, so the deadline passes during the first backoff.
 	backoffPastDeadline bool
+	// shadowStat puts a stat that records "shadow-stat" in calls first on
+	// PATH; the check runs /usr/bin/stat by absolute path, so it never runs.
+	shadowStat bool
 }
 
 // appleGateMock writes a mock container CLI that records each subcommand
@@ -275,6 +279,8 @@ func TestAppleContainerRuntime_Run_AgentsMaskGate(t *testing.T) {
 		{"removal failure is reported", withAgents, appleGateOpts{version: v160, statOut: "40\n40", rmFail: true},
 			[]string{"mask is not mounted", "removing container cid", "the container may still exist"},
 			calls("--version", "run", "exec", "kill", "rm", "rm", "rm", "rm", "rm")},
+		{"a stat earlier on PATH is never invoked", withAgents, appleGateOpts{version: v160, statOut: mount, shadowStat: true}, nil,
+			calls("--version", "run", "exec")},
 		{"no mask: no version or exec call", noAgents, appleGateOpts{version: v011, statOut: "40\n40"}, nil, calls("run")},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -290,6 +296,14 @@ func TestAppleContainerRuntime_Run_AgentsMaskGate(t *testing.T) {
 				t.Cleanup(func() { appleMaskCheckTimeout, appleMaskCheckRetryDelay = prevT, prevD })
 			}
 			command, callsFile := appleGateMock(t, tt.opts)
+			if tt.opts.shadowStat {
+				shadow := t.TempDir()
+				script := fmt.Sprintf("#!/bin/sh\necho shadow-stat >> %q\n", callsFile)
+				if err := os.WriteFile(filepath.Join(shadow, "stat"), []byte(script), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("PATH", shadow+string(os.PathListSeparator)+os.Getenv("PATH"))
+			}
 			rt := &AppleContainerRuntime{Command: command}
 			id, err := rt.Run(context.Background(), RunConfig{
 				Harness:      &harness.Generic{},
@@ -351,8 +365,15 @@ func TestAppleContainerRuntime_Run_AgentsMaskArgs(t *testing.T) {
 	if !strings.Contains(log, "--tmpfs /workspace/.scion/agents") || strings.Contains(log, "type=tmpfs") {
 		t.Errorf("run args: %s", log)
 	}
-	if !strings.Contains(log, "\nexec cid stat -c %d /workspace/.scion/agents /workspace/.scion\n") {
-		t.Errorf("mask check call missing: %s", log)
+	var execs [][]string
+	for _, line := range strings.Split(strings.TrimSpace(log), "\n") {
+		if f := strings.Fields(line); len(f) > 0 && f[0] == "exec" {
+			execs = append(execs, f)
+		}
+	}
+	want := []string{"exec", "cid", "/usr/bin/env", "-i", "/usr/bin/stat", "-c", "%d", "/workspace/.scion/agents", "/workspace/.scion"}
+	if len(execs) != 1 || !slices.Equal(execs[0], want) {
+		t.Errorf("mask check argv = %q, want exactly %q", execs, want)
 	}
 }
 

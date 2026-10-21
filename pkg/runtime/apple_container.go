@@ -192,6 +192,17 @@ var (
 // exact path with no mount table parsing; it runs as the container's
 // default user (root), since it reads metadata only.
 //
+// stat runs by absolute path with an empty environment, so the check does
+// not depend on the container PATH or environment. Scope: the per-start
+// root filesystem does not persist while the home mount does; the absolute
+// paths and the empty environment (which also clears LD_* variables) make
+// the check independent of anything under home or in the environment.
+//
+// Boundary: the mask and this check assume the agent cannot change mounts
+// inside its own container (no CAP_SYS_ADMIN), and that the check runs
+// right after start. Granting mount capability to agent containers removes
+// both guarantees.
+//
 // Retry rule: the check is retried, up to appleMaskCheckAttempts runs in
 // all within appleMaskCheckTimeout, only when it could not run (the exec
 // failed or stat exited non-zero). A result is never retried: equal
@@ -206,7 +217,7 @@ func (r *AppleContainerRuntime) verifyAgentsMask(ctx context.Context, id string)
 	// last real attempt's error and output.
 retry:
 	for attempt := 1; ; attempt++ {
-		out, err = appleBoundedCommand(ctx, r.Command, "exec", id, "stat", "-c", "%d", agents, path.Dir(agents))
+		out, err = appleBoundedCommand(ctx, r.Command, "exec", id, "/usr/bin/env", "-i", "/usr/bin/stat", "-c", "%d", agents, path.Dir(agents))
 		if err == nil || attempt >= appleMaskCheckAttempts || ctx.Err() != nil {
 			break
 		}
