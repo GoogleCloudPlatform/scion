@@ -453,6 +453,21 @@ type AgentAppliedConfig struct {
 	// Observability only; never read by a decision path (ptone/scion#620).
 	HarnessConfigSource string `json:"harnessConfigSource,omitempty"`
 
+	// Harness is the harness type the hub resolved for the agent at create
+	// (for example "claude"; see resolveAgentHarnessType in pkg/hub), so
+	// agent lists and events can derive the harness vendor without a
+	// harness-config lookup per agent. Empty on agents created before it
+	// was recorded, and when the harness did not resolve. Display only;
+	// the harness is a fixed key, so it does not change after create.
+	Harness string `json:"harness,omitempty"`
+	// ModelSize is the model size alias (small, medium, large or
+	// extra-large; short forms normalized) that Model held before the hub
+	// resolved it to a concrete model ID, from whichever precedence layer
+	// (request > project > template > hub) supplied it. Empty when the
+	// model was an explicit ID or unset, and on agents created before it
+	// was recorded. Display only.
+	ModelSize string `json:"modelSize,omitempty"`
+
 	// CreatorName is the human-readable identity of who created this agent.
 	// For user-created agents, this is the user's email.
 	// For agent-created sub-agents, this is the creating agent's name.

@@ -85,6 +85,19 @@ func (s *Server) resolveHarnessTypeFromConfigRef(ctx context.Context, projectID,
 }
 
 func (s *Server) resolveAgentHarnessType(ctx context.Context, agent *store.Agent) string {
+	return s.resolveAgentHarnessTypeMemo(ctx, agent, nil)
+}
+
+// harnessRefKey identifies one harness-config reference lookup:
+// resolveHarnessTypeFromConfigRef's result depends only on the project and
+// the reference.
+type harnessRefKey struct{ projectID, ref string }
+
+// resolveAgentHarnessTypeMemo is resolveAgentHarnessType with an optional
+// per-request memo of harness-config reference lookups. With a non-nil memo,
+// agents that share a project and a harness-config reference cost one
+// lookup between them, not one each.
+func (s *Server) resolveAgentHarnessTypeMemo(ctx context.Context, agent *store.Agent, memo map[harnessRefKey]string) string {
 	if agent == nil {
 		return "generic"
 	}
@@ -108,12 +121,88 @@ func (s *Server) resolveAgentHarnessType(ctx context.Context, agent *store.Agent
 	refs = append(refs, agent.HarnessConfig)
 
 	for _, ref := range refs {
-		if h := s.resolveHarnessTypeFromConfigRef(ctx, agent.ProjectID, ref); h != "" {
+		var h string
+		if memo == nil {
+			h = s.resolveHarnessTypeFromConfigRef(ctx, agent.ProjectID, ref)
+		} else {
+			key := harnessRefKey{agent.ProjectID, ref}
+			var ok bool
+			if h, ok = memo[key]; !ok {
+				h = s.resolveHarnessTypeFromConfigRef(ctx, agent.ProjectID, ref)
+				memo[key] = h
+			}
+		}
+		if h != "" {
 			return h
 		}
 	}
 
 	return "generic"
+}
+
+// storedAgentHarness returns the agent's harness type from its own record,
+// without a store lookup: the harness stamped at create
+// (AppliedConfig.Harness), else an inline harness, canonicalized as
+// resolveAgentHarnessType does. It returns "" when the record alone does
+// not name it, which is the case for an agent created before the stamp
+// that names its harness only through a harness-config reference.
+func storedAgentHarness(agent *store.Agent) string {
+	if agent == nil || agent.AppliedConfig == nil {
+		return ""
+	}
+	if agent.AppliedConfig.Harness != "" {
+		return agent.AppliedConfig.Harness
+	}
+	if ic := agent.AppliedConfig.InlineConfig; ic != nil && ic.Harness != "" {
+		if h := canonicalHarnessName(ic.Harness); h != "" {
+			return h
+		}
+		return ic.Harness
+	}
+	return ""
+}
+
+// stampAgentHarness records the agent's resolved harness type on
+// AppliedConfig.Harness at create, unless already set. A harness that does
+// not resolve (the "generic" fallback) is not stamped, so a later read
+// resolves it again.
+func (s *Server) stampAgentHarness(ctx context.Context, agent *store.Agent) {
+	if agent == nil || agent.AppliedConfig == nil || agent.AppliedConfig.Harness != "" {
+		return
+	}
+	if h := s.resolveAgentHarnessType(ctx, agent); h != "generic" {
+		agent.AppliedConfig.Harness = h
+	}
+}
+
+// agentModelSize returns the model size alias recorded on the agent at
+// create (AppliedConfig.ModelSize), or "".
+func agentModelSize(agent *store.Agent) string {
+	if agent == nil || agent.AppliedConfig == nil {
+		return ""
+	}
+	return agent.AppliedConfig.ModelSize
+}
+
+// setAgentListBadges sets HarnessVendor and ModelSize on every item of an
+// agent list. The harness comes from the agent record when it names it
+// (storedAgentHarness, no lookup); otherwise from resolveAgentHarnessType
+// with a memo shared by the whole list, so the store is read at most once
+// per distinct (project, harness-config reference), never once per agent.
+func (s *Server) setAgentListBadges(ctx context.Context, agents []AgentWithCapabilities) {
+	var memo map[harnessRefKey]string
+	for i := range agents {
+		a := &agents[i].Agent
+		h := storedAgentHarness(a)
+		if h == "" {
+			if memo == nil {
+				memo = map[harnessRefKey]string{}
+			}
+			h = s.resolveAgentHarnessTypeMemo(ctx, a, memo)
+		}
+		agents[i].HarnessVendor = harness.Vendor(h)
+		agents[i].ModelSize = agentModelSize(a)
+	}
 }
 
 func (s *Server) resolveAgentHarnessCapabilities(ctx context.Context, agent *store.Agent) (string, api.HarnessAdvancedCapabilities) {
