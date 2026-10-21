@@ -87,7 +87,7 @@ func (c *Client) UploadFileWithMethod(ctx context.Context, signedURL, method str
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("upload failed with status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
@@ -145,7 +145,7 @@ func (c *Client) DownloadFile(ctx context.Context, signedURL string) ([]byte, er
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("download failed with status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
