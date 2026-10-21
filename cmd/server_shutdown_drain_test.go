@@ -83,9 +83,8 @@ func drainTestAwaitListening(t *testing.T, addr, what string) {
 // drainTestHold opens a connection to a broker listener and sends a
 // request whose body never fully arrives: before it answers, the server
 // waits to read (and discard) the rest of the body, so the connection
-// stays active and the
-// broker's http.Server.Shutdown keeps waiting for it until the test closes
-// it. The broker's shutdown, and so its goroutine in the broker WaitGroup,
+// stays active and the broker's http.Server.Shutdown keeps waiting for it
+// until the test closes it. The broker's shutdown, and so its goroutine in the broker WaitGroup,
 // cannot finish while the hold is open. (A request cut inside its headers
 // would not do: a connection still reading its first request counts as
 // new, and Shutdown closes new connections older than 5s as idle.)
