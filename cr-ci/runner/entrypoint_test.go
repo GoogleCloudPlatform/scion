@@ -577,3 +577,17 @@ func TestEntrypointBackoffDoubling(t *testing.T) {
 		})
 	}
 }
+
+func TestEntrypointScratchStatFailure(t *testing.T) {
+	cs := newClaimServer(t, respondStatus(http.StatusOK))
+	h := newHarness(t, cs.URL)
+	if err := os.WriteFile(h.mountinfo, []byte("22 1 0:21 / / rw - overlay overlay rw\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h.stubCommand("stat", "#!/usr/bin/env bash\necho 'stat: simulated failure' >&2\nexit 1\n")
+	res := h.run()
+	expectFailure(t, h, res, 2, "cannot stat")
+	if n := len(cs.recorded()); n != 0 {
+		t.Errorf("claim requests = %d, want 0 (token must not be spent)", n)
+	}
+}

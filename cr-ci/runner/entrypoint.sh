@@ -116,12 +116,14 @@ else
   log "warning: cannot read $mountinfo; falling back to the device check for $scratch"
 fi
 if [[ -z $scratch_fstype ]]; then
-  scratch_dev=$(stat -c %d -- "$scratch")
-  parent_dev=$(stat -c %d -- "$(dirname -- "$scratch")")
+  scratch_dev=$(stat -c %d -- "$scratch") ||
+    die "$EXIT_CONFIG" "cannot stat $scratch to verify that it is a mount"
+  parent_dev=$(stat -c %d -- "$(dirname -- "$scratch")") ||
+    die "$EXIT_CONFIG" "cannot stat the parent of $scratch to verify that it is a mount"
   if [[ $scratch_dev == "$parent_dev" ]]; then
     die "$EXIT_CONFIG" "$scratch exists but is not a mount point; the Cloud Run Job must mount an ephemeral-disk volume there. Refusing to run on the in-memory root filesystem."
   fi
-  scratch_fstype=$(stat -f -c %T -- "$scratch")
+  scratch_fstype=$(stat -f -c %T -- "$scratch") || scratch_fstype=unknown
   mount_check="device $scratch_dev differs from parent device $parent_dev"
 fi
 log "$scratch is a mount ($scratch_fstype): $mount_check"
