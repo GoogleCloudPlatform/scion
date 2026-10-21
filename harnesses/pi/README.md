@@ -27,20 +27,31 @@ run `pi` and use `/login` interactively.
 
 ## Configuration
 
-Everything has a safe default and is overridable per agent through env
-(the `provision.py` step reads these) or by editing `settings.json`.
+Everything has a safe default. `provision.py` reads the first four env
+variables below at every start and writes `~/.pi/agent/settings.json`; the
+bridge extension reads `SCION_PI_NO_AUTO_COMPLETE` and `SCION_HOOK_DEBUG`
+(and also `SCION_PI_PROJECT_TRUST`) from pi's environment at runtime, so
+`settings.json` cannot set those two.
+Other pi settings can also be edited in `settings.json` directly, except
+`defaultProjectTrust`, which is rewritten from `SCION_PI_PROJECT_TRUST` on
+every start.
 
 | Setting | Env var | Default | Notes |
 |---------|---------|---------|-------|
 | Project trust | `SCION_PI_PROJECT_TRUST` = `never` \| `ask` \| `always` | `never` | Wins over `SCION_PI_SETTINGS` and over a value left in `settings.json`; recomputed on every start (unset means `never`). Invalid values fail provisioning |
-| Provider | `SCION_PI_PROVIDER` | unset | Sets `defaultProvider` |
-| Model | `SCION_MODEL` | unset | A `provider/id[:thinking]` value sets `defaultProvider`/`defaultModel`. Scion resolves size tiers (`small`/`medium`/`large`/`extra-large`) through `model_aliases` in `config.yaml` before the agent starts, so the resolved pattern (e.g. `anthropic/sonnet`) is written the same way. When the agent's configuration has a model, Scion also starts pi with `--model <resolved>`, which pi uses instead of `defaultModel`; a `SCION_MODEL` set only in the environment gets no `--model`, so `defaultProvider`/`defaultModel` decide the model |
+| Provider | `SCION_PI_PROVIDER` | unset | Sets `defaultProvider`; wins over a provider taken from `SCION_MODEL` |
+| Model | `SCION_MODEL` | unset | A `provider/id[:thinking]` value sets `defaultModel` to `id` (a `:thinking` suffix is not written; it takes effect only through `--model`) and `defaultProvider` to `provider` unless `SCION_PI_PROVIDER` is set. Scion resolves size tiers (`small`/`medium`/`large`/`extra-large`) through `model_aliases` in `config.yaml` before the agent starts, so the resolved pattern (e.g. `anthropic/sonnet`) is written the same way. When the agent's configuration has a model, Scion also starts pi with `--model <resolved>`, which pi uses instead of `defaultModel`; a `SCION_MODEL` set only in the environment gets no `--model`, so `defaultProvider`/`defaultModel` decide the model |
 | Other pi settings | `SCION_PI_SETTINGS` (JSON object) | unset | Deep-merged into `settings.json`. Keys that look like credentials are rejected; it cannot change auth handling |
 | Auto task completion | `SCION_PI_NO_AUTO_COMPLETE=1` | off | Bridge stops signalling `task_completed` on settle |
 | Bridge debug | `SCION_HOOK_DEBUG=1` | off | Logs bridge failures to stderr |
 
-Existing user values in `~/.pi/agent/settings.json` are preserved, and a
-second provisioning run is a no-op.
+Existing user values in `~/.pi/agent/settings.json` are preserved unless an
+env setting writes the same key: `defaultProjectTrust` always;
+`defaultProvider`/`defaultModel` when `SCION_PI_PROVIDER` or a concrete
+`SCION_MODEL` is set; and any key in `SCION_PI_SETTINGS`. The bundle's own
+defaults (`quietStartup`, `enableInstallTelemetry`) are only added when
+missing. A second provisioning run with the same environment changes
+nothing.
 
 Scion's `system_prompt` is written to `~/.pi/agent/APPEND_SYSTEM.md`, which pi
 appends to its default system prompt (it does not replace it; pi's separate
@@ -113,8 +124,11 @@ not parsed shell, so:
 - False positives (count although nothing ran, so the automatic
   `task_completed` is skipped and the coordinator is not notified): one of
   those characters inside quotes, e.g. `git commit -m "fix (sciontool status
-  blocked handling)"` or `echo "x; sciontool status blocked"`, and a heredoc
-  or multi-line string with a line that starts with a status call.
+  blocked handling)"` or `echo "x; sciontool status blocked"`; a heredoc
+  or multi-line string with a line that starts with a status call; and a
+  status call in command position that does not run or fails (for example
+  after a failing `&&` step), because the bridge sets the flag when the
+  tool starts, not when the call succeeds.
 - False negatives (a real call that does not count, so the bridge's
   `task_completed` overwrites it): wrapped calls such as
   `env X=1 sciontool status blocked ...`, `timeout 10 sciontool ...`,

@@ -377,8 +377,9 @@ func firstJSONLLine(t *testing.T, path string) []byte {
 // output).
 //
 // The opencode, muse-code and pi cases check the dialect mapping only, not
-// delivery gating: those harnesses use settle or delay mode, so the runtime
-// ignores their marker.
+// delivery gating: those harnesses use ready strategy delay (the strategies
+// are hook and delay, pkg/agent/state/state.go), so the runtime ignores
+// their marker.
 func TestProcessHookData_DialectSessionStartReadiness(t *testing.T) {
 	type tc struct {
 		name      string
