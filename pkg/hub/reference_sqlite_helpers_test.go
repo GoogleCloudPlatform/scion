@@ -347,6 +347,15 @@ type refFaultStore struct {
 	conversationCalls   int
 	// failGetAgent fails GetAgent while the switch is armed.
 	failGetAgent bool
+	// nilGetAgent answers GetAgent with (nil, nil) while the switch is armed,
+	// which no real store does; with nilGetAgentMax > 0 only the first
+	// nilGetAgentMax armed calls do (nilGetAgentN counts them).
+	nilGetAgent    bool
+	nilGetAgentMax int
+	nilGetAgentN   int
+	// nilGetConversation answers GetConversation with (nil, nil) while the
+	// switch is armed.
+	nilGetConversation bool
 	// failUpsertConv fails UpsertConversationByExternalRef while the switch
 	// is armed.
 	failUpsertConv bool
@@ -441,6 +450,9 @@ func (r *refFaultStore) GetProject(ctx context.Context, id string) (*store.Proje
 }
 
 func (r *refFaultStore) GetConversation(ctx context.Context, id string) (*store.Conversation, error) {
+	if r.nilGetConversation && r.fault.Active() {
+		return nil, nil
+	}
 	if r.failGetConversation && r.fault.Active() {
 		r.conversationCalls++
 		if r.conversationCalls > r.conversationCallsOK {
@@ -451,6 +463,10 @@ func (r *refFaultStore) GetConversation(ctx context.Context, id string) (*store.
 }
 
 func (r *refFaultStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	if r.nilGetAgent && r.fault.Active() && (r.nilGetAgentMax == 0 || r.nilGetAgentN < r.nilGetAgentMax) {
+		r.nilGetAgentN++
+		return nil, nil
+	}
 	if r.failGetAgent && r.fault.Active() {
 		return nil, errRefStoreFault
 	}

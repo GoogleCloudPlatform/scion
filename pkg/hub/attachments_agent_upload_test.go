@@ -288,7 +288,8 @@ func TestAgentMaySend_NilRecordRefused(t *testing.T) {
 	ctx := withStandingMemo(storedAgentContext(f.aa))
 	_, ok := f.srv.agentMaySend(ctx)
 	require.True(t, ok, "control: the agent may send with the real store")
-	f.srv.store = &nilAgentStore{Store: f.srv.store, nilForID: f.aa.ID}
+	f.faults.nilGetAgent = true
+	f.fault.Arm()
 	a, ok := f.srv.agentMaySend(ctx)
 	require.False(t, ok)
 	require.Nil(t, a)

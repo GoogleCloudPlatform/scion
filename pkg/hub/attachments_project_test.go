@@ -134,26 +134,13 @@ func TestMessageProjectForBind_IgnoresRequestProject(t *testing.T) {
 	require.Equal(t, f.projA.ID, *a.MessageProjectID, "the stored project is the conversation's, not a request's")
 }
 
-// nilConversationStore forces GetConversation to answer (nil, nil) for one
-// id. No real store does; the bind must not rely on that.
-type nilConversationStore struct {
-	store.Store
-	nilForID string
-}
-
-func (s *nilConversationStore) GetConversation(ctx context.Context, id string) (*store.Conversation, error) {
-	if id == s.nilForID {
-		return nil, nil
-	}
-	return s.Store.GetConversation(ctx, id)
-}
-
 // TestMessageProjectForBind_NilConversationNotFound: a (nil, nil) lookup
 // is answered as not found, so nothing is bound.
 func TestMessageProjectForBind_NilConversationNotFound(t *testing.T) {
 	f := newRefFixture(t)
 	conv := seedGroupConversation(t, f.st, f.projA.ID, "g1")
-	f.srv.store = &nilConversationStore{Store: f.srv.store, nilForID: conv}
+	f.faults.nilGetConversation = true
+	f.fault.Arm()
 	_, err := f.srv.messageProjectForBind(context.Background(), &store.Message{
 		ID: uuid.NewString(), ConversationID: conv, SenderID: f.ua.ID,
 	})
