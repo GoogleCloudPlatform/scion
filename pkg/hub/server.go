@@ -6568,8 +6568,7 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	s.startScheduledSendSweeper(ctx)
 
 	// Start the migration of personal chat thread groups into project
-	// thread groups (ptone/scion#4424). It idles while
-	// hub.chat_thread_groups is off and exits when ctx is cancelled.
+	// thread groups (ptone/scion#4424). It exits when ctx is cancelled.
 	s.startThreadGroupMigrationSweeper(ctx)
 
 	// Start notification dispatcher (uses the current event publisher).
@@ -7217,10 +7216,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/conversations", s.guarded("/api/v1/conversations", s.handleListConversations))
 	s.mux.HandleFunc("/api/v1/conversations/", s.guarded("/api/v1/conversations/", s.handleConversationRoutes))
 	s.mux.HandleFunc("/api/v1/conversations/resolve", s.guarded("/api/v1/conversations/resolve", s.handleConversationResolve))
-	// Project-scoped chat thread groups (ptone/scion#4424): 404 while the
-	// hub.chat_thread_groups experiment is off (threadGroupsGate).
-	s.mux.HandleFunc("/api/v1/thread-groups", s.guarded("/api/v1/thread-groups", s.threadGroupsGate(s.handleThreadGroups)))
-	s.mux.HandleFunc("/api/v1/thread-groups/", s.guarded("/api/v1/thread-groups/", s.threadGroupsGate(s.handleThreadGroupRoutes)))
+	// Project-scoped chat thread groups (ptone/scion#4424).
+	s.mux.HandleFunc("/api/v1/thread-groups", s.guarded("/api/v1/thread-groups", s.handleThreadGroups))
+	s.mux.HandleFunc("/api/v1/thread-groups/", s.guarded("/api/v1/thread-groups/", s.handleThreadGroupRoutes))
 
 	// Cross-project messaging endpoints (Phase 3)
 	s.mux.HandleFunc("/api/v1/messaging/capabilities", s.guarded("/api/v1/messaging/capabilities", s.handleMessagingCapabilities))

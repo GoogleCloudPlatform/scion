@@ -432,25 +432,16 @@ func TestFederationProjectVisitors_RegisteredDefaultOff(t *testing.T) {
 	}
 }
 
-// TestChatThreadGroups_RegisteredDefaultOff pins hub.chat_thread_groups
-// (ptone/scion#4424): it gates the web rail and the hub routes, so it needs
-// both layers, and it ships off.
-func TestChatThreadGroups_RegisteredDefaultOff(t *testing.T) {
-	entry, ok := Default().Lookup(ChatThreadGroups)
-	if !ok {
-		t.Fatalf("compiled registry entry %q absent", ChatThreadGroups)
+// TestChatThreadGroups_Graduated pins the graduation of
+// hub.chat_thread_groups (ptone/scion#5546): project thread groups are always
+// on, so the name is no longer active and is retired, which makes a stored
+// override for it ignored and pruned and keeps the name from being reused.
+func TestChatThreadGroups_Graduated(t *testing.T) {
+	if _, ok := Default().Lookup("hub.chat_thread_groups"); ok {
+		t.Error("hub.chat_thread_groups is still an active experiment")
 	}
-	if entry.Name != "hub.chat_thread_groups" {
-		t.Errorf("Name = %q, want hub.chat_thread_groups", entry.Name)
-	}
-	if entry.Default {
-		t.Error("Default = true, want false")
-	}
-	if len(entry.Layers) != 2 || !entry.HasLayer(LayerWeb) || !entry.HasLayer(LayerServer) {
-		t.Errorf("Layers = %v, want exactly LayerWeb and LayerServer", entry.Layers)
-	}
-	if entry.Stage != StageAlpha || entry.Issue != "ptone/scion#4424" || entry.Owner != "native-chat" || entry.ReviewBy != "2027-01-11" {
-		t.Errorf("chat thread groups experiment metadata mismatch: %+v", entry)
+	if !Default().IsRetired("hub.chat_thread_groups") {
+		t.Error("hub.chat_thread_groups is not retired")
 	}
 }
 

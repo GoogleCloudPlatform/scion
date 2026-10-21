@@ -328,7 +328,7 @@ var messagingOperations = []OperationSpec{
 		},
 		Bearer: AdmitOn(BearerTargetSelfRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
-	// Chat thread groups (ptone/scion#4424, experiment hub.chat_thread_groups):
+	// Chat thread groups (ptone/scion#4424):
 	// metadata over a project's group conversations, authorized exactly like
 	// a project group conversation. An agent must belong to the group's
 	// project.
