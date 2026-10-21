@@ -786,6 +786,7 @@ func TestAdminUserInviteBulk_DetailCollapseWithoutUserRead(t *testing.T) {
 // createPendingUserTx tries to insert it and loses the unique-index race.
 type raceOnceStore struct {
 	store.Store
+	fault *storeFaultSwitch
 	email string
 	mu    sync.Mutex
 	used  bool
@@ -793,7 +794,7 @@ type raceOnceStore struct {
 
 func (r *raceOnceStore) GetUserByEmail(ctx context.Context, email string) (*store.User, error) {
 	r.mu.Lock()
-	hide := email == r.email && !r.used
+	hide := r.fault.Active() && email == r.email && !r.used
 	if hide {
 		r.used = true
 	}
@@ -805,6 +806,9 @@ func (r *raceOnceStore) GetUserByEmail(ctx context.Context, email string) (*stor
 }
 
 func (r *raceOnceStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	if !r.fault.Active() {
+		return r.Store.WithTx(ctx, fn)
+	}
 	return r.Store.WithTx(ctx, func(tx store.Store) error {
 		return fn(&raceOnceTx{Store: tx, parent: r})
 	})
@@ -833,10 +837,15 @@ func (r *raceOnceTx) GetUserByEmail(ctx context.Context, email string) (*store.U
 // classifies the address, and creates no second row.
 func TestAdminUserInviteBulk_AlreadyExistsRace(t *testing.T) {
 	srv, s := testServer(t)
+	racer, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *raceOnceStore {
+		return &raceOnceStore{Store: inner, fault: f}
+	})
 	invited, _, _ := seedBulkExisting(t, s)
-	racer := &raceOnceStore{Store: s, email: invited.Email}
-	srv.store = racer
+	racer.mu.Lock()
+	racer.email = invited.Email
+	racer.mu.Unlock()
 	before := countUsers(t, s)
+	fault.Arm()
 	resp := decodeBulk(t, doRequest(t, srv, http.MethodPost, "/api/v1/admin/users/invite/bulk", UserInviteBulkRequest{Emails: []UserInviteRequest{
 		{Email: invited.Email}, {Email: "after-race@example.com"},
 	}}))
@@ -853,12 +862,16 @@ func TestAdminUserInviteBulk_AlreadyExistsRace(t *testing.T) {
 // calls CreateUser, so nothing else consumes the failures.
 type transientTxStore struct {
 	store.Store
+	fault *storeFaultSwitch
 	mu    sync.Mutex
 	fails int
 	calls int
 }
 
 func (f *transientTxStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	if !f.fault.Active() {
+		return f.Store.WithTx(ctx, fn)
+	}
 	return f.Store.WithTx(ctx, func(tx store.Store) error {
 		return fn(&transientCreateTx{Store: tx, parent: f})
 	})
@@ -888,9 +901,11 @@ func (t *transientCreateTx) CreateUser(ctx context.Context, u *store.User) error
 // internal_error while the other addresses go on.
 func TestAdminUserInviteBulk_TransientRetriedOnce(t *testing.T) {
 	t.Run("one conflict is retried", func(t *testing.T) {
-		srv, s := testServer(t)
-		flaky := &transientTxStore{Store: s, fails: 1}
-		srv.store = flaky
+		srv, _ := testServer(t)
+		flaky, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *transientTxStore {
+			return &transientTxStore{Store: inner, fault: f, fails: 1}
+		})
+		fault.Arm()
 		resp := decodeBulk(t, doRequest(t, srv, http.MethodPost, "/api/v1/admin/users/invite/bulk", UserInviteBulkRequest{Emails: []UserInviteRequest{{Email: "retry@example.com"}}}))
 		assert.Equal(t, inviteBatchStatusCreated, resp.Results[0].Status)
 		assert.Equal(t, 2, flaky.calls)
@@ -898,8 +913,10 @@ func TestAdminUserInviteBulk_TransientRetriedOnce(t *testing.T) {
 	})
 	t.Run("two conflicts fail the address only", func(t *testing.T) {
 		srv, s := testServer(t)
-		flaky := &transientTxStore{Store: s, fails: 2}
-		srv.store = flaky
+		flaky, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *transientTxStore {
+			return &transientTxStore{Store: inner, fault: f, fails: 2}
+		})
+		fault.Arm()
 		resp := decodeBulk(t, doRequest(t, srv, http.MethodPost, "/api/v1/admin/users/invite/bulk", UserInviteBulkRequest{Emails: []UserInviteRequest{
 			{Email: "unlucky@example.com"}, {Email: "lucky@example.com"},
 		}}))
