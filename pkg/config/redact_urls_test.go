@@ -15,6 +15,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -133,6 +135,14 @@ var urlCredentialCases = []struct{ name, in, want string }{
 	{"plain fragment", "https://hub.example.com/docs#section-2", "https://hub.example.com/docs#section-2"},
 	{"user info and query", "https://alice:s3cret@hub.example.com/x?token=tok3n", "https://alice:xxxxx@hub.example.com/x?token=xxxxx"},
 	{"unparsable URL", "https://alice:s3cret@hub example.com/%zz?token=tok3n", "https://xxxxx@hub example.com/%zz?token=xxxxx"},
+	{"semicolon separator", "https://hub.example.com/x?a=1;token=tok3n;b=2", "https://hub.example.com/x?a=1;token=xxxxx;b=2"},
+	{"json-escaped ampersand", `https://hub.example.com/x?a=1\u0026token=tok3n\u0026b=2`, `https://hub.example.com/x?a=1\u0026token=xxxxx\u0026b=2`},
+	{"json-escaped equals", `https://hub.example.com/x?token\u003dtok3n`, `https://hub.example.com/x?token\u003dxxxxx`},
+	{"json-escaped uppercase hex", `https://hub.example.com/x?a=1&TOKEN\u003Dtok3n`, `https://hub.example.com/x?a=1&TOKEN\u003Dxxxxx`},
+	{"hash route query", "https://hub.example.com/#/callback?code=s3cret&state=s", "https://hub.example.com/#/callback?code=xxxxx&state=s"},
+	{"hash route without query", "https://hub.example.com/#/settings/profile", "https://hub.example.com/#/settings/profile"},
+	{"pwd and pass", "https://hub.example.com/x?user=u&pwd=s3cret&pass=s3cret", "https://hub.example.com/x?user=u&pwd=xxxxx&pass=xxxxx"},
+	{"jwt", "https://hub.example.com/x?jwt=tok3n&id_jwt=tok3n", "https://hub.example.com/x?jwt=xxxxx&id_jwt=xxxxx"},
 }
 
 func TestRedactURL_QueryCredentials(t *testing.T) {
@@ -159,6 +169,9 @@ func TestRedactURLsIn_QueryCredentials(t *testing.T) {
 		{"two URLs", "https://a.example.com/?token=tok3n and http://u:s3cret@b.example.com/p?q=1", "https://a.example.com/?token=xxxxx and http://u:xxxxx@b.example.com/p?q=1"},
 		{"no query untouched", "dial https://hub.example.com/path/to/x: refused", "dial https://hub.example.com/path/to/x: refused"},
 		{"fragment", "redirected to https://hub.example.com/cb#access_token=tok3n", "redirected to https://hub.example.com/cb#access_token=xxxxx"},
+		{"json text", `{"url":"https://hub.example.com/cb?state=s\u0026access_token=tok3n","n":1}`, `{"url":"https://hub.example.com/cb?state=s\u0026access_token=xxxxx","n":1}`},
+		{"json escaped slash", `{"url":"https://hub.example.com\/cb\/x?token=tok3n"}`, `{"url":"https://hub.example.com\/cb\/x?token=xxxxx"}`},
+		{"go quoted ends at backslash", `Get \"https://hub.example.com/x?token=tok3n\": refused`, `Get \"https://hub.example.com/x?token=xxxxx\": refused`},
 	}
 	for _, tc := range tests {
 		got := RedactURLsIn(tc.in)
@@ -173,5 +186,34 @@ func TestRedactURLsIn_QueryCredentials(t *testing.T) {
 		if got := RedactURLsIn("at " + tc.in + " now"); got != "at "+tc.want+" now" {
 			t.Errorf("%s: RedactURLsIn = %q, want %q", tc.name, got, "at "+tc.want+" now")
 		}
+	}
+}
+
+// pkg/apiclient keeps a copy of the query and fragment rules (it imports
+// no scion package). The two copies must stay identical.
+func TestURLRedactRules_ApiclientCopyIdentical(t *testing.T) {
+	const marker = "// urlCredentialParamNames are query"
+	cfg, err := os.ReadFile("url_redact.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	api, err := os.ReadFile(filepath.Join("..", "apiclient", "redact.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ci := strings.Index(string(cfg), marker)
+	ai := strings.Index(string(api), marker)
+	if ci < 0 || ai < 0 {
+		t.Fatalf("marker %q not found (config %d, apiclient %d)", marker, ci, ai)
+	}
+	want := strings.TrimRight(string(cfg[ci:]), "\n")
+	got := string(api[ai:])
+	end := strings.Index(got, "// redactURLError returns")
+	if end < 0 {
+		t.Fatal("end marker not found in apiclient/redact.go")
+	}
+	got = strings.TrimRight(got[:end], "\n")
+	if got != want {
+		t.Errorf("pkg/apiclient/redact.go's copy of the URL redaction rules differs from pkg/config/url_redact.go")
 	}
 }

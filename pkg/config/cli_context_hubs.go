@@ -77,8 +77,11 @@ var textURLRe = regexp.MustCompile("(?i)\\bhttps?://(?:[^\\s/?#\"<>`\\\\]|\\\\.)
 
 // textFullURLRe matches each http(s) URL in a text: textURLRe's scheme and
 // authority, then its path, query and fragment, which end at white space,
-// a quote, an angle bracket, a backtick or a backslash.
-var textFullURLRe = regexp.MustCompile(textURLRe.String() + "(?:[/?#][^\\s\"<>`\\\\]*)?")
+// a quote, an angle bracket, a backtick or a backslash. A JSON escape
+// inside them (\u0026 for "&", \/ for "/") does not end the URL, so a URL
+// quoted in JSON text is redacted whole; any other backslash (\" in a Go
+// %q string, for example) ends it.
+var textFullURLRe = regexp.MustCompile(textURLRe.String() + "(?:(?:[/?#]|\\\\u00(?:23|3[fF]))(?:[^\\s\"<>`\\\\]|\\\\u[0-9a-fA-F]{4}|\\\\/)*)?")
 
 // RedactURL returns raw for display with any credential in it replaced:
 // in its user info, the password (see url.URL.Redacted), or a user name
@@ -320,6 +323,19 @@ var globalHubSettings = func() (string, *HubTransportConfig) {
 // the import cannot be saved, the returned context holds it anyway, with an
 // error wrapping ErrCLIContextImport.
 func LoadCLIContextImported(baseName func(endpoint string) string) (*CLIContext, error) {
+	return loadCLIContextImported(baseName, true)
+}
+
+// LoadCLIContextImportedInMemory is LoadCLIContextImported without the
+// save: the returned context holds the pending one-time import, and
+// nothing is written (no context.yaml, no lock). Read-only commands use
+// it, so they see the same hub as the next command that saves the import
+// (ptone/scion#5483).
+func LoadCLIContextImportedInMemory(baseName func(endpoint string) string) (*CLIContext, error) {
+	return loadCLIContextImported(baseName, false)
+}
+
+func loadCLIContextImported(baseName func(endpoint string) string, save bool) (*CLIContext, error) {
 	c, err := LoadCLIContext()
 	if err != nil || c.Version > CLIContextVersion || (c.GlobalImported() && c.CurrentImported()) {
 		return c, err
@@ -337,6 +353,10 @@ func LoadCLIContextImported(baseName func(endpoint string) string) (*CLIContext,
 		if !target.CurrentImported() {
 			target.ImportCurrentHub(endpoint, transport, baseName(endpoint), now)
 		}
+	}
+	if !save {
+		importInto(c, time.Now())
+		return c, nil
 	}
 	var imported *CLIContext
 	err = UpdateCLIContext(func(fresh *CLIContext) error {

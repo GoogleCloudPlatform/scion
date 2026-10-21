@@ -25,8 +25,8 @@ import (
 
 // urlCredentialParamNames are query and fragment parameter names whose
 // value RedactURL masks, compared lower-cased. A name that contains
-// "token", "secret", "password", "passwd", "apikey", "api_key" or
-// "api-key", or that ends in "_key" or "-key", is masked too (see
+// "token", "secret", "password", "passwd", "apikey", "api_key", "api-key"
+// or "jwt", or that ends in "_key" or "-key", is masked too (see
 // isURLCredentialParam).
 var urlCredentialParamNames = map[string]bool{
 	"key":               true,
@@ -38,6 +38,8 @@ var urlCredentialParamNames = map[string]bool{
 	"client_assertion":  true,
 	"sig":               true,
 	"signature":         true,
+	"pwd":               true,
+	"pass":              true,
 	"x-amz-credential":  true,
 	"x-amz-signature":   true,
 	"x-goog-credential": true,
@@ -51,7 +53,7 @@ func isURLCredentialParam(name string) bool {
 	if urlCredentialParamNames[n] {
 		return true
 	}
-	for _, s := range []string{"token", "secret", "password", "passwd", "apikey", "api_key", "api-key"} {
+	for _, s := range []string{"token", "secret", "password", "passwd", "apikey", "api_key", "api-key", "jwt"} {
 		if strings.Contains(n, s) {
 			return true
 		}
@@ -59,42 +61,82 @@ func isURLCredentialParam(name string) bool {
 	return strings.HasSuffix(n, "_key") || strings.HasSuffix(n, "-key")
 }
 
+// The URL delimiters redactURLParams splits on, each also in the JSON
+// escaped form a URL takes inside JSON text (\u0026 for "&" and so on).
+var (
+	urlFragmentDelims = []string{"#", `\u0023`}
+	urlQueryDelims    = []string{"?", `\u003f`}
+	urlParamDelims    = []string{"&", ";", `\u0026`, `\u003b`}
+	urlValueDelims    = []string{"=", `\u003d`}
+)
+
+// cutDelim cuts s at the first of delims (the \u forms matched
+// case-insensitively) and returns the parts and the delimiter as written.
+func cutDelim(s string, delims []string) (before, delim, after string, found bool) {
+	lower := strings.ToLower(s)
+	at, width := -1, 0
+	for _, d := range delims {
+		if i := strings.Index(lower, d); i >= 0 && (at < 0 || i < at) {
+			at, width = i, len(d)
+		}
+	}
+	if at < 0 {
+		return s, "", "", false
+	}
+	return s[:at], s[at : at+width], s[at+width:], true
+}
+
 // redactURLParams returns raw (a URL, or the part of one from its path
 // on) with the value of every credential parameter in its query and its
-// fragment replaced by xxxxx. Every other byte, including the order and
-// spelling of the other parameters, is kept.
+// fragment replaced by xxxxx. A fragment that holds a route with its own
+// query (#/path?code=...) has that query redacted. Parameters are split
+// on "&" and ";". Every other byte, including the order and spelling of
+// the other parameters, is kept.
 func redactURLParams(raw string) string {
-	rest, fragment, hasFragment := strings.Cut(raw, "#")
-	base, query, hasQuery := strings.Cut(rest, "?")
+	rest, fdelim, fragment, hasFragment := cutDelim(raw, urlFragmentDelims)
+	base, qdelim, query, hasQuery := cutDelim(rest, urlQueryDelims)
 	out := base
 	if hasQuery {
-		out += "?" + redactParamList(query)
+		out += qdelim + redactParamList(query)
 	}
 	if hasFragment {
-		out += "#" + redactParamList(fragment)
+		if route, rq, routeQuery, ok := cutDelim(fragment, urlQueryDelims); ok {
+			out += fdelim + route + rq + redactParamList(routeQuery)
+		} else {
+			out += fdelim + redactParamList(fragment)
+		}
 	}
 	return out
 }
 
-// redactParamList masks the credential values of an &-separated list of
-// name=value pairs. A name that does not unescape is compared as written.
+// redactParamList masks the credential values of a list of name=value
+// pairs. A name that does not unescape is compared as written.
 func redactParamList(list string) string {
-	if !strings.Contains(list, "=") {
-		return list
+	var b strings.Builder
+	for {
+		pair, delim, rest, more := cutDelim(list, urlParamDelims)
+		b.WriteString(redactParam(pair))
+		if !more {
+			return b.String()
+		}
+		b.WriteString(delim)
+		list = rest
 	}
-	pairs := strings.Split(list, "&")
-	for i, pair := range pairs {
-		name, _, hasValue := strings.Cut(pair, "=")
-		if !hasValue {
-			continue
-		}
-		unescaped, err := url.QueryUnescape(name)
-		if err != nil {
-			unescaped = name
-		}
-		if isURLCredentialParam(unescaped) {
-			pairs[i] = name + "=" + redactedSecret
-		}
+}
+
+// redactParam masks the value of one name=value pair with a credential
+// name.
+func redactParam(pair string) string {
+	name, vdelim, _, hasValue := cutDelim(pair, urlValueDelims)
+	if !hasValue {
+		return pair
 	}
-	return strings.Join(pairs, "&")
+	unescaped, err := url.QueryUnescape(name)
+	if err != nil {
+		unescaped = name
+	}
+	if isURLCredentialParam(unescaped) {
+		return name + vdelim + redactedSecret
+	}
+	return pair
 }
