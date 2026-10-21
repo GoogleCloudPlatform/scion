@@ -36,6 +36,12 @@ import (
 // spools the second to a temporary file.
 func spoolingUploadRequest(t *testing.T, projectID string) *http.Request {
 	t.Helper()
+	return spoolingUploadRequestTo(t, "/api/v1/chat/attachments", projectID)
+}
+
+// spoolingUploadRequestTo is spoolingUploadRequest posted to target.
+func spoolingUploadRequestTo(t *testing.T, target, projectID string) *http.Request {
+	t.Helper()
 	var body bytes.Buffer
 	mw := multipart.NewWriter(&body)
 	if projectID != "" {
@@ -52,7 +58,7 @@ func spoolingUploadRequest(t *testing.T, projectID string) *http.Request {
 		require.NoError(t, err)
 	}
 	require.NoError(t, mw.Close())
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/attachments", &body)
+	req := httptest.NewRequest(http.MethodPost, target, &body)
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 	return req
 }
@@ -100,5 +106,36 @@ func TestUserUpload_RemovesSpooledForm(t *testing.T) {
 	rec := httptest.NewRecorder()
 	f.srv.Handler().ServeHTTP(rec, req)
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	requireNoSpooledForm(t, dir)
+}
+
+// badQueryUploadTarget is the upload route with a query string ParseForm
+// refuses: ParseMultipartForm still spools the body, sets the form and then
+// returns that error.
+const badQueryUploadTarget = "/api/v1/chat/attachments?x=%zz"
+
+// TestAgentUpload_RemovesSpooledFormOnParseError: an agent upload refused
+// with 400 after its body was spooled leaves no temporary file.
+func TestAgentUpload_RemovesSpooledFormOnParseError(t *testing.T) {
+	f := newRefFixture(t)
+	enableAttachmentArtifacts(t, f)
+	dir := spoolDir(t)
+	rec := f.agentRequest(t, f.aa, spoolingUploadRequestTo(t, badQueryUploadTarget, ""))
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	requireNoSpooledForm(t, dir)
+}
+
+// TestUserUpload_RemovesSpooledFormOnParseError: the same for a user upload.
+func TestUserUpload_RemovesSpooledFormOnParseError(t *testing.T) {
+	f := newRefFixture(t)
+	enableAttachmentArtifacts(t, f)
+	dir := spoolDir(t)
+	token, _, _, err := f.srv.userTokenService.GenerateTokenPair(f.ua.ID, f.ua.Email, f.ua.DisplayName, f.ua.Role, ClientTypeWeb)
+	require.NoError(t, err)
+	req := spoolingUploadRequestTo(t, badQueryUploadTarget, f.projA.ID)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	f.srv.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 	requireNoSpooledForm(t, dir)
 }

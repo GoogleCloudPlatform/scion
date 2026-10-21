@@ -278,3 +278,18 @@ func TestAttachmentProbe_AnyTokenReads(t *testing.T) {
 		require.Equal(t, "artifact", probeAnswer(t, rec))
 	}
 }
+
+// TestAgentMaySend_NilRecordRefused: when the agent lookup answers
+// (nil, nil), the agent may not send, the same answer as not found.
+func TestAgentMaySend_NilRecordRefused(t *testing.T) {
+	f := newRefFixture(t)
+	// One standing memo for both calls: the control records the standing
+	// answer, so the second call reaches agentMaySend's own lookup.
+	ctx := withStandingMemo(storedAgentContext(f.aa))
+	_, ok := f.srv.agentMaySend(ctx)
+	require.True(t, ok, "control: the agent may send with the real store")
+	f.srv.store = &nilAgentStore{Store: f.srv.store, nilForID: f.aa.ID}
+	a, ok := f.srv.agentMaySend(ctx)
+	require.False(t, ok)
+	require.Nil(t, a)
+}

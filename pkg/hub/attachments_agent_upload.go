@@ -66,6 +66,9 @@ func (s *Server) agentMaySend(ctx context.Context) (*store.Agent, bool) {
 		}
 		return nil, false
 	}
+	if agent == nil {
+		return nil, false
+	}
 	return agent, true
 }
 
@@ -111,11 +114,14 @@ func (s *Server) handleAgentAttachmentUpload(w http.ResponseWriter, r *http.Requ
 	}
 	maxFile := s.attachmentMaxBytes(ctx, true)
 	r.Body = http.MaxBytesReader(w, r.Body, maxFile*MaxAttachmentsPerMessage+1024*1024)
-	if err := r.ParseMultipartForm(uploadFormMemory); err != nil {
+	// The form is removed on every return: ParseMultipartForm can spool
+	// parts and still answer an error (from the query string).
+	err := r.ParseMultipartForm(uploadFormMemory)
+	defer removeUploadForm(r)
+	if err != nil {
 		BadRequest(w, "invalid multipart form or request too large")
 		return
 	}
-	defer removeUploadForm(r)
 	files := r.MultipartForm.File["files"]
 	if len(files) == 0 {
 		ValidationError(w, "no files uploaded", nil)

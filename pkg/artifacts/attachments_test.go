@@ -701,3 +701,22 @@ func TestServeBoundAttachment(t *testing.T) {
 		t.Errorf("redirect lifetime = %v, want %v", rs.last.Expires, DeliveryRedirectTTL)
 	}
 }
+
+// nilAttachmentStore answers (nil, nil) from GetAttachment, which no real
+// store does; a caller must not rely on that.
+type nilAttachmentStore struct{ Store }
+
+func (nilAttachmentStore) GetAttachment(context.Context, string) (*Artifact, error) { return nil, nil }
+
+// TestServeBoundAttachment_NilAttachmentNotFound: a (nil, nil) lookup
+// answers ServeNotFound with nothing written, the same as an unknown id.
+func TestServeBoundAttachment_NilAttachmentNotFound(t *testing.T) {
+	f := newAttachmentFixture(t, false)
+	id := f.send(userU, "msg-1", pngBytes)
+	f.svc.SetStore(nilAttachmentStore{Store: f.store})
+	rec := httptest.NewRecorder()
+	out := f.svc.ServeBoundAttachment(rec, httptest.NewRequest(http.MethodGet, "/x", nil), id, "msg-1")
+	if out != ServeNotFound || rec.Body.Len() != 0 {
+		t.Fatalf("nil attachment = %v, %d bytes written", out, rec.Body.Len())
+	}
+}

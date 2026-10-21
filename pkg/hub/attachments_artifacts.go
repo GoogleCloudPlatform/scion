@@ -318,6 +318,9 @@ func (s *Server) messageProjectForBind(ctx context.Context, msg *store.Message) 
 		if err != nil {
 			return "", fmt.Errorf("conversation lookup: %w", err)
 		}
+		if conv == nil {
+			return "", fmt.Errorf("conversation lookup: %w", store.ErrNotFound)
+		}
 		if conv.Kind != "direct" {
 			if conv.ProjectID == nil {
 				return "", nil

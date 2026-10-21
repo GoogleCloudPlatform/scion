@@ -532,3 +532,40 @@ func TestSend_ReducedNameCollisionRefused(t *testing.T) {
 	require.Contains(t, rec.Body.String(), "r\u00e9sum\u00e9.pdf")
 	require.Contains(t, rec.Body.String(), "r_sum_.pdf")
 }
+
+// nilOnceAgentStore answers (nil, nil) to the first GetAgent for one id and
+// passes later calls through, so a test can reach the second of two
+// lookups.
+type nilOnceAgentStore struct {
+	store.Store
+	nilForID string
+	done     bool
+}
+
+func (s *nilOnceAgentStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	if id == s.nilForID && !s.done {
+		s.done = true
+		return nil, nil
+	}
+	return s.Store.GetAgent(ctx, id)
+}
+
+// TestAgentSendAttachments_NilSenderRecordRefused: when the sender's agent
+// lookup answers (nil, nil), the send's attachments are refused, the same
+// answer as a failed lookup.
+func TestAgentSendAttachments_NilSenderRecordRefused(t *testing.T) {
+	f := newRefFixture(t)
+	enableAttachmentArtifacts(t, f)
+	rec := f.agentUpload(t, f.aa, "a.txt", "agent bytes")
+	id := uploadedAttachmentID(t, rec, "a.txt")
+	// One standing memo for both calls, so standing is not looked up again.
+	ctx := withStandingMemo(storedAgentContext(f.aa))
+	_, _, ok := f.srv.validateMessageAttachments(ctx, f.aa, []string{id}, nil)
+	require.True(t, ok, "control: admitted with the real store")
+	// Only the sender record lookup answers (nil, nil); agentMaySend's own
+	// lookup later finds the agent, so this guard alone decides.
+	f.srv.store = &nilOnceAgentStore{Store: f.srv.store, nilForID: f.aa.ID}
+	refs, _, ok := f.srv.validateMessageAttachments(ctx, f.aa, []string{id}, nil)
+	require.False(t, ok)
+	require.Empty(t, refs)
+}

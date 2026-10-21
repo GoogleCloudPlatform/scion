@@ -350,7 +350,7 @@ func (s *Server) validateMessageAttachments(ctx context.Context, target *store.A
 	const route = "agent-message"
 	if sender := GetAgentIdentityFromContext(ctx); sender != nil {
 		rec, err := s.store.GetAgent(ctx, sender.ID())
-		if err != nil {
+		if err != nil || rec == nil {
 			return nil, "", false
 		}
 		return s.validateAgentSendAttachments(ctx, sender, rec, ids, paths, true, route)

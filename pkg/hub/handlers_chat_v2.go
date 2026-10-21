@@ -5971,11 +5971,14 @@ func (s *Server) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) 
 	// form fields) applies to the whole multipart body. Parts above
 	// uploadFormMemory are spooled to temporary files, not held in memory.
 	r.Body = http.MaxBytesReader(w, r.Body, formLimit+1024*1024)
-	if err := r.ParseMultipartForm(uploadFormMemory); err != nil {
+	// The form is removed on every return: ParseMultipartForm can spool
+	// parts and still answer an error (from the query string).
+	err := r.ParseMultipartForm(uploadFormMemory)
+	defer removeUploadForm(r)
+	if err != nil {
 		BadRequest(w, "invalid multipart form or request too large")
 		return
 	}
-	defer removeUploadForm(r)
 
 	// project_id scopes the upload to a space. DMs belong to no space, so it is
 	// optional: an upload without one is stored project-less and reachable only

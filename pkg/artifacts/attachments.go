@@ -375,7 +375,7 @@ func (s *Service) ServeBoundAttachment(w http.ResponseWriter, r *http.Request, a
 		return ServeNotFound
 	}
 	a, err := b.store.GetAttachment(ctx, artifactID)
-	if err != nil || a.ID != artifactID || a.ScopeKind != ScopeKindMessage || a.ScopeRef != messageID {
+	if err != nil || a == nil || a.ID != artifactID || a.ScopeKind != ScopeKindMessage || a.ScopeRef != messageID {
 		if err != nil && !errors.Is(err, ErrNotFound) {
 			slog.ErrorContext(ctx, "artifacts: bound attachment lookup failed", "error", err)
 		}
