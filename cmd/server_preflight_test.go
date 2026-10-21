@@ -463,32 +463,65 @@ func TestServerPreflight_NoFileChangeNoListener(t *testing.T) {
 	}))
 	h.agent(t, &store.Agent{Slug: "w", ProjectID: pid, RuntimeBrokerID: h.brokerID, AppliedConfig: &store.AgentAppliedConfig{Profile: "a"}}, "")
 	require.NoFileExists(t, filepath.Join(h.globalDir, "context.yaml"))
-	require.NoError(t, h.store.Close()) // a stopped hub: no sidecars
+	require.NoError(t, h.store.Close())
+	// The database lives outside HOME (SCION_PREFLIGHT_DB names it), so
+	// SQLite's own read-only WAL sidecars (a known limit, pinned by
+	// TestServerPreflight_StoppedWALSidecars) never touch the settings
+	// directory: the whole HOME tree, ~/.scion's mtime included, must be
+	// identical after the run.
+	dbOut := filepath.Join(t.TempDir(), "hub.db")
+	require.NoError(t, os.Rename(h.dbPath, dbOut))
+	o := h.executor()
+	o.envDSN = dbOut
 	before := treeState(t, h.home)
 	workBefore := treeState(t, h.workDir)
 	sockets := socketFDs(t)
 
-	stdout, _, err := runPreflightForTest(t, h.executor())
+	dbBefore := fileState(t, dbOut)
+
+	stdout, _, err := runPreflightForTest(t, o)
 	require.NoError(t, err)
-	decodeReport(t, stdout)
+	rep := decodeReport(t, stdout)
+	// The run reached the disk path through the provider's legacy marker:
+	// the co-located agent's agent-info.json was looked up there (and is
+	// missing). Without the switch, that marker read would migrate the
+	// marker's keys on disk (pkg/config's controls show it).
+	assert.Contains(t, reportCodes(rep), "settings.profiles.agent_info_missing")
 
 	after := treeState(t, h.home)
-	for _, sidecar := range []string{".scion/hub.db-wal", ".scion/hub.db-shm"} {
-		if _, had := before[sidecar]; !had {
-			if _, has := after[sidecar]; has {
-				// SQLite's own read-only WAL sidecars (a known limit):
-				// creating them also moves the directory's mtime.
-				delete(after, sidecar)
-				after[".scion"] = before[".scion"]
-			}
-		}
-	}
-	assert.Equal(t, before[".scion/hub.db"], after[".scion/hub.db"], "the database file is unchanged")
+	assert.Equal(t, dbBefore, fileState(t, dbOut), "the database file is unchanged")
 	assert.Contains(t, before, ".scion/groves/acme", "the fixture keeps a leftover legacy layout")
 	assert.NotContains(t, after, ".scion/projects", "under the switch the layout is not migrated, and the preflight runs without projects/")
 	assert.Equal(t, before, after, "the preflight must change no file under HOME")
 	assert.Equal(t, workBefore, treeState(t, h.workDir), "the preflight must change no file in its working directory")
 	assert.Equal(t, sockets, socketFDs(t), "the preflight must leave no socket open")
+}
+
+// The known limit behind T4's priming: a read-only open of a stopped WAL
+// database (no -wal/-shm files) leaves SQLite's own sidecars, and nothing
+// else; the database file itself is unchanged. The database sits in its
+// own directory here, so the settings directory is not involved.
+func TestServerPreflight_StoppedWALSidecars(t *testing.T) {
+	h := newPreflightHub(t)
+	require.NoError(t, h.store.Close())
+	dir := t.TempDir()
+	db := filepath.Join(dir, "hub.db")
+	b, err := os.ReadFile(h.dbPath)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(db, b, 0o644))
+	before := treeState(t, dir)
+	o := h.executor()
+	o.envDSN = db
+	_, _, err = runPreflightForTest(t, o)
+	require.NoError(t, err)
+	after := treeState(t, dir)
+	assert.Equal(t, before["hub.db"], after["hub.db"], "the database file is unchanged")
+	for _, sidecar := range []string{"hub.db-wal", "hub.db-shm"} {
+		delete(after, sidecar)
+	}
+	delete(after, ".")
+	delete(before, ".")
+	assert.Equal(t, before, after, "only SQLite's own sidecars may appear")
 }
 
 // T5: a missing database is an error and is never created, whatever form
