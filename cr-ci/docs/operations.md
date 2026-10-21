@@ -21,8 +21,9 @@ Per repository, in this order (details in
    `ROUTING_VARIABLE_NAME` to `RUNNER_LABEL` (needs write access).
 6. Watch for 48 hours: `dispatch` and `claim_consumed` for every routed job,
    no `launch_failed`, no `SECURITY_*` events, no `capacity_full` lasting
-   across reconciles, and lint durations and memory as in the PoC. Roll out
-   the fork first, then upstream.
+   across reconciles, and lint durations and memory as in the PoC. The current
+   scope is `ptone/scion` only; upstream is future work
+   ([matrix 0](permissions-matrix.md#0-summary-for-the-fork-vs-upstream-decision)).
 
 ## Fallback
 

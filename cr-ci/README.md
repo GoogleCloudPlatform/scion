@@ -108,8 +108,8 @@ proven on a manually dispatched job before any CI job depends on it.
 | [`scripts/`](scripts/) | Deploy, secret and teardown scripts (dry-run by default, `--apply` to execute), their test harness and golden transcripts; see [`scripts/README.md`](scripts/README.md) |
 | [`workflows/`](workflows/) | Workflow templates, not active: the PoC workflow and the `ci.yml` lint routing snippet, with static checks; see [`workflows/README.md`](workflows/README.md) |
 | [`docs/architecture.md`](docs/architecture.md) | Flow, security model, failure modes, fallback |
-| [`docs/permissions-matrix.md`](docs/permissions-matrix.md) | **Who needs which GitHub or GCP role for every step, fork vs upstream** |
-| [`docs/github-setup.md`](docs/github-setup.md) | GitHub App (manifest at [`scripts/github-app-manifest.json`](scripts/github-app-manifest.json)), installation on the fork and upstream, webhook check, fork-PR precondition, routing variable and fallback |
+| [`docs/permissions-matrix.md`](docs/permissions-matrix.md) | **Who needs which GitHub or GCP role for every step, fork vs upstream (future)**; the PAT alternative (not implemented) |
+| [`docs/github-setup.md`](docs/github-setup.md) | GitHub App (manifest at [`scripts/github-app-manifest.json`](scripts/github-app-manifest.json)), installation on the fork (upstream: future), webhook check, fork-PR precondition, routing variable and fallback |
 | [`docs/gcp-setup.md`](docs/gcp-setup.md) | GCP project, IAM, secrets, deploy (outline; P4) |
 | [`docs/poc-checklist.md`](docs/poc-checklist.md) | Every runtime checkpoint for the P6 PoC (open U-items, runner checkpoints, cache sharing, success criteria) with commands and expected results |
 | [`docs/operations.md`](docs/operations.md) | Rollout, fallback, rotation, quotas, troubleshooting (outline) |

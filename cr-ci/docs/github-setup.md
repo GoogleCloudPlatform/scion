@@ -343,7 +343,7 @@ It is what bounds the residual risk of a fork job reaching a cr-ci runner
   3. Click **Save**.
 
   ([GitHub docs](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository))
-- **Organization** (org owner; upstream): org **Settings**, **Actions**,
+- **Organization** (future, upstream only; org owner): org **Settings**, **Actions**,
   **General**, the same section and option. An org (or enterprise) policy
   overrides the repository setting
   ([GitHub docs](https://docs.github.com/en/organizations/managing-organization-settings/disabling-or-limiting-github-actions-for-your-organization)).

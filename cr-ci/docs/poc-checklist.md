@@ -44,7 +44,7 @@ runlog() { gcloud logging read --project P --freshness=2h --limit=200 \
 
 | ID | What | How | Expected | Source |
 | :--- | :--- | :--- | :--- | :--- |
-| B1 | Cloud Build staging access (U10) | `scripts/build-runner-image.sh --apply` | The build succeeds. On a storage 403 on `gs://P_cloudbuild` (or `BUILD_STAGING_BUCKET`), grant `roles/storage.objectViewer` on that bucket only, and record it in matrix C7 and 2.2 | [matrix U10](permissions-matrix.md#5-design-corrections-and-open-items) |
+| B1 | Cloud Build staging bucket (U10, resolved by C19) | `scripts/build-runner-image.sh --apply` | The build uploads its source to the dedicated bucket `BUILD_STAGING_BUCKET` (default `P-cr-ci-staging`, created by `bootstrap-gcp.sh`) and succeeds. A storage 403 means the C19 grant (`roles/storage.objectViewer` for `BUILD_SA_NAME` on that bucket) is missing: re-run `scripts/bootstrap-gcp.sh --apply`. Never grant anything on the shared `gs://P_cloudbuild` | [matrix C19, U10](permissions-matrix.md#5-design-corrections-and-open-items) |
 | B2 | Job volume flags (U9) | `scripts/deploy-job.sh --apply` twice (create, then update), then `gcloud run jobs describe JOB --region R --project P --format='yaml(spec.template.spec.template.spec.volumes,spec.template.spec.template.spec.containers[0].volumeMounts)'` | Both runs succeed with the GA `gcloud run jobs` group; one `ephemeral-disk` volume of `RUNNER_DISK_GI` GiB mounted at `/scratch` after the update (no duplicate). If GA rejects it, switch the script to `gcloud beta` and record it | [matrix U9](permissions-matrix.md#5-design-corrections-and-open-items) |
 | B3 | Mediator `max-instances=1` (precondition 3) | `gcloud run services describe SVC --region R --project P --format='value(spec.template.metadata.annotations."autoscaling.knative.dev/maxScale")'` | `1` (`deploy-mediator.sh` also checks it) | [architecture: deploy preconditions](architecture.md#deploy-preconditions) |
 | B4 | Runner identity has no roles (precondition 4) | `gcloud projects get-iam-policy P --flatten='bindings[].members' --filter='bindings.members:serviceAccount:EXEC' --format='value(bindings.role)'` | Empty output | [architecture: deploy preconditions](architecture.md#deploy-preconditions); matrix 2.2 |
@@ -58,7 +58,14 @@ runlog() { gcloud logging read --project P --freshness=2h --limit=200 \
 | C2 | Fork PR approval precondition (and U4) | Repo **Settings**, **Actions**, **General**, "Approval for running fork pull request workflows from contributors" | "Require approval for all external contributors" saved. Record the role of the person who could change it (expected: repo admin), and close U4 with it | [github-setup.md 6](github-setup.md#6-deploy-precondition-fork-pr-approval-g8); [matrix U4](permissions-matrix.md#5-design-corrections-and-open-items) |
 | C3 | Installation found by the mediator | First PoC dispatch (D1), then `medlog 'jsonPayload.event=("dispatch" OR "error")'` | A `dispatch` line; no `error` with an installation or `generate-jitconfig` stage | [github-setup.md 4](github-setup.md#4-install-the-app) |
 | C4 | `runner_group_id` 1 on the repo endpoint (U1) | Same dispatch | `generate-jitconfig` accepted (a `dispatch` line, no 4xx `error`) | [matrix U1](permissions-matrix.md#5-design-corrections-and-open-items) |
-| C5 | Default labels on JIT runners (U7) | While the PoC job runs: `gh api repos/REPO/actions/runners --jq '.runners[] \| select(.name \| startswith("cr-job-")) \| {name, labels: [.labels[].name]}'` | Record the labels. `[scion-cr-8c32g]` only: close U7. `self-hosted`/`X64` also present: update U7 and architecture's "Residual risk" note (the hijack guard still covers it) | [matrix U7](permissions-matrix.md#5-design-corrections-and-open-items); [architecture](architecture.md#residual-risk-label-matched-job-assignment) |
+| C5 | Default labels on JIT runners (U7) | While the PoC job runs: command C5 below | Record the labels. `[scion-cr-8c32g]` only: close U7. `self-hosted`/`X64` also present: update U7 and architecture's "Residual risk" note (the hijack guard still covers it) | [matrix U7](permissions-matrix.md#5-design-corrections-and-open-items); [architecture](architecture.md#residual-risk-label-matched-job-assignment) |
+
+Command C5:
+
+```bash
+gh api repos/REPO/actions/runners \
+  --jq '.runners[] | select(.name | startswith("cr-job-")) | {name, labels: [.labels[].name]}'
+```
 
 ## D. PoC run
 
@@ -69,7 +76,7 @@ lint workload's cache is missing or old.
 
 | ID | What | How | Expected | Source |
 | :--- | :--- | :--- | :--- | :--- |
-| D1 | Queue-to-start latency | `gh api repos/REPO/actions/runs/RUN_ID/jobs --jq '.jobs[] \| {name, created_at, started_at}'` | `started_at - created_at` < 20 s | Design 7 phase 1; [workflows/README](../workflows/README.md#poc-success-criteria) |
+| D1 | Queue-to-start latency | Command D1 below | `started_at - created_at` < 20 s | Design 7 phase 1; [workflows/README](../workflows/README.md#poc-success-criteria) |
 | D2 | `/scratch` mount detection on gVisor | `runlog 'textPayload:"/scratch is a mount"'` | `/scratch is a mount (<fstype>): listed in /proc/self/mountinfo` (or the device fallback); no execution exits 2. tmpfs means the volume is missing | [runner README, step 2](../runner/README.md#runtime-contract) |
 | D3 | Metadata ID token format and claim | `runlog 'textPayload:"claim"'`; `medlog 'jsonPayload.event=("claim_consumed" OR "claim_rejected")'` | `claim succeeded on attempt 1`; one `claim_consumed`; no `claim_rejected` with `identity_missing`/`identity_invalid` and no "metadata server returned 200 without an ID token" | [runner README, step 4](../runner/README.md#runtime-contract) |
 | D4 | HOME, links, zstd, lexical `GITHUB_WORKSPACE` | The PoC's "Check cr-ci cache parity" and "Runner facts" step logs | Every parity line `ok`; `GITHUB_WORKSPACE=/home/runner/work/scion/scion (physically /scratch/_work/scion/scion)`; `go env GOCACHE=/home/runner/.cache/go-build` | [runner README, step 3](../runner/README.md#runtime-contract); [cache sharing](../workflows/README.md#cache-sharing) |
@@ -79,6 +86,12 @@ lint workload's cache is missing or old.
 | D8 | Deregistration and billing stop | After the job: `gh api repos/REPO/actions/runners --jq '[.runners[].name]'`; `gcloud run jobs executions list --job JOB --region R --project P --limit 3 --format='table(name, status.completionTime, status.succeededCount, status.failedCount)'` | No `cr-job-*` runner left; the execution completed within seconds of the job's end, succeeded | Design 7 phase 1; architecture "Flow" step 3 |
 | D9 | No stray mediator errors | `medlog 'severity>=WARNING'` over the PoC window | No `launch_failed`, `error`, `SECURITY_*`, `labels_unservable`, `runner_reaped` for the PoC jobs; `reconcile` lines every `RECONCILE_SCHEDULE` interval | [operations: monitoring](operations.md#monitoring-and-alerts) |
 | D10 | Restart recovery (optional) | During a run's cold start, redeploy the mediator (`deploy-mediator.sh --apply`) | The runner exits 3; the next reconciles delete its registration and relaunch the job, which then passes | [operations: single instance](operations.md#mediator-single-instance) |
+
+Command D1:
+
+```bash
+gh api repos/REPO/actions/runs/RUN_ID/jobs --jq '.jobs[] | {name, created_at, started_at}'
+```
 
 ## E. Cache sharing in the other direction
 
@@ -90,7 +103,42 @@ P5 review round 3).
 
 | ID | What | How | Expected | Source |
 | :--- | :--- | :--- | :--- | :--- |
-| E1 | A cr-ci save restores on ubuntu-latest | A throwaway `workflow_dispatch` workflow on a test branch of the fork (needs ptone's word, like the PoC) with two jobs. Job 1 runs on `scion-cr-8c32g`: `go build ./cmd/...`, then `actions/cache/save` with `path: /home/runner/.cache/go-build` and `key: crci-parity-<run_id>`. Job 2 runs on `ubuntu-latest` with `needs:` job 1: `actions/cache/restore` with the same path and key, then `find ~/.cache/go-build -type f \| wc -l` and `ls -d /home/home`. Afterwards: `gh cache delete crci-parity-<run_id> --repo REPO` | Job 2 reports `cache-hit` true and thousands of files under `/home/runner/.cache/go-build`, and `/home/home` does not exist | [cache sharing](../workflows/README.md#cache-sharing); P5 review round 3 |
+| E1 | A cr-ci save restores on ubuntu-latest | The throwaway workflow below, on a test branch of the fork (needs ptone's word, like the PoC); then delete its cache with `gh cache delete crci-parity-<run_id> --repo REPO` | Job 2 reports `cache-hit` true and thousands of files under `/home/runner/.cache/go-build`, and `/home/home` does not exist | [cache sharing](../workflows/README.md#cache-sharing); P5 review round 3 |
+
+Workflow E1 (actions pinned to the same SHAs as `ci.yml` and the PoC; it
+has to sit on the default branch to be dispatched, like the PoC):
+
+```yaml
+name: cr-ci cache parity E1
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  save-on-cr-ci:
+    runs-on: scion-cr-8c32g
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - run: go build -o /dev/null ./cmd/...
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /home/runner/.cache/go-build
+          key: crci-parity-${{ github.run_id }}
+  restore-on-ubuntu:
+    needs: save-on-cr-ci
+    runs-on: ubuntu-latest
+    steps:
+      - id: restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /home/runner/.cache/go-build
+          key: crci-parity-${{ github.run_id }}
+      - run: |
+          echo "cache-hit=${{ steps.restore.outputs.cache-hit }}"
+          find /home/runner/.cache/go-build -type f | wc -l
+          ls -d /home/home 2>&1 || true
+```
 
 Both jobs pass the same literal path string, as setup-go-cache does on both
 runner types. On cr-ci it resolves to `/scratch/.cache/go-build`, and the
