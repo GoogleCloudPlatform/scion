@@ -1005,6 +1005,7 @@ func TestAsyncStart_LateFailedReportAfterReap(t *testing.T) {
 		late(t, f, row)
 		got := getAgent(t, f.s, a.ID)
 		assert.Equal(t, store.RunIntentRunning, got.RunIntent, "a late report for the old launch keeps the newer start's intent")
+		assert.Equal(t, "pull: image pull failed", got.Message, "with a newer start the refined detail is left as the broker wrote it")
 		require.NotNil(t, got.RunIntentAt)
 		assert.True(t, got.RunIntentAt.Equal(*newer.RunIntentAt), "the newer intent's time is unchanged")
 	})
@@ -1012,12 +1013,45 @@ func TestAsyncStart_LateFailedReportAfterReap(t *testing.T) {
 		f, d := newAsyncStartFixture(t)
 		a := newD9Agent(t, f, "d9-late-shape", d9Prior{"created memory", state.PhaseCreated, state.PhaseCreated})
 		row := reapAsyncStart(t, f, d, a)
+		events := recordStatusEvents(t, f.srv)
 		late(t, f, row)
 		got := getAgent(t, f.s, a.ID)
 		assert.Equal(t, store.RunIntentStopped, got.RunIntent)
 		assert.Equal(t, "Start failed: pull: image pull failed. "+provisionedRestingNote, got.Message,
 			"the refined detail is put back in the failure message shape")
+		pub := events.forAgent(a.ID)
+		require.NotEmpty(t, pub)
+		assert.Equal(t, got.Message, pub[len(pub)-1].Message, "the rewritten message is published")
 	})
+	t.Run("newer phase keeps its message", func(t *testing.T) {
+		// The reapply write is conditional on the phase it read: a start
+		// that moved the row on in between keeps its message.
+		f, d := newAsyncStartFixture(t)
+		a := newD9Agent(t, f, "d9-late-phase", d9Prior{"created memory", state.PhaseCreated, state.PhaseCreated})
+		row := reapAsyncStart(t, f, d, a)
+		stale := *row
+		stale.Message = "pull: image pull failed"
+		require.NoError(t, f.s.UpdateAgentStatus(context.Background(), a.ID, store.AgentStatusUpdate{Phase: string(state.PhaseStarting), Message: "a newer start"}))
+		f.srv.reapplyStartLaunchFailureMessage(context.Background(), &stale)
+		assert.Equal(t, "a newer start", getAgent(t, f.s, a.ID).Message, "a row that moved on keeps the newer message")
+	})
+}
+
+// TestStartLaunchFailureMessage_OldShapedMessage pins review pm-2 item 2: a
+// failed end that left an older failure message (already in the shape) in
+// place names its launch error, never nesting the old message.
+func TestStartLaunchFailureMessage_OldShapedMessage(t *testing.T) {
+	a := &store.Agent{
+		LaunchEndReason: store.LaunchEndReasonFailed, LaunchError: "boom",
+		Message: "Start failed: pull: image pull failed. " + provisionedRestingNote,
+	}
+	assert.Equal(t, "Start failed: boom. "+provisionedRestingNote, startLaunchFailureMessage(a), "an old shaped message is not nested")
+	a.Message = "pull: image pull failed."
+	assert.Equal(t, "Start failed: pull: image pull failed. "+provisionedRestingNote, startLaunchFailureMessage(a))
+	// Review pm R2: a reaper end names its launch error, whatever message
+	// the row carries (here a broker progress message).
+	reaped := &store.Agent{LaunchEndReason: store.LaunchEndReasonTimedOut, LaunchError: store.LaunchErrorLaunchTimeout, Message: "pulling image"}
+	assert.Equal(t, "Start failed: "+store.LaunchErrorLaunchTimeout+". "+provisionedRestingNote, startLaunchFailureMessage(reaped), "a reaper end names its launch error, not the row's message")
 }
 
 // TestAsyncStart_CreateEndpointCreatedStaysSync pins design D-b's phase

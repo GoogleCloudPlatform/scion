@@ -753,11 +753,13 @@ func isProvisionedStartLaunchEnd(a *store.Agent) bool {
 // <message>"; its launch error when it carried none); for a reaper end
 // (timed_out, lost), which writes no message, its launch error
 // (launch_timeout, broker_lost), never the row's older message (on a
-// memory-row retry that is the previous attempt's failure). A trailing
-// period is dropped so the text has one.
+// memory-row retry that is the previous attempt's failure). A failed end
+// that left an older failure message in place (one already in this shape)
+// uses its launch error too. A trailing period is dropped so the text has
+// one.
 func startLaunchFailureMessage(a *store.Agent) string {
 	failure := ""
-	if a.LaunchEndReason == store.LaunchEndReasonFailed {
+	if a.LaunchEndReason == store.LaunchEndReasonFailed && !strings.HasSuffix(a.Message, provisionedRestingNote) {
 		failure = strings.TrimRight(strings.TrimSpace(a.Message), ".")
 	}
 	if failure == "" {
@@ -772,7 +774,9 @@ func startLaunchFailureMessage(a *store.Agent) string {
 // as the message, so it is rewritten as "Start failed: <detail>. <note>"
 // with a narrow message write, no intent change. Only while the run intent
 // is still stopped (the reap's settle won and nothing started since) and
-// the message is not already in that shape.
+// the message is not already in that shape; the write is conditional on
+// the phase a was read in, so a start that moved the row on since keeps its
+// message. The rewritten row is published.
 func (s *Server) reapplyStartLaunchFailureMessage(ctx context.Context, a *store.Agent) {
 	if !isProvisionedStartLaunchEnd(a) || a.LaunchEndReason == store.LaunchEndReasonFailed ||
 		a.RunIntent != store.RunIntentStopped || strings.HasSuffix(a.Message, provisionedRestingNote) {
@@ -784,8 +788,17 @@ func (s *Server) reapplyStartLaunchFailureMessage(ctx context.Context, a *store.
 	}
 	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
-	if err := s.store.UpdateAgentStatus(wctx, a.ID, store.AgentStatusUpdate{Message: "Start failed: " + failure + ". " + provisionedRestingNote}); err != nil {
+	err := s.store.UpdateAgentStatus(wctx, a.ID, store.AgentStatusUpdate{
+		Message: "Start failed: " + failure + ". " + provisionedRestingNote,
+		IfPhase: a.Phase,
+	})
+	switch {
+	case errors.Is(err, store.ErrPhaseMismatch):
+		// A newer write moved the row on: leave its message.
+	case err != nil:
 		slog.Warn("Failed provisioned start: message write after a refined report failed", "agent_id", a.ID, "error", err)
+	default:
+		s.publishAgentStatusByID(ctx, a.ID)
 	}
 }
 
