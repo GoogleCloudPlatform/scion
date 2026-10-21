@@ -72,6 +72,11 @@ type separateRelayWorld struct {
 	// authzClocks are the hubs' stream re-check clocks, by hub id ("hub-a",
 	// "hub-b"); each starts at the clock grants are minted on.
 	authzClocks map[string]*clock.Fake
+	// relayClocks are the separate relays' timer clocks, by relay id, when
+	// separateRelayOptions.relayFakeClocks is set (see relayClockFor).
+	relayClocks map[string]*clock.Fake
+	// opts are the options the world was built with.
+	opts separateRelayOptions
 
 	mu          sync.Mutex
 	agentOpened []uint32 // ids of the streams opened on the agent's session
@@ -107,6 +112,30 @@ type separateRelayOptions struct {
 	// noConduitAgent starts no conduit agent: the agent has no conduit
 	// session.
 	noConduitAgent bool
+	// relayFakeClocks runs every separate relay on its own fake clock that
+	// reads the clock grants are minted on (relayClockFor), so a test moves
+	// the relays' timers with the mint clock.
+	relayFakeClocks bool
+	// relayRecheckInterval, when set, is every separate relay's re-check
+	// sweep period.
+	relayRecheckInterval time.Duration
+	// worldMod, when set, runs with the world's other mods, before the
+	// agent starts.
+	worldMod func(*separateRelayWorld)
+}
+
+// relayClockFor returns the clock for the separate relay id: nil (real
+// time) unless relayFakeClocks is set; then a fake clock started at the mint
+// clock, recorded in w.relayClocks, whose Now reads the mint clock (as the
+// agent's fixtureClock does), so the relay's timers fire only when the test
+// advances w.relayClocks[id].
+func (w *separateRelayWorld) relayClockFor(id string, mint *conduitTestClock) clock.Clock {
+	if !w.opts.relayFakeClocks {
+		return nil
+	}
+	fk := clock.NewFake(mint.Now())
+	w.relayClocks[id] = fk
+	return fixtureClock{Fake: fk, now: mint.Now}
 }
 
 // newSeparateRelayWorldWith is newSeparateRelayWorld with opts.
@@ -115,7 +144,7 @@ func newSeparateRelayWorldWith(t *testing.T, opts separateRelayOptions, mods ...
 	cf := newConduitFixture(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	w := &separateRelayWorld{release: make(chan struct{}), authzClocks: map[string]*clock.Fake{}}
+	w := &separateRelayWorld{release: make(chan struct{}), authzClocks: map[string]*clock.Fake{}, relayClocks: map[string]*clock.Fake{}, opts: opts}
 
 	// The app inside the agent: /events holds an event stream open until
 	// the test feeds it; everything else answers hello.
@@ -181,6 +210,7 @@ func newSeparateRelayWorldWith(t *testing.T, opts separateRelayOptions, mods ...
 		InstanceID: "relay-0", PublicURL: "http://" + addr, HubInternalURL: internalA.URL,
 		PublicListener: publicLn, InternalListen: "127.0.0.1:0",
 		PeerAuth: externalRelayAuth(t, "relay-0"), Registry: entadapter.NewConduitRegistryStore(w.regClient), Experiment: conduitAlwaysOn{},
+		Clock: w.relayClockFor("relay-0", cf.clock), RecheckInterval: opts.relayRecheckInterval,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -211,6 +241,9 @@ func newSeparateRelayWorldWith(t *testing.T, opts separateRelayOptions, mods ...
 	}
 	for _, m := range mods {
 		m(w)
+	}
+	if opts.worldMod != nil {
+		opts.worldMod(w)
 	}
 	if !opts.noConduitAgent {
 		w.startAgentDialingRelay(t, addr)
