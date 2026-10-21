@@ -3610,7 +3610,9 @@ export class ScionPageChat extends LitElement {
         seenUserIds.add(u.id);
         return true;
       })
-      .filter((u) => u.status !== 'disabled')
+      // A deactivated user's hub status is 'suspended' (pkg/store/models.go
+      // UserStatus*); the hub has no 'disabled' user status.
+      .filter((u) => u.status !== 'suspended')
       .map((u) => ({
         id: u.id,
         kind: 'user' as const,
