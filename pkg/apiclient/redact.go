@@ -99,10 +99,25 @@ var (
 	urlValueDelims    = []string{"=", `\u003d`}
 )
 
+// asciiLower returns s with only the ASCII letters A-Z lower-cased. Unlike
+// strings.ToLower it keeps every byte position (non-ASCII and invalid
+// UTF-8 bytes are copied as they are), so an index found in its result is
+// an index into s.
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if 'A' <= c && c <= 'Z' {
+			b[i] = c + ('a' - 'A')
+		}
+	}
+	return string(b)
+}
+
 // cutDelim cuts s at the first of delims (the \u forms matched
-// case-insensitively) and returns the parts and the delimiter as written.
+// case-insensitively, ASCII only) and returns the parts and the delimiter
+// as written.
 func cutDelim(s string, delims []string) (before, delim, after string, found bool) {
-	lower := strings.ToLower(s)
+	lower := asciiLower(s)
 	at, width := -1, 0
 	for _, d := range delims {
 		if i := strings.Index(lower, d); i >= 0 && (at < 0 || i < at) {
@@ -118,9 +133,12 @@ func cutDelim(s string, delims []string) (before, delim, after string, found boo
 // redactURLParams returns raw (a URL, or the part of one from its path
 // on) with the value of every credential parameter in its query and its
 // fragment replaced by xxxxx. A fragment that holds a route with its own
-// query (#/path?code=...) has that query redacted. Parameters are split
-// on "&" and ";". Every other byte, including the order and spelling of
-// the other parameters, is kept.
+// query (#/path?code=...) has that query redacted, and the part before its
+// "?" is redacted as a parameter list too (a "?" can also sit inside a
+// fragment parameter's value). Parameters are split on "&" and ";", so a
+// credential value that holds a literal ";" is masked only up to it. Every
+// other byte, including the order and spelling of the other parameters,
+// is kept.
 func redactURLParams(raw string) string {
 	rest, fdelim, fragment, hasFragment := cutDelim(raw, urlFragmentDelims)
 	base, qdelim, query, hasQuery := cutDelim(rest, urlQueryDelims)
@@ -130,7 +148,7 @@ func redactURLParams(raw string) string {
 	}
 	if hasFragment {
 		if route, rq, routeQuery, ok := cutDelim(fragment, urlQueryDelims); ok {
-			out += fdelim + route + rq + redactParamList(routeQuery)
+			out += fdelim + redactParamList(route) + rq + redactParamList(routeQuery)
 		} else {
 			out += fdelim + redactParamList(fragment)
 		}

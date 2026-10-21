@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -154,6 +155,15 @@ var urlCredentialCases = []struct{ name, in, want string }{
 	{"hash route without query", "https://hub.example.com/#/settings/profile", "https://hub.example.com/#/settings/profile"},
 	{"pwd and pass", "https://hub.example.com/x?user=u&pwd=s3cret&pass=s3cret", "https://hub.example.com/x?user=u&pwd=xxxxx&pass=xxxxx"},
 	{"jwt", "https://hub.example.com/x?jwt=tok3n&id_jwt=tok3n", "https://hub.example.com/x?jwt=xxxxx&id_jwt=xxxxx"},
+	{"invalid UTF-8 before ?", "https://h/\xff\xff\xff?a=1&token=tok3n", "https://h/\xff\xff\xff?a=1&token=xxxxx"},
+	{"invalid UTF-8 before &", "https://h/x?a=\xff&token=tok3n&b=2", "https://h/x?a=\xff&token=xxxxx&b=2"},
+	{"invalid UTF-8 before =", "https://h/x?\xc3=1&token=tok3n", "https://h/x?\xc3=1&token=xxxxx"},
+	{"U+023A before ?", "https://h/\u023a\u023a?token=tok3n", "https://h/\u023a\u023a?token=xxxxx"},
+	{"U+023A before =", "https://h/x?\u023a=1&token=tok3n", "https://h/x?\u023a=1&token=xxxxx"},
+	{"U+212A before &", "https://h/x?a=\u212a&token=tok3n", "https://h/x?a=\u212a&token=xxxxx"},
+	{"U+212A in the value", "https://h/x?token=\u212atok3n&b=2", "https://h/x?token=xxxxx&b=2"},
+	{"non-ASCII path", "https://h/caf\u00e9/\u65e5?token=tok3n", "https://h/caf\u00e9/\u65e5?token=xxxxx"},
+	{"question mark in a fragment value", "https://hub.example.com/cb#access_token=tok3n&state=a?b", "https://hub.example.com/cb#access_token=xxxxx&state=a?b"},
 }
 
 func TestRedactURLCredentials_Query(t *testing.T) {
@@ -173,5 +183,35 @@ func TestTransportErrors_RedactQueryCredentials(t *testing.T) {
 	_, err := NewTransport(srv.URL).Get(context.Background(), "/api/v1/x?token=tok3n&limit=5", nil)
 	if err == nil || strings.Contains(err.Error(), "tok3n") || !strings.Contains(err.Error(), "token=xxxxx&limit=5") {
 		t.Errorf("error = %v, want the query token masked", err)
+	}
+}
+
+// redactPropertyAlphabet is the junk the property tests build URLs from:
+// delimiters, escapes, non-ASCII letters whose lower case has another byte
+// length (U+023A, U+212A), and invalid UTF-8.
+var redactPropertyAlphabet = []string{
+	"a", "Z", "/", "?", "#", "&", ";", "=", "%", "%zz", "@", ":", ".",
+	`\u0026`, `\u003D`, `\u003f`, `\u0023`,
+	"\xff", "\xc3", "\u023a", "\u212a", "\u00e9",
+}
+
+func redactPropertyJunk(r *rand.Rand) string {
+	var b strings.Builder
+	for n := r.Intn(12); n > 0; n-- {
+		b.WriteString(redactPropertyAlphabet[r.Intn(len(redactPropertyAlphabet))])
+	}
+	return b.String()
+}
+
+// For any junk around it, a credential parameter between "&"s is masked,
+// and nothing panics (ptone/scion#5356 review).
+func TestRedactURLCredentials_PropertyNoPanicNoLeak(t *testing.T) {
+	r := rand.New(rand.NewSource(5356))
+	for i := 0; i < 5000; i++ {
+		in := "https://hub.example.com/" + redactPropertyJunk(r) + "?a=1&token=S3CRETVALUE&" + redactPropertyJunk(r)
+		got := redactURLCredentials(in)
+		if strings.Contains(got, "S3CRETVALUE") {
+			t.Fatalf("redactURLCredentials(%q) = %q, shows the token", in, got)
+		}
 	}
 }

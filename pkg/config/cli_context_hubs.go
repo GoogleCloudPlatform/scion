@@ -80,8 +80,9 @@ var textURLRe = regexp.MustCompile("(?i)\\bhttps?://(?:[^\\s/?#\"<>`\\\\]|\\\\.)
 // a quote, an angle bracket, a backtick or a backslash. A JSON escape
 // inside them (\u0026 for "&", \/ for "/") does not end the URL, so a URL
 // quoted in JSON text is redacted whole; any other backslash (\" in a Go
-// %q string, for example) ends it.
-var textFullURLRe = regexp.MustCompile(textURLRe.String() + "(?:(?:[/?#]|\\\\u00(?:23|3[fF]))(?:[^\\s\"<>`\\\\]|\\\\u[0-9a-fA-F]{4}|\\\\/)*)?")
+// %q string, for example) ends it. The path, query and fragment start at a
+// literal "/", "?" or "#" (encoding/json never escapes those).
+var textFullURLRe = regexp.MustCompile(textURLRe.String() + "(?:[/?#](?:[^\\s\"<>`\\\\]|\\\\u[0-9a-fA-F]{4}|\\\\/)*)?")
 
 // RedactURL returns raw for display with any credential in it replaced:
 // in its user info, the password (see url.URL.Redacted), or a user name
