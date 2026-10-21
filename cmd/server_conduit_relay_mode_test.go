@@ -19,7 +19,12 @@ package cmd
 import (
 	"context"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -340,6 +345,55 @@ func TestStartConduit_ExternalRelayMode(t *testing.T) {
 	assert.Equal(t, []string{"ingress stop", "hub mark", "ingress drain", "cancel"}, order,
 		"proxying stops before the hub's mark; the drain runs after the marks and before cancel")
 	orderMu.Unlock()
+}
+
+// TestShutdownPhaseIngressStopFirst (review a3ii2x-r2-F1): the ingress
+// stop phase sorts before every named shutdown phase, so the stop runs
+// before the hub's mark step whatever the registration order. Every
+// shutdownPhase constant declared in the package's source must be in the
+// table, so a phase added later (for example one right before the mark
+// phase) fails this test until it is checked too.
+func TestShutdownPhaseIngressStopFirst(t *testing.T) {
+	named := map[string]int{
+		"shutdownPhaseMark":  shutdownPhaseMark,
+		"shutdownPhaseDrain": shutdownPhaseDrain,
+	}
+	for name, phase := range named {
+		assert.Less(t, shutdownPhaseIngressStop, phase, "shutdownPhaseIngressStop must sort before %s", name)
+	}
+
+	files, err := filepath.Glob("*.go")
+	require.NoError(t, err)
+	fset := token.NewFileSet()
+	seen := 0
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		af, err := parser.ParseFile(fset, f, nil, parser.SkipObjectResolution)
+		require.NoError(t, err, f)
+		for _, d := range af.Decls {
+			gd, ok := d.(*ast.GenDecl)
+			if !ok || gd.Tok != token.CONST {
+				continue
+			}
+			for _, sp := range gd.Specs {
+				vs, ok := sp.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				for _, n := range vs.Names {
+					if !strings.HasPrefix(n.Name, "shutdownPhase") || n.Name == "shutdownPhaseIngressStop" {
+						continue
+					}
+					seen++
+					_, checked := named[n.Name]
+					assert.True(t, checked, "%s (%s) is a shutdown phase this test does not check; add it to the table", n.Name, f)
+				}
+			}
+		}
+	}
+	assert.Equal(t, len(named), seen, "every named shutdown phase is declared once")
 }
 
 // TestConduitIngressHoldDeadline (design v2.21.58): H = min(step deadline,
