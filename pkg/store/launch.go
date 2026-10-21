@@ -77,9 +77,8 @@ const (
 	LaunchErrorBrokerRestarted = api.LaunchCodeBrokerRestarted
 	// LaunchErrorDispatchFailed: the hub's send of the launch failed with a
 	// known outcome, or the broker acknowledged a different launch; the
-	// dispatcher ends the launch not_launched with this code
-	// (api.LaunchCodeDispatchFailed).
-	LaunchErrorDispatchFailed = "dispatch_failed"
+	// dispatcher ends the launch not_launched with this code.
+	LaunchErrorDispatchFailed = api.LaunchCodeDispatchFailed
 )
 
 // LaunchReport report-state values (mirrors the broker->Hub wire report's
