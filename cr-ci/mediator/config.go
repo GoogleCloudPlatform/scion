@@ -1,0 +1,399 @@
+package main
+
+import (
+	"errors"
+	"fmt"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// Environment variable names. They form the cr-ci config contract and must
+// match cr-ci/config.example.env one to one (enforced by a test).
+const (
+	EnvTargetRepos          = "TARGET_REPOS"
+	EnvGitHubAppID          = "GITHUB_APP_ID"
+	EnvGitHubInstallScope   = "GITHUB_APP_INSTALLATION_SCOPE"
+	EnvGCPProject           = "GCP_PROJECT"
+	EnvRegion               = "REGION"
+	EnvRunnerLabel          = "RUNNER_LABEL"
+	EnvRunnerJobName        = "RUNNER_JOB_NAME"
+	EnvRunnerImageName      = "RUNNER_IMAGE_NAME"
+	EnvRunnerCPU            = "RUNNER_CPU"
+	EnvRunnerMemory         = "RUNNER_MEMORY"
+	EnvRunnerDiskGi         = "RUNNER_DISK_GI"
+	EnvMaxConcurrentRunners = "MAX_CONCURRENT_RUNNERS"
+	EnvTaskTimeout          = "TASK_TIMEOUT"
+	EnvArtifactRepo         = "ARTIFACT_REPO"
+	EnvMediatorServiceName  = "MEDIATOR_SERVICE_NAME"
+	EnvReconcilerJobName    = "RECONCILER_JOB_NAME"
+	EnvRoutingVariableName  = "ROUTING_VARIABLE_NAME"
+	EnvBuildSAName          = "BUILD_SA_NAME"
+	EnvMediatorSAName       = "MEDIATOR_SA_NAME"
+	EnvSchedulerSAName      = "SCHEDULER_SA_NAME"
+	EnvExecSAName           = "EXEC_SA_NAME"
+	EnvAppPrivateKeySecret  = "GITHUB_APP_PRIVATE_KEY_SECRET_NAME"
+	EnvWebhookSecretSecret  = "GITHUB_WEBHOOK_SECRET_NAME"
+)
+
+// Cloud Run limits and contract defaults.
+const (
+	maxCloudRunTaskTimeout   = 168 * time.Hour
+	maxEphemeralDiskGi       = 100
+	maxCloudRunMemoryMi      = 32 * 1024
+	minCloudRunMemoryMi      = 512
+	defaultRunnerLabel       = "scion-cr-8c32g"
+	defaultRunnerJobName     = "cr-gh-runner-8c32g"
+	defaultRunnerImageName   = "gh-runner"
+	defaultRunnerCPU         = "8"
+	defaultRunnerMemory      = "32Gi"
+	defaultRunnerDiskGi      = "20"
+	defaultMaxConcurrent     = "5"
+	defaultTaskTimeout       = "45m"
+	defaultArtifactRepo      = "cr-runners"
+	defaultMediatorService   = "cr-runner-mediator"
+	defaultReconcilerJobName = "cr-runner-reconciler"
+	defaultRoutingVariable   = "SCION_LARGE_RUNNER"
+	defaultBuildSA           = "cr-runner-build-sa"
+	defaultMediatorSA        = "cr-runner-mediator-sa"
+	defaultSchedulerSA       = "cr-runner-scheduler-sa"
+	defaultExecSA            = "cr-runner-exec-sa"
+	defaultAppKeySecret      = "cr-runner-gh-app-private-key"
+	defaultWebhookSecret     = "cr-runner-gh-webhook-secret"
+)
+
+// InstallScope is where the GitHub App is installed and, therefore, which
+// runner endpoints (repo or org) the mediator calls.
+type InstallScope string
+
+const (
+	ScopeRepo InstallScope = "repo"
+	ScopeOrg  InstallScope = "org"
+)
+
+// Repo is an owner/name pair from TARGET_REPOS.
+type Repo struct {
+	Owner string
+	Name  string
+}
+
+func (r Repo) String() string { return r.Owner + "/" + r.Name }
+
+// Config is the validated cr-ci configuration. It holds resource NAMES only;
+// secret values are never part of the configuration.
+type Config struct {
+	TargetRepos          []Repo
+	GitHubAppID          int64
+	InstallScope         InstallScope
+	GCPProject           string
+	Region               string
+	RunnerLabel          string
+	RunnerJobName        string
+	RunnerImageName      string
+	RunnerCPU            int
+	RunnerMemory         string
+	RunnerMemoryMi       int
+	RunnerDiskGi         int
+	MaxConcurrentRunners int
+	TaskTimeout          time.Duration
+	ArtifactRepo         string
+	MediatorServiceName  string
+	ReconcilerJobName    string
+	RoutingVariableName  string
+	BuildSAName          string
+	MediatorSAName       string
+	SchedulerSAName      string
+	ExecSAName           string
+	AppPrivateKeySecret  string
+	WebhookSecretName    string
+}
+
+// Defaults returns the default value of every optional variable. Required
+// variables (no safe default) map to "".
+func Defaults() map[string]string {
+	return map[string]string{
+		EnvTargetRepos:          "",
+		EnvGitHubAppID:          "",
+		EnvGitHubInstallScope:   "",
+		EnvGCPProject:           "",
+		EnvRegion:               "",
+		EnvRunnerLabel:          defaultRunnerLabel,
+		EnvRunnerJobName:        defaultRunnerJobName,
+		EnvRunnerImageName:      defaultRunnerImageName,
+		EnvRunnerCPU:            defaultRunnerCPU,
+		EnvRunnerMemory:         defaultRunnerMemory,
+		EnvRunnerDiskGi:         defaultRunnerDiskGi,
+		EnvMaxConcurrentRunners: defaultMaxConcurrent,
+		EnvTaskTimeout:          defaultTaskTimeout,
+		EnvArtifactRepo:         defaultArtifactRepo,
+		EnvMediatorServiceName:  defaultMediatorService,
+		EnvReconcilerJobName:    defaultReconcilerJobName,
+		EnvRoutingVariableName:  defaultRoutingVariable,
+		EnvBuildSAName:          defaultBuildSA,
+		EnvMediatorSAName:       defaultMediatorSA,
+		EnvSchedulerSAName:      defaultSchedulerSA,
+		EnvExecSAName:           defaultExecSA,
+		EnvAppPrivateKeySecret:  defaultAppKeySecret,
+		EnvWebhookSecretSecret:  defaultWebhookSecret,
+	}
+}
+
+// Keys returns every variable name in the config contract, sorted.
+func Keys() []string {
+	d := Defaults()
+	keys := make([]string, 0, len(d))
+	for k := range d {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+var (
+	// GitHub user/org names: alphanumerics and single hyphens, max 39 chars.
+	ownerRE = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9]|-[A-Za-z0-9]){0,38}$`)
+	repoRE  = regexp.MustCompile(`^[A-Za-z0-9._-]{1,100}$`)
+	// GCP project IDs: 6-30 chars, lowercase letter first, no trailing hyphen.
+	projectRE = regexp.MustCompile(`^[a-z][a-z0-9-]{4,28}[a-z0-9]$`)
+	regionRE  = regexp.MustCompile(`^[a-z]+-[a-z]+[0-9]+$`)
+	// Runner labels: no whitespace or commas (runs-on lists are comma separated).
+	labelRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+	// Cloud Run service and job names.
+	cloudRunNameRE = regexp.MustCompile(`^[a-z](?:[a-z0-9-]{0,47}[a-z0-9])?$`)
+	// Artifact Registry repository IDs and Cloud Scheduler job IDs (kept to
+	// the stricter lowercase form so one rule covers both).
+	resourceIDRE = regexp.MustCompile(`^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
+	// Docker image names (single path component).
+	imageNameRE = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*$`)
+	// Service account IDs: 6-30 chars.
+	saRE = regexp.MustCompile(`^[a-z][a-z0-9-]{4,28}[a-z0-9]$`)
+	// Secret Manager secret IDs.
+	secretRE = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
+	// GitHub Actions configuration variable names.
+	variableRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	memoryRE   = regexp.MustCompile(`^([0-9]+)(Mi|Gi)$`)
+)
+
+// reservedLabels are the default labels every self-hosted runner carries.
+// Routing on one of them would let any self-hosted runner pick up the job.
+var reservedLabels = map[string]bool{"self-hosted": true, "linux": true, "x64": true, "arm64": true}
+
+// maxMemoryMiByCPU is the Cloud Run Jobs memory ceiling per CPU count
+// (https://docs.cloud.google.com/run/docs/configuring/jobs/cpu).
+var maxMemoryMiByCPU = map[int]int{1: 4 * 1024, 2: 8 * 1024, 4: 16 * 1024, 6: 24 * 1024, 8: 32 * 1024}
+
+// minMemoryMiByCPU is the Cloud Run Jobs memory floor per CPU count.
+var minMemoryMiByCPU = map[int]int{1: 512, 2: 512, 4: 2 * 1024, 6: 4 * 1024, 8: 4 * 1024}
+
+// Load reads and validates the config contract via getenv (os.Getenv in
+// production). Unset or empty variables take their default. All problems are
+// reported together.
+func Load(getenv func(string) string) (*Config, error) {
+	defaults := Defaults()
+	get := func(key string) string {
+		if v := strings.TrimSpace(getenv(key)); v != "" {
+			return v
+		}
+		return defaults[key]
+	}
+
+	var errs []error
+	fail := func(key, format string, args ...any) {
+		errs = append(errs, fmt.Errorf("%s: %s", key, fmt.Sprintf(format, args...)))
+	}
+	required := func(key string) string {
+		v := get(key)
+		if v == "" {
+			fail(key, "required")
+		}
+		return v
+	}
+	match := func(key string, re *regexp.Regexp, what string) string {
+		v := get(key)
+		if v != "" && !re.MatchString(v) {
+			fail(key, "%q is not a valid %s", v, what)
+		}
+		return v
+	}
+	posInt := func(key string) int {
+		v := get(key)
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			fail(key, "%q is not a positive integer", v)
+			return 0
+		}
+		return n
+	}
+
+	c := &Config{}
+
+	if raw := required(EnvTargetRepos); raw != "" {
+		c.TargetRepos = parseRepos(raw, func(format string, args ...any) { fail(EnvTargetRepos, format, args...) })
+	}
+
+	if raw := required(EnvGitHubAppID); raw != "" {
+		id, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || id < 1 {
+			fail(EnvGitHubAppID, "%q is not a positive integer", raw)
+		}
+		c.GitHubAppID = id
+	}
+
+	switch scope := InstallScope(required(EnvGitHubInstallScope)); scope {
+	case "":
+	case ScopeRepo, ScopeOrg:
+		c.InstallScope = scope
+	default:
+		fail(EnvGitHubInstallScope, "%q must be %q or %q", scope, ScopeRepo, ScopeOrg)
+	}
+	if c.InstallScope == ScopeOrg && len(c.TargetRepos) > 0 {
+		owner := c.TargetRepos[0].Owner
+		for _, r := range c.TargetRepos[1:] {
+			if !strings.EqualFold(r.Owner, owner) {
+				fail(EnvGitHubInstallScope, "org scope uses org-level runner endpoints for a single org, but %s has owner %q, not %q; use repo scope or a separate deployment per org", r, r.Owner, owner)
+			}
+		}
+	}
+
+	required(EnvGCPProject)
+	c.GCPProject = match(EnvGCPProject, projectRE, "GCP project ID")
+	required(EnvRegion)
+	c.Region = match(EnvRegion, regionRE, "GCP region")
+
+	c.RunnerLabel = match(EnvRunnerLabel, labelRE, "runner label")
+	if reservedLabels[strings.ToLower(c.RunnerLabel)] {
+		fail(EnvRunnerLabel, "%q is a default self-hosted runner label; use a unique label", c.RunnerLabel)
+	}
+	c.RunnerJobName = match(EnvRunnerJobName, cloudRunNameRE, "Cloud Run job name")
+	c.RunnerImageName = match(EnvRunnerImageName, imageNameRE, "image name")
+
+	c.RunnerCPU = posInt(EnvRunnerCPU)
+	if _, ok := maxMemoryMiByCPU[c.RunnerCPU]; c.RunnerCPU != 0 && !ok {
+		fail(EnvRunnerCPU, "%d is not a Cloud Run Jobs CPU value (1, 2, 4, 6 or 8)", c.RunnerCPU)
+	}
+	c.RunnerMemory = get(EnvRunnerMemory)
+	if mi, err := parseMemoryMi(c.RunnerMemory); err != nil {
+		fail(EnvRunnerMemory, "%v", err)
+	} else {
+		c.RunnerMemoryMi = mi
+		if lo, hi, ok := memoryBounds(c.RunnerCPU); ok && (mi < lo || mi > hi) {
+			fail(EnvRunnerMemory, "%s is outside the %d-CPU range %dMi-%dMi", c.RunnerMemory, c.RunnerCPU, lo, hi)
+		}
+	}
+
+	c.RunnerDiskGi = posInt(EnvRunnerDiskGi)
+	if c.RunnerDiskGi > maxEphemeralDiskGi {
+		fail(EnvRunnerDiskGi, "%d exceeds the %d GiB ephemeral-disk maximum", c.RunnerDiskGi, maxEphemeralDiskGi)
+	}
+	c.MaxConcurrentRunners = posInt(EnvMaxConcurrentRunners)
+
+	if raw := get(EnvTaskTimeout); raw != "" {
+		d, err := time.ParseDuration(raw)
+		switch {
+		case err != nil:
+			fail(EnvTaskTimeout, "%q is not a duration (for example 45m)", raw)
+		case d < time.Minute || d > maxCloudRunTaskTimeout:
+			fail(EnvTaskTimeout, "%s must be between 1m and %s", d, maxCloudRunTaskTimeout)
+		default:
+			c.TaskTimeout = d
+		}
+	}
+
+	c.ArtifactRepo = match(EnvArtifactRepo, resourceIDRE, "Artifact Registry repository ID")
+	c.MediatorServiceName = match(EnvMediatorServiceName, cloudRunNameRE, "Cloud Run service name")
+	c.ReconcilerJobName = match(EnvReconcilerJobName, resourceIDRE, "Cloud Scheduler job ID")
+	c.RoutingVariableName = match(EnvRoutingVariableName, variableRE, "GitHub Actions variable name")
+	if strings.HasPrefix(strings.ToUpper(c.RoutingVariableName), "GITHUB_") {
+		fail(EnvRoutingVariableName, "%q: names starting with GITHUB_ are reserved by GitHub", c.RoutingVariableName)
+	}
+
+	c.BuildSAName = match(EnvBuildSAName, saRE, "service account ID")
+	c.MediatorSAName = match(EnvMediatorSAName, saRE, "service account ID")
+	c.SchedulerSAName = match(EnvSchedulerSAName, saRE, "service account ID")
+	c.ExecSAName = match(EnvExecSAName, saRE, "service account ID")
+	checkDistinct(fail, "service account", map[string]string{
+		EnvBuildSAName: c.BuildSAName, EnvMediatorSAName: c.MediatorSAName,
+		EnvSchedulerSAName: c.SchedulerSAName, EnvExecSAName: c.ExecSAName,
+	})
+
+	c.AppPrivateKeySecret = match(EnvAppPrivateKeySecret, secretRE, "Secret Manager secret name")
+	c.WebhookSecretName = match(EnvWebhookSecretSecret, secretRE, "Secret Manager secret name")
+	checkDistinct(fail, "secret", map[string]string{
+		EnvAppPrivateKeySecret: c.AppPrivateKeySecret, EnvWebhookSecretSecret: c.WebhookSecretName,
+	})
+
+	if len(errs) > 0 {
+		return nil, fmt.Errorf("invalid cr-ci config: %w", errors.Join(errs...))
+	}
+	return c, nil
+}
+
+func parseRepos(raw string, fail func(string, ...any)) []Repo {
+	var repos []Repo
+	seen := map[string]bool{}
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			fail("empty entry in %q", raw)
+			continue
+		}
+		owner, name, ok := strings.Cut(part, "/")
+		if !ok || !ownerRE.MatchString(owner) || !repoRE.MatchString(name) || name == "." || name == ".." {
+			fail("%q is not owner/repo", part)
+			continue
+		}
+		key := strings.ToLower(part)
+		if seen[key] {
+			fail("%q is listed twice", part)
+			continue
+		}
+		seen[key] = true
+		repos = append(repos, Repo{Owner: owner, Name: name})
+	}
+	return repos
+}
+
+func parseMemoryMi(v string) (int, error) {
+	m := memoryRE.FindStringSubmatch(v)
+	if m == nil {
+		return 0, fmt.Errorf("%q must be an integer followed by Mi or Gi (for example 32Gi)", v)
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil {
+		return 0, fmt.Errorf("%q is out of range", v)
+	}
+	if m[2] == "Gi" {
+		n *= 1024
+	}
+	if n < minCloudRunMemoryMi || n > maxCloudRunMemoryMi {
+		return 0, fmt.Errorf("%q must be between 512Mi and 32Gi", v)
+	}
+	return n, nil
+}
+
+func memoryBounds(cpu int) (lo, hi int, ok bool) {
+	hi, ok = maxMemoryMiByCPU[cpu]
+	return minMemoryMiByCPU[cpu], hi, ok
+}
+
+func checkDistinct(fail func(string, string, ...any), what string, byKey map[string]string) {
+	keys := make([]string, 0, len(byKey))
+	for k := range byKey {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	owner := map[string]string{}
+	for _, k := range keys {
+		v := byKey[k]
+		if v == "" {
+			continue
+		}
+		if prev, dup := owner[v]; dup {
+			fail(k, "%s name %q is also used by %s; each must be distinct", what, v, prev)
+			continue
+		}
+		owner[v] = k
+	}
+}
