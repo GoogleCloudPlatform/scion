@@ -105,6 +105,7 @@ func StaticCapabilityNames(rt scionrt.Runtime) []string {
 	add(c.AsyncLaunch, "asyncLaunch")
 	add(c.EmptyPerAgentWorkspace, "emptyPerAgentWorkspace")
 	add(c.AgentMove, "agentMove")
+	add(c.AgentMoveRecreate, "agentMoveRecreate")
 	add(c.ReprovisionEmptyPerAgent, "reprovisionEmptyPerAgent")
 	return names
 }

@@ -1241,6 +1241,11 @@ type BrokerCapabilities struct {
 	// --broker`). The hub refuses a move unless both the source and the
 	// target broker report it (412).
 	AgentMove bool `json:"agentMove"`
+	// AgentMoveRecreate indicates the broker can be the target of a forced
+	// move (`scion reincarnate --broker --force`): it provisions the agent
+	// with a fresh workspace after confirming it has no files for the agent.
+	// The hub refuses a forced move onto a broker without it (412).
+	AgentMoveRecreate bool `json:"agentMoveRecreate,omitempty"`
 	// ReprovisionEmptyPerAgent indicates the broker's reprovision reuses an
 	// empty-per-agent agent's private workspace in place (same-broker
 	// `scion reincarnate`, miller79/scion#167). The hub refuses same-broker
