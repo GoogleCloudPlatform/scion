@@ -158,7 +158,7 @@ func shippedHarnessesWithAuth(t *testing.T) map[string]config.HarnessConfigEntry
 
 // minProvisionTestFiles mirrors the floor in python_unit_test.go (a
 // different package, so it cannot be shared).
-const minProvisionTestFiles = 9
+const minProvisionTestFiles = 10
 
 func runPinDriver(t *testing.T, python, dir string, cases []pinCase) ([]pinMethod, []pinResult) {
 	t.Helper()

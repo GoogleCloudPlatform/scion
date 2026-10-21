@@ -27,7 +27,7 @@ import (
 // directory, wrong cwd) would run zero suites and pass silently. Raise it
 // when a harness gains a provision_test.py; do not lower it to make a
 // failure go away.
-const minProvisionTestFiles = 9
+const minProvisionTestFiles = 10
 
 // requirePython returns the python3 path. A missing interpreter skips
 // locally but fails under CI (CI set), where a skip would read as a pass
