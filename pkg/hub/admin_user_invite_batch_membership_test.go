@@ -488,9 +488,27 @@ func TestInviteBatch_DecodeRefusalWritesNoAudit(t *testing.T) {
 // projects the same caller still invites, with the collapsed rows.
 func TestInviteBatch_ProjectsRequireUserRead(t *testing.T) {
 	f := newBatchFixture(t)
-	caller := grpUser(t, f.store, t.Name()+"-inviter", "Inviter")
+	// Created directly, without hub-members membership: the hub-member
+	// role grants user.read.
+	ctx := context.Background()
+	callerID := tid(t.Name() + "-inviter")
+	require.NoError(t, f.store.CreateUser(ctx, &store.User{ID: callerID, Email: callerID + "@example.com", DisplayName: "Inviter", Role: store.UserRoleMember, Status: store.UserStatusActive}))
+	caller, err := f.store.GetUser(ctx, callerID)
+	require.NoError(t, err)
 	batchGrantHubPerms(t, f.store, caller.ID, "user.invite")
 	grpBind(t, f.store, store.RoleBindingPrincipalUser, caller.ID, f.ownerRD.ID, f.projectID)
+	// Preconditions, so the test cannot pass or fail for the wrong reason:
+	// the caller can manage the project and does not hold user.read.
+	ident := mmrServiceIdentity(caller.ID, caller.Email)
+	require.True(t, f.srv.authzService.CheckAccess(ctx, ident, Resource{Type: "project", ID: f.projectID}, ActionManage).Allowed,
+		"precondition: the caller can manage the project")
+	require.False(t, f.srv.authzService.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(ident),
+		Credential: credentialContextForIdentity(ident),
+		Resource:   hubScopedResource("user", "hub"),
+		Action:     ActionRead,
+		Permission: "user.read",
+	}).Allowed, "precondition: the caller must not hold user.read")
 	pending := newInvitedUser(t, f.store, tid(t.Name()+"-pending"), "noread-pending@example.com")
 
 	rec := f.post(t, caller, UserInviteBulkRequest{
