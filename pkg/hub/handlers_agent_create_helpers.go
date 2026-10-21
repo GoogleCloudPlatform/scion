@@ -1947,7 +1947,7 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 		// broker record cannot be read (rec == nil), let it through, as
 		// brokerReachable does.
 		acceptProvider := func(brokerID string, rec *store.RuntimeBroker) (string, error) {
-			if rec != nil && !s.brokerRecordReachable(rec) {
+			if rec != nil && !s.brokerRecordReachable(ctx, rec) {
 				// The broker exists but is offline: refuse at resolution,
 				// before any agent row is created (ptone/scion#2715).
 				slog.Warn("Requested broker is offline during agent creation",
@@ -2063,7 +2063,7 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 
 			// Do not link (or dispatch to) a broker that exists but is
 			// offline: 503 before anything is written (ptone/scion#2715).
-			if !s.brokerRecordReachable(broker) {
+			if !s.brokerRecordReachable(ctx, broker) {
 				slog.Warn("Requested broker is offline during agent creation",
 					"requestedBrokerID", requestedBrokerID, "brokerID", broker.ID,
 					"status", broker.Status, "project_id", project.ID)

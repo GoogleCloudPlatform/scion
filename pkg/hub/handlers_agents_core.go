@@ -4987,12 +4987,15 @@ func (s *Server) brokerReachable(ctx context.Context, agent *store.Agent) bool {
 		return true
 	}
 
-	// Check real-time WebSocket connectivity first (no DB query needed)
+	// The control channel held by this node is the local fast path (no DB
+	// query); brokerPresence checks it too.
 	if s.controlChannel != nil && s.controlChannel.IsConnected(agent.RuntimeBrokerID) {
 		return true
 	}
 
-	// Fall back to DB status check (covers co-located mode where there's no WebSocket)
+	// Otherwise the broker's presence decides (brokerPresence: the registry
+	// with hub.conduit on, and the legacy signals, which cover co-located
+	// mode where there's no WebSocket).
 	broker, err := s.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
 	if err != nil {
 		s.agentLifecycleLog.Warn("Failed to check broker status", "brokerID", agent.RuntimeBrokerID, "error", err)
@@ -5000,19 +5003,16 @@ func (s *Server) brokerReachable(ctx context.Context, agent *store.Agent) bool {
 		return true
 	}
 
-	return s.brokerRecordReachable(broker)
+	return s.brokerRecordReachable(ctx, broker)
 }
 
 // brokerRecordReachable reports whether an already-loaded broker looks
-// reachable: connected over the control channel, or marked online in the
-// store. It is the shared rule behind brokerReachable (lifecycle actions) and
-// the explicit-broker check in resolveRuntimeBroker (agent create), so the
-// two cannot disagree about what "offline" means.
-func (s *Server) brokerRecordReachable(broker *store.RuntimeBroker) bool {
-	if s.controlChannel != nil && s.controlChannel.IsConnected(broker.ID) {
-		return true
-	}
-	return broker.Status == store.BrokerStatusOnline
+// reachable: its presence (brokerPresence). It is the shared rule behind
+// brokerReachable (lifecycle actions), the explicit-broker check in
+// resolveRuntimeBroker (agent create), the retained-files purge and the move
+// probes, so they cannot disagree about what "offline" means.
+func (s *Server) brokerRecordReachable(ctx context.Context, broker *store.RuntimeBroker) bool {
+	return s.brokerPresence(ctx, broker).Connected
 }
 
 func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id string) {

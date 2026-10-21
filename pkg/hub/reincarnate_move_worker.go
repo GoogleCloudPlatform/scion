@@ -82,7 +82,7 @@ func (s *Server) recheckMoveEligibility(ctx context.Context, agentID string, mv 
 		Profile:   mv.Profile,
 		SelfMove:  mv.SelfMove,
 		Probes: moveProbes{
-			Reachable:        s.brokerRecordReachable,
+			Reachable:        func(b *store.RuntimeBroker) bool { return s.brokerRecordReachable(ctx, b) },
 			CanDispatch:      allowed,
 			CanUseAsProvider: allowed,
 			ServesProject: func(b *store.RuntimeBroker) bool {
