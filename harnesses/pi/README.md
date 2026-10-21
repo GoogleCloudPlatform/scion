@@ -98,6 +98,7 @@ and skips the automatic `task_completed` until the next human input.
 
 ```
 pi/
+  agent-plugins.yaml # Native Agent Plugins support (no); kept out of config.yaml
   config.yaml        # Harness configuration (provisioner, capabilities, auth)
   provision.py       # Container-side provisioner (pre-start hook)
   scion_harness.py   # Generated copy of ../scion_harness.py (go generate ./harnesses/)

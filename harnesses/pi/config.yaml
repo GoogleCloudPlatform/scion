@@ -92,7 +92,6 @@ capabilities:
     streamable_http: { support: "yes" }
     project_scope: { support: "no", reason: "Project-scoped MCP is demoted to the user-level mcp.json" }
   resume: { support: "yes" }
-  agent_plugins: { support: "no", reason: "Native Agent Plugins install is not supported for this harness" }
 
 no_auth:
   behavior: drop-to-shell
