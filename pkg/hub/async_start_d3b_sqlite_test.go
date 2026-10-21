@@ -261,8 +261,9 @@ func (s beginStartLaunchFailStore) BeginStartLaunch(context.Context, string, str
 // error is errStartRunNotBegun: the claim releases (startReleased) and the
 // start counts as not happened (startDidNotHappen), for a start and for a
 // restart's start leg. A delete-held row's error (ErrLaunchInvalidPhase
-// wrapping store.ErrDeleteInProgress) is classified exactly as before the
-// wrap.
+// wrapping store.ErrDeleteInProgress) is released for the claim but never
+// counts as not happened, with or without the wrap: the delete engine owns
+// the row's intent.
 func TestAsyncStartDispatch_BeginStartLaunchFailureDidNotHappen(t *testing.T) {
 	for _, kind := range []string{store.LaunchKindStart, store.LaunchKindRestart} {
 		t.Run(kind, func(t *testing.T) {
@@ -280,9 +281,66 @@ func TestAsyncStartDispatch_BeginStartLaunchFailureDidNotHappen(t *testing.T) {
 	}
 	bare := fmt.Errorf("%w: %w", ErrLaunchInvalidPhase, store.ErrDeleteInProgress)
 	held := fmt.Errorf("%w: %w", errStartRunNotBegun, bare)
-	assert.Equal(t, startDidNotHappen(bare), startDidNotHappen(held), "the wrap does not change a delete-held row's classification")
-	assert.Equal(t, startOutcomeOf(bare), startOutcomeOf(held))
-	assert.Equal(t, startReleased, startOutcomeOf(held))
+	assert.False(t, startDidNotHappen(bare), "a delete-held refusal is not a start that did not happen")
+	assert.False(t, startDidNotHappen(held), "nor with the wrap")
+	assert.Equal(t, startReleased, startOutcomeOf(bare))
+	assert.Equal(t, startReleased, startOutcomeOf(held), "the claim is still released")
+}
+
+// deleteHeldStartDispatcher claims a delete on the row while the start is
+// in flight, then refuses the start as a launch begin does for a
+// delete-held row (ErrLaunchInvalidPhase wrapping store.ErrDeleteInProgress).
+type deleteHeldStartDispatcher struct {
+	*claimTestDispatcher
+	t *testing.T
+	s store.Store
+}
+
+func (d *deleteHeldStartDispatcher) DispatchAgentStart(_ context.Context, a *store.Agent, _ string, _ bool) error {
+	claimForTest(d.t, d.s, a.ID, store.DeletionStateDeleting, time.Minute)
+	return fmt.Errorf("%w: %w: %w", ErrLaunchInvalidPhase, store.ErrInvalidPhase, store.ErrDeleteInProgress)
+}
+
+// TestStartDidNotHappen_DeleteHeldKeepsIntent pins the P3.3-c-acked rule
+// (merge review R1, owner O2): a start refused because a delete holds the
+// row (ErrLaunchInvalidPhase wrapping store.ErrDeleteInProgress) leaves the
+// run intent to the delete engine. A provisioned agent's start runs no
+// provisioned settle (intent unchanged, no message), and a queued-stop
+// agent's start runs no ptone/scion#5070 revert (intent unchanged,
+// stop_queued untouched).
+func TestStartDidNotHappen_DeleteHeldKeepsIntent(t *testing.T) {
+	cases := []struct {
+		name   string
+		phase  state.Phase
+		mutate func(a *store.Agent)
+	}{
+		{"provisioned", state.PhaseCreated, nil},
+		{"queued stop", state.PhaseStopped, func(a *store.Agent) {
+			a.ContainerStatus = containerStatusStopQueued
+			a.Message = offlineStopMessage
+		}},
+	}
+	for i, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f, cd, _ := newClaimFixture(t)
+			f.srv.SetDispatcher(&deleteHeldStartDispatcher{claimTestDispatcher: cd, t: t, s: f.s})
+			var muts []func(a *store.Agent)
+			if c.mutate != nil {
+				muts = append(muts, c.mutate)
+			}
+			a := f.addAgent(fmt.Sprintf("dh-%d", i), string(c.phase), "", muts...)
+			before := getAgent(t, f.s, a.ID)
+			err := f.srv.startAgentCore(context.Background(), before, StartOpts{Kind: store.StartClaimUser})
+			require.Error(t, err)
+			assert.False(t, startDidNotHappen(err))
+			got := getAgent(t, f.s, a.ID)
+			assert.Equal(t, store.RunIntentRunning, got.RunIntent, "the delete engine owns the intent: no revert to stopped")
+			assert.Equal(t, before.Message, got.Message, "no settle message")
+			if c.mutate != nil {
+				assert.Equal(t, containerStatusStopQueued, got.ContainerStatus, "stop_queued is left to the delete")
+			}
+		})
+	}
 }
 
 // TestDispatchAgentStart_AttachesAgentID pins that the plain start entry

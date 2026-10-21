@@ -723,9 +723,14 @@ func (s *Server) publishAgentStatusByID(ctx context.Context, agentID string) {
 // act. Anything else, including a start that succeeded but whose status
 // write failed, an ambiguous dispatch error, a claim refusal (the earlier
 // claimant owns the intent) or a launch in flight (which may still start a
-// container), is not.
+// container), is not. Neither is any error that wraps
+// store.ErrDeleteInProgress (for example ErrLaunchInvalidPhase from a launch
+// begin that found the row delete-held): a delete-held row's run intent is
+// the delete engine's, so no provisioned settle or queued-stop revert may
+// write it (merge review; acked by the P3.3-c owner).
 func startDidNotHappen(err error) bool {
-	if err == nil || errors.Is(err, errStartedStatusWrite) || errors.Is(err, errStartClaimLost) {
+	if err == nil || errors.Is(err, errStartedStatusWrite) || errors.Is(err, errStartClaimLost) ||
+		errors.Is(err, store.ErrDeleteInProgress) {
 		return false
 	}
 	var quotaErr *startQuotaError
