@@ -103,10 +103,13 @@ P5 review round 3).
 
 | ID | What | How | Expected | Source |
 | :--- | :--- | :--- | :--- | :--- |
-| E1 | A cr-ci save restores on ubuntu-latest | The throwaway workflow below, on a test branch of the fork (needs ptone's word, like the PoC); then delete its cache with `gh cache delete crci-parity-<run_id> --repo REPO` | Job 2 reports `cache-hit` true and thousands of files under `/home/runner/.cache/go-build`, and `/home/home` does not exist | [cache sharing](../workflows/README.md#cache-sharing); P5 review round 3 |
+| E1 | A cr-ci save restores on ubuntu-latest | The throwaway workflow below, committed to the fork's default branch (needs ptone's word, like the PoC) and dispatched with `gh workflow run cr-ci-cache-parity-e1.yml --repo REPO`; then delete its cache with `gh cache delete crci-parity-<run_id> --repo REPO` | Job 2 reports `cache-hit` true and thousands of files under `/home/runner/.cache/go-build`, and `/home/home` does not exist | [cache sharing](../workflows/README.md#cache-sharing); P5 review round 3 |
 
-Workflow E1 (actions pinned to the same SHAs as `ci.yml` and the PoC; it
-has to sit on the default branch to be dispatched, like the PoC):
+Workflow E1, as `.github/workflows/cr-ci-cache-parity-e1.yml` (actions
+pinned to the same SHAs as `ci.yml` and the PoC). `workflow_dispatch` only
+offers workflows whose file exists on the default branch. Once it is there, a
+run can target another branch with `--ref <branch>`. Remove the file after
+the check:
 
 ```yaml
 name: cr-ci cache parity E1
