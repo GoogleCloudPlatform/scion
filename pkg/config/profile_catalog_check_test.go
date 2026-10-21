@@ -54,22 +54,33 @@ func catalogHome(t *testing.T, active string, fileProfiles ...string) string {
 	if len(fileProfiles) > 0 {
 		b.WriteString("profiles:\n")
 		for _, p := range fileProfiles {
-			b.WriteString("  " + p + ":\n    runtime: docker\n")
+			name, runtime := profileSpec(p)
+			b.WriteString("  " + name + ":\n    runtime: " + runtime + "\n")
 		}
 	}
 	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte(b.String()), 0o644))
 	return globalDir
 }
 
-// storedProfiles is a stored profile set of the named profiles, each on the
-// "docker" runtime; nil for no stored set.
+// profileSpec splits a fixture profile "name" or "name:runtime"; the runtime
+// defaults to "docker".
+func profileSpec(p string) (name, runtime string) {
+	if i := strings.IndexByte(p, ':'); i >= 0 {
+		return p[:i], p[i+1:]
+	}
+	return p, "docker"
+}
+
+// storedProfiles is a stored profile set of the named profiles ("name" or
+// "name:runtime"); nil for no stored set.
 func storedProfiles(names []string) map[string]V1ProfileConfig {
 	if names == nil {
 		return nil
 	}
 	profiles := map[string]V1ProfileConfig{}
 	for _, p := range names {
-		profiles[p] = V1ProfileConfig{Runtime: "docker"}
+		name, runtime := profileSpec(p)
+		profiles[name] = V1ProfileConfig{Runtime: runtime}
 	}
 	return profiles
 }
@@ -78,7 +89,21 @@ func storedProfiles(names []string) map[string]V1ProfileConfig {
 // profile set (nil: none).
 func catalogView(t *testing.T, globalDir string, stored []string) *VersionedSettings {
 	t.Helper()
-	vs, err := ProfileCatalogView(globalDir, nil, storedProfiles(stored))
+	return catalogViewRT(t, globalDir, stored, nil)
+}
+
+// catalogViewRT is catalogView with storedRT as the stored runtimes, each of
+// kubernetes type (nil: none).
+func catalogViewRT(t *testing.T, globalDir string, stored, storedRT []string) *VersionedSettings {
+	t.Helper()
+	var runtimes map[string]V1RuntimeConfig
+	if storedRT != nil {
+		runtimes = map[string]V1RuntimeConfig{}
+		for _, r := range storedRT {
+			runtimes[r] = V1RuntimeConfig{Type: "kubernetes"}
+		}
+	}
+	vs, err := ProfileCatalogView(globalDir, runtimes, storedProfiles(stored))
 	require.NoError(t, err)
 	return vs
 }
@@ -96,6 +121,8 @@ type catalogCase struct {
 	fileProfiles  []string
 	before        []string // nil: unmanaged (no stored set)
 	after         []string // nil: unmanaged
+	beforeRT      []string // stored runtimes (kubernetes type) before; nil: unmanaged
+	afterRT       []string // stored runtimes after; nil: unmanaged
 	projectActive map[string]string
 	agents        map[string]int
 	want          []ProfileCatalogFinding
@@ -104,8 +131,8 @@ type catalogCase struct {
 func runCatalogCase(t *testing.T, c catalogCase) {
 	t.Helper()
 	globalDir := catalogHome(t, c.active, c.fileProfiles...)
-	before := catalogView(t, globalDir, c.before)
-	after := catalogView(t, globalDir, c.after)
+	before := catalogViewRT(t, globalDir, c.before, c.beforeRT)
+	after := catalogViewRT(t, globalDir, c.after, c.afterRT)
 	got := CheckProfileCatalog(after, before, catalogOrigins(t, globalDir), c.projectActive, c.agents)
 	if !reflect.DeepEqual(got, c.want) {
 		t.Fatalf("findings:\n got  %+v\n want %+v", got, c.want)
@@ -157,7 +184,7 @@ func TestCheckProfileCatalog_Fixtures(t *testing.T) {
 			name: "builtin active profile, one stored", active: "local", fileProfiles: []string{"gke", "local-nfs"},
 			after: []string{"gke"}, agents: map[string]int{"": 2},
 			want: []ProfileCatalogFinding{
-				{Kind: ProfileFindingActiveProfileFallback, Profile: "local", Agents: 2, Source: ProfileSourceBuiltin},
+				{Kind: ProfileFindingActiveProfileFallback, Profile: "local", Agents: 2, Source: ProfileSourceBuiltin, Previous: "local"},
 				{Kind: ProfileFindingDroppedUnused, Profile: "local-nfs", Source: ProfileSourceFile},
 				{Kind: ProfileFindingDroppedUnused, Profile: "remote", Source: ProfileSourceBuiltin},
 			},
@@ -168,7 +195,7 @@ func TestCheckProfileCatalog_Fixtures(t *testing.T) {
 			name: "active profile only via fallback before", active: "local", fileProfiles: []string{"gke", "local-nfs"},
 			before: []string{"gke"}, after: []string{"gke", "local-nfs"}, agents: map[string]int{"": 2},
 			want: []ProfileCatalogFinding{
-				{Kind: ProfileFindingActiveProfile, Profile: "local", Agents: 2, Source: ProfileSourceBuiltin},
+				{Kind: ProfileFindingActiveProfile, Profile: "local", Agents: 2, Source: ProfileSourceBuiltin, Previous: "gke"},
 			},
 		},
 		{
@@ -186,7 +213,7 @@ func TestCheckProfileCatalog_Fixtures(t *testing.T) {
 			name: "project active profile missing, one stored", active: "local-nfs", fileProfiles: []string{"gke", "local-nfs"},
 			after: []string{"gke"}, projectActive: map[string]string{"p1": "local"},
 			want: []ProfileCatalogFinding{
-				{Kind: ProfileFindingActiveProfileFallback, Profile: "local-nfs", Source: ProfileSourceFile},
+				{Kind: ProfileFindingActiveProfileFallback, Profile: "local-nfs", Source: ProfileSourceFile, Previous: "local-nfs"},
 				{Kind: ProfileFindingDroppedUnused, Profile: "remote", Source: ProfileSourceBuiltin},
 				{Kind: ProfileFindingProjectActiveProfile, Profile: "local", Project: "p1", Source: ProfileSourceBuiltin},
 			},
@@ -247,6 +274,57 @@ func TestCheckProfileCatalog_Fixtures(t *testing.T) {
 			},
 		},
 		{
+			// A referenced profile whose runtime the stored runtimes drop:
+			// a change (the files' docker runtime is replaced).
+			name: "runtime missing", active: "gke", fileProfiles: []string{"gke", "local-nfs"},
+			after: []string{"gke", "local-nfs"}, afterRT: []string{"k8s"}, agents: map[string]int{"gke": 2},
+			want: []ProfileCatalogFinding{
+				{Kind: ProfileFindingDroppedUnused, Profile: "local", Source: ProfileSourceBuiltin},
+				{Kind: ProfileFindingDroppedUnused, Profile: "remote", Source: ProfileSourceBuiltin},
+				{Kind: ProfileFindingProfileRuntimeMissing, Profile: "gke", Agents: 2, Source: ProfileSourceFile},
+			},
+		},
+		{
+			// The same runtime was already missing before: pre-existing.
+			name: "runtime missing before too", active: "gke", fileProfiles: []string{"gke", "local-nfs"},
+			before: []string{"gke", "local-nfs"}, beforeRT: []string{"k8s"},
+			after: []string{"gke", "local-nfs"}, afterRT: []string{"k8s"}, agents: map[string]int{"gke": 2, "": 1},
+			want: []ProfileCatalogFinding{
+				{Kind: ProfileFindingProfileRuntimeMissing, Profile: "gke", Agents: 3, Source: ProfileSourceStored, PreExisting: true},
+			},
+		},
+		{
+			// A profile referenced only by a project activeProfile, whose
+			// runtime the stored runtimes drop: a change with no agents.
+			name: "runtime missing, project reference only", active: "local", fileProfiles: []string{"gke", "local-nfs"},
+			after: []string{"gke", "local", "remote:kubernetes", "local-nfs"}, afterRT: []string{"docker"}, projectActive: map[string]string{"p1": "remote"},
+			want: []ProfileCatalogFinding{
+				{Kind: ProfileFindingProfileRuntimeMissing, Profile: "remote", Source: ProfileSourceBuiltin},
+			},
+		},
+		{
+			// The default moves onto a profile whose runtime was already
+			// missing: the agents without a saved profile worked before, so
+			// the change breaks them (not pre-existing).
+			name: "default moves onto a broken runtime", active: "local", fileProfiles: []string{"gke", "bad:nope"},
+			after: []string{"bad:nope"}, agents: map[string]int{"": 2},
+			want: []ProfileCatalogFinding{
+				{Kind: ProfileFindingActiveProfileFallback, Profile: "local", Agents: 2, Source: ProfileSourceBuiltin, Previous: "local"},
+				{Kind: ProfileFindingDroppedUnused, Profile: "gke", Source: ProfileSourceFile},
+				{Kind: ProfileFindingDroppedUnused, Profile: "remote", Source: ProfileSourceBuiltin},
+				{Kind: ProfileFindingProfileRuntimeMissing, Profile: "bad", Agents: 2, Source: ProfileSourceFile},
+			},
+		},
+		{
+			// The single-stored fallback disappears: the default changes
+			// from the fallback to the configured profile.
+			name: "default changes", active: "local", fileProfiles: []string{"gke", "local-nfs"},
+			before: []string{"gke"}, agents: map[string]int{"": 3},
+			want: []ProfileCatalogFinding{
+				{Kind: ProfileFindingActiveProfileChanged, Profile: "local", Agents: 3, Source: ProfileSourceBuiltin, Previous: "gke"},
+			},
+		},
+		{
 			// Agents and projects whose profiles resolve give nothing.
 			name: "everything resolves", active: "gke", fileProfiles: []string{"gke", "local-nfs"},
 			after:         []string{"gke", "local-nfs", "local", "remote"},
@@ -265,7 +343,7 @@ func TestCheckProfileCatalog_Fixtures(t *testing.T) {
 func TestProfileCatalogView_IgnoresGlobalOverlay(t *testing.T) {
 	globalDir := catalogHome(t, "local", "gke", "local-nfs")
 	running := NewSettingsOverlay()
-	running.Update(nil, storedProfiles([]string{"gke"}), nil, "")
+	running.Update(nil, storedProfiles([]string{"gke"}), nil)
 	SetGlobalSettingsOverlay(running) // catalogHome restores the previous overlay
 
 	oneStored := catalogView(t, globalDir, []string{"gke"})
@@ -281,12 +359,24 @@ func TestProfileCatalogView_IgnoresGlobalOverlay(t *testing.T) {
 	// The change from the unmanaged view (before) to the one-profile stored set (after).
 	got := CheckProfileCatalog(oneStored, unmanaged, catalogOrigins(t, globalDir), nil, map[string]int{"": 2})
 	want := []ProfileCatalogFinding{
-		{Kind: ProfileFindingActiveProfileFallback, Profile: "local", Agents: 2, Source: ProfileSourceBuiltin},
+		{Kind: ProfileFindingActiveProfileFallback, Profile: "local", Agents: 2, Source: ProfileSourceBuiltin, Previous: "local"},
 		{Kind: ProfileFindingDroppedUnused, Profile: "local-nfs", Source: ProfileSourceFile},
 		{Kind: ProfileFindingDroppedUnused, Profile: "remote", Source: ProfileSourceBuiltin},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("findings with a global overlay installed:\n got  %+v\n want %+v", got, want)
+	}
+}
+
+// A nil before with a missing runtime: the runtime finding is not
+// pre-existing, and nothing dereferences the missing before.
+func TestCheckProfileCatalog_NilBeforeRuntimeMissing(t *testing.T) {
+	globalDir := catalogHome(t, "gke", "gke", "local-nfs")
+	after := catalogViewRT(t, globalDir, []string{"gke", "local-nfs"}, []string{"k8s"})
+	got := CheckProfileCatalog(after, nil, catalogOrigins(t, globalDir), nil, map[string]int{"gke": 1, "": 2})
+	want := []ProfileCatalogFinding{{Kind: ProfileFindingProfileRuntimeMissing, Profile: "gke", Agents: 3, Source: ProfileSourceFile}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("findings:\n got  %+v\n want %+v", got, want)
 	}
 }
 
@@ -313,7 +403,8 @@ func TestProfileOrigins_Versioned(t *testing.T) {
 	}
 }
 
-// A legacy hierarchy labels every profile "settings".
+// A legacy-format file is converted at its own layer, so a legacy hierarchy
+// tells file profiles from built-in defaults like a versioned one.
 func TestProfileOrigins_Legacy(t *testing.T) {
 	old := GetGlobalSettingsOverlay()
 	t.Cleanup(func() { SetGlobalSettingsOverlay(old) })
@@ -335,13 +426,11 @@ profiles:
 
 	got, err := ProfileOrigins(projectDir)
 	require.NoError(t, err)
-	if got["legacy-profile"] != ProfileSourceSettings {
-		t.Fatalf("origins = %v, want legacy-profile labelled settings", got)
+	if got["legacy-profile"] != ProfileSourceFile {
+		t.Fatalf("origins = %v, want legacy-profile labelled file", got)
 	}
-	for name, src := range got {
-		if src != ProfileSourceSettings {
-			t.Fatalf("legacy origin %q = %q, want settings", name, src)
-		}
+	if got["local"] != ProfileSourceBuiltin {
+		t.Fatalf("origins = %v, want the default local profile labelled builtin", got)
 	}
 }
 
@@ -353,7 +442,7 @@ func TestProfileCatalogFinding_Fields(t *testing.T) {
 		names = append(names, typ.Field(i).Name)
 	}
 	sort.Strings(names)
-	want := []string{"Agents", "Kind", "PreExisting", "Profile", "Project", "Source"}
+	want := []string{"Agents", "Kind", "PreExisting", "Previous", "Profile", "Project", "Source"}
 	if !reflect.DeepEqual(names, want) {
 		t.Fatalf("ProfileCatalogFinding fields = %v, want %v", names, want)
 	}

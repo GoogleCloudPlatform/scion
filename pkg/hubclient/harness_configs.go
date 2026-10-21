@@ -52,8 +52,11 @@ type HarnessConfigService interface {
 
 	// Finalize finalizes a harness config after file upload. A non-empty
 	// sourceURL is recorded as the config's source URL; an empty one leaves
-	// the stored source URL unchanged.
-	Finalize(ctx context.Context, id string, manifest *HarnessConfigManifest, sourceURL string) (*HarnessConfig, error)
+	// the stored source URL unchanged. uploadID, when non-empty, is the
+	// UploadResponse.UploadID whose staged files the finalize commits; an
+	// empty one makes the Hub match staged files to the manifest by hash
+	// (ptone/scion#4219).
+	Finalize(ctx context.Context, id string, manifest *HarnessConfigManifest, sourceURL, uploadID string) (*HarnessConfig, error)
 
 	// RequestDownloadURLs requests signed URLs for downloading harness config files.
 	RequestDownloadURLs(ctx context.Context, id string) (*DownloadResponse, error)
@@ -118,6 +121,9 @@ type CreateHarnessConfigResponse struct {
 	HarnessConfig *HarnessConfig  `json:"harnessConfig"`
 	UploadURLs    []UploadURLInfo `json:"uploadUrls,omitempty"`
 	ManifestURL   string          `json:"manifestUrl,omitempty"`
+	// UploadID names the staging directory the upload URLs write to; send
+	// it back in the finalize request (ptone/scion#4219).
+	UploadID string `json:"uploadId,omitempty"`
 }
 
 // UpdateHarnessConfigRequest is the request for updating a harness config.
@@ -140,6 +146,10 @@ type HarnessConfigFinalizeRequest struct {
 	// SourceURL optionally records where the uploaded files came from. When
 	// empty, the Hub leaves the stored source URL unchanged.
 	SourceURL string `json:"sourceUrl,omitempty"`
+	// UploadID, when set, is the UploadResponse.UploadID whose staged files
+	// this finalize commits. Without it the Hub matches staged files to the
+	// manifest by hash (ptone/scion#4219).
+	UploadID string `json:"uploadId,omitempty"`
 }
 
 // ReimportHarnessConfigRequest is the request body for reimporting a harness config.
@@ -259,10 +269,11 @@ func (s *harnessConfigService) RequestUploadURLs(ctx context.Context, id string,
 }
 
 // Finalize finalizes a harness config after file upload.
-func (s *harnessConfigService) Finalize(ctx context.Context, id string, manifest *HarnessConfigManifest, sourceURL string) (*HarnessConfig, error) {
+func (s *harnessConfigService) Finalize(ctx context.Context, id string, manifest *HarnessConfigManifest, sourceURL, uploadID string) (*HarnessConfig, error) {
 	req := HarnessConfigFinalizeRequest{
 		Manifest:  manifest,
 		SourceURL: sourceURL,
+		UploadID:  uploadID,
 	}
 	resp, err := s.c.post(ctx, "/api/v1/harness-configs/"+id+"/finalize", req, nil)
 	if err != nil {

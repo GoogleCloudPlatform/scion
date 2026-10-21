@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -75,6 +76,30 @@ func templateBlobHex(hash string) (string, bool) {
 // isBlobLayout reports whether t stores its files as blobs.
 func isBlobLayout(t *store.Template) bool {
 	return t != nil && t.Layout == store.TemplateLayoutBlobs
+}
+
+// blobRow is the part of a template or harness-config row that the shared
+// blob machinery reads (ptone/scion#4219): the resolver that makes a
+// commit's blobs exist, and the download signing. Harness-configs use the
+// same layout as templates (harness_config_blobs.go).
+type blobRow struct {
+	ID          string
+	StoragePath string
+	Layout      string
+	Files       []store.TemplateFile
+}
+
+// isBlobs reports whether r stores its files as blobs.
+func (r *blobRow) isBlobs() bool {
+	return r != nil && r.Layout == store.TemplateLayoutBlobs
+}
+
+// templateBlobRow is t's blobRow, nil for a nil t.
+func templateBlobRow(t *store.Template) *blobRow {
+	if t == nil {
+		return nil
+	}
+	return &blobRow{ID: t.ID, StoragePath: t.StoragePath, Layout: t.Layout, Files: t.Files}
 }
 
 // templateBlobStoragePath is the row-unique storage path a template gets when
@@ -220,15 +245,20 @@ func (s *Server) writeTemplateFileBlob(ctx context.Context, stor storage.Storage
 }
 
 // templateBlobResolver makes sure every blob a commit introduces exists under
-// the commit's content base before the row is written.
+// the commit's content base before the row is written. It serves template
+// and harness-config commits alike.
 type templateBlobResolver struct {
 	s    *Server
 	stor storage.Storage
 	base string
 	opts commitOpts
-	// src is where a missing blob is copied from: opts.copyFrom (clones),
-	// or the row itself when it is migrating from the legacy layout.
-	src *store.Template
+	// src is where a missing blob is copied from: the clone source, or the
+	// row itself when it is migrating from the legacy layout.
+	src *blobRow
+	// log and label name the kind in log lines ("template commit",
+	// "harness-config commit").
+	log   *slog.Logger
+	label string
 
 	stagedLoaded bool
 	staged       map[string][]string // file path -> staged object names (old clients)
@@ -245,17 +275,24 @@ type templateBlobResolver struct {
 // stored under its actual hash and the entry is corrected, so the blob store
 // never holds content under the wrong name.
 func (s *Server) ensureTemplateBlobs(ctx context.Context, stor storage.Storage, tmpl *store.Template, base string, next []store.TemplateFile, opts commitOpts) ([]store.TemplateFile, []store.TemplateFile, error) {
+	return s.ensureBlobs(ctx, stor, templateBlobRow(tmpl), templateBlobRow(opts.copyFrom), base, next, opts, s.templateLog, "template commit")
+}
+
+// ensureBlobs is ensureTemplateBlobs for any row kind. row is the row as
+// read; copyFrom, when set, is a clone's source. A legacy row with a storage
+// path is its own copy source (its migration).
+func (s *Server) ensureBlobs(ctx context.Context, stor storage.Storage, row, copyFrom *blobRow, base string, next []store.TemplateFile, opts commitOpts, log *slog.Logger, label string) ([]store.TemplateFile, []store.TemplateFile, error) {
 	referenced := make(map[string]bool)
-	if isBlobLayout(tmpl) {
-		for _, f := range tmpl.Files {
+	if row.isBlobs() {
+		for _, f := range row.Files {
 			if hex, ok := templateBlobHex(f.Hash); ok {
 				referenced[hex] = true
 			}
 		}
 	}
-	r := &templateBlobResolver{s: s, stor: stor, base: base, opts: opts, src: opts.copyFrom}
-	if r.src == nil && !isBlobLayout(tmpl) && tmpl.StoragePath != "" {
-		legacy := *tmpl
+	r := &templateBlobResolver{s: s, stor: stor, base: base, opts: opts, src: copyFrom, log: log, label: label}
+	if r.src == nil && row != nil && !row.isBlobs() && row.StoragePath != "" {
+		legacy := *row
 		r.src = &legacy
 	}
 
@@ -319,7 +356,7 @@ func (r *templateBlobResolver) resolve(ctx context.Context, e *store.TemplateFil
 		if found {
 			return hex, nil
 		}
-		if r.src != nil && isBlobLayout(r.src) && r.src.StoragePath != "" {
+		if r.src.isBlobs() && r.src.StoragePath != "" {
 			found, err := r.copyBlob(ctx, templateBlobPath(r.src.StoragePath, hex), blobPath, e.Hash)
 			if err != nil {
 				return "", err
@@ -329,7 +366,7 @@ func (r *templateBlobResolver) resolve(ctx context.Context, e *store.TemplateFil
 			}
 		}
 	}
-	if r.src != nil && !isBlobLayout(r.src) {
+	if r.src != nil && !r.src.isBlobs() {
 		got, err := r.copyLegacy(ctx, e)
 		if err == nil {
 			return got, nil
@@ -429,7 +466,7 @@ func (r *templateBlobResolver) moveStaged(ctx context.Context, staged, blobPath,
 		return false, fmt.Errorf("write blob: %w", err)
 	}
 	if err := r.stor.Delete(ctx, staged); err != nil && !errors.Is(err, storage.ErrNotFound) {
-		r.s.templateLog.Warn("template commit: failed to delete staged upload", "object", staged, "error", err)
+		r.log.Warn(r.label+": failed to delete staged upload", "object", staged, "error", err)
 	}
 	return true, nil
 }
@@ -469,7 +506,7 @@ func (r *templateBlobResolver) refreshExisting(ctx context.Context, e *store.Tem
 		return false, fmt.Errorf("read blob %s: %w", e.Path, err)
 	}
 	if transfer.HashBytes(data) != e.Hash {
-		r.s.templateLog.Warn("template commit: blob content does not match its name; rewriting it", "object", blobPath)
+		r.log.Warn(r.label+": blob content does not match its name; rewriting it", "object", blobPath)
 		return false, nil
 	}
 	if err := uploadTemplateBlob(ctx, r.stor, blobPath, e.Hash, data); err != nil {
@@ -531,7 +568,7 @@ func (r *templateBlobResolver) copyLegacy(ctx context.Context, e *store.Template
 		// template with the old name), this can be the other row's
 		// content: the entry is corrected to what is really stored, which
 		// is what a hydration of the legacy row would have served.
-		r.s.templateLog.Warn("template commit: legacy object does not match its manifest hash; storing its actual content",
+		r.log.Warn(r.label+": legacy object does not match its manifest hash; storing its actual content",
 			"source", r.src.ID, "sourcePath", r.src.StoragePath, "path", e.Path, "manifestHash", e.Hash, "actualHash", actual)
 		e.Hash = actual
 		e.Size = int64(len(data))
@@ -637,7 +674,13 @@ func (s *Server) deleteTemplateStorage(ctx context.Context, stor storage.Storage
 // manifest.json); a legacy row keeps the path layout with its legacy
 // fallback.
 func (s *Server) generateTemplateDownloadURLs(ctx context.Context, stor storage.Storage, t *store.Template) ([]DownloadURLInfo, string, time.Time, error) {
-	if !isBlobLayout(t) {
+	return s.generateBlobRowDownloadURLs(ctx, stor, templateBlobRow(t))
+}
+
+// generateBlobRowDownloadURLs is generateTemplateDownloadURLs for any row
+// kind (templates and harness-configs).
+func (s *Server) generateBlobRowDownloadURLs(ctx context.Context, stor storage.Storage, t *blobRow) ([]DownloadURLInfo, string, time.Time, error) {
+	if !t.isBlobs() {
 		return generateDownloadURLs(ctx, stor, t.StoragePath, s.legacyFallbackPath(t.StoragePath), t.Files)
 	}
 	expires := time.Now().Add(SignedURLExpiry)
@@ -664,11 +707,17 @@ func (s *Server) generateTemplateDownloadURLs(ctx context.Context, stor storage.
 // of this template even after a later commit replaced the file, so a
 // hydration that spans a commit still gets one consistent version.
 func rewriteLocalTemplateDownloadURLs(urls []DownloadURLInfo, hubEndpoint, templateID string, blobs bool) []DownloadURLInfo {
+	return rewriteLocalBlobDownloadURLs(urls, hubEndpoint, "templates", templateID, blobs)
+}
+
+// rewriteLocalBlobDownloadURLs is rewriteLocalTemplateDownloadURLs for any
+// resource type ("templates", "harness-configs").
+func rewriteLocalBlobDownloadURLs(urls []DownloadURLInfo, hubEndpoint, resourceType, id string, blobs bool) []DownloadURLInfo {
 	local := make([]bool, len(urls))
 	for i := range urls {
 		local[i] = strings.HasPrefix(urls[i].URL, "file://")
 	}
-	urls = rewriteLocalDownloadURLs(urls, hubEndpoint, "templates", templateID)
+	urls = rewriteLocalDownloadURLs(urls, hubEndpoint, resourceType, id)
 	if !blobs || hubEndpoint == "" {
 		return urls
 	}
@@ -686,10 +735,16 @@ func rewriteLocalTemplateDownloadURLs(urls []DownloadURLInfo, hubEndpoint, templ
 // is the hub's raw file endpoint with ?uploadId=, which stages without
 // committing.
 func (s *Server) generateTemplateUploadURLs(ctx context.Context, stor storage.Storage, t *store.Template, files []FileUploadRequest, uploadID, hubEndpoint string) ([]UploadURLInfo, error) {
+	return generateStagingUploadURLs(ctx, stor, s.templateContentBase(t), "templates", t.ID, files, uploadID, hubEndpoint)
+}
+
+// generateStagingUploadURLs is generateTemplateUploadURLs for any resource
+// type: base is the row's content base, resourceType and id name the hub's
+// raw file endpoint for local storage.
+func generateStagingUploadURLs(ctx context.Context, stor storage.Storage, base, resourceType, id string, files []FileUploadRequest, uploadID, hubEndpoint string) ([]UploadURLInfo, error) {
 	if err := validateUploadFilePaths(files); err != nil {
 		return nil, err
 	}
-	base := s.templateContentBase(t)
 	out := make([]UploadURLInfo, 0, len(files))
 	for _, f := range files {
 		signed, err := stor.GenerateSignedURL(ctx, templateStagedObjectPath(base, uploadID, f.Path), storage.SignedURLOptions{
@@ -712,7 +767,7 @@ func (s *Server) generateTemplateUploadURLs(ctx context.Context, stor storage.St
 		for i := range out {
 			local[i] = strings.HasPrefix(out[i].URL, "file://")
 		}
-		out = rewriteLocalUploadURLs(out, hubEndpoint, "templates", t.ID)
+		out = rewriteLocalUploadURLs(out, hubEndpoint, resourceType, id)
 		for i := range out {
 			if local[i] {
 				out[i].URL += "?uploadId=" + url.QueryEscape(uploadID)

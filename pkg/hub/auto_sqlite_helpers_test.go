@@ -28,7 +28,7 @@ import (
 
 const aeKey = api.EnvAutoExposePorts
 
-// createAutoExposeTemplate creates a global template whose config env carries
+// createAutoExposeTemplate creates a global template whose agent config env carries
 // the given entries.
 func createAutoExposeTemplate(t *testing.T, s store.Store, slug string, env map[string]string) {
 	t.Helper()
@@ -40,7 +40,7 @@ func createAutoExposeTemplate(t *testing.T, s store.Store, slug string, env map[
 		ContentHash: "d00dfeed",
 		Scope:       store.TemplateScopeGlobal,
 		Status:      "active",
-		Config:      &store.TemplateConfig{Env: env},
+		AgentConfig: &api.ScionConfig{Env: env},
 	}))
 }
 

@@ -32,6 +32,7 @@ import type { PropertyValues } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { repeat } from 'lit/directives/repeat.js';
 import { stateManager } from '../../../client/state.js';
+import { visibleInterval } from '../../../client/visible-interval.js';
 import {
   applyScheduledUpdate,
   cancelScheduledMessage,
@@ -76,7 +77,7 @@ export class ScionChatScheduledList extends LitElement {
   @state() private busy = new Set<string>();
 
   readonly _zone = new DisplayZoneController(this);
-  private refreshTimer: ReturnType<typeof setInterval> | null = null;
+  private stopRelativeRefresh: (() => void) | null = null;
   private loadGeneration = 0;
   /**
    * Changes applied while a load is in flight, replayed onto its result so
@@ -167,15 +168,15 @@ export class ScionChatScheduledList extends LitElement {
     super.connectedCallback();
     stateManager.addEventListener('chat-scheduled-updated', this.handleScheduledEvent);
     stateManager.addEventListener('connected', this.handleReconnect);
-    this.refreshTimer = setInterval(() => this.requestUpdate(), RELATIVE_REFRESH_MS);
+    this.stopRelativeRefresh = visibleInterval(() => this.requestUpdate(), RELATIVE_REFRESH_MS);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     stateManager.removeEventListener('chat-scheduled-updated', this.handleScheduledEvent);
     stateManager.removeEventListener('connected', this.handleReconnect);
-    if (this.refreshTimer) clearInterval(this.refreshTimer);
-    this.refreshTimer = null;
+    this.stopRelativeRefresh?.();
+    this.stopRelativeRefresh = null;
   }
 
   protected override willUpdate(changed: PropertyValues<this>): void {

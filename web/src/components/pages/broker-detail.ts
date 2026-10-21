@@ -40,6 +40,7 @@ import {
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
+import { visibleInterval } from '../../client/visible-interval.js';
 import { brokerTypeBadgeStyles } from '../shared/resource-styles.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 import { showToast } from '../../utils/toast.js';
@@ -102,7 +103,7 @@ export class ScionPageBrokerDetail extends LitElement {
   private brokerSettingsError: string | null = null;
 
   private boundOnBrokersUpdated = this.onBrokersUpdated.bind(this);
-  private relativeTimeInterval: ReturnType<typeof setInterval> | null = null;
+  private stopRelativeTimeTick: (() => void) | null = null;
 
   static override styles = [
     brokerTypeBadgeStyles,
@@ -501,16 +502,14 @@ export class ScionPageBrokerDetail extends LitElement {
 
     stateManager.addEventListener('brokers-updated', this.boundOnBrokersUpdated);
 
-    this.relativeTimeInterval = setInterval(() => this.requestUpdate(), 15_000);
+    this.stopRelativeTimeTick = visibleInterval(() => this.requestUpdate(), 15_000);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     stateManager.removeEventListener('brokers-updated', this.boundOnBrokersUpdated);
-    if (this.relativeTimeInterval) {
-      clearInterval(this.relativeTimeInterval);
-      this.relativeTimeInterval = null;
-    }
+    this.stopRelativeTimeTick?.();
+    this.stopRelativeTimeTick = null;
   }
 
   private onBrokersUpdated(): void {
@@ -586,6 +585,36 @@ export class ScionPageBrokerDetail extends LitElement {
     const label = brokerType.charAt(0).toUpperCase() + brokerType.slice(1);
     const cssClass = brokerType === 'hosted' ? 'broker-type-badge hosted' : 'broker-type-badge';
     return html`<span class=${cssClass}>${label}</span>`;
+  }
+
+  /**
+   * Warning for the two host identity states that need attention. The
+   * configured value is used either way; it is changed through the
+   * Runtime Broker update API.
+   */
+  private renderHostIdentityAlert() {
+    const hostIdentity = this.broker?.hostIdentity;
+    if (!hostIdentity) return '';
+    let message: string;
+    if (hostIdentity.state === 'mismatch') {
+      message = "Pinned host service account differs from the host's identity";
+    } else if (hostIdentity.state === 'pinned_absent') {
+      message = 'Pinned host service account is not present on the host';
+    } else {
+      return '';
+    }
+    const configured = this.broker?.gcp_host_service_account_email;
+    return html`
+      <sl-alert variant="warning" open class="host-identity-alert">
+        <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+        <strong>${message}</strong>
+        ${configured ? html`<div>Configured: ${configured}</div>` : ''}
+        ${hostIdentity.observedEmail
+          ? html`<div>Host reports: ${hostIdentity.observedEmail}</div>`
+          : ''}
+        <div>The configured value is used. Change it through the Runtime Broker update API.</div>
+      </sl-alert>
+    `;
   }
 
   private getBrokerStatusVariant(status: string): 'success' | 'warning' | 'danger' | 'neutral' {
@@ -735,6 +764,7 @@ export class ScionPageBrokerDetail extends LitElement {
           : ''}
       </div>
 
+      ${this.renderHostIdentityAlert()}
       ${this.broker.capabilities ? this.renderCapabilities(this.broker.capabilities) : ''}
       ${this.renderRuntimeTargetCard(this.broker)}
       ${this.broker.profiles && this.broker.profiles.length > 0

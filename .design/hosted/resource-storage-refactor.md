@@ -366,8 +366,12 @@ type ResourceResolver interface {
   template stale-object reconcile loop, the `FileInfo`→manifest conversion, and
   the parallel slug-scoped path functions are now shared, `kind`-keyed helpers —
   `storage.ResourceStoragePath`/`ResourceStorageURI` (keyed by
-  `storage.ResourceKind`) and `toResourceFiles`/`uploadResourceFiles`/
-  `reconcileResourceStorage` in `pkg/hub/storage_helpers.go`.
+  `storage.ResourceKind`) and `toResourceFiles`/`uploadResourceFiles` in
+  `pkg/hub/storage_helpers.go`. (The shared stale-object reconcile,
+  `reconcileResourceStorage`, was removed once templates (ptone/scion#4221)
+  and then harness-configs (ptone/scion#4219) moved to the content-addressed
+  blob layout: a commit never deletes objects, and the blob garbage collector
+  removes unreferenced blobs after a grace period.)
 - **The interfaces themselves (3b).** The hub-side `ResourceStore`
   (`pkg/hub/resource_store.go`) collapses the parallel `bootstrapSingle*`/
   `syncExisting*` routines onto one kind-generic `Bootstrap`. Rather than a risky
@@ -423,9 +427,10 @@ status tracker. Each step links to its design rationale in §7.
    `localObjectResolver` seam.
    - ✅ **3a. Shared bootstrap mechanics** — kind-keyed storage-path helpers
      (`storage.ResourceStoragePath`/`ResourceStorageURI` + `ResourceKind`) and
-     `toResourceFiles`/`uploadResourceFiles`/`reconcileResourceStorage` in
-     `pkg/hub/storage_helpers.go`, adopted by both template and harness-config
-     bootstrap/sync. (Plus the earlier ✅ content-hash consolidation — the hub's
+     `toResourceFiles`/`uploadResourceFiles` (plus a `reconcileResourceStorage`
+     prefix sweep, since replaced by the blob layout and its garbage collector,
+     ptone/scion#4221 and ptone/scion#4219) in `pkg/hub/storage_helpers.go`,
+     adopted by both template and harness-config bootstrap/sync. (Plus the earlier ✅ content-hash consolidation — the hub's
      duplicate `computeContentHash` was removed; all call sites now delegate to
      `transfer.ComputeContentHash`, eliminating the hub/broker drift risk.)
    - ✅ **3b. The interfaces themselves** — hub-side `ResourceStore` +

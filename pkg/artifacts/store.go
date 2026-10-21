@@ -18,6 +18,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -44,19 +45,33 @@ var ErrTooManyGrants = errors.New("artifacts: too many grants")
 var ErrHomeGrantAdmin = errors.New("artifacts: the home scope's grant may only be read or write")
 
 // ErrReviewGrantRefused is returned by PutReviewGrant when the artifact's
-// home or owner changed since the caller's authority was checked, or the
-// subject already holds a principal grant other than review.
+// home or owner changed since the caller's authority was checked.
 var ErrReviewGrantRefused = errors.New("artifacts: review grant refused")
 
-// ErrReviewReplacesAccess is returned by PutGrant for a review grant to a
-// user who holds a principal read, write or admin grant on the artifact:
-// the review grant would take that grant's row, and with it the user's
-// read.
+// ErrReviewReplacesAccess is returned by PutGrant and PutReviewGrant for
+// a review grant to a user who holds a principal read, write or admin
+// grant on the artifact: the review grant would take that grant's row,
+// and with it the user's read.
 var ErrReviewReplacesAccess = errors.New("artifacts: a review grant cannot replace a read, write or admin grant")
 
 // ErrCrossScopeDisabled is returned by PutGrant for a scope grant to a
 // scope other than the artifact's home while sharing across scopes is off.
 var ErrCrossScopeDisabled = errors.New("artifacts: sharing with other scopes is off")
+
+// ErrStewardPrecondition is returned by a store write made under a steward
+// authority (Actor.Expect set) when, under the artifact's lock, its home
+// or owner no longer matches the state the authority was decided against
+// (a concurrent move or ownership transfer). It wraps ErrNotFound, so a
+// caller that maps ErrNotFound to 404 answers it the same way, as for a
+// concurrent delete; nothing is written.
+var ErrStewardPrecondition = fmt.Errorf("%w: the artifact's home or owner changed", ErrNotFound)
+
+// ErrStewardActionNotAllowed is returned by a store write made under a
+// steward authority that a steward may never make: an admin grant
+// (PutGrant) or a move (UpdateArtifact). The service refuses both before
+// the store is asked; the store refuses them again so no other path can
+// make them.
+var ErrStewardActionNotAllowed = errors.New("artifacts: a steward may not give admin or move an artifact")
 
 // ErrTooManyPending is returned by CreateVersion when an artifact already
 // has the maximum number of pending versions.
@@ -70,10 +85,26 @@ var ErrStaleBase = errors.New("artifacts: current version changed")
 // newer than the base is still pending or finalizing.
 var ErrPendingNewer = errors.New("artifacts: a newer version is being published")
 
+// ErrAttachmentNotShareable is returned by every store write that would
+// share, version or change a row of an attachment scope (PutGrant,
+// PutReviewGrant, CreateLink, CreateVersion, UpdateArtifact, SetExpiry):
+// an attachment is exactly as readable as its message, and lives as long.
+var ErrAttachmentNotShareable = errors.New("artifacts: attachments cannot be shared or changed")
+
+// ErrAttachmentNotOwned is returned by BindAttachment when the upload was
+// made by someone other than the sender.
+var ErrAttachmentNotOwned = errors.New("artifacts: the attachment was uploaded by someone else")
+
+// ErrAttachmentBound is returned by BindAttachment when the attachment is
+// no longer an unsent upload: it was already sent in a message.
+var ErrAttachmentBound = errors.New("artifacts: the attachment was already sent")
+
 // Version kinds.
 const (
 	VersionKindPublish = "publish"
 	VersionKindReview  = "review"
+	// VersionKindAttachment is the one version of a web-chat attachment.
+	VersionKindAttachment = "attachment"
 )
 
 // Version states. A version is pending while its files upload (two-step
@@ -136,6 +167,12 @@ type Artifact struct {
 	// OrphanedAt is when the owner liveness reconciler found the owner
 	// gone, or nil while the owner is live (or was never checked).
 	OrphanedAt *time.Time
+}
+
+// ArtifactRef names an artifact and its home scope.
+type ArtifactRef struct {
+	ID       string
+	ScopeRef string
 }
 
 // Version is a row of the artifact_version table.
@@ -360,7 +397,9 @@ type Store interface {
 	// before now, and it refuses with ErrTooManyLinks when maxLinks
 	// unexpired links remain. It returns ErrNotFound when the artifact is
 	// absent or deleted.
-	CreateLink(ctx context.Context, g *Grant, maxLinks int, now time.Time) error
+	// It records a link_created event by actor (required) in the same
+	// transaction, with the link id and expiry, never the token or its hash.
+	CreateLink(ctx context.Context, g *Grant, maxLinks int, now time.Time, actor *Actor) error
 
 	// ResolveLink returns the link grant whose subject ref is tokenHash
 	// together with its artifact, in one query, provided that at now the
@@ -381,23 +420,31 @@ type Store interface {
 	// PutGrant adds the principal or scope grant g to its artifact, or,
 	// when the artifact already has a grant for the same subject, sets
 	// that grant's permission to g's (g.ID and g.CreatedAt then take the
-	// stored grant's). created reports which. Under the artifact's lock it
-	// reads the artifact's home scope and refuses an admin grant to it
+	// stored grant's). The GrantPut result reports which, or
+	// GrantPutUnchanged when the grant already had g's permission. Under
+	// the artifact's lock it reads the artifact's home scope and refuses an admin grant to it
 	// (ErrHomeGrantAdmin) and, unless crossScope, a scope grant to any
 	// other scope (ErrCrossScopeDisabled), and a review grant over a
 	// subject's read, write or admin grant (ErrReviewReplacesAccess). It
 	// refuses with ErrTooManyGrants when adding would exceed maxGrants
 	// principal and scope grants, and returns ErrNotFound when the artifact
 	// is absent or deleted.
-	PutGrant(ctx context.Context, g *Grant, maxGrants int, crossScope bool) (created bool, err error)
+	// In the same transaction it records, by actor (required), a
+	// grant_created event, or a grant_changed event with the old and new
+	// permission when an existing grant's permission changes (none when
+	// it already had g's permission). An actor with a steward authority
+	// may not give admin (ErrStewardActionNotAllowed).
+	PutGrant(ctx context.Context, g *Grant, maxGrants int, crossScope bool, actor *Actor) (GrantPut, error)
 
 	// PutReviewGrant is PutGrant for a review grant (design D24): g must
 	// be a review grant to a user principal. Under the artifact's lock it
 	// also refuses, with ErrReviewGrantRefused and writing nothing, when
-	// the artifact is no longer homed in home or not owned by an agent, or
-	// when the user already holds a principal grant other than review on it
-	// (a read, write or admin grant is never replaced this way).
-	PutReviewGrant(ctx context.Context, g *Grant, maxGrants int, home string) (created bool, err error)
+	// the artifact is no longer homed in home or not owned by an agent; like
+	// PutGrant it refuses with ErrReviewReplacesAccess when the user already
+	// holds a principal grant other than review on it (a read, write or
+	// admin grant is never replaced this way).
+	// It records its events like PutGrant.
+	PutReviewGrant(ctx context.Context, g *Grant, maxGrants int, home string, actor *Actor) (GrantPut, error)
 
 	// DeleteGrant deletes principal or scope grant grantID of artifact
 	// artifactID. It returns ErrNotFound when there is no such grant, and
@@ -426,8 +473,9 @@ type Store interface {
 
 	// SweepExpired soft-deletes up to limit live artifacts whose expiry is
 	// at or before now through DeleteArtifact (actor system, authority
-	// retention), and returns how many it deleted.
-	SweepExpired(ctx context.Context, now time.Time, limit int) (int, error)
+	// retention), and returns those it deleted, each with the home scope
+	// it had when the sweep found it.
+	SweepExpired(ctx context.Context, now time.Time, limit int) ([]ArtifactRef, error)
 
 	// DeleteArtifact is the one soft delete of an artifact. In one
 	// transaction it sets deleted_at, removes every grant and share link of
@@ -454,8 +502,9 @@ type Store interface {
 	// limit live artifacts of owner that are not marked, or clears it
 	// (orphaned false) on up to limit that are, recording one orphaned or
 	// unorphaned event per artifact in the same transaction. It returns
-	// how many it changed; fewer than limit means none is left.
-	SetOwnerOrphaned(ctx context.Context, owner Owner, orphaned bool, now time.Time, limit int) (int, error)
+	// those it changed, each with its home scope; fewer than limit means none
+	// is left.
+	SetOwnerOrphaned(ctx context.Context, owner Owner, orphaned bool, now time.Time, limit int) ([]ArtifactRef, error)
 
 	// ListEvents returns the artifact_event rows of an artifact, oldest
 	// first.
@@ -497,6 +546,47 @@ type Store interface {
 	// messageIDs, keyed by message id and ordered by artifact id. Messages
 	// without references are absent from the map.
 	ListMessageRefs(ctx context.Context, messageIDs []string) (map[string][]MessageRef, error)
+
+	// GetAttachment returns the live artifact of an attachment scope whose
+	// id or legacy_attachment_id is id, or ErrNotFound. It is the only
+	// lookup that returns attachment rows: GetArtifact never does.
+	GetAttachment(ctx context.Context, id string) (*Artifact, error)
+
+	// BindAttachment moves the upload artifactID to the message scope of
+	// messageID, under the artifact's row lock. It returns ErrNotFound when
+	// the artifact is absent, deleted or not an attachment,
+	// ErrAttachmentNotOwned when the upload is not scoped to
+	// PrincipalRef(ownerKind, ownerRef) or not owned by that principal, and
+	// ErrAttachmentBound when it is no longer an upload.
+	BindAttachment(ctx context.Context, artifactID, ownerKind, ownerRef, messageID string, now time.Time) error
+
+	// ListMessageAttachments returns the live attachments bound to each of
+	// messageIDs, keyed by message id, each with its one file, ordered by
+	// creation. Messages without attachments are absent from the map.
+	ListMessageAttachments(ctx context.Context, messageIDs []string) (map[string][]AttachmentRow, error)
+
+	// RetireScope soft-deletes, through DeleteArtifact, every live artifact
+	// in the scope (kind, ref), up to limit, recording actor, and returns
+	// how many it deleted.
+	RetireScope(ctx context.Context, kind, ref string, actor *Actor, limit int) (int, error)
+
+	// RetireStaleUploads soft-deletes, through DeleteArtifact (actor
+	// system, authority attachment_unsent), up to limit live artifacts of
+	// the upload scope created before cutoff, and returns how many it
+	// deleted.
+	RetireStaleUploads(ctx context.Context, cutoff time.Time, limit int) (int, error)
+
+	// ListLiveScopeRefs returns up to limit distinct scope refs of live
+	// artifacts of scope kind, in ascending order, strictly after after
+	// ("" = from the start).
+	ListLiveScopeRefs(ctx context.Context, kind, after string, limit int) ([]string, error)
+}
+
+// AttachmentRow is one attachment ListMessageAttachments returns: the
+// artifact and the one file of its current version.
+type AttachmentRow struct {
+	Artifact Artifact
+	File     File
 }
 
 // BlobMark is one listed blob for MarkBlobs.
@@ -584,3 +674,17 @@ func NewStore(db *sql.DB, driverName string) Store {
 		return &sqlStore{db: db, dialect: dialectSQLite}
 	}
 }
+
+// GrantPut is what PutGrant and PutReviewGrant did. Only GrantPutCreated and
+// GrantPutChanged changed anything, and only they record an event; the
+// decision log follows the same rule.
+type GrantPut int
+
+const (
+	// GrantPutUnchanged: the subject already held the permission.
+	GrantPutUnchanged GrantPut = iota
+	// GrantPutChanged: an existing grant's permission was changed.
+	GrantPutChanged
+	// GrantPutCreated: a new grant was added.
+	GrantPutCreated
+)

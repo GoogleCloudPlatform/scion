@@ -199,3 +199,29 @@ func TestLaunchMarker_FailedRenameRemovesTempFile(t *testing.T) {
 		t.Fatalf("expected the temp file to be removed after a failed rename, found %v", leftovers)
 	}
 }
+
+// TestLaunchMarker_EmptyProjectPathRefused covers the guard in
+// launchMarkersDir: an empty project path would otherwise resolve to the
+// broker process's working-directory (or global) project, so a read or
+// removal with no project path could reach that project's markers. With
+// the guard, nothing is written, read or removed for an empty path.
+func TestLaunchMarker_EmptyProjectPathRefused(t *testing.T) {
+	setupTestScionEnv(t) // the working directory holds its own .scion project
+	cwdProject, err := config.GetResolvedProjectDir("")
+	if err != nil {
+		t.Fatalf("test setup: resolve the working-directory project: %v", err)
+	}
+	if err := writeLaunchMarker(cwdProject, false, "agent-ep", "L-ep"); err != nil {
+		t.Fatal(err)
+	}
+	if launchMarkerMatches("", false, "agent-ep", "L-ep") {
+		t.Fatal("an empty project path read the working-directory project's marker")
+	}
+	removeLaunchMarkerIfMatches("", false, "agent-ep", "L-ep")
+	if !launchMarkerMatches(cwdProject, false, "agent-ep", "L-ep") {
+		t.Fatal("an empty project path removed the working-directory project's marker")
+	}
+	if err := writeLaunchMarker("", false, "agent-ep", "L-ep2"); err == nil {
+		t.Fatal("a marker was written for an empty project path")
+	}
+}

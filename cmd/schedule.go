@@ -296,7 +296,7 @@ func runScheduleList(cmd *cobra.Command, args []string) error {
 				if sched.NextRunAt != nil {
 					nextRun = scheduleWhen(*sched.NextRunAt, sched.Status)
 				}
-				_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", id, sched.Name, sched.CronExpr, nextRun, sched.Status)
+				_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", id, sched.Name, sched.CronExpr, nextRun, scheduleStatusLabel(sched.Status, sched.StatusReason))
 			}
 			_ = w.Flush()
 			printed = true
@@ -411,6 +411,9 @@ func printScheduleDetail(sched *hubclient.Schedule) {
 	fmt.Printf("Recurring Schedule: %s\n", sched.ID)
 	fmt.Printf("  Name:       %s\n", sched.Name)
 	fmt.Printf("  Status:     %s\n", sched.Status)
+	if sched.StatusReason != "" {
+		fmt.Printf("  Reason:     %s\n", sched.StatusReason)
+	}
 	fmt.Printf("  Cron:       %s\n", sched.CronExpr)
 	if sched.NextRunAt != nil {
 		fmt.Printf("  Next Run:   %s (%s)\n", clitime.Format(*sched.NextRunAt, clitime.Full), scheduleWhen(*sched.NextRunAt, sched.Status))
@@ -792,4 +795,14 @@ func scheduleWhen(t time.Time, status string) string {
 		return "now"
 	}
 	return clitime.Relative(t)
+}
+
+// scheduleStatusLabel renders a recurring schedule's status for the list
+// table, with the system reason it was paused, if any, in parentheses (for
+// example "paused (creator_deleted)").
+func scheduleStatusLabel(status, reason string) string {
+	if reason == "" {
+		return status
+	}
+	return status + " (" + reason + ")"
 }

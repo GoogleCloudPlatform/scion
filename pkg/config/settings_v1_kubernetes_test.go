@@ -26,7 +26,7 @@ import (
 // TestResolveKubernetesServiceAccountMapping covers the precedence for GCP
 // identity mode "assign" on Kubernetes (ptone/scion#2328): a
 // profile-level entry for a given GSA wins over the runtime-level entry for
-// the same GSA, mirroring ResolveImageRegistry's profile-overrides-runtime
+// the same GSA, mirroring SettingsImageRegistry's profile-overrides-runtime
 // precedent but evaluated per map key.
 func TestResolveKubernetesServiceAccountMapping(t *testing.T) {
 	tests := []struct {

@@ -48,6 +48,13 @@ const (
 	// and active_profile is not it, so the overlay resolves active_profile
 	// to the single stored profile.
 	ProfileFindingActiveProfileFallback ProfileCatalogFindingKind = "active_profile_fallback"
+	// ProfileFindingActiveProfileChanged: active_profile resolves before
+	// and after, but to different profiles (Previous before, Profile after),
+	// so agents without a saved profile change profile silently.
+	ProfileFindingActiveProfileChanged ProfileCatalogFindingKind = "active_profile_changed"
+	// ProfileFindingProfileRuntimeMissing: a referenced profile resolves,
+	// but the runtime it names does not (ptone/scion#4889).
+	ProfileFindingProfileRuntimeMissing ProfileCatalogFindingKind = "profile_runtime_missing"
 )
 
 // ProfileSource says where a profile name resolved before the change.
@@ -61,9 +68,6 @@ const (
 	ProfileSourceFile ProfileSource = "file"
 	// ProfileSourceBuiltin: defined only by the embedded default settings.
 	ProfileSourceBuiltin ProfileSource = "builtin"
-	// ProfileSourceSettings: a legacy settings hierarchy, where a file
-	// profile and a built-in default are not told apart.
-	ProfileSourceSettings ProfileSource = "settings"
 	// ProfileSourceNone: not defined before either.
 	ProfileSourceNone ProfileSource = "none"
 )
@@ -88,6 +92,11 @@ type ProfileCatalogFinding struct {
 	// it as a warning rather than a blocking problem. It relies on before
 	// being what the running system resolves today.
 	PreExisting bool
+	// Previous is the profile the default resolved to before, where the
+	// default profile changes: on active_profile when before resolved it
+	// through the single-stored-profile fallback, on active_profile_changed,
+	// and on active_profile_fallback when it differs from the new one.
+	Previous string
 }
 
 // CheckProfileCatalog reports the profile references that do not resolve in
@@ -149,14 +158,34 @@ func CheckProfileCatalog(after, before *VersionedSettings, origins map[string]Pr
 		referenced[configuredActiveProfile(before)] = true
 		referenced[before.ActiveProfile] = true
 	}
+	// The profile the default resolved to before ("" when it did not resolve).
+	beforeDefault := ""
+	if before != nil && activeProfileResolves(before) {
+		beforeDefault = before.ActiveProfile
+	}
+	afterDefault := ""
+	if activeProfileResolves(after) {
+		afterDefault = after.ActiveProfile
+	}
 	switch {
 	case after.activeProfileFallbackFrom != nil:
-		out = append(out, ProfileCatalogFinding{Kind: ProfileFindingActiveProfileFallback,
-			Profile: configured, Agents: agents[""], Source: source(configured)})
-	case !activeProfileResolves(after):
-		out = append(out, ProfileCatalogFinding{Kind: ProfileFindingActiveProfile,
+		f := ProfileCatalogFinding{Kind: ProfileFindingActiveProfileFallback,
+			Profile: configured, Agents: agents[""], Source: source(configured)}
+		if beforeDefault != afterDefault {
+			f.Previous = beforeDefault
+		}
+		out = append(out, f)
+	case afterDefault == "":
+		f := ProfileCatalogFinding{Kind: ProfileFindingActiveProfile,
 			Profile: configured, Agents: agents[""], Source: source(configured),
-			PreExisting: before != nil && !activeProfileResolves(before)})
+			PreExisting: before != nil && beforeDefault == ""}
+		if before != nil && before.activeProfileFallbackFrom != nil {
+			f.Previous = beforeDefault
+		}
+		out = append(out, f)
+	case beforeDefault != "" && beforeDefault != afterDefault:
+		out = append(out, ProfileCatalogFinding{Kind: ProfileFindingActiveProfileChanged,
+			Profile: afterDefault, Previous: beforeDefault, Agents: agents[""], Source: source(afterDefault)})
 	}
 
 	// Projects' activeProfiles.
@@ -181,6 +210,38 @@ func CheckProfileCatalog(after, before *VersionedSettings, origins map[string]Pr
 			out = append(out, ProfileCatalogFinding{Kind: ProfileFindingAgentSavedProfile,
 				Profile: name, Agents: n, Source: source(name), PreExisting: preExisting(name)})
 		}
+	}
+
+	// Referenced profiles that resolve but whose runtime does not.
+	// runtimeRefs maps each referenced profile to the agents that use it; a
+	// project's activeProfile is a reference with no agents of its own.
+	runtimeRefs := map[string]int{}
+	for _, name := range projectActive {
+		if name != "" {
+			runtimeRefs[name] += 0
+		}
+	}
+	for name, n := range agents {
+		if name != "" && n > 0 {
+			runtimeRefs[name] += n
+		}
+	}
+	if afterDefault != "" {
+		runtimeRefs[afterDefault] += agents[""]
+	}
+	for name, n := range runtimeRefs {
+		if !hasProfile(after, name) || profileRuntimeResolves(after, name) {
+			continue
+		}
+		pre := before != nil && !profileRuntimeResolves(before, name)
+		// Agents without a saved profile ran on BEFORE's default: when that
+		// worked and the default now lands on this profile, the change breaks
+		// them, whatever this profile's own state was before.
+		if name == afterDefault && agents[""] > 0 && beforeDefault != "" && profileRuntimeResolves(before, beforeDefault) {
+			pre = false
+		}
+		out = append(out, ProfileCatalogFinding{Kind: ProfileFindingProfileRuntimeMissing,
+			Profile: name, Agents: n, Source: source(name), PreExisting: pre})
 	}
 
 	// Profiles before has and after drops, with no reference.
@@ -221,7 +282,7 @@ func ProfileCatalogView(projectPath string, storedRuntimes map[string]V1RuntimeC
 		return nil, err
 	}
 	o := NewSettingsOverlay()
-	o.Update(storedRuntimes, storedProfiles, nil, "")
+	o.Update(storedRuntimes, storedProfiles, nil)
 	o.Apply(vs)
 	return vs, nil
 }
@@ -229,6 +290,17 @@ func ProfileCatalogView(projectPath string, storedRuntimes map[string]V1RuntimeC
 // hasProfile reports whether vs defines profile name.
 func hasProfile(vs *VersionedSettings, name string) bool {
 	_, ok := vs.Profiles[name]
+	return ok
+}
+
+// profileRuntimeResolves reports whether vs defines profile name and the
+// runtime it names.
+func profileRuntimeResolves(vs *VersionedSettings, name string) bool {
+	p, ok := vs.Profiles[name]
+	if !ok {
+		return false
+	}
+	_, ok = vs.Runtimes[p.Runtime]
 	return ok
 }
 
@@ -253,28 +325,14 @@ func activeProfileResolves(vs *VersionedSettings) bool {
 // hierarchy before any hub-stored overlay: ProfileSourceFile for a name a
 // settings file layer (global or project) or the SCION_ environment
 // defines, ProfileSourceBuiltin for a name only the embedded defaults
-// define. It takes the same branch as LoadEffectiveSettings. On a versioned
-// hierarchy it uses LoadVersionedSettings' own layers
-// (loadVersionedSettingsKoanf), once with and once without the embedded
-// defaults. On a legacy hierarchy every profile is ProfileSourceSettings: the
-// legacy adapter has no separable defaults layer. Profiles that reach the hub
+// define. It uses LoadVersionedSettings' own layers
+// (loadVersionedSettingsKoanf), the ones LoadEffectiveSettings reads, once
+// with and once without the embedded defaults; a legacy-format file is
+// converted at its own layer the same way. Profiles that reach the hub
 // only through its stored set (server config, SCION_SEED_*) are not
 // labelled here; CheckProfileCatalog labels them "stored" from before.
 func ProfileOrigins(projectPath string) (map[string]ProfileSource, error) {
 	out := map[string]ProfileSource{}
-	// The same branch LoadEffectiveSettings takes; the second result
-	// (a missing schema_version) only feeds its warnings.
-	if hasVersioned, _ := detectHierarchyFormat(projectPath); !hasVersioned {
-		legacy, err := LoadSettingsKoanf(projectPath)
-		if err != nil {
-			return nil, fmt.Errorf("loading legacy settings: %w", err)
-		}
-		vs, _ := AdaptLegacySettings(legacy)
-		for name := range vs.Profiles {
-			out[name] = ProfileSourceSettings
-		}
-		return out, nil
-	}
 	if data, err := GetDefaultSettingsDataYAML(); err == nil {
 		defaults := koanf.New(".")
 		if err := defaults.Load(rawbytes.Provider(data), yaml.Parser()); err != nil {

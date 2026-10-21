@@ -798,6 +798,17 @@ func entBrokerToStore(b *ent.RuntimeBroker) *store.RuntimeBroker {
 	if b.GcpHostProjectID != nil {
 		sb.GCPHostProjectID = *b.GcpHostProjectID
 	}
+	sb.GCPHostSource = b.GcpHostSource
+	if b.HostIdentityObservation != nil && *b.HostIdentityObservation != "" {
+		obs := &store.HostIdentityObservation{Outcome: *b.HostIdentityObservation}
+		if b.HostIdentityObservedEmail != nil {
+			obs.Email = *b.HostIdentityObservedEmail
+		}
+		if b.HostIdentityObservedAt != nil {
+			obs.ObservedAt = *b.HostIdentityObservedAt
+		}
+		sb.HostObservation = obs
+	}
 	unmarshalRawJSON(b.Capabilities, &sb.Capabilities)
 	// Profiles are persisted in the "runtimes" column (legacy naming).
 	unmarshalRawJSON(b.Runtimes, &sb.Profiles)
@@ -890,6 +901,9 @@ func (s *ProjectStore) CreateRuntimeBroker(ctx context.Context, b *store.Runtime
 	}
 	if b.GCPHostProjectID != "" {
 		create.SetGcpHostProjectID(b.GCPHostProjectID)
+	}
+	if b.GCPHostSource != "" {
+		create.SetGcpHostSource(b.GCPHostSource)
 	}
 
 	created, err := create.Save(ctx)
@@ -1000,16 +1014,8 @@ func (s *ProjectStore) UpdateRuntimeBroker(ctx context.Context, b *store.Runtime
 		} else {
 			update.ClearConnectedAt()
 		}
-		if b.GCPHostServiceAccountEmail != "" {
-			update.SetGcpHostServiceAccountEmail(b.GCPHostServiceAccountEmail)
-		} else {
-			update.ClearGcpHostServiceAccountEmail()
-		}
-		if b.GCPHostProjectID != "" {
-			update.SetGcpHostProjectID(b.GCPHostProjectID)
-		} else {
-			update.ClearGcpHostProjectID()
-		}
+		// The GCP host pair and its source are never written here; see
+		// SetRuntimeBrokerGCPHost*.
 		affected, err := update.Save(ctx)
 		if err != nil {
 			return mapError(err)
@@ -1053,6 +1059,171 @@ func (s *ProjectStore) SetRuntimeBrokerCreatedByIfEmpty(ctx context.Context, id,
 		return false, mapError(err)
 	}
 	return affected == 1, nil
+}
+
+// gcpHostEmailUnset and the other predicates below match both an empty
+// string and SQL NULL: the GCP host columns are Nillable and the source
+// column predates rows written before it existed, so a plain EQ("")
+// predicate would miss NULL-backed rows.
+func gcpHostEmailUnset() predicate.RuntimeBroker {
+	return runtimebroker.Or(runtimebroker.GcpHostServiceAccountEmailIsNil(), runtimebroker.GcpHostServiceAccountEmailEQ(""))
+}
+
+func gcpHostProjectUnset() predicate.RuntimeBroker {
+	return runtimebroker.Or(runtimebroker.GcpHostProjectIDIsNil(), runtimebroker.GcpHostProjectIDEQ(""))
+}
+
+func gcpHostNotAdmin() predicate.RuntimeBroker {
+	return runtimebroker.Or(runtimebroker.GcpHostSourceIsNil(), runtimebroker.GcpHostSourceNEQ(store.GCPHostSourceAdmin))
+}
+
+func gcpHostSourceUnset() predicate.RuntimeBroker {
+	return runtimebroker.Or(runtimebroker.GcpHostSourceIsNil(), runtimebroker.GcpHostSourceEQ(""))
+}
+
+// setGCPHostPair adds the GCP host pair to an update: empty values clear.
+func setGCPHostPair(u *ent.RuntimeBrokerUpdate, email, project string) *ent.RuntimeBrokerUpdate {
+	if email != "" {
+		u.SetGcpHostServiceAccountEmail(email)
+	} else {
+		u.ClearGcpHostServiceAccountEmail()
+	}
+	if project != "" {
+		u.SetGcpHostProjectID(project)
+	} else {
+		u.ClearGcpHostProjectID()
+	}
+	return u
+}
+
+// SetRuntimeBrokerGCPHostIfUnset writes the GCP host pair, with source, in
+// one conditional UPDATE: only while the stored email and project are both
+// empty and the source is not admin. The condition is evaluated by the
+// database, so a concurrent update-API write is never overwritten.
+func (s *ProjectStore) SetRuntimeBrokerGCPHostIfUnset(ctx context.Context, id, email, project, source string) (bool, error) {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return false, err
+	}
+	u := s.client.RuntimeBroker.Update().
+		Where(runtimebroker.IDEQ(uid), gcpHostEmailUnset(), gcpHostProjectUnset(), gcpHostNotAdmin()).
+		SetGcpHostSource(source).
+		SetUpdated(time.Now()).
+		AddLockVersion(1)
+	affected, err := setGCPHostPair(u, email, project).Save(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return affected == 1, nil
+}
+
+// SetRuntimeBrokerGCPHostDetected writes the GCP host pair with source
+// detected, in one conditional UPDATE, unless the stored source is admin.
+func (s *ProjectStore) SetRuntimeBrokerGCPHostDetected(ctx context.Context, id, email, project string) (bool, error) {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return false, err
+	}
+	u := s.client.RuntimeBroker.Update().
+		Where(runtimebroker.IDEQ(uid), gcpHostNotAdmin()).
+		SetGcpHostSource(store.GCPHostSourceDetected).
+		SetUpdated(time.Now()).
+		AddLockVersion(1)
+	affected, err := setGCPHostPair(u, email, project).Save(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return affected == 1, nil
+}
+
+// gcpHostSettingOf returns the stored GCP host pair and source of b.
+func gcpHostSettingOf(b *ent.RuntimeBroker) store.GCPHostSetting {
+	prev := store.GCPHostSetting{Source: b.GcpHostSource}
+	if b.GcpHostServiceAccountEmail != nil {
+		prev.Email = *b.GcpHostServiceAccountEmail
+	}
+	if b.GcpHostProjectID != nil {
+		prev.Project = *b.GcpHostProjectID
+	}
+	return prev
+}
+
+// casGCPHostWrite applies apply to the row as a compare-and-set on
+// lock_version (every writer of the row advances it) and returns the GCP
+// host values it replaced. A concurrent write between the read and the
+// UPDATE makes the UPDATE match no row, and the loop retries with a fresh
+// read, so the returned values are exactly the ones overwritten.
+func (s *ProjectStore) casGCPHostWrite(ctx context.Context, id string, apply func(u *ent.RuntimeBrokerUpdate)) (store.GCPHostSetting, error) {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return store.GCPHostSetting{}, err
+	}
+	for attempt := 0; attempt < maxCASRetries; attempt++ {
+		cur, err := s.client.RuntimeBroker.Get(ctx, uid)
+		if err != nil {
+			return store.GCPHostSetting{}, mapError(err)
+		}
+		u := s.client.RuntimeBroker.Update().
+			Where(runtimebroker.IDEQ(uid), runtimebroker.LockVersionEQ(cur.LockVersion)).
+			SetUpdated(time.Now()).
+			AddLockVersion(1)
+		apply(u)
+		affected, err := u.Save(ctx)
+		if err != nil {
+			return store.GCPHostSetting{}, mapError(err)
+		}
+		if affected == 1 {
+			return gcpHostSettingOf(cur), nil
+		}
+	}
+	return store.GCPHostSetting{}, store.ErrVersionConflict
+}
+
+// SetRuntimeBrokerGCPHost writes the GCP host pair unconditionally with
+// source admin, as a compare-and-set on lock_version, and returns the
+// values it replaced.
+func (s *ProjectStore) SetRuntimeBrokerGCPHost(ctx context.Context, id, email, project string) (store.GCPHostSetting, error) {
+	return s.casGCPHostWrite(ctx, id, func(u *ent.RuntimeBrokerUpdate) {
+		setGCPHostPair(u.SetGcpHostSource(store.GCPHostSourceAdmin), email, project)
+	})
+}
+
+// SetRuntimeBrokerGCPHostSource sets only the GCP host source, as a
+// compare-and-set on lock_version, and returns the values it replaced.
+func (s *ProjectStore) SetRuntimeBrokerGCPHostSource(ctx context.Context, id, source string) (store.GCPHostSetting, error) {
+	return s.casGCPHostWrite(ctx, id, func(u *ent.RuntimeBrokerUpdate) {
+		u.SetGcpHostSource(source)
+	})
+}
+
+// RecordRuntimeBrokerHostObservation stores the latest host identity
+// observation. It writes only the host_identity_* columns.
+func (s *ProjectStore) RecordRuntimeBrokerHostObservation(ctx context.Context, id string, obs store.HostIdentityObservation) error {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return err
+	}
+	at := obs.ObservedAt
+	if at.IsZero() {
+		at = time.Now()
+	}
+	u := s.client.RuntimeBroker.Update().
+		Where(runtimebroker.IDEQ(uid)).
+		SetHostIdentityObservation(obs.Outcome).
+		SetHostIdentityObservedAt(at)
+	if obs.Email != "" {
+		u.SetHostIdentityObservedEmail(strings.ToLower(obs.Email))
+	} else {
+		u.ClearHostIdentityObservedEmail()
+	}
+	affected, err := u.Save(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	if affected == 0 {
+		return store.ErrNotFound
+	}
+	return nil
 }
 
 // DeleteRuntimeBroker removes a runtime broker by ID. runtime_brokers has no
@@ -1200,10 +1371,15 @@ func runtimeBrokerBeforeCursor(cursorCreated time.Time, cursorID uuid.UUID) pred
 // broker's labels JSON contains {"scion.io/broker-role": "embedded"}.
 // Used to recover the legacy broker ID from the DB when settings are lost, so
 // only legacy rows (no stored runtime target) are candidates: a flat Runtime
-// Broker row is never recovered as the legacy identity.
+// Broker row is never recovered as the legacy identity. Only Hub-managed rows
+// (no recorded owner) are candidates.
 func (s *ProjectStore) FindEmbeddedBroker(ctx context.Context) (*store.RuntimeBroker, error) {
 	brokers, err := s.client.RuntimeBroker.Query().
-		Where(brokerLabelContains("scion.io/broker-role", "embedded"), runtimebroker.RuntimeTargetIDIsNil()).
+		Where(
+			brokerLabelContains(store.BrokerRoleLabel, store.BrokerRoleEmbedded),
+			runtimebroker.RuntimeTargetIDIsNil(),
+			runtimebroker.Or(runtimebroker.CreatedByIsNil(), runtimebroker.CreatedByEQ("")),
+		).
 		Limit(2). // Only need to know if there's exactly one
 		All(ctx)
 	if err != nil {

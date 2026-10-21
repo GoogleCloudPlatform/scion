@@ -441,6 +441,8 @@ func TestAgentAllowedList(t *testing.T) {
 		"hub.profile.show", "hub.profile.remove", "hub.test-identity",
 		"hub.test-identity.issue", "hub.test-identity.token", "hub.test-identity.list",
 		"hub.test-identity.delete", "hub.test-identity.teardown",
+		"hub.test-identity.web-code", "hub.test-identity.issue-admin",
+		"hub.test-identity.cleanup", "hub.test-identity.provenance",
 		"notifications",
 		"schedule", "schedule.list", "schedule.get", "schedule.cancel", "schedule.history",
 		"schedule.create", "schedule.create-recurring", "schedule.pause", "schedule.resume", "schedule.delete",
@@ -463,7 +465,7 @@ func TestAgentAllowedList(t *testing.T) {
 		"attach", "broadcast", "restore", "sync", "clean", "cdw", "init",
 		"completion", "config", "doctor", "messages",
 		"server", "broker",
-		"config.set", "config.validate", "config.migrate",
+		"config.set", "config.unset", "config.validate", "config.migrate",
 		"config.list", "config.get", "config.dir", "config.schema",
 		"hub.enable", "hub.disable", "hub.link", "hub.unlink",
 		"hub.auth", "hub.token", "hub.token.scopes", "hub.brokers",
@@ -683,4 +685,29 @@ func TestTunnelCommandsAbsentInAgentMode(t *testing.T) {
 	root.AddCommand(cloneCommandShape(real))
 	applyModeRestrictions(root, resolveMode())
 	assert.Empty(t, collectCommandNames(root), "agent mode must remove every tunnel command")
+}
+
+// TestConfigUnset_HumanOnly: config unset is available in human mode only,
+// like config set; agent mode removes it with the rest of config.
+func TestConfigUnset_HumanOnly(t *testing.T) {
+	assert.False(t, agentAllowed["config.unset"], "config unset must not be allowed in agent mode")
+	assert.False(t, agentAllowed["config"], "config must not be allowed in agent mode")
+
+	t.Setenv("SCION_CLI_MODE", "agent")
+	root := &cobra.Command{Use: "scion"}
+	cfg := &cobra.Command{Use: "config"}
+	cfg.AddCommand(&cobra.Command{Use: "unset", Run: func(*cobra.Command, []string) {}})
+	root.AddCommand(cfg)
+	applyModeRestrictions(root, resolveMode())
+	remaining := collectCommandNames(root)
+	assert.NotContains(t, remaining, "config.unset")
+	assert.NotContains(t, remaining, "config")
+
+	found := false
+	for _, c := range configCmd.Commands() {
+		if c.Name() == "unset" {
+			found = true
+		}
+	}
+	assert.True(t, found, "config unset is registered (human mode)")
 }

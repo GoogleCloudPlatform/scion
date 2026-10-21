@@ -23,7 +23,7 @@ import (
 	"time"
 )
 
-func TestStore_SaveLoad(t *testing.T) {
+func TestStore_Load(t *testing.T) {
 	tempDir := t.TempDir()
 	credPath := filepath.Join(tempDir, "broker-credentials.json")
 	store := NewStore(credPath)
@@ -35,11 +35,7 @@ func TestStore_SaveLoad(t *testing.T) {
 		RegisteredAt: time.Now().Truncate(time.Second),
 	}
 
-	// Save
-	err := store.Save(creds)
-	if err != nil {
-		t.Fatalf("Save failed: %v", err)
-	}
+	writeStoreFixture(t, store, creds)
 
 	// Load
 	loaded, err := store.Load()
@@ -58,33 +54,6 @@ func TestStore_SaveLoad(t *testing.T) {
 	}
 }
 
-func TestStore_FilePermissions(t *testing.T) {
-	tempDir := t.TempDir()
-	credPath := filepath.Join(tempDir, "broker-credentials.json")
-	store := NewStore(credPath)
-
-	creds := &BrokerCredentials{
-		BrokerID:  "test-host-id",
-		SecretKey: base64.StdEncoding.EncodeToString([]byte("secret")),
-	}
-
-	err := store.Save(creds)
-	if err != nil {
-		t.Fatalf("Save failed: %v", err)
-	}
-
-	// Check file permissions
-	info, err := os.Stat(credPath)
-	if err != nil {
-		t.Fatalf("Stat failed: %v", err)
-	}
-
-	perm := info.Mode().Perm()
-	if perm != FileMode {
-		t.Errorf("Expected file permissions %o, got %o", FileMode, perm)
-	}
-}
-
 func TestStore_Exists(t *testing.T) {
 	tempDir := t.TempDir()
 	credPath := filepath.Join(tempDir, "broker-credentials.json")
@@ -100,7 +69,7 @@ func TestStore_Exists(t *testing.T) {
 		BrokerID:  "test-host-id",
 		SecretKey: base64.StdEncoding.EncodeToString([]byte("secret")),
 	}
-	_ = store.Save(creds)
+	writeStoreFixture(t, store, creds)
 
 	// Should exist now
 	if !store.Exists() {
@@ -118,7 +87,7 @@ func TestStore_Delete(t *testing.T) {
 		BrokerID:  "test-host-id",
 		SecretKey: base64.StdEncoding.EncodeToString([]byte("secret")),
 	}
-	_ = store.Save(creds)
+	writeStoreFixture(t, store, creds)
 
 	// Delete
 	err := store.Delete()
@@ -159,7 +128,7 @@ func TestStore_GetSecretKey(t *testing.T) {
 		BrokerID:  "test-host-id",
 		SecretKey: base64.StdEncoding.EncodeToString(originalKey),
 	}
-	_ = store.Save(creds)
+	writeStoreFixture(t, store, creds)
 
 	// Get secret key
 	key, err := store.GetSecretKey()
@@ -169,60 +138,6 @@ func TestStore_GetSecretKey(t *testing.T) {
 
 	if string(key) != string(originalKey) {
 		t.Errorf("Secret key mismatch: expected %q, got %q", originalKey, key)
-	}
-}
-
-func TestStore_SaveValidation(t *testing.T) {
-	tempDir := t.TempDir()
-	credPath := filepath.Join(tempDir, "broker-credentials.json")
-	store := NewStore(credPath)
-
-	tests := []struct {
-		name      string
-		creds     *BrokerCredentials
-		expectErr bool
-	}{
-		{
-			name:      "nil credentials",
-			creds:     nil,
-			expectErr: true,
-		},
-		{
-			name: "missing broker ID",
-			creds: &BrokerCredentials{
-				BrokerID:  "",
-				SecretKey: "abc",
-			},
-			expectErr: true,
-		},
-		{
-			name: "missing secret key",
-			creds: &BrokerCredentials{
-				BrokerID:  "host-id",
-				SecretKey: "",
-			},
-			expectErr: true,
-		},
-		{
-			name: "valid credentials",
-			creds: &BrokerCredentials{
-				BrokerID:  "host-id",
-				SecretKey: "secret",
-			},
-			expectErr: false,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			err := store.Save(tc.creds)
-			if tc.expectErr && err == nil {
-				t.Error("Expected error but got nil")
-			}
-			if !tc.expectErr && err != nil {
-				t.Errorf("Unexpected error: %v", err)
-			}
-		})
 	}
 }
 
@@ -277,36 +192,6 @@ func TestStore_LoadValidation(t *testing.T) {
 	}
 }
 
-func TestStore_SaveFromJoinResponse(t *testing.T) {
-	tempDir := t.TempDir()
-	credPath := filepath.Join(tempDir, "broker-credentials.json")
-	store := NewStore(credPath)
-
-	err := store.SaveFromJoinResponse("host-123", "c2VjcmV0", "http://hub.example.com")
-	if err != nil {
-		t.Fatalf("SaveFromJoinResponse failed: %v", err)
-	}
-
-	// Verify saved data
-	creds, err := store.Load()
-	if err != nil {
-		t.Fatalf("Load failed: %v", err)
-	}
-
-	if creds.BrokerID != "host-123" {
-		t.Errorf("BrokerID mismatch: got %q", creds.BrokerID)
-	}
-	if creds.SecretKey != "c2VjcmV0" {
-		t.Errorf("SecretKey mismatch: got %q", creds.SecretKey)
-	}
-	if creds.HubEndpoint != "http://hub.example.com" {
-		t.Errorf("HubEndpoint mismatch: got %q", creds.HubEndpoint)
-	}
-	if creds.RegisteredAt.IsZero() {
-		t.Error("RegisteredAt should be set")
-	}
-}
-
 func TestStore_Path(t *testing.T) {
 	store := NewStore("/custom/path/creds.json")
 	if store.Path() != "/custom/path/creds.json" {
@@ -324,38 +209,6 @@ func TestDefaultPath(t *testing.T) {
 	}
 }
 
-func TestStore_JSONFormat(t *testing.T) {
-	tempDir := t.TempDir()
-	credPath := filepath.Join(tempDir, "broker-credentials.json")
-	store := NewStore(credPath)
-
-	creds := &BrokerCredentials{
-		BrokerID:     "test-host-id",
-		SecretKey:    "dGVzdC1zZWNyZXQ=",
-		HubEndpoint:  "http://localhost:8080",
-		RegisteredAt: time.Date(2025, 1, 30, 12, 0, 0, 0, time.UTC),
-	}
-	_ = store.Save(creds)
-
-	// Read raw file and verify JSON structure
-	data, _ := os.ReadFile(credPath)
-	var parsed map[string]interface{}
-	err := json.Unmarshal(data, &parsed)
-	if err != nil {
-		t.Fatalf("Failed to parse saved JSON: %v", err)
-	}
-
-	if parsed["brokerId"] != "test-host-id" {
-		t.Errorf("brokerId mismatch in JSON: %v", parsed["brokerId"])
-	}
-	if parsed["secretKey"] != "dGVzdC1zZWNyZXQ=" {
-		t.Errorf("secretKey mismatch in JSON: %v", parsed["secretKey"])
-	}
-	if parsed["hubEndpoint"] != "http://localhost:8080" {
-		t.Errorf("hubEndpoint mismatch in JSON: %v", parsed["hubEndpoint"])
-	}
-}
-
 func TestStore_TransportFieldsRoundTrip(t *testing.T) {
 	tempDir := t.TempDir()
 	credPath := filepath.Join(tempDir, "broker-credentials.json")
@@ -369,9 +222,7 @@ func TestStore_TransportFieldsRoundTrip(t *testing.T) {
 		TransportAudience: "12345.apps.googleusercontent.com",
 	}
 
-	if err := store.Save(creds); err != nil {
-		t.Fatalf("Save failed: %v", err)
-	}
+	writeStoreFixture(t, store, creds)
 
 	loaded, err := store.Load()
 	if err != nil {
@@ -429,9 +280,7 @@ func TestStore_ModTime(t *testing.T) {
 		BrokerID:  "test-host",
 		SecretKey: "dGVzdC1zZWNyZXQ=",
 	}
-	if err := store.Save(creds); err != nil {
-		t.Fatalf("Save failed: %v", err)
-	}
+	writeStoreFixture(t, store, creds)
 
 	// ModTime should now return a non-zero time
 	modTime = store.ModTime()
@@ -464,9 +313,7 @@ func TestStore_LoadIfChanged(t *testing.T) {
 		BrokerID:  "host-v1",
 		SecretKey: "c2VjcmV0LXYx",
 	}
-	if err := store.Save(initialCreds); err != nil {
-		t.Fatalf("Save failed: %v", err)
-	}
+	writeStoreFixture(t, store, initialCreds)
 
 	// First load with zero time should return credentials
 	creds, modTime, err := store.LoadIfChanged(time.Time{})
@@ -498,9 +345,7 @@ func TestStore_LoadIfChanged(t *testing.T) {
 		BrokerID:  "host-v2",
 		SecretKey: "c2VjcmV0LXYy",
 	}
-	if err := store.Save(updatedCreds); err != nil {
-		t.Fatalf("Save failed: %v", err)
-	}
+	writeStoreFixture(t, store, updatedCreds)
 
 	// LoadIfChanged with old mod time should return new credentials
 	creds, newModTime, err := store.LoadIfChanged(modTime)
@@ -515,5 +360,21 @@ func TestStore_LoadIfChanged(t *testing.T) {
 	}
 	if !newModTime.After(modTime) {
 		t.Error("Expected new mod time to be after old mod time")
+	}
+}
+
+// writeStoreFixture writes creds as the legacy credentials file of store, the
+// way older releases wrote it (the store itself only reads it now).
+func writeStoreFixture(t *testing.T, store *Store, creds *BrokerCredentials) {
+	t.Helper()
+	data, err := json.MarshalIndent(creds, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(store.Path()), DirMode); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(store.Path(), data, FileMode); err != nil {
+		t.Fatal(err)
 	}
 }

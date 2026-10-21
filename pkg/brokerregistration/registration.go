@@ -28,6 +28,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -76,6 +77,9 @@ type Options struct {
 	// reports one that a remote broker may not be able to reach (for
 	// example http://localhost:<port>).
 	HubEndpoint string
+	// Out, when set, receives one line per setting the Hub kept unchanged
+	// on registration (hubclient.PrintKeptSettings).
+	Out io.Writer
 }
 
 // Option sets an Options field.
@@ -168,6 +172,9 @@ func RegisterInstance(ctx context.Context, client hubclient.Client, inst config.
 	}
 	if ackErr := brokeridentity.CheckActivationAck(id, brokeridentity.PhaseRegister, createResp.BrokerID, createResp.RuntimeTarget); ackErr != nil {
 		return nil, &RegistrationRefusal{Phase: brokeridentity.PhaseRegister, RuntimeBrokerID: id.RuntimeBrokerID, Name: inst.Name, Err: ackErr}
+	}
+	if o.Out != nil {
+		hubclient.PrintKeptSettings(o.Out, createResp.KeptSettings)
 	}
 
 	// Step 4: join, then its acknowledgement.

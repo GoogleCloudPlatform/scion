@@ -37,7 +37,8 @@ type hubStartStub struct {
 	server           *httptest.Server
 	createBody       map[string]interface{}
 	createCalls      int
-	existingPhase    string // "" → existing-agent GET returns 404
+	existingPhase    string                 // "" → existing-agent GET returns 404
+	existingLaunch   map[string]interface{} // launch object of the existing agent (nil → none)
 	project          map[string]interface{}
 	createStatus     int                    // non-zero → the create POST fails with this status
 	createErrCode    string                 // error code for a failed create ("" → "conflict")
@@ -69,10 +70,14 @@ func newHubStartStub(t *testing.T, projectID, agentName, existingPhase string) *
 				})
 				return
 			}
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			existing := map[string]interface{}{
 				"id": "agent-id", "slug": agentName, "name": agentName,
 				"phase": stub.existingPhase, "status": stub.existingPhase,
-			})
+			}
+			if stub.existingLaunch != nil {
+				existing["launch"] = stub.existingLaunch
+			}
+			_ = json.NewEncoder(w).Encode(existing)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/projects/"+projectID+"/agents":
 			stub.createCalls++
 			// Never FailNow in the handler goroutine: it would exit without a
@@ -229,6 +234,61 @@ func TestStartAgentViaHub_ExistingAgentPreCheck(t *testing.T) {
 			}
 			assert.Contains(t, stdout, tc.wantAction+" '"+agentName+"'")
 			assert.Contains(t, stderr, "Agent '"+agentName+"' "+tc.wantResult+" via Hub.")
+		})
+	}
+}
+
+// D-T8 addition (design wave 3 D-c, R3; ptone/scion#4670): an agent left
+// in error by a failed start carries its resume memory in
+// launch.resumePhase. The CLI decides as the hub does, from the remembered
+// phase: the resume flag on the wire, the action line, the result word and
+// the flags warning. Without resumePhase an error agent behaves as before.
+func TestStartAgentViaHub_ExistingAgentResumeMemory(t *testing.T) {
+	const projectID, agentName = "proj-memory", "memory-agent"
+
+	for _, tc := range []struct {
+		resumePhase string
+		wantResume  bool
+		wantAction  string
+		wantResult  string
+		wantWarning string // "" → no flags warning
+	}{
+		{"suspended", true, "Resuming agent", "resumed", "(phase: error, resumes as suspended)"},
+		{"halted", true, "Restarting agent", "restarted", "(phase: error, resumes as halted)"},
+		{"created", false, "Starting agent", "started", "(phase: error, resumes as created)"},
+		{"provisioning", false, "Starting agent", "started", ""},
+		{"", false, "Starting agent", "started", ""},
+	} {
+		t.Run("resumePhase="+tc.resumePhase, func(t *testing.T) {
+			resetHubStartGlobals(t)
+			stub := newHubStartStub(t, projectID, agentName, "error")
+			stub.existingLaunch = map[string]interface{}{
+				"id": "l1", "state": "ended", "active": false, "kind": "start", "error": "crash_loop",
+			}
+			if tc.resumePhase != "" {
+				stub.existingLaunch["resumePhase"] = tc.resumePhase
+			}
+			cmd := newFlagCmd(t, map[string]string{"image": "img:1"})
+			var err error
+			stdout, stderr := captureStdIO(t, func() {
+				err = startAgentViaHub(cmd, stub.hubCtx(t, projectID), agentName, "", false, nil)
+			})
+			require.NoError(t, err)
+			require.Equal(t, 1, stub.createCalls)
+			if tc.wantResume {
+				assert.Equal(t, true, stub.createBody["resume"])
+			} else {
+				_, present := stub.createBody["resume"]
+				assert.False(t, present, "resume must not be set for resumePhase %q", tc.resumePhase)
+			}
+			assert.Contains(t, stdout, tc.wantAction+" '"+agentName+"'")
+			assert.Contains(t, stderr, "Agent '"+agentName+"' "+tc.wantResult+" via Hub.")
+			if tc.wantWarning == "" {
+				assert.NotContains(t, stderr, "not applied to an existing agent")
+			} else {
+				assert.Contains(t, stderr, "Warning: agent '"+agentName+"' already exists "+tc.wantWarning+
+					" and is reused in place; these flags are not applied to an existing agent: --image\n")
+			}
 		})
 	}
 }

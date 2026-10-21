@@ -133,6 +133,9 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		LaunchStep:          a.LaunchStep,
 		LaunchError:         a.LaunchError,
 		LaunchCause:         a.LaunchCause,
+		LaunchPriorPhase:    a.LaunchPriorPhase,
+		LaunchRevokeOnFail:  a.LaunchRevokeOnFail,
+		LaunchResumePhase:   a.LaunchResumePhase,
 		RunID:               a.RunID,
 		PreviousRunIDs:      append([]string(nil), a.PreviousRunIds...),
 		WorkspacePlacement:  a.WorkspacePlacement,
@@ -325,8 +328,8 @@ func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) error {
 		// launch_* field CreateAgent sets — the rest start at their column
 		// defaults ("", false, 0) because a freshly created agent has no
 		// launch yet. Every other launch_* column is written only by
-		// BeginLaunch/MarkLaunchAccepted/EndLaunch/ApplyLaunchReport/
-		// RunLaunchReaperTick (§3.3).
+		// BeginLaunch/MarkLaunchAccepted/EndLaunch(WithCode)/
+		// ApplyLaunchReport/RunLaunchReaperTick (§3.3).
 		SetLaunchAsyncOptIn(a.LaunchAsyncOptIn)
 
 	if a.MessageMode != "" {
@@ -1522,6 +1525,11 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	if su.ReportSource != store.StatusReportSourceRuntime && store.IsHaltEvidence(su.ExitReason) {
 		su.ExitReason = ""
 	}
+	// The agent-reported signaled reason only fills an empty slot: a
+	// recorded reason is never replaced by it (ptone/scion#5278).
+	if su.ExitReason == string(state.ExitReasonSignaled) && current.ExitReason != "" {
+		su.ExitReason = ""
+	}
 
 	now := time.Now()
 
@@ -1683,6 +1691,17 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		upd.SetExitReason("")
 	}
 
+	// A stored signaled reason describes the run that ended; it is cleared
+	// when the agent next moves to starting or running, by any path (a
+	// reincarnation, or a start whose started-status write failed). This
+	// reads the final phase, after every guard above, so a write those
+	// guards neutralised (a delete hold, a reincarnation in flight, another
+	// run's report) never clears it. Only the reason is cleared.
+	if current.ExitReason == string(state.ExitReasonSignaled) && su.ExitReason == "" &&
+		(su.Phase == string(state.PhaseStarting) || su.Phase == string(state.PhaseRunning)) {
+		upd.SetExitReason("")
+	}
+
 	// T1 async agent create (design t1-async-create-v11.md §3.3): a write of
 	// phase=running always clears launch_error (T3) — once an agent has run,
 	// it must never again match the incomplete-create predicate, whatever
@@ -1807,8 +1826,11 @@ func haltedStickyDrop(current *ent.Agent, su store.AgentStatusUpdate) bool {
 //   - the row is already stopped or error with no halt-evidence reason
 //     recorded, and the report (with no phase, or a stopped/error phase)
 //     brings one: a later report of the same run saying why it ended. Such
-//     an upgrade is blocked only when the report itself carries exit code
-//     0: the runtime saw a clean exit.
+//     an upgrade is blocked when the report itself carries exit code 0 (the
+//     runtime saw a clean exit), unless the row's reason is the
+//     agent-reported signaled: the agent stopped after a termination
+//     signal, so the clean exit is the graceful end of a disruption. The
+//     signaled reason is never evidence by itself.
 func evaluateHalt(current *ent.Agent, su store.AgentStatusUpdate) (bool, string) {
 	if current.RunIntent == nil || store.RunIntent(*current.RunIntent) != store.RunIntentRunning {
 		return false, ""
@@ -1833,7 +1855,7 @@ func evaluateHalt(current *ent.Agent, su store.AgentStatusUpdate) (bool, string)
 		if store.IsHaltEvidence(current.ExitReason) {
 			return false, ""
 		}
-		if su.ExitCode != nil && *su.ExitCode == 0 {
+		if su.ExitCode != nil && *su.ExitCode == 0 && current.ExitReason != string(state.ExitReasonSignaled) {
 			return false, ""
 		}
 		if newPhase == "" {

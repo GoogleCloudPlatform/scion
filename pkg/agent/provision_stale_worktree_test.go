@@ -16,7 +16,7 @@ import (
 
 // isolateGitTestEnv gives git a private HOME and no system config, and
 // clears the SCION_* and git variables that redirect repository discovery
-// (SCION_HOST_UID would otherwise turn worktree pruning into a no-op).
+// (SCION_HOST_UID would otherwise turn worktree entry removal into a no-op).
 func isolateGitTestEnv(t *testing.T) string {
 	t.Helper()
 	isolateTestEnv(t)
@@ -67,10 +67,10 @@ func worktreeAdminDir(repo, name string) string {
 	return filepath.Join(repo, ".git", "worktrees", name)
 }
 
-// With prune set and no workspace path (a shared-workspace agent), no
-// worktree prune runs in the repository of the process's current directory:
-// a stale worktree entry there survives (ptone/scion#4511).
-func TestRemoveAgentDirAndPruneWorktrees_EmptyWorkspaceDoesNotPruneCwdRepo(t *testing.T) {
+// With no workspace path (a shared-workspace agent), nothing is removed from
+// the repository of the process's current directory: a stale worktree entry
+// there survives (ptone/scion#4511).
+func TestRemoveAgentDirAndWorktreeEntry_EmptyWorkspaceLeavesCwdRepo(t *testing.T) {
 	base := isolateGitTestEnv(t)
 	cwdRepo := filepath.Join(base, "caller")
 	initTestRepo(t, cwdRepo)
@@ -86,7 +86,7 @@ func TestRemoveAgentDirAndPruneWorktrees_EmptyWorkspaceDoesNotPruneCwdRepo(t *te
 		t.Fatal(err)
 	}
 
-	removeAgentDirAndPruneWorktrees(agentDir, "", true)
+	testRemoveAgentDir(t, agentDir, "")
 
 	if _, err := os.Stat(agentDir); !os.IsNotExist(err) {
 		t.Fatalf("expected the agent dir to be removed (stat err=%v)", err)
@@ -96,9 +96,9 @@ func TestRemoveAgentDirAndPruneWorktrees_EmptyWorkspaceDoesNotPruneCwdRepo(t *te
 	}
 }
 
-// With prune set and a workspace path, the worktrees of the repository
-// holding the workspace are still pruned, wherever the process runs.
-func TestRemoveAgentDirAndPruneWorktrees_WorkspacePrunesItsRepo(t *testing.T) {
+// With a workspace path, the workspace's own entry is removed from the
+// repository holding it, wherever the process runs.
+func TestRemoveAgentDirAndWorktreeEntry_RemovesWorkspaceEntry(t *testing.T) {
 	base := isolateGitTestEnv(t)
 	repo := filepath.Join(base, "project")
 	initTestRepo(t, repo)
@@ -114,13 +114,13 @@ func TestRemoveAgentDirAndPruneWorktrees_WorkspacePrunesItsRepo(t *testing.T) {
 	}
 	t.Chdir(elsewhere)
 
-	removeAgentDirAndPruneWorktrees(agentDir, ws, true)
+	testRemoveAgentDir(t, agentDir, ws)
 
 	if _, err := os.Stat(agentDir); !os.IsNotExist(err) {
 		t.Fatalf("expected the agent dir to be removed (stat err=%v)", err)
 	}
 	if _, err := os.Stat(worktreeAdminDir(repo, "workspace")); !os.IsNotExist(err) {
-		t.Fatalf("expected the removed workspace's worktree entry to be pruned (stat err=%v)", err)
+		t.Fatalf("expected the removed workspace's worktree entry to be removed (stat err=%v)", err)
 	}
 }
 
@@ -232,7 +232,7 @@ func TestHandleAgentDirWithoutConfig_WorktreeWithUncommittedChangeIsKept(t *test
 		t.Fatal(err)
 	}
 
-	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws)
 	requireKeptWithConflict(t, err, base, edited)
 	if data, _ := os.ReadFile(edited); string(data) != "work in progress\n" {
 		t.Fatalf("edited file content = %q, want it unchanged", data)
@@ -247,7 +247,7 @@ func TestHandleAgentDirWithoutConfig_WorktreeWithUntrackedFileIsKept(t *testing.
 		t.Fatal(err)
 	}
 
-	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws)
 	requireKeptWithConflict(t, err, base, untracked)
 }
 
@@ -258,7 +258,7 @@ func TestHandleAgentDirWithoutConfig_DetachedUnreachableCommitIsKept(t *testing.
 	runGitT(t, ws, "checkout", "-q", "--detach")
 	runGitT(t, ws, "commit", "-q", "--allow-empty", "-m", "detached work")
 
-	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws)
 	requireKeptWithConflict(t, err, base, filepath.Join(ws, ".git"))
 }
 
@@ -268,7 +268,7 @@ func TestHandleAgentDirWithoutConfig_DetachedReachableCommitIsRemoved(t *testing
 	_, _, agentDir, agentHome, ws := staleWorktreeLayout(t)
 	runGitT(t, ws, "checkout", "-q", "--detach")
 
-	if err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws); err != nil {
+	if err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws); err != nil {
 		t.Fatalf("handleAgentDirWithoutConfig: %v", err)
 	}
 	if _, err := os.Stat(agentDir); !os.IsNotExist(err) {
@@ -283,7 +283,7 @@ func TestHandleAgentDirWithoutConfig_CleanWorktreeOnBranchIsRemoved(t *testing.T
 	runGitT(t, ws, "commit", "-q", "--allow-empty", "-m", "committed work")
 	gitRuns := countWorktreeGit(t)
 
-	if err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws); err != nil {
+	if err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws); err != nil {
 		t.Fatalf("handleAgentDirWithoutConfig: %v", err)
 	}
 	if *gitRuns == 0 {
@@ -313,7 +313,7 @@ func TestHandleAgentDirWithoutConfig_NoHomeNoWorktreeIsRemoved(t *testing.T) {
 	}
 	t.Chdir(base)
 
-	if err := handleAgentDirWithoutConfig("a", agentDir, agentHome, filepath.Join(agentDir, "workspace")); err != nil {
+	if err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, filepath.Join(agentDir, "workspace")); err != nil {
 		t.Fatalf("handleAgentDirWithoutConfig: %v", err)
 	}
 	if _, err := os.Stat(agentDir); !os.IsNotExist(err) {
@@ -348,7 +348,7 @@ func TestHandleAgentDirWithoutConfig_UncheckableWorktreeIsKept(t *testing.T) {
 	}
 	gitRuns := countWorktreeGit(t)
 
-	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws)
 	requireKeptWithConflict(t, err, base, gitFile)
 	if !strings.Contains(err.Error(), "could not check") {
 		t.Errorf("error = %v, want the could-not-check conflict", err)
@@ -366,7 +366,7 @@ func TestHandleAgentDirWithoutConfig_StandaloneCloneIsKept(t *testing.T) {
 	runGitT(t, base, "clone", "-q", repo, ws)
 	gitRuns := countWorktreeGit(t)
 
-	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws)
 	requireKeptWithConflict(t, err, base, filepath.Join(ws, ".git"))
 	if *gitRuns != 0 {
 		t.Errorf("git ran %d times on a standalone clone, want 0", *gitRuns)
@@ -394,7 +394,7 @@ func TestHandleAgentDirWithoutConfig_PointerOutsideProjectRepoIsKeptWithoutGit(t
 	}
 	gitRuns := countWorktreeGit(t)
 
-	err = handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	err = handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws)
 	requireKeptWithConflict(t, err, base, gitFile)
 	if *gitRuns != 0 {
 		t.Errorf("git ran %d times for a worktree of another repository, want 0", *gitRuns)
@@ -426,7 +426,7 @@ func TestHandleAgentDirWithoutConfig_SymlinkedGitdirOutsideProjectRepoIsKeptWith
 	}
 	gitRuns := countWorktreeGit(t)
 
-	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws)
 	requireKeptWithConflict(t, err, base, gitFile)
 	if *gitRuns != 0 {
 		t.Errorf("git ran %d times for a symlinked gitdir outside the project repository, want 0", *gitRuns)
@@ -454,7 +454,7 @@ func TestHandleAgentDirWithoutConfig_ProjectInLinkedWorktreeIsInspected(t *testi
 	t.Chdir(base)
 	gitRuns := countWorktreeGit(t)
 
-	if err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws); err != nil {
+	if err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws); err != nil {
 		t.Fatalf("handleAgentDirWithoutConfig: %v", err)
 	}
 	if *gitRuns == 0 {
@@ -476,7 +476,7 @@ func TestHandleAgentDirWithoutConfig_PlainWorkspaceWithFilesIsKept(t *testing.T)
 		t.Fatal(err)
 	}
 
-	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws)
 	requireKeptWithConflict(t, err, base, file)
 }
 
@@ -487,7 +487,7 @@ func TestHandleAgentDirWithoutConfig_EmptyPlainWorkspaceIsRemoved(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	if err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws); err != nil {
+	if err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws); err != nil {
 		t.Fatalf("handleAgentDirWithoutConfig: %v", err)
 	}
 	if _, err := os.Stat(agentDir); !os.IsNotExist(err) {
@@ -495,10 +495,10 @@ func TestHandleAgentDirWithoutConfig_EmptyPlainWorkspaceIsRemoved(t *testing.T) 
 	}
 }
 
-// pruneWorktreesForWorkspace with an empty workspace prunes nothing, even
-// when the current directory is a repository with a stale worktree entry,
-// and reports that it found no repository (ptone/scion#4511).
-func TestPruneWorktreesForWorkspace_EmptyWorkspaceDoesNotPrune(t *testing.T) {
+// removeWorkspaceWorktreeEntry with an empty workspace removes nothing, even
+// when the current directory is a repository with a stale worktree entry
+// (ptone/scion#4511).
+func TestRemoveWorkspaceWorktreeEntry_EmptyWorkspaceRemovesNothing(t *testing.T) {
 	base := isolateGitTestEnv(t)
 	cwdRepo := filepath.Join(base, "caller")
 	initTestRepo(t, cwdRepo)
@@ -509,17 +509,16 @@ func TestPruneWorktreesForWorkspace_EmptyWorkspaceDoesNotPrune(t *testing.T) {
 	}
 	t.Chdir(cwdRepo)
 
-	if pruneWorktreesForWorkspace("") {
-		t.Error("pruneWorktreesForWorkspace(\"\") = true, want false")
-	}
+	removeWorkspaceWorktreeEntry("")
 	if _, err := os.Stat(worktreeAdminDir(cwdRepo, "stale-wt")); err != nil {
 		t.Fatalf("expected the stale worktree entry in the current directory's repository to survive: %v", err)
 	}
 }
 
-// pruneWorktreesForWorkspace with a workspace path prunes the repository
-// holding it, wherever the process runs, and reports that it found it.
-func TestPruneWorktreesForWorkspace_WorkspacePrunesItsRepo(t *testing.T) {
+// removeWorkspaceWorktreeEntry with a workspace path removes that
+// workspace's entry from the repository holding it, wherever the process
+// runs.
+func TestRemoveWorkspaceWorktreeEntry_RemovesItsEntry(t *testing.T) {
 	base := isolateGitTestEnv(t)
 	repo := filepath.Join(base, "project")
 	initTestRepo(t, repo)
@@ -534,21 +533,29 @@ func TestPruneWorktreesForWorkspace_WorkspacePrunesItsRepo(t *testing.T) {
 	}
 	t.Chdir(elsewhere)
 
-	if !pruneWorktreesForWorkspace(stale) {
-		t.Error("pruneWorktreesForWorkspace = false, want true for a workspace in a repository")
-	}
+	removeWorkspaceWorktreeEntry(stale)
 	if _, err := os.Stat(worktreeAdminDir(repo, "workspace")); !os.IsNotExist(err) {
-		t.Fatalf("expected the stale worktree entry to be pruned (stat err=%v)", err)
+		t.Fatalf("expected the stale worktree entry to be removed (stat err=%v)", err)
 	}
 }
 
-// A workspace outside any repository has nothing to prune: the helper
-// reports false, so the provision call site falls back as before.
-func TestPruneWorktreesForWorkspace_NoRepoReportsFalse(t *testing.T) {
+// A workspace outside any repository has no entry to remove, and nothing
+// falls back to the repository of the process's current directory: a stale
+// entry there survives (ptone/scion#5071).
+func TestRemoveWorkspaceWorktreeEntry_NoRepoLeavesCwdRepo(t *testing.T) {
 	base := isolateGitTestEnv(t)
-	t.Chdir(base)
-	if pruneWorktreesForWorkspace(filepath.Join(base, "agents", "a", "workspace")) {
-		t.Error("pruneWorktreesForWorkspace = true, want false outside a repository")
+	cwdRepo := filepath.Join(base, "caller")
+	initTestRepo(t, cwdRepo)
+	stale := filepath.Join(base, "stale-wt")
+	runGitT(t, cwdRepo, "worktree", "add", "-q", "-b", "stale", stale)
+	if err := os.RemoveAll(stale); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(cwdRepo)
+
+	removeWorkspaceWorktreeEntry(filepath.Join(base, "agents", "a", "workspace"))
+	if _, err := os.Stat(worktreeAdminDir(cwdRepo, "stale-wt")); err != nil {
+		t.Fatalf("expected the stale worktree entry in the current directory's repository to survive: %v", err)
 	}
 }
 
@@ -562,7 +569,7 @@ func TestHandleAgentDirWithoutConfig_SharedModeLeftoverDirtyWorktreeIsKept(t *te
 		t.Fatal(err)
 	}
 
-	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, "")
+	err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, "")
 	requireKeptWithConflict(t, err, base, edited)
 }
 
@@ -578,7 +585,7 @@ func TestHandleAgentDirWithoutConfig_SharedModeLeftoverPlainWorkspaceIsKept(t *t
 		t.Fatal(err)
 	}
 
-	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, "")
+	err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, "")
 	requireKeptWithConflict(t, err, base, file)
 }
 
@@ -587,7 +594,7 @@ func TestHandleAgentDirWithoutConfig_SharedModeLeftoverPlainWorkspaceIsKept(t *t
 func TestHandleAgentDirWithoutConfig_SharedModeNoLeftoverIsRemoved(t *testing.T) {
 	_, _, agentDir, agentHome, _ := noConfigGitProject(t)
 
-	if err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ""); err != nil {
+	if err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ""); err != nil {
 		t.Fatalf("handleAgentDirWithoutConfig: %v", err)
 	}
 	if _, err := os.Stat(agentDir); !os.IsNotExist(err) {
@@ -613,7 +620,7 @@ func TestHandleAgentDirWithoutConfig_CleanWorktreeWithOnlyIgnoredFileIsRemoved(t
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
-	if err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws); err != nil {
+	if err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws); err != nil {
 		t.Fatalf("handleAgentDirWithoutConfig: %v", err)
 	}
 	if _, err := os.Stat(agentDir); !os.IsNotExist(err) {
@@ -634,7 +641,7 @@ func TestHandleAgentDirWithoutConfig_StagedOnlyChangeIsKept(t *testing.T) {
 	}
 	runGitT(t, ws, "add", "staged.txt")
 
-	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws)
 	requireKeptWithConflict(t, err, base, staged)
 }
 
@@ -658,7 +665,7 @@ func TestHandleAgentDirWithoutConfig_DirtySubmoduleHiddenByConfigIsKept(t *testi
 		t.Fatalf("setup: git status without --ignore-submodules=none = %q, want the submodule hidden", got)
 	}
 
-	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws)
 	requireKeptWithConflict(t, err, base, edited)
 }
 
@@ -679,7 +686,7 @@ func TestHandleAgentDirWithoutConfig_InheritedGitEnvIsIgnored(t *testing.T) {
 	t.Setenv("GIT_CONFIG_KEY_0", "core.excludesFile")
 	t.Setenv("GIT_CONFIG_VALUE_0", excludeAll)
 
-	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws)
 	requireKeptWithConflict(t, err, base, untracked)
 }
 
@@ -691,7 +698,7 @@ func TestHandleAgentDirWithoutConfig_GitTimeoutIsKept(t *testing.T) {
 	worktreeGitTimeout = time.Nanosecond
 	t.Cleanup(func() { worktreeGitTimeout = orig })
 
-	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws)
 	requireKeptWithConflict(t, err, base, filepath.Join(ws, ".git"))
 	if !strings.Contains(err.Error(), "could not check") {
 		t.Errorf("error = %q, want the could-not-check text", err.Error())
@@ -711,7 +718,7 @@ func TestHandleAgentDirWithoutConfig_SymlinkedDotGitIsKeptWithoutGit(t *testing.
 	}
 	gitRuns := countWorktreeGit(t)
 
-	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws)
 	requireKeptWithConflict(t, err, base, gitLink)
 	if *gitRuns != 0 {
 		t.Errorf("git ran %d times for a symlinked .git, want 0", *gitRuns)
@@ -730,7 +737,7 @@ func TestHandleAgentDirWithoutConfig_SymlinkedWorkspaceIsKeptWithoutGit(t *testi
 	}
 	gitRuns := countWorktreeGit(t)
 
-	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws)
 	requireKeptWithConflict(t, err, base, ws)
 	if *gitRuns != 0 {
 		t.Errorf("git ran %d times for a symlinked workspace, want 0", *gitRuns)
@@ -745,7 +752,7 @@ func TestHandleAgentDirWithoutConfig_RegularFileWorkspaceIsKeptWithoutGit(t *tes
 	}
 	gitRuns := countWorktreeGit(t)
 
-	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws)
 	requireKeptWithConflict(t, err, base, ws)
 	if *gitRuns != 0 {
 		t.Errorf("git ran %d times for a regular-file workspace, want 0", *gitRuns)
@@ -770,7 +777,7 @@ func TestHandleAgentDirWithoutConfig_MidRebaseRewrittenHeadIsKept(t *testing.T) 
 		t.Fatalf("setup: worktree not clean mid-rebase: %q", got)
 	}
 
-	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws)
 	requireKeptWithConflict(t, err, base, filepath.Join(ws, "f1"))
 }
 
@@ -797,7 +804,7 @@ func TestHandleAgentDirWithoutConfig_CommondirElsewhereIsKeptWithoutGit(t *testi
 	}
 	gitRuns := countWorktreeGit(t)
 
-	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws)
 	requireKeptWithoutGit(t, err, base, filepath.Join(ws, ".git"), gitRuns)
 }
 
@@ -809,7 +816,7 @@ func TestHandleAgentDirWithoutConfig_MissingCommondirIsKeptWithoutGit(t *testing
 	}
 	gitRuns := countWorktreeGit(t)
 
-	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws)
 	requireKeptWithoutGit(t, err, base, filepath.Join(ws, ".git"), gitRuns)
 }
 
@@ -822,7 +829,7 @@ func TestHandleAgentDirWithoutConfig_ConfigWorktreePresentIsKeptWithoutGit(t *te
 	}
 	gitRuns := countWorktreeGit(t)
 
-	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws)
 	requireKeptWithoutGit(t, err, base, filepath.Join(ws, ".git"), gitRuns)
 }
 
@@ -858,7 +865,7 @@ func TestHandleAgentDirWithoutConfig_NestedGitdirIsKeptWithoutGit(t *testing.T) 
 	}
 	gitRuns := countWorktreeGit(t)
 
-	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws)
 	requireKeptWithoutGit(t, err, base, gitFile, gitRuns)
 }
 
@@ -873,7 +880,7 @@ func TestHandleAgentDirWithoutConfig_GitdirBackPointerToOtherWorkspaceIsKeptWith
 	}
 	gitRuns := countWorktreeGit(t)
 
-	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws)
 	requireKeptWithoutGit(t, err, base, filepath.Join(ws, ".git"), gitRuns)
 }
 
@@ -907,7 +914,7 @@ func TestHandleAgentDirWithoutConfig_MetadataChangedAfterCheckIsNotFollowed(t *t
 	}
 	t.Cleanup(func() { runWorktreeGit = orig })
 
-	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws)
 	requireKeptWithConflict(t, err, base, untracked)
 }
 
@@ -927,7 +934,7 @@ func TestHandleAgentDirWithoutConfig_SharedModeCleanLeftoverIsRemovedAndPruned(t
 	t.Chdir(cwdRepo)
 	gitRuns := countWorktreeGit(t)
 
-	if err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ""); err != nil {
+	if err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ""); err != nil {
 		t.Fatalf("handleAgentDirWithoutConfig: %v", err)
 	}
 	if *gitRuns == 0 {
@@ -957,7 +964,7 @@ func TestHandleAgentDirWithoutConfig_AssumeUnchangedEditIsKept(t *testing.T) {
 		t.Fatalf("precondition: git status = %q, want the edit hidden", got)
 	}
 
-	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws)
 	requireKeptWithConflict(t, err, base, edited)
 	if data, _ := os.ReadFile(edited); string(data) != "local edit\n" {
 		t.Fatalf("edited file content = %q, want it unchanged", data)
@@ -976,7 +983,7 @@ func TestHandleAgentDirWithoutConfig_SkipWorktreeEditIsKept(t *testing.T) {
 		t.Fatalf("precondition: git status = %q, want the edit hidden", got)
 	}
 
-	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws)
 	requireKeptWithConflict(t, err, base, edited)
 }
 
@@ -987,7 +994,7 @@ func TestHandleAgentDirWithoutConfig_ClearedIndexBitsAreRemoved(t *testing.T) {
 	runGitT(t, ws, "update-index", "--assume-unchanged", "--skip-worktree", "README")
 	runGitT(t, ws, "update-index", "--no-assume-unchanged", "--no-skip-worktree", "README")
 
-	if err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws); err != nil {
+	if err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws); err != nil {
 		t.Fatalf("handleAgentDirWithoutConfig: %v", err)
 	}
 	if _, err := os.Stat(agentDir); !os.IsNotExist(err) {
@@ -1022,7 +1029,7 @@ func TestHandleAgentDirWithoutConfig_GlobalExcludesDoNotHideUntrackedFile(t *tes
 		t.Fatalf("precondition: git status = %q, want the global excludes file to hide the untracked file", got)
 	}
 
-	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws)
 	requireKeptWithConflict(t, err, base, untracked)
 }
 
@@ -1033,7 +1040,7 @@ func TestHandleAgentDirWithoutConfig_WorktreeConfigExtensionIsKeptWithoutGit(t *
 	runGitT(t, repo, "config", "extensions.worktreeConfig", "true")
 	gitRuns := countWorktreeGit(t)
 
-	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws)
 	requireKeptWithoutGit(t, err, base, filepath.Join(ws, ".git"), gitRuns)
 }
 
@@ -1044,7 +1051,7 @@ func TestHandleAgentDirWithoutConfig_WorktreeConfigExtensionOffIsInspected(t *te
 	runGitT(t, repo, "config", "extensions.worktreeConfig", "false")
 	gitRuns := countWorktreeGit(t)
 
-	if err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws); err != nil {
+	if err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws); err != nil {
 		t.Fatalf("handleAgentDirWithoutConfig: %v", err)
 	}
 	if *gitRuns == 0 {
@@ -1062,7 +1069,7 @@ func TestHandleAgentDirWithoutConfig_LockedWorktreeIsKeptWithoutGit(t *testing.T
 	runGitT(t, repo, "worktree", "lock", ws)
 	gitRuns := countWorktreeGit(t)
 
-	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws)
 	requireKeptWithoutGit(t, err, base, filepath.Join(ws, ".git"), gitRuns)
 }
 
@@ -1085,7 +1092,7 @@ func TestHandleAgentDirWithoutConfig_SubmoduleWorktreeIsKeptWithoutStatus(t *tes
 	}
 	subcommands := recordWorktreeGit(t)
 
-	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws)
 	requireKeptWithConflict(t, err, base, filepath.Join(ws, ".git"))
 	if n := countSubcommand(*subcommands, "ls-files"); n == 0 {
 		t.Errorf("git subcommands = %q, want the index listed", *subcommands)
@@ -1101,7 +1108,7 @@ func TestHandleAgentDirWithoutConfig_WorktreeWithoutSubmoduleRunsStatus(t *testi
 	_, _, agentDir, agentHome, ws := staleWorktreeLayout(t)
 	subcommands := recordWorktreeGit(t)
 
-	if err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws); err != nil {
+	if err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws); err != nil {
 		t.Fatalf("handleAgentDirWithoutConfig: %v", err)
 	}
 	// Once for the check, once to list the ignored files before removal.
@@ -1121,7 +1128,7 @@ func TestHandleAgentDirWithoutConfig_UnreadableWorktreeConfigSettingIsKept(t *te
 	runGitT(t, repo, "config", "extensions.worktreeConfig", "maybe")
 	gitRuns := countWorktreeGit(t)
 
-	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws)
 	requireKeptWithConflict(t, err, base, filepath.Join(ws, ".git"))
 	if !strings.Contains(err.Error(), "could not check") {
 		t.Errorf("error = %v, want the could-not-check conflict", err)
@@ -1143,7 +1150,7 @@ func TestHandleAgentDirWithoutConfig_NonBranchSymbolicHeadIsKept(t *testing.T) {
 		t.Fatalf("setup: git status = %q, want a clean worktree", got)
 	}
 
-	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws)
 	requireKeptWithConflict(t, err, base, filepath.Join(ws, ".git"))
 }
 
@@ -1173,7 +1180,7 @@ func TestHandleAgentDirWithoutConfig_PausedAutostashRebaseIsKeptWithoutGit(t *te
 	}
 	gitRuns := countWorktreeGit(t)
 
-	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws)
 	requireKeptWithoutGit(t, err, base, filepath.Join(ws, ".git"), gitRuns)
 }
 
@@ -1214,7 +1221,7 @@ func TestHandleAgentDirWithoutConfig_InProgressAdminStateIsKeptWithoutGit(t *tes
 			}
 			gitRuns := countWorktreeGit(t)
 
-			err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+			err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws)
 			requireKeptWithoutGit(t, err, base, filepath.Join(ws, ".git"), gitRuns)
 		})
 	}
@@ -1242,7 +1249,7 @@ func TestHandleAgentDirWithoutConfig_IdleAdminEntriesAreRemoved(t *testing.T) {
 		}
 	}
 
-	if err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws); err != nil {
+	if err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws); err != nil {
 		t.Fatalf("handleAgentDirWithoutConfig: %v", err)
 	}
 	if _, err := os.Stat(agentDir); !os.IsNotExist(err) {
@@ -1269,7 +1276,7 @@ func TestHandleAgentDirWithoutConfig_UnreadableUntrackedDirIsKept(t *testing.T) 
 	}
 	t.Cleanup(func() { _ = os.Chmod(unreadable, 0o755) })
 
-	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws)
 	requireKeptWithConflict(t, err, base, unreadable)
 	if !strings.Contains(err.Error(), "could not check") {
 		t.Errorf("error = %v, want the could-not-check conflict", err)
@@ -1278,7 +1285,7 @@ func TestHandleAgentDirWithoutConfig_UnreadableUntrackedDirIsKept(t *testing.T) 
 
 // A link inside the removed dir that points to a file outside it is removed
 // with the dir, and the target's mode is left unchanged.
-func TestRemoveAgentDirAndPruneWorktrees_LinkTargetModeUnchanged(t *testing.T) {
+func TestRemoveAgentDirAndWorktreeEntry_LinkTargetModeUnchanged(t *testing.T) {
 	base := t.TempDir()
 	target := filepath.Join(base, "outside.txt")
 	if err := os.WriteFile(target, []byte("x\n"), 0o600); err != nil {
@@ -1293,7 +1300,7 @@ func TestRemoveAgentDirAndPruneWorktrees_LinkTargetModeUnchanged(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	removeAgentDirAndPruneWorktrees(agentDir, "", false)
+	testRemoveAgentDir(t, agentDir, "")
 
 	if _, err := os.Lstat(link); !os.IsNotExist(err) {
 		t.Fatalf("expected the link to be removed (lstat err=%v)", err)

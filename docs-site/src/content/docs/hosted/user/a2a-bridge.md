@@ -278,6 +278,14 @@ This is managed using the **A2A Projects Editor** on the Integration Detail page
   * If **Enabled**: When a client sends a request with an unrecognized `contextId` (representing a new conversation), the bridge calls the Hub to automatically provision and start a new agent for that user on demand.
 * **Default Template**: Select which template is used when auto-provisioning new agents.
 
+### Asynchronous agent create (`bridge.async_create`)
+
+When the bridge auto-provisions an agent, it asks the Hub for an asynchronous create (YAML `bridge.async_create`, default `true`). A Hub with asynchronous launch enabled answers as soon as a Runtime Broker accepts the create, while the agent is still starting. A Hub without it answers once the agent is running, as before.
+
+While the agent starts, the bridge holds the first message and reports the task as `working`. Streaming and A2A SDK clients also see the status message `provisioning agent (<step>)` for each launch step (the step is shown as its code, for example `pod_create`); other clients see the `working` state only. Once the agent is running, the bridge sends the message, and the usual response wait starts. If the launch fails, the task ends `failed` and the message is not sent; streaming and SDK clients see `Agent failed to start (<code>): <message>`. A task can therefore stay `working` until the launch times out on the Hub, plus about 30 seconds.
+
+The bridge also waits when it adopts an agent that another client is still starting, and before a follow-up message on an existing task whose agent is still starting; a follow-up sent while the task's first message is still waiting is delivered after that message when both reach the same bridge instance (a follow-up handled by another replica does not wait for it). It waits in those cases even with `async_create: false`, because that setting controls only the bridge's own request. Set `async_create: false` to always use the synchronous create.
+
 ---
 
 ## 7. Desktop App Federation

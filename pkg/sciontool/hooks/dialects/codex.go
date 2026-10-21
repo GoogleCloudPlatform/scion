@@ -37,6 +37,7 @@ func (d *CodexDialect) Parse(data map[string]interface{}) (*hooks.Event, error) 
 			Message:   firstNonEmptyString(getString(data, "title"), getString(data, "message")),
 			Prompt:    getString(data, "prompt"),
 			ToolName:  getString(data, "tool_name"),
+			Source:    getString(data, "source"),
 			SessionID: getString(data, "session_id"),
 			Raw:       data,
 		},

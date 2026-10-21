@@ -61,6 +61,9 @@ func runBrokerRegisterInstance(cmd *cobra.Command, key string) error {
 	if endpoint == "" {
 		return errHubNotConfigured
 	}
+	if err := checkBrokerHubURL(endpoint); err != nil {
+		return err
+	}
 
 	// Step 1: the strictly loaded instance with this key.
 	instances, err := config.LoadRuntimeBrokerInstances("")
@@ -131,6 +134,7 @@ func runBrokerRegisterInstance(cmd *cobra.Command, key string) error {
 		TransportMode:     transportMode,
 		TransportAudience: transportAudience,
 		HubEndpoint:       endpoint,
+		Out:               os.Stdout,
 	})
 	if err != nil {
 		return err

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "smoke-stdio": {
+      "type": "stdio",
+      "command": "./bin/stdio-mcp",
+      "args": ["--data", "${PLUGIN_DATA}/x"]
+    },
+    "smoke-http": {
+      "type": "streamable-http",
+      "url": "http://127.0.0.1:8765/mcp"
+    }
+  }
+}

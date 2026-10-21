@@ -23,6 +23,12 @@ which restarts its token refresh loop. Use it when an agent's token has expired 
 itself, for example after a Hub signing-key rotation. A stopped agent gets a fresh token at its next
 start. The token carries the same scopes a refresh would.
 
+After writing the token, the Runtime Broker signals the agent's init process to reload it. If that
+signal cannot be delivered, the token is still in place, but the reset fails with
+`reload_unconfirmed` (HTTP 502) and the message "credential issued and written; the running agent
+did not confirm the reload". The CLI exits non-zero. If the agent keeps failing to authenticate,
+restart it.
+
 ### All running agents
 
 `POST /api/v1/admin/agents/reset-auth-all` with no body (the **Reset Auth** card on the admin
@@ -38,10 +44,11 @@ and `failed_by_code`, the count of failures per code. A failure that carries no 
 | `agent_not_in_standing` | The agent is not in good standing, for example it is held. | Resolve its standing, then reset auth again. |
 | `runtime_unavailable` | The agent's broker does not have its runtime available. | Retry later. |
 | `internal_error` | The new token could not be recorded. | Retry. |
+| `reload_unconfirmed` | The new token was written, but the running agent did not confirm the reload. | If the agent keeps failing to authenticate, restart it. |
 
 For the `delegation_*` codes the entry also holds `cause`, the deny cause. For these codes,
-`agent_not_in_standing` and `internal_error`, `error` is a fixed plain reason; the raw error is
-written to the Hub log only.
+`agent_not_in_standing`, `internal_error` and `reload_unconfirmed`, `error` is a fixed plain
+reason; the raw error is written to the Hub log only.
 
 ## Scope re-issue
 
@@ -126,6 +133,8 @@ scion reset-auth --all --reissue-scopes --apply    # apply
 
 Re-issues every agent on the Hub. It is a dry run unless `--apply` is given.
 
+Super-admins can run the same batch from the Web Dashboard: **Admin → Maintenance**, **Re-issue scopes**. **Dry Run** shows what would change, and **Apply**, offered after a dry run, asks for confirmation first.
+
 The bulk route requires a Hub super-admin signed in with a user session; a user access token is refused, even one held by a super-admin.
 
 - Every non-deleted agent is processed. If the agent list cannot be read completely, the run stops
@@ -151,7 +160,10 @@ Without `reissue_scopes`, both routes keep their reset-auth behaviour.
 The single-agent response holds `added`, `removed`, `kept`, `withheld` (scope and cause),
 `role_before`, `role_after`, `ceiling_source`, `edge_replaced`, `edge_new`, `credentials_revoked`,
 `dispatched`, `noop` and `dry_run`. The bulk response holds `succeeded`, `noop`, `refused` and
-`push_failed`, plus one entry per agent with its outcome and diff.
+`push_failed`, plus one entry per agent with its outcome and diff. When the new token was delivered
+but the running agent did not confirm the reload, `dispatched` is `true` and `reload_unconfirmed`
+holds the message, on the single-agent response and on that agent's bulk entry (whose outcome
+stays `changed`).
 
 Scope re-issue on either route requires a Hub super-admin on an interactive session. Agent tokens,
 user access tokens and Hub admins without super-admin are refused. Without `reissue_scopes`, the

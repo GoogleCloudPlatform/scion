@@ -24,6 +24,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/require"
 )
@@ -119,4 +120,14 @@ func fireRevisionCeiling(srv *Server, identity Identity, projectID string) (stor
 type scheduleRevision struct {
 	Attribution store.InitiatorAttribution
 	Ceiling     store.EffectCeiling
+}
+
+// scheduleTestUAT returns a token identity of user on boundary whose
+// ceiling carries exactly scopes. A project boundary needs a project ID; a
+// hub boundary carries none.
+func scheduleTestUAT(t *testing.T, user UserIdentity, boundary TokenBoundary, scopes ...string) *ScopedUserIdentity {
+	t.Helper()
+	ceiling, ok := permissions.BuildCeilingFromSelectors(scopes)
+	require.True(t, ok, "selectors must resolve: %v", scopes)
+	return NewScopedUserIdentityWithBoundaryAndDecoration(user, boundary, scopes, "", ceiling, nil)
 }

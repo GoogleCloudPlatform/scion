@@ -2291,11 +2291,8 @@ func TestInstallIntegration_SelfManaged_RegisteredButNotLoaded(t *testing.T) {
 
 	// Seed settings.yaml with a2a-bridge entry (simulates a previous install
 	// where the bridge process was never started, so LoadOne never succeeded).
-	if err := config.AddSelfManagedPluginToSettings(config.SelfManagedPluginEntry{
-		Name:       "a2a-bridge",
-		Address:    "localhost:9090",
-		ConfigFile: "~/.scion/scion-a2a-bridge-admin.yaml",
-	}); err != nil {
+	seed := "server:\n  plugins:\n    broker:\n      a2a-bridge:\n        address: localhost:9090\n        config_file: ~/.scion/scion-a2a-bridge-admin.yaml\n        mode: self-managed\n        self_managed: true\n"
+	if err := os.WriteFile(filepath.Join(tmpHome, ".scion", "settings.yaml"), []byte(seed), 0644); err != nil {
 		t.Fatal(err)
 	}
 
