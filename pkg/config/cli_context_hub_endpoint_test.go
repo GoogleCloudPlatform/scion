@@ -57,10 +57,8 @@ func TestNormalizeEndpoint_SameAndDifferentHubs(t *testing.T) {
 		{"https://hub.example.com", "https://hub.example.com."},
 		// IDN and punycode spellings are different keys.
 		{"https://bücher.example", "https://xn--bcher-kva.example"},
-		// Unicode case mapping is not applied: KELVIN SIGN is not "k",
-		// and a non-ASCII capital is not lowercased.
+		// Unicode case mapping is not applied: KELVIN SIGN is not "k".
 		{"https://\u212Aub.example.com", "https://kub.example.com"},
-		{"https://Über.example", "https://über.example"},
 		// Different hosts and IP spellings.
 		{"https://hub.example.com", "https://hub.example.org"},
 		{"http://[::1]:8080", "http://[0:0:0:0:0:0:0:1]:8080"},
@@ -73,11 +71,13 @@ func TestNormalizeEndpoint_SameAndDifferentHubs(t *testing.T) {
 	}
 }
 
-// The trailing dot and a non-ASCII host are kept as written in the key.
+// The trailing dot and a non-ASCII host are kept as written in the key:
+// a non-ASCII capital is not lowercased.
 func TestNormalizeEndpoint_KeepsTrailingDotAndNonASCIIHost(t *testing.T) {
 	tests := map[string]string{
 		"https://Hub.Example.COM.":         "https://hub.example.com.",
 		"https://XN--BCHER-KVA.example":    "https://xn--bcher-kva.example",
+		"https://Über.example":             "https://%C3%9Cber.example",
 		"https://\u212Aub.Example.com:443": NormalizeEndpoint("https://\u212Aub.example.com"),
 	}
 	for in, want := range tests {
