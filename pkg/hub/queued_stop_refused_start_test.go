@@ -35,10 +35,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// queuedStopFixture is a claim fixture whose agent's stop is queued for its
+// refusedStartFixture is a claim fixture whose agent's stop is queued for its
 // offline broker (intent stopped at intentAt, container status stop_queued
 // with the notice, a pending stop row), with a status-event recorder.
-type queuedStopFixture struct {
+type refusedStartFixture struct {
 	*reconcileFixture
 	disp     *claimTestDispatcher
 	agent    *store.Agent
@@ -46,9 +46,9 @@ type queuedStopFixture struct {
 	events   *trackingEventPublisher
 }
 
-// newQueuedStopFixture builds the fixture; withSlot records the agent's
+// newRefusedStartFixture builds the fixture; withSlot records the agent's
 // reservation, as a queued stop holds it.
-func newQueuedStopFixture(t *testing.T, withSlot bool) *queuedStopFixture {
+func newRefusedStartFixture(t *testing.T, withSlot bool) *refusedStartFixture {
 	t.Helper()
 	f, d, a := newClaimFixture(t)
 	if withSlot {
@@ -57,11 +57,11 @@ func newQueuedStopFixture(t *testing.T, withSlot bool) *queuedStopFixture {
 	at := queueStop(t, f, a, "")
 	ev := &trackingEventPublisher{}
 	f.srv.events = ev
-	return &queuedStopFixture{reconcileFixture: f, disp: d, agent: getAgent(t, f.s, a.ID), intentAt: at, events: ev}
+	return &refusedStartFixture{reconcileFixture: f, disp: d, agent: getAgent(t, f.s, a.ID), intentAt: at, events: ev}
 }
 
 // start sends a lifecycle start of the fixture's agent and returns its code.
-func (q *queuedStopFixture) start(t *testing.T) int {
+func (q *refusedStartFixture) start(t *testing.T) int {
 	t.Helper()
 	code, _ := lifecycle(t, q.reconcileFixture, q.agent.ID, "start")
 	return code
@@ -69,7 +69,7 @@ func (q *queuedStopFixture) start(t *testing.T) int {
 
 // lastPublished returns the last status event published for the agent, or
 // nil.
-func (q *queuedStopFixture) lastPublished() *store.Agent {
+func (q *refusedStartFixture) lastPublished() *store.Agent {
 	var last *store.Agent
 	for _, a := range q.events.publishedAgents() {
 		if a.ID == q.agent.ID {
@@ -103,7 +103,7 @@ func TestRefusedStartAfterQueuedStop_RestoresStoppedIntent(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			q := newQueuedStopFixture(t, tc.withSlot)
+			q := newRefusedStartFixture(t, tc.withSlot)
 			if tc.fill {
 				setBrokerAgentCeiling(t, q.s, 1)
 				filler := q.addAgent("rs-filler", "running", "working")
@@ -147,7 +147,7 @@ func TestRefusedStartAfterQueuedStop_RestoresStoppedIntent(t *testing.T) {
 // A start whose outcome is unknown may have reached the runtime: its
 // running intent and unconfirmed claim are kept.
 func TestRefusedStartAfterQueuedStop_AmbiguousKeepsRunningIntent(t *testing.T) {
-	q := newQueuedStopFixture(t, true)
+	q := newRefusedStartFixture(t, true)
 	q.disp.start = func(ctx context.Context, a *store.Agent) error {
 		return errors.New("connection reset by peer")
 	}
@@ -183,7 +183,7 @@ func (w *intentAfterReleaseStore) ReleaseAgentStart(ctx context.Context, agentID
 // compare-and-set on the refused start's intent time, so nothing is
 // reverted and no message is written.
 func TestRefusedStartAfterQueuedStop_NewerIntentKept(t *testing.T) {
-	q := newQueuedStopFixture(t, true)
+	q := newRefusedStartFixture(t, true)
 	w := &intentAfterReleaseStore{Store: q.s, t: t, agentID: q.agent.ID}
 	q.srv.store = w
 	q.srv.quotaService.store = w
@@ -202,7 +202,7 @@ func TestRefusedStartAfterQueuedStop_NewerIntentKept(t *testing.T) {
 // A stale pin is refused before the start claim: no intent is written, so
 // nothing needs restoring, and the queued stop still applies on the drain.
 func TestRefusedStartAfterQueuedStop_StalePinRefusalWritesNothing(t *testing.T) {
-	q := newQueuedStopFixture(t, true)
+	q := newRefusedStartFixture(t, true)
 	stale := *q.agent
 	stale.PinnedRuntimeTargetID = "target-1" // pinned, but the pin is incomplete
 
@@ -223,7 +223,7 @@ func TestRefusedStartAfterQueuedStop_StalePinRefusalWritesNothing(t *testing.T) 
 // stop: a start runs and replaces the queued status, a stop records a newer
 // stop intent.
 func TestRefusedStartAfterQueuedStop_NextActionUnaffected(t *testing.T) {
-	refuse := func(q *queuedStopFixture) {
+	refuse := func(q *refusedStartFixture) {
 		q.disp.start = func(ctx context.Context, a *store.Agent) error {
 			return fmt.Errorf("x: %w", errStartRequestNotSent)
 		}
@@ -231,7 +231,7 @@ func TestRefusedStartAfterQueuedStop_NextActionUnaffected(t *testing.T) {
 		require.Equal(t, store.RunIntentStopped, getAgent(t, q.s, q.agent.ID).RunIntent, "setup: the refused start restored the stopped intent")
 	}
 	t.Run("start", func(t *testing.T) {
-		q := newQueuedStopFixture(t, true)
+		q := newRefusedStartFixture(t, true)
 		refuse(q)
 		q.disp.start = nil
 		require.Equal(t, http.StatusOK, q.start(t))
@@ -241,7 +241,7 @@ func TestRefusedStartAfterQueuedStop_NextActionUnaffected(t *testing.T) {
 		assert.Empty(t, got.Message, "the start clears the refusal")
 	})
 	t.Run("stop", func(t *testing.T) {
-		q := newQueuedStopFixture(t, true)
+		q := newRefusedStartFixture(t, true)
 		refuse(q)
 		refused := getAgent(t, q.s, q.agent.ID)
 		code, _ := lifecycle(t, q.reconcileFixture, q.agent.ID, "stop")
@@ -257,7 +257,7 @@ func TestRefusedStartAfterQueuedStop_NextActionUnaffected(t *testing.T) {
 // container confirms the queued stop: the reservation is released and the
 // container status recorded stopped. The refusal message is kept.
 func TestRefusedStartAfterQueuedStop_SettleConfirmsOnInventory(t *testing.T) {
-	q := newQueuedStopFixture(t, true)
+	q := newRefusedStartFixture(t, true)
 	q.disp.start = func(ctx context.Context, a *store.Agent) error {
 		return fmt.Errorf("x: %w", errStartRequestNotSent)
 	}
@@ -295,7 +295,7 @@ func (d *pinCheckingStopDispatcher) DispatchAgentStop(ctx context.Context, a *st
 // stopped by the intent backstop, once, under a stop claim pinned to the
 // restored intent; the settle then confirms the stop once it is gone.
 func TestRefusedStartAfterQueuedStop_BackstopStopsRunningContainer(t *testing.T) {
-	q := newQueuedStopFixture(t, true)
+	q := newRefusedStartFixture(t, true)
 	q.disp.start = func(ctx context.Context, a *store.Agent) error {
 		return fmt.Errorf("x: %w", errStartRequestNotSent)
 	}
@@ -325,7 +325,7 @@ func TestRefusedStartAfterQueuedStop_BackstopStopsRunningContainer(t *testing.T)
 // superseded; the start is then refused. With no row left to apply, the
 // restored intent lets the backstop and the settle finish the stop.
 func TestRefusedStartAfterQueuedStop_DrainDuringClaim(t *testing.T) {
-	q := newQueuedStopFixture(t, true)
+	q := newRefusedStartFixture(t, true)
 	q.disp.start = func(ctx context.Context, a *store.Agent) error {
 		q.srv.drainBrokerDispatch(context.Background(), q.brokerID, func(op string) bool { return op == "stop" })
 		return fmt.Errorf("x: %w", errStartRequestNotSent)
@@ -349,7 +349,7 @@ func TestRefusedStartAfterQueuedStop_DrainDuringClaim(t *testing.T) {
 // stopped state (its stop leg stopped the old container), so the revert is
 // for starts only.
 func TestRestartOfQueuedStopAgent_ConfirmedStartLegFailure_KeepsRunningIntent(t *testing.T) {
-	q := newQueuedStopFixture(t, true)
+	q := newRefusedStartFixture(t, true)
 	_, err := q.s.SetAgentRunID(context.Background(), q.agent.ID, "run-x", nil)
 	require.NoError(t, err)
 	sawQueued := false

@@ -688,13 +688,14 @@ func (s *Server) settleFailedProvisionedStart(ctx context.Context, agentID strin
 }
 
 // publishAgentRow publishes agentID's stored row as a status event, unless
-// the row is gone or soft-deleted, or there is no publisher. Best-effort.
+// the row is gone, soft-deleted or held by a delete (the delete engine owns
+// its status), or there is no publisher. Best-effort.
 func (s *Server) publishAgentRow(ctx context.Context, agentID string) {
 	if s.events == nil {
 		return
 	}
 	cur, err := s.store.GetAgent(ctx, agentID)
-	if err != nil || !cur.DeletedAt.IsZero() {
+	if err != nil || deletedOrDeleteHeld(cur) {
 		return
 	}
 	s.events.PublishAgentStatus(ctx, cur)
