@@ -39,7 +39,7 @@ func TestGetPluginHubCreds_UsesHubEndpointNotAgentEndpoint(t *testing.T) {
 		},
 	}
 
-	creds := srv.getPluginHubCreds(context.Background(), "test-plugin")
+	creds := srv.getPluginHubCreds(context.Background(), "test-plugin", true)
 
 	if got := creds["hub_url"]; got != "https://hub.example.com" {
 		t.Errorf("hub_url = %q, want the regular hub endpoint %q, not the agent-endpoint override", got, "https://hub.example.com")

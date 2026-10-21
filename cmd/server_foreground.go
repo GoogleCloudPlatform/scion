@@ -894,12 +894,13 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 							if secretErr != nil {
 								log.Printf("Warning: failed to generate secret for broker plugin %q: %v", bt, secretErr)
 							} else {
-								hubCreds := map[string]string{
-									"hub_url":     hubSrv.HubEndpointFor(hub.HubEndpointForPluginBrokers),
-									"hmac_key":    secretKey,
-									"broker_id":   brokerID,
-									"plugin_name": bt,
-								}
+								// hub_url (public, for links people open) and
+								// hub_api_url (loopback, for the plugin's own
+								// API calls; this plugin runs on the hub's host).
+								hubCreds := hubSrv.HubManagedPluginURLCreds()
+								hubCreds["hmac_key"] = secretKey
+								hubCreds["broker_id"] = brokerID
+								hubCreds["plugin_name"] = bt
 								// Inject project slug map so hub-managed plugins can resolve
 								// human-readable project names without user-level API access.
 								if projects, listErr := s.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 500}); listErr == nil {
@@ -2943,6 +2944,7 @@ func wireCloudLoggingHealth(hubSrv *hub.Server, cs *logging.CloudWriteStats) {
 func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store, entClient *ent.Client, endpoints hub.HubEndpoints, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger, messageLogger, artifactLogger *slog.Logger, globalDir string, pluginMgr *scionplugin.Manager, secretBackend secret.SecretBackend) (*hub.Server, error) {
 	hubCfg := buildHubServerConfig(cfg, endpoints.Operator, devAuthToken, adminEmailList, adminMode, maintenanceMessage, secretBackend)
 	hubCfg.HubEndpoints = &endpoints
+	hubCfg.PluginHubAPIURL = pluginHubAPIURLFrom(cfg, currentServerEndpointMode())
 	warnNonConformingHubName(cfg.Hub.HubName)
 
 	// In hosted mode every replica must share the same session secret for
@@ -4726,6 +4728,20 @@ func resolveBrokerHubEndpointFrom(cfg *config.GlobalConfig, m serverEndpointMode
 		hubEndpointForRH = legacyEndpoint
 	}
 	return hubEndpointForRH
+}
+
+// pluginHubAPIURLFrom returns the URL hub-managed broker plugins use for
+// their own API calls to the hub (hub.ServerConfig.PluginHubAPIURL): the
+// hub's loopback URL, derived the same way as the co-located runtime
+// broker's (resolveBrokerHubEndpointFrom). Such plugins run as child
+// processes on the hub's host, so the call never leaves it and never meets a
+// proxy in front of the public endpoint. "" when the listen port is unknown.
+func pluginHubAPIURLFrom(cfg *config.GlobalConfig, m serverEndpointMode) string {
+	port := m.hubListenPort(cfg)
+	if port <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("http://localhost:%d", port)
 }
 
 // resolveMaintenanceConfig builds the maintenance config from versioned settings

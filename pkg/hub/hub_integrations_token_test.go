@@ -231,6 +231,7 @@ func TestIntegrationConfigUpdate_SecretsSessionOnlyForTokens(t *testing.T) {
 		{"inbound mode", map[string]interface{}{"settings": map[string]string{"inbound_mode": "poll"}}, []string{"settings.inbound_mode"}},
 		{"webhook registration", map[string]interface{}{"settings": map[string]string{"skip_set_webhook": "true"}}, []string{"settings.skip_set_webhook"}},
 		{"wiring key", map[string]interface{}{"settings": map[string]string{"hub_url": "https://x.example.com"}}, []string{"settings.hub_url"}},
+		{"api wiring key", map[string]interface{}{"settings": map[string]string{"hub_api_url": "http://localhost:1"}}, []string{"settings.hub_api_url"}},
 		{"unlisted key", map[string]interface{}{"settings": map[string]string{"not_a_key": "1"}}, []string{"settings.not_a_key"}},
 		{"mixed with configuration", map[string]interface{}{
 			"settings": map[string]string{"agent_cache_ttl": "1m", "webhook_url": "https://x.example.com"},
@@ -296,7 +297,7 @@ func TestIntegrationTokenSettingsKeys_EveryKnownPluginClassified(t *testing.T) {
 	}
 	notConfiguration := map[string]bool{
 		"mode": true, "path": true, "address": true, "tls_cert_file": true, "tls_key_file": true,
-		"tls_ca_file": true, "tls_skip_verify": true, "config_file": true, "hub_url": true,
+		"tls_ca_file": true, "tls_skip_verify": true, "config_file": true, "hub_url": true, "hub_api_url": true,
 		"hmac_key": true, "broker_id": true, "bot_id": true, "plugin_name": true,
 		"project_slug_map": true, "database_url": true, "database_driver": true,
 	}

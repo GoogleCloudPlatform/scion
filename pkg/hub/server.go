@@ -225,6 +225,17 @@ type ServerConfig struct {
 	// cloudrun_invoker audience default, broker join responses) is
 	// unaffected. Empty means agents receive HubEndpoint.
 	AgentEndpoint string
+	// PluginHubAPIURL is the URL a hub-managed broker plugin (one the hub
+	// runs as its own child process, on its own host: not self-managed, not
+	// HA) uses for its own API calls to the hub. It is injected as the
+	// hub_api_url credential, next to hub_url (the public endpoint, which
+	// plugins keep for links shown to people). The server sets it to the
+	// hub's loopback URL (http://localhost:<listen port>), the same URL the
+	// co-located runtime broker uses, so plugin->hub calls never leave the
+	// host and never meet a proxy in front of the public endpoint (such as
+	// IAP, which rejects HMAC-signed requests). Empty means no hub_api_url
+	// is injected and plugins call hub_url.
+	PluginHubAPIURL string
 	// SlowRequestThreshold is the duration after which an HTTP request is
 	// logged as slow. Zero uses logging.DefaultSlowRequestThreshold.
 	SlowRequestThreshold time.Duration

@@ -135,7 +135,7 @@ func setupChatMatrixEnv(t *testing.T) *chatMatrixEnv {
 	}))
 
 	// Plugin credentials, obtained the way a hub-managed plugin gets them.
-	creds := srv.getPluginHubCreds(ctx, "chat-matrix-plugin")
+	creds := srv.getPluginHubCreds(ctx, "chat-matrix-plugin", true)
 	brokerID := creds["broker_id"]
 	require.NotEmpty(t, brokerID)
 	require.NotEmpty(t, creds["hmac_key"], "plugin credentials must include a key")

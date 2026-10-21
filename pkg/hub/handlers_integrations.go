@@ -45,7 +45,7 @@ import (
 var pluginBrokerNS = uuid.MustParse("5c104390-a1d0-5e9a-9b1e-5c104390a1d0")
 
 var hubKeys = map[string]bool{
-	"hub_url": true, "broker_id": true, "hmac_key": true,
+	"hub_url": true, "hub_api_url": true, "broker_id": true, "hmac_key": true,
 	"plugin_name": true, "project_slug_map": true,
 	"database_driver": true, "database_url": true,
 }
@@ -53,6 +53,7 @@ var hubKeys = map[string]bool{
 var reconfigureRuntimeKeys = map[string]bool{
 	"config_file":      true,
 	"hub_url":          true,
+	"hub_api_url":      true,
 	"hmac_key":         true,
 	"broker_id":        true,
 	"plugin_name":      true,
@@ -1360,7 +1361,9 @@ func (s *Server) activateInstalledIntegration(ctx context.Context, mgr Integrati
 		}
 	}
 
-	for k, v := range s.getPluginHubCreds(ctx, name) {
+	pe := plugin.PluginEntry{SelfManaged: entry.SelfManaged, Mode: entry.Mode}
+	onHubHost := !entry.SelfManaged && pe.ResolvedDeploymentMode() == plugin.DeploymentModePlugin
+	for k, v := range s.getPluginHubCreds(ctx, name, onHubHost) {
 		if v != "" {
 			merged[k] = v
 		}
@@ -1436,6 +1439,7 @@ func filterSensitiveConfig(name string, cfg map[string]string) map[string]string
 	secretKeys := allSecretConfigKeys(name)
 	internalKeys := map[string]bool{
 		"hub_url":     true,
+		"hub_api_url": true,
 		"hmac_key":    true,
 		"broker_id":   true,
 		"bot_id":      true,
@@ -1524,13 +1528,13 @@ func releasePluginBuildLock(name string) {
 // server_foreground.go injects via ConfigureBroker at startup. This avoids
 // relying on the plugin manager's config map, which may be stale or empty
 // after a process restart.
-func (s *Server) getPluginHubCreds(ctx context.Context, name string) map[string]string {
-	creds := make(map[string]string)
-
-	// hub_url: from the server config (same value that startup resolves).
-	if hubURL := s.HubEndpointFor(HubEndpointForPluginBrokers); hubURL != "" {
-		creds["hub_url"] = hubURL
-	}
+//
+// onHubHost reports whether the plugin is hub-managed (the hub runs it as a
+// child process on its own host: not self-managed, not HA). Only such a
+// plugin gets hub_api_url, the hub's loopback URL; for a plugin on another
+// host loopback would point at the wrong machine. See pluginHubURLCreds.
+func (s *Server) getPluginHubCreds(ctx context.Context, name string, onHubHost bool) map[string]string {
+	creds := s.pluginHubURLCreds(onHubHost)
 
 	// broker_id: deterministic UUIDv5 — same namespace and seed as startup.
 	legacyID := "plugin-broker-" + name
@@ -1577,6 +1581,36 @@ func (s *Server) getPluginHubCreds(ctx context.Context, name string) map[string]
 	return creds
 }
 
+// pluginHubURLCreds returns the hub URL credentials for a broker plugin:
+//
+//   - hub_url: the endpoint for HubEndpointForPluginBrokers (the public
+//     endpoint). Plugins build the links people open from it (for example
+//     Telegram's "Link Telegram account" button), so it must stay public.
+//   - hub_api_url: the URL the plugin uses for its own API calls to the hub
+//     (ServerConfig.PluginHubAPIURL, the hub's loopback URL). Set only when
+//     onHubHost and the URL is known. Without it plugins call hub_url, which
+//     fails when a proxy such as IAP guards the public endpoint.
+func (s *Server) pluginHubURLCreds(onHubHost bool) map[string]string {
+	creds := make(map[string]string, 2)
+	if hubURL := s.HubEndpointFor(HubEndpointForPluginBrokers); hubURL != "" {
+		creds["hub_url"] = hubURL
+	}
+	if onHubHost && s.config.PluginHubAPIURL != "" {
+		creds["hub_api_url"] = s.config.PluginHubAPIURL
+	}
+	return creds
+}
+
+// HubManagedPluginURLCreds returns hub_url and hub_api_url for a
+// hub-managed broker plugin (one the hub runs on its own host; the server
+// startup path injects credentials only into those). See pluginHubURLCreds.
+// hub_url is always present, as the startup path has always sent it.
+func (s *Server) HubManagedPluginURLCreds() map[string]string {
+	creds := s.pluginHubURLCreds(true)
+	creds["hub_url"] = s.HubEndpointFor(HubEndpointForPluginBrokers)
+	return creds
+}
+
 // resolveIntegrationMergedConfig builds the full merged config map for a plugin
 // by reading the config file, injecting secrets from the secret backend,
 // carrying over runtime keys, and applying hub wiring credentials. The returned
@@ -1596,10 +1630,18 @@ func (s *Server) resolveIntegrationMergedConfig(ctx context.Context, mgr Integra
 	// manager's boot-resolved map as "inline" config, because it contains
 	// the file's own keys and would trigger spurious deprecation warnings (B2).
 	// When no config file exists, pass the manager map as inline config so
-	// that inline-only deployments retain their configuration keys.
+	// that inline-only deployments retain their configuration keys. That map
+	// also holds the hub_api_url injected earlier; it is left out, so the
+	// value comes only from getPluginHubCreds below (a plugin no longer run
+	// on the hub's host must not keep a loopback URL).
 	var inlineToPass map[string]string
-	if configFile == "" {
-		inlineToPass = pluginCfg
+	if configFile == "" && pluginCfg != nil {
+		inlineToPass = make(map[string]string, len(pluginCfg))
+		for k, v := range pluginCfg {
+			if k != "hub_api_url" {
+				inlineToPass[k] = v
+			}
+		}
 	}
 	merged, err := config.ResolvePluginConfig(configFile, inlineToPass)
 	if err != nil {
@@ -1634,7 +1676,9 @@ func (s *Server) resolveIntegrationMergedConfig(ctx context.Context, mgr Integra
 	// and apply as OVERRIDE. The manager's cached config may be stale or
 	// empty (e.g. after process restart), so we recompute these values the
 	// same way server_foreground.go does at startup.
-	hubCreds := s.getPluginHubCreds(ctx, name)
+	onHubHost := !mgr.IsSelfManaged("broker", name) &&
+		mgr.GetDeploymentMode("broker", name) != plugin.DeploymentModeHA
+	hubCreds := s.getPluginHubCreds(ctx, name, onHubHost)
 	for k, v := range hubCreds {
 		if v != "" {
 			merged[k] = v
