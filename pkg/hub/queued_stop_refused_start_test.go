@@ -99,6 +99,7 @@ func TestRefusedStartAfterQueuedStop_RestoresStoppedIntent(t *testing.T) {
 		{name: "broker capacity", fill: true, message: "Start failed:"},
 		{name: "broker draining", withSlot: true, err: drainingErr("5"), message: "Start failed:"},
 		{name: "runtime unavailable", withSlot: true, err: runtimeUnavailableErr(), message: "Start failed:"},
+		{name: "run not begun", withSlot: true, err: fmt.Errorf("%w: %w", errStartRunNotBegun, errors.New("disk full")), message: "Start failed:"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

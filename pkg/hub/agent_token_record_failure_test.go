@@ -159,6 +159,8 @@ func TestAgentTokenRecordFailureIsFixed500(t *testing.T) {
 		// do arms the fault and sends the request; it returns the
 		// response and, for a create, the name of the created agent.
 		do func(t *testing.T, f *recordFailureFixture) (*httptest.ResponseRecorder, string)
+		// after, when set, checks the site's end state.
+		after func(t *testing.T, f *recordFailureFixture)
 	}{
 		{name: "provision-only create", do: func(t *testing.T, f *recordFailureFixture) (*httptest.ResponseRecorder, string) {
 			f.fault.Arm()
@@ -221,6 +223,14 @@ func TestAgentTokenRecordFailureIsFixed500(t *testing.T) {
 			agent := f.agentIn(t, "record-fail-restart", state.PhaseRunning)
 			f.fault.Arm()
 			return doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/restart", nil), ""
+		}, after: func(t *testing.T, f *recordFailureFixture) {
+			// Nothing was sent, so the start leg did not happen
+			// (errStartRunNotBegun): the restart records the agent stopped
+			// and releases its slot, as for any start leg that did not act.
+			assert.EqualValues(t, 0, brokerReservationCount(t, f.store, tid("broker-record-fail")), "a pre-send failure releases the slot")
+			got, err := f.store.GetAgent(context.Background(), tid("agent-record-fail-restart"))
+			require.NoError(t, err)
+			assert.Equal(t, string(state.PhaseStopped), got.Phase, "a pre-send failure releases the slot")
 		}},
 		{name: "reset-auth", do: func(t *testing.T, f *recordFailureFixture) (*httptest.ResponseRecorder, string) {
 			agent := f.agentIn(t, "record-fail-reset-auth", state.PhaseRunning)
@@ -245,6 +255,9 @@ func TestAgentTokenRecordFailureIsFixed500(t *testing.T) {
 					}
 					assert.NotContains(t, rec.Body.String(), errCredentialCreateForTest.Error())
 					assert.False(t, f.brokerReceivedToken(), "no token may reach the broker")
+					if site.after != nil {
+						site.after(t, f)
+					}
 					if created != "" {
 						agents, err := f.store.ListAgents(context.Background(), store.AgentFilter{ProjectID: f.project.ID}, store.ListOptions{})
 						require.NoError(t, err)

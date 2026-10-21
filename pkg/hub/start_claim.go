@@ -87,6 +87,7 @@ func startOutcomeOf(err error) startOutcome {
 		return startReleased
 	case errors.Is(err, ErrLaunchInFlight), errors.As(err, &incomplete), errors.As(err, &stillMissing),
 		errors.Is(err, ErrLaunchInvalidPhase),
+		errors.Is(err, errStartRunNotBegun),
 		errors.As(err, &tokenErr), errors.Is(err, errBrokerLacksEmptyPerAgent),
 		isBrokerRuntimeUnavailable(err), isBrokerDraining(err), errors.Is(err, errStartClaimLost), errors.Is(err, store.ErrDeleteInProgress):
 		return startReleased
@@ -624,9 +625,11 @@ func (s *Server) clearSupersededQueuedStop(ctx context.Context, agent *store.Age
 
 // startDidNotHappen reports whether err is a start that definitely never
 // reached a runtime: refused before dispatch for capacity, missing
-// environment, a credential that could not be issued, a broker without the
-// required capability, a create left incomplete, a phase that no longer
-// allows a launch, or a broker that confirmed it did not act. Anything else,
+// environment, a credential that could not be issued, a run that could not
+// be begun before the request was sent (errStartRunNotBegun; not when a
+// delete refused the run-ID write, since the delete then owns the row), a
+// broker without the required capability, a create left incomplete, a phase
+// that no longer allows a launch, or a broker that confirmed it did not act. Anything else,
 // including a start that succeeded but whose status write failed, an
 // ambiguous dispatch error, a claim refusal (the earlier claimant owns the
 // intent) or a launch in flight (which may still start a container), is not.
@@ -640,6 +643,7 @@ func startDidNotHappen(err error) bool {
 	var incomplete *AgentCreateIncompleteError
 	return errors.As(err, &quotaErr) || errors.As(err, &stillMissing) || errors.As(err, &tokenErr) ||
 		errors.Is(err, errBrokerLacksEmptyPerAgent) || errors.As(err, &incomplete) ||
+		(errors.Is(err, errStartRunNotBegun) && !errors.Is(err, store.ErrDeleteInProgress)) ||
 		errors.Is(err, ErrLaunchInvalidPhase) || isConfirmedStartNotActedOnError(err)
 }
 
@@ -715,6 +719,13 @@ var errStartClaimWrite = errors.New("record the start claim")
 // errStartedStatusWrite marks a start that succeeded but whose status write
 // failed: the agent is starting, so for the claim the start succeeded.
 var errStartedStatusWrite = errors.New("agent started but its status could not be recorded")
+
+// errStartRunNotBegun marks a start dispatch whose run could not be begun
+// (beginRun: no token generator, the agent token could not be signed or its
+// credential recorded, or the run ID could not be recorded), wrapped around
+// that error. Nothing was sent to the broker, so for the claim the start is
+// released, not unconfirmed.
+var errStartRunNotBegun = errors.New("start not sent: its run could not be begun")
 
 // startQuotaError is a start refused because the broker is at capacity (or
 // the capacity check failed); nothing was dispatched.
