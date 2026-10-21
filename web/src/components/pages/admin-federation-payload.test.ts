@@ -8,8 +8,10 @@ import {
 
 // The Federation page edits the registry's federation section through the
 // server-config PUT (ptone/scion#3924). Each section key must be sent
-// explicitly when cleared, since the DB-backed save keeps an omitted key
-// (ptone/scion#3720), and every key sent must be a registry key.
+// explicitly when cleared, since the save keeps an omitted key
+// (ptone/scion#3720), and every key sent must be a registry key. A save
+// sends only the keys the user changed, so defaults shown for keys GET
+// left out are never written (ptone/scion#3913).
 
 const FULL_FEDERATION = {
   enabled: true,
@@ -48,6 +50,8 @@ function jsonResponse(body: unknown): Promise<Response> {
 describe('scion-page-admin-federation save payload (ptone/scion#3924)', () => {
   let element: HTMLElement | null = null;
   let puts: Array<Record<string, unknown>> = [];
+  // The GET bodies, in order; the last one repeats.
+  let getBodies: Array<Record<string, unknown>> = [];
 
   function fetchHandler(url: string | URL | Request, init?: RequestInit): Promise<Response> {
     const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
@@ -56,7 +60,11 @@ describe('scion-page-admin-federation save payload (ptone/scion#3924)', () => {
       return jsonResponse({ reload: { applied: [] } });
     }
     if (path.includes('/api/v1/admin/server-config')) {
-      return jsonResponse({ schema_version: '1', federation: FULL_FEDERATION });
+      const body =
+        getBodies.length > 1
+          ? getBodies.shift()!
+          : (getBodies[0] ?? { schema_version: '1', federation: FULL_FEDERATION });
+      return jsonResponse(body);
     }
     return jsonResponse({});
   }
@@ -70,10 +78,12 @@ describe('scion-page-admin-federation save payload (ptone/scion#3924)', () => {
     element?.remove();
     element = null;
     puts = [];
+    getBodies = [];
     vi.restoreAllMocks();
   });
 
-  async function renderAndSave(mutate: (el: any) => void): Promise<Record<string, unknown>> {
+  /** Renders the page, applies mutate, clicks Save and returns the PUT bodies. */
+  async function renderAndSaveAll(mutate: (el: any) => void): Promise<Array<Record<string, unknown>>> {
     vi.stubGlobal('fetch', vi.fn(fetchHandler));
     element = document.createElement('scion-page-admin-federation');
     document.body.appendChild(element);
@@ -89,8 +99,14 @@ describe('scion-page-admin-federation save payload (ptone/scion#3924)', () => {
     expect(save).toBeDefined();
     (save as HTMLElement).click();
     await new Promise((resolve) => setTimeout(resolve, 100));
-    expect(puts).toHaveLength(1);
-    return puts[0]!;
+    await el.updateComplete;
+    return puts;
+  }
+
+  async function renderAndSave(mutate: (el: any) => void): Promise<Record<string, unknown>> {
+    const sent = await renderAndSaveAll(mutate);
+    expect(sent).toHaveLength(1);
+    return sent[0]!;
   }
 
   it('edits every registry federation key', () => {
@@ -123,9 +139,46 @@ describe('scion-page-admin-federation save payload (ptone/scion#3924)', () => {
     expect(unknownPayloadKeys(cleared, 'layer1')).toEqual([]);
   });
 
-  it('sends only registry keys when nothing is changed', async () => {
-    const unchanged = await renderAndSave(() => {});
-    expect(unknownPayloadKeys(unchanged, 'layer1')).toEqual([]);
-    expect(unchanged).toEqual({ federation: FULL_FEDERATION });
+  it('sends nothing when nothing is changed (ptone/scion#3913)', async () => {
+    expect(await renderAndSaveAll(() => {})).toEqual([]);
+  });
+
+  it('sends only the changed key (ptone/scion#3913)', async () => {
+    const payload = await renderAndSave((el) => (el.debounceInterval = '30s'));
+    expect(payload).toEqual({ federation: { debounce_interval: '30s' } });
+    expect(unknownPayloadKeys(payload, 'layer1')).toEqual([]);
+  });
+
+  it('does not save the defaults shown when GET omits federation (ptone/scion#3913)', async () => {
+    getBodies = [{ schema_version: '1' }];
+    expect(await renderAndSaveAll(() => {})).toEqual([]);
+    const payload = await renderAndSave((el) => (el.enabled = true));
+    expect(payload).toEqual({ federation: { enabled: true } });
+  });
+
+  it('an issuer delete sends only trusted_issuers (ptone/scion#3913)', async () => {
+    vi.stubGlobal('fetch', vi.fn(fetchHandler));
+    element = document.createElement('scion-page-admin-federation');
+    document.body.appendChild(element);
+    const el = element as any;
+    await el.updateComplete;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await el.updateComplete;
+    el.deletingIndex = 0;
+    el.confirmDeleteIssuer();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(puts).toEqual([{ federation: { trusted_issuers: [] } }]);
+  });
+
+  it('a reload after a save that removed the block shows the defaults, not the old values (ptone/scion#3913)', async () => {
+    getBodies = [{ schema_version: '1', federation: FULL_FEDERATION }, { schema_version: '1' }];
+    const sent = await renderAndSaveAll((el) => (el.refreshInterval = '4h'));
+    expect(sent).toEqual([{ federation: { refresh_interval: '4h' } }]);
+    const el = element as any;
+    expect(el.enabled).toBe(false);
+    expect(el.algorithms).toEqual(['RS256']);
+    expect(el.refreshInterval).toBe('1h');
+    expect(el.debounceInterval).toBe('5s');
+    expect(el.issuers).toEqual([]);
   });
 });

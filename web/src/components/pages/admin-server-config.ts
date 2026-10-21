@@ -43,6 +43,7 @@ import {
   readSettingsSaveError,
   sectionPathsFromSchema,
 } from '../../shared/settings-save-errors.js';
+import { diffPayload } from '../../shared/settings-diff.js';
 import type {
   SettingsConflict,
   SettingsFieldError,
@@ -66,34 +67,6 @@ import {
 
 /** GET /api/v1/admin/server-config returns this in place of each secret. */
 const MASKED_VALUE = '********';
-
-/**
- * Returns the leaves of current that differ from base (plain objects are
- * compared key by key; arrays and scalars as whole values).
- */
-function diffPayload(
-  current: Record<string, unknown>,
-  base: Record<string, unknown>
-): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(current)) {
-    const b = base[k];
-    if (
-      v &&
-      typeof v === 'object' &&
-      !Array.isArray(v) &&
-      b &&
-      typeof b === 'object' &&
-      !Array.isArray(b)
-    ) {
-      const sub = diffPayload(v as Record<string, unknown>, b as Record<string, unknown>);
-      if (Object.keys(sub).length > 0) out[k] = sub;
-    } else if (JSON.stringify(v) !== JSON.stringify(b)) {
-      out[k] = v;
-    }
-  }
-  return out;
-}
 
 /**
  * Deep-merges src into dst (plain objects only; src wins for other values).
