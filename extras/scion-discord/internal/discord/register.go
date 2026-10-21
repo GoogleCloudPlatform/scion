@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/bwmarrin/discordgo"
 )
 
@@ -25,6 +26,7 @@ type RegistrationHandler struct {
 	store       Store
 	session     *discordgo.Session
 	hubURL      string
+	apiURL      string // the hub API calls (hub_api_url, else hubURL)
 	registerURL string // external URL for user-facing registration links; falls back to hubURL
 	hmacKey     string
 	brokerID    string
@@ -73,9 +75,10 @@ const (
 
 // NewRegistrationHandler creates a new RegistrationHandler.
 // If registerURL is non-empty it is used for user-facing registration links;
-// otherwise hubURL is used as a fallback.
+// otherwise hubURL is used as a fallback. The hub API calls go to hubAPIURL
+// (hub_api_url), or to hubURL when it is empty.
 // If httpClient is nil, a default client with a 15s timeout is used.
-func NewRegistrationHandler(store Store, session *discordgo.Session, hubURL, registerURL, hmacKey, brokerID string, httpClient *http.Client, log *slog.Logger) *RegistrationHandler {
+func NewRegistrationHandler(store Store, session *discordgo.Session, hubURL, hubAPIURL, registerURL, hmacKey, brokerID string, httpClient *http.Client, log *slog.Logger) *RegistrationHandler {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -86,6 +89,7 @@ func NewRegistrationHandler(store Store, session *discordgo.Session, hubURL, reg
 		store:       store,
 		session:     session,
 		hubURL:      hubURL,
+		apiURL:      plugin.HubAPIURL(hubURL, hubAPIURL),
 		registerURL: registerURL,
 		hmacKey:     hmacKey,
 		brokerID:    brokerID,
@@ -324,7 +328,7 @@ func (h *RegistrationHandler) registerCodeWithHub(ctx context.Context, code, dis
 		return fmt.Errorf("marshal discord link request: %w", err)
 	}
 
-	url := h.hubURL + "/api/v1/discord/link"
+	url := h.apiURL + "/api/v1/discord/link"
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("create discord link request: %w", err)
@@ -350,7 +354,7 @@ func (h *RegistrationHandler) registerCodeWithHub(ctx context.Context, code, dis
 // checkLinkingStatus checks with the hub whether a linking code was confirmed.
 func (h *RegistrationHandler) checkLinkingStatus(ctx context.Context, discordUserID string) (*identityLinkStatusResponse, error) {
 	url := fmt.Sprintf("%s/api/v1/discord/link/status?discord_user_id=%s",
-		h.hubURL, discordUserID)
+		h.apiURL, discordUserID)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create identity link status request: %w", err)

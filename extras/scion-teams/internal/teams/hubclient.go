@@ -41,6 +41,7 @@ type HubClient struct {
 }
 
 // NewHubClient creates a new HubClient for delivering messages to the hub.
+// hubURL is the plugin's API URL (hub_api_url, else hub_url).
 func NewHubClient(hubURL, hmacKey, brokerID string, log *slog.Logger) *HubClient {
 	return &HubClient{
 		hubURL:     hubURL,

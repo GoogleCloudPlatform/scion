@@ -65,7 +65,10 @@ type TelegramBrokerV2 struct {
 	api     *TelegramAPIClient
 	botInfo *BotUser
 
-	hubURL     string
+	hubURL string // hub_url: public; for links people open
+	// hubAPIURL is hub_api_url, the URL for the plugin's own API calls to
+	// the hub; "" means hubURL (see hubAPIBase).
+	hubAPIURL  string
 	hmacKey    string
 	brokerID   string
 	pluginName string
@@ -475,8 +478,13 @@ func (b *TelegramBrokerV2) configureLocked(config map[string]string) (*retiredCo
 		}
 	}
 
-	if v, ok := config["hub_url"]; ok {
+	if v, ok := config[plugin.ConfigKeyHubURL]; ok {
 		b.hubURL = v
+		// hub_api_url comes with hub_url: a configuration that names hub_url
+		// without it calls hub_url.
+		b.hubAPIURL = config[plugin.ConfigKeyHubAPIURL]
+	} else if v, ok := config[plugin.ConfigKeyHubAPIURL]; ok {
+		b.hubAPIURL = v
 	}
 	if v, ok := config["hmac_key"]; ok {
 		b.hmacKey = v
@@ -591,12 +599,12 @@ func (b *TelegramBrokerV2) configureLocked(config map[string]string) (*retiredCo
 	b.httpClient = &http.Client{Timeout: 10 * time.Second, Transport: transport}
 
 	// Create hub client, sharing the broker's (possibly wrapped) httpClient.
-	b.hubClient = NewHTTPHubClient(b.hubURL, b.hmacKey, b.brokerID, b.httpClient)
+	b.hubClient = NewHTTPHubClientWithAPIURL(b.hubURL, b.hubAPIURL, b.hmacKey, b.brokerID, b.httpClient)
 
 	// Create component handlers.
 	b.commands = NewCommandHandler(b.store, b.api, b.hubClient, bot.Username, b.log)
 	b.callbacks = NewCallbackHandler(b.store, b.api, b.hubClient, b.log)
-	b.registration = NewRegistrationHandler(b.store, b.api, b.hubURL, b.hmacKey, b.brokerID, b.httpClient, b.log)
+	b.registration = NewRegistrationHandler(b.store, b.api, b.hubURL, b.hubAPIURL, b.hmacKey, b.brokerID, b.httpClient, b.log)
 
 	// Handle v1 migration: import chat routes as group links.
 	if routesJSON, ok := config["v1_chat_routes"]; ok && routesJSON != "" {
@@ -642,6 +650,7 @@ func (b *TelegramBrokerV2) configureLocked(config map[string]string) (*retiredCo
 		"bot_username", bot.Username,
 		"bot_id", bot.ID,
 		"hub_url", b.hubURL,
+		"hub_api_url", b.hubAPIURL,
 		"broker_id", b.brokerID,
 		"store_backend", storeBackend,
 		"inbound_mode", b.inboundMode,
@@ -1976,6 +1985,9 @@ func (b *TelegramBrokerV2) HealthCheck() (*plugin.HealthStatus, error) {
 	}
 	if b.hubURL != "" {
 		details["hub_url"] = b.hubURL
+	}
+	if b.hubAPIURL != "" {
+		details["hub_api_url"] = b.hubAPIURL
 	}
 
 	return &plugin.HealthStatus{
@@ -3351,10 +3363,17 @@ func (b *TelegramBrokerV2) replyAgentListUnavailable(ctx context.Context, chatID
 
 // --- Hub delivery (reuses the same pattern as v1) ---
 
+// hubAPIBase returns the base URL for the broker's own API calls to the
+// hub: hub_api_url when the hub injected one, else hub_url. Callers hold
+// b.mu.
+func (b *TelegramBrokerV2) hubAPIBase() string {
+	return plugin.HubAPIURL(b.hubURL, b.hubAPIURL)
+}
+
 func (b *TelegramBrokerV2) deliverInbound(topic string, msg *messages.StructuredMessage) {
 	b.mu.RLock()
 	handler := b.InboundHandler
-	hubURL := b.hubURL
+	hubURL := b.hubAPIBase()
 	hmacKey := b.hmacKey
 	brokerID := b.brokerID
 	pluginName := b.pluginName
@@ -3446,7 +3465,7 @@ func (b *TelegramBrokerV2) shouldSuppressError(chatID int64, threadID int, error
 func (b *TelegramBrokerV2) deliverInboundWithFeedback(ctx context.Context, topic string, msg *messages.StructuredMessage) (statusCode int, errMsg string) {
 	b.mu.RLock()
 	handler := b.InboundHandler
-	hubURL := b.hubURL
+	hubURL := b.hubAPIBase()
 	hmacKey := b.hmacKey
 	brokerID := b.brokerID
 	pluginName := b.pluginName

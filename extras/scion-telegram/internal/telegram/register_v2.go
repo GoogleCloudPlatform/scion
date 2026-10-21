@@ -29,13 +29,15 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
 )
 
 // RegistrationHandler manages the hub-verified code-based registration flow.
 type RegistrationHandler struct {
 	store      Store
 	api        *TelegramAPIClient
-	hubURL     string
+	hubURL     string // public; the link people open
+	apiURL     string // the hub API calls (hub_api_url, else hubURL)
 	hmacKey    string
 	brokerID   string
 	httpClient *http.Client
@@ -80,9 +82,11 @@ const (
 	linkingCodeLength   = 6
 )
 
-// NewRegistrationHandler creates a new RegistrationHandler.
+// NewRegistrationHandler creates a new RegistrationHandler. The linking
+// link people open is built from hubURL (hub_url); the hub API calls go to
+// hubAPIURL (hub_api_url), or to hubURL when it is empty.
 // If httpClient is nil, a default client with a 15s timeout is used.
-func NewRegistrationHandler(store Store, api *TelegramAPIClient, hubURL, hmacKey, brokerID string, httpClient *http.Client, log *slog.Logger) *RegistrationHandler {
+func NewRegistrationHandler(store Store, api *TelegramAPIClient, hubURL, hubAPIURL, hmacKey, brokerID string, httpClient *http.Client, log *slog.Logger) *RegistrationHandler {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -93,6 +97,7 @@ func NewRegistrationHandler(store Store, api *TelegramAPIClient, hubURL, hmacKey
 		store:      store,
 		api:        api,
 		hubURL:     hubURL,
+		apiURL:     plugin.HubAPIURL(hubURL, hubAPIURL),
 		hmacKey:    hmacKey,
 		brokerID:   brokerID,
 		httpClient: httpClient,
@@ -460,7 +465,7 @@ func (h *RegistrationHandler) registerCodeWithHub(ctx context.Context, code, tel
 		return fmt.Errorf("marshal linking code request: %w", err)
 	}
 
-	url := h.hubURL + "/api/v1/telegram/link"
+	url := h.apiURL + "/api/v1/telegram/link"
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("create linking code request: %w", err)
@@ -487,7 +492,7 @@ func (h *RegistrationHandler) registerCodeWithHub(ctx context.Context, code, tel
 
 // checkLinkingStatus checks with the hub whether a linking code was confirmed.
 func (h *RegistrationHandler) checkLinkingStatus(ctx context.Context, telegramUserID string) (*linkingStatusResponse, error) {
-	url := fmt.Sprintf("%s/api/v1/telegram/link/status?telegram_user_id=%s", h.hubURL, telegramUserID)
+	url := fmt.Sprintf("%s/api/v1/telegram/link/status?telegram_user_id=%s", h.apiURL, telegramUserID)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create linking status request: %w", err)

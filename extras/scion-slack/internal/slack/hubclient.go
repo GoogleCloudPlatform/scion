@@ -67,7 +67,8 @@ type httpHubClient struct {
 	httpClient *http.Client
 }
 
-// NewHTTPHubClient creates a new HubClient that calls the Scion Hub API.
+// NewHTTPHubClient creates a new HubClient that calls the Scion Hub API at
+// hubURL (the plugin's API URL: hub_api_url, else hub_url).
 func NewHTTPHubClient(hubURL, hmacKey, brokerID string) HubClient {
 	return &httpHubClient{
 		hubURL:     hubURL,

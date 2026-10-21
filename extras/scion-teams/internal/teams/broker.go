@@ -51,8 +51,11 @@ type Config struct {
 	DBDSN          string // PostgreSQL DSN (required when DBType=postgres)
 	MentionRouting bool
 
-	// Phase 2: Hub connection.
+	// Phase 2: Hub connection. HubURL (hub_url) is the public endpoint, for
+	// links people open; HubAPIURL (hub_api_url) is the URL for the
+	// plugin's own API calls to the hub ("" means HubURL).
 	HubURL        string
+	HubAPIURL     string
 	HMACKey       string
 	BrokerID      string
 	SendQueueSize int
@@ -196,8 +199,13 @@ func (b *TeamsBroker) Configure(config map[string]string) error {
 	}
 
 	// Parse Phase 2 keys.
-	if v, ok := config["hub_url"]; ok {
+	if v, ok := config[plugin.ConfigKeyHubURL]; ok {
 		b.config.HubURL = v
+		// hub_api_url comes with hub_url: a configuration that names hub_url
+		// without it calls hub_url.
+		b.config.HubAPIURL = config[plugin.ConfigKeyHubAPIURL]
+	} else if v, ok := config[plugin.ConfigKeyHubAPIURL]; ok {
+		b.config.HubAPIURL = v
 	}
 	if v, ok := config["hmac_key"]; ok {
 		b.config.HMACKey = v
@@ -219,7 +227,7 @@ func (b *TeamsBroker) Configure(config map[string]string) error {
 	// Phase 2 requires hub connection details AND phase 1 to be complete.
 	if b.config.HubURL != "" && b.config.HMACKey != "" && b.config.BrokerID != "" {
 		if b.phase == 1 {
-			b.hubClient = NewHubClient(b.config.HubURL, b.config.HMACKey, b.config.BrokerID, b.log)
+			b.hubClient = NewHubClient(plugin.HubAPIURL(b.config.HubURL, b.config.HubAPIURL), b.config.HMACKey, b.config.BrokerID, b.log)
 
 			// Initialize outbound messaging components.
 			b.sender = NewSender(b.tokenProvider, b.log)
@@ -233,6 +241,7 @@ func (b *TeamsBroker) Configure(config map[string]string) error {
 			b.configured = true
 			b.log.Info("Phase 2 configuration complete",
 				"hub_url", b.config.HubURL,
+				"hub_api_url", b.config.HubAPIURL,
 				"broker_id", b.config.BrokerID,
 			)
 		} else if b.phase < 1 {

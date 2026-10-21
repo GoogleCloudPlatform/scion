@@ -153,7 +153,10 @@ type SlackBroker struct {
 	socketClient *socketmode.Client
 	botUserID    string
 
-	hubURL     string
+	hubURL string // hub_url: public; for links people open
+	// hubAPIURL is hub_api_url, the URL for the plugin's own API calls to
+	// the hub; "" means hubURL.
+	hubAPIURL  string
 	hmacKey    string
 	brokerID   string
 	pluginName string
@@ -206,8 +209,13 @@ func (b *SlackBroker) Configure(config map[string]string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	if v, ok := config["hub_url"]; ok {
+	if v, ok := config[plugin.ConfigKeyHubURL]; ok {
 		b.hubURL = v
+		// hub_api_url comes with hub_url: a configuration that names hub_url
+		// without it calls hub_url.
+		b.hubAPIURL = config[plugin.ConfigKeyHubAPIURL]
+	} else if v, ok := config[plugin.ConfigKeyHubAPIURL]; ok {
+		b.hubAPIURL = v
 	}
 	if v, ok := config["hmac_key"]; ok {
 		b.hmacKey = v
@@ -278,8 +286,8 @@ func (b *SlackBroker) Configure(config map[string]string) error {
 	}
 
 	if b.hubURL != "" && b.client != nil {
-		b.hubClient = NewHTTPHubClient(b.hubURL, b.hmacKey, b.brokerID)
-		b.registration = NewRegistrationHandler(b.store, b.hubURL, b.hmacKey, b.brokerID, b.log)
+		b.hubClient = NewHTTPHubClient(plugin.HubAPIURL(b.hubURL, b.hubAPIURL), b.hmacKey, b.brokerID)
+		b.registration = NewRegistrationHandler(b.store, b.hubURL, b.hubAPIURL, b.hmacKey, b.brokerID, b.log)
 
 		if slugMapJSON, ok := config["project_slug_map"]; ok && slugMapJSON != "" {
 			var m map[string]string
@@ -308,6 +316,7 @@ func (b *SlackBroker) Configure(config map[string]string) error {
 
 		b.log.Info("Slack broker phase 2 configured",
 			"hub_url", b.hubURL,
+			"hub_api_url", b.hubAPIURL,
 			"broker_id", b.brokerID,
 		)
 
@@ -665,6 +674,9 @@ func (b *SlackBroker) HealthCheck() (*plugin.HealthStatus, error) {
 	if b.hubURL != "" {
 		details["hub_url"] = b.hubURL
 	}
+	if b.hubAPIURL != "" {
+		details["hub_api_url"] = b.hubAPIURL
+	}
 	if b.config != nil {
 		details["socket_mode"] = strconv.FormatBool(b.config.SocketMode)
 	}
@@ -705,7 +717,7 @@ func (b *SlackBroker) startEventListener() {
 
 func (b *SlackBroker) deliverInbound(topic string, msg *messages.StructuredMessage) *hubError {
 	b.mu.RLock()
-	hubURL := b.hubURL
+	hubURL := plugin.HubAPIURL(b.hubURL, b.hubAPIURL)
 	hmacKey := b.hmacKey
 	brokerID := b.brokerID
 	pluginName := b.pluginName
@@ -766,7 +778,7 @@ func (b *SlackBroker) deliverInbound(topic string, msg *messages.StructuredMessa
 // on the hub side, replacing the legacy topic-based single-agent delivery.
 func (b *SlackBroker) deliverRoutedInbound(projectID, defaultAgent string, msg *messages.StructuredMessage) (*routedInboundResult, *hubError) {
 	b.mu.RLock()
-	hubURL := b.hubURL
+	hubURL := plugin.HubAPIURL(b.hubURL, b.hubAPIURL)
 	hmacKey := b.hmacKey
 	brokerID := b.brokerID
 	pluginName := b.pluginName

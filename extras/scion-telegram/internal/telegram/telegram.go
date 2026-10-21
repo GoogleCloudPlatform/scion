@@ -129,8 +129,10 @@ type TelegramBroker struct {
 	api     *TelegramAPIClient
 	botInfo *BotUser
 
-	// Hub API callback config (set via Configure)
+	// Hub API callback config (set via Configure). hubURL is hub_url;
+	// hubAPIURL is hub_api_url, the URL for API calls ("" means hubURL).
 	hubURL     string
+	hubAPIURL  string
 	hmacKey    string
 	brokerID   string
 	pluginName string
@@ -193,8 +195,12 @@ func (b *TelegramBroker) Configure(config map[string]string) error {
 	defer b.mu.Unlock()
 
 	// Store hub config (same pattern as refbroker)
-	if v, ok := config["hub_url"]; ok {
+	if v, ok := config[plugin.ConfigKeyHubURL]; ok {
 		b.hubURL = v
+		// hub_api_url comes with hub_url (see TelegramBrokerV2.Configure).
+		b.hubAPIURL = config[plugin.ConfigKeyHubAPIURL]
+	} else if v, ok := config[plugin.ConfigKeyHubAPIURL]; ok {
+		b.hubAPIURL = v
 	}
 	if v, ok := config["hmac_key"]; ok {
 		b.hmacKey = v
@@ -568,6 +574,9 @@ func (b *TelegramBroker) HealthCheck() (*plugin.HealthStatus, error) {
 	if b.hubURL != "" {
 		details["hub_url"] = b.hubURL
 	}
+	if b.hubAPIURL != "" {
+		details["hub_api_url"] = b.hubAPIURL
+	}
 
 	return &plugin.HealthStatus{
 		Status:  "healthy",
@@ -782,7 +791,7 @@ func isEcho(msg *messages.StructuredMessage) bool {
 func (b *TelegramBroker) deliverInbound(topic string, msg *messages.StructuredMessage) *hubError {
 	b.mu.RLock()
 	handler := b.InboundHandler
-	hubURL := b.hubURL
+	hubURL := plugin.HubAPIURL(b.hubURL, b.hubAPIURL)
 	hmacKey := b.hmacKey
 	brokerID := b.brokerID
 	pluginName := b.pluginName

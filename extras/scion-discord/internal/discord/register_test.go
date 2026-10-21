@@ -17,51 +17,51 @@ func testLogger() *slog.Logger {
 
 func TestNewRegistrationHandler_RegisterURL(t *testing.T) {
 	t.Run("registerURL is stored when provided", func(t *testing.T) {
-		h := NewRegistrationHandler(nil, nil, "http://localhost:8080", "https://public.example.com", "key", "broker1", nil, testLogger())
+		h := NewRegistrationHandler(nil, nil, "http://localhost:8080", "", "https://public.example.com", "key", "broker1", nil, testLogger())
 		require.NotNil(t, h)
 		assert.Equal(t, "http://localhost:8080", h.hubURL)
 		assert.Equal(t, "https://public.example.com", h.registerURL)
 	})
 
 	t.Run("registerURL is empty when not provided", func(t *testing.T) {
-		h := NewRegistrationHandler(nil, nil, "http://localhost:8080", "", "key", "broker1", nil, testLogger())
+		h := NewRegistrationHandler(nil, nil, "http://localhost:8080", "", "", "key", "broker1", nil, testLogger())
 		require.NotNil(t, h)
 		assert.Equal(t, "http://localhost:8080", h.hubURL)
 		assert.Equal(t, "", h.registerURL)
 	})
 
 	t.Run("default http client is created when nil", func(t *testing.T) {
-		h := NewRegistrationHandler(nil, nil, "http://localhost:8080", "", "key", "broker1", nil, testLogger())
+		h := NewRegistrationHandler(nil, nil, "http://localhost:8080", "", "", "key", "broker1", nil, testLogger())
 		require.NotNil(t, h.httpClient)
 		assert.Equal(t, 15*time.Second, h.httpClient.Timeout)
 	})
 
 	t.Run("custom http client is used when provided", func(t *testing.T) {
 		client := &http.Client{Timeout: 30 * time.Second}
-		h := NewRegistrationHandler(nil, nil, "http://localhost:8080", "", "key", "broker1", client, testLogger())
+		h := NewRegistrationHandler(nil, nil, "http://localhost:8080", "", "", "key", "broker1", client, testLogger())
 		assert.Equal(t, client, h.httpClient)
 	})
 }
 
 func TestRegistrationHandler_LinkURL(t *testing.T) {
 	t.Run("uses registerURL for link when set", func(t *testing.T) {
-		h := NewRegistrationHandler(nil, nil, "http://localhost:8080", "https://public.example.com", "", "", nil, testLogger())
+		h := NewRegistrationHandler(nil, nil, "http://localhost:8080", "", "https://public.example.com", "", "", nil, testLogger())
 		assert.Equal(t, "https://public.example.com", h.registrationBaseURL())
 	})
 
 	t.Run("falls back to hubURL when registerURL is empty", func(t *testing.T) {
-		h := NewRegistrationHandler(nil, nil, "http://localhost:8080", "", "", "", nil, testLogger())
+		h := NewRegistrationHandler(nil, nil, "http://localhost:8080", "", "", "", "", nil, testLogger())
 		assert.Equal(t, "http://localhost:8080", h.registrationBaseURL())
 	})
 
 	t.Run("registerURL with trailing slash is trimmed in link", func(t *testing.T) {
-		h := NewRegistrationHandler(nil, nil, "http://localhost:8080", "https://public.example.com/", "", "", nil, testLogger())
+		h := NewRegistrationHandler(nil, nil, "http://localhost:8080", "", "https://public.example.com/", "", "", nil, testLogger())
 		link := formatRegistrationLink(h.registrationBaseURL(), "ABC123", "testuser")
 		assert.Equal(t, "https://public.example.com/profile/discord?code=ABC123&user_name=testuser", link)
 	})
 
 	t.Run("hubURL with trailing slash is trimmed in link", func(t *testing.T) {
-		h := NewRegistrationHandler(nil, nil, "http://localhost:8080/", "", "", "", nil, testLogger())
+		h := NewRegistrationHandler(nil, nil, "http://localhost:8080/", "", "", "", "", nil, testLogger())
 		link := formatRegistrationLink(h.registrationBaseURL(), "ABC123", "testuser")
 		assert.Equal(t, "http://localhost:8080/profile/discord?code=ABC123&user_name=testuser", link)
 	})

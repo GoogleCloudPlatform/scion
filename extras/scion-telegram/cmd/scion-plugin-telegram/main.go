@@ -96,7 +96,8 @@ func main() {
 	fmt.Println("  TELEGRAM_WEBHOOK_URL        Public webhook URL (required)")
 	fmt.Println("  TELEGRAM_WEBHOOK_SECRET     Secret token for webhook validation (required)")
 	fmt.Println("  TELEGRAM_WEBHOOK_LISTEN     Listen address for webhook (default :9094)")
-	fmt.Println("  TELEGRAM_HUB_URL            Hub API URL")
+	fmt.Println("  TELEGRAM_HUB_URL            Hub public URL (links people open; hub API too unless set below)")
+	fmt.Println("  TELEGRAM_HUB_API_URL        Hub URL for the plugin's own API calls (default: TELEGRAM_HUB_URL)")
 	fmt.Println("  TELEGRAM_HMAC_KEY           HMAC key for hub auth")
 	fmt.Println("  TELEGRAM_BROKER_ID          Broker identifier")
 	fmt.Println("  GRPC_PORT                   gRPC port (default 50051)")
@@ -301,7 +302,7 @@ const standaloneEnvPrefix = "TELEGRAM"
 
 var standaloneEnvKeys = []string{
 	"bot_token", "webhook_url", "webhook_secret", "webhook_listen",
-	"hub_url", "hmac_key", "broker_id",
+	"hub_url", "hub_api_url", "hmac_key", "broker_id",
 	"api_base_url", "agent_cache_ttl", "send_queue_size",
 	"send_min_delay",
 	"transport_mode", "transport_audience",

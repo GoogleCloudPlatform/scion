@@ -12,11 +12,15 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
 )
 
 // httpHubClient implements HubClient using HTTP calls to the Hub API.
+// API calls go to apiURL; hubURL (the public endpoint) is HubBaseURL, for
+// links people open.
 type httpHubClient struct {
 	hubURL         string
+	apiURL         string
 	hmacKey        string
 	brokerID       string
 	httpClient     *http.Client
@@ -30,11 +34,18 @@ type httpHubClient struct {
 // and routinely takes 30–120s). The longHTTPClient inherits the Transport from
 // httpClient so that IAP-authenticated transport is preserved on long-running calls.
 func NewHTTPHubClient(hubURL, hmacKey, brokerID string, httpClient *http.Client) HubClient {
+	return NewHTTPHubClientWithAPIURL(hubURL, "", hmacKey, brokerID, httpClient)
+}
+
+// NewHTTPHubClientWithAPIURL is NewHTTPHubClient with a separate URL for
+// the API calls (hub_api_url). An empty apiURL means hubURL.
+func NewHTTPHubClientWithAPIURL(hubURL, apiURL, hmacKey, brokerID string, httpClient *http.Client) HubClient {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 15 * time.Second}
 	}
 	return &httpHubClient{
 		hubURL:     hubURL,
+		apiURL:     plugin.HubAPIURL(hubURL, apiURL),
 		hmacKey:    hmacKey,
 		brokerID:   brokerID,
 		httpClient: httpClient,
@@ -68,7 +79,7 @@ type hubAgent struct {
 // ListProjectsForUser lists the projects the linked user is a member of by
 // calling GET /projects with the linked-user header set.
 func (c *httpHubClient) ListProjectsForUser(ctx context.Context, onBehalfOf string) ([]ProjectOption, error) {
-	url := c.hubURL + "/api/v1/projects"
+	url := c.apiURL + "/api/v1/projects"
 
 	slog.Debug("Listing projects for user from hub", "url", url, "on_behalf_of", onBehalfOf)
 
@@ -105,7 +116,7 @@ func (c *httpHubClient) ListProjectsForUser(ctx context.Context, onBehalfOf stri
 }
 
 func (c *httpHubClient) ListAgents(ctx context.Context, projectID, onBehalfOf string) ([]AgentInfo, error) {
-	url := fmt.Sprintf("%s/api/v1/projects/%s/agents", c.hubURL, projectID)
+	url := fmt.Sprintf("%s/api/v1/projects/%s/agents", c.apiURL, projectID)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
@@ -154,7 +165,7 @@ type hubTemplate struct {
 
 func (c *httpHubClient) ListTemplates(ctx context.Context, projectID, onBehalfOf string) (TemplateList, error) {
 	// Fetch global templates.
-	globalURL := c.hubURL + "/api/v1/templates?scope=global&status=active"
+	globalURL := c.apiURL + "/api/v1/templates?scope=global&status=active"
 
 	slog.Debug("Listing global templates from hub", "url", globalURL, "broker_id", c.brokerID)
 
@@ -195,7 +206,7 @@ func (c *httpHubClient) ListTemplates(ctx context.Context, projectID, onBehalfOf
 	// here keeps the global templates and is reported in ProjectErr.
 	var projectErr error
 	if projectID != "" {
-		projectURL := fmt.Sprintf("%s/api/v1/templates?scope=project&projectId=%s&status=active", c.hubURL, projectID)
+		projectURL := fmt.Sprintf("%s/api/v1/templates?scope=project&projectId=%s&status=active", c.apiURL, projectID)
 
 		slog.Debug("Listing project templates from hub", "url", projectURL, "project_id", projectID)
 
@@ -259,7 +270,7 @@ type hubCreateAgentResponse struct {
 }
 
 func (c *httpHubClient) CreateAgent(ctx context.Context, projectID string, req CreateAgentRequest, onBehalfOf string) (*CreateAgentResponse, error) {
-	url := fmt.Sprintf("%s/api/v1/projects/%s/agents", c.hubURL, projectID)
+	url := fmt.Sprintf("%s/api/v1/projects/%s/agents", c.apiURL, projectID)
 
 	slog.Debug("Creating agent via hub", "url", url, "name", req.Name, "template", req.Template, "on_behalf_of", onBehalfOf)
 
@@ -334,7 +345,7 @@ func (c *httpHubClient) CreateAgent(ctx context.Context, projectID string, req C
 // GetAgent reads one agent of the project by ID or slug, for the linked user.
 // A non-OK answer is returned as a *HubError.
 func (c *httpHubClient) GetAgent(ctx context.Context, projectID, agentID, onBehalfOf string) (*hubclient.Agent, error) {
-	u := fmt.Sprintf("%s/api/v1/projects/%s/agents/%s", c.hubURL, url.PathEscape(projectID), url.PathEscape(agentID))
+	u := fmt.Sprintf("%s/api/v1/projects/%s/agents/%s", c.apiURL, url.PathEscape(projectID), url.PathEscape(agentID))
 
 	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {
@@ -405,7 +416,7 @@ type hubListSecretsResponse struct {
 
 func (c *httpHubClient) ListSecrets(ctx context.Context, scope, scopeID, onBehalfOf string) ([]SecretInfo, error) {
 	u := fmt.Sprintf("%s/api/v1/secrets?scope=%s&scopeId=%s",
-		c.hubURL, url.QueryEscape(scope), url.QueryEscape(scopeID))
+		c.apiURL, url.QueryEscape(scope), url.QueryEscape(scopeID))
 
 	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {
@@ -435,7 +446,7 @@ func (c *httpHubClient) ListSecrets(ctx context.Context, scope, scopeID, onBehal
 
 func (c *httpHubClient) GetSecret(ctx context.Context, key, scope, scopeID, onBehalfOf string) (*SecretInfo, error) {
 	u := fmt.Sprintf("%s/api/v1/secrets/%s?scope=%s&scopeId=%s",
-		c.hubURL, url.PathEscape(key), url.QueryEscape(scope), url.QueryEscape(scopeID))
+		c.apiURL, url.PathEscape(key), url.QueryEscape(scope), url.QueryEscape(scopeID))
 
 	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {
@@ -467,7 +478,7 @@ func (c *httpHubClient) GetSecret(ctx context.Context, key, scope, scopeID, onBe
 }
 
 func (c *httpHubClient) SetSecret(ctx context.Context, key, value, scope, scopeID, onBehalfOf string) error {
-	u := fmt.Sprintf("%s/api/v1/secrets/%s", c.hubURL, url.PathEscape(key))
+	u := fmt.Sprintf("%s/api/v1/secrets/%s", c.apiURL, url.PathEscape(key))
 
 	payload := setSecretPayload{
 		Value:    value,
@@ -504,7 +515,7 @@ func (c *httpHubClient) SetSecret(ctx context.Context, key, value, scope, scopeI
 
 func (c *httpHubClient) DeleteSecret(ctx context.Context, key, scope, scopeID, onBehalfOf string) error {
 	u := fmt.Sprintf("%s/api/v1/secrets/%s?scope=%s&scopeId=%s",
-		c.hubURL, url.PathEscape(key), url.QueryEscape(scope), url.QueryEscape(scopeID))
+		c.apiURL, url.PathEscape(key), url.QueryEscape(scope), url.QueryEscape(scopeID))
 
 	httpReq, err := http.NewRequestWithContext(ctx, "DELETE", u, nil)
 	if err != nil {

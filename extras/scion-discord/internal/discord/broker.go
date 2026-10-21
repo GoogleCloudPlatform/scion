@@ -193,7 +193,10 @@ type DiscordBroker struct {
 	session *discordgo.Session // Discord gateway session
 	botUser *discordgo.User    // Bot's own user info
 
-	hubURL     string
+	hubURL string // hub_url: public; for links people open
+	// hubAPIURL is hub_api_url, the URL for the plugin's own API calls to
+	// the hub; "" means hubURL (see hubAPIBase).
+	hubAPIURL  string
 	hmacKey    string
 	brokerID   string
 	pluginName string
@@ -285,8 +288,13 @@ func (b *DiscordBroker) Configure(config map[string]string) error {
 	defer b.mu.Unlock()
 
 	// Extract hub credentials (may arrive in either phase).
-	if v, ok := config["hub_url"]; ok {
+	if v, ok := config[plugin.ConfigKeyHubURL]; ok {
 		b.hubURL = v
+		// hub_api_url comes with hub_url: a configuration that names hub_url
+		// without it calls hub_url.
+		b.hubAPIURL = config[plugin.ConfigKeyHubAPIURL]
+	} else if v, ok := config[plugin.ConfigKeyHubAPIURL]; ok {
+		b.hubAPIURL = v
 	}
 	if v, ok := config["hmac_key"]; ok {
 		b.hmacKey = v
@@ -482,7 +490,7 @@ func (b *DiscordBroker) Configure(config map[string]string) error {
 		}
 
 		// Create hub client, sharing the broker's (possibly wrapped) httpClient.
-		b.hubClient = NewHTTPHubClient(b.hubURL, b.hmacKey, b.brokerID, b.httpClient)
+		b.hubClient = NewHTTPHubClientWithAPIURL(b.hubURL, b.hubAPIURL, b.hmacKey, b.brokerID, b.httpClient)
 
 		// Create component handlers.
 		appID := ""
@@ -496,7 +504,7 @@ func (b *DiscordBroker) Configure(config map[string]string) error {
 		b.commands.SetAsyncCreate(b.asyncCreate)
 		b.callbacks = NewCallbackHandler(b.store, b.session, b.hubClient, b.deliverInbound, b.log)
 		registerURL := config["register_url"]
-		b.registration = NewRegistrationHandler(b.store, b.session, b.hubURL, registerURL, b.hmacKey, b.brokerID, b.httpClient, b.log)
+		b.registration = NewRegistrationHandler(b.store, b.session, b.hubURL, b.hubAPIURL, registerURL, b.hmacKey, b.brokerID, b.httpClient, b.log)
 
 		// Parse hub-injected project slug map (projectID -> slug).
 		if slugMapJSON, ok := config["project_slug_map"]; ok && slugMapJSON != "" {
@@ -515,6 +523,7 @@ func (b *DiscordBroker) Configure(config map[string]string) error {
 
 		b.log.Info("Discord broker phase 2 configured",
 			"hub_url", b.hubURL,
+			"hub_api_url", b.hubAPIURL,
 			"broker_id", b.brokerID,
 		)
 
@@ -1104,6 +1113,9 @@ func (b *DiscordBroker) HealthCheck() (*plugin.HealthStatus, error) {
 	}
 	if b.hubURL != "" {
 		details["hub_url"] = b.hubURL
+	}
+	if b.hubAPIURL != "" {
+		details["hub_api_url"] = b.hubAPIURL
 	}
 
 	// Report degraded when gateway is disconnected but subscriptions are active.
@@ -2035,7 +2047,7 @@ func (b *DiscordBroker) handleRoutedInbound(
 func (b *DiscordBroker) deliverInbound(topic string, msg *messages.StructuredMessage) *hubError {
 	b.mu.RLock()
 	handler := b.InboundHandler
-	hubURL := b.hubURL
+	hubURL := plugin.HubAPIURL(b.hubURL, b.hubAPIURL)
 	hmacKey := b.hmacKey
 	brokerID := b.brokerID
 	pluginName := b.pluginName
@@ -2101,7 +2113,7 @@ func (b *DiscordBroker) deliverInbound(topic string, msg *messages.StructuredMes
 // on the hub side, replacing the legacy topic-based single-agent delivery.
 func (b *DiscordBroker) deliverRoutedInbound(projectID, defaultAgent string, msg *messages.StructuredMessage) (*routedInboundResult, *hubError) {
 	b.mu.RLock()
-	hubURL := b.hubURL
+	hubURL := plugin.HubAPIURL(b.hubURL, b.hubAPIURL)
 	hmacKey := b.hmacKey
 	brokerID := b.brokerID
 	pluginName := b.pluginName

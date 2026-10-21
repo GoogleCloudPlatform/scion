@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
 )
 
 const (
@@ -27,7 +28,8 @@ const (
 // for Slack users.
 type RegistrationHandler struct {
 	store      Store
-	hubURL     string
+	hubURL     string // public; the link people open
+	apiURL     string // the hub API calls (hub_api_url, else hubURL)
 	hmacKey    string
 	brokerID   string
 	httpClient *http.Client
@@ -61,14 +63,17 @@ type identityLinkUser struct {
 	Email string `json:"email"`
 }
 
-// NewRegistrationHandler creates a new RegistrationHandler.
-func NewRegistrationHandler(store Store, hubURL, hmacKey, brokerID string, log *slog.Logger) *RegistrationHandler {
+// NewRegistrationHandler creates a new RegistrationHandler. The linking
+// link people open is built from hubURL (hub_url); the hub API calls go to
+// hubAPIURL (hub_api_url), or to hubURL when it is empty.
+func NewRegistrationHandler(store Store, hubURL, hubAPIURL, hmacKey, brokerID string, log *slog.Logger) *RegistrationHandler {
 	if log == nil {
 		log = slog.Default()
 	}
 	return &RegistrationHandler{
 		store:      store,
 		hubURL:     hubURL,
+		apiURL:     plugin.HubAPIURL(hubURL, hubAPIURL),
 		hmacKey:    hmacKey,
 		brokerID:   brokerID,
 		httpClient: &http.Client{Timeout: 15 * time.Second},
@@ -225,7 +230,7 @@ func (h *RegistrationHandler) registerCodeWithHub(ctx context.Context, code, sla
 		return fmt.Errorf("marshal slack link request: %w", err)
 	}
 
-	url := h.hubURL + "/api/v1/slack/link"
+	url := h.apiURL + "/api/v1/slack/link"
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("create slack link request: %w", err)
@@ -250,7 +255,7 @@ func (h *RegistrationHandler) registerCodeWithHub(ctx context.Context, code, sla
 
 func (h *RegistrationHandler) checkLinkingStatus(ctx context.Context, slackUserID string) (*identityLinkStatusResponse, error) {
 	url := fmt.Sprintf("%s/api/v1/slack/link/status?slack_user_id=%s",
-		h.hubURL, slackUserID)
+		h.apiURL, slackUserID)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create identity link status request: %w", err)

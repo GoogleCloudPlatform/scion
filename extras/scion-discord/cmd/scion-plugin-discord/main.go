@@ -62,7 +62,8 @@ func main() {
 	fmt.Println("  public_key       Discord public key (for interaction verification)")
 	fmt.Println("  guild_ids        Comma-separated guild IDs for per-guild commands (empty = global)")
 	fmt.Println("  guild_id         (deprecated) Alias for guild_ids with a single ID")
-	fmt.Println("  hub_url          Hub API URL for inbound message delivery")
+	fmt.Println("  hub_url          Hub public URL: links people open, and the hub API when hub_api_url is unset")
+	fmt.Println("  hub_api_url      Hub URL for the plugin's own API calls (default: hub_url)")
 	fmt.Println("  hmac_key         Base64-encoded HMAC key for hub authentication")
 	fmt.Println("  broker_id        Broker ID for HMAC signing")
 	fmt.Println("  db_path          Path to SQLite database (default: discord.db)")
@@ -157,7 +158,7 @@ func serveStandalone() {
 		EnvPrefix:   "DISCORD",
 		EnvKeys: []string{
 			"bot_token", "application_id", "public_key", "guild_ids", "guild_id",
-			"hub_url", "hmac_key", "broker_id",
+			"hub_url", "hub_api_url", "hmac_key", "broker_id",
 			"mention_routing", "send_queue_size", "send_min_delay",
 			"agent_cache_ttl", "async_create", "downloads_path",
 			"transport_mode", "transport_audience",

@@ -72,7 +72,8 @@ func main() {
 	fmt.Println("  app_secret       (required) Azure App Registration client secret")
 	fmt.Println("  tenant_id        (required) Azure AD tenant ID")
 	fmt.Println("  listen_address   Webhook server bind address (default: :3978)")
-	fmt.Println("  hub_url          Hub API URL for inbound message delivery")
+	fmt.Println("  hub_url          Hub public URL: links people open, and the hub API when hub_api_url is unset")
+	fmt.Println("  hub_api_url      Hub URL for the plugin's own API calls (default: hub_url)")
 	fmt.Println("  hmac_key         Base64-encoded HMAC key for hub authentication")
 	fmt.Println("  broker_id        Broker ID for HMAC signing")
 	fmt.Println("  db_path          Path to SQLite database (default: teams.db)")
@@ -154,7 +155,7 @@ func serveStandalone() {
 		EnvKeys: []string{
 			"app_id", "app_secret", "tenant_id",
 			"listen_address",
-			"hub_url", "hmac_key", "broker_id",
+			"hub_url", "hub_api_url", "hmac_key", "broker_id",
 			"db_path", "mention_routing",
 		},
 		UpdateHook: os.Getenv("UPDATE_HOOK"),

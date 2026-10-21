@@ -30,6 +30,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 )
 
@@ -869,8 +870,11 @@ func isGroupChat(chatID int64) bool { return chatID < 0 }
 // --- httpHubClient ---
 
 // httpHubClient implements HubClient using HTTP calls to the Scion hub API.
+// API calls go to apiURL; hubURL (the public endpoint) is HubBaseURL, for
+// links people open.
 type httpHubClient struct {
 	hubURL     string
+	apiURL     string
 	hmacKey    string
 	brokerID   string
 	httpClient *http.Client
@@ -879,11 +883,18 @@ type httpHubClient struct {
 // NewHTTPHubClient creates a new HubClient that calls the Scion hub API.
 // If httpClient is nil, a default client with a 10s timeout is used.
 func NewHTTPHubClient(hubURL, hmacKey, brokerID string, httpClient *http.Client) HubClient {
+	return NewHTTPHubClientWithAPIURL(hubURL, "", hmacKey, brokerID, httpClient)
+}
+
+// NewHTTPHubClientWithAPIURL is NewHTTPHubClient with a separate URL for
+// the API calls (hub_api_url). An empty apiURL means hubURL.
+func NewHTTPHubClientWithAPIURL(hubURL, apiURL, hmacKey, brokerID string, httpClient *http.Client) HubClient {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 10 * time.Second}
 	}
 	return &httpHubClient{
 		hubURL:     hubURL,
+		apiURL:     plugin.HubAPIURL(hubURL, apiURL),
 		hmacKey:    hmacKey,
 		brokerID:   brokerID,
 		httpClient: httpClient,
@@ -914,7 +925,7 @@ type hubAgent struct {
 }
 
 func (c *httpHubClient) ListProjectsFresh(ctx context.Context) ([]ProjectOption, error) {
-	url := c.hubURL + "/api/v1/broker/projects"
+	url := c.apiURL + "/api/v1/broker/projects"
 
 	slog.Debug("Listing fresh projects from hub broker endpoint", "url", url, "broker_id", c.brokerID)
 
@@ -981,7 +992,7 @@ func (c *httpHubClient) ListProjectsForUser(ctx context.Context, onBehalfOf stri
 
 // listUserProjectsPage fetches one page of the linked user's projects.
 func (c *httpHubClient) listUserProjectsPage(ctx context.Context, onBehalfOf, cursor string) (*hubProjectsResponse, error) {
-	endpoint := c.hubURL + "/api/v1/projects"
+	endpoint := c.apiURL + "/api/v1/projects"
 	if cursor != "" {
 		endpoint += "?cursor=" + neturl.QueryEscape(cursor)
 	}
@@ -1044,7 +1055,7 @@ func (c *httpHubClient) ListAgents(ctx context.Context, projectID, onBehalfOf st
 
 // listAgentsPage fetches one page of a project's agents as the linked user.
 func (c *httpHubClient) listAgentsPage(ctx context.Context, projectID, onBehalfOf, cursor string) (*hubAgentsResponse, error) {
-	endpoint := fmt.Sprintf("%s/api/v1/projects/%s/agents", c.hubURL, projectID)
+	endpoint := fmt.Sprintf("%s/api/v1/projects/%s/agents", c.apiURL, projectID)
 	if cursor != "" {
 		endpoint += "?cursor=" + neturl.QueryEscape(cursor)
 	}
