@@ -27,7 +27,7 @@
  */
 
 import { test, expect, type Page } from '@playwright/test';
-import { openChatRail, openGeneralThread } from './fixture.js';
+import { openChatRail, openGeneralThread, expandSpace } from './fixture.js';
 import { assertFramePinned, assertNoHorizontalOverflow } from './helpers.js';
 
 interface Insets {
@@ -623,6 +623,23 @@ test('the rail and members columns clear the home indicator', async ({ page }, t
     return rail.getBoundingClientRect().bottom - button.getBoundingClientRect().bottom;
   });
   expect(gap, 'space below the footer button').toBeGreaterThanOrEqual(PORTRAIT.bottom - 0.5);
+
+  // Scrolled to the end, the last row of the rail sits above the footer,
+  // not behind it.
+  await expandSpace(page);
+  const overlap = await page.evaluate(() => {
+    const root = document.querySelector('scion-page-chat')!.shadowRoot!;
+    const footer = root.querySelector('.v2-rail > .palette-footer')!;
+    const rail = root.querySelector('scion-chat-space-rail')!;
+    const body = rail.shadowRoot!.querySelector('.rail-body') as HTMLElement;
+    body.scrollTop = body.scrollHeight;
+    const rows = [...body.querySelectorAll('*')].filter(
+      (el) => el.getBoundingClientRect().height > 0
+    );
+    const lastBottom = Math.max(...rows.map((el) => el.getBoundingClientRect().bottom));
+    return lastBottom - footer.getBoundingClientRect().top;
+  });
+  expect(overlap, 'last rail row bottom minus footer top').toBeLessThanOrEqual(0.5);
 });
 
 test('profile-shell content clears the home indicator', async ({ page }, testInfo) => {

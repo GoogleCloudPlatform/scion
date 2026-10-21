@@ -189,22 +189,12 @@ test('at 900px (the medium/compact tier), the button stays at the bottom of the 
 });
 
 test('the button stays put while the spaces list scrolls', async ({ page }) => {
-  await gotoShell(page, undefined, {
-    spaces: [{ projectId: 'project-alpha', projectName: 'Alpha', projectSlug: 'alpha' }],
-    threadsByProjectId: {
-      'project-alpha': Array.from({ length: 60 }, (_, i) => ({
-        id: `thread-${i}`,
-        projectId: 'project-alpha',
-        name: `Thread Number ${i}`,
-      })),
-    },
-  });
+  await gotoShell(page);
   await expect(paletteButton(page)).toBeVisible();
   const before = await paletteButton(page).boundingBox();
 
   const scrolled = await page.locator('scion-chat-space-rail .rail-body').evaluate((body) => {
-    // A tall spacer guarantees the list overflows whatever the fixture's
-    // threads render as (collapsed or not).
+    // A tall spacer makes the list overflow.
     const spacer = document.createElement('div');
     spacer.style.height = '3000px';
     body.append(spacer);
