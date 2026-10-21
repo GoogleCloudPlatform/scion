@@ -56,7 +56,7 @@ func assertBadgeKeys(t *testing.T, data []byte, vendor, size string) {
 	}
 }
 
-func receiveEvent(t *testing.T, ch <-chan Event) Event {
+func receiveBadgeEvent(t *testing.T, ch <-chan Event) Event {
 	t.Helper()
 	select {
 	case evt := <-ch:
@@ -83,7 +83,7 @@ func TestAgentBadges_CreatedAndStatusEventsCarryBadges(t *testing.T) {
 			pub.PublishAgentRestored(context.Background(), agent, time.Now())
 			pub.PublishAgentStatus(context.Background(), agent)
 			for i := 0; i < 6; i++ {
-				evt := receiveEvent(t, ch)
+				evt := receiveBadgeEvent(t, ch)
 				t.Run(evt.Subject, func(t *testing.T) {
 					assertBadgeKeys(t, evt.Data, tc.vendor, tc.size)
 				})
