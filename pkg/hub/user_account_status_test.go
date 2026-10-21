@@ -21,6 +21,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -432,8 +433,13 @@ func (f funcReader) GetUser(ctx context.Context, id string) (*store.User, error)
 func TestIsNilUserRowReader_TypedNil(t *testing.T) {
 	var typedNil *ptrReader
 	var r userRowReader = typedNil
-	// A plain comparison: testify's NotNil treats a typed nil as nil.
-	require.True(t, r != nil, "the interface holds a typed nil")
+	// Setup: the interface holds a nil *ptrReader, so it is non-nil as an
+	// interface. Checked through reflection: comparing r with nil here is
+	// always true and only restates the declaration.
+	rv := reflect.ValueOf(r)
+	require.True(t, rv.IsValid(), "the interface is non-nil")
+	require.Equal(t, reflect.TypeOf(typedNil), rv.Type(), "dynamic type")
+	require.True(t, rv.IsNil(), "the interface holds a typed nil")
 	assert.True(t, isNilUserRowReader(r), "typed nil pointer reader detected")
 	var nilFunc funcReader
 	assert.True(t, isNilUserRowReader(nilFunc), "typed nil func reader detected")
