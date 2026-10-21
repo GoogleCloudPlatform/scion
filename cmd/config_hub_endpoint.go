@@ -86,6 +86,16 @@ func effectiveHubSource(h cliHub) string {
 	return kind
 }
 
+// configGetValue returns the value and source config get prints for key:
+// the effective hub for hub.endpoint, else the setting's value from the
+// settings layers.
+func configGetValue(key string) (config.SettingValue, error) {
+	if key == configHubEndpointKey {
+		return effectiveHubSetting(), nil
+	}
+	return config.ResolveSettingValue(configReadProjectDir(), key)
+}
+
 // replaceHubSetting returns values with the hub.endpoint entry replaced by
 // the effective hub (effectiveHubSetting).
 func replaceHubSetting(values []config.SettingValue) []config.SettingValue {

@@ -264,15 +264,9 @@ Examples:
 	RunE: func(cmd *cobra.Command, args []string) error {
 		key := args[0]
 
-		var v config.SettingValue
-		if key == configHubEndpointKey {
-			v = effectiveHubSetting()
-		} else {
-			var err error
-			v, err = config.ResolveSettingValue(configReadProjectDir(), key)
-			if err != nil {
-				return err
-			}
+		v, err := configGetValue(key)
+		if err != nil {
+			return err
 		}
 
 		if isJSONOutput() {

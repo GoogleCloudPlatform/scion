@@ -135,18 +135,12 @@ func (c *CLIContext) LinkPathToHubURL(endpoint, baseName, projectID, localPath s
 }
 
 // ProjectLinkID returns the ID a link entry records for the project at
-// projectDir: its hub project ID, else its project ID, from its settings
-// (SCION_PROJECT_ID in the environment does not apply). It returns "" when
-// the settings cannot be read or hold neither.
+// projectDir: its hub project ID, else its project ID, read from the
+// project's own settings files only (see projectHubLinkSettings; the
+// global settings and the environment do not apply). It returns "" when
+// they hold neither.
 func ProjectLinkID(projectDir string) string {
-	s, err := LoadSettingsIgnoringEnvProjectID(projectDir)
-	if err != nil || s == nil {
-		return ""
-	}
-	if id := s.GetHubProjectID(); id != "" {
-		return id
-	}
-	return s.ProjectID
+	return projectHubLinkSettings(projectDir).ProjectID
 }
 
 // RemoveLinkEntry removes the link entry for localPath and reports whether

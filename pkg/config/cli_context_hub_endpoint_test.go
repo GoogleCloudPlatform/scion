@@ -235,9 +235,11 @@ func TestCLIContextLinkPathToHubURL_Refused(t *testing.T) {
 	}
 }
 
-// ProjectLinkID prefers the hub project ID over the project ID.
+// ProjectLinkID prefers the hub project ID over the project ID, and reads
+// neither the global settings nor the environment.
 func TestProjectLinkID(t *testing.T) {
-	cliContextTestHome(t)
+	ctxPath := cliContextTestHome(t)
+	writeCLIContextFile(t, filepath.Join(filepath.Dir(ctxPath), "settings.yaml"), "hub:\n  projectId: global-hub-id\n")
 	t.Setenv("SCION_PROJECT_ID", "env-id")
 	write := func(settings string) string {
 		dir := filepath.Join(t.TempDir(), DotScion)
