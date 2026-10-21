@@ -524,7 +524,7 @@ type User struct {
 	Status      string           `json:"status"`
 	Preferences *UserPreferences `json:"preferences,omitempty"`
 	Created     time.Time        `json:"created"`
-	LastLogin   time.Time        `json:"lastLogin,omitempty"`
+	LastLogin   time.Time        `json:"lastLogin,omitzero"`
 }
 
 // UserPreferences holds user preferences.
