@@ -1,0 +1,11 @@
+# Cloud Build config shared by build-runner-image.sh and deploy-mediator.sh.
+# Substitutions: _IMAGE (full Artifact Registry reference) and _DOCKERFILE
+# (path relative to the uploaded source). The build runs as BUILD_SA_NAME,
+# which needs CLOUD_LOGGING_ONLY (permissions-matrix C7).
+# Builder pinned by digest (gcr.io/cloud-builders/docker:latest, read 2026-10-21).
+steps:
+  - name: gcr.io/cloud-builders/docker@sha256:f772ab459889c67835bd959c2b9e9351f2c0752c4f989710ecda20c229f0733e
+    args: ['build', '--platform=linux/amd64', '-f', '${_DOCKERFILE}', '-t', '${_IMAGE}', '.']
+images: ['${_IMAGE}']
+options:
+  logging: CLOUD_LOGGING_ONLY

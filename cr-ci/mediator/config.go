@@ -22,6 +22,7 @@ const (
 	EnvRunnerLabel             = "RUNNER_LABEL"
 	EnvRunnerJobName           = "RUNNER_JOB_NAME"
 	EnvRunnerImageName         = "RUNNER_IMAGE_NAME"
+	EnvMediatorImageName       = "MEDIATOR_IMAGE_NAME"
 	EnvRunnerCPU               = "RUNNER_CPU"
 	EnvRunnerMemory            = "RUNNER_MEMORY"
 	EnvRunnerDiskGi            = "RUNNER_DISK_GI"
@@ -53,6 +54,7 @@ const (
 	defaultRunnerLabel       = "scion-cr-8c32g"
 	defaultRunnerJobName     = "cr-gh-runner-8c32g"
 	defaultRunnerImageName   = "gh-runner"
+	defaultMediatorImageName = "cr-runner-mediator"
 	defaultRunnerCPU         = "8"
 	defaultRunnerMemory      = "32Gi"
 	defaultRunnerDiskGi      = "20"
@@ -103,6 +105,7 @@ type Config struct {
 	RunnerLabel             string
 	RunnerJobName           string
 	RunnerImageName         string
+	MediatorImageName       string
 	RunnerCPU               int
 	RunnerMemory            string
 	RunnerMemoryMi          int
@@ -137,6 +140,7 @@ func Defaults() map[string]string {
 		EnvRunnerLabel:             defaultRunnerLabel,
 		EnvRunnerJobName:           defaultRunnerJobName,
 		EnvRunnerImageName:         defaultRunnerImageName,
+		EnvMediatorImageName:       defaultMediatorImageName,
 		EnvRunnerCPU:               defaultRunnerCPU,
 		EnvRunnerMemory:            defaultRunnerMemory,
 		EnvRunnerDiskGi:            defaultRunnerDiskGi,
@@ -290,6 +294,10 @@ func Load(getenv func(string) string) (*Config, error) {
 	}
 	c.RunnerJobName = match(EnvRunnerJobName, cloudRunNameRE, "Cloud Run job name")
 	c.RunnerImageName = match(EnvRunnerImageName, imageNameRE, "image name")
+	c.MediatorImageName = match(EnvMediatorImageName, imageNameRE, "image name")
+	checkDistinct(fail, "image", map[string]string{
+		EnvRunnerImageName: c.RunnerImageName, EnvMediatorImageName: c.MediatorImageName,
+	})
 
 	c.RunnerCPU = posInt(EnvRunnerCPU)
 	if _, ok := maxMemoryMiByCPU[c.RunnerCPU]; c.RunnerCPU != 0 && !ok {

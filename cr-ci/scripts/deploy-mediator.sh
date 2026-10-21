@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# deploy-mediator.sh: build the mediator image (mediator/Dockerfile) and deploy
+# the Cloud Run service MEDIATOR_SERVICE_NAME as MEDIATOR_SA_NAME
+# (permissions-matrix C12), then grant SCHEDULER_SA_NAME roles/run.invoker on
+# it (C13). max-instances is always 1 (claims live in the mediator's memory),
+# min-instances 0. Every config key is passed as an env var; the secrets are
+# passed BY NAME (the mediator reads them from Secret Manager itself).
+# Prints the service URL for MEDIATOR_URL.
+set -euo pipefail
+# shellcheck source-path=SCRIPTDIR source=lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+USAGE="Usage: deploy-mediator.sh [--tag TAG] [--local] [--no-invoker-iam-check] [--config FILE] [--dry-run | --apply]
+
+  --tag TAG               mediator image tag (default: git-<12 hex of mediator/ + go.mod at HEAD>)
+  --local                 build with the local docker daemon instead of Cloud Build
+  --no-invoker-iam-check  public ingress without the allUsers invoker binding, for
+                          projects whose org policy forbids allUsers (permissions-matrix U6)
+
+First deploy: MEDIATOR_URL may be empty; the service then answers 503 on
+/webhook and /reconcile. Put the printed URL into MEDIATOR_URL and run again.
+
+$crci_common_help"
+
+TAG=""
+LOCAL=0
+NO_INVOKER_CHECK=0
+while (($#)); do
+  case $1 in
+    --tag)
+      crci_need_value --tag "$@"
+      TAG=$2
+      shift 2
+      ;;
+    --local)
+      LOCAL=1
+      shift
+      ;;
+    --no-invoker-iam-check)
+      NO_INVOKER_CHECK=1
+      shift
+      ;;
+    *)
+      crci_parse_common_arg "$@"
+      shift "$CRCI_SHIFT"
+      ;;
+  esac
+done
+crci_help_exit "$USAGE"
+crci_start
+[[ -n $TAG ]] || TAG=$(crci_default_tag mediator go.mod)
+
+P=${CFG[GCP_PROJECT]}
+R=${CFG[REGION]}
+SVC=${CFG[MEDIATOR_SERVICE_NAME]}
+IMAGE=$(crci_image_ref "${CFG[MEDIATOR_IMAGE_NAME]}" "$TAG")
+MEDIATOR=$(crci_sa_email "${CFG[MEDIATOR_SA_NAME]}")
+SCHEDULER=$(crci_sa_email "${CFG[SCHEDULER_SA_NAME]}")
+
+crci_note "mediator image ${CFG[MEDIATOR_IMAGE_NAME]}:$TAG"
+crci_build_image "${CFG[MEDIATOR_IMAGE_NAME]}" mediator/Dockerfile . "$TAG" "$LOCAL"
+
+# Env: every key of the config contract, in config.example.env order. Values
+# contain commas (TARGET_REPOS) and spaces (RECONCILE_SCHEDULE), so gcloud's
+# alternate delimiter ^;^ is used; no config value can contain ';'.
+ENV="^;^"
+first=1
+for k in "${CRCI_KEYS[@]}"; do
+  [[ $first == 1 ]] || ENV+=";"
+  first=0
+  ENV+="$k=${CFG[$k]}"
+done
+
+if [[ $NO_INVOKER_CHECK == 1 ]]; then
+  ACCESS=(--no-allow-unauthenticated --no-invoker-iam-check)
+else
+  ACCESS=(--allow-unauthenticated)
+fi
+
+crci_note "C12: mediator service $SVC (max-instances=1 is required: claims live in memory)"
+crci_run gcloud run deploy "$SVC" --image="$IMAGE" --region="$R" --project="$P" \
+  --service-account="$MEDIATOR" \
+  --min-instances=0 --max-instances=1 --cpu=1 --memory=512Mi --concurrency=80 --timeout=300 \
+  --ingress=all --port=8080 "${ACCESS[@]}" \
+  --set-env-vars="$ENV" --labels=managed-by=cr-ci
+
+crci_note "check: max-instances is 1"
+crci_read MAXSCALE 1 gcloud run services describe "$SVC" --region="$R" --project="$P" \
+  --format='value(spec.template.metadata.annotations."autoscaling.knative.dev/maxScale")'
+[[ $MAXSCALE == 1 ]] || crci_die "service $SVC has max-instances '$MAXSCALE'; it must be 1"
+
+crci_note "C13: SCHEDULER_SA_NAME may invoke this service only"
+crci_run gcloud run services add-iam-policy-binding "$SVC" --region="$R" --project="$P" \
+  --member="serviceAccount:$SCHEDULER" --role=roles/run.invoker --format=none
+
+crci_read URL "<url printed by the command above>" gcloud run services describe "$SVC" \
+  --region="$R" --project="$P" --format='value(status.url)'
+crci_note "service URL: $URL"
+if [[ $CRCI_MODE == apply ]]; then
+  if [[ -z ${CFG[MEDIATOR_URL]} ]]; then
+    crci_note "MEDIATOR_URL is empty: set MEDIATOR_URL=$URL in $CRCI_CONFIG, re-run deploy-mediator.sh, then run deploy-scheduler.sh"
+    crci_note "the GitHub App webhook URL is $URL/webhook"
+  elif [[ ${CFG[MEDIATOR_URL]} != "$URL" ]]; then
+    printf '%s: WARNING: MEDIATOR_URL=%s but the service URL is %s.\n' "$CRCI_PROG" "${CFG[MEDIATOR_URL]}" "$URL" >&2
+    printf '%s: WARNING: update MEDIATOR_URL in %s and the App webhook URL (%s/webhook), then re-run this script and deploy-scheduler.sh.\n' \
+      "$CRCI_PROG" "$CRCI_CONFIG" "$URL" >&2
+  else
+    crci_note "MEDIATOR_URL matches; next: deploy-scheduler.sh"
+  fi
+fi

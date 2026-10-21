@@ -40,6 +40,7 @@ func TestLoadDefaults(t *testing.T) {
 		RunnerLabel:             "scion-cr-8c32g",
 		RunnerJobName:           "cr-gh-runner-8c32g",
 		RunnerImageName:         "gh-runner",
+		MediatorImageName:       "cr-runner-mediator",
 		RunnerCPU:               8,
 		RunnerMemory:            "32Gi",
 		RunnerMemoryMi:          32 * 1024,
@@ -159,6 +160,8 @@ func TestLoadInvalid(t *testing.T) {
 		{EnvRunnerJobName, "Bad-Name"},
 		{EnvRunnerJobName, "ends-with-"},
 		{EnvRunnerImageName, "Image"},
+		{EnvMediatorImageName, "Mediator"},
+		{EnvMediatorImageName, "gh-runner"}, // duplicates the runner image
 		{EnvRunnerCPU, "3"},
 		{EnvRunnerCPU, "0"},
 		{EnvRunnerCPU, "x"},

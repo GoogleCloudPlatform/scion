@@ -1,0 +1,11 @@
+# Files gcloud builds submit must not upload (deploy-mediator.sh uploads cr-ci/).
+.gcloudignore
+.git
+.gitignore
+config.env
+*.env
+docs/
+workflows/
+scripts/
+runner/
+*_test.go
