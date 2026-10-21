@@ -2584,11 +2584,11 @@ type Group struct {
 }
 
 // GroupMember represents membership in a group.
-// Members can be either users or other groups (for nested group support).
+// Members can be users, agents, or other groups (for nested group support).
 type GroupMember struct {
 	GroupID    string    `json:"groupId"`    // The group this membership belongs to
-	MemberType string    `json:"memberType"` // "user" or "group"
-	MemberID   string    `json:"memberId"`   // User ID or Group ID
+	MemberType string    `json:"memberType"` // "user", "group", or "agent"
+	MemberID   string    `json:"memberId"`   // User ID, Group ID, or Agent ID
 	Role       string    `json:"role"`       // "member", "admin", "owner"
 	AddedAt    time.Time `json:"addedAt"`
 	AddedBy    string    `json:"addedBy,omitempty"`
