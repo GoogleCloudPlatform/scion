@@ -156,6 +156,11 @@ type journalRecord struct {
 	// recorded resources (a local stop or delete owns the files), so a
 	// retry reruns only that; "" is the full clean-up.
 	CleanupScope string `json:"cleanupScope,omitempty"`
+	// ReportAttempts counts the boots whose resend of the terminal report
+	// got no hub answer, and ReportFirstFailedAt is when the first one
+	// failed; they bound the retries (ptone/scion#5186). Counters only.
+	ReportAttempts      int       `json:"reportAttempts,omitempty"`
+	ReportFirstFailedAt time.Time `json:"reportFirstFailedAt,omitzero"`
 }
 
 // key is the registry key the record's launch was registered under.

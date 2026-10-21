@@ -109,7 +109,7 @@ func TestHandleAgentDirWithoutConfig_KeepRecordsMarkerOnce(t *testing.T) {
 	base, _, agentDir, agentHome, ws := keptWorktreeWithWork(t)
 	first := *now
 
-	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws)
 	requireKeptWithConflict(t, err, base, ws)
 	rec := readMarkerT(t, agentDir)
 	if !rec.KeptAt.Equal(first) || rec.Reason != keptReasonWorkspaceMayHoldWork {
@@ -117,7 +117,7 @@ func TestHandleAgentDirWithoutConfig_KeepRecordsMarkerOnce(t *testing.T) {
 	}
 
 	*now = now.Add(time.Hour)
-	err = handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	err = handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws)
 	requireKeptWithConflict(t, err, base, ws)
 	if rec := readMarkerT(t, agentDir); !rec.KeptAt.Equal(first) {
 		t.Fatalf("keptAt = %v after a second keep, want the first %v", rec.KeptAt, first)
@@ -148,7 +148,7 @@ func TestHandleAgentDirWithoutConfig_UncheckableKeepRecordsReason(t *testing.T) 
 		}
 	}
 
-	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws)
 	requireKeptWithConflict(t, err, base, gitFile)
 	if rec := readMarkerT(t, agentDir); rec.Reason != keptReasonWorkspaceCheckFailed {
 		t.Fatalf("reason = %q, want %q", rec.Reason, keptReasonWorkspaceCheckFailed)
@@ -160,10 +160,10 @@ func TestHandleAgentDirWithoutConfig_KeptDirInsideWindowStillConflicts(t *testin
 	keptTestRetention(t, 72*time.Hour)
 	now := keptTestClock(t)
 	base, _, agentDir, agentHome, ws := keptWorktreeWithWork(t)
-	requireKeptWithConflict(t, handleAgentDirWithoutConfig("a", agentDir, agentHome, ws), base, ws)
+	requireKeptWithConflict(t, handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws), base, ws)
 
 	*now = now.Add(72*time.Hour - time.Second)
-	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws)
 	requireKeptWithConflict(t, err, base, filepath.Join(ws, "notes.txt"))
 }
 
@@ -174,11 +174,11 @@ func TestHandleAgentDirWithoutConfig_ExpiredKeptDirIsRemoved(t *testing.T) {
 	keptTestRetention(t, 72*time.Hour)
 	now := keptTestClock(t)
 	base, repo, agentDir, agentHome, ws := keptWorktreeWithWork(t)
-	requireKeptWithConflict(t, handleAgentDirWithoutConfig("a", agentDir, agentHome, ws), base, ws)
+	requireKeptWithConflict(t, handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws), base, ws)
 
 	*now = now.Add(72 * time.Hour)
 	gitRuns := countWorktreeGit(t)
-	if err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws); err != nil {
+	if err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws); err != nil {
 		t.Fatalf("handleAgentDirWithoutConfig after the window: %v", err)
 	}
 	requireRemoved(t, agentDir)
@@ -196,10 +196,10 @@ func TestHandleAgentDirWithoutConfig_ZeroRetentionKeepsForever(t *testing.T) {
 	keptTestRetention(t, 0)
 	now := keptTestClock(t)
 	base, _, agentDir, agentHome, ws := keptWorktreeWithWork(t)
-	requireKeptWithConflict(t, handleAgentDirWithoutConfig("a", agentDir, agentHome, ws), base, ws)
+	requireKeptWithConflict(t, handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws), base, ws)
 
 	*now = now.Add(10 * 365 * 24 * time.Hour)
-	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws)
 	requireKeptWithConflict(t, err, base, filepath.Join(ws, "notes.txt"))
 }
 
@@ -218,7 +218,7 @@ func TestHandleAgentDirWithoutConfig_LinkedMarkerIsIgnored(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws)
 	requireKeptWithConflict(t, err, base, filepath.Join(ws, "notes.txt"))
 	if got, _ := os.ReadFile(target); string(got) != string(data) {
 		t.Fatalf("link target content = %q, want it unchanged", got)
@@ -260,7 +260,7 @@ func TestPurgeExpiredKeptAgentDir_HomeDataKeepsDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if purgeExpiredKeptAgentDir("a", agentDir, agentHome, time.Hour) {
+	if purgeExpiredKeptAgentDirGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, time.Hour) {
 		t.Fatal("purge removed a kept dir whose home has data")
 	}
 	if _, err := os.Stat(filepath.Join(ws, "notes.txt")); err != nil {
@@ -310,7 +310,7 @@ func TestSweepExpiredKeptAgentDirs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sweepExpiredKeptAgentDirs(root, "self", func(name string) string { return filepath.Join(root, name, "home") })
+	testSweepExpiredKeptAgentDirs(root, "self", func(name string) string { return filepath.Join(root, name, "home") })
 
 	requireRemoved(t, dirs["expired"])
 	for _, name := range []string{"nomarker", "recent", "configured", "self", inFlight} {
@@ -352,7 +352,7 @@ func TestPurgeExpiredKeptAgentDir_RecheckRestoresFreshDir(t *testing.T) {
 	keptAgentDirBeforeRecheck = func(tomb string) { _ = os.Remove(filepath.Join(tomb, keptAgentDirMarker)) }
 	t.Cleanup(func() { keptAgentDirBeforeRecheck = orig })
 
-	if purgeExpiredKeptAgentDir("a", agentDir, filepath.Join(agentDir, "home"), time.Hour) {
+	if purgeExpiredKeptAgentDirGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, filepath.Join(agentDir, "home"), time.Hour) {
 		t.Fatal("purge reported a removal of a dir whose marker was gone at the recheck")
 	}
 	if _, err := os.Stat(filepath.Join(agentDir, "fresh.txt")); err != nil {
@@ -366,7 +366,7 @@ func TestDeleteAgentFiles_RemovesKeptDirWithoutRecord(t *testing.T) {
 	keptTestRetention(t, 0)
 	keptTestClock(t)
 	base, repo, agentDir, agentHome, ws := keptWorktreeWithWork(t)
-	requireKeptWithConflict(t, handleAgentDirWithoutConfig("a", agentDir, agentHome, ws), base, ws)
+	requireKeptWithConflict(t, handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws), base, ws)
 
 	if _, err := DeleteAgentFiles("a", filepath.Join(repo, ".scion"), false); err != nil {
 		t.Fatalf("DeleteAgentFiles: %v", err)
@@ -427,7 +427,7 @@ func TestHandleAgentDirWithoutConfig_AdoptionRemovesMarker(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := handleAgentDirWithoutConfig("a", agentDir, agentHome, filepath.Join(agentDir, "workspace")); err != nil {
+	if err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, filepath.Join(agentDir, "workspace")); err != nil {
 		t.Fatalf("handleAgentDirWithoutConfig: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(agentDir, "scion-agent.json")); err != nil {
@@ -480,7 +480,7 @@ func TestSweepExpiredKeptAgentDirs_ZeroRetentionSkipsListing(t *testing.T) {
 	}
 	t.Cleanup(func() { keptAgentDirReadDir = orig })
 
-	sweepExpiredKeptAgentDirs(root, "", func(name string) string {
+	testSweepExpiredKeptAgentDirs(root, "", func(name string) string {
 		t.Errorf("homeOf(%q) called with no retention window", name)
 		return filepath.Join(root, name, "home")
 	})

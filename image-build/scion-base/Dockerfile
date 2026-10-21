@@ -36,6 +36,7 @@ RUN go mod download
 # Copy source and build scion and sciontool
 COPY cmd/ ./cmd/
 COPY harnesses/ ./harnesses/
+COPY internal/ ./internal/
 COPY pkg/ ./pkg/
 COPY proto/ ./proto/
 COPY resources/ ./resources/

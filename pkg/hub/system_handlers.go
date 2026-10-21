@@ -1343,7 +1343,7 @@ func (s *Server) handleWorkstationSettings(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Edit settings.yaml in place under the process-wide settings-file lock
+	// Edit settings.yaml in place under the settings lock (LockSettingsDir)
 	// (not s.mu: the server-config PUT holds the file lock across DB writes
 	// that take s.mu, so taking them in the other order could deadlock).
 	// false removes the key, matching the server-config PUT's omitempty
@@ -1352,12 +1352,18 @@ func (s *Server) handleWorkstationSettings(w http.ResponseWriter, r *http.Reques
 	if !*req.AutoInjectGcloudADC {
 		edit = config.SettingsPathEdit{Path: []string{"auto_inject_gcloud_adc"}, Delete: true}
 	}
-	unlock := config.LockSettingsFile()
-	staged, err := config.PrepareSettingsPathEdits(globalDir, []config.SettingsPathEdit{edit})
-	if err == nil {
-		err = staged.Commit()
-	}
-	unlock()
+	err = func() error {
+		lock, err := config.LockSettingsDir(globalDir)
+		if err != nil {
+			return err
+		}
+		defer lock.Unlock()
+		staged, err := config.PrepareSettingsPathEdits(globalDir, []config.SettingsPathEdit{edit})
+		if err != nil {
+			return err
+		}
+		return staged.Commit(lock)
+	}()
 	if err != nil {
 		slog.Error("Failed to write workstation settings", "error", err)
 		if errors.Is(err, config.ErrSettingsPathEditUnsupported) {

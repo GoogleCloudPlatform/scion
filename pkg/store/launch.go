@@ -14,7 +14,11 @@
 
 package store
 
-import "time"
+import (
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+)
 
 // LaunchKind values for Agent.LaunchKind (design t1-async-create-v11.md
 // §3.3). BeginLaunch writes LaunchKindCreate; BeginStartLaunch writes
@@ -56,19 +60,26 @@ const (
 	LaunchEndReasonSuperseded      = "superseded"
 )
 
-// Launch error codes for Agent.LaunchError (design §3.3, §3.9).
+// Launch error codes for Agent.LaunchError (design §3.3, §3.9). They are
+// aliases of the shared pkg/api launch codes (design wave 3 E-a,
+// ptone/scion#4670): the store writes these, and the broker reports the rest.
 const (
-	LaunchErrorLaunchTimeout  = "launch_timeout"
-	LaunchErrorBrokerLost     = "broker_lost"
-	LaunchErrorLaunchStopped  = "launch_stopped"
-	LaunchErrorAgentError     = "agent_error"
-	LaunchErrorHubUnreachable = "hub_unreachable"
+	LaunchErrorLaunchTimeout  = api.LaunchCodeLaunchTimeout
+	LaunchErrorBrokerLost     = api.LaunchCodeBrokerLost
+	LaunchErrorLaunchStopped  = api.LaunchCodeLaunchStopped
+	LaunchErrorAgentError     = api.LaunchCodeAgentError
+	LaunchErrorHubUnreachable = api.LaunchCodeHubUnreachable
 	// LaunchErrorBrokerRestarted: the broker process restarted, or shut
 	// down, while the launch was in flight, and reported the launch failed
 	// itself (from its shutdown drain or, after a crash, from its launch
 	// journal on the next boot; ptone/scion#4668). Broker-confirmed: the
 	// broker reports it only for a launch it ended.
-	LaunchErrorBrokerRestarted = "broker_restarted"
+	LaunchErrorBrokerRestarted = api.LaunchCodeBrokerRestarted
+	// LaunchErrorDispatchFailed: the hub's send of the launch failed with a
+	// known outcome, or the broker acknowledged a different launch; the
+	// dispatcher ends the launch not_launched with this code
+	// (api.LaunchCodeDispatchFailed).
+	LaunchErrorDispatchFailed = "dispatch_failed"
 )
 
 // LaunchReport report-state values (mirrors the broker->Hub wire report's

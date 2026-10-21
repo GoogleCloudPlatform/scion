@@ -1022,7 +1022,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 					}
 					markAttemptFailed(http.StatusInternalServerError, sce.Message)
 					span.SetStatus(codes.Error, startContextSpanText(sce))
-					s.writeStartContextError(w, sce, "create agent")
+					s.writeStartContextError(w, sce, "create agent", "agent_id", req.ID, "profile", createRequestProfile(req))
 					return
 				}
 				hydratedTemplatePath = tplPath
@@ -1213,7 +1213,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				}
 				markAttemptFailed(http.StatusInternalServerError, sce.Message)
 				span.SetStatus(codes.Error, startContextSpanText(sce))
-				s.writeStartContextError(w, sce, "create agent")
+				s.writeStartContextError(w, sce, "create agent", "agent_id", req.ID, "profile", createRequestProfile(req))
 			}
 			if !tplHydrated && (req.Config.TemplateID != "" || req.Config.TemplateHash != "") {
 				tplPath, err := s.hydrateTemplate(ctx, req.Config, hubConn)
@@ -1414,7 +1414,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		span.SetStatus(codes.Error, startContextSpanText(err))
-		status := s.writeStartContextError(w, err, "create agent")
+		status := s.writeStartContextError(w, err, "create agent", "agent_id", req.ID, "profile", createRequestProfile(req))
 		markAttemptFailed(status, err.Error())
 		return
 	}
@@ -1743,7 +1743,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		createSkill := skillFailureFrom(err, opts.RunID)
 		s.agentLifecycleLog.Error("Agent create failed", append(append([]any{
 			"agent_id", req.ID, "project_id", req.ProjectID, "run_id", opts.RunID,
-			"name", req.Name, "slug", req.Slug}, failureLogAttrs(err, createSkill)...),
+			"name", req.Name, "slug", req.Slug, "runtime", sc.RuntimeType, "profile", opts.Profile},
+			failureLogAttrs(err, createSkill)...),
 			runtimeCauseLogAttrs(err, createSkill)...)...)
 		if createSkill != nil {
 			s.logSkillResolutionFailure(createSkill,
@@ -2898,6 +2899,15 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 		// the soft-delete mark was attempted, since the pod is gone), the
 		// entry may still be there and no mark was written; the hub
 		// retries or reports the failure.
+		if errors.Is(err, agent.ErrAgentFilesDeleteRefused) {
+			// The files delete refused a path that is, or resolves into,
+			// a project workspace (agent deletion never removes one). The
+			// hub gets that reason; the paths stay in the log.
+			s.agentLifecycleLog.Error("runtime op failed", "op", "delete agent", "agent_id", id, "project_id", projectID, "error", err)
+			span.SetStatus(codes.Error, err.Error())
+			RuntimeError(w, agentFilesDeleteRefusedMessage)
+			return
+		}
 		s.writeRuntimeOpError(w, ctx, "delete agent", err, "agent_id", id, "project_id", projectID)
 		return
 	}
@@ -3255,7 +3265,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	})
 	if err != nil {
 		span.SetStatus(codes.Error, startContextSpanText(err))
-		s.writeStartContextError(w, err, "start agent")
+		s.writeStartContextError(w, err, "start agent", "agent_id", id)
 		return
 	}
 	opts := sc.Opts
@@ -3309,20 +3319,20 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	if sce := rejectKubernetesAssignRuntimeChange(runtimeOpts, sc.AssignSelection, resolvedRuntimeType, func() dispatchProfileSelection {
 		return s.resolveDispatchProfileSelection(runtimeOpts)
 	}); sce != nil {
-		s.writeStartContextError(w, sce, "start agent")
+		s.writeStartContextError(w, sce, "start agent", "agent_id", id, "runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile)
 		return
 	}
 	if sce := rejectKubernetesBlockRuntimeChange(runtimeOpts, sc.BlockSelection, resolvedRuntimeType, func() dispatchProfileSelection {
 		return s.resolveDispatchProfileSelection(runtimeOpts)
 	}); sce != nil {
-		s.writeStartContextError(w, sce, "start agent")
+		s.writeStartContextError(w, sce, "start agent", "agent_id", id, "runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile)
 		return
 	}
 	// Belt and braces: the preliminary classification (buildStartContext)
 	// must agree with this authoritative runtime; the specific rejections
 	// above report their own, more actionable errors first.
 	if sce := rejectRuntimeClassificationMismatch(sc.RuntimeType, resolvedRuntimeType); sce != nil {
-		s.writeStartContextError(w, sce, "start agent")
+		s.writeStartContextError(w, sce, "start agent", "agent_id", id, "runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile)
 		return
 	}
 
@@ -3367,9 +3377,10 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 			return
 		}
 		startSkill := skillFailureFrom(err, opts.RunID)
-		s.agentLifecycleLog.Error("Agent start failed", append([]any{
-			"agent_id", id, "project_id", projectID, "run_id", opts.RunID},
-			failureLogAttrs(err, startSkill)...)...)
+		s.agentLifecycleLog.Error("Agent start failed", append(append([]any{
+			"agent_id", id, "project_id", projectID, "run_id", opts.RunID,
+			"runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile},
+			failureLogAttrs(err, startSkill)...), runtimeCauseLogAttrs(err, startSkill)...)...)
 		if startSkill != nil {
 			s.logSkillResolutionFailure(startSkill,
 				"agent_id", id, "project_id", projectID, "run_id", opts.RunID)
@@ -4362,7 +4373,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		OwnershipAgentID: restartReq.ResolvedEnv["SCION_AGENT_ID"],
 	})
 	if err != nil {
-		s.writeStartContextError(w, err, "restart agent")
+		s.writeStartContextError(w, err, "restart agent", "agent_id", id)
 		return
 	}
 	opts := sc.Opts
@@ -4400,20 +4411,20 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	if sce := rejectKubernetesAssignRuntimeChange(runtimeOpts, sc.AssignSelection, resolvedRuntimeType, func() dispatchProfileSelection {
 		return s.resolveDispatchProfileSelection(runtimeOpts)
 	}); sce != nil {
-		s.writeStartContextError(w, sce, "restart agent")
+		s.writeStartContextError(w, sce, "restart agent", "agent_id", id, "runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile)
 		return
 	}
 	if sce := rejectKubernetesBlockRuntimeChange(runtimeOpts, sc.BlockSelection, resolvedRuntimeType, func() dispatchProfileSelection {
 		return s.resolveDispatchProfileSelection(runtimeOpts)
 	}); sce != nil {
-		s.writeStartContextError(w, sce, "restart agent")
+		s.writeStartContextError(w, sce, "restart agent", "agent_id", id, "runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile)
 		return
 	}
 	// Belt and braces: the preliminary classification (buildStartContext)
 	// must agree with this authoritative runtime; the specific rejections
 	// above report their own, more actionable errors first.
 	if sce := rejectRuntimeClassificationMismatch(sc.RuntimeType, resolvedRuntimeType); sce != nil {
-		s.writeStartContextError(w, sce, "restart agent")
+		s.writeStartContextError(w, sce, "restart agent", "agent_id", id, "runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile)
 		return
 	}
 
@@ -4476,8 +4487,10 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 			return
 		}
 		restartSkill := skillFailureFrom(err, opts.RunID)
-		s.agentLifecycleLog.Error("Agent restart failed", append([]any{
-			"agent_id", id}, failureLogAttrs(err, restartSkill)...)...)
+		s.agentLifecycleLog.Error("Agent restart failed", append(append([]any{
+			"agent_id", id, "project_id", projectID, "run_id", opts.RunID,
+			"runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile},
+			failureLogAttrs(err, restartSkill)...), runtimeCauseLogAttrs(err, restartSkill)...)...)
 		if restartSkill != nil {
 			s.logSkillResolutionFailure(restartSkill,
 				"agent_id", id, "project_id", projectID, "run_id", opts.RunID)

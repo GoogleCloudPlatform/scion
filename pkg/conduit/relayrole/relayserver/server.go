@@ -224,6 +224,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	role, err := relayrole.New(relayrole.Config{
 		Hub:             &relay.HubClient{BaseURL: cfg.HubInternalURL, HTTP: cfg.HTTPClient, Auth: cfg.PeerAuth},
 		RecheckInterval: cfg.RecheckInterval,
+		Clock:           cfg.Clock,
 		Events:          cfg.Events,
 		Subjects:        RevocationSubjects,
 		Logger:          log,

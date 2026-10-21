@@ -121,6 +121,11 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 	// a previously authorized dispatch.
 	{file: "reconcile.go", function: "execDispatchStart", symbol: "DispatchAgentStart",
 		class: "exempt", reason: "durable-intent replay of previously authorized dispatch"},
+	// The same replay through the start-options entry point
+	// (ptone/scion#4669): a dispatcher that takes options gets the
+	// intent's options; it is classified with the plain call above.
+	{file: "reconcile.go", function: "execDispatchStart", symbol: "DispatchAgentStartWithOptions",
+		class: "exempt", reason: "durable-intent replay of previously authorized dispatch"},
 
 	// reconcile.go: execDispatchCreate (via DispatchAgentCreateWithGather) —
 	// durable-intent replay.
@@ -171,6 +176,10 @@ var sharedClassificationSites = []struct {
 	{
 		site:   effectCallSiteKey{"notification_sweep.go", "retryDispatch", "dispatchWithBrokerRetry"},
 		sameAs: effectCallSiteKey{"notifications.go", "dispatchToAgent", "dispatchWithBrokerRetry"},
+	},
+	{
+		site:   effectCallSiteKey{"reconcile.go", "execDispatchStart", "DispatchAgentStartWithOptions"},
+		sameAs: effectCallSiteKey{"reconcile.go", "execDispatchStart", "DispatchAgentStart"},
 	},
 }
 

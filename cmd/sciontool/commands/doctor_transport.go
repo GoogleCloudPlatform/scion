@@ -201,6 +201,9 @@ func reportFileSource(st transportauth.FileSourceStatus, diag *doctorDiag) {
 		fmt.Printf("[INFO]   env  (%s): not set in this process\n", transportauth.EnvTransportToken)
 	}
 	switch {
+	case st.FileRetained:
+		fmt.Printf("[WARN]   file (%s): being replaced; using the value read before (%s)\n",
+			st.Path, fmtExpiry(st.FileExpiry))
 	case st.FileError != nil:
 		fmt.Printf("[WARN]   file (%s): unreadable: %v\n", st.Path, st.FileError)
 	case st.FilePresent:

@@ -61,6 +61,16 @@ import (
 // (DEC-3 C1, recheckTestAdminDelegationGrantor).
 // The request credential context carries CredentialKindWorkloadDelegation,
 // which testIdentityCaller admits and the mutation audit records.
+//
+// Offline delegations (phase DL). A delegation whose grantor kind is
+// store.DelegationGrantorTestInfraOffline was written by the offline host
+// command `scion server test-infra delegate`, not by a human. It holds only
+// the member scope. Its grantor id is a reserved id that names no user, so
+// it has no bindings: the live-human-grantor check is replaced, for this
+// kind only, by offlineGrantorGate (marker, hub id binding, test-mode, not
+// revoked or expired, all read live), and its authority is a request-local
+// synthetic grant of exactly test_identity.issue that Decide adds only for a
+// request whose gate passed (offlineDelegationBinding, Decide Step 5b4).
 
 const (
 	// testIssuerDelegationHeader names the delegation a workload request
@@ -243,6 +253,16 @@ type workloadIssuerAuthenticator struct {
 	// are available on this hub (Server.workloadAdminScopeAvailable). Nil
 	// makes every admin scope unavailable.
 	adminScopes func(testAdminKind) bool
+	// hubID is the hub's resolved (pinned) hub id, fixed at New. The
+	// offline delegation gate binds every offline delegation to it.
+	hubID string
+	// testModeLevel returns the running hub's --test-mode level
+	// (Server.TestModeLevel), read at every offline redeem. Nil denies
+	// every offline delegation.
+	testModeLevel func() TestMode
+	// writeAudit writes the per-redeem audit row of an offline delegation
+	// (the test identity audit hook). Nil denies every offline delegation.
+	writeAudit func(ctx context.Context, st store.Store, record *store.MutationAuditRecord) error
 }
 
 // newWorkloadIssuerAuthenticator builds the arm's state from validated
@@ -266,6 +286,7 @@ func newWorkloadIssuerAuthenticator(cfg ServerConfig, st store.Store, now func()
 		store:       st,
 		now:         now,
 		adminScopes: adminScopes,
+		hubID:       cfg.HubID,
 	}
 }
 
@@ -447,6 +468,15 @@ type workloadDelegationState struct {
 	sub        string
 	tokenIAT   time.Time
 	runLabel   string
+	// offlineGatePassed is true only on the state authenticate builds for
+	// THIS request after offlineGrantorGate passed for an offline
+	// delegation. It is never set anywhere else, the state lives only in
+	// this request's context, and Decide Step 5b4 adds the offline
+	// synthetic grant only when it is true.
+	offlineGatePassed bool
+	// offline holds the facts the offline gate read for this request, for
+	// the issuance audit. Nil for a human-grantor delegation.
+	offline *offlineGateFacts
 }
 
 type workloadDelegationStateKey struct{}
@@ -588,7 +618,26 @@ func (a *workloadIssuerAuthenticator) authenticate(ctx context.Context, r *http.
 		return nil, refusal
 	}
 
-	grantor, refusal := a.liveHumanGrantor(ctx, d.GrantorID)
+	// The grantor check, by grantor kind. Every kind is named; any other
+	// value is refused (no fallthrough to the human path).
+	var (
+		grantor     *store.User
+		offlineSeen *offlineGateFacts
+	)
+	switch d.EffectiveGrantorKind() {
+	case store.DelegationGrantorHuman:
+		grantor, refusal = a.liveHumanGrantor(ctx, d)
+	case store.DelegationGrantorTestInfraOffline:
+		offlineSeen, refusal = a.offlineGrantorGate(ctx, a.store, d)
+		if refusal == nil {
+			refusal = a.auditOfflineRedeem(ctx, r, d, sub, runLabel, offlineSeen, now)
+		}
+		if refusal == nil {
+			grantor = offlineGrantorUser(d)
+		}
+	default:
+		refusal = refuse403("delegation grantor kind not accepted")
+	}
 	if refusal != nil {
 		return nil, refusal
 	}
@@ -603,19 +652,27 @@ func (a *workloadIssuerAuthenticator) authenticate(ctx context.Context, r *http.
 	cred := credentialContextForIdentity(identity)
 	cred.Kind = CredentialKindWorkloadDelegation
 	cred.Type = string(CredentialKindWorkloadDelegation)
+	state := &workloadDelegationState{delegation: d, sub: sub, tokenIAT: iat, runLabel: runLabel}
+	if offlineSeen != nil {
+		// Only here, after offlineGrantorGate passed for this request.
+		state.offlineGatePassed = true
+		state.offline = offlineSeen
+	}
 	return &workloadDelegationAuth{
 		identity:   identity,
 		credential: cred,
-		state:      &workloadDelegationState{delegation: d, sub: sub, tokenIAT: iat, runLabel: runLabel},
+		state:      state,
 	}, nil
 }
 
 // checkDelegationLive applies DEC-3 C2/C3 to a loaded delegation: not
 // revoked, within its server-side age (its stored expiry and its scope's
-// hard maximum age from its creation time), exactly one known scope that is
-// available on this hub (an admin scope only at the matching --test-mode
-// level, with A2), and a pinned subject the startup allowlist still covers
-// for that scope.
+// hard maximum age from its creation time; for an offline delegation also
+// the offline maximum age), exactly one known scope that is available on
+// this hub (an admin scope only at the matching --test-mode level, with
+// A2; an offline delegation only the member scope), and a pinned subject
+// the startup allowlist still covers for that scope. It does not check the
+// grantor; see liveHumanGrantor and offlineGrantorGate.
 func (a *workloadIssuerAuthenticator) checkDelegationLive(d *store.TestIdentityDelegation, now time.Time) *workloadDelegationRefusal {
 	spec, known := testIdentityDelegationScopes[d.Scope]
 	switch {
@@ -627,6 +684,12 @@ func (a *workloadIssuerAuthenticator) checkDelegationLive(d *store.TestIdentityD
 		return refuse403("delegation scope not accepted")
 	case !now.Before(d.Created.Add(spec.maxAge)):
 		return refuse403("delegation past its maximum age")
+	case d.EffectiveGrantorKind() == store.DelegationGrantorTestInfraOffline && d.Scope != store.TestInfraOfflineDelegationScope:
+		// Structural (phase DL): an offline delegation never holds an
+		// admin scope, whatever its row says.
+		return refuse403("offline delegation holds a scope other than the member scope")
+	case d.EffectiveGrantorKind() == store.DelegationGrantorTestInfraOffline && !now.Before(d.Created.Add(store.TestInfraOfflineDelegationMaxTTL)):
+		return refuse403("offline delegation past its maximum age")
 	case !a.scopeAvailable(d.Scope):
 		return refuse403("delegation scope not available on this hub")
 	case !a.subCovers(d.WorkloadSub, d.Scope):
@@ -636,10 +699,15 @@ func (a *workloadIssuerAuthenticator) checkDelegationLive(d *store.TestIdentityD
 }
 
 // liveHumanGrantor reads the grantor's row from the store on every
-// request and fails closed unless it is an active human user outside the
-// reserved test-identity domain.
-func (a *workloadIssuerAuthenticator) liveHumanGrantor(ctx context.Context, grantorID string) (*store.User, *workloadDelegationRefusal) {
-	u, err := a.store.GetUser(ctx, grantorID)
+// request and fails closed unless the delegation's grantor kind is human and
+// the row is an active human user outside the reserved test-identity
+// domain. A delegation of any other grantor kind is refused even if a
+// caller reaches this path.
+func (a *workloadIssuerAuthenticator) liveHumanGrantor(ctx context.Context, d *store.TestIdentityDelegation) (*store.User, *workloadDelegationRefusal) {
+	if d == nil || d.EffectiveGrantorKind() != store.DelegationGrantorHuman {
+		return nil, refuse403("delegation grantor kind is not human")
+	}
+	u, err := a.store.GetUser(ctx, d.GrantorID)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		return nil, refuse403("delegation grantor no longer exists")

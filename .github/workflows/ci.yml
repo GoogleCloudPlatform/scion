@@ -226,6 +226,36 @@ jobs:
         working-directory: ./web
         run: node --test scripts/check-bundle-budget.test.mjs
 
+      # npm run build moves the source maps out of web/dist/client (the tree
+      # web/embed.go embeds and the release images copy) into
+      # web/dist/sourcemaps (scripts/move-sourcemaps.mjs). Not gated on
+      # changes: this re-checks the dist/client that the Go tests and Build
+      # Binary below embed, on every run.
+      - name: Check Web Source Maps
+        working-directory: ./web
+        run: |
+          npm run test:move-sourcemaps
+          if find dist/client \( -name '*.map' -o -name '*.map.br' -o -name '*.map.gz' \) | grep .; then
+            echo "::error::source maps left in web/dist/client"; exit 1
+          fi
+          if grep -rlE --include='*.js' --include='*.mjs' --include='*.css' '[#@][[:space:]]*sourceMappingURL=' dist/client; then
+            echo "::error::sourceMappingURL comment left in web/dist/client"; exit 1
+          fi
+          test -f dist/sourcemaps/assets/main.js.map
+
+      # The maps hold only the TypeScript sources already in this repository.
+      # Kept for debugging and bundle attribution: uploaded only for pushes to
+      # main, with short retention. The release workflow never uploads or
+      # attaches them.
+      - name: Upload web source maps
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: web-sourcemaps
+          path: web/dist/sourcemaps/
+          retention-days: 7
+          if-no-files-found: error
+
       - name: Verify Web Types
         if: ${{ needs.changes.result != 'success' || needs.changes.outputs.web_checks != 'false' }}
         working-directory: ./web
@@ -392,6 +422,29 @@ jobs:
             0) ;;
             1) echo "::error title=Harness coverage::A harnesses/<name>/Dockerfile is out of sync with one or more cloudbuild-*.yaml configs (see ptone/scion#2357). Details are in the step log above." ;;
             *) echo "::error title=Harness coverage NOT checked::check-harness-coverage.sh could not run (exit $rc) — NOTHING WAS ANALYSED. This is an environment failure and is NOT a statement about the codebase. Do not read it as a coverage failure." ;;
+          esac
+          exit "$rc"
+
+      - name: Check Image Go Directories
+        run: |
+          # Invoked directly rather than via `make check-image-go-dirs`, for the
+          # same reason as Check Authorization Guards above: make would collapse
+          # the script's exit 1 (violations) and exit 2 (nothing was analysed).
+          set +e
+          ./hack/check-image-go-dirs.sh --self-test
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            set -e
+            echo "::error title=Image Go directories NOT checked::check-image-go-dirs --self-test failed (exit $rc) — the check itself is broken or could not run, so nothing was analysed."
+            exit "$rc"
+          fi
+          ./hack/check-image-go-dirs.sh
+          rc=$?
+          set -e
+          case "$rc" in
+            0) ;;
+            1) echo "::error title=Image Go directories::A Dockerfile that builds the root Go module does not copy one of its top-level Go directories, or an ignore file drops one from the build context. Add the COPY line, or a justified EXCLUDED_DIRS entry in hack/check-image-go-dirs.sh; details are in the step log above." ;;
+            *) echo "::error title=Image Go directories NOT checked::check-image-go-dirs.sh could not run (exit $rc) — NOTHING WAS ANALYSED. This is an environment failure, not a statement about the codebase." ;;
           esac
           exit "$rc"
 

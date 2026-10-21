@@ -37,7 +37,9 @@
     "pages/broker-capabilities-contract.test.ts",
     "pages/admin-maintenance-reissue-scopes.test.ts",
     "shared/log-viewer-batching.test.ts",
-    "shared/access-boundary-preview-expiry.test.ts"
+    "shared/access-boundary-preview-expiry.test.ts",
+    "shared/code-editor-language.test.ts",
+    "shared/code-editor-language-race.test.ts"
   ],
   "exclude": []
 }

@@ -197,6 +197,45 @@ test('fails when no terminal-workspace chunk was emitted', () => {
   assert.deepEqual(failures, ['no chunk matching assets/terminal-workspace-*.js']);
 });
 
+/** checkBudget over a flat file list with the given raw sizes (filled, so gzip is tiny). */
+function runChunks(sizes, chunks) {
+  return checkBudget({
+    manifest,
+    budget: budget({
+      files: {},
+      entryClosure: undefined,
+      requiredChunks: [],
+      forbiddenModules: [],
+      chunks,
+    }),
+    readFile: (f) => (f in sizes ? Buffer.alloc(sizes[f], 'a') : null),
+    listFiles: () => Object.keys(sizes),
+    readMapModules: () => [],
+  });
+}
+
+test('chunk limits apply to every chunk matching the prefix', () => {
+  const chunks = { $comment: 'why', 'assets/codemirror-': { raw: 1000, gzip: 1000 } };
+  const sizes = {
+    'assets/codemirror-a1.js': 1000,
+    'assets/codemirror-b2.js': 1001,
+    'assets/codemirror-a1.js.map': 5000,
+    'assets/lang-go-c3.js': 5000,
+  };
+  const { failures, report } = runChunks(sizes, chunks);
+  assert.deepEqual(failures, ['assets/codemirror-b2.js: raw 1001 B exceeds 1000 B']);
+  assert.equal(report.filter((r) => r.startsWith('assets/codemirror-')).length, 2);
+  assert.deepEqual(runChunks({ 'assets/codemirror-a1.js': 1000 }, chunks).failures, []);
+});
+
+test('fails when no chunk matches a sized prefix', () => {
+  const { failures } = runChunks(
+    { 'assets/lang-go-c3.js': 10 },
+    { 'assets/codemirror-': { raw: 1000, gzip: 1000 } }
+  );
+  assert.deepEqual(failures, ['no chunk matching assets/codemirror-*.js']);
+});
+
 test('allowlisted terminal modules in the login closure pass', () => {
   const { failures } = run({
     modules: { 'assets/main.js': ['src/client/main.ts', EVENTS, LOADER] },

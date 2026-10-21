@@ -27,6 +27,7 @@ import type { TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { invalidatePublicSettings } from '../../client/server-feature-flags.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import type { RuntimeBroker, GCPServiceAccount } from '../../shared/types.js';
@@ -2940,6 +2941,10 @@ export class ScionPageAdminServerConfig extends LitElement {
         await this.handleSaveError(res);
         return;
       }
+      // The save can change what GET /api/v1/settings/public returns (chat
+      // toggle, telemetry and auto-expose defaults, hub agent defaults,
+      // agent_secrets.user_scope_only); drop this tab's cached copy.
+      invalidatePublicSettings();
 
       const result = (await res.json()) as {
         reload?: ReloadResult;
@@ -3364,6 +3369,8 @@ export class ScionPageAdminServerConfig extends LitElement {
         this.error = `Reset failed: ${errText}`;
         return;
       }
+      // Like a save, a reset can change GET /api/v1/settings/public.
+      invalidatePublicSettings();
       this.resetConfirmSection = null;
       await this.loadConfig();
       this.successMessage = `Section "${sectionName}" has been reset to deployment configuration.`;

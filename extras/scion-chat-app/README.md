@@ -93,6 +93,15 @@ hub:
   # Path to the Hub's user signing key file (base64-encoded, 32 bytes).
   # The chat app uses this to mint impersonation tokens for hub users.
   signing_key: "/path/to/user-signing-key"
+  # Optional (default true): `/scionAdmin create` and `thread` opt in to an
+  # asynchronous agent create. On a Hub with async launch enabled the command
+  # replies at once and the app posts "running" or the failure when the
+  # launch ends; /thread sends its instruction only once the agent runs.
+  # Messages sent to an agent that is still starting are delivered when it
+  # is running. A Hub without async launch answers synchronously either way.
+  # Set to false to always create synchronously. Pending follow-ups are lost
+  # if the app restarts.
+  # async_create: true
 
 # Broker plugin RPC server settings.
 # The Hub connects to this address as a self-managed plugin.

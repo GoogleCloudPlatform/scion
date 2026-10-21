@@ -34,6 +34,8 @@ var lifecycleDispatchMethods = map[string]bool{
 	"DispatchAgentCreate":           true,
 	"DispatchAgentCreateWithGather": true,
 	"DispatchAgentProvision":        true,
+	// The start-options entry point (ptone/scion#4669) is a start.
+	"DispatchAgentStartWithOptions": true,
 }
 
 // How a function that calls a lifecycle dispatch method keeps the agent's

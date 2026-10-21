@@ -92,7 +92,11 @@ func wakeDeleteWonError(agentID string) *AgentDMError {
 // Returns (*WakeResult, nil) on success or (nil, *AgentDMError) on failure.
 // On failure, no message should be dispatched (AC-4).
 func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeResult, *AgentDMError) {
-	phase := state.Phase(agent.Phase)
+	// The effective resting phase (ptone/scion#4669): an error row that
+	// remembers the suspended phase a failed asynchronous resume began from
+	// wakes as a suspended agent; a local only, agent.Phase is unchanged.
+	rest := store.EffectiveRestingPhase(agent)
+	phase := state.Phase(rest)
 
 	// A create launch in flight or left incomplete skips the wake in any
 	// phase. The answer comes from the start gate, so a delete in progress
@@ -307,11 +311,21 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 		if err != nil {
 			var quotaErr *startQuotaError
 			if errors.As(err, &quotaErr) {
+				var conflict *ReservationScopeConflictError
+				if errors.As(err, &conflict) {
+					return nil, &AgentDMError{
+						Code: ErrCodeBrokerReservationScopeConflict,
+						Message: fmt.Sprintf("agent %s already holds capacity on Runtime Broker %s; it cannot be admitted on %s",
+							conflict.ResourceID, conflict.HeldScopeID, conflict.RequestedScopeID),
+						HTTPStatus: http.StatusConflict,
+					}
+				}
 				if errors.Is(err, store.ErrQuotaExceeded) {
 					return nil, &AgentDMError{
 						Code:       ErrCodeQuotaExceeded,
 						Message:    quotaExceededMessage(store.LimitMaxAgentsPerBroker),
 						HTTPStatus: http.StatusTooManyRequests,
+						Details:    quotaExceededDetails(err),
 					}
 				}
 				return nil, &AgentDMError{
@@ -458,7 +472,7 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 	default:
 		return nil, &AgentDMError{
 			Code:       ErrCodeValidationError,
-			Message:    fmt.Sprintf("Agent is not yet running (phase: %s) — wait for it to reach running state", agent.Phase),
+			Message:    fmt.Sprintf("Agent is not yet running (phase: %s) — wait for it to reach running state", rest),
 			HTTPStatus: http.StatusBadRequest,
 		}
 	}
@@ -470,7 +484,7 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 // generic "use --wake" hint (which group sends do not accept).
 func validateGroupMemberDeliverable(agent *store.Agent) *AgentDMError {
 	err := validateAgentDeliverable(agent)
-	if err != nil && state.Phase(agent.Phase) == state.PhaseSuspended {
+	if err != nil && state.Phase(store.EffectiveRestingPhase(agent)) == state.PhaseSuspended {
 		err.Message = fmt.Sprintf("agent %q is suspended; group messages do not wake agents — message it directly with --wake", agent.Slug)
 	}
 	return err
@@ -481,7 +495,8 @@ func validateGroupMemberDeliverable(agent *store.Agent) *AgentDMError {
 // the agent is running, or a typed error describing why delivery is not
 // possible.
 func validateAgentDeliverable(agent *store.Agent) *AgentDMError {
-	phase := state.Phase(agent.Phase)
+	rest := store.EffectiveRestingPhase(agent)
+	phase := state.Phase(rest)
 	switch phase {
 	case state.PhaseRunning:
 		return nil
@@ -512,7 +527,7 @@ func validateAgentDeliverable(agent *store.Agent) *AgentDMError {
 	default:
 		return &AgentDMError{
 			Code:       ErrCodeAgentNotRunning,
-			Message:    fmt.Sprintf("agent %q is not yet running (phase: %s); wait for it to reach running state", agent.Slug, agent.Phase),
+			Message:    fmt.Sprintf("agent %q is not yet running (phase: %s); wait for it to reach running state", agent.Slug, rest),
 			HTTPStatus: http.StatusConflict,
 		}
 	}
