@@ -554,7 +554,7 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 		s.addEphemeralWorkspaceStartWarning(ctx, agent, hadEphemeral)
 	}
 	if supersedesQueuedStop && (err == nil || errors.Is(err, errStartedStatusWrite)) {
-		s.clearSupersededQueuedStop(ctx, agent)
+		s.replaceQueuedStop(ctx, agent, "running")
 	}
 	if err != nil && provisioned && startDidNotHappen(err) && agent.RunIntentAt != nil {
 		s.settleFailedProvisionedStart(ctx, agent.ID, *agent.RunIntentAt, "Start failed: "+err.Error()+". "+provisionedRestingNote)
@@ -598,25 +598,20 @@ func refusedStartMessage(err error) string {
 // start did not happen: it is back at rest and can be started again.
 const provisionedRestingNote = "The agent is still provisioned and can be started again."
 
-// clearSupersededQueuedStop clears the queued-stop status and notice of an
-// agent whose start succeeded after a stop was queued for its offline
-// broker: the start superseded the stop. It runs after the start's claim is
-// released, so it re-reads the row and clears only while run intent is still
+// replaceQueuedStop clears the queued-stop status and notice of an agent
+// whose stop was queued for its offline broker, replacing stop_queued with
+// containerStatus: running after a start that succeeded (the start
+// superseded the stop), stopped after a restart's stop leg stopped the old
+// container and its start leg's outcome is unknown (ptone/scion#5143). It
+// runs after the start's claim is released, or under the restart's kept
+// claim, so it re-reads the row and clears only while run intent is still
 // running and the queued status or notice is still there: a stop recorded
 // since keeps its own state. A row a delete has won (deletedOrDeleteHeld)
 // keeps its state too: the delete claim does not move run intent (the
 // engine records stop later, in dispatch), and the store's delete guard
 // does not cover the container status, so without this check the clear
-// would repaint a deleting row running (ptone/scion#3696). The container
-// status becomes running unless the broker reported one.
-func (s *Server) clearSupersededQueuedStop(ctx context.Context, agent *store.Agent) {
-	s.replaceQueuedStop(ctx, agent, "running")
-}
-
-// replaceQueuedStop is clearSupersededQueuedStop with the container status
-// that replaces stop_queued: running after a successful start, stopped after
-// a restart's stop leg stopped the old container and its start leg's
-// outcome is unknown (ptone/scion#5143).
+// would repaint a deleting row (ptone/scion#3696). The container status is
+// replaced only while the row reads stop_queued.
 func (s *Server) replaceQueuedStop(ctx context.Context, agent *store.Agent, containerStatus string) {
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
@@ -630,7 +625,7 @@ func (s *Server) replaceQueuedStop(ctx context.Context, agent *store.Agent, cont
 		upd.ContainerStatus = containerStatus
 	}
 	if err := s.store.UpdateAgentStatus(cctx, agent.ID, upd); err != nil {
-		slog.Warn("Start: clearing the superseded queued stop failed", "agent_id", agent.ID, "error", err)
+		slog.Warn("Replacing the queued-stop container status failed", "agent_id", agent.ID, "container_status", containerStatus, "error", err)
 		return
 	}
 	if upd.ContainerStatus != "" {

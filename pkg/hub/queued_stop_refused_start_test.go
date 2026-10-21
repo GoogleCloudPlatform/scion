@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -67,16 +68,15 @@ func (q *refusedStartFixture) start(t *testing.T) int {
 	return code
 }
 
-// lastPublished returns the last status event published for the agent, or
-// nil.
-func (q *refusedStartFixture) lastPublished() *store.Agent {
-	var last *store.Agent
+// published returns the status events published for the agent, in order.
+func (q *refusedStartFixture) published() []*store.Agent {
+	var out []*store.Agent
 	for _, a := range q.events.publishedAgents() {
 		if a.ID == q.agent.ID {
-			last = a
+			out = append(out, a)
 		}
 	}
-	return last
+	return out
 }
 
 // A start refused before anything ran puts the stopped intent back, so the
@@ -86,6 +86,12 @@ func (q *refusedStartFixture) lastPublished() *store.Agent {
 // Broker refusal shows its own message (the handler records the same one).
 func TestRefusedStartAfterQueuedStop_RestoresStoppedIntent(t *testing.T) {
 	flatRefusal := &RuntimeTargetRefusal{Code: "runtime_target_mismatch", Status: http.StatusConflict, Message: "the Runtime Broker serves another runtime target"}
+	// The same refusal as the Runtime Broker's own answer: a 409 envelope with
+	// the shared flat code (brokerRuntimeTargetRefusal decodes it).
+	flatEnvelope := &brokerStatusError{
+		StatusCode: http.StatusConflict,
+		Body:       `{"error":{"code":"runtime_target_mismatch","message":"the Runtime Broker answered that it serves another runtime target"}}`,
+	}
 	cases := []struct {
 		name     string
 		withSlot bool
@@ -96,6 +102,7 @@ func TestRefusedStartAfterQueuedStop_RestoresStoppedIntent(t *testing.T) {
 	}{
 		{name: "request not sent", withSlot: true, err: fmt.Errorf("x: %w", errStartRequestNotSent), message: "Start failed:"},
 		{name: "flat runtime target refusal", withSlot: true, err: flatRefusal, message: flatRefusal.Message},
+		{name: "flat runtime target refusal from the broker", withSlot: true, err: flatEnvelope, message: "the Runtime Broker answered that it serves another runtime target"},
 		{name: "broker capacity", fill: true, message: "Start failed:"},
 		{name: "broker draining", withSlot: true, err: drainingErr("5"), message: "Start failed:"},
 		{name: "runtime unavailable", withSlot: true, err: runtimeUnavailableErr(), message: "Start failed:"},
@@ -109,9 +116,11 @@ func TestRefusedStartAfterQueuedStop_RestoresStoppedIntent(t *testing.T) {
 				filler := q.addAgent("rs-filler", "running", "working")
 				seedSlot(t, q.s, q.brokerID, filler.ID)
 			}
+			dispatchedPastRefusal := false
 			q.disp.start = func(ctx context.Context, a *store.Agent) error {
 				if tc.err == nil {
-					t.Fatal("dispatched past the capacity refusal")
+					dispatchedPastRefusal = true
+					return errors.New("dispatched past the capacity refusal")
 				}
 				return tc.err
 			}
@@ -120,6 +129,7 @@ func TestRefusedStartAfterQueuedStop_RestoresStoppedIntent(t *testing.T) {
 
 			code := q.start(t)
 			require.GreaterOrEqual(t, code, 400, "the start is refused")
+			require.False(t, dispatchedPastRefusal, "the capacity refusal comes before any dispatch")
 
 			got := getAgent(t, q.s, q.agent.ID)
 			assert.Equal(t, store.RunIntentStopped, got.RunIntent, "a definitely refused start after a queued stop restores the stopped intent")
@@ -135,8 +145,9 @@ func TestRefusedStartAfterQueuedStop_RestoresStoppedIntent(t *testing.T) {
 				require.NotNil(t, heldAfter, "the queued stop keeps its reservation")
 				assert.Equal(t, heldBefore.ID, heldAfter.ID)
 			}
-			pub := q.lastPublished()
-			require.NotNil(t, pub, "the restored state is published")
+			events := q.published()
+			require.Len(t, events, 1, "the restored state is published once")
+			pub := events[0]
 			assert.Equal(t, store.RunIntentStopped, pub.RunIntent)
 			assert.Contains(t, pub.Message, tc.message, "the published row carries the message the agent keeps")
 			assert.Equal(t, got.Message, pub.Message, "the published row carries the message the agent keeps")
@@ -161,20 +172,20 @@ func TestRefusedStartAfterQueuedStop_AmbiguousKeepsRunningIntent(t *testing.T) {
 }
 
 // intentAfterReleaseStore writes a newer running intent for agentID right
-// after the start claim is released (as a newer start would), once.
+// after the start claim is released (as a newer start would), once, and
+// keeps that write's error for the test goroutine to check.
 type intentAfterReleaseStore struct {
 	store.Store
-	t       *testing.T
 	agentID string
 	done    bool
+	err     error
 }
 
 func (w *intentAfterReleaseStore) ReleaseAgentStart(ctx context.Context, agentID, claimID, owner string) (bool, error) {
 	held, err := w.Store.ReleaseAgentStart(ctx, agentID, claimID, owner)
 	if agentID == w.agentID && !w.done {
 		w.done = true
-		_, serr := w.Store.SetRunIntent(ctx, agentID, store.RunIntentRunning)
-		require.NoError(w.t, serr)
+		_, w.err = w.Store.SetRunIntent(ctx, agentID, store.RunIntentRunning)
 	}
 	return held, err
 }
@@ -184,7 +195,7 @@ func (w *intentAfterReleaseStore) ReleaseAgentStart(ctx context.Context, agentID
 // reverted and no message is written.
 func TestRefusedStartAfterQueuedStop_NewerIntentKept(t *testing.T) {
 	q := newRefusedStartFixture(t, true)
-	w := &intentAfterReleaseStore{Store: q.s, t: t, agentID: q.agent.ID}
+	w := &intentAfterReleaseStore{Store: q.s, agentID: q.agent.ID}
 	q.srv.store = w
 	q.srv.quotaService.store = w
 	q.disp.start = func(ctx context.Context, a *store.Agent) error {
@@ -194,6 +205,7 @@ func TestRefusedStartAfterQueuedStop_NewerIntentKept(t *testing.T) {
 	require.GreaterOrEqual(t, q.start(t), 400)
 
 	require.True(t, w.done, "setup: the newer intent was written")
+	require.NoError(t, w.err, "setup: the newer intent was written")
 	got := getAgent(t, q.s, q.agent.ID)
 	assert.Equal(t, store.RunIntentRunning, got.RunIntent, "the newer intent is kept")
 	assert.NotContains(t, got.Message, "Start failed:", "no message for a revert that lost")
@@ -271,22 +283,24 @@ func TestRefusedStartAfterQueuedStop_SettleConfirmsOnInventory(t *testing.T) {
 	assert.Contains(t, got.Message, "Start failed:")
 }
 
-// pinCheckingStopDispatcher records, at each stop, the intent the agent row
-// holds and its claim kind.
+// pinCheckingStopDispatcher records, at each stop of agentID (the backstop
+// runs it on its own goroutine), whether the agent row then held a stop-kind
+// claim and the stop intent written at intentAt; the test goroutine checks.
 type pinCheckingStopDispatcher struct {
 	*claimTestDispatcher
-	t        *testing.T
-	s        store.Store
-	agentID  string
-	intentAt time.Time
+	s          store.Store
+	agentID    string
+	intentAt   time.Time
+	stopClaim  atomic.Bool
+	pinnedStop atomic.Bool
 }
 
 func (d *pinCheckingStopDispatcher) DispatchAgentStop(ctx context.Context, a *store.Agent) error {
 	if a.ID == d.agentID {
-		cur, err := d.s.GetAgent(ctx, a.ID)
-		require.NoError(d.t, err)
-		assert.Equal(d.t, store.StartClaimStop, cur.StartClaimKind, "the backstop stops under a stop claim")
-		assert.True(d.t, cur.RunIntentMatches(store.RunIntentStopped, d.intentAt), "pinned to the restored intent")
+		if cur, err := d.s.GetAgent(ctx, a.ID); err == nil {
+			d.stopClaim.Store(cur.StartClaimKind == store.StartClaimStop)
+			d.pinnedStop.Store(cur.RunIntentMatches(store.RunIntentStopped, d.intentAt))
+		}
 	}
 	return d.claimTestDispatcher.DispatchAgentStop(ctx, a)
 }
@@ -307,12 +321,14 @@ func TestRefusedStartAfterQueuedStop_BackstopStopsRunningContainer(t *testing.T)
 	q.srv.drainBrokerDispatch(context.Background(), q.brokerID, func(op string) bool { return op == "stop" })
 	require.Equal(t, 0, pendingStops(t, q.reconcileFixture))
 	require.Equal(t, int32(0), q.disp.stops.Load(), "the superseded row stops nothing")
-	pd := &pinCheckingStopDispatcher{claimTestDispatcher: q.disp, t: t, s: q.s, agentID: q.agent.ID, intentAt: *refused.RunIntentAt}
+	pd := &pinCheckingStopDispatcher{claimTestDispatcher: q.disp, s: q.s, agentID: q.agent.ID, intentAt: *refused.RunIntentAt}
 	q.srv.SetDispatcher(pd)
 
 	q.heartbeat(completeInventory(), q.agent.Slug)
 	require.Eventually(t, func() bool { return q.disp.stops.Load() == 1 }, 5*time.Second, 10*time.Millisecond, "the backstop stops the running container")
 	require.Eventually(t, func() bool { return getAgent(t, q.s, q.agent.ID).StartClaimID == "" }, 5*time.Second, 10*time.Millisecond, "the backstop's claim is released")
+	assert.True(t, pd.stopClaim.Load(), "the backstop stops under a stop claim")
+	assert.True(t, pd.pinnedStop.Load(), "pinned to the restored intent")
 
 	q.heartbeat(completeInventory())
 	got := getAgent(t, q.s, q.agent.ID)
@@ -365,4 +381,29 @@ func TestRestartOfQueuedStopAgent_ConfirmedStartLegFailure_KeepsRunningIntent(t 
 	got := getAgent(t, q.s, q.agent.ID)
 	assert.Equal(t, store.RunIntentRunning, got.RunIntent, "a restart keeps the running intent")
 	assert.Equal(t, "stopped", got.ContainerStatus, "the restart records the stopped state")
+}
+
+// publishAgentRow skips a row a delete holds (the delete engine owns its
+// status) and publishes a live row once.
+func TestPublishAgentRow_SkipsDeleteHeldRow(t *testing.T) {
+	f, _, a := newClaimFixture(t)
+	ev := &trackingEventPublisher{}
+	f.srv.events = ev
+	live := f.addAgent("publish-live", "stopped", "")
+	seedAgentDeletion(t, f.s, a.ID, deleteSeed{state: store.DeletionStateDeleting, leaseIn: time.Hour})
+
+	f.srv.publishAgentRow(context.Background(), a.ID)
+	f.srv.publishAgentRow(context.Background(), live.ID)
+
+	var held, published int
+	for _, p := range ev.publishedAgents() {
+		switch p.ID {
+		case a.ID:
+			held++
+		case live.ID:
+			published++
+		}
+	}
+	assert.Zero(t, held, "a delete-held row is not published")
+	assert.Equal(t, 1, published, "a live row is published once")
 }

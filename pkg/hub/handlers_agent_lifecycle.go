@@ -1050,9 +1050,10 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 					// superseded it): the container may be up, so no
 					// stopped state is recorded and the slot is not
 					// released. startAgentCore kept the hold's reservation,
-					// and restored stopped, when the dispatch outcome is
-					// unknown; otherwise it undid only what its hold
-					// created. Whoever took the claim settles the slot.
+					// and rested a phase it marked starting at stopped, when
+					// the dispatch outcome is unknown; otherwise it undid
+					// only what its hold created. Whoever took the claim
+					// settles the slot.
 				} else if errors.Is(dispatchErr, store.ErrDeleteInProgress) {
 					// A delete claimed the row between the legs
 					// (ptone/scion#2550, round 5 N3). The delete engine
@@ -1074,7 +1075,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 					// status is replaced: the stop leg stopped the old
 					// container, so the queued stop is done.
 					s.replaceQueuedStop(ctx, agent, "stopped")
-					s.publishAgentRow(ctx, agent.ID)
+					s.publishAgentRow(context.WithoutCancel(ctx), agent.ID)
 				} else {
 					// The start leg only runs after the stop leg succeeded
 					// or reported no running instance (any other stop error

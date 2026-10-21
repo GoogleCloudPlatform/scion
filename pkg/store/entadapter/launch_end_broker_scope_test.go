@@ -99,3 +99,72 @@ func TestLaunchEnd_ReleaseScopedToAgentBroker(t *testing.T) {
 		}
 	}
 }
+
+// An agent row with no Runtime Broker releases nothing at a launch end: the
+// scope predicate names the row's broker, and no broker-scoped reservation
+// has an empty broker ID, so a reservation the agent holds (here on
+// testQuotaBroker) is kept for the sweep. Only the reaper's writes are
+// covered: a launch report is accepted only from the row's own broker.
+func TestLaunchEnd_AgentWithoutBrokerReleasesNothing(t *testing.T) {
+	ctx := context.Background()
+	for _, how := range []string{"reaper_deadline", "reaper_lost"} {
+		t.Run(how, func(t *testing.T) {
+			s, projectID := newTestAgentStore(t)
+			a, launchID := beginTestLaunch(t, ctx, s, projectID, "scope-none")
+			require.Empty(t, a.RuntimeBrokerID, "setup: the agent has no Runtime Broker")
+			quota := NewQuotaStore(s.client)
+			ld, err := quota.CreateLimitDefinition(ctx, &store.LimitDefinition{
+				Name: store.LimitMaxAgentsPerBroker, ResourceType: "agent", Unit: "count", DefaultValue: 1,
+			})
+			require.NoError(t, err)
+			seeded, err := quota.CreateUsageReservation(ctx, &store.UsageReservation{
+				LimitDefinitionID: ld.ID, SubjectID: testQuotaBroker, ScopeType: store.QuotaScopeBroker, ScopeID: testQuotaBroker,
+				ResourceID: a.ID, Reserved: 1,
+			})
+			require.NoError(t, err)
+
+			endStartLaunchByFailure(t, ctx, s, a, launchID, how)
+
+			got, err := s.GetAgent(ctx, a.ID)
+			require.NoError(t, err)
+			require.Equal(t, store.LaunchStateEnded, got.LaunchState, "setup: the launch ended")
+			kept, err := quota.GetActiveReservation(ctx, ld.ID, a.ID)
+			require.NoError(t, err, "an agent without a broker releases nothing at a launch end")
+			assert.Equal(t, seeded.ID, kept.ID, "an agent without a broker releases nothing at a launch end")
+		})
+	}
+}
+
+// The Postgres counterpart of the other-broker rows: on Postgres too, a
+// failed report before running (L6) and a deadline reap (L7) keep the
+// reservation the agent holds on another Runtime Broker. Skipped without a
+// Postgres URL (fork CI runs it).
+func TestLaunchEnd_OtherBrokerReservationKeptOnPG(t *testing.T) {
+	ctx := context.Background()
+	for _, how := range []string{"report_failed", "reaper_deadline"} {
+		t.Run(how, func(t *testing.T) {
+			s, projectID := newPGTestAgentStore(t, 2)
+			a, launchID := beginTestLaunch(t, ctx, s, projectID, "scope-pg-"+how)
+			setAgentRuntimeBroker(t, ctx, s, a, testQuotaBroker)
+			quota := NewQuotaStore(s.client)
+			ld, err := quota.CreateLimitDefinition(ctx, &store.LimitDefinition{
+				Name: store.LimitMaxAgentsPerBroker, ResourceType: "agent", Unit: "count", DefaultValue: 1,
+			})
+			require.NoError(t, err)
+			seeded, err := quota.CreateUsageReservation(ctx, &store.UsageReservation{
+				LimitDefinitionID: ld.ID, SubjectID: "broker-2", ScopeType: store.QuotaScopeBroker, ScopeID: "broker-2",
+				ResourceID: a.ID, Reserved: 1,
+			})
+			require.NoError(t, err)
+
+			endStartLaunchByFailure(t, ctx, s, a, launchID, how)
+
+			got, err := s.GetAgent(ctx, a.ID)
+			require.NoError(t, err)
+			require.Equal(t, store.LaunchStateEnded, got.LaunchState, "setup: the launch ended")
+			kept, err := quota.GetActiveReservation(ctx, ld.ID, a.ID)
+			require.NoError(t, err, "a launch end keeps the reservation on another broker")
+			assert.Equal(t, seeded.ID, kept.ID, "a launch end keeps the reservation on another broker")
+		})
+	}
+}

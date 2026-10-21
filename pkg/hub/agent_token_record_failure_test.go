@@ -221,6 +221,9 @@ func TestAgentTokenRecordFailureIsFixed500(t *testing.T) {
 		}},
 		{name: "restart", do: func(t *testing.T, f *recordFailureFixture) (*httptest.ResponseRecorder, string) {
 			agent := f.agentIn(t, "record-fail-restart", state.PhaseRunning)
+			// The running agent holds its slot, so the release below is observable.
+			seedSlot(t, f.store, tid("broker-record-fail"), agent.ID)
+			require.EqualValues(t, 1, brokerReservationCount(t, f.store, tid("broker-record-fail")), "setup: the running agent holds its slot")
 			f.fault.Arm()
 			return doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/restart", nil), ""
 		}, after: func(t *testing.T, f *recordFailureFixture) {

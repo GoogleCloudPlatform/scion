@@ -110,11 +110,13 @@ func TestRestartAmbiguousStartLeg_KeepsSlotAndClaim(t *testing.T) {
 			} else {
 				assert.Equal(t, string(state.PhaseStopped), got.Phase, "an ambiguous restart rests at stopped")
 			}
-			published := false
+			published := 0
 			for _, p := range ev.publishedAgents() {
-				published = published || p.ID == a.ID
+				if p.ID == a.ID {
+					published++
+				}
 			}
-			assert.True(t, published, "the restart's end state is published")
+			assert.Equal(t, 1, published, "the restart's end state is published once")
 		})
 	}
 }
