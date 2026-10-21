@@ -566,10 +566,10 @@ func (s *Server) handleKeepaliveAbort(sender *launchSender, rec *launchRecord, l
 }
 
 // failLaunch implements design §3.8.2 step 7 (F2(d), "report first, then
-// clean up only if the Hub confirms the agent never ran"). step records which
-// generic step (claim/launching) the launch was in (design §3.9). cause is
-// the fixed runtime cause code for a runtime_error (launchFailureCause), or
-// "".
+// clean up only if the Hub confirms the agent never ran"; see below for a
+// Start failure). step records which generic step (claim/launching) the
+// launch was in (design §3.9). cause is the fixed runtime cause code for a
+// runtime_error (launchFailureCause), or "".
 //
 // startAttempted is true only when this attempt's Manager.Start failed. A
 // failure before Start, once an earlier gate or keepalive answered

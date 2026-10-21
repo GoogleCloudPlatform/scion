@@ -142,8 +142,9 @@ func (s *Server) recoverInstance(id string) {
 
 // recoverLaunch sends one recovered launch's terminal under the instance ID
 // it was journalled with (design wave 3 §1 C-b: the hub fences reports by
-// that ID), cleans up on a confirming answer with the existing predicates,
-// and removes the record (or keeps it as cleanup_pending if the clean-up
+// that ID), cleans up on a confirming answer with the existing predicates
+// (or startFailureCleanup for a StartFailed terminal, see below), and
+// removes the record (or keeps it as cleanup_pending if the clean-up
 // fails, ptone/scion#5177). With no definitive answer by its TTL, the
 // record is kept for the next boot to resend, up to a bound, after which it
 // is removed with no cleanup and `scion delete` removes what is left
@@ -252,10 +253,11 @@ func (s *Server) recoverLaunch(path string, jr *journalRecord) {
 	s.finishRecoveredCleanup(ctx, path, jr, cleanupErr)
 }
 
-// recoveryCleanup removes a recovered launch's resources on a confirming
-// answer: its journalled handles (each delete preconditioned on the UID
-// recorded at create time, so a newer launch's objects are untouched), then,
-// unless resourcesOnly, its name-addressed leftovers inside a registry slot.
+// recoveryCleanup removes a recovered launch's resources (on a confirming
+// answer, or resources-only as startFailureCleanup decides): its journalled
+// handles (each delete preconditioned on the UID recorded at create time, so
+// a newer launch's objects are untouched), then, unless resourcesOnly, its
+// name-addressed leftovers inside a registry slot.
 func (s *Server) recoveryCleanup(ctx context.Context, jr *journalRecord, rec *launchRecord, resourcesOnly bool) error {
 	mgr := s.recoveryManager(jr)
 	if mgr == nil && jr.RuntimeIdentity == "" {
