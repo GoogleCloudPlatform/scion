@@ -136,7 +136,8 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 
 // brokerPresentFunc reports whether the broker with the given ID is present
 // (hub.Server.BrokerPresent, design v2.21.50 §3.4). An error means presence
-// is unknown, not absent.
+// is unknown, not absent; the func logs its own errors (BrokerPresent logs
+// and counts them), so the caller does not log them again.
 type brokerPresentFunc func(ctx context.Context, brokerID string) (bool, error)
 
 // registerGlobalProjectAndBrokerPresence is registerGlobalProjectAndBroker
@@ -504,7 +505,8 @@ func buildStoreBrokerProfiles(settings *config.Settings, profileTypeSettings *co
 
 // withoutPresentBrokers drops from orphaned every agent whose broker is
 // present. A broker whose presence cannot be read is kept as present: its
-// agents are not moved. present nil returns orphaned unchanged.
+// agents are not moved, and the error is left to present's own log line.
+// present nil returns orphaned unchanged.
 func withoutPresentBrokers(ctx context.Context, orphaned []*store.Agent, present brokerPresentFunc) []*store.Agent {
 	if present == nil || len(orphaned) == 0 {
 		return orphaned
@@ -517,7 +519,6 @@ func withoutPresentBrokers(ctx context.Context, orphaned []*store.Agent, present
 			var err error
 			isPresent, err = present(ctx, a.RuntimeBrokerID)
 			if err != nil {
-				log.Printf("Warning: broker %s presence unknown, its agents are not re-assigned: %v", a.RuntimeBrokerID, err)
 				isPresent = true
 			}
 			known[a.RuntimeBrokerID] = isPresent

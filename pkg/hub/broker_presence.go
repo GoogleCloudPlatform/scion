@@ -84,8 +84,9 @@ func (s *Server) brokerPresence(ctx context.Context, b *store.RuntimeBroker) bro
 // (brokerPresence) for callers outside this package: the co-located
 // broker's startup repair of orphaned agents and project defaults. A broker
 // with no record is not present. Any other read error of the broker record
-// is returned, and the caller counts the broker as present (its agents are
-// not moved): the error is logged at Warn and counted in
+// is returned, and the caller counts the broker as present (the startup
+// repair does not move its agents): this is the one log line for the
+// failure, at Warn, and it is counted in
 // brokerPresenceRegistryFallbacks, like a failed registry read. A read cut
 // short by the caller's own context is returned without a log or a count.
 // At startup the conduit registry may not be open yet; the registry read is
@@ -99,7 +100,7 @@ func (s *Server) BrokerPresent(ctx context.Context, brokerID string) (bool, erro
 		return false, err
 	case err != nil:
 		s.brokerPresenceRegistryFallbacks.Add(1)
-		slog.WarnContext(ctx, "Broker presence: the broker record could not be read; the broker counts as present",
+		slog.WarnContext(ctx, "Broker presence: the broker record could not be read; the error is returned and the caller counts the broker as present",
 			"broker_id", brokerID, "error", err)
 		return false, err
 	}
