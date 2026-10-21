@@ -368,12 +368,48 @@ func loadClientConfig(kubeconfigPath, contextName string) (*rest.Config, loadedS
 // client-go's default one: the two cases in which the deferred loader's
 // ClientConfig tries in-cluster credentials instead
 // (clientcmd.DeferredLoadingClientConfig.ClientConfig).
+//
+// It also reports true, failing closed, when the selected context's cluster
+// names client-go's default server (clientcmd.ClusterDefaults, from
+// KUBERNETES_MASTER or the built-in default) and its user carries no
+// credential: this explicit check covers the default server with no
+// credential.
 func resolvesToDefaultConfig(raw clientcmdapi.Config, contextName string, overrides *clientcmd.ConfigOverrides, rules *clientcmd.ClientConfigLoadingRules) bool {
+	if defaultServerWithoutCredentials(raw, contextName) {
+		return true
+	}
 	direct, err := clientcmd.NewNonInteractiveClientConfig(raw, contextName, overrides, rules).ClientConfig()
 	if err != nil {
 		return clientcmd.IsEmptyConfig(err)
 	}
 	return rules.IsDefaultConfig(direct)
+}
+
+// defaultServerWithoutCredentials reports whether the selected context (the
+// requested one, else the current context) uses a cluster whose server is
+// client-go's default server and a user with no credential of any kind.
+func defaultServerWithoutCredentials(raw clientcmdapi.Config, contextName string) bool {
+	selected := contextName
+	if selected == "" {
+		selected = raw.CurrentContext
+	}
+	ctx, ok := raw.Contexts[selected]
+	if !ok || ctx == nil {
+		return false
+	}
+	cluster, ok := raw.Clusters[ctx.Cluster]
+	if !ok || cluster == nil || cluster.Server == "" || cluster.Server != clientcmd.ClusterDefaults.Server {
+		return false
+	}
+	user := raw.AuthInfos[ctx.AuthInfo]
+	if user == nil {
+		return true
+	}
+	return user.Token == "" && user.TokenFile == "" &&
+		user.ClientCertificate == "" && len(user.ClientCertificateData) == 0 &&
+		user.ClientKey == "" && len(user.ClientKeyData) == 0 &&
+		user.Username == "" && user.Password == "" &&
+		user.AuthProvider == nil && user.Exec == nil
 }
 
 // loadClientConfigNoInCluster is loadClientConfig with no in-cluster leg;
