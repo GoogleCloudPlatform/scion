@@ -50,6 +50,17 @@ const (
 	// threadGroupID.
 	groupConversationID = "99999999-9999-9999-9999-999999999998"
 	threadGroupID       = "7a000000-0000-0000-0000-000000000001"
+	// federatedUserID is a federated account (users.kind = federated) of
+	// visitorIssuer, bound to projectID by visitorRuleID and excluded from
+	// minimalVisitorRuleID.
+	federatedUserID      = "22222222-2222-2222-2222-2222222222fe"
+	visitorRoleDefID     = "aa000000-0000-0000-0000-000000000002"
+	visitorRuleID        = "f1500000-0000-0000-0000-000000000001"
+	minimalVisitorRuleID = "f1500000-0000-0000-0000-000000000002"
+	// visitorIssuer is a normalized issuer URL (no trailing slash) and
+	// visitorDomain a normalized visitor rule domain (lower case, exact).
+	visitorIssuer = "https://issuer.fixture.example"
+	visitorDomain = "partner.example"
 )
 
 // baseTime is a fixed timestamp so the generated fixture is byte-reproducible
@@ -103,6 +114,14 @@ func Spec() []TableFixture {
 			{ // max-length display_name edge case + NULL avatar_url
 				"id":    "22222222-2222-2222-2222-2222222222aa",
 				"email": "long@example.com", "display_name": maxLenString,
+			},
+			{ // federated account: synthetic .invalid email, real address in
+				// federated_email, scoped by home_issuer
+				"id":           federatedUserID,
+				"email":        "fed+" + federatedUserID + "@issuer.fixture.example.invalid",
+				"display_name": "Visitor", "role": "member", "status": "active",
+				"kind": "federated", "home_issuer": visitorIssuer,
+				"federated_email": "visitor@" + visitorDomain, "created_at": baseTime,
 			},
 		}},
 		{Table: "runtime_brokers", Rows: []row{
@@ -215,8 +234,7 @@ func Spec() []TableFixture {
 		{Table: "templates", Rows: []row{
 			{
 				"id": "7e000000-0000-0000-0000-000000000001", "name": "claude", "slug": "claude",
-				"harness": "claude", "image": "scion/claude:latest", "config": nestedConfigJSON,
-				"scope": "global", "status": "active",
+				"harness": "claude", "scope": "global", "status": "active",
 				"created_at": baseTime, "updated_at": baseTime,
 			},
 		}},
@@ -754,6 +772,29 @@ func Spec() []TableFixture {
 				"scope_type": "system", "permissions": `["agent.read","agent.list"]`,
 				"system": false,
 			},
+			{ // the seeded project-visitor role: system, project scope, not
+				// membership
+				"id": visitorRoleDefID, "name": "project-visitor",
+				"description": "Federated visitor who may message and list the project's agents; not a project member",
+				"scope_type":  "project", "permissions": `["agent.list","agent.message","agent.read"]`,
+				"system": true, "confers_membership": false,
+			},
+		}},
+
+		// ---- Project visitor rules (must precede role_bindings and
+		// project_visitor_exclusions) ----
+		{Table: "project_visitor_rules", Rows: []row{
+			{ // rule with a window and a creator
+				"id": visitorRuleID, "project_id": projectID,
+				"issuer": visitorIssuer, "domain": visitorDomain,
+				"not_before": baseTime, "expires_at": baseTime.Add(30 * 24 * time.Hour),
+				"created_by": userID, "created_at": baseTime,
+			},
+			{ // open window: NULL not_before, expires_at and created_by
+				"id": minimalVisitorRuleID, "project_id": "11111111-1111-1111-1111-1111111111aa",
+				"issuer": visitorIssuer, "domain": visitorDomain,
+				"created_at": baseTime,
+			},
 		}},
 
 		// ---- Role bindings ----
@@ -763,6 +804,25 @@ func Spec() []TableFixture {
 				"role_definition_id": roleDefID, "principal_type": "user",
 				"principal_id": userID, "scope_type": "system",
 				"created_by": "system",
+			},
+			{ // project-visitor binding created by visitorRuleID: it carries
+				// the rule's ID and window
+				"id":                 "a5b00000-0000-0000-0000-000000000001",
+				"role_definition_id": visitorRoleDefID, "principal_type": "user",
+				"principal_id": federatedUserID, "scope_type": "project",
+				"scope_id": projectID, "source_rule_id": visitorRuleID,
+				"not_before": baseTime, "expires_at": baseTime.Add(30 * 24 * time.Hour),
+				"created_by": userID,
+			},
+		}},
+
+		// ---- Project visitor exclusions: federatedUserID's binding from
+		// minimalVisitorRuleID was revoked ----
+		{Table: "project_visitor_exclusions", Rows: []row{
+			{
+				"id":      "f1e00000-0000-0000-0000-000000000001",
+				"rule_id": minimalVisitorRuleID, "user_id": federatedUserID,
+				"created_by": userID, "created_at": baseTime,
 			},
 		}},
 

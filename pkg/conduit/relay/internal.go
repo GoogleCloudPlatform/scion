@@ -59,6 +59,10 @@ const (
 	HeaderRefusalReason = "X-Conduit-Refusal-Reason"
 )
 
+// staleReasonNotSent is the X-Conduit-Stale-Reason of an internal RPC
+// whose target session ended before the request was handed to it.
+const staleReasonNotSent = "not_sent"
+
 // refuseUnavailable writes the owner's own pre-admission 503 with its
 // §3.3.1 reason.
 func refuseUnavailable(w http.ResponseWriter, why, msg string) {
@@ -256,6 +260,25 @@ func (r *Relay) serveRPC(w http.ResponseWriter, req *http.Request, peer, session
 	ctx, cancel := context.WithTimeout(req.Context(), r.cfg.RPCTimeout)
 	defer cancel()
 	resp, err := ls.Call(ctx, rpc)
+	// Broker targets only: for them a draining target, or a request the
+	// target never received, is a stale route for that session, so the
+	// caller re-resolves. Every other target keeps the 502 below.
+	broker := ls.Info().PrincipalKind == registry.PrincipalBroker
+	switch {
+	case !broker:
+	case errors.Is(err, conduit.ErrDraining):
+		// The target session refused before sending: a stale route for
+		// this session only, so the caller re-resolves (the replacement
+		// session may be held by this same relay).
+		w.Header().Set(HeaderStaleReason, string(registry.ReasonDraining))
+		http.Error(w, "target session draining", http.StatusConflict)
+		return
+	case errors.Is(err, conduit.ErrRequestNotSent):
+		// The target session ended before the request reached it.
+		w.Header().Set(HeaderStaleReason, staleReasonNotSent)
+		http.Error(w, "target session ended before the request was sent", http.StatusConflict)
+		return
+	}
 	if err != nil {
 		code, why := codeAndReason(err, "target session call failed")
 		if errors.Is(err, context.DeadlineExceeded) {
@@ -363,12 +386,22 @@ func (r *Relay) serveStream(w http.ResponseWriter, req *http.Request, peer, sess
 	if r, ok := st.(conduit.StreamRenewer); ok {
 		hop.setRenewalHandler(func(credential []byte) { _ = r.Renew(credential) })
 	}
-	if err := hop.grant(conduit.DefaultStreamWindow, TargetStream{SessionID: sessionID, StreamID: st.ID()}); err != nil {
+	// The target-side ids are this relay's own view of the stream it just
+	// opened: the id of the session it holds and the stream's id on it,
+	// never anything the caller sent.
+	if err := hop.grant(conduit.DefaultStreamWindow, TargetStream{SessionID: ls.Info().SessionID, StreamID: st.ID()}); err != nil {
 		_ = st.CloseWithCode(conduit.CloseCancelled, ReasonCancelled)
 		hop.end(errLinkLost, false)
 		return
 	}
 	cancel() // stop the opening watcher; the stream is established
+	// One debug line per internal stream this relay opens on a session it
+	// holds, so a stream that crossed nodes is visible on the owner too.
+	// The node that took the request logs the open at info with
+	// route=remote and owner_instance; port-proxy streams are per request,
+	// so the owner's line stays at debug for every stream.
+	r.log.Debug("Conduit internal stream opened", "session_id", ls.Info().SessionID, "stream_id", st.ID(),
+		"kind", open.GetKind().String(), "peer", peer)
 	splice(st, hop)
 }
 

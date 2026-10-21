@@ -82,7 +82,6 @@ capabilities:
     streamable_http: { support: "yes" }
     project_scope: { support: "no", reason: "OpenCode does not distinguish project-scoped MCP" }
   resume: { support: "yes" }
-  agent_plugins: { support: "no", reason: "Native Agent Plugins install is not yet supported for this harness" }
 no_auth:
   behavior: drop-to-shell
   command: opencode auth login

@@ -63,7 +63,20 @@ Do not post credentials, tokens, keys or other sensitive material in a space thr
 :::
 
 :::note[Attachment and shared-directory permissions]
-Shared directories and the storage that holds chat attachments do not have fine-grained permissions: access is not limited per conversation or per member. Do not rely on attachments or shared directories for files that only some project members may see. A planned move of attachments to artifacts will add finer-grained access for attachments.
+Shared directories, and the attachment store that holds chat attachments by default, grant access by project, not per conversation or per member. Keep files that only some project members may see out of them.
+
+With the `hub.attachment_artifacts` experiment on, a file uploaded in web chat is stored as an attachment of the message it is sent in, and is exactly as readable as that message at the moment it is read:
+
+- **Direct message:** its two participants.
+- **Thread in a project space:** everyone who can read the project.
+- **Group conversation without a project:** its current participants. Someone who joins can read the attachments of earlier messages, and someone who leaves stops being able to read them.
+- **Anyone the message is addressed to.**
+
+When the message goes to an agent, the file is also copied into the project's shared directory so the agent can open it, and there project access applies (until ptone/scion#4597 delivers files to the agent's own home instead).
+
+Until it is sent, only the uploader can read it, and an upload that is not sent within 24 hours is removed. Deleting a message makes its attachments unreadable at once, and their stored bytes are removed after the artifact garbage-collection grace period. Any user who cannot read it gets the same "not found" answer as for an attachment that does not exist. These attachments are read through a signed-in session, such as the web chat; user access tokens do not read, list or send them yet (ptone/scion#4596), and an upload made with a token is stored the previous way. Attachments are read only through their message: they have no share links, grants or versions, and they are not listed among artifacts.
+
+Each file can be up to the artifact file size limit (`artifacts.max_file_bytes`, 32 MiB by default), with up to 10 files per message. The experiment uses the artifact service, with its settings section enabled; `hub.artifacts` can stay off. Attachments stored while the experiment is on stay readable after it is turned off.
 :::
 
 ---
@@ -143,6 +156,7 @@ When writing instructions, you can easily pull other agents into the thread:
 - **Autocomplete Popup**: Typing `@` in the chat input opens a dropdown list of active agents in the project. The list supports fuzzy-matching as you type, and full keyboard navigation (arrow keys to select, `Enter` to insert).
 - **Code-Fence Guard**: The mention autocomplete is smart — it automatically disables itself when typing inside Markdown code fences (e.g., ` ``` ` blocks) so code snippets don't trigger unwanted dropdowns.
 - **Mention Leak Protection**: Direct mentions are safely partitioned, resolving a previous bug where mentions would leak into the default agent tab.
+- **Recipient-Form Mentions**: A mention written in recipient syntax, such as `@agent:hub-ops`, is rewritten to `@hub-ops` in the message body before the Hub stores it, so the mention reaches the named agent. The Hub does this for web, chat and CLI sends alike (`scion message` applies the same rewrite before sending). Code spans, fenced code blocks and quoted (`>`) lines are left as written, and an address such as `ops@agent:foo` is not a mention.
 - **Fan-Out Restrictions**: For platform stability, a single message is fanned out to a maximum of **10 recipients** per `@-mention` broadcast.
 - **Bidirectional Mention Translation**: Mentions are automatically translated between the formats used by agents and the web chat. In the chat UI, mentions display as `@firstname-lastname`; when delivered to agents, they are translated to `@email` format, and vice versa. This ensures both humans and agents see the most natural identifier for their context.
 - **Composer Default-Agent Disambiguation**: When sending messages in collaborative project spaces with multiple active agents, typing a message without an explicit target or `@-mention` triggers a smart disambiguation interface. This guides the user to select which agent the message should target (or fall back to the project's configured default agent), keeping routing unambiguous and conversations clear.
@@ -525,6 +539,10 @@ Who receives it:
 * **Subscribers with only the `ERROR` trigger**, when the halt replaced what would have been an `error` (for example a preempted pod whose workspace did not survive). They receive it with status `ERROR`, as they would have without the halt.
 
 Each subscriber, including the creator, receives one notification per halt.
+
+#### Notification Delivery Retries
+
+If a notification cannot be delivered to a subscriber agent (for example because its Runtime Broker is not connected), it is not marked as sent. The Hub tries again on a sweep about every 5 minutes, and again when the Runtime Broker reconnects, for up to 24 hours after the notification was created. Each notification records its number of delivery attempts (`dispatchAttempts`) and an outcome (`dispatchOutcome`): `delivered`, or `failed` once the 24 hours have passed or the subscription, subscriber or watched agent is gone. The outcome is empty while delivery is still pending. A subscriber agent that has no Runtime Broker is not attempted, so its notification stays pending and does not reach the 24-hour limit.
 
 :::tip[Project-Scoped Message Isolation]
 When using slug-based query paths or addressing agents via `agent:<name>` (e.g., `scion message agent:<name>`), Scion strictly scopes all message queries and deliveries by the active `ProjectID`. This ensures that even if different projects contain agents with identical names or slugs, messages are completely isolated within each project and never leak across project boundaries.

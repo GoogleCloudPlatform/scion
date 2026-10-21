@@ -50,7 +50,10 @@ func TestCapabilities_RegistrationMatchesHeartbeat(t *testing.T) {
 		"nil":    nil,
 	} {
 		t.Run(name, func(t *testing.T) {
-			heartbeat := runtimebroker.StaticCapabilities(rt)
+			// The node image registry is registered as the heartbeat
+			// reports it (ptone/scion#3916).
+			t.Setenv("SCION_IMAGE_REGISTRY", "node.example/scion")
+			heartbeat := runtimebroker.StaticCapabilities(rt, "node.example/scion")
 			registered := flatInstanceCapabilities(rt)
 			names := runtimebroker.StaticCapabilityNames(rt)
 
@@ -67,6 +70,11 @@ func TestCapabilities_RegistrationMatchesHeartbeat(t *testing.T) {
 					continue
 				}
 				require.True(t, stored.IsValid(), "store.BrokerCapabilities has no %s", f.Name)
+				if f.Type.Kind() == reflect.String {
+					// A node configuration value, not a capability name.
+					assert.Equal(t, hv.Field(i).String(), stored.String(), "embedded registration and heartbeat disagree on %s", f.Name)
+					continue
+				}
 				assert.Equal(t, hv.Field(i).Bool(), stored.Bool(), "embedded registration and heartbeat disagree on %s", f.Name)
 				if f.Name == "StartsInFlight" {
 					continue // reported with the heartbeat's starts-in-flight list, not a static capability

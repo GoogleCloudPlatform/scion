@@ -26,6 +26,7 @@ import { customElement, state } from 'lit/decorators.js';
 import { keyed } from 'lit/directives/keyed.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { getPublicSettings } from '../../client/server-feature-flags.js';
 import { navigateTo } from '../../client/navigation.js';
 import { runAgentDelete, lifecycleActionErrorMessage } from '../../client/agent-delete.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
@@ -818,18 +819,14 @@ export class ScionPageAgentConfigure extends LitElement {
     this.error = null;
 
     try {
-      const [agentRes, settingsRes] = await Promise.all([
+      const [agentRes, settings] = await Promise.all([
         apiFetch(`/api/v1/agents/${this.agentId}`),
-        apiFetch('/api/v1/settings/public'),
+        getPublicSettings(),
       ]);
 
-      if (settingsRes.ok) {
-        const data = (await settingsRes.json()) as {
-          telemetryEnabled?: boolean;
-          autoExposePortsEnabled?: boolean;
-        };
-        this.globalTelemetryDefault = data.telemetryEnabled ?? false;
-        this.globalAutoExposePortsDefault = data.autoExposePortsEnabled ?? false;
+      if (settings) {
+        this.globalTelemetryDefault = settings.telemetryEnabled ?? false;
+        this.globalAutoExposePortsDefault = settings.autoExposePortsEnabled ?? false;
       }
 
       if (!agentRes.ok) {

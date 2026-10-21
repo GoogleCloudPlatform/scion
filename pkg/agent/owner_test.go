@@ -108,7 +108,7 @@ func TestOwner_UnresolvedLabelledObjectIsNotOwned(t *testing.T) {
 		}, nil
 	}}
 	m := NewManager(rt).(*AgentManager)
-	m.SetOwner(OwnerScope{RuntimeBrokerID: "broker-a", EntryUnresolved: func(l map[string]string) bool { return l["agent_id"] == "agent-1" }})
+	m.SetOwner(OwnerScope{RuntimeBrokerID: "broker-a", EntryUnresolved: func(l map[string]string, key func(string) string) bool { return l[key("agent_id")] == "agent-1" }})
 	owned, err := m.listRuntime(context.Background(), nil)
 	require.NoError(t, err)
 	require.Len(t, owned, 1, "an object of a conflicting key is not owned even with this instance's label")

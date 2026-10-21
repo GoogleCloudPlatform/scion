@@ -49,15 +49,9 @@ func TestCreateAndGetTemplate(t *testing.T) {
 		Name:        "claude",
 		Slug:        "claude",
 		Harness:     "claude",
-		Image:       "img:latest",
 		Scope:       store.TemplateScopeGlobal,
 		ContentHash: "abc123",
-		Config: &store.TemplateConfig{
-			Harness: "claude",
-			Image:   "img:latest",
-			Env:     map[string]string{"FOO": "bar"},
-		},
-		Files: []store.TemplateFile{{Path: "home/.bashrc", Size: 10, Hash: "h"}},
+		Files:       []store.TemplateFile{{Path: "home/.bashrc", Size: 10, Hash: "h"}},
 	}
 	require.NoError(t, ts.CreateTemplate(ctx, tmpl))
 	assert.Equal(t, store.TemplateStatusActive, tmpl.Status, "empty status defaults to active")
@@ -67,8 +61,6 @@ func TestCreateAndGetTemplate(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "claude", got.Name)
 	assert.Equal(t, "abc123", got.ContentHash)
-	require.NotNil(t, got.Config)
-	assert.Equal(t, "bar", got.Config.Env["FOO"])
 	require.Len(t, got.Files, 1)
 	assert.Equal(t, "home/.bashrc", got.Files[0].Path)
 }
@@ -188,15 +180,12 @@ func TestUpdateTemplate(t *testing.T) {
 
 	tmpl.Name = "new"
 	tmpl.Status = store.TemplateStatusArchived
-	tmpl.Config = &store.TemplateConfig{Model: "opus"}
 	require.NoError(t, ts.UpdateTemplate(ctx, tmpl))
 
 	got, err := ts.GetTemplate(ctx, tmpl.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "new", got.Name)
 	assert.Equal(t, store.TemplateStatusArchived, got.Status)
-	require.NotNil(t, got.Config)
-	assert.Equal(t, "opus", got.Config.Model)
 }
 
 // TestTemplateAgentConfigRoundTrip covers the derived agent_config column
@@ -257,7 +246,7 @@ func TestTemplateAgentConfigRoundTrip(t *testing.T) {
 
 // TestSetTemplateAgentConfig: the snapshot backfill writes only agent_config,
 // only while the row has none and still matches the content hash and
-// layout, and leaves every other column (Updated, Status, Config) as stored
+// layout, and leaves every other column (Updated, Status) as stored
 // (ptone/scion#4222).
 func TestSetTemplateAgentConfig(t *testing.T) {
 	ts := newTestTemplateStore(t)
@@ -267,7 +256,6 @@ func TestSetTemplateAgentConfig(t *testing.T) {
 		ID: uuid.New().String(), Name: "bf", Slug: "bf", Harness: "claude",
 		Scope: store.TemplateScopeGlobal, Status: store.TemplateStatusActive,
 		ContentHash: "hash-1", Layout: store.TemplateLayoutBlobs,
-		Config: &store.TemplateConfig{Model: "row-model"},
 	}
 	require.NoError(t, ts.CreateTemplate(ctx, tmpl))
 	before, err := ts.GetTemplate(ctx, tmpl.ID)
@@ -293,7 +281,6 @@ func TestSetTemplateAgentConfig(t *testing.T) {
 	assert.Equal(t, "snap", got.AgentConfig.Model)
 	assert.True(t, before.Updated.Equal(got.Updated), "Updated is kept")
 	assert.Equal(t, before.Status, got.Status)
-	assert.Equal(t, before.Config, got.Config)
 	assert.Equal(t, before.ContentHash, got.ContentHash)
 
 	ok, err = ts.SetTemplateAgentConfig(ctx, tmpl.ID, &api.ScionConfig{Model: "second"}, want)
@@ -841,7 +828,7 @@ func TestUpdateTemplateContent_LeavesMetadataColumns(t *testing.T) {
 	ownerID := uuid.New().String()
 	tmpl := &store.Template{
 		ID: uuid.New().String(), Name: "orig", Slug: "orig", DisplayName: "Orig", Description: "orig desc",
-		Image: "img:1", BaseTemplate: "base-1", OwnerID: ownerID, Harness: "claude",
+		BaseTemplate: "base-1", OwnerID: ownerID, Harness: "claude",
 		Scope: store.TemplateScopeGlobal, Status: store.TemplateStatusActive, ContentHash: "sha256:h0",
 	}
 	require.NoError(t, ts.CreateTemplate(ctx, tmpl))
@@ -851,7 +838,7 @@ func TestUpdateTemplateContent_LeavesMetadataColumns(t *testing.T) {
 	meta, err := ts.GetTemplate(ctx, tmpl.ID)
 	require.NoError(t, err)
 	meta.Name, meta.Slug, meta.DisplayName, meta.Description = "renamed", "renamed", "Renamed", "new desc"
-	meta.Image, meta.BaseTemplate = "img:2", "base-2"
+	meta.BaseTemplate = "base-2"
 	require.NoError(t, ts.UpdateTemplate(ctx, meta))
 
 	commitRead.Files = []store.TemplateFile{{Path: "a.md", Size: 1, Hash: "sha256:a"}}
@@ -870,43 +857,6 @@ func TestUpdateTemplateContent_LeavesMetadataColumns(t *testing.T) {
 	assert.Equal(t, "renamed", got.Slug)
 	assert.Equal(t, "Renamed", got.DisplayName)
 	assert.Equal(t, "new desc", got.Description)
-	assert.Equal(t, "img:2", got.Image)
 	assert.Equal(t, "base-2", got.BaseTemplate)
 	assert.Equal(t, ownerID, got.OwnerID)
-}
-
-// TestUpdateTemplateContent_LeavesConfig: a commit never writes the stored
-// Config (ptone/scion#4223). A commit computed from a row that carries a
-// different, or no, Config leaves the stored value as it was.
-func TestUpdateTemplateContent_LeavesConfig(t *testing.T) {
-	ts := newTestTemplateStore(t)
-	ctx := context.Background()
-
-	stored := &store.TemplateConfig{Model: "stored-model", Env: map[string]string{"K": "v"}}
-	tmpl := &store.Template{
-		ID: uuid.New().String(), Name: "cfg", Slug: "cfg", Harness: "claude", Scope: store.TemplateScopeGlobal,
-		Status: store.TemplateStatusPending, Config: stored,
-	}
-	require.NoError(t, ts.CreateTemplate(ctx, tmpl))
-
-	enabled := true
-	commit := *tmpl
-	commit.Config = &store.TemplateConfig{Model: "commit-model", Telemetry: &api.TelemetryConfig{Enabled: &enabled}}
-	commit.Files = []store.TemplateFile{{Path: "a.md", Size: 1, Hash: "sha256:a"}}
-	commit.ContentHash = "sha256:h1"
-	commit.Status = store.TemplateStatusActive
-	require.NoError(t, ts.UpdateTemplateContent(ctx, &commit, store.TemplateContentPrecondition{}))
-
-	got, err := ts.GetTemplate(ctx, tmpl.ID)
-	require.NoError(t, err)
-	assert.Equal(t, "sha256:h1", got.ContentHash, "precondition: the commit wrote its columns")
-	assert.Equal(t, stored, got.Config, "a commit must not write Config")
-
-	cleared := *got
-	cleared.Config = nil
-	cleared.ContentHash = "sha256:h2"
-	require.NoError(t, ts.UpdateTemplateContent(ctx, &cleared, store.TemplateContentPrecondition{ContentHash: "sha256:h1"}))
-	got, err = ts.GetTemplate(ctx, tmpl.ID)
-	require.NoError(t, err)
-	assert.Equal(t, stored, got.Config, "a commit from a row without Config must not clear it")
 }

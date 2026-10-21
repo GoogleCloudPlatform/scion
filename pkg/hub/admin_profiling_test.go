@@ -22,7 +22,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
-	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -158,20 +157,6 @@ func renderShell(t *testing.T, provider ProfilingSettingsProvider, user *store.U
 	body, err := io.ReadAll(rec.Result().Body)
 	require.NoError(t, err)
 	return string(body)
-}
-
-// shellInitialData returns the raw fields of the shell's initial data.
-func shellInitialData(t *testing.T, html string) map[string]json.RawMessage {
-	t.Helper()
-	const open = `<script id="__SCION_DATA__" type="application/json">`
-	start := strings.Index(html, open)
-	require.GreaterOrEqual(t, start, 0, "no initial data in the shell")
-	start += len(open)
-	end := strings.Index(html[start:], "</script>")
-	require.Greater(t, end, 0)
-	var fields map[string]json.RawMessage
-	require.NoError(t, json.Unmarshal([]byte(html[start:start+end]), &fields))
-	return fields
 }
 
 // TestShellReadinessMarks_Hydration: the shell's initial data carries

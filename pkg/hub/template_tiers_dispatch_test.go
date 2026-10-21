@@ -20,9 +20,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -38,18 +40,58 @@ import (
 )
 
 // Tests for ptone/scion#4222 (TS-2b): the hub stops writing its defaults and
-// the template's config into the agent's inline config.
+// the template's config into the agent's inline config. TS-3b
+// (ptone/scion#4224) removed the template row's config and image and the
+// legacy inline telemetry path: every broker gets the telemetry tiers.
 
 const (
 	tiersHubEndpoint  = "https://hub-otel.example.com"
-	tiersRowEndpoint  = "https://row-otel.example.com"
 	tiersSnapEndpoint = "https://snap-otel.example.com"
 	tiersReqEndpoint  = "https://req-otel.example.com"
 )
 
-// tiersTemplateEnvKeys are the env keys the fixture template sets, in its
-// row config and in its snapshot. None may reach an agent through the hub.
-var tiersTemplateEnvKeys = []string{"TEMPLATE_PLAIN", "SCION_ROW_KEY", "OTEL_ROW", "SNAP_PLAIN", "SCION_SNAP_KEY", "OTEL_SNAP"}
+// tiersTemplateEnvKeys are the env keys the fixture template's snapshot
+// sets. None may reach an agent through the hub.
+var tiersTemplateEnvKeys = []string{"SNAP_PLAIN", "SCION_SNAP_KEY", "OTEL_SNAP"}
+
+// tiersBroker is the capability state of the fixture's broker.
+type tiersBroker int
+
+const (
+	// tiersCapable: the stored capabilities report templateTiers.
+	tiersCapable tiersBroker = iota
+	// tiersKnownFalse: capabilities are stored, without templateTiers (an
+	// older broker's heartbeat).
+	tiersKnownFalse
+	// tiersUnknown: no capabilities are stored.
+	tiersUnknown
+)
+
+// tiersBrokers lists every broker capability state.
+var tiersBrokers = []tiersBroker{tiersCapable, tiersKnownFalse, tiersUnknown}
+
+func (b tiersBroker) String() string {
+	switch b {
+	case tiersCapable:
+		return "templateTiers broker"
+	case tiersKnownFalse:
+		return "broker without templateTiers"
+	default:
+		return "broker with unknown capabilities"
+	}
+}
+
+// caps returns the stored capabilities for b.
+func (b tiersBroker) caps() *store.BrokerCapabilities {
+	switch b {
+	case tiersCapable:
+		return &store.BrokerCapabilities{TemplateTiers: true}
+	case tiersKnownFalse:
+		return &store.BrokerCapabilities{Sync: true}
+	default:
+		return nil
+	}
+}
 
 type tiersFixture struct {
 	srv      *Server
@@ -61,9 +103,9 @@ type tiersFixture struct {
 }
 
 // newTiersFixture builds a hub with a hub telemetry default, a project whose
-// telemetry policy is off, a broker with or without templateTiers, and a
-// template whose row and snapshot both set image, telemetry and env.
-func newTiersFixture(t *testing.T, templateTiers bool) *tiersFixture {
+// telemetry policy is off, a broker in the given capability state, and a
+// template whose snapshot sets image, telemetry and env.
+func newTiersFixture(t *testing.T, brokerCaps tiersBroker) *tiersFixture {
 	t.Helper()
 	srv, s := testServer(t)
 	ctx := t.Context()
@@ -82,7 +124,7 @@ func newTiersFixture(t *testing.T, templateTiers bool) *tiersFixture {
 	broker := &store.RuntimeBroker{
 		ID: tid("tiers-broker"), Name: "tiers-broker", Slug: "tiers-broker",
 		Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline,
-		Capabilities: &store.BrokerCapabilities{TemplateTiers: templateTiers},
+		Capabilities: brokerCaps.caps(),
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
@@ -94,13 +136,6 @@ func newTiersFixture(t *testing.T, templateTiers bool) *tiersFixture {
 		ID: tid("tiers-template"), Name: "Tiers Template", Slug: "tiers-template",
 		Harness: "claude", Scope: store.TemplateScopeGlobal, Status: store.TemplateStatusActive,
 		ContentHash: "tiers-template-hash",
-		Image:       "row-top-image:v1",
-		Config: &store.TemplateConfig{
-			Image:     "row-image:v1",
-			Env:       map[string]string{"TEMPLATE_PLAIN": "row", "SCION_ROW_KEY": "row", "OTEL_ROW": "row"},
-			Telemetry: &api.TelemetryConfig{Enabled: &on, Cloud: &api.TelemetryCloudConfig{Endpoint: tiersRowEndpoint}},
-			Secrets:   []api.RequiredSecret{{Key: "ROW_SECRET"}},
-		},
 		AgentConfig: &api.ScionConfig{
 			Image:     "snap-image:v1",
 			Env:       map[string]string{"SNAP_PLAIN": "snap", "SCION_SNAP_KEY": "snap", "OTEL_SNAP": "snap"},
@@ -130,22 +165,15 @@ func (f *tiersFixture) newAgent(t *testing.T, ctx context.Context, id string, re
 	return agent
 }
 
-func tiersName(templateTiers bool) string {
-	if templateTiers {
-		return "templateTiers broker"
-	}
-	return "legacy broker"
-}
-
 // TestTemplateTiers_TemplateEnvironmentKeysNeverDispatched is amendment
-// acceptance (a): for capable and legacy brokers, a template whose row and
-// snapshot set image, telemetry and reserved env produces an agent whose
-// AppliedConfig.Image, AppliedConfig.Env and InlineConfig.Telemetry carry
-// none of them, and so does the dispatch payload.
+// acceptance (a): for every broker, a template whose snapshot sets image,
+// telemetry and reserved env produces an agent whose AppliedConfig.Image,
+// AppliedConfig.Env and InlineConfig.Telemetry carry none of them, and so
+// does the dispatch payload.
 func TestTemplateTiers_TemplateEnvironmentKeysNeverDispatched(t *testing.T) {
-	for _, tiers := range []bool{true, false} {
-		t.Run(tiersName(tiers), func(t *testing.T) {
-			f := newTiersFixture(t, tiers)
+	for _, b := range tiersBrokers {
+		t.Run(b.String(), func(t *testing.T) {
+			f := newTiersFixture(t, b)
 			ctx := t.Context()
 			agent := f.newAgent(t, ctx, "env-keys", nil)
 
@@ -167,59 +195,42 @@ func TestTemplateTiers_TemplateEnvironmentKeysNeverDispatched(t *testing.T) {
 			}
 			if req.InlineConfig != nil {
 				assert.Empty(t, req.InlineConfig.Image)
-				if tel := req.InlineConfig.Telemetry; tel != nil && tel.Cloud != nil {
-					assert.NotEqual(t, tiersRowEndpoint, tel.Cloud.Endpoint, "row template telemetry never dispatched")
-					assert.NotEqual(t, tiersSnapEndpoint, tel.Cloud.Endpoint, "snapshot template telemetry never dispatched")
-				}
+				assert.Nil(t, req.InlineConfig.Telemetry, "no inline telemetry is ever dispatched")
 			}
 		})
 	}
 }
 
-// TestTemplateTiers_HubTelemetryDelivery: a templateTiers broker gets the
-// hub default in HubAgentDefaults.Telemetry and the project policy in
-// TelemetryPolicy, with no inline telemetry; a legacy broker gets the old
-// payload, the hub default inline with the policy written over Enabled.
+// TestTemplateTiers_HubTelemetryDelivery is ptone/scion#4224 acceptance 4
+// (dispatch payload): every broker, whether it reports templateTiers, is
+// known not to, or has unknown capabilities, gets the hub default in
+// HubAgentDefaults.Telemetry and the project policy in TelemetryPolicy, and
+// no InlineConfig.Telemetry. Mutant (b), a templateTiers gate kept in
+// wireTelemetry, fails the two non-capable subtests.
 func TestTemplateTiers_HubTelemetryDelivery(t *testing.T) {
-	t.Run("templateTiers broker", func(t *testing.T) {
-		f := newTiersFixture(t, true)
-		ctx := t.Context()
-		req, err := f.d.buildCreateRequest(ctx, f.newAgent(t, ctx, "tiers-capable", nil), "test")
-		require.NoError(t, err)
-		if req.InlineConfig != nil {
-			assert.Nil(t, req.InlineConfig.Telemetry, "the hub writes nothing into InlineConfig for a capable broker")
-		}
-		require.NotNil(t, req.Config.HubAgentDefaults)
-		require.NotNil(t, req.Config.HubAgentDefaults.Telemetry)
-		require.NotNil(t, req.Config.HubAgentDefaults.Telemetry.Cloud)
-		assert.Equal(t, tiersHubEndpoint, req.Config.HubAgentDefaults.Telemetry.Cloud.Endpoint)
-		require.NotNil(t, req.Config.TelemetryPolicy, "the project annotation travels as TelemetryPolicy")
-		assert.False(t, *req.Config.TelemetryPolicy)
-		assert.NotContains(t, req.ResolvedEnv, envTelemetryEnabled, "no requester flag without request telemetry")
-	})
-	t.Run("legacy broker", func(t *testing.T) {
-		f := newTiersFixture(t, false)
-		ctx := t.Context()
-		req, err := f.d.buildCreateRequest(ctx, f.newAgent(t, ctx, "tiers-legacy", nil), "test")
-		require.NoError(t, err)
-		require.NotNil(t, req.InlineConfig)
-		tel := req.InlineConfig.Telemetry
-		require.NotNil(t, tel, "a legacy broker still gets the hub default inline")
-		require.NotNil(t, tel.Cloud)
-		assert.Equal(t, tiersHubEndpoint, tel.Cloud.Endpoint)
-		require.NotNil(t, tel.Enabled)
-		assert.False(t, *tel.Enabled, "the project policy is still written inline for a legacy broker")
-		if req.Config.HubAgentDefaults != nil {
-			assert.Nil(t, req.Config.HubAgentDefaults.Telemetry)
-		}
-		assert.Nil(t, req.Config.TelemetryPolicy)
-	})
+	for _, b := range tiersBrokers {
+		t.Run(b.String(), func(t *testing.T) {
+			f := newTiersFixture(t, b)
+			ctx := t.Context()
+			req, err := f.d.buildCreateRequest(ctx, f.newAgent(t, ctx, "tiers-delivery", nil), "test")
+			require.NoError(t, err)
+			if req.InlineConfig != nil {
+				assert.Nil(t, req.InlineConfig.Telemetry, "the hub never sends inline telemetry")
+			}
+			require.NotNil(t, req.Config.HubAgentDefaults)
+			require.NotNil(t, req.Config.HubAgentDefaults.Telemetry, "the hub default always travels as a tier")
+			require.NotNil(t, req.Config.HubAgentDefaults.Telemetry.Cloud)
+			assert.Equal(t, tiersHubEndpoint, req.Config.HubAgentDefaults.Telemetry.Cloud.Endpoint)
+			require.NotNil(t, req.Config.TelemetryPolicy, "the project annotation always travels as TelemetryPolicy")
+			assert.False(t, *req.Config.TelemetryPolicy)
+			assert.NotContains(t, req.ResolvedEnv, envTelemetryEnabled, "no requester flag without request telemetry")
+		})
+	}
 }
 
 // TestTemplateTiers_RequesterTelemetry: requester telemetry is on/off only
-// for every broker, and create warns about the dropped fields. A
-// templateTiers broker gets the on/off as SCION_TELEMETRY_ENABLED; a legacy
-// broker gets it inline, over the hub default and under the project policy.
+// for every broker, and create warns about the dropped fields. Every broker
+// gets the on/off as SCION_TELEMETRY_ENABLED (acceptance 4), never inline.
 func TestTemplateTiers_RequesterTelemetry(t *testing.T) {
 	reqCfg := func(enabled bool) *api.ScionConfig {
 		return &api.ScionConfig{Telemetry: &api.TelemetryConfig{Enabled: &enabled, Cloud: &api.TelemetryCloudConfig{Endpoint: tiersReqEndpoint}}}
@@ -230,57 +241,30 @@ func TestTemplateTiers_RequesterTelemetry(t *testing.T) {
 		defer w.mu.Unlock()
 		assert.Contains(t, strings.Join(w.list, "\n"), "telemetry cloud", "the dropped fields are named in a create warning")
 	}
-	t.Run("templateTiers broker", func(t *testing.T) {
-		f := newTiersFixture(t, true)
-		ctx, warnings := withDispatchWarnings(t.Context())
-		agent := f.newAgent(t, ctx, "req-tel-capable", reqCfg(true))
-		req, err := f.d.buildCreateRequest(ctx, agent, "test")
-		require.NoError(t, err)
-		if req.InlineConfig != nil {
-			assert.Nil(t, req.InlineConfig.Telemetry)
+	for _, b := range tiersBrokers {
+		for _, enabled := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/enabled=%t", b, enabled), func(t *testing.T) {
+				f := newTiersFixture(t, b)
+				ctx, warnings := withDispatchWarnings(t.Context())
+				agent := f.newAgent(t, ctx, "req-tel", reqCfg(enabled))
+				req, err := f.d.buildCreateRequest(ctx, agent, "test")
+				require.NoError(t, err)
+				if req.InlineConfig != nil {
+					assert.Nil(t, req.InlineConfig.Telemetry, "the requester's telemetry is never sent inline")
+				}
+				assert.Equal(t, strconv.FormatBool(enabled), req.ResolvedEnv[envTelemetryEnabled], "the on/off arrives as SCION_TELEMETRY_ENABLED")
+				require.NotNil(t, req.Config.TelemetryPolicy, "the project policy still travels as its own tier")
+				warned(t, warnings)
+			})
 		}
-		assert.Equal(t, "true", req.ResolvedEnv[envTelemetryEnabled], "enabled arrives as SCION_TELEMETRY_ENABLED")
-		warned(t, warnings)
-	})
-	t.Run("legacy broker, project policy over the requester", func(t *testing.T) {
-		f := newTiersFixture(t, false)
-		ctx, warnings := withDispatchWarnings(t.Context())
-		agent := f.newAgent(t, ctx, "req-tel-legacy", reqCfg(true))
-		req, err := f.d.buildCreateRequest(ctx, agent, "test")
-		require.NoError(t, err)
-		require.NotNil(t, req.InlineConfig)
-		tel := req.InlineConfig.Telemetry
-		require.NotNil(t, tel)
-		require.NotNil(t, tel.Cloud)
-		assert.Equal(t, tiersHubEndpoint, tel.Cloud.Endpoint, "the requester's other fields are dropped; the hub default fills them")
-		require.NotNil(t, tel.Enabled)
-		assert.False(t, *tel.Enabled, "the project policy beats the requester's on")
-		assert.NotContains(t, req.ResolvedEnv, envTelemetryEnabled)
-		warned(t, warnings)
-	})
-	t.Run("legacy broker, requester over the hub default", func(t *testing.T) {
-		f := newTiersFixture(t, false)
-		ctx, warnings := withDispatchWarnings(t.Context())
-		f.project.Annotations = map[string]string{}
-		require.NoError(t, f.s.UpdateProject(ctx, f.project))
-		agent := f.newAgent(t, ctx, "req-tel-legacy-nopolicy", reqCfg(false))
-		req, err := f.d.buildCreateRequest(ctx, agent, "test")
-		require.NoError(t, err)
-		require.NotNil(t, req.InlineConfig)
-		tel := req.InlineConfig.Telemetry
-		require.NotNil(t, tel)
-		require.NotNil(t, tel.Cloud)
-		assert.Equal(t, tiersHubEndpoint, tel.Cloud.Endpoint)
-		require.NotNil(t, tel.Enabled)
-		assert.False(t, *tel.Enabled, "the requester's off beats the hub default's on")
-		warned(t, warnings)
-	})
+	}
 }
 
 // TestTemplateTiers_RestartDoesNotResendStoredHubCopy: an agent created by
 // an older hub has a hub-default copy in its stored InlineConfig.Telemetry.
-// A start rebuilds inline telemetry from CreateInputs instead, so the stale
-// copy never reaches the broker at top tier; a restart carries the tiers.
+// A start never resends it (start InlineConfig carries no telemetry,
+// acceptance 5) and a restart sends no inline config; both carry the tiers,
+// for every broker.
 func TestTemplateTiers_RestartDoesNotResendStoredHubCopy(t *testing.T) {
 	staleAgent := func(f *tiersFixture) *store.Agent {
 		on := true
@@ -288,55 +272,74 @@ func TestTemplateTiers_RestartDoesNotResendStoredHubCopy(t *testing.T) {
 			ID: tid("pre-change"), Name: "pre-change", Slug: "pre-change", ProjectID: f.project.ID,
 			OwnerID: "dev@localhost", RuntimeBrokerID: tid("tiers-broker"),
 			AppliedConfig: &store.AgentAppliedConfig{
-				InlineConfig: &api.ScionConfig{Telemetry: &api.TelemetryConfig{
+				InlineConfig: &api.ScionConfig{Model: "kept-model", Telemetry: &api.TelemetryConfig{
 					Enabled: &on, Cloud: &api.TelemetryCloudConfig{Endpoint: "https://stale-hub.example.com"},
 				}},
 				CreateInputs: &store.AgentCreateInputs{},
 			},
 		}
 	}
-	t.Run("templateTiers broker", func(t *testing.T) {
-		f := newTiersFixture(t, true)
-		ctx := context.Background()
-		ag := staleAgent(f)
-		require.NoError(t, f.d.DispatchAgentStart(ctx, ag, "", false))
-		if f.client.lastInlineConfig != nil {
-			assert.Nil(t, f.client.lastInlineConfig.Telemetry, "the stored hub copy is not resent")
-		}
-		require.NotNil(t, f.client.lastStartExtras.HubAgentDefaults)
-		require.NotNil(t, f.client.lastStartExtras.HubAgentDefaults.Telemetry)
-		assert.Equal(t, tiersHubEndpoint, f.client.lastStartExtras.HubAgentDefaults.Telemetry.Cloud.Endpoint)
-		require.NotNil(t, f.client.lastStartExtras.TelemetryPolicy)
-		assert.False(t, *f.client.lastStartExtras.TelemetryPolicy)
+	for _, b := range tiersBrokers {
+		t.Run(b.String(), func(t *testing.T) {
+			f := newTiersFixture(t, b)
+			ctx := context.Background()
+			ag := staleAgent(f)
+			require.NoError(t, f.d.DispatchAgentStart(ctx, ag, "", false))
+			require.NotNil(t, f.client.lastInlineConfig, "the stored inline config is still sent on start")
+			assert.Equal(t, "kept-model", f.client.lastInlineConfig.Model)
+			assert.Nil(t, f.client.lastInlineConfig.Telemetry, "start InlineConfig never carries telemetry")
+			assert.Equal(t, "https://stale-hub.example.com", ag.AppliedConfig.InlineConfig.Telemetry.Cloud.Endpoint,
+				"the agent record is not modified by dispatch")
+			require.NotNil(t, f.client.lastStartExtras.HubAgentDefaults)
+			require.NotNil(t, f.client.lastStartExtras.HubAgentDefaults.Telemetry)
+			assert.Equal(t, tiersHubEndpoint, f.client.lastStartExtras.HubAgentDefaults.Telemetry.Cloud.Endpoint)
+			require.NotNil(t, f.client.lastStartExtras.TelemetryPolicy)
+			assert.False(t, *f.client.lastStartExtras.TelemetryPolicy)
 
-		require.NoError(t, f.d.DispatchAgentRestart(ctx, ag))
-		require.NotNil(t, f.client.lastRestartExtras.HubAgentDefaults)
-		require.NotNil(t, f.client.lastRestartExtras.HubAgentDefaults.Telemetry)
-		assert.Equal(t, tiersHubEndpoint, f.client.lastRestartExtras.HubAgentDefaults.Telemetry.Cloud.Endpoint)
-		require.NotNil(t, f.client.lastRestartExtras.TelemetryPolicy)
-		assert.False(t, *f.client.lastRestartExtras.TelemetryPolicy)
-	})
-	t.Run("legacy broker", func(t *testing.T) {
-		f := newTiersFixture(t, false)
-		ctx := context.Background()
-		ag := staleAgent(f)
-		require.NoError(t, f.d.DispatchAgentStart(ctx, ag, "", false))
-		require.NotNil(t, f.client.lastInlineConfig)
-		tel := f.client.lastInlineConfig.Telemetry
-		require.NotNil(t, tel)
-		assert.Equal(t, tiersHubEndpoint, tel.Cloud.Endpoint, "the current hub default, not the stored copy")
-		require.NotNil(t, tel.Enabled)
-		assert.False(t, *tel.Enabled)
-		assert.Equal(t, "https://stale-hub.example.com", ag.AppliedConfig.InlineConfig.Telemetry.Cloud.Endpoint,
-			"the agent record is not modified by dispatch")
-		assert.Nil(t, f.client.lastStartExtras.TelemetryPolicy)
+			require.NoError(t, f.d.DispatchAgentRestart(ctx, ag))
+			require.NotNil(t, f.client.lastRestartExtras.HubAgentDefaults)
+			require.NotNil(t, f.client.lastRestartExtras.HubAgentDefaults.Telemetry)
+			assert.Equal(t, tiersHubEndpoint, f.client.lastRestartExtras.HubAgentDefaults.Telemetry.Cloud.Endpoint)
+			require.NotNil(t, f.client.lastRestartExtras.TelemetryPolicy)
+			assert.False(t, *f.client.lastRestartExtras.TelemetryPolicy)
+		})
+	}
+}
 
-		require.NoError(t, f.d.DispatchAgentRestart(ctx, ag))
-		assert.Nil(t, f.client.lastRestartExtras.TelemetryPolicy)
-		if h := f.client.lastRestartExtras.HubAgentDefaults; h != nil {
-			assert.Nil(t, h.Telemetry)
-		}
-	})
+// TestBrokerHeartbeat_WarnsOnceWithoutTemplateTiers is ptone/scion#4224
+// acceptance 4 (heartbeat): the hub logs the upgrade WARN once per broker
+// per process for a heartbeat whose capabilities lack templateTiers, and not
+// for one that reports it or for a heartbeat without capabilities.
+func TestBrokerHeartbeat_WarnsOnceWithoutTemplateTiers(t *testing.T) {
+	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
+	logs := &syncBuffer{}
+	srv.agentLifecycleLog = slog.New(slog.NewTextHandler(logs, nil))
+	ctx := context.Background()
+	newBroker := func(name string) *store.RuntimeBroker {
+		b := &store.RuntimeBroker{ID: tid(name), Name: name, Slug: name, Status: store.BrokerStatusOnline}
+		require.NoError(t, s.CreateRuntimeBroker(ctx, b))
+		return b
+	}
+	old, upgraded, silent := newBroker("tiers-old-broker"), newBroker("tiers-new-broker"), newBroker("tiers-silent-broker")
+	send := func(b *store.RuntimeBroker, caps *store.BrokerCapabilities) {
+		t.Helper()
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/runtime-brokers/"+b.ID+"/heartbeat",
+			brokerHeartbeatRequest{Status: "online", Capabilities: caps})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	}
+	for range 3 {
+		send(old, &store.BrokerCapabilities{Sync: true})
+		send(upgraded, &store.BrokerCapabilities{Sync: true, TemplateTiers: true})
+		send(silent, nil)
+	}
+
+	out := logs.String()
+	assert.Equal(t, 1, strings.Count(out, brokerWithoutTemplateTiersWarning("tiers-old-broker")), "once per broker per process: %s", out)
+	assert.Equal(t, 1, strings.Count(out, "does not report the templateTiers capability"), "only the old broker is warned about: %s", out)
+	assert.Contains(t, out, "level=WARN")
+	assert.Contains(t, brokerWithoutTemplateTiersWarning("b1"),
+		"runtime broker b1 does not report the templateTiers capability; hub telemetry defaults and project telemetry policy are not applied to its agents. Upgrade the broker.")
 }
 
 // TestTemplateTiers_ModelOrder: request > project > template (snapshot) >
@@ -344,17 +347,16 @@ func TestTemplateTiers_RestartDoesNotResendStoredHubCopy(t *testing.T) {
 // the model unset.
 func TestTemplateTiers_ModelOrder(t *testing.T) {
 	cases := []struct {
-		name, request, project, snapshot, row, hub, want string
+		name, request, project, snapshot, hub, want string
 	}{
 		{name: "request beats all", request: "req-model", project: "project-model", snapshot: "snap-model", hub: "hub-model", want: "req-model"},
 		{name: "project default beats template", project: "project-model", snapshot: "snap-model", hub: "hub-model", want: "project-model"},
 		{name: "template beats hub default", snapshot: "snap-model", hub: "hub-model", want: "snap-model"},
 		{name: "hub default when nothing else", hub: "hub-model", want: "hub-model"},
-		{name: "row config model is not a template source", row: "row-model", hub: "hub-model", want: "hub-model"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newTiersFixture(t, true)
+			f := newTiersFixture(t, tiersCapable)
 			ctx := t.Context()
 			setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{DefaultModel: tc.hub})
 			f.project.Annotations = map[string]string{}
@@ -362,7 +364,6 @@ func TestTemplateTiers_ModelOrder(t *testing.T) {
 				f.project.Annotations[projectSettingDefaultModel] = tc.project
 			}
 			f.template.AgentConfig = &api.ScionConfig{Model: tc.snapshot}
-			f.template.Config = &store.TemplateConfig{Model: tc.row}
 			var reqCfg *api.ScionConfig
 			if tc.request != "" {
 				reqCfg = &api.ScionConfig{Model: tc.request}
@@ -393,7 +394,7 @@ func TestTemplateTiers_ThinkingLevelOrder(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newTiersFixture(t, true)
+			f := newTiersFixture(t, tiersCapable)
 			setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{DefaultThinkingLevel: tc.hub})
 			f.project.Annotations = map[string]string{}
 			if tc.project != "" {
@@ -421,7 +422,7 @@ func TestTemplateTiers_ThinkingLevelOrder(t *testing.T) {
 // never inline). Thinking level is TestTemplateTiers_ThinkingLevelOrder.
 func TestTemplateTiers_OtherLaddersUnchanged(t *testing.T) {
 	t.Run("harness config: project beats template beats hub", func(t *testing.T) {
-		f := newTiersFixture(t, true)
+		f := newTiersFixture(t, tiersCapable)
 		setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{DefaultHarnessConfig: "hub-hc"})
 		f.template.DefaultHarnessConfig = "template-hc"
 		f.project.Annotations = map[string]string{}
@@ -433,7 +434,7 @@ func TestTemplateTiers_OtherLaddersUnchanged(t *testing.T) {
 		assert.Equal(t, "hub-hc", f.newAgent(t, t.Context(), "hc-hub", nil).AppliedConfig.HarnessConfig)
 	})
 	t.Run("limits: project inline, hub in HubAgentDefaults", func(t *testing.T) {
-		f := newTiersFixture(t, true)
+		f := newTiersFixture(t, tiersCapable)
 		ctx := t.Context()
 		setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{DefaultMaxTurns: 99})
 		f.project.Annotations = map[string]string{projectSettingDefaultMaxTurns: "40"}
@@ -456,9 +457,9 @@ func TestTemplateTiers_OtherLaddersUnchanged(t *testing.T) {
 }
 
 // TestTemplateTiers_RequiredSecretsFromSnapshot: the template's required
-// secrets come from its stripped AgentConfig snapshot, not the row's Config.
+// secrets come from its stripped AgentConfig snapshot.
 func TestTemplateTiers_RequiredSecretsFromSnapshot(t *testing.T) {
-	f := newTiersFixture(t, true)
+	f := newTiersFixture(t, tiersCapable)
 	ctx := t.Context()
 	req, err := f.d.buildCreateRequest(ctx, f.newAgent(t, ctx, "secrets", nil), "test")
 	require.NoError(t, err)
@@ -470,7 +471,7 @@ func TestTemplateTiers_RequiredSecretsFromSnapshot(t *testing.T) {
 // the hub derives from the snapshot exclude environment keys, and the
 // stored snapshot stays a faithful parse.
 func TestTemplateJobConfig_ExcludesEnvironmentKeys(t *testing.T) {
-	f := newTiersFixture(t, true)
+	f := newTiersFixture(t, tiersCapable)
 	jc := f.srv.templateJobConfig(t.Context(), f.template)
 	require.NotNil(t, jc)
 	assert.Empty(t, jc.Image)
@@ -501,16 +502,16 @@ func TestTemplateSkillRefs_FromSnapshot(t *testing.T) {
 }
 
 // TestCreateAgent_MessageModeFromSnapshot: the template's message_mode comes
-// from its snapshot; the row's config.messageMode is not read, and an
+// from its snapshot; without one the default applies, and an
 // invalid snapshot mode is refused.
 func TestCreateAgent_MessageModeFromSnapshot(t *testing.T) {
 	cases := []struct {
-		name, snapshot, row string
-		wantCode            int
-		wantMode            string
+		name, snapshot string
+		wantCode       int
+		wantMode       string
 	}{
-		{name: "snapshot mode applies", snapshot: store.MessageModeLineage, row: store.MessageModeBranch, wantCode: http.StatusCreated, wantMode: store.MessageModeLineage},
-		{name: "row mode is ignored", row: store.MessageModeBranch, wantCode: http.StatusCreated, wantMode: store.MessageModeProject},
+		{name: "snapshot mode applies", snapshot: store.MessageModeLineage, wantCode: http.StatusCreated, wantMode: store.MessageModeLineage},
+		{name: "no snapshot mode: default", wantCode: http.StatusCreated, wantMode: store.MessageModeProject},
 		{name: "invalid snapshot mode refused", snapshot: "bogus", wantCode: http.StatusBadRequest},
 	}
 	for _, tc := range cases {
@@ -520,7 +521,6 @@ func TestCreateAgent_MessageModeFromSnapshot(t *testing.T) {
 			require.NoError(t, s.CreateTemplate(context.Background(), &store.Template{
 				ID: tid("mm-template-" + t.Name()), Name: "mm-tmpl", Slug: "mm-tmpl", Harness: "claude",
 				ContentHash: "d00dfeed", Scope: store.TemplateScopeGlobal, Status: store.TemplateStatusActive,
-				Config:      &store.TemplateConfig{MessageMode: tc.row},
 				AgentConfig: &api.ScionConfig{MessageMode: tc.snapshot},
 			}))
 			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
@@ -709,42 +709,28 @@ func TestTemplateTiers_WireCompatibleWithBroker(t *testing.T) {
 	assert.False(t, ok, "no policy key without a policy")
 }
 
-// TestTelemetryDispatch_Units covers the delivery helpers directly.
+// TestTelemetryDispatch_Units covers the delivery helpers directly: every
+// dispatch sends the tiers and never inline telemetry (ptone/scion#4224).
 func TestTelemetryDispatch_Units(t *testing.T) {
 	on, off := true, false
 	hub := &api.TelemetryConfig{Enabled: &on, Cloud: &api.TelemetryCloudConfig{Endpoint: tiersHubEndpoint}}
 	requester := &api.TelemetryConfig{Enabled: &on, Cloud: &api.TelemetryCloudConfig{Endpoint: tiersReqEndpoint}}
 
-	legacy := telemetryDispatch{hubDefault: hub, policy: &off}
-	tel := legacy.inlineTelemetry()
-	require.NotNil(t, tel)
-	assert.Equal(t, tiersHubEndpoint, tel.Cloud.Endpoint)
-	assert.False(t, *tel.Enabled)
-	assert.True(t, *hub.Enabled, "the hub default is never modified")
-	assert.Nil(t, legacy.telemetryPolicy())
-	assert.Nil(t, legacy.wireTelemetry())
-
-	legacyReq := telemetryDispatch{hubDefault: hub, requester: &api.TelemetryConfig{Enabled: &off, Cloud: &api.TelemetryCloudConfig{Endpoint: tiersReqEndpoint}}}
-	tel = legacyReq.inlineTelemetry()
-	assert.Equal(t, tiersHubEndpoint, tel.Cloud.Endpoint, "the requester's other fields never reach the broker")
-	assert.False(t, *tel.Enabled, "the requester's on/off beats the hub default")
-	assert.True(t, *hub.Enabled, "the hub default is never modified")
-	reqOnly := telemetryDispatch{requester: requester}.inlineTelemetry()
-	require.NotNil(t, reqOnly)
-	assert.Nil(t, reqOnly.Cloud)
-	assert.True(t, *reqOnly.Enabled)
-
-	capable := telemetryDispatch{templateTiers: true, hubDefault: hub, policy: &off, requester: requester}
-	assert.Nil(t, capable.inlineTelemetry())
+	tel := telemetryDispatch{hubDefault: hub, policy: &off, requester: requester}
 	stored := &api.ScionConfig{Model: "m", Telemetry: requester}
-	out := capable.inlineConfig(stored)
-	assert.Nil(t, out.Telemetry)
+	out := tel.inlineConfig(stored)
+	require.NotNil(t, out)
+	assert.Nil(t, out.Telemetry, "inline telemetry is never sent")
 	assert.Equal(t, "m", out.Model)
 	assert.Same(t, requester, stored.Telemetry, "the stored config is never modified")
-	wt := capable.wireTelemetry()
+	assert.Nil(t, tel.inlineConfig(nil), "no stored config, no inline config")
+	assert.Nil(t, telemetryDispatch{}.inlineConfig(nil))
+
+	wt := tel.wireTelemetry()
 	require.NotNil(t, wt)
 	assert.Equal(t, tiersHubEndpoint, wt.Cloud.Endpoint)
 	assert.NotSame(t, hub, wt, "the wire value is a copy")
+	assert.Nil(t, telemetryDispatch{}.wireTelemetry())
 	// The builder sends the telemetry default even when nothing else is set,
 	// on create and on start/restart.
 	h := remoteHubAgentDefaults(opsettings.AgentDefaultsSettings{}, nil, nil, wt)
@@ -756,23 +742,25 @@ func TestTelemetryDispatch_Units(t *testing.T) {
 	require.NotNil(t, sh.Telemetry)
 	assert.Equal(t, tiersHubEndpoint, sh.Telemetry.Cloud.Endpoint)
 	assert.Nil(t, startHubAgentDefaults(opsettings.AgentDefaultsSettings{}, nil, nil, nil))
-	require.NotNil(t, capable.telemetryPolicy())
-	assert.False(t, *capable.telemetryPolicy())
+
+	p := tel.telemetryPolicy()
+	require.NotNil(t, p)
+	assert.False(t, *p)
+	assert.NotSame(t, &off, p, "the policy is a copy")
+	assert.Nil(t, telemetryDispatch{}.telemetryPolicy())
 
 	env := map[string]string{}
 	var cls map[string]api.EnvKind
-	capable.injectRequesterEnabled(env, &cls)
+	tel.injectRequesterEnabled(env, &cls)
 	assert.Equal(t, "true", env[envTelemetryEnabled])
+	assert.Equal(t, api.EnvKindPlain, cls[envTelemetryEnabled])
 	env = map[string]string{envTelemetryEnabled: "false"}
-	capable.injectRequesterEnabled(env, &cls)
+	tel.injectRequesterEnabled(env, &cls)
 	assert.Equal(t, "false", env[envTelemetryEnabled], "an explicit env flag is kept")
+	env = map[string]string{}
+	telemetryDispatch{hubDefault: hub, policy: &off}.injectRequesterEnabled(env, &cls)
+	assert.NotContains(t, env, envTelemetryEnabled, "no requester on/off, no flag")
 
-	// A legacy broker with only a project policy gets {Enabled: policy}.
-	policyOnly := telemetryDispatch{policy: &off}.inlineTelemetry()
-	require.NotNil(t, policyOnly)
-	assert.Equal(t, &api.TelemetryConfig{Enabled: &off}, policyOnly)
-
-	assert.Nil(t, telemetryDispatch{}.inlineConfig(nil))
 	assert.Equal(t, []string{"cloud", "hub", "resource"}, requesterTelemetryDroppedFields(&api.TelemetryConfig{
 		Enabled: &on, Cloud: &api.TelemetryCloudConfig{}, Hub: &api.TelemetryHubConfig{}, Resource: map[string]string{"a": "b"},
 	}))

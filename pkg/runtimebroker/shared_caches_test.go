@@ -16,6 +16,7 @@ package runtimebroker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -119,9 +120,10 @@ func TestSharedCaches_RefusesABrokerIDThatIsNotOnePathElement(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	sc, err := NewSharedCaches(filepath.Join(t.TempDir(), "cache", "templates"), 0)
 	require.NoError(t, err)
-	for _, id := range []string{"", ".", "..", "../x", "a/b"} {
+	for _, id := range []string{"", ".", "..", "../x", "a/b", "/", "a..b", `a\b`, "a\x00b"} {
 		_, err := sc.forInstance(id)
-		assert.Error(t, err, "broker ID %q", id)
+		assert.Error(t, err, "shared caches accepted broker ID %q", id)
+		assert.True(t, errors.Is(err, brokercredentials.ErrBrokerIDNotPathElement), "broker ID %q", id)
 	}
 }
 

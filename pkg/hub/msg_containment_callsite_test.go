@@ -46,6 +46,8 @@ var targetSymbols = map[string]bool{
 	"DispatchAgentCreate":           true,
 	"DispatchAgentStart":            true,
 	"DispatchAgentCreateWithGather": true,
+	// The start-options entry point (ptone/scion#4669) sends the same start.
+	"DispatchAgentStartWithOptions": true,
 }
 
 func TestExternalEffectCallSiteClassification(t *testing.T) {

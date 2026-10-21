@@ -18,8 +18,14 @@ import (
 // home paths. The agent dir is created without a scion-agent config file.
 func setupNoConfigAgentProject(t *testing.T, agentName string) (scionDir, agentDir, agentHome string) {
 	t.Helper()
+	return setupNoConfigAgentProjectIn(t, t.TempDir(), agentName)
+}
+
+// setupNoConfigAgentProjectIn is setupNoConfigAgentProject with the project
+// and HOME under tmpDir, which may be reached through a symlink.
+func setupNoConfigAgentProjectIn(t *testing.T, tmpDir, agentName string) (scionDir, agentDir, agentHome string) {
+	t.Helper()
 	t.Setenv("SCION_HOST_UID", "")
-	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
 	_ = os.Chdir(tmpDir)
@@ -239,7 +245,7 @@ func TestHandleAgentDirWithoutConfig_UnreadableHomeIsKept(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(agentHome, 0755) })
 
-	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, filepath.Join(agentDir, "workspace"))
+	err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, filepath.Join(agentDir, "workspace"))
 	if !errors.Is(err, config.ErrAgentStateConflict) {
 		t.Fatalf("error = %v, want it to wrap config.ErrAgentStateConflict", err)
 	}
@@ -280,7 +286,7 @@ func TestHandleAgentDirWithoutConfig_SplitLayoutWithRecordIsAdopted(t *testing.T
 		t.Fatal(err)
 	}
 
-	if err := handleAgentDirWithoutConfig("a", agentDir, agentHome, filepath.Join(agentDir, "workspace")); err != nil {
+	if err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, filepath.Join(agentDir, "workspace")); err != nil {
 		t.Fatalf("handleAgentDirWithoutConfig: %v", err)
 	}
 	if !config.ScionAgentConfigExists(agentDir) {
@@ -296,7 +302,7 @@ func TestHandleAgentDirWithoutConfig_SplitLayoutWithRecordIsAdopted(t *testing.T
 func TestHandleAgentDirWithoutConfig_SplitLayoutWithoutRecordIsRefused(t *testing.T) {
 	agentDir, agentHome := splitLayout(t)
 
-	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, filepath.Join(agentDir, "workspace"))
+	err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, filepath.Join(agentDir, "workspace"))
 	if !errors.Is(err, config.ErrAgentStateConflict) {
 		t.Fatalf("error = %v, want it to wrap config.ErrAgentStateConflict", err)
 	}
@@ -323,7 +329,7 @@ func TestHandleAgentDirWithoutConfig_RecordOnlyInAgentDirHomeIsRefused(t *testin
 		t.Fatal(err)
 	}
 
-	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, filepath.Join(agentDir, "workspace"))
+	err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, filepath.Join(agentDir, "workspace"))
 	if !errors.Is(err, config.ErrAgentStateConflict) {
 		t.Fatalf("error = %v, want it to wrap config.ErrAgentStateConflict", err)
 	}

@@ -129,6 +129,11 @@ type sectionMergeOptions struct {
 	// (seeded) row after env-overridden keys are dropped (endpoints drops
 	// the bootstrap hub_name, which applies without being written).
 	seededBase func(base map[string]json.RawMessage)
+	// requestFilter, when set, edits the request (its decoded document and
+	// body presence) against the base read from the same row, after the
+	// base rules above (endpoints drops an image_registry echo;
+	// filterEndpointsImageRegistry).
+	requestFilter func(base, next map[string]json.RawMessage, fp *fieldPresence)
 	// baseOut, when set, receives the base document from the same row
 	// read the merge uses, after the base rules above and the schema
 	// drops the write applies to carried keys, before the request is
@@ -176,6 +181,13 @@ func mergeSectionOnCurrentWith(ctx context.Context, ops *OperationalSettings, se
 		}
 	default:
 		return nil, 0, fmt.Errorf("reading current %s row: %w", section, err)
+	}
+
+	if opts.requestFilter != nil {
+		if next == nil {
+			next = map[string]json.RawMessage{}
+		}
+		opts.requestFilter(base, next, fp)
 	}
 
 	schema, _ := opsettings.SchemaInfo()[section].Schema.(map[string]interface{})

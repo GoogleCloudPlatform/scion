@@ -294,7 +294,7 @@ func TestAdapterRoundTripConsistency(t *testing.T) {
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
 	// Load via legacy path
-	legacySettings, err := LoadSettingsKoanf(projectDir)
+	legacySettings, err := LoadSettings(projectDir)
 	require.NoError(t, err)
 	adapted, _ := AdaptLegacySettings(legacySettings)
 

@@ -299,6 +299,8 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			Exec:        true,
 			Reprovision: true,
 			AsyncLaunch: true,
+			// Starts of existing agents can be async too (ptone/scion#4669).
+			AsyncStart: true,
 			// EmptyPerAgentWorkspace, like Attach, reflects the default
 			// runtime (false for Cloud Run, which rejects the mode).
 			EmptyPerAgentWorkspace: scionrt.HasEmptyPerAgentSupport(rt),
@@ -1022,7 +1024,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 					}
 					markAttemptFailed(http.StatusInternalServerError, sce.Message)
 					span.SetStatus(codes.Error, startContextSpanText(sce))
-					s.writeStartContextError(w, sce, "create agent")
+					s.writeStartContextError(w, sce, "create agent", "agent_id", req.ID, "profile", createRequestProfile(req))
 					return
 				}
 				hydratedTemplatePath = tplPath
@@ -1213,7 +1215,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				}
 				markAttemptFailed(http.StatusInternalServerError, sce.Message)
 				span.SetStatus(codes.Error, startContextSpanText(sce))
-				s.writeStartContextError(w, sce, "create agent")
+				s.writeStartContextError(w, sce, "create agent", "agent_id", req.ID, "profile", createRequestProfile(req))
 			}
 			if !tplHydrated && (req.Config.TemplateID != "" || req.Config.TemplateHash != "") {
 				tplPath, err := s.hydrateTemplate(ctx, req.Config, hubConn)
@@ -1414,7 +1416,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		span.SetStatus(codes.Error, startContextSpanText(err))
-		status := s.writeStartContextError(w, err, "create agent")
+		status := s.writeStartContextError(w, err, "create agent", "agent_id", req.ID, "profile", createRequestProfile(req))
 		markAttemptFailed(status, err.Error())
 		return
 	}
@@ -1743,7 +1745,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		createSkill := skillFailureFrom(err, opts.RunID)
 		s.agentLifecycleLog.Error("Agent create failed", append(append([]any{
 			"agent_id", req.ID, "project_id", req.ProjectID, "run_id", opts.RunID,
-			"name", req.Name, "slug", req.Slug}, failureLogAttrs(err, createSkill)...),
+			"name", req.Name, "slug", req.Slug, "runtime", sc.RuntimeType, "profile", opts.Profile},
+			failureLogAttrs(err, createSkill)...),
 			runtimeCauseLogAttrs(err, createSkill)...)...)
 		if createSkill != nil {
 			s.logSkillResolutionFailure(createSkill,
@@ -2898,6 +2901,15 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 		// the soft-delete mark was attempted, since the pod is gone), the
 		// entry may still be there and no mark was written; the hub
 		// retries or reports the failure.
+		if errors.Is(err, agent.ErrAgentFilesDeleteRefused) {
+			// The files delete refused a path that is, or resolves into,
+			// a project workspace (agent deletion never removes one). The
+			// hub gets that reason; the paths stay in the log.
+			s.agentLifecycleLog.Error("runtime op failed", "op", "delete agent", "agent_id", id, "project_id", projectID, "error", err)
+			span.SetStatus(codes.Error, err.Error())
+			RuntimeError(w, agentFilesDeleteRefusedMessage)
+			return
+		}
 		s.writeRuntimeOpError(w, ctx, "delete agent", err, "agent_id", id, "project_id", projectID)
 		return
 	}
@@ -2994,6 +3006,9 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	if s.refuseIfDraining(w, "start", id) {
 		return
 	}
+	// An async start's launch deadline is measured from here (design
+	// §3.8.2 step 4), as a create's is from its receipt.
+	startReceivedAt := time.Now()
 	// Tracked until Manager.Start and Run's deferred cleanup have returned.
 	// The run comes from the runId query parameter when the hub sends it,
 	// so the start carries its run from the moment it is tracked
@@ -3105,6 +3120,14 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		// create. The hub never sends a template-derived image here
 		// (ptone/scion#1799).
 		Image string `json:"image,omitempty"`
+		// AsyncLaunch, LaunchID, LaunchTimeoutSeconds and
+		// LaunchKeepaliveSeconds request an async start, under the same
+		// wire keys and meaning as a create's (CreateAgentRequest; design
+		// wave 3 §2 D-f, ptone/scion#4669).
+		AsyncLaunch            bool   `json:"asyncLaunch,omitempty"`
+		LaunchID               string `json:"launchId,omitempty"`
+		LaunchTimeoutSeconds   int    `json:"launchTimeoutSeconds,omitempty"`
+		LaunchKeepaliveSeconds int    `json:"launchKeepaliveSeconds,omitempty"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
 		if err := json.NewDecoder(r.Body).Decode(&startReq); err != nil {
@@ -3127,7 +3150,56 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	}
 	// Record the run on the tracked start, so a run-scoped stop for another
 	// run leaves this start alone (ptone/scion#2550).
-	s.startsInFlight.setRunID(ctx, s.trackedStartRunID(id, projectID, queryRunID, startReq.RunID))
+	trackedRunID := s.trackedStartRunID(id, projectID, queryRunID, startReq.RunID)
+	s.startsInFlight.setRunID(ctx, trackedRunID)
+
+	// An async start (design wave 3 §2 D-f, ptone/scion#4669) needs the
+	// launch fields, a budget above the broker's 20s abort margin, and the
+	// hub's agent ID (the launch reports' URL and the stop and delete agent
+	// match). Without any of them the start is synchronous exactly as
+	// before: tracked only, never registered. With them, the start
+	// registers under the agent's name here, before any name-addressed
+	// work, so a stop or delete of the agent, or a newer start of the
+	// name, cancels it, and a newer create waits for it. The registration
+	// follows ctx, the start tracker's context, so a tracker cancel before
+	// the transfer also refuses it.
+	hubAgentID := r.URL.Query().Get(api.AgentIDQueryParam)
+	var ss *syncStart
+	if startReq.AsyncLaunch {
+		switch {
+		case startReq.LaunchID == "":
+			s.agentLifecycleLog.Warn("async launch requested with no launchId; falling back to synchronous start",
+				"agent_id", id, "project_id", projectID)
+		case startReq.LaunchTimeoutSeconds <= minAsyncLaunchTimeoutSeconds:
+			s.agentLifecycleLog.Warn("async launch requested with too small a launchTimeoutSeconds; falling back to synchronous start",
+				"agent_id", id, "project_id", projectID, "launch_timeout_seconds", startReq.LaunchTimeoutSeconds)
+		case hubAgentID == "":
+			s.agentLifecycleLog.Warn("async launch requested with no agentId; falling back to synchronous start",
+				"agent_id", id, "project_id", projectID)
+		}
+	}
+	if startReq.AsyncLaunch && startReq.LaunchID != "" && startReq.LaunchTimeoutSeconds > minAsyncLaunchTimeoutSeconds && hubAgentID != "" {
+		var ssErr error
+		ss, ssErr = s.beginNameRegistration(ctx, launchKey{ProjectID: projectID, Slug: id}, hubAgentID, trackedRunID, store.LaunchKindStart)
+		if ssErr != nil {
+			s.writeStartRegistrationError(w, span, id, projectID, trackedRunID, ssErr)
+			return
+		}
+		// Released on every return, before finishTracked (deferred
+		// earlier), so the start stays tracked until the registration is
+		// released or handed over.
+		defer ss.finish()
+		// Admission (buildStartContext, the runtime checks, the inline
+		// config update) and a synchronous fallback's Start run under a
+		// context the registration's cancellation also ends.
+		admissionCtx, cancelAdmission := context.WithCancel(ctx)
+		stopAdmission := context.AfterFunc(ss.ctx, cancelAdmission)
+		defer func() {
+			stopAdmission()
+			cancelAdmission()
+		}()
+		ctx = admissionCtx
+	}
 	// Inject skill resolver from Hub connection for skill provisioning, same
 	// as createAgent (#1960). ProjectID comes from the URL-scoped function
 	// argument since start doesn't repeat it in the body.
@@ -3209,6 +3281,9 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 			s.agentLifecycleLog.Warn("Start agent: auxiliary runtime list failed while recovering the project path",
 				"agent_id", id, "error", err)
 		case errors.Is(err, ErrAgentListUnavailable):
+			if s.refuseCancelledStart(w, span, ss, id, projectID, trackedRunID) {
+				return
+			}
 			span.SetStatus(codes.Error, err.Error())
 			AgentLookupUnavailable(w, err, id, "start", "")
 			return
@@ -3220,11 +3295,12 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	}
 
 	// A flat instance's ownership mirror installed by buildStartContext is
-	// released when this request ends unless Start consumed it
-	// (ptone/scion#3274).
+	// released when this request ends unless Start consumed it or an async
+	// start's launch took it over (ptone/scion#3274).
 	var sc *startContext
+	ownedHandoff := false
 	defer func() {
-		if sc != nil {
+		if sc != nil && !ownedHandoff {
 			s.releaseOwnedStart(sc.Opts.RunID)
 		}
 	}()
@@ -3254,8 +3330,11 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		Operation:                opHTTPStart,
 	})
 	if err != nil {
+		if s.refuseCancelledStart(w, span, ss, id, projectID, trackedRunID) {
+			return
+		}
 		span.SetStatus(codes.Error, startContextSpanText(err))
-		s.writeStartContextError(w, err, "start agent")
+		s.writeStartContextError(w, err, "start agent", "agent_id", id)
 		return
 	}
 	opts := sc.Opts
@@ -3268,6 +3347,9 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	if opts.ProjectPath != "" {
 		if projectDir, dirErr := config.GetResolvedProjectDir(opts.ProjectPath); dirErr == nil {
 			if _, containErr := agent.CheckAgentDirContained(projectDir, id, startReq.SharedWorkspace); containErr != nil {
+				if s.refuseCancelledStart(w, span, ss, id, projectID, trackedRunID) {
+					return
+				}
 				span.SetStatus(codes.Error, containErr.Error())
 				ValidationError(w, "agent id resolves outside the project's agent directory", nil)
 				return
@@ -3292,6 +3374,9 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	}
 	runtimeOpts, provisioned, provErr := runtimeSelectionOpts(opts, opts.Name, false)
 	if provErr != nil {
+		if s.refuseCancelledStart(w, span, ss, id, projectID, trackedRunID) {
+			return
+		}
 		s.writeImageProvenanceError(w, provErr, "start agent", id)
 		return
 	}
@@ -3301,6 +3386,9 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	// logged any recorded-runtime fallback at Warn, so log it at Debug here.
 	mgr, resolvedRuntimeType, err := s.resolveManagerForOptsStrict(runtimeOpts, existingAgentProfileResolution(runtimeOpts.Profile, provisioned), slog.LevelDebug)
 	if err != nil {
+		if s.refuseCancelledStart(w, span, ss, id, projectID, trackedRunID) {
+			return
+		}
 		span.SetStatus(codes.Error, err.Error())
 		writeProfileUnresolved(w, err)
 		return
@@ -3309,20 +3397,29 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	if sce := rejectKubernetesAssignRuntimeChange(runtimeOpts, sc.AssignSelection, resolvedRuntimeType, func() dispatchProfileSelection {
 		return s.resolveDispatchProfileSelection(runtimeOpts)
 	}); sce != nil {
-		s.writeStartContextError(w, sce, "start agent")
+		if s.refuseCancelledStart(w, span, ss, id, projectID, trackedRunID) {
+			return
+		}
+		s.writeStartContextError(w, sce, "start agent", "agent_id", id, "runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile)
 		return
 	}
 	if sce := rejectKubernetesBlockRuntimeChange(runtimeOpts, sc.BlockSelection, resolvedRuntimeType, func() dispatchProfileSelection {
 		return s.resolveDispatchProfileSelection(runtimeOpts)
 	}); sce != nil {
-		s.writeStartContextError(w, sce, "start agent")
+		if s.refuseCancelledStart(w, span, ss, id, projectID, trackedRunID) {
+			return
+		}
+		s.writeStartContextError(w, sce, "start agent", "agent_id", id, "runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile)
 		return
 	}
 	// Belt and braces: the preliminary classification (buildStartContext)
 	// must agree with this authoritative runtime; the specific rejections
 	// above report their own, more actionable errors first.
 	if sce := rejectRuntimeClassificationMismatch(sc.RuntimeType, resolvedRuntimeType); sce != nil {
-		s.writeStartContextError(w, sce, "start agent")
+		if s.refuseCancelledStart(w, span, ss, id, projectID, trackedRunID) {
+			return
+		}
+		s.writeStartContextError(w, sce, "start agent", "agent_id", id, "runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile)
 		return
 	}
 
@@ -3330,6 +3427,9 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	// the single hydrated harness-config launch will use (opts, as built by
 	// buildStartContext above), before the start's side effects (applyInlineConfigUpdate, mgr.Start).
 	if d := s.enforceHarnessConfigPolicy(harnessPolicyInputForStart(opts, id)); !d.OK {
+		if s.refuseCancelledStart(w, span, ss, id, projectID, trackedRunID) {
+			return
+		}
 		span.SetStatus(codes.Error, d.detail())
 		s.writeHarnessPolicyRefusal(w, d, "start agent", id, nil)
 		return
@@ -3354,6 +3454,35 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	}
 
 	ctx = s.withHarnessConfigPolicy(ctx)
+	if ss != nil {
+		if managerSupportsAsyncLaunch(mgr) {
+			// Transfer (design wave 3 §2 D-f step 5): the launch takes the
+			// registration over and runs Manager.Start; the 202 carries the
+			// launch echo. A refusal has written its own answer.
+			ownedHandoff = s.beginAsyncStart(w, r, ctx, ss, span, opts, mgr, asyncStartInputs{
+				id:               id,
+				projectID:        projectID,
+				hubAgentID:       hubAgentID,
+				launchID:         startReq.LaunchID,
+				timeoutSeconds:   startReq.LaunchTimeoutSeconds,
+				keepaliveSeconds: startReq.LaunchKeepaliveSeconds,
+				receivedAt:       startReceivedAt,
+				runtimeName:      resolvedRuntimeType,
+				owned:            sc.ownedStart,
+			})
+			return
+		}
+		// This runtime cannot serve an async launch (as for a create,
+		// managerSupportsAsyncLaunch): start synchronously, still under the
+		// registration. The hub reads the answer, which carries no launch
+		// echo, as synchronous.
+		s.agentLifecycleLog.Warn("async launch requested for a runtime that does not support async launch; falling back to synchronous start",
+			"agent_id", id, "project_id", projectID, "runtime", resolvedRuntimeType)
+		if ss.cancelled() {
+			s.writeStartRegistrationError(w, span, id, projectID, opts.RunID, errCreateStartCancelled)
+			return
+		}
+	}
 	defer s.reportRuntimePanic(ctx, w, mgr, id, projectID, opts.RunID, "start agent")
 	agentInfo, err := mgr.Start(ctx, opts)
 	err = s.completeOwnedStart(ctx, mgr, opts.RunID, err, true)
@@ -3367,9 +3496,10 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 			return
 		}
 		startSkill := skillFailureFrom(err, opts.RunID)
-		s.agentLifecycleLog.Error("Agent start failed", append([]any{
-			"agent_id", id, "project_id", projectID, "run_id", opts.RunID},
-			failureLogAttrs(err, startSkill)...)...)
+		s.agentLifecycleLog.Error("Agent start failed", append(append([]any{
+			"agent_id", id, "project_id", projectID, "run_id", opts.RunID,
+			"runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile},
+			failureLogAttrs(err, startSkill)...), runtimeCauseLogAttrs(err, startSkill)...)...)
 		if startSkill != nil {
 			s.logSkillResolutionFailure(startSkill,
 				"agent_id", id, "project_id", projectID, "run_id", opts.RunID)
@@ -3588,16 +3718,18 @@ func isContainerStopTolerable(err error) bool {
 }
 
 // agentsWithoutProjectLabel returns the subset of agents that carry no
-// scion.project_id label. The project-scoped lookups fall back to a
+// project identity: no scion.project_id label and no ProjectID field
+// (agentHasNoProjectIdentity). The project-scoped lookups fall back to a
 // slug-only search for backward compatibility with pre-existing / solo-mode
 // containers that predate project labels; that fallback must only match such
 // genuinely unlabeled containers. A container labeled for a *different*
 // project must never satisfy a project-scoped request, or same-slug agents
-// across projects would collide.
+// across projects would collide. The ProjectID field counts too, because
+// Cloud Run stores the label under its GCP-sanitized key (ptone/scion#5268).
 func agentsWithoutProjectLabel(agents []api.AgentInfo) []api.AgentInfo {
 	filtered := make([]api.AgentInfo, 0, len(agents))
 	for _, a := range agents {
-		if a.Labels["scion.project_id"] == "" {
+		if agentHasNoProjectIdentity(a) {
 			filtered = append(filtered, a)
 		}
 	}
@@ -3715,6 +3847,11 @@ func (s *Server) hasRecordlessProber() bool {
 	return false
 }
 
+// testHookStopBetweenCancels, when set (tests only), runs in a stop (with
+// or without a run ID) between its launch registry cancel and its start
+// tracker cancel.
+var testHookStopBetweenCancels func(key launchKey)
+
 func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID string) {
 	ctx := r.Context()
 
@@ -3762,11 +3899,21 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 	if runID == "" {
 		// Wake any local launch waiting on this agent (design §3.8.1); see
 		// the identical comment in deleteAgent.
-		s.cancelLocalLaunch(key, hubAgentID)
+		woken := s.cancelLocalLaunchRecord(key, hubAgentID, "")
+		if testHookStopBetweenCancels != nil {
+			testHookStopBetweenCancels(key)
+		}
 		// Cancel a start of this agent still running on this broker and
 		// wait for its cleanup before stopping, so a start whose hub cancel
 		// was lost cannot create a container after this stop.
 		s.cancelInFlightStart(ctx, key)
+		// Then wake a launch again: an async start that registered after
+		// the first cancel and handed over to its launch before the tracker
+		// cancel reached it has a launch record by now, since its handler
+		// has returned (design wave 3 §2 D-f). Same
+		// agent scope as the first cancel; the record that cancel already
+		// woke is left alone.
+		s.recancelLocalLaunch(key, hubAgentID, "", woken)
 		match, lookupErr = s.lookupAgentMatch(ctx, id, projectID)
 	} else {
 		// A run-scoped stop resolves first, so a stop for a run that no
@@ -3784,8 +3931,17 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 		// this run may have finished (creating its container) between the
 		// lookup above and the cancel, which a stale miss would report as
 		// "not found" while that container runs.
-		wokeLaunch := s.cancelLocalLaunchForRun(key, hubAgentID, runID)
+		woken := s.cancelLocalLaunchRecord(key, hubAgentID, runID)
+		if testHookStopBetweenCancels != nil {
+			testHookStopBetweenCancels(key)
+		}
 		cancelledOwn = s.cancelInFlightStartRun(ctx, key, runID)
+		// Again after the tracker wait, as for a legacy stop above,
+		// with the same agent and run scope.
+		wokeLaunch := woken != nil
+		if s.recancelLocalLaunch(key, hubAgentID, runID, woken) {
+			wokeLaunch = true
+		}
 		if wokeLaunch {
 			cancelledOwn++
 		}
@@ -4360,7 +4516,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		OwnershipAgentID: restartReq.ResolvedEnv["SCION_AGENT_ID"],
 	})
 	if err != nil {
-		s.writeStartContextError(w, err, "restart agent")
+		s.writeStartContextError(w, err, "restart agent", "agent_id", id)
 		return
 	}
 	opts := sc.Opts
@@ -4398,20 +4554,20 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	if sce := rejectKubernetesAssignRuntimeChange(runtimeOpts, sc.AssignSelection, resolvedRuntimeType, func() dispatchProfileSelection {
 		return s.resolveDispatchProfileSelection(runtimeOpts)
 	}); sce != nil {
-		s.writeStartContextError(w, sce, "restart agent")
+		s.writeStartContextError(w, sce, "restart agent", "agent_id", id, "runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile)
 		return
 	}
 	if sce := rejectKubernetesBlockRuntimeChange(runtimeOpts, sc.BlockSelection, resolvedRuntimeType, func() dispatchProfileSelection {
 		return s.resolveDispatchProfileSelection(runtimeOpts)
 	}); sce != nil {
-		s.writeStartContextError(w, sce, "restart agent")
+		s.writeStartContextError(w, sce, "restart agent", "agent_id", id, "runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile)
 		return
 	}
 	// Belt and braces: the preliminary classification (buildStartContext)
 	// must agree with this authoritative runtime; the specific rejections
 	// above report their own, more actionable errors first.
 	if sce := rejectRuntimeClassificationMismatch(sc.RuntimeType, resolvedRuntimeType); sce != nil {
-		s.writeStartContextError(w, sce, "restart agent")
+		s.writeStartContextError(w, sce, "restart agent", "agent_id", id, "runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile)
 		return
 	}
 
@@ -4474,8 +4630,10 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 			return
 		}
 		restartSkill := skillFailureFrom(err, opts.RunID)
-		s.agentLifecycleLog.Error("Agent restart failed", append([]any{
-			"agent_id", id}, failureLogAttrs(err, restartSkill)...)...)
+		s.agentLifecycleLog.Error("Agent restart failed", append(append([]any{
+			"agent_id", id, "project_id", projectID, "run_id", opts.RunID,
+			"runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile},
+			failureLogAttrs(err, restartSkill)...), runtimeCauseLogAttrs(err, restartSkill)...)...)
 		if restartSkill != nil {
 			s.logSkillResolutionFailure(restartSkill,
 				"agent_id", id, "project_id", projectID, "run_id", opts.RunID)
@@ -5231,35 +5389,51 @@ func (s *Server) resetAuth(w http.ResponseWriter, r *http.Request, id, projectID
 		}
 	}
 
-	// Signal sciontool init (PID 1) to re-read the token and restart its refresh
-	// loop immediately. The token was already written above, and the agent also
-	// polls the token file as a UID-safe fallback, so it recovers within a few
-	// seconds even if this signal fails. In rootless containers the broker execs
-	// as the scion user and `kill -USR2 1` against the root-owned PID 1 fails
-	// with EPERM — this is expected and not an error since the token is on disk.
-	signalCmd := []string{"kill", "-USR2", "1"}
-	signaled := true
-	if _, err := rt.Exec(ctx, target, signalCmd); err != nil {
-		signaled = false
-		s.agentLifecycleLog.Warn("reset-auth: failed to signal PID 1 (token still written, poller will reload)", "agent_id", id, "error", err)
+	// Ask sciontool init (PID 1) to re-read the credential file and restart
+	// its refresh loop. This signal is the only reload trigger whose
+	// delivery the broker can confirm. (Where init also watches the
+	// credential file, it may reload on its own as well; a second reload is
+	// harmless.)
+	//
+	// The signal goes to the runtime paired with the target above. A runtime
+	// that implements InitSignaler delivers it from the runtime side to the
+	// container's main process (docker, podman and Apple container: PID 1
+	// usually runs as a different user than exec's scion user, so an
+	// in-container kill as scion does not reach it). Other runtimes
+	// (Kubernetes, where the pod runs init and exec as the same user, and the
+	// remaining backends) keep the in-container `kill -USR2 1`.
+	var signalErr error
+	if sig, ok := rt.(scionrt.InitSignaler); ok {
+		signalErr = sig.SignalInitReload(ctx, target)
+	} else {
+		_, signalErr = rt.Exec(ctx, target, []string{"kill", "-USR2", "1"})
 	}
 
-	s.agentLifecycleLog.Info("Auth reset completed", "agent_id", id, "signaled", signaled,
-		"transport_token_written", transportWritten)
+	transportNote := ""
+	if transportWritten {
+		transportNote = "; transport token written"
+	} else if transportFailed {
+		transportNote = "; transport token write failed"
+	}
 
 	s.forceHeartbeatAll("reset-auth", id)
 
-	msg := "Auth reset: token written and init signaled"
-	if !signaled {
-		msg = "Auth reset: token written; signal failed (poller will reload)"
+	if signalErr != nil {
+		// The credential is on disk, but the running agent did not confirm
+		// the reload: report that to the caller as a failure. The raw error
+		// stays in the log only.
+		s.agentLifecycleLog.Warn("reset-auth: credential written but the reload signal was not delivered",
+			"agent_id", id, "transport_token_written", transportWritten, "error", signalErr)
+		writeError(w, http.StatusBadGateway, api.BrokerErrCodeReloadUnconfirmed,
+			api.ReloadUnconfirmedMessage+transportNote, nil)
+		return
 	}
-	if transportWritten {
-		msg += "; transport token written"
-	} else if transportFailed {
-		msg += "; transport token write failed"
-	}
+
+	s.agentLifecycleLog.Info("Auth reset completed", "agent_id", id,
+		"transport_token_written", transportWritten)
+
 	writeJSON(w, http.StatusOK, ResetAuthResponse{
-		Message: msg,
+		Message: "Auth reset: token written and init signaled" + transportNote,
 	})
 }
 
@@ -7063,7 +7237,23 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 	s.startNFSProjectTreeCleanup(r.Context(), slug, r.URL.Query().Get("project_id"))
 
 	if _, err := os.Stat(projectPath); os.IsNotExist(err) {
-		// Already gone — idempotent success
+		// The project directory is already gone (an earlier delete got
+		// this far). Its project-configs entry may remain, so remove it
+		// now: success only once both are gone, so a repeated delete
+		// converges (design §7, CleanupProject convergence).
+		requestedID := r.URL.Query().Get("project_id")
+		dir, err := orphanProjectConfigDir(globalDir, slug, requestedID)
+		if err != nil {
+			s.writeRuntimeOpError(w, r.Context(), opRemoveProjectConfigDir, err, "project_slug", slug, "project_id", requestedID)
+			return
+		}
+		if dir != "" {
+			if err := s.removeProjectConfigs(globalDir, dir); err != nil {
+				s.writeRuntimeOpError(w, r.Context(), opRemoveProjectConfigDir, err, "project_slug", slug, "project_id", requestedID, "path", dir)
+				return
+			}
+			s.agentLifecycleLog.Info("Removed hub-managed project config directory left by an earlier delete", "slug", slug, "path", dir)
+		}
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -7125,14 +7315,14 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 
 	s.agentLifecycleLog.Info("Removed hub-managed project directory", "slug", slug, "path", projectPath)
 	if configDir != "" {
-		// The .scion entry is gone, so a re-run cannot redo this; a failure
-		// is logged for an operator (scion project prune) and does not
-		// change the response.
-		if err := removeProjectConfigsSubtree(globalDir, configDir); err != nil {
-			s.agentLifecycleLog.Warn("project config directory not removed", "slug", slug, "path", configDir, "error", err)
-		} else {
-			s.agentLifecycleLog.Info("Removed hub-managed project config directory", "slug", slug, "path", configDir)
+		// A failure fails the delete: the project directory is gone, so a
+		// repeated delete removes the entry by its canonical name
+		// (orphanProjectConfigDir) and then succeeds.
+		if err := s.removeProjectConfigs(globalDir, configDir); err != nil {
+			s.writeRuntimeOpError(w, r.Context(), opRemoveProjectConfigDir, err, "project_slug", slug, "path", configDir)
+			return
 		}
+		s.agentLifecycleLog.Info("Removed hub-managed project config directory", "slug", slug, "path", configDir)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

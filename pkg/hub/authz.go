@@ -72,6 +72,9 @@ const (
 	// ActionManageVisitors covers granting, changing and revoking project
 	// visitor access for federated accounts (project.manage_visitors).
 	ActionManageVisitors Action = "manage_visitors"
+	// ActionAdmin covers access constraint administration
+	// (access_constraint.admin).
+	ActionAdmin Action = "admin"
 
 	// Global-catalog write actions — see design doc §3.1.
 	// These distinguish hub-catalog mutation from project-scoped CRUD,
@@ -1069,6 +1072,22 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 				candidates = append(candidates, *cb)
 				roleDefs[role.RoleID] = role
 			}
+		}
+	}
+
+	// ── Step 5b4: Offline test-infra delegation grant (ptone/scion#4240,
+	// phase DL) ─────────────────────────────────────────────────────────
+	// A workload request through an offline delegation acts for a reserved
+	// grantor id that has no bindings. offlineDelegationBinding adds a
+	// request-local hub-scope grant of exactly test_identity.issue, only
+	// when the request's workload delegation state says the offline gate
+	// passed for this request and every id agrees (see its doc comment).
+	// The bearer gate (Step 1) and the frozen ceiling still apply. It
+	// shares no state with the agent synthetic bindings above.
+	if principal.Kind == PrincipalKindUser {
+		if cb, role := offlineDelegationBinding(ctx, principal, credential, permissionID); cb != nil {
+			candidates = append(candidates, *cb)
+			roleDefs[role.RoleID] = role
 		}
 	}
 

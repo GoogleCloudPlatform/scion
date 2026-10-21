@@ -704,3 +704,31 @@ func TestCheckTransportAuth_NoProxyModeNone(t *testing.T) {
 		t.Errorf("expected none:\n%s", out)
 	}
 }
+
+// Retained: the file was being replaced during every read of the last load
+// and the value read before is in use. Doctor says so instead of reporting
+// the file as unreadable.
+func TestReportFileSource_Retained(t *testing.T) {
+	home := isolateDoctorTransport(t)
+	path := filepath.Join(home, ".scion", transportauth.TransportTokenFileName)
+	exp := time.Now().Add(30 * time.Minute)
+	st := transportauth.FileSourceStatus{
+		Path:         path,
+		InUse:        transportauth.SourceLabelFile,
+		Expiry:       exp,
+		FilePresent:  true,
+		FileExpiry:   exp,
+		FileError:    fmt.Errorf("transport token file %s: file has no link left", path),
+		FileRetained: true,
+	}
+	var diag doctorDiag
+	out := captureStdout(t, func() { reportFileSource(st, &diag) })
+
+	want := "[WARN]   file (" + path + "): being replaced; using the value read before (expires"
+	if !strings.Contains(out, want) {
+		t.Errorf("output missing %q:\n%s", want, out)
+	}
+	if strings.Contains(out, "unreadable") {
+		t.Errorf("a retained value must not be reported as unreadable:\n%s", out)
+	}
+}

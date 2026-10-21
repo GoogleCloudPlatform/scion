@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"sort"
@@ -83,16 +84,26 @@ func (w haltDispatchWiring) watch(t *testing.T, agentID, projectID string, trigg
 	}))
 }
 
-func (w haltDispatchWiring) watcherStatuses(t *testing.T) []string {
-	t.Helper()
+// The helpers below are polled on the test goroutine, never inside
+// testify's Eventually or Never. Those run the condition on a separate
+// goroutine and can return while a call is still in flight; a call that
+// reads the store after the test's cleanup has closed it fails with
+// "sql: database is closed", and a require inside it fails the test from a
+// non-test goroutine (ptone/scion#5260).
+
+// watcherStatuses returns the sorted statuses of user "watcher"'s
+// notifications.
+func (w haltDispatchWiring) watcherStatuses() ([]string, error) {
 	notifs, err := w.s.GetNotifications(context.Background(), store.SubscriberTypeUser, "watcher", false)
-	require.NoError(t, err)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]string, 0, len(notifs))
 	for _, n := range notifs {
 		out = append(out, n.Status)
 	}
 	sort.Strings(out)
-	return out
+	return out, nil
 }
 
 func (w haltDispatchWiring) triggers() []string {
@@ -104,17 +115,68 @@ func (w haltDispatchWiring) triggers() []string {
 	return out
 }
 
+// matches reports whether the watcher's statuses and the fired hook
+// triggers equal the wanted ones, and describes what was observed.
+func (w haltDispatchWiring) matches(wantStatuses, wantTriggers []string) (bool, string) {
+	gotTriggers := w.triggers()
+	gotStatuses, err := w.watcherStatuses()
+	if err != nil {
+		return false, fmt.Sprintf("reading notifications: %v (triggers %v)", err, gotTriggers)
+	}
+	ok := assert.ObjectsAreEqual(wantStatuses, gotStatuses) && assert.ObjectsAreEqual(wantTriggers, gotTriggers)
+	return ok, fmt.Sprintf("statuses %v triggers %v", gotStatuses, gotTriggers)
+}
+
+// waitMatch polls matches on the test goroutine until it holds, failing the
+// test with the last observation after 3s.
+func (w haltDispatchWiring) waitMatch(t *testing.T, wantStatuses, wantTriggers []string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		ok, got := w.matches(wantStatuses, wantTriggers)
+		if ok {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("want statuses %v triggers %v; last saw %s", wantStatuses, wantTriggers, got)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// waitTriggers polls the fired hook triggers on the test goroutine until
+// they equal want, failing the test with the last observation after 3s.
+// It does not read the store.
+func (w haltDispatchWiring) waitTriggers(t *testing.T, want []string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		got := w.triggers()
+		if assert.ObjectsAreEqual(want, got) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("want triggers %v; last saw %v", want, got)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 // settle waits for the in-process halt dispatch, then checks that the bus
-// adds nothing more within a short window.
+// adds nothing more within a short window. Every check runs on the test
+// goroutine and is finished when settle returns.
 func (w haltDispatchWiring) settle(t *testing.T, wantStatuses, wantTriggers []string) {
 	t.Helper()
 	w.srv.haltedDispatches.Wait()
-	require.Eventually(t, func() bool {
-		return assert.ObjectsAreEqual(wantStatuses, w.watcherStatuses(t)) && assert.ObjectsAreEqual(wantTriggers, w.triggers())
-	}, 3*time.Second, 20*time.Millisecond, "statuses %v triggers %v", w.watcherStatuses(t), w.triggers())
-	assert.Never(t, func() bool {
-		return !assert.ObjectsAreEqual(wantStatuses, w.watcherStatuses(t)) || !assert.ObjectsAreEqual(wantTriggers, w.triggers())
-	}, 300*time.Millisecond, 20*time.Millisecond, "the bus must not notify or fire a halt again")
+	w.waitMatch(t, wantStatuses, wantTriggers)
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+		if ok, got := w.matches(wantStatuses, wantTriggers); !ok {
+			t.Errorf("the bus must not notify or fire a halt again: want statuses %v triggers %v; saw %s", wantStatuses, wantTriggers, got)
+			return
+		}
+	}
 }
 
 func TestHaltedDispatch_HeartbeatPreempt(t *testing.T) {
@@ -138,8 +200,7 @@ func TestHaltedDispatch_ErrorUpgradeOverPlainStop(t *testing.T) {
 	w.watch(t, f.agent.ID, f.project.ID, "ERROR")
 
 	require.Equal(t, http.StatusOK, f.selfReport(t, "run-1", map[string]any{"phase": "stopped"}))
-	require.Eventually(t, func() bool { return assert.ObjectsAreEqual([]string{"stopped"}, w.triggers()) },
-		3*time.Second, 20*time.Millisecond)
+	w.waitTriggers(t, []string{"stopped"})
 
 	f.heartbeat(t, brokerAgentHeartbeat{Phase: "error", ExitReason: "preempted", RunID: "run-1"})
 	require.Equal(t, "halted", f.get(t).Phase)
@@ -158,9 +219,7 @@ func TestHaltedDispatch_OOMAfterCrash(t *testing.T) {
 	code := 137
 	f.heartbeat(t, brokerAgentHeartbeat{Phase: "error", ExitCode: &code, RunID: "run-1"})
 	require.Equal(t, "error", f.get(t).Phase)
-	require.Eventually(t, func() bool {
-		return assert.ObjectsAreEqual([]string{"ERROR"}, w.watcherStatuses(t)) && assert.ObjectsAreEqual([]string{"error"}, w.triggers())
-	}, 3*time.Second, 20*time.Millisecond)
+	w.waitMatch(t, []string{"ERROR"}, []string{"error"})
 
 	f.heartbeat(t, brokerAgentHeartbeat{Phase: "error", ExitReason: "oom_killed", ExitCode: &code, RunID: "run-1"})
 	require.Equal(t, "halted", f.get(t).Phase)
@@ -196,13 +255,55 @@ func TestHaltedDispatch_SelfReportedStopThenRuntimeReason(t *testing.T) {
 	w.watch(t, f.agent.ID, f.project.ID, "HALTED")
 
 	require.Equal(t, http.StatusOK, f.selfReport(t, "run-1", map[string]any{"phase": "stopped", "exitCode": 0}))
-	require.Eventually(t, func() bool { return assert.ObjectsAreEqual([]string{"stopped"}, w.triggers()) },
-		3*time.Second, 20*time.Millisecond)
+	w.waitTriggers(t, []string{"stopped"})
 
 	f.heartbeat(t, brokerAgentHeartbeat{Phase: "stopped", ExitReason: "preempted", RunID: "run-1"})
 	require.Equal(t, "halted", f.get(t).Phase)
 
 	w.settle(t, []string{"HALTED"}, []string{"halted", "stopped"})
+}
+
+func TestHaltedDispatch_SignaledStopThenCleanPreempt(t *testing.T) {
+	// Durable workspace: the stopped hook fires on the agent's signaled
+	// stop report; the runtime's preempted with exit code 0 then halts the
+	// row in place: one HALTED and only the halted hook.
+	f := newHaltFixture(t)
+	w := wireHaltDispatch(t, f.srv, f.s)
+	w.watch(t, f.agent.ID, f.project.ID, "HALTED")
+
+	require.Equal(t, http.StatusOK, f.selfReport(t, "run-1", map[string]any{"phase": "stopped", "exitReason": "signaled"}))
+	require.Eventually(t, func() bool { return assert.ObjectsAreEqual([]string{"stopped"}, w.triggers()) },
+		3*time.Second, 20*time.Millisecond)
+
+	code := 0
+	f.heartbeat(t, brokerAgentHeartbeat{Phase: "stopped", ExitReason: "preempted", ExitCode: &code, RunID: "run-1"})
+	require.Equal(t, "halted", f.get(t).Phase)
+
+	w.settle(t, []string{"HALTED"}, []string{"halted", "stopped"})
+}
+
+func TestHaltedDispatch_SignaledStopThenCleanEvictErrorUpgrade(t *testing.T) {
+	// The workspace did not survive: the runtime reports error + evicted
+	// with exit code 0 after the signaled stop report. The error and halted
+	// hooks fire; an ERROR subscriber gets ERROR and a HALTED subscriber
+	// gets HALTED.
+	for _, watch := range []string{"ERROR", "HALTED"} {
+		t.Run(watch, func(t *testing.T) {
+			f := newHaltFixture(t)
+			w := wireHaltDispatch(t, f.srv, f.s)
+			w.watch(t, f.agent.ID, f.project.ID, watch)
+
+			require.Equal(t, http.StatusOK, f.selfReport(t, "run-1", map[string]any{"phase": "stopped", "exitReason": "signaled"}))
+			require.Eventually(t, func() bool { return assert.ObjectsAreEqual([]string{"stopped"}, w.triggers()) },
+				3*time.Second, 20*time.Millisecond)
+
+			code := 0
+			f.heartbeat(t, brokerAgentHeartbeat{Phase: "error", ExitReason: "evicted", ExitCode: &code, RunID: "run-1"})
+			require.Equal(t, "halted", f.get(t).Phase)
+
+			w.settle(t, []string{watch}, []string{"error", "halted", "stopped"})
+		})
+	}
 }
 
 func TestOnAgentHalted_NothingWired(t *testing.T) {

@@ -133,6 +133,11 @@ func (a *AuthzService) CanDelegate(ctx context.Context, actor Identity, grant Gr
 	if denied := a.refuseTestAdminDeniedGrant(ctx, actor, grant); denied != nil {
 		return *denied
 	}
+	// Every grant an admin-kind test identity makes must expire with it
+	// (admin tier A3): without the request's grant shaping it is refused.
+	if denied := a.refuseTestAdminUnshapedGrant(ctx, actor, grant); denied != nil {
+		return *denied
+	}
 
 	// Scoped credentials (UAT) can only delegate within their credential scope.
 	if scoped, ok := actor.(*ScopedUserIdentity); ok {
@@ -399,14 +404,21 @@ func (a *AuthzService) kindCache() *testFixtureClampCache {
 // actorHoldsAllPermissions, which every type-specific check applies.
 //
 //   - A grant with no scope type (group membership) is not confined here.
-//     canDelegateGroupMembership denies system-scoped group authority to
-//     every scoped credential.
+//     canDelegateGroupMembership refuses system-scoped group authority to
+//     every scoped credential, and checks project-scoped group authority
+//     against the token's own authority in each project.
 //   - A system-scoped grant is denied for every UAT, of either boundary
 //     kind.
 //   - A grant with any other non-project scope type is denied.
-//   - A project-scoped grant must name its project, and the token boundary
-//     must allow that project (BoundaryAllows): a project boundary allows
-//     only its own project, a hub boundary allows any project.
+//   - A project-scoped custom role definition names no project: the
+//     definition can be bound in every project. Under a hub boundary it
+//     passes here, and canDelegateCustomRole judges its permissions on the
+//     holder's system-scope authority within the token ceiling
+//     (actorHoldsAllPermissions with no scope ID). Under a project boundary
+//     it is denied.
+//   - Any other project-scoped grant must name its project, and the token
+//     boundary must allow that project (BoundaryAllows): a project boundary
+//     allows only its own project, a hub boundary allows any project.
 //   - An agent delegation must name the same project in ProjectID and
 //     ScopeID, for every boundary kind, because the authority check runs
 //     on ProjectID and the boundary check runs on ScopeID.
@@ -433,6 +445,9 @@ func (a *AuthzService) enforceUATDelegation(ctx context.Context, scoped *ScopedU
 	}
 
 	if grant.ScopeID == "" {
+		if grant.Type == GrantTypeCustomRole && scoped.Boundary().Kind == BoundaryKindHub {
+			return nil
+		}
 		return deny("scoped credential cannot delegate a project grant that names no project")
 	}
 	if grant.Type == GrantTypeAgentDelegation && grant.ProjectID != grant.ScopeID {
@@ -512,22 +527,28 @@ func (a *AuthzService) canDelegateRoleBinding(ctx context.Context, actor Identit
 // canDelegateGroupMembership checks whether the actor can add a member to
 // a group.
 //
-// RS1 D3 approved rule: group membership mutations are governed solely by
-// group roles and bindings. The previous cross-domain project-authority scan
-// (checking that the actor held all project permissions inherited through
-// group bindings) has been removed per the approved governance appendix.
-// Project-level delegation is governed at the point of assigning a project
-// role to a group (via ProjectMembershipService), not at the point of
-// managing group members.
+// A member of a group holds the authority of every role binding on the
+// group's closure: the group itself and every group that transitively
+// contains it. When the member is itself a group, every principal in that
+// member's subtree gains the same closure authority, so one check on the
+// target group's closure covers the whole subtree.
 //
-// The check now covers only:
-//   - System-scoped role bindings on the group closure: a scoped UAT must
-//     not delegate system-scoped authority through group membership.
-//   - System-scoped non-amplification: if the group inherits system-scoped
-//     bindings, the actor must hold those permissions.
+// For a session, group membership is governed by group roles (RS1 D3):
+//   - project-scoped bindings on the closure are not checked here; project
+//     delegation is governed where a project role is assigned to a group
+//     (ProjectMembershipService);
+//   - for system-scoped bindings on the closure, the actor must hold every
+//     permission they carry.
 //
-// Project-scoped bindings on the group are explicitly excluded from this
-// check per D3.
+// For a user access token, membership never carries authority beyond the
+// caller's:
+//   - a system-scoped binding on the closure refuses the token;
+//   - a binding of any scope other than system or project refuses it;
+//   - for each project with a project-scoped binding on the closure, the
+//     token boundary must allow that project, and the token must hold, in
+//     that project, every permission those bindings carry: the holder's
+//     live role bindings intersected with the token ceiling
+//     (canDelegateGroupMembershipForToken).
 func (a *AuthzService) canDelegateGroupMembership(ctx context.Context, actor Identity, grant GrantDescriptor) Decision {
 	groupID := grant.GroupID
 	if groupID == "" {
@@ -567,9 +588,10 @@ func (a *AuthzService) canDelegateGroupMembership(ctx context.Context, actor Ide
 		return Decision{Allowed: true, Reason: "group has no role bindings; no authority delegation required"}
 	}
 
-	// RS1 D3: filter to system-scoped bindings only. Project-scoped bindings
-	// are excluded because project-level delegation is governed at role
-	// assignment time (ProjectMembershipService), not at group membership time.
+	// RS1 D3: for a session, only system-scoped bindings are checked.
+	// Project-level delegation is governed at role assignment time
+	// (ProjectMembershipService). A token also has its project-scoped
+	// bindings checked below.
 	var systemBindings []*store.RoleBinding
 	for _, b := range bindings {
 		if b.ScopeType == store.RoleScopeSystem {
@@ -577,9 +599,8 @@ func (a *AuthzService) canDelegateGroupMembership(ctx context.Context, actor Ide
 		}
 	}
 
-	// R4 gap (a): UAT scope bypass on group membership. If any binding on
-	// the group closure is system-scoped, a project-scoped UAT must not be
-	// allowed to delegate that authority.
+	// A user access token never delegates system-scoped group authority,
+	// and must itself hold the project authority the closure carries.
 	if scoped, ok := actor.(*ScopedUserIdentity); ok && scoped != nil {
 		if len(systemBindings) > 0 {
 			return Decision{
@@ -587,6 +608,7 @@ func (a *AuthzService) canDelegateGroupMembership(ctx context.Context, actor Ide
 				Reason:  "scoped credential cannot delegate system-scoped group authority",
 			}
 		}
+		return a.canDelegateGroupMembershipForToken(ctx, scoped, bindings)
 	}
 
 	// If no system-scoped bindings, group membership is purely group-governed
@@ -644,6 +666,67 @@ func (a *AuthzService) canDelegateGroupMembership(ctx context.Context, actor Ide
 	}
 
 	return Decision{Allowed: true, Reason: "actor holds all system-scoped permissions inherited through group membership"}
+}
+
+// canDelegateGroupMembershipForToken is the token half of
+// canDelegateGroupMembership, for a closure with no system-scoped binding.
+// Every binding must be project-scoped and name its project. For each such
+// project, the token boundary must allow the project, and the token must
+// hold every permission the project's closure bindings carry in that
+// project (actorHoldsAllPermissions: the holder's live role bindings, plus
+// its system-scoped ones, intersected with the token ceiling). Any read
+// error refuses.
+func (a *AuthzService) canDelegateGroupMembershipForToken(ctx context.Context, scoped *ScopedUserIdentity, bindings []*store.RoleBinding) Decision {
+	permsByProject := make(map[string]map[string]struct{})
+	rdCache := make(map[string]*store.RoleDefinition)
+	for _, b := range bindings {
+		if b.ScopeType != store.RoleScopeProject {
+			return Decision{Allowed: false, Reason: "scoped credential cannot delegate group authority of scope " + b.ScopeType}
+		}
+		if b.ScopeID == "" {
+			return Decision{Allowed: false, Reason: "scoped credential cannot delegate a project group binding that names no project"}
+		}
+		rd, ok := rdCache[b.RoleDefinitionID]
+		if !ok {
+			var err error
+			rd, err = a.store.GetRoleDefinition(ctx, b.RoleDefinitionID)
+			if err != nil || rd == nil {
+				return Decision{Allowed: false, Reason: "cannot resolve role definition for group binding"}
+			}
+			rdCache[b.RoleDefinitionID] = rd
+		}
+		if permsByProject[b.ScopeID] == nil {
+			permsByProject[b.ScopeID] = make(map[string]struct{})
+		}
+		for _, perm := range rd.Permissions {
+			permsByProject[b.ScopeID][perm] = struct{}{}
+		}
+	}
+	if len(permsByProject) == 0 {
+		return Decision{Allowed: true, Reason: "group closure carries no role binding"}
+	}
+
+	projects := make([]string, 0, len(permsByProject))
+	for p := range permsByProject {
+		projects = append(projects, p)
+	}
+	sort.Strings(projects)
+	boundary := scoped.Boundary()
+	for _, projectID := range projects {
+		if !BoundaryAllows(boundary, TargetScope{Kind: TargetScopeProject, ProjectID: projectID}) {
+			return Decision{Allowed: false, Reason: "scoped credential cannot delegate group authority outside its boundary"}
+		}
+		perms := make([]string, 0, len(permsByProject[projectID]))
+		for p := range permsByProject[projectID] {
+			perms = append(perms, p)
+		}
+		sort.Strings(perms)
+		decision := a.actorHoldsAllPermissions(ctx, scoped, perms, store.RoleScopeProject, projectID)
+		if !decision.Allowed {
+			return Decision{Allowed: false, Reason: "scoped credential cannot delegate project-scoped group authority it does not hold: " + decision.Reason}
+		}
+	}
+	return Decision{Allowed: true, Reason: "scoped credential holds every project permission carried by the group closure"}
 }
 
 // canDelegateAgent checks whether the actor holds all scopes/permissions
@@ -732,7 +815,10 @@ func (a *AuthzService) canAgentDelegateToAgent(agentActor AgentIdentity, grant G
 }
 
 // canDelegateCustomRole checks whether the actor holds all permissions
-// defined in the custom role.
+// defined in the custom role. A project-scoped definition carries no scope
+// ID, so actorHoldsAllPermissions resolves only the actor's system-scope
+// bindings for it: the definition can be bound in every project. A token's
+// ceiling is intersected there as for every other grant.
 func (a *AuthzService) canDelegateCustomRole(ctx context.Context, actor Identity, grant GrantDescriptor) Decision {
 	if len(grant.CustomRolePermissions) == 0 {
 		return Decision{Allowed: true, Reason: "custom role has no permissions"}

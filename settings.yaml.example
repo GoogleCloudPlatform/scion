@@ -162,7 +162,7 @@ server:
   #   broker_name: ""
   #   hub_endpoint: ""
   #   container_hub_endpoint: ""
-  #   broker_token: ""                 # Use env var SCION_SERVER_BROKER_BROKERTOKEN
+  #   broker_token: ""                 # Use env var SCION_SERVER_RUNTIMEBROKER_BROKERTOKEN
   #   auto_provide: false
 
   # -------------------------------------------------------------------------

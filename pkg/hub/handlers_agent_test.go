@@ -3999,11 +3999,8 @@ func TestCreateAgent_GCPIdentityPassthrough(t *testing.T) {
 	srv, s, project := setupCreateAgentServer(t, disp)
 
 	// P8: passthrough requires a broker host SA. Set it on the test broker.
-	broker, err := s.GetRuntimeBroker(context.Background(), tid("broker-create"))
+	_, err := s.SetRuntimeBrokerGCPHost(context.Background(), tid("broker-create"), "host@test.iam.gserviceaccount.com", "test")
 	require.NoError(t, err)
-	broker.GCPHostServiceAccountEmail = "host@test.iam.gserviceaccount.com"
-	broker.GCPHostProjectID = "test"
-	require.NoError(t, s.UpdateRuntimeBroker(context.Background(), broker))
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:      "gcp-passthrough-agent",

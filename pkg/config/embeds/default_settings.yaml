@@ -35,7 +35,8 @@ default_harness_config: antigravity
 # Set this to the registry where your scion images are hosted.
 # Build images first — see image-build/README.md for instructions.
 # Example: ghcr.io/myorg, us-central1-docker.pkg.dev/myproject/scion
-# Env: SCION_IMAGE_REGISTRY
+# SCION_IMAGE_REGISTRY in the environment is a node override: it beats this
+# value and any value saved in the hub (it is not written to this file).
 image_registry: ""
 
 # CLI behavior settings
