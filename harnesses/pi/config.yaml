@@ -79,7 +79,7 @@ capabilities:
     enabled: { support: "yes" }
     native_emitter: { support: "no", reason: "Native telemetry forwarding is not wired for this harness" }
   prompts:
-    system_prompt: { support: "yes" }
+    system_prompt: { support: "partial", reason: "Appended to pi's default system prompt via APPEND_SYSTEM.md; cannot replace it" }
     agent_instructions: { support: "yes" }
   auth:
     api_key: { support: "partial", reason: "Env selection and provisioning are unit-tested; not exercised against a live provider" }
