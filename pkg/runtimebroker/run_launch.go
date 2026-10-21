@@ -40,8 +40,9 @@ const (
 	gateContinue gateAction = iota
 	// gateCompleted means the Hub already saw this agent reach running
 	// during this launch (e.g. a status write landing independently): skip
-	// remaining checkpoints, but Run continues, and a later failure must
-	// send nothing and never clean up.
+	// remaining checkpoints, but Run continues; a later failure before
+	// Start sends nothing and never cleans up, and a Start failure is
+	// reported and cleaned up as failLaunch describes (ptone/scion#5368).
 	gateCompleted
 	// gateAbortNoCleanup covers 409 superseded/other_owner: abort, but the
 	// other launch owns the resource names, so no deletion and no terminal.
