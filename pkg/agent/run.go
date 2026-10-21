@@ -3612,7 +3612,8 @@ func mergeExtraHosts(a, b []string) []string {
 // lacked the harness config's model_aliases) is resolved against the on-disk
 // harness-config's model_aliases, else the harness's built-in table
 // (harnesses/<harnessName>/config.yaml), so a bare alias never reaches the
-// harness verbatim. An alias neither table resolves is returned unchanged.
+// harness verbatim. An alias neither table resolves is returned in its
+// normalized form (e.g. "large" for "L").
 //
 // The broker's config model never replaces a SCION_MODEL value, alias or
 // not: that model may be a broker template or harness-config default, which
@@ -3625,6 +3626,9 @@ func resolveEffectiveModel(envModel string, cfg *api.ScionConfig, hcAliases map[
 	if model == "" || !config.KnownModelAliases[config.NormalizeModelAlias(model)] {
 		return model
 	}
+	// Normalize once ("L" -> "large"), so an alias a partial on-disk table
+	// lacks still falls through to the built-in table.
+	model = config.NormalizeModelAlias(model)
 	if len(hcAliases) > 0 {
 		if resolved := config.ResolveModelAlias(model, hcAliases); resolved != model {
 			return resolved

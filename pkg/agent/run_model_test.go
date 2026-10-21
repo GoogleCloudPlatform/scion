@@ -16,12 +16,17 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	harnessesEmbed "github.com/GoogleCloudPlatform/scion/harnesses"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
 // builtinAlias returns the embedded harness's concrete model for alias,
@@ -122,6 +127,28 @@ func TestResolveEffectiveModel(t *testing.T) {
 			want:        claudeLarge,
 		},
 		{
+			// A non-canonical spelling must not stop at the partial
+			// on-disk table's normalized miss.
+			name:        "shorthand alias missing from on-disk aliases falls back to the built-in table",
+			envModel:    "L",
+			hcAliases:   map[string]string{"small": "hc-small"},
+			harnessName: "claude",
+			want:        claudeLarge,
+		},
+		{
+			name:        "XL shorthand resolves through the built-in table",
+			envModel:    "XL",
+			hcAliases:   map[string]string{"small": "hc-small"},
+			harnessName: "claude",
+			want:        builtinAlias(t, "claude", "extra-large"),
+		},
+		{
+			name:        "unresolvable alias is returned normalized",
+			envModel:    "L",
+			harnessName: "not-a-real-harness",
+			want:        "large",
+		},
+		{
 			name:        "unresolvable alias is returned unchanged",
 			envModel:    "large",
 			harnessName: "not-a-real-harness",
@@ -219,4 +246,92 @@ func argvModel(argv []string) (string, bool) {
 		}
 	}
 	return val, found
+}
+
+// modelTestHC is a project harness-config whose own model (the broker's
+// harness-config default) differs from every hub-resolved model below.
+const modelTestHC = policyTestDecl + "model: broker-default-model\nmodel_aliases:\n  large: hc-large-model\n"
+
+// TestStart_ArgvModelAndSCIONModelAgree runs Start and captures the
+// runtime.RunConfig it launches: the harness argv --model (CommandArgs) and
+// the container env SCION_MODEL carry the same model, the hub-resolved one
+// when the start env has it (ptone/scion#3914). Before the fix, argv was
+// built from the broker's own config (here the harness-config default).
+func TestStart_ArgvModelAndSCIONModelAgree(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{name: "hub-resolved SCION_MODEL", env: map[string]string{"SCION_MODEL": "hub-model"}, want: "hub-model"},
+		{name: "explicit --env SCION_MODEL", env: map[string]string{"SCION_MODEL": "env-model"}, want: "env-model"},
+		{name: "broker config only (no SCION_MODEL)", want: "broker-default-model"},
+		{name: "leaked alias resolved through the harness-config aliases", env: map[string]string{"SCION_MODEL": "large"}, want: "hc-large-model"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newPolicyTestEnv(t)
+			e.projectHC(t, "hc-model", modelTestHC)
+			var runCfg runtime.RunConfig
+			runs := 0
+			mgr := NewManager(&runtime.MockRuntime{
+				ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+					return []api.AgentInfo{}, nil
+				},
+				RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+					runs++
+					runCfg = cfg
+					return "mock-id", nil
+				},
+			})
+			env := map[string]string{}
+			for k, v := range tc.env {
+				env[k] = v
+			}
+			const name = "model-agent"
+			if _, err := mgr.Start(context.Background(), api.StartOptions{
+				Name: name, ProjectPath: e.scion, HarnessConfig: "hc-model", NoAuth: true, Env: env,
+			}); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			if runs != 1 {
+				t.Fatalf("runtime Run called %d times, want 1", runs)
+			}
+			argv, ok := argvModel(runCfg.CommandArgs)
+			if !ok {
+				t.Fatalf("no single --model in CommandArgs %v", runCfg.CommandArgs)
+			}
+			envModel, found := "", 0
+			for _, kv := range runCfg.Env {
+				if v, ok := strings.CutPrefix(kv, "SCION_MODEL="); ok {
+					envModel = v
+					found++
+				}
+			}
+			if found != 1 {
+				t.Fatalf("SCION_MODEL appears %d times in the run env, want 1", found)
+			}
+			if argv != tc.want || envModel != tc.want {
+				t.Errorf("argv --model = %q, SCION_MODEL = %q; want both %q", argv, envModel, tc.want)
+			}
+
+			// The effective model is not written into the agent's stored
+			// config: a hub-resolved value never becomes agent config.
+			if tc.env["SCION_MODEL"] != "" {
+				data, err := os.ReadFile(filepath.Join(e.scion, "agents", name, "scion-agent.json"))
+				if err != nil {
+					t.Fatalf("read scion-agent.json: %v", err)
+				}
+				var stored struct {
+					Model string `json:"model"`
+				}
+				if err := json.Unmarshal(data, &stored); err != nil {
+					t.Fatalf("parse scion-agent.json: %v", err)
+				}
+				if stored.Model == tc.want {
+					t.Errorf("scion-agent.json model = %q: the effective model was persisted", stored.Model)
+				}
+			}
+		})
+	}
 }

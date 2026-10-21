@@ -809,6 +809,11 @@ could not resolve is resolved on the broker through the harness-config's `model_
 harness's built-in table), never replaced by the broker's own model. An explicit `SCION_MODEL` in
 the request env (`--env`) also wins and reaches the command line.
 
+Because the hub `agent_defaults.default_model` now reaches the harness command line, it must be a
+model every harness that can use it accepts. A size alias (`small`, `medium`, `large`,
+`extra-large`) is portable; a concrete model ID of one vendor (for example a Claude model on a
+gemini-cli agent) makes that agent fail at launch.
+
 #### `Changed in this release` — argv `--model` follows the hub-resolved model
 
 **Before:** the broker built the harness's `--model` argument from its own config (the request's
