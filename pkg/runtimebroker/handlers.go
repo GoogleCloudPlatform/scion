@@ -4721,8 +4721,10 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	}
 
 	// Kubernetes placement defaults for the runtime the restart starts on,
-	// and the agent's persisted kubernetes block, checked before the stop:
-	// a refusal leaves the agent running.
+	// and the agent's persisted kubernetes block, checked before this
+	// endpoint's stop: a refusal here leaves the agent running. (A restart
+	// the hub performs as its own stop followed by a start reaches the start
+	// handler, whose refusal leaves the agent stopped.)
 	rp, perr := s.placementForStart(ctx, res, opts.ProjectPath)
 	if perr == nil {
 		perr = s.checkRestartLegacyPlacement(id, opts.ProjectPath, restartReq.SharedWorkspace, rp)

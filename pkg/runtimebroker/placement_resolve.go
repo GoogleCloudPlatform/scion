@@ -50,12 +50,18 @@ const (
 	placementAgentConfigCause      = "the agent's config could not be read to check it against the agent runtime's Kubernetes placement"
 )
 
+// placementDefaultsOnlyCause is the fixed cause for a profile with placement
+// whose runtime entry exists only in the embedded default settings.
+func placementDefaultsOnlyCause(profile, entry string) string {
+	return fmt.Sprintf("profile %s sets Kubernetes placement, but its runtime entry %s is defined only by the built-in defaults; define runtimes.%s in the agent runtime's settings so its placement can be matched", profile, entry, entry)
+}
+
 func placementUndeterminedCause(entry, cause string) string {
 	return fmt.Sprintf("cannot determine whether runtime entry %s targets this agent's runtime (%s)", entry, cause)
 }
 
 // placementRefusal is the error a placement refusal returns: a 400
-// validation error with the fixed cause as its message. The hub relays a
+// validation error with the fixed cause as its message. The hub relays an
 // agent runtime's 400 validation_error with its message intact, does not retry
 // it, and treats it as a confirmed refusal of the start.
 func placementRefusal(cause string) error {
@@ -90,9 +96,12 @@ func (r runtimeResolution) forExistingAgent(agentName string) runtimeResolution 
 func (s *Server) placementForStart(ctx context.Context, res runtimeResolution, projectPath string) (*api.ResolvedPlacement, error) {
 	var projectVS *config.VersionedSettings
 	if res.Runtime != nil && res.Runtime.Name() == "kubernetes" && res.How != resolutionFlat {
-		projectDir, _ := config.GetResolvedProjectDir(projectPath)
-		if vs, _, err := s.loadRuntimeSettings(projectDir); err == nil {
-			projectVS = vs
+		// Without a resolved project directory the loader would fall back to
+		// the working directory's project; skip the warning input instead.
+		if projectDir, err := config.GetResolvedProjectDir(projectPath); err == nil {
+			if vs, _, err := s.loadRuntimeSettings(projectDir); err == nil {
+				projectVS = vs
+			}
 		}
 	}
 	return s.resolvePlacement(ctx, res, projectVS)
@@ -119,6 +128,12 @@ func (s *Server) resolvePlacement(ctx context.Context, res runtimeResolution, pr
 	gvs, _, err := config.LoadGlobalSettingsWithOverlayFor(ctx)
 	if err != nil {
 		s.agentLifecycleLog.Warn("Kubernetes placement: global settings could not be read", "agent", res.Agent, "error", err)
+		return nil, placementRefusal(placementGlobalUnreadableCause)
+	}
+	// The loader treats a global settings file it cannot stat as missing, so
+	// the settings above may lack the operator's file: fail closed.
+	if config.GlobalSettingsFileUnstatable() {
+		s.agentLifecycleLog.Warn("Kubernetes placement: the global settings file cannot be stat'd", "agent", res.Agent)
 		return nil, placementRefusal(placementGlobalUnreadableCause)
 	}
 	if config.GlobalSettingsIsLegacyFormat() && config.GlobalSettingsMentionPlacementKeys() {
@@ -154,7 +169,7 @@ func (s *Server) resolvePlacement(ctx context.Context, res runtimeResolution, pr
 	profilesOn := func(entries map[string]bool) []string {
 		var out []string
 		for name, p := range gvs.Profiles {
-			if entries[p.Runtime] && profileCarriesPlacement(p) {
+			if entries[p.Runtime] && config.ProfileHasPlacement(p) {
 				out = append(out, name)
 			}
 		}
@@ -162,7 +177,7 @@ func (s *Server) resolvePlacement(ctx context.Context, res runtimeResolution, pr
 		return out
 	}
 	carries := func(entry string) bool {
-		return entryCarriesPlacement(gvs.Runtimes[entry]) || len(profilesOn(map[string]bool{entry: true})) > 0
+		return config.RuntimeEntryHasPlacement(gvs.Runtimes[entry]) || len(profilesOn(map[string]bool{entry: true})) > 0
 	}
 
 	var matched []string
@@ -178,6 +193,22 @@ func (s *Server) resolvePlacement(ctx context.Context, res runtimeResolution, pr
 				s.agentLifecycleLog.Warn("Kubernetes placement: cannot match a runtime entry that carries placement",
 					"agent", res.Agent, "entry", name, "cause", cause, "context", rctx, "namespace", rns, "connection", conn.String())
 				return nil, placementRefusal(placementUndeterminedCause(name, cause))
+			}
+		}
+	}
+
+	// Entries defined only by the embedded defaults stay out of the entry
+	// rung and sibling agreement. One that would match this runtime still
+	// matters for the profile rung: a global profile with placement on it
+	// cannot apply, and is refused with its own cause below.
+	defaultsOnlyMatched := map[string]bool{}
+	if configuredKnown {
+		for name, rt := range gvs.Runtimes {
+			if configured[name] || !config.IsKubernetesRuntimeEntry(name, rt) {
+				continue
+			}
+			if result, _ := config.MatchKubernetesEntry(rt, rctx, rns, hasClient, conn, res.Record, defaultNS, live); result == config.Match {
+				defaultsOnlyMatched[name] = true
 			}
 		}
 	}
@@ -239,12 +270,22 @@ func (s *Server) resolvePlacement(ctx context.Context, res runtimeResolution, pr
 	case res.How == resolutionForced:
 		// The forced runtime takes the entry rung only.
 	default:
-		profileElsewhere := profileGlobal && profileCarriesPlacement(profile) && !inE[profile.Runtime]
+		if res.How == resolutionProfile && profileGlobal && config.ProfileHasPlacement(profile) && defaultsOnlyMatched[profile.Runtime] {
+			s.agentLifecycleLog.Warn("Kubernetes placement: the selected profile's runtime entry is defined only by the built-in defaults",
+				"agent", res.Agent, "profile", res.Profile, "entry", profile.Runtime)
+			return nil, placementRefusal(placementDefaultsOnlyCause(res.Profile, profile.Runtime))
+		}
+		profileElsewhere := profileGlobal && config.ProfileHasPlacement(profile) && !inE[profile.Runtime]
 		if len(pp) > 0 || profileElsewhere {
 			cause := s.profileRungCause(res, profileGlobal, matched, pp)
 			s.agentLifecycleLog.Warn("Kubernetes placement: the profile rung cannot be determined",
 				"agent", res.Agent, "how", res.How.String(), "profile", res.Profile, "profiles", pp, "matched", matched)
 			return nil, placementRefusal(cause)
+		}
+		if ppD := profilesOn(defaultsOnlyMatched); len(ppD) > 0 {
+			s.agentLifecycleLog.Warn("Kubernetes placement: a profile with placement uses a runtime entry defined only by the built-in defaults",
+				"agent", res.Agent, "how", res.How.String(), "profiles", ppD)
+			return nil, placementRefusal(placementDefaultsOnlyCause(ppD[0], gvs.Profiles[ppD[0]].Runtime))
 		}
 	}
 
@@ -297,14 +338,6 @@ func applyProfilePlacement(rp *api.ResolvedPlacement, name string, p config.V1Pr
 	}
 }
 
-func entryCarriesPlacement(rt config.V1RuntimeConfig) bool {
-	return len(rt.NodeSelector) > 0 || len(rt.Tolerations) > 0 || rt.RuntimeClassName != ""
-}
-
-func profileCarriesPlacement(p config.V1ProfileConfig) bool {
-	return len(p.NodeSelector) > 0 || len(p.Tolerations) > 0 || p.RuntimeClassName != ""
-}
-
 // kubernetesPlacementIdentity reads what the placement matcher needs from a
 // Kubernetes runtime: the client's current context, the runtime's default
 // namespace, whether it has a client, and the client's connection mode. A
@@ -347,12 +380,12 @@ func (s *Server) warnPlacementOffKubernetes(ctx context.Context, res runtimeReso
 		return
 	}
 	for _, name := range []string{res.Record.EntryName, res.DispatchEntry} {
-		if rt, ok := gvs.Runtimes[name]; ok && name != "" && entryCarriesPlacement(rt) {
+		if rt, ok := gvs.Runtimes[name]; ok && name != "" && config.RuntimeEntryHasPlacement(rt) {
 			s.agentLifecycleLog.Warn("Kubernetes placement on a runtime entry is ignored: the runtime is not Kubernetes",
 				"agent", res.Agent, "entry", name, "runtime", res.Runtime.Name())
 		}
 	}
-	if p, ok := gvs.Profiles[res.Profile]; ok && res.Profile != "" && profileCarriesPlacement(p) {
+	if p, ok := gvs.Profiles[res.Profile]; ok && res.Profile != "" && config.ProfileHasPlacement(p) {
 		s.agentLifecycleLog.Warn("Kubernetes placement on a profile is ignored: the runtime is not Kubernetes",
 			"agent", res.Agent, "profile", res.Profile, "runtime", res.Runtime.Name())
 	}
@@ -366,7 +399,7 @@ func (s *Server) warnProjectPlacement(agentName string, gvs, projectVS *config.V
 		return
 	}
 	for name, rt := range projectVS.Runtimes {
-		if !entryCarriesPlacement(rt) {
+		if !config.RuntimeEntryHasPlacement(rt) {
 			continue
 		}
 		if g, ok := gvs.Runtimes[name]; ok && samePlacement(g.NodeSelector, g.Tolerations, g.RuntimeClassName, rt.NodeSelector, rt.Tolerations, rt.RuntimeClassName) {
@@ -376,7 +409,7 @@ func (s *Server) warnProjectPlacement(agentName string, gvs, projectVS *config.V
 			"agent", agentName, "entry", "runtimes."+name)
 	}
 	for name, p := range projectVS.Profiles {
-		if !profileCarriesPlacement(p) {
+		if !config.ProfileHasPlacement(p) {
 			continue
 		}
 		if g, ok := gvs.Profiles[name]; ok && samePlacement(g.NodeSelector, g.Tolerations, g.RuntimeClassName, p.NodeSelector, p.Tolerations, p.RuntimeClassName) {
@@ -428,9 +461,9 @@ func (s *Server) checkStartLegacyPlacement(agentName, projectPath string, inline
 	return nil
 }
 
-// checkRestartLegacyPlacement checks, before a restart's stop, the agent's
-// persisted kubernetes block against the placement in effect. A config that
-// cannot be read fails closed.
+// checkRestartLegacyPlacement checks, before the restart endpoint's stop,
+// the agent's persisted kubernetes block against the placement in effect. A
+// config that cannot be read fails closed.
 func (s *Server) checkRestartLegacyPlacement(agentName, projectPath string, sharedWorkspace bool, rp *api.ResolvedPlacement) error {
 	if !rp.InEffect() || projectPath == "" {
 		// Without a project path there is no persisted config to check;

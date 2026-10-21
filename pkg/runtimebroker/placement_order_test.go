@@ -185,7 +185,8 @@ func TestPlacementOrder_AsyncCreateRefused_O4(t *testing.T) {
 	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), cause) {
 		t.Fatalf("got %d %s", w.Code, w.Body.String())
 	}
-	time.Sleep(50 * time.Millisecond)
+	// The refusal is written before beginAsyncLaunch, which is the only place
+	// a launch starts, so nothing can start after this response.
 	if n := len(mgr.recorded()); n != 0 {
 		t.Errorf("Start ran %d times for a refused create", n)
 	}
@@ -205,8 +206,10 @@ func TestPlacementOrder_AsyncCreateRefused_O4(t *testing.T) {
 	}
 }
 
-// O5: a restart whose placement cannot be determined is refused before the
-// stop: the agent is left running.
+// O5: a restart through the agent runtime's restart endpoint whose placement
+// cannot be determined is refused before that endpoint's stop: the agent is
+// left running. (A restart the hub performs as its own stop followed by a
+// start is refused at the start, after the hub's stop.)
 func TestPlacementOrder_RestartRefusedBeforeStop_O5(t *testing.T) {
 	f, _ := newOrderFixture(t, plGlobal(""), config.RuntimeBuildRecord{}, `{}`)
 	w := postAgentOpFor(t, f.srv, plOrderAgent, "restart", projectBody(f.dotScion, ""))
@@ -218,8 +221,9 @@ func TestPlacementOrder_RestartRefusedBeforeStop_O5(t *testing.T) {
 	}
 }
 
-// O6: a restart whose persisted kubernetes block conflicts with the
-// placement in effect is refused before the stop.
+// O6: a restart through the agent runtime's restart endpoint whose persisted
+// kubernetes block conflicts with the placement in effect is refused before
+// that endpoint's stop.
 func TestPlacementOrder_RestartLegacyBlockRefusedBeforeStop_O6(t *testing.T) {
 	f, _ := newOrderFixture(t, plGlobal(""), plGoodRecord(), `{"kubernetes": {"tolerations": [{"operator": "Exists"}]}}`)
 	w := postAgentOpFor(t, f.srv, plOrderAgent, "restart", projectBody(f.dotScion, ""))
@@ -390,5 +394,27 @@ func TestPlacementOrder_NotPersisted_O10(t *testing.T) {
 	}
 	if !strings.Contains(after, `"namespace": "agents"`) || !strings.Contains(after, `"max_turns": 9`) {
 		t.Errorf("scion-agent.json lost the agent's own values:\n%s", after)
+	}
+}
+
+// OP1 (carry a, handler level): the start and restart handlers settle How for
+// an existing agent with an empty selection profile, so the refusal while a
+// placement profile exists for its runtime names the agent and its missing
+// recorded profile (not the "not classified" fallback cause).
+func TestPlacementOrder_HandlersSettleUnrecorded(t *testing.T) {
+	for _, op := range []string{"start", "restart"} {
+		t.Run(op, func(t *testing.T) {
+			f, _ := newOrderFixture(t, plGlobal(plGPUProfile), plGoodRecord(), `{}`)
+			f.srv.config.ForceRuntime = ""
+			f.projectSettings(plProjectVS("gpu", map[string]config.V1ProfileConfig{"gpu": {Runtime: "gke"}}), nil)
+			w := postAgentOpFor(t, f.srv, plOrderAgent, op, projectBody(f.dotScion, ""))
+			const want = "agent agent-1 has no recorded profile; profile-level placement is configured for its runtime (profiles gpu)"
+			if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), want) {
+				t.Fatalf("%s: got %d %s; want 400 with %q", op, w.Code, w.Body.String(), want)
+			}
+			if f.mgr.stopCalls != 0 || f.mgr.startCalls != 0 {
+				t.Errorf("%s: stop=%d start=%d, want 0 and 0", op, f.mgr.stopCalls, f.mgr.startCalls)
+			}
+		})
 	}
 }

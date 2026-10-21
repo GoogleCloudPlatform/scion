@@ -977,28 +977,25 @@ func TestResolvePlacement_ConfiguredBareSiblingStillRefuses(t *testing.T) {
 	wantRefusal(t, err, "runtime entries incluster, kubernetes target the same cluster and namespace with different placement")
 }
 
-// (iii) when the configured entries cannot be told apart (the global file
-// cannot be stat'd), every entry takes part: here the default kubernetes
-// entry matches, so a stored profile on it applies instead of being refused
-// as targeting another runtime.
-func TestResolvePlacement_ConfiguredUnknownFailsClosed(t *testing.T) {
+// (iii) a global settings file that cannot be stat'd (the settings loader
+// treats it as missing, so the settings load without it) fails closed with
+// the global-unreadable cause, even when nothing in the remaining view
+// carries placement.
+func TestResolvePlacement_UnstatableGlobalFailsClosed(t *testing.T) {
 	f := newInClusterPlacementFixture(t, "", "")
 	path := filepath.Join(f.home, ".scion", "settings.yaml")
 	_ = os.RemoveAll(path)
 	if err := os.Symlink("settings.yaml", path); err != nil {
 		t.Fatal(err)
 	}
-	o := config.NewSettingsOverlay()
-	o.Update(nil, map[string]config.V1ProfileConfig{"p": {Runtime: "kubernetes", NodeSelector: map[string]string{"accel": "l4"}}}, nil)
-	config.SetGlobalSettingsOverlay(o)
-
-	rp, err := f.srv.resolvePlacement(context.Background(), f.res(resolutionProfile, "p", "kubernetes"), nil)
-	if err != nil || rp == nil || rp.NodeSelector["accel"] != "l4" {
-		t.Fatalf("got %+v, %v; want profile p on the default entry, treated as configured", rp, err)
+	if _, _, err := config.LoadGlobalSettingsWithOverlay(); err != nil {
+		t.Fatalf("precondition: the loader treats the file as missing, got %v", err)
 	}
-	if !strings.Contains(f.logs.String(), "cannot tell configured runtime entries from defaults") {
-		t.Errorf("want the fail-closed warning; logs:\n%s", f.logs.String())
+	rp, err := f.srv.resolvePlacement(context.Background(), f.res(resolutionForced, "", ""), nil)
+	if rp != nil {
+		t.Fatalf("started with placement %+v", rp)
 	}
+	wantRefusal(t, err, placementGlobalUnreadableCause)
 }
 
 // (iv) DB-backed settings: runtimes stored in the overlay are configured, so
@@ -1020,5 +1017,68 @@ func TestResolvePlacement_StoredRuntimesAreConfigured(t *testing.T) {
 	rp, err := f.srv.resolvePlacement(context.Background(), f.res(resolutionForced, "", ""), nil)
 	if err != nil || rp == nil || rp.NodeSelector["pool"] != "agents" {
 		t.Fatalf("got %+v, %v", rp, err)
+	}
+}
+
+// DB-backed settings whose overlay supplies the runtimes, a settings
+// file that still defines kubernetes (not in effect), and built-in
+// retention that keeps the embedded kubernetes entry for a referenced
+// profile: only the stored runtimes are configured, so the retained entry is
+// not a sibling and the stored entry's placement applies.
+func TestResolvePlacement_StoredRuntimesWithRetainedBuiltin(t *testing.T) {
+	f := newInClusterPlacementFixture(t, "schema_version: \"1\"\nruntimes:\n  kubernetes:\n    type: kubernetes\n", "incluster")
+	o := config.NewSettingsOverlay()
+	o.Update(map[string]config.V1RuntimeConfig{
+		"incluster": {Type: "kubernetes", NodeSelector: map[string]string{"pool": "agents"}},
+	}, map[string]config.V1ProfileConfig{
+		"local":  {Runtime: "incluster"},
+		"remote": {Runtime: "kubernetes"},
+	}, nil)
+	o.EnableConservativeRetention()
+	o.AddAgentReference("remote")
+	config.SetGlobalSettingsOverlay(o)
+	vs, _, err := config.LoadGlobalSettingsWithOverlay()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := vs.Runtimes["kubernetes"]; !ok {
+		t.Fatalf("precondition: the built-in kubernetes entry is retained; runtimes %v, retained %v", vs.Runtimes, vs.RetainedRuntimeNames())
+	}
+	rp, err := f.srv.resolvePlacement(context.Background(), f.res(resolutionForced, "", ""), nil)
+	if err != nil || rp == nil || rp.NodeSelector["pool"] != "agents" {
+		t.Fatalf("got %+v, %v; want the stored entry's placement and no refusal", rp, err)
+	}
+}
+
+// A global profile with placement whose runtime entry exists only
+// in the embedded defaults (and would match this runtime) cannot apply: the
+// start is refused with the dedicated cause, whether the profile was
+// selected or the runtime choice fell back or recorded no profile.
+func TestResolvePlacement_ProfileOnDefaultsOnlyEntry(t *testing.T) {
+	const want = "profile gpu sets Kubernetes placement, but its runtime entry kubernetes is defined only by the built-in defaults; define runtimes.kubernetes in the agent runtime's settings so its placement can be matched"
+	global := "schema_version: \"1\"\nprofiles:\n  gpu:\n    runtime: kubernetes\n    node_selector:\n      accel: l4\n"
+	for _, tc := range []struct {
+		name string
+		how  resolutionKind
+		prof string
+	}{
+		{"selected", resolutionProfile, "gpu"},
+		{"fallback", resolutionDefaultFallback, ""},
+		{"unrecorded", resolutionUnrecorded, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newInClusterPlacementFixture(t, global, "")
+			rp, err := f.srv.resolvePlacement(context.Background(), f.res(tc.how, tc.prof, "kubernetes"), nil)
+			if rp != nil {
+				t.Fatalf("started with placement %+v", rp)
+			}
+			wantRefusal(t, err, want)
+		})
+	}
+	// Defining the entry makes it configured: the selected profile applies.
+	f := newInClusterPlacementFixture(t, global+"runtimes:\n  kubernetes:\n    type: kubernetes\n", "kubernetes")
+	rp, err := f.srv.resolvePlacement(context.Background(), f.res(resolutionProfile, "gpu", "kubernetes"), nil)
+	if err != nil || rp == nil || rp.NodeSelector["accel"] != "l4" {
+		t.Fatalf("defined entry: got %+v, %v", rp, err)
 	}
 }
