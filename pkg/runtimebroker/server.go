@@ -503,6 +503,14 @@ type Server struct {
 	// every request it serves (flat_instance.go).
 	flatPolicy *config.FlatInstancePolicy
 
+	// presentationSeq is the process-wide sequence of a flat instance's
+	// presentation reports: every heartbeat service this server builds (one
+	// per hub connection, rebuilt on re-initialisation) takes the next
+	// value, so the sequence grows for the process life under one epoch
+	// (the start time) and a rebuilt service is never fenced out by its own
+	// earlier reports.
+	presentationSeq atomic.Int64
+
 	// NFS mount reconciler (nil when backend != "nfs")
 	nfsMountReconciler *NFSMountReconciler
 	// nfsHostOwned is set when nfsMountReconciler is the host mounter's:

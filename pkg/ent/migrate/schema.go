@@ -2485,6 +2485,12 @@ var (
 		{Name: "runtime_target_id", Type: field.TypeString, Nullable: true},
 		{Name: "runtime_target_type", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "runtime_target_display_name", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "runtime_target_presentation", Type: field.TypeString, Nullable: true},
+		{Name: "runtime_target_presentation_hash", Type: field.TypeString, Nullable: true},
+		{Name: "presentation_epoch", Type: field.TypeInt64, Nullable: true},
+		{Name: "presentation_seq", Type: field.TypeInt64, Nullable: true},
+		{Name: "presentation_fenced_at", Type: field.TypeTime, Nullable: true},
+		{Name: "presentation_observed_at", Type: field.TypeTime, Nullable: true},
 		{Name: "created", Type: field.TypeTime},
 		{Name: "updated", Type: field.TypeTime},
 	}

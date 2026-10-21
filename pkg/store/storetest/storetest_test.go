@@ -95,6 +95,15 @@ func TestCompositeStore_GroupChildEdgeRemoval(t *testing.T) {
 	storetest.GroupChildEdgeRemovalConformance(t, compositeFactory)
 }
 
+// TestCompositeStore_RuntimeBrokerPresentation runs the fenced
+// presentation-write conformance check (SetRuntimeBrokerPresentation, and
+// the full-row writers that must not touch its columns) on whichever
+// backend compositeFactory selects (SQLite by default, Postgres under -tags
+// integration).
+func TestCompositeStore_RuntimeBrokerPresentation(t *testing.T) {
+	storetest.RuntimeBrokerPresentationConformance(t, compositeFactory)
+}
+
 // TestCompositeStore_RuntimeBrokerCursorPagination is a targeted conformance
 // case, not part of the generic CRUD-parity oracle above: the oracle's
 // pagination category (storetest's internal testPaginate) only checks a
