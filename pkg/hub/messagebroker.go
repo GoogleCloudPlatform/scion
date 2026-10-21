@@ -737,7 +737,8 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 	// linked only after it passes the AttachmentStore lookup and the sender
 	// ownership check (linkSenderOwnedAttachmentRefs), and the SSE event and
 	// the member fan-out carry exactly the linked refs, the files history
-	// lists. An attachment stored as an artifact is not an AttachmentStore
+	// lists. A linked file downloads for the message's readers, so naming it
+	// to them discloses nothing they may not read. An attachment stored as an artifact is not an AttachmentStore
 	// file, so an artifact id that appears in transport metadata fails the
 	// lookup and is dropped: this path never binds or publishes one (artifact
 	// references come only from the admitted references below). Pinned by
