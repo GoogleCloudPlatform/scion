@@ -358,3 +358,11 @@ func (t *roundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	applyToken(req.Header, tok, t.mode)
 	return t.base.RoundTrip(req)
 }
+
+// HubOnlyBase returns the transport below this layer. The transport token is
+// meant only for the hub, so a client that also sends requests to other
+// hosts (apiclient.Transport.AuthenticatedHTTPClient, for signed transfer
+// URLs) sends those requests through HubOnlyBase instead.
+func (t *roundTripper) HubOnlyBase() http.RoundTripper {
+	return t.base
+}
