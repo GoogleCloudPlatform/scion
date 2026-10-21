@@ -102,6 +102,35 @@ type AgentReincarnation struct {
 	// "failed:<reason>"; "" until attempted. Written only by
 	// SetAgentReincarnationSourceCleanup.
 	SourceCleanup string `json:"sourceCleanup,omitempty"`
+	// TransferMode is set, at creation, for a cross-broker move: how the
+	// workspace reaches the target, TransferModeExport or
+	// TransferModeRecreate. "" for a plain reincarnation, and for a move
+	// recorded before the field existed, which was always an export move
+	// (see EffectiveTransferMode).
+	TransferMode string `json:"transferMode,omitempty"`
+}
+
+// Workspace transfer modes of a cross-broker move.
+const (
+	// TransferModeExport: the same workspace, through an NFS export both
+	// brokers mount.
+	TransferModeExport = "export"
+	// TransferModeRecreate: a fresh workspace provisioned on the target
+	// (a forced move); the source's local state is given up.
+	TransferModeRecreate = "recreate"
+)
+
+// EffectiveTransferMode is the record's transfer mode, reading a move
+// recorded without one ("") as TransferModeExport, the only mode that
+// existed before the field. It returns "" for a plain reincarnation.
+func (r *AgentReincarnation) EffectiveTransferMode() string {
+	if r.SourceBrokerID == "" {
+		return ""
+	}
+	if r.TransferMode == "" {
+		return TransferModeExport
+	}
+	return r.TransferMode
 }
 
 // SourceCleanupDone records a successful source-broker cleanup after a move.
