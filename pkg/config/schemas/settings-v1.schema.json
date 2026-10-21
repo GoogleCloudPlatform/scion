@@ -1338,6 +1338,12 @@
           "description": "The relay's own public URL, recorded as its relay_instances.public_endpoint.",
           "x-env-var": "SCION_SERVER_RELAY_PUBLICURL",
           "x-since": "1"
+        },
+        "singleton": {
+          "type": "boolean",
+          "description": "Asserts a non-HA singleton relay: required on Cloud Run (K_SERVICE set), with max_instances=1, min_instances=1 and cpu_idle=false; allowed elsewhere, where it labels the relay non-HA. Read at startup.",
+          "x-env-var": "SCION_SERVER_RELAY_SINGLETON",
+          "x-since": "1"
         }
       }
     },
