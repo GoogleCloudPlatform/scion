@@ -40,7 +40,7 @@ var (
 // hub's WebDAV endpoint, which has been removed.
 const projectSyncRemovedMessage = "project-level sync ('scion sync', 'scion sync push', 'scion sync pull') has been removed along with the hub's WebDAV endpoint. " +
 	"To sync with an agent, use 'scion sync to <agent>' or 'scion sync from <agent>'. " +
-	"To move project files, use git, or the project's Files tab in the web UI (upload, download or workspace archive)"
+	"To move project files, use git, or the project's Files tab in the web UI (upload, download or workspace archive)."
 
 // syncCmd represents the sync command.
 var syncCmd = &cobra.Command{
