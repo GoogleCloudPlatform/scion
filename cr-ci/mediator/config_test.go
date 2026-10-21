@@ -2,7 +2,10 @@ package main
 
 import (
 	"bufio"
+	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -133,78 +136,81 @@ func TestLoadRequired(t *testing.T) {
 	}
 }
 
+// invalidCases are single-key changes to validEnv that Load must reject. The
+// deploy scripts' validator must reject the same (TestScriptValidatorMatchesLoad).
+var invalidCases = []struct {
+	key, value string
+}{
+	{EnvTargetRepos, "no-slash"},
+	{EnvTargetRepos, "a/b,,c/d"},
+	{EnvTargetRepos, "a/b,A/B"},
+	{EnvTargetRepos, "-bad/repo"},
+	{EnvTargetRepos, "owner/.."},
+	{EnvTargetRepos, "owner/re po"},
+	{EnvTargetRepos, "a--b/repo"},
+	{EnvTargetRepos, "owner-/repo"},
+	{EnvTargetRepos, strings.Repeat("a", 40) + "/repo"},
+	{EnvTargetRepos, strings.Repeat("a-", 20) + "a/repo"}, // 41 chars, alternating hyphens
+	{EnvGitHubAppID, "abc"},
+	{EnvGitHubAppID, "0"},
+	{EnvGitHubInstallScope, "enterprise"},
+	{EnvGCPProject, "Bad_Project"},
+	{EnvGCPProject, "short"},
+	{EnvRegion, "uscentral"},
+	{EnvRunnerLabel, "has space"},
+	{EnvRunnerLabel, "a,b"},
+	{EnvRunnerLabel, "self-hosted"},
+	{EnvRunnerLabel, "Linux"},
+	{EnvRunnerJobName, "Bad-Name"},
+	{EnvRunnerJobName, "ends-with-"},
+	{EnvRunnerImageName, "Image"},
+	{EnvMediatorImageName, "Mediator"},
+	{EnvMediatorImageName, "gh-runner"}, // duplicates the runner image
+	{EnvRunnerCPU, "3"},
+	{EnvRunnerCPU, "0"},
+	{EnvRunnerCPU, "x"},
+	{EnvRunnerMemory, "32G"},
+	{EnvRunnerMemory, "33Gi"},
+	{EnvRunnerMemory, "256Mi"},
+	{EnvRunnerMemory, "18014398509481985Gi"}, // overflows to 1024Mi if multiplied first
+	{EnvRunnerMemory, "99999999999999999999Mi"},
+	{EnvRunnerMemory, "2Gi"}, // below the 8-CPU floor of 4Gi
+	{EnvRunnerDiskGi, "0"},
+	{EnvRunnerDiskGi, "101"},
+	{EnvMaxConcurrentRunners, "-1"},
+	{EnvTaskTimeout, "45"},
+	{EnvTaskTimeout, "30s"},
+	{EnvTaskTimeout, "169h"},
+	{EnvClaimTTL, "300"},
+	{EnvClaimTTL, "10s"},
+	{EnvClaimTTL, "2h"},
+	{EnvArtifactRepo, "Repo"},
+	{EnvMediatorServiceName, "1abc"},
+	{EnvReconcilerJobName, "has_underscore"},
+	{EnvReconcileSchedule, "@every 5m"},
+	{EnvReconcileSchedule, "*/5 * * *"},
+	{EnvReconcileSchedule, "*/5 * * * * *"},
+	{EnvMediatorURL, "http://mediator.example.com"},
+	{EnvMediatorURL, "https://"},
+	{EnvMediatorURL, "https://mediator.example.com/webhook"},
+	{EnvMediatorURL, "https://user@mediator.example.com"},
+	{EnvMediatorURL, "https://mediator.example.com?x=1"},
+	{EnvMediatorURL, "https://mediator.example.com?"},
+	{EnvMediatorURL, "https://mediator.example.com/?"},
+	{EnvMediatorURL, "https://mediator.example.com#"},
+	{EnvMediatorURL, "https://mediator.example.com#frag"},
+	{EnvRunnerGroupID, "0"},
+	{EnvRunnerGroupID, "default"},
+	{EnvRoutingVariableName, "1VAR"},
+	{EnvRoutingVariableName, "GITHUB_RUNNER"},
+	{EnvBuildSAName, "sa"},
+	{EnvExecSAName, "cr-runner-mediator-sa"}, // duplicates the mediator SA
+	{EnvAppPrivateKeySecretName, "bad/name"},
+	{EnvWebhookSecretName, "cr-runner-gh-app-private-key"}, // duplicates the key secret
+}
+
 func TestLoadInvalid(t *testing.T) {
-	tests := []struct {
-		key, value string
-	}{
-		{EnvTargetRepos, "no-slash"},
-		{EnvTargetRepos, "a/b,,c/d"},
-		{EnvTargetRepos, "a/b,A/B"},
-		{EnvTargetRepos, "-bad/repo"},
-		{EnvTargetRepos, "owner/.."},
-		{EnvTargetRepos, "owner/re po"},
-		{EnvTargetRepos, "a--b/repo"},
-		{EnvTargetRepos, "owner-/repo"},
-		{EnvTargetRepos, strings.Repeat("a", 40) + "/repo"},
-		{EnvTargetRepos, strings.Repeat("a-", 20) + "a/repo"}, // 41 chars, alternating hyphens
-		{EnvGitHubAppID, "abc"},
-		{EnvGitHubAppID, "0"},
-		{EnvGitHubInstallScope, "enterprise"},
-		{EnvGCPProject, "Bad_Project"},
-		{EnvGCPProject, "short"},
-		{EnvRegion, "uscentral"},
-		{EnvRunnerLabel, "has space"},
-		{EnvRunnerLabel, "a,b"},
-		{EnvRunnerLabel, "self-hosted"},
-		{EnvRunnerLabel, "Linux"},
-		{EnvRunnerJobName, "Bad-Name"},
-		{EnvRunnerJobName, "ends-with-"},
-		{EnvRunnerImageName, "Image"},
-		{EnvMediatorImageName, "Mediator"},
-		{EnvMediatorImageName, "gh-runner"}, // duplicates the runner image
-		{EnvRunnerCPU, "3"},
-		{EnvRunnerCPU, "0"},
-		{EnvRunnerCPU, "x"},
-		{EnvRunnerMemory, "32G"},
-		{EnvRunnerMemory, "33Gi"},
-		{EnvRunnerMemory, "256Mi"},
-		{EnvRunnerMemory, "18014398509481985Gi"}, // overflows to 1024Mi if multiplied first
-		{EnvRunnerMemory, "99999999999999999999Mi"},
-		{EnvRunnerMemory, "2Gi"}, // below the 8-CPU floor of 4Gi
-		{EnvRunnerDiskGi, "0"},
-		{EnvRunnerDiskGi, "101"},
-		{EnvMaxConcurrentRunners, "-1"},
-		{EnvTaskTimeout, "45"},
-		{EnvTaskTimeout, "30s"},
-		{EnvTaskTimeout, "169h"},
-		{EnvClaimTTL, "300"},
-		{EnvClaimTTL, "10s"},
-		{EnvClaimTTL, "2h"},
-		{EnvArtifactRepo, "Repo"},
-		{EnvMediatorServiceName, "1abc"},
-		{EnvReconcilerJobName, "has_underscore"},
-		{EnvReconcileSchedule, "@every 5m"},
-		{EnvReconcileSchedule, "*/5 * * *"},
-		{EnvReconcileSchedule, "*/5 * * * * *"},
-		{EnvMediatorURL, "http://mediator.example.com"},
-		{EnvMediatorURL, "https://"},
-		{EnvMediatorURL, "https://mediator.example.com/webhook"},
-		{EnvMediatorURL, "https://user@mediator.example.com"},
-		{EnvMediatorURL, "https://mediator.example.com?x=1"},
-		{EnvMediatorURL, "https://mediator.example.com?"},
-		{EnvMediatorURL, "https://mediator.example.com/?"},
-		{EnvMediatorURL, "https://mediator.example.com#"},
-		{EnvMediatorURL, "https://mediator.example.com#frag"},
-		{EnvRunnerGroupID, "0"},
-		{EnvRunnerGroupID, "default"},
-		{EnvRoutingVariableName, "1VAR"},
-		{EnvRoutingVariableName, "GITHUB_RUNNER"},
-		{EnvBuildSAName, "sa"},
-		{EnvExecSAName, "cr-runner-mediator-sa"}, // duplicates the mediator SA
-		{EnvAppPrivateKeySecretName, "bad/name"},
-		{EnvWebhookSecretName, "cr-runner-gh-app-private-key"}, // duplicates the key secret
-	}
-	for _, tt := range tests {
+	for _, tt := range invalidCases {
 		t.Run(tt.key+"="+tt.value, func(t *testing.T) {
 			env := validEnv()
 			env[tt.key] = tt.value
@@ -284,5 +290,77 @@ func TestExampleEnvMatchesContract(t *testing.T) {
 		if example[k] != def {
 			t.Errorf("%s: example value %q, loader default %q", k, example[k], def)
 		}
+	}
+}
+
+// validCases are configs (changes to validEnv) that Load must accept.
+var validCases = []map[string]string{
+	{},
+	{EnvTargetRepos: " owner-a/repo.one , Owner-B/repo_two ", EnvRunnerCPU: "4", EnvRunnerMemory: "16384Mi", EnvRunnerDiskGi: "100", EnvTaskTimeout: "2h", EnvMaxConcurrentRunners: "20"},
+	{EnvTargetRepos: strings.Repeat("a", 39) + "/repo," + strings.Repeat("a-", 19) + "a/repo"},
+	{EnvMediatorURL: "https://cr-runner-mediator-abc123-uc.a.run.app/"},
+	{EnvGitHubInstallScope: "org", EnvTargetRepos: "some-org/a,SOME-ORG/b"},
+	{EnvRunnerCPU: "6", EnvRunnerMemory: "24Gi"},
+	{EnvTaskTimeout: "1h30m", EnvClaimTTL: "1m30s"},
+	{EnvGitHubAppID: "+0042", EnvRunnerGroupID: "007"},
+	{EnvReconcileSchedule: "0 */2 * * 1-5"},
+}
+
+// TestScriptValidatorMatchesLoad keeps scripts/lib.sh's config validation
+// (used by every deploy script) in lockstep with Load: for every valid and
+// invalid case, scripts/check-config.sh accepts exactly when Load does, and
+// names the offending key.
+func TestScriptValidatorMatchesLoad(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Fatal("bash is required")
+	}
+	dir := t.TempDir()
+	check := func(env map[string]string) (bool, string) {
+		t.Helper()
+		var b strings.Builder
+		for k, v := range env {
+			fmt.Fprintf(&b, "%s=%s\n", k, v)
+		}
+		f := filepath.Join(dir, "c.env")
+		if err := os.WriteFile(f, []byte(b.String()), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(bash, "../scripts/check-config.sh", "--config", f)
+		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "LC_ALL=C"}
+		out, err := cmd.CombinedOutput()
+		return err == nil, string(out)
+	}
+	merge := func(over map[string]string) map[string]string {
+		env := validEnv()
+		for k, v := range over {
+			env[k] = v
+		}
+		return env
+	}
+	for i, over := range validCases {
+		env := merge(over)
+		if _, err := Load(getenvFrom(env)); err != nil {
+			t.Fatalf("valid case %d rejected by Load: %v", i, err)
+		}
+		if ok, out := check(env); !ok {
+			t.Errorf("valid case %d rejected by check-config.sh:\n%s", i, out)
+		}
+	}
+	for _, tt := range invalidCases {
+		env := merge(map[string]string{tt.key: tt.value})
+		if _, err := Load(getenvFrom(env)); err == nil {
+			t.Fatalf("%s=%q accepted by Load", tt.key, tt.value)
+		}
+		ok, out := check(env)
+		if ok {
+			t.Errorf("%s=%q accepted by check-config.sh", tt.key, tt.value)
+		} else if !strings.Contains(out, tt.key) {
+			t.Errorf("%s=%q: check-config.sh does not name the key:\n%s", tt.key, tt.value, out)
+		}
+	}
+	// Required keys.
+	if ok, out := check(map[string]string{}); ok || !strings.Contains(out, EnvGitHubAppID+": required") {
+		t.Errorf("empty config: ok=%v\n%s", ok, out)
 	}
 }

@@ -1,0 +1,33 @@
+# cr-ci bootstrap-gcp.sh (dry-run) project=example-project region=us-central1
+# dry-run: nothing is changed; '?' lines are read-only checks, assumed to find nothing
+# C1: APIs
++ gcloud services enable run.googleapis.com artifactregistry.googleapis.com secretmanager.googleapis.com cloudscheduler.googleapis.com cloudbuild.googleapis.com iam.googleapis.com --project=example-project
+# C2: service accounts (EXEC_SA_NAME must stay at zero roles)
+? gcloud iam service-accounts describe cr-runner-build-sa@example-project.iam.gserviceaccount.com --project=example-project '--format=value(email)'
++ gcloud iam service-accounts create cr-runner-build-sa --project=example-project '--display-name=cr-ci image builds (Cloud Build)' '--description=cr-ci: image builds (Cloud Build)'
+? gcloud iam service-accounts describe cr-runner-mediator-sa@example-project.iam.gserviceaccount.com --project=example-project '--format=value(email)'
++ gcloud iam service-accounts create cr-runner-mediator-sa --project=example-project '--display-name=cr-ci mediator service' '--description=cr-ci: mediator service'
+? gcloud iam service-accounts describe cr-runner-scheduler-sa@example-project.iam.gserviceaccount.com --project=example-project '--format=value(email)'
++ gcloud iam service-accounts create cr-runner-scheduler-sa --project=example-project '--display-name=cr-ci reconcile scheduler' '--description=cr-ci: reconcile scheduler'
+? gcloud iam service-accounts describe cr-runner-exec-sa@example-project.iam.gserviceaccount.com --project=example-project '--format=value(email)'
++ gcloud iam service-accounts create cr-runner-exec-sa --project=example-project '--display-name=cr-ci runner executions (no roles)' '--description=cr-ci: runner executions (no roles)'
+# C3: Artifact Registry repository
+? gcloud artifacts repositories describe cr-runners --location=us-central1 --project=example-project '--format=value(name)'
++ gcloud artifacts repositories create cr-runners --repository-format=docker --location=us-central1 --project=example-project '--description=cr-ci runner and mediator images'
+# C5: secret containers (versions come from set-secrets.sh)
+? gcloud secrets describe cr-runner-gh-app-private-key --project=example-project '--format=value(name)'
++ gcloud secrets create cr-runner-gh-app-private-key --replication-policy=automatic --project=example-project
+? gcloud secrets describe cr-runner-gh-webhook-secret --project=example-project '--format=value(name)'
++ gcloud secrets create cr-runner-gh-webhook-secret --replication-policy=automatic --project=example-project
+# C4: BUILD_SA_NAME may push to ARTIFACT_REPO only
++ gcloud artifacts repositories add-iam-policy-binding cr-runners --location=us-central1 --project=example-project --member=serviceAccount:cr-runner-build-sa@example-project.iam.gserviceaccount.com --role=roles/artifactregistry.writer --format=none
+# C7: BUILD_SA_NAME writes build logs (CLOUD_LOGGING_ONLY)
++ gcloud projects add-iam-policy-binding example-project --member=serviceAccount:cr-runner-build-sa@example-project.iam.gserviceaccount.com --role=roles/logging.logWriter --condition=None --format=none
+# C6: MEDIATOR_SA_NAME reads the two secrets only
++ gcloud secrets add-iam-policy-binding cr-runner-gh-app-private-key --project=example-project --member=serviceAccount:cr-runner-mediator-sa@example-project.iam.gserviceaccount.com --role=roles/secretmanager.secretAccessor --format=none
++ gcloud secrets add-iam-policy-binding cr-runner-gh-webhook-secret --project=example-project --member=serviceAccount:cr-runner-mediator-sa@example-project.iam.gserviceaccount.com --role=roles/secretmanager.secretAccessor --format=none
+# C11: MEDIATOR_SA_NAME may act as EXEC_SA_NAME only
++ gcloud iam service-accounts add-iam-policy-binding cr-runner-exec-sa@example-project.iam.gserviceaccount.com --project=example-project --member=serviceAccount:cr-runner-mediator-sa@example-project.iam.gserviceaccount.com --role=roles/iam.serviceAccountUser --format=none
+# check: EXEC_SA_NAME holds no project roles
+? gcloud projects get-iam-policy example-project '--flatten=bindings[].members' --filter=bindings.members:serviceAccount:cr-runner-exec-sa@example-project.iam.gserviceaccount.com '--format=value(bindings.role)'
+# done; next: set-secrets.sh, build-runner-image.sh

@@ -86,7 +86,7 @@ P=${CFG[GCP_PROJECT]}
 # (never the content); with --apply runs it with the caller's stdin.
 add_version() {
   local secret=$1 src=$2
-  printf '+ %s < %s\n' "$(crci_quote gcloud secrets versions add "$secret" --project="$P" --data-file=-)" "$src"
+  printf '+ %s < %s\n' "$(crci_quote gcloud secrets versions add "$secret" --project="$P" --data-file=- --format=none)" "$src"
   if [[ $CRCI_MODE == apply ]]; then
     gcloud secrets versions add "$secret" --project="$P" --data-file=- --format=none ||
       crci_die "step failed: gcloud secrets versions add $secret"

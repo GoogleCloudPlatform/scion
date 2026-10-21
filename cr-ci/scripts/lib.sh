@@ -76,6 +76,26 @@ crci_run() {
   fi
 }
 
+# crci_run_unless_missing CMD...: like crci_run, but a failure whose error
+# says the target is already gone (NOT_FOUND, "not found", "does not exist")
+# is a no-op, so removals stay idempotent. Other failures stop the script.
+crci_run_unless_missing() {
+  printf '+ %s\n' "$(crci_quote "$@")"
+  [[ $CRCI_MODE == apply ]] || return 0
+  local err rc
+  if err=$("$@" 2>&1 >/dev/null); then
+    return 0
+  else
+    rc=$?
+  fi
+  if grep -qE 'NOT_FOUND|[Nn]ot [Ff]ound|does not exist' <<<"$err"; then
+    crci_note "already absent"
+    return 0
+  fi
+  printf '%s\n' "$err" >&2
+  crci_die "step failed (rc $rc): $(crci_quote "$@")"
+}
+
 crci_exists() {
   printf '? %s\n' "$(crci_quote "$@")"
   [[ $CRCI_MODE == apply ]] || return 1
@@ -609,9 +629,14 @@ crci_build_image() {
     printf '+ %s | %s\n' "$(crci_quote gcloud auth print-access-token "--impersonate-service-account=$build_sa")" \
       "$(crci_quote docker login -u oauth2accesstoken --password-stdin "$reg")"
     if [[ $CRCI_MODE == apply ]]; then
-      gcloud auth print-access-token --impersonate-service-account="$build_sa" |
-        docker login -u oauth2accesstoken --password-stdin "$reg" >/dev/null ||
-        crci_die "step failed: docker login to $reg as $build_sa"
+      # Sequential, so a failure names its step; the token lives only in this
+      # shell variable and reaches docker through the printf builtin (stdin).
+      local token
+      token=$(gcloud auth print-access-token --impersonate-service-account="$build_sa") ||
+        crci_die "step failed: gcloud auth print-access-token as $build_sa"
+      printf '%s' "$token" | docker login -u oauth2accesstoken --password-stdin "$reg" >/dev/null ||
+        crci_die "step failed: docker login to $reg"
+      token=""
     fi
     crci_run docker push "$ref"
     crci_run docker logout "$reg"

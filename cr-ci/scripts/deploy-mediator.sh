@@ -96,12 +96,17 @@ crci_run gcloud run services add-iam-policy-binding "$SVC" --region="$R" --proje
 crci_read URL "<url printed by the command above>" gcloud run services describe "$SVC" \
   --region="$R" --project="$P" --format='value(status.url)'
 crci_note "service URL: $URL"
+# A service answers on several URLs (status.url, which may be the hash form,
+# and the deterministic https://SERVICE-PROJECT_NUMBER.REGION.run.app); any of
+# them is a valid MEDIATOR_URL.
+crci_read URLS "[]" gcloud run services describe "$SVC" --region="$R" --project="$P" \
+  --format='value(metadata.annotations."run.googleapis.com/urls")'
 if [[ $CRCI_MODE == apply ]]; then
   if [[ -z ${CFG[MEDIATOR_URL]} ]]; then
     crci_note "MEDIATOR_URL is empty: set MEDIATOR_URL=$URL in $CRCI_CONFIG, re-run deploy-mediator.sh, then run deploy-scheduler.sh"
     crci_note "the GitHub App webhook URL is $URL/webhook"
-  elif [[ ${CFG[MEDIATOR_URL]} != "$URL" ]]; then
-    printf '%s: WARNING: MEDIATOR_URL=%s but the service URL is %s.\n' "$CRCI_PROG" "${CFG[MEDIATOR_URL]}" "$URL" >&2
+  elif [[ ${CFG[MEDIATOR_URL]} != "$URL" && $URLS != *"\"${CFG[MEDIATOR_URL]}\""* ]]; then
+    printf '%s: WARNING: MEDIATOR_URL=%s is not one of the service URLs (%s %s).\n' "$CRCI_PROG" "${CFG[MEDIATOR_URL]}" "$URL" "$URLS" >&2
     printf '%s: WARNING: update MEDIATOR_URL in %s and the App webhook URL (%s/webhook), then re-run this script and deploy-scheduler.sh.\n' \
       "$CRCI_PROG" "$CRCI_CONFIG" "$URL" >&2
   else
