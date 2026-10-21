@@ -33,3 +33,12 @@ func TestKubeConnectionOf(t *testing.T) {
 		}
 	}
 }
+
+// The Workload Identity node label value pkg/config warns about must be the
+// one the GCP identity "block" mode forces here.
+func TestWorkloadIdentityNodeLabelMatchesConfig(t *testing.T) {
+	if config.WorkloadIdentityNodeLabel != KubernetesWorkloadIdentityNodeLabel {
+		t.Errorf("config.WorkloadIdentityNodeLabel = %q, KubernetesWorkloadIdentityNodeLabel = %q; they must be equal",
+			config.WorkloadIdentityNodeLabel, KubernetesWorkloadIdentityNodeLabel)
+	}
+}

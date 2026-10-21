@@ -65,7 +65,7 @@ func TestPlacementWarnings_V1w(t *testing.T) {
 				"scion-workload":                "agents", // paired below
 				"pool":                          "a",      // no same-key toleration
 				"cloud.google.com/gke-nodepool": "p",      // exempt prefix
-				workloadIdentityNodeLabel:       "true",   // WI key
+				WorkloadIdentityNodeLabel:       "true",   // WI key
 			},
 			Tolerations: []api.K8sToleration{
 				{Key: "scion-workload", Operator: "Equal", Value: "agents", Effect: "NoSchedule"},
@@ -287,7 +287,7 @@ profiles:
 	assert.Equal(t, map[string]string{"nvidia.com/gpu.present": "true"}, vs.Profiles["gpu"].NodeSelector)
 	assert.Empty(t, vs.Runtimes["empty"].NodeSelector)
 	assert.Empty(t, vs.Runtimes["empty"].Tolerations)
-	assert.False(t, runtimeEntryHasPlacement(vs.Runtimes["empty"]), "{} and [] must behave as unset")
+	assert.False(t, RuntimeEntryHasPlacement(vs.Runtimes["empty"]), "{} and [] must behave as unset")
 
 	// Overlay (DB-backed settings): stored values replace the file's.
 	o := NewSettingsOverlay()
@@ -301,7 +301,7 @@ profiles:
 	assert.Equal(t, wantSel, vs.Runtimes["stored"].NodeSelector)
 	assert.Equal(t, wantTol, vs.Runtimes["stored"].Tolerations)
 	assert.Equal(t, map[string]string{"a.b/c": "d"}, vs.Profiles["p"].NodeSelector)
-	assert.False(t, runtimeEntryHasPlacement(vs.Runtimes["blank"]))
+	assert.False(t, RuntimeEntryHasPlacement(vs.Runtimes["blank"]))
 	_, fileEntry := vs.Runtimes["gke"]
 	assert.False(t, fileEntry, "stored runtimes replace the file's")
 }
@@ -333,13 +333,14 @@ func TestConfiguredRuntimeNames(t *testing.T) {
 	_, hasDefault := vs.Runtimes["kubernetes"]
 	require.True(t, hasDefault, "precondition: the loaded view holds the embedded default entry")
 
-	// DB mode: the overlay's stored runtimes are configured.
+	// DB mode: when the overlay supplies the runtimes section, only its
+	// stored runtimes are configured; the file's entries are not in effect.
 	o := NewSettingsOverlay()
 	o.Update(map[string]V1RuntimeConfig{"stored": {Type: "kubernetes"}}, nil, nil)
 	SetGlobalSettingsOverlay(o)
 	names, ok = ConfiguredRuntimeNames()
 	require.True(t, ok)
-	assert.Equal(t, map[string]bool{"gke": true, "stored": true}, names)
+	assert.Equal(t, map[string]bool{"stored": true}, names)
 
 	// An active overlay without stored runtimes adds nothing.
 	o2 := NewSettingsOverlay()
@@ -368,4 +369,32 @@ func TestConfiguredRuntimeNames(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte("runtimes: [unclosed\n"), 0o644))
 	_, ok = ConfiguredRuntimeNames()
 	assert.False(t, ok, "unparsable file must fail closed")
+}
+
+// The file's runtime names are read the way the settings load them: a
+// top-level key in another letter case still configures its entries.
+func TestConfiguredRuntimeNames_KeyCase(t *testing.T) {
+	writePlacementGlobalSettings(t, "schema_version: \"1\"\nRuntimes:\n  gke:\n    type: kubernetes\n")
+	vs, _, err := LoadGlobalSettingsWithOverlay()
+	require.NoError(t, err)
+	_, loaded := vs.Runtimes["gke"]
+	require.True(t, loaded, "precondition: the loader reads the upper-case key")
+	names, ok := ConfiguredRuntimeNames()
+	require.True(t, ok)
+	assert.True(t, names["gke"], "an entry the loader reads is configured: %v", names)
+	assert.False(t, names["kubernetes"], "the embedded default entry is not configured")
+}
+
+// GlobalSettingsFileUnstatable: only a stat error other than not-exist.
+func TestGlobalSettingsFileUnstatable(t *testing.T) {
+	writePlacementGlobalSettings(t, "schema_version: \"1\"\n")
+	assert.False(t, GlobalSettingsFileUnstatable(), "readable file")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	assert.False(t, GlobalSettingsFileUnstatable(), "no global directory")
+	dir := filepath.Join(home, ".scion")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	assert.False(t, GlobalSettingsFileUnstatable(), "no file")
+	require.NoError(t, os.Symlink("settings.yaml", filepath.Join(dir, "settings.yaml")))
+	assert.True(t, GlobalSettingsFileUnstatable(), "self-referencing symlink")
 }

@@ -18,22 +18,22 @@ import (
 	"fmt"
 	"maps"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	yamlv3 "gopkg.in/yaml.v3"
+	"github.com/knadh/koanf/v2"
 )
 
 // Settings-level checks for the Kubernetes placement defaults
 // (node_selector, tolerations, runtime_class_name) on runtime entries and
 // profiles (ptone/scion#5085).
 
-// workloadIdentityNodeLabel is the node label the GCP identity "block" mode
-// forces into agent pods' node selector (runtime.KubernetesWorkloadIdentityNodeLabel;
-// pkg/config cannot import pkg/runtime).
-const workloadIdentityNodeLabel = "iam.gke.io/gke-metadata-server-enabled"
+// WorkloadIdentityNodeLabel is the node label the GCP identity "block" mode
+// forces into agent pods' node selector. It must equal
+// runtime.KubernetesWorkloadIdentityNodeLabel (pkg/config cannot import
+// pkg/runtime; a pkg/runtime test pins the two together).
+const WorkloadIdentityNodeLabel = "iam.gke.io/gke-metadata-server-enabled"
 
 // pairingExemptPrefixes are node label key prefixes that GKE or Kubernetes
 // manage; a selector key under them needs no same-key toleration.
@@ -49,11 +49,15 @@ var pairingExemptPrefixes = []string{
 // (snake_case) and agent config (camelCase) spellings, lower-cased.
 var placementKeySpellings = []string{"node_selector", "nodeselector", "tolerations", "runtime_class_name", "runtimeclassname"}
 
-func runtimeEntryHasPlacement(rt V1RuntimeConfig) bool {
+// RuntimeEntryHasPlacement reports whether a runtime entry sets any of the
+// Kubernetes placement fields (node_selector, tolerations,
+// runtime_class_name). Empty values count as unset.
+func RuntimeEntryHasPlacement(rt V1RuntimeConfig) bool {
 	return len(rt.NodeSelector) > 0 || len(rt.Tolerations) > 0 || rt.RuntimeClassName != ""
 }
 
-func profileHasPlacement(p V1ProfileConfig) bool {
+// ProfileHasPlacement is RuntimeEntryHasPlacement for a profile.
+func ProfileHasPlacement(p V1ProfileConfig) bool {
 	return len(p.NodeSelector) > 0 || len(p.Tolerations) > 0 || p.RuntimeClassName != ""
 }
 
@@ -150,12 +154,12 @@ func SiblingDisagreementCause(a, b string) string {
 func PlacementIgnoredWarnings(runtimes map[string]V1RuntimeConfig, profiles map[string]V1ProfileConfig) []string {
 	var warnings []string
 	for name, rt := range runtimes {
-		if runtimeEntryHasPlacement(rt) && !isKubernetesRuntimeEntry(name, rt) {
+		if RuntimeEntryHasPlacement(rt) && !isKubernetesRuntimeEntry(name, rt) {
 			warnings = append(warnings, fmt.Sprintf("runtimes.%s sets node_selector, tolerations or runtime_class_name but runtime %q is not a Kubernetes runtime; they are ignored", name, name))
 		}
 	}
 	for name, p := range profiles {
-		if !profileHasPlacement(p) {
+		if !ProfileHasPlacement(p) {
 			continue
 		}
 		rt, ok := runtimes[p.Runtime]
@@ -182,8 +186,8 @@ func PlacementIgnoredWarnings(runtimes map[string]V1RuntimeConfig, profiles map[
 func PlacementSettingsWarnings(runtimes map[string]V1RuntimeConfig, profiles map[string]V1ProfileConfig) []string {
 	var warnings []string
 	check := func(path string, selector map[string]string, tolerations []api.K8sToleration) {
-		if _, ok := selector[workloadIdentityNodeLabel]; ok {
-			warnings = append(warnings, fmt.Sprintf("%s.node_selector sets %q; agents in GCP identity \"block\" mode always use their own value for this key", path, workloadIdentityNodeLabel))
+		if _, ok := selector[WorkloadIdentityNodeLabel]; ok {
+			warnings = append(warnings, fmt.Sprintf("%s.node_selector sets %q; agents in GCP identity \"block\" mode always use their own value for this key", path, WorkloadIdentityNodeLabel))
 		}
 		for i, t := range tolerations {
 			if isMatchAllToleration(t) {
@@ -280,24 +284,37 @@ func GlobalSettingsMentionPlacementKeys() bool {
 }
 
 // ConfiguredRuntimeNames returns the names of the runtime entries the
-// operator configured: the runtimes keys of the global settings file, plus
-// the runtimes stored in the active settings overlay. Entries that exist
-// only in the embedded default settings are not among them. Kubernetes
-// placement considers only configured entries.
+// operator configured and that are in effect. Entries that exist only in
+// the embedded default settings, and built-in entries the settings overlay
+// retains, are not among them. Kubernetes placement considers only
+// configured entries.
+//
+//   - When the active settings overlay supplies the runtimes section (at
+//     least one stored runtime), its stored names only: the settings file's
+//     runtimes are then not in effect.
+//   - Otherwise the runtimes of the global settings file, read through the
+//     settings loader's own file layer without the embedded defaults, so key
+//     case and legacy-format conversion are handled as when the settings
+//     load. A missing file contributes no names.
 //
 // ok is false when the global settings file exists but cannot be stat'd,
-// read or parsed; callers then treat every entry as configured (fail
-// closed). A missing file contributes no names. It only reads.
+// read or decoded; callers then treat every entry as configured (fail
+// closed). It does not write any file beyond what every settings load does
+// (the loader's legacy hub key migration).
 func ConfiguredRuntimeNames() (names map[string]bool, ok bool) {
 	names = map[string]bool{}
 	if o := GetGlobalSettingsOverlay(); o != nil {
 		o.mu.RLock()
-		if o.active {
+		supplies := o.active && len(o.runtimes) > 0
+		if supplies {
 			for name := range o.runtimes {
 				names[name] = true
 			}
 		}
 		o.mu.RUnlock()
+		if supplies {
+			return names, true
+		}
 	}
 	globalDir, err := GetGlobalDir()
 	if err != nil {
@@ -306,23 +323,36 @@ func ConfiguredRuntimeNames() (names map[string]bool, ok bool) {
 	if settingsFileUnstatable(globalDir) {
 		return names, false
 	}
-	path := GetSettingsPath(globalDir)
-	if path == "" {
+	if GetSettingsPath(globalDir) == "" {
 		return names, true
 	}
-	raw, err := os.ReadFile(filepath.Clean(path))
-	if err != nil {
-		// The file was there at stat time; fail closed.
+	k := koanf.New(".")
+	if _, err := loadSettingsFileConverting(k, globalDir, &legacyLayerState{}); err != nil {
 		return names, false
 	}
-	var probe struct {
-		Runtimes map[string]any `yaml:"runtimes"`
+	vs := &VersionedSettings{
+		Runtimes:       make(map[string]V1RuntimeConfig),
+		HarnessConfigs: make(map[string]HarnessConfigEntry),
+		Profiles:       make(map[string]V1ProfileConfig),
 	}
-	if err := yamlv3.Unmarshal(raw, &probe); err != nil {
+	if err := unmarshalVersionedSettings(k, vs); err != nil {
 		return names, false
 	}
-	for name := range probe.Runtimes {
+	for name := range vs.Runtimes {
 		names[name] = true
 	}
 	return names, true
+}
+
+// GlobalSettingsFileUnstatable reports whether a global settings file name
+// (settings.yaml, settings.yml or settings.json) in the global directory
+// gives a stat error other than not-exist. The settings loader treats such a
+// file as missing, so the settings load without it; Kubernetes placement
+// fails closed on it instead.
+func GlobalSettingsFileUnstatable() bool {
+	globalDir, err := GetGlobalDir()
+	if err != nil {
+		return false
+	}
+	return settingsFileUnstatable(globalDir)
 }
