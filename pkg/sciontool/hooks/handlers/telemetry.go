@@ -18,7 +18,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
-	"go.opentelemetry.io/contrib/bridges/otelslog"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	otellog "go.opentelemetry.io/otel/log"
@@ -114,9 +114,7 @@ func newTelemetryHandler(tp trace.TracerProvider, lp otellog.LoggerProvider, met
 	}
 
 	if lp != nil {
-		h.logger = slog.New(otelslog.NewHandler("sciontool.hooks",
-			otelslog.WithLoggerProvider(lp),
-		))
+		h.logger = slog.New(logging.NewOTelHandler("sciontool.hooks", lp))
 	}
 
 	// Initialize metric instruments if a MeterProvider is given

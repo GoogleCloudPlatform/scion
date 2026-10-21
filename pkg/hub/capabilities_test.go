@@ -382,9 +382,12 @@ func TestScopedAdminListEndpointsFilterCrossProjectRowsAndCountAuthorizedMatches
 				body, totalCount = request(hub, tc.path+"?limit=100")
 				assert.Contains(t, body, tc.allowedID)
 				assert.Contains(t, body, tc.deniedID)
-				// The seeded hub-members group has no project parent, so a
-				// token cannot resolve its target scope and it is not listed.
-				assert.Equal(t, tc.unscopedTotal-1, totalCount)
+				// The seeded hub-members group has no project, so its target
+				// is the hub; the hub token with group:read lists it too.
+				hubMembers, err := s.GetGroupBySlug(ctx, hubMembersSlug)
+				require.NoError(t, err)
+				assert.Contains(t, body, hubMembers.ID)
+				assert.Equal(t, tc.unscopedTotal, totalCount)
 			} else {
 				body, totalCount = request(scoped, tc.path+"?limit=1")
 				assert.NotContains(t, body, tc.deniedID)
@@ -898,6 +901,17 @@ func TestResourceBuilders(t *testing.T) {
 		r := groupResource(g)
 		assert.Equal(t, "group", r.Type)
 		assert.Equal(t, "grp1", r.ID)
+		assert.Equal(t, "u1", r.OwnerID)
+		assert.Equal(t, "system", r.ParentType, "a group with no project is a hub-level resource")
+		assert.Empty(t, r.ParentID)
+	})
+
+	t.Run("groupResource project-scoped", func(t *testing.T) {
+		g := &store.Group{ID: "grp2", OwnerID: "u1", ProjectID: "p1"}
+		r := groupResource(g)
+		assert.Equal(t, "group", r.Type)
+		assert.Equal(t, "project", r.ParentType)
+		assert.Equal(t, "p1", r.ParentID)
 		assert.Equal(t, "u1", r.OwnerID)
 	})
 

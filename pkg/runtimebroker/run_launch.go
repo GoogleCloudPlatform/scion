@@ -129,6 +129,7 @@ type launchCtx struct {
 	req             CreateAgentRequest
 	opts            api.StartOptions
 	mgr             agent.Manager
+	runtimeName     string
 	key             launchKey
 	sharedWorkspace bool
 	// owned is the flat instance's ownership mirror for this run, handed
@@ -168,7 +169,16 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 	defer s.launchRegistry.Finish(lc.key, rec)
 	// Runs just before Finish, after every report and cleanup.
 	defer s.endLaunchJournal(rec)
-	defer removeLaunchMarkerIfMatches(lc.opts.ProjectPath, lc.sharedWorkspace, lc.key.Slug, rec.ID)
+	// The marker is kept when deleting the agent's files failed, or the
+	// terminal report got no answer (a retried report may confirm a
+	// clean-up, ptone/scion#5186): the
+	// retry at the next boot checks it before deleting them
+	// (ptone/scion#5177), and removes it once it settles.
+	defer func() {
+		if !rec.filesCleanupFailed.Load() && !rec.terminalUndelivered.Load() {
+			removeLaunchMarkerIfMatches(lc.opts.ProjectPath, lc.sharedWorkspace, lc.key.Slug, rec.ID)
+		}
+	}()
 
 	sender := newLaunchSender(s, rec, rec.AgentID, s.launchInstanceID, time.Duration(lc.req.LaunchKeepaliveSeconds)*time.Second)
 	rec.journal.setSender(sender)
@@ -395,6 +405,7 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 			// delete is conditional on the identity recorded at create
 			// time, so a newer launch's same-named resources are untouched.
 			if !alreadyCompleted && !sender.IsCompleted() {
+				rec.resourcesOnlyCleanup.Store(true)
 				s.cleanupLaunchResources(lc.mgr, rec)
 			}
 			return
@@ -415,7 +426,8 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 		launchSkill := skillFailureFrom(sr.err, lc.opts.RunID)
 		s.agentLifecycleLog.Error("runLaunch: agent start failed", append(append([]any{
 			"agent_id", rec.AgentID, "project_id", lc.req.ProjectID, "run_id", lc.opts.RunID,
-			"launch_id", rec.ID, "error_code", code}, failureLogAttrs(sr.err, launchSkill)...),
+			"launch_id", rec.ID, "error_code", code, "runtime", lc.runtimeName, "profile", lc.opts.Profile},
+			failureLogAttrs(sr.err, launchSkill)...),
 			runtimeCauseLogAttrs(sr.err, launchSkill)...)...)
 		if launchSkill != nil {
 			s.logSkillResolutionFailure(launchSkill,
@@ -471,7 +483,9 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 	result, err := sender.SendTerminal(terminalCtx, true, "", "", "", "", info)
 	if err != nil {
 		// No definitive answer by the TTL: no cleanup (same rule as a
-		// failed report, design §3.8.2 step 7).
+		// failed report, design §3.8.2 step 7); the journal record is kept so
+		// the next boot resends the report (ptone/scion#5186).
+		rec.terminalUndelivered.Store(true)
 		s.agentLifecycleLog.Warn("runLaunch: succeeded report did not get a definitive answer within the TTL",
 			"agent_id", rec.AgentID, "launch_id", rec.ID, "error", err)
 		s.forceHeartbeatAll("create", rec.AgentID)
@@ -535,7 +549,9 @@ func (s *Server) failLaunch(ctx context.Context, sender *launchSender, rec *laun
 	result, err := sender.SendTerminal(terminalCtx, false, step, errorCode, message, cause, nil)
 	if err != nil {
 		// No definitive answer by the TTL: the Hub has reaped the record by
-		// then, and `scion delete` removes the resources. No cleanup here.
+		// then. No cleanup here; the journal record is kept so the next
+		// boot resends the report (ptone/scion#5186).
+		rec.terminalUndelivered.Store(true)
 		s.agentLifecycleLog.Warn("runLaunch: failed report did not get a definitive answer within the TTL",
 			"agent_id", rec.AgentID, "launch_id", rec.ID, "error_code", errorCode, "error", err)
 		return
@@ -547,10 +563,13 @@ func (s *Server) failLaunch(ctx context.Context, sender *launchSender, rec *laun
 
 // cleanupAbortedLaunch deletes the launch's runtime resources and, for a
 // create launch whose marker still holds this launch's ID, its agent files
-// (design §3.8.4).
-func (s *Server) cleanupAbortedLaunch(mgr agent.Manager, rec *launchRecord, lc launchCtx) {
-	s.cleanupLaunchResources(mgr, rec)
-	s.cleanupLaunchFiles(rec, lc.opts, lc.sharedWorkspace, lc.key.Slug)
+// (design §3.8.4). It returns the failed steps (cleanupFailure, each also
+// recorded on rec), or nil; a skip is not a failure.
+func (s *Server) cleanupAbortedLaunch(mgr agent.Manager, rec *launchRecord, lc launchCtx) error {
+	return errors.Join(
+		s.cleanupLaunchResources(mgr, rec),
+		s.cleanupLaunchFiles(rec, lc.opts, lc.sharedWorkspace, lc.key.Slug),
+	)
 }
 
 // cleanupLaunchFiles deletes a create launch's agent files when its marker
@@ -558,25 +577,30 @@ func (s *Server) cleanupAbortedLaunch(mgr agent.Manager, rec *launchRecord, lc l
 // §3.8.4). opts needs only Name, ProjectPath, HubProjectID,
 // SharedWorkspace and RunID, so boot recovery can rebuild it from the
 // launch journal.
-func (s *Server) cleanupLaunchFiles(rec *launchRecord, opts api.StartOptions, sharedWorkspace bool, slug string) {
+func (s *Server) cleanupLaunchFiles(rec *launchRecord, opts api.StartOptions, sharedWorkspace bool, slug string) error {
 	if rec.Kind != store.LaunchKindCreate || opts.ProjectPath == "" {
-		return
+		return nil
 	}
 	// The ownership checks and the removal run under the process-wide
 	// workspace lock on the agent's files.
-	lockCtx, cancelLock := context.WithTimeout(context.Background(), 60*time.Second)
+	lockWait := 60 * time.Second
+	if s.agentFilesLockWait > 0 {
+		lockWait = s.agentFilesLockWait
+	}
+	lockCtx, cancelLock := context.WithTimeout(context.Background(), lockWait)
 	defer cancelLock()
 	unlock, err := s.lockAgentFiles(lockCtx, opts.ProjectPath, opts.Name)
 	if err != nil {
 		s.agentLifecycleLog.Warn("runLaunch: skipped agent file cleanup: the agent's workspace lock is unavailable",
 			"agent_id", rec.AgentID, "launch_id", rec.ID, "error", err)
-		return
+		rec.filesCleanupFailed.Store(true)
+		return failCleanup(rec, cleanupFailFilesLock)
 	}
 	defer unlock()
 	if !launchMarkerMatches(opts.ProjectPath, sharedWorkspace, slug, rec.ID) {
 		// A newer launch's marker write means this one's files are no
 		// longer this launch's to delete (design §3.8.4).
-		return
+		return nil
 	}
 	target := agent.RunOwnerTargetFor(opts)
 	target.SharedWorkspace = target.SharedWorkspace || sharedWorkspace
@@ -584,36 +608,40 @@ func (s *Server) cleanupLaunchFiles(rec *launchRecord, opts api.StartOptions, sh
 		// The owner of the files is unknown (ptone/scion#4771): keep them.
 		s.agentLifecycleLog.Warn("runLaunch: skipped agent file cleanup: the owner of the agent's files is unknown",
 			"agent_id", rec.AgentID, "launch_id", rec.ID, "run_id", opts.RunID, "error", ownerErr)
-		return
+		return nil
 	} else if owner != "" {
 		// The files record a different run as their owner
 		// (ptone/scion#2675): they are not this launch's to delete.
 		s.agentLifecycleLog.Info("runLaunch: skipped agent file cleanup: the agent's files belong to another run",
 			"agent_id", rec.AgentID, "launch_id", rec.ID, "run_id", opts.RunID, "files_run_id", owner)
-		return
+		return nil
 	}
 	if _, err := agent.DeleteAgentFiles(opts.Name, opts.ProjectPath, true); err != nil && !errors.Is(err, agent.ErrAgentProjectUnresolved) {
 		s.agentLifecycleLog.Warn("runLaunch: failed to clean up agent files",
 			"agent_id", rec.AgentID, "launch_id", rec.ID, "error", err)
+		rec.filesCleanupFailed.Store(true)
+		return failCleanup(rec, cleanupFailFilesDelete)
 	}
+	return nil
 }
 
 // cleanupLaunchResources deletes the runtime resources the launch recorded
 // (design §3.8.4), on a fresh context: ctx' may already be done.
-func (s *Server) cleanupLaunchResources(mgr agent.Manager, rec *launchRecord) {
+func (s *Server) cleanupLaunchResources(mgr agent.Manager, rec *launchRecord) error {
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), scionrt.AsyncLaunchCleanupBudget)
 	defer cancel()
 	handles := rec.HandlesSnapshot()
 	if err := mgr.CleanupLaunch(cleanupCtx, handles); err != nil {
 		s.agentLifecycleLog.Warn("runLaunch: failed to clean up launch resources",
 			"agent_id", rec.AgentID, "launch_id", rec.ID, "error", err)
-		return
+		return failCleanup(rec, cleanupFailRuntimeResources)
 	}
 	// A flat instance finishes only this launch's run in its records.
 	rec.ownedRunMu.Lock()
 	key := rec.ownedRun
 	rec.ownedRunMu.Unlock()
 	s.finishCleanedRun(key, handles)
+	return nil
 }
 
 // launchFailureCause returns the cause code a failed launch report carries
@@ -674,10 +702,36 @@ func stepOr(step, def string) string {
 // 3 §1 C-a write 4). Once a shutdown drain's wait has ended, the record is
 // kept instead: its terminal may not have been delivered, or its cleanup
 // may have been cut short, and the next boot's recovery finishes both.
+//
+// A launch whose clean-up failed keeps its record too, as cleanup_pending,
+// so the next boot's recovery retries the clean-up (ptone/scion#5177), and
+// so does a launch whose terminal report got no hub answer, as
+// terminal_pending, so the next boot resends it (ptone/scion#5186).
 func (s *Server) endLaunchJournal(rec *launchRecord) {
 	s.untrackAsyncLaunch(rec)
 	if s.drainExpired() {
 		return
+	}
+	if rec.terminalUndelivered.Load() {
+		// The terminal report got no hub answer: its terminal_pending
+		// record stays for the next boot to resend (ptone/scion#5186).
+		s.agentLifecycleLog.Warn("runLaunch: the terminal report got no hub answer; its journal record is kept for a retry at the next broker start",
+			"agent_id", rec.AgentID, "launch_id", rec.ID, "run_id", rec.RunID)
+		return
+	}
+	if class := rec.cleanupFailure.Load(); class != nil {
+		s.agentLifecycleLog.Warn("runLaunch: launch clean-up failed; its journal record is kept for a retry at the next broker start",
+			"agent_id", rec.AgentID, "launch_id", rec.ID, "run_id", rec.RunID, "error_class", string(*class))
+		scope := ""
+		if rec.resourcesOnlyCleanup.Load() {
+			scope = cleanupScopeResources
+		}
+		if rec.journal.cleanupPending(time.Now(), scope) {
+			return
+		}
+		// The record could not be kept: remove it, as before #5177, so
+		// it never sits in launching or terminal_pending after the hub
+		// has answered.
 	}
 	rec.journal.remove()
 }

@@ -631,10 +631,10 @@ func doGenericPostWithCredential(
 // ---------------------------------------------------------------------------
 
 // TestRS3_GenericPost_CredentialKind_Denied verifies that the generic POST
-// path rejects disallowed credential kinds (agent JWT, scoped UAT, broker,
-// federation) with 403. The credential-kind check in AddMember (R2-2) fires
-// before any transaction or CreateOnly logic, so a disallowed credential
-// never reaches the conflict guard.
+// path rejects disallowed credential kinds (agent JWT, broker, federation,
+// and a user access token credential without a token identity) with 403.
+// The actor check in AddMember fires before any transaction or CreateOnly
+// logic, so a disallowed credential never reaches the conflict guard.
 func TestRS3_GenericPost_CredentialKind_Denied(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -669,7 +669,7 @@ func TestRS3_GenericPost_CredentialKind_Denied(t *testing.T) {
 		kind CredentialKind
 	}{
 		{"agent_jwt", CredentialKindAgentJWT},
-		{"uat", CredentialKindUAT},
+		{"uat_without_token_identity", CredentialKindUAT},
 		{"broker", CredentialKindBroker},
 		{"federation", CredentialKindFederation},
 	}

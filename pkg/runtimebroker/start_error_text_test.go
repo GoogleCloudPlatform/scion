@@ -174,10 +174,12 @@ func TestAsyncStartError_NormalisedText(t *testing.T) {
 		{
 			// A hydrated cache directory is named by its content hash: the
 			// message names the template slug the caller sent instead
-			// (the request's config.template, "claude").
+			// (the request's config.template, "claude"). The log keeps the
+			// directory; the hash itself is a long hex run, which
+			// sanitizeFailureCause blanks.
 			name:      "template_not_found_hydrated_cache",
 			err:       config.NewTemplateNotFoundError(hydratedCachePath, "template path "+hydratedCachePath+" not found or not a directory"),
-			detail:    hydratedCachePath,
+			detail:    strings.TrimSuffix(hydratedCachePath, testContentHash) + redactedMarker,
 			forbid:    []string{"/var/cache/scion", testContentHash, "sha256:"},
 			wantCode:  "template_not_found",
 			wantMsg:   `Failed to create agent: template "claude" not found`,

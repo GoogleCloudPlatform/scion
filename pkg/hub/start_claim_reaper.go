@@ -128,7 +128,7 @@ func (s *Server) reapStartClaim(ctx context.Context, a *store.Agent, now time.Ti
 	if a.LaunchState == store.LaunchStateActive {
 		return // the launch owns liveness and settles the claim when it ends
 	}
-	if a.StartClaimKind == store.StartClaimCreate && a.StartClaimLaunchID != "" && a.StartClaimLaunchID == a.LaunchID {
+	if claimPairsWithEndedLaunch(a) {
 		if changed, err := s.store.SettleEndedLaunchClaim(ctx, a.ID, a.StartClaimID); err != nil || changed {
 			if err != nil {
 				slog.Warn("Start claim reaper: settling the claim of an ended launch failed", "agent_id", a.ID, "claim_id", a.StartClaimID, "error", err)
@@ -147,6 +147,27 @@ func (s *Server) reapStartClaim(ctx context.Context, a *store.Agent, now time.Ti
 		}
 	case store.StartClaimUnconfirmed:
 		s.reapUnconfirmedStartClaim(ctx, a, now, holds, view, obs)
+	}
+}
+
+// claimPairsWithEndedLaunch reports whether a's start claim is linked to
+// a's launch and is the claim kind that launch settles: a create launch
+// its create claim, a start launch its user claim, a restart launch its
+// restart claim (the store's pairing, ptone/scion#4669). The launch has
+// ended (the caller checked), so the reaper settles the claim by the
+// launch's end, as the launch's terminal write would have. Only create
+// launches exist until asynchronous start ships.
+func claimPairsWithEndedLaunch(a *store.Agent) bool {
+	if a.StartClaimLaunchID == "" || a.StartClaimLaunchID != a.LaunchID {
+		return false
+	}
+	switch a.LaunchKind {
+	case store.LaunchKindStart:
+		return a.StartClaimKind == store.StartClaimUser
+	case store.LaunchKindRestart:
+		return a.StartClaimKind == store.StartClaimRestart
+	default:
+		return a.StartClaimKind == store.StartClaimCreate
 	}
 }
 

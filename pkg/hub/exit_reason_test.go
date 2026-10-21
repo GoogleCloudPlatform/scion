@@ -35,6 +35,8 @@ func TestIsValidExitReason(t *testing.T) {
 		{"evicted", true},
 		// Valid: OOM kill
 		{"oom_killed", true},
+		// Valid: agent-reported stop after a termination signal
+		{"signaled", true},
 		// Invalid: non-terminal activities
 		{"working", false},
 		{"thinking", false},

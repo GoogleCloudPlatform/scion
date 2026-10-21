@@ -22,11 +22,13 @@
  * detail, and live SSE streaming.
  */
 
-import { LitElement, html, css, nothing } from 'lit';
+import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
+import { repeat } from 'lit/directives/repeat.js';
 import { apiFetch } from '../../client/api.js';
+import { FrameBatcher, SortedLogBuffer } from '../../client/sorted-log-buffer.js';
 import './json-browser.js';
-import { formatInstant, formatInstantWithZone } from '../../utils/time.js';
+import { effectiveTimeZone, formatInstant, formatInstantWithZone } from '../../utils/time.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
 interface CloudLogEntry {
@@ -46,7 +48,45 @@ interface CloudLogsResponse {
   hasMore?: boolean;
 }
 
+/**
+ * A buffered entry plus what its row needs, computed once at ingest: the
+ * numeric timestamp (sort key) and the formatted strings. `zone` records the
+ * display zone the strings were formatted in; a zone change re-formats them
+ * once on the next render.
+ */
+interface LogRow {
+  entry: CloudLogEntry;
+  ts: number;
+  zone: string;
+  date: string;
+  time: string;
+  subsystem: string;
+}
+
 const MAX_BUFFER = 2000;
+
+function toLogRow(entry: CloudLogEntry, zone: string): LogRow {
+  const row: LogRow = {
+    entry,
+    ts: new Date(entry.timestamp).getTime(),
+    zone: '',
+    date: '',
+    time: '',
+    subsystem: (entry.jsonPayload?.['subsystem'] as string) || entry.labels?.['component'] || '',
+  };
+  formatLogRow(row, zone);
+  return row;
+}
+
+/** (Re-)formats a row's strings unless they are already in `zone`. */
+function formatLogRow(row: LogRow, zone: string): void {
+  if (row.zone === zone) return;
+  row.zone = zone;
+  // Date divider and row time in the effective display zone (24-hour);
+  // the divider names the zone.
+  row.date = formatInstantWithZone(row.entry.timestamp, 'date');
+  row.time = formatInstant(row.entry.timestamp, 'time-millis');
+}
 
 /** Google Cloud Logging severity levels in ascending order. */
 const SEVERITY_LEVELS = ['DEFAULT', 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'] as const;
@@ -67,8 +107,13 @@ export class ScionAgentLogViewer extends LitElement {
   @property({ type: Object })
   brokers: Record<string, string> = {};
 
-  @state() private entries: CloudLogEntry[] = [];
-  @state() private entryMap = new Map<string, CloudLogEntry>();
+  /** Entries in ascending timestamp order (rendered newest first). */
+  private readonly buffer = new SortedLogBuffer<LogRow>({
+    cap: MAX_BUFFER,
+    keyOf: (row) => row.entry.insertId,
+  });
+  /** Streamed lines render at most once per animation frame. */
+  private readonly renderBatch = new FrameBatcher(() => this.requestUpdate());
   @state() private loading = false;
   @state() private error: string | null = null;
   @state() private streaming = false;
@@ -253,11 +298,18 @@ export class ScionAgentLogViewer extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
+    // Lit does not re-render on reconnect; show lines whose frame was
+    // cancelled by disconnectedCallback.
+    if (this.buffer.size > 0) this.requestUpdate();
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this.stopStream();
+    // A frame left pending would keep this detached element (and its buffer)
+    // alive until a hidden tab becomes visible; connectedCallback renders
+    // anything it skipped.
+    this.renderBatch.cancel();
   }
 
   /** Called by the parent when the logs tab is first shown. */
@@ -279,8 +331,9 @@ export class ScionAgentLogViewer extends LitElement {
     try {
       // If we have entries, fetch only newer ones
       const params = new URLSearchParams({ tail: '200' });
-      if (this.entries.length > 0) {
-        params.set('since', this.entries[0].timestamp);
+      const newest = this.buffer.newest;
+      if (newest) {
+        params.set('since', newest.entry.timestamp);
       }
       if (this.selectedBrokerId) {
         params.set('broker_id', this.selectedBrokerId);
@@ -345,10 +398,16 @@ export class ScionAgentLogViewer extends LitElement {
     }
   }
 
+  /**
+   * Adds entries to the sorted buffer (formatting each new one once) and
+   * schedules one render for the next animation frame.
+   */
   private mergeEntries(newEntries: CloudLogEntry[]): void {
+    const zone = effectiveTimeZone();
+    let added = false;
     for (const entry of newEntries) {
-      if (!this.entryMap.has(entry.insertId)) {
-        this.entryMap.set(entry.insertId, entry);
+      if (!this.buffer.has(entry.insertId)) {
+        added = this.buffer.insert(toLogRow(entry, zone)) || added;
       }
       // Auto-discover broker IDs from log entry labels
       const brokerId = entry.labels?.['broker_id'];
@@ -356,21 +415,7 @@ export class ScionAgentLogViewer extends LitElement {
         this.brokers = { ...this.brokers, [brokerId]: brokerId };
       }
     }
-
-    // Sort descending by timestamp (newest first)
-    const sorted = Array.from(this.entryMap.values()).sort(
-      (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
-    );
-
-    // Cap buffer
-    if (sorted.length > MAX_BUFFER) {
-      const evicted = sorted.splice(MAX_BUFFER);
-      for (const e of evicted) {
-        this.entryMap.delete(e.insertId);
-      }
-    }
-
-    this.entries = sorted;
+    if (added) this.renderBatch.schedule();
   }
 
   private startStream(): void {
@@ -437,8 +482,7 @@ export class ScionAgentLogViewer extends LitElement {
   private handleBrokerFilter(e: Event): void {
     this.selectedBrokerId = (e.target as HTMLSelectElement).value;
     // Clear existing entries and re-fetch with the new filter
-    this.entryMap.clear();
-    this.entries = [];
+    this.clearEntries();
     if (this.streaming) {
       this.stopStream();
       this.startStream();
@@ -449,14 +493,18 @@ export class ScionAgentLogViewer extends LitElement {
 
   private handleSeverityFilter(e: Event): void {
     this.selectedSeverity = (e.target as HTMLSelectElement).value;
-    this.entryMap.clear();
-    this.entries = [];
+    this.clearEntries();
     if (this.streaming) {
       this.stopStream();
       this.startStream();
     } else {
       void this.fetchLogs();
     }
+  }
+
+  private clearEntries(): void {
+    this.buffer.clear();
+    this.requestUpdate();
   }
 
   private handleRefresh(): void {
@@ -581,7 +629,7 @@ export class ScionAgentLogViewer extends LitElement {
   }
 
   private renderContent() {
-    if (this.loading && this.entries.length === 0) {
+    if (this.loading && this.buffer.size === 0) {
       return html`
         <div class="state-msg">
           <sl-spinner></sl-spinner>
@@ -590,7 +638,7 @@ export class ScionAgentLogViewer extends LitElement {
       `;
     }
 
-    if (this.error && this.entries.length === 0) {
+    if (this.error && this.buffer.size === 0) {
       return html`
         <div class="state-msg">
           <sl-icon name="exclamation-triangle"></sl-icon>
@@ -600,7 +648,7 @@ export class ScionAgentLogViewer extends LitElement {
       `;
     }
 
-    if (this.entries.length === 0) {
+    if (this.buffer.size === 0) {
       return html`
         <div class="state-msg">
           <sl-icon name="file-text"></sl-icon>
@@ -617,52 +665,52 @@ export class ScionAgentLogViewer extends LitElement {
   }
 
   private renderEntries() {
-    const rows: unknown[] = [];
-    let lastDate = '';
+    // Newest first. Formatting happened at ingest; formatLogRow only redoes
+    // it after a display zone change.
+    const zone = effectiveTimeZone();
+    const items = this.buffer.items;
+    const rows: { row: LogRow; divider: boolean }[] = [];
+    let lastDate: string | null = null;
+    for (let i = items.length - 1; i >= 0; i--) {
+      const row = items[i];
+      formatLogRow(row, zone);
+      rows.push({ row, divider: row.date !== lastDate });
+      lastDate = row.date;
+    }
 
-    for (const entry of this.entries) {
-      // Date divider and row time in the effective display zone (24-hour);
-      // the divider names the zone.
-      const dateStr = formatInstantWithZone(entry.timestamp, 'date');
+    return repeat(
+      rows,
+      ({ row }) => row.entry.insertId,
+      ({ row, divider }) => this.renderRow(row, divider)
+    );
+  }
 
-      if (dateStr !== lastDate) {
-        lastDate = dateStr;
-        rows.push(html`
-          <tr>
-            <td colspan="4" class="date-divider">${dateStr}</td>
-          </tr>
-        `);
-      }
-
-      const isExpanded = this.expandedIds.has(entry.insertId);
-      const timeStr = formatInstant(entry.timestamp, 'time-millis');
-      const subsystem =
-        (entry.jsonPayload?.['subsystem'] as string) || entry.labels?.['component'] || '';
-
-      rows.push(html`
-        <tr class="log-row" @click=${() => this.toggleExpand(entry.insertId)}>
-          <td class="ts">${timeStr}</td>
-          <td><span class="sev sev-${entry.severity}">${entry.severity}</span></td>
-          <td class="sub">${subsystem}</td>
-          <td class="msg">${entry.message}</td>
-        </tr>
-      `);
-
-      if (isExpanded) {
-        rows.push(html`
-          <tr class="detail-row">
+  private renderRow(row: LogRow, divider: boolean): TemplateResult {
+    const entry = row.entry;
+    const isExpanded = this.expandedIds.has(entry.insertId);
+    return html`
+      ${divider
+        ? html`<tr>
+            <td colspan="4" class="date-divider">${row.date}</td>
+          </tr>`
+        : nothing}
+      <tr class="log-row" @click=${() => this.toggleExpand(entry.insertId)}>
+        <td class="ts">${row.time}</td>
+        <td><span class="sev sev-${entry.severity}">${entry.severity}</span></td>
+        <td class="sub">${row.subsystem}</td>
+        <td class="msg">${entry.message}</td>
+      </tr>
+      ${isExpanded
+        ? html`<tr class="detail-row">
             <td colspan="4">
               <scion-json-browser
                 .data=${this.buildDetailObject(entry)}
                 expand-first
               ></scion-json-browser>
             </td>
-          </tr>
-        `);
-      }
-    }
-
-    return rows;
+          </tr>`
+        : nothing}
+    `;
   }
 
   private buildDetailObject(entry: CloudLogEntry): Record<string, unknown> {

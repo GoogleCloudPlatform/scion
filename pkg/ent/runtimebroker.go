@@ -63,6 +63,14 @@ type RuntimeBroker struct {
 	GcpHostServiceAccountEmail *string `json:"gcp_host_service_account_email,omitempty"`
 	// GcpHostProjectID holds the value of the "gcp_host_project_id" field.
 	GcpHostProjectID *string `json:"gcp_host_project_id,omitempty"`
+	// GcpHostSource holds the value of the "gcp_host_source" field.
+	GcpHostSource string `json:"gcp_host_source,omitempty"`
+	// HostIdentityObservedEmail holds the value of the "host_identity_observed_email" field.
+	HostIdentityObservedEmail *string `json:"host_identity_observed_email,omitempty"`
+	// HostIdentityObservation holds the value of the "host_identity_observation" field.
+	HostIdentityObservation *string `json:"host_identity_observation,omitempty"`
+	// HostIdentityObservedAt holds the value of the "host_identity_observed_at" field.
+	HostIdentityObservedAt *time.Time `json:"host_identity_observed_at,omitempty"`
 	// ConnectedHubID holds the value of the "connected_hub_id" field.
 	ConnectedHubID *string `json:"connected_hub_id,omitempty"`
 	// ConnectedSessionID holds the value of the "connected_session_id" field.
@@ -93,9 +101,9 @@ func (*RuntimeBroker) scanValues(columns []string) ([]any, error) {
 			values[i] = new(sql.NullBool)
 		case runtimebroker.FieldLockVersion:
 			values[i] = new(sql.NullInt64)
-		case runtimebroker.FieldName, runtimebroker.FieldSlug, runtimebroker.FieldMode, runtimebroker.FieldVersion, runtimebroker.FieldStatus, runtimebroker.FieldConnectionState, runtimebroker.FieldCapabilities, runtimebroker.FieldSupportedHarnesses, runtimebroker.FieldResources, runtimebroker.FieldRuntimes, runtimebroker.FieldDefaultProfile, runtimebroker.FieldWorkspaceStorage, runtimebroker.FieldHealth, runtimebroker.FieldEndpoint, runtimebroker.FieldCreatedBy, runtimebroker.FieldGcpHostServiceAccountEmail, runtimebroker.FieldGcpHostProjectID, runtimebroker.FieldConnectedHubID, runtimebroker.FieldConnectedSessionID, runtimebroker.FieldRuntimeTargetID, runtimebroker.FieldRuntimeTargetType, runtimebroker.FieldRuntimeTargetDisplayName:
+		case runtimebroker.FieldName, runtimebroker.FieldSlug, runtimebroker.FieldMode, runtimebroker.FieldVersion, runtimebroker.FieldStatus, runtimebroker.FieldConnectionState, runtimebroker.FieldCapabilities, runtimebroker.FieldSupportedHarnesses, runtimebroker.FieldResources, runtimebroker.FieldRuntimes, runtimebroker.FieldDefaultProfile, runtimebroker.FieldWorkspaceStorage, runtimebroker.FieldHealth, runtimebroker.FieldEndpoint, runtimebroker.FieldCreatedBy, runtimebroker.FieldGcpHostServiceAccountEmail, runtimebroker.FieldGcpHostProjectID, runtimebroker.FieldGcpHostSource, runtimebroker.FieldHostIdentityObservedEmail, runtimebroker.FieldHostIdentityObservation, runtimebroker.FieldConnectedHubID, runtimebroker.FieldConnectedSessionID, runtimebroker.FieldRuntimeTargetID, runtimebroker.FieldRuntimeTargetType, runtimebroker.FieldRuntimeTargetDisplayName:
 			values[i] = new(sql.NullString)
-		case runtimebroker.FieldLastHeartbeat, runtimebroker.FieldConnectedAt, runtimebroker.FieldCreated, runtimebroker.FieldUpdated:
+		case runtimebroker.FieldLastHeartbeat, runtimebroker.FieldHostIdentityObservedAt, runtimebroker.FieldConnectedAt, runtimebroker.FieldCreated, runtimebroker.FieldUpdated:
 			values[i] = new(sql.NullTime)
 		case runtimebroker.FieldID:
 			values[i] = new(uuid.UUID)
@@ -259,6 +267,33 @@ func (_m *RuntimeBroker) assignValues(columns []string, values []any) error {
 				_m.GcpHostProjectID = new(string)
 				*_m.GcpHostProjectID = value.String
 			}
+		case runtimebroker.FieldGcpHostSource:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field gcp_host_source", values[i])
+			} else if value.Valid {
+				_m.GcpHostSource = value.String
+			}
+		case runtimebroker.FieldHostIdentityObservedEmail:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field host_identity_observed_email", values[i])
+			} else if value.Valid {
+				_m.HostIdentityObservedEmail = new(string)
+				*_m.HostIdentityObservedEmail = value.String
+			}
+		case runtimebroker.FieldHostIdentityObservation:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field host_identity_observation", values[i])
+			} else if value.Valid {
+				_m.HostIdentityObservation = new(string)
+				*_m.HostIdentityObservation = value.String
+			}
+		case runtimebroker.FieldHostIdentityObservedAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field host_identity_observed_at", values[i])
+			} else if value.Valid {
+				_m.HostIdentityObservedAt = new(time.Time)
+				*_m.HostIdentityObservedAt = value.Time
+			}
 		case runtimebroker.FieldConnectedHubID:
 			if value, ok := values[i].(*sql.NullString); !ok {
 				return fmt.Errorf("unexpected type %T for field connected_hub_id", values[i])
@@ -417,6 +452,24 @@ func (_m *RuntimeBroker) String() string {
 	if v := _m.GcpHostProjectID; v != nil {
 		builder.WriteString("gcp_host_project_id=")
 		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	builder.WriteString("gcp_host_source=")
+	builder.WriteString(_m.GcpHostSource)
+	builder.WriteString(", ")
+	if v := _m.HostIdentityObservedEmail; v != nil {
+		builder.WriteString("host_identity_observed_email=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	if v := _m.HostIdentityObservation; v != nil {
+		builder.WriteString("host_identity_observation=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	if v := _m.HostIdentityObservedAt; v != nil {
+		builder.WriteString("host_identity_observed_at=")
+		builder.WriteString(v.Format(time.ANSIC))
 	}
 	builder.WriteString(", ")
 	if v := _m.ConnectedHubID; v != nil {

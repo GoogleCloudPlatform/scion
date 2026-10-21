@@ -83,7 +83,7 @@ var defaultSeedOperations = []store.MaintenanceOperation{
 	{
 		Key:         UTCTimestampNormalizeKey,
 		Title:       "UTC Timestamp Normalize",
-		Description: `Rewrites stored timestamps to UTC so that ordering and paging are exact: on SQLite, every ent time column, every webchat time column and the times embedded in JSON fields; on Postgres, the JSON-embedded times. Tables that cannot be read because of rows written in a numeric-abbreviation zone (for example Asia/Kathmandu) are repaired automatically at hub start, after a snapshot of the database; this operation rewrites the remaining non-canonical values, including such rows written later. Back up the database first. Run it only on this release or later. Safe to re-run; canonical values are left untouched and values are never logged.`,
+		Description: `Rewrites stored timestamps to UTC so that ordering and paging are exact: on SQLite, every ent time column, every webchat time column and the times embedded in JSON fields; on Postgres, the JSON-embedded times. Tables that cannot be read because of rows written in a numeric-abbreviation zone (for example Asia/Kathmandu) are repaired automatically at hub start, after a snapshot of the database; on SQLite the hub also runs this operation once at start, after the same snapshot, when other stored timestamps are not canonical. It rewrites the remaining non-canonical values, including such rows written later. Back up the database before a manual run. Run it only on this release or later. Safe to re-run; canonical values are left untouched and values are never logged.`,
 		Category:    store.MaintenanceCategoryMigration,
 	},
 	{
@@ -119,7 +119,7 @@ var defaultSeedOperations = []store.MaintenanceOperation{
 	{
 		Key:         TemplateBlobGCKey,
 		Title:       "Template Blob Garbage Collection",
-		Description: "Deletes stored template file blobs that no template version references any more, and abandoned staged uploads, once they are older than the grace period (default 24h, minimum 1h; set the grace parameter, e.g. 48h, to change it for one run). Blobs a template references are never deleted. The hub also runs this every hour. Safe to re-run.",
+		Description: "Deletes stored template and harness-config file blobs that no version references any more, and abandoned staged uploads, once they are older than the grace period (default 24h, minimum 1h; set the grace parameter, e.g. 48h, to change it for one run). Blobs a template or harness-config references are never deleted. The hub also runs this every hour. Safe to re-run.",
 		Category:    store.MaintenanceCategoryOperation,
 	},
 	{

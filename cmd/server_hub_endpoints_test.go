@@ -32,8 +32,9 @@ func setWebBaseURL(t *testing.T, v string) {
 }
 
 // TestHubEndpointPin checks that every operator source pins the hub
-// endpoint: SCION_SERVER_HUB_ENDPOINT, --base-url and SCION_SERVER_BASE_URL
-// (ptone/scion#3905).
+// endpoint: --base-url, SCION_SERVER_HUB_ENDPOINT and SCION_SERVER_BASE_URL
+// (ptone/scion#3905). With several set, the pin is named in the order the
+// operator endpoint resolves: flag, then environment (ptone/scion#5362).
 func TestHubEndpointPin(t *testing.T) {
 	t.Setenv("SCION_SERVER_HUB_ENDPOINT", "")
 	t.Setenv("SCION_SERVER_BASE_URL", "")
@@ -51,8 +52,12 @@ func TestHubEndpointPin(t *testing.T) {
 		t.Errorf("hubEndpointPin() = %q, want --base-url", got)
 	}
 	t.Setenv("SCION_SERVER_HUB_ENDPOINT", "https://env.example.com")
+	if got := hubEndpointPin(); got != "--base-url" {
+		t.Errorf("flag and env set: hubEndpointPin() = %q, want --base-url", got)
+	}
+	setWebBaseURL(t, "")
 	if got := hubEndpointPin(); got != "SCION_SERVER_HUB_ENDPOINT" {
-		t.Errorf("hubEndpointPin() = %q, want SCION_SERVER_HUB_ENDPOINT", got)
+		t.Errorf("both env vars set: hubEndpointPin() = %q, want SCION_SERVER_HUB_ENDPOINT", got)
 	}
 }
 

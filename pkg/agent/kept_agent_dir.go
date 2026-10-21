@@ -41,8 +41,9 @@ import (
 // the window is expected, not a failure.
 //
 // The removal does not inspect the workspace: it never runs git in it and
-// never calls DeleteAgentFiles. It uses removeAgentDirAndPruneWorktrees, as
-// the existing stale-directory removal does.
+// never calls DeleteAgentFiles. It uses removeAgentDirAndWorktreeEntry, as
+// the existing stale-directory removal does, so only the agent's own
+// worktree entry is removed from git.
 
 // keptAgentDirMarker is the marker file written into a kept agent directory.
 const keptAgentDirMarker = "kept-agent-dir.json"
@@ -257,7 +258,10 @@ func purgeExpiredKeptAgentDir(agentName, agentDir, agentHome string, retention t
 		}
 		return false
 	}
-	removeAgentDirAndPruneWorktrees(tomb, filepath.Join(tomb, "workspace"), true)
+	// git registered the worktree under the original path, not the tomb's,
+	// so that is the entry to remove. It is left alone if a directory has
+	// reappeared there (a re-provisioned agent).
+	removeAgentDirAndWorktreeEntry(tomb, filepath.Join(agentDir, "workspace"))
 	slog.Info("GetAgent: removed kept agent directory after the soft-delete retention window",
 		"agent", agentName, "agent_dir", agentDir, "kept_at", rec.KeptAt,
 		"reason", rec.Reason, "retention", retention)

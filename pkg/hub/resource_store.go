@@ -35,11 +35,11 @@ import (
 // resource_store.go is the §7.3 step-3b landing: the shared ResourceStore that
 // the parallel template and harness-config import/sync paths route through. It
 // wraps the already-shared "3a" mechanics (uploadResourceFiles,
-// reconcileResourceStorage, toResourceFiles, computeContentHash, and the
+// toResourceFiles, computeContentHash, and the
 // kind-keyed storage.ResourceStoragePath) behind one kind-generic Bootstrap.
 //
 // The two store models (store.Template / store.HarnessConfig) keep their typed
-// payloads (TemplateConfig / HarnessConfigData) — ResourceRecord is a shared
+// payloads (AgentConfig / HarnessConfigData) — ResourceRecord is a shared
 // *view* over their common fields, and a per-kind resourcePersistence bridges
 // the record to the concrete model so the typed payload survives a round-trip.
 
@@ -60,8 +60,8 @@ type ResourceRecord struct {
 	StorageURI    string
 	StorageBucket string
 	StoragePath   string
-	// Layout is the template storage layout (store.Template.Layout); empty
-	// for other kinds.
+	// Layout is the storage layout (store.Template.Layout,
+	// store.HarnessConfig.Layout).
 	Layout    string
 	Files     []store.TemplateFile
 	Status    string
@@ -106,7 +106,7 @@ type resourcePersistence interface {
 // preUploadChecker is an optional resourcePersistence extension: CheckDir
 // validates a collected resource directory before anything is written. The
 // shared store calls it once per resource, after collecting the files and
-// before Create, the upload or the reconcile, so a refused resource leaves the
+// before Create or the upload, so a refused resource leaves the
 // row and storage untouched. templatePersistence implements it for bundled
 // harness-configs (ptone/scion#4217).
 type preUploadChecker interface {
@@ -115,12 +115,14 @@ type preUploadChecker interface {
 
 // resourceFileUploader is an optional resourcePersistence extension that
 // replaces the shared path upload (uploadResourceFiles). templatePersistence
-// implements it to write content-addressed blobs (ptone/scion#4221); a kind
-// that implements it also skips the shared reconcile, because its stale
-// objects are handled by garbage collection rather than a prefix sweep.
-// The store calls it where it would call uploadResourceFiles, in both the
-// create and the existing-row branches, before the persistence's Update
-// commits the manifest.
+// (ptone/scion#4221) and harnessConfigPersistence (ptone/scion#4219)
+// implement it to write content-addressed blobs. Their stale objects are
+// removed by the blob garbage collector, never by a prefix sweep, so no
+// kind reconciles storage after an upload any more: a commit that loses its
+// compare-and-swap twice can no longer leave a row listing objects a
+// reconcile deleted. The store calls it in both the create and the
+// existing-row branches, before the persistence's Update commits the
+// manifest.
 type resourceFileUploader interface {
 	UploadFiles(ctx context.Context, stor storage.Storage, storagePath string, files []transfer.FileInfo) ([]store.TemplateFile, map[string]struct{}, error)
 }
@@ -135,38 +137,14 @@ func (rs *ResourceStore) uploadFiles(ctx context.Context, stor storage.Storage, 
 	return uploadResourceFiles(ctx, stor, storagePath, files, rs.pers.Label())
 }
 
-// reconcileStorage deletes objects under storagePath that the upload did
-// not write, except for kinds with their own UploadFiles (see
-// resourceFileUploader).
-func (rs *ResourceStore) reconcileStorage(ctx context.Context, stor storage.Storage, storagePath, name string, keep map[string]struct{}) {
-	if _, ok := rs.pers.(resourceFileUploader); ok {
-		return
-	}
-	reconcileResourceStorage(ctx, stor, storagePath, name, keep, rs.srv.resourceLog, rs.pers.Label())
-}
-
 // commitUploaded commits rec (its uploaded manifest) through the
-// persistence's Update and reconciles storage under storagePath to the
-// objects the upload wrote. Every path that uploads and then commits an
-// existing resource (Bootstrap, BootstrapSource's update and storage
-// repair) goes through it, so the reconcile order cannot drift between them.
-//
-// For a store with reconcileAfterCommit (harness-configs, ptone/scion#4219)
-// the reconcile runs only after Update succeeded and not at all when it
-// fails: a commit that loses the compare-and-swap (or is refused) must not
-// reconcile storage to its own directory while the row keeps another
-// commit's manifest. Other kinds reconcile before Update, as before.
-func (rs *ResourceStore) commitUploaded(ctx context.Context, stor storage.Storage, storagePath, name string, written map[string]struct{}, rec *ResourceRecord, dir string) error {
-	if !rs.reconcileAfterCommit {
-		rs.reconcileStorage(ctx, stor, storagePath, name, written)
-	}
-	if err := rs.pers.Update(ctx, rec, dir); err != nil {
-		return err
-	}
-	if rs.reconcileAfterCommit {
-		rs.reconcileStorage(ctx, stor, storagePath, name, written)
-	}
-	return nil
+// persistence's Update. Every path that uploads and then commits an existing
+// resource (Bootstrap, BootstrapSource's update and storage repair) goes
+// through it. Nothing is deleted from storage here: files the new manifest
+// drops keep their blobs until the blob garbage collector's grace period has
+// passed (template_blob_gc.go).
+func (rs *ResourceStore) commitUploaded(ctx context.Context, rec *ResourceRecord, dir string) error {
+	return rs.pers.Update(ctx, rec, dir)
 }
 
 // checkDir runs the persistence's optional pre-upload check.
@@ -188,9 +166,6 @@ type ResourceStore struct {
 	// excludePatterns are extra transfer.CollectFiles exclude patterns for
 	// this kind (e.g. harness-config backups and temp files).
 	excludePatterns []string
-	// reconcileAfterCommit makes commitUploaded reconcile storage only
-	// after a successful commit (harness-configs).
-	reconcileAfterCommit bool
 }
 
 // templateStore returns a ResourceStore for templates.
@@ -202,11 +177,10 @@ func (s *Server) templateStore() *ResourceStore {
 // harness type already parsed from the directory's config.yaml by the caller.
 func (s *Server) harnessConfigStore(harness string) *ResourceStore {
 	return &ResourceStore{
-		srv:                  s,
-		pers:                 &harnessConfigPersistence{s: s, harness: harness},
-		hubID:                s.HubID(),
-		excludePatterns:      config.HarnessConfigTransientPatterns,
-		reconcileAfterCommit: true,
+		srv:             s,
+		pers:            &harnessConfigPersistence{s: s, harness: harness},
+		hubID:           s.HubID(),
+		excludePatterns: config.HarnessConfigTransientPatterns,
 	}
 }
 
@@ -217,9 +191,9 @@ func (rs *ResourceStore) collectFiles(dir string) ([]transfer.FileInfo, error) {
 }
 
 // Bootstrap imports a new resource directory or syncs an existing one into the
-// storage backend + DB. When force is true it always re-uploads and reconciles
-// stale objects; when false it short-circuits if the aggregate content hash
-// already matches what is stored. Returns whether the stored content changed.
+// storage backend + DB. When force is true it always re-uploads; when false
+// it short-circuits if the aggregate content hash already matches what is
+// stored. Returns whether the stored content changed.
 func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeID, sourceURL string, force bool) (bool, error) {
 	srv := rs.srv
 	p := rs.pers
@@ -298,7 +272,7 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 		storagePath = storage.ResourceStoragePath(rs.hubID, kind, existing.Scope, existing.ScopeID, existing.Slug)
 	}
 
-	uploaded, written, err := rs.uploadFiles(ctx, stor, storagePath, files)
+	uploaded, _, err := rs.uploadFiles(ctx, stor, storagePath, files)
 	if err != nil {
 		return false, err
 	}
@@ -319,11 +293,9 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 	// record left in "pending" by a prior bootstrap that failed mid-upload: the
 	// retry re-syncs and flips it to active rather than leaving it stuck.
 	existing.Status = resourceStatusActive
-	// Commit, and reconcile storage: drop objects no longer in the manifest
-	// so removed files don't linger (commitUploaded orders the two per kind;
-	// templates store blobs, which the blob garbage collector removes
-	// instead).
-	if err := rs.commitUploaded(ctx, stor, storagePath, existing.Name, written, existing, dir); err != nil {
+	// Commit. Objects of files the manifest drops are removed by the blob
+	// garbage collector, not here.
+	if err := rs.commitUploaded(ctx, existing, dir); err != nil {
 		return false, err
 	}
 
@@ -494,10 +466,27 @@ func (p *templatePersistence) UploadFiles(ctx context.Context, stor storage.Stor
 	if t == nil {
 		return nil, nil, fmt.Errorf("%s: no template loaded for upload", p.Label())
 	}
-	base := p.s.templateContentBase(t)
+	written, err := uploadDirBlobs(ctx, stor, templateBlobRow(t), p.s.templateContentBase(t), files, p.Label())
+	if err != nil {
+		return nil, nil, err
+	}
+	p.written = written
+	return toResourceFiles(files), blobPathSet(written), nil
+}
+
+// uploadDirBlobs writes a collected directory's files as blobs under base
+// (the row's content base: its own path for a blob row, the path its commit
+// migrates it to for a legacy row) and returns the blob paths it wrote.
+// Blobs the row already references are skipped while they are present;
+// every other blob is written, which also refreshes one that was present but
+// unreferenced, so the garbage collector cannot remove it before the commit
+// (F5b). It never writes <StoragePath>/<path>, so a co-located broker's
+// direct read of a blob row keeps missing. Templates and harness-configs
+// share it.
+func uploadDirBlobs(ctx context.Context, stor storage.Storage, row *blobRow, base string, files []transfer.FileInfo, label string) (map[string]bool, error) {
 	referenced := make(map[string]bool)
-	if isBlobLayout(t) {
-		for _, f := range t.Files {
+	if row.isBlobs() {
+		for _, f := range row.Files {
 			if hex, ok := templateBlobHex(f.Hash); ok {
 				referenced[hex] = true
 			}
@@ -513,7 +502,7 @@ func (p *templatePersistence) UploadFiles(ctx context.Context, stor storage.Stor
 	for _, fi := range files {
 		hex, ok := templateBlobHex(fi.Hash)
 		if !ok {
-			return nil, nil, fmt.Errorf("%s: file %s has no content hash", p.Label(), fi.Path)
+			return nil, fmt.Errorf("%s: file %s has no content hash", label, fi.Path)
 		}
 		blobPath := templateBlobPath(base, hex)
 		if seen[blobPath] {
@@ -525,7 +514,7 @@ func (p *templatePersistence) UploadFiles(ctx context.Context, stor storage.Stor
 			// missing one.
 			exists, err := stor.Exists(ctx, blobPath)
 			if err != nil {
-				return nil, nil, fmt.Errorf("%s: failed to check blob of %s: %w", p.Label(), fi.Path, err)
+				return nil, fmt.Errorf("%s: failed to check blob of %s: %w", label, fi.Path, err)
 			}
 			if exists {
 				continue
@@ -545,28 +534,36 @@ func (p *templatePersistence) UploadFiles(ctx context.Context, stor storage.Stor
 			}
 			data, err := os.ReadFile(j.fi.FullPath)
 			if err != nil {
-				return fmt.Errorf("%s: failed to open file %s: %w", p.Label(), j.fi.Path, err)
+				return fmt.Errorf("%s: failed to open file %s: %w", label, j.fi.Path, err)
 			}
 			if transfer.HashBytes(data) != j.fi.Hash {
-				return fmt.Errorf("%s: file %s changed while it was uploaded", p.Label(), j.fi.Path)
+				return fmt.Errorf("%s: file %s changed while it was uploaded", label, j.fi.Path)
 			}
 			if err := uploadTemplateBlob(gctx, stor, j.blobPath, j.fi.Hash, data); err != nil {
-				return fmt.Errorf("%s: failed to upload file %s: %w", p.Label(), j.fi.Path, err)
+				return fmt.Errorf("%s: failed to upload file %s: %w", label, j.fi.Path, err)
 			}
 			return nil
 		})
 	}
 	if err := g.Wait(); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
-	p.written = make(map[string]bool, len(jobs))
-	written := make(map[string]struct{}, len(jobs))
+	written := make(map[string]bool, len(jobs))
 	for _, j := range jobs {
-		p.written[j.blobPath] = true
-		written[j.blobPath] = struct{}{}
+		written[j.blobPath] = true
 	}
-	return toResourceFiles(files), written, nil
+	return written, nil
+}
+
+// blobPathSet converts uploadDirBlobs' result to the set the
+// resourceFileUploader interface returns.
+func blobPathSet(written map[string]bool) map[string]struct{} {
+	out := make(map[string]struct{}, len(written))
+	for p := range written {
+		out[p] = struct{}{}
+	}
+	return out
 }
 
 // CheckDir refuses a template directory that bundles a harness-config with
@@ -642,6 +639,9 @@ type harnessConfigPersistence struct {
 	s       *Server
 	harness string
 	model   *store.HarnessConfig
+	// written lists the blob objects UploadFiles wrote, which the commit in
+	// Update does not check again.
+	written map[string]bool
 }
 
 func (p *harnessConfigPersistence) Kind() storage.ResourceKind {
@@ -678,11 +678,17 @@ func (p *harnessConfigPersistence) Create(ctx context.Context, rec *ResourceReco
 		Scope:         rec.Scope,
 		ScopeID:       rec.ScopeID,
 		Status:        rec.Status,
-		StoragePath:   rec.StoragePath,
 		StorageBucket: rec.StorageBucket,
-		StorageURI:    rec.StorageURI,
 		SourceURL:     rec.SourceURL,
 	}
+	// New harness-configs are created in the blob layout, with a row-unique
+	// storage path (ptone/scion#4219).
+	hc.Layout = store.HarnessConfigLayoutBlobs
+	hc.StoragePath = p.s.harnessConfigBlobStoragePath(hc)
+	hc.StorageURI = storage.StorageURIForPath(rec.StorageBucket, hc.StoragePath)
+	rec.StoragePath = hc.StoragePath
+	rec.StorageURI = hc.StorageURI
+	rec.Layout = hc.Layout
 	rec.Harness = harnessType
 	p.model = hc
 	return p.s.store.CreateHarnessConfig(ctx, hc)
@@ -701,13 +707,11 @@ func (p *harnessConfigPersistence) Update(ctx context.Context, rec *ResourceReco
 		if rec.SourceURL != "" {
 			hc.SourceURL = rec.SourceURL
 		}
-		p.ensureStoragePath(hc)
 	}
-	written := make(map[string]bool, len(rec.Files))
-	for _, f := range rec.Files {
-		written[f.Path] = true
-	}
-	opts := harnessConfigCommitOpts{dir: dir, written: written}
+	// A retry against a re-read row finds the uploaded blobs again (they
+	// are idempotent), and writes from dir any blob missing under the fresh
+	// row's content base.
+	opts := harnessConfigCommitOpts{dir: dir, written: p.written}
 
 	work := *hc
 	apply(&work)
@@ -751,7 +755,6 @@ func (p *harnessConfigPersistence) OnHashMatch(ctx context.Context, rec *Resourc
 	}
 	opts := harnessConfigCommitOpts{dir: dir}
 	work := *hc
-	p.ensureStoragePath(&work)
 	err := p.s.commitHarnessConfigFiles(ctx, &work, work.Files, opts)
 	if errors.Is(err, store.ErrHarnessConfigConflict) {
 		var fresh *store.HarnessConfig
@@ -763,7 +766,6 @@ func (p *harnessConfigPersistence) OnHashMatch(ctx context.Context, rec *Resourc
 				return false, nil
 			}
 			work = *fresh
-			p.ensureStoragePath(&work)
 			err = p.s.commitHarnessConfigFiles(ctx, &work, work.Files, opts)
 		}
 	}
@@ -801,13 +803,21 @@ func (p *harnessConfigPersistence) CheckDir(_ context.Context, dir string, _ []t
 	return nil
 }
 
-// ensureStoragePath gives a legacy row without a storage path the computed
-// path the shared ResourceStore uploads to, so the commit verifies (and
-// records) that path.
-func (p *harnessConfigPersistence) ensureStoragePath(hc *store.HarnessConfig) {
-	if hc.StoragePath == "" {
-		hc.StoragePath = storage.ResourceStoragePath(p.s.HubID(), p.Kind(), hc.Scope, hc.ScopeID, hc.Slug)
+// UploadFiles writes the directory's files as blobs under the
+// harness-config's content base (uploadDirBlobs). Together with the commit
+// this replaces the shared path upload and its prefix reconcile for
+// harness-configs (ptone/scion#4219, ptone/scion#3170).
+func (p *harnessConfigPersistence) UploadFiles(ctx context.Context, stor storage.Storage, _ string, files []transfer.FileInfo) ([]store.TemplateFile, map[string]struct{}, error) {
+	hc := p.model
+	if hc == nil {
+		return nil, nil, fmt.Errorf("%s: no harness config loaded for upload", p.Label())
 	}
+	written, err := uploadDirBlobs(ctx, stor, harnessConfigBlobRow(hc), p.s.harnessConfigContentBase(hc), files, p.Label())
+	if err != nil {
+		return nil, nil, err
+	}
+	p.written = written
+	return toResourceFiles(files), blobPathSet(written), nil
 }
 
 // targetHarnessConfigPersistence is the harness-config persistence used by
@@ -840,11 +850,10 @@ func (p *targetHarnessConfigPersistence) Create(context.Context, *ResourceRecord
 // harness-config with the given ID.
 func (s *Server) targetHarnessConfigStore(id string) *ResourceStore {
 	return &ResourceStore{
-		srv:                  s,
-		pers:                 &targetHarnessConfigPersistence{harnessConfigPersistence: &harnessConfigPersistence{s: s}, id: id},
-		hubID:                s.HubID(),
-		excludePatterns:      config.HarnessConfigTransientPatterns,
-		reconcileAfterCommit: true,
+		srv:             s,
+		pers:            &targetHarnessConfigPersistence{harnessConfigPersistence: &harnessConfigPersistence{s: s}, id: id},
+		hubID:           s.HubID(),
+		excludePatterns: config.HarnessConfigTransientPatterns,
 	}
 }
 
@@ -864,6 +873,7 @@ func harnessConfigToRecord(hc *store.HarnessConfig) *ResourceRecord {
 		StorageURI:    hc.StorageURI,
 		StorageBucket: hc.StorageBucket,
 		StoragePath:   hc.StoragePath,
+		Layout:        hc.Layout,
 		Files:         hc.Files,
 		Status:        hc.Status,
 		SourceURL:     hc.SourceURL,

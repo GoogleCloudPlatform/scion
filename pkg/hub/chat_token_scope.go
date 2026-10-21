@@ -67,11 +67,22 @@ func chatCredentialAllowed(ctx context.Context) bool {
 }
 
 // chatRoute wraps a chat route handler: a credential chatCredentialAllowed
-// refuses gets 403 before the handler runs.
+// refuses gets 403 before the handler runs. A visitor is refused with the
+// uniform visitor refusal unless the request is a chat sub-route that
+// admits visitors (matchVisitorSubRoute, the same entries routeGuard
+// checks), so chatCredentialAllowed never admits a visitor on its own.
 func (s *Server) chatRoute(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		identity := GetIdentityFromContext(r.Context())
+		if isVisitorIdentity(identity) {
+			if _, ok := matchVisitorSubRoute(chatConversationsPrefix, r); !ok {
+				logAuthzDenial(r, identity, Resource{Type: "inbox"}, ActionRead, "chat sub-route is not open to visitors")
+				writeVisitorRefusal(w)
+				return
+			}
+		}
 		if !chatCredentialAllowed(r.Context()) {
-			logAuthzDenial(r, GetIdentityFromContext(r.Context()), Resource{Type: "inbox"}, ActionRead, "credential cannot use chat routes")
+			logAuthzDenial(r, identity, Resource{Type: "inbox"}, ActionRead, "credential cannot use chat routes")
 			Forbidden(w)
 			return
 		}

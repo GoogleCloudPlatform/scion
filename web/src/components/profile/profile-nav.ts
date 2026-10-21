@@ -38,6 +38,16 @@ interface NavSection {
   items: NavItem[];
 }
 
+/** Page size for the GitHub App project check (see checkGitHubApp). */
+const PROJECT_PAGE_SIZE = 100;
+
+/**
+ * Most projects the GitHub App check reads: the hub's default list limit
+ * (listProjects in pkg/hub/handlers_projects_core.go), which is what the
+ * check's former single request without a limit returned.
+ */
+const GITHUB_APP_PROJECT_SCAN = 500;
+
 const PROFILE_SECTIONS: NavSection[] = [
   {
     title: 'Configuration',
@@ -505,25 +515,51 @@ export class ScionProfileNav extends LitElement {
     void this.checkGitHubApp();
   }
 
+  /**
+   * Shows the GitHub App link when the app is configured and at least one of
+   * the user's projects has an installation.
+   *
+   * The project list is only read when the app is configured (the common
+   * unconfigured hub sends no projects request at all), and it is read in
+   * pages of PROJECT_PAGE_SIZE that stop at the first match (ptone/scion#5311).
+   * The walk covers at most GITHUB_APP_PROJECT_SCAN projects, the same window
+   * the old single unbounded request saw (the hub's default list limit), so
+   * the link appears in exactly the cases it did before.
+   */
   private async checkGitHubApp(): Promise<void> {
     try {
-      const [appRes, projectsRes] = await Promise.all([
-        apiFetch('/api/v1/github-app'),
-        apiFetch('/api/v1/projects?mine=true'),
-      ]);
-      if (!appRes.ok || !projectsRes.ok) return;
-
+      const appRes = await apiFetch('/api/v1/github-app');
+      if (!appRes.ok) return;
       const appData = (await appRes.json()) as { configured: boolean; installation_url?: string };
       if (!appData.configured || !appData.installation_url) return;
 
-      const projectsData = (await projectsRes.json()) as { projects: Project[] };
-      const hasInstallation = (projectsData.projects || []).some((p) => p.githubInstallationId);
-      if (hasInstallation) {
+      if (await this.hasProjectWithGitHubInstallation()) {
         this.githubAppUrl = appData.installation_url;
       }
     } catch {
       // Non-fatal
     }
+  }
+
+  private async hasProjectWithGitHubInstallation(): Promise<boolean> {
+    let cursor = '';
+    for (let seen = 0; seen < GITHUB_APP_PROJECT_SCAN; seen += PROJECT_PAGE_SIZE) {
+      const url =
+        `/api/v1/projects?mine=true&limit=${PROJECT_PAGE_SIZE}` +
+        (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '');
+      const res = await apiFetch(url);
+      if (!res.ok) return false;
+      const data = (await res.json()) as { projects?: Project[]; nextCursor?: string };
+      const projects = data.projects || [];
+      // An empty page ends the scan even if it carries a cursor. The hub only
+      // sets nextCursor when more rows follow, so this is a guard against a
+      // cursor that would loop, not a change in what is found.
+      if (projects.length === 0) return false;
+      if (projects.some((p) => p.githubInstallationId)) return true;
+      cursor = (typeof data.nextCursor === 'string' && data.nextCursor) || '';
+      if (!cursor) return false;
+    }
+    return false;
   }
 
   override render() {

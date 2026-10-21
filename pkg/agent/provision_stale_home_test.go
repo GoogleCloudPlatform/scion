@@ -18,8 +18,14 @@ import (
 // home paths. The agent dir is created without a scion-agent config file.
 func setupNoConfigAgentProject(t *testing.T, agentName string) (scionDir, agentDir, agentHome string) {
 	t.Helper()
+	return setupNoConfigAgentProjectIn(t, t.TempDir(), agentName)
+}
+
+// setupNoConfigAgentProjectIn is setupNoConfigAgentProject with the project
+// and HOME under tmpDir, which may be reached through a symlink.
+func setupNoConfigAgentProjectIn(t *testing.T, tmpDir, agentName string) (scionDir, agentDir, agentHome string) {
+	t.Helper()
 	t.Setenv("SCION_HOST_UID", "")
-	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
 	_ = os.Chdir(tmpDir)

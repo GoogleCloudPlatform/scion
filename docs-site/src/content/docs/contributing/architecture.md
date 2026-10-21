@@ -249,7 +249,7 @@ Hub and Runtime Broker servers have their own entry points but reuse the same `a
 scion start <name> "task" [--template claude] [--profile docker-local]
 ```
 
-1. **Hub resolution**: The CLI resolves the Hub endpoint (flag, environment, settings) and fails with a pointer to `scion server start` when there is none. An unregistered project links itself on the local workstation Hub, or after a prompt on a remote Hub.
+1. **Hub resolution**: The CLI resolves the Hub endpoint (flag, environment, the directory's link entry, then the current Hub from the hub list) and fails with a pointer to `scion server start` when there is none. An unregistered project links itself on the local workstation Hub, or after a prompt on a remote Hub.
 2. **API call**: The CLI sends a `POST /api/v1/projects/{projectId}/agents` request to the Hub.
 3. **Broker selection**: The Hub selects a Runtime Broker (explicit or project default).
 4. **Environment resolution**: The Hub merges environment variables and secrets from all applicable scopes (user → project → broker).
@@ -269,11 +269,11 @@ Inside the Runtime Broker, `agent.Manager` runs these steps:
 3. **Provisioning** (`agent.ProvisionAgent`):
    a. Creates `agents/<name>/home/` and `agents/<name>/workspace/` directories.
    b. Resolves the template chain and copies home directory contents.
-   c. Merges configuration: `template base → template → settings (harness/profile) → agent overrides`.
+   c. Merges configuration: `template base → template (job keys only) → agent overrides`, filled from settings (harness/profile) and the harness-config where unset. Template environment keys are dropped with a warning, and template `env` is kept apart as a fallback the runtime applies last.
    d. Prepares the workspace for the project's sharing mode (a per-agent clone made inside the container, a git worktree, or a shared or empty directory).
    e. Runs harness-specific provisioning (`harness.Provision()`).
    f. Writes `scion-agent.json` and `agent-info.json`, and records the starting run in `host-state.json` in the agent directory.
-4. **Image resolution**: Resolves the container image from settings/template/CLI override. Pulls if not present.
+4. **Image resolution**: Resolves the container image from the harness-config, settings, the agent's inline config, the profile override and the CLI override (never the template). Pulls if not present.
 5. **Container launch** (`runtime.Run`):
    a. Builds container run arguments (volumes, env vars, labels, resource limits).
    b. Mounts the agent home at `/home/<user>` and workspace at `/workspace`.

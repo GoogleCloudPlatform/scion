@@ -423,6 +423,10 @@ var placementGuardClassification = map[string]placementGuardOp{
 	"DispatchAgentStart": {guardFirst: true, call: func(ctx context.Context, d *HTTPAgentDispatcher, a *store.Agent) error {
 		return d.DispatchAgentStart(ctx, a, "", false)
 	}},
+	"DispatchAgentStartWithOptions": {guardFirst: true, call: func(ctx context.Context, d *HTTPAgentDispatcher, a *store.Agent) error {
+		_, err := d.DispatchAgentStartWithOptions(ctx, a, "", false, StartDispatchOptions{})
+		return err
+	}},
 	"DispatchAgentStop": {call: func(ctx context.Context, d *HTTPAgentDispatcher, a *store.Agent) error {
 		return d.DispatchAgentStop(ctx, a)
 	}},
@@ -475,6 +479,7 @@ func classifiedDispatcherInterfaces() []reflect.Type {
 		reflect.TypeOf((*AgentDispatcher)(nil)).Elem(),
 		reflect.TypeOf((*agentkeys.Dispatcher)(nil)).Elem(),
 		reflect.TypeOf((*agentMoveDispatcher)(nil)).Elem(),
+		reflect.TypeOf((*startOptionsDispatcher)(nil)).Elem(),
 	}
 }
 

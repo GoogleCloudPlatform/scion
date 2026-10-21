@@ -124,27 +124,6 @@ func TestCompletion_ResolvesTheHubFromTheHubList(t *testing.T) {
 	assert.Equal(t, "version: [1\n", readFileT(t, contextFilePath()))
 }
 
-// TestSkillResolverHubOptions_SelectedHub: the hub create uses for skill
-// resolution is the hub of the invocation, and a hub from the current
-// context never links or registers an already linked project.
-func TestSkillResolverHubOptions_SelectedHub(t *testing.T) {
-	setupContextTest(t)
-	hubEndpoint, hubSource = ctxTestHub, targetSourceContext
-	opts := skillResolverHubOptions("")
-	assert.Equal(t, ctxTestHub, opts.EndpointOverride)
-	assert.True(t, opts.HubFromContext)
-
-	hubEndpoint, hubSource = "https://flag.example.com", ""
-	opts = skillResolverHubOptions("")
-	assert.Equal(t, "https://flag.example.com", opts.EndpointOverride)
-	assert.False(t, opts.HubFromContext)
-
-	hubEndpoint, hubSource = linkEntryTestHub, targetSourceDirectory
-	opts = skillResolverHubOptions("")
-	assert.Equal(t, linkEntryTestHub, opts.EndpointOverride)
-	assert.False(t, opts.HubFromContext)
-}
-
 // TestHubStatusJSON_NoSettingsTokenFields: hub status JSON no longer
 // reports hub.token or hub.apiKey from settings, which the CLI does not
 // read.

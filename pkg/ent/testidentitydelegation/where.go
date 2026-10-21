@@ -85,6 +85,16 @@ func ExpiresAt(v time.Time) predicate.TestIdentityDelegation {
 	return predicate.TestIdentityDelegation(sql.FieldEQ(FieldExpiresAt, v))
 }
 
+// HubID applies equality check predicate on the "hub_id" field. It's identical to HubIDEQ.
+func HubID(v string) predicate.TestIdentityDelegation {
+	return predicate.TestIdentityDelegation(sql.FieldEQ(FieldHubID, v))
+}
+
+// MarkerCreatedAt applies equality check predicate on the "marker_created_at" field. It's identical to MarkerCreatedAtEQ.
+func MarkerCreatedAt(v time.Time) predicate.TestIdentityDelegation {
+	return predicate.TestIdentityDelegation(sql.FieldEQ(FieldMarkerCreatedAt, v))
+}
+
 // RevokedAt applies equality check predicate on the "revoked_at" field. It's identical to RevokedAtEQ.
 func RevokedAt(v time.Time) predicate.TestIdentityDelegation {
 	return predicate.TestIdentityDelegation(sql.FieldEQ(FieldRevokedAt, v))
@@ -473,6 +483,141 @@ func ExpiresAtLT(v time.Time) predicate.TestIdentityDelegation {
 // ExpiresAtLTE applies the LTE predicate on the "expires_at" field.
 func ExpiresAtLTE(v time.Time) predicate.TestIdentityDelegation {
 	return predicate.TestIdentityDelegation(sql.FieldLTE(FieldExpiresAt, v))
+}
+
+// GrantorKindEQ applies the EQ predicate on the "grantor_kind" field.
+func GrantorKindEQ(v GrantorKind) predicate.TestIdentityDelegation {
+	return predicate.TestIdentityDelegation(sql.FieldEQ(FieldGrantorKind, v))
+}
+
+// GrantorKindNEQ applies the NEQ predicate on the "grantor_kind" field.
+func GrantorKindNEQ(v GrantorKind) predicate.TestIdentityDelegation {
+	return predicate.TestIdentityDelegation(sql.FieldNEQ(FieldGrantorKind, v))
+}
+
+// GrantorKindIn applies the In predicate on the "grantor_kind" field.
+func GrantorKindIn(vs ...GrantorKind) predicate.TestIdentityDelegation {
+	return predicate.TestIdentityDelegation(sql.FieldIn(FieldGrantorKind, vs...))
+}
+
+// GrantorKindNotIn applies the NotIn predicate on the "grantor_kind" field.
+func GrantorKindNotIn(vs ...GrantorKind) predicate.TestIdentityDelegation {
+	return predicate.TestIdentityDelegation(sql.FieldNotIn(FieldGrantorKind, vs...))
+}
+
+// HubIDEQ applies the EQ predicate on the "hub_id" field.
+func HubIDEQ(v string) predicate.TestIdentityDelegation {
+	return predicate.TestIdentityDelegation(sql.FieldEQ(FieldHubID, v))
+}
+
+// HubIDNEQ applies the NEQ predicate on the "hub_id" field.
+func HubIDNEQ(v string) predicate.TestIdentityDelegation {
+	return predicate.TestIdentityDelegation(sql.FieldNEQ(FieldHubID, v))
+}
+
+// HubIDIn applies the In predicate on the "hub_id" field.
+func HubIDIn(vs ...string) predicate.TestIdentityDelegation {
+	return predicate.TestIdentityDelegation(sql.FieldIn(FieldHubID, vs...))
+}
+
+// HubIDNotIn applies the NotIn predicate on the "hub_id" field.
+func HubIDNotIn(vs ...string) predicate.TestIdentityDelegation {
+	return predicate.TestIdentityDelegation(sql.FieldNotIn(FieldHubID, vs...))
+}
+
+// HubIDGT applies the GT predicate on the "hub_id" field.
+func HubIDGT(v string) predicate.TestIdentityDelegation {
+	return predicate.TestIdentityDelegation(sql.FieldGT(FieldHubID, v))
+}
+
+// HubIDGTE applies the GTE predicate on the "hub_id" field.
+func HubIDGTE(v string) predicate.TestIdentityDelegation {
+	return predicate.TestIdentityDelegation(sql.FieldGTE(FieldHubID, v))
+}
+
+// HubIDLT applies the LT predicate on the "hub_id" field.
+func HubIDLT(v string) predicate.TestIdentityDelegation {
+	return predicate.TestIdentityDelegation(sql.FieldLT(FieldHubID, v))
+}
+
+// HubIDLTE applies the LTE predicate on the "hub_id" field.
+func HubIDLTE(v string) predicate.TestIdentityDelegation {
+	return predicate.TestIdentityDelegation(sql.FieldLTE(FieldHubID, v))
+}
+
+// HubIDContains applies the Contains predicate on the "hub_id" field.
+func HubIDContains(v string) predicate.TestIdentityDelegation {
+	return predicate.TestIdentityDelegation(sql.FieldContains(FieldHubID, v))
+}
+
+// HubIDHasPrefix applies the HasPrefix predicate on the "hub_id" field.
+func HubIDHasPrefix(v string) predicate.TestIdentityDelegation {
+	return predicate.TestIdentityDelegation(sql.FieldHasPrefix(FieldHubID, v))
+}
+
+// HubIDHasSuffix applies the HasSuffix predicate on the "hub_id" field.
+func HubIDHasSuffix(v string) predicate.TestIdentityDelegation {
+	return predicate.TestIdentityDelegation(sql.FieldHasSuffix(FieldHubID, v))
+}
+
+// HubIDEqualFold applies the EqualFold predicate on the "hub_id" field.
+func HubIDEqualFold(v string) predicate.TestIdentityDelegation {
+	return predicate.TestIdentityDelegation(sql.FieldEqualFold(FieldHubID, v))
+}
+
+// HubIDContainsFold applies the ContainsFold predicate on the "hub_id" field.
+func HubIDContainsFold(v string) predicate.TestIdentityDelegation {
+	return predicate.TestIdentityDelegation(sql.FieldContainsFold(FieldHubID, v))
+}
+
+// MarkerCreatedAtEQ applies the EQ predicate on the "marker_created_at" field.
+func MarkerCreatedAtEQ(v time.Time) predicate.TestIdentityDelegation {
+	return predicate.TestIdentityDelegation(sql.FieldEQ(FieldMarkerCreatedAt, v))
+}
+
+// MarkerCreatedAtNEQ applies the NEQ predicate on the "marker_created_at" field.
+func MarkerCreatedAtNEQ(v time.Time) predicate.TestIdentityDelegation {
+	return predicate.TestIdentityDelegation(sql.FieldNEQ(FieldMarkerCreatedAt, v))
+}
+
+// MarkerCreatedAtIn applies the In predicate on the "marker_created_at" field.
+func MarkerCreatedAtIn(vs ...time.Time) predicate.TestIdentityDelegation {
+	return predicate.TestIdentityDelegation(sql.FieldIn(FieldMarkerCreatedAt, vs...))
+}
+
+// MarkerCreatedAtNotIn applies the NotIn predicate on the "marker_created_at" field.
+func MarkerCreatedAtNotIn(vs ...time.Time) predicate.TestIdentityDelegation {
+	return predicate.TestIdentityDelegation(sql.FieldNotIn(FieldMarkerCreatedAt, vs...))
+}
+
+// MarkerCreatedAtGT applies the GT predicate on the "marker_created_at" field.
+func MarkerCreatedAtGT(v time.Time) predicate.TestIdentityDelegation {
+	return predicate.TestIdentityDelegation(sql.FieldGT(FieldMarkerCreatedAt, v))
+}
+
+// MarkerCreatedAtGTE applies the GTE predicate on the "marker_created_at" field.
+func MarkerCreatedAtGTE(v time.Time) predicate.TestIdentityDelegation {
+	return predicate.TestIdentityDelegation(sql.FieldGTE(FieldMarkerCreatedAt, v))
+}
+
+// MarkerCreatedAtLT applies the LT predicate on the "marker_created_at" field.
+func MarkerCreatedAtLT(v time.Time) predicate.TestIdentityDelegation {
+	return predicate.TestIdentityDelegation(sql.FieldLT(FieldMarkerCreatedAt, v))
+}
+
+// MarkerCreatedAtLTE applies the LTE predicate on the "marker_created_at" field.
+func MarkerCreatedAtLTE(v time.Time) predicate.TestIdentityDelegation {
+	return predicate.TestIdentityDelegation(sql.FieldLTE(FieldMarkerCreatedAt, v))
+}
+
+// MarkerCreatedAtIsNil applies the IsNil predicate on the "marker_created_at" field.
+func MarkerCreatedAtIsNil() predicate.TestIdentityDelegation {
+	return predicate.TestIdentityDelegation(sql.FieldIsNull(FieldMarkerCreatedAt))
+}
+
+// MarkerCreatedAtNotNil applies the NotNil predicate on the "marker_created_at" field.
+func MarkerCreatedAtNotNil() predicate.TestIdentityDelegation {
+	return predicate.TestIdentityDelegation(sql.FieldNotNull(FieldMarkerCreatedAt))
 }
 
 // RevokedAtEQ applies the EQ predicate on the "revoked_at" field.

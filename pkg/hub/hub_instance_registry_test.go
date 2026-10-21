@@ -266,9 +266,10 @@ func TestHubInstanceRegistry_TickRunsNoCountQueries(t *testing.T) {
 	assert.Equal(t, deriveHealthStatus(srv.healthChecks(ctx)), rows[0].Status)
 
 	// The counting wrapper exposes no *sql.DB, so no pool is written; see
-	// TestHandleHealthSummary_NoPoolStatsRead for a row with stats.db.
+	// TestHandleHealthSummary_NoPoolStatsRead for a row with stats.db. The
+	// stats hold only this process's features (ptone/scion#4669).
 	assert.Nil(t, srv.hubInstanceDBStats())
-	assert.Empty(t, rows[0].Stats, "no stats.db without a *sql.DB")
+	assert.JSONEq(t, `{"features":["async_start_v1"]}`, string(rows[0].Stats), "no stats.db without a *sql.DB")
 }
 
 // The stored status comes from the raw checks; the stored checks are

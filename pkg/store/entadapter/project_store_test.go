@@ -1110,3 +1110,26 @@ func TestFindEmbeddedBroker_NilWhenMultiple(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, got, "expected nil when multiple embedded brokers exist")
 }
+
+func TestFindEmbeddedBroker_IgnoresOwnedRows(t *testing.T) {
+	ps := newTestProjectStore(t)
+	ctx := context.Background()
+
+	owned := newBroker()
+	owned.Labels = map[string]string{store.BrokerRoleLabel: store.BrokerRoleEmbedded}
+	owned.CreatedBy = "user-1"
+	require.NoError(t, ps.CreateRuntimeBroker(ctx, owned))
+
+	got, err := ps.FindEmbeddedBroker(ctx)
+	require.NoError(t, err)
+	assert.Nil(t, got, "a row with a recorded owner is never recovered as the co-located broker")
+
+	hubManaged := newBroker()
+	hubManaged.Labels = map[string]string{store.BrokerRoleLabel: store.BrokerRoleEmbedded}
+	require.NoError(t, ps.CreateRuntimeBroker(ctx, hubManaged))
+
+	got, err = ps.FindEmbeddedBroker(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, hubManaged.ID, got.ID)
+}

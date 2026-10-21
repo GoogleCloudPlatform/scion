@@ -191,7 +191,7 @@ Apply or answer the marks, then publish the resolved text as the next version wi
 
 ## Share an artifact
 
-Sharing is for **users only**: the artifact's owner, or a user it gave *Can manage*. Agents cannot share artifacts, including their own, so nobody can share an artifact owned by an agent beyond its home project (see [What agents cannot do](#what-agents-cannot-do)).
+Sharing is for **users only**: the artifact's owner, or a user it gave *Can manage*. Agents cannot share artifacts, including their own. For an artifact owned by an agent, the user who delegated to the agent and the owners of its home project can share it too, with limits; see [Share an agent's artifact](#share-an-agents-artifact).
 
 On the artifact's page, **Share** opens a dialog with three parts: **Share links**, **People and projects**, and **Retention** (see [Expiry, moving and deleting](#expiry-moving-and-deleting)).
 
@@ -224,14 +224,38 @@ Search for a user, or for a project when the Hub's cross-project sharing setting
 
 A grant to a project covers its members and its agents. The home project is listed first: it always has at least *Can view*, can be raised to *Can edit*, and cannot be removed. Grants stay until they are removed or the artifact is deleted.
 
+### Share an agent's artifact
+
+An agent cannot share what it publishes, so the people accountable for it can. For an artifact **owned by an agent**, these users are its **stewards**:
+
+- the user who delegated to the agent (or to the agent that started it), while they hold a role in the artifact's home project;
+- the owners of the artifact's home project (and super-admins).
+
+Project admins who are not owners, and other members, are not stewards.
+
+A steward can:
+
+- give people and projects *Can view* or *Can edit*, and give a person *Can review* (a project grant still needs the Hub's cross-project sharing setting);
+- change or remove existing grants, including lowering a *Can manage* grant;
+- create, list and revoke share links;
+- change the artifact's expiry, and delete it.
+
+A steward cannot give *Can manage* or move the artifact to another project. The Hub refuses both with `steward_action_not_allowed`. A user with *Can manage* on the artifact can do both. For full control of your own copy, fetch it and publish it as your own artifact (see [What agents cannot do](#what-agents-cannot-do)).
+
+Steward rights follow the artifact as it is now. They end when you lose your role in the home project, when the delegation to the agent is revoked, or when the artifact moves to a project where you no longer qualify: as a project owner, one you do not own; as the delegating user, one where you hold no role. Grants and links you created stay until someone removes them. Every grant, change and link you create is recorded with the reason you were allowed.
+
+For now, stewards share from the CLI: the artifact page does not show **Share** to them yet.
+
+```bash
+scion artifact grants scion://artifact/5f1c2d3e-... --add user:<id> --permission read
+scion artifact share scion://artifact/5f1c2d3e-... --ttl 3d
+```
+
 ### Grant review access to an agent's artifact
 
-Because an agent cannot share its own artifacts, it cannot choose who reviews its work. For an artifact **owned by an agent**, these users may give a person review access even though they cannot otherwise manage the artifact:
+For an artifact **owned by an agent**, admins of its home project who are not stewards may still give a person review access, even though they cannot otherwise manage the artifact. The stewards (the user who delegated to the agent, and the project's owners) can do this too, and more; see [Share an agent's artifact](#share-an-agents-artifact).
 
-- the user who delegated to the agent;
-- the project owners and admins of the artifact's home project, and super-admins.
-
-They see **Grant review access** on the artifact page instead of **Share**. Search for a user and choose **Add** to give them *Can review*: they can then publish reviews, and nothing else.
+They see **Grant review access** on the artifact page instead of **Share**. Stewards see it too, for now. Search for a user and choose **Add** to give them *Can review*: they can then publish reviews, and nothing else.
 
 Review access does not give read access. The person must already be able to read the artifact, through its home project or a grant to one of their projects; if that access ends, so does review. It is refused for someone who already holds a grant of their own on the artifact; check that grant, because *Can edit* and *Can manage* already include review.
 
@@ -266,8 +290,8 @@ Keep in mind:
 These actions are for **users** who manage the artifact. Agents cannot do any of them.
 
 - **Expiry.** In the Share dialog, **Retention** sets when the artifact expires: never, or 1, 7, 30 or 90 days from now. Before you save, the dialog says how many share links end early and how many grants go with the artifact. From the moment it expires, nobody can open it and its share links stop working. Your Hub may also give new artifacts an expiry by default.
-- **Moving.** **Move…** gives an artifact a new home project, for example after its project was deleted. It appears on the artifact page, and in the Artifacts list on rows whose home project was deleted, for the owner and users with *Can manage*, while the Hub's cross-project sharing setting is on. You must be allowed to publish in the new project. The old home project loses its access unless you add a grant for it.
-- **Deleting.** Run `scion artifact delete <ref>` (users only; add `--yes` when not at a terminal). The owner, a user with *Can manage*, and the project owners and admins of the artifact's home project (and super-admins) can delete it. Deleting ends its grants and share links, and chat references to it show as unavailable. **There is no undelete.**
+- **Moving.** **Move…** gives an artifact a new home project, for example after its project was deleted. It appears on the artifact page, and in the Artifacts list on rows whose home project was deleted, for the owner and users with *Can manage* (not for [stewards](#share-an-agents-artifact)), while the Hub's cross-project sharing setting is on. You must be allowed to publish in the new project. The old home project loses its access unless you add a grant for it.
+- **Deleting.** Run `scion artifact delete <ref>` (users only; add `--yes` when not at a terminal). The owner, a user with *Can manage*, the project owners and admins of the artifact's home project (and super-admins), and, for an artifact owned by an agent, the user who delegated to the agent (while they hold a role in its home project) can delete it. Deleting ends its grants and share links, and chat references to it show as unavailable. **There is no undelete.**
 
 Deleting a project does not delete its artifacts, and it does not revoke their share links. Moving the artifact does not end them either. To end that access, revoke the links, set the artifact to expire under **Retention**, or delete it.
 
@@ -280,13 +304,13 @@ Agents use the same `scion artifact` command, but in agent mode:
 - **No deleting, expiry changes or moves.** `scion artifact delete` is not available to agents. In an agent, `share` and `delete` do not exist at all: running one fails with `unknown command "share" for "scion artifact"` (or `"delete"`). That is expected, not a typo or an old CLI.
 - **Publishing needs the right agent role.** Agents started with `--role readonly` can read artifacts but not publish them; `baseline` and `full` agents can do both. An agent can publish new versions or reviews of someone else's artifact only with *Can edit* on it, granted to the agent or to its project.
 
-An artifact an agent owns has no user owner and no one with *Can manage*, so nobody can share it beyond its home project, and **Grant review access** reaches only people who can already read it. When the work needs readers or reviewers outside the project, the user who delegated to the agent can fetch it (`scion artifact get <ref> --out <folder>`) and publish it as their own artifact, which they can then share. The copy is a new artifact with its own reference, and it starts without the original's history or reviews; versions the agent publishes later still go to the original. If a review is current, add `--kind publish` (or `--accept`) to `get`. To let the agent keep publishing to the copy, publish the copy into the agent's project, then raise that home project's grant on the copy to *Can edit*.
+An artifact an agent owns has no user owner, but it does have [stewards](#share-an-agents-artifact): the user who delegated to the agent and the owners of its home project can share it with readers and reviewers outside the project. When someone needs full ownership, they can republish it: fetch it (`scion artifact get <ref> --out <folder>`) and publish it as your own artifact. The copy is a new artifact with its own reference and without the original's history or reviews.
 
 ## Troubleshooting
 
 ### "Not found" for an artifact
 
-A `404` means that the artifact does not exist **or** that you cannot read it. The Hub gives the same answer for both, by design, so it does not reveal whether an artifact exists. Check the reference, then ask whoever manages the artifact (its owner, or a user with *Can manage*) to share it with you or your project. An artifact owned by an agent cannot be shared beyond its home project; see [What agents cannot do](#what-agents-cannot-do).
+A `404` means that the artifact does not exist **or** that you cannot read it. The Hub gives the same answer for both, by design, so it does not reveal whether an artifact exists. Check the reference, then ask whoever manages the artifact (its owner, or a user with *Can manage*) to share it with you or your project. For an artifact owned by an agent, ask the user who delegated to the agent or an owner of its home project; see [Share an agent's artifact](#share-an-agents-artifact).
 
 ### `missing_scope` when an agent publishes
 
