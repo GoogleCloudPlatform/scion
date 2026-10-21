@@ -1026,6 +1026,57 @@ func TestAsyncStart_FailedReportPublishesOnce(t *testing.T) {
 	assert.Equal(t, "Start failed: pull: image pull failed. "+provisionedRestingNote, pub[0].Message)
 }
 
+// TestAsyncStart_FailedReportLostSettlePublishesOnce pins the other side of
+// the report path's publish-once rule (owner review R1(b)): when the
+// settle's revert loses (a newer start holds the intent), the handler
+// publishes exactly one event, the store's updated row, with the newer
+// intent kept.
+func TestAsyncStart_FailedReportLostSettlePublishesOnce(t *testing.T) {
+	f, _ := newAsyncStartFixture(t)
+	a := newD9Agent(t, f, "d9-pubonce-lost", d9Prior{"created memory", state.PhaseCreated, state.PhaseCreated})
+	code, body := lifecycleWithBody(t, f, a.ID, "start", map[string]bool{"acceptAsyncLaunch": true})
+	require.Equal(t, http.StatusOK, code, body)
+	row := getAgent(t, f.s, a.ID)
+	// A newer intent: the settle's compare-and-set on the launch's intent
+	// time loses (the pause keeps the two intent times apart).
+	time.Sleep(20 * time.Millisecond)
+	_, err := f.srv.recordRunIntent(context.Background(), row, store.RunIntentRunning)
+	require.NoError(t, err)
+	events := recordStatusEvents(t, f.srv)
+	rec := postLaunchReport(t, f.srv, f.brokerID, a.ID, f.brokerID, AgentLaunchReport{
+		LaunchID: row.LaunchID, InstanceID: "inst-1", State: "failed", ErrorCode: "boom", Step: "pull", Message: "image pull failed",
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	pub := events.forAgent(a.ID)
+	require.Len(t, pub, 1, "exactly one status event when the settle loses")
+	got := getAgent(t, f.s, a.ID)
+	assert.Equal(t, store.RunIntentRunning, got.RunIntent, "the newer intent is kept")
+	assert.Equal(t, got.Message, pub[0].Message, "the event is the store's updated row")
+	assert.Equal(t, "pull: image pull failed", pub[0].Message)
+	assert.Equal(t, store.RunIntentRunning, pub[0].RunIntent)
+}
+
+// TestAsyncStart_ReapedProvisionedStartPublishesOnce pins the reaper's
+// publish-once rule (owner review R1(c)): a reaper end of a provisioned
+// start launch that the hook settles publishes exactly one event for the
+// agent, the settled row.
+func TestAsyncStart_ReapedProvisionedStartPublishesOnce(t *testing.T) {
+	f, d := newAsyncStartFixture(t)
+	a := newD9Agent(t, f, "d9-reap-once", d9Prior{"created memory", state.PhaseCreated, state.PhaseCreated})
+	d.launchTimeout = time.Millisecond
+	code, body := lifecycleWithBody(t, f, a.ID, "start", map[string]bool{"acceptAsyncLaunch": true})
+	require.Equal(t, http.StatusOK, code, body)
+	events := recordStatusEvents(t, f.srv)
+	require.Eventually(t, func() bool {
+		f.srv.launchReaperTickHandler()(context.Background())
+		return getAgent(t, f.s, a.ID).LaunchState == store.LaunchStateEnded
+	}, 10*time.Second, 50*time.Millisecond)
+	pub := events.forAgent(a.ID)
+	require.Len(t, pub, 1, "exactly one status event for the reaped, settled launch")
+	assert.Equal(t, store.RunIntentStopped, pub[0].RunIntent)
+	assert.Equal(t, "Start failed: "+store.LaunchErrorLaunchTimeout+". "+provisionedRestingNote, pub[0].Message)
+}
+
 // TestAsyncStart_FailedReportWithoutMessageUsesLaunchError pins the
 // fallback (review pm O3): a failed report with no step and no message
 // leaves "Start failed: <its launch error>. <note>".
