@@ -101,26 +101,24 @@ func TestSendTerminal_FailedCarriesRunID(t *testing.T) {
 	if _, err := s.SendTerminal(context.Background(), false, "workspace_sync", "launch_timeout", "timed out", "", nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.SendTerminal(context.Background(), true, "", "", "", "", &hubclient.AgentLaunchReportInfo{ID: "c1"}); err != nil {
+	// The succeeded echo's own runId (the started entry's label) is not the
+	// report's top-level runId.
+	if _, err := s.SendTerminal(context.Background(), true, "", "", "", "", &hubclient.AgentLaunchReportInfo{ID: "c1", RunID: "run-entry"}); err != nil {
 		t.Fatal(err)
 	}
 	reports := rtb.getLaunchReports()
 	if len(reports) != 2 {
 		t.Fatalf("expected two reports, got %d", len(reports))
 	}
-	failed, err := json.Marshal(reports[0].Report)
-	if err != nil {
-		t.Fatal(err)
+	if got := reportJSON(t, reports[0].Report)["runId"]; got != "run-terminal" {
+		t.Fatalf("the failed report's top-level runId = %v, want the launch's run run-terminal", got)
 	}
-	if !strings.Contains(string(failed), `"runId":"run-terminal"`) {
-		t.Fatalf("the failed report does not carry the launch's run: %s", failed)
+	succeeded := reportJSON(t, reports[1].Report)
+	if got, ok := succeeded["runId"]; ok {
+		t.Fatalf("the succeeded report must stay unchanged, with no top-level runId, got %v", got)
 	}
-	succeeded, err := json.Marshal(reports[1].Report)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(succeeded), `"runId"`) {
-		t.Fatalf("the succeeded report must stay unchanged (no top-level runId): %s", succeeded)
+	if agentInfo, _ := succeeded["agent"].(map[string]any); agentInfo == nil || agentInfo["runId"] != "run-entry" {
+		t.Fatalf("the succeeded report's echo lost its own runId: %v", succeeded["agent"])
 	}
 }
 
