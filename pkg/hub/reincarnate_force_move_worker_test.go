@@ -427,21 +427,30 @@ func TestBuildReincarnationPreamble_RecreatedWorkspace(t *testing.T) {
 	}
 }
 
-// failLinkStore fails every provider link.
-type failLinkStore struct{ store.Store }
+// failLinkStore fails every provider link once its switch is armed
+// (installStoreFault).
+type failLinkStore struct {
+	store.Store
+	fault *storeFaultSwitch
+}
 
-func (failLinkStore) AddProjectProvider(context.Context, *store.ProjectProvider) error {
+func (s *failLinkStore) AddProjectProvider(ctx context.Context, p *store.ProjectProvider) error {
+	if !s.fault.Active() {
+		return s.Store.AddProjectProvider(ctx, p)
+	}
 	return errors.New("injected provider link failure")
 }
 
-// failAssignStore fails every agent write that assigns the agent to target.
+// failAssignStore fails, once its switch is armed (installStoreFault), every
+// agent write that assigns the agent to target.
 type failAssignStore struct {
 	store.Store
+	fault  *storeFaultSwitch
 	target string
 }
 
-func (s failAssignStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
-	if a.RuntimeBrokerID == s.target {
+func (s *failAssignStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
+	if s.fault.Active() && a.RuntimeBrokerID == s.target {
 		return errors.New("injected persist failure")
 	}
 	return s.Store.UpdateAgent(ctx, a)
@@ -455,19 +464,29 @@ func (s failAssignStore) UpdateAgent(ctx context.Context, a *store.Agent) error 
 func TestReincarnateForceMove_FailureBeforeProvisionSendsNoTargetDelete(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
-		wrap  func(f *moveFixture) store.Store
+		wrap  func(inner store.Store, fault *storeFaultSwitch, f *moveFixture) store.Store
 		cause string
 	}{
-		{"provider link fails", func(f *moveFixture) store.Store { return failLinkStore{Store: f.s} }, "failed to link the target broker to the project"},
-		{"persisting the new config fails", func(f *moveFixture) store.Store { return failAssignStore{Store: f.s, target: f.dst.ID} }, "failed to persist new applied config"},
+		{"provider link fails", func(inner store.Store, fault *storeFaultSwitch, _ *moveFixture) store.Store {
+			return &failLinkStore{Store: inner, fault: fault}
+		}, "failed to link the target broker to the project"},
+		{"persisting the new config fails", func(inner store.Store, fault *storeFaultSwitch, f *moveFixture) store.Store {
+			return &failAssignStore{Store: inner, fault: fault, target: f.dst.ID}
+		}, "failed to persist new applied config"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := setupForceMoveFixture(t, false, func(dst *store.RuntimeBroker) { dst.AutoProvide = true })
+			// The fixture's setup writes through the raw store only, so the
+			// wrapper is installed before anything reads the server's store in
+			// the background; it stays transparent until armed.
+			_, fault := installStoreFault(t, f.srv, func(inner store.Store, sw *storeFaultSwitch) store.Store {
+				return tc.wrap(inner, sw, f)
+			})
 			prepareForceMoveWorker(t, f)
 			f.disp.mu.Lock()
 			f.disp.recreateFiles[f.dst.ID] = true
 			f.disp.mu.Unlock()
-			f.srv.store = tc.wrap(f)
+			fault.Arm()
 
 			rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+f.agent.ID+"/reincarnate",
 				ReincarnateAgentRequest{TargetBroker: f.dst.ID, ForceMove: true})
