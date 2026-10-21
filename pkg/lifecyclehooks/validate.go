@@ -505,6 +505,16 @@ func validateExecutionIdentity(
 		}
 	}
 
+	// A broker host service account record is used only through GCP
+	// identity passthrough translation; it is never a direct reference.
+	if store.IsHostSATranslationRecord(sa) {
+		errs = append(errs, FieldError{
+			Field: "executionIdentity",
+			Message: fmt.Sprintf("GCP service account %q is a broker host service account used for GCP identity "+
+				"passthrough on sandbox profiles and cannot be used as a hook execution identity", sa.Email),
+		})
+	}
+
 	// --- caller permission (actAs) ---
 	//
 	// Runs regardless of whether the checks above produced errors, and

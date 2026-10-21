@@ -46,6 +46,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
@@ -2356,6 +2357,11 @@ type Server struct {
 	// authorizeConduitUserStream instead of authorizeConduitAction. Only
 	// tests set it, on their own Server; production code never does.
 	conduitAuthorizeActionTestHook func(ctx context.Context, identity Identity, agent *store.Agent, action Action) error
+
+	// conduitIngressSampleTestHook, when non-nil, replaces the conduit
+	// ingress's random sample of the eligible relays (one or two of them)
+	// for relay selection. Only tests set it, on their own Server.
+	conduitIngressSampleTestHook func(eligible []registry.RelayInstance) []registry.RelayInstance
 
 	// legacyPortTunnelReturnedTestHook, when non-nil, runs in the port
 	// proxy right after the port-forward tunnel returns, before the
@@ -5608,7 +5614,7 @@ func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, ag
 			MetadataMode: store.GCPMetadataModePassthrough,
 		}
 		if agent.RuntimeBrokerID != "" {
-			if err := s.translatePassthroughForSandbox(ctx, agent, agent.RuntimeBrokerID, project); err != nil {
+			if err := s.translatePassthroughForSandbox(ctx, nil, agent, agent.RuntimeBrokerID, project); err != nil {
 				return "", fmt.Errorf("failed to configure GCP identity for sandbox runtime: %w", err)
 			}
 			if agentHasAssignModeIdentity(agent) {
@@ -5683,7 +5689,7 @@ func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, ag
 				}
 				// The mode follows the pinned profile's type, as on every passthrough surface.
 				if agent.RuntimeBrokerID != "" {
-					if err := s.translatePassthroughForSandbox(ctx, agent, agent.RuntimeBrokerID, project); err != nil {
+					if err := s.translatePassthroughForSandbox(ctx, nil, agent, agent.RuntimeBrokerID, project); err != nil {
 						return "", fmt.Errorf("failed to configure GCP identity for sandbox runtime: %w", err)
 					}
 					if agentHasAssignModeIdentity(agent) {

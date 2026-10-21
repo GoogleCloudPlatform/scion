@@ -19,6 +19,8 @@ package hub
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -336,4 +338,212 @@ func TestConduitTunnelBrokerOffline_Presence(t *testing.T) {
 		require.NoError(t, err, name)
 		assert.Equal(t, tc.want, got, name)
 	}
+}
+
+// TestBrokerPresent_Wrapper: the exported wrapper reports brokerPresence
+// for a broker ID; a broker with no record is not present and not an error.
+func TestBrokerPresent_Wrapper(t *testing.T) {
+	f := newBrokerPresenceFixture(t)
+	setConduitExperiment(t, f.srv, true)
+	ctx := context.Background()
+	offlineLive := f.broker(t, "present-offline-live", store.BrokerStatusOffline, nil)
+	f.liveBrokerSession(t, offlineLive.ID)
+	online := f.broker(t, "present-online", store.BrokerStatusOnline, nil)
+	offline := f.broker(t, "present-offline", store.BrokerStatusOffline, nil)
+	for name, tc := range map[string]struct {
+		id   string
+		want bool
+	}{
+		"offline status, live registry session": {offlineLive.ID, true},
+		"online status":                         {online.ID, true},
+		"offline status, no presence":           {offline.ID, false},
+		"no record":                             {tid("present-missing"), false},
+	} {
+		got, err := f.srv.BrokerPresent(ctx, tc.id)
+		require.NoError(t, err, name)
+		assert.Equal(t, tc.want, got, name)
+	}
+}
+
+// TestBrokerPresent_NoRegistryLegacySignalsDecide: with hub.conduit on but
+// no conduit registry open, as at startup before the relay runs, the legacy
+// signals decide: the stored status online is present, offline is not.
+func TestBrokerPresent_NoRegistryLegacySignalsDecide(t *testing.T) {
+	srv, s := testServer(t)
+	setConduitExperiment(t, srv, true)
+	ctx := context.Background()
+	reg, _, _ := srv.conduitRegistry()
+	require.Nil(t, reg, "no conduit registry is open")
+	for _, tc := range []struct {
+		name, status string
+		want         bool
+	}{
+		{"startup-online", store.BrokerStatusOnline, true},
+		{"startup-offline", store.BrokerStatusOffline, false},
+	} {
+		require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+			ID: tid(tc.name), Name: tc.name, Slug: tc.name, Status: tc.status, Created: time.Now(), Updated: time.Now(),
+		}))
+		got, err := srv.BrokerPresent(ctx, tid(tc.name))
+		require.NoError(t, err, tc.name)
+		assert.Equal(t, tc.want, got, tc.name)
+	}
+	assert.Zero(t, srv.brokerPresenceRegistryFallbacks.Load(), "no registry is not a registry failure")
+}
+
+// placementPresenceProject creates a project whose providers are the given
+// brokers, each provider row online.
+func (f *brokerPresenceFixture) placementPresenceProject(t *testing.T, name string, brokers ...*store.RuntimeBroker) *store.Project {
+	t.Helper()
+	ctx := context.Background()
+	p := &store.Project{ID: tid(name), Slug: name, Name: name, Created: time.Now(), Updated: time.Now()}
+	require.NoError(t, f.store.CreateProject(ctx, p))
+	for _, b := range brokers {
+		require.NoError(t, f.store.AddProjectProvider(ctx, &store.ProjectProvider{
+			ProjectID: p.ID, BrokerID: b.ID, BrokerName: b.Name, Status: store.BrokerStatusOnline,
+		}))
+	}
+	return p
+}
+
+func brokerIDsOf(brokers []store.RuntimeBroker) []string {
+	ids := make([]string, 0, len(brokers))
+	for _, b := range brokers {
+		ids = append(ids, b.ID)
+	}
+	return ids
+}
+
+// TestPlacement_AvailableBrokersUsePresence: the placement set holds the
+// providers whose broker is present: with hub.conduit on, a broker stored
+// offline with a live registry session is in it; a broker stored offline
+// with no presence is not. With hub.conduit off only the legacy signals
+// count.
+func TestPlacement_AvailableBrokersUsePresence(t *testing.T) {
+	f := newBrokerPresenceFixture(t)
+	ctx := context.Background()
+	offlineLive := f.broker(t, "placement-offline-live", store.BrokerStatusOffline, nil)
+	f.liveBrokerSession(t, offlineLive.ID)
+	online := f.broker(t, "placement-online", store.BrokerStatusOnline, nil)
+	offline := f.broker(t, "placement-offline", store.BrokerStatusOffline, nil)
+	p := f.placementPresenceProject(t, "placement-presence", offlineLive, online, offline)
+
+	setConduitExperiment(t, f.srv, true)
+	got, err := f.srv.getAvailableBrokersForProject(ctx, p.ID)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{offlineLive.ID, online.ID}, brokerIDsOf(got))
+
+	setConduitExperiment(t, f.srv, false)
+	got, err = f.srv.getAvailableBrokersForProject(ctx, p.ID)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{online.ID}, brokerIDsOf(got))
+}
+
+// TestPlacement_SingleProviderAutoSelectUsesPresence: the only provider of
+// a project with no default is auto-selected when its broker is present: a
+// broker stored offline with a live registry session is selected with
+// hub.conduit on, and refused as offline with it off.
+func TestPlacement_SingleProviderAutoSelectUsesPresence(t *testing.T) {
+	f := newBrokerPresenceFixture(t)
+	b := f.broker(t, "placement-single", store.BrokerStatusOffline, func(b *store.RuntimeBroker) { b.AutoProvide = true })
+	f.liveBrokerSession(t, b.ID)
+	p := f.placementPresenceProject(t, "placement-single-project", b)
+	ctx := contextWithIdentity(context.Background(), NewDevUser(DevUserConfig{
+		Username: "dev", DisplayName: "Development User", Email: "dev@localhost",
+	}))
+
+	setConduitExperiment(t, f.srv, true)
+	w := httptest.NewRecorder()
+	got, err := f.srv.resolveRuntimeBroker(ctx, w, "", p)
+	require.NoError(t, err, w.Body.String())
+	assert.Equal(t, b.ID, got)
+
+	setConduitExperiment(t, f.srv, false)
+	w = httptest.NewRecorder()
+	got, err = f.srv.resolveRuntimeBroker(ctx, w, "", p)
+	require.Error(t, err)
+	assert.Empty(t, got)
+	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
+	assert.Contains(t, w.Body.String(), "only runtime broker is offline")
+}
+
+// errBrokerRecordRead is the broker record read error brokerReadFailStore
+// returns.
+var errBrokerRecordRead = errors.New("forced broker record read error")
+
+// brokerReadFailStore fails every broker record read while its fault switch
+// is armed: with the caller's context error once that context has ended,
+// otherwise with errBrokerRecordRead. Disarmed, it delegates.
+type brokerReadFailStore struct {
+	store.Store
+	fault *storeFaultSwitch
+}
+
+func (w *brokerReadFailStore) GetRuntimeBroker(ctx context.Context, id string) (*store.RuntimeBroker, error) {
+	if !w.fault.Active() {
+		return w.Store.GetRuntimeBroker(ctx, id)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return nil, errBrokerRecordRead
+}
+
+// TestBrokerPresent_ReadErrorLoggedAndCounted: a broker record read that
+// fails is returned (the caller counts the broker as present), logged at
+// Warn with the broker ID, and counted once in
+// scion.hub.broker.presence_registry_fallbacks. A read cut short by the
+// caller's own context is returned with no log and no count.
+func TestBrokerPresent_ReadErrorLoggedAndCounted(t *testing.T) {
+	srv, _, _, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *brokerReadFailStore {
+		return &brokerReadFailStore{Store: inner, fault: f}
+	})
+	reader := sdkmetric.NewManualReader()
+	require.NoError(t, srv.RegisterBrokerPresenceMetrics(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))))
+	fault.Arm()
+	logs := captureSlog(t)
+	id := tid("present-read-error")
+	const line = "the broker record could not be read"
+
+	got, err := srv.BrokerPresent(context.Background(), id)
+	require.ErrorIs(t, err, errBrokerRecordRead)
+	assert.False(t, got)
+	assert.Contains(t, logs.String(), "level=WARN")
+	assert.Contains(t, logs.String(), line)
+	assert.Contains(t, logs.String(), id)
+	assert.Equal(t, int64(1), srv.brokerPresenceRegistryFallbacks.Load())
+	assert.Equal(t, int64(1), brokerPresenceFallbacksExported(t, reader))
+
+	logs.Reset()
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = srv.BrokerPresent(cancelled, id)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.NotContains(t, logs.String(), line, "a cancelled caller context is not logged")
+	assert.Equal(t, int64(1), srv.brokerPresenceRegistryFallbacks.Load(), "a cancelled caller context is not counted")
+}
+
+// TestPlacement_OfflineProviderRowStaysOut: presence decides only the
+// broker row; the provider row must still be online. A broker that is
+// present, by a live registry session or by its stored status, but whose
+// provider row for the project is offline is not in the placement set.
+func TestPlacement_OfflineProviderRowStaysOut(t *testing.T) {
+	f := newBrokerPresenceFixture(t)
+	setConduitExperiment(t, f.srv, true)
+	ctx := context.Background()
+	liveOfflineRow := f.broker(t, "placement-row-live", store.BrokerStatusOffline, nil)
+	f.liveBrokerSession(t, liveOfflineRow.ID)
+	onlineOfflineRow := f.broker(t, "placement-row-online", store.BrokerStatusOnline, nil)
+	onlineOnlineRow := f.broker(t, "placement-row-both", store.BrokerStatusOnline, nil)
+	p := f.placementPresenceProject(t, "placement-row-project", onlineOnlineRow)
+	for _, b := range []*store.RuntimeBroker{liveOfflineRow, onlineOfflineRow} {
+		require.NoError(t, f.store.AddProjectProvider(ctx, &store.ProjectProvider{
+			ProjectID: p.ID, BrokerID: b.ID, BrokerName: b.Name, Status: store.BrokerStatusOffline,
+		}))
+		require.True(t, f.srv.brokerPresence(ctx, b).Connected, "%s is present", b.Name)
+	}
+
+	got, err := f.srv.getAvailableBrokersForProject(ctx, p.ID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{onlineOnlineRow.ID}, brokerIDsOf(got))
 }

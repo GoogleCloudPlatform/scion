@@ -256,3 +256,37 @@ func TestStartConduitExternal_RequiresInternalListen(t *testing.T) {
 	err := startConduitExternal(context.Background(), cfg, nil, &wg, make(chan error, 1))
 	require.ErrorIs(t, err, errConduitExternalNoInternalListen)
 }
+
+// TestValidateConduitIngress (design §3.9 "Ingress"): proxy ingress needs
+// HMAC relay-peer auth, and startup refuses it under an OIDC peer-auth
+// mode; redirect is refused for now. Errors name the setting.
+func TestValidateConduitIngress(t *testing.T) {
+	autoOnGCP, err := hub.ResolveConduitPeerAuthMode("", true)
+	require.NoError(t, err)
+	require.Equal(t, config.ConduitPeerAuthOIDC, autoOnGCP, "auto resolves to oidc on GCP")
+	for _, tc := range []struct {
+		name    string
+		ingress string
+		mode    string
+		wantOff string
+		wantErr string
+	}{
+		{name: "proxy (default) with hmac", mode: config.ConduitPeerAuthHMAC},
+		{name: "proxy with hmac", ingress: config.ConduitIngressProxy, mode: config.ConduitPeerAuthHMAC},
+		{name: "proxy with oidc starts with the proxy off", ingress: config.ConduitIngressProxy, mode: config.ConduitPeerAuthOIDC, wantOff: hub.ConduitIngressCauseRequiresHMAC},
+		{name: "default auto on GCP starts with the proxy off", mode: autoOnGCP, wantOff: hub.ConduitIngressCauseRequiresHMAC},
+		{name: "redirect", ingress: config.ConduitIngressRedirect, mode: config.ConduitPeerAuthHMAC, wantErr: "server.hub.conduit.ingress is redirect"},
+		{name: "redirect with oidc", ingress: config.ConduitIngressRedirect, mode: config.ConduitPeerAuthOIDC, wantErr: "server.hub.conduit.ingress is redirect"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			off, err := validateConduitIngress(config.HubConduitConfig{RelayMode: config.ConduitRelayModeExternal, Ingress: tc.ingress}, tc.mode)
+			if tc.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErr)
+				return
+			}
+			require.NoError(t, err, "no startup refusal")
+			assert.Equal(t, tc.wantOff, off)
+		})
+	}
+}

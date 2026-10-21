@@ -3220,8 +3220,9 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 			// UpdateUser succeeds so that a failed UpdateUser cannot leave
 			// the binding state diverged from User.Role.
 			var bindingSuperAdmin string // "", "ensure", or "delete"
+			activating := user.Status == store.UserStatusInvited
 
-			if user.Status == store.UserStatusInvited {
+			if activating {
 				// Transition invited → active on first login
 				// (mirrors handleOAuthCallback's invited→active block)
 				ws.logger().Info("user activated from invited state via proxy auth", "email", proxyUser.Email, "user_id", user.ID)
@@ -3267,6 +3268,13 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 				}
 			}
 			if err := ws.store.UpdateUser(ctx, user); err != nil {
+				if activating {
+					// The stored row is still invited: issue no token or
+					// session for it (mirrors provisionUser).
+					ws.logger().Error("Proxy auth: failed to activate invited user", "email", proxyUser.Email, "user_id", user.ID, "error", err)
+					http.Error(w, "internal server error", http.StatusInternalServerError)
+					return
+				}
 				ws.logger().Warn("Failed to update user via proxy auth", "email", proxyUser.Email, "error", err)
 				syncGrants = false
 			} else {
@@ -3648,8 +3656,9 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 		// UpdateUser succeeds so that a failed UpdateUser cannot leave
 		// the binding state diverged from User.Role.
 		var bindingSuperAdmin string // "", "ensure", or "delete"
+		activating := user.Status == store.UserStatusInvited
 
-		if user.Status == store.UserStatusInvited {
+		if activating {
 			// Transition invited → active on first login
 			// TODO(NG4): This duplicates the invited→active logic in provisionUser.
 			// Consolidate into a shared function in a future refactor.
@@ -3705,6 +3714,13 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 			}
 		}
 		if err := ws.store.UpdateUser(ctx, user); err != nil {
+			if activating {
+				// The stored row is still invited: issue no token or
+				// session for it (mirrors provisionUser).
+				ws.logger().Error("Failed to activate invited user on login", "error", err)
+				http.Redirect(w, r, "/login?error=user_create_failed", http.StatusFound)
+				return
+			}
 			ws.logger().Warn("Failed to update user on login", "email", userInfo.Email, "error", err)
 			syncGrants = false
 		} else {

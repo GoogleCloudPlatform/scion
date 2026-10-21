@@ -20,8 +20,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -868,4 +873,164 @@ func TestRecheckTestAdminDelegationGrantor_OfflineKindRefused(t *testing.T) {
 		return e.srv.recheckTestAdminDelegationGrantor(ctx, tx, store.DelegationGrantorTestInfraOffline, store.TestInfraOfflineGrantorID(x2HubID), permissionTestIdentityIssueAdmin)
 	})
 	require.ErrorIs(t, err, errTestAdminIssuerNotLive)
+}
+
+// The account-status gate admits the offline delegation's reserved grantor,
+// which has no users row, on a request whose offline gate passed, for
+// test_identity.issue. The allow comes from decide Step 5b4's synthetic
+// binding.
+func TestDecide_AccountStatusGate_OfflineGrantorPassesWithPassedGate(t *testing.T) {
+	e := newDLEnv(t)
+	d := e.offline(t, 0)
+	require.Equal(t, store.TestInfraOfflineGrantorID(x2HubID), d.GrantorID, "precondition: the reserved grantor id")
+	_, err := e.s.GetUser(context.Background(), d.GrantorID)
+	require.ErrorIs(t, err, store.ErrNotFound, "precondition: no users row for the reserved grantor")
+
+	ctx, identity := dlOfflineCtx(t, d, true)
+	dec := dlDecide(e, ctx, identity, permissionTestIdentityIssue)
+	assert.True(t, dec.Allowed, "reason %q", dec.Reason)
+	assert.NotEqual(t, principalNotActiveReason, dec.Reason)
+	assert.Equal(t, "synthetic:test-infra-offline-delegation:"+d.ID, dec.BindingID,
+		"the allow comes from the Step 5b4 synthetic binding")
+}
+
+// The account-status gate refuses a principal with no users row unless the
+// request is one that decide Step 5b4 grants and the principal is the
+// reserved grantor of the delegation's hub.
+func TestDecide_AccountStatusGate_OfflineGrantorRefusedWithoutProof(t *testing.T) {
+	e := newDLEnv(t)
+	d := e.offline(t, 0)
+	require.Equal(t, store.TestInfraOfflineGrantorID(x2HubID), d.GrantorID, "precondition: the reserved grantor id")
+
+	other := *d
+	other.GrantorID = generateID()
+	require.NotEqual(t, store.TestInfraOfflineGrantorID(other.HubID), other.GrantorID)
+
+	cases := []struct {
+		name       string
+		delegation *store.TestIdentityDelegation
+		passed     bool
+		bareCtx    bool
+		permission string
+	}{
+		{name: "a_gate_not_passed", delegation: d, passed: false, permission: permissionTestIdentityIssue},
+		{name: "b_other_permission", delegation: d, passed: true, permission: "user.read"},
+		{name: "c_issue_admin", delegation: d, passed: true, permission: "test_identity.issue_admin"},
+		{name: "d_grantor_not_reserved_id", delegation: &other, passed: true, permission: permissionTestIdentityIssue},
+		{name: "e_no_delegation_state", delegation: d, passed: true, bareCtx: true, permission: permissionTestIdentityIssue},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, identity := dlOfflineCtx(t, tc.delegation, tc.passed)
+			if tc.bareCtx {
+				ctx = context.Background()
+			}
+			dec := dlDecide(e, ctx, identity, tc.permission)
+			assert.False(t, dec.Allowed)
+			assert.Equal(t, principalNotActiveReason, dec.Reason)
+		})
+	}
+}
+
+// A users row with the reserved grantor id goes through the account-status
+// rule like any other row: an invited row is refused, also on a request
+// whose offline gate passed.
+func TestDecide_AccountStatusGate_OfflineGrantorRowStillChecked(t *testing.T) {
+	e := newDLEnv(t)
+	d := e.offline(t, 0)
+	require.Equal(t, store.TestInfraOfflineGrantorID(x2HubID), d.GrantorID, "precondition: the reserved grantor id")
+	require.NoError(t, e.s.CreateUser(context.Background(), &store.User{ID: d.GrantorID, Email: "dl-reserved-row@test.com",
+		DisplayName: "reserved row", Role: store.UserRoleMember, Status: store.UserStatusInvited, Created: time.Now()}))
+
+	ctx, identity := dlOfflineCtx(t, d, true)
+	dec := dlDecide(e, ctx, identity, permissionTestIdentityIssue)
+	assert.False(t, dec.Allowed)
+	assert.Equal(t, principalNotActiveReason, dec.Reason)
+}
+
+// A users-row lookup fault denies the reserved grantor too, tagged as a
+// resolution error, on a request whose offline gate passed.
+func TestDecide_AccountStatusGate_OfflineGrantorLookupFaultDenies(t *testing.T) {
+	e := newDLEnv(t)
+	d := e.offline(t, 0)
+	e.srv.authzService.store = dlUserReadFaultStore{Store: e.srv.authzService.store}
+
+	ctx, identity := dlOfflineCtx(t, d, true)
+	dec := dlDecide(e, ctx, identity, permissionTestIdentityIssue)
+	assert.False(t, dec.Allowed)
+	assert.Equal(t, principalStatusLookupReason, dec.Reason)
+	assert.Equal(t, DenyCauseResolutionError, dec.DenyCause)
+}
+
+// dlUserReadFaultStore fails every users-row read with a store error.
+type dlUserReadFaultStore struct{ store.Store }
+
+func (dlUserReadFaultStore) GetUser(context.Context, string) (*store.User, error) {
+	return nil, errors.New("injected user read failure")
+}
+
+// Source pin: offlineGrantorStatusExempt is referenced once in this
+// package's non-test code, inside principalStatusGate, and the workload
+// delegation state's offlineGatePassed field is assigned once, in
+// test_identity_workload_issuer.go.
+func TestPrincipalStatusGate_OfflineExemptionSingleSite(t *testing.T) {
+	names, err := filepath.Glob("*.go")
+	require.NoError(t, err)
+	require.NotEmpty(t, names)
+	fset := token.NewFileSet()
+	var exemptRefs, gateAssigns []string
+	// scan records, under where, every reference to the exemption helper,
+	// every assignment to a field named offlineGatePassed, and every
+	// workloadDelegationState literal that sets it (keyed) or sets fields
+	// positionally.
+	scan := func(node ast.Node, where string) {
+		ast.Inspect(node, func(n ast.Node) bool {
+			switch n := n.(type) {
+			case *ast.Ident:
+				if n.Name == "offlineGrantorStatusExempt" {
+					exemptRefs = append(exemptRefs, where)
+				}
+			case *ast.AssignStmt:
+				for _, lhs := range n.Lhs {
+					if sel, ok := lhs.(*ast.SelectorExpr); ok && sel.Sel.Name == "offlineGatePassed" {
+						gateAssigns = append(gateAssigns, where)
+					}
+				}
+			case *ast.KeyValueExpr:
+				if k, ok := n.Key.(*ast.Ident); ok && k.Name == "offlineGatePassed" {
+					gateAssigns = append(gateAssigns, where+" (keyed literal)")
+				}
+			case *ast.CompositeLit:
+				if id, ok := n.Type.(*ast.Ident); ok && id.Name == "workloadDelegationState" {
+					for _, el := range n.Elts {
+						if _, keyed := el.(*ast.KeyValueExpr); !keyed {
+							gateAssigns = append(gateAssigns, where+" (positional literal)")
+							break
+						}
+					}
+				}
+			}
+			return true
+		})
+	}
+	for _, name := range names {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, name, nil, parser.SkipObjectResolution)
+		require.NoError(t, err, name)
+		for _, decl := range file.Decls {
+			if fn, ok := decl.(*ast.FuncDecl); ok {
+				if fn.Body != nil {
+					scan(fn.Body, name+":"+fn.Name.Name)
+				}
+				continue
+			}
+			scan(decl, name+":<package level>")
+		}
+	}
+	assert.Equal(t, []string{"authz_principal_status.go:principalStatusGate"}, exemptRefs,
+		"offlineGrantorStatusExempt has exactly one caller")
+	require.Len(t, gateAssigns, 1, "offlineGatePassed is assigned once: %v", gateAssigns)
+	assert.True(t, strings.HasPrefix(gateAssigns[0], "test_identity_workload_issuer.go:"), "offlineGatePassed is assigned in %s", gateAssigns[0])
 }

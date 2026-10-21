@@ -403,3 +403,22 @@ func TestHubConduitTargetStreamDeadlines(t *testing.T) {
 	require.NotNil(t, back.Hub.Conduit)
 	assert.Equal(t, "enforce", back.Hub.Conduit.TargetStreamDeadlines)
 }
+
+// TestHubConduitIngress: the conduit ingress mode defaults to proxy, accepts
+// proxy and redirect, and refuses anything else, naming the setting.
+func TestHubConduitIngress(t *testing.T) {
+	assert.Equal(t, ConduitIngressProxy, HubConduitConfig{}.IngressValue())
+	assert.Equal(t, ConduitIngressRedirect, HubConduitConfig{Ingress: "redirect"}.IngressValue())
+	assert.NoError(t, HubConduitConfig{Ingress: "proxy"}.Validate())
+	assert.NoError(t, HubConduitConfig{Ingress: "redirect"}.Validate())
+	err := HubConduitConfig{Ingress: "tunnel"}.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "server.hub.conduit.ingress")
+	assert.False(t, HubConduitConfig{Ingress: "proxy"}.IsZero())
+
+	// One env name (the key is a single word), bound to the setting.
+	path, alias, ok := KeyForServerEnv("SCION_SERVER_HUB_CONDUIT_INGRESS")
+	assert.True(t, ok)
+	assert.False(t, alias)
+	assert.Equal(t, "server.hub.conduit.ingress", path)
+}

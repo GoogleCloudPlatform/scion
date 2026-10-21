@@ -3694,7 +3694,8 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 	runID, previousRunID, token, recorded, err := d.beginRun(ctx, agent, startEnv.tokenGrant)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
-		return err
+		// Nothing was sent: the claim releases the start (errStartRunNotBegun).
+		return fmt.Errorf("%w: %w", errStartRunNotBegun, err)
 	}
 	extras.RunID = runID
 	setStartEnvToken(resolvedEnv, &envClassifications, token)
