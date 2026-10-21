@@ -45,8 +45,8 @@ P7 is a separate pull request outside `cr-ci/`, and it needs ptone's word. It
 changes only the `lint` job of `.github/workflows/ci.yml`:
 
 1. Replace `runs-on: ubuntu-latest` with the expression above.
-2. Add the snippet's first step, "Keep caches under HOME on /scratch (cr-ci
-   runner only)", as the job's first step. It runs only when
+2. Add the snippet's first step, "Check cr-ci cache parity (cr-ci runner
+   only)", as the job's first step. It runs only when
    `runner.environment == 'self-hosted'`.
 3. In the **golangci-lint** step, replace the `env:` block with the one in
    the snippet. The throttles stay on GitHub-hosted runners and are lifted
@@ -73,38 +73,61 @@ v1 routes `lint` only.
   still installs it through the action, and the PoC uses the image's
   pre-installed binary. Bump both together: the image pin is the single
   place for the image, and `ci.yml`'s `version:` input for CI.
-- **Caches under `$HOME` go to `/scratch`, with ubuntu-latest's paths.**
-  On a cr-ci runner, `$HOME` (`/home/runner`, as on ubuntu-latest) is on
-  Cloud Run's in-memory root filesystem. The first step of both templates
-  (cr-ci runner only) links `~/.cache` to `/scratch/cache` (the
-  entrypoint's `XDG_CACHE_HOME`) and `~/go` to `/scratch/gopath` (its
-  `GOPATH`). It then sets `GOCACHE=$HOME/.cache/go-build` and
-  `GOMODCACHE=$HOME/go/pkg/mod` in `GITHUB_ENV`, overriding the entrypoint's
-  `/scratch/...` values. `go env` and golangci-lint-action (which derives
-  `~/.cache/golangci-lint` from `$HOME`) therefore report exactly the paths
-  they report on ubuntu-latest, while the bytes land on the disk. The
-  *parent* directories are linked: tar replaces a symlink that sits at an
-  archived path, but follows one in a parent component. The PoC report shows
-  where the links point and how much of `$HOME` stayed on the root
-  filesystem (`du -shx ~`).
+- **Caches under `$HOME` go to `/scratch`, in ubuntu-latest's layout.** See
+  "Cache sharing" below. The runner entrypoint sets this up; the first step of
+  both templates only checks it.
 
 ### Cache sharing
 
-`actions/cache` finds an entry by its key **and** a version, which is a
-hash of the cached path strings and the compression method. The keys
-already agree: setup-go-cache builds them from `RUNNER_OS`, `RUNNER_ARCH`,
-the Go version, the workload name, `go.sum` and the date, and these are the
-same on both runners. So the version decides:
+`actions/cache` (behind `setup-go-cache`, `save-go-cache` and
+golangci-lint-action) has to agree with ubuntu-latest on three things:
 
-| | Paths equal | Compression equal | Result |
-| :--- | :--- | :--- | :--- |
-| **cr-ci as designed** (first step above, zstd in the image, HOME `/home/runner`) | yes | yes (zstd) | **Shared.** A routed job restores the caches ubuntu-latest saved, and what it saves on `main` is the same entry a fallback run on ubuntu-latest restores. One set of entries; quota unchanged. |
-| Without the first step, without zstd, or with another HOME | no | or no | **Separate.** Every restore misses (a cold lint, about 818-1063 s against 584-776 s warm, per ci.yml's comments), and routed `main` runs save a second set: about 4.2 GB of Go build cache plus the module zips and the golangci-lint analysis cache, inside the repository's 10 GB Actions cache quota. That raises eviction pressure on every other workload. |
+1. **The key.** It agrees already: setup-go-cache builds it from
+   `RUNNER_OS`, `RUNNER_ARCH`, the Go version, the workload, `go.sum` and the
+   date.
+2. **The version**, a hash of the cache path strings and the compression
+   method. It needs `HOME=/home/runner`, `GOCACHE=$HOME/.cache/go-build`,
+   `GOMODCACHE=$HOME/go/pkg/mod` and zstd.
+3. **The paths inside the archive.** actions/cache stores each path relative
+   to `GITHUB_WORKSPACE` and extracts with `tar -C "$GITHUB_WORKSPACE"`. On
+   ubuntu-latest the workspace is `/home/runner/work/scion/scion`, so the Go
+   build cache is stored as `../../../.cache/go-build`. The cr-ci runner
+   must therefore use the same work folder, `/home/runner/work`, or the
+   names differ. And because the kernel resolves `..` **physically** while
+   the work folder is a link to `/scratch/_work`, `../../../.cache` lands in
+   `/scratch/.cache`. So `/scratch` must mirror `$HOME`:
+   `~/.cache -> /scratch/.cache` and `~/go -> /scratch/go`. With
+   `/scratch/cache`, entries would extract next to Go's cache, the restore
+   would report a hit, and the lint would still run cold.
 
-The first case applies: the templates set the paths, and the runner image
-installs zstd. If a restore misses anyway (the PoC prints
-`go cache restored: NONE`), check zstd in the image and `HOME=/home/runner`
-first.
+On the cr-ci runner this is set up before any step runs, as agreed in
+`gs://scion-xproject-exchange/cr-ci/cache-parity.md`:
+
+- the image: `HOME=/home/runner`, uid 1001, zstd;
+- the mediator: `work_folder` `/home/runner/work` in `generate-jitconfig`;
+- the entrypoint: `/home/runner/work -> /scratch/_work`,
+  `~/.cache -> /scratch/.cache` and `~/go -> /scratch/go` (the parents, so
+  tar never replaces a link), and `GOCACHE`, `GOMODCACHE` and `GOPATH` under
+  `$HOME`.
+
+Parity therefore holds for any routed workflow. The templates' first step,
+"Check cr-ci cache parity", creates nothing: it fails the job if `HOME`, the
+links, the work folder, `go env GOCACHE`/`GOMODCACHE`, `GITHUB_WORKSPACE` or
+zstd are wrong.
+
+| | Result |
+| :--- | :--- |
+| **Parity holds** (the check passes) | **Shared.** A routed job restores the entries ubuntu-latest saved, and the entries it saves on `main` restore unchanged on a fallback ubuntu-latest run. One set of entries; quota unchanged. |
+| Parity broken (the check fails) | **Separate.** Every restore misses or extracts beside the cache (a cold lint, about 818-1063 s against 584-776 s warm, per ci.yml's comments). Routed `main` runs save a second set (about 4.2 GB of Go build cache plus module zips and the golangci-lint analysis cache) inside the repository's 10 GB Actions cache quota, which raises eviction pressure on every other workload. |
+
+**`GITHUB_WORKSPACE` stays `/home/runner/work/scion/scion`.** In actions/runner
+v2.338.0 the work directory is `Path.GetFullPath(Path.Combine(root,
+WorkFolder))`, and the workspace paths are `Path.Combine` of it.
+`GetFullPath` is lexical and does not resolve symlinks (read from the source
+by cr-ci-dev-2). If it ever canonicalised to `/scratch/_work/...`, the
+archive names would differ again. That is unverified at runtime until P6;
+the parity check fails the job in that case, and the PoC's "Runner facts"
+step prints both the reported and the physical path.
 
 ## PoC success criteria
 
@@ -113,8 +136,9 @@ mediator log and the execution log
 ([github-setup.md, step 9](../docs/github-setup.md#9-verify-a-routed-job)):
 
 - Queue to first step in under 20 s.
-- The Go cache restore hits (`go cache restored: <key>`), so the lint is
-  warm, like CI's.
+- The Go cache is warm: the "Check that the Go cache is warm" step prints
+  `go cache warm: yes`, based on the file count of `$(go env GOCACHE)` after
+  the restore, not only the matched key.
 - `golangci-lint` finishes in under 14 minutes (the step prints its
   duration). Compare it with CI's warm lint (584-776 s on ubuntu-latest).
 - `memory.peak` at about 50% of 32 GiB (about 15.5 to 17 GiB), and `/scratch`
@@ -137,9 +161,10 @@ mediator log and the execution log
   default label equals `RUNNER_LABEL`'s default in `config.example.env`.
   It contains no `-c=1` throttle, and it reports `memory.peak` and
   `df -h /scratch`.
-- Both templates start with the self-hosted-only step that links `~/.cache`
-  and `~/go` to `/scratch` and sets `GOCACHE`/`GOMODCACHE` to
-  ubuntu-latest's paths in `GITHUB_ENV`.
+- Both templates start with the self-hosted-only, verify-only cache parity
+  step (`HOME`, the work folder and cache links, `go env` paths,
+  `GITHUB_WORKSPACE`, zstd). It creates no links and writes no `GITHUB_ENV`.
+- The PoC judges warmth by the contents of `$(go env GOCACHE)`.
 - The snippet sets `GOMEMLIMIT`, `GOFLAGS` and `LINT_CONCURRENCY` per runner
   type.
 - Every `uses:` is pinned to a full commit SHA. No tabs.

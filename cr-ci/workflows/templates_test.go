@@ -157,8 +157,7 @@ func TestPoCWorkflow(t *testing.T) {
 
 	for _, want := range []string{
 		"/sys/fs/cgroup/memory.peak", "df -h /scratch", "golangci-lint run ",
-		// the PoC must say whether its lint was warm
-		"id: restore", "RESTORED_KEY: ${{ steps.restore.outputs.cache-matched-key }}", "go cache restored: ",
+		"id: restore",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("PoC lacks %q", want)
@@ -173,36 +172,62 @@ func TestPoCWorkflow(t *testing.T) {
 	}
 }
 
-// TestHomeCachesOnScratch: on the cr-ci runner, $HOME is in memory, so both
-// templates link ~/.cache to /scratch in their first step, and only there.
-func TestHomeCachesOnScratch(t *testing.T) {
+// TestCacheParityCheck: both templates start with a verify-only step, on the
+// self-hosted runner only, that checks the cache-parity contract (the
+// entrypoint sets it up; see README.md, "Cache sharing").
+func TestCacheParityCheck(t *testing.T) {
 	for _, f := range []string{"cr-runner-poc.yml", "ci-lint-routing.snippet.yml"} {
 		s := readFile(t, f)
 		first := regexp.MustCompile(`(?m)^ *steps:\n *- name: (.*)\n *if: (.*)$`).FindStringSubmatch(s)
-		if first == nil || first[1] != "Keep caches under HOME on /scratch (cr-ci runner only)" ||
+		if first == nil || first[1] != "Check cr-ci cache parity (cr-ci runner only)" ||
 			first[2] != "runner.environment == 'self-hosted'" {
-			t.Errorf("%s: the first step must be the self-hosted-only ~/.cache link step, got %q", f, first)
+			t.Errorf("%s: the first step must be the self-hosted-only cache parity check, got %q", f, first)
 		}
 		for _, want := range []string{
-			`ln -sfn "$2" "$1"`,
-			// idempotent: a correct link (e.g. made by the entrypoint) is left alone
-			`if [ -L "$1" ] && [ "$(readlink "$1")" = "$2" ]; then`,
-			`if [ -d "$1" ] && [ ! -L "$1" ]; then`,
-			`link_to_scratch "$HOME/.cache" /scratch/cache`,
-			`link_to_scratch "$HOME/go" /scratch/gopath`,
-			// ubuntu-latest's cache paths, so the actions/cache versions match
-			`echo "GOCACHE=$HOME/.cache/go-build"`,
-			`echo "GOMODCACHE=$HOME/go/pkg/mod"`,
-			`} >> "$GITHUB_ENV"`,
-			`[ "$HOME" = /home/runner ] || echo "::warning::`,
+			`check HOME "$HOME" /home/runner`,
+			`check "work folder link /home/runner/work" "$(readlink /home/runner/work)" /scratch/_work`,
+			// /scratch mirrors $HOME: tar resolves ".." physically from the workspace
+			`check "~/.cache link" "$(readlink "$HOME/.cache")" /scratch/.cache`,
+			`check "~/go link" "$(readlink "$HOME/go")" /scratch/go`,
+			`check "go env GOCACHE" "$(go env GOCACHE)" /home/runner/.cache/go-build`,
+			`check "go env GOMODCACHE" "$(go env GOMODCACHE)" /home/runner/go/pkg/mod`,
+			`check "GITHUB_WORKSPACE parent" "${GITHUB_WORKSPACE%/*/*}" /home/runner/work`,
+			`command -v zstd`,
+			`exit "$fail"`,
 		} {
 			if !strings.Contains(s, want) {
-				t.Errorf("%s lacks %q", f, want)
+				t.Errorf("%s: parity check lacks %q", f, want)
 			}
 		}
-		// Linking the cache dir itself would be replaced by tar on restore.
-		if regexp.MustCompile(`(ln -sfn? \S+|link_to_scratch) "\$HOME/(\.cache/golangci-lint|\.cache/go-build|go/pkg/mod)"`).MatchString(s) {
-			t.Errorf("%s links a cache directory itself; link its parent", f)
+		// Verify only: the templates create nothing.
+		for _, banned := range []string{"ln -s", "GITHUB_ENV", "/scratch/cache", "/scratch/gopath", "rm -rf"} {
+			if strings.Contains(s, banned) {
+				t.Errorf("%s contains %q; the parity step must only verify", f, banned)
+			}
+		}
+	}
+}
+
+// TestPoCWarmSignal: the PoC judges warmth by what Go will read, not by the
+// matched cache key alone.
+func TestPoCWarmSignal(t *testing.T) {
+	s := readFile(t, "cr-runner-poc.yml")
+	restore := strings.Index(s, "id: restore")
+	warm := strings.Index(s, "- name: Check that the Go cache is warm")
+	lint := strings.Index(s, "golangci-lint run ")
+	if restore < 0 || warm < 0 || lint < 0 || !(restore < warm && warm < lint) {
+		t.Fatalf("PoC must restore, then check warmth, then lint (offsets %d, %d, %d)", restore, warm, lint)
+	}
+	for _, want := range []string{
+		"RESTORED_KEY: ${{ steps.restore.outputs.cache-matched-key }}",
+		`gocache=$(go env GOCACHE)`,
+		`files=$(find "$gocache/" -type f 2>/dev/null | wc -l)`,
+		`if [ -n "$RESTORED_KEY" ] && [ "$files" -ge 1000 ]; then`,
+		`echo "go cache warm: yes"`,
+		"go cache warm: NO",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("PoC warm check lacks %q", want)
 		}
 	}
 }

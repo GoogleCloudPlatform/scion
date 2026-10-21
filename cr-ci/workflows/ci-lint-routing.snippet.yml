@@ -22,15 +22,15 @@
 #    PoC has measured the headroom. On any GitHub-hosted runner, including a
 #    larger one used as the fallback, the current values apply unchanged.
 #
-# 3. A new FIRST step, on the cr-ci runner only, links ~/.cache and ~/go to
-#    /scratch and sets GOCACHE=$HOME/.cache/go-build and
-#    GOMODCACHE=$HOME/go/pkg/mod, the paths Go uses on ubuntu-latest. Two
-#    effects: nothing lands on Cloud Run's in-memory root filesystem, and
-#    setup-go-cache and golangci-lint-action pass actions/cache the same path
-#    strings as on ubuntu-latest. With zstd in the runner image, the cache
-#    version (paths + compression) matches too, so routed jobs restore and
-#    share CI's existing caches (workflows/README.md, "Cache sharing").
-#    The tool cache is under the runner's work folder, already on /scratch.
+# 3. A new FIRST step, on the cr-ci runner only, checks cache parity and
+#    fails the job if it is off. It creates nothing: the runner entrypoint
+#    sets up the work folder /home/runner/work (a link to /scratch/_work),
+#    ~/.cache -> /scratch/.cache, ~/go -> /scratch/go, GOCACHE and
+#    GOMODCACHE under $HOME, and the image has zstd and HOME=/home/runner.
+#    With all of that, setup-go-cache and golangci-lint-action restore and
+#    save the same cache entries as on ubuntu-latest, and the bytes land on
+#    /scratch, not on Cloud Run's in-memory root filesystem
+#    (workflows/README.md, "Cache sharing").
 #
 # 4. The golangci-lint command line reads LINT_CONCURRENCY instead of the
 #    literal 2:
@@ -41,45 +41,44 @@ lint:
   runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
   timeout-minutes: 60
   steps:
-    - name: Keep caches under HOME on /scratch (cr-ci runner only)
+    - name: Check cr-ci cache parity (cr-ci runner only)
       if: runner.environment == 'self-hosted'
       shell: bash
       run: |
-        # Cloud Run's root filesystem, including $HOME, is in memory. Link the
-        # cache directories under $HOME to the ephemeral disk, and give Go the
-        # SAME cache paths as ubuntu-latest (HOME is /home/runner on both).
-        # actions/cache matches an entry on its key AND a version hashed from
-        # the path strings and the compression method, so identical paths
-        # (plus zstd in the runner image) let a routed job restore, and share,
-        # the caches CI saves on ubuntu-latest:
-        #   ~/.cache -> /scratch/cache (the entrypoint's XDG_CACHE_HOME): Go's
-        #     build cache, and golangci-lint-action's analysis cache, whose
-        #     path the action derives from $HOME;
-        #   ~/go -> /scratch/gopath (the entrypoint's GOPATH): the module cache.
-        # The PARENT directories are linked: tar would replace a symlink at an
-        # archived path itself. Idempotent: a correct link (for example one the
-        # runner entrypoint already made) is left untouched.
-        set -euo pipefail
-        [ "$HOME" = /home/runner ] || echo "::warning::HOME is $HOME, not /home/runner: cache paths will not match ubuntu-latest's"
-        link_to_scratch() {
-          if [ -L "$1" ] && [ "$(readlink "$1")" = "$2" ]; then
-            echo "$1 -> $2 (already linked)"
-            return 0
+        # Verification only; the runner entrypoint sets all of this up
+        # (cr-ci/workflows/README.md, "Cache sharing"). actions/cache stores
+        # paths relative to GITHUB_WORKSPACE and extracts them with
+        # tar -C "$GITHUB_WORKSPACE", where ".." resolves physically. For
+        # entries to land where Go and golangci-lint look, in both directions
+        # between ubuntu-latest and cr-ci, the work folder must be
+        # /home/runner/work (a link to /scratch/_work) and /scratch must
+        # mirror $HOME: ~/.cache -> /scratch/.cache, ~/go -> /scratch/go.
+        # Plus HOME=/home/runner and zstd (the cache version hashes the paths
+        # and the compression method). Fails the job if any of it is off.
+        set -uo pipefail
+        fail=0
+        check() {
+          if [ "$2" = "$3" ]; then
+            echo "ok   $1: $2"
+          else
+            echo "::error title=cr-ci cache parity::$1 is '$2', want '$3'"
+            fail=1
           fi
-          mkdir -p "$2"
-          if [ -d "$1" ] && [ ! -L "$1" ]; then
-            cp -a "$1/." "$2/"
-            rm -rf "$1"
-          fi
-          ln -sfn "$2" "$1"
-          echo "$1 -> $(readlink -f "$1")"
         }
-        link_to_scratch "$HOME/.cache" /scratch/cache
-        link_to_scratch "$HOME/go" /scratch/gopath
-        {
-          echo "GOCACHE=$HOME/.cache/go-build"
-          echo "GOMODCACHE=$HOME/go/pkg/mod"
-        } >> "$GITHUB_ENV"
+        check HOME "$HOME" /home/runner
+        check "work folder link /home/runner/work" "$(readlink /home/runner/work)" /scratch/_work
+        check "~/.cache link" "$(readlink "$HOME/.cache")" /scratch/.cache
+        check "~/go link" "$(readlink "$HOME/go")" /scratch/go
+        check "go env GOCACHE" "$(go env GOCACHE)" /home/runner/.cache/go-build
+        check "go env GOMODCACHE" "$(go env GOMODCACHE)" /home/runner/go/pkg/mod
+        check "GITHUB_WORKSPACE parent" "${GITHUB_WORKSPACE%/*/*}" /home/runner/work
+        if command -v zstd >/dev/null; then
+          echo "ok   zstd: $(zstd --version)"
+        else
+          echo "::error title=cr-ci cache parity::zstd is not installed"
+          fail=1
+        fi
+        exit "$fail"
     # ... unchanged steps: "Checkout code", "Setup Go", "Install golangci-lint" ...
     - name: golangci-lint
       shell: bash
