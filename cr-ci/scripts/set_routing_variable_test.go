@@ -27,7 +27,9 @@ case "$1 $2" in
     if [[ -n ${GH_DENY:-} ]]; then echo "HTTP 403: Resource not accessible by integration" >&2; exit 1; fi
     if [[ " ${GH_PRESENT:-} " == *" $5 "* ]]; then echo scion-cr-8c32g; exit 0; fi
     echo "variable $3 was not found" >&2; exit 1 ;;
-  "variable set"|"variable delete") exit 0 ;;
+  "variable set"|"variable delete")
+    if [[ -n ${GH_WRITE_FAIL:-} ]]; then echo "HTTP 403: Must have admin rights to Repository." >&2; exit 1; fi
+    exit 0 ;;
   *) echo "unexpected gh call" >&2; exit 9 ;;
 esac
 `
@@ -140,7 +142,7 @@ func TestRoutingApplyClearIsIdempotent(t *testing.T) {
 		"variable get SCION_LARGE_RUNNER --repo ptone/scion",
 		"variable delete SCION_LARGE_RUNNER --repo ptone/scion",
 		"variable get SCION_LARGE_RUNNER --repo GoogleCloudPlatform/scion")
-	wantLines(t, r.out, "# GoogleCloudPlatform/scion: SCION_LARGE_RUNNER is not set; nothing to clear")
+	wantLines(t, r.out, "# GoogleCloudPlatform/scion: SCION_LARGE_RUNNER is not set (or the repo was not found: check the name); nothing to clear")
 }
 
 func TestRoutingClearAcceptsRepoOutsideTargets(t *testing.T) {
@@ -159,6 +161,15 @@ func TestRoutingApplyStopsOnPermissionDenied(t *testing.T) {
 		t.Fatalf("rc=0 on a 403\n%s", r.out)
 	}
 	wantCalls(t, r.calls, "variable get SCION_LARGE_RUNNER --repo ptone/scion")
+}
+
+func TestRoutingApplyStopsWhenSetFails(t *testing.T) {
+	r := runRouting(t, []string{"GH_WRITE_FAIL=1"}, "--apply")
+	if r.rc == 0 || !strings.Contains(r.out, "step failed") {
+		t.Fatalf("rc=%d, want a failure naming the step:\n%s", r.rc, r.out)
+	}
+	// It stops at the first failed repo instead of carrying on.
+	wantCalls(t, r.calls, "variable set SCION_LARGE_RUNNER --repo ptone/scion --body scion-cr-8c32g")
 }
 
 func TestRoutingRejects(t *testing.T) {

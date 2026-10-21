@@ -105,6 +105,8 @@ func TestSnippetLintEnv(t *testing.T) {
 		"GOFLAGS: ${{ runner.environment != 'self-hosted' && '-gcflags=github.com/GoogleCloudPlatform/scion/pkg/hub=-c=1' || '' }}",
 		`--concurrency="$LINT_CONCURRENCY"`,
 		"LINT_CONCURRENCY: ${{ runner.environment == 'self-hosted' && '4' || '2' }}",
+		"GOMEMLIMIT: ${{ runner.environment == 'self-hosted' && '24GiB' || '8GiB' }}",
+		"GOGC: '25'",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("snippet lacks %q", want)
@@ -153,7 +155,11 @@ func TestPoCWorkflow(t *testing.T) {
 		t.Errorf("PoC runner-label default = %q, want RUNNER_LABEL default %q", m[1], label)
 	}
 
-	for _, want := range []string{"/sys/fs/cgroup/memory.peak", "df -h /scratch", "golangci-lint run "} {
+	for _, want := range []string{
+		"/sys/fs/cgroup/memory.peak", "df -h /scratch", "golangci-lint run ",
+		// the PoC must say whether its lint was warm
+		"id: restore", "RESTORED_KEY: ${{ steps.restore.outputs.cache-matched-key }}", "go cache restored: ",
+	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("PoC lacks %q", want)
 		}
@@ -178,16 +184,25 @@ func TestHomeCachesOnScratch(t *testing.T) {
 			t.Errorf("%s: the first step must be the self-hosted-only ~/.cache link step, got %q", f, first)
 		}
 		for _, want := range []string{
-			`ln -sfn /scratch/cache "$HOME/.cache"`,
-			`[ ! -L "$HOME/.cache" ]`,
+			`ln -sfn "$2" "$1"`,
+			// idempotent: a correct link (e.g. made by the entrypoint) is left alone
+			`if [ -L "$1" ] && [ "$(readlink "$1")" = "$2" ]; then`,
+			`if [ -d "$1" ] && [ ! -L "$1" ]; then`,
+			`link_to_scratch "$HOME/.cache" /scratch/cache`,
+			`link_to_scratch "$HOME/go" /scratch/gopath`,
+			// ubuntu-latest's cache paths, so the actions/cache versions match
+			`echo "GOCACHE=$HOME/.cache/go-build"`,
+			`echo "GOMODCACHE=$HOME/go/pkg/mod"`,
+			`} >> "$GITHUB_ENV"`,
+			`[ "$HOME" = /home/runner ] || echo "::warning::`,
 		} {
 			if !strings.Contains(s, want) {
 				t.Errorf("%s lacks %q", f, want)
 			}
 		}
 		// Linking the cache dir itself would be replaced by tar on restore.
-		if regexp.MustCompile(`ln -sfn? \S+ "\$HOME/\.cache/golangci-lint"`).MatchString(s) {
-			t.Errorf("%s links ~/.cache/golangci-lint itself; link the parent", f)
+		if regexp.MustCompile(`(ln -sfn? \S+|link_to_scratch) "\$HOME/(\.cache/golangci-lint|\.cache/go-build|go/pkg/mod)"`).MatchString(s) {
+			t.Errorf("%s links a cache directory itself; link its parent", f)
 		}
 	}
 }

@@ -102,7 +102,7 @@ for r in "${REPOS[@]}"; do
     if ((present == 1)) || [[ $CRCI_MODE != apply ]]; then
       crci_run gh variable delete "$NAME" --repo "$r"
     else
-      crci_note "$r: $NAME is not set; nothing to clear"
+      crci_note "$r: $NAME is not set (or the repo was not found: check the name); nothing to clear"
     fi
   else
     crci_run gh variable set "$NAME" --repo "$r" --body "$VALUE"

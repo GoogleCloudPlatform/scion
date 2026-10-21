@@ -73,22 +73,38 @@ v1 routes `lint` only.
   still installs it through the action, and the PoC uses the image's
   pre-installed binary. Bump both together: the image pin is the single
   place for the image, and `ci.yml`'s `version:` input for CI.
-- **`~/.cache` is linked to `/scratch`.** On a cr-ci runner, `$HOME` is on
-  Cloud Run's in-memory root filesystem. `ci.yml` exports
-  `GOLANGCI_LINT_CACHE=$HOME/.cache/golangci-lint`, which is the path
-  `golangci-lint-action` restores and saves; the action derives it from
-  `$HOME` itself. Pointing the variable straight at `/scratch` would
-  therefore break the action's cache. Instead, the snippet's first step
-  (cr-ci runner only) links `~/.cache` to `/scratch/cache`, the entrypoint's
-  `XDG_CACHE_HOME`, so the same path resolves to the disk. It links the
-  *parent* directory: tar replaces a symlink that sits at an archived path,
-  but follows one in a parent component. The PoC does the same, and its
-  report shows where `~/.cache` points and how much of `$HOME` stayed on the
-  root filesystem (`du -shx ~`). P6 confirms that the action's restore lands
-  on `/scratch`.
-- The Go build and module caches restored by `setup-go-cache` land on
-  `/scratch`, because the entrypoint exports `GOCACHE` and `GOMODCACHE`
-  there and `go env` reports them.
+- **Caches under `$HOME` go to `/scratch`, with ubuntu-latest's paths.**
+  On a cr-ci runner, `$HOME` (`/home/runner`, as on ubuntu-latest) is on
+  Cloud Run's in-memory root filesystem. The first step of both templates
+  (cr-ci runner only) links `~/.cache` to `/scratch/cache` (the
+  entrypoint's `XDG_CACHE_HOME`) and `~/go` to `/scratch/gopath` (its
+  `GOPATH`). It then sets `GOCACHE=$HOME/.cache/go-build` and
+  `GOMODCACHE=$HOME/go/pkg/mod` in `GITHUB_ENV`, overriding the entrypoint's
+  `/scratch/...` values. `go env` and golangci-lint-action (which derives
+  `~/.cache/golangci-lint` from `$HOME`) therefore report exactly the paths
+  they report on ubuntu-latest, while the bytes land on the disk. The
+  *parent* directories are linked: tar replaces a symlink that sits at an
+  archived path, but follows one in a parent component. The PoC report shows
+  where the links point and how much of `$HOME` stayed on the root
+  filesystem (`du -shx ~`).
+
+### Cache sharing
+
+`actions/cache` finds an entry by its key **and** a version, which is a
+hash of the cached path strings and the compression method. The keys
+already agree: setup-go-cache builds them from `RUNNER_OS`, `RUNNER_ARCH`,
+the Go version, the workload name, `go.sum` and the date, and these are the
+same on both runners. So the version decides:
+
+| | Paths equal | Compression equal | Result |
+| :--- | :--- | :--- | :--- |
+| **cr-ci as designed** (first step above, zstd in the image, HOME `/home/runner`) | yes | yes (zstd) | **Shared.** A routed job restores the caches ubuntu-latest saved, and what it saves on `main` is the same entry a fallback run on ubuntu-latest restores. One set of entries; quota unchanged. |
+| Without the first step, without zstd, or with another HOME | no | or no | **Separate.** Every restore misses (a cold lint, about 818-1063 s against 584-776 s warm, per ci.yml's comments), and routed `main` runs save a second set: about 4.2 GB of Go build cache plus the module zips and the golangci-lint analysis cache, inside the repository's 10 GB Actions cache quota. That raises eviction pressure on every other workload. |
+
+The first case applies: the templates set the paths, and the runner image
+installs zstd. If a restore misses anyway (the PoC prints
+`go cache restored: NONE`), check zstd in the image and `HOME=/home/runner`
+first.
 
 ## PoC success criteria
 
@@ -97,8 +113,10 @@ mediator log and the execution log
 ([github-setup.md, step 9](../docs/github-setup.md#9-verify-a-routed-job)):
 
 - Queue to first step in under 20 s.
+- The Go cache restore hits (`go cache restored: <key>`), so the lint is
+  warm, like CI's.
 - `golangci-lint` finishes in under 14 minutes (the step prints its
-  duration).
+  duration). Compare it with CI's warm lint (584-776 s on ubuntu-latest).
 - `memory.peak` at about 50% of 32 GiB (about 15.5 to 17 GiB), and `/scratch`
   takes the 5 to 8 GiB of caches instead of RAM.
 - The runner deregisters itself, and the execution ends (and stops billing)
@@ -119,8 +137,11 @@ mediator log and the execution log
   default label equals `RUNNER_LABEL`'s default in `config.example.env`.
   It contains no `-c=1` throttle, and it reports `memory.peak` and
   `df -h /scratch`.
-- Both templates link `~/.cache` to `/scratch` in their first step, on the
-  self-hosted runner only.
+- Both templates start with the self-hosted-only step that links `~/.cache`
+  and `~/go` to `/scratch` and sets `GOCACHE`/`GOMODCACHE` to
+  ubuntu-latest's paths in `GITHUB_ENV`.
+- The snippet sets `GOMEMLIMIT`, `GOFLAGS` and `LINT_CONCURRENCY` per runner
+  type.
 - Every `uses:` is pinned to a full commit SHA. No tabs.
 - `scripts/github-app-manifest.json` requests exactly Actions read,
   Administration write and Metadata read, and the `workflow_job` event. The

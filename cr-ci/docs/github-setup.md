@@ -222,7 +222,9 @@ policy. The result must match the manifest exactly. Reference:
    ```bash
    umask 077; work=$(mktemp -d)
    scripts/set-secrets.sh --generate-webhook-secret "$work/webhook-secret" --apply
-   cat "$work/webhook-secret"; echo     # copy it into the form, then:
+   # Copy it to the clipboard without printing it, paste it into the form:
+   pbcopy < "$work/webhook-secret" 2>/dev/null || xclip -selection clipboard < "$work/webhook-secret"
+   # (No clipboard tool? cat the file, paste, then clear the terminal scrollback.)
    rm -f "$work/webhook-secret"
    ```
 
@@ -385,8 +387,9 @@ scripts/set-routing-variable.sh --repo ptone/scion --apply    # sets SCION_LARGE
 
 This is equivalent to
 `gh variable set SCION_LARGE_RUNNER --repo ptone/scion --body scion-cr-8c32g`.
-In the UI: **Settings**, **Secrets and variables**, **Actions**, the
-**Variables** tab, **New repository variable**, then **Add variable**.
+In the UI (that page needs admin; `gh` and the script need only write):
+**Settings**, **Secrets and variables**, **Actions**, the **Variables** tab,
+**New repository variable**, then **Add variable**.
 Without `--repo`, the script acts on every repository in `TARGET_REPOS`.
 
 ### Fallback toggle (G11)

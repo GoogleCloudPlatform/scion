@@ -48,20 +48,41 @@ jobs:
         if: runner.environment == 'self-hosted'
         shell: bash
         run: |
-          # Cloud Run's root filesystem, including $HOME, is in memory. Link
-          # ~/.cache to the ephemeral disk (the entrypoint's XDG_CACHE_HOME), so
-          # GOLANGCI_LINT_CACHE=$HOME/.cache/golangci-lint, the path
-          # golangci-lint-action restores and saves, resolves to /scratch and
-          # still matches the action's cache path. The PARENT is linked: tar
-          # would replace a symlink at the archived path itself.
+          # Cloud Run's root filesystem, including $HOME, is in memory. Link the
+          # cache directories under $HOME to the ephemeral disk, and give Go the
+          # SAME cache paths as ubuntu-latest (HOME is /home/runner on both).
+          # actions/cache matches an entry on its key AND a version hashed from
+          # the path strings and the compression method, so identical paths
+          # (plus zstd in the runner image) let a routed job restore, and share,
+          # the caches CI saves on ubuntu-latest:
+          #   ~/.cache -> /scratch/cache (the entrypoint's XDG_CACHE_HOME): Go's
+          #     build cache, and golangci-lint-action's analysis cache, whose
+          #     path the action derives from $HOME;
+          #   ~/go -> /scratch/gopath (the entrypoint's GOPATH): the module cache.
+          # The PARENT directories are linked: tar would replace a symlink at an
+          # archived path itself. Idempotent: a correct link (for example one the
+          # runner entrypoint already made) is left untouched.
           set -euo pipefail
-          mkdir -p /scratch/cache
-          if [ -d "$HOME/.cache" ] && [ ! -L "$HOME/.cache" ]; then
-            cp -a "$HOME/.cache/." /scratch/cache/
-            rm -rf "$HOME/.cache"
-          fi
-          ln -sfn /scratch/cache "$HOME/.cache"
-          echo "~/.cache -> $(readlink -f "$HOME/.cache")"
+          [ "$HOME" = /home/runner ] || echo "::warning::HOME is $HOME, not /home/runner: cache paths will not match ubuntu-latest's"
+          link_to_scratch() {
+            if [ -L "$1" ] && [ "$(readlink "$1")" = "$2" ]; then
+              echo "$1 -> $2 (already linked)"
+              return 0
+            fi
+            mkdir -p "$2"
+            if [ -d "$1" ] && [ ! -L "$1" ]; then
+              cp -a "$1/." "$2/"
+              rm -rf "$1"
+            fi
+            ln -sfn "$2" "$1"
+            echo "$1 -> $(readlink -f "$1")"
+          }
+          link_to_scratch "$HOME/.cache" /scratch/cache
+          link_to_scratch "$HOME/go" /scratch/gopath
+          {
+            echo "GOCACHE=$HOME/.cache/go-build"
+            echo "GOMODCACHE=$HOME/go/pkg/mod"
+          } >> "$GITHUB_ENV"
 
       - name: Runner facts
         shell: bash
@@ -82,9 +103,12 @@ jobs:
           fetch-depth: 0
 
       # Restore (never save) the lint workload's Go cache that ci.yml saves on
-      # main, using the same key scheme as .github/actions/setup-go-cache, so
-      # the PoC lint is as warm as a CI lint. The paths come from go env,
-      # which the runner entrypoint points at /scratch.
+      # main, with the same key scheme as .github/actions/setup-go-cache, so
+      # the PoC lint is as warm as a CI lint. go env reports ubuntu-latest's
+      # paths (set by the first step), so the cache version matches; the bytes
+      # land on /scratch through the links. A miss (see "go cache restored"
+      # in the lint step) means: check that the image has zstd and that HOME
+      # is /home/runner before reading the lint duration.
       - name: Compute the Go cache key
         id: key
         shell: bash
@@ -103,6 +127,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Restore the Go cache (on /scratch)
+        id: restore
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -121,8 +146,10 @@ jobs:
         env:
           GOGC: '25'
           LINT_CONCURRENCY: ${{ inputs.lint-concurrency }}
+          RESTORED_KEY: ${{ steps.restore.outputs.cache-matched-key }}
         run: |
           set -uo pipefail
+          echo "go cache restored: ${RESTORED_KEY:-NONE (cold run; check zstd and HOME=/home/runner)}"
           start=$(date +%s)
           rc=0
           golangci-lint run --new-from-merge-base=origin/main --concurrency="$LINT_CONCURRENCY" || rc=$?
@@ -139,5 +166,6 @@ jobs:
           df -h /scratch
           du -sh /scratch/* 2>/dev/null || true
           ls -ld "$HOME/.cache" 2>/dev/null || true
-          du -sh "$HOME/.cache/" 2>/dev/null || true      # trailing slash: follows the link to /scratch
+          ls -ld "$HOME/go" 2>/dev/null || true
+          du -sh "$HOME/.cache/" "$HOME/go/" 2>/dev/null || true   # trailing slash: follows the links to /scratch
           du -shx "$HOME" 2>/dev/null || true             # what stayed on the in-memory root filesystem
