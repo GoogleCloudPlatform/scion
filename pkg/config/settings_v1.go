@@ -3671,11 +3671,37 @@ func loadVersionedLayers(projectPath string, opts versionedLoadOptions) (*versio
 	k := koanf.New(".")
 	res := &versionedLoadResult{k: k}
 	legacy := &legacyLayerState{}
+	// With trackSources, res.sources records the layer that set each key:
+	// touched collects the keys each file sets, and setSource records them.
+	var touched []string
+	if opts.trackSources {
+		res.sources = map[string]string{}
+		legacy.touched = &touched
+	}
+	setSource := func(label string, keys []string) {
+		if res.sources == nil {
+			return
+		}
+		for _, key := range keys {
+			res.sources[key] = label
+		}
+	}
+	// fileLayer loads one settings file and records the keys it set as
+	// coming from label and the file's path.
+	fileLayer := func(label, dir string) (bool, error) {
+		touched = touched[:0]
+		migrated, err := loadSettingsFileConverting(k, dir, legacy)
+		if err == nil {
+			setSource(label+" "+GetSettingsPath(dir), touched)
+		}
+		return migrated, err
+	}
 
 	// 1. Load embedded defaults (YAML)
 	if opts.withDefaults {
 		if defaultData, err := GetDefaultSettingsDataYAML(); err == nil {
 			_ = k.Load(rawbytes.Provider(defaultData), yaml.Parser())
+			setSource("default", k.Keys())
 		}
 	}
 
@@ -3684,7 +3710,7 @@ func loadVersionedLayers(projectPath string, opts versionedLoadOptions) (*versio
 	var globalMigratedHub bool
 	if globalDir != "" {
 		var err error
-		globalMigratedHub, err = loadSettingsFileConverting(k, globalDir, legacy)
+		globalMigratedHub, err = fileLayer("global", globalDir)
 		if err != nil {
 			return nil, err
 		}
@@ -3706,9 +3732,10 @@ func loadVersionedLayers(projectPath string, opts versionedLoadOptions) (*versio
 	dropInheritedHubProjectID(k, projectPath, effectiveProjectPath, globalDir)
 	if !k.Exists(projectkeys.ConfigHubProjectIDKey) {
 		legacy.hubIDFromCamel = false
+		delete(res.sources, projectkeys.ConfigHubProjectIDKey)
 	}
 	if projectPath != "" && projectPath != globalDir {
-		migratedHub, err := loadSettingsFileConverting(k, projectPath, legacy)
+		migratedHub, err := fileLayer("project", projectPath)
 		if err != nil {
 			return nil, err
 		}
@@ -3725,7 +3752,7 @@ func loadVersionedLayers(projectPath string, opts versionedLoadOptions) (*versio
 	// -> FindProjectRoot): step 3 above never runs in that case, so the
 	// precedence check must run here too, not only in step 3.
 	if effectiveProjectPath != "" && effectiveProjectPath != globalDir && effectiveProjectPath != projectPath {
-		migratedHub, err := loadSettingsFileConverting(k, effectiveProjectPath, legacy)
+		migratedHub, err := fileLayer("project", effectiveProjectPath)
 		if err != nil {
 			return nil, err
 		}
@@ -3751,7 +3778,9 @@ func loadVersionedLayers(projectPath string, opts versionedLoadOptions) (*versio
 	}
 
 	// 5. Load environment variables (SCION_ prefix)
-	_ = k.Load(env.ProviderWithValue("SCION_", ".", func(key, value string) (string, interface{}) {
+	envNames := map[string]string{}
+	ek := koanf.New(".")
+	_ = ek.Load(env.ProviderWithValue("SCION_", ".", func(key, value string) (string, interface{}) {
 		// An exported but empty variable is treated as unset, so it never
 		// blanks a value from the settings files.
 		if value == "" {
@@ -3766,8 +3795,18 @@ func loadVersionedLayers(projectPath string, opts versionedLoadOptions) (*versio
 		if opts.ignoreEnvProjectID && (key == projectkeys.EnvProjectID || key == projectkeys.EnvHubProjectID) {
 			return "", nil
 		}
-		return versionedEnvKeyMapper(key), value
+		mapped := versionedEnvKeyMapper(key)
+		if mapped != "" {
+			envNames[mapped] = key
+		}
+		return mapped, value
 	}), nil)
+	_ = k.Merge(ek)
+	for _, key := range ek.Keys() {
+		if name, ok := envNames[key]; ok {
+			setSource("env "+name, []string{key})
+		}
+	}
 	splitKoanfListKeys(k, conduitV1EnvListKeys)
 	// SCION_OTEL_INSECURE is a plaintext switch. Its value is the inverse of
 	// telemetry.cloud.tls.enabled, so a key-only mapper cannot apply it.
@@ -3777,6 +3816,7 @@ func loadVersionedLayers(projectPath string, opts versionedLoadOptions) (*versio
 				"settings: value does not parse; ignoring SCION_OTEL_INSECURE and using the configured telemetry.cloud.tls.enabled")
 		} else {
 			_ = k.Load(confmap.Provider(map[string]interface{}{"telemetry.cloud.tls.enabled": !plaintext}, "."), nil)
+			setSource("env SCION_OTEL_INSECURE", []string{"telemetry.cloud.tls.enabled"})
 		}
 	}
 
@@ -3807,6 +3847,7 @@ func loadVersionedLayers(projectPath string, opts versionedLoadOptions) (*versio
 					_ = k.Load(confmap.Provider(map[string]interface{}{
 						projectkeys.ConfigHubProjectIDKey: projectID,
 					}, "."), nil)
+					setSource("project-id file "+projectIDFileSource(projectPath), []string{projectkeys.ConfigHubProjectIDKey})
 				}
 			}
 		}
@@ -5755,6 +5796,7 @@ var versionedSettingKeys = map[string]versionedSettingKey{
 	"workspace_path":           {path: []string{"workspace_path"}},
 	"image_registry":           {path: []string{"image_registry"}},
 	"cli.autohelp":             {path: []string{"cli", "autohelp"}, isBool: true},
+	"cli.mode":                 {path: []string{"cli", "mode"}},
 	"hub.enabled":              {path: []string{"hub", "enabled"}, isBool: true},
 	"hub.linked":               {path: []string{"hub", "linked"}, isBool: true},
 	"hub.endpoint":             {path: []string{"hub", "endpoint"}},
@@ -5885,13 +5927,13 @@ func updateVersionedSettingYAML(lock *SettingsLock, dir, settingsPath string, ed
 		}
 	}
 	if !yamlDecodesTo(out, want) {
-		return fmt.Errorf("refusing to write %s: the re-encoded settings do not round-trip; set %s by editing the file", targetPath, strings.Join(edit.path, "."))
+		return fmt.Errorf("refusing to write %s: the re-encoded settings do not round-trip; change %s by editing the file", targetPath, strings.Join(edit.path, "."))
 	}
 	// Generic data equality is weaker than loadability (an alias key can
 	// duplicate a struct field without a duplicate map key), so the output
 	// must also decode into VersionedSettings without error, as the input did.
 	if err := decodeVersionedSettingsYAML(out); err != nil {
-		return fmt.Errorf("refusing to write %s: the updated settings would not load: %w; set %s by editing the file", targetPath, err, strings.Join(edit.path, "."))
+		return fmt.Errorf("refusing to write %s: the updated settings would not load: %w; change %s by editing the file", targetPath, err, strings.Join(edit.path, "."))
 	}
 	if bytes.Equal(out, orig) {
 		return nil
@@ -6110,6 +6152,11 @@ func updateVersionedSettingStruct(lock *SettingsLock, dir string, key string, va
 		}
 		autohelp := value == "true"
 		vs.CLI.AutoHelp = &autohelp
+	case "cli.mode":
+		if vs.CLI == nil {
+			vs.CLI = &V1CLIConfig{}
+		}
+		vs.CLI.Mode = value
 	case "use_host_credentials":
 		use := value == "true"
 		vs.UseHostCredentials = &use
@@ -6232,6 +6279,36 @@ func GetVersionedSettingValue(vs *VersionedSettings, key string) (string, error)
 			return "false", nil
 		}
 		return "", nil
+	case "server.auth.display_name":
+		if vs.Server != nil && vs.Server.Auth != nil {
+			return vs.Server.Auth.DisplayName, nil
+		}
+		return "", nil
+	case "server.auth.email":
+		if vs.Server != nil && vs.Server.Auth != nil {
+			return vs.Server.Auth.Email, nil
+		}
+		return "", nil
+	case "server.auth.username":
+		if vs.Server != nil && vs.Server.Auth != nil {
+			return vs.Server.Auth.Username, nil
+		}
+		return "", nil
+	case "cli.mode":
+		if vs.CLI != nil {
+			return vs.CLI.Mode, nil
+		}
+		return "", nil
+	case "hub.transport.mode":
+		if vs.Hub != nil && vs.Hub.Transport != nil {
+			return vs.Hub.Transport.Mode, nil
+		}
+		return "", nil
+	case "hub.transport.audience":
+		if vs.Hub != nil && vs.Hub.Transport != nil {
+			return vs.Hub.Transport.Audience, nil
+		}
+		return "", nil
 	case "use_host_credentials":
 		if vs.UseHostCredentials != nil {
 			if *vs.UseHostCredentials {
@@ -6284,6 +6361,15 @@ func GetVersionedSettingValue(vs *VersionedSettings, key string) (string, error)
 			return vs.Server.Broker.BrokerNickname, nil
 		}
 		return "", nil
+	}
+
+	if name, ok := strings.CutPrefix(key, "hub_connections."); ok {
+		if name, ok := strings.CutSuffix(name, ".endpoint"); ok && name != "" && !strings.Contains(name, ".") {
+			if c, ok := vs.HubConnections[name]; ok {
+				return c.Endpoint, nil
+			}
+			return "", nil
+		}
 	}
 
 	if val, err, handled := getNestedMapSettingValue(vs, key); handled {

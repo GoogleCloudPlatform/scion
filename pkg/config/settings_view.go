@@ -202,6 +202,7 @@ func loadLegacySettingsLayer(k *koanf.Koanf, path string, parser koanf.Parser, s
 		} else if fk.Exists(projectkeys.ConfigHubProjectIDKey) {
 			st.hubIDFromCamel = false
 		}
+		st.touch(fk.Keys()...)
 		return k.Merge(fk)
 	}
 
@@ -213,6 +214,12 @@ func loadLegacySettingsLayer(k *koanf.Koanf, path string, parser koanf.Parser, s
 	if hub, isMap := converted["hub"].(map[string]interface{}); isMap {
 		if _, set := hub["project_id"]; set {
 			st.hubIDFromCamel = camelOnly
+		}
+	}
+	if st.touched != nil {
+		ck := koanf.New(".")
+		if err := ck.Load(confmap.Provider(converted, ""), nil); err == nil {
+			st.touch(ck.Keys()...)
 		}
 	}
 	return k.Load(confmap.Provider(converted, ""), nil)
@@ -228,6 +235,16 @@ type legacyLayerState struct {
 	// hub project ID only, never the project's own ID, so the Settings view
 	// does not take ProjectID from it (settingsViewOf).
 	hubIDFromCamel bool
+	// touched, when not nil, collects the keys each loaded file sets (in
+	// their v1 form), for the setting sources (see versionedLoadResult).
+	touched *[]string
+}
+
+// touch records keys as set by the file being loaded (see touched).
+func (st *legacyLayerState) touch(keys ...string) {
+	if st != nil && st.touched != nil {
+		*st.touched = append(*st.touched, keys...)
+	}
 }
 
 // convertLegacySettingsLayer returns the v1 form of one legacy-format file
@@ -389,6 +406,9 @@ type versionedLoadOptions struct {
 	// SCION_HUB_PROJECT_ID environment overlay (see
 	// LoadSettingsIgnoringEnvProjectID).
 	ignoreEnvProjectID bool
+	// trackSources records which layer set each key
+	// (versionedLoadResult.sources).
+	trackSources bool
 }
 
 // versionedLoadResult is what loadVersionedLayers found besides the merged
@@ -408,6 +428,11 @@ type versionedLoadResult struct {
 	// legacyWarnings are the deprecation warnings of the legacy-format files
 	// converted on the way (see loadLegacySettingsLayer).
 	legacyWarnings []string
+	// sources maps each key of k (koanf's flattened form) to the layer that
+	// last set it, when versionedLoadOptions.trackSources is set: "default",
+	// "global <file>", "project <file>", "env <VARIABLE>" or
+	// "project-id file <file>".
+	sources map[string]string
 }
 
 // loadVersionedSettings is LoadVersionedSettings with options, also
