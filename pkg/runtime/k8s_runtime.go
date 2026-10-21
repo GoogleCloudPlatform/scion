@@ -3500,9 +3500,9 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 					return classifyTerminalWaitingReason(podName, "", reason, message)
 				case "Unschedulable":
 					if r.isGKEScheduling() {
-						runtimeLog().Info("Pod unschedulable (GKE Autopilot will auto-provision nodes)", "pod", podName, "message", message, "phase", "scheduling")
+						runtimeLog().Info("Pod unschedulable (GKE Autopilot will auto-provision nodes)", append([]any{"pod", podName, "message", message, "phase", "scheduling"}, podPlacementLogAttrs(pod)...)...)
 					} else {
-						runtimeLog().Error("Pod unschedulable", "pod", podName, "message", message, "phase", "scheduling")
+						runtimeLog().Error("Pod unschedulable", append([]any{"pod", podName, "message", message, "phase", "scheduling"}, podPlacementLogAttrs(pod)...)...)
 						return newLaunchFailure(api.LaunchCodeUnschedulable, api.LaunchStepScheduling, reason,
 							fmt.Errorf("pod %q cannot be scheduled: %s — check node selectors, tolerations, and resource availability", podName, message))
 					}
@@ -3516,12 +3516,12 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 						// On GKE Autopilot, Unschedulable is transient — the cluster
 						// will auto-provision nodes. Continue waiting instead of failing.
 						if !autopilotWaitLogged {
-							runtimeLog().Info("Pod unschedulable (GKE Autopilot will auto-provision nodes)", "pod", podName, "message", cond.Message, "phase", "scheduling")
+							runtimeLog().Info("Pod unschedulable (GKE Autopilot will auto-provision nodes)", append([]any{"pod", podName, "message", cond.Message, "phase", "scheduling"}, podPlacementLogAttrs(pod)...)...)
 							fmt.Printf("  Waiting for GKE Autopilot to provision node capacity...\n")
 							autopilotWaitLogged = true
 						}
 					} else {
-						runtimeLog().Error("Pod unschedulable", "pod", podName, "message", cond.Message, "phase", "scheduling")
+						runtimeLog().Error("Pod unschedulable", append([]any{"pod", podName, "message", cond.Message, "phase", "scheduling"}, podPlacementLogAttrs(pod)...)...)
 						return newLaunchFailure(api.LaunchCodeUnschedulable, api.LaunchStepScheduling, cond.Reason,
 							fmt.Errorf("pod %q cannot be scheduled: %s — check node selectors, tolerations, and resource availability", podName, cond.Message))
 					}
