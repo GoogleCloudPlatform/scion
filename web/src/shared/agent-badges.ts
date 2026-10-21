@@ -102,7 +102,9 @@ export interface AgentBadgeView {
 /** The mark for a hub `harnessVendor` value (case-insensitive). */
 export function vendorMark(vendor: string | undefined): VendorMark {
   if (!vendor) return UNKNOWN_VENDOR_MARK;
-  return VENDOR_MARKS[vendor.toLowerCase()] ?? UNKNOWN_VENDOR_MARK;
+  // A vendor the hub knows but this map lacks: the neutral image, labelled
+  // with the hub's own vendor string so the tooltip still says whose it is.
+  return VENDOR_MARKS[vendor.toLowerCase()] ?? { label: vendor, src: UNKNOWN_VENDOR_MARK.src };
 }
 
 /**

@@ -90,7 +90,9 @@ export class ScionAgentBadges extends LitElement {
     if (!isFeatureEnabled(AGENT_BADGES_FLAG)) return nothing;
     const view = agentBadgeView(this.vendor, this.size, this.harness);
     const { mark } = view;
-    return html`<span class="badges" role="group" aria-label=${view.title} title=${view.title}>
+    // role="img" with the full label: assistive tech reads it once and treats
+    // the children (the mark's alt text, the chip text) as presentational.
+    return html`<span class="badges" role="img" aria-label=${view.title} title=${view.title}>
       <img class="mark" src=${mark.src} width="16" height="16" alt=${mark.label} />${view.size
         ? html`<span class="size">${view.size.chip}</span>`
         : nothing}

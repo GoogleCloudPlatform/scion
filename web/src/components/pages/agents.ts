@@ -184,13 +184,13 @@ export class ScionPageAgents extends LitElement {
   @state()
   private viewMode: ViewMode = 'grid';
 
+  /** Whether web.agent_badges is on, read once at the start of each render. */
+  private badgesOn = false;
+
   /**
    * One lease timer for this page's deleting agents (ptone/scion#2483 N4).
    * While paged, `this.agents` is empty and the rows are the window's page.
    */
-  /** Whether web.agent_badges is on, read once at the start of each render. */
-  private badgesOn = false;
-
   private readonly deletionLease = new DeletionLeaseController(this, () =>
     this.agentWindow.state === 'paged' ? this.agentWindow.items : this.agents
   );

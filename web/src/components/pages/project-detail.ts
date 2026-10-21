@@ -406,10 +406,10 @@ export class ScionPageProjectDetail extends LitElement {
   @state()
   private windowTick = 0;
 
-  /** One lease timer for the agents this page shows (ptone/scion#2483 N4). */
   /** Whether web.agent_badges is on, read once at the start of each render. */
   private badgesOn = false;
 
+  /** One lease timer for the agents this page shows (ptone/scion#2483 N4). */
   private readonly deletionLease = new DeletionLeaseController(this, () =>
     this.agentWindow.state === 'paged' ? this.agentWindow.items : this.agents
   );

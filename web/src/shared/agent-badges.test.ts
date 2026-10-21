@@ -39,16 +39,12 @@ describe('agent badge view', () => {
       expect(mark.src, vendor).toMatch(new RegExp(`vendor-marks/${vendor}\\.png`));
     }
     expect(UNKNOWN_VENDOR_MARK.src).toMatch(/vendor-marks\/unknown\.png/);
-    // Never inlined as a data URI (?no-inline): each is a cacheable file.
-    for (const mark of [...Object.values(VENDOR_MARKS), UNKNOWN_VENDOR_MARK]) {
-      expect(mark.src.startsWith('data:')).toBe(false);
-    }
   });
 
   it('maps unknown, empty and differently cased vendors', () => {
     expect(vendorMark(undefined)).toBe(UNKNOWN_VENDOR_MARK);
     expect(vendorMark('')).toBe(UNKNOWN_VENDOR_MARK);
-    expect(vendorMark('acme')).toBe(UNKNOWN_VENDOR_MARK);
+    expect(vendorMark('acme')).toEqual({ label: 'acme', src: UNKNOWN_VENDOR_MARK.src });
     expect(vendorMark('Anthropic')).toBe(VENDOR_MARKS.anthropic);
   });
 

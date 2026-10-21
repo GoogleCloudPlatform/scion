@@ -73,7 +73,10 @@ describe('scion-agent-badges', () => {
       expect(mark(el)?.getAttribute('height')).toBe('16');
       expect(chip(el)?.textContent).toBe('XL');
       expect(label(el)).toBe('Harness vendor: Anthropic\nConfigured model size: Extra large');
-      expect(el.shadowRoot!.querySelector('.badges')?.getAttribute('aria-label')).toBe(label(el));
+      // One accessible name: role=img makes the img alt and chip presentational.
+      const group = el.shadowRoot!.querySelector('.badges');
+      expect(group?.getAttribute('role')).toBe('img');
+      expect(group?.getAttribute('aria-label')).toBe(label(el));
     });
 
     it('omits the size chip when the size is empty', async () => {
@@ -93,15 +96,21 @@ describe('scion-agent-badges', () => {
       expect(label(el)).toBe('Harness: OpenCode');
     });
 
-    it('shows the neutral unknown mark for an unknown or missing vendor, keeping the size', async () => {
+    it('shows the neutral unknown mark, named by the raw vendor, for a vendor the map lacks', async () => {
       on();
-      const unknown = await mount({ vendor: 'acme', size: 'small' });
-      expect(markFile(unknown)).toBe('unknown');
-      expect(mark(unknown)?.getAttribute('alt')).toBe('Unknown');
-      expect(chip(unknown)?.textContent).toBe('S');
-      expect(label(unknown)).toBe('Harness: unknown\nConfigured model size: Small');
+      const unmapped = await mount({ vendor: 'acme', size: 'small' });
+      expect(markFile(unmapped)).toBe('unknown');
+      expect(mark(unmapped)?.getAttribute('alt')).toBe('acme');
+      expect(chip(unmapped)?.textContent).toBe('S');
+      expect(label(unmapped)).toBe('Harness vendor: acme\nConfigured model size: Small');
+    });
+
+    it('shows the neutral unknown mark for a missing vendor (custom harness)', async () => {
+      on();
       const missing = await mount({});
       expect(markFile(missing)).toBe('unknown');
+      expect(mark(missing)?.getAttribute('alt')).toBe('Unknown');
+      expect(label(missing)).toBe('Harness: unknown');
       expect(chip(missing)).toBeNull();
     });
 
