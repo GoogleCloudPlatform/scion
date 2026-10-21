@@ -57,11 +57,22 @@ export function triggerLabel(trigger: string): string {
   return Object.hasOwn(TRIGGER_LABELS, trigger) ? TRIGGER_LABELS[trigger] : trigger;
 }
 
+const AGENT_CREATE_TRIGGERS: readonly string[] = [
+  'COMPLETED',
+  'WAITING_FOR_INPUT',
+  'LIMITS_EXCEEDED',
+  'STALLED',
+  'ERROR',
+  'HALTED',
+];
+
 /**
  * Hint listing the default triggers, e.g. on the agent create form.
  * Returns an empty string when there are no triggers.
  */
-export function defaultTriggersHint(triggers: readonly string[] = DEFAULT_TRIGGERS): string {
+export function defaultTriggersHint(
+  triggers: readonly string[] = AGENT_CREATE_TRIGGERS
+): string {
   const labels = triggers.map(triggerLabel);
   if (labels.length === 0) return '';
   const last = labels.pop();

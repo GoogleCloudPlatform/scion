@@ -62,7 +62,7 @@ describe('triggerLabel', () => {
 describe('defaultTriggersHint', () => {
   it('lists the default triggers by display label', () => {
     expect(defaultTriggersHint()).toBe(
-      'You will be notified when this agent reaches: Completed, Waiting on Parent, Limits Exceeded, or Halted.'
+      'You will be notified when this agent reaches: Completed, Waiting on Parent, Limits Exceeded, Stalled, Error, or Halted.'
     );
   });
 
