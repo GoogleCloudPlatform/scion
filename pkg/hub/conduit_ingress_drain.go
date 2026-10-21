@@ -67,11 +67,20 @@ func conduitIngressDrainDeadline(grace time.Duration, graceSet bool) time.Durati
 // DrainConduitIngressForShutdown is the SIGTERM step of external relay
 // mode: it stops proxying new conduit dials, then fans out drain to every
 // live relay (draining ones included) and returns when every call has
-// answered or failed, within conduitIngressDrainBound. It runs once; later
-// calls, and calls outside external mode, return at once.
+// answered or failed, within conduitIngressDrainBound. With the ingress
+// proxy off (IngressOffCause) no session was proxied, so there is no
+// fan-out. It runs once; later calls, and calls outside external mode,
+// return at once.
 func (s *Server) DrainConduitIngressForShutdown(grace time.Duration, graceSet bool) {
 	rt := s.conduitExternal.Load()
 	if rt == nil || !rt.terminating.CompareAndSwap(false, true) {
+		return
+	}
+	if rt.ingressOffCause != "" {
+		// The ingress proxy was never on, so this hub proxied no session:
+		// there is nothing to drain.
+		slog.Info("Conduit ingress: shutting down; the ingress proxy was off, so no relay is asked to drain",
+			"cause", rt.ingressOffCause)
 		return
 	}
 	bound := conduitIngressDrainBound(grace, graceSet)

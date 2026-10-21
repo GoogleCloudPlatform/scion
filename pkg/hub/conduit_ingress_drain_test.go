@@ -211,3 +211,16 @@ func relayRow(t *testing.T, f *ingressFixture, id string) registry.RelayInstance
 	t.Fatalf("relay %s is not registered", id)
 	return registry.RelayInstance{}
 }
+
+// TestDrainConduitIngressForShutdown_ProxyOffAsksNoRelay: with the ingress
+// proxy off (the hub never proxied a session), SIGTERM still sets the
+// terminating state but asks no relay to drain.
+func TestDrainConduitIngressForShutdown_ProxyOffAsksNoRelay(t *testing.T) {
+	f := newIngressFixture(t, "relay-a")
+	f.s.conduitExternal.Store(f.rt)
+	f.rt.peers = &relay.PeerClient{HTTP: http.DefaultClient, Auth: f.rt.peerAuth}
+	f.rt.ingressOffCause = ConduitIngressCauseRequiresHMAC
+	f.s.DrainConduitIngressForShutdown(30*time.Second, true)
+	assert.True(t, f.rt.terminating.Load())
+	assert.Zero(t, f.relays["relay-a"].hits.Load(), "no relay is asked to drain")
+}

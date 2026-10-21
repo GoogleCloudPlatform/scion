@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -293,5 +294,47 @@ func TestPeerClientDrain_FailureCauses(t *testing.T) {
 	ok := answer(http.StatusOK, `{"goaway_sent":3}`)
 	if n, err := client(ok).Drain(ctx, ok.URL, "relay-a", 1, "hub-a", 0); err != nil || n != 3 {
 		t.Fatalf("drain = %d, %v; want 3", n, err)
+	}
+}
+
+// TestDrainIngress_ShutdownWaitsForTheRowPass: the background pass that
+// marks drained rows draining is tracked, so Shutdown does not return (and
+// the store is not closed under it) while the pass is still running.
+func TestDrainIngress_ShutdownWaitsForTheRowPass(t *testing.T) {
+	w := relaytest.NewWorld(t)
+	n := lifetimeNode(t, w, 0, 0)
+	s := dialDrainSession(t, w, n, "user-a", "hub-a", 0)
+	release := make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	w.SetFault(func(op string) error {
+		if op == registry.OpSetSessionDraining {
+			<-release
+		}
+		return nil
+	})
+	if sent, err := drainCall(t, w, n, "hub-a", "hub-a", time.Millisecond); err != nil || sent != 1 {
+		t.Fatalf("drain = %d, %v; want 1", sent, err)
+	}
+	relaytest.Wait(t, s.goAways, "GoAway")
+	_ = s.ls.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		done <- n.Relay.Shutdown(ctx)
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("Shutdown returned (%v) while the row pass was still running", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	unblock()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Shutdown did not return after the row pass ended")
 	}
 }

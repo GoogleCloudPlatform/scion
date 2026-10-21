@@ -114,9 +114,26 @@ func (r *Relay) DrainIngress(instance string, deadline time.Duration) int {
 	}
 	if len(sent) > 0 {
 		r.log.Info("Conduit relay: drained the sessions of a terminating ingress", "ingress_instance", instance, "sessions", len(sent))
-		go r.markIngressDrained(sent)
+		r.startMarkIngressDrained(sent)
 	}
 	return len(sent)
+}
+
+// startMarkIngressDrained starts markIngressDrained in the background,
+// tracked by r.wg so Shutdown waits for it, as scheduleTouch does; once the
+// relay is stopped or killed the pass is skipped (no store use after
+// Shutdown).
+func (r *Relay) startMarkIngressDrained(entries []*entry) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.state == stateStopped || r.killed {
+		return
+	}
+	r.wg.Add(1)
+	go func() {
+		defer r.wg.Done()
+		r.markIngressDrained(entries)
+	}()
 }
 
 // markIngressDrained marks the rows of drained sessions draining (routing
