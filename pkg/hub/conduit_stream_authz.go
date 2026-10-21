@@ -297,6 +297,10 @@ type conduitStreamAuthzConfig struct {
 	// Jitter offsets each renewal for an interval (nil: up to plus or
 	// minus 5% of it, defaultConduitRenewalJitter).
 	Jitter func(interval time.Duration) time.Duration
+	// SweepContext, when set, derives the context of one sweep pass from
+	// the run context; runSweep calls it once per pass. Nil: the run
+	// context.
+	SweepContext func(context.Context) context.Context
 }
 
 // conduitStreamAuthz tracks the user streams this node owns and re-checks
@@ -396,7 +400,11 @@ func (a *conduitStreamAuthz) runSweep() {
 	}
 	start := a.cfg.Clock.Now()
 	n := a.Len()
-	a.Recheck(ctx, conduitAuthzTriggerSweep, conduitAuthzMatch{})
+	pass := ctx
+	if f := a.cfg.SweepContext; f != nil {
+		pass = f(ctx)
+	}
+	a.Recheck(pass, conduitAuthzTriggerSweep, conduitAuthzMatch{})
 	took := a.cfg.Clock.Now().Sub(start)
 	a.mu.Lock()
 	a.sweeping = false
