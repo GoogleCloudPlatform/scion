@@ -176,6 +176,7 @@ Scion provides a powerful **Google Chat** integration (powered by the `scion-cha
 - **Reliable Message Delivery**: Deduplicates outgoing and incoming messages using a dedicated per-space send queue to protect against duplicate posts and network jitter.
 - **Cloud Pub/Sub Ingress Mode**: Supports Cloud Pub/Sub ingress, allowing the plugin to run securely in firewalled, private network environments without exposing a public HTTPS webhook endpoint.
 - **Observe Mode Filtering**: Optionally monitor and filter public space conversations using outbound mention resolution with settings toggles.
+- **Asynchronous Agent Creation**: On a Hub with async launch enabled, `/scionAdmin create` and `/scionAdmin thread` reply as soon as the Hub accepts the create and post "running", or the failure with its code, in the same space and thread when the launch ends. `/scionAdmin thread` shows the card as "Starting…" and sends its instruction only once the agent is running. A message sent to an agent that is still starting is delivered when it is running; if the launch fails, the failure is posted instead. Set `hub.async_create: false` to always create synchronously. Follow-ups that are still pending are lost if the app restarts.
 
 ### Commands
 

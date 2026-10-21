@@ -104,6 +104,99 @@ func TestReadFileNoFollow_RefusesHardlinkedRegularFile(t *testing.T) {
 	}
 }
 
+// TestReadAtNoFollowStat_UnlinkedAfterOpen covers a file removed after it
+// was opened and before the descriptor is checked: the read is refused with
+// an error that wraps both ErrNotSingleLinkRegular (so existing refusal
+// checks still fire) and ErrUnlinked, and no content is returned.
+func TestReadAtNoFollowStat_UnlinkedAfterOpen(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tok")
+	if err := os.WriteFile(path, []byte("old-content"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	readAtPostOpenTestHook = func(string) {
+		if err := os.Remove(path); err != nil {
+			t.Errorf("remove: %v", err)
+		}
+	}
+	t.Cleanup(func() { readAtPostOpenTestHook = nil })
+
+	data, err := ReadFileNoFollow(path, 1024)
+	if !errors.Is(err, ErrNotSingleLinkRegular) {
+		t.Fatalf("expected ErrNotSingleLinkRegular, got %v", err)
+	}
+	if !errors.Is(err, ErrUnlinked) {
+		t.Fatalf("expected ErrUnlinked, got %v", err)
+	}
+	if data != nil {
+		t.Fatalf("expected no content, got %q", data)
+	}
+}
+
+// TestReadAtNoFollowStat_ReplacedByRenameAfterOpen covers the refresh
+// pattern: a new file is renamed over the name after the old one was
+// opened. The open descriptor names the old file, which has no link left,
+// so the read is refused with both sentinels rather than returning the old
+// content.
+func TestReadAtNoFollowStat_ReplacedByRenameAfterOpen(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tok")
+	if err := os.WriteFile(path, []byte("old-content"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	tmp := filepath.Join(dir, "tok.tmp")
+	if err := os.WriteFile(tmp, []byte("new-content"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	readAtPostOpenTestHook = func(string) {
+		if err := os.Rename(tmp, path); err != nil {
+			t.Errorf("rename: %v", err)
+		}
+	}
+	t.Cleanup(func() { readAtPostOpenTestHook = nil })
+
+	data, err := ReadFileNoFollow(path, 1024)
+	if !errors.Is(err, ErrNotSingleLinkRegular) || !errors.Is(err, ErrUnlinked) {
+		t.Fatalf("expected ErrNotSingleLinkRegular and ErrUnlinked, got %v", err)
+	}
+	if data != nil {
+		t.Fatalf("expected no content, got %q", data)
+	}
+
+	readAtPostOpenTestHook = nil
+	data, err = ReadFileNoFollow(path, 1024)
+	if err != nil {
+		t.Fatalf("reading the new file: %v", err)
+	}
+	if string(data) != "new-content" {
+		t.Fatalf("got %q, want %q", data, "new-content")
+	}
+}
+
+// TestReadFileNoFollow_HardlinkIsNotUnlinked checks that ErrUnlinked is
+// specific to a file with no link left: a file with two links is refused
+// with ErrNotSingleLinkRegular only, so a caller that retries on
+// ErrUnlinked does not retry it.
+func TestReadFileNoFollow_HardlinkIsNotUnlinked(t *testing.T) {
+	dir := t.TempDir()
+	original := filepath.Join(dir, "original")
+	if err := os.WriteFile(original, []byte("content"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	linked := filepath.Join(dir, "linked")
+	if err := os.Link(original, linked); err != nil {
+		t.Fatalf("hardlink: %v", err)
+	}
+
+	_, err := ReadFileNoFollow(linked, 1024)
+	if !errors.Is(err, ErrNotSingleLinkRegular) {
+		t.Fatalf("expected ErrNotSingleLinkRegular, got %v", err)
+	}
+	if errors.Is(err, ErrUnlinked) {
+		t.Fatalf("a hardlinked file must not be reported as unlinked: %v", err)
+	}
+}
+
 // TestReadFileNoFollow_BoundsOversizedContent fails if the LimitReader cap
 // is removed or widened: a file one byte over the limit must be refused,
 // never buffered in full.

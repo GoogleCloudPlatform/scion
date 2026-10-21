@@ -586,9 +586,9 @@ func TestScheduledDispatch_HubDefaultPassthroughProfileAndSandboxTranslation(t *
 			require.NoError(t, err)
 			b.Profiles = tc.profiles
 			b.DefaultProfile = tc.brokerDefault
-			b.GCPHostServiceAccountEmail = hostSAEmail
-			b.GCPHostProjectID = hostProjectID
 			require.NoError(t, f.store.UpdateRuntimeBroker(ctx, b))
+			_, err = f.store.SetRuntimeBrokerGCPHost(ctx, f.broker.ID, hostSAEmail, hostProjectID)
+			require.NoError(t, err)
 
 			if tc.projectActiveProfile != "" {
 				proj, err := f.store.GetProject(ctx, f.proj.ID)
@@ -675,12 +675,20 @@ func TestScheduledDispatch_ProjectDefaultPassthroughFollowsProfileType(t *testin
 				{Name: "sandbox", Type: "cloudrun-sandbox", Available: true},
 			}
 			b.DefaultProfile = tc.brokerDefault
-			b.GCPHostServiceAccountEmail = hostSAEmail
-			b.GCPHostProjectID = hostProjectID
-			if tc.untranslatable {
-				b.GCPHostServiceAccountEmail = ""
-			}
 			require.NoError(t, f.store.UpdateRuntimeBroker(ctx, b))
+			hostEmail := hostSAEmail
+			if tc.untranslatable {
+				hostEmail = ""
+			}
+			_, err = f.store.SetRuntimeBrokerGCPHost(ctx, f.broker.ID, hostEmail, hostProjectID)
+			require.NoError(t, err)
+			// Translation needs enforce mode, and the schedule's principal
+			// must pass the passthrough requirements: the fixture broker
+			// has no recorded owner (and UpdateRuntimeBroker does not write
+			// CreatedBy), so the principal is made an admin, and it holds
+			// actAs on the host account.
+			grantSuperAdmin(t, f.store, f.owner.ID)
+			enforceSAAssign(f.srv, store.NewFakeCallerPermissionChecker().AllowTarget(hostSAEmail))
 			setProjectDefaultGCPMode(t, f, store.GCPMetadataModePassthrough)
 
 			const agentName = "sched-project-passthrough-profile"

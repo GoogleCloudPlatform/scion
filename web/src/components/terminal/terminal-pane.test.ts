@@ -2,6 +2,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import type { ScionTerminalPane } from './terminal-pane.js';
 import { TerminalSessionRegistry } from '../../client/terminal-sessions.js';
 import { requestUrl } from '../../client/__fixtures__/request-url.js';
+import { getPublicSettings, invalidatePublicSettings } from '../../client/server-feature-flags.js';
 
 /**
  * The automatic reconnect after a 4503 close waits a full-jitter delay;
@@ -1041,6 +1042,9 @@ describe('Capture Auth scope dialog (design ptone/scion#2291 §7)', () => {
 
   beforeEach(() => {
     showToast.mockClear();
+    // The settings are cached per page load (ptone/scion#5311); each test
+    // starts as a fresh page.
+    invalidatePublicSettings();
   });
 
   // Design §10 test 6: setting off — both radios enabled, default is
@@ -1177,6 +1181,43 @@ describe('Capture Auth scope dialog (design ptone/scion#2291 §7)', () => {
     const conflicts = (page as unknown as { captureAuthConflicts: string[] | null })
       .captureAuthConflicts;
     expect(conflicts).toBeNull();
+  });
+
+  // ptone/scion#5311 keeps §7's fresh read: the dialog bypasses the shared
+  // per-page cache on every open, so a policy an admin turned off in another
+  // tab re-enables Project on the next open, and the fresh result refreshes
+  // the cache the other pages read.
+  it('each open reads the policy fresh, past the shared settings cache', async () => {
+    await makeCaptureEligible();
+    let policy = true;
+    let settingsFetches = 0;
+    fetcher.mockImplementation((url) => {
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+      if (path.includes('/api/v1/settings/public')) {
+        settingsFetches += 1;
+        return Promise.resolve(json({ agentSecretsUserScopeOnly: policy }));
+      }
+      return Promise.resolve(json(noAuthAgent));
+    });
+    // Another page already filled the cache with the policy on.
+    await getPublicSettings();
+    expect(settingsFetches).toBe(1);
+
+    await openDialog();
+    expect(settingsFetches).toBe(2);
+    expect(radio('project')?.hasAttribute('disabled')).toBe(true);
+
+    // An admin turns the policy off elsewhere.
+    policy = false;
+    (page as unknown as { captureAuthScopeDialogOpen: boolean }).captureAuthScopeDialogOpen = false;
+    await page.updateComplete;
+    await openDialog();
+
+    expect(settingsFetches).toBe(3);
+    expect(radio('project')?.hasAttribute('disabled')).toBe(false);
+    // The fresh result is now what the other pages read, with no request.
+    expect((await getPublicSettings())?.agentSecretsUserScopeOnly).toBe(false);
+    expect(settingsFetches).toBe(3);
   });
 
   /** A promise plus its resolver, for controlling exactly when a mocked fetch settles. */

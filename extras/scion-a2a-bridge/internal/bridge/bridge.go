@@ -116,6 +116,20 @@ type Bridge struct {
 	// Used by GenerateAgentCard to conditionally advertise the REST interface.
 	v0RESTEnabled bool
 
+	// launchPollInterval is the poll interval while waiting for a launching
+	// agent; 0 uses hubclient's default. Tests shorten it.
+	launchPollInterval time.Duration
+	// launchKeepAlive, when positive, replaces the interval at which a
+	// legacy task waiting for a launch is touched against the stale-task
+	// reaper. Tests shorten it.
+	launchKeepAlive time.Duration
+	// firstSends holds, per task, a channel closed when the task's first
+	// send has completed or failed, while that send waits for a launching
+	// agent. A follow-up on the task waits for it, so it never reaches the
+	// agent before the original message (see beginFirstSend).
+	firstSendMu sync.Mutex
+	firstSends  map[string]chan struct{}
+
 	// shutdownCtx is cancelled during graceful shutdown.
 	shutdownCtx    context.Context
 	shutdownCancel context.CancelFunc
@@ -585,7 +599,7 @@ func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contex
 		return b.sendFollowUp(ctx, projectSlug, agentSlug, existingTaskID, parts, blocking)
 	}
 
-	agentCtx, err := b.resolveContext(ctx, projectSlug, agentSlug, contextID)
+	agentCtx, launching, err := b.resolveContextLaunch(ctx, projectSlug, agentSlug, contextID)
 	if err != nil {
 		return nil, fmt.Errorf("resolve context: %w", err)
 	}
@@ -649,9 +663,18 @@ func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contex
 	if !blocking {
 		aKey := agentKey(agentCtx.ProjectID, agentCtx.AgentSlug)
 		b.registerActiveTask(taskID, aKey)
+		firstSent := b.beginFirstSend(taskID, launching)
 		b.wg.Add(1)
 		go func() {
 			defer b.wg.Done()
+			defer firstSent()
+			// An agent still launching is waited for first; the send's
+			// own timeout starts after the wait.
+			if err := b.waitTaskLaunch(b.shutdownCtx, taskID, launching, nil); err != nil {
+				b.log.Warn("non-blocking send: agent did not start", "error", err, "task_id", taskID)
+				b.unregisterActiveTask(taskID, aKey)
+				return
+			}
 			sendCtx, cancel := context.WithTimeout(b.shutdownCtx, 30*time.Second)
 			defer cancel()
 			if _, err := writeClient.Agents().SendStructuredMessage(sendCtx, agentCtx.AgentID, scionMsg, false, false, false); err != nil {
@@ -679,13 +702,26 @@ func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contex
 	aKey := agentKey(agentCtx.ProjectID, agentCtx.AgentSlug)
 	b.registerActiveTask(taskID, aKey)
 
+	// An agent still launching is waited for before the send; the response
+	// wait below starts after the send.
+	firstSent := b.beginFirstSend(taskID, launching)
+	if err := b.waitTaskLaunch(ctx, taskID, launching, nil); err != nil {
+		firstSent()
+		b.unregisterActiveTask(taskID, aKey)
+		return nil, fmt.Errorf("send message to agent: %w", err)
+	}
+
+	// firstSent runs after the failed write on a send failure, so a waiting
+	// follow-up sees the task ended and is not sent.
 	if _, err := writeClient.Agents().SendStructuredMessage(ctx, agentCtx.AgentID, scionMsg, false, false, false); err != nil {
 		if _, err := b.store.UpdateTaskState(ctx, taskID, TaskStateFailed); err != nil {
 			b.log.Error("failed to update task state", "error", err, "task_id", taskID)
 		}
+		firstSent()
 		b.unregisterActiveTask(taskID, aKey)
 		return nil, fmt.Errorf("send message to agent: %w", err)
 	}
+	firstSent()
 
 	if _, err := b.store.UpdateTaskState(ctx, taskID, TaskStateWorking); err != nil {
 		b.log.Error("failed to update task state", "error", err, "task_id", taskID)
@@ -777,6 +813,20 @@ func (b *Bridge) sendFollowUp(ctx context.Context, projectSlug, agentSlug, taskI
 		aKey := agentKey(task.ProjectID, task.AgentSlug)
 		b.registerActiveTask(taskID, aKey)
 
+		// A follow-up waits for the task's first send when that send is
+		// still waiting for a launching agent, then for a launching agent
+		// itself; the response wait below starts after the send.
+		if err := b.awaitFirstSend(ctx, taskID); err != nil {
+			b.failFollowUpTask(taskID)
+			b.unregisterActiveTask(taskID, aKey)
+			return nil, fmt.Errorf("send follow-up to agent: %w", err)
+		}
+		if err := b.ensureRunningBeforeFollowUp(ctx, agentID, taskID); err != nil {
+			b.failFollowUpTask(taskID)
+			b.unregisterActiveTask(taskID, aKey)
+			return nil, fmt.Errorf("send follow-up to agent: %w", err)
+		}
+
 		if _, err := writeClient.Agents().SendStructuredMessage(ctx, agentID, scionMsg, false, false, false); err != nil {
 			b.failFollowUpTask(taskID)
 			b.unregisterActiveTask(taskID, aKey)
@@ -809,6 +859,21 @@ func (b *Bridge) sendFollowUp(ctx context.Context, projectSlug, agentSlug, taskI
 	b.wg.Add(1)
 	go func() {
 		defer b.wg.Done()
+		// The task's first send, when still waiting for a launching
+		// agent, and then a launching agent are waited for first; the
+		// send's own timeout starts after the wait.
+		if err := b.awaitFirstSend(b.shutdownCtx, taskID); err != nil {
+			b.log.Warn("non-blocking follow-up: not sent", "error", err, "task_id", taskID)
+			b.failFollowUpTask(taskID)
+			b.unregisterActiveTask(taskID, aKey)
+			return
+		}
+		if err := b.ensureRunningBeforeFollowUp(b.shutdownCtx, agentID, taskID); err != nil {
+			b.log.Warn("non-blocking follow-up: agent did not start", "error", err, "task_id", taskID)
+			b.failFollowUpTask(taskID)
+			b.unregisterActiveTask(taskID, aKey)
+			return
+		}
 		sendCtx, cancel := context.WithTimeout(b.shutdownCtx, 30*time.Second)
 		defer cancel()
 		if _, err := writeClient.Agents().SendStructuredMessage(sendCtx, agentID, scionMsg, false, false, false); err != nil {
@@ -1677,9 +1742,10 @@ func agentBeingDeleted(a *hubclient.Agent) bool {
 	return a.Deletion.State == hubclient.DeletionStateDeleting || a.Deletion.Stage == hubclient.DeletionStageFinalizing
 }
 
-// findAdoptableAgent returns the first listed agent whose name or slug is
-// agentSlug, skipping agents that are being deleted (ptone/scion#3455).
-func findAdoptableAgent(agents []hubclient.Agent, agentSlug string) (agentID, projectID string, found bool) {
+// findAdoptableAgent returns (a copy of) the first listed agent whose name
+// or slug is agentSlug, skipping agents that are being deleted
+// (ptone/scion#3455); nil when there is none.
+func findAdoptableAgent(agents []hubclient.Agent, agentSlug string) *hubclient.Agent {
 	for i := range agents {
 		a := &agents[i]
 		if a.Name != agentSlug && a.Slug != agentSlug {
@@ -1688,40 +1754,68 @@ func findAdoptableAgent(agents []hubclient.Agent, agentSlug string) (agentID, pr
 		if agentBeingDeleted(a) {
 			continue
 		}
-		return a.ID, a.ProjectID, true
+		found := *a
+		return &found
 	}
-	return "", "", false
+	return nil
+}
+
+// adoptAgent returns the adoptable agent's ID and project (empty when there
+// is none) and, when its launch is still active (launched by another
+// client, or by an earlier create of ours), the agent itself, so the caller
+// waits for it before sending.
+func adoptAgent(agents []hubclient.Agent, agentSlug string) (agentID, projectID string, launching *hubclient.Agent) {
+	a := findAdoptableAgent(agents, agentSlug)
+	if a == nil {
+		return "", "", nil
+	}
+	if hubclient.LaunchActive(a) {
+		launching = a
+	}
+	return a.ID, a.ProjectID, launching
 }
 
 // resolveContext maps an A2A context to a Scion agent, creating a new context if needed.
+// It is a test convenience: the send paths use resolveContextLaunch, which
+// also returns the agent to wait for. It is kept so the tests that resolve
+// a context without a send stay unchanged.
 func (b *Bridge) resolveContext(ctx context.Context, projectSlug, agentSlug, contextID string) (*state.Context, error) {
+	agentCtx, _, err := b.resolveContextLaunch(ctx, projectSlug, agentSlug, contextID)
+	return agentCtx, err
+}
+
+// resolveContextLaunch is resolveContext that also returns the agent to wait
+// for before the first send: the create answer when the hub accepted the
+// create asynchronously, or the adopted agent when it is still launching.
+// It is nil when the agent needs no wait, and for an existing context.
+func (b *Bridge) resolveContextLaunch(ctx context.Context, projectSlug, agentSlug, contextID string) (*state.Context, *hubclient.Agent, error) {
 	if contextID != "" {
 		existing, err := b.store.GetContext(ctx, contextID)
 		if err != nil {
-			return nil, fmt.Errorf("get context: %w", err)
+			return nil, nil, fmt.Errorf("get context: %w", err)
 		}
 		if existing != nil {
 			if existing.ProjectID != projectSlug || existing.AgentSlug != agentSlug {
-				return nil, fmt.Errorf("%w: context does not belong to %s/%s", ErrContextUnknown, projectSlug, agentSlug)
+				return nil, nil, fmt.Errorf("%w: context does not belong to %s/%s", ErrContextUnknown, projectSlug, agentSlug)
 			}
 			if err := b.store.TouchContext(ctx, contextID); err != nil {
 				b.log.Error("failed to touch context", "context_id", contextID, "error", err)
 			}
-			return existing, nil
+			return existing, nil, nil
 		}
-		return nil, fmt.Errorf("%w: %s", ErrContextUnknown, contextID)
+		return nil, nil, fmt.Errorf("%w: %s", ErrContextUnknown, contextID)
 	}
 
 	agents, err := b.hubClient.Agents().List(ctx, &hubclient.ListAgentsOptions{ProjectID: projectSlug})
 	if err != nil {
-		return nil, fmt.Errorf("list agents: %w", err)
+		return nil, nil, fmt.Errorf("list agents: %w", err)
 	}
 
-	agentID, projectID, _ := findAdoptableAgent(agents.Agents, agentSlug)
+	agentID, projectID, launching := adoptAgent(agents.Agents, agentSlug)
 	if agentID == "" {
 		projectCfg := b.GetProjectConfig(projectSlug)
 		if projectCfg == nil || !projectCfg.AutoProvision || projectCfg.DefaultTemplate == "" {
-			return nil, fmt.Errorf("%w: %q", ErrAgentNotFound, agentSlug)
+			return nil, nil, fmt.Errorf("%w: %q", ErrAgentNotFound, agentSlug)
 		}
 
 		b.log.Info("auto-provisioning agent", "slug", agentSlug, "project", projectSlug, "template", projectCfg.DefaultTemplate)
@@ -1730,6 +1824,10 @@ func (b *Bridge) resolveContext(ctx context.Context, projectSlug, agentSlug, con
 			ProjectID: projectSlug,
 			Template:  projectCfg.DefaultTemplate,
 			Labels:    map[string]string{"a2a-bridge/auto-provisioned": "true"},
+			// A hub with async launch answers once the broker accepts the
+			// create; the agent is then still launching (waited for below
+			// by the caller). Other hubs answer synchronously.
+			AcceptAsyncLaunch: b.effectiveConfig().asyncCreateEnabled(),
 		})
 		if err != nil {
 			// The hub answers delete_in_progress when the agent this create
@@ -1737,21 +1835,23 @@ func (b *Bridge) resolveContext(ctx context.Context, projectSlug, agentSlug, con
 			// that name found now is the one being deleted, so it is not
 			// adopted (ptone/scion#3455).
 			if isDeleteInProgress(err) {
-				return nil, fmt.Errorf("auto-provision agent %q: %w", agentSlug, err)
+				return nil, nil, fmt.Errorf("auto-provision agent %q: %w", agentSlug, err)
 			}
 			// Concurrent create may have succeeded; re-list to find the agent.
 			retryAgents, retryErr := b.hubClient.Agents().List(ctx, &hubclient.ListAgentsOptions{ProjectID: projectSlug})
 			if retryErr != nil {
-				return nil, fmt.Errorf("auto-provision agent %q: %w", agentSlug, err)
+				return nil, nil, fmt.Errorf("auto-provision agent %q: %w", agentSlug, err)
 			}
-			var found bool
-			agentID, projectID, found = findAdoptableAgent(retryAgents.Agents, agentSlug)
-			if !found {
-				return nil, fmt.Errorf("auto-provision agent %q: %w", agentSlug, err)
+			agentID, projectID, launching = adoptAgent(retryAgents.Agents, agentSlug)
+			if agentID == "" {
+				return nil, nil, fmt.Errorf("auto-provision agent %q: %w", agentSlug, err)
 			}
 		} else {
 			agentID = created.Agent.ID
 			projectID = created.Agent.ProjectID
+			if hubclient.LaunchActive(created.Agent) {
+				launching = created.Agent
+			}
 		}
 	}
 	if projectID == "" {
@@ -1769,10 +1869,10 @@ func (b *Bridge) resolveContext(ctx context.Context, projectSlug, agentSlug, con
 		LastActive: now,
 	}
 	if err := b.store.CreateContext(ctx, agentCtx); err != nil {
-		return nil, fmt.Errorf("create context: %w", err)
+		return nil, nil, fmt.Errorf("create context: %w", err)
 	}
 
-	return agentCtx, nil
+	return agentCtx, launching, nil
 }
 
 func (b *Bridge) registerActiveTask(taskID, aKey string) {

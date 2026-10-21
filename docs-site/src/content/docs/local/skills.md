@@ -13,7 +13,7 @@ Scion supports two ways to deliver skills to agents:
 This page covers the Skill Bank: how to author, publish, version, and consume skills with the `scion skills` command group. For Hub-side registry administration and federation, see [Skill Registry & Federation](/scion/hosted/single-node/skill-registry/).
 
 :::note
-The `scion skills` commands (except `create`) talk to a Hub. Make sure a Hub endpoint is configured — see [Connecting to a Hub](/scion/hosted/user/hosted-user/).
+The `scion skills` commands (except `create`) talk to a Hub. Make sure a Hub is selected (from your hub list, or with `--hub`) — see [Connecting to a Hub](/scion/hosted/user/hosted-user/).
 :::
 
 ## Anatomy of a skill
@@ -146,6 +146,8 @@ The `@version` suffix accepts:
 
 The `gh://` scheme retrieves skill files directly from a GitHub repository. It works out-of-the-box for public repositories, and supports secure private repository resolution.
 
+If GitHub rejects the credential sent with a skill file download at install time (`401`, `403` or `404`, for example because the token expired or was revoked), as can happen when the skill's resolution was cached or done by the Hub, Scion retries that file once without credentials. Hash checks apply to the result as usual. A fresh resolution with a rejected token still fails.
+
 #### Private repository resolution
 
 For private repositories, Scion resolves skills using the project's configured git credentials or custom secrets:
@@ -156,7 +158,7 @@ For private repositories, Scion resolves skills using the project's configured g
    - uri: gh://acme-corp/partner-skills/my-skill@v1.2.3?token=PARTNER_GITHUB_TOKEN
    ```
    Scion retrieves the secret from the `ProvisionCredentials` channel during provisioning. The secret value is processed completely in memory and is **never** forwarded to the agent's container environment or harness scripts.
-3. **Local CLI fallback**: In local CLI mode, the resolver automatically falls back to your local `GITHUB_TOKEN` environment variable.
+3. **Runtime Broker fallback**: when the project's environment supplies no `GITHUB_TOKEN`, a plain `gh://` URI uses `GITHUB_TOKEN` from the environment of the Runtime Broker process (on a workstation, the `scion server` process). It takes precedence over a `GITHUB_TOKEN` project secret that is not an environment secret.
 
 #### Input validation & auto-normalization
 

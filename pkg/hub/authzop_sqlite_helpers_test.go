@@ -81,6 +81,7 @@ type idFixtures struct {
 	gcpSADel                string
 	accessConstraint        string
 	accessConstraintUD      string
+	previewJob              string
 	invite                  string
 	envVarKey               string
 	uatRevokePost           string
@@ -346,6 +347,7 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 		gcpSADel:             tid("li-gcp-sa-del"),
 		accessConstraint:     tid("li-ac"),
 		accessConstraintUD:   tid("li-ac-ud"),
+		previewJob:           tid("li-preview-job"),
 		invite:               tid("li-invite"),
 		allowListEmail:       "li-allowlist@test.com",
 		envVarKey:            "LI_INVENTORY_TEST_VAR",
@@ -473,6 +475,11 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	acUD, err := s.CreateAccessConstraint(ctx, &store.AccessConstraint{Name: "li-ac-ud", SubjectKind: "principal", SubjectPrincipalType: &acSubjectType, SubjectPrincipalID: &acSubjectID, ScopeType: "system", MaximumPermissions: []string{"agent.read"}, Purpose: "live-inventory test fixture (update+delete)", CreatedBy: f.user, CreatedAt: now, UpdatedAt: now})
 	require.NoError(t, err)
 	f.accessConstraintUD = acUD.ID
+	// A finished constraint preview job, so the preview job and result
+	// reads address a real job. Preview jobs live in the preview service's
+	// memory, not in the store.
+	require.NotNil(t, srv.previewService, "the test server wires the preview service")
+	srv.previewService.asyncJobs.Store(f.previewJob, &PreviewJob{JobID: f.previewJob, Status: JobStatusSucceeded, Operation: "create", Result: &PreviewResult{}})
 
 	require.NoError(t, s.CreateInviteCode(ctx, &store.InviteCode{ID: f.invite, CodeHash: "li-invite-hash", CodePrefix: "li-invite", MaxUses: 1, ExpiresAt: now.Add(24 * time.Hour), CreatedBy: f.user, Created: now}))
 
@@ -1124,6 +1131,8 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/admin/access-constraints/{id}":                     {"id": f.accessConstraint},
 		"/api/v1/admin/access-constraints/{id}/affected-principals": {"id": f.accessConstraint},
 		"/api/v1/admin/access-constraints/{id}/audit":               {"id": f.accessConstraint},
+		"/api/v1/admin/access-constraint-previews/{jobId}":          {"jobId": f.previewJob},
+		"/api/v1/admin/access-constraint-previews/{jobId}/result":   {"jobId": f.previewJob},
 
 		// --- credential token family ---
 		"/api/v1/auth/tokens/{id}/revoke": {"id": f.uatRevokePost},

@@ -46,6 +46,7 @@ import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-ut
 import type { AccessBoundarySummary } from '../../shared/access-boundaries.js';
 import type { BoundarySummaryGroup } from '../shared/boundary-summary-notice.js';
 import { apiFetch, apiFetchAllPages, extractApiError } from '../../client/api.js';
+import { getPublicSettings } from '../../client/server-feature-flags.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import '../shared/boundary-summary-notice.js';
 import '../shared/env-var-list.js';
@@ -1302,14 +1303,9 @@ export class ScionPageProjectSettings extends LitElement {
 
   /** Fallback for loading hub telemetry default when /settings/resolved is unavailable. */
   private async loadHubTelemetryDefaultFallback(): Promise<void> {
-    try {
-      const response = await apiFetch('/api/v1/settings/public');
-      if (response.ok) {
-        const data = (await response.json()) as { telemetryEnabled?: boolean };
-        this.hubTelemetryDefault = data.telemetryEnabled ?? false;
-      }
-    } catch (err) {
-      console.error('Failed to load hub telemetry default:', err);
+    const settings = await getPublicSettings();
+    if (settings) {
+      this.hubTelemetryDefault = settings.telemetryEnabled ?? false;
     }
   }
 

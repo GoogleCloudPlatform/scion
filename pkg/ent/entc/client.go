@@ -443,8 +443,9 @@ func applyKeepalives(params map[string]string) {
 // AutoMigrate runs automatic schema migration on the given client.
 // It is idempotent: running it against a database that already has some or
 // all Ent-managed tables succeeds. The retired decision_audits table and its
-// rows are removed explicitly after schema migration succeeds. Other data is
-// preserved. On Postgres, any DDL statement that fails with SQLSTATE 42P07
+// rows, and the retired templates.config and templates.image columns
+// (dropTemplateLegacyColumns), are removed explicitly after schema migration
+// succeeds. Other data is preserved. On Postgres, any DDL statement that fails with SQLSTATE 42P07
 // ("relation already exists") is silently skipped so that new tables are
 // created alongside pre-existing ones. On SQLite, rows orphaned while foreign
 // keys were not enforced first get their key's declared ON DELETE action
@@ -508,7 +509,10 @@ func AutoMigrate(ctx context.Context, client *ent.Client, opts ...AutoMigrateOpt
 		}
 		return err
 	}
-	return dropDecisionAuditTable(ctx, client)
+	if err := dropDecisionAuditTable(ctx, client); err != nil {
+		return err
+	}
+	return dropTemplateLegacyColumns(ctx, client)
 }
 
 // AutoMigrateOption configures AutoMigrate.

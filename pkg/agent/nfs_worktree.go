@@ -378,6 +378,13 @@ func (m *AgentManager) RemoveNFSWorktree(ctx context.Context, projectPath, proje
 		return worktree, fmt.Errorf("workspace_storage nfs: %s is not a plain directory on the export; left in place", filepath.Dir(worktree))
 	}
 
+	// The worktree is the agent's; the project's shared checkout around it
+	// is never removed (agentFilesGuard). RemoveMountedWorktree removes
+	// the worktree by name under the checkout checked here.
+	if _, err := newAgentFilesGuard(agentName, []string{resolvedHostBase}, []string{worktree}, []string{workspace}).check(worktree); err != nil {
+		return worktree, fmt.Errorf("workspace_storage nfs: %w", err)
+	}
+
 	stateDir, err := nfsRemovalStateDir(resolvedHostBase, rel, projectID)
 	if err != nil {
 		return worktree, err

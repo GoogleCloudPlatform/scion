@@ -169,6 +169,9 @@ type conduitUserStream struct {
 	StreamID  uint32
 	// Admitted is when the stream was opened.
 	Admitted time.Time
+	// LegacyPort marks a user request the port-forward tunnel serves
+	// (port_forward_legacy_recheck.go), for the re-check's log line.
+	LegacyPort bool
 	// Close ends the stream on both legs with code and reason. It may be
 	// called at most once and must not block on the tracker.
 	Close func(code uint32, reason string)
@@ -198,8 +201,8 @@ type conduitUserStream struct {
 	// Bridge is the stream's only internal stream to the owner relay of
 	// the target session, when it reaches the target through a separate
 	// relay (external relay mode; nil otherwise). It is the one stream
-	// renewals for the target will use, so none will need a second stream;
-	// nothing sends renewals on it yet (Renew is nil for such a stream).
+	// renewals for the target use, so none needs a second stream: the
+	// renewal driver sends a hub-held leaf's renewals on it (Renew).
 	Bridge relay.Bridge
 
 	// mu serializes checks of this stream; closed is set once a check
@@ -294,6 +297,10 @@ type conduitStreamAuthzConfig struct {
 	// Jitter offsets each renewal for an interval (nil: up to plus or
 	// minus 5% of it, defaultConduitRenewalJitter).
 	Jitter func(interval time.Duration) time.Duration
+	// SweepContext, when set, derives the context of one sweep pass from
+	// the run context; runSweep calls it once per pass. Nil: the run
+	// context.
+	SweepContext func(context.Context) context.Context
 }
 
 // conduitStreamAuthz tracks the user streams this node owns and re-checks
@@ -393,7 +400,11 @@ func (a *conduitStreamAuthz) runSweep() {
 	}
 	start := a.cfg.Clock.Now()
 	n := a.Len()
-	a.Recheck(ctx, conduitAuthzTriggerSweep, conduitAuthzMatch{})
+	pass := ctx
+	if f := a.cfg.SweepContext; f != nil {
+		pass = f(ctx)
+	}
+	a.Recheck(pass, conduitAuthzTriggerSweep, conduitAuthzMatch{})
 	took := a.cfg.Clock.Now().Sub(start)
 	a.mu.Lock()
 	a.sweeping = false
@@ -594,6 +605,9 @@ func (a *conduitStreamAuthz) check(ctx context.Context, trigger string, st *cond
 	}
 	if outcome == conduitAuthzOutcomeRenewed {
 		attrs = append(attrs, "notice", notice, "deadline", st.Deadline())
+	}
+	if st.LegacyPort {
+		attrs = append(attrs, "route", "legacy_port_proxy")
 	}
 	a.cfg.Logger.Log(ctx, level, "conduit_stream_authz", attrs...)
 }

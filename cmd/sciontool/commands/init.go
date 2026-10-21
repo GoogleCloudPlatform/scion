@@ -898,6 +898,14 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// can use it without data races or startup race conditions.
 	hubClient := hub.NewClient()
 
+	// Publish what this process knows about its own agent credential for
+	// sciontool doctor. The first write happens here, before the child
+	// starts, so doctor never reads a state left by an earlier run as
+	// this one's. Only published when init runs as root.
+	credStateCtx, credStateCancel := context.WithCancel(context.Background())
+	defer credStateCancel()
+	hub.PublishCredentialState(credStateCtx, hubClient)
+
 	// Start GCP metadata server if configured
 	var metadataServer *metadata.Server
 	if metaCfg := metadata.ConfigFromEnv(); metaCfg != nil {
@@ -1391,8 +1399,31 @@ func RunInit(args []string, opts InitRunOptions) int {
 		go watchLimitsTriggerFile(triggerCtx, triggerChan)
 	}
 
-	// Wait for child to exit, duration limit, SIGUSR1, SIGUSR2, or trigger file.
-	// The loop allows SIGUSR2 (auth reset) to be handled without terminating.
+	// Reset path shared by SIGUSR2 and the credential file watcher. Both
+	// run it on this goroutine (the wait loop below), one at a time.
+	authReset := &authResetter{
+		hubClient:          hubClient,
+		tokenRefreshCancel: &tokenRefreshCancel,
+		tokenRefreshDone:   &tokenRefreshDone,
+		statusHandler:      statusHandler,
+		targetUID:          targetUID,
+		targetGID:          targetGID,
+		now:                time.Now,
+	}
+
+	// Watch the credential file, so a credential written there is adopted
+	// even when the reset signal does not arrive (for example, the writer
+	// may not be allowed to signal PID 1).
+	credFileChan := make(chan struct{}, 1)
+	credWatchCtx, credWatchCancel := context.WithCancel(context.Background())
+	defer credWatchCancel()
+	if hubClient != nil && hubClient.IsConfigured() {
+		authReset.watcher = startCredentialFileWatch(credWatchCtx, hubClient, hub.TokenWatchConfig{Notify: credFileChan})
+	}
+
+	// Wait for child to exit, duration limit, SIGUSR1, SIGUSR2, credential
+	// file change, or trigger file. The loop allows SIGUSR2 and credential
+	// file changes (auth reset) to be handled without terminating.
 	var result struct {
 		code int
 		err  error
@@ -1422,8 +1453,12 @@ waitLoop:
 			break waitLoop
 		case <-usr2Chan:
 			// SIGUSR2: auth reset — re-read token file and restart refresh loop.
-			handleAuthReset(hubClient, &tokenRefreshCancel, &tokenRefreshDone, statusHandler, targetUID, targetGID)
+			authReset.reset(authResetSignal)
 			// Continue waiting — this is non-terminal.
+		case <-credFileChan:
+			// The credential file changed: adopt a valid new credential
+			// through the same reset path. Non-terminal.
+			authReset.reset(authResetFileChange)
 		case <-triggerChan:
 			// Trigger file detected from hook handler - limits already set in agent-info.json
 			limitsExceeded = true
@@ -1909,74 +1944,203 @@ func reportHookLimitsExceeded(hubHandler *handlers.HubHandler, triggerPath strin
 	}
 }
 
-// handleAuthReset re-reads the token file, updates the hub client, and
-// restarts the token refresh loop. Called when SIGUSR2 is received from the
-// broker's reset-auth handler.
-func handleAuthReset(hubClient *hub.Client, tokenRefreshCancel *context.CancelFunc, tokenRefreshDone *<-chan struct{}, statusHandler *handlers.StatusHandler, targetUID, targetGID int) {
-	log.TaggedInfo("AUTH_RESET", "Received SIGUSR2: auth reset requested")
+// authResetSource is what triggered an auth reset.
+type authResetSource int
 
+const (
+	// authResetSignal is SIGUSR2 from the reset-auth writer.
+	authResetSignal authResetSource = iota
+	// authResetFileChange is the credential file watcher.
+	authResetFileChange
+)
+
+func (s authResetSource) String() string {
+	if s == authResetFileChange {
+		return "credential file change"
+	}
+	return "reset signal"
+}
+
+// authResetter holds the state an auth reset replaces: the shared hub
+// client's credential and the token refresh loop.
+type authResetter struct {
+	hubClient          *hub.Client
+	tokenRefreshCancel *context.CancelFunc
+	tokenRefreshDone   *<-chan struct{}
+	statusHandler      *handlers.StatusHandler
+	targetUID          int
+	targetGID          int
+	// watcher is told about refused credentials; nil when not watching.
+	watcher *hub.TokenFileWatcher
+	now     func() time.Time
+	// checkTimeout bounds each hub check of a credential; zero uses
+	// credentialCheckTimeout.
+	checkTimeout time.Duration
+
+	// The credential file value whose hub check last could not complete,
+	// how many times in a row, and whether that was logged.
+	uncheckedFP       hub.Fingerprint
+	uncheckedAttempts int
+	uncheckedLogged   bool
+}
+
+const (
+	// credentialCheckTimeout bounds a hub check of a credential.
+	credentialCheckTimeout = 5 * time.Second
+	// credentialRecheckBase and credentialRecheckMax pace re-checks of a
+	// credential file value whose hub check could not complete: 5s, 10s,
+	// 20s, 40s, then every 60s. Each value is paced on its own; a new
+	// value is checked at once.
+	credentialRecheckBase = 5 * time.Second
+	credentialRecheckMax  = 60 * time.Second
+)
+
+// recheckDelay is the wait before re-checking a value whose hub check could
+// not complete attempts times in a row.
+func recheckDelay(attempts int) time.Duration {
+	d := credentialRecheckBase
+	for i := 1; i < attempts && d < credentialRecheckMax; i++ {
+		d *= 2
+	}
+	return min(d, credentialRecheckMax)
+}
+
+// startCredentialFileWatch starts a watcher on the credential and transport
+// token files that notifies cfg.Notify on a change, until ctx ends. It
+// records the transport token file's current content as known first, so
+// only a later write by another process counts as a transport change, and
+// checks the current credential with the hub once in the background, so
+// its issue time is known when a newer credential arrives. That check is
+// not retried and changes nothing if it does not succeed.
+func startCredentialFileWatch(ctx context.Context, hubClient *hub.Client, cfg hub.TokenWatchConfig) *hub.TokenFileWatcher {
+	hubClient.NoteTransportTokenFile()
+	w := hub.NewTokenFileWatcher(cfg)
+	w.Run(ctx)
+	current := hubClient.GetToken()
+	go func() {
+		checkCtx, cancel := context.WithTimeout(ctx, credentialCheckTimeout)
+		defer cancel()
+		_ = hubClient.CheckCurrentCredentialAccepted(checkCtx, current)
+	}()
+	log.Info("Watching the credential file for changes (every %s)", hub.DefaultTokenWatchInterval)
+	return w
+}
+
+// reset re-reads the credential file and, if it holds a credential this
+// agent can adopt, puts it in the shared hub client and restarts the token
+// refresh loop. The wait loop calls it for both SIGUSR2 and credential file
+// changes, on one goroutine, so two resets never run at once. Everything is
+// checked before anything is stopped or replaced, so a credential that is
+// not adopted leaves the working credential and the refresh loop untouched.
+//
+// Both sources require a complete, unexpired credential whose subject is
+// this agent. For a file change, in addition:
+//   - a credential equal to the current one is a silent no-op (this process
+//     writes the file after each refresh);
+//   - it must be issued after the newest credential the hub has accepted
+//     from this client (hub.Client.VerifiedIssuedAt);
+//   - the hub must accept it (hub.Client.CheckCredentialAccepted). If the
+//     hub cannot be asked, the current credential is kept and the same value
+//     is checked again later, with a growing delay.
+//
+// The signal path adopts without asking the hub, so an operator reset
+// works even when the hub cannot be reached; the adopted credential is
+// checked afterwards, and only an accepted one moves the verified issue
+// time. Credential values are never logged; log lines name a credential by
+// its jti or a short fingerprint.
+func (r *authResetter) reset(source authResetSource) {
+	if source == authResetSignal {
+		log.TaggedInfo("AUTH_RESET", "Auth reset requested (SIGUSR2)")
+	}
+
+	hubClient := r.hubClient
 	if hubClient == nil {
-		log.Error("AUTH_RESET: Hub client is not configured, cannot reset auth")
+		if source == authResetSignal {
+			log.Error("AUTH_RESET: Hub client is not configured, cannot reset auth")
+		}
 		return
 	}
 
 	newToken := hub.ReadTokenFile()
-	if newToken == "" {
-		log.Error("AUTH_RESET: Token file is empty after SIGUSR2, cannot reset auth")
-		return
+	fp := hub.TokenFingerprint(newToken)
+	info, err := hub.ValidateCandidateToken(newToken, hubClient.AgentID(), r.now())
+	if source == authResetFileChange {
+		if newToken != "" && fp == hubClient.CredentialInfo().Fingerprint {
+			// The agent credential is the one in use; only the transport
+			// token file may have changed.
+			r.adoptTransportIfChanged(source)
+			return
+		}
+		if err == nil {
+			if anchor := hubClient.VerifiedIssuedAt(); !anchor.IsZero() && !info.IssuedAt.After(anchor) {
+				err = hub.ErrCandidateOlder
+			}
+		}
+		if err == nil {
+			err = r.checkWithHub(newToken, false)
+			if errors.Is(err, hub.ErrCandidateUnchecked) {
+				r.recheckLater(fp, info)
+				r.adoptTransportIfChanged(source)
+				return
+			}
+		}
 	}
-
-	tokenExpiry, err := hub.ParseTokenExpiry(newToken)
 	if err != nil {
-		log.Error("AUTH_RESET: Cannot parse new token expiry: %v", err)
+		// err is a fixed hub.ErrCandidate* value; it never quotes the file.
+		log.Error("AUTH_RESET: Not adopting the credential file (%s): %v", source, err)
+		r.uncheckedFP, r.uncheckedAttempts, r.uncheckedLogged = hub.Fingerprint{}, 0, false
+		if r.watcher != nil {
+			r.watcher.Refused(fp)
+		}
+		if source == authResetFileChange {
+			r.adoptTransportIfChanged(source)
+		}
 		return
 	}
+	r.uncheckedFP, r.uncheckedAttempts, r.uncheckedLogged = hub.Fingerprint{}, 0, false
+	log.TaggedInfo("AUTH_RESET", "Adopting credential %s (%s)", info.LogID(), source)
 
 	// Cancel the existing token refresh loop if running.
-	if *tokenRefreshCancel != nil {
-		(*tokenRefreshCancel)()
-		if *tokenRefreshDone != nil {
-			<-*tokenRefreshDone
+	if *r.tokenRefreshCancel != nil {
+		(*r.tokenRefreshCancel)()
+		if *r.tokenRefreshDone != nil {
+			<-*r.tokenRefreshDone
 		}
 	}
 
-	// Update the hub client's in-memory token.
-	if hubClient != nil {
-		hubClient.SetToken(newToken)
-	}
+	// Update the hub client's in-memory token. This also wakes every loop
+	// that is waiting after the hub refused the previous credential.
+	hubClient.SetToken(newToken)
 
 	// Reset-auth may also have written a fresh transport token. Adopt it so
 	// this process uses it immediately and the file is owned by the scion
 	// user for every other hub client in the container.
-	if adopted, err := hubClient.AdoptTransportTokenFile(targetUID, targetGID); err != nil {
+	if adopted, err := hubClient.AdoptTransportTokenFile(r.targetUID, r.targetGID); err != nil {
 		log.Error("AUTH_RESET: Failed to adopt transport token file: %v", err)
 	} else if adopted {
 		log.TaggedInfo("AUTH_RESET", "Transport token reloaded")
 	}
 
 	// Clear any AUTH_LOST message from agent-info.json.
-	_ = statusHandler.SetMessage("")
+	_ = r.statusHandler.SetMessage("")
 
-	// Schedule refresh 2 hours before the new token's expiry.
+	// Schedule refresh 2 hours before the new token's expiry; the expiry is
+	// after now (validated above), so a short-lived token refreshes in a
+	// minute.
+	tokenExpiry := info.Expiry
 	refreshAt := tokenExpiry.Add(-2 * time.Hour)
-	if refreshAt.Before(time.Now()) {
-		if time.Now().Before(tokenExpiry) {
-			refreshAt = time.Now().Add(1 * time.Minute)
-		} else {
-			log.Error("AUTH_RESET: New token is already expired at %s", tokenExpiry.Format(time.RFC3339))
-			return
-		}
+	if refreshAt.Before(r.now()) {
+		refreshAt = r.now().Add(1 * time.Minute)
 	}
 
 	// Start a new token refresh loop.
-	var tokenRefreshCtx context.Context
-	var cancel context.CancelFunc
-	tokenRefreshCtx, cancel = context.WithCancel(context.Background())
-	*tokenRefreshCancel = cancel
-	*tokenRefreshDone = hubClient.StartTokenRefresh(tokenRefreshCtx, &hub.TokenRefreshConfig{
+	tokenRefreshCtx, cancel := context.WithCancel(context.Background())
+	*r.tokenRefreshCancel = cancel
+	statusHandler := r.statusHandler
+	*r.tokenRefreshDone = hubClient.StartTokenRefresh(tokenRefreshCtx, &hub.TokenRefreshConfig{
 		RefreshAt: refreshAt,
-		ChownUID:  targetUID,
-		ChownGID:  targetGID,
+		ChownUID:  r.targetUID,
+		ChownGID:  r.targetGID,
 		OnRefreshed: func(newExpiry time.Time) {
 			log.Info("Token refreshed successfully, new expiry: %s", newExpiry.Format(time.RFC3339))
 		},
@@ -1994,7 +2158,7 @@ func handleAuthReset(hubClient *hub.Client, tokenRefreshCancel *context.CancelFu
 		tokenExpiry.Format(time.RFC3339), refreshAt.Format(time.RFC3339))
 
 	// Send an immediate heartbeat with the new token.
-	if hubClient != nil && hubClient.IsConfigured() {
+	if hubClient.IsConfigured() {
 		hubCtx, hubCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		if err := hubClient.Heartbeat(hubCtx); err != nil {
 			log.Error("AUTH_RESET: Post-reset heartbeat failed: %v", err)
@@ -2002,6 +2166,69 @@ func handleAuthReset(hubClient *hub.Client, tokenRefreshCancel *context.CancelFu
 			log.Info("AUTH_RESET: Post-reset heartbeat sent successfully")
 		}
 		hubCancel()
+	}
+
+	// A credential adopted on the signal was not asked about first; check
+	// it now, so that once the hub accepts it, a later credential file
+	// value is compared against its issue time.
+	if source == authResetSignal {
+		if err := r.checkWithHub(newToken, true); err != nil {
+			log.Info("AUTH_RESET: Adopted credential %s not confirmed by the hub yet: %v", info.LogID(), err)
+		}
+	}
+}
+
+// checkWithHub asks the hub whether it accepts token, within checkTimeout.
+// With current, token is the credential just adopted, and an accepted
+// answer counts only if it is still the in-memory credential.
+func (r *authResetter) checkWithHub(token string, current bool) error {
+	timeout := r.checkTimeout
+	if timeout <= 0 {
+		timeout = credentialCheckTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if current {
+		return r.hubClient.CheckCurrentCredentialAccepted(ctx, token)
+	}
+	return r.hubClient.CheckCredentialAccepted(ctx, token)
+}
+
+// recheckLater keeps the current credential after the hub could not be
+// asked about the file's value fp, and asks the watcher to report fp
+// again after a delay that grows while the same value stays unconfirmed.
+func (r *authResetter) recheckLater(fp hub.Fingerprint, info hub.TokenInfo) {
+	if fp != r.uncheckedFP {
+		r.uncheckedFP, r.uncheckedAttempts, r.uncheckedLogged = fp, 0, false
+	}
+	r.uncheckedAttempts++
+	delay := recheckDelay(r.uncheckedAttempts)
+	if !r.uncheckedLogged {
+		log.Error("AUTH_RESET: Keeping the current credential: %v for %s; checking again in %s and later", hub.ErrCandidateUnchecked, info.LogID(), delay)
+		r.uncheckedLogged = true
+	}
+	if r.watcher != nil {
+		r.watcher.RetryAfter(fp, delay)
+	}
+}
+
+// adoptTransportIfChanged adopts the transport token file when another
+// process wrote a new value there (reset-auth writes it after the agent
+// credential, so it can land after the agent credential was adopted).
+func (r *authResetter) adoptTransportIfChanged(source authResetSource) {
+	if !r.hubClient.TransportTokenFileChanged() {
+		return
+	}
+	if adopted, err := r.hubClient.AdoptTransportTokenFile(r.targetUID, r.targetGID); err != nil {
+		log.Error("AUTH_RESET: Failed to adopt transport token file (%s): %v", source, err)
+	} else if adopted {
+		log.TaggedInfo("AUTH_RESET", "Transport token reloaded (%s)", source)
+		// A credential file value the hub refused may have been refused
+		// for want of this transport token; let the watcher report it
+		// again.
+		if r.watcher != nil {
+			r.watcher.RecheckAgent()
+		}
 	}
 }
 

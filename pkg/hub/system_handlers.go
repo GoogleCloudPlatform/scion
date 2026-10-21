@@ -255,11 +255,20 @@ func (s *Server) handlePutRuntime(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// systemRuntimeProjectPath is the project path the system runtime handlers
+// pass to runtime.GetRuntime: the "global" alias, which
+// config.ResolveProjectPath maps to the global settings directory. The
+// co-located broker resolves its default runtime the same way at startup
+// and on a reload (cmd serverRuntimeProjectPath), so the hub never resolves
+// a runtime from a project found from the server's working directory
+// (ptone/scion#5362).
+const systemRuntimeProjectPath = "global"
+
 // applyRuntimeChange updates the image checker and co-located broker runtime
 // so they use the newly selected runtime instead of the previously
 // configured one.
 func (s *Server) applyRuntimeChange() {
-	rt := runtime.GetRuntime("", "")
+	rt := runtime.GetRuntime(systemRuntimeProjectPath, "")
 	s.SetLocalImageChecker(rt)
 
 	s.mu.RLock()
@@ -274,9 +283,15 @@ func (s *Server) applyRuntimeChange() {
 // the effective settings' configured active profile, or "default". It reads
 // ConfiguredActiveProfile, not ActiveProfile, so the settings overlay's
 // single-stored-profile fallback never redirects the system-runtime GET or
-// PUT onto the only stored profile.
+// PUT onto the only stored profile. The settings are the global ones, like
+// the server's startup loads: never a project found from the working
+// directory (ptone/scion#5362).
 func activeProfileName() string {
-	if effective, _, err := config.LoadEffectiveSettings(""); err == nil && effective != nil {
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		return "default"
+	}
+	if effective, _, err := config.LoadEffectiveSettings(globalDir); err == nil && effective != nil {
 		if active := effective.ConfiguredActiveProfile(); active != "" {
 			return active
 		}
@@ -769,7 +784,7 @@ func (s *Server) handleSystemImagesPull(w http.ResponseWriter, r *http.Request) 
 
 	jobID := api.NewUUID()
 
-	rt := runtime.GetRuntime("", "")
+	rt := runtime.GetRuntime(systemRuntimeProjectPath, "")
 
 	requestedHarnesses := req.Harnesses
 
@@ -1328,7 +1343,7 @@ func (s *Server) handleWorkstationSettings(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Edit settings.yaml in place under the process-wide settings-file lock
+	// Edit settings.yaml in place under the settings lock (LockSettingsDir)
 	// (not s.mu: the server-config PUT holds the file lock across DB writes
 	// that take s.mu, so taking them in the other order could deadlock).
 	// false removes the key, matching the server-config PUT's omitempty
@@ -1337,12 +1352,18 @@ func (s *Server) handleWorkstationSettings(w http.ResponseWriter, r *http.Reques
 	if !*req.AutoInjectGcloudADC {
 		edit = config.SettingsPathEdit{Path: []string{"auto_inject_gcloud_adc"}, Delete: true}
 	}
-	unlock := config.LockSettingsFile()
-	staged, err := config.PrepareSettingsPathEdits(globalDir, []config.SettingsPathEdit{edit})
-	if err == nil {
-		err = staged.Commit()
-	}
-	unlock()
+	err = func() error {
+		lock, err := config.LockSettingsDir(globalDir)
+		if err != nil {
+			return err
+		}
+		defer lock.Unlock()
+		staged, err := config.PrepareSettingsPathEdits(globalDir, []config.SettingsPathEdit{edit})
+		if err != nil {
+			return err
+		}
+		return staged.Commit(lock)
+	}()
 	if err != nil {
 		slog.Error("Failed to write workstation settings", "error", err)
 		if errors.Is(err, config.ErrSettingsPathEditUnsupported) {

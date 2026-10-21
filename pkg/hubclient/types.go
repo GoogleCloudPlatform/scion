@@ -221,6 +221,11 @@ type ProjectProvider struct {
 }
 
 // ProjectSettings represents project configuration settings.
+//
+// Bucket, Runtimes, Harnesses and Profiles are not stored at the project
+// layer: GET never returns them, and a PUT that sets any of them (to a
+// non-null value) is refused with 400. They are configured in server or
+// Runtime Broker settings.
 type ProjectSettings struct {
 	// ActiveProfile names the broker profile new agents in the project run
 	// under when the request names none. On PUT, an absent (null) field
@@ -375,6 +380,14 @@ type RuntimeBroker struct {
 	// RuntimeTarget is the stored descriptor of a flat Runtime Broker's
 	// single runtime target; nil for a profile-based Runtime Broker.
 	RuntimeTarget *api.RuntimeTargetDescriptor `json:"runtimeTarget,omitempty"`
+	// RuntimeTargetPresentation is the publishable configuration a flat
+	// Runtime Broker instance last reported (FC4-a): its defaults for new
+	// agents, not the configuration of any agent and not a check of
+	// cluster permissions. Nil for a legacy Runtime Broker or when none
+	// was reported. RuntimeTargetPresentationObservedAt is when the Hub
+	// last saw it ("as reported at").
+	RuntimeTargetPresentation           *api.RuntimeTargetPresentation `json:"runtimeTargetPresentation,omitempty"`
+	RuntimeTargetPresentationObservedAt *time.Time                     `json:"runtimeTargetPresentationObservedAt,omitempty"`
 }
 
 // BrokerCapabilities describes runtime broker capabilities.
@@ -390,6 +403,11 @@ type BrokerCapabilities struct {
 	// create path and the launch-report protocol (design t1-async-create-v11.md
 	// §3.2, §7 P1b-1).
 	AsyncLaunch bool `json:"asyncLaunch"`
+	// AsyncStart indicates the broker can run a start or restart of an
+	// existing agent as an asynchronous launch (ptone/scion#4669). Brokers
+	// that implement the async start (design wave 3, D2) set it in their
+	// heartbeat and registration. Mirrors store.BrokerCapabilities.AsyncStart.
+	AsyncStart bool `json:"asyncStart,omitempty"`
 	// EmptyPerAgentWorkspace indicates the broker can provision the
 	// empty-per-agent workspace sharing mode (design #2703;
 	// store.BrokerCapabilities.EmptyPerAgentWorkspace is its counterpart).
@@ -397,6 +415,9 @@ type BrokerCapabilities struct {
 	// AgentMove indicates the broker can take part in a cross-broker agent
 	// move (store.BrokerCapabilities.AgentMove is its counterpart).
 	AgentMove bool `json:"agentMove"`
+	// AgentMoveRecreate indicates the broker can be the target of a forced
+	// move (store.BrokerCapabilities.AgentMoveRecreate is its counterpart).
+	AgentMoveRecreate bool `json:"agentMoveRecreate,omitempty"`
 	// ReprovisionEmptyPerAgent indicates the broker's reprovision reuses an
 	// empty-per-agent workspace in place
 	// (store.BrokerCapabilities.ReprovisionEmptyPerAgent is its counterpart).
@@ -511,7 +532,7 @@ type User struct {
 	Status      string           `json:"status"`
 	Preferences *UserPreferences `json:"preferences,omitempty"`
 	Created     time.Time        `json:"created"`
-	LastLogin   time.Time        `json:"lastLogin,omitempty"`
+	LastLogin   time.Time        `json:"lastLogin,omitzero"`
 }
 
 // UserPreferences holds user preferences.

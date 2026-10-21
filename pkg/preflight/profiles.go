@@ -27,7 +27,8 @@ const ProfilesCheckName = "settings.profiles"
 //   - the same reference already broken before the change (PreExisting) is a
 //     warning, code suffix ".pre_existing";
 //   - a profile dropped with no reference is a warning;
-//   - the single-stored-profile fallback and a changed default are
+//   - the single-stored-profile fallback, a changed default, and the
+//     built-in profiles and runtimes kept by ptone/scion#5113 are
 //     information.
 //
 // An unknown kind maps to block, so a kind added without a mapping fails
@@ -43,7 +44,8 @@ func ProfileFindingSeverity(f config.ProfileCatalogFinding) (Severity, string) {
 		return SeverityBlock, code
 	case config.ProfileFindingDroppedUnused:
 		return SeverityWarn, code
-	case config.ProfileFindingActiveProfileFallback, config.ProfileFindingActiveProfileChanged:
+	case config.ProfileFindingActiveProfileFallback, config.ProfileFindingActiveProfileChanged,
+		config.ProfileFindingRetainedBuiltinProfile, config.ProfileFindingRetainedBuiltinRuntime:
 		return SeverityInfo, code
 	default:
 		return SeverityBlock, code

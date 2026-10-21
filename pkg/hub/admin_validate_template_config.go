@@ -16,10 +16,6 @@ package hub
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"sort"
-	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -31,17 +27,12 @@ import (
 // such check; each check has its own Kind:
 //   - environment_keys (ptone/scion#4524): the template's AgentConfig
 //     snapshot sets environment keys (see config.StripTemplateEnvironmentKeys).
-//   - stored_config (ptone/scion#4223): the row's stored Config is non-empty
-//     or its Image is set. The template API no longer writes either and
-//     agents no longer read them; a template's job config comes from its
-//     scion-agent.yaml.
 //
 // Findings are reported only; nothing is rewritten.
 
 // Template config finding kinds.
 const (
 	TemplateFindingEnvironmentKeys = "environment_keys"
-	TemplateFindingStoredConfig    = "stored_config"
 )
 
 // templateFindingsPageSize is the page size of the template scan.
@@ -78,38 +69,6 @@ func templateEnvironmentKeyFinding(t *store.Template) *TemplateConfigFinding {
 	}
 }
 
-// templateStoredConfigFinding returns the stored_config finding for t, or nil
-// when its stored Config is empty and its Image is unset. Keys name the set
-// fields: "config.<json key>" for each Config field, and "image".
-func templateStoredConfigFinding(t *store.Template) *TemplateConfigFinding {
-	var keys []string
-	if t.Config != nil {
-		var fields map[string]json.RawMessage
-		if data, err := json.Marshal(t.Config); err == nil && json.Unmarshal(data, &fields) == nil {
-			for k := range fields {
-				keys = append(keys, "config."+k)
-			}
-		}
-	}
-	sort.Strings(keys)
-	if t.Image != "" {
-		keys = append(keys, "image")
-	}
-	if len(keys) == 0 {
-		return nil
-	}
-	return &TemplateConfigFinding{
-		Kind:       TemplateFindingStoredConfig,
-		Template:   t.Name,
-		TemplateID: t.ID,
-		Scope:      t.Scope,
-		ScopeID:    t.ScopeID,
-		Keys:       keys,
-		Message: fmt.Sprintf("template %s has stored %s; ignored (set job config in scion-agent.yaml; image comes from the harness-config or settings)",
-			t.Name, strings.Join(keys, ", ")),
-	}
-}
-
 // templateConfigFindings scans every template, in every scope, and returns
 // its config findings.
 func (s *Server) templateConfigFindings(ctx context.Context) ([]TemplateConfigFinding, error) {
@@ -122,9 +81,6 @@ func (s *Server) templateConfigFindings(ctx context.Context) ([]TemplateConfigFi
 		}
 		for i := range page.Items {
 			if f := templateEnvironmentKeyFinding(&page.Items[i]); f != nil {
-				findings = append(findings, *f)
-			}
-			if f := templateStoredConfigFinding(&page.Items[i]); f != nil {
 				findings = append(findings, *f)
 			}
 		}

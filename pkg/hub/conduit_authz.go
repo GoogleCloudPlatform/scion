@@ -284,12 +284,29 @@ type conduitGrantRequest struct {
 	// CanRenew reports that this node can deliver renewals for the stream
 	// on the resolved route.
 	CanRenew bool
+	// Route is the metric and log route label of the open
+	// (conduitRouteRelayTunnel for a relay-held tunnel; contracts
+	// 1bbe35f0 §2, Renewal path unavailable, Message and observability).
+	// Empty means conduitRouteOf(Via). It is hub-internal: only the hub's
+	// own caller sets it, never from a request or relay field; it is never
+	// in the grant, an instruction or any wire field, and never an input to
+	// authorization or the re-check (Via is).
+	Route string
+}
+
+// route is req's metric and log route label: Route, or the label of Via.
+func (req conduitGrantRequest) route() string {
+	if req.Route != "" {
+		return req.Route
+	}
+	return conduitRouteOf(req.Via)
 }
 
 // mintConduitGrant authorizes req and, only if every check passes, mints a
 // single-use grant for it. Errors wrap errConduitDisabled,
 // errConduitInvalid, errConduitForbidden,
-// errConduitStreamRenewalUnavailable (503 stream_renewal_unavailable) or
+// errConduitStreamRenewalUnavailable (503 stream_renewal_unavailable),
+// errConduitAgentUpgradeRequired (409 agent_upgrade_required) or
 // errConduitGrantInternal (500 internal_error, nothing minted).
 func (s *Server) mintConduitGrant(ctx context.Context, req conduitGrantRequest) ([]byte, *grant.Claims, error) {
 	if !s.experimentEnabled(conduitExperiment) {
@@ -356,7 +373,14 @@ func (s *Server) mintConduitGrant(ctx context.Context, req conduitGrantRequest) 
 	// decides this at resolution; this is the backstop for a re-resolution
 	// onto another row after that check. With enforce it also refuses a
 	// renewal-unsupported principal.
-	if s.conduitRenewalPathUnavailable(ctx, req.Identity, req.TargetRenews, req.CanRenew, conduitRouteOf(req.Via), agent.ID) {
+	// Target without stream renewal (contracts, Target lacks stream
+	// renewal): the backstop of the open paths' check on the resolved row,
+	// at the same point, so it precedes the placement guard. Only user
+	// stream origins (tunnel, proxy, pty) are concerned.
+	if req.Via != "" && s.conduitTargetUpgradeRequired(ctx, req.Identity, req.TargetRenews, req.route(), agent.ID) {
+		return nil, nil, errConduitAgentUpgradeRequired
+	}
+	if s.conduitRenewalPathUnavailable(ctx, req.Identity, req.TargetRenews, req.CanRenew, req.route(), agent.ID) {
 		return nil, nil, errConduitStreamRenewalUnavailable
 	}
 	// Design v2.21.36 §3.5, Principals without a renewal path: with off, a
@@ -470,7 +494,7 @@ func (s *Server) mintConduitGrant(ctx context.Context, req conduitGrantRequest) 
 	if unstampedKind != "" {
 		slog.InfoContext(ctx, "Conduit open grant minted without a deadline: the principal has no renewal path",
 			"agent_id", agent.ID, "kind", req.Stream.Kind, "via", req.Via, "principal_kind", unstampedKind)
-		s.recordConduitOpenUnstamped(conduitRouteOf(req.Via), unstampedKind)
+		s.recordConduitOpenUnstamped(req.route(), unstampedKind)
 	}
 	return tok, &claims, nil
 }
@@ -480,7 +504,7 @@ func (s *Server) mintConduitGrant(ctx context.Context, req conduitGrantRequest) 
 // presented grant does not verify in re-check mode, does not match the
 // stream named by the request, or names an origin and kind outside the
 // origin table, or the agent's saved placement refuses it
-// (conduitRenewalPlacement). Nothing is minted and nothing closes; the
+// (conduitStreamPlacement). Nothing is minted and nothing closes; the
 // stream keeps its current deadline. An authorization deny wraps
 // errConduitForbidden.
 
@@ -498,9 +522,18 @@ type conduitRenewalRequest struct {
 	// OpenJTI is the jti of the stream's open grant.
 	OpenJTI string
 	// PrincipalID and Kind, when set, are the user and stream kind the
-	// relay holds for the stream; they must equal the grant's.
+	// holder of the stream's leaf has for it; they must equal the grant's.
 	PrincipalID string
 	Kind        string
+	// RelayHeld marks a request a separate relay presented for a stream on
+	// one of its user sessions (recheckRelayStream). PrincipalID is then
+	// that session's admitted principal, and a grant naming another
+	// principal is a session binding failure: a deny
+	// (errConduitRenewalSessionBinding). On a hub-held stream the hub built
+	// the request from its own state, so a mismatch is an internal
+	// inconsistency: unavailable, logged at error level (design v2.21.40
+	// §3.9, Session binding).
+	RelayHeld bool
 }
 
 // conduitRenewal is a minted renewal grant and the deadline it carries.
@@ -520,7 +553,7 @@ type conduitRenewal struct {
 // Errors wrap errConduitDisabled, errConduitRenewalUnavailable (bad or
 // mismatched grant, no target session, origin and kind outside the table,
 // or a pinned agent whose saved placement is inconsistent; see
-// conduitRenewalPlacement), errConduitForbidden (authorization denied,
+// conduitStreamPlacement), errConduitForbidden (authorization denied,
 // including an inactive user), errConduitAuthzUnavailable (a lookup
 // failed: no renewal, and the stream is not closed early), or
 // errConduitAgentGone.
@@ -563,6 +596,11 @@ func (s *Server) renewConduitStream(ctx context.Context, req conduitRenewalReque
 		return nil, fmt.Errorf("%w: not a user stream", errConduitRenewalUnavailable)
 	}
 	if req.PrincipalID != "" && req.PrincipalID != userID {
+		if req.RelayHeld {
+			return nil, fmt.Errorf("%w: the grant names another principal than the stream's session", errConduitRenewalSessionBinding)
+		}
+		slog.Error("Conduit renewal: the grant names another principal than the stream the hub holds; no renewal minted",
+			"target_session_id", req.TargetSessionID, "stream_id", req.TargetStreamID)
 		return nil, fmt.Errorf("%w: principal does not match the grant", errConduitRenewalUnavailable)
 	}
 	if req.Kind != "" && req.Kind != c.Stream.Kind {
@@ -578,47 +616,16 @@ func (s *Server) renewConduitStream(ctx context.Context, req conduitRenewalReque
 		}
 	}
 
-	agent, err := s.store.GetAgent(ctx, target.ID)
-	switch {
-	case errors.Is(err, store.ErrNotFound):
-		return nil, errConduitAgentGone
-	case err != nil:
-		return nil, fmt.Errorf("%w: agent lookup: %v", errConduitAuthzUnavailable, err)
-	case agent == nil:
-		// The store returned neither an agent nor an error: an internal
-		// inconsistency, not a deleted agent and not a decision.
-		return nil, fmt.Errorf("%w: agent lookup returned no agent", errConduitAuthzUnavailable)
-	case !agent.DeletedAt.IsZero():
-		return nil, errConduitAgentGone
-	case agent.ProjectID != c.ProjectID:
-		return nil, fmt.Errorf("%w: agent is no longer in the grant's project", errConduitForbidden)
-	}
-	ident, err := s.conduitRenewalIdentity(ctx, c, userID)
-	if err != nil {
-		return nil, err
-	}
-	verdict, reason, err := s.authorizeConduitUserStream(ctx, conduitUserStreamAuthz{
-		Identity:  ident,
-		Agent:     agent,
-		Kind:      c.Stream.Kind,
-		ViaTunnel: c.Via == grant.ViaTunnel,
-		Port:      port,
-		ConfirmDeny: func() bool {
-			_, err := s.store.GetAgent(ctx, agent.ID)
-			return err == nil && ctx.Err() == nil
-		},
-	})
-	switch verdict {
-	case conduitAuthzAllowed:
-	case conduitAuthzDenied:
-		if errors.Is(err, errConduitPrincipalInactive) {
-			return nil, err
-		}
-		return nil, fmt.Errorf("%w: %s: %w", errConduitForbidden, reason, err)
-	default:
-		return nil, fmt.Errorf("%w: %s: %w", errConduitAuthzUnavailable, reason, err)
-	}
-	if err := s.conduitRenewalPlacement(ctx, agent, req); err != nil {
+	if verdict, _, err := s.evaluateConduitStream(ctx, conduitStreamEval{
+		AgentID:     target.ID,
+		ProjectID:   c.ProjectID,
+		Identity:    func() (Identity, error) { return s.conduitRenewalIdentity(ctx, c, userID) },
+		Kind:        c.Stream.Kind,
+		ViaTunnel:   c.Via == grant.ViaTunnel,
+		Port:        port,
+		ConfirmDeny: func(agent *store.Agent) bool { return s.conduitConfirmAgentPresent(ctx, agent.ID) },
+		LogAttrs:    []any{"target_session_id", req.TargetSessionID, "stream_id", req.TargetStreamID},
+	}); verdict != conduitAuthzAllowed {
 		return nil, err
 	}
 
@@ -659,38 +666,6 @@ func (s *Server) renewConduitStream(ctx context.Context, req conduitRenewalReque
 	return &conduitRenewal{Token: tok, AuthzUntil: rc.AuthzUntil, Claims: &rc}, nil
 }
 
-// conduitRenewalPlacement applies mintConduitGrant's placement guard
-// (checkAgentPinnedPlacement) to a renewal, after the re-check's
-// authorization verdict and before minting, so a stream to a pinned agent
-// whose saved placement is inconsistent gets no renewal, as an open gets no
-// grant. A placement refusal wraps errConduitRenewalUnavailable and the
-// *PlacementConflictError: no renewal is minted, and the stream is not
-// closed from here; it ends at its current deadline. A failed placement
-// read for a pinned agent wraps errConduitAuthzUnavailable, like the other
-// lookups that fail during a renewal, and errConduitRenewalUnavailable: no
-// renewal this attempt, and nothing closes. As for an
-// open, an unpinned agent keeps today's path when the read fails, and a
-// managed runtime is not checked.
-func (s *Server) conduitRenewalPlacement(ctx context.Context, agent *store.Agent, req conduitRenewalRequest) error {
-	if isManagedAgentRuntime(agent.Runtime) {
-		return nil
-	}
-	_, err := checkAgentPinnedPlacement(ctx, s.store, agent)
-	if err == nil {
-		return nil
-	}
-	if r, refused := placementRefusalOf(err); refused {
-		slog.Warn("Conduit renewal refused for the agent's saved placement; no renewal minted",
-			"agent_id", agent.ID, "code", r.Code,
-			"target_session_id", req.TargetSessionID, "stream_id", req.TargetStreamID)
-		return fmt.Errorf("%w: agent placement: %w", errConduitRenewalUnavailable, err)
-	}
-	if agent.IsPinned() {
-		return fmt.Errorf("%w: %w: agent placement check: %w", errConduitAuthzUnavailable, errConduitRenewalUnavailable, err)
-	}
-	return nil
-}
-
 // conduitRenewalIdentity returns the identity a renewal re-check evaluates
 // for the user named by a verified grant (design v2.21.31 §3.5, Scope claim
 // scope): the user, read from the store, and for a grant with a scope the
@@ -699,18 +674,28 @@ func (s *Server) conduitRenewalPlacement(ctx context.Context, agent *store.Agent
 // row that is gone wraps errConduitPrincipalInactive; a failed lookup wraps
 // errConduitAuthzUnavailable.
 func (s *Server) conduitRenewalIdentity(ctx context.Context, c *grant.RecheckClaims, userID string) (Identity, error) {
-	user, err := s.store.GetUser(ctx, userID)
-	switch {
-	case errors.Is(err, store.ErrNotFound):
-		return nil, fmt.Errorf("%w: user not found", errConduitPrincipalInactive)
-	case err != nil:
-		return nil, fmt.Errorf("%w: user lookup: %v", errConduitAuthzUnavailable, err)
-	case user == nil:
-		// The store returned neither a user nor an error: an internal
-		// inconsistency, not an inactive user and not a decision.
-		return nil, fmt.Errorf("%w: user lookup returned no user", errConduitAuthzUnavailable)
+	var ident UserIdentity
+	if userID == DevUserID && s.authConfig.DevAuthEnabled {
+		// The development user (design v2.21.40 §3.5, Dev user) is rebuilt
+		// as such only while development authentication is enabled on this
+		// hub, read now and never from the grant. With it off, the user id
+		// takes the normal path below, and a missing row is an inactive
+		// principal.
+		ident = NewDevUser(s.authConfig.DevUserCfg)
+	} else {
+		user, err := s.store.GetUser(ctx, userID)
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			return nil, fmt.Errorf("%w: user not found", errConduitPrincipalInactive)
+		case err != nil:
+			return nil, fmt.Errorf("%w: user lookup: %v", errConduitAuthzUnavailable, err)
+		case user == nil:
+			// The store returned neither a user nor an error: an internal
+			// inconsistency, not an inactive user and not a decision.
+			return nil, fmt.Errorf("%w: user lookup returned no user", errConduitAuthzUnavailable)
+		}
+		ident = NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "")
 	}
-	ident := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "")
 	if c.Scope == nil {
 		return ident, nil
 	}
@@ -838,11 +823,13 @@ func (s *Server) conduitUserStreamAuthzInterval() time.Duration {
 // targets: user streams to brokers are not renewed until brokers move to
 // conduit, and user sessions are never targets.
 func (s *Server) conduitRenewalTarget(ctx context.Context, sessionID string) (grant.Target, error) {
-	rt := s.conduit.Load()
-	if rt == nil || rt.store == nil {
+	// The registry of whichever conduit runtime runs on this node: the
+	// in-process one, or the shared registry of external relay mode.
+	_, st, _ := s.conduitRegistry()
+	if st == nil {
 		return grant.Target{}, fmt.Errorf("%w: no conduit registry on this node", errConduitAuthzUnavailable)
 	}
-	ps, found, err := rt.store.ListPrincipalSessionsBySession(ctx, sessionID)
+	ps, found, err := st.ListPrincipalSessionsBySession(ctx, sessionID)
 	if err != nil {
 		return grant.Target{}, fmt.Errorf("%w: registry: %v", errConduitAuthzUnavailable, err)
 	}

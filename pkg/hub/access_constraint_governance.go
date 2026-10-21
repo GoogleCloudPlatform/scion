@@ -126,6 +126,48 @@ type CommitRequest struct {
 	// envelope. It is nil for non-HTTP operations and tests without request
 	// middleware.
 	AuditRequest *auditevent.RequestRef
+
+	// Credential is the identity the request is sent with. The commit
+	// re-checks judge the actor's authority within its limits (a user
+	// access token's selectors), and a commit sent with a user access
+	// token may not relax a boundary. Nil for a caller with no request
+	// credential.
+	Credential Identity
+}
+
+// errTokenRelaxationSessionOnly refuses a commit that relaxes a boundary
+// (delete, or an update that adds permissions, changes subject or scope,
+// or narrows or adds its time window) when it is sent with a user access
+// token: relaxing a boundary needs a session.
+var errTokenRelaxationSessionOnly = errors.New("relaxing an access constraint requires an interactive session")
+
+// commitSentWithToken reports whether the commit is sent with a user access
+// token, by its credential identity or by the request credential kind.
+func commitSentWithToken(ctx context.Context, req CommitRequest) bool {
+	if req.Credential != nil && !isNilIdentity(req.Credential) && IsScopedUserIdentity(req.Credential) {
+		return true
+	}
+	return GetCredentialContextFromContext(ctx).Kind == CredentialKindUAT
+}
+
+// commitActorPermissions returns the actor's effective permissions at the
+// scope, within the limits of the request credential: a user access token's
+// selectors are intersected as CanDelegate does
+// (intersectCredentialCaveats); a session carries no limits.
+func (gs *GovernanceService) commitActorPermissions(ctx context.Context, req CommitRequest, scopeType, scopeID string) ([]string, error) {
+	perms, err := gs.authz.getEffectivePermissions(
+		ctx,
+		NormalizePrincipalType(string(req.Actor.Kind)),
+		req.Actor.ID,
+		scopeType, scopeID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if req.Credential != nil && !isNilIdentity(req.Credential) {
+		perms = gs.authz.intersectCredentialCaveats(req.Credential, perms)
+	}
+	return perms, nil
 }
 
 // CommitResult is the outcome of a successful commit.
@@ -211,8 +253,23 @@ func (gs *GovernanceService) CommitBoundaryChange(ctx context.Context, req Commi
 	}
 
 	// Step g: For relaxations, verify the actor has sufficient authority.
+	// A relaxation sent with a user access token is refused: it needs a
+	// session.
 	if classification == ClassificationRelax || classification == ClassificationMixed {
+		if commitSentWithToken(ctx, req) {
+			return nil, errTokenRelaxationSessionOnly
+		}
 		if err := gs.checkRelaxationAuthority(ctx, req, scopeType, scopeID); err != nil {
+			return nil, err
+		}
+	}
+
+	// A user access token may not narrow or add a constraint's time window:
+	// the constraint is inactive outside its window, so an update whose
+	// window does not cover the existing one relaxes the boundary and needs
+	// a session.
+	if req.Operation == "update" && commitSentWithToken(ctx, req) {
+		if err := gs.checkTokenWindowCovers(ctx, req); err != nil {
 			return nil, err
 		}
 	}
@@ -449,17 +506,13 @@ func (gs *GovernanceService) compensateAuditFailure(ctx context.Context, req Com
 // Re-authorization
 // ---------------------------------------------------------------------------
 
-// reauthorizeActor verifies the actor still holds access_constraint.admin.
-// Uses getEffectivePermissions instead of Decide to avoid requiring a full
-// Identity object — the governance service operates at the principal level.
+// reauthorizeActor verifies the actor still holds access_constraint.admin,
+// within the limits of the request credential (commitActorPermissions).
+// Uses getEffectivePermissions instead of Decide: the governance service
+// operates at the principal level.
 func (gs *GovernanceService) reauthorizeActor(ctx context.Context, req CommitRequest) error {
 	scopeType, scopeID := gs.resolveScope(ctx, req)
-	actorPerms, err := gs.authz.getEffectivePermissions(
-		ctx,
-		NormalizePrincipalType(string(req.Actor.Kind)),
-		req.Actor.ID,
-		scopeType, scopeID,
-	)
+	actorPerms, err := gs.commitActorPermissions(ctx, req, scopeType, scopeID)
 	if err != nil {
 		return &GovernanceError{
 			Code:    ErrCodeMutationPermissionLost,
@@ -553,6 +606,24 @@ func (gs *GovernanceService) classifyOperation(ctx context.Context, req CommitRe
 	return ClassificationTighten, nil // No permission changes = default to tighten.
 }
 
+// checkTokenWindowCovers refuses, with errTokenRelaxationSessionOnly, an
+// update whose proposed time window does not cover the existing window:
+// the proposed NotBefore is later than the existing one or newly set, or
+// the proposed ExpiresAt is earlier than the existing one or newly set.
+func (gs *GovernanceService) checkTokenWindowCovers(ctx context.Context, req CommitRequest) error {
+	if req.ConstraintID == "" || req.Draft == nil {
+		return nil
+	}
+	existing, err := gs.store.GetAccessConstraint(ctx, req.ConstraintID)
+	if err != nil {
+		return fmt.Errorf("failed to load existing constraint: %w", err)
+	}
+	if !constraintWindowCovers(req.Draft, existing) {
+		return errTokenRelaxationSessionOnly
+	}
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // Relaxation authority
 // ---------------------------------------------------------------------------
@@ -560,13 +631,9 @@ func (gs *GovernanceService) classifyOperation(ctx context.Context, req CommitRe
 // checkRelaxationAuthority verifies the actor has sufficient authority over
 // the permissions being restored by a relaxation.
 func (gs *GovernanceService) checkRelaxationAuthority(ctx context.Context, req CommitRequest, scopeType, scopeID string) error {
-	// Get the actor's effective permissions at the relevant scope.
-	actorPerms, err := gs.authz.getEffectivePermissions(
-		ctx,
-		NormalizePrincipalType(string(req.Actor.Kind)),
-		req.Actor.ID,
-		scopeType, scopeID,
-	)
+	// Get the actor's effective permissions at the relevant scope, within
+	// the request credential's limits.
+	actorPerms, err := gs.commitActorPermissions(ctx, req, scopeType, scopeID)
 	if err != nil {
 		return &GovernanceError{
 			Code:    ErrCodeInsufficientRelaxationAuthority,
@@ -840,10 +907,23 @@ func (gs *GovernanceService) ReplaceRoleBinding(ctx context.Context, oldBindingI
 // inner's, and outer's ExpiresAt is unset or no earlier than inner's,
 // where an inner binding with no expiry needs an outer one with none.
 func bindingWindowCovers(outer, inner *store.RoleBinding) bool {
-	if outer.NotBefore != nil && (inner.NotBefore == nil || outer.NotBefore.After(*inner.NotBefore)) {
+	return timeWindowCovers(outer.NotBefore, outer.ExpiresAt, inner.NotBefore, inner.ExpiresAt)
+}
+
+// constraintWindowCovers reports whether the outer constraint's time window
+// covers the inner one: the outer constraint is active whenever the inner
+// one is. A nil bound is unbounded.
+func constraintWindowCovers(outer, inner *store.AccessConstraint) bool {
+	return timeWindowCovers(outer.NotBefore, outer.ExpiresAt, inner.NotBefore, inner.ExpiresAt)
+}
+
+// timeWindowCovers reports whether the window [outerNotBefore, outerExpiresAt]
+// covers [innerNotBefore, innerExpiresAt]. A nil bound is unbounded.
+func timeWindowCovers(outerNotBefore, outerExpiresAt, innerNotBefore, innerExpiresAt *time.Time) bool {
+	if outerNotBefore != nil && (innerNotBefore == nil || outerNotBefore.After(*innerNotBefore)) {
 		return false
 	}
-	if outer.ExpiresAt != nil && (inner.ExpiresAt == nil || outer.ExpiresAt.Before(*inner.ExpiresAt)) {
+	if outerExpiresAt != nil && (innerExpiresAt == nil || outerExpiresAt.Before(*innerExpiresAt)) {
 		return false
 	}
 	return true

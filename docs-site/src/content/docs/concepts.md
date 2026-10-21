@@ -114,9 +114,7 @@ Only the agent runtime's own observations (its reports of the container, and the
 
 To continue, run `scion start <agent>`. It starts the agent the way a start from `stopped` does. Whether the workspace survives depends on where it lives: a workspace on the agent's own pod storage (a Kubernetes EmptyDir) is re-cloned, and other workspaces are kept. `scion stop` on a halted agent records it as `stopped`.
 
-`scion list` shows the reason next to the phase, for example `halted (preempted)` or `halted (out of memory)`. In Hosted mode, the agent's creator is notified once per halt (unless they chose their own notification triggers by subscribing), and so is anyone subscribed to the `HALTED` notification trigger (see [Messaging & Notifications](/scion/hosted/user/messaging/#halted-agent-notifications)). Lifecycle hooks can use the `halted` trigger (see [Lifecycle Hooks](/scion/hosted/ha/lifecycle-hooks/#triggers)).
-
-Local mode never records `halted`.
+`scion list` shows the reason next to the phase, for example `halted (preempted)` or `halted (out of memory)`. The agent's creator is notified once per halt (unless they chose their own notification triggers by subscribing), and so is anyone subscribed to the `HALTED` notification trigger (see [Messaging & Notifications](/scion/hosted/user/messaging/#halted-agent-notifications)). Lifecycle hooks can use the `halted` trigger (see [Lifecycle Hooks](/scion/hosted/ha/lifecycle-hooks/#triggers)).
 
 #### Stalled, offline, and auto-suspend
 
@@ -164,7 +162,7 @@ When a Hub manages a git-based project and worktree-per-agent mode is not select
 
 This means a git project used locally with worktrees may switch to clone-based provisioning once it is managed by a Hub, unless the Hub project is created with workspace mode `worktree-per-agent`. When linking a git checkout to the local workstation Hub creates the project, it is created in that mode.
 
-**Worktree-per-agent (Hub-managed git projects):** the Runtime Broker provisions a shared base clone and gives each agent its own worktree over it, the same mount shape as the local-mode case, gated on the Runtime Broker host's git version being 2.48 or later; the Runtime Broker falls back to clone-per-agent if worktree provisioning is not possible. On the local workstation Hub, agents of a linked checkout use that checkout instead, and creation fails rather than falling back (see [Workspace Mode Change for Git Projects](/scion/hosted/user/hosted-user/#workspace-mode-change-for-git-projects)). See the [About Workspaces](/scion/local/workspace/) guide for details.
+**Worktree-per-agent (Hub-managed git projects):** the Runtime Broker provisions a shared base clone and gives each agent its own worktree over it, the same mount shape as a linked checkout on the workstation Hub, gated on the Runtime Broker host's git version being 2.48 or later; the Runtime Broker falls back to clone-per-agent if worktree provisioning is not possible. On the local workstation Hub, agents of a linked checkout use that checkout instead, and creation fails rather than falling back (see [Workspace Mode Change for Git Projects](/scion/hosted/user/hosted-user/#workspace-mode-change-for-git-projects)). See the [About Workspaces](/scion/local/workspace/) guide for details.
 
 ### Resource Isolation
 Scion enforces strict isolation between agents to prevent interference and cross-contamination of credentials or data.

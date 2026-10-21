@@ -244,7 +244,7 @@ func TestScheduleStoreWritesUTC_NonUTCLocal(t *testing.T) {
 			columns: []string{"updated"},
 			mutate: func(t *testing.T, s *ScheduleStore) string {
 				sc := createSchedule(t, s)
-				require.NoError(t, s.UpdateScheduleStatus(ctx, sc.ID, store.ScheduleStatusPaused))
+				require.NoError(t, s.UpdateScheduleStatus(ctx, sc.ID, store.ScheduleStatusPaused, store.ScheduleStatusReasonNone))
 				return sc.ID
 			},
 		},

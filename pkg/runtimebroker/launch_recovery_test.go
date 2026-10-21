@@ -179,7 +179,12 @@ func TestRecoverLaunches_LaunchingReportsBrokerRestarted(t *testing.T) {
 			} else if d := mgr.Deleted(); len(d) != 0 {
 				t.Fatalf("expected no delete, got %+v", d)
 			}
-			if _, err := os.Stat(path); !os.IsNotExist(err) {
+			if c.name == "no answer" {
+				// Kept for the next boot to resend (ptone/scion#5186).
+				if jr := readJournalFileT(t, path); jr.State != "terminal_pending" || jr.ReportAttempts != 1 {
+					t.Fatalf("an unanswered report did not keep the record for a retry: %+v", jr)
+				}
+			} else if _, err := os.Stat(path); !os.IsNotExist(err) {
 				t.Fatalf("recovered record not removed: %v", err)
 			}
 			if srv.launchRegistry.anyInFlight(launchKey{ProjectID: "proj", Slug: "agent-L2"}) {

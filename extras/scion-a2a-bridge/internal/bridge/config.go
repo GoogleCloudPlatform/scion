@@ -37,6 +37,21 @@ type BridgeConfig struct {
 	ExternalURL    string         `yaml:"external_url"`
 	MaxSubscribers int            `yaml:"max_subscribers"`
 	Provider       ProviderConfig `yaml:"provider"`
+	// AsyncCreate makes auto-provisioning opt in to an asynchronous agent
+	// create (default true when unset). The hub's async launch flag stays
+	// the real gate: a hub without it answers synchronously. False always
+	// uses the synchronous create. It does not affect waiting for an agent
+	// that is already launching (one launched elsewhere and adopted).
+	AsyncCreate *bool `yaml:"async_create"`
+}
+
+// asyncCreateEnabled reports whether auto-provisioning opts in to an
+// asynchronous create: bridge.async_create, true when unset.
+func (c *Config) asyncCreateEnabled() bool {
+	if c == nil || c.Bridge.AsyncCreate == nil {
+		return true
+	}
+	return *c.Bridge.AsyncCreate
 }
 
 // ProviderConfig describes the bridge operator.

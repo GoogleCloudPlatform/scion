@@ -115,4 +115,9 @@ const (
 	// LaunchCodeBrokerRestarted: the broker restarted while the launch was
 	// in flight.
 	LaunchCodeBrokerRestarted = "broker_restarted"
+	// LaunchCodeDispatchFailed: the runtime broker did not accept the
+	// launch. The hub's send failed with a known outcome (the broker
+	// refused it or could not be reached), or the broker acknowledged a
+	// different launch. The launch ends not_launched with this code.
+	LaunchCodeDispatchFailed = "dispatch_failed"
 )

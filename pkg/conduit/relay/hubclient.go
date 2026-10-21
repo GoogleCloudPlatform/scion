@@ -164,11 +164,46 @@ func (c *HubClient) post(ctx context.Context, path string, body []byte) ([]byte,
 	}
 }
 
+// Ingress headers (design §3.9 "Ingress"; contracts §3). A hub in external
+// relay mode sets both, and only on the relay-peer leg it proxies a conduit
+// dial over, after stripping any copy the client sent. A relay trusts them
+// only on that leg.
+const (
+	// HeaderIngressInstance names the hub instance the dial entered
+	// through: the hub's instance id, at most MaxIngressInstanceLen bytes.
+	HeaderIngressInstance = "X-Scion-Conduit-Ingress-Instance"
+	// HeaderIngressLifetimeCap carries the hub's conduit lifetime cap in
+	// whole seconds (decimal).
+	HeaderIngressLifetimeCap = "X-Scion-Conduit-Ingress-Lifetime-Cap-S"
+	// MaxIngressInstanceLen bounds HeaderIngressInstance and
+	// HubAdmitRequest.IngressInstance.
+	MaxIngressInstanceLen = 128
+)
+
+// How a dial reached the relay (HubAdmitRequest.Arrival).
+const (
+	// ArrivalDirect: the client dialed the relay's public listener.
+	ArrivalDirect = "direct"
+	// ArrivalIngress: a hub ingress proxied the dial over a relay-peer
+	// leg that named the ingress instance.
+	ArrivalIngress = "ingress"
+)
+
+// ReasonRelayNotAdmitting is the reason of the 503 a relay answers a conduit
+// upgrade with while it is draining or not ready (design §3.9 "Relay
+// selection", v2.21.51). It is sent only before Admit runs, so a hub
+// ingress may re-pick another relay on it.
+const ReasonRelayNotAdmitting = "relay_not_admitting"
+
 // HubAdmitRequest asks the hub to admit a dialer the relay received
 // (design §3.9 "Admission"). Headers are the dialer's credential headers
 // (ForwardCredentialHeaders), passed unchanged, and Host and RawQuery are
 // the ones the relay received, so a signed request (broker HMAC) verifies
 // as sent. SessionID is the id the relay will admit the session under.
+// Arrival is how the dial reached the relay (ArrivalDirect or
+// ArrivalIngress; "" from an older relay means direct), and
+// IngressInstance names the hub instance of an ingress arrival (empty for
+// a direct one). The hub binds Host to the arrival.
 type HubAdmitRequest struct {
 	RelayInstanceID string              `json:"relay_instance_id"`
 	RelayGeneration int64               `json:"relay_generation"`
@@ -176,6 +211,8 @@ type HubAdmitRequest struct {
 	Host            string              `json:"host"`
 	RawQuery        string              `json:"raw_query,omitempty"`
 	Headers         map[string][]string `json:"headers"`
+	Arrival         string              `json:"arrival,omitempty"`
+	IngressInstance string              `json:"ingress_instance,omitempty"`
 }
 
 // HubAdmitResponse is an admitted dialer: the principal to serve the
@@ -314,7 +351,8 @@ type HubRPCRequest struct {
 	// Features lists what the forwarding relay supports. A relay that opens
 	// the tunnels the hub authorizes lists HubFeatureTunnels; a relay that
 	// does not (an older one) gets the tunnel request refused, never an
-	// instruction it would ignore.
+	// instruction it would ignore. A relay that also re-checks every tunnel
+	// it opens lists HubFeatureTunnelRecheck.
 	Features []string `json:"features,omitempty"`
 }
 
@@ -332,6 +370,13 @@ type HubRPCResponse struct {
 // HubFeatureTunnels is the HubRPCRequest feature of a relay that opens
 // the tunnels the hub authorizes (HubRPCResponse.Tunnel).
 const HubFeatureTunnels = "tunnels"
+
+// HubFeatureTunnelRecheck is the HubRPCRequest feature of a relay that
+// hands every tunnel it opens to its stream scheduler (hint and sweep
+// re-checks; design v2.21.46 §3.9, "Relay feature tunnel_recheck"). The
+// hub stamps a relay-held tunnel's grant for renewal only when the
+// forwarding relay lists it.
+const HubFeatureTunnelRecheck = "tunnel_recheck"
 
 // TunnelsRPCPath is the RPC path of a tunnel request (POST), on the hub
 // and on a relay-held session alike.
@@ -369,6 +414,17 @@ type HubTunnelOpen struct {
 	// mapping as a tunnel on a hub-held session: target not found, and
 	// forbidden). Any other failure answers with Unavailable.
 	TargetRefusals map[uint32][]byte `json:"target_refusals,omitempty"`
+
+	// AuthzUntil (unix seconds) and AuthzIntervalS (seconds) are unsigned
+	// scheduling hints (design §3.9 "Scheduling hints"): the hub copies them
+	// from the claims of the open grant it just minted, never from a
+	// request field, and sets both or neither (neither when the claims
+	// carry no deadline). The relay uses them only to time its stream
+	// re-checks and never trusts them for authorization; the target
+	// enforces the signed values. A missing, partial or out-of-range hint
+	// leaves the stream to the re-check sweep.
+	AuthzUntil     int64 `json:"authz_until,omitempty"`
+	AuthzIntervalS int64 `json:"authz_interval_s,omitempty"`
 }
 
 // Owner returns the relay holding the target session.

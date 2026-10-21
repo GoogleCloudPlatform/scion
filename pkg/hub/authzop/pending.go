@@ -51,6 +51,9 @@ type PendingEntry struct {
 	Method  string
 	Variant string
 	Area    Area
+	// Response classifies what the response body can carry (see
+	// ResponseSensitivity). HTTP-like entry points only.
+	Response ResponseSensitivity
 }
 
 // PendingBearerDispositions lists every live entry point whose catalog
@@ -78,9 +81,6 @@ var PendingBearerDispositions = []PendingEntry{
 	// --- chat ---
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/attachments/{id}", Method: "GET", Variant: "noproject", Area: AreaChat},
 	// --- identity ---
-	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/access-constraint-previews", Method: "POST", Area: AreaIdentity},
-	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/access-constraint-previews/{jobId}", Method: "GET", Area: AreaIdentity},
-	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/access-constraint-previews/{jobId}/result", Method: "GET", Area: AreaIdentity},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/groups/{id}/members", Method: "GET", Area: AreaIdentity},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/groups/{id}/members/{type}/{memberId}", Method: "GET", Area: AreaIdentity},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/principals/agent/{id}", Method: "GET", Area: AreaIdentity},
@@ -118,12 +118,12 @@ var PendingBearerDispositions = []PendingEntry{
 	// --- catalog_resources ---
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/harness-configs/{id}/local-image", Method: "DELETE", Area: AreaCatalogResources},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/harness-configs/{id}/pull-image", Method: "POST", Area: AreaCatalogResources},
-	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills/resolve", Method: "POST", Variant: "ref=registry", Area: AreaCatalogResources},
+	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills/resolve", Method: "POST", Variant: "ref=registry", Area: AreaCatalogResources, Response: ResponseCredential},
 	// --- brokers ---
-	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/brokers/{id}/rotate-secret", Method: "POST", Area: AreaBrokers},
+	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/brokers/{id}/rotate-secret", Method: "POST", Area: AreaBrokers, Response: ResponseCredential},
 	// --- material ---
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/env/{key}", Method: "DELETE", Area: AreaMaterial},
-	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/env/{key}", Method: "PUT", Area: AreaMaterial},
+	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/env/{key}", Method: "PUT", Area: AreaMaterial, Response: ResponseCredential},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/gcp-service-accounts/mint", Method: "POST", Area: AreaMaterial},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/secrets/{key}", Method: "PATCH", Area: AreaMaterial},
 }
@@ -133,9 +133,6 @@ var PendingBearerDispositions = []PendingEntry{
 // Bearer value, and Validate does not apply the credentials agreement rule
 // to it until its disposition is recorded.
 var PendingBearerOperations = []OperationID{
-	"access.constraint.create",
-	"access.constraint.delete",
-	"access.constraint.update",
 	"agent.message.send",
 	"env.hub.list",
 	"env.read",
@@ -151,11 +148,6 @@ var PendingBearerOperations = []OperationID{
 	"hub.maintenance.execute",
 	"project.lifecycle.create",
 	"project.register",
-	"role.binding.create",
-	"role.binding.delete",
-	"role.definition.create",
-	"role.definition.delete",
-	"role.definition.update",
 	"secret.read",
 	"secret.write",
 	"user.read",

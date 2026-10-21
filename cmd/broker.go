@@ -805,6 +805,8 @@ func registerBrokerWithHub(ctx context.Context, client hubclient.Client, multiSt
 		return "", fmt.Errorf("failed to create broker registration: %w", err)
 	}
 
+	hubclient.PrintKeptSettings(os.Stdout, createResp.KeptSettings)
+
 	name := reg.Name
 	if createResp.Reregistered {
 		// The hub matches a re-registration by name, then by broker ID,
@@ -2341,10 +2343,11 @@ func getLocalBrokerID() string {
 // "reprovisionEmptyPerAgent" (in-place empty-per-agent reprovision,
 // miller79/scion#167); the hub checks runtime suitability separately.
 func brokerRegistrationCapabilities() []string {
-	// asyncLaunch matches the broker's heartbeat (runtimebroker.StaticCapabilities),
-	// so the Hub knows it from the join on, before the first heartbeat
-	// (ptone/scion#2918).
-	return []string{"sync", "attach", "reprovision", "asyncLaunch", "emptyPerAgentWorkspace", "agentMove", "reprovisionEmptyPerAgent"}
+	// asyncLaunch and asyncStart match the broker's heartbeat
+	// (runtimebroker.StaticCapabilities), so the Hub knows them from the
+	// join on, before the first heartbeat (ptone/scion#2918,
+	// ptone/scion#4669).
+	return []string{"sync", "attach", "reprovision", "asyncLaunch", "asyncStart", "emptyPerAgentWorkspace", "agentMove", "reprovisionEmptyPerAgent"}
 }
 
 // buildBrokerProfiles builds BrokerProfile objects from settings.Profiles.
@@ -2618,9 +2621,15 @@ var (
 	removeBrokerRecordOnSignal = removeBrokerArgsIfOwned
 
 	// interruptSelf asks this process to shut down the way Ctrl+C does.
+	// The SIGINT is counted first (pendingSelfInterrupts), so the
+	// server's signal handler never takes it for a second signal that
+	// forces the shutdown (ptone/scion#5054).
 	interruptSelf = func() {
 		if p, err := os.FindProcess(os.Getpid()); err == nil {
-			_ = p.Signal(os.Interrupt)
+			pendingSelfInterrupts.Add(1)
+			if p.Signal(os.Interrupt) != nil {
+				pendingSelfInterrupts.Add(-1)
+			}
 		}
 	}
 )
@@ -2687,8 +2696,8 @@ func removeBrokerRecordOnSIGTERM(globalDir string, owned []string) (stop func())
 //     run-once shutdown, which runs once.
 //   - The server was subscribed when SIGTERM arrived, but not yet published
 //     at the load: the server's handler runs the shutdown from the SIGTERM;
-//     the SIGINT sent here is a second signal on that subscription and is
-//     swallowed.
+//     the SIGINT sent here is a second signal on that subscription, counted
+//     as self-sent (interruptSelf), so it does not force the shutdown.
 //   - SIGTERM arrived before the server subscribed, but the shutdown was
 //     published before the load here: the direct call runs it.
 //   - SIGTERM arrived before the server subscribed and nothing was
@@ -2873,9 +2882,11 @@ func resolveBrokerRestartOptions(cmd *cobra.Command, saved []string) (port int, 
 func removeHubConnectionSetting(dir, name string) error {
 	// Held from the read to the write, so the entry check and the
 	// last-entry decision below use the file as it is written back.
-	// (config.LockSettingsFile serialises writers in this process only.)
-	unlock := config.LockSettingsFile()
-	defer unlock()
+	lock, err := config.LockSettingsDir(dir)
+	if err != nil {
+		return err
+	}
+	defer lock.Unlock()
 
 	path := config.GetSettingsPath(dir)
 	if path == "" {
@@ -2913,7 +2924,7 @@ func removeHubConnectionSetting(dir, name string) error {
 		versioned = version != ""
 	}
 	if !versioned {
-		return config.DeleteHubConnection(dir, name, false)
+		return config.DeleteHubConnectionLocked(lock, name)
 	}
 	if isJSON {
 		return fmt.Errorf("%s is JSON and cannot be edited in place; remove hub_connections.%s from it by hand", path, name)
@@ -2929,5 +2940,5 @@ func removeHubConnectionSetting(dir, name string) error {
 	if err != nil {
 		return fmt.Errorf("%w; remove hub_connections.%s from %s by hand", err, name, path)
 	}
-	return staged.Commit()
+	return staged.Commit(lock)
 }

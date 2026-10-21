@@ -118,6 +118,12 @@ type Principal struct {
 	// of Config.GrantKeys (a separate relay gets them from the hub with the
 	// admission).
 	GrantKeys []*conduitv1.GrantKey
+	// LifetimeCap, when above zero, is this session's lifetime cap. It
+	// lowers Config.LifetimeCap and never raises it; with no relay cap
+	// (Config.LifetimeCap 0) it is the session's cap. A separate relay
+	// sets it from the trusted ingress lifetime cap header (design §3.9
+	// "Source of the cap").
+	LifetimeCap time.Duration
 }
 
 // TokenRunBinding compares the run an agent's credential was issued for
@@ -298,6 +304,9 @@ type Relay struct {
 	// visible as ready (registered, readyCh closed), before Serve acts
 	// on the relay state (the lifetime-arming seam).
 	testHookAfterReady func()
+	// testHookAfterDone runs in Serve once the session has ended, before
+	// it leaves r.sessions, with its session id.
+	testHookAfterDone func(sessionID string)
 
 	// shutdownCap and shutdownCapSet hold the drain-deadline cap of a
 	// capped Shutdown (ShutdownWith with ShutdownOptions.CapDrain), set
@@ -625,6 +634,18 @@ func (r *Relay) lifetimeGoAway(e *entry) {
 	})
 }
 
+// sessionLifetimeCap is a session's lifetime cap: the relay's cap,
+// lowered (never raised) by the principal's; either 0 means none.
+func sessionLifetimeCap(relayCap, principalCap time.Duration) time.Duration {
+	switch {
+	case principalCap <= 0:
+		return relayCap
+	case relayCap <= 0 || principalCap < relayCap:
+		return principalCap
+	}
+	return relayCap
+}
+
 // lifetimeHint is Welcome.lifetime_hint_s for e: with a cap, the whole
 // seconds until its lifetime GoAway; otherwise Config.LifetimeHint.
 func (r *Relay) lifetimeHint(e *entry) time.Duration {
@@ -667,8 +688,8 @@ func (r *Relay) Serve(ctx context.Context, conn transport.Conn, p Principal) err
 		defer r.serves.Done()
 	}
 	e := &entry{principal: p, readyCh: make(chan struct{})}
-	if r.cfg.LifetimeCap > 0 {
-		e.capAt = r.clk.Now().Add(r.cfg.LifetimeCap)
+	if lifetimeCap := sessionLifetimeCap(r.cfg.LifetimeCap, p.LifetimeCap); lifetimeCap > 0 {
+		e.capAt = r.clk.Now().Add(lifetimeCap)
 	}
 	adm := &admitter{r: r, p: p, transport: conn.Transport(), e: e}
 	// Whatever happens below, a pending entry never outlives Serve's
@@ -714,7 +735,15 @@ func (r *Relay) Serve(ctx context.Context, conn transport.Conn, p Principal) err
 		delete(r.pending, rec.SessionID)
 	}
 	r.sessions[rec.SessionID] = e
-	state, killed := r.state, r.killed
+	// A broker session closes itself when r.sessions holds a live
+	// higher-epoch session of another incarnation of its broker
+	// (broker_incarnation.go). It leaves r.sessions at once, so Local never
+	// returns it.
+	selfClose := r.supersededAtRegistrationLocked(e)
+	if selfClose {
+		delete(r.sessions, rec.SessionID)
+	}
+	state, killed, paused := r.state, r.killed, r.paused
 	r.mu.Unlock()
 	e.readyOnce.Do(func() { close(e.readyCh) })
 	if h := r.testHookAfterReady; h != nil {
@@ -724,13 +753,16 @@ func (r *Relay) Serve(ctx context.Context, conn transport.Conn, p Principal) err
 	case killed:
 		r.stopLifetime(e)
 		_ = ls.Close()
+	case selfClose:
+		r.stopLifetime(e)
+		r.closeSupersededAtRegistration(e)
 	case e.closeForbidden.Load():
 		// A user StreamOpen arrived before sess was set (pipelined
 		// after the Hello); refuseDialerStream could not close it.
 		r.stopLifetime(e)
 		_ = ls.CloseWithCode(conduit.CloseForbidden, userStreamRefused)
-	case state != stateServing:
-		// Drain or supersede began while this session was admitted.
+	case state != stateServing || paused:
+		// Drain, supersede or stopped admission began while this session was admitted.
 		r.stopLifetime(e)
 		r.goAway(e, r.drainOptions(e))
 	default:
@@ -739,6 +771,9 @@ func (r *Relay) Serve(ctx context.Context, conn transport.Conn, p Principal) err
 	}
 
 	<-ls.Done()
+	if h := r.testHookAfterDone; h != nil {
+		h(rec.SessionID)
+	}
 	r.stopLifetime(e)
 
 	r.mu.Lock()
@@ -1038,6 +1073,12 @@ func (r *Relay) registered(ctx context.Context, sessionID string) (*entry, error
 
 // CloseSessionsOf closes every local session of the principal (agent
 // deletion). Rows are deleted as each session ends.
+//
+// It reaches registered sessions only: a session that is admitted but not
+// yet registered is not closed. A caller must therefore first make that
+// session's post-registration Revalidate fail (for example by deleting the
+// agent row, or by marking the broker session denied) before calling it,
+// so a session registered afterwards closes on its own.
 func (r *Relay) CloseSessionsOf(kind, id string, code uint32, reason string) int {
 	r.mu.Lock()
 	var hit []*entry

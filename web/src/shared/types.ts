@@ -1065,7 +1065,6 @@ export interface Template {
   description?: string;
   harness: string;
   defaultHarnessConfig?: string;
-  image?: string;
   status: string;
   scope: string;
   scopeId?: string;
@@ -1352,14 +1351,18 @@ export interface RuntimeBroker {
    * Read-only and display-only; absent otherwise.
    */
   hostedByThisServer?: boolean;
-  /** GCP host service account and project (read in snake_case; PATCH takes camelCase). */
-  gcp_host_service_account_email?: string;
+  /**
+   * GCP host project (read in snake_case; PATCH takes camelCase). The
+   * host service account, gcp_host_service_account_email, is declared below.
+   */
   gcp_host_project_id?: string;
   autoProvide: boolean;
   endpoint?: string;
   labels?: Record<string, string>;
   createdBy?: string;
   createdByName?: string;
+  /** Configured GCP host service account (Go JSON tag is snake_case). */
+  gcp_host_service_account_email?: string;
   /** Creation and last-update times, as the hub sends them. */
   created?: string;
   updated?: string;
@@ -1402,6 +1405,27 @@ export interface RuntimeBroker {
    * Renderers must show this visibly, not only in a tooltip.
    */
   agentLimitSource?: string;
+  /**
+   * Host identity state of a co-located broker: the configured GCP host
+   * service account compared with the identity the host reports. Mirrors Go
+   * store.HostIdentityStatus. observedEmail and observedAt are present only
+   * for callers allowed to update the broker.
+   */
+  hostIdentity?: BrokerHostIdentity;
+}
+
+/** Mirrors Go store.HostIdentityStatus (pkg/store/models.go). */
+export interface BrokerHostIdentity {
+  state:
+    | 'unobserved'
+    | 'unknown'
+    | 'unset_detected'
+    | 'match'
+    | 'mismatch'
+    | 'pinned_absent'
+    | 'none';
+  observedEmail?: string;
+  observedAt?: string;
 }
 
 /**

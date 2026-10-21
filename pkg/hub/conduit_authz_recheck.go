@@ -79,6 +79,8 @@ func (s *Server) startConduitStreamAuthz(ctx context.Context, clk clock.Clock, i
 		Enforce: func() bool {
 			return s.conduitTargetStreamDeadlines() == config.ConduitTargetStreamDeadlinesEnforce
 		},
+		// A sweep shares broker reads among its checks (conduitBrokerMemo).
+		SweepContext: withConduitBrokerMemo,
 	})
 	if !s.conduitAuthz.CompareAndSwap(nil, a) {
 		return nil, nil, errors.New("conduit stream re-check already started")
@@ -124,7 +126,7 @@ func (s *Server) bindConduitAuthzEvents() {
 	var removeListen func()
 	if ln, ok := events.(conduitListenNotifier); ok {
 		removeListen = ln.AddOnListen(func() {
-			a.Recheck(ctx, conduitAuthzTriggerResync, conduitAuthzMatch{})
+			a.Recheck(withConduitBrokerMemo(ctx), conduitAuthzTriggerResync, conduitAuthzMatch{})
 		})
 	}
 	ch, unsubscribe := events.Subscribe(conduitAuthzEventPatterns...)
@@ -150,7 +152,8 @@ func (s *Server) bindConduitAuthzEvents() {
 		go q.receive(ctx, ch)
 		go q.work(ctx, a)
 	}
-	a.Recheck(ctx, conduitAuthzTriggerResync, conduitAuthzMatch{})
+	// A resync is a full pass: like a sweep, it shares broker reads.
+	a.Recheck(withConduitBrokerMemo(ctx), conduitAuthzTriggerResync, conduitAuthzMatch{})
 }
 
 // conduitNotifyMaxPending bounds the distinct pending notify matches; past
@@ -315,54 +318,19 @@ func (s *Server) trackConduitUserStream(st *conduitUserStream) (untrack func()) 
 	return a.Track(st)
 }
 
-// checkConduitUserStream evaluates whether st's principal still holds the
-// authorization its stream was opened with, against current state: the
-// agent row, then authorizeConduitUserStream (the decision the tunnel open
-// path makes, with the actions conduitStreamActions requires for st's kind
-// and origin). Every read goes to s.store, the primary store (the hub has
-// no read-replica routing).
+// checkConduitUserStream is the in-process entry point of the stream
+// evaluation (design v2.21.40 §3.9, One evaluation, three entry points):
+// it evaluates st's principal against current state with
+// evaluateConduitStream, from what this node recorded at open (the
+// principal, the agent and its project, the kind, origin and port), and
+// adds no decision of its own. Every read goes to s.store, the primary
+// store (the hub has no read-replica routing).
 //
 // A store or authorization lookup failure is unavailable, never denied: a
-// deny is acted on only while the store is reachable.
+// deny is acted on only while the store answers for the agent
+// (conduitConfirmAgentPresent).
 func (s *Server) checkConduitUserStream(ctx context.Context, st *conduitUserStream) (conduitAuthzVerdict, string) {
-	agent, err := s.store.GetAgent(ctx, st.AgentID)
-	switch {
-	case errors.Is(err, store.ErrNotFound):
-		return conduitAuthzTargetGone, "agent not found"
-	case err != nil:
-		return conduitAuthzUnavailable, "agent lookup failed"
-	case !agent.DeletedAt.IsZero():
-		return conduitAuthzTargetGone, "agent deleted"
-	}
-
-	verdict, reason, _ := s.authorizeConduitUserStream(ctx, conduitUserStreamAuthz{
-		Identity:    st.Identity,
-		Agent:       agent,
-		Kind:        st.Kind,
-		ViaTunnel:   st.ViaTunnel,
-		Port:        st.Port,
-		ConfirmDeny: func() bool { return s.conduitAuthzStoreReachable(ctx, st) },
-	})
-	if verdict != conduitAuthzAllowed {
-		return verdict, reason
-	}
-	// The flat placement guard, as at open (mintConduitGrant) and renewal
-	// (conduitRenewalPlacement), after the authorization verdict: a pinned
-	// agent whose saved placement is inconsistent, or whose placement
-	// cannot be read, is not a deny (design v2.21.36 §3.5, Refusal
-	// meaning). It is unavailable: the stream is not closed early and ends
-	// at its deadline. An unpinned agent whose read fails keeps today's
-	// path, and a managed runtime is not checked.
-	if !isManagedAgentRuntime(agent.Runtime) {
-		if _, err := checkAgentPinnedPlacement(ctx, s.store, agent); err != nil {
-			if _, refused := placementRefusalOf(err); refused {
-				return conduitAuthzUnavailable, "agent placement inconsistent"
-			}
-			if agent.IsPinned() {
-				return conduitAuthzUnavailable, "agent placement check failed"
-			}
-		}
-	}
+	verdict, reason, _ := s.evaluateConduitStream(ctx, s.recordedStreamEval(ctx, st))
 	return verdict, reason
 }
 
@@ -481,13 +449,6 @@ func (s *Server) conduitUserStatus(ctx context.Context, identity Identity, userI
 		return conduitAuthzDenied, "user suspended"
 	}
 	return conduitAuthzAllowed, ""
-}
-
-// conduitAuthzStoreReachable confirms the store answers after a deny, so
-// that a deny observed during a store fault is not acted on.
-func (s *Server) conduitAuthzStoreReachable(ctx context.Context, st *conduitUserStream) bool {
-	_, err := s.store.GetAgent(ctx, st.AgentID)
-	return err == nil && ctx.Err() == nil
 }
 
 // conduitIdentityHasUserRow reports whether identity is a local user whose

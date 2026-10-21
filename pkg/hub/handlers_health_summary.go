@@ -76,6 +76,11 @@ type HealthSummaryResponse struct {
 	// health_summary_hub_instances.go.
 	HubInstances *HealthSummaryHubInstances `json:"hub_instances"`
 
+	// Schedules lists the failing and hub-paused schedules the caller may
+	// read; nil when they could not be listed. See
+	// health_summary_schedules.go.
+	Schedules *HealthSummarySchedules `json:"schedules"`
+
 	// Links holds operator-configured links for the Health page. It is
 	// omitted when no link is configured. The route requires
 	// hub.health.read, so only those callers receive it.
@@ -186,6 +191,16 @@ type HealthSummaryBroker struct {
 	// the last report before the broker went offline.
 	Health *HealthBrokerSelf  `json:"health"`
 	Agents HealthBrokerAgents `json:"agents"`
+	// HostIdentity is the host identity state of a co-located broker
+	// (see hostIdentityState); omitted while unobserved. It carries no
+	// account names: the broker detail shows them to callers allowed to
+	// update the broker.
+	HostIdentity *HealthBrokerHostIdentity `json:"host_identity,omitempty"`
+}
+
+// HealthBrokerHostIdentity is a broker's host identity state.
+type HealthBrokerHostIdentity struct {
+	State string `json:"state"`
 }
 
 // HealthBrokerSelf is a runtime broker's self-reported health.
@@ -395,6 +410,7 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 
 		ServiceAccountCheck: healthSummarySACheck(hubInstances),
 		HubInstances:        hubInstances,
+		Schedules:           s.healthSummaryScheduleSection(r),
 		Links:               s.healthSummaryLinks(),
 	}
 	// The policy sees the full integration list, so the status does not
@@ -564,10 +580,14 @@ func (s *Server) healthSummaryBrokers(ctx context.Context, agentAgg *store.Agent
 }
 
 // healthSummaryBrokerHasProblem reports whether a runtime broker row needs
-// attention: it is not online, it reports itself degraded or unhealthy, or
-// its NFS workspace share is unhealthy.
+// attention: it is not online, it reports itself degraded or unhealthy, its
+// host identity state is mismatch or pinned_absent, or its NFS workspace
+// share is unhealthy.
 func healthSummaryBrokerHasProblem(b HealthSummaryBroker) bool {
 	if healthSummaryBrokerStatusIsProblem(b.Status) || healthSummaryBrokerSelfIsProblem(b.Health) {
+		return true
+	}
+	if b.HostIdentity != nil && hostIdentityIsProblem(b.HostIdentity.State) {
 		return true
 	}
 	ws := b.WorkspaceStorage
@@ -600,6 +620,9 @@ func healthSummaryBroker(b *store.RuntimeBroker, agentAgg *store.AgentHealthAggr
 		Runtime:          brokerRuntimeSummary(b),
 		WorkspaceStorage: brokerStorageSummary(b.WorkspaceStorage),
 		Health:           brokerSelfHealthSummary(b.Health),
+	}
+	if state := hostIdentityState(b); state != HostIdentityUnobserved {
+		row.HostIdentity = &HealthBrokerHostIdentity{State: state}
 	}
 	if !b.LastHeartbeat.IsZero() {
 		hb := b.LastHeartbeat

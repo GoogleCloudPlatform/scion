@@ -570,37 +570,6 @@ func TestVersionedEnvKeyMapper_DeepServerNesting(t *testing.T) {
 	}
 }
 
-func TestMergeServerIntoSettings(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	// Write existing settings.yaml
-	existingContent := `
-schema_version: "1"
-active_profile: local
-default_template: gemini
-`
-	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "settings.yaml"), []byte(existingContent), 0644))
-
-	v1 := &V1ServerConfig{
-		LogLevel: "debug",
-		Hub: &V1ServerHubConfig{
-			Port: 9999,
-		},
-	}
-
-	err := MergeServerIntoSettings(tmpDir, v1)
-	require.NoError(t, err)
-
-	// Re-read and verify
-	data, err := os.ReadFile(filepath.Join(tmpDir, "settings.yaml"))
-	require.NoError(t, err)
-
-	content := string(data)
-	assert.Contains(t, content, "server:")
-	assert.Contains(t, content, "active_profile")
-	assert.Contains(t, content, "schema_version")
-}
-
 // ============================================================================
 // Scheduler Config Tests
 // ============================================================================

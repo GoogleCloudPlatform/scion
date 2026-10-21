@@ -21,11 +21,28 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestUserLastLoginJSON(t *testing.T) {
+	for _, lastLogin := range []time.Time{{}, time.Date(2026, 10, 16, 8, 0, 0, 0, time.UTC)} {
+		t.Run(lastLogin.String(), func(t *testing.T) {
+			data, err := json.Marshal(User{LastLogin: lastLogin})
+			require.NoError(t, err)
+			var fields map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(data, &fields))
+			if lastLogin.IsZero() {
+				assert.NotContains(t, fields, "lastLogin")
+			} else {
+				assert.JSONEq(t, `"2026-10-16T08:00:00Z"`, string(fields["lastLogin"]))
+			}
+		})
+	}
+}
 
 // TestUserService_List_SearchQueryEncoding verifies ListUsersOptions.Search
 // is encoded as the "search" query param the Hub's listUsers handler expects
