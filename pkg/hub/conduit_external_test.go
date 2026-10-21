@@ -278,9 +278,9 @@ func TestConduitExternal_ForgetAgentDeletesRelayRows(t *testing.T) {
 
 // TestConduitExternal_DialReadsNoStore: a conduit dial that a hub in
 // external relay mode does not proxy (here the ingress proxy is off) is
-// answered from the cached eligible-relay count; it never reads the
-// registry. A proxied dial reads it for relay selection
-// (conduit_ingress_test.go).
+// refused without reading the registry (the off cause answers before the
+// cached eligible-relay count is consulted). A proxied dial reads the
+// registry for relay selection (conduit_ingress_test.go).
 func TestConduitExternal_DialReadsNoStore(t *testing.T) {
 	f := &externalFixture{conduitFixture: newConduitFixture(t)}
 	var reads atomic.Int64
