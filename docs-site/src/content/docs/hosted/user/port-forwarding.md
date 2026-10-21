@@ -114,12 +114,14 @@ A request made with your own credential, for example with `curl` and an agent to
 | An HTML page that loads separate `.js`, `.css` or image files | The page loads; those files do not |
 | A page that calls back to its app with `fetch()`, XHR, `EventSource` or a WebSocket | Those calls fail |
 | Dev servers with live reload (`vite dev`, `next dev`) | Do not work |
+| Path-based client-side routing (for example React Router's `BrowserRouter`, Vue Router's `createWebHistory`) | Does not work; use hash routing (`HashRouter`, `createWebHashHistory`) or no router |
 
 ### Single-file fallback
 
 To share a working page through the proxy URL, build it as one self-contained HTML file:
 
 - Put the styles in a `<style>` element and the scripts in `<script>` elements, and turn images into `data:` URLs.
+- If the app has a client-side router, use hash routing (URLs like `#/settings`), not path-based routing.
 - With Vite, [`vite-plugin-singlefile`](https://github.com/richardtallent/vite-plugin-singlefile) produces such a file from a normal build.
 - Serve the file from any static server on the agent's loopback address, for example `python3 -m http.server 8000 --bind 127.0.0.1`, and expose the port.
 
