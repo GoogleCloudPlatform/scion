@@ -69,6 +69,7 @@ import { coalescedRefresh, type CoalescedRefresh } from '../../client/coalesced-
 import { visibleInterval } from '../../client/visible-interval.js';
 import type { RailRefreshDetail } from '../shared/chat/chat-space-rail.js';
 import { TouchPrimaryController } from '../../utils/input-modality.js';
+import { isMacPlatform } from '../../utils/platform.js';
 import { isMacTextFieldCtrlKey } from '../shared/text-field-keys.js';
 import { CHAT_PALETTE_OPEN_REQUEST_EVENT } from '../../client/chat-palette-events.js';
 import { blurElement, focusElement } from '../shared/focus-moved.js';
@@ -723,7 +724,7 @@ export class ScionPageChat extends LitElement {
   private _onDMPromoted = this.handleDMPromoted.bind(this);
   /** Bound keydown handler for Cmd/Ctrl+K quick switcher. */
   private _onKeydown = this._handleGlobalKeydown.bind(this);
-  /** Bound handler for the header palette button's open-request event. */
+  /** Bound handler for the palette footer buttons' open-request event. */
   private _onPaletteOpenRequest = this._handlePaletteOpenRequest.bind(this);
   /** Whether the device's primary pointer is touch -- see `_selectionHandsFocusToComposer`. */
   private touchPrimary = new TouchPrimaryController(this);
@@ -1245,9 +1246,101 @@ export class ScionPageChat extends LitElement {
       overflow: hidden;
     }
 
-    .v2-rail scion-chat-space-rail {
+    .v2-rail scion-chat-space-rail,
+    .v2-rail .loading-rail,
+    .v2-members scion-chat-members {
       flex: 1;
       min-height: 0;
+    }
+
+    /* The palette footer below the list carries the bottom safe-area
+       inset, so the list's own last-row inset is dropped (see
+       chat-space-rail's .rail-body and chat-members' .members-body). The
+       members column has the footer on phones only; see the mobile rules. */
+    .v2-rail {
+      --chat-list-inset-bottom: 0px;
+    }
+
+    /* Pinned below the list: only the list above it scrolls. Mirrors the
+       terminal view's "Jump to agent" footer (terminal-workspace-root.ts,
+       .terminal-rail-footer). */
+    .palette-footer {
+      flex: 0 0 auto;
+      padding: 0.375rem;
+      /* Clears the home indicator (the page uses viewport-fit=cover); the
+         inset is 0 elsewhere. */
+      padding-bottom: max(0.375rem, env(safe-area-inset-bottom, 0px));
+      border-top: 1px solid var(--scion-border, #e2e8f0);
+      background: var(--scion-surface, #ffffff);
+    }
+
+    .palette-footer-btn {
+      box-sizing: border-box;
+      width: 100%;
+      min-height: 2.5rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0 0.625rem;
+      border: 0;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--scion-text, #1e293b);
+      font: inherit;
+      font-size: var(--chat-fs-base, 0.875rem);
+      font-weight: 550;
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .palette-footer-btn sl-icon {
+      flex: 0 0 auto;
+      font-size: 1.25rem;
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    .palette-footer-label {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .palette-footer-shortcut {
+      flex: 0 0 auto;
+      font-family: inherit;
+      font-size: var(--chat-fs-xs, 0.75rem);
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    .palette-footer-btn:focus-visible {
+      background: var(--scion-bg-subtle, #f1f5f9);
+      outline: 2px solid var(--scion-primary, #3b82f6);
+      outline-offset: -2px;
+    }
+
+    /* Hover only where it does not stick after a tap: on touch, :hover
+       stays until the next tap lands elsewhere, so it would still show
+       when the palette closes and focus returns to this button. */
+    @media (hover: hover) {
+      .palette-footer-btn:hover {
+        background: var(--scion-bg-subtle, #f1f5f9);
+      }
+    }
+
+    /* Phones and touch-primary devices: a tap target of at least 44px. */
+    @media (max-width: 768px), (hover: none) and (pointer: coarse) {
+      .palette-footer-btn {
+        min-height: 44px;
+      }
+    }
+
+    /* Touch-primary: no keyboard, so no shortcut hint. */
+    @media (hover: none) and (pointer: coarse) {
+      .palette-footer-shortcut {
+        display: none;
+      }
     }
 
     .v2-members {
@@ -1615,6 +1708,12 @@ export class ScionPageChat extends LitElement {
       .v2-members-resizer {
         display: none;
       }
+
+      /* The members column has its own palette footer here, which takes
+         the bottom safe-area inset from the list (see .v2-rail above). */
+      .v2-panels .v2-members {
+        --chat-list-inset-bottom: 0px;
+      }
     }
 
     @media (prefers-reduced-motion: reduce) {
@@ -1726,9 +1825,8 @@ export class ScionPageChat extends LitElement {
     }
     // Global Cmd/Ctrl+K listener for the quick switcher.
     document.addEventListener('keydown', this._onKeydown);
-    // Header palette button: a composed custom event rather than a direct
-    // reference, since the header renders as a sibling (slotted into
-    // scion-chat-shell), not an ancestor.
+    // Palette footer buttons (renderPaletteFooter): a composed custom event,
+    // so every open request goes through one listener and its guards.
     document.addEventListener(CHAT_PALETTE_OPEN_REQUEST_EVENT, this._onPaletteOpenRequest);
     // Reactive half of the modal/route interaction: if another modal opens
     // or route hides chat while the palette is open, close it without
@@ -4661,11 +4759,12 @@ export class ScionPageChat extends LitElement {
   }
 
   /**
-   * The header palette button's open-request handler. Shares the same route/
-   * visibility/modal guard as the shortcut, but skips
-   * `_eventFromTerminalSurface`: that guard exists to let Ctrl+K keep
-   * reaching the terminal's PTY, which only makes sense for a keystroke — a
-   * click on the header button is never a keypress the terminal could want.
+   * The palette footer buttons' open-request handler (see
+   * `renderPaletteFooter`). Shares the same route/visibility/modal guard as
+   * the shortcut, but skips `_eventFromTerminalSurface`: that guard exists
+   * to let Ctrl+K keep reaching the terminal's PTY, which only makes sense
+   * for a keystroke — a click on the button is never a keypress the
+   * terminal could want.
    * Opens with `{ mode: 'open' }` rather than toggling: see `togglePalette`'s
    * doc comment for why the button must never close an already-open palette.
    */
@@ -4829,7 +4928,7 @@ export class ScionPageChat extends LitElement {
    * actually finishes.
    *
    * `mode` defaults to `'toggle'` (the shortcut's behaviour, unchanged byte
-   * for byte). `'open'` is the header button's contract: it never closes an
+   * for byte). `'open'` is the footer button's contract: it never closes an
    * already-open palette and never cancels an in-flight open, so a double
    * tap or double click — common on touch, and not reliably distinguishable
    * from two deliberate presses — can only ever leave the palette open,
@@ -6021,7 +6120,7 @@ export class ScionPageChat extends LitElement {
         @scroll=${this._handleV2PanelsScroll}
       >
         <div class="v2-rail" ?inert=${this.isMobileLayout && this.mobilePanel !== 'left'}>
-          ${this.renderV2Rail()}
+          ${this.renderV2Rail()} ${this.renderPaletteFooter()}
         </div>
 
         <div
@@ -6079,6 +6178,7 @@ export class ScionPageChat extends LitElement {
             @member-marked-unread=${this.handleMemberMarkedUnread}
             @member-search=${this._handleMemberSearch}
           ></scion-chat-members>
+          ${this.isMobileLayout ? this.renderPaletteFooter() : nothing}
         </div>
       </div>
     `;
@@ -6189,11 +6289,57 @@ export class ScionPageChat extends LitElement {
   }
 
   /**
-   * Back chevron shown only on mobile, where the neighbouring panels are
-   * off-screen and otherwise reachable only by an undiscoverable swipe.
-   * The conversation header steps back to the rail; the members header
-   * steps back to the conversation.
+   * The quick switcher's open button, pinned below a column's list: the
+   * spaces rail at every width, and the members column too on phones, where
+   * each column fills the screen on its own. The column is a flex column
+   * whose list alone scrolls, so the footer stays put however long the list
+   * grows; it carries the bottom safe-area inset, which the lists above it
+   * then drop (--chat-list-inset-bottom). The shortcut hint, the title and
+   * aria-keyshortcuts are left out on touch-primary devices, where there is
+   * no keyboard to press the shortcut; the hint is also hidden by CSS there
+   * so it follows the media query without waiting for a render.
    */
+  private renderPaletteFooter(): TemplateResult {
+    const isTouch = this.touchPrimary.isTouch;
+    const isMac = isMacPlatform();
+    const shortcutLabel = isMac ? '⌘K' : 'Ctrl+K';
+    const keyShortcuts = isMac ? 'Meta+K' : 'Control+K';
+    return html`
+      <div class="palette-footer">
+        <button
+          type="button"
+          class="palette-footer-btn"
+          aria-label="Open quick switcher"
+          aria-haspopup="dialog"
+          aria-keyshortcuts=${isTouch ? nothing : keyShortcuts}
+          title=${isTouch ? nothing : `Quick switcher (${shortcutLabel})`}
+          @click=${this._handlePaletteFooterClick}
+        >
+          <sl-icon name="compass" aria-hidden="true"></sl-icon>
+          <span class="palette-footer-label">Quick switcher</span>
+          <kbd class="palette-footer-shortcut" aria-hidden="true">${shortcutLabel}</kbd>
+        </button>
+      </div>
+    `;
+  }
+
+  /**
+   * iOS and macOS Safari do not focus a `<button>` on click, so without
+   * this the deep active element `_openPalette` captures as "what to
+   * restore focus to" would be whatever was focused before the tap, which
+   * could be the composer, popping the on-screen keyboard back open the
+   * instant the palette closes. Focusing the button first makes capture
+   * see this button. The request then goes through the open-request event
+   * and its guards (`_handlePaletteOpenRequest`).
+   */
+  private _handlePaletteFooterClick(e: Event): void {
+    const btn = e.currentTarget as HTMLElement;
+    btn.focus({ preventScroll: true });
+    btn.dispatchEvent(
+      new CustomEvent(CHAT_PALETTE_OPEN_REQUEST_EVENT, { bubbles: true, composed: true })
+    );
+  }
+
   /** The left rail: the space rail once loaded, else a spinner or a load error. */
   private renderV2Rail(): TemplateResult {
     if (this.v2SpaceRailLoaded) {
@@ -6219,6 +6365,12 @@ export class ScionPageChat extends LitElement {
     return html`<div class="loading-rail"><sl-spinner></sl-spinner></div>`;
   }
 
+  /**
+   * Back chevron shown only on mobile, where the neighbouring panels are
+   * off-screen and otherwise reachable only by an undiscoverable swipe.
+   * The conversation header steps back to the rail; the members header
+   * steps back to the conversation.
+   */
   private renderMobileBackButton(target: 'left' | 'center' = 'left') {
     return html`
       <sl-icon-button
