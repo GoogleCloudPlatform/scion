@@ -22,7 +22,14 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import scionBridge, { createHandlers, trustPolicy } from './home/.pi/agent/extensions/scion-bridge.js';
+import scionBridge, {
+  createHandlers,
+  trustPolicy,
+  makeRunner,
+  timeoutFor,
+  HOOK_TIMEOUT_MS,
+  STATUS_TIMEOUT_MS,
+} from './home/.pi/agent/extensions/scion-bridge.js';
 
 function harness(env = {}, { failing = false } = {}) {
   const calls = [];
@@ -123,6 +130,36 @@ test('empty final answer falls back to a default message', () => {
   h.agent_end({ messages: [] });
   h.agent_settled({ aborted: false });
   assert.equal(calls[calls.length - 1].argv[3], 'Task completed');
+});
+
+// --- timeouts ------------------------------------------------------------------
+
+test('status calls get a longer timeout than hook calls (Hub update needs >5 s)', () => {
+  assert.equal(HOOK_TIMEOUT_MS, 5000);
+  assert.ok(STATUS_TIMEOUT_MS >= 10000, `status timeout ${STATUS_TIMEOUT_MS} < 10 s`);
+  assert.ok(STATUS_TIMEOUT_MS > HOOK_TIMEOUT_MS);
+  assert.equal(timeoutFor(['status', 'task_completed', '--', 'x']), STATUS_TIMEOUT_MS);
+  assert.equal(timeoutFor(['hook', '--dialect=pi']), HOOK_TIMEOUT_MS);
+});
+
+test('the default runner passes the per-command timeout to execFileSync', () => {
+  const execs = [];
+  const exec = (file, args, opts) => execs.push({ file, args, opts });
+  const h = createHandlers({ run: makeRunner(exec), env: {} });
+  h.tool_execution_start({ toolName: 'bash', args: { command: 'ls' } });
+  h.agent_end({ messages: [asst('done')] });
+  h.agent_settled({ aborted: false });
+  assert.deepEqual(
+    execs.map((e) => [e.file, e.args[0], e.opts.timeout]),
+    [
+      ['sciontool', 'hook', HOOK_TIMEOUT_MS],
+      ['sciontool', 'hook', HOOK_TIMEOUT_MS],
+      ['sciontool', 'status', STATUS_TIMEOUT_MS],
+    ],
+  );
+  assert.deepEqual(execs[2].args, ['status', 'task_completed', '--', 'done']);
+  assert.deepEqual(execs[0].opts.stdio, ['pipe', 'ignore', 'ignore']);
+  assert.equal(JSON.parse(execs[0].opts.input).hook_event_name, 'tool_execution_start');
 });
 
 test('a failing sciontool never throws into pi', () => {

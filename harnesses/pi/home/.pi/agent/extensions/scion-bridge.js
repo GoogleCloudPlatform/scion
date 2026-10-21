@@ -5,7 +5,8 @@
 // `sciontool hook --dialect=pi` (see dialect.yaml) and signals
 // `task_completed` when a run has fully settled.
 //
-// Every call is best-effort and synchronous with a short timeout; a failing
+// Every call is best-effort and synchronous with a timeout (5 s for hook
+// events, 15 s for status, which waits on the Hub); a failing
 // or missing sciontool never throws into pi. Arguments are passed as an argv
 // array (never through a shell). No per-token work is done, so a streaming
 // response spawns no processes.
@@ -19,18 +20,31 @@
 
 import { execFileSync } from 'node:child_process';
 
-const HOOK_TIMEOUT_MS = 5000;
+// Per-event hook calls are local and kept short. `sciontool status` also
+// sends the status to the Hub with its own 5 s deadline, so its process gets
+// a longer budget: killing it at 5 s could cut off the Hub update for
+// task_completed and the coordinator would never be notified.
+export const HOOK_TIMEOUT_MS = 5000;
+export const STATUS_TIMEOUT_MS = 15000;
 const MAX_TOOL_INPUT_BYTES = 8192;
 const MAX_ERROR_CHARS = 200;
 const MAX_SUMMARY_CHARS = 200;
 
-function defaultRun(args, input) {
-  execFileSync('sciontool', args, {
-    input,
-    stdio: ['pipe', 'ignore', 'ignore'],
-    timeout: HOOK_TIMEOUT_MS,
-  });
+export function timeoutFor(args) {
+  return args[0] === 'status' ? STATUS_TIMEOUT_MS : HOOK_TIMEOUT_MS;
 }
+
+// makeRunner builds the sciontool runner; `exec` is injectable for tests.
+export function makeRunner(exec = execFileSync) {
+  return (args, input) =>
+    exec('sciontool', args, {
+      input,
+      stdio: ['pipe', 'ignore', 'ignore'],
+      timeout: timeoutFor(args),
+    });
+}
+
+const defaultRun = makeRunner();
 
 // Statuses the agent sets itself through its bash tool; they must not be
 // overwritten by the automatic task_completed on settle.
