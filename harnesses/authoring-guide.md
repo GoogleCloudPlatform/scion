@@ -293,9 +293,11 @@ harness-config overrides included) to the container, and both readiness
 readers use it: `sciontool init`, which ends the agent's initializing state,
 and the broker's wait before it pastes a held message. A session-start from
 `/clear` or `/compact` never counts as the hook signal. The built-in bundles
-use `hook` for claude, gemini-cli, copilot and grok-build, and `delay` 8s for
-every other harness; change a value only with evidence that the tool reads
-its input by then. A harness-config with no `ready` block gets the block of
+use `hook` for claude, gemini-cli and grok-build, and `delay` 8s for every
+other harness; change a value only with evidence that the tool reads its
+input by then. copilot uses `delay` because its `sessionStart` fires only
+when the first prompt is submitted, so `hook` held the first message of an
+agent started without a task for the whole `timeout`. A harness-config with no `ready` block gets the block of
 the built-in bundle for its `harness` type, or `delay` 8s if there is none.
 
 **`delivery`.** A message is loaded into a tmux buffer and pasted with

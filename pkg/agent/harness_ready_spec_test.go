@@ -371,10 +371,10 @@ func TestRealTmuxTwoLineInitRunGatesOnMarkerAndSettle(t *testing.T) {
 // TestReadySpecFromEmbeddedConfig checks the reader chain for every built-in
 // harness: the embedded config's ReadySpec, written to the init-run file,
 // gives the readiness mode of the legacy hard-coded table (hook for claude,
-// gemini-cli, copilot and grok-build; settle with 8s for the rest), with
-// the legacy timings.
+// gemini-cli and grok-build; settle with 8s for the rest, copilot included),
+// with the legacy timings.
 func TestReadySpecFromEmbeddedConfig(t *testing.T) {
-	legacyHook := map[string]bool{"claude": true, "gemini-cli": true, "copilot": true, "grok-build": true}
+	legacyHook := map[string]bool{"claude": true, "gemini-cli": true, "grok-build": true}
 	names := harness.AllHarnessNames()
 	if len(names) < 9 {
 		t.Fatalf("AllHarnessNames() = %v, want the nine bundles", names)

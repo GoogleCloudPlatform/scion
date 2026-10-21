@@ -387,8 +387,9 @@ file, and both readers use those values: `sciontool init`, which reports the age
 when it is ready, and the broker, which waits before pasting a held message. A
 `SCION_HARNESS_READY` value in a caller's `env` cannot override it (a template cannot set `SCION_*` keys).
 
-The built-in bundles use `hook` (settle 1.5s, timeout 90s) for claude, gemini-cli, copilot and
-grok-build, and `delay` 8s for every other harness. A harness-config without the block (for
+The built-in bundles use `hook` (settle 1.5s, timeout 90s) for claude, gemini-cli and
+grok-build, and `delay` 8s for every other harness. copilot uses `delay`: its `sessionStart`
+hook fires only when the first prompt is submitted, not at startup. A harness-config without the block (for
 example one installed before the block existed) uses the block of the built-in bundle for its
 `harness` type, so an older claude config keeps `hook`; a harness with no built-in bundle uses
 `delay` 8s.
