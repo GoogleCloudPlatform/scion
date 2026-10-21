@@ -35,6 +35,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -271,7 +272,7 @@ func TestPresentationHeartbeat_IgnoredWithoutAWrite(t *testing.T) {
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 		assert.Len(t, f.rec.snapshot(), before, "the user path never reaches the store")
 		assert.Equal(t, stored, f.row(t, f.flat.ID).RuntimeTargetPresentation)
-		assert.Contains(t, f.logs.String(), "ignoring runtimeTargetPresentation sent without the broker's own credentials")
+		assert.Contains(t, f.logs.String(), "ignoring runtimeTargetPresentation sent with a request identity other than the broker itself")
 	})
 
 	t.Run("experiment off", func(t *testing.T) {
@@ -308,6 +309,118 @@ func TestPresentationHeartbeat_OmissionKeepsAndRestoreRepopulates(t *testing.T) 
 	require.NotNil(t, row.PresentationSeq)
 	assert.Equal(t, int64(7), *row.PresentationSeq, "an omitted field does not touch the fence")
 	assert.Len(t, f.rec.snapshot(), 1, "omitted beats never reach the store")
+}
+
+// TestBrokerHeartbeat_BrokerSelfOnlyForBrokerIdentity: the presentation is
+// stored only when the request identity is the broker itself; a request
+// whose identity is not the broker stores nothing. Both heartbeats are
+// signed by the flat broker and pass through BrokerAuthMiddleware: one
+// request identity is a user and stores nothing, the other is the broker
+// and stores the presentation.
+func TestBrokerHeartbeat_BrokerSelfOnlyForBrokerIdentity(t *testing.T) {
+	f := newPresentationFixture(t, true)
+	ctx := context.Background()
+	target := f.flat.RuntimeTarget.ID
+	secretKey := []byte("presentation-test-secret-32-byte")
+	require.NoError(t, f.s.CreateBrokerSecret(ctx, &store.BrokerSecret{
+		BrokerID: f.flat.ID, SecretKey: secretKey,
+		Algorithm: store.BrokerSecretAlgorithmHMACSHA256, Status: store.BrokerSecretStatusActive,
+	}))
+	userID := tid("presentation-user")
+	require.NoError(t, f.s.CreateUser(ctx, &store.User{
+		ID: userID, Email: userID + "@test.com", DisplayName: "User", Role: "member", Status: "active",
+	}))
+	ensureHubMembership(ctx, f.s, userID)
+	send := func(t *testing.T, p *api.RuntimeTargetPresentation, seq int64, headers map[string]string) {
+		t.Helper()
+		raw, err := json.Marshal(presentationBeat(p, target, 100, seq, nil))
+		require.NoError(t, err)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/runtime-brokers/"+f.flat.ID+"/heartbeat", bytes.NewReader(raw))
+		req.Header.Set("Content-Type", "application/json")
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		require.NoError(t, f.srv.brokerAuthService.SignRequest(req, f.flat.ID, secretKey))
+		rec := httptest.NewRecorder()
+		BrokerAuthMiddleware(f.srv.brokerAuthService)(f.srv.mux).ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	t.Run("user request identity", func(t *testing.T) {
+		send(t, dockerPresentation("user"), 1, map[string]string{HeaderOnBehalfOf: "user:" + userID + "@test.com"})
+		assert.Empty(t, f.rec.snapshot(), "the presentation is stored only for the broker's own request identity")
+		assert.Nil(t, f.row(t, f.flat.ID).RuntimeTargetPresentation)
+	})
+	t.Run("broker request identity", func(t *testing.T) {
+		before := len(f.rec.snapshot())
+		p := dockerPresentation("broker")
+		send(t, p, 2, nil)
+		assert.Len(t, f.rec.snapshot(), before+1, "the broker's own request identity reaches the store")
+		assert.Equal(t, p, f.row(t, f.flat.ID).RuntimeTargetPresentation)
+	})
+	t.Run("user request identity with a broker grant", func(t *testing.T) {
+		rd, err := f.s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+			Name: "presentation-identity-broker-update", ScopeType: store.RoleScopeSystem, Permissions: []string{"broker.update"},
+		})
+		require.NoError(t, err)
+		_, err = f.s.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: userID,
+			ScopeType: store.RoleScopeSystem, ScopeID: "", CreatedBy: "test",
+		})
+		require.NoError(t, err)
+		before := len(f.rec.snapshot())
+		stored := f.row(t, f.flat.ID).RuntimeTargetPresentation
+		send(t, dockerPresentation("granted"), 3, map[string]string{HeaderOnBehalfOf: "user:" + userID + "@test.com"})
+		assert.Len(t, f.rec.snapshot(), before, "a request identity other than the broker stores nothing, whatever it is granted")
+		assert.Equal(t, stored, f.row(t, f.flat.ID).RuntimeTargetPresentation)
+	})
+}
+
+// TestPresentationHeartbeat_UserPathStoresNothing: a user heartbeat never
+// stores the presentation. A non-admin user whose only grant is broker.update
+// is admitted on a session (200) with the presentation ignored, and refused
+// on an access token (403, HOST_OPERATIONS); neither reaches the store.
+func TestPresentationHeartbeat_UserPathStoresNothing(t *testing.T) {
+	f := newPresentationFixture(t, true)
+	ctx := context.Background()
+	target := f.flat.RuntimeTarget.ID
+	stored := dockerPresentation("stored")
+	sendAsBroker(t, f.srv, f.flat.ID, presentationBeat(stored, target, 100, 1, nil))
+	require.Len(t, f.rec.snapshot(), 1)
+
+	user := newHubMemberUser(t, f.s, "presentation-broker-updater")
+	rd, err := f.s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name: "presentation-broker-update", ScopeType: store.RoleScopeSystem, Permissions: []string{"broker.update"},
+	})
+	require.NoError(t, err)
+	_, err = f.s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: user.ID,
+		ScopeType: store.RoleScopeSystem, ScopeID: "", CreatedBy: "test",
+	})
+	require.NoError(t, err)
+	path := "/api/v1/runtime-brokers/" + f.flat.ID + "/heartbeat"
+
+	t.Run("session", func(t *testing.T) {
+		f.logs.Reset()
+		rec := doRequestAsUser(t, f.srv, user, http.MethodPost, path, presentationBeat(dockerPresentation("session"), target, 100, 50, nil))
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Len(t, f.rec.snapshot(), 1, "a user session heartbeat never reaches the store")
+		assert.Equal(t, stored, f.row(t, f.flat.ID).RuntimeTargetPresentation)
+		assert.Contains(t, f.logs.String(), "ignoring runtimeTargetPresentation sent with a request identity other than the broker itself")
+	})
+	t.Run("access token", func(t *testing.T) {
+		key, _, err := f.srv.uatService.CreateTokenWithParams(rs4MintContext(user.ID), CreateTokenParams{
+			UserID: user.ID, Name: "presentation-" + tid("tok"), Boundary: hubBoundary(), Scopes: []string{"broker:read"},
+		})
+		require.NoError(t, err)
+		rec := doRequestWithToken(t, f.srv, key, http.MethodPost, path, presentationBeat(dockerPresentation("token"), target, 100, 60, nil))
+		reason, credential := sessionOnlyDetailsOf(rec)
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assert.Equal(t, string(authzop.ReasonHostOperations), reason, rec.Body.String())
+		assert.Equal(t, sessionRequiredCredential, credential)
+		assert.Len(t, f.rec.snapshot(), 1, "a refused heartbeat never reaches the store")
+		assert.Equal(t, stored, f.row(t, f.flat.ID).RuntimeTargetPresentation)
+	})
 }
 
 // TestPresentationHeartbeat_TwoWritersEndOnNewerProcess: process A (epoch

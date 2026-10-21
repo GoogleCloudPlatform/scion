@@ -1132,8 +1132,11 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	// the HOST_OPERATIONS session-only reason.
 	brokerSelf := false
 	if brokerIdent := GetBrokerIdentityFromContext(ctx); brokerIdent != nil && brokerIdent.BrokerID() == id {
-		// Broker sending its own heartbeat — allowed
-		brokerSelf = true
+		// Broker sending its own heartbeat — allowed. brokerSelf is set
+		// only when the request identity is the broker itself.
+		if self, ok := GetIdentityFromContext(ctx).(BrokerIdentity); ok && self.BrokerID() == id {
+			brokerSelf = true
+		}
 	} else if !s.authorizeBrokerHeartbeatUser(w, r, id) {
 		return
 	}
@@ -1282,7 +1285,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	// value.
 	if !brokerSelf {
 		if heartbeat.RuntimeTargetPresentation != nil {
-			s.agentLifecycleLog.Warn("heartbeat: ignoring runtimeTargetPresentation sent without the broker's own credentials",
+			s.agentLifecycleLog.Warn("heartbeat: ignoring runtimeTargetPresentation sent with a request identity other than the broker itself",
 				"broker_id", id)
 		}
 	} else if _, err := s.ApplyRuntimeTargetPresentation(ctx, id, heartbeat.PresentationTargetID,
