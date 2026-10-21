@@ -22,6 +22,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -161,5 +163,35 @@ func TestBrokerCapabilities_AdvertiseAgentMoveRecreate(t *testing.T) {
 	}
 	if !StaticCapabilities(nil, "").AgentMoveRecreate {
 		t.Fatal("StaticCapabilities must advertise AgentMoveRecreate")
+	}
+}
+
+// A forced move's rollback delete, as the hub sends it when the target
+// recorded no run (deleteFiles, never the branch, project-scoped, no run
+// ID), removes the provisioned-but-never-started agent's own directory by
+// name within the project, and leaves a sibling agent's directory and the
+// project's files in place.
+func TestDeleteAgent_ForcedMoveRollbackWithoutRun_LeavesSibling(t *testing.T) {
+	var entries []api.AgentInfo
+	var deleted []string
+	srv, home := newProvisionDirsServer(t, &entries, &deleted)
+	_, agentDir := makeHubNativeMarkerProject(t, home, "proj-b", scopeProjB, "dev")
+	_, siblingDir := makeHubNativeMarkerProject(t, home, "proj-b", scopeProjB, "sib")
+	projectFile := filepath.Join(home, ".scion", "projects", "proj-b", "README.md")
+	if err := os.WriteFile(projectFile, []byte("shared"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := doDelete(t, srv, "dev", "deleteFiles=true&removeBranch=false&projectId="+scopeProjB)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(agentDir); !os.IsNotExist(err) {
+		t.Errorf("agent directory %s not removed (stat err %v)", agentDir, err)
+	}
+	for _, p := range []string{filepath.Join(siblingDir, "scion-agent.json"), projectFile} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("%s removed: %v", p, err)
+		}
 	}
 }
