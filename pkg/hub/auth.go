@@ -182,6 +182,10 @@ type AuthConfig struct {
 	// is configured: a request that names a delegation is then refused.
 	// The arm accepts a request only while TestIdentitiesEnabled is true.
 	WorkloadIssuer *workloadIssuerAuthenticator
+	// RecordPortProxyNoCredentials counts one plain-text no-credentials
+	// 401 on a port proxy route (Server.recordPortProxyNoCredentials).
+	// Nil counts nothing.
+	RecordPortProxyNoCredentials func()
 }
 
 // tokenType represents the type of authentication token.
@@ -584,6 +588,30 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				if isArtifactSharedRequest(r) {
 					ctx = contextWithAuthType(ctx, AuthTypeSignedURL)
 					serveAfterAuth(w, next, r.WithContext(ctx))
+					return
+				}
+
+				// Step 3g: no credential of any kind reached a port proxy
+				// route on a request that is not a page navigation
+				// (a navigation without a web session is sent to login by
+				// sessionToBearerMiddleware). Answer with the plain-text
+				// 401 that names the cause, not the JSON one.
+				//
+				// ORDER: this step must stay the last one before the final
+				// 401. Any new step that lets a request without a
+				// credential through (as 3c to 3e do) goes ABOVE this
+				// one; placed below it, its port proxy requests would get
+				// this 401 instead.
+				if isProxyRoute(r.URL.Path) && !isBrowserRequest(r) {
+					hinted := writePortProxyNoCredentials(w, r)
+					if cfg.RecordPortProxyNoCredentials != nil {
+						cfg.RecordPortProxyNoCredentials()
+					}
+					log.Debug("Port proxy request without credentials",
+						slog.String("method", r.Method),
+						slog.String("path", logging.RequestPath(r)),
+						slog.Bool("sandboxed_subresource", hinted),
+					)
 					return
 				}
 
