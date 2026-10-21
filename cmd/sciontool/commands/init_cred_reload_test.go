@@ -628,19 +628,6 @@ func watchStep(t *testing.T, clk *clock.Fake) {
 	}
 }
 
-// watchQuietStep advances through one check that sees no change.
-func watchQuietStep(t *testing.T, clk *clock.Fake) {
-	t.Helper()
-	tick := clk.Now().Add(hub.DefaultTokenWatchInterval)
-	if !clk.WaitForTimer(5*time.Second, tick) {
-		t.Fatal("watcher armed no check")
-	}
-	clk.Advance(tick.Sub(clk.Now()))
-	if !clk.WaitForTimer(5*time.Second, tick.Add(hub.DefaultTokenWatchInterval)) {
-		t.Fatal("watcher did not arm its next check")
-	}
-}
-
 // startWatch starts a watcher on a fake clock for the harness and returns
 // the clock and the notification channel.
 func (h *resetHarness) startWatch() (*clock.Fake, chan struct{}) {
