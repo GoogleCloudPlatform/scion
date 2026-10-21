@@ -493,8 +493,23 @@ func TestServerPreflight_NoFileChangeNoListener(t *testing.T) {
 	assert.Contains(t, before, ".scion/groves/acme", "the fixture keeps a leftover legacy layout")
 	assert.NotContains(t, after, ".scion/projects", "under the switch the layout is not migrated, and the preflight runs without projects/")
 	assert.Equal(t, before, after, "the preflight must change no file under HOME")
-	assert.Equal(t, workBefore, treeState(t, h.workDir), "the preflight must change no file in its working directory")
+	workAfter := treeState(t, h.workDir)
+	assert.Equal(t, workBefore, workAfter, "the preflight must change no file in its working directory")
 	assert.Equal(t, sockets, socketFDs(t), "the preflight must leave no socket open")
+
+	// Positive control: the two snapshots (HOME and the working directory,
+	// the roots the run is redirected to) detect a write the audit did not
+	// list, so a tenth write-on-read path fails this test rather than
+	// passing unseen.
+	for _, c := range []struct{ root, write string }{
+		{h.home, filepath.Join(h.globalDir, "zz-unaudited-write")},
+		{h.workDir, filepath.Join(h.workDir, "zz-unaudited-write")},
+	} {
+		prev := treeState(t, c.root)
+		require.NoError(t, os.WriteFile(c.write, []byte("x"), 0o644))
+		assert.NotEqual(t, prev, treeState(t, c.root), "control: the snapshot of %s must see a new file", c.root)
+		require.NoError(t, os.Remove(c.write))
+	}
 }
 
 // The known limit behind T4's priming: a read-only open of a stopped WAL
