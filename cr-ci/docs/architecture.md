@@ -128,6 +128,16 @@ a runner's execution by its `RUNNER_NAME` env, never by job ID.
 
    `/reconcile` repeats this check for every `in_progress` job on a `cr-job-*`
    runner, which covers a missed webhook.
+
+   Fail closed has a cost: if the run lookup fails during a legitimate swap
+   (a GitHub API error), the mediator cannot tell it from a hijack and kills
+   the runner, so that legitimate job fails and needs a re-run. This needs a
+   swap and an API failure at the same moment; refusing to vouch for an
+   unknown job is the safer trade.
+
+   When the taker already has a runner of its own (idle, since its job runs
+   elsewhere), that runner's record is rebound to the displaced job, so
+   cancelling the displaced job while queued stops it.
 5. **Completed.**
    - **On a cr-ci runner** (`runner_name` set): after the hijack guard, the
      runner's record and claim are dropped. Nothing is stopped: GitHub ends a
@@ -208,8 +218,12 @@ of untrusted code can run. That window is bounded by the other layers:
   (deploy precondition 1), and the `runs-on` expression already routes
   cross-repo PRs to `ubuntu-latest`, so the PR must also have edited the
   workflow;
-- the runner's identity `EXEC_SA_NAME` holds no IAM roles, so its
-  metadata-server token is worthless;
+- the runner's identity `EXEC_SA_NAME` holds no IAM roles, so its access
+  token grants nothing in GCP. Its ID token is one of the two factors of a
+  claim (claim contract v2), but useless alone: the other factor, a pending
+  claim token, sits only in another execution's env (readable with
+  `roles/run.viewer`, which hijacking code does not have) and is consumed by
+  that runner within seconds of its start;
 - GitHub gives fork-PR workflows a read-only `GITHUB_TOKEN` and no secrets;
 - the execution is ephemeral: nothing it writes survives the kill.
 

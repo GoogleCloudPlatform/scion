@@ -384,3 +384,57 @@ func TestLegitimateSwap(t *testing.T) {
 		}
 	})
 }
+
+// ---- review round 2 ----------------------------------------------------------
+
+// TestClaimKeyFetchFailureIs503: when Google's keys cannot be fetched, the
+// runner gets 503 (it retries) and the claim is not consumed.
+func TestClaimKeyFetchFailureIs503(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	h.addSameRepoRun(10)
+	h.queued(100, 10)
+	tok := execFor(h, "cr-job-100")[0].Env["RUNNER_CLAIM_TOKEN"]
+	h.google.Fail = true
+	if code, _, _ := h.claim(tok); code != http.StatusServiceUnavailable {
+		t.Fatalf("claim during a JWKS outage: %d, want 503", code)
+	}
+	// Within the refetch backoff there is still no key set: still 503.
+	if code, _, _ := h.claim(tok); code != http.StatusServiceUnavailable {
+		t.Fatalf("claim within the JWKS backoff: %d, want 503", code)
+	}
+	if code, _ := h.reconcileWith(h.google.IDToken(testMediatorURL, schedulerEmail, h.clock.Now())); code != http.StatusServiceUnavailable {
+		t.Errorf("reconcile during a JWKS outage: %d, want 503", code)
+	}
+	h.google.Fail = false
+	h.clock.Add(61 * time.Second)
+	if code, _, _ := h.claim(tok); code != http.StatusOK {
+		t.Errorf("claim after the outage: %d, want 200 (not consumed by the 503)", code)
+	}
+}
+
+// TestSwapRebindsTakersRunner: job 101 takes cr-job-100 while its own
+// cr-job-101 is idle. cr-job-101 now serves job 100, so cancelling job 100
+// while queued stops cr-job-101 (and leaves the busy cr-job-100 alone).
+func TestSwapRebindsTakersRunner(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	h.addSameRepoRun(10)
+	h.addSameRepoRun(11)
+	h.queued(100, 10)
+	h.queued(101, 11)
+	idle := execFor(h, "cr-job-101")[0]
+	h.webhook(inProgress(101, 11, testRepo, "cr-job-100"))
+	h.gh.SetRunnerState("cr-job-100", "online", true)
+
+	if code, _ := h.webhook(jobEvent("completed", 100, 10, testRepo, "cancelled", "")); code != http.StatusOK {
+		t.Fatalf("completed: %d", code)
+	}
+	if len(h.cr.CancelCalls) != 1 || h.cr.CancelCalls[0] != idle.Name {
+		t.Errorf("cancel calls = %v, want only the idle %s", h.cr.CancelCalls, idle.Name)
+	}
+	if _, ok := h.gh.RunnerByName("cr-job-101"); ok {
+		t.Error("idle cr-job-101 not deleted")
+	}
+	if _, ok := h.gh.RunnerByName("cr-job-100"); !ok {
+		t.Error("busy cr-job-100 deleted")
+	}
+}

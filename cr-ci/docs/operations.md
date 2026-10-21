@@ -96,6 +96,21 @@ logged (a unit test enforces this).
   or `labels_unservable` means it will never get one; no line at all means the webhook was not
   delivered (App settings, "Recent deliveries") and the next `/reconcile`
   should pick it up.
+- **Job displaced by a hijack waits 5-15 min:** after a hijack kill the
+  displaced job is re-served at once; if that re-serve fails (GitHub or Cloud
+  Run error, or capacity full), `/reconcile` backfills it only after the
+  killed runner's stale registration has been reaped (offline for five
+  minutes, checked every `RECONCILE_SCHEDULE` interval), because the
+  registration still carries the job's runner name. Look for
+  `SECURITY_KILL_HIJACKED_RUNNER` followed by an `error` with
+  `stage`/`source=hijack_recovery`; no action is needed.
+- **Legitimate job killed with `reason=run_lookup_failed`:** a GitHub API
+  error hit the hijack guard during a runner swap; the guard fails closed.
+  Re-run the job.
+- **Runner exits 3 after a 503 storm on `/internal/claim`:** Google's signing
+  keys could not be fetched (`error` with `stage=claim_identity`); the claim
+  is kept and the runner retries 5xx, but five failed attempts exhaust its
+  budget. The job is backfilled after its registration is reaped.
 - **Webhook deliveries failing with 401:** the webhook secret in Secret
   Manager and in the App settings differ (see rotation above).
 - **503 from `/webhook` and `/reconcile` with `not_configured`:** `MEDIATOR_URL`

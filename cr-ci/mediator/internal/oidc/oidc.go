@@ -35,6 +35,11 @@ const (
 	maxTokenLen     = 8 << 10
 )
 
+// ErrKeysUnavailable means the token could not be checked because Google's
+// signing keys could not be fetched: a transient server-side condition, not
+// a verdict on the token.
+var ErrKeysUnavailable = errors.New("oidc: signing keys unavailable")
+
 var validIssuers = map[string]bool{"https://accounts.google.com": true, "accounts.google.com": true}
 
 // Verifier checks Google ID tokens for one audience and one caller email.
@@ -174,11 +179,14 @@ func (v *Verifier) key(ctx context.Context, kid string) (*rsa.PublicKey, error) 
 			if k, ok := v.keys[kid]; ok {
 				return k, nil // keep serving the last good key set
 			}
-			return nil, err
+			return nil, fmt.Errorf("%w: %v", ErrKeysUnavailable, err)
 		}
 	}
 	if k, ok := v.keys[kid]; ok {
 		return k, nil
+	}
+	if v.keys == nil {
+		return nil, ErrKeysUnavailable // no key set yet; fetch backed off
 	}
 	return nil, errors.New("oidc: unknown signing key")
 }

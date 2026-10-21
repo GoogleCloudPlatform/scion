@@ -2,11 +2,13 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/cr-ci/mediator/internal/claim"
 	"github.com/GoogleCloudPlatform/scion/cr-ci/mediator/internal/logging"
+	"github.com/GoogleCloudPlatform/scion/cr-ci/mediator/internal/oidc"
 )
 
 // ClaimHeader carries the runner's one-time claim token (claim contract v2).
@@ -30,6 +32,12 @@ func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.o.RunnerOIDC.Verify(r.Context(), idToken); err != nil {
+		if errors.Is(err, oidc.ErrKeysUnavailable) {
+			// Not the runner's fault: 503 so it retries. Nothing consumed.
+			s.log().Error("claim deferred: cannot verify the runner identity", "event", logging.EventError, "stage", "claim_identity", "error", err.Error())
+			plain(w, http.StatusServiceUnavailable, "unavailable")
+			return
+		}
 		s.log().Warn("claim rejected", "event", logging.EventClaimRejected, "reason", "identity_invalid", "detail", err.Error())
 		plain(w, http.StatusUnauthorized, "unauthorized")
 		return

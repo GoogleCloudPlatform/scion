@@ -15,6 +15,7 @@ type outcome string
 const (
 	outLaunched outcome = "launched"
 	outSkipped  outcome = "already served"
+	outHasName  outcome = "already has a runner" // a runner with the requested name is registered
 	outNotQueue outcome = "job not queued"
 	outQueued   outcome = "capacity full; left queued"
 )
@@ -112,7 +113,7 @@ func (s *Server) dispatchLocked(ctx context.Context, v *view, repo githubapp.Rep
 		return fail("list_runners", err)
 	}
 	if _, ok := runners[name]; ok {
-		return skip("registered", outSkipped)
+		return skip("registered", outHasName)
 	}
 	execs, err := s.execsIn(ctx, v)
 	if err != nil {

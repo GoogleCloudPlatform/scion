@@ -70,10 +70,21 @@ func (s *Server) checkRunnerJob(ctx context.Context, repoFull string, jobID, run
 			s.log().Info("runner picked up another legitimate job", append(attrs, "event", logging.EventRunnerSwap)...)
 		}
 		// The displaced job needs a runner; the job that took this runner
-		// owns a free name for it (a no-op if it already has a runner,
-		// which then serves the displaced job).
-		if _, err := s.dispatchLocked(ctx, newView(), serveRepo, served, rec.runID, jobID, "swap"); err != nil {
+		// owns a free name for it. If the taker already has a runner, that
+		// one is now idle and serves the displaced job: rebind its record,
+		// so that cancelling the displaced job while queued stops it.
+		out, err := s.dispatchLocked(ctx, newView(), serveRepo, served, rec.runID, jobID, "swap")
+		if err != nil {
 			return "", err
+		}
+		if out == outHasName {
+			taker := RunnerName(jobID)
+			switch tr := s.runners[taker]; {
+			case tr == nil:
+				s.runners[taker] = &runnerRecord{repo: serveRepo, serve: served, runID: rec.runID, at: s.o.Now()}
+			case !tr.reassigned:
+				tr.serve, tr.runID = served, rec.runID
+			}
 		}
 		return "swap", nil
 	}

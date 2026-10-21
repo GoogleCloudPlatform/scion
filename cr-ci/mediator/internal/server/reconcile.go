@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"sort"
 	"strconv"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/cr-ci/mediator/internal/githubapp"
 	"github.com/GoogleCloudPlatform/scion/cr-ci/mediator/internal/logging"
+	"github.com/GoogleCloudPlatform/scion/cr-ci/mediator/internal/oidc"
 )
 
 // ReconcileResult is the /reconcile response body.
@@ -39,6 +41,11 @@ func (s *Server) handleReconcile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.o.ReconcileOIDC.Verify(r.Context(), token); err != nil {
+		if errors.Is(err, oidc.ErrKeysUnavailable) {
+			s.log().Error("reconcile deferred: cannot verify the caller", "event", logging.EventError, "stage", "reconcile_identity", "error", err.Error())
+			plain(w, http.StatusServiceUnavailable, "unavailable")
+			return
+		}
 		s.log().Warn("reconcile denied", "event", logging.EventReconcileDenied, "reason", err.Error())
 		plain(w, http.StatusUnauthorized, "unauthorized")
 		return
