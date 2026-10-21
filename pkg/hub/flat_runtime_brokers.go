@@ -923,17 +923,25 @@ func runtimeTargetDMError(err error) *AgentDMError {
 	return &AgentDMError{Code: ErrCodeInternalError, Message: "Failed to wake agent: " + err.Error(), HTTPStatus: http.StatusInternalServerError}
 }
 
+// runtimeTargetRefusalMessage returns the message of a flat Runtime Broker
+// refusal returned by a start (the hub's own pre-check refusal, or the
+// broker's), or "" for any other error.
+func runtimeTargetRefusalMessage(err error) string {
+	var refusal *RuntimeTargetRefusal
+	if errors.As(err, &refusal) {
+		return refusal.Message
+	}
+	if se, _, _, ok := brokerRuntimeTargetRefusal(err); ok {
+		return se.brokerErrorMessage()
+	}
+	return ""
+}
+
 // settleRuntimeTargetRefusal records a flat Runtime Broker refusal returned
 // by a start as a definite start failure: the agent's message is set to the
 // refusal message. Nothing retries a refusal. Any other error is ignored.
 func (s *Server) settleRuntimeTargetRefusal(ctx context.Context, agent *store.Agent, err error) {
-	msg := ""
-	var refusal *RuntimeTargetRefusal
-	if errors.As(err, &refusal) {
-		msg = refusal.Message
-	} else if se, _, _, ok := brokerRuntimeTargetRefusal(err); ok {
-		msg = se.brokerErrorMessage()
-	}
+	msg := runtimeTargetRefusalMessage(err)
 	if msg == "" || agent == nil {
 		return
 	}

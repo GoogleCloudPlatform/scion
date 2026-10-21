@@ -550,8 +550,40 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 	}
 	if err != nil && provisioned && startDidNotHappen(err) && agent.RunIntentAt != nil {
 		s.settleFailedProvisionedStart(ctx, agent.ID, *agent.RunIntentAt, "Start failed: "+err.Error()+". "+provisionedRestingNote)
+	} else if err != nil && supersedesQueuedStop && opts.Existing == nil &&
+		startRefusedBeforeRun(err) && agent.RunIntentAt != nil {
+		// A start refused before anything ran, after a stop was queued for
+		// the agent's offline broker (ptone/scion#5070): the claim recorded
+		// run intent running, which takes the agent out of every queued-stop
+		// path (the drain, the settle and the intent backstop all need the
+		// stop intended) while stop_queued keeps its slot held. Put the
+		// stopped intent back (compare-and-set on the claim's intent time;
+		// run_intent_at stays that newer time), so the queued stop is still
+		// pending: the settle confirms it once a fresh inventory shows the
+		// container gone, and the intent backstop stops a container still
+		// running. A restart (opts.Existing) handles stop_queued itself.
+		s.settleFailedProvisionedStart(ctx, agent.ID, *agent.RunIntentAt, refusedStartMessage(err))
 	}
 	return err
+}
+
+// startRefusedBeforeRun reports whether err is a start refused before
+// anything ran: startDidNotHappen, or a broker that is draining or has no
+// runtime of the agent's type, both of which refuse a start before acting.
+func startRefusedBeforeRun(err error) bool {
+	return startDidNotHappen(err) || isBrokerDraining(err) || isBrokerRuntimeUnavailable(err)
+}
+
+// refusedStartMessage is the message a stop-queued agent gets when its
+// start is refused before anything ran: a flat Runtime Broker refusal's own
+// message (the lifecycle handler records that same message after the start
+// returns, so the status event published with it stays current), otherwise
+// the refusal with a note that the agent stays stopped.
+func refusedStartMessage(err error) string {
+	if msg := runtimeTargetRefusalMessage(err); msg != "" {
+		return msg
+	}
+	return "Start failed: " + err.Error() + ". The agent stays stopped."
 }
 
 // provisionedRestingNote ends the message a provisioned agent gets when its
@@ -611,25 +643,41 @@ func startDidNotHappen(err error) bool {
 		errors.Is(err, ErrLaunchInvalidPhase) || isConfirmedStartNotActedOnError(err)
 }
 
-// settleFailedProvisionedStart returns a provisioned agent (phase created)
-// whose start definitely did not happen to its resting state: run intent
-// goes back to stopped, compare-and-set on the intent the start recorded at
-// intentAt, and only when that wins the message says why. A newer start or
+// settleFailedProvisionedStart returns an agent whose start did not happen
+// to its resting intent: a provisioned agent (phase created), or an agent
+// whose stop was queued for its offline broker before the refused start
+// (ptone/scion#5070). Run intent goes back to stopped, compare-and-set on
+// the intent the start recorded at intentAt, and only when that wins the
+// message says why and the agent's status is published. A newer start or
 // stop since keeps its intent and gets no message.
 func (s *Server) settleFailedProvisionedStart(ctx context.Context, agentID string, intentAt time.Time, message string) {
 	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	reverted, err := s.store.RevertRunIntent(sctx, agentID, store.RunIntentRunning, intentAt, store.RunIntentStopped)
 	if err != nil {
-		slog.Warn("Failed provisioned start: intent revert failed", "agent_id", agentID, "error", err)
+		slog.Warn("Refused start: intent revert failed", "agent_id", agentID, "error", err)
 		return
 	}
 	if !reverted {
 		return
 	}
 	if err := s.store.UpdateAgentStatus(sctx, agentID, store.AgentStatusUpdate{Message: message}); err != nil {
-		slog.Warn("Failed provisioned start: message write failed", "agent_id", agentID, "error", err)
+		slog.Warn("Refused start: message write failed", "agent_id", agentID, "error", err)
 	}
+	s.publishAgentRow(sctx, agentID)
+}
+
+// publishAgentRow publishes agentID's stored row as a status event, unless
+// the row is gone or soft-deleted, or there is no publisher. Best-effort.
+func (s *Server) publishAgentRow(ctx context.Context, agentID string) {
+	if s.events == nil {
+		return
+	}
+	cur, err := s.store.GetAgent(ctx, agentID)
+	if err != nil || !cur.DeletedAt.IsZero() {
+		return
+	}
+	s.events.PublishAgentStatus(ctx, cur)
 }
 
 // writeStartedStatus is startAgentCore's default post-start write: the
