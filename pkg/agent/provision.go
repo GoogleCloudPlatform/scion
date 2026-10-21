@@ -860,9 +860,11 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 	// (proceeding is the pre-fail-closed behavior; the hub is expected to
 	// have stopped the container already), but an affirmative "yes, still
 	// running" answer is always honored.
-	// Scope the check to this agent's project (ptone/scion#5510). The ID
-	// comes from the dispatch, as in Start; the name is the fallback for
-	// entries or requests without one.
+	//
+	// The check is scoped to this agent's project (ptone/scion#5510). The
+	// broker sets both HubProjectID and Env SCION_PROJECT_ID from the
+	// dispatch's project ID; HubProjectID is read first and the Env value is
+	// the fallback. The project name scopes entries or requests without an ID.
 	reprovisionProjectID := opts.HubProjectID
 	if reprovisionProjectID == "" && opts.Env != nil {
 		reprovisionProjectID = opts.Env["SCION_PROJECT_ID"]

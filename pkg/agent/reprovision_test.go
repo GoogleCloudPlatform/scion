@@ -429,7 +429,7 @@ func TestReprovision_StoppedContainer_Proceeds(t *testing.T) {
 // Reprovision against a mock runtime holding containers. The mock applies
 // the List label filter the way a real runtime does, so a lookup that
 // narrows by label sees only the entries a runtime would return.
-func reprovisionProjectScopeRun(t *testing.T, agentName, hubProjectID string, containers func(scionDir string) []api.AgentInfo) error {
+func reprovisionProjectScopeRun(t *testing.T, agentName, hubProjectID string, env map[string]string, containers func(scionDir string) []api.AgentInfo) error {
 	t.Helper()
 	scionDir, _ := reprovisionSetup(t)
 	gc := &api.GitCloneConfig{URL: "https://example.com/repo.git"}
@@ -454,7 +454,7 @@ func reprovisionProjectScopeRun(t *testing.T, agentName, hubProjectID string, co
 	}
 	_, err := NewManager(mockRT).Reprovision(context.Background(), api.StartOptions{
 		Name: agentName, Template: "default", ProjectPath: scionDir, BrokerMode: true, GitClone: gc,
-		HubProjectID: hubProjectID,
+		HubProjectID: hubProjectID, Env: env,
 	})
 	return err
 }
@@ -475,17 +475,29 @@ func reprovisionTestProjectName(t *testing.T, scionDir string) string {
 // same name in another project must not make Reprovision refuse, while a
 // running container in the agent's own project still must. Covered for a
 // hub dispatch (project ID labels) and a local request (project name
-// labels, no hub project ID).
+// labels, no hub project ID). The hub ID is covered both as HubProjectID
+// and as the Env SCION_PROJECT_ID fallback alone.
 func TestReprovision_SameNameInOtherProject_Proceeds(t *testing.T) {
 	const agentName = "ceo"
 	for _, tc := range []struct {
 		name         string
 		hubProjectID string
+		env          map[string]string
 		own, other   func(scionDir string) map[string]string
 	}{
 		{
 			name:         "hub",
 			hubProjectID: "project-own",
+			own: func(string) map[string]string {
+				return map[string]string{"scion.name": agentName, "scion.project_id": "project-own"}
+			},
+			other: func(string) map[string]string {
+				return map[string]string{"scion.name": agentName, "scion.project_id": "project-other"}
+			},
+		},
+		{
+			name: "hub_env_only",
+			env:  map[string]string{"SCION_PROJECT_ID": "project-own"},
 			own: func(string) map[string]string {
 				return map[string]string{"scion.name": agentName, "scion.project_id": "project-own"}
 			},
@@ -506,7 +518,7 @@ func TestReprovision_SameNameInOtherProject_Proceeds(t *testing.T) {
 		for _, ownPhase := range []string{"stopped", "running"} {
 			wantRefuse := ownPhase == "running"
 			t.Run(tc.name+"/own_"+ownPhase, func(t *testing.T) {
-				err := reprovisionProjectScopeRun(t, agentName, tc.hubProjectID, func(scionDir string) []api.AgentInfo {
+				err := reprovisionProjectScopeRun(t, agentName, tc.hubProjectID, tc.env, func(scionDir string) []api.AgentInfo {
 					return []api.AgentInfo{
 						{Name: agentName, Phase: ownPhase, Labels: tc.own(scionDir)},
 						{Name: agentName, Phase: "running", Labels: tc.other(scionDir)},
@@ -532,7 +544,7 @@ func TestReprovision_SameNameInOtherProject_Proceeds(t *testing.T) {
 // canonical label) still refuses, alongside another project's container.
 func TestReprovision_OwnContainerWithoutProjectLabel_Refused(t *testing.T) {
 	const agentName = "ceo"
-	err := reprovisionProjectScopeRun(t, agentName, "project-own", func(string) []api.AgentInfo {
+	err := reprovisionProjectScopeRun(t, agentName, "project-own", nil, func(string) []api.AgentInfo {
 		return []api.AgentInfo{
 			{Name: agentName, Phase: "running", ProjectID: "project-own", Labels: map[string]string{"scion.name": agentName}},
 			{Name: agentName, Phase: "stopped", Labels: map[string]string{"scion.name": agentName, "scion.project_id": "project-other"}},
@@ -549,7 +561,7 @@ func TestReprovision_OwnContainerWithoutProjectLabel_Refused(t *testing.T) {
 // Reprovision refuses it (fail closed).
 func TestReprovision_RunningContainerNoProjectInfo_Refused(t *testing.T) {
 	const agentName = "ceo"
-	err := reprovisionProjectScopeRun(t, agentName, "project-own", func(string) []api.AgentInfo {
+	err := reprovisionProjectScopeRun(t, agentName, "project-own", nil, func(string) []api.AgentInfo {
 		return []api.AgentInfo{
 			{Name: agentName, Phase: "running", Labels: map[string]string{"scion.name": agentName}},
 		}
