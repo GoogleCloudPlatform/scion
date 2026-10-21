@@ -1377,18 +1377,30 @@ jobs:
       #   heap there rather than letting it grow to 1.25x the live heap,
       #   leaving the rest of the runner for the OS, the runner agent and
       #   the go list processes that package loading starts.
+      # - GOFLAGS -gcflags=<pkg/hub>=-c=1 runs the compiler backend for
+      #   pkg/hub on one worker instead of up to four. golangci-lint loads
+      #   packages through go list -export, which compiles each package for
+      #   its export data; the memory sampler measured a single compile
+      #   process at ~15 GB of the ~16 GB runner, far above golangci-lint's
+      #   own ~5.7 GB, so --concurrency does not bound it. That compile is
+      #   expected to be pkg/hub, the largest package; the sampler logs the
+      #   compiled package to confirm it. The package pattern is required: a -gcflags without one applies only to the
+      #   packages named on the command line. golangci-lint passes its
+      #   environment through to go list and sets no -gcflags of its own.
       # GOLANGCI_LINT_CACHE is exported because the action sets it only in
       # its own process; it must match the path the action restores and
       # saves.
       # The sampler prints memory every 30 s to the live log, so the last
       # lines before a runner shutdown show how close memory was to the
-      # limit, and prints a peak summary at the end. It does not affect the
+      # limit (for a compile process, also the package it compiles), and
+      # prints a peak summary at the end. It does not affect the
       # step's result; the step exits with golangci-lint's exit code.
       - name: golangci-lint
         shell: bash
         env:
           GOGC: '25'
           GOMEMLIMIT: 8GiB
+          GOFLAGS: '-gcflags=github.com/GoogleCloudPlatform/scion/pkg/hub=-c=1'
         run: |
           export GOLANGCI_LINT_CACHE="$HOME/.cache/golangci-lint"
           samples="$RUNNER_TEMP/lint-mem.log"
@@ -1396,7 +1408,7 @@ jobs:
           (
             trap 'kill "$nap" 2>/dev/null; exit 0' TERM
             while :; do
-              line="$(date -u +%H:%M:%S) $(free -m | awk 'NR==2{printf "used=%s avail=%s total=%s", $3, $7, $2}') top_rss_mb=$(ps -eo rss=,comm= --sort=-rss | awk 'NR==1{printf "%s:%d", $2, $1/1024}')"
+              line="$(date -u +%H:%M:%S) $(free -m | awk 'NR==2{printf "used=%s avail=%s total=%s", $3, $7, $2}') top_rss_mb=$(ps -eo rss=,comm=,args= --sort=-rss | awk 'NR==1{p=""; for (i=3; i<NF; i++) if ($i=="-p") p="[" $(i+1) "]"; printf "%s%s:%d", $2, p, $1/1024}')"
               echo "mem: $line"
               echo "$line" >> "$samples"
               sleep 30 & nap=$!
