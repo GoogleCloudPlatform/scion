@@ -1042,3 +1042,118 @@ func TestAdminUserInviteBulk_MultipartRules(t *testing.T) {
 	require.Len(t, resp.Results, 1)
 	assert.Equal(t, "mp@example.com", resp.Results[0].Email)
 }
+
+// bulkStatusTally counts the results by status.
+func bulkStatusTally(resp UserInviteBulkResponse) map[string]int {
+	tally := map[string]int{}
+	for _, r := range resp.Results {
+		tally[r.Status]++
+	}
+	return tally
+}
+
+// TestAdminUserInviteBulk_CountsMatchRowsForEachCallerClass: for a caller
+// with user.read and for one without it, every count equals the number of
+// results with that status, so the counts tell no caller more than its
+// rows; counts.exists appears only in the view whose rows show "exists".
+func TestAdminUserInviteBulk_CountsMatchRowsForEachCallerClass(t *testing.T) {
+	srv, s := testServerNoDevAuth(t)
+	invited, active, suspended := seedBulkExisting(t, s)
+	classes := []struct {
+		name       string
+		caller     *store.User
+		wantExists bool
+	}{
+		{"with user.read", bulkInviteOnlyCaller(t, s, "reader", "user.invite", "user.read"), false},
+		{"without user.read", bulkInviteOnlyCaller(t, s, "inviteonly", "user.invite"), true},
+	}
+	for _, c := range classes {
+		t.Run(c.name, func(t *testing.T) {
+			fresh := tid(t.Name()) + "@example.com"
+			rec := doRequestAsUser(t, srv, c.caller, http.MethodPost, "/api/v1/admin/users/invite/bulk", UserInviteBulkRequest{Emails: []UserInviteRequest{
+				{Email: fresh}, {Email: invited.Email}, {Email: active.Email}, {Email: suspended.Email}, {Email: "bad"}, {Email: strings.ToUpper(fresh)},
+			}})
+			resp := decodeBulk(t, rec)
+			tally := bulkStatusTally(resp)
+			assert.Equal(t, InviteBatchCounts{
+				Created:        tally[inviteBatchStatusCreated],
+				AlreadyInvited: tally[inviteBatchStatusAlreadyInvited],
+				AlreadyActive:  tally[inviteBatchStatusAlreadyActive],
+				Suspended:      tally[inviteBatchStatusSuspended],
+				Exists:         tally[inviteBatchStatusExists],
+				Invalid:        tally[inviteBatchStatusInvalid],
+				Duplicate:      tally[inviteBatchStatusDuplicate],
+				Failed:         tally[inviteBatchStatusFailed],
+			}, resp.Counts, "every count is the tally of its row status")
+			assert.Equal(t, tally[inviteBatchStatusAlreadyInvited]+tally[inviteBatchStatusAlreadyActive]+tally[inviteBatchStatusSuspended]+tally[inviteBatchStatusExists], resp.Skipped)
+			assert.Equal(t, tally[inviteBatchStatusCreated], resp.Invited)
+
+			var raw struct {
+				Counts map[string]json.RawMessage `json:"counts"`
+			}
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
+			_, hasExists := raw.Counts["exists"]
+			assert.Equal(t, c.wantExists, hasExists, "counts.exists only in the view whose rows show exists")
+			if c.wantExists {
+				assert.Equal(t, 3, tally[inviteBatchStatusExists])
+				assert.Zero(t, tally[inviteBatchStatusAlreadyInvited]+tally[inviteBatchStatusAlreadyActive]+tally[inviteBatchStatusSuspended])
+			} else {
+				assert.Zero(t, tally[inviteBatchStatusExists])
+				assert.Equal(t, 1, tally[inviteBatchStatusAlreadyInvited])
+			}
+		})
+	}
+}
+
+// TestAdminUserInviteBulk_BodyCapBoundaries: a JSON body of exactly
+// inviteBulkMaxBodyBytes is decoded and one byte more is refused with 400;
+// a multipart body over inviteBulkMaxMultipartBytes is refused with 400.
+// Neither refusal writes.
+func TestAdminUserInviteBulk_BodyCapBoundaries(t *testing.T) {
+	srv, s := testServer(t)
+	body := `{"emails":[{"email":"cap-edge@example.com"}]}`
+	atCap := body + strings.Repeat(" ", inviteBulkMaxBodyBytes-len(body))
+	require.Len(t, atCap, inviteBulkMaxBodyBytes)
+	resp := decodeBulk(t, postBulkRaw(t, srv, atCap))
+	assert.Equal(t, 1, resp.Counts.Created, "a body of exactly the cap is decoded")
+
+	before := countUsers(t, s)
+	over := `{"emails":[{"email":"cap-over@example.com"}]}`
+	over += strings.Repeat(" ", inviteBulkMaxBodyBytes+1-len(over))
+	require.Len(t, over, inviteBulkMaxBodyBytes+1)
+	rec := postBulkRaw(t, srv, over)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Equal(t, "request body too large", parseErrorResponse(t, rec.Body.Bytes()).Error.Message)
+
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	part, err := w.CreateFormFile("file", "big.csv")
+	require.NoError(t, err)
+	_, err = part.Write([]byte("email\ncap-mp@example.com\n" + strings.Repeat("#", inviteBulkMaxMultipartBytes)))
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+	rec = doRequestRaw(t, srv, http.MethodPost, "/api/v1/admin/users/invite/bulk", buf.Bytes(), w.FormDataContentType())
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Equal(t, "failed to parse multipart form", parseErrorResponse(t, rec.Body.Bytes()).Error.Message)
+	assert.Equal(t, before, countUsers(t, s), "refused bodies write nothing")
+}
+
+// TestAdminUserInviteBulk_InvalidThenValidSameAddress: an entry refused for
+// its note does not claim the address, so a later valid entry for the
+// same address is processed, not reported as a duplicate.
+func TestAdminUserInviteBulk_InvalidThenValidSameAddress(t *testing.T) {
+	srv, s := testServer(t)
+	resp := decodeBulk(t, doRequest(t, srv, http.MethodPost, "/api/v1/admin/users/invite/bulk", UserInviteBulkRequest{Emails: []UserInviteRequest{
+		{Email: "twice@example.com", Note: "bad\x01note"},
+		{Email: "Twice@Example.com", Note: "fine"},
+	}}))
+	require.Len(t, resp.Results, 2)
+	assert.Equal(t, inviteBatchStatusInvalid, resp.Results[0].Status)
+	assert.Equal(t, inviteBatchReasonNoteInvalidCharacters, resp.Results[0].Reason)
+	assert.Equal(t, inviteBatchStatusCreated, resp.Results[1].Status)
+	assert.Nil(t, resp.Results[1].DuplicateOf)
+	u, err := s.GetUserByEmail(context.Background(), "twice@example.com")
+	require.NoError(t, err)
+	require.NotNil(t, u.InviteNote)
+	assert.Equal(t, "fine", *u.InviteNote)
+}

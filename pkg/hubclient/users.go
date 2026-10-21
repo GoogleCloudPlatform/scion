@@ -251,13 +251,14 @@ const (
 const InviteBatchReasonProjectsNotGrantable = "batch_projects_not_grantable"
 
 // InviteBatchCounts counts the address statuses of a batch invite, plus
-// the failed memberships.
+// the failed memberships. Exists is set only for a caller without
+// user.read, whose results show "exists" for every existing user.
 type InviteBatchCounts struct {
 	Created          int `json:"created"`
 	AlreadyInvited   int `json:"already_invited"`
 	AlreadyActive    int `json:"already_active"`
 	Suspended        int `json:"suspended"`
-	Exists           int `json:"exists"`
+	Exists           int `json:"exists,omitempty"`
 	Invalid          int `json:"invalid"`
 	Duplicate        int `json:"duplicate"`
 	Failed           int `json:"failed"`

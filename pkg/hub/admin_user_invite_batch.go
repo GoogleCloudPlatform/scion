@@ -57,10 +57,13 @@ const (
 	inviteBulkMaxMemberships = 2000
 	// inviteBulkMaxBodyBytes bounds the JSON body. It is sized from the
 	// worst case of a valid request as encoding/json writes it: 1000
-	// entries with a 254-byte email and a 500-rune note whose every
-	// character encodes to its longest escaped form, plus 20 projects of
-	// 10 role IDs (TestAdminUserInviteBulk_BodyCapFitsWorstCase computes
-	// it).
+	// entries, each {"email":"…","note":"…"}, with a 254-byte email and a
+	// 500-rune note whose every character encodes to its longest escaped
+	// form (6 bytes, for example "\u003c"): about 22 + 1464 + 3000 bytes
+	// per entry, 4,487,000 bytes for the entries, plus 20 projects of 10
+	// role IDs (about 9 KB) and the envelope, 4,496,325 bytes in all
+	// (TestAdminUserInviteBulk_BodyCapFitsWorstCase computes it). 5 MiB
+	// (5,242,880) admits it; the design's first estimate, 2 MiB, did not.
 	inviteBulkMaxBodyBytes = 5 << 20
 	// inviteBulkMaxMultipartBytes bounds the multipart (CSV) body.
 	inviteBulkMaxMultipartBytes = 2 << 20
@@ -135,14 +138,16 @@ var inviteBulkRoleLikeFields = []string{"hubRole", "hubRoles", "role", "roles"}
 // --- Response types ---
 
 // InviteBatchCounts counts the address statuses of a run, plus the failed
-// memberships. Exists is used only for a caller without user.read, in
-// place of the three statuses it collapses.
+// memberships. Every count is the number of results with that status, so
+// the counts never tell a caller more than its per-row results. Exists is
+// used only for a caller without user.read, whose rows show "exists" in
+// place of the three statuses it collapses; it is omitted otherwise.
 type InviteBatchCounts struct {
 	Created          int `json:"created"`
 	AlreadyInvited   int `json:"already_invited"`
 	AlreadyActive    int `json:"already_active"`
 	Suspended        int `json:"suspended"`
-	Exists           int `json:"exists"`
+	Exists           int `json:"exists,omitempty"`
 	Invalid          int `json:"invalid"`
 	Duplicate        int `json:"duplicate"`
 	Failed           int `json:"failed"`
