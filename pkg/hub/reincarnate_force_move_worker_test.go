@@ -64,8 +64,9 @@ func startForceMove(t *testing.T, f *moveFixture) (*store.AgentReincarnation, *s
 // after the stop: no delete of any kind. The restored config carries the
 // recovery Task for a failure out of fromState (ptone/scion#5511): the new
 // handoff behind the recovery addendum, while the record's
-// PreviousAppliedConfig keeps the generation N Task.
-func assertForceRolledBack(t *testing.T, f *moveFixture, r *store.AgentReincarnation, a *store.Agent, targetRun, fromState string) {
+// PreviousAppliedConfig keeps the generation N Task, beforeTask (the
+// agent's Task before the move).
+func assertForceRolledBack(t *testing.T, f *moveFixture, r *store.AgentReincarnation, a *store.Agent, targetRun, fromState, beforeTask string) {
 	t.Helper()
 	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
 	r = waitForMoveSourceCleanup(t, f.s, r.ID)
@@ -81,7 +82,7 @@ func assertForceRolledBack(t *testing.T, f *moveFixture, r *store.AgentReincarna
 		"the source agent's Task carries the recovery handoff")
 	assert.Contains(t, a.AppliedConfig.Task, fmt.Sprintf("You remain generation %d.", r.ToGeneration-1))
 	require.NotNil(t, r.PreviousAppliedConfig)
-	assert.NotEqual(t, a.AppliedConfig.Task, r.PreviousAppliedConfig.Task, "the record's PreviousAppliedConfig is not changed")
+	assert.Equal(t, beforeTask, r.PreviousAppliedConfig.Task, "the record's PreviousAppliedConfig is not changed")
 	assert.Equal(t, "run-src", a.RunID, "the source's run is restored")
 	assert.EqualValues(t, 1, brokerReservationCount(t, f.s, f.src.ID), "the reservation is back on the source")
 	assert.EqualValues(t, 0, brokerReservationCount(t, f.s, f.dst.ID))
@@ -219,8 +220,12 @@ func TestReincarnateForceMove_ProvisionFailureRollsBackAndRetrySucceeds(t *testi
 	f.disp.moveProvisionErr = provisionSent(errors.New("broker returned 500: provision failed"))
 	f.disp.mu.Unlock()
 
+	before, err := f.s.GetAgent(context.Background(), f.agent.ID)
+	require.NoError(t, err)
+	require.NotNil(t, before.AppliedConfig)
+
 	r, a := startForceMove(t, f)
-	assertForceRolledBack(t, f, r, a, "", store.AgentReincarnationStateProvisioning)
+	assertForceRolledBack(t, f, r, a, "", store.AgentReincarnationStateProvisioning, before.AppliedConfig.Task)
 	assert.Contains(t, r.Error, "provision on the target broker failed")
 
 	f.disp.mu.Lock()
@@ -241,8 +246,12 @@ func TestReincarnateForceMove_DefinitiveStartFailureRollsBackAndRetrySucceeds(t 
 	f.disp.startErr = fmt.Errorf("clone failed on the target: %w", errStartRequestNotSent)
 	f.disp.mu.Unlock()
 
+	before, err := f.s.GetAgent(context.Background(), f.agent.ID)
+	require.NoError(t, err)
+	require.NotNil(t, before.AppliedConfig)
+
 	r, a := startForceMove(t, f)
-	assertForceRolledBack(t, f, r, a, "run-"+f.dst.ID+"-1", store.AgentReincarnationStateStarting)
+	assertForceRolledBack(t, f, r, a, "run-"+f.dst.ID+"-1", store.AgentReincarnationStateStarting, before.AppliedConfig.Task)
 	assert.Contains(t, r.Error, "start failed")
 
 	f.disp.mu.Lock()
@@ -270,6 +279,15 @@ func TestReincarnateForceMove_AmbiguousStartSkipsCleanupAndNeverDeletes(t *testi
 	assert.Equal(t, sourceCleanupSkippedAmbiguousStart, r.SourceCleanup)
 	assert.Equal(t, store.TransferModeRecreate, r.TransferMode)
 	assert.Equal(t, f.dst.ID, a.RuntimeBrokerID, "the agent stays assigned to the target, where a container may run")
+	// No rollback, so no recovery config (ptone/scion#5511): the row keeps
+	// the generation N+1 config, whose Task is the first task the target
+	// start was sent, with the recreated-workspace preamble.
+	require.NotNil(t, a.AppliedConfig)
+	assert.NotContains(t, a.AppliedConfig.Task, "[SCION RECOVERY HANDOFF]")
+	assert.Contains(t, a.AppliedConfig.Task, "with a recreated workspace")
+	f.disp.mu.Lock()
+	assert.Equal(t, f.disp.lastStartTask, a.AppliedConfig.Task, "the row still holds the dispatched generation N+1 task")
+	f.disp.mu.Unlock()
 	assert.Empty(t, f.disp.recreatedDeletes(), "no files delete on the target")
 	_, localDeletes, _ := f.disp.moveSnapshot()
 	assert.Empty(t, localDeletes, "no delete on the source")
@@ -353,6 +371,14 @@ func TestReincarnationWorker_TransferModeMismatchFailsBeforeAnySideEffect(t *tes
 			require.NoError(t, err)
 			assert.Equal(t, store.AgentReincarnationStateFailed, got.State)
 			assert.Contains(t, got.Error, "transfer mode changed")
+			// A pending-site failure restores the recovery config
+			// (ptone/scion#5511): the row stays on the source and its config
+			// changes only in its Task.
+			after, err := f.s.GetAgent(ctx, a.ID)
+			require.NoError(t, err)
+			require.NotNil(t, after.AppliedConfig)
+			assert.Equal(t, reincarnationRecoveryTask(2, "h", store.AgentReincarnationStatePending), after.AppliedConfig.Task)
+			assert.Equal(t, f.src.ID, after.RuntimeBrokerID)
 			f.disp.mu.Lock()
 			assert.Zero(t, f.disp.stopCalls, "nothing is stopped")
 			f.disp.mu.Unlock()
