@@ -1086,16 +1086,18 @@ func TestAsyncStart_FailedReportPublishesOnce(t *testing.T) {
 }
 
 // newerIntentOnRevertStore records a newer run intent for agentID just
-// before the first RevertRunIntent once armed, as a start recorded between
-// a failed report's write and the run-intent hook's revert would.
+// before the first RevertRunIntent once its fault switch is armed (a
+// one-shot), as a start recorded between a failed report's write and the
+// run-intent hook's revert would. Transparent until armed.
 type newerIntentOnRevertStore struct {
 	store.Store
+	fault   *storeFaultSwitch
 	agentID string
-	armed   atomic.Bool
+	fired   atomic.Bool
 }
 
 func (s *newerIntentOnRevertStore) RevertRunIntent(ctx context.Context, agentID string, from store.RunIntent, at time.Time, to store.RunIntent) (bool, error) {
-	if agentID == s.agentID && s.armed.CompareAndSwap(true, false) {
+	if s.fault.Active() && agentID == s.agentID && s.fired.CompareAndSwap(false, true) {
 		time.Sleep(20 * time.Millisecond) // keep the two intent times apart
 		if _, _, err := s.Store.SwapRunIntent(ctx, agentID, store.RunIntentRunning); err != nil {
 			return false, err
@@ -1111,21 +1113,21 @@ func (s *newerIntentOnRevertStore) RevertRunIntent(ctx context.Context, agentID 
 // updated row, and the newer intent is kept.
 func TestAsyncStart_FailedReportLostSettlePublishesOnce(t *testing.T) {
 	f, _ := newAsyncStartFixture(t)
+	wrap, fault := installStoreFault(t, f.srv, func(inner store.Store, fs *storeFaultSwitch) *newerIntentOnRevertStore {
+		return &newerIntentOnRevertStore{Store: inner, fault: fs}
+	})
 	a := newD9Agent(t, f, "d9-pubonce-lost", d9Prior{"created memory", state.PhaseCreated, state.PhaseCreated})
-	// The wrapper is installed before any request, like the other store
-	// fault wrappers in this package; it acts only once armed.
-	wrap := &newerIntentOnRevertStore{Store: f.srv.store, agentID: a.ID}
-	f.srv.store = wrap
+	wrap.agentID = a.ID
 	code, body := lifecycleWithBody(t, f, a.ID, "start", map[string]bool{"acceptAsyncLaunch": true})
 	require.Equal(t, http.StatusOK, code, body)
 	row := getAgent(t, f.s, a.ID)
 	events := recordStatusEvents(t, f.srv)
-	wrap.armed.Store(true)
+	fault.Arm()
 	rec := postLaunchReport(t, f.srv, f.brokerID, a.ID, f.brokerID, AgentLaunchReport{
 		LaunchID: row.LaunchID, InstanceID: "inst-1", State: "failed", ErrorCode: "boom", Step: "pull", Message: "image pull failed",
 	})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	require.False(t, wrap.armed.Load(), "the newer intent was recorded at the revert")
+	require.True(t, wrap.fired.Load(), "the newer intent was recorded at the revert")
 	pub := events.forAgent(a.ID)
 	require.Len(t, pub, 1, "exactly one status event when the settle loses")
 	got := getAgent(t, f.s, a.ID)
