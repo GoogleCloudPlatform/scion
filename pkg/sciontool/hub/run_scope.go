@@ -61,6 +61,11 @@ type writeGate struct {
 	since     time.Time        // first refused write since then
 	nextWrite time.Time
 	stopped   bool
+	// pausedFP and pausedRefusedBy describe the latest refused write that
+	// set or extended the pause: the short fingerprint of the credential
+	// it presented and who refused it.
+	pausedFP        string
+	pausedRefusedBy string
 }
 
 func (g *writeGate) clock() time.Time {
@@ -82,6 +87,12 @@ func (g *writeGate) allow() error {
 
 // observe records the status of a sent write.
 func (g *writeGate) observe(status int) {
+	g.observeFrom(status, "", RefusedByNone)
+}
+
+// observeFrom is observe for a write that presented the credential with
+// short fingerprint fp and, when refused, was refused by refusedBy.
+func (g *writeGate) observeFrom(status int, fp, refusedBy string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	switch {
@@ -92,6 +103,7 @@ func (g *writeGate) observe(status int) {
 		if g.since.IsZero() {
 			g.since = now
 		}
+		g.pausedFP, g.pausedRefusedBy = fp, refusedBy
 		if now.Sub(g.since) >= refusedWriteStopAfter {
 			g.stopped = true
 			return
@@ -112,4 +124,13 @@ func (g *writeGate) reset() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.refused, g.since, g.nextWrite, g.stopped = false, time.Time{}, time.Time{}, false
+	g.pausedFP, g.pausedRefusedBy = "", RefusedByNone
+}
+
+// pausedBy returns the fingerprint and refusal source of the refused write
+// that set the current pause.
+func (g *writeGate) pausedBy() (fp, refusedBy string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.pausedFP, g.pausedRefusedBy
 }
