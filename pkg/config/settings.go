@@ -15,17 +15,11 @@
 package config
 
 import (
-	"encoding/json"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
-	"github.com/GoogleCloudPlatform/scion/pkg/util"
-	"gopkg.in/yaml.v3"
 )
 
 // Note: Settings files support YAML (preferred) and JSONC formats.
@@ -281,282 +275,6 @@ func mergeMaps(base, override map[string]string) map[string]string {
 	return result
 }
 
-// LoadSettings loads and merges settings from the hierarchy using Koanf.
-// Priority: Env vars > Project > Global > Defaults
-// Supports both YAML (.yaml/.yml) and JSON (.json) files, preferring YAML.
-func LoadSettings(projectPath string) (*Settings, error) {
-	return LoadSettingsKoanf(projectPath)
-}
-
-func expandEnvMap(m map[string]string) map[string]string {
-	if m == nil {
-		return nil
-	}
-	expanded := make(map[string]string)
-	for k, v := range m {
-		// These maps become agent env, so names refused for agents
-		// (util.IsAgentRefusedHostEnvName) expand to empty.
-		ek, _, refusedInKey := util.ExpandEnvRefusing(k, util.IsAgentRefusedHostEnvName)
-		val, _, refusedInValue := util.ExpandEnvRefusing(v, util.IsAgentRefusedHostEnvName)
-		for _, name := range append(refusedInKey, refusedInValue...) {
-			slog.Warn("settings env: host environment variable is reserved for the server and is not expanded", "variable", name)
-		}
-		if ek == "" {
-			continue
-		}
-		expanded[ek] = val
-	}
-	return expanded
-}
-
-// expandAgentVisiblePath expands ${VAR} references in a path an agent can see,
-// with names refused for agents (util.IsAgentRefusedHostEnvName) expanding to
-// empty and logged by name.
-func expandAgentVisiblePath(path string) string {
-	expanded, _, refused := util.ExpandEnvRefusing(path, util.IsAgentRefusedHostEnvName)
-	for _, name := range refused {
-		slog.Warn("settings volume: host environment variable is reserved and is not expanded", "variable", name)
-	}
-	return expanded
-}
-
-func expandVolumeMounts(volumes []api.VolumeMount) []api.VolumeMount {
-	if volumes == nil {
-		return nil
-	}
-	expanded := make([]api.VolumeMount, len(volumes))
-	for i, v := range volumes {
-		// Mount paths are visible to the agent, so names refused for
-		// agents expand to empty.
-		s := expandAgentVisiblePath(v.Source)
-		t := expandAgentVisiblePath(v.Target)
-		expanded[i] = api.VolumeMount{
-			Source:   s,
-			Target:   t,
-			ReadOnly: v.ReadOnly,
-			Type:     v.Type,
-			Bucket:   v.Bucket,
-			Prefix:   v.Prefix,
-			Mode:     v.Mode,
-		}
-	}
-	return expanded
-}
-
-func MergeSettings(base *Settings, data []byte) error {
-	var override Settings
-	if err := util.UnmarshalJSONC(data, &override); err != nil {
-		return err
-	}
-
-	if override.ProjectID != "" {
-		base.ProjectID = override.ProjectID
-	}
-	if override.ActiveProfile != "" {
-		base.ActiveProfile = override.ActiveProfile
-	}
-	if override.DefaultTemplate != "" {
-		base.DefaultTemplate = override.DefaultTemplate
-	}
-
-	// Merge bucket config with env var expansion
-	if override.Bucket != nil {
-		if base.Bucket == nil {
-			base.Bucket = &BucketConfig{}
-		}
-		if override.Bucket.Provider != "" {
-			p, _ := util.ExpandEnv(override.Bucket.Provider)
-			base.Bucket.Provider = p
-		}
-		if override.Bucket.Name != "" {
-			n, _ := util.ExpandEnv(override.Bucket.Name)
-			base.Bucket.Name = n
-		}
-		if override.Bucket.Prefix != "" {
-			pf, _ := util.ExpandEnv(override.Bucket.Prefix)
-			base.Bucket.Prefix = pf
-		}
-	}
-
-	if override.CLI != nil {
-		if base.CLI == nil {
-			base.CLI = &CLIConfig{}
-		}
-		if override.CLI.AutoHelp != nil {
-			base.CLI.AutoHelp = override.CLI.AutoHelp
-		}
-	}
-
-	// Merge hub_connections map
-	if override.HubConnections != nil {
-		if base.HubConnections == nil {
-			base.HubConnections = make(map[string]HubConnectionConfig)
-		}
-		for k, v := range override.HubConnections {
-			existing := base.HubConnections[k]
-			if v.Endpoint != "" {
-				existing.Endpoint = v.Endpoint
-			}
-			base.HubConnections[k] = existing
-		}
-	}
-
-	if override.Runtimes != nil {
-		if base.Runtimes == nil {
-			base.Runtimes = make(map[string]RuntimeConfig)
-		}
-		for k, v := range override.Runtimes {
-			existing := base.Runtimes[k]
-			if v.Host != "" {
-				existing.Host = v.Host
-			}
-			if v.Context != "" {
-				existing.Context = v.Context
-			}
-			if v.Namespace != "" {
-				existing.Namespace = v.Namespace
-			}
-			if v.Env != nil {
-				existing.Env = mergeMaps(existing.Env, expandEnvMap(v.Env))
-			}
-			if v.Sync != "" {
-				existing.Sync = v.Sync
-			}
-			base.Runtimes[k] = existing
-		}
-	}
-	if override.Harnesses != nil {
-		if base.Harnesses == nil {
-			base.Harnesses = make(map[string]HarnessConfig)
-		}
-		for k, v := range override.Harnesses {
-			existing := base.Harnesses[k]
-			if v.Image != "" {
-				existing.Image = v.Image
-			}
-			if v.User != "" {
-				existing.User = v.User
-			}
-			if v.AuthSelectedType != "" {
-				existing.AuthSelectedType = v.AuthSelectedType
-			}
-			if v.Env != nil {
-				existing.Env = mergeMaps(existing.Env, expandEnvMap(v.Env))
-			}
-			if v.Volumes != nil {
-				existing.Volumes = append(existing.Volumes, expandVolumeMounts(v.Volumes)...)
-			}
-			base.Harnesses[k] = existing
-		}
-	}
-	if override.Profiles != nil {
-		if base.Profiles == nil {
-			base.Profiles = make(map[string]ProfileConfig)
-		}
-		for k, v := range override.Profiles {
-			existing := base.Profiles[k]
-			if v.Runtime != "" {
-				existing.Runtime = v.Runtime
-			}
-			if v.Volumes != nil {
-				existing.Volumes = append(existing.Volumes, expandVolumeMounts(v.Volumes)...)
-			}
-			if v.Resources != nil {
-				existing.Resources = MergeResourceSpec(existing.Resources, v.Resources)
-			}
-			if v.HarnessOverrides != nil {
-				if existing.HarnessOverrides == nil {
-					existing.HarnessOverrides = make(map[string]HarnessOverride)
-				}
-				for hk, hv := range v.HarnessOverrides {
-					hov := existing.HarnessOverrides[hk]
-					if hv.Image != "" {
-						hov.Image = hv.Image
-					}
-					if hv.User != "" {
-						hov.User = hv.User
-					}
-					if hv.AuthSelectedType != "" {
-						hov.AuthSelectedType = hv.AuthSelectedType
-					}
-					if hv.Env != nil {
-						hov.Env = mergeMaps(hov.Env, expandEnvMap(hv.Env))
-					}
-					if hv.Volumes != nil {
-						hov.Volumes = append(hov.Volumes, expandVolumeMounts(hv.Volumes)...)
-					}
-					if hv.Resources != nil {
-						hov.Resources = MergeResourceSpec(hov.Resources, hv.Resources)
-					}
-					existing.HarnessOverrides[hk] = hov
-				}
-			}
-			base.Profiles[k] = existing
-		}
-	}
-
-	return nil
-}
-
-// SaveSettings saves the settings to the specified location in YAML format.
-func SaveSettings(projectPath string, settings *Settings, global bool) error {
-	var targetPath string
-	if global {
-		globalDir, err := GetGlobalDir()
-		if err != nil {
-			return err
-		}
-		targetPath = filepath.Join(globalDir, "settings.yaml")
-	} else {
-		if projectPath == "" {
-			return fmt.Errorf("project path required for local settings")
-		}
-		targetPath = filepath.Join(projectPath, "settings.yaml")
-	}
-
-	dir := filepath.Dir(targetPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-
-	data, err := yaml.Marshal(settings)
-	if err != nil {
-		return err
-	}
-
-	return os.WriteFile(targetPath, data, 0644)
-}
-
-// SaveSettingsJSON saves the settings to the specified location in JSON format.
-// This is provided for backward compatibility.
-func SaveSettingsJSON(projectPath string, settings *Settings, global bool) error {
-	var targetPath string
-	if global {
-		globalDir, err := GetGlobalDir()
-		if err != nil {
-			return err
-		}
-		targetPath = filepath.Join(globalDir, "settings.json")
-	} else {
-		if projectPath == "" {
-			return fmt.Errorf("project path required for local settings")
-		}
-		targetPath = filepath.Join(projectPath, "settings.json")
-	}
-
-	dir := filepath.Dir(targetPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-
-	data, err := json.MarshalIndent(settings, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	return os.WriteFile(targetPath, data, 0644)
-}
-
 // UpdateSetting updates a specific setting key in the specified scope (global or local).
 // It reads from existing settings file (YAML or JSON) and writes to YAML format.
 // If the existing file is in v1 versioned format (has schema_version), it delegates
@@ -574,6 +292,9 @@ func UpdateSetting(projectPath string, key string, value string, global bool) er
 	if err := ValidateSettingWrite(key, layerGlobal); err != nil {
 		return err
 	}
+	if err := ValidateSettingValue(key, value); err != nil {
+		return err
+	}
 	var dir string
 	if global {
 		globalDir, err := GetGlobalDir()
@@ -587,11 +308,20 @@ func UpdateSetting(projectPath string, key string, value string, global bool) er
 		}
 		// Resolve through GetProjectConfigDir so that git projects with split
 		// storage write to the external config dir (~/.scion/project-configs/…)
-		// — the same location LoadSettingsKoanf reads from. This also
+		// — the same location the settings loader reads from. This also
 		// migrates a project's legacy id file to its canonical name as a
 		// side effect, via ReadProjectID.
 		dir = GetProjectConfigDir(projectPath)
 	}
+
+	// One settings lock from the format check through any auto-migration
+	// to the update, so no other writer runs in between (see
+	// LockSettingsDir).
+	lock, err := LockSettingsDir(dir)
+	if err != nil {
+		return err
+	}
+	defer lock.Unlock()
 
 	// Find existing settings file (YAML or JSON)
 	existingPath := GetSettingsPath(dir)
@@ -602,224 +332,24 @@ func UpdateSetting(projectPath string, key string, value string, global bool) er
 		if err == nil {
 			if version, _ := DetectSettingsFormat(data); version != "" {
 				// Delegate to versioned handler to preserve v1 format
-				return UpdateVersionedSetting(dir, key, value)
+				return updateVersionedSettingLocked(lock, dir, key, value)
 			}
 			// Legacy format detected — auto-migrate to v1 before updating
 			fmt.Fprintf(os.Stderr, "Warning: settings file %s uses legacy format. Auto-migrating to v1 schema.\n", existingPath)
 			fmt.Fprintf(os.Stderr, "  You can also run 'scion config migrate' to migrate manually.\n")
-			result, err := MigrateSettingsFile(dir, false)
+			result, err := migrateSettingsFileLocked(lock, dir, false)
 			if err != nil {
 				return fmt.Errorf("auto-migration of legacy settings failed: %w\n  Run 'scion config migrate' to migrate manually", err)
 			}
 			for _, w := range result.Warnings {
 				fmt.Fprintf(os.Stderr, "  Migration warning: %s\n", w)
 			}
-			return UpdateVersionedSetting(dir, key, value)
+			return updateVersionedSettingLocked(lock, dir, key, value)
 		}
 	}
 
 	// No existing file — create a new v1 settings file via the versioned handler
-	return UpdateVersionedSetting(dir, key, value)
-}
-
-func GetSettingValue(s *Settings, key string) (string, error) {
-	if projectkeys.IsProjectIDConfigKey(key) {
-		return s.ProjectID, nil
-	}
-	if projectkeys.IsHubProjectIDConfigKey(key) {
-		if s.Hub != nil {
-			return s.Hub.ProjectID, nil
-		}
-		return "", nil
-	}
-	switch key {
-	case "active_profile":
-		return s.ActiveProfile, nil
-	case "default_template":
-		return s.DefaultTemplate, nil
-	case "bucket.provider":
-		if s.Bucket != nil {
-			return s.Bucket.Provider, nil
-		}
-		return "", nil
-	case "bucket.name":
-		if s.Bucket != nil {
-			return s.Bucket.Name, nil
-		}
-		return "", nil
-	case "bucket.prefix":
-		if s.Bucket != nil {
-			return s.Bucket.Prefix, nil
-		}
-		return "", nil
-	case "hub.endpoint":
-		if s.Hub != nil {
-			return s.Hub.Endpoint, nil
-		}
-		return "", nil
-	case "hub.token":
-		if s.Hub != nil {
-			return s.Hub.Token, nil
-		}
-		return "", nil
-	case "hub.apiKey":
-		if s.Hub != nil {
-			return s.Hub.APIKey, nil
-		}
-		return "", nil
-	case "hub.brokerId":
-		if s.Hub != nil {
-			return s.Hub.BrokerID, nil
-		}
-		return "", nil
-	case "hub.brokerToken":
-		if s.Hub != nil {
-			return s.Hub.BrokerToken, nil
-		}
-		return "", nil
-	case "hub.brokerNickname":
-		if s.Hub != nil {
-			return s.Hub.BrokerNickname, nil
-		}
-		return "", nil
-	case "hub.enabled":
-		if s.Hub != nil && s.Hub.Enabled != nil {
-			if *s.Hub.Enabled {
-				return "true", nil
-			}
-			return "false", nil
-		}
-		return "", nil
-	case "hub.linked":
-		if s.Hub != nil && s.Hub.Linked != nil {
-			if *s.Hub.Linked {
-				return "true", nil
-			}
-			return "false", nil
-		}
-		return "", nil
-	case "hub.local_only":
-		if s.Hub != nil && s.Hub.LocalOnly != nil {
-			if *s.Hub.LocalOnly {
-				return "true", nil
-			}
-			return "false", nil
-		}
-		return "", nil
-	case "hub.lastSyncedAt":
-		if s.Hub != nil {
-			return s.Hub.LastSyncedAt, nil
-		}
-		return "", nil
-	case "cli.autohelp":
-		if s.CLI != nil && s.CLI.AutoHelp != nil {
-			if *s.CLI.AutoHelp {
-				return "true", nil
-			}
-			return "false", nil
-		}
-		return "", nil
-	case "cli.mode":
-		if s.CLI != nil {
-			return s.CLI.Mode, nil
-		}
-		return "", nil
-	case "hub.transport.mode":
-		if s.Hub != nil && s.Hub.Transport != nil {
-			return s.Hub.Transport.Mode, nil
-		}
-		return "", nil
-	case "hub.transport.audience":
-		if s.Hub != nil && s.Hub.Transport != nil {
-			return s.Hub.Transport.Audience, nil
-		}
-		return "", nil
-	}
-
-	// Handle hub_connections.<name>.endpoint keys
-	if strings.HasPrefix(key, "hub_connections.") {
-		parts := strings.SplitN(key, ".", 3)
-		if len(parts) == 3 && parts[2] == "endpoint" {
-			if s.HubConnections != nil {
-				if conn, ok := s.HubConnections[parts[1]]; ok {
-					return conn.Endpoint, nil
-				}
-			}
-			return "", nil
-		}
-	}
-
-	return "", fmt.Errorf("unknown or complex setting key: %s", key)
-}
-
-func GetSettingsMap(s *Settings) map[string]string {
-	m := make(map[string]string)
-	m["project_id"] = s.ProjectID
-	m["active_profile"] = s.ActiveProfile
-	m["default_template"] = s.DefaultTemplate
-	if s.Bucket != nil {
-		m["bucket.provider"] = s.Bucket.Provider
-		m["bucket.name"] = s.Bucket.Name
-		m["bucket.prefix"] = s.Bucket.Prefix
-	}
-	if s.Hub != nil {
-		if s.Hub.Enabled != nil {
-			if *s.Hub.Enabled {
-				m["hub.enabled"] = "true"
-			} else {
-				m["hub.enabled"] = "false"
-			}
-		}
-		if s.Hub.Linked != nil {
-			if *s.Hub.Linked {
-				m["hub.linked"] = "true"
-			} else {
-				m["hub.linked"] = "false"
-			}
-		}
-		if s.Hub.LocalOnly != nil {
-			if *s.Hub.LocalOnly {
-				m["hub.local_only"] = "true"
-			} else {
-				m["hub.local_only"] = "false"
-			}
-		}
-		m["hub.endpoint"] = s.Hub.Endpoint
-		// Don't include secrets in the map by default
-		if s.Hub.Token != "" {
-			m["hub.token"] = "********" // Mask token
-		}
-		if s.Hub.APIKey != "" {
-			m["hub.apiKey"] = "********" // Mask API key
-		}
-		m["hub.projectId"] = s.Hub.ProjectID
-		m["hub.brokerId"] = s.Hub.BrokerID
-		m["hub.brokerNickname"] = s.Hub.BrokerNickname
-		if s.Hub.BrokerToken != "" {
-			m["hub.brokerToken"] = "********" // Mask broker token
-		}
-		m["hub.lastSyncedAt"] = s.Hub.LastSyncedAt
-		if s.Hub.Transport != nil {
-			m["hub.transport.mode"] = s.Hub.Transport.Mode
-			m["hub.transport.audience"] = s.Hub.Transport.Audience
-		}
-	}
-	if s.CLI != nil {
-		if s.CLI.AutoHelp != nil {
-			if *s.CLI.AutoHelp {
-				m["cli.autohelp"] = "true"
-			} else {
-				m["cli.autohelp"] = "false"
-			}
-		}
-		if s.CLI.Mode != "" {
-			m["cli.mode"] = s.CLI.Mode
-		}
-	}
-	for name, conn := range s.HubConnections {
-		m["hub_connections."+name+".endpoint"] = conn.Endpoint
-	}
-	return m
+	return updateVersionedSettingLocked(lock, dir, key, value)
 }
 
 // GetHubEndpoint returns the Hub endpoint from settings, or empty string if not configured.
@@ -878,8 +408,9 @@ func (s *Settings) IsHubExplicitlyDisabled() bool {
 // the whole content of a versioned file (ptone/scion#3497). A JSON file is
 // converted to settings.yaml, as before. A missing file is left missing.
 //
-// It does not take LockSettingsFile, as before; a caller that needs the
-// read-modify-write serialised holds the lock around the call.
+// It takes the settings lock for the settings directory (see
+// LockSettingsDir); a caller that already holds it, for a read-modify-write
+// of its own, uses DeleteHubConnectionLocked.
 func DeleteHubConnection(projectPath string, name string, global bool) error {
 	var dir string
 	if global {
@@ -894,9 +425,23 @@ func DeleteHubConnection(projectPath string, name string, global bool) error {
 		}
 		// Resolve through GetProjectConfigDir so that git projects with split
 		// storage write to the external config dir (~/.scion/project-configs/…)
-		// — the same location LoadSettingsKoanf reads from.
+		// — the same location the settings loader reads from.
 		dir = GetProjectConfigDir(projectPath)
 	}
 
-	return deleteHubConnectionFromFile(dir, name)
+	lock, err := LockSettingsDir(dir)
+	if err != nil {
+		return err
+	}
+	defer lock.Unlock()
+	return deleteHubConnectionFromFile(lock, dir, name)
+}
+
+// DeleteHubConnectionLocked is DeleteHubConnection for the settings
+// directory whose settings lock the caller holds.
+func DeleteHubConnectionLocked(lock *SettingsLock, name string) error {
+	if err := lock.checkFor(filepath.Join(lock.dir, "settings.yaml")); err != nil {
+		return err
+	}
+	return deleteHubConnectionFromFile(lock, lock.dir, name)
 }

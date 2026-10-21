@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -119,6 +120,12 @@ type TestIdentityDelegationView struct {
 	RevokedAt   *time.Time `json:"revokedAt,omitempty"`
 	RevokedBy   string     `json:"revokedBy,omitempty"`
 	Live        bool       `json:"live"`
+	// GrantorKind is "human" or "test_infra_offline" (phase DL: created by
+	// the offline host command; GrantorID is then a reserved id that names
+	// no user).
+	GrantorKind string `json:"grantorKind"`
+	// HubID is the hub id an offline delegation is bound to.
+	HubID string `json:"hubId,omitempty"`
 }
 
 // testIdentityDelegationViewOf renders d. Live uses the auth arm's own
@@ -127,7 +134,22 @@ type TestIdentityDelegationView struct {
 // allowlist covers), so a delegation that mints nothing, for example one
 // whose subject was removed at a restart, is not shown as live. wi may be
 // nil (no workload issuer configured): nothing is live then.
-func testIdentityDelegationViewOf(d *store.TestIdentityDelegation, now time.Time, wi *workloadIssuerAuthenticator) TestIdentityDelegationView {
+//
+// An offline delegation (phase DL) is live only if the offline gate also
+// passes now (read through st, which must not be inside a transaction the
+// caller holds open); an unknown grantor kind is never live.
+func testIdentityDelegationViewOf(ctx context.Context, st store.Store, d *store.TestIdentityDelegation, now time.Time, wi *workloadIssuerAuthenticator) TestIdentityDelegationView {
+	live := wi != nil && wi.checkDelegationLive(d, now) == nil
+	switch d.EffectiveGrantorKind() {
+	case store.DelegationGrantorHuman:
+	case store.DelegationGrantorTestInfraOffline:
+		if live {
+			_, refusal := wi.offlineGrantorGate(ctx, st, d)
+			live = refusal == nil
+		}
+	default:
+		live = false
+	}
 	v := TestIdentityDelegationView{
 		ID:          d.ID,
 		GrantorID:   d.GrantorID,
@@ -137,7 +159,9 @@ func testIdentityDelegationViewOf(d *store.TestIdentityDelegation, now time.Time
 		Created:     d.Created,
 		ExpiresAt:   d.ExpiresAt,
 		RevokedAt:   d.RevokedAt,
-		Live:        wi != nil && wi.checkDelegationLive(d, now) == nil,
+		Live:        live,
+		GrantorKind: d.EffectiveGrantorKind(),
+		HubID:       d.HubID,
 	}
 	// The stored cap is the delegation's per-delegation identity cap for
 	// its scope's tier.
@@ -386,6 +410,9 @@ func (s *Server) handleCreateTestIdentityDelegation(w http.ResponseWriter, r *ht
 		Label:       label,
 		Created:     now,
 		ExpiresAt:   now.Add(ttl),
+		// The API creates human-grantor delegations only (the store
+		// refuses any other kind).
+		GrantorKind: store.DelegationGrantorHuman,
 	}
 	auditActor := s.buildAuditActorFromContext(ctx)
 	err := s.store.WithTx(ctx, func(tx store.Store) error {
@@ -418,7 +445,7 @@ func (s *Server) handleCreateTestIdentityDelegation(w http.ResponseWriter, r *ht
 	}
 	slog.InfoContext(ctx, "test identity issuer delegation created", "delegation_id", d.ID, "grantor_id", d.GrantorID,
 		"workload_sub", d.WorkloadSub, "scope", d.Scope, "identity_cap", d.MemberCap, "expires_at", d.ExpiresAt)
-	writeJSON(w, http.StatusCreated, testIdentityDelegationViewOf(d, now, s.workloadIssuer))
+	writeJSON(w, http.StatusCreated, testIdentityDelegationViewOf(ctx, s.store, d, now, s.workloadIssuer))
 }
 
 // handleListTestIdentityDelegations handles GET
@@ -455,7 +482,7 @@ func (s *Server) handleListTestIdentityDelegations(w http.ResponseWriter, r *htt
 	now := s.testIdentities.clock()
 	items := make([]TestIdentityDelegationView, 0, len(rows))
 	for i := range rows {
-		items = append(items, testIdentityDelegationViewOf(&rows[i], now, s.workloadIssuer))
+		items = append(items, testIdentityDelegationViewOf(ctx, s.store, &rows[i], now, s.workloadIssuer))
 	}
 	writeJSON(w, http.StatusOK, ListTestIdentityDelegationsResponse{Items: items, Truncated: truncated})
 }

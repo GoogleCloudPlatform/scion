@@ -127,6 +127,10 @@ const (
 	// and this node cannot deliver renewals on the route (contracts,
 	// Renewal path unavailable).
 	tunnelStreamRenewalUnavailable
+	// tunnelAgentUpgradeRequired: target-side deadlines are enforced in
+	// external relay mode and the target session does not renew stream
+	// authorization (contracts, Target lacks stream renewal).
+	tunnelAgentUpgradeRequired
 	tunnelInternal
 	// Placement refusals (409): the grant was refused for a pinned agent
 	// whose saved placement is inconsistent (mintConduitGrant), one entry
@@ -158,6 +162,7 @@ var conduitTunnelFailures = map[conduitTunnelFailure]struct {
 	tunnelGrantKeysUnavailable:     {http.StatusServiceUnavailable, ErrCodeUnavailable, relay.ReasonGrantKeysUnavailable},
 	tunnelConduitNotServing:        {http.StatusServiceUnavailable, ErrCodeUnavailable, ptyReasonConduitNotServing},
 	tunnelStreamRenewalUnavailable: {http.StatusServiceUnavailable, ErrCodeUnavailable, conduitReasonStreamRenewalUnavailable},
+	tunnelAgentUpgradeRequired:     {http.StatusConflict, ErrCodeAgentUpgradeRequired, conduitReasonStreamRenewalUnsupported},
 	tunnelInternal:                 {http.StatusInternalServerError, ErrCodeInternalError, ""},
 	tunnelPlacementPinStale:        {http.StatusConflict, ErrCodeRuntimeTargetPinStale, ""},
 	tunnelPlacementBrokerMissing:   {http.StatusConflict, ErrCodeRuntimeBrokerMissing, ""},
@@ -443,7 +448,7 @@ func (ts *conduitTunnelSession) open(ctx context.Context, ls conduit.LocalSessio
 	ts.commit(t)
 	committed = true
 	go t.run(ts)
-	log.Info("Conduit tunnel opened", "stream_id", user.ID())
+	log.Info("Conduit tunnel opened", append([]any{"stream_id", user.ID(), "target_session_id", opened.target.SessionID}, opened.route...)...)
 	return resp, nil
 }
 
@@ -623,9 +628,12 @@ func (s *Server) authorizeConduitTunnel(ctx context.Context, identity UserIdenti
 	}
 }
 
-// conduitTunnelBrokerOffline reports whether the stored broker row says
-// the agent's broker is offline. A missing row is not treated as offline
-// (the session resolution decides then); a read that fails is returned.
+// conduitTunnelBrokerOffline reports whether the agent's broker is offline:
+// its stored status is offline and it is not present (brokerPresence), so a
+// broker with a live registry session is not refused on a stale status, and
+// nothing that passed before is refused. A missing row is not treated as
+// offline (the session resolution decides then); a read that fails is
+// returned.
 func (s *Server) conduitTunnelBrokerOffline(ctx context.Context, agent *store.Agent) (bool, error) {
 	if agent.RuntimeBrokerID == "" {
 		return false, nil
@@ -639,7 +647,7 @@ func (s *Server) conduitTunnelBrokerOffline(ctx context.Context, agent *store.Ag
 	case b == nil:
 		return false, nil
 	}
-	return b.Status == store.BrokerStatusOffline, nil
+	return b.Status == store.BrokerStatusOffline && !s.brokerPresence(ctx, b).Connected, nil
 }
 
 // openTarget resolves the agent's session that serves kind, mints a grant
@@ -661,6 +669,9 @@ func (ts *conduitTunnelSession) openTarget(ctx context.Context, rtr *router.Rout
 	}
 	err := rtr.Do(ctx, req, func(ctx context.Context, res router.Resolved) error {
 		renews, canRenew := conduitTargetRenews(res), ts.s.conduitRouteCanRenew(res)
+		if ts.s.conduitTargetUpgradeRequired(ctx, ts.identity, renews, conduitRouteTunnel, agent.ID) {
+			return errConduitAgentUpgradeRequired
+		}
 		if ts.s.conduitRenewalPathUnavailable(ctx, ts.identity, renews, canRenew, conduitRouteTunnel, agent.ID) {
 			return errConduitStreamRenewalUnavailable
 		}
@@ -697,6 +708,7 @@ func (ts *conduitTunnelSession) openTarget(ctx context.Context, rtr *router.Rout
 		opened.grant, opened.claims = tok, claims
 		opened.target = conduitLeafTarget(res, st, bridge)
 		opened.renew = conduitStreamRenewal(res, st, claims != nil && !claims.AuthzUntil.IsZero())
+		opened.route = conduitRouteLogAttrs(res)
 		return nil
 	})
 	if err != nil {
@@ -713,18 +725,22 @@ type conduitTunnelOpened struct {
 	claims *grant.Claims
 	target relay.TargetStream
 	renew  func(grant []byte) error
+	// route holds the routing log fields (conduitRouteLogAttrs).
+	route []any
 }
 
 // conduitTunnelMintErrPassesThrough reports whether a mintConduitGrant
 // error keeps its own refusal: an authorization, request or experiment
-// refusal, a placement refusal (409), or a placement check that could not
+// refusal, a target without stream renewal (409), a placement refusal
+// (409), or a placement check that could not
 // read the store (registry unavailable). Any other mint error is the
 // signing key set failing.
 func conduitTunnelMintErrPassesThrough(err error) bool {
 	var placement *PlacementConflictError
 	return errors.Is(err, errConduitForbidden) || errors.Is(err, errConduitInvalid) || errors.Is(err, errConduitDisabled) ||
 		errors.As(err, &placement) || errors.Is(err, router.ErrRegistryUnavailable) ||
-		errors.Is(err, errConduitStreamRenewalUnavailable) || errors.Is(err, errConduitGrantInternal)
+		errors.Is(err, errConduitStreamRenewalUnavailable) || errors.Is(err, errConduitAgentUpgradeRequired) ||
+		errors.Is(err, errConduitGrantInternal)
 }
 
 // errConduitTunnelGrantKeys marks a grant that could not be signed.
@@ -779,6 +795,8 @@ func conduitTunnelOpenError(err error) error {
 		return tunnelRefusal(tunnelRegistryUnavailable, "conduit routing is temporarily unavailable")
 	case errors.Is(err, errConduitStreamRenewalUnavailable):
 		return tunnelRefusal(tunnelStreamRenewalUnavailable, "%s", conduitStreamRenewalUnavailableMessage)
+	case errors.Is(err, errConduitAgentUpgradeRequired):
+		return tunnelRefusal(tunnelAgentUpgradeRequired, "%s", conduitAgentUpgradeRequiredMessage)
 	case errors.Is(err, errConduitGrantInternal):
 		return tunnelRefusal(tunnelInternal, "internal error")
 	case errors.Is(err, errConduitTunnelGrantKeys):

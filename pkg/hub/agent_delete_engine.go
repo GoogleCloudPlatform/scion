@@ -702,6 +702,14 @@ func (e *deletionEngine) run() deletionOutcome {
 		defer cancel()
 		s.ClearTopicDefaultAgent(ctx, agent.ID, agent.Slug, agent.ProjectID)
 	})
+	// Pause the schedules whose authority is this agent, with status
+	// reason creator_deleted (ptone/scion#5403). Run only after the delete
+	// committed; the schedule evaluator pauses any it misses.
+	e.tailStep("pause authored schedules", func() {
+		ctx, cancel := context.WithTimeout(e.base, deleteStepTimeout)
+		defer cancel()
+		s.pauseSchedulesAuthoredByAgent(ctx, agent)
+	})
 
 	return deletionOutcome{kind: deletionOutcomeDeleted}
 }

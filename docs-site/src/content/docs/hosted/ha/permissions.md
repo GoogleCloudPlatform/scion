@@ -154,6 +154,18 @@ For Policy Troubleshooter to evaluate a caller's IAM permission across the organ
 
 The Hub's identity needs access to run the Policy Troubleshooter check against the project or organization that holds each target service account. Until it has that access, service account assignment is denied.
 
+When check mode is `enforce`, the Hub's service account needs `roles/iam.securityReviewer` in **every** GCP project that holds a service account you assign, not only in the Hub's own project. A grant at the organization level covers all projects in it. For a service account in another project, grant the role on that project:
+
+```bash
+gcloud projects add-iam-policy-binding <service-account-project> \
+  --member="serviceAccount:<hub-service-account>" \
+  --role="roles/iam.securityReviewer"
+```
+
+If the role is missing there, assignment is refused with `403` and a message that names the service account's GCP project, the Hub's service account and the IAM Security Reviewer role, and gives this command with both values filled in. If the Hub does not know its own service account email, or the project ID or that email does not have the shape of a GCP project ID or service account email, the refusal instead uses the generic message below; grant the role as shown above. Retrying does not help until the role is granted. Other check failures, such as the Policy Troubleshooter API being disabled or a transient error, keep the message "Could not verify your permission to use this GCP service account because the check did not complete; try again".
+
+Registering or verifying a service account checks this ahead of time. When check mode is `enforce` and the account is in a GCP project other than the Hub's own, the Hub asks Policy Troubleshooter about that project. If the Hub's service account is refused there, or the project is not found, the response still succeeds and carries the same message, with the gcloud command, in its `warnings` list: registration returns it with `201`, and verification only with `200`, since a verification that fails returns its error without warnings. A project that does not exist and one the Hub may not read give the same response. The warning is advisory only: it does not block registration or change the account's verification status. Other outcomes of that call, including a disabled API or a transient error, add no warning. Accounts in the Hub's own project, and all accounts while check mode is `off`, are not checked this way.
+
 If the check cannot run because of the Hub's identity, that Hub instance reports the check `sa_assign_check` as `degraded` in its health row, and the admin health summary (`GET /api/v1/admin/health/summary`) reports it in a `service_account_check` section that lists the instances reporting it. Every Hub replica returns the same section.
 
 ### Start-Time Admissibility Check
@@ -387,8 +399,8 @@ To prevent security bypasses via sub-agent creation, Scion enforces strict no-es
 To ensure security policies stay up-to-date and to support legacy agents created prior to the tiered role rollout, the Hub re-derives permissions from the agent's stored role during token refresh (`RefreshAgentToken`), rather than copying old JWT scopes verbatim.
 - **Legacy Agent Compatibility**: Legacy agents that do not have a stored role default to the `full` role. This prevents production regressions where standing agents lose modern required scopes (such as `project:read`, `project:agent:lifecycle`, or secret access) after a token refresh.
 
-#### Deprecation of Raw Template Scopes
-With the introduction of tiered agent roles, the raw template field `hubAccess.scopes` has been **deprecated**. Agent permissions must be configured via the named roles.
+#### Raw Template Scopes Removed
+With the introduction of tiered agent roles, the raw template field `hubAccess.scopes` no longer has any effect: the Hub does not read it from templates or record it on agents ([ptone/scion#4224](https://github.com/ptone/scion/issues/4224)), and the CLI warns when a local template file still sets it. Agent permissions are configured via the named roles.
 
 ## Implementation Status
 

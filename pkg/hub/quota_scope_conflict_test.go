@@ -507,9 +507,21 @@ func TestReassert_DifferentScopeNotOverwritten(t *testing.T) {
 func TestSweep_PinnedScopeConflictReportedNotMoved(t *testing.T) {
 	srv, s := testServer(t)
 	conflicts := scopeConflictCounter(t, srv.quotaService)
+	// brokerD is registered first and kept out of the sweep's list (the
+	// list holds the newest brokers first and is capped below), so a row
+	// on it is unlisted but live: the deregistered-scope pass leaves it.
+	brokerD, _ := newQuotaTestBrokerAndProject(t, s, "sweep-d")
+	time.Sleep(5 * time.Millisecond)
 	brokerA, _ := newQuotaTestBrokerAndProject(t, s, "sweep-a")
+	time.Sleep(5 * time.Millisecond)
 	brokerB, projectB := newQuotaTestFlatBrokerAndProject(t, s, "sweep-b")
+	time.Sleep(5 * time.Millisecond)
 	brokerC, projectC := newQuotaTestBrokerAndProject(t, s, "sweep-c")
+	all, err := s.ListRuntimeBrokers(context.Background(), store.RuntimeBrokerFilter{}, store.ListOptions{})
+	require.NoError(t, err)
+	oldLimit := reconcileBrokerListLimit
+	reconcileBrokerListLimit = len(all.Items) - 1 // every broker but the oldest, brokerD
+	t.Cleanup(func() { reconcileBrokerListLimit = oldLimit })
 	def, err := s.GetLimitDefinitionByName(context.Background(), store.LimitMaxAgentsPerBroker)
 	require.NoError(t, err)
 	old := time.Now().Add(-2 * reconcileMinReservationAge)
@@ -521,10 +533,12 @@ func TestSweep_PinnedScopeConflictReportedNotMoved(t *testing.T) {
 	})
 	require.True(t, agentHoldsBrokerCapacity(queued), "a queued stop holds capacity")
 	queuedRow := seedBrokerRow(t, s, def.ID, brokerA.ID, queued.ID, old)
-	// A pinned agent whose row is on a broker that is not listed (deleted):
-	// the backfill on B reports it and writes nothing.
+	// A pinned agent whose row is on a registered broker that is not listed
+	// (beyond the list cap): the backfill on B reports it and writes
+	// nothing. (A row on a deleted broker is released instead; see
+	// TestSweep_DeregisteredBrokerScope_ReleasesReservation_Audited.)
 	orphaned := pinnedQuotaAgent(t, s, brokerB, projectB, "sweep-orphaned", state.PhaseRunning)
-	orphanedRow := seedBrokerRow(t, s, def.ID, tid("broker-deleted"), orphaned.ID, old)
+	orphanedRow := seedBrokerRow(t, s, def.ID, brokerD.ID, orphaned.ID, old)
 	// Control: an unpinned agent keeps today's rule (an old row of a stopped
 	// agent is released wherever it is).
 	unpinned := newQuotaTestAgent(t, s, brokerC, projectC, "sweep-unpinned", state.PhaseStopped)

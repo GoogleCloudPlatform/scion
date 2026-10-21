@@ -254,7 +254,7 @@ func (s *Server) handleIssueTestAdminTokenThroughDelegation(w http.ResponseWrite
 		if err := s.recheckWorkloadDelegation(ctx, tx, st, now); err != nil {
 			return err
 		}
-		if err := s.recheckTestAdminDelegationGrantor(ctx, tx, st.delegation.GrantorID, spec.permission); err != nil {
+		if err := s.recheckTestAdminDelegationGrantor(ctx, tx, st.delegation.EffectiveGrantorKind(), st.delegation.GrantorID, spec.permission); err != nil {
 			return err
 		}
 		if err := recheckTestAdminIdentityForDelegation(ctx, tx, st, u.ID, now); err != nil {

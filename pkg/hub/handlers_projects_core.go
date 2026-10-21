@@ -1252,7 +1252,9 @@ func (s *Server) initHubManagedProject(project *store.Project) error {
 		if err != nil {
 			return fmt.Errorf("failed to read default project settings: %w", err)
 		}
-		if err := os.WriteFile(settingsPath, defaultSettings, 0644); err != nil {
+		// Checked again under the settings lock, so a file another writer
+		// has just created is not replaced.
+		if err := config.CreateSettingsFileIfMissing(settingsPath, defaultSettings); err != nil {
 			return fmt.Errorf("failed to seed settings.yaml: %w", err)
 		}
 	}
@@ -2039,10 +2041,9 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 
 		if existingBroker != nil {
 			registerOperation = "reregister"
-			// Update existing broker
+			// Update existing broker. The name and slug are set at
+			// creation or through the update API, so they are kept.
 			broker = existingBroker
-			broker.Name = req.Broker.Name
-			broker.Slug = api.Slugify(req.Broker.Name)
 			broker.Version = req.Broker.Version
 			broker.Status = store.BrokerStatusOnline
 			broker.ConnectionState = "connected"
@@ -2082,6 +2083,9 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 				writeErrorFromErr(w, err, "")
 				return
 			}
+			// A row created (or re-created after a deregistration) here gets
+			// its agents' reservations back before the registration answers.
+			s.BackfillBrokerOnRegistration(ctx, broker.ID)
 		}
 		LogRegistrationEvent(ctx, s.auditLogger, broker.ID, broker.Name, linkedByForProvider(callerUser), getClientIP(r),
 			mergeBrokerAuditDetails(brokerAuditCredentialDetails(ctx), "operation", registerOperation, "path", "embedded"))
@@ -2970,6 +2974,12 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		if err == store.ErrNotFound {
 			agent, err = s.store.GetAgent(ctx, agentID)
+			if (errors.Is(err, store.ErrNotFound) || (err == nil && agent.ProjectID != projectID)) && isVisitorIdentity(GetIdentityFromContext(ctx)) {
+				// A visitor gets the one refusal for an unknown agent too
+				// (admitVisitorSubRoute already refused it before here).
+				writeVisitorRefusal(w)
+				return
+			}
 			if err != nil {
 				writeError(w, http.StatusNotFound, ErrCodeAgentNotFound,
 					fmt.Sprintf("Agent %q not found in project", agentID),
@@ -3021,6 +3031,11 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 		isSystemPlane := false
 		allowed, reason, decision := s.authorizeAgentMessage(r.Context(), identity, agent, isSystemPlane)
 		messaging.RecordStep(r.Context(), "message_authorized")
+		if !allowed && isVisitorIdentity(identity) {
+			// A visitor's refusal names no reason or message mode.
+			writeVisitorRefusal(w)
+			return
+		}
 		if !allowed {
 			// Use typed denial code from the decision (agent path) or
 			// fall back to generic forbidden code (user path).

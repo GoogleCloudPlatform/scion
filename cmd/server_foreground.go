@@ -767,13 +767,11 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 				for name := range vs.Server.Plugins.Broker {
 					if !typesSet[name] {
 						vs.Server.MessageBroker.Types = append(vs.Server.MessageBroker.Types, name)
-						hub.SettingsWriteMu.Lock()
 						if err := config.AddPluginToMessageBrokerTypes(name); err != nil {
 							log.Printf("Warning: failed to persist %s to message_broker.types: %v", name, err)
 						} else {
 							log.Printf("NOTICE: auto-added %q to message_broker.types (was configured but missing)", name)
 						}
-						hub.SettingsWriteMu.Unlock()
 					}
 				}
 			}
@@ -2760,6 +2758,9 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 	if err := hubSrv.RegisterConduitRelayReadinessGauge(mp); err != nil {
 		log.Printf("WARNING: hub conduit relay readiness gauge disabled: %v", err)
 	}
+	if err := hubSrv.RegisterBrokerPresenceMetrics(mp); err != nil {
+		log.Printf("WARNING: hub broker presence metrics disabled: %v", err)
+	}
 
 	if refreshRec, err := hub.NewOTelConduitAgentRefreshMetrics(mp); err != nil {
 		log.Printf("WARNING: hub conduit agent refresh metrics disabled: %v", err)
@@ -2783,6 +2784,12 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 		log.Printf("WARNING: hub quota scope conflict metrics disabled: %v", err)
 	} else {
 		hubSrv.SetQuotaScopeConflictMetrics(conflictRec)
+	}
+
+	if capacityRec, err := hub.NewOTelQuotaCapacityMetrics(mp); err != nil {
+		log.Printf("WARNING: hub quota capacity metrics disabled: %v", err)
+	} else {
+		hubSrv.SetQuotaCapacityMetrics(capacityRec)
 	}
 
 	if portProxyRec, err := hub.NewOTelPortProxyMetrics(mp); err != nil {
@@ -3074,6 +3081,10 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 			)
 			hubSrv.SetSAAssignChecker(cached)
 			hubSrv.SetHookIdentityChecker(cached)
+			// Registration and verification warn when the hub's identity
+			// cannot read IAM policy in an account's GCP project other
+			// than this one; the assignment check would fail there.
+			hubSrv.SetSAProjectAccessProbe(hub.NewPTProjectAccessProbe(ptClient), ptProjectID)
 			// Both surfaces share one checker instance and one cache.
 			log.Printf("Policy Troubleshooter checker configured for actAs checks (quota project: %s)", ptProjectID)
 		}
@@ -4079,6 +4090,9 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 				brokerID = effectiveID
 			}
 			log.Printf("Registered global project with runtime broker %s (endpoint: %s, autoProvide: %v)", brokerName, rhEndpoint, serverAutoProvide)
+			// Record the reservations of the agents the co-located broker
+			// still runs (its row may have been re-created); idempotent.
+			hubSrv.BackfillBrokerOnRegistration(ctx, brokerID)
 			if statelessCloudRunBroker {
 				hubSrv.SetStatelessEmbeddedBrokerID(brokerID)
 			} else {

@@ -762,8 +762,8 @@ type StartExtras struct {
 	// HubAgentDefaults carries the hub defaults a start applies at the
 	// broker's lowest tier (see startHubAgentDefaults). Nil = none.
 	HubAgentDefaults *RemoteHubAgentDefaults
-	// TelemetryPolicy is the project's enforced telemetry on/off, set only
-	// for a broker that reports TemplateTiers (wire key telemetryPolicy;
+	// TelemetryPolicy is the project's enforced telemetry on/off, sent to
+	// every broker (wire key telemetryPolicy;
 	// see RemoteAgentConfig.TelemetryPolicy). Nil = none.
 	TelemetryPolicy *bool
 	// Image is the user's explicit image (explicitDispatchImage), already
@@ -804,6 +804,15 @@ type StartExtras struct {
 	// this restart, the same set DispatchAgentStart sends as its
 	// resolvedSecrets parameter. Values are never logged.
 	ResolvedSecrets []ResolvedSecret
+	// AsyncLaunch, LaunchID, LaunchTimeoutSeconds and LaunchKeepaliveSeconds
+	// are a start's asynchronous launch fields (ptone/scion#4669), sent
+	// under the same wire keys as a create's (RemoteCreateAgentRequest).
+	// Zero values send nothing; this release never sets them, so every
+	// start is sent synchronously.
+	AsyncLaunch            bool
+	LaunchID               string
+	LaunchTimeoutSeconds   int
+	LaunchKeepaliveSeconds int
 }
 
 // applyStartExtras writes extras onto payload as flat top-level wire keys.
@@ -883,6 +892,18 @@ func applyStartExtras(payload map[string]interface{}, extras StartExtras) {
 	}
 	if len(extras.ResolvedSecrets) > 0 {
 		payload["resolvedSecrets"] = extras.ResolvedSecrets
+	}
+	if extras.AsyncLaunch {
+		payload["asyncLaunch"] = true
+	}
+	if extras.LaunchID != "" {
+		payload["launchId"] = extras.LaunchID
+	}
+	if extras.LaunchTimeoutSeconds > 0 {
+		payload["launchTimeoutSeconds"] = extras.LaunchTimeoutSeconds
+	}
+	if extras.LaunchKeepaliveSeconds > 0 {
+		payload["launchKeepaliveSeconds"] = extras.LaunchKeepaliveSeconds
 	}
 }
 
@@ -1493,8 +1514,8 @@ type RemoteAgentConfig struct {
 	HubAgentDefaults *RemoteHubAgentDefaults `json:"hubAgentDefaults,omitempty"`
 
 	// TelemetryPolicy is the project's enforced telemetry on/off
-	// (projectSettingTelemetryEnabled), sent only to a broker that reports
-	// TemplateTiers. The broker applies it last, above the agent's config
+	// (projectSettingTelemetryEnabled), sent to every broker; one older than
+	// templateTiers ignores it. The broker applies it last, above the agent's config
 	// and the requester's SCION_TELEMETRY_ENABLED flag (ptone/scion#4218).
 	// Nil = no policy.
 	TelemetryPolicy *bool `json:"telemetryPolicy,omitempty"`
@@ -1525,10 +1546,10 @@ type RemoteHubAgentDefaults struct {
 	AutoExposePorts *bool             `json:"autoExposePorts,omitempty"`
 	Experiments     []string          `json:"experiments,omitempty"`
 	// Telemetry is the hub's telemetry default (settings telemetry), sent
-	// only to a broker that reports TemplateTiers. The broker applies it per
+	// to every broker; one older than templateTiers ignores it. The broker applies it per
 	// start below the agent's own config telemetry and never persists it
-	// (ptone/scion#4218). A legacy broker gets it inline instead
-	// (dispatchTelemetry, ptone/scion#4222).
+	// (ptone/scion#4218). It is never sent inline (dispatchTelemetry,
+	// ptone/scion#4224).
 	Telemetry *api.TelemetryConfig `json:"telemetry,omitempty"`
 }
 
@@ -1636,6 +1657,12 @@ type Server struct {
 	// open) logs later failures at Debug. Cleared on success.
 	generalTopicWarned sync.Map
 
+	// brokerTemplateTiersWarned records broker IDs the heartbeat handler
+	// already warned about for lacking the templateTiers capability, so the
+	// WARN is logged once per broker per process
+	// (warnBrokerWithoutTemplateTiers).
+	brokerTemplateTiersWarned sync.Map
+
 	// hubSAMappingCache holds the hub-wide Kubernetes mapping view behind
 	// hubSAMappingWarnings for a short window (see gcp_sa_mapping_warnings.go).
 	hubSAMappingCache hubSAMappingViewCache
@@ -1699,6 +1726,10 @@ type Server struct {
 	// conduitEligibleRelays is the number of eligible separate relays at
 	// the last check (-1: not checked yet), read by the readiness gauge.
 	conduitEligibleRelays atomic.Int64
+	// brokerPresenceRegistryFallbacks counts broker presence reads whose
+	// conduit registry read failed and fell back to the legacy signals
+	// (broker_presence.go).
+	brokerPresenceRegistryFallbacks atomic.Int64
 	// conduitAdmissionAEADv is the admission token cipher
 	// (conduit_admission.go), derived once; conduitAdmissionKeyErr is why
 	// it could not be.
@@ -2017,6 +2048,10 @@ type Server struct {
 	// somebody has to construct and pass. See saAssignCheckerFor.
 	saAssignChecker   store.CallerPermissionChecker
 	saAssignCheckMode string
+	// saProjectProbe and saProjectProbeHubProject are set by
+	// SetSAProjectAccessProbe under s.mu; see saProjectAccessWarning.
+	saProjectProbe           SAProjectAccessProbe
+	saProjectProbeHubProject string
 	// denyUnknownFailOpen is written with saAssignCheckMode under s.mu
 	// (applyGCPIAMSettingsLocked) and read lock-free by the checker.
 	denyUnknownFailOpen atomic.Bool
@@ -2308,6 +2343,11 @@ type Server struct {
 	// authorizeConduitUserStream instead of authorizeConduitAction. Only
 	// tests set it, on their own Server; production code never does.
 	conduitAuthorizeActionTestHook func(ctx context.Context, identity Identity, agent *store.Agent, action Action) error
+
+	// legacyPortTunnelReturnedTestHook, when non-nil, runs in the port
+	// proxy right after the port-forward tunnel returns, before the
+	// answer is written. Only tests set it, on their own Server.
+	legacyPortTunnelReturnedTestHook func()
 }
 
 // groupsLogger returns the groups subsystem logger, falling back to
@@ -2679,6 +2719,16 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	srv.logTestIdentityWebSessionState()
 	srv.testAdminIssuance = newTestAdminIssuanceState()
 	srv.workloadIssuer = newWorkloadIssuerAuthenticator(cfg, s, func() time.Time { return srv.testIdentities.clock() }, srv.workloadAdminScopeAvailable)
+	if srv.workloadIssuer != nil {
+		// Offline delegations (phase DL): the gate reads the running
+		// level at every redeem (srv.testMode is set below, before the hub
+		// serves), and the per-redeem audit goes through the test
+		// identity audit hook.
+		srv.workloadIssuer.testModeLevel = srv.TestModeLevel
+		srv.workloadIssuer.writeAudit = func(ctx context.Context, st store.Store, record *store.MutationAuditRecord) error {
+			return srv.testIdentities.hooks.writeAudit(ctx, st, record)
+		}
+	}
 	if srv.workloadIssuer != nil && !cfg.EnableTestIdentities {
 		slog.Warn("Test identity workload issuers are configured but test identities are off; workload delegation stays unavailable")
 	}
@@ -6167,13 +6217,20 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 	// replica): pause the row instead of recording an invalid-expression
 	// error on every tick.
 	if hasCronZonePrefix(sched.CronExpr) {
-		if err := s.store.UpdateScheduleStatus(ctx, sched.ID, store.ScheduleStatusPaused); err != nil {
+		if err := s.store.UpdateScheduleStatus(ctx, sched.ID, store.ScheduleStatusPaused, store.ScheduleStatusReasonCronZoneUnsupported); err != nil {
 			log.Error("schedule-evaluator: failed to pause schedule with unsupported zone prefix",
 				"cron_expr", sched.CronExpr, "error", err)
 			return
 		}
 		log.Warn("schedule paused: cron zone prefixes are not supported; edit the expression to UTC and resume",
 			"cron_expr", sched.CronExpr)
+		return
+	}
+
+	// Backstop for a schedule whose authority agent was deleted by a path
+	// that did not pause it (ptone/scion#5403): pause it with status reason
+	// creator_deleted instead of firing it to be refused.
+	if s.pauseScheduleIfAuthorityAgentGone(ctx, sched, log) {
 		return
 	}
 

@@ -395,6 +395,13 @@ func (r *Relay) serveStream(w http.ResponseWriter, req *http.Request, peer, sess
 		return
 	}
 	cancel() // stop the opening watcher; the stream is established
+	// One debug line per internal stream this relay opens on a session it
+	// holds, so a stream that crossed nodes is visible on the owner too.
+	// The node that took the request logs the open at info with
+	// route=remote and owner_instance; port-proxy streams are per request,
+	// so the owner's line stays at debug for every stream.
+	r.log.Debug("Conduit internal stream opened", "session_id", ls.Info().SessionID, "stream_id", st.ID(),
+		"kind", open.GetKind().String(), "peer", peer)
 	splice(st, hop)
 }
 

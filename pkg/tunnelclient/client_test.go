@@ -178,6 +178,7 @@ func TestExitCodeTableTunnelResponses(t *testing.T) {
 		{name: "5 forbidden", handle: respond(403, "forbidden", ""), want: ExitForbidden, calls: 1},
 		{name: "8 rate_limited", handle: respond(429, "rate_limited", ""), want: ExitCapReached, calls: 1},
 		{name: "9 agent_not_running", handle: respond(409, "agent_not_running", ""), want: ExitAgentNotRunning, calls: 1},
+		{name: "1 agent_upgrade_required, no retry", handle: respond(409, "agent_upgrade_required", "stream_renewal_unsupported"), want: ExitError, calls: 1},
 		{name: "10 runtime_broker_unavailable", handle: respond(503, "runtime_broker_unavailable", ""), want: ExitTargetUnavailable, calls: 1},
 		{name: "10 agent_session_unavailable", handle: respond(503, "agent_session_unavailable", ""), want: ExitTargetUnavailable, calls: 1},
 		{name: "11 404 without agent_not_found", handle: respond(404, "not_found", ""), want: ExitNoTunnelSupport, calls: 1},
@@ -848,4 +849,23 @@ func TestReplacedSessionClosesWithItsLastTunnel(t *testing.T) {
 	roundTrip(t, second, "session 2 still works")
 	cancel()
 	<-done
+}
+
+// A 409 agent_upgrade_required (the agent session does not support stream
+// renewal) is final: exit 1, one dial and one request, and the one stderr
+// line tells the user to restart the agent on a newer image.
+func TestAgentUpgradeRequiredLine(t *testing.T) {
+	h := newFakeHub(t)
+	h.set(func() { h.handle = respond(409, "agent_upgrade_required", "stream_renewal_unsupported") })
+	err := Run(runCtx(t), testConfig(h, newFakeREST(), credSeq(oauth("tok1"))), stdioReq(strings.NewReader("x"), io.Discard))
+	if got := CodeOf(err); got != ExitError {
+		t.Fatalf("exit %d (%v), want %d", got, err, ExitError)
+	}
+	if dials, calls := h.counts(); dials != 1 || calls != 1 {
+		t.Fatalf("dials %d calls %d, want 1 and 1 (no retry, no fresh session)", dials, calls)
+	}
+	const want = "the agent must be restarted on an image whose sciontool supports stream renewal (agent_upgrade_required)"
+	if got := err.Error(); got != want {
+		t.Fatalf("error %q, want %q", got, want)
+	}
 }

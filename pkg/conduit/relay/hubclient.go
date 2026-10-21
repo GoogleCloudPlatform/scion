@@ -314,7 +314,8 @@ type HubRPCRequest struct {
 	// Features lists what the forwarding relay supports. A relay that opens
 	// the tunnels the hub authorizes lists HubFeatureTunnels; a relay that
 	// does not (an older one) gets the tunnel request refused, never an
-	// instruction it would ignore.
+	// instruction it would ignore. A relay that also re-checks every tunnel
+	// it opens lists HubFeatureTunnelRecheck.
 	Features []string `json:"features,omitempty"`
 }
 
@@ -332,6 +333,13 @@ type HubRPCResponse struct {
 // HubFeatureTunnels is the HubRPCRequest feature of a relay that opens
 // the tunnels the hub authorizes (HubRPCResponse.Tunnel).
 const HubFeatureTunnels = "tunnels"
+
+// HubFeatureTunnelRecheck is the HubRPCRequest feature of a relay that
+// hands every tunnel it opens to its stream scheduler (hint and sweep
+// re-checks; design v2.21.46 §3.9, "Relay feature tunnel_recheck"). The
+// hub stamps a relay-held tunnel's grant for renewal only when the
+// forwarding relay lists it.
+const HubFeatureTunnelRecheck = "tunnel_recheck"
 
 // TunnelsRPCPath is the RPC path of a tunnel request (POST), on the hub
 // and on a relay-held session alike.
@@ -369,6 +377,17 @@ type HubTunnelOpen struct {
 	// mapping as a tunnel on a hub-held session: target not found, and
 	// forbidden). Any other failure answers with Unavailable.
 	TargetRefusals map[uint32][]byte `json:"target_refusals,omitempty"`
+
+	// AuthzUntil (unix seconds) and AuthzIntervalS (seconds) are unsigned
+	// scheduling hints (design §3.9 "Scheduling hints"): the hub copies them
+	// from the claims of the open grant it just minted, never from a
+	// request field, and sets both or neither (neither when the claims
+	// carry no deadline). The relay uses them only to time its stream
+	// re-checks and never trusts them for authorization; the target
+	// enforces the signed values. A missing, partial or out-of-range hint
+	// leaves the stream to the re-check sweep.
+	AuthzUntil     int64 `json:"authz_until,omitempty"`
+	AuthzIntervalS int64 `json:"authz_interval_s,omitempty"`
 }
 
 // Owner returns the relay holding the target session.
