@@ -37,6 +37,13 @@ import (
 //     here; an agent's authority is bounded by its delegation chain, which
 //     already requires an active delegating user.
 //
+// One exception, for the gate only: the reserved grantor of an offline
+// test-infra delegation has no users row by design. A missing row for that
+// principal passes only on a request that decide Step 5b4 grants
+// (offlineGrantorStatusExempt, test_identity_offline_delegation.go). An
+// existing row with that id still goes through activeUserPredicate, and a
+// lookup fault still denies.
+//
 // decide evaluates the gate once, before the bearer gate and every grant
 // stage, so a principal that is not active is denied with a single reason
 // whichever stage would otherwise have denied or admitted it.
@@ -55,8 +62,9 @@ const (
 // principalStatusGate applies activeUserPredicate to the decision's own
 // principal. It returns ("", "") when the principal may proceed to the
 // grant stages, and otherwise the deny reason and cause. A lookup fault
-// denies.
-func (a *AuthzService) principalStatusGate(ctx context.Context, principal PrincipalContext) (string, DenyCause) {
+// denies. credential and permissionID are used only for the offline
+// grantor exception (offlineGrantorStatusExempt).
+func (a *AuthzService) principalStatusGate(ctx context.Context, principal PrincipalContext, credential CredentialContext, permissionID string) (string, DenyCause) {
 	if NormalizePrincipalType(string(principal.Kind)) != store.RoleBindingPrincipalUser {
 		return "", ""
 	}
@@ -64,6 +72,9 @@ func (a *AuthzService) principalStatusGate(ctx context.Context, principal Princi
 		return principalStatusLookupReason, DenyCauseResolutionError
 	}
 	user, err := a.userForStatusGate(ctx, principal.ID)
+	if errors.Is(err, store.ErrNotFound) && offlineGrantorStatusExempt(ctx, principal, credential, permissionID) {
+		return "", ""
+	}
 	if gateErr := activeUserPredicate(principal, user, err); gateErr != nil {
 		if isProjectAccessLookupFault(gateErr) {
 			a.logger.Warn("failed to resolve user status for authorization (fail-closed)",
