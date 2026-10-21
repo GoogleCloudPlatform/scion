@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -150,7 +151,11 @@ func (s *Server) conduitStreamPlacement(ctx context.Context, agent *store.Agent,
 	if isManagedAgentRuntime(agent.Runtime) {
 		return "", nil
 	}
-	_, err := checkAgentPinnedPlacement(ctx, s.store, agent)
+	st := store.Store(s.store)
+	if m := conduitBrokerMemoFrom(ctx); m != nil {
+		st = m.over(s.store)
+	}
+	_, err := checkAgentPinnedPlacement(ctx, st, agent)
 	if err == nil {
 		return "", nil
 	}
@@ -202,4 +207,105 @@ func (s *Server) recordedStreamEval(ctx context.Context, st *conduitUserStream) 
 func (s *Server) checkLegacyPortRequest(ctx context.Context, st *conduitUserStream) (conduitAuthzVerdict, error) {
 	verdict, _, err := s.evaluateConduitStream(ctx, s.recordedStreamEval(ctx, st))
 	return verdict, err
+}
+
+// conduitBrokerMemo shares Runtime Broker reads among the stream checks of
+// one re-check pass (a sweep, or a resync). Only the broker row is shared:
+// the placement guard (requirePinnedPlacement) still decides each stream
+// from that stream's own agent row, read fresh by the evaluation, so every
+// verdict matches the agent read it comes with.
+//
+// A read is shared only when it is a definite answer: the broker row, or
+// store.ErrNotFound. Checks that wait on a read that fails get that
+// failure for this pass (no read of their own); nothing is stored for it,
+// so a later check of the pass reads again. A waiting check gives up when
+// its own context ends. The shared rows are read-only: no caller may
+// modify them. A memo lives for one pass and is then dropped; notify
+// re-checks, interval checks, renewals and the legacy port proxy carry
+// none and read fresh.
+type conduitBrokerMemo struct {
+	mu    sync.Mutex
+	reads map[string]*conduitBrokerRead
+
+	// brokerMemoWaitTestHook, when set, runs in a check that has joined
+	// another check's read, before it waits. Only tests set it.
+	brokerMemoWaitTestHook func()
+}
+
+// conduitBrokerRead is one shared broker read. done closes when it is
+// finished; then ok reports whether it gave a definite answer (broker,
+// err), and failed holds the error of a read that did not.
+type conduitBrokerRead struct {
+	done   chan struct{}
+	ok     bool
+	broker *store.RuntimeBroker
+	err    error
+	failed error
+}
+
+type conduitBrokerMemoKey struct{}
+
+// withConduitBrokerMemo returns ctx with a new, empty broker memo: the
+// context of one re-check pass.
+func withConduitBrokerMemo(ctx context.Context) context.Context {
+	return context.WithValue(ctx, conduitBrokerMemoKey{}, &conduitBrokerMemo{reads: map[string]*conduitBrokerRead{}})
+}
+
+// conduitBrokerMemoFrom returns ctx's broker memo, or nil.
+func conduitBrokerMemoFrom(ctx context.Context) *conduitBrokerMemo {
+	m, _ := ctx.Value(conduitBrokerMemoKey{}).(*conduitBrokerMemo)
+	return m
+}
+
+// getRuntimeBroker returns the broker row for id, read through read at
+// most once per pass while the read gives a definite answer.
+func (m *conduitBrokerMemo) getRuntimeBroker(ctx context.Context, id string, read func(context.Context, string) (*store.RuntimeBroker, error)) (*store.RuntimeBroker, error) {
+	m.mu.Lock()
+	if r, ok := m.reads[id]; ok {
+		hook := m.brokerMemoWaitTestHook
+		m.mu.Unlock()
+		if hook != nil {
+			hook()
+		}
+		select {
+		case <-r.done:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		if !r.ok {
+			return nil, r.failed
+		}
+		return r.broker, r.err
+	}
+	r := &conduitBrokerRead{done: make(chan struct{})}
+	m.reads[id] = r
+	m.mu.Unlock()
+
+	broker, err := read(ctx, id)
+	m.mu.Lock()
+	if err == nil || errors.Is(err, store.ErrNotFound) {
+		r.ok, r.broker, r.err = true, broker, err
+	} else {
+		r.failed = err
+		delete(m.reads, id)
+	}
+	m.mu.Unlock()
+	close(r.done)
+	return broker, err
+}
+
+// over returns st with GetRuntimeBroker answered through the memo.
+func (m *conduitBrokerMemo) over(st store.Store) store.Store {
+	return conduitBrokerMemoStore{Store: st, memo: m}
+}
+
+// conduitBrokerMemoStore is a store whose broker reads go through a pass's
+// memo; every other method is the wrapped store's.
+type conduitBrokerMemoStore struct {
+	store.Store
+	memo *conduitBrokerMemo
+}
+
+func (s conduitBrokerMemoStore) GetRuntimeBroker(ctx context.Context, id string) (*store.RuntimeBroker, error) {
+	return s.memo.getRuntimeBroker(ctx, id, s.Store.GetRuntimeBroker)
 }
