@@ -6168,12 +6168,6 @@ export class ScionPageChat extends LitElement {
   }
 
   /**
-   * Back chevron shown only on mobile, where the neighbouring panels are
-   * off-screen and otherwise reachable only by an undiscoverable swipe.
-   * The conversation header steps back to the rail; the members header
-   * steps back to the conversation.
-   */
-  /**
    * The quick switcher's open button, pinned below a column's list: the
    * spaces rail at every width, and the members column too on phones, where
    * each column fills the screen on its own. The column is a flex column
@@ -6250,6 +6244,12 @@ export class ScionPageChat extends LitElement {
     return html`<div class="loading-rail"><sl-spinner></sl-spinner></div>`;
   }
 
+  /**
+   * Back chevron shown only on mobile, where the neighbouring panels are
+   * off-screen and otherwise reachable only by an undiscoverable swipe.
+   * The conversation header steps back to the rail; the members header
+   * steps back to the conversation.
+   */
   private renderMobileBackButton(target: 'left' | 'center' = 'left') {
     return html`
       <sl-icon-button
