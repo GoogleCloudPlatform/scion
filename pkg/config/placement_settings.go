@@ -292,10 +292,12 @@ func GlobalSettingsMentionPlacementKeys() bool {
 //   - When the active settings overlay supplies the runtimes section (at
 //     least one stored runtime), its stored names only: the settings file's
 //     runtimes are then not in effect.
-//   - Otherwise the runtimes of the global settings file, read through the
-//     settings loader's own file layer without the embedded defaults, so key
-//     case and legacy-format conversion are handled as when the settings
-//     load. A missing file contributes no names.
+//   - Otherwise the keys of the global settings file's top-level "runtimes"
+//     section (exact key), read through the settings loader's own file layer
+//     without the embedded defaults (so legacy-format conversion is handled
+//     as when the settings load), kept only when the global settings load
+//     (the file over the defaults) has them too. A missing file contributes
+//     no names.
 //
 // ok is false when the global settings file exists but cannot be stat'd,
 // read or decoded; callers then treat every entry as configured (fail
@@ -330,16 +332,31 @@ func ConfiguredRuntimeNames() (names map[string]bool, ok bool) {
 	if _, err := loadSettingsFileConverting(k, globalDir, &legacyLayerState{}); err != nil {
 		return names, false
 	}
-	vs := &VersionedSettings{
-		Runtimes:       make(map[string]V1RuntimeConfig),
-		HarnessConfigs: make(map[string]HarnessConfigEntry),
-		Profiles:       make(map[string]V1ProfileConfig),
+	// The file layer's runtimes section, by the exact top-level key
+	// "runtimes": the settings load takes that key only (a top-level key in
+	// another letter case, such as "Runtimes:", is not loaded next to the
+	// embedded defaults' "runtimes"; observed in a dev-time run). A section
+	// that is not a map fails closed.
+	var fileNames []string
+	if section, present := k.Raw()["runtimes"]; present {
+		m, isMap := section.(map[string]interface{})
+		if !isMap {
+			return names, false
+		}
+		for name := range m {
+			fileNames = append(fileNames, name)
+		}
 	}
-	if err := unmarshalVersionedSettings(k, vs); err != nil {
+	// Keep only the names the global settings load itself has (the file over
+	// the embedded defaults), so a name counts only when the load uses it.
+	loaded, _, err := loadVersionedSettingsFileOnly(globalDir)
+	if err != nil {
 		return names, false
 	}
-	for name := range vs.Runtimes {
-		names[name] = true
+	for _, name := range fileNames {
+		if _, inEffect := loaded.Runtimes[name]; inEffect {
+			names[name] = true
+		}
 	}
 	return names, true
 }

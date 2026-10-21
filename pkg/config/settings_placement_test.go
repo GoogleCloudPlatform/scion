@@ -372,18 +372,33 @@ func TestConfiguredRuntimeNames(t *testing.T) {
 	assert.False(t, ok, "unparsable file must fail closed")
 }
 
-// The file's runtime names are read the way the settings load them: a
-// top-level key in another letter case still configures its entries.
+// The file's runtime names follow the settings load, which takes the exact
+// top-level key "runtimes". Under a top-level "Runtimes:" key, neither gke
+// nor kubernetes is configured: gke is not loaded at all, and the loaded
+// kubernetes entry comes from the embedded defaults, not from the file. The
+// entry under "runtimes:" is configured.
 func TestConfiguredRuntimeNames_KeyCase(t *testing.T) {
-	writePlacementGlobalSettings(t, "schema_version: \"1\"\nRuntimes:\n  gke:\n    type: kubernetes\n")
+	writePlacementGlobalSettings(t, "schema_version: \"1\"\nRuntimes:\n  gke:\n    type: kubernetes\n  kubernetes:\n    type: kubernetes\n    namespace: from-file\nruntimes:\n  other:\n    type: kubernetes\n")
 	vs, _, err := LoadGlobalSettingsWithOverlay()
 	require.NoError(t, err)
-	_, loaded := vs.Runtimes["gke"]
-	require.True(t, loaded, "precondition: the loader reads the upper-case key")
+	_, gkeLoaded := vs.Runtimes["gke"]
+	require.False(t, gkeLoaded, "precondition: the load ignores the top-level Runtimes: key")
+	require.NotEqual(t, "from-file", vs.Runtimes["kubernetes"].Namespace, "precondition: the loaded kubernetes entry is the embedded default")
 	names, ok := ConfiguredRuntimeNames()
 	require.True(t, ok)
-	assert.True(t, names["gke"], "an entry the loader reads is configured: %v", names)
-	assert.False(t, names["kubernetes"], "the embedded default entry is not configured")
+	assert.Equal(t, map[string]bool{"other": true}, names)
+
+	// Only the other-case key: nothing is configured. gke is not loaded, and
+	// the loaded kubernetes entry is the embedded default, although the file
+	// names it under "Runtimes:".
+	writePlacementGlobalSettings(t, "schema_version: \"1\"\nRuntimes:\n  gke:\n    type: kubernetes\n  kubernetes:\n    type: kubernetes\n")
+	vs, _, err = LoadGlobalSettingsWithOverlay()
+	require.NoError(t, err)
+	_, gkeLoaded = vs.Runtimes["gke"]
+	require.False(t, gkeLoaded, "precondition: the load ignores the top-level Runtimes: key")
+	names, ok = ConfiguredRuntimeNames()
+	require.True(t, ok)
+	assert.Empty(t, names, "entries under Runtimes: (gke, and kubernetes, which is loaded from the defaults) are not configured")
 }
 
 // GlobalSettingsFileUnstatable: only a stat error other than not-exist.
