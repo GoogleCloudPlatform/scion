@@ -23,9 +23,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectsync"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/dustin/go-humanize"
@@ -35,49 +33,36 @@ import (
 var (
 	syncDryRun  bool
 	syncExclude []string
-	syncForce   bool
 )
 
+// projectSyncRemovedMessage is the error for the project-level forms of
+// scion sync (bare, push and pull). They synced a project workspace with the
+// hub's WebDAV endpoint, which has been removed.
+const projectSyncRemovedMessage = "project-level sync ('scion sync', 'scion sync push', 'scion sync pull') has been removed along with the hub's WebDAV endpoint. " +
+	"To sync with an agent, use 'scion sync to <agent>' or 'scion sync from <agent>'. " +
+	"To move project files, use git, or the project's Files tab in the web UI (upload, download or workspace archive)"
+
 // syncCmd represents the sync command.
-// When invoked bare (no subcommand, no agent), it performs bidirectional project-level sync.
 var syncCmd = &cobra.Command{
-	Use:   "sync [push|pull|to|from] [agent-name]",
-	Short: "Sync project or agent workspace",
-	Long: `Synchronizes the workspace for a project or a specific agent.
+	Use:   "sync to|from <agent-name>",
+	Short: "Sync an agent workspace",
+	Long: `Synchronizes the local workspace with a running agent's workspace.
 
-Project-level sync (requires Hub):
-  scion sync                   Bidirectional sync (newer file wins)
-  scion sync push              Push local workspace to hub
-  scion sync pull              Pull hub workspace to local
-
-Agent-level sync (the direction is required):
+The direction is required:
   scion sync to <agent-name>   Push to a running agent's workspace
   scion sync from <agent-name> Pull from a running agent's workspace
 
 Options:
   --dry-run                    Preview what would be synced
   --exclude "pattern"          Additional glob patterns to exclude
-  --force                      Bypass safety checks (bisync max-delete)
+
+Project-level sync (bare 'scion sync', 'scion sync push' and
+'scion sync pull') has been removed and exits with an error.
 
 Examples:
-  # Bidirectional project sync against hub
-  scion sync
-
-  # Push local project workspace to hub
-  scion sync push
-
-  # Pull hub workspace to local
-  scion sync pull
-
-  # Preview project sync
-  scion sync --dry-run
-
-  # Sync with specific project
-  scion sync -g /path/to/project push
-
-  # Agent-level sync
   scion sync from my-agent
-  scion sync to my-agent --exclude "*.log"`,
+  scion sync to my-agent --exclude "*.log"
+  scion sync to my-agent --dry-run`,
 	Args: cobra.MaximumNArgs(2),
 	RunE: runSync,
 }
@@ -86,33 +71,16 @@ func init() {
 	rootCmd.AddCommand(syncCmd)
 	syncCmd.Flags().BoolVar(&syncDryRun, "dry-run", false, "Show what would be synced without making changes")
 	syncCmd.Flags().StringArrayVar(&syncExclude, "exclude", nil, "Glob patterns to exclude from sync (can be specified multiple times)")
-	syncCmd.Flags().BoolVar(&syncForce, "force", false, "Bypass safety checks (e.g., bisync max-delete limit)")
 }
 
 func runSync(cmd *cobra.Command, args []string) error {
-	// Parse arguments to determine scope and direction
-	if len(args) == 0 {
-		// Bare `scion sync` → project-level bidirectional
-		return runProjectSync(projectsync.DirBisync)
+	// The project-level forms were removed with the hub's WebDAV endpoint.
+	if len(args) == 0 || args[0] == "push" || args[0] == "pull" {
+		return newUsageError("%s", projectSyncRemovedMessage)
 	}
 
 	direction := args[0]
 
-	// Project-level subcommands: push, pull
-	switch direction {
-	case "push":
-		if len(args) > 1 {
-			return newUsageError("'push' does not take an agent name; use 'scion sync to <agent>' for agent-level sync")
-		}
-		return runProjectSync(projectsync.DirPush)
-	case "pull":
-		if len(args) > 1 {
-			return newUsageError("'pull' does not take an agent name; use 'scion sync from <agent>' for agent-level sync")
-		}
-		return runProjectSync(projectsync.DirPull)
-	}
-
-	// Agent-level subcommands: to, from
 	if direction == "to" || direction == "from" {
 		if len(args) < 2 {
 			return newUsageError("agent-level sync requires an agent name: scion sync %s <agent-name>", direction)
@@ -125,103 +93,6 @@ func runSync(cmd *cobra.Command, args []string) error {
 	}
 	// A bare agent name: agent-level sync needs a direction.
 	return newUsageError("agent-level sync requires a direction: scion sync to|from %s", api.Slugify(direction))
-}
-
-// runProjectSync performs project-level workspace sync against the Hub's WebDAV endpoint.
-func runProjectSync(direction projectsync.Direction) error {
-	// Check Hub availability (project-level sync requires a hub)
-	hubCtx, err := requireHub(projectPath)
-	if err != nil {
-		return err
-	}
-	PrintUsingHub(hubCtx.Endpoint)
-
-	// Get the project ID
-	projectID, err := GetProjectID(hubCtx)
-	if err != nil {
-		return wrapHubError(err)
-	}
-
-	// Resolve local workspace path
-	workspacePath, err := resolveProjectWorkspacePath()
-	if err != nil {
-		return err
-	}
-
-	// Get auth token for WebDAV
-	authToken := getHubAccessToken(hubCtx.Endpoint)
-	if authToken == "" {
-		return fmt.Errorf("no authentication token available for hub; run 'scion hub auth login'")
-	}
-
-	dirLabel := string(direction)
-	if direction == projectsync.DirBisync {
-		dirLabel = "bidirectional sync"
-	}
-	statusf("Starting project %s: %s ↔ hub\n", dirLabel, workspacePath)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancel()
-
-	result, err := projectsync.Sync(ctx, projectsync.Options{
-		LocalPath:       workspacePath,
-		HubEndpoint:     hubCtx.Endpoint,
-		ProjectID:       projectID,
-		AuthToken:       authToken,
-		Direction:       direction,
-		DryRun:          syncDryRun,
-		ExcludePatterns: syncExclude,
-		Force:           syncForce,
-	})
-	if err != nil {
-		return fmt.Errorf("project sync failed: %w", err)
-	}
-
-	if isJSONOutput() {
-		return outputJSON(map[string]interface{}{
-			"status":    "success",
-			"command":   "sync",
-			"scope":     "project",
-			"direction": string(result.Direction),
-			"projectId": projectID,
-			"dryRun":    result.DryRun,
-		})
-	}
-
-	if result.DryRun {
-		statusln("Dry run complete.")
-	} else {
-		statusln("Project sync complete.")
-	}
-
-	return nil
-}
-
-// resolveProjectWorkspacePath resolves the local workspace path for project-level sync.
-// It finds the project root directory containing .scion/.
-func resolveProjectWorkspacePath() (string, error) {
-	if projectPath != "" {
-		resolvedPath, _, err := config.ResolveProjectPath(projectPath)
-		if err != nil {
-			return "", fmt.Errorf("failed to resolve project path: %w", err)
-		}
-		// The workspace is the parent of the .scion directory (for project projects)
-		// or a recorded path (for external projects)
-		return resolveProjectWorkspace(resolvedPath)
-	}
-
-	// Use current directory — find the project root
-	cwd, err := filepath.Abs(".")
-	if err != nil {
-		return "", err
-	}
-
-	projectRoot, found := config.FindProjectRoot()
-	if !found {
-		return cwd, nil
-	}
-
-	return projectRoot, nil
 }
 
 // runAgentSync handles agent-level sync (to/from a specific agent).
