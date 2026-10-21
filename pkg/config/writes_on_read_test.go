@@ -80,10 +80,10 @@ func TestWritesOnReadDisabled_SettingsKeyMigration(t *testing.T) {
 		name, content, wantInMemory string
 	}{
 		// The legacy key alone: its value is used in memory.
-		{"legacy only", "hub:\n  grove_id: \"legacy\"\n", "legacy"},
+		{"legacy only", legacyHubProjectIDYAMLForTest("legacy"), "legacy"},
 		// Both keys (a conflict, which normally writes a backup): the
 		// canonical key is kept and nothing is overridden.
-		{"conflict", "hub:\n  grove_id: \"legacy\"\n  project_id: \"other\"\n", ""},
+		{"conflict", legacyHubProjectIDYAMLForTest("legacy") + "  project_id: \"other\"\n", ""},
 	}
 	for _, c := range cases {
 		for _, disabled := range []bool{true, false} {
@@ -98,7 +98,7 @@ func TestWritesOnReadDisabled_SettingsKeyMigration(t *testing.T) {
 				}
 
 				r := &fakeReporter{}
-				overrides := migrateLegacyYAMLKeys(path, hubGroveIDRename, r)
+				overrides := migrateLegacyHubProjectIDForTest(path, r)
 
 				if !disabled {
 					// Control: without the switch the file is rewritten.
@@ -121,7 +121,7 @@ func TestWritesOnReadDisabled_MarkerMigration(t *testing.T) {
 			writesonread.IsolateForTest(t)
 			dir := t.TempDir()
 			path := filepath.Join(dir, ".scion")
-			require.NoError(t, os.WriteFile(path, []byte("grove-id: abc-123\ngrove-name: My Project\ngrove-slug: my-project\n"), 0o644))
+			require.NoError(t, os.WriteFile(path, []byte(legacyMarkerYAMLForTest("abc-123", "My Project", "my-project")), 0o644))
 			before := treeSnapshot(t, dir)
 			if disabled {
 				writesonread.Set()
@@ -147,8 +147,7 @@ func TestWritesOnReadDisabled_MarkerMigration(t *testing.T) {
 func legacyLayoutHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
-	writeFile(t, filepath.Join(home, "groves", "acme", "workspace.txt"), "hello")
-	require.NoError(t, os.Symlink(filepath.Join("..", "projects", "gone"), filepath.Join(home, "groves", "gone")))
+	writeLegacyGlobalLayoutForTest(t, home)
 	return home
 }
 

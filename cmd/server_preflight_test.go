@@ -446,17 +446,17 @@ func TestServerPreflight_NoFileChangeNoListener(t *testing.T) {
 	}
 	h := newPreflightHub(t)
 	ctx := context.Background()
-	// A legacy hub.grove_id in the global settings.
-	h.writeSettings(t, "hub:\n  grove_id: \"legacy-project\"\n")
+	// The legacy hub project ID key in the global settings.
+	h.writeSettings(t, legacyHubProjectIDYAML("legacy-project"))
 	// A leftover legacy layout: a real directory and a dangling back-link.
-	require.NoError(t, os.MkdirAll(filepath.Join(h.globalDir, "groves", "acme"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(h.globalDir, "groves", "acme", "workspace.txt"), []byte("hello"), 0o644))
-	require.NoError(t, os.Symlink(filepath.Join("..", "projects", "gone"), filepath.Join(h.globalDir, "groves", "gone")))
+	require.NoError(t, os.MkdirAll(filepath.Join(h.globalDir, legacyLayoutDir, "acme"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(h.globalDir, legacyLayoutDir, "acme", "workspace.txt"), []byte("hello"), 0o644))
+	require.NoError(t, os.Symlink(filepath.Join("..", "projects", "gone"), filepath.Join(h.globalDir, legacyLayoutDir, "gone")))
 	// A provider whose project marker has legacy keys, in a git work tree.
 	repo := filepath.Join(h.home, "src", "repo")
 	require.NoError(t, os.MkdirAll(filepath.Join(repo, ".git"), 0o755))
 	marker := filepath.Join(repo, config.DotScion)
-	require.NoError(t, os.WriteFile(marker, []byte("grove-id: legacy-marker\ngrove-name: repo\ngrove-slug: repo\n"), 0o644))
+	require.NoError(t, os.WriteFile(marker, []byte(legacyMarkerYAML("legacy-marker", "repo")), 0o644))
 	pid := h.project(t, &store.Project{Slug: "repo"})
 	require.NoError(t, h.store.AddProjectProvider(ctx, &store.ProjectProvider{
 		ProjectID: pid, BrokerID: h.brokerID, BrokerName: "co-located", LocalPath: marker, Status: store.BrokerStatusOnline,
@@ -474,7 +474,7 @@ func TestServerPreflight_NoFileChangeNoListener(t *testing.T) {
 	// A --config directory whose settings file has a legacy key (audit row
 	// 7: the bootstrap material is read from it).
 	cfgDir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(cfgDir, "settings.yaml"), []byte("schema_version: \"1\"\nhub:\n  grove_id: \"legacy-config\"\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(cfgDir, "settings.yaml"), []byte("schema_version: \"1\"\n"+legacyHubProjectIDYAML("legacy-config")), 0o644))
 	o := h.executor()
 	o.envDSN = dbOut
 	o.configPath = filepath.Join(cfgDir, "settings.yaml")
@@ -493,7 +493,7 @@ func TestServerPreflight_NoFileChangeNoListener(t *testing.T) {
 	// provider's path (and is missing): the run took the disk path.
 	assert.Contains(t, reportCodes(rep), "settings.profiles.agent_info_missing")
 
-	assert.Contains(t, before[h.home], ".scion/groves/acme", "the fixture keeps a leftover legacy layout")
+	assert.Contains(t, before[h.home], filepath.Join(".scion", legacyLayoutDir, "acme"), "the fixture keeps a leftover legacy layout")
 	for _, r := range roots {
 		after := treeState(t, r)
 		if r == h.home {
@@ -1035,15 +1035,15 @@ func TestNoWriteCommandHook(t *testing.T) {
 		home := t.TempDir()
 		t.Setenv("HOME", home)
 		t.Chdir(t.TempDir())
-		require.NoError(t, os.MkdirAll(filepath.Join(home, ".scion", "groves", "acme"), 0o755))
-		require.NoError(t, os.WriteFile(filepath.Join(home, ".scion", "groves", "acme", "f"), []byte("x"), 0o644))
+		require.NoError(t, os.MkdirAll(filepath.Join(home, ".scion", legacyLayoutDir, "acme"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(home, ".scion", legacyLayoutDir, "acme", "f"), []byte("x"), 0o644))
 		warnRemovedLegacyEnvOnce = sync.Once{}
 		t.Cleanup(func() { warnRemovedLegacyEnvOnce = sync.Once{} })
 		t.Cleanup(func() { config.SetProjectMigrationReporter(config.NewSlogReporter()) })
 		return home
 	}
 	migrated := func(home string) bool {
-		info, err := os.Lstat(filepath.Join(home, ".scion", "groves", "acme"))
+		info, err := os.Lstat(filepath.Join(home, ".scion", legacyLayoutDir, "acme"))
 		return err == nil && info.Mode()&os.ModeSymlink != 0
 	}
 
@@ -1068,7 +1068,7 @@ func TestNoWriteCommandHook(t *testing.T) {
 			home := legacyHome(t)
 			prepareInvocation(args)
 			assert.False(t, writesonread.Disabled(), "the switch is set for %s", strings.Join(args, " "))
-			assert.True(t, migrated(home), "the groves/ layout is not migrated for %s", strings.Join(args, " "))
+			assert.True(t, migrated(home), "the legacy layout is not migrated for %s", strings.Join(args, " "))
 		})
 	}
 	t.Run("the layout hook skips server preflight on its own", func(t *testing.T) {
