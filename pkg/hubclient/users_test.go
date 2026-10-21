@@ -199,3 +199,119 @@ func TestUserService_Provision_TypedErrors(t *testing.T) {
 		})
 	}
 }
+
+// TestUserService_InviteBatch_RequestAndResponse pins the batch invite
+// request body and the decoding of every response field.
+func TestUserService_InviteBatch_RequestAndResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodPost, r.Method)
+		assert.Equal(t, "/api/v1/admin/users/invite/bulk", r.URL.Path)
+		var body map[string]interface{}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		assert.Equal(t, map[string]interface{}{
+			"emails": []interface{}{
+				map[string]interface{}{"email": "alice@example.com", "note": "Q3"},
+				map[string]interface{}{"email": "bad"},
+			},
+			"projects": []interface{}{
+				map[string]interface{}{"projectId": "p1", "roleDefinitionIds": []interface{}{"r1"}},
+			},
+		}, body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"batchId":"b1","invited":1,"skipped":0,"total":3,"complete":false,
+"counts":{"created":1,"already_invited":0,"already_active":0,"suspended":0,"exists":0,"invalid":1,"duplicate":1,"failed":0,"membership_failed":1},
+"results":[
+ {"index":0,"email":"alice@example.com","status":"created","userId":"u1","memberships":[{"projectId":"p1","status":"failed","code":"membership_changed","cause":"actor_authority_changed"}]},
+ {"index":1,"input":"bad","status":"invalid","reason":"invalid_email","memberships":[{"projectId":"p1","status":"skipped","code":"address_not_invited"}]},
+ {"index":2,"email":"alice@example.com","status":"duplicate","reason":"duplicate_in_batch","duplicateOf":0}
+]}`))
+	}))
+	defer server.Close()
+
+	client, err := New(server.URL)
+	require.NoError(t, err)
+	resp, err := client.Users().InviteBatch(context.Background(), &InviteBatchRequest{
+		Emails:   []InviteBatchEmail{{Email: "alice@example.com", Note: "Q3"}, {Email: "bad"}},
+		Projects: []InviteBatchProject{{ProjectID: "p1", RoleDefinitionIDs: []string{"r1"}}},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "b1", resp.BatchID)
+	assert.Equal(t, 3, resp.Total)
+	assert.False(t, resp.Complete)
+	assert.Equal(t, InviteBatchCounts{Created: 1, Invalid: 1, Duplicate: 1, MembershipFailed: 1}, resp.Counts)
+	require.Len(t, resp.Results, 3)
+	assert.Equal(t, InviteBatchStatusCreated, resp.Results[0].Status)
+	assert.Equal(t, "u1", resp.Results[0].UserID)
+	require.Len(t, resp.Results[0].Memberships, 1)
+	assert.Equal(t, InviteBatchMembership{ProjectID: "p1", Status: InviteBatchMembershipFailed, Code: "membership_changed", Cause: "actor_authority_changed"}, resp.Results[0].Memberships[0])
+	assert.Equal(t, "bad", resp.Results[1].Input)
+	assert.Equal(t, InviteBatchMembershipSkipped, resp.Results[1].Memberships[0].Status)
+	require.NotNil(t, resp.Results[2].DuplicateOf)
+	assert.Equal(t, 0, *resp.Results[2].DuplicateOf)
+}
+
+// TestUserService_InviteBatch_ProjectsOmittedWhenUnset pins that a batch
+// without projects sends no projects field.
+func TestUserService_InviteBatch_ProjectsOmittedWhenUnset(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		_, has := body["projects"]
+		assert.False(t, has, "projects omitted: %v", body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"batchId":"b2","invited":1,"total":1,"complete":true,"counts":{"created":1},"results":[{"index":0,"email":"a@example.com","status":"created","userId":"u1"}]}`))
+	}))
+	defer server.Close()
+
+	client, err := New(server.URL)
+	require.NoError(t, err)
+	resp, err := client.Users().InviteBatch(context.Background(), &InviteBatchRequest{Emails: []InviteBatchEmail{{Email: "a@example.com"}}})
+	require.NoError(t, err)
+	assert.True(t, resp.Complete)
+}
+
+// TestUserService_InviteBatch_TypedRefusal pins that a 403
+// batch_projects_not_grantable maps to *InviteBatchError with the batch ID
+// and every refused entry, and that other errors stay plain API errors.
+func TestUserService_InviteBatch_TypedRefusal(t *testing.T) {
+	cases := []struct {
+		name      string
+		status    int
+		body      string
+		wantTyped bool
+	}{
+		{"projects not grantable", http.StatusForbidden, `{"error":{"code":"forbidden","message":"x","details":{"reason":"batch_projects_not_grantable","batchId":"b9","projects":[{"index":0,"projectId":"p1","reason":"project_not_manageable"},{"index":1,"projectId":"p2","reason":"role_not_grantable","roleDefinitionId":"r2","denialCode":"target_role_protected","details":{"roleDefinitionId":"r2"}}]}}}`, true},
+		{"plain forbidden", http.StatusForbidden, `{"error":{"code":"forbidden","message":"x"}}`, false},
+		{"bad request", http.StatusBadRequest, `{"error":{"code":"invalid_request","message":"unknown field \"x\""}}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
+
+			client, err := New(server.URL)
+			require.NoError(t, err)
+			_, err = client.Users().InviteBatch(context.Background(), &InviteBatchRequest{Emails: []InviteBatchEmail{{Email: "a@example.com"}}})
+			require.Error(t, err)
+			var be *InviteBatchError
+			var apiErr *apiclient.APIError
+			assert.True(t, errors.As(err, &apiErr), "unwraps to *apiclient.APIError")
+			if !tc.wantTyped {
+				assert.False(t, errors.As(err, &be))
+				return
+			}
+			require.True(t, errors.As(err, &be), "got %T: %v", err, err)
+			assert.Equal(t, "b9", be.BatchID)
+			require.Len(t, be.Projects, 2)
+			assert.Equal(t, InviteBatchProjectRefusal{Index: 0, ProjectID: "p1", Reason: "project_not_manageable"}, be.Projects[0])
+			assert.Equal(t, "r2", be.Projects[1].RoleDefinitionID)
+			assert.Equal(t, "target_role_protected", be.Projects[1].DenialCode)
+			assert.Equal(t, "r2", be.Projects[1].Details["roleDefinitionId"])
+		})
+	}
+}

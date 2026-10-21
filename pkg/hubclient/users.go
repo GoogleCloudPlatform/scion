@@ -16,6 +16,7 @@ package hubclient
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/url"
@@ -39,6 +40,13 @@ type UserService interface {
 	// POST /api/v1/users. It returns Created=false on an identical replay.
 	// A 409 or 422 response is returned as a *ProvisionError.
 	Provision(ctx context.Context, req *ProvisionUserRequest) (*ProvisionUserResponse, error)
+
+	// InviteBatch invites a list of addresses in one request through
+	// POST /api/v1/admin/users/invite/bulk, optionally with project roles
+	// for every invited address. The response has one result per input
+	// entry. A 403 batch_projects_not_grantable response is returned as an
+	// *InviteBatchError; nothing was created then.
+	InviteBatch(ctx context.Context, req *InviteBatchRequest) (*InviteBatchResponse, error)
 }
 
 // userService is the implementation of UserService.
@@ -189,6 +197,153 @@ func (s *userService) Provision(ctx context.Context, req *ProvisionUserRequest) 
 				pe.UserID, _ = apiErr.Details["userId"].(string)
 			}
 			return nil, pe
+		}
+		return nil, err
+	}
+	return out, nil
+}
+
+// InviteBatchRequest is the JSON request of
+// POST /api/v1/admin/users/invite/bulk. There is no hub role field: the
+// hub role of an invited user is assigned at first sign-in.
+type InviteBatchRequest struct {
+	Emails   []InviteBatchEmail   `json:"emails"`
+	Projects []InviteBatchProject `json:"projects,omitempty"`
+}
+
+// InviteBatchEmail is one address of a batch invite, with an optional
+// admin note.
+type InviteBatchEmail struct {
+	Email string `json:"email"`
+	Note  string `json:"note,omitempty"`
+}
+
+// InviteBatchProject is a project and the project role definition IDs
+// every created or already invited address of the batch receives.
+type InviteBatchProject struct {
+	ProjectID         string   `json:"projectId"`
+	RoleDefinitionIDs []string `json:"roleDefinitionIds"`
+}
+
+// Address statuses of a batch invite result.
+const (
+	InviteBatchStatusCreated        = "created"
+	InviteBatchStatusAlreadyInvited = "already_invited"
+	InviteBatchStatusAlreadyActive  = "already_active"
+	InviteBatchStatusSuspended      = "suspended"
+	InviteBatchStatusExists         = "exists"
+	InviteBatchStatusInvalid        = "invalid"
+	InviteBatchStatusDuplicate      = "duplicate"
+	InviteBatchStatusFailed         = "failed"
+)
+
+// Membership statuses of a batch invite result.
+const (
+	InviteBatchMembershipApplied       = "applied"
+	InviteBatchMembershipAlreadyMember = "already_member"
+	InviteBatchMembershipConflict      = "conflict"
+	InviteBatchMembershipFailed        = "failed"
+	InviteBatchMembershipSkipped       = "skipped"
+)
+
+// InviteBatchReasonProjectsNotGrantable is details.reason of a 403 batch
+// invite refusal.
+const InviteBatchReasonProjectsNotGrantable = "batch_projects_not_grantable"
+
+// InviteBatchCounts counts the address statuses of a batch invite, plus
+// the failed memberships.
+type InviteBatchCounts struct {
+	Created          int `json:"created"`
+	AlreadyInvited   int `json:"already_invited"`
+	AlreadyActive    int `json:"already_active"`
+	Suspended        int `json:"suspended"`
+	Exists           int `json:"exists"`
+	Invalid          int `json:"invalid"`
+	Duplicate        int `json:"duplicate"`
+	Failed           int `json:"failed"`
+	MembershipFailed int `json:"membership_failed"`
+}
+
+// InviteBatchMembership is the outcome of one requested project
+// membership for one address.
+type InviteBatchMembership struct {
+	ProjectID                string   `json:"projectId"`
+	Status                   string   `json:"status"`
+	Code                     string   `json:"code,omitempty"`
+	Cause                    string   `json:"cause,omitempty"`
+	CurrentRoleDefinitionIDs []string `json:"currentRoleDefinitionIds,omitempty"`
+}
+
+// InviteBatchResult is the outcome for one input entry, in input order.
+type InviteBatchResult struct {
+	Index       int                     `json:"index"`
+	Email       string                  `json:"email,omitempty"`
+	Input       string                  `json:"input,omitempty"`
+	Status      string                  `json:"status"`
+	Reason      string                  `json:"reason,omitempty"`
+	UserID      string                  `json:"userId,omitempty"`
+	DuplicateOf *int                    `json:"duplicateOf,omitempty"`
+	Memberships []InviteBatchMembership `json:"memberships,omitempty"`
+}
+
+// InviteBatchResponse is the response of a batch invite. Complete is false
+// when any address or membership failed or was not processed; running the
+// same request again retries them.
+type InviteBatchResponse struct {
+	BatchID  string              `json:"batchId"`
+	Invited  int                 `json:"invited"`
+	Skipped  int                 `json:"skipped"`
+	Total    int                 `json:"total"`
+	Complete bool                `json:"complete"`
+	Counts   InviteBatchCounts   `json:"counts"`
+	Results  []InviteBatchResult `json:"results"`
+}
+
+// InviteBatchProjectRefusal is one refused project entry, or one refused
+// role in it, of a 403 batch_projects_not_grantable response.
+type InviteBatchProjectRefusal struct {
+	Index            int                    `json:"index"`
+	ProjectID        string                 `json:"projectId"`
+	Reason           string                 `json:"reason"`
+	RoleDefinitionID string                 `json:"roleDefinitionId,omitempty"`
+	DenialCode       string                 `json:"denialCode,omitempty"`
+	Details          map[string]interface{} `json:"details,omitempty"`
+}
+
+// InviteBatchError is a 403 batch_projects_not_grantable response: the
+// caller cannot grant one or more requested project memberships, and
+// nothing was created.
+type InviteBatchError struct {
+	*apiclient.APIError
+	// BatchID is details.batchId; the hub's audit record carries it too.
+	BatchID string
+	// Projects lists every refused entry.
+	Projects []InviteBatchProjectRefusal
+}
+
+// Unwrap returns the underlying API error.
+func (e *InviteBatchError) Unwrap() error { return e.APIError }
+
+// InviteBatch invites a list of addresses in one request.
+func (s *userService) InviteBatch(ctx context.Context, req *InviteBatchRequest) (*InviteBatchResponse, error) {
+	resp, err := s.c.post(ctx, "/api/v1/admin/users/invite/bulk", req, nil)
+	if err != nil {
+		return nil, err
+	}
+	out, err := apiclient.DecodeRequired[InviteBatchResponse](resp)
+	if err != nil {
+		var apiErr *apiclient.APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusForbidden && apiErr.Details != nil {
+			if reason, _ := apiErr.Details["reason"].(string); reason == InviteBatchReasonProjectsNotGrantable {
+				be := &InviteBatchError{APIError: apiErr}
+				be.BatchID, _ = apiErr.Details["batchId"].(string)
+				if raw, ok := apiErr.Details["projects"]; ok {
+					if b, mErr := json.Marshal(raw); mErr == nil {
+						_ = json.Unmarshal(b, &be.Projects)
+					}
+				}
+				return nil, be
+			}
 		}
 		return nil, err
 	}
