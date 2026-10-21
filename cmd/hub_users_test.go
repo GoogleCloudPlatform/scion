@@ -375,3 +375,17 @@ func TestInviteHubUsers_LocalCaps(t *testing.T) {
 	assert.Contains(t, err.Error(), "no addresses given")
 	assert.Empty(t, hub.bulkBodies)
 }
+
+// TestParseImportCSV_KeepsAllowListBehavior pins the allow-list import
+// parser after it was factored into parseEmailRecords: the header row,
+// empty records and rows without '@' are dropped, a second column is the
+// note, and '#' lines are not comments there.
+func TestParseImportCSV_KeepsAllowListBehavior(t *testing.T) {
+	got, err := parseImportCSV(strings.NewReader("Email,Note\na@example.com, first\n\nno-at-sign,x\n#b@example.com\nc@example.com\n"))
+	require.NoError(t, err)
+	assert.Equal(t, []hubclient.AllowListAddRequest{
+		{Email: "a@example.com", Note: "first"},
+		{Email: "#b@example.com"},
+		{Email: "c@example.com"},
+	}, got)
+}
