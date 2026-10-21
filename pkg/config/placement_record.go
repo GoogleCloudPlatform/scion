@@ -84,6 +84,7 @@ func settingsFileDefinesRuntime(path, name string) bool {
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
+		// Even if not-exist: the file existed at stat time, so the runtime may have been built from it.
 		return true
 	}
 	var probe struct {
