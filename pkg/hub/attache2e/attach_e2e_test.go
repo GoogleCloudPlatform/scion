@@ -125,7 +125,6 @@ func TestAttachEndToEnd(t *testing.T) {
 		conn := f.attach(t, 80, 24)
 		defer closeQuietly(conn)
 
-		f.requireClientSize(t, "80x24")
 		require.NoError(t, conn.WriteJSON(wsprotocol.NewPTYResizeMessage(100, 30)))
 		f.requireClientSize(t, "100x30")
 		require.NoError(t, conn.WriteJSON(wsprotocol.NewPTYResizeMessage(120, 40)))
@@ -136,7 +135,6 @@ func TestAttachEndToEnd(t *testing.T) {
 		f.newSession(t)
 		conn := f.attach(t, 80, 24)
 		defer closeQuietly(conn)
-		f.requireClientSize(t, "80x24")
 
 		require.NoError(t, conn.WriteControl(websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(time.Second)))
@@ -157,7 +155,6 @@ func TestAttachEndToEnd(t *testing.T) {
 		f.newSession(t)
 		conn := f.attach(t, 80, 24)
 		defer closeQuietly(conn)
-		f.requireClientSize(t, "80x24")
 
 		// C-b d, the tmux detach keystroke, sent as terminal input.
 		require.NoError(t, conn.WriteJSON(wsprotocol.NewPTYDataMessage([]byte{2, 'd'})))
@@ -173,7 +170,6 @@ func TestAttachEndToEnd(t *testing.T) {
 		f.newSession(t)
 		conn := f.attach(t, 80, 24)
 		defer closeQuietly(conn)
-		f.requireClientSize(t, "80x24")
 
 		// The agent stops: its container reports stopped and its tmux
 		// session ends. The container still resolves, so the broker's
@@ -208,7 +204,6 @@ func TestAttachEndToEnd(t *testing.T) {
 		f.newSession(t)
 		conn := f.attach(t, 80, 24)
 		defer closeQuietly(conn)
-		f.requireClientSize(t, "80x24")
 		before := f.ccMgr.GetConnection(f.brokerID)
 		require.NotNil(t, before)
 
@@ -228,7 +223,6 @@ func TestAttachEndToEnd(t *testing.T) {
 		}, 20*time.Second, 50*time.Millisecond, "the broker should reconnect its control channel")
 		again := f.attach(t, 80, 24)
 		defer closeQuietly(again)
-		f.requireClientSize(t, "80x24")
 	})
 }
 
@@ -277,8 +271,8 @@ func newFixture(t *testing.T) *fixture {
 	f.hubURL = hubTS.URL
 	f.proxy = newCutProxy(t, hubTS.Listener.Addr().String())
 
-	// Registration: the project, the broker and its secret, and the agent
-	// placed on that broker.
+	// Registration: the project, the broker and the broker's credentials,
+	// and the agent placed on that broker.
 	now := time.Now()
 	projectID := uuid.NewString()
 	require.NoError(t, s.CreateProject(ctx, &store.Project{
@@ -290,11 +284,11 @@ func newFixture(t *testing.T) *fixture {
 		ID: f.brokerID, Name: "attach-e2e-broker", Slug: "attach-e2e-broker",
 		Status: store.BrokerStatusOnline, Created: now, Updated: now,
 	}))
-	secret := make([]byte, 32)
-	_, err = rand.Read(secret)
+	brokerKey := make([]byte, 32)
+	_, err = rand.Read(brokerKey)
 	require.NoError(t, err)
 	require.NoError(t, s.CreateBrokerSecret(ctx, &store.BrokerSecret{
-		BrokerID: f.brokerID, SecretKey: secret, Status: store.BrokerSecretStatusActive,
+		BrokerID: f.brokerID, SecretKey: brokerKey, Status: store.BrokerSecretStatusActive,
 	}))
 	f.agentID = uuid.NewString()
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
@@ -343,7 +337,7 @@ func newFixture(t *testing.T) *fixture {
 	bcfg.ControlChannelEnabled = true
 	bcfg.InMemoryCredentials = &brokercredentials.BrokerCredentials{
 		BrokerID:    f.brokerID,
-		SecretKey:   base64.StdEncoding.EncodeToString(secret),
+		SecretKey:   base64.StdEncoding.EncodeToString(brokerKey),
 		HubEndpoint: f.proxy.URL(),
 	}
 	broker := runtimebroker.New(bcfg, agent.NewManager(rt), rt)
@@ -392,18 +386,20 @@ func (f *fixture) newSession(t *testing.T) {
 	// Unix socket paths are limited to about 107 bytes; fail clearly
 	// rather than with a tmux connect error.
 	require.Less(t, len(f.socket), 100, "tmux socket path too long; use a shorter TMPDIR: %s", f.socket)
-	t.Setenv("ATTACH_E2E_SOCKET", f.socket)
-	f.setPhase(state.PhaseRunning)
-	out, err := f.tmux("-f", "/dev/null", "new-session", "-d", "-s", "scion", "-x", "80", "-y", "24", "exec cat")
-	require.NoError(t, err, "new-session: %s", out)
-	out, err = f.tmux("new-session", "-d", "-s", "spare", "exec cat")
-	require.NoError(t, err, "new-session spare: %s", out)
+	// Registered before the first new-session, so a failed setup still
+	// stops the tmux server.
 	socket := f.socket
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		_ = exec.CommandContext(ctx, f.tmuxBin, "-S", socket, "kill-server").Run()
 	})
+	t.Setenv("ATTACH_E2E_SOCKET", f.socket)
+	f.setPhase(state.PhaseRunning)
+	out, err := f.tmux("-f", "/dev/null", "new-session", "-d", "-s", "scion", "-x", "80", "-y", "24", "exec cat")
+	require.NoError(t, err, "new-session: %s", out)
+	out, err = f.tmux("new-session", "-d", "-s", "spare", "exec cat")
+	require.NoError(t, err, "new-session spare: %s", out)
 }
 
 func (f *fixture) setPhase(p state.Phase) { f.phase.Store(string(p)) }
@@ -449,13 +445,14 @@ func (f *fixture) dialOK(t *testing.T, cols, rows int) *websocket.Conn {
 	return conn
 }
 
-// attach opens the attach WebSocket and waits for the first terminal
-// output (tmux's initial draw) before returning, so no input is sent before
-// the tmux client is attached.
+// attach opens the attach WebSocket, reads the first terminal output, and
+// waits until the tmux client is attached at the requested size, so no input
+// is sent before the tmux client is attached.
 func (f *fixture) attach(t *testing.T, cols, rows int) *websocket.Conn {
 	t.Helper()
 	conn := f.dialOK(t, cols, rows)
 	readUntil(t, conn, firstDataTimeout, "the first terminal output", func(out string) bool { return out != "" })
+	f.requireClientSize(t, fmt.Sprintf("%dx%d", cols, rows))
 	return conn
 }
 
