@@ -343,7 +343,8 @@ The same per-request checks apply, with these limits:
   effective access (the admin effective-access view), explaining another principal's
   authorization, or reading an access constraint's audit history needs `hub_audit:read`; among the
   built-in roles, only super-admin holds the `hub.audit.read` permission. These scopes can be
-  selected only on a hub token, and writes to these records still need a sign-in. Listing users
+  selected only on a hub token (for writes to roles, role bindings and access constraints, see
+  **Roles, role bindings and access constraints** above). Listing users
   needs `user:list` together with `user:read`, and the list holds only users the token may read;
   among the built-in roles, only super-admin holds the `user.list` permission. Redeeming an invitation code and linking a chat account
   always need a sign-in.
