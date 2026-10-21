@@ -753,6 +753,13 @@ func TestRecoverLaunch_PostCompletedTerminal_UsesPostCompletedClassifier(t *test
 
 		runRecovery(t, srv)
 
+		reports := terminalReports(rtb)
+		if len(reports) != 1 {
+			t.Fatalf("expected the terminal resent once, got %d", len(reports))
+		}
+		if got := reportJSON(t, reports[0])["runId"]; got != "run-RPD" {
+			t.Fatalf("the resent failed report runId = %v, want the journalled run run-RPD", got)
+		}
 		if n := mgr.CleanupCallCount(); n != 1 {
 			t.Fatalf("expected one handle clean-up, got %d", n)
 		}
