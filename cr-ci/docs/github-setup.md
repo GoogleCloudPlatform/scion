@@ -26,7 +26,7 @@ working App installation, with routing ready but switched off.
 
 ## 3. Configure the webhook
 
-- TODO(P5): webhook URL = mediator URL + `/webhook` (after `deploy-mediator.sh`);
+- TODO(P5): webhook URL = `MEDIATOR_URL` + `/webhook` (after `deploy-mediator.sh`);
   generate the webhook secret locally, store it in Secret Manager, and paste it
   into the App settings; check the recent deliveries page.
 

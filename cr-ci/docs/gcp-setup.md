@@ -36,13 +36,13 @@
 ## 6. Mediator (`scripts/deploy-mediator.sh`)
 
 - TODO(P4): env from the config contract, secrets by reference; public ingress
-  (`allUsers` invoker or invoker IAM check disabled, depending on org policy:
-  matrix item U6).
+  (`allUsers` invoker, or `--no-invoker-iam-check` where org policy forbids
+  `allUsers`: matrix item U6); print the service URL for `MEDIATOR_URL`.
 
 ## 7. Reconciler (`scripts/deploy-scheduler.sh`)
 
-- TODO(P4): Cloud Scheduler `RECONCILER_JOB_NAME`, OIDC as `SCHEDULER_SA_NAME`,
-  schedule.
+- TODO(P4): Cloud Scheduler `RECONCILER_JOB_NAME` on `RECONCILE_SCHEDULE`,
+  OIDC as `SCHEDULER_SA_NAME` with audience `MEDIATOR_URL`.
 
 ## 8. Quotas
 

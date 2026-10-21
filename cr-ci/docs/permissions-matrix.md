@@ -14,7 +14,10 @@ without reading the rest of cr-ci. A ready-to-send request for a
 GoogleCloudPlatform org owner is at the end ([section 6](#6-request-to-a-googlecloudplatform-org-owner)).
 
 - **Status:** complete for P1. GitHub requirements were checked against
-  docs.github.com and GCP roles against docs.cloud.google.com on 2026-10-21. The
+  docs.github.com on 2026-10-21. For GCP, the Cloud Run, Cloud Build and Cloud
+  Run Jobs limits pages (GC1, GC2, GC7, GC11) were read on the same day. The
+  other GCP role names (GC3-GC6, GC8-GC10) are standard predefined roles that
+  were not re-fetched; the P4 dry-run transcripts check them. The
   sources are cited inline as `[GHn]` (GitHub) and `[GCn]` (GCP) and listed in [section 7](#7-sources).
   Anything still unverified is marked **UNVERIFIED**, with the check that would
   settle it.
@@ -34,7 +37,7 @@ GoogleCloudPlatform org owner is at the end ([section 6](#6-request-to-a-googlec
 | Installation scope (`GITHUB_APP_INSTALLATION_SCOPE`) | `repo` only. Personal accounts have no org-level runners or runner groups [GH8]. | `repo` (recommended) or `org`. Either way an org owner must install the App. `org` also needs a runner group that allows public repositories [GH8]. |
 | Who owns the App (holds the private key, sets the webhook URL and secret)? | ptone. | Either ptone (an App owned by a personal account and made installable on "Any account" [GH2]) or the GoogleCloudPlatform org (created by an org owner or a GitHub App manager [GH2][GH4]). See [4.1](#41-who-should-own-the-github-app-for-upstream). |
 | Switching the routing variable (rollout and fallback) | ptone (owner or collaborator) [GH7]. | Anyone with **write** on the repo [GH7][GH12]. Admin is not needed. |
-| GCP steps | Same for both targets. Owner of the chosen GCP project, or the least-privilege set in [2.1](#21-deployer-roles-least-privilege-bundle). | Same, plus Google-internal org policy on the GCP project if it lives in a google.com org ([5](#5-design-corrections-and-open-items), item U6). |
+| GCP steps | Same for both targets: the owner of the chosen GCP project, or the least-privilege set in [2.1](#21-deployer-roles-least-privilege-bundle). The org-policy caveat (item U6) depends on where `GCP_PROJECT` lives, not on the GitHub target. | Same as the fork |
 
 ## 1. GitHub steps
 
@@ -67,7 +70,7 @@ Why each one is needed:
 | G5 | **Install the App on the organization** (`org` scope) | **Not possible.** Personal accounts have no org-level runners. | **Org owner only.** The App requests an organization permission. | Org *Self-hosted runners*: read and write | [GH3][GH5][GH8] |
 | G6 | **Allow repo-level self-hosted runners** for the repo (`repo` scope) | Nothing to do. Personal accounts have no such policy. | **Org owner.** Org Settings, Actions, General, *Runners*: "All repositories" or "Selected repositories" including scion. When it is "Disabled", repo-level runners (JIT runners included) cannot be created. An enterprise policy can override this (enterprise owner). | n/a | [GH9] |
 | G7 | **Runner group for org runners** (`org` scope): enable *Allow public repositories* on the group the JIT runners join, and allow the scion repo | **Not applicable** | **Org owner.** By default "only private repositories can access runners in a runner group"; the public scion repo needs the override. Every org has the Default group. Extra groups need the GitHub Team plan or above. | REST: org *Self-hosted runners*: write | [GH8] |
-| G8 | **Fork PR approval setting**: set "Require approval for all external contributors" | ptone, as repo owner (Settings, Actions, General) | **Repo admin**, unless an **org owner** (or enterprise owner) has set an overriding policy, in which case they must set it | n/a | [GH9][GH12][GH14] |
+| G8 | **Fork PR approval setting**: set "Require approval for all external contributors" | ptone, as repo owner (Settings, Actions, General) | **Repo admin** (UNVERIFIED, see U4), unless an **org owner** (or enterprise owner) has set an overriding policy, in which case they must set it | n/a | [GH9][GH12][GH14] |
 | G9 | **Approve an individual fork-PR workflow run** (day to day) | ptone or any collaborator with write | Anyone with **write** access ("maintainers with write access") | n/a | [GH15] |
 | G10 | **Set the Actions variable** `ROUTING_VARIABLE_NAME` (`SCION_LARGE_RUNNER`) to `RUNNER_LABEL`, for example `gh variable set SCION_LARGE_RUNNER --repo OWNER/REPO --body scion-cr-8c32g` | ptone (personal repos: owner or collaborator) | Anyone with **write**. Admin is **not** required. | REST: Repository *Variables*: write | [GH7][GH12] |
 | G11 | **Fallback toggle**: delete the variable, or set it to `ubuntu-latest` (or a larger-runner label) | Same as G10 | Same as G10 (write) | Same as G10 | [GH7] |
@@ -100,16 +103,16 @@ step says otherwise. Resource names come from `config.example.env`.
 | C6 | Grant `MEDIATOR_SA_NAME` `roles/secretmanager.secretAccessor` on **each of the two secrets** | `roles/secretmanager.admin` (secret) | Secret-level bindings, not project-level | [GC3] |
 | C7 | Build and push the runner image with Cloud Build as `BUILD_SA_NAME` | `roles/cloudbuild.builds.editor` (project) + `roles/iam.serviceAccountUser` on `BUILD_SA_NAME` | A user-specified build SA requires `logging: CLOUD_LOGGING_ONLY` (or a logs bucket) [GC7]. `BUILD_SA_NAME` then also needs `roles/logging.logWriter`, which the design omits (item X7). | [GC7] |
 | C8 | Create or update the Cloud Run Job `RUNNER_JOB_NAME` (image, CPU, memory, `--max-retries=0`, `--task-timeout`, ephemeral-disk volume) running as `EXEC_SA_NAME` | `roles/run.developer` (project or job) + `roles/iam.serviceAccountUser` on `EXEC_SA_NAME` | Deploying with a service identity requires `iam.serviceAccounts.actAs` on it | [GC1][GC2] |
-| C9 | **Secret rotation**: add a new version to a secret, then disable the old one | `roles/secretmanager.secretVersionAdder` (secret) to add; `roles/secretmanager.secretVersionManager` (secret) to disable or destroy | The mediator reads `latest`, so a restart or new revision picks up the new version | [GC3] |
+| C9 | **Secret rotation**: add a new version to a secret, then disable the old one | `roles/secretmanager.secretVersionAdder` (secret) to add; `roles/secretmanager.secretVersionManager` (secret) to disable or destroy | The mediator reads `latest`, so a restart or new revision picks up the new version. That restart needs `roles/run.developer` on the service (as in C12). | [GC3][GC1] |
 | C10 | Grant `MEDIATOR_SA_NAME` `roles/run.developer` on the job `RUNNER_JOB_NAME` only | `roles/run.admin` (job), because setting IAM on a job is not in run.developer | `roles/run.developer` is what the docs require for executing with overrides and cancelling executions [GC2]. `roles/run.jobsExecutorWithOverrides` is a narrower candidate (item U3). | [GC1][GC2] |
 | C11 | Grant `MEDIATOR_SA_NAME` `roles/iam.serviceAccountUser` on `EXEC_SA_NAME` | `roles/iam.serviceAccountAdmin` (on `EXEC_SA_NAME`) | The design requires this. Whether *executing* (rather than deploying) a job needs actAs is UNVERIFIED (item U3). The grant is harmless because `EXEC_SA_NAME` has no roles. | [GC1][GC2] |
-| C12 | Deploy the mediator service `MEDIATOR_SERVICE_NAME` as `MEDIATOR_SA_NAME`, reachable by GitHub without Google auth | `roles/run.developer` + `roles/iam.serviceAccountUser` on `MEDIATOR_SA_NAME`; **plus** `roles/run.admin` (service) to bind `allUsers` as invoker | Public ingress is required because GitHub cannot present Google credentials. HMAC is the authentication. An org policy restricting allowed member domains blocks `allUsers` (item U6). | [GC1] |
+| C12 | Deploy the mediator service `MEDIATOR_SERVICE_NAME` as `MEDIATOR_SA_NAME`, reachable by GitHub without Google auth | `roles/run.developer` + `roles/iam.serviceAccountUser` on `MEDIATOR_SA_NAME`; **plus** `roles/run.admin` (service) to bind `allUsers` as invoker | Public ingress is required because GitHub cannot present Google credentials. HMAC is the authentication. An org policy restricting allowed member domains blocks `allUsers`; then deploy with `--no-invoker-iam-check` instead (item U6). | [GC1] |
 | C13 | Grant `SCHEDULER_SA_NAME` `roles/run.invoker` on `MEDIATOR_SERVICE_NAME` only | `roles/run.admin` (service) | `/reconcile` additionally checks the OIDC token in code (P2), because the service is public | [GC1] |
 | C14 | Create the Cloud Scheduler job `RECONCILER_JOB_NAME` with an OIDC token for `SCHEDULER_SA_NAME` | `roles/cloudscheduler.admin` (project) + `roles/iam.serviceAccountUser` on `SCHEDULER_SA_NAME` | | [GC8] |
 | C15 | **Quota increase**: Cloud Run regional ephemeral-disk (default 100 GiB, auto-granted) to cover `RUNNER_DISK_GI` x `MAX_CONCURRENT_RUNNERS`, plus regional CPU and memory if needed | `roles/cloudquotas.admin` (project), or the legacy `roles/servicemanagement.quotaAdmin`; Google approves the request | Only needed when raising `MAX_CONCURRENT_RUNNERS` above the default 5 (at 20 GiB each) | [GC9] |
 | C16 | Read logs, executions and metrics (operations) | `roles/logging.viewer` + `roles/run.viewer` (project) | `roles/run.viewer` can see execution env overrides. That is why the JIT config is passed by a claim nonce, never as an env override (design 3.2). | [GC1] |
 | C17 | Create alerting policies (launch failures, queue starvation) | `roles/monitoring.alertPolicyEditor` (project) | P4 or operations | [GC10] |
-| C18 | Teardown (delete everything above) | The admin role for each resource above (C2-C14) | `scripts/teardown.sh` (P4) | |
+| C18 | Teardown (delete everything above) | The admin role for each resource above (C2-C14) | `scripts/teardown.sh` (P4) | Same sources as C2-C14 |
 
 ### 2.1 Deployer roles (least-privilege bundle)
 
@@ -125,6 +128,7 @@ these roles on the project:
 - `roles/run.admin`
 - `roles/cloudbuild.builds.editor`
 - `roles/cloudscheduler.admin`
+- `roles/monitoring.alertPolicyEditor` (only for the alerting policies, C17)
 - `roles/cloudquotas.admin` (only when requesting the quota increase)
 
 ### 2.2 Runtime identities (what the deployed system holds)
@@ -143,9 +147,9 @@ these roles on the project:
 | :--- | :--- | :--- | :--- |
 | Roll out: set the variable (G10) | ptone | write access | n/a |
 | Fall back: clear the variable (G11) | ptone | write access | n/a |
-| Emergency stop: uninstall or suspend the App (G17) | ptone | org owner | Or delete the runner job `RUNNER_JOB_NAME` (`roles/run.admin`) |
-| Rotate the webhook secret (G14 + C9) | ptone | App owner | `secretVersionAdder` |
-| Rotate the App key (G15 + C9) | ptone | App owner | `secretVersionAdder` |
+| Emergency stop: uninstall or suspend the App (G17) | ptone | org owner | Or delete the runner job `RUNNER_JOB_NAME` (`roles/run.developer`, as for C8) |
+| Rotate the webhook secret (G14 + C9) | ptone | App owner | `secretVersionAdder` (add), `secretVersionManager` (disable the old version), `run.developer` (restart the mediator) |
+| Rotate the App key (G15 + C9) | ptone | App owner | `secretVersionAdder` (add), `secretVersionManager` (disable the old version), `run.developer` (restart the mediator) |
 | Approve a fork run (G9) | ptone | write access | n/a |
 | Raise concurrency (C15, then redeploy) | n/a | n/a | quota admin + `run.admin` |
 | Bump the runner image (C7, C8) | n/a | n/a | `cloudbuild.builds.editor` + `run.developer` |
@@ -224,12 +228,17 @@ Corrections to the cr-runners design (verified):
   `roles/logging.logWriter` (or bucket write) in addition to the design's
   `artifactregistry.writer`.
 
+Resolved during P1 review:
+
+- **U1 (resolved). `runner_group_id` on the repo-level JIT endpoint.** It is a
+  required body field even for repo-level runners [GH1], and `1` (the default
+  group) is the value to send there. cr-runners-arch confirmed this in the P1
+  review. cr-ci sends `GITHUB_RUNNER_GROUP_ID` (default `1`). With org scope,
+  set it to the group configured in G7. The P6 PoC will exercise it against
+  the live API.
+
 Still UNVERIFIED (to settle in P2, P4 or P6):
 
-- **U1. `runner_group_id` on the repo-level JIT endpoint.** It is documented as
-  a required body field even for repo runners [GH1], and repo runners have no
-  groups. The design passes `1`, the conventional default group ID. Check
-  against the live API in P6, or with a recorded response in P2.
 - **U2. JIT config lifetime before first use.** GitHub documents that an unused
   JIT runner is removed automatically, and that ephemeral runners are removed
   after one day offline [GH19]. It does not document how long the encoded config
@@ -247,8 +256,11 @@ Still UNVERIFIED (to settle in P2, P4 or P6):
   not found in the docs that were fetched [GH16].
 - **U6. GCP org policy.** If `GCP_PROJECT` lives in a Google-managed GCP org, the
   domain-restricted-sharing constraint (`iam.allowedPolicyMemberDomains`) may
-  forbid the `allUsers` invoker binding in C12. Cloud Run's option to disable
-  the invoker IAM check is the usual alternative, and P4 should support both.
+  forbid the `allUsers` invoker binding in C12. The fallback is to deploy
+  with `--no-invoker-iam-check` (Cloud Run skips the invoker IAM check, so no
+  `allUsers` binding is needed); cr-runners-arch agreed in the P1 review.
+  `deploy-mediator.sh` (P4) supports both. The webhook stays protected by
+  HMAC, and `/reconcile` by the in-code OIDC check (audience `MEDIATOR_URL`).
   **UNVERIFIED** for the actual project. Changing org policy needs
   `roles/orgpolicy.policyAdmin` at org level, which is outside cr-ci's reach.
 
