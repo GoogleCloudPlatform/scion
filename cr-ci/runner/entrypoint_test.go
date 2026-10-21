@@ -154,6 +154,11 @@ func newHarness(t *testing.T, mediatorURL string) *harness {
 		}
 	}
 	h.writeMountinfo("ext4")
+	// A hostile ~/.curlrc: without curl -q this prints the request headers,
+	// bearer token included, and the leak assertions in run() fail.
+	if err := os.WriteFile(filepath.Join(root, ".curlrc"), []byte("verbose\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(h.runnerDir, "run.sh"), []byte(stubRunSh), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -171,6 +176,22 @@ func newHarness(t *testing.T, mediatorURL string) *harness {
 		"STUB_OUT":                 h.stubOut,
 	}
 	return h
+}
+
+// stubCommand puts an executable named name with the given script first on
+// the entrypoint's PATH.
+func (h *harness) stubCommand(name, script string) {
+	h.t.Helper()
+	bin := filepath.Join(filepath.Dir(h.scratch), "stub-bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		h.t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, name), []byte(script), 0o755); err != nil {
+		h.t.Fatal(err)
+	}
+	if !strings.HasPrefix(h.env["PATH"], bin+":") {
+		h.env["PATH"] = bin + ":" + h.env["PATH"]
+	}
 }
 
 func (h *harness) writeMountinfo(fstype string) {
@@ -398,7 +419,7 @@ func TestEntrypointScratchChecks(t *testing.T) {
 				t.Fatal(err)
 			}
 		}, "is not a mount point"},
-		{"mount table unreadable", func(h *harness) { h.env["CR_MOUNTINFO"] = filepath.Join(h.scratch, "no-such-file") }, "cannot read"},
+		{"mount table unreadable, same device as parent", func(h *harness) { h.env["CR_MOUNTINFO"] = filepath.Join(h.scratch, "no-such-file") }, "is not a mount point"},
 		{"not writable", func(h *harness) {
 			if os.Geteuid() == 0 {
 				t.Skip("root ignores directory permissions")
@@ -464,6 +485,94 @@ func TestEntrypointConfigErrors(t *testing.T) {
 			expectFailure(t, h, res, 2, tc.wantMsg)
 			if n := len(cs.recorded()); n != 0 {
 				t.Errorf("claim requests = %d, want 0 (token must not be spent)", n)
+			}
+		})
+	}
+}
+
+// stubStatFakeMount makes `stat` report a device of its own (and an ext4
+// filesystem type) for the scratch dir, as for a real mount point, and
+// defers to the real stat for every other path.
+func (h *harness) stubStatFakeMount() {
+	h.t.Helper()
+	realStat, err := exec.LookPath("stat")
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	h.stubCommand("stat", fmt.Sprintf(`#!/usr/bin/env bash
+if [[ ${!#} == %q ]]; then
+  if [[ " $* " == *" -f "* ]]; then echo ext2/ext3; else echo 999999; fi
+  exit 0
+fi
+exec %q "$@"
+`, h.scratch, realStat))
+}
+
+func TestEntrypointScratchDeviceFallback(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(h *harness)
+	}{
+		{"not in mount table", func(h *harness) {
+			if err := os.WriteFile(h.mountinfo, []byte("22 1 0:21 / / rw - overlay overlay rw\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"mount table unreadable", func(h *harness) { h.env["CR_MOUNTINFO"] = filepath.Join(h.scratch, "no-such-file") }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var h *harness
+			cs := newClaimServer(t, func(w http.ResponseWriter) { respondJIT(h.jit)(w) })
+			h = newHarness(t, cs.URL)
+			tc.mutate(h)
+			h.stubStatFakeMount()
+			res := h.run()
+			if res.exitCode != 0 {
+				t.Fatalf("exit code = %d, want 0; stderr:\n%s", res.exitCode, res.stderr)
+			}
+			if !strings.Contains(res.stderr, "device 999999 differs from parent device") {
+				t.Errorf("stderr does not report the device fallback:\n%s", res.stderr)
+			}
+			if !h.stubStarted() {
+				t.Error("run.sh was not started")
+			}
+		})
+	}
+}
+
+func TestEntrypointScratchMountTableLogged(t *testing.T) {
+	var h *harness
+	cs := newClaimServer(t, func(w http.ResponseWriter) { respondJIT(h.jit)(w) })
+	h = newHarness(t, cs.URL)
+	res := h.run()
+	if want := h.scratch + " is a mount (ext4): listed in " + h.mountinfo; !strings.Contains(res.stderr, want) {
+		t.Errorf("stderr lacks %q:\n%s", want, res.stderr)
+	}
+}
+
+func TestEntrypointBackoffDoubling(t *testing.T) {
+	cases := []struct {
+		name, base string // base "" leaves CR_CLAIM_BACKOFF_SECONDS unset (default 1)
+		want       string
+	}{
+		{"default", "", "1\n2\n4\n8"},
+		{"fractional base", "0.5", "0.5\n1\n2\n4"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cs := newClaimServer(t, respondStatus(http.StatusServiceUnavailable))
+			h := newHarness(t, cs.URL)
+			if tc.base == "" {
+				delete(h.env, "CR_CLAIM_BACKOFF_SECONDS")
+			} else {
+				h.env["CR_CLAIM_BACKOFF_SECONDS"] = tc.base
+			}
+			h.stubCommand("sleep", "#!/usr/bin/env bash\necho \"$*\" >> \"$STUB_OUT/sleeps\"\n")
+			res := h.run()
+			expectFailure(t, h, res, 3, "after 5 attempts")
+			if got := h.stubFile("sleeps"); got != tc.want {
+				t.Errorf("sleep calls = %q, want %q", got, tc.want)
 			}
 		})
 	}

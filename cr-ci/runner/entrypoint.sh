@@ -32,6 +32,7 @@
 #   CR_MOUNTINFO             mount table to check against (default /proc/self/mountinfo)
 #   CR_RUNNER_DIR            directory holding run.sh     (default /home/runner/actions-runner)
 #   CR_CLAIM_BACKOFF_SECONDS first retry delay, doubled per retry (default 1)
+# The harness also puts stub `stat` and `sleep` commands first on PATH.
 set -euo pipefail
 
 readonly CLAIM_MAX_ATTEMPTS=5
@@ -102,13 +103,28 @@ mount_fstype() {
 if [[ ! -d $scratch ]]; then
   die "$EXIT_CONFIG" "$scratch does not exist; the Cloud Run Job must mount an ephemeral-disk volume there (--add-volume=name=scratch,type=ephemeral-disk,size=<N>Gi --add-volume-mount=volume=scratch,mount-path=$scratch). Refusing to run on the in-memory root filesystem."
 fi
-if [[ ! -r $mountinfo ]]; then
-  die "$EXIT_CONFIG" "cannot read $mountinfo to verify that $scratch is a mount"
+# Primary check: /scratch is listed as a mount point in the mount table.
+# Fallback: /scratch sits on a different device than its parent directory,
+# which holds for any mount point even if the sandbox kernel (gVisor on Cloud
+# Run) were to present the mount table differently. Which check matched is
+# logged so the P6 PoC can confirm the primary one works on Cloud Run.
+scratch_fstype=""
+if [[ -r $mountinfo ]]; then
+  scratch_fstype=$(mount_fstype "$scratch")
+  mount_check="listed in $mountinfo"
+else
+  log "warning: cannot read $mountinfo; falling back to the device check for $scratch"
 fi
-scratch_fstype=$(mount_fstype "$scratch")
 if [[ -z $scratch_fstype ]]; then
-  die "$EXIT_CONFIG" "$scratch exists but is not a mount point; the Cloud Run Job must mount an ephemeral-disk volume there. Refusing to run on the in-memory root filesystem."
+  scratch_dev=$(stat -c %d -- "$scratch")
+  parent_dev=$(stat -c %d -- "$(dirname -- "$scratch")")
+  if [[ $scratch_dev == "$parent_dev" ]]; then
+    die "$EXIT_CONFIG" "$scratch exists but is not a mount point; the Cloud Run Job must mount an ephemeral-disk volume there. Refusing to run on the in-memory root filesystem."
+  fi
+  scratch_fstype=$(stat -f -c %T -- "$scratch")
+  mount_check="device $scratch_dev differs from parent device $parent_dev"
 fi
+log "$scratch is a mount ($scratch_fstype): $mount_check"
 if [[ $scratch_fstype == tmpfs ]]; then
   log "warning: $scratch is tmpfs (in-memory); use type=ephemeral-disk so caches do not consume RAM"
 fi
@@ -120,6 +136,10 @@ fi
 rm -f -- "$probe"
 
 # --- 3. Redirect workspace, temp dirs and caches to /scratch ------------------
+# The runner sets its own RUNNER_WORKSPACE and RUNNER_TEMP for job steps
+# (under its work folder, i.e. the _work symlink into /scratch). The exports
+# here cover the listener and anything that runs before the job; the _work
+# and _diag symlinks in the image are what carry the runner's own redirection.
 
 export RUNNER_WORKSPACE="$scratch/_work"
 export RUNNER_TEMP="$scratch/_temp"

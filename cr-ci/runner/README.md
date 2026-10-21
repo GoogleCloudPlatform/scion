@@ -53,14 +53,24 @@ The mediator sets these env overrides on each execution (see
 The JIT config is never passed in env, args or labels. The entrypoint does
 this, in order:
 
-1. **Checks the env.** All four variables must be set. The token must be 32
-   lowercase hex chars. `MEDIATOR_URL` must be an https origin; plain http is
+1. **Checks the env.** All four variables must be set. The token must be
+   exactly 32 lowercase hex chars (the mediator uses `hex.EncodeToString`;
+   uppercase is rejected). `MEDIATOR_URL` must be an https origin; plain http is
    accepted only for `127.0.0.1` and `localhost`, which the test harness uses.
-2. **Checks `/scratch`.** `/scratch` must exist, be listed as a mount point in
-   `/proc/self/mountinfo`, and be writable. If any check fails, it exits 2
-   before the token is spent. Cloud Run's root filesystem is in memory, so a
-   missing volume would silently turn the caches into RAM use. If `/scratch` is
-   tmpfs (an in-memory volume), it logs a warning.
+2. **Checks `/scratch`.** `/scratch` must exist, be a mount point, and be
+   writable. If any check fails, it exits 2 before the token is spent. Cloud
+   Run's root filesystem is in memory, so a missing volume would silently turn
+   the caches into RAM use. The mount check first looks for `/scratch` in
+   `/proc/self/mountinfo`. If it is not listed there, or the table cannot be
+   read, the fallback accepts `/scratch` when `stat -c %d` reports a different
+   device for it than for its parent directory. The log line
+   `/scratch is a mount (<fstype>): ...` says which check matched. If
+   `/scratch` is tmpfs (an in-memory volume), it logs a warning.
+
+   **P6 PoC checkpoint:** neither check has run on Cloud Run's gVisor yet.
+   Confirm from the execution log that one of them matches the ephemeral-disk
+   at `/scratch` (ideally `listed in /proc/self/mountinfo`). If neither does,
+   every execution exits 2.
 3. **Redirects to `/scratch`.** It exports `RUNNER_WORKSPACE=/scratch/_work`,
    `RUNNER_TEMP` and `TMPDIR=/scratch/_temp`, `GOPATH=/scratch/gopath`,
    `GOCACHE=/scratch/gocache`, `GOMODCACHE=/scratch/gomodcache`,
@@ -69,7 +79,10 @@ this, in order:
    runner's `_work` and `_diag` directories are symlinks to `/scratch/_work`
    and `/scratch/_diag`, so the work folder lands on the disk whether the JIT
    config names `_work` or `/scratch/_work` (the mediator sends
-   `/scratch/_work`).
+   `/scratch/_work`). The symlinks are what carry the runner's own
+   redirection: for job steps, the runner sets `RUNNER_WORKSPACE` and
+   `RUNNER_TEMP` itself, under its work folder. The exported values matter
+   mainly to the listener and to anything that runs before the job.
 4. **Claims the JIT config.** It sends `POST ${MEDIATOR_URL}/internal/claim`
    with `Authorization: Bearer <token>` and an empty body, and makes up to 5
    attempts:
@@ -83,7 +96,19 @@ this, in order:
 
 5. **Starts the runner.** It unsets `RUNNER_CLAIM_TOKEN` and runs
    `exec ./run.sh --jitconfig <config>` in `/home/runner/actions-runner`, so
-   the runner is PID 1 and its exit code is the execution's exit code.
+   `run.sh` is PID 1. The image sets `RUNNER_MANUALLY_TRAP_SIG=1`, which makes
+   `run.sh` take its `runWithManualTrap` path:
+   - **Graceful cancel:** it traps TERM and INT and forwards SIGINT to the
+     runner's process group. When Cloud Run sends SIGTERM (CancelExecution or
+     task timeout), the listener cancels the job gracefully before the SIGKILL
+     at the end of the grace period.
+   - **Exit code:** it exits with the runner's exit code, so a failed runner
+     shows as a failed execution.
+
+   Without the variable, `run.sh` installs no handler. As PID 1 it would then
+   drop SIGTERM, and it would exit 0 whatever the runner returned. Exit code 2
+   from the runner helper means "restart" and loops inside `run.sh` in both
+   modes.
 
 Exit codes before `run.sh` starts: **2** for a configuration error (env,
 `/scratch`, missing `run.sh`) and **3** for a failed claim. Neither path starts
@@ -110,7 +135,9 @@ access. It uses throwaway random tokens and configs. Test-only overrides
 point the script at a temp scratch directory, a fake mount table, a stub
 runner directory, and a zero retry backoff: `CR_SCRATCH_DIR`, `CR_MOUNTINFO`,
 `CR_RUNNER_DIR` and `CR_CLAIM_BACKOFF_SECONDS`. Production leaves them unset.
-The harness covers:
+Some tests also put stub `stat` and `sleep` commands first on `PATH`. Every
+run has a `~/.curlrc` containing `verbose`, so if `curl -q` were dropped, the
+leak assertions would catch the bearer token on stderr. The harness covers:
 
 - **Success.** `run.sh` gets `--jitconfig <config>`, is exec'd (same PID),
   runs in the runner dir, and sees the `/scratch` env but no token. The token
@@ -118,11 +145,15 @@ The harness covers:
 - **Claim failures.** A 410 exits 3 without retrying. Two 5xx responses and
   then a success leads to a normal start. Five 5xx responses or five
   connection errors exit 3. A 405, a wrong content type, or bad, missing,
-  empty or non-string `jit_config` exits 3 without retrying.
+  empty or non-string `jit_config` exits 3 without retrying. The retry delays
+  are 1, 2, 4, 8 s by default, and they double from a fractional base too
+  (checked with a `sleep` stub).
 - **`/scratch` problems.** A missing directory, a directory that is not a
-  mount point, an unreadable mount table, or a read-only `/scratch` exits 2
-  without contacting the mediator. tmpfs only logs a warning.
-- **Bad env.** Any missing variable, a malformed token, a non-numeric job ID,
+  mount point by either check, or a read-only `/scratch` exits 2 without
+  contacting the mediator. tmpfs only logs a warning. The device fallback
+  accepts a mount that is missing from the table, or used when the table is
+  unreadable (checked with a `stat` stub).
+- **Bad env.** Any missing variable, a malformed (short or uppercase) token, a non-numeric job ID,
   a non-https or path-bearing URL, or a missing `run.sh` exits 2 without
   contacting the mediator.
 

@@ -33,8 +33,13 @@ ARG GO_SHA256
 ARG GOLANGCI_LINT_VERSION
 ARG GOLANGCI_LINT_SHA256
 
+# RUNNER_MANUALLY_TRAP_SIG=1 makes run.sh (PID 1) trap TERM/INT, forward
+# SIGINT to the runner's process group (graceful job cancel on Cloud Run's
+# SIGTERM) and exit with the runner's exit code. Without it, run.sh installs
+# no handler, so PID 1 drops SIGTERM, and it exits 0 whatever the runner returned.
 ENV DEBIAN_FRONTEND=noninteractive \
-    LANG=C.UTF-8
+    LANG=C.UTF-8 \
+    RUNNER_MANUALLY_TRAP_SIG=1
 
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
