@@ -314,6 +314,59 @@ func TestGroupParticipantModeCleanup_KeepsAlreadyLeftRow(t *testing.T) {
 	assertGroupCleanupLeftRowUnchanged(t, f)
 }
 
+// leftRowStore is a store whose ListParticipants also returns the rows
+// already left, as a store without the left_at filter would.
+type leftRowStore struct {
+	store.Store
+	client *ent.Client
+}
+
+func (l leftRowStore) ListParticipants(ctx context.Context, conversationID string) ([]store.ConversationParticipant, error) {
+	rows, err := l.client.ConversationParticipant.Query().
+		Where(conversationparticipant.ConversationIDEQ(uuid.MustParse(conversationID))).
+		All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]store.ConversationParticipant, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, store.ConversationParticipant{
+			ID:             r.ID.String(),
+			ConversationID: r.ConversationID.String(),
+			PrincipalKind:  string(r.PrincipalKind),
+			PrincipalID:    r.PrincipalID,
+			Role:           string(r.Role),
+			JoinedAt:       r.JoinedAt,
+			LeftAt:         r.LeftAt,
+		})
+	}
+	return out, nil
+}
+
+// TestGroupParticipantModeCleanup_SkipsLeftRowFromStore checks the
+// cleanup's own left_at check: when the store lists a row already left,
+// the cleanup neither lists nor attempts it.
+func TestGroupParticipantModeCleanup_SkipsLeftRowFromStore(t *testing.T) {
+	f := newGroupCleanupFixture(t)
+	ls := leftRowStore{Store: f.s, client: f.client}
+	leftRow := groupCleanupRow{f.group.ID, f.leftNone}
+
+	var listed bool
+	for _, params := range []map[string]string{nil, {"apply": "true"}} {
+		var buf bytes.Buffer
+		res, err := (&GroupParticipantModeCleanupExecutor{Store: ls}).run(context.Background(), &buf, params)
+		require.NoError(t, err, "log:\n%s", buf.String())
+		verb := "WOULD REMOVE"
+		if params != nil {
+			verb = "REMOVE"
+		}
+		_, listed = listedRows(t, buf.String(), verb)[leftRow]
+		assert.False(t, listed, "left row from the store must not be listed (%s)", verb)
+		assert.Equal(t, 0, res.AlreadyLeft, "left row from the store must not be attempted (%s)", verb)
+	}
+	assertGroupCleanupLeftRowUnchanged(t, f)
+}
+
 // TestGroupParticipantModeCleanup_KeepsHubModeAgent checks the hub mode
 // agent's rows on their own, so a change to the kept modes fails here with
 // a named cause.
