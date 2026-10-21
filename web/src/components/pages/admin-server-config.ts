@@ -553,6 +553,10 @@ interface DeprecatedEnvKeyInfo {
 interface ConflictInfo {
   message: string;
   conflicted: SettingsConflict[];
+  // Keys of the sections saved before the conflict (ptone/scion#4467).
+  appliedKeys: string[];
+  pendingRestart: string[];
+  skipped: SkippedKey[];
 }
 
 interface UpdateCommitInfo {
@@ -1787,6 +1791,22 @@ export class ScionPageAdminServerConfig extends LitElement {
       font-family: var(--sl-font-mono, monospace);
       font-size: 0.75rem;
     }
+
+    .conflict-saved {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+
+    .conflict-saved ul {
+      margin: 0.25rem 0 0;
+      padding-left: 1.25rem;
+    }
+
+    .conflict-saved code {
+      font-family: var(--sl-font-mono, monospace);
+      font-size: 0.75rem;
+    }
   `;
 
   override connectedCallback(): void {
@@ -2985,6 +3005,9 @@ export class ScionPageAdminServerConfig extends LitElement {
         this.conflictInfo = {
           message: err.message || 'Settings have been changed since you loaded this page.',
           conflicted: err.conflicted,
+          appliedKeys: err.appliedKeys,
+          pendingRestart: err.pendingRestart,
+          skipped: err.skipped,
         };
         return;
 
@@ -3505,6 +3528,38 @@ export class ScionPageAdminServerConfig extends LitElement {
     `;
   }
 
+  /**
+   * The keys the sections written before a 409 conflict saved
+   * (ptone/scion#4467): those sections stay saved, so a restart-required key
+   * among them must still be shown.
+   */
+  private renderConflictSavedKeys(c: ConflictInfo): typeof nothing | ReturnType<typeof html> {
+    if (c.appliedKeys.length === 0 && c.pendingRestart.length === 0 && c.skipped.length === 0) {
+      return nothing;
+    }
+    return html`
+      <div class="conflict-saved">
+        <div>Changes to the other sections were saved before the conflict:</div>
+        ${c.appliedKeys.length > 0
+          ? html`<div class="applied-keys">Applied now: ${c.appliedKeys.join(', ')}</div>`
+          : nothing}
+        ${c.pendingRestart.length > 0
+          ? html`<div class="pending-restart">
+              Saved; applies after restart: ${c.pendingRestart.join(', ')}
+            </div>`
+          : nothing}
+        ${c.skipped.length > 0
+          ? html`<div class="skipped-keys">
+              Saved but not applied:
+              <ul>
+                ${c.skipped.map((s) => html`<li><code>${s.key}</code>: ${s.reason}</li>`)}
+              </ul>
+            </div>`
+          : nothing}
+      </div>
+    `;
+  }
+
   private renderConflictBanner(): typeof nothing | ReturnType<typeof html> {
     if (!this.conflictInfo) return nothing;
     return html`
@@ -3522,6 +3577,7 @@ export class ScionPageAdminServerConfig extends LitElement {
               Changed: ${this.conflictInfo.conflicted.map((c) => html` <code>${c.section}</code>`)}
             </div>`
           : nothing}
+        ${this.renderConflictSavedKeys(this.conflictInfo)}
         <div class="conflict-banner-actions">
           <sl-button
             size="small"
