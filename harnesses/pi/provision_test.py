@@ -456,6 +456,27 @@ class McpAndPromptTest(unittest.TestCase):
             invoke(tmp, env_vars=["ANTHROPIC_API_KEY"])
             self.assertFalse(os.path.exists(os.path.join(tmp, ".pi", "agent", "APPEND_SYSTEM.md")))
 
+    def test_empty_system_prompt_removes_stale_append_file(self) -> None:
+        # A pre-populated home (an earlier start wrote a prompt); this start
+        # stages none, or only whitespace: the stale file must go.
+        for staged in ("", "  \n"):
+            with tempfile.TemporaryDirectory() as tmp, env(tmp):
+                path = os.path.join(tmp, ".pi", "agent", "APPEND_SYSTEM.md")
+                os.makedirs(os.path.dirname(path))
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write("old prompt\n")
+                invoke(tmp, env_vars=["ANTHROPIC_API_KEY"], system_prompt=staged)
+                self.assertFalse(os.path.exists(path), repr(staged))
+
+    def test_system_prompt_removed_on_a_later_start_without_one(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, env(tmp):
+            path = os.path.join(tmp, ".pi", "agent", "APPEND_SYSTEM.md")
+            invoke(tmp, env_vars=["ANTHROPIC_API_KEY"], system_prompt="first\n")
+            self.assertTrue(os.path.exists(path))
+            os.remove(os.path.join(tmp, ".scion", "harness", "inputs", "system-prompt.md"))
+            invoke(tmp, env_vars=["ANTHROPIC_API_KEY"])
+            self.assertFalse(os.path.exists(path))
+
     def test_instructions_written_to_agents_md(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, env(tmp):
             invoke(tmp, env_vars=["ANTHROPIC_API_KEY"], instructions="use sciontool\n")

@@ -393,9 +393,16 @@ def _write_mcp_config(servers: dict[str, Any]) -> None:
 
 def _write_system_prompt(ctx: sh.ProvisionContext) -> None:
     prompt = ctx.read_input_text("system-prompt.md")
-    if not prompt.strip():
-        return
     target = sh.expand_path(PI_SYSTEM_PROMPT_FILE)
+    if not prompt.strip():
+        # No system prompt this start: remove one an earlier start wrote, so a
+        # stale prompt does not stay in effect.
+        try:
+            os.remove(target)
+        except FileNotFoundError:
+            return
+        ctx.info(f"removed stale system prompt {target}")
+        return
     sh.atomic_write_text(target, prompt)
     ctx.info(f"wrote system prompt to {target}")
 
