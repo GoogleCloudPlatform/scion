@@ -605,6 +605,12 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						"invalid development token", nil)
 					return
 				}
+				// The development user's account status is checked here,
+				// on every request, as the hub user token arm checks any
+				// other user's (checkUserAccount).
+				if !admitDevUserAccount(ctx, cfg, log, w) {
+					return
+				}
 				ctx = context.WithValue(ctx, userContextKey{}, devUser)
 				ctx = contextWithIdentity(ctx, devUser)
 				ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(devUser))
@@ -697,6 +703,9 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				if cfg.UserTokenSvc == nil {
 					// Fall back to dev auth if user tokens not configured
 					if cfg.DevAuthEnabled && apiclient.ValidateDevToken(token, cfg.DevAuthToken) {
+						if !admitDevUserAccount(ctx, cfg, log, w) {
+							return
+						}
 						ctx = context.WithValue(ctx, userContextKey{}, devUser)
 						ctx = contextWithIdentity(ctx, devUser)
 						ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(devUser))
