@@ -280,6 +280,19 @@ func TestAsyncStartDispatch_BeginStartLaunchFailureDidNotHappen(t *testing.T) {
 			assert.Empty(t, f.client.sent(), "nothing was sent")
 		})
 	}
+	// A delete-held refusal leaves the minted run on the row: the delete
+	// engine owns the row's run ID (owner review F1).
+	t.Run("delete held keeps the minted run", func(t *testing.T) {
+		f := newAsyncDispatchFixture(t, "asd-blfail-held", string(state.PhaseStopped), true, nil, asyncOn)
+		before := getAgent(t, f.s, f.agent.ID).RunID
+		d := NewHTTPAgentDispatcherWithClient(beginStartLaunchFailStore{Store: f.s, err: fmt.Errorf("held: %w", store.ErrDeleteInProgress)}, f.client, false, slog.Default())
+		d.SetAsyncLaunchSettingsProvider(func() AsyncLaunchSettings { return asyncOn })
+		_, err := d.DispatchAgentStartWithOptions(context.Background(), f.agent, "", false, StartDispatchOptions{Async: true, Kind: store.LaunchKindStart, PriorPhase: string(state.PhaseStopped)})
+		require.ErrorIs(t, err, store.ErrDeleteInProgress)
+		after := getAgent(t, f.s, f.agent.ID).RunID
+		assert.NotEmpty(t, after)
+		assert.NotEqual(t, before, after, "the minted run is left to the delete engine, not reverted")
+	})
 	bare := fmt.Errorf("%w: %w", ErrLaunchInvalidPhase, store.ErrDeleteInProgress)
 	held := fmt.Errorf("%w: %w", errStartRunNotBegun, bare)
 	assert.False(t, startDidNotHappen(bare), "a delete-held refusal is not a start that did not happen")
@@ -388,6 +401,7 @@ func TestAsyncStart_BeginStartLaunchFailureSettlesAtStartAgentCore(t *testing.T)
 			err = f.srv.startAgentCore(ctx, before, StartOpts{Kind: store.StartClaimUser, AcceptAsyncLaunch: true})
 			require.Error(t, err)
 			require.ErrorIs(t, err, errStartRunNotBegun)
+			require.ErrorContains(t, err, "db down")
 			assert.Empty(t, client.sent(), "nothing was sent")
 			got := getAgent(t, f.s, a.ID)
 			assert.Equal(t, store.RunIntentStopped, got.RunIntent, "the refused start is settled back to the stopped intent")
@@ -399,6 +413,8 @@ func TestAsyncStart_BeginStartLaunchFailureSettlesAtStartAgentCore(t *testing.T)
 				// The queued-stop revert (ptone/scion#5070) writes the
 				// refused-start message and keeps the stop queued.
 				assert.Equal(t, refusedStartMessage(err), got.Message, "the refused-start message")
+				assert.True(t, strings.HasPrefix(got.Message, "Start failed: "), "message: %q", got.Message)
+				assert.True(t, strings.HasSuffix(got.Message, "The agent stays stopped."), "message: %q", got.Message)
 				assert.Equal(t, containerStatusStopQueued, got.ContainerStatus, "the stop stays queued")
 			}
 		})
@@ -1159,7 +1175,6 @@ type newerIntentOnRevertStore struct {
 
 func (s *newerIntentOnRevertStore) RevertRunIntent(ctx context.Context, agentID string, from store.RunIntent, at time.Time, to store.RunIntent) (bool, error) {
 	if s.fault.Active() && agentID == s.agentID && s.fired.CompareAndSwap(false, true) {
-		time.Sleep(20 * time.Millisecond) // keep the two intent times apart
 		if _, _, err := s.Store.SwapRunIntent(ctx, agentID, store.RunIntentRunning); err != nil {
 			return false, err
 		}
@@ -1195,6 +1210,7 @@ func TestAsyncStart_FailedReportLostSettlePublishesOnce(t *testing.T) {
 	assert.Equal(t, store.RunIntentRunning, got.RunIntent, "the newer intent is kept")
 	assert.Equal(t, got.Message, pub[0].Message, "the event is the store's updated row")
 	assert.Equal(t, "pull: image pull failed", pub[0].Message)
+	assert.Equal(t, store.RunIntentRunning, pub[0].RunIntent, "the event carries the newer intent")
 }
 
 // TestAsyncStart_ReapedProvisionedStartPublishesOnce pins the reaper's
