@@ -3746,8 +3746,9 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 		// released for the claim (startOutcomeOf), and startDidNotHappen
 		// never counts it as not happened: the delete engine owns its intent.
 		// The minted run never launched, so it is reverted even under a
-		// delete hold (a compare-and-swap back to the previous run): a
-		// delete must not target a run the runtime never held.
+		// delete hold (a compare-and-swap back to the previous run), so the
+		// row does not keep a run the runtime never held; a delete that
+		// already claimed sends its own snapshot's run ID.
 		d.revertRun(ctx, agent, runID, previousRunID)
 		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("%w: %w", errStartRunNotBegun, err)

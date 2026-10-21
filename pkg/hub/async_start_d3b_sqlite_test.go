@@ -256,6 +256,25 @@ func (s beginStartLaunchFailStore) BeginStartLaunch(context.Context, string, str
 	return "", s.err
 }
 
+// deleteHoldBeginStore places a real delete hold on the row inside
+// BeginStartLaunch, after recording the run the dispatch minted, and then
+// refuses the launch as the store does for a row out of phase
+// (store.ErrInvalidPhase); beginStartLaunch then builds the real delete-held
+// refusal.
+type deleteHoldBeginStore struct {
+	store.Store
+	t      *testing.T
+	minted string
+}
+
+func (s *deleteHoldBeginStore) BeginStartLaunch(ctx context.Context, agentID, _ string, _ time.Duration, _ store.BeginLaunchOptions) (string, error) {
+	a, err := s.Store.GetAgent(ctx, agentID)
+	require.NoError(s.t, err)
+	s.minted = a.RunID
+	claimForTest(s.t, s.Store, agentID, store.DeletionStateDeleting, time.Minute)
+	return "", store.ErrInvalidPhase
+}
+
 // TestAsyncStartDispatch_BeginStartLaunchFailureDidNotHappen pins the
 // rule of errStartRunNotBegun (as for a run not begun): when
 // BeginStartLaunch fails after the run was begun, nothing was sent, so the
@@ -281,14 +300,19 @@ func TestAsyncStartDispatch_BeginStartLaunchFailureDidNotHappen(t *testing.T) {
 		})
 	}
 	// A delete-held refusal still reverts the minted run, which never
-	// launched, so a delete never targets a run the runtime did not hold
+	// launched, so the row does not keep a run the runtime never held.
 	t.Run("delete held reverts the minted run", func(t *testing.T) {
 		f := newAsyncDispatchFixture(t, "asd-blfail-held", string(state.PhaseStopped), true, nil, asyncOn)
 		before := getAgent(t, f.s, f.agent.ID).RunID
-		d := NewHTTPAgentDispatcherWithClient(beginStartLaunchFailStore{Store: f.s, err: fmt.Errorf("held: %w", store.ErrDeleteInProgress)}, f.client, false, slog.Default())
+		hs := &deleteHoldBeginStore{Store: f.s, t: t}
+		d := NewHTTPAgentDispatcherWithClient(hs, f.client, false, slog.Default())
 		d.SetAsyncLaunchSettingsProvider(func() AsyncLaunchSettings { return asyncOn })
 		_, err := d.DispatchAgentStartWithOptions(context.Background(), f.agent, "", false, StartDispatchOptions{Async: true, Kind: store.LaunchKindStart, PriorPhase: string(state.PhaseStopped)})
-		require.ErrorIs(t, err, store.ErrDeleteInProgress)
+		require.ErrorIs(t, err, ErrLaunchInvalidPhase)
+		require.ErrorIs(t, err, store.ErrDeleteInProgress, "the real delete-held refusal")
+		require.NotEmpty(t, hs.minted, "the dispatch minted a run")
+		require.NotEqual(t, before, hs.minted)
+		assert.True(t, getAgent(t, f.s, f.agent.ID).DeletionHoldsRow(time.Now()), "the row is delete-held")
 		after := getAgent(t, f.s, f.agent.ID).RunID
 		assert.Equal(t, before, after, "the row returns to the previous run under a delete hold")
 	})
