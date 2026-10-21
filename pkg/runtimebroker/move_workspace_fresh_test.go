@@ -92,6 +92,9 @@ func TestCreateAgentProvisionOnly_FreshAgentDir_Refused(t *testing.T) {
 				t.Fatalf("CheckNFSMoveWorkspace called %d times for a forced move", mgr.nfsCalls)
 			}
 			body := w.Body.String()
+			if !strings.Contains(body, `"code":"`+api.BrokerErrCodeMoveTargetNotFresh+`"`) {
+				t.Fatalf("body = %s, want error code %s", body, api.BrokerErrCodeMoveTargetNotFresh)
+			}
 			if !strings.Contains(body, tc.wantBody) {
 				t.Fatalf("body = %s, want it to contain %q", body, tc.wantBody)
 			}
@@ -134,6 +137,9 @@ func TestCreateAgentProvisionOnly_FreshAgentDir_Unsupported_Returns409(t *testin
 	}
 	if mgr.provisionCalled {
 		t.Fatal("nothing may be provisioned without confirming the agent has no files here")
+	}
+	if !strings.Contains(w.Body.String(), api.BrokerErrCodeMoveTargetNotFresh) {
+		t.Fatalf("body = %s, want error code %s", w.Body.String(), api.BrokerErrCodeMoveTargetNotFresh)
 	}
 }
 

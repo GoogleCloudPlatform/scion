@@ -95,6 +95,15 @@ const (
 	// (PurgeRetainedQueryParam) is running there (409, with Retry-After).
 	// Nothing was started or written. Retry after the removal ends.
 	BrokerErrCodeRetainedPurgeInProgress = "retained_purge_in_progress"
+
+	// BrokerErrCodeMoveTargetNotFresh marks a forced move's provision
+	// (moved-agent expectation "fresh-agent-dir") the broker refused before
+	// creating anything, because it has files for the agent or cannot
+	// confirm that it has none (409). The message names no host path. The
+	// hub then rolls the move back without removing anything on that
+	// broker: the files there were not created by the move
+	// (ptone/scion#5441).
+	BrokerErrCodeMoveTargetNotFresh = "move_target_not_fresh"
 )
 
 // BrokerErrDetailReason is the details key of a

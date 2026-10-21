@@ -470,6 +470,9 @@ var placementGuardClassification = map[string]placementGuardOp{
 	"DispatchAgentDeleteLocalOnly": {call: func(ctx context.Context, d *HTTPAgentDispatcher, a *store.Agent) error {
 		return d.DispatchAgentDeleteLocalOnly(ctx, a)
 	}},
+	"DispatchAgentDeleteRecreated": {call: func(ctx context.Context, d *HTTPAgentDispatcher, a *store.Agent) error {
+		return d.DispatchAgentDeleteRecreated(ctx, a)
+	}},
 }
 
 // classifiedDispatcherInterfaces are the interfaces whose every method

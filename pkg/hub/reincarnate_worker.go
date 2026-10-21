@@ -549,7 +549,7 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	// re-renders the previous config on its broker.
 	failAfterProvision := func(fromState, errMsg string) {
 		if move != nil {
-			s.failMoveAndRollBack(ctx, md, agentID, reincarnationID, fromState, errMsg, previous, move, srcAgent)
+			s.failMoveAndRollBack(ctx, md, agentID, reincarnationID, fromState, errMsg, previous, move, srcAgent, false)
 			return
 		}
 		s.failAfterReprovision(ctx, dispatcher, agentID, reincarnationID, fromState, errMsg, previous)
@@ -638,7 +638,11 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	// input (AC-3), delivered as the task argument to DispatchAgentStart below
 	// and also persisted onto AppliedConfig.Task for restart consistency.
 	requesterCtx := s.buildReincarnationRequesterContext(ctx, agent, requestedBy)
-	preamble := s.buildReincarnationPreamble(agent, toGeneration, handoff, migrationStart, requesterCtx, plan)
+	var recreated *recreatedWorkspace
+	if move != nil && move.recreates() {
+		recreated = s.recreatedWorkspaceFor(ctx, move, fresh)
+	}
+	preamble := s.buildReincarnationPreambleWith(agent, toGeneration, handoff, migrationStart, requesterCtx, plan, recreated)
 	fresh.Task = preamble
 	provisioningUpd := reincarnationStepUpdate{
 		reincarnationState: store.ReincarnationStateProvisioning,
@@ -679,7 +683,14 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 			return
 		}
 		if err := md.DispatchAgentProvisionForMove(ctx, agent, move.expectedNFSWorkspace()); err != nil {
-			failAfterProvision(store.AgentReincarnationStateProvisioning, "provision on the target broker failed: "+dispatchFailureText(err))
+			errMsg := "provision on the target broker failed: " + dispatchFailureText(err)
+			if move.recreates() && moveTargetUntouched(err) {
+				// The target refused before creating anything: any files
+				// it holds for the agent predate this move and stay.
+				s.failMoveAndRollBack(ctx, md, agentID, reincarnationID, store.AgentReincarnationStateProvisioning, errMsg, previous, move, srcAgent, true)
+				return
+			}
+			failAfterProvision(store.AgentReincarnationStateProvisioning, errMsg)
 			return
 		}
 	}
@@ -1077,7 +1088,7 @@ func (s *Server) failReincarnation(ctx context.Context, agentID, reincarnationID
 // rolls the agent back to the source and writes the failed agent row (with
 // previous), so a record another owner (the stale sweep) already resolved
 // never has its agent rolled back from under it.
-func (s *Server) failMoveAndRollBack(ctx context.Context, md agentMoveDispatcher, agentID, reincarnationID, fromState, errMsg string, previous *store.AgentAppliedConfig, move *reincarnationMove, srcAgent *store.Agent) {
+func (s *Server) failMoveAndRollBack(ctx context.Context, md agentMoveDispatcher, agentID, reincarnationID, fromState, errMsg string, previous *store.AgentAppliedConfig, move *reincarnationMove, srcAgent *store.Agent, targetUntouched bool) {
 	s.agentLifecycleLog.Error("reincarnation failed",
 		"agent_id", agentID, "reincarnation_id", reincarnationID, "error", errMsg)
 	failNow, ok, err := s.tryAdvanceReincarnation(ctx, reincarnationID, fromState, store.AgentReincarnationStateFailed, reincarnationStepMaxAttempts+3, func(rec *store.AgentReincarnation, _ time.Time) {
@@ -1088,7 +1099,7 @@ func (s *Server) failMoveAndRollBack(ctx context.Context, md agentMoveDispatcher
 			"agent_id", agentID, "reincarnation_id", reincarnationID, "error", err)
 		return
 	}
-	s.rollbackMove(ctx, md, agentID, move, srcAgent)
+	s.rollbackMove(ctx, md, agentID, move, srcAgent, targetUntouched)
 	s.writeFailedAgent(ctx, agentID, errMsg, previous, failNow)
 	s.reconcileFailedMove(ctx, reincarnationID)
 }
@@ -1414,6 +1425,36 @@ func (s *Server) buildReincarnationRequesterContext(ctx context.Context, agent *
 // agents.reincarnation_state is non-terminal) make it true again, so it
 // comes back here.
 func (s *Server) buildReincarnationPreamble(agent *store.Agent, toGeneration int, handoff string, migrationStart time.Time, requester reincarnationRequesterContext, plan *ReincarnationPlan) string {
+	return s.buildReincarnationPreambleWith(agent, toGeneration, handoff, migrationStart, requester, plan, nil)
+}
+
+// recreatedWorkspace describes, for the preamble, the workspace a forced
+// move provisioned fresh on the target broker.
+type recreatedWorkspace struct {
+	// TargetBroker names the broker the new generation runs on.
+	TargetBroker string
+	// Empty is true for an empty-per-agent workspace; otherwise the
+	// workspace is a fresh clone of GitRemote, on Branch if it was pushed.
+	Empty     bool
+	GitRemote string
+	Branch    string
+}
+
+// sentence is the preamble's line about a recreated workspace.
+func (r *recreatedWorkspace) sentence() string {
+	if r.Empty {
+		return fmt.Sprintf("This generation runs on broker %s with a new, empty workspace. "+
+			"Nothing from the previous generation's workspace is here; rely on the handoff below.\n", r.TargetBroker)
+	}
+	return fmt.Sprintf("This generation runs on broker %s with a recreated workspace: a fresh clone of %s (branch %s if it was pushed). "+
+		"Nothing that was uncommitted or unpushed in the previous generation's workspace is here; rely on the handoff below.\n",
+		r.TargetBroker, displayGitRemote(r.GitRemote), valueOrUnknown(r.Branch))
+}
+
+// buildReincarnationPreambleWith is buildReincarnationPreamble with, for a
+// forced move, the recreated workspace (nil for every other reincarnation,
+// whose preamble is unchanged).
+func (s *Server) buildReincarnationPreambleWith(agent *store.Agent, toGeneration int, handoff string, migrationStart time.Time, requester reincarnationRequesterContext, plan *ReincarnationPlan, recreated *recreatedWorkspace) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "[SCION REINCARNATION] You are generation %d of agent %q (id %s)", toGeneration, agent.Slug, agent.ID)
 	switch {
@@ -1431,6 +1472,9 @@ func (s *Server) buildReincarnationPreamble(agent *store.Agent, toGeneration int
 		if changes := reincarnationChangesLine(*plan); changes != "" {
 			b.WriteString(changes)
 		}
+	}
+	if recreated != nil {
+		b.WriteString(recreated.sentence())
 	}
 	b.WriteString("Before resuming:\n")
 	// Design §3.4 Amendment A23: neutral wording, since Phase 1b also serves
@@ -1732,4 +1776,23 @@ func (s *Server) reincarnationSweepHandler() func(ctx context.Context) {
 			s.agentLifecycleLog.Info("periodic sweep: marked stale reincarnations failed", "count", n)
 		}
 	}
+}
+
+// recreatedWorkspaceFor describes a forced move's recreated workspace for
+// the preamble: the target broker by name (its ID if it cannot be read),
+// the project's git remote and the new generation's branch. A failed read
+// only makes the sentence less specific; it never fails the move.
+func (s *Server) recreatedWorkspaceFor(ctx context.Context, move *reincarnationMove, fresh *store.AgentAppliedConfig) *recreatedWorkspace {
+	r := &recreatedWorkspace{TargetBroker: move.TargetBrokerID}
+	if dst, err := s.store.GetRuntimeBroker(ctx, move.TargetBrokerID); err == nil && dst.Name != "" {
+		r.TargetBroker = dst.Name
+	}
+	if project, err := s.store.GetProject(ctx, move.ProjectID); err == nil {
+		r.Empty = project.IsEmptyPerAgent()
+		r.GitRemote = project.GitRemote
+	}
+	if fresh != nil {
+		r.Branch = fresh.Branch
+	}
+	return r
 }

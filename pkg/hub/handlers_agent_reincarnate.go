@@ -107,6 +107,10 @@ type ReincarnateAgentResponse struct {
 	TargetBrokerID string `json:"targetBrokerId,omitempty"`
 	// MoveVerdict is the move eligibility verdict of a dry-run move.
 	MoveVerdict *MoveVerdict `json:"moveVerdict,omitempty"`
+	// TransferMode is how an accepted cross-broker move carries the
+	// workspace, as recorded on its reincarnation record: "export" or
+	// "recreate" (a forced move). Empty for a plain reincarnation.
+	TransferMode string `json:"transferMode,omitempty"`
 }
 
 // FieldChange describes an old→new change to a single scalar field on the
@@ -660,6 +664,7 @@ func (s *Server) startReincarnation(w http.ResponseWriter, r *http.Request, agen
 		Handoff:               handoff,
 		SourceBrokerID:        moveSourceID(move),
 		TargetBrokerID:        moveTargetID(move),
+		TransferMode:          moveTransferMode(move),
 	}
 	// The claim, the reincarnation record, the authority re-record, the
 	// reincarnate-claim hooks and the audit record commit in one
@@ -732,6 +737,7 @@ func (s *Server) startReincarnation(w http.ResponseWriter, r *http.Request, agen
 		Plan:           plan,
 		SourceBrokerID: sourceBrokerID,
 		TargetBrokerID: targetBrokerID,
+		TransferMode:   moveTransferMode(move),
 	})
 }
 
@@ -757,6 +763,15 @@ func moveTargetID(m *reincarnationMove) string {
 		return ""
 	}
 	return m.TargetBrokerID
+}
+
+// moveTransferMode is the transfer mode recorded for a move, "" for a plain
+// reincarnation.
+func moveTransferMode(m *reincarnationMove) string {
+	if m == nil {
+		return ""
+	}
+	return m.TransferMode
 }
 
 // brokerIDIfSet returns id when target is non-empty, else "".
@@ -865,12 +880,6 @@ func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, req
 		})
 		return
 	}
-	// A forced move that recreates the workspace is checked and dry-run
-	// only, until the move itself is implemented (ptone/scion#5441).
-	if v.TransferMode == MoveTransferModeRecreate {
-		writeError(w, http.StatusNotImplemented, "not_implemented", "forced moves are not enabled yet", nil)
-		return
-	}
 	s.startReincarnation(w, r, agent, auth, patch, fresh, plan, agent.Generation+1, req.Handoff, admittedDeletionClaim, src.ID, dst.ID, &reincarnationMove{
 		SourceBrokerID:    src.ID,
 		TargetBrokerID:    dst.ID,
@@ -878,6 +887,8 @@ func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, req
 		SelfMove:          in.SelfMove,
 		AgentDirWorkspace: cloneMode,
 		Profile:           in.Profile,
+		Force:             req.ForceMove,
+		TransferMode:      v.TransferMode,
 	})
 }
 

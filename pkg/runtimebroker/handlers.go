@@ -1587,7 +1587,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			checker, ok := sc.Manager.(moveWorkspaceAbsenceChecker)
 			if !ok {
 				markAttemptFailed(http.StatusConflict, "moved agent workspace not confirmed")
-				Conflict(w, "this broker cannot confirm that a moved agent has no files here")
+				writeError(w, http.StatusConflict, api.BrokerErrCodeMoveTargetNotFresh, "this broker cannot confirm that a moved agent has no files here", nil)
 				return
 			}
 			if paths, chkErr := checker.CheckMoveWorkspaceAbsent(ctx, opts); chkErr != nil {
@@ -1601,7 +1601,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				if !errors.Is(chkErr, agent.ErrMoveWorkspacePresent) {
 					msg = "Failed to provision moved agent: could not confirm that the agent has no files on this broker"
 				}
-				Conflict(w, msg)
+				writeError(w, http.StatusConflict, api.BrokerErrCodeMoveTargetNotFresh, msg, nil)
 				return
 			}
 		} else if req.ExpectExistingNFSWorkspace != "" {
