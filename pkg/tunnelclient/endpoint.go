@@ -38,8 +38,9 @@ func RedactEndpoint(endpoint string) string {
 }
 
 // NormalizeEndpoint returns the form of a hub endpoint used to identify a
-// session locally: the redacted endpoint (RedactEndpoint) with scheme and
-// host lowercased and the scheme's default port dropped. It follows the
+// session locally: the redacted endpoint (RedactEndpoint) with the ASCII
+// letters of scheme and host lowercased and the scheme's default port
+// dropped. It follows the
 // CLI's rule for comparing hub URLs. Input that is not a URL with a host
 // gives "invalid:" and a short digest of the input, so different invalid
 // inputs never compare equal and no input text is kept.
@@ -57,8 +58,8 @@ func NormalizeEndpoint(endpoint string) string {
 		sum := sha256.Sum256([]byte(strings.ToLower(s)))
 		return "invalid:" + hex.EncodeToString(sum[:8])
 	}
-	u.Scheme = strings.ToLower(u.Scheme)
-	host := strings.ToLower(u.Hostname())
+	u.Scheme = asciiLower(u.Scheme)
+	host := asciiLower(u.Hostname())
 	port := u.Port()
 	if (u.Scheme == "https" && port == "443") || (u.Scheme == "http" && port == "80") {
 		port = ""
@@ -73,6 +74,20 @@ func NormalizeEndpoint(endpoint string) string {
 		r.Host = host
 	}
 	return r.String()
+}
+
+// asciiLower returns s with only its ASCII letters lowercased, as
+// config.NormalizeEndpoint lowercases a hub URL: Unicode case mapping would
+// fold some characters into ASCII ones (U+212A KELVIN SIGN becomes "k") and
+// give two different hosts one key.
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if 'A' <= c && c <= 'Z' {
+			b[i] = c + ('a' - 'A')
+		}
+	}
+	return string(b)
 }
 
 // scrubEndpoint removes the endpoint's userinfo, query and fragment from

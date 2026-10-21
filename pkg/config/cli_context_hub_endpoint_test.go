@@ -17,6 +17,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -256,5 +257,57 @@ func TestProjectLinkID(t *testing.T) {
 	}
 	if got := ProjectLinkID(write("project_id: local-1\n")); got != "local-1" {
 		t.Errorf("project ID: got %q, want local-1", got)
+	}
+}
+
+// UnlinkPath removes a link entry, marks a path without one as imported,
+// and reports no change for a path already marked.
+func TestCLIContextUnlinkPath(t *testing.T) {
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	c := linkTestContext()
+	if err := c.SetLinkEntry("prod", KnownProject{ID: "p1"}, "/work/linked", now); err != nil {
+		t.Fatal(err)
+	}
+	if !c.UnlinkPath("/work/linked", now) {
+		t.Error("UnlinkPath of a linked path: no change")
+	}
+	if p, _ := c.LinkEntryFor("/work/linked"); p != nil || !c.ProjectImported("/work/linked") {
+		t.Errorf("linked path: entry %+v, imported %v; want removed and imported", p, c.ProjectImported("/work/linked"))
+	}
+	if !c.UnlinkPath("/work/other", now) || !c.ProjectImported("/work/other") {
+		t.Error("UnlinkPath of a path without a link: want it marked as imported")
+	}
+	if c.UnlinkPath("/work/other", now) {
+		t.Error("second UnlinkPath: want no change")
+	}
+	if c.UnlinkPath("", now) {
+		t.Error("UnlinkPath(\"\"): want no change")
+	}
+}
+
+// UnsetSetting removes a legacy hub.endpoint from the global settings file
+// (unversioned and versioned), keeping the other keys: config unset
+// --global hub.endpoint relies on it.
+func TestUnsetSetting_RemovesTheGlobalHubEndpoint(t *testing.T) {
+	for name, content := range map[string]string{
+		"unversioned": "image_registry: registry.example.test/team\nhub:\n  endpoint: https://legacy.example.org\n",
+		"versioned":   "schema_version: \"1\"\nimage_registry: registry.example.test/team\nhub:\n  endpoint: https://legacy.example.org\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctxPath := cliContextTestHome(t)
+			path := filepath.Join(filepath.Dir(ctxPath), "settings.yaml")
+			writeCLIContextFile(t, path, content)
+			res, err := UnsetSetting("", HubEndpointConfigKey, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !res.Removed {
+				t.Fatalf("Removed = false, want true (path %q)", res.Path)
+			}
+			got := readFileString(t, path)
+			if strings.Contains(got, "legacy.example.org") || !strings.Contains(got, "registry.example.test/team") {
+				t.Errorf("settings after unset:\n%s", got)
+			}
+		})
 	}
 }

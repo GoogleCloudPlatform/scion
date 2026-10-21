@@ -152,12 +152,13 @@ hub_connections.* at either layer, and server.auth.* at the project layer (read
 only from the global settings). The value of a credential-like key (for example
 hub.brokerToken) is masked in the output.
 
-hub.endpoint is kept in the hub list (~/.scion/context.yaml), never in a
-settings file. With --global, "config set --global hub.endpoint <url>" adds the
-hub to the hub list, as "scion hub add" does (an existing entry with that URL
-is reused; a new one is named from the host), and makes it the current hub.
-In a project, "config set hub.endpoint <url>" links the project directory to
-that hub instead.`,
+hub.endpoint is kept in the hub list (~/.scion/context.yaml); config set never
+writes it into a settings file, and the CLI does not read it from one. With
+--global, "config set --global hub.endpoint <url>" adds the hub to the hub list,
+as "scion hub add" does (an existing entry with that URL is reused; a new one
+is named from the host), and makes it the current hub. In a project,
+"config set hub.endpoint <url>" links the project directory to that hub
+instead.`,
 	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		key := args[0]
@@ -250,9 +251,9 @@ Use "scion harness-config" to inspect them.
 With --source the value is followed by the layer it comes from, the same
 source "config list" shows. hub.endpoint is the hub this command would use,
 as "scion hub status" reports it, with its source: the --hub flag, an
-environment variable, the project's link to a hub, or the current hub. With --format json the output is
-{"key": "...", "value": "...", "source": "..."}. The value of a
-credential-like setting is masked.
+environment variable, the project's link to a hub, or the current hub. With
+--format json the output is {"key": "...", "value": "...", "source": "..."}.
+The value of a credential-like setting is masked.
 
 Examples:
   scion config get active_profile
@@ -299,10 +300,11 @@ It accepts the keys "config set" accepts, with the same write rules. A key
 that is not in the settings file changes nothing. An environment variable
 that sets the key still applies after it is removed from the file.
 
-hub.endpoint is kept in the hub list, not in a settings file: with --global,
-"config unset --global hub.endpoint" makes no hub current (the hub stays in the
-hub list, with its stored login); in a project, it removes the project's link
-to a hub.
+hub.endpoint is kept in the hub list: with --global, "config unset --global
+hub.endpoint" makes no hub current (the hub stays in the hub list, with its
+stored login), and also removes a hub.endpoint left in the global settings
+file, which the CLI does not read but the server and the broker still fall
+back to (deprecated); in a project, it removes the project's link to a hub.
 
 Examples:
   scion config unset cli.autohelp

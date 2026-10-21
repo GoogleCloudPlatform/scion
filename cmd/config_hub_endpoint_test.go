@@ -284,7 +284,7 @@ func TestConfigUnsetGlobalHubEndpoint_ClearsTheCurrentHub(t *testing.T) {
 
 	stdout, _, err = runConfig(t, "config", "unset", "--global", "hub.endpoint")
 	require.NoError(t, err)
-	assert.Contains(t, stdout, "No hub is current; nothing changed.")
+	assert.Contains(t, stdout, "No hub is current; the hub list is unchanged.")
 
 	_, _, err = runConfig(t, "config", "set", "--global", "hub.endpoint", ctxTestHub)
 	require.NoError(t, err)
@@ -316,4 +316,86 @@ func TestConfigUnsetProjectHubEndpoint_RemovesTheLink(t *testing.T) {
 	stdout, _, err = runConfig(t, "config", "unset", "hub.endpoint")
 	require.NoError(t, err)
 	assert.Contains(t, stdout, "This project is not linked to a hub; nothing changed.")
+}
+
+// config unset --global hub.endpoint also removes a legacy hub.endpoint from
+// the global settings file (the server and the broker still fall back to
+// it), says so on stderr, and keeps the rest of the file; with no legacy
+// key it says nothing about settings.
+func TestConfigUnsetGlobalHubEndpoint_RemovesTheLegacySetting(t *testing.T) {
+	setupConfigHubTest(t)
+	writeHomeGlobalSettings(t, "image_registry: registry.example.test/team\nhub:\n  endpoint: https://legacy.example.org\n")
+	saveTestContext(t, ctxTestHub, "")
+
+	stdout, stderr, err := runConfig(t, "config", "unset", "--global", "hub.endpoint")
+	require.NoError(t, err)
+	assert.Contains(t, stdout, "Hub 'prod' ("+ctxTestHub+") is no longer the current hub")
+	assert.Contains(t, stderr, "Removed the legacy hub.endpoint from "+globalSettingsPath())
+	assertNoHubEndpointInSettings(t)
+	data, err := os.ReadFile(globalSettingsPath())
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "registry.example.test/team", "the rest of the file is kept")
+
+	// No hub current, no legacy key: nothing about settings.
+	_, stderr, err = runConfig(t, "config", "unset", "--global", "hub.endpoint")
+	require.NoError(t, err)
+	assert.NotContains(t, stderr, "legacy")
+}
+
+// With no hub current, the legacy key is still removed, and the JSON result
+// says so.
+func TestConfigUnsetGlobalHubEndpoint_LegacySettingWithoutCurrentHubJSON(t *testing.T) {
+	setupConfigHubTest(t)
+	writeHomeGlobalSettings(t, "hub:\n  endpoint: https://legacy.example.org\n")
+
+	stdout, stderr, err := runConfig(t, "--format", "json", "config", "unset", "--global", "hub.endpoint")
+	require.NoError(t, err)
+	assert.Contains(t, stderr, "Removed the legacy hub.endpoint from ")
+	var res ActionResult
+	require.NoError(t, json.Unmarshal([]byte(stdout), &res), stdout)
+	assert.Equal(t, "No hub is current; the hub list is unchanged.", res.Message)
+	assert.Equal(t, true, res.Details["legacy_setting_removed"])
+	assert.Equal(t, false, res.Details["removed"])
+	assertNoHubEndpointInSettings(t)
+}
+
+// config set --global hub.endpoint with --format json reports the hub, the
+// scope and whether the entry was created.
+func TestConfigSetGlobalHubEndpoint_JSON(t *testing.T) {
+	setupConfigHubTest(t)
+	hubResponds = func(string, bool) error { return nil }
+
+	stdout, _, err := runConfig(t, "--format", "json", "config", "set", "--global", "hub.endpoint", "https://team.example.org/")
+	require.NoError(t, err)
+	var res ActionResult
+	require.NoError(t, json.Unmarshal([]byte(stdout), &res), stdout)
+	assert.Equal(t, "Hub 'team' (https://team.example.org) is now the current hub.", res.Message)
+	assert.Equal(t, "team", res.Details["hub"])
+	assert.Equal(t, "https://team.example.org", res.Details["endpoint"])
+	assert.Equal(t, "global", res.Details["scope"])
+	assert.Equal(t, true, res.Details["created"])
+	assert.Equal(t, true, res.Details["reachable"])
+}
+
+// In a project with no link entry, config unset hub.endpoint marks the
+// project as imported, so a later run never links it from the project's
+// settings; a second unset changes nothing.
+func TestConfigUnsetProjectHubEndpoint_StopsTheImport(t *testing.T) {
+	setupConfigHubTest(t)
+	saveTestContext(t, ctxTestHub, "")
+	root := makeDirProject(t, "https://settings.example.org")
+	linkPath := config.LinkPathForProject(filepath.Join(root, ".scion"))
+
+	stdout, _, err := runConfig(t, "config", "unset", "hub.endpoint")
+	require.NoError(t, err)
+	assert.Contains(t, stdout, "This project is not linked to a hub; nothing changed.")
+	assert.True(t, readTestContext(t).ProjectImported(linkPath), "the project's settings are never imported into a link")
+
+	before, err := os.ReadFile(contextFilePath())
+	require.NoError(t, err)
+	_, _, err = runConfig(t, "config", "unset", "hub.endpoint")
+	require.NoError(t, err)
+	after, err := os.ReadFile(contextFilePath())
+	require.NoError(t, err)
+	assert.Equal(t, string(before), string(after), "context.yaml is not rewritten")
 }

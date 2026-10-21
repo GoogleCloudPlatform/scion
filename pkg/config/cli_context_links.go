@@ -170,6 +170,24 @@ func (c *CLIContext) RemoveLinkEntry(localPath string) bool {
 	return removed
 }
 
+// UnlinkPath removes the link entry for localPath, as RemoveLinkEntry does,
+// and marks the path as imported even when there was no link entry, so the
+// one-time import of the project's settings never links it later. It
+// reports whether the context changed.
+func (c *CLIContext) UnlinkPath(localPath string, now time.Time) bool {
+	if localPath == "" {
+		return false
+	}
+	if c.RemoveLinkEntry(localPath) {
+		return true
+	}
+	if c.ProjectImported(localPath) {
+		return false
+	}
+	c.markProjectImported(localPath, now)
+	return true
+}
+
 // LinkEntryFor returns the link entry for localPath and its hub entry, or
 // nil and nil when there is none or its hub has no entry.
 func (c *CLIContext) LinkEntryFor(localPath string) (*KnownProject, *HubEntry) {

@@ -35,7 +35,9 @@ import (
 //   - config get and config list report the hub this invocation uses
 //     (resolveCLIHub) and where it comes from;
 //   - config unset --global hub.endpoint clears the current hub (the entry
-//     stays); in a project it removes the project's link entry.
+//     stays) and removes a legacy hub.endpoint from the global settings file:
+//     the CLI never reads it, but the server and the broker still fall back
+//     to it (deprecated); in a project it removes the project's link entry.
 //
 // Stored logins are keyed by endpoint and are never changed here.
 
@@ -107,12 +109,6 @@ func replaceHubSetting(values []config.SettingValue) []config.SettingValue {
 	return values
 }
 
-// printUnreachableHub prints the warning for a hub at endpoint that did not
-// respond to the health check of 'hub add' or 'config set hub.endpoint'.
-func printUnreachableHub(stderr io.Writer, endpoint string, err error) {
-	_, _ = fmt.Fprintf(stderr, "Warning: the hub at %s did not respond: %v\n", endpoint, err)
-}
-
 // warnUnreachableHub checks the health of the hub at endpoint as 'hub add'
 // does and prints its warning when the hub does not respond. It returns
 // whether the hub responded.
@@ -182,6 +178,42 @@ func configSetHubEndpoint(out, stderr io.Writer, url string, global bool, projec
 	return nil
 }
 
+// describeConfigHub is a hub for config set/unset messages: "'name' (url)",
+// or "'name'" when the hub has no entry any more.
+func describeConfigHub(name, endpoint string) string {
+	if endpoint == "" {
+		return fmt.Sprintf("'%s'", name)
+	}
+	return fmt.Sprintf("'%s' (%s)", name, config.RedactURL(endpoint))
+}
+
+// removeLegacyGlobalHubSetting removes hub.endpoint from the global settings
+// file when it is there. The CLI never reads it, but the server and the
+// broker still fall back to it (deprecated), so a value left behind would
+// keep a server pointed at a hub the user just cleared. It reports what it
+// did on stderr and returns whether the key was removed.
+func removeLegacyGlobalHubSetting(stderr io.Writer) bool {
+	res, err := config.UnsetSetting("", configHubEndpointKey, true)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "Warning: could not remove the legacy %s from the global settings: %v\n", configHubEndpointKey, err)
+		return false
+	}
+	for _, w := range res.MigrationWarnings {
+		_, _ = fmt.Fprintf(stderr, "  Migration warning: %s\n", w)
+	}
+	if res.Removed {
+		_, _ = fmt.Fprintf(stderr, "Removed the legacy %s from %s (the server and the broker still fell back to it).\n", configHubEndpointKey, res.Path)
+	}
+	if globalDir, err := config.GetGlobalDir(); err == nil {
+		if v, err := config.ResolveSettingValue(globalDir, configHubEndpointKey); err == nil {
+			if file, ok := strings.CutPrefix(v.Source, "global "); ok {
+				_, _ = fmt.Fprintf(stderr, "Warning: %s is still set in %s in a form config unset does not edit; remove it by hand (the server and the broker still fall back to it).\n", configHubEndpointKey, file)
+			}
+		}
+	}
+	return res.Removed
+}
+
 // configUnsetHubEndpoint is config unset hub.endpoint. global clears the
 // current hub (its entry stays); otherwise the link entry of the project at
 // projectDir is removed.
@@ -211,7 +243,7 @@ func configUnsetHubEndpoint(out, stderr io.Writer, global bool, projectDir strin
 				break
 			}
 		}
-		if !c.RemoveLinkEntry(localPath) {
+		if !c.UnlinkPath(localPath, time.Now()) {
 			return errHubSettingUnchanged
 		}
 		return nil
@@ -220,19 +252,24 @@ func configUnsetHubEndpoint(out, stderr io.Writer, global bool, projectDir strin
 		return err
 	}
 
+	legacyRemoved := false
+	if global {
+		legacyRemoved = removeLegacyGlobalHubSetting(stderr)
+	}
+
 	scope := "global"
 	var msg string
 	switch {
 	case global && name == "":
-		msg = "No hub is current; nothing changed."
+		msg = "No hub is current; the hub list is unchanged."
 	case global:
-		msg = fmt.Sprintf("Hub '%s' (%s) is no longer the current hub; it stays in the hub list.", name, config.RedactURL(endpoint))
+		msg = fmt.Sprintf("Hub %s is no longer the current hub; it stays in the hub list.", describeConfigHub(name, endpoint))
 	case name == "":
 		scope = "local"
 		msg = "This project is not linked to a hub; nothing changed."
 	default:
 		scope = "local"
-		msg = fmt.Sprintf("This project is no longer linked to hub '%s' (%s).", name, config.RedactURL(endpoint))
+		msg = fmt.Sprintf("This project is no longer linked to hub %s.", describeConfigHub(name, endpoint))
 	}
 
 	// The hub the next invocation uses: resolveCLIHub still holds this
@@ -247,12 +284,13 @@ func configUnsetHubEndpoint(out, stderr io.Writer, global bool, projectDir strin
 			Command: "config unset",
 			Message: msg,
 			Details: map[string]interface{}{
-				"key":     configHubEndpointKey,
-				"scope":   scope,
-				"removed": name != "",
-				"hub":     name,
-				"value":   now.Value,
-				"source":  now.Source,
+				"key":                    configHubEndpointKey,
+				"scope":                  scope,
+				"removed":                name != "",
+				"hub":                    name,
+				"legacy_setting_removed": legacyRemoved,
+				"value":                  now.Value,
+				"source":                 now.Source,
 			},
 		})
 	}
