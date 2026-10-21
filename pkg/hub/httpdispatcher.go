@@ -3738,10 +3738,13 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 	launchID, settings, began, err := d.beginStartLaunch(ctx, agent, endpoint, opts, revokeEligible && issued)
 	switch {
 	case err != nil:
-		// Nothing was sent (a delete holds the row, or the store failed).
+		// Nothing was sent (a delete holds the row, or the store failed):
+		// the claim releases the start (errStartRunNotBegun), as for a run
+		// that could not be begun. A delete-held row stays with the delete
+		// engine (startDidNotHappen excludes store.ErrDeleteInProgress).
 		d.settleFailedRun(ctx, agent, runID, previousRunID, err)
 		span.SetStatus(codes.Error, err.Error())
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", errStartRunNotBegun, err)
 	case launchID != "":
 		resp, _, accepted, err = d.sendLaunching(ctx, agent, launchID, settings, began, "Agent start accepted for async launch",
 			func(ctx context.Context, f launchFields) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {

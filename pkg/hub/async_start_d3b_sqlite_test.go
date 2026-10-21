@@ -22,6 +22,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -242,6 +243,42 @@ func TestAsyncStartDispatch_Ineligible(t *testing.T) {
 			assert.Empty(t, getAgent(t, f.s, f.agent.ID).LaunchID, "no launch begun")
 		})
 	}
+}
+
+// beginStartLaunchFailStore fails BeginStartLaunch with err.
+type beginStartLaunchFailStore struct {
+	store.Store
+	err error
+}
+
+func (s beginStartLaunchFailStore) BeginStartLaunch(context.Context, string, string, time.Duration, store.BeginLaunchOptions) (string, error) {
+	return "", s.err
+}
+
+// TestAsyncStartDispatch_BeginStartLaunchFailureDidNotHappen pins the
+// merge-forward review finding (bfl-p3-dev-12, F6 consistency): when
+// BeginStartLaunch fails after the run was begun, nothing was sent, so the
+// error is errStartRunNotBegun: the claim releases (startReleased) and the
+// start counts as not happened (startDidNotHappen), for a start and for a
+// restart's start leg. A row a delete holds stays with the delete engine:
+// startDidNotHappen excludes store.ErrDeleteInProgress.
+func TestAsyncStartDispatch_BeginStartLaunchFailureDidNotHappen(t *testing.T) {
+	for _, kind := range []string{store.LaunchKindStart, store.LaunchKindRestart} {
+		t.Run(kind, func(t *testing.T) {
+			f := newAsyncDispatchFixture(t, "asd-blfail-"+kind, string(state.PhaseStopped), true, nil, asyncOn)
+			d := NewHTTPAgentDispatcherWithClient(beginStartLaunchFailStore{Store: f.s, err: errors.New("db down")}, f.client, false, slog.Default())
+			d.SetAsyncLaunchSettingsProvider(func() AsyncLaunchSettings { return asyncOn })
+			res, err := d.DispatchAgentStartWithOptions(context.Background(), f.agent, "", false, StartDispatchOptions{Async: true, Kind: kind, PriorPhase: string(state.PhaseStopped)})
+			require.Error(t, err)
+			assert.Nil(t, res)
+			assert.ErrorIs(t, err, errStartRunNotBegun, "a pre-send store failure is a run not begun")
+			assert.Equal(t, startReleased, startOutcomeOf(err), "the claim releases a start that never left the hub")
+			assert.True(t, startDidNotHappen(err), "the start did not happen")
+			assert.Empty(t, f.client.sent(), "nothing was sent")
+		})
+	}
+	held := fmt.Errorf("%w: %w", errStartRunNotBegun, fmt.Errorf("%w: %w", ErrLaunchInvalidPhase, store.ErrDeleteInProgress))
+	assert.False(t, startDidNotHappen(held), "a delete-held row stays with the delete engine")
 }
 
 // TestDispatchAgentStart_AttachesAgentID pins that the plain start entry
