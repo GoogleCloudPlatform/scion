@@ -54,8 +54,8 @@ func TestValidateBrokerIDPathElement(t *testing.T) {
 	}
 }
 
-// TestSave_RejectsBrokerIDNotPathElement: neither store writes credentials
-// whose broker ID is not a single path element.
+// TestSave_RejectsBrokerIDNotPathElement: the store does not write
+// credentials whose broker ID is not a single path element.
 func TestSave_RejectsBrokerIDNotPathElement(t *testing.T) {
 	for name, id := range notPathElementIDs {
 		if id == "" {
@@ -63,22 +63,14 @@ func TestSave_RejectsBrokerIDNotPathElement(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
-			path := filepath.Join(dir, "broker-credentials.json")
-			err := NewStore(path).Save(&BrokerCredentials{BrokerID: id, SecretKey: "c2VjcmV0"})
-			require.Error(t, err, "Store.Save accepted broker ID %q", id)
-			assert.True(t, errors.Is(err, ErrBrokerIDNotPathElement))
-			_, statErr := os.Stat(path)
-			assert.True(t, os.IsNotExist(statErr), "credentials file written")
-
 			ms := NewMultiStore(filepath.Join(dir, "multi"))
-			err = ms.Save(&BrokerCredentials{Name: "hub-a", BrokerID: id, SecretKey: "c2VjcmV0"})
+			err := ms.Save(&BrokerCredentials{Name: "hub-a", BrokerID: id, SecretKey: "c2VjcmV0"})
 			require.Error(t, err, "MultiStore.Save accepted broker ID %q", id)
 			assert.True(t, errors.Is(err, ErrBrokerIDNotPathElement))
-			_, statErr = os.Stat(filepath.Join(dir, "multi", "hub-a.json"))
+			_, statErr := os.Stat(filepath.Join(dir, "multi", "hub-a.json"))
 			assert.True(t, os.IsNotExist(statErr), "multistore credentials file written")
 		})
 	}
 	dir := t.TempDir()
-	require.NoError(t, NewStore(filepath.Join(dir, "c.json")).Save(&BrokerCredentials{BrokerID: "11111111-2222-3333-4444-555555555555", SecretKey: "c2VjcmV0"}))
 	require.NoError(t, NewMultiStore(filepath.Join(dir, "m")).Save(&BrokerCredentials{Name: "hub-a", BrokerID: "11111111-2222-3333-4444-555555555555", SecretKey: "c2VjcmV0"}))
 }

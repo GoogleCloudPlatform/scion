@@ -446,8 +446,11 @@ var brokerHubEndpointSettingPath = []string{"server", "broker", "hub_endpoint"}
 // in the settings file in dir, editing it in place, unless the file already
 // sets it.
 func saveBrokerHubEndpointIfUnset(dir, endpoint string) error {
-	unlock := config.LockSettingsFile()
-	defer unlock()
+	lock, err := config.LockSettingsDir(dir)
+	if err != nil {
+		return err
+	}
+	defer lock.Unlock()
 
 	if vs, err := config.LoadSingleFileVersioned(dir); err == nil &&
 		vs.Server != nil && vs.Server.Broker != nil && vs.Server.Broker.HubEndpoint != "" {
@@ -457,5 +460,5 @@ func saveBrokerHubEndpointIfUnset(dir, endpoint string) error {
 	if err != nil {
 		return err
 	}
-	return staged.Commit()
+	return staged.Commit(lock)
 }

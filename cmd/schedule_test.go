@@ -15,11 +15,14 @@
 package cmd
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestScheduleCreateValidation(t *testing.T) {
@@ -138,4 +141,29 @@ func TestScheduleWhen(t *testing.T) {
 			assert.Equal(t, tc.want, scheduleWhen(tc.t, tc.status))
 		})
 	}
+}
+
+func TestScheduleStatusLabel(t *testing.T) {
+	assert.Equal(t, "active", scheduleStatusLabel("active", ""))
+	assert.Equal(t, "paused", scheduleStatusLabel("paused", ""))
+	assert.Equal(t, "paused (creator_deleted)", scheduleStatusLabel("paused", "creator_deleted"))
+	assert.Equal(t, "paused (cron_zone_unsupported)", scheduleStatusLabel("paused", "cron_zone_unsupported"))
+}
+
+// TestPrintScheduleDetail_StatusReason: the detail view prints the system
+// pause reason, and prints no Reason line when there is none.
+func TestPrintScheduleDetail_StatusReason(t *testing.T) {
+	var sched hubclient.Schedule
+	require.NoError(t, json.Unmarshal([]byte(
+		`{"id":"s1","name":"nightly","cronExpr":"0 3 * * *","eventType":"message","status":"paused","statusReason":"creator_deleted"}`,
+	), &sched))
+	assert.Equal(t, "creator_deleted", sched.StatusReason)
+
+	out := captureStdout(t, func() { printScheduleDetail(&sched) })
+	assert.Contains(t, out, "  Status:     paused\n")
+	assert.Contains(t, out, "  Reason:     creator_deleted\n")
+
+	sched.StatusReason = ""
+	out = captureStdout(t, func() { printScheduleDetail(&sched) })
+	assert.NotContains(t, out, "Reason:")
 }

@@ -157,6 +157,7 @@ The existing `TestCheckAgentContainerContext` tests should be extended to cover 
 | `config list` | Y | - |
 | `config set` | Y | - |
 | `config get` | Y | - |
+| `config unset` | Y | - |
 | `config validate` | Y | - |
 | `config migrate` | Y | - |
 | `config dir` | Y | - |

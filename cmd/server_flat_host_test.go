@@ -154,7 +154,9 @@ func TestFlatRemoteActivation_BindingCheckedOnEveryStart(t *testing.T) {
 	// registered.
 	legacy := &brokercredentials.BrokerCredentials{Name: "hub", BrokerID: id.RuntimeBrokerID, SecretKey: secret, HubEndpoint: hub.URL}
 	require.NoError(t, brokercredentials.NewMultiStore(filepath.Join(globalDir, "hub-credentials")).Save(legacy))
-	require.NoError(t, brokercredentials.NewStore(filepath.Join(globalDir, brokercredentials.DefaultFileName)).Save(legacy))
+	legacyJSON, err := json.Marshal(legacy)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, brokercredentials.DefaultFileName), legacyJSON, brokercredentials.FileMode))
 	h, built := newRemoteTestHost(t, globalDir, inst)
 	require.NoError(t, h.Prepare(ctx))
 	st := h.Status()[0]

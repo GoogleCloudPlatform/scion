@@ -48,7 +48,9 @@ func TestResolveResourcePermission_Contract(t *testing.T) {
 		{"canonical user.list", "user", ActionList, "user.list"},
 		{"canonical agent.create", "agent", ActionCreate, "agent.create"},
 		{"canonical project.read", "project", ActionRead, "project.read"},
+		{"canonical access_constraint.admin", "access_constraint", ActionAdmin, "access_constraint.admin"},
 		{"agent+manage has no permission", "agent", ActionManage, ""},
+		{"access_constraint+manage has no permission", "access_constraint", ActionManage, ""},
 
 		// Non-canonical and unknown pairs are not resolvable.
 		{"hub+user.read", "hub", "user.read", ""},
@@ -115,6 +117,7 @@ func TestCanonicalizeExplainPermission(t *testing.T) {
 		{"canonical user.list", "user", "list", "user.list"},
 		{"canonical agent.create", "agent", "create", "agent.create"},
 		{"canonical project.read", "project", "read", "project.read"},
+		{"canonical access_constraint.admin", "access_constraint", "admin", "access_constraint.admin"},
 
 		// Canonicalization: action is already a canonical permission ID.
 		{"hub + user.read → user.read", "hub", "user.read", "user.read"},

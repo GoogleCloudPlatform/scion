@@ -79,7 +79,10 @@ broker settings (settings.yaml telemetry)
 - Project telemetry policy beats `--enable-telemetry` / `--disable-telemetry` and
   `SCION_TELEMETRY_ENABLED`.
 - Hub telemetry defaults and project policy travel to the broker as separate tiers on every
-  create, start and restart. They are never written into the agent's inline config.
+  create, start and restart, to every broker. They are never written into the agent's inline
+  config or sent inline. A broker older than the `templateTiers` capability ignores both tiers,
+  so its agents get only its own settings telemetry plus the requester's on/off; the hub logs a
+  warning once per such broker.
 - Broker settings telemetry is applied at each start and is not persisted in the agent's
   `scion-agent.json`.
 
@@ -214,7 +217,7 @@ existing value.
 | `SCION_AGENT_NAME` | agent name | **Unconditional** — overwrites |
 | `SCION_PROJECT` | project name | **Unconditional** — overwrites |
 | `SCION_TEMPLATE_NAME` | resolved template slug, or `custom` | **Unconditional** — overwrites |
-| `SCION_CLI_MODE` | always `agent` inside a container | **Unconditional** — overwrites |
+| `SCION_CLI_MODE` | always `agent` inside a container (outside one, it outranks the `cli.mode` setting; see below) | **Unconditional** — overwrites |
 | `SCION_MAX_TURNS` | from the resolved `ScionConfig` | **Unconditional** — overwrites the hub-supplied value |
 | `SCION_MAX_MODEL_CALLS` | from the resolved `ScionConfig` | **Unconditional** — overwrites the hub-supplied value |
 | `SCION_MAX_DURATION` | from the resolved `ScionConfig` | **Unconditional** — overwrites the hub-supplied value |
@@ -273,6 +276,13 @@ change that must not ride along in a precedence change. Adding an entry to a mis
 outbound-only filter would look like a fix and would not be one.
 
 ---
+
+The CLI mode itself is chosen as `SCION_CLI_MODE`, then the `cli.mode` setting (from the
+merged settings files), then `human`. `scion config set cli.mode agent` therefore switches
+every later command on that machine (or in that project) to agent mode, and agent mode removes
+the `config` commands, so `scion config unset cli.mode` is then unavailable. To return, run
+`SCION_CLI_MODE=human scion config unset [--global] cli.mode`, or remove `mode` from the `cli`
+section of the settings file by hand.
 
 ## Bucket 3 — end-user settings
 
@@ -502,9 +512,8 @@ secrets:    hub  <  user  <  project  <  runtime_broker           (project wins)
 For environment variables, **`user` beats `project`**. For secrets, **`project` beats `user`** —
 and `runtime_broker` is still highest for secrets.
 
-This is a **filed difference, not a documented design**. Nobody has established that the
-divergence is intentional, so this page does not present it as a second designed ladder. It is
-tracked as [issue #624](https://github.com/ptone/scion/issues/624).
+This is a **known difference, not a documented design**. Nobody has established that the
+divergence is intentional, so this page does not present it as a second designed ladder.
 
 :::note[Related: two code comments state the secret order without `hub`]
 `pkg/secret/secret.go` and `pkg/hub/httpdispatcher.go` both describe the secret order as
@@ -687,14 +696,10 @@ over-collection is recorded separately under
 deliberately stops short of calling it a bug rather than a wart.
 
 **There is no third channel — and specifically, there is no settings-file *layering* channel.**
-This matters because it looks as though there is one. `MergeSettings` composes a whole
-`harness_overrides` block when layering one settings file over another: it merges `Env` per key,
-appends `Volumes`, and runs `MergeResourceSpec` over `Resources`. It reads as thoroughly
-load-bearing. **It is dead code.** Renaming its declaration leaves `go build ./...` green, which
-is the type checker asserting that no production caller exists — a claim grep cannot make, because
-`go build` excludes `_test.go` by definition and so cannot be satisfied by a fixture. Under the
-identical procedure, renaming `ResolveHarnessConfig` turns the build red. So do not infer a
-file-layering precedence rule for this key from reading `MergeSettings`; nothing reaches it.
+Settings files are merged by the one settings loader as plain data, and no code composes a
+`harness_overrides` block across files (the former `MergeSettings` layering helper, which never
+had a production caller, has been removed). So there is no file-layering precedence rule for this
+key beyond the ordinary last-layer-wins merge of the loader.
 
 :::caution[If you go looking for this in the source, two of the three matches are decoys]
 The line `if override.Env != nil {` appears at **three** sites, and one grep finds all three:
@@ -1066,7 +1071,7 @@ image for a role, set it in a harness-config (`config.yaml` `image`) or in setti
 The two sections below record earlier changes to this chain. Their mentions of a template tier
 describe behaviour before this release.
 
-#### `Changed in ptone/scion#1799` — an explicit profile harness override image beats the template image
+#### `Changed in GoogleCloudPlatform/scion#2646` — an explicit profile harness override image beats the template image
 
 **Before:** a template's `image` (and an inline config `image`) always outranked
 `profiles.<p>.harness_overrides.<name>.image`, silently: the only trace was a debug log. In hub
@@ -1106,7 +1111,7 @@ the override, or pass `--image`, if a template's own image must win. Conversely,
 is not applied to an existing agent; the CLI warns that the flag is ignored. Re-create the agent to
 change or drop a create-time image.
 
-#### `Changed in ptone/scion#2156` — Hub settings now wins over the harness-config file's image default
+#### `Changed in GoogleCloudPlatform/scion#2074` — Hub settings now win over the harness-config file's image default
 
 **Before:** `ProvisionAgent` never copied `harness_configs.<name>.image` (or a profile's
 `harness_overrides.<name>.image`) into an agent's config, and `run.go`'s own image resolution
@@ -1138,17 +1143,18 @@ ignored), so re-create the agent to change a create-time image.
 Separately: if an agent's **template** can no longer be resolved at all on a restart
 (renamed or deleted since the agent was created), the restart falls back to the image/pull-policy
 recorded at its last provision, with a warning, rather than falling through to Hub settings or the
-file default — matching the behavior before this change. Since ptone/scion#1799 that recorded
-value is the template's own, recorded in broker-side agent state (`image-provenance.json`), not the
-merged `scion-agent.json` value, for agents provisioned at that version or later. A template's
-`image` is now ignored, so new agents record no template value; values recorded for older agents
-are still replayed.
+file default — matching the behavior before this change. Since GoogleCloudPlatform/scion#2646
+that recorded value is the template's own, recorded in broker-side agent state
+(`image-provenance.json`), not the merged `scion-agent.json` value, for agents provisioned at
+that version or later. A template's `image` is now ignored, so new agents record no template
+value; values recorded for older agents are still replayed.
 
 ### Image registry order
 
-Introduced by ptone/scion#3916. A bare image name (one without a registry host, such as `scion-claude:latest`) is rewritten to
-`<image_registry>/<name>`. Every place that resolves `image_registry` uses one order: the source
-decides first, and within a source the more specific scope wins.
+Introduced by GoogleCloudPlatform/scion#3786. A bare image name (one without a registry host,
+such as `scion-claude:latest`) is rewritten to `<image_registry>/<name>`. Every place that
+resolves `image_registry` uses one order: the source decides first, and within a source the
+more specific scope wins.
 
 | Rank | Layer | Where it comes from |
 | :--- | :--- | :--- |
@@ -1217,9 +1223,8 @@ equivalent to "set to the hub default value" gets this backwards.
 
 ### Where hub `agent_defaults` rank
 
-**`Changed in this release`** (this settles [issue #623](https://github.com/ptone/scion/issues/623)'s
-precedence question for job keys). Hub `agent_defaults` are a **low-priority fallback**: for every
-job key they sit below the template and the project, and above only the broker's own
+**`Changed in this release`**: Hub `agent_defaults` are a **low-priority fallback**: for every job
+key they sit below the template and the project, and above only the broker's own
 `settings.yaml` defaults and the harness-config base (see [the job-key
 ladder](#the-job-key-ladder)). Before, a hub `default_model` or `default_thinking_level` was
 stamped into the agent's applied config at create, where it beat the template.
@@ -1273,7 +1278,7 @@ restart. The Runtime Broker applies them on each start and does not save them in
 `scion-agent.json`. The same holds for the broker's own `settings.yaml` limit defaults. A limit
 the agent sets itself (from its template or its own config) still wins over both. A limit
 cleared on the hub falls back to the template's value, or to the current defaults when the
-template sets none. Tracked as [issue #623](https://github.com/ptone/scion/issues/623).
+template sets none.
 
 Agents created before this change keep the limits they have stored. Their saved values look
 the same as values set on the agent itself, so a changed default does not reach them.
@@ -1350,7 +1355,7 @@ go test ./pkg/hub -count=1 -timeout 60m   # slow (see below); -race needs far mo
 
 A whole-repo `go test ./...` passes on `main` given enough time: CI's Full Test Suite runs
 `go test -timeout 60m ./...`. With the default 10-minute timeout it fails in `pkg/hub`, whose
-SQLite-enabled run takes longer than that (ptone/scion#1847), so pass `-timeout 60m`.
+SQLite-enabled run takes longer than that (GoogleCloudPlatform/scion#2842), so pass `-timeout 60m`.
 
 ## See also
 

@@ -204,6 +204,7 @@ func (a *colocatedFlatActivator) Activate(ctx context.Context, c brokerhost.Cand
 		AutoProvide:      a.autoProvide,
 		Capabilities:     flatInstanceCapabilities(c.Runtime),
 		WorkspaceStorage: loadBrokerRegistrationWorkspaceStorage(),
+		HostIdentity:     hostObservationPtr(detectHostGCPIdentity(ctx)),
 	})
 	if err != nil {
 		a.reportedMu.Lock()
@@ -811,4 +812,11 @@ func startFlatColocatedHeartbeat(ctx context.Context, wg *sync.WaitGroup, s stor
 			}
 		}
 	}()
+}
+
+// hostObservationPtr returns the detection's observation for
+// EmbeddedFlatRegistrationOptions.HostIdentity.
+func hostObservationPtr(d hostDetection) *store.HostIdentityObservation {
+	obs := d.Observation()
+	return &obs
 }

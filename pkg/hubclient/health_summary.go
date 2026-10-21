@@ -61,6 +61,9 @@ type HealthSummary struct {
 	// HubInstances is nil when the hub-instance registry could not be read.
 	HubInstances *HealthSummaryHubInstances `json:"hub_instances"`
 	Links        *HealthSummaryLinks        `json:"links,omitempty"`
+	// Schedules lists the failing schedules the caller may read; nil when
+	// the hub could not list them.
+	Schedules *HealthSummarySchedules `json:"schedules"`
 
 	// Raw is the response body exactly as the hub sent it, so callers can
 	// pass the summary through without dropping fields this client does
@@ -155,6 +158,15 @@ type HealthSummaryBroker struct {
 	// broker never reported it.
 	Health *HealthBrokerSelf  `json:"health"`
 	Agents HealthBrokerAgents `json:"agents"`
+	// HostIdentity is a co-located broker's host identity state; nil while
+	// unobserved.
+	HostIdentity *HealthBrokerHostIdentity `json:"host_identity,omitempty"`
+}
+
+// HealthBrokerHostIdentity is a runtime broker's host identity state (for
+// example match, mismatch or pinned_absent).
+type HealthBrokerHostIdentity struct {
+	State string `json:"state"`
 }
 
 // HealthBrokerSelf is a runtime broker's self-reported health.
@@ -295,6 +307,56 @@ type HealthHubInstanceDB struct {
 	PoolIdle           int   `json:"pool_idle"`
 	PoolMax            int   `json:"pool_max"`
 	PoolWaitCountTotal int64 `json:"pool_wait_count_total"`
+}
+
+// HealthSummarySchedules is the schedules section: active schedules whose
+// last run failed, limited to projects where the caller holds
+// scheduled_event.read.
+type HealthSummarySchedules struct {
+	Failing []HealthFailingSchedule `json:"failing"`
+	// Total is a lower bound when ScanLimited is true.
+	Total       int  `json:"total"`
+	Truncated   bool `json:"truncated"`
+	ScanLimited bool `json:"scan_limited"`
+	// Paused lists schedules the hub paused itself, with their reason.
+	// A schedule a user paused is not listed. Nil from an older hub.
+	Paused []HealthPausedSchedule `json:"paused"`
+	// PausedUnavailable is true when the hub could not list them; the
+	// failing list is still reported.
+	PausedUnavailable bool `json:"paused_unavailable"`
+	// PausedTotal is a lower bound when PausedScanLimited is true.
+	PausedTotal       int  `json:"paused_total"`
+	PausedTruncated   bool `json:"paused_truncated"`
+	PausedScanLimited bool `json:"paused_scan_limited"`
+}
+
+// HealthPausedSchedule is one schedule the hub paused, with its reason.
+type HealthPausedSchedule struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	ProjectID   string `json:"project_id"`
+	ProjectSlug string `json:"project_slug"`
+	EventType   string `json:"event_type"`
+	Target      string `json:"target"`
+	// Reason is "creator_deleted", "cron_zone_unsupported" or "other";
+	// a newer hub may add values.
+	Reason    string     `json:"reason"`
+	UpdatedAt *time.Time `json:"updated_at"`
+}
+
+// HealthFailingSchedule is one active schedule whose last run failed.
+type HealthFailingSchedule struct {
+	ID            string     `json:"id"`
+	Name          string     `json:"name"`
+	ProjectID     string     `json:"project_id"`
+	ProjectSlug   string     `json:"project_slug"`
+	EventType     string     `json:"event_type"`
+	Target        string     `json:"target"`
+	RunCount      int        `json:"run_count"`
+	ErrorCount    int        `json:"error_count"`
+	LastFailureAt *time.Time `json:"last_failure_at"`
+	// LastError is stored error text, capped by the hub.
+	LastError string `json:"last_error"`
 }
 
 // HealthSummaryLinks holds operator-configured Health page links.

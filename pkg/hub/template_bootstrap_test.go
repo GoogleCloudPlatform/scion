@@ -558,12 +558,12 @@ func TestSyncExistingTemplate_PopulatesNewHashForLaterAgents(t *testing.T) {
 	}
 }
 
-// TestSyncExistingTemplate_PreservesTypedConfig guards the ResourceStore
+// TestSyncExistingTemplate_PreservesMetadata guards the ResourceStore
 // record↔model round-trip: a content-changing sync must update Files/ContentHash
-// while leaving the template's typed Config payload (and other fields not
-// derived from the directory) intact. A naive collapse that reconstructs the
-// model from the shared ResourceRecord would null these out.
-func TestSyncExistingTemplate_PreservesTypedConfig(t *testing.T) {
+// while leaving the template's fields not derived from the directory intact.
+// A naive collapse that reconstructs the model from the shared ResourceRecord
+// would null these out.
+func TestSyncExistingTemplate_PreservesMetadata(t *testing.T) {
 	srv, s, _ := testTemplateBootstrapServer(t)
 	ctx := context.Background()
 
@@ -576,13 +576,11 @@ func TestSyncExistingTemplate_PreservesTypedConfig(t *testing.T) {
 		t.Fatalf("bootstrap failed: %v", err)
 	}
 
-	// Attach a typed Config payload + other non-dir-derived fields, as a
-	// hub-side edit would.
+	// Attach non-dir-derived fields, as a hub-side edit would.
 	existing, err := s.GetTemplateBySlug(ctx, "typed", store.TemplateScopeGlobal, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	existing.Config = &store.TemplateConfig{Image: "custom-image:1", Model: "opus"}
 	existing.BaseTemplate = "base-xyz"
 	existing.DisplayName = "Typed Template"
 	if err := s.UpdateTemplate(ctx, existing); err != nil {
@@ -612,12 +610,6 @@ func TestSyncExistingTemplate_PreservesTypedConfig(t *testing.T) {
 	}
 	if got.ContentHash == originalHash {
 		t.Error("expected ContentHash to change after sync")
-	}
-	if got.Config == nil {
-		t.Fatal("expected typed Config to survive sync, got nil")
-	}
-	if got.Config.Image != "custom-image:1" || got.Config.Model != "opus" {
-		t.Errorf("typed Config not preserved: got %+v", got.Config)
 	}
 	if got.BaseTemplate != "base-xyz" {
 		t.Errorf("expected BaseTemplate preserved, got %q", got.BaseTemplate)

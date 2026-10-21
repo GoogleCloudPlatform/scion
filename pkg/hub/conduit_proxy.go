@@ -81,6 +81,12 @@ func (s *Server) openConduitPort(ctx context.Context, identity Identity, agent *
 	var conn net.Conn
 	err := rtr.Do(ctx, req, func(ctx context.Context, res router.Resolved) error {
 		renews, canRenew := conduitTargetRenews(res), s.conduitRouteCanRenew(res)
+		// A target without stream renewal is refused (409), never retried
+		// on the port-forward tunnel: the caller answers it with
+		// writeConduitProxyError, not as "no session".
+		if s.conduitTargetUpgradeRequired(ctx, identity, renews, conduitRouteProxy, agent.ID) {
+			return errConduitAgentUpgradeRequired
+		}
 		if s.conduitRenewalPathUnavailable(ctx, identity, renews, canRenew, conduitRouteProxy, agent.ID) {
 			return errConduitStreamRenewalUnavailable
 		}
@@ -111,6 +117,7 @@ func (s *Server) openConduitPort(ctx context.Context, identity Identity, agent *
 			return err
 		}
 		sc := newStreamConn(st, agent.ID, port)
+		sc.route = conduitRouteLogAttrs(res)
 		target := conduitLeafTarget(res, st, bridge)
 		tracked := &conduitUserStream{
 			Kind:      grant.StreamKindTCP,
@@ -282,8 +289,12 @@ func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent
 		slog.Debug("Conduit proxy: cannot lift the connection deadlines", "agent_id", agent.ID, "error", err)
 	}
 	// Logged on the way out, so an aborted response is logged too.
+	var route []any
+	if sc, ok := conn.(*streamConn); ok {
+		route = sc.route
+	}
 	defer func() {
-		slog.Debug("Proxy request",
+		slog.Debug("Proxy request", append([]any{
 			"agent_id", agent.ID,
 			"port", port,
 			"caller", identityStringFromContext(r.Context()),
@@ -292,7 +303,7 @@ func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent
 			"status", status,
 			"transport", "conduit",
 			"duration", time.Since(start),
-		)
+		}, route...)...)
 	}()
 	rp.ServeHTTP(w, r)
 }
@@ -463,6 +474,9 @@ func writeConduitProxyError(w http.ResponseWriter, r *http.Request, agentID stri
 	case errors.Is(err, errConduitStreamRenewalUnavailable):
 		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, conduitStreamRenewalUnavailableMessage,
 			map[string]interface{}{"reason": conduitReasonStreamRenewalUnavailable})
+	case errors.Is(err, errConduitAgentUpgradeRequired):
+		writeError(w, http.StatusConflict, ErrCodeAgentUpgradeRequired, conduitAgentUpgradeRequiredMessage,
+			map[string]interface{}{"reason": conduitReasonStreamRenewalUnsupported})
 	case errors.Is(err, errConduitGrantInternal):
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Internal error", nil)
 	case errors.Is(err, errConduitInvalid):
@@ -513,6 +527,9 @@ func writeAgentOffline(w http.ResponseWriter, r *http.Request) {
 type streamConn struct {
 	conduit.Stream
 	local, remote net.Addr
+	// route holds the routing log fields of the stream
+	// (conduitRouteLogAttrs).
+	route []any
 
 	// untrack ends the stream's authorization re-checks (set once, before
 	// the conn is used).

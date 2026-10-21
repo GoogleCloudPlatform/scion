@@ -100,6 +100,10 @@ type Role struct {
 
 	// tunnels are the tunnels this relay opened for its user sessions.
 	tunnels tunnelTable
+	// testHookTunnelEnded, when set (tests only, before any tunnel opens),
+	// runs after a tunnel's splice has ended and the tunnel is untracked
+	// and forgotten.
+	testHookTunnelEnded func()
 }
 
 // heldSession is one relay-held session's hub admission.
@@ -299,7 +303,9 @@ func (f *rpcForwarder) HandleRPC(ctx context.Context, req *conduitv1.RpcRequest)
 			ExcludeTargets: exclude,
 			ExcludeRelays:  excludeRelays,
 			OpenTunnels:    openTunnels,
-			Features:       []string{relay.HubFeatureTunnels},
+			// Every tunnel this relay opens goes to its stream
+			// scheduler (openTunnel), so it lists tunnel_recheck.
+			Features: []string{relay.HubFeatureTunnels, relay.HubFeatureTunnelRecheck},
 		}, &out)
 		var refusal *relay.HubRefusal
 		switch {

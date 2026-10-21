@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
@@ -82,7 +83,6 @@ func (noStreamRenewer) Renew([]byte) error { return ErrNoStreamRenewer }
 // RenewerFor returns the renewer of the stream st opened on sess: local when
 // this relay holds the target's session, the bridged stream's own renewer
 // otherwise.
-// TODO: stream tracking and renewal delivery are wired into the relay in a later change (ptone/scion#3776)
 func RenewerFor(sess conduit.Session, target relay.TargetStream, st conduit.StreamRenewer) Renewer {
 	if ls, ok := sess.(conduit.LocalSession); ok {
 		return LocalRenewer(ls, target.StreamID)
@@ -105,6 +105,11 @@ type TrackedStream struct {
 	// Interval its authorization interval.
 	AuthzUntil time.Time
 	Interval   time.Duration
+	// FirstRecheckAt, when set with Interval, is when the first re-check
+	// runs; later re-checks run at RenewalLead of Interval after each
+	// renewal. Without it the first runs at RenewalLead of Interval after
+	// Track.
+	FirstRecheckAt time.Time
 	// Renewer delivers renewals to the target.
 	Renewer Renewer
 	// Close ends the stream on both legs (called at most once).
@@ -126,6 +131,11 @@ type StreamScheduler struct {
 	ro      *Role
 	mu      sync.Mutex
 	streams map[*trackedStream]struct{}
+
+	// hintAbsent and hintInvalid count the tunnels scheduled by the sweep
+	// alone because their scheduling hints were missing or unusable.
+	hintAbsent  atomic.Int64
+	hintInvalid atomic.Int64
 }
 
 func newStreamScheduler(ro *Role) *StreamScheduler {
@@ -134,9 +144,13 @@ func newStreamScheduler(ro *Role) *StreamScheduler {
 
 // Track schedules ts until the returned function is called (when the stream
 // ends for any reason).
-// TODO: stream tracking and renewal delivery are wired into the relay in a later change (ptone/scion#3776)
 func (s *StreamScheduler) Track(ts TrackedStream) (untrack func()) {
 	st := &trackedStream{TrackedStream: ts, renewedFrom: s.ro.clk.Now()}
+	if ts.Interval > 0 && !ts.FirstRecheckAt.IsZero() {
+		// The first re-check lands at FirstRecheckAt (armLocked runs it at
+		// renewedFrom plus RenewalLead of Interval).
+		st.renewedFrom = ts.FirstRecheckAt.Add(-time.Duration(float64(ts.Interval) * RenewalLead))
+	}
 	s.mu.Lock()
 	s.streams[st] = struct{}{}
 	s.mu.Unlock()

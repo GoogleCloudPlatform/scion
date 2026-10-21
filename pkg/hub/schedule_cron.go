@@ -123,7 +123,7 @@ func (s *Server) pauseZonePrefixedSchedules(ctx context.Context) {
 				excludeIDs = append(excludeIDs, sched.ID)
 				continue
 			}
-			if err := s.store.UpdateScheduleStatus(ctx, sched.ID, store.ScheduleStatusPaused); err != nil {
+			if err := s.store.UpdateScheduleStatus(ctx, sched.ID, store.ScheduleStatusPaused, store.ScheduleStatusReasonCronZoneUnsupported); err != nil {
 				log.Error("schedule zone-prefix check: failed to pause schedule",
 					"schedule_id", sched.ID, "project_id", sched.ProjectID,
 					"cron_expr", sched.CronExpr, "error", err)

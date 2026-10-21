@@ -84,34 +84,6 @@ func (_c *TemplateCreate) SetNillableDefaultHarnessConfig(v *string) *TemplateCr
 	return _c
 }
 
-// SetImage sets the "image" field.
-func (_c *TemplateCreate) SetImage(v string) *TemplateCreate {
-	_c.mutation.SetImage(v)
-	return _c
-}
-
-// SetNillableImage sets the "image" field if the given value is not nil.
-func (_c *TemplateCreate) SetNillableImage(v *string) *TemplateCreate {
-	if v != nil {
-		_c.SetImage(*v)
-	}
-	return _c
-}
-
-// SetConfig sets the "config" field.
-func (_c *TemplateCreate) SetConfig(v string) *TemplateCreate {
-	_c.mutation.SetConfig(v)
-	return _c
-}
-
-// SetNillableConfig sets the "config" field if the given value is not nil.
-func (_c *TemplateCreate) SetNillableConfig(v *string) *TemplateCreate {
-	if v != nil {
-		_c.SetConfig(*v)
-	}
-	return _c
-}
-
 // SetAgentConfig sets the "agent_config" field.
 func (_c *TemplateCreate) SetAgentConfig(v string) *TemplateCreate {
 	_c.mutation.SetAgentConfig(v)
@@ -537,14 +509,6 @@ func (_c *TemplateCreate) createSpec() (*Template, *sqlgraph.CreateSpec) {
 		_spec.SetField(template.FieldDefaultHarnessConfig, field.TypeString, value)
 		_node.DefaultHarnessConfig = value
 	}
-	if value, ok := _c.mutation.Image(); ok {
-		_spec.SetField(template.FieldImage, field.TypeString, value)
-		_node.Image = value
-	}
-	if value, ok := _c.mutation.Config(); ok {
-		_spec.SetField(template.FieldConfig, field.TypeString, value)
-		_node.Config = value
-	}
 	if value, ok := _c.mutation.AgentConfig(); ok {
 		_spec.SetField(template.FieldAgentConfig, field.TypeString, value)
 		_node.AgentConfig = value
@@ -756,42 +720,6 @@ func (u *TemplateUpsert) UpdateDefaultHarnessConfig() *TemplateUpsert {
 // ClearDefaultHarnessConfig clears the value of the "default_harness_config" field.
 func (u *TemplateUpsert) ClearDefaultHarnessConfig() *TemplateUpsert {
 	u.SetNull(template.FieldDefaultHarnessConfig)
-	return u
-}
-
-// SetImage sets the "image" field.
-func (u *TemplateUpsert) SetImage(v string) *TemplateUpsert {
-	u.Set(template.FieldImage, v)
-	return u
-}
-
-// UpdateImage sets the "image" field to the value that was provided on create.
-func (u *TemplateUpsert) UpdateImage() *TemplateUpsert {
-	u.SetExcluded(template.FieldImage)
-	return u
-}
-
-// ClearImage clears the value of the "image" field.
-func (u *TemplateUpsert) ClearImage() *TemplateUpsert {
-	u.SetNull(template.FieldImage)
-	return u
-}
-
-// SetConfig sets the "config" field.
-func (u *TemplateUpsert) SetConfig(v string) *TemplateUpsert {
-	u.Set(template.FieldConfig, v)
-	return u
-}
-
-// UpdateConfig sets the "config" field to the value that was provided on create.
-func (u *TemplateUpsert) UpdateConfig() *TemplateUpsert {
-	u.SetExcluded(template.FieldConfig)
-	return u
-}
-
-// ClearConfig clears the value of the "config" field.
-func (u *TemplateUpsert) ClearConfig() *TemplateUpsert {
-	u.SetNull(template.FieldConfig)
 	return u
 }
 
@@ -1236,48 +1164,6 @@ func (u *TemplateUpsertOne) UpdateDefaultHarnessConfig() *TemplateUpsertOne {
 func (u *TemplateUpsertOne) ClearDefaultHarnessConfig() *TemplateUpsertOne {
 	return u.Update(func(s *TemplateUpsert) {
 		s.ClearDefaultHarnessConfig()
-	})
-}
-
-// SetImage sets the "image" field.
-func (u *TemplateUpsertOne) SetImage(v string) *TemplateUpsertOne {
-	return u.Update(func(s *TemplateUpsert) {
-		s.SetImage(v)
-	})
-}
-
-// UpdateImage sets the "image" field to the value that was provided on create.
-func (u *TemplateUpsertOne) UpdateImage() *TemplateUpsertOne {
-	return u.Update(func(s *TemplateUpsert) {
-		s.UpdateImage()
-	})
-}
-
-// ClearImage clears the value of the "image" field.
-func (u *TemplateUpsertOne) ClearImage() *TemplateUpsertOne {
-	return u.Update(func(s *TemplateUpsert) {
-		s.ClearImage()
-	})
-}
-
-// SetConfig sets the "config" field.
-func (u *TemplateUpsertOne) SetConfig(v string) *TemplateUpsertOne {
-	return u.Update(func(s *TemplateUpsert) {
-		s.SetConfig(v)
-	})
-}
-
-// UpdateConfig sets the "config" field to the value that was provided on create.
-func (u *TemplateUpsertOne) UpdateConfig() *TemplateUpsertOne {
-	return u.Update(func(s *TemplateUpsert) {
-		s.UpdateConfig()
-	})
-}
-
-// ClearConfig clears the value of the "config" field.
-func (u *TemplateUpsertOne) ClearConfig() *TemplateUpsertOne {
-	return u.Update(func(s *TemplateUpsert) {
-		s.ClearConfig()
 	})
 }
 
@@ -1937,48 +1823,6 @@ func (u *TemplateUpsertBulk) UpdateDefaultHarnessConfig() *TemplateUpsertBulk {
 func (u *TemplateUpsertBulk) ClearDefaultHarnessConfig() *TemplateUpsertBulk {
 	return u.Update(func(s *TemplateUpsert) {
 		s.ClearDefaultHarnessConfig()
-	})
-}
-
-// SetImage sets the "image" field.
-func (u *TemplateUpsertBulk) SetImage(v string) *TemplateUpsertBulk {
-	return u.Update(func(s *TemplateUpsert) {
-		s.SetImage(v)
-	})
-}
-
-// UpdateImage sets the "image" field to the value that was provided on create.
-func (u *TemplateUpsertBulk) UpdateImage() *TemplateUpsertBulk {
-	return u.Update(func(s *TemplateUpsert) {
-		s.UpdateImage()
-	})
-}
-
-// ClearImage clears the value of the "image" field.
-func (u *TemplateUpsertBulk) ClearImage() *TemplateUpsertBulk {
-	return u.Update(func(s *TemplateUpsert) {
-		s.ClearImage()
-	})
-}
-
-// SetConfig sets the "config" field.
-func (u *TemplateUpsertBulk) SetConfig(v string) *TemplateUpsertBulk {
-	return u.Update(func(s *TemplateUpsert) {
-		s.SetConfig(v)
-	})
-}
-
-// UpdateConfig sets the "config" field to the value that was provided on create.
-func (u *TemplateUpsertBulk) UpdateConfig() *TemplateUpsertBulk {
-	return u.Update(func(s *TemplateUpsert) {
-		s.UpdateConfig()
-	})
-}
-
-// ClearConfig clears the value of the "config" field.
-func (u *TemplateUpsertBulk) ClearConfig() *TemplateUpsertBulk {
-	return u.Update(func(s *TemplateUpsert) {
-		s.ClearConfig()
 	})
 }
 

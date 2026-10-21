@@ -894,6 +894,14 @@ func TestEnsureAgentOwnRuntime_ProfileEditedResolvesAgain(t *testing.T) {
 // restart goes on to start the agent.
 func TestRestartAgent_ProfileNamespace_PodGone_ProceedsToStart(t *testing.T) {
 	f := newOwnRTFixture(t, "agents", false)
+	// The start below reads the global settings only. Clear the embedded
+	// default harness config, so it fails on the missing project path and
+	// not on resolving that harness config (whose "not found" error the
+	// handler reports as a missing agent, ptone/scion#5433).
+	globalDir := filepath.Dir(filepath.Dir(filepath.Dir(f.projectDir)))
+	if err := os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte("schema_version: \"1\"\ndefault_harness_config: \"\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	w := f.do(t, http.MethodPost, "/api/v1/agents/"+ownRTAgent+"/restart?projectId="+ownRTProjectID+"&runtime=kubernetes")
 	// The start that follows fails: with the pod gone, restart has no
