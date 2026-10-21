@@ -932,6 +932,22 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	var hubGlobalProject bool
 	req.ProjectSlug, hubGlobalProject = splitHubGlobalSlug(req.ProjectPath, req.ProjectSlug)
 
+	// A project path that is this broker's global directory, for a project
+	// other than the global one, is refused here, before anything reads or
+	// writes settings or templates: the env-gather preflight and the
+	// harness-config policy gate below resolve (and can hydrate) templates
+	// under HOME. buildStartContext repeats the check for every caller
+	// (ptone/scion#5432).
+	if req.ProjectPath != "" {
+		if msg := globalDirProjectConflict(req.ProjectPath, req.ProjectID, hubGlobalProject); msg != "" {
+			sce := &startContextError{Status: http.StatusConflict, Message: msg}
+			span.SetStatus(codes.Error, startContextSpanText(sce))
+			status := s.writeStartContextError(w, sce, "create agent", "agent_id", req.ID, "profile", createRequestProfile(req))
+			markAttemptFailed(status, sce.Error())
+			return
+		}
+	}
+
 	// Resolve project path early for env-gather (needs settings access before buildStartContext)
 	if req.ProjectSlug != "" && req.ProjectPath == "" {
 		globalDir, err := config.GetGlobalDir()
