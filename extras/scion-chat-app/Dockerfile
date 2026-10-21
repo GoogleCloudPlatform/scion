@@ -34,7 +34,7 @@ COPY extras/scion-chat-app/ extras/scion-chat-app/
 WORKDIR /src/extras/scion-chat-app
 
 RUN go mod download
-RUN CGO_ENABLED=1 go build -o /scion-chat-app ./cmd/scion-chat-app/
+RUN CGO_ENABLED=0 go build -o /scion-chat-app ./cmd/scion-chat-app/
 
 # Runtime stage
 FROM debian:bookworm-slim
