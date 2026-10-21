@@ -754,8 +754,9 @@ migration, the Hub marks it failed and puts the agent in the `error` phase with 
 status message. Run `scion reincarnate` again with the same flags: the Hub does not keep a failed
 migration's patch flags. A migration that had not started yet fails within about 10 minutes with
 "reincarnation failed: did not start, so no changes were applied except that any handoff is
-carried forward for recovery; run reincarnate again". None of its patch flags are applied. A migration that had started fails after 30 minutes without progress.
-The Hub restores the previous configuration unless the new generation had already been provisioned.
+carried forward for recovery; run reincarnate again". None of its patch flags are applied. A
+migration that had started fails after 30 minutes without progress. The Hub restores the previous
+configuration unless the new generation had already been provisioned.
 Until the migration fails, a new request for the agent is refused with `409`.
 
 Reincarnation works for agents in clone-per-agent, shared-workspace (shared-plain), and

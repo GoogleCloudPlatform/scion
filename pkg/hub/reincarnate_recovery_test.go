@@ -170,6 +170,7 @@ func TestReincarnateRecovery_NextStartDeliversRecoveryTask(t *testing.T) {
 	resumeClient := &mockRuntimeBrokerClient{}
 	resumeDisp := NewHTTPAgentDispatcherWithClient(s, resumeClient, false, slog.Default())
 	require.NoError(t, resumeDisp.DispatchAgentStart(ctx, row, "", true))
+	require.True(t, resumeClient.startCalled)
 	assert.Empty(t, resumeClient.lastTask, "a resume continues the session and is handed no task")
 }
 
@@ -178,7 +179,7 @@ func TestReincarnateRecovery_NextStartDeliversRecoveryTask(t *testing.T) {
 // mid-flight before reprovision succeeded. The record's
 // PreviousAppliedConfig is not changed.
 func TestReincarnateRecovery_SweepRestoresRecoveryTask(t *testing.T) {
-	for _, state := range []string{store.AgentReincarnationStatePending, store.AgentReincarnationStateProvisioning} {
+	for _, state := range []string{store.AgentReincarnationStatePending, store.AgentReincarnationStateStopping, store.AgentReincarnationStateProvisioning} {
 		t.Run(state, func(t *testing.T) {
 			ctx := context.Background()
 			disp := newReincarnateTestDispatcher()
