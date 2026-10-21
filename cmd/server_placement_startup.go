@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"errors"
 	"os"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -36,7 +37,15 @@ func checkPlacementSiblingsAtStartup(cfg *config.GlobalConfig, logf func(format 
 		config.ConfiguredRuntimeNames, hostKubeConnection, runtime.DefaultKubernetesNamespace(), logf)
 }
 
+// errGlobalSettingsUnstatable is the load error for a global settings file
+// that cannot be stat'd: the settings loader treats it as missing, but
+// Kubernetes placement fails closed on it, so the check reports it.
+var errGlobalSettingsUnstatable = errors.New("the global settings file cannot be stat'd")
+
 func loadGlobalSettingsForPlacement() (*config.VersionedSettings, error) {
+	if config.GlobalSettingsFileUnstatable() {
+		return nil, errGlobalSettingsUnstatable
+	}
 	gs, _, err := config.LoadGlobalSettingsWithOverlay()
 	return gs, err
 }
@@ -60,7 +69,7 @@ func logPlacementSiblingsStartup(runtimeEnabled bool, load func() (*config.Versi
 	}
 	gs, err := load()
 	if err != nil {
-		if config.GlobalSettingsMentionPlacementKeys() {
+		if errors.Is(err, errGlobalSettingsUnstatable) || config.GlobalSettingsMentionPlacementKeys() {
 			logf("Warning: Kubernetes placement: global settings failed to load (%v); Kubernetes starts fail until this is fixed", err)
 		}
 		return
@@ -93,12 +102,12 @@ func logPlacementSiblingsStartup(runtimeEnabled bool, load func() (*config.Versi
 // Kubernetes placement field.
 func placementConfigured(gs *config.VersionedSettings) bool {
 	for _, rt := range gs.Runtimes {
-		if len(rt.NodeSelector) > 0 || len(rt.Tolerations) > 0 || rt.RuntimeClassName != "" {
+		if config.RuntimeEntryHasPlacement(rt) {
 			return true
 		}
 	}
 	for _, p := range gs.Profiles {
-		if len(p.NodeSelector) > 0 || len(p.Tolerations) > 0 || p.RuntimeClassName != "" {
+		if config.ProfileHasPlacement(p) {
 			return true
 		}
 	}

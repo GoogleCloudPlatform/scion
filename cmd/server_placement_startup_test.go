@@ -17,6 +17,9 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"strings"
@@ -220,4 +223,98 @@ users:
 	if len(hubOnly.lines) != 0 {
 		t.Errorf("hub-only process logged %q", hubOnly.lines)
 	}
+}
+
+// A global settings file that cannot be stat'd is logged as a load error
+// (the loader would treat it as missing; placement fails closed on it).
+func TestPlacementSiblingsStartup_UnstatableGlobalLogged(t *testing.T) {
+	var log placementLog
+	logPlacementSiblingsStartup(true, func() (*config.VersionedSettings, error) { return nil, errGlobalSettingsUnstatable },
+		allConfigured, hostOnCtxA, "agents", log.logf)
+	if !strings.Contains(log.String(), "Warning: Kubernetes placement: global settings failed to load (the global settings file cannot be stat'd)") {
+		t.Errorf("want the load-error warning; log:\n%s", log.String())
+	}
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".scion")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("settings.yaml", filepath.Join(dir, "settings.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadGlobalSettingsForPlacement(); !errors.Is(err, errGlobalSettingsUnstatable) {
+		t.Errorf("loadGlobalSettingsForPlacement: got %v, want errGlobalSettingsUnstatable", err)
+	}
+}
+
+// G5 (startup continues): in startRuntimeBroker the check is a plain
+// statement of the function body (not inside a branch that could return),
+// it comes before runtimebroker.New, and checkPlacementSiblingsAtStartup
+// returns nothing, so a logged disagreement cannot keep startup from
+// reaching runtimebroker.New.
+func TestStartRuntimeBroker_PlacementCheckThenNew_G5(t *testing.T) {
+	fset := token.NewFileSet()
+	fg, err := parser.ParseFile(fset, "server_foreground.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body *ast.BlockStmt
+	for _, d := range fg.Decls {
+		if fn, ok := d.(*ast.FuncDecl); ok && fn.Name.Name == "startRuntimeBroker" {
+			body = fn.Body
+		}
+	}
+	if body == nil {
+		t.Fatal("startRuntimeBroker not found")
+	}
+	isCall := func(n ast.Node, pkg, name string) bool {
+		found := false
+		ast.Inspect(n, func(x ast.Node) bool {
+			if c, ok := x.(*ast.CallExpr); ok {
+				switch f := c.Fun.(type) {
+				case *ast.Ident:
+					found = found || (pkg == "" && f.Name == name)
+				case *ast.SelectorExpr:
+					if id, ok := f.X.(*ast.Ident); ok && id.Name == pkg && f.Sel.Name == name {
+						found = true
+					}
+				}
+			}
+			return true
+		})
+		return found
+	}
+	checkAt, newAt, checks := -1, -1, 0
+	for i, st := range body.List {
+		if es, ok := st.(*ast.ExprStmt); ok && isCall(es, "", "checkPlacementSiblingsAtStartup") {
+			checkAt = i
+		}
+		if isCall(st, "", "checkPlacementSiblingsAtStartup") {
+			checks++
+		}
+		if newAt < 0 && isCall(st, "runtimebroker", "New") {
+			newAt = i
+		}
+	}
+	if checks != 1 || checkAt < 0 {
+		t.Fatalf("want exactly one call, as a plain body statement; calls=%d plain-statement index=%d", checks, checkAt)
+	}
+	if newAt < 0 || checkAt > newAt {
+		t.Fatalf("the check (statement %d) must come before runtimebroker.New (statement %d)", checkAt, newAt)
+	}
+	fp, err := parser.ParseFile(token.NewFileSet(), "server_placement_startup.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range fp.Decls {
+		if fn, ok := d.(*ast.FuncDecl); ok && fn.Name.Name == "checkPlacementSiblingsAtStartup" {
+			if fn.Type.Results != nil && len(fn.Type.Results.List) > 0 {
+				t.Fatal("checkPlacementSiblingsAtStartup must return nothing (no error or exit path)")
+			}
+			return
+		}
+	}
+	t.Fatal("checkPlacementSiblingsAtStartup not found")
 }
