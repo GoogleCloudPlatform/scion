@@ -162,12 +162,19 @@ type appleGateOpts struct {
 	// timeout, so the deadline passes during the first backoff.
 	backoffPastDeadline bool
 	// shadowStat puts a stat that records "shadow-stat" in calls first on
-	// PATH; the check runs /usr/bin/stat by absolute path, so it never runs.
+	// PATH. PATH independence is tested by behaviour: the mock runs the
+	// command given to exec through PATH when it is not an absolute path,
+	// as the container's PATH lookup would, so a check that ran plain stat
+	// would record shadow-stat. The empty environment (env -i) is pinned by
+	// the argv only: no mock can show LD_* being cleared, so the exact-argv
+	// test in TestAppleContainerRuntime_Run_AgentsMaskArgs is its proof.
 	shadowStat bool
 }
 
 // appleGateMock writes a mock container CLI that records each subcommand
-// in calls, prints cid for run and answers as opts says.
+// in calls, prints cid for run and answers as opts says. For exec, the
+// command given to exec, when not an absolute path, is first run through
+// PATH.
 func appleGateMock(t *testing.T, o appleGateOpts) (command, calls string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -186,6 +193,7 @@ case "$1" in
 --version) printf '%%s\n' %q ;;
 run) echo cid ;;
 exec)
+	case "$3" in /*) ;; *) "$3" >/dev/null 2>&1 ;; esac
 	[ %d -eq 1 ] && sleep 5
 	n=$(grep -c '^exec' %q)
 	if [ "$n" -le %d ]; then echo "exec failed"; exit 1; fi
