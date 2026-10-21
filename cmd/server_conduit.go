@@ -489,7 +489,21 @@ func startConduitExternal(ctx context.Context, cfg *config.GlobalConfig, hubSrv 
 	if err != nil {
 		return err
 	}
-	if err := hubSrv.StartConduitExternal(ctx, hub.ConduitExternalOptions{InstanceID: id, PeerAuth: auth}); err != nil {
+	ingressOff, err := validateConduitIngress(cfg.Hub.Conduit, mode)
+	if err != nil {
+		return err
+	}
+	if ingressOff != "" {
+		slog.Warn("Conduit ingress proxy is off: it requires HMAC relay-peer authentication; conduit dials get 503 conduit_not_serving",
+			"cause", ingressOff, "peer_auth", mode, "fix", "set server.hub.conduit.peer_auth to hmac, or upgrade to the release with the relay-peer ingress header")
+	}
+	if err := hubSrv.StartConduitExternal(ctx, hub.ConduitExternalOptions{
+		InstanceID:      id,
+		PeerAuth:        auth,
+		Ingress:         cfg.Hub.Conduit.IngressValue(),
+		IngressOffCause: ingressOff,
+		LifetimeCap:     conduitLifetimeCapSetting(cfg),
+	}); err != nil {
 		return err
 	}
 	addr, _, err := serveConduitInternalListenerFn(ctx, cfg.Hub.Conduit.InternalListen, hubSrv.ConduitInternalHandler(), wg, errCh)
@@ -498,6 +512,27 @@ func startConduitExternal(ctx context.Context, cfg *config.GlobalConfig, hubSrv 
 	}
 	slog.Info("Conduit external relay mode started: this hub runs no relay", "instance_id", id, "peer_auth", mode, "internal_listen", addr.String())
 	return nil
+}
+
+// validateConduitIngress applies the startup rules of the conduit ingress
+// in external relay mode (design §3.9 "Ingress", v2.21.52): redirect is not
+// served yet (an error naming the setting). Proxy needs HMAC relay-peer
+// authentication, because the OIDC modes carry the peer token in
+// Authorization, which on the proxy leg is the client's own credential;
+// under any other resolved mode (explicit, or auto resolving to oidc) the
+// hub still starts with its ingress proxy off, and ingressOff is the cause
+// (hub.ConduitIngressCauseRequiresHMAC). peerAuthMode is the resolved
+// peer-auth mode.
+func validateConduitIngress(c config.HubConduitConfig, peerAuthMode string) (ingressOff string, err error) {
+	switch c.IngressValue() {
+	case config.ConduitIngressRedirect:
+		return "", errors.New("server.hub.conduit.ingress is redirect, which is not supported yet; use proxy")
+	case config.ConduitIngressProxy:
+		if peerAuthMode != config.ConduitPeerAuthHMAC {
+			return hub.ConduitIngressCauseRequiresHMAC, nil
+		}
+	}
+	return "", nil
 }
 
 // externalPeerAuthOptions is the hub's relay-peer auth configuration in
