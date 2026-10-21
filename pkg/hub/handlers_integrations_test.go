@@ -36,6 +36,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // --- mock IntegrationManager ---
@@ -786,6 +788,83 @@ func TestUpdateConfig_WithConfigFile(t *testing.T) {
 	if len(mgr.replaceConfigCalls) != 1 {
 		t.Errorf("expected 1 ReplaceBrokerConfig call, got %d", len(mgr.replaceConfigCalls))
 	}
+}
+
+// The config PUT merges settings key by key (ptone/scion#3913): a key the
+// body omits keeps its stored value, a sent value (including "") replaces
+// it, and a key sent as null is deleted from the stored config, so the
+// plugin's own default applies again. The reconfigure push carries the
+// same merged config.
+func TestUpdateConfig_SettingsKeepOverwriteNullDelete(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	configFile := filepath.Join(dir, "telegram.yaml")
+	seed := "webhook_listen: \":9094\"\ndb_path: /var/tg.db\ninbound_mode: webhook\nallowed_chat_ids: \"1,2\"\n"
+	if err := os.WriteFile(configFile, []byte(seed), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := newMockIntegrationManager()
+	mgr.plugins["telegram"] = map[string]string{"config_file": configFile}
+
+	srv, st := testServer(t)
+	srv.pluginManager = mgr
+
+	createTestUserWithRole(t, st, tid("u1-kond"), "admin-kond@example.com", "admin", store.SystemRoleSuperAdmin)
+	admin := NewAuthenticatedUser(tid("u1-kond"), "admin-kond@example.com", "Admin", "admin", "cli")
+	body := `{"settings":{"webhook_listen":":9095","db_path":null,"inbound_mode":""}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/integrations/telegram/config", strings.NewReader(body))
+	req = req.WithContext(integSessionContext(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	provider, err := config.NewYAMLConfigProvider(configFile)
+	require.NoError(t, err)
+	stored, err := provider.Load(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{
+		"webhook_listen":   ":9095", // sent: overwritten
+		"inbound_mode":     "",      // sent as "": stored as ""
+		"allowed_chat_ids": "1,2",   // omitted: kept
+	}, stored, "db_path was sent as null and must be deleted")
+
+	require.Len(t, mgr.replaceConfigCalls, 1)
+	assert.NotContains(t, mgr.lastReplacedConfig, "db_path")
+	assert.Equal(t, ":9095", mgr.lastReplacedConfig["webhook_listen"])
+	assert.Equal(t, "1,2", mgr.lastReplacedConfig["allowed_chat_ids"])
+}
+
+// A settings key sent as null that is not stored is a no-op, and a body
+// whose only setting is null still saves (it is a non-empty map).
+func TestUpdateConfig_SettingsNullForUnstoredKeyIsNoOp(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	configFile := filepath.Join(dir, "telegram.yaml")
+	if err := os.WriteFile(configFile, []byte("webhook_listen: \":9094\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := newMockIntegrationManager()
+	mgr.plugins["telegram"] = map[string]string{"config_file": configFile}
+
+	srv, st := testServer(t)
+	srv.pluginManager = mgr
+
+	createTestUserWithRole(t, st, tid("u1-knul"), "admin-knul@example.com", "admin", store.SystemRoleSuperAdmin)
+	admin := NewAuthenticatedUser(tid("u1-knul"), "admin-knul@example.com", "Admin", "admin", "cli")
+	body := `{"settings":{"db_path":null}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/integrations/telegram/config", strings.NewReader(body))
+	req = req.WithContext(integSessionContext(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	provider, err := config.NewYAMLConfigProvider(configFile)
+	require.NoError(t, err)
+	stored, err := provider.Load(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"webhook_listen": ":9094"}, stored)
 }
 
 func TestUpdateConfig_InstalledButNotLoaded(t *testing.T) {

@@ -952,9 +952,10 @@ func applySettingsUpdates(raw map[string]interface{}, req *ServerConfigUpdateReq
 }
 
 // applySettingsUpdatesFromBody is applySettingsUpdates with the raw PUT
-// body, whose "server" and "telemetry" objects tell mergeServerSettings
-// and mergeSettingsSection which fields the client sent. A nil rawBody
-// derives that from req.Server and req.Telemetry.
+// body, whose "server", "telemetry" and "federation" objects tell
+// mergeServerSettings and mergeSettingsSection which fields the client
+// sent. A nil rawBody derives that from req.Server, req.Telemetry and
+// req.Federation.
 func applySettingsUpdatesFromBody(raw map[string]interface{}, req *ServerConfigUpdateRequest, rawBody []byte) {
 	if req.SchemaVersion != nil {
 		raw["schema_version"] = *req.SchemaVersion
@@ -1089,7 +1090,15 @@ func applySettingsUpdatesFromBody(raw map[string]interface{}, req *ServerConfigU
 			serverMap = make(map[string]interface{})
 			raw["server"] = serverMap
 		}
-		serverMap["federation"] = marshalToMap(req.Federation)
+		// Merged field by field like telemetry, so a key the body omits
+		// keeps its stored value (the DB-mode merge does the same; the
+		// Federation page sends only the fields that changed). Lists such
+		// as trusted_issuers are replaced as a whole; null or a zero value
+		// clears a key.
+		mergeSettingsSection(serverMap, "federation", req.Federation, rawRequestObject(rawBody, "Federation"))
+		if len(serverMap) == 0 {
+			delete(raw, "server")
+		}
 	}
 }
 
