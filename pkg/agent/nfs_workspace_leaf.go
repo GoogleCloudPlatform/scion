@@ -221,7 +221,9 @@ func ensureNFSWorkspaceLeavesClaim(runtimeName, projectID string, resolved runti
 			continue
 		}
 		if err != nil {
-			return false, false, fmt.Errorf("workspace_storage nfs: create directory %q on the export mounted at %q: %w; %s",
+			// agentDirCreated is still reported: the caller marks a
+			// directory this call created before it fails.
+			return false, agentDirCreated, fmt.Errorf("workspace_storage nfs: create directory %q on the export mounted at %q: %w; %s",
 				leaf, resolved.HostBase, err, nfsWorkspaceExportHint)
 		}
 		if !ok {

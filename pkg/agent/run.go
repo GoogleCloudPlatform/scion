@@ -2137,17 +2137,20 @@ authDone:
 			} else {
 				nfsWorkspacePreCreated, err = ensureNFSWorkspaceLeaf(m.Runtime.Name(), projectID, resolvedWorkspace, mount.PVClaimName, claimSharedDirNames)
 			}
-			if err != nil {
-				return nil, err
-			}
+			// A directory this start created is marked even when the leaf
+			// helper then failed on a later directory, before that failure
+			// is returned, so a forced move's rollback can still remove it.
 			if ownDirCreated {
 				ownDirPath, perr := nfsOwnAgentDirPath(resolvedWorkspace, ownDirName)
+				if perr == nil {
+					perr = markMoveExportAgentDir(agentDir, ownDirPath)
+				}
 				if perr != nil {
-					return nil, perr
+					return nil, errors.Join(err, perr)
 				}
-				if err := markMoveExportAgentDir(agentDir, ownDirPath); err != nil {
-					return nil, err
-				}
+			}
+			if err != nil {
+				return nil, err
 			}
 			if nfsAgentDirName != "" && !nfsAgentDirEmpty {
 				recordNFSAgentDir(agentDir, opts.Name)

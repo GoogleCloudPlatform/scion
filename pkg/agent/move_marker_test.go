@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
@@ -277,4 +278,63 @@ func TestCheckMoveMarkers_RefusesWorktreesTheMoveNeverCreates(t *testing.T) {
 		assert.Contains(t, err.Error(), "registered on a shared worktree")
 		assert.DirExists(t, local)
 	})
+}
+
+// In a split-storage layout (a project-id file) the agent's home lives
+// under the external agents root's <name>, a second directory the forced
+// move creates and its rollback delete removes: it is marked too, so the
+// guarded delete's check passes for the move's own files.
+func TestProvision_MoveMarkerOnSplitStorageHomeParent(t *testing.T) {
+	agentName := "split-move"
+	scionDir, agentDir, agentHome := setupSplitStorageFailedProvision(t, agentName)
+	ctx := withMoveReincarnationID(api.ContextWithGitClone(context.Background(), &api.GitCloneConfig{URL: "https://example.com/o/r.git"}), testMoveID)
+	_, _, _, err := ProvisionAgent(ctx, agentName, "default", "", "", scionDir, "", "", "", "")
+	require.NoError(t, err)
+	assertMarker(t, agentDir, testMoveID)
+	assertMarker(t, filepath.Dir(agentHome), testMoveID)
+
+	mgr := NewManager(&runtime.MockRuntime{NameFunc: func() string { return "docker" }}).(*AgentManager)
+	paths, err := mgr.CheckMoveMarkers(context.Background(), scionDir, "", agentName, testMoveID)
+	require.NoError(t, err, "the move's own files pass the guarded delete's check")
+	assert.Contains(t, paths, filepath.Dir(agentHome))
+}
+
+// The leaf helper still reports that it created the agent's directory on
+// the export when a later directory then fails, so the start can mark it.
+func TestEnsureNFSAgentWorkspaceLeafClaim_ReportsCreatedOnLaterError(t *testing.T) {
+	mountRoot := filepath.Join(t.TempDir(), "nfs")
+	require.NoError(t, os.MkdirAll(filepath.Join(mountRoot, "share-1"), 0o755))
+	res := resolveTestNFSWorkspace(t, mountRoot, "scratchpad")
+	blocker := filepath.Join(mountRoot, "share-1", "projects", testNFSWorkspaceProjectID, "shared-dirs", "scratchpad")
+	require.NoError(t, os.MkdirAll(filepath.Dir(blocker), 0o755))
+	require.NoError(t, os.WriteFile(blocker, []byte("not a directory"), 0o644))
+
+	_, created, err := ensureNFSAgentWorkspaceLeafClaim("kubernetes", testNFSWorkspaceProjectID, res, "ws-pv", []string{"scratchpad"}, "test-agent")
+	require.Error(t, err)
+	assert.True(t, created, "the agent's directory was created before the later failure")
+	assert.DirExists(t, nfsTestAgentDir(mountRoot, "test-agent"))
+}
+
+// A forced move's start marks the export directory it created even when a
+// later directory then fails the start.
+func TestStart_MarksMoveExportAgentDirBeforeLaterFailure(t *testing.T) {
+	fx := newMoveAbsentFixture(t, "kubernetes", true)
+	opts := moveAbsentOpts(fx.projectPath, "test-agent", false)
+	opts.MoveReincarnationID = testMoveID
+	_, err := fx.mgr.Provision(context.Background(), opts)
+	require.NoError(t, err)
+	blocker := filepath.Join(fx.mountRoot, "share-1", "projects", testNFSWorkspaceProjectID, "shared-dirs", "scratchpad")
+	require.NoError(t, os.MkdirAll(filepath.Dir(blocker), 0o755))
+	require.NoError(t, os.WriteFile(blocker, []byte("not a directory"), 0o644))
+
+	startOpts := opts
+	startOpts.FreshProvision = false
+	startOpts.MoveReincarnationID = ""
+	startOpts.Env = moveAbsentOpts(fx.projectPath, "test-agent", false).Env
+	startOpts.SharedDirs = []api.SharedDir{{Name: "scratchpad"}}
+	_, err = fx.mgr.Start(context.Background(), startOpts)
+	require.Error(t, err)
+	export := nfsTestAgentDir(fx.mountRoot, "test-agent")
+	require.DirExists(t, export)
+	assertMarker(t, export, testMoveID)
 }

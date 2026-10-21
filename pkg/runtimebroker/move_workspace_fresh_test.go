@@ -348,3 +348,21 @@ func TestDeleteAgent_MoveReincarnationIDValidation(t *testing.T) {
 		}
 	}
 }
+
+// A forced move's reincarnation ID on a create that is not provision-only
+// is refused (400) before anything runs.
+func TestCreateAgent_MoveReincarnationIDOnFullCreate_Returns400(t *testing.T) {
+	mgr := &freshMoveManager{}
+	srv, _ := newFreshMoveServer(mgr)
+	body := `{"name":"moved-agent","id":"agent-uuid-moved","slug":"moved-agent","projectId":"p1","moveReincarnationId":"reincarnation-1","config":{"template":"claude"}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	if mgr.provisionCalled || mgr.startCalled {
+		t.Fatal("nothing may be provisioned or started")
+	}
+}

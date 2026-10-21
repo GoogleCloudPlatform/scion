@@ -1598,6 +1598,10 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			if newAgentHome && !pathWithin(agentHome, agentDir) {
 				_ = removeAgentDirGuarded(filesGuard(), agentHome, "")
 				if newAgentHomeParent {
+					if moveID != "" {
+						// The move marker this call wrote there.
+						_ = os.Remove(filepath.Join(filepath.Dir(agentHome), MoveMarkerFile))
+					}
 					// os.Remove only removes an empty directory.
 					_ = os.Remove(filepath.Dir(agentHome))
 				}
@@ -1630,6 +1634,17 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	}
 	if newAgentHomeParent, err = claimDir(homeParent); err != nil {
 		return "", "", nil, fmt.Errorf("failed to create agent home: %w", err)
+	}
+	// In a split-storage layout the home's parent (the external agents
+	// root's <name>) is another agent directory a forced move creates, and
+	// one its rollback delete removes: mark it as the move's too, right
+	// after claiming it.
+	if moveID != "" && newAgentHomeParent {
+		if err := writeMoveMarker(homeParent, moveID); err != nil {
+			_ = os.Remove(filepath.Join(homeParent, MoveMarkerFile))
+			_ = os.Remove(homeParent)
+			return "", "", nil, fmt.Errorf("failed to write the move marker: %w", err)
+		}
 	}
 	if newAgentHome, err = claimDir(agentHome); err != nil {
 		return "", "", nil, fmt.Errorf("failed to create agent home: %w", err)

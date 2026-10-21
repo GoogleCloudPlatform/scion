@@ -826,6 +826,12 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		ValidationError(w, "invalid slug", nil)
 		return
 	}
+	// A forced move's reincarnation ID belongs only on its provision-only
+	// request (checked again there with the fresh-agent-dir expectation).
+	if req.MoveReincarnationID != "" && !req.ProvisionOnly {
+		ValidationError(w, "moveReincarnationId is only valid on a provision-only request", nil)
+		return
+	}
 
 	// Flat Runtime Broker target checks (target required, mismatch,
 	// explicit profile) run after decode and validation and before
