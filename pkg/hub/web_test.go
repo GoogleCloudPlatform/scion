@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -1456,6 +1457,89 @@ func TestDevAuth_AutoLogin(t *testing.T) {
 		}
 	}
 	assert.NotNil(t, sessionCookie, "session cookie should be set")
+}
+
+func TestDevAuth_RecordsLastLogin(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		previous    time.Time
+		wantUpdates int
+	}{
+		{name: "first login", wantUpdates: 1},
+		{name: "older login", previous: time.Now().Add(-6 * time.Minute), wantUpdates: 1},
+		{name: "recent login", previous: time.Now().Add(-time.Minute)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ws := newDevAuthWebServer(t)
+			s := newFakeUserStore()
+			require.NoError(t, s.CreateUser(context.Background(), &store.User{
+				ID: DevUserID, Email: "dev@localhost", LastLogin: tt.previous,
+			}))
+			ws.store = s
+			handler := ws.devAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}))
+
+			before := time.Now()
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+			require.Equal(t, http.StatusOK, rec.Code)
+			user, err := s.GetUser(context.Background(), DevUserID)
+			require.NoError(t, err)
+			if tt.wantUpdates > 0 {
+				require.False(t, user.LastLogin.Before(before))
+				require.False(t, user.LastLogin.After(time.Now()))
+			} else {
+				assert.Equal(t, tt.previous, user.LastLogin)
+			}
+			assert.Equal(t, tt.wantUpdates, s.lastLoginUpdateCalls)
+			assert.Zero(t, s.updateCalls, "login must not write the full user record")
+			loginTime := user.LastLogin
+
+			// Reusing a session must not turn last login into last activity.
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			for _, cookie := range rec.Result().Cookies() {
+				req.AddCookie(cookie)
+			}
+			rec = httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			require.Equal(t, http.StatusOK, rec.Code)
+			user, err = s.GetUser(context.Background(), DevUserID)
+			require.NoError(t, err)
+			assert.Equal(t, loginTime, user.LastLogin)
+			assert.Equal(t, tt.wantUpdates, s.lastLoginUpdateCalls)
+			assert.Zero(t, s.updateCalls)
+
+			// Clients that discard cookies must not write on every request.
+			rec = httptest.NewRecorder()
+			handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+			require.Equal(t, http.StatusOK, rec.Code)
+			user, err = s.GetUser(context.Background(), DevUserID)
+			require.NoError(t, err)
+			assert.Equal(t, loginTime, user.LastLogin)
+			assert.Equal(t, tt.wantUpdates, s.lastLoginUpdateCalls)
+			assert.Zero(t, s.updateCalls)
+		})
+	}
+}
+
+func TestDevAuth_LastLoginWriteFailure(t *testing.T) {
+	ws := newDevAuthWebServer(t)
+	s := newFakeUserStore()
+	require.NoError(t, s.CreateUser(context.Background(), &store.User{ID: DevUserID}))
+	s.lastLoginUpdateErr = errors.New("last login write failed")
+	ws.store = s
+	handler := ws.devAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	user, err := s.GetUser(context.Background(), DevUserID)
+	require.NoError(t, err)
+	assert.True(t, user.LastLogin.IsZero())
+	assert.Equal(t, 1, s.lastLoginUpdateCalls)
+	assert.Zero(t, s.updateCalls)
 }
 
 func TestDevAuth_SessionPersists(t *testing.T) {

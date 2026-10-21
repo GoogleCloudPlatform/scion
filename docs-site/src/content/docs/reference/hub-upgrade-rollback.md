@@ -18,6 +18,7 @@ files from a copy taken before the newer build first started.
 | Project members group marker (group annotation) | A one-time migration rewrites the old key `scion.io/system-project-members-group` to `scion.io/project-members-group`, and records completion in the `hub_settings` key `migration_legacy_project_members_group_marker_v1`. | A build from before the marker change recognises only the old key, so it does not recognise the rewritten groups as project members groups. |
 | Settings files (`settings.yaml`, global and per project) | When the file is loaded, a legacy `hub.grove_id` key is rewritten in place to `hub.project_id`. | A build that reads only `hub.grove_id` no longer finds the project link. |
 | `.scion` project marker files | When a marker file is read, legacy `grove-id`, `grove-name` and `grove-slug` keys are rewritten in place to `project-id`, `project-name` and `project-slug`. | A build that reads only the `grove-*` keys no longer finds them. |
+| `templates` table (`config` and `image` columns) | After schema migration, startup drops the retired `templates.config` and `templates.image` columns on SQLite and PostgreSQL (`templates.agent_config` is kept). | An older build that queries or writes `templates.config` or `templates.image` fails against the migrated schema. |
 
 Other one-time data migrations record their completion in `hub_settings` keys
 whose names start with `migration_`. They are not reverted either.

@@ -419,6 +419,11 @@ func (s *Server) validateProjectDefaultSAID(w http.ResponseWriter, ctx context.C
 		return false
 	}
 
+	if saReferencePreconditions(sa) != nil {
+		BadRequest(w, saAssignTranslationRecordMsg)
+		return false
+	}
+
 	return true
 }
 

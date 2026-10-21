@@ -103,6 +103,18 @@ type authzInputMemo struct {
 	// only. This is the ONLY ceiling input this memo ever serves — see
 	// maskAuthzInputs below.
 	edges map[string][]*store.DelegationEdge
+
+	// users memoizes the requester's users-row lookup for decide's
+	// account-status gate (principalStatusGate), keyed by user ID. A found
+	// row and a not-found result are stored; a store fault is not.
+	users map[string]memoUser
+}
+
+// memoUser is one memoized users-row lookup: the row, or notFound when the
+// store reported store.ErrNotFound.
+type memoUser struct {
+	user     *store.User
+	notFound bool
 }
 
 // authzMemoHolder is the value stored under each of the two context keys
@@ -135,6 +147,7 @@ func withAuthzInputMemo(ctx context.Context) context.Context {
 	holder := &authzMemoHolder{memo: &authzInputMemo{
 		principals: make(map[principalKey]*memoEntry),
 		edges:      make(map[string][]*store.DelegationEdge),
+		users:      make(map[string]memoUser),
 	}}
 	ctx = context.WithValue(ctx, authzInputsContextKey{}, holder)
 	ctx = context.WithValue(ctx, authzEdgesContextKey{}, holder)

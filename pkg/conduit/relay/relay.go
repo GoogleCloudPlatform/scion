@@ -118,6 +118,12 @@ type Principal struct {
 	// of Config.GrantKeys (a separate relay gets them from the hub with the
 	// admission).
 	GrantKeys []*conduitv1.GrantKey
+	// LifetimeCap, when above zero, is this session's lifetime cap. It
+	// lowers Config.LifetimeCap and never raises it; with no relay cap
+	// (Config.LifetimeCap 0) it is the session's cap. A separate relay
+	// sets it from the trusted ingress lifetime cap header (design §3.9
+	// "Source of the cap").
+	LifetimeCap time.Duration
 }
 
 // TokenRunBinding compares the run an agent's credential was issued for
@@ -628,6 +634,18 @@ func (r *Relay) lifetimeGoAway(e *entry) {
 	})
 }
 
+// sessionLifetimeCap is a session's lifetime cap: the relay's cap,
+// lowered (never raised) by the principal's; either 0 means none.
+func sessionLifetimeCap(relayCap, principalCap time.Duration) time.Duration {
+	switch {
+	case principalCap <= 0:
+		return relayCap
+	case relayCap <= 0 || principalCap < relayCap:
+		return principalCap
+	}
+	return relayCap
+}
+
 // lifetimeHint is Welcome.lifetime_hint_s for e: with a cap, the whole
 // seconds until its lifetime GoAway; otherwise Config.LifetimeHint.
 func (r *Relay) lifetimeHint(e *entry) time.Duration {
@@ -670,8 +688,8 @@ func (r *Relay) Serve(ctx context.Context, conn transport.Conn, p Principal) err
 		defer r.serves.Done()
 	}
 	e := &entry{principal: p, readyCh: make(chan struct{})}
-	if r.cfg.LifetimeCap > 0 {
-		e.capAt = r.clk.Now().Add(r.cfg.LifetimeCap)
+	if lifetimeCap := sessionLifetimeCap(r.cfg.LifetimeCap, p.LifetimeCap); lifetimeCap > 0 {
+		e.capAt = r.clk.Now().Add(lifetimeCap)
 	}
 	adm := &admitter{r: r, p: p, transport: conn.Transport(), e: e}
 	// Whatever happens below, a pending entry never outlives Serve's
@@ -725,7 +743,7 @@ func (r *Relay) Serve(ctx context.Context, conn transport.Conn, p Principal) err
 	if selfClose {
 		delete(r.sessions, rec.SessionID)
 	}
-	state, killed := r.state, r.killed
+	state, killed, paused := r.state, r.killed, r.paused
 	r.mu.Unlock()
 	e.readyOnce.Do(func() { close(e.readyCh) })
 	if h := r.testHookAfterReady; h != nil {
@@ -743,8 +761,8 @@ func (r *Relay) Serve(ctx context.Context, conn transport.Conn, p Principal) err
 		// after the Hello); refuseDialerStream could not close it.
 		r.stopLifetime(e)
 		_ = ls.CloseWithCode(conduit.CloseForbidden, userStreamRefused)
-	case state != stateServing:
-		// Drain or supersede began while this session was admitted.
+	case state != stateServing || paused:
+		// Drain, supersede or stopped admission began while this session was admitted.
 		r.stopLifetime(e)
 		r.goAway(e, r.drainOptions(e))
 	default:

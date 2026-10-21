@@ -499,6 +499,7 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 		broker.Labels = labels
 		recordChanged = true
 	}
+	priorHostSA := hostSAClaimOf(broker)
 
 	setGCPHost := updates.GCPHostServiceAccountEmail != nil || updates.GCPHostProjectID != nil
 	email, project := broker.GCPHostServiceAccountEmail, broker.GCPHostProjectID
@@ -516,10 +517,22 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 		project = *updates.GCPHostProjectID
 	}
 
+	// A changed host service account needs actAs for the requesting user on
+	// the new value; an unchanged or cleared one needs no check.
+	nextHostSA := hostSAClaim{Email: strings.ToLower(email), ProjectID: project}
+	hostSAVerdict := s.evaluateHostSAClaim(ctx, priorHostSA, nextHostSA, SurfaceBrokerHostSAUpdate)
+	if hostSAClaimWriteAllowed(priorHostSA, nextHostSA, hostSAVerdict) != nil {
+		writeHostSAClaimDenied(w, hostSAVerdict)
+		return
+	}
+
 	// The GCP host pair is written only through the dedicated store
 	// writers: a value set or cleared here is kept by registration and
 	// detection until the next update. The writers return the values they
-	// replaced, which the audit event records as the old values.
+	// replaced, which the audit event records as the old values. The pair
+	// is written only over the stored value the actAs decision above was
+	// made against (priorHostSA); if a registration or another update
+	// changed it in between, nothing is written and the request gets 409.
 	var gcpPrev *store.GCPHostSetting
 	writeErr := func() error {
 		if recordChanged {
@@ -528,9 +541,13 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 			}
 		}
 		if setGCPHost {
-			prev, err := s.store.SetRuntimeBrokerGCPHost(ctx, broker.ID, email, project)
+			prev, applied, err := s.store.SetRuntimeBrokerGCPHostIfPrior(ctx, broker.ID,
+				priorHostSA.Email, priorHostSA.ProjectID, email, project)
 			if err != nil {
 				return err
+			}
+			if !applied {
+				return ErrHostSAClaimStale
 			}
 			gcpPrev = &prev
 		}
@@ -565,6 +582,10 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 			LogBrokerSettingsEvent(ctx, s.auditLogger, after.ID, after.Name, actor.ID(), getClientIP(r),
 				mergeBrokerAuditDetails(brokerAuditCredentialDetails(ctx), details...))
 		}
+	}
+	if errors.Is(writeErr, ErrHostSAClaimStale) {
+		Conflict(w, "the broker's host service account changed during the update; retry")
+		return
 	}
 	if writeErr != nil {
 		writeErrorFromErr(w, writeErr, "")
@@ -847,6 +868,17 @@ type brokerHeartbeatRequest struct {
 	// Omitted by an older broker, in which case the stored value is left
 	// unchanged.
 	Health *api.BrokerHealthReport `json:"health,omitempty"`
+	// RuntimeTargetPresentation is a flat instance's full FC4-a
+	// presentation (see hubclient.BrokerHeartbeat.RuntimeTargetPresentation),
+	// with its fence: the instance's runtime target ID, and the reporting
+	// process's epoch and per-process sequence. It is stored only when the
+	// request identity is the broker itself (ApplyRuntimeTargetPresentation); the wire
+	// carries no hash. Omitted by an older broker or a legacy one, in which
+	// case the stored value is left unchanged.
+	RuntimeTargetPresentation *api.RuntimeTargetPresentation `json:"runtimeTargetPresentation,omitempty"`
+	PresentationTargetID      string                         `json:"presentationTargetId,omitempty"`
+	PresentationEpoch         int64                          `json:"presentationEpoch,omitempty"`
+	PresentationSeq           int64                          `json:"presentationSeq,omitempty"`
 }
 
 // brokerStartInFlight mirrors hubclient.StartInFlight.
@@ -1119,8 +1151,13 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	// dev credential holding broker.update on the broker (heartbeats modify
 	// agent state and broker liveness). A user access token is refused with
 	// the HOST_OPERATIONS session-only reason.
+	brokerSelf := false
 	if brokerIdent := GetBrokerIdentityFromContext(ctx); brokerIdent != nil && brokerIdent.BrokerID() == id {
-		// Broker sending its own heartbeat — allowed
+		// Broker sending its own heartbeat — allowed. brokerSelf is set
+		// only when the request identity is the broker itself.
+		if self, ok := GetIdentityFromContext(ctx).(BrokerIdentity); ok && self.BrokerID() == id {
+			brokerSelf = true
+		}
 	} else if !s.authorizeBrokerHeartbeatUser(w, r, id) {
 		return
 	}
@@ -1258,6 +1295,24 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				}
 			}
 		}
+	}
+
+	// A flat instance's presentation is stored only when the request is
+	// authenticated as the broker itself (write rule 1): the user path,
+	// which this handler also admits, never writes it, so the presentation
+	// stays read-only to Hub users. Rules 2-4 (flat row, experiment on,
+	// target bound, fence advances) and the Hub-computed hash are
+	// ApplyRuntimeTargetPresentation's. An omitted field keeps the stored
+	// value.
+	if !brokerSelf {
+		if heartbeat.RuntimeTargetPresentation != nil {
+			s.agentLifecycleLog.Warn("heartbeat: ignoring runtimeTargetPresentation sent with a request identity other than the broker itself",
+				"broker_id", id)
+		}
+	} else if _, err := s.ApplyRuntimeTargetPresentation(ctx, id, heartbeat.PresentationTargetID,
+		heartbeat.RuntimeTargetPresentation, heartbeat.PresentationEpoch, heartbeat.PresentationSeq, time.Now()); err != nil {
+		s.agentLifecycleLog.Warn("heartbeat: failed to store runtime target presentation",
+			"broker_id", id, "error", err)
 	}
 
 	// Process agent status updates from each project

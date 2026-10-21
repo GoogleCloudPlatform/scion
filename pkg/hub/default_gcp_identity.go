@@ -234,6 +234,8 @@ func (s *Server) resolveDefaultSAAssignmentCore(ctx context.Context, r *http.Req
 	// evaluateSAAssignment runs:
 	//   1. Hub-scoped mode coupling (D4) — denies hub-scoped SAs
 	//      when gcpIamCheckMode != enforce.
+	//   1a. Refusal of a broker host service account translation record
+	//      (saReferencePreconditions), for every caller.
 	//   2. Hub ActionAssign authorization.
 	//   3. GCP actAs check via callerPrincipal, using the identity on ctx.
 	//   4. Audit record via EvaluateActAs with the given surface.

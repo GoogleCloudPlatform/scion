@@ -557,6 +557,15 @@ func (s *Server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
 			"user account is suspended", nil)
 		return
 	}
+	// Only an active account renews its tokens. An invited row (for
+	// example the same email re-invited after the token's user was
+	// removed) becomes active at first sign-in, not through refresh.
+	if user != nil && user.Status != store.UserStatusActive {
+		slog.Warn("Refresh rejected: user is not active", "email", claims.Email, "user_id", user.ID)
+		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+			"invalid refresh token", nil)
+		return
+	}
 	refreshUserID := ""
 	if user != nil {
 		refreshUserID = user.ID
