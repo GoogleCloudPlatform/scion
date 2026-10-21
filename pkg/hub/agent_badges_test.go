@@ -172,7 +172,9 @@ type badgeFixture struct {
 
 func newBadgeFixture(t *testing.T) *badgeFixture {
 	t.Helper()
-	srv, s := testServer(t)
+	srv, s, counter, _ := testServerWithStoreFault(t, func(inner store.Store, _ *storeFaultSwitch) *harnessLookupCountingStore {
+		return &harnessLookupCountingStore{Store: inner}
+	})
 	ctx := context.Background()
 	project := &store.Project{ID: tid("badges-project"), Name: "Badges", Slug: "badges-project"}
 	require.NoError(t, s.CreateProject(ctx, project))
@@ -211,8 +213,7 @@ func newBadgeFixture(t *testing.T) *badgeFixture {
 		addIn(other, id, &store.AgentAppliedConfig{HarnessConfig: "team-default"}, harness.VendorGoogle, "")
 	}
 
-	f.counter = &harnessLookupCountingStore{Store: s}
-	srv.store = f.counter
+	f.counter = counter
 	return f
 }
 
