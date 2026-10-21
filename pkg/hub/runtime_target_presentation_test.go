@@ -597,3 +597,30 @@ func TestPresentation_ImageRegistryRedactedOnBrokerRead(t *testing.T) {
 	require.NotNil(t, got.RuntimeTargetPresentation.AgentDefaults)
 	assert.Equal(t, "https://***@registry.example/team", got.RuntimeTargetPresentation.AgentDefaults.ImageRegistry)
 }
+
+// TestPresentationHeartbeat_StoresImageRegistryRedacted: the hub stores
+// presented image registries with the same display redaction as the broker
+// record, whatever the reporting broker sent. A presentation whose image
+// registry carries userinfo is stored, hashed and read back redacted; a
+// plain image registry is stored unchanged.
+func TestPresentationHeartbeat_StoresImageRegistryRedacted(t *testing.T) {
+	f := newPresentationFixture(t, true)
+	grantDevUserRuntimeBrokerAccess(t, f.s)
+	target := f.flat.RuntimeTarget.ID
+	reported := dockerPresentation("raw")
+	reported.AgentDefaults.ImageRegistry = "https://user:s3cret@registry.example/team"
+	sendAsBroker(t, f.srv, f.flat.ID, presentationBeat(reported, target, 100, 1, nil))
+
+	want := dockerPresentation("raw")
+	want.AgentDefaults.ImageRegistry = "https://***@registry.example/team"
+	row := f.row(t, f.flat.ID)
+	assert.Equal(t, want, row.RuntimeTargetPresentation, "the hub stores the presented image registry redacted")
+	assert.Equal(t, mustHash(t, want), row.RuntimeTargetPresentationHash, "the stored hash is the stored form's")
+	rec := doRequest(t, f.srv, http.MethodGet, "/api/v1/runtime-brokers/"+f.flat.ID, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), "s3cret", "a broker read never returns the registry's userinfo")
+
+	plain := dockerPresentation("plain")
+	sendAsBroker(t, f.srv, f.flat.ID, presentationBeat(plain, target, 100, 2, nil))
+	assert.Equal(t, plain, f.row(t, f.flat.ID).RuntimeTargetPresentation, "a plain image registry is stored unchanged")
+}

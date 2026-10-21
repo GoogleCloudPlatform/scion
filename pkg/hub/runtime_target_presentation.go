@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -103,6 +104,10 @@ func (s *Server) ApplyRuntimeTargetPresentation(ctx context.Context, brokerID, t
 	if p.SchemaVersion != api.RuntimeTargetPresentationSchemaVersion {
 		return ignore(presentationIgnoredSchemaVersion, "schema_version", p.SchemaVersion)
 	}
+	// The hub stores presented image registries with the same display
+	// redaction as the broker record, whatever the reporting broker sent;
+	// the hash is computed on the stored (redacted) form.
+	p = presentationForStore(p)
 	hash, err := RuntimeTargetPresentationHash(p)
 	if err != nil {
 		return PresentationResult{}, err
@@ -121,4 +126,22 @@ func (s *Server) ApplyRuntimeTargetPresentation(ctx context.Context, brokerID, t
 			"broker_id", brokerID, "epoch", epoch, "seq", seq)
 	}
 	return PresentationResult{Outcome: outcome}, nil
+}
+
+// presentationForStore returns p with its presented image registry redacted
+// like the broker record's (config.RedactImageRegistry), copying only what it
+// changes; p itself is never modified. The redaction is idempotent, so a
+// presentation built by PresentInstance is returned unchanged.
+func presentationForStore(p *api.RuntimeTargetPresentation) *api.RuntimeTargetPresentation {
+	if p.AgentDefaults == nil || p.AgentDefaults.ImageRegistry == "" {
+		return p
+	}
+	r := config.RedactImageRegistry(p.AgentDefaults.ImageRegistry)
+	if r == p.AgentDefaults.ImageRegistry {
+		return p
+	}
+	pc, ad := *p, *p.AgentDefaults
+	ad.ImageRegistry = r
+	pc.AgentDefaults = &ad
+	return &pc
 }
