@@ -55,7 +55,7 @@ func TestBuildPod_SharedWorkspaceAgentsMask(t *testing.T) {
 	}
 	local := RunConfig{Name: "local", Image: "test-image", UnixUsername: "scion"}
 	callerSet := shared(local, noScion)
-	callerSet.Annotations = map[string]string{k8sWorkspaceAgentsAnnotation: "true"}
+	callerSet.Annotations = map[string]string{k8sWorkspaceAgentsAnnotation: "true", "other": "x"}
 	for _, tt := range []struct {
 		name             string
 		cfg              RunConfig
@@ -101,6 +101,11 @@ func TestBuildPod_SharedWorkspaceAgentsMask(t *testing.T) {
 			wantExcludes := []string(nil)
 			if tt.excluded {
 				wantExcludes = []string{".scion/agents"}
+			}
+			for k, v := range tt.cfg.Annotations {
+				if k != k8sWorkspaceAgentsAnnotation && pod.Annotations[k] != v {
+					t.Errorf("caller annotation %s = %q on the pod, want %q", k, pod.Annotations[k], v)
+				}
 			}
 			if got := k8sWorkspaceSyncExcludes(pod.Annotations); !slices.Equal(got, wantExcludes) {
 				t.Errorf("sync excludes = %q, want %q (annotations %v)", got, wantExcludes, pod.Annotations)

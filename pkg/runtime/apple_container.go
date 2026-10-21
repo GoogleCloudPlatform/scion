@@ -431,8 +431,8 @@ func (r *AppleContainerRuntime) ExecWithStdin(ctx context.Context, id string, cm
 var appleMaskMinVersion = [3]int{0, 12, 0}
 
 // appleVersionTimeout bounds "container --version", so a CLI that hangs
-// cannot hold up a start.
-const appleVersionTimeout = 5 * time.Second
+// cannot hold up a start. Tests shorten it.
+var appleVersionTimeout = 5 * time.Second
 
 var (
 	// appleMaskVersionOnce and appleMaskVersionCheck run the version check

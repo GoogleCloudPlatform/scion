@@ -4987,11 +4987,18 @@ const k8sAgentsMaskSizeLimit = "1Mi"
 // <workspace>/.scion/agents already exists on the broker's view of the
 // export, so the mount point is never created there.
 func k8sWorkspaceAgentsExcluded(config RunConfig, nfsShared bool) (excluded bool, maskTarget string) {
-	if _, ok := sharedWorkspaceAgentsMaskTarget(config, "/workspace", false); !ok {
+	target, ok := sharedWorkspaceAgentsMaskTarget(config, "/workspace", false)
+	if !ok {
 		return false, ""
 	}
+	// Workspace resolved to the repo root above, so checking the agents dir
+	// under it is the requireAgentsDir condition without resolving again.
 	if nfsShared {
-		maskTarget, _ = sharedWorkspaceAgentsMaskTarget(config, "/workspace", true)
+		if isDir(filepath.Join(config.RepoRoot, filepath.FromSlash(sharedWorkspaceAgentsDir))) {
+			maskTarget = target
+		} else {
+			runtimeLog().Debug("Not masking the in-project agents dir: it does not exist", "agent", config.Name)
+		}
 	}
 	return true, maskTarget
 }

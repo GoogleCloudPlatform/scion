@@ -23,6 +23,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 )
@@ -220,8 +221,8 @@ func TestAppleContainerRuntime_Run_SharedWorkspaceAgentsMask(t *testing.T) {
 
 func TestWarnAppleMaskVersion(t *testing.T) {
 	for _, tt := range []struct {
-		name, output string
-		fail, warn   bool
+		name, output     string
+		fail, warn, hang bool
 	}{
 		{name: "below the floor", output: "container CLI version 0.11.0 (build: release, commit: abc1234)", warn: true},
 		{name: "dev build below the floor", output: "container CLI version 0.10.0-27-g9fd15f0 (build: debug, commit: 9fd15f0)", warn: true},
@@ -229,6 +230,7 @@ func TestWarnAppleMaskVersion(t *testing.T) {
 		{name: "above the floor", output: "container CLI version 1.6.0 (build: release, commit: abc1234)"},
 		{name: "unparseable", output: "container CLI version unknown"},
 		{name: "command fails", output: "container CLI version 0.1.0", fail: true},
+		{name: "command hangs", output: "container CLI version 0.1.0", hang: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			h := newRecordingHandler(slog.LevelDebug)
@@ -237,6 +239,19 @@ func TestWarnAppleMaskVersion(t *testing.T) {
 			if tt.fail {
 				script += "exit 1\n"
 			}
+			if tt.hang {
+				// exec, so the timeout kills the process holding the pipe.
+				script = "#!/bin/sh\nexec sleep 5\n"
+				prev := appleVersionTimeout
+				appleVersionTimeout = 50 * time.Millisecond
+				t.Cleanup(func() { appleVersionTimeout = prev })
+			}
+			start := time.Now()
+			defer func() {
+				if d := time.Since(start); d > 2*time.Second {
+					t.Errorf("version check took %v, want it bounded by the timeout", d)
+				}
+			}()
 			mock := filepath.Join(t.TempDir(), "mock-container")
 			if err := os.WriteFile(mock, []byte(script), 0o755); err != nil {
 				t.Fatal(err)
@@ -257,7 +272,7 @@ func TestWarnAppleMaskVersion(t *testing.T) {
 				t.Errorf("%d warnings, want %d", warns, want)
 			}
 			if !tt.warn {
-				if _, ok := h.findRecord("Could not read the container CLI version"); ok != (tt.fail || tt.name == "unparseable") {
+				if _, ok := h.findRecord("Could not read the container CLI version"); ok != (tt.fail || tt.hang || tt.name == "unparseable") {
 					t.Errorf("debug record present = %v", ok)
 				}
 			}

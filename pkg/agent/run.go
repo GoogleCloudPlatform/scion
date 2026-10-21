@@ -2212,8 +2212,10 @@ authDone:
 	// typically resolves it to a non-empty RepoRoot (the NFS shared base)
 	// exactly as it would for a plain, non-worktree git project.
 	// RunConfig.RepoRoot being set this way on Kubernetes does not change
-	// what gets mounted: the Kubernetes runtime builds its mounts from
-	// containerWorkspace and the NFS* fields above, never from RepoRoot. The
+	// where the workspace is mounted: the Kubernetes runtime builds its
+	// workspace mounts from containerWorkspace and the NFS* fields above.
+	// It reads RepoRoot only to decide whether the shared workspace's
+	// in-project agents dir is kept out of the pod (k8sWorkspaceAgentsExcluded). The
 	// repoRoot computed earlier was validated against the PRE-backend path,
 	// so if the backend actually changed it, re-resolve against the value
 	// RunConfig will use, through the same validatedWorktreeRepoRoot
