@@ -2,8 +2,8 @@
 
 > **Status: P1 skeleton. Not deployable yet.** The config contract, the
 > permissions matrix and the doc structure exist. The mediator is a stub that
-> validates config and serves `/health`; the runner image and the scripts are
-> placeholders. See [Phases](#phases).
+> validates config and serves `/health`; the runner image and entrypoint are
+> implemented (P3, in review); the scripts are placeholders. See [Phases](#phases).
 
 cr-ci contains the documentation, scripts and code to run selected GitHub
 Actions jobs of the scion repository on **ephemeral 8 vCPU / 32 GiB Cloud Run
@@ -53,7 +53,7 @@ fork (`ptone/scion`), upstream (`GoogleCloudPlatform/scion`) or both.
 | :--- | :--- |
 | [`config.example.env`](config.example.env) | The single config contract (names only, never secret values) |
 | [`mediator/`](mediator/) | Go Cloud Run service. P1: config loader + tests, `/health` stub |
-| [`runner/`](runner/) | Runner image (`Dockerfile`, `entrypoint.sh`). P1: placeholders (P3) |
+| [`runner/`](runner/) | Runner image (`Dockerfile`, `entrypoint.sh`, offline harness); see [`runner/README.md`](runner/README.md) |
 | [`scripts/`](scripts/) | Deploy and teardown scripts (P4). P1: planned list and the `--dry-run` contract |
 | [`workflows/`](workflows/) | Workflow templates, not active (P5). P1: README |
 | [`docs/architecture.md`](docs/architecture.md) | Flow, security model, failure modes, fallback |
@@ -78,7 +78,7 @@ go build -o /dev/null ./... && go vet ./... && go test ./... && gofmt -l .
 | :--- | :--- | :--- |
 | P1 | Skeleton, config contract, docs outline, complete permissions matrix | **this change** |
 | P2 | Mediator: HMAC, fork guard, idempotency, JIT, RunJob, claim endpoint, `/reconcile`, backpressure | planned |
-| P3 | Runner image and entrypoint (`/scratch` redirection, claim exchange) | planned |
+| P3 | Runner image and entrypoint (`/scratch` redirection, claim exchange) | implemented (in review) |
 | P4 | Idempotent deploy and teardown scripts with `--dry-run` | planned |
 | P5 | GitHub setup guide, App manifest, workflow templates | planned |
 | P6 | Live PoC on the chosen target (needs ptone's go-ahead) | gated |
