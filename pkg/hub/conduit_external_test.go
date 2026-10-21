@@ -320,3 +320,87 @@ func TestConduitExternal_RequiresSessionSecret(t *testing.T) {
 	require.ErrorIs(t, err, errConduitAdmissionNoKey)
 	assert.False(t, f.srv.ConduitExternal())
 }
+
+// TestConduitExternal_IngressOffWithoutHMAC (design §3.9, v2.21.52):
+// with proxy ingress under explicit hmac, a dial reaches a relay. With the
+// proxy off because the resolved peer-auth mode is not hmac (explicit oidc,
+// or auto on GCP), the hub still starts, every dial gets 503
+// conduit_not_serving, no relay is contacted, the readiness gauge carries
+// the cause, and the HTTP readiness endpoint stays ready.
+func TestConduitExternal_IngressOffWithoutHMAC(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		cause string
+	}{
+		{name: "explicit hmac proxies"},
+		{name: "peer auth not hmac keeps the proxy off", cause: ConduitIngressCauseRequiresHMAC},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &externalFixture{conduitFixture: newConduitFixture(t)}
+			f.regStore = entadapter.NewConduitRegistryStore(enttest.NewClient(t))
+			f.reg = registry.New(f.regStore, registry.Config{})
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+
+			var hits atomic.Int32
+			relaySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				hits.Add(1)
+				w.WriteHeader(http.StatusAccepted)
+			}))
+			t.Cleanup(relaySrv.Close)
+			now := f.clock.Now()
+			_, err := f.regStore.RegisterRelay(ctx, registry.RelayInstance{InstanceID: "relay-0", InternalEndpoint: relaySrv.URL, StartedAt: now, LastSeen: now})
+			require.NoError(t, err)
+
+			opts := externalOptions(t, f)
+			opts.IngressOffCause = tc.cause
+			f.srv.config.SharedSigningSecret = testRelaySessionSecret
+			require.NoError(t, f.srv.StartConduitExternal(ctx, opts), "the hub starts")
+			require.Equal(t, 1, f.srv.refreshConduitEligibleRelays(ctx, f.srv.conduitExternal.Load()))
+
+			reader := sdkmetric.NewManualReader()
+			require.NoError(t, f.srv.RegisterConduitRelayReadinessGauge(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))))
+			var rm metricdata.ResourceMetrics
+			require.NoError(t, reader.Collect(context.Background(), &rm))
+			cause, found := "", false
+			for _, sm := range rm.ScopeMetrics {
+				for _, m := range sm.Metrics {
+					if m.Name != "scion.hub.conduit.eligible_relays" {
+						continue
+					}
+					g, ok := m.Data.(metricdata.Gauge[int64])
+					require.True(t, ok, "gauge type %T", m.Data)
+					require.Len(t, g.DataPoints, 1)
+					found = true
+					assert.EqualValues(t, 1, g.DataPoints[0].Value)
+					if v, ok := g.DataPoints[0].Attributes.Value("cause"); ok {
+						cause = v.AsString()
+					}
+				}
+			}
+			require.True(t, found, "the readiness gauge reports")
+			assert.Equal(t, tc.cause, cause, "the gauge's cause attribute")
+
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/conduit", nil)
+			req.Header.Set("Connection", "Upgrade")
+			req.Header.Set("Upgrade", "websocket")
+			f.srv.handleConduit(rec, req)
+			if tc.cause == "" {
+				assert.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+				assert.EqualValues(t, 1, hits.Load(), "the dial is proxied to the relay")
+			} else {
+				require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+				code, msg, reason := conduitDialRefusal(t, rec)
+				assert.Equal(t, ErrCodeUnavailable, code)
+				assert.Equal(t, ptyReasonConduitNotServing, reason)
+				assert.Equal(t, conduitExternalIngressOff, msg)
+				assert.Zero(t, hits.Load(), "no request reaches a relay while the proxy is off")
+			}
+
+			ready := httptest.NewRecorder()
+			f.srv.handleReadyz(ready, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+			assert.Equal(t, http.StatusOK, ready.Code, "HTTP readiness is unaffected: %s", ready.Body.String())
+		})
+	}
+}

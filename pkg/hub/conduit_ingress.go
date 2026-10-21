@@ -59,6 +59,13 @@ import (
 // written, goes to the client unchanged (502 for the error), since a second
 // Admit would replay a broker's request nonce.
 
+// ConduitIngressCauseRequiresHMAC is the cause that keeps the ingress
+// proxy off when the resolved relay-peer auth mode is not hmac: the OIDC
+// modes carry the peer token in Authorization, which on the proxy leg is
+// the client's own credential, until the relay-peer ingress header lands
+// (design §3.9, v2.21.52).
+const ConduitIngressCauseRequiresHMAC = "ingress_requires_hmac"
+
 // conduitIngressPath is the path a relay serves proxied dials on (its
 // internal listener) and the hub's own conduit path.
 const conduitIngressPath = "/api/v1/conduit"
