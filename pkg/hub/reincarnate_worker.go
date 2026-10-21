@@ -543,13 +543,18 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		}
 		srcAgent = a
 	}
+	// provisionSent records that a move's provision was dispatched to the
+	// target. Before it, the target has been sent nothing, so a forced
+	// move's rollback removes nothing there: its F4 check never ran, and
+	// any files it holds for the agent are not this move's.
+	provisionSent := false
 	// failAfterProvision fails the reincarnation once the new config has
 	// been provisioned (or a move assigned the agent to the target): a
 	// move is rolled back to the source broker; a plain reincarnation
 	// re-renders the previous config on its broker.
 	failAfterProvision := func(fromState, errMsg string) {
 		if move != nil {
-			s.failMoveAndRollBack(ctx, md, agentID, reincarnationID, fromState, errMsg, previous, move, srcAgent, false)
+			s.failMoveAndRollBack(ctx, md, agentID, reincarnationID, fromState, errMsg, previous, move, srcAgent, move.recreates() && !provisionSent)
 			return
 		}
 		s.failAfterReprovision(ctx, dispatcher, agentID, reincarnationID, fromState, errMsg, previous)
@@ -682,6 +687,7 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 			failAfterProvision(store.AgentReincarnationStateProvisioning, "failed to link the target broker to the project: "+err.Error())
 			return
 		}
+		provisionSent = true
 		if err := md.DispatchAgentProvisionForMove(ctx, agent, move.expectedNFSWorkspace()); err != nil {
 			errMsg := "provision on the target broker failed: " + dispatchFailureText(err)
 			if move.recreates() && moveTargetUntouched(err) {

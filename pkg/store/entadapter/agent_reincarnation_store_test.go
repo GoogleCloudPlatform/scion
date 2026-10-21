@@ -547,8 +547,7 @@ func TestAgentReincarnation_MoveFieldsRoundTrip(t *testing.T) {
 
 // A move's transfer mode is written at creation and read back unchanged; a
 // record created without one (a plain reincarnation, or a move recorded
-// before the column existed) reads back "", which EffectiveTransferMode
-// reads as an export move when the record names a source broker.
+// before the column existed) reads back "".
 func TestAgentReincarnation_TransferModeRoundTrip(t *testing.T) {
 	s := newTestAgentReincarnationStore(t)
 	ctx := context.Background()
@@ -563,7 +562,6 @@ func TestAgentReincarnation_TransferModeRoundTrip(t *testing.T) {
 	got, err := s.GetAgentReincarnation(ctx, forced.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.TransferModeRecreate, got.TransferMode)
-	assert.Equal(t, store.TransferModeRecreate, got.EffectiveTransferMode())
 
 	got.State = store.AgentReincarnationStateCompleted
 	ok, err := s.TryAdvanceAgentReincarnation(ctx, got, store.AgentReincarnationStatePending, time.Time{})
@@ -583,5 +581,4 @@ func TestAgentReincarnation_TransferModeRoundTrip(t *testing.T) {
 	got, err = s.GetAgentReincarnation(ctx, legacy.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "", got.TransferMode)
-	assert.Equal(t, store.TransferModeExport, got.EffectiveTransferMode())
 }

@@ -402,3 +402,107 @@ func TestBuildReincarnationPreamble_RecreatedWorkspace(t *testing.T) {
 		})
 	}
 }
+
+// failLinkStore fails every provider link.
+type failLinkStore struct{ store.Store }
+
+func (failLinkStore) AddProjectProvider(context.Context, *store.ProjectProvider) error {
+	return errors.New("injected provider link failure")
+}
+
+// failAssignStore fails every agent write that assigns the agent to target.
+type failAssignStore struct {
+	store.Store
+	target string
+}
+
+func (s failAssignStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
+	if a.RuntimeBrokerID == s.target {
+		return errors.New("injected persist failure")
+	}
+	return s.Store.UpdateAgent(ctx, a)
+}
+
+// A forced move that fails after the agent is assigned to the target but
+// before the provision is sent (the provider link, or persisting the new
+// config) has sent the target nothing: its absence check never ran, so the
+// rollback removes nothing there, and files it holds for the agent stay.
+// The source is restored and is never sent a delete.
+func TestReincarnateForceMove_FailureBeforeProvisionSendsNoTargetDelete(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		wrap  func(f *moveFixture) store.Store
+		cause string
+	}{
+		{"provider link fails", func(f *moveFixture) store.Store { return failLinkStore{Store: f.s} }, "failed to link the target broker to the project"},
+		{"persisting the new config fails", func(f *moveFixture) store.Store { return failAssignStore{Store: f.s, target: f.dst.ID} }, "failed to persist new applied config"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := setupForceMoveFixture(t, false, func(dst *store.RuntimeBroker) { dst.AutoProvide = true })
+			prepareForceMoveWorker(t, f)
+			f.disp.mu.Lock()
+			f.disp.recreateFiles[f.dst.ID] = true
+			f.disp.mu.Unlock()
+			f.srv.store = tc.wrap(f)
+
+			rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+f.agent.ID+"/reincarnate",
+				ReincarnateAgentRequest{TargetBroker: f.dst.ID, ForceMove: true})
+			require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+			r := waitForReincarnationSettled(t, f.s, f.agent.ID)
+			require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+			assert.Contains(t, r.Error, tc.cause)
+			r = waitForMoveSourceCleanup(t, f.s, r.ID)
+			a, err := f.s.GetAgent(context.Background(), f.agent.ID)
+			require.NoError(t, err)
+			assert.Equal(t, f.src.ID, a.RuntimeBrokerID, "the agent stays on the source")
+			assert.Equal(t, "run-src", a.RunID)
+			assert.EqualValues(t, 1, brokerReservationCount(t, f.s, f.src.ID), "the reservation is back on the source")
+			assert.EqualValues(t, 0, brokerReservationCount(t, f.s, f.dst.ID))
+
+			provisions, localDeletes, starts := f.disp.moveSnapshot()
+			assert.Empty(t, provisions, "the provision was never sent")
+			assert.Empty(t, starts)
+			assert.Empty(t, localDeletes, "no localOnly delete anywhere")
+			assert.Empty(t, f.disp.recreatedDeletes(), "no files delete on a target that was sent nothing")
+			f.disp.mu.Lock()
+			assert.True(t, f.disp.recreateFiles[f.dst.ID], "the target's files are kept")
+			f.disp.mu.Unlock()
+		})
+	}
+}
+
+// The re-check judges the workspace gate again, as the request did: a
+// project switched to a mode reincarnate does not support is refused, and
+// so is an agent whose workspace is no longer the kind the move was
+// accepted for.
+func TestRecheckMoveEligibility_WorkspaceGate(t *testing.T) {
+	mv := func(f *moveFixture, agentDir bool) *reincarnationMove {
+		return &reincarnationMove{SourceBrokerID: f.src.ID, TargetBrokerID: f.dst.ID, ProjectID: f.project.ID,
+			SelfMove: true, AgentDirWorkspace: agentDir}
+	}
+	t.Run("project switched to worktree-per-agent", func(t *testing.T) {
+		f := setupMoveFixture(t, true, nil)
+		ctx := context.Background()
+		p, err := f.s.GetProject(ctx, f.project.ID)
+		require.NoError(t, err)
+		if p.Labels == nil {
+			p.Labels = map[string]string{}
+		}
+		p.Labels[store.LabelWorkspaceMode] = string(store.SharingModeWorktreePerAgent)
+		require.NoError(t, f.s.UpdateProject(ctx, p))
+		_, err = f.srv.recheckMoveEligibility(ctx, f.agent.ID, mv(f, true))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "worktree-per-agent")
+	})
+	t.Run("workspace kind changed", func(t *testing.T) {
+		f := setupMoveFixture(t, true, nil)
+		_, err := f.srv.recheckMoveEligibility(context.Background(), f.agent.ID, mv(f, false))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "the agent's workspace mode changed since the move was accepted")
+	})
+	t.Run("unchanged passes", func(t *testing.T) {
+		f := setupMoveFixture(t, true, nil)
+		_, err := f.srv.recheckMoveEligibility(context.Background(), f.agent.ID, mv(f, true))
+		require.NoError(t, err)
+	})
+}

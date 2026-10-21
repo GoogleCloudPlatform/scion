@@ -105,8 +105,9 @@ type AgentReincarnation struct {
 	// TransferMode is set, at creation, for a cross-broker move: how the
 	// workspace reaches the target, TransferModeExport or
 	// TransferModeRecreate. "" for a plain reincarnation, and for a move
-	// recorded before the field existed, which was always an export move
-	// (see EffectiveTransferMode).
+	// recorded before the field existed, which was always an export move: a
+	// reader that branches on the mode reads "" on a move record as
+	// TransferModeExport.
 	TransferMode string `json:"transferMode,omitempty"`
 }
 
@@ -119,19 +120,6 @@ const (
 	// (a forced move); the source's local state is given up.
 	TransferModeRecreate = "recreate"
 )
-
-// EffectiveTransferMode is the record's transfer mode, reading a move
-// recorded without one ("") as TransferModeExport, the only mode that
-// existed before the field. It returns "" for a plain reincarnation.
-func (r *AgentReincarnation) EffectiveTransferMode() string {
-	if r.SourceBrokerID == "" {
-		return ""
-	}
-	if r.TransferMode == "" {
-		return TransferModeExport
-	}
-	return r.TransferMode
-}
 
 // SourceCleanupDone records a successful source-broker cleanup after a move.
 const SourceCleanupDone = "done"

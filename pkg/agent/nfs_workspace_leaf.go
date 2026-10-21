@@ -119,9 +119,9 @@ func ensureNFSWorkspaceLeaves(runtimeName, projectID string, resolved runtime.Re
 	workspaceLeaf := rel
 	var leaves []string
 	if agentName != "" {
-		agentDir, err := runtime.NFSAgentDirSubPath(rel, agentName)
+		agentDir, err := nfsOwnAgentDirRel(resolved, agentName)
 		if err != nil {
-			return false, fmt.Errorf("workspace_storage nfs: %w", err)
+			return false, err
 		}
 		workspaceLeaf = filepath.Join(agentDir, provision.AgentWorkspaceDir)
 		// The provisioning init container writes its lock, the branch

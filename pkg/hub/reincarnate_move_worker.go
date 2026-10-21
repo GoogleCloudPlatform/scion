@@ -109,18 +109,24 @@ func (s *Server) recheckMoveEligibility(ctx context.Context, agentID string, mv 
 	if err != nil {
 		return nil, fmt.Errorf("load project: %w", err)
 	}
+	// The workspace gate is judged again, exactly as the request judged it.
+	gate := s.reincarnateWorkspaceGate(ctx, a, project, dst, mv.Force)
+	if gate.workspaceModeErr == "" && gate.cloneMode != mv.AgentDirWorkspace {
+		return nil, fmt.Errorf("move no longer eligible: the agent's workspace mode changed since the move was accepted")
+	}
 	allowed := func(*store.RuntimeBroker) bool { return true }
 	v, ref := evaluateMoveEligibility(moveEligibilityInput{
-		Agent:         a,
-		Src:           src,
-		Dst:           dst,
-		CloneMode:     mv.AgentDirWorkspace,
-		Profile:       mv.Profile,
-		SelfMove:      mv.SelfMove,
-		Force:         mv.Force,
-		EmptyPerAgent: project.IsEmptyPerAgent(),
-		WorkspaceMode: string(project.SharingMode()),
-		GitRemote:     project.GitRemote,
+		Agent:              a,
+		Src:                src,
+		Dst:                dst,
+		WorkspaceModeError: gate.workspaceModeErr,
+		CloneMode:          gate.cloneMode,
+		Profile:            mv.Profile,
+		SelfMove:           mv.SelfMove,
+		Force:              mv.Force,
+		EmptyPerAgent:      project.IsEmptyPerAgent(),
+		WorkspaceMode:      string(project.SharingMode()),
+		GitRemote:          project.GitRemote,
 		Probes: moveProbes{
 			Reachable:        s.brokerRecordReachable,
 			CanDispatch:      allowed,
