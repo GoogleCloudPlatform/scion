@@ -293,3 +293,39 @@ func TestRoleIngressLifetimeCap(t *testing.T) {
 		}
 	})
 }
+
+// TestRoleIngressSessionsCarryTheInstance (design §3.9 "Drain through the
+// proxy"): a session admitted over a trusted ingress leg carries the
+// ingress instance, so a drain for that instance reaches it; a direct
+// session carries none.
+func TestRoleIngressSessionsCarryTheInstance(t *testing.T) {
+	f := newRoleFixture(t)
+	f.admitAs(registry.PrincipalAgent, "tok-1", nil)
+	const peer = "hub-a"
+	ingress := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.role.ServeIngress(w, r, peer)
+	}))
+	t.Cleanup(ingress.Close)
+
+	// The Welcome is sent while a session is still pending; a drain only
+	// sees registered sessions, so wait until the relay has registered each.
+	registered := func(wel *conduitv1.Welcome) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if _, _, ok := f.node.Relay.Local(ctx, wel.GetSessionId()); !ok {
+			t.Fatalf("session %s was not registered on the relay", wel.GetSessionId())
+		}
+	}
+	registered(dialWelcome(t, f.front.URL, nil))
+	if n := f.node.Relay.DrainIngress(peer, 0); n != 0 {
+		t.Fatalf("drain matched %d direct sessions, want 0", n)
+	}
+	registered(dialWelcome(t, ingress.URL, http.Header{http.CanonicalHeaderKey(relay.HeaderIngressInstance): {peer}}))
+	if n := f.node.Relay.DrainIngress("hub-b", 0); n != 0 {
+		t.Fatalf("a drain for another hub matched %d sessions, want 0", n)
+	}
+	if n := f.node.Relay.DrainIngress(peer, 0); n != 1 {
+		t.Fatalf("drain matched %d sessions, want the 1 ingress session", n)
+	}
+}
