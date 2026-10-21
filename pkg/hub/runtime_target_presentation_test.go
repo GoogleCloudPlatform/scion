@@ -40,10 +40,10 @@ import (
 )
 
 // FC4-a presentation transport (ptone/scion#3282): the Hub stores a flat
-// instance's presentation from its heartbeat only from the broker's own
-// credentials, only on a flat row bound to the reported target, with a
-// Hub-computed hash, and only when the epoch/seq fence advances. An omitted
-// field keeps the stored value.
+// instance's presentation from its heartbeat only when the request identity
+// is the broker itself, only on a flat row bound to the reported target,
+// with a Hub-computed hash, and only when the epoch/seq fence advances. An
+// omitted field keeps the stored value.
 
 // presentationCall is one SetRuntimeBrokerPresentation call seen by
 // presentationRecordingStore, with its result.
@@ -619,6 +619,7 @@ func TestPresentationHeartbeat_StoresImageRegistryRedacted(t *testing.T) {
 	rec := doRequest(t, f.srv, http.MethodGet, "/api/v1/runtime-brokers/"+f.flat.ID, nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.NotContains(t, rec.Body.String(), "s3cret", "a broker read never returns the registry's userinfo")
+	assert.Contains(t, rec.Body.String(), "https://***@registry.example/team", "a broker read returns the redacted image registry")
 
 	plain := dockerPresentation("plain")
 	sendAsBroker(t, f.srv, f.flat.ID, presentationBeat(plain, target, 100, 2, nil))

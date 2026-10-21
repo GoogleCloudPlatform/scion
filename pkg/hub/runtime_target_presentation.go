@@ -60,7 +60,7 @@ type PresentationResult struct {
 // hex SHA-256 of the canonical JSON of its FC4-a fields (SchemaVersion is
 // not one). encoding/json writes struct fields in declaration order and map
 // keys sorted, so equal presentations hash equally. The Hub computes it over
-// the received presentation and never takes a hash from a Runtime Broker.
+// the presentation as stored (after presentationForStore); it never takes a hash from a Runtime Broker.
 func RuntimeTargetPresentationHash(p *api.RuntimeTargetPresentation) (string, error) {
 	if p == nil {
 		return "", errors.New("nil presentation")

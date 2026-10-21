@@ -850,8 +850,8 @@ type brokerHeartbeatRequest struct {
 	// RuntimeTargetPresentation is a flat instance's full FC4-a
 	// presentation (see hubclient.BrokerHeartbeat.RuntimeTargetPresentation),
 	// with its fence: the instance's runtime target ID, and the reporting
-	// process's epoch and per-process sequence. It is stored only from the
-	// broker's own credentials (ApplyRuntimeTargetPresentation); the wire
+	// process's epoch and per-process sequence. It is stored only when the
+	// request identity is the broker itself (ApplyRuntimeTargetPresentation); the wire
 	// carries no hash. Omitted by an older broker or a legacy one, in which
 	// case the stored value is left unchanged.
 	RuntimeTargetPresentation *api.RuntimeTargetPresentation `json:"runtimeTargetPresentation,omitempty"`
