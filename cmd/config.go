@@ -269,7 +269,7 @@ Examples:
 			_, _ = fmt.Fprintln(w, formatValueSource(v))
 			return nil
 		}
-		fmt.Fprintln(w, v.Value)
+		_, _ = fmt.Fprintln(w, v.Value)
 		return nil
 	},
 }
@@ -322,7 +322,7 @@ Examples:
 			_, _ = fmt.Fprintf(errOut, "Warning: %s is still set by %s\n", key, strings.TrimPrefix(now.Source, "env "))
 		}
 		if nowErr == nil && strings.HasPrefix(now.Source, "project-id file ") {
-			fmt.Fprintf(errOut, "Note: %s still comes from %s\n", key, strings.TrimPrefix(now.Source, "project-id file "))
+			_, _ = fmt.Fprintf(errOut, "Note: %s still comes from %s\n", key, strings.TrimPrefix(now.Source, "project-id file "))
 		}
 
 		// A file of the edited layer that still sets the key: a spelling
@@ -374,9 +374,9 @@ Examples:
 		}
 
 		w := cmd.OutOrStdout()
-		fmt.Fprintln(w, msg)
+		_, _ = fmt.Fprintln(w, msg)
 		if nowErr == nil {
-			fmt.Fprintf(w, "Now: %s\n", formatSettingValue(now))
+			_, _ = fmt.Fprintf(w, "Now: %s\n", formatSettingValue(now))
 		}
 		return nil
 	},
@@ -593,7 +593,7 @@ func runSettingsMigration() error {
 	for _, d := range dirs {
 		result, err := config.MigrateSettingsFile(d.dir, configMigrateDryRun)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error migrating %s settings (%s): %v\n", d.label, d.dir, err)
+			_, _ = fmt.Fprintf(os.Stderr, "Error migrating %s settings (%s): %v\n", d.label, d.dir, err)
 			migrationErr = err
 			continue
 		}
