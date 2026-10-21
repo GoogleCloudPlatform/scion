@@ -593,9 +593,9 @@ type panickingStartManager struct {
 }
 
 func (m *panickingStartManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
-	m.asyncManager.mu.Lock()
-	m.asyncManager.startCalls++
-	m.asyncManager.mu.Unlock()
+	m.mu.Lock()
+	m.startCalls++
+	m.mu.Unlock()
 	panic("runtime exploded")
 }
 
