@@ -346,7 +346,7 @@ func isLocalOnlyRuntime(runtimeType string) bool {
 // "k8s-staging" of type kubernetes) is advertised, and filtered, as the
 // type it actually runs.
 func (s *Server) buildInfoProfiles(defaultRuntimeType string) []BrokerProfile {
-	vs, _, err := config.LoadEffectiveSettings("")
+	vs, err := globalEffectiveSettings()
 	if err != nil || len(vs.Profiles) == 0 {
 		return []BrokerProfile{
 			{Name: "default", Type: defaultRuntimeType, Available: true, Attach: s.attachSupportedForProfile(defaultRuntimeType, defaultRuntimeType)},
@@ -394,6 +394,21 @@ func (s *Server) buildInfoProfiles(defaultRuntimeType string) []BrokerProfile {
 	}
 
 	return profiles
+}
+
+// globalEffectiveSettings loads the broker's effective settings from its
+// global settings directory: embedded defaults, the global settings file,
+// the environment and the DB overlay, but never a project found from the
+// process working directory. A request-time read must not depend on where
+// the broker process was started (ptone/scion#5363), as the server's
+// startup loads do not (ptone/scion#5362).
+func globalEffectiveSettings() (*config.VersionedSettings, error) {
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		return nil, err
+	}
+	vs, _, err := config.LoadEffectiveSettings(globalDir)
+	return vs, err
 }
 
 // heartbeatProfileAttach returns the attach capability of each profile
