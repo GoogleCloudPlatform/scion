@@ -2525,6 +2525,12 @@ func (s *Server) handleProjectAgents(w http.ResponseWriter, r *http.Request, pro
 	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		if err == store.ErrNotFound {
+			// A visitor gets the one refusal for an unknown project too
+			// (admitVisitorSubRoute already refused it before here).
+			if isVisitorIdentity(GetIdentityFromContext(ctx)) {
+				writeVisitorRefusal(w)
+				return
+			}
 			NotFound(w, "Project")
 			return
 		}
@@ -2598,6 +2604,12 @@ var projectAgentRouteActions = map[AgentSubRouteID]string{
 
 // listProjectAgents lists agents within a specific project
 func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, projectID string) {
+	// A project visitor gets the visitor view only (routeGuard admitted it
+	// through admitVisitorSubRoute for this request).
+	if isVisitorIdentity(GetIdentityFromContext(r.Context())) {
+		s.listProjectAgentsForVisitor(w, r, projectID)
+		return
+	}
 	// The ids= format check runs before any authorization or store call
 	// this handler makes (see parseAgentListIDs).
 	if q := r.URL.Query(); !validateAgentListIDs(w, q, agentListLimit(q), isSortedModeRequest(q)) {
@@ -2818,6 +2830,12 @@ func (s *Server) createProjectAgent(w http.ResponseWriter, r *http.Request, proj
 // its descendants (authz_launcher_read.go). An agent caller that is denied, or that names
 // an agent in another project, gets the same 404 as for a missing agent.
 func (s *Server) getProjectAgent(w http.ResponseWriter, r *http.Request, projectID, agentID string) {
+	// A project visitor gets the visitor view only (routeGuard admitted it
+	// through admitVisitorSubRoute for this request).
+	if isVisitorIdentity(GetIdentityFromContext(r.Context())) {
+		s.getProjectAgentForVisitor(w, r, projectID, agentID)
+		return
+	}
 	if !checkAgentReadScope(w, r) {
 		return
 	}
