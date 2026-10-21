@@ -111,6 +111,9 @@ func TestReincarnateForceMove_CompletesOnTarget(t *testing.T) {
 	assert.Equal(t, []string{f.src.ID + "|run-src"}, localDeletes, "only the source's run is cleaned up, localOnly")
 	assert.Empty(t, f.disp.recreatedDeletes(), "a completed move removes nothing on the target")
 	f.disp.mu.Lock()
+	assert.Equal(t, []string{r.ID}, f.disp.moveProvisionIDs, "the provision carries the move's reincarnation ID")
+	f.disp.mu.Unlock()
+	f.disp.mu.Lock()
 	task := f.disp.lastStartTask
 	f.disp.mu.Unlock()
 	assert.Contains(t, task, "This generation runs on broker move-dst with a recreated workspace: a fresh clone of example.com/force-move-repo")
@@ -375,7 +378,7 @@ func TestRollbackMoveTarget_VariantByTransferMode(t *testing.T) {
 			d := newReincarnateTestDispatcher()
 			a := *dst
 			a.RunID = tc.dstRun
-			require.NoError(t, rollbackMoveTarget(ctx, d, &a, &reincarnationMove{TransferMode: tc.mode}, "run-src"))
+			require.NoError(t, rollbackMoveTarget(ctx, d, &a, &reincarnationMove{TransferMode: tc.mode}, "run-src", "reincarnation-1"))
 			assert.Equal(t, tc.wantRecreated, d.recreatedDeletes())
 			_, local, _ := d.moveSnapshot()
 			assert.Equal(t, tc.wantLocal, local)
@@ -555,4 +558,56 @@ func TestReincarnateForceMove_ProvisionNotSentSendsNoTargetDelete(t *testing.T) 
 	f.disp.mu.Lock()
 	assert.True(t, f.disp.recreateFiles[f.dst.ID], "the target's files are kept")
 	f.disp.mu.Unlock()
+}
+
+// The target refuses the forced move's provision before its absence check
+// runs (here a 503: the NFS export is unavailable), so the error comes back
+// sent and the rollback sends the guarded files delete with the move's
+// reincarnation ID. The target holds files for the agent that this move did
+// not create (no move marker), so it refuses the delete with
+// move_marker_mismatch and removes nothing; the rollback records the skip
+// and still restores the agent on the source.
+func TestReincarnateForceMove_RefusedBeforeF4RollbackDeleteIsSkipped(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		code int
+	}{
+		{"nfs unavailable", `{"error":{"code":"nfs_unavailable","message":"the NFS export is unavailable"}}`, http.StatusServiceUnavailable},
+		{"create in progress", `{"error":{"code":"conflict","message":"a create of this agent is in progress"}}`, http.StatusConflict},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := setupForceMoveFixture(t, true, nil)
+			prepareForceMoveWorker(t, f)
+			f.disp.mu.Lock()
+			f.disp.recreateFiles[f.dst.ID] = true
+			f.disp.moveProvisionErr = provisionSent(&brokerStatusError{StatusCode: tc.code, Body: tc.body})
+			f.disp.moveProvisionFailsBeforeF4 = true
+			f.disp.mu.Unlock()
+
+			r, a := startForceMove(t, f)
+			require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+			r = waitForMoveSourceCleanup(t, f.s, r.ID)
+			assert.Equal(t, f.src.ID, a.RuntimeBrokerID, "the agent stays on the source")
+			assert.Equal(t, "run-src", a.RunID)
+			assert.EqualValues(t, 1, brokerReservationCount(t, f.s, f.src.ID), "the reservation is back on the source")
+			assert.Len(t, f.disp.recreatedDeletes(), 1, "the guarded delete is sent")
+			_, localDeletes, _ := f.disp.moveSnapshot()
+			assert.Empty(t, localDeletes)
+			f.disp.mu.Lock()
+			assert.Equal(t, []string{r.ID}, f.disp.recreatedDeleteIDs, "the delete carries the move's reincarnation ID")
+			assert.True(t, f.disp.recreateFiles[f.dst.ID], "files the move did not create are kept")
+			f.disp.mu.Unlock()
+		})
+	}
+}
+
+// isMoveMarkerMismatch matches only the exact code on a 409.
+func TestIsMoveMarkerMismatch(t *testing.T) {
+	assert.True(t, isMoveMarkerMismatch(&brokerStatusError{StatusCode: http.StatusConflict, Body: moveMarkerMismatchBody}))
+	assert.True(t, isMoveMarkerMismatch(fmt.Errorf("delete: %w", &brokerStatusError{StatusCode: http.StatusConflict, Body: moveMarkerMismatchBody})))
+	assert.False(t, isMoveMarkerMismatch(&brokerStatusError{StatusCode: http.StatusConflict, Body: freshAgentDirConflictBody}))
+	assert.False(t, isMoveMarkerMismatch(&brokerStatusError{StatusCode: http.StatusInternalServerError, Body: moveMarkerMismatchBody}))
+	assert.False(t, isMoveMarkerMismatch(errors.New("move_marker_mismatch")))
+	assert.False(t, isMoveMarkerMismatch(nil))
 }

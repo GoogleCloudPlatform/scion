@@ -220,7 +220,7 @@ func (s *Server) linkMoveTargetProvider(ctx context.Context, mv *reincarnationMo
 // only once that assignment is restored, the broker reservation moved back.
 // The caller runs it only after winning the record's CAS to failed, then
 // writes the failed agent with the previous applied config.
-func (s *Server) rollbackMove(ctx context.Context, md agentMoveDispatcher, agentID string, mv *reincarnationMove, src *store.Agent, targetUntouched bool) {
+func (s *Server) rollbackMove(ctx context.Context, md agentMoveDispatcher, agentID, reincarnationID string, mv *reincarnationMove, src *store.Agent, targetUntouched bool) {
 	cur, err := s.store.GetAgent(ctx, agentID)
 	if err != nil {
 		s.agentLifecycleLog.Error("move rollback: failed to load agent; it may be left assigned to the target broker",
@@ -230,7 +230,12 @@ func (s *Server) rollbackMove(ctx context.Context, md agentMoveDispatcher, agent
 	if targetUntouched {
 		s.agentLifecycleLog.Info("move rollback: the target broker created nothing for the agent; nothing to remove there",
 			"agent_id", agentID, "target_broker_id", mv.TargetBrokerID)
-	} else if err := rollbackMoveTarget(ctx, md, withBroker(cur, mv.TargetBrokerID), mv, src.RunID); err != nil {
+	} else if err := rollbackMoveTarget(ctx, md, withBroker(cur, mv.TargetBrokerID), mv, src.RunID, reincarnationID); isMoveMarkerMismatch(err) {
+		// The target found files for the agent that this move did not
+		// create, and removed nothing: not a rollback failure.
+		s.agentLifecycleLog.Info("move rollback: target cleanup skipped: target files not created by this move",
+			"agent_id", agentID, "reincarnation_id", reincarnationID, "target_broker_id", mv.TargetBrokerID)
+	} else if err != nil {
 		s.agentLifecycleLog.Warn("move rollback: could not remove the agent's state on the target broker; left in place",
 			"agent_id", agentID, "target_broker_id", mv.TargetBrokerID, "transfer_mode", mv.TransferMode, "error", err)
 	}
@@ -270,21 +275,24 @@ func (s *Server) rollbackMove(ctx context.Context, md agentMoveDispatcher, agent
 // the target broker. An export move sends a localOnly delete: the
 // workspace on the shared export is the agent's real one and stays. A
 // recreate move sends a files delete (never removing the branch, which
-// lives on the remote): the target confirmed it had nothing for the agent
-// before provisioning, so everything there is this move's, and a leftover
-// fresh workspace would refuse every retry. The files delete names the
-// target's run only when the target recorded one (dst's run differs from
-// srcRunID, the source's); otherwise the target resolves the agent by name
-// within the project. Nothing is ever sent to the source. dst is the agent
-// as assigned to the target.
-func rollbackMoveTarget(ctx context.Context, md agentMoveDispatcher, dst *store.Agent, mv *reincarnationMove, srcRunID string) error {
+// lives on the remote) carrying the move's reincarnation ID
+// (reincarnationID). That is safe because the broker removes only
+// directories marked by this move: the provision marks each agent
+// directory it creates, right after the absence check passed, and the
+// broker refuses (api.BrokerErrCodeMoveMarkerMismatch, removing nothing)
+// when a directory that exists is unmarked or marked by another move. The
+// files delete names the target's run only when the target recorded one
+// (dst's run differs from srcRunID, the source's); otherwise the target
+// resolves the agent by name within the project. Nothing is ever sent to
+// the source. dst is the agent as assigned to the target.
+func rollbackMoveTarget(ctx context.Context, md agentMoveDispatcher, dst *store.Agent, mv *reincarnationMove, srcRunID, reincarnationID string) error {
 	if mv.recreates() {
 		if dst.RunID == srcRunID {
 			c := *dst
 			c.RunID = ""
 			dst = &c
 		}
-		return md.DispatchAgentDeleteRecreated(ctx, dst)
+		return md.DispatchAgentDeleteRecreated(ctx, dst, reincarnationID)
 	}
 	return md.DispatchAgentDeleteLocalOnly(ctx, dst)
 }

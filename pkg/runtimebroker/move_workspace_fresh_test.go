@@ -80,7 +80,7 @@ func TestCreateAgentProvisionOnly_FreshAgentDir_Refused(t *testing.T) {
 			mgr := &freshMoveManager{err: tc.err}
 			srv, logBuf := newFreshMoveServer(mgr)
 
-			w := postMoveProvision(t, srv, agent.MoveWorkspaceFreshAgentDir)
+			w := postFreshMoveProvision(t, srv, "reincarnation-1")
 			if w.Code != http.StatusConflict {
 				t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
 			}
@@ -118,7 +118,7 @@ func TestCreateAgentProvisionOnly_FreshAgentDir_Provisions(t *testing.T) {
 	mgr := &freshMoveManager{}
 	srv, _ := newFreshMoveServer(mgr)
 
-	w := postMoveProvision(t, srv, agent.MoveWorkspaceFreshAgentDir)
+	w := postFreshMoveProvision(t, srv, "reincarnation-1")
 	if w.Code != http.StatusCreated {
 		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
 	}
@@ -133,7 +133,7 @@ func TestCreateAgentProvisionOnly_FreshAgentDir_Provisions(t *testing.T) {
 // A manager that cannot run the absence check fails closed with 409.
 func TestCreateAgentProvisionOnly_FreshAgentDir_Unsupported_Returns409(t *testing.T) {
 	srv, mgr := newTestServerWithProvisionCapture()
-	w := postMoveProvision(t, srv, agent.MoveWorkspaceFreshAgentDir)
+	w := postFreshMoveProvision(t, srv, "reincarnation-1")
 	if w.Code != http.StatusConflict {
 		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
 	}
@@ -192,6 +192,148 @@ func TestDeleteAgent_ForcedMoveRollbackWithoutRun_LeavesSibling(t *testing.T) {
 	for _, p := range []string{filepath.Join(siblingDir, "scion-agent.json"), projectFile} {
 		if _, err := os.Stat(p); err != nil {
 			t.Errorf("%s removed: %v", p, err)
+		}
+	}
+}
+
+// postFreshMoveProvision posts a forced move's provision (the fresh-agent-dir
+// expectation) with the move's reincarnation ID moveID ("" for none).
+func postFreshMoveProvision(t *testing.T, srv *Server, moveID string) *httptest.ResponseRecorder {
+	t.Helper()
+	body := fmt.Sprintf(`{
+		"name": "moved-agent",
+		"id": "agent-uuid-moved",
+		"slug": "moved-agent",
+		"projectId": "p1",
+		"provisionOnly": true,
+		"expectExistingNfsWorkspace": %q,
+		"moveReincarnationId": %q,
+		"config": {"template": "claude"}
+	}`, agent.MoveWorkspaceFreshAgentDir, moveID)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	return w
+}
+
+// A forced move's provision needs its reincarnation ID, which reaches the
+// manager; an ID without the fresh-agent-dir expectation is refused too.
+func TestCreateAgentProvisionOnly_FreshAgentDir_ReincarnationID(t *testing.T) {
+	t.Run("passed to the provision", func(t *testing.T) {
+		mgr := &freshMoveManager{}
+		srv, _ := newFreshMoveServer(mgr)
+		w := postFreshMoveProvision(t, srv, "reincarnation-1")
+		if w.Code != http.StatusCreated {
+			t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+		}
+		if mgr.lastOpts.MoveReincarnationID != "reincarnation-1" {
+			t.Fatalf("provision MoveReincarnationID = %q, want reincarnation-1", mgr.lastOpts.MoveReincarnationID)
+		}
+	})
+	t.Run("missing", func(t *testing.T) {
+		mgr := &freshMoveManager{}
+		srv, _ := newFreshMoveServer(mgr)
+		w := postFreshMoveProvision(t, srv, "")
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+		}
+		if mgr.provisionCalled || len(mgr.absentCalls) != 0 {
+			t.Fatal("nothing may run without the reincarnation ID")
+		}
+	})
+	t.Run("without the fresh-agent-dir expectation", func(t *testing.T) {
+		mgr := &freshMoveManager{}
+		srv, _ := newFreshMoveServer(mgr)
+		body := `{"name":"moved-agent","id":"agent-uuid-moved","slug":"moved-agent","projectId":"p1","provisionOnly":true,"moveReincarnationId":"reincarnation-1","config":{"template":"claude"}}`
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+		}
+		if mgr.provisionCalled {
+			t.Fatal("nothing may be provisioned")
+		}
+	})
+}
+
+// A forced move's rollback delete, through the real delete handler and
+// manager, removes the agent's directory only when it carries that move's
+// marker. An unmarked directory or another move's marker is refused with
+// 409 move_marker_mismatch, a path-free body, and nothing removed; an agent
+// with no files is a plain no-op (404). A sibling agent is never touched.
+func TestDeleteAgent_ForcedMoveRollbackNeedsMoveMarker(t *testing.T) {
+	const moveID = "reincarnation-1"
+	for _, tc := range []struct {
+		name     string
+		marker   string // "" = no marker
+		noFiles  bool
+		wantCode int
+		removed  bool
+	}{
+		{name: "marked by this move", marker: moveID, wantCode: http.StatusNoContent, removed: true},
+		{name: "unmarked", wantCode: http.StatusConflict},
+		{name: "marked by another move", marker: "reincarnation-0", wantCode: http.StatusConflict},
+		{name: "no files", noFiles: true, wantCode: http.StatusNotFound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var entries []api.AgentInfo
+			var deleted []string
+			srv, home := newProvisionDirsServer(t, &entries, &deleted)
+			var agentDir string
+			if !tc.noFiles {
+				_, agentDir = makeHubNativeMarkerProject(t, home, "proj-b", scopeProjB, "dev")
+			}
+			_, siblingDir := makeHubNativeMarkerProject(t, home, "proj-b", scopeProjB, "sib")
+			if tc.marker != "" {
+				if err := os.WriteFile(filepath.Join(agentDir, agent.MoveMarkerFile), []byte(tc.marker+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			rec := doDelete(t, srv, "dev", "deleteFiles=true&removeBranch=false&projectId="+scopeProjB+"&"+api.MoveReincarnationIDQueryParam+"="+moveID)
+			if rec.Code != tc.wantCode {
+				t.Fatalf("expected %d, got %d: %s", tc.wantCode, rec.Code, rec.Body.String())
+			}
+			if tc.wantCode == http.StatusConflict {
+				if !strings.Contains(rec.Body.String(), `"code":"`+api.BrokerErrCodeMoveMarkerMismatch+`"`) {
+					t.Fatalf("body = %s, want code %s", rec.Body.String(), api.BrokerErrCodeMoveMarkerMismatch)
+				}
+				if strings.Contains(rec.Body.String(), home) || strings.Contains(rec.Body.String(), "/") {
+					t.Fatalf("body names a path: %s", rec.Body.String())
+				}
+			}
+			if agentDir != "" {
+				_, err := os.Stat(agentDir)
+				if tc.removed && !os.IsNotExist(err) {
+					t.Errorf("agent directory %s not removed (stat err %v)", agentDir, err)
+				}
+				if !tc.removed && err != nil {
+					t.Errorf("agent directory %s removed: %v", agentDir, err)
+				}
+			}
+			if _, err := os.Stat(filepath.Join(siblingDir, "scion-agent.json")); err != nil {
+				t.Errorf("sibling agent touched: %v", err)
+			}
+		})
+	}
+}
+
+// A forced move's rollback delete must be a project-scoped files delete.
+func TestDeleteAgent_MoveReincarnationIDValidation(t *testing.T) {
+	var entries []api.AgentInfo
+	var deleted []string
+	srv, _ := newProvisionDirsServer(t, &entries, &deleted)
+	for _, q := range []string{
+		"deleteFiles=false&projectId=" + scopeProjB,
+		"deleteFiles=true&localOnly=true&projectId=" + scopeProjB,
+		"deleteFiles=true",
+	} {
+		rec := doDelete(t, srv, "dev", q+"&"+api.MoveReincarnationIDQueryParam+"=reincarnation-1")
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: expected 400, got %d: %s", q, rec.Code, rec.Body.String())
 		}
 	}
 }

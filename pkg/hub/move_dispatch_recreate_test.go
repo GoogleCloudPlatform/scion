@@ -35,11 +35,18 @@ var recreateCaps = &store.BrokerCapabilities{AgentMove: true, AgentMoveRecreate:
 func TestDispatchAgentProvisionForMove_FreshAgentDirNeedsRecreateCapability(t *testing.T) {
 	t.Run("capable broker", func(t *testing.T) {
 		d, client, agent := newMoveDispatchFixture(t, recreateCaps)
-		require.NoError(t, d.DispatchAgentProvisionForMove(context.Background(), agent, "fresh-agent-dir"))
+		require.NoError(t, d.DispatchAgentProvisionForMove(context.Background(), agent, "fresh-agent-dir", "reincarnation-1"))
 		require.NotNil(t, client.lastCreateReq)
 		assert.True(t, client.lastCreateReq.ProvisionOnly)
 		assert.False(t, client.lastCreateReq.Reprovision)
 		assert.Equal(t, "fresh-agent-dir", client.lastCreateReq.ExpectExistingNFSWorkspace)
+		assert.Equal(t, "reincarnation-1", client.lastCreateReq.MoveReincarnationID, "the provision carries the move's reincarnation ID")
+	})
+	t.Run("the reincarnation ID goes with, and only with, fresh-agent-dir", func(t *testing.T) {
+		d, client, agent := newMoveDispatchFixture(t, recreateCaps)
+		require.Error(t, d.DispatchAgentProvisionForMove(context.Background(), agent, "fresh-agent-dir", ""))
+		require.Error(t, d.DispatchAgentProvisionForMove(context.Background(), agent, "agent-dir", "reincarnation-1"))
+		assert.Nil(t, client.lastCreateReq, "nothing may be sent")
 	})
 	for name, caps := range map[string]*store.BrokerCapabilities{
 		"agentMove only":         {AgentMove: true},
@@ -48,7 +55,7 @@ func TestDispatchAgentProvisionForMove_FreshAgentDirNeedsRecreateCapability(t *t
 	} {
 		t.Run(name, func(t *testing.T) {
 			d, client, agent := newMoveDispatchFixture(t, caps)
-			err := d.DispatchAgentProvisionForMove(context.Background(), agent, "fresh-agent-dir")
+			err := d.DispatchAgentProvisionForMove(context.Background(), agent, "fresh-agent-dir", "reincarnation-1")
 			require.Error(t, err)
 			assert.True(t, errors.Is(err, errBrokerLacksAgentMoveRecreate) || errors.Is(err, errBrokerLacksAgentMove), "err = %v", err)
 			assert.Nil(t, client.lastCreateReq, "nothing may be sent")
@@ -57,7 +64,7 @@ func TestDispatchAgentProvisionForMove_FreshAgentDirNeedsRecreateCapability(t *t
 	}
 	t.Run("export expectations need only AgentMove", func(t *testing.T) {
 		d, client, agent := newMoveDispatchFixture(t, &store.BrokerCapabilities{AgentMove: true})
-		require.NoError(t, d.DispatchAgentProvisionForMove(context.Background(), agent, "agent-dir"))
+		require.NoError(t, d.DispatchAgentProvisionForMove(context.Background(), agent, "agent-dir", ""))
 		require.NotNil(t, client.lastCreateReq)
 	})
 }
@@ -70,13 +77,14 @@ func TestDispatchAgentDeleteRecreated_SendsFilesDelete(t *testing.T) {
 		t.Run("run="+runID, func(t *testing.T) {
 			d, client, agent := newMoveDispatchFixture(t, recreateCaps)
 			agent.RunID = runID
-			require.NoError(t, d.DispatchAgentDeleteRecreated(context.Background(), agent))
+			require.NoError(t, d.DispatchAgentDeleteRecreated(context.Background(), agent, "reincarnation-1"))
 			require.True(t, client.deleteCalled)
 			assert.True(t, client.lastDeleteOpts.deleteFiles)
 			assert.False(t, client.lastDeleteOpts.removeBranch, "the branch lives on the remote and is never removed")
 			assert.False(t, client.lastDeleteOpts.localOnly)
 			assert.Equal(t, runID, client.lastDeleteOpts.runID)
 			assert.Equal(t, agent.ProjectID, client.lastDeleteOpts.projectID)
+			assert.Equal(t, "reincarnation-1", client.lastDeleteOpts.moveReincarnationID, "the delete carries the move's reincarnation ID")
 			assert.Equal(t, agent.Slug, client.lastAgentID)
 		})
 	}
@@ -90,7 +98,7 @@ func TestDispatchAgentDeleteRecreated_RefusesBrokerWithoutCapability(t *testing.
 	} {
 		t.Run(name, func(t *testing.T) {
 			d, client, agent := newMoveDispatchFixture(t, caps)
-			err := d.DispatchAgentDeleteRecreated(context.Background(), agent)
+			err := d.DispatchAgentDeleteRecreated(context.Background(), agent, "reincarnation-1")
 			require.Error(t, err)
 			assert.False(t, client.deleteCalled, "no delete may reach the broker")
 		})
@@ -120,10 +128,10 @@ func TestDispatchProvisionForMove_SendBoundary(t *testing.T) {
 	ctx := context.Background()
 	const fresh = "fresh-agent-dir"
 	forMove := func(d *HTTPAgentDispatcher, a *store.Agent) error {
-		return d.DispatchAgentProvisionForMove(ctx, a, fresh)
+		return d.DispatchAgentProvisionForMove(ctx, a, fresh, "reincarnation-1")
 	}
 	direct := func(d *HTTPAgentDispatcher, a *store.Agent) error {
-		return d.dispatchProvision(ctx, a, "DispatchAgentProvisionForMove", false, fresh)
+		return d.dispatchProvision(ctx, a, "DispatchAgentProvisionForMove", false, fresh, "reincarnation-1")
 	}
 	withFixture := func(mutate func(d *HTTPAgentDispatcher, c *mockRuntimeBrokerClient, a *store.Agent)) func(t *testing.T) (*HTTPAgentDispatcher, *mockRuntimeBrokerClient, *store.Agent) {
 		return func(t *testing.T) (*HTTPAgentDispatcher, *mockRuntimeBrokerClient, *store.Agent) {
@@ -239,4 +247,18 @@ func TestDispatchProvisionForMove_SendBoundary(t *testing.T) {
 			tc.keeps(t, err)
 		})
 	}
+}
+
+// The rollback delete is never sent without the move's reincarnation ID.
+func TestDispatchAgentDeleteRecreated_RequiresReincarnationID(t *testing.T) {
+	d, client, agent := newMoveDispatchFixture(t, recreateCaps)
+	require.Error(t, d.DispatchAgentDeleteRecreated(context.Background(), agent, ""))
+	assert.False(t, client.deleteCalled, "no delete may reach the broker")
+}
+
+// The delete query names the move's reincarnation ID only when it is set.
+func TestDeleteAgentQuery_MoveReincarnationID(t *testing.T) {
+	q := deleteAgentQuery(context.Background(), "p", DeleteAgentOptions{DeleteFiles: true, MoveReincarnationID: "r 1"})
+	assert.Contains(t, q, "&moveReincarnationId=r+1")
+	assert.NotContains(t, deleteAgentQuery(context.Background(), "p", DeleteAgentOptions{DeleteFiles: true}), "moveReincarnationId")
 }

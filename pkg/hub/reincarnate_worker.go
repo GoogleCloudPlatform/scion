@@ -689,7 +689,11 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 			failAfterProvision(store.AgentReincarnationStateProvisioning, "failed to link the target broker to the project: "+err.Error())
 			return
 		}
-		if err := md.DispatchAgentProvisionForMove(ctx, agent, move.expectedNFSWorkspace()); err != nil {
+		moveMarkerID := ""
+		if move.recreates() {
+			moveMarkerID = reincarnationID
+		}
+		if err := md.DispatchAgentProvisionForMove(ctx, agent, move.expectedNFSWorkspace(), moveMarkerID); err != nil {
 			// A forced move removes the target's files only when the
 			// provision may have created them: an error marked sent that
 			// is not the target's own refusal (moveTargetUntouched).
@@ -1107,7 +1111,7 @@ func (s *Server) failMoveAndRollBack(ctx context.Context, md agentMoveDispatcher
 			"agent_id", agentID, "reincarnation_id", reincarnationID, "error", err)
 		return
 	}
-	s.rollbackMove(ctx, md, agentID, move, srcAgent, targetUntouched)
+	s.rollbackMove(ctx, md, agentID, reincarnationID, move, srcAgent, targetUntouched)
 	s.writeFailedAgent(ctx, agentID, errMsg, previous, failNow)
 	s.reconcileFailedMove(ctx, reincarnationID)
 }

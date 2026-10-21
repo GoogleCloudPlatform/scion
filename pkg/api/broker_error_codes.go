@@ -104,6 +104,12 @@ const (
 	// broker: the files there were not created by the move
 	// (ptone/scion#5441).
 	BrokerErrCodeMoveTargetNotFresh = "move_target_not_fresh"
+
+	// BrokerErrCodeMoveMarkerMismatch marks a forced move's rollback delete
+	// (MoveReincarnationIDQueryParam) that removed nothing because an agent
+	// directory on the broker exists without that move's marker: the files
+	// were not created by the move (409). The message names no host path.
+	BrokerErrCodeMoveMarkerMismatch = "move_marker_mismatch"
 )
 
 // BrokerErrDetailReason is the details key of a

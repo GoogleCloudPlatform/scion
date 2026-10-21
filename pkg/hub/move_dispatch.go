@@ -36,7 +36,10 @@ type agentMoveDispatcher interface {
 	// or agent.MoveWorkspaceProject), or, for a forced move
 	// (agent.MoveWorkspaceFreshAgentDir), that it has no files for the agent
 	// yet. A failed confirmation is a 409 from the broker and an error here.
-	DispatchAgentProvisionForMove(ctx context.Context, agent *store.Agent, expectNFSWorkspace string) error
+	// moveReincarnationID is required with agent.MoveWorkspaceFreshAgentDir
+	// (the broker marks the agent directory it creates with it) and must be
+	// "" otherwise.
+	DispatchAgentProvisionForMove(ctx context.Context, agent *store.Agent, expectNFSWorkspace, moveReincarnationID string) error
 	// DispatchAgentDeleteLocalOnly removes the agent's state on
 	// agent.RuntimeBrokerID only (container, broker-local agent directory
 	// and home), never its files on the NFS export or its branch. It is
@@ -49,8 +52,11 @@ type agentMoveDispatcher interface {
 	// It names the agent's project and, when the broker recorded one, its
 	// run. It is sent only to a broker advertising AgentMoveRecreate, which
 	// confirmed it had no files for the agent before provisioning, so
-	// everything it removes was created by the move.
-	DispatchAgentDeleteRecreated(ctx context.Context, agent *store.Agent) error
+	// everything it removes was created by the move. It carries the move's
+	// reincarnation ID: the broker removes the agent's directories only when
+	// every one that exists carries that move's marker, and otherwise
+	// answers 409 api.BrokerErrCodeMoveMarkerMismatch and removes nothing.
+	DispatchAgentDeleteRecreated(ctx context.Context, agent *store.Agent, moveReincarnationID string) error
 }
 
 var _ agentMoveDispatcher = (*HTTPAgentDispatcher)(nil)
@@ -109,7 +115,7 @@ func (d *HTTPAgentDispatcher) requireMoveCapability(ctx context.Context, agent *
 }
 
 // DispatchAgentProvisionForMove implements agentMoveDispatcher.
-func (d *HTTPAgentDispatcher) DispatchAgentProvisionForMove(ctx context.Context, agent *store.Agent, expectNFSWorkspace string) error {
+func (d *HTTPAgentDispatcher) DispatchAgentProvisionForMove(ctx context.Context, agent *store.Agent, expectNFSWorkspace, moveReincarnationID string) error {
 	if expectNFSWorkspace == "" {
 		return errors.New("DispatchAgentProvisionForMove: the expected NFS workspace is required")
 	}
@@ -120,7 +126,10 @@ func (d *HTTPAgentDispatcher) DispatchAgentProvisionForMove(ctx context.Context,
 	if err := d.requireMoveCapability(ctx, agent, expectNFSWorkspace == agentpkg.MoveWorkspaceFreshAgentDir); err != nil {
 		return err
 	}
-	return d.dispatchProvision(ctx, agent, "DispatchAgentProvisionForMove", false, expectNFSWorkspace)
+	if (moveReincarnationID != "") != (expectNFSWorkspace == agentpkg.MoveWorkspaceFreshAgentDir) {
+		return errors.New("DispatchAgentProvisionForMove: the move reincarnation ID goes with, and only with, the fresh-agent-dir expectation")
+	}
+	return d.dispatchProvision(ctx, agent, "DispatchAgentProvisionForMove", false, expectNFSWorkspace, moveReincarnationID)
 }
 
 // DispatchAgentDeleteLocalOnly implements agentMoveDispatcher.
@@ -170,9 +179,12 @@ func (d *HTTPAgentDispatcher) DispatchAgentDeleteLocalOnly(ctx context.Context, 
 }
 
 // DispatchAgentDeleteRecreated implements agentMoveDispatcher.
-func (d *HTTPAgentDispatcher) DispatchAgentDeleteRecreated(ctx context.Context, agent *store.Agent) error {
+func (d *HTTPAgentDispatcher) DispatchAgentDeleteRecreated(ctx context.Context, agent *store.Agent, moveReincarnationID string) error {
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
+	}
+	if moveReincarnationID == "" {
+		return errors.New("DispatchAgentDeleteRecreated: the move reincarnation ID is required")
 	}
 	// Flat placement backstop, as for the localOnly delete.
 	if err := d.placementBackstop(ctx, agent); err != nil {
@@ -194,9 +206,10 @@ func (d *HTTPAgentDispatcher) DispatchAgentDeleteRecreated(ctx context.Context, 
 	// Without a run the broker resolves the agent by name within the
 	// project, which on this broker can only be the agent the move created.
 	err = d.client.DeleteAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, DeleteAgentOptions{
-		DeleteFiles:  true,
-		RemoveBranch: false,
-		RunID:        agent.RunID,
+		DeleteFiles:         true,
+		RemoveBranch:        false,
+		RunID:               agent.RunID,
+		MoveReincarnationID: moveReincarnationID,
 	})
 	if errors.Is(err, ErrLifecycleDeferred) {
 		return fmt.Errorf("forced move rollback delete not supported for a cross-node broker: %w", err)
@@ -221,4 +234,13 @@ func moveTargetUntouched(err error) bool {
 	var se *brokerStatusError
 	return errors.As(err, &se) && se != nil && se.StatusCode == http.StatusConflict &&
 		se.brokerErrorCode() == api.BrokerErrCodeMoveTargetNotFresh
+}
+
+// isMoveMarkerMismatch reports whether err is the broker's refusal of a
+// forced move's rollback delete because the agent's files there were not
+// created by the move (a 409 with exactly api.BrokerErrCodeMoveMarkerMismatch).
+func isMoveMarkerMismatch(err error) bool {
+	var se *brokerStatusError
+	return errors.As(err, &se) && se != nil && se.StatusCode == http.StatusConflict &&
+		se.brokerErrorCode() == api.BrokerErrCodeMoveMarkerMismatch
 }

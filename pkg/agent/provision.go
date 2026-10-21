@@ -584,6 +584,9 @@ func buildProvisionContext(ctx context.Context, opts api.StartOptions) (context.
 	if opts.FreshProvision {
 		ctx = api.ContextWithFreshProvision(ctx)
 	}
+	if opts.MoveReincarnationID != "" {
+		ctx = withMoveReincarnationID(ctx, opts.MoveReincarnationID)
+	}
 	if opts.SharedWorkspace {
 		ctx = api.ContextWithSharedWorkspace(ctx)
 	}
@@ -951,6 +954,18 @@ func reprovisionEmptyPerAgentPreflight(projectDir, agentName string, rt runtime.
 }
 
 func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
+	// A forced move's provision never touches an agent directory it did not
+	// create: an existing one (even an empty leftover that GetAgent would
+	// clear as stale) refuses the provision before anything runs.
+	if opts.MoveReincarnationID != "" {
+		agentDir, err := provisionAgentStateDir(ctx, opts)
+		if err != nil {
+			return nil, fmt.Errorf("%w: resolve the agent directory: %v", ErrMoveWorkspaceUnconfirmed, err)
+		}
+		if err := checkMovePathAbsent(agentDir); err != nil {
+			return nil, err
+		}
+	}
 	ctx = m.withWorkspaceLock(ctx)
 	ctx, inlineCfg := buildProvisionContext(ctx, opts)
 	agentDir, agentHome, _, cfg, err := GetAgent(ctx, opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.ProjectPath, opts.Profile, "created", opts.Branch, opts.Workspace, inlineCfg)
@@ -1558,6 +1573,12 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	if err != nil {
 		return "", "", nil, fmt.Errorf("failed to create agent directory: %w", err)
 	}
+	// A forced move never provisions into an agent directory it did not
+	// create.
+	moveID := moveReincarnationIDFrom(ctx)
+	if moveID != "" && !newAgentDir {
+		return "", "", nil, fmt.Errorf("%w: the agent directory already exists", ErrMoveWorkspacePresent)
+	}
 	newAgentHome := false
 	newAgentHomeParent := false
 	if newAgentDir {
@@ -1582,6 +1603,16 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 				}
 			}
 		}()
+	}
+	// A forced move's provision marks the agent directory it created as
+	// the move's before anything else is written there (a failed write
+	// fails the provision, and the deferred cleanup above removes the
+	// directory); a rollback delete removes only directories marked with
+	// the move's reincarnation ID (CheckMoveMarkers).
+	if moveID != "" {
+		if err := writeMoveMarker(agentDir, moveID); err != nil {
+			return "", "", nil, fmt.Errorf("failed to write the move marker: %w", err)
+		}
 	}
 	if err := os.MkdirAll(agentDir, 0755); err != nil {
 		return "", "", nil, fmt.Errorf("failed to create agent directory: %w", err)

@@ -1580,10 +1580,17 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// config instead of reusing what's persisted — see Manager.Reprovision.
 		var cfg *api.ScionConfig
 		var err error
+		if (req.MoveReincarnationID != "") != (req.ExpectExistingNFSWorkspace == agent.MoveWorkspaceFreshAgentDir) || req.Reprovision && req.MoveReincarnationID != "" {
+			markAttemptFailed(http.StatusBadRequest, "invalid forced move provision")
+			BadRequest(w, "a forced move's provision needs both the fresh-agent-dir expectation and the move reincarnation ID, on a provision that is not a reprovision")
+			return
+		}
 		if req.ExpectExistingNFSWorkspace == agent.MoveWorkspaceFreshAgentDir {
 			// A forced move recreates the workspace here: nothing for the
 			// agent may exist on this broker yet, so provision never adopts
-			// files it did not create.
+			// files it did not create. The provision marks the directory it
+			// creates with the move's reincarnation ID.
+			opts.MoveReincarnationID = req.MoveReincarnationID
 			checker, ok := sc.Manager.(moveWorkspaceAbsenceChecker)
 			if !ok {
 				markAttemptFailed(http.StatusConflict, "moved agent workspace not confirmed")
@@ -2498,6 +2505,16 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	if localOnly {
 		removeBranch = false
 	}
+	// moveReincarnationID marks a forced move's rollback delete: it removes
+	// nothing unless every agent directory that exists carries that move's
+	// marker (see the check after the target is resolved).
+	moveReincarnationID := query.Get(api.MoveReincarnationIDQueryParam)
+	if moveReincarnationID != "" && (!deleteFiles || localOnly || softDelete || projectID == "" ||
+		query.Get(api.PurgeRetainedQueryParam) == "true") {
+		span.SetStatus(codes.Error, "invalid forced move rollback delete")
+		ValidationError(w, "moveReincarnationId needs deleteFiles and projectId, without localOnly, softDelete or purgeRetained", nil)
+		return
+	}
 	// purgeRetained removes the retained files of a soft-deleted agent once
 	// the soft-delete retention window has passed (ptone/scion#4744). It is
 	// a files delete, never a soft one, and it removes nothing unless the
@@ -2691,6 +2708,30 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 			"agent_id", id, "project_id", ownedProject, "error", ownErr)
 		NotFound(w, "Agent")
 		return
+	}
+
+	// A forced move's rollback delete removes nothing unless every agent
+	// directory it would remove that exists carries that move's marker,
+	// checked under the files lock taken above. Anything else was not
+	// created by the move: 409, with a fixed message (the paths are
+	// logged here only).
+	if moveReincarnationID != "" {
+		checker, ok := target.mgr.(moveMarkerChecker)
+		var paths []string
+		chkErr := errors.New("this broker cannot check move markers")
+		if ok && projectPath != "" {
+			paths, chkErr = checker.CheckMoveMarkers(ctx, projectPath, agentProjectID, target.name, moveReincarnationID)
+		} else if ok {
+			chkErr = errors.New("no project path to check the move markers in")
+		}
+		if chkErr != nil {
+			s.agentLifecycleLog.Warn("Agent delete: refusing a forced move's rollback delete of files the move did not create",
+				"agent_id", id, "project_id", agentProjectID, "paths", paths, "error", chkErr)
+			span.SetStatus(codes.Error, "move marker mismatch")
+			writeError(w, http.StatusConflict, api.BrokerErrCodeMoveMarkerMismatch,
+				"Failed to delete agent: its files on this broker were not created by this move; nothing was removed", nil)
+			return
+		}
 	}
 
 	// Wake any local launch waiting on this agent (design §3.8.1): purely a
@@ -7643,6 +7684,15 @@ type moveWorkspaceAbsenceChecker interface {
 }
 
 var _ moveWorkspaceAbsenceChecker = (*agent.AgentManager)(nil)
+
+// moveMarkerChecker is implemented by managers that can confirm a forced
+// move's marker on the agent's directories before its rollback delete
+// (agent.AgentManager).
+type moveMarkerChecker interface {
+	CheckMoveMarkers(ctx context.Context, projectPath, projectID, agentName, moveID string) ([]string, error)
+}
+
+var _ moveMarkerChecker = (*agent.AgentManager)(nil)
 
 // errAgentIdentityUnknown means a runtime process restart dropped the
 // in-memory record a runtime needs to tell "not found" apart from "exists,

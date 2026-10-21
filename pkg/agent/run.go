@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -2112,6 +2113,22 @@ authDone:
 					agentEnv = withEnvValue(agentEnv, "SCION_WORKSPACE_MODE", string(store.SharingModeSharedPlain))
 				}
 			}
+			// The agent's own directory on the export, when this start uses
+			// one, and whether it existed before this start: a forced
+			// move's start marks it as the move's only when it creates it
+			// (markMoveExportAgentDir).
+			ownDirName := emptyAgentDirName
+			if ownDirName == "" && agentDirName != "" && mount.PVClaimName != "" {
+				ownDirName = agentDirName
+			}
+			ownDirPath, ownDirExisted := "", true
+			if ownDirName != "" {
+				if p, perr := nfsOwnAgentDirPath(resolvedWorkspace, ownDirName); perr == nil {
+					ownDirPath = p
+					_, statErr := os.Lstat(p)
+					ownDirExisted = !errors.Is(statErr, fs.ErrNotExist)
+				}
+			}
 			if emptyAgentDirName != "" {
 				// Empty-per-agent: only the agent's own directory is ever
 				// mounted, never the project's workspace path resolved
@@ -2132,6 +2149,11 @@ authDone:
 			}
 			if err != nil {
 				return nil, err
+			}
+			if ownDirPath != "" {
+				if err := markMoveExportAgentDir(agentDir, ownDirPath, ownDirExisted); err != nil {
+					return nil, err
+				}
 			}
 			if nfsAgentDirName != "" && !nfsAgentDirEmpty {
 				recordNFSAgentDir(agentDir, opts.Name)

@@ -321,6 +321,11 @@ type CreateAgentRequest struct {
 	// recreated, and the broker refuses with 409 when it already has any
 	// directory for the agent.
 	ExpectExistingNFSWorkspace string `json:"expectExistingNfsWorkspace,omitempty"`
+	// MoveReincarnationID, required with ExpectExistingNFSWorkspace
+	// "fresh-agent-dir" and refused otherwise, is the forced move's
+	// reincarnation ID: the provision writes it into the agent directory it
+	// creates as the move marker (agent.MoveMarkerFile).
+	MoveReincarnationID string `json:"moveReincarnationId,omitempty"`
 	// ProjectPath is the local filesystem path to the project on this runtime broker.
 	// This is provided by the Hub from the project provider record.
 	ProjectPath string `json:"projectPath,omitempty"`

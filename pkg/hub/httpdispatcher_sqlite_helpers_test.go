@@ -166,6 +166,7 @@ type mockRuntimeBrokerClient struct {
 		runID                     string
 		notAfter                  time.Time
 		projectID                 string
+		moveReincarnationID       string
 	}
 	returnErr            error
 	cleanupErr           error
@@ -411,6 +412,7 @@ func (m *mockRuntimeBrokerClient) DeleteAgent(ctx context.Context, brokerID, bro
 	m.lastDeleteOpts.notAfter = opts.NotAfter
 	m.lastDeleteOpts.localOnly = opts.LocalOnly
 	m.lastDeleteOpts.projectID = projectID
+	m.lastDeleteOpts.moveReincarnationID = opts.MoveReincarnationID
 	return m.returnErr
 }
 
