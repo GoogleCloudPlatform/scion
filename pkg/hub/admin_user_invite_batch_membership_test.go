@@ -340,8 +340,11 @@ func (h *hookedMemberSetter) SetMemberRoles(ctx context.Context, req SetMemberRo
 	return h.inner.SetMemberRoles(ctx, req)
 }
 
-func batchActor(u *store.User) UserIdentity {
-	return NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, string(ClientTypeWeb))
+// batchActor returns the identity and a context carrying it with an
+// interactive credential, as a request does, for direct runInviteBatch
+// calls.
+func batchActor(u *store.User) (context.Context, UserIdentity) {
+	return mmrServiceCtx(u.ID, u.Email), mmrServiceIdentity(u.ID, u.Email)
 }
 
 // TestInviteBatch_StopClassDenialStopsProject: the caller loses authority
@@ -349,7 +352,7 @@ func batchActor(u *store.User) UserIdentity {
 // code, and the later addresses get the same code without another call.
 func TestInviteBatch_StopClassDenialStopsProject(t *testing.T) {
 	f := newBatchFixture(t)
-	ctx := context.Background()
+	ctx, actor := batchActor(f.admin)
 	adminBindings := mmrBindingsFor(t, f.store, store.RoleBindingPrincipalUser, f.admin.ID, f.projectID)
 	require.NotEmpty(t, adminBindings)
 	setter := &hookedMemberSetter{inner: f.srv.membershipService, before: func(call int, _ SetMemberRolesRequest) {
@@ -361,7 +364,7 @@ func TestInviteBatch_StopClassDenialStopsProject(t *testing.T) {
 	}}
 	entries := []inviteBatchEntry{{raw: "stop-a@example.com"}, {raw: "stop-b@example.com"}, {raw: "stop-c@example.com"}, {raw: "stop-d@example.com"}}
 	projects := []inviteBatchProject{{ProjectID: f.projectID, RoleDefinitionIDs: []string{f.memberRD.ID}}}
-	run := f.srv.runInviteBatch(ctx, batchActor(f.admin), "b-stop", f.srv.validateInviteBatchAddresses(f.admin.ID, entries), projects, setter, true)
+	run := f.srv.runInviteBatch(ctx, actor, "b-stop", f.srv.validateInviteBatchAddresses(f.admin.ID, entries), projects, setter, true)
 
 	assert.Equal(t, inviteBatchMembershipApplied, run.results[0].Memberships[0].Status)
 	second := run.results[1].Memberships[0]
@@ -381,7 +384,7 @@ func TestInviteBatch_StopClassDenialStopsProject(t *testing.T) {
 // still attempted and applied.
 func TestInviteBatch_ContinueClassDenialDoesNotStop(t *testing.T) {
 	f := newBatchFixture(t)
-	ctx := context.Background()
+	ctx, actor := batchActor(f.owner)
 	setter := &hookedMemberSetter{inner: f.srv.membershipService, before: func(call int, req SetMemberRolesRequest) {
 		if call == 1 {
 			require.NoError(t, f.store.DeleteUser(ctx, req.PrincipalID))
@@ -389,7 +392,7 @@ func TestInviteBatch_ContinueClassDenialDoesNotStop(t *testing.T) {
 	}}
 	entries := []inviteBatchEntry{{raw: "gone@example.com"}, {raw: "stays@example.com"}}
 	projects := []inviteBatchProject{{ProjectID: f.projectID, RoleDefinitionIDs: []string{f.memberRD.ID}}}
-	run := f.srv.runInviteBatch(ctx, batchActor(f.owner), "b-cont", f.srv.validateInviteBatchAddresses(f.owner.ID, entries), projects, setter, true)
+	run := f.srv.runInviteBatch(ctx, actor, "b-cont", f.srv.validateInviteBatchAddresses(f.owner.ID, entries), projects, setter, true)
 
 	first := run.results[0].Memberships[0]
 	assert.Equal(t, inviteBatchMembershipFailed, first.Status)

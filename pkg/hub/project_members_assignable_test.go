@@ -385,10 +385,12 @@ func TestInviteBatchPreflight_ConsistentWithPut(t *testing.T) {
 
 	sawPass, sawRefused := false, false
 	for _, a := range actors {
-		actor := NewAuthenticatedUser(a.user.ID, a.user.Email, a.user.DisplayName, a.user.Role, string(ClientTypeWeb))
+		// The context carries an interactive credential, as a request does.
+		ctx := mmrServiceCtx(a.user.ID, a.user.Email)
+		actor := mmrServiceIdentity(a.user.ID, a.user.Email)
 		for _, rd := range fixtureRoles {
 			t.Run(a.name+"/"+rd.Name, func(t *testing.T) {
-				refusals, err := f.srv.inviteBatchPreflight(context.Background(), actor,
+				refusals, err := f.srv.inviteBatchPreflight(ctx, actor,
 					[]inviteBatchProject{{ProjectID: f.projectID, RoleDefinitionIDs: []string{rd.ID}}})
 				require.NoError(t, err)
 				require.LessOrEqual(t, len(refusals), 1)
