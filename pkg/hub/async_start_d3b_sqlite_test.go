@@ -260,8 +260,9 @@ func (s beginStartLaunchFailStore) BeginStartLaunch(context.Context, string, str
 // BeginStartLaunch fails after the run was begun, nothing was sent, so the
 // error is errStartRunNotBegun: the claim releases (startReleased) and the
 // start counts as not happened (startDidNotHappen), for a start and for a
-// restart's start leg. A row a delete holds stays with the delete engine:
-// startDidNotHappen excludes store.ErrDeleteInProgress.
+// restart's start leg. A delete-held row's error (ErrLaunchInvalidPhase
+// wrapping store.ErrDeleteInProgress) is classified exactly as before the
+// wrap.
 func TestAsyncStartDispatch_BeginStartLaunchFailureDidNotHappen(t *testing.T) {
 	for _, kind := range []string{store.LaunchKindStart, store.LaunchKindRestart} {
 		t.Run(kind, func(t *testing.T) {
@@ -277,8 +278,11 @@ func TestAsyncStartDispatch_BeginStartLaunchFailureDidNotHappen(t *testing.T) {
 			assert.Empty(t, f.client.sent(), "nothing was sent")
 		})
 	}
-	held := fmt.Errorf("%w: %w", errStartRunNotBegun, fmt.Errorf("%w: %w", ErrLaunchInvalidPhase, store.ErrDeleteInProgress))
-	assert.False(t, startDidNotHappen(held), "a delete-held row stays with the delete engine")
+	bare := fmt.Errorf("%w: %w", ErrLaunchInvalidPhase, store.ErrDeleteInProgress)
+	held := fmt.Errorf("%w: %w", errStartRunNotBegun, bare)
+	assert.Equal(t, startDidNotHappen(bare), startDidNotHappen(held), "the wrap does not change a delete-held row's classification")
+	assert.Equal(t, startOutcomeOf(bare), startOutcomeOf(held))
+	assert.Equal(t, startReleased, startOutcomeOf(held))
 }
 
 // TestDispatchAgentStart_AttachesAgentID pins that the plain start entry
@@ -998,6 +1002,28 @@ func TestAsyncStart_ReapedProvisionedStartRests(t *testing.T) {
 	last := pub[len(pub)-1]
 	assert.Equal(t, got.Message, last.Message, "watchers get the settled row, not the reaped copy")
 	assert.Equal(t, store.RunIntentStopped, last.RunIntent)
+}
+
+// TestAsyncStart_FailedReportPublishesOnce pins the report path's
+// publish-once rule (merge review R2): an applied failed report whose
+// start launch the run-intent hook settles publishes exactly one status
+// event for the agent, the settled row (settleFailedProvisionedStart
+// publishes it), not also the pre-settle row.
+func TestAsyncStart_FailedReportPublishesOnce(t *testing.T) {
+	f, _ := newAsyncStartFixture(t)
+	a := newD9Agent(t, f, "d9-pubonce", d9Prior{"created memory", state.PhaseCreated, state.PhaseCreated})
+	code, body := lifecycleWithBody(t, f, a.ID, "start", map[string]bool{"acceptAsyncLaunch": true})
+	require.Equal(t, http.StatusOK, code, body)
+	row := getAgent(t, f.s, a.ID)
+	events := recordStatusEvents(t, f.srv)
+	rec := postLaunchReport(t, f.srv, f.brokerID, a.ID, f.brokerID, AgentLaunchReport{
+		LaunchID: row.LaunchID, InstanceID: "inst-1", State: "failed", ErrorCode: "boom", Step: "pull", Message: "image pull failed",
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	pub := events.forAgent(a.ID)
+	require.Len(t, pub, 1, "exactly one status event for the settled report")
+	assert.Equal(t, store.RunIntentStopped, pub[0].RunIntent, "the event carries the settled row")
+	assert.Equal(t, "Start failed: pull: image pull failed. "+provisionedRestingNote, pub[0].Message)
 }
 
 // TestAsyncStart_FailedReportWithoutMessageUsesLaunchError pins the

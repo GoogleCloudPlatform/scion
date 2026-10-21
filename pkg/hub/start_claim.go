@@ -914,9 +914,11 @@ var errStartedStatusWrite = errors.New("agent started but its status could not b
 
 // errStartRunNotBegun marks a start dispatch whose run could not be begun
 // (beginRun: no token generator, the agent token could not be signed or its
-// credential recorded, or the run ID could not be recorded), wrapped around
-// that error. Nothing was sent to the broker, so for the claim the start is
-// released, not unconfirmed.
+// credential recorded, or the run ID could not be recorded), or whose
+// asynchronous launch could not be begun after the run was
+// (BeginStartLaunch failed; ptone/scion#4669), wrapped around that error.
+// Nothing was sent to the broker, so for the claim the start is released,
+// not unconfirmed.
 var errStartRunNotBegun = errors.New("start not sent: its run could not be begun")
 
 // startQuotaError is a start refused because the broker is at capacity (or
