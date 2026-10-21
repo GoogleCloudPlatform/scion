@@ -257,7 +257,7 @@ func (s beginStartLaunchFailStore) BeginStartLaunch(context.Context, string, str
 }
 
 // TestAsyncStartDispatch_BeginStartLaunchFailureDidNotHappen pins the
-// merge-forward review finding (bfl-p3-dev-12, F6 consistency): when
+// rule of errStartRunNotBegun (as for a run not begun): when
 // BeginStartLaunch fails after the run was begun, nothing was sent, so the
 // error is errStartRunNotBegun: the claim releases (startReleased) and the
 // start counts as not happened (startDidNotHappen), for a start and for a
@@ -282,7 +282,6 @@ func TestAsyncStartDispatch_BeginStartLaunchFailureDidNotHappen(t *testing.T) {
 	}
 	// A delete-held refusal still reverts the minted run, which never
 	// launched, so a delete never targets a run the runtime did not hold
-	// (agent-delete-lead, owner review F1 declined).
 	t.Run("delete held reverts the minted run", func(t *testing.T) {
 		f := newAsyncDispatchFixture(t, "asd-blfail-held", string(state.PhaseStopped), true, nil, asyncOn)
 		before := getAgent(t, f.s, f.agent.ID).RunID
@@ -315,8 +314,8 @@ func (d *deleteHeldStartDispatcher) DispatchAgentStart(_ context.Context, a *sto
 	return fmt.Errorf("%w: %w: %w", ErrLaunchInvalidPhase, store.ErrInvalidPhase, store.ErrDeleteInProgress)
 }
 
-// TestStartDidNotHappen_DeleteHeldKeepsIntent pins the P3.3-c-acked rule
-// (merge review R1, owner O2): a start refused because a delete holds the
+// TestStartDidNotHappen_DeleteHeldKeepsIntent pins the delete-hold rule:
+// a start refused because a delete holds the
 // row (ErrLaunchInvalidPhase wrapping store.ErrDeleteInProgress) leaves the
 // run intent to the delete engine. A provisioned agent's start runs no
 // provisioned settle (intent unchanged, no message), and a queued-stop
@@ -358,7 +357,7 @@ func TestStartDidNotHappen_DeleteHeldKeepsIntent(t *testing.T) {
 }
 
 // TestAsyncStart_BeginStartLaunchFailureSettlesAtStartAgentCore pins the
-// owner review's O2 at the start path: an async start whose BeginStartLaunch
+// the same rule at the start path: an async start whose BeginStartLaunch
 // fails after the run was begun (nothing was sent) is a start that did not
 // happen, so startAgentCore settles it as it settles any refused start: a
 // provisioned agent (a created memory row) goes back to rest (intent
@@ -422,7 +421,7 @@ func TestAsyncStart_BeginStartLaunchFailureSettlesAtStartAgentCore(t *testing.T)
 }
 
 // TestDispatchAgentStart_AttachesAgentID pins that the plain start entry
-// point sends the agent ID (R1: on every start, sync or async).
+// point sends the agent ID (on every start, sync or async).
 func TestDispatchAgentStart_AttachesAgentID(t *testing.T) {
 	f := newAsyncDispatchFixture(t, "asd-plain", string(state.PhaseStopped), true, nil, asyncOn)
 	require.NoError(t, f.d.DispatchAgentStart(context.Background(), f.agent, "", false))
@@ -747,7 +746,7 @@ func TestAsyncStart_LifecycleRestartAccepted(t *testing.T) {
 // TestAsyncStart_CreateEndpointAccepted pins design D-a's opt-in on the
 // create endpoint (handleExistingAgent): the released CLIs' acceptAsyncLaunch
 // makes the suspended branch (resume), the resume-in-place branch and the
-// provisioned branch (for an error row that remembers created, R3) answer
+// provisioned branch (for an error row that remembers created, design R3) answer
 // 200 with the launching agent. The first start of a created agent (a
 // counted phase, so the dispatch writes no starting) stays synchronous
 // (TestAsyncStart_CreateEndpointCreatedStaysSync).
@@ -788,7 +787,7 @@ func TestAsyncStart_CreateEndpointAccepted(t *testing.T) {
 	}
 }
 
-// TestAsyncStart_DeleteWonDuringAcceptedStart pins review r1 O3: a delete
+// TestAsyncStart_DeleteWonDuringAcceptedStart pins that a delete
 // that claims or removes the row while an asynchronous start is being
 // accepted answers 409 delete_in_progress, as a synchronous start does, on
 // lifecycle start, lifecycle restart and the create endpoint; with no
@@ -884,10 +883,10 @@ func recordStatusEvents(t *testing.T, srv *Server) *statusRecorder {
 	return r
 }
 
-// TestAsyncStart_AcceptedPublishesLaunchingAgent pins review r1 O4: an
+// TestAsyncStart_AcceptedPublishesLaunchingAgent pins that an
 // accepted start publishes the re-read row (phase starting, its active
 // launch) at once, so watchers do not wait for the launch's first report;
-// and review r2 item 3: a row a delete has claimed meanwhile publishes
+// that a row a delete has claimed meanwhile publishes
 // nothing.
 func TestAsyncStart_AcceptedPublishesLaunchingAgent(t *testing.T) {
 	f, d := newAsyncStartFixture(t)
@@ -910,8 +909,7 @@ func TestAsyncStart_AcceptedPublishesLaunchingAgent(t *testing.T) {
 	assert.Empty(t, rec.forAgent(held.ID), "a delete-held row publishes nothing on acceptance")
 }
 
-// TestAsyncStart_HandoffSetsContainerStarting pins review r1 N1 and r3
-// (ptone/scion#5266): a start that supersedes a queued stop and is handed
+// TestAsyncStart_HandoffSetsContainerStarting pins ptone/scion#5266: a start that supersedes a queued stop and is handed
 // off to an asynchronous launch clears the queued-stop notice and marks the
 // container starting (not running, and not stop_queued).
 func TestAsyncStart_HandoffSetsContainerStarting(t *testing.T) {
@@ -1115,7 +1113,7 @@ func reapAsyncStart(t *testing.T, f *reconcileFixture, d *asyncHubDispatcher, a 
 }
 
 // TestAsyncStart_ReapedProvisionedStartRests pins the reaper side of the
-// D-c run-intent hook, and review pm R2: a retry from a created memory row
+// D-c run-intent hook, and that a retry from a created memory row
 // whose previous async attempt failed (so the row carries that attempt's
 // "Start failed" message) and which the reaper times out returns the agent
 // to rest with a message naming the timeout, exactly once, not nesting the
@@ -1141,7 +1139,7 @@ func TestAsyncStart_ReapedProvisionedStartRests(t *testing.T) {
 }
 
 // TestAsyncStart_FailedReportPublishesOnce pins the report path's
-// publish-once rule (merge review R2): an applied failed report whose
+// publish-once rule: an applied failed report whose
 // start launch the run-intent hook settles publishes exactly one status
 // event for the agent, the settled row (settleFailedProvisionedStart
 // publishes it), not also the pre-settle row.
@@ -1183,7 +1181,7 @@ func (s *newerIntentOnRevertStore) RevertRunIntent(ctx context.Context, agentID 
 }
 
 // TestAsyncStart_FailedReportLostSettlePublishesOnce pins the other side of
-// the report path's publish-once rule (owner review R1(b)): when the
+// the report path's publish-once rule: when the
 // settle's revert loses (a newer start recorded its intent after the
 // report's write), the handler publishes exactly one event, the store's
 // updated row, and the newer intent is kept.
@@ -1214,7 +1212,7 @@ func TestAsyncStart_FailedReportLostSettlePublishesOnce(t *testing.T) {
 }
 
 // TestAsyncStart_ReapedProvisionedStartPublishesOnce pins the reaper's
-// publish-once rule (owner review R1(c)): a reaper end of a provisioned
+// publish-once rule: a reaper end of a provisioned
 // start launch that the hook settles publishes exactly one event for the
 // agent, the settled row.
 func TestAsyncStart_ReapedProvisionedStartPublishesOnce(t *testing.T) {
@@ -1235,7 +1233,7 @@ func TestAsyncStart_ReapedProvisionedStartPublishesOnce(t *testing.T) {
 }
 
 // TestAsyncStart_FailedReportWithoutMessageUsesLaunchError pins the
-// fallback (review pm O3): a failed report with no step and no message
+// fallback: a failed report with no step and no message
 // leaves "Start failed: <its launch error>. <note>".
 func TestAsyncStart_FailedReportWithoutMessageUsesLaunchError(t *testing.T) {
 	f, _ := newAsyncStartFixture(t)
@@ -1245,7 +1243,7 @@ func TestAsyncStart_FailedReportWithoutMessageUsesLaunchError(t *testing.T) {
 	assert.Equal(t, "Start failed: boom. "+provisionedRestingNote, got.Message, "the launch error names the failure")
 }
 
-// TestAsyncStart_LateFailedReportAfterReap pins review pm R1 and O1: a
+// TestAsyncStart_LateFailedReportAfterReap pins that a
 // failed report that arrives after the reaper ended the start launch (the
 // store refines the ended launch and answers applied) never settles the
 // run intent again, so a newer start's intent is kept; while the reap's
@@ -1308,7 +1306,7 @@ func TestAsyncStart_LateFailedReportAfterReap(t *testing.T) {
 	})
 }
 
-// TestStartLaunchFailureMessage_OldShapedMessage pins review pm-2 item 2: a
+// TestStartLaunchFailureMessage_OldShapedMessage pins that a
 // failed end that left an older failure message (already in the shape) in
 // place names its launch error, never nesting the old message.
 func TestStartLaunchFailureMessage_OldShapedMessage(t *testing.T) {
@@ -1319,7 +1317,7 @@ func TestStartLaunchFailureMessage_OldShapedMessage(t *testing.T) {
 	assert.Equal(t, "Start failed: boom. "+provisionedRestingNote, startLaunchFailureMessage(a), "an old shaped message is not nested")
 	a.Message = "pull: image pull failed."
 	assert.Equal(t, "Start failed: pull: image pull failed. "+provisionedRestingNote, startLaunchFailureMessage(a))
-	// Review pm R2: a reaper end names its launch error, whatever message
+	// A reaper end names its launch error, whatever message
 	// the row carries (here a broker progress message).
 	reaped := &store.Agent{LaunchEndReason: store.LaunchEndReasonTimedOut, LaunchError: store.LaunchErrorLaunchTimeout, Message: "pulling image"}
 	assert.Equal(t, "Start failed: "+store.LaunchErrorLaunchTimeout+". "+provisionedRestingNote, startLaunchFailureMessage(reaped), "a reaper end names its launch error, not the row's message")

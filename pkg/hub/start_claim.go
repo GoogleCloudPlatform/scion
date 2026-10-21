@@ -727,7 +727,7 @@ func (s *Server) publishAgentStatusByID(ctx context.Context, agentID string) {
 // store.ErrDeleteInProgress (for example ErrLaunchInvalidPhase from a launch
 // begin that found the row delete-held): a delete-held row's run intent is
 // the delete engine's, so no provisioned settle or queued-stop revert may
-// write it (merge review; acked by the P3.3-c owner).
+// write it.
 func startDidNotHappen(err error) bool {
 	if err == nil || errors.Is(err, errStartedStatusWrite) || errors.Is(err, errStartClaimLost) ||
 		errors.Is(err, store.ErrDeleteInProgress) {
@@ -835,7 +835,7 @@ func startLaunchFailureMessage(a *store.Agent) string {
 
 // reapplyStartLaunchFailureMessage restores the failure message shape after
 // a failed report refined an already-ended provisioned start launch (the
-// reaper ended it first; review O1): the refine wrote the broker's detail
+// reaper ended it first): the refine wrote the broker's detail
 // as the message, so it is rewritten as "Start failed: <detail>. <note>"
 // with a narrow message write, no intent change. Only while the run intent
 // is still stopped (the reap's settle won and nothing started since) and

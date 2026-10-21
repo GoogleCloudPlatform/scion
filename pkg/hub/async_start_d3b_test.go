@@ -208,7 +208,7 @@ func TestAsyncStartGate_CachedAndRefreshedInBackground(t *testing.T) {
 	assert.Equal(t, int32(2), st.reads.Load())
 }
 
-// TestAsyncStartGate_ExpiredAnswerNotUsed pins review r1 R1: an answer
+// TestAsyncStartGate_ExpiredAnswerNotUsed pins that an answer
 // older than asyncStartGateMaxAge (an idle gate) is not used. The start
 // reads false while the refresh runs, and the refreshed answer is used once
 // it lands.
