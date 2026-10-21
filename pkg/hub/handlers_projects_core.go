@@ -2083,6 +2083,9 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 				writeErrorFromErr(w, err, "")
 				return
 			}
+			// A row created (or re-created after a deregistration) here gets
+			// its agents' reservations back before the registration answers.
+			s.BackfillBrokerOnRegistration(ctx, broker.ID)
 		}
 		LogRegistrationEvent(ctx, s.auditLogger, broker.ID, broker.Name, linkedByForProvider(callerUser), getClientIP(r),
 			mergeBrokerAuditDetails(brokerAuditCredentialDetails(ctx), "operation", registerOperation, "path", "embedded"))

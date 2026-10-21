@@ -65,6 +65,21 @@ func igMintRefused(t *testing.T, srv *Server, userID string, boundary TokenBound
 	require.Error(t, err, "a %s token with %v must not mint", boundary.Kind, scopes)
 }
 
+// igSelectorsWithout returns selectors without the listed ones.
+func igSelectorsWithout(selectors []string, drop ...string) []string {
+	skip := map[string]bool{}
+	for _, d := range drop {
+		skip[d] = true
+	}
+	var out []string
+	for _, sel := range selectors {
+		if !skip[sel] {
+			out = append(out, sel)
+		}
+	}
+	return out
+}
+
 // igRequestWithCredential calls handler directly with identity and an
 // explicit credential context of kind.
 func igRequestWithCredential(handler http.HandlerFunc, identity Identity, kind CredentialKind, method, path, body string) *httptest.ResponseRecorder {
@@ -184,15 +199,17 @@ func TestRoleReadToken_DoesNotAdmitRoleWrites(t *testing.T) {
 	assert.NoError(t, err, "the refused delete leaves the binding")
 }
 
-// TestRoleRoutesToken_WriteMethodsStillDenied pins that the role routes'
-// hub-level read target admits no write: a super-admin hub token carrying
-// every mintable selector, role:read included, is refused on every role
-// definition write and changes nothing.
-func TestRoleRoutesToken_WriteMethodsStillDenied(t *testing.T) {
+// TestRoleRoutesToken_WriteMethodsNeedWriteSelectors pins that the role
+// routes' hub-level read target admits no write: a super-admin hub token
+// carrying every mintable selector except role:create, role:update and
+// role:delete, role:read included, is refused on every role definition
+// write and changes nothing.
+func TestRoleRoutesToken_WriteMethodsNeedWriteSelectors(t *testing.T) {
 	m := newBearerMatrixFixture(t)
 	ctx := context.Background()
-	all, selectors := m.everySelectorHubToken(t)
+	_, selectors := m.everySelectorHubToken(t)
 	require.Contains(t, selectors, "role:read")
+	all := m.mint(t, hubBoundary(), igSelectorsWithout(selectors, "role:create", "role:update", "role:delete"))
 	before, err := m.store.ListRoleDefinitions(ctx)
 	require.NoError(t, err)
 
@@ -261,16 +278,18 @@ func TestConstraintReadToken_DoesNotAdmitConstraintAdmin(t *testing.T) {
 	assert.NoError(t, err, "the refused delete leaves the constraint")
 }
 
-// TestConstraintWriteRoutesToken_WriteMethodsStillDenied pins that the
-// access constraint routes' hub-level read target admits no write: a
-// super-admin hub token carrying every mintable selector,
-// access_constraint:read included, is refused on every constraint write and
-// on the constraint draft route, and changes nothing.
-func TestConstraintWriteRoutesToken_WriteMethodsStillDenied(t *testing.T) {
+// TestConstraintWriteRoutesToken_WriteMethodsNeedAdminSelector pins that
+// the access constraint routes' hub-level read target admits no write: a
+// super-admin hub token carrying every mintable selector except
+// access_constraint:admin, access_constraint:read included, is refused on
+// every constraint write and on the constraint draft route, and changes
+// nothing.
+func TestConstraintWriteRoutesToken_WriteMethodsNeedAdminSelector(t *testing.T) {
 	m := newBearerMatrixFixture(t)
 	ctx := context.Background()
-	all, selectors := m.everySelectorHubToken(t)
+	_, selectors := m.everySelectorHubToken(t)
 	require.Contains(t, selectors, "access_constraint:read")
+	all := m.mint(t, hubBoundary(), igSelectorsWithout(selectors, "access_constraint:admin"))
 	ac := m.ids.accessConstraint
 	before, err := m.store.GetAccessConstraint(ctx, ac)
 	require.NoError(t, err)

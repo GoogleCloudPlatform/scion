@@ -60,6 +60,27 @@ func TestCompositeStore_UsageReservation(t *testing.T) {
 	storetest.UsageReservationConformance(t, compositeFactory)
 }
 
+// TestCompositeStore_ReservationRelease runs the conditional reservation
+// release conformance check (ReleaseReservationIfAgent and
+// ReleaseReservationIfScopeBrokerAbsent) on whichever backend
+// compositeFactory selects.
+func TestCompositeStore_ReservationRelease(t *testing.T) {
+	storetest.ReservationReleaseConformance(t, compositeFactory)
+}
+
+// TestReleaseIfScopeBrokerAbsent_UnparseableScopeID_Released runs on both
+// dialects: a scope ID that cannot be a broker ID is released, with no
+// error.
+func TestReleaseIfScopeBrokerAbsent_UnparseableScopeID_Released(t *testing.T) {
+	storetest.ReleaseIfScopeBrokerAbsentUnparseableScopeConformance(t, compositeFactory)
+}
+
+// TestReleaseIfScopeBrokerAbsent_NonCanonicalScopeID: an upper-case
+// spelling of a registered broker's ID keeps the row.
+func TestReleaseIfScopeBrokerAbsent_NonCanonicalScopeID(t *testing.T) {
+	storetest.ReleaseIfScopeBrokerAbsentNonCanonicalScopeConformance(t, compositeFactory)
+}
+
 // TestCompositeStore_GroupDirectParents runs the direct-parent group query
 // conformance check against the CompositeStore on whichever backend
 // compositeFactory selects.

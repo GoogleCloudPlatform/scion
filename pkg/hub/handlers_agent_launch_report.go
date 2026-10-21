@@ -222,6 +222,16 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 		s.settleLaunchedRun(ctx, &updated, req.Agent)
 	}
 
+	// A write that changed the row (applied, or a 409 stale_launch that
+	// still ended the launch) may have released the create claim with the
+	// agent already out of a counted phase: an exit observed during the
+	// launch skipped its release while the claim was held. Free the slot
+	// now if the agent holds no capacity and no start-kind claim; a no-op
+	// otherwise (a running agent, or a write that released quota itself).
+	if answer.Changed {
+		s.releaseSlotIfIdle(ctx, agentID)
+	}
+
 	if answer.HTTPStatus != 0 {
 		if answer.HTTPStatus == http.StatusForbidden {
 			Forbidden(w)

@@ -1544,6 +1544,22 @@ func cleanupPartialWorktree(ctx context.Context, projectRoot, worktreePath, agen
 			"agent_id", agentID, "path", worktreePath)
 		return
 	}
+	// The agent files guard checks the real location too: the worktree
+	// must really be inside the checkout, never the checkout itself. git
+	// gets its own path (it looks the worktree up by the path it
+	// registered); the directory fallback below removes the checked path.
+	// A path that is not there has nothing on disk to check or remove;
+	// only git's entry for it is cleaned up below. Any other Lstat result
+	// (a permission or not-a-directory error) goes through the guard.
+	checkedPath := worktreePath
+	if _, statErr := os.Lstat(worktreePath); !errors.Is(statErr, os.ErrNotExist) {
+		var guardErr error
+		if checkedPath, guardErr = agent.CheckAgentWorktreeRemoval(agentID, projectRoot, worktreePath); guardErr != nil {
+			slog.Warn("worktree-per-agent: refusing to clean up the partial worktree",
+				"agent_id", agentID, "path", worktreePath, "error", guardErr)
+			return
+		}
+	}
 	rm, rmCmdErr := provision.SafeGitCommand(ctx, projectRoot, "worktree", "remove", "--force", worktreePath)
 	var out []byte
 	var rmErr error
@@ -1560,7 +1576,7 @@ func cleanupPartialWorktree(ctx context.Context, projectRoot, worktreePath, agen
 	slog.Warn("worktree-per-agent: git worktree remove failed, removing the directory and its git entry",
 		"agent_id", agentID, "path", worktreePath,
 		"error", rmErr, "output", strings.TrimSpace(string(out)))
-	if cleanErr := os.RemoveAll(worktreePath); cleanErr != nil {
+	if cleanErr := os.RemoveAll(checkedPath); cleanErr != nil {
 		// The directory is (partly) still there, so its entry is not
 		// stale and is left in place; nothing else is touched.
 		slog.Warn("worktree-per-agent: failed to remove the partial worktree's directory; its git entry is left in place",
