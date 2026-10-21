@@ -344,6 +344,62 @@ func TestStartDidNotHappen_DeleteHeldKeepsIntent(t *testing.T) {
 	}
 }
 
+// TestAsyncStart_BeginStartLaunchFailureSettlesAtStartAgentCore pins the
+// owner review's O2 at the start path: an async start whose BeginStartLaunch
+// fails after the run was begun (nothing was sent) is a start that did not
+// happen, so startAgentCore settles it as it settles any refused start: a
+// provisioned agent (a created memory row) goes back to rest (intent
+// stopped, the failure message), and a queued-stop agent gets its stopped
+// intent back (ptone/scion#5070). The run the dispatch minted is reverted.
+func TestAsyncStart_BeginStartLaunchFailureSettlesAtStartAgentCore(t *testing.T) {
+	cases := []struct {
+		name    string
+		mk      func(t *testing.T, f *reconcileFixture) *store.Agent
+		wantMsg func(t *testing.T, msg string)
+	}{
+		{"provisioned (created memory)", func(t *testing.T, f *reconcileFixture) *store.Agent {
+			return newD9Agent(t, f, "bsl-prov", d9Prior{"created memory", state.PhaseCreated, state.PhaseCreated})
+		}, func(t *testing.T, msg string) {
+			assert.True(t, strings.HasPrefix(msg, "Start failed: "), "message: %q", msg)
+			assert.True(t, strings.HasSuffix(msg, provisionedRestingNote), "message: %q", msg)
+		}},
+		{"queued stop", func(t *testing.T, f *reconcileFixture) *store.Agent {
+			return f.addAgent("bsl-queued", string(state.PhaseStopped), "", func(a *store.Agent) {
+				a.ContainerStatus = containerStatusStopQueued
+				a.Message = offlineStopMessage
+			})
+		}, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f, _ := newAsyncStartFixture(t)
+			ctx := context.Background()
+			b, err := f.s.GetRuntimeBroker(ctx, f.brokerID)
+			require.NoError(t, err)
+			b.Endpoint = "http://localhost:9800"
+			require.NoError(t, f.s.UpdateRuntimeBroker(ctx, b))
+			client := &asyncEchoClient{mockRuntimeBrokerClient: &mockRuntimeBrokerClient{}, mode: "accept"}
+			d := NewHTTPAgentDispatcherWithClient(beginStartLaunchFailStore{Store: f.s, err: errors.New("db down")}, client, false, slog.Default())
+			d.SetAsyncLaunchSettingsProvider(func() AsyncLaunchSettings { return asyncOn })
+			f.srv.SetDispatcher(d)
+			a := c.mk(t, f)
+			before := getAgent(t, f.s, a.ID)
+
+			err = f.srv.startAgentCore(ctx, before, StartOpts{Kind: store.StartClaimUser, AcceptAsyncLaunch: true})
+			require.Error(t, err)
+			require.ErrorIs(t, err, errStartRunNotBegun)
+			assert.Empty(t, client.sent(), "nothing was sent")
+			got := getAgent(t, f.s, a.ID)
+			assert.Equal(t, store.RunIntentStopped, got.RunIntent, "the refused start is settled back to the stopped intent")
+			assert.Equal(t, before.RunID, got.RunID, "the minted run is reverted")
+			assert.Empty(t, got.StartClaimID, "the claim is released")
+			if c.wantMsg != nil {
+				c.wantMsg(t, got.Message)
+			}
+		})
+	}
+}
+
 // TestDispatchAgentStart_AttachesAgentID pins that the plain start entry
 // point sends the agent ID (R1: on every start, sync or async).
 func TestDispatchAgentStart_AttachesAgentID(t *testing.T) {
