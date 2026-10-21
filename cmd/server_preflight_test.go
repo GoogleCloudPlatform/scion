@@ -624,6 +624,27 @@ func TestServerPreflight_DSNRedacted(t *testing.T) {
 			assert.Equal(t, 1, exitCodeFor(err))
 		})
 	}
+	// An open error that quotes the DSN raw (pgx redacts its own errors, so
+	// a driver stand-in quotes it): the command's redaction masks it.
+	for _, dsn := range []string{
+		"postgres://hub:" + secret + "@db.invalid/hub",
+		"host=db.invalid user=hub password='" + secret + "' dbname=hub",
+	} {
+		t.Run("an open error quoting "+strings.SplitN(dsn, ":", 2)[0], func(t *testing.T) {
+			h := newPreflightHub(t)
+			t.Setenv("SCION_SERVER_DATABASE_DRIVER", "postgres")
+			orig := openPreflightClient
+			t.Cleanup(func() { openPreflightClient = orig })
+			openPreflightClient = func(driver, d string) (*ent.Client, error) {
+				return nil, fmt.Errorf("dial %s: connection refused (dsn %q)", d, d)
+			}
+			_, stderr, err := runPreflightForTest(t, preflightOptions{executor: true, brokerID: h.brokerID, envDSN: dsn})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "opening the postgres hub database read only")
+			assert.NotContains(t, err.Error(), secret, "the open error must not quote the password")
+			assert.NotContains(t, stderr, secret)
+		})
+	}
 }
 
 // T10: the report and the exit codes.
