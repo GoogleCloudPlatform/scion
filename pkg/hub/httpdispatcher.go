@@ -3744,12 +3744,11 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 		// as for a hand-off before any send. A delete-held row
 		// (ErrLaunchInvalidPhase wrapping store.ErrDeleteInProgress) is
 		// released for the claim (startOutcomeOf), and startDidNotHappen
-		// never counts it as not happened: the delete engine owns its intent,
-		// and its run ID too, so the minted run is reverted only when no
-		// delete holds the row.
-		if !errors.Is(err, store.ErrDeleteInProgress) {
-			d.revertRun(ctx, agent, runID, previousRunID)
-		}
+		// never counts it as not happened: the delete engine owns its intent.
+		// The minted run never launched, so it is reverted even under a
+		// delete hold (a compare-and-swap back to the previous run): a
+		// delete must not target a run the runtime never held.
+		d.revertRun(ctx, agent, runID, previousRunID)
 		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("%w: %w", errStartRunNotBegun, err)
 	case launchID != "":

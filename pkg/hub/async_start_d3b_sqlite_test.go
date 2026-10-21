@@ -280,9 +280,10 @@ func TestAsyncStartDispatch_BeginStartLaunchFailureDidNotHappen(t *testing.T) {
 			assert.Empty(t, f.client.sent(), "nothing was sent")
 		})
 	}
-	// A delete-held refusal leaves the minted run on the row: the delete
-	// engine owns the row's run ID (owner review F1).
-	t.Run("delete held keeps the minted run", func(t *testing.T) {
+	// A delete-held refusal still reverts the minted run, which never
+	// launched, so a delete never targets a run the runtime did not hold
+	// (agent-delete-lead, owner review F1 declined).
+	t.Run("delete held reverts the minted run", func(t *testing.T) {
 		f := newAsyncDispatchFixture(t, "asd-blfail-held", string(state.PhaseStopped), true, nil, asyncOn)
 		before := getAgent(t, f.s, f.agent.ID).RunID
 		d := NewHTTPAgentDispatcherWithClient(beginStartLaunchFailStore{Store: f.s, err: fmt.Errorf("held: %w", store.ErrDeleteInProgress)}, f.client, false, slog.Default())
@@ -290,8 +291,7 @@ func TestAsyncStartDispatch_BeginStartLaunchFailureDidNotHappen(t *testing.T) {
 		_, err := d.DispatchAgentStartWithOptions(context.Background(), f.agent, "", false, StartDispatchOptions{Async: true, Kind: store.LaunchKindStart, PriorPhase: string(state.PhaseStopped)})
 		require.ErrorIs(t, err, store.ErrDeleteInProgress)
 		after := getAgent(t, f.s, f.agent.ID).RunID
-		assert.NotEmpty(t, after)
-		assert.NotEqual(t, before, after, "the minted run is left to the delete engine, not reverted")
+		assert.Equal(t, before, after, "the row returns to the previous run under a delete hold")
 	})
 	bare := fmt.Errorf("%w: %w", ErrLaunchInvalidPhase, store.ErrDeleteInProgress)
 	held := fmt.Errorf("%w: %w", errStartRunNotBegun, bare)
