@@ -226,6 +226,7 @@ func (s *AgentStore) applyLaunchReportEnded(ctx context.Context, ltx *launchTx, 
 			if msg != "" {
 				upd.SetMessage(msg)
 			}
+			withFailedReportStep(upd, r)
 			updated, err := upd.Save(ctx)
 			if err != nil {
 				return store.LaunchReportAnswer{}, nil, false, mapError(err)
@@ -324,6 +325,9 @@ func (s *AgentStore) applyLaunchReportActive(ctx context.Context, ltx *launchTx,
 			SetLaunchCause(newLaunchCause).
 			SetMessage(newMessage).
 			SetStateVersion(current.StateVersion + 1)
+		if r.State == store.LaunchReportStateFailed {
+			withFailedReportStep(upd, r)
+		}
 		// A start-kind launch ends by its own failure rule even though
 		// another writer moved the row to error first (ptone/scion#4669):
 		// a restart ends stopped, a start restores a stopped prior or
@@ -396,6 +400,7 @@ func (s *AgentStore) applyLaunchReportPreRunning(ctx context.Context, ltx *launc
 			SetLaunchEndReason(store.LaunchEndReasonFailed).
 			SetLaunchLastReportAt(now).
 			SetStateVersion(current.StateVersion + 1)
+		withFailedReportStep(upd, r)
 		// A start-kind launch ends in its failure phase (stopped for a
 		// restart or a stopped prior) with its resume memory.
 		withStartFailureEnd(upd, current)
@@ -503,6 +508,17 @@ func applySucceededAgentInfo(upd *ent.AgentUpdateOne, current *ent.Agent, r stor
 	if r.RuntimeState != "" {
 		upd.SetRuntimeState(r.RuntimeState)
 	}
+}
+
+// withFailedReportStep adds to u, a write that applies a failed report, the
+// report's step as the launch's step, so clients can show where the launch
+// failed (design wave 3 E-d, ptone/scion#4670). A report without a step
+// leaves the last recorded step, the furthest one the launch reached.
+func withFailedReportStep(u *ent.AgentUpdateOne, r store.LaunchReport) *ent.AgentUpdateOne {
+	if r.Step == "" {
+		return u
+	}
+	return u.SetLaunchStep(r.Step)
 }
 
 // formatFailureMessage builds the "<step>: <message>" form design §3.7 uses
