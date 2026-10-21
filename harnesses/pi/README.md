@@ -42,6 +42,11 @@ Everything has a safe default and is overridable per agent through env
 Existing user values in `~/.pi/agent/settings.json` are preserved, and a
 second provisioning run is a no-op.
 
+Scion's `system_prompt` is written to `~/.pi/agent/APPEND_SYSTEM.md`, which pi
+appends to its default system prompt (it does not replace it; pi's separate
+`SYSTEM.md` replacement is not used). `agent_instructions` go to
+`~/.pi/agent/AGENTS.md`.
+
 ### Project trust
 
 pi can load settings, MCP servers, extensions, skills, prompts, themes and
@@ -69,6 +74,9 @@ What the policy does and does not cover (pi v1.3.0,
   and are untrusted input; the project `sessionDir` setting is read before
   trust is resolved; trust does not restrict what tools can do. pi has no
   sandbox: the container is the security boundary.
+- With `SCION_PI_PROJECT_TRUST=always`, a repository's `.pi/APPEND_SYSTEM.md`
+  takes precedence over the agent-level file, so the repository can override
+  Scion's system prompt.
 - A direct `pi --approve` on the command line overrides everything.
 - `SCION_PI_SETTINGS` is an operator-controlled surface: it can set
   code-loading keys (`packages`, `extensions`, `shellCommandPrefix`,
@@ -141,6 +149,13 @@ SCIONTOOL_BIN=/path/to/sciontool node --test scion-bridge.test.mjs
 - **MCP:** pi supports stdio and streamable HTTP; SSE servers are skipped
   with a warning.
 - **Usage/tokens:** no token mapping, so `SCION_USAGE_SOURCE` is not set.
+- **Synchronous bridge calls:** the bridge runs `sciontool` with
+  `execFileSync`, so pi's event loop (and its TUI) waits for each call: up to
+  5 s per hook event (session start, input, each tool start and end) and up to
+  15 s for the `task_completed` status call, which waits on the Hub. Normally
+  each call takes milliseconds; a slow or unreachable Hub makes the pause
+  visible. This matches how Claude's command hooks block; switching to async
+  calls is a possible follow-up.
 - **Provider errors:** the bridge suppresses `task_completed` when the last
   assistant message has an error stop reason. This is untested against a live
   provider.

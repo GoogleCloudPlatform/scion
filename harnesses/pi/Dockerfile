@@ -19,11 +19,11 @@ FROM ${BASE_IMAGE}
 # Exact pi release; bump deliberately. Never use a floating tag.
 ARG PI_VERSION=1.3.0
 
-# pi needs Node >= 22.19 (the scion base image ships a newer Node).
 RUN mkdir -p /home/scion/.pi/agent/extensions /home/scion/.pi/agent/skills \
       /home/scion/.pi/agent/sessions && \
   chown -R scion:scion /home/scion/.pi
 
+# pi needs Node >= 22.19 (the scion base image ships a newer Node).
 # --ignore-scripts: install no lifecycle scripts from the dependency tree.
 RUN --mount=type=secret,id=npmrc,target=/root/.npmrc,required=false \
     npm install -g --ignore-scripts @earendil-works/pi-coding-agent@${PI_VERSION} \
