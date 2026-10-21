@@ -284,10 +284,12 @@ func (s *Server) resolvePlacement(ctx context.Context, res runtimeResolution, pr
 		profileElsewhere := profileGlobal && config.ProfileHasPlacement(profile) && !inE[profile.Runtime]
 		if len(pp) > 0 || profileElsewhere {
 			// The cause lists every placement profile that targets this
-			// runtime, including those on matching defaults-only entries, so
-			// the text does not depend on whether such an entry is configured.
+			// runtime, and names the entry to move placement onto, both over
+			// the configured and the defaults-only matching entries (the
+			// first entry name in sorted order), so the text does not depend
+			// on whether such an entry is configured.
 			listed := profilesOn(unionSet(inE, defaultsOnlyMatched))
-			cause := s.profileRungCause(res, profileGlobal, matched, listed)
+			cause := s.profileRungCause(res, profileGlobal, sortedNames(unionSet(inE, defaultsOnlyMatched)), listed)
 			s.agentLifecycleLog.Warn("Kubernetes placement: the profile rung cannot be determined",
 				"agent", res.Agent, "how", res.How.String(), "profile", res.Profile, "profiles", listed, "matched", matched)
 			return nil, placementRefusal(cause)
@@ -308,13 +310,15 @@ func (s *Server) resolvePlacement(ctx context.Context, res runtimeResolution, pr
 }
 
 // profileRungCause is the fixed cause for a profile rung that could apply
-// but cannot be determined, by how the runtime was chosen.
-func (s *Server) profileRungCause(res runtimeResolution, profileGlobal bool, matched, pp []string) string {
+// but cannot be determined, by how the runtime was chosen. entries are the
+// matching runtime entries in sorted order; the first is named as the entry
+// to move placement onto.
+func (s *Server) profileRungCause(res runtimeResolution, profileGlobal bool, entries, pp []string) string {
 	switch res.How {
 	case resolutionUnrecorded:
 		entry := "<entry>"
-		if len(matched) > 0 {
-			entry = matched[0]
+		if len(entries) > 0 {
+			entry = entries[0]
 		}
 		return fmt.Sprintf("agent %s has no recorded profile; profile-level placement is configured for its runtime (profiles %s). Re-provision it with a profile (reincarnate, or delete and re-create with --profile <name>), or move that placement onto the runtime entry (runtimes.%s), which applies whatever the profile",
 			res.Agent, strings.Join(pp, ", "), entry)
@@ -330,6 +334,16 @@ func (s *Server) profileRungCause(res runtimeResolution, profileGlobal bool, mat
 	default:
 		return "the agent's profile could not be determined (the runtime choice was not classified), and profile-level placement is configured for this runtime"
 	}
+}
+
+// sortedNames returns the names in a set, sorted.
+func sortedNames(set map[string]bool) []string {
+	out := make([]string, 0, len(set))
+	for name := range set {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // unionSet returns the union of two name sets.

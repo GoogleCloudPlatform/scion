@@ -1117,7 +1117,10 @@ func TestResolvePlacement_ProfileOnDefaultsOnlyEntry(t *testing.T) {
 // settings file with no placement. (x) and (y) must give the same placement
 // and the same error, except in the rows the defaults-only rule refuses on
 // purpose (dedicated is true): there (x) must refuse with the dedicated
-// cause. The runtime is in-cluster, so every entry without a context in
+// cause. The error text is compared in full, including the entry an
+// unrecorded refusal names: the sibling is called zsib so that it sorts
+// after kubernetes, which makes that name depend on the defaults-only entry
+// being considered in (x). The runtime is in-cluster, so every entry without a context in
 // namespace "agents" (the default) matches it, and "far" (explicit context)
 // does not.
 func TestResolvePlacement_DefaultsOnlyParity(t *testing.T) {
@@ -1146,7 +1149,7 @@ func TestResolvePlacement_DefaultsOnlyParity(t *testing.T) {
 			b.WriteString("  kubernetes:\n    type: kubernetes\n")
 		}
 		if sibling != "absent" {
-			b.WriteString("  incl:\n    type: kubernetes\n")
+			b.WriteString("  zsib:\n    type: kubernetes\n")
 		}
 		b.WriteString("profiles:\n  kp:\n    runtime: kubernetes\n")
 		if kpPl {
@@ -1157,7 +1160,7 @@ func TestResolvePlacement_DefaultsOnlyParity(t *testing.T) {
 			b.WriteString("    runtime_class_name: gvisor\n")
 		}
 		if sibling == "with-placement-profile" {
-			b.WriteString("  sibp:\n    runtime: incl\n    node_selector:\n      pool: sib\n")
+			b.WriteString("  sibp:\n    runtime: zsib\n    node_selector:\n      pool: sib\n")
 		}
 		return b.String()
 	}
