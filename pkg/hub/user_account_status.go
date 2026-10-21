@@ -30,9 +30,11 @@ import (
 // (principalStatusGate) applies. The checks below call it, so they cannot
 // drift from decide:
 //   - requireActiveUser (project access) and the dev_local ceiling checks;
-//   - UnifiedAuthMiddleware, when it accepts a development token, so that
-//     the development user is held to the same rule as any other user with
-//     a record, on every request, whichever handler serves it;
+//   - UnifiedAuthMiddleware, when it accepts a hub user token or a
+//     development token, so that the development user is held to the same
+//     rule as any other user with a record, on every request, whichever
+//     handler serves it;
+//   - the user access token checks (ValidateToken, bearerStillValid);
 //   - the live-connection checks (conduitUserStatus, relayUserIdentity,
 //     conduitRenewalIdentity).
 //
@@ -138,8 +140,8 @@ func accountRefusalReason(r accountRefusal) string {
 }
 
 // writeAccountRefusal writes UnifiedAuthMiddleware's answer to a bearer
-// whose user account failed checkUserAccount. A development token gets the
-// answer the hub user token arm gives for the same account state:
+// whose user account failed checkUserAccount. A hub user token and a
+// development token get the same answer for the same account state:
 //   - lookup fault: 503 store_error;
 //   - suspended: 403 user_suspended;
 //   - no users row: 401 user_not_found;

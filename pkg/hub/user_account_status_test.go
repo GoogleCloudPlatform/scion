@@ -231,6 +231,31 @@ func TestDevToken_AccountStatusApplies_BothTokenArms(t *testing.T) {
 	}
 }
 
+// TestDevToken_AccountRefusalMatchesUserToken: for the same account state,
+// the development token and a hub user token get the same status code and
+// body.
+func TestDevToken_AccountRefusalMatchesUserToken(t *testing.T) {
+	srv, s := testServer(t)
+	dev, err := s.GetUser(context.Background(), DevUserID)
+	require.NoError(t, err)
+	session, _, _, err := srv.userTokenService.GenerateTokenPair(dev.ID, dev.Email, dev.DisplayName, dev.Role, ClientTypeWeb)
+	require.NoError(t, err)
+
+	for _, status := range nonActiveUserStatuses {
+		t.Run(status, func(t *testing.T) {
+			setUserStatus(t, s, DevUserID, status)
+			defer setUserStatus(t, s, DevUserID, store.UserStatusActive)
+			devRec := doRequest(t, srv, http.MethodGet, "/api/v1/notifications", nil)
+			userRec := doBearerRequest(t, srv, http.MethodGet, "/api/v1/notifications", session)
+			requireAccountRefusal(t, devRec, status)
+			if userRec.Code != devRec.Code || userRec.Body.String() != devRec.Body.String() {
+				t.Fatalf("refusal mismatch: status %s: user token HTTP %d %s, development token HTTP %d %s",
+					status, userRec.Code, userRec.Body.String(), devRec.Code, devRec.Body.String())
+			}
+		})
+	}
+}
+
 // doBearerRequest serves one request with the given bearer token.
 func doBearerRequest(t *testing.T, srv *Server, method, path, bearer string) *httptest.ResponseRecorder {
 	t.Helper()
@@ -307,6 +332,75 @@ func TestConduitUserStatus_DevUserAccountStatusApplies(t *testing.T) {
 			if verdict != conduitAuthzDenied {
 				t.Fatalf("conduit user status: status %s: verdict %v (%q), want denied", status, verdict, reason)
 			}
+		})
+	}
+}
+
+// TestUserToken_RequiresActiveAccount: a hub user token is accepted only
+// while its user's account is active; every defined non-active status is
+// refused.
+func TestUserToken_RequiresActiveAccount(t *testing.T) {
+	srv, s := testServer(t)
+	userID := tid("uta-user")
+	createTestUserWithRole(t, s, userID, userID+"@test.com", "member", store.SystemRoleSuperAdmin)
+	ensureHubMembership(context.Background(), s, userID)
+	u, err := s.GetUser(context.Background(), userID)
+	require.NoError(t, err)
+	session, _, _, err := srv.userTokenService.GenerateTokenPair(u.ID, u.Email, u.DisplayName, u.Role, ClientTypeWeb)
+	require.NoError(t, err)
+	path := "/api/v1/notifications"
+
+	rec := doBearerRequest(t, srv, http.MethodGet, path, session)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	for _, status := range nonActiveUserStatuses {
+		t.Run(status, func(t *testing.T) {
+			setUserStatus(t, s, userID, status)
+			defer setUserStatus(t, s, userID, store.UserStatusActive)
+			requireAccountRefusal(t, doBearerRequest(t, srv, http.MethodGet, path, session), status)
+		})
+	}
+}
+
+// TestUserAccessToken_RequiresActiveAccount: a user access token validates,
+// at authentication and on the live re-check, only while its user's
+// account is active; every defined non-active status is refused.
+func TestUserAccessToken_RequiresActiveAccount(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	userID := tid("uat-active-user")
+	createTestUserWithRole(t, s, userID, userID+"@test.com", "member", store.SystemRoleSuperAdmin)
+	ensureHubMembership(ctx, s, userID)
+	key, token, err := srv.uatService.CreateTokenWithParams(rs4MintContext(userID), CreateTokenParams{
+		UserID: userID, Name: "uat-active-" + tid("tok"), Boundary: hubBoundary(), Scopes: []string{"agent:read"},
+	})
+	require.NoError(t, err)
+	user := NewAuthenticatedUser(userID, userID+"@test.com", "UAT", "member", "web")
+	recheck := contextWithCredentialContext(contextWithIdentity(ctx, user), CredentialContext{Kind: CredentialKindUAT, ID: token.ID})
+
+	_, err = srv.uatService.ValidateToken(ctx, key)
+	require.NoError(t, err)
+	require.True(t, srv.bearerStillValid(recheck))
+
+	for _, status := range nonActiveUserStatuses {
+		t.Run(status, func(t *testing.T) {
+			setUserStatus(t, s, userID, status)
+			defer setUserStatus(t, s, userID, store.UserStatusActive)
+
+			_, err := srv.uatService.ValidateToken(ctx, key)
+			require.Error(t, err)
+			var rej *UATRejection
+			require.True(t, errors.As(err, &rej), "a refusal of a matched token: %v", err)
+			assert.True(t, rej.Found)
+			if status == store.UserStatusSuspended {
+				assert.ErrorIs(t, err, ErrUserSuspended)
+				assert.Equal(t, "user_suspended", rej.Reason)
+			} else {
+				assert.ErrorIs(t, err, ErrInvalidUAT)
+				assert.Equal(t, "user_not_active", rej.Reason)
+			}
+			assert.False(t, srv.bearerStillValid(recheck), "live re-check")
+			requireAccountRefusal(t, doBearerRequest(t, srv, http.MethodGet, "/api/v1/notifications", key), status)
 		})
 	}
 }
