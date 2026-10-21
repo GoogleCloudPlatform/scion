@@ -166,7 +166,7 @@ func TestResolveSettingValueIgnoringEnv(t *testing.T) {
 }
 
 // An unversioned file with a snake-case hub.project_id (the shape the
-// hub.grove_id migration leaves) and a top-level project_id is converted as
+// legacy hub-key migration leaves) and a top-level project_id is converted as
 // a legacy file. The view, like LoadSettings, takes both ProjectID and
 // Hub.ProjectID from hub.project_id: only a legacy camelCase hub.projectId
 // is kept out of ProjectID (ptone/scion#5427 review).
