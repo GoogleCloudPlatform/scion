@@ -185,6 +185,10 @@ var invalidCases = []struct {
 	{EnvClaimTTL, "10s"},
 	{EnvClaimTTL, "2h"},
 	{EnvArtifactRepo, "Repo"},
+	{EnvBuildStagingBucket, "Bad_Bucket"},
+	{EnvBuildStagingBucket, "ab"},
+	{EnvBuildStagingBucket, "google-bucket"},
+	{EnvBuildStagingBucket, "dotted.bucket.name"},
 	{EnvMediatorServiceName, "1abc"},
 	{EnvReconcilerJobName, "has_underscore"},
 	{EnvReconcileSchedule, "@every 5m"},
@@ -304,6 +308,7 @@ var validCases = []map[string]string{
 	{EnvTaskTimeout: "1h30m", EnvClaimTTL: "1m30s"},
 	{EnvGitHubAppID: "+0042", EnvRunnerGroupID: "007"},
 	{EnvReconcileSchedule: "0 */2 * * 1-5"},
+	{EnvBuildStagingBucket: "my-org_cr-ci-staging"},
 }
 
 // TestScriptValidatorMatchesLoad keeps scripts/lib.sh's config validation

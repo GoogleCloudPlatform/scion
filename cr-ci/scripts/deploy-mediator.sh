@@ -50,12 +50,36 @@ crci_help_exit "$USAGE"
 crci_start
 [[ -n $TAG ]] || TAG=$(crci_default_tag mediator go.mod)
 
+# GITHUB_APP_ID=1 is the documented placeholder for the steps before the App
+# exists; a mediator deployed with it gets 401s from GitHub.
+APP_ID=$(_crci_int "${CFG[GITHUB_APP_ID]}")
+if [[ $APP_ID == 1 ]]; then
+  [[ $CRCI_MODE == apply ]] && crci_die "GITHUB_APP_ID is still the placeholder 1; create the GitHub App and set its ID first"
+  crci_note "WARNING: GITHUB_APP_ID is the placeholder 1; --apply refuses to deploy until it is the real App ID"
+fi
+
 P=${CFG[GCP_PROJECT]}
 R=${CFG[REGION]}
 SVC=${CFG[MEDIATOR_SERVICE_NAME]}
 IMAGE=$(crci_image_ref "${CFG[MEDIATOR_IMAGE_NAME]}" "$TAG")
 MEDIATOR=$(crci_sa_email "${CFG[MEDIATOR_SA_NAME]}")
 SCHEDULER=$(crci_sa_email "${CFG[SCHEDULER_SA_NAME]}")
+
+# Upgrade order: the runner image and job first. The mediator's JIT work folder
+# (/home/runner/work) relies on the runner image linking it to /scratch; an
+# older image would put the work folder on the in-memory root filesystem.
+crci_note "check: the runner job runs the current runner image (deploy it before the mediator)"
+if crci_exists gcloud run jobs describe "${CFG[RUNNER_JOB_NAME]}" --region="$R" --project="$P" --format='value(metadata.name)'; then
+  crci_read JOB_IMAGE "" gcloud run jobs describe "${CFG[RUNNER_JOB_NAME]}" --region="$R" --project="$P" \
+    --format='value(spec.template.spec.template.spec.containers[0].image)'
+  WANT_TAG=$(crci_try_default_tag runner)
+  if [[ -n $WANT_TAG && -n $JOB_IMAGE && ${JOB_IMAGE##*:} != "$WANT_TAG" ]]; then
+    printf '%s: WARNING: job %s runs %s, not the current runner tag %s; run build-runner-image.sh and deploy-job.sh first (an older runner image puts the work folder in memory).\n' \
+      "$CRCI_PROG" "${CFG[RUNNER_JOB_NAME]}" "$JOB_IMAGE" "$WANT_TAG" >&2
+  fi
+elif [[ $CRCI_MODE == apply ]]; then
+  printf '%s: WARNING: runner job %s not found; run deploy-job.sh first.\n' "$CRCI_PROG" "${CFG[RUNNER_JOB_NAME]}" >&2
+fi
 
 crci_note "mediator image ${CFG[MEDIATOR_IMAGE_NAME]}:$TAG"
 crci_build_image "${CFG[MEDIATOR_IMAGE_NAME]}" mediator/Dockerfile . "$TAG" "$LOCAL"

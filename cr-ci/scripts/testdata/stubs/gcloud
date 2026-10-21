@@ -25,16 +25,38 @@ if [[ $args == *" describe "* ]]; then
     if [[ $prev == describe ]]; then rid=$a; break; fi
     prev=$a
   done
+  # Command group, e.g. "run.jobs" or "artifacts.docker.images".
+  group=""
+  for a in "$@"; do
+    [[ $a == describe ]] && break
+    [[ $a == -* ]] || group+="${group:+.}$a"
+  done
   if has "$rid" deny; then
-    echo "ERROR: (gcloud) PERMISSION_DENIED: Permission denied on resource $rid" >&2
+    # gcloud's real wording, including the misleading "(or it may not exist)".
+    echo "ERROR: (gcloud.$group.describe) PERMISSION_DENIED: Permission '$group.get' denied on resource '$rid' (or it may not exist)." >&2
     exit 1
   fi
   if ! has "$rid" exists; then
-    echo "ERROR: (gcloud) NOT_FOUND: Resource $rid was not found" >&2
+    # The real not-found message of each command (they differ).
+    case $group in
+      run.jobs) echo "ERROR: (gcloud.run.jobs.describe) Cannot find job [$rid]." ;;
+      run.services) echo "ERROR: (gcloud.run.services.describe) Cannot find service [$rid]" ;;
+      scheduler.jobs) echo "ERROR: (gcloud.scheduler.jobs.describe) NOT_FOUND: Job not found." ;;
+      secrets) echo "ERROR: (gcloud.secrets.describe) NOT_FOUND: Secret [projects/123456789/secrets/$rid] not found or has no versions." ;;
+      iam.service-accounts) echo "ERROR: (gcloud.iam.service-accounts.describe) NOT_FOUND: Unknown service account" ;;
+      artifacts.docker.images) echo "ERROR: (gcloud.artifacts.docker.images.describe) Image not found." ;;
+      artifacts.repositories) echo "ERROR: (gcloud.artifacts.repositories.describe) NOT_FOUND: Requested entity was not found." ;;
+      storage.buckets) echo "ERROR: (gcloud.storage.buckets.describe) $rid not found: 404." ;;
+      *)
+        echo "STUB: no not-found message for describe in group '$group'; add one" >&2
+        exit 2
+        ;;
+    esac >&2
     exit 1
   fi
   case $args in
     *status.url*) echo "${STUB_URL:-https://cr-runner-mediator-abc123-uc.a.run.app}" ;;
+    *containers\[0\].image*) echo "${STUB_JOB_IMAGE:-us-central1-docker.pkg.dev/example-project/cr-runners/gh-runner:golden}" ;;
     *run.googleapis.com/urls*) echo "${STUB_URLS:-[\"https://cr-runner-mediator-abc123-uc.a.run.app\"]}" ;;
     *maxScale*) echo "${STUB_MAXSCALE:-1}" ;;
   esac

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # teardown.sh: delete what the cr-ci scripts created, in reverse order
 # (permissions-matrix C18): scheduler job, mediator service, runner job,
-# Artifact Registry repo (with its images), secrets, the project-level log
+# Artifact Registry repo (with its images), build staging bucket, secrets, the project-level log
 # binding of BUILD_SA_NAME, and the four service accounts. APIs stay enabled
 # (the project may use them). Dry-run by default; --apply asks you to type
 # GCP_PROJECT (or pass --confirm GCP_PROJECT). Missing resources are skipped.
@@ -93,6 +93,11 @@ else
   delete_if_exists gcloud artifacts repositories describe "${CFG[ARTIFACT_REPO]}" --location="$R" --project="$P" --format='value(name)' -- \
     gcloud artifacts repositories delete "${CFG[ARTIFACT_REPO]}" --location="$R" --project="$P" --quiet
 fi
+
+BUCKET="gs://$(crci_staging_bucket)"
+crci_note "build staging bucket $BUCKET (uploaded sources only)"
+delete_if_exists gcloud storage buckets describe "$BUCKET" --project="$P" --format='value(name)' -- \
+  gcloud storage rm --recursive "$BUCKET" --project="$P"
 
 for s in "${CFG[GITHUB_APP_PRIVATE_KEY_SECRET_NAME]}" "${CFG[GITHUB_WEBHOOK_SECRET_NAME]}"; do
   if [[ $KEEP_SECRETS == 1 ]]; then

@@ -15,8 +15,9 @@
 #     only, runs it. A failure stops the script and names the step.
 #   - crci_exists CMD...: a read-only describe used for idempotency. Prints
 #     "? <command>". Dry-run assumes nothing exists (returns 1). With --apply it
-#     returns 0 if the resource exists, 1 if the error says NOT_FOUND, and stops
-#     on any other error (a permission denial is never retried or ignored).
+#     returns 0 if the resource exists, 1 if the error is a not-found error (see
+#     crci_is_not_found), and stops on any other error. A PERMISSION_DENIED is
+#     never taken as "missing", even when gcloud adds "(or it may not exist)".
 #   - crci_read CMD...: a read-only query whose output the script needs (apply
 #     only; prints "? <command>" and the placeholder in dry-run).
 #   - crci_require_tool NAME MIN: version check, apply mode only.
@@ -76,9 +77,22 @@ crci_run() {
   fi
 }
 
+# crci_is_not_found ERRTEXT: true if a gcloud error says the target does not
+# exist. Recognised (and nothing else):
+#   - "PERMISSION_DENIED" or "denied" anywhere: never not-found (checked first);
+#   - "NOT_FOUND" (API status; secrets, scheduler, service accounts, IAM);
+#   - "Cannot find job [" / "Cannot find service [" (gcloud run describe,
+#     which raises its own error instead of the API status);
+#   - "not found" (Artifact Registry images and repositories, Cloud Storage,
+#     "Policy binding ... not found!" from remove-iam-policy-binding);
+#   - "does not exist" (an IAM binding on a deleted account).
+crci_is_not_found() {
+  grep -qE 'PERMISSION_DENIED|[Dd]enied' <<<"$1" && return 1
+  grep -qE 'NOT_FOUND|Cannot find (job|service) \[|[Nn]ot found|does not exist' <<<"$1"
+}
+
 # crci_run_unless_missing CMD...: like crci_run, but a failure whose error
-# says the target is already gone (NOT_FOUND, "not found", "does not exist")
-# is a no-op, so removals stay idempotent. Other failures stop the script.
+# says the target is already gone (crci_is_not_found) is a no-op, so removals stay idempotent. Other failures stop the script.
 crci_run_unless_missing() {
   printf '+ %s\n' "$(crci_quote "$@")"
   [[ $CRCI_MODE == apply ]] || return 0
@@ -88,7 +102,7 @@ crci_run_unless_missing() {
   else
     rc=$?
   fi
-  if grep -qE 'NOT_FOUND|[Nn]ot [Ff]ound|does not exist' <<<"$err"; then
+  if crci_is_not_found "$err"; then
     crci_note "already absent"
     return 0
   fi
@@ -105,7 +119,7 @@ crci_exists() {
   else
     rc=$?
   fi
-  if grep -qE 'NOT_FOUND|[Nn]ot [Ff]ound|does not exist' <<<"$err"; then
+  if crci_is_not_found "$err"; then
     return 1
   fi
   printf '%s\n' "$err" >&2
@@ -480,6 +494,10 @@ crci_validate_config() {
   _crci_duration_check CLAIM_TTL $((30 * 1000)) $((3600 * 1000)) "30s" "1h0m0s"
 
   _crci_match ARTIFACT_REPO "$resid" "Artifact Registry repository ID"
+  _crci_match BUILD_STAGING_BUCKET '^[a-z0-9][a-z0-9_-]{1,61}[a-z0-9]$' "Cloud Storage bucket name"
+  if [[ ${CFG[BUILD_STAGING_BUCKET]} == goog* || ${CFG[BUILD_STAGING_BUCKET]} == *..* ]]; then
+    _crci_fail BUILD_STAGING_BUCKET "\"${CFG[BUILD_STAGING_BUCKET]}\" is not a valid Cloud Storage bucket name"
+  fi
   _crci_match MEDIATOR_SERVICE_NAME "$cloudrun" "Cloud Run service name"
   _crci_match RECONCILER_JOB_NAME "$resid" "Cloud Scheduler job ID"
   _crci_match RECONCILE_SCHEDULE '^[0-9*,/-]+( [0-9*,/-]+){4}$' "five-field cron schedule"
@@ -558,6 +576,15 @@ crci_abspath() {
 
 crci_sa_email() { printf '%s@%s.iam.gserviceaccount.com' "$1" "${CFG[GCP_PROJECT]}"; }
 
+# crci_staging_bucket: BUILD_STAGING_BUCKET, or <GCP_PROJECT>-cr-ci-staging.
+crci_staging_bucket() {
+  if [[ -n ${CFG[BUILD_STAGING_BUCKET]} ]]; then
+    printf '%s' "${CFG[BUILD_STAGING_BUCKET]}"
+  else
+    printf '%s-cr-ci-staging' "${CFG[GCP_PROJECT]}"
+  fi
+}
+
 crci_registry() { printf '%s-docker.pkg.dev' "${CFG[REGION]}"; }
 
 # crci_image_ref IMAGE_NAME TAG
@@ -594,6 +621,21 @@ crci_default_tag() {
   else
     h=$(printf '%s\n' "${trees[@]}" | git hash-object --stdin)
   fi
+  printf 'git-%s' "${h:0:12}"
+}
+
+# crci_try_default_tag PATH...: like crci_default_tag but prints nothing
+# (instead of dying) outside a git checkout or when a path is not committed.
+crci_try_default_tag() {
+  local prefix h p
+  local -a trees=()
+  git -C "$CRCI_ROOT" rev-parse --git-dir >/dev/null 2>&1 || return 0
+  prefix=$(git -C "$CRCI_ROOT" rev-parse --show-prefix 2>/dev/null) || return 0
+  for p in "$@"; do
+    h=$(git -C "$CRCI_ROOT" rev-parse "HEAD:$prefix$p" 2>/dev/null) || return 0
+    trees+=("$h")
+  done
+  ((${#trees[@]} == 1)) || h=$(printf '%s\n' "${trees[@]}" | git hash-object --stdin)
   printf 'git-%s' "${h:0:12}"
 }
 
@@ -643,6 +685,7 @@ crci_build_image() {
   else
     crci_run gcloud builds submit "$context" --config=scripts/cloudbuild.yaml \
       --substitutions="_IMAGE=$ref,_DOCKERFILE=$dockerfile" \
+      --gcs-source-staging-dir="gs://$(crci_staging_bucket)/source" \
       --service-account="projects/${CFG[GCP_PROJECT]}/serviceAccounts/$build_sa" \
       --region="${CFG[REGION]}" --project="${CFG[GCP_PROJECT]}"
   fi

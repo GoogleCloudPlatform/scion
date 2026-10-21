@@ -1,7 +1,7 @@
 # cr-ci bootstrap-gcp.sh (dry-run) project=example-project region=us-central1
 # dry-run: nothing is changed; '?' lines are read-only checks, assumed to find nothing
 # C1: APIs
-+ gcloud services enable run.googleapis.com artifactregistry.googleapis.com secretmanager.googleapis.com cloudscheduler.googleapis.com cloudbuild.googleapis.com iam.googleapis.com --project=example-project
++ gcloud services enable run.googleapis.com artifactregistry.googleapis.com secretmanager.googleapis.com cloudscheduler.googleapis.com cloudbuild.googleapis.com iam.googleapis.com storage.googleapis.com --project=example-project
 # C2: service accounts (EXEC_SA_NAME must stay at zero roles)
 ? gcloud iam service-accounts describe cr-runner-build-sa@example-project.iam.gserviceaccount.com --project=example-project '--format=value(email)'
 + gcloud iam service-accounts create cr-runner-build-sa --project=example-project '--display-name=cr-ci image builds (Cloud Build)' '--description=cr-ci: image builds (Cloud Build)'
@@ -14,6 +14,9 @@
 # C3: Artifact Registry repository
 ? gcloud artifacts repositories describe cr-runners --location=us-central1 --project=example-project '--format=value(name)'
 + gcloud artifacts repositories create cr-runners --repository-format=docker --location=us-central1 --project=example-project '--description=cr-ci runner and mediator images'
+# C19: Cloud Build staging bucket (sources only; deleted after 7 days)
+? gcloud storage buckets describe gs://example-project-cr-ci-staging --project=example-project '--format=value(name)'
++ gcloud storage buckets create gs://example-project-cr-ci-staging --project=example-project --location=us-central1 --uniform-bucket-level-access --public-access-prevention --lifecycle-file=scripts/staging-lifecycle.json
 # C5: secret containers (versions come from set-secrets.sh)
 ? gcloud secrets describe cr-runner-gh-app-private-key --project=example-project '--format=value(name)'
 + gcloud secrets create cr-runner-gh-app-private-key --replication-policy=automatic --project=example-project
@@ -21,6 +24,8 @@
 + gcloud secrets create cr-runner-gh-webhook-secret --replication-policy=automatic --project=example-project
 # C4: BUILD_SA_NAME may push to ARTIFACT_REPO only
 + gcloud artifacts repositories add-iam-policy-binding cr-runners --location=us-central1 --project=example-project --member=serviceAccount:cr-runner-build-sa@example-project.iam.gserviceaccount.com --role=roles/artifactregistry.writer --format=none
+# C19: BUILD_SA_NAME reads the uploaded build sources in the staging bucket only
++ gcloud storage buckets add-iam-policy-binding gs://example-project-cr-ci-staging --project=example-project --member=serviceAccount:cr-runner-build-sa@example-project.iam.gserviceaccount.com --role=roles/storage.objectViewer --format=none
 # C7: BUILD_SA_NAME writes build logs (CLOUD_LOGGING_ONLY)
 + gcloud projects add-iam-policy-binding example-project --member=serviceAccount:cr-runner-build-sa@example-project.iam.gserviceaccount.com --role=roles/logging.logWriter --condition=None --format=none
 # C6: MEDIATOR_SA_NAME reads the two secrets only

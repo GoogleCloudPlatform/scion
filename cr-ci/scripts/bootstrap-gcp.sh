@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # bootstrap-gcp.sh: one-time GCP setup for cr-ci (permissions-matrix C1-C7,
-# C11). Enables the APIs, creates the four service accounts, the Artifact
-# Registry repo and the two secret containers (no versions: set-secrets.sh adds
+# C11, C19). Enables the APIs, creates the four service accounts, the Artifact
+# Registry repo, the Cloud Build staging bucket and the two secret containers (no versions: set-secrets.sh adds
 # them), and binds the resource-scoped IAM of matrix 2.2 that does not need the
 # runner job or the mediator service to exist (deploy-job.sh binds C10,
 # deploy-mediator.sh binds C13). Idempotent.
@@ -12,8 +12,9 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 USAGE="Usage: bootstrap-gcp.sh [--config FILE] [--dry-run | --apply]
 
 Creates (if missing): APIs, service accounts BUILD/MEDIATOR/SCHEDULER/EXEC_SA_NAME,
-Artifact Registry repo ARTIFACT_REPO, secrets GITHUB_APP_PRIVATE_KEY_SECRET_NAME
-and GITHUB_WEBHOOK_SECRET_NAME (empty), and the IAM bindings C4, C6, C7, C11.
+Artifact Registry repo ARTIFACT_REPO, the build staging bucket
+(BUILD_STAGING_BUCKET), secrets GITHUB_APP_PRIVATE_KEY_SECRET_NAME and
+GITHUB_WEBHOOK_SECRET_NAME (empty), and the IAM bindings C4, C6, C7, C11, C19.
 
 $crci_common_help"
 
@@ -33,7 +34,7 @@ EXEC=$(crci_sa_email "${CFG[EXEC_SA_NAME]}")
 crci_note "C1: APIs"
 crci_run gcloud services enable run.googleapis.com artifactregistry.googleapis.com \
   secretmanager.googleapis.com cloudscheduler.googleapis.com cloudbuild.googleapis.com \
-  iam.googleapis.com --project="$P"
+  iam.googleapis.com storage.googleapis.com --project="$P"
 
 crci_note "C2: service accounts (EXEC_SA_NAME must stay at zero roles)"
 create_sa() { # NAME DESCRIPTION
@@ -59,6 +60,16 @@ else
     --location="$R" --project="$P" --description="cr-ci runner and mediator images"
 fi
 
+BUCKET="gs://$(crci_staging_bucket)"
+crci_note "C19: Cloud Build staging bucket (sources only; deleted after 7 days)"
+if crci_exists gcloud storage buckets describe "$BUCKET" --project="$P" --format='value(name)'; then
+  crci_run gcloud storage buckets update "$BUCKET" --project="$P" \
+    --uniform-bucket-level-access --public-access-prevention --lifecycle-file=scripts/staging-lifecycle.json
+else
+  crci_run gcloud storage buckets create "$BUCKET" --project="$P" --location="$R" \
+    --uniform-bucket-level-access --public-access-prevention --lifecycle-file=scripts/staging-lifecycle.json
+fi
+
 crci_note "C5: secret containers (versions come from set-secrets.sh)"
 for s in "${CFG[GITHUB_APP_PRIVATE_KEY_SECRET_NAME]}" "${CFG[GITHUB_WEBHOOK_SECRET_NAME]}"; do
   if crci_exists gcloud secrets describe "$s" --project="$P" --format='value(name)'; then
@@ -71,6 +82,9 @@ done
 crci_note "C4: BUILD_SA_NAME may push to ARTIFACT_REPO only"
 crci_run gcloud artifacts repositories add-iam-policy-binding "${CFG[ARTIFACT_REPO]}" --location="$R" --project="$P" \
   --member="serviceAccount:$BUILD" --role=roles/artifactregistry.writer --format=none
+crci_note "C19: BUILD_SA_NAME reads the uploaded build sources in the staging bucket only"
+crci_run gcloud storage buckets add-iam-policy-binding "$BUCKET" --project="$P" \
+  --member="serviceAccount:$BUILD" --role=roles/storage.objectViewer --format=none
 crci_note "C7: BUILD_SA_NAME writes build logs (CLOUD_LOGGING_ONLY)"
 crci_run gcloud projects add-iam-policy-binding "$P" \
   --member="serviceAccount:$BUILD" --role=roles/logging.logWriter --condition=None --format=none

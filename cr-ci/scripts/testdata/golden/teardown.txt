@@ -12,6 +12,9 @@
 # repository cr-runners and its images
 ? gcloud artifacts repositories describe cr-runners --location=us-central1 --project=example-project '--format=value(name)'
 + gcloud artifacts repositories delete cr-runners --location=us-central1 --project=example-project --quiet
+# build staging bucket gs://example-project-cr-ci-staging (uploaded sources only)
+? gcloud storage buckets describe gs://example-project-cr-ci-staging --project=example-project '--format=value(name)'
++ gcloud storage rm --recursive gs://example-project-cr-ci-staging --project=example-project
 # secret cr-runner-gh-app-private-key
 ? gcloud secrets describe cr-runner-gh-app-private-key --project=example-project '--format=value(name)'
 + gcloud secrets delete cr-runner-gh-app-private-key --project=example-project --quiet

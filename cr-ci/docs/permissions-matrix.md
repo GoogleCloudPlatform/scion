@@ -95,7 +95,7 @@ step says otherwise. Resource names come from `config.example.env`.
 
 | # | Step | Minimum role (resource) | Notes | Sources |
 | :-- | :--- | :--- | :--- | :--- |
-| C1 | Enable APIs: Cloud Run, Artifact Registry, Secret Manager, Cloud Scheduler, Cloud Build, IAM | `roles/serviceusage.serviceUsageAdmin` (project) | One time | [GC6] |
+| C1 | Enable APIs: Cloud Run, Artifact Registry, Secret Manager, Cloud Scheduler, Cloud Build, IAM, Cloud Storage | `roles/serviceusage.serviceUsageAdmin` (project) | One time | [GC6] |
 | C2 | Create the four service accounts (`BUILD_SA_NAME`, `MEDIATOR_SA_NAME`, `SCHEDULER_SA_NAME`, `EXEC_SA_NAME`) | `roles/iam.serviceAccountAdmin` (project) | `EXEC_SA_NAME` must stay at **zero** roles | [GC5] |
 | C3 | Create the Artifact Registry Docker repo `ARTIFACT_REPO` in `REGION` | `roles/artifactregistry.admin` (project) | | [GC4] |
 | C4 | Grant `BUILD_SA_NAME` `roles/artifactregistry.writer` on `ARTIFACT_REPO` | `roles/artifactregistry.admin` (repo) | Repository-level binding, not project-level | [GC4] |
@@ -112,7 +112,8 @@ step says otherwise. Resource names come from `config.example.env`.
 | C15 | **Quota increase**: Cloud Run regional ephemeral-disk (default 100 GiB, auto-granted) to cover `RUNNER_DISK_GI` x `MAX_CONCURRENT_RUNNERS`, plus regional CPU and memory if needed | `roles/cloudquotas.admin` (project), or the legacy `roles/servicemanagement.quotaAdmin`; Google approves the request | Only needed when raising `MAX_CONCURRENT_RUNNERS` above the default 5 (at 20 GiB each) | [GC9] |
 | C16 | Read logs, executions and metrics (operations) | `roles/logging.viewer` + `roles/run.viewer` (project) | `roles/run.viewer` can see execution env overrides. That is why the JIT config is passed by a claim token, never as an env override (design 3.2), and why the claim also requires the runner identity's ID token (claim contract v2). Grant it narrowly. | [GC1] |
 | C17 | Create alerting policies (launch failures, queue starvation) | `roles/monitoring.alertPolicyEditor` (project) | P4 or operations | [GC10] |
-| C18 | Teardown (delete everything above) | The admin role for each resource above (C2-C14) | `scripts/teardown.sh` (P4) | Same sources as C2-C14 |
+| C18 | Teardown (delete everything above) | The admin role for each resource above (C2-C14, C19) | `scripts/teardown.sh` (P4) | Same sources as C2-C14 |
+| C19 | Create the Cloud Build source staging bucket `BUILD_STAGING_BUCKET` (default `GCP_PROJECT-cr-ci-staging`; uniform access, public access prevention, objects deleted after 7 days) and grant `BUILD_SA_NAME` `roles/storage.objectViewer` on that bucket only; builds pass `--gcs-source-staging-dir` | `roles/storage.admin` (project), or bucket create plus `roles/storage.admin` on the bucket | A user-specified build SA reads the uploaded source itself, so it needs object read on the staging location. A dedicated bucket keeps that grant bucket-scoped instead of on the shared default `GCP_PROJECT_cloudbuild` bucket (resolves U10). The deployer uploads the source, so it needs object create there (covered by `roles/storage.admin`). | [GC7][GC12][GC13] |
 
 ### 2.1 Deployer roles (least-privilege bundle)
 
@@ -130,6 +131,7 @@ these roles on the project:
 - `roles/cloudscheduler.admin`
 - `roles/monitoring.alertPolicyEditor` (only for the alerting policies, C17)
 - `roles/cloudquotas.admin` (only when requesting the quota increase)
+- `roles/storage.admin` (the build staging bucket, C19; it can be granted on that bucket only once it exists)
 - `roles/iam.serviceAccountTokenCreator` on `BUILD_SA_NAME` (only for
   `build-runner-image.sh --local` / `deploy-mediator.sh --local`, which push
   with a token of the build SA)
@@ -138,7 +140,7 @@ these roles on the project:
 
 | Identity | Holds | Must not hold |
 | :--- | :--- | :--- |
-| `BUILD_SA_NAME` | `roles/artifactregistry.writer` on `ARTIFACT_REPO`; `roles/logging.logWriter` (C7) | Anything else |
+| `BUILD_SA_NAME` | `roles/artifactregistry.writer` on `ARTIFACT_REPO`; `roles/logging.logWriter` (C7); `roles/storage.objectViewer` on `BUILD_STAGING_BUCKET` only (C19) | Anything else |
 | `MEDIATOR_SA_NAME` | `roles/secretmanager.secretAccessor` on the two secrets only; `roles/run.developer` on `RUNNER_JOB_NAME` only; `roles/iam.serviceAccountUser` on `EXEC_SA_NAME` only | Project-level roles |
 | `SCHEDULER_SA_NAME` | `roles/run.invoker` on `MEDIATOR_SERVICE_NAME` only | Anything else |
 | `EXEC_SA_NAME` | **Nothing.** Workflow code can read its metadata-server token, so the token must be worthless. | Any role, including `roles/logging.logWriter` (Cloud Run captures stdout and stderr without it) |
@@ -282,20 +284,20 @@ Still UNVERIFIED (to settle in P2, P4 or P6):
   volumes on jobs, `run jobs deploy/update` volume flags) was not looked up;
   the floor is a recent release. **UNVERIFIED**; lower or raise it once
   checked against the gcloud release notes.
-- **U9. Job volume flags.** `deploy-job.sh` creates the job with
+- **U9. Job volume update in one call.** `deploy-job.sh` creates the job with
   `--add-volume=name=scratch,type=ephemeral-disk,size=<n>Gi` plus
   `--add-volume-mount`, and updates it with `--clear-volumes
-  --clear-volume-mounts` followed by the same flags. **UNVERIFIED** that the
-  GA `gcloud run jobs` group accepts `type=ephemeral-disk` (it may still need
-  `gcloud beta`) and that clear and add combine in one update. Check in the
-  P6 PoC with the dry-run transcript.
-- **U10. Cloud Build staging bucket.** `gcloud builds submit` uploads the
-  source to `gs://GCP_PROJECT_cloudbuild`. With a user-specified build SA, that
-  SA may need read access to the uploaded object, which section 2.2 does not
-  grant (`BUILD_SA_NAME` holds only `artifactregistry.writer` on the repo and
-  `logging.logWriter`). **UNVERIFIED**; if the P6 build fails with a storage
-  403, grant `roles/storage.objectViewer` on that bucket only, or use
-  `--local`.
+  --clear-volume-mounts` followed by the same flags. The GA `gcloud run jobs
+  create` and `update` references list `type=ephemeral-disk` with an optional
+  `size` key and the `--clear-volumes` / `--clear-volume-mounts` flags
+  (checked by the P4 reviewer). **UNVERIFIED** only that clear and add combine
+  in one `update` call; check in the P6 PoC on a second `deploy-job.sh --apply`.
+- **U10 (resolved by design). Cloud Build staging access.** `gcloud builds
+  submit` uploads the source to a bucket the build SA must read. Instead of
+  granting access to the shared default `gs://GCP_PROJECT_cloudbuild`,
+  `bootstrap-gcp.sh` creates a dedicated staging bucket and grants
+  `BUILD_SA_NAME` `roles/storage.objectViewer` on it only, and the builds pass
+  `--gcs-source-staging-dir` (row C19). Confirm on the first P6 build.
 
 ## 6. Request to a GoogleCloudPlatform org owner
 
@@ -380,6 +382,8 @@ GCP (docs.cloud.google.com, read 2026-10-21):
 - [GC9] Cloud Quotas permissions: https://docs.cloud.google.com/docs/quotas/permissions
 - [GC10] Cloud Monitoring access control: https://docs.cloud.google.com/monitoring/access-control
 - [GC11] Cloud Run Jobs CPU limits (allowed 1, 2, 4, 6, 8; memory range per CPU): https://docs.cloud.google.com/run/docs/configuring/jobs/cpu
+- [GC12] `gcloud builds submit` reference (`--gcs-source-staging-dir`, `--service-account`): https://cloud.google.com/sdk/gcloud/reference/builds/submit
+- [GC13] Cloud Storage IAM roles (`roles/storage.objectViewer`, `roles/storage.admin`): https://docs.cloud.google.com/storage/docs/access-control/iam-roles
 
 The role names in GC3-GC6 and GC8-GC10 are the standard predefined roles. They were
 not each re-fetched for this page; P4's dry-run transcripts are the check.

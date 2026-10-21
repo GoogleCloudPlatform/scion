@@ -70,6 +70,14 @@ commands without `--apply`; read that transcript before applying.
 | Runner image | see [Runner image updates](#runner-image-updates) |
 | `RECONCILE_SCHEDULE` or `MEDIATOR_URL` | `scripts/deploy-scheduler.sh --apply` (after `deploy-mediator.sh` for `MEDIATOR_URL`) |
 
+**Upgrade order: runner first.** When a change touches both, run
+`build-runner-image.sh` and `deploy-job.sh` **before** `deploy-mediator.sh`.
+The mediator registers runners with the work folder `/home/runner/work`, and
+only a runner image that links that folder to the `/scratch` disk (cache
+parity) keeps the work folder off the in-memory root filesystem. An older
+image with a newer mediator risks OOM on large jobs. `deploy-mediator.sh`
+warns when the job's image tag differs from the current `runner/` tree hash.
+
 Every script is idempotent, so re-running one after a partial failure is the
 recovery. A mediator deploy restarts the single instance and loses pending
 claims; affected jobs are relaunched by the next reconcile

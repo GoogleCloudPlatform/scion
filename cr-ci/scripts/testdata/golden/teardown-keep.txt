@@ -11,6 +11,9 @@
 + gcloud run jobs delete cr-gh-runner-8c32g --region=us-central1 --project=example-project --quiet
 # keeping repository cr-runners; removing BUILD_SA_NAME's writer binding
 + gcloud artifacts repositories remove-iam-policy-binding cr-runners --location=us-central1 --project=example-project --member=serviceAccount:cr-runner-build-sa@example-project.iam.gserviceaccount.com --role=roles/artifactregistry.writer --format=none
+# build staging bucket gs://example-project-cr-ci-staging (uploaded sources only)
+? gcloud storage buckets describe gs://example-project-cr-ci-staging --project=example-project '--format=value(name)'
++ gcloud storage rm --recursive gs://example-project-cr-ci-staging --project=example-project
 # keeping secret cr-runner-gh-app-private-key; removing MEDIATOR_SA_NAME's access
 + gcloud secrets remove-iam-policy-binding cr-runner-gh-app-private-key --project=example-project --member=serviceAccount:cr-runner-mediator-sa@example-project.iam.gserviceaccount.com --role=roles/secretmanager.secretAccessor --format=none
 # keeping secret cr-runner-gh-webhook-secret; removing MEDIATOR_SA_NAME's access

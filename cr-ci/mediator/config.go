@@ -29,6 +29,7 @@ const (
 	EnvMaxConcurrentRunners    = "MAX_CONCURRENT_RUNNERS"
 	EnvTaskTimeout             = "TASK_TIMEOUT"
 	EnvArtifactRepo            = "ARTIFACT_REPO"
+	EnvBuildStagingBucket      = "BUILD_STAGING_BUCKET"
 	EnvMediatorServiceName     = "MEDIATOR_SERVICE_NAME"
 	EnvReconcilerJobName       = "RECONCILER_JOB_NAME"
 	EnvReconcileSchedule       = "RECONCILE_SCHEDULE"
@@ -113,6 +114,7 @@ type Config struct {
 	MaxConcurrentRunners    int
 	TaskTimeout             time.Duration
 	ArtifactRepo            string
+	BuildStagingBucket      string // empty: <GCP_PROJECT>-cr-ci-staging (used by the deploy scripts only)
 	MediatorServiceName     string
 	ReconcilerJobName       string
 	ReconcileSchedule       string
@@ -147,6 +149,7 @@ func Defaults() map[string]string {
 		EnvMaxConcurrentRunners:    defaultMaxConcurrent,
 		EnvTaskTimeout:             defaultTaskTimeout,
 		EnvArtifactRepo:            defaultArtifactRepo,
+		EnvBuildStagingBucket:      "",
 		EnvMediatorServiceName:     defaultMediatorService,
 		EnvReconcilerJobName:       defaultReconcilerJobName,
 		EnvReconcileSchedule:       defaultReconcileSchedule,
@@ -189,6 +192,9 @@ var (
 	// Artifact Registry repository IDs and Cloud Scheduler job IDs (kept to
 	// the stricter lowercase form so one rule covers both).
 	resourceIDRE = regexp.MustCompile(`^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
+	// Cloud Storage bucket names (3-63 chars, no dots: dotted names need
+	// domain verification).
+	bucketRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{1,61}[a-z0-9]$`)
 	// Docker image names (single path component).
 	imageNameRE = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*$`)
 	// Service account IDs: 6-30 chars.
@@ -344,6 +350,10 @@ func Load(getenv func(string) string) (*Config, error) {
 	}
 
 	c.ArtifactRepo = match(EnvArtifactRepo, resourceIDRE, "Artifact Registry repository ID")
+	c.BuildStagingBucket = match(EnvBuildStagingBucket, bucketRE, "Cloud Storage bucket name")
+	if strings.HasPrefix(c.BuildStagingBucket, "goog") || strings.Contains(c.BuildStagingBucket, "..") {
+		fail(EnvBuildStagingBucket, "%q is not a valid Cloud Storage bucket name", c.BuildStagingBucket)
+	}
 	c.MediatorServiceName = match(EnvMediatorServiceName, cloudRunNameRE, "Cloud Run service name")
 	c.ReconcilerJobName = match(EnvReconcilerJobName, resourceIDRE, "Cloud Scheduler job ID")
 	c.ReconcileSchedule = match(EnvReconcileSchedule, cronRE, "five-field cron schedule")

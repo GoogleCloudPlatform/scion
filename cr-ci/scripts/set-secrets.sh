@@ -57,6 +57,17 @@ crci_help_exit "$USAGE"
 [[ $KEY_FILE == - && $HOOK_FILE == - ]] && crci_die "only one value can come from stdin"
 [[ $GEN_FILE == - ]] && crci_die "--generate-webhook-secret needs a file name, not stdin"
 
+# outside_module PATH: refuse secret files inside cr-ci/ (deploy-mediator.sh
+# uploads that directory to Cloud Build; .gcloudignore is an allowlist, but a
+# secret has no business in a checkout).
+outside_module() {
+  local p=$1 dir
+  dir=$(cd "$(dirname -- "$p")" 2>/dev/null && pwd -P) || return 0
+  case "$dir/" in
+    "$(cd "$CRCI_ROOT" && pwd -P)/"*) crci_die "$p is inside the cr-ci checkout; keep secret files outside it (for example ~/cr-ci-secrets/)" ;;
+  esac
+}
+
 # check_file FILE: exists, regular, not readable by group or others.
 check_file() {
   local f=$1 mode
@@ -68,6 +79,9 @@ check_file() {
 }
 [[ -n $KEY_FILE ]] && check_file "$KEY_FILE"
 [[ -n $HOOK_FILE ]] && check_file "$HOOK_FILE"
+[[ -n $KEY_FILE && $KEY_FILE != - ]] && outside_module "$KEY_FILE"
+[[ -n $HOOK_FILE && $HOOK_FILE != - ]] && outside_module "$HOOK_FILE"
+[[ -n $GEN_FILE ]] && outside_module "$GEN_FILE"
 if [[ -n $GEN_FILE ]]; then
   [[ -e $GEN_FILE || -L $GEN_FILE ]] && crci_die "$GEN_FILE exists; choose a new file name"
   [[ -d $(dirname -- "$GEN_FILE") ]] || crci_die "directory of $GEN_FILE does not exist"

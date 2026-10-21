@@ -34,6 +34,7 @@ nothing exists yet), and `#` lines are notes.
   cp config.example.env config.env      # gitignored; never commit it
   $EDITOR config.env                    # TARGET_REPOS, GITHUB_APP_ID (1 until the App exists),
                                         # GITHUB_APP_INSTALLATION_SCOPE, GCP_PROJECT, REGION
+                                        # (optional: BUILD_STAGING_BUCKET if the default name is taken)
   scripts/check-config.sh               # validates like the mediator, prints resolved values
   ```
 
@@ -50,15 +51,20 @@ It does the following (each create only if the resource is missing; bindings
 are additive, so a re-run is harmless):
 
 1. Enables the Cloud Run, Artifact Registry, Secret Manager, Cloud Scheduler,
-   Cloud Build and IAM APIs (C1).
+   Cloud Build, IAM and Cloud Storage APIs (C1).
 2. Creates `BUILD_SA_NAME`, `MEDIATOR_SA_NAME`, `SCHEDULER_SA_NAME` and
    `EXEC_SA_NAME` (C2).
-3. Creates the Docker repository `ARTIFACT_REPO` in `REGION` (C3).
+3. Creates the Docker repository `ARTIFACT_REPO` in `REGION` (C3), and the
+   Cloud Build source staging bucket `BUILD_STAGING_BUCKET` (default
+   `GCP_PROJECT-cr-ci-staging`; uniform access, public access prevention,
+   uploaded sources deleted after 7 days; C19). Bucket names are global: if
+   the default is taken, set `BUILD_STAGING_BUCKET`.
 4. Creates the two secret containers, with no versions yet (C5).
 5. Binds:
-   - `BUILD_SA_NAME`: `artifactregistry.writer` on the repository (C4) and
-     `logging.logWriter` on the project (C7, needed by `CLOUD_LOGGING_ONLY`
-     builds);
+   - `BUILD_SA_NAME`: `artifactregistry.writer` on the repository (C4),
+     `storage.objectViewer` on the staging bucket only (C19, to read the
+     uploaded build source), and `logging.logWriter` on the project (C7,
+     needed by `CLOUD_LOGGING_ONLY` builds);
    - `MEDIATOR_SA_NAME`: `secretmanager.secretAccessor` on each secret (C6),
      and `iam.serviceAccountUser` on `EXEC_SA_NAME` (C11).
 6. Checks that `EXEC_SA_NAME` holds no project role, and stops if it does.
@@ -83,10 +89,10 @@ scripts/build-runner-image.sh --apply --local # or: local docker, pushed as BUIL
 - **Cloud Build** runs `scripts/cloudbuild.yaml` (builder pinned by digest,
   `logging: CLOUD_LOGGING_ONLY`) as `BUILD_SA_NAME`. The deployer needs
   `roles/cloudbuild.builds.editor` and `iam.serviceAccountUser` on
-  `BUILD_SA_NAME` (C7). Unverified: whether the build SA also needs read
-  access to the staging bucket `gs://GCP_PROJECT_cloudbuild`, where
-  `gcloud builds submit` uploads the source
-  ([matrix U10](permissions-matrix.md#5-design-corrections-and-open-items)).
+  `BUILD_SA_NAME` (C7). The source is uploaded to the dedicated staging
+  bucket (`--gcs-source-staging-dir=gs://BUILD_STAGING_BUCKET/source`), the
+  only bucket the build SA can read (C19); the shared default
+  `gs://GCP_PROJECT_cloudbuild` is not used.
 - **`--local`** builds with the local docker daemon and pushes with a
   short-lived token of `BUILD_SA_NAME`, which goes from
   `gcloud auth print-access-token --impersonate-service-account` to
@@ -127,11 +133,17 @@ is known before the first deploy, so:
 
 ## 6. Secrets: `scripts/set-secrets.sh`
 
+Keep secret files **outside the checkout**, for example in `~/cr-ci-secrets`
+(`set-secrets.sh` refuses files inside `cr-ci/`, which `deploy-mediator.sh`
+uploads to Cloud Build):
+
 ```bash
-chmod 600 app-key.pem webhook-secret
-scripts/set-secrets.sh --app-key-file app-key.pem --webhook-secret-file webhook-secret --apply
+mkdir -m 700 -p ~/cr-ci-secrets
+chmod 600 ~/cr-ci-secrets/app-key.pem ~/cr-ci-secrets/webhook-secret
+scripts/set-secrets.sh --app-key-file ~/cr-ci-secrets/app-key.pem \
+  --webhook-secret-file ~/cr-ci-secrets/webhook-secret --apply
 # manual App setup without a GitHub-generated webhook secret:
-scripts/set-secrets.sh --generate-webhook-secret new-webhook-secret --apply
+scripts/set-secrets.sh --generate-webhook-secret ~/cr-ci-secrets/new-webhook-secret --apply
 ```
 
 - Adds a new version to `GITHUB_APP_PRIVATE_KEY_SECRET_NAME` and/or
@@ -148,7 +160,8 @@ scripts/set-secrets.sh --generate-webhook-secret new-webhook-secret --apply
   with no newline, to a new file `OUT` (mode 0600; it must not exist), and
   adds exactly that. Paste `OUT` into the App's webhook secret, then delete
   `OUT`.
-- Delete the local key and secret files once they are stored. Rotation is in
+- Delete the local key and secret files once they are stored
+  (`rm -r ~/cr-ci-secrets`). Rotation is in
   [operations.md](operations.md#secret-rotation).
 
 ## 7. Mediator: `scripts/deploy-mediator.sh`
@@ -157,10 +170,17 @@ scripts/set-secrets.sh --generate-webhook-secret new-webhook-secret --apply
 scripts/deploy-mediator.sh --apply [--tag TAG] [--local] [--no-invoker-iam-check]
 ```
 
-1. Builds `mediator/Dockerfile` (pinned base images; static binary on
+1. Refuses (with `--apply`) while `GITHUB_APP_ID` is still the placeholder
+   `1`. Warns if the runner job is missing or runs another runner image than
+   the current `runner/` tree: deploy the runner image and job **before** the
+   mediator (see the upgrade order in
+   [operations.md](operations.md#deploy-and-upgrade)).
+2. Builds `mediator/Dockerfile` (pinned base images; static binary on
    distroless, non-root) like the runner image. The default tag is the tree
-   hash of `mediator/` plus `go.mod`.
-2. Deploys `MEDIATOR_SERVICE_NAME` as `MEDIATOR_SA_NAME` (C12):
+   hash of `mediator/` plus `go.mod`. Only `go.mod` and `mediator/` (without
+   tests) are uploaded: `cr-ci/.gcloudignore` is an allowlist, so no
+   `config.env` or stray file leaves the machine.
+3. Deploys `MEDIATOR_SERVICE_NAME` as `MEDIATOR_SA_NAME` (C12):
    - `--max-instances=1` (**required**: claims live in the mediator's memory)
      and `--min-instances=0`; 1 vCPU, 512 MiB, request timeout 300 s;
    - public ingress;
@@ -168,9 +188,9 @@ scripts/deploy-mediator.sh --apply [--tag TAG] [--local] [--no-invoker-iam-check
      delimiter, because values contain commas and spaces). The secrets are
      passed **by name**; the mediator reads them from Secret Manager with its
      own identity.
-3. Re-reads the service and stops if max-instances is not 1.
-4. Grants `SCHEDULER_SA_NAME` `roles/run.invoker` on the service only (C13).
-5. Prints the service URL. If `MEDIATOR_URL` is empty, it tells you to set it
+4. Re-reads the service and stops if max-instances is not 1.
+5. Grants `SCHEDULER_SA_NAME` `roles/run.invoker` on the service only (C13).
+6. Prints the service URL. If `MEDIATOR_URL` is empty, it tells you to set it
    and run the script again; the service answers 503 on `/webhook` and
    `/reconcile` until then. If `MEDIATOR_URL` is not one of the service's URLs
    (`status.url` or the deterministic URL), it warns: update `MEDIATOR_URL`
@@ -235,10 +255,11 @@ It deletes, in reverse order, skipping what is already gone:
 3. the runner job;
 4. the Artifact Registry repository with all images (`--keep-images` keeps it
    and removes `BUILD_SA_NAME`'s binding);
-5. both secrets with all versions (`--keep-secrets` keeps them and removes
+5. the build staging bucket (uploaded sources only);
+6. both secrets with all versions (`--keep-secrets` keeps them and removes
    `MEDIATOR_SA_NAME`'s access);
-6. `BUILD_SA_NAME`'s project-level `logging.logWriter` binding;
-7. the four service accounts.
+7. `BUILD_SA_NAME`'s project-level `logging.logWriter` binding;
+8. the four service accounts.
 
 APIs stay enabled, since the project may use them. Uninstall the GitHub App
 and clear the routing variable first

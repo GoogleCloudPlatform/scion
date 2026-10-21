@@ -372,6 +372,7 @@ var allExisting = []string{
 	"cr-gh-runner-8c32g",
 	"cr-runner-mediator",
 	"cr-runner-reconciler",
+	"gs://example-project-cr-ci-staging",
 }
 
 // TestIdempotentSecondRun: with everything in place, nothing is created or
@@ -581,7 +582,7 @@ func TestMediatorDeploy(t *testing.T) {
 		`STUB_URLS=["https://cr-runner-mediator-hash-uc.a.run.app","` + mediatorURL + `"]`}
 	r = e.run("deploy-mediator.sh", "", "--config", "config.env", "--apply", "--tag", "golden")
 	wantCode(t, r, 0)
-	if strings.Contains(r.stderr, "WARNING") {
+	if strings.Contains(r.stderr, "WARNING: MEDIATOR_URL") {
 		t.Errorf("warned although MEDIATOR_URL is one of the service URLs:\n%s", r.stderr)
 	}
 	cfg := baseConfig()
@@ -602,7 +603,7 @@ func TestMediatorDeploy(t *testing.T) {
 // ---- IAM ------------------------------------------------------------------------------
 
 // TestIAMBindingsMatchMatrix: the bindings the scripts make are exactly those
-// of docs/permissions-matrix.md section 2.2 (C4, C6, C7, C10, C11, C13), each
+// of docs/permissions-matrix.md section 2.2 (C4, C6, C7, C10, C11, C13, C19), each
 // on the resource the matrix names; EXEC_SA_NAME is never granted anything.
 func TestIAMBindingsMatchMatrix(t *testing.T) {
 	const (
@@ -612,13 +613,14 @@ func TestIAMBindingsMatchMatrix(t *testing.T) {
 		exec      = "cr-runner-exec-sa@example-project.iam.gserviceaccount.com"
 	)
 	want := []string{
-		"artifacts repositories cr-runners " + build + " roles/artifactregistry.writer",            // C4
-		"projects example-project " + build + " roles/logging.logWriter",                           // C7
-		"secrets cr-runner-gh-app-private-key " + mediator + " roles/secretmanager.secretAccessor", // C6
-		"secrets cr-runner-gh-webhook-secret " + mediator + " roles/secretmanager.secretAccessor",  // C6
-		"iam service-accounts " + exec + " " + mediator + " roles/iam.serviceAccountUser",          // C11
-		"run jobs cr-gh-runner-8c32g " + mediator + " roles/run.developer",                         // C10
-		"run services cr-runner-mediator " + scheduler + " roles/run.invoker",                      // C13
+		"artifacts repositories cr-runners " + build + " roles/artifactregistry.writer",               // C4
+		"projects example-project " + build + " roles/logging.logWriter",                              // C7
+		"secrets cr-runner-gh-app-private-key " + mediator + " roles/secretmanager.secretAccessor",    // C6
+		"secrets cr-runner-gh-webhook-secret " + mediator + " roles/secretmanager.secretAccessor",     // C6
+		"iam service-accounts " + exec + " " + mediator + " roles/iam.serviceAccountUser",             // C11
+		"run jobs cr-gh-runner-8c32g " + mediator + " roles/run.developer",                            // C10
+		"run services cr-runner-mediator " + scheduler + " roles/run.invoker",                         // C13
+		"storage buckets gs://example-project-cr-ci-staging " + build + " roles/storage.objectViewer", // C19
 	}
 	var got []string
 	for _, s := range []struct {
@@ -764,10 +766,13 @@ func TestTeardown(t *testing.T) {
 		s := c.String()
 		if strings.Contains(s, " delete ") || strings.Contains(s, "remove-iam-policy-binding") {
 			deletes = append(deletes, strings.Join(c.argv[1:4], " "))
+		} else if strings.Contains(s, "storage rm ") {
+			deletes = append(deletes, strings.Join(c.argv[1:4], " "))
 		}
 	}
 	want := []string{
 		"scheduler jobs delete", "run services delete", "run jobs delete", "artifacts repositories delete",
+		"storage rm --recursive",
 		"secrets delete cr-runner-gh-app-private-key", "secrets delete cr-runner-gh-webhook-secret",
 		"projects remove-iam-policy-binding example-project",
 		"iam service-accounts delete", "iam service-accounts delete", "iam service-accounts delete", "iam service-accounts delete",
@@ -846,9 +851,32 @@ func TestDefaultTag(t *testing.T) {
 		t.Errorf("dirty runner/ accepted: %d %q", r.code, r.stderr)
 	}
 	// The mediator tag covers mediator/ and go.mod.
-	r = e.run(filepath.Join(mod, "scripts", "deploy-mediator.sh"), "", "--config", "config.env")
+	med := filepath.Join(mod, "scripts", "deploy-mediator.sh")
+	r = e.run(med, "", "--config", "config.env")
 	wantCode(t, r, 0)
 	if !regexp.MustCompile(`cr-runner-mediator:git-[0-9a-f]{12} `).MatchString(r.stdout) {
 		t.Errorf("mediator default tag missing:\n%s", r.stdout)
+	}
+
+	// Upgrade order: deploy-mediator warns when the job runs another runner
+	// image than the current runner/ tree (the runner must go first).
+	e.state("exists", allExisting...)
+	img := "us-central1-docker.pkg.dev/example-project/cr-runners/gh-runner:"
+	e.extra = []string{"STUB_JOB_IMAGE=" + img + "git-" + tree[:12]}
+	r = e.run(med, "", "--config", "config.env", "--apply", "--tag", "golden")
+	wantCode(t, r, 0)
+	if strings.Contains(r.stderr, "not the current runner tag") {
+		t.Errorf("warned although the job runs the current runner image:\n%s", r.stderr)
+	}
+	e.extra = []string{"STUB_JOB_IMAGE=" + img + "git-000000000000"}
+	r = e.run(med, "", "--config", "config.env", "--apply", "--tag", "golden")
+	wantCode(t, r, 0)
+	if !strings.Contains(r.stderr, "not the current runner tag git-"+tree[:12]) {
+		t.Errorf("no warning for an older runner image on the job:\n%s", r.stderr)
+	}
+	e.state("exists", "cr-runner-mediator")
+	r = e.run(med, "", "--config", "config.env", "--apply", "--tag", "golden")
+	if !strings.Contains(r.stderr, "runner job cr-gh-runner-8c32g not found") {
+		t.Errorf("no warning for a missing runner job:\n%s", r.stderr)
 	}
 }
