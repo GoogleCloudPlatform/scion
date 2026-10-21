@@ -193,6 +193,9 @@ func TestPlatformSkillsFS_ScionWebServing(t *testing.T) {
 		"is NOT proof",
 		"headless browser",
 		"If you could not run a browser, say so",
+		"Does not work: client-side routing by path",
+		"`HashRouter`, `createWebHashHistory`",
+		"`pushState`, `replaceState`, `BrowserRouter`",
 	} {
 		if !strings.Contains(content, want) {
 			t.Errorf("embedded scion-web-serving/SKILL.md does not contain %q", want)

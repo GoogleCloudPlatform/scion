@@ -38,6 +38,9 @@ that, or point the person to `scion tunnel` (below).
   and service workers.
 - Does not work: dev servers with live reload (`vite dev`, `next dev`), and
   anything that needs a live backend.
+- Does not work: client-side routing by path (React Router's
+  `BrowserRouter`, Vue Router's `createWebHistory` and similar). Use hash
+  routing instead (`HashRouter`, `createWebHashHistory`), or no router.
 - Data the page needs must be inlined at build time (for example a
   `<script type="application/json">` block or a JS constant).
 
@@ -83,11 +86,14 @@ https://googlecloudplatform.github.io/scion/hosted/user/port-forwarding/#multi-f
   for pages that are broken for them.
 - Search the built HTML for `src=`, `href=`, `url(`, `fetch(`, `XMLHttpRequest`,
   `EventSource`, `WebSocket`, `import(`, `localStorage`, `sessionStorage`,
-  `indexedDB`, `document.cookie`, `new Worker`, `SharedWorker` and
-  `serviceWorker`. Anything that points at your server, or uses browser
-  storage, cookies or workers, will not work through the link. This search
-  is the only check for storage, cookies and workers: they work on
-  `127.0.0.1`, so the browser check below does not catch them.
+  `indexedDB`, `document.cookie`, `new Worker`, `SharedWorker`,
+  `serviceWorker`, `pushState`, `replaceState`, `BrowserRouter` and
+  `createWebHistory`. Anything that points at your server, or uses browser
+  storage, cookies, workers or path-based routing, will not work through the
+  link. Ignore matches inside minified library code and links to other
+  sites; look for URLs that point at your own server. This search is the
+  only check for storage, cookies, workers and path-based routing: they work
+  on `127.0.0.1`, so the browser check below does not catch them.
 - Load the page in a headless browser (for example Playwright Chromium) from
   `http://127.0.0.1:<port>/`, with every request other than the page itself
   blocked and recorded. In Playwright:
