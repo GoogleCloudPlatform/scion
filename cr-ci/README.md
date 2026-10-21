@@ -59,6 +59,7 @@ each step needs are in [docs/permissions-matrix.md](docs/permissions-matrix.md).
 1. **Config.** `cp config.example.env config.env` and fill in the REQUIRED
    keys. Until the App exists, use the placeholder `GITHUB_APP_ID=1`; every
    script validates the whole config, and the GCP-side ones ignore the value.
+   `scripts/check-config.sh` validates the file and prints the resolved values.
 2. **GCP bootstrap.** `scripts/bootstrap-gcp.sh`: APIs, service accounts,
    Artifact Registry, empty secrets, IAM ([gcp-setup.md](docs/gcp-setup.md)).
 3. **Runner image.** `scripts/build-runner-image.sh`.

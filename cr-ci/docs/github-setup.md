@@ -61,8 +61,8 @@ echo "MEDIATOR_URL=https://cr-runner-mediator-${project_number}.${REGION}.run.ap
 ```
 
 Use your `MEDIATOR_SERVICE_NAME` in place of `cr-runner-mediator` if you
-changed it. Put the printed line into `config.env`. The webhook URL is
-`MEDIATOR_URL` + `/webhook`.
+changed it. Put the printed line into `config.env` and check it with
+`scripts/check-config.sh`. The webhook URL is `MEDIATOR_URL` + `/webhook`.
 
 `MEDIATOR_URL` is also the audience of every ID token the mediator accepts
 (claims and `/reconcile`). The runners and the scheduler use whatever is in
