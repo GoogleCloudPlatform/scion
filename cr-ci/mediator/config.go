@@ -351,7 +351,9 @@ func Load(getenv func(string) string) (*Config, error) {
 
 	c.ArtifactRepo = match(EnvArtifactRepo, resourceIDRE, "Artifact Registry repository ID")
 	c.BuildStagingBucket = match(EnvBuildStagingBucket, bucketRE, "Cloud Storage bucket name")
-	if strings.HasPrefix(c.BuildStagingBucket, "goog") || strings.Contains(c.BuildStagingBucket, "..") {
+	// Cloud Storage forbids the "goog" prefix and "google" anywhere in a name.
+	if strings.HasPrefix(c.BuildStagingBucket, "goog") || strings.Contains(c.BuildStagingBucket, "google") ||
+		strings.Contains(c.BuildStagingBucket, "..") {
 		fail(EnvBuildStagingBucket, "%q is not a valid Cloud Storage bucket name", c.BuildStagingBucket)
 	}
 	c.MediatorServiceName = match(EnvMediatorServiceName, cloudRunNameRE, "Cloud Run service name")

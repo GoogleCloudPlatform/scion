@@ -188,6 +188,7 @@ var invalidCases = []struct {
 	{EnvBuildStagingBucket, "Bad_Bucket"},
 	{EnvBuildStagingBucket, "ab"},
 	{EnvBuildStagingBucket, "google-bucket"},
+	{EnvBuildStagingBucket, "my-google-builds"},
 	{EnvBuildStagingBucket, "dotted.bucket.name"},
 	{EnvMediatorServiceName, "1abc"},
 	{EnvReconcilerJobName, "has_underscore"},

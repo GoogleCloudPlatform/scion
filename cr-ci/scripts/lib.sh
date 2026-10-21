@@ -495,7 +495,8 @@ crci_validate_config() {
 
   _crci_match ARTIFACT_REPO "$resid" "Artifact Registry repository ID"
   _crci_match BUILD_STAGING_BUCKET '^[a-z0-9][a-z0-9_-]{1,61}[a-z0-9]$' "Cloud Storage bucket name"
-  if [[ ${CFG[BUILD_STAGING_BUCKET]} == goog* || ${CFG[BUILD_STAGING_BUCKET]} == *..* ]]; then
+  # Cloud Storage forbids the "goog" prefix and "google" anywhere in a name.
+  if [[ ${CFG[BUILD_STAGING_BUCKET]} == goog* || ${CFG[BUILD_STAGING_BUCKET]} == *google* || ${CFG[BUILD_STAGING_BUCKET]} == *..* ]]; then
     _crci_fail BUILD_STAGING_BUCKET "\"${CFG[BUILD_STAGING_BUCKET]}\" is not a valid Cloud Storage bucket name"
   fi
   _crci_match MEDIATOR_SERVICE_NAME "$cloudrun" "Cloud Run service name"
