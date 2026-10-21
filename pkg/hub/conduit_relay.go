@@ -348,16 +348,44 @@ func (s *Server) conduitRefreshGrantKeys(ctx context.Context) []grant.WireKey {
 	return grant.ToWire(keys)
 }
 
+// SetConduitShutdownGrace records server.hub.conduit.shutdown_grace (the
+// time the platform allows between SIGTERM and process kill) when it is
+// set, so every relay shutdown path caps the GoAway drain deadline at
+// grace - 2s: the SIGTERM drain (DrainConduitForShutdown) and the
+// teardown's shutdownConduitRelay, which runs alone when the server
+// context was cancelled without the SIGTERM drain (ptone/scion#5105
+// timing). Unset (never called), the teardown's drain stays uncapped.
+func (s *Server) SetConduitShutdownGrace(grace time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.conduitShutdownGrace, s.conduitShutdownGraceSet = grace, true
+}
+
+// conduitShutdownGraceSetting returns the grace SetConduitShutdownGrace
+// recorded and whether it was set.
+func (s *Server) conduitShutdownGraceSetting() (time.Duration, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.conduitShutdownGrace, s.conduitShutdownGraceSet
+}
+
 // shutdownConduitRelay drains the relay (relay row draining, GoAway to every
-// session, wait until ctx is done). It runs first in CleanupResources. The
-// relay marks session rows draining with a bounded number of writes in
-// flight; one batched per-relay UPDATE is tracked in ptone/scion#2897.
+// session, wait until ctx is done). It runs first in CleanupResources. With
+// a shutdown grace recorded (SetConduitShutdownGrace), the GoAway drain
+// deadline is capped as in the SIGTERM drain; when that drain already ran,
+// this only waits for it. The relay marks session rows draining with a
+// bounded number of writes in flight; one batched per-relay UPDATE is
+// tracked in ptone/scion#2897.
 func (s *Server) shutdownConduitRelay(ctx context.Context) {
 	rt := s.conduit.Load()
 	if rt == nil {
 		return
 	}
-	if err := rt.relay.Shutdown(ctx); err != nil {
+	var opts relay.ShutdownOptions
+	if grace, ok := s.conduitShutdownGraceSetting(); ok {
+		opts = relay.ShutdownOptions{CapDrain: true, DrainCap: relay.ShutdownDrainCap(grace)}
+	}
+	if err := rt.relay.ShutdownWith(ctx, opts); err != nil {
 		slog.Warn("Conduit relay shutdown", "error", err)
 	}
 }

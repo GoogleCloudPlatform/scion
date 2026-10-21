@@ -258,6 +258,8 @@ type WebServer struct {
 	events         EventPublisher              // nil when no publisher configured
 	hubHandler     http.Handler                // mounted Hub API handler, or nil
 	hubShutdown    func(context.Context) error // Hub resource cleanup, or nil
+	shutdownMark   shutdownState               // BeginShutdown mark (ptone/scion#5054)
+	shutdownHooks  ShutdownHooks               // optional shutdown seams (SetShutdownHooks)
 	maintenance    *MaintenanceState           // runtime maintenance mode state (shared with Hub)
 	demotionSafe   *atomic.Bool                // shared with Hub; nil-safe (nil = false = don't demote)
 	authzService   *AuthzService               // authorization service for SSE subject checks
@@ -1979,6 +1981,11 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	ch, unsubscribe := ws.events.Subscribe(subjects...)
 	defer unsubscribe()
 
+	// The stream also ends when the server begins shutting down, so it
+	// does not hold the HTTP drain (ptone/scion#5054).
+	streamCtx, endStream := ws.shutdownMark.streamContext(r)
+	defer endStream()
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -2058,7 +2065,7 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 			_, _ = fmt.Fprintf(w, "event: reconnect\ndata: {}\n\n")
 			flusher.Flush()
 			return
-		case <-r.Context().Done():
+		case <-streamCtx.Done():
 			return
 		}
 	}
@@ -4098,6 +4105,11 @@ func (ws *WebServer) buildHandler() http.Handler {
 	// Dev-auth middleware (auto-populates session when dev token configured)
 	handler = ws.devAuthMiddleware(handler)
 
+	// Refuse new requests once shutdown has begun (ptone/scion#5054); the
+	// health endpoints stay reachable, and requests for the mounted hub API
+	// are left to the hub handler's own refusal.
+	handler = ws.shutdownMark.refuseDuringShutdown(handler, ws.isMountedHubRequest)
+
 	// Security headers
 	handler = ws.securityHeadersMiddleware(handler)
 
@@ -4146,29 +4158,41 @@ func (ws *WebServer) Start(ctx context.Context) error {
 	case err := <-errCh:
 		return err
 	case <-ctx.Done():
-		return ws.Shutdown(context.Background())
+		sctx, cancel := ws.shutdownHooks.shutdownContext()
+		defer cancel()
+		return ws.Shutdown(sctx)
 	}
 }
 
-// Shutdown gracefully shuts down the web server and any mounted Hub resources.
+// Shutdown gracefully shuts down the web server and any mounted Hub
+// resources. The order (ptone/scion#5054) is: mark shutting down (a no-op
+// if cmd already did it), wait for the co-located broker
+// (ShutdownHooks.BeforeHTTPDrain), close the listener and drain HTTP
+// (bounded by ctx and 30s), then the mounted hub's background teardown
+// (control channels, broker auth, event publisher), so the listener no
+// longer accepts requests while the hub tears down. The hub's audit
+// writer is closed later by cmd, after every server has drained.
 func (ws *WebServer) Shutdown(ctx context.Context) error {
 	if ws.httpServer == nil {
 		return nil
 	}
 
 	ws.logger().Info("Web frontend server shutting down...")
+	ws.BeginShutdown()
+
+	ws.shutdownHooks.beforeHTTPDrain(ctx)
+	dctx, cancelDrain := ws.shutdownHooks.httpDrainContext(ctx)
+	err := drainHTTPServer(dctx, ws.httpServer)
+	cancelDrain()
 
 	// Clean up mounted Hub resources (control channels, broker auth, event publisher)
 	if ws.hubShutdown != nil {
-		if err := ws.hubShutdown(ctx); err != nil {
-			ws.logger().Error("Failed to clean up Hub resources during web server shutdown", "error", err)
+		if herr := ws.hubShutdown(ctx); herr != nil {
+			ws.logger().Error("Failed to clean up Hub resources during web server shutdown", "error", herr)
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	return ws.httpServer.Shutdown(ctx)
+	return err
 }
 
 // Handler returns the HTTP handler for testing without starting a listener.
