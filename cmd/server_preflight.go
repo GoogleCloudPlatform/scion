@@ -200,7 +200,7 @@ func preflightRun(ctx context.Context, o preflightOptions) (preflight.Report, er
 		GlobalDir:         globalDir,
 		ServerConfigPath:  o.configPath,
 		ColocatedBrokerID: o.brokerID,
-		DB:                newPreflightReader(client, tx, o.brokerID),
+		DB:                newPreflightReader(tx.Client(), o.brokerID), // every read inside the one snapshot
 	}
 	return preflight.NewDefaultRegistry().RunAll(ctx, env), nil
 }
@@ -275,12 +275,14 @@ func snapshotTxOptions(d string) *sql.TxOptions {
 // sslpassword=), quoted or not.
 var dsnPasswordRE = regexp.MustCompile(`(?i)\b(?:ssl)?password\s*=\s*('(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|\S+)`)
 
-// dsnSecrets returns the credentials dsn carries: a URL's userinfo
-// password and password/sslpassword query parameters, or a keyword-form
-// DSN's password values.
+// dsnSecrets returns the credentials dsn carries: a postgres:// URL's
+// userinfo password and password/sslpassword query parameters (also with
+// an empty host, as in a Unix-socket URL such as
+// "postgres://u:p@/db?host=/cloudsql/..."), or a keyword-form DSN's
+// password values.
 func dsnSecrets(dsn string) []string {
 	var out []string
-	if u, err := url.Parse(dsn); err == nil && u.Scheme != "" && u.Host != "" {
+	if u, err := url.Parse(dsn); err == nil && (strings.EqualFold(u.Scheme, "postgres") || strings.EqualFold(u.Scheme, "postgresql")) {
 		if pw, ok := u.User.Password(); ok {
 			out = append(out, pw)
 		}

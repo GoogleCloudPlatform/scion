@@ -213,7 +213,7 @@ func openPreflightSnapshot(t *testing.T, brokerID, path string) *preflightReader
 	tx, err := client.BeginTx(context.Background(), snapshotTxOptions(dialect.SQLite))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = tx.Rollback() })
-	return newPreflightReader(client, tx, brokerID)
+	return newPreflightReader(tx.Client(), brokerID)
 }
 
 // rawDB returns the read-write fixture's *sql.DB.
@@ -464,46 +464,67 @@ func TestServerPreflight_NoFileChangeNoListener(t *testing.T) {
 	h.agent(t, &store.Agent{Slug: "w", ProjectID: pid, RuntimeBrokerID: h.brokerID, AppliedConfig: &store.AgentAppliedConfig{Profile: "a"}}, "")
 	require.NoFileExists(t, filepath.Join(h.globalDir, "context.yaml"))
 	require.NoError(t, h.store.Close())
-	// The database lives outside HOME (SCION_PREFLIGHT_DB names it), so
-	// SQLite's own read-only WAL sidecars (a known limit, pinned by
-	// TestServerPreflight_StoppedWALSidecars) never touch the settings
-	// directory: the whole HOME tree, ~/.scion's mtime included, must be
-	// identical after the run.
-	dbOut := filepath.Join(t.TempDir(), "hub.db")
+	// The database lives outside HOME, in its own directory
+	// (SCION_PREFLIGHT_DB names it), so SQLite's own read-only WAL sidecars
+	// (a known limit) never touch the settings directory: the whole HOME
+	// tree, ~/.scion's mtime included, must be identical after the run.
+	dbDir := t.TempDir()
+	dbOut := filepath.Join(dbDir, "hub.db")
 	require.NoError(t, os.Rename(h.dbPath, dbOut))
+	// A --config directory whose settings file has a legacy key (audit row
+	// 7: the bootstrap material is read from it).
+	cfgDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(cfgDir, "settings.yaml"), []byte("schema_version: \"1\"\nhub:\n  grove_id: \"legacy-config\"\n"), 0o644))
 	o := h.executor()
 	o.envDSN = dbOut
-	before := treeState(t, h.home)
-	workBefore := treeState(t, h.workDir)
+	o.configPath = filepath.Join(cfgDir, "settings.yaml")
+	roots := []string{h.home, h.workDir, cfgDir}
+	before := map[string]map[string]string{}
+	for _, r := range roots {
+		before[r] = treeState(t, r)
+	}
+	dbBefore := treeState(t, dbDir)
 	sockets := socketFDs(t)
-
-	dbBefore := fileState(t, dbOut)
 
 	stdout, _, err := runPreflightForTest(t, o)
 	require.NoError(t, err)
 	rep := decodeReport(t, stdout)
-	// The run reached the disk path through the provider's legacy marker:
-	// the co-located agent's agent-info.json was looked up there (and is
-	// missing). Without the switch, that marker read would migrate the
-	// marker's keys on disk (pkg/config's controls show it).
+	// The co-located agent's agent-info.json was looked up on disk under the
+	// provider's path (and is missing): the run took the disk path.
 	assert.Contains(t, reportCodes(rep), "settings.profiles.agent_info_missing")
 
-	after := treeState(t, h.home)
-	assert.Equal(t, dbBefore, fileState(t, dbOut), "the database file is unchanged")
-	assert.Contains(t, before, ".scion/groves/acme", "the fixture keeps a leftover legacy layout")
-	assert.NotContains(t, after, ".scion/projects", "under the switch the layout is not migrated, and the preflight runs without projects/")
-	assert.Equal(t, before, after, "the preflight must change no file under HOME")
-	workAfter := treeState(t, h.workDir)
-	assert.Equal(t, workBefore, workAfter, "the preflight must change no file in its working directory")
-	assert.Equal(t, sockets, socketFDs(t), "the preflight must leave no socket open")
+	assert.Contains(t, before[h.home], ".scion/groves/acme", "the fixture keeps a leftover legacy layout")
+	for _, r := range roots {
+		after := treeState(t, r)
+		if r == h.home {
+			assert.NotContains(t, after, ".scion/projects", "under the switch the layout is not migrated, and the preflight runs without projects/")
+		}
+		assert.Equal(t, before[r], after, "the preflight must change no file under %s", r)
+	}
+	// The database's directory: the database file is unchanged, and the
+	// only new entries are SQLite's own sidecars (which also move the
+	// directory's mtime).
+	dbAfter := treeState(t, dbDir)
+	assert.Equal(t, dbBefore["hub.db"], dbAfter["hub.db"], "the database file is unchanged")
+	for _, sidecar := range []string{"hub.db-wal", "hub.db-shm"} {
+		assert.Contains(t, dbAfter, sidecar, "SQLite's read-only WAL sidecar %s", sidecar)
+		delete(dbAfter, sidecar)
+	}
+	delete(dbAfter, ".")
+	delete(dbBefore, ".")
+	assert.Equal(t, dbBefore, dbAfter, "nothing but SQLite's sidecars appears beside the database")
+	// A listener or a leaked connection only adds sockets; another test's
+	// socket closing meanwhile must not fail this check.
+	assert.LessOrEqual(t, socketFDs(t), sockets, "the preflight must leave no socket open")
 
-	// Positive control: the two snapshots (HOME and the working directory,
-	// the roots the run is redirected to) detect a write the audit did not
+	// Positive control: each snapshot detects a write the audit did not
 	// list, so a tenth write-on-read path fails this test rather than
 	// passing unseen.
 	for _, c := range []struct{ root, write string }{
 		{h.home, filepath.Join(h.globalDir, "zz-unaudited-write")},
 		{h.workDir, filepath.Join(h.workDir, "zz-unaudited-write")},
+		{cfgDir, filepath.Join(cfgDir, "zz-unaudited-write")},
+		{dbDir, filepath.Join(dbDir, "zz-unaudited-write")},
 	} {
 		prev := treeState(t, c.root)
 		require.NoError(t, os.WriteFile(c.write, []byte("x"), 0o644))
@@ -512,9 +533,9 @@ func TestServerPreflight_NoFileChangeNoListener(t *testing.T) {
 	}
 }
 
-// The known limit behind T4's priming: a read-only open of a stopped WAL
-// database (no -wal/-shm files) leaves SQLite's own sidecars, and nothing
-// else; the database file itself is unchanged. The database sits in its
+// The known limit behind T4's separate database directory: a read-only
+// open of a stopped WAL database (no -wal/-shm files) leaves SQLite's own
+// sidecars, and nothing else; the database file itself is unchanged. The database sits in its
 // own directory here, so the settings directory is not involved.
 func TestServerPreflight_StoppedWALSidecars(t *testing.T) {
 	h := newPreflightHub(t)
@@ -532,6 +553,8 @@ func TestServerPreflight_StoppedWALSidecars(t *testing.T) {
 	after := treeState(t, dir)
 	assert.Equal(t, before["hub.db"], after["hub.db"], "the database file is unchanged")
 	for _, sidecar := range []string{"hub.db-wal", "hub.db-shm"} {
+		assert.NotContains(t, before, sidecar, "a stopped database has no %s", sidecar)
+		assert.Contains(t, after, sidecar, "the read-only open leaves SQLite's %s (the known limit)", sidecar)
 		delete(after, sidecar)
 	}
 	delete(after, ".")
@@ -656,6 +679,9 @@ func TestServerPreflight_DSNRedacted(t *testing.T) {
 		{"URL form", func(t *testing.T, h *preflightHub) preflightOptions {
 			return preflightOptions{dbFlag: "postgres://hub:" + secret + "@127.0.0.1:1/hub?connect_timeout=1&sslmode=disable"}
 		}},
+		{"Unix-socket URL form", func(t *testing.T, h *preflightHub) preflightOptions {
+			return preflightOptions{dbFlag: "postgres://hub:" + secret + "@/hub?host=/nonexistent-socket-dir&connect_timeout=1&sslmode=disable"}
+		}},
 		{"keyword form", func(t *testing.T, h *preflightHub) preflightOptions {
 			t.Setenv("SCION_SERVER_DATABASE_DRIVER", "postgres")
 			return preflightOptions{executor: true, brokerID: h.brokerID,
@@ -676,6 +702,7 @@ func TestServerPreflight_DSNRedacted(t *testing.T) {
 	// a driver stand-in quotes it): the command's redaction masks it.
 	for _, dsn := range []string{
 		"postgres://hub:" + secret + "@db.invalid/hub",
+		"postgres://hub:" + secret + "@/hub?host=/cloudsql/proj:region:db",
 		"host=db.invalid user=hub password='" + secret + "' dbname=hub",
 	} {
 		t.Run("an open error quoting "+strings.SplitN(dsn, ":", 2)[0], func(t *testing.T) {
@@ -915,22 +942,56 @@ func TestServerPreflight_ExecutorStderrWithholdsErrorText(t *testing.T) {
 		assert.Contains(t, handStderr, secret, "by hand, the error text is shown")
 	})
 
-	badSettings := "schema_version: \"1\"\nactive_profile: a\nprofiles:\n  a:\n    runtime:\n      token: " + secret + "\n"
+	// The real loaders. Each fixture makes the loader fail for certain, and
+	// the run logs that error through slog: withheld when executor-invoked,
+	// shown by hand. quoted is text only the loader's error carries, so the
+	// by-hand run proves the path was reached and the executor run that the
+	// text was withheld. None of these loaders quotes a settings value as
+	// written (the config decoder and the settings loader name the key or
+	// the line; the JSON encoder names the unencodable value), so the
+	// secret-like value never appears either way; the seam probe above pins
+	// a value-quoting error.
 	for _, c := range []struct {
-		name  string
-		setup func(t *testing.T, h *preflightHub) preflightOptions
+		name, logMsg, quoted, code string
+		setup                      func(t *testing.T, h *preflightHub) preflightOptions
+		wantErr                    string // the command's own error, when the run cannot report
 	}{
-		{"a settings file that does not decode", func(t *testing.T, h *preflightHub) preflightOptions {
-			require.NoError(t, os.WriteFile(filepath.Join(h.globalDir, "settings.yaml"), []byte(badSettings), 0o644))
-			return h.executor()
-		}},
-		{"a server config that does not load", func(t *testing.T, h *preflightHub) preflightOptions {
-			cfgPath := filepath.Join(t.TempDir(), "settings.yaml")
-			require.NoError(t, os.WriteFile(cfgPath, []byte("server:\n  hub:\n    port: "+secret+"\n"), 0o644))
-			o := h.executor()
-			o.configPath = cfgPath
-			return o
-		}},
+		{
+			// A legacy server.yaml whose hub.port holds a non-number: the
+			// config decoder fails, naming the key.
+			name: "a server config that does not load", logMsg: "preflight: the server config does not load", quoted: "'hub.port' cannot parse value as 'int'",
+			wantErr: "the server config does not load",
+			setup: func(t *testing.T, h *preflightHub) preflightOptions {
+				cfgPath := filepath.Join(t.TempDir(), "server.yaml")
+				require.NoError(t, os.WriteFile(cfgPath, []byte("hub:\n  port: "+secret+"\n"), 0o644))
+				o := h.executor()
+				o.configPath = cfgPath
+				return o
+			},
+		},
+		{
+			// A settings file that is not YAML: the effective settings do not
+			// load (a decode quoting a value is not reachable here: the
+			// settings loader ignores a value it cannot convert, by key). The
+			// error names the line, not the file's text.
+			name: "a settings file that does not load", logMsg: "preflight: the effective settings do not load", quoted: "did not find expected",
+			code: "settings.profiles.could_not_run",
+			setup: func(t *testing.T, h *preflightHub) preflightOptions {
+				require.NoError(t, os.WriteFile(filepath.Join(h.globalDir, "settings.yaml"),
+					[]byte("schema_version: \"1\"\nactive_profile: a\nprofiles:\n  a: ["+secret+"\n"), 0o644))
+				return h.executor()
+			},
+		},
+		{
+			// Bootstrap material holding a value JSON cannot encode: the
+			// section does not extract, and the error quotes the value.
+			name: "bootstrap material that does not extract", logMsg: "preflight: the bootstrap section does not extract", quoted: "unsupported value: +Inf",
+			code: "settings.profiles.could_not_evaluate",
+			setup: func(t *testing.T, h *preflightHub) preflightOptions {
+				h.writeSettings(t, "    weight: .inf\n")
+				return h.executor()
+			},
+		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			h := newPreflightHub(t)
@@ -938,17 +999,28 @@ func TestServerPreflight_ExecutorStderrWithholdsErrorText(t *testing.T) {
 			h.profilesRow(t, hubsetting.OriginManaged, &admin, "a")
 			o := c.setup(t, h)
 			stdout, stderr, err := runPreflightForTest(t, o)
-			assert.NotContains(t, stderr, secret, "the executor's stderr must not quote the value")
-			assert.NotContains(t, stdout, secret, "the report must not quote the value")
-			if err != nil {
-				assert.NotContains(t, err.Error(), secret)
+			if c.wantErr != "" {
+				require.Error(t, err)
+				assert.Equal(t, c.wantErr, err.Error())
+				assert.Empty(t, stdout)
+			} else {
+				require.Error(t, err, "the check blocks")
+				assert.Contains(t, reportCodes(decodeReport(t, stdout)), c.code)
+				assert.NotContains(t, stdout, c.quoted, "the report must not quote the loader's error")
 			}
-			if strings.Contains(stderr, "error=") {
-				assert.Contains(t, stderr, withheldNote, "a logged error is withheld")
-			}
+			assert.Contains(t, stderr, c.logMsg, "the run logs the loader's error")
+			assert.Contains(t, stderr, withheldNote, "the logged error is withheld")
+			assert.NotContains(t, stderr, c.quoted, "the executor's stderr must not quote the loader's error")
+			assert.NotContains(t, stderr, secret)
+			assert.NotContains(t, stdout, secret)
+			assert.NotContains(t, err.Error(), secret)
 
-			o.executor, o.dbFlag, o.envDSN, o.brokerID = false, h.dbPath, "", ""
-			_, handStderr, _ := runPreflightForTest(t, o)
+			// The same run with the handler's by-hand setting (withhold off).
+			o.executor, o.dbFlag, o.envDSN = false, o.envDSN, ""
+			_, handStderr, handErr := runPreflightForTest(t, o)
+			require.Error(t, handErr)
+			assert.Contains(t, handStderr, c.logMsg)
+			assert.Contains(t, handStderr, c.quoted, "by hand, the loader's error text is shown")
 			assert.NotContains(t, handStderr, withheldNote, "by hand, nothing is withheld")
 		})
 	}

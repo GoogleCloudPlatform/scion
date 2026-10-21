@@ -15,6 +15,7 @@
 package writesonread
 
 import (
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -67,8 +68,9 @@ func TestIsolateForTest_NestedRestoresParent(t *testing.T) {
 var isolateCallRE = regexp.MustCompile(`\bIsolateForTest\(`)
 
 // TestIsolateForTest_NoProductionCallers checks that only tests call
-// IsolateForTest: no non-test Go file in the module calls it, except its
-// own definition here.
+// IsolateForTest: no non-test Go file in the module calls it (its own file
+// holds only the declaration), and in cmd only server_preflight_test.go
+// does (runPreflightForTest and the root-hook test).
 func TestIsolateForTest_NoProductionCallers(t *testing.T) {
 	root, err := filepath.Abs("../..")
 	if err != nil {
@@ -99,16 +101,32 @@ func TestIsolateForTest_NoProductionCallers(t *testing.T) {
 			}
 			return nil
 		}
-		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") || path == self {
+		if !strings.HasSuffix(path, ".go") {
 			return nil
 		}
-		scanned++
 		b, err := os.ReadFile(path)
 		if err != nil {
 			return err
 		}
-		if isolateCallRE.Match(b) {
-			callers = append(callers, path)
+		n := len(isolateCallRE.FindAllIndex(b, -1))
+		switch {
+		case path == self:
+			// Its own file: only the declaration.
+			if n != 1 {
+				callers = append(callers, fmt.Sprintf("%s (%d matches, want only the declaration)", path, n))
+			}
+		case strings.HasSuffix(path, "_test.go"):
+			// Tests: in cmd, only through runPreflightForTest and the hook
+			// test, both in server_preflight_test.go.
+			rel, _ := filepath.Rel(root, path)
+			if n > 0 && strings.HasPrefix(rel, "cmd"+string(filepath.Separator)) && filepath.Base(path) != "server_preflight_test.go" {
+				callers = append(callers, path+" (a cmd test outside server_preflight_test.go)")
+			}
+		default:
+			scanned++
+			if n > 0 {
+				callers = append(callers, path)
+			}
 		}
 		return nil
 	})
@@ -119,6 +137,6 @@ func TestIsolateForTest_NoProductionCallers(t *testing.T) {
 		t.Fatalf("scanned only %d non-test Go files under %s; the walk is not looking at the module", scanned, root)
 	}
 	if len(callers) > 0 {
-		t.Errorf("IsolateForTest is for tests only, but non-test files call it: %v", callers)
+		t.Errorf("IsolateForTest is for tests only (in cmd, only through server_preflight_test.go), but these call it: %v", callers)
 	}
 }

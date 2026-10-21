@@ -37,15 +37,14 @@ import (
 // deletes nothing. A release that adds columns to these tables does not
 // break it; only a rename or drop of a column it reads does.
 type preflightReader struct {
-	q           *ent.Client // the snapshot's client
+	q           *ent.Client // the snapshot transaction's client
 	colocatedID string
 }
 
-// newPreflightReader returns the reader bound to the snapshot tx.
-func newPreflightReader(client *ent.Client, tx *ent.Tx, colocatedID string) *preflightReader {
-	r := &preflightReader{q: client, colocatedID: colocatedID}
-	r.q = tx.Client() // every read inside the one snapshot
-	return r
+// newPreflightReader returns the reader that queries through q, the
+// client of the one snapshot transaction (ent.Tx.Client).
+func newPreflightReader(q *ent.Client, colocatedID string) *preflightReader {
+	return &preflightReader{q: q, colocatedID: colocatedID}
 }
 
 var _ preflight.ReadOnlyQueries = (*preflightReader)(nil)
