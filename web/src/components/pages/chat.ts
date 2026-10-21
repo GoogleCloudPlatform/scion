@@ -72,12 +72,20 @@ import { TouchPrimaryController } from '../../utils/input-modality.js';
 import { isMacTextFieldCtrlKey } from '../shared/text-field-keys.js';
 import { CHAT_PALETTE_OPEN_REQUEST_EVENT } from '../../client/chat-palette-events.js';
 import { blurElement, focusElement } from '../shared/focus-moved.js';
-import type { GroupState, PaletteGroup, PaletteTarget } from '../../client/palette-types.js';
+import type {
+  GroupState,
+  PaletteCandidate,
+  PaletteGroup,
+  PaletteQueryDetail,
+  PaletteTarget,
+} from '../../client/palette-types.js';
 import {
   AGENTS_IDLE_TIMEOUT_MS,
   ChatPaletteDataController,
+  PEOPLE_SEARCH_MIN_CHARS,
   PaletteLoadError,
   buildDocumentCandidates,
+  normalizePeopleQuery,
 } from '../../client/chat-palette-data.js';
 import { chatRecentFiles } from '../../client/chat-recent-files.js';
 import type { RecentFile, RecentFilesSnapshot } from '../../client/chat-recent-files.js';
@@ -164,6 +172,8 @@ const loadQuickPalette = () => import('../shared/palette/quick-palette.js');
 const PALETTE_GROUP_CACHE_MS = 30_000;
 /** Debounce window for refreshing dirty palette groups while the palette is open. */
 const PALETTE_REFRESH_DEBOUNCE_MS = 500;
+/** Quiet period after the last query edit before the People group searches the hub. */
+export const PALETTE_PEOPLE_SEARCH_DEBOUNCE_MS = 250;
 
 /**
  * Convert a recent-files record into the shape `<scion-chat-file-preview>`
@@ -891,6 +901,8 @@ export class ScionPageChat extends LitElement {
   private _selfUserAbortController: AbortController | null = null;
   /** Debounce timer coalescing SSE-driven dirty-group refreshes while the palette is open. */
   private _paletteRefreshDebounce: ReturnType<typeof setTimeout> | null = null;
+  /** Debounce timer for the People group's hub search (see {@link _handlePaletteQuery}). */
+  private _palettePeopleSearchTimer: ReturnType<typeof setTimeout> | null = null;
   /** The deep-active element (and, for a textarea or text input, its selection) captured just before the palette opened. */
   private _paletteInvoker: HTMLElement | null = null;
   private _paletteInvokerSelection: {
@@ -1803,6 +1815,7 @@ export class ScionPageChat extends LitElement {
     this._selfUserAbortController = null;
     this._stopPaletteVisibilityWatchdog();
     this._stopPaletteDebouncedRefresh();
+    this._stopPalettePeopleSearch();
     // Without this, a disconnect landing while a first-open lazy import is
     // still in flight would leave `_palettePendingOpen` stuck true on the
     // detached page — the suspended togglePalette call would resume anyway
@@ -4993,6 +5006,8 @@ export class ScionPageChat extends LitElement {
    * is not fetched here — see `_handleRecentFilesSnapshot`.
    */
   private _loadPaletteGroupsOnOpen(): void {
+    // The query starts empty: drop the last open's search hits.
+    this._publishPalettePeopleSearch(this._paletteDataController.clearPeopleSearch());
     void this._loadPaletteAgents();
     if (!this._shouldUseCachedPaletteGroup('people')) void this._loadPalettePeople();
     if (!this._shouldUseCachedPaletteGroup('threads')) void this._loadPaletteThreads();
@@ -5162,6 +5177,7 @@ export class ScionPageChat extends LitElement {
     this._selfUserAbortController = null;
     this._stopPaletteVisibilityWatchdog();
     this._stopPaletteDebouncedRefresh();
+    this._stopPalettePeopleSearch();
     // A close that must not touch focus (see _paletteSkipFocusRestore) drops
     // a pending open's hidden keyboard field without refocusing anything.
     this._paletteTypeahead.stop({ restoreFocus: !this._paletteSkipFocusRestore });
@@ -5479,6 +5495,61 @@ export class ScionPageChat extends LitElement {
         delete this._paletteGroupLoadToken.threads;
       }
     }
+  }
+
+  /**
+   * Follow the palette's query for the People group, whose rows otherwise
+   * hold only the hub's recently seen users. Every edit aborts an
+   * in-flight search; a query of {@link PEOPLE_SEARCH_MIN_CHARS} or more
+   * characters searches the hub once edits pause for
+   * {@link PALETTE_PEOPLE_SEARCH_DEBOUNCE_MS}, and a shorter one drops the
+   * hits. The palette ranks whatever rows the group holds.
+   */
+  private _handlePaletteQuery(e: CustomEvent<PaletteQueryDetail>): void {
+    if (!this.v2PaletteOpen) return;
+    this._stopPalettePeopleSearch();
+    const query = normalizePeopleQuery(e.detail?.query ?? '');
+    if (query.length < PEOPLE_SEARCH_MIN_CHARS) {
+      this._publishPalettePeopleSearch(this._paletteDataController.clearPeopleSearch());
+      return;
+    }
+    this._palettePeopleSearchTimer = setTimeout(() => {
+      this._palettePeopleSearchTimer = null;
+      void this._searchPalettePeople(query);
+    }, PALETTE_PEOPLE_SEARCH_DEBOUNCE_MS);
+  }
+
+  private async _searchPalettePeople(query: string): Promise<void> {
+    let candidates: PaletteCandidate[] | null;
+    try {
+      candidates = await this._paletteDataController.searchPeople(query);
+    } catch {
+      // Superseded by a later edit or a close (an AbortError), which owns the
+      // group from here; `searchPeople` reports any other failure as no hits.
+      return;
+    }
+    if (!this.v2PaletteOpen) return;
+    this._publishPalettePeopleSearch(candidates);
+  }
+
+  /**
+   * Publish a People group rebuilt around search hits. Only over a `ready`
+   * group: a load in flight includes the hits when it finishes, and an
+   * error stays until retried.
+   */
+  private _publishPalettePeopleSearch(candidates: PaletteCandidate[] | null): void {
+    if (!candidates) return;
+    if (this.v2PaletteGroups.people?.status !== 'ready') return;
+    this.v2PaletteGroups = { ...this.v2PaletteGroups, people: { status: 'ready', candidates } };
+  }
+
+  /** Cancel a pending or in-flight People search, keeping the hits already shown. */
+  private _stopPalettePeopleSearch(): void {
+    if (this._palettePeopleSearchTimer) {
+      clearTimeout(this._palettePeopleSearchTimer);
+      this._palettePeopleSearchTimer = null;
+    }
+    this._paletteDataController.abortPeopleSearch();
   }
 
   /**
@@ -5928,6 +5999,7 @@ export class ScionPageChat extends LitElement {
               .typeahead=${this._paletteTypeahead}
               @palette-select=${this._handlePaletteSelect}
               @palette-retry=${this._handlePaletteRetry}
+              @palette-query=${this._handlePaletteQuery}
               @palette-dismiss=${this._handlePaletteDismiss}
               @sl-after-hide=${this._onPaletteAfterHide}
             ></scion-quick-palette>
