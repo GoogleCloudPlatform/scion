@@ -35,6 +35,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
@@ -168,7 +169,7 @@ func TestAttachmentDelivery_EndToEnd(t *testing.T) {
 	cfg.BrokerID = f.brokerID
 	cfg.BrokerName = "send-broker"
 	cfg.StateDir = t.TempDir()
-	brokerSrv := runtimebroker.New(cfg, mgr, rt)
+	brokerSrv := runtimebroker.New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 	hc, err := hubclient.New(hubTS.URL, hubclient.WithHMACAuth(f.brokerID, key))
 	require.NoError(t, err)
 	brokerSrv.SetHubClient(hc)
