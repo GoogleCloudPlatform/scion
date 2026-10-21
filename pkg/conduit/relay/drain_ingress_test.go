@@ -54,7 +54,14 @@ func dialDrainSession(t *testing.T, w *relaytest.World, n *relaytest.Node, user,
 	cfg := conduit.Config{}
 	var goAways <-chan *conduitv1.GoAway
 	cfg.Interceptor, goAways = goAwayRecorder(false)
-	ls, _ := n.MustDial(user, relaytest.UserHello(user), cfg)
+	ls, wel := n.MustDial(user, relaytest.UserHello(user), cfg)
+	// The Welcome is sent while the session is still pending; a drain only
+	// sees registered sessions. Wait until the relay has registered it.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, _, ok := n.Relay.Local(ctx, wel.GetSessionId()); !ok {
+		t.Fatalf("session %s was not registered on the relay", wel.GetSessionId())
+	}
 	return drainSession{ls: ls, goAways: goAways}
 }
 

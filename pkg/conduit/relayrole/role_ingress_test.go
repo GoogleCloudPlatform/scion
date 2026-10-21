@@ -307,11 +307,21 @@ func TestRoleIngressSessionsCarryTheInstance(t *testing.T) {
 	}))
 	t.Cleanup(ingress.Close)
 
-	dialWelcome(t, f.front.URL, nil)
+	// The Welcome is sent while a session is still pending; a drain only
+	// sees registered sessions, so wait until the relay has registered each.
+	registered := func(wel *conduitv1.Welcome) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if _, _, ok := f.node.Relay.Local(ctx, wel.GetSessionId()); !ok {
+			t.Fatalf("session %s was not registered on the relay", wel.GetSessionId())
+		}
+	}
+	registered(dialWelcome(t, f.front.URL, nil))
 	if n := f.node.Relay.DrainIngress(peer, 0); n != 0 {
 		t.Fatalf("drain matched %d direct sessions, want 0", n)
 	}
-	dialWelcome(t, ingress.URL, http.Header{http.CanonicalHeaderKey(relay.HeaderIngressInstance): {peer}})
+	registered(dialWelcome(t, ingress.URL, http.Header{http.CanonicalHeaderKey(relay.HeaderIngressInstance): {peer}}))
 	if n := f.node.Relay.DrainIngress("hub-b", 0); n != 0 {
 		t.Fatalf("a drain for another hub matched %d sessions, want 0", n)
 	}
