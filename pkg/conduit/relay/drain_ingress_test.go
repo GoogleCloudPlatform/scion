@@ -333,7 +333,10 @@ func TestDrainIngress_ShutdownWaitsForTheRowPass(t *testing.T) {
 	}
 	unblock()
 	select {
-	case <-done:
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Shutdown after the row pass ended: %v", err)
+		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("Shutdown did not return after the row pass ended")
 	}
