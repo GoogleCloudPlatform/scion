@@ -39,6 +39,11 @@ event_name_field: hook_event_name
 mappings:
   session_start:
     event: session-start
+    # pi's reason (startup, reload, new, resume, fork) is Scion's source.
+    # None is an in-place restart (clear/compact), so all count as a new
+    # session for readiness, including /reload.
+    fields:
+      source: reason
 
   input:
     event: prompt-submit

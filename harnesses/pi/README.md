@@ -149,6 +149,11 @@ SCIONTOOL_BIN=/path/to/sciontool node --test scion-bridge.test.mjs
 - **MCP:** pi supports stdio and streamable HTTP; SSE servers are skipped
   with a warning.
 - **Usage/tokens:** no token mapping, so `SCION_USAGE_SOURCE` is not set.
+- **`/reload` is a new session:** the bridge forwards pi's `session_start`
+  reason as the session-start source; pi has no clear/compact reasons and
+  Scion classifies `reload` like any unknown source, so an in-place `/reload`
+  is treated as a new session for readiness. This has no effect while
+  `ready` uses the delay strategy.
 - **Synchronous bridge calls:** the bridge runs `sciontool` with
   `execFileSync`, so pi's event loop (and its TUI) waits for each call: up to
   5 s per hook event (session start, input, each tool start and end) and up to

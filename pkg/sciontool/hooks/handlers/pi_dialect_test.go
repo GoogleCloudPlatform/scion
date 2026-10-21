@@ -77,10 +77,11 @@ func TestPiDialect_BridgePayloads(t *testing.T) {
 		toolInput map[string]interface{} // nil: ToolInput must be empty
 		success   bool
 		errMsg    string
+		source    string
 		activity  state.Activity
 	}
 	wants := []want{
-		{name: hooks.EventSessionStart, activity: state.ActivityWorking},
+		{name: hooks.EventSessionStart, source: "startup", activity: state.ActivityWorking},
 		{name: hooks.EventPromptSubmit, activity: state.ActivityThinking},
 		{name: hooks.EventToolStart, toolName: "bash", toolInput: map[string]interface{}{"command": "ls -la", "timeout": float64(30)}, activity: state.ActivityExecuting},
 		{name: hooks.EventToolEnd, toolName: "bash", success: true, activity: state.ActivityWorking},
@@ -89,7 +90,11 @@ func TestPiDialect_BridgePayloads(t *testing.T) {
 		{name: hooks.EventAgentEnd, activity: state.ActivityWorking},
 		{name: hooks.EventPromptSubmit, activity: state.ActivityThinking},
 		{name: hooks.EventAgentEnd, errMsg: "429 rate limited: retry later", activity: state.ActivityWorking},
-		{name: hooks.EventSessionStart, activity: state.ActivityWorking},
+		{name: hooks.EventSessionStart, source: "resume", activity: state.ActivityWorking},
+		// pi's /reload restarts in place, but the readiness classifier
+		// knows no "reload" source, so it counts as a new session (a
+		// documented known limit; harmless under ready=delay).
+		{name: hooks.EventSessionStart, source: "reload", activity: state.ActivityWorking},
 	}
 
 	records := loadPiBridgePayloads(t)
@@ -124,6 +129,9 @@ func TestPiDialect_BridgePayloads(t *testing.T) {
 		}
 		if ev.Data.Success != w.success {
 			t.Errorf("record %d: Success = %v, want %v", i, ev.Data.Success, w.success)
+		}
+		if ev.Data.Source != w.source {
+			t.Errorf("record %d: Source = %q, want %q", i, ev.Data.Source, w.source)
 		}
 		if ev.Data.Error != w.errMsg {
 			t.Errorf("record %d: Error = %q, want %q", i, ev.Data.Error, w.errMsg)

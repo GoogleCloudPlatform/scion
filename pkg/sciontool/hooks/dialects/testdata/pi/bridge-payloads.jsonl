@@ -8,3 +8,4 @@
 {"hook_event_name":"input"}
 {"hook_event_name":"agent_end","error":"429 rate limited: retry later"}
 {"hook_event_name":"session_start","reason":"resume"}
+{"hook_event_name":"session_start","reason":"reload"}

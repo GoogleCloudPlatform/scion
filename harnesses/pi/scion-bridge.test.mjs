@@ -161,6 +161,7 @@ const BRIDGE_SESSION = [
   ['input', { type: 'input', text: 'again', source: 'rpc' }],
   ['agent_end', { type: 'agent_end', messages: [asst('', { stopReason: 'error', errorMessage: '429 rate limited: retry later' })] }],
   ['session_start', { type: 'session_start', reason: 'resume' }],
+  ['session_start', { type: 'session_start', reason: 'reload' }],
 ];
 
 test('bridge hook payloads match the sciontool dialect fixture', () => {
