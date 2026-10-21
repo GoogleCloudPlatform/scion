@@ -61,7 +61,7 @@ export function triggerLabel(trigger: string): string {
  * Triggers the Hub subscribes when an agent is created with notify on
  * (newNotifySubscription in pkg/hub/handlers_agent_create_helpers.go).
  */
-const AGENT_CREATE_TRIGGERS: readonly string[] = [
+export const AGENT_CREATE_TRIGGERS: readonly string[] = [
   'COMPLETED',
   'WAITING_FOR_INPUT',
   'LIMITS_EXCEEDED',
@@ -71,10 +71,10 @@ const AGENT_CREATE_TRIGGERS: readonly string[] = [
 ];
 
 /**
- * Hint listing the triggers an agent created with notify on is subscribed to
- * (the agent create form). Returns an empty string when there are no triggers.
+ * Hint listing the default triggers.
+ * Returns an empty string when there are no triggers.
  */
-export function defaultTriggersHint(triggers: readonly string[] = AGENT_CREATE_TRIGGERS): string {
+export function defaultTriggersHint(triggers: readonly string[] = DEFAULT_TRIGGERS): string {
   const labels = triggers.map(triggerLabel);
   if (labels.length === 0) return '';
   const last = labels.pop();
