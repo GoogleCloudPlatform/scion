@@ -252,6 +252,16 @@ func TestThreadGroups_RegistryWithoutExperimentServesRoutes(t *testing.T) {
 	assert.NotContains(t, rec.Body.String(), "route not found")
 }
 
+func assertNoConversationNamed(t *testing.T, s store.Store, name string) {
+	t.Helper()
+	db := s.(interface{ DB() *sql.DB }).DB()
+	var convs, topics int
+	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM conversations WHERE display_name = ?`, name).Scan(&convs))
+	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM webchat_topic WHERE name = ?`, name).Scan(&topics))
+	assert.Zero(t, convs, "no conversation may be minted for %q", name)
+	assert.Zero(t, topics, "no topic may be minted for %q", name)
+}
+
 // A project member user can do every operation, and each mutation
 // publishes chat.thread_group with the full snapshot.
 func TestThreadGroups_MemberUserFullLifecycle(t *testing.T) {
