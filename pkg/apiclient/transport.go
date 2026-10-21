@@ -283,6 +283,17 @@ func (rt *authRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 	return base.RoundTrip(clone)
 }
 
+// CloseIdleConnections forwards cleanup to the wrapped transport when supported.
+func (rt *authRoundTripper) CloseIdleConnections() {
+	base := rt.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	if closer, ok := base.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
+}
+
 // buildURL joins the base URL with a path and optional query parameters.
 func (t *Transport) buildURL(path string, query url.Values) string {
 	u := t.BaseURL + path
