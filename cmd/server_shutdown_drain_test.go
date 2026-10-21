@@ -82,38 +82,43 @@ func drainTestAwaitListening(t *testing.T, addr, what string) {
 	require.Eventually(t, func() bool { return drainTestDialable(addr) }, drainTestWait, 10*time.Millisecond, "%s never listened on %s", what, addr)
 }
 
-// drainTestHold opens a connection to a broker listener and holds it in
-// the broker's http.Server, so the broker's Shutdown keeps waiting for it
+// drainTestHold opens a connection to a broker listener that the broker's
+// http.Server tracks and waits for, so the broker's Shutdown keeps waiting
 // until the test closes it: the broker's shutdown, and so its goroutine in
 // the broker WaitGroup, cannot finish while the hold is open.
 //
-// It writes two pipelined requests at once. The first is complete, and
-// reading its answer proves the server has accepted the connection and is
-// serving it (a connection still in the listen backlog when Shutdown closes
-// the listener is never tracked, so Shutdown would not wait for it). The
-// second has a body that never fully arrives: it is already buffered when
-// the first is answered, so the server parses it at once and then waits to
-// read (and discard) the rest of its body before answering, which keeps the
-// connection active. (A request cut inside its headers would not do:
-// Shutdown closes a connection that has read no request for 5s as idle.)
-// The short settle after the first answer leaves the server time to parse
-// the second; if it ever lost that race the test would FAIL, never pass.
+// The hold sends only the first lines of a request's headers and never
+// finishes them, so the handler never runs and the connection stays in
+// http.StateNew, which Shutdown counts as busy for 5s after the accept
+// (closeIdleConns). It does not depend on the handler, which, once the
+// server is shutting down, answers without waiting for a request body.
+// The hold lasts well under 5s: the order checks end within about a second
+// of the accept.
+//
+// A connection still in the listen backlog when Shutdown closes the
+// listener is never tracked, so the hold must be accepted before the
+// shutdown begins. A probe proves it: the server's single accept loop takes
+// connections in arrival order and tracks each one before it accepts the
+// next, so once a second connection, dialled after the hold, has been
+// served, the hold is tracked.
 func drainTestHold(t *testing.T, addr string) net.Conn {
 	t.Helper()
 	c, err := net.DialTimeout("tcp", addr, 2*time.Second)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
-	_, err = c.Write([]byte("GET /healthz HTTP/1.1\r\nHost: hold\r\n\r\n" +
-		"GET /healthz HTTP/1.1\r\nHost: hold\r\nContent-Length: 100\r\n\r\nx"))
+	_, err = c.Write([]byte("GET /healthz HTTP/1.1\r\nHost: hold\r\n"))
 	require.NoError(t, err)
-	require.NoError(t, c.SetReadDeadline(time.Now().Add(drainTestWait)))
-	resp, err := http.ReadResponse(bufio.NewReader(c), nil)
-	require.NoError(t, err, "the broker did not answer the hold's first request")
+
+	p, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	require.NoError(t, err)
+	defer func() { _ = p.Close() }()
+	require.NoError(t, p.SetDeadline(time.Now().Add(drainTestWait)))
+	_, err = p.Write([]byte("GET /healthz HTTP/1.1\r\nHost: probe\r\nConnection: close\r\n\r\n"))
+	require.NoError(t, err)
+	resp, err := http.ReadResponse(bufio.NewReader(p), nil)
+	require.NoError(t, err, "the broker did not serve the probe connection")
 	_, _ = io.Copy(io.Discard, resp.Body)
 	_ = resp.Body.Close()
-	require.False(t, resp.Close, "the broker closes the hold's connection after its first request")
-	require.NoError(t, c.SetReadDeadline(time.Time{}))
-	time.Sleep(200 * time.Millisecond)
 	return c
 }
 
