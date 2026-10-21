@@ -1250,13 +1250,25 @@ describe('ChatPaletteDataController: People group from the recent-users page', (
     await expect(secondLoad).resolves.toHaveLength(1);
   });
 
-  it('cancel() rejects a load still waiting on the shared recent-users page with an AbortError', async () => {
-    routeUsers({ recent: () => new Promise<Response>(() => {}) });
+  it('cancel() rejects a load still waiting on the shared recent-users page, and the page still lands for the next load', async () => {
+    let resolveRecent!: (v: Response) => void;
+    routeUsers({
+      recent: () =>
+        new Promise<Response>((resolve) => {
+          resolveRecent = resolve;
+        }),
+    });
     const controller = new ChatPaletteDataController();
     const load = controller.loadPeopleGroup('self-user');
     await vi.waitFor(() => expect(recentCalls()).toHaveLength(1));
     controller.cancel();
     await expect(load).rejects.toMatchObject({ name: 'AbortError' });
+
+    resolveRecent(jsonResponse({ users: [{ id: 'u0', displayName: 'Alice' }] }));
+    await expect(controller.loadPeopleGroup('self-user')).resolves.toMatchObject([
+      expect.objectContaining({ label: 'Alice' }),
+    ]);
+    expect(recentCalls()).toHaveLength(1);
   });
 
   it('cancelling Agents does not abort a concurrently in-flight People DM fetch', async () => {
@@ -1318,6 +1330,34 @@ describe('ChatPaletteDataController: People search', () => {
     expect(calls).toHaveLength(1);
     expect(calls[0].searchParams.get('search')).toBe('ali');
     expect(calls[0].searchParams.get('limit')).toBe(String(USER_SEARCH_LIMIT));
+    expect(calls[0].searchParams.get('status')).toBe('active');
+  });
+
+  it('a non-active search hit is not shown', async () => {
+    routeUsers({
+      recent: () => Promise.resolve(jsonResponse({ users: RECENT })),
+      search: () =>
+        Promise.resolve(
+          jsonResponse({
+            users: [
+              { id: 'u5', displayName: 'Sam Suspended', status: 'suspended' },
+              { id: 'u6', displayName: 'Sam Active', status: 'active' },
+            ],
+          })
+        ),
+    });
+    const controller = await loadedController();
+    expect((await controller.searchPeople('sam'))?.map((c) => c.label)).toEqual([
+      'Alice',
+      'Sam Active',
+    ]);
+  });
+
+  it('collapses each run of whitespace to one space before searching', async () => {
+    routeUsers({ recent: () => Promise.resolve(jsonResponse({ users: RECENT })) });
+    const controller = await loadedController();
+    await controller.searchPeople('  ada \t\n  lovelace  ');
+    expect(searchCalls().map((u) => u.searchParams.get('search'))).toEqual(['ada lovelace']);
   });
 
   it(`a query shorter than ${PEOPLE_SEARCH_MIN_CHARS} characters sends no request`, async () => {

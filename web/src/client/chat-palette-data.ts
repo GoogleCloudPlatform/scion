@@ -46,6 +46,11 @@ import { loadRecentUsers, searchUsers } from './user-directory.js';
 /** Shortest trimmed query the People group sends to the hub's user search. */
 export const PEOPLE_SEARCH_MIN_CHARS = 2;
 
+/** A query as sent to the hub's user search: trimmed, each run of whitespace one space. */
+export function normalizePeopleQuery(query: string): string {
+  return query.trim().replace(/\s+/g, ' ');
+}
+
 /** Maximum concurrent per-space thread-list requests. */
 const MAX_CONCURRENT_THREAD_REQUESTS = 4;
 
@@ -786,7 +791,9 @@ export class ChatPaletteDataController {
   /**
    * Search the hub's users for `query` (server-side `?search=`, bounded by
    * `USER_SEARCH_LIMIT` and `USER_SEARCH_TIMEOUT_MS`) and return the People
-   * group with the hits merged in. Any earlier search is aborted first. A
+   * group with the hits merged in. Only active users are asked for; the
+   * group's own status check still applies. The query is normalized by
+   * {@link normalizePeopleQuery}. Any earlier search is aborted first. A
    * query shorter than {@link PEOPLE_SEARCH_MIN_CHARS} sends nothing and
    * behaves like {@link clearPeopleSearch}.
    *
@@ -797,7 +804,7 @@ export class ChatPaletteDataController {
    * rejects with an AbortError-like error.
    */
   async searchPeople(query: string): Promise<PaletteCandidate[] | null> {
-    const q = query.trim();
+    const q = normalizePeopleQuery(query);
     if (q.length < PEOPLE_SEARCH_MIN_CHARS) return this.clearPeopleSearch();
     this.abortPeopleSearch();
     const controller = new AbortController();
@@ -806,7 +813,7 @@ export class ChatPaletteDataController {
     const isCurrent = (): boolean => myGeneration === this.peopleSearchGeneration;
 
     try {
-      const hits = await searchUsers(q, { signal: controller.signal });
+      const hits = await searchUsers(q, { signal: controller.signal, status: 'active' });
       if (!isCurrent()) {
         throw new DOMException('superseded by a later search', 'AbortError');
       }

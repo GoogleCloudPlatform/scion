@@ -85,6 +85,7 @@ import {
   PEOPLE_SEARCH_MIN_CHARS,
   PaletteLoadError,
   buildDocumentCandidates,
+  normalizePeopleQuery,
 } from '../../client/chat-palette-data.js';
 import { chatRecentFiles } from '../../client/chat-recent-files.js';
 import type { RecentFile, RecentFilesSnapshot } from '../../client/chat-recent-files.js';
@@ -5505,7 +5506,7 @@ export class ScionPageChat extends LitElement {
   private _handlePaletteQuery(e: CustomEvent<PaletteQueryDetail>): void {
     if (!this.v2PaletteOpen) return;
     this._stopPalettePeopleSearch();
-    const query = (e.detail?.query ?? '').trim();
+    const query = normalizePeopleQuery(e.detail?.query ?? '');
     if (query.length < PEOPLE_SEARCH_MIN_CHARS) {
       this._publishPalettePeopleSearch(this._paletteDataController.clearPeopleSearch());
       return;

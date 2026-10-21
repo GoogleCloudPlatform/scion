@@ -1050,6 +1050,45 @@ describe('palette People search: following the palette query', () => {
     expect(peopleLabels(el)).toEqual(['Alice']);
   });
 
+  it('a search that lands while the People load waits on its DM list keeps the group loading; the load then includes the hit', async () => {
+    let resolveDms!: (r: Response) => void;
+    vi.mocked(apiFetch).mockImplementation((path: string) => {
+      const url = new URL(path, 'http://hub.test');
+      if (url.pathname === '/api/v1/users' && url.searchParams.has('search')) return bob();
+      if (url.pathname === '/api/v1/users') {
+        return Promise.resolve(jsonResponse({ users: RECENT }));
+      }
+      return new Promise<Response>((resolve) => {
+        resolveDms = resolve;
+      });
+    });
+    const el = createPage();
+    el.v2PaletteOpen = true;
+    vi.useFakeTimers();
+    const load = el._loadPalettePeople();
+    await vi.waitFor(() => expect(resolveDms).toBeDefined());
+
+    query(el, 'bob');
+    await vi.advanceTimersByTimeAsync(PALETTE_PEOPLE_SEARCH_DEBOUNCE_MS);
+    await vi.waitFor(() => expect(searchQueries()).toEqual(['bob']));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(el.v2PaletteGroups.people.status).toBe('loading');
+
+    resolveDms(jsonResponse({ dms: [] }));
+    await load;
+    expect(el.v2PaletteGroups.people.status).toBe('ready');
+    expect(peopleLabels(el)).toEqual(['Alice', 'Bob']);
+  });
+
+  it('collapses whitespace runs in the query before searching', async () => {
+    routeApi(bob);
+    const el = await openPageWithPeople();
+    vi.useFakeTimers();
+    query(el, '  bob   \t builder ');
+    await vi.advanceTimersByTimeAsync(PALETTE_PEOPLE_SEARCH_DEBOUNCE_MS);
+    await vi.waitFor(() => expect(searchQueries()).toEqual(['bob builder']));
+  });
+
   it('ignores a query while the palette is closed', async () => {
     routeApi(bob);
     const el = await openPageWithPeople();
