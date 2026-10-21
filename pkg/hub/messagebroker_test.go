@@ -20,6 +20,8 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"maps"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -894,13 +896,25 @@ func TestMessageBrokerProxy_UserMessageLinksAttachments(t *testing.T) {
 
 	proxy := NewMessageBrokerProxy(b, s, events, func() AgentDispatcher { return &brokerMockDispatcher{} }, slog.Default())
 	proxy.webChatStore = wcs
+	// A message log, so the logging branch of the delivery runs too.
+	proxy.messageLog, _ = newCapturingMessageLogger()
+	published, unsubscribe := events.Subscribe("user." + tid("user-bob") + ".message")
+	defer unsubscribe()
 
 	msg := messages.NewInstruction("agent:sending-agent", "user:bob", "here is the screenshot")
 	msg.SenderID = tid("agent-sending")
 	msg.RecipientID = tid("user-bob")
 	msg.Metadata = map[string]string{attachmentsMetadataKey: encoded}
+	before := *msg
+	before.Metadata = maps.Clone(msg.Metadata)
 
 	proxy.deliverToUser(ctx, projectID, "project."+projectID+".user.message", msg)
+
+	// msg is shared with the bus's other subscribers: delivery leaves it,
+	// its metadata included, unchanged.
+	if !reflect.DeepEqual(*msg, before) {
+		t.Fatalf("delivery changed the shared message:\n got %+v\nwant %+v", *msg, before)
+	}
 
 	result, err := s.ListMessages(ctx, store.MessageFilter{RecipientID: tid("user-bob")}, store.ListOptions{})
 	if err != nil {
@@ -916,6 +930,22 @@ func TestMessageBrokerProxy_UserMessageLinksAttachments(t *testing.T) {
 	}
 	if len(linked) != 1 || linked[0].ID != meta.ID {
 		t.Fatalf("expected the attachment to be linked to the delivered message, got %+v", linked)
+	}
+
+	// The live event carries the linked attachment, so an open thread shows
+	// its preview without refetching history (ptone/scion#5504).
+	evts := collectEvents(published)
+	if len(evts) != 1 {
+		t.Fatalf("expected 1 published user message event, got %d", len(evts))
+	}
+	var payload UserMessageEvent
+	if err := json.Unmarshal(evts[0].Data, &payload); err != nil {
+		t.Fatalf("decode event: %v", err)
+	}
+	want := []AttachmentRef{{ID: meta.ID, Name: meta.Filename, MimeType: meta.MimeType, Size: meta.Size}}
+	if payload.ID != result.Items[0].ID || !reflect.DeepEqual(payload.Attachments, want) {
+		t.Fatalf("event for message %s carries attachments %+v, want %+v on %s",
+			payload.ID, payload.Attachments, want, result.Items[0].ID)
 	}
 }
 
