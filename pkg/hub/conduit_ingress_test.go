@@ -33,8 +33,8 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
-	"github.com/GoogleCloudPlatform/scion/pkg/ent/enttest"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 )
 
 // Conduit ingress (design §3.9 "Ingress" and "Relay selection"; contracts
