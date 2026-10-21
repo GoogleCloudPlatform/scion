@@ -323,7 +323,7 @@ func Load(getenv func(string) string) (*Config, error) {
 	c.ReconcileSchedule = match(EnvReconcileSchedule, cronRE, "five-field cron schedule")
 	if raw := get(EnvMediatorURL); raw != "" {
 		if u, err := url.Parse(raw); err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil ||
-			(u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+			(u.Path != "" && u.Path != "/") || strings.ContainsAny(raw, "?#") {
 			fail(EnvMediatorURL, "%q must be a bare https:// origin such as https://cr-runner-mediator-abc123-uc.a.run.app", raw)
 		} else {
 			c.MediatorURL = strings.TrimSuffix(raw, "/")
