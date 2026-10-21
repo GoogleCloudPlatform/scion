@@ -516,3 +516,28 @@ func TestBrokerPresent_ReadErrorLoggedAndCounted(t *testing.T) {
 	assert.NotContains(t, logs.String(), line, "a cancelled caller context is not logged")
 	assert.Equal(t, int64(1), srv.brokerPresenceRegistryFallbacks.Load(), "a cancelled caller context is not counted")
 }
+
+// TestPlacement_OfflineProviderRowStaysOut: presence decides only the
+// broker row; the provider row must still be online. A broker that is
+// present, by a live registry session or by its stored status, but whose
+// provider row for the project is offline is not in the placement set.
+func TestPlacement_OfflineProviderRowStaysOut(t *testing.T) {
+	f := newBrokerPresenceFixture(t)
+	setConduitExperiment(t, f.srv, true)
+	ctx := context.Background()
+	liveOfflineRow := f.broker(t, "placement-row-live", store.BrokerStatusOffline, nil)
+	f.liveBrokerSession(t, liveOfflineRow.ID)
+	onlineOfflineRow := f.broker(t, "placement-row-online", store.BrokerStatusOnline, nil)
+	onlineOnlineRow := f.broker(t, "placement-row-both", store.BrokerStatusOnline, nil)
+	p := f.placementPresenceProject(t, "placement-row-project", onlineOnlineRow)
+	for _, b := range []*store.RuntimeBroker{liveOfflineRow, onlineOfflineRow} {
+		require.NoError(t, f.store.AddProjectProvider(ctx, &store.ProjectProvider{
+			ProjectID: p.ID, BrokerID: b.ID, BrokerName: b.Name, Status: store.BrokerStatusOffline,
+		}))
+		require.True(t, f.srv.brokerPresence(ctx, b).Connected, "%s is present", b.Name)
+	}
+
+	got, err := f.srv.getAvailableBrokersForProject(ctx, p.ID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{onlineOnlineRow.ID}, brokerIDsOf(got))
+}
