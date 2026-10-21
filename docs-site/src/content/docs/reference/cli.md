@@ -574,7 +574,7 @@ Conversations are referenced using one of three forms:
 
 ### `scion conversation group`
 
-Manages a project's **thread groups**: named sets of the project's group conversations (threads), shared by every member of the project, user or agent. A thread is in at most one group, so adding it to another group moves it. Against an older Hub that does not serve thread groups (one with its former `hub.chat_thread_groups` experiment off), every subcommand fails with `this hub does not serve thread groups: upgrade the hub, or turn on its hub.chat_thread_groups experiment`.
+Manages a project's **thread groups**: named sets of the project's group conversations (threads), shared by every member of the project, user or agent. A thread is in at most one group, so adding it to another group moves it. Against an older Hub that does not serve thread groups (one with its former thread groups experiment off), every subcommand fails with `this hub does not serve thread groups: upgrade the hub, or turn on its thread groups experiment`.
 
 A `<group>` argument is a group ID, or a group name resolved within the project (`--project <id>`, defaulting to the current project) through the project's group list. Names are compared as the Hub compares them: trimmed and case-insensitive. A name that matches no group is an error. A name that matches more than one group (including an ID that is also another group's name) is an error that lists each match by name and ID; use the group ID then. An ID that is not in the project's list is looked up directly, and the Hub decides whether you can read it. A `<conversation-ref>` takes the same forms as the other `scion conversation` commands.
 

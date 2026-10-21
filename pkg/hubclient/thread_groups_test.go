@@ -194,7 +194,7 @@ func TestCreateConversationRequest_ThreadGroupIDJSON(t *testing.T) {
 }
 
 // olderHubHandler answers every thread group route 404, as an older hub's
-// experiment gate does with hub.chat_thread_groups off (ptone/scion#5546).
+// experiment gate does with thread groups off (ptone/scion#5546).
 func olderHubHandler(w http.ResponseWriter, r *http.Request) {
 	writeTGError(w, http.StatusNotFound, "not_found", "route not found")
 }

@@ -68,18 +68,6 @@ func (e *tgmEventSpy) take() []tgmEvent {
 	return out
 }
 
-// tgmSetStoredExperiments installs operational settings whose stored
-// experiments row is raw.
-func tgmSetStoredExperiments(t *testing.T, srv *Server, raw string) {
-	t.Helper()
-	fakeStore := newFakeHubSettingStore()
-	fakeStore.seed("experiments", json.RawMessage(raw))
-	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
-	_, err := ops.Refresh(context.Background())
-	require.NoError(t, err)
-	srv.SetOperationalSettings(ops)
-}
-
 type tgmFixture struct {
 	t    *testing.T
 	srv  *Server
@@ -307,20 +295,20 @@ func orderOf(t *testing.T, threadOrder, projectID string) []string {
 // --- Upgrade -----------------------------------------------------------------
 
 // Upgrade safety (ptone/scion#5546): on a hub that never turned on the
-// retired hub.chat_thread_groups experiment, whether no experiments row is
-// stored or one still holds an override for the name, the first pass copies
+// former thread groups experiment, whether no experiments row is stored or
+// one still holds an override for a retired name, the first pass copies
 // personal groups into project groups. A thread in no personal group stays
 // in no group, and the personal document is kept as it was.
 func TestThreadGroupMigration_UpgradeFromNeverEnabled(t *testing.T) {
 	for name, raw := range map[string]string{
 		"no_row":         "",
-		"stored_off":     `{"overrides":{"hub.chat_thread_groups":false}}`,
+		"retired_off":    retiredOverridesDoc(t, false),
 		"other_override": `{"overrides":{"web.other":true}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newTGMFixture(t)
 			if raw != "" {
-				tgmSetStoredExperiments(t, f.srv, raw)
+				setThreadGroupsExperimentsDoc(t, f.srv, raw)
 			}
 			t1, t2 := f.topic(f.proj.ID, "t1"), f.topic(f.proj.ID, "t2")
 			doc := groupsDoc(t, map[string][]personalThreadGroup{f.proj.ID: {tgmPG("g1", "Release", t1)}})

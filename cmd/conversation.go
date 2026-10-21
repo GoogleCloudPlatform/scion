@@ -499,8 +499,8 @@ func runConversationCreate(cmd *cobra.Command, args []string) error {
 }
 
 // isThreadGroupsDisabledCreateError reports whether err is an older hub's
-// 400 for a threadGroupId sent while its hub.chat_thread_groups experiment
-// is off (ptone/scion#5546 removed it). --group normally lists the
+// 400 for a threadGroupId sent while its thread groups experiment is off
+// (ptone/scion#5546 removed it). --group normally lists the
 // project's groups first, which already reports such a hub; this covers a
 // group ID used with no resolved project.
 func isThreadGroupsDisabledCreateError(err error) bool {

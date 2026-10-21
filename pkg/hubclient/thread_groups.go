@@ -31,7 +31,7 @@ const threadGroupsPath = "/api/v1/thread-groups"
 // groups: named sets of a project's group conversations (threads).
 //
 // A hub older than ptone/scion#5546 serves the /api/v1/thread-groups routes
-// only while its hub.chat_thread_groups experiment is on, and answers 404 on
+// only while its thread groups experiment is on, and answers 404 on
 // every one of them otherwise (as does a hub that predates the routes).
 // Every method reports that case as a *ThreadGroupsNotEnabledError (see
 // IsThreadGroupsNotEnabled), never as a plain not-found.
@@ -116,9 +116,9 @@ type threadGroupListResponse struct {
 }
 
 // ThreadGroupsNotEnabledMessage is the error text for a hub that does not
-// serve /api/v1/thread-groups: an older hub with its hub.chat_thread_groups
+// serve /api/v1/thread-groups: an older hub with its thread groups
 // experiment off, or a hub that predates the routes.
-const ThreadGroupsNotEnabledMessage = "this hub does not serve thread groups: upgrade the hub, or turn on its hub.chat_thread_groups experiment"
+const ThreadGroupsNotEnabledMessage = "this hub does not serve thread groups: upgrade the hub, or turn on its thread groups experiment"
 
 // ThreadGroupsNotEnabledError reports that the hub answered 404 because it
 // does not serve thread groups. Err is the hub's original error.

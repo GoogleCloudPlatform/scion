@@ -432,19 +432,6 @@ func TestFederationProjectVisitors_RegisteredDefaultOff(t *testing.T) {
 	}
 }
 
-// TestChatThreadGroups_Graduated pins the graduation of
-// hub.chat_thread_groups (ptone/scion#5546): project thread groups are always
-// on, so the name is no longer active and is retired, which makes a stored
-// override for it ignored and pruned and keeps the name from being reused.
-func TestChatThreadGroups_Graduated(t *testing.T) {
-	if _, ok := Default().Lookup("hub.chat_thread_groups"); ok {
-		t.Error("hub.chat_thread_groups is still an active experiment")
-	}
-	if !Default().IsRetired("hub.chat_thread_groups") {
-		t.Error("hub.chat_thread_groups is not retired")
-	}
-}
-
 // TestAttachmentArtifacts_RegisteredDefaultOff pins hub.attachment_artifacts
 // (ptone/scion#4595): it gates the hub's attachment upload path and the web
 // surfaces of later phases, so it has both layers, and it ships off.

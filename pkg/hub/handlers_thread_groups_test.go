@@ -29,6 +29,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -189,14 +190,14 @@ func threadGroupOps(t *testing.T, projectID string, g *store.ThreadGroup, conv *
 }
 
 // Thread groups are always on (ptone/scion#5546): a hub whose experiments
-// row still holds an override for the retired hub.chat_thread_groups name
-// (for example one that turned it off before the upgrade) serves every route
-// and files a new conversation into a group.
+// row still holds an override for a retired name (for example one that
+// turned the former thread groups experiment off before the upgrade) serves
+// every route and files a new conversation into a group.
 func TestThreadGroups_RetiredExperimentOverrideIgnored(t *testing.T) {
 	for _, stored := range []bool{false, true} {
 		t.Run(fmt.Sprintf("stored_%t", stored), func(t *testing.T) {
 			f := newThreadGroupFixture(t)
-			setThreadGroupsExperimentsDoc(t, f.srv, fmt.Sprintf(`{"overrides":{"hub.chat_thread_groups":%t}}`, stored))
+			setThreadGroupsExperimentsDoc(t, f.srv, retiredOverridesDoc(t, stored))
 			conv, _ := f.thread(t, f.projA, "override-thread")
 			g := f.mkGroup(t, f.projA, "Override")
 
@@ -216,6 +217,21 @@ func TestThreadGroups_RetiredExperimentOverrideIgnored(t *testing.T) {
 			require.Len(t, grp.Members, 1)
 		})
 	}
+}
+
+// retiredOverridesDoc returns a stored experiments row that sets every
+// retired experiment name to value.
+func retiredOverridesDoc(t *testing.T, value bool) string {
+	t.Helper()
+	retired := experiments.Default().Retired()
+	require.NotEmpty(t, retired)
+	overrides := make(map[string]bool, len(retired))
+	for _, name := range retired {
+		overrides[name] = value
+	}
+	raw, err := json.Marshal(map[string]any{"overrides": overrides})
+	require.NoError(t, err)
+	return string(raw)
 }
 
 // A hub built with an injected registry that has no thread groups entry

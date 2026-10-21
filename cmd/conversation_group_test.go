@@ -55,7 +55,7 @@ type tgCall struct {
 type fakeThreadGroupHub struct {
 	mu sync.Mutex
 	// enabled false makes the fake an older hub with its
-	// hub.chat_thread_groups experiment off: every thread group route is 404.
+	// thread groups experiment off: every thread group route is 404.
 	enabled bool
 	// rejectGroupOnCreate makes conversation create answer a
 	// threadGroupId with such a hub's 400 while the thread group routes
@@ -604,7 +604,7 @@ func TestConversationGroupAddRemove(t *testing.T) {
 	assert.Len(t, hub.mutations(), before)
 }
 
-// Against an older hub with its hub.chat_thread_groups experiment off
+// Against an older hub with its thread groups experiment off
 // (ptone/scion#5546), every subcommand reports the clear message, and
 // --group on conversation create does too.
 func TestConversationGroup_OlderHubWithoutThreadGroups(t *testing.T) {
