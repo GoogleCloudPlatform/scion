@@ -94,9 +94,9 @@ With --format json the output is an object keyed by setting:
 		}
 
 		w := cmd.OutOrStdout()
-		fmt.Fprintln(w, "Effective Settings:")
+		_, _ = fmt.Fprintln(w, "Effective Settings:")
 		for _, v := range values {
-			fmt.Fprintf(w, "  %s\n", formatSettingValue(v))
+			_, _ = fmt.Fprintf(w, "  %s\n", formatSettingValue(v))
 		}
 		return nil
 	},
@@ -177,7 +177,7 @@ hub.brokerToken) is masked in the output.`,
 			return err
 		}
 		if key == "cli.mode" && value == "agent" {
-			fmt.Fprintln(cmd.ErrOrStderr(), cliModeAgentNote)
+			_, _ = fmt.Fprintln(cmd.ErrOrStderr(), cliModeAgentNote)
 		}
 
 		scope := "local"
@@ -266,7 +266,7 @@ Examples:
 
 		w := cmd.OutOrStdout()
 		if configGetSource {
-			fmt.Fprintln(w, formatValueSource(v))
+			_, _ = fmt.Fprintln(w, formatValueSource(v))
 			return nil
 		}
 		fmt.Fprintln(w, v.Value)
@@ -308,7 +308,7 @@ Examples:
 		}
 		errOut := cmd.ErrOrStderr()
 		for _, w := range res.MigrationWarnings {
-			fmt.Fprintf(errOut, "  Migration warning: %s\n", w)
+			_, _ = fmt.Fprintf(errOut, "  Migration warning: %s\n", w)
 		}
 
 		scope := "local"
@@ -319,7 +319,7 @@ Examples:
 		// The value the setting has now, and where it comes from.
 		now, nowErr := config.ResolveSettingValue(configReadProjectDir(), key)
 		if nowErr == nil && strings.HasPrefix(now.Source, "env ") {
-			fmt.Fprintf(errOut, "Warning: %s is still set by %s\n", key, strings.TrimPrefix(now.Source, "env "))
+			_, _ = fmt.Fprintf(errOut, "Warning: %s is still set by %s\n", key, strings.TrimPrefix(now.Source, "env "))
 		}
 		if nowErr == nil && strings.HasPrefix(now.Source, "project-id file ") {
 			fmt.Fprintf(errOut, "Note: %s still comes from %s\n", key, strings.TrimPrefix(now.Source, "project-id file "))
