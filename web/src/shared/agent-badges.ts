@@ -28,67 +28,59 @@ import type { Agent } from './types.js';
 import { harnessDisplayName } from './harness-utils.js';
 
 /**
- * How one harness vendor is drawn. Today every mark is a neutral coloured
- * monogram. To switch a vendor to a logo, set `icon` to a registered
- * `sl-icon` name (and add it to USED_ICONS in
- * scripts/copy-shoelace-icons.mjs): the element draws the icon instead of
- * the monogram, and nothing else changes. Vendor logos need a brand-usage
- * check before they ship.
+ * The vendor mark images: 32x32 PNGs (16 CSS px at 2x) under
+ * src/assets/vendor-marks/, named after the hub `harnessVendor` value.
+ * Today each is a neutral monogram (a coloured rounded square with an
+ * initial). Switching a vendor to its branded logo is a file replacement
+ * only: overwrite `<vendor>.png` with a 32x32 PNG of the same name (a
+ * transparent background is fine; keep it small, about 1 KB). Vendor logos
+ * need a brand-usage check before they ship.
+ *
+ * `?no-inline` keeps Vite from inlining these small files as base64 data
+ * URIs: each one is emitted as its own content-hashed asset, so it gets the
+ * immutable cache headers and adds only its URL to the JS.
  */
+import anthropicMark from '../assets/vendor-marks/anthropic.png?no-inline';
+import googleMark from '../assets/vendor-marks/google.png?no-inline';
+import openaiMark from '../assets/vendor-marks/openai.png?no-inline';
+import xaiMark from '../assets/vendor-marks/xai.png?no-inline';
+import metaMark from '../assets/vendor-marks/meta.png?no-inline';
+import opencodeMark from '../assets/vendor-marks/opencode.png?no-inline';
+import copilotMark from '../assets/vendor-marks/copilot.png?no-inline';
+import hermesMark from '../assets/vendor-marks/hermes.png?no-inline';
+import unknownMark from '../assets/vendor-marks/unknown.png?no-inline';
+
+/** How one harness vendor is drawn. */
 export interface VendorMark {
-  /** Display name, used in the tooltip. */
+  /** Display name, used as the image's alt text and in the tooltip. */
   label: string;
-  /** One or two characters drawn in the mark. */
-  monogram: string;
-  /** Mark colour (a CSS colour; Shoelace tokens with fallbacks). */
-  color: string;
+  /** URL of the mark image (a Vite-emitted, content-hashed asset). */
+  src: string;
   /**
-   * True for a multi-vendor harness (the vendor is the harness itself): the
-   * mark is drawn outlined and no size chip is shown.
+   * True for a multi-vendor harness (the vendor is the harness itself): no
+   * size chip is shown.
    */
   multiVendor?: boolean;
-  /** Optional sl-icon name drawn instead of the monogram. */
-  icon?: string;
 }
 
 /**
  * The swappable vendor map: hub `harnessVendor` value to its mark. Keys are
  * the values pkg/harness Vendor returns. Multi-vendor harnesses (opencode,
- * copilot, hermes) map to their own harness identity there, so they get the
- * harness initial here.
+ * copilot, hermes) map to their own harness identity there.
  */
 export const VENDOR_MARKS: Readonly<Record<string, VendorMark>> = {
-  anthropic: { label: 'Anthropic', monogram: 'A', color: 'var(--sl-color-orange-600, #ea580c)' },
-  google: { label: 'Google', monogram: 'G', color: 'var(--sl-color-blue-600, #2563eb)' },
-  openai: { label: 'OpenAI', monogram: 'O', color: 'var(--sl-color-emerald-600, #059669)' },
-  xai: { label: 'xAI', monogram: 'x', color: 'var(--sl-color-neutral-800, #27272a)' },
-  meta: { label: 'Meta', monogram: 'M', color: 'var(--sl-color-indigo-600, #4f46e5)' },
-  opencode: {
-    label: 'OpenCode',
-    monogram: 'O',
-    color: 'var(--sl-color-neutral-600, #52525b)',
-    multiVendor: true,
-  },
-  copilot: {
-    label: 'Copilot',
-    monogram: 'C',
-    color: 'var(--sl-color-neutral-600, #52525b)',
-    multiVendor: true,
-  },
-  hermes: {
-    label: 'Hermes',
-    monogram: 'H',
-    color: 'var(--sl-color-neutral-600, #52525b)',
-    multiVendor: true,
-  },
+  anthropic: { label: 'Anthropic', src: anthropicMark },
+  google: { label: 'Google', src: googleMark },
+  openai: { label: 'OpenAI', src: openaiMark },
+  xai: { label: 'xAI', src: xaiMark },
+  meta: { label: 'Meta', src: metaMark },
+  opencode: { label: 'OpenCode', src: opencodeMark, multiVendor: true },
+  copilot: { label: 'Copilot', src: copilotMark, multiVendor: true },
+  hermes: { label: 'Hermes', src: hermesMark, multiVendor: true },
 };
 
 /** The mark of a custom or unresolved harness (no `harnessVendor`). */
-export const UNKNOWN_VENDOR_MARK: VendorMark = {
-  label: 'Unknown',
-  monogram: '?',
-  color: 'var(--sl-color-neutral-400, #a1a1aa)',
-};
+export const UNKNOWN_VENDOR_MARK: VendorMark = { label: 'Unknown', src: unknownMark };
 
 /** Model size alias to its chip text and its full word for the tooltip. */
 export const MODEL_SIZE_CHIPS: Readonly<Record<string, { chip: string; label: string }>> = {

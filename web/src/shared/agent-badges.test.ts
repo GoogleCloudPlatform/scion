@@ -34,21 +34,15 @@ describe('agent badge view', () => {
     }
   });
 
-  it('uses neutral monograms, the harness initial for multi-vendor harnesses', () => {
-    const monograms = Object.fromEntries(
-      Object.entries(VENDOR_MARKS).map(([k, m]) => [k, m.monogram])
-    );
-    expect(monograms).toEqual({
-      anthropic: 'A',
-      google: 'G',
-      openai: 'O',
-      xai: 'x',
-      meta: 'M',
-      opencode: 'O',
-      copilot: 'C',
-      hermes: 'H',
-    });
-    expect(Object.values(VENDOR_MARKS).some((m) => m.icon)).toBe(false);
+  it('points every mark at an image file named after its vendor id', () => {
+    for (const [vendor, mark] of Object.entries(VENDOR_MARKS)) {
+      expect(mark.src, vendor).toMatch(new RegExp(`vendor-marks/${vendor}\\.png`));
+    }
+    expect(UNKNOWN_VENDOR_MARK.src).toMatch(/vendor-marks\/unknown\.png/);
+    // Never inlined as a data URI (?no-inline): each is a cacheable file.
+    for (const mark of [...Object.values(VENDOR_MARKS), UNKNOWN_VENDOR_MARK]) {
+      expect(mark.src.startsWith('data:')).toBe(false);
+    }
   });
 
   it('maps unknown, empty and differently cased vendors', () => {

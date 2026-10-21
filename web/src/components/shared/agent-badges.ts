@@ -21,7 +21,8 @@
  * experiment is off.
  *
  * Kept cheap for long lists: no fetches (it reads only fields already on the
- * list row), no sl-tooltip (a native title carries the tooltip), and hosts
+ * list row), no sl-tooltip (a native title carries the tooltip), one
+ * cached image per vendor (a content-hashed file, not a data URI), and hosts
  * create it only while the experiment is on (see {@link agentBadges}). The
  * row is a flex container, so a second badge (a model vendor) can be added
  * after the size chip later.
@@ -61,31 +62,12 @@ export class ScionAgentBadges extends LitElement {
       line-height: 1;
     }
 
+    /* 16 CSS px; the image is 32x32 for HiDPI screens. */
     .mark {
-      box-sizing: border-box;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
+      display: block;
       width: 16px;
       height: 16px;
-      border-radius: 50%;
-      border: 1.5px solid var(--mark-color);
-      background: var(--mark-color);
-      color: var(--sl-color-neutral-0, #fff);
-      font-size: 10px;
-      font-weight: 700;
-      font-family: var(--sl-font-sans, sans-serif);
-    }
-
-    /* A multi-vendor harness: outlined, so it does not read as a model vendor. */
-    .mark.multi {
-      border-radius: 4px;
-      background: transparent;
-      color: var(--mark-color);
-    }
-
-    .mark sl-icon {
-      font-size: 12px;
+      flex: none;
     }
 
     .size {
@@ -104,14 +86,14 @@ export class ScionAgentBadges extends LitElement {
     }
   `;
 
-  override render() {
+  override render(): TemplateResult | typeof nothing {
     if (!isFeatureEnabled(AGENT_BADGES_FLAG)) return nothing;
     const view = agentBadgeView(this.vendor, this.size, this.harness);
     const { mark } = view;
-    return html`<span class="badges" role="img" aria-label=${view.title} title=${view.title}>
-      <span class="mark ${mark.multiVendor ? 'multi' : ''}" style="--mark-color: ${mark.color}"
-        >${mark.icon ? html`<sl-icon name=${mark.icon}></sl-icon>` : mark.monogram}</span
-      >${view.size ? html`<span class="size">${view.size.chip}</span>` : nothing}
+    return html`<span class="badges" role="group" aria-label=${view.title} title=${view.title}>
+      <img class="mark" src=${mark.src} width="16" height="16" alt=${mark.label} />${view.size
+        ? html`<span class="size">${view.size.chip}</span>`
+        : nothing}
     </span>`;
   }
 }

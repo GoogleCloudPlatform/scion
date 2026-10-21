@@ -19,7 +19,9 @@ import { render } from 'lit';
 import { agentBadges, type ScionAgentBadges } from './agent-badges.js';
 import type { Agent } from '../../shared/types.js';
 
-async function mount(props: Partial<Pick<ScionAgentBadges, 'vendor' | 'size' | 'harness'>>) {
+async function mount(
+  props: Partial<Pick<ScionAgentBadges, 'vendor' | 'size' | 'harness'>>
+): Promise<ScionAgentBadges> {
   const el = document.createElement('scion-agent-badges');
   Object.assign(el, props);
   document.body.appendChild(el);
@@ -27,9 +29,14 @@ async function mount(props: Partial<Pick<ScionAgentBadges, 'vendor' | 'size' | '
   return el;
 }
 
-const mark = (el: HTMLElement) => el.shadowRoot!.querySelector<HTMLElement>('.mark');
-const chip = (el: HTMLElement) => el.shadowRoot!.querySelector<HTMLElement>('.size');
-const label = (el: HTMLElement) =>
+const mark = (el: HTMLElement): HTMLImageElement | null =>
+  el.shadowRoot!.querySelector<HTMLImageElement>('img.mark');
+/** The vendor file a mark shows (its src names the vendor-marks file). */
+const markFile = (el: HTMLElement): string =>
+  /vendor-marks\/([a-z]+)\.png/.exec(mark(el)?.getAttribute('src') ?? '')?.[1] ?? '';
+const chip = (el: HTMLElement): HTMLElement | null =>
+  el.shadowRoot!.querySelector<HTMLElement>('.size');
+const label = (el: HTMLElement): string =>
   el.shadowRoot!.querySelector('.badges')?.getAttribute('title') ?? '';
 
 describe('scion-agent-badges', () => {
@@ -53,13 +60,17 @@ describe('scion-agent-badges', () => {
 
   describe('experiment on', () => {
     afterEach(() => delete window.__SCION_FEATURES__);
-    const on = () => (window.__SCION_FEATURES__ = { 'web.agent_badges': true });
+    const on = (): void => {
+      window.__SCION_FEATURES__ = { 'web.agent_badges': true };
+    };
 
-    it('shows the vendor monogram and the size chip, with both in the tooltip', async () => {
+    it('shows the vendor mark image and the size chip, with both in the tooltip', async () => {
       on();
       const el = await mount({ vendor: 'anthropic', size: 'extra-large' });
-      expect(mark(el)?.textContent).toBe('A');
-      expect(mark(el)?.classList.contains('multi')).toBe(false);
+      expect(markFile(el)).toBe('anthropic');
+      expect(mark(el)?.getAttribute('alt')).toBe('Anthropic');
+      expect(mark(el)?.getAttribute('width')).toBe('16');
+      expect(mark(el)?.getAttribute('height')).toBe('16');
       expect(chip(el)?.textContent).toBe('XL');
       expect(label(el)).toBe('Harness vendor: Anthropic\nConfigured model size: Extra large');
       expect(el.shadowRoot!.querySelector('.badges')?.getAttribute('aria-label')).toBe(label(el));
@@ -68,28 +79,29 @@ describe('scion-agent-badges', () => {
     it('omits the size chip when the size is empty', async () => {
       on();
       const el = await mount({ vendor: 'openai', size: '' });
-      expect(mark(el)?.textContent).toBe('O');
+      expect(markFile(el)).toBe('openai');
       expect(chip(el)).toBeNull();
       expect(label(el)).toBe('Harness vendor: OpenAI');
     });
 
-    it('shows only the outlined harness mark for a multi-vendor harness, even with a size', async () => {
+    it('shows only the harness mark for a multi-vendor harness, even with a size', async () => {
       on();
       const el = await mount({ vendor: 'opencode', size: 'large' });
-      expect(mark(el)?.textContent).toBe('O');
-      expect(mark(el)?.classList.contains('multi')).toBe(true);
+      expect(markFile(el)).toBe('opencode');
+      expect(mark(el)?.getAttribute('alt')).toBe('OpenCode');
       expect(chip(el)).toBeNull();
       expect(label(el)).toBe('Harness: OpenCode');
     });
 
-    it('shows a neutral ? for an unknown or missing vendor, keeping the size', async () => {
+    it('shows the neutral unknown mark for an unknown or missing vendor, keeping the size', async () => {
       on();
       const unknown = await mount({ vendor: 'acme', size: 'small' });
-      expect(mark(unknown)?.textContent).toBe('?');
+      expect(markFile(unknown)).toBe('unknown');
+      expect(mark(unknown)?.getAttribute('alt')).toBe('Unknown');
       expect(chip(unknown)?.textContent).toBe('S');
       expect(label(unknown)).toBe('Harness: unknown\nConfigured model size: Small');
       const missing = await mount({});
-      expect(mark(missing)?.textContent).toBe('?');
+      expect(markFile(missing)).toBe('unknown');
       expect(chip(missing)).toBeNull();
     });
 
@@ -116,14 +128,14 @@ describe('scion-agent-badges', () => {
       expect(el.vendor).toBe('xai');
       expect(el.size).toBe('');
       expect(el.harness).toBe('grok-build');
-      expect(mark(el)?.textContent).toBe('x');
+      expect(markFile(el)).toBe('xai');
       expect(chip(el)).toBeNull();
 
       render(agentBadges({ id: 'a2' } as Agent), host);
       await el.updateComplete;
       expect(el.vendor).toBe('');
       expect(el.harness).toBe('');
-      expect(mark(el)?.textContent).toBe('?');
+      expect(markFile(el)).toBe('unknown');
     });
   });
 });

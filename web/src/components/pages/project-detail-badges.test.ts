@@ -78,7 +78,20 @@ function fetchHandler(url: string | URL | Request): Promise<Response> {
     return Promise.resolve(jsonResponse({ projects: [] }));
   }
   if (path.includes(`/api/v1/projects/${PROJECT_ID}/agents`)) {
-    return Promise.resolve(jsonResponse({ agents: AGENTS, _capabilities: { actions: [] } }));
+    // The sorted list response (the page asks sort=updated&stats=1).
+    return Promise.resolve(
+      jsonResponse({
+        agents: AGENTS,
+        totalCount: AGENTS.length,
+        complete: true,
+        stats: {
+          total: AGENTS.length,
+          running: AGENTS.length,
+          agents: AGENTS.map((a) => [a.id, a.phase]),
+        },
+        _capabilities: { actions: [] },
+      })
+    );
   }
   if (path.endsWith(`/api/v1/projects/${PROJECT_ID}`)) {
     return Promise.resolve(
