@@ -866,7 +866,7 @@ func (svc *ProjectMembershipService) resolveDesiredRoleDefs(ctx context.Context,
 // decided in Phase P is trusted to still hold once the lock is held. The
 // phase/step comments below mark each part of that sequence.
 func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req SetMemberRolesRequest) (*SetMemberRolesResult, *MembershipDecision) {
-	if denial := svc.checkMembershipCredential(ctx, req.Actor.ID()); denial != nil {
+	if denial := svc.checkMembershipActor(ctx, req.Actor.ID(), req.ProjectID); denial != nil {
 		return nil, denial
 	}
 

@@ -22,6 +22,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -681,6 +682,33 @@ func TestEnumerateLocalSkills(t *testing.T) {
 	}
 	if !names["local-skill-1"] || !names["local-skill-2"] {
 		t.Errorf("expected local-skill-1 and local-skill-2, got %v", names)
+	}
+}
+
+func TestEnumerateLocalSkills_SkipsAgentPluginDirs(t *testing.T) {
+	agentHome := t.TempDir()
+	skillsDir := ".claude/skills"
+	skillsPath := filepath.Join(agentHome, skillsDir)
+
+	_ = os.MkdirAll(filepath.Join(skillsPath, "local-skill"), 0755)
+	// An Agent Plugins bundle installed by the claude harness.
+	_ = os.MkdirAll(filepath.Join(skillsPath, "scion-smoke", ".claude-plugin"), 0755)
+	_ = os.WriteFile(filepath.Join(skillsPath, "scion-smoke", "plugin.json"), []byte(`{}`), 0644)
+	// A symlinked or directory plugin.json does not mark a bundle.
+	_ = os.MkdirAll(filepath.Join(skillsPath, "linked"), 0755)
+	_ = os.WriteFile(filepath.Join(skillsPath, "linked", "SKILL.md"), []byte("x"), 0644)
+	if err := os.Symlink("SKILL.md", filepath.Join(skillsPath, "linked", "plugin.json")); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.MkdirAll(filepath.Join(skillsPath, "dirmark", "plugin.json"), 0755)
+
+	var names []string
+	for _, e := range enumerateLocalSkills(agentHome, skillsDir) {
+		names = append(names, e.Name)
+	}
+	sort.Strings(names)
+	if strings.Join(names, ",") != "dirmark,linked,local-skill" {
+		t.Fatalf("local skills = %v, want [dirmark linked local-skill]", names)
 	}
 }
 

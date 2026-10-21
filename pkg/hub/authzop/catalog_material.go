@@ -109,7 +109,7 @@ var materialOperations = []OperationSpec{
 		Domain:      "gcp.identity",
 		Description: "Mint a GCP access token for a service account",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agent/gcp-token", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agent/gcp-token", Method: "POST", Response: ResponseCredential},
 		},
 		Principals:       []PrincipalKind{PrincipalAgent},
 		Credentials:      []CredentialKind{CredentialAgentJWT},
@@ -248,8 +248,8 @@ var materialOperations = []OperationSpec{
 		Domain:      "env",
 		Description: "Read project environment variables",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/env", Method: "GET"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/env/{key}", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/env", Method: "GET", Response: ResponseCredential},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/env/{key}", Method: "GET", Response: ResponseCredential},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
@@ -266,7 +266,7 @@ var materialOperations = []OperationSpec{
 		Domain:      "env",
 		Description: "List hub-level environment variables (scope=hub), without secret entries",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/env", Method: "GET", Variant: "scope=hub"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/env", Method: "GET", Variant: "scope=hub", Response: ResponseCredential},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},

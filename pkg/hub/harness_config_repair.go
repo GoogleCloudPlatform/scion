@@ -206,6 +206,16 @@ func (s *Server) syncHarnessConfigFromStorageInner(ctx context.Context, id strin
 		return fmt.Errorf("harness-config %q not found", id)
 	}
 
+	// A blob row's content cannot drift: each blob is named by its hash and
+	// never overwritten. The shared repair below reads <StoragePath>/<path>,
+	// which a blob row never has, and would drop every entry as "missing",
+	// so blob rows only check and log; they never lose manifest entries
+	// (ptone/scion#4219).
+	if isHarnessConfigBlobLayout(hc) {
+		s.checkHarnessConfigBlobs(ctx, hc)
+		return nil
+	}
+
 	updated, contentHash, changed, err := s.syncResourceFromStorage(
 		ctx, storage.ResourceKindHarnessConfig, hc.Name,
 		hc.StoragePath, hc.Scope, hc.ScopeID, hc.Slug, hc.Files)
@@ -216,15 +226,20 @@ func (s *Server) syncHarnessConfigFromStorageInner(ctx context.Context, id strin
 		return nil
 	}
 
-	// syncResourceFromStorage read a legacy row without a storage path from
-	// the computed path; commit against, and record, that same path.
-	if hc.StoragePath == "" {
-		hc.StoragePath = storage.ResourceStoragePath(s.HubID(), storage.ResourceKindHarnessConfig, hc.Scope, hc.ScopeID, hc.Slug)
+	// Refuse an unusable stored config.yaml before the commit copies
+	// anything into blobs, so a refused repair changes no storage
+	// (ptone/scion#4219). The commit runs the same check again.
+	if err := s.checkLegacyHarnessConfigYAML(ctx, hc, updated); err != nil {
+		return fmt.Errorf("harness-config repair: update DB: %w", err)
 	}
-	// Commit the manifest rebuilt from storage. The commit re-derives
-	// Harness and Config from the stored config.yaml; a refused commit (an
-	// unusable provisioner) leaves the row unchanged and is returned for
-	// the caller to log.
+
+	// Commit the manifest rebuilt from storage. The commit migrates the
+	// legacy row to the blob layout (copying its files from the legacy
+	// path, the computed one for a row without a storage path, which is
+	// where syncResourceFromStorage read them), re-derives Harness and
+	// Config from the stored config.yaml, and writes against the row as
+	// read. A refused commit (an unusable provisioner) leaves the row
+	// unchanged and is returned for the caller to log.
 	if err := s.commitHarnessConfigFiles(ctx, hc, updated, harnessConfigCommitOpts{}); err != nil {
 		return fmt.Errorf("harness-config repair: update DB: %w", err)
 	}
@@ -579,4 +594,24 @@ func (s *Server) resolveTemplateForRepair(ctx context.Context, ref TemplateRepai
 		return nil, fmt.Errorf("lookup template %q: %w", ref.Name, err)
 	}
 	return tmpl, nil
+}
+
+// checkLegacyHarnessConfigYAML applies the one content check
+// (unusableProvisionerInYAML) to the config.yaml a legacy row stores at its
+// legacy path, for the manifest files. A manifest without config.yaml, or an
+// object that cannot be read, is left to the commit.
+func (s *Server) checkLegacyHarnessConfigYAML(ctx context.Context, hc *store.HarnessConfig, files []store.TemplateFile) error {
+	stor := s.GetStorage()
+	f, ok := templateFileByPath(files, harnessConfigYAMLPath)
+	if stor == nil || !ok {
+		return nil
+	}
+	data, err := readTemplateObject(ctx, stor, s.harnessConfigLegacyPath(hc)+"/"+f.Path, maxHarnessConfigFileSize)
+	if err != nil {
+		return nil
+	}
+	if perr := unusableProvisionerInYAML(hc.Name, data); perr != nil {
+		return &unusableHarnessConfigError{perr: perr}
+	}
+	return nil
 }

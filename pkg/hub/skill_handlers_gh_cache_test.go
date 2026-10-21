@@ -254,8 +254,8 @@ func TestSkillsResolve_GHDeclinesTokenSecretURI(t *testing.T) {
 	assert.NotEqual(t, "forbidden", resp.Errors[0].Code,
 		"authz should pass for the project owner; got forbidden: %s", resp.Errors[0].Message)
 	assert.Equal(t, "resolve_failed", resp.Errors[0].Code)
-	assert.Contains(t, resp.Errors[0].Message, "local resolver",
-		"the error should explain that the local resolver owns this URI shape")
+	assert.Equal(t, "resolver error", resp.Errors[0].Message,
+		"the error carries the fixed reason phrase for its code")
 
 	// The Hub must decline before contacting GitHub — otherwise it has already
 	// minted and spent the project's App token on a request it cannot serve.

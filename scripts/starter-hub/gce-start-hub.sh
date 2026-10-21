@@ -204,37 +204,18 @@ telemetry:
 SETTINGS_EOF
     substep "Prepared settings.yaml"
 
-    # systemd service file
-    # Always enable the runtime broker for combo hub-broker mode.
-    # The runtime (docker vs kubernetes) is controlled by settings.yaml, not this flag.
-    BROKER_FLAGS=" --enable-runtime-broker --runtime-broker-port 9800"
-    printf "[Unit]
-Description=Scion Hub API Server
-After=network.target
-
-[Service]
-User=scion
-Group=scion
-WorkingDirectory=%s
-EnvironmentFile=/home/scion/.scion/hub.env
-Environment=\"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/lib/google-cloud-sdk/bin\"
-Environment=\"HOME=/home/scion\"
-Environment=\"USE_GKE_GCLOUD_AUTH_PLUGIN=True\"
-# Public base URL dispatched to agents. This makes the broker route colocated
-# Docker agents through the public URL (Caddy, unless --no-tls) so each runs
-# under bridge networking (own netns) instead of host networking, avoiding
-# metadata-server and telemetry port collisions between concurrent agents.
-Environment=\"SCION_SERVER_BASE_URL=${HUB_BASE_URL}\"
-# Use journald for log management
-StandardOutput=journal
-StandardError=journal
-ExecStart=%s --global server start --foreground --hosted --enable-hub%s --enable-web --web-port 8080 --storage-bucket \${SCION_HUB_STORAGE_BUCKET} --auto-provide
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-" "${REPO_DIR}" "${SCION_BIN}" "${BROKER_FLAGS}" > "$UPLOAD_DIR/scion-hub.service"
+    # systemd service file, rendered from scion-hub.service.tmpl. Rebuild
+    # from git compares the installed unit against that template, so the
+    # unit text lives only there. Lines starting with ## are template notes.
+    # The runtime broker is always enabled for combo hub-broker mode; the
+    # runtime (docker vs kubernetes) is controlled by settings.yaml.
+    # Replacements are quoted so "&" in a value stays literal under bash
+    # 5.2 patsub_replacement; keep this unquoted-assignment form.
+    UNIT_TEXT="$(grep -v '^##' "${SCRIPT_DIR}/scion-hub.service.tmpl")"
+    UNIT_TEXT=${UNIT_TEXT//@REPO_DIR@/"${REPO_DIR}"}
+    UNIT_TEXT=${UNIT_TEXT//@SCION_BIN@/"${SCION_BIN}"}
+    UNIT_TEXT=${UNIT_TEXT//@HUB_BASE_URL@/"${HUB_BASE_URL}"}
+    printf '%s\n' "${UNIT_TEXT}" > "$UPLOAD_DIR/scion-hub.service"
     substep "Prepared systemd unit file"
 
     # Caddyfile

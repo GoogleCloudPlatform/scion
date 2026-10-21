@@ -575,13 +575,6 @@ func DetectDeprecatedServerEnv(serverEnvKoanf *koanf.Koanf) []DeprecatedEnvVar {
 	return deprecated
 }
 
-// envSuffixOverrides lists the keys whose env variable is not the spelling
-// derived from the koanf path. It is the reverse of the opsettings env key
-// aliases in pkg/config (opsettingsEnvKeyAliases).
-var envSuffixOverrides = map[string]string{
-	"server.hub.public_url": "HUB_ENDPOINT", // SCION_SERVER_HUB_ENDPOINT
-}
-
 // envPinnedLayer1Keys lists the Layer-1 keys for which a SCION_SERVER_*
 // variable is the supported way to pin the value on a node, not a
 // deprecated seed input. server.hub.public_url resolves env first, then the
@@ -590,14 +583,15 @@ var envPinnedLayer1Keys = map[string]bool{
 	"server.hub.public_url": true,
 }
 
-// koanfKeyToEnvSuffix converts a koanf key back to the env var suffix form.
-// e.g. "server.hub.admin_emails" → "HUB_ADMINEMAILS"
+// koanfKeyToEnvSuffix converts a koanf key back to the env var suffix form:
+// the canonical name from the env mapping table (config.ServerEnvKey), else
+// the derived spelling, e.g. "server.hub.admin_emails" → "HUB_ADMINEMAILS".
 // The "server." prefix is stripped because it corresponds to the SCION_SERVER_
 // env prefix that was already removed during key mapping. Without stripping,
 // the output would produce double-SERVER var names (SCION_SERVER_SERVER_HUB_...).
 func koanfKeyToEnvSuffix(key string) string {
-	if suffix, ok := envSuffixOverrides[key]; ok {
-		return suffix
+	if name, ok := config.ServerEnvKey(key); ok {
+		return strings.TrimPrefix(name, "SCION_SERVER_")
 	}
 	key = strings.TrimPrefix(key, "server.")
 	parts := strings.Split(key, ".")

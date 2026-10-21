@@ -952,7 +952,7 @@ func writeQuotaReserveError(w http.ResponseWriter, limitName string, err error) 
 				conflict.ResourceID, conflict.HeldScopeID, conflict.RequestedScopeID), nil)
 	case errors.Is(err, store.ErrQuotaExceeded):
 		writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded,
-			quotaExceededMessage(limitName), nil)
+			quotaExceededMessage(limitName), quotaExceededDetails(err))
 	case errors.Is(err, ErrQuotaLockContention):
 		writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded,
 			"quota check temporarily unavailable, please retry", nil)
@@ -2284,8 +2284,9 @@ func (s *Server) createAgentInProject(
 	//
 	// gVisor sandboxes cannot reach the real GCE metadata server at
 	// 169.254.169.254, so passthrough mode produces no credentials. When
-	// the target broker runs a cloudrun-sandbox profile, translate
-	// passthrough to assign using the broker's host service account —
+	// the agent's resolved runtime profile on the target broker is a
+	// cloudrun-sandbox profile, translate passthrough to assign using the
+	// broker's host service account —
 	// semantically equivalent (same identity) and the assign machinery
 	// works inside the sandbox.
 	//
@@ -2295,11 +2296,10 @@ func (s *Server) createAgentInProject(
 		agent.AppliedConfig.GCPIdentity != nil &&
 		agent.AppliedConfig.GCPIdentity.MetadataMode == store.GCPMetadataModePassthrough &&
 		runtimeBrokerID != "" {
-		if err := s.translatePassthroughForSandbox(ctx, agent, runtimeBrokerID); err != nil {
+		if err := s.translatePassthroughForSandbox(ctx, r, agent, runtimeBrokerID, project); err != nil {
 			slog.ErrorContext(ctx, "passthrough-to-assign translation failed",
 				"agent", agent.Name, "broker", runtimeBrokerID, "error", err)
-			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError,
-				"failed to configure GCP identity for sandbox runtime: "+err.Error(), nil)
+			writePassthroughTranslationError(w, err)
 			return
 		}
 		if agentHasAssignModeIdentity(agent) {
@@ -4473,7 +4473,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		canAttachEnv := canViewAgentEnv(ctx, s, agent)
 		if agent.AppliedConfig.CreateInputs != nil {
 			recordExplicitEdits(agent.AppliedConfig.CreateInputs, &old, cfg, presentConfigKeys,
-				dispatchImageRegistry(s.GetDispatcher()), canAttachEnv)
+				dispatchImageRegistry(s.GetDispatcher(), agent), canAttachEnv)
 		}
 
 		if cfg.Image != "" {
@@ -4505,7 +4505,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 			}
 			applyPatchAutoExposeEnv(agent.AppliedConfig, &old, project, cfg.Env)
 		}
-		dropEchoedInlineImage(cfg, &old, dispatchImageRegistry(s.GetDispatcher()))
+		dropEchoedInlineImage(cfg, &old, dispatchImageRegistry(s.GetDispatcher(), agent))
 		// Start from the live InlineConfig and overlay only the keys the
 		// request names (ptone/scion#3901). The configure page does not
 		// render volumes, skills, MCP servers, services, command args or
@@ -4577,11 +4577,18 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 			}
 			// Passthrough-to-assign translation for cloudrun-sandbox runtimes
 			// (same logic as the create path — see createAgentInProject).
-			if err := s.translatePassthroughForSandbox(ctx, agent, agent.RuntimeBrokerID); err != nil {
+			// The project supplies its active profile when the agent names
+			// none; a failed lookup fails the request rather than resolving
+			// the profile without it.
+			passthroughProject, err := s.store.GetProject(ctx, agent.ProjectID)
+			if err != nil {
+				writeErrorFromErr(w, err, "")
+				return
+			}
+			if err := s.translatePassthroughForSandbox(ctx, r, agent, agent.RuntimeBrokerID, passthroughProject); err != nil {
 				slog.ErrorContext(ctx, "passthrough-to-assign translation failed (PATCH)",
 					"agent", agent.ID, "broker", agent.RuntimeBrokerID, "error", err)
-				writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError,
-					"failed to configure GCP identity for sandbox runtime: "+err.Error(), nil)
+				writePassthroughTranslationError(w, err)
 				return
 			}
 		case store.GCPMetadataModeAssign:
@@ -4978,12 +4985,15 @@ func (s *Server) brokerReachable(ctx context.Context, agent *store.Agent) bool {
 		return true
 	}
 
-	// Check real-time WebSocket connectivity first (no DB query needed)
+	// The control channel held by this node is the local fast path (no DB
+	// query); brokerPresence checks it too.
 	if s.controlChannel != nil && s.controlChannel.IsConnected(agent.RuntimeBrokerID) {
 		return true
 	}
 
-	// Fall back to DB status check (covers co-located mode where there's no WebSocket)
+	// Otherwise the broker's presence decides (brokerPresence: the registry
+	// with hub.conduit on, and the legacy signals, which cover co-located
+	// mode where there's no WebSocket).
 	broker, err := s.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
 	if err != nil {
 		s.agentLifecycleLog.Warn("Failed to check broker status", "brokerID", agent.RuntimeBrokerID, "error", err)
@@ -4991,19 +5001,16 @@ func (s *Server) brokerReachable(ctx context.Context, agent *store.Agent) bool {
 		return true
 	}
 
-	return s.brokerRecordReachable(broker)
+	return s.brokerRecordReachable(ctx, broker)
 }
 
 // brokerRecordReachable reports whether an already-loaded broker looks
-// reachable: connected over the control channel, or marked online in the
-// store. It is the shared rule behind brokerReachable (lifecycle actions) and
-// the explicit-broker check in resolveRuntimeBroker (agent create), so the
-// two cannot disagree about what "offline" means.
-func (s *Server) brokerRecordReachable(broker *store.RuntimeBroker) bool {
-	if s.controlChannel != nil && s.controlChannel.IsConnected(broker.ID) {
-		return true
-	}
-	return broker.Status == store.BrokerStatusOnline
+// reachable: its presence (brokerPresence). It is the shared rule behind
+// brokerReachable (lifecycle actions), the explicit-broker check in
+// resolveRuntimeBroker (agent create), the retained-files purge and the move
+// probes, so they cannot disagree about what "offline" means.
+func (s *Server) brokerRecordReachable(ctx context.Context, broker *store.RuntimeBroker) bool {
+	return s.brokerPresence(ctx, broker).Connected
 }
 
 func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id string) {
@@ -5263,6 +5270,12 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 
 		targetAgent, err := s.store.GetAgent(r.Context(), id)
 		if err != nil {
+			// A visitor gets the one refusal for an unknown agent too
+			// (admitVisitorSubRoute already refused it before here).
+			if isVisitorIdentity(identity) && errors.Is(err, store.ErrNotFound) {
+				writeVisitorRefusal(w)
+				return
+			}
 			writeErrorFromErr(w, err, "")
 			return
 		}
@@ -5280,6 +5293,11 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 
 		allowed, reason, decision := s.authorizeAgentMessage(r.Context(), identity, targetAgent, isSystemPlane)
 		messaging.RecordStep(r.Context(), "message_authorized")
+		if !allowed && isVisitorIdentity(identity) {
+			// A visitor's refusal names no reason or message mode.
+			writeVisitorRefusal(w)
+			return
+		}
 		if !allowed {
 			// Use typed denial code from the decision (agent path) or
 			// fall back to reason-based mapping (user path).
@@ -5472,6 +5490,9 @@ func (s *Server) handleAgentExec(w http.ResponseWriter, r *http.Request, id stri
 			return
 		}
 		if writeBrokerRuntimeUnavailable(w, err, agent.Runtime) {
+			return
+		}
+		if writeBrokerOutcomeUnknown(w, err) {
 			return
 		}
 		RuntimeError(w, "Failed to execute command on runtime broker: "+err.Error())
@@ -5750,6 +5771,11 @@ func (s *Server) handleAgentResetAuth(w http.ResponseWriter, r *http.Request, id
 		if writeBrokerRuntimeUnavailable(w, err, agent.Runtime) {
 			return
 		}
+		// The credential was written but the running agent did not confirm
+		// the reload: the caller sees a failure with its own code.
+		if writeBrokerReloadUnconfirmed(w, err) {
+			return
+		}
 		if writeAgentTokenIssueError(w, err) {
 			return
 		}
@@ -5959,20 +5985,41 @@ func skillResolutionClientDetails(details map[string]interface{}) map[string]int
 // Passthrough-to-assign translation for cloudrun-sandbox runtimes
 // ---------------------------------------------------------------------------
 
-// brokerHasCloudRunSandboxProfile reports whether any profile on the broker has
-// the "cloudrun-sandbox" runtime type. This indicates the broker runs gVisor
-// sandboxes that cannot reach the real GCE metadata server.
-func brokerHasCloudRunSandboxProfile(broker *store.RuntimeBroker) bool {
-	for _, p := range broker.Profiles {
-		if p.Type == "cloudrun-sandbox" {
-			return true
-		}
+// resolvePassthroughProfile resolves the one runtime profile an agent runs
+// under on broker and reports whether it has the "cloudrun-sandbox" type:
+// such a profile runs gVisor sandboxes that cannot reach the real GCE
+// metadata server. resolvedProfile is that profile's name, or "" when none
+// resolves.
+// profileName is the agent's effective profile (see
+// effectiveRuntimeProfileName); resolveAgentRuntimeProfileType falls back to
+// the broker's default profile, then to a sole profile. A profile that cannot
+// be resolved (including any flat Runtime Broker, which stores no profiles)
+// is reported as not cloudrun-sandbox, so no host service account is
+// assigned on a guess.
+func resolvePassthroughProfile(broker *store.RuntimeBroker, profileName string) (resolvedProfile string, isSandbox bool) {
+	resolvedProfile, runtimeType, ok := resolveAgentRuntimeProfileType(broker, profileName)
+	if !ok {
+		return "", false
 	}
-	return false
+	return resolvedProfile, runtimeType == "cloudrun-sandbox"
 }
 
 // translatePassthroughForSandbox translates a passthrough GCP identity config
-// to assign mode when the target broker runs a cloudrun-sandbox runtime.
+// to assign mode when the runtime profile the agent resolves to on the target
+// broker has the cloudrun-sandbox type. The mode follows that one profile's
+// type: other profiles the broker also offers play no part.
+//
+// project supplies the project's active profile when the agent names none
+// (effectiveRuntimeProfileName); it may be nil only where the project has no
+// active profile to contribute.
+//
+// Whenever the profile resolves, it is recorded on the agent
+// (pinResolvedProfile: AppliedConfig.Profile and CreateInputs.Profile, when
+// empty) in the same change as the mode, whichever way the mode goes.
+// Later starts and reincarnations then run under the profile the mode was
+// decided on, rather than one resolved afresh from the project's active
+// profile or the broker's default at that time. A profile that cannot be
+// resolved is not recorded.
 //
 // Inside gVisor sandboxes the real GCE metadata server at 169.254.169.254 is
 // unreachable, so passthrough mode produces no credentials. The translation
@@ -5981,19 +6028,38 @@ func brokerHasCloudRunSandboxProfile(broker *store.RuntimeBroker) bool {
 // emulator → hub gcp-token endpoint → IAM impersonation) works inside the
 // sandbox.
 //
-// The method is a no-op when:
+// The GCP setting is left unchanged when:
 //   - the agent's config is not passthrough,
-//   - the broker has no cloudrun-sandbox profile, or
+//   - the agent's profile cannot be resolved (passthrough is kept and no
+//     profile is recorded),
+//   - the agent's resolved profile is not a cloudrun-sandbox profile
+//     (passthrough is kept and the profile is recorded), or
 //   - the broker has no host SA registered (leaves passthrough as-is with a
-//     warning — identical to pre-fix behavior).
+//     warning; the profile is recorded).
+//
+// Otherwise the translation makes the Hub impersonate the host service
+// account, so it is gated for every passthrough source (explicit, PATCH,
+// project default, hub default, scheduled) in this one place:
+//  1. gcpIamCheckMode must be enforce, as for any hub-scoped assignment;
+//  2. the creator on ctx must pass the passthrough gate for this broker
+//     (evaluatePassthroughIdentity: broker owner or admin, plus actAs on the
+//     host service account);
+//  3. the record used must pass the shared service-account rules
+//     (saAssignPolicyPreconditions).
+//
+// A refusal is a *passthroughTranslationDenied and leaves no record or
+// assignment behind; checks 1 and 2 run before any record is created. r
+// names the request in denial logs and may be nil (the scheduler).
 //
 // On success the agent's AppliedConfig.GCPIdentity is rewritten in place to
 // assign mode with the broker's host SA, and a GCPServiceAccount record is
 // created if one does not already exist for the email.
 func (s *Server) translatePassthroughForSandbox(
 	ctx context.Context,
+	r *http.Request,
 	agent *store.Agent,
 	brokerID string,
+	project *store.Project,
 ) error {
 	if agent.AppliedConfig == nil || agent.AppliedConfig.GCPIdentity == nil {
 		return nil
@@ -6010,24 +6076,57 @@ func (s *Server) translatePassthroughForSandbox(
 	if err != nil {
 		return fmt.Errorf("load broker %s: %w", brokerID, err)
 	}
-	if !brokerHasCloudRunSandboxProfile(broker) {
-		return nil // not a sandbox runtime — passthrough works as-is
+	profileName := effectiveRuntimeProfileName(agent.AppliedConfig.Profile, project)
+	resolvedProfile, isSandbox := resolvePassthroughProfile(broker, profileName)
+	pinResolvedProfile(agent.AppliedConfig, resolvedProfile)
+	if !isSandbox {
+		return nil // not a sandbox profile — passthrough works as-is
 	}
 
 	if broker.GCPHostServiceAccountEmail == "" {
-		// The broker has no host SA registered. The passthrough gate should
-		// have caught this for explicit passthrough requests; for project-
-		// default passthrough the gate doesn't run. Log and leave as-is —
-		// the agent won't get credentials, same as the pre-fix behavior.
+		// The broker has no host SA registered, so there is nothing to
+		// translate to. Explicit passthrough is refused earlier by the
+		// passthrough gate; a default passthrough is left as-is and the
+		// agent gets no credentials.
 		slog.WarnContext(ctx, "cloudrun-sandbox broker has no host SA — cannot translate passthrough to assign",
 			"broker_id", broker.ID, "broker_name", broker.Name)
 		return nil
+	}
+
+	// 1. Hub-scoped impersonation needs gcpIamCheckMode=enforce.
+	mode := s.saAssignCheckModeValue()
+	if mode != SAAssignCheckEnforce {
+		slog.WarnContext(ctx, "passthrough translation refused: gcpIamCheckMode is not enforce",
+			"broker_id", broker.ID, "mode", mode)
+		return &passthroughTranslationDenied{status: http.StatusForbidden, code: ErrCodeForbidden,
+			msg: passthroughTranslationModeDeniedMsg}
+	}
+	// 2. The creator must pass the passthrough gate for this broker.
+	if d := s.evaluatePassthroughIdentity(ctx, r, broker, SurfacePassthroughTranslation); d != nil {
+		return &passthroughTranslationDenied{status: http.StatusForbidden, code: ErrCodeForbidden, msg: d.msg}
 	}
 
 	// Ensure a GCPServiceAccount record exists for the broker's host SA.
 	sa, err := s.ensureHostSARecord(ctx, broker)
 	if err != nil {
 		return fmt.Errorf("ensure host SA record: %w", err)
+	}
+
+	// 3. The shared service-account rules, on the record actually used.
+	if pre := saAssignPolicyPreconditions(sa, agent.ProjectID, mode); pre != nil {
+		slog.WarnContext(ctx, "passthrough translation refused by service-account rules",
+			"broker_id", broker.ID, "sa_id", sa.ID, "rule", string(pre.Kind))
+		switch pre.Kind {
+		case saAssignPreconditionUnverified:
+			return &passthroughTranslationDenied{status: http.StatusBadRequest,
+				code: ErrCodeIdentityNotVerified, msg: identityNotVerifiedMessage(sa)}
+		case saAssignPreconditionHubMode:
+			return &passthroughTranslationDenied{status: http.StatusForbidden, code: ErrCodeForbidden,
+				msg: passthroughTranslationModeDeniedMsg}
+		default:
+			return &passthroughTranslationDenied{status: http.StatusBadRequest,
+				code: ErrCodeValidationError, msg: msgSANotAvailableInProject}
+		}
 	}
 
 	slog.InfoContext(ctx, "translated passthrough to assign for cloudrun-sandbox",
@@ -6051,78 +6150,181 @@ func (s *Server) translatePassthroughForSandbox(
 	return nil
 }
 
-// ensureHostSARecord looks up or creates a hub-scoped GCPServiceAccount
-// record for the broker's host service account. This is needed so that the
-// assign flow (JWT scope minting, gcp-token endpoint) works with a real
-// ServiceAccountID foreign key.
+// SurfacePassthroughTranslation labels the passthrough gate's audit record
+// when it runs for translation to assign mode on a cloudrun-sandbox profile.
+const SurfacePassthroughTranslation = "passthrough-translation"
+
+// passthroughTranslationModeDeniedMsg is the refusal when translation would
+// need hub-scoped impersonation outside gcpIamCheckMode=enforce.
+const passthroughTranslationModeDeniedMsg = "GCP identity passthrough on a cloudrun-sandbox profile uses the " +
+	"broker's host service account through the Hub, which requires gcpIamCheckMode=enforce"
+
+// passthroughTranslationDenied is a refusal from
+// translatePassthroughForSandbox. HTTP callers write it with write; other
+// callers (the scheduler) fail with its message.
+type passthroughTranslationDenied struct {
+	status int
+	code   string
+	msg    string
+}
+
+func (d *passthroughTranslationDenied) Error() string { return d.msg }
+
+func (d *passthroughTranslationDenied) write(w http.ResponseWriter) {
+	writeError(w, d.status, d.code, d.msg, nil)
+}
+
+// writePassthroughTranslationError writes a translation failure: a refusal
+// with its own status, a host record conflict as 409, a failed impersonation
+// probe as 502, anything else as a 500.
+func writePassthroughTranslationError(w http.ResponseWriter, err error) {
+	var denied *passthroughTranslationDenied
+	if errors.As(err, &denied) {
+		denied.write(w)
+		return
+	}
+	if errors.Is(err, errHostSARecordConflict) {
+		Conflict(w, errHostSARecordConflict.Error())
+		return
+	}
+	if errors.Is(err, errHostSARecordUnverifiable) {
+		writeError(w, http.StatusBadGateway, "gcp_verification_failed", errHostSARecordUnverifiable.Error(), nil)
+		return
+	}
+	writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError,
+		"failed to configure GCP identity for sandbox runtime: "+err.Error(), nil)
+}
+
+// hostSATranslationCreator is the CreatedBy of the hub-scoped records that
+// translatePassthroughForSandbox creates for a broker's host service account.
+const hostSATranslationCreator = store.HostSATranslationCreator
+
+// errHostSARecordConflict: the broker's host service account is registered at
+// project scope or managed by the Hub, so a hub-scoped record for it would
+// make it reachable from every project.
+var errHostSARecordConflict = errors.New("the broker's host service account is registered as a " +
+	"project-scoped or Hub-managed service account; it cannot be used through sandbox passthrough translation")
+
+// errHostSARecordUnverifiable: the Hub could not confirm it can impersonate
+// the broker's host service account, so no record is created for it.
+var errHostSARecordUnverifiable = errors.New("the Hub could not verify that it can impersonate the " +
+	"broker's host service account")
+
+// ensureHostSARecord looks up or creates the hub-scoped GCPServiceAccount
+// record that sandbox passthrough translation assigns for a broker's host
+// service account. The assign flow (JWT scope minting, gcp-token endpoint)
+// needs a real ServiceAccountID foreign key.
 //
-// The record is hub-scoped because the broker's host SA is an infrastructure
-// identity, not project-specific — any project dispatching to this broker
-// should be able to use it for passthrough translation.
+// The record is bound to the broker: only a record this function created for
+// the same broker (ScopeID == broker.ID, CreatedBy ==
+// hostSATranslationCreator) is reused. ScopeID selects the record here and is
+// never a reachability input; a hub-scoped record is reachable from every
+// project either way. Two brokers sharing a host service account each get
+// their own record.
+//
+// An email that has any project-scoped or Hub-managed record is refused
+// (errHostSARecordConflict), on reuse as well as on create, so translation
+// never widens such an account to hub scope.
+//
+// A new record is marked verified only after the Hub's impersonation probe
+// succeeds (VerifyImpersonation); with no token generator, or when the probe
+// fails, nothing is created (errHostSARecordUnverifiable).
 func (s *Server) ensureHostSARecord(
 	ctx context.Context,
 	broker *store.RuntimeBroker,
 ) (*store.GCPServiceAccount, error) {
-	// Look up by email first.
-	existing, err := s.store.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
-		Email: broker.GCPHostServiceAccountEmail,
-		Scope: store.ScopeHub,
-	})
+	email := broker.GCPHostServiceAccountEmail
+
+	// Every record with this email, in every scope. Emails are compared
+	// ignoring letter case: not every writer normalizes them, and a record
+	// that differs only in case is the same account. The store's fold
+	// predicate selects the rows and strings.EqualFold rechecks each one.
+	all, err := s.store.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{EmailFold: email})
 	if err != nil {
-		return nil, fmt.Errorf("lookup SA by email %s: %w", broker.GCPHostServiceAccountEmail, err)
+		return nil, fmt.Errorf("lookup SA by email %s: %w", email, err)
 	}
-	if len(existing) > 0 {
-		return &existing[0], nil
+	for i := range all {
+		if !strings.EqualFold(all[i].Email, email) {
+			continue
+		}
+		if all[i].Scope != store.ScopeHub || all[i].Managed {
+			slog.WarnContext(ctx, "passthrough translation refused: host SA has a project-scoped or managed record",
+				"broker", broker.ID, "sa_id", all[i].ID, "scope", all[i].Scope, "managed", all[i].Managed)
+			return nil, errHostSARecordConflict
+		}
+	}
+	if sa := brokerHostSARecord(all, email, broker.ID); sa != nil {
+		return sa, nil
 	}
 
-	// Create a new hub-scoped record for the broker's host SA.
-	// ScopeID is provenance for hub-scoped accounts (which hub instance
-	// registered it). Use the broker ID as provenance — more specific than
-	// the hub ID and stable across redeployments.
+	s.mu.RLock()
+	gen := s.gcpTokenGenerator
+	s.mu.RUnlock()
+	if gen == nil {
+		return nil, errHostSARecordUnverifiable
+	}
+	if verifyErr := gen.VerifyImpersonation(ctx, email); verifyErr != nil {
+		slog.WarnContext(ctx, "passthrough translation refused: impersonation probe failed",
+			"broker", broker.ID, "sa_email", email, "error", verifyErr)
+		return nil, errHostSARecordUnverifiable
+	}
+
+	// ScopeID is provenance for hub-scoped accounts; the broker ID binds the
+	// record to this broker (see brokerHostSARecord).
 	projectID := broker.GCPHostProjectID
 	if projectID == "" {
-		projectID = projectIDFromServiceAccountEmail(broker.GCPHostServiceAccountEmail)
+		projectID = projectIDFromServiceAccountEmail(email)
 	}
-
+	now := time.Now()
 	sa := &store.GCPServiceAccount{
 		ID:          gouuid.New().String(),
 		Scope:       store.ScopeHub,
 		ScopeID:     broker.ID,
-		Email:       broker.GCPHostServiceAccountEmail,
+		Email:       email,
 		ProjectID:   projectID,
 		DisplayName: fmt.Sprintf("Broker host SA (%s)", broker.Name),
 		DefaultScopes: []string{
 			"https://www.googleapis.com/auth/cloud-platform",
 		},
-		// The hub can already impersonate this SA (it's the broker's host
-		// identity), so mark as verified. The actAs check already passed
-		// in authorizePassthroughIdentity for explicit passthrough requests.
+		// Verified by the impersonation probe above.
 		Verified:           true,
-		VerifiedAt:         time.Now(),
+		VerifiedAt:         now,
 		VerificationStatus: store.GCPVerificationVerified,
-		CreatedBy:          "system:passthrough-translation",
-		CreatedAt:          time.Now(),
+		CreatedBy:          hostSATranslationCreator,
+		CreatedAt:          now,
 		Managed:            false, // not created by Hub SA provisioning
 	}
 
 	if err := s.store.CreateGCPServiceAccount(ctx, sa); err != nil {
 		// Race condition: another request may have created the record
-		// between our lookup and create. Try the lookup again.
-		existing, lookupErr := s.store.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
-			Email: broker.GCPHostServiceAccountEmail,
-			Scope: store.ScopeHub,
+		// between our lookup and create. Try the broker-bound lookup again.
+		again, lookupErr := s.store.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
+			EmailFold: email,
+			Scope:     store.ScopeHub,
+			ScopeID:   broker.ID,
 		})
 		if lookupErr != nil {
-			return nil, fmt.Errorf("create SA %s: %w (retry lookup: %v)",
-				broker.GCPHostServiceAccountEmail, err, lookupErr)
+			return nil, fmt.Errorf("create SA %s: %w (retry lookup: %v)", email, err, lookupErr)
 		}
-		if len(existing) > 0 {
-			return &existing[0], nil
+		if existing := brokerHostSARecord(again, email, broker.ID); existing != nil {
+			return existing, nil
 		}
-		return nil, fmt.Errorf("create SA %s: %w", broker.GCPHostServiceAccountEmail, err)
+		return nil, fmt.Errorf("create SA %s: %w", email, err)
 	}
 
 	slog.InfoContext(ctx, "created hub-scoped GCPServiceAccount for broker host SA",
 		"sa_id", sa.ID, "sa_email", sa.Email, "broker", broker.Name)
 	return sa, nil
+}
+
+// brokerHostSARecord returns the record in rows for email (ignoring letter
+// case) that translation created for brokerID, or nil.
+func brokerHostSARecord(rows []store.GCPServiceAccount, email, brokerID string) *store.GCPServiceAccount {
+	for i := range rows {
+		if strings.EqualFold(rows[i].Email, email) && store.IsHostSATranslationRecord(&rows[i]) &&
+			rows[i].ScopeID == brokerID && !rows[i].Managed {
+			return &rows[i]
+		}
+	}
+	return nil
 }

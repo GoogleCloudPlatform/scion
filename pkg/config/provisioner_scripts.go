@@ -28,13 +28,16 @@ import (
 // provisionerOwnedFiles are the bundled provisioner scripts that belong to the
 // harness bundle rather than the operator. capture_auth.py is included
 // because it calls into the vendored scion_harness.py and must stay in step
-// with it. Like config.yaml, these scripts are refreshed from the bundled
+// with it. agent-plugins.yaml (AgentPluginsSidecarFile) is included because it
+// declares what the bundled provision.py can install and must not drift from
+// it. Like config.yaml, these scripts are refreshed from the bundled
 // copy during non-force seeding so that provisioner fixes reach existing
 // nodes. Other user files are preserved.
 var provisionerOwnedFiles = map[string]bool{
-	"provision.py":     true,
-	"scion_harness.py": true,
-	"capture_auth.py":  true,
+	"provision.py":          true,
+	"scion_harness.py":      true,
+	"capture_auth.py":       true,
+	AgentPluginsSidecarFile: true,
 }
 
 // isProvisionerOwnedFile reports whether relPath, relative to the

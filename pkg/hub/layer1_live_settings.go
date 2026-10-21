@@ -35,7 +35,6 @@ import (
 type startupLayer1Values struct {
 	SoftDeleteRetention    time.Duration
 	SoftDeleteRetainFiles  bool
-	ImageRegistry          string
 	TelemetryDefault       *bool
 	AutoExposePortsDefault *bool
 	TelemetryConfig        *api.TelemetryConfig
@@ -84,7 +83,6 @@ func (s *Server) recordStartupLayer1Values() {
 	s.startupLayer1 = startupLayer1Values{
 		SoftDeleteRetention:    s.config.SoftDeleteRetention,
 		SoftDeleteRetainFiles:  s.config.SoftDeleteRetainFiles,
-		ImageRegistry:          s.config.MaintenanceConfig.ImageRegistry,
 		TelemetryDefault:       copyBoolPtr(s.config.TelemetryDefault),
 		AutoExposePortsDefault: copyBoolPtr(s.config.AutoExposePortsDefault),
 		TelemetryConfig:        s.config.TelemetryConfig,

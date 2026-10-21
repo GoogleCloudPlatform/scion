@@ -160,6 +160,25 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 		autoProvideAuthorized = true
 	}
 
+	// A registration that writes the broker's host service account needs
+	// actAs for the registering user on the requested value. It is written
+	// on a new row, and on an existing row only while the stored pair is
+	// unset and was not set through the update API
+	// (registrationFillsGCPHost); otherwise the requested value is kept, so
+	// no decision is made. The decision is made here, where the caller's
+	// identity is, and enforced where the row is written, against the value
+	// actually stored. A preserveSettings request never writes it.
+	var hostSAVerdict hostSAClaimVerdict
+	if !req.PreserveSettings {
+		requested := hostSAClaim{
+			Email:     strings.ToLower(req.GCPHostServiceAccountEmail),
+			ProjectID: req.GCPHostProjectID,
+		}
+		if existingBroker == nil || registrationFillsGCPHost(existingBroker, requested.Email) {
+			hostSAVerdict = s.evaluateHostSAClaim(r.Context(), hostSAClaimOf(existingBroker), requested, SurfaceBrokerHostSARegister)
+		}
+	}
+
 	// Create the broker registration. Pin the mutation to what was just
 	// authorized above, so a lookup race between the authorization check
 	// and this call cannot redirect it onto a broker the caller was not
@@ -171,14 +190,34 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 	var resp *CreateBrokerRegistrationResponse
 	switch {
 	case req.RuntimeTarget != nil:
-		resp, err = s.createFlatBrokerRegistration(r.Context(), req, user.ID(), existingBroker, autoProvideAuthorized)
+		resp, err = s.createFlatBrokerRegistration(r.Context(), req, user.ID(), existingBroker, autoProvideAuthorized, hostSAVerdict)
 	case existingBroker != nil:
-		resp, err = s.brokerAuthService.CreateBrokerRegistrationForAuthorizedMatch(r.Context(), req, user.ID(), existingBroker.ID, autoProvideAuthorized)
+		resp, err = s.brokerAuthService.CreateBrokerRegistrationForAuthorizedMatch(r.Context(), req, user.ID(), existingBroker.ID, autoProvideAuthorized, hostSAVerdict)
 	default:
-		resp, err = s.brokerAuthService.CreateBrokerRegistrationForAuthorizedNew(r.Context(), req, user.ID())
+		resp, err = s.brokerAuthService.CreateBrokerRegistrationForAuthorizedNew(r.Context(), req, user.ID(), hostSAVerdict)
 	}
 	if err != nil {
 		if writeRuntimeTargetRefusal(w, err) {
+			return
+		}
+		if errors.Is(err, ErrHostSAClaimStale) {
+			// The row read for the decision would not have been filled, so
+			// no decision was made, and it became fillable before the write.
+			Conflict(w, "the broker's host service account changed during registration; retry")
+			return
+		}
+		if errors.Is(err, ErrHostSAClaimNotAuthorized) {
+			if hostSAVerdict.Allowed {
+				// Not reachable from this handler: it makes a decision only
+				// against an unset prior (a new row, or a row registration
+				// would fill), and a decision that allows a non-empty value
+				// against an unset prior is always checked. A write site that
+				// refuses an allowed decision fails closed, as a conflict to
+				// retry.
+				Conflict(w, "the broker's host service account changed during registration; retry")
+				return
+			}
+			writeHostSAClaimDenied(w, hostSAVerdict)
 			return
 		}
 		writeBrokerRegistrationError(w, err)
@@ -195,8 +234,12 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 	for k, v := range joinTokenAuditDetails(resp) {
 		details[k] = v
 	}
+	kv := append([]string{"operation", operation}, keptSettingsAuditDetails(resp.KeptSettings)...)
+	if resp.GCPHostSet {
+		kv = append(kv, "gcp_host_set", "true")
+	}
 	LogRegistrationEvent(r.Context(), s.auditLogger, resp.BrokerID, req.Name, user.ID(), getClientIP(r),
-		mergeBrokerAuditDetails(details, "operation", operation))
+		mergeBrokerAuditDetails(details, kv...))
 
 	writeJSON(w, http.StatusCreated, resp)
 }
@@ -208,14 +251,25 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 //
 // autoProvideAuthorized is the handler's broker.auto_provide decision; the
 // write is pinned to it as on the legacy path (flatRegistration.GateAutoProvide).
-func (s *Server) createFlatBrokerRegistration(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy string, existing *store.RuntimeBroker, autoProvideAuthorized bool) (*CreateBrokerRegistrationResponse, error) {
-	labels := registrationLabels(req.Labels)
+//
+// hostSA is the handler's host service account decision
+// (flatRegistration.HostSAClaim).
+func (s *Server) createFlatBrokerRegistration(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy string, existing *store.RuntimeBroker, autoProvideAuthorized bool, hostSA hostSAClaimVerdict) (*CreateBrokerRegistrationResponse, error) {
+	requested := stripReservedBrokerLabels(req.Labels)
 	saEmail := strings.ToLower(req.GCPHostServiceAccountEmail)
 	// PreserveSettings (GoogleCloudPlatform/scion#2702) applies as on the
 	// legacy path: a re-registration leaves the row's metadata as it is and
 	// only issues a new join token; a new row gets AutoProvide off and no
 	// GCP host fields, with only the labels applied.
 	preserve := req.PreserveSettings
+	// A refused fill of an existing row's host service account refuses the
+	// registration before anything is written.
+	if existing != nil && !preserve {
+		if err := registrationFillDenied(saEmail, req.GCPHostProjectID, hostSA); err != nil {
+			return nil, err
+		}
+	}
+	var keptLabels []KeptSetting
 	row, created, err := s.registerFlatRuntimeBroker(ctx, flatRegistration{
 		BrokerID:  req.BrokerID,
 		Name:      req.Name,
@@ -226,29 +280,49 @@ func (s *Server) createFlatBrokerRegistration(ctx context.Context, req CreateBro
 		GateAutoProvide:       true,
 		RequestedAutoProvide:  req.AutoProvide,
 		AutoProvideAuthorized: autoProvideAuthorized,
+		HostSAClaim:           hostSA,
 		Apply: func(b *store.RuntimeBroker, created bool) {
 			if preserve && !created {
 				return
 			}
 			if !preserve {
 				b.AutoProvide = req.AutoProvide
-				b.GCPHostServiceAccountEmail = saEmail
-				b.GCPHostProjectID = req.GCPHostProjectID
 			}
-			if b.Labels == nil {
-				b.Labels = map[string]string{}
+			if created {
+				// A new row takes the GCP host pair and labels from the
+				// request; the Hub sets the broker role.
+				if !preserve && (saEmail != "" || req.GCPHostProjectID != "") {
+					b.GCPHostServiceAccountEmail = saEmail
+					b.GCPHostProjectID = req.GCPHostProjectID
+					b.GCPHostSource = store.GCPHostSourceRegistration
+				}
+				b.Labels = registrationLabels(requested)
+				b.Labels[store.BrokerRoleLabel] = store.BrokerRoleRemote
+				return
 			}
-			for k, v := range labels {
-				b.Labels[k] = v
-			}
+			// An existing row keeps its GCP host pair here (filled below
+			// only while unset) and the value of its existing labels.
+			b.Labels, keptLabels = mergeRegistrationLabels(b.Labels, requested)
 		},
 	})
 	if err != nil {
 		return nil, err
 	}
+	var gcp registrationGCPHostResult
+	if !created && !preserve {
+		if gcp, err = fillRegistrationGCPHost(ctx, s.store, row.ID, saEmail, req.GCPHostProjectID, hostSA); err != nil {
+			return nil, err
+		}
+	}
 	// A flat re-registration re-mints the join token: issueJoinToken's upsert
 	// replaces an outstanding one (for example left by a refused join).
-	return s.brokerAuthService.issueJoinToken(ctx, row.ID, createdBy, !created, req.JoinTokenTTLSeconds, row.RuntimeTarget)
+	resp, err := s.brokerAuthService.issueJoinToken(ctx, row.ID, createdBy, !created, req.JoinTokenTTLSeconds, row.RuntimeTarget)
+	if err != nil {
+		return nil, err
+	}
+	resp.KeptSettings = append(gcp.Kept, keptLabels...)
+	resp.GCPHostSet = gcp.Applied
+	return resp, nil
 }
 
 // joinTokenAuditDetails describes an issued join token for the register
@@ -280,6 +354,13 @@ func writeBrokerRegistrationError(w http.ResponseWriter, err error) {
 	}
 	if errors.Is(err, ErrJoinTokenTTLOutOfRange) {
 		ValidationError(w, err.Error(), map[string]interface{}{"field": "joinTokenTtlSeconds"})
+		return
+	}
+	if errors.Is(err, ErrHostSAClaimNotAuthorized) {
+		// Not reachable today: the registration handler writes the
+		// decision-specific refusal first. This is the generic form for any
+		// other caller.
+		writeForbidden(w, "Setting gcpHostServiceAccountEmail on this broker is not authorized")
 		return
 	}
 	writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
@@ -637,6 +718,10 @@ func (s *Server) handleBrokerJoin(w http.ResponseWriter, r *http.Request) {
 	// Log successful join
 	LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, getClientIP(r), true, "")
 	s.conduitBrokerCredentialChanged(req.BrokerID)
+	// Record the reservations of the agents the broker still runs (a broker
+	// registered again under the same ID), now that its row is written and
+	// before the join answers (BackfillBrokerOnRegistration).
+	s.BackfillBrokerOnRegistration(r.Context(), req.BrokerID)
 
 	writeJSON(w, http.StatusOK, resp)
 }

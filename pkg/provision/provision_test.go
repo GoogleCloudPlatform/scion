@@ -4871,7 +4871,7 @@ func TestProvision_WorktreePerAgent_FakeBackLink_RejectsGitDiscoveredPath(t *tes
 	require.NoError(t, os.WriteFile(backLink, []byte(externalGitFile+"\n"), 0o644))
 
 	// Sanity: confirm git itself now reports the external path for this branch.
-	discovered, findErr := findWorktreeForBranch(context.Background(), hostPath, branch)
+	discovered, _, findErr := findWorktreeForBranch(context.Background(), hostPath, branch)
 	require.NoError(t, findErr)
 	require.Equal(t, external, discovered, "setup: git worktree list should now report the out-of-tree external path")
 

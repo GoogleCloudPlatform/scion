@@ -101,7 +101,7 @@ func (s *Server) handleAdminEffectiveAccess(w http.ResponseWriter, r *http.Reque
 		Principal:  principalContextForIdentity(user),
 		Credential: credentialContextForIdentity(user),
 		Resource:   Resource{Type: "hub", ID: "hub"},
-		Action:     Action("manage"),
+		Action:     ActionRead,
 		Permission: "hub.audit.read",
 	})
 	if !decision.Allowed {

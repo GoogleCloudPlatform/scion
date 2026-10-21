@@ -255,11 +255,20 @@ func (s *Server) handlePutRuntime(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// systemRuntimeProjectPath is the project path the system runtime handlers
+// pass to runtime.GetRuntime: the "global" alias, which
+// config.ResolveProjectPath maps to the global settings directory. The
+// co-located broker resolves its default runtime the same way at startup
+// and on a reload (cmd serverRuntimeProjectPath), so the hub never resolves
+// a runtime from a project found from the server's working directory
+// (ptone/scion#5362).
+const systemRuntimeProjectPath = "global"
+
 // applyRuntimeChange updates the image checker and co-located broker runtime
 // so they use the newly selected runtime instead of the previously
 // configured one.
 func (s *Server) applyRuntimeChange() {
-	rt := runtime.GetRuntime("", "")
+	rt := runtime.GetRuntime(systemRuntimeProjectPath, "")
 	s.SetLocalImageChecker(rt)
 
 	s.mu.RLock()
@@ -274,9 +283,15 @@ func (s *Server) applyRuntimeChange() {
 // the effective settings' configured active profile, or "default". It reads
 // ConfiguredActiveProfile, not ActiveProfile, so the settings overlay's
 // single-stored-profile fallback never redirects the system-runtime GET or
-// PUT onto the only stored profile.
+// PUT onto the only stored profile. The settings are the global ones, like
+// the server's startup loads: never a project found from the working
+// directory (ptone/scion#5362).
 func activeProfileName() string {
-	if effective, _, err := config.LoadEffectiveSettings(""); err == nil && effective != nil {
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		return "default"
+	}
+	if effective, _, err := config.LoadEffectiveSettings(globalDir); err == nil && effective != nil {
 		if active := effective.ConfiguredActiveProfile(); active != "" {
 			return active
 		}
@@ -285,31 +300,34 @@ func activeProfileName() string {
 }
 
 // putRuntimeProfileToDB sets the runtime of the profile named by active in
-// the DB-owned profiles section. The base is the current row, or with no row
-// the effective profiles (bootstrap material), so other profiles and the
-// active profile's other fields are kept. The write is CAS on the base
-// revision.
+// the DB-owned profiles section. It merges: the base is the current row, or
+// with no row the effective profiles (bootstrap material), so other
+// profiles and the active profile's other fields are kept. A managed row's
+// image_registry values are kept; a seeded row's or the bootstrap's are
+// file copies and are not carried into the managed row, and a change that
+// leaves that filtered base as it is writes nothing (ptone/scion#3916).
+// The write is CAS on the base revision.
 func (s *Server) putRuntimeProfileToDB(ctx context.Context, ops *OperationalSettings, active, rt, updatedBy string) error {
-	profiles := map[string]config.V1ProfileConfig{}
 	var baseRev int64 // 0 = create-only when there is no row yet
+	var current *store.HubSetting
 	row, err := ops.store.GetHubSetting(ctx, "profiles")
 	switch {
 	case err == nil:
-		if len(row.Value) > 0 {
-			if err := json.Unmarshal(row.Value, &profiles); err != nil {
-				return fmt.Errorf("decoding current profiles row: %w", err)
-			}
-			if profiles == nil {
-				profiles = map[string]config.V1ProfileConfig{}
-			}
-		}
-		baseRev = row.Revision
+		current, baseRev = row, row.Revision
 	case errors.Is(err, store.ErrNotFound):
-		for name, p := range ops.Snapshot().Profiles {
-			profiles[name] = p
-		}
 	default:
 		return fmt.Errorf("reading current profiles row: %w", err)
+	}
+	base, err := profilesFilteredBase(ops, current)
+	if err != nil {
+		return fmt.Errorf("decoding current profiles row: %w", err)
+	}
+	profiles := map[string]config.V1ProfileConfig{}
+	if err := json.Unmarshal(base, &profiles); err != nil {
+		return fmt.Errorf("decoding current profiles row: %w", err)
+	}
+	if profiles == nil {
+		profiles = map[string]config.V1ProfileConfig{}
 	}
 
 	profile := profiles[active]
@@ -319,6 +337,9 @@ func (s *Server) putRuntimeProfileToDB(ctx context.Context, ops *OperationalSett
 	doc, err := json.Marshal(profiles)
 	if err != nil {
 		return fmt.Errorf("encoding profiles section: %w", err)
+	}
+	if sameAsFilteredBase(doc, base) {
+		return nil
 	}
 	_, err = ops.Update(ctx, "profiles", doc, updatedBy, baseRev, "managed")
 	return err
@@ -382,16 +403,19 @@ func (s *Server) handleSystemRegistry(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to save image registry setting", nil)
 			return
 		}
+		// The image_registry rule applies (ptone/scion#3916): a value
+		// equal to the one GET shows for an unsaved key is not stored, and
+		// a save that leaves the filtered base as it is writes nothing, so
+		// a seeded row keeps its origin and revision.
+		var filteredBase json.RawMessage
 		doc, baseRev, err := mergeSectionOnCurrentWith(r.Context(), ops, "endpoints", reqDoc,
-			&fieldPresence{raw: sent}, bodyMergeOptions("endpoints"))
+			&fieldPresence{raw: sent}, endpointsMergeOptions(ops, &filteredBase))
 		if err != nil {
 			slog.Error("PUT system/registry: failed to build endpoints document", "error", err)
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to save image registry setting", nil)
 			return
 		}
-		// A write that would leave a managed row as it is is skipped, as
-		// in the server-config PUT (unchangedManagedRow).
-		if _, same := unchangedManagedRow(r.Context(), ops, "endpoints", doc, baseRev); same {
+		if sameAsFilteredBase(doc, filteredBase) {
 			writeJSON(w, http.StatusOK, putRegistryResponse(req))
 			return
 		}
@@ -427,10 +451,6 @@ func (s *Server) handleSystemRegistry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.mu.Lock()
-	s.config.MaintenanceConfig.ImageRegistry = req.ImageRegistry
-	s.mu.Unlock()
-
 	writeJSON(w, http.StatusOK, putRegistryResponse(req))
 }
 
@@ -453,6 +473,14 @@ type OnboardingStatus struct {
 	GCloudADCAvailable  bool   `json:"gcloudADCAvailable"`
 	AutoInjectGcloudADC bool   `json:"autoInjectGcloudADC"`
 	Workstation         bool   `json:"workstation"`
+
+	// ImageRegistrySource is the layer ImageRegistry comes from
+	// (config.ImageRegistrySource: node_env, hub_db, file or default).
+	ImageRegistrySource string `json:"imageRegistrySource,omitempty"`
+	// ImageRegistrySaveable is the value the setup wizard may pre-fill and
+	// save: the saved hub value, else the settings-file value, never a node
+	// env (ptone/scion#3916).
+	ImageRegistrySaveable string `json:"imageRegistrySaveable,omitempty"`
 }
 
 func (s *Server) computeOnboardingStatus(ctx context.Context) OnboardingStatus {
@@ -505,13 +533,16 @@ func (s *Server) computeOnboardingStatus(ctx context.Context) OnboardingStatus {
 
 	status.EmbeddedBrokerID = s.GetEmbeddedBrokerID()
 
-	// ImageRegistry: resolve configured image registry
-	if vs, loadErr := config.LoadSingleFileVersioned(globalDir); loadErr == nil && vs != nil {
-		status.ImageRegistry = vs.ResolveImageRegistry("")
-	}
-	// TODO: use an internal settings API when available (needed for HA/DB-backed settings)
-	if envRegistry := os.Getenv("SCION_IMAGE_REGISTRY"); envRegistry != "" {
-		status.ImageRegistry = envRegistry
+	// ImageRegistry: the hub-scope value and its layer, plus the value the
+	// wizard may save (never a node env).
+	resolved := s.hubScopeImageRegistry()
+	// Shown, never saved from here: redacted (config.RedactImageRegistry).
+	status.ImageRegistry = config.RedactImageRegistry(resolved.Value)
+	status.ImageRegistrySource = string(resolved.Source)
+	if ops := s.GetOperationalSettings(); ops != nil {
+		status.ImageRegistrySaveable = shownImageRegistry(ops)
+	} else {
+		status.ImageRegistrySaveable = fileImageRegistryWithoutOps()
 	}
 
 	// BuildAvailable: true only if the build script can be resolved
@@ -744,17 +775,7 @@ func (s *Server) handleSystemImagesPull(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	var registry string
-	globalDir, err := config.GetGlobalDir()
-	if err == nil {
-		if vs, loadErr := config.LoadSingleFileVersioned(globalDir); loadErr == nil && vs != nil {
-			registry = vs.ResolveImageRegistry("")
-		}
-	}
-	// TODO: use an internal settings API when available (needed for HA/DB-backed settings)
-	if envRegistry := os.Getenv("SCION_IMAGE_REGISTRY"); envRegistry != "" {
-		registry = envRegistry
-	}
+	registry := s.resolveImageRegistry()
 	if registry == "" {
 		s.imagePullActive.Store(false)
 		writeError(w, http.StatusUnprocessableEntity, ErrCodeUnprocessable, "image_registry is not configured — run 'scion config set --global image_registry <registry>' or reinstall via Homebrew", nil)
@@ -763,7 +784,7 @@ func (s *Server) handleSystemImagesPull(w http.ResponseWriter, r *http.Request) 
 
 	jobID := api.NewUUID()
 
-	rt := runtime.GetRuntime("", "")
+	rt := runtime.GetRuntime(systemRuntimeProjectPath, "")
 
 	requestedHarnesses := req.Harnesses
 
@@ -1322,7 +1343,7 @@ func (s *Server) handleWorkstationSettings(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Edit settings.yaml in place under the process-wide settings-file lock
+	// Edit settings.yaml in place under the settings lock (LockSettingsDir)
 	// (not s.mu: the server-config PUT holds the file lock across DB writes
 	// that take s.mu, so taking them in the other order could deadlock).
 	// false removes the key, matching the server-config PUT's omitempty
@@ -1331,12 +1352,18 @@ func (s *Server) handleWorkstationSettings(w http.ResponseWriter, r *http.Reques
 	if !*req.AutoInjectGcloudADC {
 		edit = config.SettingsPathEdit{Path: []string{"auto_inject_gcloud_adc"}, Delete: true}
 	}
-	unlock := config.LockSettingsFile()
-	staged, err := config.PrepareSettingsPathEdits(globalDir, []config.SettingsPathEdit{edit})
-	if err == nil {
-		err = staged.Commit()
-	}
-	unlock()
+	err = func() error {
+		lock, err := config.LockSettingsDir(globalDir)
+		if err != nil {
+			return err
+		}
+		defer lock.Unlock()
+		staged, err := config.PrepareSettingsPathEdits(globalDir, []config.SettingsPathEdit{edit})
+		if err != nil {
+			return err
+		}
+		return staged.Commit(lock)
+	}()
 	if err != nil {
 		slog.Error("Failed to write workstation settings", "error", err)
 		if errors.Is(err, config.ErrSettingsPathEditUnsupported) {

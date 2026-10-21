@@ -72,6 +72,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectcontributor"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectprestarthook"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectsyncstate"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectvisitorexclusion"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectvisitorrule"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/relayinstance"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/rolebinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/roledefinition"
@@ -214,6 +216,8 @@ func checkColumn(t, c string) error {
 			projectcontributor.Table:            projectcontributor.ValidColumn,
 			projectprestarthook.Table:           projectprestarthook.ValidColumn,
 			projectsyncstate.Table:              projectsyncstate.ValidColumn,
+			projectvisitorexclusion.Table:       projectvisitorexclusion.ValidColumn,
+			projectvisitorrule.Table:            projectvisitorrule.ValidColumn,
 			relayinstance.Table:                 relayinstance.ValidColumn,
 			rolebinding.Table:                   rolebinding.ValidColumn,
 			roledefinition.Table:                roledefinition.ValidColumn,

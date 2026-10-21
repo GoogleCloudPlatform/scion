@@ -78,10 +78,11 @@ func TestBrokerQuota_FailedStartOnStoppedAgentReleasesNewReservation(t *testing.
 		"a failed start must roll back the reservation it created")
 }
 
-// Restart tears the container down in its stop leg (releasing the slot), so
-// the start leg's reservation is always new and a failed start leg releases
-// it: the agent has no container behind it any more.
-func TestBrokerQuota_FailedRestartReleasesReservation(t *testing.T) {
+// A restart whose start leg fails with an unknown outcome ("simulated broker
+// start failure") keeps the reservation: the start may have reached the
+// runtime, so the slot is held until the start-claim reaper settles the
+// restart's claim (ptone/scion#5143, erratum E-33c-1).
+func TestBrokerQuota_AmbiguousRestartKeepsReservation(t *testing.T) {
 	srv, s := testServer(t)
 	disp := &failingStartDispatcher{}
 	srv.SetDispatcher(disp)
@@ -90,14 +91,45 @@ func TestBrokerQuota_FailedRestartReleasesReservation(t *testing.T) {
 	broker, project := newQuotaTestBrokerAndProject(t, s, "rollback-restart")
 	running := newQuotaTestAgent(t, s, broker, project, "rollback-restart", state.PhaseRunning)
 	reserveBrokerSlot(t, s, broker, running.ID)
-	// The agent has a run, as every dispatched agent does: a failed restart
-	// that leaves no run records nothing (ptone/scion#2550 P5, see
-	// TestRestartStartLegFailureWithEmptyCurrentRunRecordsNothing).
+	// The agent has a run, as every dispatched agent does: the confirmed
+	// branch would record it stopped and release (ptone/scion#2550 P5).
 	_, err := s.SetAgentRunID(context.Background(), running.ID, "run-x", nil)
 	require.NoError(t, err)
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+running.ID+"/restart", nil)
 	require.GreaterOrEqual(t, rec.Code, 500, rec.Body.String())
+	assert.EqualValues(t, 1, brokerReservationCount(t, s, broker.ID), "an ambiguous restart keeps the reservation")
+}
+
+// notSentStartDispatcher fails every start before the request is sent: a
+// start that definitely did not act.
+type notSentStartDispatcher struct {
+	quotaLifecycleDispatcher
+}
+
+func (d *notSentStartDispatcher) DispatchAgentStart(_ context.Context, _ *store.Agent, _ string, _ bool) error {
+	d.startCount.Add(1)
+	return fmt.Errorf("start: %w", errStartRequestNotSent)
+}
+
+// Restart tears the container down in its stop leg, so a start leg that
+// definitely did not act leaves no container behind: the reservation is
+// released and the agent recorded stopped.
+func TestBrokerQuota_FailedRestartReleasesReservation(t *testing.T) {
+	srv, s := testServer(t)
+	disp := &notSentStartDispatcher{}
+	srv.SetDispatcher(disp)
+	setBrokerAgentCeiling(t, s, 1)
+
+	broker, project := newQuotaTestBrokerAndProject(t, s, "rollback-restart-not-sent")
+	running := newQuotaTestAgent(t, s, broker, project, "rollback-restart-not-sent", state.PhaseRunning)
+	reserveBrokerSlot(t, s, broker, running.ID)
+	_, err := s.SetAgentRunID(context.Background(), running.ID, "run-x", nil)
+	require.NoError(t, err)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+running.ID+"/restart", nil)
+	require.GreaterOrEqual(t, rec.Code, 500, rec.Body.String())
+	assert.EqualValues(t, 1, disp.startCount.Load())
 	assert.EqualValues(t, 0, brokerReservationCount(t, s, broker.ID))
 }
 

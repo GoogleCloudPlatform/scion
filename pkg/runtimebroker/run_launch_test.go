@@ -389,10 +389,10 @@ func TestRunLaunch_AbortRecordedDuringDownload_NoStart(t *testing.T) {
 
 	rec := newLaunchRecord("L-guard-d", "agent-guard-d", store.LaunchKindCreate, "", time.Now().Add(time.Hour), func() {})
 	lc := launchCtx{
-		req:  CreateAgentRequest{LaunchKeepaliveSeconds: 1},
-		opts: api.StartOptions{Name: "agent-guard-d"},
-		mgr:  mgr,
-		key:  launchKey{Slug: "agent-guard-d"},
+		keepalive: time.Second,
+		opts:      api.StartOptions{Name: "agent-guard-d"},
+		mgr:       mgr,
+		key:       launchKey{Slug: "agent-guard-d"},
 		downloadWorkspaceFromGCS: func(ctx context.Context, req CreateAgentRequest, opts api.StartOptions) (api.StartOptions, string, string, error) {
 			downloadStartedOnce.Do(func() { close(downloadStarted) })
 			select {

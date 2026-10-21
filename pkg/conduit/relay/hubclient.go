@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
@@ -163,11 +164,46 @@ func (c *HubClient) post(ctx context.Context, path string, body []byte) ([]byte,
 	}
 }
 
+// Ingress headers (design §3.9 "Ingress"; contracts §3). A hub in external
+// relay mode sets both, and only on the relay-peer leg it proxies a conduit
+// dial over, after stripping any copy the client sent. A relay trusts them
+// only on that leg.
+const (
+	// HeaderIngressInstance names the hub instance the dial entered
+	// through: the hub's instance id, at most MaxIngressInstanceLen bytes.
+	HeaderIngressInstance = "X-Scion-Conduit-Ingress-Instance"
+	// HeaderIngressLifetimeCap carries the hub's conduit lifetime cap in
+	// whole seconds (decimal).
+	HeaderIngressLifetimeCap = "X-Scion-Conduit-Ingress-Lifetime-Cap-S"
+	// MaxIngressInstanceLen bounds HeaderIngressInstance and
+	// HubAdmitRequest.IngressInstance.
+	MaxIngressInstanceLen = 128
+)
+
+// How a dial reached the relay (HubAdmitRequest.Arrival).
+const (
+	// ArrivalDirect: the client dialed the relay's public listener.
+	ArrivalDirect = "direct"
+	// ArrivalIngress: a hub ingress proxied the dial over a relay-peer
+	// leg that named the ingress instance.
+	ArrivalIngress = "ingress"
+)
+
+// ReasonRelayNotAdmitting is the reason of the 503 a relay answers a conduit
+// upgrade with while it is draining or not ready (design §3.9 "Relay
+// selection", v2.21.51). It is sent only before Admit runs, so a hub
+// ingress may re-pick another relay on it.
+const ReasonRelayNotAdmitting = "relay_not_admitting"
+
 // HubAdmitRequest asks the hub to admit a dialer the relay received
 // (design §3.9 "Admission"). Headers are the dialer's credential headers
 // (ForwardCredentialHeaders), passed unchanged, and Host and RawQuery are
 // the ones the relay received, so a signed request (broker HMAC) verifies
 // as sent. SessionID is the id the relay will admit the session under.
+// Arrival is how the dial reached the relay (ArrivalDirect or
+// ArrivalIngress; "" from an older relay means direct), and
+// IngressInstance names the hub instance of an ingress arrival (empty for
+// a direct one). The hub binds Host to the arrival.
 type HubAdmitRequest struct {
 	RelayInstanceID string              `json:"relay_instance_id"`
 	RelayGeneration int64               `json:"relay_generation"`
@@ -175,6 +211,8 @@ type HubAdmitRequest struct {
 	Host            string              `json:"host"`
 	RawQuery        string              `json:"raw_query,omitempty"`
 	Headers         map[string][]string `json:"headers"`
+	Arrival         string              `json:"arrival,omitempty"`
+	IngressInstance string              `json:"ingress_instance,omitempty"`
 }
 
 // HubAdmitResponse is an admitted dialer: the principal to serve the
@@ -297,11 +335,106 @@ func ForwardCredentialHeaders(h http.Header) map[string][]string {
 type HubRPCRequest struct {
 	AdmissionToken string `json:"admission_token"`
 	RPC            []byte `json:"rpc"`
+	// ExcludeTargets names target sessions an earlier attempt of the same
+	// tunnel request found stale (the owner no longer held or admitted
+	// them). The hub resolves the tunnel's target without them, re-checks
+	// and mints a new grant for the session it picks.
+	ExcludeTargets []string `json:"exclude_targets,omitempty"`
+	// OpenTunnels is, on a tunnel request, how many tunnels the relay holds
+	// open or is opening on the session, this request excluded. The hub
+	// applies its per-session tunnel cap to it.
+	OpenTunnels int `json:"open_tunnels,omitempty"`
+	// ExcludeRelays names relay instances an earlier attempt of the same
+	// tunnel request could not reach. The hub resolves the target without
+	// any session they hold, as the router does within one resolution.
+	ExcludeRelays []string `json:"exclude_relays,omitempty"`
+	// Features lists what the forwarding relay supports. A relay that opens
+	// the tunnels the hub authorizes lists HubFeatureTunnels; a relay that
+	// does not (an older one) gets the tunnel request refused, never an
+	// instruction it would ignore. A relay that also re-checks every tunnel
+	// it opens lists HubFeatureTunnelRecheck.
+	Features []string `json:"features,omitempty"`
 }
 
 // HubRPCResponse is the RPC's answer (the encoded RpcResponse).
 type HubRPCResponse struct {
 	RPC []byte `json:"rpc"`
+	// Tunnel is set only when the hub accepted a tunnel request (POST
+	// /v1/tunnels). The relay then opens the tunnel itself: the target
+	// stream, the user stream, and the splice between them. RPC is the
+	// answer to send once both legs are open, with the user stream's id
+	// set under TunnelResponseStreamIDKey in its JSON body.
+	Tunnel *HubTunnelOpen `json:"tunnel,omitempty"`
+}
+
+// HubFeatureTunnels is the HubRPCRequest feature of a relay that opens
+// the tunnels the hub authorizes (HubRPCResponse.Tunnel).
+const HubFeatureTunnels = "tunnels"
+
+// HubFeatureTunnelRecheck is the HubRPCRequest feature of a relay that
+// hands every tunnel it opens to its stream scheduler (hint and sweep
+// re-checks; design v2.21.46 §3.9, "Relay feature tunnel_recheck"). The
+// hub stamps a relay-held tunnel's grant for renewal only when the
+// forwarding relay lists it.
+const HubFeatureTunnelRecheck = "tunnel_recheck"
+
+// TunnelsRPCPath is the RPC path of a tunnel request (POST), on the hub
+// and on a relay-held session alike.
+const TunnelsRPCPath = "/v1/tunnels"
+
+// TunnelResponseStreamIDKey is the key of the user-side stream id in the
+// JSON body of an accepted tunnel request's answer.
+const TunnelResponseStreamIDKey = "streamId"
+
+// HubTunnelOpen is the hub's instruction to open an authorized tunnel: the
+// target session it resolved, the owner relay holding it, and the open
+// grant it minted for exactly that session. The grant is passed to the
+// target unchanged.
+type HubTunnelOpen struct {
+	TargetSessionID string `json:"target_session_id"`
+	OwnerInstanceID string `json:"owner_instance_id"`
+	OwnerGeneration int64  `json:"owner_generation"`
+	OwnerEndpoint   string `json:"owner_endpoint"`
+	// The Want the owner re-checks admission for (the stream kind is the
+	// capability).
+	WantProjectID   string `json:"want_project_id,omitempty"`
+	WantExecScope   string `json:"want_exec_scope,omitempty"`
+	WantIncarnation string `json:"want_incarnation"`
+
+	Kind   string            `json:"kind"`
+	Params map[string]string `json:"params,omitempty"`
+	Grant  []byte            `json:"grant"`
+	// OpenJTI is the open grant's jti.
+	OpenJTI string `json:"open_jti,omitempty"`
+	// Unavailable is the encoded RpcResponse to answer with when the
+	// tunnel cannot be opened (no target stream, or no user stream).
+	Unavailable []byte `json:"unavailable"`
+	// TargetRefusals are the encoded RpcResponses to answer with when the
+	// target refuses the stream with one of these close codes (the same
+	// mapping as a tunnel on a hub-held session: target not found, and
+	// forbidden). Any other failure answers with Unavailable.
+	TargetRefusals map[uint32][]byte `json:"target_refusals,omitempty"`
+
+	// AuthzUntil (unix seconds) and AuthzIntervalS (seconds) are unsigned
+	// scheduling hints (design §3.9 "Scheduling hints"): the hub copies them
+	// from the claims of the open grant it just minted, never from a
+	// request field, and sets both or neither (neither when the claims
+	// carry no deadline). The relay uses them only to time its stream
+	// re-checks and never trusts them for authorization; the target
+	// enforces the signed values. A missing, partial or out-of-range hint
+	// leaves the stream to the re-check sweep.
+	AuthzUntil     int64 `json:"authz_until,omitempty"`
+	AuthzIntervalS int64 `json:"authz_interval_s,omitempty"`
+}
+
+// Owner returns the relay holding the target session.
+func (o *HubTunnelOpen) Owner() Owner {
+	return Owner{InstanceID: o.OwnerInstanceID, Generation: o.OwnerGeneration, Endpoint: o.OwnerEndpoint}
+}
+
+// Want returns the Want the owner re-checks admission for.
+func (o *HubTunnelOpen) Want() registry.Want {
+	return registry.Want{ProjectID: o.WantProjectID, ExecScope: o.WantExecScope, Incarnation: o.WantIncarnation}
 }
 
 // HubRefreshRequest carries an in-band AuthRefresh credential of a

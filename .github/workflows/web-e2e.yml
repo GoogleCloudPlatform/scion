@@ -35,6 +35,9 @@
 # starts itself, in well under a minute.
 #
 # Not covered here:
+# - web/e2e/iap-journey (ptone/scion#4240, X5): operator-run only against a
+#   live IAP-fronted test hub; it skips without IAP_JOURNEY=1 and its
+#   environment (web/e2e/iap-journey/README.md).
 # - web/e2e/chat-mobile: the chat-mobile-e2e job in ci.yml owns it (sharded,
 #   with a stable required-check name), so it is not run twice.
 # - web/playwright.config.ts (e2e/*.spec.ts), which builds and starts the Go

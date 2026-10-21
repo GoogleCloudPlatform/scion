@@ -39,6 +39,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -201,7 +202,8 @@ var hubBrokersInfoCmd = &cobra.Command{
 	Long: `Show detailed information about a runtime broker on the Hub.
 
 Displays broker metadata including name, status, version, last heartbeat,
-capabilities, available profiles, and projects it provides for.
+capabilities, available profiles (legacy) or runtime target (flat), and
+projects it provides for.
 
 If no broker name is provided, the current host's broker is used (if registered).
 
@@ -2204,42 +2206,7 @@ func runHubBrokersInfo(cmd *cobra.Command, args []string) error {
 	}
 
 	if isJSONOutput() {
-		output := map[string]interface{}{
-			"id":              broker.ID,
-			"name":            broker.Name,
-			"slug":            broker.Slug,
-			"version":         broker.Version,
-			"status":          broker.Status,
-			"connectionState": broker.ConnectionState,
-			"autoProvide":     broker.AutoProvide,
-			"created":         broker.Created,
-			"updated":         broker.Updated,
-		}
-		if !broker.LastHeartbeat.IsZero() {
-			output["lastHeartbeat"] = broker.LastHeartbeat
-		}
-		if broker.Endpoint != "" {
-			output["endpoint"] = broker.Endpoint
-		}
-		if broker.CreatedBy != "" {
-			output["createdBy"] = broker.CreatedBy
-		}
-		if broker.Capabilities != nil {
-			output["capabilities"] = broker.Capabilities
-		}
-		if len(broker.Profiles) > 0 {
-			output["profiles"] = broker.Profiles
-		}
-		if len(broker.Projects) > 0 {
-			output["projects"] = broker.Projects
-		}
-		if len(broker.Labels) > 0 {
-			output["labels"] = broker.Labels
-		}
-		if len(broker.Annotations) > 0 {
-			output["annotations"] = broker.Annotations
-		}
-		return outputJSON(output)
+		return outputJSON(brokerInfoJSON(broker))
 	}
 
 	// Text output
@@ -2305,6 +2272,11 @@ func runHubBrokersInfo(cmd *cobra.Command, args []string) error {
 				fmt.Printf("  - %s (%s) [%s]\n", p.Name, p.Type, availStr)
 			}
 		}
+	} else if broker.RuntimeTarget != nil {
+		// A flat Runtime Broker has no profiles: it serves one runtime
+		// target and shows what its instance reported.
+		fmt.Println()
+		writeRuntimeTargetSections(os.Stdout, broker.RuntimeTarget, broker.RuntimeTargetPresentation, broker.RuntimeTargetPresentationObservedAt)
 	} else {
 		fmt.Println()
 		fmt.Println("Profiles: none")
@@ -2324,6 +2296,54 @@ func runHubBrokersInfo(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// brokerInfoJSON is the `hub brokers info --json` document. A flat Runtime
+// Broker's reported presentation and its observation time are included as
+// the Hub returns them.
+func brokerInfoJSON(broker *hubclient.RuntimeBroker) map[string]interface{} {
+	output := map[string]interface{}{
+		"id":              broker.ID,
+		"name":            broker.Name,
+		"slug":            broker.Slug,
+		"version":         broker.Version,
+		"status":          broker.Status,
+		"connectionState": broker.ConnectionState,
+		"autoProvide":     broker.AutoProvide,
+		"created":         broker.Created,
+		"updated":         broker.Updated,
+	}
+	if !broker.LastHeartbeat.IsZero() {
+		output["lastHeartbeat"] = broker.LastHeartbeat
+	}
+	if broker.Endpoint != "" {
+		output["endpoint"] = broker.Endpoint
+	}
+	if broker.CreatedBy != "" {
+		output["createdBy"] = broker.CreatedBy
+	}
+	if broker.Capabilities != nil {
+		output["capabilities"] = broker.Capabilities
+	}
+	if len(broker.Profiles) > 0 {
+		output["profiles"] = broker.Profiles
+	}
+	if len(broker.Projects) > 0 {
+		output["projects"] = broker.Projects
+	}
+	if len(broker.Labels) > 0 {
+		output["labels"] = broker.Labels
+	}
+	if len(broker.Annotations) > 0 {
+		output["annotations"] = broker.Annotations
+	}
+	if broker.RuntimeTargetPresentation != nil {
+		output["runtimeTargetPresentation"] = broker.RuntimeTargetPresentation
+	}
+	if broker.RuntimeTargetPresentationObservedAt != nil {
+		output["runtimeTargetPresentationObservedAt"] = broker.RuntimeTargetPresentationObservedAt
+	}
+	return output
 }
 
 func runHubBrokersDelete(cmd *cobra.Command, args []string) error {
@@ -2516,7 +2536,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 	projectID := settings.ProjectID
 	if projectID == "" {
 		projectID = config.GenerateProjectID()
-		if err := config.UpdateSetting(resolvedPath, "project_id", projectID, isGlobal); err != nil {
+		if err := config.UpdateSetting(resolvedPath, projectkeys.ConfigProjectIDKey, projectID, isGlobal); err != nil {
 			return fmt.Errorf("failed to save project_id: %w", err)
 		}
 	}
@@ -2565,8 +2585,8 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 				projectName, hubProject.Name, hubLookupID)
 
 			// Clear the stale hub project ID
-			if err := config.UpdateSetting(resolvedPath, "hub.projectId", "", isGlobal); err != nil {
-				util.Debugf("Failed to clear stale hub.projectId: %v", err)
+			if err := config.UpdateSetting(resolvedPath, projectkeys.ConfigHubProjectIDKey, "", isGlobal); err != nil {
+				util.Debugf("Failed to clear stale %s: %v", projectkeys.ConfigHubProjectIDKey, err)
 			}
 
 			// Regenerate the local project ID from the marker file or directory
@@ -2575,7 +2595,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 			} else {
 				projectID = config.GenerateProjectID()
 			}
-			if err := config.UpdateSetting(resolvedPath, "project_id", projectID, isGlobal); err != nil {
+			if err := config.UpdateSetting(resolvedPath, projectkeys.ConfigProjectIDKey, projectID, isGlobal); err != nil {
 				return fmt.Errorf("failed to save project_id: %w", err)
 			}
 		} else if hubProject != nil {
@@ -2625,7 +2645,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 				}
 				// Store the hub project ID separately — don't overwrite the
 				// local project_id (which drives config-dir paths).
-				if err := config.UpdateSetting(resolvedPath, "hub.projectId", selectedID, isGlobal); err != nil {
+				if err := config.UpdateSetting(resolvedPath, projectkeys.ConfigHubProjectIDKey, selectedID, isGlobal); err != nil {
 					return fmt.Errorf("failed to save hub project ID: %w", err)
 				}
 				hubLookupID = selectedID
@@ -2638,7 +2658,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 				}
 				// Store the hub project ID if it differs from the local one
 				if hubProjectID != "" && hubProjectID != projectID {
-					if err := config.UpdateSetting(resolvedPath, "hub.projectId", hubProjectID, isGlobal); err != nil {
+					if err := config.UpdateSetting(resolvedPath, projectkeys.ConfigHubProjectIDKey, hubProjectID, isGlobal); err != nil {
 						return fmt.Errorf("failed to save hub project ID: %w", err)
 					}
 				}
@@ -2652,7 +2672,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 			}
 			// Store the hub project ID if it differs from the local one
 			if hubProjectID != "" && hubProjectID != projectID {
-				if err := config.UpdateSetting(resolvedPath, "hub.projectId", hubProjectID, isGlobal); err != nil {
+				if err := config.UpdateSetting(resolvedPath, projectkeys.ConfigHubProjectIDKey, hubProjectID, isGlobal); err != nil {
 					return fmt.Errorf("failed to save hub project ID: %w", err)
 				}
 			}
@@ -2683,7 +2703,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 	// Always record the hub project ID in this project's own settings, even
 	// when it equals the local project_id, so the link never depends on a
 	// value inherited from another settings file.
-	if err := config.UpdateSetting(resolvedPath, "hub.projectId", effectiveHubProjectID, isGlobal); err != nil {
+	if err := config.UpdateSetting(resolvedPath, projectkeys.ConfigHubProjectIDKey, effectiveHubProjectID, isGlobal); err != nil {
 		return fmt.Errorf("failed to save hub project ID: %w", err)
 	}
 
@@ -2939,8 +2959,8 @@ func markProjectUnlinked(stderr io.Writer, resolvedPath string, isGlobal bool) e
 	if err := config.UpdateSetting(resolvedPath, "hub.linked", "false", isGlobal); err != nil {
 		return fmt.Errorf("failed to save linked state: %w", err)
 	}
-	if err := config.UpdateSetting(resolvedPath, "hub.projectId", "", isGlobal); err != nil {
-		util.Debugf("Failed to clear hub.projectId: %v", err)
+	if err := config.UpdateSetting(resolvedPath, projectkeys.ConfigHubProjectIDKey, "", isGlobal); err != nil {
+		util.Debugf("Failed to clear %s: %v", projectkeys.ConfigHubProjectIDKey, err)
 	}
 	removeLinkEntry(stderr, resolvedPath)
 	return nil

@@ -1049,13 +1049,17 @@ func TestTestAdminPolicy_RoleUpdateAddingDeniedPermissionRefused(t *testing.T) {
 	assert.Less(t, rec.Code, 300, "human super-admin: %s", rec.Body.String())
 }
 
-// Review RN1 (option b): an agent rooted at a test super-admin reads
-// project secret values only in a project where its root holds a project
-// membership. System authority (the super-admin role's secret.use) does
-// not admit an admin-kind root. Creating a project makes the test
-// super-admin its owner (the owner binding is written for the creator), so
-// its agents read that project's secrets: the accepted residual.
-func TestTestAdminPolicy_AgentSecretsOnlyInRootMemberProject(t *testing.T) {
+// Review RN1 (option b), the material precheck's root-membership rule
+// (material_runtime.go check 5) as defence in depth: given a token that
+// carries project:secret:read, an agent rooted at a test super-admin is
+// admitted only in a project where its root holds a project membership.
+// System authority (the super-admin role's secret.use) does not admit an
+// admin-kind root. The token here is minted by hand: since admin tier A3 no
+// such token is minted for an admin-rooted agent (the mint-time scope
+// clamp), so at runtime its secret reads are refused even in its root's own
+// project (TestTestAdminA3_RuntimeSecretReadClamped). The dispatch-time
+// injection under this rule is unchanged (TestTestAdminPolicy_DispatchSecretsClamp).
+func TestTestAdminPolicy_MaterialPrecheckRootMembershipWithHandMintedToken(t *testing.T) {
 	srv, s, _ := tsaServer(t)
 	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
 	ctx := context.Background()
@@ -1092,6 +1096,8 @@ func TestTestAdminPolicy_AgentSecretsOnlyInRootMemberProject(t *testing.T) {
 			ProjectID: projectID, Phase: string(state.PhaseRunning), StateVersion: 1, Ancestry: []string{rootID},
 			Created: time.Now(), Updated: time.Now()}))
 		seedSecret(t, srv.secretBackend, "TSA_SECRET", "tsa-value", "", "", projectID)
+		// A hand-minted token: the mint path no longer issues this scope to
+		// an admin-rooted agent (A3).
 		tok, err := srv.agentTokenService.GenerateAgentToken(agentID, projectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{rootID})
 		require.NoError(t, err)
 		return doRequestWithAgentToken(t, srv, http.MethodPost, "/api/v1/agent/secrets", secretFetchRequest{Keys: []string{"TSA_SECRET"}}, tok)
@@ -1100,7 +1106,7 @@ func TestTestAdminPolicy_AgentSecretsOnlyInRootMemberProject(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, rec.Code, "not a member: no secret values: %s", rec.Body.String())
 	assert.NotContains(t, rec.Body.String(), "tsa-value")
 	rec = fetch(own)
-	assert.Equal(t, http.StatusOK, rec.Code, "owned project: %s", rec.Body.String())
+	assert.Equal(t, http.StatusOK, rec.Code, "owned project, hand-minted token: %s", rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "tsa-value")
 
 	// SystemAuthorityProof itself: no system-authority admission for an

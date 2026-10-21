@@ -35,7 +35,9 @@ type InviteCode struct {
 	// Note holds the value of the "note" field.
 	Note string `json:"note,omitempty"`
 	// Created holds the value of the "created" field.
-	Created      time.Time `json:"created,omitempty"`
+	Created time.Time `json:"created,omitempty"`
+	// Issuance ID of the admin-kind test identity that created this row (grant shaping)
+	IssuanceID   *string `json:"issuance_id,omitempty"`
 	selectValues sql.SelectValues
 }
 
@@ -48,7 +50,7 @@ func (*InviteCode) scanValues(columns []string) ([]any, error) {
 			values[i] = new(sql.NullBool)
 		case invitecode.FieldMaxUses, invitecode.FieldUseCount:
 			values[i] = new(sql.NullInt64)
-		case invitecode.FieldCodeHash, invitecode.FieldCodePrefix, invitecode.FieldCreatedBy, invitecode.FieldNote:
+		case invitecode.FieldCodeHash, invitecode.FieldCodePrefix, invitecode.FieldCreatedBy, invitecode.FieldNote, invitecode.FieldIssuanceID:
 			values[i] = new(sql.NullString)
 		case invitecode.FieldExpiresAt, invitecode.FieldCreated:
 			values[i] = new(sql.NullTime)
@@ -129,6 +131,13 @@ func (_m *InviteCode) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.Created = value.Time
 			}
+		case invitecode.FieldIssuanceID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field issuance_id", values[i])
+			} else if value.Valid {
+				_m.IssuanceID = new(string)
+				*_m.IssuanceID = value.String
+			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
 		}
@@ -190,6 +199,11 @@ func (_m *InviteCode) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("created=")
 	builder.WriteString(_m.Created.Format(time.ANSIC))
+	builder.WriteString(", ")
+	if v := _m.IssuanceID; v != nil {
+		builder.WriteString("issuance_id=")
+		builder.WriteString(*v)
+	}
 	builder.WriteByte(')')
 	return builder.String()
 }

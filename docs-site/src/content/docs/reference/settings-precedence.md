@@ -7,6 +7,113 @@ Scion reads configuration from a lot of places: templates, `settings.yaml` files
 and in your project, hub database scopes, project annotations, the agent-create request, and the
 process environment. This page is the authoritative statement of which one wins.
 
+## The model: a template describes the job, settings describe the environment
+
+**`Changed in this release`** ([release notes](/scion/release-notes/#templates-describe-the-job-not-the-environment)).
+A template says what the agent does. Where and how it runs comes from the harness-config,
+settings and profiles, the hub and the project, never from the template. Every key in
+`scion-agent.yaml` therefore belongs to one of two classes. The design is recorded in
+`.design/template-settings-model.md`.
+
+| Class | Keys | In a template | Where the value comes from |
+| --- | --- | --- | --- |
+| **Job keys** | `harness_config` / `default_harness_config`, `model`, `thinking_level`, `agent_instructions`, `system_prompt`, `skills`, `mcp_servers`, `command_args`, `task_flag`, `max_turns` / `max_model_calls` / `max_duration`, `services`, `secrets` (names only), `message_mode` | Set by the template; the project and the requester override it | The [job-key ladder](#the-job-key-ladder) |
+| **Template env** | `env` | A fallback for the job's own tools | Applied only when no other source sets the key; see [template env](#template-env-is-a-lowest-precedence-fallback) |
+| **Environment keys** | `telemetry`, `hub`, `image`, `resources`, `kubernetes`, `volumes` | **Ignored, with a warning** | Harness-config, broker settings and profiles, hub settings, project policy, and the requester's own inline config |
+
+An environment key in a template is ignored when the template is loaded. The agent start
+prints `template <name> sets environment key(s) <keys>; ignored (environment comes from
+settings)`, the hub logs a warning naming the keys when the template is committed, and
+`GET /api/v1/admin/validate-resources` lists the template under `templateConfigFindings` (see
+the [API reference](/scion/reference/api/#admin-apiv1admin)). Uploads are not rejected. This is
+a **breaking** change for templates that set these keys: move the values to settings, a profile,
+the harness-config or the hub defaults. The
+requester's own inline config (`--config`, the create API, the web form) can still set `image`,
+`resources`, `kubernetes` and `volumes` for that one agent; its `telemetry` can only turn
+telemetry on or off.
+
+### The job-key ladder
+
+Lowest to highest. A lower tier fills only what every higher tier left unset:
+
+```
+built-in defaults
+  < harness-config base (its config.yaml)
+    < broker settings (settings.yaml on the broker)
+      < hub defaults (agent_defaults)
+        < template (see the note below)
+          < project defaults (project settings and scion.io/default-* annotations)
+            < requester inline config
+              < requester CLI flags (--model, --harness-config, ...)
+```
+
+The template rung is the template chain (the default template, then the named template) where
+the broker resolves a key. The hub's own rungs for `model`, `thinking_level` and `harness_config`
+read only the named template's `agentConfig` snapshot.
+
+**`Changed in this release`:** the hub defaults sit **below** the template for every job key.
+Before, a hub `default_model` (and `default_thinking_level`) beat the template's value; now the
+hub default applies only when neither the template nor the project sets one. The project still
+beats the template. Per-key details, including the harness-config name order, are in
+[B1](#b1-harness-configuration-model-thinking-level-and-scalar-limits). Skills are the one
+exception: they are merged by scope rather than replaced along the ladder, by the existing hub
+and broker merge rules. Hub-injected skills keep travelling in the requester's inline config,
+labelled by scope.
+
+### The telemetry ladder
+
+Lowest to highest:
+
+```
+broker settings (settings.yaml telemetry)
+  < hub telemetry config (a hub default)
+    < requester on/off (--enable-telemetry / --disable-telemetry; no other fields)
+      < project telemetry policy
+```
+
+**`Changed in this release`:**
+
+- A template's `telemetry:` block is ignored (it is an environment key).
+- The requester can only turn telemetry on or off. Other inline telemetry fields are ignored,
+  with a create warning, on every broker.
+- Project telemetry policy beats `--enable-telemetry` / `--disable-telemetry` and
+  `SCION_TELEMETRY_ENABLED`.
+- Hub telemetry defaults and project policy travel to the broker as separate tiers on every
+  create, start and restart, to every broker. They are never written into the agent's inline
+  config or sent inline. A broker older than the `templateTiers` capability ignores both tiers,
+  so its agents get only its own settings telemetry plus the requester's on/off; the hub logs a
+  warning once per such broker.
+- Broker settings telemetry is applied at each start and is not persisted in the agent's
+  `scion-agent.json`.
+
+### Template env is a lowest-precedence fallback
+
+**`Changed in this release`.** Before, template `env:` values were merged into the agent's
+config and beat settings harness-config env. Now a template's `env:` block is its own layer,
+for the job's own tools:
+
+- **Lowest precedence.** Each variable is set only when no other source sets the key. That
+  includes every [System A](#system-a--environment-variables) source (hub, project, user and
+  broker scopes, request env, harness-config env) and the env the runtime adds itself: resolved
+  auth env, harness env, telemetry env and env-type secrets.
+  A source whose value is empty adds no entry, so the template fills such a key.
+- **Literal values.** No `${VAR}` expansion against the broker host and no passthrough of an
+  empty value from the host. An empty value is skipped with a warning; a value containing
+  `${...}` is used as written, with a warning.
+- **`SCION_*` keys are ignored.** That namespace belongs to the platform.
+- **Never a credential.** Every env key the harness-config's auth metadata lists, for any auth
+  type, is never filled from a template, even when nothing else sets it: the `required_env[].any_of`
+  keys, the `required_files[].alternative_env_keys` and the `autodetect` env keys. So a template
+  never supplies or selects a credential. Template env does not count toward auth detection or
+  the env-gather required keys.
+- **Live.** It is never written into `scion-agent.json`. It is recomputed from the current
+  template on every start, so a template edit takes effect on the agent's next start. If the
+  template can no longer be found, the start warns and applies no template env.
+- **Existing agents.** A key baked into an older agent's stored config with the same value as
+  the live template is treated as the template fallback from its next start. Nothing on disk is
+  rewritten.
+- The hub-only `TZ` rule applies to template env like any broker-local layer.
+
 ## Read this first: there are two precedence systems, not one
 
 The single most common mistake with Scion settings is to assume there is **one** ranked list of
@@ -18,8 +125,11 @@ rank the same-named sources **differently**:
 | **A — Environment variables** | custom environment variables injected into the agent | `envScopesInPrecedenceOrder` in `pkg/hub/httpdispatcher.go`, plus the config seeding in the same file |
 | **B — `ScionConfig`** | model, thinking level, `max_turns`, `max_model_calls`, `max_duration`, and `resources` | the ladder in `ResolveHarnessConfig` and `pkg/agent/provision.go` |
 
+Telemetry and template `env:` have their own rules, stated in [the model](#the-model-a-template-describes-the-job-settings-describe-the-environment)
+above; neither is a rung of System A or System B.
+
 They are documented in two separate tables below, [System A](#system-a--environment-variables) and
-[System B](#system-b--scionconfig-limits-and-resources), and **the tables are not
+[System B](#system-b--scionconfig-job-keys-limits-and-resources), and **the tables are not
 interchangeable.** A reader who takes a rule from one and applies it to the other will get
 answers backwards. The clearest instance:
 
@@ -28,17 +138,6 @@ answers backwards. The clearest instance:
 > ranks, two of them above the hub tier.** For `resources`, "`runtime_broker` is lowest" is not a
 > rule that is stated backwards; it is a rule that **has no truth value**, because there is no
 > single thing to rank. See [Resources interleave](#resources-interleaves-and-cannot-be-given-one-rank).
-
-### `Changed in this release` — templates no longer set environment keys (**breaking**)
-
-A template's `image`, `resources`, `volumes`, `telemetry`, `hub` and `kubernetes` keys, and its
-`env` entries whose name starts with `SCION_`, are now ignored with a warning. Every row on this
-page that names a *template* tier for one of these keys no longer receives a value from the
-template. A template's other `env` entries form their own layer below every other env source:
-each is set only when nothing else sets that variable, never for the harness-config's credential
-variables, and with literal values. Move environment values to settings, a profile, the
-harness-config or the Hub defaults. See
-[Environment keys are ignored](/scion/local/templates/#environment-keys-are-ignored).
 
 ## How to read the tables
 
@@ -73,11 +172,15 @@ These are read by the Scion broker (or CLI) **to configure itself as a process**
 part of the agent settings chain at all, and an agent never sees them by this route.
 
 They enter through the koanf environment layer in `LoadVersionedSettings`
-(`pkg/config/settings_v1.go`), which is loaded **last** — after the embedded defaults, the global
+(`pkg/config/settings_v1.go`; `LoadSettings` and `LoadEffectiveSettings` both read through its layers via `loadVersionedSettings` in `pkg/config/settings_view.go`), loaded **last** — after the embedded defaults, the global
 `~/.scion/settings.yaml`, the in-repo `.scion/settings.yaml`, and any external project config.
-Loaded last means **highest priority**: a `SCION_*` variable in the broker's process environment
-overrides every settings file. An exported but empty `SCION_*` variable counts as unset, so it never
-clears a value from a settings file.
+Legacy-format settings files (those without `schema_version`) are converted to the v1 shape at
+their own layer when read, keeping only keys whose legacy source key the file sets, and a versioned file's legacy camelCase `hub.projectId` is read as a fallback when
+`hub.project_id` is absent. Loaded last means **highest priority**: a `SCION_*` variable in the
+broker's process environment overrides every settings file. An exported but empty `SCION_*`
+variable counts as unset, so it never clears a value from a settings file. Inside a Hub-managed agent container (`SCION_AGENT_ID` set), `SCION_WORKSPACE_PATH` and `SCION_RUNTIME`, which the runtime sets for the agent, are ignored as settings overrides, so they do not override `workspace_path` or `runtime`. The retired
+`SCION_HUB_BROKER_ID`, `SCION_HUB_BROKER_TOKEN`, `SCION_HUB_BROKER_NICKNAME`, and `SCION_BUCKET_*`
+variables are not read.
 
 ```
 embedded defaults  <  ~/.scion/settings.yaml  <  .scion/settings.yaml
@@ -87,6 +190,11 @@ embedded defaults  <  ~/.scion/settings.yaml  <  .scion/settings.yaml
 Key names are mapped by `versionedEnvKeyMapper`: the `SCION_` prefix is stripped, the remainder is
 lowercased, and `_` becomes a settings path separator — so `SCION_HUB_PROJECT_ID` sets
 `hub.project_id`.
+
+`SCION_HUB_PROJECT_ID` also outranks the project's `.scion/project-id` file, and a warning names
+both sources when they disagree. `SCION_PROJECT_ID` ranks lower: it sets the top-level
+`project_id`, and a `hub.project_id` from the settings files or the `project-id` file wins over it.
+When both variables are set, `SCION_HUB_PROJECT_ID` wins.
 
 :::caution[Same prefix, unrelated mechanism]
 Bucket 1 and [Bucket 2](#bucket-2--scion_-variables-that-scion-injects-into-agents) both use the
@@ -113,7 +221,7 @@ existing value.
 | `SCION_AGENT_NAME` | agent name | **Unconditional** — overwrites |
 | `SCION_PROJECT` | project name | **Unconditional** — overwrites |
 | `SCION_TEMPLATE_NAME` | resolved template slug, or `custom` | **Unconditional** — overwrites |
-| `SCION_CLI_MODE` | always `agent` inside a container | **Unconditional** — overwrites |
+| `SCION_CLI_MODE` | always `agent` inside a container (outside one, it outranks the `cli.mode` setting; see below) | **Unconditional** — overwrites |
 | `SCION_MAX_TURNS` | from the resolved `ScionConfig` | **Unconditional** — overwrites the hub-supplied value |
 | `SCION_MAX_MODEL_CALLS` | from the resolved `ScionConfig` | **Unconditional** — overwrites the hub-supplied value |
 | `SCION_MAX_DURATION` | from the resolved `ScionConfig` | **Unconditional** — overwrites the hub-supplied value |
@@ -129,7 +237,7 @@ existing value.
 **Why the split matters.** The guarded set is how a hub-resolved value reaches the container: the
 hub sends it, the broker sees the key is already present, and leaves it alone. The unconditional
 set is not overridable in any useful sense — if you want a different `max_turns`, change the
-setting that feeds `ScionConfig.MaxTurns` (see [System B](#system-b--scionconfig-limits-and-resources)),
+setting that feeds `ScionConfig.MaxTurns` (see [System B](#system-b--scionconfig-job-keys-limits-and-resources)),
 not the environment variable.
 
 ### `Known gap` — the gemini-cli harness does not consume `SCION_THINKING_LEVEL`
@@ -172,6 +280,13 @@ change that must not ride along in a precedence change. Adding an entry to a mis
 outbound-only filter would look like a fix and would not be one.
 
 ---
+
+The CLI mode itself is chosen as `SCION_CLI_MODE`, then the `cli.mode` setting (from the
+merged settings files), then `human`. `scion config set cli.mode agent` therefore switches
+every later command on that machine (or in that project) to agent mode, and agent mode removes
+the `config` commands, so `scion config unset cli.mode` is then unavailable. To return, run
+`SCION_CLI_MODE=human scion config unset [--global] cli.mode`, or remove `mode` from the `cli`
+section of the settings file by hand.
 
 ## Bucket 3 — end-user settings
 
@@ -378,12 +493,15 @@ They differ in exactly one structural property, and it explains everything else:
 "`runtime_broker < hub`" is a well-formed, true statement about environment variables and a
 statement with **no truth value** about `resources`.
 
-:::note[Do not overstate the parallel — these are different execution paths]
-The three-ranks-in-one-file shape appears on both axes, but not in the same mode. The env
-injection in `pkg/agent/run.go` is gated on `!opts.BrokerMode`, so the env sub-ladder in A3 is the
-**CLI / local** path. The `resources` interleave in
-[System B](#resources-interleaves-and-cannot-be-given-one-rank) is the **broker / provisioning**
-path. Same shape, different modes, and **only one of them interleaves with the hub tier.**
+:::note[Do not overstate the parallel — same path, different shape]
+The three-ranks-in-one-file shape appears on both axes. The env injection in `pkg/agent/run.go`
+(`resolveAuthEnvOverlay`) is no longer gated on `!opts.BrokerMode`: it runs on broker starts too,
+and it only fills keys that the start's env (hub-supplied values included) has not already set. The
+CLI no longer takes a non-broker path (local mode was removed); every agent now starts through a
+broker. So the env sub-ladder in A3 and the `resources` interleave in
+[System B](#resources-interleaves-and-cannot-be-given-one-rank) both run on the **broker /
+provisioning** path. They differ in shape, not in mode: the env sub-ladder collapses into one
+only-if-absent tier, and **only `resources` interleaves with the hub tier.**
 :::
 
 ### A5. Secrets rank `user` and `project` in the opposite direction
@@ -398,9 +516,8 @@ secrets:    hub  <  user  <  project  <  runtime_broker           (project wins)
 For environment variables, **`user` beats `project`**. For secrets, **`project` beats `user`** —
 and `runtime_broker` is still highest for secrets.
 
-This is a **filed difference, not a documented design**. Nobody has established that the
-divergence is intentional, so this page does not present it as a second designed ladder. It is
-tracked as [issue #624](https://github.com/ptone/scion/issues/624).
+This is a **known difference, not a documented design**. Nobody has established that the
+divergence is intentional, so this page does not present it as a second designed ladder.
 
 :::note[Related: two code comments state the secret order without `hub`]
 `pkg/secret/secret.go` and `pkg/hub/httpdispatcher.go` both describe the secret order as
@@ -421,18 +538,22 @@ above it left the key unset:
 | --- | --- | --- |
 | Highest | the agent-create request (`config.env`), or the auto-expose control on the agent's configure page | the agent's explicit config, so it survives reincarnate |
 | | the project annotation `scion.io/auto-expose-ports-enabled` | written by the hub at create and re-derived at reincarnate, never recorded as explicit |
-| | harness-config env (a template cannot set `SCION_*` keys) | the harness config |
-| Lowest | the hub default, `auto_expose_ports.enabled` in the hub settings | not stored on the agent; the hub sends it on every create, start and restart, and the broker applies it last |
+| | harness-config env | the harness config |
+| Lowest | the hub default, `auto_expose_ports.enabled` in the hub settings | not stored on the agent; the hub sends it on every create, start and restart, and the broker applies it after the tiers above |
 
 Because the hub default is read at each dispatch, changing it changes what an agent that inherits
 it gets at its next start. Reincarnate re-reads the project annotation, so an annotation changed
 since the agent was created takes effect there; a value the user set explicitly carries over
 unchanged.
 
+A template cannot set `SCION_AUTO_EXPOSE_PORTS`: it is a `SCION_*` key, which template env
+ignores (`Changed in this release`: template env used to be a tier of this order).
+
 Agents created by an older hub may still carry a project or hub value stamped into their inline
 config, where it looks explicit. The rerunnable maintenance migration `auto-expose-env-normalize` (run it
 from the hub admin maintenance page, or with
-`POST /api/v1/admin/maintenance/migrations/auto-expose-env-normalize/run`) removes such a stamp and re-derives the value from the project exactly as reincarnate would. A running agent keeps the old value in its container until
+`POST /api/v1/admin/maintenance/migrations/auto-expose-env-normalize/run`) removes such a stamp and re-derives the value from the project
+exactly as reincarnate would. A running agent keeps the old value in its container until
 it is next provisioned or reincarnated. A run that had to skip agents (its log reports
 `skipped N agent(s)`) still shows as completed, and the maintenance page does not offer completed
 migrations again, so re-run it with the `POST` call above.
@@ -441,31 +562,24 @@ The other auto-expose variables (`SCION_AUTO_EXPOSE_MODE`, `SCION_AUTO_EXPOSE_PO
 `SCION_AUTO_EXPOSE_INTERVAL`, `SCION_AUTO_EXPOSE_MIN_PORT`) have no project or hub tier and follow
 the ordinary env rules on this page.
 
-:::caution[Two edges of this order]
+:::caution[An edge of this order]
 - **A storage-scope value outranks harness-config env.** A
   `SCION_AUTO_EXPOSE_PORTS` set with `scion hub env set` (any scope) fills the key before the
   Runtime Broker applies the harness-config tier, so it beats it. It still loses to an
   explicit value and to the project annotation, and it beats the hub default.
-- **A local CLI start on the broker host gets no hub default.** The hub default reaches the broker
-  only with a hub dispatch. An agent started from the `scion` CLI on the broker machine itself
-  does not receive it; with no higher tier set, auto-expose stays off.
 :::
 
-### `Changed in this release` — harness-config env now outranks template env in broker mode
+### `Changed in this release` — template env is a fallback below every other source
 
-**Before:** for hub-dispatched (broker-mode) agents, template env won over harness-config env.
-**After:** harness-config env wins.
-
-This changes rank, not presence — harness-config env already reached the container. What changed
-is that it is now visible to the auth pipeline before credentials are resolved, so credentials
-declared in a harness config (`GOOGLE_CLOUD_PROJECT`, `CLOUD_ML_REGION` and similar) are seen by
-auth detection instead of arriving too late to matter.
-
-**Local (non-broker) mode is unchanged.** This reordering applies to hub-dispatched agents only.
-Do not read it as a global reordering.
-
-Template env has since moved below every other source in both modes; see
-[templates no longer set environment keys](#changed-in-this-release--templates-no-longer-set-environment-keys-breaking).
+**Before:** template env was merged into the agent's config. For hub-dispatched (broker-mode)
+agents an earlier change had already put harness-config env above it, so that credentials
+declared in a harness config (`GOOGLE_CLOUD_PROJECT`, `CLOUD_ML_REGION` and similar) reach auth
+detection; in local mode template env still beat harness-config env.
+**After:** template env is a separate, lowest-precedence fallback on every path. It never
+enters the agent's config, its values are literal, `SCION_*` keys are ignored, and no env key
+the harness-config's auth metadata lists is ever filled from it. See
+[Template env is a lowest-precedence fallback](#template-env-is-a-lowest-precedence-fallback)
+for the full rule.
 
 ### `Changed in this release` — `profiles.<name>.env` retired (**breaking**)
 
@@ -532,6 +646,8 @@ measurement, with a discriminator key set in **both** the global and the project
 `profiles.<name>.env` has been removed from the `ProfileConfig` structs and the JSON schema.
 Schema validation now **rejects** settings files that include this field. If your settings
 files still contain `profiles.<name>.env`, you will receive a validation error on startup.
+Saving the profiles section of the Hub's admin server settings also rejects it, along with any
+other key a profile has no field for.
 Search your settings files and migrate any remaining values before upgrading.
 :::
 
@@ -573,23 +689,21 @@ knowing which is which:
 | Reader | What it is for | Scoping |
 | --- | --- | --- |
 | `ResolveHarnessConfig` | **Resolution** — the values actually injected into the agent | **Filtered.** Only the override belonging to the harness config you selected is applied. |
-| `(*Server).extractRequiredEnvKeys` | **Secret discovery** — deciding which keys must be looked up or prompted for | **Unfiltered.** Every `harness_overrides` entry on the profile is walked, whichever harness config it belongs to. |
+| `(*runtimebroker.Server).extractRequiredEnvKeys` | **Secret discovery** — deciding which keys must be looked up or prompted for | **Unfiltered.** Every `harness_overrides` entry on the profile is walked, whichever harness config it belongs to. |
 
-The second reader is **broker-only**: it does not run in the local, non-broker path. Its
+The second reader is **broker-only** and runs only in the broker's create-time env-gather
+preflight (`createAgent`, when the request asks for env-gather and auth is on). It does not run on
+start or restart. Its
 over-collection is recorded separately under
 [the required-secret scan gap](#known-gap--the-required-secret-scan-collects-keys-from-config-the-agent-will-never-use)
 — the downstream effect of a spuriously-required key has **not** been traced, so that entry
 deliberately stops short of calling it a bug rather than a wart.
 
 **There is no third channel — and specifically, there is no settings-file *layering* channel.**
-This matters because it looks as though there is one. `MergeSettings` composes a whole
-`harness_overrides` block when layering one settings file over another: it merges `Env` per key,
-appends `Volumes`, and runs `MergeResourceSpec` over `Resources`. It reads as thoroughly
-load-bearing. **It is dead code.** Renaming its declaration leaves `go build ./...` green, which
-is the type checker asserting that no production caller exists — a claim grep cannot make, because
-`go build` excludes `_test.go` by definition and so cannot be satisfied by a fixture. Under the
-identical procedure, renaming `ResolveHarnessConfig` turns the build red. So do not infer a
-file-layering precedence rule for this key from reading `MergeSettings`; nothing reaches it.
+Settings files are merged by the one settings loader as plain data, and no code composes a
+`harness_overrides` block across files (the former `MergeSettings` layering helper, which never
+had a production caller, has been removed). So there is no file-layering precedence rule for this
+key beyond the ordinary last-layer-wins merge of the loader.
 
 :::caution[If you go looking for this in the source, two of the three matches are decoys]
 The line `if override.Env != nil {` appears at **three** sites, and one grep finds all three:
@@ -656,10 +770,11 @@ distinct ways, and each is independently true:
 *Fence on the above: this is read from the collection loops. What a spurious required-secret does
 further downstream has not been traced — the over-collection is measured, the consequence is not.*
 
-## System B — `ScionConfig` limits and resources
+## System B — `ScionConfig` job keys, limits and resources
 
-This governs `model`, `thinking_level`, `harness_config`, `max_turns`, `max_model_calls`, `max_duration` and
-`resources`. It is **not** the ladder in System A.
+This governs `model`, `thinking_level`, `harness_config`, `max_turns`, `max_model_calls`, `max_duration`
+(the job keys of the [job-key ladder](#the-job-key-ladder)) and `resources`, which is an environment
+key with its own chain. It is **not** the ladder in System A.
 
 ### B1. Harness configuration, model, thinking level, and scalar limits
 
@@ -668,23 +783,48 @@ only what is still unset:
 
 | Priority | Source |
 | --- | --- |
-| Highest | the agent-create request / inline config |
+| Highest | the requester's explicit CLI flags (`--model`, `--harness-config`, ...) |
+| | the agent-create request / inline config |
 | | the project's `scion.io/default-*` annotation (e.g., `scion.io/default-harness-config`, `scion.io/default-model`, `scion.io/default-thinking-level`) |
 | | the template's `scion-agent.yaml` (for `harness_config`: only a declared `harness_config` / `default_harness_config`, never the template's `harness` type) |
-| | hub `agent_defaults`: for `max_turns`, `max_model_calls` and `max_duration`, applied on every start at this rank in Postgres mode (in file mode the hub sends nothing, so the broker's `settings.yaml` defaults apply alone); for `harness_config`, `model` and `thinking_level`, resolved at create. See [Where hub `agent_defaults` rank](#where-hub-agent_defaults-rank) |
-| Lowest | the broker's own `settings.yaml` defaults (e.g., `default_max_turns` / `default_max_model_calls` / `default_max_duration`) |
+| | hub `agent_defaults` (`default_harness_config`, `default_model`, `default_thinking_level`, resolved by the hub at create; `default_max_turns`, `default_max_model_calls`, `default_max_duration`, applied by the broker on every start in a database-backed hub; in file mode the hub sends nothing and the broker's `settings.yaml` defaults apply alone) |
+| | the broker's own `settings.yaml` defaults (e.g., `default_max_turns` / `default_max_model_calls` / `default_max_duration`) |
+| Lowest | the harness-config's own `config.yaml` (for `model`; see below) |
 
-For `model`, one more layer sits below the template on the broker. `ProvisionAgent`
+When a template declares both `harness_config` and `default_harness_config`,
+`default_harness_config` wins, on the hub and on the broker (`config.ResolveHarnessConfigName`).
+
+For `model`, the harness-config sits below everything on the broker. `ProvisionAgent`
 (`pkg/agent/provision.go`) uses the harness-config's own `model` field (`config.yaml`) as the base
 layer, so it fills in only when nothing above it sets a model. The broker then resolves that value
 through the harness-config's `model_aliases` and injects the result as `SCION_MODEL`. The codex and
 gemini-cli harness-configs both declare `model: medium` this way. The hub does not apply this
 default itself: it resolves only an explicit tier.
 
+#### `Changed in this release` — hub default model and thinking level sit below the template
+
+**Before:** the hub stamped `agent_defaults.default_model` and `default_thinking_level` into the
+agent's applied config whenever the request and the project left them unset. The broker ranks
+that config above the template, so the hub default beat a model or thinking level the template
+set.
+**After:** the hub applies the template's `model` and `thinking_level` (from the template's
+read-only `agentConfig`) after the project defaults and before its own defaults. The hub default
+applies only when neither the template nor the project sets a value; the project still beats
+the template. `harness_config` and the three limits already followed this order.
+
+#### `Changed in this release` — `default_harness_config` beats `harness_config` in a template
+
+**Before:** the hub derived a template's default harness config with its own key order, which
+could pick `harness_config` when both keys were set, while the broker picked
+`default_harness_config`.
+**After:** the hub derives it with the broker's parser and key order, so `default_harness_config`
+wins everywhere. On the hub, a template's harness type (shown in template lists) comes from an
+explicit `harness:` key before it is inferred from the template's name.
+
 #### `Changed in this release` — a template's harness type is no longer used as a harness-config name
 
 **Before:** When a template declared no `harness_config` / `default_harness_config`, the Hub used the template's `harness` *type* (for example `claude`) as the harness-config name. That type comes from a `harness:` field in the template's `scion-agent.yaml`, or is inferred from the template's name for any template whose name contains `claude`, `gemini`, `opencode` or `codex`. Because the template tier sits above hub `agent_defaults`, the type silently beat an operator's `agent_defaults.default_harness_config`.
-**After:** Only a declared `harness_config` / `default_harness_config` fills the template tier. When the template declares neither, the hub `agent_defaults.default_harness_config` applies. If that is unset too, the Runtime Broker resolves the harness config itself (profile `default_harness_config`, then the settings `default_harness_config`), as it already did for local agents. Agents created from such templates no longer show the harness type as their harness config.
+**After:** Only a declared `harness_config` / `default_harness_config` fills the template tier. When the template declares neither, the hub `agent_defaults.default_harness_config` applies. If that is unset too, the Runtime Broker resolves the harness config itself (profile `default_harness_config`, then the settings `default_harness_config`), as it already did when no hub default applied. Agents created from such templates no longer show the harness type as their harness config.
 Previously such templates used the harness-config named after the type: the hub's record if it had one (the common case, since hosted mode seeds bundled harness-configs and workstation mode imports `~/.scion/harness-configs/<type>`), otherwise the broker's `harness-configs/<type>` directory. Now, if none of these defaults is set, agent creation fails with `no harness-config resolved`. A broker default also now applies to any template that declares only a harness type (a `harness:` field, or a type inferred from its name): the shipped broker settings set `default_harness_config: antigravity`, so a template named, say, `team-claude-reviewer`, or one declaring `harness: claude`, that declares no harness config moves from the hub's `claude` harness-config to that default, which may be a different harness. To keep the old behaviour, declare `default_harness_config` in the template's `scion-agent.yaml`.
 
 #### `Changed in this release` — project `default-harness-config` correctly outranks template harness config
@@ -701,65 +841,51 @@ currently agrees.
 
 ### Resources interleaves and cannot be given one rank
 
-`resources` does **not** follow the table above. The broker's own `settings.yaml` contributes at
-**three** separate ranks, **two of them above the hub tier**:
+`resources` does **not** follow the table above. It is an environment key: a template's
+`resources:` block is ignored (`Changed in this release`; before, the template was a rung of this
+chain). The broker's own `settings.yaml` contributes at **three** separate ranks, **two of them
+above the hub tier**:
 
 ```
-harness_overrides.<hc>.resources   (broker settings.yaml)   <- highest, beats even the template
-        >  template resources
+harness_overrides.<hc>.resources   (broker settings.yaml)   <- highest
+        >  the agent's own resources  (the requester's inline config, plus the
+                                       project scion.io/default-resources-* the hub stamps into it)
         >  profiles.<p>.resources  (broker settings.yaml)
+        >  hub agent_defaults.resources                     <- database-backed hubs only (not file mode); see below
         >  default_resources       (broker settings.yaml)
         >  BuiltinDefaultResources()                        <- floor
-
-   hub agent_defaults.resources  --  DELIBERATELY NOT A RUNG IN THIS CHAIN. Its position
-   moves with the hub's storage mode. See "The rank of hub agent_defaults depends on the
-   hub's storage mode" below.
 ```
 
-The `template resources` rung now holds only the agent's own `resources` (for example from `scion create --config`); a template's `resources` is ignored with a warning (see [templates no longer set environment keys](#changed-in-this-release--templates-no-longer-set-environment-keys-breaking)).
+The whole chain is resolved again on **every start** (`resolveEnvironmentResources` in
+`pkg/agent/agent_environment.go`), and only the agent's own resources are written to its
+`scion-agent.json`. **`Changed in this release`:** settings, profile and hub resources used to be
+baked into `scion-agent.json` at provision; now a change to any of them takes effect on the
+agent's next start. The hub sends `agent_defaults.resources` on create, start and restart.
+Agents provisioned before this change keep their baked resources until they are reprovisioned.
 
-**One file, three ranks, and the top one outranks the template.** A reader handed
+**One file, three ranks, and the top one outranks the agent's own value.** A reader handed
 "`runtime_broker` is lowest" as one uniform rule gets two of these three backwards.
 
 This is not a rule you can repair by flipping an inequality — there is no single "broker
 `settings.yaml` resources" thing to rank.
 
-#### Why the hub tier is missing from that chain, and why that is the same rule twice
+#### Where the hub tier sits, and why it moves with the storage mode
 
-A chain has one rung per participant, and any single rung for the hub tier would be false half
-the time: in Postgres mode the hub tier sits just above
-`default_resources`, and in **file mode it sits at the bottom of the broker chain, *below*
-`default_resources`**. A chain cannot express "this rung moves with deployment mode" any more than
-it can express an interleave.
-
-That is this section's own rule applied a second time, on a second axis. **A contribution can be
-given a single rank only if it occupies a single rank.** The broker's `settings.yaml` fails that
-test because one file contributes at three ranks; hub `agent_defaults` fails it because one tier
-contributes at different ranks in different deployments. Same defect, same remedy: show the
-positions, do not manufacture a rung.
+In a database-backed hub (SQLite or Postgres, not file mode) the hub sends `agent_defaults.resources` and the broker merges it just above
+`default_resources`. In **file mode the hub sends nothing**: a co-located broker reads the same
+`settings.yaml` itself, so those values land at `default_resources`, the bottom of the broker
+chain. See [The rank of hub `agent_defaults` depends on the hub's storage
+mode](#the-rank-of-hub-agent_defaults-depends-on-the-hubs-storage-mode).
 
 Stated against the scalar table above: **"hub `agent_defaults` sit above the broker's own
-`settings.yaml`" is true of the three scalars in Postgres mode, and for `resources` it reaches at most
-`default_resources` — and in file mode not even that.** The same broker file also supplies profile
-and harness-override resources, merged *above* the template, so those beat the hub tier per field
-in either mode, while broker `default_max_turns` **loses** to hub `default_max_turns`. The hub tier
-sits in a different place for `resources` than it does for the three scalars, and — unlike the
-scalars — it does not sit in one place even within `resources`.
+`settings.yaml`" is true of the three scalars, and for `resources` it reaches at most
+`default_resources`.** The same broker file also supplies profile and harness-override resources,
+merged *above* the hub tier, while broker `default_max_turns` **loses** to hub
+`default_max_turns`. This is the conservative direction and it is deliberate: hub-wide defaults
+should not silently override resources a broker operator set per profile.
 
-This is the conservative direction and it is deliberate: hub-wide defaults should not silently
-override resources a broker operator set per profile.
-
-:::note[Scope of the ladder above]
-The five ranks are stated as of this release and hold for everything it ships. They assume
-`profiles.<p>.resources` and `harness_overrides.<hc>.resources` continue to exist — they are two
-of the five, and the two that outrank the hub tier in **both** hub storage modes. **Nothing in
-this release removes them**, and
-the retirement of `profiles.<p>.env` does not extend to them: `env` and `resources` are different
-fields travelling different merges.
-:::
-
-`resources` also merges **field by field**, not as a whole block, via `MergeResourceSpec`. A
-template that sets only a memory limit keeps that limit and still picks up a CPU limit from a
+`resources` also merges **field by field**, not as a whole block, via `MergeResourceSpec`. An
+inline config that sets only a memory limit keeps that limit and still picks up a CPU limit from a
 lower tier.
 
 The floor, `BuiltinDefaultResources()`, fills in a CPU limit only when nothing else supplied one —
@@ -783,31 +909,30 @@ launched without it.
 
 ### Container image and Kubernetes image pull policy — a separate chain from B1
 
-`image` and `kubernetes.imagePullPolicy` are **not** part of the B1 table above: they resolve
-through their own chain, defined in `ProvisionAgent`'s harness-config merge
-(`pkg/agent/provision.go`) and re-resolved independently, on every `Start` call, in
-`pkg/agent/run.go`:
+`image` and `kubernetes.imagePullPolicy` are environment keys, **not** part of the B1 table
+above. They resolve through their own chain, on every `Start` call, in `pkg/agent/run.go`. In
+short, lowest to highest: harness-config file < settings < (inline config) < profile override <
+request `--image`.
+
+**`Changed in this release`:** the template tier is gone. A template's `image` and
+`kubernetes.imagePullPolicy` are ignored with a warning, the hub no longer copies a template's
+image into an agent, and settings- and profile-derived images and pull policies are no longer
+written into `scion-agent.json`.
 
 | Priority | `image` | `kubernetes.imagePullPolicy` |
 | --- | --- | --- |
 | Highest | the user's **explicit request image**: the current request's `opts.Image` (CLI `--image`; a local `--config` file's `image` is promoted to it; the Hub's explicit image, sent on create, start and restart), **else** the request image recorded when the agent was provisioned | the user's **explicit pull policy**: the current request's inline config, **else** the create-time inline value recorded at provision (there is no per-request pull-policy flag) |
 | | an **explicitly set** `profiles.<p>.harness_overrides.<name>.image`, re-resolved from current settings on every `Start` | an **explicitly set** `profiles.<p>.harness_overrides.<name>.image_pull_policy`, **only when that same override also sets an image**, re-resolved likewise |
 | | the current request's inline config image, **else** the create-time inline image (for an agent provisioned at this version or later; older agents rank it at the top tier, see below) | — (covered by the top row) |
-| | the template chain's own `image` — re-read from disk on every `Start`, or, if the template can no longer be resolved, the template's own value recorded at provision | the template chain's own `kubernetes.imagePullPolicy`, same rule |
+| | *legacy only:* for an agent provisioned before this release whose template can no longer be resolved, the template's own `image` recorded at its provision (with a start warning) | *legacy only:* the template's own `kubernetes.imagePullPolicy`, same rule |
 | | Hub settings `harness_configs.<name>.image`, re-resolved on every `Start` | Hub settings `harness_configs.<name>.image_pull_policy` (with a profile `image_pull_policy` whose override sets no image outranking it), likewise |
 | Lowest | the harness-config file's own `config.yaml` `image`, re-read on every `Start` | the harness-config file's own `image_pull_policy`, likewise |
 
-The template tier no longer receives a value: a template's `image` and `kubernetes` keys are
-ignored with a warning (see
-[templates no longer set environment keys](#changed-in-this-release--templates-no-longer-set-environment-keys-breaking)).
-Exception: an agent provisioned before this change still uses the template image and pull policy
-recorded at its provision when its template can no longer be resolved.
-
-Only an *explicit* profile override moves above the template; the plain `harness_configs.<name>`
-defaults stay below it. A profile's `image_pull_policy` moves up only together with a profile
-`image` on the same override, so a profile that pins an image (for example a registry digest) and
-its pull policy is not undone by a template's `imagePullPolicy: Never`, while a profile that sets
-only a pull policy does not override a template's image and pull-policy pair. One asymmetry
+Only an *explicit* profile override moves above the inline config; the plain
+`harness_configs.<name>` defaults stay below it. A profile's `image_pull_policy` moves up only
+together with a profile `image` on the same override, so a profile that pins an image (for
+example a registry digest) also pins its pull policy, while a profile that sets only a pull policy
+ranks at the settings tier. One asymmetry
 remains: the user's explicit pull policy (from an inline config) ranks above the profile's, while
 an inline *image* ranks below the profile's image. A caller that sends an inline image and pull
 policy but no request image can therefore get the profile's image with its own pull policy. The CLI
@@ -821,28 +946,31 @@ harness-config file's image, so expect one such line on most starts.
 `kubernetes.imagePullPolicy` entirely.
 
 Every tier is resolved fresh at `Start` time, including for a restart of an already-provisioned
-agent: `Start` re-reads the current template chain, the current harness-config file, and current
-settings, rather than trusting the merged `image` that `ProvisionAgent` persisted into the agent's
-`scion-agent.json`. That merged value folds in whatever inline, profile, settings and file values
-applied at provision time, so it is never reused as any single tier.
+agent: `Start` re-reads the current harness-config file and current settings. `ProvisionAgent`
+writes only the requester's own `image` (the inline config's) into the agent's
+`scion-agent.json`, never a settings, profile or harness-config file value. An agent provisioned
+before this release may still carry a merged `image` there, which folds in whatever inline,
+profile, settings and file values applied at provision time; it is never reused as any single
+tier, except as the legacy stand-in described below.
 
 What `Start` cannot re-derive, `ProvisionAgent` records per source. Image provenance (including
 the provisioned profile and template) is recorded broker-side: `image-provenance.json` (mode
 `0600`, written atomically, versioned) in the agent directory, next to `scion-agent.json` and
 outside the agent home and every container mount. For an agent with that file, every
-image-affecting input comes either from the current request or from current settings, template and
+image-affecting input comes either from the current request or from current settings and
 harness-config files resolved with the recorded profile and template, or from this record. No
 `agent-info.json` field and no container state affects the image reference (including its tag or
-digest), the registry rewrite, the pull policy, the template tier or the profile override:
+digest), the registry rewrite, the pull policy or the profile override:
 
 - `requestImage`: the user's explicit request image. A plain restart replays it at the top tier, so
-  a first start and a later restart rank it identically, locally and via the Hub.
+  a first start and a later restart rank it identically.
 - `inlineImage` / `inlineImagePullPolicy`: the create-time inline values, used when the current
   request's inline config doesn't set the field.
 - `profile`: the settings profile the agent was provisioned with. Only this profile is used to look
   up the profile `harness_overrides` image and pull policy (and the settings-tier values that
-  lookup folds in) and the profile-level `image_registry` rewrite, on every start and restart,
-  local or broker. The profile a restart passes, or the one saved in `agent-info.json`, does not
+  lookup folds in) and the profile layers of the `image_registry` rewrite (see
+  [Image registry order](#image-registry-order) for the full order), on every start and restart.
+  The profile a restart passes, or the one saved in `agent-info.json`, does not
   change it. Empty means no profile was set or active at provision; the profile active at start
   then applies, as for any settings lookup without a profile. Broker start/restart also classify
   the runtime with this profile rather than the one saved in `agent-info.json`, both for the
@@ -852,15 +980,15 @@ digest), the registry rewrite, the pull policy, the template tier or the profile
   `image_registry` prefix is applied). If the two ever disagree, the start or restart is refused
   with `409 Conflict`. Other uses of the saved profile are unchanged.
 - `template`: the template the agent was provisioned from. When a start carries no absolute
-  template path (every local restart, and every hub start or restart), the template-tier image and
-  pull policy, and the harness-config directories searched for the file tier, come from this
-  template.
-- `templateImage` / `templateImagePullPolicy`: the template chain's
-  **own** values, with nothing else folded in. `Start` uses them as the template tier only when
-  the template can no longer be resolved, and warns that it did. That happens when the template
-  was renamed or deleted since provision, and routinely on a hub start or restart, whose dispatch
-  carries no template, on a broker with no local copy. So a profile or settings pin removed since
-  provision never lingers disguised as the template's value.
+  template path (every start or restart), the harness-config
+  directories searched for the file tier come from this template.
+- `templateImage` / `templateImagePullPolicy`: read-only legacy fields. New agents record none,
+  because a template no longer sets an image. For an agent provisioned before this release they
+  hold the template chain's **own** values, with nothing else folded in, and `Start` replays them
+  only when the template can no longer be resolved, with a warning. That happens when the template
+  was renamed or deleted since provision, and routinely on a hub start or restart on a broker with
+  no local copy. So a profile or settings pin removed since provision never lingers disguised as
+  the template's value.
 
 `agent-info.json` keeps display copies (`AgentInfo.Image`, `.ExplicitImage`,
 `.ExplicitImagePullPolicy`, `.Profile`, `.Template`) for listing and status only.
@@ -895,10 +1023,10 @@ including reading those `agent-info.json` fields: its create-time inline image r
 tier, its saved or requested profile drives the override lookup, and the merged
 `scion-agent.json` value stands in for an unresolvable template.
 
-On a local restart, the Hub-settings tier itself is resolved against the profile the agent was
-actually created with when the restart supplies none (`opts.Profile == ""`), matching the
-broker's own restart-dispatch behavior (`agent.GetSavedProfile`) — not silently against whatever
-profile happens to be active on the machine at restart time. For the image and pull-policy tiers of an agent with
+On every start and restart, the Runtime Broker sets the start's profile to the one saved in
+`agent-info.json` (`agent.GetSavedProfile`; a flat broker has no profiles and skips this), so the
+Hub-settings tier resolves against the profile the agent was created with, never against whatever
+profile happens to be active on the broker at restart time. For the image and pull-policy tiers of an agent with
 broker-side image provenance, the recorded provisioned profile is used instead, as described
 above.
 
@@ -907,20 +1035,17 @@ The top tier carries **only the user's explicit image**. The Hub sends it as
 reincarnate's reprovision), and as the start/restart body's `image`. All of these come from the
 agent's recorded explicit inputs: `AppliedConfig.CreateInputs`, or the live `InlineConfig` for an
 agent written before `CreateInputs` existed. A configure-page Save that only echoes the current
-image back writes nothing into `InlineConfig`. A template's image is **not** sent as the top tier.
-Historically, on create the Runtime Broker read it from the hydrated template, at the template tier, and on
-a later start or restart from the template's own value recorded at provision. A template's image is
-now ignored (see
-[templates no longer set environment keys](#changed-in-this-release--templates-no-longer-set-environment-keys-breaking)).
+image back writes nothing into `InlineConfig`. A template's image is never sent and never
+applied.
 
-`AppliedConfig.Image` is the Hub's display record: filled from the request's explicit image at create, then
-overwritten with the image the broker reports. The broker's provision-only response reports the
+`AppliedConfig.Image` is the Hub's display record of the image the broker reports. The Hub no
+longer fills it from the template at create (`Changed in this release`). The broker's provision-only response reports the
 image `Start` will run. The field never feeds a later dispatch, so a hub restart re-resolves the
 profile-override, settings and file tiers live rather than freezing the image applied at creation.
 [Reincarnating an Agent](/scion/local/agent-lifecycle/#reincarnating-an-agent)'s plan preview
-approximates this image precedence from the Hub's own view. It can differ from what the Runtime
-Broker runs: when the Runtime Broker resolves the agent's harness config itself the preview cannot
-look up the profile override. The Runtime Broker resolves the final image, including the profile override, and the
+approximates this image precedence from the Hub's own view. It can differ from what the broker
+runs: when the broker resolves the agent's harness config itself the preview cannot look up the
+profile override. The broker resolves the final image, including the profile override, and the
 image it reports replaces the preview once the agent starts.
 
 :::note[Two different processes' settings, not one]
@@ -935,7 +1060,22 @@ lives. The two can disagree for a remote-broker deployment; the broker's dispatc
 authoritative for what actually runs.
 :::
 
-#### `Changed in ptone/scion#1799` — an explicit profile harness override image beats the template image
+#### `Changed in this release` — templates no longer set the image
+
+**Before:** a template's `image` and `kubernetes.imagePullPolicy` were a tier of this chain,
+between the inline config and Hub settings, re-read from the template on every start.
+**After:** they are ignored with a warning, like every environment key. The image comes from the
+harness-config file, settings, the profile override or the requester. Settings- and
+profile-derived images and pull policies are applied at each start and no longer written into
+`scion-agent.json`. An agent provisioned before this release keeps its recorded template image
+only as the legacy stand-in for an unresolvable template (see the table above). To keep a custom
+image for a role, set it in a harness-config (`config.yaml` `image`) or in settings
+(`harness_configs.<name>.image`, or a profile `harness_overrides.<name>.image`).
+
+The two sections below record earlier changes to this chain. Their mentions of a template tier
+describe behaviour before this release.
+
+#### `Changed in GoogleCloudPlatform/scion#2646` — an explicit profile harness override image beats the template image
 
 **Before:** a template's `image` (and an inline config `image`) always outranked
 `profiles.<p>.harness_overrides.<name>.image`, silently: the only trace was a debug log. In hub
@@ -949,7 +1089,7 @@ the user's explicit request image ranks above it, and every replacement is logge
 explicitly set profile `image_pull_policy` moves up with it. Profile and settings pins are never
 baked into the record `Start` falls back to for an unresolvable template, so removing a pin takes
 effect on the next start or restart. A user's explicit image stays the top tier on every start and
-restart, locally and via the Hub. The Hub sends only the user's explicit image as the top tier
+restart. The Hub sends only the user's explicit image as the top tier
 (see above), so a template image is resolved at the template tier everywhere and the broker's
 reported image no longer freezes. The plain `harness_configs.<name>` defaults still rank below the
 template. The broker's provision-only response reports the image `Start` will run; the reincarnate
@@ -963,7 +1103,10 @@ an upgraded broker has the template's image recorded as its explicit request ima
 sent it as `Config.Image`), and it keeps that image at the top tier, even over a profile override,
 until it is reincarnated. The broker cannot tell that image apart from a genuine request image.
 
-**Hub template records:** an image set on the Hub template record (its stored config) is not applied, and a template's own `image` is now ignored as well (see [templates no longer set environment keys](#changed-in-this-release--templates-no-longer-set-environment-keys-breaking)). Set it in the harness-config or a profile override.
+**Hub template records:** an image set only on the Hub template record (its stored config), and
+not in the template's `scion-agent.yaml`, is no longer applied, because the broker reads the
+template image from the template's files. (Since this release a template's image is ignored altogether; put it in a
+harness-config or in settings.)
 
 **Behaviour change to watch for:** a profile that sets `harness_overrides.<name>.image` now
 overrides the image of every template that uses that harness config under that profile. Remove
@@ -972,7 +1115,7 @@ the override, or pass `--image`, if a template's own image must win. Conversely,
 is not applied to an existing agent; the CLI warns that the flag is ignored. Re-create the agent to
 change or drop a create-time image.
 
-#### `Changed in ptone/scion#2156` — Hub settings now wins over the harness-config file's image default
+#### `Changed in GoogleCloudPlatform/scion#2074` — Hub settings now win over the harness-config file's image default
 
 **Before:** `ProvisionAgent` never copied `harness_configs.<name>.image` (or a profile's
 `harness_overrides.<name>.image`) into an agent's config, and `run.go`'s own image resolution
@@ -992,28 +1135,69 @@ settings-level (and harness-config-file-level) default; neither existed before t
 **Backward compatibility:** an agent created *before* this change has no `explicitImage` /
 `explicitImagePullPolicy` recorded on its `agent-info.json` (the fields didn't exist yet, and a
 missing field decodes to empty). If that agent's image *or* `kubernetes.imagePullPolicy` came from
-an inline `--config` at create time, its next plain local restart no longer re-applies that inline
-value — it falls through to the template tier (if the agent's template sets one), then Hub
-settings, then the file default, where before this change the persisted (then-unconditional) value
-kept it regardless of any of those. This is an accepted, narrow trade-off: the code cannot tell "a
+an inline `--config` at create time, a plain *local* restart (local restarts have since been
+removed) no longer re-applied that inline value — it fell through to the template tier, then Hub
+settings, then the file default. This was an accepted, narrow trade-off: the code cannot tell "a
 pre-upgrade agent with no recorded inline value" apart from "an agent that never had an inline
-override" from the file alone. `--image` or `--config` on a **local `scion start`** applies to that
-one start only — it is never written back to `agent-info.json` (only `ProvisionAgent`, which a
-plain restart does not call, records `ExplicitImage`/`ExplicitImagePullPolicy`) — so passing it
-again re-pins the value for that single start but does not make it survive the *next* plain
-restart. Re-create the agent to make an inline value durable across restarts going forward (a
-Hub-managed agent's *hub-dispatched* restarts are unaffected either way, since the broker resends
-`AppliedConfig.InlineConfig` live on every call — reincarnating isn't a remedy here, since it
-requires a Hub and a local agent's restarts don't go through it).
+override" from the file alone. A restart through the Hub is unaffected: the Hub resends the
+agent's recorded explicit image and inline config on every dispatch, so the value is re-applied.
+A later `scion start --image` is not applied to an existing agent (the CLI warns that the flag is
+ignored), so re-create the agent to change a create-time image.
 
-Separately: if an agent's **template** can no longer be resolved at all on a local restart
+Separately: if an agent's **template** can no longer be resolved at all on a restart
 (renamed or deleted since the agent was created), the restart falls back to the image/pull-policy
 recorded at its last provision, with a warning, rather than falling through to Hub settings or the
-file default — matching the behavior before this change. Since ptone/scion#1799 that recorded
-value is the template's own, recorded in broker-side agent state (`image-provenance.json`), not the
-merged `scion-agent.json` value, for agents provisioned at that version or later. A template's
-`image` is now ignored, so new agents record no template value; values recorded for older agents
-are still replayed.
+file default — matching the behavior before this change. Since GoogleCloudPlatform/scion#2646
+that recorded value is the template's own, recorded in broker-side agent state
+(`image-provenance.json`), not the merged `scion-agent.json` value, for agents provisioned at
+that version or later. A template's `image` is now ignored, so new agents record no template
+value; values recorded for older agents are still replayed.
+
+### Image registry order
+
+Introduced by GoogleCloudPlatform/scion#3786. A bare image name (one without a registry host,
+such as `scion-claude:latest`) is rewritten to `<image_registry>/<name>`. Every place that
+resolves `image_registry` uses one order: the source decides first, and within a source the
+more specific scope wins.
+
+| Rank | Layer | Where it comes from |
+| :--- | :--- | :--- |
+| 1 | Node env | `SCION_IMAGE_REGISTRY` of the process that runs the agent (a Runtime Broker), or of the Hub for Hub-wide reads |
+| 2 | Hub profile | `profiles.<name>.image_registry` saved in the Hub's settings |
+| 3 | Hub top level | `image_registry` saved in the Hub's settings (for example through the setup wizard or the admin settings page) |
+| 4 | File profile or instance | `profiles.<name>.image_registry` in the settings file, or a flat instance's `agent_defaults.image_registry` |
+| 5 | File top level | `image_registry` in the settings file |
+| 6 | Default | none: images are not rewritten |
+
+What this means in practice:
+
+- `SCION_IMAGE_REGISTRY` on a Runtime Broker overrides every settings value for the agents that
+  broker runs. It is not a settings value: `scion config get image_registry` and `scion init` do
+  not show or save it.
+- A saved Hub top-level value beats a settings-file profile or instance value. Only a saved Hub
+  profile value beats it. To keep a per-profile registry, save it in the Hub profile.
+- Only values an admin saved count as Hub values. The values the Hub seeds from its settings file
+  at startup are file values.
+- On the Hub, the file tier is the Hub's startup merge: coded defaults, then
+  `SCION_SEED_IMAGEREGISTRY`, then `settings.yaml`, then `SCION_SERVER_IMAGEREGISTRY` (each later
+  one wins). A saved Hub value beats all of them.
+- Hub-wide reads (setup status, image pull, harness image status, maintenance builds) use the Hub
+  process's own `SCION_IMAGE_REGISTRY` as the node env and do not use profile values. Under HA,
+  each replica uses its own environment for these reads.
+- When the Hub rewrites an agent's explicit image for a dispatch, it uses only the target Runtime
+  Broker's reported `SCION_IMAGE_REGISTRY`, never the Hub's own. For a remote Runtime Broker, the
+  file tiers are the Hub's own settings file; images taken from a template are resolved by the
+  Runtime Broker with its own settings file. For a flat Runtime Broker the Hub does not rewrite the
+  image, and the Runtime Broker resolves it with its instance value.
+- `SCION_MAINTENANCE_IMAGE_REGISTRY` applies only to maintenance image builds. It is not an agent
+  image registry, and a Runtime Broker does not start with it as the only registry. The Hub logs a
+  warning at startup when it is set and differs from the resolved value.
+
+A Hub value is saved only when an admin changes it. Saving an unrelated setting, or saving a page
+that echoes the value it shows, stores nothing. At the top level, the field shows the saved value,
+or else this Hub replica's settings-file value, and never an environment value. Saving the value
+shown does not pin it; change it once to pin it. A profile's field shows only a saved value, so
+typing any value into it saves that value.
 
 ---
 
@@ -1043,20 +1227,22 @@ equivalent to "set to the hub default value" gets this backwards.
 
 ### Where hub `agent_defaults` rank
 
-Hub `agent_defaults` are a **low-priority fallback**: they supply a value only when nothing
-above them did.
+**`Changed in this release`**: Hub `agent_defaults` are a **low-priority fallback**: for every job
+key they sit below the template and the project, and above only the broker's own
+`settings.yaml` defaults and the harness-config base (see [the job-key
+ladder](#the-job-key-ladder)). Before, a hub `default_model` or `default_thinking_level` was
+stamped into the agent's applied config at create, where it beat the template.
 
 - **Limits and `resources`** (`default_max_turns`, `default_max_model_calls`,
-  `default_max_duration`, `resources`) follow this model. The Runtime Broker applies them on
-  every start, below the template and the agent's own config (for `resources`, also below the
-  broker's profile resources and harness overrides; see
-  [Resources interleaves](#resources-interleaves-and-cannot-be-given-one-rank)). In Postgres mode they rank above
-  the broker's own `settings.yaml` defaults, and in file mode at the bottom (see the next
-  section). A change to them reaches an agent at its next start or restart (see
+  `default_max_duration`, `resources`): the Runtime Broker applies them on every start, below the
+  template and the agent's own config (for `resources`, also below the broker's profile resources
+  and harness overrides; see
+  [Resources interleaves](#resources-interleaves-and-cannot-be-given-one-rank)). A change to them
+  reaches an agent at its next start or restart (see
   [the change below](#changed-in-this-release--hub-agent_defaults-limits-and-resources-apply-on-every-start)).
 - **The other `agent_defaults`** (default template, harness config, harness auth, model,
-  thinking level) are resolved by the hub at agent create and stored with the agent. A later
-  change to them does not reach agents that already exist.
+  thinking level) are resolved by the hub at agent create, below the template and the project,
+  and stored with the agent. A later change to them does not reach agents that already exist.
 
 Project-level default limits (project settings) are also written into the agent's config at
 create. They count as the agent's own values, outrank the template, and are not refreshed on
@@ -1068,7 +1254,7 @@ The rank of the limits and `resources` differs by hub mode:
 
 | Hub mode | Rank of hub `agent_defaults` |
 | --- | --- |
-| **Postgres mode** | Just **above** the broker's own `settings.yaml` defaults |
+| **Database-backed** (SQLite or Postgres) | Just **above** the broker's own `settings.yaml` defaults |
 | **File mode** | **Bottom** of the broker chain |
 
 In file mode the hub sends nothing, so a co-located broker reads the same `settings.yaml` and
@@ -1081,10 +1267,9 @@ Note also the `resources` asymmetry described in
 own `settings.yaml` defaults" means `default_resources` **only**. Broker profile resources and
 harness overrides live in the same file and are merged *above* the hub tier.
 
-**This is why the hub tier does not appear as a rung in the `resources` chain.** The two rows of
-the table above are two *different* positions in that chain — above `default_resources` in
-Postgres mode, below it in file mode — so no single rung is correct. Read the chain for the five
-ranks that do not move, and read this table for where the hub tier lands in your deployment.
+**This is why the hub rung in the `resources` chain is marked "database-backed hubs only".** The two
+rows of the table above are two *different* positions in that chain — just above
+`default_resources` in a database-backed hub, at `default_resources` in file mode.
 
 ### `Changed in this release` — hub `agent_defaults` limits and resources apply on every start
 
@@ -1097,13 +1282,19 @@ restart. The Runtime Broker applies them on each start and does not save them in
 `scion-agent.json`. The same holds for the broker's own `settings.yaml` limit defaults. A limit
 the agent sets itself (from its template or its own config) still wins over both. A limit
 cleared on the hub falls back to the template's value, or to the current defaults when the
-template sets none. Tracked as [issue #623](https://github.com/ptone/scion/issues/623).
+template sets none.
 
 Agents created before this change keep the limits they have stored. Their saved values look
 the same as values set on the agent itself, so a changed default does not reach them.
 
 The hub's other `agent_defaults` (default template, harness config, harness auth, model,
 thinking level) are still applied only at agent create.
+
+:::note[Upgrade the hub before the brokers]
+A broker at this release talking to an older hub receives hub `agent_defaults.resources` only at
+create, not on later starts, and, because it no longer persists them, applies them only on the
+agent's first start.
+:::
 
 ### `Known gap` — file mode with a *remote* broker cannot reach hub `agent_defaults`
 
@@ -1168,7 +1359,7 @@ go test ./pkg/hub -count=1 -timeout 60m   # slow (see below); -race needs far mo
 
 A whole-repo `go test ./...` passes on `main` given enough time: CI's Full Test Suite runs
 `go test -timeout 60m ./...`. With the default 10-minute timeout it fails in `pkg/hub`, whose
-SQLite-enabled run takes longer than that (ptone/scion#1847), so pass `-timeout 60m`.
+SQLite-enabled run takes longer than that (GoogleCloudPlatform/scion#2842), so pass `-timeout 60m`.
 
 ## See also
 

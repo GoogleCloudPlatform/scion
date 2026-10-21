@@ -299,6 +299,10 @@ type Server struct {
 	manifestUpload       func(ctx context.Context, bucket, storagePath string, manifest *transfer.Manifest) error
 	projectWorkspaceStat func(path string) (os.FileInfo, error)
 	projectPathAbs       func(path string) (string, error)
+	// projectConfigsRemove, when set (tests), replaces
+	// removeProjectConfigsSubtree for a project delete's project-configs
+	// entry (removeProjectConfigs).
+	projectConfigsRemove func(globalDir, path string) error
 
 	// Hub connections (replaces single hubClient, heartbeat, controlChannel, etc.)
 	hubConnections map[string]*HubConnection // keyed by connection name
@@ -334,6 +338,10 @@ type Server struct {
 	multiCredStore  *brokercredentials.MultiStore
 	credLastScan    time.Time
 	credWatcherStop chan struct{}
+
+	// shutdownContext, when set (SetShutdownContext), returns the context
+	// Start passes to Shutdown once its ctx ends (ptone/scion#5054).
+	shutdownContext func() (context.Context, context.CancelFunc)
 
 	// dispatchAttempts tracks request-id based create-attempt state for
 	// idempotency and auditability.
@@ -375,6 +383,11 @@ type Server struct {
 	// boot recovery's sends. Zero in production; only tests set it.
 	launchRecoveryTTL time.Duration
 
+	// agentFilesLockWait, when positive, replaces the 60s a launch's file
+	// clean-up waits for the agent's workspace lock. Zero in production;
+	// only tests set it.
+	agentFilesLockWait time.Duration
+
 	// createSupersedeWait overrides defaultCreateSupersedeWait when
 	// positive (see beginCreateRegistration). Zero in production.
 	createSupersedeWait time.Duration
@@ -401,6 +414,9 @@ type Server struct {
 	// ownershipSetupErr refuses a flat instance whose manager could not be
 	// owner-scoped (startServices).
 	ownershipSetupErr error
+	// stateDirSetupErr refuses to start a server whose broker ID cannot
+	// name its default state directory (DefaultStateDir; startServices).
+	stateDirSetupErr error
 
 	// auxiliaryRuntimes holds runtime+manager pairs for non-default runtimes
 	// created via profile resolution (e.g. kubernetes when default is docker).
@@ -486,6 +502,14 @@ type Server struct {
 	// defaults), snapshotted when the server is built and attached to
 	// every request it serves (flat_instance.go).
 	flatPolicy *config.FlatInstancePolicy
+
+	// presentationSeq is the process-wide sequence of a flat instance's
+	// presentation reports: every heartbeat service this server builds (one
+	// per hub connection, rebuilt on re-initialisation) takes the next
+	// value, so the sequence grows for the process life under one epoch
+	// (the start time) and a rebuilt service is never fenced out by its own
+	// earlier reports.
+	presentationSeq atomic.Int64
 
 	// NFS mount reconciler (nil when backend != "nfs")
 	nfsMountReconciler *NFSMountReconciler
@@ -590,7 +614,10 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 	}
 	srv.stateDir = cfg.StateDir
 	if srv.stateDir == "" {
-		if dir, err := DefaultStateDir(cfg.BrokerID); err != nil {
+		if dir, err := DefaultStateDir(cfg.BrokerID); errors.Is(err, brokercredentials.ErrBrokerIDNotPathElement) {
+			srv.stateDirSetupErr = fmt.Errorf("runtime broker state directory: %w", err)
+			slog.Error("Runtime Broker will not start", "error", srv.stateDirSetupErr)
+		} else if err != nil {
 			slog.Warn("Failed to resolve user home directory for state dir", "error", err)
 		} else {
 			srv.stateDir = dir
@@ -718,14 +745,18 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 
 // DefaultStateDir is a Runtime Broker's state root when ServerConfig.StateDir
 // is not set: ~/.scion/runtime-broker-state/<brokerID> ("default" when the
-// ID is empty).
+// ID is empty). An ID that is not a single path element is an error
+// (brokercredentials.ErrBrokerIDNotPathElement).
 func DefaultStateDir(brokerID string) (string, error) {
+	if brokerID == "" {
+		brokerID = "default"
+	}
+	if err := brokercredentials.ValidateBrokerIDPathElement(brokerID); err != nil {
+		return "", err
+	}
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
-	}
-	if brokerID == "" {
-		brokerID = "default"
 	}
 	return filepath.Join(homeDir, ".scion", "runtime-broker-state", brokerID), nil
 }
@@ -1368,8 +1399,27 @@ func (s *Server) Start(ctx context.Context) error {
 	case err := <-errCh:
 		return err
 	case <-ctx.Done():
-		return s.Shutdown(context.Background())
+		s.mu.RLock()
+		shutdownContext := s.shutdownContext
+		s.mu.RUnlock()
+		sctx, cancel := context.Background(), context.CancelFunc(func() {})
+		if shutdownContext != nil {
+			sctx, cancel = shutdownContext()
+		}
+		defer cancel()
+		return s.Shutdown(sctx)
 	}
+}
+
+// SetShutdownContext sets the function that returns the context Start
+// passes to Shutdown once its ctx ends, so the process can bound the
+// broker's shutdown by its own shutdown budget (ptone/scion#5054);
+// Shutdown's ShutdownDeadline still applies within it. Nil (the default):
+// context.Background(). Call it before Start.
+func (s *Server) SetShutdownContext(fn func() (context.Context, context.CancelFunc)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.shutdownContext = fn
 }
 
 // Started reports whether the server's services were started.
@@ -1400,6 +1450,9 @@ func (s *Server) startServices(ctx context.Context, withListener bool) error {
 	}
 	if s.ownershipSetupErr != nil {
 		return s.ownershipSetupErr
+	}
+	if s.stateDirSetupErr != nil {
+		return s.stateDirSetupErr
 	}
 	if s.hostSetupErr != nil {
 		return s.hostSetupErr
@@ -2592,13 +2645,18 @@ func dedupeAgentEntries(agents []api.AgentInfo) []api.AgentInfo {
 	return out
 }
 
+// agentsForProject keeps the entries positively identified as belonging to
+// projectID: by the scion.project_id label, else by the ProjectID field
+// (agentInProjectStrict). The field covers a runtime whose labels are
+// stored under other keys, such as Cloud Run's GCP-sanitized
+// scion_project_id (ptone/scion#5268); every other runtime sets both.
 func agentsForProject(agents []api.AgentInfo, projectID string) []api.AgentInfo {
 	if projectID == "" {
 		return agents
 	}
 	filtered := make([]api.AgentInfo, 0, len(agents))
 	for _, agent := range agents {
-		if projectkeys.ProjectIDFromLabels(agent.Labels) == projectID {
+		if agentInProjectStrict(agent, projectID) {
 			filtered = append(filtered, agent)
 		}
 	}

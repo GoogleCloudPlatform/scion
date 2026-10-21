@@ -55,7 +55,8 @@ func writePathEditFixture(t *testing.T, content string) (string, string) {
 
 func TestPrepareSettingsPathEdits_InPlace(t *testing.T) {
 	dir, path := writePathEditFixture(t, pathEditFixture)
-	unlock := LockSettingsFile()
+	lock := mustLockSettingsDir(t, dir)
+	unlock := lock.Unlock
 	staged, err := PrepareSettingsPathEdits(dir, []SettingsPathEdit{
 		{Path: []string{"server", "hub", "port"}, Value: 9999},
 		{Path: []string{"server", "broker", "enabled"}, Delete: true},
@@ -71,7 +72,7 @@ func TestPrepareSettingsPathEdits_InPlace(t *testing.T) {
 	if fmt.Sprint(staged.Changed) != fmt.Sprint(want) {
 		t.Errorf("Changed = %v, want %v", staged.Changed, want)
 	}
-	if err := staged.Commit(); err != nil {
+	if err := staged.Commit(lock); err != nil {
 		unlock()
 		t.Fatal(err)
 	}
@@ -97,14 +98,15 @@ func TestPrepareSettingsPathEdits_NoOpWritesNothing(t *testing.T) {
 	dir, path := writePathEditFixture(t, pathEditFixture)
 	before, _ := os.Stat(path)
 	time.Sleep(10 * time.Millisecond)
-	unlock := LockSettingsFile()
+	lock := mustLockSettingsDir(t, dir)
+	unlock := lock.Unlock
 	staged, err := PrepareSettingsPathEdits(dir, []SettingsPathEdit{
 		{Path: []string{"server", "hub", "port"}, Value: 9810},
 		{Path: []string{"server", "hub", "admin_emails"}, Value: []string{"a@example.com"}},
 		{Path: []string{"server", "missing"}, Delete: true},
 	})
 	if err == nil {
-		err = staged.Commit()
+		err = staged.Commit(lock)
 	}
 	unlock()
 	if err != nil {
@@ -121,7 +123,8 @@ func TestPrepareSettingsPathEdits_NoOpWritesNothing(t *testing.T) {
 
 func TestPrepareSettingsPathEdits_RefusesAlias(t *testing.T) {
 	dir, _ := writePathEditFixture(t, "schema_version: \"1\"\nbase: &b\n  port: 1\nserver:\n  hub: *b\n")
-	unlock := LockSettingsFile()
+	lock := mustLockSettingsDir(t, dir)
+	unlock := lock.Unlock
 	defer unlock()
 	_, err := PrepareSettingsPathEdits(dir, []SettingsPathEdit{{Path: []string{"server", "hub", "port"}, Value: 2}})
 	if !errors.Is(err, ErrSettingsPathEditUnsupported) {
@@ -131,10 +134,11 @@ func TestPrepareSettingsPathEdits_RefusesAlias(t *testing.T) {
 
 func TestPrepareSettingsPathEdits_CreatesMissingFile(t *testing.T) {
 	dir := t.TempDir()
-	unlock := LockSettingsFile()
+	lock := mustLockSettingsDir(t, dir)
+	unlock := lock.Unlock
 	staged, err := PrepareSettingsPathEdits(dir, []SettingsPathEdit{{Path: []string{"active_profile"}, Value: "local"}})
 	if err == nil {
-		err = staged.Commit()
+		err = staged.Commit(lock)
 	}
 	unlock()
 	if err != nil {
@@ -162,15 +166,19 @@ func TestSettingsFileLock_ConcurrentWritersKeepBothUpdates(t *testing.T) {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			unlock := LockSettingsFile()
-			defer unlock()
+			lock, err := LockSettingsDir(dir)
+			if err != nil {
+				errs <- err
+				return
+			}
+			defer lock.Unlock()
 			staged, err := PrepareSettingsPathEdits(dir, []SettingsPathEdit{{Path: []string{"server", "hub", "port"}, Value: 9999}})
 			if err != nil {
 				errs <- err
 				return
 			}
 			time.Sleep(5 * time.Millisecond) // the DB writes happen here
-			errs <- staged.Commit()
+			errs <- staged.Commit(lock)
 		}()
 		go func() {
 			defer wg.Done()
@@ -238,13 +246,14 @@ func TestLoadModifySaveVersionedSettings(t *testing.T) {
 // A delete with Keep empties the block except the kept subtrees.
 func TestPrepareSettingsPathEdits_DeleteKeeping(t *testing.T) {
 	dir, path := writePathEditFixture(t, pathEditFixture)
-	unlock := LockSettingsFile()
+	lock := mustLockSettingsDir(t, dir)
+	unlock := lock.Unlock
 	staged, err := PrepareSettingsPathEdits(dir, []SettingsPathEdit{{
 		Path: []string{"server"}, Delete: true,
 		Keep: [][]string{{"broker", "broker_id"}, {"broker", "broker_token"}},
 	}})
 	if err == nil {
-		err = staged.Commit()
+		err = staged.Commit(lock)
 	}
 	unlock()
 	if err != nil {
@@ -270,7 +279,8 @@ func TestPrepareSettingsPathEdits_DeleteKeeping(t *testing.T) {
 func TestPrepareEffectiveSettingsPathEdits(t *testing.T) {
 	dir, path := writePathEditFixture(t, pathEditFixture)
 	before, _ := os.ReadFile(path)
-	unlock := LockSettingsFile()
+	lock := mustLockSettingsDir(t, dir)
+	unlock := lock.Unlock
 	staged, err := PrepareEffectiveSettingsPathEdits(dir, []SettingsPathEdit{
 		{Path: []string{"server", "log_format"}, Value: ""},                             // absent == "": no effect
 		{Path: []string{"server", "database", "driver"}, Value: ""},                     // creates an empty block: no effect
@@ -288,13 +298,14 @@ func TestPrepareEffectiveSettingsPathEdits(t *testing.T) {
 		t.Errorf("Changed = %v, want %v", got, want)
 	}
 
-	unlock = LockSettingsFile()
+	lock = mustLockSettingsDir(t, dir)
+	unlock = lock.Unlock
 	staged, err = PrepareEffectiveSettingsPathEdits(dir, []SettingsPathEdit{
 		{Path: []string{"server", "log_format"}, Value: ""},
 		{Path: []string{"active_profile"}, Delete: true}, // absent already
 	})
 	if err == nil {
-		err = staged.Commit()
+		err = staged.Commit(lock)
 	}
 	unlock()
 	if err != nil {

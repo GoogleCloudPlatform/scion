@@ -29,6 +29,7 @@ import type {
   PageData,
   Agent,
   AgentAppliedConfig,
+  AgentLaunch,
   AgentInlineConfig,
   TelemetryConfig,
   GCPIdentityConfig,
@@ -48,6 +49,7 @@ import {
   isAgentRunning,
   isAgentLaunching,
   isIncompleteCreate,
+  isFailedStartLaunch,
   RESUME_BEST_EFFORT_CONFIRM_MESSAGE,
   lifecycleActionRequestInit,
 } from '../../shared/types.js';
@@ -67,6 +69,7 @@ import {
 } from '../../shared/gcp-identity-display.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
+import type { AgentsChangedDetail } from '../../client/state.js';
 import { AgentSeedEpoch } from '../../client/agent-seed-epoch.js';
 import '../shared/status-badge.js';
 import '../shared/detail-header.js';
@@ -103,15 +106,17 @@ import { formatNumber } from '../../utils/format-number.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import { DEFAULT_TRIGGERS } from '../../shared/notification-triggers.js';
 import { navigateTo, stripBasePath } from '../../client/navigation.js';
+import { visibleInterval } from '../../client/visible-interval.js';
+import {
+  launchCodeLabel,
+  launchFailedTitle,
+  launchKindTitle,
+  launchStepLabel,
+} from '../../shared/agent-launch-labels.js';
 
 /** Display text for a launch failure cause (api.BrokerRuntimeCause*). */
 function launchCauseLabel(cause: string): string {
   return cause.replace(/_/g, ' ');
-}
-
-/** Display text for a launch step the broker reported. */
-function launchStepLabel(step: string): string {
-  return step.replace(/_/g, ' ');
 }
 
 /**
@@ -395,7 +400,8 @@ export class ScionPageAgentDetail extends LitElement {
       color: var(--sl-color-danger-700, #b91c1c);
       margin-bottom: 0.25rem;
     }
-    .agent-error-banner .error-cause {
+    .agent-error-banner .error-cause,
+    .agent-error-banner .error-step {
       font-size: 0.8125rem;
       color: var(--sl-color-danger-700, #b91c1c);
       margin-bottom: 0.25rem;
@@ -815,9 +821,16 @@ export class ScionPageAgentDetail extends LitElement {
     }
   `;
 
-  private boundOnAgentsUpdated = this.onAgentsUpdated.bind(this);
+  private boundOnAgentsChanged = this.onAgentsChanged.bind(this);
   private boundOnProjectsUpdated = this.onProjectsUpdated.bind(this);
-  private relativeTimeInterval: ReturnType<typeof setInterval> | null = null;
+  private boundOnAgentsResync = this.onAgentsResync.bind(this);
+  private stopRelativeTimeTick: (() => void) | null = null;
+  /**
+   * The stateManager project object last merged into `this.project` (or
+   * seeded from it). stateManager replaces a project's object on each of
+   * its events, so the same reference means nothing changed for it.
+   */
+  private mergedProjectSource: Project | null = null;
   /**
    * Pending SPA-redirect timer for the deleted state; cancellable on
    * disconnect. `@state()` so `renderDeletedState` re-renders (dropping
@@ -837,27 +850,43 @@ export class ScionPageAgentDetail extends LitElement {
     }
     void this.loadData();
 
-    stateManager.addEventListener('agents-updated', this.boundOnAgentsUpdated);
+    stateManager.addEventListener('agents-changed', this.boundOnAgentsChanged);
     stateManager.addEventListener('projects-updated', this.boundOnProjectsUpdated);
+    stateManager.addEventListener('agents-resync', this.boundOnAgentsResync);
 
-    this.relativeTimeInterval = setInterval(() => this.requestUpdate(), 15000);
+    this.stopRelativeTimeTick = visibleInterval(() => this.requestUpdate(), 15000);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
-    stateManager.removeEventListener('agents-updated', this.boundOnAgentsUpdated);
+    stateManager.removeEventListener('agents-changed', this.boundOnAgentsChanged);
     stateManager.removeEventListener('projects-updated', this.boundOnProjectsUpdated);
-    if (this.relativeTimeInterval) {
-      clearInterval(this.relativeTimeInterval);
-      this.relativeTimeInterval = null;
-    }
+    stateManager.removeEventListener('agents-resync', this.boundOnAgentsResync);
+    this.stopRelativeTimeTick?.();
+    this.stopRelativeTimeTick = null;
     if (this.deleteRedirectTimer) {
       clearTimeout(this.deleteRedirectTimer);
       this.deleteRedirectTimer = null;
     }
   }
 
-  private onAgentsUpdated(): void {
+  /**
+   * React to a coalesced `agents-changed` flush only when it names this
+   * page's agent. Other agents in the project scope change often, and
+   * merging on their flushes gave `this.agent` a new identity each time,
+   * re-rendering the whole page for nothing.
+   */
+  private onAgentsChanged(event: Event): void {
+    // Typed as partial: a malformed or partial payload must not throw here.
+    const change = (event as CustomEvent<{ data?: Partial<AgentsChangedDetail> }>).detail?.data;
+    const id = this.agentId;
+    if (
+      !change ||
+      !id ||
+      !(change.upserted?.includes(id) || change.deleted?.includes(id) || change.unknown?.has(id))
+    ) {
+      return;
+    }
     const updatedAgent = stateManager.getAgent(this.agentId);
     if (updatedAgent && this.agent) {
       this.agent = { ...this.agent, ...updatedAgent };
@@ -867,14 +896,24 @@ export class ScionPageAgentDetail extends LitElement {
     // mean it was deleted: setScope() clears the map before this page's
     // own reseed lands at the end of loadData (which awaits the project,
     // auth/me, notification and subscription fetches first), and
-    // removeAgent() prunes stale rows without a tombstone. Either way, an
-    // unrelated `agents-updated` flush during that window would otherwise
+    // removeAgent() prunes stale rows without a tombstone. Either way, a
+    // flush naming this agent during that window would otherwise
     // be read as "this agent was deleted". Key on the authoritative
     // tombstone instead of absence. (No `!this.deleted` guard here:
     // `showDeletedStateThenRedirect` already no-ops once `deleted` is true.)
     if (!updatedAgent && this.agent && stateManager.getDeletedAgentIds().has(this.agentId)) {
       this.showDeletedStateThenRedirect();
     }
+  }
+
+  /**
+   * After an SSE reconnect, changes to this agent during the outage were
+   * missed and arrive in no `agents-changed` flush. Refetch it, so a quiet
+   * agent does not keep a stale phase until its next change.
+   */
+  private onAgentsResync(): void {
+    if (!this.agent || this.deleted) return;
+    this.backgroundRefresh();
   }
 
   /**
@@ -937,7 +976,7 @@ export class ScionPageAgentDetail extends LitElement {
    * banner's Retry (no confirm) and Force. On 204 show the deleted state and
    * redirect. On 202 stay with "Deleting…" (the helper applied the
    * response's view); the SSE `deleted` event then runs
-   * `showDeletedStateThenRedirect` through `onAgentsUpdated`, as it does for
+   * `showDeletedStateThenRedirect` through `onAgentsChanged`, as it does for
    * a delete started elsewhere.
    */
   private async deleteAgent(opts: AgentDeleteRequest = {}): Promise<void> {
@@ -975,12 +1014,19 @@ export class ScionPageAgentDetail extends LitElement {
   }
 
   private onProjectsUpdated(): void {
-    if (this.agent?.projectId) {
-      const updatedProject = stateManager.getProject(this.agent.projectId);
-      if (updatedProject && this.project) {
-        this.project = { ...this.project, ...updatedProject };
-      }
-    }
+    if (!this.agent?.projectId || !this.project) return;
+    const updatedProject = stateManager.getProject(this.agent.projectId);
+    if (!updatedProject) return;
+    // `projects-updated` carries no ID. Skip a flush that did not touch
+    // this page's project: the same object as the one last merged (or the
+    // one loadData seeded, which is `this.project` itself). stateManager
+    // never mutates a stored project in place, so the same reference means
+    // nothing changed.
+    const sameObject =
+      updatedProject === this.project || updatedProject === this.mergedProjectSource;
+    if (sameObject) return;
+    this.mergedProjectSource = updatedProject;
+    this.project = { ...this.project, ...updatedProject };
   }
 
   override willUpdate(changed: Map<PropertyKey, unknown>): void {
@@ -1404,7 +1450,8 @@ export class ScionPageAgentDetail extends LitElement {
 
   /**
    * The banner under the header: a create that did not complete, an async
-   * launch in progress, or the generic error banner.
+   * launch in progress, a start or restart that did not complete, or the
+   * generic error banner.
    */
   private renderStateBanner(): TemplateResult | typeof nothing {
     const agent = this.agent!;
@@ -1416,7 +1463,9 @@ export class ScionPageAgentDetail extends LitElement {
       const step = agent.launch?.step;
       const stepText = step ? `Step: ${launchStepLabel(step)}` : '';
       const stepEl = step
-        ? html`<div class="launch-step" data-testid="launch-step">${stepText}</div>`
+        ? html`<div class="launch-step" data-testid="launch-step" data-step=${step}>
+            ${stepText}
+          </div>`
         : nothing;
       const messageEl = message
         ? html`<div class="launch-message" data-testid="launch-message">${message}</div>`
@@ -1425,11 +1474,14 @@ export class ScionPageAgentDetail extends LitElement {
         <div class="agent-launch-banner" data-testid="agent-launch-banner">
           <sl-spinner></sl-spinner>
           <div class="launch-content">
-            <div class="launch-title">Launching</div>
+            <div class="launch-title">${launchKindTitle(agent.launch?.kind)}</div>
             ${stepEl} ${messageEl}
           </div>
         </div>
       `;
+    }
+    if (isFailedStartLaunch(agent)) {
+      return this.renderFailedStartBanner(agent, message);
     }
     if (agent.phase === 'error' && message) {
       return html`
@@ -1452,33 +1504,15 @@ export class ScionPageAgentDetail extends LitElement {
    */
   private renderIncompleteCreateBanner(agent: Agent, message?: string): TemplateResult {
     const launch = agent.launch!;
-    const code = launch.error;
     const reason = launch.state === 'active' ? 'stopping' : launchEndReasonLabel(launch.endReason);
     const task = agent.appliedConfig?.task;
     const canDelete = can(agent._capabilities, 'delete') && !this.deletionLease.isDeleting(agent);
-    const codeEl = code ? html`<span data-testid="launch-code">${code}</span>` : nothing;
-    const messageEl = message
-      ? html`<div class="error-message" data-testid="launch-error-message">${message}</div>`
-      : nothing;
-    const reasonEl = reason
-      ? html`<span data-testid="launch-end-reason">${reason}</span>`
-      : nothing;
     return html`
       <div class="agent-error-banner" data-testid="incomplete-create-banner">
         <sl-icon name="exclamation-octagon"></sl-icon>
         <div class="error-content">
-          <div class="error-title">Agent create did not complete</div>
-          ${code || reason
-            ? html`<div class="error-code" data-testid="launch-error-code">
-                ${codeEl}${code && reason ? ' — ' : ''}${reasonEl}
-              </div>`
-            : nothing}
-          ${launch.cause
-            ? html`<div class="error-cause" data-testid="launch-error-cause">
-                Cause: ${launchCauseLabel(launch.cause)}
-              </div>`
-            : nothing}
-          ${messageEl}
+          <div class="error-title">${launchFailedTitle(launch.kind)}</div>
+          ${this.renderLaunchFailureDetails(launch, reason, message)}
           <div class="error-hint">
             This agent cannot be started or resumed. Delete it and create it again.
           </div>
@@ -1523,6 +1557,69 @@ export class ScionPageAgentDetail extends LitElement {
               </sl-button>
             </a>
           </div>
+        </div>
+      </div>
+    `;
+  }
+
+  /**
+   * The failure lines a failed-launch banner shows: the code with its label
+   * and how the launch ended, the runtime cause, the step the launch failed
+   * in, and the message. launch-code keeps the raw code for automation.
+   */
+  private renderLaunchFailureDetails(
+    launch: AgentLaunch,
+    reason: string | undefined,
+    message?: string
+  ): TemplateResult {
+    const code = launch.error;
+    const codeEl = code
+      ? html`<span data-testid="launch-code">${code}</span>:
+          <span data-testid="launch-code-label">${launchCodeLabel(code)}</span>`
+      : nothing;
+    const reasonEl = reason
+      ? html`<span data-testid="launch-end-reason">${reason}</span>`
+      : nothing;
+    return html`
+      ${code || reason
+        ? html`<div class="error-code" data-testid="launch-error-code">
+            ${codeEl}${code && reason ? ' — ' : ''}${reasonEl}
+          </div>`
+        : nothing}
+      ${launch.cause
+        ? html`<div class="error-cause" data-testid="launch-error-cause">
+            Cause: ${launchCauseLabel(launch.cause)}
+          </div>`
+        : nothing}
+      ${code && launch.step
+        ? html`<div class="error-step" data-testid="launch-failed-step" data-step=${launch.step}>
+            Failed at: ${launchStepLabel(launch.step)}
+          </div>`
+        : nothing}
+      ${message
+        ? html`<div class="error-message" data-testid="launch-error-message">${message}</div>`
+        : nothing}
+    `;
+  }
+
+  /**
+   * A start or restart launch that failed (ptone/scion#4669). Unlike a
+   * create that did not complete, the hub still accepts a start or resume,
+   * so the header keeps those actions and the banner offers no delete.
+   */
+  private renderFailedStartBanner(agent: Agent, message?: string): TemplateResult {
+    const launch = agent.launch!;
+    return html`
+      <div class="agent-error-banner" data-testid="failed-start-banner">
+        <sl-icon name="exclamation-octagon"></sl-icon>
+        <div class="error-content">
+          <div class="error-title">${launchFailedTitle(launch.kind)}</div>
+          ${this.renderLaunchFailureDetails(
+            launch,
+            launchEndReasonLabel(launch.endReason),
+            message
+          )}
+          <div class="error-hint">Start or resume the agent to try again.</div>
         </div>
       </div>
     `;

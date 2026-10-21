@@ -150,7 +150,10 @@ describe('scion-chat-file-preview, the pin alone, with source validation bypasse
     el.target = { kind: 'attachment', id: 'att-1', name: 'notes.txt', mime: 'text/plain', size: 5 };
     await settle(el);
 
-    expect(apiFetchMock).toHaveBeenCalledWith('/api/v1/chat/attachments/att-1', expect.anything());
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/v1/chat/attachments/att-1?stream=1',
+      expect.anything()
+    );
     expect(dialog(el)?.querySelector('.file-preview-placeholder.error')).toBeNull();
   });
 });

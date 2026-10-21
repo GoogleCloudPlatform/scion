@@ -160,6 +160,29 @@ func TestSkillStore_ListWithFilters(t *testing.T) {
 	assert.Equal(t, "alpha-skill", result.Items[0].Name)
 }
 
+// TestSkillStore_ListSkipTotalCountReturnsPageWithoutTotal pins that
+// ListSkills honours SkipTotalCount: the page and its cursor are the same,
+// and the total is left at zero instead of being counted.
+func TestSkillStore_ListSkipTotalCountReturnsPageWithoutTotal(t *testing.T) {
+	cs := newTestCompositeStore(t)
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		name := fmt.Sprintf("skip-count-%d", i)
+		require.NoError(t, cs.CreateSkill(ctx, &store.Skill{ID: uuid.New().String(), Name: name, Slug: name, Scope: "global", Status: "active"}))
+	}
+
+	counted, err := cs.ListSkills(ctx, store.SkillFilter{}, store.ListOptions{Limit: 2})
+	require.NoError(t, err)
+	assert.Equal(t, 3, counted.TotalCount)
+
+	skipped, err := cs.ListSkills(ctx, store.SkillFilter{}, store.ListOptions{Limit: 2, SkipTotalCount: true})
+	require.NoError(t, err)
+	assert.Equal(t, 0, skipped.TotalCount)
+	require.Len(t, skipped.Items, 2)
+	assert.Equal(t, counted.Items, skipped.Items)
+	assert.Equal(t, counted.NextCursor, skipped.NextCursor)
+}
+
 func TestSkillStore_VersionCRUD(t *testing.T) {
 	cs := newTestCompositeStore(t)
 	ctx := context.Background()

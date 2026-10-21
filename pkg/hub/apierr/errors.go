@@ -92,6 +92,10 @@ const (
 	// ErrCodeAgentSessionUnavailable is returned (503) when the agent is
 	// running but the conduit session a stream needs is not connected.
 	ErrCodeAgentSessionUnavailable = "agent_session_unavailable"
+	// ErrCodeAgentUpgradeRequired is returned (409) for a user stream open
+	// to an agent session that does not support stream renewal while the
+	// hub requires it (design §3.5, Q14).
+	ErrCodeAgentUpgradeRequired = "agent_upgrade_required"
 	// ErrCodeSendInProgress is returned (409) for a chat send whose
 	// idempotency key belongs to a send that is still running.
 	ErrCodeSendInProgress = "send_in_progress"
@@ -140,6 +144,13 @@ const (
 	// The agent is kept, not rolled back: the broker may still be starting
 	// it. Details carry agentId and phase (ptone/scion#4817).
 	ErrCodeStartOutcomeUnknown = "start_outcome_unknown"
+
+	// ErrCodeOutcomeUnknown is returned (502) by exec when the request was
+	// sent to the runtime broker and its result was not received: the
+	// broker may have executed it. It is never retried. Details carry
+	// operation, broker_id and request_id (contracts §2, "Ambiguous broker
+	// results").
+	ErrCodeOutcomeUnknown = "outcome_unknown"
 
 	// Conversation resolution error codes (Tranche G read-switch)
 
@@ -396,6 +407,19 @@ func WriteErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 		statusCode = http.StatusConflict
 		code = ErrCodeVersionConflict
 		message = "Version conflict - resource was modified"
+	case errors.Is(err, store.ErrTestAdminGrantRefused):
+		// Admin tier A3 grant shaping: a grant a test identity with an
+		// admin role may not make. The fixed sentinel text only: the
+		// wrapped error is not shown.
+		statusCode = http.StatusForbidden
+		code = ErrCodeForbidden
+		message = store.ErrTestAdminGrantRefused.Error()
+	case errors.Is(err, store.ErrTestAdminGrantUnshaped):
+		// Admin tier A3 grant shaping, fail-closed: the store could not
+		// bound the grant by the identity's expiry.
+		statusCode = http.StatusForbidden
+		code = ErrCodeForbidden
+		message = store.ErrTestAdminGrantUnshaped.Error()
 	case errors.Is(err, store.ErrProjectMembersGroupPrincipal):
 		// Must precede ErrInvalidInput, which it wraps.
 		statusCode = http.StatusBadRequest

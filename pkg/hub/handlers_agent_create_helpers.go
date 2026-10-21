@@ -533,8 +533,8 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 //
 // Exceptions — these ignore whether the slot is already set:
 //   - TemplateID and TemplateHash are replaced whenever resolvedTemplate is
-//     non-nil; HubAccessScopes too, but only when the template declares
-//     hubAccess (otherwise an existing value is left as-is).
+//     non-nil. A template no longer sets HubAccessScopes (ptone/scion#4224);
+//     an existing value is left as-is.
 //   - Model-alias resolution: when AppliedConfig.Model is an alias, rewrites
 //     it to the resolved concrete name, and overwrites a non-empty
 //     InlineConfig.Model with that same resolved value (InlineConfig.Model
@@ -591,22 +591,11 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 // design §3.3) — those are populated by populateAgentConfig above this call,
 // before AppliedConfig is handed here.
 func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, project *store.Project, resolvedTemplate *store.Template) {
-	// Populate template ID, hash, and hub access scopes if template was resolved.
+	// Populate template ID and hash if template was resolved. The agent role
+	// determines hub access scopes; a template sets none (ptone/scion#4224).
 	if resolvedTemplate != nil {
 		agent.AppliedConfig.TemplateID = resolvedTemplate.ID
 		agent.AppliedConfig.TemplateHash = resolvedTemplate.ContentHash
-		if resolvedTemplate.Config != nil && resolvedTemplate.Config.HubAccess != nil {
-			// Still store the scopes on AppliedConfig for backward-compat visibility,
-			// but they are no longer used for token generation (replaced by AgentRole).
-			agent.AppliedConfig.HubAccessScopes = resolvedTemplate.Config.HubAccess.Scopes
-			if len(resolvedTemplate.Config.HubAccess.Scopes) > 0 {
-				slog.Warn("Template uses deprecated hubAccess.scopes; agent role determines scopes instead",
-					"template", resolvedTemplate.Slug,
-					"scopes", resolvedTemplate.Config.HubAccess.Scopes,
-					"agent_role", agent.AppliedConfig.AgentRole,
-				)
-			}
-		}
 
 		// The template's job keys are not copied here. Its model is filled
 		// by deriveAgentConfig's template rung, from the AgentConfig
@@ -1152,19 +1141,24 @@ const (
 )
 
 // classifyExistingAgent mirrors handleExistingAgent's decision tree
-// read-only.
+// read-only. Both read the agent's effective resting phase
+// (store.EffectiveRestingPhase, ptone/scion#4669), never its stored phase:
+// an error row that remembers the phase a failed asynchronous start began
+// from takes the branch that phase would take. The CLI's mirror of this
+// tree (cmd/common.go) must follow the same rule.
 func classifyExistingAgent(a *store.Agent, req CreateAgentRequest) existingAgentBranch {
+	rest := store.EffectiveRestingPhase(a)
 	switch {
-	case !req.ProvisionOnly && a.Phase == string(state.PhaseSuspended):
+	case !req.ProvisionOnly && rest == string(state.PhaseSuspended):
 		return existingBranchStart
-	case !req.ProvisionOnly && (a.Phase == string(state.PhaseRunning) || a.Phase == string(state.PhaseStopped) || a.Phase == string(state.PhaseError) || a.Phase == string(state.PhaseHalted)):
-		if inPlace, _ := resumeInPlaceDecision(a.Phase, req.Resume, req.ForceResume); inPlace {
+	case !req.ProvisionOnly && (rest == string(state.PhaseRunning) || rest == string(state.PhaseStopped) || rest == string(state.PhaseError) || rest == string(state.PhaseHalted)):
+		if inPlace, _ := resumeInPlaceDecision(rest, req.Resume, req.ForceResume); inPlace {
 			return existingBranchStart
 		}
 		return existingBranchNone
-	case req.GatherEnv && a.Phase == string(state.PhaseProvisioning):
+	case req.GatherEnv && rest == string(state.PhaseProvisioning):
 		return existingBranchRecreate
-	case !req.ProvisionOnly && (a.Phase == string(state.PhaseCreated) || a.Phase == string(state.PhaseProvisioning)):
+	case !req.ProvisionOnly && (rest == string(state.PhaseCreated) || rest == string(state.PhaseProvisioning)):
 		return existingBranchStart
 	}
 	return existingBranchNone
@@ -1354,11 +1348,22 @@ func (s *Server) handleExistingAgent(
 		return res
 	}
 
+	// rest is the phase the branches below are chosen by: the effective
+	// resting phase (store.EffectiveRestingPhase, ptone/scion#4669), which
+	// for an error row that remembers the phase a failed asynchronous start
+	// began from is that phase. It is never written to existingAgent.Phase,
+	// which the whole-row post-start writes would persist. storedPhase is
+	// the stored phase, for the post-start "did the broker set a phase"
+	// checks.
+	rest := store.EffectiveRestingPhase(existingAgent)
+	storedPhase := existingAgent.Phase
+
 	s.agentLifecycleLog.Info("handleExistingAgent: found existing agent",
 		"slug", existingAgent.Slug,
 		"existing_agent_id", existingAgent.ID,
 		"existing_owner_id", existingAgent.OwnerID,
 		"existing_phase", existingAgent.Phase,
+		"resting_phase", rest,
 		"caller_id", createdBy,
 	)
 	cleanupMode := req.CleanupMode
@@ -1367,7 +1372,7 @@ func (s *Server) handleExistingAgent(
 	}
 
 	// Branch 1: Suspended agents are restarted in-place (not deleted), preserving harness state.
-	if !req.ProvisionOnly && existingAgent.Phase == string(state.PhaseSuspended) {
+	if !req.ProvisionOnly && rest == string(state.PhaseSuspended) {
 		if existingAgent.RuntimeBrokerID == "" && runtimeBrokerID != "" {
 			existingAgent.RuntimeBrokerID = runtimeBrokerID
 		}
@@ -1403,7 +1408,7 @@ func (s *Server) handleExistingAgent(
 		extendWriteDeadlineForSyncDispatch(ctx, w, s.config.WriteTimeout)
 		// This branch only runs for suspended agents, so resume the harness
 		// session (Claude --continue) rather than starting fresh.
-		resume := existingAgent.Phase == string(state.PhaseSuspended)
+		resume := rest == string(state.PhaseSuspended)
 		// The post-start write runs inside the start claim, before it is
 		// released, so it never overwrites a newer start's status.
 		var afterErr error // a post-start write error, answered after the start
@@ -1415,7 +1420,7 @@ func (s *Server) handleExistingAgent(
 				answered = true
 				return nil
 			}
-			if existingAgent.Phase == string(state.PhaseSuspended) {
+			if existingAgent.Phase == string(state.PhaseSuspended) || existingAgent.Phase == storedPhase {
 				existingAgent.Phase = string(state.PhaseRunning)
 			}
 			// Clear any exit reason/code left from the prior generation —
@@ -1495,12 +1500,12 @@ func (s *Server) handleExistingAgent(
 	// Branch 2: Agent is running/stopped/error/halted.
 	// Resume=true for stopped or halted agents restarts in-place; otherwise reject as duplicate.
 	if !req.ProvisionOnly &&
-		(existingAgent.Phase == string(state.PhaseRunning) ||
-			existingAgent.Phase == string(state.PhaseStopped) ||
-			existingAgent.Phase == string(state.PhaseError) ||
-			existingAgent.Phase == string(state.PhaseHalted)) {
+		(rest == string(state.PhaseRunning) ||
+			rest == string(state.PhaseStopped) ||
+			rest == string(state.PhaseError) ||
+			rest == string(state.PhaseHalted)) {
 
-		resumeInPlace, forcedRecovery := resumeInPlaceDecision(existingAgent.Phase, req.Resume, req.ForceResume)
+		resumeInPlace, forcedRecovery := resumeInPlaceDecision(rest, req.Resume, req.ForceResume)
 		if resumeInPlace {
 			if existingAgent.RuntimeBrokerID == "" && runtimeBrokerID != "" {
 				existingAgent.RuntimeBrokerID = runtimeBrokerID
@@ -1637,7 +1642,7 @@ func (s *Server) handleExistingAgent(
 	}
 
 	// Branch 3: Env-gather re-provisioning — provisioning + GatherEnv requested.
-	if req.GatherEnv && existingAgent.Phase == string(state.PhaseProvisioning) {
+	if req.GatherEnv && rest == string(state.PhaseProvisioning) {
 		// Flat placement pre-check on the agent being replaced, before its
 		// stop intent: the recreate deletes it on its Runtime Broker.
 		if _, err := s.pinnedPlacementBroker(ctx, existingAgent); err != nil {
@@ -1736,8 +1741,8 @@ func (s *Server) handleExistingAgent(
 
 	// Branch 4: Restart — agent was provisioned/created and needs to be started.
 	if !req.ProvisionOnly &&
-		(existingAgent.Phase == string(state.PhaseCreated) ||
-			existingAgent.Phase == string(state.PhaseProvisioning)) {
+		(rest == string(state.PhaseCreated) ||
+			rest == string(state.PhaseProvisioning)) {
 
 		// Recover RuntimeBrokerID from the freshly-resolved value if the stored one is empty.
 		if existingAgent.RuntimeBrokerID == "" && runtimeBrokerID != "" {
@@ -1797,7 +1802,8 @@ func (s *Server) handleExistingAgent(
 			}
 			// If the broker didn't set a running phase, default to running.
 			if existingAgent.Phase == string(state.PhaseCreated) ||
-				existingAgent.Phase == string(state.PhaseProvisioning) {
+				existingAgent.Phase == string(state.PhaseProvisioning) ||
+				existingAgent.Phase == storedPhase {
 				existingAgent.Phase = string(state.PhaseRunning)
 			}
 			// Clear any exit reason/code left from the prior generation — see
@@ -1889,7 +1895,8 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 		return "", err
 	}
 
-	// Get available (online) brokers for fallback logic
+	// Get available brokers (online provider rows whose broker is present)
+	// for fallback logic
 	availableBrokers, err := s.getAvailableBrokersForProject(ctx, project.ID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
@@ -1941,7 +1948,7 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 		// broker record cannot be read (rec == nil), let it through, as
 		// brokerReachable does.
 		acceptProvider := func(brokerID string, rec *store.RuntimeBroker) (string, error) {
-			if rec != nil && !s.brokerRecordReachable(rec) {
+			if rec != nil && !s.brokerRecordReachable(ctx, rec) {
 				// The broker exists but is offline: refuse at resolution,
 				// before any agent row is created (ptone/scion#2715).
 				slog.Warn("Requested broker is offline during agent creation",
@@ -2057,7 +2064,7 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 
 			// Do not link (or dispatch to) a broker that exists but is
 			// offline: 503 before anything is written (ptone/scion#2715).
-			if !s.brokerRecordReachable(broker) {
+			if !s.brokerRecordReachable(ctx, broker) {
 				slog.Warn("Requested broker is offline during agent creation",
 					"requestedBrokerID", requestedBrokerID, "brokerID", broker.ID,
 					"status", broker.Status, "project_id", project.ID)
@@ -2072,7 +2079,9 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 				Status:     broker.Status,
 				LinkedBy:   linkedByForProvider(GetUserIdentityFromContext(ctx)),
 			}
-			if addErr := s.store.AddProjectProvider(ctx, provider); addErr != nil {
+			// linkProjectProvider also retains the project's activeProfile
+			// built-in before this request dispatches (ptone/scion#5113).
+			if addErr := s.linkProjectProvider(ctx, provider); addErr != nil {
 				slog.Warn("Failed to auto-link broker during agent creation",
 					"broker", broker.Name, "project_id", project.ID, "error", addErr)
 				RuntimeBrokerUnavailable(w, requestedBrokerID, usableBrokers())
@@ -2146,13 +2155,15 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 	}
 
 	// Case 3: No default and no explicit broker - auto-select only when there is
-	// exactly one provider and its broker is online and dispatchable.
+	// exactly one provider and its broker is present (brokerPresence) and
+	// dispatchable.
 	if len(allProviders) == 1 {
 		broker, brokerErr := s.store.GetRuntimeBroker(ctx, allProviders[0].BrokerID)
-		if brokerErr == nil && broker.Status == store.BrokerStatusOnline && s.canUseBrokerForProject(ctx, broker, project) {
+		present := brokerErr == nil && s.brokerPresence(ctx, broker).Connected
+		if present && s.canUseBrokerForProject(ctx, broker, project) {
 			return allProviders[0].BrokerID, nil
 		}
-		if brokerErr == nil && broker.Status == store.BrokerStatusOnline {
+		if present {
 			NoRuntimeBroker(w, "No runtime brokers available for this project that you have permission to use", usableBrokers())
 		} else {
 			NoRuntimeBroker(w, "This project's only runtime broker is offline", usableBrokers())
@@ -2234,6 +2245,34 @@ func (s *Server) canDispatchToBroker(ctx context.Context, broker *store.RuntimeB
 	return s.brokerDispatchAllowed(ctx, broker, func(user UserIdentity) bool {
 		return s.userHoldsBrokerDispatch(ctx, user, broker)
 	})
+}
+
+// canRunBrokerImageOps reports whether the caller may pull or remove an
+// image on broker (the harness-config image operations with broker_id). It
+// writes no HTTP response.
+//
+// Dispatch authority is checked first: a user or dev caller holding
+// broker.dispatch on the broker passes. A user or dev caller whose
+// credential is not an interactive session or dev credential
+// (sessionCredentialAllowed) is then refused, so the broker's auto-provide
+// setting never admits a user access token or any other non-session
+// credential. Every other caller is decided by canDispatchToBroker, the
+// shared-broker rule agent creation uses. Agent creation itself keeps
+// canUseBrokerForProject.
+func (s *Server) canRunBrokerImageOps(ctx context.Context, broker *store.RuntimeBroker) bool {
+	identity := GetIdentityFromContext(ctx)
+	if isNilIdentity(identity) || broker == nil {
+		return false
+	}
+	if user, ok := identity.(UserIdentity); ok && (identity.Type() == "user" || identity.Type() == "dev") {
+		if s.userHoldsBrokerDispatch(ctx, user, broker) {
+			return true
+		}
+		if !sessionCredentialAllowed(ctx) {
+			return false
+		}
+	}
+	return s.canDispatchToBroker(ctx, broker)
 }
 
 // canUseBrokerForProject reports whether the caller, already authorized to
@@ -2348,7 +2387,9 @@ func (s *Server) brokerProviderHasOwnerConsent(ctx context.Context, broker *stor
 	return s.authzService.IsSystemAdmin(ctx, provider.LinkedBy)
 }
 
-// getAvailableBrokersForProject returns online runtime brokers that are providers to the project.
+// getAvailableBrokersForProject returns the runtime brokers that are online
+// providers to the project and are present (brokerPresence, design v2.21.50
+// §3.4). The provider row must still be online.
 func (s *Server) getAvailableBrokersForProject(ctx context.Context, projectID string) ([]store.RuntimeBroker, error) {
 	// Get providers for this project
 	providers, err := s.store.GetProjectProviders(ctx, projectID)
@@ -2356,7 +2397,7 @@ func (s *Server) getAvailableBrokersForProject(ctx context.Context, projectID st
 		return nil, err
 	}
 
-	// Filter to online brokers and fetch their full details
+	// Filter to online provider rows whose broker is present
 	var availableBrokers []store.RuntimeBroker
 	for _, provider := range providers {
 		if provider.Status == store.BrokerStatusOnline {
@@ -2364,7 +2405,7 @@ func (s *Server) getAvailableBrokersForProject(ctx context.Context, projectID st
 			if err != nil {
 				continue // Skip brokers we can't fetch
 			}
-			if broker.Status == store.BrokerStatusOnline {
+			if s.brokerPresence(ctx, broker).Connected {
 				availableBrokers = append(availableBrokers, *broker)
 			}
 		}

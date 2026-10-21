@@ -41,6 +41,13 @@ type testInfraGates struct {
 	// "web_session_key_unavailable"), and is "" when they are available or
 	// the member tier is off (testIdentityWebSessionsUnavailableReason).
 	TestIdentityWebSessionsUnavailableReason string
+	// TestAdminWebSessions is true when admin-kind test identities may
+	// hold web sessions (ptone/scion#4240, WS4): the startup setting
+	// server.hub.test_identities.admin_web_sessions is on, the hub runs at
+	// an admin level, and test identity web sessions are available
+	// (testAdminWebSessionsAvailable). The test super-admin kind also needs
+	// TestSuperAdmin.
+	TestAdminWebSessions bool
 	// TestIssuerAudience is the audience a workload ID token must carry to
 	// prove a test identity issuer delegation on this hub
 	// ("scion-test-issuer:<hub id>"), or "" when the hub accepts no
@@ -60,6 +67,7 @@ func (s *Server) testInfraGates() testInfraGates {
 		TestSuperAdmin:                           s.testAdminTierEnabled(testAdminKindSuperAdmin),
 		TestIdentityWebSessions:                  webSessions,
 		TestIdentityWebSessionsUnavailableReason: s.testIdentityWebSessionsUnavailableReason(),
+		TestAdminWebSessions:                     s.testAdminWebSessionsAvailable(),
 		TestIssuerAudience:                       s.testIssuerAudienceIfAccepted(),
 	}
 }
@@ -75,7 +83,7 @@ func (s *Server) testIssuerAudienceIfAccepted() string {
 }
 
 // TestInfraStatusResponse is the body of GET /api/v1/test-infra/status:
-// exactly four booleans, the web session unavailable reason and the issuer
+// exactly five booleans, the web session unavailable reason and the issuer
 // audience string, and no other hub data.
 type TestInfraStatusResponse struct {
 	TestIdentities                           bool   `json:"testIdentities"`
@@ -83,6 +91,7 @@ type TestInfraStatusResponse struct {
 	TestSuperAdmin                           bool   `json:"testSuperAdmin"`
 	TestIdentityWebSessions                  bool   `json:"testIdentityWebSessions"`
 	TestIdentityWebSessionsUnavailableReason string `json:"testIdentityWebSessionsUnavailableReason"`
+	TestAdminWebSessions                     bool   `json:"testAdminWebSessions"`
 	TestIssuerAudience                       string `json:"testIssuerAudience"`
 }
 
