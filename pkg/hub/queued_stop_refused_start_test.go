@@ -181,11 +181,12 @@ func TestRefusedStartAfterQueuedStop_AmbiguousKeepsRunningIntent(t *testing.T) {
 	assert.NotContains(t, got.Message, "Start failed:")
 }
 
-// intentAfterReleaseStore writes a newer running intent for agentID right
-// after the start claim is released (as a newer start would), once, and
-// keeps that write's error for the test goroutine to check.
+// intentAfterReleaseStore, once armed, writes a newer running intent for
+// agentID right after the start claim is released (as a newer start would),
+// once, and keeps that write's error for the test goroutine to check.
 type intentAfterReleaseStore struct {
 	store.Store
+	fault   *storeFaultSwitch
 	agentID string
 	done    bool
 	err     error
@@ -193,7 +194,7 @@ type intentAfterReleaseStore struct {
 
 func (w *intentAfterReleaseStore) ReleaseAgentStart(ctx context.Context, agentID, claimID, owner string) (bool, error) {
 	held, err := w.Store.ReleaseAgentStart(ctx, agentID, claimID, owner)
-	if agentID == w.agentID && !w.done {
+	if w.fault.Active() && agentID == w.agentID && !w.done {
 		w.done = true
 		_, w.err = w.Store.SetRunIntent(ctx, agentID, store.RunIntentRunning)
 	}
@@ -205,9 +206,10 @@ func (w *intentAfterReleaseStore) ReleaseAgentStart(ctx context.Context, agentID
 // reverted and no message is written.
 func TestRefusedStartAfterQueuedStop_NewerIntentKept(t *testing.T) {
 	q := newRefusedStartFixture(t, true)
-	w := &intentAfterReleaseStore{Store: q.s, agentID: q.agent.ID}
-	q.srv.store = w
-	q.srv.quotaService.store = w
+	w, fault := installStoreFault(t, q.srv, func(inner store.Store, fs *storeFaultSwitch) *intentAfterReleaseStore {
+		return &intentAfterReleaseStore{Store: inner, fault: fs, agentID: q.agent.ID}
+	})
+	fault.Arm()
 	q.disp.start = func(ctx context.Context, a *store.Agent) error {
 		return fmt.Errorf("x: %w", errStartRequestNotSent)
 	}
