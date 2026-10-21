@@ -152,11 +152,14 @@ func TestStripUnsupportedAppleFlags_KeepsTmpfs(t *testing.T) {
 // --version; for exec (the mask check), statOut with exit code statRC,
 // after failFirst failing calls (exit 1, "exec failed"); hang makes every
 // exec hang in a child that keeps the output pipe open; rmFail makes rm
-// fail.
+// fail. The mock ignores backoffPastDeadline, which the test applies.
 type appleGateOpts struct {
 	version, statOut  string
 	statRC, failFirst int
 	hang, rmFail      bool
+	// backoffPastDeadline sets a retry delay longer than the check's
+	// timeout, so the deadline passes during the first backoff.
+	backoffPastDeadline bool
 }
 
 // appleGateMock writes a mock container CLI that records each subcommand
@@ -265,6 +268,8 @@ func TestAppleContainerRuntime_Run_AgentsMaskGate(t *testing.T) {
 			[]string{"unexpected stat output"}, append(calls("--version", "run", "exec"), removed...)},
 		{"one value fails at once", withAgents, appleGateOpts{version: v160, statOut: "41"},
 			[]string{"unexpected stat output"}, append(calls("--version", "run", "exec"), removed...)},
+		{"deadline during backoff keeps the last attempt's output", withAgents, appleGateOpts{version: v160, statOut: mount, failFirst: 99, backoffPastDeadline: true},
+			[]string{"could not check that the mask is mounted", "exec failed"}, append(calls("--version", "run", "exec"), removed...)},
 		{"mask check hangs fails", withAgents, appleGateOpts{version: v160, statOut: mount, hang: true},
 			[]string{"could not check that the mask is mounted"}, append(calls("--version", "run", "exec"), removed...)},
 		{"removal failure is reported", withAgents, appleGateOpts{version: v160, statOut: "40\n40", rmFail: true},
@@ -278,6 +283,11 @@ func TestAppleContainerRuntime_Run_AgentsMaskGate(t *testing.T) {
 				prev := appleMaskCheckTimeout
 				appleMaskCheckTimeout = 500 * time.Millisecond
 				t.Cleanup(func() { appleMaskCheckTimeout = prev })
+			}
+			if tt.opts.backoffPastDeadline {
+				prevT, prevD := appleMaskCheckTimeout, appleMaskCheckRetryDelay
+				appleMaskCheckTimeout, appleMaskCheckRetryDelay = 300*time.Millisecond, 5*time.Second
+				t.Cleanup(func() { appleMaskCheckTimeout, appleMaskCheckRetryDelay = prevT, prevD })
 			}
 			command, callsFile := appleGateMock(t, tt.opts)
 			rt := &AppleContainerRuntime{Command: command}

@@ -202,6 +202,9 @@ func (r *AppleContainerRuntime) verifyAgentsMask(ctx context.Context, id string)
 	agents := "/workspace/" + sharedWorkspaceAgentsDir
 	var out string
 	var err error
+	// A deadline that passes during the backoff ends the loop, keeping the
+	// last real attempt's error and output.
+retry:
 	for attempt := 1; ; attempt++ {
 		out, err = appleBoundedCommand(ctx, r.Command, "exec", id, "stat", "-c", "%d", agents, path.Dir(agents))
 		if err == nil || attempt >= appleMaskCheckAttempts || ctx.Err() != nil {
@@ -209,6 +212,7 @@ func (r *AppleContainerRuntime) verifyAgentsMask(ctx context.Context, id string)
 		}
 		select {
 		case <-ctx.Done():
+			break retry
 		case <-time.After(appleMaskCheckRetryDelay):
 		}
 	}
