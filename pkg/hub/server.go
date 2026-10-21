@@ -1726,6 +1726,10 @@ type Server struct {
 	// conduitEligibleRelays is the number of eligible separate relays at
 	// the last check (-1: not checked yet), read by the readiness gauge.
 	conduitEligibleRelays atomic.Int64
+	// brokerPresenceRegistryFallbacks counts broker presence reads whose
+	// conduit registry read failed and fell back to the legacy signals
+	// (broker_presence.go).
+	brokerPresenceRegistryFallbacks atomic.Int64
 	// conduitAdmissionAEADv is the admission token cipher
 	// (conduit_admission.go), derived once; conduitAdmissionKeyErr is why
 	// it could not be.

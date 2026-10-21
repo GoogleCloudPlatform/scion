@@ -784,7 +784,7 @@ func (s *Server) moveProbesFor(r *http.Request, project *store.Project, ac *stor
 	p := moveProbes{
 		// The loaded record decides; unlike brokerReachable this never fails
 		// open, because a move refused here leaves the agent untouched.
-		Reachable: s.brokerRecordReachable,
+		Reachable: func(b *store.RuntimeBroker) bool { return s.brokerRecordReachable(ctx, b) },
 		CanDispatch: func(dst *store.RuntimeBroker) bool {
 			return s.canDispatchToBroker(ctx, dst)
 		},

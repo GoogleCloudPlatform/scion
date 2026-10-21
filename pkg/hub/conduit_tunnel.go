@@ -628,9 +628,12 @@ func (s *Server) authorizeConduitTunnel(ctx context.Context, identity UserIdenti
 	}
 }
 
-// conduitTunnelBrokerOffline reports whether the stored broker row says
-// the agent's broker is offline. A missing row is not treated as offline
-// (the session resolution decides then); a read that fails is returned.
+// conduitTunnelBrokerOffline reports whether the agent's broker is offline:
+// its stored status is offline and it is not present (brokerPresence), so a
+// broker with a live registry session is not refused on a stale status, and
+// nothing that passed before is refused. A missing row is not treated as
+// offline (the session resolution decides then); a read that fails is
+// returned.
 func (s *Server) conduitTunnelBrokerOffline(ctx context.Context, agent *store.Agent) (bool, error) {
 	if agent.RuntimeBrokerID == "" {
 		return false, nil
@@ -644,7 +647,7 @@ func (s *Server) conduitTunnelBrokerOffline(ctx context.Context, agent *store.Ag
 	case b == nil:
 		return false, nil
 	}
-	return b.Status == store.BrokerStatusOffline, nil
+	return b.Status == store.BrokerStatusOffline && !s.brokerPresence(ctx, b).Connected, nil
 }
 
 // openTarget resolves the agent's session that serves kind, mints a grant
