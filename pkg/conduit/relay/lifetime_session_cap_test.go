@@ -20,7 +20,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay/relaytest"
+	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
 // A session's lifetime cap from its principal (design §3.9 "Source of the
@@ -77,5 +79,43 @@ func TestLifetimeCap_PrincipalCapWithoutRelayCap(t *testing.T) {
 	relaytest.WaitClosed(t, ls.Done(), "session to end by the principal cap")
 	if left := t0.Add(90 * time.Second).Sub(n.Clock.Now()); left < 0 {
 		t.Fatalf("session ended %s after the principal cap", -left)
+	}
+}
+
+// TestLifetimeCap_PrincipalCapBoundsTheDrainDeadline: under a principal
+// cap (120s, below the relay's 3500s), the lifetime GoAway at 60s leaves
+// 60s, and the 90s session drain deadline is cut to end at the principal
+// cap, not the relay's.
+func TestLifetimeCap_PrincipalCapBoundsTheDrainDeadline(t *testing.T) {
+	w := relaytest.NewWorld(t)
+	n := lifetimeNode(t, w, 3500*time.Second, 90*time.Second)
+	p := agentPrincipal("L1", 1)
+	p.LifetimeCap = 120 * time.Second
+	w.SetPrincipal("a", p)
+	t0 := n.Clock.Now()
+	cfg := echoConfig()
+	var goAways <-chan *conduitv1.GoAway
+	cfg.Interceptor, goAways = goAwayRecorder(false)
+	_, wel := n.MustDial("a", relaytest.AgentHello(agentID, "L1", "", "pty"), cfg)
+	ls, st := openEcho(t, n, wel.GetSessionId())
+	waitTimer(t, n, t0.Add(60*time.Second), "lifetime GoAway")
+
+	n.Clock.Advance(60 * time.Second)
+	g := relaytest.Wait(t, goAways, "GoAway")
+	if g.GetDrainDeadlineMs() != 60000 {
+		t.Fatalf("drain_deadline_ms = %d, want 60000 (ends at the principal cap)", g.GetDrainDeadlineMs())
+	}
+	waitTimer(t, n, t0.Add(120*time.Second), "drain deadline")
+	n.Clock.Advance(60*time.Second - time.Millisecond)
+	if isClosed(ls.Done()) {
+		t.Fatal("session closed before the drain deadline")
+	}
+	n.Clock.Advance(time.Millisecond)
+	if ce := streamEnd(t, st); ce.Code != conduit.CloseRelayRestart {
+		t.Fatalf("stream closed with %d, want 4503", ce.Code)
+	}
+	relaytest.WaitClosed(t, ls.Done(), "session to end by the principal cap")
+	if !n.Clock.Now().Equal(t0.Add(120 * time.Second)) {
+		t.Fatalf("drain ended at +%s, want the principal cap (+2m0s)", n.Clock.Now().Sub(t0))
 	}
 }
