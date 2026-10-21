@@ -187,7 +187,7 @@ func TestAgentScheduleScope_PerIDActions(t *testing.T) {
 	for _, action := range agentScopeScheduleActions {
 		for _, h := range agentScopeHolders {
 			t.Run(action.name+"/"+string(h), func(t *testing.T) {
-				sc := storeAgentScopeSchedule(t, s, projectID, "scope-"+action.name, h, action.status)
+				sc := storeAgentScopeSchedule(t, s, projectID, "scope-"+action.name+"-"+string(h), h, action.status)
 				before, err := s.GetSchedule(context.Background(), sc.ID)
 				require.NoError(t, err)
 
@@ -544,7 +544,7 @@ func TestAgentScheduleScope_ListPagesHeldRowsFirst(t *testing.T) {
 	heldEvt := storeAgentScopeEventAt(t, s, projectID, holderCallerAgent, base)
 	for i, h := range []agentScopeHolder{holderOtherAgent, holderUser, holderLegacy, holderOtherAgent, holderUser} {
 		at := base.Add(time.Duration(i+1) * time.Minute)
-		storeAgentScopeScheduleAt(t, s, projectID, "scope-page-"+string(h), h, store.ScheduleStatusActive, at)
+		storeAgentScopeScheduleAt(t, s, projectID, "scope-page-"+string(h)+"-"+string(rune('a'+i)), h, store.ScheduleStatusActive, at)
 		storeAgentScopeEventAt(t, s, projectID, h, at)
 	}
 	caller := agentScopeCaller(projectID)
