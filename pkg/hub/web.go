@@ -3710,7 +3710,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 			if activating {
 				// The stored row is still invited: issue no token or
 				// session for it (mirrors provisionUser).
-				ws.logger().Error("Failed to activate invited user on login", "email", userInfo.Email, "user_id", user.ID, "error", err)
+				ws.logger().Error("Failed to activate invited user on login", "error", err)
 				http.Redirect(w, r, "/login?error=user_create_failed", http.StatusFound)
 				return
 			}
