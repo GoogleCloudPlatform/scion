@@ -69,6 +69,20 @@ import {
 const MASKED_VALUE = '********';
 
 /**
+ * Sets obj[key] to a tri-state switch value only when it differs from the
+ * loaded one; null (Use default) is sent as null, which clears the stored
+ * key (ptone/scion#3724).
+ */
+function putTriState(
+  obj: Record<string, unknown>,
+  key: string,
+  value: boolean | null,
+  loaded: boolean | null
+): void {
+  if (value !== loaded) obj[key] = value;
+}
+
+/**
  * Deep-merges src into dst (plain objects only; src wins for other values).
  * Used to combine the Layer-1 and Layer-0 parts of a workstation save.
  */
@@ -768,6 +782,10 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private defaultMaxAgentRole = '';
   @state() private defaultAgentRole = '';
   @state() private defaultRuntimeBroker = '';
+  // The loaded default runtime broker (as shown, see
+  // normalizeDefaultRuntimeBroker); a save sends the key only when the
+  // form value differs from it.
+  private loadedDefaultRuntimeBroker = '';
   @state() private runtimeBrokers: RuntimeBroker[] = [];
   // Agent container timezone (agent_defaults.default_timezone). Empty means UTC.
   @state() private defaultTimezone = '';
@@ -851,24 +869,37 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private secretsGCPProjectId = '';
   @state() private secretsGCPReplicationLocations = '';
 
+  // Tri-state switches (ptone/scion#3724, ptone/scion#3913): null means the
+  // key is unset (GET left it out), so the hub's default applies. Each has a
+  // loaded copy; a save sends a switch only when it differs from the loaded
+  // value, as null when the user chose "Use default". An untouched unset
+  // switch is therefore never written as an explicit false.
+
   // Auto-expose ports
-  @state() private autoExposePortsEnabled = false;
+  @state() private autoExposePortsEnabled: boolean | null = null;
+  private loadedAutoExposePortsEnabled: boolean | null = null;
 
-  // Quotas
-  @state() private enforceBrokerQuotas = true;
+  // Quotas (unset means enforced)
+  @state() private enforceBrokerQuotas: boolean | null = null;
+  private loadedEnforceBrokerQuotas: boolean | null = null;
 
-  // Agent Secrets
-  @state() private agentSecretsUserScopeOnly = false;
+  // Agent Secrets (unset means permissive)
+  @state() private agentSecretsUserScopeOnly: boolean | null = null;
+  private loadedAgentSecretsUserScopeOnly: boolean | null = null;
 
   // Telemetry
-  @state() private telemetryEnabled = false;
-  @state() private telemetryCloudEnabled = false;
+  @state() private telemetryEnabled: boolean | null = null;
+  private loadedTelemetryEnabled: boolean | null = null;
+  @state() private telemetryCloudEnabled: boolean | null = null;
+  private loadedTelemetryCloudEnabled: boolean | null = null;
   @state() private telemetryCloudEndpoint = '';
   @state() private telemetryCloudProtocol = '';
   @state() private telemetryCloudProvider = '';
   @state() private telemetryCloudGcpProjectId = '';
-  @state() private telemetryCloudCloudLogging = false;
-  @state() private telemetryHubEnabled = false;
+  @state() private telemetryCloudCloudLogging: boolean | null = null;
+  private loadedTelemetryCloudCloudLogging: boolean | null = null;
+  @state() private telemetryHubEnabled: boolean | null = null;
+  private loadedTelemetryHubEnabled: boolean | null = null;
   @state() private telemetryHubReportInterval = '';
   /**
    * Stored telemetry.local, kept only so a file-mode save (which replaces the
@@ -1898,123 +1929,114 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.defaultMaxAgentRole = data.default_max_agent_role || '';
     this.defaultAgentRole = data.default_agent_role || '';
     this.defaultRuntimeBroker = data.default_runtime_broker || '';
+    this.loadedDefaultRuntimeBroker = this.defaultRuntimeBroker;
+    this.normalizeDefaultRuntimeBroker();
     this.defaultTimezone = data.default_timezone || '';
     this.defaultGCPIdentityMode = data.default_gcp_identity_mode || '';
     this.defaultGCPIdentitySAID = data.default_gcp_identity_service_account_id || '';
     this.loadedGCPIdentitySAID = this.defaultGCPIdentitySAID;
 
-    // Server
-    const srv = data.server;
-    if (srv) {
-      this.serverMode = srv.mode || '';
-      this.logLevel = srv.log_level || '';
+    // Server. Every field is assigned on each load, from an empty block
+    // when GET left one out, so a reload after a save that removed a
+    // sub-block shows it as unset instead of the values from before the
+    // save (ptone/scion#3724).
+    const srv = data.server ?? {};
+    this.serverMode = srv.mode || '';
+    this.logLevel = srv.log_level || '';
 
-      // Hub
-      if (srv.hub) {
-        this.hubPort = srv.hub.port || 0;
-        this.hubHost = srv.hub.host || '';
-        this.hubPublicUrl = srv.hub.public_url || '';
-        this.hubMonitoringDashboardUrl = srv.hub.monitoring_dashboard_url || '';
-        this.loadedMonitoringDashboardUrl = this.hubMonitoringDashboardUrl;
-        this.monitoringDashboardUrlTouched = false;
-        this.hubReadTimeout = srv.hub.read_timeout || '';
-        this.hubWriteTimeout = srv.hub.write_timeout || '';
-        this.hubAdminEmails = (srv.hub.admin_emails || []).join(', ');
-        this.hubSoftDeleteRetention = srv.hub.soft_delete_retention || '';
-        this.hubSoftDeleteRetainFiles = srv.hub.soft_delete_retain_files || false;
-        this.hubAutoSuspendStalled = srv.hub.auto_suspend_stalled || false;
-        this.hubStalledThreshold = srv.hub.stalled_threshold || '';
-        this.hubGcpIamCheckMode = srv.hub.gcp_iam_check_mode || 'off';
-        this.hubGcpIamDenyUnknownPolicy = srv.hub.gcp_iam_deny_unknown_policy || 'fail-open';
-        this.loadedGcpIamCheckMode = this.hubGcpIamCheckMode;
-        this.loadedGcpIamDenyUnknownPolicy = this.hubGcpIamDenyUnknownPolicy;
-      }
+    // Hub
+    const hubBlock = srv.hub ?? {};
+    this.hubPort = hubBlock.port || 0;
+    this.hubHost = hubBlock.host || '';
+    this.hubPublicUrl = hubBlock.public_url || '';
+    this.hubMonitoringDashboardUrl = hubBlock.monitoring_dashboard_url || '';
+    this.loadedMonitoringDashboardUrl = this.hubMonitoringDashboardUrl;
+    this.monitoringDashboardUrlTouched = false;
+    this.hubReadTimeout = hubBlock.read_timeout || '';
+    this.hubWriteTimeout = hubBlock.write_timeout || '';
+    this.hubAdminEmails = (hubBlock.admin_emails || []).join(', ');
+    this.hubSoftDeleteRetention = hubBlock.soft_delete_retention || '';
+    this.hubSoftDeleteRetainFiles = hubBlock.soft_delete_retain_files || false;
+    this.hubAutoSuspendStalled = hubBlock.auto_suspend_stalled || false;
+    this.hubStalledThreshold = hubBlock.stalled_threshold || '';
+    this.hubGcpIamCheckMode = hubBlock.gcp_iam_check_mode || 'off';
+    this.hubGcpIamDenyUnknownPolicy = hubBlock.gcp_iam_deny_unknown_policy || 'fail-open';
+    this.loadedGcpIamCheckMode = this.hubGcpIamCheckMode;
+    this.loadedGcpIamDenyUnknownPolicy = this.hubGcpIamDenyUnknownPolicy;
 
-      // Broker
-      if (srv.broker) {
-        this.brokerEnabled = srv.broker.enabled || false;
-        this.brokerPort = srv.broker.port || 0;
-        this.brokerHost = srv.broker.host || '';
-        this.brokerHubEndpoint = srv.broker.hub_endpoint || '';
-        this.brokerContainerHubEndpoint = srv.broker.container_hub_endpoint || '';
-        this.brokerName = srv.broker.broker_name || '';
-        this.brokerNickname = srv.broker.broker_nickname || '';
-        // Absent means on (the server auto-provides when the key is unset).
-        this.brokerAutoProvide = srv.broker.auto_provide ?? true;
-      }
+    // Broker
+    const brokerBlock = srv.broker ?? {};
+    this.brokerEnabled = brokerBlock.enabled || false;
+    this.brokerPort = brokerBlock.port || 0;
+    this.brokerHost = brokerBlock.host || '';
+    this.brokerHubEndpoint = brokerBlock.hub_endpoint || '';
+    this.brokerContainerHubEndpoint = brokerBlock.container_hub_endpoint || '';
+    this.brokerName = brokerBlock.broker_name || '';
+    this.brokerNickname = brokerBlock.broker_nickname || '';
+    // Absent means on (the server auto-provides when the key is unset).
+    this.brokerAutoProvide = brokerBlock.auto_provide ?? true;
 
-      // Database
-      if (srv.database) {
-        this.dbDriver = srv.database.driver || '';
-        this.dbUrl = srv.database.url || '';
-      }
+    // Database
+    const dbBlock = srv.database ?? {};
+    this.dbDriver = dbBlock.driver || '';
+    this.dbUrl = dbBlock.url || '';
 
-      // Auth
-      if (srv.auth) {
-        this.authDevMode = srv.auth.dev_mode || false;
-        this.authDevToken = srv.auth.dev_token || '';
-        this.authAuthorizedDomains = (srv.auth.authorized_domains || []).join(', ');
-        this.authUserAccessMode = srv.auth.user_access_mode || 'open';
-        this.authDefaultUserRole = srv.auth.default_user_role || 'member';
-      }
+    // Auth
+    const authBlock = srv.auth ?? {};
+    this.authDevMode = authBlock.dev_mode || false;
+    this.authDevToken = authBlock.dev_token || '';
+    this.authAuthorizedDomains = (authBlock.authorized_domains || []).join(', ');
+    this.authUserAccessMode = authBlock.user_access_mode || 'open';
+    this.authDefaultUserRole = authBlock.default_user_role || 'member';
 
-      // Storage
-      if (srv.storage) {
-        this.storageProvider = srv.storage.provider || '';
-        this.storageBucket = srv.storage.bucket || '';
-        this.storageLocalPath = srv.storage.local_path || '';
-      }
+    // Storage
+    const storageBlock = srv.storage ?? {};
+    this.storageProvider = storageBlock.provider || '';
+    this.storageBucket = storageBlock.bucket || '';
+    this.storageLocalPath = storageBlock.local_path || '';
 
-      // Secrets
-      if (srv.secrets) {
-        this.secretsBackend = srv.secrets.backend || '';
-        this.secretsGCPProjectId = srv.secrets.gcp_project_id || '';
-        this.secretsGCPReplicationLocations = (srv.secrets.gcp_replication_locations || []).join(
-          ', '
-        );
-      }
+    // Secrets
+    const secretsBlock = srv.secrets ?? {};
+    this.secretsBackend = secretsBlock.backend || '';
+    this.secretsGCPProjectId = secretsBlock.gcp_project_id || '';
+    this.secretsGCPReplicationLocations = (secretsBlock.gcp_replication_locations || []).join(', ');
 
-      // Message Broker
-      if (srv.message_broker) {
-        this.messageBrokerEnabled = srv.message_broker.enabled || false;
-        this.messageBrokerType = srv.message_broker.type || '';
-      }
+    // Message Broker
+    const mbBlock = srv.message_broker ?? {};
+    this.messageBrokerEnabled = mbBlock.enabled || false;
+    this.messageBrokerType = mbBlock.type || '';
 
-      // Native Chat — an absent section or an absent key means enabled.
-      this.nativeChatEnabled = srv.native_chat?.enabled ?? true;
-    }
+    // Native Chat — an absent section or an absent key means enabled.
+    this.nativeChatEnabled = srv.native_chat?.enabled ?? true;
 
     // Telemetry
     const tel = data.telemetry;
     this.storedTelemetryLocal = tel?.local;
-    if (tel) {
-      this.telemetryEnabled = tel.enabled || false;
-      if (tel.cloud) {
-        this.telemetryCloudEnabled = tel.cloud.enabled || false;
-        this.telemetryCloudEndpoint = tel.cloud.endpoint || '';
-        this.telemetryCloudProtocol = tel.cloud.protocol || '';
-        this.telemetryCloudProvider = tel.cloud.provider || '';
-        this.telemetryCloudGcpProjectId = tel.cloud.gcp_project_id || '';
-        this.telemetryCloudCloudLogging = tel.cloud.cloud_logging || false;
-      }
-      if (tel.hub) {
-        this.telemetryHubEnabled = tel.hub.enabled || false;
-        this.telemetryHubReportInterval = tel.hub.report_interval || '';
-      }
-    }
+    this.telemetryEnabled = tel?.enabled ?? null;
+    this.telemetryCloudEnabled = tel?.cloud?.enabled ?? null;
+    this.telemetryCloudEndpoint = tel?.cloud?.endpoint || '';
+    this.telemetryCloudProtocol = tel?.cloud?.protocol || '';
+    this.telemetryCloudProvider = tel?.cloud?.provider || '';
+    this.telemetryCloudGcpProjectId = tel?.cloud?.gcp_project_id || '';
+    this.telemetryCloudCloudLogging = tel?.cloud?.cloud_logging ?? null;
+    this.telemetryHubEnabled = tel?.hub?.enabled ?? null;
+    this.telemetryHubReportInterval = tel?.hub?.report_interval || '';
+    this.loadedTelemetryEnabled = this.telemetryEnabled;
+    this.loadedTelemetryCloudEnabled = this.telemetryCloudEnabled;
+    this.loadedTelemetryCloudCloudLogging = this.telemetryCloudCloudLogging;
+    this.loadedTelemetryHubEnabled = this.telemetryHubEnabled;
 
     // Auto-expose ports
-    const aep = data.auto_expose_ports;
-    if (aep) {
-      this.autoExposePortsEnabled = aep.enabled || false;
-    }
+    this.autoExposePortsEnabled = data.auto_expose_ports?.enabled ?? null;
+    this.loadedAutoExposePortsEnabled = this.autoExposePortsEnabled;
 
     // Quotas — absent means enforced (fail-safe default).
-    const quotas = data.quotas;
-    this.enforceBrokerQuotas = quotas?.enforce_broker_quotas ?? true;
+    this.enforceBrokerQuotas = data.quotas?.enforce_broker_quotas ?? null;
+    this.loadedEnforceBrokerQuotas = this.enforceBrokerQuotas;
 
     // Agent Secrets — absent means permissive (agents may write project scope).
-    this.agentSecretsUserScopeOnly = data.agent_secrets?.user_scope_only ?? false;
+    this.agentSecretsUserScopeOnly = data.agent_secrets?.user_scope_only ?? null;
+    this.loadedAgentSecretsUserScopeOnly = this.agentSecretsUserScopeOnly;
 
     // Hub observability export switches — absent means unset.
     const obs = data.server?.hub?.observability;
@@ -2082,22 +2104,35 @@ export class ScionPageAdminServerConfig extends LitElement {
       if (res.ok) {
         const data = (await res.json()) as { brokers?: RuntimeBroker[] } | RuntimeBroker[];
         this.runtimeBrokers = Array.isArray(data) ? data : data.brokers || [];
-        // Normalize: if the stored value is a name or slug, resolve it to the broker ID
-        // so the dropdown selection matches.
-        if (this.defaultRuntimeBroker && this.runtimeBrokers.length > 0) {
-          const match = this.runtimeBrokers.find(
-            (b) =>
-              b.id === this.defaultRuntimeBroker ||
-              (b.name && b.name.toLowerCase() === this.defaultRuntimeBroker.toLowerCase()) ||
-              (b.slug && b.slug.toLowerCase() === this.defaultRuntimeBroker.toLowerCase())
-          );
-          if (match && match.id !== this.defaultRuntimeBroker) {
-            this.defaultRuntimeBroker = match.id;
-          }
-        }
+        this.normalizeDefaultRuntimeBroker();
       }
     } catch {
       // Non-critical — dropdown falls back to free-text input
+    }
+  }
+
+  /**
+   * Shows a stored default runtime broker given by name or slug as the
+   * broker's ID, so the dropdown selection matches. The ID is display
+   * only: when the value was not edited, the loaded value moves along with
+   * it, so a save does not rewrite the operator's name or slug as an ID
+   * (ptone/scion#3913).
+   */
+  private normalizeDefaultRuntimeBroker(): void {
+    const current = this.defaultRuntimeBroker;
+    if (!current || this.runtimeBrokers.length === 0) return;
+    const lower = current.toLowerCase();
+    const match = this.runtimeBrokers.find(
+      (b) =>
+        b.id === current ||
+        (b.name && b.name.toLowerCase() === lower) ||
+        (b.slug && b.slug.toLowerCase() === lower)
+    );
+    if (match && match.id !== current) {
+      if (current === this.loadedDefaultRuntimeBroker) {
+        this.loadedDefaultRuntimeBroker = match.id;
+      }
+      this.defaultRuntimeBroker = match.id;
     }
   }
 
@@ -2245,6 +2280,45 @@ export class ScionPageAdminServerConfig extends LitElement {
   }
 
   /**
+   * A switch for a tri-state boolean setting (ptone/scion#3724). While the
+   * key is unset (value null) the switch is drawn as unsetChecked and the
+   * hint says it is not set; toggling an unset switch back to that state
+   * leaves it unset, and "Use default" unsets a set switch. The save sends
+   * the key only when it differs from the loaded value (putTriState).
+   */
+  private renderTriStateSwitch(opts: {
+    key: string;
+    label: string;
+    value: boolean | null;
+    loaded: boolean | null;
+    unsetChecked: boolean;
+    unsetLabel: string;
+    set: (v: boolean | null) => void;
+  }): ReturnType<typeof html> {
+    const { key, label, value, loaded, unsetChecked, unsetLabel, set } = opts;
+    const onToggle = (on: boolean) => set(loaded === null && on === unsetChecked ? null : on);
+    const display = value === null ? unsetLabel : value ? 'Enabled' : 'Disabled';
+    return this.renderFieldValue(
+      key,
+      display,
+      html`${this.renderEnvBadge(key)}<sl-switch
+          data-tristate=${key}
+          ?checked=${value ?? unsetChecked}
+          @sl-change=${(e: Event) => onToggle((e.target as HTMLInputElement).checked)}
+          >${label}</sl-switch
+        >${value !== null
+          ? html`<sl-button
+              size="small"
+              variant="text"
+              data-tristate-default=${key}
+              @click=${() => set(null)}
+              >Use default</sl-button
+            >`
+          : html`<span class="hint" data-tristate-unset=${key}>${unsetLabel}</span>`}`
+    );
+  }
+
+  /**
    * Service account value to save, or undefined to leave it out of the
    * payload. The account only applies in "assign" mode, so it is cleared
    * when the admin picks another mode in the form.
@@ -2322,7 +2396,10 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('default_thinking_level')) {
       payload.default_thinking_level = this.defaultThinkingLevel ?? null;
     }
-    if (ok('default_runtime_broker')) {
+    if (
+      ok('default_runtime_broker') &&
+      this.defaultRuntimeBroker !== this.loadedDefaultRuntimeBroker
+    ) {
       payload.default_runtime_broker = this.defaultRuntimeBroker || '';
     }
     if (ok('default_timezone')) {
@@ -2410,52 +2487,41 @@ export class ScionPageAdminServerConfig extends LitElement {
 
     if (Object.keys(server).length > 0) payload.server = server;
 
-    // Telemetry — all Layer-1
+    // Telemetry — all Layer-1. The tri-state switches go in only when
+    // changed (see putTriState).
     if (ok('telemetry.enabled')) {
-      const telemetry: Record<string, unknown> = {
-        enabled: this.telemetryEnabled,
-      };
+      const telemetry: Record<string, unknown> = {};
+      putTriState(telemetry, 'enabled', this.telemetryEnabled, this.loadedTelemetryEnabled);
       if (ok('telemetry.cloud.enabled')) {
-        telemetry.cloud = {
-          enabled: this.telemetryCloudEnabled,
+        const cloud: Record<string, unknown> = {
           endpoint: this.telemetryCloudEndpoint,
           protocol: this.telemetryCloudProtocol,
           provider: this.telemetryCloudProvider,
           // null clears a stored project ID; an omitted key would keep it,
           // because telemetry is merged key by key (ptone/scion#3717).
           gcp_project_id: this.telemetryCloudGcpProjectId || null,
-          cloud_logging: this.telemetryCloudCloudLogging,
         };
+        putTriState(cloud, 'enabled', this.telemetryCloudEnabled, this.loadedTelemetryCloudEnabled);
+        putTriState(
+          cloud,
+          'cloud_logging',
+          this.telemetryCloudCloudLogging,
+          this.loadedTelemetryCloudCloudLogging
+        );
+        telemetry.cloud = cloud;
       }
       if (ok('telemetry.hub.enabled')) {
-        telemetry.hub = {
-          enabled: this.telemetryHubEnabled,
+        const hub: Record<string, unknown> = {
           report_interval: this.telemetryHubReportInterval,
         };
+        putTriState(hub, 'enabled', this.telemetryHubEnabled, this.loadedTelemetryHubEnabled);
+        telemetry.hub = hub;
       }
       payload.telemetry = telemetry;
     }
 
-    // Auto-expose ports — Layer-1
-    if (ok('auto_expose_ports.enabled')) {
-      payload.auto_expose_ports = {
-        enabled: this.autoExposePortsEnabled,
-      };
-    }
-
-    // Quotas — Layer-1
-    if (ok('quotas.enforce_broker_quotas')) {
-      payload.quotas = {
-        enforce_broker_quotas: this.enforceBrokerQuotas,
-      };
-    }
-
-    // Agent Secrets — Layer-1
-    if (ok('agent_secrets.user_scope_only')) {
-      payload.agent_secrets = {
-        user_scope_only: this.agentSecretsUserScopeOnly,
-      };
-    }
+    // Auto-expose ports, quotas, agent secrets — Layer-1 tri-state switches.
+    this.putTriStateSections(payload, ok);
 
     // Runtimes, profiles, harness_configs — always send edited state (including
     // empty objects) so the backend can distinguish "no change" from "cleared".
@@ -2464,6 +2530,48 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('profiles')) payload.profiles = this.profiles;
 
     return payload;
+  }
+
+  /**
+   * Adds the auto_expose_ports, quotas and agent_secrets sections, each
+   * only when its switch differs from the loaded value: null (Use default)
+   * clears the stored key, and an untouched unset switch is not written as
+   * an explicit false (ptone/scion#3724). ok is the caller's editability
+   * check.
+   */
+  private putTriStateSections(
+    payload: Record<string, unknown>,
+    ok: (key: string) => boolean
+  ): void {
+    const sections: Array<[string, string, string, boolean | null, boolean | null]> = [
+      [
+        'auto_expose_ports',
+        'enabled',
+        'auto_expose_ports.enabled',
+        this.autoExposePortsEnabled,
+        this.loadedAutoExposePortsEnabled,
+      ],
+      [
+        'quotas',
+        'enforce_broker_quotas',
+        'quotas.enforce_broker_quotas',
+        this.enforceBrokerQuotas,
+        this.loadedEnforceBrokerQuotas,
+      ],
+      [
+        'agent_secrets',
+        'user_scope_only',
+        'agent_secrets.user_scope_only',
+        this.agentSecretsUserScopeOnly,
+        this.loadedAgentSecretsUserScopeOnly,
+      ],
+    ];
+    for (const [section, field, key, value, loaded] of sections) {
+      if (!ok(key)) continue;
+      const block: Record<string, unknown> = {};
+      putTriState(block, field, value, loaded);
+      if (Object.keys(block).length > 0) payload[section] = block;
+    }
   }
 
   /**
@@ -2664,7 +2772,10 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('default_thinking_level')) {
       payload.default_thinking_level = this.defaultThinkingLevel ?? null;
     }
-    if (ok('default_runtime_broker')) {
+    if (
+      ok('default_runtime_broker') &&
+      this.defaultRuntimeBroker !== this.loadedDefaultRuntimeBroker
+    ) {
       payload.default_runtime_broker = this.defaultRuntimeBroker || '';
     }
     // Sent unconditionally (not `|| undefined`): an explicit "" clears the
@@ -2818,12 +2929,14 @@ export class ScionPageAdminServerConfig extends LitElement {
 
     payload.server = server;
 
-    // Telemetry
+    // Telemetry. The tri-state switches go in only when changed; the file
+    // save merges telemetry key by key, so an omitted key is kept.
     const telemetry: Record<string, unknown> = {};
-    if (ok('telemetry.enabled')) telemetry.enabled = this.telemetryEnabled;
+    if (ok('telemetry.enabled')) {
+      putTriState(telemetry, 'enabled', this.telemetryEnabled, this.loadedTelemetryEnabled);
+    }
     if (ok('telemetry.cloud.enabled')) {
-      telemetry.cloud = {
-        enabled: this.telemetryCloudEnabled,
+      const cloud: Record<string, unknown> = {
         endpoint: ok('telemetry.cloud.endpoint')
           ? this.telemetryCloudEndpoint || undefined
           : undefined,
@@ -2836,18 +2949,26 @@ export class ScionPageAdminServerConfig extends LitElement {
         gcp_project_id: ok('telemetry.cloud.gcp_project_id')
           ? this.telemetryCloudGcpProjectId || undefined
           : undefined,
-        cloud_logging: ok('telemetry.cloud.cloud_logging')
-          ? this.telemetryCloudCloudLogging
-          : undefined,
       };
+      putTriState(cloud, 'enabled', this.telemetryCloudEnabled, this.loadedTelemetryCloudEnabled);
+      if (ok('telemetry.cloud.cloud_logging')) {
+        putTriState(
+          cloud,
+          'cloud_logging',
+          this.telemetryCloudCloudLogging,
+          this.loadedTelemetryCloudCloudLogging
+        );
+      }
+      telemetry.cloud = cloud;
     }
     if (ok('telemetry.hub.enabled')) {
-      telemetry.hub = {
-        enabled: this.telemetryHubEnabled,
+      const hub: Record<string, unknown> = {
         report_interval: ok('telemetry.hub.report_interval')
           ? this.telemetryHubReportInterval || undefined
           : undefined,
       };
+      putTriState(hub, 'enabled', this.telemetryHubEnabled, this.loadedTelemetryHubEnabled);
+      telemetry.hub = hub;
     }
     if (Object.keys(telemetry).length > 0) {
       // A file-mode save replaces the whole telemetry object, so echo the
@@ -2856,26 +2977,8 @@ export class ScionPageAdminServerConfig extends LitElement {
       payload.telemetry = telemetry;
     }
 
-    // Auto-expose ports
-    if (ok('auto_expose_ports.enabled')) {
-      payload.auto_expose_ports = {
-        enabled: this.autoExposePortsEnabled,
-      };
-    }
-
-    // Quotas
-    if (ok('quotas.enforce_broker_quotas')) {
-      payload.quotas = {
-        enforce_broker_quotas: this.enforceBrokerQuotas,
-      };
-    }
-
-    // Agent Secrets
-    if (ok('agent_secrets.user_scope_only')) {
-      payload.agent_secrets = {
-        user_scope_only: this.agentSecretsUserScopeOnly,
-      };
-    }
+    // Auto-expose ports, quotas, agent secrets (tri-state switches)
+    this.putTriStateSections(payload, ok);
 
     // Runtimes, profiles, harness_configs — always send edited state (including
     // empty objects) so the backend can distinguish "no change" from "cleared".
@@ -3975,31 +4078,27 @@ export class ScionPageAdminServerConfig extends LitElement {
                   )}
                 </div>
                 <div class="form-field full-width">
-                  ${this.renderFieldValue(
-                    'telemetry.enabled',
-                    this.telemetryEnabled ? 'Enabled' : 'Disabled',
-                    html`${this.renderEnvBadge('telemetry.enabled')}<sl-switch
-                        ?checked=${this.telemetryEnabled}
-                        @sl-change=${(e: Event) => {
-                          this.telemetryEnabled = (e.target as HTMLInputElement).checked;
-                        }}
-                        >Enable Telemetry</sl-switch
-                      >`
-                  )}
+                  ${this.renderTriStateSwitch({
+                    key: 'telemetry.enabled',
+                    label: 'Enable Telemetry',
+                    value: this.telemetryEnabled,
+                    loaded: this.loadedTelemetryEnabled,
+                    unsetChecked: false,
+                    unsetLabel: 'Not set (default applies)',
+                    set: (v) => (this.telemetryEnabled = v),
+                  })}
                   <span class="hint">Default opt-in state for new agents</span>
                 </div>
                 <div class="form-field full-width">
-                  ${this.renderFieldValue(
-                    'auto_expose_ports.enabled',
-                    this.autoExposePortsEnabled ? 'Enabled' : 'Disabled',
-                    html`${this.renderEnvBadge('auto_expose_ports.enabled')}<sl-switch
-                        ?checked=${this.autoExposePortsEnabled}
-                        @sl-change=${(e: Event) => {
-                          this.autoExposePortsEnabled = (e.target as HTMLInputElement).checked;
-                        }}
-                        >Enable Auto-Expose Ports</sl-switch
-                      >`
-                  )}
+                  ${this.renderTriStateSwitch({
+                    key: 'auto_expose_ports.enabled',
+                    label: 'Enable Auto-Expose Ports',
+                    value: this.autoExposePortsEnabled,
+                    loaded: this.loadedAutoExposePortsEnabled,
+                    unsetChecked: false,
+                    unsetLabel: 'Not set (default applies)',
+                    set: (v) => (this.autoExposePortsEnabled = v),
+                  })}
                   <span class="hint"
                     >Automatically detect and expose listening TCP ports in agent containers</span
                   >
@@ -4410,17 +4509,15 @@ export class ScionPageAdminServerConfig extends LitElement {
         <h3 class="section-title">Quotas</h3>
         <div class="form-grid">
           <div class="form-field full-width">
-            ${this.renderFieldValue(
-              'quotas.enforce_broker_quotas',
-              this.enforceBrokerQuotas ? 'Enabled' : 'Disabled',
-              html`${this.renderEnvBadge('quotas.enforce_broker_quotas')}<sl-switch
-                  ?checked=${this.enforceBrokerQuotas}
-                  @sl-change=${(e: Event) => {
-                    this.enforceBrokerQuotas = (e.target as HTMLInputElement).checked;
-                  }}
-                  >Enforce broker agent quotas</sl-switch
-                >`
-            )}
+            ${this.renderTriStateSwitch({
+              key: 'quotas.enforce_broker_quotas',
+              label: 'Enforce broker agent quotas',
+              value: this.enforceBrokerQuotas,
+              loaded: this.loadedEnforceBrokerQuotas,
+              unsetChecked: true,
+              unsetLabel: 'Not set (default: on)',
+              set: (v) => (this.enforceBrokerQuotas = v),
+            })}
             <span class="hint"
               >When off, agents can be started on a broker beyond its max_agents_per_broker cap.
               Usage is still counted. Manage the per-broker cap from
@@ -4435,17 +4532,15 @@ export class ScionPageAdminServerConfig extends LitElement {
         <h3 class="section-title">Agent Secrets</h3>
         <div class="form-grid">
           <div class="form-field full-width">
-            ${this.renderFieldValue(
-              'agent_secrets.user_scope_only',
-              this.agentSecretsUserScopeOnly ? 'Enabled' : 'Disabled',
-              html`${this.renderEnvBadge('agent_secrets.user_scope_only')}<sl-switch
-                  ?checked=${this.agentSecretsUserScopeOnly}
-                  @sl-change=${(e: Event) => {
-                    this.agentSecretsUserScopeOnly = (e.target as HTMLInputElement).checked;
-                  }}
-                  >Restrict agent-written secrets to profile scope</sl-switch
-                >`
-            )}
+            ${this.renderTriStateSwitch({
+              key: 'agent_secrets.user_scope_only',
+              label: 'Restrict agent-written secrets to profile scope',
+              value: this.agentSecretsUserScopeOnly,
+              loaded: this.loadedAgentSecretsUserScopeOnly,
+              unsetChecked: false,
+              unsetLabel: 'Not set (default: off)',
+              set: (v) => (this.agentSecretsUserScopeOnly = v),
+            })}
             <span class="hint"
               >When on, agents (including Capture Auth) can only store secrets in the user's
               profile. Project-scope writes from agents are rejected. Existing project secrets are
@@ -6282,17 +6377,15 @@ export class ScionPageAdminServerConfig extends LitElement {
         <h3 class="section-title">Cloud Export (OTLP)</h3>
         <div class="form-grid">
           <div class="form-field full-width">
-            ${this.renderFieldValue(
-              'telemetry.cloud.enabled',
-              this.telemetryCloudEnabled ? 'Enabled' : 'Disabled',
-              html`${this.renderEnvBadge('telemetry.cloud.enabled')}<sl-switch
-                  ?checked=${this.telemetryCloudEnabled}
-                  @sl-change=${(e: Event) => {
-                    this.telemetryCloudEnabled = (e.target as HTMLInputElement).checked;
-                  }}
-                  >Enable Cloud Export</sl-switch
-                >`
-            )}
+            ${this.renderTriStateSwitch({
+              key: 'telemetry.cloud.enabled',
+              label: 'Enable Cloud Export',
+              value: this.telemetryCloudEnabled,
+              loaded: this.loadedTelemetryCloudEnabled,
+              unsetChecked: false,
+              unsetLabel: 'Not set (default applies)',
+              set: (v) => (this.telemetryCloudEnabled = v),
+            })}
           </div>
           <div class="form-field full-width">
             <label>Endpoint</label>
@@ -6354,17 +6447,15 @@ export class ScionPageAdminServerConfig extends LitElement {
             )}
           </div>
           <div class="form-field">
-            ${this.renderFieldValue(
-              'telemetry.cloud.cloud_logging',
-              this.telemetryCloudCloudLogging ? 'Enabled' : 'Disabled',
-              html`${this.renderEnvBadge('telemetry.cloud.cloud_logging')}<sl-switch
-                  ?checked=${this.telemetryCloudCloudLogging}
-                  @sl-change=${(e: Event) => {
-                    this.telemetryCloudCloudLogging = (e.target as HTMLInputElement).checked;
-                  }}
-                  >Enable Cloud Logging</sl-switch
-                >`
-            )}
+            ${this.renderTriStateSwitch({
+              key: 'telemetry.cloud.cloud_logging',
+              label: 'Enable Cloud Logging',
+              value: this.telemetryCloudCloudLogging,
+              loaded: this.loadedTelemetryCloudCloudLogging,
+              unsetChecked: false,
+              unsetLabel: 'Not set (default applies)',
+              set: (v) => (this.telemetryCloudCloudLogging = v),
+            })}
           </div>
         </div>
       </div>
@@ -6373,17 +6464,15 @@ export class ScionPageAdminServerConfig extends LitElement {
         <h3 class="section-title">Hub Reporting</h3>
         <div class="form-grid">
           <div class="form-field">
-            ${this.renderFieldValue(
-              'telemetry.hub.enabled',
-              this.telemetryHubEnabled ? 'Enabled' : 'Disabled',
-              html`${this.renderEnvBadge('telemetry.hub.enabled')}<sl-switch
-                  ?checked=${this.telemetryHubEnabled}
-                  @sl-change=${(e: Event) => {
-                    this.telemetryHubEnabled = (e.target as HTMLInputElement).checked;
-                  }}
-                  >Enable Hub Reporting</sl-switch
-                >`
-            )}
+            ${this.renderTriStateSwitch({
+              key: 'telemetry.hub.enabled',
+              label: 'Enable Hub Reporting',
+              value: this.telemetryHubEnabled,
+              loaded: this.loadedTelemetryHubEnabled,
+              unsetChecked: false,
+              unsetLabel: 'Not set (default applies)',
+              set: (v) => (this.telemetryHubEnabled = v),
+            })}
           </div>
           <div class="form-field">
             <label>Report Interval</label>
