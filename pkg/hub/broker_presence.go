@@ -80,6 +80,24 @@ func (s *Server) brokerPresence(ctx context.Context, b *store.RuntimeBroker) bro
 	return brokerPresenceResult{Source: brokerPresenceNone}
 }
 
+// BrokerPresent reports whether the broker with ID brokerID is present
+// (brokerPresence) for callers outside this package: the co-located
+// broker's startup repair of orphaned agents and project defaults. A broker
+// with no record is not present; any other store error is returned, and the
+// caller must not treat it as absence. At startup the conduit registry may
+// not be open yet; the registry read is then not live and the legacy
+// signals decide, as they did before presence.
+func (s *Server) BrokerPresent(ctx context.Context, brokerID string) (bool, error) {
+	b, err := s.store.GetRuntimeBroker(ctx, brokerID)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return s.brokerPresence(ctx, b).Connected, nil
+}
+
 // brokerRegistryLive reports whether broker id has a live, current session
 // in this node's conduit registry: Registry.BrokerReference finds one (a
 // session whose relay row is present, current and fresh, itself fresh,

@@ -128,7 +128,24 @@ func refreshDetectedGCPHost(ctx context.Context, s store.Store, broker *store.Ru
 // broker's workspace storage descriptor; nil leaves an existing record's
 // descriptor unchanged. profileTypeSettings resolves each profile's runtime
 // type (loadBrokerProfileTypeSettings); nil registers runtime keys as types.
+// It repairs orphaned agents on the store's guards alone; the co-located
+// broker registers through registerGlobalProjectAndBrokerPresence.
 func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID, brokerName, endpoint string, rt runtime.Runtime, autoProvide bool, settings *config.Settings, workspaceStorage *api.BrokerWorkspaceStorage, profileTypeSettings *config.VersionedSettings) (string, error) {
+	return registerGlobalProjectAndBrokerPresence(ctx, s, nil, brokerID, brokerName, endpoint, rt, autoProvide, settings, workspaceStorage, profileTypeSettings)
+}
+
+// brokerPresentFunc reports whether the broker with the given ID is present
+// (hub.Server.BrokerPresent, design v2.21.50 §3.4). An error means presence
+// is unknown, not absent.
+type brokerPresentFunc func(ctx context.Context, brokerID string) (bool, error)
+
+// registerGlobalProjectAndBrokerPresence is registerGlobalProjectAndBroker
+// whose orphan repair also skips every agent whose broker is present
+// (present, nil: the store's guards alone). Project defaults are repointed
+// only from brokers found not present, and those are the only brokers marked
+// offline. At startup the conduit registry may not be open yet; the legacy
+// presence signals then decide, as BrokerPresent documents.
+func registerGlobalProjectAndBrokerPresence(ctx context.Context, s store.Store, present brokerPresentFunc, brokerID, brokerName, endpoint string, rt runtime.Runtime, autoProvide bool, settings *config.Settings, workspaceStorage *api.BrokerWorkspaceStorage, profileTypeSettings *config.VersionedSettings) (string, error) {
 	// Check if global project already exists
 	globalProject, err := s.GetProjectBySlug(ctx, GlobalProjectName)
 	if err != nil && err != store.ErrNotFound {
@@ -300,8 +317,12 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 	// Re-assign agents orphaned by broker ID changes.
 	// An agent is orphaned when its RuntimeBrokerID points to a broker that
 	// is offline/missing AND the agent is not in a terminal state.
-	// Guard: agents under active remote brokers are NOT reassigned.
+	// Guard: agents under active remote brokers are NOT reassigned, and
+	// neither are agents whose broker is present.
 	orphaned, orphanErr := s.FindOrphanedAgents(ctx, brokerID)
+	if orphanErr == nil {
+		orphaned = withoutPresentBrokers(ctx, orphaned, present)
+	}
 	if orphanErr != nil {
 		log.Printf("Warning: failed to query orphaned agents: %v", orphanErr)
 	} else if len(orphaned) > 0 {
@@ -479,4 +500,31 @@ func buildStoreBrokerProfiles(settings *config.Settings, profileTypeSettings *co
 	}
 
 	return profiles
+}
+
+// withoutPresentBrokers drops from orphaned every agent whose broker is
+// present. A broker whose presence cannot be read is kept as present: its
+// agents are not moved. present nil returns orphaned unchanged.
+func withoutPresentBrokers(ctx context.Context, orphaned []*store.Agent, present brokerPresentFunc) []*store.Agent {
+	if present == nil || len(orphaned) == 0 {
+		return orphaned
+	}
+	known := make(map[string]bool)
+	kept := orphaned[:0:0]
+	for _, a := range orphaned {
+		isPresent, ok := known[a.RuntimeBrokerID]
+		if !ok {
+			var err error
+			isPresent, err = present(ctx, a.RuntimeBrokerID)
+			if err != nil {
+				log.Printf("Warning: broker %s presence unknown, its agents are not re-assigned: %v", a.RuntimeBrokerID, err)
+				isPresent = true
+			}
+			known[a.RuntimeBrokerID] = isPresent
+		}
+		if !isPresent {
+			kept = append(kept, a)
+		}
+	}
+	return kept
 }
