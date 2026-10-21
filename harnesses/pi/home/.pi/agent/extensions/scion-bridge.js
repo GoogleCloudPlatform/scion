@@ -124,8 +124,10 @@ export function createHandlers({ run = defaultRun, env = process.env } = {}) {
     },
 
     input(event) {
-      // Only human/RPC input counts as a prompt; extension-injected input
-      // would inflate max_turns accounting. The prompt text is not forwarded.
+      // Only human/RPC input is forwarded as prompt-submit; skipping
+      // extension-injected input avoids extra prompt-submit/THINKING status
+      // updates. (Turns for max_turns are counted at agent_end, not here.)
+      // The prompt text is not forwarded.
       if (event && event.source === 'extension') return;
       agentSetStatus = false;
       emit('input');
