@@ -80,7 +80,8 @@ each step needs are in [docs/permissions-matrix.md](docs/permissions-matrix.md).
 11. **Preconditions.** "Require approval for all external contributors" on
     every target ([step 6](docs/github-setup.md#6-deploy-precondition-fork-pr-approval-g8);
     all preconditions in [architecture.md](docs/architecture.md#deploy-preconditions)).
-12. **PoC.** Run [`workflows/cr-runner-poc.yml`](workflows/cr-runner-poc.yml)
+12. **PoC.** Work through [docs/poc-checklist.md](docs/poc-checklist.md), which
+    includes running [`workflows/cr-runner-poc.yml`](workflows/cr-runner-poc.yml)
     ([step 7](docs/github-setup.md#7-poc-run-before-any-routing); P6, needs
     ptone's go-ahead).
 13. **Route.** `scripts/set-routing-variable.sh --repo <owner/repo> --apply`
@@ -106,6 +107,7 @@ proven on a manually dispatched job before any CI job depends on it.
 | [`docs/permissions-matrix.md`](docs/permissions-matrix.md) | **Who needs which GitHub or GCP role for every step, fork vs upstream** |
 | [`docs/github-setup.md`](docs/github-setup.md) | GitHub App (manifest at [`scripts/github-app-manifest.json`](scripts/github-app-manifest.json)), installation on the fork and upstream, webhook check, fork-PR precondition, routing variable and fallback |
 | [`docs/gcp-setup.md`](docs/gcp-setup.md) | GCP project, IAM, secrets, deploy (outline; P4) |
+| [`docs/poc-checklist.md`](docs/poc-checklist.md) | Every runtime checkpoint for the P6 PoC (open U-items, runner checkpoints, cache sharing, success criteria) with commands and expected results |
 | [`docs/operations.md`](docs/operations.md) | Rollout, fallback, rotation, quotas, troubleshooting (outline) |
 
 ## Go module
@@ -127,7 +129,7 @@ go build -o /dev/null ./... && go vet ./... && go test ./... && gofmt -l .
 | P3 | Runner image and entrypoint (`/scratch` redirection, claim exchange) | implemented (in review) |
 | P4 | Idempotent deploy and teardown scripts with `--dry-run` | implemented (in review) |
 | P5 | GitHub setup guide, App manifest, workflow templates | implemented (in review) |
-| P6 | Live PoC on the chosen target (needs ptone's go-ahead) | gated |
+| P6 | Live PoC on the chosen target (needs ptone's go-ahead); [checklist](docs/poc-checklist.md) | gated |
 | P7 | `ci.yml` `runs-on` change (separate PR, outside `cr-ci/`) | gated |
 
 Nothing in this directory touches live GitHub or GCP resources. Running the

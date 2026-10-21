@@ -14,7 +14,7 @@ Per repository, in this order (details in
    redelivered `ping` gets 200 ([step 5](github-setup.md#5-check-the-webhook)).
 2. The [deploy preconditions](architecture.md#deploy-preconditions) hold,
    above all "Require approval for **all** external contributors".
-3. The PoC workflow passed on this target (P6; [criteria](../workflows/README.md#poc-success-criteria)).
+3. The P6 [PoC checklist](poc-checklist.md) passed on this target.
 4. `ci.yml` carries the routing expression (P7). Until then, the variable
    changes nothing.
 5. `scripts/set-routing-variable.sh --repo <owner/repo> --apply` sets

@@ -142,6 +142,9 @@ step prints both the reported and the physical path.
 
 ## PoC success criteria
 
+These are part of the full P6 list in
+[docs/poc-checklist.md](../docs/poc-checklist.md) (items D1-D8, E1).
+
 From design section 7, phase 1. Read them from the PoC run's log, the
 mediator log and the execution log
 ([github-setup.md, step 9](../docs/github-setup.md#9-verify-a-routed-job)):

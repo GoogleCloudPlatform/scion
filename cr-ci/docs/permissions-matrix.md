@@ -242,7 +242,8 @@ Resolved during P1 review:
   set it to the group configured in G7. The P6 PoC will exercise it against
   the live API.
 
-Still UNVERIFIED (to settle in P2, P4 or P6):
+Still UNVERIFIED (to settle in P2, P4 or P6). Each item's runtime check is in
+[poc-checklist.md](poc-checklist.md):
 
 - **U2. JIT config lifetime before first use.** GitHub documents that an unused
   JIT runner is removed automatically, and that ephemeral runners are removed

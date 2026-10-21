@@ -360,8 +360,9 @@ gh workflow run cr-runner-poc.yml --repo ptone/scion -f runner-label=scion-cr-8c
 gh run watch --repo ptone/scion "$(gh run list --repo ptone/scion --workflow cr-runner-poc.yml --limit 1 --json databaseId -q '.[0].databaseId')"
 ```
 
-What to check is listed in [step 9](#9-verify-a-routed-job), and the PoC
-criteria in [workflows/README.md](../workflows/README.md#poc-success-criteria).
+What to check is listed in [step 9](#9-verify-a-routed-job). The complete P6
+list, with every open runtime checkpoint and the PoC criteria, is
+[poc-checklist.md](poc-checklist.md).
 
 ## 8. Route jobs: the Actions variable `SCION_LARGE_RUNNER` (G10)
 
