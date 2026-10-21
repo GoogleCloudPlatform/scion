@@ -345,3 +345,45 @@ func TestAgentBadges_AgentJWTListCarriesBadges(t *testing.T) {
 		assert.Equal(t, len(want), seen, "%s: every agent listed", query)
 	}
 }
+
+// TestAgentBadges_ReincarnateRederivesHarnessAndSize pins that a
+// reincarnation's fresh config re-stamps the harness and re-captures the
+// size from the replayed create inputs and the current layers, rather than
+// keeping the outgoing generation's values.
+func TestAgentBadges_ReincarnateRederivesHarnessAndSize(t *testing.T) {
+	cases := []struct {
+		name           string
+		inline         *api.ScionConfig
+		projectDefault string
+		wantSize       string
+	}{
+		{name: "create-time alias replayed", inline: &api.ScionConfig{Harness: "claude", Model: "l"}, wantSize: "large"},
+		{name: "size follows the current project layer", inline: &api.ScionConfig{Harness: "claude"}, projectDefault: "m", wantSize: "medium"},
+		{name: "explicit ID in the current project layer clears it", inline: &api.ScionConfig{Harness: "claude"}, projectDefault: "claude-opus-4-8", wantSize: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			disp := newReincarnateTestDispatcher()
+			srv, s, project, broker := setupReincarnateTestServer(t, disp)
+			ctx := context.Background()
+			if tc.projectDefault != "" {
+				project.Annotations = map[string]string{projectSettingDefaultModel: tc.projectDefault}
+				require.NoError(t, s.UpdateProject(ctx, project))
+			}
+			agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+				// The outgoing generation's values, which must not carry over.
+				a.AppliedConfig.Harness = "stale-harness"
+				a.AppliedConfig.ModelSize = "extra-large"
+				a.AppliedConfig.Model = "stale-model"
+				live, explicit := *tc.inline, *tc.inline
+				a.AppliedConfig.InlineConfig = &live
+				a.AppliedConfig.CreateInputs.InlineConfig = &explicit
+			})
+
+			fresh, _, err := srv.buildFreshAppliedConfig(ctx, agent, project, "")
+			require.NoError(t, err)
+			assert.Equal(t, "claude", fresh.Harness, "the harness is re-stamped")
+			assert.Equal(t, tc.wantSize, fresh.ModelSize, "the size is re-captured")
+		})
+	}
+}

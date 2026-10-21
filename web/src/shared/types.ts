@@ -948,8 +948,12 @@ export interface Agent {
    * events.
    */
   harnessVendor?: string;
-  /** The model size alias the agent was created with; absent when it has none. */
-  modelSize?: AgentModelSize;
+  /**
+   * The model size alias the agent was created with; absent when it has
+   * none. An SSE status event sends '' to clear it, so a merged row can
+   * hold ''. Test for truthiness, not presence.
+   */
+  modelSize?: AgentModelSize | '';
   runtimeBrokerId?: string;
   runtimeBrokerName?: string;
   /**

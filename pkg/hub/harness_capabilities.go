@@ -61,6 +61,35 @@ func newHarnessTypeMemo() *harnessTypeMemo {
 	return &harnessTypeMemo{project: map[harnessRefKey]string{}, global: map[string]string{}}
 }
 
+// projectTable and globalTable return the memo's tables, nil for a nil memo.
+func (m *harnessTypeMemo) projectTable() map[harnessRefKey]string {
+	if m == nil {
+		return nil
+	}
+	return m.project
+}
+
+func (m *harnessTypeMemo) globalTable() map[string]string {
+	if m == nil {
+		return nil
+	}
+	return m.global
+}
+
+// memoized returns table[key], calling load and storing its result on a
+// miss. A nil table (no memo) always calls load and stores nothing.
+func memoized[K comparable](table map[K]string, key K, load func() string) string {
+	if table == nil {
+		return load()
+	}
+	if h, ok := table[key]; ok {
+		return h
+	}
+	h := load()
+	table[key] = h
+	return h
+}
+
 // harnessTypeOfConfig returns the harness type a stored harness-config
 // names, or "" for none (also for a lookup error or a missing record).
 func harnessTypeOfConfig(hc *store.HarnessConfig, err error) string {
@@ -88,32 +117,17 @@ func (s *Server) resolveHarnessTypeFromConfigRefMemo(ctx context.Context, projec
 	}
 
 	if projectID != "" {
-		key := harnessRefKey{projectID, configRef}
-		h, ok := "", false
-		if memo != nil {
-			h, ok = memo.project[key]
-		}
-		if !ok {
-			h = harnessTypeOfConfig(s.store.GetHarnessConfigBySlug(ctx, configRef, store.HarnessConfigScopeProject, projectID))
-			if memo != nil {
-				memo.project[key] = h
-			}
-		}
+		h := memoized(memo.projectTable(), harnessRefKey{projectID, configRef}, func() string {
+			return harnessTypeOfConfig(s.store.GetHarnessConfigBySlug(ctx, configRef, store.HarnessConfigScopeProject, projectID))
+		})
 		if h != "" {
 			return h
 		}
 	}
 
-	h, ok := "", false
-	if memo != nil {
-		h, ok = memo.global[configRef]
-	}
-	if !ok {
-		h = harnessTypeOfConfig(s.store.GetHarnessConfigBySlug(ctx, configRef, store.HarnessConfigScopeGlobal, ""))
-		if memo != nil {
-			memo.global[configRef] = h
-		}
-	}
+	h := memoized(memo.globalTable(), configRef, func() string {
+		return harnessTypeOfConfig(s.store.GetHarnessConfigBySlug(ctx, configRef, store.HarnessConfigScopeGlobal, ""))
+	})
 	if h != "" {
 		return h
 	}
