@@ -1009,6 +1009,30 @@ describe('scion-page-admin-server-config', () => {
       expect(field.querySelector('.broker-host-effective')).toBeNull();
     });
 
+    // ptone/scion#4418: the env-pin keys are the koanf keys
+    // server.broker.broker_name and broker_nickname, so an environment
+    // override locks those fields.
+    for (const [key, label, value] of [
+      ['server.broker.broker_name', 'Broker Name', 'env-broker'],
+      ['server.broker.broker_nickname', 'Broker Nickname', 'env-nick'],
+    ] as const) {
+      it(`an env override of ${key} locks the ${label} field`, async () => {
+        const config = withBrokerHost(undefined, { ...workstation, env_overrides: [key] });
+        config.server.broker[key.split('.').pop()!] = value;
+        element = await createComponent(createFetchHandler(config));
+        const fieldLabel = queryAll(element, 'sl-tab-panel[name="broker"] label').find(
+          (l) => l.textContent?.trim() === label
+        );
+        expect(fieldLabel).toBeDefined();
+        const field = fieldLabel!.closest('.form-field')!;
+        expect(field.querySelector('sl-input')).toBeNull();
+        expect(field.querySelector('.read-only-badge')?.textContent).toContain(
+          'environment variable'
+        );
+        expect(field.querySelector('.read-only-value')?.textContent?.trim()).toBe(value);
+      });
+    }
+
     it('an empty runtime broker host shows 0.0.0.0 on a file-backed hub', async () => {
       element = await createComponent(createFetchHandler(withBrokerHost(undefined, {})));
       const field = brokerHostField(element);
