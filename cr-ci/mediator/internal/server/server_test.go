@@ -466,7 +466,7 @@ func TestQueuedLaunchAndClaim(t *testing.T) {
 		t.Fatalf("queued: %d %q", code, out)
 	}
 	req := h.gh.JITRequests[0]
-	if req["name"] != "cr-job-100" || req["runner_group_id"] != float64(1) || req["work_folder"] != "/scratch/_work" {
+	if req["name"] != "cr-job-100" || req["runner_group_id"] != float64(1) || req["work_folder"] != "/home/runner/work" {
 		t.Errorf("jit request = %v", req)
 	}
 	if ls, _ := req["labels"].([]any); len(ls) != 1 || ls[0] != testLabel {

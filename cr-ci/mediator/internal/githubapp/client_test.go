@@ -142,7 +142,7 @@ func TestJITAndDeleteRunner(t *testing.T) {
 		t.Run(string(scope), func(t *testing.T) {
 			c, gh, _ := newTestClient(t, scope)
 			ctx := context.Background()
-			id, jit, err := c.GenerateJITConfig(ctx, repo, JITRequest{Name: "cr-job-1", RunnerGroupID: 1, Labels: []string{"lbl"}, WorkFolder: "/scratch/_work"})
+			id, jit, err := c.GenerateJITConfig(ctx, repo, JITRequest{Name: "cr-job-1", RunnerGroupID: 1, Labels: []string{"lbl"}, WorkFolder: "/home/runner/work"})
 			if err != nil || id == 0 || jit == "" {
 				t.Fatalf("GenerateJITConfig = %d %q %v", id, jit, err)
 			}

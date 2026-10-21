@@ -33,8 +33,15 @@ import (
 const (
 	// RunnerPrefix prefixes every runner name the mediator registers.
 	RunnerPrefix = "cr-job-"
-	// WorkFolder is the runner work folder, on the /scratch ephemeral disk.
-	WorkFolder = "/scratch/_work"
+	// WorkFolder is the runner work folder sent in generate-jitconfig. It is
+	// the same path as on GitHub-hosted ubuntu-latest, because actions/cache
+	// stores paths relative to GITHUB_WORKSPACE (under the work folder): only
+	// an identical work folder lets cache entries restore to the same place in
+	// both directions. The runner image makes it a symlink to the /scratch
+	// ephemeral disk (cr-ci cache parity contract, item 2). The runner keeps
+	// this path as configured (Path.GetFullPath does not resolve symlinks), so
+	// GITHUB_WORKSPACE is /home/runner/work/<repo>/<repo>.
+	WorkFolder = "/home/runner/work"
 
 	maxWebhookBody          = 5 << 20
 	secretRefetchBackoff    = time.Minute      // between refetches while a secret is cached

@@ -96,7 +96,15 @@ a runner's execution by its `RUNNER_NAME` env, never by job ID.
      mint an orphan runner.
    - **Launch:** `generate-jitconfig` with name `cr-job-<job_id>`,
      `runner_group_id` `GITHUB_RUNNER_GROUP_ID`, labels `[RUNNER_LABEL]` and
-     `work_folder` `/scratch/_work`. The JIT config is stored under a fresh
+     `work_folder` `/home/runner/work`, the same path as on GitHub-hosted
+     `ubuntu-latest`. `actions/cache` stores paths relative to
+     `GITHUB_WORKSPACE`, so only an identical work folder (and `HOME`) lets
+     cache entries move between the two runner types in both directions. The
+     runner image links that folder to the `/scratch` disk (cache parity
+     contract). The runner keeps the configured path as is: its work directory
+     is `Path.GetFullPath(...)`, which does not resolve symlinks (checked in
+     the actions/runner source at the pinned version), so `GITHUB_WORKSPACE`
+     is `/home/runner/work/<repo>/<repo>`. The JIT config is stored under a fresh
      claim token, then `jobs.run` starts one execution with the env
      overrides below. If `jobs.run` fails, the mediator deletes the
      registration, drops the claim, logs `launch_failed` and answers 503;
