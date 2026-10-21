@@ -776,7 +776,9 @@ func startLaunchFailureMessage(a *store.Agent) string {
 // is still stopped (the reap's settle won and nothing started since) and
 // the message is not already in that shape; the write is conditional on
 // the phase a was read in, so a start that moved the row on since keeps its
-// message. The rewritten row is published.
+// message. On success a.Message is set to the rewritten text, so the
+// caller's own publish of a (the handler publishes the changed row) carries
+// it.
 func (s *Server) reapplyStartLaunchFailureMessage(ctx context.Context, a *store.Agent) {
 	if !isProvisionedStartLaunchEnd(a) || a.LaunchEndReason == store.LaunchEndReasonFailed ||
 		a.RunIntent != store.RunIntentStopped || strings.HasSuffix(a.Message, provisionedRestingNote) {
@@ -788,17 +790,15 @@ func (s *Server) reapplyStartLaunchFailureMessage(ctx context.Context, a *store.
 	}
 	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
-	err := s.store.UpdateAgentStatus(wctx, a.ID, store.AgentStatusUpdate{
-		Message: "Start failed: " + failure + ". " + provisionedRestingNote,
-		IfPhase: a.Phase,
-	})
+	msg := "Start failed: " + failure + ". " + provisionedRestingNote
+	err := s.store.UpdateAgentStatus(wctx, a.ID, store.AgentStatusUpdate{Message: msg, IfPhase: a.Phase})
 	switch {
 	case errors.Is(err, store.ErrPhaseMismatch):
 		// A newer write moved the row on: leave its message.
 	case err != nil:
 		slog.Warn("Failed provisioned start: message write after a refined report failed", "agent_id", a.ID, "error", err)
 	default:
-		s.publishAgentStatusByID(ctx, a.ID)
+		a.Message = msg
 	}
 }
 
