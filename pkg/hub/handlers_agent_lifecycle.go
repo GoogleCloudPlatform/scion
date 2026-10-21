@@ -1049,8 +1049,10 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 					// The claim was lost while the start leg ran (a stop
 					// superseded it): the container may be up, so no
 					// stopped state is recorded and the slot is not
-					// released; startAgentCore already undid only what its
-					// hold created.
+					// released. startAgentCore kept the hold's reservation,
+					// and restored stopped, when the dispatch outcome is
+					// unknown; otherwise it undid only what its hold
+					// created. Whoever took the claim settles the slot.
 				} else if errors.Is(dispatchErr, store.ErrDeleteInProgress) {
 					// A delete claimed the row between the legs
 					// (ptone/scion#2550, round 5 N3). The delete engine
@@ -1060,6 +1062,19 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 					// is conditional on the row still reading starting,
 					// so it leaves the engine's phase alone.
 					sd.rollback(ctx)
+				} else if startOutcomeOf(dispatchErr) == startUnconfirmed {
+					// The start leg may have reached the runtime
+					// (ptone/scion#5143, erratum E-33c-1): nothing is
+					// recorded stopped and nothing is released. The restart
+					// claim stays unconfirmed, startAgentCore kept the hold's
+					// reservation and rests the agent at stopped, and the
+					// start-claim reaper settles both once a fresh inventory
+					// shows the outcome (then the idle release frees the
+					// slot of an agent that is not running). A stop_queued
+					// status is replaced: the stop leg stopped the old
+					// container, so the queued stop is done.
+					s.replaceQueuedStop(ctx, agent, "stopped")
+					s.publishAgentRow(ctx, agent.ID)
 				} else {
 					// The start leg only runs after the stop leg succeeded
 					// or reported no running instance (any other stop error

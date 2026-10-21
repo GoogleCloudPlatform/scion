@@ -524,6 +524,13 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 			err = dispatch(dctx)
 		}
 		if err != nil {
+			if opts.Dispatch != nil && startOutcomeOf(err) == startUnconfirmed {
+				// The caller's hold (a restart's) outlives a start whose
+				// outcome is unknown (ptone/scion#5143): its reservation is
+				// kept, and the agent rests at stopped, until the start
+				// claim is settled.
+				sd.keepForUnknownOutcome()
+			}
 			sd.rollback(ctx)
 			return false, err
 		}
@@ -603,6 +610,14 @@ const provisionedRestingNote = "The agent is still provisioned and can be starte
 // would repaint a deleting row running (ptone/scion#3696). The container
 // status becomes running unless the broker reported one.
 func (s *Server) clearSupersededQueuedStop(ctx context.Context, agent *store.Agent) {
+	s.replaceQueuedStop(ctx, agent, "running")
+}
+
+// replaceQueuedStop is clearSupersededQueuedStop with the container status
+// that replaces stop_queued: running after a successful start, stopped after
+// a restart's stop leg stopped the old container and its start leg's
+// outcome is unknown (ptone/scion#5143).
+func (s *Server) replaceQueuedStop(ctx context.Context, agent *store.Agent, containerStatus string) {
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	cur, err := s.store.GetAgent(cctx, agent.ID)
@@ -612,7 +627,7 @@ func (s *Server) clearSupersededQueuedStop(ctx context.Context, agent *store.Age
 	}
 	upd := store.AgentStatusUpdate{ClearMessageIf: offlineStopMessage}
 	if cur.ContainerStatus == containerStatusStopQueued {
-		upd.ContainerStatus = "running"
+		upd.ContainerStatus = containerStatus
 	}
 	if err := s.store.UpdateAgentStatus(cctx, agent.ID, upd); err != nil {
 		slog.Warn("Start: clearing the superseded queued stop failed", "agent_id", agent.ID, "error", err)
