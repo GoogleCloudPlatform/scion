@@ -99,10 +99,14 @@ func TestRefusedStartAfterQueuedStop_RestoresStoppedIntent(t *testing.T) {
 		fill    bool
 		err     error
 		message string
+		// exact: the agent's message (and the published one) is exactly
+		// message: a flat Runtime Broker refusal's own message, which
+		// runtimeTargetRefusalMessage must decode for each refusal shape.
+		exact bool
 	}{
 		{name: "request not sent", withSlot: true, err: fmt.Errorf("x: %w", errStartRequestNotSent), message: "Start failed:"},
-		{name: "flat runtime target refusal", withSlot: true, err: flatRefusal, message: flatRefusal.Message},
-		{name: "flat runtime target refusal from the broker", withSlot: true, err: flatEnvelope, message: "the Runtime Broker answered that it serves another runtime target"},
+		{name: "flat runtime target refusal", withSlot: true, err: flatRefusal, message: flatRefusal.Message, exact: true},
+		{name: "flat runtime target refusal from the broker", withSlot: true, err: flatEnvelope, message: "the Runtime Broker answered that it serves another runtime target", exact: true},
 		{name: "broker capacity", fill: true, message: "Start failed:"},
 		{name: "broker draining", withSlot: true, err: drainingErr("5"), message: "Start failed:"},
 		{name: "runtime unavailable", withSlot: true, err: runtimeUnavailableErr(), message: "Start failed:"},
@@ -116,10 +120,10 @@ func TestRefusedStartAfterQueuedStop_RestoresStoppedIntent(t *testing.T) {
 				filler := q.addAgent("rs-filler", "running", "working")
 				seedSlot(t, q.s, q.brokerID, filler.ID)
 			}
-			dispatchedPastRefusal := false
+			var dispatchedPastRefusal atomic.Bool
 			q.disp.start = func(ctx context.Context, a *store.Agent) error {
 				if tc.err == nil {
-					dispatchedPastRefusal = true
+					dispatchedPastRefusal.Store(true)
 					return errors.New("dispatched past the capacity refusal")
 				}
 				return tc.err
@@ -129,7 +133,7 @@ func TestRefusedStartAfterQueuedStop_RestoresStoppedIntent(t *testing.T) {
 
 			code := q.start(t)
 			require.GreaterOrEqual(t, code, 400, "the start is refused")
-			require.False(t, dispatchedPastRefusal, "the capacity refusal comes before any dispatch")
+			require.False(t, dispatchedPastRefusal.Load(), "the capacity refusal comes before any dispatch")
 
 			got := getAgent(t, q.s, q.agent.ID)
 			assert.Equal(t, store.RunIntentStopped, got.RunIntent, "a definitely refused start after a queued stop restores the stopped intent")
@@ -138,6 +142,9 @@ func TestRefusedStartAfterQueuedStop_RestoresStoppedIntent(t *testing.T) {
 			assert.True(t, store.QueuedStopStillIntended(got), "the queued-stop paths apply again")
 			assert.Empty(t, got.StartClaimID, "the claim is released")
 			assert.Contains(t, got.Message, tc.message, "the refusal is shown")
+			if tc.exact {
+				assert.Equal(t, tc.message, got.Message, "the flat refusal's own message is shown")
+			}
 			heldAfter := activeReservation(t, q.s, def, q.agent.ID)
 			if heldBefore == nil {
 				assert.Nil(t, heldAfter, "no reservation is created")
@@ -151,6 +158,9 @@ func TestRefusedStartAfterQueuedStop_RestoresStoppedIntent(t *testing.T) {
 			assert.Equal(t, store.RunIntentStopped, pub.RunIntent)
 			assert.Contains(t, pub.Message, tc.message, "the published row carries the message the agent keeps")
 			assert.Equal(t, got.Message, pub.Message, "the published row carries the message the agent keeps")
+			if tc.exact {
+				assert.Equal(t, tc.message, pub.Message, "the flat refusal's own message is published")
+			}
 		})
 	}
 }

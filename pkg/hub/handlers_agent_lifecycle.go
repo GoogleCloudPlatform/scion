@@ -1049,11 +1049,11 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 					// The claim was lost while the start leg ran (a stop
 					// superseded it): the container may be up, so no
 					// stopped state is recorded and the slot is not
-					// released. startAgentCore kept the hold's reservation,
-					// and rested a phase it marked starting at stopped, when
-					// the dispatch outcome is unknown; otherwise it undid
-					// only what its hold created. Whoever took the claim
-					// settles the slot.
+					// released. When the dispatch outcome is unknown,
+					// startAgentCore kept the hold's reservation, and a phase
+					// the hold marked starting rests at stopped; otherwise it
+					// undid only what its hold created. Whoever took the
+					// claim settles the slot.
 				} else if errors.Is(dispatchErr, store.ErrDeleteInProgress) {
 					// A delete claimed the row between the legs
 					// (ptone/scion#2550, round 5 N3). The delete engine
