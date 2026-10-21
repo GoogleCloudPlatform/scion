@@ -95,12 +95,14 @@ What the policy does and does not cover (pi v1.3.0,
 | `input` (human/RPC) | `prompt-submit` |
 | `tool_execution_start` / `_end` | `tool-start` / `tool-end` |
 | `agent_end` | `agent-end` (carries a provider error) |
-| `agent_settled`, not aborted, no error, and the agent did not set `ask_user`/`blocked`/`limits_exceeded` this turn | `sciontool status task_completed -- <summary>` |
+| `agent_settled`, not aborted, no error, and the agent did not run `sciontool status` `ask_user`/`blocked`/`limits_exceeded`/`task_completed` itself this turn | `sciontool status task_completed -- <summary>` |
 
 `ask_user` and `blocked` are not pi events. Instruct the agent to run
 `sciontool status ask_user "<question>"` or `sciontool status blocked "<reason>"`
 through its bash tool; the bridge sees that command on `tool_execution_start`
 and skips the automatic `task_completed` until the next human input.
+The same applies when the agent runs `sciontool status task_completed "<summary>"`
+itself: the bridge skips its own call, so the agent's summary is kept.
 
 ## Bundle Layout
 

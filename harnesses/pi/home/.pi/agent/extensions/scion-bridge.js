@@ -47,8 +47,10 @@ export function makeRunner(exec = execFileSync) {
 const defaultRun = makeRunner();
 
 // Statuses the agent sets itself through its bash tool; they must not be
-// overwritten by the automatic task_completed on settle.
-const STICKY_STATUS_RE = /\bsciontool\s+status\s+(?:ask_user|blocked|limits_exceeded)\b/;
+// overwritten by the automatic task_completed on settle. An agent-run
+// task_completed counts too: the bridge's own call would replace the agent's
+// summary with the tail of the chat text.
+const STICKY_STATUS_RE = /\bsciontool\s+status\s+(?:ask_user|blocked|limits_exceeded|task_completed)\b/;
 
 const TRUST_DECISIONS = { never: 'no', always: 'yes', ask: 'undecided' };
 
@@ -100,7 +102,8 @@ export function createHandlers({ run = defaultRun, env = process.env } = {}) {
   // agent_settled (which fires after agent_end once pi will not continue).
   let lastRunFailed = false;
   let lastMessages;
-  // Set when the agent ran `sciontool status ask_user|blocked|...` this turn.
+  // Set when the agent ran `sciontool status ask_user|blocked|limits_exceeded|task_completed`
+  // this turn.
   let agentSetStatus = false;
 
   const safe = (what, fn) => {

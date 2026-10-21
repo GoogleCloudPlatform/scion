@@ -257,10 +257,22 @@ test('the sticky guard resets on the next human input', () => {
   assert.deepEqual(statusCalls(calls).map((c) => c.argv[3]), ['b']);
 });
 
-test('other bash commands (even mentioning sciontool) do not trip the guard', () => {
+test('an agent-run task_completed is not overwritten on settle', () => {
+  for (const cmd of ['sciontool status task_completed "Fixed the bug"', 'make test && sciontool status task_completed "done"']) {
+    const { calls, h } = harness();
+    h.tool_execution_start(bashStart(cmd));
+    h.agent_end({ messages: [asst('chat text tail')] });
+    h.agent_settled({ aborted: false });
+    assert.equal(statusCalls(calls).length, 0, cmd);
+  }
+});
+
+test('other commands and tools (even mentioning sciontool) do not trip the guard', () => {
   const { calls, h } = harness();
-  h.tool_execution_start(bashStart('ls; sciontool status task_completed "x"'));
+  h.tool_execution_start(bashStart('grep -n "sciontool status" README.md'));
+  h.tool_execution_start(bashStart('sciontool hook --dialect=pi'));
   h.tool_execution_start({ toolName: 'write', args: { command: 'sciontool status blocked' } });
+  h.tool_execution_start({ toolName: 'write', args: { command: 'sciontool status task_completed "x"' } });
   h.agent_end({ messages: [asst('ok')] });
   h.agent_settled({ aborted: false });
   assert.equal(statusCalls(calls).length, 1);
