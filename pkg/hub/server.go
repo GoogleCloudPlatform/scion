@@ -1653,6 +1653,10 @@ type RemoteAgentInfo struct {
 
 // Server is the Hub API HTTP server.
 type Server struct {
+	// uploadFormMemoryForTest, when positive, replaces maxUploadTotalSize as
+	// the in-memory multipart limit (uploadFormMaxMemory). Set by tests only.
+	uploadFormMemoryForTest int64
+
 	// generalTopicWarned records project IDs whose #general ensure already
 	// logged a Warn, so a space that keeps failing (it is retried on every
 	// open) logs later failures at Debug. Cleared on success.

@@ -492,7 +492,9 @@ func (s *Server) handleProjectWorkspaceUpload(w http.ResponseWriter, r *http.Req
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadTotalSize)
 
 	// Parse multipart form
-	if err := r.ParseMultipartForm(maxUploadTotalSize); err != nil {
+	cleanup, err := parseMultipartUpload(r, s.uploadFormMaxMemory())
+	defer cleanup()
+	if err != nil {
 		if err.Error() == "http: request body too large" {
 			BadRequest(w, "Request body exceeds 100MB limit")
 			return
