@@ -22,7 +22,7 @@
  * groups a caller actually supplies via `groups` are rendered, so a host
  * that only ever populates `agents` gets a single-group palette for free —
  * one global keyboard model across every rendered group, and typed
- * selection/dismiss/retry events. It makes no API calls and does not
+ * selection/dismiss/retry/query events. It makes no API calls and does not
  * navigate itself — the host supplies `groups` (and, for its own copy,
  * `label`/`placeholder`) and reacts to its events.
  *
@@ -42,6 +42,7 @@ import {
   type PaletteCandidate,
   type PaletteDismissReason,
   type PaletteGroup,
+  type PaletteQueryDetail,
   type PaletteTarget,
 } from '../../../client/palette-types.js';
 import {
@@ -522,6 +523,21 @@ export class ScionQuickPalette extends LitElement {
     if (changedKeys.has('queryText') || changed.has('groups') || changed.has('open')) {
       const ranked = this.rankedPaletteCandidates;
       this.reconcileActiveId(ranked, changedKeys.has('queryText'));
+    }
+  }
+
+  override updated(changed: PropertyValues<ScionQuickPalette>): void {
+    // See willUpdate for why `queryText` is read through the Map shape. The
+    // first render's `undefined -> ''` is not an edit, so it is not reported.
+    const changedKeys = changed as unknown as Map<PropertyKey, unknown>;
+    if (changedKeys.has('queryText') && changedKeys.get('queryText') !== undefined) {
+      this.dispatchEvent(
+        new CustomEvent<PaletteQueryDetail>('palette-query', {
+          detail: { query: this.queryText },
+          bubbles: true,
+          composed: true,
+        })
+      );
     }
   }
 

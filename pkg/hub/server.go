@@ -1771,6 +1771,10 @@ type Server struct {
 	// conduitRefreshMetrics counts agent AuthRefresh outcomes
 	// (conduit_agent_refresh.go); nil until SetConduitAgentRefreshMetrics.
 	conduitRefreshMetrics atomic.Pointer[OTelConduitAgentRefreshMetrics]
+	// conduitIngressDrainMetrics counts failed drain calls of a
+	// terminating hub ingress (conduit_ingress_drain.go); nil until
+	// SetConduitIngressDrainMetrics.
+	conduitIngressDrainMetrics atomic.Pointer[OTelConduitIngressDrainMetrics]
 	// conduitBrokerRPCMetrics counts routed broker requests that fell back
 	// because of a hub-side fault (conduit_broker_routed_metrics.go); nil
 	// until SetConduitBrokerRPCMetrics.
@@ -7107,6 +7111,10 @@ func (s *Server) registerRoutes() {
 
 	// Principal resolution endpoints (Phase 4)
 	s.mux.HandleFunc("/api/v1/users/me/groups", s.guarded("/api/v1/users/me/groups", s.handleMyGroups))
+	// A project visitor's own visitor grants (ptone/scion#4603).
+	s.mux.HandleFunc("/api/v1/users/me/visitor-grants", s.guarded("/api/v1/users/me/visitor-grants", s.handleUserMeVisitorGrants))
+	// A project visitor's own DMs with agents (ptone/scion#4603).
+	s.mux.HandleFunc("/api/v1/users/me/visitor-dms", s.guarded("/api/v1/users/me/visitor-dms", s.handleUserMeVisitorDMs))
 	s.mux.HandleFunc("/api/v1/principals/", s.guarded("/api/v1/principals/", s.handlePrincipalRoutes))
 
 	// User-scoped injected-skills endpoints (/users/me/...)

@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
@@ -122,7 +123,7 @@ func TestHeartbeatHealth_NFSMounts(t *testing.T) {
 			mc := newSyncMountChecker()
 			mc.mountErr = tc.mountErr
 			srv := New(ServerConfig{Host: "127.0.0.1", NFSConfig: nfsCfg(tc.autoMount), NFSMountChecker: mc},
-				nil, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+				nil, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 			if !tc.pending {
 				_ = srv.nfsMountReconciler.Reconcile(context.Background())
 				close(srv.nfsStartupReconcileDone)

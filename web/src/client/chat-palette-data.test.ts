@@ -15,10 +15,10 @@
  */
 
 /**
- * Tests for the chat palette's real Agents/DM data adapter: full pagination
- * past 100 entries including a filtered empty intermediate page with a
- * cursor, repeated-cursor-as-error detection, DM-recency join, and
- * `_messageability`/capability-fallback viability.
+ * Tests for the chat palette's real Agents/People/Threads data adapter:
+ * DM-recency join, `_messageability`/capability-fallback viability, the
+ * People group's bounded recent-users page and debounced-by-caller server
+ * search, and stale-load guarding.
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
@@ -37,7 +37,6 @@ import {
   fetchPaletteDms,
   buildAgentCandidates,
   isPaletteAgentViable,
-  fetchAllPaletteUsers,
   buildUserCandidates,
   isPaletteUserViable,
   fetchPaletteSpaces,
@@ -47,6 +46,7 @@ import {
   PaletteLoadError,
   ChatPaletteDataController,
   AGENT_DMS_CACHE_MS,
+  PEOPLE_SEARCH_MIN_CHARS,
   type PaletteAgentSource,
   type RawPaletteDm,
   type RawPaletteUser,
@@ -58,6 +58,12 @@ import type { RecentFile } from './chat-recent-files.js';
 import type { AgentListSnapshot } from './agent-store.js';
 import type { Agent } from '../shared/types.js';
 import { agent as harnessAgent, createHarness } from './__fixtures__/agent-store-harness.js';
+import {
+  RECENT_USERS_LIMIT,
+  USER_SEARCH_LIMIT,
+  USER_SEARCH_TIMEOUT_MS,
+  resetUserDirectory,
+} from './user-directory.js';
 
 const apiFetchMock = vi.mocked(apiFetch);
 
@@ -67,6 +73,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 afterEach(() => {
   apiFetchMock.mockReset();
+  resetUserDirectory();
   vi.useRealTimers();
 });
 
@@ -940,128 +947,6 @@ describe('ChatPaletteDataController over a real agent store', () => {
 // People group
 // ===========================================================================
 
-describe('fetchAllPaletteUsers: full pagination', () => {
-  it('traverses more than 100 entries across pages', async () => {
-    const page1 = Array.from({ length: 100 }, (_, i) => ({ id: `u${i}` }));
-    const page2 = Array.from({ length: 30 }, (_, i) => ({ id: `v${i}` }));
-    apiFetchMock
-      .mockResolvedValueOnce(jsonResponse({ users: page1, nextCursor: 'cursor-1' }))
-      .mockResolvedValueOnce(jsonResponse({ users: page2 }));
-
-    const all = await fetchAllPaletteUsers();
-
-    expect(all).toHaveLength(130);
-    expect(apiFetchMock).toHaveBeenCalledTimes(2);
-    expect(apiFetchMock.mock.calls[1][0]).toContain('cursor=cursor-1');
-  });
-
-  it('continues past a filtered empty intermediate page that still carries a cursor', async () => {
-    apiFetchMock
-      .mockResolvedValueOnce(jsonResponse({ users: [{ id: 'u0' }], nextCursor: 'cursor-1' }))
-      .mockResolvedValueOnce(jsonResponse({ users: [], nextCursor: 'cursor-2' }))
-      .mockResolvedValueOnce(jsonResponse({ users: [{ id: 'u1' }] }));
-
-    const all = await fetchAllPaletteUsers();
-
-    expect(all.map((u) => u.id)).toEqual(['u0', 'u1']);
-    expect(apiFetchMock).toHaveBeenCalledTimes(3);
-  });
-
-  it('stops when nextCursor is absent even if totalCount implied more', async () => {
-    apiFetchMock.mockResolvedValueOnce(jsonResponse({ users: [{ id: 'u0' }] }));
-    const all = await fetchAllPaletteUsers();
-    expect(all).toHaveLength(1);
-    expect(apiFetchMock).toHaveBeenCalledTimes(1);
-  });
-
-  it('treats a repeated cursor as a load error, not an infinite loop', async () => {
-    apiFetchMock
-      .mockResolvedValueOnce(jsonResponse({ users: [{ id: 'u0' }], nextCursor: 'loop' }))
-      .mockResolvedValueOnce(jsonResponse({ users: [{ id: 'u1' }], nextCursor: 'loop' }));
-
-    await expect(fetchAllPaletteUsers()).rejects.toThrow(PaletteLoadError);
-    expect(apiFetchMock).toHaveBeenCalledTimes(2);
-  });
-
-  it('follows nextCursor through the full 500-page safety bound and then throws, rather than looping forever', async () => {
-    // A server that keeps returning a new (never-repeated) cursor forever —
-    // buggy or hostile — must not hang the palette on an unbounded loop.
-    for (let i = 0; i < 501; i++) {
-      apiFetchMock.mockResolvedValueOnce(
-        jsonResponse({ users: [{ id: `u${i}` }], nextCursor: `cursor-${i}` })
-      );
-    }
-    await expect(fetchAllPaletteUsers()).rejects.toThrow(PaletteLoadError);
-    expect(apiFetchMock).toHaveBeenCalledTimes(500);
-  });
-
-  it('exactly 500 pages that terminate normally on the last one does not throw', async () => {
-    // A server with exactly 500 pages, with pagination legitimately ending
-    // on the last one (no further cursor), must not be treated as having
-    // hit the safety bound.
-    for (let i = 0; i < 499; i++) {
-      apiFetchMock.mockResolvedValueOnce(
-        jsonResponse({ users: [{ id: `u${i}` }], nextCursor: `cursor-${i}` })
-      );
-    }
-    apiFetchMock.mockResolvedValueOnce(jsonResponse({ users: [{ id: 'u499' }] })); // 500th page, no nextCursor
-    const all = await fetchAllPaletteUsers();
-    expect(all).toHaveLength(500);
-    expect(apiFetchMock).toHaveBeenCalledTimes(500);
-  });
-
-  it('throws PaletteLoadError on a non-ok response', async () => {
-    apiFetchMock.mockResolvedValueOnce(jsonResponse({}, 500));
-    await expect(fetchAllPaletteUsers()).rejects.toThrow(PaletteLoadError);
-  });
-
-  it('an abort landing during the body read rejects with the original AbortError, not PaletteLoadError', async () => {
-    const controller = new AbortController();
-    apiFetchMock.mockImplementationOnce(() => {
-      controller.abort();
-      return Promise.resolve({
-        ok: true,
-        status: 200,
-        json: () => Promise.reject(new DOMException('aborted', 'AbortError')),
-      } as unknown as Response);
-    });
-    await expect(fetchAllPaletteUsers(controller.signal)).rejects.toMatchObject({
-      name: 'AbortError',
-    });
-  });
-
-  it('a genuinely malformed body under a live (non-aborted) signal still becomes a PaletteLoadError', async () => {
-    const controller = new AbortController();
-    apiFetchMock.mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      json: () => Promise.reject(new SyntaxError('bad json')),
-    } as unknown as Response);
-    await expect(fetchAllPaletteUsers(controller.signal)).rejects.toBeInstanceOf(PaletteLoadError);
-  });
-
-  it('ignores a malformed (non-array) users field instead of spreading it', async () => {
-    apiFetchMock.mockResolvedValueOnce(jsonResponse({ users: 'not-an-array' }));
-    const all = await fetchAllPaletteUsers();
-    expect(all).toEqual([]);
-  });
-
-  it('throws PaletteLoadError on a literal null body instead of a raw TypeError', async () => {
-    apiFetchMock.mockResolvedValueOnce(jsonResponse(null));
-    await expect(fetchAllPaletteUsers()).rejects.toBeInstanceOf(PaletteLoadError);
-  });
-
-  it('throws PaletteLoadError on an array body instead of silently returning an empty page', async () => {
-    apiFetchMock.mockResolvedValueOnce(jsonResponse([1, 2, 3]));
-    await expect(fetchAllPaletteUsers()).rejects.toBeInstanceOf(PaletteLoadError);
-  });
-
-  it('throws PaletteLoadError on a primitive (e.g. number) body instead of silently returning an empty page', async () => {
-    apiFetchMock.mockResolvedValueOnce(jsonResponse(42));
-    await expect(fetchAllPaletteUsers()).rejects.toBeInstanceOf(PaletteLoadError);
-  });
-});
-
 describe('isPaletteUserViable: status exclusion', () => {
   it('active is viable', () => {
     expect(isPaletteUserViable({ id: 'u', status: 'active' })).toBe(true);
@@ -1213,145 +1098,185 @@ describe('buildUserCandidates: DM recency join, self/disabled exclusion', () => 
   });
 });
 
-describe('ChatPaletteDataController: People group cancellation and stale-load guarding', () => {
-  it('resolves with candidates for a normal load, excluding self', async () => {
-    apiFetchMock
-      .mockResolvedValueOnce(
-        jsonResponse({
-          users: [
-            { id: 'self-user', displayName: 'Me' },
-            { id: 'u0', displayName: 'Alice' },
-          ],
-        })
-      )
-      .mockResolvedValueOnce(jsonResponse({ dms: [] }));
+/** A `/api/v1/...` request path and query, from an `apiFetch` mock call. */
+function requestUrl(call: unknown[]): URL {
+  return new URL(String(call[0]), 'http://hub.test');
+}
+
+function isRecentUsersUrl(url: URL): boolean {
+  return url.pathname === '/api/v1/users' && url.searchParams.get('sort') === 'lastSeen';
+}
+
+function isSearchUrl(url: URL): boolean {
+  return url.pathname === '/api/v1/users' && url.searchParams.has('search');
+}
+
+/** apiFetch answers by route: the recent-users page, user search, and the DM list. */
+function routeUsers(routes: {
+  recent?: () => Promise<Response>;
+  search?: (query: string, signal?: AbortSignal) => Promise<Response>;
+  dms?: () => Promise<Response>;
+}): void {
+  apiFetchMock.mockImplementation((path, options) => {
+    const url = new URL(String(path), 'http://hub.test');
+    if (isSearchUrl(url)) {
+      return (
+        routes.search?.(url.searchParams.get('search') ?? '', options?.signal ?? undefined) ??
+        Promise.resolve(jsonResponse({ users: [] }))
+      );
+    }
+    if (isRecentUsersUrl(url)) {
+      return routes.recent?.() ?? Promise.resolve(jsonResponse({ users: [] }));
+    }
+    if (url.pathname === '/api/v1/chat/dms') {
+      return routes.dms?.() ?? Promise.resolve(jsonResponse({ dms: [] }));
+    }
+    return Promise.reject(new Error(`unexpected request ${String(path)}`));
+  });
+}
+
+function searchCalls(): URL[] {
+  return apiFetchMock.mock.calls.map(requestUrl).filter(isSearchUrl);
+}
+
+function recentCalls(): URL[] {
+  return apiFetchMock.mock.calls.map(requestUrl).filter(isRecentUsersUrl);
+}
+
+/** A response that never settles until `signal` aborts, then rejects with an AbortError. */
+function hangUntilAborted(signal?: AbortSignal): Promise<Response> {
+  return new Promise((_resolve, reject) => {
+    signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+  });
+}
+
+describe('ChatPaletteDataController: People group from the recent-users page', () => {
+  it('requests one bounded recent-users page and does not follow its cursor', async () => {
+    routeUsers({
+      recent: () =>
+        Promise.resolve(
+          jsonResponse({
+            users: [
+              { id: 'self-user', displayName: 'Me' },
+              { id: 'u0', displayName: 'Alice' },
+            ],
+            nextCursor: 'more',
+          })
+        ),
+    });
     const controller = new ChatPaletteDataController();
     const candidates = await controller.loadPeopleGroup('self-user');
+
     expect(candidates.map((c) => c.label)).toEqual(['Alice']);
+    const users = apiFetchMock.mock.calls
+      .map(requestUrl)
+      .filter((u) => u.pathname === '/api/v1/users');
+    expect(users).toHaveLength(1);
+    expect(users[0].searchParams.get('limit')).toBe(String(RECENT_USERS_LIMIT));
+    expect(users[0].searchParams.has('cursor')).toBe(false);
   });
 
-  it('a superseded load rejects with an AbortError rather than resolving stale data', async () => {
-    let resolveFirst!: (v: Response) => void;
-    apiFetchMock
-      .mockImplementationOnce(
-        () =>
-          new Promise<Response>((resolve) => {
-            resolveFirst = resolve;
-          })
-      )
-      .mockResolvedValueOnce(jsonResponse({ users: [{ id: 'u1', displayName: 'Second' }] }))
-      .mockResolvedValueOnce(jsonResponse({ dms: [] }));
-
-    const controller = new ChatPaletteDataController();
-    const firstLoad = controller.loadPeopleGroup('self-user');
-    const secondLoad = controller.loadPeopleGroup('self-user');
-    resolveFirst(jsonResponse({ users: [{ id: 'u0', displayName: 'First' }] }));
-
-    await expect(firstLoad).rejects.toMatchObject({ name: 'AbortError' });
-    await expect(secondLoad).resolves.toMatchObject([expect.objectContaining({ label: 'Second' })]);
-  });
-
-  it('cancel() aborts the in-flight request', async () => {
-    const controller = new ChatPaletteDataController();
-    apiFetchMock.mockImplementationOnce((_url, options) => {
-      return new Promise((_resolve, reject) => {
-        options?.signal?.addEventListener('abort', () => {
-          reject(new DOMException('aborted', 'AbortError'));
-        });
-      });
+  it('a later load inside the directory TTL reuses the page: only the DM list is fetched again', async () => {
+    routeUsers({
+      recent: () => Promise.resolve(jsonResponse({ users: [{ id: 'u0', displayName: 'Alice' }] })),
     });
-    const load = controller.loadPeopleGroup('self-user');
-    controller.cancel();
-    await expect(load).rejects.toMatchObject({ name: 'AbortError' });
+    const controller = new ChatPaletteDataController();
+    await controller.loadPeopleGroup('self-user');
+    await controller.loadPeopleGroup('self-user');
+
+    expect(recentCalls()).toHaveLength(1);
+    const dmCalls = apiFetchMock.mock.calls
+      .map(requestUrl)
+      .filter((u) => u.pathname === '/api/v1/chat/dms');
+    expect(dmCalls).toHaveLength(2);
   });
 
-  it('a DM-list failure fails the whole People group rather than silently degrading recency', async () => {
-    apiFetchMock
-      .mockResolvedValueOnce(jsonResponse({ users: [{ id: 'u0', displayName: 'Alice' }] }))
-      .mockResolvedValueOnce(jsonResponse({}, 500));
+  it('a failed recent-users page fails the group with a PaletteLoadError', async () => {
+    routeUsers({ recent: () => Promise.resolve(jsonResponse({}, 500)) });
     const controller = new ChatPaletteDataController();
     await expect(controller.loadPeopleGroup('self-user')).rejects.toThrow(PaletteLoadError);
   });
 
-  it('a supersede that arrives while the stale load is blocked on its own DMs fetch also rejects with an AbortError (isolates the *second*, post-DMs check)', async () => {
-    // Isolates loadPeopleGroup's *second* generation check (after
-    // fetchPaletteDms resolves) from the first (after fetchAllPaletteUsers
-    // resolves, isolated separately below) — mirrors the equivalent
-    // Agents-group test. This check is the last thing before returning (no
-    // further fetch follows it), so removing it can only make the stale load
-    // *resolve* with stale data — there's no other error for the outer
-    // catch-all's `signal.aborted` reclassification to coincidentally mask
-    // it with.
-    let resolveFirstDms!: (v: Response) => void;
-    apiFetchMock
-      .mockResolvedValueOnce(jsonResponse({ users: [{ id: 'u0', displayName: 'First' }] }))
-      .mockImplementationOnce(
-        () =>
-          new Promise<Response>((resolve) => {
-            resolveFirstDms = resolve;
-          })
-      )
-      .mockResolvedValueOnce(jsonResponse({ users: [{ id: 'u1', displayName: 'Second' }] }))
-      .mockResolvedValueOnce(jsonResponse({ dms: [] }));
+  it('a DM-list failure fails the whole People group rather than silently degrading recency', async () => {
+    routeUsers({
+      recent: () => Promise.resolve(jsonResponse({ users: [{ id: 'u0', displayName: 'Alice' }] })),
+      dms: () => Promise.resolve(jsonResponse({}, 500)),
+    });
+    const controller = new ChatPaletteDataController();
+    await expect(controller.loadPeopleGroup('self-user')).rejects.toThrow(PaletteLoadError);
+  });
 
+  it('a superseded load rejects with an AbortError rather than resolving stale data', async () => {
+    let resolveRecent!: (v: Response) => void;
+    routeUsers({
+      recent: () =>
+        new Promise<Response>((resolve) => {
+          resolveRecent = resolve;
+        }),
+    });
     const controller = new ChatPaletteDataController();
     const firstLoad = controller.loadPeopleGroup('self-user');
-    await vi.waitFor(() => expect(apiFetchMock).toHaveBeenCalledTimes(2));
+    const secondLoad = controller.loadPeopleGroup('self-user');
+    await vi.waitFor(() => expect(resolveRecent).toBeDefined());
+    resolveRecent(jsonResponse({ users: [{ id: 'u0', displayName: 'Alice' }] }));
 
+    await expect(firstLoad).rejects.toMatchObject({ name: 'AbortError' });
+    await expect(secondLoad).resolves.toMatchObject([expect.objectContaining({ label: 'Alice' })]);
+    expect(recentCalls()).toHaveLength(1);
+  });
+
+  it('a supersede during the DM fetch also rejects the stale load with an AbortError', async () => {
+    let resolveFirstDms!: (v: Response) => void;
+    let dmCalls = 0;
+    routeUsers({
+      recent: () => Promise.resolve(jsonResponse({ users: [{ id: 'u0', displayName: 'Alice' }] })),
+      dms: () => {
+        dmCalls++;
+        if (dmCalls === 1) {
+          return new Promise<Response>((resolve) => {
+            resolveFirstDms = resolve;
+          });
+        }
+        return Promise.resolve(jsonResponse({ dms: [] }));
+      },
+    });
+    const controller = new ChatPaletteDataController();
+    const firstLoad = controller.loadPeopleGroup('self-user');
+    await vi.waitFor(() => expect(dmCalls).toBe(1));
     const secondLoad = controller.loadPeopleGroup('self-user');
     resolveFirstDms(jsonResponse({ dms: [] }));
 
     await expect(firstLoad).rejects.toMatchObject({ name: 'AbortError' });
-    await expect(secondLoad).resolves.toMatchObject([expect.objectContaining({ label: 'Second' })]);
+    await expect(secondLoad).resolves.toHaveLength(1);
   });
 
-  it('the post-users generation check avoids a wasteful extra DMs fetch for an already-stale load (the immediately-following post-DMs check independently guarantees correctness either way)', async () => {
-    // The check immediately after `fetchAllPaletteUsers` resolves and the
-    // one immediately after `fetchPaletteDms` resolves test the exact same
-    // condition (`myGeneration !== this.peopleGeneration`), with nothing in
-    // between able to change it back — so removing the *first* one alone
-    // cannot produce a wrong *result*: the second one still throws the
-    // AbortError before any stale data could be returned. A plain
-    // reject/resolve assertion therefore cannot tell the two apart. What the
-    // first check actually buys is avoiding a pointless, already-doomed
-    // `fetchPaletteDms` call once a load is known stale — an efficiency
-    // property, not a correctness one, so it has to be observed as a call
-    // count instead: exactly 3 apiFetch calls when the stale load's own
-    // users fetch resolves after being superseded (not 4).
-    let resolveFirstUsers!: (v: Response) => void;
-    apiFetchMock
-      .mockImplementationOnce(
-        () =>
-          new Promise<Response>((resolve) => {
-            resolveFirstUsers = resolve;
-          })
-      )
-      .mockResolvedValueOnce(jsonResponse({ users: [{ id: 'u1', displayName: 'Second' }] }))
-      .mockResolvedValueOnce(jsonResponse({ dms: [] }))
-      // Only reached if the post-users check is missing and the stale load
-      // wastefully re-fetches DMs — must resolve validly (not run out of
-      // queued responses) so removing the check is caught by the *call
-      // count* below, not incidentally by an unrelated TypeError-to-AbortError
-      // path.
-      .mockResolvedValueOnce(jsonResponse({ dms: [] }));
-
+  it('cancel() rejects a load still waiting on the shared recent-users page, and the page still lands for the next load', async () => {
+    let resolveRecent!: (v: Response) => void;
+    routeUsers({
+      recent: () =>
+        new Promise<Response>((resolve) => {
+          resolveRecent = resolve;
+        }),
+    });
     const controller = new ChatPaletteDataController();
-    const firstLoad = controller.loadPeopleGroup('self-user');
-    const secondLoad = controller.loadPeopleGroup('self-user');
-    resolveFirstUsers(jsonResponse({ users: [{ id: 'u0', displayName: 'First' }] }));
+    const load = controller.loadPeopleGroup('self-user');
+    await vi.waitFor(() => expect(recentCalls()).toHaveLength(1));
+    controller.cancel();
+    await expect(load).rejects.toMatchObject({ name: 'AbortError' });
 
-    await expect(firstLoad).rejects.toMatchObject({ name: 'AbortError' });
-    await expect(secondLoad).resolves.toMatchObject([expect.objectContaining({ label: 'Second' })]);
-    expect(apiFetchMock).toHaveBeenCalledTimes(3);
+    resolveRecent(jsonResponse({ users: [{ id: 'u0', displayName: 'Alice' }] }));
+    await expect(controller.loadPeopleGroup('self-user')).resolves.toMatchObject([
+      expect.objectContaining({ label: 'Alice' }),
+    ]);
+    expect(recentCalls()).toHaveLength(1);
   });
 
-  it('cancelling Agents does not abort a concurrently in-flight People load, and vice versa', async () => {
-    // Each group has its own generation/AbortController — the palette loads
-    // all groups on open, and one group's cancellation must not corrupt an
-    // unrelated group's request.
-    let peopleSignal!: AbortSignal;
-    apiFetchMock.mockImplementationOnce((_url, options) => {
-      peopleSignal = options!.signal!;
+  it('cancelling Agents does not abort a concurrently in-flight People DM fetch', async () => {
+    let peopleDmSignal: AbortSignal | undefined;
+    apiFetchMock.mockImplementation((path, options) => {
+      const url = new URL(String(path), 'http://hub.test');
+      if (isRecentUsersUrl(url)) return Promise.resolve(jsonResponse({ users: [] }));
+      peopleDmSignal = options?.signal ?? undefined;
       return new Promise(() => {});
     });
     const { source, pending } = fakeAgentSource();
@@ -1360,14 +1285,209 @@ describe('ChatPaletteDataController: People group cancellation and stale-load gu
     void controller.loadPeopleGroup('self-user');
     await vi.waitFor(() => {
       expect(pending[0]).toBeDefined();
-      expect(peopleSignal).toBeDefined();
+      expect(peopleDmSignal).toBeDefined();
     });
     const agentsSignal = pending[0]!.signal!;
 
     controller.loadAgentsGroup().catch(() => {});
 
     expect(agentsSignal.aborted).toBe(true);
-    expect(peopleSignal.aborted).toBe(false);
+    expect(peopleDmSignal!.aborted).toBe(false);
+  });
+});
+
+describe('ChatPaletteDataController: People search', () => {
+  const RECENT = [
+    { id: 'self-user', displayName: 'Me' },
+    { id: 'u0', displayName: 'Alice' },
+  ];
+
+  async function loadedController(): Promise<ChatPaletteDataController> {
+    const controller = new ChatPaletteDataController();
+    await controller.loadPeopleGroup('self-user');
+    return controller;
+  }
+
+  it('sends one bounded server search and merges its hits after the recent users, without duplicates or self', async () => {
+    routeUsers({
+      recent: () => Promise.resolve(jsonResponse({ users: RECENT })),
+      search: () =>
+        Promise.resolve(
+          jsonResponse({
+            users: [
+              { id: 'u0', displayName: 'Alice' },
+              { id: 'u9', displayName: 'Alicia', email: 'alicia@example.com' },
+              { id: 'self-user', displayName: 'Me' },
+            ],
+          })
+        ),
+    });
+    const controller = await loadedController();
+    const candidates = await controller.searchPeople('  ali ');
+
+    expect(candidates?.map((c) => c.label)).toEqual(['Alice', 'Alicia']);
+    const calls = searchCalls();
+    expect(calls).toHaveLength(1);
+    expect(calls[0].searchParams.get('search')).toBe('ali');
+    expect(calls[0].searchParams.get('limit')).toBe(String(USER_SEARCH_LIMIT));
+    expect(calls[0].searchParams.get('status')).toBe('active');
+  });
+
+  it('a non-active search hit is not shown', async () => {
+    routeUsers({
+      recent: () => Promise.resolve(jsonResponse({ users: RECENT })),
+      search: () =>
+        Promise.resolve(
+          jsonResponse({
+            users: [
+              { id: 'u5', displayName: 'Sam Suspended', status: 'suspended' },
+              { id: 'u6', displayName: 'Sam Active', status: 'active' },
+            ],
+          })
+        ),
+    });
+    const controller = await loadedController();
+    expect((await controller.searchPeople('sam'))?.map((c) => c.label)).toEqual([
+      'Alice',
+      'Sam Active',
+    ]);
+  });
+
+  it('collapses each run of whitespace to one space before searching', async () => {
+    routeUsers({ recent: () => Promise.resolve(jsonResponse({ users: RECENT })) });
+    const controller = await loadedController();
+    await controller.searchPeople('  ada \t\n  lovelace  ');
+    expect(searchCalls().map((u) => u.searchParams.get('search'))).toEqual(['ada lovelace']);
+  });
+
+  it(`a query shorter than ${PEOPLE_SEARCH_MIN_CHARS} characters sends no request`, async () => {
+    routeUsers({ recent: () => Promise.resolve(jsonResponse({ users: RECENT })) });
+    const controller = await loadedController();
+    expect(await controller.searchPeople('a')).toBeNull();
+    expect(await controller.searchPeople('   ')).toBeNull();
+    expect(searchCalls()).toHaveLength(0);
+  });
+
+  it('a superseded search is aborted and its late result discarded', async () => {
+    let firstSignal: AbortSignal | undefined;
+    let resolveFirst!: (v: Response) => void;
+    routeUsers({
+      recent: () => Promise.resolve(jsonResponse({ users: RECENT })),
+      search: (query, signal) => {
+        if (query === 'bo') {
+          firstSignal = signal;
+          return new Promise<Response>((resolve) => {
+            resolveFirst = resolve;
+          });
+        }
+        return Promise.resolve(jsonResponse({ users: [{ id: 'u2', displayName: 'Bob' }] }));
+      },
+    });
+    const controller = await loadedController();
+    const first = controller.searchPeople('bo');
+    await vi.waitFor(() => expect(firstSignal).toBeDefined());
+    const second = controller.searchPeople('bob');
+
+    expect(firstSignal!.aborted).toBe(true);
+    resolveFirst(jsonResponse({ users: [{ id: 'u1', displayName: 'Boris' }] }));
+    await expect(first).rejects.toMatchObject({ name: 'AbortError' });
+    expect((await second)?.map((c) => c.label)).toEqual(['Alice', 'Bob']);
+    // A later rebuild still carries only the current query's hits.
+    expect((await controller.loadPeopleGroup('self-user')).map((c) => c.label)).toEqual([
+      'Alice',
+      'Bob',
+    ]);
+  });
+
+  it('abortPeopleSearch (a query edit) aborts the request and keeps the hits already merged', async () => {
+    let call = 0;
+    let pendingSignal: AbortSignal | undefined;
+    routeUsers({
+      recent: () => Promise.resolve(jsonResponse({ users: RECENT })),
+      search: (_query, signal) => {
+        call++;
+        if (call === 1) {
+          return Promise.resolve(jsonResponse({ users: [{ id: 'u2', displayName: 'Bob' }] }));
+        }
+        pendingSignal = signal;
+        return hangUntilAborted(signal);
+      },
+    });
+    const controller = await loadedController();
+    await controller.searchPeople('bo');
+    const pending = controller.searchPeople('bob');
+    await vi.waitFor(() => expect(pendingSignal).toBeDefined());
+    controller.abortPeopleSearch();
+
+    expect(pendingSignal!.aborted).toBe(true);
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    expect((await controller.loadPeopleGroup('self-user')).map((c) => c.label)).toEqual([
+      'Alice',
+      'Bob',
+    ]);
+  });
+
+  it('cancel() (a close) aborts an in-flight search with an AbortError', async () => {
+    let searchSignal: AbortSignal | undefined;
+    routeUsers({
+      recent: () => Promise.resolve(jsonResponse({ users: RECENT })),
+      search: (_query, signal) => {
+        searchSignal = signal;
+        return hangUntilAborted(signal);
+      },
+    });
+    const controller = await loadedController();
+    const search = controller.searchPeople('bob');
+    await vi.waitFor(() => expect(searchSignal).toBeDefined());
+    controller.cancel();
+
+    expect(searchSignal!.aborted).toBe(true);
+    await expect(search).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
+  it('a failed search keeps the recent users', async () => {
+    routeUsers({
+      recent: () => Promise.resolve(jsonResponse({ users: RECENT })),
+      search: () => Promise.resolve(jsonResponse({}, 500)),
+    });
+    const controller = await loadedController();
+    expect((await controller.searchPeople('bob'))?.map((c) => c.label)).toEqual(['Alice']);
+  });
+
+  it('a search that times out resolves to the recent users', async () => {
+    routeUsers({
+      recent: () => Promise.resolve(jsonResponse({ users: RECENT })),
+      search: (_query, signal) => hangUntilAborted(signal),
+    });
+    const controller = await loadedController();
+    vi.useFakeTimers();
+    const search = controller.searchPeople('bob');
+    await vi.advanceTimersByTimeAsync(USER_SEARCH_TIMEOUT_MS);
+    expect((await search)?.map((c) => c.label)).toEqual(['Alice']);
+  });
+
+  it('hits that arrive before the first load are kept and included by it', async () => {
+    routeUsers({
+      recent: () => Promise.resolve(jsonResponse({ users: RECENT })),
+      search: () => Promise.resolve(jsonResponse({ users: [{ id: 'u2', displayName: 'Bob' }] })),
+    });
+    const controller = new ChatPaletteDataController();
+    expect(await controller.searchPeople('bob')).toBeNull();
+    expect((await controller.loadPeopleGroup('self-user')).map((c) => c.label)).toEqual([
+      'Alice',
+      'Bob',
+    ]);
+  });
+
+  it('clearPeopleSearch drops the hits, and returns null when there were none', async () => {
+    routeUsers({
+      recent: () => Promise.resolve(jsonResponse({ users: RECENT })),
+      search: () => Promise.resolve(jsonResponse({ users: [{ id: 'u2', displayName: 'Bob' }] })),
+    });
+    const controller = await loadedController();
+    await controller.searchPeople('bob');
+    expect(controller.clearPeopleSearch()?.map((c) => c.label)).toEqual(['Alice']);
+    expect(controller.clearPeopleSearch()).toBeNull();
   });
 });
 

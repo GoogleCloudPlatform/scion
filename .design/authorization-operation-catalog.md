@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 345
+**Operations:** 346
 
 ## Table of Contents
 
@@ -55,12 +55,13 @@
 - [project.visitors.rules.add](#projectvisitorsrulesadd) — Add a visitor rule: visitor access to a project for every user of a trusted issuer whose verified email is in a domain, bound per user on the user's first matching request
 - [project.visitors.rules.update](#projectvisitorsrulesupdate) — Replace the window (not before, expires at) of a project visitor rule and of every visitor binding it created
 - [project.visitors.rules.remove](#projectvisitorsrulesremove) — Remove a project visitor rule; every visitor binding it created and its exclusions are deleted in the same transaction, and grants by email are unchanged
-- [project.lifecycle.create](#projectlifecyclecreate) — Create a new project
+- [project.lifecycle.create](#projectlifecyclecreate) — Create a new project. project.create is checked as a collection-level create at the hub scope; a token needs project:create on a hub boundary. Naming an existing project by id needs project.update on it
 - [project.lifecycle.delete](#projectlifecycledelete) — Delete a project with cascading security state cleanup and atomic audit
 - [project.read](#projectread) — Read a single project's metadata by ID or slug
 - [project.list](#projectlist) — List projects within the caller's authorized scope. A user access token needs project:list on either boundary: a project token lists only its boundary project
 - [project.update](#projectupdate) — Update project settings and metadata
-- [project.register](#projectregister) — Register a project from an external source
+- [project.register](#projectregister) — Register a project from an external source. Register checks project.create as a collection-level create at the hub scope; a token needs project:create on a hub boundary. An existing project named by id or matched by slug needs project.update on it. The embedded-broker form (a broker in the request body) is session-only (CREDENTIAL_MANAGEMENT): a token or any other non-session credential is refused before any lookup or write
+- [project.clone](#projectclone) — Clone a project into a new project owned by the caller. The caller needs project.read on the source and project.create as a collection-level create at the hub scope; a token also needs the project:clone selector
 - [schedule.event.list](#scheduleeventlist) — List scheduled events or recurring schedules in a project
 - [schedule.event.read](#scheduleeventread) — Read a scheduled event, a recurring schedule or a schedule's run history
 - [schedule.event.create](#scheduleeventcreate) — Create a scheduled event or recurring schedule of any event type. A user access token needs scheduled_event:create and passes the event type's target checks
@@ -2367,7 +2368,7 @@
 
 **Domain:** project
 
-**Description:** Create a new project
+**Description:** Create a new project. project.create is checked as a collection-level create at the hub scope; a token needs project:create on a hub boundary. Naming an existing project by id needs project.update on it
 
 ### Entry Points
 
@@ -2377,7 +2378,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_collection`; boundaries `hub`; pinned by `TestProjectCreateToken_RequiresCreateSelectorAndHubBoundary`)
 
 **Base Permission:** `project.create`
 
@@ -2404,6 +2407,8 @@
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestOwnerGrantCoverageCheck`
 - `pkg/hub:TestOwnerBindingAuditFailureRollsBack`
+- `pkg/hub:TestProjectCreateToken_RequiresCreateSelectorAndHubBoundary`
+- `pkg/hub:TestProjectCreateToken_IdempotentPathRequiresUpdate`
 
 ---
 
@@ -2598,7 +2603,7 @@
 
 **Domain:** project
 
-**Description:** Register a project from an external source
+**Description:** Register a project from an external source. Register checks project.create as a collection-level create at the hub scope; a token needs project:create on a hub boundary. An existing project named by id or matched by slug needs project.update on it. The embedded-broker form (a broker in the request body) is session-only (CREDENTIAL_MANAGEMENT): a token or any other non-session credential is refused before any lookup or write
 
 ### Entry Points
 
@@ -2608,9 +2613,11 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
 
-**Base Permission:** `project.register`
+**Bearer:** `admit` (target `hub_collection`; boundaries `hub`; pinned by `TestProjectRegisterToken_EnforcesProjectCreate`)
+
+**Base Permission:** `project.create`
 
 **Resource Resolver:** project-from-body
 
@@ -2619,7 +2626,7 @@
 ### Delegation
 
 - **Kind:** `non_amplification`
-- When the call creates the project, the creator is bound to the project-owner role on it; registering an existing project binds no owner. A credential with a permission ceiling must cover every permission of that role before any write (projectOwnerGrantDenial); for other callers project.register gates the grant
+- When the call creates the project, the creator is bound to the project-owner role on it; registering an existing project binds no owner. A credential with a permission ceiling must cover every permission of that role before any write (projectOwnerGrantDenial); for other callers project.create gates the grant
 
 ### Audit
 
@@ -2635,6 +2642,54 @@
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestOwnerGrantCoverageCheck`
 - `pkg/hub:TestOwnerBindingAuditFailureRollsBack`
+- `pkg/hub:TestProjectRegisterToken_EnforcesProjectCreate`
+- `pkg/hub:TestProjectRegisterToken_EmbeddedBrokerFormIsSessionOnly`
+
+---
+
+## project.clone
+
+**Domain:** project
+
+**Description:** Clone a project into a new project owned by the caller. The caller needs project.read on the source and project.create as a collection-level create at the hub scope; a token also needs the project:clone selector
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/projects/{id}/clone` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_collection`; boundaries `hub`; pinned by `TestProjectCloneToken_RequiresSourceReadCloneAndCreate`)
+
+**Base Permission:** `project.create`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `create-resource`, `grant-authority`
+
+### Delegation
+
+- **Kind:** `non_amplification`
+- The caller is bound to the project-owner role on the clone. A credential with a permission ceiling must cover every permission of that role before any write (projectOwnerGrantDenial); for other callers project.create gates the grant
+
+### Audit
+
+- **Event Type:** `project_member_add`
+- **Context Fields:** actor_id, project_id
+- **After Fields:** user_id, role
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestOwnerBindingRequiresCanDelegate`
+- `pkg/hub:TestProjectCloneToken_RequiresSourceReadCloneAndCreate`
 
 ---
 

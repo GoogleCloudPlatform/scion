@@ -124,6 +124,17 @@ type conduitExternalRuntime struct {
 	// ingressCountFailures counts relay session counts that failed during
 	// relay selection.
 	ingressCountFailures atomic.Int64
+	// peers calls the relays' internal API (the drain fan-out).
+	peers *relay.PeerClient
+	// terminating is set once, before the shutdown marks any server
+	// (BeginConduitIngressShutdown): from then on no conduit dial is
+	// proxied (cause ingress_terminating).
+	terminating atomic.Bool
+	// drainStarted makes the ingress drain step run once.
+	drainStarted atomic.Bool
+	// legs counts the hub's open proxied legs; the drain step holds them
+	// and closes the ones left at its deadline.
+	legs conduitIngressLegs
 }
 
 // StartConduitExternal starts the hub's side of external relay mode: the
@@ -186,10 +197,11 @@ func (s *Server) StartConduitExternal(ctx context.Context, opts ConduitExternalO
 	if id == "" {
 		id = ConduitInstanceID("")
 	}
+	peers := &relay.PeerClient{HTTP: opts.HTTPClient, Auth: opts.PeerAuth}
 	rtr, err := router.New(router.Config{
 		Registry: reg,
 		Store:    st,
-		Peers:    &relay.PeerClient{HTTP: opts.HTTPClient, Auth: opts.PeerAuth},
+		Peers:    peers,
 		Now:      now,
 		Brokers:  newLegacyBrokerResolver(s.controlChannel, id),
 	})
@@ -206,7 +218,7 @@ func (s *Server) StartConduitExternal(ctx context.Context, opts ConduitExternalO
 	if err != nil {
 		return err
 	}
-	rt := &conduitExternalRuntime{router: rtr, registry: reg, store: st, now: now, peerAuth: opts.PeerAuth, replay: opts.replayStore,
+	rt := &conduitExternalRuntime{router: rtr, registry: reg, store: st, now: now, peerAuth: opts.PeerAuth, replay: opts.replayStore, peers: peers,
 		instanceID: id, ingress: opts.Ingress, ingressOffCause: opts.IngressOffCause, lifetimeCap: opts.LifetimeCap, ingressTransport: newConduitIngressTransport(nil, conduitIngressResponseHeaderTimeout)}
 	if rt.ingress == "" {
 		rt.ingress = config.ConduitIngressProxy
@@ -294,6 +306,7 @@ const (
 	conduitExternalNoRelayMsg   = "No conduit relay is available (external relay mode with no eligible relay)"
 	conduitExternalNoIngressMsg = "No conduit relay took the session (external relay mode)"
 	conduitExternalIngressOff   = "This hub does not proxy conduit dials (external relay mode)"
+	conduitExternalTerminating  = "This hub is shutting down; reconnect (external relay mode)"
 )
 
 // refuseConduitExternal answers a conduit dial on a hub in external relay
@@ -304,6 +317,9 @@ const (
 func (s *Server) refuseConduitExternal(w http.ResponseWriter, r *http.Request, rt *conduitExternalRuntime) {
 	msg := conduitExternalNoIngressMsg
 	switch {
+	case rt != nil && rt.terminating.Load():
+		msg = conduitExternalTerminating
+		slog.Debug("Conduit ingress: dial refused", "cause", conduitIngressCauseTerminating)
 	case rt != nil && rt.ingressOffCause != "":
 		msg = conduitExternalIngressOff
 	case s.conduitEligibleRelays.Load() <= 0:

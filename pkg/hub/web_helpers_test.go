@@ -25,6 +25,7 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/require"
@@ -212,6 +213,15 @@ func (s *proxyAuthStore) CreateUser(_ context.Context, user *store.User) error {
 
 func (s *proxyAuthStore) UpdateUser(_ context.Context, user *store.User) error {
 	s.users[user.ID] = user
+	return nil
+}
+
+func (s *proxyAuthStore) UpdateUserLastLogin(ctx context.Context, id string, timestamp time.Time) error {
+	u, err := s.GetUser(ctx, id)
+	if err != nil {
+		return err
+	}
+	u.LastLogin = timestamp
 	return nil
 }
 

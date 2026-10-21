@@ -27,6 +27,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -465,7 +466,7 @@ func TestRecoverLaunches_DispatchAttemptReplay(t *testing.T) {
 	cfg := srv1.config
 	cfg.StateDir = srv1.stateDir
 	mgr2 := newAsyncManager()
-	srv2 := New(cfg, mgr2, &runtime.MockRuntime{NameFunc: func() string { return "mock" }})
+	srv2 := New(cfg, mgr2, &runtime.MockRuntime{NameFunc: func() string { return "mock" }}, config.RuntimeBuildRecord{})
 	rtb2 := &mockRuntimeBrokerService{launchReportFunc: appliedReports}
 	srv2.hubMu.Lock()
 	srv2.hubConnections["hub-a"] = &HubConnection{Name: "hub-a", BrokerID: "broker-on-a", HubClient: &stubBrokerHubClient{brokers: rtb2}}

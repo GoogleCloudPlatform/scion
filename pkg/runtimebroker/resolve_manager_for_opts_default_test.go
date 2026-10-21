@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -34,7 +35,7 @@ func newKubernetesDefaultTestServer(t *testing.T) *Server {
 	t.Setenv("XDG_CONFIG_HOME", "")
 
 	cfg := DefaultServerConfig()
-	return New(cfg, &filteringMockManager{}, fakeKubernetesRuntime("cluster-default", "ns-default"))
+	return New(cfg, &filteringMockManager{}, fakeKubernetesRuntime("cluster-default", "ns-default"), config.RuntimeBuildRecord{})
 }
 
 // TestResolveManagerForOpts_DefaultKubernetesProfileSkipsResolution asserts
@@ -60,11 +61,11 @@ runtimes:
     namespace: ns-default
 `)
 
-	srv.resolveAuxiliaryRuntime = func(_, _, profileFlag string) runtime.Runtime {
+	srv.resolveAuxiliaryRuntime = withoutRecord(func(_, _, profileFlag string) runtime.Runtime {
 		return &runtime.ErrorRuntime{Err: fmt.Errorf("resolveAuxiliaryRuntime must not be called for profile %q matching the default", profileFlag)}
-	}
+	})
 
-	mgr, _ := srv.resolveManagerForOpts(api.StartOptions{Name: "agent", Profile: "same", ProjectPath: projectDir})
+	mgr, _ := managerAndType(srv.resolveManagerForOpts(api.StartOptions{Name: "agent", Profile: "same", ProjectPath: projectDir}))
 
 	if mgr != srv.manager {
 		t.Fatalf("expected the shared manager for a profile matching the Kubernetes default (did resolveManagerForOpts call resolveAuxiliaryRuntime instead of short-circuiting?)")
@@ -96,11 +97,11 @@ runtimes:
 `)
 
 	other := fakeKubernetesRuntime("cluster-other", "ns-other")
-	srv.resolveAuxiliaryRuntime = stubResolver(t, map[string]runtime.Runtime{
+	srv.resolveAuxiliaryRuntime = withoutRecord(stubResolver(t, map[string]runtime.Runtime{
 		"other": other,
-	})
+	}))
 
-	mgr, _ := srv.resolveManagerForOpts(api.StartOptions{Name: "agent", Profile: "other", ProjectPath: projectDir})
+	mgr, _ := managerAndType(srv.resolveManagerForOpts(api.StartOptions{Name: "agent", Profile: "other", ProjectPath: projectDir}))
 
 	if mgr == srv.manager {
 		t.Fatalf("expected a non-default manager for a profile targeting a different cluster")
@@ -134,11 +135,11 @@ runtimes:
 `)
 
 	other := fakeKubernetesRuntime("cluster-other", "ns-default")
-	srv.resolveAuxiliaryRuntime = stubResolver(t, map[string]runtime.Runtime{
+	srv.resolveAuxiliaryRuntime = withoutRecord(stubResolver(t, map[string]runtime.Runtime{
 		"other-context": other,
-	})
+	}))
 
-	mgr, _ := srv.resolveManagerForOpts(api.StartOptions{Name: "agent", Profile: "other-context", ProjectPath: projectDir})
+	mgr, _ := managerAndType(srv.resolveManagerForOpts(api.StartOptions{Name: "agent", Profile: "other-context", ProjectPath: projectDir}))
 
 	if mgr == srv.manager {
 		t.Fatalf("expected a non-default manager for a profile targeting a different context")
@@ -171,11 +172,11 @@ runtimes:
 `)
 
 	other := fakeKubernetesRuntime("cluster-default", "ns-other")
-	srv.resolveAuxiliaryRuntime = stubResolver(t, map[string]runtime.Runtime{
+	srv.resolveAuxiliaryRuntime = withoutRecord(stubResolver(t, map[string]runtime.Runtime{
 		"other-namespace": other,
-	})
+	}))
 
-	mgr, _ := srv.resolveManagerForOpts(api.StartOptions{Name: "agent", Profile: "other-namespace", ProjectPath: projectDir})
+	mgr, _ := managerAndType(srv.resolveManagerForOpts(api.StartOptions{Name: "agent", Profile: "other-namespace", ProjectPath: projectDir}))
 
 	if mgr == srv.manager {
 		t.Fatalf("expected a non-default manager for a profile targeting a different namespace")
@@ -209,11 +210,11 @@ runtimes:
 		srv.config.ForceRuntime = ""
 		t.Setenv("SCION_K8S_NAMESPACE", "ns-default")
 
-		srv.resolveAuxiliaryRuntime = func(_, _, profileFlag string) runtime.Runtime {
+		srv.resolveAuxiliaryRuntime = withoutRecord(func(_, _, profileFlag string) runtime.Runtime {
 			return &runtime.ErrorRuntime{Err: fmt.Errorf("resolveAuxiliaryRuntime must not be called for profile %q matching the default", profileFlag)}
-		}
+		})
 
-		mgr, _ := srv.resolveManagerForOpts(api.StartOptions{Name: "agent", Profile: "unset-namespace", ProjectPath: projectDir})
+		mgr, _ := managerAndType(srv.resolveManagerForOpts(api.StartOptions{Name: "agent", Profile: "unset-namespace", ProjectPath: projectDir}))
 
 		if mgr != srv.manager {
 			t.Fatalf("expected the shared manager when the env default namespace matches the broker's own")
@@ -226,11 +227,11 @@ runtimes:
 		t.Setenv("SCION_K8S_NAMESPACE", "ns-other")
 
 		other := fakeKubernetesRuntime("cluster-default", "ns-other")
-		srv.resolveAuxiliaryRuntime = stubResolver(t, map[string]runtime.Runtime{
+		srv.resolveAuxiliaryRuntime = withoutRecord(stubResolver(t, map[string]runtime.Runtime{
 			"unset-namespace": other,
-		})
+		}))
 
-		mgr, _ := srv.resolveManagerForOpts(api.StartOptions{Name: "agent", Profile: "unset-namespace", ProjectPath: projectDir})
+		mgr, _ := managerAndType(srv.resolveManagerForOpts(api.StartOptions{Name: "agent", Profile: "unset-namespace", ProjectPath: projectDir}))
 
 		if mgr == srv.manager {
 			t.Fatalf("expected a non-default manager when the env default namespace differs from the broker's own")
@@ -263,11 +264,11 @@ runtimes:
     namespace: ns-default
 `)
 
-	srv.resolveAuxiliaryRuntime = func(_, _, profileFlag string) runtime.Runtime {
+	srv.resolveAuxiliaryRuntime = withoutRecord(func(_, _, profileFlag string) runtime.Runtime {
 		return &runtime.ErrorRuntime{Err: fmt.Errorf("resolveAuxiliaryRuntime must not be called for profile %q matching the default", profileFlag)}
-	}
+	})
 
-	mgr, _ := srv.resolveManagerForOpts(api.StartOptions{Name: "agent", Profile: "k8s-alias", ProjectPath: projectDir})
+	mgr, _ := managerAndType(srv.resolveManagerForOpts(api.StartOptions{Name: "agent", Profile: "k8s-alias", ProjectPath: projectDir}))
 
 	if mgr != srv.manager {
 		t.Fatalf("expected the shared manager for a profile using the \"k8s\" alias for the Kubernetes-default broker's own type")
@@ -323,11 +324,11 @@ users:
 		srv.config.ForceRuntime = ""
 		t.Setenv("KUBECONFIG", writeKubeconfig(t, "cluster-default"))
 
-		srv.resolveAuxiliaryRuntime = func(_, _, profileFlag string) runtime.Runtime {
+		srv.resolveAuxiliaryRuntime = withoutRecord(func(_, _, profileFlag string) runtime.Runtime {
 			return &runtime.ErrorRuntime{Err: fmt.Errorf("resolveAuxiliaryRuntime must not be called for profile %q matching the default", profileFlag)}
-		}
+		})
 
-		mgr, _ := srv.resolveManagerForOpts(api.StartOptions{Name: "agent", Profile: "unset-context", ProjectPath: projectDir})
+		mgr, _ := managerAndType(srv.resolveManagerForOpts(api.StartOptions{Name: "agent", Profile: "unset-context", ProjectPath: projectDir}))
 
 		if mgr != srv.manager {
 			t.Fatalf("expected the shared manager when the kubeconfig's current context matches the broker's own")
@@ -340,11 +341,11 @@ users:
 		t.Setenv("KUBECONFIG", writeKubeconfig(t, "cluster-other"))
 
 		other := fakeKubernetesRuntime("cluster-other", "ns-default")
-		srv.resolveAuxiliaryRuntime = stubResolver(t, map[string]runtime.Runtime{
+		srv.resolveAuxiliaryRuntime = withoutRecord(stubResolver(t, map[string]runtime.Runtime{
 			"unset-context": other,
-		})
+		}))
 
-		mgr, _ := srv.resolveManagerForOpts(api.StartOptions{Name: "agent", Profile: "unset-context", ProjectPath: projectDir})
+		mgr, _ := managerAndType(srv.resolveManagerForOpts(api.StartOptions{Name: "agent", Profile: "unset-context", ProjectPath: projectDir}))
 
 		if mgr == srv.manager {
 			t.Fatalf("expected a non-default manager when the kubeconfig's current context differs from the broker's own")
@@ -386,11 +387,11 @@ runtimes:
     namespace: ns-default
 `)
 
-	srv.resolveAuxiliaryRuntime = stubResolver(t, map[string]runtime.Runtime{
+	srv.resolveAuxiliaryRuntime = withoutRecord(stubResolver(t, map[string]runtime.Runtime{
 		"unset-context": fakeKubernetesRuntime("cluster-default", "ns-default"),
-	})
+	}))
 
-	mgr, _ := srv.resolveManagerForOpts(api.StartOptions{Name: "agent", Profile: "unset-context", ProjectPath: projectDir})
+	mgr, _ := managerAndType(srv.resolveManagerForOpts(api.StartOptions{Name: "agent", Profile: "unset-context", ProjectPath: projectDir}))
 
 	if mgr != srv.manager {
 		t.Fatalf("expected the shared manager when full resolution lands on the default's own identity, even though the pre-check could not prove it")
@@ -425,11 +426,11 @@ runtimes:
     namespace: ns-other
 `)
 
-	srv.resolveAuxiliaryRuntime = func(_, _, profileFlag string) runtime.Runtime {
+	srv.resolveAuxiliaryRuntime = withoutRecord(func(_, _, profileFlag string) runtime.Runtime {
 		return &runtime.ErrorRuntime{Err: fmt.Errorf("cluster unreachable for profile %q", profileFlag)}
-	}
+	})
 
-	mgr, runtimeType := srv.resolveManagerForOpts(api.StartOptions{Name: "agent", Profile: "unreachable", ProjectPath: projectDir})
+	mgr, runtimeType := managerAndType(srv.resolveManagerForOpts(api.StartOptions{Name: "agent", Profile: "unreachable", ProjectPath: projectDir}))
 
 	if runtimeType != "error" {
 		t.Fatalf("expected the resolved runtime type to be \"error\", got %q", runtimeType)
@@ -451,7 +452,7 @@ func TestResolveManagerForOpts_NonKubernetesDefaultSkipsResolution(t *testing.T)
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", "")
 	cfg := DefaultServerConfig()
-	srv := New(cfg, &filteringMockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	srv := New(cfg, &filteringMockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 	srv.config.ForceRuntime = ""
 
 	projectDir := t.TempDir()
@@ -464,11 +465,11 @@ runtimes:
     type: docker
 `)
 
-	srv.resolveAuxiliaryRuntime = func(_, _, profileFlag string) runtime.Runtime {
+	srv.resolveAuxiliaryRuntime = withoutRecord(func(_, _, profileFlag string) runtime.Runtime {
 		return &runtime.ErrorRuntime{Err: fmt.Errorf("resolveAuxiliaryRuntime must not be called for profile %q matching the default", profileFlag)}
-	}
+	})
 
-	mgr, _ := srv.resolveManagerForOpts(api.StartOptions{Name: "agent", Profile: "same", ProjectPath: projectDir})
+	mgr, _ := managerAndType(srv.resolveManagerForOpts(api.StartOptions{Name: "agent", Profile: "same", ProjectPath: projectDir}))
 
 	if mgr != srv.manager {
 		t.Fatalf("expected the shared manager for a profile matching a non-Kubernetes default's type")
@@ -488,7 +489,7 @@ func TestResolveManagerForOpts_NilClientKubernetesDefaultResolves(t *testing.T) 
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", "")
 	cfg := DefaultServerConfig()
-	srv := New(cfg, &filteringMockManager{}, &runtime.KubernetesRuntime{Client: nil, DefaultNamespace: "ns-default"})
+	srv := New(cfg, &filteringMockManager{}, &runtime.KubernetesRuntime{Client: nil, DefaultNamespace: "ns-default"}, config.RuntimeBuildRecord{})
 	srv.config.ForceRuntime = ""
 
 	projectDir := t.TempDir()
@@ -504,11 +505,11 @@ runtimes:
 `)
 
 	other := fakeKubernetesRuntime("cluster-other", "ns-default")
-	srv.resolveAuxiliaryRuntime = stubResolver(t, map[string]runtime.Runtime{
+	srv.resolveAuxiliaryRuntime = withoutRecord(stubResolver(t, map[string]runtime.Runtime{
 		"other": other,
-	})
+	}))
 
-	mgr, _ := srv.resolveManagerForOpts(api.StartOptions{Name: "agent", Profile: "other", ProjectPath: projectDir})
+	mgr, _ := managerAndType(srv.resolveManagerForOpts(api.StartOptions{Name: "agent", Profile: "other", ProjectPath: projectDir}))
 
 	if mgr == srv.manager {
 		t.Fatalf("expected a non-default manager when the default's Client is nil")

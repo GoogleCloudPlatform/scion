@@ -113,14 +113,32 @@ func (s *Server) serveConduitIngress(w http.ResponseWriter, r *http.Request, rt 
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "WebSocket upgrade required", nil)
 		return
 	}
+	// The dial counts as an open proxied leg from here until it returns,
+	// upgraded session included, so the shutdown's drain step can hold it
+	// and close it at its deadline (cancelling the leg's context closes
+	// both connections). It is counted before terminating is checked, so a
+	// leg the drain step does not see always sees terminating.
+	legCtx, closeLeg := context.WithCancel(r.Context())
+	defer closeLeg()
+	defer rt.legs.done(rt.legs.add(closeLeg))
+	r = r.WithContext(legCtx)
 	excluded := map[string]bool{}
 	for attempt := 0; attempt <= router.MaxReResolves; attempt++ {
+		if rt.terminating.Load() {
+			// The shutdown stopped proxying while this dial was being
+			// placed: no further byte goes to a relay (cause
+			// ingress_terminating).
+			break
+		}
 		target, ok := s.pickConduitIngressRelay(r.Context(), rt, excluded)
 		if !ok {
 			break
 		}
 		if !s.proxyConduitDial(w, r, rt, target) {
 			return
+		}
+		if rt.terminating.Load() {
+			break // refused below with cause ingress_terminating, no re-pick
 		}
 		excluded[target.InstanceID] = true
 		slog.Info("Conduit ingress: re-picking a relay", "relay_instance_id", target.InstanceID, "attempt", attempt+1)
@@ -303,6 +321,13 @@ func (s *Server) proxyConduitDial(w http.ResponseWriter, r *http.Request, rt *co
 			pr.Out.Header.Set(relay.HeaderIngressInstance, rt.instanceID)
 			pr.Out.Header.Set(relay.HeaderIngressLifetimeCap, strconv.FormatInt(int64(rt.lifetimeCap/time.Second), 10))
 			relay.SetPeerTarget(pr.Out, target.InstanceID, target.Generation)
+			if rt.terminating.Load() {
+				// Proxying stopped after the relay was picked: the leg
+				// is never sent (the empty host fails the round trip before
+				// any byte, and the caller refuses the dial).
+				pr.Out.URL.Host = ""
+				return
+			}
 			if err := rt.peerAuth.Sign(pr.Out); err != nil {
 				signErr = err
 				// An unsigned leg is never sent: the empty host fails the
@@ -325,7 +350,13 @@ func (s *Server) proxyConduitDial(w http.ResponseWriter, r *http.Request, rt *co
 				}
 				return
 			}
-			slog.Warn("Conduit ingress: proxying the dial failed", "relay_instance_id", target.InstanceID, "error", err)
+			if rt.terminating.Load() {
+				// The drain step closed the leg (or the shutdown cut it
+				// short): expected, not a relay fault.
+				slog.Debug("Conduit ingress: proxied dial ended while shutting down", "relay_instance_id", target.InstanceID, "cause", conduitIngressCauseTerminating, "error", err)
+			} else {
+				slog.Warn("Conduit ingress: proxying the dial failed", "relay_instance_id", target.InstanceID, "error", err)
+			}
 			writeError(w, http.StatusBadGateway, ErrCodeRuntimeError, "Conduit relay connection failed", nil)
 		},
 		ErrorLog: slog.NewLogLogger(slog.Default().Handler(), slog.LevelDebug),

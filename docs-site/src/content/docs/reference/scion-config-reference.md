@@ -44,13 +44,15 @@ When a project is exported or managed locally in a standalone environment, some 
 
 ## Configuration Hierarchy
 
-Scion resolves settings in the following order (highest priority first):
+Scion resolves settings through a single loader in the following order (highest priority first):
 
 1.  **CLI Flags**: (e.g., `scion start --profile remote`)
-2.  **Environment Variables**: `SCION_*` overrides.
-3.  **Project Settings**: `.scion/settings.yaml` (Project level).
+2.  **Environment Variables**: `SCION_*` overrides (mapped to settings keys with `_` as a path separator; an exported empty value counts as unset).
+3.  **Project Settings**: `.scion/settings.yaml` (in-repo) and, for git projects with split storage, `~/.scion/project-configs/<slug>__<id>/.scion/settings.yaml` (external project config).
 4.  **Global Settings**: `~/.scion/settings.yaml` (User level).
 5.  **Defaults**: System built-ins.
+
+Whole-file rewrites of `settings.yaml` (such as `scion config set`, `scion config unset`, `scion config migrate`, and Hub link updates) take the settings-directory lock (an exclusive lock on `.settings.lock` in that directory, waited for up to 10 seconds) and replace the file atomically via a temporary file in the same directory, preserving existing file permissions.
 
 ## Unrecognized Key Warnings
 
@@ -58,7 +60,7 @@ When loading settings files, Scion logs a warning for any unrecognized key it en
 
 ## Migration
 
-To migrate legacy configuration files to the new schema v1 format:
+Legacy settings files (those without `schema_version`) are converted to the v1 shape at their own layer when read, keeping only keys that the file itself sets; a versioned file's legacy camelCase `hub.projectId` is also read as a fallback when `hub.project_id` is absent. To rewrite legacy configuration files on disk to the schema v1 format:
 
 ```bash
 # Migrate legacy settings (a server.yaml next to a legacy settings.yaml is
@@ -66,4 +68,4 @@ To migrate legacy configuration files to the new schema v1 format:
 scion config migrate
 ```
 
-A `server.yaml` next to a `settings.yaml` that already has `schema_version` is not merged automatically: copy its contents under a top-level `server:` key in `settings.yaml` and remove `server.yaml` (a `--server` flag is tracked in ptone/scion#3116).
+A `server.yaml` next to a `settings.yaml` that already has `schema_version` is not merged automatically: copy its contents under a top-level `server:` key in `settings.yaml` and remove `server.yaml`.

@@ -34,7 +34,7 @@ COPY extras/scion-a2a-bridge/ extras/scion-a2a-bridge/
 WORKDIR /src/extras/scion-a2a-bridge
 
 RUN go mod download
-RUN CGO_ENABLED=1 go build -tags no_embed_web -o /scion-a2a-bridge ./cmd/scion-a2a-bridge/
+RUN CGO_ENABLED=0 go build -tags no_embed_web -o /scion-a2a-bridge ./cmd/scion-a2a-bridge/
 
 # Runtime stage
 FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241

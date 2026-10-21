@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -124,7 +125,7 @@ func TestFlatAbsence_StartupKeepsRecordWithoutRemovedFiles(t *testing.T) {
 // whose runtime cannot confirm absence refuses to start.
 func TestFlatAbsence_RuntimeWithoutCheckRefusedAtStartup(t *testing.T) {
 	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
-	srv := New(f.srv.config, f.mgr, noAbsenceRuntime{f.srv.currentRuntime()})
+	srv := New(f.srv.config, f.mgr, noAbsenceRuntime{f.srv.currentRuntime()}, config.RuntimeBuildRecord{})
 	err := srv.StartServices(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "cannot confirm that a deleted object is gone") {
 		t.Fatalf("StartServices = %v, want the refusal", err)

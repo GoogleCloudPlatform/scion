@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -466,7 +467,7 @@ func newTestServerWithManager(t *testing.T, mgr agent.Manager) *Server {
 	// returns the mock manager directly instead of creating a real one.
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "mock" }}
 
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 	endAsyncLaunchesAtCleanup(t, srv)
 	return srv
 }
@@ -527,7 +528,7 @@ func newTestServerWithEnvCapture() (*Server, *envCapturingManager) {
 	// NameFunc returns "docker" so resolveManagerForOpts matches the settings-resolved runtime.
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 
-	return New(cfg, mgr, rt), mgr
+	return New(cfg, mgr, rt, config.RuntimeBuildRecord{}), mgr
 }
 
 // provisionCapturingManager tracks whether Provision, Reprovision or Start
@@ -596,5 +597,5 @@ func newTestServerWithProvisionCapture() (*Server, *provisionCapturingManager) {
 	// NameFunc returns "docker" so resolveManagerForOpts matches the settings-resolved runtime.
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 
-	return New(cfg, mgr, rt), mgr
+	return New(cfg, mgr, rt, config.RuntimeBuildRecord{}), mgr
 }
