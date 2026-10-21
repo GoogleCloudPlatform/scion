@@ -35,6 +35,7 @@ func TestLaunchErrorCodesMatchAPI(t *testing.T) {
 		{LaunchErrorAgentError, api.LaunchCodeAgentError, "agent_error"},
 		{LaunchErrorHubUnreachable, api.LaunchCodeHubUnreachable, "hub_unreachable"},
 		{LaunchErrorBrokerRestarted, api.LaunchCodeBrokerRestarted, "broker_restarted"},
+		{LaunchErrorDispatchFailed, api.LaunchCodeDispatchFailed, "dispatch_failed"},
 	} {
 		assert.Equal(t, tc.api, tc.store, "store code must equal the api code")
 		assert.Equal(t, tc.wire, tc.store, "store code must keep its wire string")
