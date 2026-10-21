@@ -3927,7 +3927,7 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 			testHookStopBetweenCancels(key)
 		}
 		cancelledOwn = s.cancelInFlightStartRun(ctx, key, runID)
-		// Again after the tracker wait, as for a legacy stop above
+		// Again after the tracker wait, as for a legacy stop above,
 		// with the same agent and run scope.
 		wokeLaunch := woken != nil
 		if s.recancelLocalLaunch(key, hubAgentID, runID, woken) {
