@@ -432,7 +432,8 @@ func (f funcReader) GetUser(ctx context.Context, id string) (*store.User, error)
 func TestIsNilUserRowReader_TypedNilPointer(t *testing.T) {
 	var typedNil *ptrReader
 	var r userRowReader = typedNil
-	require.NotNil(t, r, "the interface holds a typed nil")
+	// A plain comparison: testify's NotNil treats a typed nil as nil.
+	require.True(t, r != nil, "the interface holds a typed nil")
 	assert.True(t, isNilUserRowReader(r), "typed nil pointer reader detected")
 	var nilFunc funcReader
 	assert.True(t, isNilUserRowReader(nilFunc), "typed nil func reader detected")
