@@ -1915,23 +1915,25 @@ func (d *HTTPAgentDispatcher) DispatchAgentReprovision(ctx context.Context, agen
 // it with the GatherEnv two-pass mechanism, and merge any resolved storage env
 // back into AppliedConfig.
 func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *store.Agent, callerName string, reprovision bool, expectNFSWorkspace string) (err error) {
+	// Every failure before the request is sent is marked
+	// errProvisionNotSent: the broker was sent nothing.
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
-		return err
+		return provisionNotSent(err)
 	}
 	// Flat placement backstop (requirePinnedPlacement): first after the
 	// assignment check, before any store write or broker call.
 	if err := d.placementBackstop(ctx, agent); err != nil {
-		return err
+		return provisionNotSent(err)
 	}
 
 	endpoint, err := d.getProvisioningBrokerEndpoint(ctx, agent)
 	if err != nil {
-		return err
+		return provisionNotSent(err)
 	}
 
 	// Hub check before dispatch (see DispatchAgentCreate).
 	if err := d.kubernetesIdentityPrecheck(ctx, agent); err != nil {
-		return err
+		return provisionNotSent(err)
 	}
 
 	// Provision and reprovision keep going on a secret resolution error:
@@ -1941,7 +1943,7 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 	// them again in buildStartEnv and fails closed there.
 	req, err := d.buildCreateRequestFor(ctx, agent, callerName, continueOnSecretResolutionError)
 	if err != nil {
-		return err
+		return provisionNotSent(err)
 	}
 	// A provision starts no run: the token is issued for the agent's
 	// current run, and its credential recorded on its own. A failed
@@ -1951,7 +1953,7 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 	if req.tokenGrant != nil {
 		token, err := signAndRecordAgentToken(ctx, d.tokenGenerator, d.store, *req.tokenGrant, agent.RunID)
 		if err != nil {
-			return fmt.Errorf("%s: %w", callerName, err)
+			return provisionNotSent(fmt.Errorf("%s: %w", callerName, err))
 		}
 		req.AgentToken = token
 	}

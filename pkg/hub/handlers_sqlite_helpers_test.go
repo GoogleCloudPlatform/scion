@@ -5198,6 +5198,11 @@ func (d *reincarnateTestDispatcher) DispatchAgentProvisionForMove(_ context.Cont
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.moveProvisionCalls = append(d.moveProvisionCalls, agent.RuntimeBrokerID+"|"+expect)
+	if errors.Is(d.moveProvisionErr, errProvisionNotSent) {
+		// Failed on the hub before the request was sent: the broker
+		// sees nothing.
+		return d.moveProvisionErr
+	}
 	if d.recreateFiles != nil && expect == "fresh-agent-dir" {
 		if d.recreateFiles[agent.RuntimeBrokerID] {
 			return &brokerStatusError{StatusCode: http.StatusConflict, Body: freshAgentDirConflictBody}

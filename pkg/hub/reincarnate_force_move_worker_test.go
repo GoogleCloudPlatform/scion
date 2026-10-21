@@ -173,6 +173,10 @@ func TestMoveTargetUntouched(t *testing.T) {
 	assert.False(t, moveTargetUntouched(&brokerStatusError{StatusCode: http.StatusConflict, Body: `{"error":{"code":"conflict","message":"x"}}`}))
 	assert.False(t, moveTargetUntouched(&brokerStatusError{StatusCode: http.StatusInternalServerError, Body: freshAgentDirConflictBody}))
 	assert.False(t, moveTargetUntouched(errors.New("broker returned 500: provision failed")))
+	notSent := provisionNotSent(errors.New("identity not mapped on the target profile"))
+	assert.True(t, moveTargetUntouched(fmt.Errorf("provision: %w", notSent)), "a provision that failed before sending")
+	assert.Equal(t, "identity not mapped on the target profile", notSent.Error(), "the wrapper keeps the text")
+	assert.True(t, errors.Is(provisionNotSent(errNoRuntimeBrokerAssigned), errNoRuntimeBrokerAssigned), "the wrapper keeps the chain")
 }
 
 // A failure at the target's provision (after it created files, with no run
@@ -505,4 +509,32 @@ func TestRecheckMoveEligibility_WorkspaceGate(t *testing.T) {
 		_, err := f.srv.recheckMoveEligibility(context.Background(), f.agent.ID, mv(f, true))
 		require.NoError(t, err)
 	})
+}
+
+// A forced move's provision that fails on the hub before its request is
+// sent (errProvisionNotSent: for example the target's GCP identity check)
+// removes nothing on the target: the rollback sends no delete, and files
+// the target holds for the agent stay. The source is restored.
+func TestReincarnateForceMove_ProvisionNotSentSendsNoTargetDelete(t *testing.T) {
+	f := setupForceMoveFixture(t, true, nil)
+	prepareForceMoveWorker(t, f)
+	f.disp.mu.Lock()
+	f.disp.recreateFiles[f.dst.ID] = true
+	f.disp.moveProvisionErr = provisionNotSent(errors.New("GCP service account not mapped on the target profile"))
+	f.disp.mu.Unlock()
+
+	r, a := startForceMove(t, f)
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+	assert.Contains(t, r.Error, "GCP service account not mapped on the target profile")
+	r = waitForMoveSourceCleanup(t, f.s, r.ID)
+	assert.Equal(t, f.src.ID, a.RuntimeBrokerID, "the agent stays on the source")
+	assert.Equal(t, "run-src", a.RunID)
+	assert.EqualValues(t, 1, brokerReservationCount(t, f.s, f.src.ID), "the reservation is back on the source")
+	_, localDeletes, starts := f.disp.moveSnapshot()
+	assert.Empty(t, starts)
+	assert.Empty(t, localDeletes, "no localOnly delete anywhere")
+	assert.Empty(t, f.disp.recreatedDeletes(), "no files delete on a target that was sent nothing")
+	f.disp.mu.Lock()
+	assert.True(t, f.disp.recreateFiles[f.dst.ID], "the target's files are kept")
+	f.disp.mu.Unlock()
 }

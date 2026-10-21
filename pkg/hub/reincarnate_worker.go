@@ -543,10 +543,13 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		}
 		srcAgent = a
 	}
-	// provisionSent records that a move's provision was dispatched to the
-	// target. Before it, the target has been sent nothing, so a forced
-	// move's rollback removes nothing there: its F4 check never ran, and
-	// any files it holds for the agent are not this move's.
+	// provisionSent records that the worker has called the move's provision
+	// dispatch. Before that call the target has been sent nothing, so a
+	// forced move's rollback removes nothing there: its absence check never
+	// ran, and any files it holds for the agent are not this move's. The
+	// dispatch can still fail before its request leaves the hub; that
+	// failure is marked errProvisionNotSent and treated the same way
+	// (moveTargetUntouched).
 	provisionSent := false
 	// failAfterProvision fails the reincarnation once the new config has
 	// been provisioned (or a move assigned the agent to the target): a

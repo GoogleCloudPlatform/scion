@@ -170,13 +170,24 @@ func nfsOwnAgentDirPath(resolved runtime.ResolvedWorkspace, dirName string) (str
 // path resolved describes. ensureNFSAgentWorkspaceLeaf creates it there and
 // CheckMoveWorkspaceAbsent checks it, both through this function.
 func nfsOwnAgentDirRel(resolved runtime.ResolvedWorkspace, dirName string) (string, error) {
-	rel := resolved.ServerRelativePath
-	if rel == "" || !filepath.IsLocal(rel) || filepath.Join(resolved.HostBase, rel) != resolved.HostPath {
-		return "", fmt.Errorf("workspace_storage nfs: unexpected workspace path %q under %q", rel, resolved.HostBase)
+	rel, err := nfsWorkspaceRel(resolved)
+	if err != nil {
+		return "", err
 	}
 	agentRel, err := runtime.NFSAgentDirSubPath(rel, dirName)
 	if err != nil {
 		return "", fmt.Errorf("workspace_storage nfs: %w", err)
 	}
 	return agentRel, nil
+}
+
+// nfsWorkspaceRel returns the project's export-relative workspace path that
+// resolved describes, after checking that it is a local path and that the
+// host base joined with it is the resolved host path.
+func nfsWorkspaceRel(resolved runtime.ResolvedWorkspace) (string, error) {
+	rel := resolved.ServerRelativePath
+	if rel == "" || !filepath.IsLocal(rel) || filepath.Join(resolved.HostBase, rel) != resolved.HostPath {
+		return "", fmt.Errorf("workspace_storage nfs: unexpected workspace path %q under %q", rel, resolved.HostBase)
+	}
+	return rel, nil
 }

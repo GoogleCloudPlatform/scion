@@ -109,12 +109,12 @@ func ensureNFSWorkspaceLeaves(runtimeName, projectID string, resolved runtime.Re
 		return false, nil
 	}
 
-	rel := resolved.ServerRelativePath
 	if !shareddirs.ValidProjectID(projectID) {
 		return false, fmt.Errorf("workspace_storage nfs: invalid project ID %q", projectID)
 	}
-	if rel == "" || !filepath.IsLocal(rel) || filepath.Join(resolved.HostBase, rel) != resolved.HostPath {
-		return false, fmt.Errorf("workspace_storage nfs: unexpected workspace path %q under %q", rel, resolved.HostBase)
+	rel, err := nfsWorkspaceRel(resolved)
+	if err != nil {
+		return false, err
 	}
 	workspaceLeaf := rel
 	var leaves []string

@@ -66,10 +66,24 @@ var errBrokerLacksAgentMove = errors.New("runtime broker does not advertise the 
 // the fresh-agent-dir expectation must never be relied on to refuse it.
 var errBrokerLacksAgentMoveRecreate = errors.New("runtime broker does not advertise the forced agent move capability; refusing to send it a forced move request")
 
-// requireAgentMoveBroker loads agent.RuntimeBrokerID and returns
-// errBrokerLacksAgentMove unless it advertises AgentMove.
-func (d *HTTPAgentDispatcher) requireAgentMoveBroker(ctx context.Context, agent *store.Agent) error {
-	return d.requireMoveCapability(ctx, agent, false)
+// errProvisionNotSent marks a provision that failed on the hub before any
+// request was sent to the broker (dispatchProvision's checks, the request
+// build, the agent token). errors.Is matches it through
+// provisionNotSentError, which keeps the wrapped error's text and chain.
+var errProvisionNotSent = errors.New("provision not sent to the broker")
+
+// provisionNotSentError wraps a pre-send provision failure: its text and
+// Unwrap are the wrapped error's, and errors.Is(err, errProvisionNotSent)
+// holds.
+type provisionNotSentError struct{ err error }
+
+func (e provisionNotSentError) Error() string        { return e.err.Error() }
+func (e provisionNotSentError) Unwrap() error        { return e.err }
+func (e provisionNotSentError) Is(target error) bool { return target == errProvisionNotSent }
+
+// provisionNotSent marks err (non-nil) as a pre-send provision failure.
+func provisionNotSent(err error) error {
+	return provisionNotSentError{err: err}
 }
 
 // requireMoveCapability loads agent.RuntimeBrokerID and returns
@@ -96,7 +110,7 @@ func (d *HTTPAgentDispatcher) requireMoveCapability(ctx context.Context, agent *
 // DispatchAgentProvisionForMove implements agentMoveDispatcher.
 func (d *HTTPAgentDispatcher) DispatchAgentProvisionForMove(ctx context.Context, agent *store.Agent, expectNFSWorkspace string) error {
 	if expectNFSWorkspace == "" {
-		return errors.New("DispatchAgentProvisionForMove: the expected NFS workspace is required")
+		return provisionNotSent(errors.New("DispatchAgentProvisionForMove: the expected NFS workspace is required"))
 	}
 	// A broker without AgentMove would ignore the expected workspace and
 	// provision an empty one, and one without AgentMoveRecreate is not
@@ -119,7 +133,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentDeleteLocalOnly(ctx context.Context, 
 	if err := d.placementBackstop(ctx, agent); err != nil {
 		return err
 	}
-	if err := d.requireAgentMoveBroker(ctx, agent); err != nil {
+	if err := d.requireMoveCapability(ctx, agent, false); err != nil {
 		return err
 	}
 	ctx = withRecordedRuntime(ctx, agent.Runtime)
@@ -191,12 +205,13 @@ func (d *HTTPAgentDispatcher) DispatchAgentDeleteRecreated(ctx context.Context, 
 
 // moveTargetUntouched reports whether a forced move's provision failed
 // before the target created anything for the agent: nothing was sent (the
-// target lacks the move capabilities), or the target refused with
+// target lacks the move capabilities, or the provision failed on the hub
+// before sending, errProvisionNotSent), or the target refused with
 // BrokerErrCodeMoveTargetNotFresh because it already has files for the
 // agent, or cannot confirm it has none. A rollback then removes nothing on
 // the target, whose files (if any) the move did not create.
 func moveTargetUntouched(err error) bool {
-	if errors.Is(err, errBrokerLacksAgentMove) || errors.Is(err, errBrokerLacksAgentMoveRecreate) {
+	if errors.Is(err, errProvisionNotSent) || errors.Is(err, errBrokerLacksAgentMove) || errors.Is(err, errBrokerLacksAgentMoveRecreate) {
 		return true
 	}
 	var se *brokerStatusError
