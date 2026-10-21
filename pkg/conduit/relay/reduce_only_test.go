@@ -171,7 +171,9 @@ func TestReduceOnly_NoPathLengthensASession(t *testing.T) {
 				done <- n.Relay.Shutdown(ctx)
 			}()
 			endsBy(t, n, s, s.t0.Add(5*time.Second))
-			relaytest.Wait(t, done, "Shutdown")
+			if err := relaytest.Wait(t, done, "Shutdown"); err != nil {
+				t.Fatalf("Shutdown during a drain: %v", err)
+			}
 		}},
 		{name: "admission stopped during a drain", run: func(t *testing.T) {
 			w, n := roNode(t, 0, 0)
