@@ -103,6 +103,10 @@ through its bash tool; the bridge sees that command on `tool_execution_start`
 and skips the automatic `task_completed` until the next human input.
 The same applies when the agent runs `sciontool status task_completed "<summary>"`
 itself: the bridge skips its own call, so the agent's summary is kept.
+The call must be in command position (plain, or after `;`, `&&`, `||`, `|`,
+`&`, `then`, a newline, `(` or `$(`); a command that only mentions it, such
+as `grep "sciontool status blocked"`, does not count. The bridge does not
+parse shell quoting, so `echo "x; sciontool status blocked"` still counts.
 
 ## Bundle Layout
 

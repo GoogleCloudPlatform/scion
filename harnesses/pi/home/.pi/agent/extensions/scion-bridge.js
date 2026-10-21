@@ -50,7 +50,13 @@ const defaultRun = makeRunner();
 // overwritten by the automatic task_completed on settle. An agent-run
 // task_completed counts too: the bridge's own call would replace the agent's
 // summary with the tail of the chat text.
-const STICKY_STATUS_RE = /\bsciontool\s+status\s+(?:ask_user|blocked|limits_exceeded|task_completed)\b/;
+// The call must be in command position: at the start of the command or of a
+// line, after ; & | (so && and ||), ( { $( or a backtick, optionally after
+// then/do/else, and optionally with a path (/usr/local/bin/sciontool). A
+// command that only mentions it (grep "sciontool status blocked", echo ...)
+// does not count. Text after ; or | inside quotes is not parsed as shell.
+const STICKY_STATUS_RE =
+  /(?:^|[;&|\n({`])\s*(?:(?:then|do|else)\s+)?(?:[^\s;&|()`'"]*\/)?sciontool\s+status\s+(?:ask_user|blocked|limits_exceeded|task_completed)\b/;
 
 const TRUST_DECISIONS = { never: 'no', always: 'yes', ask: 'undecided' };
 

@@ -257,25 +257,47 @@ test('the sticky guard resets on the next human input', () => {
   assert.deepEqual(statusCalls(calls).map((c) => c.argv[3]), ['b']);
 });
 
-test('an agent-run task_completed is not overwritten on settle', () => {
-  for (const cmd of ['sciontool status task_completed "Fixed the bug"', 'make test && sciontool status task_completed "done"']) {
-    const { calls, h } = harness();
-    h.tool_execution_start(bashStart(cmd));
-    h.agent_end({ messages: [asst('chat text tail')] });
-    h.agent_settled({ aborted: false });
-    assert.equal(statusCalls(calls).length, 0, cmd);
+const settledStatusCalls = (cmd, tool = 'bash') => {
+  const { calls, h } = harness();
+  h.tool_execution_start({ toolName: tool, args: { command: cmd } });
+  h.agent_end({ messages: [asst('chat text tail')] });
+  h.agent_settled({ aborted: false });
+  return statusCalls(calls).length;
+};
+
+test('a status call in command position (plain or compound) suppresses the automatic task_completed', () => {
+  for (const cmd of [
+    'sciontool status task_completed "Fixed the bug"',
+    'make test && sciontool status task_completed "done"',
+    'cd /workspace; sciontool status blocked "waiting on CI"',
+    'false || sciontool status ask_user "which branch?"',
+    'go test ./... | tee log.txt & sciontool status limits_exceeded "x"',
+    'make build\nsciontool status task_completed "built"',
+    'if make test; then sciontool status task_completed "green"; fi',
+    '/usr/local/bin/sciontool status blocked "y"',
+    'out=$(sciontool status task_completed "z")',
+    '(sciontool status task_completed "subshell")',
+    '  sciontool  status  task_completed  "spaced"',
+  ]) {
+    assert.equal(settledStatusCalls(cmd), 0, cmd);
   }
 });
 
-test('other commands and tools (even mentioning sciontool) do not trip the guard', () => {
-  const { calls, h } = harness();
-  h.tool_execution_start(bashStart('grep -n "sciontool status" README.md'));
-  h.tool_execution_start(bashStart('sciontool hook --dialect=pi'));
-  h.tool_execution_start({ toolName: 'write', args: { command: 'sciontool status blocked' } });
-  h.tool_execution_start({ toolName: 'write', args: { command: 'sciontool status task_completed "x"' } });
-  h.agent_end({ messages: [asst('ok')] });
-  h.agent_settled({ aborted: false });
-  assert.equal(statusCalls(calls).length, 1);
+test('commands that only mention a status call, other sciontool commands and non-bash tools do not trip the guard', () => {
+  for (const [cmd, tool] of [
+    ['grep -rn "sciontool status task_completed" .', 'bash'],
+    ["echo 'then run sciontool status blocked'", 'bash'],
+    ['cat notes.md | grep "sciontool status ask_user"', 'bash'],
+    ['rg sciontool\\s+status\\s+limits_exceeded harnesses/', 'bash'],
+    ['grep -n "sciontool status" README.md', 'bash'],
+    ['sciontool hook --dialect=pi', 'bash'],
+    ['sciontool status --help', 'bash'],
+    ['mysciontool status blocked "x"', 'bash'],
+    ['sciontool status blocked', 'write'],
+    ['sciontool status task_completed "x"', 'write'],
+  ]) {
+    assert.equal(settledStatusCalls(cmd, tool), 1, `${tool}: ${cmd}`);
+  }
 });
 
 // --- project trust -----------------------------------------------------------
