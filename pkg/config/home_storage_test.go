@@ -290,7 +290,7 @@ profiles:
 		map[string]V1ProfileConfig{
 			"local": {Runtime: "docker"},
 			"gke":   {Runtime: "k8s", HomeStorageBackend: "nfs", HomeStorageLeaf: "pod"},
-		}, nil, "")
+		}, nil)
 	SetGlobalSettingsOverlay(o)
 
 	check := func(vs *VersionedSettings, wantBackend, wantLeaf string) {
@@ -313,7 +313,7 @@ profiles:
 	o.Update(nil, map[string]V1ProfileConfig{
 		"local": {Runtime: "docker", DefaultTemplate: "edited"},
 		"gke":   {Runtime: "k8s", HomeStorageBackend: "nfs", HomeStorageLeaf: "pod", DefaultTemplate: "edited"},
-	}, nil, "")
+	}, nil)
 	vs, _, err = LoadGlobalSettingsWithOverlay()
 	require.NoError(t, err)
 	check(vs, "nfs", "pod")
@@ -323,7 +323,7 @@ profiles:
 	o.Update(nil, map[string]V1ProfileConfig{
 		"local": {Runtime: "docker"},
 		"gke":   {Runtime: "k8s"},
-	}, nil, "")
+	}, nil)
 	vs, _, err = LoadGlobalSettingsWithOverlay()
 	require.NoError(t, err)
 	got := vs.ResolveHomeStorage("gke")

@@ -37,7 +37,7 @@ To use the local Hub together with remote ones, see [Working with Several Hubs](
 
 When the server is up, `scion server start` asks the Hub whether onboarding is complete. If it is not, it prints and opens the [onboarding wizard](/scion/getting-started/onboarding/) (`/onboarding`); otherwise it opens the Web Dashboard. If the Hub's onboarding status cannot be read, Scion opens the wizard only when no global settings file existed before this start.
 
-**No image registry yet.** The Runtime Broker needs `image_registry` to pull agent images. If it is not set, the Hub and Web Dashboard still start, so the wizard (which sets the registry) is reachable, and the Runtime Broker is skipped with a warning. Set the registry in the wizard or with `scion config set --global image_registry <registry>`, then run `scion server restart` to start the Runtime Broker. (A hosted server still refuses to start without it.)
+**No image registry yet.** The Runtime Broker needs `image_registry` to pull agent images. If it is not set, the Hub and Web Dashboard still start, so the wizard (which sets the registry) is reachable, and the Runtime Broker is skipped with a warning. Set the registry in the wizard or with `scion config set --global image_registry <registry>`, then run `scion server restart` to start the Runtime Broker; a registry saved in the wizard counts at restart. `SCION_MAINTENANCE_IMAGE_REGISTRY` applies only to maintenance builds and does not count. (A hosted server still refuses to start without it.)
 
 **No dev-auth banner.** The CLI reaches this server with its development token, by design. The `WARNING: Development authentication enabled` banner is therefore not shown for the local workstation Hub on loopback; every other Hub that uses dev auth still shows it.
 
@@ -90,6 +90,10 @@ On macOS, Scion prefers Podman, then Docker, and uses the Apple `container` runt
 If you are using other runtimes, you may need to ensure that the containers can route traffic back to the host machine's IP address on the port where the Hub is listening (e.g., `8080`).
 
 To set the address agents use to reach the Hub, set `server.broker.container_hub_endpoint` in `settings.yaml` (for example `http://host.containers.internal:8080`). See [Hub Endpoint Resolution](/scion/reference/server-config/#hub-endpoint-resolution).
+
+## Running Many Agents on Linux
+
+With Docker or Podman, every agent runs as your user, so all agents share your user's inotify limits. The kernel default (`fs.inotify.max_user_instances=128`) can run out at around 150 agents. A workstation server does not warn at startup; run `scion doctor` to see the limits and their current use, and see [Scaling a Broker Host: inotify Limits](/scion/hosted/ha/runtime-broker/#scaling-a-broker-host-inotify-limits) for how to raise them.
 
 ## Next Steps
 

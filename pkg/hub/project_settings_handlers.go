@@ -131,9 +131,9 @@ const (
 //
 // Finally, do not try to "complete" this list from hubclient.ProjectSettings.
 // That struct also carries Bucket, Runtimes, Harnesses and Profiles, which the
-// settings endpoint accepts on PUT, silently ignores, and never returns on GET.
-// They are not annotation-backed, so their absence here is correct and loses
-// nothing on clone.
+// settings endpoint refuses on PUT (projectSettingsNotStoredFields) and never
+// returns on GET. They are not annotation-backed, so their absence here is
+// correct and loses nothing on clone.
 var projectSettingKeys = []string{
 	projectSettingDefaultTemplate,
 	projectSettingDefaultHarnessConfig,
@@ -232,6 +232,12 @@ func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, p
 			BadRequest(w, "Invalid request body: "+err.Error())
 			return
 		}
+		// Refused before anything is merged or stored: these fields decode
+		// but are never stored at the project layer.
+		if msg := projectSettingsNotStoredFieldError(body); msg != "" {
+			BadRequest(w, msg)
+			return
+		}
 		merged, present, err := mergeProjectSettingsPut(projectSettingsFromAnnotations(project), body)
 		if err != nil {
 			BadRequest(w, "Invalid request body: "+err.Error())
@@ -275,6 +281,9 @@ func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, p
 		}
 
 		s.events.PublishProjectUpdated(ctx, project)
+		if present[projectSettingsFieldActiveProfile] {
+			s.onProjectActiveProfileSaved(ctx, project)
+		}
 		writeJSON(w, http.StatusOK, projectSettingsWithWarnings{
 			ProjectSettings: projectSettingsFromAnnotations(project),
 			Warnings:        s.profileDefaultSAWarnings(ctx, project.ID, changedProfileDefaults),
@@ -579,6 +588,7 @@ const (
 	projectSettingsFieldGCPIdentityMode          = "defaultGCPIdentityMode"
 	projectSettingsFieldGCPIdentitySAID          = "defaultGCPIdentityServiceAccountID"
 	projectSettingsFieldGCPIdentitySAIDByProfile = "defaultGCPIdentityServiceAccountIDByProfile"
+	projectSettingsFieldActiveProfile            = "activeProfile"
 )
 
 // projectSettingsNullClearsFields are the fields for which JSON null clears
@@ -589,6 +599,53 @@ var projectSettingsNullClearsFields = map[string]bool{
 	projectSettingsFieldThinkingLevel:          true,
 	projectSettingsFieldTelemetryEnabled:       true,
 	projectSettingsFieldAutoExposePortsEnabled: true,
+}
+
+// projectSettingsNotStoredFields are the hubclient.ProjectSettings fields
+// the project settings endpoint does not store: bucket, runtimes, harnesses
+// and profiles are read from server and Runtime Broker settings, never
+// from a project's settings. A PUT carrying one of them with a value is
+// refused (projectSettingsNotStoredFieldError) instead of being accepted
+// and dropped.
+var projectSettingsNotStoredFields = []string{"bucket", "runtimes", "harnesses", "profiles"}
+
+// projectSettingsNotStoredFieldError returns the 400 message for a PUT body
+// that carries a projectSettingsNotStoredFields field with a non-null
+// value, or "" when it carries none. Keys match as encoding/json matches
+// them (projectSettingsFieldIndex: exact, else Unicode case folding), so
+// no spelling the decoder accepts gets through. A null value is allowed:
+// on this endpoint null means "keep", so it asks for no change. A body
+// that is not a JSON object is left to mergeProjectSettingsPut, which
+// reports it. The message names the field and never echoes its value.
+func projectSettingsNotStoredFieldError(body []byte) string {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return ""
+	}
+	var found []string
+	for _, k := range slices.Sorted(maps.Keys(raw)) {
+		if isJSONNull(raw[k]) {
+			continue
+		}
+		if i := projectSettingsFieldIndex(projectSettingsNotStoredFields, k); i >= 0 {
+			found = append(found, projectSettingsNotStoredFields[i])
+		}
+	}
+	if len(found) == 0 {
+		return ""
+	}
+	slices.Sort(found)
+	found = slices.Compact(found)
+	return fmt.Sprintf("%s: not a project setting; bucket, runtimes, harnesses and profiles are not stored at the project layer and are configured in server or Runtime Broker settings",
+		strings.Join(quoteFieldNames(found), ", "))
+}
+
+func quoteFieldNames(ss []string) []string {
+	out := make([]string, len(ss))
+	for i, s := range ss {
+		out[i] = strconv.Quote(s)
+	}
+	return out
 }
 
 // mergeProjectSettingsPut applies a project settings PUT body to the stored

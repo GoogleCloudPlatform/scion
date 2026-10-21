@@ -974,7 +974,7 @@ func TestReincarnateAgent_DryRun_ShowsDiffAndWritesNothing(t *testing.T) {
 		Scope:       store.TemplateScopeGlobal,
 		Status:      store.TemplateStatusActive,
 		ContentHash: "new-template-hash",
-		Config:      &store.TemplateConfig{Image: "template-image:v2"},
+		AgentConfig: &api.ScionConfig{Image: "template-image:v2"},
 	}
 	require.NoError(t, s.CreateTemplate(context.Background(), template))
 
@@ -1034,7 +1034,7 @@ func TestReincarnateAgent_AC2a_ExplicitImageSurvivesTemplateBump(t *testing.T) {
 		Scope:       store.TemplateScopeGlobal,
 		Status:      store.TemplateStatusActive,
 		ContentHash: "new-template-hash",
-		Config:      &store.TemplateConfig{Image: "template-image:v2"},
+		AgentConfig: &api.ScionConfig{Image: "template-image:v2"},
 	}
 	require.NoError(t, s.CreateTemplate(context.Background(), template))
 
@@ -1121,7 +1121,7 @@ func TestReincarnateAgent_TemplateImageIgnoredHarnessConfigShown(t *testing.T) {
 		Scope:       store.TemplateScopeGlobal,
 		Status:      store.TemplateStatusActive,
 		ContentHash: "template-hash",
-		Config:      &store.TemplateConfig{Image: "template-image:v1"},
+		AgentConfig: &api.ScionConfig{Image: "template-image:v1"},
 	}
 	require.NoError(t, s.CreateTemplate(context.Background(), template))
 
@@ -1181,7 +1181,7 @@ func TestReincarnateAgent_PlanUsesSettingsImageOverHarnessConfig(t *testing.T) {
 	overlay := config.NewSettingsOverlay()
 	overlay.Update(nil, nil, map[string]config.HarnessConfigEntry{
 		hcSlug: {Harness: "claude", Image: "settings-image:v1"},
-	}, "")
+	})
 	config.SetGlobalSettingsOverlay(overlay)
 	t.Cleanup(func() { config.SetGlobalSettingsOverlay(nil) })
 
@@ -1593,6 +1593,147 @@ func TestUpdateReincarnationStep_StoresCopyOfAppliedConfig(t *testing.T) {
 	assert.Equal(t, "api-key", cfg.HarnessAuth, "an echo written onto the returned agent must not leak into the caller's struct")
 }
 
+// TestUpdateReincarnationStep_ClearExit covers the step's clearExit field:
+// unset leaves the recorded exit code and reason alone, set clears both.
+func TestUpdateReincarnationStep_ClearExit(t *testing.T) {
+	ctx := context.Background()
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	recordPreviousRunExit(t, s, agent.ID, "stopped", "crashed", 1)
+
+	written, err := srv.updateReincarnationStep(ctx, agent.ID, reincarnationStepUpdate{
+		reincarnationState: store.ReincarnationStateProvisioning,
+	}, reincarnationStepMaxAttempts)
+	require.NoError(t, err)
+	assert.Equal(t, "crashed", written.ExitReason, "a step without clearExit keeps the reason")
+	require.NotNil(t, written.ExitCode, "a step without clearExit keeps the exit code")
+	assert.Equal(t, 1, *written.ExitCode)
+
+	written, err = srv.updateReincarnationStep(ctx, agent.ID, reincarnationStepUpdate{
+		reincarnationState: store.ReincarnationStateProvisioning,
+		clearExit:          true,
+	}, reincarnationStepMaxAttempts)
+	require.NoError(t, err)
+	assert.Empty(t, written.ExitReason)
+	assert.Nil(t, written.ExitCode)
+	stored, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Empty(t, stored.ExitReason, "clearExit clears the stored reason")
+	assert.Nil(t, stored.ExitCode, "clearExit clears the stored exit code")
+}
+
+// recordPreviousRunExit writes phase and a previous run's exit reason and
+// code onto the agent row, and checks that both are stored.
+func recordPreviousRunExit(t *testing.T, s store.Store, agentID, phase, reason string, code int) {
+	t.Helper()
+	ctx := context.Background()
+	a, err := s.GetAgent(ctx, agentID)
+	require.NoError(t, err)
+	a.Phase = phase
+	a.ExitReason = reason
+	a.ExitCode = &code
+	require.NoError(t, s.UpdateAgent(ctx, a))
+	got, err := s.GetAgent(ctx, agentID)
+	require.NoError(t, err)
+	require.Equal(t, reason, got.ExitReason, "the previous run's reason is stored")
+	require.NotNil(t, got.ExitCode, "the previous run's exit code is stored")
+	require.Equal(t, code, *got.ExitCode)
+}
+
+// exitFieldsAtStop records the agent row's exit fields as the worker's
+// stop dispatch sees them, that is, after the stopping step's write.
+type exitFieldsAtStop struct {
+	mu     sync.Mutex
+	seen   bool
+	err    error
+	reason string
+	code   *int
+}
+
+// observeExitFieldsAtStop installs a stop hook on disp that reads the
+// agent row.
+func observeExitFieldsAtStop(t *testing.T, s store.Store, disp *reincarnateTestDispatcher, agentID string) *exitFieldsAtStop {
+	t.Helper()
+	obs := &exitFieldsAtStop{}
+	disp.mu.Lock()
+	disp.stopHook = func() {
+		a, err := s.GetAgent(context.Background(), agentID)
+		obs.mu.Lock()
+		defer obs.mu.Unlock()
+		obs.seen = true
+		obs.err = err
+		if err != nil {
+			return
+		}
+		obs.reason = a.ExitReason
+		obs.code = a.ExitCode
+	}
+	disp.mu.Unlock()
+	return obs
+}
+
+// assertCleared checks that the stop dispatch ran, read the agent row and
+// saw no exit fields.
+func (o *exitFieldsAtStop) assertCleared(t *testing.T) {
+	t.Helper()
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	require.True(t, o.seen, "the stop dispatch ran")
+	require.NoError(t, o.err, "the stop hook read the agent row")
+	assert.Empty(t, o.reason, "the stopping step clears the previous run's exit reason")
+	assert.Nil(t, o.code, "the stopping step clears the previous run's exit code")
+}
+
+// TestReincarnateAgent_ClearsPreviousRunExitFields covers
+// ptone/scion#5282: a reincarnation clears the previous run's exit code and
+// reason when it begins, so the new generation never carries them.
+func TestReincarnateAgent_ClearsPreviousRunExitFields(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	recordPreviousRunExit(t, s, agent.ID, "stopped", "oom_killed", 137)
+	obs := observeExitFieldsAtStop(t, s, disp, agent.ID)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateCompleted, r.State, r.Error)
+	obs.assertCleared(t)
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Empty(t, final.ExitReason, "the new generation does not carry the previous run's exit reason")
+	assert.Nil(t, final.ExitCode, "the new generation does not carry the previous run's exit code")
+}
+
+// TestReincarnateAgent_StopFailureClearsExitFields: a reincarnation whose
+// stop fails has already begun, so the previous run's exit fields stay
+// cleared, and the failure still records why in the phase and message.
+func TestReincarnateAgent_StopFailureClearsExitFields(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.stopErr = fmt.Errorf("broker unreachable")
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	recordPreviousRunExit(t, s, agent.ID, "stopped", "crashed", 1)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "error", final.Phase, "the failed step still sets phase error")
+	assert.Contains(t, final.Message, "reincarnation failed: stop failed", "the failed step still records why")
+	assert.Empty(t, final.ExitReason, "the previous run's exit reason stays cleared")
+	assert.Nil(t, final.ExitCode, "the previous run's exit code stays cleared")
+}
+
 // TestCopyBrokerEcho covers the helper the worker takes broker echoes with:
 // non-empty fields win, empty fields leave dst alone, and the image is only
 // taken when asked.
@@ -1736,12 +1877,20 @@ func TestReincarnateAgent_StartEchoPersistedAtCompletion(t *testing.T) {
 
 // TestDispatchImageRegistry_ReadsTheHTTPDispatcher proves the reincarnate
 // path reads the registry from the HTTP dispatcher itself, the value it
-// rewrites images with at send time.
+// rewrites images with at send time, for the agent's broker and saved
+// profile (ptone/scion#3916).
 func TestDispatchImageRegistry_ReadsTheHTTPDispatcher(t *testing.T) {
 	d := &HTTPAgentDispatcher{}
-	d.SetImageRegistryProvider(func() string { return "ghcr.io/test-org" })
-	assert.Equal(t, "ghcr.io/test-org", dispatchImageRegistry(d))
-	assert.Equal(t, "", dispatchImageRegistry(nil), "a dispatcher that does not rewrite images reports no registry")
+	var gotBroker, gotProfile string
+	d.SetImageRegistryProvider(func(brokerID, profile string) string {
+		gotBroker, gotProfile = brokerID, profile
+		return "ghcr.io/test-org"
+	})
+	agent := &store.Agent{RuntimeBrokerID: "broker-1", AppliedConfig: &store.AgentAppliedConfig{Profile: "k8s"}}
+	assert.Equal(t, "ghcr.io/test-org", dispatchImageRegistry(d, agent))
+	assert.Equal(t, "broker-1", gotBroker, "the agent's broker")
+	assert.Equal(t, "k8s", gotProfile, "the agent's saved profile")
+	assert.Equal(t, "", dispatchImageRegistry(nil, agent), "a dispatcher that does not rewrite images reports no registry")
 }
 
 // TestReincarnateAgent_LegacyAgent_DropsSkillsWithWarning covers the legacy
@@ -1785,16 +1934,15 @@ func TestReincarnateAgent_LegacyAgent_DropsSkillsWithWarning(t *testing.T) {
 	assert.True(t, foundDroppedSkillsWarning, "expected dropped-skills warning naming the ref, got %v", resp.Plan.Warnings)
 }
 
-// TestReincarnateAgent_LegacyAgent_TemplateEnvV1ToV2 is the AC-2a test the
-// design's A1 addendum 2 calls for: a legacy
-// agent's InlineConfig.Env is indistinguishable-by-inspection from a mix of
-// explicit keys and template defaults aliased in at create time
-// (buildAppliedConfig aliases AppliedConfig.Env to InlineConfig.Env). The
-// legacy fallback must drop every key the CURRENT template defines — so a
-// template env default that changed from v1 (at create) to v2 (at
-// reincarnate) comes out as v2, not the stale v1 — and keep, with a warning,
-// any key the template does not define.
-func TestReincarnateAgent_LegacyAgent_TemplateEnvV1ToV2(t *testing.T) {
+// TestReincarnateAgent_LegacyAgent_TemplateEnvResidueKept: a legacy agent
+// (no CreateInputs) whose InlineConfig.Env holds a key an older hub aliased
+// in from the template keeps it as explicit env, with the "may be stale"
+// warning, alongside its genuinely explicit keys. The drop-only filter keyed
+// on the template row's stored env is retired with that column, and it is
+// not rekeyed on the template's file env (its AgentConfig snapshot), which
+// would drop a requester's own key that shares a name with it
+// (ptone/scion#4224). The reincarnation still succeeds.
+func TestReincarnateAgent_LegacyAgent_TemplateEnvResidueKept(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
 
@@ -1806,9 +1954,8 @@ func TestReincarnateAgent_LegacyAgent_TemplateEnvV1ToV2(t *testing.T) {
 		Scope:       store.TemplateScopeGlobal,
 		Status:      store.TemplateStatusActive,
 		ContentHash: "template-hash-v2",
-		Config: &store.TemplateConfig{
-			Env: map[string]string{"TEMPLATE_ENV_KEY": "v2"},
-		},
+		// The template's own file defines the same key.
+		AgentConfig: &api.ScionConfig{Env: map[string]string{"TEMPLATE_ENV_KEY": "v2"}},
 	}
 	require.NoError(t, s.CreateTemplate(context.Background(), template))
 
@@ -1840,33 +1987,27 @@ func TestReincarnateAgent_LegacyAgent_TemplateEnvV1ToV2(t *testing.T) {
 	var resp ReincarnateAgentResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 
-	// The plan's env diff must show TEMPLATE_ENV_KEY removed: the legacy
-	// residue is dropped, and the hub no longer copies the template's env
-	// into the agent config (ptone/scion#4222); the template's own file
-	// supplies it on the broker. AGENT_SPECIFIC_KEY survives untouched
-	// (absent from added/removed/changed).
-	assert.Contains(t, resp.Plan.EnvKeys.Removed, "TEMPLATE_ENV_KEY")
-	assert.NotContains(t, resp.Plan.EnvKeys.Changed, "AGENT_SPECIFIC_KEY")
-	assert.NotContains(t, resp.Plan.EnvKeys.Removed, "AGENT_SPECIFIC_KEY")
+	// Both keys are replayed as explicit env, so neither leaves the plan's
+	// env diff.
+	for _, k := range []string{"TEMPLATE_ENV_KEY", "AGENT_SPECIFIC_KEY"} {
+		assert.NotContains(t, resp.Plan.EnvKeys.Removed, k)
+		assert.NotContains(t, resp.Plan.EnvKeys.Changed, k)
+	}
 
-	foundDroppedWarning := false
 	foundKeptWarning := false
 	for _, w := range resp.Plan.Warnings {
-		// The old value ("v1") must NEVER appear in the plan — it
-		// came from a legacy agent's live env, indistinguishable from a
-		// genuine per-agent secret that happens to share this key name. The
-		// template's value is not shown either: the hub no longer supplies it.
-		if containsAll(w, "dropped", "TEMPLATE_ENV_KEY") {
-			assert.NotContains(t, w, "v1", "the old value must be masked, never shown in the plan")
-			assert.NotContains(t, w, "v2", "the template value is not part of the plan")
-			foundDroppedWarning = true
-		}
-		if containsAll(w, "kept", "AGENT_SPECIFIC_KEY") {
+		assert.False(t, containsAll(w, "dropped", "env key"), "no env key is dropped any more, got %q", w)
+		if containsAll(w, "kept 2 env key(s) as explicit", "may be a stale default", "AGENT_SPECIFIC_KEY, TEMPLATE_ENV_KEY") {
+			assert.NotContains(t, w, "v1", "values are never shown in the plan")
 			foundKeptWarning = true
 		}
 	}
-	assert.True(t, foundDroppedWarning, "expected a warning naming dropped TEMPLATE_ENV_KEY, got %v", resp.Plan.Warnings)
-	assert.True(t, foundKeptWarning, "expected a warning flagging AGENT_SPECIFIC_KEY as kept-but-uncertain, got %v", resp.Plan.Warnings)
+	assert.True(t, foundKeptWarning, "expected the kept-as-explicit warning naming both keys, got %v", resp.Plan.Warnings)
+
+	fresh, _, err := srv.buildFreshAppliedConfig(context.Background(), agent, project, "")
+	require.NoError(t, err)
+	assert.Equal(t, "v1", fresh.Env["TEMPLATE_ENV_KEY"], "the residue is replayed as explicit env, not replaced from the template")
+	assert.Equal(t, "keep-me", fresh.Env["AGENT_SPECIFIC_KEY"])
 }
 
 // TestReincarnateAgent_FreshConfigDoesNotAliasEnv proves design §3.3 A1
@@ -1886,7 +2027,7 @@ func TestReincarnateAgent_FreshConfigDoesNotAliasEnv(t *testing.T) {
 		Scope:       store.TemplateScopeGlobal,
 		Status:      store.TemplateStatusActive,
 		ContentHash: "template-hash-noalias",
-		Config: &store.TemplateConfig{
+		AgentConfig: &api.ScionConfig{
 			Env: map[string]string{"TEMPLATE_DEFAULT_KEY": "from-template"},
 		},
 	}
@@ -3488,7 +3629,7 @@ func TestReincarnateAgent_ChangesLineWiring(t *testing.T) {
 			Scope:       store.TemplateScopeGlobal,
 			Status:      store.TemplateStatusActive,
 			ContentHash: "new-template-hash",
-			Config:      &store.TemplateConfig{Image: "template-image:v2"},
+			AgentConfig: &api.ScionConfig{Image: "template-image:v2"},
 		}
 		require.NoError(t, s.CreateTemplate(context.Background(), template))
 
@@ -3549,7 +3690,7 @@ func TestReincarnateAgent_ChangesLineWiring(t *testing.T) {
 			Scope:       store.TemplateScopeGlobal,
 			Status:      store.TemplateStatusActive,
 			ContentHash: "same-template-hash",
-			Config:      &store.TemplateConfig{Image: "old-image:v1"},
+			AgentConfig: &api.ScionConfig{Image: "old-image:v1"},
 		}
 		require.NoError(t, s.CreateTemplate(context.Background(), template))
 
@@ -5696,7 +5837,7 @@ harness_configs:
 				Scope:       store.TemplateScopeGlobal,
 				Status:      store.TemplateStatusActive,
 				ContentHash: "new-template-hash",
-				Config:      &store.TemplateConfig{Image: "template-image:v2"},
+				AgentConfig: &api.ScionConfig{Image: "template-image:v2"},
 			}
 			require.NoError(t, s.CreateTemplate(context.Background(), template))
 

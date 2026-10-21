@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -74,6 +75,12 @@ func (s *Server) startConduitStreamAuthz(ctx context.Context, clk clock.Clock, i
 		UserStreamAuthzMax: s.config.ConduitUserStreamAuthzMax,
 		Metrics:            serverConduitAuthzMetrics{s},
 		Logger:             slog.Default().With("subsystem", "hub.conduit"),
+		Renew:              s.renewConduitUserStream,
+		Enforce: func() bool {
+			return s.conduitTargetStreamDeadlines() == config.ConduitTargetStreamDeadlinesEnforce
+		},
+		// A sweep shares broker reads among its checks (conduitBrokerMemo).
+		SweepContext: withConduitBrokerMemo,
 	})
 	if !s.conduitAuthz.CompareAndSwap(nil, a) {
 		return nil, nil, errors.New("conduit stream re-check already started")
@@ -81,6 +88,8 @@ func (s *Server) startConduitStreamAuthz(ctx context.Context, clk clock.Clock, i
 	runCtx, cancel := context.WithCancel(ctx)
 	a.Start(runCtx)
 	s.bindConduitAuthzEvents()
+	s.bindConduitGrantKeyEvents()
+	go s.runConduitGrantKeySettle(runCtx, a.cfg.Clock)
 	stop = func() {
 		cancel()
 		s.conduitAuthz.CompareAndSwap(a, nil)
@@ -117,7 +126,7 @@ func (s *Server) bindConduitAuthzEvents() {
 	var removeListen func()
 	if ln, ok := events.(conduitListenNotifier); ok {
 		removeListen = ln.AddOnListen(func() {
-			a.Recheck(ctx, conduitAuthzTriggerResync, conduitAuthzMatch{})
+			a.Recheck(withConduitBrokerMemo(ctx), conduitAuthzTriggerResync, conduitAuthzMatch{})
 		})
 	}
 	ch, unsubscribe := events.Subscribe(conduitAuthzEventPatterns...)
@@ -143,7 +152,8 @@ func (s *Server) bindConduitAuthzEvents() {
 		go q.receive(ctx, ch)
 		go q.work(ctx, a)
 	}
-	a.Recheck(ctx, conduitAuthzTriggerResync, conduitAuthzMatch{})
+	// A resync is a full pass: like a sweep, it shares broker reads.
+	a.Recheck(withConduitBrokerMemo(ctx), conduitAuthzTriggerResync, conduitAuthzMatch{})
 }
 
 // conduitNotifyMaxPending bounds the distinct pending notify matches; past
@@ -308,34 +318,19 @@ func (s *Server) trackConduitUserStream(st *conduitUserStream) (untrack func()) 
 	return a.Track(st)
 }
 
-// checkConduitUserStream evaluates whether st's principal still holds the
-// authorization its stream was opened with, against current state: the
-// agent row, then authorizeConduitUserStream (the decision the tunnel open
-// path makes, with the actions conduitStreamActions requires for st's kind
-// and origin). Every read goes to s.store, the primary store (the hub has
-// no read-replica routing).
+// checkConduitUserStream is the in-process entry point of the stream
+// evaluation (design v2.21.40 §3.9, One evaluation, three entry points):
+// it evaluates st's principal against current state with
+// evaluateConduitStream, from what this node recorded at open (the
+// principal, the agent and its project, the kind, origin and port), and
+// adds no decision of its own. Every read goes to s.store, the primary
+// store (the hub has no read-replica routing).
 //
 // A store or authorization lookup failure is unavailable, never denied: a
-// deny is acted on only while the store is reachable.
+// deny is acted on only while the store answers for the agent
+// (conduitConfirmAgentPresent).
 func (s *Server) checkConduitUserStream(ctx context.Context, st *conduitUserStream) (conduitAuthzVerdict, string) {
-	agent, err := s.store.GetAgent(ctx, st.AgentID)
-	switch {
-	case errors.Is(err, store.ErrNotFound):
-		return conduitAuthzTargetGone, "agent not found"
-	case err != nil:
-		return conduitAuthzUnavailable, "agent lookup failed"
-	case !agent.DeletedAt.IsZero():
-		return conduitAuthzTargetGone, "agent deleted"
-	}
-
-	verdict, reason, _ := s.authorizeConduitUserStream(ctx, conduitUserStreamAuthz{
-		Identity:    st.Identity,
-		Agent:       agent,
-		Kind:        st.Kind,
-		ViaTunnel:   st.ViaTunnel,
-		Port:        st.Port,
-		ConfirmDeny: func() bool { return s.conduitAuthzStoreReachable(ctx, st) },
-	})
+	verdict, reason, _ := s.evaluateConduitStream(ctx, s.recordedStreamEval(ctx, st))
 	return verdict, reason
 }
 
@@ -373,6 +368,10 @@ type conduitUserStreamAuthz struct {
 	ViaTunnel bool
 	// Port is the agent-local port of a tcp stream.
 	Port int
+	// DeferTCPTarget leaves the tcp port check to the caller. Only the
+	// tunnel open sets it, so that a stopped agent is reported before the
+	// port it no longer exposes. Re-checks never set it.
+	DeferTCPTarget bool
 	// ConfirmDeny, if set, is asked before an action deny is reported;
 	// false makes the decision unavailable instead.
 	ConfirmDeny func() bool
@@ -408,8 +407,12 @@ func (s *Server) authorizeConduitUserStream(ctx context.Context, req conduitUser
 	if len(actions) == 0 {
 		return conduitAuthzDenied, "unknown stream kind", fmt.Errorf("%w: unknown stream kind %q", errConduitForbidden, req.Kind)
 	}
+	authorize := s.authorizeConduitAction
+	if hook := s.conduitAuthorizeActionTestHook; hook != nil {
+		authorize = hook
+	}
 	for _, action := range actions {
-		if err := s.authorizeConduitAction(ctx, req.Identity, req.Agent, action); err != nil {
+		if err := authorize(ctx, req.Identity, req.Agent, action); err != nil {
 			if errors.Is(err, errConduitAuthzUnavailable) {
 				return conduitAuthzUnavailable, "authorization lookup failed", err
 			}
@@ -419,7 +422,7 @@ func (s *Server) authorizeConduitUserStream(ctx context.Context, req conduitUser
 			return conduitAuthzDenied, "permission no longer held", err
 		}
 	}
-	if req.Kind == grant.StreamKindTCP {
+	if req.Kind == grant.StreamKindTCP && !req.DeferTCPTarget {
 		if err := s.authorizeConduitTCPTarget(req.Agent, req.Port); err != nil {
 			return conduitAuthzDenied, "port no longer an authorized target", err
 		}
@@ -446,13 +449,6 @@ func (s *Server) conduitUserStatus(ctx context.Context, identity Identity, userI
 		return conduitAuthzDenied, "user suspended"
 	}
 	return conduitAuthzAllowed, ""
-}
-
-// conduitAuthzStoreReachable confirms the store answers after a deny, so
-// that a deny observed during a store fault is not acted on.
-func (s *Server) conduitAuthzStoreReachable(ctx context.Context, st *conduitUserStream) bool {
-	_, err := s.store.GetAgent(ctx, st.AgentID)
-	return err == nil && ctx.Err() == nil
 }
 
 // conduitIdentityHasUserRow reports whether identity is a local user whose

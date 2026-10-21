@@ -3569,8 +3569,8 @@ func TestParity_T2_TemplateGlobalAndProjectScoped(t *testing.T) {
 	addToHubMembersGroup(t, s, f.userID)
 	globalTplID := tid("t2-global-tpl")
 	projectTplID := tid("t2-project-tpl")
-	require.NoError(t, s.CreateTemplate(ctx, &store.Template{ID: globalTplID, Name: "t2g", Slug: "t2g", Harness: "claude", Image: "img", Scope: store.TemplateScopeGlobal}))
-	require.NoError(t, s.CreateTemplate(ctx, &store.Template{ID: projectTplID, Name: "t2p", Slug: "t2p", Harness: "claude", Image: "img", Scope: store.TemplateScopeProject, ScopeID: f.projectID}))
+	require.NoError(t, s.CreateTemplate(ctx, &store.Template{ID: globalTplID, Name: "t2g", Slug: "t2g", Harness: "claude", Scope: store.TemplateScopeGlobal}))
+	require.NoError(t, s.CreateTemplate(ctx, &store.Template{ID: projectTplID, Name: "t2p", Slug: "t2p", Harness: "claude", Scope: store.TemplateScopeProject, ScopeID: f.projectID}))
 
 	t.Run("global", func(t *testing.T) {
 		actions, _ := runBatchParity(t, s, f.user, "template", templateResource(&store.Template{ID: globalTplID, Scope: store.TemplateScopeGlobal}))

@@ -389,6 +389,35 @@ type CreateBrokerResponse struct {
 	// Reissued is true when an earlier, unused join token for this broker
 	// was replaced and no longer works.
 	Reissued bool `json:"reissued,omitempty"`
+	// KeptSettings lists requested values the Hub did not apply because
+	// the stored value is kept (fields managed through the update API).
+	KeptSettings []KeptSetting `json:"keptSettings,omitempty"`
+}
+
+// KeptSetting is a requested registration value the Hub kept unchanged.
+type KeptSetting struct {
+	// Field is gcpHostServiceAccountEmail, gcpHostProjectId or labels.<key>.
+	Field          string `json:"field"`
+	StoredValue    string `json:"storedValue"`
+	RequestedValue string `json:"requestedValue"`
+	// Reason is "set"; "pinned" for a value cleared through the update
+	// API; or "email_required" for a project sent without a service account.
+	Reason string `json:"reason"`
+}
+
+// Message is the one-line operator message for a kept setting.
+func (k KeptSetting) Message() string {
+	if k.Reason == "email_required" {
+		return fmt.Sprintf("not applied %s=%q: send gcpHostServiceAccountEmail together with the project", k.Field, k.RequestedValue)
+	}
+	return fmt.Sprintf("kept %s=%q (requested %q); change it through the Runtime Broker update API (PATCH /api/v1/runtime-brokers/{id})", k.Field, k.StoredValue, k.RequestedValue)
+}
+
+// PrintKeptSettings writes one Message line per kept setting to w.
+func PrintKeptSettings(w io.Writer, kept []KeptSetting) {
+	for _, k := range kept {
+		_, _ = fmt.Fprintln(w, k.Message())
+	}
 }
 
 // JoinBrokerRequest is the request to complete broker registration.

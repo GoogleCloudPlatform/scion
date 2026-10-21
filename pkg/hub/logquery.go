@@ -82,7 +82,7 @@ type LogQueryOptions struct {
 	Until         time.Time
 	Severity      string
 	PageToken     string
-	Sources       []string // optional: "hub", "broker", "agent", "messages" — restricts to matching logs/subsystems
+	Sources       []string // optional: "hub", "broker", "agent", "messages", "artifacts" — restricts to matching logs/subsystems
 	Search        string   // optional: substring match on jsonPayload.message
 	HubName       string   // optional: filter by hub label to scope logs to this hub instance
 }
@@ -196,8 +196,8 @@ func BuildLogFilter(opts LogQueryOptions, projectID ...string) string {
 		// not in the whitelist.
 		pid := projectID[0]
 		parts = append(parts, fmt.Sprintf(
-			`(logName = "projects/%s/logs/%s" OR logName = "projects/%s/logs/%s" OR logName = "projects/%s/logs/%s")`,
-			pid, logging.ServerLogID, pid, logging.AgentLogID, pid, logging.MessageLogID))
+			`(logName = "projects/%s/logs/%s" OR logName = "projects/%s/logs/%s" OR logName = "projects/%s/logs/%s" OR logName = "projects/%s/logs/%s")`,
+			pid, logging.ServerLogID, pid, logging.AgentLogID, pid, logging.MessageLogID, pid, logging.ArtifactLogID))
 	}
 	if opts.AgentID != "" && opts.LogID == logging.MessageLogID {
 		// For message logs, match where this agent is either the recipient
@@ -261,6 +261,9 @@ func BuildLogFilter(opts LogQueryOptions, projectID ...string) string {
 			case "messages":
 				srcParts = append(srcParts, fmt.Sprintf(
 					`logName = "projects/%s/logs/%s"`, pid, logging.MessageLogID))
+			case "artifacts":
+				srcParts = append(srcParts, fmt.Sprintf(
+					`logName = "projects/%s/logs/%s"`, pid, logging.ArtifactLogID))
 			}
 		}
 		if len(srcParts) > 0 {

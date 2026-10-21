@@ -144,41 +144,6 @@ func (s *Store) Load() (*BrokerCredentials, error) {
 	return &creds, nil
 }
 
-// Save writes credentials to the file with proper permissions.
-func (s *Store) Save(creds *BrokerCredentials) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if creds == nil {
-		return errors.New("credentials cannot be nil")
-	}
-	if creds.BrokerID == "" {
-		return errors.New("brokerId is required")
-	}
-	if creds.SecretKey == "" {
-		return errors.New("secretKey is required")
-	}
-
-	// Ensure parent directory exists with restricted permissions
-	dir := filepath.Dir(s.path)
-	if err := os.MkdirAll(dir, DirMode); err != nil {
-		return fmt.Errorf("failed to create credentials directory: %w", err)
-	}
-
-	// Marshal with pretty printing for readability
-	data, err := json.MarshalIndent(creds, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal credentials: %w", err)
-	}
-
-	// Write with restricted permissions (owner read/write only)
-	if err := os.WriteFile(s.path, data, FileMode); err != nil {
-		return fmt.Errorf("failed to write credentials file: %w", err)
-	}
-
-	return nil
-}
-
 // Delete removes the credentials file.
 func (s *Store) Delete() error {
 	s.mu.Lock()
@@ -205,19 +170,6 @@ func (s *Store) GetSecretKey() ([]byte, error) {
 	}
 
 	return secretKey, nil
-}
-
-// SaveFromJoinResponse creates and saves credentials from a join response.
-// This is a convenience method for the common use case of saving credentials
-// immediately after completing a broker join.
-func (s *Store) SaveFromJoinResponse(brokerID, secretKey, hubEndpoint string) error {
-	creds := &BrokerCredentials{
-		BrokerID:     brokerID,
-		SecretKey:    secretKey,
-		HubEndpoint:  hubEndpoint,
-		RegisteredAt: time.Now(),
-	}
-	return s.Save(creds)
 }
 
 // ModTime returns the modification time of the credentials file.

@@ -156,7 +156,7 @@ func newBrokerConduitFixture(t *testing.T, target *api.RuntimeTargetDescriptor, 
 	_, _ = rand.Read(peerSecret)
 	auth, err := relay.NewHMACPeerAuthFromSecret(relay.HMACPeerAuthConfig{Secret: peerSecret, SelfID: "hub-a"})
 	require.NoError(t, err)
-	opts := ConduitRelayOptions{InstanceID: "hub-a", PeerAuth: auth, Store: f.regStore, Registry: registry.New(f.regStore, registry.Config{}), Clock: clock.NewFake(time.Now())}
+	opts := ConduitRelayOptions{InstanceID: "hub-a", PeerAuth: auth, Store: f.regStore, Registry: registry.New(f.regStore, registry.Config{}), Clock: clock.NewFake(time.Now()), sessionWriteWait: conduitFixtureWriteWait}
 	if mod != nil {
 		mod(&opts)
 	}
@@ -170,6 +170,15 @@ func newBrokerConduitFixture(t *testing.T, target *api.RuntimeTargetDescriptor, 
 	t.Cleanup(f.public.Close)
 	return f
 }
+
+// conduitFixtureWriteWait is the relay session write deadline of the conduit
+// fixtures. The deadline runs on the fixtures' fake relay clock, so it sits
+// far above any single Advance a test makes: an advance of
+// conduit.DefaultWriteWait or more would otherwise fire the deadline of a
+// write in flight and close the session (ptone/scion#5210). It also
+// stretches the relay's backstop after a GoAway from the agent (drain
+// deadline + WriteWait); no fixture test relies on that backstop.
+const conduitFixtureWriteWait = 7 * 24 * time.Hour
 
 // setConduitExperiment overrides hub.conduit on srv the way an admin toggle
 // would; every other experiment keeps its production registry value.
@@ -242,6 +251,9 @@ var testGrantEncryptionKey = secret.DeriveLocalEncryptionKey("test-shared-secret
 func assertNoKeyMaterial(t *testing.T, s string, ring *grant.KeyRing) {
 	t.Helper()
 	for _, k := range ring.Keys {
+		if len(k.Seed) == 0 {
+			continue // the seed was dropped; only the public half remains
+		}
 		for _, enc := range []string{base64.StdEncoding.EncodeToString(k.Seed), base64.RawURLEncoding.EncodeToString(k.Seed), fmt.Sprintf("%x", k.Seed)} {
 			assert.NotContains(t, s, enc)
 		}
@@ -367,7 +379,14 @@ type conduitProxyFixture struct {
 
 func newConduitProxyFixture(t *testing.T, app http.Handler) *conduitProxyFixture {
 	t.Helper()
-	f := &conduitProxyFixture{relayFixture: newRelayFixture(t, nil), app: newProxyApp(t, app)}
+	return newConduitProxyFixtureServer(t, app, nil)
+}
+
+// newConduitProxyFixtureServer is newConduitProxyFixture with srvMod applied
+// to the server before it starts serving (newRelayFixtureServer).
+func newConduitProxyFixtureServer(t *testing.T, app http.Handler, srvMod func(*Server)) *conduitProxyFixture {
+	t.Helper()
+	f := &conduitProxyFixture{relayFixture: newRelayFixtureServer(t, srvMod, nil), app: newProxyApp(t, app)}
 	f.base = f.public.URL
 	setConduitExperiment(t, f.srv, true)
 	require.True(t, f.srv.conduitServing())
@@ -414,7 +433,18 @@ type relayFixture struct {
 
 func newRelayFixture(t *testing.T, mod func(*ConduitRelayOptions)) *relayFixture {
 	t.Helper()
+	return newRelayFixtureServer(t, nil, mod)
+}
+
+// newRelayFixtureServer is newRelayFixture with srvMod, when set, applied to
+// the server before the relay starts and before the public handler serves,
+// so a test can configure it without racing the serving goroutines.
+func newRelayFixtureServer(t *testing.T, srvMod func(*Server), mod func(*ConduitRelayOptions)) *relayFixture {
+	t.Helper()
 	f := &relayFixture{conduitFixture: newConduitFixture(t)}
+	if srvMod != nil {
+		srvMod(f.srv)
+	}
 	ctx := context.Background()
 
 	agent := &store.Agent{
@@ -435,7 +465,11 @@ func newRelayFixture(t *testing.T, mod func(*ConduitRelayOptions)) *relayFixture
 	_, _ = rand.Read(secret)
 	auth, err := relay.NewHMACPeerAuthFromSecret(relay.HMACPeerAuthConfig{Secret: secret, SelfID: "hub-a"})
 	require.NoError(t, err)
-	opts := ConduitRelayOptions{InstanceID: "hub-a", PeerAuth: auth, Store: f.regStore, Registry: f.reg, Clock: clock.NewFake(time.Now())}
+	// The relay clock also drives the stream re-check and its renewal
+	// driver, so it starts at the clock the fixture mints grants on: a
+	// grant's authz_until is then ahead of it, as in production, where both
+	// read the same time.
+	opts := ConduitRelayOptions{InstanceID: "hub-a", PeerAuth: auth, Store: f.regStore, Registry: f.reg, Clock: clock.NewFake(f.clock.Now()), sessionWriteWait: conduitFixtureWriteWait}
 	if mod != nil {
 		mod(&opts)
 	}
@@ -995,8 +1029,8 @@ func watchStream(st *conduitUserStream) *streamCalls {
 		closeFn(code, reason)
 	}
 	if renewFn != nil {
-		st.Renew = func() error {
-			err := renewFn()
+		st.Renew = func(g []byte) error {
+			err := renewFn(g)
 			c.mu.Lock()
 			c.renews = append(c.renews, err)
 			c.mu.Unlock()

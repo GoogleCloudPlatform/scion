@@ -36,6 +36,14 @@ func TestClassifySource(t *testing.T) {
 			expected: "messages",
 		},
 		{
+			name: "scion-artifacts log name",
+			entry: CloudLogEntry{
+				LogName: "projects/my-project/logs/scion-artifacts",
+				Labels:  map[string]string{"component": "scion-hub"},
+			},
+			expected: "artifacts",
+		},
+		{
 			name: "scion-agents log name",
 			entry: CloudLogEntry{
 				LogName: "projects/my-project/logs/scion-agents",
@@ -229,6 +237,16 @@ func TestBuildLogFilter_Sources(t *testing.T) {
 			projectID: "my-project",
 			expected: []string{
 				`scion-messages`,
+			},
+		},
+		{
+			name: "artifacts source filter",
+			opts: LogQueryOptions{
+				Sources: []string{"artifacts"},
+			},
+			projectID: "my-project",
+			expected: []string{
+				` AND (logName = "projects/my-project/logs/scion-artifacts")`,
 			},
 		},
 		{

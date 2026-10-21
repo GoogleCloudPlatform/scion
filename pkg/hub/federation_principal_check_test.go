@@ -1,0 +1,317 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build !no_sqlite
+
+package hub
+
+import (
+	"net/http"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// The principal check on federation credentials (ptone/scion#5080): a
+// credential naming a test identity or the platform service account is
+// refused, whatever its claims say. The peer signs these credentials with
+// its own key, as a peer that issues them anyway would.
+
+// peerTokPlatformAuthSA is the receiving hub's platform service account in
+// these tests.
+const peerTokPlatformAuthSA = "platform-transport@hub-recv.iam.gserviceaccount.com"
+
+// A user access credential from a peer hub naming a test identity is
+// refused, for every reserved test identity domain.
+func TestFederationPrincipalCheck_TestIdentityRefused(t *testing.T) {
+	f := newPeerTokFixture(t, nil)
+	assertPeerTokUser(t, f, f.signAsPeer(t, peerUserClaims("sub-human", "human@corp.com")), "sub-human", "human@corp.com")
+
+	for name, email := range map[string]string{
+		"member fixture":      "driver-1@scion-fixture.invalid",
+		"hub admin":           "driver-2@scion-test-hub-admin.invalid",
+		"super admin":         "driver-3@scion-test-super-admin.invalid",
+		"mixed case":          "Driver-4@SCION-Fixture.Invalid",
+		"subdomain":           "driver-5@run.scion-fixture.invalid",
+		"federated synthetic": "fed+abc123@idp.example.com.invalid",
+	} {
+		t.Run(name, func(t *testing.T) {
+			assertPeerTokRefused(t, f, f.signAsPeer(t, peerUserClaims("sub-"+name, email)))
+		})
+	}
+}
+
+// The reserved domains match by exact domain or subdomain suffix
+// (store.IsReservedTestIdentityEmail, emailInDomain in pkg/store), not by
+// substring: look-alike domains are accepted like any other email.
+func TestFederationPrincipalCheck_LookAlikeDomainsAccepted(t *testing.T) {
+	f := newPeerTokFixture(t, nil)
+	for _, email := range []string{
+		"a@scion-fixture.invalid.example.com",
+		"b@xscion-fixture.invalid",
+		"c@scion-test-hub-admin.invalid.example.com",
+		"d@xscion-test-hub-admin.invalid",
+		"e@scion-test-super-admin.invalid.example.com",
+		"f@xscion-test-super-admin.invalid",
+	} {
+		t.Run(email, func(t *testing.T) {
+			assertPeerTokUser(t, f, f.signAsPeer(t, peerUserClaims("sub-"+email, email)), "sub-"+email, email)
+		})
+	}
+}
+
+// A credential naming this hub's platform service account is refused
+// (email compared case-insensitively); a normal user's credential is still
+// accepted with the account configured. On the peer hub user access path
+// the service account email rule in extractHubUserClaims refuses the
+// account first, so the issuer_type user cases are the ones that show the
+// platform service account rule on its own: there, other service account
+// emails are still accepted.
+func TestFederationPrincipalCheck_PlatformServiceAccountRefused(t *testing.T) {
+	f := newPeerTokFixture(t, nil)
+	f.srv.authConfig.PlatformAuthSA = peerTokPlatformAuthSA
+
+	assertPeerTokRefused(t, f, f.signAsPeer(t, peerUserClaims("sub-platform", peerTokPlatformAuthSA)))
+	assertPeerTokRefused(t, f, f.signAsPeer(t, peerUserClaims("sub-platform-upper", "Platform-Transport@HUB-RECV.iam.gserviceaccount.com")))
+
+	assertPeerTokUser(t, f, f.signAsPeer(t, peerUserClaims("sub-human", "human@corp.com")), "sub-human", "human@corp.com")
+
+	t.Run("issuer_type user: platform service account", func(t *testing.T) {
+		assertPeerTokRefused(t, f, f.userIssuerToken(t, "idp-platform", peerTokPlatformAuthSA))
+	})
+	t.Run("issuer_type user: platform service account, mixed case", func(t *testing.T) {
+		assertPeerTokRefused(t, f, f.userIssuerToken(t, "idp-platform-upper", "Platform-Transport@HUB-RECV.iam.gserviceaccount.com"))
+	})
+	t.Run("issuer_type user: test identity", func(t *testing.T) {
+		assertPeerTokRefused(t, f, f.userIssuerToken(t, "idp-fixture", "driver-1@scion-fixture.invalid"))
+	})
+	t.Run("issuer_type user: other service account accepted", func(t *testing.T) {
+		identity, _, rec := f.through(t, f.userIssuerToken(t, "idp-worker", "worker@proj.iam.gserviceaccount.com"))
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		fu, ok := identity.(*FederatedUserIdentity)
+		require.True(t, ok, "identity = %T, want *FederatedUserIdentity", identity)
+		assert.Equal(t, "worker@proj.iam.gserviceaccount.com", fu.Email())
+	})
+}
+
+// peerTokDriverPrincipal and peerTokDriverPrincipalSA are proxy driver
+// principals of the receiving hub in these tests: one outside and one inside
+// the gserviceaccount.com domain.
+const (
+	peerTokDriverPrincipal   = "iap-driver@corp.example.com"
+	peerTokDriverPrincipalSA = "iap-driver@hub-recv.iam.gserviceaccount.com"
+)
+
+// A credential naming one of this hub's proxy driver principals is refused
+// with the uniform federation refusal (email compared case-insensitively),
+// on the peer hub user access path and for an issuer_type user issuer; a
+// normal user's credential and other service account emails are still
+// accepted with drivers configured.
+func TestFederationPrincipalCheck_DriverPrincipalRefused(t *testing.T) {
+	f := newPeerTokFixture(t, nil)
+	f.srv.authConfig.DriverPrincipals = newDriverPrincipalSet([]string{peerTokDriverPrincipal, peerTokDriverPrincipalSA})
+
+	assertPeerTokRefused(t, f, f.signAsPeer(t, peerUserClaims("sub-driver", peerTokDriverPrincipal)))
+	assertPeerTokRefused(t, f, f.signAsPeer(t, peerUserClaims("sub-driver-upper", "IAP-Driver@Corp.Example.com")))
+
+	assertPeerTokUser(t, f, f.signAsPeer(t, peerUserClaims("sub-human", "human@corp.com")), "sub-human", "human@corp.com")
+
+	t.Run("issuer_type user: driver principal", func(t *testing.T) {
+		assertPeerTokRefused(t, f, f.userIssuerToken(t, "idp-driver", peerTokDriverPrincipal))
+	})
+	t.Run("issuer_type user: service account driver principal", func(t *testing.T) {
+		assertPeerTokRefused(t, f, f.userIssuerToken(t, "idp-driver-sa", peerTokDriverPrincipalSA))
+	})
+	t.Run("issuer_type user: other service account accepted", func(t *testing.T) {
+		identity, _, rec := f.through(t, f.userIssuerToken(t, "idp-worker", "worker@proj.iam.gserviceaccount.com"))
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		fu, ok := identity.(*FederatedUserIdentity)
+		require.True(t, ok, "identity = %T, want *FederatedUserIdentity", identity)
+		assert.Equal(t, "worker@proj.iam.gserviceaccount.com", fu.Email())
+	})
+
+	// Control: with no driver principals configured, the same emails are
+	// accepted, so the refusals above come from the driver principal rule.
+	t.Run("no drivers configured: same emails accepted", func(t *testing.T) {
+		f.srv.authConfig.DriverPrincipals = nil
+		assertPeerTokUser(t, f, f.signAsPeer(t, peerUserClaims("sub-driver-ctl", peerTokDriverPrincipal)), "sub-driver-ctl", peerTokDriverPrincipal)
+		identity, _, rec := f.through(t, f.userIssuerToken(t, "idp-driver-sa-ctl", peerTokDriverPrincipalSA))
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		fu, ok := identity.(*FederatedUserIdentity)
+		require.True(t, ok, "identity = %T, want *FederatedUserIdentity", identity)
+		assert.Equal(t, peerTokDriverPrincipalSA, fu.Email())
+	})
+}
+
+// userIssuerToken returns a credential for subject and email signed by the
+// issuer_type user issuer of the fixture.
+func (f *peerTokFixture) userIssuerToken(t *testing.T, subject, email string) string {
+	t.Helper()
+	now := time.Now()
+	return f.signUser(t, map[string]interface{}{
+		"iss":   peerTokUserIssuerURL,
+		"sub":   subject,
+		"aud":   []string{federationTokenAudience},
+		"iat":   now.Add(-time.Minute).Unix(),
+		"exp":   now.Add(10 * time.Minute).Unix(),
+		"email": email,
+	})
+}
+
+// Authenticate is a wrapper over AuthenticateWithOptions: called with no
+// options it still runs the principal check and the kind check, and the
+// options it is given reach AuthenticateWithOptions.
+func TestFederationPrincipalCheck_AuthenticateWrapper(t *testing.T) {
+	f := newPeerTokFixture(t, nil)
+	auth := f.srv.federationAuth.Load()
+	require.NotNil(t, auth)
+
+	t.Run("no options: principal check runs", func(t *testing.T) {
+		_, err := auth.Authenticate(f.userIssuerToken(t, "idp-fixture", "driver-1@scion-fixture.invalid"))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "credential names a test identity")
+
+		identity, err := auth.Authenticate(f.userIssuerToken(t, "idp-human", "human@corp.com"))
+		require.NoError(t, err)
+		_, ok := identity.(*FederatedUserIdentity)
+		assert.True(t, ok, "identity = %T, want *FederatedUserIdentity", identity)
+	})
+
+	peerUser := f.signAsPeer(t, peerUserClaims("sub-human", "human@corp.com"))
+	t.Run("no options: kind check runs", func(t *testing.T) {
+		_, err := auth.Authenticate(peerUser)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "user access credentials from hub issuers are not accepted")
+	})
+
+	t.Run("options reach AuthenticateWithOptions", func(t *testing.T) {
+		identity, err := auth.Authenticate(peerUser, FederationAuthOptions{AcceptHubUserTokens: true})
+		require.NoError(t, err)
+		_, ok := identity.(*FederatedUserIdentity)
+		assert.True(t, ok, "identity = %T, want *FederatedUserIdentity", identity)
+
+		platform := f.userIssuerToken(t, "idp-platform", peerTokPlatformAuthSA)
+		_, err = auth.Authenticate(platform, FederationAuthOptions{PlatformAuthSA: peerTokPlatformAuthSA})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "credential names a transport identity of this hub")
+		_, err = auth.Authenticate(platform)
+		require.NoError(t, err, "without the option the account is another service account email")
+	})
+}
+
+// A credential minted by the peer for a normal human user is still accepted
+// with the platform service account configured, and agent credentials are
+// unchanged.
+func TestFederationPrincipalCheck_HumanAndAgentAccepted(t *testing.T) {
+	f := newPeerTokFixture(t, nil)
+	f.srv.authConfig.PlatformAuthSA = peerTokPlatformAuthSA
+
+	token, u := f.mintUserToken(t)
+	assertPeerTokUser(t, f, token, u.ID, u.Email)
+
+	fa := assertPeerTokAgent(t, f, f.mintAgentToken(t))
+	assert.Equal(t, f.peerAgent.Subject, fa.RemoteAgentID())
+}
+
+// federationPrincipalRefusal by identity type: it reads the email of user
+// and service account identities, and never refuses an agent identity.
+// The platform service account and proxy driver principals are refused
+// through AuthConfig.isTransportIdentity.
+func TestFederationPrincipalRefusal(t *testing.T) {
+	opts := FederationAuthOptions{
+		PlatformAuthSA:   peerTokPlatformAuthSA,
+		DriverPrincipals: newDriverPrincipalSet([]string{peerTokDriverPrincipal}),
+	}
+	const iss = "https://issuer.example.com"
+	for _, tc := range []struct {
+		name     string
+		identity FederatedIdentity
+		opts     FederationAuthOptions
+		refused  bool
+	}{
+		{"user: human", NewFederatedUserIdentity(iss, "s1", "human@corp.com", "H", "viewer", nil), opts, false},
+		{"user: test identity", NewFederatedUserIdentity(iss, "s2", "x@scion-fixture.invalid", "X", "viewer", nil), opts, true},
+		{"user: platform service account", NewFederatedUserIdentity(iss, "s3", peerTokPlatformAuthSA, "P", "viewer", nil), opts, true},
+		{"service: platform service account", NewFederatedServiceIdentity(iss, "s4", peerTokPlatformAuthSA, nil), opts, true},
+		{"service: platform service account, none configured", NewFederatedServiceIdentity(iss, "s5", peerTokPlatformAuthSA, nil), FederationAuthOptions{}, false},
+		{"service: other service account", NewFederatedServiceIdentity(iss, "s6", "worker@proj.iam.gserviceaccount.com", nil), opts, false},
+		{"service: test identity", NewFederatedServiceIdentity(iss, "s7", "x@scion-test-hub-admin.invalid", nil), opts, true},
+		{"user: driver principal", NewFederatedUserIdentity(iss, "s8", peerTokDriverPrincipal, "D", "viewer", nil), opts, true},
+		{"service: driver principal", NewFederatedServiceIdentity(iss, "s9", "IAP-Driver@corp.example.com", nil), opts, true},
+		{"user: driver principal, none configured", NewFederatedUserIdentity(iss, "s10", peerTokDriverPrincipal, "D", "viewer", nil), FederationAuthOptions{}, false},
+		{"agent", NewFederatedAgentIdentity(iss, "agent-1", "project-a", "worker", "user:root", []string{"user:root"}, nil), opts, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reason := federationPrincipalRefusal(tc.identity, tc.opts)
+			if tc.refused {
+				assert.NotEmpty(t, reason)
+			} else {
+				assert.Empty(t, reason)
+			}
+		})
+	}
+}
+
+// A user access credential from a peer hub naming an email in the
+// gserviceaccount.com domain or any subdomain of it is refused (exact domain
+// or subdomain suffix, trailing dot ignored); a normal domain email and
+// look-alike domains are accepted. issuer_type user issuers are not
+// affected.
+func TestFederationPrincipalCheck_ServiceAccountUserTokenRefused(t *testing.T) {
+	f := newPeerTokFixture(t, nil)
+	assertPeerTokUser(t, f, f.signAsPeer(t, peerUserClaims("sub-human", "human@corp.com")), "sub-human", "human@corp.com")
+
+	for name, email := range map[string]string{
+		"iam":           "driver@proj.iam.gserviceaccount.com",
+		"appspot":       "proj@appspot.gserviceaccount.com",
+		"developer":     "123-compute@developer.gserviceaccount.com",
+		"system":        "svc@system.gserviceaccount.com",
+		"mixed case":    "Driver@Proj.IAM.GServiceAccount.com",
+		"cloudservices": "123456789@cloudservices.gserviceaccount.com",
+		"cloudbuild":    "123456789@cloudbuild.gserviceaccount.com",
+		"other managed": "service-123@gcp-sa-example.iam.gserviceaccount.com",
+		"bare domain":   "svc@gserviceaccount.com",
+		"trailing dot":  "driver@proj.iam.gserviceaccount.com.",
+	} {
+		t.Run(name, func(t *testing.T) {
+			assertPeerTokRefused(t, f, f.signAsPeer(t, peerUserClaims("sub-"+name, email)))
+		})
+	}
+
+	for name, email := range map[string]string{
+		"look-alike prefix": "a@xgserviceaccount.com",
+		"look-alike suffix": "b@proj.iam.gserviceaccount.com.example.com",
+	} {
+		t.Run(name, func(t *testing.T) {
+			assertPeerTokUser(t, f, f.signAsPeer(t, peerUserClaims("sub-"+name, email)), "sub-"+name, email)
+		})
+	}
+
+	t.Run("issuer_type user unchanged", func(t *testing.T) {
+		now := time.Now()
+		identity, _, rec := f.through(t, f.signUser(t, map[string]interface{}{
+			"iss":   peerTokUserIssuerURL,
+			"sub":   "idp-sa",
+			"aud":   []string{federationTokenAudience},
+			"iat":   now.Add(-time.Minute).Unix(),
+			"exp":   now.Add(10 * time.Minute).Unix(),
+			"email": "worker@proj.iam.gserviceaccount.com",
+		}))
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		_, ok := identity.(*FederatedUserIdentity)
+		assert.True(t, ok, "identity = %T, want *FederatedUserIdentity", identity)
+	})
+}

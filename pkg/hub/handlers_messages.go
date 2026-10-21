@@ -463,7 +463,9 @@ func (s *Server) handleAgentMessages(w http.ResponseWriter, r *http.Request, age
 // Streams new messages involving a specific agent in real time. Callers
 // holding agent.attach on the agent see all messages; others see only their
 // own. With the conversation setting on, both see only their own DM
-// conversation with the agent, matching the REST default path.
+// conversation with the agent, matching the REST default path. A stream
+// opened with a user access token ends once the token stops validating or
+// loses the permission that admitted it (streamTokenStillAuthorized).
 // Unlike /message-logs/stream this does not depend on Cloud Logging: it
 // subscribes to the in-process event bus that handleAgentOutboundMessage
 // and handleAgentMessage already publish to, so it works on any hub
@@ -571,6 +573,14 @@ func (s *Server) handleAgentMessagesStream(w http.ResponseWriter, r *http.Reques
 	heartbeat := time.NewTicker(30 * time.Second)
 	defer heartbeat.Stop()
 
+	// A token stream is re-checked on the permission that admitted it.
+	recheckAction, recheckPermission := ActionRead, "agent.read"
+	if fullHistory.Allowed {
+		recheckAction, recheckPermission = ActionAttach, "agent.attach"
+	}
+	recheck, stopRecheck := streamTokenRecheck(ctx)
+	defer stopRecheck()
+
 	// Server-side timeout matching handlers_logs.go: tell the client to
 	// reconnect after 10 minutes so long-lived connections don't accumulate.
 	timeout := time.NewTimer(10 * time.Minute)
@@ -600,6 +610,11 @@ func (s *Server) handleAgentMessagesStream(w http.ResponseWriter, r *http.Reques
 		case <-heartbeat.C:
 			_, _ = fmt.Fprintf(w, ":heartbeat %d\n\n", time.Now().UnixMilli())
 			flusher.Flush()
+		case <-recheck:
+			if !s.streamTokenStillAuthorized(ctx, res, recheckAction, recheckPermission) {
+				endStreamForCredential(ctx, w, flusher)
+				return
+			}
 		case <-timeout.C:
 			_, _ = fmt.Fprintf(w, "event: timeout\ndata: {\"message\":\"stream timeout, please reconnect\"}\n\n")
 			flusher.Flush()

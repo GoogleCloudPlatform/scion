@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
-	"os"
 	"path/filepath"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -190,7 +189,7 @@ func (s *Server) ArchiveObsoleteBundledHarnessConfigs(ctx context.Context) error
 		// concurrent commit is never reverted; a lost race is logged and
 		// skipped (the next startup retries).
 		hc.Status = store.HarnessConfigStatusArchived
-		if err := s.store.UpdateHarnessConfigContent(ctx, &hc, store.HarnessConfigContentPrecondition{ContentHash: hc.ContentHash}); err != nil {
+		if err := s.store.UpdateHarnessConfigContent(ctx, &hc, harnessConfigCommitPrecondition(&hc)); err != nil {
 			s.resourceLog.Warn("failed to archive obsolete bundled harness-config",
 				"name", hc.Name, "id", hc.ID, "error", err)
 			continue
@@ -220,24 +219,6 @@ func (s *Server) checkAndUpdateImageStatus(ctx context.Context, hcID, image stri
 	if err := s.store.UpdateHarnessConfigImageStatus(ctx, hcID, result.Status, result.CheckedAt); err != nil {
 		slog.Error("failed to update image status", "id", hcID, "error", err)
 	}
-}
-
-// resolveImageRegistry returns the configured image registry from the
-// server's in-memory config, which includes environment variable overrides
-// applied at startup. Falls back to SCION_IMAGE_REGISTRY env var if the
-// maintenance config value is empty.
-//
-// TODO: use an internal settings API that returns fully-resolved settings
-// (env var overrides + DB values) once available — needed for HA mode where
-// settings will live in the database.
-func (s *Server) resolveImageRegistry() string {
-	s.mu.RLock()
-	r := s.config.MaintenanceConfig.ImageRegistry
-	s.mu.RUnlock()
-	if r != "" {
-		return r
-	}
-	return os.Getenv("SCION_IMAGE_REGISTRY")
 }
 
 // RecheckAllImageStatuses is a no-op. Remote registry checks are now

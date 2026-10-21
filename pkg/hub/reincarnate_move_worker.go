@@ -82,7 +82,7 @@ func (s *Server) recheckMoveEligibility(ctx context.Context, agentID string, mv 
 		Profile:   mv.Profile,
 		SelfMove:  mv.SelfMove,
 		Probes: moveProbes{
-			Reachable:        s.brokerRecordReachable,
+			Reachable:        func(b *store.RuntimeBroker) bool { return s.brokerRecordReachable(ctx, b) },
 			CanDispatch:      allowed,
 			CanUseAsProvider: allowed,
 			ServesProject: func(b *store.RuntimeBroker) bool {
@@ -116,7 +116,7 @@ func (s *Server) moveBrokerQuota(ctx context.Context, a *store.Agent, mv *reinca
 	src := withBroker(a, mv.SourceBrokerID)
 	s.releaseBrokerQuota(ctx, src)
 	if _, err := s.checkAndReserveBrokerQuota(ctx, withBroker(a, mv.TargetBrokerID)); err != nil {
-		s.reassertBrokerReservation(ctx, src)
+		s.restoreBrokerReservation(ctx, src)
 		return err
 	}
 	return nil
@@ -126,21 +126,36 @@ func (s *Server) moveBrokerQuota(ctx context.Context, a *store.Agent, mv *reinca
 // it does not serve it yet. The caller's right to link it was checked when
 // the move was accepted; a self-move's target already serves the project,
 // so a self-move never links.
+//
+// A move onto the co-located broker also records, at once, the references
+// it adds there (the project's activeProfile and the moved agent's own
+// profile), whether or not it links, so the built-ins they name are
+// retained before the move provisions (ptone/scion#5113).
 func (s *Server) linkMoveTargetProvider(ctx context.Context, mv *reincarnationMove) error {
-	if mv.SelfMove || s.brokerServesProject(ctx, mv.TargetBrokerID, mv.ProjectID) {
+	if mv.SelfMove {
+		return nil
+	}
+	if s.brokerServesProject(ctx, mv.TargetBrokerID, mv.ProjectID) {
+		s.onColocatedPlacement(ctx, mv.ProjectID, mv.TargetBrokerID, mv.Profile)
 		return nil
 	}
 	dst, err := s.store.GetRuntimeBroker(ctx, mv.TargetBrokerID)
 	if err != nil {
 		return err
 	}
-	return s.store.AddProjectProvider(ctx, &store.ProjectProvider{
+	if err := s.linkProjectProvider(ctx, &store.ProjectProvider{
 		ProjectID:  mv.ProjectID,
 		BrokerID:   dst.ID,
 		BrokerName: dst.Name,
 		Status:     dst.Status,
 		LinkedBy:   "agent-move",
-	})
+	}); err != nil {
+		return err
+	}
+	// linkProjectProvider recorded the project's activeProfile; add the
+	// moved agent's own profile.
+	s.addColocatedAgentReference(dst.ID, mv.Profile)
+	return nil
 }
 
 // rollbackMove undoes a move that failed after the agent was assigned to
@@ -191,7 +206,7 @@ func (s *Server) rollbackMove(ctx context.Context, md agentMoveDispatcher, agent
 		}
 	}
 	s.releaseBrokerQuota(ctx, cur)
-	s.reassertBrokerReservation(ctx, withBroker(cur, mv.SourceBrokerID))
+	s.restoreBrokerReservation(ctx, withBroker(cur, mv.SourceBrokerID))
 }
 
 // cleanUpMoveSource removes the agent's broker-local state from the source
@@ -243,7 +258,7 @@ func (s *Server) reconcileFailedMove(ctx context.Context, reincarnationID string
 			"agent_id", rec.AgentID, "reincarnation_id", rec.ID, "error", err)
 	} else if a.RuntimeBrokerID == rec.SourceBrokerID {
 		s.releaseBrokerQuota(ctx, a)
-		s.reassertBrokerReservation(ctx, a)
+		s.restoreBrokerReservation(ctx, a)
 	}
 	if rec.SourceCleanup == "" {
 		if err := s.store.SetAgentReincarnationSourceCleanup(ctx, rec.ID, sourceCleanupSkippedInterrupted); err != nil {

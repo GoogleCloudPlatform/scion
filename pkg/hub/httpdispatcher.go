@@ -32,6 +32,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
@@ -182,11 +183,12 @@ type HTTPAgentDispatcher struct {
 	commandBus      CommandBus
 	dispatchMetrics dispatchmetrics.Recorder
 
-	// imageRegistryProvider returns the configured image registry prefix
-	// for rewriting bare image names before dispatching to brokers. It is
+	// imageRegistryProvider returns the image registry prefix for
+	// rewriting bare image names before dispatching an agent to a broker,
+	// for that broker and the agent's profile ("" = no rewrite). It is
 	// read at each dispatch, so a saved image_registry change (or its
 	// clear) applies to the next agent. Nil = no rewrite.
-	imageRegistryProvider func() string
+	imageRegistryProvider func(brokerID, profile string) string
 
 	// Resource hash repair callbacks sync a resource's DB manifest from GCS
 	// when a hash mismatch is detected during dispatch. Nil = no repair.
@@ -477,19 +479,20 @@ func (d *HTTPAgentDispatcher) autoExposePortsDefault() *bool {
 }
 
 // SetImageRegistryProvider registers the accessor for the image registry
-// prefix used to rewrite bare image names before dispatching to brokers. It
-// is read at each dispatch.
-func (d *HTTPAgentDispatcher) SetImageRegistryProvider(fn func() string) {
+// prefix used to rewrite bare image names before dispatching to a broker
+// (per broker and profile). It is read at each dispatch.
+func (d *HTTPAgentDispatcher) SetImageRegistryProvider(fn func(brokerID, profile string) string) {
 	d.imageRegistryProvider = fn
 }
 
-// ImageRegistry returns the registry prefix this dispatcher rewrites bare
-// image names to at send time ("" = no rewrite).
-func (d *HTTPAgentDispatcher) ImageRegistry() string {
+// ImageRegistryFor returns the registry prefix this dispatcher rewrites
+// bare image names to when sending an agent with profile to brokerID
+// ("" = no rewrite).
+func (d *HTTPAgentDispatcher) ImageRegistryFor(brokerID, profile string) string {
 	if d.imageRegistryProvider == nil {
 		return ""
 	}
-	return d.imageRegistryProvider()
+	return d.imageRegistryProvider(brokerID, profile)
 }
 
 // SetTemplateRepairer registers a callback that syncs a template's DB manifest
@@ -880,9 +883,9 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 	// Read once, so the broker and the agent see the same set.
 	experiments := d.dispatchExperiments()
 
-	// Telemetry for this dispatch: separate tiers for a templateTiers
-	// broker, the legacy inline merge otherwise (see dispatch_telemetry.go).
-	tel := d.dispatchTelemetry(ctx, agent, projectInfo.telemetryPolicy)
+	// Telemetry for this dispatch: always the separate tiers, never inline
+	// telemetry (see dispatch_telemetry.go).
+	tel := d.dispatchTelemetry(agent, projectInfo.telemetryPolicy)
 
 	// Add configuration if available
 	if agent.AppliedConfig != nil {
@@ -910,7 +913,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 		// Only the user's explicit image travels as Config.Image (the
 		// broker's top tier); a template-derived AppliedConfig.Image does
 		// not — see explicitDispatchImage (ptone/scion#1799).
-		image := d.dispatchImageForBroker(agent.AppliedConfig)
+		image := d.dispatchImageForBroker(agent)
 		req.Config = &RemoteAgentConfig{
 			Template:                  agent.Template,
 			Image:                     image,
@@ -1417,6 +1420,7 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 	info.telemetryPolicy = projectTelemetryPolicy(project)
 
 	// First check if the broker has a registered local path for this project.
+	localPath := ""
 	if agent.RuntimeBrokerID != "" {
 		provider, provErr := d.store.GetProjectProvider(ctx, agent.ProjectID, agent.RuntimeBrokerID)
 		if provErr != nil {
@@ -1424,9 +1428,9 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 				d.log.Warn("Failed to get project provider for path lookup", "error", provErr)
 			}
 		} else if provider.LocalPath != "" {
-			info.projectPath = provider.LocalPath
+			localPath = provider.LocalPath
 			if d.debug {
-				d.log.Debug("Found project path for broker", "brokerID", agent.RuntimeBrokerID, "path", info.projectPath)
+				d.log.Debug("Found project path for broker", "brokerID", agent.RuntimeBrokerID, "path", localPath)
 			}
 		}
 	}
@@ -1434,16 +1438,12 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 	// slug. This applies to both hub-native projects (no git remote) and
 	// git-anchored projects — the broker needs a project identity to create
 	// agent directories under ~/.scion/projects/<slug>/ rather than falling
-	// back to the global project.
-	if info.projectPath == "" {
-		info.projectSlug = project.Slug
-	} else if isGlobalHubProject(project.Slug) {
-		// The global project's slug travels with its provider path so the
-		// broker can tell the global project apart from another project
-		// whose path points at the broker's global directory. The broker
-		// keeps resolving the project from the path.
-		info.projectSlug = globalProjectSlug
-	}
+	// back to the global project. The global project's slug travels with its
+	// provider path so the broker can tell the global project apart from
+	// another project whose path points at the broker's global directory.
+	// The same helper decides the path the built-in profile reference count
+	// reads agent-info.json from (ptone/scion#5113).
+	info.projectPath, info.projectSlug = config.ProjectDispatchLocation(localPath, project.Slug, isGlobalHubProject(project.Slug))
 	return info, nil
 }
 
@@ -3471,8 +3471,24 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 // true, the harness is asked to continue its prior session (e.g. Claude
 // --continue) instead of starting a fresh conversation. The hub is the source
 // of truth for resume: callers compute it from the agent's stored phase
-// (suspended → resume).
-func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool) (err error) {
+// (suspended → resume). It is DispatchAgentStartWithOptions with no options;
+// both call the synchronous dispatchAgentStart directly, so neither is a
+// guarded call site of the other.
+func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool) error {
+	return d.dispatchAgentStart(ctx, agent, task, resume)
+}
+
+// DispatchAgentStartWithOptions is DispatchAgentStart with per-call options
+// (ptone/scion#4669). This release accepts opts but does not act on them:
+// the start is always synchronous and the result is nil. Asynchronous start
+// adds its branch here.
+func (d *HTTPAgentDispatcher) DispatchAgentStartWithOptions(ctx context.Context, agent *store.Agent, task string, resume bool, _ StartDispatchOptions) (*StartDispatchResult, error) {
+	return nil, d.dispatchAgentStart(ctx, agent, task, resume)
+}
+
+// dispatchAgentStart is the synchronous start dispatch behind
+// DispatchAgentStart and DispatchAgentStartWithOptions.
+func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool) (err error) {
 	ctx, span := tracer.Start(ctx, "hub.dispatch.start")
 	defer span.End()
 	span.SetAttributes(
@@ -3628,7 +3644,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 	// from the stored InlineConfig: an agent created by an older hub has a
 	// hub-default copy there, and resending it would keep that default at
 	// the top tier (ptone/scion#4222).
-	tel := d.dispatchTelemetry(ctx, agent, projectInfo.telemetryPolicy)
+	tel := d.dispatchTelemetry(agent, projectInfo.telemetryPolicy)
 	tel.injectRequesterEnabled(resolvedEnv, &envClassifications)
 
 	// Thread through updated InlineConfig so the broker can apply config
@@ -3665,7 +3681,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		Workspace:            startEnv.workspace,
 		HubAgentDefaults:     startHubAgentDefaults(d.hubAgentDefaults(), d.autoExposePortsDefault(), startEnv.experiments, tel.wireTelemetry()),
 		TelemetryPolicy:      tel.telemetryPolicy(),
-		Image:                d.dispatchImageForBroker(agent.AppliedConfig),
+		Image:                d.dispatchImageForBroker(agent),
 		TemplateName:         agent.Template,
 	}
 	extras.TemplateID, extras.TemplateHash = dispatchTemplateIdentity(agent)
@@ -3850,10 +3866,9 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	// would. A resolution error is handled there as on start: it is logged
 	// and the restart proceeds without injected secrets.
 	projectInfo := startEnv.projectInfo
-	// Telemetry tiers for a templateTiers broker (see dispatch_telemetry.go).
-	// A restart sends no inline config, so a legacy broker keeps the
-	// telemetry its stored agent config already has.
-	tel := d.dispatchTelemetry(ctx, agent, projectInfo.telemetryPolicy)
+	// Telemetry tiers for this restart (see dispatch_telemetry.go). A restart
+	// sends no inline config, so it never carries inline telemetry.
+	tel := d.dispatchTelemetry(agent, projectInfo.telemetryPolicy)
 	tel.injectRequesterEnabled(resolvedEnv, &envClassifications)
 	extras := StartExtras{
 		HubEndpoint:          d.effectiveAgentHubEndpoint(),
@@ -3862,7 +3877,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		Workspace:            startEnv.workspace,
 		HubAgentDefaults:     startHubAgentDefaults(d.hubAgentDefaults(), d.autoExposePortsDefault(), startEnv.experiments, tel.wireTelemetry()),
 		TelemetryPolicy:      tel.telemetryPolicy(),
-		Image:                d.dispatchImageForBroker(agent.AppliedConfig),
+		Image:                d.dispatchImageForBroker(agent),
 		SharedWorkspace:      projectInfo.sharedWorkspace,
 		TemplateName:         agent.Template,
 		ProjectPath:          projectInfo.projectPath,

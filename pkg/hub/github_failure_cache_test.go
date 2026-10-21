@@ -116,10 +116,15 @@ func TestSkillsResolve_GHNotFoundIsRemembered(t *testing.T) {
 
 	first := resolveErr(t, uri)
 	require.Equal(t, int64(1), gh.calls(), "the first resolve asks GitHub")
-	assert.Contains(t, first.Message, "GitHub API error 404")
+	assert.Equal(t, "skill not found", first.Message)
+	assert.Equal(t, http.StatusNotFound, first.Status)
 
 	second := resolveErr(t, uri)
 	assert.Equal(t, int64(1), gh.calls(), "the remembered not found must be served without a GitHub call")
+	// Each request has its own correlation id; the rest of the error is the
+	// original one.
+	assert.NotEmpty(t, second.CorrelationID)
+	first.CorrelationID, second.CorrelationID = "", ""
 	assert.Equal(t, first, second, "the remembered failure must be reported as the original one")
 
 	resolveErr(t, otherURI)

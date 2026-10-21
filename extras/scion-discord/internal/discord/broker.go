@@ -234,6 +234,7 @@ type DiscordBroker struct {
 	now func() time.Time
 
 	agentCacheTTL  time.Duration
+	asyncCreate    bool              // async_create: /scion thread opts in to an asynchronous create
 	projectSlugMap map[string]string // injected by hub: projectID -> slug
 	downloadsPath  string            // override for file download directory; empty = default
 
@@ -261,6 +262,7 @@ func NewBroker(log *slog.Logger) *DiscordBroker {
 		pluginName:    "discord",
 		httpClient:    &http.Client{Timeout: 10 * time.Second},
 		agentCacheTTL: defaultAgentCacheTTL,
+		asyncCreate:   true,
 	}
 }
 
@@ -435,6 +437,17 @@ func (b *DiscordBroker) Configure(config map[string]string) error {
 			b.agentCacheTTL = d
 		}
 
+		// Parse optional async create opt-out (default true; an absent
+		// key on a later Configure restores the default).
+		b.asyncCreate = true
+		if v, ok := config["async_create"]; ok && v != "" {
+			enabled, err := strconv.ParseBool(v)
+			if err != nil {
+				return fmt.Errorf("invalid async_create: %w", err)
+			}
+			b.asyncCreate = enabled
+		}
+
 		// Parse optional downloads directory override.
 		if v, ok := config["downloads_path"]; ok && v != "" {
 			b.downloadsPath = v
@@ -480,6 +493,7 @@ func (b *DiscordBroker) Configure(config map[string]string) error {
 		}
 		sendSearchRoot := config["send_search_root"]
 		b.commands = NewCommandHandler(b.store, b.session, b.hubClient, b.deliverInbound, appID, guildIDs, b.agentCacheTTL, sendSearchRoot, b.log)
+		b.commands.SetAsyncCreate(b.asyncCreate)
 		b.callbacks = NewCallbackHandler(b.store, b.session, b.hubClient, b.deliverInbound, b.log)
 		registerURL := config["register_url"]
 		b.registration = NewRegistrationHandler(b.store, b.session, b.hubURL, registerURL, b.hmacKey, b.brokerID, b.httpClient, b.log)

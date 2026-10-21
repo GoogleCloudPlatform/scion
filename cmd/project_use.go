@@ -178,23 +178,11 @@ type useTarget struct {
 // calls.
 func describeUseTarget(c *config.CLIContext) useTarget {
 	var t useTarget
-	envHub, envName := envHubEndpoint()
 	dir, inDir := filesystemProject()
 	dirIsGlobal := inDir && config.IsGlobalProjectDir(dir)
 
-	switch {
-	case hubSource == targetSourceContext:
-		t.HubEndpoint, t.HubSource, t.HubLabel = hubEndpoint, useSourceContext, "current context"
-	case hubSource == targetSourceDirectory:
-		t.HubEndpoint, t.HubSource, t.HubLabel = hubEndpoint, useSourceDirectory, "directory link"
-	case hubEndpoint != "":
-		t.HubEndpoint, t.HubSource, t.HubLabel = hubEndpoint, useSourceFlag, "--hub flag"
-	case envHub != "":
-		t.HubEndpoint, t.HubSource, t.HubLabel = envHub, useSourceEnv, envName
-	}
-	if t.HubEndpoint == "" {
-		t.HubSource, t.HubLabel = useSourceNone, "none"
-	}
+	h := resolveCLIHub()
+	t.HubEndpoint, t.HubSource, t.HubLabel = h.Endpoint, h.Source, h.Label
 
 	switch {
 	case projectSource == targetSourceContext:
@@ -410,8 +398,8 @@ func runUseShow(out, stderr io.Writer) error {
 			projectValue = t.ProjectID
 		}
 		w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-		// The endpoint may come from SCION_HUB_ENDPOINT/SCION_HUB_URL,
-		// where a user may have put credentials: they are never printed.
+		// The endpoint may come from SCION_HUB_ENDPOINT/SCION_HUB_URL; user
+		// info in it is not shown.
 		_, _ = fmt.Fprintf(w, "Hub:\t%s\t%s\t(%s)\n", shownHub, config.RedactURL(t.HubEndpoint), t.HubLabel)
 		_, _ = fmt.Fprintf(w, "Project:\t%s\t%s\t(%s)\n", shownProject, projectValue, t.ProjectLabel)
 		_ = w.Flush()
@@ -518,7 +506,7 @@ func runUseClear(out io.Writer) error {
 
 // printRegisteredHub announces a hub entry that was added for a URL.
 func printRegisteredHub(out io.Writer, name, endpoint string) {
-	_, _ = fmt.Fprintf(out, "Registered hub '%s' (%s); rename with 'scion hub rename'.\n", name, endpoint)
+	_, _ = fmt.Fprintf(out, "Registered hub '%s' (%s); rename with 'scion hub rename'.\n", name, config.RedactURL(endpoint))
 }
 
 // warnHubTokenForContextHub warns that SCION_HUB_TOKEN, which is not tied
@@ -574,7 +562,7 @@ func runUseSwitch(out, stderr io.Writer) error {
 
 	if isJSONOutput() {
 		return outputJSON(useSwitchJSON{
-			Hub:        useHubJSON{Name: name, Endpoint: endpoint, Source: useSourceContext},
+			Hub:        useHubJSON{Name: name, Endpoint: config.RedactURL(endpoint), Source: useSourceContext},
 			Project:    project,
 			Registered: registered,
 		})
@@ -587,9 +575,9 @@ func runUseSwitch(out, stderr io.Writer) error {
 		if shown == "" {
 			shown = project.ID
 		}
-		_, _ = fmt.Fprintf(out, "Now using project '%s' on hub '%s' (%s).\n", shown, name, endpoint)
+		_, _ = fmt.Fprintf(out, "Now using project '%s' on hub '%s' (%s).\n", shown, name, config.RedactURL(endpoint))
 	} else {
-		_, _ = fmt.Fprintf(out, "Now using hub '%s' (%s).\n", name, endpoint)
+		_, _ = fmt.Fprintf(out, "Now using hub '%s' (%s).\n", name, config.RedactURL(endpoint))
 		_, _ = fmt.Fprintf(out, "No project selected on hub '%s'; run 'scion use <project>' or 'scion project list --hub %s'.\n", name, name)
 	}
 	settings, err := config.LoadSettings(useSettingsPath())

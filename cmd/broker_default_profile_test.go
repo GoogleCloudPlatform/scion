@@ -70,14 +70,14 @@ func TestLoadServerSettings_DefaultProfile(t *testing.T) {
 
 	t.Run("loaded", func(t *testing.T) {
 		setup(t, "schema_version: \"1\"\nactive_profile: k8s\nprofiles:\n  k8s:\n    runtime: kubernetes\n")
-		settings, dp := loadServerSettings("")
+		settings, dp := loadServerSettings()
 		require.NotNil(t, settings)
 		require.NotNil(t, dp)
 		assert.Equal(t, "k8s", *dp)
 	})
 	t.Run("failed to load", func(t *testing.T) {
 		setup(t, "schema_version: [this is not: valid yaml\n")
-		settings, dp := loadServerSettings("")
+		settings, dp := loadServerSettings()
 		require.NotNil(t, settings, "falls back to empty settings")
 		assert.Nil(t, dp)
 	})

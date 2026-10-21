@@ -29,11 +29,13 @@ import (
 // Runtime Broker sessions on GET /api/v1/conduit, behind hub.conduit.
 //
 // A broker holds its conduit session alongside the control channel
-// (/api/v1/runtime-brokers/connect). The control channel stays the only
-// path for broker RPC, sync operations, PTY and broker presence; the
-// conduit session is registered in the conduit registry but carries no
-// work, and router.Resolve keeps answering broker requests through the
-// legacy control-channel adapter (Config.Brokers).
+// (/api/v1/runtime-brokers/connect). With hub.conduit on, the hub's
+// transient broker requests (logs, exec, images, project cleanup) go
+// through the router to a broker session that lists them in its Hello
+// (conduit_broker_routed.go), and the control channel is their fallback
+// only. The control channel stays the path for durable operations, keys,
+// PTY and broker presence: router.Resolve answers broker streams through
+// the legacy control-channel adapter (Config.Brokers).
 //
 // Both endpoints authenticate the broker with authenticateBrokerUpgrade,
 // so the two cannot accept different credentials.
@@ -91,7 +93,7 @@ func (s *Server) decideConduitBroker(w http.ResponseWriter, r *http.Request, for
 	}
 	rt := s.conduit.Load()
 	if rt == nil && !forRelay {
-		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "Conduit relay is not running on this hub node (hub.conduit was enabled after startup; restart required)", nil)
+		s.writeConduitRelayNotRunning(w)
 		return conduitAdmission{}, false
 	}
 	broker, err := s.store.GetRuntimeBroker(r.Context(), brokerID)

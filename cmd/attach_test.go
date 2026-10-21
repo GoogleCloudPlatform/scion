@@ -157,11 +157,9 @@ func newAttachMockHubServer(t *testing.T, projectID, agentName, agentID, runtime
 // print the cobra usage block after it, while the error itself is still
 // returned so the exit code stays non-zero.
 func TestAttachCmd_RuntimeErrorSilencesUsage(t *testing.T) {
-	origNoHub := noHub
 	origProjectPath := projectPath
 	origSilenceUsage := attachCmd.SilenceUsage
 	defer func() {
-		noHub = origNoHub
 		projectPath = origProjectPath
 		attachCmd.SilenceUsage = origSilenceUsage
 	}()

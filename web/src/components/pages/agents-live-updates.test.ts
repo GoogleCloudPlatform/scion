@@ -253,6 +253,66 @@ describe('scion-page-agents live updates (agents-changed -> mergeChanged)', () =
     expect(el.agents.map((a) => a.id)).toEqual(['a2']);
   });
 
+  describe('keyed rows (webperf C10)', () => {
+    // Default sort is "updated", newest first: a1 (newest), a2, a3 (oldest).
+    const rows = (): Agent[] => [
+      agent('a1', { updated: '2026-01-03T00:00:00Z' }),
+      agent('a2', { updated: '2026-01-02T00:00:00Z' }),
+      agent('a3', { updated: '2026-01-01T00:00:00Z' }),
+    ];
+
+    /** The card (grid) or table row (list) rendering agent `id`. */
+    function rowOf(el: TestEl, id: string, selector: string): Element | null {
+      return el.shadowRoot?.querySelector(`a[href="/agents/${id}"]`)?.closest(selector) ?? null;
+    }
+
+    for (const [view, selector, suffix] of [
+      ['grid', '.agent-card', ''],
+      ['list', 'tbody tr', ' in the table view'],
+    ] as const) {
+      it(`agents list keeps row DOM nodes across an unrelated agent update${suffix}`, async () => {
+        localStorage.setItem('scion-view-agents', view);
+        const initial = rows();
+        vi.stubGlobal(
+          'fetch',
+          vi.fn(() =>
+            Promise.resolve(jsonResponse({ agents: initial, _capabilities: { actions: [] } }))
+          )
+        );
+        const el = document.createElement('scion-page-agents') as TestEl;
+        document.body.appendChild(el);
+        await el.updateComplete;
+        await flush();
+        await el.updateComplete;
+
+        const order = (): string[] =>
+          [...(el.shadowRoot?.querySelectorAll(`${selector} a[href^="/agents/a"]`) ?? [])].map(
+            (a) => a.getAttribute('href') ?? ''
+          );
+        expect(order()).toEqual(['/agents/a1', '/agents/a2', '/agents/a3']);
+        const a1Row = rowOf(el, 'a1', selector);
+        const a2Row = rowOf(el, 'a2', selector);
+        const a3Row = rowOf(el, 'a3', selector);
+        expect(a1Row && a2Row && a3Row).toBeTruthy();
+
+        // a3 is updated and moves to the top of the "updated" sort.
+        handleUpdate('agent.a3.status', {
+          agentId: 'a3',
+          phase: 'stopped',
+          updated: '2026-01-04T00:00:00Z',
+        });
+        await flush();
+        await el.updateComplete;
+
+        expect(order()).toEqual(['/agents/a3', '/agents/a1', '/agents/a2']);
+        // Keyed by id: each agent keeps its own DOM node (moved, not re-filled).
+        expect(rowOf(el, 'a1', selector)).toBe(a1Row);
+        expect(rowOf(el, 'a2', selector)).toBe(a2Row);
+        expect(rowOf(el, 'a3', selector)).toBe(a3Row);
+      });
+    }
+  });
+
   it('a REST response landing after an SSE delete does not resurrect the deleted agent', async () => {
     const initial = [agent('a1'), agent('a2')];
     vi.stubGlobal(
