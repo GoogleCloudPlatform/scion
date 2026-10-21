@@ -184,3 +184,90 @@ func TestClient_DownloadHTTPFailurePreservesFile(t *testing.T) {
 		}
 	}
 }
+
+type transferTestBody struct {
+	*strings.Reader
+	closed bool
+}
+
+func (b *transferTestBody) Close() error {
+	b.closed = true
+	return nil
+}
+
+type transferTestRoundTripper func(*http.Request) (*http.Response, error)
+
+func (rt transferTestRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return rt(req)
+}
+
+func transferResponseClient(status int, content string) (*Client, *transferTestBody) {
+	body := &transferTestBody{Reader: strings.NewReader(content)}
+	client := NewClient(&http.Client{Transport: transferTestRoundTripper(func(req *http.Request) (*http.Response, error) {
+		if req.Body != nil {
+			_ = req.Body.Close()
+		}
+		return &http.Response{
+			StatusCode:    status,
+			ContentLength: int64(len(content)),
+			Body:          body,
+			Request:       req,
+		}, nil
+	})})
+	return client, body
+}
+
+func TestClient_HTTPErrorBodyLimit(t *testing.T) {
+	for _, operation := range []string{"upload", "download"} {
+		for _, status := range []int{http.StatusMultipleChoices, http.StatusInternalServerError} {
+			for _, size := range []string{"small", "large"} {
+				t.Run(operation+"/"+strconv.Itoa(status)+"/"+size, func(t *testing.T) {
+					content := "failure details"
+					if size == "large" {
+						content = strings.Repeat("x", 128<<10)
+					}
+					client, body := transferResponseClient(status, content)
+					var err error
+					if operation == "upload" {
+						err = client.UploadFileWithMethod(t.Context(), "https://transfer.invalid/file", http.MethodPut, nil, strings.NewReader("file content"))
+					} else {
+						_, err = client.DownloadFile(t.Context(), "https://transfer.invalid/file")
+					}
+					if err == nil {
+						t.Fatal("expected a transfer error")
+					}
+					// Bound actual body consumption, not just the returned string.
+					wantExcerpt := content
+					if len(wantExcerpt) > 1024 {
+						wantExcerpt = wantExcerpt[:1024]
+					}
+					if read := len(content) - body.Len(); read != len(wantExcerpt) {
+						t.Errorf("read %d error-body bytes, want %d", read, len(wantExcerpt))
+					}
+					want := operation + " failed with status " + strconv.Itoa(status) + ": " + wantExcerpt
+					if err.Error() != want {
+						t.Errorf("error diagnostic differs: got %d bytes, want %d", len(err.Error()), len(want))
+					}
+					if !body.closed {
+						t.Error("response body was not closed")
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestClient_DownloadFile_LargeSuccessfulBody(t *testing.T) {
+	content := strings.Repeat("x", 128<<10)
+	client, body := transferResponseClient(http.StatusOK, content)
+	data, err := client.DownloadFile(t.Context(), "https://transfer.invalid/file")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != content {
+		t.Errorf("successful download returned %d bytes, want %d", len(data), len(content))
+	}
+	if !body.closed {
+		t.Error("response body was not closed")
+	}
+}
