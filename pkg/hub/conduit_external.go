@@ -108,7 +108,8 @@ type conduitExternalRuntime struct {
 	// session lifetime cap sent on the ingress leg.
 	ingress     string
 	lifetimeCap time.Duration
-	// ingressTransport carries proxied conduit dials to the relays.
+	// ingressTransport carries proxied conduit dials to the relays
+	// (newConduitIngressTransport: bounded dial and response headers).
 	ingressTransport http.RoundTripper
 	// ingressCountFailures counts relay session counts that failed during
 	// relay selection.
@@ -196,7 +197,7 @@ func (s *Server) StartConduitExternal(ctx context.Context, opts ConduitExternalO
 		return err
 	}
 	rt := &conduitExternalRuntime{router: rtr, registry: reg, store: st, now: now, peerAuth: opts.PeerAuth, replay: opts.replayStore,
-		instanceID: id, ingress: opts.Ingress, lifetimeCap: opts.LifetimeCap, ingressTransport: http.DefaultTransport}
+		instanceID: id, ingress: opts.Ingress, lifetimeCap: opts.LifetimeCap, ingressTransport: newConduitIngressTransport(nil, conduitIngressResponseHeaderTimeout)}
 	if rt.ingress == "" {
 		rt.ingress = config.ConduitIngressProxy
 	}
@@ -204,7 +205,7 @@ func (s *Server) StartConduitExternal(ctx context.Context, opts ConduitExternalO
 		rt.lifetimeCap = config.ConduitDefaultLifetimeCap
 	}
 	if opts.HTTPClient != nil && opts.HTTPClient.Transport != nil {
-		rt.ingressTransport = opts.HTTPClient.Transport
+		rt.ingressTransport = newConduitIngressTransport(opts.HTTPClient.Transport, conduitIngressResponseHeaderTimeout)
 	}
 	s.conduitEligibleRelays.Store(-1)
 	if !s.conduitExternal.CompareAndSwap(nil, rt) {

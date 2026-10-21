@@ -81,7 +81,8 @@ func newIngressFixture(t *testing.T, ids ...string) *ingressFixture {
 	f.rt = &conduitExternalRuntime{
 		registry: registry.New(st, registry.Config{}), store: st, now: time.Now,
 		peerAuth: externalRelayAuth(t, "hub-a"), instanceID: "hub-a",
-		ingress: "proxy", lifetimeCap: 3500 * time.Second, ingressTransport: http.DefaultTransport,
+		ingress: "proxy", lifetimeCap: 3500 * time.Second,
+		ingressTransport: newConduitIngressTransport(nil, conduitIngressResponseHeaderTimeout),
 	}
 	for _, id := range ids {
 		fr := &fakeIngressRelay{id: id, verify: externalRelayAuth(t, id)}
@@ -188,10 +189,11 @@ func TestConduitIngress_ProxyLeg(t *testing.T) {
 }
 
 // TestConduitIngress_RepicksOnlyBeforeAdmission: another relay is picked
-// only after a transport failure before any answer, 409
-// relay_target_mismatch, or 503 relay_not_admitting; any other answer,
-// including a 503 given after admission or a 401, reaches the client
-// unchanged with no second relay contacted.
+// only after a transport failure before the request was written, 409
+// relay_target_mismatch, 503 relay_not_admitting, or a stopped relay's 503
+// not_serving; any other answer, including a 503 given after admission or a
+// 401, reaches the client unchanged, and a connection lost after the request
+// was written is 502, with no second relay contacted.
 func TestConduitIngress_RepicksOnlyBeforeAdmission(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -208,7 +210,17 @@ func TestConduitIngress_RepicksOnlyBeforeAdmission(t *testing.T) {
 			w.Header().Set(relay.HeaderStaleReason, "relay_target_mismatch")
 			http.Error(w, "stale", http.StatusConflict)
 		}, repick: true},
+		{name: "stopped relay not serving", first: func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set(relay.HeaderRefusalReason, relay.ReasonNotServing)
+			http.Error(w, "relay unavailable", http.StatusServiceUnavailable)
+		}, repick: true},
 		{name: "transport failure before any answer", down: true, repick: true},
+		{name: "connection lost after the request was written", first: func(w http.ResponseWriter, _ *http.Request) {
+			conn, _, err := http.NewResponseController(w).Hijack()
+			if err == nil {
+				_ = conn.Close()
+			}
+		}, status: http.StatusBadGateway, contain: "Conduit relay connection failed"},
 		{name: "503 after admission", first: func(w http.ResponseWriter, _ *http.Request) {
 			writeRelayUnavailable(w, relay.ReasonUpstreamUnreachable)
 		}, status: http.StatusServiceUnavailable, contain: relay.ReasonUpstreamUnreachable},
@@ -241,6 +253,45 @@ func TestConduitIngress_RepicksOnlyBeforeAdmission(t *testing.T) {
 			assert.Zero(t, f.relays["relay-b"].hits.Load(), "no second relay after admission may have run")
 		})
 	}
+}
+
+// TestConduitIngress_UnansweringRelayTimesOut: a relay that takes the dial
+// and never answers ends in 502 once the response header bound passes, with
+// no second relay contacted, since the relay may have run Admit.
+func TestConduitIngress_UnansweringRelayTimesOut(t *testing.T) {
+	f := newIngressFixture(t, "relay-a", "relay-b")
+	f.preferRelays("relay-a", "relay-b")
+	const bound = 300 * time.Millisecond
+	f.rt.ingressTransport = newConduitIngressTransport(nil, bound)
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	f.relays["relay-a"].answer = func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}
+	start := time.Now()
+	rec := f.dial(t, nil)
+	elapsed := time.Since(start)
+	require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
+	assert.GreaterOrEqual(t, elapsed, bound)
+	assert.Less(t, elapsed, 10*time.Second, "the dial ends at the response header bound")
+	assert.EqualValues(t, 1, f.relays["relay-a"].hits.Load())
+	assert.Zero(t, f.relays["relay-b"].hits.Load(), "no second relay after the request was written")
+}
+
+// TestConduitIngressTransportBounds: the production transport has a
+// response header bound above the relay's admission call bound, and keeps
+// no connection for reuse.
+func TestConduitIngressTransportBounds(t *testing.T) {
+	tr, ok := newConduitIngressTransport(nil, conduitIngressResponseHeaderTimeout).(*http.Transport)
+	require.True(t, ok)
+	assert.Greater(t, tr.ResponseHeaderTimeout, relay.DefaultHubCallTimeout)
+	assert.True(t, tr.DisableKeepAlives)
+	assert.NotNil(t, tr.DialContext)
+	assert.Positive(t, tr.TLSHandshakeTimeout)
+	assert.Zero(t, http.DefaultTransport.(*http.Transport).ResponseHeaderTimeout, "the default transport is not changed")
 }
 
 // TestConduitIngress_NoRelayLeft: with no eligible relay, or every relay

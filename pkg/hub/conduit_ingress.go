@@ -21,11 +21,14 @@ import (
 	"io"
 	"log/slog"
 	"math/rand/v2"
+	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/http/httputil"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
@@ -50,9 +53,11 @@ import (
 // current generation holds fewer sessions; when a count fails it picks one
 // of the two at random. A dial is re-picked, within router.MaxReResolves,
 // only when it failed before the relay could have run Admit: a transport
-// error before any response byte, 409 relay_target_mismatch, or 503
-// relay_not_admitting. Every other answer goes to the client unchanged,
-// since a second Admit would replay a broker's request nonce.
+// error before the request was written, 409 relay_target_mismatch, 503
+// relay_not_admitting, or 503 not_serving from a stopped relay's relay-peer
+// check. Every other answer, and a transport error after the request was
+// written, goes to the client unchanged (502 for the error), since a second
+// Admit would replay a broker's request nonce.
 
 // conduitIngressPath is the path a relay serves proxied dials on (its
 // internal listener) and the hub's own conduit path.
@@ -61,6 +66,19 @@ const conduitIngressPath = "/api/v1/conduit"
 // conduitIngressRefusalBodyMax bounds the relay refusal body read to find
 // its reason.
 const conduitIngressRefusalBodyMax = 4 << 10
+
+// conduitIngressDialTimeout bounds connecting to a relay's internal
+// listener; conduitIngressTLSHandshakeTimeout bounds its TLS handshake.
+const (
+	conduitIngressDialTimeout         = 5 * time.Second
+	conduitIngressTLSHandshakeTimeout = 10 * time.Second
+)
+
+// conduitIngressResponseHeaderTimeout bounds the wait for a relay's answer
+// to a proxied dial: the relay answers after its admission call to the hub,
+// which relay.DefaultHubCallTimeout bounds, plus a margin. It bounds only
+// the response headers, never an upgraded session.
+const conduitIngressResponseHeaderTimeout = relay.DefaultHubCallTimeout + 5*time.Second
 
 // errConduitIngressRepick marks a relay answer the hub may re-pick on.
 var errConduitIngressRepick = errors.New("conduit ingress: the relay refused before admission")
@@ -158,16 +176,53 @@ func sampleConduitIngressRelays(candidates []registry.RelayInstance) []registry.
 	return []registry.RelayInstance{candidates[p[0]], candidates[p[1]]}
 }
 
+// newConduitIngressTransport returns the transport for proxied dials: a
+// clone of base (nil: http.DefaultTransport) with a dial timeout, a TLS
+// handshake timeout when base has none, headerTimeout as the response
+// header timeout, and keep-alives off, so the transport never sends a dial
+// again on its own over a reused connection. A base that is not an
+// *http.Transport is returned unchanged and keeps its own bounds.
+func newConduitIngressTransport(base http.RoundTripper, headerTimeout time.Duration) http.RoundTripper {
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	t, ok := base.(*http.Transport)
+	if !ok {
+		return base
+	}
+	t = t.Clone()
+	dial := t.DialContext
+	if dial == nil {
+		dial = (&net.Dialer{KeepAlive: 30 * time.Second}).DialContext
+	}
+	t.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		ctx, cancel := context.WithTimeout(ctx, conduitIngressDialTimeout)
+		defer cancel()
+		return dial(ctx, network, addr)
+	}
+	if t.TLSHandshakeTimeout <= 0 {
+		t.TLSHandshakeTimeout = conduitIngressTLSHandshakeTimeout
+	}
+	t.ResponseHeaderTimeout = headerTimeout
+	t.DisableKeepAlives = true
+	return t
+}
+
 // conduitIngressRepickResponse reports whether a relay's answer to a
 // proxied dial was given before admission: 409 relay_target_mismatch (the
-// relay-peer check) or 503 relay_not_admitting (draining or not ready).
-// It reads at most conduitIngressRefusalBodyMax bytes of a 503 body; the
-// body of an answer that is not re-picked is restored for the client.
+// relay-peer check), 503 not_serving in the refusal reason header (the
+// relay-peer check of a stopped relay), or 503 relay_not_admitting
+// (draining or not ready). It reads at most conduitIngressRefusalBodyMax
+// bytes of a 503 body; the body of an answer that is not re-picked is
+// restored for the client.
 func conduitIngressRepickResponse(resp *http.Response) bool {
 	switch resp.StatusCode {
 	case http.StatusConflict:
 		return resp.Header.Get(relay.HeaderStaleReason) == "relay_target_mismatch"
 	case http.StatusServiceUnavailable:
+		if resp.Header.Get(relay.HeaderRefusalReason) == relay.ReasonNotServing {
+			return true
+		}
 		body, err := io.ReadAll(io.LimitReader(resp.Body, conduitIngressRefusalBodyMax))
 		resp.Body = struct {
 			io.Reader
@@ -189,13 +244,20 @@ func conduitIngressRepickResponse(resp *http.Response) bool {
 }
 
 // conduitIngressTransport records whether the round trip itself failed
-// (no response at all), as opposed to a failure after a response arrived.
+// (no response at all), as opposed to a failure after a response arrived,
+// and whether the request may have reached the relay. wrote is set at the
+// first request header field the transport writes, which precedes the end
+// of the request headers on the wire, so a relay cannot have run Admit for
+// a request that leaves it unset.
 type conduitIngressTransport struct {
 	base   http.RoundTripper
 	failed bool
+	wrote  atomic.Bool
 }
 
 func (t *conduitIngressTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	trace := &httptrace.ClientTrace{WroteHeaderField: func(string, []string) { t.wrote.Store(true) }}
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
 	resp, err := t.base.RoundTrip(req)
 	if err != nil {
 		t.failed = true
@@ -206,8 +268,8 @@ func (t *conduitIngressTransport) RoundTrip(req *http.Request) (*http.Response, 
 // proxyConduitDial proxies r to target's internal listener over a
 // relay-peer leg. It returns true, with nothing written to the client, when
 // the dial failed before the relay could have run Admit, so another relay
-// may be picked; otherwise the relay's answer (or the session) went to the
-// client.
+// may be picked; otherwise the relay's answer (or the session, or a 502
+// when the leg failed after the request was written) went to the client.
 func (s *Server) proxyConduitDial(w http.ResponseWriter, r *http.Request, rt *conduitExternalRuntime, target registry.RelayInstance) (repick bool) {
 	endpoint, err := url.Parse(target.InternalEndpoint)
 	if err != nil || endpoint.Host == "" {
@@ -253,7 +315,7 @@ func (s *Server) proxyConduitDial(w http.ResponseWriter, r *http.Request, rt *co
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
-			if errors.Is(err, errConduitIngressRepick) || transport.failed {
+			if errors.Is(err, errConduitIngressRepick) || (transport.failed && !transport.wrote.Load()) {
 				repick = true
 				if signErr != nil {
 					slog.Error("Conduit ingress: signing the relay-peer leg failed", "error", signErr)
