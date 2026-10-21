@@ -68,11 +68,11 @@ v1 routes `lint` only.
 ### Things P6 must look at before P7
 
 - **golangci-lint version.** `ci.yml` installs golangci-lint v2.15.0 through
-  `golangci-lint-action`. The runner image pins v2.11.4
-  (`runner/Dockerfile`). Through the snippet, the routed `lint` job keeps
-  using the action's v2.15.0, so CI results do not change. The PoC uses the
-  image's binary. Bring the image pin in step with CI before relying on the
-  pre-installed tool.
+  `golangci-lint-action`, and the runner image pins the same version
+  (`GOLANGCI_LINT_VERSION` in `runner/Dockerfile`). The routed `lint` job
+  still installs it through the action, and the PoC uses the image's
+  pre-installed binary. Bump both together: the image pin is the single
+  place for the image, and `ci.yml`'s `version:` input for CI.
 - **`~/.cache` is linked to `/scratch`.** On a cr-ci runner, `$HOME` is on
   Cloud Run's in-memory root filesystem. `ci.yml` exports
   `GOLANGCI_LINT_CACHE=$HOME/.cache/golangci-lint`, which is the path
