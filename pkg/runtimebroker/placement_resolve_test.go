@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -1085,10 +1086,131 @@ func TestResolvePlacement_ProfileOnDefaultsOnlyEntry(t *testing.T) {
 			t.Fatalf("got %+v, %v; want nil, nil", rp, err)
 		}
 	})
+	// A configured entry with the same identity (incluster, no placement)
+	// whose own profile sets placement does not change that: the selected
+	// remote profile on the defaults-only entry is still settled. An agent
+	// with no recorded profile is still refused.
+	t.Run("selected profile without placement beside a configured sibling", func(t *testing.T) {
+		g := "schema_version: \"1\"\nruntimes:\n  incluster:\n    type: kubernetes\nprofiles:\n  gpu:\n    runtime: incluster\n    node_selector:\n      accel: l4\n  remote:\n    runtime: kubernetes\n"
+		f := newInClusterPlacementFixture(t, g, "")
+		rp, err := f.srv.resolvePlacement(context.Background(), f.res(resolutionProfile, "remote", "kubernetes"), nil)
+		if rp != nil || err != nil {
+			t.Fatalf("remote selected: got %+v, %v; want nil, nil", rp, err)
+		}
+		_, err = f.srv.resolvePlacement(context.Background(), f.res(resolutionUnrecorded, "", ""), nil)
+		wantRefusal(t, err, "agent agent-1 has no recorded profile; profile-level placement is configured for its runtime (profiles gpu)")
+	})
 	// Defining the entry makes it configured: the selected profile applies.
 	f := newInClusterPlacementFixture(t, global+"runtimes:\n  kubernetes:\n    type: kubernetes\n", "kubernetes")
 	rp, err := f.srv.resolvePlacement(context.Background(), f.res(resolutionProfile, "gpu", "kubernetes"), nil)
 	if err != nil || rp == nil || rp.NodeSelector["accel"] != "l4" {
 		t.Fatalf("defined entry: got %+v, %v", rp, err)
+	}
+}
+
+// Parity between a runtime entry that exists only in the built-in defaults
+// and the same entry defined by the operator without placement. For every
+// way the runtime was chosen, the selected profile's placement, and an
+// identity-matched configured sibling (absent, present without a placement
+// profile, present with one), case (x) has the runtime's matching entry
+// "kubernetes" only in the built-in defaults and case (y) defines it in the
+// settings file with no placement. (x) and (y) must give the same placement
+// and the same error, except in the rows the defaults-only rule refuses on
+// purpose (dedicated is true): there (x) must refuse with the dedicated
+// cause. The runtime is in-cluster, so every entry without a context in
+// namespace "agents" (the default) matches it, and "far" (explicit context)
+// does not.
+func TestResolvePlacement_DefaultsOnlyParity(t *testing.T) {
+	type kind struct {
+		name    string
+		how     resolutionKind
+		profile string // selected profile
+		farPl   bool   // profile far sets placement
+	}
+	kinds := []kind{
+		{"profile-global", resolutionProfile, "kp", false},
+		{"profile-not-global", resolutionProfile, "ghost", false},
+		{"profile-elsewhere", resolutionProfile, "far", false},
+		{"profile-elsewhere-with-placement", resolutionProfile, "far", true},
+		{"unrecorded", resolutionUnrecorded, "", false},
+		{"default-fallback", resolutionDefaultFallback, "", false},
+		{"strict-fallback", resolutionStrictFallback, "", false},
+		{"unset", resolutionUnset, "", false},
+		{"forced", resolutionForced, "", false},
+	}
+	siblings := []string{"absent", "bare", "with-placement-profile"}
+	settings := func(defineKubernetes, kpPl, farPl bool, sibling string) string {
+		var b strings.Builder
+		b.WriteString("schema_version: \"1\"\nruntimes:\n  far:\n    type: kubernetes\n    context: ctx-x\n")
+		if defineKubernetes {
+			b.WriteString("  kubernetes:\n    type: kubernetes\n")
+		}
+		if sibling != "absent" {
+			b.WriteString("  incl:\n    type: kubernetes\n")
+		}
+		b.WriteString("profiles:\n  kp:\n    runtime: kubernetes\n")
+		if kpPl {
+			b.WriteString("    node_selector:\n      accel: l4\n")
+		}
+		b.WriteString("  far:\n    runtime: far\n")
+		if farPl {
+			b.WriteString("    runtime_class_name: gvisor\n")
+		}
+		if sibling == "with-placement-profile" {
+			b.WriteString("  sibp:\n    runtime: incl\n    node_selector:\n      pool: sib\n")
+		}
+		return b.String()
+	}
+	type outcome struct {
+		sel map[string]string
+		rc  string
+		err string
+	}
+	run := func(t *testing.T, global string, k kind) outcome {
+		t.Helper()
+		f := newInClusterPlacementFixture(t, global, "")
+		rp, err := f.srv.resolvePlacement(context.Background(), f.res(k.how, k.profile, ""), nil)
+		var o outcome
+		if rp != nil {
+			o.sel, o.rc = rp.NodeSelector, rp.RuntimeClassName
+		}
+		if err != nil {
+			o.err = err.Error()
+		}
+		return o
+	}
+	for _, k := range kinds {
+		for _, kpPl := range []bool{false, true} {
+			for _, sib := range siblings {
+				// The rows the defaults-only rule refuses on purpose in (x):
+				// the selected global profile on the defaults-only entry sets
+				// placement; or, for the kinds that do not settle the profile
+				// rung (everything but a selected global profile on a matching
+				// entry and the forced runtime), a profile with placement on
+				// the defaults-only entry is the only one that could apply.
+				dedicated := false
+				switch k.name {
+				case "profile-global":
+					dedicated = kpPl
+				case "forced":
+				default:
+					dedicated = kpPl && sib != "with-placement-profile" && !k.farPl
+				}
+				name := fmt.Sprintf("%s/kp-placement=%v/sibling=%s", k.name, kpPl, sib)
+				t.Run(name, func(t *testing.T) {
+					x := run(t, settings(false, kpPl, k.farPl, sib), k)
+					if dedicated {
+						if !strings.Contains(x.err, "profile kp sets Kubernetes placement, but its runtime entry kubernetes is defined only by the built-in defaults") {
+							t.Fatalf("(x) want the dedicated cause, got %+v", x)
+						}
+						return
+					}
+					y := run(t, settings(true, kpPl, k.farPl, sib), k)
+					if !reflect.DeepEqual(x, y) {
+						t.Fatalf("(x) defaults-only and (y) configured differ:\n x: %+v\n y: %+v", x, y)
+					}
+				})
+			}
+		}
 	}
 }

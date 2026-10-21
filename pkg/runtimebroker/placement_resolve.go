@@ -267,27 +267,32 @@ func (s *Server) resolvePlacement(ctx context.Context, res runtimeResolution, pr
 	switch {
 	case res.How == resolutionProfile && profileGlobal && inE[profile.Runtime]:
 		applyProfilePlacement(rp, res.Profile, profile)
-	case res.How == resolutionForced:
-		// The forced runtime takes the entry rung only.
-	default:
-		if res.How == resolutionProfile && profileGlobal && config.ProfileHasPlacement(profile) && defaultsOnlyMatched[profile.Runtime] {
+	case res.How == resolutionProfile && profileGlobal && defaultsOnlyMatched[profile.Runtime]:
+		// The selected global profile's runtime entry exists only in the
+		// built-in defaults and matches this runtime. Like the case above, it
+		// settles the profile rung; its placement cannot be matched, though,
+		// so a profile that sets placement is refused. Without placement it
+		// is the entry rung only, as above with a profile that sets none.
+		if config.ProfileHasPlacement(profile) {
 			s.agentLifecycleLog.Warn("Kubernetes placement: the selected profile's runtime entry is defined only by the built-in defaults",
 				"agent", res.Agent, "profile", res.Profile, "entry", profile.Runtime)
 			return nil, placementRefusal(placementDefaultsOnlyCause(res.Profile, profile.Runtime))
 		}
+	case res.How == resolutionForced:
+		// The forced runtime takes the entry rung only.
+	default:
 		profileElsewhere := profileGlobal && config.ProfileHasPlacement(profile) && !inE[profile.Runtime]
 		if len(pp) > 0 || profileElsewhere {
-			cause := s.profileRungCause(res, profileGlobal, matched, pp)
+			// The cause lists every placement profile that targets this
+			// runtime, including those on matching defaults-only entries, so
+			// the text does not depend on whether such an entry is configured.
+			listed := profilesOn(unionSet(inE, defaultsOnlyMatched))
+			cause := s.profileRungCause(res, profileGlobal, matched, listed)
 			s.agentLifecycleLog.Warn("Kubernetes placement: the profile rung cannot be determined",
-				"agent", res.Agent, "how", res.How.String(), "profile", res.Profile, "profiles", pp, "matched", matched)
+				"agent", res.Agent, "how", res.How.String(), "profile", res.Profile, "profiles", listed, "matched", matched)
 			return nil, placementRefusal(cause)
 		}
-		// A selected global profile on a matching defaults-only entry settles
-		// the profile rung, as step 4.1 does for a configured entry: with
-		// placement it was refused just above; without, other profiles on that
-		// entry do not apply to this agent.
-		settledOnDefaultsOnly := res.How == resolutionProfile && profileGlobal && defaultsOnlyMatched[profile.Runtime]
-		if ppD := profilesOn(defaultsOnlyMatched); len(ppD) > 0 && !settledOnDefaultsOnly {
+		if ppD := profilesOn(defaultsOnlyMatched); len(ppD) > 0 {
 			s.agentLifecycleLog.Warn("Kubernetes placement: a profile with placement uses a runtime entry defined only by the built-in defaults",
 				"agent", res.Agent, "how", res.How.String(), "profiles", ppD)
 			return nil, placementRefusal(placementDefaultsOnlyCause(ppD[0], gvs.Profiles[ppD[0]].Runtime))
@@ -325,6 +330,18 @@ func (s *Server) profileRungCause(res runtimeResolution, profileGlobal bool, mat
 	default:
 		return "the agent's profile could not be determined (the runtime choice was not classified), and profile-level placement is configured for this runtime"
 	}
+}
+
+// unionSet returns the union of two name sets.
+func unionSet(a, b map[string]bool) map[string]bool {
+	out := make(map[string]bool, len(a)+len(b))
+	for k, v := range a {
+		out[k] = v
+	}
+	for k, v := range b {
+		out[k] = v
+	}
+	return out
 }
 
 // applyProfilePlacement applies profile p's placement over rp.
