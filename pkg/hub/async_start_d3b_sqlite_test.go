@@ -395,6 +395,11 @@ func TestAsyncStart_BeginStartLaunchFailureSettlesAtStartAgentCore(t *testing.T)
 			assert.Empty(t, got.StartClaimID, "the claim is released")
 			if c.wantMsg != nil {
 				c.wantMsg(t, got.Message)
+			} else {
+				// The queued-stop revert (ptone/scion#5070) writes the
+				// refused-start message and keeps the stop queued.
+				assert.Equal(t, refusedStartMessage(err), got.Message, "the refused-start message")
+				assert.Equal(t, containerStatusStopQueued, got.ContainerStatus, "the stop stays queued")
 			}
 		})
 	}
