@@ -1075,6 +1075,16 @@ func TestResolvePlacement_ProfileOnDefaultsOnlyEntry(t *testing.T) {
 			wantRefusal(t, err, want)
 		})
 	}
+	// The selected profile is settled: remote (no placement) on the same
+	// defaults-only entry starts without placement, whatever other profiles
+	// on that entry set.
+	t.Run("selected profile without placement", func(t *testing.T) {
+		f := newInClusterPlacementFixture(t, global+"  remote:\n    runtime: kubernetes\n", "")
+		rp, err := f.srv.resolvePlacement(context.Background(), f.res(resolutionProfile, "remote", "kubernetes"), nil)
+		if rp != nil || err != nil {
+			t.Fatalf("got %+v, %v; want nil, nil", rp, err)
+		}
+	})
 	// Defining the entry makes it configured: the selected profile applies.
 	f := newInClusterPlacementFixture(t, global+"runtimes:\n  kubernetes:\n    type: kubernetes\n", "kubernetes")
 	rp, err := f.srv.resolvePlacement(context.Background(), f.res(resolutionProfile, "gpu", "kubernetes"), nil)

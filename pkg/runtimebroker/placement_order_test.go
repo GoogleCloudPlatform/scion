@@ -31,8 +31,8 @@ import (
 
 // Ordering tests for the Kubernetes placement defaults (ptone/scion#5085):
 // only legs that start a pod resolve placement, and a refusal comes before
-// the leg's side effects (the 201, the stop, the config write). Test IDs
-// are from the placement design's catalogue.
+// the leg's side effects (the 201, the restart endpoint's stop, the config
+// write). Test IDs are from the placement design's catalogue.
 
 const plOrderAgent = "agent-1"
 

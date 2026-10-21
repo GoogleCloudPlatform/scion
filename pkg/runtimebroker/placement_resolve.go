@@ -282,7 +282,12 @@ func (s *Server) resolvePlacement(ctx context.Context, res runtimeResolution, pr
 				"agent", res.Agent, "how", res.How.String(), "profile", res.Profile, "profiles", pp, "matched", matched)
 			return nil, placementRefusal(cause)
 		}
-		if ppD := profilesOn(defaultsOnlyMatched); len(ppD) > 0 {
+		// A selected global profile on a matching defaults-only entry settles
+		// the profile rung, as step 4.1 does for a configured entry: with
+		// placement it was refused just above; without, other profiles on that
+		// entry do not apply to this agent.
+		settledOnDefaultsOnly := res.How == resolutionProfile && profileGlobal && defaultsOnlyMatched[profile.Runtime]
+		if ppD := profilesOn(defaultsOnlyMatched); len(ppD) > 0 && !settledOnDefaultsOnly {
 			s.agentLifecycleLog.Warn("Kubernetes placement: a profile with placement uses a runtime entry defined only by the built-in defaults",
 				"agent", res.Agent, "how", res.How.String(), "profiles", ppD)
 			return nil, placementRefusal(placementDefaultsOnlyCause(ppD[0], gvs.Profiles[ppD[0]].Runtime))
