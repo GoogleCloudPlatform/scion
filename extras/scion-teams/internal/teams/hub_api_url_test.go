@@ -70,7 +70,7 @@ func newHubAPIURLBroker(t *testing.T, hubKeys map[string]string) *TeamsBroker {
 		cfg[k] = v
 	}
 	require.NoError(t, broker.Configure(cfg))
-	t.Cleanup(func() { broker.Close() })
+	t.Cleanup(func() { _ = broker.Close() })
 	require.NotNil(t, broker.hubClient)
 	return broker
 }

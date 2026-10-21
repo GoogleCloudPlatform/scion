@@ -69,7 +69,7 @@ func (h *recordingHub) requests() []string {
 func newHubAPIURLBroker(t *testing.T, tgSrv *fakeTGServerV2, hubKeys map[string]string) *TelegramBrokerV2 {
 	t.Helper()
 	b := NewV2(slog.Default())
-	t.Cleanup(func() { b.Close() })
+	t.Cleanup(func() { _ = b.Close() })
 	cfg := map[string]string{
 		"bot_token":      "test-token",
 		"api_base_url":   tgSrv.srv.URL,
