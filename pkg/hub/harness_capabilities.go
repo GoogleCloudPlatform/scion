@@ -137,9 +137,10 @@ func (s *Server) resolveHarnessTypeFromConfigRefMemo(ctx context.Context, projec
 
 // resolveAgentHarnessType resolves the agent's harness type live: inline
 // harness, then its harness-config references. It does not read the
-// harness stamped at create (AppliedConfig.Harness), which lists and events
-// prefer; the two agree unless a harness-config's harness type is changed
-// in the catalog after the agent was created.
+// harness stamped at create (AppliedConfig.Harness), which every
+// harnessVendor (lists, events and the single-agent view, through
+// agentBadgeHarness) prefers; the two agree unless a harness-config's
+// harness type is changed in the catalog after the agent was created.
 func (s *Server) resolveAgentHarnessType(ctx context.Context, agent *store.Agent) string {
 	return s.resolveAgentHarnessTypeMemo(ctx, agent, nil)
 }
@@ -214,6 +215,17 @@ func (s *Server) stampAgentHarness(ctx context.Context, agent *store.Agent) {
 	if h := s.resolveAgentHarnessType(ctx, agent); h != "generic" {
 		agent.AppliedConfig.Harness = h
 	}
+}
+
+// agentBadgeHarness returns the harness the single-agent view derives its
+// vendor from: the record's harness (storedAgentHarness) when it names one,
+// as lists and events do, else the live resolved harness. So all three
+// agree for every agent.
+func agentBadgeHarness(agent *store.Agent, resolvedHarness string) string {
+	if h := storedAgentHarness(agent); h != "" {
+		return h
+	}
+	return resolvedHarness
 }
 
 // agentModelSize returns the model size alias recorded on the agent at
