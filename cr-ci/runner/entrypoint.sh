@@ -6,15 +6,19 @@
 #      Run, so running without /scratch would silently eat RAM. Fail loudly.
 #   2. Point the runner workspace, temp dirs and Go caches at /scratch.
 #   3. Exchange the one-time RUNNER_CLAIM_TOKEN with the mediator for the JIT
-#      runner config: POST ${MEDIATOR_URL}/internal/claim with
-#      "Authorization: Bearer <token>" and an empty body; 200 returns
-#      {"jit_config":"..."}, 410 means unknown/expired/used, 5xx is transient.
+#      runner config (claim contract v2): fetch this execution's Google ID
+#      token (audience MEDIATOR_URL) from the metadata server, then
+#      POST ${MEDIATOR_URL}/internal/claim with "Authorization: Bearer <ID
+#      token>", "X-Runner-Claim: <RUNNER_CLAIM_TOKEN>" and an empty body.
+#      200 returns {"jit_config":"..."}; 401 means the identity was rejected,
+#      410 that the claim is unknown/expired/used; 5xx is transient.
 #   4. exec ./run.sh --jitconfig <config> so that the runner is PID 1 and runs
 #      exactly one job.
 #
-# Neither the token nor the JIT config is ever printed, logged or written to
-# disk. Do NOT add `set -x` or debug echoes of either variable. The token is
-# passed to curl on stdin (not argv) and the response stays in shell memory.
+# Neither the claim token, the ID token nor the JIT config is ever printed,
+# logged or written to disk. Do NOT add `set -x` or debug echoes of them. The
+# claim and ID tokens reach curl on stdin (not argv), and responses stay in
+# shell memory.
 #
 # Required env (set by the mediator as Cloud Run Job overrides):
 #   RUNNER_CLAIM_TOKEN  32 lowercase hex chars, single use
@@ -24,7 +28,8 @@
 #
 # Exit codes (run.sh's own exit code once it is exec'd):
 #   2  configuration error: missing or invalid env, /scratch missing or not writable
-#   3  claim failed: 410, non-retryable response, or retries exhausted; run.sh not started
+#   3  claim failed: 401, 410, other non-retryable response (mediator or
+#      metadata server), or retries exhausted; run.sh not started
 #
 # Overrides, for the offline test harness (runner/entrypoint_test.go) only;
 # production leaves them unset:
@@ -32,6 +37,8 @@
 #   CR_MOUNTINFO             mount table to check against (default /proc/self/mountinfo)
 #   CR_RUNNER_DIR            directory holding run.sh     (default /home/runner/actions-runner)
 #   CR_CLAIM_BACKOFF_SECONDS first retry delay, doubled per retry (default 1)
+#   CR_METADATA_URL          metadata server origin       (default http://metadata.google.internal;
+#                            otherwise only http://127.0.0.1[:port] or http://localhost[:port])
 # The harness also puts stub `stat` and `sleep` commands first on PATH.
 set -euo pipefail
 
@@ -43,6 +50,7 @@ scratch=${CR_SCRATCH_DIR:-/scratch}
 mountinfo=${CR_MOUNTINFO:-/proc/self/mountinfo}
 runner_dir=${CR_RUNNER_DIR:-/home/runner/actions-runner}
 backoff=${CR_CLAIM_BACKOFF_SECONDS:-1}
+metadata_base=${CR_METADATA_URL:-http://metadata.google.internal}
 
 log() { printf 'cr-ci-entrypoint: %s\n' "$*" >&2; }
 die() {
@@ -73,6 +81,11 @@ claim_base=${MEDIATOR_URL%/}
 if [[ ! $claim_base =~ ^https://[^/?#[:space:]]+$ &&
   ! $claim_base =~ ^http://(127\.0\.0\.1|localhost)(:[0-9]+)?$ ]]; then
   die "$EXIT_CONFIG" "MEDIATOR_URL must be an https origin with no path, got '$MEDIATOR_URL'"
+fi
+
+if [[ $metadata_base != http://metadata.google.internal &&
+  ! $metadata_base =~ ^http://(127\.0\.0\.1|localhost)(:[0-9]+)?$ ]]; then
+  die "$EXIT_CONFIG" "CR_METADATA_URL must be http://metadata.google.internal or a loopback origin, got '$metadata_base'"
 fi
 
 if [[ ! $backoff =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
@@ -163,19 +176,49 @@ if [[ ! -x $runner_dir/run.sh ]]; then
 fi
 cd -- "$runner_dir"
 
-# --- 4. Claim exchange --------------------------------------------------------
+# --- 4. Claim exchange (claim contract v2) -----------------------------------
 
 claim_url="$claim_base/internal/claim"
+identity_url="$metadata_base/computeMetadata/v1/instance/service-accounts/default/identity"
+id_token=""
 jit_config=""
 
-# One claim request. Sets the globals http_code, content_type and body. curl's
-# options come from a config on stdin so the token never appears in argv
-# (/proc/<pid>/cmdline). -q must stay first: it stops ~/.curlrc from turning
-# on verbose output, which would print the request headers.
+# All curl calls start with -q, which must stay first: it stops ~/.curlrc
+# from turning on verbose output, which would print request headers (the
+# tokens) or response bodies.
+
+# Fetch this execution's Google ID token for audience MEDIATOR_URL. Sets the
+# globals http_code and body (the token on 200). The request carries no
+# secret; the response is the secret and stays in memory. The metadata
+# server is link-local, so never go through a proxy.
+identity_once() {
+  local out rc=0
+  out=$(
+    curl -q --silent --show-error --noproxy '*' \
+      --get --data-urlencode "audience=$claim_base" --data-urlencode "format=full" \
+      --header 'Metadata-Flavor: Google' \
+      --connect-timeout 5 --max-time 15 \
+      --write-out '\n%{http_code}' \
+      -- "$identity_url"
+  ) || rc=$?
+  if ((rc != 0)); then
+    http_code=000
+    body=""
+    log "identity token fetch failed: curl exit $rc (connection error or timeout)"
+    return 0
+  fi
+  http_code=${out##*$'\n'}
+  body=${out%$'\n'*}
+}
+
+# One claim request. Sets the globals http_code, content_type and body. Both
+# headers come from a curl config on stdin, so neither token appears in argv
+# (/proc/<pid>/cmdline).
 claim_once() {
   local out rc=0
   out=$(
-    printf 'header = "Authorization: Bearer %s"\n' "$RUNNER_CLAIM_TOKEN" |
+    printf 'header = "Authorization: Bearer %s"\nheader = "X-Runner-Claim: %s"\n' \
+      "$id_token" "$RUNNER_CLAIM_TOKEN" |
       curl -q --config - \
         --silent --show-error \
         --request POST --data-binary '' \
@@ -196,9 +239,45 @@ claim_once() {
   content_type=${trailer#* }
 }
 
+# retry_or_die <step>: called after a transient failure (5xx or connection
+# error) of <step>. Metadata and claim failures share one budget of
+# CLAIM_MAX_ATTEMPTS attempts.
+retry_or_die() {
+  if ((attempt >= CLAIM_MAX_ATTEMPTS)); then
+    die "$EXIT_CLAIM" "claim failed after $attempt attempts (last: $1 status $http_code); not starting the runner"
+  fi
+  log "attempt $attempt: $1 status $http_code; retrying in ${delay}s"
+  sleep "$delay"
+  attempt=$((attempt + 1))
+  delay=$(awk -v d="$delay" 'BEGIN { print d * 2 }')
+}
+
 attempt=1
 delay=$backoff
 while :; do
+  # The ID token is fetched once (valid for an hour) and reused on claim retries.
+  if [[ -z $id_token ]]; then
+    identity_once
+    case $http_code in
+      200)
+        # A JWT: three base64url segments. Anything else is not sent anywhere.
+        if [[ ! $body =~ ^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$ ]]; then
+          body=""
+          die "$EXIT_CLAIM" "metadata server returned 200 without an ID token; not starting the runner"
+        fi
+        id_token=$body
+        body=""
+        ;;
+      000 | 5??)
+        retry_or_die "metadata server"
+        continue
+        ;;
+      *)
+        die "$EXIT_CLAIM" "metadata server returned status $http_code for the ID token; not starting the runner"
+        ;;
+    esac
+  fi
+
   claim_once
   case $http_code in
     200)
@@ -211,17 +290,14 @@ while :; do
       log "claim succeeded on attempt $attempt"
       break
       ;;
+    401)
+      die "$EXIT_CLAIM" "mediator rejected the runner identity (401); not starting the runner"
+      ;;
     410)
       die "$EXIT_CLAIM" "claim token unknown, expired or already used (410); not starting the runner"
       ;;
     000 | 5??)
-      if ((attempt >= CLAIM_MAX_ATTEMPTS)); then
-        die "$EXIT_CLAIM" "claim failed after $attempt attempts (last status $http_code); not starting the runner"
-      fi
-      log "claim attempt $attempt got status $http_code; retrying in ${delay}s"
-      sleep "$delay"
-      attempt=$((attempt + 1))
-      delay=$(awk -v d="$delay" 'BEGIN { print d * 2 }')
+      retry_or_die "claim"
       ;;
     *)
       die "$EXIT_CLAIM" "claim returned unexpected status $http_code; not starting the runner"
@@ -229,6 +305,7 @@ while :; do
   esac
 done
 body=""
+id_token=""
 
 # The token is spent; keep it out of the job's environment.
 unset RUNNER_CLAIM_TOKEN

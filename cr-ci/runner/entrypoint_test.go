@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -73,16 +74,22 @@ func fakeJITConfig(t *testing.T) string {
 
 type claimRequest struct {
 	method, path, auth string
+	claim, flavor      string // X-Runner-Claim, Metadata-Flavor
+	query              url.Values
 	bodyLen            int
 }
 
 // claimServer replies with the scripted responses in order and repeats the
-// last one when the script runs out.
+// last one when the script runs out. It also serves as the fake metadata
+// server (see newMetadataServer).
 type claimServer struct {
 	*httptest.Server
 	mu       sync.Mutex
 	script   []func(http.ResponseWriter)
 	requests []claimRequest
+	// guard, if set, can answer a request itself (returning true) before the
+	// script is consulted, as the real metadata server does for bad requests.
+	guard func(http.ResponseWriter, *http.Request) bool
 }
 
 func newClaimServer(t *testing.T, script ...func(http.ResponseWriter)) *claimServer {
@@ -92,12 +99,53 @@ func newClaimServer(t *testing.T, script ...func(http.ResponseWriter)) *claimSer
 		body, _ := io.ReadAll(r.Body)
 		cs.mu.Lock()
 		n := len(cs.requests)
-		cs.requests = append(cs.requests, claimRequest{r.Method, r.URL.Path, r.Header.Get("Authorization"), len(body)})
+		cs.requests = append(cs.requests, claimRequest{
+			method: r.Method, path: r.URL.Path, auth: r.Header.Get("Authorization"),
+			claim: r.Header.Get("X-Runner-Claim"), flavor: r.Header.Get("Metadata-Flavor"),
+			query: r.URL.Query(), bodyLen: len(body),
+		})
+		script, guard := cs.script, cs.guard
 		cs.mu.Unlock()
-		cs.script[min(n, len(cs.script)-1)](w)
+		if guard != nil && guard(w, r) {
+			return
+		}
+		script[min(n, len(script)-1)](w)
 	}))
 	t.Cleanup(cs.Close)
 	return cs
+}
+
+const identityPath = "/computeMetadata/v1/instance/service-accounts/default/identity"
+
+// newMetadataServer fakes the GCE/Cloud Run metadata server's identity
+// endpoint. Like the real one, it refuses requests without
+// "Metadata-Flavor: Google" (403); it also refuses a wrong path, a wrong
+// audience or a missing format=full (400). Otherwise it plays the script.
+func newMetadataServer(t *testing.T, audience string, script ...func(http.ResponseWriter)) *claimServer {
+	t.Helper()
+	ms := newClaimServer(t, script...)
+	ms.guard = func(w http.ResponseWriter, r *http.Request) bool {
+		q := r.URL.Query()
+		switch {
+		case r.Header.Get("Metadata-Flavor") != "Google":
+			http.Error(w, "missing Metadata-Flavor", http.StatusForbidden)
+		case r.Method != http.MethodGet || r.URL.Path != identityPath:
+			http.Error(w, "not found", http.StatusNotFound)
+		case q.Get("audience") != audience || q.Get("format") != "full":
+			http.Error(w, "bad audience or format", http.StatusBadRequest)
+		default:
+			return false
+		}
+		return true
+	}
+	return ms
+}
+
+// setScript replaces the scripted responses (before the entrypoint runs).
+func (cs *claimServer) setScript(script ...func(http.ResponseWriter)) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	cs.script = script
 }
 
 func (cs *claimServer) recorded() []claimRequest {
@@ -112,6 +160,26 @@ func respondJIT(cfg string) func(http.ResponseWriter) {
 		w.Header().Set("Cache-Control", "no-store")
 		fmt.Fprintf(w, `{"jit_config":%q}`, cfg)
 	}
+}
+
+func respondIDToken(tok string) func(http.ResponseWriter) {
+	return func(w http.ResponseWriter) {
+		w.Header().Set("Content-Type", "text/html") // what the metadata server sends
+		io.WriteString(w, tok)
+	}
+}
+
+// fakeIDToken returns a throwaway JWT-shaped value (three base64url segments).
+func fakeIDToken(t *testing.T) string {
+	t.Helper()
+	seg := func(n int) string {
+		b := make([]byte, n)
+		if _, err := rand.Read(b); err != nil {
+			t.Fatal(err)
+		}
+		return base64.RawURLEncoding.EncodeToString(b)
+	}
+	return seg(30) + "." + seg(200) + "." + seg(256)
 }
 
 func respondStatus(code int) func(http.ResponseWriter) {
@@ -132,6 +200,8 @@ type harness struct {
 	scratch, mountinfo string
 	runnerDir, stubOut string
 	token, jit         string
+	idToken, audience  string
+	meta               *claimServer // fake metadata server, wired by default
 	env                map[string]string
 }
 
@@ -147,7 +217,10 @@ func newHarness(t *testing.T, mediatorURL string) *harness {
 		stubOut:   filepath.Join(root, "stub-out"),
 		token:     randomHex(t, 16),
 		jit:       fakeJITConfig(t),
+		idToken:   fakeIDToken(t),
+		audience:  strings.TrimSuffix(mediatorURL, "/"),
 	}
+	h.meta = newMetadataServer(t, h.audience, respondIDToken(h.idToken))
 	for _, d := range []string{h.scratch, h.runnerDir, h.stubOut} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
@@ -173,6 +246,7 @@ func newHarness(t *testing.T, mediatorURL string) *harness {
 		"CR_MOUNTINFO":             h.mountinfo,
 		"CR_RUNNER_DIR":            h.runnerDir,
 		"CR_CLAIM_BACKOFF_SECONDS": "0",
+		"CR_METADATA_URL":          h.meta.URL,
 		"STUB_OUT":                 h.stubOut,
 	}
 	return h
@@ -229,7 +303,7 @@ func (h *harness) run() result {
 		h.t.Fatalf("running entrypoint.sh: %v", err)
 	}
 	// The secrets must never reach the logs, whatever the outcome.
-	for name, secret := range map[string]string{"claim token": h.token, "JIT config": h.jit} {
+	for name, secret := range map[string]string{"claim token": h.token, "JIT config": h.jit, "ID token": h.idToken} {
 		if strings.Contains(res.stdout, secret) || strings.Contains(res.stderr, secret) {
 			h.t.Errorf("%s leaked into entrypoint output", name)
 		}
@@ -315,8 +389,22 @@ func TestEntrypointSuccess(t *testing.T) {
 	if r.method != http.MethodPost || r.path != "/internal/claim" || r.bodyLen != 0 {
 		t.Errorf("claim request = %s %s (body %d bytes), want POST /internal/claim with empty body", r.method, r.path, r.bodyLen)
 	}
-	if r.auth != "Bearer "+h.token {
-		t.Error("claim request did not carry Authorization: Bearer <RUNNER_CLAIM_TOKEN>")
+	if r.auth != "Bearer "+h.idToken {
+		t.Error("claim request did not carry Authorization: Bearer <ID token from the metadata server>")
+	}
+	if r.claim != h.token {
+		t.Error("claim request did not carry X-Runner-Claim: <RUNNER_CLAIM_TOKEN>")
+	}
+
+	mreqs := h.meta.recorded()
+	if len(mreqs) != 1 {
+		t.Fatalf("metadata requests = %d, want 1", len(mreqs))
+	}
+	m := mreqs[0]
+	if m.method != http.MethodGet || m.path != identityPath || m.flavor != "Google" ||
+		m.query.Get("audience") != cs.URL || m.query.Get("format") != "full" {
+		t.Errorf("metadata request = %s %s flavor=%q query=%v, want GET %s with Metadata-Flavor: Google, audience=%s, format=full",
+			m.method, m.path, m.flavor, m.query, identityPath, cs.URL)
 	}
 }
 
@@ -378,7 +466,7 @@ func TestEntrypointConnectionErrorsExhausted(t *testing.T) {
 	cs.Close() // nothing listens on the port any more
 	h := newHarness(t, url)
 	res := h.run()
-	expectFailure(t, h, res, 3, "after 5 attempts (last status 000)")
+	expectFailure(t, h, res, 3, "after 5 attempts (last: claim status 000)")
 }
 
 func TestEntrypointNonRetryableResponses(t *testing.T) {
@@ -474,6 +562,7 @@ func TestEntrypointConfigErrors(t *testing.T) {
 		{"non-numeric job id", func(h *harness) { h.env["GH_JOB_ID"] = "42x" }, "GH_JOB_ID must be numeric"},
 		{"http to a remote host", func(h *harness) { h.env["MEDIATOR_URL"] = "http://mediator.example.com" }, "must be an https origin"},
 		{"url with a path", func(h *harness) { h.env["MEDIATOR_URL"] = "https://mediator.example.com/x" }, "must be an https origin"},
+		{"remote metadata url", func(h *harness) { h.env["CR_METADATA_URL"] = "http://metadata.example.com" }, "CR_METADATA_URL must be"},
 		{"runner dir without run.sh", func(h *harness) { os.Remove(filepath.Join(h.runnerDir, "run.sh")) }, "run.sh not found"},
 	}
 	for _, tc := range cases {
@@ -589,5 +678,153 @@ func TestEntrypointScratchStatFailure(t *testing.T) {
 	expectFailure(t, h, res, 2, "cannot stat")
 	if n := len(cs.recorded()); n != 0 {
 		t.Errorf("claim requests = %d, want 0 (token must not be spent)", n)
+	}
+}
+
+func TestEntrypointTrailingSlashAudience(t *testing.T) {
+	var h *harness
+	cs := newClaimServer(t, func(w http.ResponseWriter) { respondJIT(h.jit)(w) })
+	h = newHarness(t, cs.URL+"/")
+	if res := h.run(); res.exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr:\n%s", res.exitCode, res.stderr)
+	}
+	if m := h.meta.recorded(); len(m) != 1 || m[0].query.Get("audience") != cs.URL {
+		t.Errorf("metadata requests = %+v, want one with audience %s (no trailing slash)", m, cs.URL)
+	}
+}
+
+func TestEntrypointIdentityRejected(t *testing.T) {
+	cs := newClaimServer(t, respondStatus(http.StatusUnauthorized))
+	h := newHarness(t, cs.URL)
+	res := h.run()
+	expectFailure(t, h, res, 3, "rejected the runner identity (401)")
+	if n := len(cs.recorded()); n != 1 {
+		t.Errorf("claim requests = %d, want 1 (401 is not retried)", n)
+	}
+}
+
+func TestEntrypointMetadataRetryThenSuccess(t *testing.T) {
+	var h *harness
+	cs := newClaimServer(t, func(w http.ResponseWriter) { respondJIT(h.jit)(w) })
+	h = newHarness(t, cs.URL)
+	h.meta.setScript(respondStatus(http.StatusServiceUnavailable), respondStatus(http.StatusInternalServerError), respondIDToken(h.idToken))
+	res := h.run()
+	if res.exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr:\n%s", res.exitCode, res.stderr)
+	}
+	if n := len(h.meta.recorded()); n != 3 {
+		t.Errorf("metadata requests = %d, want 3", n)
+	}
+	if reqs := cs.recorded(); len(reqs) != 1 || reqs[0].auth != "Bearer "+h.idToken {
+		t.Errorf("want exactly one claim request carrying the ID token, got %d", len(reqs))
+	}
+	if !strings.Contains(res.stderr, "claim succeeded on attempt 3") {
+		t.Errorf("metadata retries did not use the shared attempt budget:\n%s", res.stderr)
+	}
+}
+
+func TestEntrypointMetadataExhausted(t *testing.T) {
+	cs := newClaimServer(t, respondStatus(http.StatusOK))
+	h := newHarness(t, cs.URL)
+	h.meta.setScript(respondStatus(http.StatusServiceUnavailable))
+	res := h.run()
+	expectFailure(t, h, res, 3, "after 5 attempts (last: metadata server status 503)")
+	if n := len(h.meta.recorded()); n != 5 {
+		t.Errorf("metadata requests = %d, want 5", n)
+	}
+	if n := len(cs.recorded()); n != 0 {
+		t.Errorf("claim requests = %d, want 0", n)
+	}
+}
+
+func TestEntrypointMetadataUnreachable(t *testing.T) {
+	cs := newClaimServer(t, respondStatus(http.StatusOK))
+	h := newHarness(t, cs.URL)
+	h.meta.Close() // nothing listens on the port any more
+	res := h.run()
+	expectFailure(t, h, res, 3, "after 5 attempts (last: metadata server status 000)")
+	if n := len(cs.recorded()); n != 0 {
+		t.Errorf("claim requests = %d, want 0", n)
+	}
+}
+
+func TestEntrypointMetadataNonRetryable(t *testing.T) {
+	cases := []struct {
+		name    string
+		respond func(http.ResponseWriter)
+		wantMsg string
+	}{
+		{"not found", respondStatus(http.StatusNotFound), "metadata server returned status 404"},
+		{"forbidden", respondStatus(http.StatusForbidden), "metadata server returned status 403"},
+		{"empty body", respondIDToken(""), "200 without an ID token"},
+		{"not a jwt", respondIDToken("not-a-jwt"), "200 without an ID token"},
+		{"header injection attempt", respondIDToken("a.b.c\"\nheader = \"X-Evil: 1"), "200 without an ID token"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cs := newClaimServer(t, respondStatus(http.StatusOK))
+			h := newHarness(t, cs.URL)
+			h.meta.setScript(tc.respond)
+			res := h.run()
+			expectFailure(t, h, res, 3, tc.wantMsg)
+			if n := len(h.meta.recorded()); n != 1 {
+				t.Errorf("metadata requests = %d, want 1 (not retried)", n)
+			}
+			if n := len(cs.recorded()); n != 0 {
+				t.Errorf("claim requests = %d, want 0", n)
+			}
+		})
+	}
+}
+
+func TestEntrypointSharedAttemptBudget(t *testing.T) {
+	cs := newClaimServer(t, respondStatus(http.StatusBadGateway))
+	h := newHarness(t, cs.URL)
+	h.meta.setScript(respondStatus(http.StatusServiceUnavailable), respondStatus(http.StatusServiceUnavailable), respondIDToken(h.idToken))
+	res := h.run()
+	expectFailure(t, h, res, 3, "after 5 attempts (last: claim status 502)")
+	if n := len(h.meta.recorded()); n != 3 {
+		t.Errorf("metadata requests = %d, want 3", n)
+	}
+	if n := len(cs.recorded()); n != 3 {
+		t.Errorf("claim requests = %d, want 3 (5 attempts minus 2 spent on the metadata server)", n)
+	}
+}
+
+func TestEntrypointIDTokenReusedOnClaimRetry(t *testing.T) {
+	var h *harness
+	cs := newClaimServer(t, respondStatus(http.StatusServiceUnavailable), func(w http.ResponseWriter) { respondJIT(h.jit)(w) })
+	h = newHarness(t, cs.URL)
+	res := h.run()
+	if res.exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr:\n%s", res.exitCode, res.stderr)
+	}
+	if n := len(h.meta.recorded()); n != 1 {
+		t.Errorf("metadata requests = %d, want 1 (ID token reused)", n)
+	}
+	reqs := cs.recorded()
+	if len(reqs) != 2 {
+		t.Fatalf("claim requests = %d, want 2", len(reqs))
+	}
+	for i, r := range reqs {
+		if r.auth != "Bearer "+h.idToken || r.claim != h.token {
+			t.Errorf("claim request %d lacks the ID token or the claim header", i+1)
+		}
+	}
+}
+
+// After a runner swap or hijack recovery the mediator may launch a runner
+// whose RUNNER_NAME belongs to another job ID; that must only warn.
+func TestEntrypointRunnerNameMismatchOnlyWarns(t *testing.T) {
+	var h *harness
+	cs := newClaimServer(t, func(w http.ResponseWriter) { respondJIT(h.jit)(w) })
+	h = newHarness(t, cs.URL)
+	h.env["RUNNER_NAME"] = "cr-job-9999"
+	res := h.run()
+	if res.exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr:\n%s", res.exitCode, res.stderr)
+	}
+	if !strings.Contains(res.stderr, "warning: RUNNER_NAME 'cr-job-9999' does not match cr-job-4242") {
+		t.Errorf("no RUNNER_NAME mismatch warning in stderr:\n%s", res.stderr)
 	}
 }

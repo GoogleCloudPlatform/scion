@@ -48,7 +48,7 @@ The mediator sets these env overrides on each execution (see
 | `RUNNER_CLAIM_TOKEN` | 32 lowercase hex chars, single use, valid for `CLAIM_TTL` |
 | `MEDIATOR_URL` | https origin of the mediator, no trailing slash |
 | `GH_JOB_ID` | numeric GitHub job ID (used in logs only) |
-| `RUNNER_NAME` | `cr-job-<GH_JOB_ID>` (used in logs only) |
+| `RUNNER_NAME` | normally `cr-job-<GH_JOB_ID>` (used in logs only). After a runner swap or hijack recovery the mediator may reuse another job's name, so a mismatch is only a warning |
 
 The JIT config is never passed in env, args or labels. The entrypoint does
 this, in order:
@@ -83,16 +83,32 @@ this, in order:
    redirection: for job steps, the runner sets `RUNNER_WORKSPACE` and
    `RUNNER_TEMP` itself, under its work folder. The exported values matter
    mainly to the listener and to anything that runs before the job.
-4. **Claims the JIT config.** It sends `POST ${MEDIATOR_URL}/internal/claim`
-   with `Authorization: Bearer <token>` and an empty body, and makes up to 5
-   attempts:
+4. **Claims the JIT config** (claim contract v2,
+   `gs://scion-xproject-exchange/cr-ci/claim-contract-v2.md`). The claim is
+   bound to the execution's workload identity, so a principal that can read
+   the execution's env (`run.viewer`) cannot race the runner for the token.
+   1. **Gets an ID token.** It sends `GET
+      http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience=<MEDIATOR_URL>&format=full`
+      with `Metadata-Flavor: Google`, with no proxy and `MEDIATOR_URL` URL-encoded.
+      Fetching its own identity token needs no IAM role. Only a JWT-shaped
+      response (three base64url segments) is accepted. The token is fetched
+      once and reused for claim retries.
+   2. **Claims.** It sends `POST ${MEDIATOR_URL}/internal/claim` with
+      `Authorization: Bearer <ID token>`, `X-Runner-Claim: <RUNNER_CLAIM_TOKEN>`
+      and an empty body. The mediator checks the identity
+      (`EXEC_SA_NAME@GCP_PROJECT`, `aud` = `MEDIATOR_URL`) before it looks up
+      the claim, so a bad identity does not consume the claim.
+
+   Metadata and claim failures share one budget of 5 attempts:
 
    | Response | Action |
    | :--- | :--- |
-   | 200 with `application/json` and a non-empty `jit_config` string | continue |
-   | 5xx or connection error/timeout | retry after 1, 2, 4, then 8 s; after the 5th failure, exit 3 |
-   | 410 (unknown, expired or used token) | exit 3 at once |
-   | anything else (other status, wrong content type, bad JSON) | exit 3 at once; the token may already be spent |
+   | claim 200 with `application/json` and a non-empty `jit_config` string | continue |
+   | metadata or claim 5xx, or connection error/timeout | retry after 1, 2, 4, then 8 s; after the 5th failed attempt, exit 3 |
+   | claim 401 (identity rejected) | exit 3 at once |
+   | claim 410 (claim missing, malformed, unknown, expired or used) | exit 3 at once |
+   | metadata: any other status, or 200 without a JWT | exit 3 at once |
+   | claim: anything else (other status, wrong content type, bad JSON) | exit 3 at once; the claim may already be spent |
 
 5. **Starts the runner.** It unsets `RUNNER_CLAIM_TOKEN` and runs
    `exec ./run.sh --jitconfig <config>` in `/home/runner/actions-runner`, so
@@ -116,10 +132,11 @@ Exit codes before `run.sh` starts: **2** for a configuration error (env,
 in-memory claims are gone), the runner exits 3. `/reconcile` then deletes the
 orphaned `cr-job-*` registration and relaunches the job if it is still queued.
 
-**Secrets.** Neither the token nor the JIT config is ever printed, logged or
-written to disk. The token reaches curl on stdin, as a curl config, not in its
-argv. `curl -q` ignores any `~/.curlrc`, so no config file can turn on
-verbose header output. The response stays in shell memory. The script never
+**Secrets.** Neither the claim token, the ID token nor the JIT config is
+ever printed, logged or written to disk. Both request headers reach curl on
+stdin, as a curl config, not in its argv. `curl -q` ignores any `~/.curlrc`,
+so no config file can turn on verbose header output. Responses stay in shell
+memory, and the ID token is cleared before the exec. The script never
 uses `set -x`; keep it that way. The JIT config does appear in `run.sh`'s argv,
 as the runner requires. That is acceptable because it is single use and dies
 with the execution.
@@ -133,15 +150,32 @@ cd cr-ci && go test ./runner/
 The harness needs `bash`, `curl`, `jq` and `awk`, and no network or GCP
 access. It uses throwaway random tokens and configs. Test-only overrides
 point the script at a temp scratch directory, a fake mount table, a stub
-runner directory, and a zero retry backoff: `CR_SCRATCH_DIR`, `CR_MOUNTINFO`,
-`CR_RUNNER_DIR` and `CR_CLAIM_BACKOFF_SECONDS`. Production leaves them unset.
+runner directory, a zero retry backoff, and a fake metadata server on
+loopback: `CR_SCRATCH_DIR`, `CR_MOUNTINFO`, `CR_RUNNER_DIR`,
+`CR_CLAIM_BACKOFF_SECONDS` and `CR_METADATA_URL`. `CR_METADATA_URL` defaults
+to `http://metadata.google.internal` and accepts only that value or a
+loopback http origin. Production leaves them all unset.
 Some tests also put stub `stat` and `sleep` commands first on `PATH`. Every
 run has a `~/.curlrc` containing `verbose`, so if `curl -q` were dropped, the
-leak assertions would catch the bearer token on stderr. The harness covers:
+leak assertions would catch the tokens on stderr. Like the real metadata
+server, the fake one answers 403 without `Metadata-Flavor: Google`; it also
+answers 400 on a wrong audience or a missing `format=full`. The harness
+covers:
 
-- **Success.** `run.sh` gets `--jitconfig <config>`, is exec'd (same PID),
-  runs in the runner dir, and sees the `/scratch` env but no token. The token
-  and the config appear on neither stdout nor stderr.
+- **Success.** The metadata request carries the flavor header,
+  `audience=MEDIATOR_URL` (with any trailing slash stripped) and
+  `format=full`. The claim carries `Bearer <ID token>` and
+  `X-Runner-Claim: <claim token>`. `run.sh` gets `--jitconfig <config>`, is
+  exec'd (same PID), runs in the runner dir, and sees the `/scratch` env but
+  no token. The claim token, the ID token and the config appear on neither
+  stdout nor stderr. A RUNNER_NAME/GH_JOB_ID mismatch only warns.
+- **Identity.** A claim 401 exits 3 without retrying. Two metadata 5xx
+  responses and then a token leads to a normal start on attempt 3. Five
+  metadata 5xx responses, or an unreachable metadata server, exit 3 without
+  any claim request. Metadata 404 or 403, an empty body, a non-JWT body, or
+  a header-injection attempt exits 3 without retrying. Two metadata failures
+  plus three claim failures use up the shared budget of 5. The ID token is
+  fetched once and reused when the claim is retried.
 - **Claim failures.** A 410 exits 3 without retrying. Two 5xx responses and
   then a success leads to a normal start. Five 5xx responses or five
   connection errors exit 3. A 405, a wrong content type, or bad, missing,
@@ -153,9 +187,10 @@ leak assertions would catch the bearer token on stderr. The harness covers:
   contacting the mediator. tmpfs only logs a warning. The device fallback
   accepts a mount that is missing from the table, or used when the table is
   unreadable (checked with a `stat` stub).
-- **Bad env.** Any missing variable, a malformed (short or uppercase) token, a non-numeric job ID,
-  a non-https or path-bearing URL, or a missing `run.sh` exits 2 without
-  contacting the mediator.
+- **Bad env.** Any missing variable, a malformed (short or uppercase) token,
+  a non-numeric job ID, a non-https or path-bearing URL, a non-loopback
+  `CR_METADATA_URL`, or a missing `run.sh` exits 2 without contacting the
+  mediator.
 
 Lint the script with `shellcheck -x runner/entrypoint.sh` and
 `bash -n runner/entrypoint.sh`.
