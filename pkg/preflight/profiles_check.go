@@ -307,8 +307,6 @@ func sourcePhrase(s config.ProfileSource) string {
 		return "defined in a settings file"
 	case config.ProfileSourceBuiltin:
 		return "a built-in default profile"
-	case config.ProfileSourceSettings:
-		return "a settings-file or built-in profile"
 	default:
 		return "not defined"
 	}
