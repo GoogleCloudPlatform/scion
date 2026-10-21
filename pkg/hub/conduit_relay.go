@@ -525,6 +525,8 @@ func (s *Server) handleConduit(w http.ResponseWriter, r *http.Request) {
 			NotFound(w, "route")
 		case r.Method != http.MethodGet:
 			MethodNotAllowed(w, http.MethodGet)
+		case rt.ingress == config.ConduitIngressProxy:
+			s.serveConduitIngress(w, r, rt)
 		default:
 			s.refuseConduitExternal(w, r, rt)
 		}

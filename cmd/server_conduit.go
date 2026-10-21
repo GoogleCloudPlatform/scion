@@ -489,7 +489,15 @@ func startConduitExternal(ctx context.Context, cfg *config.GlobalConfig, hubSrv 
 	if err != nil {
 		return err
 	}
-	if err := hubSrv.StartConduitExternal(ctx, hub.ConduitExternalOptions{InstanceID: id, PeerAuth: auth}); err != nil {
+	if err := validateConduitIngress(cfg.Hub.Conduit, mode); err != nil {
+		return err
+	}
+	if err := hubSrv.StartConduitExternal(ctx, hub.ConduitExternalOptions{
+		InstanceID:  id,
+		PeerAuth:    auth,
+		Ingress:     cfg.Hub.Conduit.IngressValue(),
+		LifetimeCap: conduitLifetimeCapSetting(cfg),
+	}); err != nil {
 		return err
 	}
 	addr, _, err := serveConduitInternalListenerFn(ctx, cfg.Hub.Conduit.InternalListen, hubSrv.ConduitInternalHandler(), wg, errCh)
@@ -497,6 +505,24 @@ func startConduitExternal(ctx context.Context, cfg *config.GlobalConfig, hubSrv 
 		return err
 	}
 	slog.Info("Conduit external relay mode started: this hub runs no relay", "instance_id", id, "peer_auth", mode, "internal_listen", addr.String())
+	return nil
+}
+
+// validateConduitIngress applies the startup rules of the conduit ingress
+// in external relay mode (design §3.9 "Ingress"): redirect is not served
+// yet, and proxy needs HMAC relay-peer authentication, because the OIDC
+// modes carry the peer token in Authorization, which on the proxy leg is
+// the client's own credential. peerAuthMode is the resolved peer-auth mode.
+// Errors name the setting.
+func validateConduitIngress(c config.HubConduitConfig, peerAuthMode string) error {
+	switch c.IngressValue() {
+	case config.ConduitIngressRedirect:
+		return errors.New("server.hub.conduit.ingress is redirect, which is not supported yet; use proxy")
+	case config.ConduitIngressProxy:
+		if peerAuthMode != config.ConduitPeerAuthHMAC {
+			return fmt.Errorf("server.hub.conduit.ingress is proxy, which requires HMAC relay-peer authentication, but server.hub.conduit.peer_auth resolves to %q; set peer_auth to hmac", peerAuthMode)
+		}
+	}
 	return nil
 }
 

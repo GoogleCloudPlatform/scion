@@ -209,7 +209,9 @@ func TestConduitExternal_DialRefusedNotServing(t *testing.T) {
 	assert.Equal(t, int64(0), n)
 
 	ctx := context.Background()
-	_, err := f.reg.RegisterRelay(ctx, registry.RelayInstance{InstanceID: "relay-0", InternalEndpoint: "http://relay-0:9811"})
+	// An eligible relay that refuses every connection: the ingress cannot
+	// place the dial on it.
+	_, err := f.reg.RegisterRelay(ctx, registry.RelayInstance{InstanceID: "relay-0", InternalEndpoint: "http://127.0.0.1:1"})
 	require.NoError(t, err)
 	// The count is refreshed on its period, not per dial.
 	f.srv.refreshConduitEligibleRelays(ctx, f.srv.conduitExternal.Load())
@@ -217,7 +219,7 @@ func TestConduitExternal_DialRefusedNotServing(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
 	_, msg, reason = conduitDialRefusal(t, rec)
 	assert.Equal(t, ptyReasonConduitNotServing, reason)
-	assert.Equal(t, conduitExternalNoIngressMsg, msg, "relays are eligible, but this hub has no ingress yet")
+	assert.Equal(t, conduitExternalNoIngressMsg, msg, "a relay is eligible, but none took the dial")
 	n, _ = eligibleRelaysGauge(t, reader)
 	assert.Equal(t, int64(1), n)
 

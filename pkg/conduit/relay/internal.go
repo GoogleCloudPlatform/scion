@@ -113,20 +113,26 @@ func (r *Relay) InternalHandler() http.Handler {
 	return http.HandlerFunc(r.serveInternal)
 }
 
-func (r *Relay) serveInternal(w http.ResponseWriter, req *http.Request) {
+// AuthenticatePeer runs the relay-peer checks of every request on this
+// relay's internal listener: the relay-peer authentication, and the target
+// instance and generation the request was signed for. It returns the
+// authenticated peer id. On a refusal it writes the answer (401, 409
+// relay_target_mismatch, or 503 when the relay no longer serves) and
+// returns false.
+func (r *Relay) AuthenticatePeer(w http.ResponseWriter, req *http.Request) (peer string, ok bool) {
 	if r.cfg.PeerAuth == nil {
 		http.Error(w, "relay-peer auth not configured", http.StatusUnauthorized)
-		return
+		return "", false
 	}
 	peer, err := r.cfg.PeerAuth.Verify(req)
 	if err != nil {
 		http.Error(w, "relay-peer identity required", http.StatusUnauthorized)
-		return
+		return "", false
 	}
 	target, targetGen := req.Header.Get(HeaderPeerTarget), req.Header.Get(HeaderPeerTargetGeneration)
 	if target == "" || targetGen == "" {
 		http.Error(w, "relay-peer target required", http.StatusUnauthorized)
-		return
+		return "", false
 	}
 	r.mu.Lock()
 	killed, gen := r.killed, r.gen
@@ -136,10 +142,18 @@ func (r *Relay) serveInternal(w http.ResponseWriter, req *http.Request) {
 		// a stale route for the caller, which re-resolves.
 		w.Header().Set(HeaderStaleReason, "relay_target_mismatch")
 		http.Error(w, "request is for another relay instance or generation", http.StatusConflict)
-		return
+		return "", false
 	}
 	if killed {
 		refuseUnavailable(w, ReasonNotServing, "relay unavailable")
+		return "", false
+	}
+	return peer, true
+}
+
+func (r *Relay) serveInternal(w http.ResponseWriter, req *http.Request) {
+	peer, ok := r.AuthenticatePeer(w, req)
+	if !ok {
 		return
 	}
 	path := req.URL.Path
