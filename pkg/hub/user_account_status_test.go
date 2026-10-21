@@ -429,7 +429,7 @@ func (f funcReader) GetUser(ctx context.Context, id string) (*store.User, error)
 // A typed nil held in the userRowReader interface (a nil pointer or a nil
 // func) is treated as no reader: checkUserAccount reports a lookup fault
 // and never calls it.
-func TestIsNilUserRowReader_TypedNilPointer(t *testing.T) {
+func TestIsNilUserRowReader_TypedNil(t *testing.T) {
 	var typedNil *ptrReader
 	var r userRowReader = typedNil
 	// A plain comparison: testify's NotNil treats a typed nil as nil.
