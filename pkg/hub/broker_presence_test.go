@@ -466,3 +466,53 @@ func TestPlacement_SingleProviderAutoSelectUsesPresence(t *testing.T) {
 	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
 	assert.Contains(t, w.Body.String(), "only runtime broker is offline")
 }
+
+// errBrokerRecordRead is the broker record read error brokerReadFailStore
+// returns.
+var errBrokerRecordRead = errors.New("forced broker record read error")
+
+// brokerReadFailStore fails every broker record read: with the caller's
+// context error once that context has ended, otherwise with
+// errBrokerRecordRead.
+type brokerReadFailStore struct {
+	store.Store
+}
+
+func (brokerReadFailStore) GetRuntimeBroker(ctx context.Context, _ string) (*store.RuntimeBroker, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return nil, errBrokerRecordRead
+}
+
+// TestBrokerPresent_ReadErrorLoggedAndCounted: a broker record read that
+// fails is returned (the caller counts the broker as present), logged at
+// Warn with the broker ID, and counted once in
+// scion.hub.broker.presence_registry_fallbacks. A read cut short by the
+// caller's own context is returned with no log and no count.
+func TestBrokerPresent_ReadErrorLoggedAndCounted(t *testing.T) {
+	srv, _ := testServer(t)
+	reader := sdkmetric.NewManualReader()
+	require.NoError(t, srv.RegisterBrokerPresenceMetrics(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))))
+	srv.store = brokerReadFailStore{srv.store}
+	logs := captureSlog(t)
+	id := tid("present-read-error")
+	const line = "the broker record could not be read"
+
+	got, err := srv.BrokerPresent(context.Background(), id)
+	require.ErrorIs(t, err, errBrokerRecordRead)
+	assert.False(t, got)
+	assert.Contains(t, logs.String(), "level=WARN")
+	assert.Contains(t, logs.String(), line)
+	assert.Contains(t, logs.String(), id)
+	assert.Equal(t, int64(1), srv.brokerPresenceRegistryFallbacks.Load())
+	assert.Equal(t, int64(1), brokerPresenceFallbacksExported(t, reader))
+
+	logs.Reset()
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = srv.BrokerPresent(cancelled, id)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.NotContains(t, logs.String(), line, "a cancelled caller context is not logged")
+	assert.Equal(t, int64(1), srv.brokerPresenceRegistryFallbacks.Load(), "a cancelled caller context is not counted")
+}
