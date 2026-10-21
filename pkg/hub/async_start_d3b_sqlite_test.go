@@ -338,10 +338,10 @@ func (d *deleteHeldStartDispatcher) DispatchAgentStart(_ context.Context, a *sto
 	return fmt.Errorf("%w: %w: %w", ErrLaunchInvalidPhase, store.ErrInvalidPhase, store.ErrDeleteInProgress)
 }
 
-// TestStartDidNotHappen_DeleteHeldKeepsIntent pins the delete-hold rule:
-// a start refused because a delete holds the
-// row (ErrLaunchInvalidPhase wrapping store.ErrDeleteInProgress) leaves the
-// run intent to the delete engine. A provisioned agent's start runs no
+// TestStartDidNotHappen_DeleteHeldKeepsIntent pins the delete-hold rule: a
+// start refused because a delete holds the row (ErrLaunchInvalidPhase
+// wrapping store.ErrDeleteInProgress) leaves the run intent to the delete
+// engine. A provisioned agent's start runs no
 // provisioned settle (intent unchanged, no message), and a queued-stop
 // agent's start runs no ptone/scion#5070 revert (intent unchanged,
 // stop_queued untouched).
@@ -381,7 +381,7 @@ func TestStartDidNotHappen_DeleteHeldKeepsIntent(t *testing.T) {
 }
 
 // TestAsyncStart_BeginStartLaunchFailureSettlesAtStartAgentCore pins the
-// the same rule at the start path: an async start whose BeginStartLaunch
+// same rule at the start path: an async start whose BeginStartLaunch
 // fails after the run was begun (nothing was sent) is a start that did not
 // happen, so startAgentCore settles it as it settles any refused start: a
 // provisioned agent (a created memory row) goes back to rest (intent
@@ -933,9 +933,10 @@ func TestAsyncStart_AcceptedPublishesLaunchingAgent(t *testing.T) {
 	assert.Empty(t, rec.forAgent(held.ID), "a delete-held row publishes nothing on acceptance")
 }
 
-// TestAsyncStart_HandoffSetsContainerStarting pins ptone/scion#5266: a start that supersedes a queued stop and is handed
-// off to an asynchronous launch clears the queued-stop notice and marks the
-// container starting (not running, and not stop_queued).
+// TestAsyncStart_HandoffSetsContainerStarting pins ptone/scion#5266: a
+// start that supersedes a queued stop and is handed off to an asynchronous
+// launch clears the queued-stop notice and marks the container starting
+// (not running, and not stop_queued).
 func TestAsyncStart_HandoffSetsContainerStarting(t *testing.T) {
 	f, _ := newAsyncStartFixture(t)
 	a := f.addAgent("as-queued", string(state.PhaseStopped), "", func(a *store.Agent) {
@@ -1032,10 +1033,10 @@ func newD9Agent(t *testing.T, f *reconcileFixture, slug string, p d9Prior) *stor
 	return seedResumeMemory(t, f.s, f.addAgent(slug, string(p.memory), ""), string(p.memory))
 }
 
-// TestAsyncStart_D9SyncAsyncParity is design D-T9 (with v3.1 N2's retry
-// from a memory row): for each prior phase, a failed synchronous start and
-// a failed asynchronous start (an applied failed report) leave the agent
-// with
+// TestAsyncStart_D9SyncAsyncParity checks sync/async parity, including a
+// retry from a resume-memory row: for each prior phase, a failed
+// synchronous start and a failed asynchronous start (an applied failed
+// report) leave the agent with
 //   - the phase D-c assigns: the synchronous rollback restores the stored
 //     phase; the asynchronous end restores stopped or error, and ends error
 //     with resume memory for a suspended, halted, created or provisioning

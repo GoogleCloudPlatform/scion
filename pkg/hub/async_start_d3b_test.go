@@ -312,10 +312,9 @@ func TestStartDispatchOptions_LaunchKind(t *testing.T) {
 	assert.Equal(t, store.LaunchKindRestart, StartDispatchOptions{Kind: store.LaunchKindRestart}.launchKind())
 }
 
-// TestStartDidNotHappen_DeleteWrapped is the startDidNotHappen unit row the
-// P3.3-c owner asked for: an error that wraps store.ErrDeleteInProgress is
-// never a start that did not happen, whatever else it wraps; the same
-// refusal without the delete sentinel still is.
+// TestStartDidNotHappen_DeleteWrapped pins that an error that wraps
+// store.ErrDeleteInProgress is never a start that did not happen, whatever
+// else it wraps; the same refusal without the delete sentinel still is.
 func TestStartDidNotHappen_DeleteWrapped(t *testing.T) {
 	assert.False(t, startDidNotHappen(fmt.Errorf("%w: %w: %w", ErrLaunchInvalidPhase, store.ErrInvalidPhase, store.ErrDeleteInProgress)),
 		"a delete-held launch refusal is the delete engine's")
