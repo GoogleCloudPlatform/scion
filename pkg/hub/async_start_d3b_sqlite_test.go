@@ -30,6 +30,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1084,34 +1085,53 @@ func TestAsyncStart_FailedReportPublishesOnce(t *testing.T) {
 	assert.Equal(t, "Start failed: pull: image pull failed. "+provisionedRestingNote, pub[0].Message)
 }
 
+// newerIntentOnRevertStore records a newer run intent for agentID just
+// before the first RevertRunIntent once armed, as a start recorded between
+// a failed report's write and the run-intent hook's revert would.
+type newerIntentOnRevertStore struct {
+	store.Store
+	agentID string
+	armed   atomic.Bool
+}
+
+func (s *newerIntentOnRevertStore) RevertRunIntent(ctx context.Context, agentID string, from store.RunIntent, at time.Time, to store.RunIntent) (bool, error) {
+	if agentID == s.agentID && s.armed.CompareAndSwap(true, false) {
+		time.Sleep(20 * time.Millisecond) // keep the two intent times apart
+		if _, _, err := s.Store.SwapRunIntent(ctx, agentID, store.RunIntentRunning); err != nil {
+			return false, err
+		}
+	}
+	return s.Store.RevertRunIntent(ctx, agentID, from, at, to)
+}
+
 // TestAsyncStart_FailedReportLostSettlePublishesOnce pins the other side of
 // the report path's publish-once rule (owner review R1(b)): when the
-// settle's revert loses (a newer start holds the intent), the handler
-// publishes exactly one event, the store's updated row, with the newer
-// intent kept.
+// settle's revert loses (a newer start recorded its intent after the
+// report's write), the handler publishes exactly one event, the store's
+// updated row, and the newer intent is kept.
 func TestAsyncStart_FailedReportLostSettlePublishesOnce(t *testing.T) {
 	f, _ := newAsyncStartFixture(t)
 	a := newD9Agent(t, f, "d9-pubonce-lost", d9Prior{"created memory", state.PhaseCreated, state.PhaseCreated})
+	// The wrapper is installed before any request, like the other store
+	// fault wrappers in this package; it acts only once armed.
+	wrap := &newerIntentOnRevertStore{Store: f.srv.store, agentID: a.ID}
+	f.srv.store = wrap
 	code, body := lifecycleWithBody(t, f, a.ID, "start", map[string]bool{"acceptAsyncLaunch": true})
 	require.Equal(t, http.StatusOK, code, body)
 	row := getAgent(t, f.s, a.ID)
-	// A newer intent: the settle's compare-and-set on the launch's intent
-	// time loses (the pause keeps the two intent times apart).
-	time.Sleep(20 * time.Millisecond)
-	_, err := f.srv.recordRunIntent(context.Background(), row, store.RunIntentRunning)
-	require.NoError(t, err)
 	events := recordStatusEvents(t, f.srv)
+	wrap.armed.Store(true)
 	rec := postLaunchReport(t, f.srv, f.brokerID, a.ID, f.brokerID, AgentLaunchReport{
 		LaunchID: row.LaunchID, InstanceID: "inst-1", State: "failed", ErrorCode: "boom", Step: "pull", Message: "image pull failed",
 	})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.False(t, wrap.armed.Load(), "the newer intent was recorded at the revert")
 	pub := events.forAgent(a.ID)
 	require.Len(t, pub, 1, "exactly one status event when the settle loses")
 	got := getAgent(t, f.s, a.ID)
 	assert.Equal(t, store.RunIntentRunning, got.RunIntent, "the newer intent is kept")
 	assert.Equal(t, got.Message, pub[0].Message, "the event is the store's updated row")
 	assert.Equal(t, "pull: image pull failed", pub[0].Message)
-	assert.Equal(t, store.RunIntentRunning, pub[0].RunIntent)
 }
 
 // TestAsyncStart_ReapedProvisionedStartPublishesOnce pins the reaper's
