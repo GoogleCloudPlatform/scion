@@ -885,7 +885,7 @@ var principalContextSetterFiles = map[string]map[string]bool{
 		"auth.go": true, "auth_external_bearer.go": true, "brokerauth.go": true,
 		// In-process identity substitution for deferred or internal work.
 		"authz.go": true, "capabilities.go": true, "chat_scheduled_send.go": true,
-		"pty_handlers.go": true, "server.go": true,
+		"passthrough_translation_review.go": true, "pty_handlers.go": true, "server.go": true,
 		// The attachment read decision for a delivery recipient, built from
 		// the hub's agent row (attachmentDecisionForRecipient; ptone/scion#4596).
 		"attachment_delivery.go": true,

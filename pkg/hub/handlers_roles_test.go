@@ -2159,9 +2159,15 @@ func TestGenericDeleteBinding_SuperAdmin_LastAdmin(t *testing.T) {
 	devUser.Status = "suspended"
 	require.NoError(t, s.UpdateUser(ctx, devUser))
 
+	// The fixture isolates the last-admin guard: the authorization decision
+	// reads the dev user as active, so the request reaches the guard, while
+	// the guard's transaction reads the stored suspended row and counts zero
+	// surviving active admins. A suspended actor is refused before the
+	// guard; TestGenericDeleteBinding_SuspendedActor_RefusedBeforeLastAdminGuard
+	// pins that.
+	authzSeesUserActive(t, srv, devUser.ID)
+
 	// Now try to delete target's binding. Target is the only active admin.
-	// Dev can still make the request (auth middleware uses identity, not user status
-	// for existing sessions), but the guard should see zero surviving active admins.
 	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/admin/role-bindings/"+targetBinding.ID, nil)
 	assert.Equal(t, http.StatusConflict, rec.Code,
 		"deleting last active admin's binding should be blocked")
@@ -2170,6 +2176,33 @@ func TestGenericDeleteBinding_SuperAdmin_LastAdmin(t *testing.T) {
 	// Re-activate dev for cleanup.
 	devUser.Status = "active"
 	_ = s.UpdateUser(ctx, devUser)
+}
+
+// TestGenericDeleteBinding_SuspendedActor_RefusedBeforeLastAdminGuard sets
+// up the state in which TestGenericDeleteBinding_SuperAdmin_LastAdmin gets
+// 409 last_admin, without a stub: the suspended dev user's own stored row
+// is what authorization reads. The account-status check refuses the request
+// with 403 before the last-admin guard runs, and the binding is kept.
+func TestGenericDeleteBinding_SuspendedActor_RefusedBeforeLastAdminGuard(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	devUser := getDevUser(t, srv, s)
+	srv.ensureSuperAdminBinding(ctx, devUser.ID)
+
+	targetID := tid("ga-susp-actor-target")
+	seedRolesTestUser(t, s, targetID, "gasuspactor@test.local")
+	targetBinding := createSuperAdminBindingDirect(t, s, targetID)
+
+	devUser.Status = store.UserStatusSuspended
+	require.NoError(t, s.UpdateUser(ctx, devUser))
+
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/admin/role-bindings/"+targetBinding.ID, nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), `"code":"forbidden"`)
+	assert.NotContains(t, rec.Body.String(), "last_admin")
+	_, err := s.GetRoleBinding(ctx, targetBinding.ID)
+	assert.NoError(t, err, "the target binding is kept")
 }
 
 // TestGenericDeleteBinding_SuperAdmin_AllowedWithSurvivor verifies that

@@ -159,9 +159,9 @@ const (
 //
 // The method:
 //  1. Resolves the target project (fail-closed on not-found).
-//  2. Checks base permission (project.delete).
-//  3. Enforces ownership/ancestry governance.
-//  4. Checks actor status (not suspended).
+//  2. Checks actor status (not suspended).
+//  3. Checks base permission (project.delete).
+//  4. Enforces ownership/ancestry governance.
 //  5. Checks credential ceiling (session JWT only, no scoped UAT/agent).
 //  6. Acquires the project membership lock for serialization.
 //  7. Re-evaluates authority under lock (TOCTOU closure).
@@ -199,7 +199,14 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 		}
 	}
 
-	// 2. Check base permission (project.delete) via the authz evaluator.
+	// 2. Check actor status — suspended users cannot delete projects.
+	// Runs before the permission check, which denies every account that is
+	// not active, so a suspended actor keeps its own denial code.
+	if err := svc.checkActorStatus(ctx, req.Actor.ID()); err != nil {
+		return nil, err
+	}
+
+	// 3. Check base permission (project.delete) via the authz evaluator.
 	if svc.authz != nil {
 		resource := Resource{
 			Type:    "project",
@@ -218,7 +225,7 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 		}
 	}
 
-	// 3. Enforce ownership/ancestry governance.
+	// 4. Enforce ownership/ancestry governance.
 	// Project deletion requires the actor to be:
 	//   - A direct project owner (active binding), OR
 	//   - A super-admin (system-scoped)
@@ -227,11 +234,6 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 	govDecision := svc.checkDeletionGovernance(ctx, req)
 	if !govDecision.Allowed {
 		return nil, &govDecision
-	}
-
-	// 4. Check actor status — suspended users cannot delete projects.
-	if err := svc.checkActorStatus(ctx, req.Actor.ID()); err != nil {
-		return nil, err
 	}
 
 	// 5. Credential ceiling — project deletion is restricted to full session.

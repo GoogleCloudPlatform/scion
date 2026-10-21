@@ -260,7 +260,7 @@ func TestSettle_SupersedingStart_KeepsReservation(t *testing.T) {
 
 // The settle's release commits first; a start that comes after finds no
 // reservation and is admitted with the cap check: at a full instance it is
-// refused, and the agent's stop is still confirmed.
+// refused and puts the queued stop's intent back (ptone/scion#5070).
 func TestSettle_ReleaseCommitsFirst_StartGetsCheckedAdmission(t *testing.T) {
 	t.Run("room", func(t *testing.T) {
 		sf := newSettleFixture(t, "commit-room")
@@ -297,8 +297,8 @@ func TestSettle_ReleaseCommitsFirst_StartGetsCheckedAdmission(t *testing.T) {
 		assert.Nil(t, sf.held(t), "no unchecked re-assert after the settle's own release")
 		assert.EqualValues(t, 1, brokerReservationCount(t, sf.s, sf.brokerID))
 		got := getAgent(t, sf.s, sf.agent.ID)
-		assert.Equal(t, store.RunIntentRunning, got.RunIntent, "the refused start left its run intent")
-		assert.Equal(t, containerStatusStopQueued, got.ContainerStatus, "a superseded stop is not confirmed")
+		assert.Equal(t, store.RunIntentStopped, got.RunIntent, "the refused start restored the stopped intent")
+		assert.Equal(t, containerStatusStopQueued, got.ContainerStatus, "the next settle confirms the stop, not this one")
 		assert.Zero(t, sf.backstops(backstopSiteSettle))
 	})
 }
@@ -495,13 +495,19 @@ func TestSettle_ClaimBetweenReleaseAndReread_ReserveAfter_Checked(t *testing.T) 
 	assert.EqualValues(t, 1, brokerReservationCount(t, sf.s, sf.brokerID))
 }
 
-// A superseding start refused at a full instance (429) after the settle's
-// release: no reservation is ever created for the agent (no settle
-// re-assert, no backfill, nothing from the sweep or a later heartbeat). Its
-// container status stays stop_queued with run intent running, display only,
-// until the agent's next lifecycle action; here a start once a slot frees,
-// which reserves with the cap check and replaces the status.
-func TestSettle_RefusedSupersedingStart_NoReservationUntilNextAction(t *testing.T) {
+// A superseding start refused at a full instance (429) inside the settle's
+// release window (after the conditional release, before the re-read) puts
+// the stopped intent back at its newer time (ptone/scion#5070). The
+// settle's re-read then sees a queued stop intended again: the release was
+// proven safe on the locked row, so nothing is re-asserted, and the
+// confirmation is left to the next settle. In between, the sweep's backfill
+// restores the still-intended queued stop's reservation unchecked (the
+// accounting of a slot in use, as for any queued stop that lost its
+// reservation; TestBackfill_RestoresQueuedStopReservation), so the instance
+// reads one over its cap while the filler holds the slot. The next settle
+// releases that reservation and confirms the stop, with no backstop write.
+// A start once a slot frees then reserves with the cap check.
+func TestSettle_RefusedStartRevertsInsideReleaseWindow_NoReassert(t *testing.T) {
 	sf := newSettleFixture(t, "refused-start")
 	setBrokerAgentCeiling(t, sf.s, 1)
 	filler := sf.addAgent("refused-start-filler", "running", "working")
@@ -514,14 +520,23 @@ func TestSettle_RefusedSupersedingStart_NoReservationUntilNextAction(t *testing.
 
 	sf.settle()
 	require.Equal(t, http.StatusTooManyRequests, code)
-	assert.Nil(t, sf.held(t))
+	assert.Nil(t, sf.held(t), "nothing re-asserted after the safe release")
+	assert.Zero(t, sf.backstops(backstopSiteSettle), "a refused start inside the release window writes no backstop re-assert")
+	got := getAgent(t, sf.s, sf.agent.ID)
+	assert.Equal(t, store.RunIntentStopped, got.RunIntent, "the refused start put the stopped intent back")
+	assert.Equal(t, containerStatusStopQueued, got.ContainerStatus, "confirmed by the next settle, not this one")
 
 	sf.srv.ReconcileStaleBrokerQuotaReservations(context.Background())
+	require.NotNil(t, sf.held(t), "the sweep backfills the still-intended queued stop's reservation")
+	assert.EqualValues(t, 2, brokerReservationCount(t, sf.s, sf.brokerID), "one over the cap until the next settle")
+
 	sf.settle() // a later heartbeat
-	assert.Nil(t, sf.held(t), "no reservation is ever created for the refused start")
-	got := getAgent(t, sf.s, sf.agent.ID)
-	assert.Equal(t, containerStatusStopQueued, got.ContainerStatus, "display only, until the next lifecycle action")
-	assert.Equal(t, store.RunIntentRunning, got.RunIntent)
+	assert.Nil(t, sf.held(t), "the next settle releases the backfilled reservation")
+	got = getAgent(t, sf.s, sf.agent.ID)
+	assert.Equal(t, "stopped", got.ContainerStatus, "the next settle confirms the stop")
+	assert.Equal(t, store.RunIntentStopped, got.RunIntent)
+	assert.Contains(t, got.Message, "Start failed:", "the refusal is shown")
+	assert.Zero(t, sf.backstops(backstopSiteSettle), "a refused start inside the release window writes no backstop re-assert")
 
 	require.NoError(t, sf.s.ReleaseReservation(context.Background(), brokerLimitDefID(t, sf.s), filler.ID))
 	sf.disp.start = func(ctx context.Context, cur *store.Agent) error {
@@ -530,8 +545,35 @@ func TestSettle_RefusedSupersedingStart_NoReservationUntilNextAction(t *testing.
 	}
 	require.Equal(t, http.StatusOK, doRequest(t, sf.srv, http.MethodPost, "/api/v1/agents/"+sf.agent.ID+"/start", nil).Code)
 	require.NotNil(t, sf.held(t), "the next start reserves with the cap check")
-	assert.Equal(t, "running", getAgent(t, sf.s, sf.agent.ID).ContainerStatus, "stop_queued is replaced")
+	assert.Equal(t, "running", getAgent(t, sf.s, sf.agent.ID).ContainerStatus)
 	assert.Zero(t, sf.backstops(backstopSiteSettle))
+}
+
+// The no-re-assert rule skips only a newer start (intent running) or a queued
+// stop intended again at a newer time. A newer stop that is neither (here
+// it holds a stop-kind claim, so it is not a still-intended queued stop, and
+// its intent time is not the queued stop's, so the drain is not applying
+// this stop) keeps the backstop re-assert: the settle cannot tell that its
+// container is gone for that stop.
+func TestSettle_NewerStopAfterRelease_Reasserts(t *testing.T) {
+	sf := newSettleFixture(t, "newer-stop")
+	ctx := context.Background()
+	sf.hook.afterRelease = func() {
+		at, err := sf.s.SetRunIntent(ctx, sf.agent.ID, store.RunIntentStopped)
+		require.NoError(t, err)
+		_, err = sf.s.ClaimAgentStop(ctx, sf.agent.ID, "other-hub", at, time.Minute)
+		require.NoError(t, err)
+	}
+	sf.fault.Arm()
+
+	sf.settle()
+
+	require.Nil(t, sf.hook.afterRelease, "the newer stop ran after the settle's release")
+	got := getAgent(t, sf.s, sf.agent.ID)
+	require.Equal(t, store.StartClaimStop, got.StartClaimKind, "setup: the newer stop holds its claim")
+	require.True(t, supersededAfter(got.RunIntentAt, sf.agent.RunIntentAt), "setup: a newer stop intent")
+	assert.NotNil(t, sf.held(t), "a newer stop after the release is re-asserted")
+	assert.EqualValues(t, 1, sf.backstops(backstopSiteSettle), "a newer stop after the release is re-asserted")
 }
 
 // The two conjuncts of the settle's no-re-assert rule: the intent goes back

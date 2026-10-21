@@ -209,7 +209,7 @@ func TestPassthrough_CloudRunSandbox_SARecordCreated(t *testing.T) {
 	hostSAEmail := "broker-host@sa-project.iam.gserviceaccount.com"
 	hostProjectID := "sa-project"
 	owner := ptUser(tid("user-sandbox-pt-2"), "sandbox-owner2@test.com", store.UserRoleMember)
-	srv, s, project, _ := setupPassthroughSandboxServer(t, owner, hostSAEmail, hostProjectID)
+	srv, s, project, broker := setupPassthroughSandboxServer(t, owner, hostSAEmail, hostProjectID)
 
 	checker := store.NewFakeCallerPermissionChecker().AllowTarget(hostSAEmail)
 	enforceSAAssign(srv, checker)
@@ -236,7 +236,9 @@ func TestPassthrough_CloudRunSandbox_SARecordCreated(t *testing.T) {
 	assert.Equal(t, hostSAEmail, sa.Email)
 	assert.Equal(t, hostProjectID, sa.ProjectID)
 	assert.Equal(t, store.ScopeHub, sa.Scope, "broker host SA record must be hub-scoped")
-	assert.True(t, sa.Verified, "broker host SA should be pre-verified")
+	assert.True(t, sa.Verified, "broker host SA is verified by the impersonation probe")
+	assert.Equal(t, broker.ID, sa.ScopeID, "the record is bound to its broker")
+	assert.Equal(t, hostSATranslationCreator, sa.CreatedBy)
 }
 
 // TestPassthrough_CloudRunSandbox_SARecordReused verifies that creating

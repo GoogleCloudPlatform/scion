@@ -30,6 +30,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -97,6 +98,9 @@ type Role struct {
 
 	// Streams schedules the re-checks of the user streams this relay holds.
 	Streams *StreamScheduler
+
+	// untrustedIngress counts dials whose ingress headers were not trusted.
+	untrustedIngress atomic.Uint64
 
 	// tunnels are the tunnels this relay opened for its user sessions.
 	tunnels tunnelTable
@@ -179,11 +183,49 @@ func writeUnavailable(w http.ResponseWriter, message, reason string) {
 	}})
 }
 
-// ServeHTTP serves GET /api/v1/conduit: the relay asks the hub to admit the
-// dialer with the credential headers it presented, and serves the session
-// as the principal the hub admitted. A hub refusal is passed on unchanged;
-// an unreachable hub is 503.
+// ServeHTTP serves GET /api/v1/conduit on the relay's public listener: a
+// direct dial. The ingress headers are never trusted here: a dial that
+// carries either is logged and counted (cause ingress_header_untrusted)
+// and admitted as direct.
 func (ro *Role) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get(relay.HeaderIngressInstance) != "" || r.Header.Get(relay.HeaderIngressLifetimeCap) != "" {
+		ro.ingressHeaderUntrusted("public listener")
+	}
+	ro.serve(w, r, relay.ArrivalDirect, "")
+}
+
+// ServeIngress serves GET /api/v1/conduit proxied by a hub ingress over a
+// relay-peer leg (the internal listener). peer is the relay-peer id the
+// caller already authenticated as (relay.Relay.AuthenticatePeer). The dial
+// is an ingress arrival only when the ingress instance header names that
+// same peer; otherwise it is refused with 403 (cause
+// ingress_header_untrusted), never served as direct.
+func (ro *Role) ServeIngress(w http.ResponseWriter, r *http.Request, peer string) {
+	instance := r.Header.Get(relay.HeaderIngressInstance)
+	if instance == "" || len(instance) > relay.MaxIngressInstanceLen || instance != peer {
+		ro.ingressHeaderUntrusted("ingress leg")
+		http.Error(w, "ingress instance missing or not the authenticated peer", http.StatusForbidden)
+		return
+	}
+	ro.serve(w, r, relay.ArrivalIngress, instance)
+}
+
+// ingressHeaderUntrusted logs and counts ingress headers this relay did
+// not trust (cause ingress_header_untrusted).
+func (ro *Role) ingressHeaderUntrusted(where string) {
+	n := ro.untrustedIngress.Add(1)
+	ro.log.Warn("Conduit relay: ingress headers not trusted on this dial", "cause", "ingress_header_untrusted", "where", where, "count", n)
+}
+
+// IngressHeaderUntrustedCount returns how many dials carried ingress
+// headers this relay did not trust.
+func (ro *Role) IngressHeaderUntrustedCount() uint64 { return ro.untrustedIngress.Load() }
+
+// serve admits a dial: the relay asks the hub to admit the dialer with the
+// credential headers it presented and how the dial arrived, and serves the
+// session as the principal the hub admitted. A hub refusal is passed on
+// unchanged; an unreachable hub is 503.
+func (ro *Role) serve(w http.ResponseWriter, r *http.Request, arrival, ingressInstance string) {
 	if r.URL.Path != ConduitPath {
 		http.NotFound(w, r)
 		return
@@ -194,7 +236,8 @@ func (ro *Role) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !ro.relay.Admitting() {
-		writeUnavailable(w, "This relay is not admitting conduit sessions", "conduit_not_serving")
+		// Always before Admit, so an ingress may re-pick on this reason.
+		writeUnavailable(w, "This relay is not admitting conduit sessions", relay.ReasonRelayNotAdmitting)
 		return
 	}
 	if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") || !strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade") {
@@ -210,6 +253,8 @@ func (ro *Role) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Host:            r.Host,
 		RawQuery:        r.URL.RawQuery,
 		Headers:         relay.ForwardCredentialHeaders(r.Header),
+		Arrival:         arrival,
+		IngressInstance: ingressInstance,
 	}, &adm)
 	var refusal *relay.HubRefusal
 	switch {

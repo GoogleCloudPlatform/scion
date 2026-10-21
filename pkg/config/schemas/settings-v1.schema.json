@@ -1544,6 +1544,13 @@
               "x-env-var": "SCION_SERVER_HUB_CONDUIT_RELAYMODE",
               "x-since": "1"
             },
+            "ingress": {
+              "type": "string",
+              "enum": ["proxy", "redirect"],
+              "description": "How a hub in external relay mode serves a conduit dial: 'proxy' (default) reverse-proxies the dial to the chosen relay, authenticated as relay-peer with HMAC peer authentication; 'redirect' answers with the relay's public URL. Read at startup; ignored in in_process mode.",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_INGRESS",
+              "x-since": "1"
+            },
             "target_stream_deadlines": {
               "type": "string",
               "enum": ["off", "enforce"],

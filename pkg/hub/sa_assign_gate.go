@@ -258,16 +258,15 @@ func (s *Server) hookIdentityCheckerFor() store.CallerPermissionChecker {
 // confinement for humans and adds it for agents, so no single sentence about
 // "the gate" on a hub-scoped account is true of both:
 //
-//   - HUMAN caller, HUB-scoped (parentless) account: behaviour CHANGES. Under
-//     ActionRead the seeded hub-members read-all policy matched it, because
-//     matchesResource's scope switch has no "hub" arm and falls through to
-//     true. Nothing grants hub-wide assign, so under ActionAssign a plain hub
-//     member is now DENIED and only hub admins and the account's creator pass.
-//     That looks like a regression and is the ruled fail-closed answer
-//     (design-draft §8.2). Do NOT "fix" it with a hub-scoped assign policy —
-//     hub-scoped policies match every resource, so that would grant every hub
-//     member every service account on the hub. It is also the one behaviour
-//     change worth a release note.
+//   - HUMAN caller, HUB-scoped (parentless) account: a current hub member
+//     passes Layer 1 through the hub-member assign relationship rule
+//     (RelationshipRuleHubMemberSAAssign in authz_relationship_rules.go), as
+//     do hub admins; a user who is not a current hub member does not, and the
+//     account's creator gets no owner shortcut for assign. Do NOT add a
+//     hub-scoped assign policy: hub-scoped policies match every resource.
+//     Hub records that sandbox passthrough translation created for a broker
+//     host account are refused here for every caller
+//     (saAssignPreconditionTranslationRecord).
 //   - AGENT caller, HUB-scoped account: behaviour is UNCHANGED, already denied
 //     before and after. Agent principals come only from the agent's own groups,
 //     which never include hub-members, so the read-all policy was never fetched
@@ -499,7 +498,29 @@ const (
 	// saAssignPreconditionHubMode: a hub-scoped account while
 	// gcpIamCheckMode is not enforce.
 	saAssignPreconditionHubMode saAssignPreconditionKind = "hub_mode"
+	// saAssignPreconditionTranslationRecord: the account is the hub record of
+	// a broker's host service account that sandbox passthrough translation
+	// created. It is used only through translation, which applies the
+	// passthrough requirements; it is never an explicit or default
+	// reference.
+	saAssignPreconditionTranslationRecord saAssignPreconditionKind = "translation_record"
 )
+
+// saAssignTranslationRecordMsg is the refusal for naming a translation
+// record explicitly or as a default.
+const saAssignTranslationRecordMsg = "This service account is a broker host service account used for GCP identity " +
+	"passthrough on sandbox profiles and cannot be assigned directly; use passthrough on the broker instead"
+
+// saReferencePreconditions applies the rules for an account named as an
+// explicit or default reference, on top of saAssignPolicyPreconditions.
+// translatePassthroughForSandbox does not call it: a translation record is
+// valid there.
+func saReferencePreconditions(sa *store.GCPServiceAccount) *saAssignPrecondition {
+	if store.IsHostSATranslationRecord(sa) {
+		return &saAssignPrecondition{Kind: saAssignPreconditionTranslationRecord}
+	}
+	return nil
+}
 
 // saAssignPrecondition is a refusal from saAssignPolicyPreconditions.
 type saAssignPrecondition struct {
@@ -589,6 +610,13 @@ func (s *Server) evaluateSAAssignment(ctx context.Context, r *http.Request, sa *
 			// msgSANotAvailableInProject names no account (identity_errors.go).
 			return &saAssignDenial{kind: saAssignDenyValidation, msg: msgSANotAvailableInProject}
 		}
+	}
+	// Explicit and default references only: the translation path does not
+	// come through this gate.
+	if pre := saReferencePreconditions(sa); pre != nil {
+		slog.Warn("SA assignment denied: broker host account translation record",
+			"surface", surface, "targetSA", sa.Email)
+		return &saAssignDenial{kind: saAssignDenyForbidden, msg: saAssignTranslationRecordMsg}
 	}
 
 	identity := GetIdentityFromContext(ctx)

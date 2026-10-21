@@ -312,3 +312,27 @@ func TestExecutionIdentity_ChecksTheImmediateCaller(t *testing.T) {
 		t.Errorf("expected the target to be the hook's execution identity; got %q", calls[0].TargetSAEmail)
 	}
 }
+
+// A broker host service account record (the hub record GCP identity
+// passthrough translation keeps) is refused as an execution identity, even
+// for a caller with actAs on it. ValidateHook serves both hook create and
+// hook update.
+func TestExecutionIdentity_TranslationRecordRefused(t *testing.T) {
+	resolver := &mockSAResolver{accounts: map[string]*store.GCPServiceAccount{
+		"sa-001": {
+			ID: "sa-001", Scope: store.ScopeHub, ScopeID: "broker-1", Email: hookSAEmail,
+			Verified: true, VerificationStatus: store.GCPVerificationVerified,
+			CreatedBy: store.HostSATranslationCreator,
+		},
+	}}
+	checker := store.NewFakeCallerPermissionChecker().AllowTarget(hookSAEmail)
+
+	err := ValidateHook(context.Background(), hookWithIdentity(), resolver, defaultCaller(), checker, noAudit())
+
+	if !hasExecutionIdentityError(t, err) {
+		t.Fatalf("a translation record must not be accepted as an execution identity; got: %v", err)
+	}
+	if msg := executionIdentityMessage(t, err); !strings.Contains(msg, "broker host service account") {
+		t.Errorf("unexpected message: %q", msg)
+	}
+}

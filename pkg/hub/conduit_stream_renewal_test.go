@@ -758,10 +758,11 @@ func TestRenewalDriver_NonAdvancingUntilNeverLoops(t *testing.T) {
 // cmd sets a conduit test seam, as a composite-literal key or by
 // assignment: ConduitRelayOptions.AuthzClock, and the Server fields
 // conduitScopeOfTest, conduitAuthorizeActionTestHook,
-// conduitRouteCanRenewTest, legacyPortTunnelReturnedTestHook and the
-// broker memo's brokerMemoWaitTestHook.
+// conduitRouteCanRenewTest, legacyPortTunnelReturnedTestHook,
+// conduitIngressSampleTestHook and the broker memo's
+// brokerMemoWaitTestHook.
 func TestConduitTestSeamsNeverSetInProduction(t *testing.T) {
-	seams := map[string]bool{"AuthzClock": true, "conduitScopeOfTest": true, "conduitAuthorizeActionTestHook": true, "conduitRouteCanRenewTest": true, "withoutStreamRenewer": true, "legacyPortTunnelReturnedTestHook": true, "brokerMemoWaitTestHook": true}
+	seams := map[string]bool{"AuthzClock": true, "conduitScopeOfTest": true, "conduitAuthorizeActionTestHook": true, "conduitRouteCanRenewTest": true, "withoutStreamRenewer": true, "legacyPortTunnelReturnedTestHook": true, "conduitIngressSampleTestHook": true, "brokerMemoWaitTestHook": true}
 	for _, dir := range []string{".", filepath.Join("..", "..", "cmd")} {
 		files, err := filepath.Glob(filepath.Join(dir, "*.go"))
 		require.NoError(t, err)

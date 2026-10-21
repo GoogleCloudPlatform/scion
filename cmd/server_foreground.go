@@ -150,9 +150,11 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	for _, cleanup := range logCleanups {
-		defer cleanup()
-	}
+	// The log cleanups (OTel, Cloud Logging flush) run once: deferred here,
+	// or earlier on the graceful shutdown's early exit (awaitServerExit),
+	// which ends the process without returning (ptone/scion#5054).
+	flushLogs := onceCleanups(logCleanups)
+	defer flushLogs()
 
 	// 2. Load & reconcile config
 	cfg, err := loadAndReconcileConfig(cmd)
@@ -334,11 +336,32 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// The returned done channel is for tests only: do not wait on it here
-	// (architect ruling R11b). The goroutine may be inside the shutdown's
-	// synchronous log write, and joining it would make this return depend
-	// on the logger.
-	_ = installServerShutdownSignals(ctx, signal.Notify, cancel)
+	// One graceful shutdown for the whole process (ptone/scion#5054):
+	// components register pre-cancel steps on it (shutdownSeq.addStep)
+	// instead of subscribing to signals themselves. The signal handler
+	// lives until this function returns (signalsCtx), so a second signal
+	// can force the shutdown during the teardown. The returned done
+	// channel is for tests only: do not wait on it here (architect ruling
+	// R11b).
+	shutdownSeq := newServerShutdownSequence(cancel, shutdownClock)
+	signalsCtx, stopSignals := context.WithCancel(context.Background())
+	defer stopSignals()
+	_ = installServerShutdownSignals(signalsCtx, signal.Notify, shutdownSeq)
+	// The whole-process shutdown budget (shutdown_grace when set, else
+	// none: each phase keeps its own bound) and its phase deadlines; see
+	// cmd/server_shutdown.go for the order.
+	shutdownPlan := serverShutdownPlan{q: shutdownSeq, budget: serverShutdownBudgetFor(cfg)}
+	// With the budget set, the process exits within the grace whatever
+	// close is still running.
+	shutdownPlan.armExitWatchdog(signalsCtx.Done())
+	// The hub front waits for the co-located broker before it closes its
+	// listener (hub.ShutdownHooks.BeforeHTTPDrain).
+	brokerStop := newColocatedBrokerStop()
+	frontShutdownHooks := hub.ShutdownHooks{
+		Context:          shutdownPlan.teardownContext,
+		HTTPDrainContext: shutdownPlan.httpDrainContext,
+		BeforeHTTPDrain:  brokerStop.beforeHTTPDrain(shutdownClock, brokerStopWaitFallback, shutdownPlan.brokerContext),
+	}
 
 	var wg sync.WaitGroup
 	errCh := make(chan error, 3)
@@ -467,6 +490,10 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	// above runs (ptone/scion#4869).
 	stopPluginShutdownMark := context.AfterFunc(ctx, pluginMgr.BeginShutdown)
 	defer stopPluginShutdownMark()
+	// The graceful shutdown's mark comes before cancel (after the conduit
+	// drain), so plugin exits are expected from the mark on
+	// (ptone/scion#5054); the AfterFunc above covers the other returns.
+	shutdownSeq.addStep(shutdownPhaseMark, pluginMgr.BeginShutdown)
 
 	// 11. Start Hub
 	var hubSrv *hub.Server
@@ -586,7 +613,12 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		// Conduit relay (hub.conduit): after operational settings are
 		// loaded (initHubServer) and before the background services start,
 		// which register the registry singleton only when a relay runs.
-		if err := startConduit(ctx, cancel, cfg, hubSrv, hubEndpoints.For(hub.HubEndpointForConduitCheck), &wg, errCh); err != nil {
+		// Mark the hub shutting down first when the shutdown begins
+		// (/readyz 503, new work refused, streams ended).
+		shutdownSeq.addStep(shutdownPhaseMark, hubSrv.BeginShutdown)
+		hubSrv.SetShutdownHooks(frontShutdownHooks)
+
+		if err := startConduit(ctx, shutdownSeq, cfg, hubSrv, hubEndpoints.For(hub.HubEndpointForConduitCheck), &wg, errCh); err != nil {
 			return err
 		}
 
@@ -611,15 +643,11 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			// Combined mode: Hub API is mounted on the Web server.
 			// Background services (scheduler, notification dispatcher) are
 			// started after initWebServer sets the ChannelEventPublisher.
+			// The web server runs the hub's background teardown after
+			// its own HTTP drain (WebServer.Shutdown, mounted by
+			// MountHubAPI); the audit writer closes after every server
+			// has drained (awaitServerExit).
 			log.Printf("Hub API will be mounted on Web server (port %d)", webPort)
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				<-ctx.Done()
-				// Background teardown only: the audit writer closes
-				// after every server has drained (awaitServerExit).
-				_ = hubSrv.CleanupBackgroundResources(context.Background())
-			}()
 		}
 	}
 
@@ -630,6 +658,8 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
+		shutdownSeq.addStep(shutdownPhaseMark, webSrv.BeginShutdown)
+		webSrv.SetShutdownHooks(frontShutdownHooks)
 
 		// In combined mode, start Hub background services now that the
 		// ChannelEventPublisher has been wired by initWebServer.
@@ -667,8 +697,20 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 				return err
 			}
 		}
-		if err := startRuntimeBroker(ctx, cmd, cfg, hubSrv, webSrv, s, hubEndpoint, hubEndpointSrc, devAuthToken, brokerSettings, brokerDefaultProfile, globalDir, requestLogger, messageLogger, &wg, errCh); err != nil {
-			return err
+		// The broker's goroutines join brokerWG, so the hub front can
+		// wait for them (brokerStop) before closing its listener; the
+		// server WaitGroup waits for brokerWG.
+		var brokerWG sync.WaitGroup
+		brokerStop.markStarted()
+		brokerErr := startRuntimeBroker(ctx, cmd, cfg, hubSrv, webSrv, s, hubEndpoint, hubEndpointSrc, devAuthToken, brokerSettings, brokerDefaultProfile, globalDir, requestLogger, messageLogger, &brokerWG, errCh, shutdownPlan.brokerContext)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			brokerWG.Wait()
+			brokerStop.markStopped()
+		}()
+		if brokerErr != nil {
+			return brokerErr
 		}
 	}
 	// Phase 2 item 5: one, centralized call site for the shared_dir_storage
@@ -962,7 +1004,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	if hubSrv != nil {
 		closeAudit = hubSrv.CloseAuditWriter
 	}
-	return awaitServerExit(ctx, errCh, cancel, wg.Wait, closeAudit)
+	return awaitServerExit(ctx, errCh, cancel, wg.Wait, closeAudit, shutdownPlan.exitSignal(signalsCtx.Done()), shutdownPlan.exitCloseContext, flushLogs)
 }
 
 // serverShutdown is the run-once graceful shutdown that
@@ -971,35 +1013,36 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 // broker's SIGTERM handler calls it directly (see handleBrokerSIGTERM).
 var serverShutdown atomic.Pointer[func(os.Signal)]
 
-// installServerShutdownSignals is step 7 of runServerStart: SIGINT
-// (Ctrl+C) and SIGTERM (systemd, Kubernetes, container stop) both start the
-// graceful shutdown, which logs "Received signal ..." and calls cancel, once.
-// Only the first signal is acted on; the subscription is never stopped, so a
-// second signal is ignored rather than killing the process mid-drain.
-// Orchestrators that escalate to SIGKILL after their grace period still
-// terminate the process immediately. notify is signal.Notify in production
-// and injectable in tests.
+// installServerShutdownSignals is step 7 of runServerStart, the process's
+// one SIGINT/SIGTERM handler (ptone/scion#5054): the first signal (Ctrl+C,
+// systemd, Kubernetes, container stop) begins q, the single graceful
+// shutdown, which logs "Received signal ...", runs q's pre-cancel steps
+// (mark shutting down, then the conduit drain) and cancels the server
+// context. No other component subscribes to these signals, so nothing
+// cancels before the steps have run. A second signal from outside the
+// process on this subscription forces the shutdown (q.force): cancel at
+// once and stop waiting for the servers, so an interactive Ctrl+C never
+// waits out a drain. Neither the foreground broker's direct call
+// (serverShutdown) nor a SIGINT the process sent itself (interruptSelf)
+// counts toward that. Orchestrators that escalate to
+// SIGKILL after their grace period still terminate the process
+// immediately. notify is signal.Notify in production and injectable in
+// tests.
 //
-// The signal goroutine also exits when ctx is done (runServerStart cancels
-// ctx on every return), unless it is inside the shutdown's synchronous log
-// line, in which case it exits when that write returns. A signal arriving
-// after that is still swallowed by the subscription, without a log line,
+// ctx is the handler's lifetime: runServerStart passes one that ends when
+// it returns (not the server context, which the shutdown itself cancels),
+// so a second signal is handled for the whole teardown. A signal arriving
+// after ctx ends is swallowed by the subscription, which is never stopped,
 // unless the foreground broker's SIGTERM handler calls the published
-// shutdown, which then logs once (and cancels a no-op), as on base.
+// shutdown, which then does nothing more than a no-op begin.
 // The returned done channel is closed as the goroutine's last action; it
 // exists for tests, and production must not wait on it.
 //
 // The run-once shutdown is published in serverShutdown strictly after
 // notify returns, so a caller that finds it unpublished knows the server
 // may not be subscribed yet.
-func installServerShutdownSignals(ctx context.Context, notify func(chan<- os.Signal, ...os.Signal), cancel context.CancelFunc) (done <-chan struct{}) {
-	var once sync.Once
-	shutdown := func(sig os.Signal) {
-		once.Do(func() {
-			log.Printf("Received signal %v, shutting down...", sig)
-			cancel()
-		})
-	}
+func installServerShutdownSignals(ctx context.Context, notify func(chan<- os.Signal, ...os.Signal), q *serverShutdownSequence) (done <-chan struct{}) {
+	shutdown := func(sig os.Signal) { q.begin(sig) }
 
 	sigCh := make(chan os.Signal, 1)
 	notify(sigCh, os.Interrupt, syscall.SIGTERM)
@@ -1007,12 +1050,31 @@ func installServerShutdownSignals(ctx context.Context, notify func(chan<- os.Sig
 	exited := make(chan struct{})
 	go func() {
 		defer close(exited)
-		select {
-		case sig := <-sigCh:
-			if ctx.Err() == nil {
-				shutdown(sig)
+		// received counts the signals from outside the process seen on
+		// this subscription. The first begins the shutdown (or finds it
+		// already begun by the foreground broker's direct call for the
+		// same SIGTERM); only a second one forces it. A SIGINT the
+		// process sent itself is never counted.
+		received := 0
+		for {
+			select {
+			case sig := <-sigCh:
+				self := sig == os.Interrupt && consumeSelfInterrupt()
+				if !self {
+					received++
+				}
+				if q.claim() {
+					// The steps run off this goroutine, so a second
+					// signal can force the shutdown while they run.
+					go q.run(sig)
+					continue
+				}
+				if received >= 2 {
+					q.force(sig)
+				}
+			case <-ctx.Done():
+				return
 			}
-		case <-ctx.Done():
 		}
 	}()
 
@@ -1029,7 +1091,15 @@ func installServerShutdownSignals(ctx context.Context, notify func(chan<- os.Sig
 // closes the writer without waiting: requests still draining then have
 // their audit records counted as closed. closeAudit may be nil (no hub);
 // the close is bounded by the writer's own drain timeout.
-func awaitServerExit(ctx context.Context, errCh <-chan error, cancel context.CancelFunc, wait func(), closeAudit func(context.Context) error) error {
+//
+// exit (may be nil) ends the wait early (ptone/scion#5054): it is closed
+// when a second signal forces the shutdown, or at the teardown deadline
+// of the shutdown budget (server.hub.conduit.shutdown_grace). The servers
+// are then still running, so the store and the other deferred closes must
+// not run under them: awaitServerExit closes the audit writer, then
+// flushes the logs (flushLogs, may be nil), both within exitClose's bound,
+// and ends the process (exitProcess) with exitCodeUnfinishedShutdown.
+func awaitServerExit(ctx context.Context, errCh <-chan error, cancel context.CancelFunc, wait func(), closeAudit func(context.Context) error, exit <-chan struct{}, exitClose func() (context.Context, context.CancelFunc), flushLogs func()) error {
 	select {
 	case err := <-errCh:
 		cancel()
@@ -1038,7 +1108,34 @@ func awaitServerExit(ctx context.Context, errCh <-chan error, cancel context.Can
 		}
 		return err
 	case <-ctx.Done():
-		wait()
+		waited := make(chan struct{})
+		go func() {
+			wait()
+			close(waited)
+		}()
+		select {
+		case <-waited:
+		case <-exit:
+			log.Printf("Exiting before the servers stopped (shutdown forced or its budget used up)")
+			closeCtx, cancelClose := exitClose()
+			flushed := make(chan struct{})
+			go func() {
+				defer close(flushed)
+				if closeAudit != nil {
+					_ = closeAudit(closeCtx)
+				}
+				if flushLogs != nil {
+					flushLogs()
+				}
+			}()
+			select {
+			case <-flushed:
+			case <-closeCtx.Done():
+			}
+			cancelClose()
+			exitProcess(exitCodeUnfinishedShutdown)
+			return nil // reached only when exitProcess is a test fake
+		}
 		if closeAudit != nil {
 			_ = closeAudit(context.Background())
 		}
@@ -3968,7 +4065,7 @@ func resolveBrokerDefaultRuntime(getRuntime func(projectPath, profileName string
 	return rt, nil
 }
 
-func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.GlobalConfig, hubSrv *hub.Server, webSrv *hub.WebServer, s store.Store, hubEndpoint string, hubEndpointSrc hubEndpointSource, devAuthToken string, brokerSettings *config.Settings, brokerDefaultProfile *string, globalDir string, requestLogger, messageLogger *slog.Logger, wg *sync.WaitGroup, errCh chan error) error {
+func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.GlobalConfig, hubSrv *hub.Server, webSrv *hub.WebServer, s store.Store, hubEndpoint string, hubEndpointSrc hubEndpointSource, devAuthToken string, brokerSettings *config.Settings, brokerDefaultProfile *string, globalDir string, requestLogger, messageLogger *slog.Logger, wg *sync.WaitGroup, errCh chan error, shutdownContext func() (context.Context, context.CancelFunc)) error {
 	// Flat Runtime Broker instances (server.broker.instances), strictly
 	// loaded. A process with instances hosts them through the flat host
 	// (co-located with the Hub, or remote with instance-scoped credentials
@@ -3993,6 +4090,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 			hubEndpoint: hubEndpoint, hubEndpointSrc: hubEndpointSrc, devAuthToken: devAuthToken,
 			settings: brokerSettings, globalDir: globalDir, autoProvide: autoProvide,
 			requestLogger: requestLogger, messageLogger: messageLogger, wg: wg, errCh: errCh,
+			shutdownContext: shutdownContext,
 		})
 	}
 	warnUnhostedFlatIdentities(globalDir)
@@ -4062,7 +4160,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 			rhEndpoint = fmt.Sprintf("http://localhost:%d", cfg.RuntimeBroker.Port)
 		}
 
-		effectiveID, regErr := registerGlobalProjectAndBroker(ctx, s, brokerID, brokerName, rhEndpoint, rt, serverAutoProvide, brokerSettings, loadBrokerRegistrationWorkspaceStorage(), loadBrokerProfileTypeSettings())
+		effectiveID, regErr := registerGlobalProjectAndBrokerPresence(ctx, s, hubSrv.BrokerPresent, brokerID, brokerName, rhEndpoint, rt, serverAutoProvide, brokerSettings, loadBrokerRegistrationWorkspaceStorage(), loadBrokerProfileTypeSettings())
 		if regErr != nil {
 			// ERROR, not a warning: the co-located broker is how this process
 			// runs agents. Losing it silently left the Hub reporting healthy
@@ -4245,6 +4343,9 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 	}
 
 	rhSrv := runtimebroker.New(rhCfg, mgr, rt)
+	// The broker phase of the process's graceful shutdown bounds the
+	// broker's own (ptone/scion#5054).
+	rhSrv.SetShutdownContext(shutdownContext)
 	rhSrv.SetRequestLogger(requestLogger)
 	if messageLogger != nil {
 		rhSrv.SetMessageLogger(messageLogger)
