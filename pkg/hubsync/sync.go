@@ -201,6 +201,10 @@ const (
 	// Either way the effective caller is a dev-auth identity, not an agent
 	// token.
 	CredentialKindDevAuto CredentialKind = "dev_auto"
+	// CredentialKindNone means no credential is sent: none is configured
+	// for the hub, and it is not a loopback hub, the only kind a dev token
+	// is sent to.
+	CredentialKindNone CredentialKind = "none"
 )
 
 // EnsureHubReadyOptions configures the behavior of EnsureHubReady.
@@ -1975,13 +1979,18 @@ func ReadAgentTokenFile() string {
 // for this change — tracked as https://github.com/ptone/scion/issues/2213.
 func createHubClient(settings *config.Settings, endpoint string) (hubclient.Client, CredentialKind, error) {
 	authOpt, kind := selectHubCredential(endpoint)
-	client, err := hubclient.New(endpoint, authOpt, hubclient.WithTimeout(30*time.Second))
+	opts := []hubclient.Option{hubclient.WithTimeout(30 * time.Second)}
+	if authOpt != nil {
+		opts = append(opts, authOpt)
+	}
+	client, err := hubclient.New(endpoint, opts...)
 	return client, kind, err
 }
 
 // selectHubCredential picks the authentication option createHubClient uses
 // for endpoint, in the priority order documented on createHubClient, and
-// reports which kind of credential it is. It makes no network calls.
+// reports which kind of credential it is. It makes no network calls. The
+// option is nil when no credential is sent (CredentialKindNone).
 func selectHubCredential(endpoint string) (hubclient.Option, CredentialKind) {
 	// 1. Check for OAuth credentials from scion hub auth login
 	if accessToken := credentials.GetAccessToken(endpoint); accessToken != "" {
@@ -2005,7 +2014,11 @@ func selectHubCredential(endpoint string) (hubclient.Option, CredentialKind) {
 		return hubclient.WithBearerToken(token), CredentialKindHubToken
 	}
 
-	// 4. Fallback to auto dev auth
+	// 4. Fallback to auto dev auth, for a loopback hub only: a dev token
+	// is valid only on the local workstation server that wrote it.
+	if !isLocalhostEndpoint(endpoint) {
+		return nil, CredentialKindNone
+	}
 	return hubclient.WithAutoDevAuth(), CredentialKindDevAuto
 }
 

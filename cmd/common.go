@@ -302,7 +302,10 @@ func getHubAccessToken(endpoint string) string {
 		return token
 	}
 
-	// Priority 3: Dev auth token
+	// Priority 3: Dev auth token, for a loopback hub only (see scopeDevAuth)
+	if !isLocalhostEndpoint(endpoint) {
+		return ""
+	}
 	return apiclient.ResolveDevToken()
 }
 

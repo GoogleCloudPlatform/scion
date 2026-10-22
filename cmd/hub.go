@@ -657,8 +657,10 @@ func hubClientForEndpoint(settings *config.Settings, endpoint string) (hubclient
 	}
 
 	// Fallback to auto dev auth if no explicit auth configured
-	// This checks SCION_DEV_TOKEN env var and ~/.scion/dev-token file
-	if !authConfigured {
+	// This checks SCION_DEV_TOKEN env var and ~/.scion/dev-token file. A
+	// dev token is valid only on the local workstation server that wrote
+	// it, so it is sent only to a loopback hub (as scopeDevAuth reports).
+	if !authConfigured && isLocalhostEndpoint(endpoint) {
 		opts = append(opts, hubclient.WithAutoDevAuth())
 	}
 
