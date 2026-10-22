@@ -39,11 +39,39 @@ type reincarnationMove struct {
 	// Profile is the profile the move was checked against (explicit, else
 	// the project's active profile; "" = the target's default).
 	Profile string
+	// Force is the request's forceMove: the eligibility re-check runs with
+	// it, as the request's check did.
+	Force bool
+	// TransferMode is the verdict's transfer mode when the move was
+	// accepted (MoveTransferModeExport or MoveTransferModeRecreate; "" is
+	// read as export, the only mode before forced moves). The re-check
+	// refuses a move whose mode has changed since, and a recreate move
+	// provisions a fresh workspace and rolls back with a files delete.
+	TransferMode string
 }
 
-// expectedNFSWorkspace is the workspace the target broker must find on its
-// mount of the export before provisioning the moved agent.
+// transferMode is the move's transfer mode, reading "" as export.
+func (m *reincarnationMove) transferMode() string {
+	if m.TransferMode == "" {
+		return MoveTransferModeExport
+	}
+	return m.TransferMode
+}
+
+// recreates reports whether the move provisions the workspace fresh on the
+// target (a forced move).
+func (m *reincarnationMove) recreates() bool {
+	return m.transferMode() == MoveTransferModeRecreate
+}
+
+// expectedNFSWorkspace is the moved-agent workspace expectation the target
+// broker checks before provisioning: for an export move, the workspace it
+// must find on its mount of the export; for a recreate move, that it has
+// nothing for the agent yet.
 func (m *reincarnationMove) expectedNFSWorkspace() string {
+	if m.recreates() {
+		return agent.MoveWorkspaceFreshAgentDir
+	}
 	if m.AgentDirWorkspace {
 		return agent.MoveWorkspaceAgentDir
 	}
@@ -55,8 +83,12 @@ func (m *reincarnationMove) expectedNFSWorkspace() string {
 // facts may have changed since the request was accepted. Caller access was
 // decided at request time (the worker has no request identity), so the
 // access check re-confirms only that a self-move's target still serves the
-// project; the capacity limit is enforced when the slot is reserved. It
-// returns the agent it validated, as it is on the source broker.
+// project; the capacity limit is enforced when the slot is reserved. The
+// project's workspace facts are read again, as the request read them, and
+// the check runs with the request's force flag. A move whose transfer mode
+// differs from the one it was accepted with is refused: a move never
+// switches between carrying and recreating the workspace. It returns the
+// agent it validated, as it is on the source broker.
 func (s *Server) recheckMoveEligibility(ctx context.Context, agentID string, mv *reincarnationMove) (*store.Agent, error) {
 	a, err := s.store.GetAgent(ctx, agentID)
 	if err != nil {
@@ -73,14 +105,28 @@ func (s *Server) recheckMoveEligibility(ctx context.Context, agentID string, mv 
 	if err != nil {
 		return nil, fmt.Errorf("load target broker: %w", err)
 	}
+	project, err := s.store.GetProject(ctx, mv.ProjectID)
+	if err != nil {
+		return nil, fmt.Errorf("load project: %w", err)
+	}
+	// The workspace gate is judged again, exactly as the request judged it.
+	gate := s.reincarnateWorkspaceGate(ctx, a, project, dst, mv.Force)
+	if gate.workspaceModeErr == "" && gate.cloneMode != mv.AgentDirWorkspace {
+		return nil, fmt.Errorf("move no longer eligible: the agent's workspace mode changed since the move was accepted")
+	}
 	allowed := func(*store.RuntimeBroker) bool { return true }
-	_, ref := evaluateMoveEligibility(moveEligibilityInput{
-		Agent:     a,
-		Src:       src,
-		Dst:       dst,
-		CloneMode: mv.AgentDirWorkspace,
-		Profile:   mv.Profile,
-		SelfMove:  mv.SelfMove,
+	v, ref := evaluateMoveEligibility(moveEligibilityInput{
+		Agent:              a,
+		Src:                src,
+		Dst:                dst,
+		WorkspaceModeError: gate.workspaceModeErr,
+		CloneMode:          gate.cloneMode,
+		Profile:            mv.Profile,
+		SelfMove:           mv.SelfMove,
+		Force:              mv.Force,
+		EmptyPerAgent:      project.IsEmptyPerAgent(),
+		WorkspaceMode:      string(project.SharingMode()),
+		GitRemote:          project.GitRemote,
 		Probes: moveProbes{
 			Reachable:        func(b *store.RuntimeBroker) bool { return s.brokerRecordReachable(ctx, b) },
 			CanDispatch:      allowed,
@@ -94,6 +140,10 @@ func (s *Server) recheckMoveEligibility(ctx context.Context, agentID string, mv 
 	})
 	if ref != nil {
 		return nil, fmt.Errorf("move no longer eligible: %s", ref.Message)
+	}
+	if v.TransferMode != mv.transferMode() {
+		return nil, fmt.Errorf("move no longer eligible: the workspace transfer mode changed from %s to %s since the move was accepted",
+			mv.transferMode(), valueOrUnknown(v.TransferMode))
 	}
 	return a, nil
 }
@@ -161,22 +211,34 @@ func (s *Server) linkMoveTargetProvider(ctx context.Context, mv *reincarnationMo
 
 // rollbackMove undoes a move that failed after the agent was assigned to
 // the target broker and before it definitely started there, leaving the
-// agent on the source as it was: a best-effort localOnly delete of whatever
-// the target created; the agent's broker, runtime, run and workspace
-// placement restored from src (the agent as it was on the source); and,
+// agent on the source as it was: a best-effort delete of whatever the
+// target created (localOnly for an export move, whose workspace on the
+// export is the agent's real one; a files delete for a recreate move, whose
+// target workspace this move created, see rollbackMoveTarget; nothing when
+// targetUntouched, for a forced move the target refused before creating
+// anything); the agent's broker, runtime, run and workspace placement
+// restored from src (the agent as it was on the source); and,
 // only once that assignment is restored, the broker reservation moved back.
 // The caller runs it only after winning the record's CAS to failed, then
 // writes the failed agent with the previous applied config.
-func (s *Server) rollbackMove(ctx context.Context, md agentMoveDispatcher, agentID string, mv *reincarnationMove, src *store.Agent) {
+func (s *Server) rollbackMove(ctx context.Context, md agentMoveDispatcher, agentID, reincarnationID string, mv *reincarnationMove, src *store.Agent, targetUntouched bool) {
 	cur, err := s.store.GetAgent(ctx, agentID)
 	if err != nil {
 		s.agentLifecycleLog.Error("move rollback: failed to load agent; it may be left assigned to the target broker",
 			"agent_id", agentID, "target_broker_id", mv.TargetBrokerID, "error", err)
 		return
 	}
-	if err := md.DispatchAgentDeleteLocalOnly(ctx, withBroker(cur, mv.TargetBrokerID)); err != nil {
+	if targetUntouched {
+		s.agentLifecycleLog.Info("move rollback: the target broker created nothing for the agent; nothing to remove there",
+			"agent_id", agentID, "target_broker_id", mv.TargetBrokerID)
+	} else if err := rollbackMoveTarget(ctx, md, withBroker(cur, mv.TargetBrokerID), mv, src.RunID, reincarnationID); isMoveMarkerMismatch(err) {
+		// The target found files for the agent that this move did not
+		// create, and removed nothing: not a rollback failure.
+		s.agentLifecycleLog.Info("move rollback: target cleanup skipped: target files not created by this move",
+			"agent_id", agentID, "reincarnation_id", reincarnationID, "target_broker_id", mv.TargetBrokerID)
+	} else if err != nil {
 		s.agentLifecycleLog.Warn("move rollback: could not remove the agent's state on the target broker; left in place",
-			"agent_id", agentID, "target_broker_id", mv.TargetBrokerID, "error", err)
+			"agent_id", agentID, "target_broker_id", mv.TargetBrokerID, "transfer_mode", mv.TransferMode, "error", err)
 	}
 	srcID, srcRuntime := mv.SourceBrokerID, src.Runtime
 	if _, err := s.updateReincarnationStep(ctx, agentID, reincarnationStepUpdate{
@@ -208,6 +270,32 @@ func (s *Server) rollbackMove(ctx context.Context, md agentMoveDispatcher, agent
 	}
 	s.releaseBrokerQuota(ctx, cur)
 	s.restoreBrokerReservation(ctx, withBroker(cur, mv.SourceBrokerID))
+}
+
+// rollbackMoveTarget removes what a failed move created for the agent on
+// the target broker. An export move sends a localOnly delete: the
+// workspace on the shared export is the agent's real one and stays. A
+// recreate move sends a files delete (never removing the branch, which
+// lives on the remote) carrying the move's reincarnation ID
+// (reincarnationID). That is safe because the broker removes only
+// directories marked by this move: the provision marks each agent
+// directory it creates, right after the absence check passed, and the
+// broker refuses (api.BrokerErrCodeMoveMarkerMismatch, removing nothing)
+// when a directory that exists is unmarked or marked by another move. The
+// files delete names the target's run only when the target recorded one
+// (dst's run differs from srcRunID, the source's); otherwise the target
+// resolves the agent by name within the project. Nothing is ever sent to
+// the source. dst is the agent as assigned to the target.
+func rollbackMoveTarget(ctx context.Context, md agentMoveDispatcher, dst *store.Agent, mv *reincarnationMove, srcRunID, reincarnationID string) error {
+	if mv.recreates() {
+		if dst.RunID == srcRunID {
+			c := *dst
+			c.RunID = ""
+			dst = &c
+		}
+		return md.DispatchAgentDeleteRecreated(ctx, dst, reincarnationID)
+	}
+	return md.DispatchAgentDeleteLocalOnly(ctx, dst)
 }
 
 // cleanUpMoveSource removes the agent's broker-local state from the source

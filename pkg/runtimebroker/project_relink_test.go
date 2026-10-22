@@ -83,7 +83,7 @@ func newRelinkFixture(t *testing.T) *relinkFixture {
 		ID: relinkAgent, Name: relinkAgent, ContainerID: relinkAgent, ProjectPath: filepath.Join(oldRoot, config.DotScion), Phase: "stopped",
 		Labels: map[string]string{"scion.name": relinkAgent, "scion.project_id": relinkOldID},
 	}}}
-	srv := New(cfg, mgr, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	srv := New(cfg, mgr, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 	return &relinkFixture{srv: srv, mgr: mgr, root: root, dotScion: dotScion, oldRoot: oldRoot, newRoot: newRoot}
 }
 

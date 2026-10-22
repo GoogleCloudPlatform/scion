@@ -244,19 +244,19 @@ func (t *Transport) DoNoRetry(ctx context.Context, req *http.Request) (*http.Res
 // raw *http.Client (e.g. the transfer client for signed URL uploads/downloads)
 // but still need to authenticate with the hub when signed URLs are HTTP proxy
 // URLs rather than GCS signed URLs or file:// URLs.
+// The base client's redirect policy, cookie jar, and timeout are preserved.
 func (t *Transport) AuthenticatedHTTPClient() *http.Client {
 	base := t.HTTPClient
 	if base == nil {
 		base = http.DefaultClient
 	}
-	return &http.Client{
-		Timeout: base.Timeout,
-		Transport: &authRoundTripper{
-			base: base.Transport,
-			auth: t.Auth,
-			ua:   t.UserAgent,
-		},
+	client := *base
+	client.Transport = &authRoundTripper{
+		base: base.Transport,
+		auth: t.Auth,
+		ua:   t.UserAgent,
 	}
+	return &client
 }
 
 // authRoundTripper is an http.RoundTripper that applies authentication headers.
@@ -273,6 +273,10 @@ func (rt *authRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 	}
 	if rt.auth != nil {
 		if err := rt.auth.ApplyAuth(clone); err != nil {
+			// The base transport will not receive this request to close its body.
+			if clone.Body != nil {
+				_ = clone.Body.Close()
+			}
 			return nil, fmt.Errorf("failed to apply auth: %w", err)
 		}
 	}
@@ -281,6 +285,17 @@ func (rt *authRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 		base = http.DefaultTransport
 	}
 	return base.RoundTrip(clone)
+}
+
+// CloseIdleConnections forwards cleanup to the wrapped transport when supported.
+func (rt *authRoundTripper) CloseIdleConnections() {
+	base := rt.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	if closer, ok := base.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
 }
 
 // buildURL joins the base URL with a path and optional query parameters.

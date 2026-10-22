@@ -47,7 +47,7 @@ func newHostNFSServer(t *testing.T, m *HostNFSMounter, brokerID, rtName string, 
 	t.Helper()
 	cfg := ServerConfig{Host: "127.0.0.1", Port: 0, BrokerID: brokerID, StateDir: t.TempDir(),
 		NFSConfig: nfs, NFSMountChecker: mc, NFSHostMounter: m}
-	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return rtName }})
+	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return rtName }}, config.RuntimeBuildRecord{})
 	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 	return srv
 }
@@ -83,7 +83,7 @@ func TestHostNFSMounter_InstanceThatCannotServeDoesNotRegister(t *testing.T) {
 		NFSConfig: hostNFSConfig(true, shareWS1), NFSMountChecker: newSyncMountChecker(), NFSHostMounter: m,
 		FlatInstance: &FlatInstanceConfig{Identity: &brokeridentity.Identity{RuntimeBrokerID: "rb-x"},
 			Instance: config.V1RuntimeBrokerInstanceConfig{Key: "docker-x"}}}
-	srv := New(cfg, unscopedManager{&mockManager{}}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	srv := New(cfg, unscopedManager{&mockManager{}}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 	require.Error(t, srv.ownershipSetupErr)
 	assert.Empty(t, m.ShareIDs(), "an instance that cannot serve registered its shares")

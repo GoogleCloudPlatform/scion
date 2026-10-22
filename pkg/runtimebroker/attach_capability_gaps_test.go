@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	"github.com/stretchr/testify/require"
@@ -112,7 +113,7 @@ func TestHandlePTYStream_RuntimeWithoutAttach_ClosesBeforeExec(t *testing.T) {
 func newFallbackOnlyAuxServer() (*Server, *attachCapableTestRuntime) {
 	mgr := &mockManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(DefaultServerConfig(), mgr, rt)
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	auxMgr := &mockManager{agents: []api.AgentInfo{{Name: "some-agent", ID: "cid-1", Labels: map[string]string{"scion.name": "some-agent"}}}}
 	auxRT := &attachCapableTestRuntime{

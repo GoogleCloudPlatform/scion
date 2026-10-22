@@ -832,6 +832,10 @@ export interface AgentAppliedConfig {
   harnessConfigId?: string;
   harnessConfigHash?: string;
   harnessConfigSource?: string;
+  /** The harness type the hub resolved at create; absent on older agents. */
+  harness?: string;
+  /** The model size alias the agent was created with; absent for an explicit model ID or no model. */
+  modelSize?: AgentModelSize;
   creatorName?: string;
   hubAccessScopes?: string[];
   agentRole?: string;
@@ -902,6 +906,9 @@ export interface AgentUpdateDisposition {
   heldForReincarnate: string[];
 }
 
+/** A model size alias (pkg/config KnownModelAliases). */
+export type AgentModelSize = 'small' | 'medium' | 'large' | 'extra-large';
+
 /**
  * Agent information from the Hub API
  */
@@ -932,6 +939,21 @@ export interface Agent {
   harnessAuth?: string;
   resolvedHarness?: string;
   harnessCapabilities?: HarnessAdvancedCapabilities;
+  /**
+   * The harness vendor (pkg/harness Vendor): the model vendor of a
+   * single-vendor harness ("anthropic", "google", "openai", "xai", "meta"),
+   * the harness name of a multi-vendor one ("opencode", "copilot",
+   * "hermes"). Absent for a custom or unresolved harness. Set on list
+   * items (full and compact), the single-agent GET and SSE created/status
+   * events.
+   */
+  harnessVendor?: string;
+  /**
+   * The model size alias the agent was created with; absent when it has
+   * none. An SSE status event sends '' to clear it, so a merged row can
+   * hold ''. Test for truthiness, not presence.
+   */
+  modelSize?: AgentModelSize | '';
   runtimeBrokerId?: string;
   runtimeBrokerName?: string;
   /**
@@ -1252,6 +1274,28 @@ export interface PresentedTarget {
   sharedDirStorageBackend?: string;
   sharedDirStorageBackends?: Record<string, string>;
   homeStorageBackend?: string;
+  /**
+   * Kubernetes placement defaults (ptone/scion#5085). Optional: a Hub that
+   * does not publish them sends none, and the card then shows no
+   * Placement group.
+   */
+  nodeSelector?: Record<string, string>;
+  tolerations?: PresentedToleration[];
+  runtimeClassName?: string;
+}
+
+/**
+ * One Kubernetes toleration as presented. Only these four fields are ever
+ * rendered; any other key on the object is ignored.
+ */
+export interface PresentedToleration {
+  key?: string;
+  /** "Equal" or "Exists"; empty means Equal. */
+  operator?: string;
+  /** Empty for Exists. */
+  value?: string;
+  /** NoSchedule, PreferNoSchedule, NoExecute, or empty for any effect. */
+  effect?: string;
 }
 
 /** Resource quantities as the Hub sends them (Go `api.ResourceSpec`). */
@@ -1323,6 +1367,12 @@ export interface RuntimeBroker {
   runtimeTargetPresentation?: RuntimeTargetPresentation;
   /** When the Hub last saw runtimeTargetPresentation ("as reported at"). */
   runtimeTargetPresentationObservedAt?: string;
+  /**
+   * True when the broker runs in the process that answered the request
+   * (this server's co-located broker or one of its flat instances).
+   * Read-only and display-only; absent otherwise.
+   */
+  hostedByThisServer?: boolean;
   autoProvide: boolean;
   endpoint?: string;
   labels?: Record<string, string>;
@@ -1330,6 +1380,8 @@ export interface RuntimeBroker {
   createdByName?: string;
   /** Configured GCP host service account (Go JSON tag is snake_case). */
   gcp_host_service_account_email?: string;
+  /** Configured GCP host project (read in snake_case; PATCH takes camelCase). */
+  gcp_host_project_id?: string;
   /** Creation and last-update times, as the hub sends them. */
   created?: string;
   updated?: string;

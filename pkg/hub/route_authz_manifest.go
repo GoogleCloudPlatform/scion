@@ -139,6 +139,10 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/users/me/groups": "authenticated", // My groups
 	"/api/v1/principals/":     "authenticated", // Principal routes
 
+	// ── Project visitor's own grants ───────────────────────────────────
+	"/api/v1/users/me/visitor-grants": "authenticated", // Own visitor grants (visitor only; 404 for anyone else)
+	"/api/v1/users/me/visitor-dms":    "authenticated", // Own DMs with agents (visitor only; 404 for anyone else)
+
 	// ── User-scoped injected skills ────────────────────────────────────
 	"/api/v1/users/me/injected-skills":  "authenticated", // List/create user injected skills
 	"/api/v1/users/me/injected-skills/": "authenticated", // User injected skill by ID
@@ -240,8 +244,8 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/conversations":         "authenticated", // List/create conversations
 	"/api/v1/conversations/":        "authenticated", // Conversation routes
 	"/api/v1/conversations/resolve": "authenticated", // Resolve a conversation reference
-	"/api/v1/thread-groups":         "authenticated", // List/create thread groups (experiment hub.chat_thread_groups)
-	"/api/v1/thread-groups/":        "authenticated", // Thread group routes (experiment hub.chat_thread_groups)
+	"/api/v1/thread-groups":         "authenticated", // List/create thread groups
+	"/api/v1/thread-groups/":        "authenticated", // Thread group routes
 
 	// ── Cross-project messaging ────────────────────────────────────────
 	"/api/v1/messaging/capabilities":    "authenticated", // Messaging feature capabilities

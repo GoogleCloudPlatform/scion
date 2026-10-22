@@ -960,7 +960,7 @@ func TestHubWorkspaceOnSameHome_BrokerKeepsHubIdentity(t *testing.T) {
 			cfg.BrokerID = "same-home-broker"
 			cfg.BrokerName = "same-home-broker"
 			cfg.StorageBucket = "bucket"
-			brokerSrv := runtimebroker.New(cfg, &sameHomeManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+			brokerSrv := runtimebroker.New(cfg, &sameHomeManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 			brokerSrv.SetWorkspaceDownloader(func(_ context.Context, _, _, localPath string) error {
 				return os.WriteFile(filepath.Join(localPath, "downloaded.txt"), []byte("downloaded"), 0644)
 			})

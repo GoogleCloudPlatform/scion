@@ -17,7 +17,6 @@ package transfer
 import (
 	"fmt"
 	"io/fs"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -79,7 +78,7 @@ func (b *ManifestBuilder) Build() (*Manifest, error) {
 	}, nil
 }
 
-// CollectFiles walks the directory and collects file information.
+// CollectFiles walks the directory and collects information for regular files.
 func (b *ManifestBuilder) CollectFiles() ([]FileInfo, error) {
 	var files []FileInfo
 
@@ -110,14 +109,9 @@ func (b *ManifestBuilder) CollectFiles() ([]FileInfo, error) {
 			return nil
 		}
 
-		// Skip directories (only collect files)
-		if d.IsDir() {
-			return nil
-		}
-
-		// Skip symlinks — they may be dangling (e.g. .claude/debug/latest)
-		// and cannot be meaningfully transferred between environments.
-		if d.Type()&os.ModeSymlink != 0 {
+		// Only regular files can be transferred. Opening a FIFO can block,
+		// and symlinks, sockets and devices are not transferable file content.
+		if !d.Type().IsRegular() {
 			return nil
 		}
 

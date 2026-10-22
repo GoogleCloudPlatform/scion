@@ -1023,6 +1023,10 @@ type DeleteAgentOptions struct {
 	// retained files after the retention window (api.PurgeRetainedQueryParam,
 	// ptone/scion#4744). Set by the purge job through withPurgeRetained.
 	PurgeRetained bool
+	// MoveReincarnationID marks a forced move's rollback delete
+	// (api.MoveReincarnationIDQueryParam): the broker removes nothing
+	// unless every agent directory that exists carries that move's marker.
+	MoveReincarnationID string
 }
 
 // deleteAgentQuery renders opts (and the context's linked-project path) as
@@ -1049,6 +1053,9 @@ func deleteAgentQuery(ctx context.Context, projectID string, opts DeleteAgentOpt
 	}
 	if opts.PurgeRetained {
 		query += "&" + api.PurgeRetainedQueryParam + "=true"
+	}
+	if opts.MoveReincarnationID != "" {
+		query += "&" + api.MoveReincarnationIDQueryParam + "=" + url.QueryEscape(opts.MoveReincarnationID)
 	}
 	// The recorded runtime (GoogleCloudPlatform/scion#2423) rides on ctx, as
 	// for every other existing-agent operation, so both transports send it
@@ -1365,6 +1372,10 @@ type RemoteCreateAgentRequest struct {
 	// ProvisionOnly request for an agent moved from another broker, the
 	// broker confirms the workspace on its mount of the export first.
 	ExpectExistingNFSWorkspace string `json:"expectExistingNfsWorkspace,omitempty"`
+	// MoveReincarnationID mirrors
+	// runtimebroker.CreateAgentRequest.MoveReincarnationID: a forced move's
+	// reincarnation ID, sent with the fresh-agent-dir expectation.
+	MoveReincarnationID string `json:"moveReincarnationId,omitempty"`
 	// AsyncLaunch, LaunchID, LaunchTimeoutSeconds and LaunchKeepaliveSeconds
 	// mirror runtimebroker.CreateAgentRequest's async launch fields. They are
 	// set only by dispatchLaunching. LaunchTimeoutSeconds is the remaining
@@ -1760,6 +1771,10 @@ type Server struct {
 	// conduitRefreshMetrics counts agent AuthRefresh outcomes
 	// (conduit_agent_refresh.go); nil until SetConduitAgentRefreshMetrics.
 	conduitRefreshMetrics atomic.Pointer[OTelConduitAgentRefreshMetrics]
+	// conduitIngressDrainMetrics counts failed drain calls of a
+	// terminating hub ingress (conduit_ingress_drain.go); nil until
+	// SetConduitIngressDrainMetrics.
+	conduitIngressDrainMetrics atomic.Pointer[OTelConduitIngressDrainMetrics]
 	// conduitBrokerRPCMetrics counts routed broker requests that fell back
 	// because of a hub-side fault (conduit_broker_routed_metrics.go); nil
 	// until SetConduitBrokerRPCMetrics.
@@ -6568,8 +6583,7 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	s.startScheduledSendSweeper(ctx)
 
 	// Start the migration of personal chat thread groups into project
-	// thread groups (ptone/scion#4424). It idles while
-	// hub.chat_thread_groups is off and exits when ctx is cancelled.
+	// thread groups (ptone/scion#4424). It exits when ctx is cancelled.
 	s.startThreadGroupMigrationSweeper(ctx)
 
 	// Start notification dispatcher (uses the current event publisher).
@@ -7096,6 +7110,10 @@ func (s *Server) registerRoutes() {
 
 	// Principal resolution endpoints (Phase 4)
 	s.mux.HandleFunc("/api/v1/users/me/groups", s.guarded("/api/v1/users/me/groups", s.handleMyGroups))
+	// A project visitor's own visitor grants (ptone/scion#4603).
+	s.mux.HandleFunc("/api/v1/users/me/visitor-grants", s.guarded("/api/v1/users/me/visitor-grants", s.handleUserMeVisitorGrants))
+	// A project visitor's own DMs with agents (ptone/scion#4603).
+	s.mux.HandleFunc("/api/v1/users/me/visitor-dms", s.guarded("/api/v1/users/me/visitor-dms", s.handleUserMeVisitorDMs))
 	s.mux.HandleFunc("/api/v1/principals/", s.guarded("/api/v1/principals/", s.handlePrincipalRoutes))
 
 	// User-scoped injected-skills endpoints (/users/me/...)
@@ -7217,10 +7235,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/conversations", s.guarded("/api/v1/conversations", s.handleListConversations))
 	s.mux.HandleFunc("/api/v1/conversations/", s.guarded("/api/v1/conversations/", s.handleConversationRoutes))
 	s.mux.HandleFunc("/api/v1/conversations/resolve", s.guarded("/api/v1/conversations/resolve", s.handleConversationResolve))
-	// Project-scoped chat thread groups (ptone/scion#4424): 404 while the
-	// hub.chat_thread_groups experiment is off (threadGroupsGate).
-	s.mux.HandleFunc("/api/v1/thread-groups", s.guarded("/api/v1/thread-groups", s.threadGroupsGate(s.handleThreadGroups)))
-	s.mux.HandleFunc("/api/v1/thread-groups/", s.guarded("/api/v1/thread-groups/", s.threadGroupsGate(s.handleThreadGroupRoutes)))
+	// Project-scoped chat thread groups (ptone/scion#4424).
+	s.mux.HandleFunc("/api/v1/thread-groups", s.guarded("/api/v1/thread-groups", s.handleThreadGroups))
+	s.mux.HandleFunc("/api/v1/thread-groups/", s.guarded("/api/v1/thread-groups/", s.handleThreadGroupRoutes))
 
 	// Cross-project messaging endpoints (Phase 3)
 	s.mux.HandleFunc("/api/v1/messaging/capabilities", s.guarded("/api/v1/messaging/capabilities", s.handleMessagingCapabilities))

@@ -107,6 +107,10 @@ type ReincarnateAgentResponse struct {
 	TargetBrokerID string `json:"targetBrokerId,omitempty"`
 	// MoveVerdict is the move eligibility verdict of a dry-run move.
 	MoveVerdict *MoveVerdict `json:"moveVerdict,omitempty"`
+	// TransferMode is how an accepted cross-broker move carries the
+	// workspace, as recorded on its reincarnation record: "export" or
+	// "recreate" (a forced move). Empty for a plain reincarnation.
+	TransferMode string `json:"transferMode,omitempty"`
 }
 
 // FieldChange describes an old→new change to a single scalar field on the
@@ -369,99 +373,10 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 			"a shared dir backend change cannot be combined with a move to another broker", nil)
 		return
 	}
-	// Design §3.4 Amendments A2/A4/A23/A23.1/A23.2: eligible workspaces are
-	// clone-per-agent (a real GitClone, on a project that is neither
-	// worktree-per-agent nor shared — A23.1 R3: a project can be switched to
-	// shared after an agent was created as clone-per-agent, via a project
-	// label update, so this must be re-checked here rather than assumed from
-	// how populateAgentConfig behaves today) or an explicit mount (no
-	// GitClone, but a non-empty EFFECTIVE Workspace — shared-workspace and
-	// hub-managed projects), via the shared api.ReincarnateEligible
-	// predicate. GitClone alone does NOT identify clone-per-agent mode:
-	// populateAgentConfig (handlers_agent_create_helpers.go) sets GitClone
-	// for every git-remote project that is not shared-workspace, and that
-	// includes worktree-per-agent — so a worktree-per-agent agent has a
-	// non-nil GitClone and would otherwise pass the predicate. It is
-	// excluded here, separately, because only the Hub has the project
-	// record the predicate itself cannot see (api.ReincarnateEligible's doc
-	// comment).
-	//
-	// "Effective" Workspace (A23.1 R1): linkedProjectPath resolves a
-	// registered ProjectProvider.LocalPath for the agent's broker, exactly
-	// as the dispatcher's resolveDispatchProjectInfo does, and
-	// effectiveDispatchWorkspace applies buildCreateRequest's own "a linked
-	// local provider clears an absolute Workspace" rule. Gating on the raw
-	// AppliedConfig.Workspace let a linked shared project look eligible
-	// here, then get stopped and refused by the broker with a 409 — a
-	// regression from Phase 1's clean up-front 400. Evaluating the same
-	// effective value the dispatcher will actually send keeps the two from
-	// disagreeing.
-	//
-	// A23.2 FYI-b: the mirror of R3, for the reverse switch. A project can
-	// also switch TO clone-per-agent after an agent was created as
-	// shared-workspace or hub-managed: the agent's stored GitClone is still
-	// nil, but a fresh reincarnation would derive a GitClone from the
-	// project's CURRENT mode — and this agent has no existing real clone on
-	// disk for the broker's GitClone branch to find, so (without this
-	// check) it would be stopped and then refused by the broker's own "no
-	// existing git clone" 409, the same stop-then-refuse shape R1 fixed for
-	// the other direction. The linked-provider case is excluded here
-	// (linkedProjectPath == "") because when a provider IS linked,
-	// effectiveDispatchWorkspace already clears the workspace to "" and the
-	// generic ReincarnateEligible check below catches it as "neither".
-	//
-	// Checked before any plan is computed or anything persisted, as defense
-	// in depth alongside the broker's own refusal (Reprovision refuses to
-	// touch a workspace it did not find already on disk): this is what
-	// makes --dry-run report the restriction too, instead of a dry run
-	// showing a plan that a real request could not safely execute.
-	// Empty-per-agent workspaces are broker-local, unsynced state.
-	// A4 (ptone/scion#2727): an empty-per-agent workspace can move when it
-	// is on the shared export (placement export) and both brokers see the
-	// same export (equal identity markers): the target finds it in place.
-	// miller79/scion#167: on the same broker (no move target, including
-	// `--broker <current>`) the broker reuses the private workspace in
-	// place, gated below on a local-disk runtime and the broker's
-	// ReprovisionEmptyPerAgent capability. Any other empty-per-agent
-	// request (a move whose workspace is not movable) is still refused,
-	// unless it is a forced move (ptone/scion#5441): then the move checks
-	// decide, and a workspace the export cannot carry is recreated empty on
-	// the target.
-	emptyPerAgentMove := moveTarget != nil && project.IsEmptyPerAgent() &&
-		(req.ForceMove || s.emptyPerAgentWorkspaceMovable(ctx, agent, moveTarget))
-	sameBrokerEmptyPerAgent := project.IsEmptyPerAgent() && moveTarget == nil
-	workspaceModeErr := ""
-	if project.IsEmptyPerAgent() && !emptyPerAgentMove && !sameBrokerEmptyPerAgent {
-		workspaceModeErr = `reincarnate does not yet support "Empty directory per agent" (empty-per-agent) workspaces`
-	}
-
-	hasGitClone := agent.AppliedConfig != nil && agent.AppliedConfig.GitClone != nil
-	var effectiveWorkspace string
-	var linkedProjectPath string
-	if agent.AppliedConfig != nil {
-		linkedProjectPath = s.linkedProjectPath(ctx, agent)
-		effectiveWorkspace = effectiveDispatchWorkspace(agent.AppliedConfig.Workspace, linkedProjectPath)
-	}
-	switchedToCloneOnly := !hasGitClone && project.GitRemote != "" && !project.IsSharedWorkspace() &&
-		linkedProjectPath == "" && effectiveWorkspace != ""
-	if workspaceModeErr == "" && (agent.AppliedConfig == nil || (!emptyPerAgentMove && (project.IsWorktreePerAgent() ||
-		(hasGitClone && project.IsSharedWorkspace()) ||
-		switchedToCloneOnly ||
-		!api.ReincarnateEligible(hasGitClone, effectiveWorkspace, project.IsEmptyPerAgent())))) {
-		// FYI-6 (review p1b-r1): the generic message now covers every
-		// eligible mode, not just clone-per-agent.
-		workspaceModeErr = "reincarnate requires a clone-per-agent, shared-workspace or hub-managed workspace"
-		if project.IsWorktreePerAgent() {
-			workspaceModeErr = "reincarnate does not yet support worktree-per-agent workspaces"
-		}
-	}
-	// A linked project's workspace is a broker-local path, never on a
-	// shared export, so it cannot move.
-	if moveTarget != nil && workspaceModeErr == "" && linkedProjectPath != "" {
-		workspaceModeErr = "reincarnate --broker does not support linked projects; the workspace is local to the current broker"
-	}
+	gate := s.reincarnateWorkspaceGate(ctx, agent, project, moveTarget, req.ForceMove)
+	workspaceModeErr, sameBrokerEmptyPerAgent := gate.workspaceModeErr, gate.sameBrokerEmptyPerAgent
 	if moveTarget != nil {
-		s.planReincarnateMove(w, r, req, agent, auth, project, moveTarget, workspaceModeErr, hasGitClone || emptyPerAgentMove, admittedDeletionClaim, patch)
+		s.planReincarnateMove(w, r, req, agent, auth, project, moveTarget, workspaceModeErr, gate.cloneMode, admittedDeletionClaim, patch)
 		return
 	}
 	if workspaceModeErr != "" {
@@ -660,6 +575,7 @@ func (s *Server) startReincarnation(w http.ResponseWriter, r *http.Request, agen
 		Handoff:               handoff,
 		SourceBrokerID:        moveSourceID(move),
 		TargetBrokerID:        moveTargetID(move),
+		TransferMode:          moveTransferMode(move),
 	}
 	// The claim, the reincarnation record, the authority re-record, the
 	// reincarnate-claim hooks and the audit record commit in one
@@ -732,6 +648,7 @@ func (s *Server) startReincarnation(w http.ResponseWriter, r *http.Request, agen
 		Plan:           plan,
 		SourceBrokerID: sourceBrokerID,
 		TargetBrokerID: targetBrokerID,
+		TransferMode:   moveTransferMode(move),
 	})
 }
 
@@ -757,6 +674,15 @@ func moveTargetID(m *reincarnationMove) string {
 		return ""
 	}
 	return m.TargetBrokerID
+}
+
+// moveTransferMode is the transfer mode recorded for a move, "" for a plain
+// reincarnation.
+func moveTransferMode(m *reincarnationMove) string {
+	if m == nil {
+		return ""
+	}
+	return m.TransferMode
 }
 
 // brokerIDIfSet returns id when target is non-empty, else "".
@@ -865,12 +791,6 @@ func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, req
 		})
 		return
 	}
-	// A forced move that recreates the workspace is checked and dry-run
-	// only, until the move itself is implemented (ptone/scion#5441).
-	if v.TransferMode == MoveTransferModeRecreate {
-		writeError(w, http.StatusNotImplemented, "not_implemented", "forced moves are not enabled yet", nil)
-		return
-	}
 	s.startReincarnation(w, r, agent, auth, patch, fresh, plan, agent.Generation+1, req.Handoff, admittedDeletionClaim, src.ID, dst.ID, &reincarnationMove{
 		SourceBrokerID:    src.ID,
 		TargetBrokerID:    dst.ID,
@@ -878,6 +798,8 @@ func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, req
 		SelfMove:          in.SelfMove,
 		AgentDirWorkspace: cloneMode,
 		Profile:           in.Profile,
+		Force:             req.ForceMove,
+		TransferMode:      v.TransferMode,
 	})
 }
 
@@ -1223,4 +1145,121 @@ func (s *Server) requesterDescendsFrom(ctx context.Context, requesterID string, 
 		delegateID = active[0].DelegatorID
 	}
 	return false, nil
+}
+
+// reincarnateWorkspaceGateResult is the outcome of reincarnateWorkspaceGate.
+type reincarnateWorkspaceGateResult struct {
+	// workspaceModeErr is the refusal message of the reincarnate workspace
+	// gate, or "" when the agent's workspace mode is eligible.
+	workspaceModeErr string
+	// cloneMode, for a move, is true when the workspace is the agent's own
+	// directory (clone-per-agent, or an empty-per-agent workspace the move
+	// may carry or, forced, recreate).
+	cloneMode bool
+	// sameBrokerEmptyPerAgent is an empty-per-agent reincarnation that
+	// stays on the agent's broker.
+	sameBrokerEmptyPerAgent bool
+}
+
+// reincarnateWorkspaceGate decides whether agent's workspace mode allows a
+// reincarnation, a move to moveTarget when it is non-nil (forced when
+// forceMove). The request handler and the move worker's re-check both call
+// it, so a workspace change between the two is judged the same way.
+func (s *Server) reincarnateWorkspaceGate(ctx context.Context, agent *store.Agent, project *store.Project, moveTarget *store.RuntimeBroker, forceMove bool) reincarnateWorkspaceGateResult {
+	// Design §3.4 Amendments A2/A4/A23/A23.1/A23.2: eligible workspaces are
+	// clone-per-agent (a real GitClone, on a project that is neither
+	// worktree-per-agent nor shared — A23.1 R3: a project can be switched to
+	// shared after an agent was created as clone-per-agent, via a project
+	// label update, so this must be re-checked here rather than assumed from
+	// how populateAgentConfig behaves today) or an explicit mount (no
+	// GitClone, but a non-empty EFFECTIVE Workspace — shared-workspace and
+	// hub-managed projects), via the shared api.ReincarnateEligible
+	// predicate. GitClone alone does NOT identify clone-per-agent mode:
+	// populateAgentConfig (handlers_agent_create_helpers.go) sets GitClone
+	// for every git-remote project that is not shared-workspace, and that
+	// includes worktree-per-agent — so a worktree-per-agent agent has a
+	// non-nil GitClone and would otherwise pass the predicate. It is
+	// excluded here, separately, because only the Hub has the project
+	// record the predicate itself cannot see (api.ReincarnateEligible's doc
+	// comment).
+	//
+	// "Effective" Workspace (A23.1 R1): linkedProjectPath resolves a
+	// registered ProjectProvider.LocalPath for the agent's broker, exactly
+	// as the dispatcher's resolveDispatchProjectInfo does, and
+	// effectiveDispatchWorkspace applies buildCreateRequest's own "a linked
+	// local provider clears an absolute Workspace" rule. Gating on the raw
+	// AppliedConfig.Workspace let a linked shared project look eligible
+	// here, then get stopped and refused by the broker with a 409 — a
+	// regression from Phase 1's clean up-front 400. Evaluating the same
+	// effective value the dispatcher will actually send keeps the two from
+	// disagreeing.
+	//
+	// A23.2 FYI-b: the mirror of R3, for the reverse switch. A project can
+	// also switch TO clone-per-agent after an agent was created as
+	// shared-workspace or hub-managed: the agent's stored GitClone is still
+	// nil, but a fresh reincarnation would derive a GitClone from the
+	// project's CURRENT mode — and this agent has no existing real clone on
+	// disk for the broker's GitClone branch to find, so (without this
+	// check) it would be stopped and then refused by the broker's own "no
+	// existing git clone" 409, the same stop-then-refuse shape R1 fixed for
+	// the other direction. The linked-provider case is excluded here
+	// (linkedProjectPath == "") because when a provider IS linked,
+	// effectiveDispatchWorkspace already clears the workspace to "" and the
+	// generic ReincarnateEligible check below catches it as "neither".
+	//
+	// Checked before any plan is computed or anything persisted, as defense
+	// in depth alongside the broker's own refusal (Reprovision refuses to
+	// touch a workspace it did not find already on disk): this is what
+	// makes --dry-run report the restriction too, instead of a dry run
+	// showing a plan that a real request could not safely execute.
+	// Empty-per-agent workspaces are broker-local, unsynced state.
+	// A4 (ptone/scion#2727): an empty-per-agent workspace can move when it
+	// is on the shared export (placement export) and both brokers see the
+	// same export (equal identity markers): the target finds it in place.
+	// miller79/scion#167: on the same broker (no move target, including
+	// `--broker <current>`) the broker reuses the private workspace in
+	// place, gated below on a local-disk runtime and the broker's
+	// ReprovisionEmptyPerAgent capability. Any other empty-per-agent
+	// request (a move whose workspace is not movable) is still refused,
+	// unless it is a forced move (ptone/scion#5441): then the move checks
+	// decide, and a workspace the export cannot carry is recreated empty on
+	// the target.
+	emptyPerAgentMove := moveTarget != nil && project.IsEmptyPerAgent() &&
+		(forceMove || s.emptyPerAgentWorkspaceMovable(ctx, agent, moveTarget))
+	sameBrokerEmptyPerAgent := project.IsEmptyPerAgent() && moveTarget == nil
+	workspaceModeErr := ""
+	if project.IsEmptyPerAgent() && !emptyPerAgentMove && !sameBrokerEmptyPerAgent {
+		workspaceModeErr = `reincarnate does not yet support "Empty directory per agent" (empty-per-agent) workspaces`
+	}
+
+	hasGitClone := agent.AppliedConfig != nil && agent.AppliedConfig.GitClone != nil
+	var effectiveWorkspace string
+	var linkedProjectPath string
+	if agent.AppliedConfig != nil {
+		linkedProjectPath = s.linkedProjectPath(ctx, agent)
+		effectiveWorkspace = effectiveDispatchWorkspace(agent.AppliedConfig.Workspace, linkedProjectPath)
+	}
+	switchedToCloneOnly := !hasGitClone && project.GitRemote != "" && !project.IsSharedWorkspace() &&
+		linkedProjectPath == "" && effectiveWorkspace != ""
+	if workspaceModeErr == "" && (agent.AppliedConfig == nil || (!emptyPerAgentMove && (project.IsWorktreePerAgent() ||
+		(hasGitClone && project.IsSharedWorkspace()) ||
+		switchedToCloneOnly ||
+		!api.ReincarnateEligible(hasGitClone, effectiveWorkspace, project.IsEmptyPerAgent())))) {
+		// FYI-6 (review p1b-r1): the generic message now covers every
+		// eligible mode, not just clone-per-agent.
+		workspaceModeErr = "reincarnate requires a clone-per-agent, shared-workspace or hub-managed workspace"
+		if project.IsWorktreePerAgent() {
+			workspaceModeErr = "reincarnate does not yet support worktree-per-agent workspaces"
+		}
+	}
+	// A linked project's workspace is a broker-local path, never on a
+	// shared export, so it cannot move.
+	if moveTarget != nil && workspaceModeErr == "" && linkedProjectPath != "" {
+		workspaceModeErr = "reincarnate --broker does not support linked projects; the workspace is local to the current broker"
+	}
+	return reincarnateWorkspaceGateResult{
+		workspaceModeErr:        workspaceModeErr,
+		cloneMode:               hasGitClone || emptyPerAgentMove,
+		sameBrokerEmptyPerAgent: sameBrokerEmptyPerAgent,
+	}
 }

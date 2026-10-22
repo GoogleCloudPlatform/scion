@@ -687,13 +687,13 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	f.artifact = seedLiveInventoryArtifact(t, ctx, artStore, artBlobs, f.project)
 	seedLiveInventoryCatalogFiles(t, ctx, s, artBlobs, &f)
 
-	// hub.conduit, hub.agent_delegation, hub.chat_thread_groups and
-	// federation.project_visitors on too, so their experiment-gated routes
-	// are live: the registry above with all four also defaulting on (no
-	// operational settings, which the other entries rely on, are replaced).
+	// hub.conduit, hub.agent_delegation and federation.project_visitors on
+	// too, so their experiment-gated routes are live: the registry above
+	// with all three also defaulting on (no operational settings, which the
+	// other entries rely on, are replaced).
 	var active []experiments.Experiment
 	for _, e := range srv.experimentRegistry().All() {
-		if e.Name == conduitExperiment || e.Name == experiments.AgentDelegation || e.Name == experiments.ChatThreadGroups || e.Name == experiments.FederationProjectVisitors {
+		if e.Name == conduitExperiment || e.Name == experiments.AgentDelegation || e.Name == experiments.FederationProjectVisitors {
 			e.Default = true
 		}
 		active = append(active, e)
@@ -704,7 +704,6 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	require.True(t, srv.experimentEnabled(conduitExperiment))
 	require.True(t, srv.experimentEnabled(experiments.Artifacts))
 	require.True(t, srv.experimentEnabled(experiments.AgentDelegation))
-	require.True(t, srv.experimentEnabled(experiments.ChatThreadGroups))
 	require.True(t, srv.experimentEnabled(experiments.FederationProjectVisitors))
 	// POST /api/v1/auth/federation-token also answers 404 while the OIDC
 	// provider is off: install a test key manager and allow the audience
@@ -1034,6 +1033,7 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/projects/{id}/settings/resolved":                 {"id": f.project},
 		"/api/v1/projects/{id}/messaging-policy":                  {"id": f.project},
 		"/api/v1/projects/{id}/set-template":                      {"id": f.project},
+		"/api/v1/projects/{id}/clone":                             {"id": f.project},
 		"/api/v1/projects/{id}/discover-templates":                {"id": f.project},
 		"/api/v1/projects/{id}/import-templates":                  {"id": f.project},
 		"/api/v1/projects/{id}/discover-harness-configs":          {"id": f.project},

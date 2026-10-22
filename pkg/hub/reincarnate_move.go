@@ -78,10 +78,10 @@ const (
 const (
 	// MoveTransferModeExport carries the workspace: the target finds the
 	// same directory through a shared NFS export.
-	MoveTransferModeExport = "export"
+	MoveTransferModeExport = store.TransferModeExport
 	// MoveTransferModeRecreate provisions the workspace fresh on the target
 	// (a forced move); the source's local state is given up.
-	MoveTransferModeRecreate = "recreate"
+	MoveTransferModeRecreate = store.TransferModeRecreate
 )
 
 // Move consequence kinds (MoveConsequence.Kind), in display order.
