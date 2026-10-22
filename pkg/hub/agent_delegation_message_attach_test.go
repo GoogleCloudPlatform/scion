@@ -119,7 +119,9 @@ func TestAgentDelegatedMessage_SuperAdminIssuerPiercesNoMode(t *testing.T) {
 	for _, mode := range []string{store.MessageModeNone, store.MessageModeLineage, store.MessageModeBranch} {
 		t.Run(mode, func(t *testing.T) {
 			f.mutateAgent(t, f.agentB.ID, func(a *store.Agent) { a.MessageMode = mode })
-			defer f.mutateAgent(t, f.agentB.ID, func(a *store.Agent) { a.MessageMode = store.MessageModeProject })
+			defer func() {
+				_ = f.mutateAgent(t, f.agentB.ID, func(a *store.Agent) { a.MessageMode = store.MessageModeProject })
+			}()
 			rec := f.sendMessage(t, cred.Token, agentMessagePath(f.agentB.ID), adtText("blocked"))
 			adtAssertAPIError(t, rec, http.StatusForbidden, ErrCodeMessageDenied)
 			assert.Equal(t, http.StatusOK, requestAsIdentity(t, f.srv, authUser(admin), http.MethodPost,
