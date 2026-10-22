@@ -459,3 +459,26 @@ func TestAgentConfigPatch_ResourcesSubFieldChangeIsApplied(t *testing.T) {
 	assert.Empty(t, resp.Disposition.HeldForReincarnate)
 	assert.Empty(t, resp.Warnings)
 }
+
+// TestBuildAppliedConfig_DropsChangedFields: a new agent starts with no
+// changed_fields (or cleared_fields), whatever the create request carries.
+func TestBuildAppliedConfig_DropsChangedFields(t *testing.T) {
+	srv, _ := testServer(t)
+	ac := srv.buildAppliedConfig(CreateAgentRequest{
+		Config: &api.ScionConfig{
+			SystemPrompt:  "p",
+			ChangedFields: []string{"system_prompt"},
+			ClearedFields: []string{"max_turns"},
+		},
+		Workspace: "/tmp/changed-fields-ws",
+	}, "dev@localhost", AgentRoleBaseline)
+	require.NotNil(t, ac)
+	require.NotNil(t, ac.InlineConfig)
+	assert.Nil(t, ac.InlineConfig.ChangedFields)
+	assert.Nil(t, ac.InlineConfig.ClearedFields)
+	assert.Equal(t, "p", ac.InlineConfig.SystemPrompt)
+	if ac.CreateInputs != nil && ac.CreateInputs.InlineConfig != nil {
+		assert.Nil(t, ac.CreateInputs.InlineConfig.ChangedFields)
+		assert.Nil(t, ac.CreateInputs.InlineConfig.ClearedFields)
+	}
+}
