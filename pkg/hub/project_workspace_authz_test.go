@@ -66,11 +66,6 @@ func TestProjectWorkspaceAuthz_NonMemberDenied(t *testing.T) {
 		{"cache status", http.MethodGet, base + "/workspace/cache/status", nil},
 		{"cache refresh", http.MethodPost, base + "/workspace/cache/refresh", nil},
 		{"cache notify", http.MethodPost, base + "/workspace/cache/notify", nil},
-		{"dav read", http.MethodGet, base + "/dav/SECRET.md", nil},
-		{"dav propfind", "PROPFIND", base + "/dav/", nil},
-		{"dav write", http.MethodPut, base + "/dav/DAV-OWNED.md", nil},
-		{"dav delete", http.MethodDelete, base + "/dav/SECRET.md", nil},
-		{"dav mkcol", "MKCOL", base + "/dav/newdir", nil},
 	}
 
 	for _, tc := range cases {
@@ -91,7 +86,7 @@ func TestProjectWorkspaceAuthz_NonMemberDenied(t *testing.T) {
 		assert.FileExists(t, filepath.Join(ws, f),
 			"a non-member request deleted %s from another project's workspace", f)
 	}
-	for _, f := range []string{"OWNED.md", "DAV-OWNED.md", "newdir"} {
+	for _, f := range []string{"OWNED.md"} {
 		_, err := os.Stat(filepath.Join(ws, f))
 		assert.True(t, os.IsNotExist(err),
 			"a non-member request created %s in another project's workspace", f)
@@ -127,23 +122,22 @@ func TestProjectWorkspaceAuthz_MemberStillAllowed(t *testing.T) {
 		assert.FileExists(t, filepath.Join(ws, "MINE.md"))
 	})
 
-	t.Run("dav read", func(t *testing.T) {
-		rec := doRequest(t, srv, http.MethodGet, base+"/dav/SECRET.md", nil)
-		assert.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
-		assert.Contains(t, rec.Body.String(), workspaceSecret)
-	})
-
-	t.Run("dav write", func(t *testing.T) {
-		rec := doRequest(t, srv, http.MethodPut, base+"/dav/DAV-MINE.md", nil)
-		assert.Contains(t, []int{http.StatusCreated, http.StatusNoContent, http.StatusOK}, rec.Code,
-			"body: %s", rec.Body.String())
-		assert.FileExists(t, filepath.Join(ws, "DAV-MINE.md"))
+	// The WebDAV endpoint was removed (ptone/scion#5547). Its path is now an
+	// unlisted project sub-route, so even the owner gets the plain 404 and
+	// no workspace bytes.
+	t.Run("removed dav route is not found", func(t *testing.T) {
+		for _, method := range []string{http.MethodGet, http.MethodPut, "PROPFIND"} {
+			rec := doRequest(t, srv, method, base+"/dav/SECRET.md", nil)
+			assert.Equal(t, http.StatusNotFound, rec.Code, "%s body: %s", method, rec.Body.String())
+			assert.NotContains(t, rec.Body.String(), workspaceSecret, method)
+		}
 	})
 }
 
-// TestProjectWorkspaceAction pins the method-to-permission mapping. Every
-// WebDAV verb is a write by maintainer decision, PROPFIND and LOCK included,
-// and unknown verbs fall on the restrictive side.
+// TestProjectWorkspaceAction pins the method-to-permission mapping: only GET,
+// HEAD and OPTIONS are reads. The former WebDAV verbs (PROPFIND, LOCK and the
+// rest) stay listed as writes, as examples of verbs the workspace routes do
+// not serve: an unknown verb must fall on the restrictive side.
 func TestProjectWorkspaceAction(t *testing.T) {
 	reads := []string{http.MethodGet, http.MethodHead, http.MethodOptions}
 	writes := []string{

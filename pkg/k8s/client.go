@@ -352,8 +352,64 @@ func loadClientConfig(kubeconfigPath, contextName string) (*rest.Config, loadedS
 		}
 	}
 	src.connection = connectionModeFor(contextName, rawConfig, rawErr)
+	if src.connection == ConnKubeconfig && resolvesToDefaultConfig(rawConfig, contextName, overrides, loadingRules) {
+		// The deferred loader treats a configuration equal to client-go's
+		// default (for example one naming only the KUBERNETES_MASTER server,
+		// with no credentials) as empty and may use in-cluster credentials
+		// instead, so what the client connected with is not known.
+		src.connection = ConnUnknown
+	}
 
 	return config, src, nil
+}
+
+// resolvesToDefaultConfig reports whether the kubeconfig raw, with the same
+// context and overrides, resolves to an empty configuration or to
+// client-go's default one: the two cases in which the deferred loader's
+// ClientConfig tries in-cluster credentials instead
+// (clientcmd.DeferredLoadingClientConfig.ClientConfig).
+//
+// It also reports true, failing closed, when the selected context's cluster
+// names client-go's default server (clientcmd.ClusterDefaults, from
+// KUBERNETES_MASTER or the built-in default) and its user carries no
+// credential: this explicit check covers the default server with no
+// credential.
+func resolvesToDefaultConfig(raw clientcmdapi.Config, contextName string, overrides *clientcmd.ConfigOverrides, rules *clientcmd.ClientConfigLoadingRules) bool {
+	if defaultServerWithoutCredentials(raw, contextName) {
+		return true
+	}
+	direct, err := clientcmd.NewNonInteractiveClientConfig(raw, contextName, overrides, rules).ClientConfig()
+	if err != nil {
+		return clientcmd.IsEmptyConfig(err)
+	}
+	return rules.IsDefaultConfig(direct)
+}
+
+// defaultServerWithoutCredentials reports whether the selected context (the
+// requested one, else the current context) uses a cluster whose server is
+// client-go's default server and a user with no credential of any kind.
+func defaultServerWithoutCredentials(raw clientcmdapi.Config, contextName string) bool {
+	selected := contextName
+	if selected == "" {
+		selected = raw.CurrentContext
+	}
+	ctx, ok := raw.Contexts[selected]
+	if !ok || ctx == nil {
+		return false
+	}
+	cluster, ok := raw.Clusters[ctx.Cluster]
+	if !ok || cluster == nil || cluster.Server == "" || cluster.Server != clientcmd.ClusterDefaults.Server {
+		return false
+	}
+	user := raw.AuthInfos[ctx.AuthInfo]
+	if user == nil {
+		return true
+	}
+	return user.Token == "" && user.TokenFile == "" &&
+		user.ClientCertificate == "" && len(user.ClientCertificateData) == 0 &&
+		user.ClientKey == "" && len(user.ClientKeyData) == 0 &&
+		user.Username == "" && user.Password == "" &&
+		user.AuthProvider == nil && user.Exec == nil
 }
 
 // loadClientConfigNoInCluster is loadClientConfig with no in-cluster leg;
@@ -664,4 +720,45 @@ func (c *Client) ListSecretProviderClasses(ctx context.Context, namespace, label
 	return c.dynamic.Resource(SecretProviderClassGVR).Namespace(namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: labelSelector,
 	})
+}
+
+// LiveCurrentContext reads the kubeconfig current-context now, with the
+// same loading rules a client built by NewClientWithContext uses
+// (kubeconfigPath as the explicit path when set, else KUBECONFIG and
+// ~/.kube/config). It builds no client and makes no request. A load error
+// is returned; when no kubeconfig exists the context is "".
+func LiveCurrentContext(kubeconfigPath string) (string, error) {
+	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
+	if kubeconfigPath != "" {
+		loadingRules.ExplicitPath = kubeconfigPath
+	}
+	raw, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, &clientcmd.ConfigOverrides{}).RawConfig()
+	if err != nil {
+		return "", err
+	}
+	return raw.CurrentContext, nil
+}
+
+// HostConnection reports the current context and connection mode a client
+// built by NewClientWithContext(kubeconfigPath, "") would have, without
+// building one: the kubeconfig's when it loads, else, with no
+// kubeconfigPath, in-cluster when an in-cluster configuration is available
+// (the context is then ""). It makes no request.
+func HostConnection(kubeconfigPath string) (string, ConnectionMode, error) {
+	return hostConnection(kubeconfigPath, loadClientConfig, rest.InClusterConfig)
+}
+
+func hostConnection(kubeconfigPath string,
+	loadConfig func(string, string) (*rest.Config, loadedSource, error),
+	inClusterConfig func() (*rest.Config, error)) (string, ConnectionMode, error) {
+	_, src, err := loadConfig(kubeconfigPath, "")
+	if err == nil {
+		return src.currentContext, src.connection, nil
+	}
+	if kubeconfigPath == "" {
+		if _, icErr := inClusterConfig(); icErr == nil {
+			return "", ConnInCluster, nil
+		}
+	}
+	return "", ConnUnknown, err
 }

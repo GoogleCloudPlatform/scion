@@ -112,6 +112,9 @@ func TestCatalogRejectsEveryUndeclaredPhaseOutcomePair(t *testing.T) {
 					if entry.Family == "authorization" && entry.Action == "decide" {
 						event = validAuthorizationDecisionEvent(OutcomeAllow)
 					}
+					if entry.Family == BrokerFamily {
+						event = validBrokerEnvelopeFixture(entry.Action)
+					}
 					event.Family = entry.Family
 					event.Action = entry.Action
 					event.Phase = phase
@@ -1236,7 +1239,7 @@ func assertValidationErrorDoesNotRetain(t *testing.T, err error, field, rule, ca
 }
 
 // catalogEntryCount is the number of declared catalog actions.
-const catalogEntryCount = 6
+const catalogEntryCount = 11
 
 // catalogIndex returns the position of family/action in an enumerated
 // catalog snapshot, so tests do not depend on declaration order.

@@ -1457,7 +1457,11 @@ func (s *Server) handleExistingAgent(
 		// reserves the broker capacity and marks the agent starting for the
 		// dispatch (ptone/scion#1963, ptone/scion#2014; rolled back if the
 		// start fails) and runs afterStart while the claim is held.
-		if err := s.startAgentCore(ctx, existingAgent, StartOpts{Kind: store.StartClaimUser, Task: req.Task, Resume: resume, AfterStart: afterStart, SyncDispatchBound: true}); answered || err != nil {
+		// launchAccepted: the start was accepted as an asynchronous launch
+		// (ptone/scion#4669); afterStart did not run.
+		var launchAccepted bool
+		if err := s.startAgentCore(ctx, existingAgent, StartOpts{Kind: store.StartClaimUser, Task: req.Task, Resume: resume, AfterStart: afterStart, SyncDispatchBound: true,
+			AcceptAsyncLaunch: req.AcceptAsyncLaunch, OnLaunchAccepted: func(context.Context, *store.Agent) { launchAccepted = true }}); answered || err != nil {
 			if answered {
 				return existingAgentErrored
 			}
@@ -1492,6 +1496,19 @@ func (s *Server) handleExistingAgent(
 				RuntimeError(w, "Failed to resume suspended agent: "+err.Error())
 			}
 			return existingAgentErrored
+		}
+
+		if launchAccepted {
+			// A delete that won during the send answers as for a
+			// synchronous start; the delete ends the launch.
+			if s.existingAgentDeleteWonBeforeAnswer(ctx, w, existingAgent.ID, nil) {
+				return existingAgentErrored
+			}
+			if req.Notify {
+				s.createNotifySubscription(ctx, existingAgent.ID, existingAgent.ProjectID, notifySubscriberType, notifySubscriberID, createdBy)
+			}
+			s.writeExistingAgentLaunchAccepted(ctx, w, existingAgent, project)
+			return existingAgentStarted
 		}
 
 		if s.existingAgentDeleteWonBeforeAnswer(ctx, w, existingAgent.ID, afterErr) {
@@ -1598,7 +1615,11 @@ func (s *Server) handleExistingAgent(
 			// reserves the broker capacity and marks the agent starting for the
 			// dispatch (ptone/scion#1963, ptone/scion#2014; rolled back if the
 			// start fails) and runs afterStart while the claim is held.
-			if err := s.startAgentCore(ctx, existingAgent, StartOpts{Kind: store.StartClaimUser, Task: req.Task, Resume: forcedRecovery, AfterStart: afterStart, SyncDispatchBound: true}); answered || err != nil {
+			// launchAccepted: the start was accepted as an asynchronous launch
+			// (ptone/scion#4669); afterStart did not run.
+			var launchAccepted bool
+			if err := s.startAgentCore(ctx, existingAgent, StartOpts{Kind: store.StartClaimUser, Task: req.Task, Resume: forcedRecovery, AfterStart: afterStart, SyncDispatchBound: true,
+				AcceptAsyncLaunch: req.AcceptAsyncLaunch, OnLaunchAccepted: func(context.Context, *store.Agent) { launchAccepted = true }}); answered || err != nil {
 				if answered {
 					return existingAgentErrored
 				}
@@ -1633,6 +1654,19 @@ func (s *Server) handleExistingAgent(
 					RuntimeError(w, "Failed to resume stopped agent: "+err.Error())
 				}
 				return existingAgentErrored
+			}
+
+			if launchAccepted {
+				// A delete that won during the send answers as for a
+				// synchronous start; the delete ends the launch.
+				if s.existingAgentDeleteWonBeforeAnswer(ctx, w, existingAgent.ID, nil) {
+					return existingAgentErrored
+				}
+				if req.Notify {
+					s.createNotifySubscription(ctx, existingAgent.ID, existingAgent.ProjectID, notifySubscriberType, notifySubscriberID, createdBy)
+				}
+				s.writeExistingAgentLaunchAccepted(ctx, w, existingAgent, project)
+				return existingAgentStarted
 			}
 
 			if s.existingAgentDeleteWonBeforeAnswer(ctx, w, existingAgent.ID, afterErr) {
@@ -1833,7 +1867,11 @@ func (s *Server) handleExistingAgent(
 		// The start runs under a start claim, which records run intent running,
 		// reserves the broker capacity (rolled back if the start fails) and
 		// runs afterStart while the claim is held.
-		if err := s.startAgentCore(ctx, existingAgent, StartOpts{Kind: store.StartClaimUser, Task: req.Task, Resume: false, AfterStart: afterStart, SyncDispatchBound: true}); answered || err != nil {
+		// launchAccepted: the start was accepted as an asynchronous launch
+		// (ptone/scion#4669); afterStart did not run.
+		var launchAccepted bool
+		if err := s.startAgentCore(ctx, existingAgent, StartOpts{Kind: store.StartClaimUser, Task: req.Task, Resume: false, AfterStart: afterStart, SyncDispatchBound: true,
+			AcceptAsyncLaunch: req.AcceptAsyncLaunch, OnLaunchAccepted: func(context.Context, *store.Agent) { launchAccepted = true }}); answered || err != nil {
 			if answered {
 				return existingAgentErrored
 			}
@@ -1868,6 +1906,19 @@ func (s *Server) handleExistingAgent(
 				RuntimeError(w, "Failed to start agent: "+err.Error())
 			}
 			return existingAgentErrored
+		}
+
+		if launchAccepted {
+			// A delete that won during the send answers as for a
+			// synchronous start; the delete ends the launch.
+			if s.existingAgentDeleteWonBeforeAnswer(ctx, w, existingAgent.ID, nil) {
+				return existingAgentErrored
+			}
+			if req.Notify {
+				s.createNotifySubscription(ctx, existingAgent.ID, existingAgent.ProjectID, notifySubscriberType, notifySubscriberID, createdBy)
+			}
+			s.writeExistingAgentLaunchAccepted(ctx, w, existingAgent, project)
+			return existingAgentStarted
 		}
 
 		if s.existingAgentDeleteWonBeforeAnswer(ctx, w, existingAgent.ID, afterErr) {

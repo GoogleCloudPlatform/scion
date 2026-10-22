@@ -4220,6 +4220,17 @@ const (
 	// EdgeDeactivationSACleared marks an assignment ended by a write that
 	// removed the agent's assign-mode GCP identity.
 	EdgeDeactivationSACleared EdgeDeactivationCause = "sa_cleared"
+	// EdgeDeactivationReincarnateFailed marks the assignment a reincarnation
+	// claim recorded for a new account, ended when the reincarnation failed
+	// and the previous configuration was restored by the worker.
+	EdgeDeactivationReincarnateFailed EdgeDeactivationCause = "reincarnate_failed"
+	// EdgeDeactivationReincarnatePendingSwept is EdgeDeactivationReincarnateFailed
+	// for a reincarnation the sweep failed because its worker never started.
+	EdgeDeactivationReincarnatePendingSwept EdgeDeactivationCause = "reincarnate_pending_swept"
+	// EdgeDeactivationReincarnateStaleSwept is EdgeDeactivationReincarnateFailed
+	// for a reincarnation the sweep failed after its worker stopped
+	// reporting progress.
+	EdgeDeactivationReincarnateStaleSwept EdgeDeactivationCause = "reincarnate_stale_swept"
 )
 
 // ValidAssignmentDeactivationCause reports whether c is a cause that may be
@@ -4230,7 +4241,14 @@ func ValidAssignmentDeactivationCause(c EdgeDeactivationCause) bool {
 		EdgeDeactivationAgentHardDelete,
 		EdgeDeactivationCreateCompensation,
 		EdgeDeactivationSAReplaced,
-		EdgeDeactivationSACleared:
+		EdgeDeactivationSACleared,
+		// On an assignment, reincarnate_replaced marks the row a
+		// reincarnation claim replaced with one for another account; the
+		// claim's reincarnation ID is its operation ID.
+		EdgeDeactivationReincarnateReplaced,
+		EdgeDeactivationReincarnateFailed,
+		EdgeDeactivationReincarnatePendingSwept,
+		EdgeDeactivationReincarnateStaleSwept:
 		return true
 	}
 	return false
