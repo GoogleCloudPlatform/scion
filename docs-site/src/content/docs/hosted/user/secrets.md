@@ -33,6 +33,27 @@ runtime_broker  <  hub  <  project  <  user
 ```
 Therefore, user-scoped settings have the highest priority and will override project, hub, and broker-scoped variables or secrets of the same name. Template `env` blocks and CLI `--env` flags are layered on top of resolved secrets.
 
+### Scope and Sharing
+
+A scope decides which agents receive a variable or secret, not which people can use it. The Hub applies the scopes to every agent it starts, whoever starts it:
+
+| Scope | Agents that receive it |
+| :--- | :--- |
+| **Hub** | Every agent on the Hub, started by any user. |
+| **Broker** | Every agent running on that Runtime Broker, started by any user. |
+| **Project** | Every agent in that Project, started by any member of the Project. |
+| **User** | Only agents owned by that user. An agent started by another agent (a child agent) is owned by its parent agent, so it receives user-scoped values only if they are set with `--allow-progeny` (see [Propagation to Descendant Agents](#propagation-to-descendant-agents-progeny)). |
+
+Hub, Broker and Project scope apply to child agents in the same way as to the agents users start directly.
+
+The [injection mode](#injection-modes) does not change who can receive a value. An `always` value is injected into every agent in its scope. An `as_needed` environment value is injected into any agent in its scope whose template or harness configuration requests that key. Template choice is up to the user starting the agent, so any user who can start an agent in the scope can request the key. `file` and `variable` secrets are placed in every agent in their scope, whatever their injection mode.
+
+:::caution[Hub and Broker scope are shared]
+Hub-scope and Broker-scope variables and secrets are shared credentials. Every user who can start an agent on the Hub, or on that Runtime Broker, receives them in their agents. These scopes do not keep a value private to one user. Put only values there that every such user may hold.
+
+Store sensitive secrets at **User** scope, so that only your own agents receive them, or at **Project** scope. A Project-scoped secret is shared with every member of the Project: their agents receive it, and those agents can also read it at runtime (see [Agent Runtime Secret Retrieval](#agent-runtime-secret-retrieval)).
+:::
+
 ### Reserved Names
 
 Names beginning with `SCION_` or `GCE_METADATA_` (case-sensitive prefix match) are reserved for Scion's own control-plane variables. The Hub rejects with a validation error any environment variable, or `environment`-type secret, whose key or target uses one of these prefixes. `file` and `variable` secrets are not affected.
@@ -472,10 +493,10 @@ For external messaging integrations (such as Discord, Telegram, or Google Chat) 
 
 ### Resolution Hierarchy
 When an agent starts, the Runtime Broker requests a "Resolved Environment" from the Hub. The Hub merges secret values in this order (last one wins for the same key):
-1. Hub Secrets (global defaults)
-2. User Secrets
+1. Broker Secrets
+2. Hub Secrets (global defaults)
 3. Project Secrets
-4. Broker Secrets
+4. User Secrets
 5. Template `env` block
 6. CLI `--env` flags
 

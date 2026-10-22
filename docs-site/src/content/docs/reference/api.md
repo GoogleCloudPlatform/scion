@@ -398,6 +398,8 @@ These are stricter than the former `--enable-test-identities` flag, which needed
 
 At startup, for any level except `off`, the hub writes one line tagged `[scion-test-admin-audit]` to stdout, whatever `server.log_level` is set to, with the resolved level (`test_mode`), the preconditions that admitted it (`preconditions`) and a `warning`: hub- and broker-scope environment secrets are injected into every member agent, so keep only test-grade secrets on a test hub. `GET /api/v1/admin/health/summary` reports the same as `hub.test_mode` and `hub.test_mode_preconditions`, next to the booleans derived from the level.
 
+On every hub, not only in test mode, hub- and broker-scope variables and secrets reach the agents of every user who starts agents there; see [Scope and Sharing](/scion/hosted/user/secrets/#scope-and-sharing).
+
 The Helm chart renders only the `member` level: `hub.testIdentities.enabled: true` renders `--test-mode=member:<hub.hubId>` and requires `hub.hubClass: test`. No chart value renders `admin` or `super-admin`, and `hub.args` refuses `--test-mode`. The chart pins `server.hub.hub_id` to `hub.hubId` in the settings it renders. With `config.existingSecret` the settings file is yours and the chart cannot read it: its `server.hub.hub_id` must be set and equal `hub.hubId`, or every pod refuses to start.
 
 While the test admin tier is on (`--test-mode=admin` or `super-admin`):
