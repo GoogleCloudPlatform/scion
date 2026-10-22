@@ -1022,19 +1022,9 @@ func TestSync_RejectsPersistedWorkspacePath(t *testing.T) {
 }
 
 // Sync from an agent is not supported on Kubernetes: it fails with a clear
-// error before reading the pod or copying anything, whatever the pod's
-// annotations say.
+// error before making any API request.
 func TestSync_FromUnsupported(t *testing.T) {
 	rt, cs, _ := newTestK8sRuntime()
-	pod := newFakeAgentPodWithHomeDirAnnotation("test-agent", "/some/agent/home")
-	if _, err := cs.CoreV1().Pods("default").Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	cs.ClearActions()
-	rt.syncTransfer = func(_ context.Context, _, _, src, dest string, _ []string) error {
-		t.Errorf("Sync from copied %s -> %s", src, dest)
-		return nil
-	}
 	err := rt.Sync(context.Background(), "test-agent", SyncFrom)
 	if !errors.Is(err, errK8sSyncFromUnsupported) {
 		t.Fatalf("err = %v, want errK8sSyncFromUnsupported", err)
