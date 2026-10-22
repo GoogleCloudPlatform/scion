@@ -34,6 +34,8 @@ func validUsageEvent() *UsageEvent {
 		SourceEventID:        "rid1:abcd",
 		SourceIdentity:       SourceIdentityRequestID,
 		SourceOccurrence:     1,
+		ProducerEpoch:        "ep1",
+		ProducerSeq:          7,
 		SourceTime:           "2026-10-22T00:05:00.123456789Z",
 		Harness:              "claude",
 		Model:                "claude-sonnet-5",
@@ -55,7 +57,7 @@ func validUsageEvent() *UsageEvent {
 
 // Hand-written golden: field order, omitted reasoning (Claude reports
 // none), a reported zero cache_read, full-precision source_time.
-const usageGolden = `{"schema_version":1,"event_type":"agent.usage","event_id":"u1-0123","producer_namespace":"sciontool/project/p/agent/a","event_ts":"2026-10-22T00:05:00Z","observed_ts":"2026-10-22T00:20:00.123456Z","hub_id":"hub-1","project_id":"p","agent_id":"a","launch_id":"launch-1","usage_source":"native","source_kind":"claude.api_request","source_schema_version":"1","source_event_id":"rid1:abcd","source_identity":"request_id","source_occurrence":1,"source_time":"2026-10-22T00:05:00.123456789Z","harness":"claude","model":"claude-sonnet-5","model_source":"event","session_id":"s1","status":"success","calls":1,"input":2,"output":41,"cache_read":0,"cache_write":26607,"input_derivation":"reported","token_status":"reported","reported_cost_micros":66931,"reported_cost_currency":"USD","reported_cost_source":"harness"}`
+const usageGolden = `{"schema_version":1,"event_type":"agent.usage","event_id":"u1-0123","producer_namespace":"sciontool/project/p/agent/a","event_ts":"2026-10-22T00:05:00Z","observed_ts":"2026-10-22T00:20:00.123456Z","hub_id":"hub-1","project_id":"p","agent_id":"a","launch_id":"launch-1","usage_source":"native","source_kind":"claude.api_request","source_schema_version":"1","source_event_id":"rid1:abcd","source_identity":"request_id","source_occurrence":1,"producer_epoch":"ep1","producer_seq":7,"source_time":"2026-10-22T00:05:00.123456789Z","harness":"claude","model":"claude-sonnet-5","model_source":"event","session_id":"s1","status":"success","calls":1,"input":2,"output":41,"cache_read":0,"cache_write":26607,"input_derivation":"reported","token_status":"reported","reported_cost_micros":66931,"reported_cost_currency":"USD","reported_cost_source":"harness"}`
 
 func TestUsageEventGoldenAndRoundTrip(t *testing.T) {
 	ev := validUsageEvent()
@@ -106,6 +108,8 @@ func TestUsageEventValidate(t *testing.T) {
 		"none with id":              func(e *UsageEvent) { e.SourceIdentity = SourceIdentityNone; e.IdentityAmbiguous = true },
 		"none not ambiguous":        func(e *UsageEvent) { e.SourceIdentity, e.SourceEventID = SourceIdentityNone, "" },
 		"unknown identity":          func(e *UsageEvent) { e.SourceIdentity = "fuzzy" },
+		"missing epoch":             func(e *UsageEvent) { e.ProducerEpoch = "" },
+		"seq zero":                  func(e *UsageEvent) { e.ProducerSeq = 0 },
 		"occurrence zero":           func(e *UsageEvent) { e.SourceOccurrence = 0 },
 		"repeat not ambiguous":      func(e *UsageEvent) { e.SourceOccurrence = 2 },
 		"bad model source":          func(e *UsageEvent) { e.ModelSource = "guess" },

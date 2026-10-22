@@ -93,6 +93,12 @@ type UsageEvent struct {
 	SourceIdentity      string `json:"source_identity"`
 	SourceOccurrence    int64  `json:"source_occurrence"`
 	IdentityAmbiguous   bool   `json:"identity_ambiguous,omitempty"`
+	// ProducerEpoch identifies one durable producer outbox; ProducerSeq is
+	// strictly increasing within it (advanced even when an event is refused
+	// for overflow), so a gap is evidence of loss and a new epoch for the
+	// same agent and launch means the outbox itself was lost.
+	ProducerEpoch string `json:"producer_epoch"`
+	ProducerSeq   int64  `json:"producer_seq"`
 	// SourceTime is the source's own timestamp at full precision (RFC 3339,
 	// up to nanoseconds), kept apart from the microsecond event_ts.
 	SourceTime string `json:"source_time,omitempty"`
@@ -159,6 +165,9 @@ func (e *UsageEvent) Validate() error {
 		}
 	default:
 		errs = append(errs, fmt.Errorf("source_identity %q is not known", e.SourceIdentity))
+	}
+	if e.ProducerEpoch == "" || e.ProducerSeq < 1 {
+		errs = append(errs, fmt.Errorf("producer_epoch %q / producer_seq %d: both required, seq >= 1", e.ProducerEpoch, e.ProducerSeq))
 	}
 	if e.SourceOccurrence < 1 {
 		errs = append(errs, fmt.Errorf("source_occurrence = %d, want >= 1", e.SourceOccurrence))
