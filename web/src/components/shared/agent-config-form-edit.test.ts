@@ -660,6 +660,17 @@ describe('next task', () => {
     expect(el.collectConfigPatch()).toEqual({ task: 'fix the bug' });
   });
 
+  it('can be replaced but not cleared: no Clear, and an emptied task sends nothing', async () => {
+    const el = await mount('stopped', { values: { task: 'old task' } });
+    const f = field(el, 'config.task');
+    expect(f.querySelector('sl-button.clear')).toBeNull();
+    expect(f.textContent).toContain('It can be replaced, not emptied.');
+    await typeInto(el, 'config.task', '');
+    expect(el.collectConfigPatch()).toEqual({});
+    await typeInto(el, 'config.task', 'new task');
+    expect(el.collectConfigPatch()).toEqual({ task: 'new task' });
+  });
+
   it('is marked not applied on resume for a suspended agent', async () => {
     const el = await mount('suspended');
     expect(field(el, 'config.task').dataset.disposition).toBe('locked');

@@ -396,6 +396,23 @@ describe('agent edit page shared goldens (replayed by the hub tests)', () => {
     expect(patches().map((c) => c.body)).toEqual([golden('env')]);
   });
 
+  it('an emptied next task sends no PATCH', async () => {
+    const agent = makeAgent('stopped', 5);
+    agent.appliedConfig!.task = 'old task';
+    const el = await mount(agent);
+    const form = formOf(el)!;
+    const input = form.shadowRoot!.querySelector(
+      '.field[data-key="config.task"] sl-textarea'
+    ) as HTMLInputElement;
+    expect(input.value).toBe('old task');
+    input.value = '';
+    input.dispatchEvent(new Event('sl-input'));
+    await flush(form);
+    await flush(el);
+    await click(el, 'save');
+    expect(patches()).toEqual([]);
+  });
+
   it('next task', async () => {
     const el = await mount(makeAgent('stopped', 5), makeAgent('stopped', 6));
     const form = formOf(el)!;
@@ -540,7 +557,7 @@ describe('agent edit page grouping', () => {
   });
 });
 
-describe('agent edit page Clear (UAT AC6)', () => {
+describe('agent edit page Clear of a stored value', () => {
   it('clearing a previously set Max turns sends null and reports it in the toast', async () => {
     const el = await mount(makeAgent('stopped', 5), makeAgent('stopped', 6));
     await editField(el, 'config.max_turns', 'clear');

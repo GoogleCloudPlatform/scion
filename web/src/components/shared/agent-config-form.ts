@@ -219,6 +219,12 @@ interface AgentConfigFieldBase {
    * changed (the message mode has its own endpoint and card).
    */
   readOnlyInEdit?: boolean;
+  /**
+   * Edit mode cannot clear the field: the hub ignores an empty value (it
+   * keeps the stored one), so the field can only be replaced. No Clear is
+   * offered and an emptied control sends nothing.
+   */
+  replaceOnlyInEdit?: boolean;
 }
 
 /** One row of the field table. control decides how it is edited and emitted. */
@@ -330,8 +336,9 @@ export const AGENT_CONFIG_FIELDS: ReadonlyArray<AgentConfigFieldDef> = [
     tab: 'agent',
     label: 'Next task',
     tier: 'T1',
-    help: 'Given to the agent when it starts fresh; a resume continues the conversation and does not send it.',
+    help: 'Given to the agent when it starts fresh; a resume continues the conversation and does not send it. It can be replaced, not emptied.',
     editOnly: true,
+    replaceOnlyInEdit: true,
   },
   {
     key: 'projectId',
@@ -865,6 +872,8 @@ export class ScionAgentConfigForm extends LitElement {
         case 'choice':
         case 'model': {
           const v = emitString(f.control, d);
+          // A replace-only field's emptied control is not a clear: nothing is sent.
+          if (v === null && f.replaceOnlyInEdit) break;
           if (v !== null || !create) out[f.configKey] = v;
           break;
         }
@@ -1352,6 +1361,7 @@ export class ScionAgentConfigForm extends LitElement {
   }
 
   private renderClear(f: AgentConfigFieldDef, off: boolean, d: FieldDraft | undefined) {
+    if (this.mode === 'edit' && f.replaceOnlyInEdit) return nothing;
     // Edit mode: Clear reverts a value the agent stores to the inherited
     // one, so a field that only inherits offers it only to drop an edit.
     const nothingToClear =

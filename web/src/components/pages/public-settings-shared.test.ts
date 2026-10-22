@@ -17,7 +17,8 @@
 /**
  * ptone/scion#5311: GET /api/v1/settings/public is read once per page load.
  * The boot fetch (applyServerFeatureFlags) fills the cache that the create
- * form and the project settings fallback then read; an admin save drops it.
+ * form, the Edit page and the project settings fallback then read; an admin
+ * save drops it.
  */
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
@@ -57,6 +58,9 @@ function stubFetch(): void {
       if (url.match(/\/api\/v1\/projects\/proj-1(\?|$)/)) {
         return json({ id: 'proj-1', name: 'Proj', slug: 'proj' });
       }
+      if (url.includes('/api/v1/agents/a1')) {
+        return json({ id: 'a1', name: 'a1', phase: 'stopped', projectId: 'proj-1' });
+      }
       return json({});
     })
   );
@@ -69,7 +73,11 @@ async function until(ready: () => boolean): Promise<void> {
 
 beforeAll(async () => {
   stubFetch();
-  await Promise.all([import('./agent-create.js'), import('./project-settings.js')]);
+  await Promise.all([
+    import('./agent-create.js'),
+    import('./agent-edit.js'),
+    import('./project-settings.js'),
+  ]);
 }, 30_000);
 
 afterEach(() => {
@@ -90,6 +98,13 @@ describe('shared public settings (ptone/scion#5311)', () => {
     };
     document.body.appendChild(create);
     await until(() => create.hubSettings.telemetryEnabled === true);
+
+    window.history.replaceState({}, '', '/agents/a1/edit');
+    const edit = document.createElement('scion-page-agent-edit') as HTMLElement & {
+      hubAutoExpose: boolean;
+    };
+    document.body.appendChild(edit);
+    await until(() => edit.hubAutoExpose === true);
 
     const settings = document.createElement('scion-page-project-settings') as HTMLElement & {
       projectId: string;
