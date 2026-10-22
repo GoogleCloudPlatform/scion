@@ -1,6 +1,6 @@
 # Release Notes (2026-10-21)
 
-Admin settings pages now save only what changed, and project chat thread groups graduated. Agents get one model channel with new `scion create --model` and `--thinking-level` flags, and `scion reincarnate --force` can now recreate a workspace on another Runtime Broker. Account status now gates every credential check, and a co-located Hub shuts down gracefully within one budget.
+Admin settings pages now save only what changed, and project chat thread groups graduated. Agents get one model channel with new `scion create --model` and `--thinking-level` flags, and `scion reincarnate --force` can now recreate a workspace on another Runtime Broker. Account status now gates every credential check, and a co-located Hub shuts down gracefully within a single shutdown budget.
 
 ## ⚠️ BREAKING CHANGES
 * **Settings saves send only changes; null deletes** (#3984): Admin settings pages and federation send only edited fields, and the Hub's file-mode save keeps omitted keys, as DB mode already did. Clearing a stored value now sends `null`, which deletes the key, an API change for settings clients. Integration plugin defaults show as placeholders and are never saved, an unrelated save no longer rewrites the default Runtime Broker, and new projects inherit the global active profile.
@@ -17,7 +17,7 @@ Admin settings pages now save only what changed, and project chat thread groups 
 * **User access tokens for projects** (#3909, #3928): Project create, register and clone need the new Hub-only `project:create` selector and live authority. Invited users' memberships and role bindings take effect at first sign-in.
 * **Flat Runtime Brokers, experimental** (#3948, #3720, #3934): Behind `hub.flat_runtime_brokers`, a new Brokers area lists kind, runtime target, capacity and health, with detail tabs. Flat instances publish their runtime target configuration to the Hub, with credentials withheld. Capacity accounting handles refused starts, launch-end release and ambiguous restarts.
 * **Conduit, experimental** (#3930, #3938, #3953, #3926, #3739, #3932): In external relay mode the Hub reverse-proxies each conduit dial to a relay it selects (`server.hub.conduit.ingress: proxy`), passes a trusted lifetime cap, and drains proxied sessions on SIGTERM. Stream logs show route and owning relay. Placement and startup repair read Runtime Broker presence through the shared helper.
-* **Groundwork** (#3908, #3981, #3750, #3935): Project visitors can list and read agents and their own grants and DMs (behind `federation.project_visitors`). A hidden, read-only `scion server preflight` command and a `settings.profiles` check for the coming rebuild preflight. Kubernetes clients record runtime build records and connection mode.
+* **Groundwork** (#3908, #3981, #3750, #3935): Project visitors can list and read agents and their own grants and DMs (behind `federation.project_visitors`). A hidden, read-only `scion server preflight` command and a `settings.profiles` check for the upcoming rebuild preflight. Kubernetes clients record runtime build records and connection mode.
 
 ## 🔒 Security
 * **Active account required for credentials** (#3942): Credential checks, including the development user, now require an active account.
