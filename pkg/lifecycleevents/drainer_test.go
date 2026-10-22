@@ -518,3 +518,57 @@ func TestInstallPolicy(t *testing.T) {
 		}
 	}
 }
+
+// countingStore counts the maintenance statements of a drainer.
+type countingStore struct {
+	*memDB
+	mu           sync.Mutex
+	trims, stats int
+}
+
+func (c *countingStore) TrimLifecycleOutbox(ctx context.Context, now time.Time, maxAge time.Duration, maxRows, maxPermanent int) (store.LifecycleOutboxTrim, error) {
+	c.mu.Lock()
+	c.trims++
+	c.mu.Unlock()
+	return c.memDB.TrimLifecycleOutbox(ctx, now, maxAge, maxRows, maxPermanent)
+}
+
+func (c *countingStore) LifecycleOutboxStats(ctx context.Context) (store.LifecycleOutboxStats, error) {
+	c.mu.Lock()
+	c.stats++
+	c.mu.Unlock()
+	return c.memDB.LifecycleOutboxStats(ctx)
+}
+
+// TestDrainerMaintenanceCadence is section 22 item 12 N5: Run claims every
+// poll but trims and samples the gauges only every MaintenanceInterval (the
+// first pass included), so an idle drainer runs one claim per tick.
+func TestDrainerMaintenanceCadence(t *testing.T) {
+	h := newDrainHarness(t)
+	cs := &countingStore{memDB: h.db}
+	d := h.drainer("me", func(c *DrainerConfig) {
+		c.Store = cs
+		c.Now = time.Now
+		c.PollInterval = time.Millisecond
+		c.MaintenanceInterval = time.Hour
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); d.Run(ctx) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for len(h.sink.Delivered()) < 2 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(30 * time.Millisecond) // many idle ticks
+	cancel()
+	<-done
+	if got := len(h.sink.Delivered()); got != 2 {
+		t.Fatalf("delivered %d rows, want 2", got)
+	}
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	// The first pass maintains, and the shutdown pass is a full DrainOnce.
+	if cs.trims != 2 || cs.stats != 2 {
+		t.Errorf("trims=%d stats=%d, want 2 each (first pass + final pass)", cs.trims, cs.stats)
+	}
+}

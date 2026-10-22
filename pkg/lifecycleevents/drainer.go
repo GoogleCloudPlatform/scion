@@ -37,19 +37,22 @@ const (
 	MaxOutboxAge         = 72 * time.Hour
 	MaxPermanentFailures = 5
 
-	DefaultPollInterval   = 2 * time.Second
-	DefaultBatchSize      = 20
-	DefaultLeaseDuration  = 30 * time.Second
-	DefaultEmitTimeout    = 10 * time.Second
-	DefaultSweepInterval  = time.Hour
-	DefaultSweepBatch     = 500
-	DefaultShutdownBudget = 5 * time.Second
-	backoffBase           = time.Second
-	backoffMax            = 5 * time.Minute
-	blockedLogInterval    = time.Minute
-	maxDropIDsPerLine     = 100
-	maxDropLinesPerReason = 10
-	maxLastErrorBytes     = 256
+	DefaultPollInterval  = 2 * time.Second
+	DefaultBatchSize     = 20
+	DefaultLeaseDuration = 30 * time.Second
+	DefaultEmitTimeout   = 10 * time.Second
+	DefaultSweepInterval = time.Hour
+	// DefaultMaintenanceInterval is the cadence of the trim and the gauge
+	// sampling, slower than claiming (section 22 item 12, N5).
+	DefaultMaintenanceInterval = time.Minute
+	DefaultSweepBatch          = 500
+	DefaultShutdownBudget      = 5 * time.Second
+	backoffBase                = time.Second
+	backoffMax                 = 5 * time.Minute
+	blockedLogInterval         = time.Minute
+	maxDropIDsPerLine          = 100
+	maxDropLinesPerReason      = 10
+	maxLastErrorBytes          = 256
 )
 
 // DrainerConfig configures a Drainer. Zero durations and sizes take the
@@ -68,16 +71,19 @@ type DrainerConfig struct {
 	// a telemetrycontract.LifecycleEvent.
 	Validate func(payload []byte) error
 
-	PollInterval   time.Duration
-	BatchSize      int
-	LeaseDuration  time.Duration
-	EmitTimeout    time.Duration
-	SweepInterval  time.Duration
-	SweepBatch     int
-	ShutdownBudget time.Duration
-	MaxRows        int
-	MaxAge         time.Duration
-	MaxPermanent   int
+	PollInterval  time.Duration
+	BatchSize     int
+	LeaseDuration time.Duration
+	EmitTimeout   time.Duration
+	SweepInterval time.Duration
+	// MaintenanceInterval is how often Run trims the outbox and samples the
+	// gauges; claiming runs every PollInterval.
+	MaintenanceInterval time.Duration
+	SweepBatch          int
+	ShutdownBudget      time.Duration
+	MaxRows             int
+	MaxAge              time.Duration
+	MaxPermanent        int
 
 	// ExitWhenEmpty makes Run return once the outbox is empty: used when
 	// the drainer runs only to deliver a backlog left from a time the
@@ -139,6 +145,7 @@ func NewDrainer(cfg DrainerConfig) (*Drainer, error) {
 	setDur(&cfg.LeaseDuration, DefaultLeaseDuration)
 	setDur(&cfg.EmitTimeout, DefaultEmitTimeout)
 	setDur(&cfg.SweepInterval, DefaultSweepInterval)
+	setDur(&cfg.MaintenanceInterval, DefaultMaintenanceInterval)
 	setDur(&cfg.ShutdownBudget, DefaultShutdownBudget)
 	setDur(&cfg.MaxAge, MaxOutboxAge)
 	setInt(&cfg.BatchSize, DefaultBatchSize)
@@ -175,8 +182,15 @@ func (d *Drainer) Run(ctx context.Context) {
 	ticker := time.NewTicker(d.cfg.PollInterval)
 	defer ticker.Stop()
 	nextSweep := d.cfg.Now().Add(d.cfg.SweepInterval)
+	var nextMaintenance time.Time // the first pass maintains
 	for {
-		res, err := d.DrainOnce(ctx)
+		// A backlog-only drainer needs the pending count each pass to know
+		// when to exit; otherwise trim and stats run on the slower cadence.
+		maintain := d.cfg.ExitWhenEmpty || !d.cfg.Now().Before(nextMaintenance)
+		if maintain {
+			nextMaintenance = d.cfg.Now().Add(d.cfg.MaintenanceInterval)
+		}
+		res, err := d.drainPass(ctx, maintain)
 		if err != nil && ctx.Err() == nil {
 			d.cfg.Logger.Warn("lifecycle outbox drain pass failed", "error", err)
 		}
@@ -225,13 +239,21 @@ func (d *Drainer) sweep(ctx context.Context) {
 // blocked and not yet due for a probe) claim and deliver one batch, then
 // sample the gauges.
 func (d *Drainer) DrainOnce(ctx context.Context) (DrainResult, error) {
+	return d.drainPass(ctx, true)
+}
+
+// drainPass is one pass; maintain adds the trim before the claim and the
+// gauge sampling after it. Without maintain, Remaining is -1 (unknown).
+func (d *Drainer) drainPass(ctx context.Context, maintain bool) (DrainResult, error) {
 	var res DrainResult
 	now := d.cfg.Now()
-	trim, err := d.cfg.Store.TrimLifecycleOutbox(ctx, now, d.cfg.MaxAge, d.cfg.MaxRows, d.cfg.MaxPermanent)
-	if err != nil {
-		return res, fmt.Errorf("trim: %w", err)
+	if maintain {
+		trim, err := d.cfg.Store.TrimLifecycleOutbox(ctx, now, d.cfg.MaxAge, d.cfg.MaxRows, d.cfg.MaxPermanent)
+		if err != nil {
+			return res, fmt.Errorf("trim: %w", err)
+		}
+		res.Dropped = d.reportDrops(trim)
 	}
-	res.Dropped = d.reportDrops(trim)
 
 	if allowed, probe := d.claimAllowed(now); allowed {
 		batch := d.cfg.BatchSize
@@ -264,6 +286,10 @@ func (d *Drainer) DrainOnce(ctx context.Context) (DrainResult, error) {
 		}
 	}
 
+	if !maintain {
+		res.Remaining = -1
+		return res, nil
+	}
 	stats, err := d.cfg.Store.LifecycleOutboxStats(ctx)
 	if err != nil {
 		return res, fmt.Errorf("stats: %w", err)
