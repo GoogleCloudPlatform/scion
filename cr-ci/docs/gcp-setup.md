@@ -23,6 +23,17 @@ nothing exists yet), and `#` lines are notes.
   covers everything). The design suggests `deploy-demo-test` / `us-central1`
   for the PoC. On a shared project, the deployer needs the least-privilege
   bundle in [matrix 2.1](permissions-matrix.md#21-deployer-roles-least-privilege-bundle).
+- **Region choice.** `REGION` is the only place a region is set; nothing in the
+  code or scripts assumes `us-central1`. Any region where Cloud Run Jobs and
+  Artifact Registry are available works: the job, the mediator, the image
+  repository and the staging bucket all go to `REGION`. Cost differs:
+  `us-central1` has Tier 1 Cloud Run pricing, while for example `us-west2` is
+  Tier 2 ([Cloud Run locations](https://docs.cloud.google.com/run/docs/locations)),
+  roughly 25 % more per vCPU and GiB-second. The design's remark that Cloud Run
+  *Instances* are not available in some regions does not matter here: cr-ci uses
+  Jobs, which are GA everywhere. The ephemeral-disk quotas (section 9) are per
+  region, so a new region needs its own quota requests. Moving region means
+  redeploying everything (a new `MEDIATOR_URL`, so the App's webhook URL changes too).
 - **Tools:** bash >= 4, the gcloud CLI (version floor `CRCI_MIN_GCLOUD` in
   `scripts/lib.sh`; see [matrix U8](permissions-matrix.md#5-design-corrections-and-open-items)),
   authenticated as the deployer (`gcloud auth login`). docker only for
@@ -216,7 +227,8 @@ scripts/deploy-mediator.sh --apply [--tag TAG] [--local] [--no-invoker-iam-check
      own identity.
 4. Re-reads the service and stops if max-instances is not 1.
 5. Grants `SCHEDULER_SA_NAME` `roles/run.invoker` on the service only (C13).
-6. Prints the service URL. If `MEDIATOR_URL` is empty, it tells you to set it
+6. Prints the service URL. The GitHub App's webhook URL is that URL (or
+   `MEDIATOR_URL`) **plus `/webhook`**; the bare URL gets 404 on delivery. If `MEDIATOR_URL` is empty, it tells you to set it
    and run the script again; the service answers 503 on `/webhook` and
    `/reconcile` until then. If `MEDIATOR_URL` is not one of the service's URLs
    (`status.url` or the deterministic URL), it warns: update `MEDIATOR_URL`
@@ -282,8 +294,11 @@ To raise a quota (C15, `roles/cloudquotas.admin`; Google approves the request):
      --format='table(quotaId, metric, dimensions)'
    ```
 
-2. Request the new value for `REGION`, for example 25 GiB per instance (and
-   enough regional allocation for `MAX_CONCURRENT_RUNNERS` x 25 GiB):
+2. Request the new value for `REGION`, for example 25 GiB per instance, and
+   enough regional allocation for `MAX_CONCURRENT_RUNNERS` x 25 GiB. With the
+   default regional 100 GiB, set `MAX_CONCURRENT_RUNNERS=4` at 25 GiB, or raise
+   the regional quota first: otherwise the 5th concurrent runner fails to start
+   (`launch_failed`, `RESOURCE_EXHAUSTED`) and its job waits for `/reconcile`.
 
    ```bash
    gcloud beta quotas preferences create --service=run.googleapis.com --project=GCP_PROJECT \

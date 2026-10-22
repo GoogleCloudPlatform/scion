@@ -212,6 +212,9 @@ logged (a unit test enforces this).
   budget. The job is backfilled after its registration is reaped.
 - **Webhook deliveries failing with 401:** the webhook secret in Secret
   Manager and in the App settings differ (see rotation above).
+- **Webhook deliveries get 404:** the App's webhook URL lacks `/webhook`. It must
+  be `MEDIATOR_URL/webhook` (App settings, **General**, **Webhook URL**), then
+  redeliver from **Advanced**, **Recent Deliveries**.
 - **503 from `/webhook` and `/reconcile` with `not_configured`:** `MEDIATOR_URL`
   is empty; set it and redeploy.
 - **Image build fails with "the --chmod option requires BuildKit":** the

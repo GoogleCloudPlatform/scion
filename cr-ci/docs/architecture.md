@@ -310,7 +310,9 @@ so it is deferred.
   (restored Go cache 4.8 GB growing to ~8-9.5 GB, workspace 1.1 GB, modules
   ~1.3 GB, Go temp dirs up to ~2 GB), and runs with 10 GiB ran out of space. Raise
   the per-instance quota and use about 25 GiB, and size the regional quota for
-  `MAX_CONCURRENT_RUNNERS` x `RUNNER_DISK_GI`
+  `MAX_CONCURRENT_RUNNERS` x `RUNNER_DISK_GI`: at 25 GiB the default 100 GiB
+  allows `MAX_CONCURRENT_RUNNERS=4`, and a 5th runner would fail as
+  `launch_failed` (`RESOURCE_EXHAUSTED`)
   ([gcp-setup.md, "Quotas"](gcp-setup.md#9-quotas)).
 - **RAM build cache (`RUNNER_BUILD_CACHE_IN_RAM=true`):** the alternative for a
   small `/scratch`. The entrypoint makes `/scratch/.cache` a link to a directory on
