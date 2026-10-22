@@ -551,14 +551,14 @@ func TestRerender_ClearedPromptRemovedForNonContainerHarness(t *testing.T) {
 	}
 }
 
-func TestPromptTargets(t *testing.T) {
-	got, err := promptTargets(&harness.Generic{})
+func TestSystemPromptTargets(t *testing.T) {
+	got, err := systemPromptTargets(&harness.Generic{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{".scion/system_prompt.md", "agents.md"}
+	want := []string{".scion/system_prompt.md"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("promptTargets(generic) = %v, want %v", got, want)
+		t.Fatalf("systemPromptTargets(generic) = %v, want %v", got, want)
 	}
 }
 
@@ -566,5 +566,23 @@ func TestRerenderSkippedWarning(t *testing.T) {
 	got := rerenderSkippedWarning([]string{"skills", "system_prompt"})
 	if !strings.HasPrefix(got, "skills, system_prompt: not re-rendered at this start") || !strings.Contains(got, "next reincarnation") {
 		t.Fatalf("warning = %q", got)
+	}
+}
+
+// TestRerender_InstructionsChangeKeepsTemplateHomePrompt: a system prompt
+// file the render does not produce (here one a template's home/ supplied)
+// is left alone when only the agent instructions change; only a start that
+// clears the system prompt removes it.
+func TestRerender_InstructionsChangeKeepsTemplateHomePrompt(t *testing.T) {
+	f := newRerenderFixture(t)
+	promptFile := filepath.Join(f.agentHome, ".scion", "system_prompt.md")
+	writeFileString(t, promptFile, "template home prompt")
+	cfg := &api.ScionConfig{AgentInstructions: "new instructions"}
+	inline := &api.ScionConfig{AgentInstructions: "new instructions", ChangedFields: []string{"agent_instructions"}}
+	if _, err := rerenderProvisionedFiles(context.Background(), f.inputs(&harness.Generic{}, []string{"agent_instructions"}, cfg, inline, []*config.Template{{Name: "t", Path: t.TempDir()}})); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFileString(t, promptFile); got != "template home prompt" {
+		t.Fatalf("an instructions-only re-render changed the system prompt file: %q", got)
 	}
 }

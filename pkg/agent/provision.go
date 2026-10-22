@@ -4643,16 +4643,15 @@ const servicesFileName = "scion-services.yaml"
 // writeServicesFile writes services to the agent home's scion-services.yaml
 // for sciontool to consume at container startup. Shared by ProvisionAgent
 // and the start-time re-render (rerenderProvisionedFiles).
+//
+// The write is confined to the agent home (writeHomeFile): an existing home
+// is one the agent's container could change.
 func writeServicesFile(agentHome string, services []api.ServiceSpec) error {
-	scionDir := filepath.Join(agentHome, ".scion")
-	if err := os.MkdirAll(scionDir, 0755); err != nil {
-		return fmt.Errorf("failed to create agent .scion directory: %w", err)
-	}
 	servicesData, err := yaml.Marshal(services)
 	if err != nil {
 		return fmt.Errorf("failed to marshal services config: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(scionDir, servicesFileName), servicesData, 0644); err != nil {
+	if err := writeHomeFile(agentHome, filepath.Join(".scion", servicesFileName), servicesData, 0o644); err != nil {
 		return fmt.Errorf("failed to write %s: %w", servicesFileName, err)
 	}
 	return nil

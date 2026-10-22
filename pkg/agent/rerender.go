@@ -19,14 +19,16 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agentplugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -282,29 +284,37 @@ func rerenderPrompts(in rerenderInputs, recorded string, write func(func() error
 		util.Debugf("rerender: staged prompts for agent %s in the inputs record", in.AgentName)
 		return fp, "", nil
 	}
-	// The files the harness writes for prompts, whatever their content: a
-	// target this render no longer produces (a cleared system prompt with
-	// no template default) is removed, as the clear reverts to nothing.
-	targets, err := promptTargets(in.Harness)
-	if err != nil {
-		return "", "", err
-	}
-	err = write(func() error {
-		for rel, data := range files {
-			dst := filepath.Join(in.AgentHome, filepath.FromSlash(rel))
-			if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-				return err
-			}
-			if err := os.WriteFile(dst, data, 0o644); err != nil {
-				return err
-			}
+	// When this start clears the system prompt, a system-prompt file the
+	// render no longer produces (no template default) is removed, as the
+	// clear reverts to nothing. Otherwise a file the render does not
+	// produce, such as one a template's home/ supplies, is left alone.
+	var stale []string
+	if in.Inline != nil && slices.Contains(in.Inline.ClearedFields, "system_prompt") {
+		targets, err := systemPromptTargets(in.Harness)
+		if err != nil {
+			return "", "", err
 		}
 		for _, rel := range targets {
-			if _, rendered := files[rel]; rendered {
-				continue
+			if _, rendered := files[rel]; !rendered {
+				stale = append(stale, rel)
 			}
-			if err := os.Remove(filepath.Join(in.AgentHome, filepath.FromSlash(rel))); err != nil && !os.IsNotExist(err) {
-				return err
+		}
+	}
+	// Writes are confined to the agent home (home_confined_write_*.go).
+	err = write(func() error {
+		names := make([]string, 0, len(files))
+		for rel := range files {
+			names = append(names, rel)
+		}
+		sort.Strings(names)
+		for _, rel := range names {
+			if err := writeHomeFile(in.AgentHome, rel, files[rel], 0o644); err != nil {
+				return fmt.Errorf("write %s: %w", rel, err)
+			}
+		}
+		for _, rel := range stale {
+			if err := removeHomeFile(in.AgentHome, rel); err != nil {
+				return fmt.Errorf("remove %s: %w", rel, err)
 			}
 		}
 		return nil
@@ -316,31 +326,42 @@ func rerenderPrompts(in rerenderInputs, recorded string, write func(func() error
 	return fp, "", nil
 }
 
-// promptTargets returns the agent-home paths (slash-separated, relative)
-// harness h writes the instructions and the system prompt to, found by
-// rendering placeholder content into a scratch home.
-func promptTargets(h api.Harness) ([]string, error) {
+// systemPromptTargets returns the agent-home paths (slash-separated,
+// relative) harness h writes only the system prompt to, found by rendering
+// placeholder content into scratch homes: the paths InjectSystemPrompt
+// writes that InjectAgentInstructions does not (a system prompt prepended
+// to the instructions shares their file, which is always rendered).
+func systemPromptTargets(h api.Harness) ([]string, error) {
+	instructions, err := scratchRender(func(dir string) error { return h.InjectAgentInstructions(dir, []byte("instructions")) })
+	if err != nil {
+		return nil, err
+	}
+	prompt, err := scratchRender(func(dir string) error { return h.InjectSystemPrompt(dir, []byte("system prompt")) })
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for rel := range prompt {
+		if _, shared := instructions[rel]; !shared {
+			out = append(out, rel)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// scratchRender runs render on a new scratch directory and returns the
+// files it wrote.
+func scratchRender(render func(dir string) error) (map[string][]byte, error) {
 	scratch, err := os.MkdirTemp("", "scion-rerender-targets-")
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = os.RemoveAll(scratch) }()
-	if err := h.InjectAgentInstructions(scratch, []byte("instructions")); err != nil {
+	if err := render(scratch); err != nil {
 		return nil, err
 	}
-	if err := h.InjectSystemPrompt(scratch, []byte("system prompt")); err != nil {
-		return nil, err
-	}
-	files, err := readTree(scratch)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]string, 0, len(files))
-	for rel := range files {
-		out = append(out, rel)
-	}
-	sort.Strings(out)
-	return out, nil
+	return readTree(scratch)
 }
 
 // rerenderSkippedWarning is the start warning for re-render keys a start
@@ -349,22 +370,59 @@ func rerenderSkippedWarning(keys []string) string {
 	return strings.Join(keys, ", ") + ": not re-rendered at this start because the agent's harness configuration could not be resolved; they take effect at the next start that resolves it, or at the next reincarnation"
 }
 
-// rerenderSkills resolves and installs the agent's skills
-// (resolveAndInstallSkills, the provisioning step) and, for a
-// container-script harness, records the staged resolution record in the
-// control-plane inputs record Start restages from. Skills dropped from the
-// list stay installed, as after a reprovision.
+// rerenderSkills resolves and installs the agent's skills with the
+// provisioning step (resolveAndInstallSkills) into a scratch home, then
+// installs each resolved skill into the agent home confined to it
+// (installHomeDir), writes the resolution record there with the skills
+// already in the home listed as local, as provisioning does, and, for a
+// container-script harness, records it in the control-plane inputs record
+// Start restages from. Skills dropped from the list stay installed, as
+// after a reprovision.
 func rerenderSkills(ctx context.Context, in rerenderInputs) error {
-	record, err := resolveAndInstallSkills(ctx, in.AgentName, in.ProjectDir, in.Harness, in.AgentHome, in.Config.Skills)
+	scratch, err := os.MkdirTemp("", "scion-rerender-skills-")
 	if err != nil {
 		return err
 	}
-	if record == nil || !isContainerScriptHarness(in.Harness) {
+	defer func() { _ = os.RemoveAll(scratch) }()
+	record, err := resolveAndInstallSkills(ctx, in.AgentName, in.ProjectDir, in.Harness, scratch, in.Config.Skills)
+	if err != nil {
+		return err
+	}
+	if record == nil {
 		return nil
 	}
-	data, err := os.ReadFile(filepath.Join(stagedInputsDir(in.AgentHome), resolvedSkillsInputName))
+	skillsDir := in.Harness.SkillsDir()
+	resolved := map[string]bool{}
+	for _, e := range record.Skills {
+		name := path.Base(e.InstalledPath)
+		if name == "." || name == "/" || name == ".." || strings.ContainsAny(name, "/\\") {
+			return fmt.Errorf("invalid installed skill name %q", name)
+		}
+		resolved[name] = true
+		rel := filepath.Join(skillsDir, name)
+		if err := installHomeDir(filepath.Join(scratch, rel), in.AgentHome, rel); err != nil {
+			return fmt.Errorf("install skill %s: %w", name, err)
+		}
+	}
+	home, err := os.OpenRoot(in.AgentHome)
 	if err != nil {
-		return fmt.Errorf("read staged skill resolution record: %w", err)
+		return err
+	}
+	local, err := rootLocalSkills(home, skillsDir, resolved)
+	_ = home.Close()
+	if err != nil {
+		return err
+	}
+	record.Skills = append(local, record.Skills...)
+	data, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := writeHomeFile(in.AgentHome, filepath.Join(".scion", resolvedSkillsInputName), data, 0o644); err != nil {
+		return fmt.Errorf("write skill resolution record: %w", err)
+	}
+	if !isContainerScriptHarness(in.Harness) {
+		return nil
 	}
 	dir := filepath.Join(in.AgentDir, controlPlaneInputsDirName)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -373,17 +431,44 @@ func rerenderSkills(ctx context.Context, in rerenderInputs) error {
 	return os.WriteFile(filepath.Join(dir, resolvedSkillsInputName), data, 0o644)
 }
 
+// rootLocalSkills lists, as enumerateLocalSkills does, the skill
+// directories already in the agent home's skills directory, except the
+// names in skip, without following links: an entry that is not a real
+// directory is not a skill. A skills directory that is missing or not a
+// real directory lists none.
+func rootLocalSkills(home *os.Root, skillsDir string, skip map[string]bool) ([]SkillResolutionEntry, error) {
+	if ok, err := realDirChain(home, filepath.Clean(skillsDir), true); err != nil || !ok {
+		return nil, err
+	}
+	entries, err := readRootDir(home, skillsDir)
+	if err != nil {
+		return nil, err
+	}
+	var out []SkillResolutionEntry
+	for _, e := range entries {
+		if !e.IsDir() || e.Type()&os.ModeSymlink != 0 || strings.HasPrefix(e.Name(), ".") || skip[e.Name()] {
+			continue
+		}
+		if fi, err := home.Lstat(filepath.Join(skillsDir, e.Name(), agentplugin.ManifestFile)); err == nil && fi.Mode().IsRegular() {
+			continue
+		}
+		out = append(out, SkillResolutionEntry{
+			Name:          e.Name(),
+			InstalledPath: filepath.ToSlash(filepath.Join(skillsDir, e.Name())),
+			Source:        "local",
+		})
+	}
+	return out, nil
+}
+
 // rerenderServices writes the services file (writeServicesFile, the
-// provisioning step), or removes it when the agent has no services.
+// provisioning step), or removes it when the agent has no services,
+// confined to the agent home.
 func rerenderServices(agentHome string, services []api.ServiceSpec) error {
 	if len(services) > 0 {
 		return writeServicesFile(agentHome, services)
 	}
-	err := os.Remove(filepath.Join(agentHome, ".scion", servicesFileName))
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return err
-	}
-	return nil
+	return removeHomeFile(agentHome, filepath.Join(".scion", servicesFileName))
 }
 
 func inlineString(c *api.ScionConfig, get func(*api.ScionConfig) string) string {
