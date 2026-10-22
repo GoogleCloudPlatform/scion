@@ -437,7 +437,7 @@ func TestForceDelete_RunMismatch_RetryLostClaim(t *testing.T) {
 	f := newRunMismatchFixture(t, "rmf-lost", state.PhaseRunning)
 	var logs bytes.Buffer
 	var logMu sync.Mutex
-	f.srv.agentLifecycleLog = slog.New(slog.NewTextHandler(&lockedWriter{w: &logs, mu: &logMu}, nil))
+	f.srv.agentLifecycleLog = slog.New(slog.NewTextHandler(&syncedLogWriter{w: &logs, mu: &logMu}, nil))
 	var stolen atomic.Bool
 	f.client.answerCtx = func(ctx context.Context, runID string) error {
 		if runID == "run-a" {
@@ -467,13 +467,14 @@ func TestForceDelete_RunMismatch_RetryLostClaim(t *testing.T) {
 	assert.NotContains(t, logs.String(), "Failed to delete the run the broker held", "the lost claim is not classified")
 }
 
-// lockedWriter serializes writes to w.
-type lockedWriter struct {
+// syncedLogWriter serializes writes to w (its own type: pkg/hub already has a
+// lockedWriter in conduit_relay_ops_test.go).
+type syncedLogWriter struct {
 	w  *bytes.Buffer
 	mu *sync.Mutex
 }
 
-func (l *lockedWriter) Write(p []byte) (int, error) {
+func (l *syncedLogWriter) Write(p []byte) (int, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.w.Write(p)
