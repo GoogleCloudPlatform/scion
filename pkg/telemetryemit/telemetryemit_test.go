@@ -185,6 +185,10 @@ func TestMemoryCounters(t *testing.T) {
 	m.Dropped("age", 3)
 	m.SinkBlocked(ReasonAuth, true)
 	m.ObserverState(ObserverStateDisabledUnpinnedHubID)
+	m.DrainerState(DrainerStateBacklogOnly)
+	if m.Get(MetricDrainerState, DrainerStateBacklogOnly) != 1 || m.Get(MetricDrainerState, DrainerStateRunning) != 0 {
+		t.Errorf("drainer state: %s", m)
+	}
 	if got := m.Get(MetricEventsEnqueued, "created"); got != 2 {
 		t.Errorf("enqueued = %d", got)
 	}
@@ -213,6 +217,7 @@ func TestOTelCountersExport(t *testing.T) {
 	c.Dropped("poison", 2)
 	c.Outbox(OutboxGauges{Pending: 5})
 	c.ObserverState(ObserverStateEnabled)
+	c.DrainerState(DrainerStateRunning)
 	var rm metricdata.ResourceMetrics
 	if err := reader.Collect(context.Background(), &rm); err != nil {
 		t.Fatal(err)
@@ -223,7 +228,7 @@ func TestOTelCountersExport(t *testing.T) {
 			names[m.Name] = true
 		}
 	}
-	for _, want := range []string{MetricEventsEnqueued, MetricOutboxDropped, MetricOutboxPending, MetricObserverState} {
+	for _, want := range []string{MetricEventsEnqueued, MetricOutboxDropped, MetricOutboxPending, MetricObserverState, MetricDrainerState} {
 		if !names[want] {
 			t.Errorf("metric %s not exported; got %v", want, names)
 		}

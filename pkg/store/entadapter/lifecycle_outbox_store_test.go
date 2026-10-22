@@ -456,6 +456,13 @@ func TestLifecycleStore_OutboxLeaseAndTrim(t *testing.T) {
 	st, err := f.cs.LifecycleOutboxStats(ctx)
 	require.NoError(t, err)
 	assert.Zero(t, st.Pending)
+	has, err := f.cs.LifecycleOutboxHasRows(ctx)
+	require.NoError(t, err)
+	assert.False(t, has, "empty outbox")
+	f.create("lc-ob-4")
+	has, err = f.cs.LifecycleOutboxHasRows(ctx)
+	require.NoError(t, err)
+	assert.True(t, has)
 }
 
 func TestLifecycleStore_TrimOverflowSkipsLeased(t *testing.T) {

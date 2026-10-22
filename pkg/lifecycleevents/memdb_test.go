@@ -275,6 +275,12 @@ func (db *memDB) TrimLifecycleOutbox(ctx context.Context, now time.Time, maxAge 
 	return t, nil
 }
 
+func (db *memDB) LifecycleOutboxHasRows(ctx context.Context) (bool, error) {
+	db.stateMu.Lock()
+	defer db.stateMu.Unlock()
+	return len(db.outbox) > 0, nil
+}
+
 func (db *memDB) LifecycleOutboxStats(ctx context.Context) (store.LifecycleOutboxStats, error) {
 	db.stateMu.Lock()
 	defer db.stateMu.Unlock()

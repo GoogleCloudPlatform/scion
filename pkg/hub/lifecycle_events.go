@@ -149,7 +149,10 @@ func (s *Server) wakeLifecycleDrainer() {
 
 // startLifecycleEvents starts the outbox drainer when there is work for
 // it: an installed observer, or rows already in the outbox (then it exits
-// once they are delivered). Otherwise it does nothing (review r6 N4).
+// once they are delivered: design 5.4, a switched-off pipeline still
+// drains its committed backlog). Otherwise the cost is one synchronous
+// existence probe, with no goroutine and no poll (review r6 N4). The
+// drainer state is exported as lifecycle_drainer_state.
 func (s *Server) startLifecycleEvents(ctx context.Context) {
 	ls, ok := s.store.(lifecycleEventStore)
 	if !ok {
@@ -167,17 +170,20 @@ func (s *Server) startLifecycleEvents(ctx context.Context) {
 			rt.state = s.lifecycleObserverState(false)
 			rt.countersOrNop().ObserverState(rt.state)
 		}
-		st, err := ls.LifecycleOutboxStats(ctx)
+		has, err := ls.LifecycleOutboxHasRows(ctx)
 		if err != nil {
 			slog.Warn("lifecycle outbox check failed; drainer not started", "error", err)
+			rt.countersOrNop().DrainerState(telemetryemit.DrainerStateIdleDisabled)
 			return
 		}
-		if st.Pending == 0 {
+		if !has {
+			rt.countersOrNop().DrainerState(telemetryemit.DrainerStateIdleDisabled)
 			return
 		}
 	}
 	if rt.sink == nil {
 		slog.Warn("lifecycle events: no sink configured; outbox rows are kept and not delivered")
+		rt.countersOrNop().DrainerState(telemetryemit.DrainerStateIdleDisabled)
 		return
 	}
 	d, err := lifecycleevents.NewDrainer(lifecycleevents.DrainerConfig{
@@ -189,6 +195,7 @@ func (s *Server) startLifecycleEvents(ctx context.Context) {
 	})
 	if err != nil {
 		slog.Warn("lifecycle drainer not started", "error", err)
+		rt.countersOrNop().DrainerState(telemetryemit.DrainerStateIdleDisabled)
 		return
 	}
 	if s.ctx != nil {
@@ -197,9 +204,16 @@ func (s *Server) startLifecycleEvents(ctx context.Context) {
 	dctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	rt.drainer, rt.cancel, rt.done = d, cancel, done
+	counters := rt.countersOrNop()
+	if installed {
+		counters.DrainerState(telemetryemit.DrainerStateRunning)
+	} else {
+		counters.DrainerState(telemetryemit.DrainerStateBacklogOnly)
+	}
 	go func() {
 		defer close(done)
 		d.Run(dctx)
+		counters.DrainerState(telemetryemit.DrainerStateIdleDisabled)
 	}()
 }
 

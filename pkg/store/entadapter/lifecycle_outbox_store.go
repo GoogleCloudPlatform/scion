@@ -496,6 +496,17 @@ func (c *CompositeStore) TrimLifecycleOutbox(ctx context.Context, now time.Time,
 	return t, nil
 }
 
+// LifecycleOutboxHasRows implements store.LifecycleOutboxStore with an
+// existence probe (SELECT ... LIMIT 1), so its cost does not grow with
+// the backlog.
+func (c *CompositeStore) LifecycleOutboxHasRows(ctx context.Context) (bool, error) {
+	ok, err := c.client.AgentLifecycleOutbox.Query().Exist(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return ok, nil
+}
+
 // LifecycleOutboxStats implements store.LifecycleOutboxStore.
 func (c *CompositeStore) LifecycleOutboxStats(ctx context.Context) (store.LifecycleOutboxStats, error) {
 	var st store.LifecycleOutboxStats

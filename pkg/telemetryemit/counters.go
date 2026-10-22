@@ -44,6 +44,7 @@ const (
 	MetricSeqAllocatedMax = "lifecycle_outbox_seq_allocated_max" // gauge; lag only, not loss
 	MetricSeqDeliveredMax = "lifecycle_outbox_seq_delivered_max" // gauge; lag only, not loss
 	MetricObserverState   = "lifecycle_observer_state"           // gauge {state}
+	MetricDrainerState    = "lifecycle_drainer_state"            // gauge {state}
 	attrTransition        = "transition"
 	attrReason            = "reason"
 	attrCause             = "cause"
@@ -58,6 +59,17 @@ const (
 )
 
 var observerStates = []string{ObserverStateEnabled, ObserverStateDisabledExperimentOff, ObserverStateDisabledUnpinnedHubID}
+
+// Drainer states for MetricDrainerState (design 11, r6 N4): running with
+// an installed observer, backlog_only while delivering rows left from an
+// earlier run, idle_disabled when no drainer runs.
+const (
+	DrainerStateRunning      = "running"
+	DrainerStateBacklogOnly  = "backlog_only"
+	DrainerStateIdleDisabled = "idle_disabled"
+)
+
+var drainerStates = []string{DrainerStateRunning, DrainerStateBacklogOnly, DrainerStateIdleDisabled}
 
 // OutboxGauges is one sample of the outbox gauges.
 type OutboxGauges struct {
@@ -82,6 +94,7 @@ type LifecycleCounters interface {
 	SinkBlocked(reason string, blocked bool)
 	Outbox(g OutboxGauges)
 	ObserverState(state string)
+	DrainerState(state string)
 }
 
 // NopCounters discards everything.
@@ -97,6 +110,7 @@ func (NopCounters) Dropped(string, int)      {}
 func (NopCounters) SinkBlocked(string, bool) {}
 func (NopCounters) Outbox(OutboxGauges)      {}
 func (NopCounters) ObserverState(string)     {}
+func (NopCounters) DrainerState(string)      {}
 
 // MemoryCounters keeps values in memory, for tests. Get reads a value by
 // metric name and attribute value ("" for none).
@@ -176,6 +190,15 @@ func (m *MemoryCounters) Outbox(g OutboxGauges) {
 	m.set(MetricSeqAllocatedMax, "", g.SeqAllocatedMax)
 	m.set(MetricSeqDeliveredMax, "", g.SeqDeliveredMax)
 }
+func (m *MemoryCounters) DrainerState(state string) {
+	for _, s := range drainerStates {
+		v := int64(0)
+		if s == state {
+			v = 1
+		}
+		m.set(MetricDrainerState, s, v)
+	}
+}
 func (m *MemoryCounters) ObserverState(state string) {
 	for _, s := range observerStates {
 		v := int64(0)
@@ -192,6 +215,7 @@ func (m *MemoryCounters) ObserverState(state string) {
 type OTelCounters struct {
 	enqueued, buildFailures, resyncs, emitAttempts, emitFailures, delivered, dropped metric.Int64Counter
 	sinkBlocked, pending, oldestAge, seqAllocated, seqDelivered, observerState       metric.Int64Gauge
+	drainerState                                                                     metric.Int64Gauge
 }
 
 // NewOTelCounters creates the instruments on mp's meter named scope.
@@ -225,6 +249,7 @@ func NewOTelCounters(mp metric.MeterProvider, scope string) (*OTelCounters, erro
 		seqAllocated:  gauge(MetricSeqAllocatedMax),
 		seqDelivered:  gauge(MetricSeqDeliveredMax),
 		observerState: gauge(MetricObserverState),
+		drainerState:  gauge(MetricDrainerState),
 	}
 	if err := errors.Join(errs...); err != nil {
 		return nil, err
@@ -265,5 +290,15 @@ func (c *OTelCounters) ObserverState(state string) {
 			v = 1
 		}
 		c.observerState.Record(bg, v, attr(attrState, s))
+	}
+}
+
+func (c *OTelCounters) DrainerState(state string) {
+	for _, s := range drainerStates {
+		v := int64(0)
+		if s == state {
+			v = 1
+		}
+		c.drainerState.Record(bg, v, attr(attrState, s))
 	}
 }

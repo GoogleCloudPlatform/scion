@@ -98,6 +98,10 @@ type LifecycleOutboxStore interface {
 	// one) older than maxAge, the oldest beyond maxRows, and those with
 	// permanent_failures >= maxPermanentFailures.
 	TrimLifecycleOutbox(ctx context.Context, now time.Time, maxAge time.Duration, maxRows, maxPermanentFailures int) (LifecycleOutboxTrim, error)
+	// LifecycleOutboxHasRows reports whether the outbox holds any row, at
+	// constant cost (an existence probe, not a count): the startup check
+	// that decides whether a backlog-only drainer must run.
+	LifecycleOutboxHasRows(ctx context.Context) (bool, error)
 	// LifecycleOutboxStats samples the outbox.
 	LifecycleOutboxStats(ctx context.Context) (LifecycleOutboxStats, error)
 	// SweepOrphanLifecycleCursors deletes up to limit cursors whose agent

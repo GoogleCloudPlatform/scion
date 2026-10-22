@@ -182,13 +182,15 @@ func TestLifecycleEvents_ExperimentOff(t *testing.T) {
 	assert.False(t, running, "no drainer without an observer or a backlog")
 	assert.Equal(t, telemetryemit.ObserverStateDisabledExperimentOff, stateNow)
 	assert.Equal(t, int64(1), counters.Get(telemetryemit.MetricObserverState, telemetryemit.ObserverStateDisabledExperimentOff))
+	assert.Equal(t, int64(1), counters.Get(telemetryemit.MetricDrainerState, telemetryemit.DrainerStateIdleDisabled))
+	assert.Zero(t, counters.Get(telemetryemit.MetricDrainerState, telemetryemit.DrainerStateRunning))
 }
 
 // TestLifecycleEvents_BacklogDrainerStartsAndExits: rows left in the
 // outbox from a time the observer was installed are delivered at startup
 // by a drainer that then exits (review r6 N4).
 func TestLifecycleEvents_BacklogDrainerStartsAndExits(t *testing.T) {
-	srv, ls, projectID, sink, _ := lifecycleTestServer(t, true)
+	srv, ls, projectID, sink, counters := lifecycleTestServer(t, true)
 	_, err := srv.installLifecycleObserver()
 	require.NoError(t, err)
 	lifecycleCreateAgent(t, srv, projectID, "lc-backlog")
@@ -206,6 +208,8 @@ func TestLifecycleEvents_BacklogDrainerStartsAndExits(t *testing.T) {
 	}
 	evs := lifecycleDecode(t, sink.Delivered())
 	assert.Equal(t, "created@1", lifecycleSeq(evs))
+	assert.Equal(t, int64(1), counters.Get(telemetryemit.MetricDrainerState, telemetryemit.DrainerStateIdleDisabled),
+		"the backlog-only drainer reports idle once it exits: %s", counters)
 }
 
 // TestLifecycleEvents_UnpinnedHubID: a derived hub ID (hostname) is not a
