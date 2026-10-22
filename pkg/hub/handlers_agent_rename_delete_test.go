@@ -137,16 +137,18 @@ func TestDeleteAgent_StopsScheduledEventTimerWithoutNotFoundWarning(t *testing.T
 
 // fireAfterListStore claims one scheduled event as fired right after
 // ListScheduledEvents returns it as pending. It reproduces an event that
-// fires between the delete path's list and its cancel.
+// fires between the delete path's list and its cancel. It delegates
+// unchanged until its fault switch is armed.
 type fireAfterListStore struct {
 	store.Store
+	fault   *storeFaultSwitch
 	eventID string
 }
 
 func (s *fireAfterListStore) ListScheduledEvents(ctx context.Context, filter store.ScheduledEventFilter, opts store.ListOptions) (*store.ListResult[store.ScheduledEvent], error) {
 	res, err := s.Store.ListScheduledEvents(ctx, filter, opts)
-	if err != nil {
-		return nil, err
+	if err != nil || !s.fault.Active() {
+		return res, err
 	}
 	claimer, ok := s.Store.(store.ScheduledEventClaimer)
 	if !ok {
@@ -168,7 +170,12 @@ func (s *fireAfterListStore) ListScheduledEvents(ctx context.Context, filter sto
 // fired status and fire time, its timer is left alone, and the delete logs
 // no warning for it.
 func TestDeleteAgent_KeepsScheduledEventFiredBeforeCancel(t *testing.T) {
-	f := projectAgentAuthzSetup(t)
+	evtID := tid("delete-fired-before-cancel-evt")
+	srv, s := testServer(t)
+	_, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *fireAfterListStore {
+		return &fireAfterListStore{Store: inner, fault: f, eventID: evtID}
+	})
+	f := projectAgentAuthzSetupOn(t, srv, s)
 	ctx := context.Background()
 
 	logs := &levelLogHandler{}
@@ -178,7 +185,7 @@ func TestDeleteAgent_KeepsScheduledEventFiredBeforeCancel(t *testing.T) {
 	payload, err := json.Marshal(map[string]string{"agentId": f.target.ID})
 	require.NoError(t, err)
 	evt := store.ScheduledEvent{
-		ID:        tid("delete-fired-before-cancel-evt"),
+		ID:        evtID,
 		ProjectID: f.project.ID,
 		EventType: "message",
 		FireAt:    time.Now().Add(time.Hour),
@@ -189,7 +196,7 @@ func TestDeleteAgent_KeepsScheduledEventFiredBeforeCancel(t *testing.T) {
 	f.srv.scheduler.scheduleTimer(ctx, evt)
 	t.Cleanup(func() { f.srv.scheduler.StopEventTimer(evt.ID) })
 
-	f.srv.store = &fireAfterListStore{Store: f.store, eventID: evt.ID}
+	fault.Arm()
 
 	delRec := doRequestAsUser(t, f.srv, f.member, http.MethodDelete, f.targetPath(), nil)
 	require.Contains(t, []int{http.StatusOK, http.StatusNoContent}, delRec.Code,
