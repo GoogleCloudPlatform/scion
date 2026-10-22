@@ -422,9 +422,11 @@ describe('deleteGroup()', () => {
     expect(opts.credentials).toBe('include');
   });
 
-  it('uses raw fetch (not apiFetch) — no scion:access-denied event', async () => {
-    // deleteGroup uses raw fetch with credentials:'include'
+  it("skips the global 403 handling (authErrors: 'caller') — no scion:access-denied event", async () => {
+    // deleteGroup has its own constraint-gate UX for a 403.
     fetchMock.mockResolvedValueOnce(fixtureResponse('error-constraint-gate.json', 403));
+    const denied = vi.fn();
+    window.addEventListener('scion:access-denied', denied);
 
     try {
       await deleteGroup('g-123');
@@ -432,7 +434,10 @@ describe('deleteGroup()', () => {
     } catch (err) {
       expect(err).toBeInstanceOf(GroupsApiError);
       expect((err as GroupsApiError).kind).toBe('constraint_gate');
+    } finally {
+      window.removeEventListener('scion:access-denied', denied);
     }
+    expect(denied).not.toHaveBeenCalled();
   });
 });
 

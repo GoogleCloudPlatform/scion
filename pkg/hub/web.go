@@ -1756,7 +1756,9 @@ func (ws *WebServer) prefetchPageData(r *http.Request) template.JS {
 // returns the body of a 200 answer. It has a 2-second deadline. The shell
 // head is already sent when this runs (spaHandler), so a panic here must
 // not cut the document short: it degrades to no data, like a timeout or an
-// error status.
+// error status. parent is used for cancellation only: the request's
+// identity comes from the Authorization header alone (the web session user
+// lives under a context key the hub does not read), so the token decides.
 func (ws *WebServer) prefetchHubGET(parent context.Context, apiPath, accessToken string) ([]byte, bool) {
 	ctx, cancel := context.WithTimeout(parent, 2*time.Second)
 	defer cancel()
