@@ -117,6 +117,7 @@ function agent(i) {
     detached: false,
     generation: 1,
     harnessConfig: 'default-claude',
+    harnessVendor: 'anthropic',
     id,
     labels: { bench: 'true', 'bench-seq': String(i), 'bench-tier': large ? 'large' : 'small' },
     lastActivityEvent: ZERO_TIME,
