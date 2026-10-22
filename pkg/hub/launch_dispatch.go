@@ -368,7 +368,7 @@ func (s *Server) persistAcceptedLaunch(ctx context.Context, dispatched *store.Ag
 		}
 		result = latest
 		mergeDispatchedConfig(latest, dispatched)
-		lastErr = s.store.UpdateAgent(ctx, latest)
+		lastErr = s.store.UpdateAgent(lifecycleConfigResolution(ctx), latest)
 		if lastErr == nil {
 			if fresh, err := s.store.GetAgent(ctx, dispatched.ID); err == nil {
 				return fresh, nil

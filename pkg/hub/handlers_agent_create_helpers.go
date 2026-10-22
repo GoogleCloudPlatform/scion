@@ -1725,7 +1725,7 @@ func (s *Server) handleExistingAgent(
 		// failed delete, or a deleting row whose lease lapsed, does not hold
 		// the row, so it is removed as before.
 		actor := auditActorFromContext(ctx)
-		n, err := s.store.FinalizeAgentDeletion(ctx, existingAgent.ID, createRowCompensable(), store.DeletionFinalizeHard, store.DeletionFields{},
+		n, err := s.store.FinalizeAgentDeletion(lifecycleCreateRollback(ctx, "env_gather_recreate"), existingAgent.ID, createRowCompensable(), store.DeletionFinalizeHard, store.DeletionFields{},
 			createRowHeldCheck(func(tx store.Store) error {
 				return s.hardDeleteAgentTx(ctx, tx, existingAgent, actor)
 			}))

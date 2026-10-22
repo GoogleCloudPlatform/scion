@@ -571,6 +571,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 				obs.Metrics = obs.Metrics.Failed(mpErr)
 			} else {
 				exit.addFlush(mp.Shutdown)
+				lifecycleMeterProvider = mp
 
 				hubDBRec = wireHubCoreMetrics(hubSrv, mp)
 
@@ -602,6 +603,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		}
 		log.Print(obs.Metrics.LogLine())
 		hubSrv.SetObservabilityExportStatus(obs)
+		wireLifecycleEventsSink(hubSrv, cfg, devAuthToken != "")
 
 		// Wire command bus for cross-node dispatch (B2-4).
 		cmdBus, err := newCommandBus(ctx, cfg, hubSrv)
@@ -1238,6 +1240,7 @@ func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger, me
 				ch, logging.ResilientCloudHandlerConfig{},
 			)
 			cloudHandler = resilientHandler
+			lifecycleCloudHandler = resilientHandler
 			cleanups = append(cleanups, cloudLogCleanup)
 			cleanups = append(cleanups, resilientCleanup)
 			log.Printf("Cloud Logging enabled with circuit breaker (logId=%s, project=%s)", logging.FormatLogID(), logging.FormatProjectID())

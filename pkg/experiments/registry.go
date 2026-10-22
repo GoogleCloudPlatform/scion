@@ -203,7 +203,27 @@ const AsyncAgentStart = "hub.async_agent_start"
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
+// LifecycleEvents gates the agent lifecycle event pipeline (WP1): with it
+// on, every authoritative agent-row write records versioned
+// agent.lifecycle events in a transactional outbox, which the hub delivers
+// to the Cloud Logging log scion-analytics. It takes effect only with a
+// pinned hub ID and a configured sink; the state is exported as
+// lifecycle_observer_state. Turning it off stops new events; pending rows
+// are still delivered.
+const LifecycleEvents = "hub.lifecycle_events"
+
 var compiled = []Experiment{
+	{
+		Name:        LifecycleEvents,
+		Title:       "Agent lifecycle events",
+		Description: "Records a versioned agent.lifecycle event for every authoritative agent transition (create, launch, start, stop, delete and the rest) in the transaction that commits it, and delivers them to the Cloud Logging log scion-analytics. Takes effect only with a pinned hub ID (server.hub.hub_id) and server Cloud Logging enabled; lifecycle_observer_state reports why it is not in effect. Enable it on every replica together. Turning it off stops new events; events already recorded are still delivered.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#333",
+		Owner:       "telemetry",
+		ReviewBy:    "2027-03-31",
+	},
 	{
 		Name:        AsyncAgentStart,
 		Title:       "Asynchronous agent start",

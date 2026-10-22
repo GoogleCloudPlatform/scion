@@ -122,3 +122,18 @@ func Classify(err error) (ErrorClass, string) {
 	}
 	return ClassTransient, ReasonUnknown
 }
+
+// KindOf names the kind of sink s for the lifecycle_sink_kind gauge
+// (design section 22 item 4, condition b): cloud_logging, stdout, or none
+// for no sink. Any other sink (tests) reports "other".
+func KindOf(s Sink) string {
+	switch s.(type) {
+	case nil:
+		return SinkKindNone
+	case *CloudLoggingSink:
+		return SinkKindCloudLogging
+	case *StdoutSink:
+		return SinkKindStdout
+	}
+	return "other"
+}

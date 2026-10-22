@@ -1640,6 +1640,9 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		"secrets.backend",
 	}
 
+	// hub.lifecycle_events is read on every apply (WP1).
+	s.reconcileLifecycleEvents(context.Background())
+
 	return map[string]interface{}{
 		"applied":          applied,
 		"requires_restart": needsRestart,

@@ -166,7 +166,11 @@ func (s *Server) updateReincarnationStep(ctx context.Context, agentID string, up
 		} else if upd.clearMessageIfEquals != "" && agent.Message == upd.clearMessageIfEquals {
 			agent.Message = ""
 		}
-		if err := s.store.UpdateAgent(ctx, agent); err != nil {
+		wctx := ctx
+		if upd.appliedConfig != nil {
+			wctx = lifecycleConfigResolution(ctx) // WP1: the reprovision resolves configuration
+		}
+		if err := s.store.UpdateAgent(wctx, agent); err != nil {
 			if errors.Is(err, store.ErrVersionConflict) {
 				lastErr = err
 				continue

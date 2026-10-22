@@ -51,6 +51,9 @@ type startDispatch struct {
 	marked bool
 	// settled is set once rollback or settle has run.
 	settled bool
+	// unconfirmed is set by keepForUnknownOutcome: the rollback is the
+	// rollback of a start whose outcome is unknown (WP1 r4 N3).
+	unconfirmed bool
 }
 
 // errStartingWrite marks beginStartDispatch's failure to write PhaseStarting,
@@ -221,9 +224,13 @@ func (d *startDispatch) rollback(ctx context.Context) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), startDispatchRollbackTimeout)
 	defer cancel()
 	if d.marked {
+		rctx := ctx
+		if d.unconfirmed {
+			rctx = lifecycleStartUnconfirmed(ctx) // WP1 r4 N3: no event, counted
+		}
 		// Restore lets the prior phase be halted, which no other write
 		// may store directly (ptone/scion#4853).
-		err := d.s.store.UpdateAgentStatus(ctx, d.agent.ID, store.AgentStatusUpdate{
+		err := d.s.store.UpdateAgentStatus(rctx, d.agent.ID, store.AgentStatusUpdate{
 			Phase:   d.priorPhase,
 			IfPhase: string(state.PhaseStarting),
 			Restore: true,
@@ -289,6 +296,7 @@ func (d *startDispatch) keepForUnknownOutcome() {
 		return
 	}
 	d.reserved = false
+	d.unconfirmed = true
 	if d.marked {
 		d.priorPhase = string(state.PhaseStopped)
 	}

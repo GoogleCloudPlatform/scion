@@ -1025,6 +1025,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 				slog.Info("Restart: agent not running on broker, proceeding with start",
 					"agent_id", id, "error", stopErr)
 			}
+			// The stop leg is confirmed: close the old run's lifecycle
+			// segment before the start leg mints the next run (WP1 r5 B1).
+			s.recordRestartStopLeg(ctx, agent.ID, agent.RunID)
 			// The dying container's own status report (phase stopped)
 			// may have released the slot during the stop leg; the restart
 			// held it throughout, so put it back without the cap check.
@@ -1443,7 +1446,7 @@ func restartStoppedRecordable(runID string) bool {
 
 func (s *Server) recordRestartStopped(ctx context.Context, id, runID string) bool {
 	zero := 0
-	recorded, err := s.recordStopStatus(ctx, id, runID, "restart", store.AgentStatusUpdate{
+	recorded, err := s.recordStopStatus(lifecycleRestartFailed(ctx), id, runID, "restart", store.AgentStatusUpdate{
 		Phase:           string(state.PhaseStopped),
 		ContainerStatus: "stopped",
 		ExitCode:        &zero,
