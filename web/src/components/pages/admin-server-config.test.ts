@@ -1009,6 +1009,30 @@ describe('scion-page-admin-server-config', () => {
       expect(field.querySelector('.broker-host-effective')).toBeNull();
     });
 
+    // ptone/scion#4418: the env-pin keys are the koanf keys
+    // server.broker.broker_name and broker_nickname, so an environment
+    // override locks those fields.
+    for (const [key, label, value] of [
+      ['server.broker.broker_name', 'Broker Name', 'env-broker'],
+      ['server.broker.broker_nickname', 'Broker Nickname', 'env-nick'],
+    ] as const) {
+      it(`an env override of ${key} locks the ${label} field`, async () => {
+        const config = withBrokerHost(undefined, { ...workstation, env_overrides: [key] });
+        config.server.broker[key.split('.').pop()!] = value;
+        element = await createComponent(createFetchHandler(config));
+        const fieldLabel = queryAll(element, 'sl-tab-panel[name="broker"] label').find(
+          (l) => l.textContent?.trim() === label
+        );
+        expect(fieldLabel).toBeDefined();
+        const field = fieldLabel!.closest('.form-field')!;
+        expect(field.querySelector('sl-input')).toBeNull();
+        expect(field.querySelector('.read-only-badge')?.textContent).toContain(
+          'environment variable'
+        );
+        expect(field.querySelector('.read-only-value')?.textContent?.trim()).toBe(value);
+      });
+    }
+
     it('an empty runtime broker host shows 0.0.0.0 on a file-backed hub', async () => {
       element = await createComponent(createFetchHandler(withBrokerHost(undefined, {})));
       const field = brokerHostField(element);
@@ -1497,6 +1521,79 @@ describe('scion-page-admin-server-config', () => {
       const reloadBtn = bannerEl!.querySelector('sl-button');
       expect(reloadBtn).not.toBeNull();
       expect(reloadBtn!.textContent).toContain('Reload');
+    });
+
+    // ptone/scion#4467: the sections written before the conflict stay
+    // saved, so the banner lists their keys, a restart-required one included.
+    it('409 revision_conflict lists the keys saved before the conflict', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: () => ({
+            status: 409,
+            body: {
+              error: 'revision_conflict',
+              message: 'One or more sections have been modified since the expected revision.',
+              applied: { endpoints: 4 },
+              conflicted: [{ section: 'access', expected_revision: 3, current_revision: 5 }],
+              applied_keys: ['server.hub.hub_name'],
+              pending_restart: ['server.hub.public_url'],
+              skipped: [{ key: 'server.notifications.slack', reason: 'invalid webhook URL' }],
+            },
+          }),
+        })
+      );
+
+      const buttons = queryAll(element, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await (element as any).updateComplete;
+
+      const bannerEl = query(element, '.conflict-banner');
+      expect(bannerEl).not.toBeNull();
+      const saved = bannerEl!.querySelector('.conflict-saved');
+      expect(saved).not.toBeNull();
+      expect(saved!.querySelector('.pending-restart')?.textContent).toContain(
+        'applies after restart: server.hub.public_url'
+      );
+      expect(saved!.querySelector('.applied-keys')?.textContent).toContain(
+        'Applied now: server.hub.hub_name'
+      );
+      const skipped = saved!.querySelector('.skipped-keys')?.textContent ?? '';
+      expect(skipped).toContain('server.notifications.slack');
+      expect(skipped).toContain('invalid webhook URL');
+      // The changed sections and the Reload action are still there.
+      expect(bannerEl!.textContent).toContain('access');
+      expect(bannerEl!.querySelector('sl-button')?.textContent).toContain('Reload');
+    });
+
+    it('409 revision_conflict without saved keys shows no saved-keys block', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: () => ({
+            status: 409,
+            body: {
+              error: 'revision_conflict',
+              conflicted: [{ section: 'access', expected_revision: 3, current_revision: 5 }],
+              applied_keys: [],
+              pending_restart: [],
+            },
+          }),
+        })
+      );
+
+      const buttons = queryAll(element, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await (element as any).updateComplete;
+
+      expect(query(element, '.conflict-banner')).not.toBeNull();
+      expect(query(element, '.conflict-saved')).toBeNull();
     });
 
     it('422 layer0_rejected renders safety net notice and logs keys', async () => {
