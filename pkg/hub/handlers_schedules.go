@@ -354,10 +354,17 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, projectI
 func (s *Server) listSchedules(w http.ResponseWriter, r *http.Request, projectID string) {
 	query := r.URL.Query()
 
+	// An agent caller lists only the schedules it holds.
+	agentID, ok := agentListFilter(r.Context())
+	if !ok {
+		writeJSON(w, http.StatusOK, ListSchedulesResponse{Schedules: []store.Schedule{}, ServerTime: time.Now().UTC()})
+		return
+	}
 	filter := store.ScheduleFilter{
-		ProjectID: projectID,
-		Status:    query.Get("status"),
-		Name:      query.Get("name"),
+		ProjectID:        projectID,
+		Status:           query.Get("status"),
+		Name:             query.Get("name"),
+		InitiatorAgentID: agentID,
 	}
 
 	result, err := s.store.ListSchedules(r.Context(), filter, listOptionsFromQuery(query))
@@ -366,10 +373,11 @@ func (s *Server) listSchedules(w http.ResponseWriter, r *http.Request, projectID
 		return
 	}
 
+	schedules, totalCount := visibleScheduledRows(r.Context(), s, projectID, result.Items, result.TotalCount, scheduleRow)
 	writeJSON(w, http.StatusOK, ListSchedulesResponse{
-		Schedules:  result.Items,
+		Schedules:  schedules,
 		NextCursor: result.NextCursor,
-		TotalCount: result.TotalCount,
+		TotalCount: totalCount,
 		ServerTime: time.Now().UTC(),
 	})
 }
@@ -386,6 +394,9 @@ func (s *Server) getSchedule(w http.ResponseWriter, r *http.Request, projectID, 
 		NotFound(w, "Schedule")
 		return
 	}
+	if !s.authorizeScheduledEventRow(w, r, projectID, ActionRead, scheduleRow(schedule)) {
+		return
+	}
 
 	writeJSON(w, http.StatusOK, schedule)
 }
@@ -399,6 +410,9 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 	}
 	if schedule.ProjectID != projectID {
 		NotFound(w, "Schedule")
+		return
+	}
+	if !s.authorizeScheduledEventRow(w, r, projectID, ActionUpdate, scheduleEditRow(schedule)) {
 		return
 	}
 	originalStatus := schedule.Status
@@ -602,6 +616,9 @@ func (s *Server) deleteSchedule(w http.ResponseWriter, r *http.Request, projectI
 		NotFound(w, "Schedule")
 		return
 	}
+	if !s.authorizeScheduledEventRow(w, r, projectID, ActionDelete, scheduleRow(schedule)) {
+		return
+	}
 
 	// No future dispatch is created by a delete, so there is no
 	// re-attribution — just a record of who deleted it, written in the same
@@ -629,6 +646,9 @@ func (s *Server) pauseSchedule(w http.ResponseWriter, r *http.Request, projectID
 	}
 	if schedule.ProjectID != projectID {
 		NotFound(w, "Schedule")
+		return
+	}
+	if !s.authorizeScheduledEventRow(w, r, projectID, ActionUpdate, scheduleRow(schedule)) {
 		return
 	}
 	if schedule.Status != store.ScheduleStatusActive {
@@ -663,6 +683,9 @@ func (s *Server) resumeSchedule(w http.ResponseWriter, r *http.Request, projectI
 	}
 	if schedule.ProjectID != projectID {
 		NotFound(w, "Schedule")
+		return
+	}
+	if !s.authorizeScheduledEventRow(w, r, projectID, ActionUpdate, scheduleRow(schedule)) {
 		return
 	}
 	// Resuming re-arms future dispatch and records the resumer as the
@@ -747,6 +770,9 @@ func (s *Server) getScheduleHistory(w http.ResponseWriter, r *http.Request, proj
 	}
 	if schedule.ProjectID != projectID {
 		NotFound(w, "Schedule")
+		return
+	}
+	if !s.authorizeScheduledEventRow(w, r, projectID, ActionRead, scheduleRow(schedule)) {
 		return
 	}
 

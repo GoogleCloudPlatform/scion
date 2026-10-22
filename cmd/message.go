@@ -300,24 +300,6 @@ Examples:
 			return newUsageError("--attach cannot be combined with --in or --at")
 		}
 
-		// Validate attachment file paths exist
-		for _, p := range msgAttach {
-			resolved := resolveAttachmentPath(p)
-			if resolved == "" {
-				return fmt.Errorf("attachment %q: path is outside allowed roots (/workspace, /scion-volumes)", p)
-			}
-			info, err := os.Stat(resolved)
-			if err != nil {
-				return fmt.Errorf("attachment %q: %w", p, err)
-			}
-			if !info.Mode().IsRegular() {
-				if info.IsDir() {
-					return fmt.Errorf("attachment %q: is a directory, not a regular file", p)
-				}
-				return fmt.Errorf("attachment %q: is not a regular file", p)
-			}
-		}
-
 		// Validate artifact references (ptone/scion#3223). They are carried
 		// in message metadata and as URLs in the body.
 		artifactRefs, err := parseArtifactFlags(msgArtifacts)
@@ -384,6 +366,20 @@ Examples:
 		// Handle scheduled messages
 		if msgIn != "" || msgAt != "" {
 			return scheduleMessageViaHub(hubCtx, agentName, message, msgInterrupt, msgPlain)
+		}
+
+		// Attachments: ask the hub where uploads go first (ptone/scion#4596).
+		// With "artifact", the files are checked and uploaded for each
+		// recipient send, which names them by id; otherwise today's path
+		// validation and staging run unchanged.
+		msgAttachUpload = nil
+		if len(msgAttach) > 0 {
+			toAgent := agentName != "" || (convRef != nil && convRef.Kind == messaging.RefAgent) || groupHasAgent(groupRecipients)
+			upload, staged, err := resolveAttachMode(hubCtx.Client, msgAttach, toAgent)
+			if err != nil {
+				return err
+			}
+			msgAttachUpload, msgAttach = upload, staged
 		}
 
 		// Stage attachments to shared volume
@@ -576,9 +572,6 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 		fmt.Printf("Sending message to agent '%s'...\n", agentName)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
 	msg := buildStructuredMessage(sender, "agent:"+agentName, message, msgAttach, msgPlain, interrupt)
 	// Validate through the new envelope choke point (Phase 7, AC-8).
 	if err := messaging.ValidateLegacyMessage(msg); err != nil {
@@ -595,11 +588,17 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 		messages.DedupMentionNames(extractMentions(message), parseCCFlag(msgCC)),
 		strings.TrimPrefix(sender, "agent:"), agentName)
 
-	resp, err := agentSvc.SendStructuredMessageWithOptions(ctx, agentName, msg, hubclient.SendMessageOptions{
-		Interrupt: interrupt,
-		Notify:    notify,
-		Wake:      wake,
-		Mentions:  mentions,
+	attachmentIDs, sendCtx, sendCancel, err := uploadThenSendContext(context.Background())
+	if err != nil {
+		return err
+	}
+	defer sendCancel()
+	resp, err := agentSvc.SendStructuredMessageWithOptions(sendCtx, agentName, msg, hubclient.SendMessageOptions{
+		Interrupt:     interrupt,
+		Notify:        notify,
+		Wake:          wake,
+		Mentions:      mentions,
+		AttachmentIDs: attachmentIDs,
 	})
 	if err != nil {
 		return agentMessageSendError(agentName, err)
@@ -664,7 +663,14 @@ func sendCrossProjectMessage(hubCtx *HubContext, targetProject, agentSlug, messa
 	// ProjectAgents("") produces /api/v1/agents/{uuid}/message which bypasses
 	// the project-scoped slug lookup and its project isolation check.
 	agentSvc := hubCtx.Client.ProjectAgents("")
-	resp, err := agentSvc.SendStructuredMessage(ctx, result.Agent.ID, msg, interrupt, false, wake)
+	attachmentIDs, sendCtx, sendCancel, err := uploadThenSendContext(context.Background())
+	if err != nil {
+		return err
+	}
+	defer sendCancel()
+	resp, err := agentSvc.SendStructuredMessageWithOptions(sendCtx, result.Agent.ID, msg, hubclient.SendMessageOptions{
+		Interrupt: interrupt, Wake: wake, AttachmentIDs: attachmentIDs,
+	})
 	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to send cross-project message to agent '%s': %w", agentSlug, err))
 	}
@@ -713,9 +719,6 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 		return wrapHubError(err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
 	agentSvc := hubCtx.Client.ProjectAgents(projectID)
 
 	// DEF-142 P5: when running in an agent context, send ALL ref kinds via
@@ -743,9 +746,15 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 			// this path), just the body's @mentions, filtered of the sender
 			// and the primary for old-hub compatibility.
 			mentions := filterMentionNames(extractMentions(message), senderAgent, ref.Value)
-			resp, err := agentSvc.SendStructuredMessageWithOptions(ctx, ref.Value, agentMsg, hubclient.SendMessageOptions{
-				Wake:     wake,
-				Mentions: mentions,
+			attachmentIDs, sendCtx, sendCancel, err := uploadThenSendContext(context.Background())
+			if err != nil {
+				return err
+			}
+			defer sendCancel()
+			resp, err := agentSvc.SendStructuredMessageWithOptions(sendCtx, ref.Value, agentMsg, hubclient.SendMessageOptions{
+				Wake:          wake,
+				Mentions:      mentions,
+				AttachmentIDs: attachmentIDs,
 			})
 			if err != nil {
 				return agentMessageSendError(ref.Value, err)
@@ -801,7 +810,13 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 			return fmt.Errorf("message validation failed: %w", err)
 		}
 
-		result, err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg)
+		ids, sendCtx, sendCancel, err := uploadThenSendContext(context.Background())
+		if err != nil {
+			return err
+		}
+		defer sendCancel()
+		outMsg.AttachmentIDs = ids
+		result, err := agentSvc.SendOutboundMessage(sendCtx, senderAgent, outMsg)
 		if err != nil {
 			return wrapHubError(fmt.Errorf("failed to send message to %s: %w", ref.Raw, err))
 		}
@@ -859,7 +874,14 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 	// The hub ingests attachments, and so reports attachment warnings,
 	// only for agent senders; this human path has none to print. It can
 	// report an artifact warning.
-	humanResp, err := agentSvc.SendStructuredMessage(ctx, ref.Value, agentMsg, interrupt, false, wake)
+	attachmentIDs, sendCtx, sendCancel, err := uploadThenSendContext(context.Background())
+	if err != nil {
+		return err
+	}
+	defer sendCancel()
+	humanResp, err := agentSvc.SendStructuredMessageWithOptions(sendCtx, ref.Value, agentMsg, hubclient.SendMessageOptions{
+		Interrupt: interrupt, Wake: wake, AttachmentIDs: attachmentIDs,
+	})
 	if err != nil {
 		return agentMessageSendError(ref.Value, err)
 	}
@@ -932,9 +954,6 @@ func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message
 	}
 	agentSvc := hubCtx.Client.ProjectAgents(projectID)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
 	outMsg := &hubclient.OutboundMessageRequest{
 		Recipient:   userRecipient,
 		Msg:         message,
@@ -946,7 +965,13 @@ func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message
 		Metadata:    artifactRefsMetadata(msgArtifactRefs),
 	}
 
-	result, err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg)
+	attachmentIDs, sendCtx, sendCancel, err := uploadThenSendContext(context.Background())
+	if err != nil {
+		return err
+	}
+	defer sendCancel()
+	outMsg.AttachmentIDs = attachmentIDs
+	result, err := agentSvc.SendOutboundMessage(sendCtx, senderAgent, outMsg)
 	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to send message to %s: %w", userRecipient, err))
 	}
@@ -1273,9 +1298,6 @@ func sendGroupMessageViaHubCtx(hubCtx *HubContext, recipients []messages.GroupRe
 			return
 		}
 
-		ctx, cancel := context.WithTimeout(fanCtx, 30*time.Second)
-		defer cancel()
-
 		switch recip.Kind {
 		case messages.RecipientAgent:
 			slug := api.Slugify(recip.Name)
@@ -1283,7 +1305,15 @@ func sendGroupMessageViaHubCtx(hubCtx *HubContext, recipients []messages.GroupRe
 			msg.Type = messages.TypeGroupSet
 			msg.Recipients = recipientsStr
 			msg.Metadata = map[string]string{"group_id": groupID}
-			sendResp, err := agentSvc.SendStructuredMessage(ctx, slug, msg, interrupt, false, false)
+			attachmentIDs, sendCtx, sendCancel, err := uploadThenSendContext(fanCtx)
+			if err != nil {
+				recordErr(idx, recipStr, err)
+				return
+			}
+			defer sendCancel()
+			sendResp, err := agentSvc.SendStructuredMessageWithOptions(sendCtx, slug, msg, hubclient.SendMessageOptions{
+				Interrupt: interrupt, AttachmentIDs: attachmentIDs,
+			})
 			if err != nil {
 				recordErr(idx, recipStr, err)
 				return
@@ -1323,7 +1353,14 @@ func sendGroupMessageViaHubCtx(hubCtx *HubContext, recipients []messages.GroupRe
 				ThreadID:    msgThreadID,
 				Metadata:    map[string]string{"recipients": recipientsStr, "group_id": groupID},
 			}
-			outResp, err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg)
+			ids, sendCtx, sendCancel, err := uploadThenSendContext(fanCtx)
+			if err != nil {
+				recordErr(idx, recipStr, err)
+				return
+			}
+			defer sendCancel()
+			outMsg.AttachmentIDs = ids
+			outResp, err := agentSvc.SendOutboundMessage(sendCtx, senderAgent, outMsg)
 			if err != nil {
 				recordErr(idx, recipStr, err)
 				return
@@ -1902,8 +1939,8 @@ func init() {
 	// Retained flags (core message functionality)
 	messageCmd.Flags().BoolVarP(&msgInterrupt, "interrupt", "i", false, "Interrupt the harness before sending the message")
 	messageCmd.Flags().BoolVarP(&msgWake, "wake", "w", false, "Resume a suspended agent before delivering the message")
-	messageCmd.Flags().StringArrayVar(&msgArtifacts, "artifact", nil, "Reference a published artifact (scion://artifact/<id>[@<seq>]), repeatable, at most 10. The reference is added to the message text and the recipient is shown how to fetch it; the hub attaches only artifacts you can read.")
-	messageCmd.Flags().StringArrayVar(&msgAttach, "attach", nil, "Attach file path(s), repeatable; use paths under /workspace or /scion-volumes (bare relative paths resolve to /workspace). Absolute paths outside these roots are skipped with a warning; when an agent sends the message, attachments the hub cannot read are reported as warnings after it is sent (human sends do not report these yet).")
+	messageCmd.Flags().StringArrayVar(&msgArtifacts, "artifact", nil, "Reference a published artifact (work product to review, version or find later; use --attach for a file that is part of this message) (scion://artifact/<id>[@<seq>]), repeatable, at most 10. The reference is added to the message text and the recipient is shown how to fetch it; the hub attaches only artifacts you can read.")
+	messageCmd.Flags().StringArrayVar(&msgAttach, "attach", nil, "Attach a file as part of this message, repeatable (use --artifact for work product to review, version or find later). When the hub stores attachments as artifacts, the file is uploaded and an agent recipient gets it in ~/.scion/inbox/<message-id>/; HTML and SVG are refused. Otherwise use paths under /workspace or /scion-volumes (bare relative paths resolve to /workspace); attachments the hub cannot read are reported as warnings after an agent's send.")
 	messageCmd.Flags().StringVar(&msgBodyFile, "body-file", "", "Read message body from a file instead of positional args ('-' reads stdin; trailing CR/LF characters are trimmed)")
 
 	// Deprecated flags — still functional, emit warnings when used.
@@ -1938,13 +1975,18 @@ func init() {
 	rootCmd.AddCommand(messageCmd)
 }
 
+// attachmentRoots are the roots staged --attach paths must lie under; the
+// first is the base of a bare relative path. Tests point them at a temporary
+// directory.
+var attachmentRoots = []string{"/workspace", "/scion-volumes"}
+
 // resolveAttachmentPath resolves a relative or absolute attachment path.
-// Relative paths are resolved relative to /workspace. Absolute paths outside
-// /workspace and /scion-volumes are filtered out with a warning. Returns ""
-// for filtered paths.
+// Relative paths are resolved relative to the first of the attachment roots
+// (attachmentRoots). Absolute paths outside the attachment roots are filtered
+// out with a warning. Returns "" for filtered paths.
 func resolveAttachmentPath(p string) string {
 	if !filepath.IsAbs(p) {
-		p = filepath.Join("/workspace", p)
+		p = filepath.Join(attachmentRoots[0], p)
 	}
 
 	// Resolve symlinks to prevent directory traversal via symlinks
@@ -1954,9 +1996,10 @@ func resolveAttachmentPath(p string) string {
 		resolved = filepath.Clean(p)
 	}
 
-	if strings.HasPrefix(resolved, "/workspace/") || resolved == "/workspace" ||
-		strings.HasPrefix(resolved, "/scion-volumes/") || resolved == "/scion-volumes" {
-		return resolved
+	for _, root := range attachmentRoots {
+		if strings.HasPrefix(resolved, root+"/") || resolved == root {
+			return resolved
+		}
 	}
 
 	fmt.Fprintf(os.Stderr, "Warning: attachment path %q is outside allowed roots "+

@@ -24,7 +24,6 @@ import (
 	"go/parser"
 	"go/token"
 	"log/slog"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -615,10 +614,17 @@ func TestRelayStreamRecheck_NoRenewalPathIsUnavailable(t *testing.T) {
 	assert.False(t, res.Close)
 }
 
-// productionFiles parses the non-test Go files of pkg/hub.
+// productionFiles parses the non-test Go files of pkg/hub and of each
+// existing guardScanSubdirs directory.
 func productionFiles(t *testing.T) map[string]*ast.File {
 	t.Helper()
-	names, err := filepath.Glob("*.go")
+	// pkgmove:scan-covers pkg/hub/apierr
+	// scanned through guardScanSubdirs; guards the conduit stream renewer, track-site and renewal-principal pins.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// scanned through guardScanSubdirs; guards the conduit stream renewer, track-site and renewal-principal pins.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// scanned through guardScanSubdirs once it exists; guards the conduit stream renewer, track-site and renewal-principal pins.
+	names, err := globGuardScanDirs(".", "*.go")
 	require.NoError(t, err)
 	out := map[string]*ast.File{}
 	for _, name := range names {

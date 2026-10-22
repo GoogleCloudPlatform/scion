@@ -320,6 +320,16 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	if err := checkServerPorts(cfg); err != nil {
 		return err
 	}
+	// The web server's listener checks (dev auth bind, then the web base
+	// URL; ptone/scion#5364) run here, before the store, dev auth and the
+	// hub are initialised. The base URL is resolved once, here.
+	var webBase resolvedWebBaseURL
+	if enableWeb {
+		webBase, err = webStartupPreflight(cfg, currentServerEndpointMode(), globalSettingsFileLabel())
+		if err != nil {
+			return err
+		}
+	}
 
 	// Log server mode
 	if hostedMode {
@@ -654,7 +664,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	// 12. Start Web
 	var webSrv *hub.WebServer
 	if enableWeb {
-		webSrv, err = initWebServer(ctx, cfg, hubSrv, devAuthToken, adminMode, maintenanceMessage, requestLogger, hubDBRec)
+		webSrv, err = initWebServer(ctx, cfg, hubSrv, devAuthToken, webBase, adminMode, maintenanceMessage, requestLogger, hubDBRec)
 		if err != nil {
 			return err
 		}
@@ -3657,31 +3667,28 @@ var startPostgresCommandBus = func(ctx context.Context, dsn string, ownsLocally 
 // initWebServer creates and configures the Web server. The provided context is
 // threaded to the event publisher so that the Postgres LISTEN/NOTIFY goroutine
 // is cancelled cleanly on shutdown, preventing connection leaks.
-func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Server, devAuthToken string, adminMode bool, maintenanceMessage string, requestLogger *slog.Logger, dbRec dbmetrics.Recorder) (*hub.WebServer, error) {
-	webHost := cfg.Hub.Host
-	if webHost == "" {
-		webHost = "0.0.0.0"
-	}
+func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Server, devAuthToken string, base resolvedWebBaseURL, adminMode bool, maintenanceMessage string, requestLogger *slog.Logger, dbRec dbmetrics.Recorder) (*hub.WebServer, error) {
+	webHost := webListenHost(cfg)
 
 	// Refuse to start when dev auth is enabled on a non-loopback interface.
 	// Dev auth auto-logs in every request as admin — exposing it on a public
-	// address would create an unauthenticated admin endpoint.
+	// address would create an unauthenticated admin endpoint. Startup runs
+	// the same check earlier (webStartupPreflight); this one stays as
+	// defense in depth.
 	if devAuthToken != "" && !hub.IsLoopbackHost(webHost) {
-		return nil, fmt.Errorf(
-			"dev auth cannot be enabled when the server is bound to a non-loopback address (%s). "+
-				"Dev auth auto-logs in all requests as admin and must only be used on localhost. "+
-				"Either bind to 127.0.0.1/::1/localhost (--host 127.0.0.1) or disable dev auth", webHost)
+		return nil, devAuthBindError(webHost)
 	}
+
+	// The web base URL was resolved once at startup (webStartupPreflight;
+	// operator inputs only, never the settings database). The listener
+	// check runs again here as defense in depth.
+	if err := checkWebBaseURLListener(base, webHost, webPort); err != nil {
+		return nil, err
+	}
+	baseURL := base.URL
 
 	// Allow env var overrides for session/OAuth config
 	sessionSecret := resolveSessionSecret()
-	baseURL := webBaseURL
-	if baseURL == "" {
-		baseURL = os.Getenv("SCION_SERVER_BASE_URL")
-	}
-	if baseURL == "" {
-		baseURL = fmt.Sprintf("http://localhost:%d", webPort)
-	}
 
 	// Construct proxy authenticator for the web server when auth mode is "proxy".
 	// This mirrors the construction in initHubServer — both need the same authenticator.
@@ -4349,6 +4356,10 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		// A failed registration leaves it disabled: the overlay is unchanged.
 		enableColocatedProfileReferences(ctx, hubSrv)
 	}
+	// Kubernetes placement defaults: sibling runtime entries must agree.
+	// Logged, never fatal; after the overlay install so it sees the stored
+	// runtimes.
+	checkPlacementSiblingsAtStartup(cfg, log.Printf)
 
 	rhSrv := runtimebroker.New(rhCfg, mgr, rt, rtRecord)
 	// The broker phase of the process's graceful shutdown bounds the

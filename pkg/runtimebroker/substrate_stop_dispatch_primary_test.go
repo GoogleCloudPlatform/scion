@@ -29,6 +29,9 @@ import (
 // stopped through the default runtime even while an auxiliary runtime is
 // registered — never through the auxiliary one.
 func TestSubstrateBroker_StopDefaultRuntimeMatch_DispatchesToDefaultWithAuxRegistered(t *testing.T) {
+	// The unlabelled entry's recorded path identifies as the project, as
+	// the fallback stage requires.
+	legacyPath := legacyProjectPath(t, stopLookupProjectID)
 	cases := []struct {
 		name string
 		list func(context.Context, map[string]string) ([]api.AgentInfo, error)
@@ -36,14 +39,14 @@ func TestSubstrateBroker_StopDefaultRuntimeMatch_DispatchesToDefaultWithAuxRegis
 		{"project-scoped stage", func(context.Context, map[string]string) ([]api.AgentInfo, error) {
 			return []api.AgentInfo{{
 				Name: "dev", ContainerID: "c-default",
-				Labels: map[string]string{"scion.name": "dev", projectkeys.LabelProjectID: gapProjBID},
+				Labels: map[string]string{"scion.name": "dev", projectkeys.LabelProjectID: stopLookupProjectID},
 			}}, nil
 		}},
 		{"unlabelled fallback stage", func(_ context.Context, f map[string]string) ([]api.AgentInfo, error) {
 			if _, scoped := f[projectkeys.LabelProjectID]; scoped {
 				return nil, nil
 			}
-			return []api.AgentInfo{{Name: "dev", ContainerID: "c-default", Labels: map[string]string{"scion.name": "dev"}}}, nil
+			return []api.AgentInfo{{Name: "dev", ContainerID: "c-default", ProjectPath: legacyPath, Labels: map[string]string{"scion.name": "dev"}}}, nil
 		}},
 	}
 	for _, tc := range cases {
@@ -57,7 +60,7 @@ func TestSubstrateBroker_StopDefaultRuntimeMatch_DispatchesToDefaultWithAuxRegis
 			})
 
 			w := httptest.NewRecorder()
-			srv.stopAgent(w, httptest.NewRequest(http.MethodPost, "/api/v1/agents/dev/stop", nil), "dev", gapProjBID)
+			srv.stopAgent(w, httptest.NewRequest(http.MethodPost, "/api/v1/agents/dev/stop", nil), "dev", stopLookupProjectID)
 			if w.Code != http.StatusAccepted {
 				t.Fatalf("status=%d body=%s, want 202", w.Code, w.Body.String())
 			}
@@ -72,6 +75,9 @@ func TestSubstrateBroker_StopDefaultRuntimeMatch_DispatchesToDefaultWithAuxRegis
 // fallback stage must be stopped through that auxiliary runtime, not the
 // default one.
 func TestSubstrateBroker_StopFallbackAuxMatch_DispatchesToThatAux(t *testing.T) {
+	// The entry's recorded path identifies as the project, as the fallback
+	// stage requires.
+	legacyPath := legacyProjectPath(t, stopLookupProjectID)
 	defaultStops, auxStops := &stopRecorder{}, &stopRecorder{}
 	srv := newProberBroker(t, func(context.Context, map[string]string) ([]api.AgentInfo, error) { return nil, nil }, defaultStops)
 	addAuxRuntime(t, srv, "aux-a", &runtime.MockRuntime{
@@ -80,13 +86,13 @@ func TestSubstrateBroker_StopFallbackAuxMatch_DispatchesToThatAux(t *testing.T) 
 			if _, scoped := f[projectkeys.LabelProjectID]; scoped {
 				return nil, nil
 			}
-			return []api.AgentInfo{{Name: "dev", ContainerID: "c-aux", Labels: map[string]string{"scion.name": "dev"}}}, nil
+			return []api.AgentInfo{{Name: "dev", ContainerID: "c-aux", ProjectPath: legacyPath, Labels: map[string]string{"scion.name": "dev"}}}, nil
 		},
 		StopFunc: auxStops.stop,
 	})
 
 	w := httptest.NewRecorder()
-	srv.stopAgent(w, httptest.NewRequest(http.MethodPost, "/api/v1/agents/dev/stop", nil), "dev", gapProjBID)
+	srv.stopAgent(w, httptest.NewRequest(http.MethodPost, "/api/v1/agents/dev/stop", nil), "dev", stopLookupProjectID)
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("status=%d body=%s, want 202", w.Code, w.Body.String())
 	}

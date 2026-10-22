@@ -191,6 +191,7 @@ func init() {
 				"telemetry.enabled",
 				"telemetry.cloud", "telemetry.cloud.enabled", "telemetry.cloud.endpoint",
 				"telemetry.cloud.protocol", "telemetry.cloud.headers", "telemetry.cloud.provider",
+				"telemetry.cloud.gcp_project_id",
 				"telemetry.cloud.tls", "telemetry.cloud.tls.enabled", "telemetry.cloud.tls.insecure_skip_verify", "telemetry.cloud.tls.ca_file",
 				"telemetry.cloud.tls.cert_file", "telemetry.cloud.tls.key_file",
 				"telemetry.cloud.batch", "telemetry.cloud.batch.max_size", "telemetry.cloud.batch.timeout",
@@ -551,6 +552,8 @@ func compileSchemas() {
 				"conversation_envelope_switch":    map[string]interface{}{"type": "boolean"},
 				"cross_project_messaging_enabled": map[string]interface{}{"type": "boolean"},
 				"offload_threshold_runes":         map[string]interface{}{"type": "integer", "minimum": 0},
+				"attachment_delivery_max_bytes":   map[string]interface{}{"type": "integer", "minimum": 0},
+				"attachment_inbox_retention_days": map[string]interface{}{"type": "integer", "minimum": 1},
 			},
 			"additionalProperties": false,
 		},
@@ -739,6 +742,12 @@ func compileSchemas() {
 					"kubernetes_service_account_mappings": kubernetesServiceAccountMappingsSchema(),
 					// GCP identity "block" on Kubernetes.
 					"kubernetes_block_service_account": kubernetesBlockServiceAccountSchema(),
+
+					// Kubernetes placement defaults (ptone/scion#5085); shapes
+					// only.
+					"node_selector":      map[string]interface{}{"type": "object", "additionalProperties": map[string]interface{}{"type": "string"}},
+					"tolerations":        map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "object"}},
+					"runtime_class_name": map[string]interface{}{"type": "string"},
 				},
 				// Each property is a V1ProfileConfig field (pinned by
 				// TestProfilesSectionSchema_MatchesProfileConfig). A key the
