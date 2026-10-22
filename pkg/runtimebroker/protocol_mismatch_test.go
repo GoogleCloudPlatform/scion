@@ -109,14 +109,14 @@ func (m *protocolMockManager) Reprovision(ctx context.Context, opts api.StartOpt
 func (m *protocolMockManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
 	return nil, nil
 }
-func (m *protocolMockManager) Stop(ctx context.Context, agentID, projectPath, runID string) error {
+func (m *protocolMockManager) Stop(ctx context.Context, agentID, projectPath, projectID, runID string) error {
 	return nil
 }
 
 func (m *protocolMockManager) StopTarget(ctx context.Context, ref scionrt.RunRef) error {
 	return nil
 }
-func (m *protocolMockManager) Delete(ctx context.Context, agentID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+func (m *protocolMockManager) Delete(ctx context.Context, agentID string, deleteFiles bool, projectPath, projectID string, removeBranch bool) (bool, error) {
 	return true, nil
 }
 

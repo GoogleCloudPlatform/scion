@@ -26,22 +26,44 @@ import (
 // silently pick a same-slug agent from another project.
 
 func TestSelectAgentTarget(t *testing.T) {
-	inA := api.AgentInfo{Name: "dev", ContainerID: "cid-a", Labels: map[string]string{"scion.project": "proj-a"}}
-	inB := api.AgentInfo{Name: "dev", ContainerID: "cid-b", Labels: map[string]string{"scion.project": "proj-b"}}
-	legacy := api.AgentInfo{Name: "dev", ContainerID: "cid-legacy"}
+	// Entries identified by their project ID (label or field; a Cloud Run
+	// entry carries only the field).
+	inA := api.AgentInfo{Name: "dev", ContainerID: "cid-a", Labels: map[string]string{"scion.project": "proj-a", "scion.project_id": identityProjA}}
+	inB := api.AgentInfo{Name: "dev", ContainerID: "cid-b", Labels: map[string]string{"scion.project": "proj-b", "scion.project_id": identityProjB}}
+	idOnlyA := api.AgentInfo{Name: "dev", ContainerID: "cid-id-a", ProjectID: identityProjA}
+	// A project name label alone is not an identity: such an entry is
+	// treated like one with no identity.
+	nameOnlyB := api.AgentInfo{Name: "dev", ContainerID: "cid-name-b", Labels: map[string]string{"scion.project": "proj-b"}}
+	nameOnlyBWithPath := api.AgentInfo{Name: "dev", ContainerID: "cid-name-b-path", ProjectPath: identityTestProjectPath(t, identityProjB),
+		Labels: map[string]string{"scion.project": "proj-b"}}
+	// Entries with no project identity are accepted only as containers whose
+	// recorded path identifies as the requested project's ID.
+	legacy := api.AgentInfo{Name: "dev", ContainerID: "cid-legacy", ProjectPath: identityTestProjectPath(t, identityProjB)}
+	legacyOther := api.AgentInfo{Name: "dev", ContainerID: "cid-legacy-a", ProjectPath: identityTestProjectPath(t, identityProjA)}
+	legacyNoPath := api.AgentInfo{Name: "dev", ContainerID: "cid-legacy-nopath"}
 
 	tests := []struct {
 		name        string
 		agents      []api.AgentInfo
 		projectName string
+		projectID   string
 		wantID      string
 		wantFound   bool
 		wantErr     bool
 	}{
-		{name: "scoped picks own project even when listed second", agents: []api.AgentInfo{inA, inB}, projectName: "proj-b", wantID: "cid-b", wantFound: true},
-		{name: "scoped never falls back to other project", agents: []api.AgentInfo{inA}, projectName: "proj-b"},
-		{name: "scoped prefers labelled over unlabelled", agents: []api.AgentInfo{legacy, inB}, projectName: "proj-b", wantID: "cid-b", wantFound: true},
-		{name: "scoped accepts unlabelled legacy when nothing labelled matches", agents: []api.AgentInfo{inA, legacy}, projectName: "proj-b", wantID: "cid-legacy", wantFound: true},
+		{name: "scoped picks own project even when listed second", agents: []api.AgentInfo{inA, inB}, projectName: "proj-b", projectID: identityProjB, wantID: "cid-b", wantFound: true},
+		{name: "scoped never falls back to other project", agents: []api.AgentInfo{inA}, projectName: "proj-b", projectID: identityProjB},
+		{name: "scoped compares the project ID field of an ID-only entry", agents: []api.AgentInfo{idOnlyA}, projectName: "proj-b", projectID: identityProjB},
+		{name: "scoped accepts an ID-only entry of its project", agents: []api.AgentInfo{idOnlyA}, projectName: "proj-a", projectID: identityProjA, wantID: "cid-id-a", wantFound: true},
+		{name: "scoped refuses a project name label alone", agents: []api.AgentInfo{nameOnlyB}, projectName: "proj-b", projectID: identityProjB},
+		{name: "scoped accepts a name-labelled entry whose path identifies as the project", agents: []api.AgentInfo{nameOnlyBWithPath}, projectName: "proj-b", projectID: identityProjB, wantID: "cid-name-b-path", wantFound: true},
+		{name: "scoped without a project ID accepts no labelled entry", agents: []api.AgentInfo{inB}, projectName: "proj-b"},
+		{name: "scoped prefers labelled over unlabelled", agents: []api.AgentInfo{legacy, inB}, projectName: "proj-b", projectID: identityProjB, wantID: "cid-b", wantFound: true},
+		{name: "scoped accepts unlabelled legacy when nothing labelled matches", agents: []api.AgentInfo{inA, legacy}, projectName: "proj-b", projectID: identityProjB, wantID: "cid-legacy", wantFound: true},
+		{name: "scoped picks the unlabelled entry of its project among two", agents: []api.AgentInfo{legacyOther, legacy}, projectName: "proj-b", projectID: identityProjB, wantID: "cid-legacy", wantFound: true},
+		{name: "scoped skips unlabelled entry of another project", agents: []api.AgentInfo{inA, legacyOther}, projectName: "proj-b", projectID: identityProjB},
+		{name: "scoped skips unlabelled entry without a path", agents: []api.AgentInfo{legacyNoPath}, projectName: "proj-b", projectID: identityProjB},
+		{name: "scoped without a project ID accepts no unlabelled entry", agents: []api.AgentInfo{legacy}, projectName: "proj-b"},
 		{name: "unscoped multi-match fails closed", agents: []api.AgentInfo{inA, inB}, wantErr: true},
 		{name: "unscoped single match", agents: []api.AgentInfo{inA}, wantID: "cid-a", wantFound: true},
 		{name: "duplicate reports of same container are one match", agents: []api.AgentInfo{inA, inA}, wantID: "cid-a", wantFound: true},
@@ -49,7 +71,7 @@ func TestSelectAgentTarget(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, found, err := selectAgentTarget(tt.agents, "dev", tt.projectName)
+			got, found, err := selectAgentTarget(tt.agents, "dev", tt.projectName, tt.projectID)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -76,7 +98,7 @@ func TestDelete_AmbiguousSlugFailsClosed(t *testing.T) {
 		DeleteFunc: func(ctx context.Context, ref runtime.RunRef) error { deleted = append(deleted, ref.ID); return nil },
 	}
 	mgr := &AgentManager{Runtime: mock}
-	if _, err := mgr.Delete(context.Background(), "dev", false, "", false); err == nil {
+	if _, err := mgr.Delete(context.Background(), "dev", false, "", "", false); err == nil {
 		t.Fatal("expected ambiguity error, got nil")
 	}
 	if len(deleted) != 0 || len(stopped) != 0 {
@@ -96,7 +118,7 @@ func TestStop_AmbiguousSlugFailsClosed(t *testing.T) {
 		StopFunc: func(ctx context.Context, ref runtime.RunRef) error { stopped = append(stopped, ref.ID); return nil },
 	}
 	mgr := &AgentManager{Runtime: mock}
-	if err := mgr.Stop(context.Background(), "dev", "", ""); err == nil {
+	if err := mgr.Stop(context.Background(), "dev", "", "", ""); err == nil {
 		t.Fatal("expected ambiguity error, got nil")
 	}
 	if len(stopped) != 0 {
