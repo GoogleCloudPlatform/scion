@@ -27,23 +27,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// authHeaderHub starts a fake hub on addr that records the Authorization
-// header of every request.
-func authHeaderHub(t *testing.T, addr string) (*httptest.Server, func() []string) {
+// authHeaderHub starts a fake hub on 127.0.0.1 that records the
+// Authorization header of every request.
+func authHeaderHub(t *testing.T) (*httptest.Server, func() []string) {
 	t.Helper()
 	var mu sync.Mutex
 	var seen []string
-	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		seen = append(seen, r.Header.Get("Authorization"))
 		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{}`))
 	}))
-	l, err := net.Listen("tcp", addr)
-	require.NoError(t, err, "listen on %s", addr)
-	srv.Listener = l
-	srv.Start()
 	t.Cleanup(srv.Close)
 	return srv, func() []string {
 		mu.Lock()
@@ -52,16 +48,47 @@ func authHeaderHub(t *testing.T, addr string) (*httptest.Server, func() []string
 	}
 }
 
+// nonLoopbackTestHost is a host name that is not a loopback hub for the dev
+// credential rule; tests reach a local fake hub under it (hostnameURL).
+const nonLoopbackTestHost = "hub.example.test"
+
+// hostnameURL returns the URL of srv under nonLoopbackTestHost. For the test,
+// http.DefaultTransport (which the hub clients use) dials that host and port
+// to srv's own address, with no proxy, so a non-loopback hub is real to the
+// code under test without binding any address besides 127.0.0.1.
+func hostnameURL(t *testing.T, srv *httptest.Server) string {
+	t.Helper()
+	addr := srv.Listener.Addr().String()
+	_, port, err := net.SplitHostPort(addr)
+	require.NoError(t, err)
+	hostPort := net.JoinHostPort(nonLoopbackTestHost, port)
+	orig := http.DefaultTransport
+	base, ok := orig.(*http.Transport)
+	require.True(t, ok, "http.DefaultTransport is not an *http.Transport")
+	tr := base.Clone()
+	tr.Proxy = nil
+	var d net.Dialer
+	tr.DialContext = func(ctx context.Context, network, a string) (net.Conn, error) {
+		if a == hostPort {
+			a = addr
+		}
+		return d.DialContext(ctx, network, a)
+	}
+	http.DefaultTransport = tr
+	t.Cleanup(func() { http.DefaultTransport = orig })
+	return "http://" + hostPort
+}
+
 // With only a dev token, the REST hub client sends it to a loopback hub
-// and sends no credential to a hub on another address.
+// and sends no credential to a hub under a non-loopback host name.
 func TestHubClientForEndpoint_DevTokenOnlyForLoopback(t *testing.T) {
 	setupContextTest(t)
 	t.Setenv("SCION_DEV_TOKEN", "placeholder-dev-token")
-	other, otherSeen := authHeaderHub(t, "127.0.0.2:0")
-	local, localSeen := authHeaderHub(t, "127.0.0.1:0")
+	other, otherSeen := authHeaderHub(t)
+	local, localSeen := authHeaderHub(t)
 
-	for _, srv := range []*httptest.Server{other, local} {
-		client, err := hubClientForEndpoint(&config.Settings{}, srv.URL)
+	for _, endpoint := range []string{hostnameURL(t, other), local.URL} {
+		client, err := hubClientForEndpoint(&config.Settings{}, endpoint)
 		require.NoError(t, err)
 		_, _ = client.Auth().Me(context.Background())
 	}
@@ -74,15 +101,15 @@ func TestHubClientForEndpoint_DevTokenOnlyForLoopback(t *testing.T) {
 }
 
 // With only a dev token, the completion client sends it to a loopback hub
-// and sends no credential to a hub on another address.
+// and sends no credential to a hub under a non-loopback host name.
 func TestFetchHubAgents_DevTokenOnlyForLoopback(t *testing.T) {
 	setupContextTest(t)
 	t.Setenv("SCION_DEV_TOKEN", "placeholder-dev-token")
-	other, otherSeen := authHeaderHub(t, "127.0.0.2:0")
-	local, localSeen := authHeaderHub(t, "127.0.0.1:0")
+	other, otherSeen := authHeaderHub(t)
+	local, localSeen := authHeaderHub(t)
 
-	for _, srv := range []*httptest.Server{other, local} {
-		_, _ = fetchHubAgents(context.Background(), srv.URL, &config.Settings{})
+	for _, endpoint := range []string{hostnameURL(t, other), local.URL} {
+		_, _ = fetchHubAgents(context.Background(), endpoint, &config.Settings{})
 	}
 	got := otherSeen()
 	require.NotEmpty(t, got, "the non-loopback hub received no request")

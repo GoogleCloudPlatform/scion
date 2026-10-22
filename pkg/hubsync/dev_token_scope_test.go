@@ -23,31 +23,60 @@ import (
 	"testing"
 )
 
-// authRecordingHub starts a hub on addr that records the Authorization
+// authRecordingHub starts a hub on 127.0.0.1 that records the Authorization
 // header of every request.
-func authRecordingHub(t *testing.T, addr string) (*httptest.Server, func() []string) {
+func authRecordingHub(t *testing.T) (*httptest.Server, func() []string) {
 	t.Helper()
 	var mu sync.Mutex
 	var seen []string
-	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		seen = append(seen, r.Header.Get("Authorization"))
 		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{}`))
 	}))
-	l, err := net.Listen("tcp", addr)
-	if err != nil {
-		t.Fatalf("listen on %s: %v", addr, err)
-	}
-	srv.Listener = l
-	srv.Start()
 	t.Cleanup(srv.Close)
 	return srv, func() []string {
 		mu.Lock()
 		defer mu.Unlock()
 		return append([]string(nil), seen...)
 	}
+}
+
+// nonLoopbackTestHost is a host name that is not a loopback hub for the dev
+// credential rule; tests reach a local fake hub under it (hostnameURL).
+const nonLoopbackTestHost = "hub.example.test"
+
+// hostnameURL returns the URL of srv under nonLoopbackTestHost. For the test,
+// http.DefaultTransport (which the hub client uses) dials that host and port
+// to srv's own address, with no proxy, so a non-loopback hub is real to the
+// code under test without binding any address besides 127.0.0.1.
+func hostnameURL(t *testing.T, srv *httptest.Server) string {
+	t.Helper()
+	addr := srv.Listener.Addr().String()
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostPort := net.JoinHostPort(nonLoopbackTestHost, port)
+	orig := http.DefaultTransport
+	base, ok := orig.(*http.Transport)
+	if !ok {
+		t.Fatal("http.DefaultTransport is not an *http.Transport")
+	}
+	tr := base.Clone()
+	tr.Proxy = nil
+	var d net.Dialer
+	tr.DialContext = func(ctx context.Context, network, a string) (net.Conn, error) {
+		if a == hostPort {
+			a = addr
+		}
+		return d.DialContext(ctx, network, a)
+	}
+	http.DefaultTransport = tr
+	t.Cleanup(func() { http.DefaultTransport = orig })
+	return "http://" + hostPort
 }
 
 // devTokenOnlyEnv leaves a dev token as the only credential.
@@ -79,14 +108,14 @@ func TestSelectHubCredential_DevTokenOnlyForLoopback(t *testing.T) {
 }
 
 // End to end: the client createHubClient builds sends the dev token to a
-// loopback hub and nothing to a hub on another address.
+// loopback hub and nothing to a hub under a non-loopback host name.
 func TestCreateHubClient_DevAuthOnlyForLoopbackHub(t *testing.T) {
 	devTokenOnlyEnv(t)
-	other, otherSeen := authRecordingHub(t, "127.0.0.2:0")
-	local, localSeen := authRecordingHub(t, "127.0.0.1:0")
+	other, otherSeen := authRecordingHub(t)
+	local, localSeen := authRecordingHub(t)
 
-	for _, srv := range []*httptest.Server{other, local} {
-		client, _, err := createHubClient(nil, srv.URL)
+	for _, endpoint := range []string{hostnameURL(t, other), local.URL} {
+		client, _, err := createHubClient(nil, endpoint)
 		if err != nil {
 			t.Fatal(err)
 		}
