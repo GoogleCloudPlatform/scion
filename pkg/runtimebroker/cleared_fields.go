@@ -19,12 +19,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path"
-	"path/filepath"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/agenthome"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
@@ -99,7 +98,8 @@ func (s *Server) clearedFieldsInheritance(ctx context.Context, projectPath, proj
 	}
 	defaultRef := templateRef
 	var hash string
-	if data, err := os.ReadFile(filepath.Join(config.GetAgentHomePath(projectDir, agentName), "agent-info.json")); err == nil {
+	// Read confined to the agent home (agenthome.ReadAgentInfo).
+	if data, err := agenthome.ReadAgentInfo(config.GetAgentHomePath(projectDir, agentName)); err == nil {
 		var info api.AgentInfo
 		if json.Unmarshal(data, &info) == nil {
 			hash = info.TemplateHash
