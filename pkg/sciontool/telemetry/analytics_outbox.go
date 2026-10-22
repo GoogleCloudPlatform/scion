@@ -20,6 +20,10 @@ package telemetry
 //	hub_id          pinned hub ID (written once, never overwritten)
 //	overflow        persisted count of events refused because the outbox was full
 //	staging.jsonl   appended by producers; lines may lack hub_id
+//	finalizing-N.jsonl  staging rotated by Finalize, being streamed to ready
+//	intent.corrupt-*    unreadable intents, kept for inspection
+//	dead_letters    persisted count of dead-lettered lines
+//	sync_uncertain, commit_deferred  one byte per append that needed recovery
 //	ready-N.jsonl   final bytes written by Finalize; never modified
 //	cursor          "N offset" of the next ready line to send
 //	index/<hash>    persisted occurrence count for one source identity
@@ -69,7 +73,6 @@ const (
 	analyticsIndexTTL         = 24 * time.Hour
 	analyticsIndexMaxEntries  = 100_000
 	analyticsLockWait         = 2 * time.Second
-	analyticsLockPoll         = 10 * time.Millisecond
 	// analyticsMaxLineBytes caps one event line well below Cloud Logging's
 	// per-entry limit (256 KB), so a line can never be rejected for size.
 	analyticsMaxLineBytes = 64 << 10
@@ -123,17 +126,22 @@ const (
 var ErrAnalyticsOutboxLocked = errors.New("analytics outbox: lock wait timed out")
 
 // AnalyticsOutboxStats are the outbox's fixed-cardinality counters, for WP3
-// diagnostics. Counters other than PendingBytes, OldestPendingAge and
-// PersistedOverflow are per process.
+// diagnostics. PendingBytes, RetainedBytes, OldestPendingAge, HeldIntent
+// and the Persisted* fields are read from disk (shared by all processes and
+// kept across restarts); the rest are per process.
 type AnalyticsOutboxStats struct {
 	Appended, CertainDuplicates, Overflow, AppendFailed int64
 	Finalized, Delivered, SendFailures, Torn            int64
 	HubIDMismatch, Conflicts, Quarantined, DeadLetters  int64
-	SyncUncertain, CorruptIntents                       int64
-	PersistedOverflow, PersistedOversize                int64
-	PersistedAppendFailed, PersistedDeadLetters         int64
-	PendingBytes, RetainedBytes                         int64
-	OldestPendingAge                                    time.Duration
+	SyncUncertain, CorruptIntents, Unresolved           int64
+	CommitDeferred                                      int64
+	PersistedSyncUncertain, PersistedCommitDeferred     int64
+	// HeldIntent is true while an unresolved append holds the outbox.
+	HeldIntent                                  bool
+	PersistedOverflow, PersistedOversize        int64
+	PersistedAppendFailed, PersistedDeadLetters int64
+	PendingBytes, RetainedBytes                 int64
+	OldestPendingAge                            time.Duration
 }
 
 // AnalyticsOutbox is a handle on one outbox directory. It is safe for use
@@ -156,7 +164,12 @@ type AnalyticsOutbox struct {
 	geteuid func() int
 	chown   func(path string, uid, gid int) error
 
-	deadLetters, syncUncertain, corruptIntents atomic.Int64
+	deadLetters, syncUncertain, corruptIntents, unresolved, commitDeferred atomic.Int64
+
+	// expireBatch is ExpireIndex's per-lock batch size and beforeExpireBatch
+	// runs before each batch (test seams).
+	expireBatch       int
+	beforeExpireBatch func()
 
 	// fsyncFile and fsyncDir are the file and directory sync calls (test
 	// seams for sync faults).
@@ -176,6 +189,17 @@ type AnalyticsOutbox struct {
 type readyFile interface {
 	io.ReadSeekCloser
 }
+
+// ErrAnalyticsOutboxHeld means an in-flight append's line is visible in
+// staging but could not be made durable (staging sync keeps failing). The
+// intent is kept and appends and finalization are held until a later
+// operation can sync and commit it (or finds the line gone): an uncertain
+// event is never claimed durable, and nothing ships behind it.
+var ErrAnalyticsOutboxHeld = errors.New("analytics outbox: held on an unresolved append (staging sync failing)")
+
+// errAppendUnresolved wraps ErrAnalyticsOutboxHeld for the append whose own
+// line is the unresolved one (counted as unresolved, not as lost).
+var errAppendUnresolved = fmt.Errorf("this append is unresolved: %w", ErrAnalyticsOutboxHeld)
 
 // errSimulatedCrash is returned by appendUsage at a crashAt step (tests).
 var errSimulatedCrash = errors.New("analytics outbox: simulated crash")
@@ -245,7 +269,12 @@ func (o *AnalyticsOutbox) open() error {
 			return err
 		}
 	}
-	return o.recoverIntentLocked()
+	// A held outbox still opens (hooks need a handle to count failures);
+	// mutating operations stay blocked until the intent resolves.
+	if err := o.recoverIntentLocked(); err != nil && !errors.Is(err, ErrAnalyticsOutboxHeld) {
+		return err
+	}
+	return nil
 }
 
 // mkdir creates d (whose parent must exist) if missing, chowns it, and
@@ -294,21 +323,50 @@ func (o *AnalyticsOutbox) lock() (func(), error) {
 			return nil, err
 		}
 	}
-	deadline := time.Now().Add(analyticsLockWait)
-	for {
-		err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
-		if err == nil {
-			break
+	// A blocking flock queues in the kernel instead of polling, so a
+	// waiter is not starved by peers that re-take the lock immediately. It
+	// runs in a goroutine so the wait stays bounded; if the wait times out,
+	// the goroutine releases the lock as soon as it gets it.
+	type result struct{ err error }
+	done := make(chan result, 1)
+	var abandoned atomic.Bool
+	go func() {
+		var err error
+		for {
+			err = unix.Flock(int(f.Fd()), unix.LOCK_EX)
+			if !errors.Is(err, unix.EINTR) {
+				break
+			}
 		}
-		if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EINTR) {
+		if err == nil && abandoned.Load() {
+			_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
 			_ = f.Close()
-			return nil, fmt.Errorf("analytics outbox: locking: %w", err)
+			return
 		}
-		if time.Now().After(deadline) {
+		done <- result{err}
+	}()
+	timer := time.NewTimer(analyticsLockWait)
+	defer timer.Stop()
+	select {
+	case r := <-done:
+		if r.err != nil {
 			_ = f.Close()
-			return nil, ErrAnalyticsOutboxLocked
+			return nil, fmt.Errorf("analytics outbox: locking: %w", r.err)
 		}
-		time.Sleep(analyticsLockPoll)
+	case <-timer.C:
+		abandoned.Store(true)
+		// The goroutine may have just acquired the lock and sent before
+		// seeing abandoned; drain that case here.
+		select {
+		case r := <-done:
+			if r.err == nil {
+				_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
+			}
+			_ = f.Close()
+		default:
+			// The goroutine closes f after it acquires (and releases).
+		}
+		return nil, ErrAnalyticsOutboxLocked
 	}
 	return func() {
 		_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
@@ -324,6 +382,9 @@ func (o *AnalyticsOutbox) lock() (func(), error) {
 func (o *AnalyticsOutbox) AppendUsage(ev *telemetrycontract.UsageEvent) (AppendOutcome, error) {
 	outcome, err := o.appendUsage(ev)
 	switch {
+	case errors.Is(err, errAppendUnresolved):
+		// Not known lost: the intent persists and decides later.
+		o.unresolved.Add(1)
 	case err != nil:
 		o.appendFailed.Add(1)
 		// Persisted, lock-free evidence of the loss (a hook process's
@@ -342,8 +403,13 @@ func (o *AnalyticsOutbox) AppendUsage(ev *telemetrycontract.UsageEvent) (AppendO
 // bumpAppendFailed appends one byte to the append_failed file with
 // O_APPEND, without the lock (it may be the lock that failed); the file
 // size is the persisted count.
-func (o *AnalyticsOutbox) bumpAppendFailed() {
-	p := o.path("append_failed")
+func (o *AnalyticsOutbox) bumpAppendFailed() { o.bumpPersisted("append_failed") }
+
+// bumpPersisted appends one byte to the named counter file (O_APPEND, no
+// lock needed); its size is the persisted count, visible across hook
+// processes and restarts.
+func (o *AnalyticsOutbox) bumpPersisted(name string) {
+	p := o.path(name)
 	_, statErr := os.Stat(p)
 	f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
@@ -484,12 +550,20 @@ func (o *AnalyticsOutbox) appendUsage(ev *telemetrycontract.UsageEvent) (outcome
 			}
 		}
 		landed, rerr := o.recoverIntent()
+		if errors.Is(rerr, ErrAnalyticsOutboxHeld) {
+			// Visible but not durable: neither accepted nor lost yet.
+			committed = true // seq stays with the intent
+			return 0, errAppendUnresolved
+		}
 		if rerr != nil {
 			return 0, errors.Join(err, rerr)
 		}
 		if landed {
+			// The first sync failed, but recovery synced the line and
+			// committed it: durable now, not a loss.
 			committed = true
 			o.syncUncertain.Add(1)
+			o.bumpPersisted("sync_uncertain")
 			return AppendWritten, nil
 		}
 		return 0, err
@@ -501,7 +575,8 @@ func (o *AnalyticsOutbox) appendUsage(ev *telemetrycontract.UsageEvent) (outcome
 	if err := o.commitIntent(in); err != nil {
 		// Not a loss: the intent stays and the next locked operation
 		// completes it from the durable line.
-		o.syncUncertain.Add(1)
+		o.commitDeferred.Add(1)
+		o.bumpPersisted("commit_deferred")
 		return AppendWritten, nil
 	}
 	return AppendWritten, nil
@@ -584,10 +659,17 @@ func (o *AnalyticsOutbox) recoverIntent() (landed bool, err error) {
 	}
 	var in appendIntent
 	if json.Unmarshal(b, &in) != nil || in.EventID == "" {
-		// Unreadable intent (atomic rename makes this unexpected): keep it
-		// for inspection as intent.corrupt-<unix nanos>, count it, and go
-		// on. Whether its line landed cannot be decided, so the staged
-		// line (if any) stays unindexed; the counter makes that visible.
+		// Unreadable intent (atomic rename makes this unexpected). Its line,
+		// if it landed, is staging's last complete line: re-derive that
+		// event's seq and index entry from the line itself (idempotent for
+		// an already indexed event), after making staging durable. Then
+		// keep the intent for inspection as intent.corrupt-<ns>.
+		if err := o.syncStaging(); err != nil {
+			return false, fmt.Errorf("%w: %v", ErrAnalyticsOutboxHeld, err)
+		}
+		if err := o.reindexLastStagingLine(); err != nil {
+			return false, err
+		}
 		o.corruptIntents.Add(1)
 		name := fmt.Sprintf("intent.corrupt-%d", o.now().UnixNano())
 		if err := os.Rename(o.path("intent"), o.path(name)); err != nil {
@@ -600,6 +682,12 @@ func (o *AnalyticsOutbox) recoverIntent() (landed bool, err error) {
 		return false, err
 	}
 	if last == in.EventID {
+		// Visible is not durable: commit the index only after staging
+		// (and its directory entry) sync. Otherwise keep the intent and
+		// hold.
+		if err := o.syncStaging(); err != nil {
+			return true, fmt.Errorf("%w: %v", ErrAnalyticsOutboxHeld, err)
+		}
 		return true, o.commitIntent(in)
 	}
 	if err := os.Remove(o.path("intent")); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -608,40 +696,30 @@ func (o *AnalyticsOutbox) recoverIntent() (landed bool, err error) {
 	return false, o.fsyncDir(o.dir)
 }
 
+// syncStaging fsyncs the staging file and the outbox directory, making a
+// visible staged line durable.
+func (o *AnalyticsOutbox) syncStaging() error {
+	f, err := os.Open(o.path("staging.jsonl"))
+	if errors.Is(err, os.ErrNotExist) {
+		return o.fsyncDir(o.dir)
+	}
+	if err != nil {
+		return fmt.Errorf("analytics outbox: %w", err)
+	}
+	defer f.Close()
+	if err := o.fsyncFile(f); err != nil {
+		return fmt.Errorf("analytics outbox: syncing staging: %w", err)
+	}
+	return o.fsyncDir(o.dir)
+}
+
 // lastStagingEventID returns the event_id of the staging file's last
 // complete (newline-terminated) line, or "" if there is none or the file
 // ends in a torn fragment.
 func (o *AnalyticsOutbox) lastStagingEventID() (string, error) {
-	f, err := os.Open(o.path("staging.jsonl"))
-	if errors.Is(err, os.ErrNotExist) {
-		return "", nil
-	}
-	if err != nil {
-		return "", fmt.Errorf("analytics outbox: %w", err)
-	}
-	defer f.Close()
-	info, err := f.Stat()
-	if err != nil {
-		return "", fmt.Errorf("analytics outbox: %w", err)
-	}
-	size := info.Size()
-	if size == 0 {
-		return "", nil
-	}
-	start := size - analyticsMaxLineBytes - 1
-	if start < 0 {
-		start = 0
-	}
-	tail := make([]byte, size-start)
-	if _, err := f.ReadAt(tail, start); err != nil && !errors.Is(err, io.EOF) {
-		return "", fmt.Errorf("analytics outbox: %w", err)
-	}
-	if tail[len(tail)-1] != '\n' {
-		return "", nil
-	}
-	body := tail[:len(tail)-1]
-	if i := bytes.LastIndexByte(body, '\n'); i >= 0 {
-		body = body[i+1:]
+	body, err := o.lastStagingLine()
+	if err != nil || body == nil {
+		return "", err
 	}
 	var head struct {
 		EventID string `json:"event_id"`
@@ -650,6 +728,92 @@ func (o *AnalyticsOutbox) lastStagingEventID() (string, error) {
 		return "", nil
 	}
 	return head.EventID, nil
+}
+
+// lastStagingLine returns the staging file's last complete
+// (newline-terminated) line, or nil if there is none or the file ends in a
+// torn fragment.
+func (o *AnalyticsOutbox) lastStagingLine() ([]byte, error) {
+	f, err := os.Open(o.path("staging.jsonl"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("analytics outbox: %w", err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("analytics outbox: %w", err)
+	}
+	size := info.Size()
+	if size == 0 {
+		return nil, nil
+	}
+	start := size - analyticsMaxLineBytes - 1
+	if start < 0 {
+		start = 0
+	}
+	tail := make([]byte, size-start)
+	if _, err := f.ReadAt(tail, start); err != nil && !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("analytics outbox: %w", err)
+	}
+	if tail[len(tail)-1] != '\n' {
+		return nil, nil
+	}
+	body := tail[:len(tail)-1]
+	if i := bytes.LastIndexByte(body, '\n'); i >= 0 {
+		body = body[i+1:]
+	}
+	return body, nil
+}
+
+// reindexLastStagingLine makes sure the event on staging's last complete
+// line is reflected in seq and its occurrence index entry (count at least
+// its occurrence; its fingerprint recorded for a verified request ID). It
+// is idempotent for an event that is already indexed.
+func (o *AnalyticsOutbox) reindexLastStagingLine() error {
+	body, err := o.lastStagingLine()
+	if err != nil || body == nil {
+		return err
+	}
+	var ev telemetrycontract.UsageEvent
+	if telemetrycontract.Unmarshal(body, &ev) != nil {
+		return nil // torn or foreign: nothing to index
+	}
+	if cur, err := o.readInt("seq"); err != nil {
+		return err
+	} else if ev.ProducerSeq > cur {
+		if err := o.writeFileAtomic("seq", []byte(strconv.FormatInt(ev.ProducerSeq, 10))); err != nil {
+			return err
+		}
+	}
+	if ev.SourceIdentity == telemetrycontract.SourceIdentityNone {
+		return nil
+	}
+	name := analyticsIndexName(ev.ProducerNamespace, ev.SourceKind, ev.SourceEventID)
+	entry, err := o.readIndex(name)
+	if err != nil {
+		return err
+	}
+	changed := false
+	if entry.count < ev.SourceOccurrence {
+		entry.count, changed = ev.SourceOccurrence, true
+	}
+	if ev.SourceIdentity == telemetrycontract.SourceIdentityRequestID {
+		fp, err := usageSemanticFingerprint(&ev)
+		if err != nil {
+			return err
+		}
+		if !entry.has(fp) {
+			entry.fingerprints = append(entry.fingerprints, fp)
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return o.writeIndex(name, entry)
 }
 
 // usageSemanticFingerprint hashes the event's source-determined content:
@@ -712,12 +876,20 @@ func (o *AnalyticsOutbox) appendLineAt(name string, line []byte) (int64, error) 
 		return -1, fmt.Errorf("analytics outbox: %w", err)
 	}
 	defer f.Close()
-	var before int64
+	// The pre-append size is the truncate-back point; without it nothing
+	// may be written (a wrong offset could cut committed lines).
+	info, err := f.Stat()
+	if err != nil {
+		return -1, fmt.Errorf("analytics outbox: stat %s: %w", name, err)
+	}
+	before := info.Size()
 	buf := make([]byte, 0, len(line)+2)
-	if info, err := f.Stat(); err == nil && info.Size() > 0 {
-		before = info.Size()
+	if before > 0 {
 		last := make([]byte, 1)
-		if _, err := f.ReadAt(last, info.Size()-1); err == nil && last[0] != '\n' {
+		if _, err := f.ReadAt(last, before-1); err != nil {
+			return -1, fmt.Errorf("analytics outbox: reading %s: %w", name, err)
+		}
+		if last[0] != '\n' {
 			buf = append(buf, '\n')
 		}
 	}
@@ -789,8 +961,8 @@ func (o *AnalyticsOutbox) PinnedHubID() string {
 
 // Finalize and Drain must be called from one goroutine, sequentially (the
 // pipeline's drainer): Drain reads ready files and the cursor without the
-// lock, and only Finalize creates ready files (under the lock, against
-// appenders).
+// lock, and only Finalize creates finalizing and ready files (rotating
+// staging under the lock, streaming outside it).
 //
 // Finalize moves staging lines to a new ready file as final bytes: lines
 // that carry hub_id are copied unchanged; lines without it get the pinned
@@ -799,28 +971,40 @@ func (o *AnalyticsOutbox) PinnedHubID() string {
 // ready file is synced but before staging is truncated repeats the copy;
 // the duplicate lines are byte-identical, which is neutral downstream.
 func (o *AnalyticsOutbox) Finalize() (int, error) {
+	return o.FinalizeContext(context.Background())
+}
+
+// FinalizeContext is Finalize that stops between files when ctx is done.
+// Leftover finalizing files are streamed even when rotation is held or
+// fails (a stuck intent stalls only staging, not what is already rotated).
+func (o *AnalyticsOutbox) FinalizeContext(ctx context.Context) (int, error) {
 	// Under the lock, only recover an intent and rotate staging to a
 	// finalizing file (cheap renames), so appenders never wait for the
 	// copy. The finalizing files are then streamed into ready files
 	// without the lock: only this goroutine touches them.
-	hubID, err := o.rotateStaging()
-	if err != nil || hubID == "" {
-		return 0, err
+	_, rotErr := o.rotateStaging()
+	hubID := o.PinnedHubID()
+	if hubID == "" {
+		return 0, rotErr
 	}
 	files, err := o.finalizingFiles()
 	if err != nil {
-		return 0, err
+		return 0, errors.Join(rotErr, err)
 	}
 	total := 0
 	for _, name := range files {
-		n, err := o.finalizeFile(name, hubID)
-		if err != nil {
-			return total, err
+		if err := ctx.Err(); err != nil {
+			return total, errors.Join(rotErr, err)
 		}
+		n, err := o.finalizeFile(name, hubID)
 		total += n
+		if err != nil {
+			o.finalized.Add(int64(total))
+			return total, errors.Join(rotErr, err)
+		}
 	}
 	o.finalized.Add(int64(total))
-	return total, nil
+	return total, rotErr
 }
 
 // rotateStaging renames a non-empty staging file to finalizing-<n>.jsonl
@@ -847,7 +1031,25 @@ func (o *AnalyticsOutbox) rotateStaging() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("analytics outbox: %w", err)
 	}
-	name := fmt.Sprintf("finalizing-%d.jsonl", o.now().UnixNano())
+	// Monotonic, never-reused name (highest existing + 1, zero-padded so
+	// lexical order is numeric order); an existing file is never replaced.
+	existing, err := o.finalizingFiles()
+	if err != nil {
+		return "", err
+	}
+	next := int64(1)
+	if len(existing) > 0 {
+		last := existing[len(existing)-1]
+		n, perr := strconv.ParseInt(strings.TrimSuffix(strings.TrimPrefix(last, "finalizing-"), ".jsonl"), 10, 64)
+		if perr != nil {
+			return "", fmt.Errorf("analytics outbox: unexpected file %s", last)
+		}
+		next = n + 1
+	}
+	name := fmt.Sprintf("finalizing-%020d.jsonl", next)
+	if _, err := os.Stat(o.path(name)); err == nil {
+		return "", fmt.Errorf("analytics outbox: %s already exists", name)
+	}
 	if err := os.Rename(o.path("staging.jsonl"), o.path(name)); err != nil {
 		return "", fmt.Errorf("analytics outbox: rotating staging: %w", err)
 	}
@@ -867,7 +1069,7 @@ func (o *AnalyticsOutbox) finalizingFiles() ([]string, error) {
 			out = append(out, e.Name())
 		}
 	}
-	sort.Strings(out) // same digit count for the foreseeable future; ties impossible
+	sort.Strings(out) // zero-padded numbers: lexical order is numeric order
 	return out, nil
 }
 
@@ -1200,10 +1402,17 @@ func (o *AnalyticsOutbox) ExpireIndex() (removed int, err error) {
 			expired = append(expired, indexAge{a.name, a.mod.Add(time.Nanosecond)})
 		}
 	}
-	for start := 0; start < len(expired); start += analyticsExpireBatch {
-		end := start + analyticsExpireBatch
+	batch := o.expireBatch
+	if batch <= 0 {
+		batch = analyticsExpireBatch
+	}
+	for start := 0; start < len(expired); start += batch {
+		end := start + batch
 		if end > len(expired) {
 			end = len(expired)
+		}
+		if o.beforeExpireBatch != nil {
+			o.beforeExpireBatch()
 		}
 		n, err := o.removeIndexBatch(expired[start:end])
 		removed += n
@@ -1264,11 +1473,22 @@ func (o *AnalyticsOutbox) Stats() AnalyticsOutboxStats {
 	s.DeadLetters = o.deadLetters.Load()
 	s.SyncUncertain = o.syncUncertain.Load()
 	s.CorruptIntents = o.corruptIntents.Load()
+	s.Unresolved = o.unresolved.Load()
+	if _, err := os.Stat(o.path("intent")); err == nil {
+		s.HeldIntent = true
+	}
 	s.PersistedOverflow, _ = o.readInt("overflow")
 	s.PersistedOversize, _ = o.readInt("oversize")
-	if info, err := os.Stat(o.path("append_failed")); err == nil {
-		s.PersistedAppendFailed = info.Size()
+	persisted := func(name string) int64 {
+		if info, err := os.Stat(o.path(name)); err == nil {
+			return info.Size()
+		}
+		return 0
 	}
+	s.PersistedAppendFailed = persisted("append_failed")
+	s.PersistedSyncUncertain = persisted("sync_uncertain")
+	s.PersistedCommitDeferred = persisted("commit_deferred")
+	s.CommitDeferred = o.commitDeferred.Load()
 	s.PersistedDeadLetters, _ = o.readInt("dead_letters")
 	s.RetainedBytes, _ = o.retainedBytes()
 	pending, oldest, err := o.pendingBytes()
@@ -1442,21 +1662,6 @@ func (o *AnalyticsOutbox) writeFileFrom(dir, name string, fill func(io.Writer) e
 		return fmt.Errorf("analytics outbox: writing %s: %w", name, err)
 	}
 	return syncDir(dir)
-}
-
-func truncateSync(path string) error {
-	f, err := os.OpenFile(path, os.O_RDWR, 0)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("analytics outbox: %w", err)
-	}
-	defer f.Close()
-	if err := f.Truncate(0); err != nil {
-		return fmt.Errorf("analytics outbox: %w", err)
-	}
-	return f.Sync()
 }
 
 func syncDir(dir string) error {

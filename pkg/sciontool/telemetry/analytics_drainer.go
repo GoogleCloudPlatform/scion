@@ -163,13 +163,17 @@ func (d *AnalyticsDrainer) Stop(ctx context.Context) {
 	d.mu.Lock()
 	d.retryAfter = time.Time{} // the final attempt ignores backoff
 	d.mu.Unlock()
-	d.RunOnce(ctx)
+	d.runOnce(ctx, true)
 }
 
 // RunOnce performs one drain step: pin the hub ID if needed, finalize,
 // send (unless backing off), and occasionally expire the index. It returns
 // the number of lines sent.
-func (d *AnalyticsDrainer) RunOnce(ctx context.Context) int {
+func (d *AnalyticsDrainer) RunOnce(ctx context.Context) int { return d.runOnce(ctx, false) }
+
+// runOnce is RunOnce; final (the stop pass) skips index expiry so the pass
+// stays within the stop budget.
+func (d *AnalyticsDrainer) runOnce(ctx context.Context, final bool) int {
 	if ctx.Err() != nil {
 		return 0
 	}
@@ -184,7 +188,7 @@ func (d *AnalyticsDrainer) RunOnce(ctx context.Context) int {
 		}
 	}
 	if d.outbox.PinnedHubID() != "" {
-		if _, err := d.outbox.Finalize(); err != nil {
+		if _, err := d.outbox.FinalizeContext(ctx); err != nil {
 			log.Debug("Analytics drainer: finalize: %v", err)
 		}
 	}
@@ -211,7 +215,7 @@ func (d *AnalyticsDrainer) RunOnce(ctx context.Context) int {
 		d.mu.Unlock()
 	}
 
-	if d.now().Sub(d.lastExpiry) >= analyticsIndexExpiryEvery {
+	if !final && ctx.Err() == nil && d.now().Sub(d.lastExpiry) >= analyticsIndexExpiryEvery {
 		if _, err := d.outbox.ExpireIndex(); err == nil {
 			d.lastExpiry = d.now()
 		}
