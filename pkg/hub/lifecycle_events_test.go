@@ -106,12 +106,14 @@ func (lostDeleteStore) CompleteLifecycleOutboxRow(context.Context, int64, string
 	return false, errors.New("injected: process stopped before the delete")
 }
 
-// TestLifecycleEvents_SliceOneDoneWhen is the slice 1 done-when test
-// (WP1 design 11): an HTTP create through a fake dispatcher, whose
-// dispatch-result write is unobserved in slice 1, then a delete through
-// the delete engine (its claim write is unobserved too), drained to a
-// MemorySink: created(1), a gap at 2, resynced(unobserved_change, 3),
-// deleted(4). A forced redelivery sends byte-identical events.
+// TestLifecycleEvents_SliceOneDoneWhen is the slice 1 done-when flow
+// (WP1 design 11) at the slice 2 head: an HTTP create through a fake
+// dispatcher, then a delete through the delete engine, drained to a
+// MemorySink. In slice 1 the dispatch-result and delete-claim writes were
+// unobserved, which gave created(1), a gap, resynced(unobserved_change, 3),
+// deleted(4); slice 2 observes them, so the history is dense from created
+// to deleted with no resync. A forced redelivery sends byte-identical
+// events.
 func TestLifecycleEvents_SliceOneDoneWhen(t *testing.T) {
 	srv, ls, projectID, sink, counters := lifecycleTestServer(t, true)
 	state, err := srv.installLifecycleObserver()
@@ -137,8 +139,11 @@ func TestLifecycleEvents_SliceOneDoneWhen(t *testing.T) {
 	}
 
 	evs := lifecycleDecode(t, first)
-	require.Equal(t, "created@1 resynced@3(unobserved_change) deleted@4", lifecycleSeq(evs), "counters: %s", counters)
-	created, resynced, deleted := evs[0], evs[1], evs[2]
+	seq := lifecycleSeq(evs)
+	require.True(t, strings.HasPrefix(seq, "created@1 ") && strings.HasSuffix(seq, fmt.Sprintf(" deleted@%d", len(evs))),
+		"dense history from created to deleted: %s (counters: %s)", seq, counters)
+	require.NotContains(t, seq, "resynced", "every write is observed in slice 2")
+	created, deleted := evs[0], evs[len(evs)-1]
 	for _, e := range evs {
 		assert.Equal(t, agentID, e.AgentID)
 		assert.Equal(t, projectID, e.ProjectID)
@@ -147,8 +152,6 @@ func TestLifecycleEvents_SliceOneDoneWhen(t *testing.T) {
 	require.NotNil(t, created.Metadata)
 	assert.NotEmpty(t, created.Metadata.CreatorPrincipalType, "the creator comes from the create's delegation edge")
 	assert.NotEmpty(t, created.Metadata.CreatorPrincipalID)
-	require.NotNil(t, resynced.Gap)
-	assert.True(t, *resynced.Gap)
 	assert.Equal(t, tc.DeleteModeHard, deleted.DeleteMode)
 	require.NotNil(t, deleted.Metadata, "deleted carries the last metadata")
 	assert.Equal(t, created.Metadata.Name, deleted.Metadata.Name)
@@ -158,9 +161,9 @@ func TestLifecycleEvents_SliceOneDoneWhen(t *testing.T) {
 	assert.Zero(t, st.Pending, "delivered rows are removed")
 }
 
-// TestLifecycleEvents_ExperimentOff: with no observer installed (slice 1
-// production) the same flow writes no lifecycle rows, and startup starts
-// no drainer (review r6 N4).
+// TestLifecycleEvents_ExperimentOff: with hub.lifecycle_events off (the
+// default) the same flow writes no lifecycle rows, and startup starts no
+// drainer (review r6 N4).
 func TestLifecycleEvents_ExperimentOff(t *testing.T) {
 	srv, ls, projectID, _, counters := lifecycleTestServer(t, true)
 	agentID := lifecycleCreateAgent(t, srv, projectID, "lc-off")
@@ -202,7 +205,7 @@ func TestLifecycleEvents_BacklogDrainerStartsAndExits(t *testing.T) {
 		t.Fatal("the backlog drainer did not exit once the outbox was empty")
 	}
 	evs := lifecycleDecode(t, sink.Delivered())
-	assert.Equal(t, "created@1", lifecycleSeq(evs))
+	assert.True(t, strings.HasPrefix(lifecycleSeq(evs), "created@1"), lifecycleSeq(evs))
 	assert.Equal(t, int64(1), counters.Get(telemetryemit.MetricDrainerState, telemetryemit.DrainerStateIdleDisabled),
 		"the backlog-only drainer reports idle once it exits: %s", counters)
 }
