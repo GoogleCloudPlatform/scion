@@ -604,15 +604,11 @@ func printDevTokenNotSentNote(stderr io.Writer, projectPath string) {
 	if getAuthInfo(settings, endpoint).MethodType != "devauth" {
 		return
 	}
-	if _, source := apiclient.ResolveDevTokenWithSource(); source == defaultDevTokenFileSource {
+	if _, source := apiclient.ResolveDevTokenWithSource(); source == apiclient.DevTokenSourceDefaultFile {
 		return
 	}
 	_, _ = fmt.Fprintf(stderr, "Note: the dev token is used only for a local hub; it is not sent to %s.\n", config.RedactURL(endpoint))
 }
-
-// defaultDevTokenFileSource is the source apiclient.ResolveDevTokenWithSource
-// reports for the default ~/.scion/dev-token file.
-const defaultDevTokenFileSource = "~/.scion/dev-token"
 
 // checkAgentContainerContext detects when the CLI is running inside an agent
 // container (SCION_HOST_UID is set) but has no reachable Hub endpoint. In that
