@@ -1197,6 +1197,26 @@ The value must be `scheme://host[:port]` only: `http` or `https`, an IP literal 
 
 **Security:** with an `http://` value, agent bearer tokens, and the secrets and tokens agents fetch from the Hub, travel **unencrypted** on the network between agents and the Hub. Use `https://` unless that network is trusted and isolated (for example, a private VPC subnet with no untrusted tenants).
 
+### Web Base URL
+
+The web server's base URL is the base of the OAuth redirect URI (`<base URL>/auth/callback/<provider>`), decides whether the session cookie is marked `Secure`, and is sent to the browser client. It follows the operator-configured Hub endpoint order above, limited to operator inputs:
+
+1. The `--base-url` flag.
+2. `SCION_SERVER_HUB_ENDPOINT`.
+3. `SCION_SERVER_BASE_URL`.
+4. `server.hub.public_url` in the global `settings.yaml`.
+5. `http://localhost:{port}` (the default).
+
+A trailing `/` is removed. The base URL is never taken from the settings database or from a `server.hub.public_url` saved through the admin settings API, and not from `hub.endpoint` (`SCION_HUB_ENDPOINT`) or a URL derived from an IAP audience. Changing it needs access to the server's flags, environment or global settings file, and a restart, so a write through the admin API cannot redirect OAuth logins or downgrade the session cookie. The server logs the URL and its source at startup, for example `Web base URL: https://scion.example.com (from server.hub.public_url in /home/scion/.scion/settings.yaml)`.
+
+The OAuth providers check the redirect URI against the one registered for the OAuth client. Google requires an exact match, and GitHub requires the same host and port as the registered callback URL (a path below it is accepted). If the base URL changes, logins fail until the registered redirect URI is updated to match. Neither provider accepts a different host.
+
+**Listener check:** the web server refuses to start when it listens on an address that is not loopback and its base URL is not `https` (including the default `http://localhost:{port}`), because OAuth callbacks and the session cookie would then cross the network unencrypted. Loopback means the listen host is literally `localhost`, an address in `127.0.0.0/8`, or `::1`. Names are never resolved, so a hostname that resolves to `127.0.0.1` (for example through `/etc/hosts`) does not count as loopback. The error names the base URL, where it came from, and the listen address. To fix it, set an `https` base URL (`--base-url`, `SCION_SERVER_BASE_URL` or `server.hub.public_url`) or listen on a loopback host (`--host 127.0.0.1`). A workstation server listens on `127.0.0.1` by default and is not affected.
+
+:::caution[Upgrade note: a deliberate availability change]
+Earlier releases started the web server with an `http` base URL on any listener, including the `http://localhost:{port}` default on `0.0.0.0`. This release refuses to start in that case, by design: a hosted server that listens on a non-loopback address must now have an `https` base URL. Before upgrading, check that such a server sets `--base-url`, `SCION_SERVER_BASE_URL`, `SCION_SERVER_HUB_ENDPOINT` or `server.hub.public_url` to its `https` URL (the Helm chart sets `SCION_SERVER_BASE_URL`, and the Cloud Run Terraform module sets `server.hub.public_url`). A server whose `settings.yaml` sets `server.hub.public_url` but not `--base-url` or `SCION_SERVER_BASE_URL` now uses that URL for OAuth redirects and the session cookie instead of `http://localhost:{port}`, so its OAuth clients must list `<public_url>/auth/callback/<provider>`.
+:::
+
 ## Notification channels
 
 Notification channels deliver agent messages to external systems. Configure them

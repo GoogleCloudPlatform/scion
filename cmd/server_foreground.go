@@ -3673,15 +3673,17 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 				"Either bind to 127.0.0.1/::1/localhost (--host 127.0.0.1) or disable dev auth", webHost)
 	}
 
+	// The web base URL: operator inputs only (flag, environment, the global
+	// settings file), never the settings database; see resolveWebBaseURL.
+	base := resolveWebBaseURL(cfg, currentServerEndpointMode(), globalSettingsFileLabel())
+	if err := checkWebBaseURLListener(base, webHost, webPort); err != nil {
+		return nil, err
+	}
+	log.Printf("Web base URL: %s (from %s)", base.URL, base.Source)
+	baseURL := base.URL
+
 	// Allow env var overrides for session/OAuth config
 	sessionSecret := resolveSessionSecret()
-	baseURL := webBaseURL
-	if baseURL == "" {
-		baseURL = os.Getenv("SCION_SERVER_BASE_URL")
-	}
-	if baseURL == "" {
-		baseURL = fmt.Sprintf("http://localhost:%d", webPort)
-	}
 
 	// Construct proxy authenticator for the web server when auth mode is "proxy".
 	// This mirrors the construction in initHubServer — both need the same authenticator.
