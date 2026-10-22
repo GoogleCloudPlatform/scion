@@ -408,7 +408,7 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	// as before: without a handle they are skipped.
 	var agentHome *agenthome.Home
 	if config.HomeDir != "" {
-		if h, err := agenthome.Open(config.HomeDir); err == nil {
+		if h, err := agenthome.OpenCreate(config.HomeDir, 0755); err == nil {
 			agentHome = h
 			defer func() { _ = agentHome.Close() }()
 		}
@@ -1559,7 +1559,7 @@ func applyResolvedAuth(config RunConfig, addEnv func(string, string), addVolume 
 			}
 			dst := filepath.Join(config.HomeDir, relPath)
 			if home == nil {
-				h, err := agenthome.Open(config.HomeDir)
+				h, err := agenthome.OpenCreate(config.HomeDir, 0755)
 				if err != nil {
 					return fmt.Errorf("failed to open the agent home for auth file %s: %w", dst, err)
 				}

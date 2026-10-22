@@ -17,6 +17,7 @@
 package runtime
 
 import (
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -24,6 +25,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agenthome"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 )
@@ -163,8 +165,8 @@ func TestApplyResolvedAuth_LinkLeafReplaced(t *testing.T) {
 func TestApplyResolvedAuth_RefusesLinkedComponent(t *testing.T) {
 	home, outside, before := newRuntimeConfinedHome(t)
 	plantLink(t, outside, filepath.Join(home, ".codex"))
-	if err := applyAuthOnly(authRunConfig(t, home)); err == nil {
-		t.Fatal("expected a linked directory component to be refused")
+	if err := applyAuthOnly(authRunConfig(t, home)); !errors.Is(err, agenthome.ErrLinkComponent) {
+		t.Fatalf("err = %v, want a linked directory component refusal", err)
 	}
 	if got := outsideTree(t, outside); got != before {
 		t.Fatalf("outside directory changed:\n%s\nwant:\n%s", got, before)
@@ -177,8 +179,47 @@ func TestApplyResolvedAuth_LinkReplantedBetweenStartsIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	plantLink(t, outside, filepath.Join(home, ".codex"))
-	if err := applyAuthOnly(authRunConfig(t, home)); err == nil {
-		t.Fatal("expected the re-planted link to be refused")
+	if err := applyAuthOnly(authRunConfig(t, home)); !errors.Is(err, agenthome.ErrLinkComponent) {
+		t.Fatalf("err = %v, want the re-planted link refused", err)
+	}
+	if got := outsideTree(t, outside); got != before {
+		t.Fatalf("outside directory changed:\n%s\nwant:\n%s", got, before)
+	}
+}
+
+// --- cloudrun sandbox auth file copy (copySandboxAuthFiles) ---
+
+func sandboxAuthFiles(t *testing.T) []api.FileMapping {
+	t.Helper()
+	return authRunConfig(t, "").ResolvedAuth.Files
+}
+
+func TestCopySandboxAuthFiles_LinkLeafReplaced(t *testing.T) {
+	home, outside, before := newRuntimeConfinedHome(t)
+	plantLink(t, filepath.Join(outside, "auth.json"), filepath.Join(home, ".codex/auth.json"))
+	copySandboxAuthFiles(home, sandboxAuthFiles(t))
+	p := filepath.Join(home, ".codex/auth.json")
+	fi, err := os.Lstat(p)
+	if err != nil || !fi.Mode().IsRegular() {
+		t.Fatalf("auth file = %v, %v; want a regular file", fi, err)
+	}
+	if b, _ := os.ReadFile(p); string(b) != `{"token":"x"}` {
+		t.Fatalf("auth file = %q", b)
+	}
+	if got := outsideTree(t, outside); got != before {
+		t.Fatalf("outside directory changed:\n%s\nwant:\n%s", got, before)
+	}
+}
+
+func TestCopySandboxAuthFiles_LinkedComponentSkipped(t *testing.T) {
+	home, outside, before := newRuntimeConfinedHome(t)
+	// First copy succeeds; a link re-planted at the directory afterwards is
+	// not traversed by the next copy (best effort: logged and skipped).
+	copySandboxAuthFiles(home, sandboxAuthFiles(t))
+	plantLink(t, filepath.Join(outside, "sub"), filepath.Join(home, ".codex"))
+	copySandboxAuthFiles(home, sandboxAuthFiles(t))
+	if fi, err := os.Lstat(filepath.Join(home, ".codex")); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf(".codex = %v, %v; want the planted link left as is", fi, err)
 	}
 	if got := outsideTree(t, outside); got != before {
 		t.Fatalf("outside directory changed:\n%s\nwant:\n%s", got, before)

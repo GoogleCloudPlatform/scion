@@ -32,9 +32,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agenthome"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
 )
 
@@ -1219,6 +1219,46 @@ func relocateToScion(src, dst string) error {
 	return nil
 }
 
+// copySandboxAuthFiles copies the auth files with a SourcePath into the
+// sandbox agent home at agentHome, at the path each maps to below the
+// sandbox home, best effort (a failure is logged and the file skipped).
+// Every copy goes through one pkg/agenthome handle (copyFileIntoHome).
+func copySandboxAuthFiles(agentHome string, files []api.FileMapping) {
+	var home *agenthome.Home
+	defer func() {
+		if home != nil {
+			_ = home.Close()
+		}
+	}()
+	for _, f := range files {
+		if f.SourcePath == "" {
+			continue
+		}
+		containerPath := expandTildeTarget(f.ContainerPath, sandboxAgentHome)
+		var relPath string
+		if strings.HasPrefix(containerPath, sandboxAgentHome+"/") {
+			relPath = strings.TrimPrefix(containerPath, sandboxAgentHome+"/")
+		} else {
+			relPath = strings.TrimPrefix(containerPath, "/")
+		}
+		dst := filepath.Join(agentHome, relPath)
+		if home == nil {
+			h, err := agenthome.OpenCreate(agentHome, 0755)
+			if err != nil {
+				runtimeLog().Warn("cloudrun-sandbox: failed to open the agent home for auth files",
+					"home", agentHome, "error", err)
+				return
+			}
+			home = h
+		}
+		if err := copyFileIntoHome(f.SourcePath, home, relPath); err != nil {
+			runtimeLog().Warn("cloudrun-sandbox: failed to copy auth file",
+				"src", f.SourcePath, "dst", dst, "error", err)
+			continue
+		}
+	}
+}
+
 // copyDirContents copies files from src to dst (non-recursive, best-effort).
 func copyDirContents(src, dst string) error {
 	entries, err := os.ReadDir(src)
@@ -2159,29 +2199,11 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 		// normally reach the sandbox through that path. This block mirrors
 		// the Docker runtime's file-copy mode (common.go:820-839) for
 		// robustness in case the staging path is bypassed or incomplete.
-		for _, f := range cfg.ResolvedAuth.Files {
-			if f.SourcePath == "" {
-				continue
-			}
-			containerPath := expandTildeTarget(f.ContainerPath, sandboxAgentHome)
-			var relPath string
-			if strings.HasPrefix(containerPath, sandboxAgentHome+"/") {
-				relPath = strings.TrimPrefix(containerPath, sandboxAgentHome+"/")
-			} else {
-				relPath = strings.TrimPrefix(containerPath, "/")
-			}
-			dst := filepath.Join(paths.agentHome, relPath)
-			if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
-				runtimeLog().Warn("cloudrun-sandbox: failed to create directory for auth file",
-					"dst", dst, "error", err)
-				continue
-			}
-			if err := util.CopyFile(f.SourcePath, dst); err != nil {
-				runtimeLog().Warn("cloudrun-sandbox: failed to copy auth file",
-					"src", f.SourcePath, "dst", dst, "error", err)
-				continue
-			}
-		}
+		//
+		// The copies are confined to the home (copyFileIntoHome through one
+		// pkg/agenthome handle): a link at an auth file is replaced, never
+		// written through, and a linked directory component is refused.
+		copySandboxAuthFiles(paths.agentHome, cfg.ResolvedAuth.Files)
 	}
 
 	// Env-type secrets win over harness, auth and synthesised env, as in
