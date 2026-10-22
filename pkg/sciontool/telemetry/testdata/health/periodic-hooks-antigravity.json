@@ -37,7 +37,7 @@
   "metric_export_attempts": 3,
   "metric_export_failures": 1,
   "metric_export_retries": 1,
-  "log_records_accepted": 40,
+  "log_records_accepted": 10,
   "log_records_rejected": 0,
   "log_records_filtered": 30,
   "log_records_delivered": 10,

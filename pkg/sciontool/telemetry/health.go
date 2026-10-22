@@ -418,14 +418,22 @@ type analyticsHandles struct {
 // once under the outbox lock). A LedgerSnapshot error, including a lock
 // timeout, is analytics_stats_failed: the disk-derived fields are then
 // omitted. WP3 never reads outbox files itself.
-func (h analyticsHandles) counters() telemetrycontract.HealthAnalyticsCounters {
+//
+// now is the snapshot time (the pending age uses it). readDisk=false skips
+// LedgerSnapshot (and so the outbox flock): only in-memory counters are
+// filled, for local diagnostics on latency-sensitive paths.
+func (h analyticsHandles) counters(now time.Time, readDisk bool) telemetrycontract.HealthAnalyticsCounters {
 	outbox := h.native.Outbox()
 	if outbox == nil {
 		// A lazily opened outbox that failed: nothing is measurable.
 		return telemetrycontract.HealthAnalyticsCounters{StatsFailed: true, DroppedNoIdentity: h.native.DroppedNoIdentity(), Invalid: h.native.Invalid()}
 	}
 	s := outbox.MemoryStats()
-	ledger, err := outbox.LedgerSnapshot()
+	var ledger OutboxLedger
+	var err error
+	if readDisk {
+		ledger, err = outbox.LedgerSnapshot()
+	}
 	c := telemetrycontract.HealthAnalyticsCounters{
 		Appended:          s.Appended,
 		CertainDuplicates: s.CertainDuplicates,
@@ -451,7 +459,7 @@ func (h analyticsHandles) counters() telemetrycontract.HealthAnalyticsCounters {
 	if h.drainer != nil {
 		c.RetryBackoffMs = h.drainer.Backoff().Milliseconds()
 	}
-	if err != nil {
+	if err != nil || !readDisk {
 		return c
 	}
 	c.OverflowTotal, c.OversizeTotal = ledger.OverflowTotal, ledger.OversizeTotal
@@ -461,7 +469,7 @@ func (h analyticsHandles) counters() telemetrycontract.HealthAnalyticsCounters {
 	c.PendingBytes, c.RetainedBytes = ledger.PendingBytes, ledger.RetainedBytes
 	c.ProducerEpoch, c.ProducerSeqLast = ledger.Epoch, ledger.LastSeq
 	if ledger.PendingBytes > 0 && !ledger.OldestPending.IsZero() {
-		age := time.Since(ledger.OldestPending).Milliseconds()
+		age := now.Sub(ledger.OldestPending).Milliseconds()
 		if age < 0 {
 			age = 0
 		}
@@ -482,15 +490,21 @@ func (p *Pipeline) SettleUsageSource(overlay map[string]string, nativePolicy str
 	h := &p.health
 	h.mu.Lock()
 	h.selection = sel
-	enabled, kick := h.enabled, h.kick
+	enabled, kick, loopRunning := h.enabled, h.kick, h.cancel != nil
 	h.mu.Unlock()
-	if enabled {
+	if !enabled {
+		return
+	}
+	if !loopRunning {
+		// No loop (tests drive the emitter by hand): emit here.
 		p.emitHealth(telemetrycontract.HealthTriggerStart)
-		// The loop sends it; init never waits on Cloud Logging.
-		select {
-		case kick <- struct{}{}:
-		default:
-		}
+		return
+	}
+	// The loop builds (outbox ledger read under its flock) and sends the
+	// start event; init never waits on the lock or on Cloud Logging.
+	select {
+	case kick <- struct{}{}:
+	default:
 	}
 }
 
@@ -551,14 +565,18 @@ func (p *Pipeline) startHealth(ctx context.Context, gcp *GCPExporter, handles an
 	periodic, retry, done, kick := h.periodic, h.retry, h.done, h.kick
 	h.mu.Unlock()
 
-	if settled {
-		p.emitHealth(telemetrycontract.HealthTriggerStart)
-	}
-	go p.healthLoop(loopCtx, periodic, retry, done, kick)
+	// The start event is emitted by the loop goroutine (not here, under
+	// p.mu), because building it reads the outbox ledger under its flock.
+	go p.healthLoop(loopCtx, periodic, retry, done, kick, settled)
 }
 
-func (p *Pipeline) healthLoop(ctx context.Context, periodic, retry time.Duration, done chan struct{}, kick <-chan struct{}) {
+func (p *Pipeline) healthLoop(ctx context.Context, periodic, retry time.Duration, done chan struct{}, kick <-chan struct{}, settled bool) {
 	defer close(done)
+	if settled {
+		// Always runs before done closes, even if the loop is cancelled
+		// at once (emitHealth keeps a single start per run).
+		p.emitHealth(telemetrycontract.HealthTriggerStart)
+	}
 	periodicTicker := time.NewTicker(periodic)
 	defer periodicTicker.Stop()
 	retryTicker := time.NewTicker(retry)
@@ -574,6 +592,12 @@ func (p *Pipeline) healthLoop(ctx context.Context, periodic, retry time.Duration
 		case <-retryTicker.C:
 			p.flushHealth(ctx)
 		case <-kick:
+			p.health.mu.Lock()
+			settled := p.health.selection.Settled
+			p.health.mu.Unlock()
+			if settled {
+				p.emitHealth(telemetrycontract.HealthTriggerStart) // once per run
+			}
 			p.flushHealth(ctx)
 		}
 	}
@@ -690,7 +714,7 @@ func (p *Pipeline) healthSnapshotInputs(trigger string) healthInputs {
 	in.DeliveryState = p.DeliveryState()
 	if handles.native != nil {
 		in.AnalyticsEnabled = true
-		in.Analytics = handles.counters()
+		in.Analytics = handles.counters(in.Now, true)
 	} else {
 		in.AnalyticsDisabledReason = handles.disabledReason
 	}
@@ -819,7 +843,11 @@ func (p *Pipeline) flushHealth(ctx context.Context) {
 
 // AnalyticsDiagnostics returns the analytics outbox counters, or ok=false
 // when analytics is disabled (with the reason).
-func (p *Pipeline) AnalyticsDiagnostics() (counters telemetrycontract.HealthAnalyticsCounters, ok bool, disabledReason string) {
+//
+// readDisk selects whether the outbox ledger is read (WP2 LedgerSnapshot,
+// which takes the outbox flock with up to a 2 s wait); with false only the
+// in-memory counters are returned.
+func (p *Pipeline) AnalyticsDiagnostics(readDisk bool) (counters telemetrycontract.HealthAnalyticsCounters, ok bool, disabledReason string) {
 	if p == nil {
 		return counters, false, ""
 	}
@@ -830,7 +858,7 @@ func (p *Pipeline) AnalyticsDiagnostics() (counters telemetrycontract.HealthAnal
 	if handles.native == nil {
 		return counters, false, handles.disabledReason
 	}
-	return handles.counters(), true, ""
+	return handles.counters(time.Now(), readDisk), true, ""
 }
 
 // metricRejectReasons returns up to limit metric reject reasons with

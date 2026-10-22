@@ -153,13 +153,21 @@ func (p *Pipeline) logDeliverySnapshot(force bool) {
 	depth := p.QueueDepth()
 	diagnostics := p.Diagnostics()
 	analytics := "disabled"
-	if counters, ok, reason := p.AnalyticsDiagnostics(); ok {
+	// Forced snapshots run inline on export-failure and Start paths: they
+	// do not take the outbox lock (in-memory counters only). The periodic
+	// snapshot reads the ledger.
+	readDisk := !force
+	if counters, ok, reason := p.AnalyticsDiagnostics(readDisk); ok {
 		age := "none"
 		if counters.OldestPendingFileAgeMs != nil {
 			age = fmt.Sprintf("%d", *counters.OldestPendingFileAgeMs)
 		}
 		counters.OldestPendingFileAgeMs = nil // printed as a value below, not a pointer
-		if counters.StatsFailed {
+		if !readDisk {
+			analytics = fmt.Sprintf("{Appended:%d CertainDuplicates:%d Overflow:%d AppendFailed:%d Finalized:%d Delivered:%d SendFailures:%d SendRetries:%d Torn:%d DeadLetters:%d Unresolved:%d} disk=not_read(forced)",
+				counters.Appended, counters.CertainDuplicates, counters.Overflow, counters.AppendFailed, counters.Finalized,
+				counters.Delivered, counters.SendFailures, counters.SendRetries, counters.Torn, counters.DeadLetters, counters.Unresolved)
+		} else if counters.StatsFailed {
 			// Disk-derived fields are unknown: never print placeholder zeros.
 			counters.PendingBytes, counters.RetainedBytes, counters.ProducerSeqLast, counters.ProducerEpoch = 0, 0, 0, ""
 			counters.OverflowTotal, counters.OversizeTotal, counters.AppendFailedTotal, counters.DeadLettersTotal = 0, 0, 0, 0

@@ -328,7 +328,9 @@ func fixedHealthInputs(trigger string) healthInputs {
 			ProducerEpoch: "epoch-1", ProducerSeqLast: 4,
 		},
 		Metrics: DeliverySnapshot{Accepted: 12, Delivered: 12, Attempts: 3, Retries: 1, Failed: 1},
-		Logs:    DeliverySnapshot{Accepted: 40, Filtered: 30, Delivered: 10, Attempts: 5},
+		// accepted is counted after the policy filter: 30 filtered out, the
+		// 10 accepted all delivered.
+		Logs: DeliverySnapshot{Accepted: 10, Filtered: 30, Delivered: 10, Attempts: 5},
 	}
 }
 
@@ -382,7 +384,7 @@ func setTestVersion(t *testing.T) {
 func TestHealthEventGolden(t *testing.T) {
 	setTestVersion(t)
 
-	goldenHealth(t, "start-native-claude", fixedHealthInputs(telemetrycontract.HealthTriggerStart))
+	goldenHealth(t, "start-native-claude", startRow(fixedHealthInputs(telemetrycontract.HealthTriggerStart)))
 
 	periodic := fixedHealthInputs(telemetrycontract.HealthTriggerPeriodic)
 	periodic.Seq = 2
@@ -392,7 +394,7 @@ func TestHealthEventGolden(t *testing.T) {
 	periodic.AnalyticsEnabled, periodic.AnalyticsDisabledReason = false, "outbox_unavailable"
 	goldenHealth(t, "periodic-hooks-antigravity", periodic)
 
-	disabled := fixedHealthInputs(telemetrycontract.HealthTriggerStart)
+	disabled := startRow(fixedHealthInputs(telemetrycontract.HealthTriggerStart))
 	disabled.Usage = deriveUsageCollection(UsageSourceSelection{Settled: true}, "claude", false, true)
 	disabled.SourceOrigin = telemetrycontract.UsageSourceOriginUnset
 	disabled.UsageDiag, disabled.HarnessVersion = nil, ""
@@ -401,12 +403,14 @@ func TestHealthEventGolden(t *testing.T) {
 	final := fixedHealthInputs(telemetrycontract.HealthTriggerFinal)
 	final.Seq = 7
 	// 4 finalized = 2 delivered + 1 dead-lettered (100 bytes) + 1 still
-	// pending (512 bytes); retained = pending + dead letter; 4 appended + 1
-	// overflow = 5 seqs; 2 metric points residual at stop = 2 unconfirmed.
+	// pending (512 bytes); retained = pending + dead letter; seq_last 5 = 4
+	// appended in this run + 1 overflow persisted from an earlier run (this
+	// process offered only derived 4 + duplicate 1); 2 metric points
+	// residual at stop = 2 unconfirmed.
 	final.Analytics.Delivered, final.Analytics.DeadLetters, final.Analytics.DeadLettersTotal = 2, 1, 1
 	final.Analytics.PendingBytes, final.Analytics.OldestPendingFileAgeMs = 512, i64(61_000)
 	final.Analytics.RetainedBytes = 512 + 100
-	final.Analytics.Overflow, final.Analytics.OverflowTotal, final.Analytics.ProducerSeqLast = 1, 1, 5
+	final.Analytics.OverflowTotal, final.Analytics.ProducerSeqLast = 1, 5
 	final.Metrics.Delivered, final.Metrics.Unconfirmed, final.Metrics.Canceled = 10, 2, 2
 	final.FinalResidualRecords = 2
 	goldenHealth(t, "final-not-drained", final)
@@ -697,7 +701,7 @@ func TestHealthDisabledWithoutGCPExporter(t *testing.T) {
 	if p.health.enabled || len(p.health.queue) != 0 {
 		t.Fatal("health must stay disabled without the GCP exporter")
 	}
-	if _, ok, reason := p.AnalyticsDiagnostics(); ok || reason != AnalyticsDisabledNoGCPExporter {
+	if _, ok, reason := p.AnalyticsDiagnostics(true); ok || reason != AnalyticsDisabledNoGCPExporter {
 		t.Fatalf("analytics diagnostics ok=%v reason=%q", ok, reason)
 	}
 	p.emitFinalHealth(context.Background()) // no-op, no panic
@@ -739,7 +743,7 @@ func TestAnalyticsStatsFailureReported(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "cursor"), []byte("garbage"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	c := analyticsHandles{native: NewUsageAnalytics(o, telemetrycontract.UsageSourceNative)}.counters()
+	c := analyticsHandles{native: NewUsageAnalytics(o, telemetrycontract.UsageSourceNative)}.counters(time.Now(), true)
 	if !c.StatsFailed || c.PendingBytes != 0 {
 		t.Fatalf("stats failed %v pending %d", c.StatsFailed, c.PendingBytes)
 	}
@@ -976,7 +980,7 @@ func TestAnalyticsLedgerReadFailureIsStatsFailure(t *testing.T) {
 		if err := corrupt(dir); err != nil {
 			t.Fatal(err)
 		}
-		c := analyticsHandles{native: NewUsageAnalytics(o, telemetrycontract.UsageSourceNative)}.counters()
+		c := analyticsHandles{native: NewUsageAnalytics(o, telemetrycontract.UsageSourceNative)}.counters(time.Now(), true)
 		if !c.StatsFailed {
 			t.Errorf("%s: stats_failed = false; the value would read as a measured 0", name)
 		}
@@ -995,7 +999,7 @@ func TestAnalyticsLedgerReadFailureIsStatsFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c := (analyticsHandles{native: NewUsageAnalytics(o, telemetrycontract.UsageSourceNative)}).counters(); c.StatsFailed || c.ProducerEpoch == "" {
+	if c := (analyticsHandles{native: NewUsageAnalytics(o, telemetrycontract.UsageSourceNative)}).counters(time.Now(), true); c.StatsFailed || c.ProducerEpoch == "" {
 		t.Fatalf("healthy outbox: %+v", c)
 	}
 }
@@ -1141,14 +1145,14 @@ func TestAnalyticsHeldReported(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := analyticsHandles{native: NewUsageAnalytics(o, telemetrycontract.UsageSourceNative)}
-	if c := h.counters(); c.Held || c.StatsFailed {
+	if c := h.counters(time.Now(), true); c.Held || c.StatsFailed {
 		t.Fatalf("healthy outbox: held %v stats_failed %v", c.Held, c.StatsFailed)
 	}
 	// A producer that stopped right after writing its intent (WP2 write path).
 	o.crashAt = "intent"
 	_, _ = o.AppendUsage(draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:held", 1))
 	o.crashAt = ""
-	c := h.counters()
+	c := h.counters(time.Now(), true)
 	if !c.Held {
 		t.Fatal("intent on disk must report held")
 	}
@@ -1183,7 +1187,7 @@ func TestRetainedMatchesOutbox(t *testing.T) {
 	if err := o.deadLetter([]byte(`{"x":1}`)); err != nil {
 		t.Fatal(err)
 	}
-	c := analyticsHandles{native: native}.counters()
+	c := analyticsHandles{native: native}.counters(time.Now(), true)
 	ledger, err := o.LedgerSnapshot()
 	if err != nil {
 		t.Fatal(err)
@@ -1200,7 +1204,7 @@ func TestRetainedMatchesOutbox(t *testing.T) {
 func TestAnalyticsCountersNilOutbox(t *testing.T) {
 	setAnalyticsEnv(t, "claude")
 	lazy := NewLazyUsageAnalytics(func() (*AnalyticsOutbox, error) { return nil, errors.New("no home") }, telemetrycontract.UsageSourceHooks)
-	c := analyticsHandles{native: lazy}.counters()
+	c := analyticsHandles{native: lazy}.counters(time.Now(), true)
 	if !c.StatsFailed {
 		t.Fatal("unavailable outbox must report stats_failed")
 	}
@@ -1235,6 +1239,20 @@ func TestHealthInvalidEventCounted(t *testing.T) {
 	if last := h.sentEvents(t)[1]; last.HealthRejected != 1 {
 		t.Fatalf("health_rejected = %d, want 1", last.HealthRejected)
 	}
+}
+
+// startRow resets the per-run and per-process counters, as at a start
+// snapshot (taken at Start or at init's settle, before the harness runs);
+// persisted state (producer_seq_last, epoch) is kept from earlier runs.
+func startRow(in healthInputs) healthInputs {
+	if in.UsageDiag != nil {
+		in.UsageDiag = &UsageDiagnostics{}
+	}
+	in.HarnessVersion = "" // no recognized record yet
+	persistedSeq, epoch := in.Analytics.ProducerSeqLast, in.Analytics.ProducerEpoch
+	in.Analytics = telemetrycontract.HealthAnalyticsCounters{ProducerSeqLast: persistedSeq, ProducerEpoch: epoch}
+	in.Metrics, in.Logs = DeliverySnapshot{}, DeliverySnapshot{}
+	return in
 }
 
 // Every golden must decode and validate, and must satisfy the cross-field
@@ -1286,8 +1304,41 @@ func TestHealthGoldensAreConsistent(t *testing.T) {
 				t.Errorf("%s: a per-run counter exceeds its persisted total", f)
 			}
 		}
+		// accepted is counted after the policy filter, so filtered is not
+		// part of it; delivered, unconfirmed and dropped are outcomes of
+		// accepted records (the rest are still queued).
 		if ev.MetricPointsDelivered+ev.MetricPointsUnconfirmed+ev.MetricPointsDropped > ev.MetricPointsAccepted {
 			t.Errorf("%s: metric outcomes exceed accepted", f)
+		}
+		if ev.LogRecordsDelivered+ev.LogRecordsUnconfirmed+ev.LogRecordsDropped > ev.LogRecordsAccepted {
+			t.Errorf("%s: log outcomes exceed accepted", f)
+		}
+		if ev.LogExportFailures > ev.LogExportAttempts || ev.LogExportRetries > 0 && ev.LogExportRetries >= ev.LogExportAttempts {
+			t.Errorf("%s: log export call counts inconsistent", f)
+		}
+		if ev.FinalFlushOutcome == telemetrycontract.FinalFlushDrained {
+			// Nothing left anywhere: every accepted record has an outcome.
+			if ev.MetricPointsDelivered+ev.MetricPointsUnconfirmed+ev.MetricPointsDropped != ev.MetricPointsAccepted ||
+				ev.LogRecordsDelivered+ev.LogRecordsUnconfirmed+ev.LogRecordsDropped != ev.LogRecordsAccepted ||
+				ev.QueueRecords != 0 || ev.QueueBytes != 0 {
+				t.Errorf("%s: drained, but accepted records are unaccounted for", f)
+			}
+		}
+		if ev.UsageCollection != telemetrycontract.UsageCollectionEnabled && (v(ev.AnalyticsAppended) != 0 || v(ev.AnalyticsCertainDuplicates) != 0) {
+			t.Errorf("%s: this process appended usage events while collection is %s", f, ev.UsageCollection)
+		}
+		if ev.UsageSource == telemetrycontract.UsageSourceNative && ev.AnalyticsAppended != nil {
+			// The native path offers one event per derived or duplicate
+			// observation; each ends in at most one outbox outcome.
+			offered := v(ev.UsageObservationsDerived) + v(ev.UsageObservationsDuplicate)
+			outcomes := v(ev.AnalyticsAppended) + v(ev.AnalyticsCertainDuplicates) + v(ev.AnalyticsOverflow)
+			if outcomes > offered {
+				t.Errorf("%s: outbox outcomes %d exceed events offered %d", f, outcomes, offered)
+			}
+		}
+		if ev.Trigger == telemetrycontract.HealthTriggerStart && (v(ev.UsageObservationsDerived) != 0 || v(ev.AnalyticsAppended) != 0 ||
+			ev.MetricPointsAccepted != 0 || ev.LogRecordsAccepted != 0 || ev.HarnessVersion != "") {
+			t.Errorf("%s: a start snapshot carries per-run activity", f)
 		}
 		if ev.FinalResidualRecords != nil && *ev.FinalResidualRecords > ev.MetricPointsUnconfirmed {
 			t.Errorf("%s: residual records must also be unconfirmed", f)
@@ -1354,12 +1405,18 @@ func TestHealthLedgerMatchesWP2WritePaths(t *testing.T) {
 		t.Fatalf("overflow append outcome %v", out)
 	}
 	o.maxPending = analyticsOutboxMaxPending
+	// oversize: a line over the 64 KiB cap.
+	big := draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:big", 1)
+	big.SessionID = strings.Repeat("s", 70<<10)
+	if out, _ := o.AppendUsage(big); out != AppendOversize {
+		t.Fatalf("oversize append outcome %v", out)
+	}
 	// held: a producer that stopped right after writing its intent.
 	o.crashAt = "intent"
 	_, _ = o.AppendUsage(draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:h", 1))
 	o.crashAt = ""
 
-	c := analyticsHandles{native: NewUsageAnalytics(o, telemetrycontract.UsageSourceNative)}.counters()
+	c := analyticsHandles{native: NewUsageAnalytics(o, telemetrycontract.UsageSourceNative)}.counters(time.Now(), true)
 	if c.StatsFailed {
 		t.Fatal("stats failed on a readable outbox")
 	}
@@ -1373,6 +1430,7 @@ func TestHealthLedgerMatchesWP2WritePaths(t *testing.T) {
 		"commit_deferred_total": {c.CommitDeferredTotal, ledger.CommitDeferredTotal},
 		"dead_letters_total":    {c.DeadLettersTotal, ledger.DeadLettersTotal},
 		"overflow_total":        {c.OverflowTotal, ledger.OverflowTotal},
+		"oversize_total":        {c.OversizeTotal, ledger.OversizeTotal},
 		"pending_bytes":         {c.PendingBytes, ledger.PendingBytes},
 		"retained_bytes":        {c.RetainedBytes, ledger.RetainedBytes},
 		"producer_seq_last":     {c.ProducerSeqLast, ledger.LastSeq},
@@ -1400,7 +1458,8 @@ func TestAnalyticsLedgerLockTimeoutIsStatsFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = unix.Flock(int(f.Fd()), unix.LOCK_UN) }()
-	c := analyticsHandles{native: NewUsageAnalytics(o, telemetrycontract.UsageSourceNative)}.counters()
+	o.lockWait = 50 * time.Millisecond
+	c := analyticsHandles{native: NewUsageAnalytics(o, telemetrycontract.UsageSourceNative)}.counters(time.Now(), true)
 	if !c.StatsFailed {
 		t.Fatal("a lock timeout must be a stats failure")
 	}
