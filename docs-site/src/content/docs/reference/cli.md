@@ -800,7 +800,10 @@ needs the `agent:update` scope for them; otherwise sign in with `scion hub auth 
 patching itself, needs the agent lifecycle permission. Before a real patched reincarnation the CLI dry-runs
 the same request, and stops if the Hub does not apply the patch (upgrade the Hub). Patch flags combine
 with `--broker`: the move's checks judge the patched configuration, for example the patched service
-account.
+account. When a reincarnation that changed the service account fails and the agent returns to its
+previous configuration, the agent's previous service-account assignment returns with it, with the
+source recorded for that assignment. If the assignment was changed again while the reincarnation
+was in progress, the later assignment stays.
 
 To reincarnate another principal's agent you must be able to delegate the agent's role. The agent
 keeps its existing delegator unless you change its role with `--role`; then you become its recorded
