@@ -301,6 +301,9 @@ func (o *AnalyticsOutbox) open(tolerateLocked bool) error {
 	// A held outbox still opens (hooks need a handle to count failures);
 	// mutating operations stay blocked until the intent resolves.
 	if err := o.recoverIntentLocked(); err != nil && !errors.Is(err, ErrAnalyticsOutboxHeld) {
+		// The open fails; a lazy producer then loses its observation with
+		// the lock held, so consume a seq for it (a visible gap).
+		o.consumeSeqDuringHold()
 		return err
 	}
 	return nil
@@ -334,7 +337,17 @@ func (o *AnalyticsOutbox) own(path string) error {
 }
 
 // Dir returns the outbox directory.
-func (o *AnalyticsOutbox) Dir() string { return o.dir }
+// errNilOutbox is returned by mutating methods on a nil outbox (a producer
+// whose outbox could not be opened has none).
+var errNilOutbox = errors.New("analytics outbox: not open")
+
+// Dir returns the outbox directory ("" on a nil outbox).
+func (o *AnalyticsOutbox) Dir() string {
+	if o == nil {
+		return ""
+	}
+	return o.dir
+}
 
 func (o *AnalyticsOutbox) path(name string) string { return filepath.Join(o.dir, name) }
 func (o *AnalyticsOutbox) indexDir() string        { return filepath.Join(o.dir, "index") }
@@ -437,6 +450,9 @@ func (o *AnalyticsOutbox) lock() (func(), error) {
 // bytes to staging. The caller fills every other field. On
 // AppendCertainDuplicate and AppendOverflow nothing is written.
 func (o *AnalyticsOutbox) AppendUsage(ev *telemetrycontract.UsageEvent) (AppendOutcome, error) {
+	if o == nil {
+		return 0, errNilOutbox
+	}
 	outcome, err := o.appendUsage(ev)
 	switch {
 	case errors.Is(err, errAppendUnresolved):
@@ -504,8 +520,11 @@ func (o *AnalyticsOutbox) appendUsage(ev *telemetrycontract.UsageEvent) (outcome
 	}
 
 	epoch, err := o.readTrimmed("epoch")
-	if err != nil || epoch == "" {
-		return 0, fmt.Errorf("analytics outbox: reading epoch: %v", err)
+	if err != nil {
+		return 0, fmt.Errorf("analytics outbox: reading epoch: %w", err)
+	}
+	if epoch == "" {
+		return 0, errors.New("analytics outbox: epoch missing")
 	}
 	seq, err := o.readInt("seq")
 	if err != nil {
@@ -610,6 +629,15 @@ func (o *AnalyticsOutbox) appendUsage(ev *telemetrycontract.UsageEvent) (outcome
 			}
 		}
 		landed, rerr := o.recoverIntent()
+		if landed && rerr != nil && !errors.Is(rerr, ErrAnalyticsOutboxHeld) {
+			// Staging synced (the line is durable) but the commit failed:
+			// not a loss; the intent stays and the next locked operation
+			// completes it (as for a commit failure on the main path).
+			committed = true
+			o.commitDeferred.Add(1)
+			o.bumpPersisted("commit_deferred")
+			return AppendWritten, nil
+		}
 		if errors.Is(rerr, ErrAnalyticsOutboxHeld) {
 			// Visible but not durable: neither accepted nor lost yet.
 			committed = true // seq stays with the intent
@@ -1007,6 +1035,9 @@ func (o *AnalyticsOutbox) appendLineAt(name string, line []byte) (int64, error) 
 // PinHubID records hubID as the outbox's hub on first call; later calls
 // with a different value keep the pinned one and report a mismatch.
 func (o *AnalyticsOutbox) PinHubID(hubID string) (pinned string, err error) {
+	if o == nil {
+		return "", errNilOutbox
+	}
 	if err := validHubID(hubID); err != nil {
 		return "", err
 	}
@@ -1047,6 +1078,9 @@ func validHubID(id string) error {
 
 // PinnedHubID returns the pinned hub ID, or "".
 func (o *AnalyticsOutbox) PinnedHubID() string {
+	if o == nil {
+		return ""
+	}
 	id, _ := o.readTrimmed("hub_id")
 	return id
 }
@@ -1070,6 +1104,9 @@ func (o *AnalyticsOutbox) Finalize() (int, error) {
 // Leftover finalizing files are streamed even when rotation is held or
 // fails (a stuck intent stalls only staging, not what is already rotated).
 func (o *AnalyticsOutbox) FinalizeContext(ctx context.Context) (int, error) {
+	if o == nil {
+		return 0, errNilOutbox
+	}
 	// Under the lock, only recover an intent and rotate staging to a
 	// finalizing file (cheap renames), so appenders never wait for the
 	// copy. The finalizing files are then streamed into ready files
@@ -1372,6 +1409,9 @@ type AnalyticsSendFunc func(ctx context.Context, line []byte) error
 // stops at the first send error and returns it; the same bytes are sent
 // again next time. Called only from the pipeline's drainer goroutine.
 func (o *AnalyticsOutbox) Drain(ctx context.Context, send AnalyticsSendFunc) (int, error) {
+	if o == nil {
+		return 0, errNilOutbox
+	}
 	files, err := o.readyFiles()
 	if err != nil {
 		return 0, err
@@ -1485,6 +1525,9 @@ const analyticsExpireBatch = 500
 // the lock and removes candidates in short locked batches, re-checking
 // each entry's age under the lock (an appender may have just updated it).
 func (o *AnalyticsOutbox) ExpireIndex() (removed int, err error) {
+	if o == nil {
+		return 0, errNilOutbox
+	}
 	entries, err := os.ReadDir(o.indexDir())
 	if err != nil {
 		return 0, fmt.Errorf("analytics outbox: %w", err)
@@ -1593,6 +1636,9 @@ type OutboxLedger struct {
 // A counter file that does not exist yet reads as 0; any other read or
 // parse error, or ErrAnalyticsOutboxLocked, is returned.
 func (o *AnalyticsOutbox) LedgerSnapshot() (OutboxLedger, error) {
+	if o == nil {
+		return OutboxLedger{}, errNilOutbox
+	}
 	unlock, err := o.lock()
 	if err != nil {
 		return OutboxLedger{Dir: o.dir}, err
@@ -1663,6 +1709,9 @@ func (o *AnalyticsOutbox) byteCounter(name string) (int64, error) {
 // access); the Persisted*/disk-derived fields are left zero. Use
 // LedgerSnapshot for the ledger.
 func (o *AnalyticsOutbox) MemoryStats() AnalyticsOutboxStats {
+	if o == nil {
+		return AnalyticsOutboxStats{}
+	}
 	return AnalyticsOutboxStats{
 		Appended:          o.appended.Load(),
 		CertainDuplicates: o.certainDup.Load(),
@@ -1687,6 +1736,9 @@ func (o *AnalyticsOutbox) MemoryStats() AnalyticsOutboxStats {
 // Stats returns MemoryStats plus the disk-derived fields from one
 // LedgerSnapshot (best effort: a snapshot error leaves them zero).
 func (o *AnalyticsOutbox) Stats() AnalyticsOutboxStats {
+	if o == nil {
+		return AnalyticsOutboxStats{}
+	}
 	s := o.MemoryStats()
 	d, err := o.LedgerSnapshot()
 	if err != nil {

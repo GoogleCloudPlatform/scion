@@ -141,6 +141,9 @@ func NewAnalyticsDrainer(outbox *AnalyticsOutbox, send AnalyticsSendFunc, resolv
 
 // Start runs the drain loop in a goroutine until Stop.
 func (d *AnalyticsDrainer) Start(ctx context.Context) {
+	if d == nil {
+		return
+	}
 	ctx, d.cancel = context.WithCancel(ctx)
 	d.done = make(chan struct{})
 	go func() {
@@ -161,6 +164,9 @@ func (d *AnalyticsDrainer) Start(ctx context.Context) {
 // Stop ends the loop, then makes one final bounded drain attempt within
 // ctx (graceful stop). Events still pending stay in the outbox.
 func (d *AnalyticsDrainer) Stop(ctx context.Context) {
+	if d == nil {
+		return
+	}
 	if d.cancel != nil {
 		d.cancel()
 		<-d.done
@@ -174,7 +180,12 @@ func (d *AnalyticsDrainer) Stop(ctx context.Context) {
 // RunOnce performs one drain step: pin the hub ID if needed, finalize,
 // send (unless backing off), and occasionally expire the index. It returns
 // the number of lines sent.
-func (d *AnalyticsDrainer) RunOnce(ctx context.Context) int { return d.runOnce(ctx, false) }
+func (d *AnalyticsDrainer) RunOnce(ctx context.Context) int {
+	if d == nil {
+		return 0
+	}
+	return d.runOnce(ctx, false)
+}
 
 // runOnce is RunOnce; final (the stop pass) skips index expiry so the pass
 // stays within the stop budget.
@@ -241,6 +252,9 @@ func (d *AnalyticsDrainer) runOnce(ctx context.Context, final bool) int {
 
 // Backoff reports the current retry backoff (zero when healthy).
 func (d *AnalyticsDrainer) Backoff() time.Duration {
+	if d == nil {
+		return 0
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.backoff
@@ -289,10 +303,10 @@ func (p *Pipeline) SetAnalyticsOutbox(agentHome string, uid, gid int) {
 // AnalyticsOutboxDir returns the outbox directory the pipeline uses (for
 // WP3 diagnostics), or "".
 func (p *Pipeline) AnalyticsOutboxDir() string {
-	if p == nil || p.analytics.native == nil {
+	if p == nil {
 		return ""
 	}
-	return p.analytics.native.Outbox().Dir()
+	return p.analytics.native.Dir() // nil-safe; the evidence dir when failed
 }
 
 // start enables analytics when the GCP exporter is active. Any failure
@@ -318,7 +332,7 @@ func (a *analyticsState) start(ctx context.Context, gcp *GCPExporter) {
 		// increment still leaves evidence (append_failed in dir when it
 		// exists, else the per-process invalid counter).
 		a.disabledReason = "outbox_unavailable"
-		a.native = newFailedUsageAnalytics(dir, err, telemetrycontract.UsageSourceNative)
+		a.native = newFailedUsageAnalytics(dir, a.owner, err, telemetrycontract.UsageSourceNative)
 		log.Error("Usage analytics disabled: %v", err)
 		return
 	}

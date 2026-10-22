@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -633,8 +634,16 @@ func TestLazyOpenLockTimeoutPersistsAppendFailed(t *testing.T) {
 // disable analytics when the outbox is already initialized.
 func TestPipelineOpenToleratesLockTimeout(t *testing.T) {
 	o := testOutbox(t)
-	holder, _ := os.OpenFile(filepath.Join(o.Dir(), "lock"), os.O_RDWR, 0)
-	_ = unix.Flock(int(holder.Fd()), unix.LOCK_EX)
+	holder, err := os.OpenFile(filepath.Join(o.Dir(), "lock"), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Flock(int(holder.Fd()), unix.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenAnalyticsOutbox(o.Dir()); !errors.Is(err, ErrAnalyticsOutboxLocked) {
+		t.Fatalf("premise: a strict open under the held lock must time out, got %v", err)
+	}
 	tolerant, err := openAnalyticsOutboxTolerant(o.Dir(), nil)
 	_ = unix.Flock(int(holder.Fd()), unix.LOCK_UN)
 	_ = holder.Close()
@@ -661,6 +670,9 @@ func TestAnalyticsStartFailureKeepsEvidence(t *testing.T) {
 	feed(d, claudeLogs(claudeRecord("", "1", 1_000, fullClaudeTokens)))
 	if a.native.Invalid() != 1 || d.Diagnostics().Derived != 1 {
 		t.Errorf("invalid = %d derived = %d; the counters keep working and the loss is counted", a.native.Invalid(), d.Diagnostics().Derived)
+	}
+	if got := (&Pipeline{analytics: a}).AnalyticsOutboxDir(); got != a.outboxDir {
+		t.Errorf("AnalyticsOutboxDir in the failed state = %q, want %q (and no panic)", got, a.outboxDir)
 	}
 }
 
@@ -707,4 +719,177 @@ func TestOutboxLockTimeoutDeliveredBranchReleases(t *testing.T) {
 		t.Fatalf("lock leaked after the delivered-branch timeout: %v", err)
 	}
 	unlock()
+}
+
+// failedStartState builds the root-init failed-start state over an existing
+// outbox whose recovery fails (an unreadable intent), with ownership seams
+// recording every chown. It returns the state, its dir and the chown log.
+func failedStartState(t *testing.T) (analyticsState, string, func() map[string]OutboxOwner) {
+	t.Helper()
+	setAnalyticsEnv(t, "claude")
+	dir := filepath.Join(t.TempDir(), "home", ".scion", AnalyticsOutboxDirName)
+	if err := os.MkdirAll(filepath.Join(dir, "intent"), 0o700); err != nil { // pre-existing, unreadable intent
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	chowned := map[string]OutboxOwner{}
+	prevEuid, prevChown := outboxGeteuid, outboxChown
+	outboxGeteuid = func() int { return 0 }
+	outboxChown = func(p string, uid, gid int) error {
+		mu.Lock()
+		defer mu.Unlock()
+		rel, _ := filepath.Rel(dir, p)
+		if i := strings.Index(rel, ".tmp-"); i > 0 && strings.HasPrefix(filepath.Base(rel), ".") {
+			base := filepath.Base(rel)
+			rel = filepath.Join(filepath.Dir(rel), base[1:strings.Index(base, ".tmp-")])
+		}
+		chowned[rel] = OutboxOwner{uid, gid}
+		return nil
+	}
+	t.Cleanup(func() { outboxGeteuid, outboxChown = prevEuid, prevChown })
+	a := analyticsState{outboxDir: dir, owner: &OutboxOwner{UID: 1000, GID: 1001}}
+	a.start(context.Background(), &GCPExporter{})
+	if a.disabledReason != "outbox_unavailable" || a.drainer != nil {
+		t.Fatalf("premise: start must fail with the directory present: %+v", a)
+	}
+	return a, dir, func() map[string]OutboxOwner {
+		mu.Lock()
+		defer mu.Unlock()
+		out := map[string]OutboxOwner{}
+		for k, v := range chowned {
+			out[k] = v
+		}
+		return out
+	}
+}
+
+// WP2 r6 R1 + tele-em: in the failed-start state every exported method is
+// safe, and every file or directory the outbox code created is owned by
+// the agent user with mode 0600 (files) / 0700 (directories). Hook-side
+// evidence keeps working afterwards.
+func TestFailedStartStateMethodsAndOwnership(t *testing.T) {
+	a, dir, chowned := failedStartState(t)
+	p := &Pipeline{analytics: a}
+
+	// A native increment in the failed state leaves owned evidence.
+	d := bareUsageDeriver(claudeUsageRule{})
+	d.analytics = a.native
+	feed(d, claudeLogs(claudeRecord("", "1", 1_000, fullClaudeTokens)))
+
+	// Pipeline methods.
+	if got := p.AnalyticsOutboxDir(); got != dir {
+		t.Errorf("AnalyticsOutboxDir = %q, want %q", got, dir)
+	}
+	if _, _, ok, err := p.AnalyticsLedger(); ok || err != nil {
+		t.Errorf("AnalyticsLedger in the failed state = ok %v, err %v; want not ok, no error", ok, err)
+	}
+	p.SetAnalyticsOutbox(filepath.Dir(filepath.Dir(dir)), 1000, 1001)
+
+	// UsageAnalytics methods.
+	u := a.native
+	if u.Dir() != dir || u.Outbox() != nil || u.Invalid() != 1 || u.DroppedNoIdentity() != 0 {
+		t.Errorf("producer: dir %q outbox %v invalid %d dropped %d", u.Dir(), u.Outbox(), u.Invalid(), u.DroppedNoIdentity())
+	}
+	if _, err := u.Record(UsageObservation{SourceKind: "x", Status: "success", Calls: 1, TokenStatus: "not_reported"}); err == nil {
+		t.Error("Record in the failed state must report the error")
+	}
+
+	// AnalyticsOutbox methods on the nil outbox the failed state has.
+	var o *AnalyticsOutbox
+	_ = o.Dir()
+	_ = o.PinnedHubID()
+	_ = o.Stats()
+	_ = o.MemoryStats()
+	for name, err := range map[string]error{
+		"AppendUsage":     func() error { _, err := o.AppendUsage(requestIDDraft(1)); return err }(),
+		"PinHubID":        func() error { _, err := o.PinHubID("hub"); return err }(),
+		"Finalize":        func() error { _, err := o.Finalize(); return err }(),
+		"FinalizeContext": func() error { _, err := o.FinalizeContext(context.Background()); return err }(),
+		"Drain":           func() error { _, err := o.Drain(context.Background(), nil); return err }(),
+		"ExpireIndex":     func() error { _, err := o.ExpireIndex(); return err }(),
+		"LedgerSnapshot":  func() error { _, err := o.LedgerSnapshot(); return err }(),
+	} {
+		if err == nil {
+			t.Errorf("nil outbox %s must return an error", name)
+		}
+	}
+	// Drainer methods on the nil drainer the failed state has.
+	var dr *AnalyticsDrainer
+	dr.Start(context.Background())
+	dr.Stop(context.Background())
+	_ = dr.RunOnce(context.Background())
+	_ = dr.Backoff()
+	a.stop(context.Background())
+
+	// Every created path: chowned to the agent user, with the right mode.
+	owners := chowned()
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(dir, path)
+		if rel == "." || rel == "intent" {
+			return nil // created by the test (MkdirAll for the unreadable intent), not by the outbox
+		}
+		if got, ok := owners[rel]; !ok || got != (OutboxOwner{1000, 1001}) {
+			t.Errorf("%s not owned by the agent user (got %v, %v)", rel, got, ok)
+		}
+		want := os.FileMode(0o600)
+		if info.IsDir() {
+			want = 0o700
+		}
+		if info.Mode().Perm() != want {
+			t.Errorf("%s mode %v, want %v", rel, info.Mode().Perm(), want)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := owners["append_failed"]; !ok {
+		t.Error("append_failed evidence was not created/owned")
+	}
+}
+
+// WP2 r6 O1: append error, then recovery finds the line durable but the
+// commit fails: written (commit deferred), not counted as lost.
+func TestOutboxAppendErrorWithFailedCommitIsDeferred(t *testing.T) {
+	o := testOutbox(t)
+	calls := 0
+	o.fsyncFile = func(f *os.File) error {
+		calls++
+		if calls == 1 {
+			return errInjectedSync // the append's own sync
+		}
+		return f.Sync()
+	}
+	o.truncateHook = func() error { return errInjectedSync } // the line stays
+	o.crashAt = "commit"                                     // recovery's commit fails
+	got, err := o.AppendUsage(requestIDDraft(5))
+	if err != nil || got != AppendWritten {
+		t.Fatalf("append = %v, %v; want written (deferred)", got, err)
+	}
+	o.crashAt, o.truncateHook = "", nil
+	mustAppend(t, o, requestIDDraft(5), AppendCertainDuplicate)
+	if st := o.Stats(); st.PersistedAppendFailed != 0 || st.PersistedCommitDeferred != 1 {
+		t.Errorf("stats = %+v; want no append_failed, one commit_deferred", st)
+	}
+}
+
+// WP2 r6 O2: a lazy open whose recovery fails (lock held) consumes a seq.
+func TestLazyOpenRecoveryErrorConsumesSeq(t *testing.T) {
+	setAnalyticsEnv(t, "antigravity")
+	o := testOutbox(t)
+	if err := os.Mkdir(filepath.Join(o.Dir(), "intent"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	hook := NewLazyUsageAnalytics(o.Dir(), nil, telemetrycontract.UsageSourceHooks)
+	if _, err := hook.Record(UsageObservation{SourceKind: "hook.x.model_end", Status: "success", Calls: 1, TokenStatus: "not_reported"}); err == nil {
+		t.Fatal("record with a failing open succeeded")
+	}
+	_ = os.Remove(filepath.Join(o.Dir(), "intent"))
+	next := mustAppend(t, o, requestIDDraft(5), AppendWritten)
+	if next.ProducerSeq != 2 || o.Stats().PersistedAppendFailed != 1 {
+		t.Errorf("seq %d append_failed %d; want 2 (gap) and 1", next.ProducerSeq, o.Stats().PersistedAppendFailed)
+	}
 }
