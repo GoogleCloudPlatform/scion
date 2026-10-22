@@ -1343,3 +1343,51 @@ func TestEntrypointBuildCacheInRAMLinks(t *testing.T) {
 		t.Errorf("stderr does not log RAM mode:\n%s", res.stderr)
 	}
 }
+
+// A SIGTERM during the claim phase (here: between claim retries) stops the
+// entrypoint at the next checkpoint with 128+15, without starting run.sh.
+func TestEntrypointSignalDuringClaim(t *testing.T) {
+	cs := newClaimServer(t, respondStatus(http.StatusServiceUnavailable))
+	h := newHarness(t, cs.URL)
+	h.env["CR_CLAIM_BACKOFF_SECONDS"] = "2"
+	cmd := exec.Command("bash", "entrypoint.sh")
+	for k, v := range h.env {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
+	var stdout, stderr strings.Builder
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	for len(cs.recorded()) == 0 {
+		if time.Now().After(deadline) {
+			_ = cmd.Process.Kill()
+			t.Fatalf("no claim attempt; stderr:\n%s", stderr.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	err := cmd.Wait()
+	code := 0
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		code = exitErr.ExitCode()
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	if code != 143 {
+		t.Errorf("exit code = %d, want 143 (128+SIGTERM); stderr:\n%s", code, stderr.String())
+	}
+	if h.stubStarted() {
+		t.Error("run.sh was started after a SIGTERM during the claim")
+	}
+	if !strings.Contains(stderr.String(), "received SIGTERM before run.sh started") {
+		t.Errorf("stderr does not log the early signal:\n%s", stderr.String())
+	}
+	if n := len(cs.recorded()); n > 2 {
+		t.Errorf("%d claim attempts after the signal, want the retries to stop", n)
+	}
+}

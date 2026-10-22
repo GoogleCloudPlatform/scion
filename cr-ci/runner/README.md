@@ -194,7 +194,10 @@ this, in order:
      process group, before the SIGKILL at the end of the grace period. `run.sh` is
      started under job control (`set -m`): a plain background job would inherit an
      ignored SIGINT, and the graceful cancel would silently stop working (a test
-     checks the disposition).
+     checks the disposition). The traps are installed when the script starts.
+     A SIGTERM or SIGINT that arrives before `run.sh` runs (during the checks or the
+     claim) stops the script at the next checkpoint with 128+n (143 or 130), without
+     starting the runner; `/reconcile` reaps the unused registration.
 
    The output goes through two FIFOs in a private temp dir under `/tmp`, small and
    on the root filesystem, never on `/scratch`. A watcher process that does not

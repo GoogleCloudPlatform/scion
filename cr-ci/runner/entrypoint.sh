@@ -42,6 +42,7 @@
 #      not writable, a HOME link (~/work, ~/.cache, ~/go) that is not the expected symlink
 #   3  claim failed: 401, 410, other non-retryable response (mediator or
 #      metadata server), or retries exhausted; run.sh not started
+#   128+n  SIGTERM (143) or SIGINT (130) received before run.sh started; run.sh not started
 #   otherwise run.sh's exit code, or, when run.sh exits 0, the runner exit code that
 #      run-helper.sh reported as unknown (for example 134 after an abort)
 #
@@ -79,6 +80,32 @@ die() {
   shift
   log "FATAL: $*"
   exit "$code"
+}
+
+# Signals. Cloud Run sends SIGTERM to PID 1 (this script) on CancelExecution or the task
+# timeout. Before run.sh runs, a TERM or INT is recorded and the script stops at the next
+# checkpoint without starting the runner (exit 128+n; /reconcile reaps an unused
+# registration). Once run.sh runs, it is forwarded to it (section 5). Trapped from the
+# start: as PID 1, an untrapped TERM would simply be dropped.
+runner_pid=""
+pending_signal=""
+# shellcheck disable=SC2329 # invoked by the traps below
+on_signal() {
+  if [[ -n $runner_pid ]]; then
+    log "received SIG$1; forwarding it to run.sh (graceful job cancel)"
+    kill -s "$1" "$runner_pid" 2>/dev/null || true
+  else
+    pending_signal=$1
+    log "received SIG$1 before run.sh started; stopping without starting the runner"
+  fi
+}
+trap 'on_signal TERM' TERM
+trap 'on_signal INT' INT
+# exit_if_signalled: a checkpoint before run.sh starts.
+exit_if_signalled() {
+  if [[ -n $pending_signal ]]; then
+    exit $((128 + $(kill -l "$pending_signal")))
+  fi
 }
 
 # --- 1. Required env ----------------------------------------------------------
@@ -350,7 +377,9 @@ retry_or_die() {
     die "$EXIT_CLAIM" "claim failed after $attempt attempts (last: $1 status $http_code); not starting the runner"
   fi
   log "attempt $attempt: $1 status $http_code; retrying in ${delay}s"
+  exit_if_signalled
   sleep "$delay"
+  exit_if_signalled
   attempt=$((attempt + 1))
   delay=$(awk -v d="$delay" 'BEGIN { print d * 2 }')
 }
@@ -358,6 +387,7 @@ retry_or_die() {
 attempt=1
 delay=$backoff
 while :; do
+  exit_if_signalled
   # The ID token is fetched once (valid for an hour) and reused on claim retries.
   if [[ -z $id_token ]]; then
     identity_once
@@ -456,20 +486,18 @@ watch_runner_output() {
 watch_runner_output &
 watcher_pid=$!
 
+exit_if_signalled
 log "starting run.sh (ephemeral JIT runner)"
 set -m
 ./run.sh --jitconfig "$jit_config" >"$out_fifo" 2>&1 &
 runner_pid=$!
 set +m
 jit_config=""
-
-# shellcheck disable=SC2329 # invoked by the traps below
-forward_signal() {
-  log "received SIG$1; forwarding it to run.sh (graceful job cancel)"
-  kill -s "$1" "$runner_pid" 2>/dev/null || true
-}
-trap 'forward_signal TERM' TERM
-trap 'forward_signal INT' INT
+# A signal between the last checkpoint and runner_pid being set was only recorded.
+if [[ -n $pending_signal ]]; then
+  log "forwarding SIG$pending_signal, which arrived while run.sh was starting"
+  kill -s "$pending_signal" "$runner_pid" 2>/dev/null || true
+fi
 
 runner_rc=0
 while :; do
