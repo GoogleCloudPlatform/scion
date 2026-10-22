@@ -17,9 +17,11 @@ package hubclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -245,6 +247,44 @@ func TestAgentsDelete(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestAgentsDelete_UnfollowedRedirect(t *testing.T) {
+	var deleteRequests, redirectedRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/moved" {
+			redirectedRequests.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		deleteRequests.Add(1)
+		if r.Method != http.MethodDelete || r.URL.Path != "/api/v1/agents/agent-to-delete" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("X-Request-ID", "delete-redirect")
+		http.Redirect(w, r, "/moved", http.StatusTemporaryRedirect)
+	}))
+	defer server.Close()
+
+	hc := server.Client()
+	hc.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	client, err := New(server.URL, WithHTTPClient(hc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = client.Agents().Delete(context.Background(), "agent-to-delete", nil)
+	if deleteRequests.Load() != 1 || redirectedRequests.Load() != 0 {
+		t.Errorf("request replayed: DELETE requests=%d, redirect requests=%d", deleteRequests.Load(), redirectedRequests.Load())
+	}
+	var apiErr *apiclient.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("unfollowed redirect must not report a successful deletion, got %v", err)
+	}
+	if apiErr.StatusCode != http.StatusTemporaryRedirect || apiErr.RequestID != "delete-redirect" {
+		t.Errorf("redirect details not preserved: %+v", apiErr)
 	}
 }
 
