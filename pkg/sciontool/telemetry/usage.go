@@ -632,6 +632,17 @@ type UsageDeriver struct {
 	derived, duplicate, malformed atomic.Int64
 	malformedWarnOnce             sync.Once
 
+	// WP3 population counters (wp3-design.md section 1.1): raw log
+	// records seen and matched by a log rule; metric batches walked, those
+	// with a malformed point, and the increments derived from them; and
+	// recognized observations that carried no call and no tokens.
+	logReceived, logRecognized               atomic.Int64
+	metricBatches, metricMalformed, metricIn atomic.Int64
+	ignored                                  atomic.Int64
+	// lastHarnessVersion is the harness version on the most recent
+	// recognized native record that carried one (string).
+	lastHarnessVersion atomic.Value
+
 	// sessionUsage, if set, also receives each recorded increment for the
 	// session metrics aggregator (see SessionUsageSink). Set by the
 	// Pipeline before the deriver is published.
@@ -650,11 +661,29 @@ type UsageDeriver struct {
 // populated only by a rule that tracks them (usageRuleDiagnostics; today
 // only copilotUsageRule, for its cumulative-to-delta conversion) and stay 0
 // for every other harness.
+//
+// Populations (WP3 design section 1.1): LogRecordsReceived counts every raw
+// log record offered to a log rule, mostly non-usage frames;
+// LogRecordsRecognized those a rule matched. MetricBatchesReceived counts
+// ResourceMetrics batches walked by a metric rule, MetricIncrements the
+// increments derived from them. An observation is a recognized log record
+// or a metric increment, and observations = Ignored + Duplicate + Derived.
+// Malformed counts malformed log records plus malformed metric batches
+// (MetricBatchesMalformed), so its units are mixed.
 type UsageDiagnostics struct {
 	Derived, Duplicate, Malformed int64
 	ClampedInput                  int64
 	StaleBackwards                int64
 	BaselinedAfterCap             int64
+
+	LogRecordsReceived, LogRecordsRecognized int64
+	MetricBatchesReceived                    int64
+	MetricBatchesMalformed                   int64
+	MetricIncrements                         int64
+	Ignored                                  int64
+	// HarnessVersion is the last harness version seen on a recognized
+	// record, "" if none.
+	HarnessVersion string
 }
 
 // usageRuleDiagnostics is implemented by a rule that tracks additional,
@@ -849,18 +878,22 @@ func (d *UsageDeriver) ProcessResourceMetrics(ctx context.Context, resourceMetri
 // on scope.
 func (d *UsageDeriver) observeMetricBatch(ctx context.Context, rule metricBatchDeriver, rm *metricpb.ResourceMetrics, matched map[string]bool) bool {
 	increments, names, err := rule.DeriveBatch(rm)
+	d.metricBatches.Add(1)
 	for name := range names {
 		matched[name] = true
 	}
 	if err != nil {
 		d.malformed.Add(1)
+		d.metricMalformed.Add(1)
 		d.malformedWarnOnce.Do(func() {
 			slog.Warn("usage deriver observed a malformed native usage metric; the affected data points were dropped")
 		})
 	}
 	recorded := false
 	for _, increment := range increments {
+		d.metricIn.Add(1)
 		if increment.Calls == 0 && len(increment.Tokens) == 0 {
+			d.ignored.Add(1)
 			continue
 		}
 		fingerprint := d.metricFingerprint("", increment.dedupeKey)
@@ -907,6 +940,7 @@ func (d *UsageDeriver) observe(ctx context.Context, scopeName string, record *lo
 // observeRecord is observe with the record's resource attributes, which
 // the analytics event reads the harness version from.
 func (d *UsageDeriver) observeRecord(ctx context.Context, scopeName string, resourceAttrs []*commonpb.KeyValue, record *logspb.LogRecord) bool {
+	d.logReceived.Add(1)
 	eventName, err := normalizedLogEventName(record, scopeName)
 	if err != nil || eventName == "" {
 		return false
@@ -915,6 +949,10 @@ func (d *UsageDeriver) observeRecord(ctx context.Context, scopeName string, reso
 		increment, matched, err := rule.MatchLog(scopeName, eventName, record)
 		if !matched {
 			continue
+		}
+		d.logRecognized.Add(1)
+		if v := harnessVersionFromAttrs(record.GetAttributes(), resourceAttrs); v != "" {
+			d.lastHarnessVersion.Store(v)
 		}
 		if err != nil {
 			d.malformed.Add(1)
@@ -936,6 +974,7 @@ func (d *UsageDeriver) observeRecord(ctx context.Context, scopeName string, reso
 		// A rule that recognizes the event but derives nothing usable from it
 		// (no call, no tokens) has nothing to record or dedupe.
 		if increment.Calls == 0 && len(increment.Tokens) == 0 {
+			d.ignored.Add(1)
 			return false
 		}
 		fingerprint := d.fingerprint(scopeName, eventName, record)
@@ -1059,6 +1098,16 @@ func (d *UsageDeriver) Diagnostics() UsageDiagnostics {
 		Derived:   d.derived.Load(),
 		Duplicate: d.duplicate.Load(),
 		Malformed: d.malformed.Load(),
+
+		LogRecordsReceived:     d.logReceived.Load(),
+		LogRecordsRecognized:   d.logRecognized.Load(),
+		MetricBatchesReceived:  d.metricBatches.Load(),
+		MetricBatchesMalformed: d.metricMalformed.Load(),
+		MetricIncrements:       d.metricIn.Load(),
+		Ignored:                d.ignored.Load(),
+	}
+	if v, ok := d.lastHarnessVersion.Load().(string); ok {
+		diag.HarnessVersion = v
 	}
 	for _, rule := range d.rules {
 		if rd, ok := rule.(usageRuleDiagnostics); ok {

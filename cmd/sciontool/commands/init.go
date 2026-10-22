@@ -832,6 +832,9 @@ func RunInit(args []string, opts InitRunOptions) int {
 		reportInitFailure(agentHome, overlayErr)
 		return 1
 	}
+	// Report the settled usage-source decision for the telemetry.health
+	// event (WP3); only SCION_USAGE_SOURCE is read from the overlay.
+	telemetryPipeline.SettleUsageSource(harnessEnvOverlay, nativeTelemetryPolicy)
 
 	// Configure git credentials for shared-workspace projects (git-workspace hybrid).
 	// The workspace is pre-cloned on the host; agents need credentials to push/pull.
