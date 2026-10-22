@@ -23,7 +23,9 @@ package hub
 // observer is installed only by tests, through installLifecycleObserver.
 // At startup the drainer starts only when an observer is installed or the
 // outbox already holds rows (a backlog from an earlier run, delivered and
-// then the drainer exits); otherwise nothing runs beyond one row count.
+// then the drainer exits); otherwise the only cost is one synchronous
+// existence probe. The observer is installed only with a sink, so an
+// installed observer always has a drainer that delivers and trims.
 
 import (
 	"context"
@@ -112,10 +114,20 @@ func (s *Server) installLifecycleObserver() (string, error) {
 	rt := &s.lifecycleEvents
 	state := s.lifecycleObserverState(true)
 	rt.mu.Lock()
+	if state == telemetryemit.ObserverStateEnabled && rt.sink == nil {
+		// Without a sink no drainer runs, so nothing would deliver or trim
+		// the outbox (max_rows/max_age): refuse rather than grow it.
+		state = telemetryemit.ObserverStateDisabledNoSink
+	}
 	rt.state = state
 	counters := rt.countersOrNop()
 	rt.mu.Unlock()
 	counters.ObserverState(state)
+	if state == telemetryemit.ObserverStateDisabledNoSink {
+		slog.Warn("hub.lifecycle_events has no sink configured; lifecycle observer not installed")
+		ls.SetAgentWriteObserver(nil)
+		return state, nil
+	}
 	if state != telemetryemit.ObserverStateEnabled {
 		slog.Warn("hub.lifecycle_events requires a pinned hub ID; lifecycle observer not installed",
 			"hub_id", s.HubID(), "hub_id_source", s.config.HubIDSource, "state", state)
@@ -214,6 +226,14 @@ func (s *Server) startLifecycleEvents(ctx context.Context) {
 		defer close(done)
 		d.Run(dctx)
 		counters.DrainerState(telemetryemit.DrainerStateIdleDisabled)
+		// Forget this drainer (a backlog-only one exits on its own), so a
+		// later start can run a new one. A stop may already have cleared it.
+		rt.mu.Lock()
+		if rt.drainer == d {
+			rt.drainer, rt.cancel, rt.done = nil, nil, nil
+		}
+		rt.mu.Unlock()
+		cancel()
 	}()
 }
 

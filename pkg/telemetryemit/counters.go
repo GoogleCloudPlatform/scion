@@ -56,9 +56,12 @@ const (
 	ObserverStateEnabled               = "enabled"
 	ObserverStateDisabledExperimentOff = "disabled_experiment_off"
 	ObserverStateDisabledUnpinnedHubID = "disabled_unpinned_hub_id"
+	// ObserverStateDisabledNoSink: no sink is configured, so nothing could
+	// drain or trim the outbox; the observer is not installed.
+	ObserverStateDisabledNoSink = "disabled_no_sink"
 )
 
-var observerStates = []string{ObserverStateEnabled, ObserverStateDisabledExperimentOff, ObserverStateDisabledUnpinnedHubID}
+var observerStates = []string{ObserverStateEnabled, ObserverStateDisabledExperimentOff, ObserverStateDisabledUnpinnedHubID, ObserverStateDisabledNoSink}
 
 // Drainer states for MetricDrainerState (design 11, r6 N4): running with
 // an installed observer, backlog_only while delivering rows left from an

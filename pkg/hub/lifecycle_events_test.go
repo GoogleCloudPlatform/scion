@@ -43,6 +43,8 @@ func lifecycleTestServer(t *testing.T, pinned bool) (*Server, lifecycleEventStor
 	ls, ok := s.(lifecycleEventStore)
 	require.True(t, ok, "the test store must support the lifecycle observer")
 	srv.config.HubIDPinned = pinned
+	// The done-when delete is a hard delete (design 11): no retention.
+	srv.config.SoftDeleteRetention = 0
 	if !pinned {
 		srv.config.HubIDSource = lifecycleevents.HubIDSourceHostname
 	}
@@ -120,7 +122,7 @@ func TestLifecycleEvents_SliceOneDoneWhen(t *testing.T) {
 	agentID := lifecycleCreateAgent(t, srv, projectID, "lc-done-when")
 	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+agentID, nil)
 	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
-	gone := agentGone(t, srv.store, agentID)
+	require.True(t, agentGone(t, srv.store, agentID), "the done-when delete is a hard delete")
 
 	// First drain: delivered, but the deletes are lost (crash after the
 	// sink acknowledged). Second drain, after the leases expire: the same
@@ -147,11 +149,7 @@ func TestLifecycleEvents_SliceOneDoneWhen(t *testing.T) {
 	assert.NotEmpty(t, created.Metadata.CreatorPrincipalID)
 	require.NotNil(t, resynced.Gap)
 	assert.True(t, *resynced.Gap)
-	if gone {
-		assert.Equal(t, tc.DeleteModeHard, deleted.DeleteMode)
-	} else {
-		assert.Equal(t, tc.DeleteModeSoft, deleted.DeleteMode)
-	}
+	assert.Equal(t, tc.DeleteModeHard, deleted.DeleteMode)
 	require.NotNil(t, deleted.Metadata, "deleted carries the last metadata")
 	assert.Equal(t, created.Metadata.Name, deleted.Metadata.Name)
 
@@ -244,4 +242,62 @@ func TestLifecycleEvents_PinnedHubID(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, telemetryemit.ObserverStateEnabled, state, "the persisted file is stable on SQLite")
 	assert.True(t, ls2.AgentWriteObserverInstalled())
+}
+
+// TestLifecycleEvents_NoSinkRefusesObserver: without a sink no drainer
+// would deliver or trim the outbox, so the observer is not installed
+// (wp1s1 review r1 R4).
+func TestLifecycleEvents_NoSinkRefusesObserver(t *testing.T) {
+	srv, ls, projectID, _, _ := lifecycleTestServer(t, true)
+	counters := telemetryemit.NewMemoryCounters()
+	srv.SetLifecycleEventsSink(nil, counters)
+	state, err := srv.installLifecycleObserver()
+	require.NoError(t, err)
+	assert.Equal(t, telemetryemit.ObserverStateDisabledNoSink, state)
+	assert.False(t, ls.AgentWriteObserverInstalled())
+	assert.Equal(t, int64(1), counters.Get(telemetryemit.MetricObserverState, telemetryemit.ObserverStateDisabledNoSink))
+	lifecycleCreateAgent(t, srv, projectID, "lc-no-sink")
+	has, err := ls.LifecycleOutboxHasRows(context.Background())
+	require.NoError(t, err)
+	assert.False(t, has, "no rows without an observer")
+}
+
+// TestLifecycleEvents_BacklogDrainerClearsAndRestarts: once a backlog-only
+// drainer exits, its state is cleared, so a later start (for example with
+// the observer now installed) runs a new drainer (wp1s1 review r1 R4).
+func TestLifecycleEvents_BacklogDrainerClearsAndRestarts(t *testing.T) {
+	srv, ls, projectID, sink, counters := lifecycleTestServer(t, true)
+	_, err := srv.installLifecycleObserver()
+	require.NoError(t, err)
+	lifecycleCreateAgent(t, srv, projectID, "lc-restart-1")
+	ls.SetAgentWriteObserver(nil)
+
+	srv.startLifecycleEvents(context.Background())
+	srv.lifecycleEvents.mu.Lock()
+	done := srv.lifecycleEvents.done
+	srv.lifecycleEvents.mu.Unlock()
+	require.NotNil(t, done)
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the backlog drainer did not exit")
+	}
+	require.Eventually(t, func() bool {
+		srv.lifecycleEvents.mu.Lock()
+		defer srv.lifecycleEvents.mu.Unlock()
+		return srv.lifecycleEvents.drainer == nil
+	}, 10*time.Second, 10*time.Millisecond, "an exited drainer is cleared")
+
+	_, err = srv.installLifecycleObserver()
+	require.NoError(t, err)
+	srv.startLifecycleEvents(context.Background())
+	srv.lifecycleEvents.mu.Lock()
+	running := srv.lifecycleEvents.drainer != nil
+	srv.lifecycleEvents.mu.Unlock()
+	require.True(t, running, "a later start with the observer installed runs a drainer")
+	assert.Equal(t, int64(1), counters.Get(telemetryemit.MetricDrainerState, telemetryemit.DrainerStateRunning))
+
+	lifecycleCreateAgent(t, srv, projectID, "lc-restart-2")
+	require.Eventually(t, func() bool { return len(sink.Delivered()) >= 2 }, 30*time.Second, 20*time.Millisecond,
+		"the new drainer delivers the second create")
 }
