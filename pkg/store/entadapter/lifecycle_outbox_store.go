@@ -27,7 +27,6 @@ package entadapter
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync/atomic"
 	"time"
@@ -607,39 +606,6 @@ func deleteProjectLifecycleCursors(ctx context.Context, client *ent.Client, proj
 	}
 	_, err = client.AgentLifecycleCursor.Delete().Where(agentlifecyclecursor.IDIn(ids...)).Exec(ctx)
 	return err
-}
-
-// errLifecycleWriterPanicked makes finish roll back when the writer
-// panics.
-var errLifecycleWriterPanicked = errors.New("agent writer panicked")
-
-// lifecycleTxStore returns the store an observed writer writes through.
-// When an observer is installed and s runs outside any transaction, that
-// is a copy of s on a new transaction, so the row and its lifecycle rows
-// commit together; otherwise it is s itself. The writer must call finish
-// with its result: finish commits the new transaction on success and
-// rolls it back on error (marking transient driver errors), and returns
-// the error unchanged when no transaction was opened.
-func (s *AgentStore) lifecycleTxStore(ctx context.Context, obs store.AgentWriteObserver) (*AgentStore, func(error) error, error) {
-	if obs == nil || s.inTx {
-		return s, func(err error) error { return err }, nil
-	}
-	tx, err := s.client.Tx(ctx)
-	if err != nil {
-		return nil, nil, markTransient(fmt.Errorf("begin transaction: %w", err))
-	}
-	ts := &AgentStore{client: tx.Client(), inTx: true, afterRunIDRead: s.afterRunIDRead, lifecycle: s.lifecycle, entTx: tx}
-	finish := func(err error) error {
-		if err != nil {
-			_ = tx.Rollback()
-			return markTransient(err)
-		}
-		if err := tx.Commit(); err != nil {
-			return markTransient(fmt.Errorf("commit transaction: %w", err))
-		}
-		return nil
-	}
-	return ts, finish, nil
 }
 
 // lifecycleWriteTx returns the client an observed writer writes with: its
