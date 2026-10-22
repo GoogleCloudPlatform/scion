@@ -538,7 +538,7 @@ func TestPlainDelete_RunMismatch_PreviousRun_InDoubtSoftRecordsRun(t *testing.T)
 // row's run among its previous runs. Any other run difference keeps the
 // row's runs.
 func TestFinalizeInDoubtDelete_SeedsRetriedRunOnlyForRetryIntent(t *testing.T) {
-	for _, tc := range []struct {
+	for i, tc := range []struct {
 		name     string
 		runID    string
 		prev     []string
@@ -546,11 +546,14 @@ func TestFinalizeInDoubtDelete_SeedsRetriedRunOnlyForRetryIntent(t *testing.T) {
 		wantPrev []string
 	}{
 		{"retry intent: recorded", "run-p", []string{"run-a"}, "run-p", []string{"run-a"}},
-		{"other run without the row's run: kept", "run-x", []string{"run-old"}, "run-a", []string{"run-p"}},
-		{"same run as the row: kept", "run-a", []string{"run-p"}, "run-a", []string{"run-p"}},
+		// Each case below fails one clause of the guard and passes the
+		// others, so each clause is pinned on its own.
+		{"other run without the row's run among its previous runs: kept", "run-x", []string{"run-old"}, "run-a", []string{"run-p"}},
+		{"same run as the row, listing it too: kept", "run-a", []string{"run-p", "run-a"}, "run-a", []string{"run-p"}},
+		{"no run in the intent: kept", "", []string{"run-a"}, "run-a", []string{"run-p"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			f, _, claim := newInDoubtFixture(t, "rmf-seed-"+tc.wantRun+"-"+tc.runID, func(f *deferredDeleteFixture) {
+			f, _, claim := newInDoubtFixture(t, fmt.Sprintf("rmf-seed-%d", i), func(f *deferredDeleteFixture) {
 				f.srv.config.SoftDeleteRetention = time.Hour
 				for _, run := range []string{"run-p", "run-a"} {
 					_, err := f.store.SetAgentRunID(context.Background(), f.agent.ID, run, nil)
