@@ -952,10 +952,38 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// Record the hub project ID for a broker copy of a hub workspace
 		// before any project settings are read, under the process-wide
 		// workspace lock on the project.
+		// The workspace's .scion entry is checked against the broker's
+		// record first (checkWorkspaceConfigRecord): nothing, including
+		// the identity alignment, reads it before.
+		var checkErr error
 		if lockErr := s.withWorkspaceLock(ctx, func() {
-			s.alignHubManagedProjectIdentity(ctx, req.ID, req.ProjectPath, req.ProjectSlug, req.ProjectID)
+			if checkErr = checkWorkspaceConfigRecord(req.ProjectPath, req.ProjectID); checkErr == nil {
+				s.alignHubManagedProjectIdentity(ctx, req.ID, req.ProjectPath, req.ProjectSlug, req.ProjectID)
+			}
 		}, req.ProjectPath); lockErr != nil {
 			s.writeRuntimeOpError(w, ctx, "create agent", lockErr, "agent_id", req.ID, "project_id", req.ProjectID)
+			return
+		}
+		if checkErr != nil {
+			sce := s.workspaceConfigStartContextError(checkErr, req.Name)
+			markAttemptFailed(sce.Status, "hub-managed workspace configuration check failed")
+			span.SetStatus(codes.Error, "hub-managed workspace configuration check failed")
+			writeError(w, sce.Status, ErrCodeConflict, sce.Message, nil)
+			return
+		}
+	} else if req.ProjectPath != "" {
+		// A request that names the path of a hub-managed workspace
+		// directly gets the same check before its settings are read.
+		var checkErr error
+		if lockErr := s.withWorkspaceLock(ctx, func() { checkErr = checkWorkspaceConfigRecord(req.ProjectPath, req.ProjectID) }, req.ProjectPath); lockErr != nil {
+			s.writeRuntimeOpError(w, ctx, "create agent", lockErr, "agent_id", req.ID, "project_id", req.ProjectID)
+			return
+		}
+		if checkErr != nil {
+			sce := s.workspaceConfigStartContextError(checkErr, req.Name)
+			markAttemptFailed(sce.Status, "hub-managed workspace configuration check failed")
+			span.SetStatus(codes.Error, "hub-managed workspace configuration check failed")
+			writeError(w, sce.Status, ErrCodeConflict, sce.Message, nil)
 			return
 		}
 	}

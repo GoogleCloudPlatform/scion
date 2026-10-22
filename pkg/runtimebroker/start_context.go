@@ -316,6 +316,21 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 	}
 
+	// A hub-managed workspace's .scion entry must be in the state the
+	// broker recorded for it before anything is read through it (see
+	// checkWorkspaceConfigRecord); recordHubProjectFiles records the state
+	// it leaves.
+	if in.ProjectPath != "" && !in.ProjectPathFromContainer {
+		var checkErr error
+		if err := s.withWorkspaceLock(ctx, func() { checkErr = checkWorkspaceConfigRecord(in.ProjectPath, in.ProjectID) }, in.ProjectPath); err != nil {
+			return nil, fmt.Errorf("project workspace lock: %w", err)
+		}
+		if checkErr != nil {
+			span.SetStatus(codes.Error, "hub-managed workspace configuration check failed")
+			return nil, s.workspaceConfigStartContextError(checkErr, in.Name)
+		}
+	}
+
 	// Shared-workspace dispatch verifies the project identity before loading
 	// project settings, before the marker handling below and before the
 	// recorded profile is computed (ptone/scion#1799): see
@@ -2287,6 +2302,15 @@ func ambiguousNonGitWorkspace(in startContextInputs, worktreeProvisioned bool) s
 // project directory and creates its split storage directories. The caller
 // holds the workspace lock on in.ProjectPath.
 func (s *Server) recordHubProjectFiles(ctx context.Context, in startContextInputs) {
+	// Record the .scion state this leaves (a no-op for paths that are not
+	// hub-managed workspace roots); see checkWorkspaceConfigRecord.
+	defer func() {
+		if err := recordWorkspaceConfigState(in.ProjectPath, in.ProjectID); err != nil {
+			s.agentLifecycleLog.Warn("Failed to record the hub-managed workspace's .scion state",
+				"agent_id", in.AgentID, "project_id", in.ProjectID, "path", in.ProjectPath, "error", err)
+		}
+	}()
+
 	// A broker copy of a hub workspace (~/.scion/projects/<slug>)
 	// records the hub project ID as its identity; see
 	// recordHubProjectIdentity. Done before the checks below, which
