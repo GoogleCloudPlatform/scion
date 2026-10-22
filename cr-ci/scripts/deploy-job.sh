@@ -4,7 +4,8 @@
 # MEDIATOR_SA_NAME roles/run.developer on that job only (C10).
 # Shape: RUNNER_CPU / RUNNER_MEMORY, one task, no retries, TASK_TIMEOUT, an
 # ephemeral-disk volume of RUNNER_DISK_GI at /scratch, identity EXEC_SA_NAME, and
-# the env RUNNER_BUILD_CACHE_IN_RAM for the entrypoint (the job's only env var:
+# the env RUNNER_BUILD_CACHE_IN_RAM and RUNNER_IDLE_TIMEOUT_SECONDS (from RUNNER_IDLE_TIMEOUT)
+# for the entrypoint (the job's only env vars:
 # --set-env-vars replaces the template's env on update).
 # --warm-up then runs one no-op execution (RUNNER_WARMUP=1: the entrypoint runs
 # its checks and exits 0 before any claim), so the first real job does not pay
@@ -51,6 +52,7 @@ IMAGE=$(crci_image_ref "${CFG[RUNNER_IMAGE_NAME]}" "$TAG")
 EXEC=$(crci_sa_email "${CFG[EXEC_SA_NAME]}")
 MEDIATOR=$(crci_sa_email "${CFG[MEDIATOR_SA_NAME]}")
 TIMEOUT_S=$(crci_duration_seconds "${CFG[TASK_TIMEOUT]}")
+IDLE_S=$(crci_duration_seconds "${CFG[RUNNER_IDLE_TIMEOUT]}")
 
 crci_note "image must exist (build-runner-image.sh)"
 if ! crci_exists gcloud artifacts docker images describe "$IMAGE" --project="$P" --format='value(image_summary.digest)'; then
@@ -66,7 +68,7 @@ SHAPE=(
   --cpu="${CFG[RUNNER_CPU]}" --memory="${CFG[RUNNER_MEMORY]}"
   --tasks=1 --parallelism=1 --max-retries=0 --task-timeout="${TIMEOUT_S}s"
   --labels=managed-by=cr-ci
-  --set-env-vars="RUNNER_BUILD_CACHE_IN_RAM=${CFG[RUNNER_BUILD_CACHE_IN_RAM]}"
+  --set-env-vars="RUNNER_BUILD_CACHE_IN_RAM=${CFG[RUNNER_BUILD_CACHE_IN_RAM]},RUNNER_IDLE_TIMEOUT_SECONDS=$IDLE_S"
 )
 VOLUME=(
   --add-volume="name=scratch,type=ephemeral-disk,size=${CFG[RUNNER_DISK_GI]}Gi"

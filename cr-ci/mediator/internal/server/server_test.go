@@ -785,6 +785,30 @@ func TestReconcileKeepsColdStartingRunners(t *testing.T) {
 	}
 }
 
+// TestReconcileReapsIdleStoppedRunnerOnFirstPass: a runner the entrypoint stopped
+// for its idle timeout (RUNNER_IDLE_TIMEOUT, default 10m, longer than ReapAfter)
+// leaves an offline, never-busy registration; it is aged from its launch, so the
+// first reconcile after the stop deletes it.
+func TestReconcileReapsIdleStoppedRunnerOnFirstPass(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	h.addSameRepoRun(10, fakes.GitHubJob{ID: 100, Status: "queued", Labels: []string{testLabel}})
+	h.queued(100, 10)
+	tok := h.executions()[0].Env["RUNNER_CLAIM_TOKEN"]
+	if code, _, _ := h.claim(tok); code != http.StatusOK {
+		t.Fatalf("claim: %d", code)
+	}
+	// Job 100 is cancelled before GitHub hands it to the runner, which then sits idle.
+	h.gh.SetJob(10, fakes.GitHubJob{ID: 100, Status: "completed", Labels: []string{testLabel}})
+	h.gh.SetRunnerState("cr-job-100", "online", false)
+	h.clock.Add(10 * time.Minute)
+	h.gh.SetRunnerState("cr-job-100", "offline", false) // idle timeout: run.sh stopped
+	h.cr.Complete("100")
+	if res := h.reconcile(); res.RunnersReaped != 1 {
+		t.Fatalf("reaped %d on the first pass after the idle stop, want 1", res.RunnersReaped)
+	}
+	h.wantLog(logging.EventRunnerReaped)
+}
+
 func TestReconcileBackfill(t *testing.T) {
 	h := newHarness(t, harnessOpts{max: 2})
 	t0 := h.clock.Now().Add(-10 * time.Minute)

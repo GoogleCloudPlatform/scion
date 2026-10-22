@@ -381,8 +381,8 @@ func TestEntrypointSuccess(t *testing.T) {
 	}
 	// The watcher's done FIFO is closed for the child: no fd of run.sh points at it.
 	// (Other inherited fds, such as a build wrapper's lock, are not the entrypoint's.)
-	if fds := h.stubFile("fds_long"); strings.Contains(fds, "watcher-done") {
-		t.Errorf("run.sh inherited the watcher's done FIFO:\n%s", fds)
+	if fds := h.stubFile("fds_long"); strings.Contains(fds, "watcher-done") || strings.Contains(fds, "idle-wait") {
+		t.Errorf("run.sh inherited the watcher's done FIFO or the idle timer's FIFO:\n%s", fds)
 	}
 	// An ignored SIGINT would break run.sh's graceful cancel (RUNNER_MANUALLY_TRAP_SIG).
 	if got := h.stubFile("int_trap"); got != "" {
@@ -604,6 +604,8 @@ func TestEntrypointConfigErrors(t *testing.T) {
 		{"http to a remote host", func(h *harness) { h.env["MEDIATOR_URL"] = "http://mediator.example.com" }, "must be an https origin"},
 		{"url with a path", func(h *harness) { h.env["MEDIATOR_URL"] = "https://mediator.example.com/x" }, "must be an https origin"},
 		{"remote metadata url", func(h *harness) { h.env["CR_METADATA_URL"] = "http://metadata.example.com" }, "CR_METADATA_URL must be"},
+		{"zero idle timeout", func(h *harness) { h.env["RUNNER_IDLE_TIMEOUT_SECONDS"] = "0" }, "RUNNER_IDLE_TIMEOUT_SECONDS must be"},
+		{"idle timeout with a unit", func(h *harness) { h.env["RUNNER_IDLE_TIMEOUT_SECONDS"] = "10m" }, "RUNNER_IDLE_TIMEOUT_SECONDS must be"},
 		{"runner dir without run.sh", func(h *harness) { os.Remove(filepath.Join(h.runnerDir, "run.sh")) }, "run.sh not found"},
 	}
 	for _, tc := range cases {
@@ -1497,5 +1499,73 @@ func TestEntrypointClaimFailureRemovesFIFODir(t *testing.T) {
 	expectFailure(t, h, h.run(), 3, "410")
 	if left, _ := filepath.Glob(filepath.Join(fifoRoot, "cr-ci-entrypoint.*")); len(left) != 0 {
 		t.Errorf("FIFO directory left behind after the failed claim: %v", left)
+	}
+}
+
+// --- Idle timeout (RUNNER_IDLE_TIMEOUT_SECONDS) -------------------------------------
+
+// A runner that has not started a job by its idle deadline is stopped like a cancel
+// (SIGTERM to run.sh), and the execution ends 0 with a distinct log line.
+func TestEntrypointIdleTimeoutStopsRunner(t *testing.T) {
+	h := newSuccessHarness(t)
+	h.env["RUNNER_IDLE_TIMEOUT_SECONDS"] = "1"
+	h.setRunSh(stubRunShWith(signalStub))
+	res := h.run()
+	if res.exitCode != 0 {
+		t.Errorf("exit code = %d, want 0 (an idle stop is not a failure); stderr:\n%s", res.exitCode, res.stderr)
+	}
+	if got := h.stubFile("signal"); got != "TERM" {
+		t.Errorf("run.sh received %q, want TERM from the idle watchdog", got)
+	}
+	for _, want := range []string{
+		"idle timeout: no job started within 1s of the container start; stopping the runner gracefully",
+		"idle_timeout: runner stopped after 1s without a job (run.sh exited 42); exiting 0",
+	} {
+		if !strings.Contains(res.stderr, want) {
+			t.Errorf("stderr does not contain %q:\n%s", want, res.stderr)
+		}
+	}
+}
+
+// A job that starts shortly before the deadline (about 2 s; the deadline counts from
+// the entrypoint's start, which leaves room for the claim) is not touched: the runner runs it to
+// the end and the entrypoint reports run.sh's own result.
+func TestEntrypointIdleTimeoutJobJustBeforeDeadline(t *testing.T) {
+	h := newSuccessHarness(t)
+	h.env["RUNNER_IDLE_TIMEOUT_SECONDS"] = "5"
+	h.setRunSh(stubRunShWith(`trap 'echo TERM > "$out/signal"; exit 42' TERM
+trap 'echo INT > "$out/signal"; exit 43' INT
+sleep 3
+echo "2026-10-22 21:00:00Z: Running job: lint"
+for _ in $(seq 1 30); do sleep 0.1; done
+echo "2026-10-22 21:00:03Z: Job lint completed with result: Succeeded"
+exit 0
+`))
+	res := h.run()
+	if res.exitCode != 0 {
+		t.Errorf("exit code = %d, want run.sh's 0; stderr:\n%s", res.exitCode, res.stderr)
+	}
+	if _, err := os.Stat(filepath.Join(h.stubOut, "signal")); err == nil {
+		t.Errorf("run.sh was signalled (%s), want the started job left alone", h.stubFile("signal"))
+	}
+	if strings.Contains(res.stderr, "idle") {
+		t.Errorf("stderr reports an idle stop for a runner that started a job:\n%s", res.stderr)
+	}
+	if !strings.Contains(res.stderr, "run.sh exited 0") {
+		t.Errorf("stderr does not report run.sh's exit:\n%s", res.stderr)
+	}
+}
+
+// A run that ends before the deadline does not wait for it, and leaves no watchdog behind.
+func TestEntrypointIdleTimeoutDoesNotDelayExit(t *testing.T) {
+	h := newSuccessHarness(t)
+	h.env["RUNNER_IDLE_TIMEOUT_SECONDS"] = "60"
+	start := time.Now()
+	res := h.run()
+	if res.exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr:\n%s", res.exitCode, res.stderr)
+	}
+	if d := time.Since(start); d > 30*time.Second {
+		t.Errorf("entrypoint took %s, want it to end with run.sh, not at the idle deadline", d)
 	}
 }

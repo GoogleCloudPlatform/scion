@@ -499,6 +499,17 @@ crci_validate_config() {
 
   _crci_duration_check TASK_TIMEOUT $((60 * 1000)) $((168 * 3600 * 1000)) "1m" "168h"
   _crci_duration_check CLAIM_TTL $((30 * 1000)) $((3600 * 1000)) "30s" "1h0m0s"
+  # RUNNER_IDLE_TIMEOUT: at least 1m and at most half of TASK_TIMEOUT (Load does the same).
+  local idle_ms task_ms
+  if [[ -n ${CFG[RUNNER_IDLE_TIMEOUT]} ]]; then
+    if ! idle_ms=$(_crci_duration_ms "${CFG[RUNNER_IDLE_TIMEOUT]}"); then
+      _crci_fail RUNNER_IDLE_TIMEOUT "\"${CFG[RUNNER_IDLE_TIMEOUT]}\" is not a duration"
+    elif ((idle_ms < 60 * 1000)); then
+      _crci_fail RUNNER_IDLE_TIMEOUT "${CFG[RUNNER_IDLE_TIMEOUT]} must be at least 1m"
+    elif task_ms=$(_crci_duration_ms "${CFG[TASK_TIMEOUT]}") && ((task_ms >= 60 * 1000 && task_ms <= 168 * 3600 * 1000 && idle_ms * 2 > task_ms)); then
+      _crci_fail RUNNER_IDLE_TIMEOUT "${CFG[RUNNER_IDLE_TIMEOUT]} must be at most half of TASK_TIMEOUT (${CFG[TASK_TIMEOUT]})"
+    fi
+  fi
 
   _crci_match ARTIFACT_REPO "$resid" "Artifact Registry repository ID"
   _crci_match BUILD_STAGING_BUCKET '^[a-z0-9][a-z0-9_-]{1,61}[a-z0-9]$' "Cloud Storage bucket name"

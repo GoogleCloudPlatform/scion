@@ -199,8 +199,18 @@ this, in order:
      A SIGTERM or SIGINT that arrives before `run.sh` runs (during the checks or the
      claim) stops the script at the next checkpoint with 128+n (143 or 130), without
      starting the runner; `/reconcile` reaps the unused registration.
+   - **Idle timeout.** If no `Running job:` line from the runner listener has appeared
+     within `RUNNER_IDLE_TIMEOUT_SECONDS` (default 600; `deploy-job.sh` sets it from
+     `RUNNER_IDLE_TIMEOUT`) of the container start, the entrypoint logs
+     `idle timeout: ...`, sends SIGTERM to `run.sh` (the same graceful path as a
+     cancel) and exits **0**, logging `idle_timeout: runner stopped ...`. GitHub may give
+     any queued job with the label to an idle runner, and that job only gets the rest
+     of the execution's task timeout; the idle timeout makes that at least
+     `TASK_TIMEOUT - RUNNER_IDLE_TIMEOUT`. A job that starts before the deadline is
+     never touched. The timer is a `read -t` on a FIFO in a subshell, killed when
+     `run.sh` exits.
 
-   The output goes through two FIFOs in a private temp dir under `/tmp`, small and
+   The output goes through FIFOs in a private temp dir under `/tmp`, small and
    on the root filesystem, never on `/scratch`. A watcher process that does not
    finish within 5 s of `run.sh`'s exit is abandoned, so a stray process holding
    the pipe cannot keep the execution alive.
