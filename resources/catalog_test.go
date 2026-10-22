@@ -195,7 +195,7 @@ func TestPlatformSkillsFS_ScionWebServing(t *testing.T) {
 		"If you could not run a browser, say so",
 		"Does not work: client-side routing by path",
 		"`HashRouter`, `createWebHashHistory`",
-		"`pushState`, `replaceState`, `BrowserRouter`",
+		"Search your SOURCE (not the build) for `BrowserRouter`, `createBrowserRouter` and `createWebHistory`",
 	} {
 		if !strings.Contains(content, want) {
 			t.Errorf("embedded scion-web-serving/SKILL.md does not contain %q", want)

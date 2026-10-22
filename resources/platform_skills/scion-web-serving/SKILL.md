@@ -86,14 +86,17 @@ https://googlecloudplatform.github.io/scion/hosted/user/port-forwarding/#multi-f
   for pages that are broken for them.
 - Search the built HTML for `src=`, `href=`, `url(`, `fetch(`, `XMLHttpRequest`,
   `EventSource`, `WebSocket`, `import(`, `localStorage`, `sessionStorage`,
-  `indexedDB`, `document.cookie`, `new Worker`, `SharedWorker`,
-  `serviceWorker`, `pushState`, `replaceState`, `BrowserRouter` and
-  `createWebHistory`. Anything that points at your server, or uses browser
-  storage, cookies, workers or path-based routing, will not work through the
-  link. Ignore matches inside minified library code and links to other
-  sites; look for URLs that point at your own server. This search is the
-  only check for storage, cookies, workers and path-based routing: they work
-  on `127.0.0.1`, so the browser check below does not catch them.
+  `indexedDB`, `document.cookie`, `new Worker`, `SharedWorker` and
+  `serviceWorker`. Anything that points at your server, or uses browser
+  storage, cookies or workers, will not work through the link. Ignore
+  matches inside minified library code and links to other sites; look for
+  URLs that point at your own server.
+- Search your SOURCE (not the build) for `BrowserRouter`,
+  `createBrowserRouter` and `createWebHistory`: any hit is path-based
+  routing, which will not work through the link.
+- These two searches are the only check for storage, cookies, workers and
+  path-based routing: they work on `127.0.0.1`, so the browser check below
+  does not catch them.
 - Load the page in a headless browser (for example Playwright Chromium) from
   `http://127.0.0.1:<port>/`, with every request other than the page itself
   blocked and recorded. In Playwright:
