@@ -61,6 +61,9 @@ var updateAgentDeletionHook func(ctx context.Context, tx *ent.Tx, id string)
 // read, so the predicate is always evaluated against the row the write
 // lands on.
 func (s *AgentStore) UpdateAgentDeletion(ctx context.Context, id string, pred store.DeletionPredicate, set store.DeletionFields) (int, error) {
+	if set.SetsRunIDs() {
+		return 0, fmt.Errorf("update agent deletion %s: %w: run IDs are written only by a soft finalize", id, store.ErrInvalidInput)
+	}
 	uid, err := parseUUID(id)
 	if err != nil {
 		return 0, err
@@ -174,6 +177,19 @@ func applyAgentDeletionFields(ctx context.Context, tx *ent.Tx, row *ent.Agent, s
 	}
 	if set.DeletedAt != nil {
 		upd.SetDeletedAt(*set.DeletedAt)
+	}
+	if set.RunID != nil {
+		upd.SetRunID(*set.RunID)
+		if *set.RunID != row.RunID {
+			upd.SetRunIDUpdatedAt(now.UTC())
+		}
+	}
+	if set.PreviousRunIDs != nil {
+		if prev := *set.PreviousRunIDs; len(prev) > 0 {
+			upd.SetPreviousRunIds(prev)
+		} else {
+			upd.ClearPreviousRunIds()
+		}
 	}
 
 	n, err := upd.Save(ctx)

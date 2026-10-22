@@ -1,0 +1,379 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build !no_sqlite
+
+package hub
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// Tests for ptone/scion#5016: when the broker refuses a run-scoped delete
+// because it holds a different run of the agent (ptone/scion#3080), the
+// delete engine deletes that reported run once, when the delete is forced
+// or the reported run is one of the row's previous runs, and then
+// finalizes. A second refusal is never retried, and a failure of the
+// retried delete never finalizes.
+
+// answerHeld answers a delete of the row's run run-a with the refusal
+// naming held, and any other run with then(runID).
+func answerHeld(t *testing.T, held string, then func(runID string) error) func(string) error {
+	return func(runID string) error {
+		if runID == "run-a" {
+			return runMismatchEnvelope(t, runID, held, true)
+		}
+		return then(runID)
+	}
+}
+
+func answerOK(string) error { return nil }
+
+// requireKept checks a failed delete: status, deletion code, the row kept
+// and not soft-deleted, the claim failed with code, and the prior phase
+// restored.
+func requireKept(t *testing.T, s store.Store, agentID string, r deleteResult, status int, code string, wantPhase state.Phase) {
+	t.Helper()
+	require.Equal(t, status, r.rec.Code, r.rec.Body.String())
+	_, details := errorBody(t, r.rec)
+	assert.Equal(t, code, details["deletionCode"])
+	got := mustGetAgent(t, s, agentID)
+	assert.True(t, got.DeletedAt.IsZero(), "the row is not soft-deleted")
+	assert.Equal(t, store.DeletionStateFailed, got.DeletionState)
+	assert.Equal(t, code, got.DeletionCode)
+	assert.Equal(t, string(wantPhase), got.Phase, "the prior phase is restored")
+}
+
+// Test 1: a force delete refused for run-a because the broker holds run-b
+// deletes run-b, then run-a as a previous run, and finalizes.
+func TestForceDelete_RunMismatch_DeletesReportedRun(t *testing.T) {
+	f := newRunMismatchFixture(t, "rmf-retry", state.PhaseRunning)
+	f.client.answer = answerHeld(t, "run-b", answerOK)
+	r := f.del(t, "?force=true")
+	require.Equal(t, http.StatusNoContent, r.rec.Code, r.rec.Body.String())
+	assert.True(t, agentGone(t, f.store, f.agent.ID), "a force delete is hard")
+	assert.Equal(t, []string{"run-a", "run-b", "run-a"}, f.client.deleted(),
+		"the recorded run, then the reported run, then the recorded run as a previous run")
+}
+
+// Test 2: the row's previous runs are sent after the recorded run, newest
+// first, and the reported run is not sent twice.
+func TestForceDelete_RunMismatch_PreviousRunsIncluded(t *testing.T) {
+	f := newRunMismatchFixture(t, "rmf-prev", state.PhaseRunning, "run-p")
+	f.client.answer = answerHeld(t, "run-b", answerOK)
+	r := f.del(t, "?force=true")
+	require.Equal(t, http.StatusNoContent, r.rec.Code, r.rec.Body.String())
+	assert.True(t, agentGone(t, f.store, f.agent.ID))
+	assert.Equal(t, []string{"run-a", "run-b", "run-a", "run-p"}, f.client.deleted())
+}
+
+// Test 3: the retried delete is refused because yet another run holds the
+// agent now: conflict, the row kept, and no third send.
+func TestForceDelete_RunMismatch_SecondMismatchRefuses(t *testing.T) {
+	f := newRunMismatchFixture(t, "rmf-second", state.PhaseRunning)
+	f.client.answer = answerHeld(t, "run-b", func(runID string) error {
+		return runMismatchEnvelope(t, runID, "run-c", true)
+	})
+	r := f.del(t, "?force=true")
+	requireKept(t, f.store, f.agent.ID, r, http.StatusConflict, store.DeletionCodeConflict, state.PhaseRunning)
+	sent := f.client.deleted()
+	require.Len(t, sent, 2, "exactly one retry: no third send (%v)", sent)
+	assert.Equal(t, []string{"run-a", "run-b"}, sent)
+	body := r.rec.Body.String()
+	assert.Contains(t, body, "held run run-b of this agent, not run run-a")
+	assert.Contains(t, body, "now holds run run-c")
+	assert.NotContains(t, body, "Force delete", "a forced delete's refusal does not suggest force")
+
+	// The next delete starts over from the row's run.
+	f.client.answer = answerOK
+	r = f.del(t, "")
+	require.Equal(t, http.StatusNoContent, r.rec.Code, r.rec.Body.String())
+}
+
+// Test 4: the retried delete is refused naming the recorded run again: no
+// third send either.
+func TestForceDelete_RunMismatch_SecondMismatchBackToRecorded(t *testing.T) {
+	f := newRunMismatchFixture(t, "rmf-back", state.PhaseRunning)
+	f.client.answer = answerHeld(t, "run-b", func(runID string) error {
+		return runMismatchEnvelope(t, runID, "run-a", true)
+	})
+	r := f.del(t, "?force=true")
+	requireKept(t, f.store, f.agent.ID, r, http.StatusConflict, store.DeletionCodeConflict, state.PhaseRunning)
+	sent := f.client.deleted()
+	require.Len(t, sent, 2, "exactly one retry: no third send (%v)", sent)
+	assert.Equal(t, []string{"run-a", "run-b"}, sent)
+}
+
+// Test 5: any other failure of the retried delete is classified like a
+// non-force dispatch failure: never the force finalize.
+func TestForceDelete_RunMismatch_RetryFailureNotFinalized(t *testing.T) {
+	for i, tc := range []struct {
+		name   string
+		err    func(t *testing.T) error
+		status int
+		code   string
+	}{
+		{"runtime error", func(t *testing.T) error {
+			return brokerEnvelope(t, http.StatusInternalServerError, "runtime_error", nil)
+		}, http.StatusBadGateway, store.DeletionCodeRuntimeError},
+		{"runtime unavailable", func(t *testing.T) error {
+			return brokerEnvelope(t, http.StatusServiceUnavailable, brokerCodeRuntimeUnavailable, nil)
+		}, http.StatusServiceUnavailable, store.DeletionCodeRuntimeUnavailable},
+		{"broker conflict", func(t *testing.T) error {
+			return brokerEnvelope(t, http.StatusConflict, "conflict", nil)
+		}, http.StatusConflict, store.DeletionCodeConflict},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRunMismatchFixture(t, fmt.Sprintf("rmf-fail-%d", i), state.PhaseRunning)
+			f.client.answer = answerHeld(t, "run-b", func(string) error { return tc.err(t) })
+			r := f.del(t, "?force=true")
+			requireKept(t, f.store, f.agent.ID, r, tc.status, tc.code, state.PhaseRunning)
+			assert.Equal(t, []string{"run-a", "run-b"}, f.client.deleted())
+		})
+	}
+}
+
+// Test 6: a retried delete refused as stale abandons the claim, as the
+// first dispatch's would.
+func TestForceDelete_RunMismatch_RetryStaleAbandons(t *testing.T) {
+	f := newRunMismatchFixture(t, "rmf-stale", state.PhaseRunning)
+	f.client.answer = answerHeld(t, "run-b", func(string) error { return staleDispatchErr() })
+	r := f.del(t, "?force=true")
+	require.NotEqual(t, http.StatusNoContent, r.rec.Code, r.rec.Body.String())
+	_, details := errorBody(t, r.rec)
+	assert.Equal(t, store.DeletionCodeAbandoned, details["deletionCode"])
+	got := mustGetAgent(t, f.store, f.agent.ID)
+	assert.True(t, got.DeletedAt.IsZero(), "the row was soft-deleted")
+	view := store.ComputeAgentDeletion(got, time.Now())
+	require.NotNil(t, view)
+	assert.Equal(t, store.DeletionCodeAbandoned, view.Code)
+	assert.Equal(t, []string{"run-a", "run-b"}, f.client.deleted())
+}
+
+// Test 7: a reported run that is not a valid run ID is never sent, even
+// with force, and the refusal does not suggest force.
+func TestForceDelete_RunMismatch_InvalidReportedRunRefuses(t *testing.T) {
+	f := newRunMismatchFixture(t, "rmf-invalid", state.PhaseRunning)
+	f.client.answer = answerHeld(t, "bad,run", answerOK)
+	r := f.del(t, "?force=true")
+	requireKept(t, f.store, f.agent.ID, r, http.StatusConflict, store.DeletionCodeConflict, state.PhaseRunning)
+	assert.Equal(t, []string{"run-a"}, f.client.deleted())
+	assert.NotContains(t, r.rec.Body.String(), "Force delete")
+}
+
+// Test 8: a plain delete whose reported run is not one of the row's
+// previous runs is still refused, sends only the recorded run, and its
+// message says that force delete removes the reported run; so does a
+// created row's best-effort delete.
+func TestPlainDelete_RunMismatch_RefusedSuggestsForce(t *testing.T) {
+	for _, phase := range []state.Phase{state.PhaseRunning, state.PhaseCreated} {
+		t.Run(string(phase), func(t *testing.T) {
+			f := newRunMismatchFixture(t, "rmf-plain-"+string(phase), phase, "run-p")
+			f.client.answer = answerHeld(t, "run-b", answerOK)
+			r := f.del(t, "")
+			requireKept(t, f.store, f.agent.ID, r, http.StatusConflict, store.DeletionCodeConflict, phase)
+			assert.Equal(t, []string{"run-a"}, f.client.deleted())
+			assert.Contains(t, r.rec.Body.String(), "Force delete removes run run-b that the broker holds, then the agent")
+		})
+	}
+}
+
+// Test 9: a created row's best-effort delete with force deletes the
+// reported run too.
+func TestForceDelete_RunMismatch_BestEffortRetries(t *testing.T) {
+	f := newRunMismatchFixture(t, "rmf-created", state.PhaseCreated)
+	f.client.answer = answerHeld(t, "run-b", answerOK)
+	r := f.del(t, "?force=true")
+	require.Equal(t, http.StatusNoContent, r.rec.Code, r.rec.Body.String())
+	assert.True(t, agentGone(t, f.store, f.agent.ID))
+	assert.Equal(t, []string{"run-a", "run-b", "run-a"}, f.client.deleted())
+}
+
+// Test 10: across nodes, the retried delete is a second intent pinned to
+// the reported run, with the recorded run among its previous runs.
+func TestForceDelete_RunMismatch_DeferredRetry(t *testing.T) {
+	setDeleteWaitTimeout(t, func(context.Context) time.Duration { return 10 * time.Second })
+	f := newDeferredDeleteFixture(t, "rmf-deferred", nil)
+	_, err := f.store.SetAgentRunID(context.Background(), f.agent.ID, "run-a", nil)
+	require.NoError(t, err)
+
+	refusal := fmt.Errorf("dispatch delete: %w", deleteAgentError(runMismatchEnvelope(t, "run-a", "run-b", true), "run-a"))
+	var (
+		mu      sync.Mutex
+		intents []*DeleteDispatchArgs
+	)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		seen := map[string]bool{}
+		assert.Eventually(t, func() bool {
+			all, _ := f.store.ListPendingDispatch(context.Background(), f.agent.RuntimeBrokerID)
+			for _, d := range all {
+				if d.AgentID != f.agent.ID || d.Op != brokerDispatchOpDelete || seen[d.ID] {
+					continue
+				}
+				seen[d.ID] = true
+				args, err := UnmarshalDeleteArgs(d.Args)
+				if !assert.NoError(t, err) {
+					return true
+				}
+				mu.Lock()
+				intents = append(intents, args)
+				n := len(intents)
+				mu.Unlock()
+				if ok, _ := f.store.ClaimBrokerDispatch(context.Background(), d.ID, "test-owner"); ok {
+					if n == 1 {
+						_ = f.store.FailBrokerDispatch(context.Background(), d.ID, refusal.Error(), dispatchFailureResult(refusal))
+					} else {
+						_ = f.store.CompleteBrokerDispatch(context.Background(), d.ID, "")
+					}
+				}
+				f.bus.PublishDispatchDone(context.Background(), d.ID)
+				if n == 2 {
+					return true
+				}
+			}
+			return false
+		}, 5*time.Second, 10*time.Millisecond, "the retried delete intent was never written")
+	}()
+
+	r := f.del(t, "?force=true")
+	<-done
+	require.Equal(t, http.StatusNoContent, r.rec.Code, r.rec.Body.String())
+	assert.True(t, agentGone(t, f.store, f.agent.ID))
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, intents, 2)
+	assert.Equal(t, "run-a", intents[0].RunID)
+	assert.Equal(t, "run-b", intents[1].RunID, "the retry is pinned to the reported run")
+	assert.Contains(t, intents[1].PreviousRunIDs, "run-a", "the recorded run is a previous run of the retry")
+	assert.NotContains(t, intents[1].PreviousRunIDs, "run-b")
+}
+
+// Test 11 (1b) and the soft finish: a plain delete refused because the
+// broker holds one of the row's previous runs deletes it, then the
+// recorded run, and soft-deletes the row recording the run it deleted,
+// with the recorded run among the previous runs.
+func TestPlainDelete_RunMismatch_PreviousRun_SoftRecordsRun(t *testing.T) {
+	f := newRunMismatchFixture(t, "rmf-soft", state.PhaseRunning, "run-p")
+	f.srv.config.SoftDeleteRetention = time.Hour
+	f.client.answer = answerHeld(t, "run-p", answerOK)
+	r := f.del(t, "")
+	require.Equal(t, http.StatusNoContent, r.rec.Code, r.rec.Body.String())
+	assert.Equal(t, []string{"run-a", "run-p", "run-a"}, f.client.deleted())
+	got := mustGetAgent(t, f.store, f.agent.ID)
+	require.False(t, got.DeletedAt.IsZero(), "soft-deleted")
+	assert.Equal(t, "run-p", got.RunID, "the row records the run the delete removed")
+	assert.Equal(t, []string{"run-a"}, got.PreviousRunIDs, "the recorded run is a previous run")
+}
+
+// A soft delete that needed no retry keeps the row's runs.
+func TestPlainDelete_NoMismatch_SoftKeepsRuns(t *testing.T) {
+	f := newRunMismatchFixture(t, "rmf-soft-plain", state.PhaseRunning, "run-p")
+	f.srv.config.SoftDeleteRetention = time.Hour
+	r := f.del(t, "")
+	require.Equal(t, http.StatusNoContent, r.rec.Code, r.rec.Body.String())
+	got := mustGetAgent(t, f.store, f.agent.ID)
+	require.False(t, got.DeletedAt.IsZero(), "soft-deleted")
+	assert.Equal(t, "run-a", got.RunID)
+	assert.Equal(t, []string{"run-p"}, got.PreviousRunIDs)
+}
+
+// Test 12 (1b): the plain-delete retry and its guards.
+func TestPlainDelete_RunMismatch_PreviousRun(t *testing.T) {
+	t.Run("member: deleted and finalized", func(t *testing.T) {
+		f := newRunMismatchFixture(t, "rmf-1b-ok", state.PhaseRunning, "run-p")
+		f.client.answer = answerHeld(t, "run-p", answerOK)
+		r := f.del(t, "")
+		require.Equal(t, http.StatusNoContent, r.rec.Code, r.rec.Body.String())
+		assert.True(t, agentGone(t, f.store, f.agent.ID))
+		assert.Equal(t, []string{"run-a", "run-p", "run-a"}, f.client.deleted())
+	})
+	t.Run("not a member: refused", func(t *testing.T) {
+		f := newRunMismatchFixture(t, "rmf-1b-no", state.PhaseRunning, "run-p")
+		f.client.answer = answerHeld(t, "run-b", answerOK)
+		r := f.del(t, "")
+		requireKept(t, f.store, f.agent.ID, r, http.StatusConflict, store.DeletionCodeConflict, state.PhaseRunning)
+		assert.Equal(t, []string{"run-a"}, f.client.deleted())
+	})
+	t.Run("second mismatch: refused, no loop", func(t *testing.T) {
+		f := newRunMismatchFixture(t, "rmf-1b-second", state.PhaseRunning, "run-p")
+		f.client.answer = answerHeld(t, "run-p", func(runID string) error {
+			return runMismatchEnvelope(t, runID, "run-c", true)
+		})
+		r := f.del(t, "")
+		requireKept(t, f.store, f.agent.ID, r, http.StatusConflict, store.DeletionCodeConflict, state.PhaseRunning)
+		sent := f.client.deleted()
+		require.Len(t, sent, 2, "exactly one retry: no third send (%v)", sent)
+		assert.Equal(t, []string{"run-a", "run-p"}, sent)
+		body := r.rec.Body.String()
+		assert.Contains(t, body, "now holds run run-c")
+		assert.Contains(t, body, "Retry the delete")
+		assert.NotContains(t, body, "Force delete", "the hint is not given after the retry already ran")
+	})
+	t.Run("invalid member: refused", func(t *testing.T) {
+		f := newRunMismatchFixture(t, "rmf-1b-invalid", state.PhaseRunning, "bad,run")
+		f.client.answer = answerHeld(t, "bad,run", answerOK)
+		r := f.del(t, "")
+		requireKept(t, f.store, f.agent.ID, r, http.StatusConflict, store.DeletionCodeConflict, state.PhaseRunning)
+		assert.Equal(t, []string{"run-a"}, f.client.deleted())
+		assert.NotContains(t, r.rec.Body.String(), "Force delete")
+	})
+}
+
+func TestRetryReportedRun(t *testing.T) {
+	snap := &store.Agent{RunID: "run-a", PreviousRunIDs: []string{"run-p", "bad,run"}}
+	for _, tc := range []struct {
+		name    string
+		force   bool
+		current string
+		retry   bool
+		why     string
+	}{
+		{"force, valid", true, "run-b", true, retryReportedRunForce},
+		{"force, invalid", true, "bad,run", false, ""},
+		{"force, empty", true, "", false, ""},
+		{"force, same as requested", true, "run-a", false, ""},
+		{"plain, member", false, "run-p", true, retryReportedRunPrevious},
+		{"plain, not a member", false, "run-b", false, ""},
+		{"plain, invalid member", false, "bad,run", false, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			retry, why := retryReportedRun(tc.force, snap, &DeleteRunMismatchError{RequestedRunID: "run-a", CurrentRunID: tc.current})
+			assert.Equal(t, tc.retry, retry)
+			assert.Equal(t, tc.why, why)
+		})
+	}
+}
+
+func TestEngineRunMismatchMessage(t *testing.T) {
+	valid := &DeleteRunMismatchError{RequestedRunID: "run-a", CurrentRunID: "run-b"}
+	invalid := &DeleteRunMismatchError{RequestedRunID: "run-a", CurrentRunID: "bad,run"}
+	assert.Contains(t, engineRunMismatchMessage(valid, false), "Force delete removes run run-b")
+	assert.NotContains(t, engineRunMismatchMessage(valid, true), "Force delete")
+	assert.NotContains(t, engineRunMismatchMessage(invalid, false), "Force delete")
+	assert.Contains(t, createCleanupRefusedMessage(valid), "Delete the agent to retry; force delete removes run run-b")
+	assert.Equal(t, createCleanupRefusedPrefix+deleteRunMismatchMessage(invalid)+". Delete the agent to retry.",
+		createCleanupRefusedMessage(invalid))
+}

@@ -36,6 +36,9 @@ func (c *CompositeStore) FinalizeAgentDeletion(ctx context.Context, id string, p
 	default:
 		return 0, fmt.Errorf("finalize agent deletion %s: %w: mode %q", id, store.ErrInvalidInput, mode)
 	}
+	if mode == store.DeletionFinalizeHard && set.SetsRunIDs() {
+		return 0, fmt.Errorf("finalize agent deletion %s: %w: run IDs are written only by a soft finalize", id, store.ErrInvalidInput)
+	}
 	uid, err := parseUUID(id)
 	if err != nil {
 		return 0, err
