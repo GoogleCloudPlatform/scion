@@ -118,8 +118,10 @@ func TestTestInfraMarkUnmark_KeyLifecycle(t *testing.T) {
 	})
 
 	testInfraMarkHubID, testInfraMarkAcknowledge = "hub-1", true
+	cfg := &config.GlobalConfig{}
+	cfg.Hub.HubID = "hub-1" // pinned, and equal to --hub-id
 	var out bytes.Buffer
-	require.NoError(t, markTestInfra(ctx, client, &config.GlobalConfig{}, &out))
+	require.NoError(t, markTestInfra(ctx, client, cfg, &out))
 	key, err := testinfra.ReadWebSessionKey(ctx, client, "hub-1")
 	require.NoError(t, err)
 	assert.Contains(t, out.String(), "web session key was generated")
@@ -173,6 +175,7 @@ func TestTestInfraUnmark_GuardedOpenDestroysKey(t *testing.T) {
 
 	// Mark through the same guarded opener the mark command uses.
 	cfg, markClient := tiaMarkDB(t)
+	cfg.Hub.HubID = tiaCmdHubID // pinned, and equal to --hub-id
 	testInfraMarkHubID, testInfraMarkAcknowledge = tiaCmdHubID, true
 	var out bytes.Buffer
 	require.NoError(t, markTestInfra(ctx, markClient, cfg, &out))

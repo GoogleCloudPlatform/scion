@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/require"
 )
@@ -102,15 +103,13 @@ func TestResolveDerivedConfig_GoldenCreatePath(t *testing.T) {
 		Scope:                store.TemplateScopeGlobal,
 		Status:               store.TemplateStatusActive,
 		ContentHash:          "tmpl-golden-hash-v1",
-		// The template's image and env are environment keys the hub no
-		// longer copies (ptone/scion#4222); they must not appear below.
-		Config: &store.TemplateConfig{
+		// The template's image and env are environment keys the hub does
+		// not copy (ptone/scion#4222); they must not appear below. A
+		// template stamps no hubAccessScopes (ptone/scion#4224).
+		AgentConfig: &api.ScionConfig{
 			Image: "golden-template-image:v1",
 			Env: map[string]string{
 				"TEMPLATE_ENV_KEY": "template-value",
-			},
-			HubAccess: &store.HubAccessConfig{
-				Scopes: []string{"golden-scope"},
 			},
 		},
 	}
@@ -141,6 +140,8 @@ func TestResolveDerivedConfig_GoldenCreatePath(t *testing.T) {
 
 	want := fmt.Sprintf(`{
   "model": "concrete-model-x",
+  "modelSize": "extra-large",
+  "harness": "claude",
   "workspace": "/tmp/golden-workspace",
   "gitClone": {
     "url": "https://example.com/golden/repo.git",
@@ -152,7 +153,6 @@ func TestResolveDerivedConfig_GoldenCreatePath(t *testing.T) {
   "harnessConfigId": %q,
   "harnessConfigHash": "hc-golden-hash-v1",
   "creatorName": "dev@localhost",
-  "hubAccessScopes": ["golden-scope"],
   "agentRole": "baseline",
   "inlineConfig": {
     "detached": null

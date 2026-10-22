@@ -76,6 +76,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectcontributor"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectprestarthook"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectsyncstate"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectvisitorexclusion"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectvisitorrule"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/relayinstance"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/rolebinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/roledefinition"
@@ -225,6 +227,10 @@ type Client struct {
 	ProjectPreStartHook *ProjectPreStartHookClient
 	// ProjectSyncState is the client for interacting with the ProjectSyncState builders.
 	ProjectSyncState *ProjectSyncStateClient
+	// ProjectVisitorExclusion is the client for interacting with the ProjectVisitorExclusion builders.
+	ProjectVisitorExclusion *ProjectVisitorExclusionClient
+	// ProjectVisitorRule is the client for interacting with the ProjectVisitorRule builders.
+	ProjectVisitorRule *ProjectVisitorRuleClient
 	// RelayInstance is the client for interacting with the RelayInstance builders.
 	RelayInstance *RelayInstanceClient
 	// RoleBinding is the client for interacting with the RoleBinding builders.
@@ -340,6 +346,8 @@ func (c *Client) init() {
 	c.ProjectContributor = NewProjectContributorClient(c.config)
 	c.ProjectPreStartHook = NewProjectPreStartHookClient(c.config)
 	c.ProjectSyncState = NewProjectSyncStateClient(c.config)
+	c.ProjectVisitorExclusion = NewProjectVisitorExclusionClient(c.config)
+	c.ProjectVisitorRule = NewProjectVisitorRuleClient(c.config)
 	c.RelayInstance = NewRelayInstanceClient(c.config)
 	c.RoleBinding = NewRoleBindingClient(c.config)
 	c.RoleDefinition = NewRoleDefinitionClient(c.config)
@@ -514,6 +522,8 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		ProjectContributor:            NewProjectContributorClient(cfg),
 		ProjectPreStartHook:           NewProjectPreStartHookClient(cfg),
 		ProjectSyncState:              NewProjectSyncStateClient(cfg),
+		ProjectVisitorExclusion:       NewProjectVisitorExclusionClient(cfg),
+		ProjectVisitorRule:            NewProjectVisitorRuleClient(cfg),
 		RelayInstance:                 NewRelayInstanceClient(cfg),
 		RoleBinding:                   NewRoleBindingClient(cfg),
 		RoleDefinition:                NewRoleDefinitionClient(cfg),
@@ -615,6 +625,8 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		ProjectContributor:            NewProjectContributorClient(cfg),
 		ProjectPreStartHook:           NewProjectPreStartHookClient(cfg),
 		ProjectSyncState:              NewProjectSyncStateClient(cfg),
+		ProjectVisitorExclusion:       NewProjectVisitorExclusionClient(cfg),
+		ProjectVisitorRule:            NewProjectVisitorRuleClient(cfg),
 		RelayInstance:                 NewRelayInstanceClient(cfg),
 		RoleBinding:                   NewRoleBindingClient(cfg),
 		RoleDefinition:                NewRoleDefinitionClient(cfg),
@@ -682,12 +694,13 @@ func (c *Client) Use(hooks ...Hook) {
 		c.MaintenanceOperationRun, c.MembershipLossCheck, c.Message,
 		c.MessageAddressee, c.MutationAudit, c.NonceCache, c.Notification,
 		c.NotificationSubscription, c.PolicyBinding, c.Project, c.ProjectContributor,
-		c.ProjectPreStartHook, c.ProjectSyncState, c.RelayInstance, c.RoleBinding,
-		c.RoleDefinition, c.RuntimeBroker, c.Schedule, c.ScheduledEvent, c.Secret,
-		c.Skill, c.SkillInjection, c.SkillRegistry, c.SkillVersion,
-		c.SubscriptionTemplate, c.Template, c.TestIdentityDelegation,
-		c.TestIdentityLoginCode, c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember,
-		c.UsageReservation, c.User, c.UserAccessToken, c.UserTerminalWorkspace,
+		c.ProjectPreStartHook, c.ProjectSyncState, c.ProjectVisitorExclusion,
+		c.ProjectVisitorRule, c.RelayInstance, c.RoleBinding, c.RoleDefinition,
+		c.RuntimeBroker, c.Schedule, c.ScheduledEvent, c.Secret, c.Skill,
+		c.SkillInjection, c.SkillRegistry, c.SkillVersion, c.SubscriptionTemplate,
+		c.Template, c.TestIdentityDelegation, c.TestIdentityLoginCode,
+		c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember, c.UsageReservation,
+		c.User, c.UserAccessToken, c.UserTerminalWorkspace,
 	} {
 		n.Use(hooks...)
 	}
@@ -713,12 +726,13 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.MaintenanceOperationRun, c.MembershipLossCheck, c.Message,
 		c.MessageAddressee, c.MutationAudit, c.NonceCache, c.Notification,
 		c.NotificationSubscription, c.PolicyBinding, c.Project, c.ProjectContributor,
-		c.ProjectPreStartHook, c.ProjectSyncState, c.RelayInstance, c.RoleBinding,
-		c.RoleDefinition, c.RuntimeBroker, c.Schedule, c.ScheduledEvent, c.Secret,
-		c.Skill, c.SkillInjection, c.SkillRegistry, c.SkillVersion,
-		c.SubscriptionTemplate, c.Template, c.TestIdentityDelegation,
-		c.TestIdentityLoginCode, c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember,
-		c.UsageReservation, c.User, c.UserAccessToken, c.UserTerminalWorkspace,
+		c.ProjectPreStartHook, c.ProjectSyncState, c.ProjectVisitorExclusion,
+		c.ProjectVisitorRule, c.RelayInstance, c.RoleBinding, c.RoleDefinition,
+		c.RuntimeBroker, c.Schedule, c.ScheduledEvent, c.Secret, c.Skill,
+		c.SkillInjection, c.SkillRegistry, c.SkillVersion, c.SubscriptionTemplate,
+		c.Template, c.TestIdentityDelegation, c.TestIdentityLoginCode,
+		c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember, c.UsageReservation,
+		c.User, c.UserAccessToken, c.UserTerminalWorkspace,
 	} {
 		n.Intercept(interceptors...)
 	}
@@ -847,6 +861,10 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.ProjectPreStartHook.mutate(ctx, m)
 	case *ProjectSyncStateMutation:
 		return c.ProjectSyncState.mutate(ctx, m)
+	case *ProjectVisitorExclusionMutation:
+		return c.ProjectVisitorExclusion.mutate(ctx, m)
+	case *ProjectVisitorRuleMutation:
+		return c.ProjectVisitorRule.mutate(ctx, m)
 	case *RelayInstanceMutation:
 		return c.RelayInstance.mutate(ctx, m)
 	case *RoleBindingMutation:
@@ -9324,6 +9342,272 @@ func (c *ProjectSyncStateClient) mutate(ctx context.Context, m *ProjectSyncState
 	}
 }
 
+// ProjectVisitorExclusionClient is a client for the ProjectVisitorExclusion schema.
+type ProjectVisitorExclusionClient struct {
+	config
+}
+
+// NewProjectVisitorExclusionClient returns a client for the ProjectVisitorExclusion from the given config.
+func NewProjectVisitorExclusionClient(c config) *ProjectVisitorExclusionClient {
+	return &ProjectVisitorExclusionClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `projectvisitorexclusion.Hooks(f(g(h())))`.
+func (c *ProjectVisitorExclusionClient) Use(hooks ...Hook) {
+	c.hooks.ProjectVisitorExclusion = append(c.hooks.ProjectVisitorExclusion, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `projectvisitorexclusion.Intercept(f(g(h())))`.
+func (c *ProjectVisitorExclusionClient) Intercept(interceptors ...Interceptor) {
+	c.inters.ProjectVisitorExclusion = append(c.inters.ProjectVisitorExclusion, interceptors...)
+}
+
+// Create returns a builder for creating a ProjectVisitorExclusion entity.
+func (c *ProjectVisitorExclusionClient) Create() *ProjectVisitorExclusionCreate {
+	mutation := newProjectVisitorExclusionMutation(c.config, OpCreate)
+	return &ProjectVisitorExclusionCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of ProjectVisitorExclusion entities.
+func (c *ProjectVisitorExclusionClient) CreateBulk(builders ...*ProjectVisitorExclusionCreate) *ProjectVisitorExclusionCreateBulk {
+	return &ProjectVisitorExclusionCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *ProjectVisitorExclusionClient) MapCreateBulk(slice any, setFunc func(*ProjectVisitorExclusionCreate, int)) *ProjectVisitorExclusionCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &ProjectVisitorExclusionCreateBulk{err: fmt.Errorf("calling to ProjectVisitorExclusionClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*ProjectVisitorExclusionCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &ProjectVisitorExclusionCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for ProjectVisitorExclusion.
+func (c *ProjectVisitorExclusionClient) Update() *ProjectVisitorExclusionUpdate {
+	mutation := newProjectVisitorExclusionMutation(c.config, OpUpdate)
+	return &ProjectVisitorExclusionUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *ProjectVisitorExclusionClient) UpdateOne(_m *ProjectVisitorExclusion) *ProjectVisitorExclusionUpdateOne {
+	mutation := newProjectVisitorExclusionMutation(c.config, OpUpdateOne, withProjectVisitorExclusion(_m))
+	return &ProjectVisitorExclusionUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *ProjectVisitorExclusionClient) UpdateOneID(id uuid.UUID) *ProjectVisitorExclusionUpdateOne {
+	mutation := newProjectVisitorExclusionMutation(c.config, OpUpdateOne, withProjectVisitorExclusionID(id))
+	return &ProjectVisitorExclusionUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for ProjectVisitorExclusion.
+func (c *ProjectVisitorExclusionClient) Delete() *ProjectVisitorExclusionDelete {
+	mutation := newProjectVisitorExclusionMutation(c.config, OpDelete)
+	return &ProjectVisitorExclusionDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *ProjectVisitorExclusionClient) DeleteOne(_m *ProjectVisitorExclusion) *ProjectVisitorExclusionDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *ProjectVisitorExclusionClient) DeleteOneID(id uuid.UUID) *ProjectVisitorExclusionDeleteOne {
+	builder := c.Delete().Where(projectvisitorexclusion.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &ProjectVisitorExclusionDeleteOne{builder}
+}
+
+// Query returns a query builder for ProjectVisitorExclusion.
+func (c *ProjectVisitorExclusionClient) Query() *ProjectVisitorExclusionQuery {
+	return &ProjectVisitorExclusionQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeProjectVisitorExclusion},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a ProjectVisitorExclusion entity by its id.
+func (c *ProjectVisitorExclusionClient) Get(ctx context.Context, id uuid.UUID) (*ProjectVisitorExclusion, error) {
+	return c.Query().Where(projectvisitorexclusion.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *ProjectVisitorExclusionClient) GetX(ctx context.Context, id uuid.UUID) *ProjectVisitorExclusion {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *ProjectVisitorExclusionClient) Hooks() []Hook {
+	return c.hooks.ProjectVisitorExclusion
+}
+
+// Interceptors returns the client interceptors.
+func (c *ProjectVisitorExclusionClient) Interceptors() []Interceptor {
+	return c.inters.ProjectVisitorExclusion
+}
+
+func (c *ProjectVisitorExclusionClient) mutate(ctx context.Context, m *ProjectVisitorExclusionMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&ProjectVisitorExclusionCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&ProjectVisitorExclusionUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&ProjectVisitorExclusionUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&ProjectVisitorExclusionDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown ProjectVisitorExclusion mutation op: %q", m.Op())
+	}
+}
+
+// ProjectVisitorRuleClient is a client for the ProjectVisitorRule schema.
+type ProjectVisitorRuleClient struct {
+	config
+}
+
+// NewProjectVisitorRuleClient returns a client for the ProjectVisitorRule from the given config.
+func NewProjectVisitorRuleClient(c config) *ProjectVisitorRuleClient {
+	return &ProjectVisitorRuleClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `projectvisitorrule.Hooks(f(g(h())))`.
+func (c *ProjectVisitorRuleClient) Use(hooks ...Hook) {
+	c.hooks.ProjectVisitorRule = append(c.hooks.ProjectVisitorRule, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `projectvisitorrule.Intercept(f(g(h())))`.
+func (c *ProjectVisitorRuleClient) Intercept(interceptors ...Interceptor) {
+	c.inters.ProjectVisitorRule = append(c.inters.ProjectVisitorRule, interceptors...)
+}
+
+// Create returns a builder for creating a ProjectVisitorRule entity.
+func (c *ProjectVisitorRuleClient) Create() *ProjectVisitorRuleCreate {
+	mutation := newProjectVisitorRuleMutation(c.config, OpCreate)
+	return &ProjectVisitorRuleCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of ProjectVisitorRule entities.
+func (c *ProjectVisitorRuleClient) CreateBulk(builders ...*ProjectVisitorRuleCreate) *ProjectVisitorRuleCreateBulk {
+	return &ProjectVisitorRuleCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *ProjectVisitorRuleClient) MapCreateBulk(slice any, setFunc func(*ProjectVisitorRuleCreate, int)) *ProjectVisitorRuleCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &ProjectVisitorRuleCreateBulk{err: fmt.Errorf("calling to ProjectVisitorRuleClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*ProjectVisitorRuleCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &ProjectVisitorRuleCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for ProjectVisitorRule.
+func (c *ProjectVisitorRuleClient) Update() *ProjectVisitorRuleUpdate {
+	mutation := newProjectVisitorRuleMutation(c.config, OpUpdate)
+	return &ProjectVisitorRuleUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *ProjectVisitorRuleClient) UpdateOne(_m *ProjectVisitorRule) *ProjectVisitorRuleUpdateOne {
+	mutation := newProjectVisitorRuleMutation(c.config, OpUpdateOne, withProjectVisitorRule(_m))
+	return &ProjectVisitorRuleUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *ProjectVisitorRuleClient) UpdateOneID(id uuid.UUID) *ProjectVisitorRuleUpdateOne {
+	mutation := newProjectVisitorRuleMutation(c.config, OpUpdateOne, withProjectVisitorRuleID(id))
+	return &ProjectVisitorRuleUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for ProjectVisitorRule.
+func (c *ProjectVisitorRuleClient) Delete() *ProjectVisitorRuleDelete {
+	mutation := newProjectVisitorRuleMutation(c.config, OpDelete)
+	return &ProjectVisitorRuleDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *ProjectVisitorRuleClient) DeleteOne(_m *ProjectVisitorRule) *ProjectVisitorRuleDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *ProjectVisitorRuleClient) DeleteOneID(id uuid.UUID) *ProjectVisitorRuleDeleteOne {
+	builder := c.Delete().Where(projectvisitorrule.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &ProjectVisitorRuleDeleteOne{builder}
+}
+
+// Query returns a query builder for ProjectVisitorRule.
+func (c *ProjectVisitorRuleClient) Query() *ProjectVisitorRuleQuery {
+	return &ProjectVisitorRuleQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeProjectVisitorRule},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a ProjectVisitorRule entity by its id.
+func (c *ProjectVisitorRuleClient) Get(ctx context.Context, id uuid.UUID) (*ProjectVisitorRule, error) {
+	return c.Query().Where(projectvisitorrule.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *ProjectVisitorRuleClient) GetX(ctx context.Context, id uuid.UUID) *ProjectVisitorRule {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *ProjectVisitorRuleClient) Hooks() []Hook {
+	return c.hooks.ProjectVisitorRule
+}
+
+// Interceptors returns the client interceptors.
+func (c *ProjectVisitorRuleClient) Interceptors() []Interceptor {
+	return c.inters.ProjectVisitorRule
+}
+
+func (c *ProjectVisitorRuleClient) mutate(ctx context.Context, m *ProjectVisitorRuleMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&ProjectVisitorRuleCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&ProjectVisitorRuleUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&ProjectVisitorRuleUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&ProjectVisitorRuleDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown ProjectVisitorRule mutation op: %q", m.Op())
+	}
+}
+
 // RelayInstanceClient is a client for the RelayInstance schema.
 type RelayInstanceClient struct {
 	config
@@ -12459,11 +12743,12 @@ type (
 		LimitDefinition, MaintenanceOperation, MaintenanceOperationRun,
 		MembershipLossCheck, Message, MessageAddressee, MutationAudit, NonceCache,
 		Notification, NotificationSubscription, PolicyBinding, Project,
-		ProjectContributor, ProjectPreStartHook, ProjectSyncState, RelayInstance,
-		RoleBinding, RoleDefinition, RuntimeBroker, Schedule, ScheduledEvent, Secret,
-		Skill, SkillInjection, SkillRegistry, SkillVersion, SubscriptionTemplate,
-		Template, TestIdentityDelegation, TestIdentityLoginCode, TestInfraMarker,
-		ThreadGroup, ThreadGroupMember, UsageReservation, User, UserAccessToken,
+		ProjectContributor, ProjectPreStartHook, ProjectSyncState,
+		ProjectVisitorExclusion, ProjectVisitorRule, RelayInstance, RoleBinding,
+		RoleDefinition, RuntimeBroker, Schedule, ScheduledEvent, Secret, Skill,
+		SkillInjection, SkillRegistry, SkillVersion, SubscriptionTemplate, Template,
+		TestIdentityDelegation, TestIdentityLoginCode, TestInfraMarker, ThreadGroup,
+		ThreadGroupMember, UsageReservation, User, UserAccessToken,
 		UserTerminalWorkspace []ent.Hook
 	}
 	inters struct {
@@ -12481,11 +12766,12 @@ type (
 		LimitDefinition, MaintenanceOperation, MaintenanceOperationRun,
 		MembershipLossCheck, Message, MessageAddressee, MutationAudit, NonceCache,
 		Notification, NotificationSubscription, PolicyBinding, Project,
-		ProjectContributor, ProjectPreStartHook, ProjectSyncState, RelayInstance,
-		RoleBinding, RoleDefinition, RuntimeBroker, Schedule, ScheduledEvent, Secret,
-		Skill, SkillInjection, SkillRegistry, SkillVersion, SubscriptionTemplate,
-		Template, TestIdentityDelegation, TestIdentityLoginCode, TestInfraMarker,
-		ThreadGroup, ThreadGroupMember, UsageReservation, User, UserAccessToken,
+		ProjectContributor, ProjectPreStartHook, ProjectSyncState,
+		ProjectVisitorExclusion, ProjectVisitorRule, RelayInstance, RoleBinding,
+		RoleDefinition, RuntimeBroker, Schedule, ScheduledEvent, Secret, Skill,
+		SkillInjection, SkillRegistry, SkillVersion, SubscriptionTemplate, Template,
+		TestIdentityDelegation, TestIdentityLoginCode, TestInfraMarker, ThreadGroup,
+		ThreadGroupMember, UsageReservation, User, UserAccessToken,
 		UserTerminalWorkspace []ent.Interceptor
 	}
 )

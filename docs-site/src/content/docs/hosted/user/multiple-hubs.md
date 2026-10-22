@@ -30,12 +30,12 @@ Not logged in to hub 'prod'. Run: scion hub auth login --hub prod
 Hubs are also added for you:
 
 - **A background `scion server start`** (with the web server on, the default; `--foreground` does not) adds the local workstation hub as `local` (`local-2` and so on if that name is taken). It becomes the current hub when no hub is current yet and your global settings do not name another hub in `hub.endpoint`.
-- **`scion hub auth login`** adds a hub URL given with `--hub-url` or `--hub`, with a nickname derived from the host (for example `hub` for `https://hub.example.com`). It does not make the hub current.
+- **`scion hub auth login`** adds a hub URL given with `--hub` (or its deprecated alias `--hub-url`), with a nickname derived from the host (for example `hub` for `https://hub.example.com`). It does not make the hub current.
 - **`scion use --hub <url>`** and **`scion use <project> --hub <url>`** add a URL that is not in the list yet, and print `Registered hub '<name>' (<url>); rename with 'scion hub rename'.`
 - **`scion hub link`** adds the hub it linked on, if needed (see [Linked directories](#linked-directories)).
-- **An existing `hub.endpoint` in your global settings** is added to the list once, the first time the CLI reads the hub list. It is named `local` for a local workstation hub, otherwise after its host. This import does not make it the current hub, and no settings file is changed.
+- **An existing `hub.endpoint` in your global settings** is added to the list once, the first time the CLI reads the hub list. It is named `local` for a local workstation hub, otherwise after its host. When no hub is current yet, it also becomes the current hub, so commands run outside a project directory keep their target. A `hub.transport` there is copied onto the entry. No settings file is changed, and after the import the CLI no longer reads `hub.endpoint`.
 
-After a hub is in the list, `--hub <nickname>` works anywhere `--hub <url>` does, and `scion hub auth login --hub-url <nickname>` works too. Shell completion offers the nicknames after `--hub`.
+After a hub is in the list, `--hub <nickname>` works anywhere `--hub <url>` does, and `scion --hub <nickname> hub auth login` works too. Shell completion offers the nicknames after `--hub`.
 
 ## See the hub list
 
@@ -166,11 +166,11 @@ Auth:     Dev auth (<dev token source>), not verified; run 'scion hub status' to
 Saved context (applies outside scion project directories): prod / web
 ```
 
-The source labels are `--hub flag`, `SCION_HUB_ENDPOINT` (or `SCION_HUB_URL`), `directory link`, `project settings: <path>`, `global settings` and `current context` for the hub, and `--project flag`, `directory: <path>`, `current context` and `global project` for the project; `none` means nothing chose one. A hub that is not in the hub list shows `-` as its name. `scion hub status` uses the same labels for its endpoint.
+The source labels are `--hub flag`, `SCION_HUB_ENDPOINT` (or `SCION_HUB_URL`), `directory link` and `current context` for the hub, and `--project flag`, `directory: <path>`, `current context` and `global project` for the project; `none` means nothing chose one. A hub that is not in the hub list shows `-` as its name. `scion hub status` uses the same labels for its endpoint.
 
 With no hub at all, `scion use` prints `No hub selected. Add one with 'scion hub add <name> <url>' or start a local hub with 'scion server start'.` and exits 0.
 
-With `--format json`, the output has `effective` (`hub` with `name`, `endpoint` and `source`; `project` with `id`, `slug`, `name`, `path` and `source`; and `auth` with `method` and `user`), `context` (the saved hub and project), and `overridden`, which is `true` when the effective target differs from the saved context. The JSON `source` values are `flag`, `env`, `directory`, `project_settings`, `context`, `global_settings`, `global` and `none`. A script can check its target this way before it acts.
+With `--format json`, the output has `effective` (`hub` with `name`, `endpoint` and `source`; `project` with `id`, `slug`, `name`, `path` and `source`; and `auth` with `method` and `user`), `context` (the saved hub and project), and `overridden`, which is `true` when the effective target differs from the saved context. The JSON `source` values are `flag`, `env`, `directory`, `context`, `global` and `none`. A script can check its target this way before it acts.
 
 ## List projects across hubs
 
@@ -200,12 +200,11 @@ The hub and the project are resolved separately. The first source that gives a v
 **Hub:**
 
 1. `--hub <nickname or URL>`. A URL that is not in the hub list is used for this command only and is not added.
-2. `SCION_HUB_ENDPOINT`.
+2. `SCION_HUB_ENDPOINT`, then `SCION_HUB_URL`. While either is set, tiers 3 and 4 are skipped: no link entry and no current hub is used.
 3. Inside a project directory: the directory's link entry in the hub list (see [Linked directories](#linked-directories)).
-4. Inside a project directory: `hub.endpoint` in its settings (its own, else inherited from the global settings).
-5. The current hub.
-6. Outside a project directory, when no hub is current: `hub.endpoint` in the global settings.
-7. `SCION_HUB_URL`. While it is set, tiers 3 and 5 are skipped: no link entry and no current hub is used.
+4. The current hub.
+
+CLI commands do not read `hub.endpoint` or `hub.transport` from any settings file; the hub list is the CLI's only hub configuration. (A server process still has a deprecated fallback to `hub.endpoint`; see [The server's own hub endpoint](#the-servers-own-hub-endpoint).)
 
 A command that needs a Hub and finds none fails with `No hub selected. Add one with 'scion hub add <name> <url>', start a local hub with 'scion server start', or pick one with 'scion use --hub <name>'.` In a project that was never linked and still has agents from the removed local-only mode, the error explains that local-only mode was removed instead.
 
@@ -236,9 +235,9 @@ Warning: this directory is linked to hub 'local' (http://127.0.0.1:8080), but --
 The warning applies to project commands only. Commands that need no project, such as `scion hub status`, and commands given `--project` or `--global` do not print it.
 :::
 
-**Environment variables.** `SCION_HUB_ENDPOINT` overrides the current hub in that shell and is never saved. `SCION_HUB_URL` also turns off the current hub and link entries in that shell, but a `hub.endpoint` in settings wins over it. Bare `scion use` and `scion use --hub` print `Note: SCION_HUB_ENDPOINT is set and overrides the current hub in this shell.` (or `SCION_HUB_URL`, whichever is set) when the variable names another hub. `SCION_HUB_TOKEN` is not tied to a hub. When it is set and the hub came from the current context, `scion use` warns: `Warning: SCION_HUB_TOKEN is set and will be sent to hub '<name>'`.
+**Environment variables.** `SCION_HUB_ENDPOINT` overrides the current hub in that shell and is never saved. `SCION_HUB_URL` does the same when `SCION_HUB_ENDPOINT` is not set. Bare `scion use` and `scion use --hub` print `Note: SCION_HUB_ENDPOINT is set and overrides the current hub in this shell.` (or `SCION_HUB_URL`, whichever is set) when the variable names another hub. `SCION_HUB_TOKEN` is not tied to a hub. When it is set and the hub came from the current context, `scion use` warns: `Warning: SCION_HUB_TOKEN is set and will be sent to hub '<name>'`.
 
-**`scion server` and `scion runtime-broker`** do not use the current context: only a `--hub` nickname is resolved there. See [The server's own hub endpoint](#the-servers-own-hub-endpoint).
+**`scion server` and `scion runtime-broker start`** do not use the current context: only a `--hub` nickname is resolved there, and nothing else in `~/.scion/context.yaml` chooses their Hub (a background `scion server start` still adds the local Hub to the list, as described above). The other `scion runtime-broker` commands, such as `register` and `join`, talk to the hub the CLI selected, like any other command. See [The server's own hub endpoint](#the-servers-own-hub-endpoint).
 
 ## Linked directories
 
@@ -246,11 +245,13 @@ The warning applies to project commands only. Commands that need no project, suc
 
 `scion hub unlink` removes the directory's link entry. It does not change the current context.
 
-When `scion hub auth login` gets its hub from the current context or from a directory's link entry (no `--hub-url`, `--hub` or environment variable), it stores the login and leaves your settings unchanged:
+A project linked before link entries existed recorded its hub only as `hub.endpoint` in its own settings (or inherited the global one). The first time the CLI resolves such a project, it records that hub as a link entry for the directory. The settings file is not changed, so an older `scion` binary still finds the endpoint there.
+
+`scion hub auth login` never writes settings and never makes a hub current. When it gets its hub from the current context or from a directory's link entry (no `--hub` or environment variable), it says which one it used:
 
 ```text
-Logged in to https://hub.example.com (current hub, selected with 'scion use'); settings unchanged.
-Logged in to http://127.0.0.1:8080 (the hub this directory is linked to); settings unchanged.
+Logged in to https://hub.example.com (current hub, selected with 'scion use').
+Logged in to http://127.0.0.1:8080 (the hub this directory is linked to).
 ```
 
 ## Agents are not affected
@@ -288,7 +289,7 @@ A server still falls back to the CLI's `hub.endpoint` (or `SCION_HUB_ENDPOINT`) 
 deprecated: the server's hub endpoint came from hub.endpoint/SCION_HUB_ENDPOINT; set server.hub.public_url (SCION_SERVER_HUB_ENDPOINT) or server.broker.hub_endpoint (SCION_SERVER_RUNTIMEBROKER_HUBENDPOINT).
 ```
 
-Because of this split, `scion use --hub prod` never changes the endpoint that a local workstation server gives its agents. Under `scion server` and `scion runtime-broker`, `--hub` takes a nickname or a URL, but nothing else comes from the hub list there: no current hub and no current project. See [Hub Endpoint Resolution](/scion/reference/server-config/#hub-endpoint-resolution) for the full order.
+Because of this split, `scion use --hub prod` never changes the endpoint that a local workstation server gives its agents. Under `scion server` and `scion runtime-broker start`, `--hub` takes a nickname or a URL, but nothing else comes from the hub list there: no current hub and no current project. See [Hub Endpoint Resolution](/scion/reference/server-config/#hub-endpoint-resolution) for the full order.
 
 ## See also
 

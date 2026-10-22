@@ -352,17 +352,20 @@ func installClaudeViaHub(t *testing.T, srv *Server, s store.Store, sourceURL str
 		require.NotNil(t, hc)
 	}
 
+	// Stage the files the way the upload URLs do, and finalize that upload
+	// (ptone/scion#4219 part 2).
 	stor := srv.GetStorage()
+	uploadID := api.NewUUID()
 	manifestFiles := make([]map[string]interface{}, 0, len(files))
 	for _, f := range files {
-		_, err := stor.Upload(context.Background(), hc.StoragePath+"/"+f.path, bytes.NewReader(f.data), storage.UploadOptions{})
+		_, err := stor.Upload(context.Background(), srv.harnessConfigStagedObjectPath(hc, uploadID, f.path), bytes.NewReader(f.data), storage.UploadOptions{})
 		require.NoError(t, err)
 		sum := sha256.Sum256(f.data)
 		manifestFiles = append(manifestFiles, map[string]interface{}{
 			"path": f.path, "size": len(f.data), "hash": "sha256:" + hex.EncodeToString(sum[:]),
 		})
 	}
-	body := map[string]interface{}{"manifest": map[string]interface{}{"version": "1.0", "harness": "claude", "files": manifestFiles}}
+	body := map[string]interface{}{"manifest": map[string]interface{}{"version": "1.0", "harness": "claude", "files": manifestFiles}, "uploadId": uploadID}
 	if sourceURL != "" {
 		body["sourceUrl"] = sourceURL
 	}
@@ -664,4 +667,17 @@ type finalizeEnvErrDispatcher struct {
 
 func (d *finalizeEnvErrDispatcher) DispatchFinalizeEnv(context.Context, *store.Agent, map[string]string) (*CreateDispatchResult, error) {
 	return nil, d.err
+}
+
+// setHarnessConfigContentForTest writes hc's content columns (Files,
+// ContentHash, Harness, Config, Status, Layout, Storage*) as a test fixture,
+// against the row's current content hash, layout and storage path.
+// UpdateHarnessConfig writes metadata only (ptone/scion#4219), so fixtures
+// that stage content state use this.
+func setHarnessConfigContentForTest(ctx context.Context, s store.Store, hc *store.HarnessConfig) error {
+	cur, err := s.GetHarnessConfig(ctx, hc.ID)
+	if err != nil {
+		return err
+	}
+	return s.UpdateHarnessConfigContent(ctx, hc, harnessConfigCommitPrecondition(cur))
 }

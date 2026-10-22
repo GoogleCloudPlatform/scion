@@ -47,13 +47,73 @@ type bearerMatrixExclusion struct {
 // TestBearerMatrixExclusions_NotStaleAndPinned keeps every key live and
 // every Pin declared.
 var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
+	{OperationID: "project.membership.add", Method: "POST", Pattern: "/api/v1/projects/{id}/members"}: {
+		Reason: "a token acts on membership only through its holder's project role, and the fixture super-admin holds no role in the fixture project; a grant also needs selectors for every permission of the granted role (CanDelegate). The dedicated test drives the route with real tokens on both boundaries and with the holder's session",
+		Pin:    "TestMembershipToken_SelectorAndBoundaryPerRoute",
+	},
+	{OperationID: "project.membership.update", Method: "PATCH", Pattern: "/api/v1/projects/{id}/members/{memberId}"}: {
+		Reason: "a token acts on membership only through its holder's project role, and the fixture super-admin holds no role in the fixture project; a grant also needs selectors for every permission of the granted role (CanDelegate). The dedicated test drives the route with real tokens on both boundaries and with the holder's session",
+		Pin:    "TestMembershipToken_SelectorAndBoundaryPerRoute",
+	},
+	{OperationID: "project.membership.remove", Method: "DELETE", Pattern: "/api/v1/projects/{id}/members/{memberId}"}: {
+		Reason: "a token acts on membership only through its holder's project role, and the fixture super-admin holds no role in the fixture project. The dedicated test drives the route with real tokens on both boundaries and with the holder's session",
+		Pin:    "TestMembershipToken_SelectorAndBoundaryPerRoute",
+	},
+	{OperationID: "project.membership.transfer", Method: "POST", Pattern: "/api/v1/projects/{id}/transfer-ownership"}: {
+		Reason: "a token acts on membership only through its holder's project role, and the fixture super-admin holds no role in the fixture project; a grant also needs selectors for every permission of the granted role (CanDelegate). The dedicated test drives the route with real tokens on both boundaries and with the holder's session",
+		Pin:    "TestMembershipToken_SelectorAndBoundaryPerRoute",
+	},
+	{OperationID: "project.membership.principal.set", Method: "PUT", Pattern: "/api/v1/projects/{id}/members/principals/{type}/{principalId}"}: {
+		Reason: "a token acts on membership only through its holder's project role, and the fixture super-admin holds no role in the fixture project; a grant also needs selectors for every permission of the granted role (CanDelegate). The dedicated test drives the route with real tokens on both boundaries and with the holder's session",
+		Pin:    "TestMembershipToken_SelectorAndBoundaryPerRoute",
+	},
+	{OperationID: "project.membership.principal.remove", Method: "DELETE", Pattern: "/api/v1/projects/{id}/members/principals/{type}/{principalId}"}: {
+		Reason: "a token acts on membership only through its holder's project role, and the fixture super-admin holds no role in the fixture project. The dedicated test drives the route with real tokens on both boundaries and with the holder's session",
+		Pin:    "TestMembershipToken_SelectorAndBoundaryPerRoute",
+	},
+	{OperationID: "project.membership.rolebinding.create", Method: "POST", Pattern: "/api/v1/admin/role-bindings"}: {
+		Reason: "a token acts on membership only through its holder's project role, and the fixture super-admin holds no role in the fixture project; a grant also needs selectors for every permission of the granted role (CanDelegate). The dedicated test drives the route with real tokens on both boundaries and with the holder's session",
+		Pin:    "TestMembershipToken_SelectorAndBoundaryPerRoute",
+	},
+	{OperationID: "project.membership.rolebinding.delete", Method: "DELETE", Pattern: "/api/v1/admin/role-bindings/{id}"}: {
+		Reason: "a token acts on membership only through its holder's project role, and the fixture super-admin holds no role in the fixture project. The dedicated test drives the route with real tokens on both boundaries and with the holder's session",
+		Pin:    "TestMembershipToken_SelectorAndBoundaryPerRoute",
+	},
+	{OperationID: "project.lifecycle.create", Method: "POST", Pattern: "/api/v1/projects"}: {
+		Reason: "the creator is bound to the seeded project-owner role, and a token must cover every permission of that role, some of which have no selector; the dedicated test narrows the owner role to permissions with selectors and drives the route with real tokens on both boundaries and with the holder's session",
+		Pin:    "TestProjectCreateToken_RequiresCreateSelectorAndHubBoundary",
+	},
+	{OperationID: "project.register", Method: "POST", Pattern: "/api/v1/projects/register"}: {
+		Reason: "the creator is bound to the seeded project-owner role, and a token must cover every permission of that role, some of which have no selector; the dedicated test narrows the owner role to permissions with selectors and drives the route with real tokens on both boundaries and with the holder's session",
+		Pin:    "TestProjectRegisterToken_EnforcesProjectCreate",
+	},
+	{OperationID: "project.clone", Method: "POST", Pattern: "/api/v1/projects/{id}/clone"}: {
+		Reason: "a clone needs project:read, project:clone and project:create together, the creator is bound to the seeded project-owner role (some of its permissions have no selector), and only a super-admin who is a member of the source project can mint project:clone; the dedicated test sets this up and drives the route with real tokens and with the holder's session",
+		Pin:    "TestProjectCloneToken_RequiresSourceReadCloneAndCreate",
+	},
 	{OperationID: "project.lifecycle.delete", Method: "DELETE", Pattern: "/api/v1/projects/{id}"}: {
 		Reason: "project.delete has no token selector, so a token is refused by the deletion service's base permission check (403 project_delete_forbidden) before its session-only credential step is reached; the session-only step and its IRREVERSIBLE_CASCADE reason are pinned at the service",
 		Pin:    "TestRS3_ProjectDeleteScopedUATDenied",
 	},
-	{OperationID: "harnessconfig.read", Method: "GET", Pattern: "/api/v1/harness-configs"}: {
-		Reason: "the collection list filters each row by harness_config.read instead of refusing the request, so a token without the selector gets 200 with no rows rather than 403; the list gets its own harness_config.list disposition in a later batch",
-		Pin:    "TestScopedAdminListEndpointsFilterCrossProjectRowsAndCountAuthorizedMatches",
+	{OperationID: "harnessconfig.list", Method: "GET", Pattern: "/api/v1/harness-configs"}: {
+		Reason: "the collection list filters each row by harness_config.read instead of refusing the request, so a token without the selector gets 200 with no rows rather than 403; the unfiltered list needs harness_config:list on a hub boundary",
+		Pin:    "TestCatalogWideList_UsesListSelectorThroughEvidence",
+	},
+	{OperationID: "template.list", Method: "GET", Pattern: "/api/v1/templates"}: {
+		Reason: "the collection list filters each row by template.read instead of refusing the request, so a token without the selector gets 200 with no rows rather than 403; the unfiltered list needs template:list on a hub boundary",
+		Pin:    "TestCatalogWideList_UsesListSelectorThroughEvidence",
+	},
+	{OperationID: "skill.list", Method: "GET", Pattern: "/api/v1/skills"}: {
+		Reason: "a token without skill:list, or bounded to another project, gets 200 with no rows rather than 403: the list never refuses the request",
+		Pin:    "TestSkillListToken_CountsOnlyAuthorizedRows",
+	},
+	{OperationID: "project.list", Method: "GET", Pattern: "/api/v1/projects"}: {
+		Reason: "a token without project:list, or bounded to another project, gets 200 with no rows rather than 403: the list never refuses the request",
+		Pin:    "TestProjectListToken_RequiresProjectListSelector",
+	},
+	{OperationID: "agent.list", Method: "GET", Pattern: "/api/v1/agents"}: {
+		Reason: "a token without agent:list, or bounded to another project, gets 200 with no rows rather than 403: the list never refuses the request",
+		Pin:    "TestListCaveats_ProjectBoundaryRequiresListPermissionInCeiling",
 	},
 	{OperationID: "inbox.message.read", Method: "GET", Pattern: "/api/v1/messages"}: {
 		Reason: "the message list filters rows to the token boundary instead of refusing the request, so a project token for another project gets 200 with no rows",
@@ -187,6 +247,77 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "the matrix server configures no attachment store, so every caller gets 503 before the attachment is looked up",
 		Pin:    "TestChatAttachmentDownloadToken_ProjectFileNeedsProjectRead",
 	},
+	// Global catalog and project-scope branches whose refusal the generic
+	// probes cannot observe. Each is pinned by a test that drives real
+	// tokens through the branch.
+	{OperationID: "template.clone", Method: "POST", Pattern: "/api/v1/templates/{id}/clone"}: {
+		Reason: "the source needs template:read before the destination's template:create is checked, and a token without the read selector is answered 404 on the source, so a POST refusal is not 403",
+		Pin:    "TestCatalogCloneToken_RequiresReadAndCreate",
+	},
+	{OperationID: "harnessconfig.clone", Method: "POST", Pattern: "/api/v1/harness-configs/{id}/clone"}: {
+		Reason: "the route gate needs harness_config:read on the source before the destination's harness_config:create is checked, and a token without the read selector is answered 404, so a POST refusal is not 403",
+		Pin:    "TestCatalogCloneToken_RequiresReadAndCreate",
+	},
+	{OperationID: "template.reimport", Method: "POST", Pattern: "/api/v1/templates/{id}/reimport"}: {
+		Reason: "the record needs template:read before template:create on the owning scope is checked, and a token without the read selector is answered 404, so a POST refusal is not 403",
+		Pin:    "TestCatalogReimportToken_RequiresReadAndCreate",
+	},
+	{OperationID: "harnessconfig.reimport", Method: "POST", Pattern: "/api/v1/harness-configs/{id}/reimport"}: {
+		Reason: "the route gate needs harness_config:read before harness_config:create on the owning scope is checked, and a token without the read selector is answered 404, so a POST refusal is not 403",
+		Pin:    "TestCatalogReimportToken_RequiresReadAndCreate",
+	},
+	{OperationID: "harnessconfig.delete", Method: "DELETE", Pattern: "/api/v1/harness-configs/{id}"}: {
+		Reason: "the route gate needs harness_config:read before harness_config:delete on the owning scope is checked, and a token without the read selector is answered 404, so a DELETE refusal is not 403",
+		Pin:    "TestHarnessDeleteToken_RequiresReadAndDelete",
+	},
+	{OperationID: "harnessconfig.read", Method: "GET", Pattern: "/api/v1/harness-configs/{id}/image-status"}: {
+		Reason: "an admitted read of a config with an image queries the image registry, and one without an image answers 400, so the admitting token cannot show the target exists with a 2xx",
+		Pin:    "TestHarnessImageStatusToken_RequiresRead",
+	},
+	{OperationID: "skill.resolve.local", Method: "POST", Pattern: "/api/v1/skills/resolve"}: {
+		Reason: "a reference the caller may not read answers as not found inside a 200 response, so a refused token is not answered 403",
+		Pin:    "TestLocalSkillResolve_TokenNeedsSkillRead",
+	},
+	{OperationID: "skill.resolve.github.project", Method: "POST", Pattern: "/api/v1/skills/resolve"}: {
+		Reason: "a refused reference answers forbidden inside a 200 response, so a refused token is not answered 403",
+		Pin:    "TestProjectGitHubSkillResolve_TokenNeedsSkillReadOnProject",
+	},
+	{OperationID: "skill.resolve.github.public", Method: "POST", Pattern: "/api/v1/skills/resolve"}: {
+		Reason: "a refused reference answers forbidden inside a 200 response, so a refused token is not answered 403",
+		Pin:    "TestPublicGitHubSkillResolve_TokenNeedsSkillReadOnHub",
+	},
+	{OperationID: "template.import.global", Method: "POST", Pattern: "/api/v1/resources/import"}: {
+		Reason: "an admitted import fetches its source after the check; the pin stops the fetch at a source that is not a GitHub URL",
+		Pin:    "TestGlobalResourceImport_ResolvesHubThroughEvidence",
+	},
+	{OperationID: "template.import.global", Method: "POST", Pattern: "/api/v1/resources/discover"}: {
+		Reason: "an admitted discovery fetches its source after the check; the pin stops the fetch at a source that is not a GitHub URL",
+		Pin:    "TestGlobalResourceImport_ResolvesHubThroughEvidence",
+	},
+	{OperationID: "harnessconfig.import.global", Method: "POST", Pattern: "/api/v1/resources/import"}: {
+		Reason: "an admitted import fetches its source after the check; the pin stops the fetch at a source that is not a GitHub URL",
+		Pin:    "TestGlobalResourceImport_ResolvesHubThroughEvidence",
+	},
+	{OperationID: "harnessconfig.import.global", Method: "POST", Pattern: "/api/v1/resources/discover"}: {
+		Reason: "an admitted discovery fetches its source after the check; the pin stops the fetch at a source that is not a GitHub URL",
+		Pin:    "TestGlobalResourceImport_ResolvesHubThroughEvidence",
+	},
+	{OperationID: "template.import.project", Method: "POST", Pattern: "/api/v1/resources/import"}: {
+		Reason: "an admitted import fetches its source after the check; the pin stops the fetch at a source that is not a GitHub URL",
+		Pin:    "TestProjectResourceImport_TokenNeedsCreateOnTheProject",
+	},
+	{OperationID: "template.import.project", Method: "POST", Pattern: "/api/v1/resources/discover"}: {
+		Reason: "an admitted discovery fetches its source after the check; the pin stops the fetch at a source that is not a GitHub URL",
+		Pin:    "TestProjectResourceImport_TokenNeedsCreateOnTheProject",
+	},
+	{OperationID: "harnessconfig.import.project", Method: "POST", Pattern: "/api/v1/resources/import"}: {
+		Reason: "an admitted import fetches its source after the check; the pin stops the fetch at a source that is not a GitHub URL",
+		Pin:    "TestProjectResourceImport_TokenNeedsCreateOnTheProject",
+	},
+	{OperationID: "harnessconfig.import.project", Method: "POST", Pattern: "/api/v1/resources/discover"}: {
+		Reason: "an admitted discovery fetches its source after the check; the pin stops the fetch at a source that is not a GitHub URL",
+		Pin:    "TestProjectResourceImport_TokenNeedsCreateOnTheProject",
+	},
 	{OperationID: "artifact.update", Method: "PATCH", Pattern: "/api/v1/artifacts/{id}"}: {
 		Reason: "the artifact service answers a caller that cannot read the artifact with 404, as for a missing artifact, on every method, so the generic refusal probes get 404 where the matrix expects 403 for a non-GET method; the admitting token carries only artifact:manage, not artifact:read, so the read check answers it 404 too; with artifact:read added, the super-admin is neither the fixture artifact's owner nor an admin grantee, so the manage check would answer 403",
 		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
@@ -235,9 +366,33 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "the artifact service answers a caller that cannot read the artifact with 404, as for a missing artifact, on every method, so the generic refusal probes get 404 where the matrix expects 403 for a non-GET method",
 		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
 	},
+	{OperationID: "broker.read", Method: "GET", Pattern: "/api/v1/runtime-brokers"}: {
+		Reason: "the broker list filters each row by broker.read instead of refusing the request, so a token without the selector, or bounded to a project, gets 200 with no rows rather than 403",
+		Pin:    "TestBrokerListing_TokenWithoutBrokerReadListsNoBrokers",
+	},
+	{OperationID: "group.list", Method: "GET", Pattern: "/api/v1/groups"}: {
+		Reason: "the group list filters each row by the group.read check instead of refusing the request, so a token without the selector gets 200 with no rows rather than 403",
+		Pin:    "TestExplicitGroupToken_ResolvesHubTarget",
+	},
+	{OperationID: "group.member.add", Method: "POST", Pattern: "/api/v1/groups/{id}/members"}: {
+		Reason: "a token is held to the group role hierarchy: only the group's owner or an owner or admin member adds members, and the matrix's super-admin is none of these on the fixture group, so the admitting token is refused by the hierarchy check after the selector check",
+		Pin:    "TestGroupMemberAddToken_HeldToGroupRoleHierarchy",
+	},
 	{OperationID: "artifact.list", Method: "GET", Pattern: "/api/v1/artifacts"}: {
 		Reason: "the artifact list filters each row by the artifact.read check instead of refusing the request, so a token without the selector, or bounded to another project, gets 200 with no rows rather than 403 or 404 (no existence oracle)",
 		Pin:    "TestArtifactsListUserAccessTokensAreBounded",
+	},
+	{OperationID: "agent.messages.read", Method: "GET", Pattern: "/api/v1/agents/{id}/messages/stream"}: {
+		Reason: "the matrix server configures no event publisher, so every caller gets 501 before the agent is looked up",
+		Pin:    "TestMessagesStreamToken_AdmissionByBoundary",
+	},
+	{OperationID: "project.conversation.gcsobject.read", Method: "GET", Pattern: "/api/v1/gcs/object"}: {
+		Reason: "the matrix server enables no gs:// link experiment and configures no token generator, so every caller gets the same 404 before the message is looked up",
+		Pin:    "TestGCSObjectToken_ProjectGroupNeedsProjectRead",
+	},
+	{OperationID: "web.events.stream", Method: "GET", Pattern: "/events"}: {
+		Reason: "the web server serves the event stream, not the hub API handler the matrix drives; the web server admits only a signed-in web session",
+		Pin:    "TestWebEventStream_RefusesUserAccessToken",
 	},
 }
 
@@ -629,6 +784,16 @@ var bearerMatrixPositiveServerErrors = map[liveInventoryKey]bearerMatrixPositive
 	{"agent.messages.read", http.MethodGet, "/api/v1/agents/{id}/message-logs"}: {
 		http.StatusNotImplemented, "the test server configures no log query service"},
 	{"agent.messages.read", http.MethodGet, "/api/v1/projects/{projectId}/agents/{id}/message-logs"}: {
+		http.StatusNotImplemented, "the test server configures no log query service"},
+	{"agent.logs.read", http.MethodGet, "/api/v1/agents/{id}/cloud-logs/stream"}: {
+		http.StatusNotImplemented, "the test server configures no log query service"},
+	{"agent.logs.read", http.MethodGet, "/api/v1/projects/{projectId}/agents/{id}/cloud-logs/stream"}: {
+		http.StatusNotImplemented, "the test server configures no log query service"},
+	{"agent.messages.read", http.MethodGet, "/api/v1/agents/{id}/message-logs/stream"}: {
+		http.StatusNotImplemented, "the test server configures no log query service"},
+	{"agent.messages.read", http.MethodGet, "/api/v1/projects/{projectId}/agents/{id}/message-logs/stream"}: {
+		http.StatusNotImplemented, "the test server configures no log query service"},
+	{"project.messagelogs.read", http.MethodGet, "/api/v1/projects/{id}/message-logs/stream"}: {
 		http.StatusNotImplemented, "the test server configures no log query service"},
 	{"agent.workspace.sync", http.MethodPost, "/api/v1/agents/{id}/workspace/sync-from"}: {
 		http.StatusBadGateway, "the fixture agent's runtime broker is not connected through the control channel"},

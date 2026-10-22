@@ -1377,10 +1377,7 @@ func rangeAssigned(names []string) {
 // pairs. Adding one widens what the guard above accepts, so it needs a
 // deliberate change here.
 func TestUnregisteredResourcePermissions_ExactSet(t *testing.T) {
-	assert.Equal(t, map[resourceActionKey]string{
-		{ResourceType: "runtime_broker", Action: ActionRead}:   "runtime_broker.read",
-		{ResourceType: "runtime_broker", Action: ActionUpdate}: "runtime_broker.update",
-	}, unregisteredResourcePermissions,
+	assert.Equal(t, map[resourceActionKey]string{}, unregisteredResourcePermissions,
 		"unregistered pairs changed; confirm the new pair is needed "+
 			"(see ptone/scion#2140) and update this pin")
 }

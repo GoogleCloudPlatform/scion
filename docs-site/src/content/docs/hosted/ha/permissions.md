@@ -154,6 +154,18 @@ For Policy Troubleshooter to evaluate a caller's IAM permission across the organ
 
 The Hub's identity needs access to run the Policy Troubleshooter check against the project or organization that holds each target service account. Until it has that access, service account assignment is denied.
 
+When check mode is `enforce`, the Hub's service account needs `roles/iam.securityReviewer` in **every** GCP project that holds a service account you assign, not only in the Hub's own project. A grant at the organization level covers all projects in it. For a service account in another project, grant the role on that project:
+
+```bash
+gcloud projects add-iam-policy-binding <service-account-project> \
+  --member="serviceAccount:<hub-service-account>" \
+  --role="roles/iam.securityReviewer"
+```
+
+If the role is missing there, assignment is refused with `403` and a message that names the service account's GCP project, the Hub's service account and the IAM Security Reviewer role, and gives this command with both values filled in. If the Hub does not know its own service account email, or the project ID or that email does not have the shape of a GCP project ID or service account email, the refusal instead uses the generic message below; grant the role as shown above. Retrying does not help until the role is granted. Other check failures, such as the Policy Troubleshooter API being disabled or a transient error, keep the message "Could not verify your permission to use this GCP service account because the check did not complete; try again".
+
+Registering or verifying a service account checks this ahead of time. When check mode is `enforce` and the account is in a GCP project other than the Hub's own, the Hub asks Policy Troubleshooter about that project. If the Hub's service account is refused there, or the project is not found, the response still succeeds and carries the same message, with the gcloud command, in its `warnings` list: registration returns it with `201`, and verification only with `200`, since a verification that fails returns its error without warnings. A project that does not exist and one the Hub may not read give the same response. The warning is advisory only: it does not block registration or change the account's verification status. Other outcomes of that call, including a disabled API or a transient error, add no warning. Accounts in the Hub's own project, and all accounts while check mode is `off`, are not checked this way.
+
 If the check cannot run because of the Hub's identity, that Hub instance reports the check `sa_assign_check` as `degraded` in its health row, and the admin health summary (`GET /api/v1/admin/health/summary`) reports it in a `service_account_check` section that lists the instances reporting it. Every Hub replica returns the same section.
 
 ### Start-Time Admissibility Check
@@ -230,7 +242,7 @@ Hub administrators can set a hub-wide default GCP identity in **Admin > Server C
 4. The hub default. An explicit hub default of **Block** counts as set too.
 5. Nothing configured at any rung: the Hub leaves the agent's GCP identity unset and sends no mode, so the Runtime Broker applies its runtime default: **Block** on every runtime except Kubernetes, **Passthrough** on Kubernetes.
 
-This ladder applies the same way whether the agent is created interactively/via the API or dispatched by a schedule (ptone/scion#1927): a scheduled dispatch starts at rung 2, and a hub default with no project-level override reaches it exactly as it would an interactive create.
+This ladder applies the same way whether the agent is created interactively/via the API or dispatched by a schedule: a scheduled dispatch starts at rung 2, and a hub default with no project-level override reaches it exactly as it would an interactive create.
 
 **Kubernetes runtime note**: on the Kubernetes runtime, **Block** runs the agent pod as a zero-privilege identity rather than refusing it: the operator's block Kubernetes ServiceAccount (`kubernetes_block_service_account`), or the namespace's default ServiceAccount when none is configured, with no Kubernetes API token mounted and only on Workload Identity nodes. This applies whether **Block** comes from the create request, an explicit project default, an explicit hub default, or a project or hub default of **Assign** with no service account selected. Zero privilege depends on IAM preconditions the operator must keep true; see [block on Kubernetes](/scion/hosted/ha/kubernetes/#block). Rung 5 (nothing configured) and a denied hub-default **Passthrough** (below) are not **Block**: they get the Kubernetes runtime default, **Passthrough**.
 
@@ -321,8 +333,10 @@ These built-in roles bundle common permissions for human users:
 | `project-visitor` | Message, list and read the project's agents (`agent.message`, `agent.list`, `agent.read`). Held only by federated accounts through a visitor grant, which is part of the experimental `federation.project_visitors` feature. It is not project membership: a visitor is not listed as a member and does not count as one in any membership rule. It cannot be assigned through the members editor or the role binding API. |
 
 :::caution[Breaking change: role revision 3; port access restored in revision 5]
-The `project-owner` role is at revision 9, `project-admin` at revision 8 and `project-member` at revision 5. On upgrade, existing Hubs reconcile these roles automatically. Revision 3 removed `agent.attach` and `agent.port_access` and added `agent.lifecycle`; revision 4 added `gcp_service_account.assign`; revision 5 restores `agent.port_access`, so owners and admins can open forwarded ports on any agent in their project; revision 6 adds `artifact.read` and `artifact.create`; `project-owner` revision 7 adds `project.set_messaging_policy`; `project-owner` revision 8 and `project-admin` revision 7 add `agent.delegation.revoke`, `agent.delegation.credential.revoke`, `agent.delegation.list` and `agent.delegation.read` for agent delegation grants bounded to the project; `project-owner` revision 9 and `project-admin` revision 8 add `project.manage_visitors` (grant and revoke visitor access; no route checks it yet). (`project-member` reached revision 5 by a different path: revision 4 added `gcp_service_account.assign` and revision 5 added `artifact.read` and `artifact.create`.) Owners and admins who previously attached to other members' agents can no longer do so. User access tokens minted before the split that hold `agent:attach` keep lifecycle authority so existing automation continues to work. See [Personal Access Tokens](/scion/hosted/user/personal-access-tokens/) for the current scope list.
+The `project-owner` role is at revision 10, `project-admin` at revision 8 and `project-member` at revision 5. On upgrade, existing Hubs reconcile these roles automatically. Revision 3 removed `agent.attach` and `agent.port_access` and added `agent.lifecycle`; revision 4 added `gcp_service_account.assign`; revision 5 restores `agent.port_access`, so owners and admins can open forwarded ports on any agent in their project; revision 6 adds `artifact.read` and `artifact.create`; `project-owner` revision 7 adds `project.set_messaging_policy`; `project-owner` revision 8 and `project-admin` revision 7 add `agent.delegation.revoke`, `agent.delegation.credential.revoke`, `agent.delegation.list` and `agent.delegation.read` for agent delegation grants bounded to the project; `project-owner` revision 9 and `project-admin` revision 8 add `project.manage_visitors` (grant, change and revoke visitor access through `/api/v1/projects/{id}/visitors`); `project-owner` revision 10 adds `artifact.steward`, which makes project owners [stewards](/scion/reference/artifacts/#stewards) of the artifacts agents own in the project (`project-admin` does not get it). (`project-member` reached revision 5 by a different path: revision 4 added `gcp_service_account.assign` and revision 5 added `artifact.read` and `artifact.create`.) Owners and admins who previously attached to other members' agents can no longer do so. User access tokens minted before the split that hold `agent:attach` keep lifecycle authority so existing automation continues to work. See [Personal Access Tokens](/scion/hosted/user/personal-access-tokens/) for the current scope list.
 :::
+
+The `hub-admin` role is at revision 8. Revision 8 adds `project.manage_visitors`, so a hub admin can list, shorten and revoke visitor grants on any project. Granting visitor access or extending a grant's window also needs every permission of the `project-visitor` role on that project, which `hub-admin` alone does not give.
 
 ### Hub Roles
 
@@ -385,8 +399,8 @@ To prevent security bypasses via sub-agent creation, Scion enforces strict no-es
 To ensure security policies stay up-to-date and to support legacy agents created prior to the tiered role rollout, the Hub re-derives permissions from the agent's stored role during token refresh (`RefreshAgentToken`), rather than copying old JWT scopes verbatim.
 - **Legacy Agent Compatibility**: Legacy agents that do not have a stored role default to the `full` role. This prevents production regressions where standing agents lose modern required scopes (such as `project:read`, `project:agent:lifecycle`, or secret access) after a token refresh.
 
-#### Deprecation of Raw Template Scopes
-With the introduction of tiered agent roles, the raw template field `hubAccess.scopes` has been **deprecated**. Agent permissions must be configured via the named roles.
+#### Raw Template Scopes Removed
+With the introduction of tiered agent roles, the raw template field `hubAccess.scopes` no longer has any effect: the Hub does not read it from templates or record it on agents, and the CLI warns when a local template file still sets it. Agent permissions are configured via the named roles.
 
 ## Implementation Status
 

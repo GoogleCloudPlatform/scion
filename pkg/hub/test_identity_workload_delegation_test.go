@@ -785,6 +785,20 @@ func TestIsTestIdentityIssuanceRoute(t *testing.T) {
 		{http.MethodDelete, "/api/v1/test-identities/a%2Fb", false},
 		{http.MethodPost, "/api/v1/test-identity-delegations", false},
 		{http.MethodGet, "/api/v1/test-identities/", false},
+		// X4: admin-kind issuance, POST only; revoke-all never.
+		{http.MethodPost, "/api/v1/test-identities/admin", true},
+		{http.MethodGet, "/api/v1/test-identities/admin", false},
+		{http.MethodPost, "/api/v1/test-identities/admin/revoke-all", false},
+		{http.MethodPost, "/api/v1/test-identities/admin/", false},
+		{http.MethodPost, "/api/v1/test-identities/admin%2F", false},
+		// The issuer cleanup and provenance (Phase 3c).
+		{http.MethodPost, "/api/v1/test-identities/cleanup", true},
+		{http.MethodGet, "/api/v1/test-identities/cleanup", false},
+		{http.MethodPost, "/api/v1/test-identities/cleanup/x", false},
+		{http.MethodGet, "/api/v1/test-identities/provenance", true},
+		{http.MethodPost, "/api/v1/test-identities/provenance", false},
+		{http.MethodGet, "/api/v1/test-identities/provenance/x", false},
+		{http.MethodGet, "/api/v1/test-identities/%70rovenance", false},
 	} {
 		req := httptest.NewRequest(tc.method, tc.target, nil)
 		assert.Equal(t, tc.want, isTestIdentityIssuanceRoute(req), "%s %s", tc.method, tc.target)
@@ -960,7 +974,7 @@ func TestWorkloadDelegation_ManagementScopedToDelegation(t *testing.T) {
 	// A workload credential context without its state manages nothing.
 	ctx := contextWithCredentialContext(context.Background(), CredentialContext{Kind: CredentialKindWorkloadDelegation, ID: d1.ID})
 	issued := grantor.ID
-	assert.False(t, canManageTestIdentity(ctx, NewAuthenticatedUser(grantor.ID, grantor.Email, "", "member", "api"),
+	assert.False(t, e.srv.canManageTestIdentity(ctx, NewAuthenticatedUser(grantor.ID, grantor.Email, "", "member", "api"),
 		&store.User{IssuedBy: &issued, IssuerDelegationID: &d1.ID}))
 }
 
@@ -1077,7 +1091,7 @@ func TestWorkloadDelegation_StartupValidation(t *testing.T) {
 	member := []config.TestIdentityWorkloadIssuer{{Sub: x2Sub, MaxTier: "member"}}
 	aud := testIssuerAudience(x2HubID)
 	base := func() ServerConfig {
-		return ServerConfig{HubID: x2HubID, EnableTestIdentities: true, TestIdentityWorkloadIssuers: member,
+		return ServerConfig{HubID: x2HubID, HubIDPinned: true, EnableTestIdentities: true, TestIdentityWorkloadIssuers: member,
 			TestMode: TestModeConfig{Level: TestModeMember, HubID: x2HubID, HubClass: config.HubClassTest, MarkerHubID: x2HubID, MarkerClass: config.HubClassTest}}
 	}
 	require.NoError(t, validateTestIdentityWorkloadIssuers(base()))
@@ -1104,15 +1118,20 @@ func TestWorkloadDelegation_StartupValidation(t *testing.T) {
 	cfg.HubID = ""
 	assert.ErrorIs(t, validateTestIdentityWorkloadIssuers(cfg), errWorkloadIssuerNoHubID)
 
+	// X4: a max_tier "admin" entry needs --test-mode=admin or above; below
+	// it the hub refuses to start (no silent narrowing).
 	cfg = base()
 	cfg.TestIdentityWorkloadIssuers = []config.TestIdentityWorkloadIssuer{{Sub: x2Sub, MaxTier: "admin"}}
-	assert.ErrorIs(t, validateTestIdentityWorkloadIssuers(cfg), config.ErrWorkloadIssuerAdminTierUnsupported)
+	assert.ErrorIs(t, validateTestIdentityWorkloadIssuers(cfg), errWorkloadIssuerAdminTierOff)
+	admitted := cfg
+	admitted.TestAdminGate = TestAdminGateConfig{HubAdmin: true, HubID: x2HubID}
+	assert.NoError(t, validateTestIdentityWorkloadIssuers(admitted), "admin entry at the admin level")
 
 	// New refuses to build a Server from such a config.
 	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
 	_, err = New(cfg, s)
-	assert.ErrorIs(t, err, config.ErrWorkloadIssuerAdminTierUnsupported)
+	assert.ErrorIs(t, err, errWorkloadIssuerAdminTierOff)
 }
 
 // --- status: testIssuerAudience -------------------------------------------------
@@ -1569,6 +1588,54 @@ func TestWorkloadDelegation_WebLoginCodeForOwnIdentity(t *testing.T) {
 	assert.Len(t, x2WebCodeAudits(t, e, i1.ID), 1, "no code minted while web sessions are unavailable")
 }
 
+// X3b with WS2 (ptone/scion#4240): on a proxy auth mode hub, a workload
+// delegation mints a web-login code for its own member identity only while
+// the hub lists at least one driver principal. Without one it gets the 404
+// unavailable answer with the no-driver-principals cause, and no code is
+// minted.
+func TestWorkloadDelegation_WebLoginCodeOnProxyHubFollowsDriverPrincipals(t *testing.T) {
+	e := newX2Env(t, true)
+	x2EnableWebSessions(t, e)
+
+	grantor, _ := e.bindingGrantor(t, "x2-web-proxy-grantor")
+	d1 := e.delegate(t, grantor, nil)
+	rec := e.mint(t, d1.ID)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	i1 := tiDecode(t, rec).Identity
+	path := "/api/v1/test-identities/" + i1.ID + "/web-login-code"
+
+	e.srv.config.AuthMode = "proxy"
+	e.srv.config.ProxyAuth = &fakeProxyAuthenticator{}
+	e.srv.proxyDrivers = newDriverPrincipalSet([]string{"web-driver@x2-proj.iam.gserviceaccount.com"})
+	webOn, cause := e.srv.testIdentityWebSessionGate()
+	require.True(t, webOn, "proxy auth mode with a driver principal: web sessions available (cause %q)", cause)
+
+	rec = e.workload(t, http.MethodPost, path, x2Token(t, x2TokenOpts{}), d1.ID, nil, nil)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var resp TestIdentityWebCodeResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotEmpty(t, resp.Code)
+	require.Len(t, x2WebCodeAudits(t, e, i1.ID), 1, "one code minted with a driver principal configured")
+
+	e.srv.proxyDrivers = nil
+	webOn, cause = e.srv.testIdentityWebSessionGate()
+	require.False(t, webOn)
+	require.Equal(t, testIdentityWebCauseNoDriverPrincipals, cause)
+
+	rec = e.workload(t, http.MethodPost, path, x2Token(t, x2TokenOpts{}), d1.ID, nil, nil)
+	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), testIdentityWebReasonUnavailable)
+	assert.Contains(t, rec.Body.String(), testIdentityWebCauseNoDriverPrincipals)
+	// The error envelope carries error.code; no web-login code field may
+	// appear at the top level.
+	var top map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &top))
+	assert.NotContains(t, top, "code")
+	assert.NotContains(t, top, "codeId")
+	assert.Contains(t, top, "error")
+	assert.Len(t, x2WebCodeAudits(t, e, i1.ID), 1, "no code minted without a driver principal")
+}
+
 // X3b (ptone/scion#4240): a workload delegation gets the same 404 as for
 // an unknown identity on another delegation's identity, on the grantor's
 // own (session-issued) identity and on an admin-kind identity; nothing is
@@ -1634,9 +1701,10 @@ func TestWorkloadDelegation_WebLoginCodeRefusedOutsideOwnMemberIdentities(t *tes
 	assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 }
 
-// The member-tier rule of workloadWebCodeAdmitted on its own: the store
-// never holds an admin-kind row with a delegation id, so the handler test
-// above cannot reach this branch with one.
+// The member-tier rule of workloadWebCodeAdmitted on its own: an admin-kind
+// row with a delegation id comes only from an admin-scope delegation
+// (phase X4), which testIdentityCaller refuses before this check, so the
+// handler test above cannot reach this branch with one.
 func TestWorkloadWebCodeAdmitted(t *testing.T) {
 	ctx := context.Background()
 	did := "d-1"

@@ -339,13 +339,9 @@ func TestCreateGroup_ParentID_AllowedForParentAdmin(t *testing.T) {
 	require.Len(t, children.Items, 1)
 	assert.Equal(t, child.ID, children.Items[0].ID, "the new group is a child of the parent")
 
-	var recs []*store.MutationAuditRecord
-	require.Eventually(t, func() bool {
-		recs = f.groupMembershipAudits(t, f.parent.ID)
-		return len(recs) > 0
-	}, 2*time.Second, 10*time.Millisecond, "create with parentId must write a group_membership audit record")
-	time.Sleep(50 * time.Millisecond)
-	recs = f.groupMembershipAudits(t, f.parent.ID)
+	// The record commits with the group, so it is readable when the
+	// response returns.
+	recs := f.groupMembershipAudits(t, f.parent.ID)
 	require.Len(t, recs, 1, "exactly one audit record for the parent membership")
 
 	rec := recs[0]
@@ -364,15 +360,12 @@ func TestCreateGroup_ParentID_AllowedForParentAdmin(t *testing.T) {
 	refCode, refBody := f.addSpareAsMember(t, actor)
 	require.Equal(t, http.StatusCreated, refCode, refBody)
 	var ref *store.MutationAuditRecord
-	require.Eventually(t, func() bool {
-		for _, r := range f.groupMembershipAudits(t, f.parent.ID) {
-			if r.ID != rec.ID {
-				ref = r
-				return true
-			}
+	for _, r := range f.groupMembershipAudits(t, f.parent.ID) {
+		if r.ID != rec.ID {
+			ref = r
 		}
-		return false
-	}, 2*time.Second, 10*time.Millisecond)
+	}
+	require.NotNil(t, ref, "addGroupMember writes its record before it returns")
 	assert.Equal(t, ref.MutationType, rec.MutationType)
 	assert.Equal(t, ref.TargetType, rec.TargetType)
 	assert.Equal(t, ref.CanDelegateResult, rec.CanDelegateResult)
@@ -606,8 +599,8 @@ func TestCreateGroup_ParentID_SlugConflict_NoAudit(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, spare.ParentID, "the group holding the slug is unchanged")
 
-	// Audit records are written asynchronously: give a record time to land.
-	time.Sleep(200 * time.Millisecond)
+	// The audit records commit with the group, so the rolled-back create
+	// leaves none.
 	assert.Empty(t, f.groupMembershipAudits(t, f.parent.ID), "a failed create writes no audit record")
 }
 

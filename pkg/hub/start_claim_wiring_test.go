@@ -439,22 +439,74 @@ func TestStartClaimWiring_FenceFailureRollsBackCapacity(t *testing.T) {
 	}
 }
 
-// A failed start keeps a reservation the agent already held.
-func TestStartClaimWiring_FailedStartKeepsPreheldCapacity(t *testing.T) {
-	f, d, a := newClaimFixture(t)
-	ctx := context.Background()
-	setBrokerAgentCeiling(t, f.s, 5)
-	_, err := f.srv.checkAndReserveBrokerQuota(ctx, a)
-	require.NoError(t, err)
-	def, err := f.s.GetLimitDefinitionByName(ctx, store.LimitMaxAgentsPerBroker)
-	require.NoError(t, err)
-	d.start = func(ctx context.Context, cur *store.Agent) error {
-		return fmt.Errorf("x: %w", errStartRequestNotSent)
+// A start that fails before it is sent (errStartRequestNotSent, confirmed
+// not acted on) and a reservation the agent held before the start: the
+// dispatch created no hold, so its rollback releases nothing, and the
+// claim's releaseSlotIfIdle (run by startClaimRun.finish for every outcome
+// except startHandedOff, design r7 R6-B1 option A) decides by the agent's
+// own state.
+func TestStartClaimWiring_FailedStartReleasesIdlePreheldCapacity(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		phase state.Phase
+		// queued: the agent's stop is queued for its offline broker
+		// (container status stop_queued, run intent stopped).
+		queued bool
+		kept   bool
+		why    string
+	}{
+		// Pins design r7 §4.3, clearing-paths row "start fails, confirmed
+		// not acted on": "releaseSlotIfIdle covers any hold the dispatch
+		// did not create". A stopped agent holds no capacity, so its
+		// pre-held reservation is an orphan and is released once the claim
+		// clears, without waiting for the sweep.
+		{"stopped", state.PhaseStopped, false, false, "a stopped agent's pre-held reservation is released once the claim clears"},
+		// Pins the same row's limit: releaseSlotIfIdle releases only an agent
+		// that holds no capacity (NotCounted). A failed start never takes a
+		// running agent's reservation.
+		{"running", state.PhaseRunning, false, true, "a running agent keeps the reservation it held before the failed start"},
+		// Pins NotCounted's second arm (store.AgentHoldsBrokerCapacity): a
+		// stopped agent whose stop is queued still holds its capacity (the
+		// queued stop is not a release, design §4.3), so the idle release
+		// keeps its reservation.
+		{"stop_queued", state.PhaseStopped, true, true, "a queued-stop agent keeps the reservation it held before the failed start"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, d, a := newClaimFixture(t) // a is stopped
+			if tc.phase != state.PhaseStopped {
+				a = f.addAgent("claimed-"+tc.name, string(tc.phase), "")
+			}
+			if tc.queued {
+				queueStop(t, f, a, "")
+				a = getAgent(t, f.s, a.ID)
+			}
+			ctx := context.Background()
+			setBrokerAgentCeiling(t, f.s, 5)
+			_, err := f.srv.checkAndReserveBrokerQuota(ctx, a)
+			require.NoError(t, err)
+			def, err := f.s.GetLimitDefinitionByName(ctx, store.LimitMaxAgentsPerBroker)
+			require.NoError(t, err)
+			require.EqualValues(t, 1, brokerReservationCount(t, f.s, f.brokerID), "the reservation is held before the start")
+			dispatched := false
+			d.start = func(ctx context.Context, cur *store.Agent) error {
+				dispatched = true
+				return fmt.Errorf("x: %w", errStartRequestNotSent)
+			}
+			require.Error(t, f.srv.startAgentCore(ctx, a, StartOpts{Kind: store.StartClaimUser}))
+			require.True(t, dispatched, "the start reached the dispatcher and failed before sending")
+			got := getAgent(t, f.s, a.ID)
+			assert.Empty(t, got.StartClaimID, "the claim is released")
+			assert.Equal(t, string(tc.phase), got.Phase, "the phase is unchanged")
+			has, err := f.s.HasActiveReservation(ctx, def.ID, a.ID)
+			require.NoError(t, err)
+			assert.Equal(t, tc.kept, has, tc.why)
+			want := int64(0)
+			if tc.kept {
+				want = 1
+			}
+			assert.EqualValues(t, want, brokerReservationCount(t, f.s, f.brokerID), tc.why)
+		})
 	}
-	require.Error(t, f.srv.startAgentCore(ctx, a, StartOpts{Kind: store.StartClaimUser}))
-	has, err := f.s.HasActiveReservation(ctx, def.ID, a.ID)
-	require.NoError(t, err)
-	assert.True(t, has, "a reservation the agent held before the start is kept")
 }
 
 // A start refused by a stop-kind claim says a stop is in progress.
@@ -920,4 +972,56 @@ func TestStartClaimWiring_StartLostWithoutADeleteIsAbandoned(t *testing.T) {
 	errCode, _ := errorDetails(body)
 	assert.Equal(t, ErrCodeConflict, errCode)
 	assert.Contains(t, fmt.Sprint(body), "abandoned")
+}
+
+func TestStartClaimWiring_StatusWriteFailureHeartbeatClearsExitFields(t *testing.T) {
+	f, d, a := newClaimFixture(t)
+	// The fixture only writes through the raw store, before any audited setup.
+	_, fault := installStoreFault(t, f.srv, func(inner store.Store, sw *storeFaultSwitch) failRunningStatusStore {
+		return failRunningStatusStore{Store: inner, agentID: a.ID, fault: sw}
+	})
+	dispatched := false
+	d.start = func(context.Context, *store.Agent) error { dispatched = true; return nil }
+	ctx := context.Background()
+	oldCode := 137
+	a.ExitCode, a.ExitReason = &oldCode, "crashed"
+	require.NoError(t, f.s.UpdateAgent(ctx, a))
+	fault.Arm()
+	code, _ := lifecycle(t, f, a.ID, "start")
+	require.Equal(t, http.StatusInternalServerError, code)
+	require.True(t, dispatched, "the broker start succeeded before the write failed")
+	got := getAgent(t, f.s, a.ID)
+	require.Equal(t, "starting", got.Phase)
+	require.Equal(t, &oldCode, got.ExitCode)
+	require.Equal(t, "crashed", got.ExitReason)
+
+	f.heartbeat(completeInventory(), a.Slug)
+	got = getAgent(t, f.s, a.ID)
+	assert.Equal(t, "running", got.Phase)
+	assert.Nil(t, got.ExitCode)
+	assert.Empty(t, got.ExitReason)
+}
+
+func TestStartClaimWiring_StartingHeartbeatKeepsFreshDisruption(t *testing.T) {
+	for _, hb := range []brokerAgentHeartbeat{
+		{Phase: "running"},
+		{ContainerStatus: "running"},
+	} {
+		t.Run("phase="+hb.Phase+"/container="+hb.ContainerStatus, func(t *testing.T) {
+			f, _, a := newClaimFixture(t)
+			a.Phase, a.ExitReason = "starting", "preempted"
+			oldCode := 137
+			a.ExitCode = &oldCode
+			require.NoError(t, f.s.UpdateAgent(context.Background(), a))
+			hb.Slug, hb.RuntimeTarget, hb.ExitReason = a.Slug, "docker", "evicted"
+			f.send(brokerHeartbeatRequest{
+				Status:   store.BrokerStatusOnline,
+				Projects: []brokerProjectHeartbeat{{ProjectID: f.projectID, Agents: []brokerAgentHeartbeat{hb}}},
+			})
+			got := getAgent(t, f.s, a.ID)
+			assert.Equal(t, "running", got.Phase)
+			assert.Nil(t, got.ExitCode)
+			assert.Equal(t, "evicted", got.ExitReason)
+		})
+	}
 }

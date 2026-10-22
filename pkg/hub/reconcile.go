@@ -251,6 +251,7 @@ func (s *Server) execDispatchStart(ctx context.Context, d store.BrokerDispatch) 
 	}
 	var task string
 	var resume bool
+	var opts StartDispatchOptions
 	if d.Args != "" {
 		args, err := UnmarshalStartArgs(d.Args)
 		if err != nil {
@@ -258,12 +259,23 @@ func (s *Server) execDispatchStart(ctx context.Context, d store.BrokerDispatch) 
 		}
 		task = args.Task
 		resume = args.Resume
+		opts.Async = args.Async
 	}
 	ctx, warns := withDispatchWarnings(ctx)
-	if err := dispatcher.DispatchAgentStart(ctx, agent, task, resume); err != nil {
+	// A dispatcher that takes start options gets the intent's options (and
+	// may return an accepted launch); any other runs the synchronous start
+	// (ptone/scion#4669). Both calls stay in this function, which the
+	// call-site and run-intent guards list.
+	var res *StartDispatchResult
+	if od, ok := dispatcher.(startOptionsDispatcher); ok {
+		res, err = od.DispatchAgentStartWithOptions(ctx, agent, task, resume, opts)
+	} else {
+		err = dispatcher.DispatchAgentStart(ctx, agent, task, resume)
+	}
+	if err != nil {
 		return "", fmt.Errorf("dispatch start: %w", err)
 	}
-	return s.lifecycleDispatchResult(ctx, agent.ID, warns), nil
+	return s.lifecycleDispatchResult(ctx, agent.ID, warns, res.AcceptedLaunch()), nil
 }
 
 // lifecycleDispatchResult is the result a completed start or restart row
@@ -272,10 +284,13 @@ func (s *Server) execDispatchStart(ctx context.Context, d store.BrokerDispatch) 
 // otherwise never see, and whether a delete won after the broker start
 // landed. The requester answers 409 delete_in_progress from its own re-read;
 // DeleteWon only ends its wait for a success phase that will not come.
-func (s *Server) lifecycleDispatchResult(ctx context.Context, agentID string, warns *dispatchWarnings) string {
+// launch is the asynchronous launch the start was accepted as, or nil for a
+// synchronous start (ptone/scion#4669); it also ends the requester's wait.
+func (s *Server) lifecycleDispatchResult(ctx context.Context, agentID string, warns *dispatchWarnings, launch *LaunchAccepted) string {
 	return marshalLifecycleResult(LifecycleDispatchResult{
 		Warnings:  warns.Warnings(),
 		DeleteWon: s.deleteWonAfterLanding(ctx, agentID),
+		Launch:    launch,
 	})
 }
 
@@ -410,7 +425,7 @@ func (s *Server) execDispatchRestart(ctx context.Context, d store.BrokerDispatch
 	if err := dispatcher.DispatchAgentRestart(ctx, agent); err != nil {
 		return "", fmt.Errorf("dispatch restart: %w", err)
 	}
-	return s.lifecycleDispatchResult(ctx, agent.ID, warns), nil
+	return s.lifecycleDispatchResult(ctx, agent.ID, warns, nil), nil
 }
 
 func (s *Server) execDispatchDelete(ctx context.Context, d store.BrokerDispatch) (string, error) {
@@ -615,7 +630,11 @@ func (s *Server) execDispatchFinalizeEnv(ctx context.Context, d store.BrokerDisp
 		env = args.Env
 	}
 	ctx, warns := withDispatchWarnings(ctx)
-	finalized, err := dispatcher.DispatchFinalizeEnv(ctx, agent, env)
+	// The requesting node keeps the agent when its wait for this
+	// dispatch expires (ErrDispatchFailed, an unknown outcome), so an
+	// unknown outcome here keeps the credential too; a definite failure
+	// still revokes (ptone/scion#4817).
+	finalized, err := dispatcher.DispatchFinalizeEnv(withKeepCredentialOnUnknownOutcome(ctx), agent, env)
 	if err != nil {
 		return "", fmt.Errorf("dispatch finalize_env: %w", err)
 	}
@@ -636,7 +655,12 @@ func (s *Server) execDispatchCreate(ctx context.Context, d store.BrokerDispatch)
 		return "", fmt.Errorf("no dispatcher available")
 	}
 	ctx, warns := withDispatchWarnings(ctx)
-	created, err := dispatcher.DispatchAgentCreateWithGather(ctx, agent)
+	// The requesting node keeps the agent when its wait for this
+	// dispatch expires (ErrDispatchFailed, an unknown outcome), so an
+	// unknown outcome here keeps the credential too; a definite failure
+	// still revokes, and the requester revokes when it rolls back
+	// (ptone/scion#4817).
+	created, err := dispatcher.DispatchAgentCreateWithGather(withKeepCredentialOnUnknownOutcome(ctx), agent)
 	if err != nil {
 		return "", fmt.Errorf("dispatch create: %w", err)
 	}

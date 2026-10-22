@@ -14,7 +14,10 @@
 
 package artifacts
 
-import "context"
+import (
+	"context"
+	"strings"
+)
 
 // Principal kinds returned by Host.Principal.
 const (
@@ -22,11 +25,26 @@ const (
 	PrincipalKindAgent = "agent"
 )
 
-// Scope kinds. In v1 every scope is a scion project, and its ref is the
-// project's stable id.
+// Scope kinds. A project scope's ref is the project's stable id. The two
+// attachment scopes (ptone/scion#4595) hold web-chat attachments: an upload
+// scope's ref is the uploader as PrincipalRef(kind, id), and a message
+// scope's ref is the id of the message the attachment was sent in.
 const (
 	ScopeKindProject = "project"
+	// ScopeKindUpload holds a file uploaded for a message that has not been
+	// sent yet. Only the uploader reads it.
+	ScopeKindUpload = "upload"
+	// ScopeKindMessage holds a file sent in a message. It is readable
+	// exactly by the readers of that message (MessageScopeHost).
+	ScopeKindMessage = "message"
 )
+
+// IsAttachmentScope reports whether kind is one of the attachment scopes.
+// Rows in them are never listed, never shared and never versioned, and the
+// artifact routes answer for them as for an id that does not exist.
+func IsAttachmentScope(kind string) bool {
+	return kind == ScopeKindUpload || kind == ScopeKindMessage
+}
 
 // Permission IDs passed to Host.Authorize. They match the hub permission
 // registry rows of the same name.
@@ -36,6 +54,10 @@ const (
 	PermissionUpdate = "artifact.update"
 	PermissionDelete = "artifact.delete"
 	PermissionManage = "artifact.manage"
+	// PermissionSteward is held by a home project's owners (and
+	// super-admins): it makes them stewards of the artifacts agents own in
+	// that project (design D25). It is never agent-callable.
+	PermissionSteward = "artifact.steward"
 )
 
 // Host is the service's only view of the system it runs in. It answers
@@ -90,11 +112,49 @@ type Host interface {
 
 // ScopeChecker is an optional extension of Host. The artifact list asks it
 // which home projects still exist, so it can mark the rows of artifacts
-// whose project was deleted. A host without it reports none deleted.
+// whose project was deleted. A host without it reports none deleted. The
+// maintenance pass asks it which messages still exist, so it can retire
+// the attachments of messages that are gone (ptone/scion#4595).
 type ScopeChecker interface {
-	// ScopesExist reports, for each project id in refs, whether the
-	// project exists. An id missing from the answer counts as existing.
+	// ScopesExist reports, for each ref, whether its scope exists. A ref
+	// is a project id, or MessageScopeRef(id) for a message, which exists
+	// while it is stored and not deleted. A ref missing from the answer
+	// counts as existing.
 	ScopesExist(ctx context.Context, refs []string) (map[string]bool, error)
+}
+
+// messageRefPrefix marks a message ref in a ScopesExist question. Project
+// ids are UUIDs, so the two kinds of ref never collide.
+const messageRefPrefix = ScopeKindMessage + ":"
+
+// MessageScopeRef is the ScopesExist ref of message messageID.
+func MessageScopeRef(messageID string) string { return messageRefPrefix + messageID }
+
+// ParseMessageScopeRef returns the message id of a ScopesExist ref made by
+// MessageScopeRef, and false for any other ref.
+func ParseMessageScopeRef(ref string) (string, bool) {
+	id, ok := strings.CutPrefix(ref, messageRefPrefix)
+	return id, ok && id != ""
+}
+
+// MessageScopeHost is an optional extension of Host (ptone/scion#4595).
+// The read rule of the attachment scopes asks it about the caller of the
+// request; a host without it makes every upload and message scoped row
+// unreadable (fail closed).
+//
+// Like every Host method, it answers only for the identity of the request
+// whose context is ctx.
+type MessageScopeHost interface {
+	// PermitsMessageRead reports whether the caller's credential allows
+	// reading messages at all. It is asked first, so nothing reaches past
+	// what the credential allows.
+	PermitsMessageRead(ctx context.Context) bool
+
+	// MayReadMessage reports whether the caller may read the message
+	// messageID now: a reader of its conversation, or one of its
+	// addressees. A deleted or unknown message, and any lookup failure,
+	// answer false.
+	MayReadMessage(ctx context.Context, messageID string) bool
 }
 
 // ScopeExplainer is an optional extension of Host. When a credential
@@ -129,6 +189,26 @@ type ReviewGrantAuthority interface {
 	MayGrantReview(ctx context.Context, ownerAgentID, homeScope string) bool
 }
 
+// Review grant clauses, as ReviewGrantClauser names them.
+const (
+	ReviewClauseProjectAdmin   = "project_admin"
+	ReviewClauseDelegatingUser = "delegating_user"
+)
+
+// ReviewGrantClauser is an optional host interface that replaces
+// ReviewGrantAuthority when a host has it (ptone/scion#5120): the service
+// asks it instead of MayGrantReview. It makes the same decision as
+// MayGrantReview, in the same single evaluation, and names the clause that
+// allowed it, so the decision log can record it without asking the host a
+// second question.
+type ReviewGrantClauser interface {
+	// ReviewGrantClause answers like MayGrantReview: ReviewClauseProjectAdmin
+	// when the caller holds project administration in homeScope,
+	// ReviewClauseDelegatingUser when it is the delegating user of agent
+	// ownerAgentID, or "" when MayGrantReview would answer false.
+	ReviewGrantClause(ctx context.Context, ownerAgentID, homeScope string) string
+}
+
 // PrincipalChecker is an optional extension of Host (ptone/scion#4529).
 // The owner liveness reconciler asks it which artifact owners still exist,
 // so it can mark the artifacts of a deleted agent or user. A host without
@@ -155,4 +235,35 @@ type ScopeAdministrator interface {
 	// with the caller's credential limits applied. Any lookup failure
 	// answers false.
 	AdministersScope(ctx context.Context, scopeRef string) bool
+}
+
+// Steward clauses, as Stewardship names them (design D25).
+const (
+	// StewardClauseProjectOwner: the caller holds artifact.steward in the
+	// artifact's home project (its owners, and super-admins).
+	StewardClauseProjectOwner = "project_owner"
+	// StewardClauseDelegator: the caller is the user at the root of the
+	// owning agent's live delegation chain and reads in the home project
+	// through a role.
+	StewardClauseDelegator = "delegator"
+)
+
+// Stewardship is an optional extension of Host (design D25,
+// ptone/scion#5144). For an artifact owned by an agent, the agent cannot
+// share it (sharing is user-only), so the humans accountable for it are
+// its stewards: they may share it within bounds (no admin grant, no move),
+// change its expiry and delete it. The service asks it only for an
+// artifact owned by an agent, after the owner and admin-grant checks, for
+// a user whose credential permits artifact.manage in the home project. A
+// host without it has no stewards (fail closed).
+type Stewardship interface {
+	// StewardClause reports which steward clause the calling user
+	// satisfies for an artifact owned by agent ownerAgentID and homed in
+	// project homeScope: StewardClauseProjectOwner,
+	// StewardClauseDelegator, or "" for none. sponsorRef and orphaned come
+	// from the artifact row (sponsorRef is "" until sponsors are recorded).
+	// A grant on the artifact never makes the caller a steward: the clauses
+	// are decided from roles and the delegation chain only. Any lookup
+	// failure answers "".
+	StewardClause(ctx context.Context, ownerAgentID, homeScope, sponsorRef string, orphaned bool) string
 }

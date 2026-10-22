@@ -33,6 +33,10 @@ type GroupMembership struct {
 	UserID *uuid.UUID `json:"user_id,omitempty"`
 	// AgentID holds the value of the "agent_id" field.
 	AgentID *uuid.UUID `json:"agent_id,omitempty"`
+	// ExpiresAt holds the value of the "expires_at" field.
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	// Issuance ID of the admin-kind test identity that created this row (grant shaping)
+	IssuanceID *string `json:"issuance_id,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
 	// The values are being populated by the GroupMembershipQuery when eager-loading is set.
 	Edges        GroupMembershipEdges `json:"edges"`
@@ -92,9 +96,9 @@ func (*GroupMembership) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case groupmembership.FieldUserID, groupmembership.FieldAgentID:
 			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
-		case groupmembership.FieldRole, groupmembership.FieldAddedBy:
+		case groupmembership.FieldRole, groupmembership.FieldAddedBy, groupmembership.FieldIssuanceID:
 			values[i] = new(sql.NullString)
-		case groupmembership.FieldAddedAt:
+		case groupmembership.FieldAddedAt, groupmembership.FieldExpiresAt:
 			values[i] = new(sql.NullTime)
 		case groupmembership.FieldID, groupmembership.FieldGroupID:
 			values[i] = new(uuid.UUID)
@@ -156,6 +160,20 @@ func (_m *GroupMembership) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.AgentID = new(uuid.UUID)
 				*_m.AgentID = *value.S.(*uuid.UUID)
+			}
+		case groupmembership.FieldExpiresAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field expires_at", values[i])
+			} else if value.Valid {
+				_m.ExpiresAt = new(time.Time)
+				*_m.ExpiresAt = value.Time
+			}
+		case groupmembership.FieldIssuanceID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field issuance_id", values[i])
+			} else if value.Valid {
+				_m.IssuanceID = new(string)
+				*_m.IssuanceID = value.String
 			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
@@ -228,6 +246,16 @@ func (_m *GroupMembership) String() string {
 	if v := _m.AgentID; v != nil {
 		builder.WriteString("agent_id=")
 		builder.WriteString(fmt.Sprintf("%v", *v))
+	}
+	builder.WriteString(", ")
+	if v := _m.ExpiresAt; v != nil {
+		builder.WriteString("expires_at=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
+	if v := _m.IssuanceID; v != nil {
+		builder.WriteString("issuance_id=")
+		builder.WriteString(*v)
 	}
 	builder.WriteByte(')')
 	return builder.String()

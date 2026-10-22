@@ -732,6 +732,9 @@ func (_u *MutationAuditUpdate) sqlSave(ctx context.Context) (_node int, err erro
 	if _u.mutation.AgentDelegationCodeCleared() {
 		_spec.ClearField(mutationaudit.FieldAgentDelegationCode, field.TypeString)
 	}
+	if _u.mutation.ProvenanceBasisCleared() {
+		_spec.ClearField(mutationaudit.FieldProvenanceBasis, field.TypeString)
+	}
 	if _node, err = sqlgraph.UpdateNodes(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
 			err = &NotFoundError{mutationaudit.Label}
@@ -1486,6 +1489,9 @@ func (_u *MutationAuditUpdateOne) sqlSave(ctx context.Context) (_node *MutationA
 	}
 	if _u.mutation.AgentDelegationCodeCleared() {
 		_spec.ClearField(mutationaudit.FieldAgentDelegationCode, field.TypeString)
+	}
+	if _u.mutation.ProvenanceBasisCleared() {
+		_spec.ClearField(mutationaudit.FieldProvenanceBasis, field.TypeString)
 	}
 	_node = &MutationAudit{config: _u.config}
 	_spec.Assign = _node.assignValues

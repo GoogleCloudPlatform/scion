@@ -16,6 +16,7 @@ package chatapp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -72,9 +73,41 @@ type CommandRouter struct {
 	pendingAuth    map[string]*pendingDeviceAuth // keyed by platformUserID+platform
 	pendingDeletes map[string]string             // keyed by actionID -> agentID
 
-	// testClient, when non-nil, is returned by clientForUser instead of
-	// going through the identity mapper. Used only in tests.
+	// testClient, when non-nil, is returned by clientForUser and
+	// clientForMapping instead of going through the identity mapper. Used
+	// only in tests.
 	testClient hubclient.Client
+
+	// syncCreate turns off the async create opt-in (hub.async_create:
+	// false). The zero value opts in.
+	syncCreate bool
+	// launchPollInterval is the poll interval of the launch watchers; 0
+	// means the hubclient default (2 s). Tests shorten it.
+	launchPollInterval time.Duration
+
+	// Launch watchers (launch_wait.go). bgCtx ends at Shutdown; bg counts
+	// the running watchers; launchQueues holds the deferred work per
+	// launching agent, guarded by launchMu.
+	bgOnce       sync.Once
+	bgCtx        context.Context
+	bgCancel     context.CancelFunc
+	bg           sync.WaitGroup
+	launchMu     sync.Mutex
+	launchQueues map[string]*agentLaunchQueue
+}
+
+// SetAsyncCreate sets whether /create and /thread opt in to an
+// asynchronous agent create (hub.async_create, default true). The Hub's
+// async launch flag stays the real gate: a Hub without it answers
+// synchronously either way.
+func (r *CommandRouter) SetAsyncCreate(enabled bool) {
+	r.syncCreate = !enabled
+}
+
+// asyncCreateEnabled reports whether creates opt in to an asynchronous
+// launch.
+func (r *CommandRouter) asyncCreateEnabled() bool {
+	return !r.syncCreate
 }
 
 // NewCommandRouter creates a new command router.
@@ -405,7 +438,7 @@ func (r *CommandRouter) handleDialogSubmit(ctx context.Context, event *ChatEvent
 		if mapping == nil {
 			return nil, r.reply(ctx, event, "Authentication required. Use `/scionAdmin register` first.")
 		}
-		client, err := r.idMapper.ClientFor(ctx, mapping)
+		client, err := r.clientForMapping(ctx, mapping)
 		if err != nil {
 			return nil, r.reply(ctx, event, fmt.Sprintf("Failed to create client: %v", err))
 		}
@@ -419,7 +452,39 @@ func (r *CommandRouter) handleDialogSubmit(ctx context.Context, event *ChatEvent
 		if event.ThreadID != "" {
 			msg.ThreadID = event.ThreadID
 		}
-		if _, err := client.ProjectAgents(link.ProjectID).SendStructuredMessage(ctx, agentID, msg, false, false, false); err != nil {
+		agents := client.ProjectAgents(link.ProjectID)
+		// Read the agent once: an agent that is still launching refuses
+		// messages, so the response then waits for the launch. A failed
+		// read sends as before; the Hub refuses the send if needed.
+		getCtx, cancel := context.WithTimeout(ctx, deferredSendTimeout)
+		agent, getErr := agents.Get(getCtx, agentID)
+		cancel()
+		if getErr != nil {
+			r.log.Warn("respond: reading agent before send failed; sending anyway", "error", getErr, "agent", agentID)
+			agent = nil
+		}
+		spaceID, threadID := event.SpaceID, event.ThreadID
+		deferred, deferErr := r.deferUntilRunning(agentQueueKey(link.ProjectID, agentID, agent), agents, agent, deferredWork{
+			spaceID:  spaceID,
+			threadID: threadID,
+			message:  true,
+			run: func(wctx context.Context) {
+				sendCtx, cancel := deferredContext(wctx)
+				defer cancel()
+				text := fmt.Sprintf("Response sent to agent `%s`.", agentID)
+				if _, err := agents.SendStructuredMessage(sendCtx, agentID, msg, false, false, false); err != nil {
+					text = fmt.Sprintf("Failed to send response to agent: %v", err)
+				}
+				r.postDeferred(wctx, spaceID, threadID, text)
+			},
+		})
+		if errors.Is(deferErr, errDeferredQueueFull) {
+			return nil, r.reply(ctx, event, launchQueueFullText(agentID))
+		}
+		if deferred {
+			return nil, r.reply(ctx, event, launchStartingNotice(agentID))
+		}
+		if _, err := agents.SendStructuredMessage(ctx, agentID, msg, false, false, false); err != nil {
 			return nil, r.reply(ctx, event, fmt.Sprintf("Failed to send response to agent: %v", err))
 		}
 		return nil, r.reply(ctx, event, fmt.Sprintf("Response sent to agent `%s`.", agentID))
@@ -758,13 +823,37 @@ func (r *CommandRouter) cmdCreate(ctx context.Context, event *ChatEvent, args []
 		return textResponse(event, "Authentication required. Use `/scionAdmin register` first."), nil
 	}
 
-	createResp, err := client.ProjectAgents(link.ProjectID).Create(ctx, &hubclient.CreateAgentRequest{
-		Name: args[0],
+	agents := client.ProjectAgents(link.ProjectID)
+	createResp, err := agents.Create(ctx, &hubclient.CreateAgentRequest{
+		Name:              args[0],
+		AcceptAsyncLaunch: r.asyncCreateEnabled(),
 	})
 	if err != nil {
 		return textResponse(event, fmt.Sprintf("Failed to create agent: %v", err)), nil
 	}
-	return textResponse(event, fmt.Sprintf("Agent `%s` created (ID: `%s`).", createResp.Agent.Slug, createResp.Agent.ID)), nil
+	if createResp == nil || createResp.Agent == nil {
+		return textResponse(event, "Failed to create agent: received empty response from server"), nil
+	}
+	created := createResp.Agent
+	if hubclient.LaunchActive(created) {
+		// Async answer: reply now and post the outcome in the same space
+		// and thread once the launch ends. The watcher polls with this
+		// user's client, the identity that made the create.
+		spaceID, threadID := event.SpaceID, event.ThreadID
+		deferred, deferErr := r.deferUntilRunning(agentQueueKey(link.ProjectID, args[0], created), agents, created, deferredWork{
+			spaceID:  spaceID,
+			threadID: threadID,
+			run: func(wctx context.Context) {
+				r.postDeferred(wctx, spaceID, threadID, fmt.Sprintf("Agent `%s` is running (ID: `%s`).", created.Slug, created.ID))
+			},
+		})
+		if deferred {
+			return textResponse(event, fmt.Sprintf("Creating agent `%s`… (I'll post here when it is running)", created.Slug)), nil
+		}
+		r.log.Warn("create: not following the launch", "error", deferErr, "agent", created.Slug)
+		return textResponse(event, fmt.Sprintf("Creating agent `%s` (ID: `%s`); it is still starting.", created.Slug, created.ID)), nil
+	}
+	return textResponse(event, fmt.Sprintf("Agent `%s` created (ID: `%s`).", created.Slug, created.ID)), nil
 }
 
 // projectSubscriptionPattern returns the broker subscription pattern used to
@@ -1236,7 +1325,7 @@ func (r *CommandRouter) cmdMessage(ctx context.Context, event *ChatEvent, args [
 	if err != nil || mapping == nil {
 		return textResponse(event, "Authentication required. Use `/scionAdmin register` first."), nil
 	}
-	client, err := r.idMapper.ClientFor(ctx, mapping)
+	client, err := r.clientForMapping(ctx, mapping)
 	if err != nil {
 		return textResponse(event, fmt.Sprintf("Failed to create client: %v", err)), nil
 	}
@@ -1327,15 +1416,41 @@ func (r *CommandRouter) cmdMessage(ctx context.Context, event *ChatEvent, args [
 		msg.Msg = messageText
 	}
 
-	if _, err := client.ProjectAgents(link.ProjectID).SendStructuredMessage(ctx, agentSlug, msg, false, false, false); err != nil {
-		return textResponse(event, fmt.Sprintf("Failed to send message to `%s`: %v", agentSlug, err)), nil
-	}
-
 	displayName := event.UserDisplayName
 	if displayName == "" {
 		displayName = event.UserEmail
 	}
 	replyText := fmt.Sprintf("Message from *%s* sent to *%s*:\n%s", displayName, agentSlug, messageText)
+
+	// An agent that is still launching refuses messages: the message waits
+	// for the launch (agent was just read), behind any earlier deferred
+	// work for the agent.
+	agents := client.ProjectAgents(link.ProjectID)
+	spaceID, replyThread := event.SpaceID, event.ThreadID
+	deferred, deferErr := r.deferUntilRunning(agentQueueKey(link.ProjectID, agentSlug, agent), agents, agent, deferredWork{
+		spaceID:  spaceID,
+		threadID: replyThread,
+		message:  true,
+		run: func(wctx context.Context) {
+			sendCtx, cancel := deferredContext(wctx)
+			defer cancel()
+			text := replyText
+			if _, err := agents.SendStructuredMessage(sendCtx, agentSlug, msg, false, false, false); err != nil {
+				text = fmt.Sprintf("Failed to send message to `%s`: %v", agentSlug, err)
+			}
+			r.postDeferred(wctx, spaceID, replyThread, text)
+		},
+	})
+	if errors.Is(deferErr, errDeferredQueueFull) {
+		return textResponse(event, launchQueueFullText(agentSlug)), nil
+	}
+	if deferred {
+		return textResponse(event, launchStartingNotice(agentSlug)), nil
+	}
+
+	if _, err := agents.SendStructuredMessage(ctx, agentSlug, msg, false, false, false); err != nil {
+		return textResponse(event, fmt.Sprintf("Failed to send message to `%s`: %v", agentSlug, err)), nil
+	}
 	return textResponse(event, replyText), nil
 }
 
@@ -1641,13 +1756,18 @@ func (r *CommandRouter) cmdThread(ctx context.Context, event *ChatEvent, args []
 
 	// Create the agent.
 	createResp, err := client.ProjectAgents(link.ProjectID).Create(ctx, &hubclient.CreateAgentRequest{
-		Name: agentName,
+		Name:              agentName,
+		AcceptAsyncLaunch: r.asyncCreateEnabled(),
 	})
 	if err != nil {
 		return textResponse(event, fmt.Sprintf("Failed to create agent: %v", err)), nil
 	}
 	if createResp == nil || createResp.Agent == nil {
 		return textResponse(event, "Failed to create agent: received empty response from server"), nil
+	}
+	if hubclient.LaunchActive(createResp.Agent) {
+		// Async answer: the agent is already launching, so no Start.
+		return r.threadAsync(ctx, event, link, client, createResp.Agent, instruction), nil
 	}
 
 	// Start the agent.
@@ -1691,30 +1811,149 @@ func (r *CommandRouter) cmdThread(ctx context.Context, event *ChatEvent, args []
 		}
 	}
 
+	card := threadCard(createResp.Agent, "Running", instruction)
+	return cardResponse(event, &card), nil
+}
+
+// threadCard is the /thread result card with the given status.
+func threadCard(a *hubclient.Agent, status, instruction string) Card {
 	card := Card{
 		Header: CardHeader{
 			Title:    "Thread Created",
-			Subtitle: fmt.Sprintf("Agent: %s", createResp.Agent.Slug),
+			Subtitle: fmt.Sprintf("Agent: %s", a.Slug),
 		},
 		Sections: []CardSection{
 			{
 				Widgets: []Widget{
-					{Type: WidgetKeyValue, Label: "Agent", Content: createResp.Agent.Slug},
-					{Type: WidgetKeyValue, Label: "Status", Content: "Running"},
+					{Type: WidgetKeyValue, Label: "Agent", Content: a.Slug},
+					{Type: WidgetKeyValue, Label: "Status", Content: status},
 				},
 			},
 		},
 		Actions: []CardAction{
-			{Label: "View Status", ActionID: fmt.Sprintf("agent.status.%s", createResp.Agent.ID)},
-			{Label: "View Logs", ActionID: fmt.Sprintf("agent.logs.%s", createResp.Agent.ID)},
+			{Label: "View Status", ActionID: fmt.Sprintf("agent.status.%s", a.ID)},
+			{Label: "View Logs", ActionID: fmt.Sprintf("agent.logs.%s", a.ID)},
 		},
 	}
 	if instruction != "" {
 		card.Sections[0].Widgets = append(card.Sections[0].Widgets,
 			Widget{Type: WidgetKeyValue, Label: "Instruction", Content: instruction})
 	}
+	return card
+}
 
-	return cardResponse(event, &card), nil
+// threadAsync finishes /thread after an asynchronous create: it opens the
+// agent's thread with a "starting" kickoff, posts the card with status
+// "Starting…", and returns. A launch watcher (polling with this user's
+// client, the identity that made the create) then sends the instruction
+// and updates the card to "Running", or, if the launch fails, updates the
+// card, posts the failure in the agent's thread and sends nothing.
+//
+// The work is registered before the kickoff and card posts, so a message
+// relayed to the agent meanwhile queues behind the instruction; the
+// watcher does not use it before ready is closed, once the posts are done.
+func (r *CommandRouter) threadAsync(ctx context.Context, event *ChatEvent, link *state.SpaceLink, client hubclient.Client, a *hubclient.Agent, instruction string) *EventResponse {
+	agents := client.ProjectAgents(link.ProjectID)
+	slug := a.Slug
+	spaceID, eventThread := event.SpaceID, event.ThreadID
+
+	// Set before ready is closed; read by the watcher only after it.
+	var (
+		agentThread string
+		cardName    string
+		msg         *messages.StructuredMessage
+		card        Card
+	)
+	ready := make(chan struct{})
+
+	setStatus := func(wctx context.Context, status string) {
+		if wctx.Err() != nil {
+			return
+		}
+		updated := threadCard(a, status, instruction)
+		if cardName == "" {
+			// The card went out as the command's response and cannot be
+			// updated: post the status instead.
+			r.postDeferred(wctx, spaceID, eventThread, fmt.Sprintf("Agent `%s`: %s.", slug, status))
+			return
+		}
+		upCtx, cancel := deferredContext(wctx)
+		defer cancel()
+		if err := r.messenger.UpdateMessage(upCtx, cardName, SendMessageRequest{SpaceID: spaceID, Card: &updated}); err != nil {
+			r.log.Warn("failed to update thread card", "error", err, "agent", slug)
+		}
+	}
+
+	deferred, deferErr := r.deferUntilRunning(agentQueueKey(link.ProjectID, slug, a), agents, a, deferredWork{
+		spaceID: spaceID,
+		place:   func() (string, string) { return spaceID, agentThread },
+		ready:   ready,
+		message: instruction != "",
+		run: func(wctx context.Context) {
+			if msg != nil {
+				sendCtx, cancel := deferredContext(wctx)
+				_, err := agents.SendStructuredMessage(sendCtx, slug, msg, false, false, false)
+				cancel()
+				if err != nil {
+					r.postDeferred(wctx, spaceID, agentThread, fmt.Sprintf("Agent `%s` is running, but sending the instruction failed: %v", slug, err))
+				}
+			}
+			setStatus(wctx, "Running")
+		},
+		failed: func(wctx context.Context, _ string) {
+			setStatus(wctx, "Failed to start")
+		},
+	})
+	if !deferred {
+		// Nothing has been posted yet, so no "Starting…" card is left behind.
+		r.log.Warn("thread: not following the launch", "error", deferErr, "agent", slug)
+		text := fmt.Sprintf("Agent `%s` created and still starting; I am not following its launch.", slug)
+		if instruction != "" {
+			text += " Send the instruction once it is running."
+		}
+		return textResponse(event, text)
+	}
+	defer close(ready)
+
+	threadMsg := fmt.Sprintf("Agent `%s` created; starting…", slug)
+	if instruction != "" {
+		threadMsg += fmt.Sprintf("\n\n*Instruction:* %s", instruction)
+	}
+	kickoffMsgName, msgErr := r.messenger.SendMessage(ctx, SendMessageRequest{
+		SpaceID:   spaceID,
+		ThreadKey: fmt.Sprintf("scion-agent-%s", slug),
+		Text:      threadMsg,
+	})
+	if msgErr != nil {
+		r.log.Warn("failed to post thread kickoff message", "error", msgErr)
+	}
+	// The agent replies in the new thread, as on the synchronous path.
+	agentThread = eventThread
+	if msgErr == nil && kickoffMsgName != "" {
+		agentThread = strings.Replace(kickoffMsgName, "/messages/", "/threads/", 1)
+	}
+
+	if instruction != "" {
+		msg = messages.NewInstruction("user:"+r.senderEmailForUser(ctx, event), slug, instruction)
+		if r.broker != nil {
+			msg.Channel = r.broker.ChannelName()
+		}
+		msg.ThreadID = agentThread
+	}
+
+	// Post the card ourselves so it can be updated when the launch ends.
+	card = threadCard(a, "Starting…", instruction)
+	name, cardErr := r.messenger.SendMessage(ctx, SendMessageRequest{
+		SpaceID:  spaceID,
+		ThreadID: eventThread,
+		Card:     &card,
+	})
+	if cardErr != nil {
+		r.log.Warn("failed to post thread card", "error", cardErr)
+		return cardResponse(event, &card)
+	}
+	cardName = name
+	return nil
 }
 
 func (r *CommandRouter) cmdSend(ctx context.Context, event *ChatEvent, args []string) (*EventResponse, error) {
@@ -2194,6 +2433,14 @@ func (r *CommandRouter) clientForUser(ctx context.Context, event *ChatEvent) (hu
 	}
 	if mapping == nil {
 		return nil, fmt.Errorf("user not registered")
+	}
+	return r.clientForMapping(ctx, mapping)
+}
+
+// clientForMapping creates a Hub client authenticated as the mapped user.
+func (r *CommandRouter) clientForMapping(ctx context.Context, mapping *state.UserMapping) (hubclient.Client, error) {
+	if r.testClient != nil {
+		return r.testClient, nil
 	}
 	return r.idMapper.ClientFor(ctx, mapping)
 }

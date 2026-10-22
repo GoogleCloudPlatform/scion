@@ -165,3 +165,11 @@ export function setFeatureFlag(name: string, enabled: boolean): void {
  * the /agents/{id}/edit route. Default OFF.
  */
 export const AGENT_EDIT_FLAG = 'web.agent_edit';
+
+/**
+ * Brokers area (broker UI Option A, slice A1): with the registered
+ * experiment hub.flat_runtime_brokers on, /brokers and /brokers/{id} render
+ * the new Brokers area; with it off, the existing pages. Presentation only:
+ * every hub check is server-side. Default OFF (not in DEFAULT_ON_FLAGS).
+ */
+export const FLAT_BROKERS_FLAG = 'hub.flat_runtime_brokers';

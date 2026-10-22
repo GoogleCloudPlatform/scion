@@ -338,6 +338,14 @@ type refFaultStore struct {
 	failConvByExtRef    bool
 	failGetProject      bool
 	failGetConversation bool
+	// conversationCallsOK, when failGetConversation is set, lets that many
+	// GetConversation calls made while the switch is armed through before the
+	// rest fail; conversationCalls counts the armed calls. Zero fails every
+	// armed call, as before.
+	conversationCallsOK int
+	conversationCalls   int
+	// failGetAgent fails GetAgent while the switch is armed.
+	failGetAgent bool
 	// failGetProjectID, when set, fails GetProject for that project only.
 	failGetProjectID string
 }
@@ -386,7 +394,17 @@ func (r *refFaultStore) GetProject(ctx context.Context, id string) (*store.Proje
 
 func (r *refFaultStore) GetConversation(ctx context.Context, id string) (*store.Conversation, error) {
 	if r.failGetConversation && r.fault.Active() {
-		return nil, errRefStoreFault
+		r.conversationCalls++
+		if r.conversationCalls > r.conversationCallsOK {
+			return nil, errRefStoreFault
+		}
 	}
 	return r.Store.GetConversation(ctx, id)
+}
+
+func (r *refFaultStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	if r.failGetAgent && r.fault.Active() {
+		return nil, errRefStoreFault
+	}
+	return r.Store.GetAgent(ctx, id)
 }

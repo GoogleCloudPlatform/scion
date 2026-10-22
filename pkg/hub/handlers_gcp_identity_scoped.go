@@ -694,6 +694,7 @@ func (s *Server) createHubScopedGCPServiceAccount(w http.ResponseWriter, r *http
 		}
 	}
 	resp.Warnings = s.hubSAMappingWarnings(r.Context(), sa)
+	resp.Warnings = s.withSAProjectAccessWarning(r.Context(), resp.Warnings, sa)
 	s.logGCPServiceAccountRegisterAudit(r.Context(), sa)
 
 	writeJSON(w, http.StatusCreated, resp)

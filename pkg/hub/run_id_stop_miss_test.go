@@ -180,10 +180,11 @@ func (c runLandingStartClient) StartAgent(ctx context.Context, _, _, _, _, _, _,
 	return nil, errors.New("connection reset by peer")
 }
 
-// A restart whose stop leg succeeds and whose start leg fails while
-// keeping the run it minted (the broker attempted the start, or a transport
-// error) records the agent stopped under that run and releases its
-// reservation.
+// A restart whose stop leg succeeds and whose start leg fails definitely
+// while keeping the run it minted (the broker attempted the start and
+// answered with a coded error) records the agent stopped under that run and
+// releases its reservation. A transport error is an unknown outcome:
+// TestRestartStartLegAmbiguousKeepingMintedRunKeepsSlot.
 func TestRestartStartLegFailureKeepingMintedRunRecordsStopped(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -192,7 +193,6 @@ func TestRestartStartLegFailureKeepingMintedRunRecordsStopped(t *testing.T) {
 		{"start attempted", func(t *testing.T) error {
 			return brokerEnvelope(t, http.StatusInternalServerError, "runtime_error", startAttempted(""))
 		}},
-		{"transport error", func(*testing.T) error { return errors.New("connection reset by peer") }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, s, agent := restartQuotaAgent(t, "restart-minted-"+tc.name)
@@ -219,6 +219,36 @@ func TestRestartStartLegFailureKeepingMintedRunRecordsStopped(t *testing.T) {
 				t.Errorf("reservations = %d, want 0 (released)", n)
 			}
 		})
+	}
+}
+
+// A restart whose start leg fails with a transport error after minting its
+// run may have reached the runtime: the minted run is kept, nothing is
+// recorded stopped and the reservation is kept, until the start-claim
+// reaper settles the restart's claim (ptone/scion#5143, erratum E-33c-1).
+func TestRestartStartLegAmbiguousKeepingMintedRunKeepsSlot(t *testing.T) {
+	srv, s, agent := restartQuotaAgent(t, "restart-minted-transport")
+	mockClient := &mockRuntimeBrokerClient{}
+	d := NewHTTPAgentDispatcherWithClient(s, startErrClient{mockClient, errors.New("connection reset by peer")}, false, slog.Default())
+	d.SetTokenGenerator(staticTokenGenerator{token: "test-token"})
+	srv.SetDispatcher(d)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/restart", nil)
+	if rec.Code < 400 {
+		t.Fatalf("restart: status %d, want a failure: %s", rec.Code, rec.Body.String())
+	}
+	if !mockClient.stopCalled {
+		t.Fatal("the stop leg was not dispatched")
+	}
+	got := mustGetAgent(t, s, agent.ID)
+	if got.Phase == string(state.PhaseStopped) || got.ContainerStatus == "stopped" {
+		t.Errorf("phase=%q container=%q: an ambiguous start leg records nothing stopped", got.Phase, got.ContainerStatus)
+	}
+	if got.RunID == "" || got.RunID == "run-x" {
+		t.Errorf("run = %q, want the run the failed start leg minted", got.RunID)
+	}
+	if n := brokerReservationCount(t, s, agent.RuntimeBrokerID); n != 1 {
+		t.Errorf("reservations = %d, want 1 (an ambiguous restart keeps the reservation)", n)
 	}
 }
 

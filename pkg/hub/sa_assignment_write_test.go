@@ -235,6 +235,9 @@ func TestSAParentCeiling_ScheduledHostPassthroughRecordsRevisionPrincipal(t *tes
 	hostSAEmail := "broker-host@sa-rec-sched-pt.iam.gserviceaccount.com"
 	owner := ptUser(tid("user-sa-rec-sched-pt"), "sa-rec-sched-pt@test.com", store.UserRoleMember)
 	srv, s, project, _ := setupPassthroughSandboxServer(t, owner, hostSAEmail, "sa-rec-sched-pt")
+	// Translation needs enforce mode and actAs for the revision principal,
+	// who owns the broker.
+	enforceSAAssign(srv, store.NewFakeCallerPermissionChecker().AllowTarget(hostSAEmail))
 	ctx := context.Background()
 	proj, err := s.GetProject(ctx, project.ID)
 	require.NoError(t, err)

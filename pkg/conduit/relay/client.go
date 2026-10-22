@@ -159,6 +159,79 @@ func (c *PeerClient) Probe(ctx context.Context, endpoint, targetID string, targe
 	return sr.InstanceID, nil
 }
 
+// Causes of a failed drain call (DrainError.Cause), the values of the
+// hub counter scion.hub.conduit.ingress_drain_failed.
+const (
+	DrainFailedUnreachable = "unreachable"
+	DrainFailedTimeout     = "timeout"
+	DrainFailedRefused     = "refused"
+	DrainFailedBadResponse = "bad_response"
+)
+
+// DrainError is a failed drain call: Cause is one of the DrainFailed
+// values, Status the HTTP status of a refused call.
+type DrainError struct {
+	Cause  string
+	Status int
+	Err    error
+}
+
+func (e *DrainError) Error() string {
+	if e.Status != 0 {
+		return fmt.Sprintf("conduit relay drain: %s (HTTP %d)", e.Cause, e.Status)
+	}
+	return fmt.Sprintf("conduit relay drain: %s: %v", e.Cause, e.Err)
+}
+
+func (e *DrainError) Unwrap() error { return e.Err }
+
+// Drain is POST {endpoint}/internal/v1/conduit/drain, signed for the relay
+// targetID at generation targetGen, with its body bound to the signature
+// (X-Conduit-Body-SHA256). It asks the relay to send GoAway to the
+// sessions proxied by ingressInstance, which must be this client's own
+// relay-peer identity, with deadline (0: the relay's own) as the drain
+// deadline. It returns the count of sessions sent GoAway, or a
+// *DrainError.
+func (c *PeerClient) Drain(ctx context.Context, endpoint, targetID string, targetGen int64, ingressInstance string, deadline time.Duration) (int, error) {
+	body, err := json.Marshal(DrainRequest{IngressInstance: ingressInstance, DrainDeadlineMs: deadline.Milliseconds()})
+	if err != nil {
+		return 0, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(endpoint, "/")+internalDrainPath, bytes.NewReader(body))
+	if err != nil {
+		return 0, err
+	}
+	sum := sha256.Sum256(body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(HeaderBodySHA256, hex.EncodeToString(sum[:]))
+	SetPeerTarget(req, targetID, targetGen)
+	if err := c.sign(req); err != nil {
+		return 0, err
+	}
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return 0, &DrainError{Cause: DrainFailedTimeout, Err: ctx.Err()}
+		}
+		return 0, &DrainError{Cause: DrainFailedUnreachable, Err: err}
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return 0, &DrainError{Cause: DrainFailedRefused, Status: resp.StatusCode}
+	}
+	var dr DrainResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&dr); err != nil {
+		if ctx.Err() != nil {
+			return 0, &DrainError{Cause: DrainFailedTimeout, Err: ctx.Err()}
+		}
+		return 0, &DrainError{Cause: DrainFailedBadResponse, Err: err}
+	}
+	if dr.GoAwaySent < 0 {
+		return 0, &DrainError{Cause: DrainFailedBadResponse, Err: errors.New("negative goaway_sent")}
+	}
+	return dr.GoAwaySent, nil
+}
+
 // probe is the relay's self-check probe (registry.ProbeFunc). It runs
 // before RegisterRelay, so it targets this instance at its current,
 // not yet registered, generation.
@@ -304,7 +377,24 @@ func statusErr(resp *http.Response) error {
 // StreamClose. Cancelling ctx or reaching open_timeout_ms while opening
 // sends StreamClose{4499} and drops the WS, so the owner cancels its leg
 // (4499 to the target) — both legs see 4499.
+//
+// An owner that reports no target-side ids in its accept still opens the
+// stream (TargetOf then reports them unknown); OpenBridge refuses it. This
+// leniency is the compatibility path for in-process relays of mixed
+// versions only: separate relays and the hub-held leaves of a hub in
+// external relay mode use OpenBridge. It goes when the hub's record
+// fallback for unknown target-side ids (conduitTargetOf) is removed.
 func (s *RemoteSession) OpenStream(ctx context.Context, open *conduitv1.StreamOpen) (conduit.Stream, error) {
+	hop, err := s.openHop(ctx, open)
+	if err != nil {
+		return nil, err
+	}
+	return hop, nil
+}
+
+// openHop opens one internal stream hop to the owner relay (see
+// OpenStream).
+func (s *RemoteSession) openHop(ctx context.Context, open *conduitv1.StreamOpen) (*wsStream, error) {
 	kind, err := conduit.StreamKindFromProto(open.GetKind())
 	if err != nil {
 		return nil, closeErr(conduit.CloseProtocolError, ReasonBadFrame, err.Error())
@@ -399,7 +489,9 @@ func (s *RemoteSession) OpenStream(ctx context.Context, open *conduitv1.StreamOp
 		}
 		switch body := res.f.GetBody().(type) {
 		case *conduitv1.Frame_StreamAccept:
-			return newWSStream(conn, body.StreamAccept.GetInitialWindow(), win, s.client.hopClock(), s.client.closeWait()), nil
+			hop := newWSStream(conn, body.StreamAccept.GetInitialWindow(), win, s.client.hopClock(), s.client.closeWait())
+			hop.target = hopAcceptTarget(body.StreamAccept, s.rec.SessionID)
+			return hop, nil
 		case *conduitv1.Frame_StreamClose:
 			_ = conn.Close()
 			return nil, &conduit.CloseError{Code: body.StreamClose.GetCode(), Reason: body.StreamClose.GetReason()}
@@ -440,6 +532,7 @@ func (s *RemoteSession) Info() conduit.SessionInfo {
 			Rpc:                 append([]string(nil), c.RPC...),
 			EndpointIncarnation: c.EndpointIncarnation,
 			ExecScope:           c.ExecScope,
+			Features:            append([]string(nil), c.Features...),
 			TransportLimits: &conduitv1.TransportLimits{
 				MaxFrame:     uint32(c.TransportLimits.MaxFrame),
 				IdleTimeoutS: uint32(c.TransportLimits.IdleTimeoutS),
@@ -453,3 +546,6 @@ func (s *RemoteSession) Close() error { return nil }
 
 // Record returns the registry record the handle was resolved from.
 func (s *RemoteSession) Record() registry.SessionRecord { return s.rec }
+
+// Endpoint returns the internal endpoint of the relay holding the session.
+func (s *RemoteSession) Endpoint() string { return s.endpoint }

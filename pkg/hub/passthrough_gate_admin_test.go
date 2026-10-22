@@ -87,6 +87,7 @@ func newPTEmbeddedFixture(t *testing.T, name string, projectOwner *store.User, b
 	project.DefaultRuntimeBrokerID = broker.ID
 	require.NoError(t, s.UpdateProject(ctx, project))
 
+	srv.SetEmbeddedBrokerID(broker.ID)
 	srv.SetDispatcher(&createAgentDispatcher{createPhase: string(state.PhaseRunning)})
 	enforceSAAssign(srv, store.NewFakeCallerPermissionChecker().AllowTarget(ptEmbeddedHostSA))
 
@@ -176,4 +177,20 @@ func TestPassthroughEmbeddedBroker_NonAdminRequiresOwnership(t *testing.T) {
 
 		require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 	})
+}
+
+// TestBrokerOwnership_UsesRecordedEmbeddedBroker pins that the co-located
+// broker is the one the server recorded at startup: a row that only carries
+// the embedded role label (here with no recorded owner, the shape of the
+// co-located row) is not treated as the co-located broker for an unscoped
+// local administrator when the server recorded another broker.
+func TestBrokerOwnership_UsesRecordedEmbeddedBroker(t *testing.T) {
+	admin := ptUser(tid("user-pt-adm-label-only"), "pt-adm-label-only@test.com", store.UserRoleAdmin)
+	f := newPTEmbeddedFixture(t, "label-only", admin, "")
+	f.srv.SetEmbeddedBrokerID(tid("broker-pt-adm-recorded-elsewhere"))
+
+	rec := doRequestAsUser(t, f.srv, admin, http.MethodPost, "/api/v1/agents", f.createReq("pt-adm-label-only"))
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "broker ownership")
 }

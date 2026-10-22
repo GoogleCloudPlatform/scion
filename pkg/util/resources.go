@@ -48,7 +48,7 @@ func ParseMemory(s string) (int64, error) {
 			if err != nil {
 				return 0, fmt.Errorf("invalid memory value %q: %w", s, err)
 			}
-			return int64(val * float64(bs.multiplier)), nil
+			return checkedMemoryBytes(s, val*float64(bs.multiplier))
 		}
 	}
 
@@ -72,7 +72,7 @@ func ParseMemory(s string) (int64, error) {
 				if err != nil {
 					return 0, fmt.Errorf("invalid memory value %q: %w", s, err)
 				}
-				return int64(val * float64(ds.multiplier)), nil
+				return checkedMemoryBytes(s, val*float64(ds.multiplier))
 			}
 		}
 	}
@@ -83,6 +83,14 @@ func ParseMemory(s string) (int64, error) {
 		return 0, fmt.Errorf("invalid memory value %q: %w", s, err)
 	}
 	return val, nil
+}
+
+func checkedMemoryBytes(input string, bytes float64) (int64, error) {
+	// The upper bound is exclusive: 1<<63 cannot be represented by int64.
+	if math.IsNaN(bytes) || bytes >= 1<<63 || bytes < -(1<<63) {
+		return 0, fmt.Errorf("memory value %q is outside the supported byte range", input)
+	}
+	return int64(bytes), nil
 }
 
 // FormatMemoryForDocker formats bytes as a Docker-compatible memory string.
@@ -124,7 +132,7 @@ func FormatMemoryForApple(bytes int64) string {
 
 // ParseCPU parses a CPU quantity. Accepts whole numbers, decimals, and
 // Kubernetes millicore notation (e.g., "500m" = 0.5 cores).
-// Returns the value as a float64 number of cores.
+// Returns the value as a finite float64 number of cores.
 func ParseCPU(s string) (float64, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -136,12 +144,18 @@ func ParseCPU(s string) (float64, error) {
 		if err != nil {
 			return 0, fmt.Errorf("invalid cpu value %q: %w", s, err)
 		}
+		if math.IsNaN(millis) || math.IsInf(millis, 0) {
+			return 0, fmt.Errorf("invalid cpu value %q: must be finite", s)
+		}
 		return millis / 1000.0, nil
 	}
 
 	val, err := strconv.ParseFloat(s, 64)
 	if err != nil {
 		return 0, fmt.Errorf("invalid cpu value %q: %w", s, err)
+	}
+	if math.IsNaN(val) || math.IsInf(val, 0) {
+		return 0, fmt.Errorf("invalid cpu value %q: must be finite", s)
 	}
 	return val, nil
 }

@@ -430,11 +430,13 @@ func loadHomeStorageSettings(ctx context.Context) (*config.VersionedSettings, er
 	return checkHomeStorageLoaded(gs)
 }
 
-// checkHomeStorageLoaded fails when the global settings file mentions home
-// storage but gs does not carry it, which happens when a file without
-// schema_version "1" takes the legacy loader. It applies to every source
-// of global settings a start uses, including the snapshot shared with the
-// shared-dir backend.
+// checkHomeStorageLoaded fails when a global settings file without
+// schema_version "1" mentions home storage but gs does not carry it. A
+// legacy-format file is converted with its server block kept
+// (ptone/scion#3919), so this fires only when no block loads although the
+// raw file mentions the key (for example a misplaced or commented-out
+// block). It applies to every source of global settings a start uses,
+// including the snapshot shared with the shared-dir backend.
 func checkHomeStorageLoaded(gs *config.VersionedSettings) (*config.VersionedSettings, error) {
 	if gs != nil && (gs.Server == nil || gs.Server.HomeStorage == nil) &&
 		config.GlobalSettingsIsLegacyFormat() && config.GlobalSettingsMentions("home_storage") {

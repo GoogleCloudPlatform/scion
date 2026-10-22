@@ -49,7 +49,7 @@ interface HarnessConfigEntry {
 import { isAgentLaunching, isIncompleteCreate, isSharedWorkspace } from '../../shared/types.js';
 import { isTargetKubernetesOnly } from '../../shared/runtime-kind.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
-import { defaultTriggersHint } from '../../shared/notification-triggers.js';
+import { AGENT_CREATE_TRIGGERS, defaultTriggersHint } from '../../shared/notification-triggers.js';
 import {
   resolveInheritedPlaceholders,
   type AgentConfigPlaceholder,
@@ -60,6 +60,7 @@ import { GcpIdentityState } from '../../shared/gcp-identity-state.js';
 import { assignStatusTarget } from '../../shared/gcp-sa-assign-status.js';
 import { GCPServiceAccountsLoader } from '../../client/gcp-sa-accounts-loader.js';
 import { apiFetch, apiFetchAllPages, parseApiError } from '../../client/api.js';
+import { getPublicSettings } from '../../client/server-feature-flags.js';
 import { navigateTo } from '../../client/navigation.js';
 import { showToast } from '../../utils/toast.js';
 import { showResponseWarnings, showResponseBodyWarnings } from '../../client/response-warnings.js';
@@ -438,7 +439,7 @@ export class ScionPageAgentCreate extends LitElement {
       }
       const tmplUrl = `/api/v1/templates?${tmplParams.toString()}`;
 
-      const [projectsRes, brokersRes, templates, settingsRes, harnessConfigsRes] =
+      const [projectsRes, brokersRes, templates, publicSettings, harnessConfigsRes] =
         await Promise.all([
           // Not `mine=true`: on the server that resolves to projects where the
           // caller holds the project-owner role specifically, but creating an
@@ -463,7 +464,7 @@ export class ScionPageAgentCreate extends LitElement {
               return [] as Template[];
             }
           ),
-          fetch('/api/v1/settings/public', { credentials: 'include' }),
+          getPublicSettings(),
           apiFetch('/api/v1/harness-configs?status=active&limit=100'),
         ]);
 
@@ -480,8 +481,8 @@ export class ScionPageAgentCreate extends LitElement {
 
       this.templates = templates;
 
-      if (settingsRes.ok) {
-        this.hubSettings = (await settingsRes.json()) as HubPublicDefaults;
+      if (publicSettings) {
+        this.hubSettings = publicSettings;
       }
 
       if (harnessConfigsRes.ok) {
@@ -1269,7 +1270,7 @@ export class ScionPageAgentCreate extends LitElement {
         >
           Notify me on important agent state changes
         </sl-checkbox>
-        <sl-tooltip content=${defaultTriggersHint()} hoist>
+        <sl-tooltip content=${defaultTriggersHint(AGENT_CREATE_TRIGGERS)} hoist>
           <span class="help-badge">?</span>
         </sl-tooltip>
       </div>

@@ -237,7 +237,7 @@ func TestCreateAgentHubManagedProjectSettingsEndpoint(t *testing.T) {
 
 	mgr := &envCapturingManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	// Set up a hub-managed project directory at the expected path.
 	globalDir, err := config.GetGlobalDir()
@@ -346,7 +346,7 @@ func TestCreateAgentContainerHubEndpointOverride(t *testing.T) {
 
 		mgr := &envCapturingManager{}
 		rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-		srv := New(cfg, mgr, rt)
+		srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 		body := `{
 			"name": "test-agent",
@@ -385,7 +385,7 @@ func TestCreateAgentContainerHubEndpointOverride(t *testing.T) {
 
 		mgr := &envCapturingManager{}
 		rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-		srv := New(cfg, mgr, rt)
+		srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 		// Create a project directory with settings.yaml containing hub.endpoint
 		projectDir := filepath.Join(t.TempDir(), ".scion")
@@ -455,7 +455,7 @@ hub:
 
 		mgr := &envCapturingManager{}
 		rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-		srv := New(cfg, mgr, rt)
+		srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 		body := `{
 			"name": "test-agent",
@@ -488,7 +488,7 @@ hub:
 		rt := &runtime.MockRuntime{
 			NameFunc: func() string { return "kubernetes" },
 		}
-		srv := New(cfg, mgr, rt)
+		srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 		// Create a project dir with kubernetes settings so resolveManagerForOpts
 		// matches the "kubernetes" runtime without trying to create a real manager.
@@ -567,7 +567,7 @@ runtimes:
 		cfg.ForceRuntime = "kubernetes"
 		mgr := &envCapturingManager{}
 		rt := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
-		return New(cfg, mgr, rt), mgr
+		return New(cfg, mgr, rt, config.RuntimeBuildRecord{}), mgr
 	}
 
 	assertAccepted := func(t *testing.T, w *httptest.ResponseRecorder, mgr *envCapturingManager) {
@@ -634,7 +634,7 @@ func TestCreateAgentConnectionHubEndpoint(t *testing.T) {
 
 		mgr := &envCapturingManager{}
 		rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-		srv := New(cfg, mgr, rt)
+		srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 		// Register a remote hub connection (as would happen via control channel)
 		srv.hubMu.Lock()
@@ -673,7 +673,7 @@ func TestCreateAgentConnectionHubEndpoint(t *testing.T) {
 
 		mgr := &envCapturingManager{}
 		rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-		srv := New(cfg, mgr, rt)
+		srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 		srv.hubMu.Lock()
 		srv.hubConnections["hub-demo"] = &HubConnection{

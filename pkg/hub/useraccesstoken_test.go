@@ -176,7 +176,7 @@ func newTestValidateService() (*UserAccessTokenService, *mockUATStore, *mockUser
 	tokenStore := newMockUATStore()
 	userStore := &mockUserStore{
 		users: map[string]*store.User{
-			tid("user-1"): {ID: tid("user-1"), Email: "test@example.com", DisplayName: "Test User", Role: "member"},
+			tid("user-1"): {ID: tid("user-1"), Email: "test@example.com", DisplayName: "Test User", Role: "member", Status: store.UserStatusActive},
 		},
 	}
 	svc := &UserAccessTokenService{

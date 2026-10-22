@@ -847,3 +847,39 @@ func TestHubHandler_WaitingDefaultMessage(t *testing.T) {
 		})
 	}
 }
+
+// claudeSessionStart parses a claude SessionStart hook payload with source
+// through the real dialect. An empty source leaves the field out.
+func claudeSessionStart(t *testing.T, source string) *hooks.Event {
+	t.Helper()
+	raw := map[string]interface{}{
+		"hook_event_name": "SessionStart",
+		"session_id":      "sess-123",
+	}
+	if source != "" {
+		raw["source"] = source
+	}
+	event, err := dialects.NewClaudeDialect().Parse(raw)
+	if err != nil {
+		t.Fatalf("dialect.Parse: %v", err)
+	}
+	if event.Name != hooks.EventSessionStart || event.Data.Source != source {
+		t.Fatalf("dialect.Parse = %q source %q, want %q source %q", event.Name, event.Data.Source, hooks.EventSessionStart, source)
+	}
+	return event
+}
+
+// sessionStartStep runs one event through the StatusHandler and then the
+// HubHandler (the hook process order) and returns the Hub updates this
+// event sent and the local agent-info.json afterwards.
+func sessionStartStep(t *testing.T, sh *StatusHandler, hh *HubHandler, sent func() []hubReport, event *hooks.Event) ([]hubReport, map[string]interface{}) {
+	t.Helper()
+	before := len(sent())
+	if err := sh.Handle(event); err != nil {
+		t.Fatalf("StatusHandler.Handle: %v", err)
+	}
+	if err := hh.Handle(event); err != nil {
+		t.Fatalf("HubHandler.Handle: %v", err)
+	}
+	return sent()[before:], readAgentInfoMap(t, sh.StatusPath)
+}

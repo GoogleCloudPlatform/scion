@@ -185,12 +185,16 @@ func remainingLaunchSeconds(timeout, elapsed time.Duration) int {
 //   - an error whose outcome is unknown (isUnknownDispatchOutcome: the
 //     request may have reached the broker): the launch is kept and returned
 //     as accepted with no owner, and no error (ptone/scion#4866).
-//   - any other error, env requirements, or a synchronous answer from a
-//     broker without async support: the launch is ended as not_launched.
+//   - any other error: the launch is ended as not_launched with the code
+//     dispatch_failed, so a client following it sees a failed launch (the
+//     env and bootstrap finalize callers keep the row in provisioning).
+//   - env requirements, or a synchronous answer from a broker without async
+//     support: the launch is ended as not_launched without a code. Neither
+//     is a failure: the start goes on, or waits for env (see each case).
 //   - launchPending with the matching ID: the launch is marked accepted and
 //     returned. The agent row is now provisioning.
-//   - launchPending with another ID: the launch is ended and
-//     errLaunchEchoMismatch is returned.
+//   - launchPending with another ID: the launch is ended as not_launched
+//     with the code dispatch_failed and errLaunchEchoMismatch is returned.
 //
 // deferrable marks sends whose transport may defer to the owner node; for
 // those, a client that can predict deferral is asked first so no launch is
@@ -268,10 +272,16 @@ func (d *HTTPAgentDispatcher) dispatchLaunching(
 		addDispatchWarnings(ctx, launchOutcomeUnknownWarning)
 		return nil, nil, &LaunchAccepted{ID: launchID}, nil
 	case err != nil:
-		d.endLaunchNotLaunched(ctx, agent, launchID)
+		// The broker refused the launch or was not reached: a failure. The
+		// code tells a client following the launch that it ended, whatever
+		// the caller then does with the row (ptone/scion#5283).
+		d.endLaunchNotLaunchedWithCode(ctx, agent, launchID, store.LaunchErrorDispatchFailed)
 		return nil, nil, nil, err
 	case envReqs != nil:
-		// Waiting for a human to supply env costs no launch budget.
+		// Waiting for a human to supply env costs no launch budget. No
+		// code: this is not a failure. The same request may begin a new
+		// launch at once (the gather second pass, the finalize retry), or
+		// the row waits in provisioning for the env to be submitted.
 		d.endLaunchNotLaunched(ctx, agent, launchID)
 		return resp, envReqs, nil, nil
 	case resp != nil && resp.LaunchPending && resp.LaunchID == launchID:
@@ -281,11 +291,14 @@ func (d *HTTPAgentDispatcher) dispatchLaunching(
 			"launched_by", agent.CreatedBy, "relationship", launchRelationship(agent))
 		return resp, nil, &LaunchAccepted{ID: launchID, Owner: resp.LaunchInstanceID}, nil
 	case resp == nil || !resp.LaunchPending:
-		// A broker without async support answered synchronously.
+		// A broker without async support answered synchronously. No code:
+		// the start goes on outside the launch record, and the caller
+		// applies the broker's phase from the answer.
 		d.endLaunchNotLaunched(ctx, agent, launchID)
 		return resp, nil, nil, nil
 	default:
-		d.endLaunchNotLaunched(ctx, agent, launchID)
+		// The broker is not running the launch the hub began: a failure.
+		d.endLaunchNotLaunchedWithCode(ctx, agent, launchID, store.LaunchErrorDispatchFailed)
 		d.log.Warn("Broker acknowledged a different launch ID; ending the launch",
 			"agent_id", agent.ID, "launch_id", launchID, "broker_launch_id", resp.LaunchID)
 		return nil, nil, nil, errLaunchEchoMismatch
@@ -311,12 +324,19 @@ func (d *HTTPAgentDispatcher) markLaunchAccepted(ctx context.Context, agent *sto
 // after a send whose outcome is unknown.
 const launchOutcomeUnknownWarning = "The runtime broker did not confirm the launch request; the launch is kept and settles when the broker reports it, or ends when the launch times out."
 
-// endLaunchNotLaunched ends launchID as not_launched. It uses a context
-// detached from the request so a client disconnect cannot strand the launch.
+// endLaunchNotLaunched ends launchID as not_launched without a code, for
+// the cases that are not failures. It uses a context detached from the
+// request so a client disconnect cannot strand the launch.
 func (d *HTTPAgentDispatcher) endLaunchNotLaunched(ctx context.Context, agent *store.Agent, launchID string) {
+	d.endLaunchNotLaunchedWithCode(ctx, agent, launchID, "")
+}
+
+// endLaunchNotLaunchedWithCode ends launchID as not_launched and records
+// code ("" for none) as the launch error, like endLaunchNotLaunched.
+func (d *HTTPAgentDispatcher) endLaunchNotLaunchedWithCode(ctx context.Context, agent *store.Agent, launchID, code string) {
 	endCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
-	if err := d.store.EndLaunch(endCtx, agent.ID, launchID, store.LaunchEndReasonNotLaunched); err != nil {
+	if err := d.store.EndLaunchWithCode(endCtx, agent.ID, launchID, store.LaunchEndReasonNotLaunched, code); err != nil {
 		d.log.Warn("Failed to end launch",
 			"agent_id", agent.ID, "launch_id", launchID, "error", err)
 	}

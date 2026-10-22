@@ -26,35 +26,29 @@ import '@shoelace-style/shoelace/dist/themes/dark.css';
 
 import type { AuthMeResponse, PageData, User } from '../shared/types.js';
 import { stateManager } from './state.js';
-import { debugLog } from './debug-log.js';
 import { setDocumentTitle } from './page-title.js';
-import { setInitialPageData, takeInitialPageData } from './ssr-page-data.js';
+import { readInitialPageData, setInitialPageData, takeInitialPageData } from './ssr-page-data.js';
 import { configureReadinessMarks, readinessNavigationStarted } from './readiness-marks.js';
 import { CHAT_DM_ROUTE, CHAT_SPACE_ROUTE, CHAT_THREAD_ROUTE } from './chat-routes.js';
 import { chatNotifications } from './chat-notifications.js';
 import { chatUnread, startChatUnreadIfEligible } from './chat-unread.js';
-import { TerminalCoordinator } from './terminal-coordinator.js';
-import { TerminalWorkspaceRoot } from './terminal-workspace-root.js';
-import { TerminalWorkspacePersistence, restoreUrlIntent } from './terminal-persistence.js';
-import { openLayoutSlots } from './terminal-layout-open.js';
-import { parseLayoutUrl } from './terminal-layout.js';
+import type { TerminalCoordinator } from './terminal-coordinator.js';
+import type { TerminalWorkspaceRoot } from './terminal-workspace-root.js';
+import type { TerminalWorkspacePersistence } from './terminal-persistence.js';
 import type { TerminalResources, TerminalSession } from './terminal-sessions.js';
 import {
   TERMINAL_PALETTE_NEW_AGENT_EVENT,
   type TerminalPaletteNewAgentDetail,
 } from './terminal-workspace-events.js';
+// The terminal workspace is a lazy chunk (ptone/scion#5306): only type
+// imports of its modules here; values come from loadTerminalWorkspace().
 import {
-  MOVE_TERMINALS_LABEL,
-  TERMINALS_OPEN_ELSEWHERE_HELP,
-  TERMINALS_OPEN_ELSEWHERE_HELP_LABEL,
-  TERMINALS_OPEN_ELSEWHERE_STATUS,
-  nonOwnerOpenStatus,
-  offersMove,
-  openPalettePickedAgent,
-} from './terminal-palette-open.js';
-import { moveTerminalsWithStatus, terminalsOpenElsewhere } from './terminal-move.js';
+  loadTerminalWorkspace,
+  type TerminalWorkspaceModule,
+} from './terminal-workspace-loader.js';
 import { showToast } from '../utils/toast.js';
-import { isFeatureEnabled } from '../utils/feature-flags.js';
+import { FLAT_BROKERS_FLAG, isFeatureEnabled } from '../utils/feature-flags.js';
+import { resolveBrokerRoute } from './broker-routes.js';
 import { applyServerFeatureFlags } from './server-feature-flags.js';
 import { setPreferredTimeZone } from '../utils/time.js';
 import { withTimeout } from './with-timeout.js';
@@ -70,6 +64,7 @@ import { chatRecentFiles } from './chat-recent-files.js';
 import { isInPagePop, pushRouteEntry, type RouteShell } from './route-history.js';
 import { browserPath, stripBasePath } from './navigation.js';
 import { clearChatScrollAnchor } from '../components/shared/chat/chat-scroll-anchor.js';
+import { deepActiveElement } from '../components/shared/deep-active-element.js';
 import { installViewportFrame } from './viewport.js';
 import {
   buildRecentFilesScope,
@@ -164,6 +159,8 @@ let cachedAdminStatus: AdminStatus | null = null;
 let terminalCoordinator: TerminalCoordinator | null = null;
 let terminalWorkspace: TerminalWorkspaceRoot | null = null;
 let terminalPersistence: TerminalWorkspacePersistence | null = null;
+/** The loaded terminal workspace chunk; set before the coordinator is created. */
+let terminalModule: TerminalWorkspaceModule | null = null;
 /** Set after account teardown to prevent stale callbacks from recreating sessions. */
 let accountTornDown = false;
 let routeOutlet: HTMLElement | null = null;
@@ -194,17 +191,19 @@ function ensureRoots(): HTMLElement | null {
  * with its "?" help, and the move button under it.
  */
 function showTerminalsOpenElsewhere(): void {
-  terminalWorkspace?.setStatus(TERMINALS_OPEN_ELSEWHERE_STATUS, {
-    label: TERMINALS_OPEN_ELSEWHERE_HELP_LABEL,
-    text: TERMINALS_OPEN_ELSEWHERE_HELP,
+  if (!terminalModule) return;
+  terminalWorkspace?.setStatus(terminalModule.TERMINALS_OPEN_ELSEWHERE_STATUS, {
+    label: terminalModule.TERMINALS_OPEN_ELSEWHERE_HELP_LABEL,
+    text: terminalModule.TERMINALS_OPEN_ELSEWHERE_HELP,
   });
   offerTerminalMove();
 }
 
 /** Shows "Move terminals to this window" under the non-owner status message. */
 function offerTerminalMove(): void {
+  if (!terminalModule) return;
   terminalWorkspace?.setStatusAction({
-    label: MOVE_TERMINALS_LABEL,
+    label: terminalModule.MOVE_TERMINALS_LABEL,
     onClick: () => void runTerminalMove(),
   });
 }
@@ -218,10 +217,11 @@ async function runTerminalMove(): Promise<void> {
   const coordinator = terminalCoordinator;
   const persistence = terminalPersistence;
   const workspace = terminalWorkspace;
-  if (!coordinator || !persistence || !workspace || terminalMoveRunning) return;
+  const t = terminalModule;
+  if (!coordinator || !persistence || !workspace || !t || terminalMoveRunning) return;
   terminalMoveRunning = true;
   try {
-    const result = await moveTerminalsWithStatus({
+    const result = await t.moveTerminalsWithStatus({
       coordinator,
       persistence,
       workspace,
@@ -242,14 +242,94 @@ async function runTerminalMove(): Promise<void> {
   }
 }
 
-function ensureTerminalCoordinator(): TerminalCoordinator | null {
+/** Delay before the first-load placeholder appears, so a cached chunk does not flash it. */
+const TERMINAL_LOADING_DELAY_MS = 150;
+/**
+ * The first-load terminal placeholder: its timer, its element once shown,
+ * and the navigation that currently owns it.
+ */
+interface TerminalLoadingState {
+  owner: number;
+  timer: ReturnType<typeof setTimeout>;
+  el: HTMLElement | null;
+}
+let terminalLoading: TerminalLoadingState | null = null;
+
+/** Removes the terminal loading placeholder (or cancels its timer), whoever owns it. */
+function clearTerminalLoading(): void {
+  if (!terminalLoading) return;
+  clearTimeout(terminalLoading.timer);
+  terminalLoading.el?.remove();
+  terminalLoading = null;
+}
+
+/**
+ * Shows "Loading terminals…" in #app after TERMINAL_LOADING_DELAY_MS, while
+ * the terminal workspace chunk loads for the first time (the route outlet,
+ * which holds the whole app shell, is hidden meanwhile). A newer first-load
+ * terminal navigation adopts a placeholder that is already pending or shown,
+ * so it neither flashes blank nor restarts the delay. Returns the cleanup for
+ * navigation `owner`: it removes the placeholder only while `owner` still
+ * owns it, so a superseded load cannot remove a newer navigation's. Non-
+ * terminal navigations and an account teardown use clearTerminalLoading.
+ */
+function startTerminalLoading(app: HTMLElement, owner: number): () => void {
+  if (terminalLoading) {
+    terminalLoading.owner = owner;
+  } else {
+    const state: TerminalLoadingState = {
+      owner,
+      el: null,
+      timer: setTimeout(() => {
+        const el = document.createElement('div');
+        el.id = 'terminal-workspace-loading';
+        el.setAttribute('role', 'status');
+        el.setAttribute('aria-live', 'polite');
+        el.style.cssText =
+          'height:var(--scion-app-height, 100dvh);display:flex;flex-direction:column;' +
+          'align-items:center;justify-content:center;gap:var(--sl-spacing-small);' +
+          'background:var(--scion-surface);color:var(--scion-text-muted)';
+        const spinner = document.createElement('sl-spinner');
+        spinner.style.fontSize = '2rem';
+        const label = document.createElement('span');
+        el.append(spinner, label);
+        app.appendChild(el);
+        state.el = el;
+        // Fill the live region in a later task than its insertion: some
+        // screen readers do not announce text a status node is inserted with.
+        state.timer = setTimeout(() => {
+          label.textContent = 'Loading terminals…';
+        }, 0);
+      }, TERMINAL_LOADING_DELAY_MS),
+    };
+    terminalLoading = state;
+  }
+  return (): void => {
+    if (terminalLoading?.owner === owner) clearTerminalLoading();
+  };
+}
+
+/**
+ * Returns the terminal coordinator, creating it (and the workspace) on the
+ * first /terminals render. The first call loads the terminal workspace chunk;
+ * if navigation `thisNav` is superseded while it loads, nothing is created or
+ * mounted and null is returned. A chunk load failure rejects.
+ */
+async function ensureTerminalCoordinator(thisNav: number): Promise<TerminalCoordinator | null> {
+  if (!currentUser?.id || accountTornDown) return null;
+  if (terminalCoordinator) return terminalCoordinator;
+  const t = await loadTerminalWorkspace();
+  // Same guard as the rest of renderRoute: a newer navigation (or an account
+  // teardown) during the load wins, and this one must not mount anything.
+  if (thisNav !== navigationId) return null;
   if (!currentUser?.id || accountTornDown) return null;
   if (terminalCoordinator) return terminalCoordinator;
   const app = document.getElementById('app');
   if (!app) return null;
-  terminalWorkspace = new TerminalWorkspaceRoot(currentUser);
+  terminalModule = t;
+  terminalWorkspace = new t.TerminalWorkspaceRoot(currentUser);
   app.appendChild(terminalWorkspace.element);
-  terminalCoordinator = new TerminalCoordinator(
+  terminalCoordinator = new t.TerminalCoordinator(
     {
       hubUrl: new URL(import.meta.env.BASE_URL, window.location.origin).href,
       accountId: currentUser.id,
@@ -270,7 +350,7 @@ function ensureTerminalCoordinator(): TerminalCoordinator | null {
       },
     }
   );
-  terminalPersistence = new TerminalWorkspacePersistence({
+  terminalPersistence = new t.TerminalWorkspacePersistence({
     coordinator: terminalCoordinator,
     workspace: terminalWorkspace,
     onRestoredSelection: (agentId): void => {
@@ -290,7 +370,7 @@ function ensureTerminalCoordinator(): TerminalCoordinator | null {
   terminalWorkspace.element.addEventListener(TERMINAL_PALETTE_NEW_AGENT_EVENT, (e) => {
     const { agentId } = (e as CustomEvent<TerminalPaletteNewAgentDetail>).detail;
     if (!terminalCoordinator || !terminalWorkspace) return;
-    void openPalettePickedAgent({
+    void t.openPalettePickedAgent({
       coordinator: terminalCoordinator,
       workspace: terminalWorkspace,
       agentId,
@@ -405,16 +485,8 @@ const ROUTES: RouteConfig[] = [
     tag: 'scion-page-agents',
     load: () => import('../components/pages/agents.js'),
   },
-  {
-    pattern: /^\/brokers$/,
-    tag: 'scion-page-brokers',
-    load: () => import('../components/pages/brokers.js'),
-  },
-  {
-    pattern: /^\/brokers\/[^/]+$/,
-    tag: 'scion-page-broker-detail',
-    load: () => import('../components/pages/broker-detail.js'),
-  },
+  // /brokers and /brokers/{id} are resolved by resolveBrokerRoute
+  // (broker-routes.ts), ahead of this table.
   {
     pattern: /^\/skills$/,
     tag: 'scion-page-skills',
@@ -825,6 +897,29 @@ window.addEventListener('error', (event) => {
     error: event.error as unknown,
   });
 });
+
+/**
+ * First-run redirect: if the system has not completed onboarding, replace the
+ * URL with /onboarding before the first render. Started at the top of init()
+ * and awaited with the other boot requests (ptone/scion#5307).
+ */
+async function redirectIfOnboardingIncomplete(): Promise<void> {
+  const skipRedirectPaths = ['/onboarding', '/login', '/invite'];
+  if (skipRedirectPaths.includes(stripBasePath(window.location.pathname))) return;
+  try {
+    const statusRes = await fetch('/api/v1/system/status', { credentials: 'include' });
+    if (statusRes.ok) {
+      const status = (await statusRes.json()) as { complete?: boolean };
+      if (!status.complete) {
+        sessionStorage.setItem('onboardingStatus', JSON.stringify(status));
+        window.history.replaceState({}, '', browserPath('/onboarding'));
+      }
+    }
+  } catch {
+    // System status endpoint unavailable (non-workstation mode) — skip redirect
+  }
+}
+
 window.addEventListener('unhandledrejection', (event) => {
   console.error('[Scion] Unhandled promise rejection:', event.reason);
 });
@@ -853,12 +948,16 @@ async function init(): Promise<void> {
     setInitialPageData(initialData);
   }
 
-  // Attach debug logger to state manager to capture all SSE events
-  debugLog.attach(stateManager);
+  // Start the page chunk for the initial path now (ptone/scion#5307): the
+  // import overlaps the boot requests below instead of following them. It
+  // only fetches; renderRoute still gates the render (flags, permissions).
+  preloadInitialRoute(stripBasePath(window.location.pathname));
 
-  // Start the feature-flag fetch now so it overlaps the auth and component
-  // work below; it is awaited before the first render, which needs the flags.
+  // Start the feature-flag and onboarding-status fetches now so they overlap
+  // the auth and component work below; both are awaited, together with the
+  // timezone refresh, before the first render.
   const featureFlagsReady = applyServerFeatureFlags();
+  const onboardingChecked = redirectIfOnboardingIncomplete();
 
   // Fetch current user from session if not provided by SSR
   let tzReady: Promise<void> = Promise.resolve();
@@ -922,31 +1021,14 @@ async function init(): Promise<void> {
 
   console.info('[Scion] Components defined, setting up router...');
 
-  // First-run redirect: if the system hasn't completed onboarding, navigate to /onboarding
-  const skipRedirectPaths = ['/onboarding', '/login', '/invite'];
-  if (!skipRedirectPaths.includes(stripBasePath(window.location.pathname))) {
-    try {
-      const statusRes = await fetch('/api/v1/system/status', { credentials: 'include' });
-      if (statusRes.ok) {
-        const status = (await statusRes.json()) as { complete?: boolean };
-        if (!status.complete) {
-          sessionStorage.setItem('onboardingStatus', JSON.stringify(status));
-          window.history.replaceState({}, '', '/onboarding');
-        }
-      }
-    } catch {
-      // System status endpoint unavailable (non-workstation mode) — skip redirect
-    }
-  }
-
   // Render the initial page based on current URL (strip proxy prefix for route
   // matching). Feature flags must be settled first — renderRoute gates /chat on
   // them, and rendering early would flash a page the server has disabled.
-  // tzReady is awaited alongside it (review R2-1), bounded to
-  // TZ_LOAD_BUDGET_MS (review R3-1); both fetches started above and
-  // overlap, so this adds no latency beyond the slower of
-  // featureFlagsReady and min(the /auth/me refresh, the budget).
-  await Promise.all([featureFlagsReady, tzReady]);
+  // The onboarding check must be settled too: it may replace the URL with
+  // /onboarding. tzReady is awaited alongside them (review R2-1), bounded to
+  // TZ_LOAD_BUDGET_MS (review R3-1); all three started above and overlap,
+  // so this adds no latency beyond the slowest of them.
+  await Promise.all([featureFlagsReady, onboardingChecked, tzReady]);
   ensureRoots();
 
   // The unread conversation count (the header's chat badge and the tab-title
@@ -990,6 +1072,7 @@ async function init(): Promise<void> {
       chatRecentFiles.clearForLogout();
     }
 
+    clearTerminalLoading();
     if (accountTornDown) return;
     accountTornDown = true;
     try {
@@ -1018,18 +1101,7 @@ async function init(): Promise<void> {
  * Retrieves initial page data from SSR-injected script tag
  */
 function getInitialData(): PageData | null {
-  const script = document.getElementById('__SCION_DATA__');
-  if (!script) {
-    console.warn('[Scion] No initial data found');
-    return null;
-  }
-
-  try {
-    return JSON.parse(script.textContent || '{}') as PageData;
-  } catch (e) {
-    console.error('[Scion] Failed to parse initial data:', e);
-    return null;
-  }
+  return readInitialPageData(document);
 }
 
 /** Fallback route for unmatched paths */
@@ -1043,6 +1115,8 @@ const NOT_FOUND_ROUTE: RouteConfig = {
  * Resolves a URL path to a route configuration
  */
 function resolveRoute(path: string): RouteConfig {
+  const brokerRoute = resolveBrokerRoute(path, isFeatureEnabled(FLAT_BROKERS_FLAG));
+  if (brokerRoute) return brokerRoute;
   for (const route of ROUTES) {
     if (route.pattern.test(path)) {
       return route;
@@ -1061,6 +1135,44 @@ function getShellType(tag: string): ShellType {
   if (PROFILE_ROUTES.has(tag)) return 'profile';
   if (CHAT_ROUTES.has(tag)) return 'chat';
   return 'app';
+}
+
+/**
+ * Starts the imports a route renders with: the page module, plus the profile
+ * or chat shell when that shell is not defined yet. Each import registers its
+ * custom element as a side effect; repeated calls reuse the module.
+ */
+function startRouteLoads(route: RouteConfig, shellType: ShellType): Promise<unknown> {
+  const loads: Promise<unknown>[] = [route.load()];
+  if (shellType === 'profile' && !customElements.get('scion-profile-shell')) {
+    loads.push(
+      import('../components/profile/profile-shell.js'),
+      import('../components/profile/profile-nav.js')
+    );
+  }
+  if (shellType === 'chat' && !customElements.get('scion-chat-shell')) {
+    loads.push(import('../components/chat/chat-shell.js'));
+  }
+  return Promise.all(loads);
+}
+
+/**
+ * Fetches the initial path's page chunk while the boot requests are in
+ * flight (ptone/scion#5307). Nothing is rendered: renderRoute starts the same
+ * imports (the module loader dedupes them) and still applies the flag and
+ * permission checks first. The terminal routes are left to their own lazy
+ * loader. A failure here is ignored; renderRoute's own load reports it.
+ */
+function preloadInitialRoute(pathname: string): void {
+  if (
+    pathname === '/terminals' ||
+    terminalAgentRoute.test(pathname) ||
+    legacyTerminalRoute.test(pathname)
+  ) {
+    return;
+  }
+  const route = resolveRoute(pathname);
+  startRouteLoads(route, getShellType(route.tag)).catch(() => undefined);
 }
 
 /** Cached shell element and its type, reused across navigations */
@@ -1099,35 +1211,79 @@ async function renderRoute(path: string): Promise<void> {
       navigateTo('/login');
       return;
     }
+    // Hide the previous page before the workspace chunk loads, as before the
+    // chunk was lazy: the URL already says /terminals, so the old page must
+    // not stay interactive under it while the load runs. A newer navigation
+    // un-hides it (and reuses the page, see returningFromTerminal below).
+    // Hiding blurs the focused element; a failed load gives focus back. Look
+    // through shadow roots: document.activeElement is only the outer host.
+    const focusBeforeLoad = deepActiveElement();
     appContainer.hidden = true;
-    const coordinator = ensureTerminalCoordinator();
+    // First load only: the outlet (with the whole app shell) is hidden and
+    // the workspace does not exist yet, so show a loading state meanwhile.
+    const app = document.getElementById('app');
+    let stopLoading: (() => void) | null = null;
+    if (!terminalCoordinator && app) stopLoading = startTerminalLoading(app, thisNav);
+    else clearTerminalLoading();
+    let coordinator: TerminalCoordinator | null;
+    try {
+      coordinator = await ensureTerminalCoordinator(thisNav);
+    } catch (err) {
+      // The chunk failed to load (for example after a deploy removed it).
+      // Like a failed page chunk, the previous page comes back on screen;
+      // the loader does not cache the failure, so the next visit retries.
+      console.error('[Scion] Failed to load the terminal workspace:', err);
+      if (thisNav === navigationId) {
+        appContainer.hidden = false;
+        // Only if nothing else took focus during the load.
+        const now = deepActiveElement();
+        if (
+          (now === null || now === document.body) &&
+          focusBeforeLoad instanceof HTMLElement &&
+          focusBeforeLoad.isConnected
+        ) {
+          focusBeforeLoad.focus({ preventScroll: true });
+        }
+        showToast('Could not load terminals. Reload the page to try again.', 'danger');
+      }
+      return;
+    } finally {
+      // Success, failure or supersede: this load's placeholder goes.
+      stopLoading?.();
+    }
+    if (thisNav !== navigationId) return;
+    setDocumentTitle('Terminals');
+    // No coordinator (account torn down, or no #app): nothing to show or open.
+    // Otherwise terminalModule is set too: it is assigned before the
+    // coordinator is created.
+    const t = terminalModule;
+    if (!coordinator || !t) return;
     terminalWorkspace?.setUser(currentUser);
     terminalWorkspace?.setCurrentPath(path);
     terminalWorkspace?.show(true);
-    setDocumentTitle('Terminals');
 
     // ── URL layout restoration (#1715) ──────────────────────────────
     // Parse layout state from query params BEFORE default single-agent
     // selection to avoid a flash of single → multi layout transition.
     const queryString = path.includes('?') ? path.split('?')[1] : window.location.search;
-    const layoutUrl = parseLayoutUrl(queryString);
+    const layoutUrl = t.parseLayoutUrl(queryString);
 
     // ── Persisted terminal list restore (ptone/scion#2278) ──────────
     // Runs for every render into /terminals…, before the URL-driven code
     // below: an explicit URL decides what is visible and connected, and
     // the saved list decides rail membership only.
-    if (coordinator && terminalPersistence) {
-      await terminalPersistence.restore(restoreUrlIntent(pathname, queryString));
+    if (terminalPersistence) {
+      await terminalPersistence.restore(t.restoreUrlIntent(pathname, queryString));
       if (thisNav !== navigationId) return;
     }
 
-    if (layoutUrl && coordinator && terminalWorkspace) {
+    if (layoutUrl && terminalWorkspace) {
       // Suppress URL sync while restoring to avoid feedback loops
       terminalWorkspace.setSuppressUrlSync(true);
       try {
         // Restore the layout preset and open agents from URL slots.
         // Map agent IDs to session keys, opening new sessions as needed.
-        const sessionKeys = await openLayoutSlots({
+        const sessionKeys = await t.openLayoutSlots({
           coordinator,
           workspace: terminalWorkspace,
           slots: layoutUrl.slots,
@@ -1149,24 +1305,24 @@ async function renderRoute(path: string): Promise<void> {
     // Default behavior: single-agent from path
     const agentId = pathname.match(terminalAgentRoute)?.[1];
     terminalRouteAgentId = agentId?.toLowerCase() ?? null;
-    if (agentId && coordinator) {
+    if (agentId) {
       const requestId = coordinator.supported ? crypto.randomUUID() : undefined;
       if (requestId) terminalNavigations.set(requestId, thisNav);
       const result = await coordinator.open(agentId, requestId);
       if (requestId && result.status !== 'pending') terminalNavigations.delete(requestId);
       if (thisNav === navigationId && !coordinator.isOwner) {
-        if (offersMove(result.status) && !terminalMoveRunning) {
+        if (t.offersMove(result.status) && !terminalMoveRunning) {
           showTerminalsOpenElsewhere();
         } else {
-          terminalWorkspace?.setStatus(nonOwnerOpenStatus(result.status));
+          terminalWorkspace?.setStatus(t.nonOwnerOpenStatus(result.status));
           if (!terminalMoveRunning) terminalWorkspace?.setStatusAction(null);
         }
       }
-    } else if (!agentId && coordinator && terminalPersistence && !terminalMoveRunning) {
+    } else if (terminalPersistence && !terminalMoveRunning) {
       // A bare /terminals in a window that does not own the terminals
       // (for example a new window): show the same "open in another
       // window" state as the other non-owner screens, not the empty one.
-      const elsewhere = await terminalsOpenElsewhere({
+      const elsewhere = await t.terminalsOpenElsewhere({
         coordinator,
         persistence: terminalPersistence,
       });
@@ -1180,6 +1336,8 @@ async function renderRoute(path: string): Promise<void> {
   // The terminal route handler hides the outlet without clearing it, so
   // the previous page and shell are still live in the DOM.
   const returningFromTerminal = appContainer.hidden;
+  // Leaving /terminals during a first load: its placeholder goes now.
+  clearTerminalLoading();
   appContainer.hidden = false;
   terminalWorkspace?.show(false);
   const route = resolveRoute(pathname);
@@ -1194,6 +1352,22 @@ async function renderRoute(path: string): Promise<void> {
     user: currentUser || undefined,
     data: initialData,
   };
+
+  // Block /chat routes when the native_chat feature flag is disabled (O2).
+  // Checked before the imports start, so a disabled chat is never fetched
+  // here. (Chat and admin routes are disjoint.)
+  if (CHAT_ROUTES.has(tag) && !isFeatureEnabled('web.native_chat')) {
+    navigateTo('/');
+    return;
+  }
+
+  const shellType = getShellType(tag);
+
+  // Lazy-load the page component module (and profile/chat shell if needed).
+  // Started before the admin-status request below so the chunk downloads
+  // while it is in flight (ptone/scion#5307); nothing renders until both are
+  // done and the permission check has passed.
+  const loadsReady = startRouteLoads(route, shellType);
 
   // Block non-admin users from admin-only routes.
   // Hub-admin users (who have admin role bindings but not super-admin role)
@@ -1210,6 +1384,9 @@ async function renderRoute(path: string): Promise<void> {
   // Maintenance) require isSuperAdmin; other admin routes require at least
   // one matching permission from ROUTE_PERMISSION_MAP.
   if (ADMIN_ROUTES.has(tag)) {
+    // A failed import is reported by the await below; a denied user is
+    // redirected first and never reaches it.
+    loadsReady.catch(() => undefined);
     cachedAdminStatus = await loadAdminStatus(currentUser?.id, { fresh: true });
 
     if (SUPERADMIN_ROUTES.has(tag)) {
@@ -1226,27 +1403,7 @@ async function renderRoute(path: string): Promise<void> {
     }
   }
 
-  // Block /chat routes when the native_chat feature flag is disabled (O2).
-  if (CHAT_ROUTES.has(tag) && !isFeatureEnabled('web.native_chat')) {
-    navigateTo('/');
-    return;
-  }
-
-  const shellType = getShellType(tag);
-
-  // Lazy-load the page component module (and profile/chat shell if needed).
-  // The import registers the custom element as a side effect.
-  const loads: Promise<unknown>[] = [route.load()];
-  if (shellType === 'profile' && !customElements.get('scion-profile-shell')) {
-    loads.push(
-      import('../components/profile/profile-shell.js'),
-      import('../components/profile/profile-nav.js')
-    );
-  }
-  if (shellType === 'chat' && !customElements.get('scion-chat-shell')) {
-    loads.push(import('../components/chat/chat-shell.js'));
-  }
-  await Promise.all(loads);
+  await loadsReady;
 
   // If another navigation started while we were loading, abort this render
   if (thisNav !== navigationId) return;

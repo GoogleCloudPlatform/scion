@@ -367,7 +367,7 @@ profiles:
 		map[string]V1ProfileConfig{
 			"local": {Runtime: "docker"},
 			"gke":   {Runtime: "k8s", SharedDirStorageBackend: "nfs"},
-		}, nil, "")
+		}, nil)
 	SetGlobalSettingsOverlay(o)
 
 	vs, _, err = LoadGlobalSettingsWithOverlay()
@@ -382,7 +382,7 @@ profiles:
 	o.Update(nil, map[string]V1ProfileConfig{
 		"local": {Runtime: "docker"},
 		"gke":   {Runtime: "k8s", SharedDirStorageBackend: "local"},
-	}, nil, "")
+	}, nil)
 	vs, _, err = LoadGlobalSettingsWithOverlay()
 	require.NoError(t, err)
 	cfg, _ = vs.ResolveSharedDirStorage("gke")

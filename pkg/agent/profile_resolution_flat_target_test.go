@@ -269,7 +269,7 @@ server:
 // policy never reaches what they return.
 var nonForSettingsLoaders = map[string]bool{
 	"LoadEffectiveSettings": true, "LoadGlobalSettings": true, "LoadGlobalSettingsWithOverlay": true,
-	"LoadSettings": true, "LoadVersionedSettings": true, "LoadSettingsKoanf": true,
+	"LoadSettings": true, "LoadVersionedSettings": true,
 	"LoadSettingsIgnoringEnvProjectID": true, "LoadSettingsFromDir": true, "LoadSingleFileVersioned": true,
 }
 

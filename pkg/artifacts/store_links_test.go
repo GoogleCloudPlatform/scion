@@ -41,7 +41,7 @@ func TestStoreLinks(t *testing.T) {
 		a, _, _, _ := seedArtifact(t, st, "")
 		now := time.Now()
 		g := linkGrant(a.ID, LinkTokenHash("tok"), now.Add(time.Hour))
-		if err := st.CreateLink(ctx, g, 5, now); err != nil {
+		if err := st.CreateLink(ctx, g, 5, now, testActor); err != nil {
 			t.Fatalf("CreateLink: %v", err)
 		}
 		ra, rg, err := st.ResolveLink(ctx, LinkTokenHash("tok"), now)
@@ -71,7 +71,7 @@ func TestStoreLinks(t *testing.T) {
 		}
 		// A hash names one link across the hub.
 		b, _, _, _ := seedArtifact(t, st, "")
-		if err := st.CreateLink(ctx, linkGrant(b.ID, LinkTokenHash("tok"), now.Add(time.Hour)), 5, now); err == nil {
+		if err := st.CreateLink(ctx, linkGrant(b.ID, LinkTokenHash("tok"), now.Add(time.Hour)), 5, now, testActor); err == nil {
 			t.Errorf("a second link with the same hash was accepted")
 		}
 		if err := st.RevokeLink(ctx, b.ID, g.ID, testActor); !errors.Is(err, ErrNotFound) {
@@ -94,7 +94,7 @@ func TestStoreLinks(t *testing.T) {
 			{ArtifactID: a.ID, SubjectKind: SubjectLink, SubjectRef: "x", Permission: GrantRead},
 			{ArtifactID: a.ID, SubjectKind: SubjectLink, SubjectRef: "x", Permission: GrantAdmin, ExpiresAt: &now},
 			{ArtifactID: a.ID, SubjectKind: SubjectLink, Permission: GrantRead, ExpiresAt: &now}} {
-			if err := st.CreateLink(ctx, bad, 5, now); err == nil {
+			if err := st.CreateLink(ctx, bad, 5, now, testActor); err == nil {
 				t.Errorf("CreateLink(%+v) accepted", bad)
 			}
 		}
@@ -119,7 +119,7 @@ func TestStoreResolveLinkArtifactState(t *testing.T) {
 		} {
 			a, _, _, _ := seedArtifact(t, st, "")
 			hash := LinkTokenHash(tc.name)
-			if err := st.CreateLink(ctx, linkGrant(a.ID, hash, now.Add(time.Hour)), 5, now); err != nil {
+			if err := st.CreateLink(ctx, linkGrant(a.ID, hash, now.Add(time.Hour)), 5, now, testActor); err != nil {
 				t.Fatal(err)
 			}
 			if _, _, err := st.ResolveLink(ctx, hash, now); err != nil {
@@ -137,7 +137,7 @@ func TestStoreResolveLinkArtifactState(t *testing.T) {
 		if _, err := db.Exec(s.rebind("UPDATE artifact SET deleted_at = ? WHERE id = ?"), s.timeArg(now), a.ID); err != nil {
 			t.Fatal(err)
 		}
-		if err := st.CreateLink(ctx, linkGrant(a.ID, LinkTokenHash("d"), now.Add(time.Hour)), 5, now); !errors.Is(err, ErrNotFound) {
+		if err := st.CreateLink(ctx, linkGrant(a.ID, LinkTokenHash("d"), now.Add(time.Hour)), 5, now, testActor); !errors.Is(err, ErrNotFound) {
 			t.Errorf("link on a deleted artifact: %v", err)
 		}
 	})
@@ -151,17 +151,17 @@ func TestStoreLinkCap(t *testing.T) {
 		a, _, _, _ := seedArtifact(t, st, "")
 		now := time.Now()
 		short := linkGrant(a.ID, LinkTokenHash("short"), now.Add(time.Minute))
-		if err := st.CreateLink(ctx, short, 2, now); err != nil {
+		if err := st.CreateLink(ctx, short, 2, now, testActor); err != nil {
 			t.Fatal(err)
 		}
-		if err := st.CreateLink(ctx, linkGrant(a.ID, LinkTokenHash("long"), now.Add(time.Hour)), 2, now); err != nil {
+		if err := st.CreateLink(ctx, linkGrant(a.ID, LinkTokenHash("long"), now.Add(time.Hour)), 2, now, testActor); err != nil {
 			t.Fatal(err)
 		}
-		if err := st.CreateLink(ctx, linkGrant(a.ID, LinkTokenHash("third"), now.Add(time.Hour)), 2, now); !errors.Is(err, ErrTooManyLinks) {
+		if err := st.CreateLink(ctx, linkGrant(a.ID, LinkTokenHash("third"), now.Add(time.Hour)), 2, now, testActor); !errors.Is(err, ErrTooManyLinks) {
 			t.Fatalf("over the cap: %v", err)
 		}
 		later := now.Add(2 * time.Minute)
-		if err := st.CreateLink(ctx, linkGrant(a.ID, LinkTokenHash("third"), later.Add(time.Hour)), 2, later); err != nil {
+		if err := st.CreateLink(ctx, linkGrant(a.ID, LinkTokenHash("third"), later.Add(time.Hour)), 2, later, testActor); err != nil {
 			t.Fatalf("after one expired: %v", err)
 		}
 		grants, err := st.ListGrants(ctx, a.ID)
@@ -187,7 +187,7 @@ func TestStoreLinkCap(t *testing.T) {
 			go func(i int) {
 				defer wg.Done()
 				other := NewStore(reopen(), driverOf(st))
-				errs[i] = other.CreateLink(ctx, linkGrant(b.ID, LinkTokenHash(uuid.NewString()), now.Add(time.Hour)), limit, now)
+				errs[i] = other.CreateLink(ctx, linkGrant(b.ID, LinkTokenHash(uuid.NewString()), now.Add(time.Hour)), limit, now, testActor)
 			}(i)
 		}
 		wg.Wait()

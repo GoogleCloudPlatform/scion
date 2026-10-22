@@ -28,6 +28,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -120,13 +121,13 @@ func newLifecycleFixture(t *testing.T) *lifecycleFixture {
 		},
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	f.srv = New(cfg, f.defaultMgr, rt)
+	f.srv = New(cfg, f.defaultMgr, rt, config.RuntimeBuildRecord{})
 	// A real kubernetes runtime cannot be built without a cluster; hand out
 	// the mock instead. resolveManagerForOpts still wraps it in a real
 	// agent.Manager and registers it as an auxiliary runtime.
-	f.srv.resolveAuxiliaryRuntime = func(projectPath, agentName, profileFlag string) runtime.Runtime {
+	f.srv.resolveAuxiliaryRuntime = withoutRecord(func(projectPath, agentName, profileFlag string) runtime.Runtime {
 		return f.k8sRuntime
-	}
+	})
 	return f
 }
 

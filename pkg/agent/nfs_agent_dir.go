@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -60,6 +61,26 @@ func nfsAgentDirSelection(env map[string]string, gitClone *api.GitCloneConfig, a
 		branch = "scion/" + agentName
 	}
 	return agentName, branch, nil
+}
+
+// nfsOwnAgentDirSelection decides whether the agent gets its own directory
+// on the NFS workspace export (<subpath_root>/<projectID>/agents/<agent
+// name>), and returns its name in emptyDirName for an empty-per-agent agent
+// (nfsEmptyAgentDirSelection) or in cloneDirName, with the agent's branch,
+// for a clone-per-agent agent on Kubernetes (nfsAgentDirSelection). All
+// three are empty when the agent gets none. Start uses it to lay out the
+// workspace and CheckMoveWorkspaceAbsent to find what a start would use,
+// so both always agree.
+func nfsOwnAgentDirSelection(runtimeName string, ws *config.V1WorkspaceStorageConfig, emptyPerAgent bool, env map[string]string, gitClone *api.GitCloneConfig, agentName string) (emptyDirName, cloneDirName, cloneBranch string, err error) {
+	if emptyPerAgent {
+		emptyDirName, err = nfsEmptyAgentDirSelection(runtimeName, ws, agentName)
+		return emptyDirName, "", "", err
+	}
+	if !isKubernetesRuntime(runtimeName) || ws == nil || ws.Backend != "nfs" {
+		return "", "", "", nil
+	}
+	cloneDirName, cloneBranch, err = nfsAgentDirSelection(env, gitClone, agentName)
+	return "", cloneDirName, cloneBranch, err
 }
 
 // nfsAgentDirLockWait bounds how long RemoveNFSAgentFiles waits for the
@@ -139,10 +160,17 @@ func (m *AgentManager) removeNFSAgentWorkspace(ctx context.Context, projectPath,
 	if real, err := filepath.EvalSymlinks(agentDir); err != nil || real != agentDir {
 		return agentDir, fmt.Errorf("workspace_storage nfs: %s is not a plain directory on the export; left in place", agentDir)
 	}
-	if err := provision.RemoveAgentWorkspace(ctx, agentDir, nfsAgentDirLockWait); err != nil {
+	// The agent directory is the agent's; the project's shared checkout
+	// next to it is never removed (agentFilesGuard). The removal acts on
+	// the path the guard returns.
+	checkedDir, err := newAgentFilesGuard(agentName, []string{resolvedHostBase}, []string{agentDir}, []string{filepath.Join(resolvedHostBase, rel)}).check(agentDir)
+	if err != nil {
+		return agentDir, fmt.Errorf("workspace_storage nfs: %w", err)
+	}
+	if err := provision.RemoveAgentWorkspace(ctx, checkedDir, nfsAgentDirLockWait); err != nil {
 		return agentDir, err
 	}
-	purgeRemovedAgentWorkspaces(agentDir)
+	purgeRemovedAgentWorkspaces(checkedDir)
 	slog.Info("workspace_storage nfs: removed the agent's workspace", "path", filepath.Join(agentDir, provision.AgentWorkspaceDir))
 	return agentDir, nil
 }

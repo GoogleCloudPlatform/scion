@@ -19,13 +19,18 @@ import (
 	"fmt"
 )
 
+// harnessImageMap maps each bundled harness (a harnesses/<name>/ directory
+// with a Dockerfile) to its image name. Keep it in sync with harnesses/;
+// TestHarnessImageMap_MatchesBundledHarnesses fails on drift.
 var harnessImageMap = map[string]string{
 	"antigravity": "scion-antigravity:latest",
 	"claude":      "scion-claude:latest",
 	"codex":       "scion-codex:latest",
 	"copilot":     "scion-copilot:latest",
 	"gemini-cli":  "scion-gemini-cli:latest",
+	"grok-build":  "scion-grok-build:latest",
 	"hermes":      "scion-hermes:latest",
+	"muse-code":   "scion-muse-code:latest",
 	"opencode":    "scion-opencode:latest",
 }
 

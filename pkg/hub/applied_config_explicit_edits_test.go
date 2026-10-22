@@ -170,7 +170,7 @@ func TestApplyAgentUpdate_TemplateEnvRefreshesAfterEchoPatch(t *testing.T) {
 		Scope:       store.TemplateScopeGlobal,
 		Status:      store.TemplateStatusActive,
 		ContentHash: "template-hash-v1",
-		Config:      &store.TemplateConfig{Env: map[string]string{"K": "a"}},
+		AgentConfig: &api.ScionConfig{Env: map[string]string{"K": "a"}},
 	}
 	require.NoError(t, s.CreateTemplate(ctx, template))
 
@@ -197,8 +197,9 @@ func TestApplyAgentUpdate_TemplateEnvRefreshesAfterEchoPatch(t *testing.T) {
 	}
 
 	// Now the template's default changes.
-	template.Config.Env["K"] = "b"
-	require.NoError(t, s.UpdateTemplate(ctx, template))
+	template.AgentConfig.Env["K"] = "b"
+	template.ContentHash = "template-hash-v2"
+	require.NoError(t, setTemplateContentForTest(ctx, s, template))
 
 	fresh, _, err := srv.buildFreshAppliedConfig(ctx, updated, project, "")
 	require.NoError(t, err)

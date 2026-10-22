@@ -21,18 +21,31 @@
 
 import { describe, it, expect, afterEach } from 'vitest';
 
-import { attentionHref, type HealthAttentionItem } from './health-attention.js';
+import {
+  attentionHref,
+  truncateText,
+  pausedReasonLabel,
+  PAUSED_REASON_GENERIC,
+  SCHEDULE_ERROR_MAX_CHARS,
+  type HealthAttentionItem,
+  type HealthFailingSchedule,
+  type HealthPausedSchedule,
+} from './health-attention.js';
 import './health-attention.js';
 import { hasInPageState } from '../../client/route-history.js';
 import { elementStyleRules } from './__fixtures__/css-rules.js';
 
 async function mount(
   items: HealthAttentionItem[] | null,
-  integrationsDetail = true
+  integrationsDetail = true,
+  failingSchedules: HealthFailingSchedule[] | null = null,
+  pausedSchedules: HealthPausedSchedule[] | null = null
 ): Promise<ShadowRoot> {
   const el = document.createElement('scion-health-attention');
   el.items = items;
   el.integrationsDetail = integrationsDetail;
+  el.failingSchedules = failingSchedules;
+  el.pausedSchedules = pausedSchedules;
   document.body.appendChild(el);
   await el.updateComplete;
   return el.shadowRoot!;
@@ -197,6 +210,186 @@ describe('scion-health-attention', () => {
   });
 });
 
+const scheduleItem: HealthAttentionItem = {
+  severity: 'warning',
+  kind: 'schedule',
+  subject: { type: 'schedule', id: 'sc 1', name: 'nightly', project_id: 'p 1' },
+  message: 'Scheduled event alpha / nightly failed its last run',
+};
+
+const failingRow: HealthFailingSchedule = {
+  id: 'sc 1',
+  name: 'nightly',
+  project_id: 'p 1',
+  project_slug: 'alpha',
+  event_type: 'message',
+  target: 'worker',
+  run_count: 7,
+  error_count: 3,
+  last_failure_at: '2026-10-19T08:00:00Z',
+  last_error: 'schedule authority denied',
+};
+
+describe('scion-health-attention failing schedules', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('links a schedule item to its project schedules page and shows the detail line', async () => {
+    const root = await mount([scheduleItem], true, [failingRow]);
+    const li = root.querySelector('li[data-kind="schedule"]')!;
+    expect(li.querySelector('a')!.getAttribute('href')).toBe('/projects/p%201/schedules');
+    expect(li.querySelector('a')!.textContent).toBe(scheduleItem.message);
+    const detail = li.querySelector('.detail')!.textContent!;
+    expect(detail).toContain('Target: worker');
+    expect(detail).toContain('3 of 7 runs failed');
+    expect(detail).toContain('last failure ');
+    expect(li.querySelector('.last-error')!.textContent).toBe(
+      'Last error: schedule authority denied'
+    );
+  });
+
+  it('shows no detail line without a matching row', async () => {
+    const root = await mount([scheduleItem], true, []);
+    expect(root.querySelector('.detail')).toBeNull();
+    const none = await mount([scheduleItem], true, null);
+    expect(none.querySelector('.detail')).toBeNull();
+  });
+
+  it('omits the target and the last error when the row has none', async () => {
+    const root = await mount([scheduleItem], true, [
+      { ...failingRow, target: '', last_error: '', last_failure_at: null },
+    ]);
+    const detail = root.querySelector('.detail')!;
+    expect(detail.textContent!.trim()).toBe('3 of 7 runs failed');
+    expect(detail.querySelector('.last-error')).toBeNull();
+  });
+
+  it('shortens a long last error and keeps the full text in the title', async () => {
+    const long = 'e'.repeat(SCHEDULE_ERROR_MAX_CHARS + 40);
+    const root = await mount([scheduleItem], true, [{ ...failingRow, last_error: long }]);
+    const el = root.querySelector('.last-error')!;
+    expect(el.textContent).toBe('Last error: ' + 'e'.repeat(SCHEDULE_ERROR_MAX_CHARS) + '\u2026');
+    expect(el.getAttribute('title')).toBe(long);
+  });
+
+  it('renders markup in the last error and target as text, never as elements', async () => {
+    const markup = '<img src=x onerror="window.__scheduleErr=1"><b>bold</b>';
+    const root = await mount([scheduleItem], true, [
+      { ...failingRow, target: '<i>agent</i>', last_error: markup },
+    ]);
+    const detail = root.querySelector('.detail')!;
+    expect(detail.querySelector('img')).toBeNull();
+    expect(detail.querySelector('b')).toBeNull();
+    expect(detail.querySelector('i')).toBeNull();
+    expect(detail.textContent).toContain('Target: <i>agent</i>');
+    expect(root.querySelector('.last-error')!.textContent).toBe('Last error: ' + markup);
+    expect(root.querySelector('.last-error')!.getAttribute('title')).toBe(markup);
+    expect((window as unknown as { __scheduleErr?: number }).__scheduleErr).toBeUndefined();
+  });
+});
+
+const pausedItem: HealthAttentionItem = {
+  severity: 'warning',
+  kind: 'schedule',
+  subject: { type: 'schedule', id: 'sc 2', name: 'weekly', project_id: 'p 1' },
+  message:
+    'Scheduled event alpha / weekly was paused by the hub: the agent that created it was deleted',
+};
+
+const pausedRow: HealthPausedSchedule = {
+  id: 'sc 2',
+  name: 'weekly',
+  project_id: 'p 1',
+  project_slug: 'alpha',
+  event_type: 'message',
+  target: 'worker',
+  reason: 'creator_deleted',
+  updated_at: '2026-10-19T08:00:00Z',
+};
+
+describe('scion-health-attention hub-paused schedules', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('links a paused item to its project schedules page and shows the reason', async () => {
+    const root = await mount([pausedItem], true, [], [pausedRow]);
+    const li = root.querySelector('li[data-kind="schedule"]')!;
+    expect(li.querySelector('a')!.getAttribute('href')).toBe('/projects/p%201/schedules');
+    expect(li.querySelector('a')!.textContent).toBe(pausedItem.message);
+    const detail = li.querySelector('.paused-detail')!.textContent!;
+    expect(detail).toContain('Paused by the hub: the agent that created it was deleted');
+    expect(detail).toContain('Target: worker');
+    expect(detail).toContain('updated ');
+    expect(li.querySelector('.last-error')).toBeNull();
+  });
+
+  it('shows fixed text for each known reason', async () => {
+    const root = await mount([pausedItem], true, null, [
+      { ...pausedRow, reason: 'cron_zone_unsupported', target: '', updated_at: null },
+    ]);
+    expect(root.querySelector('.paused-detail')!.textContent!.trim()).toBe(
+      'Paused by the hub: its cron expression names a time zone, which is not supported'
+    );
+  });
+
+  it('shows the generic label for an unknown reason and never the code', async () => {
+    for (const reason of ['other', 'some_later_reason', '<b>stored</b>', '', 'toString']) {
+      const root = await mount([pausedItem], true, null, [{ ...pausedRow, reason, target: '' }]);
+      const detail = root.querySelector('.paused-detail')!;
+      expect(detail.textContent).toContain('Paused by the hub: ' + PAUSED_REASON_GENERIC);
+      expect(detail.querySelector('b')).toBeNull();
+      if (reason) expect(detail.textContent).not.toContain(reason);
+      document.body.innerHTML = '';
+    }
+  });
+
+  it('renders markup in the target as text, never as elements', async () => {
+    const root = await mount([pausedItem], true, null, [
+      { ...pausedRow, target: '<img src=x onerror="window.__pausedErr=1">' },
+    ]);
+    const detail = root.querySelector('.paused-detail')!;
+    expect(detail.querySelector('img')).toBeNull();
+    expect(detail.textContent).toContain('Target: <img src=x onerror="window.__pausedErr=1">');
+    expect((window as unknown as { __pausedErr?: number }).__pausedErr).toBeUndefined();
+  });
+
+  it('shows no detail line without a matching row', async () => {
+    const root = await mount([pausedItem], true, null, [{ ...pausedRow, id: 'other' }]);
+    expect(root.querySelector('.detail')).toBeNull();
+    const none = await mount([pausedItem], true, null, null);
+    expect(none.querySelector('.detail')).toBeNull();
+  });
+});
+
+describe('pausedReasonLabel', () => {
+  it('maps known codes to fixed text and anything else to the generic label', () => {
+    expect(pausedReasonLabel('creator_deleted')).toBe('the agent that created it was deleted');
+    expect(pausedReasonLabel('cron_zone_unsupported')).toBe(
+      'its cron expression names a time zone, which is not supported'
+    );
+    expect(pausedReasonLabel('other')).toBe(PAUSED_REASON_GENERIC);
+    expect(pausedReasonLabel('constructor')).toBe(PAUSED_REASON_GENERIC);
+    expect(pausedReasonLabel(undefined)).toBe(PAUSED_REASON_GENERIC);
+    expect(pausedReasonLabel(null)).toBe(PAUSED_REASON_GENERIC);
+  });
+});
+
+describe('truncateText', () => {
+  it('keeps text at or under the limit', () => {
+    expect(truncateText('', 3)).toBe('');
+    expect(truncateText('abc', 3)).toBe('abc');
+  });
+
+  it('cuts by characters, never splitting one, and adds an ellipsis', () => {
+    expect(truncateText('abcd', 3)).toBe('abc\u2026');
+    expect(truncateText('\u{1F600}\u{1F600}\u{1F600}\u{1F600}', 2)).toBe(
+      '\u{1F600}\u{1F600}\u2026'
+    );
+  });
+});
+
 describe('attentionHref', () => {
   it('returns null for subjects without an ID or of other types', () => {
     for (const subject of [
@@ -207,6 +400,8 @@ describe('attentionHref', () => {
       { type: 'hub', id: 'x' },
       { type: 'dispatch', id: 'x' },
       { type: 'agents', id: 'x' },
+      { type: 'schedule', id: 'x' },
+      { type: 'schedules' },
     ]) {
       expect(attentionHref({ ...items[2]!, subject }, true)).toBeNull();
     }
@@ -216,6 +411,10 @@ describe('attentionHref', () => {
     expect(
       attentionHref({ ...items[0]!, subject: { type: 'hub', id: 'hub/a', name: 'a' } }, false)
     ).toBe('#hub-instance-hub%2Fa');
+  });
+
+  it('links a schedule to its project schedules page', () => {
+    expect(attentionHref(scheduleItem, false)).toBe('/projects/p%201/schedules');
   });
 
   it('links an integration only when the summary carries integration identity', () => {

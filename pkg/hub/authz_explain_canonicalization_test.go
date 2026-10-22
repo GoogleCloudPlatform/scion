@@ -48,7 +48,9 @@ func TestResolveResourcePermission_Contract(t *testing.T) {
 		{"canonical user.list", "user", ActionList, "user.list"},
 		{"canonical agent.create", "agent", ActionCreate, "agent.create"},
 		{"canonical project.read", "project", ActionRead, "project.read"},
+		{"canonical access_constraint.admin", "access_constraint", ActionAdmin, "access_constraint.admin"},
 		{"agent+manage has no permission", "agent", ActionManage, ""},
+		{"access_constraint+manage has no permission", "access_constraint", ActionManage, ""},
 
 		// Non-canonical and unknown pairs are not resolvable.
 		{"hub+user.read", "hub", "user.read", ""},
@@ -115,6 +117,7 @@ func TestCanonicalizeExplainPermission(t *testing.T) {
 		{"canonical user.list", "user", "list", "user.list"},
 		{"canonical agent.create", "agent", "create", "agent.create"},
 		{"canonical project.read", "project", "read", "project.read"},
+		{"canonical access_constraint.admin", "access_constraint", "admin", "access_constraint.admin"},
 
 		// Canonicalization: action is already a canonical permission ID.
 		{"hub + user.read → user.read", "hub", "user.read", "user.read"},
@@ -183,8 +186,8 @@ func TestExplainAPI_PermissionCanonicalization(t *testing.T) {
 		wantPermID   string // Expected canonical permission in provenance.
 	}{
 		// Canonical inputs — hub-member has user.read and group.list.
-		// user.list is Reserved, so it is granted by nothing; the request
-		// still resolves to the canonical user.list.
+		// hub-member does not hold user.list; the request still resolves
+		// to the canonical user.list.
 		{"canonical user+read", "user", "read", true, "user.read"},
 		{"canonical user+list", "user", "list", false, "user.list"},
 		{"canonical group+list", "group", "list", true, "group.list"},

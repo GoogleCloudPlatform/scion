@@ -97,6 +97,12 @@ func newAttachmentStaging(sharedDirHostPath string, inWorkspace bool) *attachmen
 // srcPath is not resolved through the root: it is the hub's own attachment
 // store, which is not reachable from a container.
 func (a *attachmentStaging) stage(srcPath, id, filename string) (string, error) {
+	return a.stageFrom(func() (io.ReadCloser, error) { return os.Open(srcPath) }, id, filename)
+}
+
+// stageFrom is stage with the bytes read from what open returns instead of
+// a host file. open is called only when the file is not staged yet.
+func (a *attachmentStaging) stageFrom(open func() (io.ReadCloser, error), id, filename string) (string, error) {
 	if err := validStagingComponent(id); err != nil {
 		return "", fmt.Errorf("attachment id: %w", err)
 	}
@@ -128,7 +134,7 @@ func (a *attachmentStaging) stage(srcPath, id, filename string) (string, error) 
 	}
 	defer func() { _ = dst.Close() }()
 
-	src, err := os.Open(srcPath)
+	src, err := open()
 	if err != nil {
 		_ = root.Remove(destPath)
 		return "", fmt.Errorf("open attachment: %w", err)

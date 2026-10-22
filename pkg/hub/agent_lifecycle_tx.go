@@ -189,7 +189,9 @@ func lifecycleAudit(mutationType, agentID string, actor AuditActor, now time.Tim
 // that ID (cause agent_soft_delete), run the soft-delete hooks, and write the
 // agent_soft_delete audit record. a is the post-write row. The agent's
 // service-account assignment is deactivated under the same operation ID and
-// cause, so a restore returns exactly it.
+// cause, so a restore returns exactly it. As in agentHardDeleteWork, only the
+// edges where the agent is the delegate are deactivated; its doc comment
+// gives the reason.
 func (s *Server) softDeleteAgentTx(ctx context.Context, tx store.Store, a *store.Agent, actor AuditActor) error {
 	if a == nil {
 		return fmt.Errorf("%w: nil agent in softDeleteAgentTx", store.ErrInvalidInput)
@@ -238,10 +240,19 @@ func (s *Server) softDeleteAgentTx(ctx context.Context, tx store.Store, a *store
 // survive as history), then run the hard-delete hooks. Both the hard delete
 // (hardDeleteAgentTx) and the rollback of a committed create
 // (compensateAgentCreate) run it, so a hook registered for hard delete also
-// runs when a create is rolled back. The hooks run when rowRemoved is true
-// or anything was deactivated. label prefixes store errors; a hook error is
-// returned as is.
-func (s *Server) agentHardDeleteWork(ctx context.Context, tx store.Store, a *store.Agent, actor AuditActor, d store.Deactivation, label string, rowRemoved bool) (edges, assignments int, err error) {
+// runs when a create is rolled back. label prefixes store errors; a hook
+// error is returned as is.
+//
+// Only the edges where the agent is the delegate are deactivated. Edges where
+// it is the delegator are left as they are: authorization re-loads each
+// agent delegator in a chain. The delegation ceiling walk
+// (walkDelegationChainHops, through checkAgentHoldsPermission) and the
+// standing check (resolveChainRoot with checkChain) refuse a chain that
+// reaches a missing or soft-deleted agent, and a restore reactivates an edge
+// only when its delegator is live (checkRestoreDelegatorsLive). A project
+// delete, which removes every agent of the project in one transaction,
+// deactivates both sides (deactivateProjectAgentEdges).
+func (s *Server) agentHardDeleteWork(ctx context.Context, tx store.Store, a *store.Agent, actor AuditActor, d store.Deactivation, label string) (edges, assignments int, err error) {
 	edges, err = tx.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, a.ID, d)
 	if err != nil {
 		return 0, 0, fmt.Errorf("%s: deactivate delegation edges: %w", label, err)
@@ -249,9 +260,6 @@ func (s *Server) agentHardDeleteWork(ctx context.Context, tx store.Store, a *sto
 	assignments, err = tx.DeactivateAgentServiceAccountAssignments(ctx, a.ID, d)
 	if err != nil {
 		return 0, 0, fmt.Errorf("%s: deactivate service-account assignments: %w", label, err)
-	}
-	if !rowRemoved && edges == 0 && assignments == 0 {
-		return 0, 0, nil
 	}
 	if err := runAgentTxHooks(ctx, "hard-delete", s.lifecycleTxHooks.snapshot(&s.lifecycleTxHooks.hardDelete), tx, a, actor); err != nil {
 		return 0, 0, err
@@ -279,7 +287,7 @@ func (s *Server) hardDeleteAgentTx(ctx context.Context, tx store.Store, a *store
 		Cause: store.EdgeDeactivationAgentHardDelete,
 		At:    &now,
 		OpID:  opID,
-	}, "hard delete", true)
+	}, "hard delete")
 	if err != nil {
 		return err
 	}
@@ -287,7 +295,7 @@ func (s *Server) hardDeleteAgentTx(ctx context.Context, tx store.Store, a *store
 	// on (fixturePurgeBasisFor: only when the context carries the purge's
 	// basis and the agent's own stamp names the same root).
 	basis := fixturePurgeBasisFor(ctx, a.Fixture)
-	if basis != nil && actor.CorrelationID == "" {
+	if basis != nil {
 		actor.CorrelationID = basis.RunID
 	}
 	record, err := lifecycleAudit(mutationTypeAgentHardDelete, a.ID, actor, now, struct {
@@ -300,6 +308,14 @@ func (s *Server) hardDeleteAgentTx(ctx context.Context, tx store.Store, a *store
 	}{opID, n, assignments, a.IsIncompleteCreate(), a.SoftDeleteOpID, basis})
 	if err != nil {
 		return err
+	}
+	if basis != nil {
+		// The provenance_basis column (Phase 3c); a failure aborts the
+		// hard delete.
+		if err := writeFixturePurgeAuditTx(ctx, tx, record, *basis); err != nil {
+			return fmt.Errorf("hard delete audit: %w", err)
+		}
+		return nil
 	}
 	if err := tx.CreateMutationAudit(ctx, record); err != nil {
 		return fmt.Errorf("hard delete audit: %w", err)

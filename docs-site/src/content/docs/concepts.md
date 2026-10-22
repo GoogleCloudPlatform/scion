@@ -67,7 +67,7 @@ Agent state uses a **layered model** with three dimensions:
 
 - **Phase** — The lifecycle stage of the agent container:
   `created` → `provisioning` → `cloning` → `starting` → `running` → `stopping` → `stopped`
-  with two off-the-happy-path destinations: `suspended` (paused for later resume) and `error` (the agent crashed).
+  with three off-the-happy-path destinations: `suspended` (paused for later resume), `error` (the agent crashed), and `halted` (the platform ended a run that should still be running).
 
 - **Activity** — What the agent is doing within the `running` phase:
   `initializing` (shown as "starting"), `working`, `thinking`, `executing`, `waiting_for_input`, `blocked`, `completed`, `limits_exceeded`, `stalled`, `offline`, `crashed`
@@ -94,6 +94,27 @@ A crash can be set from two places: `sciontool` reports it from the recovered ex
 The `error` phase is not limited to runtime crashes — it also covers **setup failures** that happen before an agent ever reaches `running`, such as a failed git clone or a provisioning error. In all cases the phase is restartable.
 
 The `error` phase is **restartable**: running `scion start` clears the error and launches a fresh session. See [Crash Recovery](/scion/local/agent-lifecycle/#crash-recovery-the-error-phase).
+
+#### Halted phase (the platform ended the run)
+
+`halted` means the platform, not you and not the agent, ended a run that was meant to keep running. The agent's **exit reason** says why:
+
+| Exit reason | What happened |
+|---|---|
+| `preempted` | The Kubernetes scheduler evicted the pod to make room for a higher-priority one. |
+| `evicted` | The pod was removed by another disruption, such as node-pressure eviction or a node drain. |
+| `oom_killed` | The container was killed for exceeding its memory limit. |
+| `container_missing` | The agent runtime kept reporting a complete inventory without the agent's container. |
+
+A stopped or suspended agent can also carry the exit reason `signaled`. The agent reports it when it stopped after a termination signal (for example `docker stop`, or a host or node shutdown). It is not a halt reason: on its own it never halts an agent, it only fills an empty exit reason, and it is cleared when the agent next starts.
+
+Only the agent runtime's own observations (its reports of the container, and the Hub's check of its inventory) can halt an agent; a status report an agent sends about itself never does, and never sets one of these reasons. An agent is halted only when all of these hold: it was meant to be running (it was started and not stopped since), no start, restart or stop of it is in progress, and its agent runtime is Docker, Podman, Apple container, or Kubernetes. Otherwise the same run ends `stopped` or `error`, as before. While the agent is running, a reason from the table reported by the agent runtime halts it whatever the exit code. If the agent has already reported that it stopped, a later reason from the table reported by the agent runtime with a clean exit (code 0) upgrades it to `halted` only when the agent's report said it stopped after a termination signal.
+
+`halted` is terminal, like `stopped`: the agent has no container and does not count toward the agent quota. It stays `halted` until you act on it. Status reports from the old run do not move it.
+
+To continue, run `scion start <agent>`. It starts the agent the way a start from `stopped` does. Whether the workspace survives depends on where it lives: a workspace on the agent's own pod storage (a Kubernetes EmptyDir) is re-cloned, and other workspaces are kept. `scion stop` on a halted agent records it as `stopped`.
+
+`scion list` shows the reason next to the phase, for example `halted (preempted)` or `halted (out of memory)`. The agent's creator is notified once per halt (unless they chose their own notification triggers by subscribing), and so is anyone subscribed to the `HALTED` notification trigger (see [Messaging & Notifications](/scion/hosted/user/messaging/#halted-agent-notifications)). Lifecycle hooks can use the `halted` trigger (see [Lifecycle Hooks](/scion/hosted/ha/lifecycle-hooks/#triggers)).
 
 #### Stalled, offline, and auto-suspend
 
@@ -141,7 +162,7 @@ When a Hub manages a git-based project and worktree-per-agent mode is not select
 
 This means a git project used locally with worktrees may switch to clone-based provisioning once it is managed by a Hub, unless the Hub project is created with workspace mode `worktree-per-agent`. When linking a git checkout to the local workstation Hub creates the project, it is created in that mode.
 
-**Worktree-per-agent (Hub-managed git projects):** the Runtime Broker provisions a shared base clone and gives each agent its own worktree over it, the same mount shape as the local-mode case, gated on the Runtime Broker host's git version being 2.48 or later; the Runtime Broker falls back to clone-per-agent if worktree provisioning is not possible. On the local workstation Hub, agents of a linked checkout use that checkout instead, and creation fails rather than falling back (see [Workspace Mode Change for Git Projects](/scion/hosted/user/hosted-user/#workspace-mode-change-for-git-projects)). See the [About Workspaces](/scion/local/workspace/) guide for details.
+**Worktree-per-agent (Hub-managed git projects):** the Runtime Broker provisions a shared base clone and gives each agent its own worktree over it, the same mount shape as a linked checkout on the workstation Hub, gated on the Runtime Broker host's git version being 2.48 or later; the Runtime Broker falls back to clone-per-agent if worktree provisioning is not possible. On the local workstation Hub, agents of a linked checkout use that checkout instead, and creation fails rather than falling back (see [Workspace Mode Change for Git Projects](/scion/hosted/user/hosted-user/#workspace-mode-change-for-git-projects)). See the [About Workspaces](/scion/local/workspace/) guide for details.
 
 ### Resource Isolation
 Scion enforces strict isolation between agents to prevent interference and cross-contamination of credentials or data.
