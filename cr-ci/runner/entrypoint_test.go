@@ -1192,6 +1192,7 @@ func TestEntrypointIgnoresOtherUnknownCodeLines(t *testing.T) {
 		"job step said: Exiting with unknown error code: 7",
 		"Exiting with unknown error code: 7 (and more)",
 		"Exiting with unknown error code: abc",
+		"Exiting with unknown error code: 08", // leading zero: would be octal in (( ))
 		"Exiting with unknown error code: ",
 	} {
 		t.Run(line, func(t *testing.T) {

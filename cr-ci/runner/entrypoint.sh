@@ -475,8 +475,9 @@ watch_runner_output() {
   local line
   while IFS= read -r line || [[ -n $line ]]; do
     printf '%s\n' "$line"
-    # Exactly run-helper.sh's line (anchored, digits only); nothing else is captured.
-    if [[ $line =~ ^Exiting\ with\ unknown\ error\ code:\ ([0-9]{1,3})$ ]]; then
+    # Exactly run-helper.sh's line (anchored, a decimal number without leading zeros,
+    # so (( )) never reads it as octal); nothing else is captured.
+    if [[ $line =~ ^Exiting\ with\ unknown\ error\ code:\ (0|[1-9][0-9]{0,2})$ ]]; then
       printf '%s\n' "${BASH_REMATCH[1]}" >"$listener_code_file"
     fi
   done <"$out_fifo"
