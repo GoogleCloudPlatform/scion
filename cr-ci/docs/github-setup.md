@@ -45,7 +45,8 @@ in [gcp-setup.md](gcp-setup.md).
 
 **Already done** (README quick start): `bootstrap-gcp.sh`,
 `build-runner-image.sh` and `deploy-job.sh`. `cr-ci/config.env` holds
-`TARGET_REPOS`, `GITHUB_APP_INSTALLATION_SCOPE`, `GCP_PROJECT` and `REGION`.
+`TARGET_REPOS`, `GCP_PROJECT` and `REGION` (`GITHUB_APP_INSTALLATION_SCOPE`
+defaults to `repo`, right for the fork).
 Every script validates the whole config, and `GITHUB_APP_ID` is required, so
 until the App exists `config.env` carries the placeholder `GITHUB_APP_ID=1`.
 The GCP-side scripts do not use the value. Step 2.3 replaces it before

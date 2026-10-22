@@ -33,7 +33,7 @@ nothing exists yet), and `#` lines are notes.
   cd cr-ci
   cp config.example.env config.env      # gitignored; never commit it
   $EDITOR config.env                    # TARGET_REPOS, GITHUB_APP_ID (1 until the App exists),
-                                        # GITHUB_APP_INSTALLATION_SCOPE, GCP_PROJECT, REGION
+                                        # GCP_PROJECT, REGION (GITHUB_APP_INSTALLATION_SCOPE defaults to repo)
                                         # (optional: BUILD_STAGING_BUCKET if the default name is taken)
   scripts/check-config.sh               # validates like the mediator, prints resolved values
   ```

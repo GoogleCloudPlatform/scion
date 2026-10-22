@@ -124,12 +124,26 @@ func TestLoadOrgScope(t *testing.T) {
 	}
 }
 
+// GITHUB_APP_INSTALLATION_SCOPE defaults to repo, the common case (and the
+// only one for a personal account).
+func TestLoadInstallScopeDefault(t *testing.T) {
+	env := validEnv()
+	delete(env, EnvGitHubInstallScope)
+	c, err := Load(getenvFrom(env))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.InstallScope != ScopeRepo {
+		t.Errorf("InstallScope = %q, want %q by default", c.InstallScope, ScopeRepo)
+	}
+}
+
 func TestLoadRequired(t *testing.T) {
 	_, err := Load(getenvFrom(nil))
 	if err == nil {
 		t.Fatal("Load with empty env succeeded")
 	}
-	for _, k := range []string{EnvTargetRepos, EnvGitHubAppID, EnvGitHubInstallScope, EnvGCPProject, EnvRegion} {
+	for _, k := range []string{EnvTargetRepos, EnvGitHubAppID, EnvGCPProject, EnvRegion} {
 		if !strings.Contains(err.Error(), k+": required") {
 			t.Errorf("error does not report %s as required: %v", k, err)
 		}
@@ -315,6 +329,7 @@ var validCases = []map[string]string{
 	{EnvRunnerDiskGi: "25"},  // needs the per-instance quota raised; the loader allows 1-100
 	{EnvRunnerDiskGi: "100"}, // Cloud Run's per-volume maximum
 	{EnvRunnerBuildCacheInRAM: "true"},
+	{EnvGitHubInstallScope: ""}, // defaults to repo
 }
 
 // TestScriptValidatorMatchesLoad keeps scripts/lib.sh's config validation

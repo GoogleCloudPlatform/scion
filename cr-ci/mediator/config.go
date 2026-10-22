@@ -142,7 +142,7 @@ func Defaults() map[string]string {
 	return map[string]string{
 		EnvTargetRepos:             "",
 		EnvGitHubAppID:             "",
-		EnvGitHubInstallScope:      "",
+		EnvGitHubInstallScope:      string(ScopeRepo),
 		EnvGCPProject:              "",
 		EnvRegion:                  "",
 		EnvRunnerLabel:             defaultRunnerLabel,
@@ -280,8 +280,7 @@ func Load(getenv func(string) string) (*Config, error) {
 		c.GitHubAppID = id
 	}
 
-	switch scope := InstallScope(required(EnvGitHubInstallScope)); scope {
-	case "":
+	switch scope := InstallScope(get(EnvGitHubInstallScope)); scope {
 	case ScopeRepo, ScopeOrg:
 		c.InstallScope = scope
 	default:

@@ -422,9 +422,8 @@ crci_validate_config() {
     fi
   fi
 
-  _crci_required GITHUB_APP_INSTALLATION_SCOPE
   v=${CFG[GITHUB_APP_INSTALLATION_SCOPE]}
-  if [[ -n $v && $v != repo && $v != org ]]; then
+  if [[ $v != repo && $v != org ]]; then
     _crci_fail GITHUB_APP_INSTALLATION_SCOPE "\"$v\" must be \"repo\" or \"org\""
   fi
   if [[ $v == org && ${#owners[@]} -gt 0 ]]; then
