@@ -2320,6 +2320,19 @@ authDone:
 		}
 	}
 
+	// Kubernetes placement defaults resolved by the agent runtime server,
+	// applied over a copy of the agent's kubernetes block: the only place
+	// placement is applied (run_placement.go).
+	var agentK8s *api.KubernetesConfig
+	if finalScionCfg != nil {
+		agentK8s = finalScionCfg.Kubernetes
+	}
+	placedK8s, placementWarnings, err := m.applyStartPlacement(opts, agentK8s)
+	if err != nil {
+		return nil, err
+	}
+	warnings = append(warnings, placementWarnings...)
+
 	// The run ID was fixed (minted if absent) at the top of Start.
 	runID := opts.RunID
 	// SCION_LAUNCH_ID carries the same value as the run label, so the
@@ -2488,11 +2501,9 @@ authDone:
 			// on the Kubernetes runtime. They are resolved here at start
 			// time rather than persisted by ProvisionAgent, so a settings
 			// change applies on the next start, matching ImagePullPolicy.
-			var k8sCfg *api.KubernetesConfig
-			if finalScionCfg != nil && finalScionCfg.Kubernetes != nil {
-				cpy := *finalScionCfg.Kubernetes
-				k8sCfg = &cpy
-			}
+			// placedK8s is a fresh copy of the template/agent block with
+			// the resolved placement applied (nil when there is neither).
+			k8sCfg := placedK8s
 			if resolvedPullPolicy != "" || k8sCfg != nil {
 				if k8sCfg == nil {
 					k8sCfg = &api.KubernetesConfig{}
