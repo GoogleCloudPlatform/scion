@@ -498,20 +498,29 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			// from the in-project agents root under this mount; that is the
 			// control on every runtime. The in-project agents root is
 			// additionally kept out of the container's view (below):
-			// every runtime shadows it with a tmpfs when it already exists.
+			// shadowed with a tmpfs on Docker/Podman whenever .scion is a
+			// directory, and on Apple when the agents dir already exists.
 			//
 			// The project configuration directory <workspace>/.scion
 			// (settings, templates, harness-configs), which the broker
 			// reads when it starts agents in this project, is mounted
 			// read-only (workspaceProjectConfigMount). Since it is
-			// read-only, the agents mask needs its mount point to exist
-			// already, so the mask is added only when the agents dir
-			// exists; when it does not, there is nothing to hide and the
-			// agent cannot create it.
+			// read-only, the container runtime cannot create the agents
+			// mask's mount point in it, so on Docker/Podman the broker
+			// creates the (git-excluded) agents dir first, as the runtime
+			// itself used to; the mask then also hides an agent dir the
+			// broker creates there after the start. Apple keeps masking
+			// only an existing agents dir.
 			registerMount(config.Workspace, "/workspace", false, true)
 			addArg("--workdir", "/workspace")
 			if src, tgt, ok := workspaceProjectConfigMount(config.Workspace, "/workspace"); ok {
 				registerMount(src, tgt, true, true)
+				if config.RuntimeName != appleContainerRuntimeName && filepath.Base(src) == workspaceProjectConfigDir {
+					if err := os.MkdirAll(filepath.Join(src, "agents"), 0o755); err != nil {
+						runtimeLog().Warn("Could not create the in-project agents dir for its mask",
+							"agent", config.Name, "error", err)
+					}
+				}
 			}
 			if target, ok := sharedWorkspaceAgentsMaskTarget(config, "/workspace", true); ok {
 				sharedWorkspaceAgentsMask = target

@@ -155,18 +155,21 @@ func TestBuildCommonRunArgs_ProjectConfigReadOnly(t *testing.T) {
 			// roTarget its container path; empty means no read-only mount.
 			roSrc, roTarget string
 			mask            string
+			// maskNonApple overrides mask on Docker and Podman, where the
+			// broker creates a missing agents dir so that it can be masked.
+			maskNonApple string
 		}{
-			{"shared, agents dir exists", sharedWith(true), ".scion", "/workspace/.scion", "/workspace/.scion/agents"},
-			{"shared, no agents dir", sharedWith(false), ".scion", "/workspace/.scion", ""},
-			{"shared, .scion marker file", sharedMarker, "", "", ""},
-			{"shared, no .scion", sharedNoScion, "", "", ""},
-			{"shared, .scion symlink inside the workspace", symlinkInside, "config/scion", "/workspace/config/scion", ""},
-			{"shared, .scion symlink outside the workspace", symlinkOutside, "", "", ""},
-			{"plain, in-place .scion with agents", plainWith(true), ".scion", "/workspace/.scion", "/workspace/.scion/agents"},
-			{"plain, in-place .scion", plainWith(false), ".scion", "/workspace/.scion", ""},
-			{"plain, .scion marker file", plainMarker, "", "", ""},
-			{"worktree", worktree, "", "", ""},
-			{"git clone", gitClone, "", "", ""},
+			{"shared, agents dir exists", sharedWith(true), ".scion", "/workspace/.scion", "/workspace/.scion/agents", ""},
+			{"shared, no agents dir", sharedWith(false), ".scion", "/workspace/.scion", "", "/workspace/.scion/agents"},
+			{"shared, .scion marker file", sharedMarker, "", "", "", ""},
+			{"shared, no .scion", sharedNoScion, "", "", "", ""},
+			{"shared, .scion symlink inside the workspace", symlinkInside, "config/scion", "/workspace/config/scion", "", ""},
+			{"shared, .scion symlink outside the workspace", symlinkOutside, "", "", "", ""},
+			{"plain, in-place .scion with agents", plainWith(true), ".scion", "/workspace/.scion", "/workspace/.scion/agents", ""},
+			{"plain, in-place .scion", plainWith(false), ".scion", "/workspace/.scion", "", ""},
+			{"plain, .scion marker file", plainMarker, "", "", "", ""},
+			{"worktree", worktree, "", "", "", ""},
+			{"git clone", gitClone, "", "", "", ""},
 		} {
 			t.Run(rt+"/"+tt.name, func(t *testing.T) {
 				t.Setenv("HOME", t.TempDir())
@@ -237,10 +240,17 @@ func TestBuildCommonRunArgs_ProjectConfigReadOnly(t *testing.T) {
 						gotMask = strings.TrimPrefix(args[i+1], "type=tmpfs,destination=")
 					}
 				}
-				if gotMask != tt.mask {
-					t.Errorf("agents mask = %q, want %q", gotMask, tt.mask)
+				wantMask := tt.mask
+				if tt.maskNonApple != "" && rt != appleContainerRuntimeName {
+					wantMask = tt.maskNonApple
 				}
-				if tt.mask != "" {
+				if gotMask != wantMask {
+					t.Errorf("agents mask = %q, want %q", gotMask, wantMask)
+				}
+				if wantMask != "" {
+					if fi, err := os.Stat(filepath.Join(cfg.Workspace, ".scion", "agents")); err != nil || !fi.IsDir() {
+						t.Errorf("the masked agents dir does not exist on the broker: %v", err)
+					}
 					flag := "--mount"
 					if rt == appleContainerRuntimeName {
 						flag = "--tmpfs"

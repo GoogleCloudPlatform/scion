@@ -120,6 +120,19 @@ func testRecordOutsideRunArgMounts(t *testing.T) {
 	// the /workspace mount and must be shadowed by the agents tmpfs.
 	modes = append(modes, mode{"shared workspace, in-project agent dir (restart resolution)", inProject,
 		withPaths(filepath.Join(external, "home"), root, root, nil)})
+	// The Apple runtime gets the same layouts with its own mask flags: in
+	// the full-repo-root fallback, /repo-root/.scion is masked with
+	// --tmpfs, since the --mount form is dropped for Apple.
+	apple := func(cfg RunConfig) RunConfig {
+		cfg.RuntimeName = appleContainerRuntimeName
+		return cfg
+	}
+	modes = append(modes,
+		mode{"apple: worktree outside the repo (full repo root mounted)", inProject,
+			apple(withPaths(config.GetAgentHomePath(scion, "a"), root, filepath.Join(base, ".scion_worktrees", "repo", "a"), nil))},
+		mode{"apple: shared workspace (repo root)", external,
+			apple(withPaths(filepath.Join(external, "home"), root, root, nil))},
+	)
 	for _, m := range modes {
 		for _, recordName := range controlPlaneRecordNames {
 			t.Run(m.name+"/"+recordName, func(t *testing.T) {
@@ -138,6 +151,11 @@ func checkRecordOutsideRunArgs(t *testing.T, record string, cfg RunConfig) {
 	if err != nil {
 		t.Fatalf("buildCommonRunArgs: %v", err)
 	}
+	if cfg.RuntimeName == appleContainerRuntimeName {
+		// The Apple runtime drops the flags it does not support before
+		// the run; check what it actually passes.
+		args = stripUnsupportedAppleFlags(args)
+	}
 	var tmpfs []string
 	type bind struct{ src, dst string }
 	var binds []bind
@@ -148,6 +166,8 @@ func checkRecordOutsideRunArgs(t *testing.T, record string, cfg RunConfig) {
 			if len(parts) >= 2 {
 				binds = append(binds, bind{parts[0], parts[1]})
 			}
+		case "--tmpfs":
+			tmpfs = append(tmpfs, args[i+1])
 		case "--mount":
 			spec := args[i+1]
 			if strings.Contains(spec, "type=tmpfs") {
