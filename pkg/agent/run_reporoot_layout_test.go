@@ -510,3 +510,40 @@ func TestStart_SharedWorkspaceWithoutGitNeverMountsAncestorRepo(t *testing.T) {
 		t.Fatalf("RunConfig.Workspace = %q, want %q", captured.Workspace, ws)
 	}
 }
+
+// A shared workspace whose .git directory git does not accept (empty, or
+// with a commondir naming a missing directory) inside an enclosing
+// repository: a plain mount, never the enclosing repository.
+func TestDetectRepoRoot_SharedWorkspaceWithUnusableGitDirIsPlain(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, ws string)
+	}{
+		{name: "empty .git dir", setup: func(t *testing.T, ws string) {
+			if err := os.RemoveAll(filepath.Join(ws, ".git")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(filepath.Join(ws, ".git"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "commondir to a missing dir", setup: func(t *testing.T, ws string) {
+			if err := os.WriteFile(filepath.Join(ws, ".git", "commondir"), []byte("/nonexistent-common-dir\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ancestor := mkGitRepo(t, filepath.Join(t.TempDir(), "home"))
+			ws := mkGitRepo(t, filepath.Join(ancestor, "projects", "a"))
+			projectDir := filepath.Join(ws, config.DotScion)
+			if err := os.MkdirAll(projectDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			tc.setup(t, ws)
+			if got := mustDetectRepoRoot(t, false, ws, projectDir); got != "" {
+				t.Fatalf("repo root = %q, want \"\" (plain mount), never %q", got, ancestor)
+			}
+		})
+	}
+}

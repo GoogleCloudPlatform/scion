@@ -2842,8 +2842,8 @@ func writeAgentTokenFile(agentHome, token string) error {
 // the container, so git's answer is used only to check those paths, never
 // as the root itself:
 //   - workspace at the project root (a shared workspace): the root is the
-//     workspace when it has a .git entry of its own, otherwise "" (a plain
-//     mount). It is never an enclosing repository: a workspace whose .git
+//     workspace when it has a .git entry of its own (a .git directory must
+//     be one git accepts), otherwise "" (a plain mount). It is never an enclosing repository: a workspace whose .git
 //     is missing is indistinguishable from one whose .git was removed;
 //   - workspace that is a plain checkout elsewhere (for example a workspace
 //     storage backend's host path): the root is the workspace;
@@ -2875,17 +2875,24 @@ func detectRepoRoot(explicit bool, effectiveWorkspace, projectDir string, settin
 				return "", nil
 			}
 			if hasOwnGitDir {
-				if err := checkOwnCommonDir(effectiveWorkspace); err != nil {
+				isRepo, err := checkOwnCommonDir(effectiveWorkspace)
+				if err != nil {
 					return "", err
+				}
+				if !isRepo {
+					return "", nil
 				}
 			}
 			return effectiveWorkspace, nil
 		}
 		if hasOwnGitDir {
-			if err := checkOwnCommonDir(effectiveWorkspace); err != nil {
+			isRepo, err := checkOwnCommonDir(effectiveWorkspace)
+			if err != nil {
 				return "", err
 			}
-			return effectiveWorkspace, nil
+			if isRepo {
+				return effectiveWorkspace, nil
+			}
 		}
 		projectRepo := projectRepoRoot(projectRoot)
 		ceiling := filepath.Dir(effectiveWorkspace)
@@ -2896,7 +2903,7 @@ func detectRepoRoot(explicit bool, effectiveWorkspace, projectDir string, settin
 			if projectRepo != "" && samePath(filepath.Dir(commonDir), projectRepo) {
 				return projectRepo, nil
 			}
-			return "", workspaceCommonDirError(effectiveWorkspace, commonDir, nil)
+			return "", workspaceCommonDirError(effectiveWorkspace, commonDir)
 		}
 	}
 	projectRepo := projectRepoRoot(projectRoot)
@@ -2913,26 +2920,25 @@ func detectRepoRoot(explicit bool, effectiveWorkspace, projectDir string, settin
 	return "", fmt.Errorf("git reports repository root %s for project %s, which is not the project's own repository; refusing to start: check the repository's git configuration", top, projectDir)
 }
 
-// checkOwnCommonDir refuses a workspace with its own .git directory whose
-// git common dir is not that directory.
-func checkOwnCommonDir(workspace string) error {
+// checkOwnCommonDir checks a workspace with its own .git directory. It
+// reports false when git does not treat the workspace as a repository at all
+// (for example an empty .git directory), and refuses with an error when git
+// does, but with a common dir other than that .git directory.
+func checkOwnCommonDir(workspace string) (bool, error) {
 	ownGitDir := filepath.Join(workspace, ".git")
 	commonDir, err := boundedCommonGitDir(workspace, filepath.Dir(workspace))
 	if err != nil {
-		return workspaceCommonDirError(workspace, "", err)
+		return false, nil
 	}
 	if !samePath(commonDir, ownGitDir) {
-		return workspaceCommonDirError(workspace, commonDir, nil)
+		return false, workspaceCommonDirError(workspace, commonDir)
 	}
-	return nil
+	return true, nil
 }
 
 // workspaceCommonDirError is detectRepoRoot's refusal for a workspace whose
 // git common dir does not belong to the project.
-func workspaceCommonDirError(workspace, commonDir string, err error) error {
-	if err != nil {
-		return fmt.Errorf("cannot resolve the git common dir of workspace %s: %w; refusing to start: check the workspace's .git metadata", workspace, err)
-	}
+func workspaceCommonDirError(workspace, commonDir string) error {
 	return fmt.Errorf("git common dir %s of workspace %s is outside the project's own repository; refusing to start: check the workspace's .git metadata", commonDir, workspace)
 }
 
