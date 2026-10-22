@@ -274,6 +274,10 @@ logged (a unit test enforces this).
   than wait for a job it could only give part of the task timeout. The next
   `/reconcile` reaps its registration (`runner_reaped`) and re-serves its job if
   that is still queued.
+- **Runner execution exits 4 with `ERROR idle_timeout_raced_job`:** the idle stop
+  and a job start crossed (a job was assigned just as the idle deadline passed),
+  and the stop cancelled that job. Re-run the job. Frequent ones would mean jobs
+  routinely arrive near the deadline: raise `RUNNER_IDLE_TIMEOUT`.
 - **Legitimate job killed with `reason=run_lookup_failed`:** a GitHub API
   error hit the hijack guard during a runner swap; the guard fails closed.
   Re-run the job.

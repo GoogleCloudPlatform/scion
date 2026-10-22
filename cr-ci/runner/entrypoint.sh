@@ -46,6 +46,8 @@
 #      metadata server), or retries exhausted; run.sh not started
 #   128+n  SIGTERM (143) or SIGINT (130) received before run.sh started; run.sh not started
 #   0      also when the runner was stopped for its idle timeout (logged as "idle_timeout")
+#   4      the idle stop raced a job start: the SIGTERM cancelled a job that started just
+#          as the deadline passed (logged as "ERROR idle_timeout_raced_job")
 #   otherwise run.sh's exit code, or, when run.sh exits 0, the runner exit code that
 #      run-helper.sh reported as unknown (for example 134 after an abort)
 #
@@ -69,6 +71,7 @@ set -euo pipefail
 readonly CLAIM_MAX_ATTEMPTS=5
 readonly EXIT_CONFIG=2
 readonly EXIT_CLAIM=3
+readonly EXIT_IDLE_RACE=4
 
 scratch=${CR_SCRATCH_DIR:-/scratch}
 mountinfo=${CR_MOUNTINFO:-/proc/self/mountinfo}
@@ -540,6 +543,8 @@ idle_left=$((idle_timeout - SECONDS))
   trap - TERM INT
   read -r -t "$idle_left" -u "$idle_fd" _ || true
   [[ -e $job_started_file ]] && exit 0
+  # Not atomic with the TERM below: a job assigned now, or whose "Running job:" line is
+  # still in the pipe, is cancelled by it. The exit logic reports that as a race (exit 4).
   : >"$idle_stopped_file"
   log "idle timeout: no job started within ${idle_timeout}s of the container start; stopping the runner gracefully"
   kill -s TERM "$runner_pid" 2>/dev/null || true
@@ -571,9 +576,18 @@ listener_code=""
 [[ -s $listener_code_file ]] && listener_code=$(<"$listener_code_file")
 idle_stopped=0
 [[ -e $idle_stopped_file ]] && idle_stopped=1
+job_started=0
+[[ -e $job_started_file ]] && job_started=1
 kill "$watcher_pid" 2>/dev/null || true
 rm -rf -- "$fifo_dir"
 
+if ((idle_stopped && job_started)); then
+  # The watchdog found no job and sent SIGTERM, but a job started in that gap (or its
+  # "Running job:" line was still in the pipe): the SIGTERM cancelled that job. Rare, and
+  # not reversible; fail the execution so it does not pass for an idle stop.
+  log "ERROR idle_timeout_raced_job: the idle stop after ${idle_timeout}s raced a job start; the job was cancelled (run.sh exited $runner_rc); exiting $EXIT_IDLE_RACE"
+  exit "$EXIT_IDLE_RACE"
+fi
 if ((idle_stopped)); then
   # Expected, not a failure: the unused registration is reaped by the mediator's next
   # /reconcile (offline, idle, older than the reap age), which also re-serves any job

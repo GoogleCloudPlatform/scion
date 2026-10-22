@@ -1527,12 +1527,13 @@ func TestEntrypointIdleTimeoutStopsRunner(t *testing.T) {
 	}
 }
 
-// A job that starts shortly before the deadline (about 2 s; the deadline counts from
-// the entrypoint's start, which leaves room for the claim) is not touched: the runner runs it to
+// A job that starts shortly before the deadline (3 s after run.sh starts, the deadline
+// 9 s after the entrypoint starts: about 6 s of margin for the claim and a loaded
+// machine) is not touched: the runner runs it to
 // the end and the entrypoint reports run.sh's own result.
 func TestEntrypointIdleTimeoutJobJustBeforeDeadline(t *testing.T) {
 	h := newSuccessHarness(t)
-	h.env["RUNNER_IDLE_TIMEOUT_SECONDS"] = "5"
+	h.env["RUNNER_IDLE_TIMEOUT_SECONDS"] = "9"
 	h.setRunSh(stubRunShWith(`trap 'echo TERM > "$out/signal"; exit 42' TERM
 trap 'echo INT > "$out/signal"; exit 43' INT
 sleep 3
@@ -1567,5 +1568,27 @@ func TestEntrypointIdleTimeoutDoesNotDelayExit(t *testing.T) {
 	}
 	if d := time.Since(start); d > 30*time.Second {
 		t.Errorf("entrypoint took %s, want it to end with run.sh, not at the idle deadline", d)
+	}
+}
+
+// The idle stop raced a job start: the watchdog found no job and sent SIGTERM, and the
+// job's "Running job:" line arrived anyway (here: printed by the stub on SIGTERM, which
+// makes the race deterministic). The cancelled job must not pass for an idle stop.
+func TestEntrypointIdleTimeoutRacedJob(t *testing.T) {
+	h := newSuccessHarness(t)
+	h.env["RUNNER_IDLE_TIMEOUT_SECONDS"] = "1"
+	h.setRunSh(stubRunShWith(`trap 'echo "2026-10-22 21:00:01Z: Running job: lint"; echo TERM > "$out/signal"; exit 0' TERM
+for _ in $(seq 1 300); do sleep 0.1; done
+exit 9
+`))
+	res := h.run()
+	if res.exitCode != 4 {
+		t.Errorf("exit code = %d, want 4 for an idle stop that raced a job; stderr:\n%s", res.exitCode, res.stderr)
+	}
+	if !strings.Contains(res.stderr, "ERROR idle_timeout_raced_job:") {
+		t.Errorf("stderr does not report the race:\n%s", res.stderr)
+	}
+	if strings.Contains(res.stderr, "without a job") {
+		t.Errorf("stderr reports a plain idle stop for a cancelled job:\n%s", res.stderr)
 	}
 }

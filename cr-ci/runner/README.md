@@ -214,8 +214,13 @@ this, in order:
      cancel) and exits **0**, logging `idle_timeout: runner stopped ...`. GitHub may give
      any queued job with the label to an idle runner, and that job only gets the rest
      of the execution's task timeout; the idle timeout makes that at least
-     `TASK_TIMEOUT - RUNNER_IDLE_TIMEOUT`. A job that starts before the deadline is
-     never touched. The timer is a `read -t` on a FIFO in a subshell, killed when
+     `TASK_TIMEOUT - RUNNER_IDLE_TIMEOUT`. A job whose `Running job:` line the
+     entrypoint has read before the deadline is never touched. **Remaining race:** the
+     check and the SIGTERM are not atomic, so a job that GitHub assigns in the moment
+     between them (or whose line is still in the pipe) is cancelled by the SIGTERM.
+     The entrypoint then sees both markers, logs `ERROR idle_timeout_raced_job` and
+     exits **4**, so the execution fails visibly instead of passing for an idle stop;
+     re-run the cancelled job. The timer is a `read -t` on a FIFO in a subshell, killed when
      `run.sh` exits.
 
    The output goes through FIFOs in a private temp dir under `/tmp`, small and
@@ -223,7 +228,8 @@ this, in order:
    finish within 5 s of `run.sh`'s exit is abandoned, so a stray process holding
    the pipe cannot keep the execution alive.
 
-Exit codes: the runner's (above) once `run.sh` has started. Before that, **2** for a configuration error (env,
+Exit codes: the runner's (above) once `run.sh` has started, 0 for an idle stop, and
+**4** when an idle stop raced a job start (above). Before that, **2** for a configuration error (env,
 `HOME`, `/scratch`, a HOME link, missing `run.sh`) and **3** for a failed claim. Neither path starts
 `run.sh`. If a claim is lost (for example, the mediator restarted and its
 in-memory claims are gone), the runner exits 3. `/reconcile` then deletes the

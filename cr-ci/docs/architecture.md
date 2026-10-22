@@ -142,7 +142,10 @@ a runner's execution by its `RUNNER_NAME` env, never by job ID.
    - **Idle timeout.** The entrypoint stops a runner that has not started a job
      within `RUNNER_IDLE_TIMEOUT` (default 10m, at least 1m, at most half of
      `TASK_TIMEOUT`) of the container start, gracefully (SIGTERM to `run.sh`), and
-     exits 0 with an `idle_timeout:` log line. So a runner can only take a job
+     exits 0 with an `idle_timeout:` log line. (The check and the SIGTERM are not
+     atomic: a job assigned in between is cancelled, and the entrypoint then logs
+     `ERROR idle_timeout_raced_job` and exits 4, so that failure is visible.) So a
+     runner can only take a job
      while it is young, and **every job gets at least
      `TASK_TIMEOUT - RUNNER_IDLE_TIMEOUT`** (35 minutes with the defaults). The
      offline registration is reaped by the next `/reconcile` (it is aged from its
