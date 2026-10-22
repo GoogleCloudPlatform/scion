@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
@@ -88,6 +89,21 @@ type BrokerAuthEvent struct {
 	ActorType  string              `json:"actorType,omitempty"` // "user", "broker", or "system"
 	Timestamp  time.Time           `json:"timestamp"`
 	Details    map[string]string   `json:"details,omitempty"`
+
+	// The typed fields below feed the broker family audit envelope
+	// (remaining-audit P4 slice 1; audit_broker_envelope.go). The converted
+	// branch of LogAuditLogger.LogBrokerAuthEvent reads only these and the
+	// fields above that have a declared leaf; it never reads FailReason or
+	// Details, which stay populated for the legacy event types and the
+	// existing mock-level assertions.
+
+	// FailureCode classifies an auth_failure or a failed join.
+	FailureCode auditevent.BrokerFailureCode `json:"-"`
+	// ProjectID selects project scope for the project-scoped (embedded)
+	// registration.
+	ProjectID string `json:"-"`
+	// RegisterOperation is register or reregister, for register events.
+	RegisterOperation auditevent.BrokerRegisterOperation `json:"-"`
 }
 
 // InviteAuditEventType defines the type of invite/allow-list audit event.
@@ -284,6 +300,16 @@ type LogAuditLogger struct {
 	prefix string
 	debug  bool
 	log    *slog.Logger
+
+	// brokerEnvelopes receives the converted broker family events
+	// (auth_failure, register, join, rotate, deregister). The server sets
+	// it to a SlogSink over the shared async audit writer
+	// (setBrokerEnvelopeSink). Without one, a converted event is dropped
+	// with the rate-limited warning.
+	brokerEnvelopes auditevent.Sink
+	// brokerDropWarn rate-limits the operational warning for a converted
+	// event that could not be built; nil uses defaultBrokerAuditDropWarner.
+	brokerDropWarn *auditDropWarner
 }
 
 // NewLogAuditLogger creates a new log-based audit logger.
@@ -292,9 +318,10 @@ func NewLogAuditLogger(prefix string, debug bool) *LogAuditLogger {
 		prefix = "[Audit]"
 	}
 	return &LogAuditLogger{
-		prefix: prefix,
-		debug:  debug,
-		log:    logging.Subsystem("hub.audit"),
+		prefix:         prefix,
+		debug:          debug,
+		log:            logging.Subsystem("hub.audit"),
+		brokerDropWarn: newAuditDropWarner(),
 	}
 }
 
@@ -351,9 +378,18 @@ func credentialLogAttr(ctx context.Context) (slog.Attr, bool) {
 //     credential being rejected is the reason this event exists.
 //   - everything else -> Info. Administrative, low-volume, and each one
 //     changes who can talk to the Hub.
+//
+// Remaining-audit P4 slice 1 converts auth_failure, register, join, rotate
+// and deregister: those are emitted as broker family audit envelopes
+// through the shared async audit writer (emitBrokerEnvelope), replacing the
+// legacy line one for one. auth_success, link, unlink, update_settings and
+// the dead revoke constant keep the legacy path below unchanged.
 func (l *LogAuditLogger) LogBrokerAuthEvent(ctx context.Context, event *BrokerAuthEvent) error {
 	if event == nil {
 		return nil
+	}
+	if action, ok := convertedBrokerAction(event.EventType); ok {
+		return l.emitBrokerEnvelope(ctx, action, event)
 	}
 
 	level := slog.LevelInfo
@@ -706,6 +742,7 @@ func AuditableBrokerAuthMiddleware(svc *BrokerAuthService, logger AuditLogger) f
 				event.EventType = BrokerAuthEventAuthFailure
 				event.Success = false
 				event.FailReason = err.Error()
+				event.FailureCode = brokerAuthFailureCode(err)
 
 				if logger != nil {
 					_ = logger.LogBrokerAuthEvent(r.Context(), event)
@@ -819,25 +856,55 @@ func mergeBrokerAuditDetails(details map[string]string, kv ...string) map[string
 }
 
 // LogRegistrationEvent logs a broker registration or re-registration event.
-// details carries the credential attribution, the operation and the issued
-// join token's details (brokerAuditCredentialDetails, "operation" and
-// joinTokenAuditDetails); it must not hold secret material, the join token
-// or its hash.
-func LogRegistrationEvent(ctx context.Context, logger AuditLogger, brokerID, brokerName, actorID, ipAddress string, details map[string]string) {
+// operation is register or reregister. details carries the credential
+// attribution, the operation and the issued join token's details
+// (brokerAuditCredentialDetails, "operation" and joinTokenAuditDetails);
+// it must not hold secret material, the join token or its hash.
+func LogRegistrationEvent(ctx context.Context, logger AuditLogger, brokerID, brokerName, actorID, ipAddress string, operation auditevent.BrokerRegisterOperation, details map[string]string) {
 	if logger == nil {
 		return
 	}
 
 	event := &BrokerAuthEvent{
-		EventType:  BrokerAuthEventRegister,
-		BrokerID:   brokerID,
-		BrokerName: brokerName,
-		IPAddress:  ipAddress,
-		Success:    true,
-		ActorID:    actorID,
-		ActorType:  "user",
-		Timestamp:  time.Now(),
-		Details:    mergeBrokerAuditDetails(details),
+		EventType:         BrokerAuthEventRegister,
+		BrokerID:          brokerID,
+		BrokerName:        brokerName,
+		IPAddress:         ipAddress,
+		Success:           true,
+		ActorID:           actorID,
+		ActorType:         "user",
+		Timestamp:         time.Now(),
+		Details:           mergeBrokerAuditDetails(details),
+		RegisterOperation: operation,
+	}
+
+	_ = logger.LogBrokerAuthEvent(ctx, event)
+}
+
+// LogEmbeddedRegistrationEvent logs the project-scoped registration made by
+// the deprecated embedded-broker branch of project registration. The
+// envelope is project-scoped with projectID. actorID is the caller user's
+// ID. The branch requires an authenticated session user, so an empty
+// actorID is a bug path: like every empty actor, the envelope is dropped
+// with the rate-limited warning (architect ruling R14). A user-initiated
+// registration is never attributed to the hub.
+func LogEmbeddedRegistrationEvent(ctx context.Context, logger AuditLogger, brokerID, brokerName, projectID, actorID, ipAddress string, operation auditevent.BrokerRegisterOperation, details map[string]string) {
+	if logger == nil {
+		return
+	}
+
+	event := &BrokerAuthEvent{
+		EventType:         BrokerAuthEventRegister,
+		BrokerID:          brokerID,
+		BrokerName:        brokerName,
+		IPAddress:         ipAddress,
+		Success:           true,
+		ActorID:           actorID,
+		ActorType:         "user",
+		Timestamp:         time.Now(),
+		Details:           mergeBrokerAuditDetails(details),
+		ProjectID:         projectID,
+		RegisterOperation: operation,
 	}
 
 	_ = logger.LogBrokerAuthEvent(ctx, event)
@@ -911,19 +978,21 @@ func brokerSettingsChangeDetails(before, after *store.RuntimeBroker) []string {
 	return kv
 }
 
-// LogJoinEvent logs a broker join event.
-func LogJoinEvent(ctx context.Context, logger AuditLogger, brokerID, ipAddress string, success bool, failReason string) {
+// LogJoinEvent logs a broker join event. failureCode classifies a failed
+// join (brokerJoinFailureCode) and is empty on success.
+func LogJoinEvent(ctx context.Context, logger AuditLogger, brokerID, ipAddress string, success bool, failReason string, failureCode auditevent.BrokerFailureCode) {
 	if logger == nil {
 		return
 	}
 
 	event := &BrokerAuthEvent{
-		EventType:  BrokerAuthEventJoin,
-		BrokerID:   brokerID,
-		IPAddress:  ipAddress,
-		Success:    success,
-		FailReason: failReason,
-		Timestamp:  time.Now(),
+		EventType:   BrokerAuthEventJoin,
+		BrokerID:    brokerID,
+		IPAddress:   ipAddress,
+		Success:     success,
+		FailReason:  failReason,
+		FailureCode: failureCode,
+		Timestamp:   time.Now(),
 	}
 
 	_ = logger.LogBrokerAuthEvent(ctx, event)

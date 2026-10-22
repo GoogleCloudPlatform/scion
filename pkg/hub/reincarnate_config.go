@@ -496,6 +496,9 @@ func legacyCreateInputsFromAppliedConfig(old *store.AgentAppliedConfig) (*store.
 		// provisions afresh, so the new generation starts with no clears
 		// (ptone/scion#3906).
 		inline.ClearedFields = nil
+		// So does changed_fields: the reprovision renders every
+		// provision-rendered key afresh (ptone/scion#3982).
+		inline.ChangedFields = nil
 
 		if len(inline.Skills) > 0 {
 			refs := make([]string, 0, len(inline.Skills))

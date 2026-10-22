@@ -20,22 +20,10 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
 )
-
-// parseMultipartFormExceptions lists the non-test functions that may still
-// call ParseMultipartForm directly, keyed by file then function.
-//
-// handleAttachmentUpload is NOT covered by this change: it does not remove its
-// parsed form, so temporary files from its larger parts stay behind after the
-// request. ptone/scion#4596 covers it. When that lands, convert the site to
-// parseMultipartUpload and delete this entry; if it stalls, convert it here.
-var parseMultipartFormExceptions = map[string]map[string]bool{
-	"handlers_chat_v2.go": {"handleAttachmentUpload": true},
-}
 
 // multipartUploadHandlers are the handlers known to parse multipart forms
 // through parseMultipartUpload. The pin requires each of them to call it, so
@@ -43,6 +31,8 @@ var parseMultipartFormExceptions = map[string]map[string]bool{
 var multipartUploadHandlers = []string{
 	"handleAdminAllowListImport",
 	"handleAdminUserInviteBulk",
+	"handleAgentAttachmentUpload",
+	"handleAttachmentUpload",
 	"handleHarnessConfigFileUpload",
 	"handleProjectWorkspaceUpload",
 	"handleTemplateFileUpload",
@@ -64,9 +54,9 @@ var implicitMultipartParsers = map[string]bool{
 // of its guardScanSubdirs subpackages) so that every multipart form a handler
 // parses is removed by that handler:
 //
-//  1. ParseMultipartForm is referenced only inside parseMultipartUpload (plus
-//     parseMultipartFormExceptions). The whole file is walked, package-level
-//     function literals included.
+//  1. ParseMultipartForm is referenced only inside parseMultipartUpload; no
+//     function is exempt. The whole file is walked, package-level function
+//     literals included.
 //  2. Every reference to parseMultipartUpload is the callee of a statement
 //     "cleanup, err := parseMultipartUpload(...)" directly in a top-level
 //     function's own body (not in a function literal, whose deferred cleanup
@@ -77,7 +67,7 @@ var implicitMultipartParsers = map[string]bool{
 //     or, for FormValue and PostFormValue only, a ParseForm statement on a
 //     parameter of type *http.Request. The parse must be an earlier statement
 //     of a block that encloses the call within the same function, so a parse
-//     in a sibling branch does not count. Excepted functions are skipped.
+//     in a sibling branch does not count.
 //  4. Server.uploadFormMemoryForTest is referenced (read, set, incremented or
 //     addressed) only in uploadFormMaxMemory; tests set it.
 //
@@ -187,7 +177,7 @@ func (p *multipartPin) scanFile(f *ast.File) {
 		case *ast.SelectorExpr:
 			switch name := x.Sel.Name; name {
 			case "ParseMultipartForm":
-				if (fnName != "parseMultipartUpload" || !enclosingFuncDeclIsPlain(stack)) && !parseMultipartFormExceptions[fileName(p, x)][fnName] {
+				if fnName != "parseMultipartUpload" || !enclosingFuncDeclIsPlain(stack) {
 					p.report(x.Pos(), "ParseMultipartForm called directly in %s; use parseMultipartUpload", where)
 				}
 			case "uploadFormMemoryForTest":
@@ -195,7 +185,7 @@ func (p *multipartPin) scanFile(f *ast.File) {
 					p.report(x.Pos(), "uploadFormMemoryForTest is referenced outside uploadFormMaxMemory")
 				}
 			default:
-				if afterParseForm, ok := implicitMultipartParsers[name]; ok && !parseMultipartFormExceptions[fileName(p, x)][fnName] {
+				if afterParseForm, ok := implicitMultipartParsers[name]; ok {
 					if !parsedBefore(stack, x, afterParseForm) {
 						p.report(x.Pos(), "%s in %s without an earlier parse of the same request in an enclosing block; it parses the multipart form implicitly", name, where)
 					}
@@ -208,11 +198,6 @@ func (p *multipartPin) scanFile(f *ast.File) {
 		}
 		return true
 	})
-}
-
-// fileName returns the base file name of n's position.
-func fileName(p *multipartPin, n ast.Node) string {
-	return filepath.Base(p.fset.Position(n.Pos()).Filename)
 }
 
 // stmtList returns the statement list n holds directly, if any.

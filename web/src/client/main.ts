@@ -29,6 +29,7 @@ import { stateManager } from './state.js';
 import { setDocumentTitle } from './page-title.js';
 import { readInitialPageData, setInitialPageData, takeInitialPageData } from './ssr-page-data.js';
 import { configureReadinessMarks, readinessNavigationStarted } from './readiness-marks.js';
+import { legacyAgentRedirect } from './agent-routes.js';
 import { CHAT_DM_ROUTE, CHAT_SPACE_ROUTE, CHAT_THREAD_ROUTE } from './chat-routes.js';
 import { chatNotifications } from './chat-notifications.js';
 import { chatUnread, startChatUnreadIfEligible } from './chat-unread.js';
@@ -783,12 +784,7 @@ const ROUTES: RouteConfig[] = [
     load: () => import('../components/pages/agent-graph.js'),
   },
   {
-    pattern: /^\/agents\/[^/]+\/configure$/,
-    tag: 'scion-page-agent-configure',
-    load: () => import('../components/pages/agent-configure.js'),
-  },
-  {
-    // Edit agent page (experiment web.agent_edit; the page renders 404 when off).
+    // Edit agent page (the by-tier view inside it is behind web.agent_edit).
     pattern: /^\/agents\/[^/]+\/edit$/,
     tag: 'scion-page-agent-edit',
     load: () => import('../components/pages/agent-edit.js'),
@@ -1181,7 +1177,7 @@ function preloadInitialRoute(pathname: string): void {
   ) {
     return;
   }
-  const route = resolveRoute(pathname);
+  const route = resolveRoute(legacyAgentRedirect(pathname) ?? pathname);
   startRouteLoads(route, getShellType(route.tag)).catch(() => undefined);
 }
 
@@ -1214,6 +1210,13 @@ async function renderRoute(path: string): Promise<void> {
   if (legacyAgent) {
     pathname = `/terminals/${legacyAgent}`;
     path = pathname;
+    window.history.replaceState({}, '', browserPath(path));
+    noteShownEntry();
+  }
+  const redirected = legacyAgentRedirect(pathname);
+  if (redirected) {
+    pathname = redirected;
+    path = redirected;
     window.history.replaceState({}, '', browserPath(path));
     noteShownEntry();
   }

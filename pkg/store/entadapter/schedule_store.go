@@ -970,17 +970,29 @@ func (s *ScheduleStore) ClaimScheduledEvent(ctx context.Context, id string, clai
 // CancelScheduledEvent marks a pending event as cancelled. Returns ErrNotFound
 // if the event doesn't exist or is not pending.
 func (s *ScheduleStore) CancelScheduledEvent(ctx context.Context, id string) error {
+	return s.CancelScheduledEventWithReason(ctx, id, "")
+}
+
+// CancelScheduledEventWithReason marks a pending event as cancelled and, when
+// reason is not empty, records it as the event's error. The UPDATE is
+// conditional on status = 'pending', so it cannot overwrite an event that
+// was fired or claimed first. Returns ErrNotFound if the event doesn't exist
+// or is not pending.
+func (s *ScheduleStore) CancelScheduledEventWithReason(ctx context.Context, id string, reason string) error {
 	uid, err := parseUUID(id)
 	if err != nil {
 		return err
 	}
-	n, err := s.client.ScheduledEvent.Update().
+	update := s.client.ScheduledEvent.Update().
 		Where(
 			scheduledevent.IDEQ(uid),
 			scheduledevent.StatusEQ(store.ScheduledEventPending),
 		).
-		SetStatus(store.ScheduledEventCancelled).
-		Save(ctx)
+		SetStatus(store.ScheduledEventCancelled)
+	if reason != "" {
+		update.SetError(reason)
+	}
+	n, err := update.Save(ctx)
 	if err != nil {
 		return err
 	}
