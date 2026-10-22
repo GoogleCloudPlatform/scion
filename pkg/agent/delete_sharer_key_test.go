@@ -141,7 +141,7 @@ func setSeam[T any](t *testing.T, seam *T, v T) {
 // The sharer key finds the worktree and registry entry a broker
 // provisioned under the hub agent ID; the other sharer is detached first,
 // and the last one removes everything.
-func TestDeleteAgentFilesFor_SharerKey(t *testing.T) {
+func TestDeleteHubAgentFiles_SharerKey(t *testing.T) {
 	p := newSharerKeyProject(t)
 	wtA := p.add(t, "dev-a", "uuid-a", "shared")
 	p.add(t, "dev-b", "uuid-b", "shared")
@@ -170,7 +170,7 @@ func TestDeleteAgentFilesFor_SharerKey(t *testing.T) {
 // With nothing registered under the sharer key, the name is looked up: an
 // agent provisioned by name (ProvisionAgent, a workstation's linked
 // checkout) is still torn down when the delete carries a hub agent ID.
-func TestDeleteAgentFilesFor_FallsBackToName(t *testing.T) {
+func TestDeleteHubAgentFiles_FallsBackToName(t *testing.T) {
 	p := newSharerKeyProject(t)
 	wt := p.add(t, "dev-a", "dev-a", "shared")
 
@@ -182,7 +182,7 @@ func TestDeleteAgentFilesFor_FallsBackToName(t *testing.T) {
 
 // A sharer key that is not a single path element is refused before
 // anything is touched.
-func TestDeleteAgentFilesFor_InvalidSharerKey(t *testing.T) {
+func TestDeleteHubAgentFiles_InvalidSharerKey(t *testing.T) {
 	p := newSharerKeyProject(t)
 	wt := p.add(t, "dev-a", "uuid-a", "shared")
 	for _, key := range []string{"..", "../uuid-a", "a/b"} {
@@ -199,7 +199,7 @@ func TestDeleteAgentFilesFor_InvalidSharerKey(t *testing.T) {
 // A failed worktree removal leaves the registry entry, the worktree and the
 // agent directory in place; a retry completes the teardown. This also
 // covers a removal that failed after removing the directory.
-func TestDeleteAgentFilesFor_WorktreeRemovalFails_RegistryKept(t *testing.T) {
+func TestDeleteHubAgentFiles_WorktreeRemovalFails_RegistryKept(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
 		removeDirToo  bool
@@ -240,7 +240,7 @@ func TestDeleteAgentFilesFor_WorktreeRemovalFails_RegistryKept(t *testing.T) {
 
 // A worktree directory that is still present after its removal reported
 // success keeps the registry entry.
-func TestDeleteAgentFilesFor_WorktreeStillPresent_RegistryKept(t *testing.T) {
+func TestDeleteHubAgentFiles_WorktreeStillPresent_RegistryKept(t *testing.T) {
 	p := newSharerKeyProject(t)
 	p.add(t, "dev-a", "uuid-a", "shared")
 	setSeam(t, &removeWorktree, func(string, string, bool) (bool, error) { return false, nil })
@@ -253,7 +253,7 @@ func TestDeleteAgentFilesFor_WorktreeStillPresent_RegistryKept(t *testing.T) {
 
 // Removing git's entry for the worktree: a failure keeps the registry
 // entry, and an entry or directory that is already gone counts as removed.
-func TestDeleteAgentFilesFor_WorktreeEntry(t *testing.T) {
+func TestDeleteHubAgentFiles_WorktreeEntry(t *testing.T) {
 	t.Run("entry removal fails", func(t *testing.T) {
 		p := newSharerKeyProject(t)
 		wt := p.add(t, "dev-a", "uuid-a", "shared")
@@ -305,7 +305,7 @@ func TestDeleteAgentFilesFor_WorktreeEntry(t *testing.T) {
 
 // The registry entry is still rewritten atomically while other sharers
 // remain, and the default key is the agent name (local mode).
-func TestDeleteAgentFilesFor_DefaultKeyIsName(t *testing.T) {
+func TestDeleteHubAgentFiles_DefaultKeyIsName(t *testing.T) {
 	p := newSharerKeyProject(t)
 	wt := p.add(t, "dev-a", "dev-a", "shared")
 	p.add(t, "dev-b", "dev-b", "shared")
@@ -326,7 +326,7 @@ func TestDeleteAgentFilesFor_DefaultKeyIsName(t *testing.T) {
 // "git worktree add" leaves) cannot be removed: the delete fails with the
 // registry entry and the agent directory kept, on every attempt, until the
 // entry is unlocked; the retry after that completes the teardown.
-func TestDeleteAgentFilesFor_LockedWorktreeEntry_FailsClosed(t *testing.T) {
+func TestDeleteHubAgentFiles_LockedWorktreeEntry_FailsClosed(t *testing.T) {
 	p := newSharerKeyProject(t)
 	wt := p.add(t, "dev-a", "uuid-a", "shared")
 	if out, err := exec.Command("git", "-C", p.base, "worktree", "lock", wt).CombinedOutput(); err != nil {
@@ -377,6 +377,16 @@ func TestDeleteHubAgentFiles_WorktreeAndHubStateDir(t *testing.T) {
 	}
 	if err := os.WriteFile(filepath.Join(stateDir, "scion-agent.json"), []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
+	}
+	// Precondition: the Hub-ID state dir is a directory of its own, not the
+	// marker-derived one or the in-project agent dir, so the delete must
+	// remove it on top of what DeleteAgentFiles removes.
+	markerDir, err := config.AgentDirForProject(p.scionDir, "dev-a", true, markerID)
+	if err != nil {
+		t.Fatalf("AgentDirForProject(marker): %v", err)
+	}
+	if stateDir == markerDir || stateDir == filepath.Join(p.scionDir, "agents", "dev-a") {
+		t.Fatalf("setup: Hub-ID state dir %s is not distinct (marker dir %s)", stateDir, markerDir)
 	}
 
 	for call := 1; call <= 2; call++ {
