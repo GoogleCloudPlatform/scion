@@ -176,6 +176,12 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 				log.Debug("Hub: Skipping waiting_for_input from sub-agent (local status held)")
 				return nil
 			}
+			// The parent's own question leaves limits_exceeded and
+			// crashed in place locally; the Hub follows.
+			if h.isLocalTerminal() {
+				log.Debug("Hub: Skipping waiting_for_input (local status terminal)")
+				return nil
+			}
 			message := "Waiting on parent"
 			if event.Data.ToolName == "ExitPlanMode" {
 				message = "Waiting for plan approval"

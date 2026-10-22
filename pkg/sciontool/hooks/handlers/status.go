@@ -356,10 +356,18 @@ func (h *StatusHandler) setWaitingFromNotificationFor(owner string) error {
 // keeps the notification marker and the owner list and records the parent's
 // wait as parentWaitAgent, so a later owner's event still matches its entry
 // and the last owner's leaves the parent's agent-set wait. Otherwise it
-// writes an agent-set wait as UpdateActivity does, replacing any activity.
-// It is one locked update.
+// writes an agent-set wait as UpdateActivity does, replacing any activity
+// except the terminal statuses limits_exceeded and crashed: a question the
+// agent asks after it ended must not clear how it ended, as with the
+// parent's own Notification (see setWaitingFromNotificationFor). blocked
+// and completed are still replaced, since the agent really is asking. It is
+// one locked update.
 func (h *StatusHandler) setParentQuestionWait() error {
 	return h.update(func(info map[string]interface{}) bool {
+		current, _ := info["activity"].(string)
+		if state.Activity(current).IsTerminal() {
+			return false
+		}
 		if isNotificationWaiting(info) && len(notificationWaitOwners(info)) > 0 {
 			info[parentWaitKey] = parentWaitAgent
 			delete(info, "toolName")
