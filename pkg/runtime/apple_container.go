@@ -202,9 +202,11 @@ func appleTmpfsTargets(args []string) []string {
 	return targets
 }
 
-// appleNestedReadOnlyTargets returns the container paths of the read-only
-// -v binds in args that are nested in the workspace or repo root mount
-// (the project configuration directory), in order.
+// appleNestedReadOnlyTargets returns the container paths of every
+// read-only -v bind in args that is nested in the workspace or repo root
+// mount, in order: the project configuration directory, and any read-only
+// template volume placed there. Each is version-gated and checked after the
+// start.
 func appleNestedReadOnlyTargets(args []string) []string {
 	var targets []string
 	for i := 0; i < len(args)-1; i++ {
@@ -271,20 +273,52 @@ func (r *AppleContainerRuntime) verifyReadOnly(ctx context.Context, id string, t
 	return nil
 }
 
-// mountinfoReadOnly reports whether the last /proc/self/mountinfo entry
-// whose mount point is target has the per-mount "ro" option, and whether
-// there is such an entry. Fields: ID, parent ID, major:minor, root, mount
-// point, mount options, ...
+// mountinfoReadOnly reports whether target is mounted read-only in the
+// mount table mountinfo (/proc/self/mountinfo, listed in mount order), and
+// whether there is a mount entry for it at all. The entry that counts is
+// the last one whose mount point is target, and only while it is the
+// mount in effect: an entry mounted later at target or at any directory
+// above it covers it (a nested bind shadowed by its parent), and then the
+// result is not read-only. Fields: ID, parent ID, major:minor, root, mount
+// point (octal-escaped), per-mount options, ...
 func mountinfoReadOnly(mountinfo, target string) (readOnly, found bool) {
+	target = path.Clean(target)
 	for _, line := range strings.Split(mountinfo, "\n") {
 		f := strings.Fields(line)
-		if len(f) < 6 || f[4] != target {
+		if len(f) < 6 {
 			continue
 		}
-		found = true
-		readOnly = slices.Contains(strings.Split(f[5], ","), "ro")
+		mp := path.Clean(unescapeMountinfo(f[4]))
+		switch {
+		case mp == target:
+			found = true
+			readOnly = slices.Contains(strings.Split(f[5], ","), "ro")
+		case found && (mp == "/" || strings.HasPrefix(target, mp+"/")):
+			// A later mount above target covers it.
+			readOnly = false
+		}
 	}
 	return readOnly, found
+}
+
+// unescapeMountinfo decodes the octal escapes (\040 for a space, \011,
+// \012, \134) the kernel writes in mountinfo path fields.
+func unescapeMountinfo(s string) string {
+	if !strings.Contains(s, "\\") {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+3 < len(s) {
+			if v, err := strconv.ParseUint(s[i+1:i+4], 8, 8); err == nil {
+				b.WriteByte(byte(v))
+				i += 3
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
 }
 
 // verifyMasks runs verifyMask for each tmpfs mask target, in order, and

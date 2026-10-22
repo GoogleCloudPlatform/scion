@@ -314,6 +314,9 @@ func TestAppleContainerRuntime_Run_AgentsMaskGate(t *testing.T) {
 			[]string{"/workspace/.scion is not mounted read-only"}, append(calls("--version", "run", "exec"), removed...)},
 		{"read-only bind missing from the mount table fails", noAgents, appleGateOpts{version: v160, statOut: "40\n40", mountinfo: "100 90 0:50 / /workspace rw - virtiofs share rw"},
 			[]string{"no mount table entry"}, append(calls("--version", "run", "exec"), removed...)},
+		{"read-only bind shadowed by a later workspace mount fails", noAgents, appleGateOpts{version: v160, statOut: "40\n40",
+			mountinfo: "101 100 0:50 /.scion /workspace/.scion ro - virtiofs share rw\n102 90 0:50 / /workspace rw - virtiofs share rw"},
+			[]string{"/workspace/.scion is not mounted read-only"}, append(calls("--version", "run", "exec"), removed...)},
 		{"mask and read-only bind: a later rw entry wins", withAgents, appleGateOpts{version: v160, statOut: mount, mountinfo: defaultAppleMountinfo + "\n102 101 0:51 / /workspace/.scion rw - tmpfs tmpfs rw"},
 			[]string{"is not mounted read-only"}, append(calls("--version", "run", "exec", "exec"), removed...)},
 		{"no .scion: no version or exec call", noScion, appleGateOpts{version: v011, statOut: "40\n40"}, nil, calls("run")},
@@ -539,6 +542,25 @@ func TestMountinfoReadOnly(t *testing.T) {
 		if ro != tt.readOnly || found != tt.found {
 			t.Errorf("%s: (ro=%v, found=%v), want (%v, %v)", tt.target, ro, found, tt.readOnly, tt.found)
 		}
+	}
+	// A read-only child listed before the mount that covers it (a parent
+	// mounted later) is shadowed: not read-only. A mount below the target
+	// does not cover it.
+	shadowed := "101 100 0:50 /.scion /workspace/.scion ro,relatime - virtiofs share rw\n" +
+		"102 90 0:50 / /workspace rw,relatime - virtiofs share rw\n"
+	if ro, found := mountinfoReadOnly(shadowed, "/workspace/.scion"); ro || !found {
+		t.Errorf("shadowed child: (ro=%v, found=%v), want (false, true)", ro, found)
+	}
+	below := "100 90 0:50 / /workspace rw - virtiofs share rw\n" +
+		"101 100 0:50 /.scion /workspace/.scion ro - virtiofs share rw\n" +
+		"102 101 0:51 / /workspace/.scion/agents rw - tmpfs tmpfs rw\n"
+	if ro, _ := mountinfoReadOnly(below, "/workspace/.scion"); !ro {
+		t.Error("a mount below the target must not cover it")
+	}
+	// Mount points are octal-escaped: a space is \040.
+	spaced := "101 100 0:50 /x /repo-root/my\\040proj/.scion ro - virtiofs share rw\n"
+	if ro, found := mountinfoReadOnly(spaced, "/repo-root/my proj/.scion"); !ro || !found {
+		t.Errorf("escaped mount point: (ro=%v, found=%v)", ro, found)
 	}
 	// Options are matched as whole words: "rorelatime" is not "ro", and the
 	// super options after "-" do not count.
