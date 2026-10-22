@@ -1578,7 +1578,7 @@ func applyResolvedAuth(config RunConfig, addEnv func(string, string), addVolume 
 }
 
 // copyFileIntoHome copies the host file src to rel in the agent home with
-// src's permission bits, creating missing parent directories (0755). Every
+// src's permission bits less group and other write, creating missing parent directories (0755). Every
 // write is confined to the home (pkg/agenthome): a link at rel is replaced,
 // never written through, and a linked directory component is refused.
 func copyFileIntoHome(src string, home *agenthome.Home, rel string) error {
@@ -1595,7 +1595,11 @@ func copyFileIntoHome(src string, home *agenthome.Home, rel string) error {
 			return fmt.Errorf("failed to create directory for auth file: %w", err)
 		}
 	}
-	return home.WriteFile(rel, data, info.Mode().Perm())
+	// Home.WriteFile sets the mode exactly (no umask). The old copy
+	// (os.WriteFile) had the process umask applied to a new file, so strip
+	// group and other write as the default umask (022) did: a group- or
+	// other-writable source must not give a writable copy in the home.
+	return home.WriteFile(rel, data, info.Mode().Perm()&^0o022)
 }
 
 // stagedSecretWarnThreshold is the size (in bytes) above which a warning is

@@ -121,7 +121,9 @@ func (h *Home) WriteFile(rel string, data []byte, mode os.FileMode) error {
 }
 
 // ReadFile reads the regular file rel, up to max bytes, refusing a link at
-// any component or at the leaf.
+// any component or at the leaf. Unlike the unix implementation, it does not
+// refuse a file with more than one hard link: the link count is not
+// portably available here.
 func (h *Home) ReadFile(rel string, max int64) ([]byte, error) {
 	parent, leaf, err := splitLeaf(rel)
 	if err != nil {

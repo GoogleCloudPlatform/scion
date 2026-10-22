@@ -30,6 +30,9 @@
 // no-follow checks there are check-then-act rather than descriptor-based,
 // and their errors may name paths relative to the home.
 //
+// Reads (ReadFile) refuse a link at any component or at the leaf; on unix
+// they also refuse a file with more than one hard link.
+//
 // Paths passed to a Home are relative to the home, slash or OS separated.
 // An absolute path or one with a ".." component is refused.
 package agenthome

@@ -119,6 +119,9 @@ func TestBuildCommonRunArgs_MountPointUnderHome(t *testing.T) {
 	if _, err := buildCommonRunArgs(volumeRunConfig(home)); err != nil {
 		t.Fatalf("best-effort mount-point mkdir failed the build: %v", err)
 	}
+	if fi, err := os.Lstat(filepath.Join(home, "data")); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("data = %v, %v; want the planted link left as is", fi, err)
+	}
 	if got := outsideTree(t, outside); got != before {
 		t.Fatalf("outside directory changed:\n%s\nwant:\n%s", got, before)
 	}
@@ -223,5 +226,29 @@ func TestCopySandboxAuthFiles_LinkedComponentSkipped(t *testing.T) {
 	}
 	if got := outsideTree(t, outside); got != before {
 		t.Fatalf("outside directory changed:\n%s\nwant:\n%s", got, before)
+	}
+}
+
+// The auth file copy keeps the source's permission bits less group and
+// other write, as the old umask-applied copy did.
+func TestCopyFileIntoHome_StripsGroupOtherWrite(t *testing.T) {
+	home, _, _ := newRuntimeConfinedHome(t)
+	src := filepath.Join(t.TempDir(), "cred")
+	if err := os.WriteFile(src, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(src, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	h, err := agenthome.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = h.Close() }()
+	if err := copyFileIntoHome(src, h, "d/cred"); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Lstat(filepath.Join(home, "d/cred")); err != nil || fi.Mode().Perm() != 0o644 {
+		t.Fatalf("copy = %v, %v; want mode 0644", fi, err)
 	}
 }

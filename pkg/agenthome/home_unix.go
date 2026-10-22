@@ -149,7 +149,9 @@ func (h *Home) WriteFile(rel string, data []byte, mode os.FileMode) error {
 }
 
 // ReadFile reads the regular file rel, up to max bytes, without following
-// a link at any component or at the leaf. A missing file satisfies
+// a link at any component or at the leaf. Like dirfd.ReadAtNoFollow, it
+// also refuses a file with more than one hard link
+// (dirfd.ErrNotSingleLinkRegular). A missing file satisfies
 // errors.Is(err, fs.ErrNotExist).
 func (h *Home) ReadFile(rel string, max int64) ([]byte, error) {
 	parent, leaf, err := splitLeaf(rel)
