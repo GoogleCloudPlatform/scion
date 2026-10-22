@@ -229,8 +229,10 @@ export class ScionChatMembers extends LitElement {
       /* Set by the chat page's mobile panels; see chat.ts. */
       touch-action: var(--chat-touch-action, auto);
       /* The last row clears the home indicator (the page uses
-         viewport-fit=cover); the inset is 0 elsewhere. */
-      padding-bottom: env(safe-area-inset-bottom, 0px);
+         viewport-fit=cover); the inset is 0 elsewhere. A host that pins
+         its own footer below this list, which takes the inset, sets
+         --chat-list-inset-bottom to 0px (see chat.ts's .palette-footer). */
+      padding-bottom: var(--chat-list-inset-bottom, env(safe-area-inset-bottom, 0px));
     }
 
     .section-label {

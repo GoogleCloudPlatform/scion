@@ -15,7 +15,6 @@
 package commands
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -53,6 +52,23 @@ type doctorDiag struct {
 	// authRedirectedTo is the scheme://host an authentication probe was
 	// redirected to, when the redirect was not a proxy sign-in page.
 	authRedirectedTo string
+	// lookup is doctor's verdict on the token file's value from its agent
+	// lookup (lookupNotRun when no lookup was made).
+	lookup lookupVerdict
+	// init is the outcome of the init process credential check.
+	init initAuthResult
+	// file is the token file as read once by runDoctor (read is false when
+	// a section runs on its own, as in tests).
+	file doctorTokenFile
+}
+
+// doctorTokenFile is one read of the token file. It holds the value in
+// memory only; doctor never prints it.
+type doctorTokenFile struct {
+	read    bool
+	ok      bool
+	token   string
+	modTime time.Time
 }
 
 // transportFailed reports whether the transport section found a failure.
@@ -243,30 +259,17 @@ func reportTransportRefreshStatus(diag *doctorDiag) {
 // classifyRejection decides whether a 401/403 (or a redirect to a sign-in
 // page) came from the platform guard in front of the hub or from the hub
 // itself. The hub answers with a JSON error object; IAP and Cloud Run
-// answer with their own (non-JSON) pages.
+// answer with their own (non-JSON) pages. sciontool init classifies its
+// own refused requests with the same rule.
 func classifyRejection(resp *http.Response, body []byte) string {
-	if resp == nil {
-		return rejectedByNone
-	}
-	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-		if loc := resp.Header.Get("Location"); strings.Contains(loc, "accounts.google.com") {
-			return rejectedByProxy
-		}
-		return rejectedByNone
-	}
-	if resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusForbidden {
-		return rejectedByNone
-	}
-	if strings.EqualFold(resp.Header.Get("X-Goog-IAP-Generated-Response"), "true") {
+	switch hub.ClassifyRejection(resp, body) {
+	case hub.RefusedByProxy:
 		return rejectedByProxy
-	}
-	var hubErr struct {
-		Error json.RawMessage `json:"error"`
-	}
-	if json.Unmarshal(body, &hubErr) == nil && len(hubErr.Error) > 0 {
+	case hub.RefusedByHub:
 		return rejectedByHub
+	default:
+		return rejectedByNone
 	}
-	return rejectedByProxy
 }
 
 // describeRejection returns a short label for a classified rejection.
@@ -303,8 +306,8 @@ func printTransportRemediation(diag doctorDiag) bool {
 	} else if diag.transportMissing {
 		fmt.Println("[!] If reset-auth does not deliver one, check the hub's transport minter configuration and logs.")
 	}
-	fmt.Println("[!] Run from the host:  scion agent reset-auth <agent-name>  (also pushes a fresh transport token)")
-	fmt.Println("[!] Or restart agent:   scion agent restart <agent-name>")
+	fmt.Println("[!] Run from the host:  scion reset-auth <agent-name>  (also pushes a fresh transport token)")
+	fmt.Println("[!] Or restart the agent from the host:  scion stop <agent-name>  then  scion start <agent-name>")
 	if diag.authRejectedBy == rejectedByProxy && !diag.transportFailed() {
 		fmt.Println("[!] If the credential is current, check that SCION_TRANSPORT_MODE matches the proxy " +
 			"(iap: Proxy-Authorization, cloudrun_invoker: X-Serverless-Authorization) " +

@@ -230,6 +230,9 @@ type Client struct {
 	// has accepted from this client (see VerifiedIssuedAt). It only ever
 	// increases. Guarded by tokenMu.
 	verifiedIAT time.Time
+	// cstate is what this client knows about its own credential, for
+	// sciontool doctor (see credential_state.go).
+	cstate credState
 }
 
 // NewClient creates a new Hub client from environment variables.
@@ -276,13 +279,14 @@ func NewClient() *Client {
 			Timeout: DefaultTimeout,
 		},
 	}
+	c.recordCredential(token)
 	c.configureOIDCTransport()
 	return c
 }
 
 // NewClientWithConfig creates a new Hub client with explicit configuration.
 func NewClientWithConfig(hubURL, token, agentID string) *Client {
-	return &Client{
+	c := &Client{
 		hubURL:         hubURL,
 		token:          token,
 		agentID:        agentID,
@@ -293,6 +297,8 @@ func NewClientWithConfig(hubURL, token, agentID string) *Client {
 			Timeout: DefaultTimeout,
 		},
 	}
+	c.recordCredential(c.token)
+	return c
 }
 
 // IsConfigured returns true if the client is properly configured.
@@ -352,17 +358,24 @@ func GetAgentID() string {
 
 // UpdateStatus sends a status update to the Hub with automatic retry on transient failures.
 func (c *Client) UpdateStatus(ctx context.Context, status StatusUpdate) error {
+	_, err := c.updateStatus(ctx, status)
+	return err
+}
+
+// updateStatus is UpdateStatus that also returns how the final attempt
+// went.
+func (c *Client) updateStatus(ctx context.Context, status StatusUpdate) (writeResult, error) {
 	if !c.IsConfigured() {
-		return fmt.Errorf("hub client not configured")
+		return writeResult{}, fmt.Errorf("hub client not configured")
 	}
 
 	endpoint := fmt.Sprintf("%s/api/v1/agents/%s/status", strings.TrimSuffix(c.hubURL, "/"), c.agentID)
 
 	body, err := json.Marshal(status)
 	if err != nil {
-		return fmt.Errorf("failed to marshal status: %w", err)
+		return writeResult{}, fmt.Errorf("failed to marshal status: %w", err)
 	}
-	return c.postJSONWithRetry(ctx, endpoint, body)
+	return c.postJSONWithRetryResult(ctx, endpoint, body)
 }
 
 // ReportSSHHostKey sends the conduit SSH server's public host key
@@ -372,13 +385,30 @@ func (c *Client) ReportSSHHostKey(ctx context.Context, publicKey string) error {
 }
 
 func (c *Client) postJSONWithRetry(ctx context.Context, endpoint string, body []byte) error {
+	_, err := c.postJSONWithRetryResult(ctx, endpoint, body)
+	return err
+}
+
+// writeResult describes the final attempt of a status write: its HTTP
+// status (0 when none), the short fingerprint of the credential it
+// presented and, for a 401 or 403, who refused it.
+type writeResult struct {
+	status    int
+	fp        string
+	refusedBy string
+}
+
+// postJSONWithRetryResult is postJSONWithRetry that also returns how the
+// final attempt went.
+func (c *Client) postJSONWithRetryResult(ctx context.Context, endpoint string, body []byte) (res writeResult, err error) {
 	if err := c.writes.allow(); err != nil {
-		return err
+		return res, err
 	}
 	// Read token under lock to avoid data race with concurrent RefreshToken calls.
 	c.tokenMu.RLock()
 	currentToken := c.token
 	c.tokenMu.RUnlock()
+	res.fp = shortFP(currentToken)
 
 	var lastErr error
 	attempts := c.maxRetries + 1
@@ -388,7 +418,7 @@ func (c *Client) postJSONWithRetry(ctx context.Context, endpoint string, body []
 			delay := c.calculateBackoff(attempt)
 			select {
 			case <-ctx.Done():
-				return fmt.Errorf("context cancelled during retry: %w", ctx.Err())
+				return res, fmt.Errorf("context cancelled during retry: %w", ctx.Err())
 			case <-time.After(delay):
 				// Continue with retry
 			}
@@ -397,7 +427,7 @@ func (c *Client) postJSONWithRetry(ctx context.Context, endpoint string, body []
 		// Create a fresh request for each attempt (body reader needs to be recreated)
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 		if err != nil {
-			return fmt.Errorf("failed to create request: %w", err)
+			return res, fmt.Errorf("failed to create request: %w", err)
 		}
 
 		req.Header.Set("Content-Type", "application/json")
@@ -405,9 +435,10 @@ func (c *Client) postJSONWithRetry(ctx context.Context, endpoint string, body []
 
 		resp, err := c.client.Do(req)
 		if err != nil {
+			res.status, res.refusedBy = 0, RefusedByNone
 			// Check if context was cancelled - don't retry
 			if ctx.Err() != nil {
-				return fmt.Errorf("request failed (context cancelled): %w", ctx.Err())
+				return res, fmt.Errorf("request failed (context cancelled): %w", ctx.Err())
 			}
 			// Network error - retry
 			lastErr = fmt.Errorf("failed to send request: %w", err)
@@ -417,23 +448,25 @@ func (c *Client) postJSONWithRetry(ctx context.Context, endpoint string, body []
 		// Read response body
 		respBody, _ := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
-		c.writes.observe(resp.StatusCode)
+		res.status = resp.StatusCode
+		res.refusedBy = ClassifyRejection(resp, respBody)
+		c.writes.observeFrom(resp.StatusCode, res.fp, res.refusedBy)
 
 		// Success
 		if resp.StatusCode < 400 {
-			return nil
+			return res, nil
 		}
 
 		// 4xx errors are client errors - don't retry
 		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
-			return fmt.Errorf("hub returned error %d: %s", resp.StatusCode, string(respBody))
+			return res, fmt.Errorf("hub returned error %d: %s", resp.StatusCode, string(respBody))
 		}
 
 		// 5xx errors are server errors - retry
 		lastErr = fmt.Errorf("hub returned error %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	return fmt.Errorf("request failed after %d attempts: %w", attempts, lastErr)
+	return res, fmt.Errorf("request failed after %d attempts: %w", attempts, lastErr)
 }
 
 // calculateBackoff returns the delay for a retry attempt using exponential backoff.
@@ -453,10 +486,17 @@ func (c *Client) calculateBackoff(attempt int) time.Duration {
 // Heartbeat sends a heartbeat to the Hub.
 // Note: Heartbeat only updates last_seen timestamp, it does not change the agent's status.
 // This allows the actual status (working, busy, etc.) to be preserved between heartbeats.
+//
+// Its outcome is recorded in the client's credential state, including a
+// heartbeat that was not sent because status writes are paused.
 func (c *Client) Heartbeat(ctx context.Context) error {
-	return c.UpdateStatus(ctx, StatusUpdate{
+	res, err := c.updateStatus(ctx, StatusUpdate{
 		Heartbeat: true,
 	})
+	if c != nil && c.IsConfigured() {
+		c.recordHeartbeat(res, err)
+	}
+	return err
 }
 
 // ReportState sends a structured phase/activity update to the Hub.
@@ -820,6 +860,15 @@ func (c *Client) RefreshToken(ctx context.Context) (string, time.Time, error) {
 	currentToken := c.token
 	c.tokenMu.RUnlock()
 
+	// Record the outcome in the credential state, for the credential
+	// presented.
+	var (
+		recStatus    int
+		recRefusedBy string
+		recOK        bool
+	)
+	defer func() { c.recordRefresh(shortFP(currentToken), recStatus, recRefusedBy, recOK) }()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("failed to create request: %w", err)
@@ -834,6 +883,8 @@ func (c *Client) RefreshToken(ctx context.Context) (string, time.Time, error) {
 	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(resp.Body)
+	recStatus = resp.StatusCode
+	recRefusedBy = ClassifyRejection(resp, respBody)
 
 	if resp.StatusCode != http.StatusOK {
 		// 401/403 mean the presented token is rejected (e.g. after a hub
@@ -892,6 +943,7 @@ func (c *Client) RefreshToken(ctx context.Context) (string, time.Time, error) {
 	}
 	c.recordTransportRefreshOutcome(result, chownUID, chownGID)
 
+	recOK = true
 	return result.Token, expiresAt, nil
 }
 
@@ -1362,6 +1414,7 @@ func (c *Client) SetToken(token string) {
 // changes. The caller holds tokenMu for writing.
 func (c *Client) setTokenLocked(token string) {
 	c.token = token
+	c.recordCredential(token)
 	if c.credChanged != nil {
 		close(c.credChanged)
 	}
@@ -2292,19 +2345,26 @@ func readTokenFileGuarded(path string) (string, error) {
 // readTokenAt applies the token-file checks to leaf, relative to the
 // already-resolved parent directory dirFd; path is used only in errors.
 func readTokenAt(dirFd int, leaf, path string) (string, error) {
+	value, _, err := readTokenAtStat(dirFd, leaf, path)
+	return value, err
+}
+
+// readTokenAtStat is readTokenAt that also returns the fstat of the file
+// it read, taken on the same descriptor.
+func readTokenAtStat(dirFd int, leaf, path string) (string, syscall.Stat_t, error) {
 	var dirSt syscall.Stat_t
 	if err := syscall.Fstat(dirFd, &dirSt); err != nil {
-		return "", fmt.Errorf("failed to stat parent directory of %s: %w", path, err)
+		return "", dirSt, fmt.Errorf("failed to stat parent directory of %s: %w", path, err)
 	}
 
 	data, st, err := dirfd.ReadAtNoFollowStat(dirFd, leaf, tokenFileMaxBytes)
 	if err != nil {
-		return "", fmt.Errorf("%s: %w", path, err)
+		return "", st, fmt.Errorf("%s: %w", path, err)
 	}
 	if enforceTokenFileOwnerChecks.Load() && st.Uid != 0 && st.Uid != dirSt.Uid {
-		return "", fmt.Errorf("refusing to read %s: unexpected owner", path)
+		return "", st, fmt.Errorf("refusing to read %s: unexpected owner", path)
 	}
-	return string(data), nil
+	return string(data), st, nil
 }
 
 // selfMessageRequest is the payload for delivering a message to the current agent

@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -170,7 +171,7 @@ func (m *mockManager) Start(ctx context.Context, opts api.StartOptions) (*api.Ag
 	return agent, nil
 }
 
-func (m *mockManager) Stop(ctx context.Context, agentID, projectPath, runID string) error {
+func (m *mockManager) Stop(ctx context.Context, agentID, projectPath, projectID, runID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.stopCalls++
@@ -190,7 +191,7 @@ func (m *mockManager) StopTarget(ctx context.Context, ref runtime.RunRef) error 
 	return m.stopErr
 }
 
-func (m *mockManager) Delete(ctx context.Context, agentID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+func (m *mockManager) Delete(ctx context.Context, agentID string, deleteFiles bool, projectPath, projectID string, removeBranch bool) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.lastDeleteProjectPath = projectPath
@@ -466,7 +467,7 @@ func newTestServerWithManager(t *testing.T, mgr agent.Manager) *Server {
 	// returns the mock manager directly instead of creating a real one.
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "mock" }}
 
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 	endAsyncLaunchesAtCleanup(t, srv)
 	return srv
 }
@@ -527,7 +528,7 @@ func newTestServerWithEnvCapture() (*Server, *envCapturingManager) {
 	// NameFunc returns "docker" so resolveManagerForOpts matches the settings-resolved runtime.
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 
-	return New(cfg, mgr, rt), mgr
+	return New(cfg, mgr, rt, config.RuntimeBuildRecord{}), mgr
 }
 
 // provisionCapturingManager tracks whether Provision, Reprovision or Start
@@ -596,5 +597,5 @@ func newTestServerWithProvisionCapture() (*Server, *provisionCapturingManager) {
 	// NameFunc returns "docker" so resolveManagerForOpts matches the settings-resolved runtime.
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 
-	return New(cfg, mgr, rt), mgr
+	return New(cfg, mgr, rt, config.RuntimeBuildRecord{}), mgr
 }

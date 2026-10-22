@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -124,6 +125,12 @@ type agentMentionFanoutInput struct {
 	// ParentMessageID is the parent message's persisted ID, stamped into
 	// mention metadata as "mention_of".
 	ParentMessageID string
+
+	// ParentAttachments are the attachments stored as artifacts bound to
+	// the parent message (ptone/scion#4596). Each copy delivers them into
+	// its target's home, and the target is recorded as an addressee of
+	// the parent for them, immediately before the copy is dispatched.
+	ParentAttachments []AttachmentRef
 
 	// Channel is the delivery channel to stamp on mention deliveries.
 	Channel string
@@ -362,11 +369,29 @@ func (s *Server) deliverAgentMentionCopy(ctx, aggregateCtx context.Context, in a
 		metadata["mention_of"] = in.ParentMessageID
 	}
 
+	// The parent's attachments stored as artifacts (ptone/scion#4596): the
+	// target is recorded as an addressee of the parent, in state pending,
+	// only now, after the pair limiter, the pairwise authorization and the
+	// conversation resolution, so a mention any of them stops records
+	// nothing; and before the copy is dispatched, so the delivery decision
+	// at dispatch already sees it.
+	var deliveries []messages.AttachmentDelivery
+	addresseeRow := ""
+	if len(in.ParentAttachments) > 0 && in.ParentMessageID != "" {
+		via := "body-mention"
+		if position == "default_agent" {
+			via = "default-agent"
+		}
+		addresseeRow = s.recordAttachmentAddressee(ctx, in.ParentMessageID, target.ID, via)
+		deliveries = attachmentDeliveries(in.ParentMessageID, in.ParentAttachments)
+	}
+
 	// Bound this one mention's delivery attempt inside the aggregate
 	// budget, so a single slow or unreachable recipient cannot consume
 	// the whole budget and starve every mention after it.
 	dispatchCtx, dispatchCancel := context.WithTimeout(aggregateCtx, mentionDispatchTimeout)
 	dmResult, dmErr := s.ExecuteAgentDM(dispatchCtx, &AgentDMInput{
+		Deliveries:     deliveries,
 		SenderAgent:    in.Sender,
 		SenderIdentity: in.SenderIdent,
 		TargetAgent:    target,
@@ -387,6 +412,11 @@ func (s *Server) deliverAgentMentionCopy(ctx, aggregateCtx context.Context, in a
 		SkipPhaseGate: true,
 	})
 	dispatchCancel()
+	if dmErr != nil {
+		s.finishAttachmentAddressee(context.WithoutCancel(ctx), addresseeRow, errors.New(dmErr.Message))
+	} else {
+		s.finishAttachmentAddressee(context.WithoutCancel(ctx), addresseeRow, nil)
+	}
 	if dmErr != nil {
 		s.mentionPairLimiter.Release(in.Sender.ID, target.ID)
 		switch dmErr.Code {

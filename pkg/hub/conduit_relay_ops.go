@@ -167,25 +167,30 @@ func (s *Server) recheckRelayAdmission(ctx context.Context, c conduitAdmissionCl
 }
 
 // relayUserIdentity rebuilds a relay-held user session's identity from
-// current state: the user row (gone or suspended: denied) and, for an
-// access token, the token row (revoked, expired or another owner's:
-// denied), as scheduled dispatch rebuilds one. The development user is
-// rebuilt as itself.
+// current state: the user row (the account-status rule, checkUserAccount:
+// gone or not active is denied) and, for an access token, the token row
+// (revoked, expired or another owner's: denied), as scheduled dispatch
+// rebuilds one. The development user is held to the same account-status
+// rule as any other user and, once its row passes, is rebuilt as itself.
 func (s *Server) relayUserIdentity(ctx context.Context, c conduitAdmissionClaims) (UserIdentity, conduitAuthzVerdict, string) {
-	if c.AuthType == AuthTypeDevToken {
-		if c.ID != DevUserID {
-			return nil, conduitAuthzDenied, "development credential for another user"
-		}
-		return NewDevUser(s.authConfig.DevUserCfg), conduitAuthzAllowed, ""
+	devToken := c.AuthType == AuthTypeDevToken
+	if devToken && c.ID != DevUserID {
+		return nil, conduitAuthzDenied, "development credential for another user"
 	}
-	u, err := s.store.GetUser(ctx, c.ID)
-	switch {
-	case errors.Is(err, store.ErrNotFound):
-		return nil, conduitAuthzDenied, "user not found"
-	case err != nil:
-		return nil, conduitAuthzUnavailable, "user lookup failed"
-	case u.Status == store.UserStatusSuspended:
-		return nil, conduitAuthzDenied, "user suspended"
+	principal := PrincipalContext{Kind: PrincipalKindUser, ID: c.ID}
+	if devToken {
+		principal = devUserPrincipal()
+	}
+	u, err := checkUserAccount(ctx, s.store, principal)
+	switch refusal := classifyUserAccount(u, err); refusal {
+	case accountAllowed:
+	case accountLookupFault:
+		return nil, conduitAuthzUnavailable, accountRefusalReason(refusal)
+	default:
+		return nil, conduitAuthzDenied, accountRefusalReason(refusal)
+	}
+	if devToken {
+		return NewDevUser(s.authConfig.DevUserCfg), conduitAuthzAllowed, ""
 	}
 	base := NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, string(ClientTypeAPI))
 	if c.AuthType != AuthTypeUAT {

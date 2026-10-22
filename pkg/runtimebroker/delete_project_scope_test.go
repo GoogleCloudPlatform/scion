@@ -72,7 +72,7 @@ func newScopeTestServer(t *testing.T, mgr *filteringMockManager) (*Server, strin
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	return New(cfg, mgr, rt), home
+	return New(cfg, mgr, rt, config.RuntimeBuildRecord{}), home
 }
 
 // makeHubProject creates ~/.scion/projects/<slug>/.scion with a project-id

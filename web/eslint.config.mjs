@@ -81,6 +81,8 @@ const componentTests = [
   'src/components/pages/agent-placement.test.ts',
   'src/components/pages/agent-detail-placement.test.ts',
   'src/components/pages/admin-maintenance-reissue-scopes.test.ts',
+  'src/components/shared/resource-list-refresh.test.ts',
+  'src/components/pages/harness-config-detail-source.test.ts',
 ];
 
 /** Points the given files at their own TypeScript project. */
@@ -135,6 +137,7 @@ export default defineConfig([
       'e2e/terminal-pane/*.ts',
       'e2e/terminal-workspace/*.ts',
       'e2e/test-hub-banner/*.ts',
+      'e2e/broker-area/*.ts',
       'e2e/test-identity-session/*.ts',
       'e2e/iap-driver/*.ts',
       'e2e/iap-journey/*.ts',

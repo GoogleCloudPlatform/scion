@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
@@ -65,7 +66,7 @@ func newPlainDockerBroker(t *testing.T, defaultStops *stopRecorder) *Server {
 	}
 	mgr := agent.NewManager(rt)
 	t.Cleanup(mgr.Close)
-	return New(DefaultServerConfig(), mgr, rt)
+	return New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 }
 
 // matchingAuxRuntime reports one project-labelled "dev" entry with the given

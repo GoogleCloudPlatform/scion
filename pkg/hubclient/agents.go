@@ -857,6 +857,9 @@ type SendMessageOptions struct {
 	// addition to any @mentions the server extracts from the body. The
 	// primary recipient and the sender are excluded automatically.
 	Mentions []string
+	// AttachmentIDs names attachments the sender uploaded
+	// (AttachmentUploader.UploadAttachments), by id (ptone/scion#4596).
+	AttachmentIDs []string
 }
 
 // SendStructuredMessage sends a structured message to an agent.
@@ -879,12 +882,14 @@ func (s *agentService) SendStructuredMessageWithOptions(ctx context.Context, age
 		Notify            bool                        `json:"notify,omitempty"`
 		Wake              bool                        `json:"wake,omitempty"`
 		Mentions          []string                    `json:"mentions,omitempty"`
+		AttachmentIDs     []string                    `json:"attachment_ids,omitempty"`
 	}{
 		StructuredMessage: msg,
 		Interrupt:         opts.Interrupt,
 		Notify:            opts.Notify,
 		Wake:              opts.Wake,
 		Mentions:          opts.Mentions,
+		AttachmentIDs:     opts.AttachmentIDs,
 	}
 	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/message", body, nil)
 	if err != nil {
@@ -965,6 +970,9 @@ type OutboundMessageRequest struct {
 	// Wake requests that a suspended target agent be resumed before
 	// delivering the message. Ignored for non-agent recipients.
 	Wake bool `json:"wake,omitempty"`
+	// AttachmentIDs names attachments the sending agent uploaded, by id
+	// (ptone/scion#4596). Attachments keeps meaning staged paths.
+	AttachmentIDs []string `json:"attachment_ids,omitempty"`
 }
 
 // OutboundMessageResult is the parsed response from a successful outbound
@@ -1310,6 +1318,10 @@ type ReincarnateAgentResponse struct {
 	TargetBrokerID string `json:"targetBrokerId,omitempty"`
 	// MoveVerdict is the move eligibility verdict of a dry-run move.
 	MoveVerdict *MoveVerdict `json:"moveVerdict,omitempty"`
+	// TransferMode is how an accepted cross-broker move carries the
+	// workspace: "export" or "recreate" (a forced move). Empty for a plain
+	// reincarnation and from a hub that predates forced moves.
+	TransferMode string `json:"transferMode,omitempty"`
 }
 
 // MoveVerdict is the hub's eligibility verdict for moving an agent to

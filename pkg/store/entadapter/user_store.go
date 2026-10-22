@@ -488,6 +488,18 @@ func (s *UserStore) UpdateUser(ctx context.Context, u *store.User) error {
 	return nil
 }
 
+// UpdateUserLastLogin sets only the last_login timestamp for a user.
+func (s *UserStore) UpdateUserLastLogin(ctx context.Context, id string, t time.Time) error {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return err
+	}
+	if err := s.client.User.UpdateOneID(uid).SetLastLogin(t).Exec(ctx); err != nil {
+		return mapError(err)
+	}
+	return nil
+}
+
 // UpdateUserLastSeen sets only the last_seen timestamp for a user.
 func (s *UserStore) UpdateUserLastSeen(ctx context.Context, id string, t time.Time) error {
 	uid, err := parseUUID(id)

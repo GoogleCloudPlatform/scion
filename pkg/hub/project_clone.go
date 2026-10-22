@@ -23,7 +23,6 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
-	"slices"
 	"strconv"
 	"strings"
 
@@ -445,9 +444,13 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 	writeJSON(w, http.StatusCreated, clone)
 }
 
-// authorizeProjectClone checks that the caller can read the source project and
-// create projects at hub scope. It writes the HTTP error response on failure and
-// returns a non-nil error; on success it returns nil.
+// authorizeProjectClone checks, before any source content is read or
+// copied, that the caller can read the source project and create projects
+// at hub scope. The create check is projectCreateDecision, the same
+// admission project create and project register apply. A user access token
+// must also carry the project:clone selector, eligible for its boundary; a
+// session needs no project.clone binding. It writes the HTTP error response
+// on failure and returns a non-nil error; on success it returns nil.
 func (s *Server) authorizeProjectClone(ctx context.Context, w http.ResponseWriter, src *store.Project) error {
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
@@ -473,15 +476,43 @@ func (s *Server) authorizeProjectClone(ctx context.Context, w http.ResponseWrite
 		return errors.New("forbidden: cannot read source")
 	}
 
-	// 2. Caller must be able to create projects at hub scope.
-	caps := s.authzService.ComputeScopeCapabilities(ctx, userIdent, "", "", "project")
-	if !slices.Contains(caps.Actions, string(ActionCreate)) {
+	// 2. A token must carry project:clone (see projectCloneTokenDenial).
+	if reason := projectCloneTokenDenial(userIdent); reason != "" {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden,
+			"Insufficient permission to clone projects", nil)
+		return errors.New("forbidden: " + reason)
+	}
+
+	// 3. Caller must be able to create projects at hub scope.
+	if !s.projectCreateDecision(ctx, userIdent).Allowed {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden,
 			"Insufficient permission to create projects", nil)
 		return errors.New("forbidden: cannot create projects")
 	}
 
 	return nil
+}
+
+// projectCloneTokenDenial returns a reason when a user access token may not
+// clone a project, and "" otherwise. The token's ceiling must allow
+// project.clone and project.clone must be eligible for the token's boundary
+// kind. The check reads only the token's ceiling and boundary; it does not
+// look up a project.clone binding. authorizeProjectClone makes the live
+// checks: project.read on the source and project.create at the hub. Other
+// identities return "".
+func projectCloneTokenDenial(identity Identity) string {
+	scoped, ok := identity.(*ScopedUserIdentity)
+	if !ok {
+		return ""
+	}
+	if scoped == nil || !scoped.Ceiling().Allows("project.clone") {
+		return "token ceiling does not allow project.clone"
+	}
+	boundary := scoped.Boundary()
+	if !boundary.Valid() || !permissionEligibleForBoundary("project.clone", boundary.Kind) {
+		return "project.clone is not eligible for this token boundary"
+	}
+	return ""
 }
 
 // cloneProjectHarnessConfigs deep-copies all project-scoped harness configs from

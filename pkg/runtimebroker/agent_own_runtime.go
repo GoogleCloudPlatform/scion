@@ -33,9 +33,9 @@ import (
 
 // An existing agent's own runtime.
 //
-// An agent started under a broker profile records that profile in its
-// agent-info.json (agent.GetSavedProfile); start and restart already resolve
-// their runtime from it. Operations on an existing agent (delete, stop,
+// An agent provisioned under a broker profile records that profile in its
+// broker-side image provenance (agent.ProvisionedProfile); start and restart
+// already resolve their runtime from it. Operations on an existing agent (delete, stop,
 // status, logs, exec) resolve the same runtime here, before the recorded
 // runtime check, so that:
 //
@@ -47,14 +47,18 @@ import (
 //     the broker may have no access to) are not queried and cannot fail the
 //     operation.
 //
-// An agent with no saved profile, or whose profile no longer resolves, keeps
-// the previous behaviour: every registered runtime is searched.
+// An agent with no provisioned profile (including one provisioned before
+// image provenance was recorded), or whose profile no longer resolves, keeps
+// the previous behaviour: every registered runtime is searched. The
+// agent-info.json in the agent home is not read for it.
 
 // agentOwnRuntime is the runtime an existing agent's saved profile resolves
-// to, paired with its manager.
+// to, paired with its manager and the runtime's build record, all from the
+// runtimeResolution that filled the entry.
 type agentOwnRuntime struct {
 	mgr     agent.Manager
 	rt      scionrt.Runtime
+	record  config.RuntimeBuildRecord
 	profile string
 	// fingerprint identifies the profile's runtime configuration the entry
 	// was resolved from; a memoised entry whose fingerprint differs from the
@@ -147,21 +151,21 @@ func (s *Server) ownRuntimeFor(ctx context.Context) *agentOwnRuntime {
 // the missing profile.
 //
 // Per-request cost: every existing-agent request reads the agent's
-// agent-info.json and the project's settings (local file reads only). The
+// image provenance record and the project's settings (local file reads only). The
 // runtime itself is resolved (for Kubernetes, a client build and an API
 // server check) only on the first request for a configuration, or after
 // that configuration changes.
 func (s *Server) ensureAgentOwnRuntime(ctx context.Context, id, projectID, projectPathHint string) context.Context {
 	// A flat instance has one runtime and never resolves a saved profile.
-	if defMgr, defRT := s.defaultPair(); defMgr == nil || defRT == nil || s.isFlat() {
+	if defMgr, defRT, _ := s.defaultPair(); defMgr == nil || defRT == nil || s.isFlat() {
 		return ctx
 	}
 	projectDir := s.knownAgentProjectDir(id, projectID, projectPathHint)
 	if projectDir == "" {
 		return ctx
 	}
-	profile := agent.GetSavedProfile(id, projectDir)
-	if profile == "" {
+	profile, ok, err := agent.ProvisionedProfile(projectDir, id, false, projectID, false)
+	if err != nil || !ok || profile == "" {
 		return ctx
 	}
 	vs, _, err := config.LoadEffectiveSettings(projectDir)
@@ -191,15 +195,18 @@ func (s *Server) ensureAgentOwnRuntime(ctx context.Context, id, projectID, proje
 		if v, ok := s.agentOwnRuntimes.Load(key); ok && v.(*agentOwnRuntime).fingerprint == fp {
 			return v, nil
 		}
-		mgr, name := s.resolveManagerForOpts(api.StartOptions{Name: id, ProjectPath: projectDir, Profile: profile})
+		res := s.resolveManagerForOpts(api.StartOptions{Name: id, ProjectPath: projectDir, Profile: profile})
+		mgr, name := res.Manager, res.RuntimeType
 		if mgr == nil || name == "error" {
 			return nil, errors.New("profile runtime could not be resolved")
 		}
-		rt := s.runtimeOfManager(mgr)
+		// The runtime and record come from the same resolution as mgr, never
+		// from runtimeOfManager.
+		rt := res.Runtime
 		if rt == nil {
 			return nil, fmt.Errorf("manager for runtime %q exposes no runtime", name)
 		}
-		own := &agentOwnRuntime{mgr: mgr, rt: rt, profile: profile, fingerprint: fp}
+		own := &agentOwnRuntime{mgr: mgr, rt: rt, record: res.Record, profile: profile, fingerprint: fp}
 		s.agentOwnRuntimes.Store(key, own)
 		return own, nil
 	})
@@ -304,7 +311,7 @@ func (s *Server) logSavedProfileFallback(id, projectID, projectDir, profile, cat
 
 // runtimeOfManager returns the runtime behind mgr, or nil.
 func (s *Server) runtimeOfManager(mgr agent.Manager) scionrt.Runtime {
-	if defMgr, defRT := s.defaultPair(); mgr == defMgr {
+	if defMgr, defRT, _ := s.defaultPair(); mgr == defMgr {
 		return defRT
 	}
 	if am, ok := mgr.(*agent.AgentManager); ok {

@@ -78,6 +78,18 @@ const (
 	FieldRuntimeTargetType = "runtime_target_type"
 	// FieldRuntimeTargetDisplayName holds the string denoting the runtime_target_display_name field in the database.
 	FieldRuntimeTargetDisplayName = "runtime_target_display_name"
+	// FieldRuntimeTargetPresentation holds the string denoting the runtime_target_presentation field in the database.
+	FieldRuntimeTargetPresentation = "runtime_target_presentation"
+	// FieldRuntimeTargetPresentationHash holds the string denoting the runtime_target_presentation_hash field in the database.
+	FieldRuntimeTargetPresentationHash = "runtime_target_presentation_hash"
+	// FieldPresentationEpoch holds the string denoting the presentation_epoch field in the database.
+	FieldPresentationEpoch = "presentation_epoch"
+	// FieldPresentationSeq holds the string denoting the presentation_seq field in the database.
+	FieldPresentationSeq = "presentation_seq"
+	// FieldPresentationFencedAt holds the string denoting the presentation_fenced_at field in the database.
+	FieldPresentationFencedAt = "presentation_fenced_at"
+	// FieldPresentationObservedAt holds the string denoting the presentation_observed_at field in the database.
+	FieldPresentationObservedAt = "presentation_observed_at"
 	// FieldCreated holds the string denoting the created field in the database.
 	FieldCreated = "created"
 	// FieldUpdated holds the string denoting the updated field in the database.
@@ -121,6 +133,12 @@ var Columns = []string{
 	FieldRuntimeTargetID,
 	FieldRuntimeTargetType,
 	FieldRuntimeTargetDisplayName,
+	FieldRuntimeTargetPresentation,
+	FieldRuntimeTargetPresentationHash,
+	FieldPresentationEpoch,
+	FieldPresentationSeq,
+	FieldPresentationFencedAt,
+	FieldPresentationObservedAt,
 	FieldCreated,
 	FieldUpdated,
 }
@@ -322,6 +340,36 @@ func ByRuntimeTargetType(opts ...sql.OrderTermOption) OrderOption {
 // ByRuntimeTargetDisplayName orders the results by the runtime_target_display_name field.
 func ByRuntimeTargetDisplayName(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldRuntimeTargetDisplayName, opts...).ToFunc()
+}
+
+// ByRuntimeTargetPresentation orders the results by the runtime_target_presentation field.
+func ByRuntimeTargetPresentation(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRuntimeTargetPresentation, opts...).ToFunc()
+}
+
+// ByRuntimeTargetPresentationHash orders the results by the runtime_target_presentation_hash field.
+func ByRuntimeTargetPresentationHash(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRuntimeTargetPresentationHash, opts...).ToFunc()
+}
+
+// ByPresentationEpoch orders the results by the presentation_epoch field.
+func ByPresentationEpoch(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldPresentationEpoch, opts...).ToFunc()
+}
+
+// ByPresentationSeq orders the results by the presentation_seq field.
+func ByPresentationSeq(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldPresentationSeq, opts...).ToFunc()
+}
+
+// ByPresentationFencedAt orders the results by the presentation_fenced_at field.
+func ByPresentationFencedAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldPresentationFencedAt, opts...).ToFunc()
+}
+
+// ByPresentationObservedAt orders the results by the presentation_observed_at field.
+func ByPresentationObservedAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldPresentationObservedAt, opts...).ToFunc()
 }
 
 // ByCreated orders the results by the created field.

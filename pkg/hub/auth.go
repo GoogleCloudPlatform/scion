@@ -182,6 +182,10 @@ type AuthConfig struct {
 	// is configured: a request that names a delegation is then refused.
 	// The arm accepts a request only while TestIdentitiesEnabled is true.
 	WorkloadIssuer *workloadIssuerAuthenticator
+	// RecordPortProxyNoCredentials counts one plain-text no-credentials
+	// 401 on a port proxy route (Server.recordPortProxyNoCredentials).
+	// Nil counts nothing.
+	RecordPortProxyNoCredentials func()
 }
 
 // tokenType represents the type of authentication token.
@@ -587,6 +591,30 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 					return
 				}
 
+				// Step 3g: no credential of any kind reached a port proxy
+				// route on a request that is not a page navigation
+				// (a navigation without a web session is sent to login by
+				// sessionToBearerMiddleware). Answer with the plain-text
+				// 401 that names the cause, not the JSON one.
+				//
+				// ORDER: this step must stay the last one before the final
+				// 401. Any new step that lets a request without a
+				// credential through (as 3c to 3e do) goes ABOVE this
+				// one; placed below it, its port proxy requests would get
+				// this 401 instead. (3f is left free for such a step.)
+				if isProxyRoute(r.URL.Path) && !isBrowserRequest(r) {
+					hinted := writePortProxyNoCredentials(w, r)
+					if cfg.RecordPortProxyNoCredentials != nil {
+						cfg.RecordPortProxyNoCredentials()
+					}
+					log.Debug("Port proxy request without credentials",
+						slog.String("method", r.Method),
+						slog.String("path", logging.RequestPath(r)),
+						slog.Bool("sandboxed_subresource", hinted),
+					)
+					return
+				}
+
 				writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 					"missing authorization header", nil)
 				return
@@ -603,6 +631,12 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				if !apiclient.ValidateDevToken(token, cfg.DevAuthToken) {
 					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 						"invalid development token", nil)
+					return
+				}
+				// The development user's account status is checked here,
+				// on every request, as the hub user token arm checks any
+				// other user's (checkUserAccount).
+				if !admitDevUserAccount(ctx, cfg, log, w) {
 					return
 				}
 				ctx = context.WithValue(ctx, userContextKey{}, devUser)
@@ -697,6 +731,9 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				if cfg.UserTokenSvc == nil {
 					// Fall back to dev auth if user tokens not configured
 					if cfg.DevAuthEnabled && apiclient.ValidateDevToken(token, cfg.DevAuthToken) {
+						if !admitDevUserAccount(ctx, cfg, log, w) {
+							return
+						}
 						ctx = context.WithValue(ctx, userContextKey{}, devUser)
 						ctx = contextWithIdentity(ctx, devUser)
 						ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(devUser))
@@ -746,36 +783,33 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				// JWT tokens are self-contained; check current user status
 				// from the store to enforce suspension between token refreshes.
 				if cfg.UserStore != nil {
-					u, uErr := cfg.UserStore.GetUser(ctx, claims.UserID)
-					if uErr != nil && !errors.Is(uErr, store.ErrNotFound) {
+					// The account must be active (checkUserAccount, the rule
+					// decide applies): a suspended account, an account with no
+					// user record (for example deleted after the token was
+					// issued; the token is self-contained) and an account in
+					// any other non-active status are refused.
+					u, uErr := checkUserAccount(ctx, cfg.UserStore, PrincipalContext{Kind: PrincipalKindUser, ID: claims.UserID})
+					switch refusal := classifyUserAccount(u, uErr); refusal {
+					case accountAllowed:
+					case accountLookupFault:
 						log.Error("JWT auth: user store lookup failed",
 							"user_id", claims.UserID, "error", uErr)
-						writeError(w, http.StatusServiceUnavailable, "store_error",
-							"unable to verify user status", nil)
+						writeAccountRefusal(w, refusal)
 						return
-					}
-					// NOTE: We intentionally check only for UserStatusSuspended rather
-					// than u.Status != UserStatusActive. The third status, UserStatusInvited,
-					// represents users in the onboarding flow who do not hold JWT tokens —
-					// they authenticate via the OAuth/invitation path, not the JWT path.
-					// Suspended is the only non-active state reachable with a cached JWT.
-					if uErr == nil && u.Status == store.UserStatusSuspended {
+					case accountSuspended:
 						log.Warn("JWT auth rejected: user is suspended",
 							"user_id", claims.UserID, "email", claims.Email)
-						writeError(w, http.StatusForbidden, "user_suspended",
-							"access denied: user account is suspended", nil)
+						writeAccountRefusal(w, refusal)
 						return
-					}
-					// A token whose subject has no user record (for example
-					// the account was deleted after the token was issued) is
-					// rejected here, like a suspended user. The token is
-					// self-contained, so authentication must not succeed for
-					// an identity that has no store record.
-					if errors.Is(uErr, store.ErrNotFound) {
+					case accountMissing:
 						log.Warn("JWT auth rejected: no user record for this token",
 							"user_id", claims.UserID)
-						writeError(w, http.StatusUnauthorized, ErrCodeUserNotFound,
-							"invalid access token: no user record for this token", nil)
+						writeAccountRefusal(w, refusal)
+						return
+					default:
+						log.Warn("JWT auth rejected: user is not active",
+							"reason", accountRefusalReason(refusal))
+						writeAccountRefusal(w, refusal)
 						return
 					}
 					// A federated account authenticates only with its

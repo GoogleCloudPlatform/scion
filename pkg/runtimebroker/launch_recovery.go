@@ -17,7 +17,6 @@ package runtimebroker
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -254,7 +253,7 @@ func (s *Server) recoveryCleanup(ctx context.Context, jr *journalRecord, rec *la
 // matches. Nil when none matches, or when the launch's identity is unknown:
 // recovery then cleans up nothing rather than guess.
 func (s *Server) recoveryManager(jr *journalRecord) agent.Manager {
-	defMgr, defRT := s.defaultPair()
+	defMgr, defRT, _ := s.defaultPair()
 	if s.isFlat() {
 		// A flat instance serves exactly one runtime target.
 		return defMgr
@@ -275,7 +274,8 @@ func (s *Server) recoveryManager(jr *journalRecord) agent.Manager {
 	if jr.Profile == "" {
 		return nil
 	}
-	mgr, _, err := s.resolveManagerForOptsStrict(api.StartOptions{Name: jr.AgentName, ProjectPath: jr.ProjectPath, Profile: jr.Profile}, profileLenient, slog.LevelWarn)
+	res, err := s.resolveManagerForOptsStrict(api.StartOptions{Name: jr.AgentName, ProjectPath: jr.ProjectPath, Profile: jr.Profile}, profileLenient)
+	mgr := res.Manager
 	if err != nil || mgr == nil || s.launchRuntimeIdentity(mgr) != id {
 		return nil
 	}
@@ -299,7 +299,7 @@ func (s *Server) launchRuntimeIdentity(mgr agent.Manager) string {
 	if !reflect.TypeOf(mgr).Comparable() {
 		return ""
 	}
-	if defMgr, defRT := s.defaultPair(); defRT != nil && defMgr != nil && reflect.TypeOf(defMgr).Comparable() && defMgr == mgr {
+	if defMgr, defRT, _ := s.defaultPair(); defRT != nil && defMgr != nil && reflect.TypeOf(defMgr).Comparable() && defMgr == mgr {
 		return auxiliaryRuntimeIdentity(defRT)
 	}
 	s.auxiliaryRuntimesMu.RLock()
@@ -368,7 +368,7 @@ func (s *Server) deleteRecoveredRun(ctx context.Context, mgr agent.Manager, jr *
 			"agent_id", jr.AgentID, "launch_id", jr.LaunchID, "error", err)
 		return failCleanup(nil, cleanupFailRunList)
 	}
-	target, found, err := agent.SelectExactRunTarget(infos, jr.AgentName, jr.ProjectPath, jr.RunID)
+	target, found, err := agent.SelectExactRunTarget(infos, jr.AgentName, jr.ProjectPath, jr.ProjectID, jr.RunID)
 	if err != nil {
 		s.agentLifecycleLog.Warn("Launch recovery: run-scoped cleanup skipped", "agent_id", jr.AgentID, "launch_id", jr.LaunchID, "error", err)
 		return nil

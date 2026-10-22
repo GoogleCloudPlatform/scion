@@ -22,6 +22,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util/urlredact"
 )
 
 // The hub registry: the named hub entries of context.yaml, managed with
@@ -32,6 +34,11 @@ import (
 // global settings' hub configuration. The context returned with it already
 // holds the import, so callers can warn and carry on.
 var ErrCLIContextImport = errors.New("could not save the imported hub settings to context.yaml")
+
+// HubEndpointConfigKey is the config key ('scion config set|get|unset')
+// that names the hub. The config commands map it to the hub list (the
+// current hub, or a project's link entry); no settings file holds it.
+const HubEndpointConfigKey = "hub.endpoint"
 
 // HubNames returns the names of the hub entries, sorted.
 func (c *CLIContext) HubNames() []string {
@@ -52,9 +59,21 @@ func ValidateHubName(name string) error {
 }
 
 // ValidateHubURL returns an error when endpoint is not an http or https URL
-// with a host. User info, a query and a fragment are refused too: the hub
-// list holds no credentials, and a hub URL needs neither.
+// with a host. User info, any '@', a query and a fragment are refused too:
+// the hub list holds no credentials, and a hub URL needs none of them.
 func ValidateHubURL(endpoint string) error {
+	// A hub URL never needs an '@'; with one, a password containing '/'
+	// can parse as a port and path, so the URL is not repeated.
+	//
+	// This check must stay BEFORE the parse-and-scheme check below. That
+	// check formats the endpoint with RedactURL and is the one place that
+	// gets non-http(s) URLs (a schemeless "user:pass@host" parses as an
+	// opaque URL that RedactURL leaves unchanged). It is safe only because
+	// every endpoint with an '@' has already returned here; swapping the
+	// two blocks would print such credentials.
+	if strings.Contains(endpoint, "@") {
+		return fmt.Errorf("invalid hub URL %q: a hub URL must not contain '@'", urlredact.MaskWhole(strings.TrimSpace(endpoint), urlredact.Mask))
+	}
 	u, err := url.Parse(strings.TrimSpace(endpoint))
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" ||
 		u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.Contains(endpoint, "#") {
@@ -63,44 +82,61 @@ func ValidateHubURL(endpoint string) error {
 	return nil
 }
 
-// userInfoRe matches the user info of a URL that url.Parse rejects, up to
-// the last '@' before the host.
-// pkg/apiclient keeps a copy of these rules (redactURLUserInfo), since it
-// imports no scion package; change both together.
-var userInfoRe = regexp.MustCompile(`^([A-Za-z][A-Za-z0-9+.-]*://)?[^/?#]*@`)
-
 // textURLRe matches the scheme and authority of each http(s) URL in a
 // text. The authority ends at the path, query or fragment, at white space,
 // or at a character that delimits a URL in a message and cannot appear in
 // user info.
 var textURLRe = regexp.MustCompile("(?i)\\bhttps?://(?:[^\\s/?#\"<>`\\\\]|\\\\.)*")
 
-// RedactURL returns raw for display with any credential in its user info
-// replaced: the password (see url.URL.Redacted), or a user name given
-// without a password, which may itself be a token. A URL that does not
-// parse has its whole user info replaced.
+// textFullURLRe matches each http(s) URL in a text: textURLRe's scheme and
+// authority, then its path, query and fragment, which end at white space,
+// a quote, an angle bracket, a backtick or a backslash. A JSON escape
+// inside them (\u0026 for "&", \/ for "/") does not end the URL, so a URL
+// quoted in JSON text is redacted whole; any other backslash (\" in a Go
+// %q string, for example) ends it. The path, query and fragment start at a
+// literal "/", "?" or "#" (encoding/json never escapes those).
+var textFullURLRe = regexp.MustCompile(textURLRe.String() + "(?:[/?#](?:[^\\s\"<>`\\\\]|\\\\u[0-9a-fA-F]{4}|\\\\/)*)?")
+
+// RedactURL returns raw for display with any credential in it replaced:
+// in its user info, the password (see url.URL.Redacted), or a user name
+// given without a password, which may itself be a token; in its query and
+// fragment, the value of every parameter with a credential-like name (see
+// isURLCredentialParam). A URL that does not parse has its whole user info
+// replaced. A URL whose user info cannot be delimited (see
+// urlredact.Undelimited) shows only its scheme and a mask. A URL with
+// nothing to mask is returned as given.
 func RedactURL(raw string) string {
-	if u, err := url.Parse(raw); err == nil {
-		if u.User == nil {
-			return raw
-		}
-		if _, hasPassword := u.User.Password(); hasPassword {
-			return u.Redacted()
-		}
-		u.User = url.User("xxxxx")
-		return u.String()
+	if urlredact.Undelimited(raw) {
+		return urlredact.MaskWhole(raw, urlredact.Mask)
 	}
-	return userInfoRe.ReplaceAllString(raw, "${1}xxxxx@")
+	return redactURLParams(urlredact.RedactUserInfo(raw))
 }
 
-// RedactURLsIn returns text (for example an error message) with the user
-// info of every http(s) URL in it replaced as RedactURL does.
+// RedactURLsIn returns text (for example an error message) with every
+// http(s) URL in it redacted as RedactURL does: its user info, and the
+// credential parameters of its query and fragment. A URL whose user info
+// cannot be delimited (see urlredact.Undelimited) shows only its scheme and
+// a mask. A URL inside another one's path, query or fragment has its user
+// info masked whole (urlredact.RedactUserInfoIn).
 func RedactURLsIn(text string) string {
-	return textURLRe.ReplaceAllStringFunc(text, func(m string) string {
-		if !strings.Contains(m, "@") {
-			return m
+	return textFullURLRe.ReplaceAllStringFunc(text, func(m string) string {
+		authority := textURLRe.FindString(m)
+		rest := m[len(authority):]
+		// Punctuation that ends a sentence is not part of the URL.
+		trimmed := strings.TrimRight(rest, ".,;:!?)]}'")
+		tail := rest[len(trimmed):]
+		// The whole URL, not its authority cut at the first '/', '?' or
+		// '#': user info containing one of those ends the authority early.
+		if full := authority + trimmed; urlredact.Undelimited(full) {
+			return urlredact.MaskWhole(full, urlredact.Mask) + tail
 		}
-		return RedactURL(m)
+		if strings.Contains(authority, "@") {
+			authority = RedactURL(authority)
+		}
+		// A URL inside this one (a redirect parameter, or a second URL
+		// with no space before it) has its user info masked by the shared
+		// rule as well.
+		return authority + urlredact.RedactUserInfoIn(redactURLParams(trimmed), urlredact.Mask) + tail
 	})
 }
 
@@ -125,6 +161,37 @@ func (c *CLIContext) AddHub(name, endpoint string) error {
 	}
 	c.Hubs[name] = &HubEntry{Endpoint: NormalizeEndpoint(endpoint)}
 	return nil
+}
+
+// EnsureHubURL returns the name of the hub entry for endpoint, adding one
+// named baseName (with -2, -3, ... on a collision) when no entry has that
+// normalised endpoint. endpoint must pass ValidateHubURL, the rule 'scion
+// hub add' applies.
+func (c *CLIContext) EnsureHubURL(endpoint, baseName string) (name string, created bool, err error) {
+	if err := ValidateHubURL(endpoint); err != nil {
+		return "", false, err
+	}
+	name, created = c.EnsureHub(endpoint, baseName)
+	return name, created, nil
+}
+
+// SelectHubURL makes the hub at endpoint the current hub, adding an entry
+// for it as EnsureHubURL does. It returns the entry's name.
+func (c *CLIContext) SelectHubURL(endpoint, baseName string) (name string, created bool, err error) {
+	name, created, err = c.EnsureHubURL(endpoint, baseName)
+	if err != nil {
+		return "", false, err
+	}
+	c.CurrentHub = name
+	return name, created, nil
+}
+
+// ClearCurrentHub makes no hub current and returns the name of the hub
+// that was current, or "". The hub entry itself is kept.
+func (c *CLIContext) ClearCurrentHub() string {
+	name := c.CurrentHub
+	c.CurrentHub = ""
+	return name
 }
 
 // RenameHub renames the hub entry oldName to newName and rewrites every
@@ -282,6 +349,21 @@ var globalHubSettings = func() (string, *HubTransportConfig) {
 	return strings.TrimSpace(s.Hub.Endpoint), s.Hub.Transport
 }
 
+// GlobalSettingsFileWithHubEndpoint returns the path of the global settings
+// file when that file sets hub.endpoint (in any spelling the settings loader
+// reads), or "". Environment variables are not applied: only the file is
+// looked at.
+func GlobalSettingsFileWithHubEndpoint() string {
+	if ep, _ := globalHubSettings(); ep == "" {
+		return ""
+	}
+	dir, err := GetGlobalDir()
+	if err != nil {
+		return ""
+	}
+	return GetSettingsPath(dir)
+}
+
 // LoadCLIContextImported is LoadCLIContext plus the one-time import of the
 // global settings' hub configuration into the hub list. The CLI reads no
 // hub setting itself; this import is how an existing hub.endpoint carries
@@ -304,6 +386,19 @@ var globalHubSettings = func() (string, *HubTransportConfig) {
 // the import cannot be saved, the returned context holds it anyway, with an
 // error wrapping ErrCLIContextImport.
 func LoadCLIContextImported(baseName func(endpoint string) string) (*CLIContext, error) {
+	return loadCLIContextImported(baseName, true)
+}
+
+// LoadCLIContextImportedInMemory is LoadCLIContextImported without the
+// save: the returned context holds the pending one-time import, and
+// nothing is written (no context.yaml, no lock). Read-only commands use
+// it, so they see the same hub as the next command that saves the import
+// (ptone/scion#5483).
+func LoadCLIContextImportedInMemory(baseName func(endpoint string) string) (*CLIContext, error) {
+	return loadCLIContextImported(baseName, false)
+}
+
+func loadCLIContextImported(baseName func(endpoint string) string, save bool) (*CLIContext, error) {
 	c, err := LoadCLIContext()
 	if err != nil || c.Version > CLIContextVersion || (c.GlobalImported() && c.CurrentImported()) {
 		return c, err
@@ -321,6 +416,10 @@ func LoadCLIContextImported(baseName func(endpoint string) string) (*CLIContext,
 		if !target.CurrentImported() {
 			target.ImportCurrentHub(endpoint, transport, baseName(endpoint), now)
 		}
+	}
+	if !save {
+		importInto(c, time.Now())
+		return c, nil
 	}
 	var imported *CLIContext
 	err = UpdateCLIContext(func(fresh *CLIContext) error {

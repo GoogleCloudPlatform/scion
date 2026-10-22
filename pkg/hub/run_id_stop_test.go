@@ -28,6 +28,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -279,7 +280,7 @@ func stopE2EBroker(t *testing.T) (*runLabelManager, string) {
 	cfg := runtimebroker.DefaultServerConfig()
 	cfg.BrokerID = "e2e-broker"
 	cfg.BrokerName = "e2e-broker"
-	brokerSrv := runtimebroker.New(cfg, mgr, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	brokerSrv := runtimebroker.New(cfg, mgr, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 	httpSrv := httptest.NewServer(brokerSrv.Handler())
 	t.Cleanup(httpSrv.Close)
 	return mgr, httpSrv.URL

@@ -438,7 +438,9 @@ func decodeInviteBatchJSON(r *http.Request) (*inviteBatchRequest, *inviteBatchRe
 // field, no projects (design §3.2).
 func decodeInviteBatchMultipart(w http.ResponseWriter, r *http.Request) (*inviteBatchRequest, *inviteBatchRequestError) {
 	r.Body = http.MaxBytesReader(w, r.Body, inviteBulkMaxMultipartBytes)
-	if err := r.ParseMultipartForm(inviteBulkMaxMultipartBytes); err != nil {
+	cleanup, err := parseMultipartUpload(r, inviteBulkMaxMultipartBytes)
+	defer cleanup()
+	if err != nil {
 		return nil, inviteBatchBadRequest("failed to parse multipart form", "")
 	}
 	if r.MultipartForm != nil {

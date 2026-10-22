@@ -47,7 +47,6 @@ import { TouchPrimaryController } from '../../utils/input-modality.js';
 import { apiFetch } from '../../client/api.js';
 import { TERMINAL_SESSION_COUNT_EVENT } from '../../client/terminal-workspace-events.js';
 import { TRAY_COUNT_EVENT, type TrayCountDetail } from '../../client/tray-count-events.js';
-import { CHAT_PALETTE_OPEN_REQUEST_EVENT } from '../../client/chat-palette-events.js';
 import {
   CHAT_UNREAD_COUNT_EVENT,
   chatUnread,
@@ -260,9 +259,8 @@ export class ScionHeader extends LitElement {
       align-items: center;
       gap: 0.5rem;
       /* Lets the title truncate instead of forcing .header-left (and, past
-         it, the palette button and both dropdowns) wider than the
-         viewport at narrow widths — same reasoning as .header-left's own
-         min-width: 0 above. */
+         it, both dropdowns) wider than the viewport at narrow widths —
+         same reasoning as .header-left's own min-width: 0 above. */
       min-width: 0;
     }
 
@@ -281,8 +279,8 @@ export class ScionHeader extends LitElement {
       font-weight: 700;
       color: var(--scion-text, #1e293b);
       /* Truncates with an ellipsis rather than wrapping onto a second line
-         (which grows the header's height) once the palette button and both
-         dropdowns leave it less room than its own text needs. */
+         (which grows the header's height) once both dropdowns leave it
+         less room than its own text needs. */
       min-width: 0;
       overflow: hidden;
       text-overflow: ellipsis;
@@ -933,54 +931,41 @@ export class ScionHeader extends LitElement {
   }
 
   // =========================================================================
-  // Palette button -- opens a quick palette from the header: the chat quick
-  // switcher on a chat route, or a graph view's "Jump to agent" palette
-  // while one is on screen. One button, one render path, shared by every
-  // host -- see renderPaletteButton's own doc comment. The terminal view
-  // has none here: its "Jump to agent" button is a labelled footer in its
-  // Open terminals column (TerminalWorkspaceRoot.buildRailFooter).
+  // Palette button -- opens a graph view's "Jump to agent" palette from the
+  // header while one is on screen. The chat and terminal views have none
+  // here: each opens its palette from a labelled button pinned to the bottom
+  // of its own list column (the chat page's spaces rail, and on phones its
+  // members column too; TerminalWorkspaceRoot.buildRailFooter).
   // =========================================================================
 
   /**
    * The header's palette button. Renders as a single element shared by every
    * responsive tier (positioned via `.header-right`'s own flex layout, see
    * the render() call site) rather than duplicated per tier. Visible on
-   * every width when signed in on a route with a palette to open: narrow
-   * screens need it most since they have no keyboard shortcut, but desktop
-   * keeps it too, both to discover the shortcut (via the tooltip) and for a
-   * pointer/trackpad user who would rather click than reach for a chord.
-   *
-   * Which host owns the click is resolved once here, as its open-request
-   * event, and threaded through to the click handler rather than re-resolved
-   * there: the route could otherwise change between render and click
-   * (unlikely for a header button, but this keeps the two in sync by
-   * construction rather than by coincidence).
+   * every width when signed in while a graph view offers its palette:
+   * narrow screens need it most since they have no keyboard shortcut, but
+   * desktop keeps it too, both to discover the shortcut (via the tooltip)
+   * and for a pointer/trackpad user who would rather click than reach for a
+   * chord.
    */
   private renderPaletteButton(): TemplateResult | typeof nothing {
     if (!this.user) return nothing;
-    const isChat = this.isChatView();
-    const isGraph = !isChat && !this.isTerminalView() && this.graphPaletteAvailable;
-    if (!isChat && !isGraph) return nothing;
-    const openRequestEvent = isChat
-      ? CHAT_PALETTE_OPEN_REQUEST_EVENT
-      : GRAPH_PALETTE_OPEN_REQUEST_EVENT;
+    if (this.isChatView() || this.isTerminalView() || !this.graphPaletteAvailable) return nothing;
 
     const isTouch = this.touchPrimary.isTouch;
     const isMac = isMacPlatform();
     const shortcutLabel = isMac ? '⌘K' : 'Ctrl+K';
     const ariaKeyshortcuts = isMac ? 'Meta+K' : 'Control+K';
-    const label = isChat ? 'Quick switcher' : 'Jump to agent';
-    const ariaLabel = isChat ? 'Open quick switcher' : 'Open Jump to agent';
 
     return html`
-      <sl-tooltip content=${`${label} (${shortcutLabel})`} ?disabled=${isTouch}>
+      <sl-tooltip content=${`Jump to agent (${shortcutLabel})`} ?disabled=${isTouch}>
         <button
           type="button"
           class="palette-button"
-          aria-label=${ariaLabel}
+          aria-label="Open Jump to agent"
           aria-haspopup="dialog"
           aria-keyshortcuts=${isTouch ? nothing : ariaKeyshortcuts}
-          @click=${(e: Event): void => this.handlePaletteButtonClick(e, openRequestEvent)}
+          @click=${this.handlePaletteButtonClick}
         >
           <sl-icon name="compass" aria-hidden="true"></sl-icon>
         </button>
@@ -990,16 +975,18 @@ export class ScionHeader extends LitElement {
 
   /**
    * iOS and macOS Safari do not focus a `<button>` on click, so without this
-   * the deep active element the owning host captures as "what to restore
-   * focus to" would be whatever was focused before the click — which could
-   * be the chat composer, popping the on-screen keyboard back open the
+   * the deep active element the graph palette host captures as "what to
+   * restore focus to" would be whatever was focused before the click — which
+   * could be a text field, popping the on-screen keyboard back open the
    * instant the palette closes. Focusing the button explicitly first, before
    * dispatching, makes capture reliably see this button instead.
    */
-  private handlePaletteButtonClick(e: Event, openRequestEvent: string): void {
+  private handlePaletteButtonClick(e: Event): void {
     const btn = e.currentTarget as HTMLElement;
     btn.focus({ preventScroll: true });
-    this.dispatchEvent(new CustomEvent(openRequestEvent, { bubbles: true, composed: true }));
+    this.dispatchEvent(
+      new CustomEvent(GRAPH_PALETTE_OPEN_REQUEST_EVENT, { bubbles: true, composed: true })
+    );
   }
 
   // =========================================================================

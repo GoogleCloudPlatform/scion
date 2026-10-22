@@ -96,6 +96,21 @@ const (
 	// Nothing was started or written. Retry after the removal ends.
 	BrokerErrCodeRetainedPurgeInProgress = "retained_purge_in_progress"
 
+	// BrokerErrCodeMoveTargetNotFresh marks a forced move's provision
+	// (moved-agent expectation "fresh-agent-dir") the broker refused before
+	// creating anything, because it has files for the agent or cannot
+	// confirm that it has none (409). The message names no host path. The
+	// hub then rolls the move back without removing anything on that
+	// broker: the files there were not created by the move
+	// (ptone/scion#5441).
+	BrokerErrCodeMoveTargetNotFresh = "move_target_not_fresh"
+
+	// BrokerErrCodeMoveMarkerMismatch marks a forced move's rollback delete
+	// (MoveReincarnationIDQueryParam) that removed nothing because an agent
+	// directory on the broker exists without that move's marker: the files
+	// were not created by the move (409). The message names no host path.
+	BrokerErrCodeMoveMarkerMismatch = "move_marker_mismatch"
+
 	// BrokerErrCodeReloadUnconfirmed marks a reset-auth that wrote the new
 	// credential into the agent container but could not deliver the reload
 	// signal to the agent's init process (502), so the running agent did not

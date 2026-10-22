@@ -465,10 +465,13 @@ var placementGuardClassification = map[string]placementGuardOp{
 		return err
 	}},
 	"DispatchAgentProvisionForMove": {missingRowRefusedEarly: true, call: func(ctx context.Context, d *HTTPAgentDispatcher, a *store.Agent) error {
-		return d.DispatchAgentProvisionForMove(ctx, a, "/nfs/workspace")
+		return d.DispatchAgentProvisionForMove(ctx, a, "/nfs/workspace", "")
 	}},
 	"DispatchAgentDeleteLocalOnly": {call: func(ctx context.Context, d *HTTPAgentDispatcher, a *store.Agent) error {
 		return d.DispatchAgentDeleteLocalOnly(ctx, a)
+	}},
+	"DispatchAgentDeleteRecreated": {call: func(ctx context.Context, d *HTTPAgentDispatcher, a *store.Agent) error {
+		return d.DispatchAgentDeleteRecreated(ctx, a, "reincarnation-1")
 	}},
 }
 

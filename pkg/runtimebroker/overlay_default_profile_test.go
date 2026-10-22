@@ -172,11 +172,11 @@ func storedProfileShapes() []struct {
 	}
 }
 
-// A saved profile the stored profiles lack fails start, restart and resume
-// with the saved-profile error, and never falls back to the default profile
-// (including the only stored profile) or the default runtime, including
-// when agent-info.json records that the agent last ran on the default
-// runtime (ptone/scion#3907).
+// A provisioned profile the stored profiles lack fails start, restart and
+// resume with the saved-profile error, and never falls back to the default
+// profile (including the only stored profile) or the default runtime,
+// including when agent-info.json records that the agent last ran on the
+// default runtime (ptone/scion#3907).
 func TestOverlayProfiles_MissingSavedProfileFailsWithoutFallback(t *testing.T) {
 	for _, shape := range storedProfileShapes() {
 		for _, recorded := range []string{"", "docker"} {
@@ -190,6 +190,7 @@ func TestOverlayProfiles_MissingSavedProfileFailsWithoutFallback(t *testing.T) {
 					shape.install(t)
 					const name = "vanished-profile-agent"
 					writeSavedAgentInfo(t, f.projectPath, name, "vanished", recorded)
+					writeProvisionedProfile(t, f.projectPath, name, "vanished")
 					f.defaultMgr.agents = append(f.defaultMgr.agents, lifecycleAgent(name, f.projectPath, ""))
 
 					w := op.run(t, f, name)
@@ -333,7 +334,7 @@ func TestOverlayProfiles_RunningAgentsUnaffected(t *testing.T) {
 	t.Run("non-dispatch resolution", func(t *testing.T) {
 		f := newLifecycleFixture(t)
 		installStoredProfilesOverlay(t)
-		mgr, name := f.srv.resolveManagerForOpts(api.StartOptions{Name: "running", ProjectPath: f.projectPath})
+		mgr, name := managerAndType(f.srv.resolveManagerForOpts(api.StartOptions{Name: "running", ProjectPath: f.projectPath}))
 		if mgr == nil || name != "docker" {
 			t.Errorf("resolveManagerForOpts = %v, %q; want the default docker manager", mgr, name)
 		}
@@ -379,7 +380,7 @@ func TestOverlayProfiles_KubernetesOnlyBrokerWithoutActiveProfileStarts(t *testi
 	cfg.StateDir = t.TempDir()
 	cfg.ContainerHubEndpoint = lifecycleBridge
 	mgr := &filteringMockManager{}
-	srv := New(cfg, mgr, &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }})
+	srv := New(cfg, mgr, &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}, config.RuntimeBuildRecord{})
 	srv.discoverAuxiliaryRuntimesForProjects([]string{projectPath})
 
 	health := httptest.NewRecorder()

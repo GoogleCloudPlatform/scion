@@ -92,14 +92,15 @@ type RunConfig struct {
 
 	// RuntimeName is set by the calling runtime adapter (docker/podman/apple)
 	// before invoking buildCommonRunArgs, e.g. via runtime.Name(). It gates
-	// runtime-specific mount narrowing in buildCommonRunArgs that cannot yet
-	// be applied uniformly across adapters — currently the narrowed read-only
-	// mount over the shared base repo's .git admin surface (config/hooks/info)
-	// for hub-native worktree-per-agent projects, which the broker-git
-	// worktree change currently applies to Docker only. Left empty by
-	// adapters that have not yet been extended (podman, apple); code gating on
-	// this field must fail closed (i.e. skip the mount narrowing) for any
-	// value it does not explicitly recognize.
+	// runtime-specific choices in buildCommonRunArgs that cannot yet be
+	// applied uniformly across adapters: the narrowed read-only mount over
+	// the shared base repo's .git admin surface (config/hooks/info) for
+	// hub-native worktree-per-agent projects, which the broker-git worktree
+	// change currently applies to Docker ("docker") only, and the form and
+	// condition of the shared workspace .scion/agents mask for Apple
+	// ("container"). Docker and Apple set it; Podman leaves it empty. Code
+	// gating on this field must fail closed (i.e. skip the mount narrowing)
+	// for any value it does not explicitly recognize.
 	RuntimeName string
 
 	// WorkspaceBackendName is the name of the backend chosen by the workspace

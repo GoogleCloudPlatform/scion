@@ -1146,9 +1146,10 @@ func TestConduitTunnel_UserLookupFaultIs500(t *testing.T) {
 // TestConduitTunnel_UserStatusAgreesWithRecheck: the tunnel request path
 // and the per-stream re-check share one user-status rule
 // (conduitUserStatus). For active, suspended, deleted and unknown users,
-// a scoped token of a suspended user, and an identity without a user row,
-// the request is refused exactly when the re-check denies on user status,
-// with the same cause.
+// a scoped token of a suspended user, and the development user (active and
+// suspended; its row is checked like any other user's), the request is
+// refused exactly when the re-check denies on user status, with the same
+// cause.
 func TestConduitTunnel_UserStatusAgreesWithRecheck(t *testing.T) {
 	f := newConduitFixture(t)
 	ctx := context.Background()
@@ -1175,9 +1176,20 @@ func TestConduitTunnel_UserStatusAgreesWithRecheck(t *testing.T) {
 		{"suspended, scoped token", NewScopedUserIdentity(suspended, f.agent.ProjectID, []string{store.UATScopeAgentPortAccess}), true, "user suspended"},
 		{"deleted", NewAuthenticatedUser(deletedID, "deleted@conduit.test", "D", store.UserRoleMember, "cli"), true, "user not found"},
 		{"unknown", NewAuthenticatedUser(tid("tunnel-ghost"), "ghost@conduit.test", "G", store.UserRoleMember, "cli"), true, "user not found"},
-		{"no user row (dev)", NewDevUser(DevUserConfig{Username: "dev"}), false, ""},
+		{"development user, active", NewDevUser(DevUserConfig{Username: "dev"}), false, ""},
+		{"development user, suspended", NewDevUser(DevUserConfig{Username: "dev"}), true, "user suspended"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.name == "development user, suspended" {
+				dev, err := f.store.GetUser(ctx, DevUserID)
+				require.NoError(t, err)
+				dev.Status = store.UserStatusSuspended
+				require.NoError(t, f.store.UpdateUser(ctx, dev))
+				t.Cleanup(func() {
+					dev.Status = store.UserStatusActive
+					require.NoError(t, f.store.UpdateUser(ctx, dev))
+				})
+			}
 			verdict, reason := f.srv.checkConduitUserStream(ctx, &conduitUserStream{
 				Kind: grant.StreamKindTCP, Identity: tc.ident, UserID: tc.ident.ID(),
 				AgentID: f.agent.ID, ProjectID: f.agent.ProjectID, Port: 3000,
