@@ -19,6 +19,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"time"
 
@@ -594,6 +596,10 @@ type AgentAppliedConfig struct {
 // caller's original agent object (which the persistence path may still
 // write from) must come out of this call unmodified.
 //
+// Each InlineConfig.MCPServers entry's env and headers maps are cleared the
+// same way (see redactMCPServersForResponse), matching env: the entries
+// themselves stay in the response.
+//
 // CreateInputs.InlineConfig gets the same treatment as InlineConfig, through
 // a deep copy of CreateInputs (see redactCreateInputsForResponse).
 //
@@ -632,8 +638,9 @@ func redactCreateInputsForResponse(ci *AgentCreateInputs, canAttach bool) *Agent
 }
 
 // redactInlineConfigForResponse returns a deep copy of cfg suitable for a
-// response body: Env and the Telemetry cloud-export header map are cleared
-// unless canAttach is true, and GITHUB_TOKEN is stripped from Env
+// response body: Env, the Telemetry cloud-export header map and every MCP
+// server's env and headers are cleared unless canAttach is true, and
+// GITHUB_TOKEN is stripped from Env
 // unconditionally, mirroring AgentAppliedConfig's own top-level rule (see
 // ResponseView/MarshalJSON above). ClearedFields is dropped for every
 // viewer: it is hub-internal bookkeeping (ptone/scion#3906), its env.<KEY>
@@ -675,7 +682,34 @@ func redactInlineConfigForResponse(cfg *api.ScionConfig, canAttach bool) *api.Sc
 		copied.Env = env
 	}
 	copied.Telemetry = redactTelemetryForResponse(cfg.Telemetry, canAttach)
+	copied.MCPServers = redactMCPServersForResponse(cfg.MCPServers, canAttach)
 	return &copied
+}
+
+// redactMCPServersForResponse returns a deep copy of servers suitable for a
+// response body. Each server's env and headers maps get the same
+// default-closed treatment as InlineConfig.Env: they are cleared unless
+// canAttach is true. Every other field of an entry (transport, command,
+// args, url, scope) is copied through, so the response still lists every
+// server. canAttach is ResponseView's own parameter, passed through
+// unchanged by redactInlineConfigForResponse. The input is never mutated.
+func redactMCPServersForResponse(servers map[string]api.MCPServerConfig, canAttach bool) map[string]api.MCPServerConfig {
+	if servers == nil {
+		return nil
+	}
+	copied := make(map[string]api.MCPServerConfig, len(servers))
+	for name, srv := range servers {
+		srv.Args = slices.Clone(srv.Args)
+		if canAttach {
+			srv.Env = maps.Clone(srv.Env)
+			srv.Headers = maps.Clone(srv.Headers)
+		} else {
+			srv.Env = nil
+			srv.Headers = nil
+		}
+		copied[name] = srv
+	}
+	return copied
 }
 
 // redactTelemetryForResponse returns a deep copy of cfg with the cloud-export
