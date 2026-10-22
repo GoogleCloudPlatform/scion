@@ -246,7 +246,7 @@ test_full_unit_renders_values_verbatim() {
     assert_not_contains "$unit" "##" "template notes dropped"
 }
 
-test_full_no_tls_skips_caddy() {
+test_full_no_tls_needs_https_base_url() {
     local mode
     for mode in flag env; do
         fresh_state
@@ -257,11 +257,36 @@ test_full_no_tls_skips_caddy() {
             EXTRA_ENV=(SKIP_TLS=true)
             run_script gce-start-hub.sh --full
         fi
+        assert_eq 1 "$RC" "${mode}: --no-tls without an https HUB_BASE_URL stops"
+        assert_contains "$OUT" "needs HUB_BASE_URL set to the https:// URL" "${mode}: names the fix"
+        assert_contains "$OUT" "refuses to start with an http base URL on a non-loopback listener" "${mode}: says why"
+        if [[ -f "${STUB_SCP_DIR}/scion-hub.service" ]]; then fail "${mode}: nothing uploaded"; else pass; fi
+        assert_eq "" "$(cat "${STUB_SSH_LOG}" 2>/dev/null)" "${mode}: no remote session"
+    done
+
+    fresh_state
+    EXTRA_ENV=(HUB_BASE_URL=http://hub.internal.example.test:8080)
+    run_script gce-start-hub.sh --full --no-tls
+    assert_eq 1 "$RC" "an http HUB_BASE_URL stops"
+    assert_contains "$OUT" "(got http://hub.internal.example.test:8080)" "names the rejected URL"
+}
+
+test_full_no_tls_skips_caddy() {
+    local mode
+    for mode in flag env; do
+        fresh_state
+        if [[ "$mode" == flag ]]; then
+            EXTRA_ENV=(HUB_BASE_URL=https://hub.internal.example.test)
+            run_script gce-start-hub.sh --full --no-tls
+        else
+            EXTRA_ENV=(SKIP_TLS=true HUB_BASE_URL=https://hub.internal.example.test)
+            run_script gce-start-hub.sh --full
+        fi
         assert_eq 0 "$RC" "${mode}: --full without TLS completes"
         if [[ -f "${STUB_SCP_DIR}/Caddyfile" ]]; then fail "${mode}: no Caddyfile uploaded"; else pass; fi
         if [[ -f "${STUB_SCP_DIR}/scion-hub.service" ]]; then pass; else fail "${mode}: unit file still uploaded"; fi
         assert_contains "$(cat "${STUB_SCP_DIR}/scion-hub.service")" \
-            'SCION_SERVER_BASE_URL=http://hub.demo.scion-ai.dev:8080"' "${mode}: plain HTTP base URL"
+            'SCION_SERVER_BASE_URL=https://hub.internal.example.test"' "${mode}: the terminator's https base URL"
         assert_contains "$(cat "${STUB_SSH_LOG}")" "SKIP_TLS=true" "${mode}: remote session skips Caddy"
         assert_eq "" "$CURL_CALLS" "${mode}: no HTTPS health check"
         assert_contains "$OUT" "Skipping the HTTPS health check" "${mode}: says the check is skipped"

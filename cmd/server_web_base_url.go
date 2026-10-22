@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"fmt"
+	"log"
 	"net"
 	"net/url"
 	"os"
@@ -23,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 )
 
 // The web base URL is the public URL of the web server. It is the base of
@@ -39,11 +41,27 @@ import (
 // the session cookie; changing the web base URL takes operator access to
 // the file or the environment and a restart (ptone/scion#5364).
 //
-// It follows the hub's operator endpoint resolver (resolveHubEndpointFrom),
-// so the hub endpoint and the web base URL cannot disagree on the order:
-// --base-url, SCION_SERVER_HUB_ENDPOINT, SCION_SERVER_BASE_URL, then
-// server.hub.public_url from the global settings file. The legacy settings
-// hub.endpoint (SCION_HUB_ENDPOINT) is not followed.
+// Order (ptone/scion#5364): --base-url, then SCION_SERVER_BASE_URL, then
+// SCION_SERVER_HUB_ENDPOINT, then server.hub.public_url from the global
+// settings file, then the default http://localhost:<port>. The two inputs
+// the web server read before (--base-url and SCION_SERVER_BASE_URL) keep
+// their relative order and win; SCION_SERVER_HUB_ENDPOINT and the file only
+// fill in when neither is set. SCION_SERVER_HUB_ENDPOINT is documented as an
+// override of the endpoint advertised to agents, so it must not move the
+// OAuth redirect base away from SCION_SERVER_BASE_URL. Below those two, the
+// hub-side values come from the hub's operator endpoint resolver
+// (resolveHubEndpointFrom), so they cannot drift from it. The legacy
+// settings hub.endpoint (SCION_HUB_ENDPOINT) is not followed.
+//
+// In a process that does not run the hub (the web server with the Runtime
+// Broker only), server.hub.public_url and SCION_SERVER_HUB_ENDPOINT name the
+// hub the broker reports to, which can be another host; they are not
+// followed there: only --base-url, then SCION_SERVER_BASE_URL, then the
+// default.
+//
+// The scheme is lower-cased and a trailing "/" removed, so every consumer
+// (the redirect URI, the cookie's Secure check on the "https://" prefix,
+// the client config) sees the same value the listener check accepted.
 
 // webBaseURLFollowsIAPAudience decides whether the web base URL follows a
 // hub endpoint derived from the IAP audience (a Cloud Run IAP front end;
@@ -73,31 +91,84 @@ type resolvedWebBaseURL struct {
 // globalSettingsFile names the global settings file in the source label of
 // a server.hub.public_url value.
 func resolveWebBaseURL(cfg *config.GlobalConfig, m serverEndpointMode, globalSettingsFile string) resolvedWebBaseURL {
-	// The web server always fronts the hub, so the hub-enabled order
-	// applies; the legacy settings endpoint is left out ("").
-	m.hubEnabled = true
+	normalize := func(raw string) string { return lowerScheme(strings.TrimRight(raw, "/")) }
+	if m.baseURLFlag != "" {
+		return resolvedWebBaseURL{URL: normalize(m.baseURLFlag), Source: "--base-url"}
+	}
+	// Explicit override step: SCION_SERVER_BASE_URL outranks the hub-side
+	// values (SCION_SERVER_HUB_ENDPOINT and the file) for the web, unlike
+	// for the hub endpoint, which ranks SCION_SERVER_HUB_ENDPOINT first.
+	if baseURL := os.Getenv("SCION_SERVER_BASE_URL"); baseURL != "" {
+		return resolvedWebBaseURL{URL: normalize(baseURL), Source: "SCION_SERVER_BASE_URL"}
+	}
+	def := resolvedWebBaseURL{URL: fmt.Sprintf("http://localhost:%d", m.webPort), Source: webBaseURLSourceDefault}
+	if !m.hubEnabled {
+		// No hub in this process: the hub endpoint names a remote hub.
+		return def
+	}
 	endpoint, src := resolveHubEndpointFrom(cfg, m, "", nil)
-	endpoint = strings.TrimRight(endpoint, "/")
 	switch src {
-	case hubEndpointSourceBaseURLFlag:
-		return resolvedWebBaseURL{URL: endpoint, Source: "--base-url"}
-	case hubEndpointSourceBaseURLEnv:
-		return resolvedWebBaseURL{URL: endpoint, Source: "SCION_SERVER_BASE_URL"}
 	case hubEndpointSourceConfig:
 		if os.Getenv(hubEndpointEnvVar) != "" {
-			return resolvedWebBaseURL{URL: endpoint, Source: hubEndpointEnvVar}
+			return resolvedWebBaseURL{URL: normalize(endpoint), Source: hubEndpointEnvVar}
 		}
 		file := globalSettingsFile
 		if file == "" {
 			file = "the global settings file"
 		}
-		return resolvedWebBaseURL{URL: endpoint, Source: "server.hub.public_url in " + file}
+		return resolvedWebBaseURL{URL: normalize(endpoint), Source: "server.hub.public_url in " + file}
 	case hubEndpointSourceIAPAudience:
 		if webBaseURLFollowsIAPAudience {
-			return resolvedWebBaseURL{URL: endpoint, Source: "derived from the IAP audience (server.auth.proxy.iap.audience)"}
+			return resolvedWebBaseURL{URL: normalize(endpoint), Source: "derived from the IAP audience (server.auth.proxy.iap.audience)"}
 		}
 	}
-	return resolvedWebBaseURL{URL: fmt.Sprintf("http://localhost:%d", m.webPort), Source: webBaseURLSourceDefault}
+	return def
+}
+
+// lowerScheme lower-cases the scheme of raw ("HTTPS://h" -> "https://h");
+// a value without "://" is returned as it is.
+func lowerScheme(raw string) string {
+	if scheme, rest, ok := strings.Cut(raw, "://"); ok {
+		return strings.ToLower(scheme) + "://" + rest
+	}
+	return raw
+}
+
+// webListenHost is the web server's listen host: cfg.Hub.Host, with an
+// empty value normalised to 0.0.0.0 (what the listener binds) before any
+// check.
+func webListenHost(cfg *config.GlobalConfig) string {
+	if cfg.Hub.Host == "" {
+		return "0.0.0.0"
+	}
+	return cfg.Hub.Host
+}
+
+// devAuthBindError is the refusal for dev auth on a non-loopback listen
+// host (the message initWebServer has always used).
+func devAuthBindError(webHost string) error {
+	return fmt.Errorf(
+		"dev auth cannot be enabled when the server is bound to a non-loopback address (%s). "+
+			"Dev auth auto-logs in all requests as admin and must only be used on localhost. "+
+			"Either bind to 127.0.0.1/::1/localhost (--host 127.0.0.1) or disable dev auth", webHost)
+}
+
+// webStartupPreflight runs the web server's listener checks at startup,
+// before the store, dev auth and the hub are initialised: first the
+// dev-auth bind check (dev auth is enabled in the config), then the web
+// base URL check. It returns the web base URL, resolved once here and
+// passed to initWebServer, and logs it with its source.
+func webStartupPreflight(cfg *config.GlobalConfig, m serverEndpointMode, globalSettingsFile string) (resolvedWebBaseURL, error) {
+	webHost := webListenHost(cfg)
+	if cfg.Auth.Enabled && !hub.IsLoopbackHost(webHost) {
+		return resolvedWebBaseURL{}, devAuthBindError(webHost)
+	}
+	base := resolveWebBaseURL(cfg, m, globalSettingsFile)
+	if err := checkWebBaseURLListener(base, webHost, m.webPort); err != nil {
+		return resolvedWebBaseURL{}, err
+	}
+	log.Printf("Web base URL: %s (from %s)", base.URL, base.Source)
+	return base, nil
 }
 
 // globalSettingsFileLabel returns the path of the global settings file for

@@ -1837,22 +1837,24 @@ Exactly one list is.
    SCION_SERVER_BASE_URL environment variable.
 
    Precedence for base-url, read from the hub rather than assumed, because "two
-   sources" only matters if one of them silently loses:
+   sources" only matters if one of them silently loses (see the server config
+   reference, "Web Base URL" and "Hub Endpoint Resolution", for the full rules):
 
-     cmd/server_foreground.go, initWebServer (the OAuth redirect base)
-       --base-url, else SCION_SERVER_BASE_URL, else http://localhost:<web-port>
-     cmd/server_foreground.go, resolveHubEndpoint (the URL agents dial)
-       settings file server.hub.public_url, else --base-url, else
-       SCION_SERVER_BASE_URL, else project settings, else localhost
+     cmd/server_web_base_url.go, resolveWebBaseURL (the OAuth redirect base)
+       --base-url, else SCION_SERVER_BASE_URL, else SCION_SERVER_HUB_ENDPOINT,
+       else server.hub.public_url from the global settings file, else
+       http://localhost:<web-port>
+     cmd/server_foreground.go, resolveHubEndpointFrom (the URL agents dial)
+       --base-url, else SCION_SERVER_HUB_ENDPOINT, else SCION_SERVER_BASE_URL,
+       else server.hub.public_url from the settings file, else the fallbacks
 
-   Two consequences, both silent. ARGV BEATS THE ENVIRONMENT AT BOTH SITES, and
-   the environment variable is one this chart renders, so an argv --base-url
-   shadows a live value rather than a hypothetical one, with no error and, unless
-   --debug is on, no log line either. And the two sites do not
-   agree with each other - the settings file outranks argv when resolving the
-   agent-facing endpoint but is not consulted at all for the OAuth redirect - so
-   argv plus a settings file that sets public_url yields two different base URLs
-   in one process, each correct by its own rule.
+   ARGV BEATS THE ENVIRONMENT AT BOTH SITES, and the environment variable is
+   one this chart renders, so an argv --base-url shadows a live value rather
+   than a hypothetical one, with no error and, unless --debug is on, no log
+   line either. The two sites also rank SCION_SERVER_BASE_URL and
+   SCION_SERVER_HUB_ENDPOINT in opposite orders, so setting both (for example
+   through hub.extraEnv) can give the OAuth redirect and the agent endpoint
+   two different base URLs in one process, each correct by its own rule.
 
    That is why this entry is reserved rather than merely discouraged. A later
    phase may still choose argv as the delivery channel for base-url, and this

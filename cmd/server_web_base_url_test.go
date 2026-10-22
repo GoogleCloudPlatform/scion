@@ -31,13 +31,13 @@ func webBaseURLTestEnv(t *testing.T) {
 	t.Setenv("SCION_HUB_ENDPOINT", "")
 }
 
-// The web base URL follows the hub's operator endpoint order (--base-url,
-// SCION_SERVER_HUB_ENDPOINT, SCION_SERVER_BASE_URL, server.hub.public_url
-// from the global settings file), and otherwise the default; the legacy
-// settings hub.endpoint is not followed (ptone/scion#5364).
+// The web base URL order: --base-url, SCION_SERVER_BASE_URL,
+// SCION_SERVER_HUB_ENDPOINT, server.hub.public_url from the global settings
+// file, then the default; the legacy settings hub.endpoint is not followed
+// (ptone/scion#5364).
 func TestResolveWebBaseURL_Order(t *testing.T) {
 	const file = "/home/u/.scion/settings.yaml"
-	mode := serverEndpointMode{webEnabled: true, webPort: 8080}
+	mode := serverEndpointMode{hubEnabled: true, webEnabled: true, webPort: 8080}
 
 	t.Run("default", func(t *testing.T) {
 		webBaseURLTestEnv(t)
@@ -66,14 +66,28 @@ func TestResolveWebBaseURL_Order(t *testing.T) {
 		got := resolveWebBaseURL(cfg, mode, file)
 		assert.Equal(t, resolvedWebBaseURL{URL: "https://env.example.com", Source: "SCION_SERVER_BASE_URL"}, got)
 	})
-	t.Run("SCION_SERVER_HUB_ENDPOINT outranks SCION_SERVER_BASE_URL", func(t *testing.T) {
+	t.Run("SCION_SERVER_BASE_URL outranks SCION_SERVER_HUB_ENDPOINT", func(t *testing.T) {
 		webBaseURLTestEnv(t)
-		t.Setenv(hubEndpointEnvVar, "https://hubenv.example.com")
+		t.Setenv(hubEndpointEnvVar, "https://agents.internal.example.com")
 		t.Setenv("SCION_SERVER_BASE_URL", "https://env.example.com")
 		cfg := &config.GlobalConfig{}
-		cfg.Hub.Endpoint = "https://hubenv.example.com" // applied over the file value when the config loads
+		cfg.Hub.Endpoint = "https://agents.internal.example.com" // applied over the file value when the config loads
+		got := resolveWebBaseURL(cfg, mode, file)
+		assert.Equal(t, resolvedWebBaseURL{URL: "https://env.example.com", Source: "SCION_SERVER_BASE_URL"}, got)
+	})
+	t.Run("only SCION_SERVER_HUB_ENDPOINT set: it is used", func(t *testing.T) {
+		webBaseURLTestEnv(t)
+		t.Setenv(hubEndpointEnvVar, "https://hubenv.example.com")
+		cfg := &config.GlobalConfig{}
+		cfg.Hub.Endpoint = "https://hubenv.example.com"
 		got := resolveWebBaseURL(cfg, mode, file)
 		assert.Equal(t, resolvedWebBaseURL{URL: "https://hubenv.example.com", Source: hubEndpointEnvVar}, got)
+	})
+	t.Run("upper-case scheme is lower-cased", func(t *testing.T) {
+		webBaseURLTestEnv(t)
+		t.Setenv("SCION_SERVER_BASE_URL", "HTTPS://Hub.Example.com/")
+		got := resolveWebBaseURL(&config.GlobalConfig{}, mode, file)
+		assert.Equal(t, resolvedWebBaseURL{URL: "https://Hub.Example.com", Source: "SCION_SERVER_BASE_URL"}, got)
 	})
 	t.Run("--base-url outranks everything", func(t *testing.T) {
 		webBaseURLTestEnv(t)
@@ -92,7 +106,7 @@ func TestResolveWebBaseURL_Order(t *testing.T) {
 		got := resolveWebBaseURL(&config.GlobalConfig{}, mode, file)
 		assert.Equal(t, "default", got.Source)
 	})
-	t.Run("hub disabled in the mode still uses the hub order", func(t *testing.T) {
+	t.Run("no hub in the process: SCION_SERVER_BASE_URL is used", func(t *testing.T) {
 		webBaseURLTestEnv(t)
 		t.Setenv("SCION_SERVER_BASE_URL", "https://env.example.com")
 		m := mode
@@ -100,22 +114,39 @@ func TestResolveWebBaseURL_Order(t *testing.T) {
 		got := resolveWebBaseURL(&config.GlobalConfig{}, m, file)
 		assert.Equal(t, "SCION_SERVER_BASE_URL", got.Source)
 	})
+	t.Run("no hub in the process: the file value (a remote hub) is not followed", func(t *testing.T) {
+		webBaseURLTestEnv(t)
+		cfg := &config.GlobalConfig{}
+		cfg.Hub.Endpoint = "https://remote-hub.example.com"
+		m := mode
+		m.hubEnabled = false
+		got := resolveWebBaseURL(cfg, m, file)
+		assert.Equal(t, resolvedWebBaseURL{URL: "http://localhost:8080", Source: "default"}, got)
+	})
+	t.Run("no hub in the process: SCION_SERVER_HUB_ENDPOINT (a remote hub) is not followed", func(t *testing.T) {
+		webBaseURLTestEnv(t)
+		t.Setenv(hubEndpointEnvVar, "https://remote-hub.example.com")
+		cfg := &config.GlobalConfig{}
+		cfg.Hub.Endpoint = "https://remote-hub.example.com"
+		m := mode
+		m.hubEnabled = false
+		got := resolveWebBaseURL(cfg, m, file)
+		assert.Equal(t, "default", got.Source)
+	})
 }
 
-// The IAP-derived hub endpoint is followed only when the
-// webBaseURLFollowsIAPAudience decision is on (ptone/scion#5364).
+// The IAP-derived hub endpoint is not followed: this pins the current D3
+// decision (webBaseURLFollowsIAPAudience = false, ptone/scion#5364) as a
+// literal, so flipping the const must change this test, deliberately and
+// visibly (to expect https://hub-123.us-central1.run.app, source "derived
+// from the IAP audience (server.auth.proxy.iap.audience)").
 func TestResolveWebBaseURL_IAPAudienceDecision(t *testing.T) {
 	webBaseURLTestEnv(t)
 	cfg := &config.GlobalConfig{}
 	cfg.Auth.Proxy = &config.ProxyAuthConfig{IAP: &config.IAPAuthConfig{Audience: "/projects/123/locations/us-central1/services/hub"}}
-	mode := serverEndpointMode{webEnabled: true, webPort: 8080, hosted: true}
+	mode := serverEndpointMode{hubEnabled: true, webEnabled: true, webPort: 8080, hosted: true}
 	got := resolveWebBaseURL(cfg, mode, "")
-	if webBaseURLFollowsIAPAudience {
-		assert.Equal(t, "https://hub-123.us-central1.run.app", got.URL)
-		assert.Equal(t, "derived from the IAP audience (server.auth.proxy.iap.audience)", got.Source)
-	} else {
-		assert.Equal(t, resolvedWebBaseURL{URL: "http://localhost:8080", Source: "default"}, got)
-	}
+	assert.Equal(t, resolvedWebBaseURL{URL: "http://localhost:8080", Source: "default"}, got)
 }
 
 // A non-loopback listener with a base URL that is not https is refused,
@@ -153,6 +184,7 @@ func TestCheckWebBaseURLListener_Cases(t *testing.T) {
 		refuse bool
 	}{
 		{"https on a public listener", https, "0.0.0.0", false},
+		{"upper-case HTTPS on a public listener", resolvedWebBaseURL{URL: "HTTPS://hub.example.com", Source: "--base-url"}, "0.0.0.0", false},
 		{"http on 127.0.0.1", http, "127.0.0.1", false},
 		{"http on 127.1.2.3", http, "127.1.2.3", false},
 		{"http on ::1", http, "::1", false},
@@ -189,4 +221,48 @@ func TestCheckWebBaseURLListener_AHostnameResolvingToLoopbackDoesNotQualify(t *t
 	for _, host := range []string{"ip6-localhost", "localhost.localdomain", "localtest.me"} {
 		assert.Error(t, checkWebBaseURLListener(http, host, 8080), "listen host %q", host)
 	}
+}
+
+// webStartupPreflight runs at startup before the store and the hub: the
+// dev-auth bind check first (same message as initWebServer), then the web
+// base URL check, and returns the resolved base URL (ptone/scion#5364).
+func TestWebStartupPreflight(t *testing.T) {
+	mode := serverEndpointMode{hubEnabled: true, webEnabled: true, webPort: 8080}
+	t.Run("default base URL on 0.0.0.0 is refused", func(t *testing.T) {
+		webBaseURLTestEnv(t)
+		cfg := &config.GlobalConfig{}
+		cfg.Hub.Host = ""
+		_, err := webStartupPreflight(cfg, mode, "")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "refusing to start the web server")
+		assert.Contains(t, err.Error(), "listens on 0.0.0.0:8080")
+	})
+	t.Run("https base URL on 0.0.0.0 passes and is returned", func(t *testing.T) {
+		webBaseURLTestEnv(t)
+		t.Setenv("SCION_SERVER_BASE_URL", "https://hub.example.com")
+		cfg := &config.GlobalConfig{}
+		cfg.Hub.Host = "0.0.0.0"
+		got, err := webStartupPreflight(cfg, mode, "")
+		require.NoError(t, err)
+		assert.Equal(t, resolvedWebBaseURL{URL: "https://hub.example.com", Source: "SCION_SERVER_BASE_URL"}, got)
+	})
+	t.Run("dev auth on a non-loopback host is refused first, with the dev-auth message", func(t *testing.T) {
+		webBaseURLTestEnv(t)
+		cfg := &config.GlobalConfig{}
+		cfg.Hub.Host = "0.0.0.0"
+		cfg.Auth.Enabled = true
+		_, err := webStartupPreflight(cfg, mode, "")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "dev auth cannot be enabled")
+		assert.NotContains(t, err.Error(), "refusing to start the web server")
+	})
+	t.Run("http on a loopback host with dev auth passes", func(t *testing.T) {
+		webBaseURLTestEnv(t)
+		cfg := &config.GlobalConfig{}
+		cfg.Hub.Host = "127.0.0.1"
+		cfg.Auth.Enabled = true
+		got, err := webStartupPreflight(cfg, mode, "")
+		require.NoError(t, err)
+		assert.Equal(t, "default", got.Source)
+	})
 }
