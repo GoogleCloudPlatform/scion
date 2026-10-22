@@ -830,6 +830,12 @@ func entBrokerToStore(b *ent.RuntimeBroker) *store.RuntimeBroker {
 			DisplayName: b.RuntimeTargetDisplayName,
 		}
 	}
+	unmarshalRawJSON(b.RuntimeTargetPresentation, &sb.RuntimeTargetPresentation)
+	sb.RuntimeTargetPresentationHash = b.RuntimeTargetPresentationHash
+	sb.RuntimeTargetPresentationObservedAt = b.PresentationObservedAt
+	sb.PresentationEpoch = b.PresentationEpoch
+	sb.PresentationSeq = b.PresentationSeq
+	sb.PresentationFencedAt = b.PresentationFencedAt
 	return sb
 }
 
@@ -858,6 +864,8 @@ func (s *ProjectStore) CreateRuntimeBroker(ctx context.Context, b *store.Runtime
 		SetHealth(marshalRawJSON(b.Health)).
 		SetLabels(b.Labels).
 		SetAnnotations(b.Annotations)
+	// The six presentation columns are never written at creation; only
+	// SetRuntimeBrokerPresentation writes them.
 	if b.IsFlat() {
 		create.SetRuntimeTargetID(b.RuntimeTarget.ID).
 			SetRuntimeTargetType(b.RuntimeTarget.Type).
@@ -957,7 +965,12 @@ func (s *ProjectStore) UpdateRuntimeBroker(ctx context.Context, b *store.Runtime
 		// On a flat row (stored runtime target), profiles never persist:
 		// strip rather than reject, so a leftover written by an older binary
 		// cannot make later read-modify-writes fail. The runtime_target_*
-		// columns are never written here.
+		// columns are never written here, and neither are the six
+		// presentation columns (runtime_target_presentation, its hash,
+		// presentation_epoch, presentation_seq, presentation_fenced_at,
+		// presentation_observed_at): only SetRuntimeBrokerPresentation
+		// writes them, so a write-back of a copy read before a presentation
+		// write cannot roll it back. Do not add them to this list.
 		profiles, defaultProfile := b.Profiles, b.DefaultProfile
 		if cur.RuntimeTargetID != nil && *cur.RuntimeTargetID != "" {
 			if len(profiles) > 0 || defaultProfile != "" {
@@ -1141,14 +1154,28 @@ func gcpHostSettingOf(b *ent.RuntimeBroker) store.GCPHostSetting {
 // UPDATE makes the UPDATE match no row, and the loop retries with a fresh
 // read, so the returned values are exactly the ones overwritten.
 func (s *ProjectStore) casGCPHostWrite(ctx context.Context, id string, apply func(u *ent.RuntimeBrokerUpdate)) (store.GCPHostSetting, error) {
+	prev, _, err := s.casGCPHostWriteIf(ctx, id, nil, apply)
+	return prev, err
+}
+
+// casGCPHostWriteIf is casGCPHostWrite with an optional precondition on the
+// stored values. cond is evaluated on each read; when it returns false the
+// row is not written and the stored values are returned with applied=false.
+// Because the UPDATE is conditioned on the lock_version that was read, the
+// values cond accepted are the values the write replaces.
+func (s *ProjectStore) casGCPHostWriteIf(ctx context.Context, id string, cond func(store.GCPHostSetting) bool, apply func(u *ent.RuntimeBrokerUpdate)) (store.GCPHostSetting, bool, error) {
 	uid, err := parseUUID(id)
 	if err != nil {
-		return store.GCPHostSetting{}, err
+		return store.GCPHostSetting{}, false, err
 	}
 	for attempt := 0; attempt < maxCASRetries; attempt++ {
 		cur, err := s.client.RuntimeBroker.Get(ctx, uid)
 		if err != nil {
-			return store.GCPHostSetting{}, mapError(err)
+			return store.GCPHostSetting{}, false, mapError(err)
+		}
+		stored := gcpHostSettingOf(cur)
+		if cond != nil && !cond(stored) {
+			return stored, false, nil
 		}
 		u := s.client.RuntimeBroker.Update().
 			Where(runtimebroker.IDEQ(uid), runtimebroker.LockVersionEQ(cur.LockVersion)).
@@ -1157,20 +1184,33 @@ func (s *ProjectStore) casGCPHostWrite(ctx context.Context, id string, apply fun
 		apply(u)
 		affected, err := u.Save(ctx)
 		if err != nil {
-			return store.GCPHostSetting{}, mapError(err)
+			return store.GCPHostSetting{}, false, mapError(err)
 		}
 		if affected == 1 {
-			return gcpHostSettingOf(cur), nil
+			return stored, true, nil
 		}
 	}
-	return store.GCPHostSetting{}, store.ErrVersionConflict
+	return store.GCPHostSetting{}, false, store.ErrVersionConflict
 }
 
 // SetRuntimeBrokerGCPHost writes the GCP host pair unconditionally with
 // source admin, as a compare-and-set on lock_version, and returns the
-// values it replaced.
+// values it replaced. For test fixtures and maintenance only; request paths
+// use SetRuntimeBrokerGCPHostIfPrior or SetRuntimeBrokerGCPHostIfUnset.
 func (s *ProjectStore) SetRuntimeBrokerGCPHost(ctx context.Context, id, email, project string) (store.GCPHostSetting, error) {
 	return s.casGCPHostWrite(ctx, id, func(u *ent.RuntimeBrokerUpdate) {
+		setGCPHostPair(u.SetGcpHostSource(store.GCPHostSourceAdmin), email, project)
+	})
+}
+
+// SetRuntimeBrokerGCPHostIfPrior writes the GCP host pair with source admin
+// only while the stored pair is priorEmail/priorProject (email compared
+// ignoring letter case), in the same compare-and-set as the write.
+func (s *ProjectStore) SetRuntimeBrokerGCPHostIfPrior(ctx context.Context, id, priorEmail, priorProject, email, project string) (store.GCPHostSetting, bool, error) {
+	matches := func(stored store.GCPHostSetting) bool {
+		return strings.EqualFold(stored.Email, priorEmail) && stored.Project == priorProject
+	}
+	return s.casGCPHostWriteIf(ctx, id, matches, func(u *ent.RuntimeBrokerUpdate) {
 		setGCPHostPair(u.SetGcpHostSource(store.GCPHostSourceAdmin), email, project)
 	})
 }

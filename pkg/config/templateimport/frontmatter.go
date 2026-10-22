@@ -24,27 +24,26 @@ import (
 var frontMatterDelimiter = []byte("---")
 
 // ParseFrontMatter splits a markdown file into YAML front matter and the remaining body.
+// Front matter delimiters must occupy their own lines.
 // Returns the parsed front matter as a map, the markdown body, and any error.
 // If the file has no front matter, returns nil map and the full content as body.
 func ParseFrontMatter(data []byte) (map[string]any, string, error) {
 	trimmed := bytes.TrimLeft(data, " \t\r\n")
-	if !bytes.HasPrefix(trimmed, frontMatterDelimiter) {
+	opening, rest, ok := bytes.Cut(trimmed, []byte("\n"))
+	if !ok || !bytes.Equal(bytes.TrimRight(opening, " \t\r"), frontMatterDelimiter) {
 		return nil, string(data), nil
 	}
 
-	// Skip the opening delimiter line
-	rest := trimmed[len(frontMatterDelimiter):]
-	// Skip any trailing content on the delimiter line (e.g., newline)
-	if idx := bytes.IndexByte(rest, '\n'); idx >= 0 {
-		rest = rest[idx+1:]
-	} else {
-		// No newline after opening delimiter — malformed
-		return nil, string(data), nil
+	// Match a whole closing delimiter line. Leading whitespace is significant:
+	// an indented --- can be content in a YAML block scalar.
+	closingIdx := 0
+	for line := range bytes.Lines(rest) {
+		if bytes.Equal(bytes.TrimRight(line, " \t\r\n"), frontMatterDelimiter) {
+			break
+		}
+		closingIdx += len(line)
 	}
-
-	// Find the closing delimiter
-	closingIdx := bytes.Index(rest, frontMatterDelimiter)
-	if closingIdx < 0 {
+	if closingIdx == len(rest) {
 		return nil, "", fmt.Errorf("unclosed front matter: missing closing ---")
 	}
 

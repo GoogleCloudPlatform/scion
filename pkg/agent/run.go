@@ -464,8 +464,12 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// environment values applied here on every start, never persisted
 	// (ptone/scion#4561).
 	var fileVolumes, settingsVolumes []api.VolumeMount
+	// The on-disk harness-config's model_aliases, for resolving a size alias
+	// in the effective model (resolveEffectiveModel).
+	var hcModelAliases map[string]string
 	if harnessConfigName != "" {
 		if hcDir, err := resolveHarnessConfigDir(ctx, harnessConfigName, projectDir, templatePaths...); err == nil {
+			hcModelAliases = hcDir.Config.ModelAliases
 			if hcDir.Config.Image != "" {
 				fileImage = hcDir.Config.Image
 				util.Debugf("image resolution: on-disk harness-config image=%s path=%s", fileImage, hcDir.Path)
@@ -1357,16 +1361,18 @@ authDone:
 	if h != nil {
 		opts.Env[state.HarnessReadyEnv] = state.FormatReadySpecEnv(h.ReadySpec())
 	}
-	if _, ok := opts.Env["SCION_MODEL"]; !ok && finalScionCfg != nil && finalScionCfg.Model != "" {
-		opts.Env["SCION_MODEL"] = finalScionCfg.Model
-	}
-	// Re-resolve SCION_MODEL if it contains an unresolved size alias.
-	// The hub may inject a raw alias (e.g. "large") when its store lacks
-	// the harness config's model_aliases map; the broker has the on-disk
-	// config and can resolve it here.
-	if resolved, ok := reResolveModelAlias(opts.Env["SCION_MODEL"], finalScionCfg, harnessName); ok {
-		util.Debugf("RunAgent: re-resolved leaked model alias %q → %q", opts.Env["SCION_MODEL"], resolved)
-		opts.Env["SCION_MODEL"] = resolved
+	// One model channel (ptone/scion#3914): the agent's model is resolved
+	// once, here, and both SCION_MODEL and the harness argv --model
+	// (CommandArgs below) carry this same value. SCION_MODEL already in the
+	// env (the hub-resolved model, or an explicit --env) wins over the
+	// broker's own config, so a broker template or harness-config default
+	// cannot override the hub's request > project > template > hub order.
+	effectiveModel := resolveEffectiveModel(opts.Env["SCION_MODEL"], finalScionCfg, hcModelAliases, harnessName)
+	if effectiveModel != "" {
+		if prev := opts.Env["SCION_MODEL"]; prev != "" && prev != effectiveModel {
+			util.Debugf("RunAgent: resolved model alias %q → %q", prev, effectiveModel)
+		}
+		opts.Env["SCION_MODEL"] = effectiveModel
 	}
 	if _, ok := opts.Env["SCION_THINKING_LEVEL"]; !ok && finalScionCfg != nil && finalScionCfg.ThinkingLevel != nil {
 		opts.Env["SCION_THINKING_LEVEL"] = strconv.Itoa(*finalScionCfg.ThinkingLevel)
@@ -2030,32 +2036,24 @@ authDone:
 		// pod-local EmptyDir on Kubernetes). With NFS storage it gets its
 		// own agent directory on the export (design #2703 P3), which only
 		// the Kubernetes runtime can mount: see nfsEmptyAgentDirSelection.
-		var emptyAgentDirName string
 		if emptyPerAgent {
 			sharingMode = store.SharingModeEmptyPerAgent
-			var selErr error
-			emptyAgentDirName, selErr = nfsEmptyAgentDirSelection(m.Runtime.Name(), settings.Server.WorkspaceStorage, opts.Name)
-			if selErr != nil {
-				return nil, selErr
-			}
+		}
+		// The agent's own directory on the export, if it gets one
+		// (nfsOwnAgentDirSelection): empty-per-agent, or a git project
+		// dispatched in clone-per-agent mode on Kubernetes, with a
+		// workspace the agent container clones into. Paths are still
+		// resolved from the project's workspace path (shared-plain).
+		emptyAgentDirName, agentDirName, agentBranch, selErr := nfsOwnAgentDirSelection(m.Runtime.Name(), settings.Server.WorkspaceStorage, emptyPerAgent, opts.Env, opts.GitClone, opts.Name)
+		if selErr != nil {
+			return nil, selErr
 		}
 		// On Kubernetes, a git project dispatched in worktree-per-agent mode
 		// gets its own worktree under the shared checkout. Shared-plain and
 		// every other runtime keep the layout above.
-		// A git project dispatched in clone-per-agent mode gets its own
-		// agent directory next to the project's workspace path instead,
-		// with a workspace the agent container clones into. Paths are
-		// still resolved from the project's workspace path (shared-plain).
-		var worktreeName, worktreeBranch, agentDirName, agentBranch string
+		var worktreeName, worktreeBranch string
 		if isKubernetesRuntime(m.Runtime.Name()) && !emptyPerAgent {
 			worktreeName, worktreeBranch = nfsWorktreeSelection(opts.Env, opts.GitClone, opts.Name)
-			if settings.Server.WorkspaceStorage.Backend == "nfs" {
-				var selErr error
-				agentDirName, agentBranch, selErr = nfsAgentDirSelection(opts.Env, opts.GitClone, opts.Name)
-				if selErr != nil {
-					return nil, selErr
-				}
-			}
 		}
 		if worktreeName != "" {
 			sharingMode = store.SharingModeWorktreePerAgent
@@ -2120,6 +2118,11 @@ authDone:
 					agentEnv = withEnvValue(agentEnv, "SCION_WORKSPACE_MODE", string(store.SharingModeSharedPlain))
 				}
 			}
+			// ownDirCreated reports whether this start created the agent's
+			// own directory on the export (an atomic claim in the leaf
+			// helper): a forced move's start marks it as the move's only
+			// then (markMoveExportAgentDir).
+			ownDirName, ownDirCreated := "", false
 			if emptyAgentDirName != "" {
 				// Empty-per-agent: only the agent's own directory is ever
 				// mounted, never the project's workspace path resolved
@@ -2128,15 +2131,29 @@ authDone:
 				if mount.PVClaimName == "" {
 					return nil, errEmptyPerAgentNFSNoClaim
 				}
-				nfsWorkspacePreCreated, err = ensureNFSAgentWorkspaceLeaf(m.Runtime.Name(), projectID, resolvedWorkspace, mount.PVClaimName, claimSharedDirNames, emptyAgentDirName)
+				nfsWorkspacePreCreated, ownDirCreated, err = ensureNFSAgentWorkspaceLeafClaim(m.Runtime.Name(), projectID, resolvedWorkspace, mount.PVClaimName, claimSharedDirNames, emptyAgentDirName)
+				ownDirName = emptyAgentDirName
 				nfsAgentDirName = emptyAgentDirName
 				nfsAgentDirEmpty = true
 			} else if agentDirName != "" && mount.PVClaimName != "" {
-				nfsWorkspacePreCreated, err = ensureNFSAgentWorkspaceLeaf(m.Runtime.Name(), projectID, resolvedWorkspace, mount.PVClaimName, claimSharedDirNames, agentDirName)
+				nfsWorkspacePreCreated, ownDirCreated, err = ensureNFSAgentWorkspaceLeafClaim(m.Runtime.Name(), projectID, resolvedWorkspace, mount.PVClaimName, claimSharedDirNames, agentDirName)
+				ownDirName = agentDirName
 				nfsAgentDirName = agentDirName
 				nfsAgentBranch = agentBranch
 			} else {
 				nfsWorkspacePreCreated, err = ensureNFSWorkspaceLeaf(m.Runtime.Name(), projectID, resolvedWorkspace, mount.PVClaimName, claimSharedDirNames)
+			}
+			// A directory this start created is marked even when the leaf
+			// helper then failed on a later directory, before that failure
+			// is returned, so a forced move's rollback can still remove it.
+			if ownDirCreated {
+				ownDirPath, perr := nfsOwnAgentDirPath(resolvedWorkspace, ownDirName)
+				if perr == nil {
+					perr = markMoveExportAgentDir(agentDir, ownDirPath)
+				}
+				if perr != nil {
+					return nil, errors.Join(err, perr)
+				}
 			}
 			if err != nil {
 				return nil, err
@@ -2212,13 +2229,16 @@ authDone:
 	// typically resolves it to a non-empty RepoRoot (the NFS shared base)
 	// exactly as it would for a plain, non-worktree git project.
 	// RunConfig.RepoRoot being set this way on Kubernetes does not change
-	// what gets mounted: the Kubernetes runtime builds its mounts from
-	// containerWorkspace and the NFS* fields above, never from RepoRoot. The
-	// repoRoot computed earlier was validated against the PRE-backend path,
-	// so if the backend actually changed it, re-resolve against the value
-	// RunConfig will use, through the same validatedWorktreeRepoRoot
-	// comparison used above and in the persistence gate — not a separate,
-	// inline comparison of this layout's own.
+	// where the workspace is mounted: the Kubernetes runtime builds its
+	// workspace mounts from containerWorkspace and the NFS* fields above.
+	// It reads RepoRoot only to decide whether the shared workspace's
+	// in-project agents dir is kept out of the pod (see
+	// k8sWorkspaceAgentsExcluded). The repoRoot computed earlier was
+	// validated against the PRE-backend path, so if the backend actually
+	// changed it, re-resolve against the value RunConfig will use, through
+	// the same validatedWorktreeRepoRoot comparison used above and in the
+	// persistence gate — not a separate, inline comparison of this layout's
+	// own.
 	if effectiveWorkspace != preBackendWorkspace && !emptyPerAgent {
 		repoRoot = validatedWorktreeRepoRoot(candidateRepoRoot, effectiveWorkspace)
 		if repoRoot == "" {
@@ -2395,10 +2415,11 @@ authDone:
 			var args []string
 			if finalScionCfg != nil {
 				args = finalScionCfg.CommandArgs
-				if finalScionCfg.Model != "" {
-					// Prepend model flag so it appears before user args but is passed in baseArgs
-					args = append([]string{"--model", finalScionCfg.Model}, args...)
-				}
+			}
+			// The model flag comes before user args, from the same
+			// effective model as SCION_MODEL.
+			args = modelCommandArgs(effectiveModel, args)
+			if finalScionCfg != nil {
 				// If task_flag is configured, append task as a flag value
 				if finalScionCfg.TaskFlag != "" && task != "" {
 					args = append(args, finalScionCfg.TaskFlag, task)
@@ -3587,38 +3608,52 @@ func mergeExtraHosts(a, b []string) []string {
 	return result
 }
 
-// reResolveModelAlias detects when SCION_MODEL contains an unresolved size
-// alias (e.g. "large") that the hub failed to resolve, and returns a
-// concrete model to use instead. It returns ("", false) when no
-// re-resolution is needed — either because the value is not a known alias,
-// or a concrete replacement could not be determined.
+// resolveEffectiveModel returns the agent's one effective model: SCION_MODEL
+// from the start env when set (the hub-resolved model, or an explicit
+// --env), else the broker's own config model (an agent with no hub-resolved
+// model). A size alias left in that value (e.g. "large", when the hub's store
+// lacked the harness config's model_aliases) is resolved against the on-disk
+// harness-config's model_aliases, else the harness's built-in table
+// (harnesses/<harnessName>/config.yaml), so a bare alias never reaches the
+// harness verbatim. An alias neither table resolves is returned in its
+// normalized form (e.g. "large" for "L").
 //
-// It first tries cfg.Model, the broker's own resolved config (this is the
-// pre-existing behavior for when the hub's alias resolution failed but the
-// broker's local config resolved it). When cfg.Model is empty or is itself
-// still the same unresolved alias — e.g. GetAgent had no local template
-// chain to resolve against either — it falls back to the harness's built-in
-// alias table (harnesses/<harnessName>/config.yaml) so a bare alias never
-// reaches the harness verbatim.
-func reResolveModelAlias(envModel string, cfg *api.ScionConfig, harnessName string) (string, bool) {
-	if envModel == "" {
-		return "", false
+// The broker's config model never replaces a SCION_MODEL value, alias or
+// not: that model may be a broker template or harness-config default, which
+// ranks below the hub-resolved model.
+func resolveEffectiveModel(envModel string, cfg *api.ScionConfig, hcAliases map[string]string, harnessName string) string {
+	model := envModel
+	if model == "" && cfg != nil {
+		model = cfg.Model
 	}
-	normalized := config.NormalizeModelAlias(envModel)
-	if !config.KnownModelAliases[normalized] {
-		return "", false
+	if model == "" || !config.KnownModelAliases[config.NormalizeModelAlias(model)] {
+		return model
 	}
-	if cfg != nil && cfg.Model != "" && envModel != cfg.Model {
-		return cfg.Model, true
+	// Normalize once ("L" -> "large"), so an alias a partial on-disk table
+	// lacks still falls through to the built-in table.
+	model = config.NormalizeModelAlias(model)
+	if len(hcAliases) > 0 {
+		if resolved := config.ResolveModelAlias(model, hcAliases); resolved != model {
+			return resolved
+		}
 	}
 	if harnessName != "" {
 		if aliases := harness.DefaultModelAliases(harnessName); len(aliases) > 0 {
-			if resolved := config.ResolveModelAlias(envModel, aliases); resolved != envModel {
-				return resolved, true
+			if resolved := config.ResolveModelAlias(model, aliases); resolved != model {
+				return resolved
 			}
 		}
 	}
-	return "", false
+	return model
+}
+
+// modelCommandArgs prepends the harness model flag for model to args. It
+// returns args unchanged when model is empty.
+func modelCommandArgs(model string, args []string) []string {
+	if model == "" {
+		return args
+	}
+	return append([]string{"--model", model}, args...)
 }
 
 // isEmptyPerAgentStart reports whether opts start an empty-per-agent agent

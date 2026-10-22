@@ -157,6 +157,41 @@ func (RuntimeBroker) Fields() []ent.Field {
 		field.String("runtime_target_display_name").
 			Optional().
 			Default(""),
+		// --- Flat Runtime Broker presentation (store.RuntimeBroker.RuntimeTargetPresentation) ---
+		// The six presentation columns are written only by
+		// SetRuntimeBrokerPresentation (one conditional, epoch/seq-fenced
+		// update) and removed only by deleting the row. CreateRuntimeBroker,
+		// UpdateRuntimeBroker and every other full-row writer never write
+		// them, so a write-back of an older copy cannot roll them back.
+		//
+		// runtime_target_presentation is the JSON-encoded
+		// api.RuntimeTargetPresentation; empty means never reported.
+		field.String("runtime_target_presentation").
+			Optional(),
+		// runtime_target_presentation_hash is the Hub-computed hash of the
+		// stored presentation (never a hash sent by the Runtime Broker).
+		field.String("runtime_target_presentation_hash").
+			Optional(),
+		// presentation_epoch and presentation_seq are the fence of the last
+		// accepted write: the reporting process's start time (Unix
+		// nanoseconds) and its per-process heartbeat counter.
+		field.Int64("presentation_epoch").
+			Optional().
+			Nillable(),
+		field.Int64("presentation_seq").
+			Optional().
+			Nillable(),
+		// presentation_fenced_at is the Hub time of the last fence-advancing
+		// write (written or confirmed).
+		field.Time("presentation_fenced_at").
+			Optional().
+			Nillable(),
+		// presentation_observed_at is the Hub time the stored presentation
+		// was last written or confirmed, refreshed at most every
+		// store.PresentationObservedRefresh on an unchanged presentation.
+		field.Time("presentation_observed_at").
+			Optional().
+			Nillable(),
 		field.Time("created").
 			Default(time.Now).
 			Immutable(),

@@ -332,8 +332,10 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 		if err != nil {
 			if v := moveVerdictFromError(err); v != nil && !isJSONOutput() {
 				printMoveVerdict(os.Stderr, v)
-				printMoveForceHint(os.Stderr, err, reincarnateForce)
 			}
+			// On stderr in both output modes: an agent moving itself
+			// usually runs with --json, and it must amend the handoff.
+			printMoveForceHint(os.Stderr, err, reincarnateForce)
 			if perr := patchNeedsUpdateError(err, wantPatched, hubCtx.CredentialKind); perr != nil {
 				return wrapHubError(perr)
 			}
@@ -368,8 +370,8 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 	if err != nil {
 		if v := moveVerdictFromError(err); v != nil && !isJSONOutput() {
 			printMoveVerdict(os.Stderr, v)
-			printMoveForceHint(os.Stderr, err, reincarnateForce)
 		}
+		printMoveForceHint(os.Stderr, err, reincarnateForce)
 		if apiclient.IsConflictError(err) && moveVerdictFromError(err) == nil {
 			return wrapHubError(fmt.Errorf("a reincarnation is already pending for '%s': %w", agentName, err))
 		}
@@ -631,9 +633,12 @@ const (
 	moveTransferModeRecreate      = "recreate"
 )
 
-// moveForceHint is printed under a refused move's verdict when --force would
-// recreate the agent on the target instead.
-const moveForceHint = "--force recreates the agent on the target instead, giving up its local state (see --dry-run --force)."
+// moveForceHint is the warning printed, on stderr in both human and --json
+// output, when a move refused without --force could be made with it: a
+// forced move keeps only what the handoff carries, so the caller (often the
+// agent itself) can put what matters into the handoff before re-running.
+const moveForceHint = "A forced move does not preserve this agent's home or workspace: it restarts on the target with a fresh home and the target's workspace. " +
+	"Put anything worth keeping into the handoff, then re-run with --force (preview with --dry-run --force)."
 
 // printMoveForceHint prints moveForceHint when a move refused without
 // --force carries forceWouldApply in its error details: the hub decides

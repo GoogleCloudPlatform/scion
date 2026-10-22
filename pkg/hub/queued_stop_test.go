@@ -589,7 +589,7 @@ func TestQueuedStop_ClearSkipsAStopRecordedAfterTheStart(t *testing.T) {
 	// A newer stop queued after the start: intent stopped again.
 	_, err := f.s.SetRunIntent(ctx, a.ID, store.RunIntentStopped)
 	require.NoError(t, err)
-	f.srv.clearSupersededQueuedStop(ctx, snapshot)
+	f.srv.replaceQueuedStop(ctx, snapshot, "running")
 	got := getAgent(t, f.s, a.ID)
 	assert.Equal(t, containerStatusStopQueued, got.ContainerStatus)
 	assert.Equal(t, offlineStopMessage, got.Message)

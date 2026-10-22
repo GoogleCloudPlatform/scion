@@ -72,13 +72,15 @@ The agent is provisioned but not started, even when a task is given. Run
 			return asUsageError(err)
 		}
 
-		hubCtx, err := requireHub(projectPath)
+		// Load inline config if --config was specified, with --model and
+		// --thinking-level on top, before any hub work so a bad flag value
+		// fails as a usage error first (as in scion start).
+		inlineCfg, err := loadCreateInlineConfig(cmd)
 		if err != nil {
 			return err
 		}
 
-		// Load inline config if --config was specified.
-		inlineCfg, err := loadCreateInlineConfig()
+		hubCtx, err := requireHub(projectPath)
 		if err != nil {
 			return err
 		}
@@ -197,19 +199,23 @@ func writeHubCreateText(w io.Writer, agentName string, resp *hubclient.CreateAge
 }
 
 // loadCreateInlineConfig loads the --config file, if one was given, and
-// resolves its file:// content fields. It returns nil without --config.
-func loadCreateInlineConfig() (*api.ScionConfig, error) {
-	if inlineConfigPath == "" {
-		return nil, nil
+// resolves its file:// content fields, then applies --model and
+// --thinking-level over it (applyModelFlags), so a flag beats the file's
+// value. It returns nil when neither --config nor a model flag is given.
+func loadCreateInlineConfig(cmd *cobra.Command) (*api.ScionConfig, error) {
+	var cfg *api.ScionConfig
+	if inlineConfigPath != "" {
+		var configDir string
+		var err error
+		cfg, configDir, err = loadInlineConfig(inlineConfigPath)
+		if err != nil {
+			return nil, err
+		}
+		if err := resolveInlineConfigContent(cfg, configDir); err != nil {
+			return nil, err
+		}
 	}
-	cfg, configDir, err := loadInlineConfig(inlineConfigPath)
-	if err != nil {
-		return nil, err
-	}
-	if err := resolveInlineConfigContent(cfg, configDir); err != nil {
-		return nil, err
-	}
-	return cfg, nil
+	return applyModelFlags(cmd, cfg)
 }
 
 // createAgentViaHub provisions the agent through the Hub. inlineCfg is the
@@ -340,6 +346,10 @@ func init() {
 	createCmd.Flags().StringVar(&runtimeBrokerID, "broker", "", "Preferred runtime broker ID, name, or slug")
 	createCmd.Flags().StringVar(&harnessConfigFlag, "harness-config", "", "Named harness configuration to use")
 	createCmd.Flags().StringVar(&harnessConfigFlag, "harness", "", "Named harness configuration to use (alias for --harness-config)")
+
+	// Model and thinking level (ptone/scion#378), as on scion start
+	createCmd.Flags().StringVar(&modelFlag, "model", "", "Model to use: alias (small, medium, large, extra-large/xl) or explicit model ID")
+	createCmd.Flags().StringVar(&thinkingLevelFlag, "thinking-level", "", thinkingLevelFlagUsage)
 
 	createCmd.Flags().StringVar(&harnessAuthFlag, "harness-auth", "", "Override auth method for the harness (api-key, oauth-token, auth-file, vertex-ai)")
 

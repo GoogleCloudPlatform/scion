@@ -332,6 +332,9 @@ func gcpFilterPredicates(filter store.GCPServiceAccountFilter) []predicate.GCPSe
 	if filter.Email != "" {
 		preds = append(preds, gcpserviceaccount.EmailEQ(filter.Email))
 	}
+	if filter.EmailFold != "" {
+		preds = append(preds, gcpserviceaccount.EmailEqualFold(filter.EmailFold))
+	}
 	if filter.Managed != nil {
 		preds = append(preds, gcpserviceaccount.ManagedEQ(*filter.Managed))
 	}

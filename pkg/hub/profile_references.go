@@ -241,18 +241,15 @@ func (s *Server) onProjectActiveProfileSaved(ctx context.Context, project *store
 	s.triggerProfileReferences()
 }
 
-// countProfileReferences reads the store and the co-located broker's agent
-// directories and counts the references (config.CountProfileReferences).
+// countProfileReferences reads the store and counts the references with
+// agent.BuildProfileReferences (which wraps config.CountProfileReferences);
+// that function's doc comment, on BuildProfileReferencesDetailed, is the
+// one description of which agent-info.json is read and when the hub's
+// AppliedConfig.Profile counts instead.
 //
-// An agent's saved profile is read from its agent-info.json on this host
-// (agent.SavedProfileOnDisk), at the project path dispatch would send and
-// the broker would resolve (config.ProjectDispatchLocation, then
-// config.BrokerProjectPath). agent-info.json, not the image provenance
-// record, is the source: both are written from the same profile at
-// provision, and agent-info.json only gains a profile later when it had
-// none, so it is never less specific. When the file is missing (never
-// provisioned here), or the agent is unplaced, the hub's
-// AppliedConfig.Profile is counted: that is what the first start sends.
+// agent-info.json, not the image provenance record, is the source: both
+// are written from the same profile at provision, and agent-info.json only
+// gains a profile later when it had none, so it is never less specific.
 // Agents on flat Runtime Brokers carry their instance's broker ID, never
 // the legacy co-located one, so the broker filter excludes them.
 func (s *Server) countProfileReferences(ctx context.Context, brokerID, globalDir string) (config.ProfileReferences, error) {
@@ -260,13 +257,11 @@ func (s *Server) countProfileReferences(ctx context.Context, brokerID, globalDir
 	if err != nil {
 		return config.ProfileReferences{}, fmt.Errorf("list the co-located broker's projects: %w", err)
 	}
-	localPaths := make(map[string]string, len(providers))
+	in := agent.ProfileRefInputs{Providers: make([]agent.ProfileRefProvider, 0, len(providers))}
 	for _, pv := range providers {
-		localPaths[pv.ProjectID] = pv.LocalPath
+		in.Providers = append(in.Providers, agent.ProfileRefProvider{ProjectID: pv.ProjectID, LocalPath: pv.LocalPath})
 	}
 
-	projects := make(map[string]*store.Project)
-	var projectRows []config.ProfileRefProject
 	cursor := ""
 	for {
 		page, err := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: profileReferencePageSize, Cursor: cursor, SkipTotalCount: true})
@@ -275,12 +270,11 @@ func (s *Server) countProfileReferences(ctx context.Context, brokerID, globalDir
 		}
 		for i := range page.Items {
 			pr := &page.Items[i]
-			projects[pr.ID] = pr
-			_, provided := localPaths[pr.ID]
-			projectRows = append(projectRows, config.ProfileRefProject{
-				ID:                  pr.ID,
-				ActiveProfile:       pr.Annotations[projectSettingActiveProfile],
-				ProvidedByColocated: provided,
+			in.Projects = append(in.Projects, agent.ProfileRefProject{
+				ID:              pr.ID,
+				Slug:            pr.Slug,
+				ActiveProfile:   pr.Annotations[projectSettingActiveProfile],
+				SharedWorkspace: pr.IsSharedWorkspace(),
 			})
 		}
 		if page.NextCursor == "" {
@@ -289,8 +283,6 @@ func (s *Server) countProfileReferences(ctx context.Context, brokerID, globalDir
 		cursor = page.NextCursor
 	}
 
-	var agentRows []config.ProfileRefAgent
-	missing, unreadable := 0, 0
 	cursor = ""
 	for {
 		page, err := s.store.ListAgents(ctx, store.AgentFilter{}, store.ListOptions{Limit: profileReferencePageSize, Cursor: cursor, SkipTotalCount: true})
@@ -300,34 +292,13 @@ func (s *Server) countProfileReferences(ctx context.Context, brokerID, globalDir
 		for i := range page.Items {
 			a := &page.Items[i]
 			if a.RuntimeBrokerID != "" && a.RuntimeBrokerID != brokerID {
-				continue // counted nowhere; skip before any disk read
+				continue // counted nowhere
 			}
-			hubProfile := ""
+			row := agent.ProfileRefAgentRow{Slug: a.Slug, ProjectID: a.ProjectID, RuntimeBrokerID: a.RuntimeBrokerID}
 			if a.AppliedConfig != nil {
-				hubProfile = a.AppliedConfig.Profile
+				row.AppliedProfile = a.AppliedConfig.Profile
 			}
-			row := config.ProfileRefAgent{SavedProfile: hubProfile, RuntimeBrokerID: a.RuntimeBrokerID}
-			if a.RuntimeBrokerID == brokerID {
-				if pr := projects[a.ProjectID]; pr != nil {
-					path, slug := config.ProjectDispatchLocation(localPaths[pr.ID], pr.Slug, isGlobalHubProject(pr.Slug))
-					projectPath := config.BrokerProjectPath(globalDir, path, slug)
-					if projectPath != "" {
-						profile, state := agent.SavedProfileOnDisk(projectPath, a.Slug, pr.IsSharedWorkspace(), pr.ID)
-						switch state {
-						case agent.SavedProfileFound:
-							row.SavedProfile = profile
-						case agent.SavedProfileUnreadable:
-							// What start's runtime selection uses: the
-							// provisioned profile, else "" (GetSavedProfile).
-							unreadable++
-							row.SavedProfile = profile
-						default:
-							missing++
-						}
-					}
-				}
-			}
-			agentRows = append(agentRows, row)
+			in.Agents = append(in.Agents, row)
 		}
 		if page.NextCursor == "" {
 			break
@@ -335,13 +306,11 @@ func (s *Server) countProfileReferences(ctx context.Context, brokerID, globalDir
 		cursor = page.NextCursor
 	}
 
-	refs, ok := config.CountProfileReferences(brokerID, agentRows, projectRows)
+	refs, ok := agent.BuildProfileReferences(globalDir, brokerID, in)
 	if !ok {
 		return config.ProfileReferences{}, fmt.Errorf("no co-located broker ID")
 	}
-	refs.AgentInfoMissing = missing
-	refs.AgentInfoUnreadable = unreadable
 	slog.Debug("Built-in profile references counted",
-		"agents", len(agentRows), "agent_info_missing", missing, "agent_info_unreadable", unreadable)
+		"agents", len(in.Agents), "agent_info_missing", refs.AgentInfoMissing, "agent_info_unreadable", refs.AgentInfoUnreadable)
 	return refs, nil
 }

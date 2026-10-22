@@ -72,6 +72,8 @@ When an agent runs `scion start` or `scion create` inside its container, the CLI
 
 With the `hub.flat_runtime_brokers` [experiment](/scion/reference/experiments/) on (default off), the Hub accepts Runtime Brokers that each serve exactly one runtime target with a stable identity. A new agent placed on such a Runtime Broker is pinned to its runtime target and stays on it across restarts, and the Hub refuses a dispatch for a different target. The agent's record shows the pin as a read-only `pinnedRuntimeTarget`, and the Runtime Broker's record shows its `runtimeTarget` (see the [Agents API](/scion/reference/api/#agents-apiv1agents)). A pinned agent cannot be [moved to another Runtime Broker](#moving-an-agent-to-another-runtime-broker), and an agent cannot be moved onto a flat Runtime Broker (`409 runtime_target_move_unsupported`). Existing profile-based Runtime Brokers are unchanged.
 
+The experiment also switches the web UI's **Brokers** pages to the Brokers area. The list shows each Runtime Broker's kind (flat or legacy) and runtime target, and marks the Runtime Brokers that run in this server's own process. Each Runtime Broker's page has Overview, Agents & projects, Health and Configure tabs. Health is shown only to users who can read the Hub health summary. Configure is shown only to users who can update or unregister the Runtime Broker. With the experiment off, the Brokers pages are unchanged.
+
 To run flat Runtime Brokers, add one entry per instance under `server.broker.instances` in the global `settings.yaml`. Each entry has an immutable local `key`, a `name` that it registers under, and exactly one `runtime_target`: the local Docker daemon, or a Kubernetes cluster and namespace.
 
 ```yaml
@@ -124,13 +126,16 @@ A legacy Runtime Broker's limit is not copied to the instances that replace it, 
 
 `scion reincarnate <agent> --broker <name|id>` moves an agent to another Runtime Broker, for example to drain a broker or to reach different hardware. The agent keeps its ID, slug, and generation chain, and its workspace, uncommitted and unpushed changes included. The move is a [reincarnation](/scion/reference/cli/#scion-reincarnate): the agent starts a new generation on the target with a Hub-built preamble and the handoff you provide.
 
-The workspace is never copied. A move works only when both Runtime Brokers mount the **same NFS export**, so the target sees the very directory the source used. A move that does not meet that requirement is refused; there is no fallback that re-clones or copies the workspace.
+The workspace is never copied. An ordinary move works only when both Runtime Brokers mount the **same NFS export**, so the target sees the very directory the source used (`transferMode: "export"`). A move that does not meet that requirement is refused. When a forced move would apply, the CLI prints a hint pointing at `--dry-run --force`, which previews recreating a clone-per-agent or empty-per-agent workspace on the target (`transferMode: "recreate"`) and giving up the source's local state; executing such a move is not enabled yet and returns `501 Not Implemented`.
 
 ```bash
 # Check the move without changing anything
 scion reincarnate my-agent --broker broker-b --dry-run
 
-# Move it
+# Preview a forced move when the workspace is not on a shared NFS export
+scion reincarnate my-agent --broker broker-b --dry-run --force
+
+# Move it (when the workspace is carried through the shared NFS export)
 scion reincarnate my-agent --broker broker-b --handoff-file handoff.md
 ```
 
@@ -155,9 +160,9 @@ scion reincarnate my-agent --broker broker-b --handoff-file handoff.md
 
 ### Checks and dry run
 
-The Hub checks the move in a fixed order: workspace mode, workspace storage reported by both Runtime Brokers, same NFS export, workspace on the export, target profile, target health, access, agent-move capability, and capacity. The first failing check decides the answer, and the CLI prints every check as passed, failed, or not evaluated.
+The Hub checks the move in a fixed order: `runtime_target`, `workspace_mode`, `workspace_storage_reported`, `same_export`, `workspace_on_export`, `workspace_recreatable`, `target_profile`, `target_health`, `access`, `capability`, and `capacity`. The first failing check decides the answer, and the CLI prints the transfer mode of an eligible move (`export` or `recreate`), every check (`passed`, `failed`, `not_evaluated`, or `waived`), and the move's `consequences` (what is `kept`, `carried`, `recreated`, and `lost`). With `--force` (`--dry-run --force`), the export checks run first so an eligible shared-export move still uses `transferMode: "export"`; only when they fail on `workspace_storage_reported`, `same_export`, `workspace_on_export`, or the Kubernetes export constraint on `target_profile` are those three export checks marked `waived`, `target_profile` re-evaluated for a recreated workspace, and `workspace_recreatable` evaluated for a fresh clone-per-agent or empty-per-agent workspace on the target (which must advertise `agentMoveRecreate`).
 
-A refused move is refused **before any side effect**: the agent is not stopped, no quota changes, and the target is not linked to the project. `--dry-run` runs the same checks and returns the verdict and plan without doing anything else. Without `--dry-run`, the CLI sends a dry run first and stops if it is refused, so a real request is only sent for an eligible move, and never to a Hub that does not support `--broker`. Patch flags such as `--model` or `--image` combine with `--broker`, and the checks judge the patched configuration.
+A refused move is refused **before any side effect**: the agent is not stopped, no quota changes, and the target is not linked to the project. `--dry-run` runs the same checks and returns the verdict and plan without doing anything else. Without `--dry-run`, the CLI sends a dry run first and stops if it is refused, so a real request is only sent for an eligible move, and never to a Hub that does not support `--broker`, or, when `--force` is passed, to a Hub that does not support `--force`. Executing a forced move whose transfer mode is `recreate` is not enabled yet and returns `501 Not Implemented`. Patch flags such as `--model` or `--image` combine with `--broker`, and the checks judge the patched configuration.
 
 ### Permissions
 

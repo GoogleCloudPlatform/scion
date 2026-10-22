@@ -584,6 +584,9 @@ func buildProvisionContext(ctx context.Context, opts api.StartOptions) (context.
 	if opts.FreshProvision {
 		ctx = api.ContextWithFreshProvision(ctx)
 	}
+	if opts.MoveReincarnationID != "" {
+		ctx = withMoveReincarnationID(ctx, opts.MoveReincarnationID)
+	}
 	if opts.SharedWorkspace {
 		ctx = api.ContextWithSharedWorkspace(ctx)
 	}
@@ -661,12 +664,23 @@ func (m *AgentManager) finishProvision(opts api.StartOptions, agentDir, agentHom
 // Reprovision's running-container precondition check (design §3.4 Amendment
 // A2). A List error is not treated as "not running" by the caller — see the
 // call site's comment.
-func (m *AgentManager) containerIsRunning(ctx context.Context, name string) (bool, error) {
+//
+// Agent names are unique only within a project, so entries that belong to
+// another project on the same broker are skipped: otherwise a running agent
+// with the same name elsewhere would make every reprovision of this one
+// refuse. The scoping is a post-filter (matchAgentProject), not a runtime
+// label filter, so it fails closed: an entry whose project cannot be told
+// (legacy labels, project ID only on AgentInfo, or no project info at all)
+// still counts as this agent's container.
+func (m *AgentManager) containerIsRunning(ctx context.Context, name, projectName, projectID string) (bool, error) {
 	agents, err := m.listRuntime(ctx, map[string]string{"scion.name": name})
 	if err != nil {
 		return false, err
 	}
 	for _, a := range agents {
+		if !matchAgentProject(a, projectName, projectID) {
+			continue
+		}
 		if a.Name == name || strings.TrimPrefix(a.Name, "/") == name || strings.EqualFold(a.Name, name) {
 			if strings.EqualFold(a.Phase, "running") {
 				return true, nil
@@ -849,7 +863,16 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 	// (proceeding is the pre-fail-closed behavior; the hub is expected to
 	// have stopped the container already), but an affirmative "yes, still
 	// running" answer is always honored.
-	if running, err := m.containerIsRunning(ctx, opts.Name); err != nil {
+	//
+	// The check is scoped to this agent's project (ptone/scion#5510). The
+	// broker sets both HubProjectID and Env SCION_PROJECT_ID from the
+	// dispatch's project ID; HubProjectID is read first and the Env value is
+	// the fallback. The project name scopes entries or requests without an ID.
+	reprovisionProjectID := opts.HubProjectID
+	if reprovisionProjectID == "" && opts.Env != nil {
+		reprovisionProjectID = opts.Env["SCION_PROJECT_ID"]
+	}
+	if running, err := m.containerIsRunning(ctx, opts.Name, config.GetProjectName(projectDir), reprovisionProjectID); err != nil {
 		util.Debugf("reprovision: failed to check running state for %s, proceeding: %v", opts.Name, err)
 	} else if running {
 		return nil, fmt.Errorf("%w: agent %q container is still running; stop it first", ErrReprovisionRefused, opts.Name)
@@ -951,6 +974,18 @@ func reprovisionEmptyPerAgentPreflight(projectDir, agentName string, rt runtime.
 }
 
 func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
+	// A forced move's provision never touches an agent directory it did not
+	// create: an existing one (even an empty leftover that GetAgent would
+	// clear as stale) refuses the provision before anything runs.
+	if opts.MoveReincarnationID != "" {
+		agentDir, err := provisionAgentStateDir(ctx, opts)
+		if err != nil {
+			return nil, fmt.Errorf("%w: resolve the agent directory: %v", ErrMoveWorkspaceUnconfirmed, err)
+		}
+		if err := checkMovePathAbsent(agentDir); err != nil {
+			return nil, err
+		}
+	}
 	ctx = m.withWorkspaceLock(ctx)
 	ctx, inlineCfg := buildProvisionContext(ctx, opts)
 	agentDir, agentHome, _, cfg, err := GetAgent(ctx, opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.ProjectPath, opts.Profile, "created", opts.Branch, opts.Workspace, inlineCfg)
@@ -1372,16 +1407,27 @@ func withAgentStateDir(ctx context.Context, projectDir, agentName string) (conte
 // (broker mode, shared workspace, Hub project ID). It reads the filesystem
 // only and changes nothing.
 func AgentNeedsProvision(ctx context.Context, opts api.StartOptions) (bool, error) {
-	projectDir, err := config.GetResolvedProjectDir(opts.ProjectPath)
-	if err != nil {
-		return false, err
-	}
-	ctx, _ = buildProvisionContext(ctx, opts)
-	_, agentDir, _, err := withAgentStateDir(ctx, projectDir, opts.Name)
+	agentDir, err := provisionAgentStateDir(ctx, opts)
 	if err != nil {
 		return false, err
 	}
 	return !agentStateProvisioned(agentDir), nil
+}
+
+// provisionAgentStateDir resolves the broker-side state directory of the
+// agent opts names exactly as Provision and Start resolve it: from the
+// resolved project dir and the provisioning context (broker mode, shared
+// workspace, Hub project ID). It reads the filesystem only and changes
+// nothing. AgentNeedsProvision and CheckMoveWorkspaceAbsent share it, so
+// neither computes the directory a second way.
+func provisionAgentStateDir(ctx context.Context, opts api.StartOptions) (string, error) {
+	projectDir, err := config.GetResolvedProjectDir(opts.ProjectPath)
+	if err != nil {
+		return "", err
+	}
+	ctx, _ = buildProvisionContext(ctx, opts)
+	_, agentDir, _, err := withAgentStateDir(ctx, projectDir, opts.Name)
+	return agentDir, err
 }
 
 // agentStateProvisioned reports whether agentDir holds a provisioned agent:
@@ -1547,6 +1593,12 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	if err != nil {
 		return "", "", nil, fmt.Errorf("failed to create agent directory: %w", err)
 	}
+	// A forced move never provisions into an agent directory it did not
+	// create.
+	moveID := moveReincarnationIDFrom(ctx)
+	if moveID != "" && !newAgentDir {
+		return "", "", nil, fmt.Errorf("%w: the agent directory already exists", ErrMoveWorkspacePresent)
+	}
 	newAgentHome := false
 	newAgentHomeParent := false
 	if newAgentDir {
@@ -1565,12 +1617,28 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			_ = removeAgentDirGuarded(filesGuard(), agentDir, agentWorkspace)
 			if newAgentHome && !pathWithin(agentHome, agentDir) {
 				_ = removeAgentDirGuarded(filesGuard(), agentHome, "")
-				if newAgentHomeParent {
-					// os.Remove only removes an empty directory.
-					_ = os.Remove(filepath.Dir(agentHome))
+			}
+			// The home's parent this call claimed, whether or not the home
+			// itself was claimed (the home claim can fail after it).
+			if homeParent := filepath.Dir(agentHome); newAgentHomeParent && !pathWithin(homeParent, agentDir) {
+				if moveID != "" {
+					// The move marker this call wrote there.
+					_ = os.Remove(filepath.Join(homeParent, MoveMarkerFile))
 				}
+				// os.Remove only removes an empty directory.
+				_ = os.Remove(homeParent)
 			}
 		}()
+	}
+	// A forced move's provision marks the agent directory it created as
+	// the move's before anything else is written there (a failed write
+	// fails the provision, and the deferred cleanup above removes the
+	// directory); a rollback delete removes only directories marked with
+	// the move's reincarnation ID (CheckMoveMarkers).
+	if moveID != "" {
+		if err := writeMoveMarker(agentDir, moveID); err != nil {
+			return "", "", nil, fmt.Errorf("failed to write the move marker: %w", err)
+		}
 	}
 	if err := os.MkdirAll(agentDir, 0755); err != nil {
 		return "", "", nil, fmt.Errorf("failed to create agent directory: %w", err)
@@ -1589,7 +1657,18 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	if newAgentHomeParent, err = claimDir(homeParent); err != nil {
 		return "", "", nil, fmt.Errorf("failed to create agent home: %w", err)
 	}
-	if newAgentHome, err = claimDir(agentHome); err != nil {
+	// In a split-storage layout the home's parent (the external agents
+	// root's <name>) is another agent directory a forced move creates, and
+	// one its rollback delete removes: mark it as the move's too, right
+	// after claiming it.
+	if moveID != "" && newAgentHomeParent {
+		if err := writeMoveMarker(homeParent, moveID); err != nil {
+			_ = os.Remove(filepath.Join(homeParent, MoveMarkerFile))
+			_ = os.Remove(homeParent)
+			return "", "", nil, fmt.Errorf("failed to write the move marker: %w", err)
+		}
+	}
+	if newAgentHome, err = claimAgentHome(agentHome); err != nil {
 		return "", "", nil, fmt.Errorf("failed to create agent home: %w", err)
 	}
 	if err := os.MkdirAll(agentHome, 0755); err != nil {
@@ -4042,6 +4121,10 @@ func removeWorkspaceWorktreeEntry(agentWorkspace string) {
 		slog.Warn("could not remove the worktree entry", "path", agentWorkspace, "error", err)
 	}
 }
+
+// claimAgentHome is claimDir for ProvisionAgent's agent home; a variable
+// so a test can make the home claim fail.
+var claimAgentHome = claimDir
 
 // claimDir creates dir with os.Mkdir and reports whether this call created
 // it. A dir that already exists is not an error and reports false.

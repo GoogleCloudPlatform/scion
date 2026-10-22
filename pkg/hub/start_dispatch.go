@@ -275,6 +275,25 @@ func (d *startDispatch) settle() {
 	}
 }
 
+// keepForUnknownOutcome prepares d's rollback for a start whose outcome is
+// unknown (ptone/scion#5143): the rollback then releases nothing, so the
+// reservation this hold created or re-asserted stays held, and it restores
+// stopped, not the prior phase, when this hold wrote starting (any
+// uncounted prior phase: a restored suspended, halted or error phase would
+// keep the agent from reading running if the start did land, and a
+// suspended one would resume the old session on the next start). The start
+// claim's settlement frees the slot: the reaper's release, then the idle
+// release. Nil-safe; a no-op once d is settled.
+func (d *startDispatch) keepForUnknownOutcome() {
+	if d == nil || d.settled {
+		return
+	}
+	d.reserved = false
+	if d.marked {
+		d.priorPhase = string(state.PhaseStopped)
+	}
+}
+
 // heartbeatPhaseGuarded reports whether a broker heartbeat must not write
 // hbPhase over agent's stored phase. It does so when hbPhase is not counted
 // toward the broker cap (stopped, suspended, error) and a lifecycle op for

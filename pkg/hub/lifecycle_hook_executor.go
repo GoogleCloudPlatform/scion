@@ -241,6 +241,12 @@ func (e *HTTPExecutor) resolveIdentityAndToken(ctx context.Context, hook *store.
 	if err != nil {
 		return "", "", fmt.Errorf("resolve SA record %s: %w", hook.ExecutionIdentity, err)
 	}
+	// A broker host service account record is never a hook identity; a hook
+	// stored before that was refused at write time fails here, before any
+	// token is minted.
+	if store.IsHostSATranslationRecord(sa) {
+		return "", "", fmt.Errorf("hook %s: execution identity %s is a broker host service account record and cannot be used", hook.ID, hook.ExecutionIdentity)
+	}
 	saEmail = sa.Email
 
 	// For webhook actions, do NOT attach the SA token.

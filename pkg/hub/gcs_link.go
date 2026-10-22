@@ -385,7 +385,7 @@ func (s *Server) resolveCurrentSA(ctx context.Context, agent *store.Agent) (*sto
 	if gcpID.MetadataMode != store.GCPMetadataModeAssign || gcpID.ServiceAccountID == "" || gcpID.ServiceAccountEmail == "" {
 		return nil, GCSLinkReasonNoSA
 	}
-	sa, err := s.admissibleGCPServiceAccount(ctx, gcpID, agent.ProjectID)
+	sa, err := s.admissibleGCPServiceAccount(ctx, gcpID, agent.ProjectID, agent.RuntimeBrokerID)
 	switch {
 	case err == nil:
 		return sa, ""

@@ -20,8 +20,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
@@ -42,11 +44,13 @@ import (
 // whose leaf it holds (port proxy, PTY), the registry maintenance and the
 // revocation events relays listen to.
 //
-// The hub's GET /api/v1/conduit serves no sessions in this mode. Until the
-// ingress (proxy or redirect) lands, a dial gets 503 unavailable with
-// reason conduit_not_serving, and the readiness gauge reports how many
-// relays are eligible. The hub does not advertise hub.conduit to agents
-// (dispatchExperiments) in this mode.
+// The hub's GET /api/v1/conduit holds no sessions in this mode: with
+// server.hub.conduit.ingress = proxy it proxies each dial to a relay
+// (conduit_ingress.go). When no relay takes the dial, or the proxy is off
+// (IngressOffCause), it gets 503 unavailable with reason
+// conduit_not_serving, and the readiness gauge reports how many relays are
+// eligible, with the cause attribute while the proxy is off. The hub does not advertise
+// hub.conduit to agents (dispatchExperiments) in this mode.
 
 // conduitRelayRecheckPeriod is how often the eligible-relay count of the
 // readiness gauge is refreshed (the relay heartbeat period).
@@ -65,6 +69,19 @@ type ConduitExternalOptions struct {
 	PeerAuth relay.PeerAuth
 	// HTTPClient performs the internal calls to relays (nil: default).
 	HTTPClient *http.Client
+	// Ingress is the conduit ingress mode (config.ConduitIngressProxy or
+	// config.ConduitIngressRedirect; "" = proxy). Startup refuses redirect
+	// for now, so only proxy serves dials; any other value refuses them.
+	Ingress string
+	// IngressOffCause, when set, keeps the ingress proxy off: every dial
+	// gets 503 conduit_not_serving and no request reaches a relay. It is
+	// ConduitIngressCauseRequiresHMAC when proxy ingress runs under a
+	// relay-peer auth mode other than hmac (design §3.9, v2.21.52). The
+	// readiness gauge carries it as the cause attribute.
+	IngressOffCause string
+	// LifetimeCap is the hub's conduit session lifetime cap, sent to relays
+	// on the ingress leg (0 = config.ConduitDefaultLifetimeCap).
+	LifetimeCap time.Duration
 	// AuthzRecheckInterval overrides ServerConfig.ConduitAuthzRecheckInterval
 	// (0 = use it; negative disables the sweep, for tests).
 	AuthzRecheckInterval time.Duration
@@ -93,6 +110,31 @@ type conduitExternalRuntime struct {
 	peerAuth relay.PeerAuth
 	// replay overrides the shared relay-peer replay store (tests).
 	replay relayPeerReplayStore
+	// instanceID is this hub's instance id (the ingress instance header).
+	instanceID string
+	// ingress is the conduit ingress mode, and lifetimeCap the hub's
+	// session lifetime cap sent on the ingress leg.
+	ingress     string
+	lifetimeCap time.Duration
+	// ingressOffCause keeps the ingress proxy off ("" when it serves).
+	ingressOffCause string
+	// ingressTransport carries proxied conduit dials to the relays
+	// (newConduitIngressTransport: bounded dial and response headers).
+	ingressTransport http.RoundTripper
+	// ingressCountFailures counts relay session counts that failed during
+	// relay selection.
+	ingressCountFailures atomic.Int64
+	// peers calls the relays' internal API (the drain fan-out).
+	peers *relay.PeerClient
+	// terminating is set once, before the shutdown marks any server
+	// (BeginConduitIngressShutdown): from then on no conduit dial is
+	// proxied (cause ingress_terminating).
+	terminating atomic.Bool
+	// drainStarted makes the ingress drain step run once.
+	drainStarted atomic.Bool
+	// legs counts the hub's open proxied legs; the drain step holds them
+	// and closes the ones left at its deadline.
+	legs conduitIngressLegs
 }
 
 // StartConduitExternal starts the hub's side of external relay mode: the
@@ -155,10 +197,11 @@ func (s *Server) StartConduitExternal(ctx context.Context, opts ConduitExternalO
 	if id == "" {
 		id = ConduitInstanceID("")
 	}
+	peers := &relay.PeerClient{HTTP: opts.HTTPClient, Auth: opts.PeerAuth}
 	rtr, err := router.New(router.Config{
 		Registry: reg,
 		Store:    st,
-		Peers:    &relay.PeerClient{HTTP: opts.HTTPClient, Auth: opts.PeerAuth},
+		Peers:    peers,
 		Now:      now,
 		Brokers:  newLegacyBrokerResolver(s.controlChannel, id),
 	})
@@ -175,7 +218,17 @@ func (s *Server) StartConduitExternal(ctx context.Context, opts ConduitExternalO
 	if err != nil {
 		return err
 	}
-	rt := &conduitExternalRuntime{router: rtr, registry: reg, store: st, now: now, peerAuth: opts.PeerAuth, replay: opts.replayStore}
+	rt := &conduitExternalRuntime{router: rtr, registry: reg, store: st, now: now, peerAuth: opts.PeerAuth, replay: opts.replayStore, peers: peers,
+		instanceID: id, ingress: opts.Ingress, ingressOffCause: opts.IngressOffCause, lifetimeCap: opts.LifetimeCap, ingressTransport: newConduitIngressTransport(nil, conduitIngressResponseHeaderTimeout)}
+	if rt.ingress == "" {
+		rt.ingress = config.ConduitIngressProxy
+	}
+	if rt.lifetimeCap <= 0 {
+		rt.lifetimeCap = config.ConduitDefaultLifetimeCap
+	}
+	if opts.HTTPClient != nil && opts.HTTPClient.Transport != nil {
+		rt.ingressTransport = newConduitIngressTransport(opts.HTTPClient.Transport, conduitIngressResponseHeaderTimeout)
+	}
 	s.conduitEligibleRelays.Store(-1)
 	if !s.conduitExternal.CompareAndSwap(nil, rt) {
 		stopAuthz()
@@ -251,7 +304,9 @@ func (s *Server) conduitRoutable() bool {
 // reason conduit_not_serving; the message tells the two cases apart.
 const (
 	conduitExternalNoRelayMsg   = "No conduit relay is available (external relay mode with no eligible relay)"
-	conduitExternalNoIngressMsg = "This hub does not serve conduit sessions in external relay mode"
+	conduitExternalNoIngressMsg = "No conduit relay took the session (external relay mode)"
+	conduitExternalIngressOff   = "This hub does not proxy conduit dials (external relay mode)"
+	conduitExternalTerminating  = "This hub is shutting down; reconnect (external relay mode)"
 )
 
 // refuseConduitExternal answers a conduit dial on a hub in external relay
@@ -259,9 +314,15 @@ const (
 // whether any relay was eligible at the last count (refreshed every
 // conduitRelayRecheckPeriod); a dial never reads the registry. The hub
 // stays up.
-func (s *Server) refuseConduitExternal(w http.ResponseWriter, r *http.Request, _ *conduitExternalRuntime) {
+func (s *Server) refuseConduitExternal(w http.ResponseWriter, r *http.Request, rt *conduitExternalRuntime) {
 	msg := conduitExternalNoIngressMsg
-	if s.conduitEligibleRelays.Load() <= 0 {
+	switch {
+	case rt != nil && rt.terminating.Load():
+		msg = conduitExternalTerminating
+		slog.Debug("Conduit ingress: dial refused", "cause", conduitIngressCauseTerminating)
+	case rt != nil && rt.ingressOffCause != "":
+		msg = conduitExternalIngressOff
+	case s.conduitEligibleRelays.Load() <= 0:
 		msg = conduitExternalNoRelayMsg
 	}
 	writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, msg,
@@ -272,6 +333,9 @@ func (s *Server) refuseConduitExternal(w http.ResponseWriter, r *http.Request, _
 // scion.hub.conduit.eligible_relays, the number of eligible separate relays
 // at the last check. It reports only in external relay mode, and only once
 // a check has succeeded; 0 means conduit dials get 503 conduit_not_serving.
+// While the ingress proxy is off, every observation carries the attribute
+// cause (for example ingress_requires_hmac), and dials get 503
+// conduit_not_serving whatever the count.
 func (s *Server) RegisterConduitRelayReadinessGauge(mp metric.MeterProvider) error {
 	if mp == nil {
 		return errors.New("conduit relay readiness gauge: nil MeterProvider")
@@ -284,7 +348,11 @@ func (s *Server) RegisterConduitRelayReadinessGauge(mp metric.MeterProvider) err
 				return nil
 			}
 			if n := s.conduitEligibleRelays.Load(); n >= 0 {
-				o.Observe(n)
+				if rt := s.conduitExternal.Load(); rt != nil && rt.ingressOffCause != "" {
+					o.Observe(n, metric.WithAttributes(attribute.String("cause", rt.ingressOffCause)))
+				} else {
+					o.Observe(n)
+				}
 			}
 			return nil
 		}))

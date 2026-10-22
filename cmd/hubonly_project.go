@@ -116,7 +116,12 @@ func ownProjectIDs(dir string) (hubID, localID string) {
 	for _, d := range dirs {
 		versioned := isVersionedSettingsDir(d)
 		if s, err := config.LoadSettingsFromDir(d); err == nil && s != nil {
-			if s.Hub != nil && s.Hub.ProjectID != "" {
+			// A versioned file keeps the project's own id at
+			// hub.project_id, which the settings view also reports as
+			// Hub.ProjectID; it is read in the versioned branch below,
+			// where it counts only with hub.linked. So both ids are read
+			// from the view for a legacy file only.
+			if !versioned && s.Hub != nil && s.Hub.ProjectID != "" {
 				hubID = s.Hub.ProjectID
 			}
 			// A versioned file keeps the id at hub.project_id only; a

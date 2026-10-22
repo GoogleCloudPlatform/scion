@@ -379,7 +379,7 @@ var testAdminRoleGatePolicy = map[string]testAdminRoleGate{
 	"handlers_runtime_brokers.go:updateRuntimeBroker":             {Policy: testAdminPolicyDeny, Reason: "runtime broker update, except a broker the test identity registered (the co-located broker)"},
 	"handlers_runtime_brokers.go:deleteRuntimeBroker":             {Policy: testAdminPolicyDeny, Reason: "runtime broker deregistration, except a broker the test identity registered (the co-located broker)"},
 	"web.go:authorizeSSESubjects":                                 {Policy: testAdminPolicyAllow, Reason: "event subscriptions (read)"},
-	"passthrough_gate.go:authorizePassthroughIdentity":            {Policy: testAdminPolicyDeny, Reason: "exposes the co-located broker's host GCP identity to agents"},
+	"passthrough_gate.go:evaluatePassthroughIdentity":             {Policy: testAdminPolicyDeny, Reason: "exposes the co-located broker's host GCP identity to agents"},
 	"handlers_auth.go:handleAuthAdminStatus":                      {Policy: testAdminPolicyAllow, Reason: "display of the caller's own admin status"},
 	"perftrace_middleware.go:perfHeadersAllowed":                  {Policy: testAdminPolicyAllow, Reason: "request timing headers"},
 	"project_messaging_policy.go:messagingPolicyOwnerRule":        {Policy: testAdminPolicyAllow, Reason: "project messaging policy (project.set_messaging_policy is allow)"},
@@ -556,7 +556,6 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	"hub.conduit":                            testAdminPolicyDeny,
 	experiments.ChatScheduledSend:            testAdminPolicyDeny,
 	experiments.AgentEdit:                    testAdminPolicyDeny,
-	experiments.ChatThreadGroups:             testAdminPolicyDeny,
 	experiments.AttachmentArtifacts:          testAdminPolicyDeny,
 	experiments.AgentPlugins:                 testAdminPolicyDeny,
 }

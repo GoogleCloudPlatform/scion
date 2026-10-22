@@ -791,13 +791,23 @@ func closureKeys(refs []store.PrincipalRef) (directKey string, groupKeys map[str
 // users rows for federated principals. Once one does, revisit this arm and
 // require an active row, as for local users.
 func (a *AuthzService) requireActiveUser(ctx context.Context, principal PrincipalContext) error {
-	normalizedType := NormalizePrincipalType(string(principal.Kind))
-	if normalizedType != store.RoleBindingPrincipalUser {
+	if NormalizePrincipalType(string(principal.Kind)) != store.RoleBindingPrincipalUser {
 		return nil
 	}
-	user, err := a.store.GetUser(ctx, principal.ID)
+	_, err := checkUserAccount(ctx, a.store, principal)
+	return err
+}
+
+// activeUserPredicate is requireActiveUser's decision on an already
+// performed users-row lookup (user, err from GetUser(principal.ID)). It is
+// shared with decide's account-status gate (principalStatusGate), so both
+// apply exactly the same rule. Principals that are not users pass.
+func activeUserPredicate(principal PrincipalContext, user *store.User, err error) error {
+	if NormalizePrincipalType(string(principal.Kind)) != store.RoleBindingPrincipalUser {
+		return nil
+	}
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
-		return projectAccessLookupFault(fmt.Errorf("%w: user lookup failed: %v", ErrProjectAccessDenied, err))
+		return projectAccessLookupFault(fmt.Errorf("%w: user lookup failed: %w", ErrProjectAccessDenied, err))
 	}
 	if principal.Kind == PrincipalKindFederatedUser {
 		if err != nil {

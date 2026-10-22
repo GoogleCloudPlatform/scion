@@ -168,6 +168,18 @@ var projectHubLinkSettings = func(projectDir string) projectHubLink {
 // context. When it cannot be saved, c holds the import anyway and the error
 // wraps ErrCLIContextImport.
 func LinkEntryForProject(c *CLIContext, projectDir string, baseName func(endpoint string) string) (*KnownProject, *HubEntry, error) {
+	return linkEntryForProject(c, projectDir, baseName, true)
+}
+
+// LinkEntryForProjectInMemory is LinkEntryForProject without the save: c
+// gets the pending one-time import of the project's link, and nothing is
+// written (ptone/scion#5483).
+func LinkEntryForProjectInMemory(c *CLIContext, projectDir string, baseName func(endpoint string) string) (*KnownProject, *HubEntry) {
+	p, h, _ := linkEntryForProject(c, projectDir, baseName, false)
+	return p, h
+}
+
+func linkEntryForProject(c *CLIContext, projectDir string, baseName func(endpoint string) string, save bool) (*KnownProject, *HubEntry, error) {
 	localPath := LinkPathForProject(projectDir)
 	if localPath == "" {
 		return nil, nil, nil
@@ -201,6 +213,11 @@ func LinkEntryForProject(c *CLIContext, projectDir string, baseName func(endpoin
 			_ = target.SetLinkEntry(name, KnownProject{ID: link.ProjectID}, localPath, now)
 		}
 		target.markProjectImported(localPath, now)
+	}
+	if !save {
+		importInto(c, time.Now())
+		p, h := c.LinkEntryFor(localPath)
+		return p, h, nil
 	}
 	var saved *CLIContext
 	err := UpdateCLIContext(func(fresh *CLIContext) error {

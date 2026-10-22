@@ -1987,6 +1987,10 @@ type V1ServerHubConduitConfig struct {
 	// scion server --role relay, hold the conduit sessions). Read at
 	// startup.
 	RelayMode string `json:"relay_mode,omitempty" yaml:"relay_mode,omitempty" koanf:"relay_mode"`
+	// Ingress is "proxy" (default: the hub reverse-proxies each conduit
+	// dial to the chosen relay) or "redirect" (the hub answers with the
+	// relay's public URL), in external relay mode. Read at startup.
+	Ingress string `json:"ingress,omitempty" yaml:"ingress,omitempty" koanf:"ingress"`
 	// TargetStreamDeadlines is "off" (default) or "enforce": whether
 	// targets enforce user streams' authorization deadlines locally
 	// (design §3.5, Target-side deadlines). The value is published to
@@ -3795,6 +3799,9 @@ func loadVersionedLayers(projectPath string, opts versionedLoadOptions) (*versio
 		if opts.ignoreEnvProjectID && (key == projectkeys.EnvProjectID || key == projectkeys.EnvHubProjectID) {
 			return "", nil
 		}
+		if opts.skipEnv[key] {
+			return "", nil
+		}
 		mapped := versionedEnvKeyMapper(key)
 		if mapped != "" {
 			envNames[mapped] = key
@@ -4428,6 +4435,7 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 				ShutdownGrace:         c.ShutdownGrace,
 				ProxySessionMaxAge:    c.ProxySessionMaxAge,
 				RelayMode:             c.RelayMode,
+				Ingress:               c.Ingress,
 				TargetStreamDeadlines: c.TargetStreamDeadlines,
 				PeerSecret:            c.PeerSecret,
 			}
@@ -4803,6 +4811,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 			ShutdownGrace:         c.ShutdownGrace,
 			ProxySessionMaxAge:    c.ProxySessionMaxAge,
 			RelayMode:             c.RelayMode,
+			Ingress:               c.Ingress,
 			TargetStreamDeadlines: c.TargetStreamDeadlines,
 			PeerSecret:            c.PeerSecret,
 		}

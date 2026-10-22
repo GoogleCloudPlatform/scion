@@ -1310,6 +1310,10 @@ type ReincarnateAgentResponse struct {
 	TargetBrokerID string `json:"targetBrokerId,omitempty"`
 	// MoveVerdict is the move eligibility verdict of a dry-run move.
 	MoveVerdict *MoveVerdict `json:"moveVerdict,omitempty"`
+	// TransferMode is how an accepted cross-broker move carries the
+	// workspace: "export" or "recreate" (a forced move). Empty for a plain
+	// reincarnation and from a hub that predates forced moves.
+	TransferMode string `json:"transferMode,omitempty"`
 }
 
 // MoveVerdict is the hub's eligibility verdict for moving an agent to

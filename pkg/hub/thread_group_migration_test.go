@@ -32,7 +32,6 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -69,17 +68,6 @@ func (e *tgmEventSpy) take() []tgmEvent {
 	return out
 }
 
-func tgmSetExperiment(t *testing.T, srv *Server, enabled bool) {
-	t.Helper()
-	fakeStore := newFakeHubSettingStore()
-	fakeStore.seed("experiments", json.RawMessage(fmt.Sprintf(`{"overrides":{%q:%t}}`, experiments.ChatThreadGroups, enabled)))
-	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
-	_, err := ops.Refresh(context.Background())
-	require.NoError(t, err)
-	srv.SetOperationalSettings(ops)
-	require.Equal(t, enabled, srv.experimentEnabled(experiments.ChatThreadGroups))
-}
-
 type tgmFixture struct {
 	t    *testing.T
 	srv  *Server
@@ -113,7 +101,6 @@ func newTGMFixtureOn(t *testing.T, srv *Server, s store.Store) *tgmFixture {
 	srv.SetWebChatStore(wcs)
 	spy := &tgmEventSpy{}
 	srv.SetEventPublisher(spy)
-	tgmSetExperiment(t, srv, true)
 	return &tgmFixture{t: t, srv: srv, s: s, wcs: wcs, proj: proj, spy: spy,
 		projects: []string{proj.ID}, members: map[string]bool{}, outsiders: map[string]bool{}}
 }
@@ -305,45 +292,41 @@ func orderOf(t *testing.T, threadOrder, projectID string) []string {
 	return doc[projectID]
 }
 
-// --- Flag gate ---------------------------------------------------------------
+// --- Upgrade -----------------------------------------------------------------
 
-func TestThreadGroupMigration_FlagOffDoesNothing(t *testing.T) {
-	f := newTGMFixture(t)
-	t1 := f.topic(f.proj.ID, "t1")
-	doc := groupsDoc(t, map[string][]personalThreadGroup{f.proj.ID: {tgmPG("g1", "Release", t1)}})
-	f.setPrefs("u-a", doc, "")
+// Upgrade safety (ptone/scion#5546): on a hub that never turned on the
+// former thread groups experiment, whether no experiments row is stored or
+// one still holds an override for a retired name, the first pass copies
+// personal groups into project groups. A thread in no personal group stays
+// in no group, and the personal document is kept as it was.
+func TestThreadGroupMigration_UpgradeFromNeverEnabled(t *testing.T) {
+	for name, raw := range map[string]string{
+		"no_row":         "",
+		"retired_off":    retiredOverridesDoc(t, false),
+		"other_override": `{"overrides":{"web.other":true}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newTGMFixture(t)
+			if raw != "" {
+				setThreadGroupsExperimentsDoc(t, f.srv, raw)
+			}
+			t1, t2 := f.topic(f.proj.ID, "t1"), f.topic(f.proj.ID, "t2")
+			doc := groupsDoc(t, map[string][]personalThreadGroup{f.proj.ID: {tgmPG("g1", "Release", t1)}})
+			f.setPrefs("u-a", doc, "")
 
-	tgmSetExperiment(t, f.srv, false)
-	st := f.pass()
-	assert.Zero(t, st.Users)
-	assert.Empty(t, f.groups(f.proj.ID))
-	assert.False(t, f.prefs("u-a").ThreadGroupsMigrated)
-	assert.Empty(t, f.spy.take())
-}
-
-// The sweeper idles while the flag is off and migrates within one tick of
-// it being turned on, with no restart.
-func TestThreadGroupMigration_SweeperStartsWhenFlagTurnsOn(t *testing.T) {
-	f := newTGMFixture(t)
-	t1 := f.topic(f.proj.ID, "t1")
-	f.setPrefs("u-a", groupsDoc(t, map[string][]personalThreadGroup{f.proj.ID: {tgmPG("g1", "Release", t1)}}), "")
-	tgmSetExperiment(t, f.srv, false)
-
-	prev := threadGroupMigrationTick
-	threadGroupMigrationTick = 20 * time.Millisecond
-	t.Cleanup(func() { threadGroupMigrationTick = prev })
-	// Registered after the restore, so it runs first: the sweeper is
-	// stopped and joined before the tick is written back.
-	t.Cleanup(f.srv.stopThreadGroupMigrationSweeper)
-	f.srv.startThreadGroupMigrationSweeper(context.Background())
-
-	time.Sleep(100 * time.Millisecond)
-	assert.Empty(t, f.groups(f.proj.ID), "nothing happens while the flag is off")
-	assert.False(t, f.prefs("u-a").ThreadGroupsMigrated)
-
-	tgmSetExperiment(t, f.srv, true)
-	require.Eventually(t, func() bool { return f.prefs("u-a").ThreadGroupsMigrated }, 5*time.Second, 10*time.Millisecond)
-	assert.Equal(t, []string{f.conv(t1)}, tgmMembers(f.group(f.proj.ID, "Release")))
+			st := f.pass()
+			assert.Equal(t, 1, st.Users)
+			assert.Equal(t, 1, st.UsersMarked)
+			assert.Equal(t, []string{f.conv(t1)}, tgmMembers(f.group(f.proj.ID, "Release")))
+			assert.Len(t, f.groups(f.proj.ID), 1)
+			unfiled, err := f.s.GetThreadGroupIDForConversation(context.Background(), f.conv(t2))
+			require.NoError(t, err)
+			assert.Empty(t, unfiled, "a thread in no personal group gets no group")
+			p := f.prefs("u-a")
+			assert.True(t, p.ThreadGroupsMigrated)
+			assert.JSONEq(t, doc, p.ThreadGroups, "the personal groups document is kept")
+		})
+	}
 }
 
 // The first pass runs at once on start, before the first tick.
@@ -866,22 +849,18 @@ func TestThreadGroupMigration_UserPrefsPutResetsMarker(t *testing.T) {
 	assert.NotContains(t, rec.Body.String(), "igrated", "the marker is not part of the API")
 }
 
-// A personal edit made while the flag is off is migrated on the next pass
-// after it is turned on.
-func TestThreadGroupMigration_EditWhileFlagOffMigratedLater(t *testing.T) {
+// A personal edit made after a user was migrated clears the marker and is
+// migrated on the next pass.
+func TestThreadGroupMigration_EditAfterMigrationMigratedLater(t *testing.T) {
 	f := newTGMFixture(t)
 	t1, t2 := f.topic(f.proj.ID, "t1"), f.topic(f.proj.ID, "t2")
 	f.setPrefs("u-a", groupsDoc(t, map[string][]personalThreadGroup{f.proj.ID: {tgmPG("g1", "Release", t1)}}), "")
 	f.pass()
 	require.True(t, f.prefs("u-a").ThreadGroupsMigrated)
 
-	tgmSetExperiment(t, f.srv, false)
 	f.setPrefs("u-a", groupsDoc(t, map[string][]personalThreadGroup{f.proj.ID: {tgmPG("g1", "Release", t1), tgmPG("g2", "Later", t2)}}), "")
-	f.pass()
-	assert.Nil(t, f.group(f.proj.ID, "Later"))
 	assert.False(t, f.prefs("u-a").ThreadGroupsMigrated)
 
-	tgmSetExperiment(t, f.srv, true)
 	f.pass()
 	assert.Equal(t, []string{f.conv(t2)}, tgmMembers(f.group(f.proj.ID, "Later")))
 	assert.Equal(t, []string{f.conv(t1)}, tgmMembers(f.group(f.proj.ID, "Release")))

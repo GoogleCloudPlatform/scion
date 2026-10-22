@@ -784,6 +784,19 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 		}
 	}
 
+	// Record the resolved harness type for agent lists and events, which
+	// derive the harness vendor from it without a harness-config lookup.
+	s.stampAgentHarness(ctx, agent, resolvedHC)
+
+	// Record the model size alias before it is resolved below. Every
+	// precedence layer (request > project > template > hub) has already
+	// written AppliedConfig.Model by now, so this is the alias of whichever
+	// layer supplied the model. An explicit model ID or no model records
+	// no size.
+	if size := config.ModelSizeAlias(agent.AppliedConfig.Model); size != "" {
+		agent.AppliedConfig.ModelSize = size
+	}
+
 	// Resolve model size aliases (e.g. "extra-large" → "fable") so that
 	// AppliedConfig.Model and InlineConfig.Model carry the concrete model
 	// name. This prevents raw aliases from leaking into SCION_MODEL env var
@@ -1895,7 +1908,8 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 		return "", err
 	}
 
-	// Get available (online) brokers for fallback logic
+	// Get available brokers (online provider rows whose broker is present)
+	// for fallback logic
 	availableBrokers, err := s.getAvailableBrokersForProject(ctx, project.ID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
@@ -2154,13 +2168,15 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 	}
 
 	// Case 3: No default and no explicit broker - auto-select only when there is
-	// exactly one provider and its broker is online and dispatchable.
+	// exactly one provider and its broker is present (brokerPresence) and
+	// dispatchable.
 	if len(allProviders) == 1 {
 		broker, brokerErr := s.store.GetRuntimeBroker(ctx, allProviders[0].BrokerID)
-		if brokerErr == nil && broker.Status == store.BrokerStatusOnline && s.canUseBrokerForProject(ctx, broker, project) {
+		present := brokerErr == nil && s.brokerPresence(ctx, broker).Connected
+		if present && s.canUseBrokerForProject(ctx, broker, project) {
 			return allProviders[0].BrokerID, nil
 		}
-		if brokerErr == nil && broker.Status == store.BrokerStatusOnline {
+		if present {
 			NoRuntimeBroker(w, "No runtime brokers available for this project that you have permission to use", usableBrokers())
 		} else {
 			NoRuntimeBroker(w, "This project's only runtime broker is offline", usableBrokers())
@@ -2384,7 +2400,9 @@ func (s *Server) brokerProviderHasOwnerConsent(ctx context.Context, broker *stor
 	return s.authzService.IsSystemAdmin(ctx, provider.LinkedBy)
 }
 
-// getAvailableBrokersForProject returns online runtime brokers that are providers to the project.
+// getAvailableBrokersForProject returns the runtime brokers that are online
+// providers to the project and are present (brokerPresence, design v2.21.50
+// §3.4). The provider row must still be online.
 func (s *Server) getAvailableBrokersForProject(ctx context.Context, projectID string) ([]store.RuntimeBroker, error) {
 	// Get providers for this project
 	providers, err := s.store.GetProjectProviders(ctx, projectID)
@@ -2392,7 +2410,7 @@ func (s *Server) getAvailableBrokersForProject(ctx context.Context, projectID st
 		return nil, err
 	}
 
-	// Filter to online brokers and fetch their full details
+	// Filter to online provider rows whose broker is present
 	var availableBrokers []store.RuntimeBroker
 	for _, provider := range providers {
 		if provider.Status == store.BrokerStatusOnline {
@@ -2400,7 +2418,7 @@ func (s *Server) getAvailableBrokersForProject(ctx context.Context, projectID st
 			if err != nil {
 				continue // Skip brokers we can't fetch
 			}
-			if broker.Status == store.BrokerStatusOnline {
+			if s.brokerPresence(ctx, broker).Connected {
 				availableBrokers = append(availableBrokers, *broker)
 			}
 		}

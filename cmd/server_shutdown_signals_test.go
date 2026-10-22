@@ -25,6 +25,7 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -93,18 +94,23 @@ func (f *fakeSignalNotify) deliver(sig os.Signal) {
 	}
 }
 
+// newTestShutdown returns a shutdown sequence on the real clock whose
+// cancel is cancel.
+func newTestShutdown(cancel context.CancelFunc) *serverShutdownSequence {
+	return newServerShutdownSequence(cancel, clock.Real())
+}
+
 // PS-1: SIGTERM and SIGINT each start the graceful shutdown by calling
-// cancel exactly once; a second signal of either kind causes no second
-// cancel and no panic; the subscribed set is exactly {Interrupt, SIGTERM}.
+// cancel exactly once; the subscribed set is exactly {Interrupt, SIGTERM},
+// and the run-once shutdown is published after notify.
 func TestInstallServerShutdownSignals_SingleCancel(t *testing.T) {
 	for _, tc := range []struct {
-		name          string
-		first, second os.Signal
-		logged        string
+		name   string
+		first  os.Signal
+		logged string
 	}{
-		{"SIGTERM then SIGINT", syscall.SIGTERM, os.Interrupt, "Received signal terminated, shutting down..."},
-		{"SIGINT then SIGTERM", os.Interrupt, syscall.SIGTERM, "Received signal interrupt, shutting down..."},
-		{"SIGTERM twice", syscall.SIGTERM, syscall.SIGTERM, "Received signal terminated, shutting down..."},
+		{"SIGTERM", syscall.SIGTERM, "Received signal terminated, shutting down..."},
+		{"SIGINT", os.Interrupt, "Received signal interrupt, shutting down..."},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			resetServerShutdownForTest(t)
@@ -113,11 +119,11 @@ func TestInstallServerShutdownSignals_SingleCancel(t *testing.T) {
 			var cancels atomic.Int32
 			cancelled := make(chan struct{}, 2)
 			ctx, stop := context.WithCancel(context.Background())
-			t.Cleanup(stop)
-			done := installServerShutdownSignals(ctx, f.notify, func() {
+			q := newTestShutdown(func() {
 				cancels.Add(1)
 				cancelled <- struct{}{}
 			})
+			done := installServerShutdownSignals(ctx, f.notify, q)
 
 			require.Equal(t, 1, f.calls, "notify is called once")
 			assert.ElementsMatch(t, []os.Signal{os.Interrupt, syscall.SIGTERM}, f.sigs)
@@ -127,31 +133,78 @@ func TestInstallServerShutdownSignals_SingleCancel(t *testing.T) {
 			f.deliver(tc.first)
 			<-cancelled
 			assert.Contains(t, logs.String(), tc.logged)
-			<-done // the signal goroutine has exited after its one shutdown
-
-			// A second signal stays unread in the (still subscribed)
-			// channel and can never reach cancel.
-			f.deliver(tc.second)
-			assert.Equal(t, 1, len(f.ch), "the second signal is not consumed")
-			f.deliver(tc.second) // channel full: dropped, as signal.Notify does
+			stop()
+			<-done
 			assert.Equal(t, int32(1), cancels.Load(), "cancel is called exactly once")
 			assert.Equal(t, 1, strings.Count(logs.String(), "Received signal"), "the shutdown line is logged once")
+			select {
+			case <-q.forced():
+				t.Fatal("one signal forced the shutdown")
+			default:
+			}
 		})
 	}
 }
 
-// N3-a (R11a): when ctx is done first (runServerStart cancels it on every
-// return), the signal goroutine exits without starting a shutdown; a later
-// signal stays unconsumed in the still-subscribed channel (so it is
-// swallowed, not handled by the default action), with no cancel and no log
-// line.
+// R6 (ptone/scion#5054): a second signal from outside the process on the
+// server's subscription forces the shutdown (an interactive Ctrl+C never
+// waits out a drain): the remaining pre-cancel steps are skipped, cancel
+// runs at once and q.forced is closed.
+func TestInstallServerShutdownSignals_SecondSignalForces(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		first, second os.Signal
+	}{
+		{"SIGTERM then SIGINT", syscall.SIGTERM, os.Interrupt},
+		{"SIGINT then SIGINT", os.Interrupt, os.Interrupt},
+		{"SIGTERM then SIGTERM", syscall.SIGTERM, syscall.SIGTERM},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetServerShutdownForTest(t)
+			logs := captureStdLog(t)
+			var f fakeSignalNotify
+			cancelled := make(chan struct{}, 4)
+			ctx, stop := context.WithCancel(context.Background())
+			t.Cleanup(stop)
+			q := newTestShutdown(func() { cancelled <- struct{}{} })
+			// A drain step that blocks until the test releases it, as a
+			// slow drain would.
+			drainEntered, releaseDrain := make(chan struct{}), make(chan struct{})
+			var laterRan atomic.Bool
+			require.True(t, q.addStep(shutdownPhaseMark, func() {
+				close(drainEntered)
+				<-releaseDrain
+			}))
+			require.True(t, q.addStep(shutdownPhaseDrain, func() { laterRan.Store(true) }))
+			done := installServerShutdownSignals(ctx, f.notify, q)
+
+			f.deliver(tc.first)
+			<-drainEntered
+			f.deliver(tc.second)
+			<-q.forced()
+			<-cancelled // force cancels at once, while the step still blocks
+			assert.Contains(t, logs.String(), "again, forcing shutdown")
+			close(releaseDrain)
+			<-cancelled // the run's own cancel after the step returns
+			assert.False(t, laterRan.Load(), "steps after the force are skipped")
+			stop()
+			<-done
+		})
+	}
+}
+
+// N3-a (R11a): when the handler's lifetime ctx is done first (runServerStart
+// cancels it on every return), the signal goroutine exits without starting
+// a shutdown; a later signal stays unconsumed in the still-subscribed
+// channel (so it is swallowed, not handled by the default action), with no
+// cancel and no log line.
 func TestInstallServerShutdownSignals_CtxDoneFirstExitsWithoutShutdown(t *testing.T) {
 	resetServerShutdownForTest(t)
 	logs := captureStdLog(t)
 	var f fakeSignalNotify
 	var cancels atomic.Int32
 	ctx, stop := context.WithCancel(context.Background())
-	done := installServerShutdownSignals(ctx, f.notify, func() { cancels.Add(1) })
+	done := installServerShutdownSignals(ctx, f.notify, newTestShutdown(func() { cancels.Add(1) }))
 
 	stop()
 	<-done // the goroutine has exited
@@ -162,77 +215,59 @@ func TestInstallServerShutdownSignals_CtxDoneFirstExitsWithoutShutdown(t *testin
 	assert.NotContains(t, logs.String(), "Received signal")
 }
 
-// N3-b (R11a): a signal first runs the shutdown once (one log line), then
-// the goroutine exits; a second signal stays unconsumed.
-func TestInstallServerShutdownSignals_SignalFirstExitsAfterShutdown(t *testing.T) {
+// The handler keeps reading after the first signal until its lifetime ctx
+// ends, which is not the server context the shutdown cancels: the
+// shutdown's own cancel does not stop it, so a second signal during the
+// teardown is still handled.
+func TestInstallServerShutdownSignals_HandlesSignalsAfterCancel(t *testing.T) {
 	resetServerShutdownForTest(t)
-	logs := captureStdLog(t)
+	captureStdLog(t)
 	var f fakeSignalNotify
-	var cancels atomic.Int32
-	cancelled := make(chan struct{}, 2)
-	ctx, stop := context.WithCancel(context.Background())
+	serverCtx, serverCancel := context.WithCancel(context.Background())
+	lifetime, stop := context.WithCancel(context.Background())
 	t.Cleanup(stop)
-	done := installServerShutdownSignals(ctx, f.notify, func() {
-		cancels.Add(1)
-		cancelled <- struct{}{}
-	})
+	q := newTestShutdown(serverCancel)
+	done := installServerShutdownSignals(lifetime, f.notify, q)
 
 	f.deliver(syscall.SIGTERM)
-	<-cancelled
-	<-done
-
-	f.deliver(os.Interrupt)
-	assert.Equal(t, 1, len(f.ch), "the second signal is not consumed")
-	assert.Equal(t, int32(1), cancels.Load())
-	assert.Equal(t, 1, strings.Count(logs.String(), "Received signal"), "the shutdown line is logged once")
-}
-
-// blockingLogWriter blocks every write until released, reporting the first
-// write on entered.
-type blockingLogWriter struct {
-	entered chan struct{}
-	release chan struct{}
-	once    sync.Once
-}
-
-func (w *blockingLogWriter) Write(p []byte) (int, error) {
-	w.once.Do(func() { close(w.entered) })
-	<-w.release
-	return len(p), nil
-}
-
-// N3-c (R11b): while the shutdown's log write is blocked, the signal
-// goroutine has not exited (done stays open) even though cancel has not
-// run yet; once the write returns, cancel runs and the goroutine exits. Its
-// lifetime is bounded by the logger, as on base. Production never waits on
-// done.
-func TestInstallServerShutdownSignals_GoroutineBoundedByLogWrite(t *testing.T) {
-	resetServerShutdownForTest(t)
-	w := &blockingLogWriter{entered: make(chan struct{}), release: make(chan struct{})}
-	savedOut, savedFlags := log.Writer(), log.Flags()
-	log.SetOutput(w)
-	t.Cleanup(func() {
-		log.SetOutput(savedOut)
-		log.SetFlags(savedFlags)
-	})
-	var f fakeSignalNotify
-	var cancels atomic.Int32
-	ctx, stop := context.WithCancel(context.Background())
-	t.Cleanup(stop)
-	done := installServerShutdownSignals(ctx, f.notify, func() { cancels.Add(1) })
-
-	f.deliver(syscall.SIGTERM)
-	<-w.entered
+	<-serverCtx.Done()
 	select {
 	case <-done:
-		t.Fatal("the goroutine exited while its log write was blocked")
+		t.Fatal("the handler exited with the server context")
 	default:
 	}
-	assert.Equal(t, int32(0), cancels.Load(), "cancel runs after the log line")
-
-	close(w.release)
+	f.deliver(os.Interrupt)
+	<-q.forced()
+	stop()
 	<-done
-	assert.Equal(t, int32(1), cancels.Load())
+}
+
+// The pre-cancel steps run in phase order (mark before the conduit drain,
+// whatever the registration order), all before cancel, and a step
+// registered after the shutdown began is refused and never runs.
+func TestServerShutdownSequence_StepsInPhaseOrderBeforeCancel(t *testing.T) {
+	captureStdLog(t)
+	var mu sync.Mutex
+	var order []string
+	record := func(s string) func() {
+		return func() {
+			mu.Lock()
+			defer mu.Unlock()
+			order = append(order, s)
+		}
+	}
+	q := newTestShutdown(record("cancel"))
+	require.True(t, q.addStep(shutdownPhaseDrain, record("drain")))
+	require.True(t, q.addStep(shutdownPhaseMark, record("mark-hub")))
+	require.True(t, q.addStep(shutdownPhaseMark, record("mark-web")))
+
+	q.begin(syscall.SIGTERM)
+	assert.False(t, q.addStep(shutdownPhaseMark, record("late")), "a step registered after the shutdown began is refused")
+	q.begin(syscall.SIGTERM) // run-once
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []string{"mark-hub", "mark-web", "drain", "cancel"}, order, "pre-cancel steps in phase order, then cancel")
 }
 
 // PS-2: a SIGTERM-initiated shutdown runs the step-16 tail in order:
@@ -250,17 +285,19 @@ func TestServerShutdown_SIGTERMOrderedPath(t *testing.T) {
 		defer func() { events <- "log-cleanup" }() // step 1's deferred log cleanups
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		_ = installServerShutdownSignals(ctx, f.notify, func() {
+		lifetime, stop := context.WithCancel(context.Background())
+		defer stop()
+		_ = installServerShutdownSignals(lifetime, f.notify, newTestShutdown(func() {
 			events <- "cancel"
 			cancel()
-		})
+		}))
 		close(installed)
 		return awaitServerExit(ctx, make(chan error), cancel,
 			func() { events <- "wait-return" },
 			func(context.Context) error {
 				events <- "close"
 				return nil
-			})
+			}, nil, nil, nil)
 	}
 
 	done := make(chan error, 1)

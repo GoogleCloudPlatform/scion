@@ -682,6 +682,13 @@ func TestScheduledDispatch_ProjectDefaultPassthroughFollowsProfileType(t *testin
 			}
 			_, err = f.store.SetRuntimeBrokerGCPHost(ctx, f.broker.ID, hostEmail, hostProjectID)
 			require.NoError(t, err)
+			// Translation needs enforce mode, and the schedule's principal
+			// must pass the passthrough requirements: the fixture broker
+			// has no recorded owner (and UpdateRuntimeBroker does not write
+			// CreatedBy), so the principal is made an admin, and it holds
+			// actAs on the host account.
+			grantSuperAdmin(t, f.store, f.owner.ID)
+			enforceSAAssign(f.srv, store.NewFakeCallerPermissionChecker().AllowTarget(hostSAEmail))
 			setProjectDefaultGCPMode(t, f, store.GCPMetadataModePassthrough)
 
 			const agentName = "sched-project-passthrough-profile"

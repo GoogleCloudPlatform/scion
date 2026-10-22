@@ -198,6 +198,37 @@ func RuntimeBrokerGCPHostWritersConformance(t *testing.T, factory Factory) {
 			assert.Equal(t, store.GCPHostSetting{Email: gcpHostEmailA, Project: gcpHostProjectA, Source: store.GCPHostSourceRegistration}, prev)
 		})
 
+		t.Run("SetGCPHostIfPrior writes only over the expected pair", func(t *testing.T) {
+			s := factory(t)
+			b := newGCPHostBroker(t, ctx, s, gcpHostEmailA, gcpHostProjectA, store.GCPHostSourceRegistration)
+
+			// A different expected pair: nothing is written and the stored
+			// values are returned.
+			prev, applied, err := s.SetRuntimeBrokerGCPHostIfPrior(ctx, b.ID, gcpHostEmailB, gcpHostProjectA, gcpHostEmailB, gcpHostProjectB)
+			require.NoError(t, err)
+			assert.False(t, applied)
+			assert.Equal(t, store.GCPHostSetting{Email: gcpHostEmailA, Project: gcpHostProjectA, Source: store.GCPHostSourceRegistration}, prev)
+			requireGCPHost(t, ctx, s, b.ID, gcpHostEmailA, gcpHostProjectA, store.GCPHostSourceRegistration)
+
+			// The expected pair, with the email in another letter case:
+			// written with source admin, and the replaced values returned.
+			prev, applied, err = s.SetRuntimeBrokerGCPHostIfPrior(ctx, b.ID, "Host-A@Proj-A.iam.gserviceaccount.com", gcpHostProjectA, gcpHostEmailB, gcpHostProjectB)
+			require.NoError(t, err)
+			assert.True(t, applied)
+			assert.Equal(t, store.GCPHostSetting{Email: gcpHostEmailA, Project: gcpHostProjectA, Source: store.GCPHostSourceRegistration}, prev)
+			requireGCPHost(t, ctx, s, b.ID, gcpHostEmailB, gcpHostProjectB, store.GCPHostSourceAdmin)
+
+			// An unset pair is expected as empty values.
+			u := newGCPHostBroker(t, ctx, s, "", "", "")
+			_, applied, err = s.SetRuntimeBrokerGCPHostIfPrior(ctx, u.ID, "", "", gcpHostEmailA, gcpHostProjectA)
+			require.NoError(t, err)
+			assert.True(t, applied)
+			requireGCPHost(t, ctx, s, u.ID, gcpHostEmailA, gcpHostProjectA, store.GCPHostSourceAdmin)
+
+			_, _, err = s.SetRuntimeBrokerGCPHostIfPrior(ctx, uuid.NewString(), "", "", gcpHostEmailA, gcpHostProjectA)
+			assert.ErrorIs(t, err, store.ErrNotFound)
+		})
+
 		t.Run("SetSource releases the pair to registration", func(t *testing.T) {
 			s := factory(t)
 			b := newGCPHostBroker(t, ctx, s, "", "", "")
