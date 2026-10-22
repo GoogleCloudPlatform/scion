@@ -405,20 +405,6 @@ export async function listReadableProjects(
   return { projects: sortProjectChoices(out), truncated: cursor !== '' };
 }
 
-/**
- * The projects to offer as a new artifact's home, before the canCreate
- * filter: the global project first (looked up on its own, so the cap never
- * drops it), then the other projects the caller can see, by name.
- */
-export async function listPublishCandidates(signal?: AbortSignal): Promise<ReadableProjects> {
-  const global = await findGlobalProject(signal);
-  const rest = await listReadableProjects({ skip: global?.id, signal });
-  return {
-    projects: global ? [global, ...rest.projects] : rest.projects,
-    truncated: rest.truncated,
-  };
-}
-
 /** Orders choices global first, then by name. */
 export function sortProjectChoices(projects: ProjectChoice[]): ProjectChoice[] {
   return [...projects].sort((a, b) => {
@@ -498,7 +484,8 @@ export async function filterPublishable(
 
 /**
  * The project preselected for a new artifact: the global project when it
- * is publishable (canCreate holds only for a member or owner), or the only
+ * is publishable (canCreate: owner, member with publish rights, or a role
+ * that grants artifact.create), or the only
  * choice when there is exactly one; otherwise none.
  */
 export function defaultProjectChoice(publishable: ProjectChoice[]): string {

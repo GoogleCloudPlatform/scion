@@ -30,7 +30,6 @@ import {
   isInlineType,
   linkLifetimeChoices,
   findGlobalProject,
-  listPublishCandidates,
   listReadableProjects,
   listProjectArtifacts,
   orderArtifactRefs,
@@ -821,29 +820,22 @@ describe('where the caller may publish (ptone/scion#5477)', () => {
     expect(await findGlobalProject()).toBeNull();
   });
 
-  it('puts global first even past the cap, and lists it once', async () => {
-    let pages = 0;
+  it('leaves the skipped project (global) out of the paged list', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn((input: RequestInfo | URL) => {
-        const url = requestUrl(input);
-        if (url.includes('slug=global')) {
-          return Promise.resolve(json({ projects: [{ id: 'g', name: 'Global', slug: 'global' }] }));
-        }
-        pages++;
-        // The first page also holds global; every page says there is more.
-        const projects = Array.from({ length: 200 }, (_, i) => ({
-          id: `p${pages}-${i}`,
-          slug: `s${i}`,
-        }));
-        if (pages === 1) projects[0] = { id: 'g', slug: 'global' };
-        return Promise.resolve(json({ projects, nextCursor: `c${pages}` }));
-      })
+      vi.fn(() =>
+        Promise.resolve(
+          json({
+            projects: [
+              { id: 'g', name: 'Global', slug: 'global' },
+              { id: 'w', name: 'Web', slug: 'web' },
+            ],
+          })
+        )
+      )
     );
-    const out = await listPublishCandidates();
-    expect(out.truncated).toBe(true);
-    expect(out.projects[0].id).toBe('g');
-    expect(out.projects.filter((p) => p.id === 'g')).toHaveLength(1);
+    const out = await listReadableProjects({ skip: 'g' });
+    expect(out.projects.map((p) => p.id)).toEqual(['w']);
   });
 
   it('stops checking and reports nothing more once aborted', async () => {

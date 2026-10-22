@@ -33,12 +33,13 @@ import type { TemplateResult } from 'lit';
 import { customElement, property, query, state } from 'lit/decorators.js';
 
 import {
-  GLOBAL_PROJECT_SLUG,
   PublishError,
+  canPublishIn,
   defaultProjectChoice,
   filterPublishable,
+  findGlobalProject,
   formatBytes,
-  listPublishCandidates,
+  listReadableProjects,
   READABLE_PROJECTS_CAP,
   publishErrorMessage,
   publishFiles,
@@ -254,22 +255,38 @@ export class ScionArtifactPublishDialog extends LitElement {
     this.choicesTruncated = false;
     this.userPicked = false;
     try {
-      // Global comes first, looked up on its own, so the cap never drops it.
-      const { projects, truncated } = await listPublishCandidates(signal);
+      // Global is looked up on its own, so the cap never drops it, and is
+      // checked while the other projects are listed, so its preselect does
+      // not wait for the paging. The only-choice default waits for the end.
+      const global = await findGlobalProject(signal);
       if (gen !== this.choicesGen) return;
-      this.choicesTruncated = truncated;
-      const publishable = await filterPublishable(projects, {
+      let others: ProjectChoice[] = [];
+      let globalOk = false;
+      const withGlobal = (list: ProjectChoice[]): ProjectChoice[] =>
+        global && globalOk ? [global, ...list] : list;
+      const globalCheck = (async (): Promise<void> => {
+        if (!global || !(await canPublishIn(global.id, signal))) return;
+        if (gen !== this.choicesGen) return;
+        globalOk = true;
+        this.choices = withGlobal(others);
+        if (!this.userPicked && !this.chosen) this.chosen = global.id;
+      })();
+      // Awaited at the end; a failure meanwhile must not go unhandled.
+      void globalCheck.catch(() => undefined);
+      const rest = await listReadableProjects({ skip: global?.id, signal });
+      if (gen !== this.choicesGen) return;
+      this.choicesTruncated = rest.truncated;
+      others = await filterPublishable(rest.projects, {
         onUpdate: (sofar) => {
           if (gen !== this.choicesGen) return;
-          this.choices = sofar;
-          // Global is preselected as soon as it passes; the only-choice
-          // default has to wait for the end.
-          const global = sofar.find((p) => p.slug === GLOBAL_PROJECT_SLUG);
-          if (global && !this.userPicked && !this.chosen) this.chosen = global.id;
+          others = sofar;
+          this.choices = withGlobal(sofar);
         },
         signal,
       });
+      await globalCheck;
       if (gen !== this.choicesGen) return;
+      const publishable = withGlobal(others);
       this.choices = publishable;
       if (!this.userPicked && !this.chosen) this.chosen = defaultProjectChoice(publishable);
       this.dispatchEvent(
@@ -286,6 +303,22 @@ export class ScionArtifactPublishDialog extends LitElement {
       if (gen === this.choicesGen) this.choicesLoading = false;
       if (this.choicesAbort === abort) this.choicesAbort = null;
     }
+  }
+
+  /**
+   * Retry after a failed load. The Retry button goes away with the error,
+   * so focus moves to the Project field (or back to Retry if it failed
+   * again) instead of falling to the dialog.
+   */
+  private async retryChoices(): Promise<void> {
+    const gen = this.choicesGen + 1;
+    await this.loadChoices();
+    await this.updateComplete;
+    if (!this.open || gen !== this.choicesGen) return;
+    const target = this.choicesError
+      ? this.shadowRoot?.querySelector<HTMLElement>('.project sl-alert sl-button')
+      : this.shadowRoot?.querySelector<HTMLElement>('.project-select');
+    target?.focus();
   }
 
   /** The home project of a new artifact. */
@@ -426,7 +459,7 @@ export class ScionArtifactPublishDialog extends LitElement {
         <sl-alert variant="danger" open class="choices-error">
           <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
           Could not load your projects: ${this.choicesError}
-          <sl-button size="small" @click=${(): void => void this.loadChoices()}>
+          <sl-button size="small" @click=${(): void => void this.retryChoices()}>
             <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
             Retry
           </sl-button>

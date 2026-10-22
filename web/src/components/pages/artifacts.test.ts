@@ -720,6 +720,8 @@ describe('artifacts list page: New artifact (ptone/scion#5477)', () => {
     expect(disabled(newButton(el))).toBe(false);
     const checks = scopedChecks(m);
     expect(checks[0]).toBe('g-1');
+    // The paged list holds global too, but it is not checked again.
+    expect(checks.filter((c) => c === 'g-1')).toHaveLength(1);
     // Global, then one pool's worth: not all twenty.
     expect(checks.length).toBeLessThanOrEqual(1 + PUBLISH_CHECK_CONCURRENCY);
     const projectCalls = m.urls.filter((u) => u.startsWith('/api/v1/projects?'));

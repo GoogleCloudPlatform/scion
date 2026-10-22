@@ -59,6 +59,8 @@ function mockFetch(
     /** Projects the ?slug= lookup searches (default: projects). */
     globalLookup?: Project[];
     signals?: AbortSignal[];
+    /** The paged list (not the ?slug= lookup) never answers. */
+    holdList?: boolean;
   } = {}
 ): Mock {
   const m: Mock = { calls: [], posted: [] };
@@ -84,6 +86,7 @@ function mockFetch(
           const found = (opts.globalLookup ?? projects).filter((p) => p.slug === slug);
           return Promise.resolve(json({ projects: found }));
         }
+        if (opts.holdList) return new Promise<Response>(() => {});
         return Promise.resolve(json({ projects, nextCursor: opts.nextCursor }));
       }
       if (method === 'GET' && url.startsWith('/api/v1/artifacts?')) {
@@ -267,10 +270,35 @@ describe('publish dialog project picker', () => {
     expect(el.shadowRoot!.querySelector('.choices-note.truncated')).not.toBeNull();
   });
 
-  it('lists global once when the paged list also holds it', async () => {
-    mockFetch([WEB, GLOBAL], new Set(['g-1', 'w-1']));
+  it('lists and checks global once when the paged list also holds it', async () => {
+    const m = mockFetch([WEB, GLOBAL], new Set(['g-1', 'w-1']));
     const el = await openDialog();
     expect(optionIds(el)).toEqual(['g-1', 'w-1']);
+    expect(m.calls.filter((c) => c.includes('scope=g-1'))).toHaveLength(1);
+  });
+
+  it('preselects global without waiting for the other projects to be listed', async () => {
+    mockFetch([GLOBAL, WEB], new Set(['g-1', 'w-1']), 200, { holdList: true });
+    const el = await openDialog();
+    expect(optionIds(el)).toEqual(['g-1']);
+    expect(picker(el).value).toBe('g-1');
+    expect(el.shadowRoot!.querySelector('.choices-note.checking')).not.toBeNull();
+  });
+
+  it('moves focus to the Project field after a successful Retry', async () => {
+    mockFetch([WEB], new Set(['w-1']), 500);
+    const el = await openDialog();
+    mockFetch([WEB], new Set(['w-1']));
+    const focused: Element[] = [];
+    const spy = vi.spyOn(HTMLElement.prototype, 'focus').mockImplementation(function (
+      this: HTMLElement
+    ) {
+      focused.push(this);
+    });
+    (el.shadowRoot!.querySelector('.project sl-alert sl-button') as HTMLElement).click();
+    await settle(el);
+    spy.mockRestore();
+    expect(focused).toContain(picker(el));
   });
 
   it('cancels the running checks when closed, and reopening starts afresh', async () => {
