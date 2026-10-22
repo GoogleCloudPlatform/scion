@@ -24,6 +24,12 @@ package urlredacttest
 //     is a hub URL and hub URLs never hold an '@', fails closed on them.
 //   - A URL in a query value is not user info to a redactor that takes one
 //     URL; the text redactors check it on its own.
+//
+// Over-redaction, accepted as failing closed: in
+// "next=https://app.example.com&mail=a@b.example.com" a nested URL's query
+// holds an '@', which url.Parse reads as user info "app.example.com&mail=a"
+// at host "b.example.com". The text redactors mask it; no secret is shown,
+// and nothing that could be one is kept.
 var Rows = []Row{
 	{
 		Name:   "slash in password",
@@ -44,6 +50,8 @@ var Rows = []Row{
 			ProvisionRedactCloneURL:            "<unparseable clone URL>",
 			ProvisionSanitizeCloneOutput:       "Get \"<unparseable clone URL>\": refused",
 			RemoteFetchRedactURL:               "(unparseable)",
+			CmdDisplaySourceURL:                "(non-web source)",
+			HubSkillsDiscoverBase:              "(rejected: 400, URL not echoed)",
 		},
 	},
 	{
@@ -65,6 +73,8 @@ var Rows = []Row{
 			ProvisionRedactCloneURL:            "<unparseable clone URL>",
 			ProvisionSanitizeCloneOutput:       "Get \"<unparseable clone URL>\": refused",
 			RemoteFetchRedactURL:               "(unparseable)",
+			CmdDisplaySourceURL:                "(non-web source)",
+			HubSkillsDiscoverBase:              "(rejected: 400, URL not echoed)",
 		},
 	},
 	{
@@ -86,6 +96,8 @@ var Rows = []Row{
 			ProvisionRedactCloneURL:            "<unparseable clone URL>",
 			ProvisionSanitizeCloneOutput:       "Get \"<unparseable clone URL>\": refused",
 			RemoteFetchRedactURL:               "(unparseable)",
+			CmdDisplaySourceURL:                "(non-web source)",
+			HubSkillsDiscoverBase:              "(rejected: 400, URL not echoed)",
 		},
 	},
 	{
@@ -107,6 +119,8 @@ var Rows = []Row{
 			ProvisionRedactCloneURL:            "https://tok_fake/Pw9q@hub.example.com/x",
 			ProvisionSanitizeCloneOutput:       "Get \"https://tok_fake/Pw9q@hub.example.com/x\": refused",
 			RemoteFetchRedactURL:               "https://tok_fake/Pw9q@hub.example.com/x",
+			CmdDisplaySourceURL:                "https://tok_fake/Pw9q@hub.example.com/x",
+			HubSkillsDiscoverBase:              "(rejected: 400, URL not echoed)",
 		},
 	},
 	{
@@ -128,6 +142,8 @@ var Rows = []Row{
 			ProvisionRedactCloneURL:            "https://hub.example.com/api",
 			ProvisionSanitizeCloneOutput:       "Get \"https://hub.example.com/api\": refused",
 			RemoteFetchRedactURL:               "https://hub.example.com/api",
+			CmdDisplaySourceURL:                "https://hub.example.com/api",
+			HubSkillsDiscoverBase:              "(rejected: 400, URL not echoed)",
 		},
 	},
 	{
@@ -149,6 +165,8 @@ var Rows = []Row{
 			ProvisionRedactCloneURL:            "https://ss/w0rd@hub.example.com/api",
 			ProvisionSanitizeCloneOutput:       "Get \"https://ss/w0rd@hub.example.com/api\": refused",
 			RemoteFetchRedactURL:               "https://ss/w0rd@hub.example.com/api",
+			CmdDisplaySourceURL:                "https://ss/w0rd@hub.example.com/api",
+			HubSkillsDiscoverBase:              "(rejected: 400, URL not echoed)",
 		},
 	},
 	{
@@ -170,6 +188,8 @@ var Rows = []Row{
 			ProvisionRedactCloneURL:            "<unparseable clone URL>",
 			ProvisionSanitizeCloneOutput:       "Get \"<unparseable clone URL>\": refused",
 			RemoteFetchRedactURL:               "(unparseable)",
+			CmdDisplaySourceURL:                "(non-web source)",
+			HubSkillsDiscoverBase:              "(rejected: 400, URL not echoed)",
 		},
 	},
 	{
@@ -191,6 +211,8 @@ var Rows = []Row{
 			ProvisionRedactCloneURL:            "https://ss",
 			ProvisionSanitizeCloneOutput:       "Get \"https://ss\": refused",
 			RemoteFetchRedactURL:               "https://ss",
+			CmdDisplaySourceURL:                "https://ss",
+			HubSkillsDiscoverBase:              "(rejected: 400, URL not echoed)",
 		},
 	},
 	{
@@ -212,6 +234,8 @@ var Rows = []Row{
 			ProvisionRedactCloneURL:            "<unparseable clone URL>",
 			ProvisionSanitizeCloneOutput:       "Get \"<unparseable clone URL>\": refused",
 			RemoteFetchRedactURL:               "(unparseable)",
+			CmdDisplaySourceURL:                "(non-web source)",
+			HubSkillsDiscoverBase:              "(rejected: 400, URL not echoed)",
 		},
 	},
 	{
@@ -233,6 +257,8 @@ var Rows = []Row{
 			ProvisionRedactCloneURL:            "https://hub.example.com/a",
 			ProvisionSanitizeCloneOutput:       "Get \"https://hub.example.com/a\": refused",
 			RemoteFetchRedactURL:               "https://hub.example.com/a",
+			CmdDisplaySourceURL:                "https://hub.example.com/a",
+			HubSkillsDiscoverBase:              "(rejected: 400, URL not echoed)",
 		},
 	},
 	{
@@ -254,6 +280,8 @@ var Rows = []Row{
 			ProvisionRedactCloneURL:            "https://hub.example.com/api",
 			ProvisionSanitizeCloneOutput:       "Get \"https://hub.example.com/api\": refused",
 			RemoteFetchRedactURL:               "https://hub.example.com/api",
+			CmdDisplaySourceURL:                "https://hub.example.com/api",
+			HubSkillsDiscoverBase:              "(rejected: 400, URL not echoed)",
 		},
 	},
 	{
@@ -275,6 +303,8 @@ var Rows = []Row{
 			ProvisionRedactCloneURL:            "https://hub.example.com/healthz",
 			ProvisionSanitizeCloneOutput:       "Get \"https://hub.example.com/healthz\": refused",
 			RemoteFetchRedactURL:               "https://hub.example.com/healthz",
+			CmdDisplaySourceURL:                "https://hub.example.com/healthz",
+			HubSkillsDiscoverBase:              "(rejected: 400, URL not echoed)",
 		},
 	},
 	{
@@ -296,6 +326,8 @@ var Rows = []Row{
 			ProvisionRedactCloneURL:            "https://hub.example.com/x",
 			ProvisionSanitizeCloneOutput:       "Get \"https://hub.example.com/x\": refused",
 			RemoteFetchRedactURL:               "https://hub.example.com/x",
+			CmdDisplaySourceURL:                "https://hub.example.com/x",
+			HubSkillsDiscoverBase:              "(rejected: 400, URL not echoed)",
 		},
 	},
 	{
@@ -317,6 +349,8 @@ var Rows = []Row{
 			ProvisionRedactCloneURL:            "https://[::1]:8443/api",
 			ProvisionSanitizeCloneOutput:       "Get \"https://[::1]:8443/api\": refused",
 			RemoteFetchRedactURL:               "https://[::1]:8443/api",
+			CmdDisplaySourceURL:                "https://[::1]:8443/api",
+			HubSkillsDiscoverBase:              "(rejected: 400, URL not echoed)",
 		},
 	},
 	{
@@ -339,6 +373,8 @@ var Rows = []Row{
 			ProvisionRedactCloneURL:            "https://u:1234/x@h.example",
 			ProvisionSanitizeCloneOutput:       "Get \"https://u:1234/x@h.example\": refused",
 			RemoteFetchRedactURL:               "https://u:1234/x@h.example",
+			CmdDisplaySourceURL:                "https://u:1234/x@h.example",
+			HubSkillsDiscoverBase:              "(rejected: 400, URL not echoed)",
 		},
 	},
 	{
@@ -361,6 +397,8 @@ var Rows = []Row{
 			ProvisionRedactCloneURL:            "https://tok9/x@h.example",
 			ProvisionSanitizeCloneOutput:       "Get \"https://tok9/x@h.example\": refused",
 			RemoteFetchRedactURL:               "https://tok9/x@h.example",
+			CmdDisplaySourceURL:                "https://tok9/x@h.example",
+			HubSkillsDiscoverBase:              "(rejected: 400, URL not echoed)",
 		},
 	},
 	{
@@ -383,6 +421,8 @@ var Rows = []Row{
 			ProvisionRedactCloneURL:            "https://u:12",
 			ProvisionSanitizeCloneOutput:       "Get \"https://u:12\": refused",
 			RemoteFetchRedactURL:               "https://u:12",
+			CmdDisplaySourceURL:                "https://u:12",
+			HubSkillsDiscoverBase:              "(rejected: 400, URL not echoed)",
 		},
 	},
 	{
@@ -405,6 +445,8 @@ var Rows = []Row{
 			ProvisionRedactCloneURL:            "https://tok9",
 			ProvisionSanitizeCloneOutput:       "Get \"https://tok9\": refused",
 			RemoteFetchRedactURL:               "https://tok9",
+			CmdDisplaySourceURL:                "https://tok9",
+			HubSkillsDiscoverBase:              "(rejected: 400, URL not echoed)",
 		},
 	},
 	{
@@ -418,7 +460,7 @@ var Rows = []Row{
 			ConfigRedactURL:                    "https://hub.example.com/login?next=https://alice:s3cretPw@app.example.com/x",
 			ConfigRedactURLsIn:                 "Get \"https://hub.example.com/login?next=https://xxxxx@app.example.com/x\": refused",
 			APIClientRedactURL:                 "https://hub.example.com/login?next=https://alice:s3cretPw@app.example.com/x",
-			LoggingSanitizeText:                "Get \"https://hub.example.com/login?next=[REDACTED]]@app.example.com/x\": refused",
+			LoggingSanitizeText:                "Get \"https://hub.example.com/login?next=[REDACTED]\": refused",
 			CmdRedactEndpointIn:                "Get \"[redacted hub URL]\": refused",
 			TunnelClientRedactEndpoint:         "https://hub.example.com/login",
 			TunnelClientScrubEndpoint:          "Get \"https://hub.example.com/login\": refused",
@@ -427,6 +469,8 @@ var Rows = []Row{
 			ProvisionRedactCloneURL:            "https://hub.example.com/login",
 			ProvisionSanitizeCloneOutput:       "Get \"https://hub.example.com/login\": refused",
 			RemoteFetchRedactURL:               "https://hub.example.com/login",
+			CmdDisplaySourceURL:                "https://hub.example.com/login",
+			HubSkillsDiscoverBase:              "(rejected: 400, URL not echoed)",
 		},
 	},
 	{
@@ -440,7 +484,7 @@ var Rows = []Row{
 			ConfigRedactURL:                    "https://hub.example.com/r?next=https://alice:fake/Pw9q@app.example.com/x",
 			ConfigRedactURLsIn:                 "Get \"https://hub.example.com/r?next=https://xxxxx\": refused",
 			APIClientRedactURL:                 "https://hub.example.com/r?next=https://alice:fake/Pw9q@app.example.com/x",
-			LoggingSanitizeText:                "Get \"https://hub.example.com/r?next=[REDACTED]]\": refused",
+			LoggingSanitizeText:                "Get \"https://hub.example.com/r?next=[REDACTED]\": refused",
 			CmdRedactEndpointIn:                "Get \"[redacted hub URL]\": refused",
 			TunnelClientRedactEndpoint:         "https://hub.example.com/r",
 			TunnelClientScrubEndpoint:          "Get \"https://hub.example.com/r\": refused",
@@ -449,6 +493,101 @@ var Rows = []Row{
 			ProvisionRedactCloneURL:            "https://hub.example.com/r",
 			ProvisionSanitizeCloneOutput:       "Get \"https://hub.example.com/r\": refused",
 			RemoteFetchRedactURL:               "https://hub.example.com/r",
+			CmdDisplaySourceURL:                "https://hub.example.com/r",
+			HubSkillsDiscoverBase:              "(rejected: 400, URL not echoed)",
+		},
+	},
+	{
+		Name:   "e-mail address in a nested URL's query",
+		In:     "https://hub.example.com/r?next=https://app.example.com&mail=a@b.example.com",
+		Secret: "",
+		Want: map[string]string{
+			URLRedactRedactUserInfo:            "https://hub.example.com/r?next=https://app.example.com&mail=a@b.example.com",
+			URLRedactRedactUserInfoIn:          "Get \"https://hub.example.com/r?next=https://xxxxx@b.example.com\": refused",
+			ConfigRedactURL:                    "https://hub.example.com/r?next=https://app.example.com&mail=a@b.example.com",
+			ConfigRedactURLsIn:                 "Get \"https://hub.example.com/r?next=https://xxxxx@b.example.com\": refused",
+			APIClientRedactURL:                 "https://hub.example.com/r?next=https://app.example.com&mail=a@b.example.com",
+			LoggingSanitizeText:                "Get \"https://hub.example.com/r?next=[REDACTED]\": refused",
+			CmdRedactEndpointIn:                "Get \"[redacted hub URL]\": refused",
+			TunnelClientRedactEndpoint:         "https://hub.example.com/r",
+			TunnelClientScrubEndpoint:          "Get \"https://hub.example.com/r\": refused",
+			RuntimeBrokerRedactCloneURL:        "https://hub.example.com/r",
+			RuntimeBrokerSanitizeCloneErrorTxt: "Get \"https://hub.example.com/r\": refused",
+			ProvisionRedactCloneURL:            "https://hub.example.com/r",
+			ProvisionSanitizeCloneOutput:       "Get \"https://hub.example.com/r\": refused",
+			RemoteFetchRedactURL:               "https://hub.example.com/r",
+			CmdDisplaySourceURL:                "https://hub.example.com/r",
+			HubSkillsDiscoverBase:              "(rejected: 400, URL not echoed)",
+		},
+	},
+	{
+		Name:   "password, GitHub skills URL",
+		In:     "https://x-access-token:s3cretPw@github.com/acme/repo/tree/main/skills",
+		Secret: "s3cretPw",
+		Want: map[string]string{
+			URLRedactRedactUserInfo:            "https://x-access-token:xxxxx@github.com/acme/repo/tree/main/skills",
+			URLRedactRedactUserInfoIn:          "Get \"https://xxxxx@github.com/acme/repo/tree/main/skills\": refused",
+			ConfigRedactURL:                    "https://x-access-token:xxxxx@github.com/acme/repo/tree/main/skills",
+			ConfigRedactURLsIn:                 "Get \"https://x-access-token:xxxxx@github.com/acme/repo/tree/main/skills\": refused",
+			APIClientRedactURL:                 "https://x-access-token:xxxxx@github.com/acme/repo/tree/main/skills",
+			LoggingSanitizeText:                "Get \"https://[REDACTED]@github.com/acme/repo/tree/main/skills\": refused",
+			CmdRedactEndpointIn:                "Get \"https://x-access-token:xxxxx@github.com/acme/repo/tree/main/skills\": refused",
+			TunnelClientRedactEndpoint:         "https://github.com/acme/repo/tree/main/skills",
+			TunnelClientScrubEndpoint:          "Get \"https://github.com/acme/repo/tree/main/skills\": refused",
+			RuntimeBrokerRedactCloneURL:        "https://github.com/acme/repo/tree/main/skills",
+			RuntimeBrokerSanitizeCloneErrorTxt: "Get \"https://github.com/acme/repo/tree/main/skills\": refused",
+			ProvisionRedactCloneURL:            "https://github.com/acme/repo/tree/main/skills",
+			ProvisionSanitizeCloneOutput:       "Get \"https://github.com/acme/repo/tree/main/skills\": refused",
+			RemoteFetchRedactURL:               "https://github.com/acme/repo/tree/main/skills",
+			CmdDisplaySourceURL:                "https://github.com/acme/repo/tree/main/skills",
+			HubSkillsDiscoverBase:              "https://github.com/acme/repo/tree/main/skills",
+		},
+	},
+	{
+		Name:   "slash in password, GitHub skills URL",
+		In:     "https://x-access-token:fake/Pw9q@github.com/acme/repo/tree/main/skills",
+		Secret: "fake/Pw9q",
+		Want: map[string]string{
+			URLRedactRedactUserInfo:            "https://xxxxx",
+			URLRedactRedactUserInfoIn:          "Get \"https://xxxxx\": refused",
+			ConfigRedactURL:                    "https://xxxxx",
+			ConfigRedactURLsIn:                 "Get \"https://xxxxx\": refused",
+			APIClientRedactURL:                 "https://xxxxx",
+			LoggingSanitizeText:                "Get \"https://[REDACTED]\": refused",
+			CmdRedactEndpointIn:                "Get \"[redacted hub URL]\": refused",
+			TunnelClientRedactEndpoint:         "the configured hub endpoint",
+			TunnelClientScrubEndpoint:          "Get \"https://x-access-token:fake/Pw9q@github.com/acme/repo/tree/main/skills\": refused",
+			RuntimeBrokerRedactCloneURL:        "<unparseable>",
+			RuntimeBrokerSanitizeCloneErrorTxt: "Get \"<unparseable>\": refused",
+			ProvisionRedactCloneURL:            "<unparseable clone URL>",
+			ProvisionSanitizeCloneOutput:       "Get \"<unparseable clone URL>\": refused",
+			RemoteFetchRedactURL:               "(unparseable)",
+			CmdDisplaySourceURL:                "(non-web source)",
+			HubSkillsDiscoverBase:              "(rejected: 400, URL not echoed)",
+		},
+	},
+	{
+		Name:     "token read as a host, GitHub skills URL",
+		In:       "https://tok9/x@github.com/acme/repo/tree/main/skills",
+		Secret:   "tok9/x",
+		Residual: []string{URLRedactRedactUserInfo, URLRedactRedactUserInfoIn, ConfigRedactURL, ConfigRedactURLsIn, APIClientRedactURL, LoggingSanitizeText},
+		Want: map[string]string{
+			URLRedactRedactUserInfo:            "https://tok9/x@github.com/acme/repo/tree/main/skills",
+			URLRedactRedactUserInfoIn:          "Get \"https://tok9/x@github.com/acme/repo/tree/main/skills\": refused",
+			ConfigRedactURL:                    "https://tok9/x@github.com/acme/repo/tree/main/skills",
+			ConfigRedactURLsIn:                 "Get \"https://tok9/x@github.com/acme/repo/tree/main/skills\": refused",
+			APIClientRedactURL:                 "https://tok9/x@github.com/acme/repo/tree/main/skills",
+			LoggingSanitizeText:                "Get \"https://tok9/x@github.com/acme/repo/tree/main/skills\": refused",
+			CmdRedactEndpointIn:                "Get \"[redacted hub URL]\": refused",
+			TunnelClientRedactEndpoint:         "https://tok9/x@github.com/acme/repo/tree/main/skills",
+			TunnelClientScrubEndpoint:          "Get \"https://tok9/x@github.com/acme/repo/tree/main/skills\": refused",
+			RuntimeBrokerRedactCloneURL:        "https://tok9/x@github.com/acme/repo/tree/main/skills",
+			RuntimeBrokerSanitizeCloneErrorTxt: "Get \"https://tok9/x@github.com/acme/repo/tree/main/skills\": refused",
+			ProvisionRedactCloneURL:            "https://tok9/x@github.com/acme/repo/tree/main/skills",
+			ProvisionSanitizeCloneOutput:       "Get \"https://tok9/x@github.com/acme/repo/tree/main/skills\": refused",
+			RemoteFetchRedactURL:               "https://tok9/x@github.com/acme/repo/tree/main/skills",
+			CmdDisplaySourceURL:                "https://tok9/x@github.com/acme/repo/tree/main/skills",
+			HubSkillsDiscoverBase:              "(rejected: 400, URL not echoed)",
 		},
 	},
 	{
@@ -470,6 +609,8 @@ var Rows = []Row{
 			ProvisionRedactCloneURL:            "https://hub.example.com/users/a@b.example.com/profile",
 			ProvisionSanitizeCloneOutput:       "Get \"https://hub.example.com/users/a@b.example.com/profile\": refused",
 			RemoteFetchRedactURL:               "https://hub.example.com/users/a@b.example.com/profile",
+			CmdDisplaySourceURL:                "https://hub.example.com/users/a@b.example.com/profile",
+			HubSkillsDiscoverBase:              "(rejected: 400, URL not echoed)",
 		},
 	},
 	{
@@ -491,6 +632,8 @@ var Rows = []Row{
 			ProvisionRedactCloneURL:            "https://hub.example.com/api",
 			ProvisionSanitizeCloneOutput:       "Get \"https://hub.example.com/api\": refused",
 			RemoteFetchRedactURL:               "https://hub.example.com/api",
+			CmdDisplaySourceURL:                "https://hub.example.com/api",
+			HubSkillsDiscoverBase:              "(rejected: 400, URL not echoed)",
 		},
 	},
 	{
@@ -512,6 +655,8 @@ var Rows = []Row{
 			ProvisionRedactCloneURL:            "https://hub.example.com:8443/api",
 			ProvisionSanitizeCloneOutput:       "Get \"https://hub.example.com:8443/api\": refused",
 			RemoteFetchRedactURL:               "https://hub.example.com:8443/api",
+			CmdDisplaySourceURL:                "https://hub.example.com:8443/api",
+			HubSkillsDiscoverBase:              "(rejected: 400, URL not echoed)",
 		},
 	},
 }

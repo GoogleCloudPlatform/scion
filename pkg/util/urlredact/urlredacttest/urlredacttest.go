@@ -43,6 +43,8 @@ const (
 	ProvisionRedactCloneURL            = "provision.redactCloneURL"
 	ProvisionSanitizeCloneOutput       = "provision.sanitizeCloneOutput"
 	RemoteFetchRedactURL               = "remotefetch.redactURL"
+	CmdDisplaySourceURL                = "cmd.displaySourceURL"
+	HubSkillsDiscoverBase              = "hub.skillsDiscoverBase"
 )
 
 // Columns lists every column: its name, the name of its constant here, and
@@ -64,6 +66,13 @@ var Columns = []struct{ Name, Const, Runner string }{
 	{ProvisionRedactCloneURL, "ProvisionRedactCloneURL", "pkg/provision/clone_url_table_test.go"},
 	{ProvisionSanitizeCloneOutput, "ProvisionSanitizeCloneOutput", "pkg/provision/clone_url_table_test.go"},
 	{RemoteFetchRedactURL, "RemoteFetchRedactURL", "pkg/artifacts/remotefetch/redact_url_table_test.go"},
+	{CmdDisplaySourceURL, "CmdDisplaySourceURL", "cmd/templates_update_url_table_test.go"},
+	// A byte-identical copy of the inline code in
+	// pkg/hub/handlers_skills_discover.go, so the table stays light. It does
+	// not use the shared rule, but it shows no row's secret (it accepts only
+	// the host github.com, then drops the user info), so it is checked like a
+	// migrated column: any future leak fails its test.
+	{HubSkillsDiscoverBase, "HubSkillsDiscoverBase", "pkg/util/urlredact/hub_skills_discover_copy_test.go"},
 }
 
 // KnownUnmigrated are the columns whose redactor does not use the shared
@@ -79,6 +88,7 @@ var KnownUnmigrated = map[string]bool{
 	ProvisionRedactCloneURL:            true,
 	ProvisionSanitizeCloneOutput:       true,
 	RemoteFetchRedactURL:               true,
+	CmdDisplaySourceURL:                true,
 }
 
 // Text returns the error text a text column is run on: in quoted the way

@@ -138,7 +138,7 @@ func blankKeyValues(re *regexp.Regexp, s string) string {
 		}
 		end := m[1]
 		if value[0] != '"' && value[0] != '\'' {
-			end = extendValue(s, end)
+			end = extendValue(s, extendOverMarkers(s, m[6], end))
 		}
 		b.WriteString(s[last:m[6]])
 		b.WriteString(RedactedMarker)
@@ -146,6 +146,22 @@ func blankKeyValues(re *regexp.Regexp, s string) string {
 	}
 	b.WriteString(s[last:])
 	return b.String()
+}
+
+// extendOverMarkers returns the end of an unquoted value that starts at
+// start and ends at end in s, extended over each RedactedMarker an earlier
+// rule wrote inside it: the value pattern stops at the marker's ']', so
+// without this the value would be blanked up to there and the rest of the
+// marker left behind ("[REDACTED]]"). After a marker the value runs on to
+// the next white space or delimiter.
+func extendOverMarkers(s string, start, end int) int {
+	for end < len(s) && s[end] == ']' && strings.HasSuffix(s[start:end], RedactedMarker[:len(RedactedMarker)-1]) {
+		end++
+		for end < len(s) && !isValueEnd(s[end]) {
+			end++
+		}
+	}
+	return end
 }
 
 // extendValue returns the end of an unquoted value that ends at i in s,
