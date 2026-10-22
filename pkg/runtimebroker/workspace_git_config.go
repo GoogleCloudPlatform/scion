@@ -30,14 +30,145 @@ import (
 // works and can push.
 
 // minimalGitConfigCore is the [core] section of a minimal repository
-// configuration. It holds no key that names a program, a path or a
-// command (no hooksPath, fsmonitor, sshCommand, editor, pager, alias or
-// filter).
+// configuration for a SHA-1 repository. It holds no key that names a
+// program, a path or a command (no hooksPath, fsmonitor, sshCommand,
+// editor, pager, alias or filter). Every value the broker writes comes from
+// a fixed template here, the hub-known clone URL, or a branch name and
+// object format read from the repository's HEAD and strictly validated;
+// nothing is copied from the source repository's configuration.
 const minimalGitConfigCore = "[core]\n" +
 	"\trepositoryformatversion = 0\n" +
 	"\tfilemode = true\n" +
 	"\tbare = false\n" +
 	"\tlogallrefupdates = true\n"
+
+// sha256GitConfigCore is the [core] and [extensions] sections for a
+// repository whose objects use SHA-256 (format version 1 is required for
+// the extension).
+const sha256GitConfigCore = "[core]\n" +
+	"\trepositoryformatversion = 1\n" +
+	"\tfilemode = true\n" +
+	"\tbare = false\n" +
+	"\tlogallrefupdates = true\n" +
+	"[extensions]\n" +
+	"\tobjectformat = sha256\n"
+
+// branchNameChars is the only character class a branch name written into
+// the configuration may use. None of them needs escaping inside a quoted
+// subsection name (only '"' and '\\' would); quotedSubsectionSafe checks
+// this.
+const branchNameChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/-"
+
+// quotedSubsectionSafe reports whether every character of chars may appear
+// unescaped in a quoted git configuration subsection name.
+func quotedSubsectionSafe(chars string) bool {
+	return !strings.ContainsAny(chars, "\"\\\n\x00")
+}
+
+func init() {
+	if !quotedSubsectionSafe(branchNameChars) {
+		panic("branchNameChars needs escaping in a quoted subsection")
+	}
+}
+
+// maxBranchNameLen bounds a branch name written into the configuration.
+const maxBranchNameLen = 200
+
+// validBranchName reports whether name may be written as a branch
+// subsection: only branchNameChars, at most maxBranchNameLen bytes, git's
+// check-ref-format rules for the whole name (no "..", no leading '-' or
+// '/', no trailing '/' or '.') and for every '/'-separated component (not
+// empty, no leading '.', no ".lock" suffix).
+func validBranchName(name string) bool {
+	if name == "" || len(name) > maxBranchNameLen {
+		return false
+	}
+	for _, c := range name {
+		if !strings.ContainsRune(branchNameChars, c) {
+			return false
+		}
+	}
+	if strings.Contains(name, "..") || strings.HasPrefix(name, "-") || strings.HasPrefix(name, "/") ||
+		strings.HasSuffix(name, "/") || strings.HasSuffix(name, ".") {
+		return false
+	}
+	for _, comp := range strings.Split(name, "/") {
+		if comp == "" || strings.HasPrefix(comp, ".") || strings.HasSuffix(comp, ".lock") {
+			return false
+		}
+	}
+	return true
+}
+
+// headInfo is what ensureMinimalGitConfig reads from a repository's HEAD.
+type headInfo struct {
+	branch string // the branch HEAD names, when valid
+	sha256 bool   // the object ids are 64 hex digits
+}
+
+// maxRefFileBytes bounds the HEAD and loose ref files read.
+const maxRefFileBytes = 4096
+
+// isObjectID reports whether s is 40 or 64 lowercase hex digits.
+func isObjectID(s string) bool {
+	if len(s) != 40 && len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// readSmallRegular reads name in dir when it is a regular file of at most
+// limit bytes.
+func readSmallRegular(dir *os.Root, name string, limit int64) (string, bool) {
+	info, err := dir.Lstat(name)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > limit {
+		return "", false
+	}
+	b, err := dir.ReadFile(name)
+	if err != nil {
+		return "", false
+	}
+	return string(b), true
+}
+
+// readHeadInfo reads the branch HEAD names (when valid) and the object
+// format from the repository in gitDir. An id is looked up in the loose
+// ref, then in packed-refs; an unborn branch reads as SHA-1.
+func readHeadInfo(gitDir *os.Root) headInfo {
+	var hi headInfo
+	head, ok := readSmallRegular(gitDir, "HEAD", maxRefFileBytes)
+	if !ok {
+		return hi
+	}
+	head = strings.TrimSuffix(head, "\n")
+	if isObjectID(head) {
+		hi.sha256 = len(head) == 64
+		return hi
+	}
+	name, ok := strings.CutPrefix(head, "ref: refs/heads/")
+	if !ok || !validBranchName(name) {
+		return hi
+	}
+	hi.branch = name
+	if id, ok := readSmallRegular(gitDir, "refs/heads/"+name, maxRefFileBytes); ok && isObjectID(strings.TrimSuffix(id, "\n")) {
+		hi.sha256 = len(strings.TrimSuffix(id, "\n")) == 64
+		return hi
+	}
+	if packed, ok := readSmallRegular(gitDir, "packed-refs", 64<<20); ok {
+		for _, line := range strings.Split(packed, "\n") {
+			if id, ref, ok := strings.Cut(line, " "); ok && ref == "refs/heads/"+name && isObjectID(id) {
+				hi.sha256 = len(id) == 64
+				break
+			}
+		}
+	}
+	return hi
+}
 
 // scpCloneURL matches the scp-style ssh remote the hub keeps as a clone URL
 // ("git@host:org/repo"; see util.NormalizeCloneURL).
@@ -73,14 +204,24 @@ func validateOriginURL(cloneURL string) error {
 	return errUnsafeCloneURL
 }
 
-// minimalGitConfig returns the minimal repository configuration, with an
-// origin remote when originURL is not empty (already validated).
-func minimalGitConfig(originURL string) string {
+// minimalGitConfig returns the minimal repository configuration: core
+// settings (SHA-256 when hi says so), an origin remote when originURL is
+// not empty (already validated), and a tracking entry for hi.branch when
+// there is an origin and a branch.
+func minimalGitConfig(originURL string, hi headInfo) string {
 	cfg := minimalGitConfigCore
+	if hi.sha256 {
+		cfg = sha256GitConfigCore
+	}
 	if originURL != "" {
 		cfg += "[remote \"origin\"]\n" +
 			"\turl = " + originURL + "\n" +
 			"\tfetch = +refs/heads/*:refs/remotes/origin/*\n"
+		if hi.branch != "" && validBranchName(hi.branch) {
+			cfg += "[branch \"" + hi.branch + "\"]\n" +
+				"\tremote = origin\n" +
+				"\tmerge = refs/heads/" + hi.branch + "\n"
+		}
 	}
 	return cfg
 }
@@ -132,7 +273,7 @@ func ensureMinimalGitConfig(workspaceDir, cloneURL string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	_, werr := f.WriteString(minimalGitConfig(origin))
+	_, werr := f.WriteString(minimalGitConfig(origin, readHeadInfo(gitDir)))
 	if cerr := f.Close(); werr == nil {
 		werr = cerr
 	}

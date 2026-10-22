@@ -15,6 +15,7 @@
 package transfer
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -199,7 +200,9 @@ func TestApplyStagedWorkspace_GitData(t *testing.T) {
 		".git/config":           "[core]\n\tbare = false\n",
 		".git/hooks/pre-commit": "#!/bin/sh\nmine\n",
 		".git/refs/heads/main":  "old\n",
-		".git/refs/heads/other": "kept\n",
+		".git/refs/heads/other": "packed or deleted by the source\n",
+		".git/packed-refs":      "stale\n",
+		".git/objects/zz/old":   "receiver's object",
 	})
 
 	if _, err := ApplyStagedWorkspace(staging, dest, StagedApplyOptions{GitData: true}); err != nil {
@@ -214,13 +217,15 @@ func TestApplyStagedWorkspace_GitData(t *testing.T) {
 		".git/objects/pack/p.pack": "pack",
 		".git/config":              "[core]\n\tbare = false\n",
 		".git/hooks/pre-commit":    "#!/bin/sh\nmine\n",
-		".git/refs/heads/other":    "kept\n", // git data is never deleted
+		".git/objects/zz/old":      "receiver's object", // objects are never deleted
 		"a.txt":                    "a",
 	} {
 		if got := readT(t, filepath.Join(dest, rel)); got != want {
 			t.Errorf("%s = %q, want %q", rel, got, want)
 		}
 	}
+	// The ref state is one unit: a ref the source no longer has is removed.
+	absentT(t, filepath.Join(dest, ".git/refs/heads/other"))
 
 	// Without GitData the same staging leaves .git alone.
 	dest2 := t.TempDir()
@@ -335,6 +340,128 @@ func TestApplyStagedWorkspace_KeepsExistingMode(t *testing.T) {
 	for _, e := range entries {
 		if len(e.Name()) > 9 && e.Name()[:10] == ".sync-tmp-" {
 			t.Errorf("temporary file left behind: %s", e.Name())
+		}
+	}
+}
+
+// TestApplyStagedWorkspace_LargeFilesStreamed covers files larger than one
+// copy chunk: a new one is written, an identical one is not rewritten, and
+// one differing only in its last byte is rewritten.
+func TestApplyStagedWorkspace_LargeFilesStreamed(t *testing.T) {
+	staging, dest := t.TempDir(), t.TempDir()
+	big := make([]byte, 3*copyChunk+17)
+	for i := range big {
+		big[i] = byte(i * 7)
+	}
+	changed := append([]byte(nil), big...)
+	changed[len(changed)-1] ^= 0xff
+	for name, data := range map[string][]byte{"new.bin": big, "same.bin": big, "changed.bin": changed} {
+		if err := os.WriteFile(filepath.Join(staging, name), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, data := range map[string][]byte{"same.bin": big, "changed.bin": big} {
+		if err := os.WriteFile(filepath.Join(dest, name), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sameBefore, _ := os.Stat(filepath.Join(dest, "same.bin"))
+
+	stats, err := ApplyStagedWorkspace(staging, dest, StagedApplyOptions{})
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if stats.Written != 2 {
+		t.Errorf("Written = %d, want 2 (new.bin, changed.bin)", stats.Written)
+	}
+	sameAfter, _ := os.Stat(filepath.Join(dest, "same.bin"))
+	if !os.SameFile(sameBefore, sameAfter) {
+		t.Error("identical large file was rewritten")
+	}
+	for name, want := range map[string][]byte{"new.bin": big, "changed.bin": changed} {
+		got, err := os.ReadFile(filepath.Join(dest, name))
+		if err != nil || !bytes.Equal(got, want) {
+			t.Errorf("%s: content differs (err %v)", name, err)
+		}
+	}
+}
+
+// TestApplyStagedWorkspace_RefStateNeedsRepository checks that ref state
+// is removed only when the staging directory carries a repository
+// (.git/HEAD): staged objects alone never delete the receiver's refs.
+func TestApplyStagedWorkspace_RefStateNeedsRepository(t *testing.T) {
+	staging, dest := t.TempDir(), t.TempDir()
+	writeTreeT(t, staging, map[string]string{".git/objects/ab/cd": "o"})
+	writeTreeT(t, dest, map[string]string{".git/HEAD": "ref: refs/heads/main\n", ".git/refs/heads/main": "x\n"})
+	if _, err := ApplyStagedWorkspace(staging, dest, StagedApplyOptions{GitData: true}); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if got := readT(t, filepath.Join(dest, ".git/refs/heads/main")); got != "x\n" {
+		t.Errorf("refs/heads/main = %q, want kept", got)
+	}
+}
+
+// TestApplyStagedWorkspace_RefusesReservedAlias stands in for a
+// name-folding filesystem with a hard link: a content path whose target is
+// the destination's own .git or .scion file under another name is refused.
+func TestApplyStagedWorkspace_RefusesReservedAlias(t *testing.T) {
+	for _, reserved := range []string{".git", ".scion"} {
+		staging, dest := t.TempDir(), t.TempDir()
+		writeTreeT(t, dest, map[string]string{reserved: "pointer\n"})
+		if err := os.Link(filepath.Join(dest, reserved), filepath.Join(dest, "alias")); err != nil {
+			t.Skipf("hard links unsupported: %v", err)
+		}
+		writeTreeT(t, staging, map[string]string{"alias": "agent\n"})
+		_, err := ApplyStagedWorkspace(staging, dest, StagedApplyOptions{})
+		if !errors.Is(err, ErrReservedEntry) {
+			t.Fatalf("%s: err = %v, want ErrReservedEntry", reserved, err)
+		}
+		if got := readT(t, filepath.Join(dest, reserved)); got != "pointer\n" {
+			t.Errorf("%s changed: %q", reserved, got)
+		}
+	}
+}
+
+// TestApplyStagedWorkspace_RemovesEmptiedDirectories checks that content
+// directories the source no longer has are removed once empty, while a
+// directory still holding an excluded entry stays.
+func TestApplyStagedWorkspace_RemovesEmptiedDirectories(t *testing.T) {
+	staging, dest := t.TempDir(), t.TempDir()
+	writeTreeT(t, staging, map[string]string{"keep/a.txt": "a"})
+	writeTreeT(t, dest, map[string]string{
+		"keep/a.txt":        "a",
+		"gone/deep/x.txt":   "x",
+		"held/.scion/local": "kept",
+	})
+	if _, err := ApplyStagedWorkspace(staging, dest, StagedApplyOptions{}); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	absentT(t, filepath.Join(dest, "gone"))
+	if got := readT(t, filepath.Join(dest, "held/.scion/local")); got != "kept" {
+		t.Errorf("held/.scion/local = %q", got)
+	}
+}
+
+func TestApplyStagedWorkspace_ShallowValidated(t *testing.T) {
+	good := "0123456789abcdef0123456789abcdef01234567\n" + "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n"
+	for name, tc := range map[string]struct {
+		content string
+		applied bool
+	}{
+		"valid":      {good, true},
+		"short id":   {"0123\n", false},
+		"upper hex":  {"0123456789ABCDEF0123456789abcdef01234567\n", false},
+		"no newline": {"0123456789abcdef0123456789abcdef01234567", false},
+		"other text": {"[core]\n\thooksPath = /tmp/x\n", false},
+	} {
+		staging, dest := t.TempDir(), t.TempDir()
+		writeTreeT(t, staging, map[string]string{".git/HEAD": "ref: refs/heads/main\n", ".git/shallow": tc.content})
+		if _, err := ApplyStagedWorkspace(staging, dest, StagedApplyOptions{GitData: true}); err != nil {
+			t.Fatalf("%s: apply: %v", name, err)
+		}
+		_, err := os.Stat(filepath.Join(dest, ".git/shallow"))
+		if (err == nil) != tc.applied {
+			t.Errorf("%s: shallow applied = %v, want %v", name, err == nil, tc.applied)
 		}
 	}
 }

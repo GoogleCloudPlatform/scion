@@ -54,6 +54,51 @@ var workspaceSyncCorpus = []string{
 	".git/objects/INFO/alternates", ".git/objects/Info/http-alternates", ".git/OBJECTS/ab/cd",
 	".git/Refs/heads/main", ".git/head", ".git/Index", ".git/HOOKS/pre-commit", ".git/Config",
 	".git/refs/heads/.GIT", ".git/refs/heads/.Scion/x", ".git/objects/.Ds_Store", "Git/HEAD", "SCION/x",
+	// NTFS and HFS+ variants: trailing dots and spaces, streams, 8.3 short
+	// names, ignorable characters.
+	".git.", ".git./config", ".git /hooks/pre-commit", ".git::$INDEX_ALLOCATION/config", "git~1/config", "GIT~2",
+	"sub/git~1/hooks/x", "\ufeff.git/config", ".g\u200cit/config", ".scion.", "proj/.scion /x", "SCION~1/settings.yaml",
+	"proj/sc1a2b~1/x", "proj/.s\u206acion/x", ".\u017fcion/x", ".DS_Store.", ".git/objects/info./alternates",
+	".git/objects/INFO~1", ".git/objects/i\u200cnfo/alternates", ".git/objects/info:x", ".git/refs/heads/git~1",
+	".git/HEAD.", ".git/shallow", ".gitignore", ".gitattributes", "git~1.txt", ".git.bak/x", ".scionrc", "information/x",
+}
+
+// TestWorkspaceSyncRcloneDirectoryDecisions checks the directory side of
+// the rclone rules: the git data directories are entered, and nothing is
+// passed below a directory the classifier never syncs.
+func TestWorkspaceSyncRcloneDirectoryDecisions(t *testing.T) {
+	enter := map[syncFilter][]string{
+		filterWorkspaceContent:   {"src", "a/b"},
+		filterWorkspaceGitState:  {".git", ".git/refs", ".git/refs/heads"},
+		filterWorkspaceGitObject: {".git", ".git/objects", ".git/objects/pack"},
+	}
+	for f, dirs := range enter {
+		ctx, err := filteredContext(context.Background(), f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		includeDir := filter.GetConfig(ctx).IncludeDirectory(ctx, nil)
+		for _, d := range dirs {
+			if ok, err := includeDir(d); err != nil || !ok {
+				t.Errorf("filter %d: directory %q not entered (err %v)", f, d, err)
+			}
+		}
+	}
+	never := []string{".GIT", ".git.", "git~1", "sub/.git", ".scion", "proj/.Scion", "SCION~1", ".git/objects/info", ".git/objects/INFO", ".git/hooks", ".git/modules/m"}
+	for _, f := range []syncFilter{filterWorkspaceContent, filterWorkspaceGitState, filterWorkspaceGitObject} {
+		ctx, err := filteredContext(context.Background(), f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fi := filter.GetConfig(ctx)
+		for _, d := range never {
+			for _, below := range []string{"/config", "/hooks/pre-commit", "/x/y"} {
+				if fi.IncludeRemote(d + below) {
+					t.Errorf("filter %d passes %q below never-synced %q", f, d+below, d)
+				}
+			}
+		}
+	}
 }
 
 // TestWorkspaceSyncRcloneRulesParity checks that the rclone rules the
@@ -62,10 +107,11 @@ var workspaceSyncCorpus = []string{
 func TestWorkspaceSyncRcloneRulesParity(t *testing.T) {
 	for _, tc := range []struct {
 		f    syncFilter
-		want transfer.WorkspaceSyncClass
+		want func(rel string) bool
 	}{
-		{filterWorkspaceContent, transfer.WorkspaceSyncContent},
-		{filterWorkspaceGitData, transfer.WorkspaceSyncGitData},
+		{filterWorkspaceContent, func(rel string) bool { return transfer.IsWorkspaceSyncContent(rel, false) }},
+		{filterWorkspaceGitState, func(rel string) bool { return transfer.IsWorkspaceGitState(rel, false) }},
+		{filterWorkspaceGitObject, func(rel string) bool { return transfer.IsWorkspaceGitObject(rel, false) }},
 	} {
 		ctx, err := filteredContext(context.Background(), tc.f)
 		if err != nil {
@@ -74,10 +120,17 @@ func TestWorkspaceSyncRcloneRulesParity(t *testing.T) {
 		fi := filter.GetConfig(ctx)
 		for _, rel := range workspaceSyncCorpus {
 			rcloneIncludes := fi.IncludeRemote(rel)
-			classIncludes := transfer.ClassifyWorkspaceSyncPath(rel, false) == tc.want
+			classIncludes := tc.want(rel)
 			if rcloneIncludes != classIncludes {
 				t.Errorf("filter %d: rclone includes %q = %v, classifier says %v", tc.f, rel, rcloneIncludes, classIncludes)
 			}
+		}
+	}
+	// Every git data file is in exactly one of the two parts.
+	for _, rel := range workspaceSyncCorpus {
+		if transfer.ClassifyWorkspaceSyncPath(rel, false) == transfer.WorkspaceSyncGitData &&
+			transfer.IsWorkspaceGitState(rel, false) == transfer.IsWorkspaceGitObject(rel, false) {
+			t.Errorf("%q: git data in both or neither part", rel)
 		}
 	}
 }
@@ -129,20 +182,43 @@ func TestUploadWorkspace_CarriesContentAndGitDataOnly(t *testing.T) {
 	}
 }
 
-// TestUploadWorkspace_KeepsGitDataInBucket checks that a content-only
-// change does not delete git data from the bucket (the content sync
-// excludes .git, and git data is only ever copied).
-func TestUploadWorkspace_KeepsGitDataInBucket(t *testing.T) {
+// TestUploadWorkspace_GitDataSemantics checks how an upload treats git data
+// already in the bucket: objects are only ever added (a content-only change
+// leaves them), while the ref state follows the source as one unit (a ref
+// the source no longer has is removed).
+func TestUploadWorkspace_GitDataSemantics(t *testing.T) {
 	workspace, bucket := t.TempDir(), t.TempDir()
-	writeTree(t, workspace, map[string]string{"a.txt": "a"})
-	writeTree(t, bucket, map[string]string{".git/refs/heads/main": "kept\n", "stale.txt": "gone"})
+	writeTree(t, workspace, map[string]string{"a.txt": "a", ".git/HEAD": "ref: refs/heads/main\n", ".git/packed-refs": "abc refs/heads/main\n"})
+	writeTree(t, bucket, map[string]string{
+		".git/refs/heads/main": "stale loose ref\n",
+		".git/objects/ab/cd":   "object",
+		"stale.txt":            "gone",
+	})
 	if err := uploadWorkspace(context.Background(), workspace, bucket); err != nil {
 		t.Fatalf("upload: %v", err)
 	}
-	if got := readFile(t, filepath.Join(bucket, ".git/refs/heads/main")); got != "kept\n" {
-		t.Errorf("bucket git data = %q", got)
+	if got := readFile(t, filepath.Join(bucket, ".git/objects/ab/cd")); got != "object" {
+		t.Errorf("bucket object = %q, want kept", got)
 	}
+	assertAbsent(t, filepath.Join(bucket, ".git/refs/heads/main"))
 	assertAbsent(t, filepath.Join(bucket, "stale.txt"))
+	if got := readFile(t, filepath.Join(bucket, ".git/packed-refs")); got != "abc refs/heads/main\n" {
+		t.Errorf("bucket packed-refs = %q", got)
+	}
+}
+
+// TestUploadWorkspace_SkipsUnsupportedRepository checks that a repository
+// that cannot travel as git data (here: reftable) uploads its content only.
+func TestUploadWorkspace_SkipsUnsupportedRepository(t *testing.T) {
+	workspace, bucket := t.TempDir(), t.TempDir()
+	writeTree(t, workspace, map[string]string{"a.txt": "a", ".git/HEAD": "ref: refs/heads/.invalid\n", ".git/reftable/tables.list": "x", ".git/objects/ab/cd": "o"})
+	if err := uploadWorkspace(context.Background(), workspace, bucket); err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+	if got := readFile(t, filepath.Join(bucket, "a.txt")); got != "a" {
+		t.Errorf("a.txt = %q", got)
+	}
+	assertAbsent(t, filepath.Join(bucket, ".git"))
 }
 
 // TestDownloadWorkspace_RefusesPreExistingBucketObjects puts every entry
@@ -356,4 +432,82 @@ func TestDownloadWorkspace_CreatesMissingDestination(t *testing.T) {
 	if got := readFile(t, filepath.Join(workspace, ".git/HEAD")); got != "ref: refs/heads/main\n" {
 		t.Errorf(".git/HEAD = %q", got)
 	}
+}
+
+// gitOK reports whether git succeeds in dir (same environment as git).
+func gitOK(t *testing.T, dir string, args ...string) bool {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = append(os.Environ(), "HOME="+t.TempDir(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull)
+	return cmd.Run() == nil
+}
+
+// TestWorkspaceRoundTrip_PackedAndDeletedRefs covers the ref state as one
+// unit: the agent commits, deletes a branch and packs its refs (as git gc
+// does), and the sync-back must leave the hub's clone at the agent's commit
+// without the deleted branch. A second sync-back through the same bucket,
+// after another commit and a gc, must again land the agent's state.
+func TestWorkspaceRoundTrip_PackedAndDeletedRefs(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skipf("git not available: %v", err)
+	}
+	ctx := context.Background()
+	hub, broker := t.TempDir(), t.TempDir()
+	createBucket, syncBackBucket := t.TempDir(), t.TempDir()
+
+	git(t, hub, "init", "-q", "-b", "main")
+	writeTree(t, hub, map[string]string{"README.md": "v1\n"})
+	git(t, hub, "add", "README.md")
+	git(t, hub, "commit", "-q", "-m", "initial")
+	git(t, hub, "branch", "doomed")
+
+	if err := uploadWorkspace(ctx, hub, createBucket); err != nil {
+		t.Fatalf("create-time upload: %v", err)
+	}
+	if err := downloadWorkspace(ctx, createBucket, broker, true); err != nil {
+		t.Fatalf("create-time download: %v", err)
+	}
+
+	syncBack := func() {
+		t.Helper()
+		if err := uploadWorkspace(ctx, broker, syncBackBucket); err != nil {
+			t.Fatalf("sync-back upload: %v", err)
+		}
+		if err := downloadWorkspace(ctx, syncBackBucket, hub, true); err != nil {
+			t.Fatalf("sync-back download: %v", err)
+		}
+	}
+
+	// Round 1: commit, delete a branch, pack every ref.
+	writeTree(t, broker, map[string]string{"README.md": "v2\n"})
+	git(t, broker, "commit", "-q", "-am", "agent work")
+	git(t, broker, "branch", "-D", "doomed")
+	git(t, broker, "pack-refs", "--all", "--prune")
+	agentHead := git(t, broker, "rev-parse", "HEAD")
+	syncBack()
+	if got := git(t, hub, "rev-parse", "HEAD"); got != agentHead {
+		t.Errorf("round 1: hub HEAD = %s, want the agent's commit %s", got, agentHead)
+	}
+	if gitOK(t, hub, "rev-parse", "--verify", "--quiet", "refs/heads/doomed") {
+		t.Error("round 1: the branch the agent deleted is back in the hub's clone")
+	}
+	if got := git(t, hub, "status", "--porcelain"); got != "" {
+		t.Errorf("round 1: hub checkout not clean: %q", got)
+	}
+
+	// Round 2, same bucket: another commit, a new loose branch, then gc.
+	writeTree(t, broker, map[string]string{"new.go": "package x\n"})
+	git(t, broker, "add", "new.go")
+	git(t, broker, "commit", "-q", "-m", "more agent work")
+	git(t, broker, "branch", "feature")
+	git(t, broker, "gc", "-q")
+	agentHead = git(t, broker, "rev-parse", "HEAD")
+	syncBack()
+	if got := git(t, hub, "rev-parse", "HEAD"); got != agentHead {
+		t.Errorf("round 2: hub HEAD = %s, want %s", got, agentHead)
+	}
+	if got := git(t, hub, "rev-parse", "refs/heads/feature"); got != agentHead {
+		t.Errorf("round 2: hub feature = %s, want %s", got, agentHead)
+	}
+	git(t, hub, "fsck", "--no-progress")
 }

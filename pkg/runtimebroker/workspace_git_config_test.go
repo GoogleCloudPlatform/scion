@@ -186,3 +186,122 @@ func TestWorkspaceDownloaders_Defaults(t *testing.T) {
 		t.Error("workspace apply download is not gcp.SyncWorkspaceContentFromGCS")
 	}
 }
+
+// parseGitConfig flattens the minimal configuration into "section.key=value"
+// lines ("section.subsection.key=value" for a quoted subsection), failing on
+// anything it does not recognise.
+func parseGitConfig(t *testing.T, cfg string) []string {
+	t.Helper()
+	var out []string
+	section := ""
+	for _, line := range strings.Split(strings.TrimSuffix(cfg, "\n"), "\n") {
+		switch {
+		case strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]"):
+			inner := line[1 : len(line)-1]
+			if name, sub, ok := strings.Cut(inner, " \""); ok {
+				if !strings.HasSuffix(sub, "\"") {
+					t.Fatalf("bad subsection line %q", line)
+				}
+				section = name + "." + strings.TrimSuffix(sub, "\"")
+			} else {
+				section = inner
+			}
+		case strings.HasPrefix(line, "\t"):
+			k, v, ok := strings.Cut(strings.TrimPrefix(line, "\t"), " = ")
+			if !ok || section == "" {
+				t.Fatalf("bad key line %q", line)
+			}
+			out = append(out, section+"."+k+"="+v)
+		default:
+			t.Fatalf("unexpected config line %q", line)
+		}
+	}
+	return out
+}
+
+// TestEnsureMinimalGitConfig_ExactKeys pins the exact keys and values the
+// broker writes in each case; nothing else may ever appear.
+func TestEnsureMinimalGitConfig_ExactKeys(t *testing.T) {
+	core := func(version string) []string {
+		return []string{"core.repositoryformatversion=" + version, "core.filemode=true", "core.bare=false", "core.logallrefupdates=true"}
+	}
+	origin := []string{"remote.origin.url=https://github.com/org/repo.git", "remote.origin.fetch=+refs/heads/*:refs/remotes/origin/*"}
+	sha1 := "0123456789abcdef0123456789abcdef01234567"
+	sha256 := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	for name, tc := range map[string]struct {
+		files map[string]string
+		url   string
+		want  []string
+	}{
+		"sha1 branch with origin": {
+			files: map[string]string{"HEAD": "ref: refs/heads/feature/x-1\n", "refs/heads/feature/x-1": sha1 + "\n"},
+			url:   "https://github.com/org/repo.git",
+			want:  append(append(core("0"), origin...), "branch.feature/x-1.remote=origin", "branch.feature/x-1.merge=refs/heads/feature/x-1"),
+		},
+		"sha256 detached with origin": {
+			files: map[string]string{"HEAD": sha256 + "\n"},
+			url:   "https://github.com/org/repo.git",
+			want:  append(append(core("1"), "extensions.objectformat=sha256"), origin...),
+		},
+		"sha256 branch from packed-refs": {
+			files: map[string]string{"HEAD": "ref: refs/heads/main\n", "packed-refs": "# pack-refs with: peeled\n" + sha256 + " refs/heads/main\n"},
+			url:   "https://github.com/org/repo.git",
+			want:  append(append(append(core("1"), "extensions.objectformat=sha256"), origin...), "branch.main.remote=origin", "branch.main.merge=refs/heads/main"),
+		},
+		"invalid branch name omitted": {
+			files: map[string]string{"HEAD": "ref: refs/heads/feature/.hidden\n", "refs/heads/feature/.hidden": sha1 + "\n"},
+			url:   "https://github.com/org/repo.git",
+			want:  append(core("0"), origin...),
+		},
+		"branch without origin": {
+			files: map[string]string{"HEAD": "ref: refs/heads/main\n", "refs/heads/main": sha1 + "\n"},
+			url:   "",
+			want:  core("0"),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ws := t.TempDir()
+			for rel, content := range tc.files {
+				p := filepath.Join(ws, ".git", filepath.FromSlash(rel))
+				if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if wrote, err := ensureMinimalGitConfig(ws, tc.url); !wrote || err != nil {
+				t.Fatalf("wrote=%v err=%v", wrote, err)
+			}
+			b, err := os.ReadFile(filepath.Join(ws, ".git/config"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := parseGitConfig(t, string(b)); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("config keys:\n got %q\nwant %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestValidBranchName(t *testing.T) {
+	for _, ok := range []string{"main", "feature/x-1", "release/v1.2", "a_b", "x.y"} {
+		if !validBranchName(ok) {
+			t.Errorf("validBranchName(%q) = false, want true", ok)
+		}
+	}
+	for _, bad := range []string{
+		"", "-x", "/x", "x/", "x.", "a..b", "a//b", ".hidden", "feature/.hidden", "x.lock", "feature/x.lock/y",
+		"a b", "a\"b", "a\\b", "a@{b", "a~b", "a^b", "a:b", "a?b", "a*b", "a[b", "ü", strings.Repeat("a", 201),
+	} {
+		if validBranchName(bad) {
+			t.Errorf("validBranchName(%q) = true, want false", bad)
+		}
+	}
+	if !quotedSubsectionSafe(branchNameChars) {
+		t.Error("branchNameChars needs escaping in a quoted subsection")
+	}
+	if quotedSubsectionSafe("a\"b") || quotedSubsectionSafe(`a\b`) {
+		t.Error("quotedSubsectionSafe accepts a quote or a backslash")
+	}
+}

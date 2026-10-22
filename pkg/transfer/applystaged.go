@@ -25,6 +25,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -32,9 +33,13 @@ import (
 type StagedApplyOptions struct {
 	// GitData also applies the git-data class (see
 	// ClassifyWorkspaceSyncPath) from the staging directory into the
-	// destination's root .git directory. Git data is never deleted from
-	// the destination, and it is applied only when the destination's .git
-	// is a real directory or absent (then it is created).
+	// destination's root .git directory, only when that .git is a real
+	// directory or absent (then it is created). Objects are only ever
+	// added. The ref state (HEAD, packed-refs, index, shallow, refs/**) is
+	// applied as one unit: when staging carries a repository (it has
+	// .git/HEAD), ref state files the staging directory does not have are
+	// removed from the destination, so a ref the source packed or deleted
+	// does not come back.
 	GitData bool
 }
 
@@ -65,6 +70,11 @@ var ErrStagedApplyConflict = errors.New("destination entry has the wrong type")
 // whose links are kept (see linkPolicy).
 var ErrSymlinkInPath = errors.New("path crosses a symbolic link")
 
+// ErrReservedEntry marks a write refused because the destination resolves
+// its target to an existing .git or .scion entry under another name (a
+// case-insensitive or otherwise name-folding filesystem).
+var ErrReservedEntry = errors.New("path resolves to a reserved entry")
+
 // errSwapped marks a directory that changed between its Lstat and its open.
 var errSwapped = errors.New("destination directory changed during apply")
 
@@ -82,6 +92,27 @@ const (
 	refuseLinks
 )
 
+// copyChunk is the buffer size of streamed copies and comparisons.
+const copyChunk = 64 << 10
+
+// fileSource is the content of one file to write.
+type fileSource struct {
+	size int64
+	open func() (io.ReadCloser, error)
+}
+
+// stagedSource returns the file at p as a fileSource.
+func stagedSource(p string, size int64) fileSource {
+	return fileSource{size: size, open: func() (io.ReadCloser, error) { return os.Open(p) }}
+}
+
+// bytesSource returns data as a fileSource.
+func bytesSource(data []byte) fileSource {
+	return fileSource{size: int64(len(data)), open: func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(data)), nil
+	}}
+}
+
 // ApplyStagedWorkspace makes the workspace at dest match the staging
 // directory staging, the way an rclone sync of the workspace would, but
 // confined to dest:
@@ -94,15 +125,20 @@ const (
 //     directory is the one that Lstat saw. A symlink is therefore never
 //     followed, including one swapped in while the apply runs. A symlink
 //     where staging has a directory is replaced by a real directory.
-//   - Files are written to a fresh temporary name (O_EXCL) and renamed over
-//     the target, so a symlink at the target is replaced, not written
+//   - No write lands on an existing .git or .scion entry reached under
+//     another name (a name-folding filesystem): the target is compared
+//     with those entries before it is opened or replaced.
+//   - Files are streamed to a fresh temporary name (O_EXCL) and renamed
+//     over the target, so a symlink at the target is replaced, not written
 //     through. An existing file keeps its permission bits; a new one gets
-//     the staged file's.
-//   - Unchanged files (same content) are not rewritten.
+//     the staged file's. Unchanged files (same size and content, compared
+//     in chunks) are not rewritten.
 //   - After the writes, content files in dest that staging does not have
-//     are removed. Paths outside the content class (.git, .scion,
-//     .DS_Store) and symlinks are never removed, and directories are left
-//     in place.
+//     are removed, and content directories that staging does not have are
+//     removed once empty. With opts.GitData, the same applies to the ref
+//     state (see StagedApplyOptions). Paths outside these classes (the
+//     .git configuration, .scion, .DS_Store), objects, and symlinks are
+//     never removed.
 //
 // staging is a private directory the caller filled (rclone with the
 // workspace sync filters); dest must already exist.
@@ -113,10 +149,12 @@ func ApplyStagedWorkspace(staging, dest string, opts StagedApplyOptions) (Staged
 		rel  string
 		full string
 		mode fs.FileMode
+		size int64
 	}
 	var contentFiles, gitFiles []stagedFile
 	contentDirs := map[string]bool{}
-	staged := map[string]bool{}
+	keep := map[string]bool{}
+	carriesRepo := false
 
 	err := filepath.WalkDir(staging, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -153,12 +191,19 @@ func ApplyStagedWorkspace(staging, dest string, opts StagedApplyOptions) (Staged
 		if err != nil {
 			return err
 		}
-		f := stagedFile{rel: rel, full: p, mode: info.Mode().Perm()}
+		if rel == dotGit+"/shallow" && !validShallowFile(p, info.Size()) {
+			stats.Refused++
+			return nil
+		}
+		f := stagedFile{rel: rel, full: p, mode: info.Mode().Perm(), size: info.Size()}
+		keep[rel] = true
 		if class == WorkspaceSyncGitData {
 			gitFiles = append(gitFiles, f)
+			if rel == dotGit+"/HEAD" {
+				carriesRepo = true
+			}
 		} else {
 			contentFiles = append(contentFiles, f)
-			staged[rel] = true
 		}
 		return nil
 	})
@@ -173,7 +218,7 @@ func ApplyStagedWorkspace(staging, dest string, opts StagedApplyOptions) (Staged
 	defer func() { _ = root.Close() }()
 
 	for _, f := range contentFiles {
-		written, err := writeStaged(root, f.rel, f.full, f.mode)
+		written, err := writeConfined(root, f.rel, stagedSource(f.full, f.size), f.mode, replaceLinks)
 		if err != nil {
 			return stats, err
 		}
@@ -182,7 +227,7 @@ func ApplyStagedWorkspace(staging, dest string, opts StagedApplyOptions) (Staged
 		}
 	}
 	// Empty directories that staging has are created, as rclone creates
-	// directories holding files (directories are never removed).
+	// directories holding files.
 	for rel := range contentDirs {
 		dir, err := openDirChain(root, rel, true, replaceLinks)
 		if err != nil {
@@ -191,6 +236,7 @@ func ApplyStagedWorkspace(staging, dest string, opts StagedApplyOptions) (Staged
 		_ = dir.Close()
 	}
 
+	applyGitState := false
 	if opts.GitData && len(gitFiles) > 0 {
 		ok, err := gitDirUsable(root)
 		if err != nil {
@@ -199,8 +245,12 @@ func ApplyStagedWorkspace(staging, dest string, opts StagedApplyOptions) (Staged
 		if !ok {
 			stats.GitDataSkipped = true
 		} else {
+			// Objects first, then the ref state that points at them.
+			sort.SliceStable(gitFiles, func(i, j int) bool {
+				return IsWorkspaceGitObject(gitFiles[i].rel, false) && !IsWorkspaceGitObject(gitFiles[j].rel, false)
+			})
 			for _, f := range gitFiles {
-				written, err := writeStaged(root, f.rel, f.full, f.mode)
+				written, err := writeConfined(root, f.rel, stagedSource(f.full, f.size), f.mode, replaceLinks)
 				if err != nil {
 					return stats, err
 				}
@@ -208,15 +258,50 @@ func ApplyStagedWorkspace(staging, dest string, opts StagedApplyOptions) (Staged
 					stats.Written++
 				}
 			}
+			applyGitState = carriesRepo
 		}
 	}
 
-	deleted, err := deleteExtraneous(root, staged)
-	stats.Deleted = deleted
+	deleted, err := deleteExtraneous(root, ".", keep, contentDirs, IsWorkspaceSyncContent)
+	stats.Deleted += deleted
 	if err != nil {
 		return stats, err
 	}
+	if applyGitState {
+		deleted, err := deleteExtraneous(root, dotGit, keep, nil, IsWorkspaceGitState)
+		stats.Deleted += deleted
+		if err != nil {
+			return stats, err
+		}
+	}
 	return stats, nil
+}
+
+// maxShallowBytes bounds a staged .git/shallow file.
+const maxShallowBytes = 4 << 20
+
+// validShallowFile reports whether the staged shallow file at p holds only
+// object ids: lines of exactly 40 or 64 lowercase hex digits, each ended by
+// a newline.
+func validShallowFile(p string, size int64) bool {
+	if size <= 0 || size > maxShallowBytes {
+		return false
+	}
+	data, err := os.ReadFile(p)
+	if err != nil || len(data) == 0 || data[len(data)-1] != '\n' {
+		return false
+	}
+	for _, line := range strings.Split(strings.TrimSuffix(string(data), "\n"), "\n") {
+		if len(line) != 40 && len(line) != 64 {
+			return false
+		}
+		for _, c := range line {
+			if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // gitDirUsable reports whether git data may be applied: the destination's
@@ -237,13 +322,33 @@ func gitDirUsable(root *os.Root) (bool, error) {
 	return info.IsDir(), nil
 }
 
-// openDirChain opens the directory dirRel (slash-separated, "" for the
-// root) under root, one level at a time, never following a symlink. With
-// create, missing levels are created, and a symlink at a level is replaced
-// by a real directory (replaceLinks) or refused with ErrSymlinkInPath
-// (refuseLinks). Without create, a missing level returns fs.ErrNotExist and
-// a symlink returns ErrStagedApplyConflict. The caller closes the returned
-// root.
+// reservedNames are the entries a write must never reach under another
+// name.
+var reservedNames = []string{dotGit, dotScion}
+
+// aliasesReserved reports whether info, the entry name in dir, is an
+// existing .git or .scion entry of dir reached under a different name (a
+// filesystem that folds case or ignores characters in names).
+func aliasesReserved(dir *os.Root, name string, info fs.FileInfo) bool {
+	for _, r := range reservedNames {
+		if name == r {
+			continue
+		}
+		if ri, err := dir.Lstat(r); err == nil && os.SameFile(ri, info) {
+			return true
+		}
+	}
+	return false
+}
+
+// openDirChain opens the directory dirRel (slash-separated, "" or "." for
+// the root) under root, one level at a time, never following a symlink.
+// With create, missing levels are created, and a symlink at a level is
+// replaced by a real directory (replaceLinks) or refused with
+// ErrSymlinkInPath (refuseLinks). Without create, a missing level returns
+// fs.ErrNotExist and a symlink returns ErrStagedApplyConflict. A level that
+// is an existing .git or .scion reached under another name is refused with
+// ErrReservedEntry. The caller closes the returned root.
 func openDirChain(root *os.Root, dirRel string, create bool, links linkPolicy) (*os.Root, error) {
 	cur, err := root.OpenRoot(".")
 	if err != nil {
@@ -275,6 +380,9 @@ func openLevel(cur *os.Root, name string, create bool, links linkPolicy) (*os.Ro
 	if err != nil {
 		return nil, err
 	}
+	if aliasesReserved(cur, name, info) {
+		return nil, ErrReservedEntry
+	}
 	if info.Mode()&fs.ModeSymlink != 0 {
 		if !create {
 			return nil, ErrStagedApplyConflict
@@ -290,6 +398,9 @@ func openLevel(cur *os.Root, name string, create bool, links linkPolicy) (*os.Ro
 		}
 		if info, err = cur.Lstat(name); err != nil {
 			return nil, err
+		}
+		if aliasesReserved(cur, name, info) {
+			return nil, ErrReservedEntry
 		}
 	}
 	if !info.IsDir() {
@@ -307,24 +418,16 @@ func openLevel(cur *os.Root, name string, create bool, links linkPolicy) (*os.Ro
 	return next, nil
 }
 
-// writeStaged writes the staged file src to rel under root (see
-// ApplyStagedWorkspace). It reports whether the file was written.
-func writeStaged(root *os.Root, rel, src string, stagedMode fs.FileMode) (bool, error) {
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return false, fmt.Errorf("failed to read staged %s: %w", rel, err)
-	}
-	return writeConfined(root, rel, data, stagedMode, replaceLinks)
-}
-
-// writeConfined writes data to the slash-separated path rel under root
+// writeConfined writes src to the slash-separated path rel under root
 // without following a symbolic link: directory levels are opened one at a
-// time (openDirChain), and the file is written to a fresh temporary name
+// time (openDirChain), and the file is streamed to a fresh temporary name
 // and renamed into place. Missing directories are created. A link on the
-// path is handled by links. An existing file keeps its permission bits and
-// is not rewritten when its content is already data; a new file gets
-// newMode. It reports whether the file was written.
-func writeConfined(root *os.Root, rel string, data []byte, newMode fs.FileMode, links linkPolicy) (bool, error) {
+// path is handled by links. A target that is an existing .git or .scion
+// entry under another name is refused (ErrReservedEntry). An existing file
+// keeps its permission bits and is not rewritten when it already holds the
+// same content; a new file gets newMode. It reports whether the file was
+// written.
+func writeConfined(root *os.Root, rel string, src fileSource, newMode fs.FileMode, links linkPolicy) (bool, error) {
 	dirRel, base := path.Split(rel)
 	dirRel = strings.TrimSuffix(dirRel, "/")
 	dir, err := openDirChain(root, dirRel, true, links)
@@ -336,25 +439,35 @@ func writeConfined(root *os.Root, rel string, data []byte, newMode fs.FileMode, 
 	mode := newMode
 	info, err := dir.Lstat(base)
 	switch {
+	case err == nil && aliasesReserved(dir, base, info):
+		return false, fmt.Errorf("%s: %w", rel, ErrReservedEntry)
 	case err == nil && info.IsDir():
 		return false, fmt.Errorf("%s: %w", rel, ErrStagedApplyConflict)
 	case err == nil && info.Mode()&fs.ModeSymlink != 0 && links == refuseLinks:
 		return false, fmt.Errorf("%s: %w", rel, ErrSymlinkInPath)
 	case err == nil && info.Mode().IsRegular():
 		mode = info.Mode().Perm()
-		if same, serr := sameContent(dir, base, data); serr == nil && same {
-			return false, nil
+		if info.Size() == src.size {
+			if same, serr := sameContent(dir, base, src); serr == nil && same {
+				return false, nil
+			}
 		}
 	case err != nil && !errors.Is(err, fs.ErrNotExist):
 		return false, err
 	}
 
+	in, err := src.open()
+	if err != nil {
+		return false, fmt.Errorf("failed to read staged %s: %w", rel, err)
+	}
+	defer func() { _ = in.Close() }()
+
 	tmp, err := createTemp(dir, mode)
 	if err != nil {
 		return false, fmt.Errorf("failed to write %s: %w", rel, err)
 	}
-	name := tmp.Name()
-	_, werr := io.Copy(tmp, bytes.NewReader(data))
+	name := path.Base(tmp.Name())
+	_, werr := io.CopyBuffer(tmp, in, make([]byte, copyChunk))
 	cerr := tmp.Close()
 	if werr == nil {
 		werr = cerr
@@ -362,34 +475,63 @@ func writeConfined(root *os.Root, rel string, data []byte, newMode fs.FileMode, 
 	if werr == nil {
 		// The permission bits are set explicitly: the create mode is
 		// filtered by the umask.
-		werr = dir.Chmod(path.Base(name), mode)
+		werr = dir.Chmod(name, mode)
 	}
 	if werr == nil {
-		werr = dir.Rename(path.Base(name), base)
+		// The target may have appeared since the Lstat above: check it
+		// again right before replacing it.
+		if cur, lerr := dir.Lstat(base); lerr == nil && (aliasesReserved(dir, base, cur) || cur.IsDir()) {
+			werr = fmt.Errorf("%w", ErrReservedEntry)
+			if cur.IsDir() {
+				werr = ErrStagedApplyConflict
+			}
+		}
+	}
+	if werr == nil {
+		werr = dir.Rename(name, base)
 	}
 	if werr != nil {
-		_ = dir.Remove(path.Base(name))
+		_ = dir.Remove(name)
 		return false, fmt.Errorf("failed to write %s: %w", rel, werr)
 	}
 	return true, nil
 }
 
-// sameContent reports whether the regular file name in dir holds data.
-func sameContent(dir *os.Root, name string, data []byte) (bool, error) {
+// sameContent reports whether the regular file name in dir holds the same
+// bytes as src, compared in chunks.
+func sameContent(dir *os.Root, name string, src fileSource) (bool, error) {
 	f, err := dir.OpenFile(name, os.O_RDONLY, 0)
 	if err != nil {
 		return false, err
 	}
 	defer func() { _ = f.Close() }()
 	info, err := f.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Size() != int64(len(data)) {
+	if err != nil || !info.Mode().IsRegular() || info.Size() != src.size {
 		return false, err
 	}
-	have, err := io.ReadAll(io.LimitReader(f, int64(len(data))+1))
+	in, err := src.open()
 	if err != nil {
 		return false, err
 	}
-	return bytes.Equal(have, data), nil
+	defer func() { _ = in.Close() }()
+	a, b := make([]byte, copyChunk), make([]byte, copyChunk)
+	for {
+		na, ea := io.ReadFull(f, a)
+		nb, eb := io.ReadFull(in, b)
+		if na != nb || !bytes.Equal(a[:na], b[:nb]) {
+			return false, nil
+		}
+		aDone := ea == io.EOF || ea == io.ErrUnexpectedEOF
+		bDone := eb == io.EOF || eb == io.ErrUnexpectedEOF
+		switch {
+		case ea != nil && !aDone:
+			return false, ea
+		case eb != nil && !bDone:
+			return false, eb
+		case aDone || bDone:
+			return aDone && bDone, nil
+		}
+	}
 }
 
 // createTemp creates a new file with a random name in dir. O_EXCL makes the
@@ -410,26 +552,44 @@ func createTemp(dir *os.Root, mode fs.FileMode) (*os.File, error) {
 	return nil, errors.New("could not create a temporary file")
 }
 
-// deleteExtraneous removes the regular content files under root that are
-// not in keep. Directories outside the content class are not entered, and
-// symlinks are not followed or removed.
-func deleteExtraneous(root *os.Root, keep map[string]bool) (int, error) {
-	var extraneous []string
-	err := fs.WalkDir(root.FS(), ".", func(p string, d fs.DirEntry, err error) error {
+// deleteExtraneous removes, under the directory start of root, the regular
+// files in scope (inScope, by root-relative path) that are not in keep, and
+// then the directories in scope that are not in keepDirs once they are
+// empty (keepDirs nil: no directory is removed). Directories out of scope
+// are not entered, and symlinks are never followed or removed. It returns
+// the number of files removed.
+func deleteExtraneous(root *os.Root, start string, keep, keepDirs map[string]bool, inScope func(rel string, isDir bool) bool) (int, error) {
+	if start != "." {
+		info, err := root.Lstat(start)
+		if errors.Is(err, fs.ErrNotExist) {
+			return 0, nil
+		}
+		if err != nil {
+			return 0, err
+		}
+		if !info.IsDir() {
+			return 0, nil
+		}
+	}
+	var extraneous, dirs []string
+	err := fs.WalkDir(root.FS(), start, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if p == "." {
 			return nil
 		}
-		if !IsWorkspaceSyncContent(p, d.IsDir()) {
-			if d.IsDir() {
+		if !inScope(p, d.IsDir()) {
+			if d.IsDir() && p != start && !strings.HasPrefix(start+"/", p+"/") {
 				return fs.SkipDir
 			}
 			return nil
 		}
-		if d.Type().IsRegular() && !keep[p] {
+		switch {
+		case d.Type().IsRegular() && !keep[p]:
 			extraneous = append(extraneous, p)
+		case d.IsDir() && keepDirs != nil && !keepDirs[p]:
+			dirs = append(dirs, p)
 		}
 		return nil
 	})
@@ -440,19 +600,34 @@ func deleteExtraneous(root *os.Root, keep map[string]bool) (int, error) {
 	for _, rel := range extraneous {
 		dirRel, base := path.Split(rel)
 		dir, err := openDirChain(root, strings.TrimSuffix(dirRel, "/"), false, replaceLinks)
-		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, ErrStagedApplyConflict) {
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, ErrStagedApplyConflict) || errors.Is(err, ErrReservedEntry) {
 			continue
 		}
 		if err != nil {
 			return deleted, err
 		}
 		info, err := dir.Lstat(base)
-		if err == nil && info.Mode().IsRegular() {
+		if err == nil && info.Mode().IsRegular() && !aliasesReserved(dir, base, info) {
 			if err := dir.Remove(base); err != nil && !errors.Is(err, fs.ErrNotExist) {
 				_ = dir.Close()
 				return deleted, fmt.Errorf("failed to remove %s: %w", rel, err)
 			}
 			deleted++
+		}
+		_ = dir.Close()
+	}
+	// Deepest first, so a parent is empty once its children are gone.
+	sort.Slice(dirs, func(i, j int) bool { return strings.Count(dirs[i], "/") > strings.Count(dirs[j], "/") })
+	for _, rel := range dirs {
+		dirRel, base := path.Split(rel)
+		dir, err := openDirChain(root, strings.TrimSuffix(dirRel, "/"), false, replaceLinks)
+		if err != nil {
+			continue
+		}
+		if info, err := dir.Lstat(base); err == nil && info.IsDir() && !aliasesReserved(dir, base, info) {
+			// Remove fails on a directory that is not empty; that is
+			// expected (it holds excluded entries or symlinks) and ignored.
+			_ = dir.Remove(base)
 		}
 		_ = dir.Close()
 	}

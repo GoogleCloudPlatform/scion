@@ -355,12 +355,12 @@ func TestWorkspaceSyncGuard_NoUnfilteredRcloneTransfers(t *testing.T) {
 // returns every way it departs from the filtered-sync rules:
 //   - an rclone transfer package is imported, under its own name or an
 //     alias, and any reference through it other than the single sync.Sync
-//     call in syncFiltered and the single sync.CopyDir call in copyGitData
+//     call in syncFiltered and the single sync.CopyDir call in copyGitObjects
 //     appears, including a function value held in a local or package-level
 //     variable; a dot import is rejected outright, since its references
 //     cannot be attributed;
-//   - syncFiltered or copyGitData does not build its context with
-//     filteredContext (copyGitData with the git-data filter);
+//   - syncFiltered or copyGitObjects does not build its context with
+//     filteredContext (copyGitObjects with the git-data filter);
 //   - the helpers do not route through syncFiltered, the workspace helpers
 //     do not use the workspace content filter and the git-data copy, or the
 //     workspace download opens anything but its staging directory as the
@@ -404,7 +404,7 @@ func storageSyncViolations(src string) ([]string, error) {
 	// The whole file is walked, so declarations outside functions are
 	// covered too. The only allowed references are the callees of the
 	// single sync.Sync call in syncFiltered and the single sync.CopyDir
-	// call in copyGitData.
+	// call in copyGitObjects.
 	callees := map[*ast.SelectorExpr]bool{}
 	ast.Inspect(f, func(n ast.Node) bool {
 		if call, ok := n.(*ast.CallExpr); ok {
@@ -446,14 +446,14 @@ func storageSyncViolations(src string) ([]string, error) {
 				ref := x.Name + "." + v.Sel.Name
 				allowed := x.Name == "sync" &&
 					((fnName == "syncFiltered" && base+"."+v.Sel.Name == "sync.Sync") ||
-						(fnName == "copyGitData" && base+"."+v.Sel.Name == "sync.CopyDir"))
+						(fnName == "copyGitObjects" && base+"."+v.Sel.Name == "sync.CopyDir"))
 				switch {
 				case fnName == "":
-					problems = append(problems, "a package-level declaration references "+ref+"; only syncFiltered may call sync.Sync and only copyGitData sync.CopyDir")
+					problems = append(problems, "a package-level declaration references "+ref+"; only syncFiltered may call sync.Sync and only copyGitObjects sync.CopyDir")
 				case !callees[v]:
-					problems = append(problems, fnName+" references "+ref+" as a value; only syncFiltered may call sync.Sync and only copyGitData sync.CopyDir")
+					problems = append(problems, fnName+" references "+ref+" as a value; only syncFiltered may call sync.Sync and only copyGitObjects sync.CopyDir")
 				case !allowed:
-					problems = append(problems, fnName+" calls "+ref+"; only syncFiltered may call sync.Sync and only copyGitData sync.CopyDir")
+					problems = append(problems, fnName+" calls "+ref+"; only syncFiltered may call sync.Sync and only copyGitObjects sync.CopyDir")
 				}
 			case *ast.CallExpr:
 				name := ""
@@ -487,13 +487,13 @@ func storageSyncViolations(src string) ([]string, error) {
 		}
 	}
 	if total != 2 {
-		problems = append(problems, "found "+strconv.Itoa(total)+" rclone transfer references, want exactly 2 (sync.Sync in syncFiltered, sync.CopyDir in copyGitData)")
+		problems = append(problems, "found "+strconv.Itoa(total)+" rclone transfer references, want exactly 2 (sync.Sync in syncFiltered, sync.CopyDir in copyGitObjects)")
 	}
 	if callsIn["syncFiltered"]["filteredContext"] != 1 {
 		problems = append(problems, "syncFiltered must build its context with filteredContext")
 	}
-	if got := argsIn["copyGitData"]["filteredContext"]; len(got) != 1 || !strings.HasSuffix(got[0], ",filterWorkspaceGitData") {
-		problems = append(problems, "copyGitData must build its context with filteredContext(..., filterWorkspaceGitData)")
+	if got := argsIn["copyGitObjects"]["filteredContext"]; len(got) != 1 || !strings.HasSuffix(got[0], ",filterWorkspaceGitObject") {
+		problems = append(problems, "copyGitObjects must build its context with filteredContext(..., filterWorkspaceGitObject)")
 	}
 	for _, helper := range []string{"syncLocalToRemote", "syncRemoteToLocal"} {
 		if callsIn[helper]["syncFiltered"] != 1 {
@@ -505,9 +505,12 @@ func storageSyncViolations(src string) ([]string, error) {
 		if len(got) != 1 || !strings.HasSuffix(got[0], ",filterWorkspaceContent") {
 			problems = append(problems, helper+" must call syncFiltered once with filterWorkspaceContent")
 		}
-		if callsIn[helper]["copyGitData"] != 1 {
-			problems = append(problems, helper+" must call copyGitData")
+		if callsIn[helper]["syncGitData"] != 1 || callsIn[helper]["copyGitObjects"] != 0 {
+			problems = append(problems, helper+" must carry git data only through syncGitData")
 		}
+	}
+	if got := argsIn["syncGitData"]["syncFiltered"]; callsIn["syncGitData"]["copyGitObjects"] != 1 || len(got) != 1 || !strings.HasSuffix(got[0], ",filterWorkspaceGitState") {
+		problems = append(problems, "syncGitData must copy objects and sync the ref state with filterWorkspaceGitState")
 	}
 	if got := argsIn["downloadWorkspace"]["openPair"]; len(got) != 1 || got[0] != "ctx,remote,staging" {
 		problems = append(problems, "downloadWorkspace must open only its staging directory as the rclone destination")
@@ -590,7 +593,7 @@ func TestWorkspaceSyncGuard_StorageGuardCatchesBypasses(t *testing.T) {
 	// The volume download helper's tail, where a function-value bypass is
 	// added.
 	const downloadTail = "fmt.Printf(\"Syncing %s to %s via rclone\\n\", remote, localPath)\n\treturn syncFiltered(ctx, dstFs, srcFs, filterIdentity)"
-	const only = " only syncFiltered may call sync.Sync and only copyGitData sync.CopyDir"
+	const only = " only syncFiltered may call sync.Sync and only copyGitObjects sync.CopyDir"
 	// Each case lists the problems its bypass must produce, so an
 	// unrelated violation cannot make a case pass on its own.
 	cases := map[string]struct {
@@ -657,17 +660,23 @@ func TestWorkspaceSyncGuard_StorageGuardCatchesBypasses(t *testing.T) {
 		},
 		"git data copied unfiltered": {
 			mutate: func(t *testing.T) string {
-				return edit(t, orig, "fctx, err := filteredContext(withSyncStatsGroup(ctx), filterWorkspaceGitData)",
+				return edit(t, orig, "fctx, err := filteredContext(withSyncStatsGroup(ctx), filterWorkspaceGitObject)",
 					"fctx, err := filteredContext(withSyncStatsGroup(ctx), filterIdentity)")
 			},
-			want: []string{"copyGitData must build its context with filteredContext(..., filterWorkspaceGitData)"},
+			want: []string{"copyGitObjects must build its context with filteredContext(..., filterWorkspaceGitObject)"},
 		},
 		"workspace upload with the identity filter": {
 			mutate: func(t *testing.T) string {
-				return edit(t, orig, "if err := syncFiltered(ctx, dstFs, srcFs, filterWorkspaceContent); err != nil {\n\t\treturn err\n\t}\n\treturn copyGitData(ctx, dstFs, srcFs)",
-					"if err := syncFiltered(ctx, dstFs, srcFs, filterIdentity); err != nil {\n\t\treturn err\n\t}\n\treturn copyGitData(ctx, dstFs, srcFs)")
+				return edit(t, orig, "fmt.Printf(\"Syncing workspace %s to %s via rclone\\n\", localPath, remote)\n\tif err := syncFiltered(ctx, dstFs, srcFs, filterWorkspaceContent); err != nil {",
+					"fmt.Printf(\"Syncing workspace %s to %s via rclone\\n\", localPath, remote)\n\tif err := syncFiltered(ctx, dstFs, srcFs, filterIdentity); err != nil {")
 			},
 			want: []string{"uploadWorkspace must call syncFiltered once with filterWorkspaceContent"},
+		},
+		"ref state copied instead of synced": {
+			mutate: func(t *testing.T) string {
+				return edit(t, orig, "\treturn syncFiltered(ctx, dst, src, filterWorkspaceGitState)\n}", "\treturn copyGitObjects(ctx, dst, src)\n}")
+			},
+			want: []string{"syncGitData must copy objects and sync the ref state with filterWorkspaceGitState"},
 		},
 		"workspace download straight into the workspace": {
 			mutate: func(t *testing.T) string {

@@ -53,9 +53,13 @@ const (
 	// (transfer.WorkspaceSyncContentRcloneRules): no .git, no .scion at
 	// any depth, no .DS_Store.
 	filterWorkspaceContent
-	// filterWorkspaceGitData passes only workspace git data
-	// (transfer.WorkspaceSyncGitDataRcloneRules).
-	filterWorkspaceGitData
+	// filterWorkspaceGitState passes only the git ref state
+	// (transfer.WorkspaceSyncGitStateRcloneRules): HEAD, packed-refs,
+	// index, shallow and refs/**, synced as one unit.
+	filterWorkspaceGitState
+	// filterWorkspaceGitObject passes only git objects
+	// (transfer.WorkspaceSyncGitObjectRcloneRules), only ever copied.
+	filterWorkspaceGitObject
 )
 
 // filteredContext returns ctx carrying the rclone filter f. Excluded
@@ -71,8 +75,10 @@ func filteredContext(ctx context.Context, f syncFilter) (context.Context, error)
 		rules.ExcludeRule = workspaceIdentityExcludes
 	case filterWorkspaceContent:
 		rules.FilterRule = transfer.WorkspaceSyncContentRcloneRules
-	case filterWorkspaceGitData:
-		rules.FilterRule = transfer.WorkspaceSyncGitDataRcloneRules
+	case filterWorkspaceGitState:
+		rules.FilterRule = transfer.WorkspaceSyncGitStateRcloneRules
+	case filterWorkspaceGitObject:
+		rules.FilterRule = transfer.WorkspaceSyncGitObjectRcloneRules
 	default:
 		return nil, fmt.Errorf("unknown workspace sync filter %d", f)
 	}
@@ -111,13 +117,14 @@ func withSyncStatsGroup(ctx context.Context) context.Context {
 	return accounting.WithStatsGroup(ctx, fmt.Sprintf("scion-workspace-sync-%d", syncStatsSeq.Add(1)))
 }
 
-// syncFiltered makes dst match src under the filter f (content or
-// identity; never git data, which is only ever copied). It is the only
-// place in this package that calls sync.Sync; a guard test fails if
-// another call appears.
+// syncFiltered makes dst match src under the filter f (identity, content
+// or git ref state; never git objects, which are only ever copied). Only
+// files the filter passes are deleted from dst. It is the only place in
+// this package that calls sync.Sync; a guard test fails if another call
+// appears.
 func syncFiltered(ctx context.Context, dst, src fs.Fs, f syncFilter) error {
-	if f == filterWorkspaceGitData {
-		return fmt.Errorf("git data is copied, never synced")
+	if f == filterWorkspaceGitObject {
+		return fmt.Errorf("git objects are copied, never synced")
 	}
 	fctx, err := filteredContext(withSyncStatsGroup(ctx), f)
 	if err != nil {
@@ -129,18 +136,28 @@ func syncFiltered(ctx context.Context, dst, src fs.Fs, f syncFilter) error {
 	return nil
 }
 
-// copyGitData copies the workspace git data from src to dst. It never
-// deletes anything on dst. It is the only place in this package that calls
-// sync.CopyDir; a guard test fails if another call appears.
-func copyGitData(ctx context.Context, dst, src fs.Fs) error {
-	fctx, err := filteredContext(withSyncStatsGroup(ctx), filterWorkspaceGitData)
+// copyGitObjects copies the workspace git objects from src to dst. It
+// never deletes anything on dst. It is the only place in this package that
+// calls sync.CopyDir; a guard test fails if another call appears.
+func copyGitObjects(ctx context.Context, dst, src fs.Fs) error {
+	fctx, err := filteredContext(withSyncStatsGroup(ctx), filterWorkspaceGitObject)
 	if err != nil {
 		return err
 	}
 	if err := sync.CopyDir(fctx, dst, src, false); err != nil {
-		return fmt.Errorf("rclone git data copy failed: %w", err)
+		return fmt.Errorf("rclone git object copy failed: %w", err)
 	}
 	return nil
+}
+
+// syncGitData carries git data from src to dst: the objects are copied
+// first (never deleted), then the ref state is synced as one unit, so a
+// ref the source packed or deleted is removed from dst too.
+func syncGitData(ctx context.Context, dst, src fs.Fs) error {
+	if err := copyGitObjects(ctx, dst, src); err != nil {
+		return err
+	}
+	return syncFiltered(ctx, dst, src, filterWorkspaceGitState)
 }
 
 // gcsRemote returns the rclone remote for a bucket prefix.
@@ -188,8 +205,10 @@ func syncRemoteToLocal(ctx context.Context, remote, localPath string) error {
 }
 
 // uploadWorkspace makes remote's content match the workspace at localPath
-// (filterWorkspaceContent) and copies the workspace's git data next to it.
-// Excluded entries already at remote are left alone.
+// (filterWorkspaceContent) and carries the workspace's git data next to it
+// (syncGitData), unless the repository cannot travel as git data
+// (transfer.WorkspaceGitDataUnsupported): its git data is then skipped
+// with a warning. Excluded entries already at remote are left alone.
 func uploadWorkspace(ctx context.Context, localPath, remote string) error {
 	srcFs, dstFs, err := openPair(ctx, localPath, remote)
 	if err != nil {
@@ -199,7 +218,11 @@ func uploadWorkspace(ctx context.Context, localPath, remote string) error {
 	if err := syncFiltered(ctx, dstFs, srcFs, filterWorkspaceContent); err != nil {
 		return err
 	}
-	return copyGitData(ctx, dstFs, srcFs)
+	if reason := transfer.WorkspaceGitDataUnsupported(localPath); reason != "" {
+		slog.Warn("Workspace upload skipped git data: commits travel only by git push", "reason", reason)
+		return nil
+	}
+	return syncGitData(ctx, dstFs, srcFs)
 }
 
 // downloadWorkspace makes the workspace at localPath match remote's
@@ -228,7 +251,7 @@ func downloadWorkspace(ctx context.Context, remote, localPath string, gitData bo
 		return err
 	}
 	if gitData {
-		if err := copyGitData(ctx, dstFs, srcFs); err != nil {
+		if err := syncGitData(ctx, dstFs, srcFs); err != nil {
 			return err
 		}
 	}

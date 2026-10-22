@@ -257,7 +257,7 @@ func (c *Client) DownloadFiles(ctx context.Context, urls []DownloadURLInfo, dest
 		// Written without following a symlink anywhere on the path: a
 		// link in the destination (even one inside it, for example into
 		// its .git) refuses the write rather than redirecting it.
-		if _, err := writeConfined(root, url.Path, content, 0644, refuseLinks); err != nil {
+		if _, err := writeConfined(root, url.Path, bytesSource(content), 0644, refuseLinks); err != nil {
 			return fmt.Errorf("failed to download file %s: %w", url.Path, err)
 		}
 
