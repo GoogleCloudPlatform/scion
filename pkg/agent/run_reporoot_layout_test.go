@@ -270,6 +270,8 @@ func hubNativeSharedStartFixture(t *testing.T) (markerPath, ws, other string) {
 	_ = os.Chdir(home)
 	t.Cleanup(func() { _ = os.Chdir(oldWd) })
 	t.Setenv("HOME", home)
+	// A container UID makes provisioning skip its git checks; keep them on.
+	t.Setenv("SCION_HOST_UID", "")
 	if old, ok := os.LookupEnv("SCION_AUTO_EXPOSE_PORTS"); ok {
 		_ = os.Unsetenv("SCION_AUTO_EXPOSE_PORTS")
 		t.Cleanup(func() { _ = os.Setenv("SCION_AUTO_EXPOSE_PORTS", old) })
@@ -471,43 +473,82 @@ func TestBrokerProjectRoot_WorkspacePathOnlyFromProjectConfigs(t *testing.T) {
 }
 
 // Start of a hub-native shared-workspace agent whose clone lost its .git
-// while HOME is a git repository: the runtime gets a plain workspace mount
-// (no RepoRoot), never HOME's repository.
+// after HOME became a git repository: the restart never mounts HOME's
+// repository. With a container UID (SCION_HOST_UID, a broker running in a
+// container) provisioning's git checks are off and the restart gets a plain
+// workspace mount; without one the workspace containment check refuses the
+// restart before the runtime is called. Both values are set explicitly, so
+// the result does not depend on the environment the tests run in.
 func TestStart_SharedWorkspaceWithoutGitNeverMountsAncestorRepo(t *testing.T) {
-	markerPath, ws, _ := hubNativeSharedStartFixture(t)
-	setupGitRepo(t, os.Getenv("HOME"))
+	for _, tc := range []struct {
+		name, hostUID string
+		wantRefused   bool
+	}{
+		{name: "container UID", hostUID: "1000"},
+		{name: "no container UID", hostUID: "", wantRefused: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			markerPath, ws, _ := hubNativeSharedStartFixture(t)
+			t.Setenv("SCION_HOST_UID", tc.hostUID)
 
-	var captured runtime.RunConfig
-	mgr := NewManager(&runtime.MockRuntime{
-		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
-			return []api.AgentInfo{}, nil
-		},
-		RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
-			captured = cfg
-			return "mock-id", nil
-		},
-	})
-	createOpts := hubNativeSharedStartOpts(markerPath)
-	createOpts.FreshProvision = true
-	if _, err := mgr.Start(context.Background(), createOpts); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	if eval(t, captured.RepoRoot) != eval(t, ws) {
-		t.Fatalf("first start RepoRoot = %q, want the clone %q", captured.RepoRoot, ws)
-	}
+			var calls int
+			var captured runtime.RunConfig
+			mgr := NewManager(&runtime.MockRuntime{
+				ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+					return []api.AgentInfo{}, nil
+				},
+				RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+					calls++
+					captured = cfg
+					return "mock-id", nil
+				},
+			})
+			createOpts := hubNativeSharedStartOpts(markerPath)
+			createOpts.FreshProvision = true
+			if _, err := mgr.Start(context.Background(), createOpts); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			if eval(t, captured.RepoRoot) != eval(t, ws) {
+				t.Fatalf("first start RepoRoot = %q, want the clone %q", captured.RepoRoot, ws)
+			}
 
-	if err := os.RemoveAll(filepath.Join(ws, ".git")); err != nil {
-		t.Fatal(err)
-	}
-	captured = runtime.RunConfig{}
-	if _, err := mgr.Start(context.Background(), hubNativeSharedStartOpts(markerPath)); err != nil {
-		t.Fatalf("Start after .git removal: %v", err)
-	}
-	if captured.RepoRoot != "" {
-		t.Fatalf("RunConfig.RepoRoot = %q after .git removal, want \"\" (plain mount)", captured.RepoRoot)
-	}
-	if eval(t, captured.Workspace) != eval(t, ws) {
-		t.Fatalf("RunConfig.Workspace = %q, want %q", captured.Workspace, ws)
+			// HOME becomes a git repository (ignoring the agents dirs, as
+			// any project-local layout must) after the agent exists, and the
+			// clone loses its .git.
+			home := os.Getenv("HOME")
+			if err := os.WriteFile(filepath.Join(home, ".gitignore"), []byte(".scion/project-configs/*/.scion/agents/\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			setupGitRepo(t, home)
+			if err := os.RemoveAll(filepath.Join(ws, ".git")); err != nil {
+				t.Fatal(err)
+			}
+			if !util.IsGitRepoDir(ws) {
+				t.Fatal("fixture: git should find HOME's repository from the clone")
+			}
+
+			calls = 0
+			captured = runtime.RunConfig{}
+			_, err := mgr.Start(context.Background(), hubNativeSharedStartOpts(markerPath))
+			if tc.wantRefused {
+				if err == nil {
+					t.Fatalf("restart succeeded with RepoRoot %q; want a refusal", captured.RepoRoot)
+				}
+				if calls != 0 {
+					t.Fatalf("runtime Run was called %d time(s) on a refused start", calls)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Start after .git removal: %v", err)
+			}
+			if captured.RepoRoot != "" {
+				t.Fatalf("RunConfig.RepoRoot = %q after .git removal, want \"\" (plain mount), never HOME %q", captured.RepoRoot, home)
+			}
+			if eval(t, captured.Workspace) != eval(t, ws) {
+				t.Fatalf("RunConfig.Workspace = %q, want %q", captured.Workspace, ws)
+			}
+		})
 	}
 }
 
@@ -644,5 +685,27 @@ func TestStartNFSWorkspace_RefusesRedirectedCommonDir(t *testing.T) {
 	}
 	if calls != 0 {
 		t.Fatalf("runtime Run was called %d time(s) on a refused start", calls)
+	}
+}
+
+// A plain (non-git) workspace outside the project root, under an enclosing
+// repository (a git HOME), for a project with its own repository: the git
+// probe in the workspace is bounded at the workspace, so git never answers
+// with the enclosing repository, and the root is the project's repository.
+func TestDetectRepoRoot_PlainWorkspaceUnderGitHomeUsesProjectRepo(t *testing.T) {
+	home := mkGitRepo(t, filepath.Join(t.TempDir(), "home"))
+	proj := mkGitRepo(t, filepath.Join(home, "proj"))
+	projectDir := filepath.Join(proj, config.DotScion)
+	ws := filepath.Join(home, "plain-ws")
+	for _, d := range []string{projectDir, ws} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !util.IsGitRepoDir(ws) {
+		t.Fatal("fixture: an unbounded git search from the workspace should reach the git HOME")
+	}
+	if got := mustDetectRepoRoot(t, false, ws, projectDir); eval(t, got) != eval(t, proj) {
+		t.Fatalf("repo root = %q, want the project repository %q", got, proj)
 	}
 }

@@ -2858,8 +2858,9 @@ func writeAgentTokenFile(agentHome, token string) error {
 // as the root itself:
 //   - workspace at the project root (a shared workspace): the root is the
 //     workspace when it has a .git entry of its own (a .git directory must
-//     be one git accepts), otherwise "" (a plain mount). It is never an enclosing repository: a workspace whose .git
-//     is missing is indistinguishable from one whose .git was removed;
+//     be one git accepts), otherwise "" (a plain mount). It is never an
+//     enclosing repository: a workspace whose .git is missing is
+//     indistinguishable from one whose .git was removed;
 //   - workspace that is a plain checkout elsewhere (for example a workspace
 //     storage backend's host path): the root is the workspace;
 //   - workspace that is a worktree or a subdirectory of a repository: the
@@ -2965,9 +2966,13 @@ func workspaceCommonDirError(workspace, commonDir string) error {
 // GIT_CEILING_DIRECTORIES: git checks dir and its ancestors below ceiling for
 // a repository, never ceiling itself or anything above it. The environment
 // is worktreeGitEnv's, so an inherited GIT_DIR or similar cannot override
-// the search.
+// the search. Like the package's other git calls in agent-writable
+// directories, it is bounded by worktreeGitTimeout.
 func boundedRevParse(dir, ceiling string, args ...string) (string, error) {
-	cmd := exec.Command("git", append([]string{"rev-parse"}, args...)...)
+	ctx, cancel := context.WithTimeout(context.Background(), worktreeGitTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-c", "core.fsmonitor=false", "rev-parse"}, args...)...)
+	cmd.WaitDelay = 5 * time.Second
 	cmd.Dir = dir
 	cmd.Env = append(worktreeGitEnv(), "GIT_CEILING_DIRECTORIES="+ceiling)
 	out, err := cmd.Output()
