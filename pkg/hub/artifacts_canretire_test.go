@@ -1,0 +1,91 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build !no_sqlite
+
+package hub
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"testing"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// TestArtifactCanRetireOnRoutes (ptone/scion#4535): on the hub's routes,
+// with the real artifact host and authz service, GET of the artifact and
+// of a version states canRetire for an admin grantee, the stewards (the
+// delegating user and a home-project owner) and a home-project admin (the
+// custodian clause), and for nobody else; DELETE by the same caller
+// answers 204 exactly when canRetire is true, and 403 otherwise.
+func TestArtifactCanRetireOnRoutes(t *testing.T) {
+	type caller struct {
+		name     string
+		identity func(f reviewGrantFixture) Identity
+		// adminGrant gives the caller (a user) an admin grant first.
+		adminGrant bool
+		retire     bool
+	}
+	user := func(pick func(f reviewGrantFixture) string) func(f reviewGrantFixture) Identity {
+		return func(f reviewGrantFixture) Identity { return f.user(pick(f)) }
+	}
+	cases := []caller{
+		{name: "delegating user", identity: user(func(f reviewGrantFixture) string { return f.delegator }), retire: true},
+		{name: "home-project owner", identity: user(func(f reviewGrantFixture) string { return f.owner }), retire: true},
+		{name: "home-project admin", identity: user(func(f reviewGrantFixture) string { return f.admin }), retire: true},
+		{name: "admin grantee", identity: user(func(f reviewGrantFixture) string { return f.member }), adminGrant: true, retire: true},
+		{name: "home-project member", identity: user(func(f reviewGrantFixture) string { return f.member })},
+		{name: "owning agent", identity: func(f reviewGrantFixture) Identity {
+			return artifactTestAgent(f.agent.ID, f.home, ScopeProjectArtifactRead, ScopeProjectArtifactWrite)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newReviewGrantFixture(t)
+			st, blobs := enableArtifactsForTest(t, f.srv)
+			id := reviewGrantArtifact(t, f, st, blobs)
+			identity := tc.identity(f)
+			if tc.adminGrant {
+				_, err := st.PutGrant(context.Background(), &artifacts.Grant{ID: tid("cr-admin-" + tc.name), ArtifactID: id,
+					SubjectKind: artifacts.SubjectPrincipal, SubjectRef: artifacts.PrincipalRef(artifacts.PrincipalKindUser, identity.ID()),
+					Permission: artifacts.GrantAdmin, CreatedAt: time.Now()}, artifacts.MaxGrantsPerArtifact, true,
+					&artifacts.Actor{Kind: artifacts.PrincipalKindUser, Ref: "test-setup", Authority: artifacts.AuthorityOwner})
+				require.NoError(t, err)
+			}
+			var resp artifacts.ArtifactResponse
+			for _, target := range []string{"/api/v1/artifacts/" + id, "/api/v1/artifacts/" + id + "/versions/1"} {
+				rec := identityArtifactRequest(t, f.srv, identity, http.MethodGet, target, nil)
+				require.Equal(t, http.StatusOK, rec.Code, "GET %s: %s", target, rec.Body.String())
+				resp = artifacts.ArtifactResponse{}
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+				assert.Equal(t, tc.retire, resp.CanRetire, "GET %s canRetire", target)
+				if !tc.retire {
+					assert.NotContains(t, rec.Body.String(), `"canRetire"`, "GET %s", target)
+				}
+			}
+			// Parity: the delete route agrees with the flag.
+			del := identityArtifactRequest(t, f.srv, identity, http.MethodDelete, "/api/v1/artifacts/"+id, nil)
+			want := http.StatusForbidden
+			if resp.CanRetire {
+				want = http.StatusNoContent
+			}
+			assert.Equal(t, want, del.Code, "canRetire=%v but DELETE answered %d %s", resp.CanRetire, del.Code, del.Body.String())
+		})
+	}
+}
