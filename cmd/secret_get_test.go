@@ -84,15 +84,22 @@ var errSecretGetValuePathExpected = errors.New("value path expected: the metadat
 func useSecretGetHub(t *testing.T, srv *httptest.Server) {
 	t.Helper()
 	t.Cleanup(sciontoolhub.SetHubTestSandboxed())
-	origClient, origFetch := newSecretValueHubClient, fetchProjectSecretMeta
-	newSecretValueHubClient = func() *sciontoolhub.Client {
+	stubValueClient(t, func() *sciontoolhub.Client {
 		return sciontoolhub.NewClientWithConfig(srv.URL, secretGetTestToken, secretGetTestAgentID)
-	}
+	})
+	resetSecretGetFlags(t)
+}
+
+// stubValueClient installs factory as the value client factory and replaces
+// the metadata fetch with a stub that returns errSecretGetValuePathExpected.
+func stubValueClient(t *testing.T, factory func() *sciontoolhub.Client) {
+	t.Helper()
+	origClient, origFetch := newSecretValueHubClient, fetchProjectSecretMeta
+	newSecretValueHubClient = factory
 	fetchProjectSecretMeta = func(*cobra.Command, string) (*hubclient.Secret, error) {
 		return nil, errSecretGetValuePathExpected
 	}
 	t.Cleanup(func() { newSecretValueHubClient, fetchProjectSecretMeta = origClient, origFetch })
-	resetSecretGetFlags(t)
 }
 
 func resetSecretGetFlags(t *testing.T) {
@@ -114,16 +121,19 @@ func runSecretGetTest(t *testing.T, args ...string) (string, error) {
 	return out.String(), err
 }
 
-// TestSecretGet_DefaultPrintsValue checks that plain `scion secret get KEY`
-// writes exactly the decoded value, with nothing added (ptone/scion#5013).
-func TestSecretGet_DefaultPrintsValue(t *testing.T) {
-	h := &secretGetTestHub{}
-	useSecretGetHub(t, h.start(t))
+// TestSecretGet_DefaultPrintsMetadata checks that plain `scion secret get
+// KEY` prints the metadata view and never reads the value
+// (ptone/scion#5013).
+func TestSecretGet_DefaultPrintsMetadata(t *testing.T) {
+	resetSecretGetFlags(t)
+	meta := secretGetTestMeta()
+	useSecretMetaFake(t, meta)
 
 	out, err := runSecretGetTest(t, "MY_KEY")
 	require.NoError(t, err)
-	assert.Equal(t, secretGetTestValue, out)
-	assert.Equal(t, 1, h.requests)
+	var want bytes.Buffer
+	printSecretMetadata(&want, meta)
+	assert.Equal(t, want.String(), out)
 }
 
 // TestSecretGet_ValueFlagPrintsValue checks that --value prints exactly the
@@ -202,7 +212,7 @@ func TestSecretGetWantsValue(t *testing.T) {
 		want                  bool
 		wantUsageErr          bool
 	}{
-		{name: "default prints the value", want: true},
+		{name: "default prints the metadata", want: false},
 		{name: "--metadata", metadata: true, want: false},
 		{name: "--value", value: true, want: true},
 		{name: "--format json prints metadata", json: true, want: false},
@@ -225,7 +235,7 @@ func TestSecretGetWantsValue(t *testing.T) {
 }
 
 // TestSecretGet_ValueOutsideAgent checks that, without an agent's hub
-// identity, a value read fails with an error that names --metadata.
+// identity, --value fails with an error that says what to run instead.
 func TestSecretGet_ValueOutsideAgent(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -238,18 +248,15 @@ func TestSecretGet_ValueOutsideAgent(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			resetSecretGetFlags(t)
-			origClient, origFetch := newSecretValueHubClient, fetchProjectSecretMeta
-			newSecretValueHubClient = tc.factory
-			fetchProjectSecretMeta = func(*cobra.Command, string) (*hubclient.Secret, error) {
-				return nil, errSecretGetValuePathExpected
-			}
-			t.Cleanup(func() { newSecretValueHubClient, fetchProjectSecretMeta = origClient, origFetch })
+			stubValueClient(t, tc.factory)
+			agentSecretGetValue = true
 
 			out, err := runSecretGetTest(t, "MY_KEY")
 			require.Error(t, err)
 			assert.True(t, errors.Is(err, errSecretValueNeedsAgent))
-			assert.Contains(t, err.Error(), "scion secret get KEY --metadata")
+			assert.Contains(t, err.Error(), "(--value)")
 			assert.Contains(t, err.Error(), "agent container")
+			assert.Contains(t, err.Error(), "without --value, 'scion secret get KEY' prints the stored metadata")
 			assert.Empty(t, out)
 		})
 	}
@@ -260,6 +267,7 @@ func TestSecretGet_ValueOutsideAgent(t *testing.T) {
 func TestSecretGet_HubErrorReturned(t *testing.T) {
 	h := &secretGetTestHub{status: http.StatusNotFound}
 	useSecretGetHub(t, h.start(t))
+	agentSecretGetValue = true
 
 	out, err := runSecretGetTest(t, "MY_KEY")
 	require.Error(t, err)

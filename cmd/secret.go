@@ -57,13 +57,13 @@ For admin-level secret management with scope options, use 'scion hub secret'.`,
 // prints: the secret value (true) or its metadata (false). --value and
 // --metadata override it either way, so flipping the default is a change
 // to this constant alone.
-const secretGetPrintsValueByDefault = true
+const secretGetPrintsValueByDefault = false
 
-// errSecretValueNeedsAgent is returned when plain `scion secret get` is
-// asked for a value without an agent's hub identity. The hub returns secret
-// values only to agents, through the agent-scoped endpoint.
-var errSecretValueNeedsAgent = errors.New("printing a secret value requires an agent's hub identity " +
-	"(run inside an agent container); use 'scion secret get KEY --metadata' to view the stored metadata")
+// errSecretValueNeedsAgent is returned when `scion secret get` is asked for
+// a value without an agent's hub identity. The hub returns secret values
+// only to agents, through the agent-scoped endpoint.
+var errSecretValueNeedsAgent = errors.New("printing a secret value (--value) requires an agent's hub identity " +
+	"(run inside an agent container); without --value, 'scion secret get KEY' prints the stored metadata")
 
 // newSecretValueHubClient builds the Hub client for reading a secret value.
 // It is the agent's own client (the same one sciontool uses), so the read
@@ -75,26 +75,26 @@ var newSecretValueHubClient = func() *sciontoolhub.Client {
 // agentSecretGetCmd retrieves a project-scoped secret value or its metadata.
 var agentSecretGetCmd = &cobra.Command{
 	Use:   "get KEY",
-	Short: "Print a project-scoped secret value",
-	Long: `Print the value of a project-scoped secret from the Hub.
+	Short: "Get a project-scoped secret's metadata, or its value with --value",
+	Long: `Get a project-scoped secret from the Hub.
 
-The decoded value is written to stdout as-is, with no added newline or
-labels, so it is safe to capture with $(...). Reading a value requires an
-agent's hub identity: run it inside an agent container.
+By default this prints the secret's metadata (key, scope, type, target,
+version and timestamps). --format json prints the metadata object and
+never the value.
 
-Use --metadata to print the secret's metadata (key, scope, type, target,
-version and timestamps) instead. --format json always prints the metadata
-object and never the value.
+With --value, the decoded value is written to stdout as-is, with no added
+newline or labels, so it is safe to capture with $(...). Reading a value
+requires an agent's hub identity: run it inside an agent container.
 
 Examples:
-  # Print a secret value
+  # Show secret metadata
   scion secret get MY_API_KEY
 
-  # Use in a script
-  export API_KEY=$(scion secret get MY_API_KEY)
+  # Print a secret value (inside an agent container)
+  scion secret get --value MY_API_KEY
 
-  # Show secret metadata
-  scion secret get MY_API_KEY --metadata`,
+  # Use in a script
+  export API_KEY=$(scion secret get --value MY_API_KEY)`,
 	Args: cobra.ExactArgs(1),
 	RunE: runAgentSecretGet,
 }
@@ -148,8 +148,8 @@ func init() {
 	agentSecretCmd.AddCommand(agentSecretSetCmd)
 	agentSecretCmd.AddCommand(agentSecretListCmd)
 
-	agentSecretGetCmd.Flags().BoolVar(&agentSecretGetMetadata, "metadata", false, "Print the secret's metadata instead of its value")
-	agentSecretGetCmd.Flags().BoolVar(&agentSecretGetValue, "value", false, "Print the secret's value (the default)")
+	agentSecretGetCmd.Flags().BoolVar(&agentSecretGetMetadata, "metadata", false, "Print the secret's metadata (the default)")
+	agentSecretGetCmd.Flags().BoolVar(&agentSecretGetValue, "value", false, "Print the secret's decoded value (requires an agent's hub identity)")
 	agentSecretGetCmd.MarkFlagsMutuallyExclusive("metadata", "value")
 
 	agentSecretSetCmd.Flags().StringVar(&agentSecretType, "type", "", "Secret type: environment (default), variable, file")

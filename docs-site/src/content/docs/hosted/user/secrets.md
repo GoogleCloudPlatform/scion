@@ -133,10 +133,10 @@ scion secret set ANTHROPIC_API_KEY sk-ant-api01-...
 scion secret list
 
 # Get metadata for a specific project secret
-scion secret get ANTHROPIC_API_KEY --metadata
+scion secret get ANTHROPIC_API_KEY
 ```
 
-Plain `scion secret get KEY` prints the secret's value, which only works inside an agent container (see [Agent Runtime Secret Retrieval](#agent-runtime-secret-retrieval) below). On the host, use `--metadata`.
+`scion secret get --value KEY` prints the secret's value instead, which only works inside an agent container (see [Agent Runtime Secret Retrieval](#agent-runtime-secret-retrieval) below).
 
 :::tip[Graceful Raw vs. Base64 Fallback]
 To prevent silent integration failures (such as when the web UI sends raw plaintext but the underlying REST endpoint accepts base64), all four of Scion's secret-write API handlers (Hub, User, Project, and Broker scopes) feature a **graceful fallback mechanism**.
@@ -219,13 +219,13 @@ From inside an agent container, read secrets with `scion secret`. The calls are 
 
 *   **Retrieve a Secret Value**: Decodes and writes the raw bytes of a specific secret to stdout, with no added newline (ideal for piping or scripting).
     ```bash
-    scion secret get MY_API_KEY
+    scion secret get --value MY_API_KEY
     ```
     *Example script usage:*
     ```bash
-    export API_KEY=$(scion secret get MY_API_KEY)
+    export API_KEY=$(scion secret get --value MY_API_KEY)
     ```
-    Use `scion secret get MY_API_KEY --metadata` to see the secret's metadata instead.
+    Without `--value`, `scion secret get MY_API_KEY` prints the secret's metadata.
 
 `sciontool secret get` and `sciontool secret list` have moved to these `scion` commands; they now print a message naming the `scion` command and exit `1`.
 
