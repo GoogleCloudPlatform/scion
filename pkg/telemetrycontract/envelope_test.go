@@ -575,13 +575,6 @@ type dashField struct {
 
 func (e *dashField) Validate() error { return nil }
 
-type badTagName struct {
-	Envelope
-	X int64 `json:"a\\b"`
-}
-
-func (e *badTagName) Validate() error { return nil }
-
 type badOption struct {
 	Envelope
 	X int64 `json:"x,inline"`
@@ -596,12 +589,22 @@ func TestCheckStructureFieldRules(t *testing.T) {
 		"untagged field":   &untaggedField{},
 		"unexported field": &unexportedField{},
 		"json dash field":  &dashField{},
-		"invalid tag name": &badTagName{},
 		"unknown option":   &badOption{},
 	} {
 		if err := checkStructure(reflect.TypeOf(ev)); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+	// An invalid tag name. The type is built with reflect.StructOf so the
+	// source holds no malformed struct tag (staticcheck SA5008), and it is
+	// checked against the struct rules directly (a StructOf type is unnamed,
+	// so checkStructure would reject it at the root before the tag rule).
+	badTag := reflect.StructOf([]reflect.StructField{
+		{Name: "Envelope", Type: envelopeType, Anonymous: true},
+		{Name: "X", Type: reflect.TypeOf(int64(0)), Tag: reflect.StructTag(`json:"a\\b"`)},
+	})
+	if err := checkStructType(badTag, true, map[reflect.Type]bool{}); err == nil || !strings.Contains(err.Error(), "wire names are") {
+		t.Errorf("invalid tag name: err = %v", err)
 	}
 }
 
