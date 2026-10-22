@@ -47,6 +47,10 @@ const (
 	classObserved writerClass = "observed"
 	classPending  writerClass = "pending" // observed in slice 2; must be emptied there
 	classExempt   writerClass = "exempt"
+	// classObserverOff: a path the writer takes only while no observer is
+	// installed (with one it routes the write through an observed path).
+	// The guard checks that the caller loads the observer slot.
+	classObserverOff writerClass = "observer_off"
 )
 
 type writerEntry struct {
@@ -54,7 +58,7 @@ type writerEntry struct {
 	reason string
 }
 
-// agentWriterClasses classifies every agent mutation site at the slice 1
+// agentWriterClasses classifies every agent mutation site at the slice 2
 // head, keyed "file:Func" (methods as "file:Recv.Method"; a per-caller
 // helper as "file:helper via file:Caller").
 var agentWriterClasses = map[string]writerEntry{
@@ -67,30 +71,31 @@ var agentWriterClasses = map[string]writerEntry{
 	"composite.go:CompositeStore.purgeDeletedAgents via composite.go:CompositeStore.PurgeDeletedAgents":     {classObserved, "no event after an observed soft delete; N2 resync; cursor cleanup"},
 	"composite.go:CompositeStore.purgeDeletedAgents via composite.go:CompositeStore.PurgeDeletedAgentsByID": {classObserved, "no event after an observed soft delete; N2 resync; cursor cleanup"},
 
-	// Observed in slice 2 (design 2.8). Until then their changes surface
-	// through the fingerprint resync. Slice 2 must empty this class.
-	"agent_store.go:buildAgentUpdate via agent_store.go:AgentStore.UpdateAgent":                                              {classPending, "configured, metadata_changed, reincarnated, restored, stopped"},
-	"agent_store.go:buildAgentUpdate via agent_store.go:AgentStore.tryRunningFastPath":                                       {classPending, "UpdateAgent running fast path"},
-	"agent_store.go:buildAgentUpdate via agent_store.go:AgentStore.updateAgentRunningTx":                                     {classPending, "UpdateAgent running path"},
-	"agent_store.go:AgentStore.updateAgentRunningTx":                                                                         {classPending, "UpdateAgent running path"},
-	"agent_store.go:AgentStore.UpdateAgentStatus":                                                                            {classPending, "started, stopped, halted"},
-	"agent_store.go:AgentStore.markAgentContainerMissing via agent_store.go:AgentStore.MarkAgentContainerMissing":            {classPending, "halted"},
-	"agent_store.go:AgentStore.markAgentContainerMissing via agent_store.go:AgentStore.MarkAgentContainerMissingIfUnchanged": {classPending, "halted"},
-	"agent_store.go:AgentStore.setAgentRunIDOnce":                                                                            {classPending, "run_mint (step 0)"},
-	"agent_store.go:AgentStore.swapAgentRunID via agent_store.go:AgentStore.CompareAndSwapAgentRunID":                        {classPending, "run_adopt (cas): adoption provenance"},
-	"agent_store.go:AgentStore.swapAgentRunID via agent_store.go:AgentStore.RevertAgentRunID":                                {classPending, "run_revert (step 0)"},
-	"agent_store.go:AgentStore.swapAgentRunID via agent_store.go:AgentStore.AdoptAgentRunID":                                 {classPending, "run_adopt (heartbeat_adopt): adoption provenance"},
-	"launch_store.go:AgentStore.beginLaunch via launch_store.go:AgentStore.BeginLaunch":                                      {classPending, "fingerprint only"},
-	"launch_store.go:AgentStore.beginLaunch via launch_store.go:AgentStore.BeginStartLaunch":                                 {classPending, "fingerprint only"},
-	"launch_store.go:AgentStore.MarkLaunchAccepted":                                                                          {classPending, "launch_accepted"},
-	"launch_store.go:AgentStore.endLaunch via launch_store.go:AgentStore.EndLaunch":                                          {classPending, "launch_failed when coded"},
-	"launch_store.go:AgentStore.endLaunch via launch_store.go:AgentStore.EndLaunchWithCode":                                  {classPending, "launch_failed when coded"},
-	"launch_report.go:AgentStore.applyLaunchReportPreRunning":                                                                {classPending, "configured, started, launch_failed"},
-	"launch_report.go:AgentStore.applyLaunchReportActive":                                                                    {classPending, "configured, started, launch_failed"},
-	"launch_report.go:AgentStore.applyLaunchReportEnded":                                                                     {classPending, "launch_failed"},
-	"launch_reaper.go:reapRow":                                {classPending, "launch_failed (per savepoint)"},
-	"start_claim_store.go:AgentStore.ClaimAgentReincarnation": {classPending, "records the reincarnation base run"},
-	"agent_deletion_store.go:applyAgentDeletionFields via agent_deletion_store.go:AgentStore.updateAgentDeletionOnce": {classPending, "delete claim and rollback (phase, deleted_at)"},
+	// Observed in slice 2 (design 2.8). The pending class is empty.
+	"agent_store.go:buildAgentUpdate via agent_store.go:AgentStore.updateAgentObserved":                                      {classObserved, "configured, metadata_changed, reincarnated, restored, started, stopped (UpdateAgent with an observer)"},
+	"agent_store.go:AgentStore.updateAgentRunningTx via agent_store.go:AgentStore.updateAgentObserved":                       {classObserved, "UpdateAgent running write with an observer"},
+	"agent_store.go:buildAgentUpdate via agent_store.go:AgentStore.UpdateAgent":                                              {classObserverOff, "UpdateAgent non-running CAS; with an observer UpdateAgent routes every write through updateAgentObserved"},
+	"agent_store.go:buildAgentUpdate via agent_store.go:AgentStore.tryRunningFastPath":                                       {classObserverOff, "UpdateAgent running fast path; with an observer UpdateAgent routes every write through updateAgentObserved"},
+	"agent_store.go:AgentStore.updateAgentRunningTx via agent_store.go:AgentStore.UpdateAgent":                               {classObserverOff, "UpdateAgent running path; with an observer UpdateAgent routes every write through updateAgentObserved"},
+	"agent_store.go:buildAgentUpdate via agent_store.go:AgentStore.updateAgentRunningTx":                                     {classExempt, "nested helper, classified at its caller: updateAgentRunningTx via updateAgentObserved (observed) and via UpdateAgent (observer_off)"},
+	"agent_store.go:AgentStore.UpdateAgentStatus":                                                                            {classObserved, "started, stopped, halted, launch_failed (every branch, timestamps-only included)"},
+	"agent_store.go:AgentStore.markAgentContainerMissing via agent_store.go:AgentStore.MarkAgentContainerMissing":            {classObserved, "halted, stopped(error), launch_failed(launch_error)"},
+	"agent_store.go:AgentStore.markAgentContainerMissing via agent_store.go:AgentStore.MarkAgentContainerMissingIfUnchanged": {classObserved, "halted, stopped(error), launch_failed(launch_error)"},
+	"agent_store.go:AgentStore.setAgentRunIDOnce":                                                                            {classObserved, "run_mint (step 0): pending_run_change_at"},
+	"agent_store.go:AgentStore.swapAgentRunID via agent_store.go:AgentStore.CompareAndSwapAgentRunID":                        {classObserved, "run_adopt (cas): rebind, adoption provenance"},
+	"agent_store.go:AgentStore.swapAgentRunID via agent_store.go:AgentStore.RevertAgentRunID":                                {classObserved, "run_revert (step 0)"},
+	"agent_store.go:AgentStore.swapAgentRunID via agent_store.go:AgentStore.AdoptAgentRunID":                                 {classObserved, "run_adopt (heartbeat_adopt): rebind, adoption provenance"},
+	"launch_store.go:AgentStore.beginLaunch via launch_store.go:AgentStore.BeginLaunch":                                      {classObserved, "fingerprint only"},
+	"launch_store.go:AgentStore.beginLaunch via launch_store.go:AgentStore.BeginStartLaunch":                                 {classObserved, "fingerprint only"},
+	"launch_store.go:AgentStore.MarkLaunchAccepted":                                                                          {classObserved, "launch_accepted"},
+	"launch_store.go:AgentStore.endLaunch via launch_store.go:AgentStore.EndLaunch":                                          {classObserved, "launch_failed when coded"},
+	"launch_store.go:AgentStore.endLaunch via launch_store.go:AgentStore.EndLaunchWithCode":                                  {classObserved, "launch_failed when coded"},
+	"launch_report.go:AgentStore.applyLaunchReportPreRunning":                                                                {classObserved, "configured, started, launch_failed (observed in ApplyLaunchReport)"},
+	"launch_report.go:AgentStore.applyLaunchReportActive":                                                                    {classObserved, "configured, started, launch_failed (observed in ApplyLaunchReport)"},
+	"launch_report.go:AgentStore.applyLaunchReportEnded":                                                                     {classObserved, "started (late report; observed in ApplyLaunchReport)"},
+	"launch_reaper.go:reapRow":                                {classObserved, "launch_failed (per savepoint)"},
+	"start_claim_store.go:AgentStore.ClaimAgentReincarnation": {classObserved, "records the reincarnation base run"},
+	"agent_deletion_store.go:applyAgentDeletionFields via agent_deletion_store.go:AgentStore.updateAgentDeletionOnce": {classObserved, "delete claim and rollback (phase, deleted_at)"},
 
 	// Exempt: cannot change a fingerprint or snapshot input.
 	"run_intent_store.go:AgentStore.SwapRunIntent":                                                  {classExempt, "run_intent is desired state"},
@@ -127,8 +132,11 @@ var (
 		"Create": true, "CreateBulk": true, "Update": true, "UpdateOne": true,
 		"UpdateOneID": true, "Delete": true, "DeleteOne": true, "DeleteOneID": true,
 	}
-	rawAgentSQL     = regexp.MustCompile(`(?i)\b(update|delete\s+from|insert\s+into)\s+"?agents"?\b`)
-	observeEntry    = map[string]bool{"observeAgentWrite": true}
+	rawAgentSQL  = regexp.MustCompile(`(?i)\b(update|delete\s+from|insert\s+into)\s+"?agents"?\b`)
+	observeEntry = map[string]bool{
+		"observeAgentWrite": true, "observeAgentWriteDeferred": true, "observedAgentWrite": true,
+		"observeLaunchReport": true, "observeReap": true,
+	}
 	entPkgPath      = "github.com/GoogleCloudPlatform/scion/pkg/ent"
 	guardedPackages = []string{
 		"github.com/GoogleCloudPlatform/scion/pkg/store",
@@ -152,6 +160,27 @@ type guardReport struct {
 	// observes is the set of function keys whose body calls the observer
 	// entry point.
 	observes map[string]bool
+	// loadsObserver is the set of function keys whose body loads the
+	// observer slot (a call of X.lifecycle.load()).
+	loadsObserver map[string]bool
+}
+
+// observedThrough reports whether key calls the observer, or is reached
+// only through a chain of single callers one of which does (a helper of
+// one writer whose observe call sits in that writer).
+func (r guardReport) observedThrough(key string) bool {
+	for seen := map[string]bool{}; !seen[key]; {
+		seen[key] = true
+		if r.observes[key] {
+			return true
+		}
+		callers := r.callers[key]
+		if len(callers) != 1 {
+			return false
+		}
+		key = callers[0]
+	}
+	return false
 }
 
 func funcKey(fset *token.FileSet, fd *ast.FuncDecl) string {
@@ -191,7 +220,7 @@ func analyzeAgentWriters(t *testing.T, patterns ...string) guardReport {
 	if n := packages.PrintErrors(pkgs); n > 0 {
 		t.Fatalf("%d package load errors", n)
 	}
-	rep := guardReport{callers: map[string][]string{}, observes: map[string]bool{}}
+	rep := guardReport{callers: map[string][]string{}, observes: map[string]bool{}, loadsObserver: map[string]bool{}}
 	declKey := map[types.Object]string{} // func object -> key
 	type callSite struct {
 		caller string
@@ -227,6 +256,14 @@ func analyzeAgentWriters(t *testing.T, patterns ...string) guardReport {
 							}
 						case *ast.SelectorExpr:
 							callee = pkg.TypesInfo.Uses[fn.Sel]
+							if fn.Sel.Name == "load" {
+								if inner, ok := fn.X.(*ast.SelectorExpr); ok && inner.Sel.Name == "lifecycle" {
+									rep.loadsObserver[key] = true
+								}
+							}
+							if observeEntry[fn.Sel.Name] {
+								rep.observes[key] = true
+							}
 							if agentMutators[fn.Sel.Name] {
 								if xt := pkg.TypesInfo.TypeOf(fn.X); xt != nil {
 									switch {
@@ -289,8 +326,11 @@ func classify(rep guardReport, classes map[string]writerEntry) []string {
 				}
 				used[k] = true
 				// The observe call may sit in the helper or in the caller.
-				if e.class == classObserved && !rep.observes[c] && !rep.observes[f.key] {
+				if e.class == classObserved && !rep.observedThrough(c) && !rep.observes[f.key] {
 					problems = append(problems, fmt.Sprintf("%s is observed but neither %s nor the helper calls the observer", k, c))
+				}
+				if e.class == classObserverOff && !loadsUpward(rep, c) {
+					problems = append(problems, fmt.Sprintf("%s is observer_off but %s (or its caller) does not load the observer", k, c))
 				}
 			}
 			continue
@@ -301,8 +341,11 @@ func classify(rep guardReport, classes map[string]writerEntry) []string {
 			continue
 		}
 		used[f.key] = true
-		if e.class == classObserved && !rep.observes[f.key] {
+		if e.class == classObserved && !rep.observedThrough(f.key) {
 			problems = append(problems, fmt.Sprintf("%s is classified observed but does not call the observer", f.key))
+		}
+		if e.class == classObserverOff && !loadsUpward(rep, f.key) {
+			problems = append(problems, fmt.Sprintf("%s is observer_off but does not load the observer", f.key))
 		}
 		if e.class == classExempt && e.reason == "" {
 			problems = append(problems, fmt.Sprintf("%s is exempt without a reason", f.key))
@@ -319,6 +362,24 @@ func classify(rep guardReport, classes map[string]writerEntry) []string {
 		}
 	}
 	return problems
+}
+
+// loadsUpward reports whether key, or every caller of key, loads the
+// observer slot.
+func loadsUpward(rep guardReport, key string) bool {
+	if rep.loadsObserver[key] {
+		return true
+	}
+	callers := rep.callers[key]
+	if len(callers) == 0 {
+		return false
+	}
+	for _, c := range callers {
+		if !rep.loadsObserver[c] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestAgentWritersAreClassified(t *testing.T) {
@@ -339,7 +400,10 @@ func TestAgentWritersAreClassified(t *testing.T) {
 		}
 	}
 	sort.Strings(pending)
-	t.Logf("%d agent mutation sites; writers pending slice 2 (%d): %s", len(rep.findings), len(pending), strings.Join(pending, ", "))
+	if len(pending) > 0 {
+		t.Errorf("writers still pending slice 2 (%d): %s", len(pending), strings.Join(pending, ", "))
+	}
+	t.Logf("%d agent mutation sites classified", len(rep.findings))
 }
 
 // TestAgentWriterGuardProof runs the analyzer on a testdata package with
@@ -354,6 +418,7 @@ func TestAgentWriterGuardProof(t *testing.T) {
 	classes := map[string]writerEntry{
 		"proof.go:observedButSilent":           {classObserved, "x"},
 		"proof.go:shared via proof.go:callerA": {classExempt, "x"},
+		"proof.go:offPathWithoutLoad":          {classObserverOff, "x"},
 	}
 	problems := strings.Join(classify(rep, classes), "\n")
 	for _, want := range []string{
@@ -363,6 +428,7 @@ func TestAgentWriterGuardProof(t *testing.T) {
 		"unclassified agent writer proof.go:entityUpdate (Agent.Update",
 		"proof.go:observedButSilent is classified observed but does not call the observer",
 		"unclassified agent writer proof.go:shared via proof.go:callerB",
+		"proof.go:offPathWithoutLoad is observer_off but does not load the observer",
 	} {
 		if !strings.Contains(problems, want) {
 			t.Errorf("guard missed %q; it reported:\n%s", want, problems)

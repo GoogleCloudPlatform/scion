@@ -123,6 +123,11 @@ type AgentWriteHints struct {
 	StopLegRunID string
 }
 
+// LifecycleEndReasonCancelled is the end_reason of an attempt a stop
+// cancelled (a wind-down reap); the other launch end reasons are the
+// store's LaunchEndReason* values, which share the wire names.
+const LifecycleEndReasonCancelled = "cancelled"
+
 // LaunchEndHint describes a failed launch end.
 type LaunchEndHint struct {
 	// Reason is the wire end_reason (timed_out, lost, failed, not_launched,

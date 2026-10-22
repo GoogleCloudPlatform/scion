@@ -48,3 +48,9 @@ func shared(ctx context.Context, c *ent.Client, id uuid.UUID) error {
 func callerA(ctx context.Context, c *ent.Client, id uuid.UUID) error { return shared(ctx, c, id) }
 
 func callerB(ctx context.Context, c *ent.Client, id uuid.UUID) error { return shared(ctx, c, id) }
+
+// offPathWithoutLoad is classified observer_off by the proof test, but
+// neither it nor its caller loads an observer slot.
+func offPathWithoutLoad(ctx context.Context, c *ent.Client, id uuid.UUID) error {
+	return c.Agent.UpdateOneID(id).SetPhase("running").Exec(ctx)
+}

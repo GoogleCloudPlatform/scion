@@ -197,6 +197,7 @@ func (s *AgentStore) beginLaunch(ctx context.Context, agentID, kind string, time
 	if err != nil {
 		return "", err
 	}
+	obs := s.lifecycle.load()
 
 	ltx, err := s.beginLaunchTx(ctx)
 	if err != nil {
@@ -258,14 +259,24 @@ func (s *AgentStore) beginLaunch(ctx context.Context, agentID, kind string, time
 	}
 	// Link the start claim of the matching kind to this launch, so only
 	// this launch's end settles it.
-	if _, err := linkLaunchClaim(upd, current, kind, newID, now).Save(ctx); err != nil {
+	updated, err := linkLaunchClaim(upd, current, kind, newID, now).Save(ctx)
+	if err != nil {
 		return "", mapError(err)
+	}
+	// Observed for the fingerprint only: beginning a launch is not a
+	// transition (design 2.1).
+	var hooks commitHooks
+	if err := observeAgentWriteDeferred(ctx, obs, ltx.client, &hooks, store.AgentWrite{
+		Op: store.AgentWriteLaunch, Before: entAgentToStore(current), After: entAgentToStore(updated), Now: now,
+	}); err != nil {
+		return "", err
 	}
 
 	if err := ltx.tx.Commit(); err != nil {
 		return "", fmt.Errorf("launch store: commit BeginLaunch: %w", err)
 	}
 	committed = true
+	hooks.run()
 	return newID, nil
 }
 
@@ -275,6 +286,7 @@ func (s *AgentStore) MarkLaunchAccepted(ctx context.Context, agentID, launchID, 
 	if err != nil {
 		return store.Agent{}, err
 	}
+	obs := s.lifecycle.load()
 
 	ltx, err := s.beginLaunchTx(ctx)
 	if err != nil {
@@ -320,11 +332,25 @@ func (s *AgentStore) MarkLaunchAccepted(ctx context.Context, agentID, launchID, 
 	if err != nil {
 		return store.Agent{}, mapError(err)
 	}
+	// launch_accepted on the launch's first acceptance: the acknowledged
+	// branch (an owner) or the unknown-outcome branch (no owner, the row
+	// still created). A repeated acceptance records nothing.
+	var hooks commitHooks
+	hints := store.AgentWriteHints{
+		LaunchAccepted: current.LaunchOwner == "" && (owner != "" || state.Phase(current.Phase) == state.PhaseCreated),
+		LaunchOwner:    updated.LaunchOwner,
+	}
+	if err := observeAgentWriteDeferred(ctx, obs, ltx.client, &hooks, store.AgentWrite{
+		Op: store.AgentWriteLaunch, Before: entAgentToStore(current), After: entAgentToStore(updated), Now: time.Now(), Hints: hints,
+	}); err != nil {
+		return store.Agent{}, err
+	}
 
 	if err := ltx.tx.Commit(); err != nil {
 		return store.Agent{}, fmt.Errorf("launch store: commit MarkLaunchAccepted: %w", err)
 	}
 	committed = true
+	hooks.run()
 	return *entAgentToStore(updated), nil
 }
 
@@ -345,6 +371,7 @@ func (s *AgentStore) endLaunch(ctx context.Context, agentID, launchID, reason, c
 	if err != nil {
 		return err
 	}
+	obs := s.lifecycle.load()
 
 	ltx, err := s.beginLaunchTx(ctx)
 	if err != nil {
@@ -387,15 +414,28 @@ func (s *AgentStore) endLaunch(ctx context.Context, agentID, launchID, reason, c
 	if code != "" {
 		upd.SetLaunchError(code)
 	}
-	if _, err := withLaunchEndSettlement(upd, current, reason, now).
-		Save(ctx); err != nil {
+	updated, err := withLaunchEndSettlement(upd, current, reason, now).Save(ctx)
+	if err != nil {
 		return mapError(err)
+	}
+	// A coded end is a failed launch (launch_failed); a codeless one (an
+	// env-gather end) derives nothing (design 2.3).
+	var hooks commitHooks
+	var hints store.AgentWriteHints
+	if code != "" {
+		hints.LaunchEnd = &store.LaunchEndHint{Reason: reason, Code: code}
+	}
+	if err := observeAgentWriteDeferred(ctx, obs, ltx.client, &hooks, store.AgentWrite{
+		Op: store.AgentWriteLaunch, Before: entAgentToStore(current), After: entAgentToStore(updated), Now: now, Hints: hints,
+	}); err != nil {
+		return err
 	}
 
 	if err := ltx.tx.Commit(); err != nil {
 		return fmt.Errorf("launch store: commit EndLaunch: %w", err)
 	}
 	committed = true
+	hooks.run()
 	return nil
 }
 

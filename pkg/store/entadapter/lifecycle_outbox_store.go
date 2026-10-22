@@ -27,6 +27,7 @@ package entadapter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"time"
@@ -104,10 +105,37 @@ func observeAgentWrite(ctx context.Context, o store.AgentWriteObserver, client *
 	return o.ObserveAgentWrite(ctx, &lifecycleTx{client: client, tx: tx}, w)
 }
 
+// commitHooks collects the observer's post-commit hooks for a writer that
+// commits a raw *sql.Tx itself (the launch store and reaper): the writer
+// runs them after its Commit succeeds, and drops them on rollback.
+type commitHooks struct{ fns []func() }
+
+// run runs the collected hooks once.
+func (h *commitHooks) run() {
+	if h == nil {
+		return
+	}
+	fns := h.fns
+	h.fns = nil
+	for _, f := range fns {
+		f()
+	}
+}
+
+// observeAgentWriteDeferred is observeAgentWrite for a raw transaction:
+// post-commit hooks go to hooks, which the writer runs after its commit.
+func observeAgentWriteDeferred(ctx context.Context, o store.AgentWriteObserver, client *ent.Client, hooks *commitHooks, w store.AgentWrite) error {
+	if o == nil {
+		return nil
+	}
+	return o.ObserveAgentWrite(ctx, &lifecycleTx{client: client, hooks: hooks}, w)
+}
+
 // lifecycleTx implements store.LifecycleTx over the writer's transaction.
 type lifecycleTx struct {
 	client *ent.Client
 	tx     *ent.Tx
+	hooks  *commitHooks
 }
 
 var _ store.LifecycleTx = (*lifecycleTx)(nil)
@@ -188,13 +216,21 @@ func (l *lifecycleTx) BumpLifecycleCursor(ctx context.Context, agentID string, n
 			SetCreatorPrincipalType(upd.CreatorPrincipalType).
 			SetCreatorPrincipalID(upd.CreatorPrincipalID).
 			SetUpdatedAt(now).
+			SetOpenRun(upd.Run.OpenRun).
+			SetOpenRunGeneration(upd.Run.OpenRunGeneration).
+			SetOpenRunMetadataRevision(upd.Run.OpenRunMetadataRevision).
+			SetNillablePendingRunChangeAt(utcPtr(upd.Run.PendingRunChangeAt)).
+			SetReincarnationBaseRunID(upd.Run.ReincarnationBaseRunID).
+			SetPendingAdoptedFrom(upd.Run.PendingAdoptedFrom).
+			SetNillablePendingAdoptedAt(utcPtr(upd.Run.PendingAdoptedAt)).
+			SetPendingAdoptionSource(upd.Run.PendingAdoptionSource).
 			Save(ctx)
 		if err != nil {
 			return nil, mapError(err)
 		}
 		return entCursorToStore(c), nil
 	}
-	c, err := l.client.AgentLifecycleCursor.UpdateOneID(uid).
+	u := l.client.AgentLifecycleCursor.UpdateOneID(uid).
 		AddTransitionRevision(int64(n)).
 		SetProjectID(projectUID).
 		SetMetadataRevision(upd.MetadataRevision).
@@ -202,11 +238,36 @@ func (l *lifecycleTx) BumpLifecycleCursor(ctx context.Context, agentID string, n
 		SetLastFingerprint(upd.LastFingerprint).
 		SetLastDeleted(upd.LastDeleted).
 		SetUpdatedAt(now).
-		Save(ctx)
+		SetOpenRun(upd.Run.OpenRun).
+		SetOpenRunGeneration(upd.Run.OpenRunGeneration).
+		SetOpenRunMetadataRevision(upd.Run.OpenRunMetadataRevision).
+		SetReincarnationBaseRunID(upd.Run.ReincarnationBaseRunID).
+		SetPendingAdoptedFrom(upd.Run.PendingAdoptedFrom).
+		SetPendingAdoptionSource(upd.Run.PendingAdoptionSource)
+	if t := upd.Run.PendingRunChangeAt; t != nil {
+		u.SetPendingRunChangeAt(t.UTC())
+	} else {
+		u.ClearPendingRunChangeAt()
+	}
+	if t := upd.Run.PendingAdoptedAt; t != nil {
+		u.SetPendingAdoptedAt(t.UTC())
+	} else {
+		u.ClearPendingAdoptedAt()
+	}
+	c, err := u.Save(ctx)
 	if err != nil {
 		return nil, mapError(err)
 	}
 	return entCursorToStore(c), nil
+}
+
+// utcPtr returns t in UTC, or nil.
+func utcPtr(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	u := t.UTC()
+	return &u
 }
 
 // DeleteLifecycleCursor implements store.LifecycleTx.
@@ -247,6 +308,10 @@ func (l *lifecycleTx) InsertLifecycleOutbox(ctx context.Context, rows []store.Li
 // passes its transaction; with none (a store copy built without one) f
 // runs at once.
 func (l *lifecycleTx) AfterCommit(f func()) {
+	if l.hooks != nil {
+		l.hooks.fns = append(l.hooks.fns, f)
+		return
+	}
 	if l.tx == nil {
 		f()
 		return
@@ -638,6 +703,10 @@ func (s *AgentStore) lifecycleWriteTx(ctx context.Context, obs store.AgentWriteO
 		return s.client, s.entTx, func() {}, nil
 	}
 	tx, err = s.client.Tx(ctx)
+	if errors.Is(err, ent.ErrTxStarted) {
+		// s.client already wraps a transaction it was built on: join it.
+		return s.client, s.entTx, func() {}, nil
+	}
 	if err != nil {
 		return nil, nil, nil, markTransient(fmt.Errorf("begin transaction: %w", err))
 	}
@@ -675,4 +744,87 @@ func lifecycleBeforeRow(ctx context.Context, client *ent.Client, obs store.Agent
 		return nil, mapError(err)
 	}
 	return entAgentToStore(row), nil
+}
+
+// lifecycleAfterRow reads the committed state of uid inside the writer's
+// transaction, for the observer's after row.
+func lifecycleAfterRow(ctx context.Context, client *ent.Client, uid uuid.UUID) (*store.Agent, error) {
+	row, err := client.Agent.Get(ctx, uid)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return entAgentToStore(row), nil
+}
+
+// observedAgentWrite runs write, an observed agent write that reports how
+// many rows it changed, in one transaction with the observer (a new one,
+// or the ambient transaction): a locked read of the before row, write,
+// a read of the after row, the observer, commit. A write that changed no
+// row is not observed. It is the observer entry point of writers whose
+// write is a single conditional statement (the run-ID writers,
+// ClaimAgentReincarnation).
+func (s *AgentStore) observedAgentWrite(ctx context.Context, obs store.AgentWriteObserver, uid uuid.UUID, op store.AgentWriteOp, hints store.AgentWriteHints, write func(client *ent.Client) (int, error)) (int, error) {
+	client, tx, done, err := s.lifecycleWriteTx(ctx, obs)
+	if err != nil {
+		return 0, err
+	}
+	defer done()
+	before, err := lifecycleBeforeRow(ctx, client, obs, uid)
+	if err != nil {
+		return 0, err
+	}
+	n, err := write(client)
+	if err != nil || n == 0 {
+		return n, err
+	}
+	if before != nil {
+		after, err := lifecycleAfterRow(ctx, client, uid)
+		if err != nil {
+			return 0, err
+		}
+		if err := observeAgentWrite(ctx, obs, client, tx, store.AgentWrite{
+			Op: op, Before: before, After: after, Now: time.Now(), Hints: hints,
+		}); err != nil {
+			return 0, err
+		}
+	}
+	if err := commitLifecycleWriteTx(tx, s.entTx); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// RecordRestartStopLeg records that a restart's stop leg confirmed run
+// runID stopped (WP1 design 2.4a step 3, r5 B1). In its own transaction it
+// reads the agent row under lock and runs the observer, which closes the
+// open run segment as stopped(stopped, cause=restart_stop_leg) when it is
+// runID, and does nothing otherwise. It writes only the lifecycle cursor
+// and outbox, never an agents column, and does nothing while no observer
+// is installed or when the agent is gone. It is not part of store.Store:
+// the hub type-asserts for it.
+func (s *AgentStore) RecordRestartStopLeg(ctx context.Context, agentID, runID string) error {
+	obs := s.lifecycle.load()
+	if obs == nil || runID == "" {
+		return nil
+	}
+	uid, err := parseUUID(agentID)
+	if err != nil {
+		return err
+	}
+	client, tx, done, err := s.lifecycleWriteTx(ctx, obs)
+	if err != nil {
+		return err
+	}
+	defer done()
+	row, err := lifecycleBeforeRow(ctx, client, obs, uid)
+	if err != nil || row == nil {
+		return err
+	}
+	if err := observeAgentWrite(ctx, obs, client, tx, store.AgentWrite{
+		Op: store.AgentWriteRestartStopLeg, Before: row, After: row, Now: time.Now(),
+		Hints: store.AgentWriteHints{StopLegRunID: runID},
+	}); err != nil {
+		return err
+	}
+	return commitLifecycleWriteTx(tx, s.entTx)
 }

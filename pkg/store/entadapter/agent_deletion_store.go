@@ -115,6 +115,20 @@ func (s *AgentStore) updateAgentDeletionOnce(ctx context.Context, uid uuid.UUID,
 		// this dialect). Re-read and re-evaluate.
 		return 0, true, nil
 	}
+	if obs := s.lifecycle.load(); obs != nil {
+		// Observed (design 2.6, r3 B1): the delete claim and rollback can
+		// write phase and deleted_at.
+		after, err := lifecycleAfterRow(ctx, tx.Client(), uid)
+		if err != nil {
+			return 0, false, err
+		}
+		if err := observeAgentWrite(ctx, obs, tx.Client(), tx, store.AgentWrite{
+			Op: store.AgentWriteDeletion, Before: current, After: after, Now: time.Now(),
+			Hints: store.AgentWriteHints{Kind: store.WriteKindDeletion},
+		}); err != nil {
+			return 0, false, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, false, err
 	}

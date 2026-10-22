@@ -437,15 +437,17 @@ func TestLifecycleStore_HardFinalize(t *testing.T) {
 
 // TestLifecycleStore_UnobservedWriteThenHardFinalize is the store form of
 // the done-when sequence: the create is observed, a later write is not
-// (slice 1 leaves UpdateAgent unobserved), and the hard delete then
-// emits a gap, resynced and deleted.
+// (it runs with the observer off), and the hard delete then emits a gap,
+// resynced and deleted.
 func TestLifecycleStore_UnobservedWriteThenHardFinalize(t *testing.T) {
 	f := newLifecycleFixture(t)
 	a := f.create("lc-gap")
 	got, err := f.cs.GetAgent(context.Background(), a.ID)
 	require.NoError(t, err)
 	got.Phase = "stopped"
+	f.cs.SetAgentWriteObserver(nil)
 	require.NoError(t, f.cs.UpdateAgent(context.Background(), got))
+	f.cs.SetAgentWriteObserver(f.obs)
 	f.finalize(context.Background(), a.ID, store.DeletionFinalizeHard)
 	evs, _ := lifecycleEvents(t, f.cs, a.ID)
 	require.Equal(t, "created@1 resynced@3(unobserved_change) deleted@4(hard)", lcSeq(evs))
@@ -529,12 +531,12 @@ func TestLifecycleStore_DeleteOfSoftDeletedAndRestore(t *testing.T) {
 	f.finalize(context.Background(), b.ID, store.DeletionFinalizeSoft)
 	got, err := f.cs.GetAgent(context.Background(), b.ID)
 	require.NoError(t, err)
-	// Restore is UpdateAgent (unobserved until slice 2).
+	// Restore is UpdateAgent clearing deleted_at (observed since slice 2).
 	got.DeletedAt = time.Time{}
 	require.NoError(t, f.cs.UpdateAgent(context.Background(), got))
 	f.finalize(context.Background(), b.ID, store.DeletionFinalizeHard)
 	evs, _ = lifecycleEvents(t, f.cs, b.ID)
-	assert.Equal(t, "created@1 deleted@2(soft) resynced@4(unobserved_change) deleted@5(hard)", lcSeq(evs))
+	assert.Equal(t, "created@1 deleted@2(soft) restored@3 deleted@4(hard)", lcSeq(evs))
 }
 
 // TestLifecycleStore_DeleteProject covers B1: a forced project delete with
