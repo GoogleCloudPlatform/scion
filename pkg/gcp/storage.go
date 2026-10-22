@@ -232,6 +232,10 @@ func downloadWorkspace(ctx context.Context, remote, localPath string, gitData bo
 			return err
 		}
 	}
+	// rclone created a missing destination; keep doing so.
+	if err := os.MkdirAll(localPath, 0o755); err != nil {
+		return fmt.Errorf("failed to create workspace directory: %w", err)
+	}
 	stats, err := transfer.ApplyStagedWorkspace(staging, localPath, transfer.StagedApplyOptions{GitData: gitData})
 	if err != nil {
 		return fmt.Errorf("failed to apply workspace download: %w", err)

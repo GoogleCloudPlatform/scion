@@ -333,3 +333,20 @@ func TestWorkspaceRoundTrip_UnpushedCommitsSurviveSyncBack(t *testing.T) {
 		assertAbsent(t, filepath.Join(hub, rel))
 	}
 }
+
+// TestDownloadWorkspace_CreatesMissingDestination keeps rclone's behaviour
+// of creating a destination that does not exist yet.
+func TestDownloadWorkspace_CreatesMissingDestination(t *testing.T) {
+	bucket := t.TempDir()
+	workspace := filepath.Join(t.TempDir(), "projects", "p")
+	writeTree(t, bucket, map[string]string{"a.txt": "a", ".git/HEAD": "ref: refs/heads/main\n"})
+	if err := downloadWorkspace(context.Background(), bucket, workspace, true); err != nil {
+		t.Fatalf("download: %v", err)
+	}
+	if got := readFile(t, filepath.Join(workspace, "a.txt")); got != "a" {
+		t.Errorf("a.txt = %q", got)
+	}
+	if got := readFile(t, filepath.Join(workspace, ".git/HEAD")); got != "ref: refs/heads/main\n" {
+		t.Errorf(".git/HEAD = %q", got)
+	}
+}
