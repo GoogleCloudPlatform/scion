@@ -26,8 +26,8 @@
  * Last-Event-ID resume support (handled natively by EventSource).
  *
  * Reconnection retries indefinitely; a tab that becomes visible reconnects
- * immediately. The first retry after a server-initiated close (`reconnect`)
- * or a drop of a live connection waits a full-jitter delay, random(0, 2 s),
+ * immediately. The first retry after a server-initiated close (`reconnect`,
+ * or `superseded` with reason max_age) or a drop of a live connection waits a full-jitter delay, random(0, 2 s),
  * so the clients of a restarting hub instance do not all come back, and
  * refetch their lists, in the same second.
  *
@@ -305,7 +305,7 @@ export class SSEClient extends EventTarget {
     // Report the gap immediately so snapshot consumers invalidate in-flight
     // work. Every client of the instance gets this at about the same time, so
     // the reopen waits a full-jitter delay rather than happening at once.
-    this.eventSource.addEventListener('reconnect', () => {
+    const onServerClose = (): void => {
       if (es !== this.eventSource) return;
       if (this.connectionOpen) {
         this.connectionOpen = false;
@@ -315,6 +315,23 @@ export class SSEClient extends EventTarget {
       es.close();
       this.eventSource = null;
       this.scheduleReconnect(true);
+    };
+    this.eventSource.addEventListener('reconnect', onServerClose);
+
+    // The hub closes a stream that reached its maximum age with
+    // `event: superseded` and reason max_age (phase 1 of ptone/scion#5219).
+    // Every stream of an instance can reach it in the same window, so it
+    // takes the same jittered reopen as `reconnect`. Other reasons are left
+    // to the stream ending on its own.
+    this.eventSource.addEventListener('superseded', (event) => {
+      if (es !== this.eventSource) return;
+      let reason: unknown;
+      try {
+        reason = (JSON.parse(event.data as string) as { reason?: unknown })?.reason;
+      } catch {
+        return;
+      }
+      if (reason === 'max_age') onServerClose();
     });
 
     // A heartbeat sent as a named event (not a comment) is visible here and

@@ -1033,6 +1033,32 @@ describe('SSEClient first reconnect full jitter (ptone/scion#5236)', () => {
     client.disconnect();
   });
 
+  it.each([
+    [0, 0],
+    [0.5, 1_000],
+    [0.75, 1_500],
+  ])('waits random(0, 2 s) after superseded with reason max_age (draw %s -> %s ms)', (draw, ms) => {
+    const client = jitterClient([draw]);
+    const disconnected = vi.fn();
+    client.addEventListener('disconnected', disconnected);
+    const old = latest();
+    old.dispatchEvent(new MessageEvent('superseded', { data: '{"reason":"max_age"}' }));
+    expect(old.closed).toBe(true);
+    expect(disconnected).toHaveBeenCalledTimes(1);
+    expectReopenAfter(ms);
+    client.disconnect();
+  });
+
+  it('leaves a superseded stream with another reason, or unparsable data, alone', () => {
+    const client = jitterClient([]);
+    latest().dispatchEvent(new MessageEvent('superseded', { data: '{"reason":"tab"}' }));
+    latest().dispatchEvent(new MessageEvent('superseded', { data: 'not json' }));
+    expect(latest().closed).toBe(false);
+    vi.advanceTimersByTime(5_000);
+    expect(FakeEventSource.instances).toHaveLength(1);
+    client.disconnect();
+  });
+
   it('keeps proportional jitter for the attempts after the first', async () => {
     // Draw 0.5 feeds the full jitter, then 0 and 1 are the -10 % and +10 %
     // ends of the proportional jitter on the 2 s and 4 s backoffs.
