@@ -26,6 +26,7 @@ import (
 	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 	"google.golang.org/api/option"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
@@ -362,10 +363,11 @@ func (e *GCPExporter) SendAnalytics(ctx context.Context, line []byte) error {
 	}
 	entry, err := analyticsEntry(line)
 	if err != nil {
-		return err
+		// The same bytes will never parse: dead-letter, do not retry.
+		return PermanentSendError(err)
 	}
 	if e.analyticsSink != nil {
-		return e.analyticsSink(entry)
+		return classifyAnalyticsSendError(e.analyticsSink(entry))
 	}
 	if e.logClient == nil {
 		return errors.New("GCP analytics exporter unavailable")
@@ -373,7 +375,21 @@ func (e *GCPExporter) SendAnalytics(ctx context.Context, line []byte) error {
 	e.analyticsOnce.Do(func() {
 		e.analyticsLogger = e.logClient.Logger(telemetrycontract.AnalyticsLogID)
 	})
-	return e.analyticsLogger.LogSync(ctx, entry)
+	return classifyAnalyticsSendError(e.analyticsLogger.LogSync(ctx, entry))
+}
+
+// classifyAnalyticsSendError marks errors Cloud Logging will repeat for the
+// same entry (InvalidArgument, e.g. a malformed or oversized entry) as
+// permanent; everything else (unavailable, deadline, permission, quota) is
+// retried.
+func classifyAnalyticsSendError(err error) error {
+	if err == nil || IsPermanentSendError(err) {
+		return err
+	}
+	if status.Code(err) == codes.InvalidArgument {
+		return PermanentSendError(err)
+	}
+	return err
 }
 
 // analyticsEntry builds the Cloud Logging entry for one analytics line.

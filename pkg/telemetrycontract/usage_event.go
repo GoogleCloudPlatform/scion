@@ -92,7 +92,7 @@ type UsageEvent struct {
 	SourceEventID       string `json:"source_event_id,omitempty"`
 	SourceIdentity      string `json:"source_identity"`
 	SourceOccurrence    int64  `json:"source_occurrence"`
-	IdentityAmbiguous   bool   `json:"identity_ambiguous,omitempty"`
+	IdentityAmbiguous   bool   `json:"identity_ambiguous"`
 	// ProducerEpoch identifies one durable producer outbox; ProducerSeq is
 	// strictly increasing within it (advanced even when an event is refused
 	// for overflow), so a gap is evidence of loss and a new epoch for the
@@ -122,6 +122,7 @@ type UsageEvent struct {
 	TokenStatus             string   `json:"token_status"`
 	MalformedFields         []string `json:"malformed_fields,omitempty"`
 
+	// IntervalStart is omitted when the source does not report it.
 	IntervalStart string `json:"interval_start,omitempty"`
 	IntervalEnd   string `json:"interval_end,omitempty"`
 	Temporality   string `json:"temporality,omitempty"`
@@ -218,8 +219,12 @@ func (e *UsageEvent) Validate() error {
 	}
 	interval := e.IntervalStart != "" || e.IntervalEnd != "" || e.Temporality != ""
 	if interval {
-		if err := ValidateTS(e.IntervalStart); err != nil {
-			errs = append(errs, fmt.Errorf("interval_start: %w", err))
+		// interval_start may be unknown (omitted); interval_end and
+		// temporality are what mark a metric-derived event.
+		if e.IntervalStart != "" {
+			if err := ValidateTS(e.IntervalStart); err != nil {
+				errs = append(errs, fmt.Errorf("interval_start: %w", err))
+			}
 		}
 		if err := ValidateTS(e.IntervalEnd); err != nil {
 			errs = append(errs, fmt.Errorf("interval_end: %w", err))

@@ -529,15 +529,16 @@ func hookHomeDir() string {
 
 // hookUsageAnalytics returns the hook-path agent.usage producer, or nil when
 // analytics is disabled: hook usage not selected (SCION_USAGE_SOURCE is not
-// "hooks"), no GCP exporter configured, or the outbox cannot be opened.
+// "hooks") or no GCP exporter configured. It does no I/O.
 func hookUsageAnalytics(cfg *telemetry.Config) *telemetry.UsageAnalytics {
 	if os.Getenv("SCION_USAGE_SOURCE") != telemetrycontract.UsageSourceHooks || !telemetry.AnalyticsEnabledForHooks(cfg) {
 		return nil
 	}
-	outbox, err := telemetry.OpenAnalyticsOutbox(telemetry.DefaultAnalyticsOutboxDir())
-	if err != nil {
-		log.Debug("Hook usage analytics disabled: %v", err)
-		return nil
-	}
-	return telemetry.NewUsageAnalytics(outbox, telemetrycontract.UsageSourceHooks)
+	// Opened lazily: only a model-end event pays for the open and flock.
+	// The directory is the agent home's (the hook runs as the agent user,
+	// HOME=<agent home>), the same one init resolves for the pipeline.
+	dir := telemetry.AnalyticsOutboxDirFor(hookHomeDir())
+	return telemetry.NewLazyUsageAnalytics(func() (*telemetry.AnalyticsOutbox, error) {
+		return telemetry.OpenAnalyticsOutbox(dir)
+	}, telemetrycontract.UsageSourceHooks)
 }

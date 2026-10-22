@@ -409,8 +409,8 @@ func TestOutboxCrashBetweenLedgerAndLineLeavesGap(t *testing.T) {
 	mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:a", 1), AppendWritten)
 	// Simulate the crashed append of a second observation of cmp1:a:
 	// seq and index updated, line never written.
-	_ = writeFileAtomic(o.Dir(), "seq", []byte("2"))
-	_ = o.writeIndex(analyticsIndexName("sciontool/project/p/agent/a", "claude.api_request", "cmp1:a"), 2)
+	_ = o.writeFileAtomic("seq", []byte("2"))
+	_ = o.writeIndex(analyticsIndexName("sciontool/project/p/agent/a", "claude.api_request", "cmp1:a"), indexEntry{count: 2})
 
 	next := mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:a", 1), AppendWritten)
 	if next.ProducerSeq != 3 || next.SourceOccurrence != 3 || !next.IdentityAmbiguous {
@@ -497,5 +497,207 @@ func TestOutboxStatsPending(t *testing.T) {
 	data, _ := os.ReadFile(filepath.Join(o.Dir(), "staging.jsonl"))
 	if int64(len(data)) != st.PendingBytes || !bytes.HasSuffix(data, []byte("\n")) {
 		t.Errorf("pending %d vs staging %d bytes", st.PendingBytes, len(data))
+	}
+}
+
+// --- token-analyst-2 r1 findings: crash recovery, conflicts, read faults --
+
+func requestIDDraft(input int64) *telemetrycontract.UsageEvent {
+	return draftUsage(telemetrycontract.SourceIdentityRequestID, "rid1:req-A", input)
+}
+
+// Finding 1: a crash after the line is durable but before seq/index are
+// committed is completed on recovery: the retry is a certain duplicate and
+// exactly one line exists, with no seq reuse.
+func TestOutboxCrashAfterLineBeforeIndexRecovers(t *testing.T) {
+	o := testOutbox(t)
+	o.crashAt = "line"
+	if _, err := o.AppendUsage(requestIDDraft(5)); !errors.Is(err, errSimulatedCrash) {
+		t.Fatalf("simulated crash = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(o.Dir(), "intent")); err != nil {
+		t.Fatal("intent must survive the crash")
+	}
+	restarted, err := OpenAnalyticsOutbox(o.Dir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustAppend(t, restarted, requestIDDraft(5), AppendCertainDuplicate)
+	next := mustAppend(t, restarted, draftUsage(telemetrycontract.SourceIdentityRequestID, "rid1:req-B", 1), AppendWritten)
+	if next.ProducerSeq != 2 {
+		t.Errorf("seq after recovered crash = %d, want 2 (no reuse)", next.ProducerSeq)
+	}
+	if got := len(stagingLines(t, restarted)); got != 2 {
+		t.Errorf("staging lines = %d, want 2", got)
+	}
+}
+
+// Finding 1: a crash after the intent but before the line is durable must
+// NOT suppress the source retry: the event is accepted as a first sighting.
+func TestOutboxCrashBeforeLineDoesNotSuppressRetry(t *testing.T) {
+	for _, torn := range []bool{false, true} {
+		o := testOutbox(t)
+		o.crashAt = "intent"
+		if _, err := o.AppendUsage(requestIDDraft(5)); !errors.Is(err, errSimulatedCrash) {
+			t.Fatalf("simulated crash = %v", err)
+		}
+		if torn { // the crash also left half a line behind
+			f, _ := os.OpenFile(filepath.Join(o.Dir(), "staging.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+			_, _ = f.WriteString(`{"schema_version":1,"event_id":"u1-`)
+			_ = f.Close()
+		}
+		restarted, _ := OpenAnalyticsOutbox(o.Dir())
+		ev := mustAppend(t, restarted, requestIDDraft(5), AppendWritten)
+		if ev.SourceOccurrence != 1 || ev.IdentityAmbiguous || ev.ProducerSeq != 1 {
+			t.Errorf("torn=%v: retry = occurrence %d ambiguous %v seq %d; want a clean first sighting", torn, ev.SourceOccurrence, ev.IdentityAmbiguous, ev.ProducerSeq)
+		}
+	}
+}
+
+// Recovery also runs before Finalize, so a crashed writer's durable line is
+// indexed before the drainer moves it out of staging.
+func TestOutboxFinalizeRecoversIntentFirst(t *testing.T) {
+	o := testOutbox(t)
+	_, _ = o.PinHubID("hub")
+	writer, _ := OpenAnalyticsOutbox(o.Dir())
+	writer.crashAt = "line"
+	_, _ = writer.AppendUsage(requestIDDraft(5))
+	if n, err := o.Finalize(); err != nil || n != 1 {
+		t.Fatalf("Finalize = %d, %v", n, err)
+	}
+	c := &capture{}
+	_, _ = o.Drain(context.Background(), c.send)
+	mustAppend(t, o, requestIDDraft(5), AppendCertainDuplicate)
+}
+
+// Finding 2: the same verified request ID with different content is a
+// conflict, written as a further (ambiguous) occurrence for WP4 to
+// quarantine -- never silently discarded. Identical content stays a
+// certain duplicate; observation-only fields do not matter.
+func TestOutboxRequestIDConflictIsSurfaced(t *testing.T) {
+	o := testOutbox(t)
+	mustAppend(t, o, requestIDDraft(5), AppendWritten)
+
+	retransmit := requestIDDraft(5)
+	retransmit.ObservedTS = telemetrycontract.FormatTS(outboxTestTS.Add(time.Hour))
+	retransmit.ProducerBuild, retransmit.HarnessVersion = "other-build", "9.9"
+	mustAppend(t, o, retransmit, AppendCertainDuplicate)
+
+	for name, mutate := range map[string]func(*telemetrycontract.UsageEvent){
+		"tokens": func(e *telemetrycontract.UsageEvent) { n := int64(6); e.Input = &n },
+		"model":  func(e *telemetrycontract.UsageEvent) { e.Model = "other" },
+		"status": func(e *telemetrycontract.UsageEvent) { e.Status = telemetrycontract.StatusError },
+	} {
+		ev := requestIDDraft(5)
+		mutate(ev)
+		mustAppend(t, o, ev, AppendWritten)
+		if !ev.IdentityAmbiguous || ev.SourceOccurrence < 2 {
+			t.Errorf("%s conflict = occurrence %d ambiguous %v", name, ev.SourceOccurrence, ev.IdentityAmbiguous)
+		}
+		// The same conflicting content again is now a recorded duplicate.
+		again := requestIDDraft(5)
+		mutate(again)
+		mustAppend(t, o, again, AppendCertainDuplicate)
+	}
+	if got := o.Stats().Conflicts; got != 3 {
+		t.Errorf("conflicts = %d, want 3", got)
+	}
+	if got := len(stagingLines(t, o)); got != 4 {
+		t.Errorf("staging lines = %d, want 4 (original + 3 conflicts)", got)
+	}
+}
+
+// failingReady fails reads after limit bytes.
+type failingReady struct {
+	*os.File
+	limit, read int64
+}
+
+func (f *failingReady) Read(p []byte) (int, error) {
+	if f.read >= f.limit {
+		return 0, errors.New("injected read failure")
+	}
+	if rem := f.limit - f.read; int64(len(p)) > rem {
+		p = p[:rem]
+	}
+	n, err := f.File.Read(p)
+	f.read += int64(n)
+	return n, err
+}
+
+func preparedReady(t *testing.T, n int) (*AnalyticsOutbox, []string) {
+	t.Helper()
+	o := testOutbox(t)
+	_, _ = o.PinHubID("hub")
+	for i := 0; i < n; i++ {
+		mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, fmt.Sprintf("cmp1:%d", i), int64(i)), AppendWritten)
+	}
+	if _, err := o.Finalize(); err != nil {
+		t.Fatal(err)
+	}
+	files, _ := o.readyFiles()
+	data, _ := os.ReadFile(filepath.Join(o.Dir(), readyName(files[0])))
+	return o, nonEmptyLines(data)
+}
+
+// Finding 3: a mid-file read failure is never completion: the cursor stays
+// at the last acknowledged line and the file is kept; the rest is sent
+// later.
+func TestOutboxDrainReadFailureKeepsUnsentBytes(t *testing.T) {
+	o, lines := preparedReady(t, 3)
+	firstLen := int64(len(lines[0]) + 1)
+	o.openFile = func(name string) (readyFile, error) {
+		f, err := os.Open(name)
+		if err != nil {
+			return nil, err
+		}
+		return &failingReady{File: f, limit: firstLen + 5}, nil
+	}
+	c := &capture{}
+	n, err := o.Drain(context.Background(), c.send)
+	if err == nil || n != 1 {
+		t.Fatalf("Drain with read failure = %d, %v; want 1 sent and an error", n, err)
+	}
+	if files, _ := o.readyFiles(); len(files) != 1 {
+		t.Fatal("ready file deleted after a read failure")
+	}
+	if file, off, _ := o.readCursor(); off != firstLen {
+		t.Errorf("cursor = %d/%d, want offset %d (only the acknowledged line)", file, off, firstLen)
+	}
+	o.openFile = func(name string) (readyFile, error) { return os.Open(name) }
+	if _, err := o.Drain(context.Background(), c.send); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.lines) != 3 || c.lines[1] != lines[1] || c.lines[2] != lines[2] {
+		t.Errorf("after recovery sent %d lines", len(c.lines))
+	}
+}
+
+// Finding 3: a truncated ready file (partial final line) is quarantined
+// byte-for-byte, never counted as delivered; complete lines before it are
+// sent, and later files are not blocked.
+func TestOutboxDrainTruncatedReadyIsQuarantined(t *testing.T) {
+	o, lines := preparedReady(t, 2)
+	files, _ := o.readyFiles()
+	path := filepath.Join(o.Dir(), readyName(files[0]))
+	data, _ := os.ReadFile(path)
+	truncated := data[:len(data)-10]
+	_ = os.WriteFile(path, truncated, 0o600)
+	mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:later", 9), AppendWritten)
+	_, _ = o.Finalize()
+
+	c := &capture{}
+	if _, err := o.Drain(context.Background(), c.send); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.lines) != 2 || c.lines[0] != lines[0] || decodeUsage(t, c.lines[1]).SourceEventID != "cmp1:later" {
+		t.Fatalf("sent = %q", c.lines)
+	}
+	q, err := os.ReadFile(filepath.Join(o.Dir(), fmt.Sprintf("quarantine-%d.jsonl", files[0])))
+	if err != nil || string(q) != string(truncated) {
+		t.Errorf("quarantine must keep the truncated file byte-for-byte: %v", err)
+	}
+	if st := o.Stats(); st.Quarantined != 1 || st.Delivered != 2 {
+		t.Errorf("stats = %+v", st)
 	}
 }

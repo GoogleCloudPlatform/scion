@@ -16,10 +16,12 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
@@ -63,6 +65,11 @@ type UsageAnalytics struct {
 	usageSource string
 	now         func() time.Time
 
+	// openOnce/open defer opening the outbox to the first Record (hook
+	// processes: only a model-end event pays for the open and flock).
+	openOnce sync.Once
+	open     func() (*AnalyticsOutbox, error)
+
 	droppedNoIdentity, invalid atomic.Int64
 }
 
@@ -74,6 +81,29 @@ func NewUsageAnalytics(outbox *AnalyticsOutbox, usageSource string) *UsageAnalyt
 		return nil
 	}
 	return &UsageAnalytics{outbox: outbox, usageSource: usageSource, now: time.Now}
+}
+
+// NewLazyUsageAnalytics returns a producer that opens its outbox (via open)
+// only on the first Record. If open fails, every Record returns the error.
+func NewLazyUsageAnalytics(open func() (*AnalyticsOutbox, error), usageSource string) *UsageAnalytics {
+	return &UsageAnalytics{open: open, usageSource: usageSource, now: time.Now}
+}
+
+func (a *UsageAnalytics) ensureOpen() error {
+	a.openOnce.Do(func() {
+		if a.outbox == nil && a.open != nil {
+			o, err := a.open()
+			if err != nil {
+				log.Debug("Usage analytics outbox unavailable: %v", err)
+				return
+			}
+			a.outbox = o
+		}
+	})
+	if a.outbox == nil {
+		return errors.New("analytics: outbox unavailable")
+	}
+	return nil
 }
 
 // AnalyticsEnabledForHooks reports whether a hook process should write
@@ -98,6 +128,10 @@ func (a *UsageAnalytics) Record(obs UsageObservation) (AppendOutcome, error) {
 		a.droppedNoIdentity.Add(1)
 		return 0, err
 	}
+	if err := a.ensureOpen(); err != nil {
+		a.invalid.Add(1)
+		return 0, err
+	}
 	outcome, err := a.outbox.AppendUsage(ev)
 	if err != nil {
 		a.invalid.Add(1)
@@ -113,8 +147,10 @@ func (a *UsageAnalytics) DroppedNoIdentity() int64 {
 	return a.droppedNoIdentity.Load()
 }
 
+// Outbox returns the producer's outbox, opening it if lazy; nil if it
+// cannot be opened.
 func (a *UsageAnalytics) Outbox() *AnalyticsOutbox {
-	if a == nil {
+	if a == nil || a.ensureOpen() != nil {
 		return nil
 	}
 	return a.outbox
@@ -178,7 +214,9 @@ func (a *UsageAnalytics) build(obs UsageObservation) (*telemetrycontract.UsageEv
 		ev.SourceTime = obs.SourceTime.UTC().Format(time.RFC3339Nano)
 	}
 	if obs.Temporality != "" {
-		ev.IntervalStart = telemetrycontract.FormatTS(obs.IntervalStart)
+		if !obs.IntervalStart.IsZero() {
+			ev.IntervalStart = telemetrycontract.FormatTS(obs.IntervalStart)
+		}
 		ev.IntervalEnd = telemetrycontract.FormatTS(obs.IntervalEnd)
 		ev.Temporality = obs.Temporality
 	}
@@ -515,9 +553,15 @@ func metricObservation(inc usageIncrement, fingerprint string) UsageObservation 
 		obs.SourceTime = obs.IntervalEnd
 		obs.EventTime = obs.IntervalEnd
 	}
-	obs.IntervalStart = time.Unix(0, int64(inc.intervalStartNanos)).UTC()
-	if inc.intervalStartNanos == 0 || obs.IntervalEnd.IsZero() || obs.Temporality == "" {
+	// An unknown interval start is omitted (interval_end and temporality
+	// still mark the event as metric-derived, never per-request).
+	if inc.intervalStartNanos != 0 {
+		obs.IntervalStart = time.Unix(0, int64(inc.intervalStartNanos)).UTC()
+	}
+	if obs.IntervalEnd.IsZero() {
 		obs.Temporality = ""
+	} else if obs.Temporality == "" {
+		obs.Temporality = telemetrycontract.TemporalityDelta
 	}
 	if inc.rawTokens == nil {
 		obs.SourceKind = "copilot.metrics.calls"

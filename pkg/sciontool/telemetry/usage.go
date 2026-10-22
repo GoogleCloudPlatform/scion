@@ -897,7 +897,10 @@ func (d *UsageDeriver) observeMetricBatch(ctx context.Context, rule metricBatchD
 			continue
 		}
 		fingerprint := d.metricFingerprint("", increment.dedupeKey)
-		obs := metricObservation(increment, fingerprint)
+		var obs UsageObservation
+		if d.analytics != nil {
+			obs = metricObservation(increment, fingerprint)
+		}
 		if d.seen.SeenBefore(fingerprint) {
 			d.duplicate.Add(1)
 			// The event path still sees the repeat; the outbox's persisted

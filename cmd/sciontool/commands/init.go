@@ -619,6 +619,9 @@ func RunInit(args []string, opts InitRunOptions) int {
 	var telemetryPipeline *telemetry.Pipeline
 	telemetryCtx := context.Background()
 	if pipeline := telemetry.New(); pipeline != nil {
+		// Usage analytics outbox: the agent home, owned by the agent user
+		// (init runs as root; hooks write the same outbox as that user).
+		pipeline.SetAnalyticsOutbox(agentHome, targetUID, targetGID)
 		var telemetryCancel context.CancelFunc
 		telemetryCtx, telemetryCancel = context.WithCancel(context.Background())
 		if err := pipeline.Start(telemetryCtx); err != nil {
