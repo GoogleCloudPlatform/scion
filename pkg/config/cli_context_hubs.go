@@ -52,9 +52,14 @@ func ValidateHubName(name string) error {
 }
 
 // ValidateHubURL returns an error when endpoint is not an http or https URL
-// with a host. User info, a query and a fragment are refused too: the hub
-// list holds no credentials, and a hub URL needs neither.
+// with a host. User info, any '@', a query and a fragment are refused too:
+// the hub list holds no credentials, and a hub URL needs none of them.
 func ValidateHubURL(endpoint string) error {
+	// A hub URL never needs an '@'; with one, a password containing '/'
+	// can parse as a port and path, so the URL is not repeated.
+	if strings.Contains(endpoint, "@") {
+		return fmt.Errorf("invalid hub URL %q: a hub URL must not contain '@'", maskWholeURL(strings.TrimSpace(endpoint)))
+	}
 	u, err := url.Parse(strings.TrimSpace(endpoint))
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" ||
 		u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.Contains(endpoint, "#") {

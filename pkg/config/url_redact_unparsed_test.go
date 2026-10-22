@@ -15,6 +15,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -100,5 +101,88 @@ func TestRedactURLsIn_UndelimitedUserInfo(t *testing.T) {
 				t.Errorf("%s: RedactURLsIn(%q) = %q, shows %q", tc.name, tc.in, got, tc.secret[i:i+4])
 			}
 		}
+	}
+}
+
+// ValidateHubURL refuses a hub URL with an '@' anywhere, and its error,
+// and the same URL quoted in a text and passed through RedactURLsIn, show
+// no part of the password, for passwords with '/', '?' or '#'. A password
+// that parses as a port and a path is refused at entry without being
+// shown; RedactURLsIn cannot tell it from a port and a path, so its text
+// form is not checked.
+func TestValidateHubURL_RefusalShowsNoPassword(t *testing.T) {
+	for _, tc := range []struct {
+		in, secret string
+		text       bool
+	}{
+		{"https://alice:fake/Pw9q@hub.example.com", "fake/Pw9q", true},
+		{"https://alice:fake?Pw9q@hub.example.com", "fake?Pw9q", true},
+		{"https://alice:fake#Pw9q@hub.example.com", "fake#Pw9q", true},
+		{"  https://tok_fake/Pw9q@hub.example.com  ", "tok_fake/Pw9q", true},
+		{"https://alice:1234/Pw9q@hub.example.com", "1234/Pw9q", false},
+	} {
+		err := ValidateHubURL(tc.in)
+		if err == nil {
+			t.Errorf("ValidateHubURL(%q) accepted the URL", tc.in)
+			continue
+		}
+		if want := `invalid hub URL "https://xxxxx": a hub URL must not contain '@'`; err.Error() != want {
+			t.Errorf("ValidateHubURL(%q) = %q, want %q", tc.in, err.Error(), want)
+		}
+		outs := []string{err.Error()}
+		if tc.text {
+			outs = append(outs, RedactURLsIn(fmt.Sprintf("invalid hub URL %q", strings.TrimSpace(tc.in))))
+		}
+		for _, out := range outs {
+			for i := 0; i+4 <= len(tc.secret); i++ {
+				if strings.Contains(out, tc.secret[i:i+4]) {
+					t.Errorf("%q: %q shows %q", tc.in, out, tc.secret[i:i+4])
+				}
+			}
+		}
+	}
+}
+
+// An '@' anywhere in a hub URL is refused, by hub add (AddHub) and by
+// ValidateHubURL, even outside the user info.
+func TestCLIContextAddHub_RefusesAt(t *testing.T) {
+	for _, u := range []string{
+		"https://hub.example.com/@x",
+		"https://hub.example.com/u/a@b.example.com",
+		"https://alice:1234/Pw9q@hub.example.com",
+		"https://tok@hub.example.com",
+	} {
+		err := newCLIContext().AddHub("prod", u)
+		if err == nil || !strings.Contains(err.Error(), "a hub URL must not contain '@'") {
+			t.Errorf("AddHub(prod, %q) = %v, want the '@' refusal", u, err)
+		}
+	}
+}
+
+// A global hub.endpoint with an '@' outside the user info is not imported.
+func TestLoadCLIContextImported_EndpointWithAtNotImported(t *testing.T) {
+	cliContextTestHome(t)
+	writeGlobalSettingsFile(t, "hub:\n  endpoint: https://hub.example.com/u/a@b.example.com\n")
+	c, err := LoadCLIContextImported(importNamer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Hubs) != 0 || c.GlobalImported() {
+		t.Errorf("context = %+v, want nothing imported", c)
+	}
+}
+
+// A linked project whose hub.endpoint has an '@' outside the user info
+// gets no link entry; the import is recorded.
+func TestLinkEntryForProject_EndpointWithAtNotLinked(t *testing.T) {
+	cliContextTestHome(t)
+	projectDir, _, linkPath := linkImportProject(t, "hub:\n  endpoint: https://alice:1234/Pw9q@proj.example.com\n  projectId: hub-1\n  linked: true\n")
+	c := newCLIContext()
+	p, h, err := LinkEntryForProject(c, projectDir, importNamer)
+	if err != nil || p != nil || h != nil {
+		t.Fatalf("= %+v, %+v, %v; want nothing", p, h, err)
+	}
+	if len(c.Hubs) != 0 || !c.ProjectImported(linkPath) {
+		t.Errorf("context = %+v, want no hub and the import recorded", c)
 	}
 }
