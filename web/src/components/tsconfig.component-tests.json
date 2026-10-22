@@ -40,7 +40,9 @@
     "shared/log-viewer-batching.test.ts",
     "shared/access-boundary-preview-expiry.test.ts",
     "shared/code-editor-language.test.ts",
-    "shared/code-editor-language-race.test.ts"
+    "shared/code-editor-language-race.test.ts",
+    "shared/resource-list-refresh.test.ts",
+    "pages/harness-config-detail-source.test.ts"
   ],
   "exclude": []
 }

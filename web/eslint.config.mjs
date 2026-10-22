@@ -81,6 +81,8 @@ const componentTests = [
   'src/components/pages/agent-placement.test.ts',
   'src/components/pages/agent-detail-placement.test.ts',
   'src/components/pages/admin-maintenance-reissue-scopes.test.ts',
+  'src/components/shared/resource-list-refresh.test.ts',
+  'src/components/pages/harness-config-detail-source.test.ts',
 ];
 
 /** Points the given files at their own TypeScript project. */
