@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
 
 // template_commit.go is the single commit path for a template's files
@@ -486,16 +487,20 @@ func upsertTemplateFile(files []store.TemplateFile, entry store.TemplateFile) []
 	return out
 }
 
-// newFileMode is the mode a file written through a file API is recorded
-// with: the mode files already records for p, so editing an executable
-// keeps its executable bit (ptone/scion#5652), else "0644".
+// newFileMode is the mode a harness-config file written through the file
+// API is recorded with: the normalised mode files already records for p, so
+// editing an executable keeps its executable bit (ptone/scion#5652), else
+// "0644" for a new file, which those handlers have always recorded.
+// Template file handlers record no mode for a new file and rely on
+// upsertTemplateFile to keep an existing one; both download as the same
+// normalised mode.
 func newFileMode(files []store.TemplateFile, p string) string {
 	for _, f := range files {
-		if f.Path == p && f.Mode != "" {
-			return f.Mode
+		if f.Path == p {
+			return transfer.NormalizedModeString(f.Mode)
 		}
 	}
-	return "0644"
+	return transfer.NormalizedModeString("")
 }
 
 // removeTemplateFile returns a copy of files without the entry for p.

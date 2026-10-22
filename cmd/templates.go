@@ -32,7 +32,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
-	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -1014,7 +1013,7 @@ func pullTemplateFromHubMatch(hubCtx *HubContext, match *TemplateMatch, toPath s
 
 		// Write file, creating parent directories as needed, with the
 		// executable bit the Hub recorded (ptone/scion#5652).
-		if err := transfer.WriteFileInRootMode(root, fileInfo.Path, content, transfer.NormalizeMode(fileInfo.Mode)); err != nil {
+		if err := writePulledFile(root, fileInfo.Path, content, fileInfo.Mode); err != nil {
 			return fmt.Errorf("failed to write %s: %w", fileInfo.Path, err)
 		}
 		fmt.Printf("  Downloaded: %s\n", fileInfo.Path)

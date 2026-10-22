@@ -420,3 +420,12 @@ func TestDownloadMode_RowStoredBeforeFixServesItsMode(t *testing.T) {
 		require.Equal(t, want, f.Mode, f.Path)
 	}
 }
+
+func TestNewFileMode(t *testing.T) {
+	files := []store.TemplateFile{{Path: "exec", Mode: "04755"}, {Path: "plain", Mode: "0600"}, {Path: "legacy"}}
+	for p, want := range map[string]string{"exec": "0755", "plain": "0644", "legacy": "0644", "new": "0644"} {
+		if got := newFileMode(files, p); got != want {
+			t.Errorf("newFileMode(%q) = %q, want %q", p, got, want)
+		}
+	}
+}

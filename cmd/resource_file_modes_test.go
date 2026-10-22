@@ -75,3 +75,44 @@ func TestWriteHarnessConfigFile_Mode(t *testing.T) {
 		}
 	}
 }
+
+func TestModeOnlyChanges_SkippedWithoutLocalExecBits(t *testing.T) {
+	orig := localModesCarryExecBit
+	localModesCarryExecBit = func() bool { return false }
+	t.Cleanup(func() { localModesCarryExecBit = orig })
+
+	// A Windows CLI collects 0666 for an executable the Hub records 0755.
+	got := modeOnlyChanges([]hubclient.FileInfo{{Path: "bin/x", Hash: "h", Mode: "0666"}},
+		[]hubclient.DownloadURLInfo{{Path: "bin/x", Hash: "h", Mode: "0755"}})
+	if len(got) != 0 {
+		t.Errorf("modeOnlyChanges = %v, want none on a platform without exec bits", got)
+	}
+}
+
+// TestWritePulledFile covers `templates pull` and `harness-config pull`:
+// the recorded mode is applied exactly, also over an existing file.
+func TestWritePulledFile(t *testing.T) {
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	if err := os.WriteFile(filepath.Join(dir, "was-exec"), []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for p, mode := range map[string]string{"plugins/p/bin/cmd": "0755", "setuid": "4755", "was-exec": "0644", "legacy": ""} {
+		if err := writePulledFile(root, p, []byte("x"), mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for p, want := range map[string]os.FileMode{"plugins/p/bin/cmd": 0o755, "setuid": 0o755, "was-exec": 0o644, "legacy": 0o644} {
+		info, err := os.Stat(filepath.Join(dir, filepath.FromSlash(p)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode() & (os.ModePerm | os.ModeSetuid); got != want {
+			t.Errorf("%s: mode = %v, want %v", p, got, want)
+		}
+	}
+}

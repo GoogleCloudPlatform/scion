@@ -25,8 +25,6 @@
 package templatecache
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -249,12 +247,19 @@ func (c *Cache) PutWithModes(contentHash string, files map[string][]byte, modes 
 
 // EntryKey returns the cache entry name for a resource with the given
 // content hash and file modes. The content hash does not cover file modes,
-// so a resource with an executable file is keyed by the content hash plus
-// a digest of its executable paths: entries cached before modes were
-// carried (every file 0644) and entries for the same content with other
+// so a resource with an executable file is keyed by a hash derived from the
+// content hash and its sorted executable paths: entries cached before modes
+// were carried (every file 0644) and entries for the same content with other
 // executable bits are then never reused for it. A resource with no
-// executable file keeps the bare content hash, so its existing entries
-// stay valid.
+// executable file keeps the bare content hash, so its existing entries stay
+// valid.
+//
+// The derived key has the same "sha256:<64 hex>" form as a content hash
+// (transfer.IsContentHash), because the broker treats a hydrated template
+// directory's name as the template hash it records for the agent
+// (agent-info TemplateHash) and later looks up in this cache. For a
+// resource with executables that recorded hash is therefore this key,
+// not the hub's ContentHash; it is only ever used as a cache key.
 func EntryKey(contentHash string, modes map[string]os.FileMode) string {
 	var exec []string
 	for p, m := range modes {
@@ -266,12 +271,14 @@ func EntryKey(contentHash string, modes map[string]os.FileMode) string {
 		return contentHash
 	}
 	sort.Strings(exec)
-	h := sha256.New()
+	var b strings.Builder
+	b.WriteString("scion-cache-entry-v1\x00")
+	b.WriteString(contentHash)
 	for _, p := range exec {
-		_, _ = h.Write([]byte(p))
-		_, _ = h.Write([]byte{0})
+		b.WriteString("\x00x:")
+		b.WriteString(p)
 	}
-	return contentHash + "-x" + hex.EncodeToString(h.Sum(nil))[:16]
+	return transfer.HashBytes([]byte(b.String()))
 }
 
 // writeFilesInDir writes files beneath the directory name inside parent,

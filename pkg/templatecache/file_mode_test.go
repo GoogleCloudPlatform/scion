@@ -56,6 +56,13 @@ func TestEntryKey(t *testing.T) {
 	if err := validateEntryName(x1); err != nil {
 		t.Errorf("executable key is not a valid entry name: %v", err)
 	}
+	// The broker records a hydrated template directory's name as the
+	// agent's template hash, so the key keeps the content-hash form.
+	for _, k := range []string{x1, x2} {
+		if !transfer.IsContentHash(k) {
+			t.Errorf("executable key %q is not in content-hash form", k)
+		}
+	}
 }
 
 // modeTemplateService returns a template service whose one template has
