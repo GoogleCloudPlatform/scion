@@ -157,9 +157,9 @@ func installHomeDir(srcDir, agentHome, dstRel string) error {
 	if err != nil {
 		return err
 	}
-	err = copyDirInto(srcDir, tfd, 0)
-	_ = syscall.Close(tfd)
-	if err != nil {
+	// Closed once, on every return; the rename below works with it open.
+	defer func() { _ = syscall.Close(tfd) }()
+	if err := copyDirInto(srcDir, tfd, 0); err != nil {
 		return err
 	}
 	if err := removeEntryAt(pfd, leaf); err != nil {
@@ -228,12 +228,13 @@ func copyFileInto(src string, dstFd int, name string, mode os.FileMode) error {
 	if err != nil {
 		return err
 	}
+	// The deferred Close covers the error returns; after the final Close
+	// below it is a no-op (an *os.File reports os.ErrClosed, ignored here).
+	defer func() { _ = out.Close() }()
 	if _, err := io.Copy(out, in); err != nil {
-		_ = out.Close()
 		return err
 	}
 	if err := out.Chmod(mode); err != nil {
-		_ = out.Close()
 		return err
 	}
 	return out.Close()

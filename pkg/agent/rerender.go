@@ -466,8 +466,8 @@ func rerenderSkills(ctx context.Context, in rerenderInputs) error {
 	if err != nil {
 		return err
 	}
+	defer func() { _ = home.Close() }()
 	local, err := rootLocalSkills(home, skillsDir, resolved)
-	_ = home.Close()
 	if err != nil {
 		return err
 	}
