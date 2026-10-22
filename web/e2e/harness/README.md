@@ -137,7 +137,7 @@ reference use.
 
 ### Hub settings and a co-located broker
 
-Two more `startHub()` options, both off by default:
+Three more `startHub()` options, all off by default:
 
 - `env`: extra environment of the hub process, for supported
   configuration such as `SCION_SERVER_HUB_ASYNCAGENTLAUNCH: 'true'` or
@@ -153,6 +153,12 @@ Two more `startHub()` options, both off by default:
   its provider. The broker registers whether or not a container runtime
   works on the host; agents only start where one does. The broker needs an
   image registry setting (`SCION_IMAGE_REGISTRY` in `env`).
+- `startupExperiments`: names of experiments the hub reads only at process
+  start (for example `hub.conduit`, whose relay starts only if it is on
+  then). `startHub()` turns each one on through the admin experiments API
+  and restarts the hub on the same database, port, HOME and hub id. If
+  anything fails before the restarted hub is healthy, the hub process is
+  killed and `startHub()` throws.
 
 `E2E_KEEP_HUB_STATE=1` makes `stopHub()` keep the hub's temp dir (the
 SQLite database, the private HOME and the hub's files) and print its

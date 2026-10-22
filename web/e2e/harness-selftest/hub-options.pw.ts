@@ -32,7 +32,8 @@
  * - runtimeBroker without testIdentities is refused;
  * - startupExperiments turns each experiment on through the admin
  *   experiments API and restarts the server on the same database, port,
- *   HOME and hub id; without it there is one start and no API call.
+ *   HOME and hub id; without it there is one start and no API call; a
+ *   failure before the restart completes leaves no hub running.
  */
 
 import * as fs from 'node:fs';
@@ -83,7 +84,8 @@ if (argv[0] === 'server' && argv[1] === 'start') {
         req.on('end', () => {
           const record = { method: req.method, auth: req.headers.authorization, body };
           fs.appendFileSync(process.env.HARNESS_SELFTEST_LOG + '.requests', JSON.stringify(record) + '\\n');
-          res.writeHead(200, { 'Content-Type': 'application/json' });
+          const fail = req.method === 'PUT' && process.env.HARNESS_SELFTEST_FAIL_PUT === '1';
+          res.writeHead(fail ? 500 : 200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ revision: 7, experiments: [] }));
         });
         return;
@@ -339,4 +341,26 @@ test('without startupExperiments the server starts once and no experiment is set
     'server start',
   ]);
   expect(experimentsRequests()).toEqual([]);
+});
+
+test('a failed startupExperiments restart leaves no hub running', async () => {
+  process.env.HARNESS_SELFTEST_FAIL_PUT = '1';
+  try {
+    await expect(
+      startHub({
+        testLogin: false,
+        testIdentities: true,
+        build: false,
+        binary,
+        stateFile,
+        startupExperiments: ['hub.conduit'],
+      })
+    ).rejects.toThrow('startHub: PUT /api/v1/admin/experiments answered 500');
+  } finally {
+    delete process.env.HARNESS_SELFTEST_FAIL_PUT;
+  }
+  const starts = invocations().filter((c) => c.argv[1] === 'start');
+  expect(starts).toHaveLength(1);
+  await expect.poll(() => alive(starts[0].pid), { message: 'the hub was stopped' }).toBe(false);
+  expect(fs.existsSync(stateFile), 'no state file').toBe(false);
 });

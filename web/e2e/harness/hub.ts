@@ -305,7 +305,8 @@ async function launchHub(
   args: string[],
   env: NodeJS.ProcessEnv,
   cwd: string,
-  baseURL: string
+  baseURL: string,
+  onSpawn?: (child: ChildProcess) => void
 ): Promise<LaunchedHub> {
   const hubProcess = spawn(binary, args, {
     cwd,
@@ -313,6 +314,7 @@ async function launchHub(
     detached: true,
     env,
   });
+  onSpawn?.(hubProcess);
 
   // Capture the dev token file path from hub startup logs; the token is
   // read from that file once the hub is healthy.
@@ -387,6 +389,18 @@ async function setExperimentOverrides(
   });
   if (put.status !== 200) {
     throw new Error(`startHub: PUT /api/v1/admin/experiments answered ${put.status}`);
+  }
+}
+
+/** SIGKILLs a hub started by launchHub (its process group); a gone process is fine. */
+function killProcessGroup(child: ChildProcess): void {
+  if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
+  try {
+    process.kill(-child.pid, 'SIGKILL');
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code !== 'ESRCH') {
+      console.warn(`[hub] Could not kill the hub (PID ${child.pid}): ${String(err)}`);
+    }
   }
 }
 
@@ -526,12 +540,22 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubState>
   // they apply from process start.
   const startupExperiments = options.startupExperiments ?? [];
   if (startupExperiments.length > 0) {
-    await setExperimentOverrides(baseURL, devToken, startupExperiments);
-    console.info(
-      `[hub] Restarting the hub for startup experiments: ${startupExperiments.join(', ')}`
-    );
-    await stopProcessGroup(hubProcess);
-    ({ hubProcess, devToken } = await launchHub(binary, args, env, cwd, baseURL));
+    // No state file exists yet, so stopHub could not find a hub left
+    // running by a failure here: kill whichever process is current.
+    let current: ChildProcess = hubProcess;
+    try {
+      await setExperimentOverrides(baseURL, devToken, startupExperiments);
+      console.info(
+        `[hub] Restarting the hub for startup experiments: ${startupExperiments.join(', ')}`
+      );
+      await stopProcessGroup(hubProcess);
+      ({ hubProcess, devToken } = await launchHub(binary, args, env, cwd, baseURL, (child) => {
+        current = child;
+      }));
+    } catch (err) {
+      killProcessGroup(current);
+      throw err;
+    }
   }
 
   const state: HubState = {
