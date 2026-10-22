@@ -22,10 +22,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
-	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -51,28 +48,6 @@ func OverrideIsGitRepo(fn func() bool) func() {
 
 //go:embed all:embeds/*
 var EmbedsFS embed.FS
-
-// defaultSettingsYAMLToJSON reads an embedded YAML settings template and
-// converts it to the legacy JSON format consumed by LoadSettingsKoanf.
-// Versioned (v1+) templates are round-tripped through convertVersionedToLegacy;
-// legacy templates are marshalled directly.
-func defaultSettingsYAMLToJSON(yamlData []byte) ([]byte, error) {
-	version, _ := DetectSettingsFormat(yamlData)
-	if version != "" {
-		var vs VersionedSettings
-		if err := yaml.Unmarshal(yamlData, &vs); err != nil {
-			return nil, err
-		}
-		legacy := convertVersionedToLegacy(&vs)
-		return json.MarshalIndent(legacy, "", "  ")
-	}
-
-	var settings Settings
-	if err := yaml.Unmarshal(yamlData, &settings); err != nil {
-		return nil, err
-	}
-	return json.MarshalIndent(settings, "", "  ")
-}
 
 // getDefaultSettingsDataForRuntime generates default settings JSON with the
 // specified runtime for the local profile. Handles both versioned and legacy formats.
@@ -105,29 +80,6 @@ func getDefaultSettingsDataForRuntime(targetRuntime string) ([]byte, error) {
 		settings.Profiles["local"] = local
 	}
 	return json.MarshalIndent(settings, "", "  ")
-}
-
-// GetDefaultSettingsData returns the embedded default settings in JSON format.
-// This function adjusts the local profile runtime based on the OS. It is used as
-// a fallback default for settings loaders; during init, DetectLocalRuntime is used
-// instead for actual runtime probing.
-func GetDefaultSettingsData() ([]byte, error) {
-	// Cloud Run Instance with sandbox launcher: use the tier-specific
-	// defaults so that LoadSettingsKoanf never starts from workstation
-	// profiles that cannot work on this tier.
-	if isCloudRunSandboxEnvironment() {
-		data, err := EmbedsFS.ReadFile("embeds/default_settings_cloudrun_sandbox.yaml")
-		if err != nil {
-			return nil, fmt.Errorf("failed to read Cloud Run sandbox settings template: %w", err)
-		}
-		return defaultSettingsYAMLToJSON(data)
-	}
-
-	targetRuntime := "docker"
-	if runtime.GOOS == "darwin" {
-		targetRuntime = "container"
-	}
-	return getDefaultSettingsDataForRuntime(targetRuntime)
 }
 
 // SeedFileFromFS writes a file from an embed.FS to a target path.
@@ -580,8 +532,7 @@ func ensureProjectSettingsFile(configDir string, opt InitProjectOpts) error {
 		if err != nil {
 			return fmt.Errorf("failed to read default project settings: %w", err)
 		}
-		newSettingsPath := filepath.Join(configDir, "settings.yaml")
-		if err := os.WriteFile(newSettingsPath, defaultSettings, 0644); err != nil {
+		if err := seedSettingsFile(configDir, defaultSettings); err != nil {
 			return fmt.Errorf("failed to seed settings.yaml: %w", err)
 		}
 	}
@@ -608,8 +559,7 @@ func ensureProjectConfigFiles(configDir string, opt InitProjectOpts) error {
 		if err != nil {
 			return fmt.Errorf("failed to read default project settings: %w", err)
 		}
-		newSettingsPath := filepath.Join(configDir, "settings.yaml")
-		if err := os.WriteFile(newSettingsPath, defaultSettings, 0644); err != nil {
+		if err := seedSettingsFile(configDir, defaultSettings); err != nil {
 			return fmt.Errorf("failed to seed settings.yaml: %w", err)
 		}
 	}
@@ -679,12 +629,37 @@ func writeProjectSettings(externalPath, workspacePath, projectID string, opt Ini
 		return fmt.Errorf("failed to marshal project settings: %w", err)
 	}
 
-	settingsFile := filepath.Join(externalPath, "settings.yaml")
-	if err := os.WriteFile(settingsFile, data, 0644); err != nil {
+	if err := replaceSettingsFile(externalPath, filepath.Join(externalPath, "settings.yaml"), data); err != nil {
 		return fmt.Errorf("failed to write project settings.yaml: %w", err)
 	}
 
 	return nil
+}
+
+// seedSettingsFile writes data as settings.yaml in dir unless dir already
+// has a settings file, checked again under the settings lock so that two
+// concurrent seeds cannot replace a file another writer has just created.
+func seedSettingsFile(dir string, data []byte) error {
+	lock, err := LockSettingsDir(dir)
+	if err != nil {
+		return err
+	}
+	defer lock.Unlock()
+	if GetSettingsPath(dir) != "" {
+		return nil
+	}
+	return writeSettingsFileAtomic(lock, filepath.Join(dir, "settings.yaml"), data)
+}
+
+// replaceSettingsFile replaces the settings file at path in dir with data,
+// atomically and under the settings lock for dir.
+func replaceSettingsFile(dir, path string, data []byte) error {
+	lock, err := LockSettingsDir(dir)
+	if err != nil {
+		return err
+	}
+	defer lock.Unlock()
+	return writeSettingsFileAtomic(lock, path, data)
 }
 
 // InitMachineOpts controls optional behavior for InitMachine.
@@ -776,8 +751,7 @@ func InitMachine(harnesses []api.Harness, opts ...InitMachineOpts) error {
 			}
 		}
 
-		newSettingsPath := filepath.Join(globalDir, "settings.yaml")
-		if err := os.WriteFile(newSettingsPath, defaultSettings, 0644); err != nil {
+		if err := seedSettingsFile(globalDir, defaultSettings); err != nil {
 			return fmt.Errorf("failed to seed global settings.yaml: %w", err)
 		}
 	}
@@ -920,72 +894,9 @@ func EnsureScionGitExclude(repoRoot string) error {
 		return nil
 	}
 
-	// Without --path-format=absolute, which would resolve symbolic links,
-	// so that the checks below see a link at info or info/exclude. The
-	// result is relative to repoRoot unless the git directory is elsewhere.
-	cmd := exec.Command("git", "rev-parse", "--git-path", "info/exclude")
-	cmd.Dir = repoRoot
-	out, err := cmd.Output()
+	excludePath, err := util.AppendGitExcludeLine(repoRoot, ".scion/agents/")
 	if err != nil {
-		return fmt.Errorf("resolve git exclude file in %s: %w", repoRoot, err)
-	}
-	excludePath := strings.TrimSpace(string(out))
-	if excludePath == "" {
-		return fmt.Errorf("resolve git exclude file in %s: empty path", repoRoot)
-	}
-	if !filepath.IsAbs(excludePath) {
-		excludePath = filepath.Join(repoRoot, excludePath)
-	}
-
-	infoDir := filepath.Dir(excludePath)
-	if info, err := os.Lstat(infoDir); err == nil {
-		if !info.IsDir() {
-			return fmt.Errorf("%s is not a directory", infoDir)
-		}
-	} else if os.IsNotExist(err) {
-		if err := os.Mkdir(infoDir, 0755); err != nil {
-			return fmt.Errorf("create %s: %w", infoDir, err)
-		}
-	} else {
 		return err
-	}
-
-	var content []byte
-	if info, err := os.Lstat(excludePath); err == nil {
-		if !info.Mode().IsRegular() {
-			return fmt.Errorf("%s is not a regular file", excludePath)
-		}
-		if content, err = os.ReadFile(excludePath); err != nil {
-			return err
-		}
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-
-	present := false
-	for _, line := range strings.Split(string(content), "\n") {
-		if strings.TrimSpace(line) == ".scion/agents/" {
-			present = true
-			break
-		}
-	}
-
-	if !present {
-		entry := ".scion/agents/\n"
-		if len(content) > 0 && content[len(content)-1] != '\n' {
-			entry = "\n" + entry
-		}
-		f, err := os.OpenFile(excludePath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
-		if err != nil {
-			return err
-		}
-		if _, err := f.WriteString(entry); err != nil {
-			_ = f.Close()
-			return err
-		}
-		if err := f.Close(); err != nil {
-			return err
-		}
 	}
 
 	// info/exclude has the lowest precedence: a negation such as

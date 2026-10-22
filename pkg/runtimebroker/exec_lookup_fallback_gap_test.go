@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
@@ -150,7 +151,7 @@ func fallbackOnDefaultBroker(t *testing.T, defRec, auxRec *callRecorder) (*Serve
 	rt := recordingRuntime("docker", unlabelledDev(t, "c-legacy"), defRec)
 	mgr := agent.NewManager(rt)
 	t.Cleanup(mgr.Close)
-	srv := New(DefaultServerConfig(), mgr, rt)
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 	addAuxRuntime(t, srv, "aux-a", recordingRuntime("aux-a", nil, auxRec))
 	return srv, mgr, rt
 }
@@ -162,7 +163,7 @@ func fallbackOnLaterAuxBroker(t *testing.T, defRec, recA, recB *callRecorder) *S
 	rt := recordingRuntime("docker", nil, defRec)
 	mgr := agent.NewManager(rt)
 	t.Cleanup(mgr.Close)
-	srv := New(DefaultServerConfig(), mgr, rt)
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 	addAuxRuntime(t, srv, "aux-a", recordingRuntime("aux-a", nil, recA))
 	addAuxRuntime(t, srv, "aux-b", recordingRuntime("aux-b", unlabelledDev(t, "c-b"), recB))
 	return srv
@@ -283,7 +284,7 @@ func TestResetAuth_AuxMatch_TokenViaStdinThenSignalOnSameRuntime(t *testing.T) {
 	rt := recordingRuntime("docker", nil, defRec)
 	mgr := agent.NewManager(rt)
 	t.Cleanup(mgr.Close)
-	srv := New(DefaultServerConfig(), mgr, rt)
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 	addAuxRuntime(t, srv, "aux-a", recordingRuntime("aux-a", nil, recA))
 	addAuxRuntime(t, srv, "aux-b", recordingRuntime("aux-b", []api.AgentInfo{{
 		Name:        "dev",
@@ -301,5 +302,82 @@ func TestResetAuth_AuxMatch_TokenViaStdinThenSignalOnSameRuntime(t *testing.T) {
 	}
 	if d, a := defRec.got(), recA.got(); len(d) != 0 || len(a) != 0 {
 		t.Fatalf("calls default=%+v aux-a=%+v, want none", d, a)
+	}
+}
+
+// signalingRecordingRuntime is a recordingRuntime that also implements
+// runtime.InitSignaler, recording SignalInitReload calls in the same
+// recorder.
+type signalingRecordingRuntime struct {
+	*runtime.MockRuntime
+	rec *callRecorder
+}
+
+func (s *signalingRecordingRuntime) SignalInitReload(_ context.Context, id string) error {
+	s.rec.mu.Lock()
+	defer s.rec.mu.Unlock()
+	s.rec.calls = append(s.rec.calls, execCall{Method: "SignalInitReload", ID: id})
+	return nil
+}
+
+func labelledDev(containerID string) []api.AgentInfo {
+	return []api.AgentInfo{{
+		Name:        "dev",
+		ContainerID: containerID,
+		Labels:      map[string]string{"scion.name": "dev", projectkeys.LabelProjectID: stopLookupProjectID},
+	}}
+}
+
+// The InitSignaler check must be made on the runtime paired with the target
+// by lookupAgentTarget, not on the default runtime: a default runtime that
+// implements InitSignaler must not receive the signal for an agent held by a
+// plain aux runtime, which keeps the in-container kill.
+func TestResetAuth_SignalerOnDefaultOnly_AuxTargetUsesExecKill(t *testing.T) {
+	defRec, recB := &callRecorder{}, &callRecorder{}
+	rt := &signalingRecordingRuntime{MockRuntime: recordingRuntime("docker", nil, defRec), rec: defRec}
+	mgr := agent.NewManager(rt)
+	t.Cleanup(mgr.Close)
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	addAuxRuntime(t, srv, "aux-b", recordingRuntime("aux-b", labelledDev("c-b"), recB))
+
+	w := doResetAuthLookupTest(srv)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s, want 200", w.Code, w.Body.String())
+	}
+	if got, want := recB.got(), resetAuthCalls("c-b"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("aux-b calls = %+v, want %+v", got, want)
+	}
+	if got := defRec.got(); len(got) != 0 {
+		t.Fatalf("default runtime calls = %+v, want none", got)
+	}
+}
+
+// And the reverse: a paired aux runtime that implements InitSignaler gets
+// the signal through SignalInitReload, with no in-container kill, while the
+// plain default runtime sees nothing.
+func TestResetAuth_SignalerOnPairedAux_UsesSignalInitReload(t *testing.T) {
+	defRec, recB := &callRecorder{}, &callRecorder{}
+	rt := recordingRuntime("docker", nil, defRec)
+	mgr := agent.NewManager(rt)
+	t.Cleanup(mgr.Close)
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	addAuxRuntime(t, srv, "aux-b", &signalingRecordingRuntime{
+		MockRuntime: recordingRuntime("aux-b", labelledDev("c-b"), recB), rec: recB})
+
+	w := doResetAuthLookupTest(srv)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s, want 200", w.Code, w.Body.String())
+	}
+	want := []execCall{
+		{Method: "ExecWithStdin", ID: "c-b", Cmd0: "sh", Stdin: "t0k3n"},
+		{Method: "SignalInitReload", ID: "c-b"},
+	}
+	if got := recB.got(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("aux-b calls = %+v, want %+v", got, want)
+	}
+	if got := defRec.got(); len(got) != 0 {
+		t.Fatalf("default runtime calls = %+v, want none", got)
 	}
 }

@@ -136,6 +136,18 @@ describe('feature-flags: terminal workspace flag removed', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Removed project thread groups flag (graduated, ptone/scion#5546)
+// ---------------------------------------------------------------------------
+
+describe('feature-flags: project thread groups flag removed', () => {
+  // The one allowed reference to the retired name outside compiledRetired
+  // (see the experiment-removal checklist).
+  it('the retired name resolves OFF by default (not in DEFAULT_ON_FLAGS)', () => {
+    expect(isFeatureEnabled('hub.chat_thread_groups')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // isFeatureEnabled: resolution order
 // ---------------------------------------------------------------------------
 

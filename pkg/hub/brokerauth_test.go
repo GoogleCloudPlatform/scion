@@ -1169,7 +1169,7 @@ func TestBrokerRegistration_SetsLabels(t *testing.T) {
 	}
 }
 
-func TestBrokerReregistration_MergesLabels(t *testing.T) {
+func TestBrokerReregistration_AddsAbsentLabelsKeepsExisting(t *testing.T) {
 	svc, s := setupTestBrokerAuthService(t)
 	ctx := context.Background()
 
@@ -1233,8 +1233,13 @@ func TestBrokerReregistration_MergesLabels(t *testing.T) {
 	if broker.Labels["scion.io/broker-role"] != "remote" {
 		t.Errorf("Expected broker-role=remote, got %q", broker.Labels["scion.io/broker-role"])
 	}
-	if broker.Labels["custom"] != "value2" {
-		t.Errorf("Expected custom=value2, got %q", broker.Labels["custom"])
+	// An existing key keeps its stored value; the request's value is
+	// reported as kept.
+	if broker.Labels["custom"] != "value1" {
+		t.Errorf("Expected custom=value1 to be kept, got %q", broker.Labels["custom"])
+	}
+	if len(resp2.KeptSettings) != 1 || resp2.KeptSettings[0].Field != "labels.custom" {
+		t.Errorf("Expected one kept setting for labels.custom, got %+v", resp2.KeptSettings)
 	}
 	if broker.Labels["user-label"] != "user-value" {
 		t.Errorf("Expected user-label=user-value to be preserved, got %q", broker.Labels["user-label"])
@@ -1493,7 +1498,7 @@ func TestBrokerRegistration_HostSAEmail_NormalizedToLowercase(t *testing.T) {
 		GCPHostServiceAccountEmail: "Broker-SA@My-Project.iam.gserviceaccount.com",
 	}
 
-	resp, err := svc.CreateBrokerRegistration(ctx, req, "admin")
+	resp, err := createBrokerRegistrationWithHostSA(ctx, svc, req, "admin")
 	if err != nil {
 		t.Fatalf("CreateBrokerRegistration failed: %v", err)
 	}
@@ -1510,24 +1515,16 @@ func TestBrokerRegistration_HostSAEmail_NormalizedToLowercase(t *testing.T) {
 	}
 }
 
-// MEDIUM-3 (re-registration path): When an existing broker is re-registered
-// with a mixed-case host SA email, the stored value must still be lowercase.
+// A re-registration that fills an unset GCP host service account stores it
+// lowercased; a later re-registration keeps the stored value.
 func TestBrokerReregistration_HostSAEmail_NormalizedToLowercase(t *testing.T) {
 	svc, s := setupTestBrokerAuthService(t)
 	ctx := context.Background()
 
-	// First registration with lowercase email.
-	req := CreateBrokerRegistrationRequest{
-		Name:                       "rereg-host",
-		GCPHostServiceAccountEmail: "lowercase@proj.iam.gserviceaccount.com",
-	}
-	resp1, err := svc.CreateBrokerRegistration(ctx, req, "admin")
+	resp1, err := svc.CreateBrokerRegistration(ctx, CreateBrokerRegistrationRequest{Name: "rereg-host"}, "admin")
 	if err != nil {
 		t.Fatalf("First registration failed: %v", err)
 	}
-
-	// Complete the first join so the join token is consumed and
-	// re-registration can issue a new one.
 	_, err = svc.CompleteBrokerJoin(ctx, BrokerJoinRequest{
 		BrokerID:  resp1.BrokerID,
 		JoinToken: resp1.JoinToken,
@@ -1538,28 +1535,30 @@ func TestBrokerReregistration_HostSAEmail_NormalizedToLowercase(t *testing.T) {
 		t.Fatalf("CompleteBrokerJoin failed: %v", err)
 	}
 
-	// Re-register with mixed-case email.
-	req2 := CreateBrokerRegistrationRequest{
-		Name:                       "rereg-host",
-		GCPHostServiceAccountEmail: "MixedCase@Proj.iam.gserviceaccount.com",
-	}
-	resp2, err := svc.CreateBrokerRegistration(ctx, req2, "admin")
-	if err != nil {
-		t.Fatalf("Re-registration failed: %v", err)
-	}
-	if resp2.BrokerID != resp1.BrokerID {
-		t.Fatalf("re-registration should reuse broker ID")
+	for _, email := range []string{"MixedCase@Proj.iam.gserviceaccount.com", "Other@Proj.iam.gserviceaccount.com"} {
+		resp, err := createBrokerRegistrationWithHostSA(ctx, svc, CreateBrokerRegistrationRequest{
+			Name:                       "rereg-host",
+			GCPHostServiceAccountEmail: email,
+			GCPHostProjectID:           "proj",
+		}, "admin")
+		if err != nil {
+			t.Fatalf("Re-registration failed: %v", err)
+		}
+		if resp.BrokerID != resp1.BrokerID {
+			t.Fatalf("re-registration should reuse broker ID")
+		}
 	}
 
-	broker, err := s.GetRuntimeBroker(ctx, resp2.BrokerID)
+	broker, err := s.GetRuntimeBroker(ctx, resp1.BrokerID)
 	if err != nil {
 		t.Fatalf("GetRuntimeBroker failed: %v", err)
 	}
-
 	want := "mixedcase@proj.iam.gserviceaccount.com"
 	if broker.GCPHostServiceAccountEmail != want {
-		t.Errorf("host SA email should be lowercased on re-registration:\n  got:  %q\n  want: %q",
-			broker.GCPHostServiceAccountEmail, want)
+		t.Errorf("host SA email: got %q, want %q", broker.GCPHostServiceAccountEmail, want)
+	}
+	if broker.GCPHostSource != store.GCPHostSourceRegistration {
+		t.Errorf("host SA source: got %q, want %q", broker.GCPHostSource, store.GCPHostSourceRegistration)
 	}
 }
 
@@ -1592,7 +1591,7 @@ func TestCreateBrokerRegistrationForAuthorizedMatch_IDMismatchRefused(t *testing
 	_, err = svc.CreateBrokerRegistrationForAuthorizedMatch(ctx, CreateBrokerRegistrationRequest{
 		Name:        "pin-mismatch-host",
 		AutoProvide: !beforeAutoProvide,
-	}, "someone-else", "a-different-broker-id-than-was-matched", true)
+	}, "someone-else", "a-different-broker-id-than-was-matched", true, hostSAClaimVerdict{})
 	if !errors.Is(err, ErrBrokerRegistrationAuthorizationStale) {
 		t.Fatalf("expected ErrBrokerRegistrationAuthorizationStale, got: %v", err)
 	}
@@ -1643,7 +1642,7 @@ func TestCreateBrokerRegistrationForAuthorizedMatch_AutoProvidePin(t *testing.T)
 			_, err := svc.CreateBrokerRegistrationForAuthorizedMatch(ctx, CreateBrokerRegistrationRequest{
 				Name:        "pin-autoprovide-host",
 				AutoProvide: tc.requestedOn,
-			}, "owner", broker.ID, tc.authorized)
+			}, "owner", broker.ID, tc.authorized, hostSAClaimVerdict{})
 			if tc.wantStale {
 				if !errors.Is(err, ErrBrokerRegistrationAuthorizationStale) {
 					t.Fatalf("expected ErrBrokerRegistrationAuthorizationStale, got: %v", err)
@@ -1683,7 +1682,7 @@ func TestCreateBrokerRegistrationForAuthorizedMatch_EmptyIDRefused(t *testing.T)
 	_, err = svc.CreateBrokerRegistrationForAuthorizedMatch(ctx, CreateBrokerRegistrationRequest{
 		Name:        "pin-empty-host",
 		AutoProvide: !beforeAutoProvide,
-	}, "someone-else", "", true)
+	}, "someone-else", "", true, hostSAClaimVerdict{})
 	if err == nil {
 		t.Fatal("expected an error for an empty expectedExistingBrokerID, got nil")
 	}
@@ -1720,7 +1719,7 @@ func TestCreateBrokerRegistrationForAuthorizedNew_ExistingMatchRefused(t *testin
 	_, err = svc.CreateBrokerRegistrationForAuthorizedNew(ctx, CreateBrokerRegistrationRequest{
 		Name:        "pin-new-host",
 		AutoProvide: !beforeAutoProvide,
-	}, "late-arriving-caller")
+	}, "late-arriving-caller", hostSAClaimVerdict{})
 	if !errors.Is(err, ErrBrokerRegistrationAuthorizationStale) {
 		t.Fatalf("expected ErrBrokerRegistrationAuthorizationStale, got: %v", err)
 	}

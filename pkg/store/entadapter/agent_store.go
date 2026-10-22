@@ -328,8 +328,8 @@ func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) error {
 		// launch_* field CreateAgent sets — the rest start at their column
 		// defaults ("", false, 0) because a freshly created agent has no
 		// launch yet. Every other launch_* column is written only by
-		// BeginLaunch/MarkLaunchAccepted/EndLaunch/ApplyLaunchReport/
-		// RunLaunchReaperTick (§3.3).
+		// BeginLaunch/MarkLaunchAccepted/EndLaunch(WithCode)/
+		// ApplyLaunchReport/RunLaunchReaperTick (§3.3).
 		SetLaunchAsyncOptIn(a.LaunchAsyncOptIn)
 
 	if a.MessageMode != "" {
@@ -1525,6 +1525,11 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	if su.ReportSource != store.StatusReportSourceRuntime && store.IsHaltEvidence(su.ExitReason) {
 		su.ExitReason = ""
 	}
+	// The agent-reported signaled reason only fills an empty slot: a
+	// recorded reason is never replaced by it (ptone/scion#5278).
+	if su.ExitReason == string(state.ExitReasonSignaled) && current.ExitReason != "" {
+		su.ExitReason = ""
+	}
 
 	now := time.Now()
 
@@ -1670,7 +1675,9 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 			upd.SetMessage("")
 		}
 		upd.SetStalledFromActivity("")
-		upd.ClearExitCode()
+		if su.ExitCode == nil {
+			upd.ClearExitCode()
+		}
 		upd.SetExitReason("")
 	}
 
@@ -1681,8 +1688,35 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	// (state.ExitReasonPreempted/ExitReasonEvicted), and that reason
 	// describes the old pod, not the new generation a start/restart brings
 	// up, so it must be cleared regardless of the current phase.
-	if su.ClearExit {
+	// A provisional start or reincarnation can retain old exits until the
+	// first running report; clear only after the guards accept that transition.
+	if su.ClearExit || (current.Phase == string(state.PhaseStarting) && su.Phase == string(state.PhaseRunning)) {
+		if su.ExitCode == nil {
+			upd.ClearExitCode()
+		}
+		upd.SetExitReason("")
+	}
+
+	// A move from a pre-running phase to running is the new run's first
+	// running write: the exit code and reason describe the previous run, so
+	// they are cleared, whichever path brings running (ptone/scion#5384).
+	// The provisional starting write keeps them, since a rollback restores
+	// the prior stopped or error phase, which still needs them. A running to
+	// running write keeps them too: a disruption reason can be recorded on a
+	// live agent. This reads the final phase, after every guard above.
+	if su.Phase == string(state.PhaseRunning) && isPreRunningPhase(current.Phase) {
 		upd.ClearExitCode()
+		upd.SetExitReason("")
+	}
+
+	// A stored signaled reason describes the run that ended; it is cleared
+	// when the agent next moves to starting or running, by any path (a
+	// reincarnation, or a start whose started-status write failed). This
+	// reads the final phase, after every guard above, so a write those
+	// guards neutralised (a delete hold, a reincarnation in flight, another
+	// run's report) never clears it. Only the reason is cleared.
+	if current.ExitReason == string(state.ExitReasonSignaled) && su.ExitReason == "" &&
+		(su.Phase == string(state.PhaseStarting) || su.Phase == string(state.PhaseRunning)) {
 		upd.SetExitReason("")
 	}
 
@@ -1759,6 +1793,16 @@ func isAgentReport(su store.AgentStatusUpdate) bool {
 	return su.ReportSource != ""
 }
 
+// isPreRunningPhase reports whether phase is one a run passes through
+// before it first reaches running.
+func isPreRunningPhase(phase string) bool {
+	switch state.Phase(phase) {
+	case state.PhaseCreated, state.PhaseProvisioning, state.PhaseCloning, state.PhaseStarting:
+		return true
+	}
+	return false
+}
+
 // isBrokerHeartbeat reports whether su is a broker heartbeat: the agent
 // runtime's own view of the container. sciontool's heartbeat goes through
 // the agent's status endpoint (source agent), so it is not one. Only a
@@ -1810,8 +1854,11 @@ func haltedStickyDrop(current *ent.Agent, su store.AgentStatusUpdate) bool {
 //   - the row is already stopped or error with no halt-evidence reason
 //     recorded, and the report (with no phase, or a stopped/error phase)
 //     brings one: a later report of the same run saying why it ended. Such
-//     an upgrade is blocked only when the report itself carries exit code
-//     0: the runtime saw a clean exit.
+//     an upgrade is blocked when the report itself carries exit code 0 (the
+//     runtime saw a clean exit), unless the row's reason is the
+//     agent-reported signaled: the agent stopped after a termination
+//     signal, so the clean exit is the graceful end of a disruption. The
+//     signaled reason is never evidence by itself.
 func evaluateHalt(current *ent.Agent, su store.AgentStatusUpdate) (bool, string) {
 	if current.RunIntent == nil || store.RunIntent(*current.RunIntent) != store.RunIntentRunning {
 		return false, ""
@@ -1836,7 +1883,7 @@ func evaluateHalt(current *ent.Agent, su store.AgentStatusUpdate) (bool, string)
 		if store.IsHaltEvidence(current.ExitReason) {
 			return false, ""
 		}
-		if su.ExitCode != nil && *su.ExitCode == 0 {
+		if su.ExitCode != nil && *su.ExitCode == 0 && current.ExitReason != string(state.ExitReasonSignaled) {
 			return false, ""
 		}
 		if newPhase == "" {

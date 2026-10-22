@@ -230,7 +230,10 @@ func (m *bearerMatrixFixture) request(t *testing.T, e bearerMatrixEntry, key str
 	t.Helper()
 	ep := e.EntryPoint
 	id := string(e.Spec.ID)
-	params := opPatternOverrides(m.ids)[overrideKey{id, ep.Pattern}]
+	params := m.callerPatternOverrides()[overrideKey{id, ep.Pattern}]
+	if params == nil {
+		params = opPatternOverrides(m.ids)[overrideKey{id, ep.Pattern}]
+	}
 	if params == nil {
 		params = bearerMatrixPatternOverrides(m.ids)[ep.Pattern]
 	}
@@ -303,6 +306,18 @@ func bearerMatrixBodyOverrides(f idFixtures) map[overrideKey]map[string]interfac
 		{"inbox.notification.template.create", "/api/v1/notifications/templates"}: {
 			"name": f.inbox.createConversations + "-template", "triggerActivities": []string{"COMPLETED"}, "projectId": f.project,
 		},
+		// Explain names a fixture project target; the cross-principal
+		// variant explains for the fixture user.
+		{"user.self.explain", "/api/v1/authz/explain"}: {
+			"resource": map[string]interface{}{"type": "project", "id": f.project}, "action": "read",
+		},
+		{"hub.audit.explain", "/api/v1/authz/explain"}: {
+			"resource": map[string]interface{}{"type": "project", "id": f.project}, "action": "read", "principalId": f.user,
+		},
+		// The user PATCH variants change a display name: the fixture user's
+		// for the cross-user variant, the caller's own for the self variant.
+		{"user.update", "/api/v1/users/{id}"}:      {"displayName": "BDM User"},
+		{"user.self.update", "/api/v1/users/{id}"}: {"displayName": "BDM Self"},
 		// Chat writes with bodies the handlers accept.
 		{"chat.prefs.update", "/api/v1/chat/prefs"}:                                    {"visibility_mode": "conversation"},
 		{"chat.thread.create", "/api/v1/chat/spaces/{id}/threads"}:                     {"name": "bdm thread"},
@@ -319,6 +334,17 @@ func bearerMatrixBodyOverrides(f idFixtures) map[overrideKey]map[string]interfac
 		{"chat.conversation.pin.dm", "/api/v1/chat/conversations/{id}/pin"}:            {"pinned": true},
 		{"chat.presence.update", "/api/v1/chat/presence"}:                              {"projectIds": []string{f.project}},
 		{"chat.userprefs.update", "/api/v1/chat/user-prefs"}:                           {"spaceSortMode": "alpha"},
+		// Group create validates the name before the authorization check.
+		{"group.create", "/api/v1/groups"}: {"name": "bdm group create"},
+	}
+}
+
+// callerPatternOverrides holds per-operation path parameters that name the
+// matrix's own super-admin, for entry points told apart by whether the path
+// names the caller's own record.
+func (m *bearerMatrixFixture) callerPatternOverrides() map[overrideKey]map[string]string {
+	return map[overrideKey]map[string]string{
+		{"user.self.update", "/api/v1/users/{id}"}: {"id": m.adminID},
 	}
 }
 
@@ -339,6 +365,13 @@ func bearerMatrixQueryOverrides(f idFixtures) map[overrideKey]string {
 func bearerMatrixPatternOverrides(f idFixtures) map[string]map[string]string {
 	return map[string]map[string]string{
 		"/api/v1/agents/{id}/pty": {"id": f.agent},
+		// Streams of the fixture agent and project.
+		"/api/v1/agents/{id}/cloud-logs/stream":                        {"id": f.agent},
+		"/api/v1/projects/{projectId}/agents/{id}/cloud-logs/stream":   {"projectId": f.project, "id": f.agent},
+		"/api/v1/agents/{id}/messages/stream":                          {"id": f.agent},
+		"/api/v1/agents/{id}/message-logs/stream":                      {"id": f.agent},
+		"/api/v1/projects/{projectId}/agents/{id}/message-logs/stream": {"projectId": f.project, "id": f.agent},
+		"/api/v1/projects/{id}/message-logs/stream":                    {"id": f.project},
 	}
 }
 

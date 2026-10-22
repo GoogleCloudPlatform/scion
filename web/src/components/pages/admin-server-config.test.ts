@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { setPreferredTimeZone } from '../../utils/time.js';
+import { getPublicSettings, invalidatePublicSettings } from '../../client/server-feature-flags.js';
+import { requestUrl } from '../../client/__fixtures__/request-url.js';
 import type { ScionPageAdminServerConfig } from './admin-server-config.js';
 import {
   isLayer0Key,
@@ -486,6 +488,93 @@ describe('scion-page-admin-server-config', () => {
     });
   });
 
+  // ptone/scion#5311: the public settings are cached per page load; a save
+  // here can change them, so a successful save drops the cache and a failed
+  // one keeps it.
+  describe('public settings cache', () => {
+    async function saveWith(status: number): Promise<number> {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      const handler = createFetchHandler(config, {
+        putHandler: () =>
+          status < 400
+            ? { status, body: { reload: { applied: [] } } }
+            : { status, body: { error: { code: 'validation_error', message: 'bad' } } },
+      });
+      element = await createComponent((url, init) =>
+        requestUrl(url).includes('/api/v1/settings/public')
+          ? Promise.resolve(new Response('{}', { status: 200 }))
+          : handler(url, init)
+      );
+      const fetchMock = vi.mocked(fetch);
+      const settingsCalls = (): number =>
+        fetchMock.mock.calls.filter(([u]) => requestUrl(u).includes('/api/v1/settings/public'))
+          .length;
+      invalidatePublicSettings();
+      await getPublicSettings();
+      const before = settingsCalls();
+
+      const buttons = queryAll(element, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      await getPublicSettings();
+      return settingsCalls() - before;
+    }
+
+    it('a successful save makes the next public settings read fetch again', async () => {
+      expect(await saveWith(200)).toBe(1);
+    });
+
+    it('a failed save keeps the cached public settings', async () => {
+      expect(await saveWith(422)).toBe(0);
+    });
+
+    /** Like saveWith, for a section reset (DELETE /admin/server-config/sections/{name}). */
+    async function resetWith(status: number): Promise<number> {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      const handler = createFetchHandler(config);
+      element = await createComponent((url, init) => {
+        if (requestUrl(url).includes('/api/v1/settings/public')) {
+          return Promise.resolve(new Response('{}', { status: 200 }));
+        }
+        if (init?.method === 'DELETE') {
+          return Promise.resolve(new Response(status < 400 ? '{}' : 'bad', { status }));
+        }
+        return handler(url, init);
+      });
+      const fetchMock = vi.mocked(fetch);
+      const settingsCalls = (): number =>
+        fetchMock.mock.calls.filter(([u]) => requestUrl(u).includes('/api/v1/settings/public'))
+          .length;
+      invalidatePublicSettings();
+      await getPublicSettings();
+      const before = settingsCalls();
+
+      await (
+        element as unknown as { handleResetSection(name: string): Promise<void> }
+      ).handleResetSection('telemetry');
+      expect(
+        fetchMock.mock.calls.some(
+          ([u, init]) =>
+            init?.method === 'DELETE' &&
+            requestUrl(u).includes('/api/v1/admin/server-config/sections/telemetry')
+        )
+      ).toBe(true);
+
+      await getPublicSettings();
+      return settingsCalls() - before;
+    }
+
+    it('a successful section reset makes the next public settings read fetch again', async () => {
+      expect(await resetWith(200)).toBe(1);
+    });
+
+    it('a failed section reset keeps the cached public settings', async () => {
+      expect(await resetWith(500)).toBe(0);
+    });
+  });
+
   // ── Criterion 4: DB mode, Layer-0 read-only ──
 
   describe('Criterion 4 — DB mode, Layer-0 read-only', () => {
@@ -919,6 +1008,30 @@ describe('scion-page-admin-server-config', () => {
       expect(field.querySelector('.read-only-value')?.textContent?.trim()).toBe('10.0.0.5');
       expect(field.querySelector('.broker-host-effective')).toBeNull();
     });
+
+    // ptone/scion#4418: the env-pin keys are the koanf keys
+    // server.broker.broker_name and broker_nickname, so an environment
+    // override locks those fields.
+    for (const [key, label, value] of [
+      ['server.broker.broker_name', 'Broker Name', 'env-broker'],
+      ['server.broker.broker_nickname', 'Broker Nickname', 'env-nick'],
+    ] as const) {
+      it(`an env override of ${key} locks the ${label} field`, async () => {
+        const config = withBrokerHost(undefined, { ...workstation, env_overrides: [key] });
+        config.server.broker[key.split('.').pop()!] = value;
+        element = await createComponent(createFetchHandler(config));
+        const fieldLabel = queryAll(element, 'sl-tab-panel[name="broker"] label').find(
+          (l) => l.textContent?.trim() === label
+        );
+        expect(fieldLabel).toBeDefined();
+        const field = fieldLabel!.closest('.form-field')!;
+        expect(field.querySelector('sl-input')).toBeNull();
+        expect(field.querySelector('.read-only-badge')?.textContent).toContain(
+          'environment variable'
+        );
+        expect(field.querySelector('.read-only-value')?.textContent?.trim()).toBe(value);
+      });
+    }
 
     it('an empty runtime broker host shows 0.0.0.0 on a file-backed hub', async () => {
       element = await createComponent(createFetchHandler(withBrokerHost(undefined, {})));
@@ -1408,6 +1521,79 @@ describe('scion-page-admin-server-config', () => {
       const reloadBtn = bannerEl!.querySelector('sl-button');
       expect(reloadBtn).not.toBeNull();
       expect(reloadBtn!.textContent).toContain('Reload');
+    });
+
+    // ptone/scion#4467: the sections written before the conflict stay
+    // saved, so the banner lists their keys, a restart-required one included.
+    it('409 revision_conflict lists the keys saved before the conflict', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: () => ({
+            status: 409,
+            body: {
+              error: 'revision_conflict',
+              message: 'One or more sections have been modified since the expected revision.',
+              applied: { endpoints: 4 },
+              conflicted: [{ section: 'access', expected_revision: 3, current_revision: 5 }],
+              applied_keys: ['server.hub.hub_name'],
+              pending_restart: ['server.hub.public_url'],
+              skipped: [{ key: 'server.notifications.slack', reason: 'invalid webhook URL' }],
+            },
+          }),
+        })
+      );
+
+      const buttons = queryAll(element, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await (element as any).updateComplete;
+
+      const bannerEl = query(element, '.conflict-banner');
+      expect(bannerEl).not.toBeNull();
+      const saved = bannerEl!.querySelector('.conflict-saved');
+      expect(saved).not.toBeNull();
+      expect(saved!.querySelector('.pending-restart')?.textContent).toContain(
+        'applies after restart: server.hub.public_url'
+      );
+      expect(saved!.querySelector('.applied-keys')?.textContent).toContain(
+        'Applied now: server.hub.hub_name'
+      );
+      const skipped = saved!.querySelector('.skipped-keys')?.textContent ?? '';
+      expect(skipped).toContain('server.notifications.slack');
+      expect(skipped).toContain('invalid webhook URL');
+      // The changed sections and the Reload action are still there.
+      expect(bannerEl!.textContent).toContain('access');
+      expect(bannerEl!.querySelector('sl-button')?.textContent).toContain('Reload');
+    });
+
+    it('409 revision_conflict without saved keys shows no saved-keys block', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: () => ({
+            status: 409,
+            body: {
+              error: 'revision_conflict',
+              conflicted: [{ section: 'access', expected_revision: 3, current_revision: 5 }],
+              applied_keys: [],
+              pending_restart: [],
+            },
+          }),
+        })
+      );
+
+      const buttons = queryAll(element, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await (element as any).updateComplete;
+
+      expect(query(element, '.conflict-banner')).not.toBeNull();
+      expect(query(element, '.conflict-saved')).toBeNull();
     });
 
     it('422 layer0_rejected renders safety net notice and logs keys', async () => {
@@ -2367,6 +2553,82 @@ describe('scion-page-admin-server-config', () => {
         (b.textContent ?? '').includes('environment variable')
       );
       expect(pinned.length).toBe(2);
+    });
+  });
+
+  // ── image_registry: one badge from the server's provenance (ptone/scion#3916) ──
+
+  describe('image_registry provenance badge and inherited hint', () => {
+    const generic = 'Overridden by environment on this node';
+    function texts(el: HTMLElement, sel: string): string[] {
+      return queryAll(el, sel).map((b) => (b.textContent ?? '').replace(/\s+/g, ' ').trim());
+    }
+
+    it('names the startup env instead of the generic badge', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'db',
+            env_overrides: ['image_registry'],
+            image_registry_provenance: { source: 'file', value: 's.example' },
+          })
+        )
+      );
+      const badges = texts(element, '.image-registry-badge');
+      expect(badges).toHaveLength(1);
+      expect(badges[0]).toContain('SCION_SERVER_IMAGEREGISTRY at startup');
+      expect(texts(element, '.env-badge').some((t) => t.includes(generic))).toBe(false);
+    });
+
+    it('lists a broker that reports a node env', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'db',
+            image_registry_provenance: {
+              source: 'hub_db',
+              value: 'db.example',
+              node_env_overrides: [
+                { broker_id: 'b1', broker_name: 'gpu-pool', value: 'n.example', differs: true },
+              ],
+            },
+          })
+        )
+      );
+      const badges = texts(element, '.image-registry-badge');
+      expect(badges).toHaveLength(1);
+      expect(badges[0]).toContain('Runtime Broker gpu-pool sets SCION_IMAGE_REGISTRY=n.example');
+    });
+
+    it('describes a profile image_registry env value as a startup value', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({ settings_tier: 'db', env_overrides: ['profiles.k8s.image_registry'] })
+        )
+      );
+      const badges = texts(element, '.image-registry-badge');
+      expect(badges).toHaveLength(1);
+      expect(badges[0]).toContain('a saved profile value replaces it');
+      expect(texts(element, '.env-badge').some((t) => t.includes(generic))).toBe(false);
+    });
+
+    it('shows what a profile without a saved registry inherits', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'db',
+            profiles: { k8s: { runtime: 'docker' } },
+            image_registry_provenance: {
+              source: 'hub_db',
+              value: 'db.example',
+              profiles: { k8s: { source: 'hub_db', value: 'db.example' } },
+            },
+          })
+        )
+      );
+      expect(texts(element, '.image-registry-inherited')).toEqual([
+        'Inherited: db.example (saved hub value).',
+      ]);
     });
   });
 
@@ -4228,12 +4490,12 @@ describe('scion-page-admin-server-config', () => {
         clear: (el) => (el.brokerContainerHubEndpoint = ''),
         expected: '',
       },
-      'server.broker.name': {
+      'server.broker.broker_name': {
         clear: (el) => (el.brokerName = ''),
         expected: '',
         bodyPath: ['server', 'broker', 'broker_name'],
       },
-      'server.broker.nickname': {
+      'server.broker.broker_nickname': {
         clear: (el) => (el.brokerNickname = ''),
         expected: '',
         bodyPath: ['server', 'broker', 'broker_nickname'],

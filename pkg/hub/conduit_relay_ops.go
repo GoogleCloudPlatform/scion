@@ -45,10 +45,6 @@ func init() {
 	hubInternalOps[relay.HubSessionRecheckPath] = (*Server).hubRelaySessionRecheck
 }
 
-// conduitRelayTunnelsMessage refuses POST /v1/tunnels on a relay-held
-// session.
-const conduitRelayTunnelsMessage = "Tunnels are not available on sessions held by a separate relay"
-
 // newConduitRelayRPCHandler builds the RPC handler of a relay-held user
 // session: the unchanged in-process handler, for the identity the
 // admission token names (a test seam).
@@ -171,25 +167,30 @@ func (s *Server) recheckRelayAdmission(ctx context.Context, c conduitAdmissionCl
 }
 
 // relayUserIdentity rebuilds a relay-held user session's identity from
-// current state: the user row (gone or suspended: denied) and, for an
-// access token, the token row (revoked, expired or another owner's:
-// denied), as scheduled dispatch rebuilds one. The development user is
-// rebuilt as itself.
+// current state: the user row (the account-status rule, checkUserAccount:
+// gone or not active is denied) and, for an access token, the token row
+// (revoked, expired or another owner's: denied), as scheduled dispatch
+// rebuilds one. The development user is held to the same account-status
+// rule as any other user and, once its row passes, is rebuilt as itself.
 func (s *Server) relayUserIdentity(ctx context.Context, c conduitAdmissionClaims) (UserIdentity, conduitAuthzVerdict, string) {
-	if c.AuthType == AuthTypeDevToken {
-		if c.ID != DevUserID {
-			return nil, conduitAuthzDenied, "development credential for another user"
-		}
-		return NewDevUser(s.authConfig.DevUserCfg), conduitAuthzAllowed, ""
+	devToken := c.AuthType == AuthTypeDevToken
+	if devToken && c.ID != DevUserID {
+		return nil, conduitAuthzDenied, "development credential for another user"
 	}
-	u, err := s.store.GetUser(ctx, c.ID)
-	switch {
-	case errors.Is(err, store.ErrNotFound):
-		return nil, conduitAuthzDenied, "user not found"
-	case err != nil:
-		return nil, conduitAuthzUnavailable, "user lookup failed"
-	case u.Status == store.UserStatusSuspended:
-		return nil, conduitAuthzDenied, "user suspended"
+	principal := PrincipalContext{Kind: PrincipalKindUser, ID: c.ID}
+	if devToken {
+		principal = devUserPrincipal()
+	}
+	u, err := checkUserAccount(ctx, s.store, principal)
+	switch refusal := classifyUserAccount(u, err); refusal {
+	case accountAllowed:
+	case accountLookupFault:
+		return nil, conduitAuthzUnavailable, accountRefusalReason(refusal)
+	default:
+		return nil, conduitAuthzDenied, accountRefusalReason(refusal)
+	}
+	if devToken {
+		return NewDevUser(s.authConfig.DevUserCfg), conduitAuthzAllowed, ""
 	}
 	base := NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, string(ClientTypeAPI))
 	if c.AuthType != AuthTypeUAT {
@@ -256,14 +257,19 @@ func (s *Server) hubRelayRPC(w http.ResponseWriter, r *http.Request, peer, sessi
 		http.Error(w, "malformed rpc", http.StatusBadRequest)
 		return
 	}
-	var resp *conduitv1.RpcResponse
+	var credExpiry time.Time
+	if c.CredentialExpiry > 0 {
+		credExpiry = time.Unix(c.CredentialExpiry, 0)
+	}
+	var (
+		resp   *conduitv1.RpcResponse
+		tunnel *relay.HubTunnelOpen
+	)
 	if rpc.GetPath() == conduitTunnelsPath {
-		resp = tunnelRefusal(tunnelConduitNotServing, conduitRelayTunnelsMessage).response()
+		// The relay holding the session opens the tunnel the hub
+		// authorizes (conduit_tunnel_relay.go).
+		resp, tunnel = s.relayTunnelRPC(r.Context(), rt, v.identity, credExpiry, sessionID, rpc, req)
 	} else {
-		var credExpiry time.Time
-		if c.CredentialExpiry > 0 {
-			credExpiry = time.Unix(c.CredentialExpiry, 0)
-		}
 		resp = newConduitRelayRPCHandler(s, v.identity, credExpiry).HandleRPC(r.Context(), rpc)
 	}
 	resp.RequestId = rpc.GetRequestId()
@@ -273,7 +279,7 @@ func (s *Server) hubRelayRPC(w http.ResponseWriter, r *http.Request, peer, sessi
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(relay.HubRPCResponse{RPC: out})
+	_ = json.NewEncoder(w).Encode(relay.HubRPCResponse{RPC: out, Tunnel: tunnel})
 }
 
 // hubRelayRefresh serves POST sessions/{id}/refresh: an agent's in-band
@@ -381,6 +387,10 @@ func (s *Server) hubRelaySessionRecheck(w http.ResponseWriter, r *http.Request, 
 		v := s.recheckRelayAdmission(r.Context(), c)
 		switch v.verdict {
 		case conduitAuthzAllowed:
+			if c.Kind == registry.PrincipalBroker && s.relayBrokerSessionSuperseded(r.Context(), rt.registry, now, c) {
+				res.Close, res.CloseCode, res.Reason = true, relay.CloseSupersededIncarnation, relay.SupersededIncarnationReason()
+				break
+			}
 			res.OK = true
 			// Re-issued only while the credential itself is valid.
 			if admissionHalfLifeLeft(c, now) && (c.CredentialExpiry == 0 || now.Unix() < c.CredentialExpiry) {

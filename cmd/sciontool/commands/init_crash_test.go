@@ -32,6 +32,7 @@ func TestClassifyExit(t *testing.T) {
 		wantCrash         bool
 		wantLimits        bool
 		wantMsg           string
+		wantSignaled      bool
 	}{
 		{
 			name:           "clean exit code 0",
@@ -97,6 +98,24 @@ func TestClassifyExit(t *testing.T) {
 			requestedShutdown: true,
 			wantCode:          0,
 			wantCrash:         false,
+			wantSignaled:      true,
+		},
+		{
+			name:              "clean exit after requested shutdown is signaled stop",
+			supervisedCode:    0,
+			requestedShutdown: true,
+			wantCode:          0,
+			wantCrash:         false,
+			wantSignaled:      true,
+		},
+		{
+			name:              "limits exceeded after requested shutdown is not signaled",
+			supervisedCode:    0,
+			limitsExceeded:    true,
+			requestedShutdown: true,
+			wantCode:          handlers.ExitCodeLimitsExceeded,
+			wantLimits:        true,
+			wantCrash:         false,
 		},
 		{
 			name:              "requested shutdown with non-signal exit code is still crash",
@@ -113,6 +132,7 @@ func TestClassifyExit(t *testing.T) {
 			requestedShutdown: true,
 			wantCode:          0,
 			wantCrash:         false,
+			wantSignaled:      true,
 		},
 	}
 
@@ -125,6 +145,9 @@ func TestClassifyExit(t *testing.T) {
 			if got.isCrash != tc.wantCrash {
 				t.Errorf("isCrash = %v, want %v", got.isCrash, tc.wantCrash)
 			}
+			if got.signaled != tc.wantSignaled {
+				t.Errorf("signaled = %v, want %v", got.signaled, tc.wantSignaled)
+			}
 			if got.limitsExceeded != tc.wantLimits {
 				t.Errorf("limitsExceeded = %v, want %v", got.limitsExceeded, tc.wantLimits)
 			}
@@ -136,6 +159,63 @@ func TestClassifyExit(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestFinalStatusUpdate(t *testing.T) {
+	t.Run("signaled stop", func(t *testing.T) {
+		u := finalStatusUpdate(exitOutcome{exitCode: 0, signaled: true})
+		if u.Phase != state.PhaseStopped || u.Activity != "" {
+			t.Errorf("phase/activity = %q/%q, want stopped/empty", u.Phase, u.Activity)
+		}
+		if u.ExitReason != "signaled" {
+			t.Errorf("ExitReason = %q, want signaled", u.ExitReason)
+		}
+		if u.Message != "Agent stopped" {
+			t.Errorf("Message = %q, want %q", u.Message, "Agent stopped")
+		}
+		if want := (state.AgentState{Phase: state.PhaseStopped}).DisplayStatus(); u.Status != want || u.Status == "" {
+			t.Errorf("Status = %q, want %q", u.Status, want)
+		}
+		if u.ExitCode != nil {
+			t.Errorf("ExitCode = %d, want nil", *u.ExitCode)
+		}
+	})
+	t.Run("clean stop", func(t *testing.T) {
+		u := finalStatusUpdate(exitOutcome{exitCode: 0})
+		if u.Phase != state.PhaseStopped || u.Message != "Agent stopped" {
+			t.Errorf("phase/message = %q/%q, want stopped/%q", u.Phase, u.Message, "Agent stopped")
+		}
+		if u.ExitReason != "" {
+			t.Errorf("ExitReason = %q, want empty", u.ExitReason)
+		}
+		if u.ExitCode != nil {
+			t.Errorf("ExitCode = %d, want nil", *u.ExitCode)
+		}
+	})
+	t.Run("crash", func(t *testing.T) {
+		u := finalStatusUpdate(exitOutcome{exitCode: 42, isCrash: true, message: "Agent crashed with exit code 42"})
+		if u.Phase != state.PhaseError || u.Message != "Agent crashed with exit code 42" {
+			t.Errorf("phase/message = %q/%q", u.Phase, u.Message)
+		}
+		if u.ExitReason != "" {
+			t.Errorf("ExitReason = %q, want empty", u.ExitReason)
+		}
+		if u.ExitCode == nil || *u.ExitCode != 42 {
+			t.Errorf("ExitCode = %v, want 42", u.ExitCode)
+		}
+	})
+	t.Run("limits", func(t *testing.T) {
+		u := finalStatusUpdate(exitOutcome{exitCode: handlers.ExitCodeLimitsExceeded, limitsExceeded: true})
+		if u.Phase != state.PhaseStopped || u.Activity != state.ActivityLimitsExceeded {
+			t.Errorf("phase/activity = %q/%q, want stopped/limits_exceeded", u.Phase, u.Activity)
+		}
+		if u.ExitReason != "" {
+			t.Errorf("ExitReason = %q, want empty", u.ExitReason)
+		}
+		if u.ExitCode == nil || *u.ExitCode != handlers.ExitCodeLimitsExceeded {
+			t.Errorf("ExitCode = %v, want %d", u.ExitCode, handlers.ExitCodeLimitsExceeded)
+		}
+	})
 }
 
 func TestReadHarnessExitCode(t *testing.T) {

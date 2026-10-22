@@ -79,7 +79,7 @@ func TestCreateAgentViaHub_SendsInlineConfig(t *testing.T) {
 			}
 			agentImage = tc.image
 
-			inlineCfg, err := loadCreateInlineConfig()
+			inlineCfg, err := loadCreateInlineConfig(nil)
 			require.NoError(t, err)
 
 			stub := newHubStartStub(t, projectID, agentName, "")
@@ -128,4 +128,108 @@ func TestCreateAgentViaHub_SendsInlineConfig(t *testing.T) {
 			}, cfg["mcp_servers"])
 		})
 	}
+}
+
+// ptone/scion#378: scion create takes --model and --thinking-level, as
+// scion start does. They are sent as the request config's explicit model
+// and thinking level (the top tier of the hub's order), over a --config
+// file's values, and without either flag no config is sent.
+func TestCreateAgentViaHub_ModelFlags(t *testing.T) {
+	const projectID, agentName = "proj-create-model", "create-model-agent"
+
+	for _, flag := range []string{"model", "thinking-level"} {
+		f := createCmd.Flags().Lookup(flag)
+		require.NotNil(t, f, "create has no --%s flag", flag)
+		assert.Equal(t, "", f.DefValue, "--%s default", flag)
+	}
+	assert.Equal(t, thinkingLevelFlagUsage, createCmd.Flags().Lookup("thinking-level").Usage)
+
+	for _, tc := range []struct {
+		name          string
+		model         string
+		thinking      string
+		withConfig    bool
+		wantModel     any
+		wantThinking  any
+		wantNoConfig  bool
+		wantUsageErrs string
+	}{
+		{name: "no flags: no config", wantNoConfig: true},
+		{name: "--model explicit ID", model: "claude-opus-4", wantModel: "claude-opus-4"},
+		{name: "--model alias is normalized", model: "XL", wantModel: "extra-large"},
+		{name: "--thinking-level shorthand", thinking: "high", wantThinking: float64(75)},
+		{name: "--thinking-level integer", thinking: "0", wantThinking: float64(0)},
+		{name: "both flags over --config", model: "flag-model", thinking: "10", withConfig: true, wantModel: "flag-model", wantThinking: float64(10)},
+		{name: "--config alone keeps its values", withConfig: true, wantModel: "gemini-2.5-pro", wantThinking: float64(40)},
+		{name: "invalid --thinking-level", thinking: "lots", wantUsageErrs: "--thinking-level"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetHubStartGlobals(t)
+			origPath, origModel, origThinking := inlineConfigPath, modelFlag, thinkingLevelFlag
+			t.Cleanup(func() { inlineConfigPath, modelFlag, thinkingLevelFlag = origPath, origModel, origThinking })
+			inlineConfigPath, modelFlag, thinkingLevelFlag = "", tc.model, tc.thinking
+			if tc.withConfig {
+				dir := t.TempDir()
+				require.NoError(t, os.WriteFile(filepath.Join(dir, "prompt.md"), []byte("Be terse."), 0o644))
+				inlineConfigPath = filepath.Join(dir, "agent.yaml")
+				require.NoError(t, os.WriteFile(inlineConfigPath, []byte(createHubInlineConfigYAML), 0o644))
+			}
+
+			inlineCfg, err := loadCreateInlineConfig(nil)
+			if tc.wantUsageErrs != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantUsageErrs)
+				assert.True(t, isUsageError(err), "error %q is not a usage error", err)
+				return
+			}
+			require.NoError(t, err)
+
+			stub := newHubStartStub(t, projectID, agentName, "")
+			captureStdIO(t, func() {
+				err = createAgentViaHub(stub.hubCtx(t, projectID), agentName, "", inlineCfg)
+			})
+			require.NoError(t, err)
+			require.Equal(t, 1, stub.createCalls)
+
+			rawCfg, present := stub.createBody["config"]
+			if tc.wantNoConfig {
+				assert.False(t, present, "config must be omitted without --config, --model or --thinking-level")
+				return
+			}
+			require.True(t, present, "create request must carry a config")
+			cfg, ok := rawCfg.(map[string]interface{})
+			require.True(t, ok, "config must be an object, got %T", rawCfg)
+			if tc.wantModel == nil {
+				assert.NotContains(t, cfg, "model")
+			} else {
+				assert.Equal(t, tc.wantModel, cfg["model"])
+			}
+			if tc.wantThinking == nil {
+				assert.NotContains(t, cfg, "thinking_level")
+			} else {
+				assert.Equal(t, tc.wantThinking, cfg["thinking_level"])
+			}
+		})
+	}
+}
+
+// An explicit --thinking-level "" on scion create fails as a usage error
+// before any hub work, instead of being treated as unset.
+func TestCreateRejectsExplicitEmptyThinkingLevel(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	t.Chdir(tmp)
+
+	f := createCmd.Flags().Lookup("thinking-level")
+	saved := thinkingLevelFlag
+	t.Cleanup(func() {
+		thinkingLevelFlag = saved
+		f.Changed = false
+	})
+	require.NoError(t, createCmd.Flags().Set("thinking-level", ""))
+
+	err := createCmd.RunE(createCmd, []string{"agent-x"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--thinking-level")
+	assert.True(t, isUsageError(err), "error %q is not a usage error", err)
 }

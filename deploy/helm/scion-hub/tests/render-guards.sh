@@ -21,7 +21,7 @@
 # too.
 set -u
 
-EXPECTED_TOTAL=207   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 9 (agents.imageRegistry for the in-process broker: three refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: seven refusals, four acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check) + 14 (workspaceStorage.nfs: eleven refusals, one acceptance, two rendered-shape checks) + 6 (runtime.gke: five refusals, one rendered-shape check).
+EXPECTED_TOTAL=208   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 10 (agents.imageRegistry for the in-process broker: four refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: eight refusals, three acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check) + 14 (workspaceStorage.nfs: eleven refusals, one acceptance, two rendered-shape checks) + 6 (runtime.gke: five refusals, one rendered-shape check).
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 # auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
@@ -886,9 +886,11 @@ echo "== agents.imageRegistry is required for the in-process broker =="
 # The chart always renders --enable-runtime-broker, and the hub then refuses to
 # start without a registry (requireImageRegistryForBroker,
 # cmd/server_foreground.go). The hub's sources, each accepted here: the
-# SCION_IMAGE_REGISTRY and SCION_MAINTENANCE_IMAGE_REGISTRY environment
-# variables, and image_registry resolved for the active profile (profile level,
-# else top level). Not checked under config.existingSecret. BASE carries a
+# SCION_IMAGE_REGISTRY environment variable, and image_registry resolved for
+# the active profile (profile level, else top level).
+# SCION_MAINTENANCE_IMAGE_REGISTRY applies only to maintenance builds
+# (ptone/scion#3916) and is refused as the only source, naming the
+# replacement. Not checked under config.existingSecret. BASE carries a
 # registry, so each row clears it first.
 reject "no registry anywhere" "agents.imageRegistry is required" --set agents.imageRegistry=
 reject "registry only on a profile that is not active" "agents.imageRegistry is required" \
@@ -902,19 +904,22 @@ accept "active-profile image_registry through config.extra" \
   --set agents.imageRegistry= --set config.extra.profiles.default.image_registry=example.invalid/agents
 accept "SCION_IMAGE_REGISTRY through hub.extraEnv" \
   --set agents.imageRegistry= --set 'hub.extraEnv[0].name=SCION_IMAGE_REGISTRY' --set 'hub.extraEnv[0].value=example.invalid/agents'
-accept "SCION_MAINTENANCE_IMAGE_REGISTRY through hub.extraEnv valueFrom" \
+reject "SCION_MAINTENANCE_IMAGE_REGISTRY through hub.extraEnv valueFrom as the only source" "now applies only to maintenance image builds" \
   --set agents.imageRegistry= --set 'hub.extraEnv[0].name=SCION_MAINTENANCE_IMAGE_REGISTRY' \
   --set 'hub.extraEnv[0].valueFrom.configMapKeyRef.name=registry' --set 'hub.extraEnv[0].valueFrom.configMapKeyRef.key=prefix'
+accept "SCION_MAINTENANCE_IMAGE_REGISTRY alongside agents.imageRegistry" \
+  --set 'hub.extraEnv[0].name=SCION_MAINTENANCE_IMAGE_REGISTRY' --set 'hub.extraEnv[0].value=example.invalid/maintenance'
 accept "no registry under config.existingSecret" \
   --set agents.imageRegistry= --set auth.proxy.iap.audience= --set config.existingSecret=operator-owned
 
 echo "== hub.extraEnv entries the koanf env layer applies over settings.yaml =="
-# LoadVersionedSettings loads SCION_* variables over settings.yaml, so two
-# extraEnv shapes change what the registry check above read from the file. The
-# chart refuses them rather than modelling env precedence (assertExtraEnv).
+# LoadVersionedSettings loads SCION_* variables over settings.yaml, so
+# SCION_ACTIVE_PROFILE changes what the registry check above read from the
+# file. The chart refuses it rather than modelling env precedence
+# (assertExtraEnv).
 #
-# An empty SCION_IMAGE_REGISTRY erases the rendered image_registry: this first
-# row rendered before the refusal and the hub then refused to start.
+# An empty SCION_IMAGE_REGISTRY or SCION_MAINTENANCE_IMAGE_REGISTRY is not a
+# registry source and is refused as a likely mistake.
 reject "empty SCION_IMAGE_REGISTRY alongside agents.imageRegistry" "to an empty value" \
   --set 'hub.extraEnv[0].name=SCION_IMAGE_REGISTRY' --set-string 'hub.extraEnv[0].value='
 reject "empty SCION_MAINTENANCE_IMAGE_REGISTRY" "to an empty value" \
@@ -926,7 +931,7 @@ reject "empty SCION_IMAGE_REGISTRY under config.existingSecret" "to an empty val
   --set 'hub.extraEnv[0].name=SCION_IMAGE_REGISTRY' --set-string 'hub.extraEnv[0].value='
 accept "non-empty SCION_IMAGE_REGISTRY alongside agents.imageRegistry" \
   --set 'hub.extraEnv[0].name=SCION_IMAGE_REGISTRY' --set 'hub.extraEnv[0].value=example.invalid/other'
-accept "non-empty literal SCION_MAINTENANCE_IMAGE_REGISTRY as the only source" \
+reject "non-empty literal SCION_MAINTENANCE_IMAGE_REGISTRY as the only source" "Set agents.imageRegistry, image_registry through config.extra, or SCION_IMAGE_REGISTRY" \
   --set agents.imageRegistry= --set 'hub.extraEnv[0].name=SCION_MAINTENANCE_IMAGE_REGISTRY' \
   --set 'hub.extraEnv[0].value=example.invalid/agents'
 accept "SCION_IMAGE_REGISTRY valueFrom alongside agents.imageRegistry" \

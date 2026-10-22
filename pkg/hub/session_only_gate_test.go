@@ -47,7 +47,7 @@ func TestSessionOnlyGate_ReasonIsReported(t *testing.T) {
 		want   authzop.SessionOnlyReason
 	}{
 		{"own profile update", http.MethodPatch, "/api/v1/users/" + m.adminID, map[string]interface{}{"displayName": "x"}, authzop.ReasonInteractiveState},
-		{"other user update", http.MethodPatch, "/api/v1/users/" + f.user, map[string]interface{}{"displayName": "x"}, authzop.ReasonGovernancePending},
+		{"other user role change", http.MethodPatch, "/api/v1/users/" + f.user, map[string]interface{}{"role": "member"}, authzop.ReasonGovernancePending},
 		{"user delete", http.MethodDelete, "/api/v1/users/" + f.userDel, nil, authzop.ReasonGovernancePending},
 		{"revoke sessions", http.MethodPost, "/api/v1/users/" + f.user + "/revoke-sessions", map[string]interface{}{}, authzop.ReasonSessionRecovery},
 		{"terminal workspace read", http.MethodGet, "/api/v1/users/me/terminal-workspace", nil, authzop.ReasonInteractiveState},
@@ -57,20 +57,17 @@ func TestSessionOnlyGate_ReasonIsReported(t *testing.T) {
 		{"token create", http.MethodPost, "/api/v1/auth/tokens", map[string]interface{}{"name": "x", "boundary": map[string]string{"kind": "hub"}, "scopes": []string{"agent:read"}}, authzop.ReasonCredentialManagement},
 		{"token revoke", http.MethodPost, "/api/v1/auth/tokens/" + f.uatRevokePost + "/revoke", map[string]interface{}{}, authzop.ReasonCredentialManagement},
 		{"token delete", http.MethodDelete, "/api/v1/auth/tokens/" + f.uatRevokeDelete, nil, authzop.ReasonCredentialManagement},
-		{"project member add", http.MethodPost, "/api/v1/projects/" + f.project + "/members", map[string]interface{}{
-			"roleDefinitionId": f.projectMemberRoleID, "principalType": "user", "principalId": f.user,
-		}, authzop.ReasonGovernancePending},
-		{"project member remove", http.MethodDelete, "/api/v1/projects/" + f.project + "/members/" + f.projectMembership, nil, authzop.ReasonGovernancePending},
 	}
 	for _, tc := range httpCases {
 		rec := doRequestWithUAT(t, m.srv, key, tc.method, tc.path, tc.body)
 		requireSessionOnlyRefusal(t, rec, tc.want, tc.name)
 	}
 
-	// Sites a token cannot reach through the route layer, because the
-	// role_binding permissions carry no selector, are called directly with
-	// the same minted token, authenticated as the middleware does. Project
-	// delete is pinned at the service by TestRS3_ProjectDeleteScopedUATDenied.
+	// The super-admin binding delete site is called directly with the same
+	// minted token, authenticated as the middleware does;
+	// TestRoleBindingDeleteToken_SuperAdminBindingDenied drives it through
+	// the route with role_binding:delete. Project delete is pinned at the
+	// service by TestRS3_ProjectDeleteScopedUATDenied.
 	ctx := realTokenContext(t, m.srv, key)
 
 	bindings, err := m.store.ListRoleBindingsForPrincipal(context.Background(), store.RoleBindingPrincipalUser, m.adminID)

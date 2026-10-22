@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -143,7 +144,7 @@ func (s *Server) purgeTestAdminGrants(ctx context.Context, run fixturePurgeRun, 
 			if err := enqueueGrantPurgeLossTx(ctx, tx, g, actor); err != nil {
 				return err
 			}
-			return tx.CreateMutationAudit(ctx, record)
+			return writeFixturePurgeAuditTx(ctx, tx, record, basis)
 		})
 		switch {
 		case errors.Is(err, store.ErrStampedRoleInUse):
@@ -216,6 +217,7 @@ func (s *Server) detachTestAdminGroups(ctx context.Context, rootID string) (int,
 		return 0, fmt.Errorf("list stamped groups: %w", err)
 	}
 	actor := AuditActor{PrincipalKind: membershipLossSystemActorKind, PrincipalID: membershipLossSystemActorID}
+	runID := api.NewUUID()
 	removed := 0
 	for i := range set.Groups {
 		g := &set.Groups[i]
@@ -233,6 +235,15 @@ func (s *Server) detachTestAdminGroups(ctx context.Context, rootID string) (int,
 		if err != nil {
 			return removed, fmt.Errorf("members of group %s: %w", g.ID, err)
 		}
+		// The provenance this removal relied on: the group's own stamp
+		// (provenance_basis, Phase 3c). One run per expiry.
+		edgeBasis := fixturePurgeBasis{
+			RootID:   rootID,
+			IssuerID: g.Fixture.IssuerID,
+			Basis:    fixturePurgeBasisName,
+			RunID:    runID,
+			Trigger:  testIdentityExpireMutation,
+		}
 		for _, parentID := range parents {
 			record := &store.MutationAuditRecord{
 				MutationType:  testAdminGroupEdgeRemoveMutation,
@@ -240,6 +251,7 @@ func (s *Server) detachTestAdminGroups(ctx context.Context, rootID string) (int,
 				TargetID:      g.ID,
 				BeforeSummary: marshalDeletionAuditJSON(map[string]string{"parent_group_id": parentID, "child_group_id": g.ID, "fixture_root_id": rootID}),
 				Timestamp:     time.Now(),
+				CorrelationID: runID,
 			}
 			actor.ApplyActor(record)
 			applyHubActorFallback(record)
@@ -252,7 +264,7 @@ func (s *Server) detachTestAdminGroups(ctx context.Context, rootID string) (int,
 						return err
 					}
 				}
-				return tx.CreateMutationAudit(ctx, record)
+				return writeFixturePurgeAuditTx(ctx, tx, record, edgeBasis)
 			})
 			if errors.Is(err, store.ErrNotFound) {
 				continue

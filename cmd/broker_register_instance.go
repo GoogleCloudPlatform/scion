@@ -134,6 +134,7 @@ func runBrokerRegisterInstance(cmd *cobra.Command, key string) error {
 		TransportMode:     transportMode,
 		TransportAudience: transportAudience,
 		HubEndpoint:       endpoint,
+		Out:               os.Stdout,
 	})
 	if err != nil {
 		return err

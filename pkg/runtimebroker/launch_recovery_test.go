@@ -27,6 +27,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -179,7 +180,12 @@ func TestRecoverLaunches_LaunchingReportsBrokerRestarted(t *testing.T) {
 			} else if d := mgr.Deleted(); len(d) != 0 {
 				t.Fatalf("expected no delete, got %+v", d)
 			}
-			if _, err := os.Stat(path); !os.IsNotExist(err) {
+			if c.name == "no answer" {
+				// Kept for the next boot to resend (ptone/scion#5186).
+				if jr := readJournalFileT(t, path); jr.State != "terminal_pending" || jr.ReportAttempts != 1 {
+					t.Fatalf("an unanswered report did not keep the record for a retry: %+v", jr)
+				}
+			} else if _, err := os.Stat(path); !os.IsNotExist(err) {
 				t.Fatalf("recovered record not removed: %v", err)
 			}
 			if srv.launchRegistry.anyInFlight(launchKey{ProjectID: "proj", Slug: "agent-L2"}) {
@@ -462,7 +468,7 @@ func TestRecoverLaunches_DispatchAttemptReplay(t *testing.T) {
 	cfg := srv1.config
 	cfg.StateDir = srv1.stateDir
 	mgr2 := newAsyncManager()
-	srv2 := New(cfg, mgr2, &runtime.MockRuntime{NameFunc: func() string { return "mock" }})
+	srv2 := New(cfg, mgr2, &runtime.MockRuntime{NameFunc: func() string { return "mock" }}, config.RuntimeBuildRecord{})
 	rtb2 := &mockRuntimeBrokerService{launchReportFunc: appliedReports}
 	srv2.hubMu.Lock()
 	srv2.hubConnections["hub-a"] = &HubConnection{Name: "hub-a", BrokerID: "broker-on-a", HubClient: &stubBrokerHubClient{brokers: rtb2}}

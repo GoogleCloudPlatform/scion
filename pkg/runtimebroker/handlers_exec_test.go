@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -58,7 +59,7 @@ func TestExecCommand_ProjectScopedDisambiguation(t *testing.T) {
 			return "output-from-" + id, nil
 		},
 	}
-	srv := New(DefaultServerConfig(), mgr, rt)
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	doExec := func(projectID string) (string, int) {
 		execedID = ""
@@ -111,7 +112,7 @@ func TestStopAgent_ProjectScopedDisambiguation(t *testing.T) {
 		},
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(DefaultServerConfig(), mgr, rt)
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/stop?projectId=project-B", nil)
 	w := httptest.NewRecorder()
@@ -146,7 +147,7 @@ func TestExecCommand_NotFoundWhenOnlyInOtherProject(t *testing.T) {
 			return "", nil
 		},
 	}
-	srv := New(DefaultServerConfig(), mgr, rt)
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	body, _ := json.Marshal(map[string]any{"command": []string{"echo", "hi"}})
 	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/exec?projectId=project-B", bytes.NewReader(body))
@@ -174,7 +175,7 @@ func TestStopAgent_NotFoundInProjectIsNoOp(t *testing.T) {
 		},
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(DefaultServerConfig(), mgr, rt)
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/stop?projectId=project-B", nil)
 	w := httptest.NewRecorder()
@@ -211,7 +212,7 @@ func TestStopAgent_LookupErrorReturns5xx(t *testing.T) {
 	}
 	mgr.listErr = fmt.Errorf("docker ps failed against https://10.0.0.5:2376 (namespace scion-prod)")
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(DefaultServerConfig(), mgr, rt)
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/stop?projectId=project-A", nil)
 	w := httptest.NewRecorder()
@@ -259,7 +260,7 @@ func TestStopAgent_AmbiguousMatchAbortsWithoutStop(t *testing.T) {
 		},
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(DefaultServerConfig(), mgr, rt)
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/stop?projectId=project-A", nil)
 	w := httptest.NewRecorder()
@@ -331,7 +332,7 @@ func TestStopAgent_AuxiliaryListErrorAbortsWithout202(t *testing.T) {
 
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	auxRt := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
-	srv := New(DefaultServerConfig(), defaultMgr, rt)
+	srv := New(DefaultServerConfig(), defaultMgr, rt, config.RuntimeBuildRecord{})
 
 	srv.auxiliaryRuntimesMu.Lock()
 	srv.auxiliaryRuntimes["kubernetes"] = auxiliaryRuntime{Runtime: auxRt, Manager: auxMgr}
@@ -378,7 +379,7 @@ func TestExecCommand_ListUnavailableReturns503(t *testing.T) {
 			return "", nil
 		},
 	}
-	srv := New(DefaultServerConfig(), mgr, rt)
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	body, _ := json.Marshal(map[string]any{"command": []string{"echo", "hi"}})
 	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/exec?projectId=project-A", bytes.NewReader(body))
@@ -422,7 +423,7 @@ func TestExecCommand_NotFoundInProject(t *testing.T) {
 		NameFunc: func() string { return "docker" },
 		ExecFunc: func(_ context.Context, _ string, _ []string) (string, error) { return "", nil },
 	}
-	srv := New(DefaultServerConfig(), mgr, rt)
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	body, _ := json.Marshal(map[string]any{"command": []string{"echo", "hi"}})
 	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/ghost/exec?projectId=project-A", bytes.NewReader(body))
@@ -469,7 +470,7 @@ func TestExecCommand_AmbiguousMatchReturns500(t *testing.T) {
 			return "", nil
 		},
 	}
-	srv := New(DefaultServerConfig(), mgr, rt)
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	body, _ := json.Marshal(map[string]any{"command": []string{"echo", "hi"}})
 	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/exec?projectId=project-A", bytes.NewReader(body))
@@ -568,7 +569,7 @@ func TestRestartAgent_AuxiliaryListErrorAbortsWithoutStart(t *testing.T) {
 
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	auxRt := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
-	srv := New(DefaultServerConfig(), defaultMgr, rt)
+	srv := New(DefaultServerConfig(), defaultMgr, rt, config.RuntimeBuildRecord{})
 
 	srv.auxiliaryRuntimesMu.Lock()
 	srv.auxiliaryRuntimes["kubernetes"] = auxiliaryRuntime{Runtime: auxRt, Manager: auxMgr}

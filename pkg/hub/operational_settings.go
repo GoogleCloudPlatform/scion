@@ -1422,22 +1422,10 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		applied = append(applied, "monitoring_dashboard_url")
 	}
 
-	// Image registry (#985) — wire DB value to the consumption path.
-	// resolveImageRegistry() reads s.config.MaintenanceConfig.ImageRegistry.
-	// In a DB-backed snapshot an unset value returns to the startup
-	// registry (ptone/scion#3904); in a file snapshot it keeps the running
-	// value (for example one set through /system/registry).
-	imageRegistry := snap.ImageRegistry
-	if imageRegistry == "" {
-		imageRegistry = s.config.MaintenanceConfig.ImageRegistry
-		if snap.FromOperationalSettings {
-			imageRegistry = s.startupLayer1.ImageRegistry
-		}
-	}
-	if s.config.MaintenanceConfig.ImageRegistry != imageRegistry {
-		s.config.MaintenanceConfig.ImageRegistry = imageRegistry
-		applied = append(applied, "image_registry")
-	}
+	// image_registry is not applied here: every hub read resolves it from
+	// the operational settings when it needs it (hubScopeImageRegistry,
+	// dispatchImageRegistryFor; ptone/scion#3916), and the co-located
+	// broker's overlay is fed below.
 
 	// Soft-delete retention and retain-files. Consumers read them through
 	// softDeleteSettings, so a change applies to the next delete and the
@@ -1545,9 +1533,15 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	// The overlay is installed at hub startup in co-located mode (see
 	// cmd/server_foreground.go). For standalone brokers the overlay is nil
 	// and they continue reading from disk only.
+	// The image_registry layers are fed whether or not any catalog section
+	// is present, so a managed endpoints value reaches the co-located
+	// broker with no stored catalog (ptone/scion#3916, ptone/scion#5007).
+	if snap.FromOperationalSettings {
+		feedImageRegistryOverlay(s.GetOperationalSettings())
+	}
 	if snap.Runtimes != nil || snap.Profiles != nil || snap.HarnessConfigs != nil {
 		if overlay := config.GetGlobalSettingsOverlay(); overlay != nil {
-			overlay.Update(snap.Runtimes, snap.Profiles, snap.HarnessConfigs, snap.ImageRegistry)
+			overlay.Update(snap.Runtimes, snap.Profiles, snap.HarnessConfigs)
 			// Recount the built-in profile references the overlay retains
 			// (ptone/scion#5113); never blocks.
 			s.triggerProfileReferences()

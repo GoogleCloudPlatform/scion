@@ -59,6 +59,9 @@ var relaySettingCases = []relaySettingCase{
 	{"server.hub.conduit.relay_mode", ConduitRelayModeExternal,
 		func(gc *GlobalConfig) string { return gc.Hub.Conduit.RelayMode },
 		func(vs *VersionedSettings) string { return vsConduit(vs).RelayMode }},
+	{"server.hub.conduit.target_stream_deadlines", ConduitTargetStreamDeadlinesEnforce,
+		func(gc *GlobalConfig) string { return gc.Hub.Conduit.TargetStreamDeadlines },
+		func(vs *VersionedSettings) string { return vsConduit(vs).TargetStreamDeadlines }},
 	{"server.relay.hub_internal_url", "http://hub-internal.scion.svc:9811",
 		func(gc *GlobalConfig) string { return gc.Relay.HubInternalURL },
 		func(vs *VersionedSettings) string { return vsRelay(vs).HubInternalURL }},
@@ -373,4 +376,49 @@ func TestPeerSecretOnlyNewlineIsUnset(t *testing.T) {
 			assertUnset(t)
 		})
 	}
+}
+
+// TestHubConduitTargetStreamDeadlines: server.hub.conduit.target_stream_deadlines
+// is off by default, accepts off and enforce, refuses anything else at
+// validation (startup and the settings PUT both validate), and survives
+// both settings conversions.
+func TestHubConduitTargetStreamDeadlines(t *testing.T) {
+	assert.Equal(t, ConduitTargetStreamDeadlinesOff, HubConduitConfig{}.TargetStreamDeadlinesValue())
+	assert.True(t, HubConduitConfig{}.IsZero())
+	assert.False(t, HubConduitConfig{TargetStreamDeadlines: "off"}.IsZero())
+	for _, v := range []string{"", "off", "enforce"} {
+		assert.NoError(t, HubConduitConfig{TargetStreamDeadlines: v}.Validate(), v)
+	}
+	for _, v := range []string{"on", "Enforce", "observe"} {
+		err := HubConduitConfig{TargetStreamDeadlines: v}.Validate()
+		require.Error(t, err, v)
+		assert.Contains(t, err.Error(), "server.hub.conduit.target_stream_deadlines")
+	}
+
+	v1 := &V1ServerConfig{Hub: &V1ServerHubConfig{Conduit: &V1ServerHubConduitConfig{TargetStreamDeadlines: "enforce"}}}
+	gc := ConvertV1ServerToGlobalConfig(v1)
+	assert.Equal(t, ConduitTargetStreamDeadlinesEnforce, gc.Hub.Conduit.TargetStreamDeadlinesValue())
+	back := ConvertGlobalToV1ServerConfig(gc)
+	require.NotNil(t, back.Hub)
+	require.NotNil(t, back.Hub.Conduit)
+	assert.Equal(t, "enforce", back.Hub.Conduit.TargetStreamDeadlines)
+}
+
+// TestHubConduitIngress: the conduit ingress mode defaults to proxy, accepts
+// proxy and redirect, and refuses anything else, naming the setting.
+func TestHubConduitIngress(t *testing.T) {
+	assert.Equal(t, ConduitIngressProxy, HubConduitConfig{}.IngressValue())
+	assert.Equal(t, ConduitIngressRedirect, HubConduitConfig{Ingress: "redirect"}.IngressValue())
+	assert.NoError(t, HubConduitConfig{Ingress: "proxy"}.Validate())
+	assert.NoError(t, HubConduitConfig{Ingress: "redirect"}.Validate())
+	err := HubConduitConfig{Ingress: "tunnel"}.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "server.hub.conduit.ingress")
+	assert.False(t, HubConduitConfig{Ingress: "proxy"}.IsZero())
+
+	// One env name (the key is a single word), bound to the setting.
+	path, alias, ok := KeyForServerEnv("SCION_SERVER_HUB_CONDUIT_INGRESS")
+	assert.True(t, ok)
+	assert.False(t, alias)
+	assert.Equal(t, "server.hub.conduit.ingress", path)
 }

@@ -101,7 +101,7 @@ func TestConduitRenewStream_PlacementRefusal(t *testing.T) {
 		require.ErrorIs(t, err, errConduitRenewalUnavailable, tc.name)
 		requirePlacementRefusal(t, err, tc.code)
 		assert.NotErrorIs(t, err, errConduitAuthzUnavailable, tc.name)
-		assert.NotErrorIs(t, err, errConduitRenewalRefused, "%s: a placement refusal must not close the stream", tc.name)
+		assert.Equal(t, ConduitRenewalUnavailable, ClassifyConduitRenewal(err), "%s: a placement refusal must not close the stream", tc.name)
 	}
 
 	override.set(&consistent)
@@ -134,7 +134,7 @@ func TestConduitRenewStream_PlacementReadFailure(t *testing.T) {
 		require.ErrorIs(t, err, errConduitAuthzUnavailable)
 		require.ErrorIs(t, err, errConduitRenewalUnavailable)
 		require.ErrorIs(t, err, boom)
-		assert.NotErrorIs(t, err, errConduitRenewalRefused, "a placement read failure must not close the stream")
+		assert.Equal(t, ConduitRenewalUnavailable, ClassifyConduitRenewal(err), "a placement read failure must not close the stream")
 		_, refused := placementRefusalOf(err)
 		assert.False(t, refused)
 	})

@@ -114,20 +114,24 @@ func harnessConfigResource(hc *store.HarnessConfig) Resource {
 	return r
 }
 
-// groupResource constructs a Resource from a store.Group for capability computation.
+// groupResource constructs a Resource from a store.Group for capability
+// computation and authorization.
+//
+// Project-scoped groups (e.g. "project:<slug>:members") are children of the
+// project. Setting the parent lets the project owner and admin rules apply.
+// A group with no project is a hub-level resource: it carries the explicit
+// system parent of hubScopedResource, so its target resolves to the hub
+// scope. The kernel treats a system parent like no parent, so session
+// decisions are the same for either shape.
 func groupResource(g *store.Group) Resource {
-	r := Resource{
-		Type:    "group",
-		ID:      g.ID,
-		OwnerID: g.OwnerID,
-		Labels:  g.Labels,
-	}
-	// Project-scoped groups (e.g. "project:<slug>:members") are children of the
-	// project. Setting the parent lets project owner/admin bypass apply.
+	var r Resource
 	if g.ProjectID != "" {
-		r.ParentType = "project"
-		r.ParentID = g.ProjectID
+		r = Resource{Type: "group", ID: g.ID, ParentType: "project", ParentID: g.ProjectID}
+	} else {
+		r = hubScopedResource("group", g.ID)
 	}
+	r.OwnerID = g.OwnerID
+	r.Labels = g.Labels
 	return r
 }
 

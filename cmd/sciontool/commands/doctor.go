@@ -42,6 +42,10 @@ Checks performed:
   - Hub reachability (unauthenticated health check)
   - Token validity (authenticated status update and a read-only agent lookup),
     telling a platform-proxy rejection apart from a hub rejection
+  - The credential held by sciontool init itself: whether it matches the
+    token file (compared by credential ID and a short hash, never the
+    value), init's last heartbeat, refresh and start-up check results, and
+    whether its credential is expired or refused
   - GCP metadata server (if configured)
   - GitHub App token (if configured)
 
@@ -81,13 +85,27 @@ func runDoctor() int {
 	}
 
 	// --- Authentication ---
+	// The token file is read once here; the Authentication and Init
+	// Process Credential sections both use this read.
+	diag.file.token, diag.file.modTime, diag.file.ok = hub.ReadTokenFileWithModTime()
+	diag.file.read = true
 	tokenValid := false
 	if hubURL != "" && hubReachable {
 		tokenValid = checkAuthentication(hubURL, &failures, transportSrc, &diag)
 	}
 
+	// --- Init Process Credential ---
+	// Runs whenever the agent ID is set, even when the hub was not
+	// reachable: it reports what sciontool init itself recorded.
+	var initRes initAuthResult
+	if agentIDForInitCheck() != "" {
+		initRes = checkInitCredential(&diag)
+		failures += initRes.failures
+	}
+	diag.init = initRes
+
 	// --- GCP Metadata ---
-	checkGCPMetadata(&failures)
+	checkGCPMetadata(&failures, initRes)
 
 	// --- GitHub Token ---
 	checkGitHubToken(&failures)
@@ -369,9 +387,13 @@ func checkAuthentication(hubURL string, failures *int, transportSrc transportaut
 	fmt.Println("\n--- Authentication ---")
 
 	agentID := os.Getenv("SCION_AGENT_ID")
-	token := hub.ReadTokenFile()
+	token := diag.file.token
+	if !diag.file.read {
+		token = hub.ReadTokenFile()
+	}
 
 	if token == "" || agentID == "" {
+		diag.lookup = lookupNotRun
 		fmt.Println("[FAIL] Cannot test auth: missing token or agent ID")
 		*failures++
 		return false
@@ -392,6 +414,7 @@ func checkAuthentication(hubURL string, failures *int, transportSrc transportaut
 
 	resp, err := client.Do(req)
 	if err != nil {
+		diag.lookup = lookupUnchecked
 		fmt.Printf("[FAIL] Auth check failed: %s\n", describeRequestError(err))
 		*failures++
 		return false
@@ -433,15 +456,22 @@ func checkAuthentication(hubURL string, failures *int, transportSrc transportaut
 		return false
 	}
 	req.Header.Set("X-Scion-Agent-Token", token)
+	// Sent the same way as sciontool init sends it, since the hub may
+	// refuse a credential presented without it.
+	if runID := os.Getenv(hub.EnvLaunchID); runID != "" {
+		req.Header.Set(hub.RunIDHeader, runID)
+	}
 
 	resp, err = client.Do(req)
 	if err != nil {
+		diag.lookup = lookupUnchecked
 		fmt.Printf("[FAIL] Agent lookup check failed: %s\n", describeRequestError(err))
 		*failures++
 		return false
 	}
-	respBody, _ = io.ReadAll(resp.Body)
+	respBody, _ = io.ReadAll(io.LimitReader(resp.Body, lookupRecordMaxBytes+1))
 	_ = resp.Body.Close()
+	diag.lookup = classifyLookup(resp, respBody, agentID)
 
 	by := classifyRejection(resp, respBody)
 	target, redirected := redirectTarget(resp)
@@ -465,7 +495,7 @@ func checkAuthentication(hubURL string, failures *int, transportSrc transportaut
 	}
 }
 
-func checkGCPMetadata(failures *int) {
+func checkGCPMetadata(failures *int, initRes initAuthResult) {
 	// os.LookupEnv, not os.Getenv: "nobody configured a metadata mode" and "a
 	// mode is configured but unusable" are different conditions, and only the
 	// first is a reason to skip the check silently. This mirrors ConfigFromEnv,
@@ -518,11 +548,11 @@ func checkGCPMetadata(failures *int) {
 	// This is what gcloud auth print-access-token exercises end-to-end:
 	// metadata server → hub token broker → GCP token.
 	if mode == "assign" {
-		checkGCPTokenAcquisition(port, failures)
+		checkGCPTokenAcquisition(port, failures, initRes)
 	}
 }
 
-func checkGCPTokenAcquisition(port int, failures *int) {
+func checkGCPTokenAcquisition(port int, failures *int, initRes initAuthResult) {
 	tokenURL := fmt.Sprintf("http://127.0.0.1:%d/computeMetadata/v1/instance/service-accounts/default/token", port)
 
 	req, err := http.NewRequest("GET", tokenURL, nil)
@@ -548,8 +578,7 @@ func checkGCPTokenAcquisition(port int, failures *int) {
 	if resp.StatusCode != http.StatusOK {
 		fmt.Printf("[FAIL] GCP token check: metadata server returned %d: %s\n",
 			resp.StatusCode, doctorTruncate(string(body), 120))
-		fmt.Println("[!] gcloud auth print-access-token will fail in this state")
-		fmt.Println("[!] Run from the host:  scion agent reset-auth <agent-name>")
+		printGCPInitHint(initRes)
 		*failures++
 		return
 	}
@@ -724,11 +753,23 @@ func printRemediation(tokenExpiry time.Time, tokenSubject string, tokenValid boo
 	// Only print remediation if there's a problem
 	expired := !tokenExpiry.IsZero() && now.After(tokenExpiry)
 	transportProblem := diag.transportFailed() || diag.authRejectedBy == rejectedByProxy
-	if !expired && tokenValid && !transportProblem && diag.authRedirectedTo == "" {
+	if !expired && tokenValid && !transportProblem && diag.authRedirectedTo == "" && diag.init.outcome == initOutcomeNone {
 		return
 	}
 
 	fmt.Println("\n--- Remediation ---")
+
+	// The init process's own credential. While init is switching to a new
+	// credential file, or when a proxy refused init's requests, no
+	// reset-auth advice is given unless doctor's own check of the file
+	// was refused by the hub.
+	printInitRemediation(diag.init)
+	if !expired && tokenValid && !transportProblem && diag.authRedirectedTo == "" {
+		return
+	}
+	if diag.init.outcome == initOutcomeQuiet && diag.authRejectedBy != rejectedByHub && !expired && !transportProblem && diag.authRedirectedTo == "" {
+		return
+	}
 
 	// A redirect means the probes never reached an endpoint that answered
 	// them, so neither credential was checked.
@@ -738,7 +779,7 @@ func printRemediation(tokenExpiry time.Time, tokenSubject string, tokenValid boo
 		fmt.Println("[!] Check that SCION_HUB_ENDPOINT uses the hub's final URL (scheme and host), " +
 			"and that nothing between the agent and the hub redirects API requests.")
 		if expired {
-			fmt.Println("[!] The agent token has also expired. Run from the host:  scion agent reset-auth <agent-name>")
+			fmt.Println("[!] The agent token has also expired. Run from the host:  scion reset-auth <agent-name>")
 		}
 		return
 	}
@@ -751,12 +792,12 @@ func printRemediation(tokenExpiry time.Time, tokenSubject string, tokenValid boo
 
 	if expired && !tokenValid {
 		fmt.Println("[!] Token is expired and cannot be refreshed.")
-		fmt.Println("[!] Run from the host:  scion agent reset-auth <agent-name>")
-		fmt.Println("[!] Or restart agent:   scion agent restart <agent-name>")
+		fmt.Println("[!] Run from the host:  scion reset-auth <agent-name>")
+		fmt.Println("[!] Or restart the agent from the host:  scion stop <agent-name>  then  scion start <agent-name>")
 	} else if !tokenValid {
 		fmt.Println("[!] Token is rejected by the hub (signing key may have changed).")
-		fmt.Println("[!] Run from the host:  scion agent reset-auth <agent-name>")
-		fmt.Println("[!] Or restart agent:   scion agent restart <agent-name>")
+		fmt.Println("[!] Run from the host:  scion reset-auth <agent-name>")
+		fmt.Println("[!] Or restart the agent from the host:  scion stop <agent-name>  then  scion start <agent-name>")
 	}
 }
 

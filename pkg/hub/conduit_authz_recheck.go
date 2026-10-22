@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -74,6 +75,12 @@ func (s *Server) startConduitStreamAuthz(ctx context.Context, clk clock.Clock, i
 		UserStreamAuthzMax: s.config.ConduitUserStreamAuthzMax,
 		Metrics:            serverConduitAuthzMetrics{s},
 		Logger:             slog.Default().With("subsystem", "hub.conduit"),
+		Renew:              s.renewConduitUserStream,
+		Enforce: func() bool {
+			return s.conduitTargetStreamDeadlines() == config.ConduitTargetStreamDeadlinesEnforce
+		},
+		// A sweep shares broker reads among its checks (conduitBrokerMemo).
+		SweepContext: withConduitBrokerMemo,
 	})
 	if !s.conduitAuthz.CompareAndSwap(nil, a) {
 		return nil, nil, errors.New("conduit stream re-check already started")
@@ -119,7 +126,7 @@ func (s *Server) bindConduitAuthzEvents() {
 	var removeListen func()
 	if ln, ok := events.(conduitListenNotifier); ok {
 		removeListen = ln.AddOnListen(func() {
-			a.Recheck(ctx, conduitAuthzTriggerResync, conduitAuthzMatch{})
+			a.Recheck(withConduitBrokerMemo(ctx), conduitAuthzTriggerResync, conduitAuthzMatch{})
 		})
 	}
 	ch, unsubscribe := events.Subscribe(conduitAuthzEventPatterns...)
@@ -145,7 +152,8 @@ func (s *Server) bindConduitAuthzEvents() {
 		go q.receive(ctx, ch)
 		go q.work(ctx, a)
 	}
-	a.Recheck(ctx, conduitAuthzTriggerResync, conduitAuthzMatch{})
+	// A resync is a full pass: like a sweep, it shares broker reads.
+	a.Recheck(withConduitBrokerMemo(ctx), conduitAuthzTriggerResync, conduitAuthzMatch{})
 }
 
 // conduitNotifyMaxPending bounds the distinct pending notify matches; past
@@ -310,34 +318,19 @@ func (s *Server) trackConduitUserStream(st *conduitUserStream) (untrack func()) 
 	return a.Track(st)
 }
 
-// checkConduitUserStream evaluates whether st's principal still holds the
-// authorization its stream was opened with, against current state: the
-// agent row, then authorizeConduitUserStream (the decision the tunnel open
-// path makes, with the actions conduitStreamActions requires for st's kind
-// and origin). Every read goes to s.store, the primary store (the hub has
-// no read-replica routing).
+// checkConduitUserStream is the in-process entry point of the stream
+// evaluation (design v2.21.40 §3.9, One evaluation, three entry points):
+// it evaluates st's principal against current state with
+// evaluateConduitStream, from what this node recorded at open (the
+// principal, the agent and its project, the kind, origin and port), and
+// adds no decision of its own. Every read goes to s.store, the primary
+// store (the hub has no read-replica routing).
 //
 // A store or authorization lookup failure is unavailable, never denied: a
-// deny is acted on only while the store is reachable.
+// deny is acted on only while the store answers for the agent
+// (conduitConfirmAgentPresent).
 func (s *Server) checkConduitUserStream(ctx context.Context, st *conduitUserStream) (conduitAuthzVerdict, string) {
-	agent, err := s.store.GetAgent(ctx, st.AgentID)
-	switch {
-	case errors.Is(err, store.ErrNotFound):
-		return conduitAuthzTargetGone, "agent not found"
-	case err != nil:
-		return conduitAuthzUnavailable, "agent lookup failed"
-	case !agent.DeletedAt.IsZero():
-		return conduitAuthzTargetGone, "agent deleted"
-	}
-
-	verdict, reason, _ := s.authorizeConduitUserStream(ctx, conduitUserStreamAuthz{
-		Identity:    st.Identity,
-		Agent:       agent,
-		Kind:        st.Kind,
-		ViaTunnel:   st.ViaTunnel,
-		Port:        st.Port,
-		ConfirmDeny: func() bool { return s.conduitAuthzStoreReachable(ctx, st) },
-	})
+	verdict, reason, _ := s.evaluateConduitStream(ctx, s.recordedStreamEval(ctx, st))
 	return verdict, reason
 }
 
@@ -437,39 +430,33 @@ func (s *Server) authorizeConduitUserStream(ctx context.Context, req conduitUser
 	return conduitAuthzAllowed, "", nil
 }
 
-// conduitUserStatus is the user-status rule of a user principal: a local
-// user (conduitIdentityHasUserRow) whose row is gone or suspended is
-// denied, and a failed lookup is unavailable. Identities without a user row
-// are allowed. It reads no agent, so the tunnel path applies it before the
-// target is resolved.
+// conduitUserStatus is the user-status rule of a user principal: the
+// account-status rule (checkUserAccount) applied to a local user
+// (conduitIdentityHasUserRow), the development user included. A user whose
+// row is gone or not active is denied, and a failed lookup is unavailable.
+// Identities without a user row are allowed. It reads no agent, so the
+// tunnel path applies it before the target is resolved.
 func (s *Server) conduitUserStatus(ctx context.Context, identity Identity, userID string) (conduitAuthzVerdict, string) {
 	if !conduitIdentityHasUserRow(identity) {
 		return conduitAuthzAllowed, ""
 	}
-	u, err := s.store.GetUser(ctx, userID)
-	switch {
-	case errors.Is(err, store.ErrNotFound):
-		return conduitAuthzDenied, "user not found"
-	case err != nil:
-		return conduitAuthzUnavailable, "user lookup failed"
-	case u.Status == store.UserStatusSuspended:
-		return conduitAuthzDenied, "user suspended"
+	user, err := checkUserAccount(ctx, s.store, PrincipalContext{Kind: PrincipalKindUser, ID: userID})
+	switch refusal := classifyUserAccount(user, err); refusal {
+	case accountAllowed:
+		return conduitAuthzAllowed, ""
+	case accountLookupFault:
+		return conduitAuthzUnavailable, accountRefusalReason(refusal)
+	default:
+		return conduitAuthzDenied, accountRefusalReason(refusal)
 	}
-	return conduitAuthzAllowed, ""
-}
-
-// conduitAuthzStoreReachable confirms the store answers after a deny, so
-// that a deny observed during a store fault is not acted on.
-func (s *Server) conduitAuthzStoreReachable(ctx context.Context, st *conduitUserStream) bool {
-	_, err := s.store.GetAgent(ctx, st.AgentID)
-	return err == nil && ctx.Err() == nil
 }
 
 // conduitIdentityHasUserRow reports whether identity is a local user whose
-// store row decides whether it is still active (suspended or deleted).
+// store row decides whether it is still active. The development user has a
+// row like any other local user and is checked the same way.
 func conduitIdentityHasUserRow(identity Identity) bool {
 	switch identity.(type) {
-	case *AuthenticatedUser, *ScopedUserIdentity:
+	case *AuthenticatedUser, *ScopedUserIdentity, *DevUser:
 		return true
 	default:
 		return false

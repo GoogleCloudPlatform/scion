@@ -261,6 +261,14 @@ type CreateBrokerRegistrationResponse struct {
 	// JoinTokenTTL is the lifetime the token was issued with. It is
 	// recorded in the audit log and not sent to the client.
 	JoinTokenTTL time.Duration `json:"-"`
+	// KeptSettings lists requested values that were not applied because
+	// the stored value is kept (see KeptSetting). Empty requested values
+	// are never listed.
+	KeptSettings []KeptSetting `json:"keptSettings,omitempty"`
+	// GCPHostSet is true when this registration filled the GCP host pair
+	// of an existing broker. It is recorded in the audit log and not sent
+	// to the client.
+	GCPHostSet bool `json:"-"`
 }
 
 // BrokerJoinRequest is the request body for POST /api/v1/brokers/join.
@@ -316,10 +324,14 @@ func capabilitiesFromStrings(names []string) *store.BrokerCapabilities {
 			caps.Reprovision = true
 		case "asynclaunch", "async_launch":
 			caps.AsyncLaunch = true
+		case "asyncstart", "async_start":
+			caps.AsyncStart = true
 		case "emptyperagentworkspace", "empty_per_agent_workspace":
 			caps.EmptyPerAgentWorkspace = true
 		case "agentmove", "agent_move":
 			caps.AgentMove = true
+		case "agentmoverecreate", "agent_move_recreate":
+			caps.AgentMoveRecreate = true
 		case "reprovisionemptyperagent", "reprovision_empty_per_agent":
 			caps.ReprovisionEmptyPerAgent = true
 		case "startsinflight", "starts_in_flight":
@@ -396,8 +408,16 @@ var ErrJoinTokenTTLOutOfRange = fmt.Errorf("joinTokenTtlSeconds must be between 
 
 // CreateBrokerRegistration creates a new broker with a join token.
 // Requires admin authentication.
+//
+// It carries no host service account decision, so a registration through it
+// never writes the broker's host service account email. On a new row a
+// requested one is refused with ErrHostSAClaimNotAuthorized. On an existing
+// row whose pair is unset and not set through the update API
+// (registrationFillsGCPHost) it is refused with ErrHostSAClaimStale, after
+// the record update; on any other existing row the requested pair is kept
+// and reported.
 func (s *BrokerAuthService) CreateBrokerRegistration(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy string) (*CreateBrokerRegistrationResponse, error) {
-	return s.createBrokerRegistration(ctx, req, createdBy, "", false, true)
+	return s.createBrokerRegistration(ctx, req, createdBy, "", false, true, hostSAClaimVerdict{})
 }
 
 // CreateBrokerRegistrationForAuthorizedMatch is CreateBrokerRegistration for
@@ -414,11 +434,16 @@ func (s *BrokerAuthService) CreateBrokerRegistration(ctx context.Context, req Cr
 // already on, so the broker re-read here must still have auto-provide on;
 // otherwise the registration is refused with
 // ErrBrokerRegistrationAuthorizationStale.
-func (s *BrokerAuthService) CreateBrokerRegistrationForAuthorizedMatch(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy, expectedExistingBrokerID string, autoProvideAuthorized bool) (*CreateBrokerRegistrationResponse, error) {
+//
+// hostSA is the caller's actAs decision for the requested host service
+// account (Server.evaluateHostSAClaim). The write stores a changed, non-empty
+// host service account only when hostSA allows exactly that value; otherwise
+// it is refused with ErrHostSAClaimNotAuthorized and nothing is written.
+func (s *BrokerAuthService) CreateBrokerRegistrationForAuthorizedMatch(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy, expectedExistingBrokerID string, autoProvideAuthorized bool, hostSA hostSAClaimVerdict) (*CreateBrokerRegistrationResponse, error) {
 	if expectedExistingBrokerID == "" {
 		return nil, errors.New("expectedExistingBrokerID is required")
 	}
-	return s.createBrokerRegistration(ctx, req, createdBy, expectedExistingBrokerID, false, autoProvideAuthorized)
+	return s.createBrokerRegistration(ctx, req, createdBy, expectedExistingBrokerID, false, autoProvideAuthorized, hostSA)
 }
 
 // CreateBrokerRegistrationForAuthorizedNew is CreateBrokerRegistration for a
@@ -429,9 +454,9 @@ func (s *BrokerAuthService) CreateBrokerRegistrationForAuthorizedMatch(ctx conte
 // authorization and this call — the request is refused
 // (ErrBrokerRegistrationAuthorizationStale) rather than treated as an
 // implicit re-registration of a broker the caller was never authorized
-// against.
-func (s *BrokerAuthService) CreateBrokerRegistrationForAuthorizedNew(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy string) (*CreateBrokerRegistrationResponse, error) {
-	return s.createBrokerRegistration(ctx, req, createdBy, "", true, true)
+// against. hostSA is as for CreateBrokerRegistrationForAuthorizedMatch.
+func (s *BrokerAuthService) CreateBrokerRegistrationForAuthorizedNew(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy string, hostSA hostSAClaimVerdict) (*CreateBrokerRegistrationResponse, error) {
+	return s.createBrokerRegistration(ctx, req, createdBy, "", true, true, hostSA)
 }
 
 // createBrokerRegistration implements CreateBrokerRegistration,
@@ -453,7 +478,12 @@ func (s *BrokerAuthService) CreateBrokerRegistrationForAuthorizedNew(ctx context
 // always passes true: its caller checks broker.auto_provide whenever
 // req.AutoProvide is set, except for a PreserveSettings request, whose
 // AutoProvide is forced off below and by the HTTP handler.
-func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy, expectedExistingBrokerID string, expectNoExistingMatch, autoProvideAuthorized bool) (*CreateBrokerRegistrationResponse, error) {
+//
+// hostSA is the caller's host service account decision. Immediately before
+// the row is written, hostSAClaimWriteAllowed compares the stored value of
+// the row re-read here with the value about to be stored; a change to a
+// non-empty value needs hostSA to allow exactly that value.
+func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy, expectedExistingBrokerID string, expectNoExistingMatch, autoProvideAuthorized bool, hostSA hostSAClaimVerdict) (*CreateBrokerRegistrationResponse, error) {
 	if err := s.admitBroker(ctx, req.BrokerID); err != nil {
 		return nil, err
 	}
@@ -476,14 +506,6 @@ func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req Cr
 	// GCP SA emails are case-insensitive; normalize to lowercase before
 	// storage so that later comparisons (e.g. actAs checks) are reliable.
 	req.GCPHostServiceAccountEmail = strings.ToLower(req.GCPHostServiceAccountEmail)
-
-	// Default broker-type label to "external" if not provided
-	if req.Labels == nil {
-		req.Labels = make(map[string]string)
-	}
-	if _, exists := req.Labels["scion.io/broker-type"]; !exists {
-		req.Labels["scion.io/broker-type"] = "external"
-	}
 
 	// Before generating a new broker ID, check for an existing broker with same name
 	var brokerID string
@@ -521,31 +543,36 @@ func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req Cr
 		}
 	}
 
+	var kept []KeptSetting
+	var gcp registrationGCPHostResult
 	if existingBroker != nil && req.PreserveSettings {
 		// Reuse existing broker and leave its record as it is: only a new
 		// join token is issued below.
 		brokerID = existingBroker.ID
 		reregistered = true
 	} else if existingBroker != nil {
-		// Reuse existing broker - update its metadata
+		// Reuse existing broker - update its metadata. Labels are added
+		// when the key is absent; the GCP host pair is filled below only
+		// while unset (see broker_registration_fields.go).
 		brokerID = existingBroker.ID
 		reregistered = true
-		existingBroker.AutoProvide = req.AutoProvide
-		existingBroker.GCPHostServiceAccountEmail = req.GCPHostServiceAccountEmail
-		existingBroker.GCPHostProjectID = req.GCPHostProjectID
-		// Merge request labels into existing labels to preserve any
-		// user-set labels while updating registration-provided ones.
-		if len(req.Labels) > 0 {
-			if existingBroker.Labels == nil {
-				existingBroker.Labels = make(map[string]string, len(req.Labels))
-			}
-			for k, v := range req.Labels {
-				existingBroker.Labels[k] = v
-			}
+		// A refused fill of the host service account refuses the
+		// registration before anything is written.
+		if err := registrationFillDenied(req.GCPHostServiceAccountEmail, req.GCPHostProjectID, hostSA); err != nil {
+			return nil, err
 		}
+		priorHostSA := hostSAClaimOf(existingBroker)
+		existingBroker.AutoProvide = req.AutoProvide
+		existingBroker.Labels, kept = mergeRegistrationLabels(existingBroker.Labels, req.Labels)
 		existingBroker.Updated = time.Now()
+		if err := hostSAClaimWriteAllowed(priorHostSA, hostSAClaimOf(existingBroker), hostSA); err != nil {
+			return nil, err
+		}
 		if err := s.store.UpdateRuntimeBroker(ctx, existingBroker); err != nil {
 			return nil, fmt.Errorf("failed to update existing broker: %w", err)
+		}
+		if gcp, err = fillRegistrationGCPHost(ctx, s.store, brokerID, req.GCPHostServiceAccountEmail, req.GCPHostProjectID, hostSA); err != nil {
+			return nil, err
 		}
 	} else {
 		// Create new broker - use client-supplied ID if provided, otherwise generate
@@ -555,26 +582,40 @@ func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req Cr
 			brokerID = uuid.New().String()
 		}
 
+		labels := registrationLabels(req.Labels)
+		labels[store.BrokerRoleLabel] = store.BrokerRoleRemote
 		broker := &store.RuntimeBroker{
 			ID:                         brokerID,
 			Name:                       req.Name,
 			Slug:                       slugify(req.Name),
 			Status:                     store.BrokerStatusOffline,
 			AutoProvide:                req.AutoProvide,
-			Labels:                     req.Labels,
+			Labels:                     labels,
 			GCPHostServiceAccountEmail: req.GCPHostServiceAccountEmail,
 			GCPHostProjectID:           req.GCPHostProjectID,
 			Created:                    time.Now(),
 			Updated:                    time.Now(),
 			CreatedBy:                  createdBy,
 		}
+		if broker.GCPHostServiceAccountEmail != "" || broker.GCPHostProjectID != "" {
+			broker.GCPHostSource = store.GCPHostSourceRegistration
+		}
 
+		if err := hostSAClaimWriteAllowed(hostSAClaim{}, hostSAClaimOf(broker), hostSA); err != nil {
+			return nil, err
+		}
 		if err := s.store.CreateRuntimeBroker(ctx, broker); err != nil {
 			return nil, fmt.Errorf("failed to create runtime broker: %w", err)
 		}
 	}
 
-	return s.issueJoinToken(ctx, brokerID, createdBy, reregistered, req.JoinTokenTTLSeconds, nil)
+	resp, err := s.issueJoinToken(ctx, brokerID, createdBy, reregistered, req.JoinTokenTTLSeconds, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp.KeptSettings = append(gcp.Kept, kept...)
+	resp.GCPHostSet = gcp.Applied
+	return resp, nil
 }
 
 // issueJoinToken mints and stores a join token for brokerID and builds the
@@ -1428,16 +1469,30 @@ func registrationLabels(in map[string]string) map[string]string {
 	return out
 }
 
+// reservedBrokerLabels are the Hub-managed label keys: only hub-internal
+// code sets them, and a client-supplied value is dropped on registration
+// and update.
+var reservedBrokerLabels = []string{pluginBrokerLabel, store.BrokerRoleLabel}
+
+// isReservedBrokerLabel reports whether key is Hub-managed.
+func isReservedBrokerLabel(key string) bool {
+	for _, k := range reservedBrokerLabels {
+		if key == k {
+			return true
+		}
+	}
+	return false
+}
+
 // stripReservedBrokerLabels returns labels without the hub-reserved keys
-// (pluginBrokerLabel). Only hub-internal code sets those; a client-supplied
-// value is dropped on registration and update. nil stays nil.
+// (reservedBrokerLabels). nil stays nil.
 func stripReservedBrokerLabels(in map[string]string) map[string]string {
 	if in == nil {
 		return nil
 	}
 	out := make(map[string]string, len(in))
 	for k, v := range in {
-		if k == pluginBrokerLabel {
+		if isReservedBrokerLabel(k) {
 			continue
 		}
 		out[k] = v

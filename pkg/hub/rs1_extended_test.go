@@ -252,11 +252,12 @@ func TestRS1_ScopedUAT_CrossProjectDenied(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestRS1_ScopedUAT_MutationInProject mints a project:manage UAT and uses
-// it to remove a member — proving that the UAT scope covers membership
-// mutations. We test RemoveMember rather than AddMember because AddMember's
-// delegation check requires the actor to hold ALL permissions from the
-// target role (filtered by UAT scopes), and project:manage alone does not
-// cover the agent:create etc. permissions in the target role.
+// it to remove a member: a project:manage token on its own project removes
+// a member through its holder's owner role. RemoveMember is used rather
+// than AddMember because AddMember's delegation check requires the token's
+// selectors to cover ALL permissions of the target role, and
+// project:manage alone does not cover the agent:create etc. permissions
+// in the target role.
 func TestRS1_ScopedUAT_MutationInProject(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -289,14 +290,12 @@ func TestRS1_ScopedUAT_MutationInProject(t *testing.T) {
 	// R3-2: mint a real project:manage UAT.
 	uatKey := mintScopedUAT(t, srv, ownerID, projectID, []string{"project:manage"})
 
-	// R2-2: Membership mutations now enforce a credential-kind allowlist at
-	// the service boundary. UAT credentials are rejected regardless of scope.
-	// This is the correct behavior per the R2 hardening brief: only
-	// interactive and dev human sessions may perform membership mutations.
 	rec := doRequestWithUAT(t, srv, uatKey, http.MethodDelete,
 		"/api/v1/projects/"+projectID+"/members/"+binding.ID, nil)
-	assert.Equal(t, http.StatusForbidden, rec.Code,
-		"R2-2: UAT credential should be rejected for membership mutations (got %d: %s)", rec.Code, rec.Body.String())
+	require.Equal(t, http.StatusNoContent, rec.Code,
+		"a project:manage token removes a member in its own project (got %d: %s)", rec.Code, rec.Body.String())
+	_, getErr := s.GetRoleBinding(ctx, binding.ID)
+	assert.ErrorIs(t, getErr, store.ErrNotFound, "the member binding is removed")
 }
 
 // TestRS1_ScopedUAT_MutationCrossProjectDenied proves a project:manage UAT

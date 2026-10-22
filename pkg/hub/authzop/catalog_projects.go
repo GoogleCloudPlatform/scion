@@ -28,7 +28,7 @@ var projectOperations = []OperationSpec{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/members", Method: "POST"},
 		},
 		Principals:            []PrincipalKind{PrincipalUser},
-		Credentials:           []CredentialKind{CredentialSessionJWT},
+		Credentials:           []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
 		ResourceResolver:      "project-from-url",
 		BasePermission:        "project.manage",
 		Effects:               []SecurityEffect{EffectGrantAuthority},
@@ -51,7 +51,7 @@ var projectOperations = []OperationSpec{
 		},
 		DenialCodes: []DenialCode{DenialForbidden, DenialRoleAssignmentForbidden, DenialTargetRoleProtected, DenialPrincipalIneligible},
 		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
-		Bearer:      SessionOnly(ReasonGovernancePending),
+		Bearer:      membershipTokenBearer("TestMembershipToken_CannotGrantRoleAboveCaller"),
 	},
 	{
 		ID:          "project.membership.update",
@@ -61,7 +61,7 @@ var projectOperations = []OperationSpec{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/members/{memberId}", Method: "PATCH"},
 		},
 		Principals:            []PrincipalKind{PrincipalUser},
-		Credentials:           []CredentialKind{CredentialSessionJWT},
+		Credentials:           []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
 		ResourceResolver:      "project-from-url",
 		BasePermission:        "project.manage",
 		Effects:               []SecurityEffect{EffectChangeAuthority},
@@ -85,7 +85,7 @@ var projectOperations = []OperationSpec{
 		},
 		DenialCodes: []DenialCode{DenialForbidden, DenialRoleAssignmentForbidden, DenialTargetRoleProtected, DenialLastOwner},
 		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
-		Bearer:      SessionOnly(ReasonGovernancePending),
+		Bearer:      membershipTokenBearer("TestMembershipToken_GovernanceMatrixApplies"),
 	},
 	{
 		ID:          "project.membership.remove",
@@ -95,7 +95,7 @@ var projectOperations = []OperationSpec{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/members/{memberId}", Method: "DELETE"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
 		ResourceResolver: "project-from-url",
 		BasePermission:   "project.manage",
 		Effects:          []SecurityEffect{EffectRevokeAuthority},
@@ -116,7 +116,7 @@ var projectOperations = []OperationSpec{
 		},
 		DenialCodes: []DenialCode{DenialForbidden, DenialRoleAssignmentForbidden, DenialTargetRoleProtected, DenialLastOwner},
 		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
-		Bearer:      SessionOnly(ReasonGovernancePending),
+		Bearer:      membershipTokenBearer("TestMembershipToken_GovernanceMatrixApplies"),
 	},
 	{
 		ID:          "project.membership.list",
@@ -144,7 +144,7 @@ var projectOperations = []OperationSpec{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/transfer-ownership", Method: "POST"},
 		},
 		Principals:            []PrincipalKind{PrincipalUser},
-		Credentials:           []CredentialKind{CredentialSessionJWT},
+		Credentials:           []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
 		ResourceResolver:      "project-from-url",
 		BasePermission:        "project.manage",
 		Effects:               []SecurityEffect{EffectChangeAuthority},
@@ -169,9 +169,139 @@ var projectOperations = []OperationSpec{
 		},
 		DenialCodes: []DenialCode{DenialForbidden, DenialRoleAssignmentForbidden, DenialPrincipalIneligible, DenialLastOwner},
 		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
-		Bearer:      SessionOnly(ReasonGovernancePending),
+		Bearer:      membershipTokenBearer("TestTransferOwnershipToken_RequiresDirectOwner"),
 	},
 
+	{
+		ID:          "project.membership.principal.set",
+		Domain:      "project.membership",
+		Description: "Replace a principal's whole set of project roles",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/members/principals/{type}/{principalId}", Method: "PUT"},
+		},
+		Principals:            []PrincipalKind{PrincipalUser},
+		Credentials:           []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver:      "project-from-url",
+		BasePermission:        "project.manage",
+		Effects:               []SecurityEffect{EffectGrantAuthority, EffectChangeAuthority, EffectRevokeAuthority},
+		DelegationKind:        DelegationConditionalIncrease,
+		DelegationDescription: "CanDelegate checked for every created binding; a built-in role change is checked only when the new role is higher",
+		Governance: &GovernancePolicy{
+			Kind:        GovernancePeerSuperior,
+			Description: "Built-in roles follow the governance matrix (owners manage all roles, admins manage members only, direct owners for admin and owner targets); custom roles need custom-role authority (direct owner). Enforced by ProjectMembershipService.SetMemberRoles.",
+		},
+		AuthorityEval: AuthorityEvalBeforeAndAfter,
+		Invariants: []Invariant{
+			{ID: "direct-user-only-owner", Description: "project-owner role is direct-user-only", Kind: InvariantSecurity, FailClosed: true},
+			{ID: "single-binding-per-principal", Description: "CT1 D4: one built-in binding per principal per project", Kind: InvariantBusiness, FailClosed: false},
+			{ID: "last-owner-guard", Description: "Cannot remove or demote the last active direct owner", Kind: InvariantSecurity, FailClosed: true},
+		},
+		AuditObligation: &AuditObligation{
+			EventType:     "project_member_role_change",
+			ContextFields: []string{"actor_id", "project_id"},
+			BeforeFields:  []string{"target_principal_id", "old_role"},
+			AfterFields:   []string{"new_role"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden, DenialRoleAssignmentForbidden, DenialTargetRoleProtected, DenialPrincipalIneligible, DenialLastOwner, DenialCredentialInsufficient},
+		TestRefs:    []TestRef{{Package: "pkg/hub", Function: "TestMembershipToken_SelectorAndBoundaryPerRoute"}},
+		Bearer:      membershipTokenBearer("TestMembershipToken_CannotGrantRoleAboveCaller"),
+	},
+	{
+		ID:          "project.membership.principal.remove",
+		Domain:      "project.membership",
+		Description: "Remove every project role a principal holds",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/members/principals/{type}/{principalId}", Method: "DELETE"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "project-from-url",
+		BasePermission:   "project.manage",
+		Effects:          []SecurityEffect{EffectRevokeAuthority},
+		DelegationKind:   DelegationNone,
+		Governance: &GovernancePolicy{
+			Kind:        GovernancePeerSuperior,
+			Description: "Built-in roles follow the governance matrix; custom roles need custom-role authority (direct owner). Enforced by ProjectMembershipService.SetMemberRoles.",
+		},
+		AuthorityEval: AuthorityEvalProposedPost,
+		Invariants: []Invariant{
+			{ID: "last-owner-guard", Description: "Cannot remove the last active direct owner", Kind: InvariantSecurity, FailClosed: true},
+		},
+		AuditObligation: &AuditObligation{
+			EventType:     "project_member_remove",
+			ContextFields: []string{"actor_id", "project_id"},
+			BeforeFields:  []string{"target_principal_id", "target_role"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden, DenialRoleAssignmentForbidden, DenialTargetRoleProtected, DenialLastOwner, DenialCredentialInsufficient},
+		TestRefs:    []TestRef{{Package: "pkg/hub", Function: "TestMembershipToken_SelectorAndBoundaryPerRoute"}},
+		Bearer:      membershipTokenBearer("TestMembershipToken_LastOwnerProtected"),
+	},
+	{
+		ID:          "project.membership.rolebinding.create",
+		Domain:      "project.membership",
+		Description: "Create a project-scoped binding of a built-in project role through the role-binding API",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/role-bindings", Method: "POST", Variant: "scope=project,role=builtin"},
+		},
+		Principals:            []PrincipalKind{PrincipalUser},
+		Credentials:           []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver:      "project-from-body",
+		BasePermission:        "project.manage",
+		Effects:               []SecurityEffect{EffectGrantAuthority},
+		DelegationKind:        DelegationNonAmplification,
+		DelegationDescription: "Actor must hold all permissions in the target role (CanDelegate non-amplification)",
+		Governance: &GovernancePolicy{
+			Kind:        GovernancePeerSuperior,
+			Description: "Routed to ProjectMembershipService.AddMember (create-only): the governance matrix, direct-owner rule and one-binding invariant apply. The project-scope branch runs before any hub-level check.",
+		},
+		AuthorityEval: AuthorityEvalNone,
+		Invariants: []Invariant{
+			{ID: "direct-user-only-owner", Description: "project-owner role is direct-user-only", Kind: InvariantSecurity, FailClosed: true},
+			{ID: "single-binding-per-principal", Description: "CT1 D4: one direct binding per principal per project", Kind: InvariantBusiness, FailClosed: false},
+		},
+		AuditObligation: &AuditObligation{
+			EventType:     "project_member_add",
+			ContextFields: []string{"actor_id", "project_id"},
+			AfterFields:   []string{"target_principal_id", "target_role"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden, DenialRoleAssignmentForbidden, DenialTargetRoleProtected, DenialPrincipalIneligible, DenialConflict},
+		TestRefs:    []TestRef{{Package: "pkg/hub", Function: "TestMembershipToken_SelectorAndBoundaryPerRoute"}},
+		Bearer:      membershipTokenBearerOn(BearerTargetProjectBody, "TestMembershipToken_CannotGrantRoleAboveCaller"),
+	},
+	{
+		ID:          "project.membership.rolebinding.delete",
+		Domain:      "project.membership",
+		Description: "Delete a project-scoped role binding through the role-binding API",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/role-bindings/{id}", Method: "DELETE", Variant: "scope=project"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "project-from-binding",
+		BasePermission:   "project.manage",
+		Effects:          []SecurityEffect{EffectRevokeAuthority},
+		DelegationKind:   DelegationNone,
+		Governance: &GovernancePolicy{
+			Kind:        GovernancePeerSuperior,
+			Description: "Project-scoped bindings are removed under project governance: a caller with project.manage on the binding's project goes to ProjectMembershipService.RemoveMember (governance matrix, direct-owner rule, last-owner guard) before any hub-level check; any other caller needs role_binding.delete at hub scope.",
+		},
+		AuthorityEval: AuthorityEvalProposedPost,
+		Invariants: []Invariant{
+			{ID: "last-owner-guard", Description: "Cannot remove the last active direct owner", Kind: InvariantSecurity, FailClosed: true},
+		},
+		AuditObligation: &AuditObligation{
+			EventType:     "project_member_remove",
+			ContextFields: []string{"actor_id", "project_id"},
+			BeforeFields:  []string{"target_principal_id", "target_role"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden, DenialRoleAssignmentForbidden, DenialTargetRoleProtected, DenialLastOwner},
+		TestRefs:    []TestRef{{Package: "pkg/hub", Function: "TestRoleBindingDelete_ProjectBindingUnderProjectGovernance"}},
+		Bearer:      membershipTokenBearerOn(BearerTargetRoleBindingRecord, "TestMembershipToken_GovernanceMatrixApplies"),
+	},
 	// =====================================================================
 	// Domain: project.visitors — visitor grants for federated accounts
 	// (ptone/scion#4603). Every entry point answers 404 while the
@@ -420,14 +550,15 @@ var projectOperations = []OperationSpec{
 	// Domain: project — project lifecycle
 	// =====================================================================
 	{
-		ID:          "project.lifecycle.create",
-		Domain:      "project",
-		Description: "Create a new project",
+		ID:     "project.lifecycle.create",
+		Domain: "project",
+		Description: "Create a new project. project.create is checked as a collection-level create at the hub scope; " +
+			"a token needs project:create on a hub boundary. Naming an existing project by id needs project.update on it",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects", Method: "POST"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
 		ResourceResolver: "hub-scoped",
 		BasePermission:   "project.create",
 		Effects:          []SecurityEffect{EffectCreateResource, EffectGrantAuthority},
@@ -449,7 +580,11 @@ var projectOperations = []OperationSpec{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
 			{Package: "pkg/hub", Function: "TestOwnerGrantCoverageCheck"},
 			{Package: "pkg/hub", Function: "TestOwnerBindingAuditFailureRollsBack"},
+			{Package: "pkg/hub", Function: "TestProjectCreateToken_RequiresCreateSelectorAndHubBoundary"},
+			{Package: "pkg/hub", Function: "TestProjectCreateToken_IdempotentPathRequiresUpdate"},
 		},
+		Bearer: BearerDisposition{Kind: BearerAdmit, Target: BearerTargetHubCollection,
+			Boundaries: []BearerBoundary{BearerBoundaryHub}, Pin: "TestProjectCreateToken_RequiresCreateSelectorAndHubBoundary"},
 	},
 	{
 		ID:          "project.lifecycle.delete",
@@ -588,22 +723,24 @@ var projectOperations = []OperationSpec{
 		Bearer:           AdmitOn(BearerTargetProjectPath, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
-		ID:          "project.register",
-		Domain:      "project",
-		Description: "Register a project from an external source",
+		ID:     "project.register",
+		Domain: "project",
+		Description: "Register a project from an external source. Register checks project.create as a collection-level create at the hub scope; " +
+			"a token needs project:create on a hub boundary. An existing project named by id or matched by slug needs project.update on it. " +
+			"The embedded-broker form (a broker in the request body) is session-only (CREDENTIAL_MANAGEMENT): a token or any other non-session credential is refused before any lookup or write",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/register", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/register", Method: "POST", Response: ResponseCredential},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
 		ResourceResolver: "project-from-body",
-		BasePermission:   "project.register",
+		BasePermission:   "project.create",
 		Effects:          []SecurityEffect{EffectCreateResource, EffectGrantAuthority},
 		DelegationKind:   DelegationNonAmplification,
 		DelegationDescription: "When the call creates the project, the creator is bound to the project-owner role on it; " +
 			"registering an existing project binds no owner. " +
 			"A credential with a permission ceiling must cover every permission of that role before any write (projectOwnerGrantDenial); " +
-			"for other callers project.register gates the grant",
+			"for other callers project.create gates the grant",
 		AuthorityEval: AuthorityEvalNone,
 		// createProjectWithOwner writes the project row, the owner binding
 		// and this record in one transaction.
@@ -618,7 +755,46 @@ var projectOperations = []OperationSpec{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
 			{Package: "pkg/hub", Function: "TestOwnerGrantCoverageCheck"},
 			{Package: "pkg/hub", Function: "TestOwnerBindingAuditFailureRollsBack"},
+			{Package: "pkg/hub", Function: "TestProjectRegisterToken_EnforcesProjectCreate"},
+			{Package: "pkg/hub", Function: "TestProjectRegisterToken_EmbeddedBrokerFormIsSessionOnly"},
 		},
+		Bearer: BearerDisposition{Kind: BearerAdmit, Target: BearerTargetHubCollection,
+			Boundaries: []BearerBoundary{BearerBoundaryHub}, Pin: "TestProjectRegisterToken_EnforcesProjectCreate"},
+	},
+	{
+		ID:     "project.clone",
+		Domain: "project",
+		Description: "Clone a project into a new project owned by the caller. The caller needs project.read on the source and " +
+			"project.create as a collection-level create at the hub scope; a token also needs the project:clone selector",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/clone", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "project-from-url",
+		BasePermission:   "project.create",
+		Effects:          []SecurityEffect{EffectCreateResource, EffectGrantAuthority},
+		DelegationKind:   DelegationNonAmplification,
+		DelegationDescription: "The caller is bound to the project-owner role on the clone. " +
+			"A credential with a permission ceiling must cover every permission of that role before any write (projectOwnerGrantDenial); " +
+			"for other callers project.create gates the grant",
+		AuthorityEval: AuthorityEvalNone,
+		// createProjectWithOwner writes the project row, the owner binding
+		// and this record in one transaction.
+		AuditObligation: &AuditObligation{
+			EventType:     "project_member_add",
+			ContextFields: []string{"actor_id", "project_id"},
+			AfterFields:   []string{"user_id", "role"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden, DenialResourceNotFound},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestOwnerBindingRequiresCanDelegate"},
+			{Package: "pkg/hub", Function: "TestProjectCloneToken_RequiresSourceReadCloneAndCreate"},
+		},
+		Bearer: BearerDisposition{Kind: BearerAdmit, Target: BearerTargetHubCollection,
+			Boundaries: []BearerBoundary{BearerBoundaryHub}, Pin: "TestProjectCloneToken_RequiresSourceReadCloneAndCreate"},
 	},
 
 	// =====================================================================
@@ -713,12 +889,27 @@ var projectOperations = []OperationSpec{
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
 		ResourceResolver: "project-from-url",
 		BasePermission:   "scheduled_event.update",
-		Effects:          []SecurityEffect{EffectUpdateResource},
-		DelegationKind:   DelegationNone,
+		Effects:          []SecurityEffect{EffectUpdateResource, EffectGrantAuthority},
+		DelegationKind:   DelegationNonAmplification,
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestScheduleResumeToken_RechecksTarget"}},
 		Bearer:           AdmitOn(BearerTargetProjectPath, BearerBoundaryProject, BearerBoundaryHub),
+		DelegationDescription: "Only the dispatch_agent event type grants authority. A resume, and an update that changes the event type, payload, " +
+			"cron expression or enables the schedule, records the caller's initiator attribution and frozen effect ceiling (revisionAuthorityCeiling) " +
+			"in place of the stored ones; an update that changes none of those fields records neither. An update can switch a schedule to dispatch_agent. " +
+			"A dispatch_agent schedule then creates an agent at fire time, with a delegation edge from the recorded principal, " +
+			"after CanDelegate for that principal. A message schedule grants no authority. " +
+			"Effects are listed per operation, not per event type, so grant-authority is listed for the whole operation",
+		AuditObligation: &AuditObligation{
+			EventType:     "agent_delegation",
+			ContextFields: []string{"actor_id"},
+			AfterFields:   []string{"agent_id", "can_delegate_result"},
+			Atomic:        false,
+			NonAtomicJustification: "The update or resume write records no mutation audit record: it stores the initiator attribution and the frozen effect ceiling " +
+				"on the schedule row in the same conditional update that bumps its authorization revision. The agent_delegation record is written " +
+				"when a dispatch_agent schedule fires, in the agent-create transaction with the agent row and its delegation edge. A message schedule writes none",
+		},
 	},
 	{
 		ID:          "schedule.event.pause",
@@ -1037,7 +1228,7 @@ var projectOperations = []OperationSpec{
 		Domain:      "artifact",
 		Description: "Create a share link: an unguessable token, shown once, that lets anyone holding it read the artifact's current version without signing in until it expires (at most the hub's maximum lifetime, never past the artifact's own expiry) or is revoked",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/links", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/links", Method: "POST", Response: ResponseCredential},
 		},
 		Principals:            []PrincipalKind{PrincipalUser},
 		Credentials:           []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
@@ -1200,7 +1391,7 @@ var projectOperations = []OperationSpec{
 		Domain:      "artifact",
 		Description: "Get a view URL for a ready version whose entry is HTML: a capability, valid for a limited time, that serves only that version's files under /api/v1/artifacts/view/ in the sandboxed viewer (see the view exemption); the caller needs only the read check",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/versions/{seq}/view", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/versions/{seq}/view", Method: "POST", Response: ResponseCredential},
 		},
 		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
@@ -1250,8 +1441,8 @@ var projectOperations = []OperationSpec{
 		Domain:      "project",
 		Description: "Read a project's environment variables (list or one key)",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/env", Method: "GET"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/env/{key}", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/env", Method: "GET", Response: ResponseCredential},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/env/{key}", Method: "GET", Response: ResponseCredential},
 		},
 		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
@@ -1269,7 +1460,7 @@ var projectOperations = []OperationSpec{
 		Domain:      "project",
 		Description: "Set or delete a project environment variable",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/env/{key}", Method: "PUT"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/env/{key}", Method: "PUT", Response: ResponseCredential},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/env/{key}", Method: "DELETE"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
@@ -1466,9 +1657,10 @@ var projectOperations = []OperationSpec{
 	{
 		ID:          "project.messagelogs.read",
 		Domain:      "project",
-		Description: "Read a project's message log",
+		Description: "Read and stream a project's message log. A stream opened by a token ends once the token stops validating or loses project.read",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/message-logs", Method: "GET"},
+			{Kind: EntryPointSSE, Pattern: "/api/v1/projects/{id}/message-logs/stream", Method: "GET"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
@@ -1851,3 +2043,24 @@ var artifactManageBearer = BearerDisposition{Kind: BearerAdmit, Target: BearerTa
 var artifactVersionBearer = BearerDisposition{Kind: BearerAdmit, Target: BearerTargetArtifactRecord,
 	Boundaries: []BearerBoundary{BearerBoundaryProject, BearerBoundaryHub},
 	Pin:        "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded"}
+
+// membershipTokenBearer is the bearer disposition of the project membership
+// operations addressed by a project path: a user access token passes only
+// when its selectors carry project:manage and its boundary covers the
+// project (a project-boundary holder must still be a member). The token
+// then acts only through its holder's own project role: the governance
+// matrix, the direct-owner rule, CanDelegate (a token never grants a role
+// above its selectors), last-owner protection and the one-binding
+// invariant apply, and the hub role-binding authority of a holder with no
+// project role is never used. pin names the dedicated test.
+func membershipTokenBearer(pin string) BearerDisposition {
+	return membershipTokenBearerOn(BearerTargetProjectPath, pin)
+}
+
+// membershipTokenBearerOn is membershipTokenBearer with the target resolver
+// that names the project.
+func membershipTokenBearerOn(target BearerTarget, pin string) BearerDisposition {
+	return BearerDisposition{Kind: BearerAdmit, Target: target,
+		Boundaries: []BearerBoundary{BearerBoundaryProject, BearerBoundaryHub},
+		Pin:        pin}
+}

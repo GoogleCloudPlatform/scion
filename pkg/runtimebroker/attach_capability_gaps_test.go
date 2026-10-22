@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	"github.com/stretchr/testify/require"
@@ -113,7 +114,7 @@ func newFallbackOnlyAuxServer(t *testing.T) (*Server, *attachCapableTestRuntime)
 	t.Helper()
 	mgr := &mockManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(DefaultServerConfig(), mgr, rt)
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	auxMgr := &mockManager{agents: []api.AgentInfo{{
 		Name: "some-agent", ID: "cid-1", ContainerID: "cid-1",

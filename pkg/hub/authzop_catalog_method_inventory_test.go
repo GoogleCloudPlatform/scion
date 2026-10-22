@@ -52,6 +52,7 @@ var positiveCheckExclusions = map[liveInventoryKey]string{
 	{OperationID: "hub.maintenance.execute", Method: "POST", Pattern: "/api/v1/admin/maintenance/check-updates"}:            "handleCheckForUpdates (admin_maintenance.go:662-690) calls the GitHub release channel when MaintenanceConfig.DeploymentTier == \"binary\"; excluded so this test cannot depend on, or accidentally call out based on, server config",
 	{OperationID: "agent.hold.lift", Method: "POST", Pattern: "/api/v1/agents/{id}/hold/lift"}:                              "handleAgentHoldLift (agent_hold_lift.go) clears an agent's holds and writes an audit record: a live POST mutates state, so it is not dispatched against a real target here; TestAgentHoldLift drives it against a real held agent",
 	{OperationID: "chat.attachment.download.project", Method: "GET", Pattern: "/api/v1/chat/attachments/{id}"}:              "handleAttachmentDownload answers every id it cannot serve exactly like an unknown id (ptone/scion#4595): with the artifact service configured and no attachment storage backend in testServer, the placeholder id gets that 404 before any lookup; TestAttachmentArtifacts_NoLegacyStoreAnswersNotFound pins that answer, and the attachment tests read real attachments through the route",
+	{OperationID: "project.conversation.gcsobject.read", Method: "GET", Pattern: "/api/v1/gcs/object"}:                      "handleGCSObject (gcs_link.go) answers the same 404 to every caller while the web.gcs_links experiment is off or no token generator is configured, which is the case in this test server; TestGCSObjectToken_ProjectGroupNeedsProjectRead and the TestGCSLink_* tests enable it and drive the route",
 }
 
 // controlCheckExclusions lists HTTP catalog entry points for which
@@ -103,6 +104,7 @@ var suffixCheckExclusions = map[liveInventoryKey]string{
 	{OperationID: "artifact.version.upload", Method: "PUT", Pattern: "/api/v1/artifacts/{id}/versions/{seq}/files/{path}"}:       "the file path is every segment after files/, so the bogus suffix becomes part of the file path, and the fixture's version 1 is ready, so handlePutFile (pkg/artifacts/versions.go) answers 409 conflict (not pending) before it looks the file up",
 	{OperationID: "user.read", Method: "GET", Pattern: "/api/v1/users/{id}"}:                                                     "handleUserByID (handlers_users_core.go) only special-cases the \"revoke-sessions\" suffix; any other suffix, including this check's bogus one, falls through to the same GET handling as the bare ID",
 	{OperationID: "user.update", Method: "PATCH", Pattern: "/api/v1/users/{id}"}:                                                 "same as user.read above: handleUserByID ignores an unrecognized suffix rather than 404ing on it",
+	{OperationID: "user.self.update", Method: "PATCH", Pattern: "/api/v1/users/{id}"}:                                            "same as user.read above: handleUserByID ignores an unrecognized suffix rather than 404ing on it",
 	{OperationID: "user.admin.delete", Method: "DELETE", Pattern: "/api/v1/users/{id}"}:                                          "same as user.read above: handleUserByID ignores an unrecognized suffix rather than 404ing on it",
 	{OperationID: "secret.read", Method: "GET", Pattern: "/api/v1/secrets/{key}"}:                                                "handleSecretByKey (handlers_env_secrets.go) extracts the key with extractID, which truncates at the first '/' after the prefix and discards the suffix, so the request proceeds on the bare key; with no secret backend configured in testServer, getSecret then panics on a nil backend, recovered as a 500 — not a 404/405, but unrelated to the suffix, which the truncation already removed",
 	{OperationID: "secret.write", Method: "PUT", Pattern: "/api/v1/secrets/{key}"}:                                               "extractID truncates the suffix the same way as secret.read above, but setSecret checks the request body's value field before ever touching the secret backend; this test's generic empty PUT body always fails that check with 400 \"value is required\", the same 400 the bare path gets",
@@ -186,6 +188,29 @@ var suffixCheckExclusions = map[liveInventoryKey]string{
 	{OperationID: "hub.integrations.update", Method: "POST", Pattern: "/api/v1/admin/integrations/{name}/restart"}:               "handleAdminIntegrationByName splits the sub-path into at most three parts and the restart branch ignores the third, so a suffix restarts the integration as the bare path does",
 	{OperationID: "hub.integrations.install", Method: "POST", Pattern: "/api/v1/admin/integrations/{name}/install"}:              "handleAdminIntegrationByName splits the sub-path into at most three parts and the install branch ignores the third, so a suffix reaches the same install handling as the bare path",
 	{OperationID: "hub.integrations.install", Method: "POST", Pattern: "/api/v1/admin/integrations/{name}/update"}:               "handleAdminIntegrationByName splits the sub-path into at most three parts and a POST to update with a third part starts the same update as the bare path",
+	// handleSkillByID (skill_handlers.go) splits the path into at most
+	// three segments, so the action handlers below receive any trailing
+	// segment as part of the third one and ignore it, or treat it as a
+	// nested file path.
+	{OperationID: "skill.read", Method: "GET", Pattern: "/api/v1/skills/{id}/download"}:       "handleSkillByID passes the download action with a trailing segment to handleSkillDownload, which ignores it and answers as for the bare path",
+	{OperationID: "skill.read", Method: "GET", Pattern: "/api/v1/skills/{id}/resolve"}:        "handleSkillByID passes the resolve action with a trailing segment to handleSkillResolveSingle, which ignores it and answers as for the bare path",
+	{OperationID: "skill.update", Method: "POST", Pattern: "/api/v1/skills/{id}/upload"}:      "handleSkillByID passes the upload action with a trailing segment to handleSkillUpload, which ignores it and answers as for the bare path",
+	{OperationID: "skill.update", Method: "POST", Pattern: "/api/v1/skills/{id}/finalize"}:    "handleSkillByID passes the finalize action with a trailing segment to handleSkillFinalize, which ignores it and answers as for the bare path",
+	{OperationID: "skill.update", Method: "PUT", Pattern: "/api/v1/skills/{id}/files/{path}"}: "the file path may be nested, so the trailing segment names a file below {path}; the write is checked like the bare path and answers 409 for the published version",
+	// The batch resolve is reached through the skill ID segment "resolve",
+	// so a trailing segment is ignored the same way.
+	{OperationID: "skill.resolve.local", Method: "POST", Pattern: "/api/v1/skills/resolve"}:          "handleSkillByID sends any path whose first segment is \"resolve\" to handleSkillsResolve, which ignores the rest",
+	{OperationID: "skill.resolve.github.project", Method: "POST", Pattern: "/api/v1/skills/resolve"}: "same as skill.resolve.local above",
+	{OperationID: "skill.resolve.github.public", Method: "POST", Pattern: "/api/v1/skills/resolve"}:  "same as skill.resolve.local above",
+	// A template or harness config file path may be nested, so a trailing
+	// segment on a file write names a new file below {path}.
+	{OperationID: "template.update", Method: "PUT", Pattern: "/api/v1/templates/{id}/files/{path}"}:            "handleTemplateFiles takes everything after files/ as the file path, so the write creates the nested file",
+	{OperationID: "harnessconfig.update", Method: "PUT", Pattern: "/api/v1/harness-configs/{id}/files/{path}"}: "handleHarnessConfigFiles takes everything after files/ as the file path, so the write creates the nested file",
+	// handleAdminAccessConstraintPreviews (handlers_access_constraints.go)
+	// splits the path after the prefix into at most two parts and reads the
+	// job for any second part other than "result".
+	{OperationID: "access.constraint.preview", Method: "GET", Pattern: "/api/v1/admin/access-constraint-previews/{jobId}"}:        "a trailing segment on the job path is a second part other than \"result\", so the request answers the job read",
+	{OperationID: "access.constraint.preview", Method: "GET", Pattern: "/api/v1/admin/access-constraint-previews/{jobId}/result"}: "a trailing segment joins \"result\" into one second part that is not \"result\", so the request answers the job read",
 }
 
 // catalogHTTPEntryPoints returns every (operationID, EntryPoint) pair in

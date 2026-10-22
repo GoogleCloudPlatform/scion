@@ -204,6 +204,7 @@ func (a *colocatedFlatActivator) Activate(ctx context.Context, c brokerhost.Cand
 		AutoProvide:      a.autoProvide,
 		Capabilities:     flatInstanceCapabilities(c.Runtime),
 		WorkspaceStorage: loadBrokerRegistrationWorkspaceStorage(),
+		HostIdentity:     hostObservationPtr(detectHostGCPIdentity(ctx)),
 	})
 	if err != nil {
 		a.reportedMu.Lock()
@@ -316,6 +317,10 @@ type flatHostParams struct {
 	messageLogger  *slog.Logger
 	wg             *sync.WaitGroup
 	errCh          chan error
+	// shutdownContext bounds the host's shutdown by the broker phase of
+	// the process's graceful shutdown (ptone/scion#5054); nil: unbounded
+	// beyond the host's own ShutdownTimeout.
+	shutdownContext func() (context.Context, context.CancelFunc)
 }
 
 // startFlatRuntimeBrokerHost hosts the configured flat instances. A
@@ -328,7 +333,7 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 		return errors.New("flat Runtime Broker host: co-located mode requires the Hub")
 	}
 
-	versionedSettings, _, vsErr := config.LoadEffectiveSettings("")
+	versionedSettings, _, vsErr := loadServerEffectiveSettings()
 	var vsBroker *config.V1BrokerConfig
 	if vsErr == nil && versionedSettings != nil && versionedSettings.Server != nil {
 		vsBroker = versionedSettings.Server.Broker
@@ -417,7 +422,8 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 	}
 	buildServer := func(ic brokerhost.InstanceContext) (*runtimebroker.Server, error) {
 		rhCfg := flatInstanceServerConfig(shared, ic)
-		srv := runtimebroker.New(rhCfg, ic.Manager, ic.Runtime)
+		// A flat instance has no settings-v1 runtime entry: zero record.
+		srv := runtimebroker.New(rhCfg, ic.Manager, ic.Runtime, config.RuntimeBuildRecord{})
 		if p.requestLogger != nil {
 			srv.SetRequestLogger(p.requestLogger)
 		}
@@ -445,6 +451,7 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 			ReadTimeout:  cfg.RuntimeBroker.ReadTimeout,
 			WriteTimeout: cfg.RuntimeBroker.WriteTimeout,
 		},
+		ShutdownContext: p.shutdownContext,
 	})
 	if err != nil {
 		return err
@@ -476,7 +483,9 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 			}
 		}
 		for _, a := range active {
-			startFlatColocatedHeartbeat(ctx, p.wg, p.store, a.Server, a.Context.Identity.RuntimeBrokerID, a.Context.Instance.Name)
+			presenter := newFlatColocatedPresenter(p.hubSrv, a.Context.Identity.RuntimeBrokerID, a.Context.Identity.RuntimeTarget.ID,
+				a.Context.Instance, time.Now().UnixNano())
+			startFlatColocatedHeartbeat(ctx, p.wg, p.store, a.Server, a.Context.Identity.RuntimeBrokerID, a.Context.Instance.Name, presenter)
 		}
 	}
 
@@ -728,8 +737,8 @@ func colocatedSettingsOverlayEnabled(cfg *config.GlobalConfig, hubSrv *hub.Serve
 
 // installColocatedSettingsOverlay installs the global settings overlay for a
 // co-located DB-backed Hub, so that the broker's config.LoadEffectiveSettings
-// calls pick up the stored runtimes, profiles, harness_configs and
-// image_registry instead of only the settings file. It seeds
+// calls pick up the stored runtimes, profiles, harness_configs and the hub's
+// image_registry layers instead of only the settings file. It seeds
 // the overlay from the current operational settings snapshot so stored
 // values apply from the first dispatch; later changes arrive through
 // hub.ApplySnapshot. Flat instances never read profiles or runtimes from it.
@@ -742,7 +751,10 @@ func installColocatedSettingsOverlay(cfg *config.GlobalConfig, hubSrv *hub.Serve
 	config.SetGlobalSettingsOverlay(overlay)
 	if ops := hubSrv.GetOperationalSettings(); ops != nil {
 		snap := ops.Snapshot()
-		overlay.Update(snap.Runtimes, snap.Profiles, snap.HarnessConfigs, snap.ImageRegistry)
+		overlay.Update(snap.Runtimes, snap.Profiles, snap.HarnessConfigs)
+		// The startup ApplySnapshot ran before this install, so the
+		// image_registry layers are fed here too (ptone/scion#3916).
+		overlay.UpdateImageRegistryInputs(ops.ImageRegistryHubInputs())
 		log.Printf("Settings overlay installed for co-located broker (runtimes=%d, profiles=%d, harness_configs=%d)",
 			len(snap.Runtimes), len(snap.Profiles), len(snap.HarnessConfigs))
 	} else {
@@ -773,17 +785,69 @@ func enableColocatedProfileReferences(ctx context.Context, hubSrv *hub.Server) {
 		return
 	}
 	hubSrv.EnableProfileReferences(ctx, overlay, brokerID, globalDir)
-	_, _, _ = config.LoadEffectiveSettings("")
+	_, _, _ = config.LoadEffectiveSettings(globalDir)
+}
+
+// flatColocatedPresenter publishes a co-located flat instance's FC4-a
+// presentation (contract-appendix-p3.md FC4-a, ptone/scion#3282). A co-located
+// connection sends no HTTP heartbeat, so the internal heartbeat loop
+// publishes it through the Hub's one writer,
+// hub.Server.ApplyRuntimeTargetPresentation (write rules 2-4 and the
+// Hub-computed hash; rule 1, broker credentials on the request, does not
+// apply to this in-process caller). The presentation is computed once, the
+// epoch is fixed for the process life and the sequence grows per tick, as
+// on the HTTP path.
+type flatColocatedPresenter struct {
+	hub          *hub.Server
+	brokerID     string
+	targetID     string
+	presentation api.RuntimeTargetPresentation
+	epoch        int64
+	seq          int64
+}
+
+// newFlatColocatedPresenter returns the presenter for one co-located flat
+// instance, or nil without a Hub.
+func newFlatColocatedPresenter(hubSrv *hub.Server, brokerID, targetID string, inst config.V1RuntimeBrokerInstanceConfig, epoch int64) *flatColocatedPresenter {
+	if hubSrv == nil {
+		return nil
+	}
+	return &flatColocatedPresenter{
+		hub:          hubSrv,
+		brokerID:     brokerID,
+		targetID:     targetID,
+		presentation: config.PresentInstance(inst).API(),
+		epoch:        epoch,
+	}
+}
+
+// publish sends the presentation with the next sequence. It is called from
+// one goroutine only (the instance's heartbeat loop).
+func (p *flatColocatedPresenter) publish(ctx context.Context, now time.Time) (hub.PresentationResult, error) {
+	p.seq++
+	pres := p.presentation
+	return p.hub.ApplyRuntimeTargetPresentation(ctx, p.brokerID, p.targetID, &pres, p.epoch, p.seq, now)
+}
+
+// flatColocatedHeartbeatInterval is the co-located internal heartbeat
+// period. Tests shorten it.
+var flatColocatedHeartbeatInterval = 30 * time.Second
+
+// controlChannelState reports whether an instance's control channel is up
+// (*runtimebroker.Server).
+type controlChannelState interface {
+	IsControlChannelConnected() bool
 }
 
 // startFlatColocatedHeartbeat runs the co-located internal heartbeat for one
-// active instance: every 30s it writes the instance's status from its own
-// control channel state.
-func startFlatColocatedHeartbeat(ctx context.Context, wg *sync.WaitGroup, s store.Store, srv *runtimebroker.Server, brokerID, brokerName string) {
+// active instance: every flatColocatedHeartbeatInterval it writes the
+// instance's status from its own control channel state, then publishes its
+// presentation (presenter, when not nil).
+func startFlatColocatedHeartbeat(ctx context.Context, wg *sync.WaitGroup, s store.Store, srv controlChannelState, brokerID, brokerName string, presenter *flatColocatedPresenter) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		ticker := time.NewTicker(30 * time.Second)
+		ticker := time.NewTicker(flatColocatedHeartbeatInterval)
 		defer ticker.Stop()
 		prevOnline := srv.IsControlChannelConnected()
 		for {
@@ -804,7 +868,19 @@ func startFlatColocatedHeartbeat(ctx context.Context, wg *sync.WaitGroup, s stor
 				if err := s.UpdateRuntimeBrokerHeartbeat(ctx, brokerID, status); err != nil {
 					log.Printf("Warning: failed to update internal heartbeat for %s: %v", brokerName, err)
 				}
+				if presenter != nil {
+					if _, err := presenter.publish(ctx, time.Now()); err != nil {
+						log.Printf("Warning: failed to publish the runtime target presentation for %s: %v", brokerName, err)
+					}
+				}
 			}
 		}
 	}()
+}
+
+// hostObservationPtr returns the detection's observation for
+// EmbeddedFlatRegistrationOptions.HostIdentity.
+func hostObservationPtr(d hostDetection) *store.HostIdentityObservation {
+	obs := d.Observation()
+	return &obs
 }

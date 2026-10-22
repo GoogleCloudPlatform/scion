@@ -15,6 +15,7 @@
 package opsettings
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"reflect"
@@ -168,5 +169,75 @@ func TestServerEnvAliasesReach(t *testing.T) {
 	}
 	if checked < 100 {
 		t.Fatalf("checked only %d aliases; the alias derivation is broken", checked)
+	}
+}
+
+// TestDefaultModelFromEnv: SCION_SEED_DEFAULT_MODEL (an alias) and
+// SCION_SEED_DEFAULTMODEL seed default_model, and SCION_SERVER_DEFAULTMODEL
+// reaches the bootstrap merge and is reported as an env override (the admin
+// page's env badge source).
+func TestDefaultModelFromEnv(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	for _, name := range []string{"SCION_SEED_DEFAULT_MODEL", "SCION_SEED_DEFAULTMODEL"} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(name, "gemini-envtest")
+			if got := config.LoadSeedEnvKoanf().String("default_model"); got != "gemini-envtest" {
+				t.Errorf("seed layer default_model = %q", got)
+			}
+			if got := config.LoadBootstrapKoanf().String("default_model"); got != "gemini-envtest" {
+				t.Errorf("bootstrap default_model = %q", got)
+			}
+		})
+	}
+	t.Setenv("SCION_SERVER_DEFAULTMODEL", "claude-envtest")
+	if got := config.LoadBootstrapKoanf().String("default_model"); got != "claude-envtest" {
+		t.Errorf("bootstrap default_model = %q, want the SCION_SERVER_ value over the seed", got)
+	}
+	found := false
+	for _, k := range DetectEnvOverrides(config.LoadEnvKoanf()) {
+		found = found || k == "default_model"
+	}
+	if !found {
+		t.Error("default_model is not reported as an env override")
+	}
+}
+
+// TestBooleanFalseFromEnvValidates: SCION_SERVER_<bool>=false reaches the
+// bootstrap section as the boolean false, so the section validates and the
+// setting is off.
+func TestBooleanFalseFromEnvValidates(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SCION_SERVER_HUB_AUTOSUSPENDSTALLED", "false")
+	t.Setenv("SCION_SERVER_TELEMETRY_ENABLED", "false")
+	t.Setenv("SCION_SERVER_DEFAULTMAXTURNS", "12")
+	k := config.LoadBootstrapKoanf()
+	for _, sec := range []string{"lifecycle", "telemetry", "agent_defaults"} {
+		doc, err := ExtractSectionFromKoanf(k, sec)
+		if err != nil {
+			t.Fatalf("%s: %v", sec, err)
+		}
+		if errs := Validate(sec, doc); len(errs) > 0 {
+			t.Errorf("%s: %s does not validate: %v", sec, doc, errs)
+		}
+	}
+	var lc LifecycleSettings
+	doc, _ := ExtractSectionFromKoanf(k, "lifecycle")
+	if err := json.Unmarshal(doc, &lc); err != nil {
+		t.Fatalf("decode lifecycle: %v", err)
+	}
+	if lc.AutoSuspendStalled == nil || *lc.AutoSuspendStalled {
+		t.Errorf("auto_suspend_stalled = %v, want false", lc.AutoSuspendStalled)
+	}
+}
+
+// TestValidateServerEnvRegistry: with the real registry, a Layer-0
+// SCION_SEED_* name (seeding never reads it) does not stop the server, while a
+// Layer-1 one with a bad value does.
+func TestValidateServerEnvRegistry(t *testing.T) {
+	if err := config.ValidateServerEnv([]string{"SCION_SEED_SERVER_HUB_PORT=abc"}, IsLayer1Key); err != nil {
+		t.Errorf("Layer-0 seed name stopped the server: %v", err)
+	}
+	if err := config.ValidateServerEnv([]string{"SCION_SEED_SERVER_HUB_AUTOSUSPENDSTALLED=abc"}, IsLayer1Key); err == nil {
+		t.Error("a bad Layer-1 seed value did not stop the server")
 	}
 }

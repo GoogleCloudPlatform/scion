@@ -29,9 +29,11 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -287,8 +289,10 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	// SECURITY-GATE: CheckAccess — verify project.create permission.
-	// The resource is hub-scoped because the project does not exist yet.
-	if !s.authorize(w, r, Resource{Type: "project"}, ActionCreate) {
+	// The project does not exist yet, so the request is a collection-level
+	// create at the hub scope (hubCollectionEvidence). A token needs the
+	// project:create selector on a hub boundary.
+	if !s.authorizeProjectCreate(w, r) {
 		return
 	}
 
@@ -795,6 +799,35 @@ func (s *Server) createProjectOwnerRoleBindingTx(ctx context.Context, tx store.S
 	return nil
 }
 
+// projectCreateDecision is the project.create admission shared by project
+// create, project register and project clone. The new project does not
+// exist yet, so the request is a collection-level create at the hub scope
+// (hubCollectionEvidence): a token needs the project:create selector on a
+// hub boundary and its holder needs live project.create authority. Session
+// decisions do not depend on the evidence.
+func (s *Server) projectCreateDecision(ctx context.Context, identity Identity) Decision {
+	return s.authzService.CheckAccessWithEvidence(ctx, identity, Resource{Type: "project"}, ActionCreate, hubCollectionEvidence("project.create"))
+}
+
+// authorizeProjectCreate applies projectCreateDecision for the request
+// identity and writes the same 401 and 403 responses as authorize.
+func (s *Server) authorizeProjectCreate(w http.ResponseWriter, r *http.Request) bool {
+	ctx := r.Context()
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return false
+	}
+	resource := Resource{Type: "project"}
+	decision := s.projectCreateDecision(ctx, identity)
+	if !decision.Allowed {
+		logAuthzDenial(r, identity, resource, ActionCreate, decision.Reason)
+		writeForbiddenStructuredDenialCause(w, "", resource.Type, ActionCreate, decision.DeniedBy, decision.adoptionDetailsCause())
+		return false
+	}
+	return true
+}
+
 // projectOwnerGrantDenial returns a reason when the request credential may
 // not be granted the project-owner role of a project it creates, and "" when
 // it may. A credential with a permission ceiling (a scoped user identity)
@@ -1251,17 +1284,20 @@ func (s *Server) initHubManagedProject(project *store.Project) error {
 		if err != nil {
 			return fmt.Errorf("failed to read default project settings: %w", err)
 		}
-		if err := os.WriteFile(settingsPath, defaultSettings, 0644); err != nil {
+		// Checked again under the settings lock, so a file another writer
+		// has just created is not replaced.
+		if err := config.CreateSettingsFileIfMissing(settingsPath, defaultSettings); err != nil {
 			return fmt.Errorf("failed to seed settings.yaml: %w", err)
 		}
 	}
 
 	// Write hub connection settings into the seeded settings file.
+	// hub.project_id is the one v1 key for the project ID (the other
+	// project-ID key names map to it).
 	settingsUpdates := map[string]string{
-		"hub.enabled":   "true",
-		"hub.endpoint":  s.HubEndpointFor(HubEndpointForProjectSettings),
-		"hub.projectId": project.ID,
-		"project_id":    project.ID,
+		"hub.enabled":                     "true",
+		"hub.endpoint":                    s.HubEndpointFor(HubEndpointForProjectSettings),
+		projectkeys.ConfigHubProjectIDKey: project.ID,
 	}
 	for key, value := range settingsUpdates {
 		if err := config.UpdateSetting(scionDir, key, value, false); err != nil {
@@ -1331,11 +1367,12 @@ func (s *Server) cloneSharedWorkspaceProject(ctx context.Context, project *store
 	}
 
 	// Write hub connection settings
+	// hub.project_id is the one v1 key for the project ID (the other
+	// project-ID key names map to it).
 	settingsUpdates := map[string]string{
-		"hub.enabled":   "true",
-		"hub.endpoint":  s.HubEndpointFor(HubEndpointForProjectSettings),
-		"hub.projectId": project.ID,
-		"project_id":    project.ID,
+		"hub.enabled":                     "true",
+		"hub.endpoint":                    s.HubEndpointFor(HubEndpointForProjectSettings),
+		projectkeys.ConfigHubProjectIDKey: project.ID,
 	}
 	for key, value := range settingsUpdates {
 		if err := config.UpdateSetting(scionDir, key, value, false); err != nil {
@@ -1514,8 +1551,10 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 
 	// SECURITY-GATE: CheckAccess — verify project.create permission.
 	// Register may find an existing project or create a new one; either way
-	// the caller must be allowed to provision projects at hub scope.
-	if !s.authorize(w, r, Resource{Type: "project"}, ActionCreate) {
+	// the caller must be allowed to provision projects at hub scope, as a
+	// collection-level create (hubCollectionEvidence). Register checks
+	// project.create; project.register is not checked.
+	if !s.authorizeProjectCreate(w, r) {
 		return
 	}
 
@@ -1525,6 +1564,17 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
+	}
+
+	// SECURITY-GATE: the embedded-broker form of register (req.Broker set)
+	// creates or re-registers a broker and returns its secret, so it is
+	// session-only (CREDENTIAL_MANAGEMENT): every credential other than an
+	// interactive session or a dev credential is refused before any lookup
+	// or write. A token registers brokers through POST /api/v1/brokers.
+	if req.Broker != nil {
+		if _, ok := s.requireSessionCredentialFor(w, ctx, authzop.ReasonCredentialManagement); !ok {
+			return
+		}
 	}
 
 	if req.Name == "" {
@@ -2036,10 +2086,9 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 
 		if existingBroker != nil {
 			registerOperation = "reregister"
-			// Update existing broker
+			// Update existing broker. The name and slug are set at
+			// creation or through the update API, so they are kept.
 			broker = existingBroker
-			broker.Name = req.Broker.Name
-			broker.Slug = api.Slugify(req.Broker.Name)
 			broker.Version = req.Broker.Version
 			broker.Status = store.BrokerStatusOnline
 			broker.ConnectionState = "connected"
@@ -2079,6 +2128,9 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 				writeErrorFromErr(w, err, "")
 				return
 			}
+			// A row created (or re-created after a deregistration) here gets
+			// its agents' reservations back before the registration answers.
+			s.BackfillBrokerOnRegistration(ctx, broker.ID)
 		}
 		LogRegistrationEvent(ctx, s.auditLogger, broker.ID, broker.Name, linkedByForProvider(callerUser), getClientIP(r),
 			mergeBrokerAuditDetails(brokerAuditCredentialDetails(ctx), "operation", registerOperation, "path", "embedded"))
@@ -2151,6 +2203,11 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// The node image registry is shown redacted (ptone/scion#3916).
+	if broker != nil {
+		shown := brokerForDisplay(*broker)
+		broker = &shown
+	}
 	writeJSON(w, http.StatusOK, RegisterProjectResponse{
 		Project:     project,
 		Broker:      broker,
@@ -2513,6 +2570,12 @@ func (s *Server) handleProjectAgents(w http.ResponseWriter, r *http.Request, pro
 	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		if err == store.ErrNotFound {
+			// A visitor gets the one refusal for an unknown project too
+			// (admitVisitorSubRoute already refused it before here).
+			if isVisitorIdentity(GetIdentityFromContext(ctx)) {
+				writeVisitorRefusal(w)
+				return
+			}
 			NotFound(w, "Project")
 			return
 		}
@@ -2586,6 +2649,12 @@ var projectAgentRouteActions = map[AgentSubRouteID]string{
 
 // listProjectAgents lists agents within a specific project
 func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, projectID string) {
+	// A project visitor gets the visitor view only (routeGuard admitted it
+	// through admitVisitorSubRoute for this request).
+	if isVisitorIdentity(GetIdentityFromContext(r.Context())) {
+		s.listProjectAgentsForVisitor(w, r, projectID)
+		return
+	}
 	// The ids= format check runs before any authorization or store call
 	// this handler makes (see parseAgentListIDs).
 	if q := r.URL.Query(); !validateAgentListIDs(w, q, agentListLimit(q), isSortedModeRequest(q)) {
@@ -2734,7 +2803,7 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 		scopeCapDone()
 	}
 
-	writeAgentList(w, legacyAgentListView(query), ListAgentsResponse{
+	s.writeAgentList(ctx, w, legacyAgentListView(query), ListAgentsResponse{
 		Agents:                agents,
 		NextCursor:            result.NextCursor,
 		TotalCount:            result.TotalCount,
@@ -2806,6 +2875,12 @@ func (s *Server) createProjectAgent(w http.ResponseWriter, r *http.Request, proj
 // its descendants (authz_launcher_read.go). An agent caller that is denied, or that names
 // an agent in another project, gets the same 404 as for a missing agent.
 func (s *Server) getProjectAgent(w http.ResponseWriter, r *http.Request, projectID, agentID string) {
+	// A project visitor gets the visitor view only (routeGuard admitted it
+	// through admitVisitorSubRoute for this request).
+	if isVisitorIdentity(GetIdentityFromContext(r.Context())) {
+		s.getProjectAgentForVisitor(w, r, projectID, agentID)
+		return
+	}
 	if !checkAgentReadScope(w, r) {
 		return
 	}
@@ -2962,6 +3037,12 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		if err == store.ErrNotFound {
 			agent, err = s.store.GetAgent(ctx, agentID)
+			if (errors.Is(err, store.ErrNotFound) || (err == nil && agent.ProjectID != projectID)) && isVisitorIdentity(GetIdentityFromContext(ctx)) {
+				// A visitor gets the one refusal for an unknown agent too
+				// (admitVisitorSubRoute already refused it before here).
+				writeVisitorRefusal(w)
+				return
+			}
 			if err != nil {
 				writeError(w, http.StatusNotFound, ErrCodeAgentNotFound,
 					fmt.Sprintf("Agent %q not found in project", agentID),
@@ -3013,6 +3094,11 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 		isSystemPlane := false
 		allowed, reason, decision := s.authorizeAgentMessage(r.Context(), identity, agent, isSystemPlane)
 		messaging.RecordStep(r.Context(), "message_authorized")
+		if !allowed && isVisitorIdentity(identity) {
+			// A visitor's refusal names no reason or message mode.
+			writeVisitorRefusal(w)
+			return
+		}
 		if !allowed {
 			// Use typed denial code from the decision (agent path) or
 			// fall back to generic forbidden code (user path).

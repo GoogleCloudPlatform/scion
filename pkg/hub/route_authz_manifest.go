@@ -139,6 +139,10 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/users/me/groups": "authenticated", // My groups
 	"/api/v1/principals/":     "authenticated", // Principal routes
 
+	// ── Project visitor's own grants ───────────────────────────────────
+	"/api/v1/users/me/visitor-grants": "authenticated", // Own visitor grants (visitor only; 404 for anyone else)
+	"/api/v1/users/me/visitor-dms":    "authenticated", // Own DMs with agents (visitor only; 404 for anyone else)
+
 	// ── User-scoped injected skills ────────────────────────────────────
 	"/api/v1/users/me/injected-skills":  "authenticated", // List/create user injected skills
 	"/api/v1/users/me/injected-skills/": "authenticated", // User injected skill by ID
@@ -240,8 +244,8 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/conversations":         "authenticated", // List/create conversations
 	"/api/v1/conversations/":        "authenticated", // Conversation routes
 	"/api/v1/conversations/resolve": "authenticated", // Resolve a conversation reference
-	"/api/v1/thread-groups":         "authenticated", // List/create thread groups (experiment hub.chat_thread_groups)
-	"/api/v1/thread-groups/":        "authenticated", // Thread group routes (experiment hub.chat_thread_groups)
+	"/api/v1/thread-groups":         "authenticated", // List/create thread groups
+	"/api/v1/thread-groups/":        "authenticated", // Thread group routes
 
 	// ── Cross-project messaging ────────────────────────────────────────
 	"/api/v1/messaging/capabilities":    "authenticated", // Messaging feature capabilities
@@ -302,6 +306,8 @@ var routeAuthzManifest = map[string]string{
 	"POST /api/v1/test-identities/{id}/token":          "authenticated", // Re-issue a test identity token
 	"POST /api/v1/test-identities/{id}/web-login-code": "authenticated", // Mint a test identity web-login code
 	"DELETE /api/v1/test-identities/{id}":              "authenticated", // Delete a test identity
+	"POST /api/v1/test-identities/cleanup":             "authenticated", // Issuer-scoped cleanup of expired test identities
+	"GET /api/v1/test-identities/provenance":           "authenticated", // Provenance of one resource
 	"POST /api/v1/test-identities/admin":               "authenticated", // Issue an admin-kind test identity
 	"POST /api/v1/test-identities/admin/revoke-all":    "authenticated", // Revoke every admin-kind test identity
 	"GET /api/v1/test-identities/admin/{id}/residue":   "authenticated", // Residue report of an admin-kind test identity

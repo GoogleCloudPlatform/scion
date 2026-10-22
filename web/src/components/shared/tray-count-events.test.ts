@@ -54,9 +54,12 @@ function user(id: string): any {
   return { id, email: `${id}@example.com`, displayName: id };
 }
 
+/** The real setTimeout, captured before the tests fake timers. */
+const realSetTimeout = globalThis.setTimeout;
+
 /** Lets pending promise chains (fetch, json, Lit update) settle. */
 async function flush(): Promise<void> {
-  for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+  for (let i = 0; i < 5; i++) await new Promise((r) => realSetTimeout(r, 0));
 }
 
 interface TrayCase {
@@ -105,7 +108,7 @@ describe.each(CASES)('$tag: count events', (c) => {
   beforeEach(() => {
     pending.length = 0;
     events = [];
-    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'] });
     document.addEventListener(TRAY_COUNT_EVENT, record);
   });
 

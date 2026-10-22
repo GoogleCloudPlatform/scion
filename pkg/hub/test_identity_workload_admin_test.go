@@ -271,13 +271,21 @@ func TestWorkloadAdminDelegation_InTransactionGrantorRecheck(t *testing.T) {
 	ctx := context.Background()
 	inTx := func(grantorID, permission string) error {
 		return e.s.WithTx(ctx, func(tx store.Store) error {
-			return e.srv.recheckTestAdminDelegationGrantor(ctx, tx, grantorID, permission)
+			return e.srv.recheckTestAdminDelegationGrantor(ctx, tx, store.DelegationGrantorHuman, grantorID, permission)
 		})
 	}
 
 	live := taUser(t, e.s, "x4-c1-live", store.SystemRoleSuperAdmin)
 	require.NoError(t, inTx(live.ID, permissionTestIdentityIssueAdmin))
 	require.NoError(t, inTx(live.ID, permissionTestIdentityIssueSuperAdmin))
+	// Phase DL: a non-human grantor kind is refused before any read, even
+	// for a live super-admin's id.
+	for _, kind := range []string{store.DelegationGrantorTestInfraOffline, "robot", ""} {
+		err := e.s.WithTx(ctx, func(tx store.Store) error {
+			return e.srv.recheckTestAdminDelegationGrantor(ctx, tx, kind, live.ID, permissionTestIdentityIssueAdmin)
+		})
+		require.ErrorIs(t, err, errTestAdminIssuerNotLive, "grantor kind %q", kind)
+	}
 	assert.ErrorIs(t, inTx(live.ID, "test_identity.no_such_capability"), errTestAdminIssuerNotLive, "capability not held")
 
 	demoted := taUser(t, e.s, "x4-c1-demoted", store.SystemRoleSuperAdmin)
@@ -753,9 +761,11 @@ func TestWorkloadAdminDelegation_ScopeBoundsTheKind(t *testing.T) {
 	assert.Zero(t, e.liveAdmins(t, ""))
 }
 
-// Admin-scope delegations are issue-only in X4: member issuance, list,
-// token re-issue, delete and the web-login code refuse them (403), even for
-// the identities they issued.
+// Admin-scope delegations reach no member-tier route: member issuance,
+// list, delete and purge refuse them (403), even for the identities they
+// issued. (Token re-issue and the web-login code for their own admin-kind
+// identities were admitted in X4b; see
+// test_identity_workload_admin_credentials_test.go.)
 func TestWorkloadAdminDelegation_IssueOnly(t *testing.T) {
 	e := newX4Env(t, true)
 	x2EnableWebSessions(t, e.x2Env)
@@ -775,14 +785,11 @@ func TestWorkloadAdminDelegation_IssueOnly(t *testing.T) {
 		"list": func() *httptest.ResponseRecorder {
 			return e.workload(t, http.MethodGet, "/api/v1/test-identities", tok(), hd.ID, nil, nil)
 		},
-		"token": func() *httptest.ResponseRecorder {
-			return e.workload(t, http.MethodPost, "/api/v1/test-identities/"+adminID+"/token", tok(), hd.ID, nil, nil)
-		},
 		"delete": func() *httptest.ResponseRecorder {
 			return e.workload(t, http.MethodDelete, "/api/v1/test-identities/"+adminID, tok(), hd.ID, nil, nil)
 		},
-		"web-code": func() *httptest.ResponseRecorder {
-			return e.workload(t, http.MethodPost, "/api/v1/test-identities/"+adminID+"/web-login-code", tok(), hd.ID, nil, nil)
+		"purge": func() *httptest.ResponseRecorder {
+			return e.workload(t, http.MethodDelete, "/api/v1/test-identities/"+adminID+"?purge=true", tok(), hd.ID, nil, nil)
 		},
 	} {
 		got := call()

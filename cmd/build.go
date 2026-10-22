@@ -77,7 +77,10 @@ field is updated to reference the built image.`,
 
 		imageRegistry := ""
 		if settings != nil {
-			imageRegistry = settings.ResolveImageRegistry(profile)
+			// SCION_IMAGE_REGISTRY beats every settings layer
+			// (ptone/scion#3916).
+			imageRegistry = config.ResolveImageRegistryLayers(
+				settings.ImageRegistryLayers(profile, config.ImageRegistryFromEnv())).Value
 		}
 
 		baseImage := buildBaseImage
@@ -290,15 +293,7 @@ func resolveGCPProject(settings *config.VersionedSettings) string {
 // modifying the image field in config.yaml. The image field is a stable
 // reference; two-phase resolution at agent start prefers local images.
 func syncBuildToHub(harnessConfigName string, hcDir *config.HarnessConfigDir) {
-	var gp string
-	if projectPath != "" {
-		if resolved, err := config.GetResolvedProjectDir(projectPath); err == nil {
-			gp = resolved
-		}
-	} else if resolved, err := config.GetResolvedProjectDir(""); err == nil {
-		gp = resolved
-	}
-	hubCtx, hubErr := requireHub(gp)
+	hubCtx, hubErr := requireHubForUpload(projectPath)
 	if errors.Is(hubErr, errHubNotConfigured) {
 		// No hub configured: the image is built locally and there is
 		// nothing to sync it to.

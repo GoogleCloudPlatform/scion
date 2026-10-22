@@ -177,13 +177,6 @@ const AgentDelegation = "hub.agent_delegation"
 // unaffected).
 const FederationProjectVisitors = "federation.project_visitors"
 
-// ChatThreadGroups gates project-scoped chat thread groups
-// (ptone/scion#4424): the hub's /api/v1/thread-groups routes (404 while
-// off), the threadGroupId field on conversation create, the migration of
-// personal groups into project groups, and the web rail's project groups.
-// Turning it off hides the feature but keeps every stored group.
-const ChatThreadGroups = "hub.chat_thread_groups"
-
 // AgentPlugins gates native install of Agent Plugins 1.0.0 bundles declared
 // in a template's agent_plugins. The hub sends it to the broker at each
 // dispatch; outside broker mode the settings key local_experiments decides.
@@ -198,10 +191,30 @@ const AgentPlugins = "hub.agent_plugins"
 // are reaped either way.
 const AsyncAgentLaunch = "hub.async_agent_launch"
 
+// AsyncAgentStart gates asynchronous start, resume and restart of existing
+// agents (ptone/scion#4669). It applies only while hub.async_agent_launch is
+// on too. Turn it on only after every hub node runs a version that
+// advertises async_start_v1 in the hub-instance registry; to roll back,
+// turn it off and wait launch_timeout plus 15 seconds before downgrading
+// any node. This release registers it only: every start stays synchronous
+// whatever its value.
+const AsyncAgentStart = "hub.async_agent_start"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
 var compiled = []Experiment{
+	{
+		Name:        AsyncAgentStart,
+		Title:       "Asynchronous agent start",
+		Description: "Lets the hub answer a start, resume or restart of an existing agent as soon as the Runtime Broker accepts it, like an asynchronous create; it applies only while hub.async_agent_launch is also on. Turn it on only after every hub node runs a version that supports it (each advertises async_start_v1). To roll back, turn it off and wait launch_timeout plus 15 seconds before downgrading any node. In this release starts stay synchronous whatever its value.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#4669",
+		Owner:       "async-start",
+		ReviewBy:    "2027-01-12",
+	},
 	{
 		Name:        AsyncAgentLaunch,
 		Title:       "Asynchronous agent create",
@@ -271,13 +284,16 @@ var compiled = []Experiment{
 	{
 		Name:        FlatRuntimeBrokers,
 		Title:       "Flat Runtime Brokers",
-		Description: "Lets a Runtime Broker serve exactly one runtime target with a stable identity: the hub accepts single-target Runtime Broker registrations, pins new agents to that target and rejects mismatched dispatches. Existing profile-based Runtime Brokers are unchanged.",
+		Description: "Lets a Runtime Broker serve exactly one runtime target with a stable identity: the hub accepts single-target Runtime Broker registrations, pins new agents to that target and rejects mismatched dispatches. Existing profile-based Runtime Brokers are unchanged. The web layer only lets the web UI read the flag (presentation only); every hub check is LayerServer. With it on, the web UI shows the Brokers area.",
 		Default:     false,
-		Layers:      []Layer{LayerServer},
-		Stage:       StageAlpha,
-		Issue:       "ptone/scion#2926",
-		Owner:       "runtime-broker",
-		ReviewBy:    "2027-03-31",
+		Layers: []Layer{
+			LayerServer,
+			LayerWeb,
+		},
+		Stage:    StageAlpha,
+		Issue:    "ptone/scion#2926",
+		Owner:    "runtime-broker",
+		ReviewBy: "2027-03-31",
 	},
 	{
 		Name:        Artifacts,
@@ -335,17 +351,6 @@ var compiled = []Experiment{
 		ReviewBy:    "2027-01-07",
 	},
 	{
-		Name:        ChatThreadGroups,
-		Title:       "Project thread groups in chat",
-		Description: "Makes chat thread groups belong to the project, so every project member (user or agent) sees the same groups and can file threads into them; each user keeps their own sidebar order. Gates the web rail (LayerWeb) and the hub's /api/v1/thread-groups routes, which answer 404 while it is off, plus the copy of personal groups into project groups (LayerServer). Turning it off hides project groups and restores personal groups; no data is deleted.",
-		Default:     false,
-		Layers:      []Layer{LayerWeb, LayerServer},
-		Stage:       StageAlpha,
-		Issue:       "ptone/scion#4424",
-		Owner:       "native-chat",
-		ReviewBy:    "2027-01-11",
-	},
-	{
 		Name:        AgentPlugins,
 		Title:       "Agent Plugins (native install)",
 		Description: "Installs Agent Plugins 1.0.0 bundles declared in a template's agent_plugins into harnesses that support them natively (codex, copilot, muse-code, claude). While off, agent_plugins is ignored with a start warning and previously installed plugins are removed at the next start.",
@@ -369,6 +374,8 @@ var compiledRetired = []string{
 	"web.access_boundaries_authoring",
 	// Graduated: the terminal workspace is always on (ptone/scion#4917).
 	"web.terminal_workspace",
+	// Graduated: project thread groups are always on (ptone/scion#5546).
+	"hub.chat_thread_groups",
 }
 
 // Registry is an immutable, validated set of experiments. It is the only way

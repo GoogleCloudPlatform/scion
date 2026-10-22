@@ -198,6 +198,64 @@ jobs:
       - name: Verify Web Build
         run: ls -la web/dist
 
+      # Guards against stale chunks shipping in the hub binary (#3842).
+      # The build must not write output into public/ (Vite's publicDir copies
+      # it into the next build), and every .js in dist/client/assets must be
+      # referenced by the Vite manifest. Also runs the node:test suites of the
+      # build helper scripts; REQUIRE_BUILD=1 makes the precompress suite's
+      # real-build checks (sibling decoding, byte budgets) fail instead of
+      # skip if the build output is missing.
+      - name: Check Web Build Orphans
+        working-directory: ./web
+        run: |
+          REQUIRE_BUILD=1 npm run test:build-scripts
+          test ! -e public/assets || { echo "public/assets must not exist after the build (#3842)"; exit 1; }
+          npm run check:orphans
+
+      # Bundle budget (ptone/scion#5306): main.js and entry-closure size
+      # limits, the lazy terminal-workspace chunk exists, and no terminal-*
+      # module is in the static closure of the entry (client/main.ts) or of
+      # the login and home routes. Limits live in web/bundle-budget.json.
+      # Not gated: it only reads the build above.
+      - name: Check web bundle budget
+        working-directory: ./web
+        run: node scripts/check-bundle-budget.mjs
+
+      - name: Test web bundle budget script
+        if: ${{ needs.changes.result != 'success' || needs.changes.outputs.web_checks != 'false' }}
+        working-directory: ./web
+        run: node --test scripts/check-bundle-budget.test.mjs
+
+      # npm run build moves the source maps out of web/dist/client (the tree
+      # web/embed.go embeds and the release images copy) into
+      # web/dist/sourcemaps (scripts/move-sourcemaps.mjs). Not gated on
+      # changes: this re-checks the dist/client that the Go tests and Build
+      # Binary below embed, on every run.
+      - name: Check Web Source Maps
+        working-directory: ./web
+        run: |
+          npm run test:move-sourcemaps
+          if find dist/client \( -name '*.map' -o -name '*.map.br' -o -name '*.map.gz' \) | grep .; then
+            echo "::error::source maps left in web/dist/client"; exit 1
+          fi
+          if grep -rlE --include='*.js' --include='*.mjs' --include='*.css' '[#@][[:space:]]*sourceMappingURL=' dist/client; then
+            echo "::error::sourceMappingURL comment left in web/dist/client"; exit 1
+          fi
+          test -f dist/sourcemaps/assets/main.js.map
+
+      # The maps hold only the TypeScript sources already in this repository.
+      # Kept for debugging and bundle attribution: uploaded only for pushes to
+      # main, with short retention. The release workflow never uploads or
+      # attaches them.
+      - name: Upload web source maps
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: web-sourcemaps
+          path: web/dist/sourcemaps/
+          retention-days: 7
+          if-no-files-found: error
+
       - name: Verify Web Types
         if: ${{ needs.changes.result != 'success' || needs.changes.outputs.web_checks != 'false' }}
         working-directory: ./web
@@ -329,6 +387,26 @@ jobs:
           fi
           exit "$rc"
 
+      - name: Check Store Delete Callers
+        run: |
+          set +e
+          ./hack/check-store-delete-callers.sh --self-test
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            set -e
+            echo "::error title=Store delete callers NOT checked::check-store-delete-callers --self-test failed (exit $rc) — the guard itself is broken or could not run, so nothing was analysed."
+            exit "$rc"
+          fi
+          ./hack/check-store-delete-callers.sh
+          rc=$?
+          set -e
+          if [ "$rc" -eq 1 ]; then
+            echo "::error title=Store delete callers::A direct store DeleteAgent or DeleteProject reference does not match hack/store-delete-callers-allowlist.txt. The store methods do not deactivate delegation edges or service-account assignments; remove agents and projects through the delete engine or ProjectDeletionService, or deactivate first and add an allowlist entry. If calls were removed, lower the allowlist count. Details are in the step log."
+          elif [ "$rc" -ne 0 ]; then
+            echo "::error title=Store delete callers NOT checked::check-store-delete-callers could not run (exit $rc) — nothing was analysed."
+          fi
+          exit "$rc"
+
       - name: Check Harness Coverage in Cloud Build Configs
         run: |
           # Invoked directly rather than via a Makefile target, for the same
@@ -344,6 +422,29 @@ jobs:
             0) ;;
             1) echo "::error title=Harness coverage::A harnesses/<name>/Dockerfile is out of sync with one or more cloudbuild-*.yaml configs (see ptone/scion#2357). Details are in the step log above." ;;
             *) echo "::error title=Harness coverage NOT checked::check-harness-coverage.sh could not run (exit $rc) — NOTHING WAS ANALYSED. This is an environment failure and is NOT a statement about the codebase. Do not read it as a coverage failure." ;;
+          esac
+          exit "$rc"
+
+      - name: Check Image Go Directories
+        run: |
+          # Invoked directly rather than via `make check-image-go-dirs`, for the
+          # same reason as Check Authorization Guards above: make would collapse
+          # the script's exit 1 (violations) and exit 2 (nothing was analysed).
+          set +e
+          ./hack/check-image-go-dirs.sh --self-test
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            set -e
+            echo "::error title=Image Go directories NOT checked::check-image-go-dirs --self-test failed (exit $rc) — the check itself is broken or could not run, so nothing was analysed."
+            exit "$rc"
+          fi
+          ./hack/check-image-go-dirs.sh
+          rc=$?
+          set -e
+          case "$rc" in
+            0) ;;
+            1) echo "::error title=Image Go directories::A Dockerfile that builds the root Go module does not copy one of its top-level Go directories, or an ignore file drops one from the build context. Add the COPY line, or a justified EXCLUDED_DIRS entry in hack/check-image-go-dirs.sh; details are in the step log above." ;;
+            *) echo "::error title=Image Go directories NOT checked::check-image-go-dirs.sh could not run (exit $rc) — NOTHING WAS ANALYSED. This is an environment failure, not a statement about the codebase." ;;
           esac
           exit "$rc"
 
@@ -682,6 +783,17 @@ jobs:
         with:
           workload: sqlite-nonhub
 
+      # pkg/hub/attache2e attaches to a real tmux server; with
+      # SCION_TEST_REQUIRE_TMUX=1 it fails instead of skipping when tmux
+      # is missing (ptone/scion#3312).
+      - name: Install tmux
+        run: |
+          if ! command -v tmux &> /dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y tmux
+          fi
+          tmux -V
+
       # `make test-fast-ci` (Build & Test, above) uses -tags no_sqlite, which
       # leaves out every test file that carries `//go:build !no_sqlite`
       # because it needs a real SQLite-backed store (ptone/scion#1118). This
@@ -699,6 +811,8 @@ jobs:
       # timeout stays above it so a real hang still produces go's goroutine
       # dump.
       - name: Run SQLite-enabled tests (make test-sqlite-nonhub)
+        env:
+          SCION_TEST_REQUIRE_TMUX: "1"
         run: make test-sqlite-nonhub
 
       # internal/fixturegen's TestFixtureCoverage carries `//go:build
@@ -1226,6 +1340,12 @@ jobs:
   lint:
     name: golangci-lint
     runs-on: ubuntu-latest
+    # Bounds a hang only; the runner shutdowns in ptone/scion#4208 were not
+    # timeouts. Passing lint steps took up to ~22 min at the default
+    # concurrency (4); --concurrency=2 below can make that up to ~2x slower
+    # in the worst case, plus checkout and cache restore, so 60 leaves margin
+    # without falling back to the 360-minute default.
+    timeout-minutes: 60
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -1244,16 +1364,84 @@ jobs:
         with:
           workload: lint
 
-      - name: golangci-lint
-        # Bound golangci-lint memory so type-checking the module (pkg/hub in
-        # particular) cannot exhaust the ~16 GB runner, which shows up as
-        # "The runner has received a shutdown signal" (ptone/scion#4208).
-        env:
-          GOGC: '50'
-          GOMEMLIMIT: 8GiB
+      # The action only restores its analysis cache and installs the binary
+      # here (its post step still saves the cache); lint runs in the next
+      # step so that a memory sampler can log alongside it. The version is
+      # pinned so that a new golangci-lint release cannot change memory use
+      # unnoticed; bump it deliberately.
+      - name: Install golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
-          args: '--new-from-merge-base=origin/main'
+          version: v2.15.0
+          install-only: true
+
+      # Bound memory in the lint step so it cannot exhaust the ~16 GB
+      # runner, which shows up as "The runner has received a shutdown
+      # signal" with no lint output (ptone/scion#4208). golangci-lint
+      # loads packages through go list -export, which compiles each
+      # package for its export data in a separate compile process. The
+      # memory sampler measured one compile process at ~15 GB, while
+      # golangci-lint itself peaked at 5.6-5.7 GB.
+      # - GOFLAGS -gcflags=<pkg/hub>=-c=1 runs the compiler backend for
+      #   pkg/hub on one worker instead of up to four. This may lower
+      #   that compile's peak by the backend state of up to three
+      #   functions compiled at once; most of its memory is retained IR
+      #   and generated code, which -c does not change, so the effect
+      #   is expected to be modest. The package pattern limits the flag
+      #   to pkg/hub; without one it would apply to every package
+      #   matched by ./..., which golangci-lint loads. golangci-lint
+      #   passes its environment through to go list and sets no
+      #   -gcflags of its own.
+      # - --concurrency=2 (default: CPU count, 4) halves the packages
+      #   golangci-lint analyses at once, lowering its own memory; it
+      #   does not bound the compile processes.
+      # - GOGC=25 sets the heap target to 1.25x the live heap (default
+      #   2x; previously 1.5x), trading GC CPU for a lower peak. The
+      #   compile processes inherit it.
+      # - GOMEMLIMIT=8GiB is a soft limit: the GC runs harder near that
+      #   size but does not cap the heap if the live set is larger.
+      #   Close to the limit it holds the heap there rather than at
+      #   1.25x the live heap.
+      # GOLANGCI_LINT_CACHE is exported because the action sets it only
+      # in its own process; it must match the path the action restores
+      # and saves.
+      # The sampler prints memory and the largest process every 30 s to
+      # the live log, so the last lines before a runner shutdown show
+      # how close memory was to the limit. For a compile process it also
+      # prints the package (-p, read from the response file when the
+      # arguments are passed as @file) and the response file's line
+      # count, which tells a package from its test variant. It prints a
+      # peak summary at the end and does not affect the step's result;
+      # the step exits with golangci-lint's exit code.
+      - name: golangci-lint
+        shell: bash
+        env:
+          GOGC: '25'
+          GOMEMLIMIT: 8GiB
+          GOFLAGS: '-gcflags=github.com/GoogleCloudPlatform/scion/pkg/hub=-c=1'
+        run: |
+          export GOLANGCI_LINT_CACHE="$HOME/.cache/golangci-lint"
+          samples="$RUNNER_TEMP/lint-mem.log"
+          : > "$samples"
+          (
+            trap 'kill "$nap" 2>/dev/null; exit 0' TERM
+            while :; do
+              line="$(date -u +%H:%M:%S) $(free -m | awk 'NR==2{printf "used=%s avail=%s total=%s", $3, $7, $2}') top_rss_mb=$(ps -ww -eo rss=,comm=,args= --sort=-rss | awk 'NR==1{p=""; r=""; if ($2=="compile") { for (i=3; i<=NF; i++) { if ($i=="-p" && i<NF) p=$(i+1); else if ($i ~ /^@/ && p=="") { f=substr($i,2); prev=""; n=0; while ((getline l < f) > 0) { n++; if (prev=="-p" && p=="") p=l; prev=l }; close(f); if (n>0) r=",rsp_lines=" n } } } if (p!="" || r!="") p="[" p r "]"; printf "%s%s:%d", $2, p, $1/1024}')"
+              echo "mem: $line"
+              echo "$line" >> "$samples"
+              sleep 30 & nap=$!
+              wait "$nap"
+            done
+          ) &
+          sampler=$!
+          trap 'kill "$sampler" 2>/dev/null || true' EXIT
+          rc=0
+          golangci-lint run --new-from-merge-base=origin/main --concurrency=2 || rc=$?
+          kill "$sampler" 2>/dev/null || true
+          wait "$sampler" 2>/dev/null || true
+          awk '{split($2,u,"="); split($3,a,"="); if (u[2]>max) max=u[2]; if (min=="" || a[2]<min) min=a[2]; n++}
+            END {if (n==0) print "mem summary: no samples"; else printf "mem summary: %d samples, peak used=%d MB, min avail=%d MB\n", n, max, min}' "$samples" || true
+          exit "$rc"
 
       - name: Save Go cache
         uses: ./.github/actions/save-go-cache

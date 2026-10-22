@@ -23,14 +23,13 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"cloud.google.com/go/compute/metadata"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
@@ -147,6 +146,19 @@ func conduitAuthzRecheckIntervalSetting(cfg *config.GlobalConfig) time.Duration 
 	return d
 }
 
+// warnConduitTargetStreamDeadlines logs a startup warning when
+// server.hub.conduit.target_stream_deadlines is enforce in external relay
+// mode: renewals for streams held by or bridged through a separate relay
+// land later, so until then user streams to renewal-capable agents are
+// refused (503 stream_renewal_unavailable) on those routes.
+func warnConduitTargetStreamDeadlines(c config.HubConduitConfig) {
+	if c.TargetStreamDeadlinesValue() != config.ConduitTargetStreamDeadlinesEnforce || !c.ExternalRelay() {
+		return
+	}
+	slog.Warn("server.hub.conduit.target_stream_deadlines is enforce with relay_mode external: " +
+		"user streams to renewal-capable agents are refused (503 stream_renewal_unavailable) until relay renewals land")
+}
+
 // conduitLifetimeCapSetting returns the configured conduit session lifetime
 // cap (default 3500s). validateServerPreflight has already rejected a
 // malformed or out-of-range value.
@@ -194,19 +206,39 @@ func conduitShutdownDrainSetting(cfg *config.GlobalConfig) (time.Duration, bool)
 	return d, set
 }
 
-// Test seams for startConduit and its SIGTERM trap.
+// Test seams for startConduit and its shutdown step.
 var (
-	conduitSignalNotify = signal.Notify
-	conduitSignalStop   = signal.Stop
 	// startConduitRelayFn starts the relay (startConduitRelay).
 	startConduitRelayFn = startConduitRelay
 	// startConduitExternalFn starts external relay mode
 	// (startConduitExternal).
 	startConduitExternalFn = startConduitExternal
-	// conduitShutdownDrain is the trap's drain: the hub's SIGTERM drain
-	// with the configured grace.
+	// conduitShutdownDrain is the shutdown step's drain: the hub's
+	// SIGTERM drain with the configured grace.
 	conduitShutdownDrain = func(hubSrv *hub.Server, grace time.Duration, capDrain bool) {
 		hubSrv.DrainConduitForShutdown(grace, capDrain)
+	}
+	// conduitSetShutdownGrace records a set shutdown_grace on the hub, so
+	// the teardown's relay shutdown caps the drain too (ptone/scion#5105).
+	conduitSetShutdownGrace = func(hubSrv *hub.Server, grace time.Duration) {
+		hubSrv.SetConduitShutdownGrace(grace)
+	}
+	// conduitIngressShutdownDrain is the ingress drain step's drain in
+	// external relay mode: ask the relays to drain this hub's proxied
+	// sessions, hold the proxied legs and close the ones left at the step
+	// deadline.
+	conduitIngressShutdownDrain = func(hubSrv *hub.Server, opts hub.ConduitIngressDrainOptions) {
+		hubSrv.DrainConduitIngressForShutdown(opts)
+	}
+	// conduitIngressProxyActive reports whether the hub proxies conduit
+	// dials to relays (external mode with proxy ingress serving).
+	conduitIngressProxyActive = func(hubSrv *hub.Server) bool {
+		return hubSrv.ConduitIngressProxyActive()
+	}
+	// conduitIngressStop stops the hub proxying conduit dials (the
+	// ingress stop step).
+	conduitIngressStop = func(hubSrv *hub.Server) {
+		hubSrv.BeginConduitIngressShutdown()
 	}
 	// serveConduitInternalListenerFn opens the internal listener that
 	// serves the internal relay API (serveConduitInternalListener).
@@ -226,26 +258,115 @@ var (
 	}
 )
 
-// trapConduitSIGTERM handles SIGTERM while the conduit relay runs (design
-// §3.3): drain sends GoAway to every relay session, and only then is the
+// relayDrainWriteTimeout and relayDrainSendMargin mirror the relay's
+// bounds on a SIGTERM drain (pkg/conduit/relay: deleteTimeout and
+// drainSendMargin): before it sends any GoAway, the relay waits for its two
+// draining registry writes for at most deleteTimeout, and, with a capped
+// drain, at most the drain cap less drainSendMargin.
+const (
+	relayDrainWriteTimeout = 10 * time.Second
+	relayDrainSendMargin   = 500 * time.Millisecond
+)
+
+// conduitDrainSendSlack is the time the drain step allows, after the
+// relay's registry-write bound, for the GoAways to be sent.
+const conduitDrainSendSlack = 2 * time.Second
+
+// conduitDrainStepBound is how long the pre-cancel conduit drain step may
+// hold the shutdown before cancel: the relay's own bound on its draining
+// registry writes plus conduitDrainSendSlack, so cancel (which closes the
+// listeners) never runs before the GoAways unless the relay itself is past
+// its bounds. Unset: 10s + 2s. With shutdown_grace set: min(10s, cap -
+// 0.5s) + 2s, clamped to [2s, S], where cap = shutdown_grace - 2s. A slow
+// registry therefore uses part of the later phases' time (the phase
+// deadlines are measured from the signal); the process still exits within
+// the grace (exit wait at S, watchdog at G - 250ms).
+func conduitDrainStepBound(b serverShutdownBudget) time.Duration {
+	if !b.set {
+		return relayDrainWriteTimeout + conduitDrainSendSlack
+	}
+	writes := max(min(relayDrainWriteTimeout, relay.ShutdownDrainCap(b.grace)-relayDrainSendMargin), 0)
+	return min(writes+conduitDrainSendSlack, b.span())
+}
+
+// registerConduitShutdownDrain makes the relay drain a pre-cancel step of
+// the process's single graceful shutdown (design §3.3, ptone/scion#5054):
+// on the first SIGINT or SIGTERM, after the servers are marked shutting
+// down, drain sends GoAway to every relay session, and only then is the
 // server context cancelled, so every session has its GoAway before any
-// listener closes. The trap is removed when ctx ends. os.Interrupt is
-// handled elsewhere and is not affected.
-func trapConduitSIGTERM(ctx context.Context, cancel context.CancelFunc, drain func(), wg *sync.WaitGroup) {
-	ch := make(chan os.Signal, 1)
-	conduitSignalNotify(ch, syscall.SIGTERM)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		defer conduitSignalStop(ch)
+// listener closes. The step waits for drain at most bound on q's clock.
+// The conduit no longer subscribes to signals itself; a second subscriber
+// would cancel before the drain (ptone/scion#5105). It returns false, and
+// the drain never runs from here, when the shutdown has already begun.
+func registerConduitShutdownDrain(q *serverShutdownSequence, bound time.Duration, drain func()) bool {
+	return q.addStep(shutdownPhaseDrain, boundedShutdownStep(q.clk, bound, "conduit drain", drain))
+}
+
+// shutdownPhaseIngressStop is the phase of the step that stops the hub
+// proxying conduit dials. It sorts before shutdownPhaseMark (the shutdown
+// runs steps in phase order), so the stop runs before the hub's mark
+// step: after the mark a broker-signed dial still passes the hub's
+// shutdown refusal, and it must already find proxying stopped (cause
+// ingress_terminating), whatever the registration order of the steps.
+const shutdownPhaseIngressStop = shutdownPhaseMark - 1
+
+// conduitIngressHTTPDrainMargin is how long before the shutdown's HTTP-drain
+// deadline the ingress hold ends, so the step returns and cancel starts
+// with time left for the HTTP drain (design v2.21.58).
+const conduitIngressHTTPDrainMargin = time.Second
+
+// conduitIngressHoldDeadline is the ingress drain's hold deadline H, the
+// absolute deadline handed to the hub drain (design v2.21.58): min(step
+// deadline, HTTP-drain deadline - conduitIngressHTTPDrainMargin), where the
+// HTTP-drain deadline is the shutdown's own (T0 + 3S/4, httpDrainEnd).
+// Without a budget there is no HTTP-drain deadline, and H is the step
+// deadline. With G = 10s: S = 8s, the HTTP-drain deadline is T0 + 6s and H
+// = T0 + 5s (the step deadline is T0 + 8s); with G = 30s, H is the step
+// deadline T0 + 12s.
+func conduitIngressHoldDeadline(b serverShutdownBudget, t0, stepDeadline time.Time) time.Time {
+	if !b.set {
+		return stepDeadline
+	}
+	if h := b.httpDrainEnd(t0).Add(-conduitIngressHTTPDrainMargin); h.Before(stepDeadline) {
+		return h
+	}
+	return stepDeadline
+}
+
+// registerConduitIngressShutdownDrain makes the ingress drain a pre-cancel
+// step of the process's single graceful shutdown, in the same phase and
+// with the same bound as the relay drain (registerConduitShutdownDrain);
+// a process registers one of the two. drain gets when the shutdown began
+// and the step's absolute deadline (step start plus bound on q's clock);
+// the caller derives the hold deadline from it (conduitIngressHoldDeadline). The step waits for drain at most bound.
+// It returns false, and the drain never runs from here, when the shutdown
+// has already begun.
+func registerConduitIngressShutdownDrain(q *serverShutdownSequence, bound time.Duration, drain func(signalAt, stepDeadline time.Time)) bool {
+	return q.addStep(shutdownPhaseDrain, func() {
+		start := q.clk.Now()
+		signalAt, _ := q.startedAt()
+		boundedShutdownStep(q.clk, bound, "conduit ingress drain", func() { drain(signalAt, start.Add(bound)) })()
+	})
+}
+
+// boundedShutdownStep returns step bounded to bound on clk: it runs step
+// in its own goroutine and returns when step does or when bound has
+// passed, whichever is first (the step then goes on in the background).
+func boundedShutdownStep(clk clock.Clock, bound time.Duration, name string, step func()) func() {
+	return func() {
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			step()
+		}()
+		fire, stop := clock.After(clk, bound)
+		defer stop()
 		select {
-		case sig := <-ch:
-			slog.Info("Received signal; draining conduit sessions before shutting down", "signal", sig.String())
-			drain()
-			cancel()
-		case <-ctx.Done():
+		case <-done:
+		case <-fire:
+			slog.Warn("Shutdown step still running at its bound; continuing the shutdown", "step", name, "bound", bound)
 		}
-	}()
+	}
 }
 
 // conduitAdvertiseEndpoint derives the internal endpoint other hub nodes
@@ -325,13 +446,15 @@ func conduitInternalRelayAPIServed(cfg *config.GlobalConfig, requireHA bool) boo
 var errConduitExternalNeedsExperiment = errors.New("server.hub.conduit.relay_mode is external, which requires the hub.conduit experiment; turn it on or remove relay_mode")
 
 // startConduit opens the internal listener (if configured) and starts the
-// hub's conduit relay when hub.conduit is on; once the relay runs, SIGTERM
-// drains it before cancel stops the server. With the flag off it does
-// nothing (SIGTERM is not trapped). In hosted-HA mode every failure is
+// hub's conduit relay when hub.conduit is on; once the relay runs, the
+// graceful shutdown q drains it before the server context is cancelled
+// (registerConduitShutdownDrain), and a set shutdown_grace also caps the
+// teardown's relay shutdown (hub.Server.SetConduitShutdownGrace). With the
+// flag off it does nothing (no shutdown step). In hosted-HA mode every failure is
 // returned and the server exits non-zero (C8); elsewhere a failure is logged and the hub serves
 // without a relay. A relay that stops on its own (superseded) reports on
 // errCh so the process exits and restarts.
-func startConduit(ctx context.Context, cancel context.CancelFunc, cfg *config.GlobalConfig, hubSrv *hub.Server, hubEndpoint string, wg *sync.WaitGroup, errCh chan<- error) error {
+func startConduit(ctx context.Context, q *serverShutdownSequence, cfg *config.GlobalConfig, hubSrv *hub.Server, hubEndpoint string, wg *sync.WaitGroup, errCh chan<- error) error {
 	if hubSrv == nil {
 		return nil
 	}
@@ -342,11 +465,32 @@ func startConduit(ctx context.Context, cancel context.CancelFunc, cfg *config.Gl
 		return nil
 	}
 	if cfg.Hub.Conduit.ExternalRelay() {
-		// External relay mode: no relay here, so nothing to drain on
-		// SIGTERM. Its configuration was chosen explicitly, so every
-		// failure is fatal, in and outside hosted HA.
+		// External relay mode: no relay here, so no relay drain and no
+		// grace recorded. Its configuration was chosen explicitly, so
+		// every failure is fatal, in and outside hosted HA. With the
+		// ingress proxy serving, the shutdown stops proxying before it
+		// marks any server (shutdownPhaseIngressStop), and the ingress
+		// drain step asks the relays to drain the sessions this hub
+		// proxied, holds the proxied legs and closes the ones left at its
+		// deadline (design §3.9 "Drain through the proxy"). With the
+		// proxy off there are no steps.
 		if err := startConduitExternalFn(ctx, cfg, hubSrv, wg, errCh); err != nil {
 			return fmt.Errorf("conduit external relay mode: %w", err)
+		}
+		if conduitIngressProxyActive(hubSrv) {
+			grace, graceSet := conduitShutdownDrainSetting(cfg)
+			budget := serverShutdownBudgetFor(cfg)
+			bound := conduitDrainStepBound(budget)
+			q.addStep(shutdownPhaseIngressStop, func() { conduitIngressStop(hubSrv) })
+			registerConduitIngressShutdownDrain(q, bound, func(signalAt, stepDeadline time.Time) {
+				conduitIngressShutdownDrain(hubSrv, hub.ConduitIngressDrainOptions{
+					Clock:        q.clk,
+					SignalAt:     signalAt,
+					HoldDeadline: conduitIngressHoldDeadline(budget, signalAt, stepDeadline),
+					Grace:        grace,
+					GraceSet:     graceSet,
+				})
+			})
 		}
 		return nil
 	}
@@ -354,7 +498,11 @@ func startConduit(ctx context.Context, cancel context.CancelFunc, cfg *config.Gl
 	err := startConduitRelayFn(ctx, cfg, hubSrv, hubEndpoint, wg, errCh, requireHA)
 	if err == nil {
 		grace, capDrain := conduitShutdownDrainSetting(cfg)
-		trapConduitSIGTERM(ctx, cancel, func() { conduitShutdownDrain(hubSrv, grace, capDrain) }, wg)
+		if capDrain {
+			conduitSetShutdownGrace(hubSrv, grace)
+		}
+		bound := conduitDrainStepBound(serverShutdownBudgetFor(cfg))
+		registerConduitShutdownDrain(q, bound, func() { conduitShutdownDrain(hubSrv, grace, capDrain) })
 		return nil
 	}
 	if requireHA {
@@ -476,7 +624,21 @@ func startConduitExternal(ctx context.Context, cfg *config.GlobalConfig, hubSrv 
 	if err != nil {
 		return err
 	}
-	if err := hubSrv.StartConduitExternal(ctx, hub.ConduitExternalOptions{InstanceID: id, PeerAuth: auth}); err != nil {
+	ingressOff, err := validateConduitIngress(cfg.Hub.Conduit, mode)
+	if err != nil {
+		return err
+	}
+	if ingressOff != "" {
+		slog.Warn("Conduit ingress proxy is off: it requires HMAC relay-peer authentication; conduit dials get 503 conduit_not_serving",
+			"cause", ingressOff, "peer_auth", mode, "fix", "set server.hub.conduit.peer_auth to hmac, or upgrade to the release with the relay-peer ingress header")
+	}
+	if err := hubSrv.StartConduitExternal(ctx, hub.ConduitExternalOptions{
+		InstanceID:      id,
+		PeerAuth:        auth,
+		Ingress:         cfg.Hub.Conduit.IngressValue(),
+		IngressOffCause: ingressOff,
+		LifetimeCap:     conduitLifetimeCapSetting(cfg),
+	}); err != nil {
 		return err
 	}
 	addr, _, err := serveConduitInternalListenerFn(ctx, cfg.Hub.Conduit.InternalListen, hubSrv.ConduitInternalHandler(), wg, errCh)
@@ -485,6 +647,27 @@ func startConduitExternal(ctx context.Context, cfg *config.GlobalConfig, hubSrv 
 	}
 	slog.Info("Conduit external relay mode started: this hub runs no relay", "instance_id", id, "peer_auth", mode, "internal_listen", addr.String())
 	return nil
+}
+
+// validateConduitIngress applies the startup rules of the conduit ingress
+// in external relay mode (design §3.9 "Ingress", v2.21.52): redirect is not
+// served yet (an error naming the setting). Proxy needs HMAC relay-peer
+// authentication, because the OIDC modes carry the peer token in
+// Authorization, which on the proxy leg is the client's own credential;
+// under any other resolved mode (explicit, or auto resolving to oidc) the
+// hub still starts with its ingress proxy off, and ingressOff is the cause
+// (hub.ConduitIngressCauseRequiresHMAC). peerAuthMode is the resolved
+// peer-auth mode.
+func validateConduitIngress(c config.HubConduitConfig, peerAuthMode string) (ingressOff string, err error) {
+	switch c.IngressValue() {
+	case config.ConduitIngressRedirect:
+		return "", errors.New("server.hub.conduit.ingress is redirect, which is not supported yet; use proxy")
+	case config.ConduitIngressProxy:
+		if peerAuthMode != config.ConduitPeerAuthHMAC {
+			return hub.ConduitIngressCauseRequiresHMAC, nil
+		}
+	}
+	return "", nil
 }
 
 // externalPeerAuthOptions is the hub's relay-peer auth configuration in

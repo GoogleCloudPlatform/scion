@@ -28,17 +28,27 @@ import (
 //
 // StartsInFlight is set only when the heartbeat actually carries the
 // starts-in-flight list, so it is not part of this static set.
-func StaticCapabilities(rt scionrt.Runtime) *hubclient.BrokerCapabilities {
+//
+// nodeImageRegistry is the broker's SCION_IMAGE_REGISTRY
+// (config.ImageRegistryFromEnv); it is a node configuration value carried
+// with the capabilities, not a feature flag (ptone/scion#3916).
+func StaticCapabilities(rt scionrt.Runtime, nodeImageRegistry string) *hubclient.BrokerCapabilities {
 	return &hubclient.BrokerCapabilities{
+		NodeImageRegistry:      nodeImageRegistry,
 		WebPTY:                 webPTYSupported(rt),
 		Sync:                   true,
 		Attach:                 scionrt.HasAttachSupport(rt),
 		Reprovision:            true,
 		AsyncLaunch:            true,
+		AsyncStart:             true, // async start of existing agents (ptone/scion#4669)
 		EmptyPerAgentWorkspace: scionrt.HasEmptyPerAgentSupport(rt),
 		// This broker honours localOnly deletes and confirms a moved
 		// agent's NFS workspace before provisioning it (agent move).
 		AgentMove: true,
+		// This broker can be the target of a forced move: it confirms it
+		// has no files for the agent before provisioning it with a fresh
+		// workspace (ptone/scion#5441).
+		AgentMoveRecreate: true,
 		// This broker's reprovision reuses an empty-per-agent workspace in
 		// place (miller79/scion#167).
 		ReprovisionEmptyPerAgent: true,
@@ -86,7 +96,7 @@ func webPTYSupported(rt scionrt.Runtime) bool {
 // registration and join requests carry (the names the Hub's
 // capabilitiesFromStrings accepts).
 func StaticCapabilityNames(rt scionrt.Runtime) []string {
-	c := StaticCapabilities(rt)
+	c := StaticCapabilities(rt, "")
 	var names []string
 	add := func(on bool, name string) {
 		if on {
@@ -98,8 +108,10 @@ func StaticCapabilityNames(rt scionrt.Runtime) []string {
 	add(c.Attach, "attach")
 	add(c.Reprovision, "reprovision")
 	add(c.AsyncLaunch, "asyncLaunch")
+	add(c.AsyncStart, "asyncStart")
 	add(c.EmptyPerAgentWorkspace, "emptyPerAgentWorkspace")
 	add(c.AgentMove, "agentMove")
+	add(c.AgentMoveRecreate, "agentMoveRecreate")
 	add(c.ReprovisionEmptyPerAgent, "reprovisionEmptyPerAgent")
 	return names
 }

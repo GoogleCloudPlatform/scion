@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -817,11 +818,17 @@ func (s *Server) canReadConstraintAudit(r *http.Request, constraint *store.Acces
 		resource.ParentType = "project"
 		resource.ParentID = constraint.ScopeID
 	}
+	// hub.audit.read is a hub-level permission: a user access token reads
+	// any constraint's audit history only on a hub boundary, with the
+	// hub_audit:read selector, through the hub-level constraint record.
+	if IsScopedUserIdentity(user) {
+		resource = hubScopedResource("access_constraint", constraint.ID)
+	}
 	decision := s.authzService.Decide(r.Context(), AuthzRequest{
 		Principal:  principalContextForIdentity(user),
 		Credential: credentialContextForIdentity(user),
 		Resource:   resource,
-		Action:     ActionManage,
+		Action:     ActionRead,
 		Permission: "hub.audit.read",
 	})
 	return decision.Allowed
@@ -1125,6 +1132,7 @@ func (s *Server) createAccessConstraint(w http.ResponseWriter, r *http.Request, 
 		Draft:        draft,
 		PreviewToken: req.PreviewToken,
 		Actor:        actor,
+		Credential:   user,
 	}
 	if requestID := logging.RequestIDFromContext(r.Context()); requestID != "" {
 		commitRequest.AuditRequest = &auditevent.RequestRef{
@@ -1287,6 +1295,7 @@ func (s *Server) updateAccessConstraint(w http.ResponseWriter, r *http.Request, 
 		BaseRevision: expectedRevision,
 		PreviewToken: req.PreviewToken,
 		Actor:        actor,
+		Credential:   user,
 	})
 	if err != nil {
 		s.handleGovernanceError(w, err)
@@ -1316,6 +1325,16 @@ func (s *Server) deleteAccessConstraint(w http.ResponseWriter, r *http.Request, 
 	if s.governanceService == nil {
 		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
 			"boundary governance service is not available", nil)
+		return
+	}
+
+	// Deleting a boundary relaxes it, which needs an interactive session:
+	// a user access token is refused before the preview token is used.
+	if !sessionCredentialAllowed(r.Context()) {
+		writeSessionOnlyDenial(w, ErrCodeForbidden,
+			fmt.Sprintf("access constraint deletion requires an interactive session; credential kind %q is not allowed",
+				GetCredentialContextFromContext(r.Context()).Kind),
+			authzop.ReasonGovernancePending)
 		return
 	}
 
@@ -1373,6 +1392,7 @@ func (s *Server) deleteAccessConstraint(w http.ResponseWriter, r *http.Request, 
 		BaseRevision: existing.Revision,
 		PreviewToken: previewToken,
 		Actor:        actor,
+		Credential:   user,
 	})
 	if err != nil {
 		s.handleGovernanceError(w, err)
@@ -1415,7 +1435,7 @@ func (s *Server) requireConstraintAdminPermission(w http.ResponseWriter, r *http
 	decision := s.authzService.Decide(r.Context(), AuthzRequest{
 		Principal:  principalContextForIdentity(user),
 		Credential: credentialContextForIdentity(user),
-		Resource:   Resource{Type: "access_constraint", ID: "hub"},
+		Resource:   hubScopedResource("access_constraint", "hub"),
 		Action:     Action(action),
 		Permission: permission,
 	})
@@ -1809,6 +1829,10 @@ func computeWPHealth(hc *AccessConstraint) wpResolutionHealth {
 
 // handleGovernanceError maps governance errors to HTTP responses.
 func (s *Server) handleGovernanceError(w http.ResponseWriter, err error) {
+	if errors.Is(err, errTokenRelaxationSessionOnly) {
+		writeSessionOnlyDenial(w, ErrCodeForbidden, err.Error(), authzop.ReasonGovernancePending)
+		return
+	}
 	var govErr *GovernanceError
 	if errors.As(err, &govErr) {
 		statusCode := governanceErrorStatus(govErr.Code)

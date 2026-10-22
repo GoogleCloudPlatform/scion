@@ -29,6 +29,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/daemon"
@@ -504,11 +505,11 @@ func TestBrokerStartForeground_SIGTERMSingleShutdown(t *testing.T) {
 		signalsDone := installServerShutdownSignals(ctx, func(c chan<- os.Signal, sigs ...os.Signal) {
 			serverSigCh = c
 			signal.Notify(c, sigs...)
-		}, func() {
+		}, newTestShutdown(func() {
 			cancels.Add(1)
 			cancel()
 			cancelled <- struct{}{}
-		})
+		}))
 		defer func() {
 			cancel()
 			<-signalsDone
@@ -566,12 +567,18 @@ func TestHandleBrokerSIGTERM_PublishedShutdownRunsOnce(t *testing.T) {
 
 	var f fakeSignalNotify
 	var cancels atomic.Int32
-	ctx, cancel := context.WithCancel(context.Background())
+	_, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	done := installServerShutdownSignals(ctx, f.notify, func() {
+	// The handler's lifetime is separate from the server context the
+	// shutdown cancels, as in runServerStart, so it still reads the
+	// subscription's copy of the SIGTERM after the shutdown ran.
+	lifetime, stop := context.WithCancel(context.Background())
+	t.Cleanup(stop)
+	q := newTestShutdown(func() {
 		cancels.Add(1)
 		cancel()
 	})
+	done := installServerShutdownSignals(lifetime, f.notify, q)
 
 	handleBrokerSIGTERM(globalDir, owned)
 
@@ -582,9 +589,86 @@ func TestHandleBrokerSIGTERM_PublishedShutdownRunsOnce(t *testing.T) {
 	assert.Equal(t, int32(1), cancels.Load(), "the direct call runs the shutdown")
 
 	f.deliver(syscall.SIGTERM) // the server's own subscription sees the same signal
+	require.Eventually(t, func() bool { return len(f.ch) == 0 }, 5*time.Second, time.Millisecond, "the subscription's SIGTERM was not read")
+	require.Never(t, func() bool {
+		select {
+		case <-q.forced():
+			return true
+		default:
+			return false
+		}
+	}, 200*time.Millisecond, 5*time.Millisecond, "the one SIGTERM seen by both handlers forced the shutdown (ptone/scion#5054 R6)")
+	stop()
 	<-done
 	assert.Equal(t, int32(1), cancels.Load(), "the shutdown runs once")
 	assert.Equal(t, 1, strings.Count(logs.String(), "Received signal terminated, shutting down..."), "logged once")
+}
+
+// R6 (ptone/scion#5054), the interleaving where the server was subscribed
+// when SIGTERM arrived but had not published its shutdown when the broker
+// handler looked: the server's subscription gets the SIGTERM, and the
+// broker handler's self-sent SIGINT (counted by interruptSelf) arrives as
+// a second signal on it. It begins nothing new and does not force. A real
+// second signal from outside still forces.
+func TestInstallServerShutdownSignals_SelfInterruptDoesNotForce(t *testing.T) {
+	resetServerShutdownForTest(t)
+	captureStdLog(t)
+	t.Cleanup(func() { pendingSelfInterrupts.Store(0) })
+	var f fakeSignalNotify
+	var cancels atomic.Int32
+	cancelled := make(chan struct{}, 4)
+	lifetime, stop := context.WithCancel(context.Background())
+	t.Cleanup(stop)
+	q := newTestShutdown(func() {
+		cancels.Add(1)
+		cancelled <- struct{}{}
+	})
+	done := installServerShutdownSignals(lifetime, f.notify, q)
+
+	f.deliver(syscall.SIGTERM)
+	<-cancelled
+	pendingSelfInterrupts.Add(1) // what interruptSelf does before it signals
+	f.deliver(os.Interrupt)
+	require.Eventually(t, func() bool { return pendingSelfInterrupts.Load() == 0 }, 5*time.Second, time.Millisecond, "the self-sent SIGINT was not received")
+	select {
+	case <-q.forced():
+		t.Fatal("the self-sent SIGINT forced the shutdown")
+	default:
+	}
+	assert.Equal(t, int32(1), cancels.Load())
+
+	f.deliver(syscall.SIGTERM) // a real second signal
+	<-q.forced()
+	stop()
+	<-done
+}
+
+// R6: SIGTERM before the server subscribed and nothing published: the
+// broker handler's self-sent SIGINT is the subscription's first signal. It
+// begins the shutdown once and does not force.
+func TestInstallServerShutdownSignals_SelfInterruptFirstBegins(t *testing.T) {
+	resetServerShutdownForTest(t)
+	captureStdLog(t)
+	t.Cleanup(func() { pendingSelfInterrupts.Store(0) })
+	var f fakeSignalNotify
+	cancelled := make(chan struct{}, 4)
+	lifetime, stop := context.WithCancel(context.Background())
+	t.Cleanup(stop)
+	q := newTestShutdown(func() { cancelled <- struct{}{} })
+	done := installServerShutdownSignals(lifetime, f.notify, q)
+
+	pendingSelfInterrupts.Add(1)
+	f.deliver(os.Interrupt)
+	<-cancelled
+	select {
+	case <-q.forced():
+		t.Fatal("a self-sent first SIGINT forced the shutdown")
+	default:
+	}
+	_, begun := q.startedAt()
+	assert.True(t, begun)
+	stop()
+	<-done
 }
 
 // TestBrokerStartForeground_SIGTERMBeforeServerSignals: a SIGTERM that

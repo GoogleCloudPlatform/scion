@@ -268,7 +268,7 @@ func TestOtherProjectAgentsInUse(t *testing.T) {
 		{"agent with empty ID", "self", []api.AgentInfo{{Phase: "running"}}, nil, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			srv := New(DefaultServerConfig(), &mockManager{agents: tc.agents, listErr: tc.err}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+			srv := New(DefaultServerConfig(), &mockManager{agents: tc.agents, listErr: tc.err}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 			got, _ := srv.otherProjectAgentsInUse(context.Background(), brokerTestHubID, tc.agentID)
 			assert.Equal(t, tc.want, got)
 		})
@@ -305,7 +305,7 @@ func TestRecordBrokerWorkspaceCopy(t *testing.T) {
 func TestAlignHubManagedProjectIdentity_StartPathUsesHubIDDir(t *testing.T) {
 	workspace, _ := seedBrokerWorkspace(t, brokerTestLocalID, false)
 	writeBrokerRecord(t, brokerTestHubID)
-	srv := New(DefaultServerConfig(), &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	srv := New(DefaultServerConfig(), &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 
 	srv.alignHubManagedProjectIdentity(context.Background(), "agent-1", workspace, brokerTestSlug, brokerTestHubID)
 
@@ -441,7 +441,7 @@ func TestAlignHubManagedProjectIdentity_FailureLogDescribesErrorWithoutPath(t *t
 	require.NoError(t, os.Remove(filepath.Join(scionPath, "project-id")))
 	require.NoError(t, os.MkdirAll(filepath.Join(scionPath, "project-id", "x"), 0o755))
 
-	srv := New(DefaultServerConfig(), &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	srv := New(DefaultServerConfig(), &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 	logs := captureLifecycleLog(srv)
 	srv.alignHubManagedProjectIdentity(context.Background(), "agent-1", workspace, brokerTestSlug, brokerTestHubID)
 
@@ -478,7 +478,7 @@ func TestAlignHubManagedProjectIdentity_UnexpectedFormLogOmitsRecordedValue(t *t
 	scionPath := filepath.Join(workspace, config.DotScion)
 	require.NoError(t, config.WriteProjectID(scionPath, "../../other"))
 
-	srv := New(DefaultServerConfig(), &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	srv := New(DefaultServerConfig(), &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 	logs := captureLifecycleLog(srv)
 	srv.alignHubManagedProjectIdentity(context.Background(), "agent-1", workspace, brokerTestSlug, brokerTestHubID)
 

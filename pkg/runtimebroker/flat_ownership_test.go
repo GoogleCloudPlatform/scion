@@ -27,6 +27,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -501,7 +502,7 @@ type plainManager struct{ agent.Manager }
 func TestFlatInstance_UnscopableManagerFailsClosed(t *testing.T) {
 	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
 	cfg := f.srv.config
-	srv := New(cfg, plainManager{f.mgr}, f.srv.runtime)
+	srv := New(cfg, plainManager{f.mgr}, f.srv.runtime, config.RuntimeBuildRecord{})
 	err := srv.StartServices(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "cannot be restricted") {
 		t.Fatalf("StartServices = %v, want the fail-closed refusal", err)

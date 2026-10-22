@@ -27,6 +27,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
@@ -101,7 +102,7 @@ func TestWorkspaceUploadValidation(t *testing.T) {
 	cfg := DefaultServerConfig()
 	mgr := &mockAgentManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	tests := []struct {
 		name       string
@@ -158,7 +159,7 @@ func TestWorkspaceApplyValidation(t *testing.T) {
 	cfg := DefaultServerConfig()
 	mgr := &mockAgentManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	tests := []struct {
 		name       string
@@ -215,7 +216,7 @@ func TestWorkspaceUploadMethodNotAllowed(t *testing.T) {
 	cfg := DefaultServerConfig()
 	mgr := &mockAgentManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodDelete} {
 		t.Run(method, func(t *testing.T) {
@@ -235,7 +236,7 @@ func TestWorkspaceApplyMethodNotAllowed(t *testing.T) {
 	cfg := DefaultServerConfig()
 	mgr := &mockAgentManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodDelete} {
 		t.Run(method, func(t *testing.T) {
@@ -256,7 +257,7 @@ func TestWorkspaceUploadAgentNotFound(t *testing.T) {
 	cfg.StorageBucket = "test-bucket"
 	mgr := &mockAgentManager{agents: []api.AgentInfo{}} // No agents
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	body := WorkspaceUploadRequest{
 		Slug:        "nonexistent-agent",
@@ -280,7 +281,7 @@ func TestWorkspaceApplyAgentNotFound(t *testing.T) {
 	cfg.StorageBucket = "test-bucket"
 	mgr := &mockAgentManager{agents: []api.AgentInfo{}} // No agents
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	body := WorkspaceApplyRequest{
 		Slug:        "nonexistent-agent",
@@ -319,7 +320,7 @@ func TestWorkspaceUploadRejectsUnsafeWorkspacePath(t *testing.T) {
 			return "/", nil
 		},
 	}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 	logs := captureLifecycleJSONLog(srv)
 	installFailingWorkspaceTransfers(t, srv)
 
@@ -380,7 +381,7 @@ func TestGetAgentWorkspacePath_PrimaryBranchAcceptsLegitimateScionHomeWorkspace(
 			return workspace, nil
 		},
 	}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	got, err := srv.getAgentWorkspacePath(context.Background(), "test-agent")
 	if err != nil {
@@ -407,7 +408,7 @@ func TestWorkspaceApplyRejectsUnsafeWorkspacePath(t *testing.T) {
 			return "/", nil
 		},
 	}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 	logs := captureLifecycleJSONLog(srv)
 	installFailingWorkspaceTransfers(t, srv)
 
@@ -463,7 +464,7 @@ func TestGetAgentWorkspacePath_WorktreeFallbackAcceptsInBoundsPath(t *testing.T)
 			return "", nil // primary branch has nothing, forces the worktree fallback
 		},
 	}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	got, err := srv.getAgentWorkspacePath(context.Background(), "test-agent")
 	if err != nil {
@@ -515,7 +516,7 @@ func TestGetAgentWorkspacePath_WorktreeFallbackRejectsSymlinkOutsideParent(t *te
 			return "", nil // primary branch has nothing, forces the worktree fallback
 		},
 	}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	got, err := srv.getAgentWorkspacePath(context.Background(), "test-agent")
 	if err == nil {
@@ -555,7 +556,7 @@ func TestGetAgentWorkspacePath_WorktreeBaseAcceptsInBoundsPath(t *testing.T) {
 			return "", nil // primary branch has nothing, forces the WorktreeBase fallback
 		},
 	}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	got, err := srv.getAgentWorkspacePath(context.Background(), "test-agent")
 	if err != nil {
@@ -601,7 +602,7 @@ func TestGetAgentWorkspacePath_WorktreeBaseRejectsSymlinkOutsideBase(t *testing.
 			return "", nil
 		},
 	}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	got, err := srv.getAgentWorkspacePath(context.Background(), "test-agent")
 	if err == nil {
@@ -619,7 +620,7 @@ func TestBuildWorkspaceManifest(t *testing.T) {
 	cfg := DefaultServerConfig()
 	mgr := &mockAgentManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	// Create a temporary directory with test files
 	tmpDir, err := os.MkdirTemp("", "workspace-test")
@@ -676,7 +677,7 @@ func TestBuildWorkspaceManifestWithExcludes(t *testing.T) {
 	cfg := DefaultServerConfig()
 	mgr := &mockAgentManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	// Create a temporary directory with test files
 	tmpDir, err := os.MkdirTemp("", "workspace-test")
@@ -722,7 +723,7 @@ func TestCountWorkspaceFiles(t *testing.T) {
 	cfg := DefaultServerConfig()
 	mgr := &mockAgentManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	// Create a temporary directory with test files
 	tmpDir, err := os.MkdirTemp("", "workspace-test")
@@ -764,7 +765,7 @@ func TestWorkspaceRoutesRegistered(t *testing.T) {
 	cfg := DefaultServerConfig()
 	mgr := &mockAgentManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	handler := srv.Handler()
 
@@ -796,7 +797,7 @@ func TestApplyFilePermissions(t *testing.T) {
 	cfg := DefaultServerConfig()
 	mgr := &mockAgentManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	// Create a temporary directory with test files
 	tmpDir, err := os.MkdirTemp("", "workspace-perm-test")
@@ -837,7 +838,7 @@ func TestApplyFilePermissions_InvalidMode(t *testing.T) {
 	cfg := DefaultServerConfig()
 	mgr := &mockAgentManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	tmpDir, err := os.MkdirTemp("", "workspace-perm-test")
 	if err != nil {
@@ -867,7 +868,7 @@ func TestApplyFilePermissions_EmptyMode(t *testing.T) {
 	cfg := DefaultServerConfig()
 	mgr := &mockAgentManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	tmpDir, err := os.MkdirTemp("", "workspace-perm-test")
 	if err != nil {
@@ -907,7 +908,7 @@ func TestApplyFilePermissions_MissingFile(t *testing.T) {
 	cfg := DefaultServerConfig()
 	mgr := &mockAgentManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	tmpDir, err := os.MkdirTemp("", "workspace-perm-test")
 	if err != nil {
@@ -1062,7 +1063,7 @@ func TestWorkspaceUpload_InvalidJSON(t *testing.T) {
 	cfg := DefaultServerConfig()
 	mgr := &mockAgentManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	bodyBytes := []byte(`{invalid json`)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/workspace/upload", bytes.NewReader(bodyBytes))
@@ -1080,7 +1081,7 @@ func TestWorkspaceApply_InvalidJSON(t *testing.T) {
 	cfg := DefaultServerConfig()
 	mgr := &mockAgentManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	bodyBytes := []byte(`{invalid json`)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/workspace/apply", bytes.NewReader(bodyBytes))
@@ -1100,7 +1101,7 @@ func TestWorkspaceUpload_WithBucketInRequest(t *testing.T) {
 	cfg.StorageBucket = ""
 	mgr := &mockAgentManager{agents: []api.AgentInfo{}}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	// Bucket provided in request
 	body := WorkspaceUploadRequest{
@@ -1133,7 +1134,7 @@ func TestWorkspaceApply_WithBucketInRequest(t *testing.T) {
 	cfg.StorageBucket = ""
 	mgr := &mockAgentManager{agents: []api.AgentInfo{}}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	// Bucket provided in request
 	body := WorkspaceApplyRequest{
@@ -1163,7 +1164,7 @@ func TestCountWorkspaceFiles_EmptyDirectory(t *testing.T) {
 	cfg := DefaultServerConfig()
 	mgr := &mockAgentManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	// Create an empty temp directory
 	tmpDir, err := os.MkdirTemp("", "workspace-empty-test")
@@ -1186,7 +1187,7 @@ func TestCountWorkspaceFiles_NestedDirectories(t *testing.T) {
 	cfg := DefaultServerConfig()
 	mgr := &mockAgentManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	// Create temp directory with nested structure
 	tmpDir, err := os.MkdirTemp("", "workspace-nested-test")
@@ -1234,7 +1235,7 @@ func TestProjectWorkspaceUpload_MissingProjectID(t *testing.T) {
 	cfg.StateDir = t.TempDir()
 	mgr := &mockAgentManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	body := ProjectWorkspaceUploadRequest{
 		StoragePath:   "workspaces/test/project-workspace",
@@ -1252,7 +1253,7 @@ func TestProjectWorkspaceUpload_MissingStoragePath(t *testing.T) {
 	cfg.StateDir = t.TempDir()
 	mgr := &mockAgentManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	body := ProjectWorkspaceUploadRequest{
 		ProjectID:     "project-123",
@@ -1270,7 +1271,7 @@ func TestProjectWorkspaceUpload_MissingWorkspacePath(t *testing.T) {
 	cfg.StateDir = t.TempDir()
 	mgr := &mockAgentManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	body := ProjectWorkspaceUploadRequest{
 		ProjectID:   "project-123",
@@ -1288,7 +1289,7 @@ func TestProjectWorkspaceUpload_NoBucket(t *testing.T) {
 	cfg.StateDir = t.TempDir()
 	mgr := &mockAgentManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	body := ProjectWorkspaceUploadRequest{
 		ProjectID:     "project-123",
@@ -1308,7 +1309,7 @@ func TestProjectWorkspaceUpload_NonExistentPath(t *testing.T) {
 	cfg.StorageBucket = "test-bucket"
 	mgr := &mockAgentManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	body := ProjectWorkspaceUploadRequest{
 		ProjectID:     "project-123",
@@ -1334,7 +1335,7 @@ func TestProjectWorkspaceUpload_RejectsUnsafeWorkspacePath(t *testing.T) {
 	cfg.StorageBucket = "test-bucket"
 	mgr := &mockAgentManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	body := ProjectWorkspaceUploadRequest{
 		ProjectID:     "project-123",
@@ -1365,7 +1366,7 @@ func TestProjectWorkspaceUpload_RejectsUnsafeRelativeWorkspacePath(t *testing.T)
 	cfg.StorageBucket = "test-bucket"
 	mgr := &mockAgentManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	body := ProjectWorkspaceUploadRequest{
 		ProjectID:     "project-123",
@@ -1403,7 +1404,7 @@ func TestProjectWorkspaceUpload_MethodNotAllowed(t *testing.T) {
 	cfg.StateDir = t.TempDir()
 	mgr := &mockAgentManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/project-upload", nil)
 	rec := httptest.NewRecorder()
@@ -1422,7 +1423,7 @@ func TestProjectWorkspaceUpload_LegacyRouteRemoved(t *testing.T) {
 	cfg.StateDir = t.TempDir()
 	mgr := &mockAgentManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/workspace/grove-upload", nil)
 	rec := httptest.NewRecorder()
@@ -1454,7 +1455,7 @@ func TestBuildWorkspaceManifestExcludesIdentityEntry(t *testing.T) {
 	cfg := DefaultServerConfig()
 	mgr := &mockAgentManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	for _, tc := range []struct {
 		name  string

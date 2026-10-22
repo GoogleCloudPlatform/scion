@@ -832,6 +832,10 @@ export interface AgentAppliedConfig {
   harnessConfigId?: string;
   harnessConfigHash?: string;
   harnessConfigSource?: string;
+  /** The harness type the hub resolved at create; absent on older agents. */
+  harness?: string;
+  /** The model size alias the agent was created with; absent for an explicit model ID or no model. */
+  modelSize?: AgentModelSize;
   creatorName?: string;
   hubAccessScopes?: string[];
   agentRole?: string;
@@ -902,6 +906,9 @@ export interface AgentUpdateDisposition {
   heldForReincarnate: string[];
 }
 
+/** A model size alias (pkg/config KnownModelAliases). */
+export type AgentModelSize = 'small' | 'medium' | 'large' | 'extra-large';
+
 /**
  * Agent information from the Hub API
  */
@@ -932,6 +939,21 @@ export interface Agent {
   harnessAuth?: string;
   resolvedHarness?: string;
   harnessCapabilities?: HarnessAdvancedCapabilities;
+  /**
+   * The harness vendor (pkg/harness Vendor): the model vendor of a
+   * single-vendor harness ("anthropic", "google", "openai", "xai", "meta"),
+   * the harness name of a multi-vendor one ("opencode", "copilot",
+   * "hermes"). Absent for a custom or unresolved harness. Set on list
+   * items (full and compact), the single-agent GET and SSE created/status
+   * events.
+   */
+  harnessVendor?: string;
+  /**
+   * The model size alias the agent was created with; absent when it has
+   * none. An SSE status event sends '' to clear it, so a merged row can
+   * hold ''. Test for truthiness, not presence.
+   */
+  modelSize?: AgentModelSize | '';
   runtimeBrokerId?: string;
   runtimeBrokerName?: string;
   /**
@@ -1065,7 +1087,6 @@ export interface Template {
   description?: string;
   harness: string;
   defaultHarnessConfig?: string;
-  image?: string;
   status: string;
   scope: string;
   scopeId?: string;
@@ -1222,6 +1243,104 @@ export interface RuntimeTargetDescriptor {
   displayName?: string;
 }
 
+/**
+ * The publishable configuration a flat Runtime Broker instance last
+ * reported (Go `api.RuntimeTargetPresentation`, the frozen FC4-a
+ * "published" set). It is read-only, shown as the instance's defaults for
+ * new agents: not the configuration of any agent and not a check of cluster
+ * permissions. Fields FC4-a never publishes (kubeconfig context, service
+ * account policy, volume sources, secret targets, env values) have no field
+ * here; a client must render only the fields named below.
+ */
+export interface RuntimeTargetPresentation {
+  schemaVersion: number;
+  key: string;
+  name: string;
+  target?: PresentedTarget;
+  agentDefaults?: PresentedAgentDefaults;
+}
+
+/** The publishable part of an instance's runtime_target. */
+export interface PresentedTarget {
+  type: string;
+  displayName?: string;
+  namespace?: string;
+  gke?: boolean;
+  priorityClassName?: string;
+  sharedDirStorageClass?: string;
+  sharedDirSize?: string;
+  /** Tri-state: absent (or null) = unset; true and false are distinct. */
+  safeToEvict?: boolean | null;
+  sharedDirStorageBackend?: string;
+  sharedDirStorageBackends?: Record<string, string>;
+  homeStorageBackend?: string;
+  /**
+   * Kubernetes placement defaults (ptone/scion#5085). Optional: a Hub that
+   * does not publish them sends none, and the card then shows no
+   * Placement group.
+   */
+  nodeSelector?: Record<string, string>;
+  tolerations?: PresentedToleration[];
+  runtimeClassName?: string;
+}
+
+/**
+ * One Kubernetes toleration as presented. Only these four fields are ever
+ * rendered; any other key on the object is ignored.
+ */
+export interface PresentedToleration {
+  key?: string;
+  /** "Equal" or "Exists"; empty means Equal. */
+  operator?: string;
+  /** Empty for Exists. */
+  value?: string;
+  /** NoSchedule, PreferNoSchedule, NoExecute, or empty for any effect. */
+  effect?: string;
+}
+
+/** Resource quantities as the Hub sends them (Go `api.ResourceSpec`). */
+export interface PresentedResourceSpec {
+  requests?: { cpu?: string; memory?: string };
+  limits?: { cpu?: string; memory?: string };
+  disk?: string;
+}
+
+/** A volume mount's mount target, read-only flag and kind (never its source). */
+export interface PresentedVolume {
+  target: string;
+  readOnly?: boolean;
+  type?: string;
+}
+
+/** A secret declaration's key, kind and description (never a value or target). */
+export interface PresentedSecretDecl {
+  key: string;
+  type?: string;
+  description?: string;
+}
+
+/** One harness override; its environment is published as variable names only. */
+export interface PresentedHarnessOverride {
+  image?: string;
+  imagePullPolicy?: string;
+  authSelectedType?: string;
+  user?: string;
+  envKeys?: string[];
+  volumes?: PresentedVolume[];
+  resources?: PresentedResourceSpec;
+}
+
+/** The publishable part of an instance's agent_defaults. */
+export interface PresentedAgentDefaults {
+  defaultHarnessConfig?: string;
+  imageRegistry?: string;
+  cloneDepth?: string;
+  resources?: PresentedResourceSpec;
+  volumes?: PresentedVolume[];
+  secrets?: PresentedSecretDecl[];
+  harnessOverrides?: Record<string, PresentedHarnessOverride>;
+}
+
 /** Read-only view of an agent's pinned placement (Hub `pinnedRuntimeTarget`). */
 export interface PinnedRuntimeTarget {
   id: string;
@@ -1244,11 +1363,25 @@ export interface RuntimeBroker {
   profiles?: BrokerProfile[];
   /** Present only for a flat Runtime Broker (single runtime target). */
   runtimeTarget?: RuntimeTargetDescriptor;
+  /** What a flat Runtime Broker instance last reported; absent when none was. */
+  runtimeTargetPresentation?: RuntimeTargetPresentation;
+  /** When the Hub last saw runtimeTargetPresentation ("as reported at"). */
+  runtimeTargetPresentationObservedAt?: string;
+  /**
+   * True when the broker runs in the process that answered the request
+   * (this server's co-located broker or one of its flat instances).
+   * Read-only and display-only; absent otherwise.
+   */
+  hostedByThisServer?: boolean;
   autoProvide: boolean;
   endpoint?: string;
   labels?: Record<string, string>;
   createdBy?: string;
   createdByName?: string;
+  /** Configured GCP host service account (Go JSON tag is snake_case). */
+  gcp_host_service_account_email?: string;
+  /** Configured GCP host project (read in snake_case; PATCH takes camelCase). */
+  gcp_host_project_id?: string;
   /** Creation and last-update times, as the hub sends them. */
   created?: string;
   updated?: string;
@@ -1291,6 +1424,27 @@ export interface RuntimeBroker {
    * Renderers must show this visibly, not only in a tooltip.
    */
   agentLimitSource?: string;
+  /**
+   * Host identity state of a co-located broker: the configured GCP host
+   * service account compared with the identity the host reports. Mirrors Go
+   * store.HostIdentityStatus. observedEmail and observedAt are present only
+   * for callers allowed to update the broker.
+   */
+  hostIdentity?: BrokerHostIdentity;
+}
+
+/** Mirrors Go store.HostIdentityStatus (pkg/store/models.go). */
+export interface BrokerHostIdentity {
+  state:
+    | 'unobserved'
+    | 'unknown'
+    | 'unset_detected'
+    | 'match'
+    | 'mismatch'
+    | 'pinned_absent'
+    | 'none';
+  observedEmail?: string;
+  observedAt?: string;
 }
 
 /**

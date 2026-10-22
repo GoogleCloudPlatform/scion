@@ -538,7 +538,9 @@ func TestValidateActivation_NoInstanceCredentials(t *testing.T) {
 	// locations, are present and must be ignored.
 	legacy := &brokercredentials.BrokerCredentials{Name: testHubName, BrokerID: ti.id.RuntimeBrokerID, SecretKey: testSecret, HubEndpoint: hub.URL}
 	require.NoError(t, brokercredentials.NewMultiStore(filepath.Join(ti.globalDir, "hub-credentials")).Save(legacy))
-	require.NoError(t, brokercredentials.NewStore(filepath.Join(ti.globalDir, brokercredentials.DefaultFileName)).Save(legacy))
+	legacyJSON, err := json.Marshal(legacy)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(ti.globalDir, brokercredentials.DefaultFileName), legacyJSON, brokercredentials.FileMode))
 
 	list, err := LoadInstanceCredentials(ti.globalDir, ti.id)
 	assert.Nil(t, list)

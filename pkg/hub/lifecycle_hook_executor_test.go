@@ -1241,3 +1241,20 @@ func TestLifecycleHookExecutor_HaltedCarriesReasonAsData(t *testing.T) {
 	_, ok := vars["EXIT_REASON"]
 	assert.False(t, ok, "a value outside the known reasons is never passed")
 }
+
+func TestLifecycleHookExecutor_StoppedHookExitReasonVars(t *testing.T) {
+	// The agent-reported "signaled" reason never reaches EXIT_REASON
+	// (ptone/scion#5278); a runtime reason still does.
+	s := executorTestStore(t)
+	executor := newTestExecutor(s, &mockTokenGenerator{accessToken: "tok", email: "hub@sa.com"}, newCapturingAuditLogger(), slog.Default())
+	hook := makeTestHook("sa", &store.LifecycleHookAction{Type: store.LifecycleHookActionHTTP, Method: "POST", URL: "https://example.com/stopped"})
+
+	vars := executor.buildRenderVars(context.Background(), hook,
+		&store.Agent{ID: "a", Phase: "stopped", ExitReason: "signaled"}, store.LifecycleHookTriggerStopped, "")
+	_, ok := vars["EXIT_REASON"]
+	assert.False(t, ok, "a stopped hook never receives EXIT_REASON=signaled")
+
+	vars = executor.buildRenderVars(context.Background(), hook,
+		&store.Agent{ID: "a", Phase: "stopped", ExitReason: "preempted"}, store.LifecycleHookTriggerStopped, "")
+	assert.Equal(t, "preempted", vars["EXIT_REASON"])
+}

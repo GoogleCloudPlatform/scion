@@ -784,7 +784,7 @@ func TestBrokerUpdate_GCPHostSAEmail_InvalidFormat(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // Embedded broker: admin-role user passes ownership check without super-admin
-// binding when broker has the "scion.io/broker-role": "embedded" label and
+// binding when the broker is the one the server recorded as embedded and
 // CreatedBy is empty (single-node / co-located broker scenario).
 // ---------------------------------------------------------------------------
 
@@ -832,6 +832,8 @@ func TestPassthrough_EmbeddedBroker_AdminRoleUser_Allowed(t *testing.T) {
 		},
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+	// The co-located broker is the one the server recorded at startup.
+	srv.SetEmbeddedBrokerID(broker.ID)
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
 		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
@@ -906,6 +908,8 @@ func TestPassthrough_EmbeddedBroker_NonAdminUser_Denied(t *testing.T) {
 		},
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+	// The co-located broker is the one the server recorded at startup.
+	srv.SetEmbeddedBrokerID(broker.ID)
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
 		ProjectID:  project.ID,
 		BrokerID:   broker.ID,

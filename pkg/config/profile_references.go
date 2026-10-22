@@ -73,6 +73,17 @@ func CountProfileReferences(colocatedBrokerID string, agents []ProfileRefAgent, 
 	return refs, true
 }
 
+// GlobalProjectSlug is the slug of a broker's global project on the hub:
+// the CLI registers it under the name "global", and the combined hub and
+// broker server creates it with this slug. Project slugs are unique on the
+// hub, and only the slug identifies the global project.
+const GlobalProjectSlug = "global"
+
+// IsGlobalProjectSlug reports whether a hub project with this slug is a
+// broker's global project. Only the slug counts. The hub's dispatch and the
+// built-in profile reference count both use it, so they agree.
+func IsGlobalProjectSlug(slug string) bool { return slug == GlobalProjectSlug }
+
 // ProjectDispatchLocation returns the project location the hub sends a
 // broker when dispatching an agent: the broker's provider LocalPath when it
 // has one, else the project slug, which the broker resolves itself. The

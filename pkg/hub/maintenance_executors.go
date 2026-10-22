@@ -22,6 +22,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -31,11 +32,14 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	cloudbuild "cloud.google.com/go/cloudbuild/apiv1/v2"
 	cloudbuildpb "cloud.google.com/go/cloudbuild/apiv1/v2/cloudbuildpb"
 	gcstorage "cloud.google.com/go/storage"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/unitdrift"
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -57,6 +61,10 @@ type MaintenanceExecutor interface {
 // HubSettingSectionUpdateAvailable is the hub_settings section key used to
 // store the latest detected release update for the admin UI.
 const HubSettingSectionUpdateAvailable = "system.update_available"
+
+// HubSettingSectionUnitDrift is the hub_settings section key holding the
+// last systemd unit check of Rebuild from git (UnitDriftStatus).
+const HubSettingSectionUnitDrift = "system.unit_drift"
 
 // SecretMigrationExecutor migrates hub-scoped secrets from the legacy fixed "hub" scope ID
 // to the per-instance hub ID namespace in GCP Secret Manager.
@@ -231,32 +239,34 @@ func (e *PullImagesExecutor) Run(ctx context.Context, logger io.Writer, params m
 		harnesses = []string{"claude", "antigravity"}
 	}
 
+	// The registry is shown redacted (config.RedactImageRegistry).
 	log.Debug("Starting pull-images",
-		"runtime", runtimeBin, "registry", registry, "tag", tag,
+		"runtime", runtimeBin, "registry", config.RedactImageRegistry(registry), "tag", tag,
 		"harnesses", fmt.Sprint(harnesses))
 
 	_, _ = fmt.Fprintf(logger, "Using runtime: %s\n", runtimeBin)
-	_, _ = fmt.Fprintf(logger, "Registry: %s, Tag: %s\n", registry, tag)
+	_, _ = fmt.Fprintf(logger, "Registry: %s, Tag: %s\n", config.RedactImageRegistry(registry), tag)
 	_, _ = fmt.Fprintf(logger, "Pulling %d image(s)...\n\n", len(harnesses))
 
 	pulled := 0
 	var lastErr error
 	for _, h := range harnesses {
 		image := fmt.Sprintf("%s/scion-%s:%s", registry, h, tag)
-		_, _ = fmt.Fprintf(logger, "Pulling %s ...\n", image)
-		log.Debug("Pulling image", "image", image)
+		shown := config.RedactImageRegistry(image)
+		_, _ = fmt.Fprintf(logger, "Pulling %s ...\n", shown)
+		log.Debug("Pulling image", "image", shown)
 
 		cmd := exec.CommandContext(ctx, runtimeBin, "image", "pull", image)
 		cmd.Stdout = logger
 		cmd.Stderr = logger
 		if err := cmd.Run(); err != nil {
 			_, _ = fmt.Fprintf(logger, "  ERROR: %v\n\n", err)
-			log.Error("Image pull failed", "image", image, "error", err)
+			log.Error("Image pull failed", "image", shown, "error", err)
 			lastErr = err
 			continue
 		}
 		_, _ = fmt.Fprintf(logger, "  OK\n\n")
-		log.Debug("Image pulled successfully", "image", image)
+		log.Debug("Image pulled successfully", "image", shown)
 		pulled++
 	}
 
@@ -274,6 +284,16 @@ type RebuildServerExecutor struct {
 	repoBranch  string // git branch to checkout before building (empty = stay on current)
 	binaryDest  string // install path (e.g., /usr/local/bin/scion)
 	serviceName string // systemd service name (e.g., "scion-hub")
+
+	// unitLocator and unitRevision back the systemd unit drift check;
+	// tests replace them so they never call the host's systemctl or git.
+	unitLocator  unitdrift.Locator
+	unitRevision unitdrift.Revision
+	unitTimeout  time.Duration // zero means unitdrift.DefaultTimeout
+
+	// store, when set, keeps the last unit check result for the
+	// Admin -> Maintenance banner (hub setting system.unit_drift).
+	store store.Store
 }
 
 // RebuildServerOptions configures a RebuildServerExecutor. Zero values are
@@ -283,15 +303,21 @@ type RebuildServerOptions struct {
 	RepoBranch  string // git branch to checkout before building (empty = stay on current)
 	BinaryDest  string // install path (e.g., /usr/local/bin/scion)
 	ServiceName string // systemd service name (e.g., "scion-hub")
+	// Store, when set, keeps the last systemd unit check result for the
+	// Admin -> Maintenance page. Optional.
+	Store store.Store
 }
 
 // NewRebuildServerExecutor returns a RebuildServerExecutor configured from opts.
 func NewRebuildServerExecutor(opts RebuildServerOptions) *RebuildServerExecutor {
 	return &RebuildServerExecutor{
-		repoPath:    opts.RepoPath,
-		repoBranch:  opts.RepoBranch,
-		binaryDest:  opts.BinaryDest,
-		serviceName: opts.ServiceName,
+		repoPath:     opts.RepoPath,
+		repoBranch:   opts.RepoBranch,
+		binaryDest:   opts.BinaryDest,
+		serviceName:  opts.ServiceName,
+		unitLocator:  unitdrift.SystemctlLocator,
+		unitRevision: unitdrift.GitRevision,
+		store:        opts.Store,
 	}
 }
 
@@ -343,6 +369,7 @@ func (e *RebuildServerExecutor) Run(ctx context.Context, logger io.Writer, param
 	}
 
 	var steps []step
+	var currentBranch string
 	steps = append(steps, step{"Fetching latest code", "git", []string{"fetch", "origin"}, repoPath})
 	if branch != "" {
 		steps = append(steps, step{"Checking out branch " + branch, "git", []string{"checkout", branch}, repoPath})
@@ -355,7 +382,7 @@ func (e *RebuildServerExecutor) Run(ctx context.Context, logger io.Writer, param
 		if err != nil {
 			return fmt.Errorf("failed to determine current branch: %s", strings.TrimSpace(string(branchOut)))
 		}
-		currentBranch := strings.TrimSpace(string(branchOut))
+		currentBranch = strings.TrimSpace(string(branchOut))
 		steps = append(steps, step{"Resetting to origin/" + currentBranch, "git", []string{"reset", "--hard", "origin/" + currentBranch}, repoPath})
 	}
 	steps = append(steps,
@@ -391,6 +418,44 @@ func (e *RebuildServerExecutor) Run(ctx context.Context, logger io.Writer, param
 		_, _ = fmt.Fprintln(logger)
 	}
 
+	// Compare the installed systemd unit with the template in the tree just
+	// checked out. Rebuild from git never rewrites the unit, so a template
+	// change needs a re-provision; tell the admin. The check is read-only,
+	// bounded and never fails, so the restart below always runs. Its report
+	// is written last, after the completion line (also when the restart
+	// fails to start), so it is not buried in the build output.
+	_, _ = fmt.Fprintf(logger, "==> Checking systemd unit against template (result at end of log)\n\n")
+	unitBranch := branch
+	if unitBranch == "" {
+		unitBranch = currentBranch
+	}
+	if unitBranch == "HEAD" { // detached checkout: no branch to name
+		unitBranch = ""
+	}
+	unitReport := unitdrift.Check(ctx, unitdrift.CheckOptions{
+		RepoPath: repoPath,
+		Branch:   unitBranch,
+		Service:  serviceName,
+		Locate:   e.unitLocator,
+		Revision: e.unitRevision,
+		Timeout:  e.unitTimeout,
+	})
+	if unitReport.Status == unitdrift.Drift {
+		log.Warn("Installed systemd unit differs from template; re-provision needed", "service_name", serviceName)
+	}
+	// Persist the result for the Maintenance banner now, before the
+	// restart, so the restart cannot lose it.
+	e.persistUnitStatus(ctx, logger, unitReport, unitBranch, serviceName)
+	// The restart child's output and everything written after Start go
+	// through a Write-only, mutex-guarded writer. Handing the child a
+	// *bytes.Buffer directly would let exec copy with Buffer.ReadFrom, which
+	// trims the buffer back to its length at Start when the child exits,
+	// dropping the lines below; it would also race with them.
+	tail := &restartLogWriter{w: logger}
+	defer func() {
+		_, _ = fmt.Fprintf(tail, "\n==> Systemd unit check\n%s", unitReport.Text)
+	}()
+
 	// Fire-and-forget: start the restart but don't wait for it to finish.
 	// "systemctl restart" sends SIGTERM to this very process, so cmd.Run()
 	// would never return — it reports "signal: terminated". Using cmd.Start()
@@ -400,16 +465,101 @@ func (e *RebuildServerExecutor) Run(ctx context.Context, logger io.Writer, param
 	log.Debug("Initiating service restart (fire-and-forget)",
 		"cmd", "sudo", "args", fmt.Sprintf("[systemctl restart %s]", serviceName))
 	restartCmd := exec.Command("sudo", "systemctl", "restart", serviceName)
-	restartCmd.Stdout = logger
-	restartCmd.Stderr = logger
+	restartCmd.Stdout = tail
+	restartCmd.Stderr = tail
 	if err := restartCmd.Start(); err != nil {
 		log.Error("Failed to initiate service restart", "error", err)
 		return fmt.Errorf("restarting service failed: %w", err)
 	}
 
 	log.Info("Server rebuild complete, restart initiated")
-	_, _ = fmt.Fprintln(logger, "\nServer rebuild complete, restart initiated.")
+	_, _ = fmt.Fprintln(tail, "\nServer rebuild complete, restart initiated.")
 	return nil
+}
+
+// restartLogWriter serialises writes to w. It implements only Write (not
+// io.ReaderFrom), so os/exec copies a child's output with its own buffer
+// and calls Write as data arrives.
+type restartLogWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (l *restartLogWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
+}
+
+// UnitDriftStatus is the stored result of the last systemd unit check,
+// shown on Admin -> Maintenance. Only "match" and "drift" are stored.
+type UnitDriftStatus struct {
+	Status    string   `json:"status"` // "match" or "drift"
+	CheckedAt string   `json:"checkedAt"`
+	Commit    string   `json:"commit"`
+	Branch    string   `json:"branch"`
+	Service   string   `json:"service"` // systemd unit name, e.g. scion-hub.service
+	Summary   []string `json:"summary,omitempty"`
+}
+
+// unitStatusTimeout bounds the store call that records the unit check.
+const unitStatusTimeout = 5 * time.Second
+
+// persistUnitStatus records the unit check for the Maintenance banner:
+// match and drift are stored, a structural skip removes the record (the
+// host is no longer comparable, so an old drift must not stick), and a
+// transient skip leaves it as it is. It never fails the run and recovers
+// from panics, so the restart that follows always runs.
+func (e *RebuildServerExecutor) persistUnitStatus(ctx context.Context, logger io.Writer, rep unitdrift.Report, branch, service string) {
+	if e.store == nil {
+		return
+	}
+	log := logging.Subsystem("hub.maintenance.rebuild-server")
+	defer func() {
+		if r := recover(); r != nil {
+			log.Warn("Recording the systemd unit status panicked", "panic", fmt.Sprint(r))
+			_, _ = fmt.Fprintf(logger, "Warning: could not record the systemd unit status: internal error\n\n")
+		}
+	}()
+	ctx, cancel := context.WithTimeout(ctx, unitStatusTimeout)
+	defer cancel()
+
+	var status string
+	switch rep.Status {
+	case unitdrift.Match:
+		status = "match"
+	case unitdrift.Drift:
+		status = "drift"
+	default:
+		if !rep.Structural {
+			return
+		}
+		if err := e.store.DeleteHubSetting(ctx, HubSettingSectionUnitDrift); err != nil && !errors.Is(err, store.ErrNotFound) {
+			log.Warn("Failed to clear the systemd unit status", "error", err)
+			_, _ = fmt.Fprintf(logger, "Warning: could not clear the systemd unit status: %v\n\n", err)
+			return
+		}
+		_, _ = fmt.Fprintf(logger, "Cleared the recorded systemd unit status (check not applicable).\n\n")
+		return
+	}
+	value, err := json.Marshal(UnitDriftStatus{
+		Status:    status,
+		CheckedAt: time.Now().UTC().Format(time.RFC3339),
+		Commit:    rep.Commit,
+		Branch:    branch,
+		Service:   unitdrift.UnitName(service),
+		Summary:   rep.Diff, // already elided by unitdrift
+	})
+	if err != nil {
+		log.Warn("Failed to encode the systemd unit status", "error", err)
+		return
+	}
+	if _, err := e.store.UpsertHubSetting(ctx, HubSettingSectionUnitDrift, json.RawMessage(value), "system", -1, "managed"); err != nil {
+		log.Warn("Failed to record the systemd unit status", "error", err)
+		_, _ = fmt.Fprintf(logger, "Warning: could not record the systemd unit status: %v\n\n", err)
+		return
+	}
+	_, _ = fmt.Fprintf(logger, "Recorded systemd unit status: %s\n\n", status)
 }
 
 // RebuildWebExecutor rebuilds the web frontend assets from source.

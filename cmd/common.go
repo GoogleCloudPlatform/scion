@@ -348,10 +348,27 @@ func loadSettingsForTarget(resolvedPath string) (*config.Settings, error) {
 // prompt (see hubsync.EnsureHubReady). There is no per-command agent
 // reconcile.
 func requireHub(projectPath string) (*HubContext, error) {
+	return requireHubWith(projectPath, false)
+}
+
+// requireHubForUpload is requireHub for a command that uploads to, or reads
+// from, the Hub in the scope templateScopeFromGlobalFlag picks. In the
+// global scope (--global) no project ID is read, so the project is not
+// linked to the Hub or registered (ptone/scion#5217); in the project scope
+// it is requireHub.
+func requireHubForUpload(projectPath string) (*HubContext, error) {
+	return requireHubWith(projectPath, templateScopeFromGlobalFlag() == "global")
+}
+
+// requireHubWith is requireHub with skipProjectLink passed to
+// hubsync.EnsureHubReady as SkipProjectLink. A hub profile is handled
+// first, so its refusal of --global applies whatever skipProjectLink is.
+func requireHubWith(projectPath string, skipProjectLink bool) (*HubContext, error) {
 	if hubProfileSelected() {
 		return profileAgentHubContext()
 	}
 	opts := hubsync.EnsureHubReadyOptions{
+		SkipProjectLink:  skipProjectLink,
 		AutoConfirm:      autoConfirm,
 		NonInteractive:   nonInteractive,
 		EndpointOverride: hubEndpoint,
@@ -410,6 +427,23 @@ func detectCrossProjectTarget(cmd *cobra.Command) string {
 		return ""
 	}
 	return projectPath
+}
+
+// localProjectDir returns the project directory whose local files (such as
+// harness-configs) a command reads: the directory named with --project, or
+// the one found from the working directory. A --project value that is a hub
+// project reference names no local directory, so it returns "" and only
+// the global directory is read; the hub call gets the reference itself
+// (ptone/scion#5217).
+func localProjectDir() string {
+	if projectPath != "" && hubsync.IsHubProjectRef(projectPath) {
+		return ""
+	}
+	dir, err := config.GetResolvedProjectDir(projectPath)
+	if err != nil {
+		return ""
+	}
+	return dir
 }
 
 // CheckAgentsGitignore verifies that .scion/agents/ is listed in .gitignore
@@ -593,11 +627,16 @@ func printDeleteInProgressWarnings(w io.Writer, err error) {
 }
 
 // shouldSuggestHubCheck reports whether the hub-check hint is relevant for
-// err: true for connectivity failures (no structured API response) and 5xx.
+// err: true for connectivity failures (no structured API response) and 5xx,
+// except a reload_unconfirmed answer, where the hub answered normally and
+// only the running agent did not confirm a credential reload.
 func shouldSuggestHubCheck(err error) bool {
 	var apiErr *apiclient.APIError
 	if !errors.As(err, &apiErr) {
 		return true
+	}
+	if apiErr.Code == api.BrokerErrCodeReloadUnconfirmed {
+		return false
 	}
 	return apiErr.IsServerError()
 }
@@ -766,24 +805,9 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		}
 	}
 
-	if modelFlag != "" {
-		normalizedModel := config.NormalizeModelAlias(modelFlag)
-		if inlineCfg == nil {
-			inlineCfg = &api.ScionConfig{}
-		}
-		inlineCfg.Model = normalizedModel
-	}
-	// An explicitly set --thinking-level is always parsed, so an empty
-	// value fails instead of being treated as unset.
-	if thinkingLevelFlag != "" || (cmd != nil && cmd.Flags().Changed("thinking-level")) {
-		val, err := parseThinkingLevel(thinkingLevelFlag)
-		if err != nil {
-			return err
-		}
-		if inlineCfg == nil {
-			inlineCfg = &api.ScionConfig{}
-		}
-		inlineCfg.ThinkingLevel = &val
+	inlineCfg, err = applyModelFlags(cmd, inlineCfg)
+	if err != nil {
+		return err
 	}
 
 	hubCtx, err := requireHub(projectPath)
@@ -792,6 +816,33 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 	}
 
 	return startAgentViaHub(cmd, hubCtx, agentName, task, resume, inlineCfg)
+}
+
+// applyModelFlags writes --model and --thinking-level into the request's
+// inline config, creating it when either flag is set, and returns it. They
+// are explicit request values, the top of the hub's request > project >
+// template > hub order. --model is sent alias-normalized; the hub resolves
+// the alias. An explicitly set --thinking-level is always parsed, so an
+// empty value fails (a usage error) instead of being treated as unset.
+// Shared by scion start and scion create.
+func applyModelFlags(cmd *cobra.Command, inlineCfg *api.ScionConfig) (*api.ScionConfig, error) {
+	if modelFlag != "" {
+		if inlineCfg == nil {
+			inlineCfg = &api.ScionConfig{}
+		}
+		inlineCfg.Model = config.NormalizeModelAlias(modelFlag)
+	}
+	if thinkingLevelFlag != "" || (cmd != nil && cmd.Flags().Changed("thinking-level")) {
+		val, err := parseThinkingLevel(thinkingLevelFlag)
+		if err != nil {
+			return nil, err
+		}
+		if inlineCfg == nil {
+			inlineCfg = &api.ScionConfig{}
+		}
+		inlineCfg.ThinkingLevel = &val
+	}
+	return inlineCfg, nil
 }
 
 // applyServiceAccountFlag wires the --service-account CLI flag into a

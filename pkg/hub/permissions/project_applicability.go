@@ -50,8 +50,10 @@ var ProjectTargetApplicability = map[string]bool{
 
 	// project.* — read/update/delete/manage/set_messaging_policy target an
 	// existing project; create/register/clone/list are hub-level collection
-	// actions (create: no project exists yet; register/clone/list reviewed
-	// conservatively false — flagged for D.2 confirmation, not blocking).
+	// actions (create: no project exists yet). register and clone are false:
+	// their creation half is project.create on hub collection evidence, and
+	// a clone's source half is project.read on the source project. list is
+	// a collection list.
 	"project.create": false, "project.read": true, "project.update": true,
 	"project.delete": true, "project.manage": true, "project.register": false,
 	"project.set_messaging_policy": true, "project.clone": false, "project.list": false,
@@ -225,9 +227,13 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	// project.list's selector lists projects on either boundary; a project
 	// token lists only its boundary project.
 	"project.list": {BoundaryKindProject, BoundaryKindHub},
+	// project.create provisions a project at the hub; a project boundary
+	// never covers a project that does not exist yet.
+	"project.create": {BoundaryKindHub},
+
 	"skill.create": {BoundaryKindProject, BoundaryKindHub}, "skill.read": {BoundaryKindProject, BoundaryKindHub},
 	"skill.update": {BoundaryKindProject, BoundaryKindHub}, "skill.delete": {BoundaryKindProject, BoundaryKindHub},
-	"skill.list": {BoundaryKindProject, BoundaryKindHub}, "skill.register": {BoundaryKindHub},
+	"skill.list": {BoundaryKindProject, BoundaryKindHub}, "skill.register": {BoundaryKindHub}, "skill.create_global": {BoundaryKindHub},
 	"artifact.read": {BoundaryKindProject, BoundaryKindHub}, "artifact.create": {BoundaryKindProject, BoundaryKindHub},
 	"artifact.update": {BoundaryKindProject, BoundaryKindHub}, "artifact.delete": {BoundaryKindProject, BoundaryKindHub},
 	"artifact.manage": {BoundaryKindProject, BoundaryKindHub}, "artifact.steward": {BoundaryKindProject, BoundaryKindHub},
@@ -241,6 +247,7 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	"group.delete": {BoundaryKindHub}, "group.list": {BoundaryKindHub}, "group.addMember": {BoundaryKindHub},
 	"group.removeMember": {BoundaryKindHub},
 	"user.read":          {BoundaryKindHub}, "user.invite": {BoundaryKindHub}, "user.list": {BoundaryKindHub},
+	"user.update": {BoundaryKindHub}, "user.suspend": {BoundaryKindHub},
 	"broker.read": {BoundaryKindHub}, "broker.list": {BoundaryKindHub},
 	"gcp_service_account.read": {BoundaryKindHub}, "gcp_service_account.list": {BoundaryKindHub},
 	"gcp_service_account.verify": {BoundaryKindHub}, "gcp_service_account.assign": {BoundaryKindProject, BoundaryKindHub},
@@ -248,6 +255,18 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	// broker.create's selector "broker:create" is hub-only: a broker is a
 	// hub-level resource.
 	"broker.create": {BoundaryKindHub},
+
+	// Role definition, role binding and access constraint reads are
+	// hub-only: a token reads them through the hub-level admin routes,
+	// which list every scope's records.
+	"role.read": {BoundaryKindHub}, "role_binding.read": {BoundaryKindHub},
+	"access_constraint.read": {BoundaryKindHub},
+	// Role definition, role binding and access constraint administration
+	// is hub-only: the definitions, bindings and constraints are written
+	// through the hub-level admin routes.
+	"role.create": {BoundaryKindHub}, "role.update": {BoundaryKindHub}, "role.delete": {BoundaryKindHub},
+	"role_binding.create": {BoundaryKindHub}, "role_binding.delete": {BoundaryKindHub},
+	"access_constraint.admin": {BoundaryKindHub},
 
 	// Self-scoped permissions. inbox.* may be selected on either boundary;
 	// a project token sees only its boundary project's records.
@@ -285,6 +304,7 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	"hub.integrations.read": {BoundaryKindHub}, "hub.integrations.update": {BoundaryKindHub},
 	"hub.teams_manifest.read": {BoundaryKindHub}, "hub.diagnostics.read": {BoundaryKindHub},
 	"hub.github_app.read": {BoundaryKindHub}, "hub.github_app.update": {BoundaryKindHub},
+	"hub.audit.read": {BoundaryKindHub},
 
 	// quota.* administer hub-wide limits, entitlements and usage, so their
 	// selectors are hub-only.
@@ -384,6 +404,9 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	// project.list is a hub-level collection action (false in
 	// ProjectTargetApplicability), so hub-boundary mint needs a system grant.
 	"project.list": {TargetClassKindHubResource},
+	// project.create is a hub-level collection action: no project exists
+	// yet, so hub-boundary mint needs a system grant.
+	"project.create": {TargetClassKindHubResource},
 
 	// artifact.* — project-homed, no scope-kind split and no global catalog.
 	"artifact.read": {TargetClassKindProjectScoped}, "artifact.create": {TargetClassKindProjectScoped},
@@ -392,12 +415,12 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 
 	// skill.* — read/list support both project and global catalog classes;
 	// create/update/delete are project-scoped only; register is a hub-level
-	// registry action.
+	// registry action and create_global a hub-level catalog action.
 	"skill.create": {TargetClassKindProjectScoped},
 	"skill.read":   {TargetClassKindProjectScoped, TargetClassKindGlobalCatalog},
 	"skill.update": {TargetClassKindProjectScoped}, "skill.delete": {TargetClassKindProjectScoped},
 	"skill.list":     {TargetClassKindProjectScoped, TargetClassKindGlobalCatalog},
-	"skill.register": {TargetClassKindHubResource},
+	"skill.register": {TargetClassKindHubResource}, "skill.create_global": {TargetClassKindHubResource},
 
 	// template.*, harness_config.* — unlike skill, a single create
 	// permission covers every scope (templateScopeResource/
@@ -432,6 +455,8 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	// mint case this table must cover explicitly, not by omission.
 	"user.read": {TargetClassKindHubResource}, "user.invite": {TargetClassKindHubResource},
 	"user.list": {TargetClassKindHubResource},
+	// user.update and user.suspend target the hub-level user record.
+	"user.update": {TargetClassKindHubResource}, "user.suspend": {TargetClassKindHubResource},
 
 	// broker.* — user-owned hub resource.
 	"broker.read": {TargetClassKindHubResource}, "broker.list": {TargetClassKindHubResource},
@@ -451,6 +476,16 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 
 	// broker.create targets the hub-level broker collection only.
 	"broker.create": {TargetClassKindHubResource},
+
+	// Role definition, role binding and access constraint reads target
+	// the hub-level records.
+	"role.read": {TargetClassKindHubResource}, "role_binding.read": {TargetClassKindHubResource},
+	"access_constraint.read": {TargetClassKindHubResource},
+	// Their administration targets the same hub-level records.
+	"role.create": {TargetClassKindHubResource}, "role.update": {TargetClassKindHubResource},
+	"role.delete":         {TargetClassKindHubResource},
+	"role_binding.create": {TargetClassKindHubResource}, "role_binding.delete": {TargetClassKindHubResource},
+	"access_constraint.admin": {TargetClassKindHubResource},
 
 	// Self-scoped permissions.
 	"inbox.read": {TargetClassKindSelf}, "inbox.write": {TargetClassKindSelf},
@@ -479,6 +514,7 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	"hub.integrations.read": {TargetClassKindHubResource}, "hub.integrations.update": {TargetClassKindHubResource},
 	"hub.teams_manifest.read": {TargetClassKindHubResource}, "hub.diagnostics.read": {TargetClassKindHubResource},
 	"hub.github_app.read": {TargetClassKindHubResource}, "hub.github_app.update": {TargetClassKindHubResource},
+	"hub.audit.read": {TargetClassKindHubResource},
 
 	// quota.* target the hub-wide quota records.
 	"quota.read": {TargetClassKindHubResource}, "quota.create": {TargetClassKindHubResource},
