@@ -972,3 +972,31 @@ func TestDeployMediatorMinInstances(t *testing.T) {
 		t.Errorf("dry-run lacks --min-instances=1 --max-instances=1:\n%s", r.stdout)
 	}
 }
+
+// TestDeployJobDiskLimitHint: a RUNNER_DISK_GI above the region's limit fails at
+// the job create, and the script says what the error means.
+func TestDeployJobDiskLimitHint(t *testing.T) {
+	cfg := baseConfig()
+	cfg["RUNNER_DISK_GI"] = "25"
+	e := newEnv(t, cfg)
+	e.state("exists", allExisting...)
+	e.extra = []string{"STUB_DISK_LIMIT_GI=23"}
+	r := e.run("deploy-job.sh", "", "--config", "config.env", "--tag", "golden", "--apply")
+	if r.code == 0 {
+		t.Fatal("deploy-job.sh succeeded over the disk limit")
+	}
+	for _, want := range []string{
+		"RUNNER_DISK_GI=25 is above Cloud Run's 10 GiB per-instance default",
+		"N is the limit in us-central1: set RUNNER_DISK_GI to at most N",
+	} {
+		if !strings.Contains(r.stdout+r.stderr, want) {
+			t.Errorf("output lacks %q:\nstdout:\n%s\nstderr:\n%s", want, r.stdout, r.stderr)
+		}
+	}
+	cfg["RUNNER_DISK_GI"] = "23"
+	e = newEnv(t, cfg)
+	e.state("exists", allExisting...)
+	e.extra = []string{"STUB_DISK_LIMIT_GI=23"}
+	r = e.run("deploy-job.sh", "", "--config", "config.env", "--tag", "golden", "--apply")
+	wantCode(t, r, 0)
+}

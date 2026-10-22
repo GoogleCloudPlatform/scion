@@ -132,6 +132,20 @@ then remove the old stack's regional resources with `scripts/teardown.sh
 --regional-only --config <old config.env> --apply` (it keeps the service accounts,
 secrets, staging bucket and project binding the new stack shares).
 
+## Webhook URL change
+
+After the App's webhook URL changes (a region move, a new `MEDIATOR_URL`), check
+it end to end (C1). The `ping` from the App's creation is usually far down
+**Advanced**, **Recent Deliveries**, so redeliver a recent `workflow_job` delivery
+instead, one whose action is **`completed` or `in_progress`**, never `queued`.
+A redelivered `queued` event for a job that is still queued would launch a runner,
+and for any other job it costs GitHub API calls for nothing; `completed` and
+`in_progress` events only reach the hijack guard and cleanup, which are no-ops for
+a finished job. Expect 200 (and a mediator log line for the delivery); 401 means
+the webhook secret differs ([github-setup.md, step 5](github-setup.md#5-check-the-webhook)
+has the table). If deliveries got 429 or 404 between the change and the check,
+redeliver those too, or let `/reconcile` backfill their jobs.
+
 ## Secret rotation
 
 All values go through `scripts/set-secrets.sh` (file at mode 0600, or stdin),

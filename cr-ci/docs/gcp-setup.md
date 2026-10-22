@@ -284,11 +284,27 @@ default. **10 GiB is too small for a warm golangci-lint**: the P6 PoC measured
 about 15-20 GiB on disk (the restored Go cache grows from 4.8 GB to about
 8-9.5 GB during the lint, plus a 1.1 GB workspace, about 1.3 GB of modules and
 up to 2 GB of Go temp dirs). Every lint run with 10 GiB ran out of space. Use
-about **25 GiB**, after raising the per-instance quota, or keep the build cache
+**at least 20 GiB** (P6b peaked at 16.5 GB on 23 GiB), after raising the
+per-instance quota, or keep the build cache
 in RAM (`RUNNER_BUILD_CACHE_IN_RAM=true`, then `deploy-job.sh --apply`; it costs
 about 9.5 GB of the 32 GiB memory, see
 [architecture](architecture.md#constraints)). A job above the per-instance quota is rejected at `deploy-job.sh`
-("Total size of ephemeral-disk volumes cannot exceed 10 GiB").
+("Total size of 'ephemeral-disk' volumes cannot exceed N GiB"), and nothing is
+created or changed.
+
+**The limit depends on the region and the grant.** It was 10 GiB in us-central1
+and 23 GiB in us-west2 after the quota grant (a request for more was granted as
+23), so `check-config.sh` cannot know it. `deploy-job.sh` notes when
+`RUNNER_DISK_GI` is above 10, and when the create or update fails it explains the
+error: N in the message is the limit in `REGION`. Set `RUNNER_DISK_GI` to at most
+N, or ask for more. us-west2 runs with `RUNNER_DISK_GI=23` and
+`MAX_CONCURRENT_RUNNERS=4` (92 GiB of the default 100 GiB regional allocation).
+
+**Reading the quotas needs `cloudquotas.quotas.get`** (`roles/cloudquotas.viewer`,
+project). A deployer without it (as in the us-west2 deployment) cannot run the
+`gcloud beta quotas info` command below; the job create is then the only check
+of the per-instance limit, and the regional allocation can only be assumed from
+the default. Ask a project admin for the values, or for the viewer role.
 
 To raise a quota (C15, `roles/cloudquotas.admin`; Google approves the request):
 

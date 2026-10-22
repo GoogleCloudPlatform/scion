@@ -75,11 +75,19 @@ VOLUME=(
   "--add-volume-mount=volume=scratch,mount-path=/scratch"
 )
 
+# The per-job ephemeral-disk limit the server enforces depends on the region and
+# its quota grant (10 GiB by default; us-west2 allowed 23 after the grant), and the
+# deployer may not be able to read the quota (cloudquotas.quotas.get), so the
+# create or update itself is the check.
+DISK_HINT="if the error says \"Total size of 'ephemeral-disk' volumes cannot exceed N GiB\", N is the limit in $R: set RUNNER_DISK_GI to at most N, or request a higher per-instance quota (docs/gcp-setup.md, \"Quotas\")"
 crci_note "C8: runner job $JOB"
+if ((CFG[RUNNER_DISK_GI] > 10)); then
+  crci_note "RUNNER_DISK_GI=${CFG[RUNNER_DISK_GI]} is above Cloud Run's 10 GiB per-instance default: it needs the per-instance quota raised in $R (the limit is per region)"
+fi
 if crci_exists gcloud run jobs describe "$JOB" --region="$R" --project="$P" --format='value(name)'; then
-  crci_run gcloud run jobs update "$JOB" "${SHAPE[@]}" --clear-volumes --clear-volume-mounts "${VOLUME[@]}"
+  crci_run_hint "$DISK_HINT" gcloud run jobs update "$JOB" "${SHAPE[@]}" --clear-volumes --clear-volume-mounts "${VOLUME[@]}"
 else
-  crci_run gcloud run jobs create "$JOB" "${SHAPE[@]}" "${VOLUME[@]}"
+  crci_run_hint "$DISK_HINT" gcloud run jobs create "$JOB" "${SHAPE[@]}" "${VOLUME[@]}"
 fi
 
 crci_note "C10: MEDIATOR_SA_NAME may run and cancel executions of this job only"

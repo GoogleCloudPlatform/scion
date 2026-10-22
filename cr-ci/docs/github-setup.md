@@ -309,7 +309,10 @@ event type, so a redelivered `ping` tests the URL and the webhook secret
 end to end. It never starts a runner.
 
 1. App settings, **Advanced**, **Recent Deliveries**. Open the `ping`
-   delivery (or any other) and click **Redeliver**.
+   delivery and click **Redeliver**. Later, when the ping is buried (after a
+   webhook URL change), redeliver a `workflow_job` delivery whose action is
+   `completed` or `in_progress`, never `queued`
+   ([operations](operations.md#webhook-url-change)).
 2. Read the response code:
 
    | Response | Meaning | Fix |

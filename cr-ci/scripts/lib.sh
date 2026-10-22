@@ -77,6 +77,20 @@ crci_run() {
   fi
 }
 
+# crci_run_hint HINT CMD...: like crci_run, but prints HINT (a crci_note) before
+# stopping when CMD fails.
+crci_run_hint() {
+  local hint=$1 rc
+  shift
+  printf '+ %s\n' "$(crci_quote "$@")"
+  if [[ $CRCI_MODE == apply ]]; then
+    "$@" && return 0
+    rc=$?
+    crci_note "$hint"
+    crci_die "step failed (rc $rc): $(crci_quote "$@")"
+  fi
+}
+
 # crci_is_not_found ERRTEXT: true if a gcloud error says the target does not
 # exist. Recognised (and nothing else):
 #   - "PERMISSION_DENIED" or "denied" anywhere: never not-found (checked first);
