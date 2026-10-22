@@ -128,15 +128,14 @@ func TestCapabilitiesFromStrings_ChangedFields(t *testing.T) {
 // wantClearAppliedAtStart are the container keys whose clear a broker with
 // clearedFields applies at the next start (ptone/scion#4890): the keys
 // api.ClearableConfigPath accepts, and env (removed keys travel as
-// env.KEY entries).
+// env.KEY entries), except the count limits, whose 0 (Unlimited) no start
+// applies over an inherited limit (ptone/scion#5605).
 var wantClearAppliedAtStart = map[string]bool{
-	"config.max_turns":       true,
-	"config.max_model_calls": true,
-	"config.max_duration":    true,
-	"config.thinking_level":  true,
-	"config.resources":       true,
-	"config.system_prompt":   true,
-	"config.env":             true,
+	"config.max_duration":   true,
+	"config.thinking_level": true,
+	"config.resources":      true,
+	"config.system_prompt":  true,
+	"config.env":            true,
 }
 
 func TestBrokerStartSupport_ClearAppliesAtStart(t *testing.T) {
@@ -147,8 +146,17 @@ func TestBrokerStartSupport_ClearAppliesAtStart(t *testing.T) {
 		assert.False(t, without.clearAppliesAtStart(f.Key), "without clearedFields: %s", f.Key)
 	}
 	cleared := []string{"config.max_turns", "config.model", "config.resources"}
-	assert.Equal(t, []string{"config.model"}, with.heldClearEdits(cleared))
-	assert.Equal(t, cleared, without.heldClearEdits(cleared))
+	nullClear := rawConfigOf(t, `{"Max_Turns": null, "model": "", "resources": {}}`)
+	assert.Equal(t, []string{"config.model"}, with.heldClearEdits(cleared, nullClear), "a null count limit is a clear the broker applies")
+	assert.Equal(t, cleared, without.heldClearEdits(cleared, nullClear))
+	// Unlimited (0) on a count limit is never reported applied
+	// (ptone/scion#5605).
+	for _, key := range []string{"max_turns", "max_model_calls"} {
+		zero := rawConfigOf(t, `{"`+key+`": 0}`)
+		assert.Equal(t, []string{"config." + key}, with.heldClearEdits([]string{"config." + key}, zero), key)
+		null := rawConfigOf(t, `{"`+key+`": null}`)
+		assert.Empty(t, with.heldClearEdits([]string{"config." + key}, null), key)
+	}
 	removed := map[string][]string{"env": {"A"}, "volumes": {"/data"}}
 	assert.Equal(t, map[string][]string{"volumes": {"/data"}}, with.heldRemovals(removed))
 	assert.Equal(t, removed, without.heldRemovals(removed))

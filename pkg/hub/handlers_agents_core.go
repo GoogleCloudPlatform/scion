@@ -4553,7 +4553,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		// the next start (ptone/scion#4890), so only the rest are held.
 		sup := s.agentBrokerStartSupport(ctx, agent)
 		provision = sup.heldProvisionEdits(provision)
-		cleared = sup.heldClearEdits(cleared)
+		cleared = sup.heldClearEdits(cleared, rawFields)
 		removed = sup.heldRemovals(removed)
 		warnings = append(warnings, reincarnateOnlyEditWarnings(provision, cleared)...)
 		warnings = append(warnings, removedEntriesWarnings(removed)...)

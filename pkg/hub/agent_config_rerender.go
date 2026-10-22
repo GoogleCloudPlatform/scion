@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"sort"
 	"strings"
@@ -98,26 +99,58 @@ func (sup brokerStartSupport) heldProvisionEdits(provision []string) []string {
 	return out
 }
 
-// clearAppliesAtStart reports whether the broker applies a clear of the
-// config key with wire key key at the next start: with ClearedFields, a
-// key api.ClearableConfigPath accepts, and env, whose removed keys are
-// sent as env.KEY entries.
+// clearAppliesAtStart reports whether the broker applies a clear or zero
+// of the config key with wire key key at the next start: with
+// ClearedFields, a key api.ClearableConfigPath accepts, and env, whose
+// removed keys are sent as env.KEY entries. The count limits are left out:
+// their 0 (Unlimited) is not applied by any start or reincarnation over an
+// inherited limit (ptone/scion#5605), so the field keeps
+// clearNeedsReincarnate; their null clear is handled by heldClearEdits.
 func (sup brokerStartSupport) clearAppliesAtStart(key string) bool {
 	k, ok := strings.CutPrefix(key, agentConfigKeyPrefix)
-	return ok && sup.ClearedFields && (k == "env" || api.ClearableConfigPath(k))
+	return ok && sup.ClearedFields && !countLimitKeys[k] && (k == "env" || api.ClearableConfigPath(k))
 }
+
+// countLimitKeys are the count limits, whose 0 is the Edit page's
+// Unlimited rather than a clear.
+var countLimitKeys = map[string]bool{"max_turns": true, "max_model_calls": true}
 
 // heldClearEdits returns the entries of cleared (wire keys of cleared
 // container keys, from reincarnateOnlyConfigEdits) that still wait for a
-// reincarnation with this broker.
-func (sup brokerStartSupport) heldClearEdits(cleared []string) []string {
+// reincarnation with this broker. rawConfig is the request's raw config
+// object.
+//
+// A count limit sent as a number (0, Unlimited) is excluded from the
+// applied path and stays held, with today's warning: the broker would
+// restore the inherited limit rather than remove it, and no start or
+// reincarnation can yet express "no limit" over an inherited one
+// (ptone/scion#5605). Only a null value is reported as a clear the broker
+// applies.
+func (sup brokerStartSupport) heldClearEdits(cleared []string, rawConfig map[string]json.RawMessage) []string {
 	var out []string
 	for _, k := range cleared {
-		if !sup.clearAppliesAtStart(k) {
+		countLimitClear := sup.ClearedFields && countLimitKeys[strings.TrimPrefix(k, agentConfigKeyPrefix)] && !countLimitSentAsNumber(k, rawConfig)
+		if !sup.clearAppliesAtStart(k) && !countLimitClear {
 			out = append(out, k)
 		}
 	}
 	return out
+}
+
+// countLimitSentAsNumber reports whether the wire key key is a count limit
+// the request's raw config sends as a number rather than null.
+func countLimitSentAsNumber(key string, rawConfig map[string]json.RawMessage) bool {
+	k := strings.TrimPrefix(key, agentConfigKeyPrefix)
+	if !countLimitKeys[k] {
+		return false
+	}
+	for rk, v := range rawConfig {
+		if strings.EqualFold(rk, k) {
+			s := strings.TrimSpace(string(v))
+			return s != "" && s != "null"
+		}
+	}
+	return false
 }
 
 // heldRemovals returns removed (the entries removedConfigEntries reports
