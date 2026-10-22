@@ -21,7 +21,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -414,132 +413,59 @@ type analyticsHandles struct {
 	disabledReason string
 }
 
-// outboxDisk is the outbox's on-disk state read for one snapshot. Each
-// value is read exactly once, and failed is set if ANY read failed: then
-// none of these values is a measurement (design 1.3, analytics_stats_failed).
-type outboxDisk struct {
-	epoch                                   string
-	seq, overflowTotal, oversizeTotal       int64
-	appendFailedTotal, deadLettersTotal     int64
-	syncUncertainTotal, commitDeferredTotal int64
-	held                                    bool
-	pending, retained                       int64
-	oldest                                  time.Time
-	failed                                  bool
-}
-
-// readOutboxDisk reads the persisted ledger, totals and pending figures,
-// keeping every error (Stats discards them as zeros).
-func readOutboxDisk(o *AnalyticsOutbox) outboxDisk {
-	var d outboxDisk
-	if o == nil {
-		d.failed = true
-		return d
-	}
-	var errs []error
-	note := func(err error) { errs = append(errs, err) }
-	// WP2's persisted counter files. The names are WP2's; the drift test
-	// TestOutboxDiskMatchesStats produces each one through WP2 code paths
-	// and compares with Stats(), so a rename cannot go unnoticed.
-	sizeOf := func(name string) int64 { // lock-free counters: one byte per event
-		info, err := os.Stat(o.path(name))
-		if err == nil {
-			return info.Size()
-		}
-		if !errors.Is(err, os.ErrNotExist) {
-			note(err)
-		}
-		return 0
-	}
-	readInt := func(name string) int64 {
-		n, err := o.readInt(name)
-		note(err)
-		return n
-	}
-	var err error
-	d.epoch, err = o.readTrimmed("epoch")
-	note(err)
-	if err == nil && d.epoch == "" {
-		note(errors.New("outbox epoch is missing")) // created when the outbox opens
-	}
-	d.seq = readInt("seq")
-	d.overflowTotal = readInt("overflow")
-	d.oversizeTotal = readInt("oversize")
-	d.deadLettersTotal = readInt("dead_letters")
-	d.appendFailedTotal = sizeOf("append_failed")
-	d.syncUncertainTotal = sizeOf("sync_uncertain")
-	d.commitDeferredTotal = sizeOf("commit_deferred")
-	if _, err := os.Stat(o.path("intent")); err == nil {
-		d.held = true
-	} else if !errors.Is(err, os.ErrNotExist) {
-		note(err)
-	}
-	d.pending, d.oldest, err = o.pendingBytes()
-	note(err)
-	// retained = the SAME pending read + dead-lettered and quarantined
-	// files (WP2 retainedBytes' definition; TestRetainedMatchesOutbox pins
-	// that the two agree), so retained >= pending within one row. A file
-	// moved between the two reads can be counted twice (transient
-	// over-count of at most one file).
-	extra, err := retainedExtraBytes(o.dir)
-	note(err)
-	d.retained = d.pending + extra
-	d.failed = errors.Join(errs...) != nil
-	return d
-}
-
+// counters builds the analytics fields from WP2's typed accessors only:
+// MemoryStats (in-memory atomics) and LedgerSnapshot (every disk value read
+// once under the outbox lock). A LedgerSnapshot error, including a lock
+// timeout, is analytics_stats_failed: the disk-derived fields are then
+// omitted. WP3 never reads outbox files itself.
 func (h analyticsHandles) counters() telemetrycontract.HealthAnalyticsCounters {
 	outbox := h.native.Outbox()
 	if outbox == nil {
 		// A lazily opened outbox that failed: nothing is measurable.
 		return telemetrycontract.HealthAnalyticsCounters{StatsFailed: true, DroppedNoIdentity: h.native.DroppedNoIdentity(), Invalid: h.native.Invalid()}
 	}
-	// Stats() also reads the disk (WP2); only its in-memory counters are
-	// used here. Disk values come from readOutboxDisk, read once each.
-	s := outbox.Stats()
-	d := readOutboxDisk(outbox)
+	s := outbox.MemoryStats()
+	ledger, err := outbox.LedgerSnapshot()
 	c := telemetrycontract.HealthAnalyticsCounters{
-		Appended:            s.Appended,
-		CertainDuplicates:   s.CertainDuplicates,
-		Overflow:            s.Overflow,
-		OverflowTotal:       d.overflowTotal,
-		AppendFailed:        s.AppendFailed,
-		DroppedNoIdentity:   h.native.DroppedNoIdentity(),
-		Finalized:           s.Finalized,
-		Delivered:           s.Delivered,
-		SendFailures:        s.SendFailures,
-		SendRetries:         h.send.Retries(),
-		Torn:                s.Torn,
-		HubIDMismatch:       s.HubIDMismatch,
-		Conflicts:           s.Conflicts,
-		Quarantined:         s.Quarantined,
-		DeadLetters:         s.DeadLetters,
-		OversizeTotal:       d.oversizeTotal,
-		AppendFailedTotal:   d.appendFailedTotal,
-		DeadLettersTotal:    d.deadLettersTotal,
-		SyncUncertain:       s.SyncUncertain,
-		CorruptIntents:      s.CorruptIntents,
-		Invalid:             h.native.Invalid(),
-		RetainedBytes:       d.retained,
-		Unresolved:          s.Unresolved,
-		CommitDeferred:      s.CommitDeferred,
-		SyncUncertainTotal:  d.syncUncertainTotal,
-		CommitDeferredTotal: d.commitDeferredTotal,
-		Held:                d.held,
-		PendingBytes:        d.pending,
-		ProducerEpoch:       d.epoch,
-		ProducerSeqLast:     d.seq,
-		StatsFailed:         d.failed,
+		Appended:          s.Appended,
+		CertainDuplicates: s.CertainDuplicates,
+		Overflow:          s.Overflow,
+		AppendFailed:      s.AppendFailed,
+		DroppedNoIdentity: h.native.DroppedNoIdentity(),
+		Finalized:         s.Finalized,
+		Delivered:         s.Delivered,
+		SendFailures:      s.SendFailures,
+		SendRetries:       h.send.Retries(),
+		Torn:              s.Torn,
+		HubIDMismatch:     s.HubIDMismatch,
+		Conflicts:         s.Conflicts,
+		Quarantined:       s.Quarantined,
+		DeadLetters:       s.DeadLetters,
+		SyncUncertain:     s.SyncUncertain,
+		CorruptIntents:    s.CorruptIntents,
+		Invalid:           h.native.Invalid(),
+		Unresolved:        s.Unresolved,
+		CommitDeferred:    s.CommitDeferred,
+		StatsFailed:       err != nil,
 	}
-	if !d.failed && d.pending > 0 && !d.oldest.IsZero() {
-		age := time.Since(d.oldest).Milliseconds()
+	if h.drainer != nil {
+		c.RetryBackoffMs = h.drainer.Backoff().Milliseconds()
+	}
+	if err != nil {
+		return c
+	}
+	c.OverflowTotal, c.OversizeTotal = ledger.OverflowTotal, ledger.OversizeTotal
+	c.AppendFailedTotal, c.DeadLettersTotal = ledger.AppendFailedTotal, ledger.DeadLettersTotal
+	c.SyncUncertainTotal, c.CommitDeferredTotal = ledger.SyncUncertainTotal, ledger.CommitDeferredTotal
+	c.Held = ledger.Held
+	c.PendingBytes, c.RetainedBytes = ledger.PendingBytes, ledger.RetainedBytes
+	c.ProducerEpoch, c.ProducerSeqLast = ledger.Epoch, ledger.LastSeq
+	if ledger.PendingBytes > 0 && !ledger.OldestPending.IsZero() {
+		age := time.Since(ledger.OldestPending).Milliseconds()
 		if age < 0 {
 			age = 0
 		}
 		c.OldestPendingFileAgeMs = &age
-	}
-	if h.drainer != nil {
-		c.RetryBackoffMs = h.drainer.Backoff().Milliseconds()
 	}
 	return c
 }
@@ -993,30 +919,4 @@ func finalHealthBudget(ctx context.Context, now time.Time) time.Duration {
 		budget = healthFinalMinBudget
 	}
 	return budget
-}
-
-// retainedExtraBytes sums the outbox files that count against the cap but
-// are not pending: dead_letter.jsonl and quarantine-* (as in WP2's
-// AnalyticsOutbox.retainedBytes).
-func retainedExtraBytes(dir string) (int64, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return 0, err
-	}
-	var total int64
-	for _, e := range entries {
-		name := e.Name()
-		if name != "dead_letter.jsonl" && !strings.HasPrefix(name, "quarantine-") {
-			continue
-		}
-		info, err := e.Info()
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				continue // removed meanwhile
-			}
-			return 0, err
-		}
-		total += info.Size()
-	}
-	return total, nil
 }

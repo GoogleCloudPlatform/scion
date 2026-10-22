@@ -27,6 +27,7 @@ import (
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
 	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
+	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -1143,9 +1144,10 @@ func TestAnalyticsHeldReported(t *testing.T) {
 	if c := h.counters(); c.Held || c.StatsFailed {
 		t.Fatalf("healthy outbox: held %v stats_failed %v", c.Held, c.StatsFailed)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "intent"), []byte(`{"event_id":"u1-x"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	// A producer that stopped right after writing its intent (WP2 write path).
+	o.crashAt = "intent"
+	_, _ = o.AppendUsage(draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:held", 1))
+	o.crashAt = ""
 	c := h.counters()
 	if !c.Held {
 		t.Fatal("intent on disk must report held")
@@ -1167,8 +1169,7 @@ func TestAnalyticsHeldReported(t *testing.T) {
 // on a quiescent outbox (drift guard for the shared definition).
 func TestRetainedMatchesOutbox(t *testing.T) {
 	setAnalyticsEnv(t, "claude")
-	dir := filepath.Join(t.TempDir(), "ob")
-	o, err := OpenAnalyticsOutbox(dir)
+	o, err := OpenAnalyticsOutbox(filepath.Join(t.TempDir(), "ob"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1178,21 +1179,20 @@ func TestRetainedMatchesOutbox(t *testing.T) {
 	if _, err := native.Record(obs); err != nil {
 		t.Fatal(err)
 	}
-	for name, body := range map[string]string{"dead_letter.jsonl": "{\"x\":1}\n", "quarantine-1.jsonl": "{\"y\":2}\n", "unrelated.txt": "zzz"} {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
-			t.Fatal(err)
-		}
+	// A dead-lettered line through WP2's own path.
+	if err := o.deadLetter([]byte(`{"x":1}`)); err != nil {
+		t.Fatal(err)
 	}
 	c := analyticsHandles{native: native}.counters()
-	want, err := o.retainedBytes()
+	ledger, err := o.LedgerSnapshot()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.StatsFailed || c.RetainedBytes != want || c.RetainedBytes < c.PendingBytes || c.PendingBytes == 0 {
-		t.Fatalf("retained %d (outbox %d) pending %d failed %v", c.RetainedBytes, want, c.PendingBytes, c.StatsFailed)
+	if c.StatsFailed || c.RetainedBytes != ledger.RetainedBytes || c.PendingBytes != ledger.PendingBytes || c.PendingBytes == 0 {
+		t.Fatalf("retained %d/%d pending %d/%d failed %v", c.RetainedBytes, ledger.RetainedBytes, c.PendingBytes, ledger.PendingBytes, c.StatsFailed)
 	}
-	if extra := c.RetainedBytes - c.PendingBytes; extra != int64(len("{\"x\":1}\n")+len("{\"y\":2}\n")) {
-		t.Fatalf("extra retained bytes %d", extra)
+	if c.RetainedBytes <= c.PendingBytes {
+		t.Fatalf("retained %d must exceed pending %d by the dead-lettered line", c.RetainedBytes, c.PendingBytes)
 	}
 }
 
@@ -1314,8 +1314,8 @@ func TestFinalHeldIsNotDrained(t *testing.T) {
 
 // R4-1 drift guard: produce every persisted state through WP2's own write
 // paths (no WP3-written files) and check that the health snapshot reports
-// exactly what WP2's Stats() reports, each non-zero/true.
-func TestOutboxDiskMatchesStats(t *testing.T) {
+// exactly what WP2's LedgerSnapshot reports, each non-zero/true.
+func TestHealthLedgerMatchesWP2WritePaths(t *testing.T) {
 	setAnalyticsEnv(t, "claude")
 	o := testOutbox(t)
 	// append_failed: a failed file sync that can be taken back.
@@ -1359,25 +1359,49 @@ func TestOutboxDiskMatchesStats(t *testing.T) {
 	_, _ = o.AppendUsage(draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:h", 1))
 	o.crashAt = ""
 
-	st := o.Stats()
 	c := analyticsHandles{native: NewUsageAnalytics(o, telemetrycontract.UsageSourceNative)}.counters()
 	if c.StatsFailed {
 		t.Fatal("stats failed on a readable outbox")
 	}
+	ledger, err := o.LedgerSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
 	for name, pair := range map[string][2]int64{
-		"append_failed_total":   {c.AppendFailedTotal, st.PersistedAppendFailed},
-		"sync_uncertain_total":  {c.SyncUncertainTotal, st.PersistedSyncUncertain},
-		"commit_deferred_total": {c.CommitDeferredTotal, st.PersistedCommitDeferred},
-		"dead_letters_total":    {c.DeadLettersTotal, st.PersistedDeadLetters},
-		"overflow_total":        {c.OverflowTotal, st.PersistedOverflow},
-		"pending_bytes":         {c.PendingBytes, st.PendingBytes},
-		"retained_bytes":        {c.RetainedBytes, st.RetainedBytes},
+		"append_failed_total":   {c.AppendFailedTotal, ledger.AppendFailedTotal},
+		"sync_uncertain_total":  {c.SyncUncertainTotal, ledger.SyncUncertainTotal},
+		"commit_deferred_total": {c.CommitDeferredTotal, ledger.CommitDeferredTotal},
+		"dead_letters_total":    {c.DeadLettersTotal, ledger.DeadLettersTotal},
+		"overflow_total":        {c.OverflowTotal, ledger.OverflowTotal},
+		"pending_bytes":         {c.PendingBytes, ledger.PendingBytes},
+		"retained_bytes":        {c.RetainedBytes, ledger.RetainedBytes},
+		"producer_seq_last":     {c.ProducerSeqLast, ledger.LastSeq},
 	} {
 		if pair[0] != pair[1] || pair[0] == 0 {
-			t.Errorf("%s: health %d, WP2 Stats %d (want equal and non-zero)", name, pair[0], pair[1])
+			t.Errorf("%s: health %d, WP2 LedgerSnapshot %d (want equal and non-zero)", name, pair[0], pair[1])
 		}
 	}
-	if c.Held != st.HeldIntent || !c.Held {
-		t.Errorf("held: health %v, WP2 Stats %v (want both true)", c.Held, st.HeldIntent)
+	if c.Held != ledger.Held || !c.Held || c.ProducerEpoch != ledger.Epoch || c.ProducerEpoch == "" {
+		t.Errorf("held %v/%v epoch %q/%q", c.Held, ledger.Held, c.ProducerEpoch, ledger.Epoch)
+	}
+}
+
+// A ledger read that cannot take the outbox lock (lock timeout) is a stats
+// failure: the disk-derived fields are omitted, the in-memory ones stay.
+func TestAnalyticsLedgerLockTimeoutIsStatsFailure(t *testing.T) {
+	setAnalyticsEnv(t, "claude")
+	o := testOutbox(t)
+	f, err := os.OpenFile(filepath.Join(o.Dir(), "lock"), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = unix.Flock(int(f.Fd()), unix.LOCK_UN) }()
+	c := analyticsHandles{native: NewUsageAnalytics(o, telemetrycontract.UsageSourceNative)}.counters()
+	if !c.StatsFailed {
+		t.Fatal("a lock timeout must be a stats failure")
 	}
 }
