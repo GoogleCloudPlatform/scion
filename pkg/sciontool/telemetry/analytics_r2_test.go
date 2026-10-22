@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
+	"golang.org/x/sys/unix"
 )
 
 var errInjectedSync = errors.New("injected sync failure")
@@ -265,6 +266,26 @@ func TestOutboxPersistentSyncFailureHoldsThenResolves(t *testing.T) {
 		if got := len(stagingLines(t, reopened)); got != 1 {
 			t.Errorf("lineSurvives=%v: staging lines = %d, want exactly 1", lineSurvives, got)
 		}
+		// Seq accounting is explicit: the held append had seq 1, the
+		// append refused during the hold had seq 2 (both consumed). A new
+		// event gets seq 3 either way; when the held line was lost, seq 1
+		// is a real gap (no line carries it).
+		next := mustAppend(t, reopened, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:after", 1), AppendWritten)
+		if !lineSurvives {
+			// The retry above took seq 3; this one is 4.
+			if next.ProducerSeq != 4 {
+				t.Errorf("line lost: next seq = %d, want 4", next.ProducerSeq)
+			}
+		} else if next.ProducerSeq != 3 {
+			t.Errorf("line survived: next seq = %d, want 3", next.ProducerSeq)
+		}
+		seqs := map[int64]bool{}
+		for _, l := range stagingLines(t, reopened) {
+			seqs[decodeUsage(t, l).ProducerSeq] = true
+		}
+		if seqs[1] != lineSurvives || seqs[2] {
+			t.Errorf("lineSurvives=%v: staged seqs = %v; seq 1 present only if the line survived, seq 2 (refused during the hold) never", lineSurvives, seqs)
+		}
 	}
 }
 
@@ -400,4 +421,48 @@ func TestOutboxFinalizeStreamsLeftoversWhileHeld(t *testing.T) {
 	if n != 1 || !errors.Is(err, ErrAnalyticsOutboxHeld) {
 		t.Errorf("Finalize while held = %d, %v; want the leftover finalized and the hold reported", n, err)
 	}
+}
+
+// token-analyst-2 (60daf2e8): the lock goroutine acquires the flock right
+// after the caller's wait timed out (between acquisition and the handoff
+// check). The lock must still be released, not leaked.
+func TestOutboxLockTimeoutHandoffReleases(t *testing.T) {
+	o := testOutbox(t)
+	holder, err := os.OpenFile(filepath.Join(o.Dir(), "lock"), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Flock(int(holder.Fd()), unix.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	o.lockWait = 50 * time.Millisecond
+	acquired := make(chan struct{})
+	proceed := make(chan struct{})
+	o.lockAcquiredHook = func() {
+		close(acquired)
+		<-proceed // stay between acquisition and the handoff check
+	}
+	errc := make(chan error, 1)
+	go func() {
+		_, err := o.lock()
+		errc <- err
+	}()
+	if err := <-errc; !errors.Is(err, ErrAnalyticsOutboxLocked) {
+		t.Fatalf("lock() = %v; want a timeout", err)
+	}
+	// Release the holder: the abandoned goroutine now acquires the flock
+	// and parks in the hook, after the caller has given up.
+	_ = unix.Flock(int(holder.Fd()), unix.LOCK_UN)
+	<-acquired
+	close(proceed)
+
+	// The lock must become available again.
+	o.lockAcquiredHook = nil
+	o.lockWait = 2 * time.Second
+	unlock, err := o.lock()
+	if err != nil {
+		t.Fatalf("lock leaked by the abandoned goroutine: %v", err)
+	}
+	unlock()
+	_ = holder.Close()
 }

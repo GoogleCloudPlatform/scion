@@ -60,6 +60,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -165,6 +166,11 @@ type AnalyticsOutbox struct {
 	chown   func(path string, uid, gid int) error
 
 	deadLetters, syncUncertain, corruptIntents, unresolved, commitDeferred atomic.Int64
+
+	// lockWait overrides analyticsLockWait and lockAcquiredHook runs in the
+	// lock goroutine right after the flock is acquired (test seams).
+	lockWait         time.Duration
+	lockAcquiredHook func()
 
 	// expireBatch is ExpireIndex's per-lock batch size and beforeExpireBatch
 	// runs before each batch (test seams).
@@ -325,11 +331,18 @@ func (o *AnalyticsOutbox) lock() (func(), error) {
 	}
 	// A blocking flock queues in the kernel instead of polling, so a
 	// waiter is not starved by peers that re-take the lock immediately. It
-	// runs in a goroutine so the wait stays bounded; if the wait times out,
-	// the goroutine releases the lock as soon as it gets it.
-	type result struct{ err error }
-	done := make(chan result, 1)
-	var abandoned atomic.Bool
+	// runs in a goroutine so the wait stays bounded. Ownership of the lock
+	// and the file is handed over under mu: exactly one side releases them
+	// -- the caller if the result was delivered, the goroutine if the wait
+	// was abandoned first.
+	const (
+		waiting = iota
+		delivered
+		abandoned
+	)
+	var mu sync.Mutex
+	state := waiting
+	done := make(chan error, 1) // buffered: the goroutine never blocks on send
 	go func() {
 		var err error
 		for {
@@ -338,34 +351,49 @@ func (o *AnalyticsOutbox) lock() (func(), error) {
 				break
 			}
 		}
-		if err == nil && abandoned.Load() {
-			_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
-			_ = f.Close()
-			return
+		if o.lockAcquiredHook != nil {
+			o.lockAcquiredHook()
 		}
-		done <- result{err}
-	}()
-	timer := time.NewTimer(analyticsLockWait)
-	defer timer.Stop()
-	select {
-	case r := <-done:
-		if r.err != nil {
-			_ = f.Close()
-			return nil, fmt.Errorf("analytics outbox: locking: %w", r.err)
-		}
-	case <-timer.C:
-		abandoned.Store(true)
-		// The goroutine may have just acquired the lock and sent before
-		// seeing abandoned; drain that case here.
-		select {
-		case r := <-done:
-			if r.err == nil {
+		mu.Lock()
+		if state == abandoned {
+			mu.Unlock()
+			if err == nil {
 				_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
 			}
 			_ = f.Close()
-		default:
-			// The goroutine closes f after it acquires (and releases).
+			return
 		}
+		state = delivered
+		mu.Unlock()
+		done <- err
+	}()
+	wait := o.lockWait
+	if wait <= 0 {
+		wait = analyticsLockWait
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		if err != nil {
+			_ = f.Close()
+			return nil, fmt.Errorf("analytics outbox: locking: %w", err)
+		}
+	case <-timer.C:
+		mu.Lock()
+		if state == delivered {
+			// The goroutine handed over just before the timeout: the
+			// result is (or is about to be) in done, and it is ours to
+			// release.
+			mu.Unlock()
+			if err := <-done; err == nil {
+				_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
+			}
+			_ = f.Close()
+			return nil, ErrAnalyticsOutboxLocked
+		}
+		state = abandoned // the goroutine releases when it gets the lock
+		mu.Unlock()
 		return nil, ErrAnalyticsOutboxLocked
 	}
 	return func() {
@@ -440,6 +468,11 @@ func (o *AnalyticsOutbox) appendUsage(ev *telemetrycontract.UsageEvent) (outcome
 	}
 	defer unlock()
 	if err := o.recoverIntentLocked(); err != nil {
+		if errors.Is(err, ErrAnalyticsOutboxHeld) {
+			// This observation is refused while held: consume a seq for it
+			// (after the held intent's), so the loss is a visible gap.
+			o.consumeSeqDuringHold()
+		}
 		return 0, err
 	}
 
@@ -599,6 +632,22 @@ func (o *AnalyticsOutbox) truncateTo(name string, size int64) error {
 	return o.fsyncFile(f)
 }
 
+// consumeSeqDuringHold advances seq past both the persisted value and the
+// held intent's seq (best effort; caller holds the lock).
+func (o *AnalyticsOutbox) consumeSeqDuringHold() {
+	cur, err := o.readInt("seq")
+	if err != nil {
+		return
+	}
+	if b, err := os.ReadFile(o.path("intent")); err == nil {
+		var in appendIntent
+		if json.Unmarshal(b, &in) == nil && in.Seq > cur {
+			cur = in.Seq
+		}
+	}
+	_ = o.writeFileAtomic("seq", []byte(strconv.FormatInt(cur+1, 10)))
+}
+
 // appendIntent is the in-flight append record (see the file comment).
 type appendIntent struct {
 	EventID      string   `json:"event_id"`
@@ -689,6 +738,16 @@ func (o *AnalyticsOutbox) recoverIntent() (landed bool, err error) {
 			return true, fmt.Errorf("%w: %v", ErrAnalyticsOutboxHeld, err)
 		}
 		return true, o.commitIntent(in)
+	}
+	// The line did not survive: the observation is lost. Consume its seq so
+	// the loss is a visible gap downstream (the index is left untouched, so
+	// a source retry is a clean first sighting).
+	if cur, err := o.readInt("seq"); err != nil {
+		return false, err
+	} else if in.Seq > cur {
+		if err := o.writeFileAtomic("seq", []byte(strconv.FormatInt(in.Seq, 10))); err != nil {
+			return false, err
+		}
 	}
 	if err := os.Remove(o.path("intent")); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return false, fmt.Errorf("analytics outbox: %w", err)

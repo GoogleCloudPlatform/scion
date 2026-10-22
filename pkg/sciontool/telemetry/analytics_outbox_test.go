@@ -549,8 +549,10 @@ func TestOutboxCrashBeforeLineDoesNotSuppressRetry(t *testing.T) {
 		}
 		restarted, _ := OpenAnalyticsOutbox(o.Dir())
 		ev := mustAppend(t, restarted, requestIDDraft(5), AppendWritten)
-		if ev.SourceOccurrence != 1 || ev.IdentityAmbiguous || ev.ProducerSeq != 1 {
-			t.Errorf("torn=%v: retry = occurrence %d ambiguous %v seq %d; want a clean first sighting", torn, ev.SourceOccurrence, ev.IdentityAmbiguous, ev.ProducerSeq)
+		// A clean first sighting; the lost attempt's seq 1 is consumed, so
+		// the loss is a visible gap.
+		if ev.SourceOccurrence != 1 || ev.IdentityAmbiguous || ev.ProducerSeq != 2 {
+			t.Errorf("torn=%v: retry = occurrence %d ambiguous %v seq %d; want occurrence 1, certain, seq 2 (gap)", torn, ev.SourceOccurrence, ev.IdentityAmbiguous, ev.ProducerSeq)
 		}
 	}
 }
