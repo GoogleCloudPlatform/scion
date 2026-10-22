@@ -172,45 +172,43 @@ func TestSyncWorkspaceToPod_Excludes(t *testing.T) {
 // copy when the pod's annotation says so, and only then. It reads the pod
 // returned by List and makes no other pod request.
 func TestSync_WorkspaceAgentsAnnotationExcludes(t *testing.T) {
-	for _, dir := range []SyncDirection{SyncTo} {
-		for _, excluded := range []bool{true, false} {
-			t.Run(string(dir)+map[bool]string{true: "/annotated", false: "/plain"}[excluded], func(t *testing.T) {
-				rt, cs, _ := newTestK8sRuntime()
-				pod := newFakeAgentPodWithHomeDirAnnotation("test-agent", "/some/agent/home")
-				pod.Annotations = withWorkspaceAgentsAnnotation(pod.Annotations, excluded)
-				if _, err := cs.CoreV1().Pods("default").Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
-					t.Fatal(err)
-				}
-				cs.ClearActions()
-				got := map[string][]string{}
-				rt.syncTransfer = func(_ context.Context, _, _, src, dest string, excludes []string) error {
-					got[src+" -> "+dest] = excludes
-					return nil
-				}
-				captureStdout(t, func() {
-					if err := rt.Sync(context.Background(), "test-agent", dir); err != nil {
-						t.Fatalf("Sync: %v", err)
-					}
-				})
-				if len(got) != 2 {
-					t.Fatalf("transfers = %v, want workspace and home", got)
-				}
-				for k, ex := range got {
-					isWorkspace := strings.Contains(k, "/workspace")
-					if isWorkspace && excluded && !slices.Equal(ex, []string{".scion/agents"}) {
-						t.Errorf("%s excludes = %q, want [.scion/agents]", k, ex)
-					}
-					if (!isWorkspace || !excluded) && ex != nil {
-						t.Errorf("%s excludes = %q, want none", k, ex)
-					}
-				}
-				for _, a := range cs.Actions() {
-					if a.GetResource().Resource == "pods" && a.GetVerb() != "list" {
-						t.Errorf("Sync made a %s pods request; it should use the listed pod", a.GetVerb())
-					}
+	for _, excluded := range []bool{true, false} {
+		t.Run(map[bool]string{true: "annotated", false: "plain"}[excluded], func(t *testing.T) {
+			rt, cs, _ := newTestK8sRuntime()
+			pod := newFakeAgentPodWithHomeDirAnnotation("test-agent", "/some/agent/home")
+			pod.Annotations = withWorkspaceAgentsAnnotation(pod.Annotations, excluded)
+			if _, err := cs.CoreV1().Pods("default").Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			cs.ClearActions()
+			got := map[string][]string{}
+			rt.syncTransfer = func(_ context.Context, _, _, src, dest string, excludes []string) error {
+				got[src+" -> "+dest] = excludes
+				return nil
+			}
+			captureStdout(t, func() {
+				if err := rt.Sync(context.Background(), "test-agent", SyncTo); err != nil {
+					t.Fatalf("Sync: %v", err)
 				}
 			})
-		}
+			if len(got) != 2 {
+				t.Fatalf("transfers = %v, want workspace and home", got)
+			}
+			for k, ex := range got {
+				isWorkspace := strings.Contains(k, "/workspace")
+				if isWorkspace && excluded && !slices.Equal(ex, []string{".scion/agents"}) {
+					t.Errorf("%s excludes = %q, want [.scion/agents]", k, ex)
+				}
+				if (!isWorkspace || !excluded) && ex != nil {
+					t.Errorf("%s excludes = %q, want none", k, ex)
+				}
+			}
+			for _, a := range cs.Actions() {
+				if a.GetResource().Resource == "pods" && a.GetVerb() != "list" {
+					t.Errorf("Sync made a %s pods request; it should use the listed pod", a.GetVerb())
+				}
+			}
+		})
 	}
 }
 

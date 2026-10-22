@@ -4296,10 +4296,9 @@ func (r *KubernetesRuntime) PullImage(ctx context.Context, image string) error {
 }
 
 // errK8sSyncFromUnsupported is Sync's error for SyncFrom: the Kubernetes
-// runtime only copies from the broker to the pod. A workspace comes back
-// from an agent through the Hub workspace API, and commits by pushing them
-// to the remote.
-var errK8sSyncFromUnsupported = errors.New("kubernetes: syncing from an agent is not supported by the Kubernetes runtime; use the Hub workspace API (scion sync from) and push commits to the remote")
+// runtime only copies from the broker to the pod. An agent's changes reach
+// the host only when the agent commits and pushes them to the remote.
+var errK8sSyncFromUnsupported = errors.New("kubernetes: syncing from an agent is not supported; the agent must commit and push its changes to the remote")
 
 func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncDirection) error {
 	if direction == SyncFrom {
@@ -4335,13 +4334,13 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 	}
 
 	// Only a path that passes the fixed floors may be used here as the sync
-	// source (broker disk -> agent). This is a
-	// value read straight from a persisted pod annotation, not freshly
-	// computed, so it needs this check independent of whatever validated it
-	// (or didn't) when it was first written. No per-project root is
-	// available at this call site — only agent annotations/labels are in
-	// scope, with no project directory or settings to derive one from — so
-	// only the fixed deny-set applies, not per-project root containment.
+	// source (broker disk -> agent). This is a value read straight from a
+	// persisted pod annotation, not freshly computed, so it needs this check
+	// independent of whatever validated it (or didn't) when it was first
+	// written. No per-project root is available at this call site — only
+	// agent annotations/labels are in scope, with no project directory or
+	// settings to derive one from — so only the fixed deny-set applies, not
+	// per-project root containment.
 	resolvedWorkspacePath, err := ValidateWorkspaceSource(workspacePath, "")
 	if err != nil {
 		return err
@@ -4353,16 +4352,15 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 
 	// Same reasoning as workspacePath above: homeDir is a host path read
 	// straight from a persisted annotation, used below as the sync source,
-	// and needs the same
-	// check independent of whatever validated it when first written. This is
-	// an agent's home directory, not a workspace, so it goes through
-	// ValidateAgentHomeSource rather than ValidateWorkspaceSource: the two
-	// admit disjoint shapes under ~/.scion (see ValidateAgentHomeSource's
-	// doc comment). Agent homes under ~/.scion take one of three layouts
-	// (global, hub-managed, or externalized git project); a home outside
-	// ~/.scion entirely (a plain in-repo project's own agent home, for
-	// example) is subject to the fixed floors only, the same as any other
-	// source this function's sibling validates.
+	// and needs the same check independent of whatever validated it when
+	// first written. This is an agent's home directory, not a workspace, so
+	// it goes through ValidateAgentHomeSource rather than
+	// ValidateWorkspaceSource: the two admit disjoint shapes under ~/.scion
+	// (see ValidateAgentHomeSource's doc comment). Agent homes under ~/.scion
+	// take one of three layouts (global, hub-managed, or externalized git
+	// project); a home outside ~/.scion entirely (a plain in-repo project's
+	// own agent home, for example) is subject to the fixed floors only, the
+	// same as any other source this function's sibling validates.
 	if homeDir != "" {
 		resolvedHomeDir, err := ValidateAgentHomeSource(homeDir, "")
 		if err != nil {

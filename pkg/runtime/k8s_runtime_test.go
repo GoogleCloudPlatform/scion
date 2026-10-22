@@ -993,11 +993,10 @@ func newFakeAgentPodWithHomeDirAnnotation(name, homeDirPath string) *corev1.Pod 
 // the sync call to actually run.
 func TestSync_RejectsPersistedWorkspacePath(t *testing.T) {
 	for _, tt := range []struct {
-		name      string
-		direction SyncDirection
-		bad       string
+		name string
+		bad  string
 	}{
-		{name: "SyncTo with root", direction: SyncTo, bad: "/"},
+		{name: "root", bad: "/"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			clientset := k8sfake.NewClientset()
@@ -1011,7 +1010,7 @@ func TestSync_RejectsPersistedWorkspacePath(t *testing.T) {
 			client := k8s.NewTestClient(fc, clientset)
 			r := NewKubernetesRuntime(client)
 
-			err := r.Sync(context.Background(), "test-agent", tt.direction)
+			err := r.Sync(context.Background(), "test-agent", SyncTo)
 			if err == nil {
 				t.Fatal("expected Sync to fail for a persisted workspace path of '/'")
 			}
@@ -1072,12 +1071,11 @@ func TestSync_RejectsPersistedHomeDirPath(t *testing.T) {
 	}
 
 	for _, tt := range []struct {
-		name      string
-		direction SyncDirection
-		bad       string
+		name string
+		bad  string
 	}{
-		{name: "SyncTo with root", direction: SyncTo, bad: "/"},
-		{name: "SyncTo with $HOME", direction: SyncTo, bad: home},
+		{name: "root", bad: "/"},
+		{name: "$HOME", bad: home},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			clientset := k8sfake.NewClientset()
@@ -1091,7 +1089,7 @@ func TestSync_RejectsPersistedHomeDirPath(t *testing.T) {
 			client := k8s.NewTestClient(fc, clientset)
 			r := NewKubernetesRuntime(client)
 
-			err := r.Sync(context.Background(), "test-agent", tt.direction)
+			err := r.Sync(context.Background(), "test-agent", SyncTo)
 			if err == nil {
 				t.Fatalf("expected Sync to fail for a persisted home directory path of %q", tt.bad)
 			}

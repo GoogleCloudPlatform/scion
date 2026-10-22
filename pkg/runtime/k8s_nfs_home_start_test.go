@@ -1004,48 +1004,44 @@ func TestRun_NFSHomeSecretsCleanedAfterPreviousPod(t *testing.T) {
 // Sync of an NFS-home agent copies the workspace only, and says that the
 // home is not synced.
 func TestSync_NFSHomePodSkipsHome(t *testing.T) {
-	for _, dir := range []SyncDirection{SyncTo} {
-		t.Run(string(dir), func(t *testing.T) {
-			rt, cs, _ := newTestK8sRuntime()
-			pod := newFakeAgentPodWithHomeDirAnnotation("test-agent", "/some/agent/home")
-			pod.Annotations[k8sHomeStorageAnnotation] = HomeStorageNFS
-			if _, err := cs.CoreV1().Pods("default").Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
-				t.Fatal(err)
-			}
-			var copied []string
-			rt.syncTransfer = func(_ context.Context, _, _, src, dest string, _ []string) error {
-				copied = append(copied, src+" -> "+dest)
-				return nil
-			}
-			out := captureStdout(t, func() {
-				if err := rt.Sync(context.Background(), "test-agent", dir); err != nil {
-					t.Fatalf("Sync: %v", err)
-				}
-			})
-			if len(copied) != 1 || !strings.Contains(copied[0], "/workspace") {
-				t.Errorf("copies = %v, want the workspace only", copied)
-			}
-			if !strings.Contains(out, "Agent home is kept on persistent storage; not syncing it.") {
-				t.Errorf("no notice in %q", out)
-			}
+	rt, cs, _ := newTestK8sRuntime()
+	pod := newFakeAgentPodWithHomeDirAnnotation("test-agent", "/some/agent/home")
+	pod.Annotations[k8sHomeStorageAnnotation] = HomeStorageNFS
+	if _, err := cs.CoreV1().Pods("default").Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	var copied []string
+	rt.syncTransfer = func(_ context.Context, _, _, src, dest string, _ []string) error {
+		copied = append(copied, src+" -> "+dest)
+		return nil
+	}
+	out := captureStdout(t, func() {
+		if err := rt.Sync(context.Background(), "test-agent", SyncTo); err != nil {
+			t.Fatalf("Sync: %v", err)
+		}
+	})
+	if len(copied) != 1 || !strings.Contains(copied[0], "/workspace") {
+		t.Errorf("copies = %v, want the workspace only", copied)
+	}
+	if !strings.Contains(out, "Agent home is kept on persistent storage; not syncing it.") {
+		t.Errorf("no notice in %q", out)
+	}
 
-			// A plain pod still syncs its home.
-			rt2, cs2, _ := newTestK8sRuntime()
-			plain := newFakeAgentPodWithHomeDirAnnotation("test-agent", "/some/agent/home")
-			if _, err := cs2.CoreV1().Pods("default").Create(context.Background(), plain, metav1.CreateOptions{}); err != nil {
-				t.Fatal(err)
-			}
-			copied = nil
-			rt2.syncTransfer = rt.syncTransfer
-			captureStdout(t, func() {
-				if err := rt2.Sync(context.Background(), "test-agent", dir); err != nil {
-					t.Fatalf("Sync: %v", err)
-				}
-			})
-			if len(copied) != 2 {
-				t.Errorf("plain pod copies = %v, want workspace and home", copied)
-			}
-		})
+	// A plain pod still syncs its home.
+	rt2, cs2, _ := newTestK8sRuntime()
+	plain := newFakeAgentPodWithHomeDirAnnotation("test-agent", "/some/agent/home")
+	if _, err := cs2.CoreV1().Pods("default").Create(context.Background(), plain, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	copied = nil
+	rt2.syncTransfer = rt.syncTransfer
+	captureStdout(t, func() {
+		if err := rt2.Sync(context.Background(), "test-agent", SyncTo); err != nil {
+			t.Fatalf("Sync: %v", err)
+		}
+	})
+	if len(copied) != 2 {
+		t.Errorf("plain pod copies = %v, want workspace and home", copied)
 	}
 }
 
