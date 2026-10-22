@@ -30,6 +30,10 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
+// TestListEnrichesTemplateAndHarnessFromAgentInfo: a running agent's
+// template is filled from agent-info.json; its harness-config and profile
+// come from the broker-side agent dir (scion-agent.json and the image
+// provenance record), never from the copies in agent-info.json.
 func TestListEnrichesTemplateAndHarnessFromAgentInfo(t *testing.T) {
 	// Create a temp project structure
 	tmpDir := t.TempDir()
@@ -40,13 +44,15 @@ func TestListEnrichesTemplateAndHarnessFromAgentInfo(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Write agent-info.json with template and harness-config
+	// Write agent-info.json with template, and harness-config, profile and
+	// runtime values that differ from the broker's records.
 	info := api.AgentInfo{
 		Name:          agentName,
 		Template:      "my-template",
-		HarnessConfig: "claude",
+		HarnessConfig: "rewritten-hc",
+		Profile:       "rewritten-profile",
 		Phase:         "running",
-		Runtime:       "docker",
+		Runtime:       "kubernetes",
 	}
 	infoData, _ := json.MarshalIndent(info, "", "  ")
 	infoPath := filepath.Join(agentHome, "agent-info.json")
@@ -54,8 +60,8 @@ func TestListEnrichesTemplateAndHarnessFromAgentInfo(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Write scion-agent.json so the agent dir is recognized
-	if err := os.WriteFile(filepath.Join(projectPath, "agents", agentName, "scion-agent.json"), []byte("{}"), 0644); err != nil {
+	writeAgentConfigHarness(t, projectPath, agentName, "claude")
+	if err := os.WriteFile(filepath.Join(projectPath, "agents", agentName, "image-provenance.json"), []byte(`{"version": 1, "profile": "prov"}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -68,6 +74,7 @@ func TestListEnrichesTemplateAndHarnessFromAgentInfo(t *testing.T) {
 					Name:            agentName,
 					ProjectPath:     projectPath,
 					ContainerStatus: "Up 2 hours",
+					Runtime:         "docker",
 					// Template and HarnessConfig intentionally empty
 				},
 			}, nil
@@ -96,7 +103,13 @@ func TestListEnrichesTemplateAndHarnessFromAgentInfo(t *testing.T) {
 		t.Errorf("Template = %q, want %q", found.Template, "my-template")
 	}
 	if found.HarnessConfig != "claude" {
-		t.Errorf("HarnessConfig = %q, want %q", found.HarnessConfig, "claude")
+		t.Errorf("HarnessConfig = %q, want %q (scion-agent.json)", found.HarnessConfig, "claude")
+	}
+	if found.Profile != "prov" {
+		t.Errorf("Profile = %q, want %q (image provenance)", found.Profile, "prov")
+	}
+	if found.Runtime != "docker" {
+		t.Errorf("Runtime = %q, want %q (the runtime entry)", found.Runtime, "docker")
 	}
 	if found.Phase != "running" {
 		t.Errorf("Phase = %q, want %q", found.Phase, "running")
@@ -243,9 +256,7 @@ func TestListNonRunningAgentIncludesHarnessConfig(t *testing.T) {
 	if err := os.WriteFile(infoPath, infoData, 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(projectPath, "agents", agentName, "scion-agent.json"), []byte("{}"), 0644); err != nil {
-		t.Fatal(err)
-	}
+	writeAgentConfigHarness(t, projectPath, agentName, "gemini")
 
 	// No running containers
 	mock := &runtime.MockRuntime{}
@@ -1059,6 +1070,22 @@ func writeCreatedAgentDirWithInfo(t *testing.T, projectPath string, info api.Age
 	if err := os.WriteFile(filepath.Join(projectPath, "agents", info.Name, "home", "agent-info.json"), data, 0644); err != nil {
 		t.Fatal(err)
 	}
+	// Provisioning records the harness-config in scion-agent.json too,
+	// where List reads it from.
+	writeAgentConfigHarness(t, projectPath, info.Name, info.HarnessConfig)
+}
+
+// writeAgentConfigHarness writes the agent's scion-agent.json recording
+// harnessConfig.
+func writeAgentConfigHarness(t *testing.T, projectPath, name, harnessConfig string) {
+	t.Helper()
+	data, err := json.Marshal(map[string]string{"harness_config": harnessConfig})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectPath, "agents", name, "scion-agent.json"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // writeHubLinkedSettings links the project at projectPath (its .scion
@@ -1300,5 +1327,61 @@ func TestListVanishedPodReportDoesNotTouchAgentInfo(t *testing.T) {
 	}
 	if len(agents) != 1 || agents[0].Phase != string(state.PhaseCreated) {
 		t.Fatalf("live running entry = %+v, want phase %q", agents, state.PhaseCreated)
+	}
+}
+
+// TestListCreatedAgentSettingsFromBrokerRecords: an agent with no runtime
+// entry is listed with the profile from its image provenance record and the
+// harness-config from its scion-agent.json; the profile, harness-config and
+// runtime in its agent-info.json are not used, for display or for the
+// filter.
+func TestListCreatedAgentSettingsFromBrokerRecords(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	projectPath := filepath.Join(tmp, "proj", ".scion")
+	writeCreatedAgentDirWithInfo(t, projectPath, api.AgentInfo{Name: "alpha", Phase: "created", HarnessConfig: "hc-a"})
+	writeCreatedAgentDirWithInfo(t, projectPath, api.AgentInfo{Name: "legacy", Phase: "created", HarnessConfig: "hc-l"})
+	for name, info := range map[string]api.AgentInfo{
+		"alpha":  {Name: "alpha", Phase: "created", HarnessConfig: "rewritten-hc", Profile: "rewritten-profile", Runtime: "kubernetes"},
+		"legacy": {Name: "legacy", Phase: "created", HarnessConfig: "rewritten-hc", Profile: "rewritten-profile", Runtime: "kubernetes"},
+	} {
+		data, err := json.Marshal(info)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(projectPath, "agents", name, "home", "agent-info.json"), data, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(projectPath, "agents", "alpha", imageProvenanceFile), []byte(`{"version": 1, "profile": "prov"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := NewManager(&runtime.MockRuntime{})
+	agents, err := mgr.List(context.Background(), map[string]string{"scion.project_path": projectPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][2]string{"alpha": {"prov", "hc-a"}, "legacy": {"", "hc-l"}}
+	for _, a := range agents {
+		w, ok := want[a.Name]
+		if !ok {
+			continue
+		}
+		delete(want, a.Name)
+		if a.Profile != w[0] || a.HarnessConfig != w[1] || a.Runtime != "" {
+			t.Errorf("%s: profile %q harness-config %q runtime %q; want %q, %q, none", a.Name, a.Profile, a.HarnessConfig, a.Runtime, w[0], w[1])
+		}
+	}
+	if len(want) != 0 {
+		t.Errorf("agents not listed: %v", want)
+	}
+
+	filtered, err := mgr.List(context.Background(), map[string]string{"scion.project_path": projectPath, "scion.harness_config": "rewritten-hc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if names := listedNames(filtered); len(names) != 0 {
+		t.Errorf("filter on the agent-info.json harness-config matched %v, want none", names)
 	}
 }

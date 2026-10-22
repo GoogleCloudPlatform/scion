@@ -2997,7 +2997,7 @@ const (
 // SavedProfileOnDisk returns the saved profile of the agent agentName in
 // projectPath on this host, as the start path would see it, for the hub's
 // built-in profile reference count (ptone/scion#5113). It reads
-// agent-info.json exactly as GetSavedProfile does (GetResolvedProjectDir,
+// agent-info.json via readSavedAgentInfo (GetResolvedProjectDir,
 // then GetAgentHomePath). When that file exists but cannot be used, the
 // start path's runtime selection would use the provisioned profile from the
 // image provenance record (ProvisionedProfile), so that is returned instead.
@@ -3026,7 +3026,7 @@ func getSavedAgentInfo(agentName string, projectPath string) *api.AgentInfo {
 }
 
 // readSavedAgentInfo reads agent agentName's agent-info.json in projectPath:
-// the one reader behind GetSaved* and SavedProfileOnDisk, so they always
+// the one reader behind GetSavedPhase and SavedProfileOnDisk, so they always
 // look at the same file. info is non-nil only when state is
 // SavedProfileFound.
 func readSavedAgentInfo(agentName string, projectPath string) (*api.AgentInfo, SavedProfileState) {
@@ -3080,28 +3080,10 @@ func (m *AgentManager) hasRuntimeEntry(ctx context.Context, opts api.StartOption
 // equals a run ID the hub sends.
 const ProvisionOwnerPrefix = "provision-"
 
-func GetSavedProfile(agentName string, projectPath string) string {
-	if info := getSavedAgentInfo(agentName, projectPath); info != nil {
-		return info.Profile
-	}
-	return ""
-}
-
-// GetSavedRuntime returns the runtime name agent-info.json records the
-// agent last ran on, or "" if none is recorded.
-func GetSavedRuntime(agentName string, projectPath string) string {
-	if info := getSavedAgentInfo(agentName, projectPath); info != nil {
-		return info.Runtime
-	}
-	return ""
-}
-
-func GetSavedHarnessConfig(agentName string, projectPath string) string {
-	if info := getSavedAgentInfo(agentName, projectPath); info != nil {
-		return info.HarnessConfig
-	}
-	return ""
-}
+// There is deliberately no getter for the profile, runtime or harness
+// config recorded in agent-info.json: the agent home is writable by the
+// agent, so those copies are display-only. The broker reads them from its
+// own records instead (ProvisionedProfile, PersistedHarnessConfig).
 
 func GetSavedPhase(agentName string, projectPath string) string {
 	if info := getSavedAgentInfo(agentName, projectPath); info != nil {

@@ -396,6 +396,16 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		logImageProvenanceError(opts.Name, err)
 		return nil, err
 	}
+	// startProfile is the settings profile this start resolves the agent's
+	// settings with when the request names none: opts.Profile (a broker
+	// start or restart fills it from the provisioned profile, else the
+	// Hub-sent one), else the profile recorded in broker-side image
+	// provenance. The profile in agent-info.json (finalScionCfg.Info, read
+	// from the agent home) is never used for it.
+	startProfile := opts.Profile
+	if startProfile == "" && provenance != nil {
+		startProfile = provenance.Profile
+	}
 	// A template recorded as loaded from a content-addressed cache is not
 	// available by name here: the recorded name is then a display name
 	// only, so it is never looked up, and the template counts as
@@ -488,21 +498,11 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	}
 
 	if settings != nil && harnessConfigName != "" {
-		// A local restart (no --profile) has no request-level profile to
-		// resolve settings against; fall back to the profile the agent was
-		// actually created with (finalScionCfg.Info.Profile, already loaded —
-		// the same value agent.GetSavedProfile would read from
-		// agent-info.json), matching the broker's own restart-dispatch
-		// behavior (runtimebroker/handlers.go's GetSavedProfile calls).
-		settingsProfile := opts.Profile
-		if settingsProfile == "" && finalScionCfg != nil && finalScionCfg.Info != nil {
-			settingsProfile = finalScionCfg.Info.Profile
-		}
+		// Settings are resolved against startProfile (see above).
+		settingsProfile := startProfile
 		// The image and pull-policy lookups use the profile recorded in
-		// broker-side image provenance when it exists, rather than the
-		// agent-info.json profile or the broker's restart profile (which is
-		// read from agent-info.json). An agent
-		// provisioned before provenance was recorded keeps the legacy
+		// broker-side image provenance when it exists. An agent
+		// provisioned before provenance was recorded keeps the
 		// settingsProfile lookup.
 		imageProfile := settingsProfile
 		if provenance != nil {
@@ -561,10 +561,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		ownEnv = persisted
 	}
 	if finalScionCfg != nil {
-		envProfile := opts.Profile
-		if envProfile == "" && finalScionCfg.Info != nil {
-			envProfile = finalScionCfg.Info.Profile
-		}
+		envProfile := startProfile
 		finalScionCfg = withEnvironment(finalScionCfg, ownEnv.clone())
 		finalScionCfg.Volumes = mergeEnvironmentVolumes(settingsVolumes, fileVolumes, ownEnv.Volumes)
 		applyEnvironmentResources(ctx, finalScionCfg, settings, envProfile, harnessConfigName)
@@ -644,10 +641,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// agent was created with, else the active profile). Unset keeps the
 	// depth sent with the request.
 	if opts.GitClone != nil {
-		cdProfile := opts.Profile
-		if cdProfile == "" && finalScionCfg != nil && finalScionCfg.Info != nil {
-			cdProfile = finalScionCfg.Info.Profile
-		}
+		cdProfile := startProfile
 		var cdIn cloneDepthInput
 		if finalScionCfg != nil {
 			cdIn.Template = finalScionCfg.CloneDepth
@@ -823,9 +817,8 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// node), so we must skip the local check to ensure registry rewrite applies.
 	if settings != nil && resolvedImage != "" {
 		// The profile-level image_registry is looked up with the
-		// provisioned profile recorded in broker-side provenance, never a
-		// profile read from agent-info.json (a broker start/restart fills
-		// opts.Profile from there); legacy agents keep opts.Profile.
+		// provisioned profile recorded in broker-side provenance; legacy
+		// agents keep opts.Profile (the Hub-sent profile on a broker start).
 		registryProfile := opts.Profile
 		if provenance != nil {
 			registryProfile = provenance.Profile
@@ -1893,10 +1886,7 @@ authDone:
 			// The profile is the one named for this start, else the one
 			// the agent was created with (as for the shared-dir PVC
 			// defaults below); an agent that recorded its backend keeps it.
-			sdStorageProfile := opts.Profile
-			if sdStorageProfile == "" && finalScionCfg != nil && finalScionCfg.Info != nil {
-				sdStorageProfile = finalScionCfg.Info.Profile
-			}
+			sdStorageProfile := startProfile
 			cfg, err := selectSharedDirStorage(globalSettings, sdStorageProfile, recordedSharedDirBackend, opts.Name)
 			if err != nil {
 				return nil, err
@@ -1972,10 +1962,7 @@ authDone:
 	// Home storage: local, or (Kubernetes only) an NFS home on the export of
 	// the profile's shared_dir_storage. Chosen at the agent's first start
 	// and recorded, before any pod exists; later starts use the record.
-	homeStorageProfile := opts.Profile
-	if homeStorageProfile == "" && finalScionCfg != nil && finalScionCfg.Info != nil {
-		homeStorageProfile = finalScionCfg.Info.Profile
-	}
+	homeStorageProfile := startProfile
 	homePlan, err := resolveHomeStorage(homeStorageInput{
 		AgentDir:     agentDir,
 		AgentName:    opts.Name,
@@ -2282,10 +2269,7 @@ authDone:
 	// other runtimes it is accepted and ignored, with a warning.
 	var sdClass, sdSize string
 	var settingsSafeToEvict *bool
-	sdProfile := opts.Profile
-	if sdProfile == "" && finalScionCfg != nil && finalScionCfg.Info != nil {
-		sdProfile = finalScionCfg.Info.Profile
-	}
+	sdProfile := startProfile
 	var tmplSafeToEvict *bool
 	if finalScionCfg != nil && finalScionCfg.Kubernetes != nil {
 		tmplSafeToEvict = finalScionCfg.Kubernetes.SafeToEvict
