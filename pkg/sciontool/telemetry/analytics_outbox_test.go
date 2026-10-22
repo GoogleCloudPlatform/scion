@@ -409,7 +409,7 @@ func TestOutboxCrashBetweenLedgerAndLineLeavesGap(t *testing.T) {
 	mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:a", 1), AppendWritten)
 	// Simulate the crashed append of a second observation of cmp1:a:
 	// seq and index updated, line never written.
-	_ = writeFileAtomic(o.Dir(), "seq", []byte("2"))
+	_ = o.writeFileAtomic("seq", []byte("2"))
 	_ = o.writeIndex(analyticsIndexName("sciontool/project/p/agent/a", "claude.api_request", "cmp1:a"), indexEntry{count: 2})
 
 	next := mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:a", 1), AppendWritten)

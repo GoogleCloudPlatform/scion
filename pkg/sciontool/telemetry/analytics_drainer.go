@@ -38,6 +38,13 @@ const (
 	analyticsBackoffMax       = 5 * time.Minute
 	analyticsIndexExpiryEvery = 10 * time.Minute
 	analyticsHubIDTimeout     = 5 * time.Second
+	// analyticsSendTimeout bounds one send so a stalled RPC cannot hold
+	// the drain loop until Stop.
+	analyticsSendTimeout = 30 * time.Second
+	// analyticsStopBudget caps the final drain at shutdown; it also never
+	// takes more than half of the caller's remaining budget, so the
+	// exporter flush that follows keeps its share.
+	analyticsStopBudget = 5 * time.Second
 )
 
 // HubIDResolver returns the hub's own ID, or an error if it cannot be
@@ -113,9 +120,14 @@ type AnalyticsDrainer struct {
 // NewAnalyticsDrainer builds a drainer for outbox. resolve may be nil when
 // the hub ID is already pinned.
 func NewAnalyticsDrainer(outbox *AnalyticsOutbox, send AnalyticsSendFunc, resolve HubIDResolver) *AnalyticsDrainer {
+	bounded := func(ctx context.Context, line []byte) error {
+		sctx, cancel := context.WithTimeout(ctx, analyticsSendTimeout)
+		defer cancel()
+		return send(sctx, line)
+	}
 	return &AnalyticsDrainer{
 		outbox:   outbox,
-		send:     send,
+		send:     bounded,
 		resolve:  resolve,
 		interval: analyticsDrainInterval,
 		now:      time.Now,
@@ -233,9 +245,34 @@ type analyticsState struct {
 	drainer        *AnalyticsDrainer
 	disabledReason string
 
-	// outboxDir and resolver override the defaults (tests).
+	// outboxDir and owner locate the outbox under the AGENT home and name
+	// its owner (Pipeline.SetAnalyticsOutbox); resolver overrides the hub
+	// ID resolver (tests).
 	outboxDir string
+	owner     *OutboxOwner
 	resolver  HubIDResolver
+}
+
+// SetAnalyticsOutbox points the pipeline's analytics outbox at the agent
+// home and names the agent user that must own it. sciontool init calls it
+// before Start: init runs as root with HOME=/root, while hook processes run
+// as the agent user with HOME=<agent home>, so the outbox must be resolved
+// from the agent home explicitly and its files chowned to the agent user.
+func (p *Pipeline) SetAnalyticsOutbox(agentHome string, uid, gid int) {
+	if p == nil {
+		return
+	}
+	p.analytics.outboxDir = AnalyticsOutboxDirFor(agentHome)
+	p.analytics.owner = &OutboxOwner{UID: uid, GID: gid}
+}
+
+// AnalyticsOutboxDir returns the outbox directory the pipeline uses (for
+// WP3 diagnostics), or "".
+func (p *Pipeline) AnalyticsOutboxDir() string {
+	if p == nil || p.analytics.native == nil {
+		return ""
+	}
+	return p.analytics.native.Outbox().Dir()
 }
 
 // start enables analytics when the GCP exporter is active. Any failure
@@ -250,9 +287,12 @@ func (a *analyticsState) start(ctx context.Context, gcp *GCPExporter) {
 	}
 	dir := a.outboxDir
 	if dir == "" {
-		dir = DefaultAnalyticsOutboxDir()
+		// Not set by init (tests, or a pipeline run as the agent user):
+		// this process's own home.
+		home, _ := os.UserHomeDir()
+		dir = AnalyticsOutboxDirFor(home)
 	}
-	outbox, err := OpenAnalyticsOutbox(dir)
+	outbox, err := OpenAnalyticsOutboxOwned(dir, a.owner)
 	if err != nil {
 		a.disabledReason = "outbox_unavailable"
 		log.Error("Usage analytics disabled: %v", err)
@@ -268,11 +308,24 @@ func (a *analyticsState) start(ctx context.Context, gcp *GCPExporter) {
 	a.disabledReason = ""
 }
 
-// stop ends the drainer after one final bounded drain within ctx.
+// stop ends the drainer after one final drain bounded by its own
+// sub-deadline: at most analyticsStopBudget and at most half of ctx's
+// remaining time, so the exporter shutdown that follows keeps its share.
 func (a *analyticsState) stop(ctx context.Context) {
 	if a.drainer == nil {
 		return
 	}
-	a.drainer.Stop(ctx)
+	budget := analyticsStopBudget
+	if dl, ok := ctx.Deadline(); ok {
+		if half := time.Until(dl) / 2; half < budget {
+			budget = half
+		}
+	}
+	if budget < 0 {
+		budget = 0
+	}
+	sctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	a.drainer.Stop(sctx)
 	a.drainer = nil
 }
