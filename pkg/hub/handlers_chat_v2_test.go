@@ -2844,17 +2844,12 @@ func TestDEF96_PromoteDM_HistoryVisibleOnFirstRead(t *testing.T) {
 	}
 }
 
-// TestPromoteDM_Handler_SetsConversationDefaultAgentID is review round 2
-// finding #3: round 1's TestPromoteDM_DualWrite_SetsConversationDefaultAgentID
-// calls the *store* with DefaultAgentID already filled in, so it proves the
-// SQL and nothing else — deleting handlers_chat_v2.go's
-// `DefaultAgentID: agentID` (the actual wiring, at the promote HTTP
-// handler) doesn't fail that test. This exercises the real promote
-// endpoint end to end: POST the promote request for a user<->agent DM,
-// then assert the promoted conversation's default_agent_id equals the
-// agent's ID, the same way a promoted thread's default is expected to show
-// up in `scion conversation show` (F1).
-func TestPromoteDM_Handler_SetsConversationDefaultAgentID(t *testing.T) {
+// promoteDMThroughHandler creates a project, an agent with the slug
+// promote-da-bot and a user<->agent DM with one message, promotes the DM
+// through the promote endpoint and returns the store, the agent ID, the
+// webchat store and the promote response.
+func promoteDMThroughHandler(t *testing.T) (store.Store, string, WebChatStore, promoteResponse) {
+	t.Helper()
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -2946,6 +2941,23 @@ func TestPromoteDM_Handler_SetsConversationDefaultAgentID(t *testing.T) {
 		t.Fatal("promoteResponse.ConversationID is empty")
 	}
 
+	return s, agentID, wcs, promResp
+}
+
+// TestPromoteDM_Handler_SetsConversationDefaultAgentID is review round 2
+// finding #3: round 1's TestPromoteDM_DualWrite_SetsConversationDefaultAgentID
+// calls the *store* with DefaultAgentID already filled in, so it proves the
+// SQL and nothing else — deleting handlers_chat_v2.go's
+// `DefaultAgentID: agentID` (the actual wiring, at the promote HTTP
+// handler) doesn't fail that test. This exercises the real promote
+// endpoint end to end: POST the promote request for a user<->agent DM,
+// then assert the promoted conversation's default_agent_id equals the
+// agent's ID, the same way a promoted thread's default is expected to show
+// up in `scion conversation show` (F1).
+func TestPromoteDM_Handler_SetsConversationDefaultAgentID(t *testing.T) {
+	s, agentID, _, promResp := promoteDMThroughHandler(t)
+	ctx := context.Background()
+
 	groupConv, err := s.GetConversation(ctx, promResp.ConversationID)
 	if err != nil {
 		t.Fatalf("GetConversation: %v", err)
@@ -2955,6 +2967,30 @@ func TestPromoteDM_Handler_SetsConversationDefaultAgentID(t *testing.T) {
 	}
 	if *groupConv.DefaultAgentID != agentID {
 		t.Errorf("default_agent_id = %q, want %q", *groupConv.DefaultAgentID, agentID)
+	}
+}
+
+// TestPromoteDM_Handler_StoresAgentSlugAsTopicDefault: promoting a DM
+// stores the agent slug as the thread's default agent, the form group
+// create stores (setGroupDefaultAgent), and the agent ID as the owner value.
+func TestPromoteDM_Handler_StoresAgentSlugAsTopicDefault(t *testing.T) {
+	_, agentID, wcs, promResp := promoteDMThroughHandler(t)
+
+	topic, err := wcs.GetTopic(context.Background(), promResp.ID)
+	if err != nil {
+		t.Fatalf("GetTopic: %v", err)
+	}
+	if topic == nil {
+		t.Fatal("promoted topic not found")
+	}
+	if topic.DefaultAgent != "promote-da-bot" {
+		t.Errorf("topic default_agent = %q, want the agent slug %q", topic.DefaultAgent, "promote-da-bot")
+	}
+	if topic.DefaultAgentID != agentID {
+		t.Errorf("topic default_agent_id = %q, want %q", topic.DefaultAgentID, agentID)
+	}
+	if promResp.DefaultAgent != "promote-da-bot" {
+		t.Errorf("response defaultAgent = %q, want %q", promResp.DefaultAgent, "promote-da-bot")
 	}
 }
 

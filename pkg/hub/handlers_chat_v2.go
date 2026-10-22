@@ -3937,9 +3937,12 @@ func (s *Server) handleConversationPromote(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// The agent supplies the default thread name and the thread's default
+	// agent slug.
+	agent, agentErr := s.store.GetAgent(ctx, agentID)
+
 	// Default thread name: use agent's display name, or title-case slug
 	if body.Name == "" {
-		agent, agentErr := s.store.GetAgent(ctx, agentID)
 		if agentErr == nil && agent != nil {
 			if agent.Name != "" {
 				body.Name = agent.Name
@@ -3990,14 +3993,20 @@ func (s *Server) handleConversationPromote(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	// 11. Build topic struct
+	// 11. Build topic struct. The default agent is stored as the agent
+	// slug, as group create does (setGroupDefaultAgent); the ID is the
+	// fallback when the slug cannot be read.
+	defaultAgent := agentID
+	if agentErr == nil && agent != nil && agent.Slug != "" {
+		defaultAgent = agent.Slug
+	}
 	topicID := uuid.New().String()
 	now := time.Now().UTC()
 	topic := WebChatTopic{
 		ID:             topicID,
 		ProjectID:      projectID,
 		Name:           body.Name,
-		DefaultAgent:   agentID,
+		DefaultAgent:   defaultAgent,
 		DefaultAgentID: agentID, // review round 1 finding #4: agentID is already the UUID here
 		CreatedBy:      user.ID(),
 		CreatedAt:      now,
