@@ -242,10 +242,10 @@ func (l *lifecycleTx) InsertLifecycleOutbox(ctx context.Context, rows []store.Li
 	return mapError(err)
 }
 
-// AfterCommit implements store.LifecycleTx. Without a known transaction
-// (a write outside any) f runs at once: that write has already committed
-// when its observer returns only in the paths that pass no tx, which none
-// of the observed writers do.
+// AfterCommit implements store.LifecycleTx: f runs after the writer's
+// transaction commits, and never if it rolls back. Every observed writer
+// passes its transaction; with none (a store copy built without one) f
+// runs at once.
 func (l *lifecycleTx) AfterCommit(f func()) {
 	if l.tx == nil {
 		f()
