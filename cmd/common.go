@@ -1712,10 +1712,12 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 }
 
 // hubCreateRequestTimeout is the client timeout of the agent create request
-// that scion start and scion create send. With async launch off, the hub
-// answers only once the runtime has created the agent, which can take well
-// over hubClientTimeout (a Cloud Run instance create, for example), so this
-// one request gets a longer timeout. Other hub requests keep theirs.
+// that scion start and scion create send, and of the env submit that
+// carries the launch when the hub gathers env first. With async launch off,
+// the hub answers only once the runtime has created the agent, which can
+// take well over hubClientTimeout (a Cloud Run instance create, for
+// example), so these requests get a longer timeout. Other hub requests keep
+// theirs.
 var hubCreateRequestTimeout = 3 * time.Minute
 
 func createAgentWithBrokerResolution(ctx context.Context, hubCtx *HubContext, projectID string, req *hubclient.CreateAgentRequest) (*hubclient.CreateAgentResponse, error) {
@@ -2091,7 +2093,9 @@ func gatherAndSubmitEnvGuarded(ctx context.Context, hubCtx *HubContext, projectI
 	if !cleanup.markSubmitted() {
 		return nil, errEnvGatherInterrupted
 	}
-	submitResp, err := hubCtx.Client.ProjectAgents(projectID).SubmitEnv(ctx, agentID, &hubclient.SubmitEnvRequest{
+	// The submit carries the launch, which the hub can run synchronously,
+	// so it gets the create request's longer timeout.
+	submitResp, err := hubCtx.Client.ProjectAgents(projectID).SubmitEnv(apiclient.WithRequestTimeout(ctx, hubCreateRequestTimeout), agentID, &hubclient.SubmitEnvRequest{
 		Env: gatheredEnv,
 	})
 	if err != nil {
