@@ -152,7 +152,7 @@ func TestStripUnsupportedAppleFlags_KeepsTmpfs(t *testing.T) {
 // --version; for exec (the mask check), statOut with exit code statRC,
 // after failFirst failing calls (exit 1, "exec failed"); hang makes every
 // exec hang in a child that keeps the output pipe open; rmFail makes rm
-// fail. The mock ignores backoffPastDeadline and shadowStat, which the
+// fail. The mock ignores backoffPastDeadline and shadowPath, which the
 // test applies.
 type appleGateOpts struct {
 	version, statOut  string
@@ -161,20 +161,22 @@ type appleGateOpts struct {
 	// backoffPastDeadline sets a retry delay longer than the check's
 	// timeout, so the deadline passes during the first backoff.
 	backoffPastDeadline bool
-	// shadowStat puts a stat that records "shadow-stat" in calls first on
-	// PATH. PATH independence is tested by behaviour: the mock runs the
-	// command given to exec through PATH when it is not an absolute path,
-	// as the container's PATH lookup would, so a check that ran plain stat
-	// would record shadow-stat. The empty environment (env -i) is pinned by
-	// the argv only: no mock can show LD_* being cleared, so the exact-argv
-	// test in TestAppleContainerRuntime_Run_AgentsMaskArgs is its proof.
-	shadowStat bool
+	// shadowPath puts a stat and an env that record "shadow-stat" and
+	// "shadow-env" in calls first on PATH. The mock runs the first word of
+	// the exec command through PATH when it is not an absolute path, as the
+	// container's PATH lookup would, so a check whose first word were plain
+	// stat or plain env would record a shadow call. That is all the row
+	// shows by behaviour: the mock never resolves the later words, so the
+	// absolute /usr/bin/stat that env runs, and the empty environment
+	// (env -i), are pinned by the exact-argv test in
+	// TestAppleContainerRuntime_Run_AgentsMaskArgs only.
+	shadowPath bool
 }
 
 // appleGateMock writes a mock container CLI that records each subcommand
 // in calls, prints cid for run and answers as opts says. For exec, the
-// command given to exec, when not an absolute path, is first run through
-// PATH.
+// first word of the command given to exec, when not an absolute path, is
+// first run through PATH, without its arguments.
 func appleGateMock(t *testing.T, o appleGateOpts) (command, calls string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -287,7 +289,7 @@ func TestAppleContainerRuntime_Run_AgentsMaskGate(t *testing.T) {
 		{"removal failure is reported", withAgents, appleGateOpts{version: v160, statOut: "40\n40", rmFail: true},
 			[]string{"mask is not mounted", "removing container cid", "the container may still exist"},
 			calls("--version", "run", "exec", "kill", "rm", "rm", "rm", "rm", "rm")},
-		{"a stat earlier on PATH is never invoked", withAgents, appleGateOpts{version: v160, statOut: mount, shadowStat: true}, nil,
+		{"a stat or env earlier on PATH is never invoked", withAgents, appleGateOpts{version: v160, statOut: mount, shadowPath: true}, nil,
 			calls("--version", "run", "exec")},
 		{"no mask: no version or exec call", noAgents, appleGateOpts{version: v011, statOut: "40\n40"}, nil, calls("run")},
 	} {
@@ -304,11 +306,13 @@ func TestAppleContainerRuntime_Run_AgentsMaskGate(t *testing.T) {
 				t.Cleanup(func() { appleMaskCheckTimeout, appleMaskCheckRetryDelay = prevT, prevD })
 			}
 			command, callsFile := appleGateMock(t, tt.opts)
-			if tt.opts.shadowStat {
+			if tt.opts.shadowPath {
 				shadow := t.TempDir()
-				script := fmt.Sprintf("#!/bin/sh\necho shadow-stat >> %q\n", callsFile)
-				if err := os.WriteFile(filepath.Join(shadow, "stat"), []byte(script), 0o755); err != nil {
-					t.Fatal(err)
+				for _, name := range []string{"stat", "env"} {
+					script := fmt.Sprintf("#!/bin/sh\necho shadow-%s >> %q\n", name, callsFile)
+					if err := os.WriteFile(filepath.Join(shadow, name), []byte(script), 0o755); err != nil {
+						t.Fatal(err)
+					}
 				}
 				t.Setenv("PATH", shadow+string(os.PathListSeparator)+os.Getenv("PATH"))
 			}
