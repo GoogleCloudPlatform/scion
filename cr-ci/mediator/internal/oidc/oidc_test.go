@@ -151,3 +151,28 @@ func TestFetchDoesNotBlockCachedKeys(t *testing.T) {
 		t.Error("unknown kid verified")
 	}
 }
+
+// TestFetchSurvivesCancelledTrigger: the JWKS fetch claims the once-a-minute
+// slot, so it must not run on the triggering request's context. A caller that
+// sends a token with a new kid and disconnects at once must still leave the
+// mediator with the refreshed key set.
+func TestFetchSurvivesCancelledTrigger(t *testing.T) {
+	g := fakes.NewGoogle(fakes.Key(1))
+	defer g.Close()
+	now := time.Unix(1_700_000_000, 0)
+	v := &Verifier{CertsURL: g.Server.URL, Audience: aud, Email: email, Now: func() time.Time { return now }}
+	if err := v.Verify(context.Background(), g.IDToken(aud, email, now)); err != nil {
+		t.Fatalf("initial verify: %v", err)
+	}
+	// Google rotates to a new kid; the refetch slot is open again.
+	g.Kid = "rotated-kid"
+	now = now.Add(61 * time.Second)
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	_ = v.Verify(cancelled, g.IDToken(aud, email, now)) // triggers the fetch, then "disconnects"
+
+	if err := v.Verify(context.Background(), g.IDToken(aud, email, now)); err != nil {
+		t.Errorf("token with the rotated kid rejected after a cancelled trigger: %v", err)
+	}
+}

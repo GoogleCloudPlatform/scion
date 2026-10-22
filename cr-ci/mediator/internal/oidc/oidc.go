@@ -32,6 +32,7 @@ const (
 	clockSkew       = 60 * time.Second
 	defaultKeysTTL  = time.Hour
 	minRefetchDelay = time.Minute
+	fetchTimeout    = 10 * time.Second
 	maxTokenLen     = 8 << 10
 )
 
@@ -214,7 +215,12 @@ func (v *Verifier) maybeFetch(ctx context.Context) error {
 	if !due {
 		return nil
 	}
-	keys, ttl, err := v.fetch(ctx)
+	// Detached from the triggering request: the fetch has claimed the
+	// once-a-minute slot, so a caller that disconnects (anyone can send an
+	// unknown kid) must not cancel it and leave the key set stale.
+	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), fetchTimeout)
+	defer cancel()
+	keys, ttl, err := v.fetch(fctx)
 	if err != nil {
 		return err
 	}
