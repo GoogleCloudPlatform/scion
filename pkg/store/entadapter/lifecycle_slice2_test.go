@@ -915,3 +915,64 @@ func TestLifecycleStore2_RestartWithoutStopLeg(t *testing.T) {
 	f.startWrite(a.ID)
 	assert.Equal(t, "created@1[/1] started@2[R1/1] stopped@3(superseded)[R1/1] started@4[R2/1]", lcFull(f.events(a.ID)))
 }
+
+// TestLifecycleStore2_StartedBeforeConfigured is design N5: a correlated
+// heartbeat commits started before the config echo commits configured;
+// both are accepted and ordered by revision.
+func TestLifecycleStore2_StartedBeforeConfigured(t *testing.T) {
+	f, a := newS2Fixture(t)
+	ctx := context.Background()
+	f.mint(a.ID, "R1")
+	f.heartbeat(a.ID, "running", "R1")
+	f.update(lifecycleevents.WithConfigResolution(ctx), a.ID, func(a *store.Agent) {
+		a.AppliedConfig = &store.AgentAppliedConfig{Model: "resolved"}
+	})
+	assert.Equal(t, "created@1[/1] started@2[R1/1] configured@3[R1/1]", lcFull(f.events(a.ID)))
+}
+
+// TestLifecycleStore2_DyingContainerReportBeforeR2: the old container's
+// own stopped report for R1 lands first, so R1 is closed by stopped and
+// the start of R2 needs no supersede: no double terminal.
+func TestLifecycleStore2_DyingContainerReportBeforeR2(t *testing.T) {
+	f, a := newS2Fixture(t)
+	ctx := context.Background()
+	f.mint(a.ID, "R1")
+	f.startWrite(a.ID)
+	f.status(ctx, a.ID, store.AgentStatusUpdate{Phase: "stopped", ReportSource: store.StatusReportSourceAgent, ReportRunID: "R1"})
+	f.mint(a.ID, "R2")
+	f.startWrite(a.ID)
+	assert.Equal(t, "created@1[/1] started@2[R1/1] stopped@3(stopped)[R1/1] started@4[R2/1]", lcFull(f.events(a.ID)))
+}
+
+// TestLifecycleStore2_RestartFailedAfterRunChange: with no stop-leg
+// closure (no broker stop leg), a failed start leg from running gives
+// superseded(R1) + launch_failed(restart_failed), never a bare stopped.
+func TestLifecycleStore2_RestartFailedAfterRunChange(t *testing.T) {
+	f, a := newS2Fixture(t)
+	ctx := context.Background()
+	f.mint(a.ID, "R1")
+	f.startWrite(a.ID)
+	f.mint(a.ID, "R2")
+	rctx := lifecycleevents.WithStartOutcome(ctx, lifecycleevents.StartOutcomeRestartFailed)
+	f.status(rctx, a.ID, store.AgentStatusUpdate{Phase: "stopped", IfRunID: "R2"})
+	assert.Equal(t, "created@1[/1] started@2[R1/1] stopped@3(superseded)[R1/1] launch_failed@4(restart_failed)[/1]",
+		lcFull(f.events(a.ID)))
+}
+
+// TestLifecycleStore2_StopConfirmedStartUnconfirmed is the token-analyst-2
+// 05:49 matrix case: the confirmed stop leg closes R1; the unconfirmed
+// start rollback records nothing and is counted, so only the new attempt
+// is unresolved.
+func TestLifecycleStore2_StopConfirmedStartUnconfirmed(t *testing.T) {
+	f, a := newS2Fixture(t)
+	ctx := context.Background()
+	f.mint(a.ID, "R1")
+	f.startWrite(a.ID)
+	require.NoError(t, f.cs.RecordRestartStopLeg(ctx, a.ID, "R1"))
+	f.mint(a.ID, "R2")
+	f.status(ctx, a.ID, store.AgentStatusUpdate{Phase: "starting"})
+	uctx := lifecycleevents.WithStartOutcome(ctx, lifecycleevents.StartOutcomeUnconfirmed)
+	f.status(uctx, a.ID, store.AgentStatusUpdate{Phase: "stopped", IfPhase: "starting", Restore: true})
+	assert.Equal(t, "created@1[/1] started@2[R1/1] stopped@3(stopped,restart_stop_leg)[R1/1]", lcFull(f.events(a.ID)))
+	assert.Equal(t, int64(1), f.counters.Get(telemetryemit.MetricUnconfirmed, ""))
+}
