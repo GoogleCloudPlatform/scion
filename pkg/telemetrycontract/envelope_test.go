@@ -350,3 +350,137 @@ func TestMockSeedEnvelopeDecodes(t *testing.T) {
 		t.Errorf("decoded envelope = %+v", ev.Envelope)
 	}
 }
+
+// R1: the producer gate accepts only the canonical FormatTS form of a
+// non-zero instant.
+func TestEnvelopeValidateRejectsNonCanonicalTimestamps(t *testing.T) {
+	for _, ts := range []string{
+		"2026-10-22T02:00:00+02:00",      // offset, not UTC
+		"2026-10-22T00:00:00.123456789Z", // sub-microsecond
+		"2026-10-22T00:00:00.120Z",       // trailing fractional zero
+		"2026-10-22T00:00:00.000Z",       // ditto
+		"0001-01-01T00:00:00Z",           // zero time sentinel
+	} {
+		e := NewEnvelope(EventTypeUsage, "u", "ns", testEventTS, testEventTS)
+		e.EventTS = ts
+		if err := e.Validate(); err == nil {
+			t.Errorf("Validate accepted event_ts %q", ts)
+		}
+		e.EventTS, e.ObservedTS = FormatTS(testEventTS), ts
+		if err := e.Validate(); err == nil {
+			t.Errorf("Validate accepted observed_ts %q", ts)
+		}
+	}
+	zero := NewEnvelope(EventTypeUsage, "u", "ns", time.Time{}, testEventTS)
+	if _, err := Marshal(&testEvent{Envelope: zero}); err == nil {
+		t.Error("Marshal accepted a zero event time")
+	}
+	for _, ok := range []string{"2026-10-22T00:00:00Z", "2026-10-22T00:00:00.12Z", "2026-10-22T00:00:00.000001Z"} {
+		if err := ValidateTS(ok); err != nil {
+			t.Errorf("ValidateTS(%q) = %v, want nil", ok, err)
+		}
+	}
+}
+
+// R2: invalid UTF-8 is rejected, never rewritten to U+FFFD.
+func TestMarshalRejectsInvalidUTF8(t *testing.T) {
+	env := func() Envelope { return NewEnvelope(EventTypeLifecycle, "l", "ns", testEventTS, testEventTS) }
+	cases := map[string]*testEvent{
+		"invalid label key":                {Envelope: env(), Labels: Labels{{"a\xff", "v"}}},
+		"invalid label value":              {Envelope: env(), Labels: Labels{{"k", "v\xfe"}}},
+		"keys colliding after replacement": {Envelope: env(), Labels: Labels{{"k\xfe", "1"}, {"k\xff", "2"}}},
+	}
+	for name, ev := range cases {
+		if _, err := Marshal(ev); err == nil {
+			t.Errorf("%s: Marshal accepted invalid UTF-8", name)
+		}
+		if err := ev.Labels.Validate(); err == nil {
+			t.Errorf("%s: Labels.Validate accepted invalid UTF-8", name)
+		}
+	}
+	bad := env()
+	bad.AgentID = "agent\xc3"
+	if _, err := Marshal(&testEvent{Envelope: bad}); err == nil {
+		t.Error("Marshal accepted an invalid UTF-8 envelope string")
+	}
+}
+
+// laxEvent's Validate deliberately skips Labels.Validate (O1): Marshal's
+// walk must still enforce label invariants.
+type laxEvent struct {
+	Envelope
+	Labels Labels `json:"labels"`
+}
+
+func (e *laxEvent) Validate() error { return e.Envelope.Validate() }
+
+func TestMarshalEnforcesLabelsWithoutEventValidate(t *testing.T) {
+	env := NewEnvelope(EventTypeLifecycle, "l", "ns", testEventTS, testEventTS)
+	for name, l := range map[string]Labels{
+		"duplicate":    {{"a", "1"}, {"a", "2"}},
+		"out of order": {{"b", "1"}, {"a", "2"}},
+	} {
+		if _, err := Marshal(&laxEvent{Envelope: env, Labels: l}); err == nil {
+			t.Errorf("%s labels marshaled through an event whose Validate skips them", name)
+		}
+	}
+	nested := struct {
+		laxEvent
+		More []Labels `json:"more"`
+	}{laxEvent: laxEvent{Envelope: env}, More: []Labels{{{"z", ""}, {"a", ""}}}}
+	if _, err := Marshal(&nested); err == nil {
+		t.Error("nested invalid Labels marshaled")
+	}
+}
+
+type walkEvent struct {
+	Envelope
+	Nested   *struct{ F float32 } `json:"nested,omitempty"`
+	Slice    []any                `json:"slice"`
+	Map      map[string]any       `json:"map"`
+	Unsigned uint64               `json:"unsigned"`
+	Number   *json.Number         `json:"number,omitempty"`
+	Internal float64              `json:"-"`
+}
+
+func (e *walkEvent) Validate() error { return e.Envelope.Validate() }
+
+// O3/O4: every recursive branch of the walk, json:"-" skipped, json.Number
+// rejected.
+func TestMarshalWalksNestedValues(t *testing.T) {
+	env := NewEnvelope(EventTypeHealth, "h", "ns", testEventTS, testEventTS)
+	ok := &walkEvent{Envelope: env, Slice: []any{int64(1), "s"}, Map: map[string]any{"n": int64(2)}, Internal: 0.5}
+	if _, err := Marshal(ok); err != nil {
+		t.Fatalf("valid nested event rejected (json:\"-\" float must be skipped): %v", err)
+	}
+	cases := map[string]func(*walkEvent){
+		"float in nested struct":   func(e *walkEvent) { e.Nested = &struct{ F float32 }{F: 1} },
+		"float slice element":      func(e *walkEvent) { e.Slice = []any{1.0} },
+		"float map value":          func(e *walkEvent) { e.Map = map[string]any{"x": float64(1)} },
+		"invalid UTF-8 map key":    func(e *walkEvent) { e.Map = map[string]any{"\xff": int64(1)} },
+		"uint64 beyond safe range": func(e *walkEvent) { e.Unsigned = MaxSafeInteger + 1 },
+		"json.Number":              func(e *walkEvent) { n := json.Number("1.5"); e.Number = &n },
+	}
+	for name, mutate := range cases {
+		ev := &walkEvent{Envelope: env}
+		mutate(ev)
+		if _, err := Marshal(ev); err == nil {
+			t.Errorf("%s: Marshal accepted it", name)
+		}
+	}
+}
+
+func TestUnmarshalNullLabels(t *testing.T) {
+	data := []byte(`{"schema_version":1,"event_type":"agent.lifecycle","event_id":"l","producer_namespace":"ns","event_ts":"2026-10-22T00:00:00Z","observed_ts":"2026-10-22T00:00:00Z","count":0,"labels":null}`)
+	var ev testEvent
+	if err := Unmarshal(data, &ev); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if ev.Labels != nil {
+		t.Errorf("labels:null decoded as %v, want nil", ev.Labels)
+	}
+	out, err := Marshal(&ev)
+	if err != nil || !strings.Contains(string(out), `"labels":[]`) {
+		t.Errorf("re-marshal of null labels = %s (%v), want []", out, err)
+	}
+}

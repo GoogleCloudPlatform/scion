@@ -27,9 +27,10 @@ package telemetrycontract
 //   - the primary key is (producer_namespace, event_id);
 //   - every numeric payload field is an integer;
 //   - timestamps are RFC 3339 strings;
-//   - unknown values are omitted, never a sentinel number.
+//   - "unknown values omitted or null, never sentinel numbers".
 //
-// Unknown policy: an unknown value is OMITTED (omitempty), never null and
+// Unknown policy (this package's choice within the freeze, agreed with the
+// WP1 lifecycle design): an unknown value is OMITTED (omitempty), never null and
 // never a sentinel. A string field that may be unknown is a plain string
 // with omitempty (empty means unknown). An integer that may be unknown is
 // *int64 with omitempty, so a known zero (non-nil pointer to 0) is still
@@ -43,6 +44,7 @@ import (
 	"reflect"
 	"sort"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
@@ -141,10 +143,10 @@ func (e *Envelope) Validate() error {
 	if e.ProducerNamespace == "" {
 		errs = append(errs, errors.New("producer_namespace is empty"))
 	}
-	if _, err := ParseTS(e.EventTS); err != nil {
+	if err := ValidateTS(e.EventTS); err != nil {
 		errs = append(errs, fmt.Errorf("event_ts: %w", err))
 	}
-	if _, err := ParseTS(e.ObservedTS); err != nil {
+	if err := ValidateTS(e.ObservedTS); err != nil {
 		errs = append(errs, fmt.Errorf("observed_ts: %w", err))
 	}
 	if len(errs) > 0 {
@@ -155,7 +157,8 @@ func (e *Envelope) Validate() error {
 
 // NewEnvelope returns an Envelope with the schema version and event type
 // set and the two timestamps formatted. The caller fills the identity
-// fields it knows.
+// fields it knows. A zero time.Time is not a valid timestamp (it would be
+// a sentinel); Validate, and therefore Marshal, rejects it.
 func NewEnvelope(eventType, eventID, producerNamespace string, eventTS, observedTS time.Time) Envelope {
 	return Envelope{
 		SchemaVersion:     SchemaVersion,
@@ -188,8 +191,27 @@ func FormatTS(t time.Time) string {
 	return t.UTC().Truncate(time.Microsecond).Format(time.RFC3339Nano)
 }
 
-// ParseTS parses an RFC 3339 timestamp (any offset; FormatTS always writes
-// UTC).
+// ValidateTS reports whether s is a canonical producer timestamp: exactly
+// FormatTS's output for a non-zero instant (UTC "Z", at most microsecond
+// precision, no trailing fractional zeros). Producers write only this form,
+// so one instant always serializes to the same bytes.
+func ValidateTS(s string) error {
+	t, err := ParseTS(s)
+	if err != nil {
+		return err
+	}
+	if t.IsZero() {
+		return fmt.Errorf("timestamp %q is the zero time (a sentinel, not a known value)", s)
+	}
+	if canonical := FormatTS(t); canonical != s {
+		return fmt.Errorf("timestamp %q is not in canonical form %q (UTC, microsecond precision)", s, canonical)
+	}
+	return nil
+}
+
+// ParseTS parses an RFC 3339 timestamp leniently (any offset and
+// precision), for consumers. Producers must emit ValidateTS's canonical
+// form.
 func ParseTS(s string) (time.Time, error) {
 	if s == "" {
 		return time.Time{}, errors.New("timestamp is empty")
@@ -234,9 +256,19 @@ func (l Labels) Map() map[string]string {
 }
 
 // Validate checks that keys are unique and in canonical (bytewise
-// ascending) order. Any key or value string is otherwise accepted,
-// including an empty value.
+// ascending) order, and that every key and value is valid UTF-8 (JSON
+// encoding would otherwise silently replace invalid bytes with U+FFFD,
+// which is lossy and can make distinct keys collide on the wire). Any
+// valid string is otherwise accepted, including an empty key or value.
 func (l Labels) Validate() error {
+	for _, kv := range l {
+		if !utf8.ValidString(kv.Key) {
+			return fmt.Errorf("telemetrycontract: label key %q is not valid UTF-8", kv.Key)
+		}
+		if !utf8.ValidString(kv.Value) {
+			return fmt.Errorf("telemetrycontract: value of label %q is not valid UTF-8", kv.Key)
+		}
+	}
 	for i := 1; i < len(l); i++ {
 		switch {
 		case l[i-1].Key == l[i].Key:
@@ -273,8 +305,11 @@ func encodeNoHTMLEscape(v any) ([]byte, error) {
 	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
 }
 
-// Marshal serializes ev deterministically: it validates ev, rejects
-// non-integer numeric fields and integers beyond MaxSafeInteger, and
+// Marshal serializes ev deterministically: it validates ev, then walks
+// every serialized field and rejects non-integer numerics, integers beyond
+// MaxSafeInteger, strings that are not valid UTF-8, and any Labels value
+// that fails Labels.Validate (so label invariants hold even if an event
+// type's own Validate forgets them). It
 // encodes with encoding/json (struct fields in declaration order) without
 // HTML escaping, so label punctuation such as "<" and "&" stays verbatim.
 // The result has no trailing newline.
@@ -285,7 +320,7 @@ func Marshal(ev Event) ([]byte, error) {
 	if err := ev.Validate(); err != nil {
 		return nil, err
 	}
-	if err := checkNumerics(reflect.ValueOf(ev), ""); err != nil {
+	if err := checkValues(reflect.ValueOf(ev), ""); err != nil {
 		return nil, err
 	}
 	data, err := encodeNoHTMLEscape(ev)
@@ -306,7 +341,7 @@ func Unmarshal(data []byte, ev Event) error {
 	if err := json.Unmarshal(data, ev); err != nil {
 		return fmt.Errorf("telemetrycontract: decoding event: %w", err)
 	}
-	if err := checkNumerics(reflect.ValueOf(ev), ""); err != nil {
+	if err := checkValues(reflect.ValueOf(ev), ""); err != nil {
 		return err
 	}
 	return ev.Validate()
@@ -317,43 +352,66 @@ func isNilPointer(v any) bool {
 	return rv.Kind() == reflect.Pointer && rv.IsNil()
 }
 
-// checkNumerics walks v and reports the first float/complex field or
-// integer outside ±MaxSafeInteger. path names the offending field for the
-// error message.
-func checkNumerics(v reflect.Value, path string) error {
+var (
+	labelsType     = reflect.TypeOf(Labels(nil))
+	jsonNumberType = reflect.TypeOf(json.Number(""))
+)
+
+// checkValues walks the fields encoding/json serializes (exported, not
+// tagged "-") and reports the first float/complex value, json.Number
+// (which can carry a fraction), integer outside ±MaxSafeInteger, string
+// that is not valid UTF-8, or invalid Labels value. path names the
+// offending field for the error message.
+func checkValues(v reflect.Value, path string) error {
+	if v.Type() == labelsType {
+		if err := v.Interface().(Labels).Validate(); err != nil {
+			return fmt.Errorf("field %s: %w", path, err)
+		}
+	}
+	if v.Type() == jsonNumberType {
+		return fmt.Errorf("telemetrycontract: field %s has type json.Number; analytics numerics must be Go integers", path)
+	}
 	switch v.Kind() {
 	case reflect.Pointer, reflect.Interface:
 		if v.IsNil() {
 			return nil
 		}
-		return checkNumerics(v.Elem(), path)
+		return checkValues(v.Elem(), path)
 	case reflect.Struct:
 		t := v.Type()
 		for i := 0; i < t.NumField(); i++ {
 			f := t.Field(i)
-			if !f.IsExported() {
+			if !f.IsExported() || f.Tag.Get("json") == "-" {
 				continue
 			}
 			name := f.Name
 			if path != "" {
 				name = path + "." + name
 			}
-			if err := checkNumerics(v.Field(i), name); err != nil {
+			if err := checkValues(v.Field(i), name); err != nil {
 				return err
 			}
 		}
 	case reflect.Slice, reflect.Array:
 		for i := 0; i < v.Len(); i++ {
-			if err := checkNumerics(v.Index(i), fmt.Sprintf("%s[%d]", path, i)); err != nil {
+			if err := checkValues(v.Index(i), fmt.Sprintf("%s[%d]", path, i)); err != nil {
 				return err
 			}
 		}
 	case reflect.Map:
 		iter := v.MapRange()
 		for iter.Next() {
-			if err := checkNumerics(iter.Value(), fmt.Sprintf("%s[%v]", path, iter.Key())); err != nil {
+			elem := fmt.Sprintf("%s[%v]", path, iter.Key())
+			if err := checkValues(iter.Key(), elem+"(key)"); err != nil {
 				return err
 			}
+			if err := checkValues(iter.Value(), elem); err != nil {
+				return err
+			}
+		}
+	case reflect.String:
+		if !utf8.ValidString(v.String()) {
+			return fmt.Errorf("telemetrycontract: field %s is not valid UTF-8", path)
 		}
 	case reflect.Float32, reflect.Float64, reflect.Complex64, reflect.Complex128:
 		return fmt.Errorf("telemetrycontract: field %s has non-integer type %s; analytics numerics must be integers", path, v.Type())
