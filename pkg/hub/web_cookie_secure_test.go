@@ -34,6 +34,11 @@ func TestNewWebServer_SessionCookieSecureFollowsScheme(t *testing.T) {
 		{"HTTP://hub.example.com", false},
 		{"", false},
 		{"://bad", false},
+		// Unparsable but https: Secure (fail closed).
+		{"https://localhost:8443/%zz", true},
+		{"HTTPS://host:abc", true},
+		// Unparsable and http: not Secure.
+		{"http://host:abc", false},
 	} {
 		t.Run(tc.baseURL, func(t *testing.T) {
 			if got := baseURLIsHTTPS(tc.baseURL); got != tc.secure {

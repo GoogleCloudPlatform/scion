@@ -93,14 +93,20 @@ require_cert_email() {
     fi
 }
 
-# hub_env_base_url prints SCION_SERVER_BASE_URL from HUB_ENV_FILE (quotes
-# stripped; the last assignment wins, as for systemd), or nothing when the
-# file does not exist or does not set it.
+# hub_env_base_url prints SCION_SERVER_BASE_URL from HUB_ENV_FILE, parsed
+# as systemd's EnvironmentFile= does for these simple cases: the last
+# assignment wins, spaces around "=" are allowed, and surrounding
+# whitespace, a trailing CR and surrounding quotes are removed. Prints
+# nothing when the file does not exist or does not set it.
 hub_env_base_url() {
     local raw=""
     if [[ -f "${HUB_ENV_FILE}" ]]; then
-        raw=$(grep -E "^[[:space:]]*SCION_SERVER_BASE_URL=" "${HUB_ENV_FILE}" 2>/dev/null | tail -1 | cut -d'=' -f2- || true)
+        raw=$(grep -E "^[[:space:]]*SCION_SERVER_BASE_URL[[:space:]]*=" "${HUB_ENV_FILE}" 2>/dev/null | tail -1 | cut -d'=' -f2- || true)
     fi
+    raw="${raw%$'\r'}"
+    # Trim surrounding whitespace.
+    raw="${raw#"${raw%%[![:space:]]*}"}"
+    raw="${raw%"${raw##*[![:space:]]}"}"
     raw="${raw#\"}"
     raw="${raw%\"}"
     raw="${raw#\'}"

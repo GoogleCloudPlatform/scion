@@ -336,6 +336,35 @@ test_full_no_tls_checks_the_effective_hub_env_base_url() {
     assert_eq 1 "$RC" "different https values are refused"
 }
 
+# hub.env is parsed as systemd does: CRLF line endings and spaces around
+# "=" are accepted (ptone/scion#5364).
+test_full_no_tls_hub_env_crlf_and_spaced_assignment() {
+    local envfile
+    fresh_state
+    envfile="${STATE_DIR}/hub-test.env"
+    printf 'SCION_SERVER_BASE_URL=https://hub.internal.example.test\r\n' > "$envfile"
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}" HUB_ENV_FILE="$envfile")
+    run_script gce-start-hub.sh --full --no-tls
+    assert_eq 0 "$RC" "a CRLF hub.env is accepted"
+    assert_contains "$(cat "${STUB_SCP_DIR}/scion-hub.service")" \
+        'SCION_SERVER_BASE_URL=https://hub.internal.example.test"' "CRLF: no CR in the unit"
+
+    fresh_state
+    envfile="${STATE_DIR}/hub-test.env"
+    printf '  SCION_SERVER_BASE_URL = "https://hub.internal.example.test"  \n' > "$envfile"
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}" HUB_ENV_FILE="$envfile" HUB_BASE_URL=https://hub.internal.example.test)
+    run_script gce-start-hub.sh --full --no-tls
+    assert_eq 0 "$RC" "a spaced, quoted assignment equal to HUB_BASE_URL is accepted"
+
+    fresh_state
+    envfile="${STATE_DIR}/hub-test.env"
+    printf 'SCION_SERVER_BASE_URL = http://10.0.0.5:8080\r\n' > "$envfile"
+    EXTRA_ENV=(HUB_ENV_FILE="$envfile")
+    run_script gce-start-hub.sh --full --no-tls
+    assert_eq 1 "$RC" "a spaced http assignment is refused"
+    assert_contains "$OUT" "(got http://10.0.0.5:8080 from SCION_SERVER_BASE_URL in ${envfile})" "the parsed value is named"
+}
+
 # The scheme match is case-insensitive without bash-4 expansions.
 test_full_no_tls_accepts_upper_case_https() {
     fresh_state

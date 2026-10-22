@@ -633,10 +633,14 @@ func (ws *WebServer) logger() *slog.Logger {
 // WebServerConfig or NewWebServer cannot get a non-Secure session cookie
 // from an upper-case "HTTPS://" base URL. (The server's resolver also
 // lower-cases the scheme; this does not rely on it.) A base URL that does
-// not parse is not https.
+// not parse falls back to a case-insensitive "https://" prefix check, so
+// an unparsable https URL still gets a Secure cookie (fail closed).
 func baseURLIsHTTPS(baseURL string) bool {
 	u, err := url.Parse(baseURL)
-	return err == nil && strings.EqualFold(u.Scheme, "https")
+	if err != nil {
+		return strings.HasPrefix(strings.ToLower(baseURL), "https://")
+	}
+	return strings.EqualFold(u.Scheme, "https")
 }
 
 // IsLoopbackHost reports whether host is a loopback address (127.0.0.0/8,
