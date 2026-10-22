@@ -673,7 +673,7 @@ func HubClientForCredentials(creds *brokercredentials.BrokerCredentials) (hubcli
 // newHeartbeatService builds the heartbeat service for one hub connection.
 // A flat instance's service is in flat mode (HeartbeatService.flat).
 func (s *Server) newHeartbeatService(client hubclient.RuntimeBrokerService, brokerID, hubEndpoint string, interval time.Duration) *HeartbeatService {
-	mgr, rt := s.defaultPair()
+	mgr, rt, _ := s.defaultPair()
 	hb := NewHeartbeatService(
 		client,
 		brokerID,

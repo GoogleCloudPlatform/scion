@@ -582,7 +582,33 @@ type reincarnateTestDispatcher struct {
 	moveProvisionErr     error
 	localOnlyDeleteCalls []string // "<brokerID>|<runID>"
 	localOnlyDeleteErr   map[string]error
-	startBrokers         []string
+	// recreatedDeleteCalls records a forced move's rollback deletes
+	// (DispatchAgentDeleteRecreated): "<brokerID>|<projectID>|<runID>".
+	recreatedDeleteCalls []string
+	recreatedDeleteErr   error
+	// recreateFiles, when non-nil, models each broker's files for the
+	// moved agent as a forced move sees them: a fresh-agent-dir provision
+	// to a broker holding some is refused with the broker's 409 (marked
+	// sent); one that proceeds creates them, even when it then fails with
+	// a moveProvisionErr marked sent (a partial provision); a
+	// moveProvisionErr not marked sent is returned before any of this,
+	// as a pre-send failure; a recreated-files delete
+	// removes them, and a localOnly delete does not (it leaves the
+	// workspace a move created on the export).
+	recreateFiles map[string]bool
+	// recreateOwner is the move marker (reincarnation ID) of the files a
+	// forced move's provision created on each broker; files a test put in
+	// recreateFiles itself have none, so a rollback delete is refused with
+	// move_marker_mismatch and removes nothing. moveProvisionFailsBeforeF4
+	// makes a sent moveProvisionErr a refusal from before the broker's
+	// absence check: nothing is created. moveProvisionIDs and
+	// recreatedDeleteIDs record the reincarnation IDs each call carried.
+	recreateOwner              map[string]string
+	moveProvisionFailsBeforeF4 bool
+	moveProvisionIDs           []string
+	recreatedDeleteIDs         []string
+
+	startBrokers []string
 	// runStore, when set, makes DispatchAgentStart mint and record a run
 	// on the row first, like the real dispatcher's beginRun, and record
 	// startPlacement (when set), like a target's start report.
@@ -5181,17 +5207,66 @@ func (d *reincarnateTestDispatcher) DispatchAgentReprovision(_ context.Context, 
 	}
 	return err
 }
-func (d *reincarnateTestDispatcher) DispatchAgentProvisionForMove(_ context.Context, agent *store.Agent, expect string) error {
+func (d *reincarnateTestDispatcher) DispatchAgentProvisionForMove(_ context.Context, agent *store.Agent, expect, moveID string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.moveProvisionCalls = append(d.moveProvisionCalls, agent.RuntimeBrokerID+"|"+expect)
+	d.moveProvisionIDs = append(d.moveProvisionIDs, moveID)
+	if d.moveProvisionErr != nil && (!errors.Is(d.moveProvisionErr, errProvisionSent) || d.moveProvisionFailsBeforeF4) {
+		// Failed on the hub before the request was sent (the real
+		// dispatcher marks only errors at or after the send), or refused
+		// by the broker before its absence check: nothing is created.
+		return d.moveProvisionErr
+	}
+	if d.recreateFiles != nil && expect == "fresh-agent-dir" {
+		if d.recreateFiles[agent.RuntimeBrokerID] {
+			return provisionSent(&brokerStatusError{StatusCode: http.StatusConflict, Body: freshAgentDirConflictBody})
+		}
+		d.recreateFiles[agent.RuntimeBrokerID] = true
+		if d.recreateOwner == nil {
+			d.recreateOwner = map[string]string{}
+		}
+		d.recreateOwner[agent.RuntimeBrokerID] = moveID
+	}
 	return d.moveProvisionErr
 }
+
+// moveMarkerMismatchBody is the broker's fixed, path-free 409 body for a
+// forced move's rollback delete of files the move did not create.
+const moveMarkerMismatchBody = `{"error":{"code":"move_marker_mismatch","message":"Failed to delete agent: its files on this broker were not created by this move; nothing was removed"}}`
+
+// freshAgentDirConflictBody is the broker's fixed, path-free 409 body for a
+// forced move's provision onto a broker that has files for the agent.
+const freshAgentDirConflictBody = `{"error":{"code":"move_target_not_fresh","message":"Failed to provision moved agent: the agent already has files on this broker; refusing to recreate over them"}}`
+
 func (d *reincarnateTestDispatcher) DispatchAgentDeleteLocalOnly(_ context.Context, agent *store.Agent) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.localOnlyDeleteCalls = append(d.localOnlyDeleteCalls, agent.RuntimeBrokerID+"|"+agent.RunID)
 	return d.localOnlyDeleteErr[agent.RuntimeBrokerID]
+}
+func (d *reincarnateTestDispatcher) DispatchAgentDeleteRecreated(_ context.Context, agent *store.Agent, moveID string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.recreatedDeleteCalls = append(d.recreatedDeleteCalls, agent.RuntimeBrokerID+"|"+agent.ProjectID+"|"+agent.RunID)
+	d.recreatedDeleteIDs = append(d.recreatedDeleteIDs, moveID)
+	if d.recreatedDeleteErr != nil {
+		return d.recreatedDeleteErr
+	}
+	if d.recreateFiles != nil && d.recreateFiles[agent.RuntimeBrokerID] {
+		// The broker removes only files marked by this move.
+		if d.recreateOwner[agent.RuntimeBrokerID] != moveID {
+			return &brokerStatusError{StatusCode: http.StatusConflict, Body: moveMarkerMismatchBody}
+		}
+		delete(d.recreateFiles, agent.RuntimeBrokerID)
+		delete(d.recreateOwner, agent.RuntimeBrokerID)
+	}
+	return nil
+}
+func (d *reincarnateTestDispatcher) recreatedDeletes() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]string(nil), d.recreatedDeleteCalls...)
 }
 func (d *reincarnateTestDispatcher) moveSnapshot() (provisions, localDeletes, startBrokers []string) {
 	d.mu.Lock()

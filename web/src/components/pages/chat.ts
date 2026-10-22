@@ -69,15 +69,24 @@ import { coalescedRefresh, type CoalescedRefresh } from '../../client/coalesced-
 import { visibleInterval } from '../../client/visible-interval.js';
 import type { RailRefreshDetail } from '../shared/chat/chat-space-rail.js';
 import { TouchPrimaryController } from '../../utils/input-modality.js';
+import { isMacPlatform } from '../../utils/platform.js';
 import { isMacTextFieldCtrlKey } from '../shared/text-field-keys.js';
 import { CHAT_PALETTE_OPEN_REQUEST_EVENT } from '../../client/chat-palette-events.js';
 import { blurElement, focusElement } from '../shared/focus-moved.js';
-import type { GroupState, PaletteGroup, PaletteTarget } from '../../client/palette-types.js';
+import type {
+  GroupState,
+  PaletteCandidate,
+  PaletteGroup,
+  PaletteQueryDetail,
+  PaletteTarget,
+} from '../../client/palette-types.js';
 import {
   AGENTS_IDLE_TIMEOUT_MS,
   ChatPaletteDataController,
+  PEOPLE_SEARCH_MIN_CHARS,
   PaletteLoadError,
   buildDocumentCandidates,
+  normalizePeopleQuery,
 } from '../../client/chat-palette-data.js';
 import { chatRecentFiles } from '../../client/chat-recent-files.js';
 import type { RecentFile, RecentFilesSnapshot } from '../../client/chat-recent-files.js';
@@ -164,6 +173,8 @@ const loadQuickPalette = () => import('../shared/palette/quick-palette.js');
 const PALETTE_GROUP_CACHE_MS = 30_000;
 /** Debounce window for refreshing dirty palette groups while the palette is open. */
 const PALETTE_REFRESH_DEBOUNCE_MS = 500;
+/** Quiet period after the last query edit before the People group searches the hub. */
+export const PALETTE_PEOPLE_SEARCH_DEBOUNCE_MS = 250;
 
 /**
  * Convert a recent-files record into the shape `<scion-chat-file-preview>`
@@ -713,7 +724,7 @@ export class ScionPageChat extends LitElement {
   private _onDMPromoted = this.handleDMPromoted.bind(this);
   /** Bound keydown handler for Cmd/Ctrl+K quick switcher. */
   private _onKeydown = this._handleGlobalKeydown.bind(this);
-  /** Bound handler for the header palette button's open-request event. */
+  /** Bound handler for the palette footer buttons' open-request event. */
   private _onPaletteOpenRequest = this._handlePaletteOpenRequest.bind(this);
   /** Whether the device's primary pointer is touch -- see `_selectionHandsFocusToComposer`. */
   private touchPrimary = new TouchPrimaryController(this);
@@ -891,6 +902,8 @@ export class ScionPageChat extends LitElement {
   private _selfUserAbortController: AbortController | null = null;
   /** Debounce timer coalescing SSE-driven dirty-group refreshes while the palette is open. */
   private _paletteRefreshDebounce: ReturnType<typeof setTimeout> | null = null;
+  /** Debounce timer for the People group's hub search (see {@link _handlePaletteQuery}). */
+  private _palettePeopleSearchTimer: ReturnType<typeof setTimeout> | null = null;
   /** The deep-active element (and, for a textarea or text input, its selection) captured just before the palette opened. */
   private _paletteInvoker: HTMLElement | null = null;
   private _paletteInvokerSelection: {
@@ -1233,9 +1246,101 @@ export class ScionPageChat extends LitElement {
       overflow: hidden;
     }
 
-    .v2-rail scion-chat-space-rail {
+    .v2-rail scion-chat-space-rail,
+    .v2-rail .loading-rail,
+    .v2-members scion-chat-members {
       flex: 1;
       min-height: 0;
+    }
+
+    /* The palette footer below the list carries the bottom safe-area
+       inset, so the list's own last-row inset is dropped (see
+       chat-space-rail's .rail-body and chat-members' .members-body). The
+       members column has the footer on phones only; see the mobile rules. */
+    .v2-rail {
+      --chat-list-inset-bottom: 0px;
+    }
+
+    /* Pinned below the list: only the list above it scrolls. Mirrors the
+       terminal view's "Jump to agent" footer (terminal-workspace-root.ts,
+       .terminal-rail-footer). */
+    .palette-footer {
+      flex: 0 0 auto;
+      padding: 0.375rem;
+      /* Clears the home indicator (the page uses viewport-fit=cover); the
+         inset is 0 elsewhere. */
+      padding-bottom: max(0.375rem, env(safe-area-inset-bottom, 0px));
+      border-top: 1px solid var(--scion-border, #e2e8f0);
+      background: var(--scion-surface, #ffffff);
+    }
+
+    .palette-footer-btn {
+      box-sizing: border-box;
+      width: 100%;
+      min-height: 2.5rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0 0.625rem;
+      border: 0;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--scion-text, #1e293b);
+      font: inherit;
+      font-size: var(--chat-fs-base, 0.875rem);
+      font-weight: 550;
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .palette-footer-btn sl-icon {
+      flex: 0 0 auto;
+      font-size: 1.25rem;
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    .palette-footer-label {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .palette-footer-shortcut {
+      flex: 0 0 auto;
+      font-family: inherit;
+      font-size: var(--chat-fs-xs, 0.75rem);
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    .palette-footer-btn:focus-visible {
+      background: var(--scion-bg-subtle, #f1f5f9);
+      outline: 2px solid var(--scion-primary, #3b82f6);
+      outline-offset: -2px;
+    }
+
+    /* Hover only where it does not stick after a tap: on touch, :hover
+       stays until the next tap lands elsewhere, so it would still show
+       when the palette closes and focus returns to this button. */
+    @media (hover: hover) {
+      .palette-footer-btn:hover {
+        background: var(--scion-bg-subtle, #f1f5f9);
+      }
+    }
+
+    /* Phones and touch-primary devices: a tap target of at least 44px. */
+    @media (max-width: 768px), (hover: none) and (pointer: coarse) {
+      .palette-footer-btn {
+        min-height: 44px;
+      }
+    }
+
+    /* Touch-primary: no keyboard, so no shortcut hint. */
+    @media (hover: none) and (pointer: coarse) {
+      .palette-footer-shortcut {
+        display: none;
+      }
     }
 
     .v2-members {
@@ -1603,6 +1708,12 @@ export class ScionPageChat extends LitElement {
       .v2-members-resizer {
         display: none;
       }
+
+      /* The members column has its own palette footer here, which takes
+         the bottom safe-area inset from the list (see .v2-rail above). */
+      .v2-panels .v2-members {
+        --chat-list-inset-bottom: 0px;
+      }
     }
 
     @media (prefers-reduced-motion: reduce) {
@@ -1714,9 +1825,8 @@ export class ScionPageChat extends LitElement {
     }
     // Global Cmd/Ctrl+K listener for the quick switcher.
     document.addEventListener('keydown', this._onKeydown);
-    // Header palette button: a composed custom event rather than a direct
-    // reference, since the header renders as a sibling (slotted into
-    // scion-chat-shell), not an ancestor.
+    // Palette footer buttons (renderPaletteFooter): a composed custom event,
+    // so every open request goes through one listener and its guards.
     document.addEventListener(CHAT_PALETTE_OPEN_REQUEST_EVENT, this._onPaletteOpenRequest);
     // Reactive half of the modal/route interaction: if another modal opens
     // or route hides chat while the palette is open, close it without
@@ -1803,6 +1913,7 @@ export class ScionPageChat extends LitElement {
     this._selfUserAbortController = null;
     this._stopPaletteVisibilityWatchdog();
     this._stopPaletteDebouncedRefresh();
+    this._stopPalettePeopleSearch();
     // Without this, a disconnect landing while a first-open lazy import is
     // still in flight would leave `_palettePendingOpen` stuck true on the
     // detached page — the suspended togglePalette call would resume anyway
@@ -3610,7 +3721,9 @@ export class ScionPageChat extends LitElement {
         seenUserIds.add(u.id);
         return true;
       })
-      .filter((u) => u.status !== 'disabled')
+      // A deactivated user's hub status is 'suspended' (pkg/store/models.go
+      // UserStatus*); the hub has no 'disabled' user status.
+      .filter((u) => u.status !== 'suspended')
       .map((u) => ({
         id: u.id,
         kind: 'user' as const,
@@ -4646,11 +4759,12 @@ export class ScionPageChat extends LitElement {
   }
 
   /**
-   * The header palette button's open-request handler. Shares the same route/
-   * visibility/modal guard as the shortcut, but skips
-   * `_eventFromTerminalSurface`: that guard exists to let Ctrl+K keep
-   * reaching the terminal's PTY, which only makes sense for a keystroke — a
-   * click on the header button is never a keypress the terminal could want.
+   * The palette footer buttons' open-request handler (see
+   * `renderPaletteFooter`). Shares the same route/visibility/modal guard as
+   * the shortcut, but skips `_eventFromTerminalSurface`: that guard exists
+   * to let Ctrl+K keep reaching the terminal's PTY, which only makes sense
+   * for a keystroke — a click on the button is never a keypress the
+   * terminal could want.
    * Opens with `{ mode: 'open' }` rather than toggling: see `togglePalette`'s
    * doc comment for why the button must never close an already-open palette.
    */
@@ -4814,7 +4928,7 @@ export class ScionPageChat extends LitElement {
    * actually finishes.
    *
    * `mode` defaults to `'toggle'` (the shortcut's behaviour, unchanged byte
-   * for byte). `'open'` is the header button's contract: it never closes an
+   * for byte). `'open'` is the footer button's contract: it never closes an
    * already-open palette and never cancels an in-flight open, so a double
    * tap or double click — common on touch, and not reliably distinguishable
    * from two deliberate presses — can only ever leave the palette open,
@@ -4991,6 +5105,8 @@ export class ScionPageChat extends LitElement {
    * is not fetched here — see `_handleRecentFilesSnapshot`.
    */
   private _loadPaletteGroupsOnOpen(): void {
+    // The query starts empty: drop the last open's search hits.
+    this._publishPalettePeopleSearch(this._paletteDataController.clearPeopleSearch());
     void this._loadPaletteAgents();
     if (!this._shouldUseCachedPaletteGroup('people')) void this._loadPalettePeople();
     if (!this._shouldUseCachedPaletteGroup('threads')) void this._loadPaletteThreads();
@@ -5160,6 +5276,7 @@ export class ScionPageChat extends LitElement {
     this._selfUserAbortController = null;
     this._stopPaletteVisibilityWatchdog();
     this._stopPaletteDebouncedRefresh();
+    this._stopPalettePeopleSearch();
     // A close that must not touch focus (see _paletteSkipFocusRestore) drops
     // a pending open's hidden keyboard field without refocusing anything.
     this._paletteTypeahead.stop({ restoreFocus: !this._paletteSkipFocusRestore });
@@ -5477,6 +5594,61 @@ export class ScionPageChat extends LitElement {
         delete this._paletteGroupLoadToken.threads;
       }
     }
+  }
+
+  /**
+   * Follow the palette's query for the People group, whose rows otherwise
+   * hold only the hub's recently seen users. Every edit aborts an
+   * in-flight search; a query of {@link PEOPLE_SEARCH_MIN_CHARS} or more
+   * characters searches the hub once edits pause for
+   * {@link PALETTE_PEOPLE_SEARCH_DEBOUNCE_MS}, and a shorter one drops the
+   * hits. The palette ranks whatever rows the group holds.
+   */
+  private _handlePaletteQuery(e: CustomEvent<PaletteQueryDetail>): void {
+    if (!this.v2PaletteOpen) return;
+    this._stopPalettePeopleSearch();
+    const query = normalizePeopleQuery(e.detail?.query ?? '');
+    if (query.length < PEOPLE_SEARCH_MIN_CHARS) {
+      this._publishPalettePeopleSearch(this._paletteDataController.clearPeopleSearch());
+      return;
+    }
+    this._palettePeopleSearchTimer = setTimeout(() => {
+      this._palettePeopleSearchTimer = null;
+      void this._searchPalettePeople(query);
+    }, PALETTE_PEOPLE_SEARCH_DEBOUNCE_MS);
+  }
+
+  private async _searchPalettePeople(query: string): Promise<void> {
+    let candidates: PaletteCandidate[] | null;
+    try {
+      candidates = await this._paletteDataController.searchPeople(query);
+    } catch {
+      // Superseded by a later edit or a close (an AbortError), which owns the
+      // group from here; `searchPeople` reports any other failure as no hits.
+      return;
+    }
+    if (!this.v2PaletteOpen) return;
+    this._publishPalettePeopleSearch(candidates);
+  }
+
+  /**
+   * Publish a People group rebuilt around search hits. Only over a `ready`
+   * group: a load in flight includes the hits when it finishes, and an
+   * error stays until retried.
+   */
+  private _publishPalettePeopleSearch(candidates: PaletteCandidate[] | null): void {
+    if (!candidates) return;
+    if (this.v2PaletteGroups.people?.status !== 'ready') return;
+    this.v2PaletteGroups = { ...this.v2PaletteGroups, people: { status: 'ready', candidates } };
+  }
+
+  /** Cancel a pending or in-flight People search, keeping the hits already shown. */
+  private _stopPalettePeopleSearch(): void {
+    if (this._palettePeopleSearchTimer) {
+      clearTimeout(this._palettePeopleSearchTimer);
+      this._palettePeopleSearchTimer = null;
+    }
+    this._paletteDataController.abortPeopleSearch();
   }
 
   /**
@@ -5926,6 +6098,7 @@ export class ScionPageChat extends LitElement {
               .typeahead=${this._paletteTypeahead}
               @palette-select=${this._handlePaletteSelect}
               @palette-retry=${this._handlePaletteRetry}
+              @palette-query=${this._handlePaletteQuery}
               @palette-dismiss=${this._handlePaletteDismiss}
               @sl-after-hide=${this._onPaletteAfterHide}
             ></scion-quick-palette>
@@ -5947,7 +6120,7 @@ export class ScionPageChat extends LitElement {
         @scroll=${this._handleV2PanelsScroll}
       >
         <div class="v2-rail" ?inert=${this.isMobileLayout && this.mobilePanel !== 'left'}>
-          ${this.renderV2Rail()}
+          ${this.renderV2Rail()} ${this.renderPaletteFooter()}
         </div>
 
         <div
@@ -6005,6 +6178,7 @@ export class ScionPageChat extends LitElement {
             @member-marked-unread=${this.handleMemberMarkedUnread}
             @member-search=${this._handleMemberSearch}
           ></scion-chat-members>
+          ${this.isMobileLayout ? this.renderPaletteFooter() : nothing}
         </div>
       </div>
     `;
@@ -6115,11 +6289,57 @@ export class ScionPageChat extends LitElement {
   }
 
   /**
-   * Back chevron shown only on mobile, where the neighbouring panels are
-   * off-screen and otherwise reachable only by an undiscoverable swipe.
-   * The conversation header steps back to the rail; the members header
-   * steps back to the conversation.
+   * The quick switcher's open button, pinned below a column's list: the
+   * spaces rail at every width, and the members column too on phones, where
+   * each column fills the screen on its own. The column is a flex column
+   * whose list alone scrolls, so the footer stays put however long the list
+   * grows; it carries the bottom safe-area inset, which the lists above it
+   * then drop (--chat-list-inset-bottom). The shortcut hint, the title and
+   * aria-keyshortcuts are left out on touch-primary devices, where there is
+   * no keyboard to press the shortcut; the hint is also hidden by CSS there
+   * so it follows the media query without waiting for a render.
    */
+  private renderPaletteFooter(): TemplateResult {
+    const isTouch = this.touchPrimary.isTouch;
+    const isMac = isMacPlatform();
+    const shortcutLabel = isMac ? '⌘K' : 'Ctrl+K';
+    const keyShortcuts = isMac ? 'Meta+K' : 'Control+K';
+    return html`
+      <div class="palette-footer">
+        <button
+          type="button"
+          class="palette-footer-btn"
+          aria-label="Open quick switcher"
+          aria-haspopup="dialog"
+          aria-keyshortcuts=${isTouch ? nothing : keyShortcuts}
+          title=${isTouch ? nothing : `Quick switcher (${shortcutLabel})`}
+          @click=${this._handlePaletteFooterClick}
+        >
+          <sl-icon name="compass" aria-hidden="true"></sl-icon>
+          <span class="palette-footer-label">Quick switcher</span>
+          <kbd class="palette-footer-shortcut" aria-hidden="true">${shortcutLabel}</kbd>
+        </button>
+      </div>
+    `;
+  }
+
+  /**
+   * iOS and macOS Safari do not focus a `<button>` on click, so without
+   * this the deep active element `_openPalette` captures as "what to
+   * restore focus to" would be whatever was focused before the tap, which
+   * could be the composer, popping the on-screen keyboard back open the
+   * instant the palette closes. Focusing the button first makes capture
+   * see this button. The request then goes through the open-request event
+   * and its guards (`_handlePaletteOpenRequest`).
+   */
+  private _handlePaletteFooterClick(e: Event): void {
+    const btn = e.currentTarget as HTMLElement;
+    btn.focus({ preventScroll: true });
+    btn.dispatchEvent(
+      new CustomEvent(CHAT_PALETTE_OPEN_REQUEST_EVENT, { bubbles: true, composed: true })
+    );
+  }
+
   /** The left rail: the space rail once loaded, else a spinner or a load error. */
   private renderV2Rail(): TemplateResult {
     if (this.v2SpaceRailLoaded) {
@@ -6145,6 +6365,12 @@ export class ScionPageChat extends LitElement {
     return html`<div class="loading-rail"><sl-spinner></sl-spinner></div>`;
   }
 
+  /**
+   * Back chevron shown only on mobile, where the neighbouring panels are
+   * off-screen and otherwise reachable only by an undiscoverable swipe.
+   * The conversation header steps back to the rail; the members header
+   * steps back to the conversation.
+   */
   private renderMobileBackButton(target: 'left' | 'center' = 'left') {
     return html`
       <sl-icon-button

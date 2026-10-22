@@ -197,10 +197,19 @@ func TestReincarnateMove_TargetStartFailureRollsBack(t *testing.T) {
 	f := setupMoveFixture(t, true, nil)
 	prepareMoveWorkerFixture(t, f)
 	f.disp.startErr = fmt.Errorf("start refused by broker: %w", errStartRequestNotSent)
+	before, err := f.s.GetAgent(context.Background(), f.agent.ID)
+	require.NoError(t, err)
 
 	r, a := startMove(t, f)
 	assertRolledBackToSource(t, f, r, a)
 	assert.Contains(t, r.Error, "start failed")
+	// The rollback restores the recovery config on the source: the new
+	// handoff behind the recovery addendum (ptone/scion#5511). The
+	// record's PreviousAppliedConfig keeps the generation N Task.
+	require.NotEmpty(t, r.Handoff)
+	assert.Equal(t, reincarnationRecoveryTask(r.ToGeneration, r.Handoff, store.AgentReincarnationStateStarting), a.AppliedConfig.Task)
+	require.NotNil(t, r.PreviousAppliedConfig)
+	assert.Equal(t, before.AppliedConfig.Task, r.PreviousAppliedConfig.Task, "the record's PreviousAppliedConfig is not changed")
 }
 
 // A user moving an agent to a broker that does not yet serve the project
@@ -423,6 +432,10 @@ func TestReincarnationWorker_MoveRecheckFailsBeforeAnySideEffect(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, f.src.ID, after.RuntimeBrokerID)
 	assert.EqualValues(t, 1, brokerReservationCount(t, f.s, f.src.ID))
+	// A pending-site failure restores the recovery config too
+	// (ptone/scion#5511).
+	require.NotNil(t, after.AppliedConfig)
+	assert.Equal(t, reincarnationRecoveryTask(2, "h", store.AgentReincarnationStatePending), after.AppliedConfig.Task)
 }
 
 // R-1: an ambiguous start on the target (a container may be running there)
@@ -492,6 +505,9 @@ func TestReincarnateMove_RollbackPerStep(t *testing.T) {
 		user     bool // a user moves the agent (so the target may be linked)
 		inject   func(m *moveFaultStore, f *moveFixture)
 		wantErr  string
+		// fromState is the step the rollback fails out of, which the
+		// restored recovery Task names (ptone/scion#5511).
+		fromState string
 	}{
 		{name: "provisioning write fails", provider: true, inject: func(m *moveFaultStore, f *moveFixture) {
 			m.failUpdate = func(a *store.Agent) error {
@@ -500,10 +516,10 @@ func TestReincarnateMove_RollbackPerStep(t *testing.T) {
 				}
 				return nil
 			}
-		}, wantErr: "failed to persist new applied config"},
+		}, wantErr: "failed to persist new applied config", fromState: store.AgentReincarnationStateProvisioning},
 		{name: "provider link fails", user: true, inject: func(m *moveFaultStore, _ *moveFixture) {
 			m.addProviderErr = boom
-		}, wantErr: "failed to link the target broker"},
+		}, wantErr: "failed to link the target broker", fromState: store.AgentReincarnationStateProvisioning},
 		{name: "advance to starting fails", provider: true, inject: func(m *moveFaultStore, _ *moveFixture) {
 			m.failAdvance = func(rec *store.AgentReincarnation, _ string) (bool, error, bool) {
 				if rec.State == store.AgentReincarnationStateStarting {
@@ -511,7 +527,7 @@ func TestReincarnateMove_RollbackPerStep(t *testing.T) {
 				}
 				return false, nil, false
 			}
-		}, wantErr: "failed to advance record to starting"},
+		}, wantErr: "failed to advance record to starting", fromState: store.AgentReincarnationStateProvisioning},
 		{name: "starting write fails", provider: true, inject: func(m *moveFaultStore, _ *moveFixture) {
 			m.failUpdate = func(a *store.Agent) error {
 				if a.ReincarnationState == store.ReincarnationStateStarting {
@@ -519,7 +535,7 @@ func TestReincarnateMove_RollbackPerStep(t *testing.T) {
 				}
 				return nil
 			}
-		}, wantErr: "failed to record starting state"},
+		}, wantErr: "failed to record starting state", fromState: store.AgentReincarnationStateStarting},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -548,6 +564,17 @@ func TestReincarnateMove_RollbackPerStep(t *testing.T) {
 			assert.Contains(t, r.Error, tc.wantErr)
 			_, _, starts := f.disp.moveSnapshot()
 			assert.Empty(t, starts, "the agent is not started")
+			// The rollback restores the recovery config on the source, or
+			// previous unchanged when the request carried no handoff
+			// (ptone/scion#5511). The record's PreviousAppliedConfig is not
+			// changed.
+			require.NotNil(t, r.PreviousAppliedConfig)
+			want := r.PreviousAppliedConfig.Task
+			if r.Handoff != "" {
+				want = reincarnationRecoveryTask(r.ToGeneration, r.Handoff, tc.fromState)
+			}
+			assert.Equal(t, want, a.AppliedConfig.Task)
+			assert.NotContains(t, r.PreviousAppliedConfig.Task, "[SCION RECOVERY HANDOFF]")
 		})
 	}
 }

@@ -92,3 +92,47 @@ func TestConduitRegistry_EligibleRelaysFailsClosed(t *testing.T) {
 	_, err := reg.EligibleRelays(f.ctx, registry.TransportWS, f.clock.Now())
 	require.ErrorIs(t, err, assert.AnError)
 }
+
+// TestConduitRegistry_LiveRelays (design §3.9 "Drain through the proxy"):
+// LiveRelays keeps the live (RelayStaleAfter), addressable relays,
+// draining ones included, since a draining relay may still hold sessions.
+func TestConduitRegistry_LiveRelays(t *testing.T) {
+	f := newConduitFixture(t)
+	short := registry.New(f.store, registry.Config{Clock: f.clock, RelayStaleAfter: 20 * time.Second})
+
+	genA := f.registerRelay("relay-a")
+	f.registerRelay("relay-b")
+	genC := f.registerRelay("relay-c")
+	_, err := f.reg.RegisterRelay(f.ctx, registry.RelayInstance{InstanceID: "relay-d"}) // unaddressable
+	require.NoError(t, err)
+	require.NoError(t, f.reg.SetRelayDraining(f.ctx, "relay-c", genC, true))
+
+	f.clock.Advance(30 * time.Second)
+	require.NoError(t, f.reg.HeartbeatRelay(f.ctx, "relay-a", genA))
+	now := f.clock.Now()
+
+	live := func(reg *registry.Registry) []string {
+		t.Helper()
+		rs, err := reg.LiveRelays(f.ctx, now)
+		require.NoError(t, err)
+		out := []string{}
+		for _, ri := range rs {
+			out = append(out, ri.InstanceID)
+		}
+		return out
+	}
+	// Default staleness (60s): relay-b (30s ago) and the draining relay-c
+	// are live; the unaddressable relay-d never is.
+	assert.Equal(t, []string{"relay-a", "relay-b", "relay-c"}, live(f.reg))
+	// RelayStaleAfter 20s: only relay-a, heartbeated now.
+	assert.Equal(t, []string{"relay-a"}, live(short))
+
+	fs := &registry.FaultStore{Inner: f.store, Fault: func(_ context.Context, op string) error {
+		if op == registry.OpListRelays {
+			return assert.AnError
+		}
+		return nil
+	}}
+	_, err = registry.New(fs, registry.Config{Clock: f.clock}).LiveRelays(f.ctx, now)
+	require.ErrorIs(t, err, assert.AnError, "a read error is returned, never a partial list")
+}

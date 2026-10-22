@@ -254,7 +254,7 @@ func (s *Server) recoveryCleanup(ctx context.Context, jr *journalRecord, rec *la
 // matches. Nil when none matches, or when the launch's identity is unknown:
 // recovery then cleans up nothing rather than guess.
 func (s *Server) recoveryManager(jr *journalRecord) agent.Manager {
-	defMgr, defRT := s.defaultPair()
+	defMgr, defRT, _ := s.defaultPair()
 	if s.isFlat() {
 		// A flat instance serves exactly one runtime target.
 		return defMgr
@@ -275,7 +275,8 @@ func (s *Server) recoveryManager(jr *journalRecord) agent.Manager {
 	if jr.Profile == "" {
 		return nil
 	}
-	mgr, _, err := s.resolveManagerForOptsStrict(api.StartOptions{Name: jr.AgentName, ProjectPath: jr.ProjectPath, Profile: jr.Profile}, profileLenient, slog.LevelWarn)
+	res, err := s.resolveManagerForOptsStrict(api.StartOptions{Name: jr.AgentName, ProjectPath: jr.ProjectPath, Profile: jr.Profile}, profileLenient, slog.LevelWarn)
+	mgr := res.Manager
 	if err != nil || mgr == nil || s.launchRuntimeIdentity(mgr) != id {
 		return nil
 	}
@@ -299,7 +300,7 @@ func (s *Server) launchRuntimeIdentity(mgr agent.Manager) string {
 	if !reflect.TypeOf(mgr).Comparable() {
 		return ""
 	}
-	if defMgr, defRT := s.defaultPair(); defRT != nil && defMgr != nil && reflect.TypeOf(defMgr).Comparable() && defMgr == mgr {
+	if defMgr, defRT, _ := s.defaultPair(); defRT != nil && defMgr != nil && reflect.TypeOf(defMgr).Comparable() && defMgr == mgr {
 		return auxiliaryRuntimeIdentity(defRT)
 	}
 	s.auxiliaryRuntimesMu.RLock()

@@ -333,7 +333,7 @@ func TestOverlayProfiles_RunningAgentsUnaffected(t *testing.T) {
 	t.Run("non-dispatch resolution", func(t *testing.T) {
 		f := newLifecycleFixture(t)
 		installStoredProfilesOverlay(t)
-		mgr, name := f.srv.resolveManagerForOpts(api.StartOptions{Name: "running", ProjectPath: f.projectPath})
+		mgr, name := managerAndType(f.srv.resolveManagerForOpts(api.StartOptions{Name: "running", ProjectPath: f.projectPath}))
 		if mgr == nil || name != "docker" {
 			t.Errorf("resolveManagerForOpts = %v, %q; want the default docker manager", mgr, name)
 		}
@@ -379,7 +379,7 @@ func TestOverlayProfiles_KubernetesOnlyBrokerWithoutActiveProfileStarts(t *testi
 	cfg.StateDir = t.TempDir()
 	cfg.ContainerHubEndpoint = lifecycleBridge
 	mgr := &filteringMockManager{}
-	srv := New(cfg, mgr, &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }})
+	srv := New(cfg, mgr, &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}, config.RuntimeBuildRecord{})
 	srv.discoverAuxiliaryRuntimesForProjects([]string{projectPath})
 
 	health := httptest.NewRecorder()

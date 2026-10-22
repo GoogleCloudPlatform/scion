@@ -422,7 +422,8 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 	}
 	buildServer := func(ic brokerhost.InstanceContext) (*runtimebroker.Server, error) {
 		rhCfg := flatInstanceServerConfig(shared, ic)
-		srv := runtimebroker.New(rhCfg, ic.Manager, ic.Runtime)
+		// A flat instance has no settings-v1 runtime entry: zero record.
+		srv := runtimebroker.New(rhCfg, ic.Manager, ic.Runtime, config.RuntimeBuildRecord{})
 		if p.requestLogger != nil {
 			srv.SetRequestLogger(p.requestLogger)
 		}
