@@ -405,6 +405,26 @@ func TestConfigSetGlobalHubEndpoint_SaysWhenAnotherHubApplies(t *testing.T) {
 		assert.Equal(t, "Hub 'team' (https://team.example.org) is now the current hub.\n", stdout)
 		assert.Equal(t, "Note: here hub.endpoint still comes from link hub 'linked': https://linked.example.org\n", stderr)
 	})
+	t.Run("--hub flag", func(t *testing.T) {
+		setupConfigHubTest(t)
+		hubResponds = func(string, bool) error { return nil }
+
+		stdout, stderr, err := runConfig(t, "--hub", "https://flag.example.org", "config", "set", "--global", "hub.endpoint", "https://team.example.org")
+		require.NoError(t, err)
+		assert.Equal(t, "Hub 'team' (https://team.example.org) is now the current hub.\n", stdout)
+		assert.Equal(t, "Note: here hub.endpoint still comes from flag --hub: https://flag.example.org\n", stderr)
+	})
+	t.Run("the environment names the hub, a directory link names another", func(t *testing.T) {
+		setupConfigHubTest(t)
+		hubResponds = func(string, bool) error { return nil }
+		root := makeDirProject(t, "")
+		saveLinkEntry(t, filepath.Join(root, ".scion"), "https://linked.example.org", "linked")
+		t.Setenv("SCION_HUB_ENDPOINT", "https://team.example.org")
+
+		_, stderr, err := runConfig(t, "config", "set", "--global", "hub.endpoint", "https://team.example.org")
+		require.NoError(t, err)
+		assert.Equal(t, "Note: here hub.endpoint still comes from link hub 'linked': https://linked.example.org\n", stderr)
+	})
 	t.Run("the same hub: nothing to say", func(t *testing.T) {
 		setupConfigHubTest(t)
 		hubResponds = func(string, bool) error { return nil }
@@ -471,4 +491,26 @@ func TestConfigUnsetGlobalHubEndpoint_WarnsAboutAFormItCannotEdit(t *testing.T) 
 	require.NoError(t, err)
 	assert.Contains(t, stderr, "Warning: hub.endpoint is still set in "+globalSettingsPath()+" in a form config unset does not edit; remove it by hand")
 	assert.Contains(t, stderr, "Warning: hub.endpoint is still set by SCION_HUB_ENDPOINT")
+}
+
+// When the first-run import of the global settings' hub exists only in
+// memory (context.yaml cannot be written), config get still names the hub
+// entry: the name comes from the invocation's resolution, not from the file.
+func TestConfigGetHubEndpoint_NamesAnImportHeldInMemory(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permissions are not enforced for root")
+	}
+	setupConfigHubTest(t)
+	enableGlobalHubImport(t)
+	writeHomeGlobalSettings(t, "hub:\n  endpoint: https://global.example.org\n")
+	dir := filepath.Dir(globalSettingsPath())
+	require.NoError(t, os.Chmod(dir, 0o500))
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	stdout, stderr, err := runConfig(t, "--global", "config", "get", "--source", "hub.endpoint")
+	require.NoError(t, err)
+	assert.Equal(t, "https://global.example.org  (current hub 'global')\n", stdout)
+	assert.Contains(t, stderr, "could not save the imported hub settings")
+	_, statErr := os.Stat(contextFilePath())
+	assert.True(t, os.IsNotExist(statErr), "context.yaml was not written")
 }

@@ -17,6 +17,7 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -179,12 +180,22 @@ func TestResolveInvocationTarget_LinkedProjectImport(t *testing.T) {
 		assert.Equal(t, ctxTestHub, hubEndpoint, "the current hub applies")
 		assert.Equal(t, targetSourceContext, hubSource)
 		assert.Equal(t, "Note: this project's settings name the hub "+linkEntryTestPinnedHub+
-			", which is not in your hub list; to use it here, add it with 'scion hub add <name> "+linkEntryTestPinnedHub+"'\n", stderr.String())
+			", which is not in your hub list; to use it here, add it with 'scion hub add <name> "+linkEntryTestPinnedHub+
+			"'; to stop using this project's hub setting, run 'scion config unset hub.endpoint' in this project\n", stderr.String())
 		assert.Equal(t, before, readFileT(t, contextFilePath()), "nothing is written")
 		got := readTestContext(t)
 		_, h := got.HubByEndpoint(linkEntryTestPinnedHub)
 		assert.Nil(t, h, "the project's settings add no hub")
 		assert.False(t, got.ProjectImported(config.LinkPathForProject(dotScion)), "the import stays pending")
+
+		// The hint's way out: config unset hub.endpoint in the project stops
+		// the note (and the link).
+		require.NoError(t, configUnsetHubEndpoint(io.Discard, io.Discard, false, dotScion))
+		stderr.Reset()
+		resetContextTargets()
+		require.NoError(t, resolveInvocationTarget(c, ModeHuman))
+		assert.Empty(t, stderr.String(), "no note after config unset hub.endpoint")
+		assert.Equal(t, ctxTestHub, hubEndpoint)
 	})
 	t.Run("not imported", func(t *testing.T) {
 		setupContextTest(t)

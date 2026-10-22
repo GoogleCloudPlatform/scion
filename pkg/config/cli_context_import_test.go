@@ -552,6 +552,9 @@ func TestLinkEntryForProject_UnlistedHubIsNotLinked(t *testing.T) {
 	if !strings.Contains(err.Error(), "scion hub add <name> https://unlisted.example.com") {
 		t.Errorf("err = %q, want the hub add hint", err)
 	}
+	if !strings.Contains(err.Error(), "run 'scion config unset hub.endpoint' in this project") {
+		t.Errorf("err = %q, want the hint on how to stop using the project's hub setting", err)
+	}
 	if p != nil || h != nil || len(c.Hubs) != 0 || c.ProjectImported(linkPath) {
 		t.Errorf("= %+v, %+v, context %+v; want no link, no hub, import pending", p, h, c)
 	}

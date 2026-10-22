@@ -1003,8 +1003,8 @@ View and modify configuration settings.
 (`hub.transport.mode`, `hub.transport.audience`) and each hub connection's endpoint
 (`hub_connections.<name>.endpoint`), with the effective value and its source: `default`
 (the embedded defaults), `global <file>`, `project <file>`, `env <VARIABLE>` or
-`project-id file <file>` (for `hub.endpoint`, see below). A setting with no value shows `<unset>`. `config get <key>`
-reads the same settings and gives the same value and source. The value of a
+`project-id file <file>` (for `hub.endpoint`, see below). A setting with no value shows
+`<unset>`. `config get <key>` reads the same settings and gives the same value and source. The value of a
 credential-like key (for example `hub.brokerToken`) is masked in both. With
 `--format json`, `config list` prints an object keyed by setting
 (`{"<key>": {"value": "...", "source": "..."}}`) and `config get` prints

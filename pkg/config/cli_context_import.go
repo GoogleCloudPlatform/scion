@@ -151,7 +151,7 @@ type ProjectHubNotListedError struct {
 
 func (e *ProjectHubNotListedError) Error() string {
 	ep := RedactURL(NormalizeEndpoint(e.Endpoint))
-	return fmt.Sprintf("this project's settings name the hub %s, which is not in your hub list; to use it here, add it with 'scion hub add <name> %s'", ep, ep)
+	return fmt.Sprintf("this project's settings name the hub %s, which is not in your hub list; to use it here, add it with 'scion hub add <name> %s'; to stop using this project's hub setting, run 'scion config unset hub.endpoint' in this project", ep, ep)
 }
 
 // errProjectHubNotListed stops the context update of LinkEntryForProject

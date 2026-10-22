@@ -314,16 +314,19 @@ func configUnsetHubEndpoint(out, stderr io.Writer, global bool, projectDir strin
 // set, the link of the directory it runs in counts too. overridden reports
 // that another hub applies.
 func hubSettingAfterSet(global bool, name, endpoint string) (v config.SettingValue, overridden bool) {
+	same := func(ep string) bool { return config.NormalizeEndpoint(ep) == config.NormalizeEndpoint(endpoint) }
 	h := resolveCLIHub()
-	if h.Source == useSourceFlag || h.Source == useSourceEnv || (global && h.Source == useSourceDirectory) {
-		return effectiveHubSetting(), config.NormalizeEndpoint(h.Endpoint) != config.NormalizeEndpoint(endpoint)
+	fixed := h.Source == useSourceFlag || h.Source == useSourceEnv || (global && h.Source == useSourceDirectory)
+	if fixed && !same(h.Endpoint) {
+		return effectiveHubSetting(), true
 	}
 	// With --global the invocation does not resolve the directory's link,
-	// but later commands in this directory do, and the link wins over the
-	// current hub.
-	if global {
+	// but later commands in this directory do (without --hub or the
+	// environment), and the link wins over the current hub. This also holds
+	// when --hub or the environment names the hub just set.
+	if global && h.Source != useSourceDirectory {
 		if c, err := config.LoadCLIContext(); err == nil {
-			if ep, linkHub := directoryLinkedHub(targetResolution{stderr: io.Discard}, c); ep != "" && config.NormalizeEndpoint(ep) != config.NormalizeEndpoint(endpoint) {
+			if ep, linkHub := directoryLinkedHub(targetResolution{stderr: io.Discard}, c); ep != "" && !same(ep) {
 				return config.SettingValue{
 					Key:    configHubEndpointKey,
 					Value:  config.RedactURL(ep),
@@ -331,6 +334,9 @@ func hubSettingAfterSet(global bool, name, endpoint string) (v config.SettingVal
 				}, true
 			}
 		}
+	}
+	if fixed {
+		return effectiveHubSetting(), false
 	}
 	kind := "current hub"
 	if !global {
