@@ -22,11 +22,13 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	entsql "entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -213,6 +215,187 @@ func TestLifecycleStore_ObserverErrorRollsBackWrite(t *testing.T) {
 }
 
 var errInjectedLC = errors.New("injected lifecycle failure")
+
+// lifecycleSnapshot is the lifecycle table state a failed write must not
+// change: the outbox row count and every cursor's revision and fingerprint.
+func lifecycleSnapshot(t *testing.T, cs *CompositeStore) string {
+	t.Helper()
+	ctx := context.Background()
+	n, err := cs.client.AgentLifecycleOutbox.Query().Count(ctx)
+	require.NoError(t, err)
+	cursors, err := cs.client.AgentLifecycleCursor.Query().Order(func(s *entsql.Selector) { s.OrderBy(s.C(agentlifecyclecursor.FieldID)) }).All(ctx)
+	require.NoError(t, err)
+	var b strings.Builder
+	fmt.Fprintf(&b, "outbox=%d", n)
+	for _, c := range cursors {
+		fmt.Fprintf(&b, " %s:%d:%s:%v", c.ID, c.TransitionRevision, c.LastFingerprint, c.LastDeleted)
+	}
+	return b.String()
+}
+
+// TestLifecycleStore_ObserverErrorRollsBackEveryWriter is the per-writer
+// atomicity test of design section 8: for every observed entry point, an
+// observer failure (a cursor or outbox statement error) surfaces as the
+// write's error, the product row is unchanged, and no lifecycle row or
+// cursor moves.
+func TestLifecycleStore_ObserverErrorRollsBackEveryWriter(t *testing.T) {
+	ctx := context.Background()
+	type check func(t *testing.T, f *lifecycleFixture, a *store.Agent)
+	present := func(t *testing.T, f *lifecycleFixture, a *store.Agent) {
+		got, err := f.cs.GetAgent(ctx, a.ID)
+		require.NoError(t, err, "the product row must survive the rolled-back write")
+		assert.True(t, got.DeletedAt.IsZero(), "and stay live")
+	}
+	softDeleted := func(t *testing.T, f *lifecycleFixture, a *store.Agent) {
+		got, err := f.cs.GetAgent(ctx, a.ID)
+		require.NoError(t, err, "the soft-deleted row must survive the rolled-back purge")
+		assert.False(t, got.DeletedAt.IsZero())
+	}
+	absent := func(t *testing.T, f *lifecycleFixture, a *store.Agent) {
+		_, err := f.cs.GetAgent(ctx, a.ID)
+		assert.ErrorIs(t, err, store.ErrNotFound, "the create must roll back")
+	}
+	cases := []struct {
+		name  string
+		setup func(f *lifecycleFixture) *store.Agent // runs with the real observer
+		write func(f *lifecycleFixture, a *store.Agent) error
+		after check
+	}{
+		{"CreateAgent in WithTx",
+			func(f *lifecycleFixture) *store.Agent { return makeAgent(f.projectID, "rb-create-tx") },
+			func(f *lifecycleFixture, a *store.Agent) error {
+				return f.cs.WithTx(ctx, func(tx store.Store) error { return tx.CreateAgent(ctx, a) })
+			}, absent},
+		{"CreateAgent outside a transaction",
+			func(f *lifecycleFixture) *store.Agent { return makeAgent(f.projectID, "rb-create-notx") },
+			func(f *lifecycleFixture, a *store.Agent) error { return f.cs.CreateAgent(ctx, a) }, absent},
+		{"soft finalize",
+			func(f *lifecycleFixture) *store.Agent { return f.create("rb-soft") },
+			func(f *lifecycleFixture, a *store.Agent) error {
+				now := time.Now()
+				_, err := f.cs.FinalizeAgentDeletion(ctx, a.ID, store.DeletionPredicate{}, store.DeletionFinalizeSoft, store.DeletionFields{DeletedAt: &now}, nil)
+				return err
+			}, present},
+		{"hard finalize",
+			func(f *lifecycleFixture) *store.Agent { return f.create("rb-hard") },
+			func(f *lifecycleFixture, a *store.Agent) error {
+				_, err := f.cs.FinalizeAgentDeletion(ctx, a.ID, store.DeletionPredicate{}, store.DeletionFinalizeHard, store.DeletionFields{}, nil)
+				return err
+			}, present},
+		{"DeleteAgent",
+			func(f *lifecycleFixture) *store.Agent { return f.create("rb-delete") },
+			func(f *lifecycleFixture, a *store.Agent) error { return f.cs.DeleteAgent(ctx, a.ID) }, present},
+		{"purge",
+			func(f *lifecycleFixture) *store.Agent {
+				// Soft delete with the observer off, so the purge has an
+				// event to emit (the r6 N2 path) and therefore an observer
+				// call that can fail.
+				a := f.create("rb-purge")
+				f.cs.SetAgentWriteObserver(nil)
+				f.finalize(ctx, a.ID, store.DeletionFinalizeSoft)
+				return a
+			},
+			func(f *lifecycleFixture, a *store.Agent) error {
+				_, err := f.cs.PurgeDeletedAgentsByID(ctx, []string{a.ID}, time.Now().Add(time.Hour))
+				return err
+			}, softDeleted},
+		{"DeleteProject",
+			func(f *lifecycleFixture) *store.Agent { return f.create("rb-project") },
+			func(f *lifecycleFixture, a *store.Agent) error { return f.cs.DeleteProject(ctx, f.projectID) },
+			func(t *testing.T, f *lifecycleFixture, a *store.Agent) {
+				present(t, f, a)
+				_, err := f.cs.GetProject(ctx, f.projectID)
+				require.NoError(t, err, "the project must survive the rolled-back delete")
+			}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := newLifecycleFixture(t)
+			a := c.setup(f)
+			before := lifecycleSnapshot(t, f.cs)
+			f.cs.SetAgentWriteObserver(failingObserver{err: errInjectedLC})
+			require.ErrorIs(t, c.write(f, a), errInjectedLC, "the observer failure must surface")
+			c.after(t, f, a)
+			assert.Equal(t, before, lifecycleSnapshot(t, f.cs), "no outbox row or cursor may move")
+		})
+	}
+}
+
+// TestLifecycleStore_ObserverSwapDuringWrites is the r2 N11 test: one
+// goroutine installs and removes the observer while others create and
+// delete agents. Every write succeeds, every outbox row decodes, and each
+// agent's revisions are dense from 1, except for explicit gap markers
+// (a skipped revision followed by resynced(unobserved_change)). Each write
+// loads the observer once and keeps it through commit, so a swap never
+// tears a write. The gate runs it under -race.
+func TestLifecycleStore_ObserverSwapDuringWrites(t *testing.T) {
+	f := newLifecycleFixture(t)
+	ctx := context.Background()
+	stop := make(chan struct{})
+	var swaps sync.WaitGroup
+	swaps.Add(1)
+	go func() {
+		defer swaps.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				f.cs.SetAgentWriteObserver(f.obs)
+				return
+			default:
+			}
+			if i%2 == 0 {
+				f.cs.SetAgentWriteObserver(nil)
+			} else {
+				f.cs.SetAgentWriteObserver(f.obs)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+	var wg sync.WaitGroup
+	errs := make(chan error, 64)
+	for w := 0; w < 4; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := 0; i < 6; i++ {
+				a := makeAgent(f.projectID, fmt.Sprintf("swap-%d-%d", w, i))
+				if err := f.cs.CreateAgent(ctx, a); err != nil {
+					errs <- err
+					continue
+				}
+				if err := f.cs.DeleteAgent(ctx, a.ID); err != nil {
+					errs <- err
+				}
+			}
+		}(w)
+	}
+	wg.Wait()
+	close(stop)
+	swaps.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("a write failed during observer swaps: %v", err)
+	}
+	evs, _ := lifecycleEvents(t, f.cs, "") // decodes every row
+	byAgent := map[string][]*tc.LifecycleEvent{}
+	for _, e := range evs {
+		byAgent[e.AgentID] = append(byAgent[e.AgentID], e)
+	}
+	for id, es := range byAgent {
+		sort.Slice(es, func(i, j int) bool { return es[i].TransitionRevision < es[j].TransitionRevision })
+		if es[0].TransitionRevision != 1 {
+			t.Errorf("agent %s: first revision %d, want 1: %s", id, es[0].TransitionRevision, lcSeq(es))
+		}
+		for i := 1; i < len(es); i++ {
+			step := es[i].TransitionRevision - es[i-1].TransitionRevision
+			gapMarker := step == 2 && es[i].Transition == tc.TransitionResynced && es[i].Cause == tc.CauseUnobservedChange
+			if step != 1 && !gapMarker {
+				t.Errorf("agent %s: revisions not dense and no gap marker: %s", id, lcSeq(es))
+			}
+		}
+	}
+	t.Logf("%d events for %d agents", len(evs), len(byAgent))
+}
 
 func TestLifecycleStore_HardFinalize(t *testing.T) {
 	f := newLifecycleFixture(t)
