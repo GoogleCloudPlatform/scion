@@ -636,7 +636,7 @@ type UsageDeriver struct {
 	// records seen and matched by a log rule; metric batches walked, those
 	// with a malformed point, and the increments derived from them; and
 	// recognized observations that carried no call and no tokens.
-	logReceived, logRecognized               atomic.Int64
+	logReceived, logRecognized, logMalformed atomic.Int64
 	metricBatches, metricMalformed, metricIn atomic.Int64
 	ignored                                  atomic.Int64
 	// lastHarnessVersion is the harness version on the most recent
@@ -668,8 +668,10 @@ type UsageDeriver struct {
 // ResourceMetrics batches walked by a metric rule, MetricIncrements the
 // increments derived from them. An observation is a recognized log record
 // or a metric increment, and observations = Ignored + Duplicate + Derived.
-// Malformed counts malformed log records plus malformed metric batches
-// (MetricBatchesMalformed), so its units are mixed.
+// Malformed counts malformed log records plus malformed metric batches, so
+// its units are mixed; LogRecordsMalformed and MetricBatchesMalformed are
+// the per-unit counters. Each field is loaded separately, so a snapshot is
+// not atomic across fields: invariants hold between updates only.
 type UsageDiagnostics struct {
 	Derived, Duplicate, Malformed int64
 	ClampedInput                  int64
@@ -677,6 +679,7 @@ type UsageDiagnostics struct {
 	BaselinedAfterCap             int64
 
 	LogRecordsReceived, LogRecordsRecognized int64
+	LogRecordsMalformed                      int64
 	MetricBatchesReceived                    int64
 	MetricBatchesMalformed                   int64
 	MetricIncrements                         int64
@@ -959,6 +962,7 @@ func (d *UsageDeriver) observeRecord(ctx context.Context, scopeName string, reso
 		}
 		if err != nil {
 			d.malformed.Add(1)
+			d.logMalformed.Add(1)
 			// Warn, not Error: this is a data-quality degradation (tokens
 			// dropped, the call is still counted), not a failure of
 			// sciontool itself — matching pipeline.go's own slog.Warn calls
@@ -1104,6 +1108,7 @@ func (d *UsageDeriver) Diagnostics() UsageDiagnostics {
 
 		LogRecordsReceived:     d.logReceived.Load(),
 		LogRecordsRecognized:   d.logRecognized.Load(),
+		LogRecordsMalformed:    d.logMalformed.Load(),
 		MetricBatchesReceived:  d.metricBatches.Load(),
 		MetricBatchesMalformed: d.metricMalformed.Load(),
 		MetricIncrements:       d.metricIn.Load(),

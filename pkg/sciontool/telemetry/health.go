@@ -41,8 +41,13 @@ const (
 	healthRetryInterval    = 30 * time.Second
 	healthQueueCap         = 8
 	// healthFinalBudget bounds the final health send inside Stop, so it
-	// cannot take the exporter shutdown's share of the stop budget.
+	// cannot take the exporter shutdown's share of the stop budget (see
+	// finalHealthBudget).
 	healthFinalBudget = 2 * time.Second
+	// healthFinalMinBudget is the floor when the stop budget is (nearly)
+	// spent: a final event recording a not-drained stop is most useful
+	// exactly then, so it may overrun an expired deadline by this much.
+	healthFinalMinBudget = 250 * time.Millisecond
 )
 
 // UsageSourceSelection is the usage-source decision as the pipeline knows
@@ -96,7 +101,15 @@ func deriveUsageCollection(sel UsageSourceSelection, harness string, nativeActiv
 	disabled := func(reason string) usageCollection {
 		return usageCollection{State: telemetrycontract.UsageCollectionDisabled, Reason: reason}
 	}
-	switch strings.TrimSpace(sel.Source) {
+	nativeDisabled := func(reason string) usageCollection {
+		// The selected source is known and safe to report.
+		u := disabled(reason)
+		u.Source = telemetrycontract.UsageSourceNative
+		return u
+	}
+	// Exact comparison, as ActivateUsageSource and the hook gate do: a
+	// padded value is unrecognized.
+	switch sel.Source {
 	case "":
 		return disabled(telemetrycontract.UsageDisabledSourceUnset)
 	case telemetrycontract.UsageSourceNative:
@@ -104,12 +117,12 @@ func deriveUsageCollection(sel UsageSourceSelection, harness string, nativeActiv
 			return enabledUsage(telemetrycontract.UsageSourceNative, harness)
 		}
 		if sel.Origin == telemetrycontract.UsageSourceOriginOverlay && sel.NativePolicy == "disabled" {
-			return disabled(telemetrycontract.UsageDisabledNativePolicy)
+			return nativeDisabled(telemetrycontract.UsageDisabledNativePolicy)
 		}
 		if !harnessHasRule {
-			return disabled(telemetrycontract.UsageDisabledNoHarnessRule)
+			return nativeDisabled(telemetrycontract.UsageDisabledNoHarnessRule)
 		}
-		return disabled(telemetrycontract.UsageDisabledDeriverFailed)
+		return nativeDisabled(telemetrycontract.UsageDisabledDeriverFailed)
 	case telemetrycontract.UsageSourceHooks:
 		return enabledUsage(telemetrycontract.UsageSourceHooks, harness)
 	default:
@@ -219,7 +232,7 @@ func buildHealthEvent(in healthInputs) (*telemetrycontract.HealthEvent, error) {
 		UsageCollection:         in.Usage.State,
 		UsageDisabledReason:     in.Usage.Reason,
 		UsageCapabilityStatus:   in.Usage.CapabilityStatus,
-		UsageCapabilities:       in.Usage.Capabilities,
+		UsageCapabilities:       append([]string{}, in.Usage.Capabilities...),
 		UsageGranularity:        in.Usage.Granularity,
 		UsageTokensPositiveOnly: in.Usage.PositiveOnly,
 		UsageRulesVersion:       UsageRuleSchemaVersion,
@@ -252,7 +265,7 @@ func buildHealthEvent(in healthInputs) (*telemetrycontract.HealthEvent, error) {
 		ev.SetUsageCounters(telemetrycontract.HealthUsageCounters{
 			LogRecordsReceived:     d.LogRecordsReceived,
 			LogRecordsRecognized:   d.LogRecordsRecognized,
-			LogRecordsMalformed:    d.Malformed - d.MetricBatchesMalformed,
+			LogRecordsMalformed:    d.LogRecordsMalformed,
 			MetricBatchesReceived:  d.MetricBatchesReceived,
 			MetricBatchesMalformed: d.MetricBatchesMalformed,
 			MetricIncrements:       d.MetricIncrements,
@@ -270,9 +283,6 @@ func buildHealthEvent(in healthInputs) (*telemetrycontract.HealthEvent, error) {
 	} else {
 		ev.AnalyticsState = telemetrycontract.AnalyticsStateDisabled
 		ev.AnalyticsDisabledReason = in.AnalyticsDisabledReason
-		if ev.AnalyticsDisabledReason == "" {
-			ev.AnalyticsDisabledReason = "unknown"
-		}
 	}
 	ev.LossIndicated = lossIndicated(in)
 	if in.Trigger == telemetrycontract.HealthTriggerFinal {
@@ -288,13 +298,15 @@ func buildHealthEvent(in healthInputs) (*telemetrycontract.HealthEvent, error) {
 }
 
 // lossIndicated reports whether any counter in the snapshot records a
-// possible loss (design section 3.2): refused or failed analytics appends,
-// torn lines, events without identity, and metric/log records rejected,
+// possible loss (design section 3.2): refused (overflow, oversize) or failed
+// analytics appends, torn lines, events without identity, quarantined and
+// dead-lettered lines, and metric/log records rejected,
 // dropped or terminal without confirmation. It is evidence to examine, not
 // a measured token loss.
 func lossIndicated(in healthInputs) bool {
 	a := in.Analytics
-	if in.AnalyticsEnabled && (a.OverflowTotal > 0 || a.Overflow > 0 || a.AppendFailed > 0 || a.Torn > 0 || a.DroppedNoIdentity > 0) {
+	if in.AnalyticsEnabled && (a.OverflowTotal > 0 || a.Overflow > 0 || a.AppendFailed > 0 || a.AppendFailedTotal > 0 ||
+		a.OversizeTotal > 0 || a.Torn > 0 || a.DroppedNoIdentity > 0 || a.Quarantined > 0 || a.DeadLetters > 0 || a.DeadLettersTotal > 0) {
 		return true
 	}
 	for _, s := range []DeliverySnapshot{in.Metrics, in.Logs} {
@@ -359,15 +371,15 @@ type healthEmitter struct {
 	started   bool // the start event was enqueued
 	selection UsageSourceSelection
 
-	sendFailures, superseded, droppedNoIdentity int64
+	sendFailures, superseded int64
 
 	send  AnalyticsSendFunc
-	hubID func() string
+	hubID func(context.Context) string
 	now   func() time.Time
 
 	// Test overrides, applied on every start.
 	sendOverride  AnalyticsSendFunc
-	hubIDOverride func() string
+	hubIDOverride func(context.Context) string
 
 	periodic, retry time.Duration
 	cancel          context.CancelFunc
@@ -409,26 +421,32 @@ func (h analyticsHandles) counters() telemetrycontract.HealthAnalyticsCounters {
 	// failure is reported, never mistaken for an empty outbox.
 	_, _, statErr := outbox.pendingBytes()
 	c := telemetrycontract.HealthAnalyticsCounters{
-		Appended:               s.Appended,
-		CertainDuplicates:      s.CertainDuplicates,
-		Overflow:               s.Overflow,
-		OverflowTotal:          s.PersistedOverflow,
-		AppendFailed:           s.AppendFailed,
-		DroppedNoIdentity:      h.native.DroppedNoIdentity(),
-		Finalized:              s.Finalized,
-		Delivered:              s.Delivered,
-		SendFailures:           s.SendFailures,
-		SendRetries:            h.send.Retries(),
-		Torn:                   s.Torn,
-		HubIDMismatch:          s.HubIDMismatch,
-		PendingBytes:           s.PendingBytes,
-		OldestPendingFileAgeMs: -1,
-		ProducerEpoch:          epoch,
-		ProducerSeqLast:        seq,
-		StatsFailed:            statErr != nil,
+		Appended:          s.Appended,
+		CertainDuplicates: s.CertainDuplicates,
+		Overflow:          s.Overflow,
+		OverflowTotal:     s.PersistedOverflow,
+		AppendFailed:      s.AppendFailed,
+		DroppedNoIdentity: h.native.DroppedNoIdentity(),
+		Finalized:         s.Finalized,
+		Delivered:         s.Delivered,
+		SendFailures:      s.SendFailures,
+		SendRetries:       h.send.Retries(),
+		Torn:              s.Torn,
+		HubIDMismatch:     s.HubIDMismatch,
+		Conflicts:         s.Conflicts,
+		Quarantined:       s.Quarantined,
+		DeadLetters:       s.DeadLetters,
+		OversizeTotal:     s.PersistedOversize,
+		AppendFailedTotal: s.PersistedAppendFailed,
+		DeadLettersTotal:  s.PersistedDeadLetters,
+		PendingBytes:      s.PendingBytes,
+		ProducerEpoch:     epoch,
+		ProducerSeqLast:   seq,
+		StatsFailed:       statErr != nil,
 	}
 	if s.PendingBytes > 0 {
-		c.OldestPendingFileAgeMs = s.OldestPendingAge.Milliseconds()
+		age := s.OldestPendingAge.Milliseconds()
+		c.OldestPendingFileAgeMs = &age
 	}
 	if h.drainer != nil {
 		c.RetryBackoffMs = h.drainer.Backoff().Milliseconds()
@@ -478,14 +496,14 @@ func (p *Pipeline) startHealth(ctx context.Context, gcp *GCPExporter, handles an
 	h.seq = 0
 	h.queue = nil
 	h.started = false
-	h.sendFailures, h.superseded, h.droppedNoIdentity = 0, 0, 0
+	h.sendFailures, h.superseded = 0, 0
 	h.finalUsage, h.finalNative, h.finalResidual = nil, false, 0
 	h.send = gcp.SendAnalytics
 	if h.sendOverride != nil {
 		h.send = h.sendOverride
 	}
 	if outbox := handles.native.Outbox(); outbox != nil {
-		h.hubID = outbox.PinnedHubIDOrEmpty
+		h.hubID = func(context.Context) string { return outbox.PinnedHubIDOrEmpty() }
 	} else {
 		// No outbox (analytics disabled): resolve the hub ID the same
 		// way the drainer does, cached in memory.
@@ -591,7 +609,7 @@ func (p *Pipeline) emitFinalHealth(ctx context.Context) {
 	}
 	p.stopHealthLoop()
 	p.emitHealth(telemetrycontract.HealthTriggerFinal)
-	finalCtx, cancel := context.WithTimeout(ctx, healthFinalBudget)
+	finalCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finalHealthBudget(ctx, time.Now()))
 	defer cancel()
 	h.mu.Lock()
 	// Final first: it carries the final-flush outcome.
@@ -680,9 +698,6 @@ func (p *Pipeline) emitHealth(trigger string) {
 
 	ev, err := buildHealthEvent(p.healthSnapshotInputs(trigger))
 	if err != nil {
-		h.mu.Lock()
-		h.droppedNoIdentity++
-		h.mu.Unlock()
 		log.Info("Telemetry health not emitted: %v", err)
 		return
 	}
@@ -727,7 +742,7 @@ func (p *Pipeline) flushHealth(ctx context.Context) {
 			h.mu.Unlock()
 			hub := ""
 			if hubID != nil {
-				hub = hubID()
+				hub = hubID(ctx)
 			}
 			if hub == "" {
 				return
@@ -830,20 +845,49 @@ func (a *analyticsState) handles() analyticsHandles {
 	return analyticsHandles{native: a.native, drainer: a.drainer, send: a.send, disabledReason: a.disabledReason}
 }
 
-// cachedHubID memoizes the first successful resolution.
-func cachedHubID(resolve HubIDResolver) func() string {
+// cachedHubID memoizes the first successful resolution. Each attempt is
+// bounded by the caller's ctx (Stop's loop cancellation, the final-send
+// budget) and by analyticsHubIDTimeout, whichever ends first. Concurrent
+// callers do not wait for an attempt in flight; they report "" (not yet
+// known) instead.
+func cachedHubID(resolve HubIDResolver) func(context.Context) string {
 	var mu sync.Mutex
 	var id string
-	return func() string {
+	var inFlight bool
+	return func(ctx context.Context) string {
+		mu.Lock()
+		if id != "" || inFlight {
+			v := id
+			mu.Unlock()
+			return v
+		}
+		inFlight = true
+		mu.Unlock()
+		rctx, cancel := context.WithTimeout(ctx, analyticsHubIDTimeout)
+		v, err := resolve(rctx)
+		cancel()
 		mu.Lock()
 		defer mu.Unlock()
-		if id == "" {
-			ctx, cancel := context.WithTimeout(context.Background(), analyticsHubIDTimeout)
-			defer cancel()
-			if v, err := resolve(ctx); err == nil {
-				id = v
-			}
+		inFlight = false
+		if err == nil && id == "" {
+			id = v
 		}
 		return id
 	}
+}
+
+// finalHealthBudget is min(healthFinalBudget, a quarter of the time left
+// before ctx's deadline), never below healthFinalMinBudget. The final send
+// runs detached from ctx's cancellation, bounded by this budget.
+func finalHealthBudget(ctx context.Context, now time.Time) time.Duration {
+	budget := healthFinalBudget
+	if deadline, ok := ctx.Deadline(); ok {
+		if share := deadline.Sub(now) / 4; share < budget {
+			budget = share
+		}
+	}
+	if budget < healthFinalMinBudget {
+		budget = healthFinalMinBudget
+	}
+	return budget
 }

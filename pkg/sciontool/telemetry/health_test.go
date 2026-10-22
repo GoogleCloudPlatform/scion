@@ -107,7 +107,7 @@ func TestUsageDiagnosticsPopulations(t *testing.T) {
 	got := d.Diagnostics()
 	want := UsageDiagnostics{
 		Derived: 3 + 1, Duplicate: 1 + 1, Malformed: 1 + 1,
-		LogRecordsReceived: 8, LogRecordsRecognized: 5,
+		LogRecordsReceived: 8, LogRecordsRecognized: 5, LogRecordsMalformed: 1,
 		MetricBatchesReceived: 1, MetricBatchesMalformed: 1, MetricIncrements: 3,
 		Ignored: 1 + 1,
 	}
@@ -321,7 +321,7 @@ func fixedHealthInputs(trigger string) healthInputs {
 		AnalyticsEnabled: true,
 		Analytics: telemetrycontract.HealthAnalyticsCounters{
 			Appended: 4, Finalized: 4, Delivered: 3, SendFailures: 2, SendRetries: 2, PendingBytes: 0,
-			OldestPendingFileAgeMs: -1, ProducerEpoch: "epoch-1", ProducerSeqLast: 4,
+			ProducerEpoch: "epoch-1", ProducerSeqLast: 4,
 		},
 		Metrics: DeliverySnapshot{Accepted: 12, Delivered: 12, Attempts: 3, Retries: 1, Failed: 1},
 		Logs:    DeliverySnapshot{Accepted: 40, Filtered: 30, Delivered: 10, Attempts: 5},
@@ -396,7 +396,7 @@ func TestHealthEventGolden(t *testing.T) {
 
 	final := fixedHealthInputs(telemetrycontract.HealthTriggerFinal)
 	final.Seq = 7
-	final.Analytics.PendingBytes, final.Analytics.OldestPendingFileAgeMs = 512, 61_000
+	final.Analytics.PendingBytes, final.Analytics.OldestPendingFileAgeMs = 512, i64(61_000)
 	final.Analytics.Overflow, final.Analytics.OverflowTotal = 1, 1
 	final.FinalResidualRecords = 2
 	goldenHealth(t, "final-not-drained", final)
@@ -445,9 +445,26 @@ func TestFinalFlushOutcomeAndLoss(t *testing.T) {
 		t.Fatalf("outcome %q loss %v residual %d", ev.FinalFlushOutcome, ev.LossIndicated, *ev.FinalResidualRecords)
 	}
 	for name, mutate := range map[string]func(*healthInputs){
+		"dead letters total":  func(in *healthInputs) { in.Analytics.DeadLettersTotal = 1 },
+		"quarantined":         func(in *healthInputs) { in.Analytics.Quarantined = 1 },
+		"oversize total":      func(in *healthInputs) { in.Analytics.OversizeTotal = 1 },
+		"append failed total": func(in *healthInputs) { in.Analytics.AppendFailedTotal = 1 },
+	} {
+		in := fixedHealthInputs(telemetrycontract.HealthTriggerPeriodic)
+		mutate(&in)
+		if ev, _ := buildHealthEvent(in); !ev.LossIndicated {
+			t.Errorf("%s must indicate loss", name)
+		}
+	}
+	conflict := fixedHealthInputs(telemetrycontract.HealthTriggerPeriodic)
+	conflict.Analytics.Conflicts = 1
+	if ev, _ := buildHealthEvent(conflict); ev.LossIndicated {
+		t.Error("a request_id conflict is a quality signal, not loss")
+	}
+	for name, mutate := range map[string]func(*healthInputs){
 		"metric residual":   func(in *healthInputs) { in.FinalResidualRecords = 1 },
 		"queued records":    func(in *healthInputs) { in.Queue.Records = 1 },
-		"analytics pending": func(in *healthInputs) { in.Analytics.PendingBytes = 10; in.Analytics.OldestPendingFileAgeMs = 5 },
+		"analytics pending": func(in *healthInputs) { in.Analytics.PendingBytes = 10; in.Analytics.OldestPendingFileAgeMs = i64(5) },
 		// A failed disk read is not an empty outbox.
 		"analytics stats failed": func(in *healthInputs) { in.Analytics.StatsFailed = true },
 	} {
@@ -478,9 +495,20 @@ type healthHarness struct {
 	hub    string
 }
 
+// clearUsageSourceEnv removes an inherited SCION_USAGE_SOURCE (agent
+// containers export it) for the test, restoring it afterwards.
+func clearUsageSourceEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("SCION_USAGE_SOURCE", "")
+	if err := os.Unsetenv("SCION_USAGE_SOURCE"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func newHealthHarness(t *testing.T) *healthHarness {
 	t.Helper()
 	setAnalyticsEnv(t, "claude")
+	clearUsageSourceEnv(t)
 	setTestVersion(t)
 	h := &healthHarness{hub: "hub-1"}
 	o, err := OpenAnalyticsOutbox(filepath.Join(t.TempDir(), "ob"))
@@ -498,7 +526,7 @@ func newHealthHarness(t *testing.T) *healthHarness {
 		h.sent = append(h.sent, append([]byte(nil), line...))
 		return nil
 	}
-	p.health.hubIDOverride = func() string { h.mu.Lock(); defer h.mu.Unlock(); return h.hub }
+	p.health.hubIDOverride = func(context.Context) string { h.mu.Lock(); defer h.mu.Unlock(); return h.hub }
 	p.health.periodic, p.health.retry = time.Hour, time.Hour // driven by hand
 	h.p = p
 	ctx, cancel := context.WithCancel(context.Background())
@@ -540,6 +568,9 @@ func TestHealthEmitterHoldRetryAndReplay(t *testing.T) {
 	h.fail = true
 	h.mu.Unlock()
 	h.p.SettleUsageSource(map[string]string{"SCION_USAGE_SOURCE": "native"}, "disabled")
+	if got := h.p.health.queue[0].ev.UsageSource; got != "native" {
+		t.Fatalf("the selected source must be kept when disabled: %q", got)
+	}
 	h.p.SettleUsageSource(nil, "") // a second settle never emits a second start
 	h.p.flushHealth(ctx)
 	if n := len(h.p.health.queue); n != 1 || h.p.health.queue[0].line != nil {
@@ -645,6 +676,7 @@ func TestHealthFinalWithPendingAndOverflow(t *testing.T) {
 // diagnostics report why analytics is off.
 func TestHealthDisabledWithoutGCPExporter(t *testing.T) {
 	setAnalyticsEnv(t, "claude")
+	clearUsageSourceEnv(t)
 	p := NewWithConfig(&Config{Enabled: true})
 	p.startHealth(context.Background(), nil, analyticsHandles{disabledReason: AnalyticsDisabledNoGCPExporter})
 	p.SettleUsageSource(nil, "")
@@ -706,5 +738,207 @@ func TestAnalyticsStatsFailureReported(t *testing.T) {
 	}
 	if ev.FinalFlushOutcome != "not_drained" || ev.AnalyticsStatsFailed == nil || !*ev.AnalyticsStatsFailed {
 		t.Fatalf("outcome %q stats_failed %v", ev.FinalFlushOutcome, ev.AnalyticsStatsFailed)
+	}
+}
+
+// With SCION_USAGE_SOURCE in the process environment the decision is
+// settled at start: start is emitted without a settle call, with origin
+// runtime_env, and a later settle (the overlay) emits no second start and
+// cannot override the runtime value.
+func TestHealthStartFromRuntimeEnv(t *testing.T) {
+	setAnalyticsEnv(t, "antigravity")
+	setTestVersion(t)
+	t.Setenv("SCION_USAGE_SOURCE", "hooks")
+	o, err := OpenAnalyticsOutbox(filepath.Join(t.TempDir(), "ob"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sent [][]byte
+	p := NewWithConfig(&Config{Enabled: true})
+	p.health.sendOverride = func(_ context.Context, line []byte) error { sent = append(sent, line); return nil }
+	p.health.hubIDOverride = func(context.Context) string { return "hub-1" }
+	p.health.periodic, p.health.retry = time.Hour, time.Hour
+	p.startHealth(context.Background(), &GCPExporter{}, analyticsHandles{native: NewUsageAnalytics(o, telemetrycontract.UsageSourceNative)})
+	p.stopHealthLoop()
+	p.SettleUsageSource(map[string]string{"SCION_USAGE_SOURCE": "native"}, "enabled")
+	p.flushHealth(context.Background())
+	if len(sent) != 1 {
+		t.Fatalf("sent %d events, want exactly one start", len(sent))
+	}
+	var ev telemetrycontract.HealthEvent
+	if err := telemetrycontract.Unmarshal(sent[0], &ev); err != nil {
+		t.Fatal(err)
+	}
+	if ev.Trigger != "start" || ev.UsageSourceOrigin != "runtime_env" || ev.UsageSource != "hooks" || ev.UsageCollection != "enabled" ||
+		strings.Join(ev.UsageCapabilities, ",") != "calls" {
+		t.Fatalf("start from runtime env: %+v", ev)
+	}
+}
+
+// R1: a hub-ID lookup that never answers is bounded by the caller: the
+// final send returns within its budget and stopping the loop does not wait
+// for the lookup's own timeout.
+func TestHealthHubLookupHonorsBudgets(t *testing.T) {
+	setAnalyticsEnv(t, "claude")
+	clearUsageSourceEnv(t)
+	setTestVersion(t)
+	blocking := func(ctx context.Context) (string, error) { <-ctx.Done(); return "", ctx.Err() }
+	lookup := cachedHubID(blocking)
+
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	if got := lookup(ctx); got != "" {
+		t.Fatalf("lookup = %q", got)
+	}
+	cancel()
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("lookup ignored the caller's deadline: %s", d)
+	}
+
+	p := NewWithConfig(&Config{Enabled: true})
+	p.health.sendOverride = func(context.Context, []byte) error { return nil }
+	p.health.hubIDOverride = lookup
+	p.health.periodic, p.health.retry = time.Hour, 10*time.Millisecond
+	p.startHealth(context.Background(), &GCPExporter{}, analyticsHandles{disabledReason: telemetrycontract.AnalyticsDisabledOutboxUnavailable})
+	p.SettleUsageSource(nil, "") // start queued; the loop retries the lookup every 10 ms
+	time.Sleep(30 * time.Millisecond)
+	stopStart := time.Now()
+	p.stopHealthLoop()
+	if d := time.Since(stopStart); d > time.Second {
+		t.Fatalf("stopHealthLoop waited for an in-flight lookup: %s", d)
+	}
+	// emitFinalHealth would stop the loop itself; restart state for it.
+	p.health.mu.Lock()
+	p.health.enabled = true
+	p.health.mu.Unlock()
+	finalStart := time.Now()
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
+	defer stopCancel()
+	p.emitFinalHealth(stopCtx) // budget: a quarter of 1 s = 250 ms
+	if d := time.Since(finalStart); d > 750*time.Millisecond {
+		t.Fatalf("final send took %s, want about 250 ms", d)
+	}
+}
+
+func TestFinalHealthBudget(t *testing.T) {
+	now := time.Now()
+	at := func(left time.Duration) context.Context {
+		ctx, cancel := context.WithDeadline(context.Background(), now.Add(left))
+		t.Cleanup(cancel)
+		return ctx
+	}
+	for name, c := range map[string]struct {
+		ctx  context.Context
+		want time.Duration
+	}{
+		"no deadline":       {context.Background(), healthFinalBudget},
+		"ample (20 s)":      {at(20 * time.Second), healthFinalBudget},
+		"quarter (4 s)":     {at(4 * time.Second), time.Second},
+		"nearly spent":      {at(100 * time.Millisecond), healthFinalMinBudget},
+		"expired (overrun)": {at(-time.Second), healthFinalMinBudget},
+	} {
+		if got := finalHealthBudget(c.ctx, now); got != c.want {
+			t.Errorf("%s: budget %s, want %s", name, got, c.want)
+		}
+	}
+}
+
+// R2: concurrent malformed metric batches and log records never produce a
+// negative or torn per-unit counter in a snapshot, so a health event built
+// meanwhile always validates.
+func TestUsageMalformedCountersRaceFree(t *testing.T) {
+	setTestVersion(t)
+	d := bareUsageDeriver(stubLogRule{}, stubMetricRule{err: errors.New("bad point")})
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			d.observeMetricBatch(context.Background(), d.rules[1].(metricBatchDeriver), &metricpb.ResourceMetrics{}, map[string]bool{})
+			d.observe(context.Background(), stubUsageScope, namedRecord("usage.bad", uint64(i+1)))
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		<-time.After(100 * time.Millisecond)
+		close(stop)
+	}()
+	for i := 0; i < 2000; i++ {
+		diag := d.Diagnostics()
+		in := fixedHealthInputs(telemetrycontract.HealthTriggerPeriodic)
+		in.UsageDiag = &diag
+		ev, err := buildHealthEvent(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ev.HubID = "hub-1"
+		if _, err := telemetrycontract.Marshal(ev); err != nil {
+			t.Fatalf("snapshot %d invalid: %v", i, err)
+		}
+	}
+	wg.Wait()
+	diag := d.Diagnostics()
+	if diag.LogRecordsMalformed+diag.MetricBatchesMalformed != diag.Malformed {
+		t.Fatalf("quiescent: log %d + metric %d != malformed %d", diag.LogRecordsMalformed, diag.MetricBatchesMalformed, diag.Malformed)
+	}
+}
+
+// N7: Stop end to end. With native usage active and a metric residual at
+// stop, the final event (sent after the analytics drain, before the
+// exporter shuts down) says enabled, carries the captured usage counters
+// and final_residual_records > 0.
+func TestPipelineStopEmitsFinalHealth(t *testing.T) {
+	setAnalyticsEnv(t, "claude")
+	clearUsageSourceEnv(t)
+	setTestVersion(t)
+	o, err := OpenAnalyticsOutbox(filepath.Join(t.TempDir(), "ob"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &mockMetricClient{exportFunc: func(context.Context, *colmetricpb.ExportMetricsServiceRequest, ...grpc.CallOption) (*colmetricpb.ExportMetricsServiceResponse, error) {
+		return &colmetricpb.ExportMetricsServiceResponse{}, nil
+	}}
+	p := &Pipeline{running: true, config: &Config{Enabled: true}, exporter: &CloudExporter{metricClient: client}, metricStreams: newMetricStreams(), metricLastFlush: time.Now()}
+	var sent [][]byte
+	p.health.sendOverride = func(_ context.Context, line []byte) error { sent = append(sent, line); return nil }
+	p.health.hubIDOverride = func(context.Context) string { return "hub-1" }
+	p.health.periodic, p.health.retry = time.Hour, time.Hour
+	d := bareUsageDeriver(claudeUsageRule{})
+	feed(d, claudeLogs(claudeRecord("req_011CUabcdefghijklmnopq", "1", 5, fullClaudeTokens)))
+	p.usageDeriver.Store(d)
+	p.startHealth(context.Background(), &GCPExporter{}, analyticsHandles{native: NewUsageAnalytics(o, telemetrycontract.UsageSourceNative)})
+	p.SettleUsageSource(map[string]string{"SCION_USAGE_SOURCE": "native"}, "enabled")
+	// A dirty stream that the tight stop deadline cannot export.
+	if err := p.metricStreams.add([]*metricpb.ResourceMetrics{stopTestMetric(5, 2)}); err != nil {
+		t.Fatal(err)
+	}
+	p.metricDirtyRecords, p.metricDirtyEntries = 1, 1
+	p.budget.records, p.budget.entries = 1, 1
+	stopCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_ = p.Stop(stopCtx) // reports the residual as an error
+
+	var final *telemetrycontract.HealthEvent
+	for _, l := range sent {
+		var ev telemetrycontract.HealthEvent
+		if err := telemetrycontract.Unmarshal(l, &ev); err != nil {
+			t.Fatal(err)
+		}
+		if ev.Trigger == "final" {
+			final = &ev
+		}
+	}
+	if final == nil {
+		t.Fatalf("no final event among %d sent", len(sent))
+	}
+	if final.UsageCollection != "enabled" || final.UsageObservationsDerived == nil || *final.UsageObservationsDerived != 1 ||
+		final.FinalResidualRecords == nil || *final.FinalResidualRecords < 1 || final.FinalFlushOutcome != "not_drained" {
+		t.Fatalf("final: collection %q derived %v residual %v outcome %q", final.UsageCollection, final.UsageObservationsDerived, final.FinalResidualRecords, final.FinalFlushOutcome)
 	}
 }

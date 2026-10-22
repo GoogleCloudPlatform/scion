@@ -41,7 +41,7 @@ func validHealth() *HealthEvent {
 	}
 	ev.HubID, ev.AgentID, ev.ProjectID = "hub-1", "a", "p"
 	ev.SetUsageCounters(HealthUsageCounters{LogRecordsReceived: 3})
-	ev.SetAnalyticsCounters(HealthAnalyticsCounters{ProducerEpoch: "e", ProducerSeqLast: 2, OldestPendingFileAgeMs: -1})
+	ev.SetAnalyticsCounters(HealthAnalyticsCounters{ProducerEpoch: "e", ProducerSeqLast: 2})
 	return ev
 }
 
@@ -113,12 +113,7 @@ func TestHealthEventValidate(t *testing.T) {
 			e.AnalyticsState, e.AnalyticsDisabledReason = AnalyticsStateDisabled, "outbox_unavailable"
 		}, "omitted when analytics is disabled"},
 		"enabled analytics without counters": {func(e *HealthEvent) {
-			e.SetAnalyticsCounters(HealthAnalyticsCounters{OldestPendingFileAgeMs: -1})
-			e.AnalyticsAppended, e.AnalyticsCertainDuplicates, e.AnalyticsOverflow, e.AnalyticsOverflowTotal = nil, nil, nil, nil
-			e.AnalyticsAppendFailed, e.AnalyticsDroppedNoIdentity, e.AnalyticsFinalized, e.AnalyticsDelivered = nil, nil, nil, nil
-			e.AnalyticsSendFailures, e.AnalyticsSendRetries, e.AnalyticsTorn, e.AnalyticsHubIDMismatch = nil, nil, nil, nil
-			e.AnalyticsPendingBytes, e.AnalyticsRetryBackoffMs, e.ProducerSeqLast = nil, nil, nil
-			e.AnalyticsStatsFailed, e.ProducerEpoch, e.AnalyticsOldestPendingFileAgeMs = nil, "", nil
+			clearAnalytics(e)
 		}, "requires the analytics_* counters"},
 		"negative counter": {func(e *HealthEvent) { e.MetricExportRetries = -1 }, "metric_export_retries"},
 		"negative optional": {func(e *HealthEvent) {
@@ -126,6 +121,14 @@ func TestHealthEventValidate(t *testing.T) {
 			e.AnalyticsPendingBytes = &v
 		}, "analytics_pending_bytes"},
 		"stats_failed without counters": {func(e *HealthEvent) { e.AnalyticsStatsFailed = nil }, "analytics_stats_failed"},
+		"nil capabilities": {func(e *HealthEvent) {
+			e.UsageCapabilities = nil
+			e.UsageCapabilityStatus = UsageCapabilityStatusUnknown
+		}, "must not be nil"},
+		"unknown analytics reason": {func(e *HealthEvent) {
+			clearAnalytics(e)
+			e.AnalyticsState, e.AnalyticsDisabledReason = AnalyticsStateDisabled, "unknown"
+		}, "analytics_disabled_reason"},
 		"bad origin": {func(e *HealthEvent) { e.UsageSourceOrigin = "" }, "usage_source_origin"},
 	}
 	for name, c := range cases {
@@ -164,5 +167,19 @@ func TestHealthSharedColumnTypes(t *testing.T) {
 	}
 	if _, ok := raw["health_seq"].(float64); !ok {
 		t.Error("health_seq must be a number (integer)")
+	}
+}
+
+// clearAnalytics removes every analytics_* field.
+func clearAnalytics(e *HealthEvent) {
+	e.AnalyticsAppended, e.AnalyticsCertainDuplicates, e.AnalyticsOverflow, e.AnalyticsOverflowTotal = nil, nil, nil, nil
+	e.AnalyticsAppendFailed, e.AnalyticsDroppedNoIdentity, e.AnalyticsFinalized, e.AnalyticsDelivered = nil, nil, nil, nil
+	e.AnalyticsSendFailures, e.AnalyticsSendRetries, e.AnalyticsTorn, e.AnalyticsHubIDMismatch = nil, nil, nil, nil
+	e.AnalyticsConflicts, e.AnalyticsQuarantined, e.AnalyticsDeadLetters = nil, nil, nil
+	e.AnalyticsOversizeTotal, e.AnalyticsAppendFailedTotal, e.AnalyticsDeadLettersTotal = nil, nil, nil
+	e.AnalyticsPendingBytes, e.AnalyticsRetryBackoffMs, e.ProducerSeqLast = nil, nil, nil
+	e.AnalyticsStatsFailed, e.ProducerEpoch, e.AnalyticsOldestPendingFileAgeMs = nil, "", nil
+	if e.hasAnalyticsCounters() {
+		panic("clearAnalytics missed a field")
 	}
 }

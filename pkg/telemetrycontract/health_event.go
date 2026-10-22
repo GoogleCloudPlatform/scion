@@ -80,10 +80,13 @@ const (
 	UsageGranularityInvocation = "invocation"
 )
 
-// Analytics (usage outbox) states.
+// Analytics (usage outbox) states and disabled reasons.
 const (
 	AnalyticsStateEnabled  = "enabled"
 	AnalyticsStateDisabled = "disabled"
+
+	AnalyticsDisabledOutboxUnavailable = "outbox_unavailable"
+	AnalyticsDisabledNoGCPExporter     = "no_gcp_exporter"
 )
 
 // Final flush outcomes (trigger final only): whether every queue drained.
@@ -116,9 +119,11 @@ type HealthAnalyticsCounters struct {
 	AppendFailed, DroppedNoIdentity                      int64
 	Finalized, Delivered, SendFailures, SendRetries      int64
 	Torn, HubIDMismatch                                  int64
+	Conflicts, Quarantined, DeadLetters                  int64
+	OversizeTotal, AppendFailedTotal, DeadLettersTotal   int64
 	PendingBytes                                         int64
-	// OldestPendingFileAgeMs < 0 means nothing is pending (omitted).
-	OldestPendingFileAgeMs int64
+	// OldestPendingFileAgeMs is nil when nothing is pending (omitted).
+	OldestPendingFileAgeMs *int64
 	RetryBackoffMs         int64
 	ProducerEpoch          string
 	ProducerSeqLast        int64
@@ -144,9 +149,11 @@ type HealthEvent struct {
 	UsageDisabledReason string `json:"usage_disabled_reason,omitempty"`
 	// UsageCapabilityStatus is "static_table" when UsageCapabilities comes
 	// from adapter evidence at this build, "unknown" when there is none.
-	UsageCapabilityStatus string   `json:"usage_capability_status,omitempty"`
-	UsageCapabilities     []string `json:"usage_capabilities,omitempty"`
-	UsageGranularity      string   `json:"usage_granularity,omitempty"`
+	UsageCapabilityStatus string `json:"usage_capability_status,omitempty"`
+	// UsageCapabilities is always written and never nil: the list with
+	// static_table, [] otherwise (read it with usage_capability_status).
+	UsageCapabilities []string `json:"usage_capabilities"`
+	UsageGranularity  string   `json:"usage_granularity,omitempty"`
 	// UsageTokensPositiveOnly is true when the adapter drops zero token
 	// values, so a missing category may be a zero. Always written.
 	UsageTokensPositiveOnly bool   `json:"usage_tokens_positive_only"`
@@ -183,10 +190,21 @@ type HealthEvent struct {
 	AnalyticsSendFailures      *int64 `json:"analytics_send_failures,omitempty"`
 	// AnalyticsSendRetries counts send attempts of a line whose previous
 	// attempt failed (a failure can be the last attempt before stop).
-	AnalyticsSendRetries   *int64 `json:"analytics_send_retries,omitempty"`
-	AnalyticsTorn          *int64 `json:"analytics_torn,omitempty"`
-	AnalyticsHubIDMismatch *int64 `json:"analytics_hub_id_mismatch,omitempty"`
-	AnalyticsPendingBytes  *int64 `json:"analytics_pending_bytes,omitempty"`
+	AnalyticsSendRetries *int64 `json:"analytics_send_retries,omitempty"`
+	AnalyticsTorn        *int64 `json:"analytics_torn,omitempty"`
+	// Conflicts: a verified request_id seen again with different content
+	// (written as an ambiguous occurrence; quality, not loss). Quarantined:
+	// ready lines in a truncated file set aside. DeadLetters: lines the
+	// destination permanently rejected. *_total are persisted across runs
+	// (all producers): oversize refusals, append failures, dead letters.
+	AnalyticsConflicts         *int64 `json:"analytics_conflicts,omitempty"`
+	AnalyticsQuarantined       *int64 `json:"analytics_quarantined,omitempty"`
+	AnalyticsDeadLetters       *int64 `json:"analytics_dead_letters,omitempty"`
+	AnalyticsOversizeTotal     *int64 `json:"analytics_oversize_total,omitempty"`
+	AnalyticsAppendFailedTotal *int64 `json:"analytics_append_failed_total,omitempty"`
+	AnalyticsDeadLettersTotal  *int64 `json:"analytics_dead_letters_total,omitempty"`
+	AnalyticsHubIDMismatch     *int64 `json:"analytics_hub_id_mismatch,omitempty"`
+	AnalyticsPendingBytes      *int64 `json:"analytics_pending_bytes,omitempty"`
 	// AnalyticsOldestPendingFileAgeMs is the age of the oldest pending
 	// outbox FILE's last modification: a lower bound on the oldest pending
 	// event's age. Omitted when nothing is pending.
@@ -234,8 +252,8 @@ type HealthEvent struct {
 	// those processes and are absent here. Always written.
 	LossIndicated bool `json:"loss_indicated"`
 
-	// FinalResidualRecords are metric/log records still unconfirmed when
-	// the final flush gave up (trigger final only).
+	// FinalResidualRecords are metric records still unconfirmed when the
+	// final metric flush gave up (trigger final only).
 	FinalResidualRecords *int64 `json:"final_residual_records,omitempty"`
 	// FinalFlushOutcome says whether the queues drained, not whether the
 	// run was loss-free.
@@ -327,6 +345,9 @@ func (e *HealthEvent) Validate() error {
 	if !enabled && (e.UsageCapabilityStatus != "" || len(e.UsageCapabilities) > 0 || e.UsageGranularity != "" || e.UsageTokensPositiveOnly) {
 		errs = append(errs, errors.New("usage capabilities are only reported when usage collection is enabled"))
 	}
+	if e.UsageCapabilities == nil {
+		errs = append(errs, errors.New("usage_capabilities must not be nil (it would be written as null); use [] when none are known"))
+	}
 	seen := map[string]bool{}
 	for _, c := range e.UsageCapabilities {
 		if !validCapabilities[c] || seen[c] {
@@ -348,8 +369,10 @@ func (e *HealthEvent) Validate() error {
 			errs = append(errs, errors.New("analytics_disabled_reason is only set when analytics is disabled"))
 		}
 	case AnalyticsStateDisabled:
-		if e.AnalyticsDisabledReason == "" {
-			errs = append(errs, errors.New("disabled analytics requires analytics_disabled_reason"))
+		switch e.AnalyticsDisabledReason {
+		case AnalyticsDisabledOutboxUnavailable, AnalyticsDisabledNoGCPExporter:
+		default:
+			errs = append(errs, fmt.Errorf("analytics_disabled_reason %q is not known", e.AnalyticsDisabledReason))
 		}
 		if e.hasAnalyticsCounters() {
 			errs = append(errs, errors.New("analytics_* counters are omitted when analytics is disabled"))
@@ -423,6 +446,9 @@ func (e *HealthEvent) analyticsCounters() map[string]*int64 {
 		"analytics_finalized": e.AnalyticsFinalized, "analytics_delivered": e.AnalyticsDelivered,
 		"analytics_send_failures": e.AnalyticsSendFailures, "analytics_send_retries": e.AnalyticsSendRetries,
 		"analytics_torn": e.AnalyticsTorn, "analytics_hub_id_mismatch": e.AnalyticsHubIDMismatch,
+		"analytics_conflicts": e.AnalyticsConflicts, "analytics_quarantined": e.AnalyticsQuarantined,
+		"analytics_dead_letters": e.AnalyticsDeadLetters, "analytics_oversize_total": e.AnalyticsOversizeTotal,
+		"analytics_append_failed_total": e.AnalyticsAppendFailedTotal, "analytics_dead_letters_total": e.AnalyticsDeadLettersTotal,
 		"analytics_pending_bytes": e.AnalyticsPendingBytes, "analytics_retry_backoff_ms": e.AnalyticsRetryBackoffMs,
 		"producer_seq_last": e.ProducerSeqLast,
 	}
@@ -487,10 +513,13 @@ func (e *HealthEvent) SetAnalyticsCounters(c HealthAnalyticsCounters) {
 	e.AnalyticsFinalized, e.AnalyticsDelivered = i64(c.Finalized), i64(c.Delivered)
 	e.AnalyticsSendFailures, e.AnalyticsSendRetries = i64(c.SendFailures), i64(c.SendRetries)
 	e.AnalyticsTorn, e.AnalyticsHubIDMismatch = i64(c.Torn), i64(c.HubIDMismatch)
+	e.AnalyticsConflicts, e.AnalyticsQuarantined, e.AnalyticsDeadLetters = i64(c.Conflicts), i64(c.Quarantined), i64(c.DeadLetters)
+	e.AnalyticsOversizeTotal, e.AnalyticsAppendFailedTotal = i64(c.OversizeTotal), i64(c.AppendFailedTotal)
+	e.AnalyticsDeadLettersTotal = i64(c.DeadLettersTotal)
 	e.AnalyticsPendingBytes, e.AnalyticsRetryBackoffMs = i64(c.PendingBytes), i64(c.RetryBackoffMs)
 	e.AnalyticsOldestPendingFileAgeMs = nil
-	if c.OldestPendingFileAgeMs >= 0 {
-		e.AnalyticsOldestPendingFileAgeMs = i64(c.OldestPendingFileAgeMs)
+	if c.OldestPendingFileAgeMs != nil {
+		e.AnalyticsOldestPendingFileAgeMs = i64(*c.OldestPendingFileAgeMs)
 	}
 	e.ProducerEpoch = c.ProducerEpoch
 	e.ProducerSeqLast = i64(c.ProducerSeqLast)
