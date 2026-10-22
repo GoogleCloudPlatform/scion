@@ -217,6 +217,26 @@ func TestParseSkillURI_ErrorsOmitQuery(t *testing.T) {
 			wantErr: `invalid skill URI "a/b"` + omitted,
 		},
 		{
+			name:    "skill:// version before the query",
+			input:   "skill://my-skill@1.0?token=made-up-value-16",
+			wantErr: `invalid skill URI "skill://my-skill@1.0"` + omitted,
+		},
+		{
+			name:    "scoped skill:// version before the query",
+			input:   "skill://scion/core/my-skill@^1.0?token=made-up-value-17",
+			wantErr: `invalid skill URI "skill://scion/core/my-skill@^1.0"` + omitted,
+		},
+		{
+			name:    "bare name version before the query",
+			input:   "my-skill@1.0?token=made-up-value-18",
+			wantErr: `invalid skill URI "my-skill@1.0"` + omitted,
+		},
+		{
+			name:    "skill:// with a bare trailing question mark",
+			input:   "skill://my-skill?",
+			wantErr: `invalid skill URI "skill://my-skill"` + omitted,
+		},
+		{
 			name:    "no query keeps the detailed error",
 			input:   "skill://scion/bogus/my-skill",
 			wantErr: `invalid skill URI "skill://scion/bogus/my-skill": unrecognized scope "bogus" (must be core, global, project, or user)`,
@@ -240,5 +260,28 @@ func TestParseSkillURI_ErrorsOmitQuery(t *testing.T) {
 				t.Errorf("NormalizeSkillURI(%q) error = %v, want %q", tt.input, nerr, tt.wantErr)
 			}
 		})
+	}
+}
+
+// TestParseSkillURI_WithoutQueryUnchanged checks that inputs without a '?'
+// parse exactly as before the query check was added.
+func TestParseSkillURI_WithoutQueryUnchanged(t *testing.T) {
+	tests := []struct {
+		input string
+		want  SkillURI
+	}{
+		{"skill://my-skill@1.0", SkillURI{Raw: "skill://my-skill@1.0", Registry: "scion", Name: "my-skill", Version: "1.0"}},
+		{"skill://scion/core/my-skill@^1.0", SkillURI{Raw: "skill://scion/core/my-skill@^1.0", Registry: "scion", Scope: "core", Name: "my-skill", Version: "^1.0"}},
+		{"my-skill", SkillURI{Raw: "my-skill", Registry: "scion", Name: "my-skill", Version: "latest"}},
+	}
+	for _, tt := range tests {
+		got, err := ParseSkillURI(tt.input)
+		if err != nil {
+			t.Errorf("ParseSkillURI(%q): %v", tt.input, err)
+			continue
+		}
+		if *got != tt.want {
+			t.Errorf("ParseSkillURI(%q) = %+v, want %+v", tt.input, *got, tt.want)
+		}
 	}
 }
