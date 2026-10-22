@@ -408,6 +408,10 @@ type BrokerCapabilities struct {
 	// AgentMoveRecreate indicates the broker can be the target of a forced
 	// move (store.BrokerCapabilities.AgentMoveRecreate is its counterpart).
 	AgentMoveRecreate bool `json:"agentMoveRecreate,omitempty"`
+	// AttachmentDelivery indicates the broker can receive attachment
+	// deliveries (ptone/scion#4596; store.BrokerCapabilities.AttachmentDelivery
+	// is its counterpart).
+	AttachmentDelivery bool `json:"attachmentDelivery"`
 	// ReprovisionEmptyPerAgent indicates the broker's reprovision reuses an
 	// empty-per-agent workspace in place
 	// (store.BrokerCapabilities.ReprovisionEmptyPerAgent is its counterpart).

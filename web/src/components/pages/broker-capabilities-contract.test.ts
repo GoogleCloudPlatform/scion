@@ -43,6 +43,7 @@ const UNDECLARED_ALLOWED: readonly string[] = [
   'agentMoveRecreate',
   'asyncLaunch',
   'asyncStart',
+  'attachmentDelivery',
   'changedFields',
   'clearedFields',
   'emptyPerAgentWorkspace',

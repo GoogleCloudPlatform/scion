@@ -57,6 +57,9 @@ func StaticCapabilities(rt scionrt.Runtime, nodeImageRegistry string) *hubclient
 		ChangedFields: true,
 		// This broker applies cleared_fields at start (ptone/scion#4890).
 		ClearedFields: true,
+		// This broker redeems attachment delivery capabilities and writes
+		// the files into the agent's home (ptone/scion#4596).
+		AttachmentDelivery: true,
 	}
 }
 
@@ -120,5 +123,6 @@ func StaticCapabilityNames(rt scionrt.Runtime) []string {
 	add(c.ReprovisionEmptyPerAgent, "reprovisionEmptyPerAgent")
 	add(c.ChangedFields, "changedFields")
 	add(c.ClearedFields, "clearedFields")
+	add(c.AttachmentDelivery, "attachmentDelivery")
 	return names
 }

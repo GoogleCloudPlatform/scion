@@ -551,7 +551,7 @@ above it left the key unset:
 
 | Priority | Source | Where it is recorded |
 | --- | --- | --- |
-| Highest | the agent-create request (`config.env`), or the auto-expose control on the agent's configure page | the agent's explicit config, so it survives reincarnate |
+| Highest | the agent-create request (`config.env`), or the auto-expose control on the agent's Edit page | the agent's explicit config, so it survives reincarnate |
 | | the project annotation `scion.io/auto-expose-ports-enabled` | written by the hub at create and re-derived at reincarnate, never recorded as explicit |
 | | harness-config env | the harness config |
 | Lowest | the hub default, `auto_expose_ports.enabled` in the hub settings | not stored on the agent; the hub sends it on every create, start and restart, and the broker applies it after the tiers above |
@@ -1068,8 +1068,8 @@ The top tier carries **only the user's explicit image**. The Hub sends it as
 `Config.Image` on create (and on the re-dispatches that reuse the create request: finalize-env and
 reincarnate's reprovision), and as the start/restart body's `image`. All of these come from the
 agent's recorded explicit inputs: `AppliedConfig.CreateInputs`, or the live `InlineConfig` for an
-agent written before `CreateInputs` existed. A configure-page Save that only echoes the current
-image back writes nothing into `InlineConfig`. A template's image is never sent and never
+agent written before `CreateInputs` existed. A PATCH that only echoes the current image back
+writes nothing into `InlineConfig`. A template's image is never sent and never
 applied.
 
 `AppliedConfig.Image` is the Hub's display record of the image the broker reports. The Hub no
