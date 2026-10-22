@@ -339,7 +339,8 @@ func TestNewEventIDUnique(t *testing.T) {
 }
 
 // A row from the shared telemetry exchange's contract mock
-// (mock-events.jsonl, first usage row; not a fixture in this repository) decodes into an Envelope-based type unchanged.
+// (mock-events.jsonl, first usage row; not a fixture in this repository)
+// decodes into an Envelope-based type unchanged.
 func TestMockSeedEnvelopeDecodes(t *testing.T) {
 	row := `{"schema_version": 1, "event_id": "u1", "producer_namespace": "mock-hub/agent-a/inc-1", "event_type": "agent.usage", "event_ts": "2026-10-22T00:05:00Z", "observed_ts": "2026-10-22T00:20:00Z", "hub_id": "mock-hub", "project_id": "mock-project", "agent_id": "agent-a", "incarnation_id": "inc-1", "launch_id": "launch-1", "broker_id": "mock-broker", "producer_build": "mock-v0", "calls": 1}`
 	var ev testEvent
@@ -433,64 +434,167 @@ func TestMarshalEnforcesLabelsWithoutEventValidate(t *testing.T) {
 	}
 }
 
-type walkEvent struct {
-	Envelope
-	Nested   *struct{ F float32 } `json:"nested,omitempty"`
-	Slice    []any                `json:"slice"`
-	Map      map[string]any       `json:"map"`
-	Unsigned uint64               `json:"unsigned"`
-	Number   *json.Number         `json:"number,omitempty"`
-	Internal float64              `json:"-"`
+// --- allowlist (WP0 review r4) -------------------------------------------
+
+// Nested is an allowed nested object.
+type Nested struct {
+	Name   string   `json:"name"`
+	Counts []int64  `json:"counts,omitempty"`
+	Flag   *bool    `json:"flag,omitempty"`
+	Labels *Labels  `json:"labels,omitempty"`
+	Tags   []string `json:"tags,omitempty"`
 }
 
-func (e *walkEvent) Validate() error { return e.Envelope.Validate() }
+// allowedEvent uses every allowlisted shape.
+type allowedEvent struct {
+	Envelope
+	S      string   `json:"s"`
+	B      bool     `json:"b"`
+	I      int64    `json:"i"`
+	U      uint32   `json:"u"`
+	P      *int64   `json:"p,omitempty"`
+	L      Labels   `json:"l"`
+	N      Nested   `json:"n"`
+	NP     *Nested  `json:"np,omitempty"`
+	NS     []Nested `json:"ns,omitempty"`
+	Strs   []string `json:"strs,omitempty"`
+	Ints16 []int16  `json:"ints16,omitempty"`
+}
 
-// O3/O4: every recursive branch of the walk, json:"-" skipped, json.Number
-// rejected.
-func TestMarshalWalksNestedValues(t *testing.T) {
-	env := NewEnvelope(EventTypeHealth, "h", "ns", testEventTS, testEventTS)
-	ok := &walkEvent{Envelope: env, Slice: []any{int64(1), "s"}, Map: map[string]any{"n": int64(2)}, Internal: 0.5}
+func (e *allowedEvent) Validate() error { return nil }
+
+type selfEncodingRoot struct {
+	Envelope
+	X int64 `json:"x"`
+}
+
+func (e *selfEncodingRoot) Validate() error { return nil }
+func (e selfEncodingRoot) MarshalJSON() ([]byte, error) {
+	return []byte(`{"x":1.5}`), nil
+}
+
+type Recursive struct {
+	Next *Recursive `json:"next,omitempty"`
+}
+
+type TextOnly string
+
+func (TextOnly) MarshalText() ([]byte, error) { return []byte("x"), nil }
+
+type PtrMarshaler struct {
+	A string `json:"a"`
+}
+
+func (*PtrMarshaler) MarshalJSON() ([]byte, error) { return []byte(`{}`), nil }
+
+type CaseA struct {
+	Lower string `json:"agent_ref"`
+	Upper string `json:"Agent_Ref"`
+}
+
+type rejectEvent[T any] struct {
+	Envelope
+	V T `json:"v"`
+}
+
+func (e *rejectEvent[T]) Validate() error { return nil }
+
+func TestCheckStructureAllowlist(t *testing.T) {
+	env := NewEnvelope(EventTypeUsage, "u", "ns", testEventTS, testEventTS)
+	empty := Labels{}
+	ok := &allowedEvent{Envelope: env, L: Labels{{"k", "v"}}, NP: &Nested{Name: "x", Labels: &empty}, NS: []Nested{{Name: "y"}}}
 	if _, err := Marshal(ok); err != nil {
-		t.Fatalf("valid nested event rejected (json:\"-\" float must be skipped): %v", err)
+		t.Fatalf("allowlisted event rejected: %v", err)
 	}
-	cases := map[string]func(*walkEvent){
-		"float in nested struct":   func(e *walkEvent) { e.Nested = &struct{ F float32 }{F: 1} },
-		"float slice element":      func(e *walkEvent) { e.Slice = []any{1.0} },
-		"float map value":          func(e *walkEvent) { e.Map = map[string]any{"x": float64(1)} },
-		"invalid UTF-8 map key":    func(e *walkEvent) { e.Map = map[string]any{"\xff": int64(1)} },
-		"uint64 beyond safe range": func(e *walkEvent) { e.Unsigned = MaxSafeInteger + 1 },
-		"json.Number":              func(e *walkEvent) { n := json.Number("1.5"); e.Number = &n },
+
+	rejected := map[string]reflect.Type{
+		"float":                reflect.TypeOf(&rejectEvent[float64]{}),
+		"float pointer":        reflect.TypeOf(&rejectEvent[*float32]{}),
+		"interface":            reflect.TypeOf(&rejectEvent[any]{}),
+		"slice of interface":   reflect.TypeOf(&rejectEvent[[]any]{}),
+		"map":                  reflect.TypeOf(&rejectEvent[map[string]string]{}),
+		"array":                reflect.TypeOf(&rejectEvent[[2]int64]{}),
+		"byte slice":           reflect.TypeOf(&rejectEvent[[]byte]{}),
+		"raw message":          reflect.TypeOf(&rejectEvent[json.RawMessage]{}),
+		"json.Number":          reflect.TypeOf(&rejectEvent[json.Number]{}),
+		"time.Time":            reflect.TypeOf(&rejectEvent[time.Time]{}),
+		"text marshaler":       reflect.TypeOf(&rejectEvent[TextOnly]{}),
+		"pointer marshaler":    reflect.TypeOf(&rejectEvent[PtrMarshaler]{}),
+		"anonymous struct":     reflect.TypeOf(&rejectEvent[struct{ A string }]{}),
+		"unexported struct":    reflect.TypeOf(&rejectEvent[idsC]{}),
+		"recursive":            reflect.TypeOf(&rejectEvent[Recursive]{}),
+		"envelope as field":    reflect.TypeOf(&rejectEvent[Envelope]{}),
+		"case-insensitive dup": reflect.TypeOf(&rejectEvent[CaseA]{}),
+		"nested slice":         reflect.TypeOf(&rejectEvent[[][]string]{}),
+		"double pointer":       reflect.TypeOf(&rejectEvent[**int64]{}),
+		"self-encoding root":   reflect.TypeOf(&selfEncodingRoot{}),
+		"non-pointer root":     reflect.TypeOf(allowedEvent{}),
 	}
-	for name, mutate := range cases {
-		ev := &walkEvent{Envelope: env}
-		mutate(ev)
-		if _, err := Marshal(ev); err == nil {
-			t.Errorf("%s: Marshal accepted it", name)
+	for name, typ := range rejected {
+		if err := checkStructure(typ); err == nil {
+			t.Errorf("%s: checkStructure accepted %s", name, typ)
+		}
+	}
+	if _, err := Marshal(&selfEncodingRoot{Envelope: env}); err == nil {
+		t.Error("Marshal accepted a root type with its own MarshalJSON")
+	}
+}
+
+type untaggedField struct {
+	Envelope
+	X int64
+}
+
+func (e *untaggedField) Validate() error { return nil }
+
+type unexportedField struct {
+	Envelope
+	x int64 //nolint:unused // deliberately unexported
+}
+
+func (e *unexportedField) Validate() error { return nil }
+
+type dashField struct {
+	Envelope
+	X int64 `json:"-"`
+}
+
+func (e *dashField) Validate() error { return nil }
+
+type badTagName struct {
+	Envelope
+	X int64 `json:"a\\b"`
+}
+
+func (e *badTagName) Validate() error { return nil }
+
+type badOption struct {
+	Envelope
+	X int64 `json:"x,inline"`
+}
+
+func (e *badOption) Validate() error { return nil }
+
+// Field-level allowlist rules: explicit valid tag, exported, no json:"-",
+// no option but omitempty.
+func TestCheckStructureFieldRules(t *testing.T) {
+	for name, ev := range map[string]Event{
+		"untagged field":   &untaggedField{},
+		"unexported field": &unexportedField{},
+		"json dash field":  &dashField{},
+		"invalid tag name": &badTagName{},
+		"unknown option":   &badOption{},
+	} {
+		if err := checkStructure(reflect.TypeOf(ev)); err == nil {
+			t.Errorf("%s: accepted", name)
 		}
 	}
 }
 
-func TestUnmarshalNullLabels(t *testing.T) {
-	data := []byte(`{"schema_version":1,"event_type":"agent.lifecycle","event_id":"l","producer_namespace":"ns","event_ts":"2026-10-22T00:00:00Z","observed_ts":"2026-10-22T00:00:00Z","count":0,"labels":null}`)
-	var ev testEvent
-	if err := Unmarshal(data, &ev); err != nil {
-		t.Fatalf("Unmarshal: %v", err)
-	}
-	if ev.Labels != nil {
-		t.Errorf("labels:null decoded as %v, want nil", ev.Labels)
-	}
-	out, err := Marshal(&ev)
-	if err != nil || !strings.Contains(string(out), `"labels":[]`) {
-		t.Errorf("re-marshal of null labels = %s (%v), want []", out, err)
-	}
-}
-
-// R2-1: fields promoted from an embedded struct of unexported type are
-// serialized by encoding/json, so the walk must check them too.
+// R4-1 and R2-1: every embedding other than the root Envelope is rejected,
+// tagged or not, exported or not, by value or pointer.
 type innerPayload struct {
-	Ratio  *float64 `json:"ratio,omitempty"`
-	Labels Labels   `json:"labels"`
-	Note   string   `json:"note,omitempty"`
+	Note string `json:"note,omitempty"`
 }
 
 type embeddedUnexportedEvent struct {
@@ -498,41 +602,44 @@ type embeddedUnexportedEvent struct {
 	innerPayload
 }
 
-func (e *embeddedUnexportedEvent) Validate() error { return e.Envelope.Validate() }
+func (e *embeddedUnexportedEvent) Validate() error { return nil }
 
 type embeddedUnexportedPtrEvent struct {
 	Envelope
 	*innerPayload
 }
 
-func (e *embeddedUnexportedPtrEvent) Validate() error { return e.Envelope.Validate() }
+func (e *embeddedUnexportedPtrEvent) Validate() error { return nil }
 
-func TestMarshalChecksEmbeddedUnexportedStructs(t *testing.T) {
-	env := NewEnvelope(EventTypeUsage, "u", "ns", testEventTS, testEventTS)
-	ok := &embeddedUnexportedEvent{Envelope: env, innerPayload: innerPayload{Labels: Labels{{"a", "1"}}, Note: "n"}}
-	got, err := Marshal(ok)
-	if err != nil {
-		t.Fatalf("valid embedded payload rejected: %v", err)
-	}
-	if !strings.Contains(string(got), `"labels":[{"key":"a","value":"1"}],"note":"n"`) {
-		t.Errorf("embedded fields must be written flat: %s", got)
-	}
-	bad := map[string]innerPayload{
-		"float":          {Ratio: new(float64)},
-		"invalid labels": {Labels: Labels{{"b", ""}, {"a", ""}}},
-		"invalid utf-8":  {Note: "x\xff"},
-	}
-	for name, p := range bad {
-		if _, err := Marshal(&embeddedUnexportedEvent{Envelope: env, innerPayload: p}); err == nil {
-			t.Errorf("%s in embedded unexported struct: Marshal accepted it", name)
-		}
-		p := p
-		if _, err := Marshal(&embeddedUnexportedPtrEvent{Envelope: env, innerPayload: &p}); err == nil {
-			t.Errorf("%s in embedded unexported *struct: Marshal accepted it", name)
+type TimeHolder struct {
+	At time.Time `json:"at"`
+}
+
+type taggedEmbedEvent struct {
+	Envelope
+	TimeHolder `json:"usage"`
+	Usage      string `json:"usage_other"`
+}
+
+func (e *taggedEmbedEvent) Validate() error { return nil }
+
+func TestCheckStructureRejectsOtherEmbeddings(t *testing.T) {
+	for name, typ := range map[string]reflect.Type{
+		"unexported embed":         reflect.TypeOf(&embeddedUnexportedEvent{}),
+		"unexported pointer embed": reflect.TypeOf(&embeddedUnexportedPtrEvent{}),
+		"tagged embed (R4-1)":      reflect.TypeOf(&taggedEmbedEvent{}),
+	} {
+		if err := checkStructure(typ); err == nil {
+			t.Errorf("%s: accepted", name)
 		}
 	}
-	if _, err := Marshal(&embeddedUnexportedPtrEvent{Envelope: env}); err != nil {
-		t.Errorf("nil embedded pointer must be allowed: %v", err)
+}
+
+func TestCheckStructureIsCached(t *testing.T) {
+	typ := reflect.TypeOf(&allowedEvent{})
+	first := checkStructure(typ)
+	if _, ok := structureCache.Load(typ); !ok || first != nil {
+		t.Errorf("result not cached (err %v)", first)
 	}
 }
 
@@ -746,6 +853,10 @@ func TestCheckWire(t *testing.T) {
 			t.Errorf("%s: checkWire accepted it", name)
 		}
 	}
+	noEventID := `{"schema_version":1,"event_type":"agent.usage","producer_namespace":"ns","event_ts":"2026-10-22T00:05:00Z","observed_ts":"2026-10-22T00:05:00Z"}`
+	if err := checkWire([]byte(noEventID), &env); err == nil {
+		t.Error("an omitted envelope key accepted")
+	}
 	if err := checkWire([]byte(`[1]`), &env); err == nil {
 		t.Error("a non-object accepted")
 	}
@@ -757,8 +868,9 @@ func TestLabelsMarshalJSONValidates(t *testing.T) {
 		t.Error("out-of-order Labels encoded")
 	}
 	env := NewEnvelope(EventTypeHealth, "h", "ns", testEventTS, testEventTS)
-	ev := &walkEvent{Envelope: env, Map: map[string]any{"labels": Labels{{"k", ""}, {"k", ""}}}}
+	bad := Labels{{"k", ""}, {"k", ""}}
+	ev := &allowedEvent{Envelope: env, NS: []Nested{{Name: "x", Labels: &bad}}}
 	if _, err := Marshal(ev); err == nil {
-		t.Error("invalid Labels inside an interface map accepted")
+		t.Error("invalid Labels nested in a slice of structs accepted")
 	}
 }
