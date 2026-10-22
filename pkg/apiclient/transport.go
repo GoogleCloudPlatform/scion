@@ -273,6 +273,10 @@ func (rt *authRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 	}
 	if rt.auth != nil {
 		if err := rt.auth.ApplyAuth(clone); err != nil {
+			// The base transport will not receive this request to close its body.
+			if clone.Body != nil {
+				_ = clone.Body.Close()
+			}
 			return nil, fmt.Errorf("failed to apply auth: %w", err)
 		}
 	}
