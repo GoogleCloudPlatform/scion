@@ -5433,6 +5433,23 @@ describe('settings the page must not write unless changed (ptone/scion#3913)', (
     expect(bodies[1]!.telemetry).toEqual({ cloud: { endpoint: 'otel.example.com:4317' } });
   });
 
+  it('a file-mode save keeps a telemetry block that holds only false or null', async () => {
+    const bodies: Array<Record<string, any>> = [];
+    // unsetConfig drops telemetry, so the stored block is set afterwards.
+    const cfg = unsetConfig('file');
+    cfg.telemetry = { cloud: { enabled: true } };
+    element = await render(cfg, bodies);
+    const el = element as any;
+    expect(el.telemetryCloudEnabled).toBe(true);
+    // Use default on the stored cloud switch, and set the unset hub switch off.
+    el.telemetryCloudEnabled = null;
+    el.telemetryHubEnabled = false;
+    await save(element);
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]!.telemetry.cloud).toEqual({ enabled: null });
+    expect(bodies[0]!.telemetry.hub).toEqual({ enabled: false });
+  });
+
   it('an unset switch says it is not set; toggling it twice leaves it unset', async () => {
     const bodies: Array<Record<string, any>> = [];
     element = await render(unsetConfig('db'), bodies);

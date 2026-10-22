@@ -68,16 +68,16 @@ import {
 /** GET /api/v1/admin/server-config returns this in place of each secret. */
 const MASKED_VALUE = '********';
 
-/**
- * Sets obj[key] to a tri-state switch value only when it differs from the
- * loaded one; null (Use default) is sent as null, which clears the stored
- * key (ptone/scion#3724).
- */
 /** True when obj has a key whose value is not undefined (null counts). */
 function hasDefinedValue(obj: Record<string, unknown>): boolean {
   return Object.values(obj).some((v) => v !== undefined);
 }
 
+/**
+ * Sets obj[key] to a tri-state switch value only when it differs from the
+ * loaded one; null (Use default) is sent as null, which clears the stored
+ * key (ptone/scion#3724).
+ */
 function putTriState(
   obj: Record<string, unknown>,
   key: string,
