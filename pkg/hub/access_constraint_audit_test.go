@@ -306,124 +306,6 @@ func TestAudit_RedactionNoSensitiveData(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 4. Recovery audit: disable-all with atomic audit
-// ---------------------------------------------------------------------------
-
-func TestRecovery_DisableAllWithAudit(t *testing.T) {
-	gs, ps, _, s, _ := auditTestSetup(t)
-	ctx := context.Background()
-
-	adminID := govSeedAdminUser(t, s, "recovery-admin")
-	actor := PrincipalContext{Kind: "user", ID: adminID}
-
-	// Create two constraints.
-	for i, name := range []string{"recovery-boundary-1", "recovery-boundary-2"} {
-		pvSeedUser(t, s, name+"-user")
-		pType := "user"
-		draft := &store.AccessConstraint{
-			Name:                 name,
-			SubjectKind:          store.ConstraintSubjectPrincipal,
-			SubjectPrincipalType: &pType,
-			SubjectPrincipalID:   strPtr(tid(name + "-user")),
-			ScopeType:            "system",
-			MaximumPermissions:   []string{"agent.read", "agent.create"},
-			Purpose:              "test recovery",
-			CreatedBy:            adminID,
-		}
-		_ = i
-		govCreateAndCommit(t, gs, ps, draft, actor)
-	}
-
-	// Create recovery service with the same audit writer.
-	rs := NewRecoveryService(s, gs.auditWriter, nil, slog.Default())
-	rs.nowFunc = gs.nowFunc
-
-	result, err := rs.DisableAll(ctx, adminID)
-	require.NoError(t, err)
-	require.NotNil(t, result)
-	assert.Equal(t, 2, result.DisabledCount, "should disable both constraints")
-	assert.NotEmpty(t, result.AuditID, "disable-all must produce an audit ID")
-	assert.Len(t, result.DisabledIDs, 2)
-
-	// Verify the audit entry.
-	entries := gs.auditWriter.GetEntries()
-	var disableEntry *BoundaryAuditEntry
-	for i := range entries {
-		if entries[i].Operation == "disable_all" {
-			disableEntry = &entries[i]
-			break
-		}
-	}
-	require.NotNil(t, disableEntry, "must have a disable_all audit entry")
-	assert.Equal(t, "all", disableEntry.ConstraintID)
-	assert.Equal(t, adminID, disableEntry.ActorID)
-}
-
-// ---------------------------------------------------------------------------
-// 5. Recovery audit failure rolls back disable
-// ---------------------------------------------------------------------------
-
-func TestRecovery_AuditFailureRollsBackDisable(t *testing.T) {
-	_, _, _, s, _ := auditTestSetup(t)
-	ctx := context.Background()
-
-	adminID := govSeedAdminUser(t, s, "recovery-fail-admin")
-
-	// Create a constraint directly.
-	pvSeedUser(t, s, "recovery-fail-user")
-	pType := "user"
-	created, err := s.CreateAccessConstraint(ctx, &store.AccessConstraint{
-		Name:                 "recovery-fail-boundary",
-		SubjectKind:          store.ConstraintSubjectPrincipal,
-		SubjectPrincipalType: &pType,
-		SubjectPrincipalID:   strPtr(tid("recovery-fail-user")),
-		ScopeType:            "system",
-		MaximumPermissions:   []string{"agent.read"},
-		Purpose:              "test recovery audit failure",
-		CreatedBy:            adminID,
-	})
-	require.NoError(t, err)
-
-	// First, test that audit failure during disable rolls back.
-	failWriter := NewBoundaryAuditWriter(slog.Default())
-	failWriter.failFunc = func() error { return assert.AnError }
-	rsf := NewRecoveryService(s, failWriter, nil, slog.Default())
-
-	_, err = rsf.DisableAll(ctx, adminID)
-	require.Error(t, err, "disable should fail when audit write fails")
-	assert.Contains(t, err.Error(), "audit write failed")
-
-	// Verify constraint is still enabled (rollback happened).
-	c, lookupErr := s.GetAccessConstraint(ctx, created.ID)
-	require.NoError(t, lookupErr)
-	assert.False(t, c.Disabled, "constraint should still be enabled after audit failure rollback")
-
-	// Now test the normal disable/recover cycle with a working writer.
-	regularWriter := NewBoundaryAuditWriter(slog.Default())
-	rs2 := NewRecoveryService(s, regularWriter, nil, slog.Default())
-
-	result, err := rs2.DisableAll(ctx, adminID)
-	require.NoError(t, err)
-	assert.Equal(t, 1, result.DisabledCount)
-
-	// Verify constraint is now disabled.
-	c, err = s.GetAccessConstraint(ctx, created.ID)
-	require.NoError(t, err)
-	assert.True(t, c.Disabled, "constraint should be disabled")
-
-	// Now recover.
-	recoverResult, err := rs2.RecoverAll(ctx, adminID)
-	require.NoError(t, err)
-	assert.Equal(t, 1, recoverResult.RecoveredCount)
-	assert.NotEmpty(t, recoverResult.AuditID)
-
-	// Verify constraint is re-enabled.
-	c, err = s.GetAccessConstraint(ctx, created.ID)
-	require.NoError(t, err)
-	assert.False(t, c.Disabled, "constraint should be re-enabled after recovery")
-}
-
-// ---------------------------------------------------------------------------
 // 6. Online/offline exclusion: two operations cannot run concurrently
 // ---------------------------------------------------------------------------
 
@@ -483,14 +365,14 @@ func TestRecovery_SQLiteExclusiveLock(t *testing.T) {
 
 	adminID := govSeedAdminUser(t, s, "sqlite-lock-admin")
 
-	rs := NewRecoveryService(s, NewBoundaryAuditWriter(slog.Default()), nil, slog.Default())
+	rs := NewRecoveryService(s, nil, slog.Default())
 
 	// First recovery should succeed.
 	assert.True(t, rs.recoveryLock.TryAcquire(adminID))
 	rs.recoveryLock.Release()
 
 	// Running DisableAll acquires and releases the lock.
-	result, err := rs.DisableAll(ctx, adminID)
+	result, err := rs.DisableAll(ctx, pvTestActor(adminID))
 	require.NoError(t, err)
 	assert.Equal(t, 0, result.DisabledCount) // No constraints to disable.
 
@@ -939,7 +821,7 @@ func TestRecovery_ListRecoveryDisabled(t *testing.T) {
 	err = s.DisableAccessConstraint(ctx, created.ID)
 	require.NoError(t, err)
 
-	rs := NewRecoveryService(s, NewBoundaryAuditWriter(slog.Default()), nil, slog.Default())
+	rs := NewRecoveryService(s, nil, slog.Default())
 	disabled, err := rs.ListRecoveryDisabled(ctx)
 	require.NoError(t, err)
 	assert.Len(t, disabled, 1)

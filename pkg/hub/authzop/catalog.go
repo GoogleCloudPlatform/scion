@@ -427,7 +427,6 @@ var MutationClassifications = []MutationClassification{
 	// pkg/hub/access_constraint_recovery.go — constraint recovery operations
 	// -----------------------------------------------------------------------
 	{File: "pkg/hub/access_constraint_recovery.go", Function: "RecoverAll", Symbol: "UpdateAccessConstraint", Exemption: &MutationExemption{Kind: ExemptionHubAdmin, Reason: "Constraint recovery: re-enables constraints disabled by audit failure", Scope: "pkg/hub/access_constraint_recovery.go"}},
-	{File: "pkg/hub/access_constraint_recovery.go", Function: "rollbackDisable", Symbol: "UpdateAccessConstraint", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Constraint recovery rollback: restores constraint on disable failure", Scope: "pkg/hub/access_constraint_recovery.go"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/hub/handlers_groups.go — group CRUD and membership
