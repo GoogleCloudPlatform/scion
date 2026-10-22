@@ -24,7 +24,6 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
-	"unicode"
 )
 
 // SchemePrefix is a URL's scheme and "://", as a regular expression.
@@ -159,20 +158,31 @@ func locateUserInfo(raw string) (kind, start, end int) {
 	return userInfoSpan, 0, m[1] - 1
 }
 
+// textURLSpace is the white space that ends a URL in a text: ASCII only,
+// the set of RE2's \s plus '\v', as in pkg/config's text patterns. A
+// non-ASCII space (U+00A0, U+2028 and the like, as in a copied URL) stays
+// inside the URL, which then fails to parse and has its user info masked
+// up to its '@', failing closed.
+const textURLSpace = " \t\n\v\f\r"
+
 // textURLTrailing is the punctuation that ends a sentence, a quotation or
 // an escape around a URL in a text, rather than ending the URL itself.
 const textURLTrailing = ".,;:!?)]}>'\"`\\"
 
-// The limits that keep RedactUserInfoIn linear in the length of its text.
-// Past either one, the rest of the run is masked whole: that fails closed.
+// The limits on the work RedactUserInfoIn does in one run of text without
+// white space. Past either one, the rest of the run is masked whole when an
+// '@' follows: that fails closed.
 const (
-	// MaxTextURLLen is the longest URL, from its scheme to the end of its
-	// run, whose user info RedactUserInfoIn locates when an '@' follows;
-	// a longer one is masked whole.
+	// MaxTextURLLen bounds a run from its first scheme: a run longer than
+	// this, from that scheme to the next white space, with an '@' after
+	// the scheme, is masked whole from the scheme. It only ever fires on a
+	// run's first URL (every later one is shorter) and keeps the cost per
+	// parse small; linear time does not depend on it.
 	MaxTextURLLen = 4096
 	// MaxTextURLsPerRun is the most URLs RedactUserInfoIn checks in one
-	// run of text without white space (a URL inside another one counts);
-	// past it, the rest of the run is masked whole when an '@' follows.
+	// run (a URL inside another one counts); past it, the rest of the run
+	// is masked whole when an '@' follows. It bounds the parses per run,
+	// which keeps the scan linear in the length of the text.
 	MaxTextURLsPerRun = 16
 )
 
@@ -180,16 +190,18 @@ const (
 // it, the user name too, replaced by mask, and every other byte kept; a URL
 // whose user info cannot be delimited (see Undelimited) shows only its
 // scheme and mask, with the rest of its run. A URL starts at a scheme and
-// "://" and runs to the next white space, less the punctuation that ends
-// it (textURLTrailing); white space is the only boundary, so a quote or
+// "://" and runs to the next ASCII white space (textURLSpace), less the
+// punctuation that ends it (textURLTrailing); white space is the only
+// boundary, so a quote or
 // bracket inside a password cannot end the URL early. A URL inside another
 // one (a redirect parameter, or two URLs with no space between them) is
 // checked on its own as well, unless the outer URL was masked whole.
 //
 // It takes time linear in the length of text: each run is cut once, a run
-// with no '@' after a scheme is skipped, and a URL longer than
-// MaxTextURLLen, or past the first MaxTextURLsPerRun URLs of its run, is
-// masked whole with the rest of the run when an '@' follows it.
+// with no '@' after a scheme is skipped, each URL is parsed once, and past
+// the first MaxTextURLsPerRun URLs of a run (or in a run longer than
+// MaxTextURLLen from its first scheme) the rest of the run is masked whole
+// when an '@' follows.
 func RedactUserInfoIn(text, mask string) string {
 	var b strings.Builder
 	written := 0 // text[written:] is not in b yet
@@ -201,7 +213,7 @@ func RedactUserInfoIn(text, mask string) string {
 		}
 		start := pos + loc[0]
 		end := len(text)
-		if i := strings.IndexFunc(text[start:], unicode.IsSpace); i >= 0 {
+		if i := strings.IndexAny(text[start:], textURLSpace); i >= 0 {
 			end = start + i
 		}
 		if strings.IndexByte(text[start:end], '@') >= 0 {

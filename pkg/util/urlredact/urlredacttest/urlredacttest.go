@@ -75,7 +75,9 @@ var Columns = []struct{ Name, Const, Runner string }{
 	// because of an incidental functional gate (the host must equal
 	// "github.com"), not because the code redacts; if that gate is widened
 	// (an allowlist, a pattern, other forges), this column must be measured
-	// again.
+	// again. Only the span is pinned: the stubs that stand in for the rest of
+	// the handler (a 400 that does not echo the URL) are not, so a change to
+	// what the handler does after the span does not show here.
 	{HubSkillsDiscoverBase, "HubSkillsDiscoverBase", "pkg/util/urlredact/hub_skills_discover_copy_test.go"},
 }
 

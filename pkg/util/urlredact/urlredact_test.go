@@ -161,6 +161,9 @@ func TestRedactUserInfoIn(t *testing.T) {
 		{"outer masked whole", "https://a:p@ss/w0rd@one.example/r?next=https://b:s3cretPw@two.example", "https://[M]"},
 		{"other scheme", "git clone ssh://git:s3cretPw@git.example.com/r.git", "git clone ssh://[M]@git.example.com/r.git"},
 		{"tab boundary", "a\thttps://alice:s3cretPw@hub.example.com\tb", "a\thttps://[M]@hub.example.com\tb"},
+		{"non-breaking space in password", "fatal: unable to access 'https://u:pa\u00a0ss9q@h.example/r'", "fatal: unable to access 'https://[M]@h.example/r'"},
+		{"line separator in password", "dial https://u:pa\u2028ss9q@h.example/r: refused", "dial https://[M]@h.example/r: refused"},
+		{"vertical tab boundary", "a\vhttps://alice:s3cretPw@hub.example.com\vb", "a\vhttps://[M]@hub.example.com\vb"},
 	} {
 		if got := RedactUserInfoIn(tc.in, "[M]"); got != tc.want {
 			t.Errorf("%s: RedactUserInfoIn(%q) = %q, want %q", tc.name, tc.in, got, tc.want)
@@ -169,11 +172,12 @@ func TestRedactUserInfoIn(t *testing.T) {
 }
 
 // redactPropertyAlphabet is the junk the property test puts around a
-// made-up secret in a password: URL delimiters, quotes, brackets, escapes
-// and invalid UTF-8, never white space (the only URL boundary in a text).
+// made-up secret in a password: URL delimiters, quotes, brackets, escapes,
+// invalid UTF-8 and non-ASCII spaces, never ASCII white space (the only URL
+// boundary in a text).
 var redactPropertyAlphabet = []string{
 	"a", "Z", "0", "/", "?", "#", "@", ":", ".", "&", ";", "=", "%", "%zz", "%40",
-	"'", `"`, ")", "]", "[", "<", ">", "\\", "`", ",", "\xff", "é",
+	"'", `"`, ")", "]", "[", "<", ">", "\\", "`", ",", "\xff", "é", "\u00a0", "\u2028",
 }
 
 func redactPropertyJunk(r *rand.Rand) string {
