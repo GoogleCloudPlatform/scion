@@ -359,3 +359,40 @@ func TestLifecycleWorstCaseEventFitsBudget(t *testing.T) {
 	}
 	t.Logf("worst-case lifecycle event: %d bytes", len(data))
 }
+
+// TestLifecycleGoldenPerTransition pins the exact bytes of the minimal
+// event of every transition (design section 8: a golden per transition).
+func TestLifecycleGoldenPerTransition(t *testing.T) {
+	const env = `{"schema_version":1,"event_type":"agent.lifecycle","event_id":"6f1c0000-0000-4000-8000-000000000001",` +
+		`"producer_namespace":"scion-hub/hub-a","event_ts":"2026-10-22T00:00:00.000001Z","observed_ts":"2026-10-22T00:00:00.000002Z",` +
+		`"hub_id":"hub-a","project_id":"p1","agent_id":"a1","incarnation_id":"1","producer_build":"v0.0.0-test",`
+	const revs = `"transition_revision":1,"metadata_revision":1`
+	const snap = `,"metadata":{"labels":[]}}`
+	golden := map[string]string{
+		TransitionCreated:         `"transition":"created",` + revs + snap,
+		TransitionLaunchAccepted:  `"transition":"launch_accepted",` + revs + `}`,
+		TransitionConfigured:      `"transition":"configured",` + revs + snap,
+		TransitionStarted:         `"transition":"started",` + revs + `}`,
+		TransitionLaunchFailed:    `"transition":"launch_failed",` + revs + `,"end_reason":"failed"}`,
+		TransitionMetadataChanged: `"transition":"metadata_changed",` + revs + snap,
+		TransitionStopped:         `"transition":"stopped",` + revs + `,"stop_kind":"stopped"}`,
+		TransitionHalted:          `"transition":"halted",` + revs + `}`,
+		TransitionReincarnated:    `"transition":"reincarnated",` + revs + snap,
+		TransitionDeleted:         `"transition":"deleted",` + revs + `,"delete_mode":"hard"` + snap,
+		TransitionRestored:        `"transition":"restored",` + revs + snap,
+		TransitionResynced:        `"transition":"resynced",` + revs + `,"cause":"no_cursor"` + snap,
+	}
+	for _, tr := range allTransitions {
+		want, ok := golden[tr]
+		if !ok {
+			t.Fatalf("no golden for %s", tr)
+		}
+		data, err := Marshal(minimalLifecycleEvent(tr))
+		if err != nil {
+			t.Fatalf("%s: Marshal: %v", tr, err)
+		}
+		if got := string(data); got != env+want {
+			t.Errorf("%s golden mismatch:\n got %s\nwant %s", tr, got, env+want)
+		}
+	}
+}

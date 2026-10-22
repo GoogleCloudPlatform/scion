@@ -425,6 +425,28 @@ func TestLifecycleStore_UnobservedWriteThenHardFinalize(t *testing.T) {
 	assert.True(t, *evs[1].Gap)
 }
 
+// TestReconcileHarnessConfigColumnCausesNoResync is design r2 N12: the
+// boot reconcile rewrites the denormalized harness_config column (an
+// exempt writer), and since the snapshot reads applied_config, not the
+// column, the next observed write finds the fingerprint unchanged.
+func TestReconcileHarnessConfigColumnCausesNoResync(t *testing.T) {
+	f := newLifecycleFixture(t)
+	ctx := context.Background()
+	a := f.create("lc-reconcile", func(a *store.Agent) {
+		a.AppliedConfig = &store.AgentAppliedConfig{HarnessConfig: "claude"}
+	})
+	// Make the column look like a row written before the column existed.
+	_, err := f.cs.client.Agent.UpdateOneID(uuid.MustParse(a.ID)).ClearHarnessConfig().Save(ctx)
+	require.NoError(t, err)
+	require.NoError(t, f.cs.ReconcileHarnessConfigColumn(ctx))
+	got, err := f.cs.client.Agent.Get(ctx, uuid.MustParse(a.ID))
+	require.NoError(t, err)
+	require.Equal(t, "claude", got.HarnessConfig, "the reconcile rewrote the column")
+	f.finalize(ctx, a.ID, store.DeletionFinalizeHard)
+	evs, _ := lifecycleEvents(t, f.cs, a.ID)
+	assert.Equal(t, "created@1 deleted@2(hard)", lcSeq(evs), "no resynced after the reconcile")
+}
+
 func TestLifecycleStore_SoftFinalizeThenPurge(t *testing.T) {
 	f := newLifecycleFixture(t)
 	a := f.create("lc-soft")
