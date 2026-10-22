@@ -23,6 +23,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"golang.org/x/sys/unix"
 
@@ -204,6 +205,32 @@ func (h *Home) Remove(rel string) error {
 	}
 	if err != nil && !errors.Is(err, unix.ENOENT) {
 		return pathErr("remove", h.path, append(parent, leaf), err)
+	}
+	return nil
+}
+
+// Rename renames the entry oldRel to newRel, which must be in the same
+// directory. Whatever entry is at newRel (a link included) is replaced,
+// never followed; a link at a parent component is refused.
+func (h *Home) Rename(oldRel, newRel string) error {
+	parent, oldLeaf, err := splitLeaf(oldRel)
+	if err != nil {
+		return err
+	}
+	newParent, newLeaf, err := splitLeaf(newRel)
+	if err != nil {
+		return err
+	}
+	if strings.Join(parent, "/") != strings.Join(newParent, "/") {
+		return fmt.Errorf("agenthome: rename %q to %q: not in the same directory", oldRel, newRel)
+	}
+	fd, err := h.walk(parent, false, 0)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = unix.Close(fd) }()
+	if err := dirfd.RenameAt(fd, oldLeaf, newLeaf); err != nil {
+		return pathErr("rename", h.path, append(parent, newLeaf), err)
 	}
 	return nil
 }

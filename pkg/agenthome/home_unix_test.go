@@ -381,3 +381,26 @@ func TestInstallTree_LimitLeavesDestination(t *testing.T) {
 		}
 	}
 }
+
+func TestRename(t *testing.T) {
+	f := newFixture(t)
+	f.mkdir(t, "d")
+	if err := os.WriteFile(filepath.Join(f.home, "d/tmp"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.link(t, f.victim, "d/final")
+	if err := f.h.Rename("d/tmp", "d/final"); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Lstat(filepath.Join(f.home, "d/final")); err != nil || !fi.Mode().IsRegular() {
+		t.Fatalf("final = %v, %v; want a regular file", fi, err)
+	}
+	if err := f.h.Rename("d/final", "other/final"); err == nil {
+		t.Fatal("rename across directories accepted")
+	}
+	f.link(t, f.outside, "l")
+	if err := f.h.Rename("l/victim", "l/moved"); !isLinkRefusal(err) {
+		t.Fatalf("err = %v, want a link refusal", err)
+	}
+	f.checkOutside(t)
+}

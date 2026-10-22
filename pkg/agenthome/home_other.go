@@ -179,6 +179,29 @@ func (h *Home) Remove(rel string) error {
 	return nil
 }
 
+// Rename renames the entry oldRel to newRel, which must be in the same
+// directory.
+func (h *Home) Rename(oldRel, newRel string) error {
+	parent, oldLeaf, err := splitLeaf(oldRel)
+	if err != nil {
+		return err
+	}
+	newParent, newLeaf, err := splitLeaf(newRel)
+	if err != nil {
+		return err
+	}
+	if path.Join(parent...) != path.Join(newParent...) {
+		return fmt.Errorf("agenthome: rename %q to %q: not in the same directory", oldRel, newRel)
+	}
+	if err := h.checkDirs(parent, false, 0); err != nil {
+		return err
+	}
+	if err := h.root.Rename(path.Join(append(parent, oldLeaf)...), path.Join(append(parent, newLeaf)...)); err != nil {
+		return pathErr("rename", h.path, append(parent, newLeaf), err)
+	}
+	return nil
+}
+
 // RemoveAll removes rel and everything below it (os.Root.RemoveAll removes
 // a link itself and does not follow it). A missing entry or parent is not
 // an error.

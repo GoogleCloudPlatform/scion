@@ -417,3 +417,67 @@ func TestRestoreSecretsRecord_LinkReplantedBetweenStartsIsRefused(t *testing.T) 
 	}
 	c.checkOutside(t)
 }
+
+// --- writeAgentTokenFile ---
+
+func TestWriteAgentTokenFile_LinkLeavesReplaced(t *testing.T) {
+	c := newConfinedHome(t)
+	c.link(t, filepath.Join(c.outside, "victim"), ".scion/scion-token")
+	c.link(t, filepath.Join(c.outside, "TOKEN_A"), ".scion/scion-token.tmp")
+	if err := writeAgentTokenFile(c.home, tokenFileSentinel); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(c.home, ".scion/scion-token")
+	requireRegular(t, p, tokenFileSentinel)
+	if fi, _ := os.Lstat(p); fi.Mode().Perm() != 0o600 {
+		t.Fatalf("mode = %v, want 0600", fi.Mode())
+	}
+	requireAbsent(t, filepath.Join(c.home, ".scion/scion-token.tmp"))
+	c.checkOutside(t)
+}
+
+func TestWriteAgentTokenFile_RefusesLinkedComponent(t *testing.T) {
+	c := newConfinedHome(t)
+	c.link(t, c.outside, ".scion")
+	if err := writeAgentTokenFile(c.home, tokenFileSentinel); err == nil {
+		t.Fatal("expected a linked .scion to be refused")
+	}
+	c.checkOutside(t)
+}
+
+func TestWriteAgentTokenFile_LinkReplantedBetweenStartsIsRefused(t *testing.T) {
+	c := newConfinedHome(t)
+	if err := writeAgentTokenFile(c.home, tokenFileSentinel); err != nil {
+		t.Fatal(err)
+	}
+	c.link(t, c.outside, ".scion")
+	if err := writeAgentTokenFile(c.home, tokenFileSentinel); err == nil {
+		t.Fatal("expected the re-planted link to be refused")
+	}
+	c.checkOutside(t)
+}
+
+// --- removeStaleAuthCandidates (Start with NoAuth) ---
+
+func TestRemoveStaleAuthCandidates_LinkLeafAndComponent(t *testing.T) {
+	c := newConfinedHome(t)
+	rel := agentplugin.InputsRel + "/auth-candidates.json"
+	c.link(t, filepath.Join(c.outside, "victim"), rel)
+	if err := removeStaleAuthCandidates(c.home); err != nil {
+		t.Fatal(err)
+	}
+	requireAbsent(t, filepath.Join(c.home, rel))
+	c.checkOutside(t)
+
+	for _, comp := range []string{".scion", ".scion/harness", agentplugin.InputsRel} {
+		c := newConfinedHome(t)
+		c.link(t, c.outside, comp)
+		if err := removeStaleAuthCandidates(c.home); err == nil {
+			t.Fatalf("%s: expected a linked directory component to be refused", comp)
+		}
+		c.checkOutside(t)
+	}
+	if err := removeStaleAuthCandidates(filepath.Join(t.TempDir(), "missing")); err != nil {
+		t.Fatalf("missing home: %v", err)
+	}
+}
