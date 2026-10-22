@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "event_type": "telemetry.health",
-  "event_id": "h1-7beffc762bbbd0e5878f087c7f2ec2e9",
+  "event_id": "h1-21429f14bc05addb51557417ce8034c1",
   "producer_namespace": "sciontool/project/proj-1/agent/agent-1",
   "event_ts": "2026-10-22T06:00:00.123456Z",
   "observed_ts": "2026-10-22T06:00:00.123456Z",
@@ -12,7 +12,7 @@
   "broker_id": "broker-1",
   "producer_build": "v0.0.0-wp3test",
   "harness_version": "2.1.0",
-  "pipeline_run_id": "0f9a3c1e-0000-4000-8000-000000000001",
+  "pipeline_run_id": "0f9a3c1e-0000-4000-8000-000000000005",
   "health_seq": 3,
   "trigger": "final",
   "harness": "claude",

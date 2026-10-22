@@ -191,6 +191,11 @@ type healthInputs struct {
 
 	SendFailures, Superseded, Rejected int64
 
+	// DisabledProducerInvalid counts usage events a producer could not write
+	// while analytics is disabled (WP2's failing producer, outbox
+	// unavailable). Not serialized; it sets loss_indicated.
+	DisabledProducerInvalid int64
+
 	FinalResidualRecords int64
 }
 
@@ -308,6 +313,9 @@ func buildHealthEvent(in healthInputs) (*telemetrycontract.HealthEvent, error) {
 // dropped or terminal without confirmation. It is evidence to examine, not
 // a measured token loss.
 func lossIndicated(in healthInputs) bool {
+	if !in.AnalyticsEnabled && in.DisabledProducerInvalid > 0 {
+		return true // usage derived but not written: outbox unavailable
+	}
 	a := in.Analytics
 	if a.StatsFailed {
 		// Disk-derived totals are unknown in this snapshot: only measured
@@ -419,21 +427,17 @@ type analyticsHandles struct {
 // timeout, is analytics_stats_failed: the disk-derived fields are then
 // omitted. WP3 never reads outbox files itself.
 //
-// now is the snapshot time (the pending age uses it). readDisk=false skips
-// LedgerSnapshot (and so the outbox flock): only in-memory counters are
-// filled, for local diagnostics on latency-sensitive paths.
-func (h analyticsHandles) counters(now time.Time, readDisk bool) telemetrycontract.HealthAnalyticsCounters {
+// now is the snapshot time (the pending age uses it). It always reads the
+// ledger; latency-sensitive local diagnostics use memory() instead, a
+// separate type that cannot be built into an event.
+func (h analyticsHandles) counters(now time.Time) telemetrycontract.HealthAnalyticsCounters {
 	outbox := h.native.Outbox()
 	if outbox == nil {
 		// A lazily opened outbox that failed: nothing is measurable.
 		return telemetrycontract.HealthAnalyticsCounters{StatsFailed: true, DroppedNoIdentity: h.native.DroppedNoIdentity(), Invalid: h.native.Invalid()}
 	}
 	s := outbox.MemoryStats()
-	var ledger OutboxLedger
-	var err error
-	if readDisk {
-		ledger, err = outbox.LedgerSnapshot()
-	}
+	ledger, err := outbox.LedgerSnapshot()
 	c := telemetrycontract.HealthAnalyticsCounters{
 		Appended:          s.Appended,
 		CertainDuplicates: s.CertainDuplicates,
@@ -460,7 +464,7 @@ func (h analyticsHandles) counters(now time.Time, readDisk bool) telemetrycontra
 	if h.drainer != nil {
 		c.RetryBackoffMs = h.drainer.Backoff().Milliseconds()
 	}
-	if err != nil || !readDisk {
+	if err != nil {
 		return c
 	}
 	c.OverflowTotal, c.OversizeTotal = ledger.OverflowTotal, ledger.OversizeTotal
@@ -497,8 +501,9 @@ func (p *Pipeline) SettleUsageSource(overlay map[string]string, nativePolicy str
 		return
 	}
 	if !loopRunning {
-		// No loop (tests drive the emitter by hand): emit here.
-		p.emitHealth(telemetrycontract.HealthTriggerStart)
+		// No loop: either Stop is in progress (the final event follows) or
+		// a test drives the emitter by hand. Never build the event here, on
+		// init's goroutine (it would wait on the outbox flock).
 		return
 	}
 	// The loop builds (outbox ledger read under its flock) and sends the
@@ -717,9 +722,12 @@ func (p *Pipeline) healthSnapshotInputs(trigger string) healthInputs {
 	// (disabledReason outbox_unavailable): analytics is still disabled.
 	if handles.enabled() {
 		in.AnalyticsEnabled = true
-		in.Analytics = handles.counters(in.Now, true)
+		in.Analytics = handles.counters(in.Now)
 	} else {
 		in.AnalyticsDisabledReason = handles.disabledReason
+		// A failing producer (outbox unavailable) still counts the usage
+		// events it could not write: that is loss evidence (loss_indicated).
+		in.DisabledProducerInvalid = handles.native.Invalid()
 	}
 	d := p.Diagnostics()
 	in.Metrics, in.Logs = d["metrics"], d["logs"]
@@ -844,13 +852,10 @@ func (p *Pipeline) flushHealth(ctx context.Context) {
 	}
 }
 
-// AnalyticsDiagnostics returns the analytics outbox counters, or ok=false
-// when analytics is disabled (with the reason).
-//
-// readDisk selects whether the outbox ledger is read (WP2 LedgerSnapshot,
-// which takes the outbox flock with up to a 2 s wait); with false only the
-// in-memory counters are returned.
-func (p *Pipeline) AnalyticsDiagnostics(readDisk bool) (counters telemetrycontract.HealthAnalyticsCounters, ok bool, disabledReason string) {
+// AnalyticsDiagnostics returns the analytics outbox counters (in-memory and
+// one ledger read, which takes the outbox flock with up to a 2 s wait), or
+// ok=false when analytics is disabled (with the reason).
+func (p *Pipeline) AnalyticsDiagnostics() (counters telemetrycontract.HealthAnalyticsCounters, ok bool, disabledReason string) {
 	if p == nil {
 		return counters, false, ""
 	}
@@ -861,7 +866,33 @@ func (p *Pipeline) AnalyticsDiagnostics(readDisk bool) (counters telemetrycontra
 	if !handles.enabled() {
 		return counters, false, handles.disabledReason
 	}
-	return handles.counters(time.Now(), readDisk), true, ""
+	return handles.counters(time.Now()), true, ""
+}
+
+// analyticsMemory is the in-memory analytics counter set (no disk values),
+// for local diagnostics only. It is a separate type from
+// HealthAnalyticsCounters so that it can never be serialized into a health
+// event with placeholder disk fields.
+type analyticsMemory struct {
+	Appended, CertainDuplicates, Overflow, AppendFailed, DroppedNoIdentity, Invalid int64
+	Finalized, Delivered, SendFailures, SendRetries, Torn, InvalidLines             int64
+	HubIDMismatch, Conflicts, Quarantined, DeadLetters                              int64
+	SyncUncertain, CorruptIntents, Unresolved, CommitDeferred                       int64
+}
+
+// memory reads the in-memory counters only (MemoryStats; no outbox lock).
+func (h analyticsHandles) memory() analyticsMemory {
+	m := analyticsMemory{DroppedNoIdentity: h.native.DroppedNoIdentity(), Invalid: h.native.Invalid(), SendRetries: h.send.Retries()}
+	outbox := h.native.Outbox()
+	if outbox == nil {
+		return m
+	}
+	s := outbox.MemoryStats()
+	m.Appended, m.CertainDuplicates, m.Overflow, m.AppendFailed = s.Appended, s.CertainDuplicates, s.Overflow, s.AppendFailed
+	m.Finalized, m.Delivered, m.SendFailures, m.Torn, m.InvalidLines = s.Finalized, s.Delivered, s.SendFailures, s.Torn, s.InvalidLines
+	m.HubIDMismatch, m.Conflicts, m.Quarantined, m.DeadLetters = s.HubIDMismatch, s.Conflicts, s.Quarantined, s.DeadLetters
+	m.SyncUncertain, m.CorruptIntents, m.Unresolved, m.CommitDeferred = s.SyncUncertain, s.CorruptIntents, s.Unresolved, s.CommitDeferred
+	return m
 }
 
 // metricRejectReasons returns up to limit metric reject reasons with

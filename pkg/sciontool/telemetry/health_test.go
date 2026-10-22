@@ -13,8 +13,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -384,7 +386,13 @@ func setTestVersion(t *testing.T) {
 func TestHealthEventGolden(t *testing.T) {
 	setTestVersion(t)
 
-	goldenHealth(t, "start-native-claude", startRow(fixedHealthInputs(telemetrycontract.HealthTriggerStart)))
+	// Each golden is an independent single-row fixture: its own pipeline
+	// run, so primary keys never collide and no run is self-contradictory.
+	run := func(in healthInputs, n int) healthInputs {
+		in.PipelineRunID = fmt.Sprintf("0f9a3c1e-0000-4000-8000-%012d", n)
+		return in
+	}
+	goldenHealth(t, "start-native-claude", run(startRow(fixedHealthInputs(telemetrycontract.HealthTriggerStart)), 1))
 
 	periodic := fixedHealthInputs(telemetrycontract.HealthTriggerPeriodic)
 	periodic.Seq = 2
@@ -392,19 +400,20 @@ func TestHealthEventGolden(t *testing.T) {
 	periodic.Usage = enabledUsage(telemetrycontract.UsageSourceHooks, "antigravity")
 	periodic.UsageDiag = nil
 	periodic.AnalyticsEnabled, periodic.AnalyticsDisabledReason = false, "outbox_unavailable"
-	goldenHealth(t, "periodic-hooks-antigravity", periodic)
+	goldenHealth(t, "periodic-hooks-antigravity", run(periodic, 2))
 
 	disabled := startRow(fixedHealthInputs(telemetrycontract.HealthTriggerStart))
 	disabled.Usage = deriveUsageCollection(UsageSourceSelection{Settled: true}, "claude", false, true)
 	disabled.SourceOrigin = telemetrycontract.UsageSourceOriginUnset
 	disabled.UsageDiag, disabled.HarnessVersion = nil, ""
-	goldenHealth(t, "start-disabled-source-unset", disabled)
+	goldenHealth(t, "start-disabled-source-unset", run(disabled, 3))
 
 	final := fixedHealthInputs(telemetrycontract.HealthTriggerFinal)
 	final.Seq = 7
 	// 4 finalized = 2 delivered + 1 dead-lettered (100 bytes) + 1 still
-	// pending (512 bytes); retained = pending + dead letter; seq_last 5 = 4
-	// appended in this run + 1 overflow persisted from an earlier run (this
+	// pending (512 bytes); retained = pending + dead letter. Its own run,
+	// starting on an outbox whose seq was 1 (one overflow from an earlier
+	// run, overflow_total 1): seq_last 5 = 1 + 4 appended in this run (this
 	// process offered only derived 4 + duplicate 1); 2 metric points
 	// residual at stop = 2 unconfirmed.
 	final.Analytics.Delivered, final.Analytics.DeadLetters, final.Analytics.DeadLettersTotal = 2, 1, 1
@@ -413,11 +422,11 @@ func TestHealthEventGolden(t *testing.T) {
 	final.Analytics.OverflowTotal, final.Analytics.ProducerSeqLast = 1, 5
 	final.Metrics.Delivered, final.Metrics.Unconfirmed, final.Metrics.Canceled = 10, 2, 2
 	final.FinalResidualRecords = 2
-	goldenHealth(t, "final-not-drained", final)
+	goldenHealth(t, "final-not-drained", run(final, 4))
 
 	drained := fixedHealthInputs(telemetrycontract.HealthTriggerFinal)
 	drained.Seq = 3
-	goldenHealth(t, "final-drained", drained)
+	goldenHealth(t, "final-drained", run(drained, 5))
 }
 
 // Identity: the event ID is a pure function of namespace, run and seq.
@@ -584,11 +593,11 @@ func TestHealthEmitterHoldRetryAndReplay(t *testing.T) {
 	h.hub = ""
 	h.fail = true
 	h.mu.Unlock()
-	h.p.SettleUsageSource(map[string]string{"SCION_USAGE_SOURCE": "native"}, "disabled")
+	settleNow(h.p, map[string]string{"SCION_USAGE_SOURCE": "native"}, "disabled")
 	if got := h.p.health.queue[0].ev.UsageSource; got != "native" {
 		t.Fatalf("the selected source must be kept when disabled: %q", got)
 	}
-	h.p.SettleUsageSource(nil, "") // a second settle never emits a second start
+	settleNow(h.p, nil, "") // a second settle never emits a second start
 	h.p.flushHealth(ctx)
 	if n := len(h.p.health.queue); n != 1 || h.p.health.queue[0].line != nil {
 		t.Fatalf("start must be held unfrozen until the hub is pinned: queue=%d", n)
@@ -629,7 +638,7 @@ func TestHealthEmitterQueueCap(t *testing.T) {
 	h.mu.Lock()
 	h.fail = true
 	h.mu.Unlock()
-	h.p.SettleUsageSource(nil, "")
+	settleNow(h.p, nil, "")
 	for i := 0; i < healthQueueCap+2; i++ {
 		h.p.emitHealth(telemetrycontract.HealthTriggerPeriodic)
 	}
@@ -647,7 +656,7 @@ func TestHealthEmitterQueueCap(t *testing.T) {
 // mark (advanced by the refused event) and loss_indicated.
 func TestHealthFinalWithPendingAndOverflow(t *testing.T) {
 	h := newHealthHarness(t)
-	h.p.SettleUsageSource(map[string]string{"SCION_USAGE_SOURCE": "hooks"}, "")
+	settleNow(h.p, map[string]string{"SCION_USAGE_SOURCE": "hooks"}, "")
 	h.mu.Lock()
 	h.fail = true
 	h.mu.Unlock()
@@ -701,7 +710,7 @@ func TestHealthDisabledWithoutGCPExporter(t *testing.T) {
 	if p.health.enabled || len(p.health.queue) != 0 {
 		t.Fatal("health must stay disabled without the GCP exporter")
 	}
-	if _, ok, reason := p.AnalyticsDiagnostics(true); ok || reason != AnalyticsDisabledNoGCPExporter {
+	if _, ok, reason := p.AnalyticsDiagnostics(); ok || reason != AnalyticsDisabledNoGCPExporter {
 		t.Fatalf("analytics diagnostics ok=%v reason=%q", ok, reason)
 	}
 	p.emitFinalHealth(context.Background()) // no-op, no panic
@@ -743,7 +752,7 @@ func TestAnalyticsStatsFailureReported(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "cursor"), []byte("garbage"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	c := analyticsHandles{native: NewUsageAnalytics(o, telemetrycontract.UsageSourceNative)}.counters(time.Now(), true)
+	c := analyticsHandles{native: NewUsageAnalytics(o, telemetrycontract.UsageSourceNative)}.counters(time.Now())
 	if !c.StatsFailed || c.PendingBytes != 0 {
 		t.Fatalf("stats failed %v pending %d", c.StatsFailed, c.PendingBytes)
 	}
@@ -980,7 +989,7 @@ func TestAnalyticsLedgerReadFailureIsStatsFailure(t *testing.T) {
 		if err := corrupt(dir); err != nil {
 			t.Fatal(err)
 		}
-		c := analyticsHandles{native: NewUsageAnalytics(o, telemetrycontract.UsageSourceNative)}.counters(time.Now(), true)
+		c := analyticsHandles{native: NewUsageAnalytics(o, telemetrycontract.UsageSourceNative)}.counters(time.Now())
 		if !c.StatsFailed {
 			t.Errorf("%s: stats_failed = false; the value would read as a measured 0", name)
 		}
@@ -999,7 +1008,7 @@ func TestAnalyticsLedgerReadFailureIsStatsFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c := (analyticsHandles{native: NewUsageAnalytics(o, telemetrycontract.UsageSourceNative)}).counters(time.Now(), true); c.StatsFailed || c.ProducerEpoch == "" {
+	if c := (analyticsHandles{native: NewUsageAnalytics(o, telemetrycontract.UsageSourceNative)}).counters(time.Now()); c.StatsFailed || c.ProducerEpoch == "" {
 		t.Fatalf("healthy outbox: %+v", c)
 	}
 }
@@ -1022,7 +1031,7 @@ func TestHealthPermanentRejectionDoesNotBlock(t *testing.T) {
 		return nil
 	}
 	h.p.health.mu.Unlock()
-	h.p.SettleUsageSource(nil, "")
+	settleNow(h.p, nil, "")
 	h.p.emitHealth(telemetrycontract.HealthTriggerPeriodic)
 	h.p.flushHealth(context.Background())
 	evs := h.sentEvents(t)
@@ -1084,7 +1093,7 @@ func TestHealthStatsFailureNoFalseEpochOrSeq(t *testing.T) {
 	if out, err := native.Record(obs); err != nil || out != AppendWritten {
 		t.Fatalf("append: %v %v", out, err)
 	}
-	h.p.SettleUsageSource(nil, "")
+	settleNow(h.p, nil, "")
 	seqPath := filepath.Join(h.outbox.Dir(), "seq")
 	good, err := os.ReadFile(seqPath)
 	if err != nil {
@@ -1145,14 +1154,14 @@ func TestAnalyticsHeldReported(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := analyticsHandles{native: NewUsageAnalytics(o, telemetrycontract.UsageSourceNative)}
-	if c := h.counters(time.Now(), true); c.Held || c.StatsFailed {
+	if c := h.counters(time.Now()); c.Held || c.StatsFailed {
 		t.Fatalf("healthy outbox: held %v stats_failed %v", c.Held, c.StatsFailed)
 	}
 	// A producer that stopped right after writing its intent (WP2 write path).
 	o.crashAt = "intent"
 	_, _ = o.AppendUsage(draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:held", 1))
 	o.crashAt = ""
-	c := h.counters(time.Now(), true)
+	c := h.counters(time.Now())
 	if !c.Held {
 		t.Fatal("intent on disk must report held")
 	}
@@ -1187,7 +1196,7 @@ func TestRetainedMatchesOutbox(t *testing.T) {
 	if err := o.deadLetter([]byte(`{"x":1}`)); err != nil {
 		t.Fatal(err)
 	}
-	c := analyticsHandles{native: native}.counters(time.Now(), true)
+	c := analyticsHandles{native: native}.counters(time.Now())
 	ledger, err := o.LedgerSnapshot()
 	if err != nil {
 		t.Fatal(err)
@@ -1209,7 +1218,7 @@ func TestAnalyticsCountersNilOutbox(t *testing.T) {
 		t.Fatal(err)
 	}
 	lazy := NewLazyUsageAnalytics(filepath.Join(blocker, "ob"), nil, telemetrycontract.UsageSourceHooks)
-	c := analyticsHandles{native: lazy}.counters(time.Now(), true)
+	c := analyticsHandles{native: lazy}.counters(time.Now())
 	if !c.StatsFailed {
 		t.Fatal("unavailable outbox must report stats_failed")
 	}
@@ -1229,7 +1238,7 @@ func TestAnalyticsCountersNilOutbox(t *testing.T) {
 // and counted in health_rejected, so its seq gap is explained.
 func TestHealthInvalidEventCounted(t *testing.T) {
 	h := newHealthHarness(t)
-	h.p.SettleUsageSource(nil, "")
+	settleNow(h.p, nil, "")
 	h.p.health.mu.Lock()
 	h.p.health.queue[0].ev.Trigger = "bogus" // make it fail Validate
 	h.p.health.mu.Unlock()
@@ -1260,13 +1269,167 @@ func startRow(in healthInputs) healthInputs {
 	return in
 }
 
-// Every golden must decode and validate, and must satisfy the cross-field
-// invariants of a real row (R4-4): goldens are mirrored as WP4 fixtures.
+// healthRowViolations returns the cross-field invariants a single real
+// health row violates. The same checker runs over the goldens and over
+// events captured from a real pipeline flow (TestHealthRealFlowSatisfiesInvariants),
+// so the goldens are held to what live events satisfy.
+func healthRowViolations(ev *telemetrycontract.HealthEvent) []string {
+	var out []string
+	bad := func(format string, args ...any) { out = append(out, fmt.Sprintf(format, args...)) }
+	v := func(p *int64) int64 {
+		if p == nil {
+			return 0
+		}
+		return *p
+	}
+	if ev.UsageObservationsDerived != nil {
+		recognized := v(ev.UsageLogRecordsRecognized) + v(ev.UsageMetricIncrements)
+		if recognized != v(ev.UsageObservationsIgnored)+v(ev.UsageObservationsDuplicate)+v(ev.UsageObservationsDerived) {
+			bad("recognized observations do not split into ignored+duplicate+derived")
+		}
+		if v(ev.UsageLogRecordsMalformed) > v(ev.UsageLogRecordsRecognized) || v(ev.UsageLogRecordsRecognized) > v(ev.UsageLogRecordsReceived) {
+			bad("malformed <= recognized <= received violated")
+		}
+	}
+	if ev.AnalyticsPendingBytes != nil { // measured disk state
+		if v(ev.AnalyticsAppended)+v(ev.AnalyticsOverflow) > v(ev.ProducerSeqLast) {
+			bad("appended+overflow exceed allocated seqs")
+		}
+		settled := v(ev.AnalyticsDelivered) + v(ev.AnalyticsDeadLetters) + v(ev.AnalyticsQuarantined)
+		if settled > v(ev.AnalyticsFinalized) || (v(ev.AnalyticsPendingBytes) == 0 && settled != v(ev.AnalyticsFinalized)) {
+			bad("finalized lines not accounted for (delivered+dead+quarantined %d, finalized %d, pending %d)",
+				settled, v(ev.AnalyticsFinalized), v(ev.AnalyticsPendingBytes))
+		}
+		if v(ev.AnalyticsDeadLetters) > v(ev.AnalyticsDeadLettersTotal) || v(ev.AnalyticsOverflow) > v(ev.AnalyticsOverflowTotal) {
+			bad("a per-run counter exceeds its persisted total")
+		}
+	}
+	// accepted is counted after the policy filter; delivered, unconfirmed
+	// and dropped are outcomes of accepted records (the rest are queued).
+	if ev.MetricPointsDelivered+ev.MetricPointsUnconfirmed+ev.MetricPointsDropped > ev.MetricPointsAccepted {
+		bad("metric outcomes exceed accepted")
+	}
+	if ev.LogRecordsDelivered+ev.LogRecordsUnconfirmed+ev.LogRecordsDropped > ev.LogRecordsAccepted {
+		bad("log outcomes exceed accepted")
+	}
+	if ev.FinalResidualRecords != nil && *ev.FinalResidualRecords > ev.MetricPointsUnconfirmed {
+		bad("residual records must also be unconfirmed")
+	}
+	if ev.MetricExportFailures > ev.MetricExportAttempts || ev.MetricExportRetries > 0 && ev.MetricExportRetries >= ev.MetricExportAttempts {
+		bad("metric export call counts inconsistent")
+	}
+	if ev.LogExportFailures > ev.LogExportAttempts || ev.LogExportRetries > 0 && ev.LogExportRetries >= ev.LogExportAttempts {
+		bad("log export call counts inconsistent")
+	}
+	if ev.FinalFlushOutcome == telemetrycontract.FinalFlushDrained {
+		if ev.MetricPointsDelivered+ev.MetricPointsUnconfirmed+ev.MetricPointsDropped != ev.MetricPointsAccepted ||
+			ev.LogRecordsDelivered+ev.LogRecordsUnconfirmed+ev.LogRecordsDropped != ev.LogRecordsAccepted ||
+			ev.QueueRecords != 0 || ev.QueueBytes != 0 {
+			bad("drained, but accepted records are unaccounted for")
+		}
+	}
+	if ev.UsageCollection != telemetrycontract.UsageCollectionEnabled && (v(ev.AnalyticsAppended) != 0 || v(ev.AnalyticsCertainDuplicates) != 0) {
+		bad("this process appended usage events while collection is %s", ev.UsageCollection)
+	}
+	if ev.UsageSource == telemetrycontract.UsageSourceNative && ev.AnalyticsAppended != nil {
+		offered := v(ev.UsageObservationsDerived) + v(ev.UsageObservationsDuplicate)
+		outcomes := v(ev.AnalyticsAppended) + v(ev.AnalyticsCertainDuplicates) + v(ev.AnalyticsOverflow)
+		if outcomes > offered {
+			bad("outbox outcomes %d exceed events offered %d", outcomes, offered)
+		}
+	}
+	if ev.Trigger == telemetrycontract.HealthTriggerStart && (v(ev.UsageObservationsDerived) != 0 || v(ev.AnalyticsAppended) != 0 ||
+		ev.MetricPointsAccepted != 0 || ev.LogRecordsAccepted != 0 || ev.HarnessVersion != "") {
+		bad("a start snapshot carries per-run activity")
+	}
+	return out
+}
+
+// healthSetViolations returns the invariants a set of rows violates as if
+// they were all live events: the primary key (producer_namespace, event_id)
+// is unique; within one (namespace, pipeline_run_id) health_seq is unique,
+// there is at most one start and one final (the final has the highest seq),
+// one harness and one usage source, epochs agree, producer_seq_last never
+// decreases with health_seq, and a final's high-water covers the start's
+// plus this run's appends and overflow.
+func healthSetViolations(evs map[string]*telemetrycontract.HealthEvent) []string {
+	var out []string
+	bad := func(format string, args ...any) { out = append(out, fmt.Sprintf(format, args...)) }
+	v := func(p *int64) int64 {
+		if p == nil {
+			return 0
+		}
+		return *p
+	}
+	keys := map[string]string{}
+	runs := map[string][]string{}
+	for name, ev := range evs {
+		k := ev.ProducerNamespace + "\x00" + ev.EventID
+		if prev, dup := keys[k]; dup {
+			bad("%s and %s share the primary key (namespace, event_id %s)", prev, name, ev.EventID)
+		}
+		keys[k] = name
+		r := ev.ProducerNamespace + "\x00" + ev.PipelineRunID
+		runs[r] = append(runs[r], name)
+	}
+	for _, names := range runs {
+		sort.Slice(names, func(i, j int) bool { return evs[names[i]].HealthSeq < evs[names[j]].HealthSeq })
+		var start, final *telemetrycontract.HealthEvent
+		seqs := map[int64]string{}
+		for i, name := range names {
+			ev := evs[name]
+			if prev, dup := seqs[ev.HealthSeq]; dup {
+				bad("%s and %s share health_seq %d in one run", prev, name, ev.HealthSeq)
+			}
+			seqs[ev.HealthSeq] = name
+			switch ev.Trigger {
+			case telemetrycontract.HealthTriggerStart:
+				if start != nil {
+					bad("run has two start events (%s)", name)
+				}
+				start = ev
+			case telemetrycontract.HealthTriggerFinal:
+				if final != nil {
+					bad("run has two final events (%s)", name)
+				}
+				final = ev
+				if i != len(names)-1 {
+					bad("%s: final is not the last event of its run", name)
+				}
+			}
+			if i > 0 {
+				prev := evs[names[i-1]]
+				if prev.Harness != ev.Harness || prev.UsageSource != ev.UsageSource {
+					bad("%s: harness/usage source changes within a run", name)
+				}
+				if prev.ProducerEpoch != "" && ev.ProducerEpoch != "" {
+					if prev.ProducerEpoch != ev.ProducerEpoch {
+						bad("%s: producer_epoch changes within a run", name)
+					} else if v(ev.ProducerSeqLast) < v(prev.ProducerSeqLast) {
+						bad("%s: producer_seq_last decreases within a run", name)
+					}
+				}
+			}
+		}
+		if start != nil && final != nil && start.ProducerSeqLast != nil && final.ProducerSeqLast != nil &&
+			v(final.ProducerSeqLast) < v(start.ProducerSeqLast)+v(final.AnalyticsAppended)+v(final.AnalyticsOverflow) {
+			bad("final producer_seq_last %d < start %d + appended %d + overflow %d",
+				v(final.ProducerSeqLast), v(start.ProducerSeqLast), v(final.AnalyticsAppended), v(final.AnalyticsOverflow))
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// Every golden must decode and validate, satisfy the row invariants of a
+// real row, and the set must satisfy the live-event set invariants (R4-4,
+// R5-1, R6-1): goldens are mirrored as WP4 fixtures.
 func TestHealthGoldensAreConsistent(t *testing.T) {
 	files, err := filepath.Glob(filepath.Join("testdata", "health", "*.json"))
 	if err != nil || len(files) < 5 {
 		t.Fatalf("goldens: %v %v", files, err)
 	}
+	evs := map[string]*telemetrycontract.HealthEvent{}
 	for _, f := range files {
 		raw, err := os.ReadFile(f)
 		if err != nil {
@@ -1276,80 +1439,103 @@ func TestHealthGoldensAreConsistent(t *testing.T) {
 		if err := json.Compact(&compact, raw); err != nil {
 			t.Fatal(err)
 		}
-		var ev telemetrycontract.HealthEvent
-		if err := telemetrycontract.Unmarshal(compact.Bytes(), &ev); err != nil {
+		ev := &telemetrycontract.HealthEvent{}
+		if err := telemetrycontract.Unmarshal(compact.Bytes(), ev); err != nil {
 			t.Errorf("%s: does not validate: %v", f, err)
 			continue
 		}
-		v := func(p *int64) int64 {
-			if p == nil {
-				return 0
-			}
-			return *p
+		for _, msg := range healthRowViolations(ev) {
+			t.Errorf("%s: %s", f, msg)
 		}
-		if ev.UsageObservationsDerived != nil {
-			recognized := v(ev.UsageLogRecordsRecognized) + v(ev.UsageMetricIncrements)
-			if recognized != v(ev.UsageObservationsIgnored)+v(ev.UsageObservationsDuplicate)+v(ev.UsageObservationsDerived) {
-				t.Errorf("%s: recognized observations do not split into ignored+duplicate+derived", f)
-			}
-			if v(ev.UsageLogRecordsMalformed) > v(ev.UsageLogRecordsRecognized) || v(ev.UsageLogRecordsRecognized) > v(ev.UsageLogRecordsReceived) {
-				t.Errorf("%s: malformed <= recognized <= received violated", f)
-			}
+		evs[filepath.Base(f)] = ev
+	}
+	for _, msg := range healthSetViolations(evs) {
+		t.Errorf("golden set: %s", msg)
+	}
+}
+
+// The checkers are held to live output: a real flow (real outbox, native
+// deriver with analytics, start -> usage -> periodic -> final through the
+// emitter) produces events that validate and satisfy every row and set
+// invariant the goldens are checked against.
+func TestHealthRealFlowSatisfiesInvariants(t *testing.T) {
+	h := newHealthHarness(t)
+	d := bareUsageDeriver(claudeUsageRule{})
+	d.analytics = h.p.health.analyticsHandles.native
+	h.p.usageDeriver.Store(d)
+	settleNow(h.p, map[string]string{"SCION_USAGE_SOURCE": "native"}, "enabled")
+	h.p.flushHealth(context.Background())
+	feed(d, claudeLogs(
+		claudeRecord("req_011CUabcdefghijklmnopq", "1", 10, fullClaudeTokens),
+		claudeRecord("req_011CUabcdefghijklmnopq", "1", 10, fullClaudeTokens), // duplicate
+		claudeRecord("", "2", 20, fullClaudeTokens),
+		namedRecord("tool_result", 30),
+	))
+	h.p.emitHealth(telemetrycontract.HealthTriggerPeriodic)
+	h.p.flushHealth(context.Background())
+	h.p.captureFinalUsage(d)
+	h.p.emitFinalHealth(context.Background())
+
+	h.mu.Lock()
+	lines := append([][]byte(nil), h.sent...)
+	h.mu.Unlock()
+	if len(lines) != 3 {
+		t.Fatalf("sent %d events, want start, periodic, final", len(lines))
+	}
+	evs := map[string]*telemetrycontract.HealthEvent{}
+	for i, l := range lines {
+		ev := &telemetrycontract.HealthEvent{}
+		if err := telemetrycontract.Unmarshal(l, ev); err != nil {
+			t.Fatal(err)
 		}
-		if ev.AnalyticsPendingBytes != nil { // measured disk state
-			if v(ev.AnalyticsAppended)+v(ev.AnalyticsOverflow) > v(ev.ProducerSeqLast) {
-				t.Errorf("%s: appended+overflow exceed allocated seqs", f)
-			}
-			settled := v(ev.AnalyticsDelivered) + v(ev.AnalyticsDeadLetters) + v(ev.AnalyticsQuarantined)
-			if settled > v(ev.AnalyticsFinalized) || (v(ev.AnalyticsPendingBytes) == 0 && settled != v(ev.AnalyticsFinalized)) {
-				t.Errorf("%s: finalized lines are not accounted for (delivered+dead+quarantined %d, finalized %d, pending %d)",
-					f, settled, v(ev.AnalyticsFinalized), v(ev.AnalyticsPendingBytes))
-			}
-			if v(ev.AnalyticsDeadLetters) > v(ev.AnalyticsDeadLettersTotal) || v(ev.AnalyticsOverflow) > v(ev.AnalyticsOverflowTotal) {
-				t.Errorf("%s: a per-run counter exceeds its persisted total", f)
-			}
+		for _, msg := range healthRowViolations(ev) {
+			t.Errorf("live %s: %s", ev.Trigger, msg)
 		}
-		// accepted is counted after the policy filter, so filtered is not
-		// part of it; delivered, unconfirmed and dropped are outcomes of
-		// accepted records (the rest are still queued).
-		if ev.MetricPointsDelivered+ev.MetricPointsUnconfirmed+ev.MetricPointsDropped > ev.MetricPointsAccepted {
-			t.Errorf("%s: metric outcomes exceed accepted", f)
+		evs[fmt.Sprintf("live-%d-%s", i, ev.Trigger)] = ev
+	}
+	for _, msg := range healthSetViolations(evs) {
+		t.Errorf("live set: %s", msg)
+	}
+	final := evs["live-2-final"]
+	if final == nil || *final.AnalyticsAppended != 2 || *final.AnalyticsCertainDuplicates != 1 || *final.ProducerSeqLast != 2 {
+		t.Fatalf("live final counters: %+v", final)
+	}
+}
+
+// The set checker catches the r6 golden defects (shared run: duplicate
+// primary key, two finals, harness switch, seq_last not covering appends).
+func TestHealthSetViolationsDetectsSharedRun(t *testing.T) {
+	setTestVersion(t)
+	mk := func(name string, in healthInputs) (string, *telemetrycontract.HealthEvent) {
+		ev, err := buildHealthEvent(in)
+		if err != nil {
+			t.Fatal(err)
 		}
-		if ev.LogRecordsDelivered+ev.LogRecordsUnconfirmed+ev.LogRecordsDropped > ev.LogRecordsAccepted {
-			t.Errorf("%s: log outcomes exceed accepted", f)
-		}
-		if ev.LogExportFailures > ev.LogExportAttempts || ev.LogExportRetries > 0 && ev.LogExportRetries >= ev.LogExportAttempts {
-			t.Errorf("%s: log export call counts inconsistent", f)
-		}
-		if ev.FinalFlushOutcome == telemetrycontract.FinalFlushDrained {
-			// Nothing left anywhere: every accepted record has an outcome.
-			if ev.MetricPointsDelivered+ev.MetricPointsUnconfirmed+ev.MetricPointsDropped != ev.MetricPointsAccepted ||
-				ev.LogRecordsDelivered+ev.LogRecordsUnconfirmed+ev.LogRecordsDropped != ev.LogRecordsAccepted ||
-				ev.QueueRecords != 0 || ev.QueueBytes != 0 {
-				t.Errorf("%s: drained, but accepted records are unaccounted for", f)
-			}
-		}
-		if ev.UsageCollection != telemetrycontract.UsageCollectionEnabled && (v(ev.AnalyticsAppended) != 0 || v(ev.AnalyticsCertainDuplicates) != 0) {
-			t.Errorf("%s: this process appended usage events while collection is %s", f, ev.UsageCollection)
-		}
-		if ev.UsageSource == telemetrycontract.UsageSourceNative && ev.AnalyticsAppended != nil {
-			// The native path offers one event per derived or duplicate
-			// observation; each ends in at most one outbox outcome.
-			offered := v(ev.UsageObservationsDerived) + v(ev.UsageObservationsDuplicate)
-			outcomes := v(ev.AnalyticsAppended) + v(ev.AnalyticsCertainDuplicates) + v(ev.AnalyticsOverflow)
-			if outcomes > offered {
-				t.Errorf("%s: outbox outcomes %d exceed events offered %d", f, outcomes, offered)
-			}
-		}
-		if ev.Trigger == telemetrycontract.HealthTriggerStart && (v(ev.UsageObservationsDerived) != 0 || v(ev.AnalyticsAppended) != 0 ||
-			ev.MetricPointsAccepted != 0 || ev.LogRecordsAccepted != 0 || ev.HarnessVersion != "") {
-			t.Errorf("%s: a start snapshot carries per-run activity", f)
-		}
-		if ev.FinalResidualRecords != nil && *ev.FinalResidualRecords > ev.MetricPointsUnconfirmed {
-			t.Errorf("%s: residual records must also be unconfirmed", f)
-		}
-		if ev.MetricExportFailures > ev.MetricExportAttempts || ev.MetricExportRetries >= ev.MetricExportAttempts && ev.MetricExportAttempts > 0 {
-			t.Errorf("%s: metric export call counts inconsistent", f)
+		return name, ev
+	}
+	evs := map[string]*telemetrycontract.HealthEvent{}
+	shared := func(trigger string, seq int64) healthInputs {
+		in := fixedHealthInputs(trigger)
+		in.PipelineRunID, in.Seq = "shared-run", seq
+		return in
+	}
+	n, e := mk("start-a", startRow(shared(telemetrycontract.HealthTriggerStart, 1)))
+	evs[n] = e
+	n, e = mk("start-b", startRow(shared(telemetrycontract.HealthTriggerStart, 1)))
+	evs[n] = e
+	hooks := shared(telemetrycontract.HealthTriggerPeriodic, 2)
+	hooks.Harness, hooks.Usage, hooks.UsageDiag, hooks.AnalyticsEnabled, hooks.AnalyticsDisabledReason =
+		"antigravity", enabledUsage(telemetrycontract.UsageSourceHooks, "antigravity"), nil, false, "outbox_unavailable"
+	n, e = mk("periodic-hooks", hooks)
+	evs[n] = e
+	n, e = mk("final-a", shared(telemetrycontract.HealthTriggerFinal, 3))
+	evs[n] = e
+	n, e = mk("final-b", shared(telemetrycontract.HealthTriggerFinal, 7))
+	evs[n] = e
+	got := strings.Join(healthSetViolations(evs), "\n")
+	for _, want := range []string{"share the primary key", "two start events", "two final events", "harness/usage source changes", "final producer_seq_last"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("set checker missed %q; got:\n%s", want, got)
 		}
 	}
 }
@@ -1421,7 +1607,7 @@ func TestHealthLedgerMatchesWP2WritePaths(t *testing.T) {
 	_, _ = o.AppendUsage(draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:h", 1))
 	o.crashAt = ""
 
-	c := analyticsHandles{native: NewUsageAnalytics(o, telemetrycontract.UsageSourceNative)}.counters(time.Now(), true)
+	c := analyticsHandles{native: NewUsageAnalytics(o, telemetrycontract.UsageSourceNative)}.counters(time.Now())
 	if c.StatsFailed {
 		t.Fatal("stats failed on a readable outbox")
 	}
@@ -1464,7 +1650,7 @@ func TestAnalyticsLedgerLockTimeoutIsStatsFailure(t *testing.T) {
 	}
 	defer func() { _ = unix.Flock(int(f.Fd()), unix.LOCK_UN) }()
 	o.lockWait = 50 * time.Millisecond
-	c := analyticsHandles{native: NewUsageAnalytics(o, telemetrycontract.UsageSourceNative)}.counters(time.Now(), true)
+	c := analyticsHandles{native: NewUsageAnalytics(o, telemetrycontract.UsageSourceNative)}.counters(time.Now())
 	if !c.StatsFailed {
 		t.Fatal("a lock timeout must be a stats failure")
 	}
@@ -1486,12 +1672,154 @@ func TestHealthAnalyticsDisabledWithFailingProducer(t *testing.T) {
 	}
 	p := NewWithConfig(&Config{Enabled: true})
 	p.health.analyticsHandles = handles
-	if _, ok, reason := p.AnalyticsDiagnostics(false); ok || reason != telemetrycontract.AnalyticsDisabledOutboxUnavailable {
+	if _, ok, reason := p.AnalyticsDiagnostics(); ok || reason != telemetrycontract.AnalyticsDisabledOutboxUnavailable {
 		t.Fatalf("ok %v reason %q", ok, reason)
 	}
 	p.health.now, p.health.runID = time.Now, "run"
 	in := p.healthSnapshotInputs(telemetrycontract.HealthTriggerPeriodic)
 	if in.AnalyticsEnabled || in.AnalyticsDisabledReason != telemetrycontract.AnalyticsDisabledOutboxUnavailable {
 		t.Fatalf("inputs: enabled %v reason %q", in.AnalyticsEnabled, in.AnalyticsDisabledReason)
+	}
+}
+
+// settleNow records the usage-source decision and, as the health loop would
+// on its kick, emits the start event (tests drive the emitter by hand with
+// the loop stopped; SettleUsageSource itself never emits).
+func settleNow(p *Pipeline, overlay map[string]string, policy string) {
+	p.SettleUsageSource(overlay, policy)
+	p.emitHealth(telemetrycontract.HealthTriggerStart)
+}
+
+// O-1 (r6): inline snapshots never wait on the outbox flock. With the flock
+// held (default 2 s lock wait), the degraded/export-failure path returns at
+// once, both on the first transition (forced) and when already degraded
+// with the 60 s interval elapsed; and it does not wait behind a periodic
+// snapshot that is blocked reading the ledger.
+func TestDegradedSnapshotNeverWaitsOnOutboxLock(t *testing.T) {
+	setAnalyticsEnv(t, "claude")
+	o := testOutbox(t)
+	p := NewWithConfig(&Config{Enabled: true})
+	p.health.analyticsHandles = analyticsHandles{native: NewUsageAnalytics(o, telemetrycontract.UsageSourceNative), send: newCountingSend(nil)}
+	f, err := os.OpenFile(filepath.Join(o.Dir(), "lock"), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	unlocked := false
+	defer func() {
+		if !unlocked {
+			_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
+		}
+	}()
+
+	// A periodic snapshot blocked on the ledger read (outside diagnosticMu).
+	periodicDone := make(chan struct{})
+	p.diagnosticLast = time.Now().Add(-2 * diagnosticSnapshotInterval)
+	go func() {
+		defer close(periodicDone)
+		p.logDeliverySnapshotDisk(false, true)
+	}()
+	time.Sleep(50 * time.Millisecond) // let it reach the lock wait
+
+	start := time.Now()
+	p.markDeliveryDegraded() // first transition: forced
+	p.diagnosticMu.Lock()
+	p.diagnosticLast = time.Now().Add(-2 * diagnosticSnapshotInterval)
+	p.diagnosticMu.Unlock()
+	p.markDeliveryDegraded() // already degraded, interval elapsed
+	if d := time.Since(start); d > 500*time.Millisecond {
+		t.Fatalf("degraded snapshots took %s with the outbox lock held; they must not read the ledger", d)
+	}
+	_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
+	unlocked = true
+	<-periodicDone
+}
+
+// O-2 (r6): with analytics disabled because the outbox is unavailable, the
+// usage events WP2's failing producer could not write still set
+// loss_indicated (the analytics_* counters themselves stay omitted).
+func TestDisabledAnalyticsLostEventsIndicateLoss(t *testing.T) {
+	setAnalyticsEnv(t, "claude")
+	clearUsageSourceEnv(t)
+	setTestVersion(t)
+	blocker := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	failing := NewLazyUsageAnalytics(filepath.Join(blocker, "ob"), nil, telemetrycontract.UsageSourceNative)
+	obs := claudeObservation("api_request", claudeRecord("req_011CUabcdefghijklmnopq", "1", 5, fullClaudeTokens).Attributes)
+	obs.Identity, obs.SourceEventID, obs.SourceKind, obs.Status, obs.Calls = telemetrycontract.SourceIdentityComposite, "cmp1:lost", "claude.api_request", "success", 1
+	if _, err := failing.Record(obs); err == nil {
+		t.Fatal("expected the failing producer to refuse the event")
+	}
+	p := NewWithConfig(&Config{Enabled: true})
+	p.health.analyticsHandles = analyticsHandles{native: failing, disabledReason: telemetrycontract.AnalyticsDisabledOutboxUnavailable}
+	p.health.now, p.health.runID = time.Now, "run"
+	in := p.healthSnapshotInputs(telemetrycontract.HealthTriggerPeriodic)
+	in.AgentID = "agent-1"
+	ev, err := buildHealthEvent(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.AnalyticsState != "disabled" || ev.AnalyticsDisabledReason != "outbox_unavailable" || !ev.LossIndicated || ev.AnalyticsInvalid != nil {
+		t.Fatalf("state %q reason %q loss %v invalid %v", ev.AnalyticsState, ev.AnalyticsDisabledReason, ev.LossIndicated, ev.AnalyticsInvalid)
+	}
+}
+
+// token-analyst-2 (r6 O-2 scope): outbox unavailable with zero refused
+// events does not indicate loss; after one refusal the next snapshot does.
+// Neither row invents a refused-event count or any analytics_* value, and
+// an earlier run's delivered usage (its own final event) is unaffected.
+func TestDisabledAnalyticsLossFlagTransition(t *testing.T) {
+	setAnalyticsEnv(t, "claude")
+	clearUsageSourceEnv(t)
+	setTestVersion(t)
+	// An earlier run that delivered usage (independent row, untouched).
+	earlier, err := buildHealthEvent(fixedHealthInputs(telemetrycontract.HealthTriggerFinal))
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocker := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	failing := NewLazyUsageAnalytics(filepath.Join(blocker, "ob"), nil, telemetrycontract.UsageSourceNative)
+	p := NewWithConfig(&Config{Enabled: true})
+	p.health.analyticsHandles = analyticsHandles{native: failing, disabledReason: telemetrycontract.AnalyticsDisabledOutboxUnavailable}
+	p.health.now, p.health.runID = time.Now, "unavailable-run"
+	snapshot := func() *telemetrycontract.HealthEvent {
+		in := p.healthSnapshotInputs(telemetrycontract.HealthTriggerPeriodic)
+		ev, err := buildHealthEvent(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ev.HubID = "hub-1"
+		line, err := telemetrycontract.Marshal(ev)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(line), `"analytics_invalid"`) || strings.Contains(string(line), `"analytics_appended"`) {
+			t.Fatalf("disabled row must not serialize analytics counters: %s", line)
+		}
+		return ev
+	}
+	before := snapshot()
+	if before.LossIndicated || before.AnalyticsState != "disabled" {
+		t.Fatalf("zero refusals: loss %v state %q", before.LossIndicated, before.AnalyticsState)
+	}
+	obs := claudeObservation("api_request", claudeRecord("req_011CUabcdefghijklmnopq", "1", 5, fullClaudeTokens).Attributes)
+	obs.Identity, obs.SourceEventID, obs.SourceKind, obs.Status, obs.Calls = telemetrycontract.SourceIdentityComposite, "cmp1:r", "claude.api_request", "success", 1
+	if _, err := failing.Record(obs); err == nil {
+		t.Fatal("expected a refusal")
+	}
+	after := snapshot()
+	if !after.LossIndicated {
+		t.Fatal("one refusal must set loss_indicated")
+	}
+	if earlier.AnalyticsDelivered == nil || *earlier.AnalyticsDelivered == 0 || earlier.PipelineRunID == after.PipelineRunID {
+		t.Fatalf("earlier run's delivered usage must stay its own independent row")
 	}
 }

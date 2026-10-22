@@ -141,8 +141,22 @@ func (p *Pipeline) UsageDiagnostics() UsageDiagnostics {
 // Snapshots use the local logger only. They are fixed-cardinality and do not
 // traverse the telemetry exporter whose failure they describe.
 func (p *Pipeline) logDeliverySnapshot(force bool) {
+	p.logDeliverySnapshotDisk(force, false)
+}
+
+// logDeliverySnapshotDisk is logDeliverySnapshot with an explicit choice of
+// whether the outbox ledger may be read. Only the periodic ticker passes
+// readDisk=true; every inline caller (Start, Stop, export-failure and
+// degraded paths) passes false, so none of them ever waits on the outbox
+// flock. The ledger read happens before diagnosticMu is taken, so an inline
+// snapshot never waits behind a periodic ledger read either.
+func (p *Pipeline) logDeliverySnapshotDisk(force, readDisk bool) {
 	if p == nil {
 		return
+	}
+	var analytics string
+	if readDisk {
+		analytics = p.analyticsSnapshotLine(true)
 	}
 	p.diagnosticMu.Lock()
 	defer p.diagnosticMu.Unlock()
@@ -150,40 +164,45 @@ func (p *Pipeline) logDeliverySnapshot(force bool) {
 		return
 	}
 	p.diagnosticLast = time.Now()
+	if !readDisk {
+		analytics = p.analyticsSnapshotLine(false)
+	}
 	depth := p.QueueDepth()
 	diagnostics := p.Diagnostics()
-	analytics := "disabled"
-	// Forced snapshots run inline on export-failure and Start paths: they
-	// do not take the outbox lock (in-memory counters only). The periodic
-	// snapshot reads the ledger.
-	readDisk := !force
-	if counters, ok, reason := p.AnalyticsDiagnostics(readDisk); ok {
-		age := "none"
-		if counters.OldestPendingFileAgeMs != nil {
-			age = fmt.Sprintf("%d", *counters.OldestPendingFileAgeMs)
-		}
-		counters.OldestPendingFileAgeMs = nil // printed as a value below, not a pointer
-		if !readDisk {
-			analytics = fmt.Sprintf("{Appended:%d CertainDuplicates:%d Overflow:%d AppendFailed:%d Finalized:%d Delivered:%d SendFailures:%d SendRetries:%d Torn:%d DeadLetters:%d Unresolved:%d} disk=not_read(forced)",
-				counters.Appended, counters.CertainDuplicates, counters.Overflow, counters.AppendFailed, counters.Finalized,
-				counters.Delivered, counters.SendFailures, counters.SendRetries, counters.Torn, counters.DeadLetters, counters.Unresolved)
-		} else if counters.StatsFailed {
-			// Disk-derived fields are unknown: never print placeholder zeros.
-			counters.PendingBytes, counters.RetainedBytes, counters.ProducerSeqLast, counters.ProducerEpoch = 0, 0, 0, ""
-			counters.OverflowTotal, counters.OversizeTotal, counters.AppendFailedTotal, counters.DeadLettersTotal = 0, 0, 0, 0
-			counters.SyncUncertainTotal, counters.CommitDeferredTotal, counters.Held = 0, 0, false
-			age = "unknown"
-			analytics = fmt.Sprintf("%+v disk=unknown(stats_failed)", counters)
-		} else {
-			analytics = fmt.Sprintf("%+v oldest_pending_file_age_ms=%s", counters, age)
-		}
-	} else if reason != "" {
-		analytics = "disabled(" + reason + ")"
-	}
 	log.Info("Telemetry delivery snapshot state=%s queue_bytes=%d queue_records=%d queue_entries=%d spans=%+v metrics=%+v logs=%+v usage=%+v analytics=%s metric_reject_reasons=%s",
 		p.DeliveryState(), depth.Bytes, depth.Records, depth.Entries,
 		diagnostics["spans"], diagnostics["metrics"], diagnostics["logs"],
 		p.UsageDiagnostics(), analytics, p.metricRejectReasons(metricRejectReasonLimit))
+}
+
+// analyticsSnapshotLine formats the analytics part of the snapshot line:
+// the in-memory counters always, and the ledger only when readDisk.
+func (p *Pipeline) analyticsSnapshotLine(readDisk bool) string {
+	h := &p.health
+	h.mu.Lock()
+	handles := h.analyticsHandles
+	h.mu.Unlock()
+	if !handles.enabled() {
+		if handles.disabledReason != "" {
+			return "disabled(" + handles.disabledReason + ")"
+		}
+		return "disabled"
+	}
+	mem := handles.memory()
+	if !readDisk {
+		return fmt.Sprintf("%+v disk=not_read", mem)
+	}
+	c := handles.counters(time.Now())
+	if c.StatsFailed {
+		return fmt.Sprintf("%+v disk=unknown(stats_failed)", mem)
+	}
+	age := "none"
+	if c.OldestPendingFileAgeMs != nil {
+		age = fmt.Sprintf("%d", *c.OldestPendingFileAgeMs)
+	}
+	return fmt.Sprintf("%+v disk={Epoch:%s LastSeq:%d PendingBytes:%d RetainedBytes:%d Held:%v OverflowTotal:%d OversizeTotal:%d AppendFailedTotal:%d DeadLettersTotal:%d SyncUncertainTotal:%d CommitDeferredTotal:%d OldestPendingFileAgeMs:%s}",
+		mem, c.ProducerEpoch, c.ProducerSeqLast, c.PendingBytes, c.RetainedBytes, c.Held, c.OverflowTotal, c.OversizeTotal,
+		c.AppendFailedTotal, c.DeadLettersTotal, c.SyncUncertainTotal, c.CommitDeferredTotal, age)
 }
 
 func (p *Pipeline) markDeliveryDegraded() {
@@ -191,7 +210,8 @@ func (p *Pipeline) markDeliveryDegraded() {
 		return
 	}
 	previous := p.deliveryState.Swap("degraded")
-	p.logDeliverySnapshot(previous != "degraded")
+	// Inline on export-failure paths: never reads the outbox ledger.
+	p.logDeliverySnapshotDisk(previous != "degraded", false)
 }
 
 func (p *Pipeline) startDiagnosticSnapshots(ctx context.Context) {
@@ -207,7 +227,7 @@ func (p *Pipeline) startDiagnosticSnapshots(ctx context.Context) {
 			case <-localCtx.Done():
 				return
 			case <-ticker.C:
-				p.logDeliverySnapshot(false)
+				p.logDeliverySnapshotDisk(false, true) // the only ledger reader
 			}
 		}
 	}()
