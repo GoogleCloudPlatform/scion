@@ -69,9 +69,10 @@ type UsageAnalytics struct {
 	// processes: only a model-end event pays for the open and flock).
 	// failDir is the outbox directory, used to persist append_failed
 	// lock-free when the open itself fails.
-	openOnce sync.Once
-	open     func() (*AnalyticsOutbox, error)
-	failDir  string
+	openOnce  sync.Once
+	open      func() (*AnalyticsOutbox, error)
+	failDir   string
+	failOwner *OutboxOwner
 
 	droppedNoIdentity, invalid atomic.Int64
 }
@@ -95,6 +96,7 @@ func NewLazyUsageAnalytics(dir string, owner *OutboxOwner, usageSource string) *
 	return &UsageAnalytics{
 		open:        func() (*AnalyticsOutbox, error) { return OpenAnalyticsOutboxOwned(dir, owner) },
 		failDir:     dir,
+		failOwner:   owner,
 		usageSource: usageSource,
 		now:         time.Now,
 	}
@@ -103,10 +105,11 @@ func NewLazyUsageAnalytics(dir string, owner *OutboxOwner, usageSource string) *
 // newFailedUsageAnalytics is a producer whose outbox could not be opened
 // (pipeline start): it records nothing but leaves the same evidence per
 // accepted increment as a failed lazy open.
-func newFailedUsageAnalytics(dir string, openErr error, usageSource string) *UsageAnalytics {
+func newFailedUsageAnalytics(dir string, owner *OutboxOwner, openErr error, usageSource string) *UsageAnalytics {
 	return &UsageAnalytics{
 		open:        func() (*AnalyticsOutbox, error) { return nil, openErr },
 		failDir:     dir,
+		failOwner:   owner,
 		usageSource: usageSource,
 		now:         time.Now,
 	}
@@ -122,7 +125,22 @@ func (a *UsageAnalytics) recordOpenFailure() {
 	if info, err := os.Stat(a.failDir); err != nil || !info.IsDir() {
 		return
 	}
-	newOutboxHandle(a.failDir, nil).bumpAppendFailed()
+	// With the owner, so a counter file created by root (sciontool init)
+	// stays writable for agent-user hook processes.
+	newOutboxHandle(a.failDir, a.failOwner).bumpAppendFailed()
+}
+
+// Dir is the producer's outbox directory: the open outbox's, or for a
+// producer whose outbox could not be opened, the directory its loss
+// evidence is written to ("" if none).
+func (a *UsageAnalytics) Dir() string {
+	if a == nil {
+		return ""
+	}
+	if o := a.Outbox(); o != nil {
+		return o.Dir()
+	}
+	return a.failDir
 }
 
 func (a *UsageAnalytics) ensureOpen() error {
