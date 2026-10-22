@@ -339,22 +339,33 @@ export interface ProjectChoice {
   slug: string;
 }
 
-/** Projects requested per page when listing the caller's projects. */
-const MEMBER_PROJECTS_PAGE = 200;
-/** Pages followed at most, so a runaway cursor cannot loop forever. */
-const MEMBER_PROJECTS_MAX_PAGES = 10;
+/** Projects requested per page when listing the projects the caller can see. */
+const READABLE_PROJECTS_PAGE = 200;
+/** Pages followed at most: the list stops at this many projects. */
+const READABLE_PROJECTS_MAX_PAGES = 10;
+/** The most projects listReadableProjects returns. */
+export const READABLE_PROJECTS_CAP = READABLE_PROJECTS_PAGE * READABLE_PROJECTS_MAX_PAGES;
 /** canCreate checks in flight at once. */
-const PUBLISH_CHECK_CONCURRENCY = 4;
+export const PUBLISH_CHECK_CONCURRENCY = 6;
+
+/** The projects the caller can see, and whether the list stopped at the cap. */
+export interface ReadableProjects {
+  projects: ProjectChoice[];
+  truncated: boolean;
+}
 
 /**
- * The projects the caller owns or is a member of (GET
- * /api/v1/projects?mine=true), global first, then by name.
+ * The projects the caller can see (GET /api/v1/projects, paged), global
+ * first, then by name. Not mine=true: on the hub that means projects the
+ * caller owns, and a member may publish too (agent-create.ts has the same
+ * note). canCreate decides; over-listing only costs checks. The list stops
+ * at READABLE_PROJECTS_CAP projects and says so (truncated).
  */
-export async function listMemberProjects(): Promise<ProjectChoice[]> {
+export async function listReadableProjects(): Promise<ReadableProjects> {
   const out: ProjectChoice[] = [];
   let cursor = '';
-  for (let page = 0; page < MEMBER_PROJECTS_MAX_PAGES; page++) {
-    const params = new URLSearchParams({ mine: 'true', limit: String(MEMBER_PROJECTS_PAGE) });
+  for (let page = 0; page < READABLE_PROJECTS_MAX_PAGES; page++) {
+    const params = new URLSearchParams({ limit: String(READABLE_PROJECTS_PAGE) });
     if (cursor) params.set('cursor', cursor);
     const body = await okJSON<{
       projects?: Array<{ id: string; name?: string; slug?: string }>;
@@ -367,7 +378,7 @@ export async function listMemberProjects(): Promise<ProjectChoice[]> {
     cursor = body.nextCursor ?? '';
     if (!cursor) break;
   }
-  return sortProjectChoices(out);
+  return { projects: sortProjectChoices(out), truncated: cursor !== '' };
 }
 
 /** Orders choices global first, then by name. */
@@ -384,7 +395,8 @@ export function sortProjectChoices(projects: ProjectChoice[]): ProjectChoice[] {
  * Whether the caller may publish artifacts in project: the list's
  * canCreate, which is the decision publish makes (pkg/artifacts canCreateIn).
  * A list the caller may not read (403, 404) answers false; other failures
- * throw.
+ * throw. (A hub with no artifact routes at all also answers 404, but the
+ * callers only run with hub.artifacts on.)
  */
 export async function canPublishIn(projectId: string): Promise<boolean> {
   const params = new URLSearchParams({ mine: '1', scope: projectId, limit: '1' });
@@ -397,32 +409,53 @@ export async function canPublishIn(projectId: string): Promise<boolean> {
 }
 
 /**
- * Checks projects in order, a few at a time. With firstOnly it stops after
- * the batch that holds the first publishable project. Returns the
- * publishable ones in the order given. Any failed check fails the whole
- * call, so a hub error never looks like "nowhere to publish".
+ * Checks projects in order, PUBLISH_CHECK_CONCURRENCY at a time, and
+ * returns the publishable ones in the order given. onUpdate gets that list
+ * so far (in order, only checked projects) each time a check passes, so a
+ * caller can render it progressively. With firstOnly no new check starts
+ * after the first pass, and the result holds that one project. Any failed
+ * check fails the whole call, so a hub error never looks like "nowhere to
+ * publish".
  */
 export async function filterPublishable(
   projects: ProjectChoice[],
-  opts: { firstOnly?: boolean; check?: (id: string) => Promise<boolean> } = {}
+  opts: {
+    firstOnly?: boolean;
+    check?: (id: string) => Promise<boolean>;
+    onUpdate?: (publishable: ProjectChoice[]) => void;
+  } = {}
 ): Promise<ProjectChoice[]> {
   const check = opts.check ?? canPublishIn;
-  const out: ProjectChoice[] = [];
-  for (let i = 0; i < projects.length; i += PUBLISH_CHECK_CONCURRENCY) {
-    const batch = projects.slice(i, i + PUBLISH_CHECK_CONCURRENCY);
-    const allowed = await Promise.all(batch.map((p) => check(p.id)));
-    batch.forEach((p, j) => {
-      if (allowed[j]) out.push(p);
-    });
-    if (opts.firstOnly && out.length > 0) return out.slice(0, 1);
-  }
-  return out;
+  const allowed: boolean[] = projects.map(() => false);
+  const passed = (): ProjectChoice[] => projects.filter((_, i) => allowed[i]);
+  let next = 0;
+  let stop = false;
+  const worker = async (): Promise<void> => {
+    while (!stop && next < projects.length) {
+      const i = next++;
+      let ok: boolean;
+      try {
+        ok = await check(projects[i].id);
+      } catch (err) {
+        stop = true;
+        throw err;
+      }
+      if (!ok) continue;
+      allowed[i] = true;
+      if (opts.firstOnly) stop = true;
+      opts.onUpdate?.(passed());
+    }
+  };
+  const workers = Math.min(PUBLISH_CHECK_CONCURRENCY, projects.length);
+  await Promise.all(Array.from({ length: workers }, () => worker()));
+  const out = passed();
+  return opts.firstOnly ? out.slice(0, 1) : out;
 }
 
 /**
  * The project preselected for a new artifact: the global project when it
- * is publishable (the list only holds projects the caller is a member of),
- * or the only choice when there is exactly one; otherwise none.
+ * is publishable (canCreate holds only for a member or owner), or the only
+ * choice when there is exactly one; otherwise none.
  */
 export function defaultProjectChoice(publishable: ProjectChoice[]): string {
   const global = publishable.find((p) => p.slug === GLOBAL_PROJECT_SLUG);

@@ -31,8 +31,8 @@
  * project first, stopping at the first publishable one): the button is
  * disabled while that runs, disabled with an explanation when there is
  * nowhere, and enabled otherwise, including when the check failed (the
- * dialog then shows the error). After publishing, the user lands on the
- * new artifact's page.
+ * dialog then shows the error). A finished load in the dialog updates the
+ * button. After publishing, the user lands on the new artifact's page.
  */
 
 import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
@@ -46,7 +46,7 @@ import {
   artifactListUrl,
   artifactPagePath,
   filterPublishable,
-  listMemberProjects,
+  listReadableProjects,
   type Artifact,
   type ArtifactResponse,
   type ArtifactAccess,
@@ -108,6 +108,8 @@ export class ScionPageArtifacts extends LitElement {
 
   /** Bumped on every reload, so a slow response for old filters is dropped. */
   private generation = 0;
+  /** Bumped per publish check, so a stale result is dropped. */
+  private publishGen = 0;
   private searchTimer: ReturnType<typeof setTimeout> | null = null;
   private requested = new Set<string>();
 
@@ -180,15 +182,25 @@ export class ScionPageArtifacts extends LitElement {
 
   /** Works out whether the user may publish in any project. */
   private async checkPublishAccess(): Promise<void> {
+    const gen = ++this.publishGen;
     this.publishAccess = 'checking';
     try {
-      const found = await filterPublishable(await listMemberProjects(), { firstOnly: true });
-      if (!this.isConnected) return;
+      const { projects } = await listReadableProjects();
+      if (gen !== this.publishGen || !this.isConnected) return;
+      const found = await filterPublishable(projects, { firstOnly: true });
+      if (gen !== this.publishGen || !this.isConnected) return;
       this.publishAccess = found.length > 0 ? 'yes' : 'no';
     } catch {
-      if (!this.isConnected) return;
+      if (gen !== this.publishGen || !this.isConnected) return;
       this.publishAccess = 'unknown';
     }
+  }
+
+  /** The dialog finished loading the choices: that settles the button. */
+  private onChoices(e: CustomEvent<{ count: number }>): void {
+    // Drop a page check still running: the dialog's answer is complete.
+    this.publishGen++;
+    this.publishAccess = e.detail.count > 0 ? 'yes' : 'no';
   }
 
   private onPublished(e: CustomEvent<ArtifactResponse>): void {
@@ -367,6 +379,7 @@ export class ScionPageArtifacts extends LitElement {
         chooseProject
         ?open=${this.publishOpen}
         @artifact-published=${(e: CustomEvent<ArtifactResponse>): void => this.onPublished(e)}
+        @artifact-publish-choices=${(e: CustomEvent<{ count: number }>): void => this.onChoices(e)}
         @artifact-publish-closed=${(): void => {
           this.publishOpen = false;
         }}
@@ -392,7 +405,12 @@ export class ScionPageArtifacts extends LitElement {
     // A disabled button gets no pointer or focus events: the wrapper takes
     // them, so hovering or tabbing to it shows why.
     return html`<sl-tooltip content=${NOWHERE_TO_PUBLISH}>
-      <span class="nowhere-wrap" tabindex="0" aria-label=${`New artifact: ${NOWHERE_TO_PUBLISH}`}
+      <span
+        class="nowhere-wrap"
+        role="button"
+        tabindex="0"
+        aria-disabled="true"
+        aria-label=${`New artifact: ${NOWHERE_TO_PUBLISH}`}
         >${button}</span
       >
     </sl-tooltip>`;

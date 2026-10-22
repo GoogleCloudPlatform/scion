@@ -21,7 +21,9 @@
  * new artifact homed in a project or as a new version of an artifact.
  * With chooseProject (the hub Artifacts page, ptone/scion#5477) the user
  * picks the home project from those where they may publish, the global
- * project or the only choice preselected.
+ * project or the only choice preselected. Choices appear as their checks
+ * pass; when the load finishes, `artifact-publish-choices` reports how many
+ * there are ({ count }).
  * Fires `artifact-published` with the finalized ArtifactResponse, and
  * `artifact-publish-closed` whenever it closes; the parent owns `open`.
  */
@@ -31,11 +33,13 @@ import type { TemplateResult } from 'lit';
 import { customElement, property, query, state } from 'lit/decorators.js';
 
 import {
+  GLOBAL_PROJECT_SLUG,
   PublishError,
   defaultProjectChoice,
   filterPublishable,
   formatBytes,
-  listMemberProjects,
+  listReadableProjects,
+  READABLE_PROJECTS_CAP,
   publishErrorMessage,
   publishFiles,
 } from '../../client/artifacts.js';
@@ -112,6 +116,10 @@ export class ScionArtifactPublishDialog extends LitElement {
   @state() private choicesError: string | null = null;
   /** The picked home project, with chooseProject. */
   @state() private chosen = '';
+  /** The project list stopped at READABLE_PROJECTS_CAP. */
+  @state() private choicesTruncated = false;
+  /** The user picked a project: no automatic choice replaces it. */
+  private userPicked = false;
   /** Bumped per choices load, so a stale one is dropped. */
   private choicesGen = 0;
   /** The version a failed attempt left pending; the next attempt resumes it. */
@@ -176,6 +184,11 @@ export class ScionArtifactPublishDialog extends LitElement {
     .project sl-alert sl-button {
       margin-left: 0.5rem;
     }
+    .choices-note {
+      font-size: 0.75rem;
+      color: var(--scion-text-muted, #64748b);
+      margin-top: 0.25rem;
+    }
     .slug {
       font-family: var(--scion-font-mono, monospace);
       font-size: 0.75rem;
@@ -218,11 +231,32 @@ export class ScionArtifactPublishDialog extends LitElement {
     this.choicesError = null;
     this.choices = [];
     this.chosen = '';
+    this.choicesTruncated = false;
+    this.userPicked = false;
     try {
-      const publishable = await filterPublishable(await listMemberProjects());
+      const { projects, truncated } = await listReadableProjects();
+      if (gen !== this.choicesGen) return;
+      this.choicesTruncated = truncated;
+      const publishable = await filterPublishable(projects, {
+        onUpdate: (sofar) => {
+          if (gen !== this.choicesGen) return;
+          this.choices = sofar;
+          // Global is preselected as soon as it passes; the only-choice
+          // default has to wait for the end.
+          const global = sofar.find((p) => p.slug === GLOBAL_PROJECT_SLUG);
+          if (global && !this.userPicked && !this.chosen) this.chosen = global.id;
+        },
+      });
       if (gen !== this.choicesGen) return;
       this.choices = publishable;
-      this.chosen = defaultProjectChoice(publishable);
+      if (!this.userPicked && !this.chosen) this.chosen = defaultProjectChoice(publishable);
+      this.dispatchEvent(
+        new CustomEvent<{ count: number }>('artifact-publish-choices', {
+          detail: { count: publishable.length },
+          bubbles: true,
+          composed: true,
+        })
+      );
     } catch (err) {
       if (gen !== this.choicesGen) return;
       this.choicesError = err instanceof Error ? err.message : 'Could not load projects';
@@ -376,6 +410,7 @@ export class ScionArtifactPublishDialog extends LitElement {
       </div>`;
     }
     const none = !this.choicesLoading && this.choices.length === 0;
+    const empty = this.choices.length === 0;
     return html`<div class="project">
       <sl-select
         class="project-select"
@@ -383,14 +418,15 @@ export class ScionArtifactPublishDialog extends LitElement {
         size="small"
         required
         hoist
-        placeholder=${this.choicesLoading ? 'Loading projects…' : 'Choose a project'}
+        placeholder=${this.choicesLoading && empty ? 'Loading projects…' : 'Choose a project'}
         help-text=${none
           ? "You can't publish in any of your projects."
           : "The artifact's home. Members of this project can read it."}
-        ?disabled=${this.busy || this.choicesLoading || none}
+        ?disabled=${this.busy || empty}
         .value=${this.chosen}
         @sl-change=${(e: Event): void => {
           this.chosen = (e.target as HTMLSelectElement).value;
+          this.userPicked = true;
         }}
       >
         ${this.choices.map(
@@ -402,6 +438,14 @@ export class ScionArtifactPublishDialog extends LitElement {
             >`
         )}
       </sl-select>
+      ${this.choicesLoading && !empty
+        ? html`<div class="choices-note checking">Checking more projects…</div>`
+        : nothing}
+      ${this.choicesTruncated
+        ? html`<div class="choices-note truncated">
+            Showing projects from the first ${READABLE_PROJECTS_CAP} you can see.
+          </div>`
+        : nothing}
     </div>`;
   }
 

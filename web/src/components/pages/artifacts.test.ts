@@ -685,9 +685,55 @@ describe('artifacts list page: New artifact (ptone/scion#5477)', () => {
     expect(btn.textContent).toContain('New artifact');
     expect(disabled(btn)).toBe(false);
     expect(el.shadowRoot!.querySelector('sl-tooltip')).toBeNull();
-    // Global is checked first, in the first batch, and the walk stops there.
+    // Global is checked first, and no check starts after it passes.
     expect(scopedChecks(m)[0]).toBe('g-1');
     expect(scopedChecks(m).length).toBeLessThanOrEqual(2);
+    // Not mine=true, which means owned projects only: members publish too.
+    const projectCalls = m.urls.filter((u) => u.startsWith('/api/v1/projects?'));
+    expect(projectCalls).toEqual(['/api/v1/projects?limit=200']);
+  });
+
+  it('a stale check from an earlier mount cannot overwrite a newer result', async () => {
+    // The first mount's project list answers only after the second mount's
+    // check has finished, and would say "nowhere".
+    let releaseFirst: (r: Response) => void = () => {};
+    let call = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = requestUrl(input);
+        if (url.startsWith('/api/v1/projects?')) {
+          call++;
+          if (call === 1) return new Promise<Response>((r) => (releaseFirst = r));
+          return Promise.resolve(json({ projects: [GLOBAL] }));
+        }
+        if (url.startsWith('/api/v1/artifacts?')) {
+          const scope = new URL(url, 'http://x').searchParams.get('scope');
+          return Promise.resolve(json({ artifacts: [], canCreate: scope === 'g-1' }));
+        }
+        return Promise.resolve(json({}, 404));
+      })
+    );
+    const el = await mount(true);
+    el.remove();
+    document.body.appendChild(el);
+    await settle(el);
+    expect(disabled(newButton(el))).toBe(false);
+    releaseFirst(json({ projects: [] }));
+    await settle(el);
+    expect(disabled(newButton(el))).toBe(false);
+    expect(el.shadowRoot!.querySelector('sl-tooltip')).toBeNull();
+  });
+
+  it('follows the dialog when its finished load finds nowhere to publish', async () => {
+    mockPublish([GLOBAL], new Set(['g-1']), 500);
+    const el = await mount(true);
+    expect(disabled(newButton(el))).toBe(false);
+    const dialog = el.shadowRoot!.querySelector('scion-artifact-publish-dialog')!;
+    dialog.dispatchEvent(new CustomEvent('artifact-publish-choices', { detail: { count: 0 } }));
+    await settle(el);
+    expect(disabled(newButton(el))).toBe(true);
+    expect(el.shadowRoot!.querySelector('sl-tooltip')).not.toBeNull();
   });
 
   it('opens the publish dialog with the project picker', async () => {
@@ -710,8 +756,12 @@ describe('artifacts list page: New artifact (ptone/scion#5477)', () => {
     expect(disabled(newButton(el))).toBe(true);
     const tip = el.shadowRoot!.querySelector('sl-tooltip')!;
     expect(tip.getAttribute('content')).toContain("can't publish in any of your projects");
-    // The wrapper takes focus, so the reason is reachable from the keyboard.
-    expect(tip.querySelector('[tabindex="0"]')).not.toBeNull();
+    // The wrapper takes focus and is a named, disabled button, so the reason
+    // is reachable from the keyboard and read out.
+    const wrap = tip.querySelector('[tabindex="0"]')!;
+    expect(wrap.getAttribute('role')).toBe('button');
+    expect(wrap.getAttribute('aria-disabled')).toBe('true');
+    expect(wrap.getAttribute('aria-label')).toContain("can't publish");
     // The empty state says it too.
     expect(el.shadowRoot!.querySelector('.empty-state .nowhere')!.textContent).toContain(
       "can't publish"

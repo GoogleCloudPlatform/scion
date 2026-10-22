@@ -43,11 +43,17 @@ interface Mock {
 }
 
 /**
- * Mocks fetch: the caller's projects (or projectsStatus), canCreate per
- * project id in publishable, and the create, upload and finalize calls of a
- * publish.
+ * Mocks fetch: the projects the caller can see (or projectsStatus; with
+ * nextCursor set, every page says there is more), canCreate per project id
+ * in publishable (never answered for ids in hold), and the create, upload
+ * and finalize calls of a publish.
  */
-function mockFetch(projects: Project[], publishable: Set<string>, projectsStatus = 200): Mock {
+function mockFetch(
+  projects: Project[],
+  publishable: Set<string>,
+  projectsStatus = 200,
+  opts: { hold?: Set<string>; nextCursor?: string } = {}
+): Mock {
   const m: Mock = { calls: [], posted: [] };
   const json = (body: unknown, status = 200): Response =>
     new Response(JSON.stringify(body), {
@@ -66,10 +72,11 @@ function mockFetch(projects: Project[], publishable: Set<string>, projectsStatus
             json({ error: { code: 'internal', message: 'boom' } }, projectsStatus)
           );
         }
-        return Promise.resolve(json({ projects }));
+        return Promise.resolve(json({ projects, nextCursor: opts.nextCursor }));
       }
       if (method === 'GET' && url.startsWith('/api/v1/artifacts?')) {
         const scope = new URL(url, 'http://x').searchParams.get('scope') ?? '';
+        if (opts.hold?.has(scope)) return new Promise<Response>(() => {});
         return Promise.resolve(json({ artifacts: [], canCreate: publishable.has(scope) }));
       }
       if (method === 'POST' && url === '/api/v1/artifacts') {
@@ -223,6 +230,61 @@ describe('publish dialog project picker', () => {
     expect(m.posted).toHaveLength(1);
     expect(m.posted[0].scope).toBe('w-1');
     expect(published).toHaveBeenCalledTimes(1);
+  });
+
+  it('asks for the projects the caller can see, not only owned ones (no mine)', async () => {
+    const m = mockFetch([GLOBAL], new Set(['g-1']));
+    await openDialog();
+    const projectCalls = m.calls.filter((c) => c.startsWith('GET /api/v1/projects?'));
+    expect(projectCalls).toHaveLength(1);
+    expect(projectCalls[0]).not.toContain('mine');
+  });
+
+  it('shows choices as they pass, global preselected, while other checks run', async () => {
+    mockFetch([GLOBAL, WEB, RELEASE], new Set(['g-1', 'w-1', 'r-1']), 200, {
+      hold: new Set(['r-1']),
+    });
+    const el = await openDialog();
+    expect(optionIds(el)).toEqual(['g-1', 'w-1']);
+    expect(picker(el).value).toBe('g-1');
+    expect(disabled(picker(el))).toBe(false);
+    expect(el.shadowRoot!.querySelector('.choices-note.checking')).not.toBeNull();
+  });
+
+  it('does not replace a project the user picked while checks run', async () => {
+    mockFetch([WEB, RELEASE], new Set(['w-1', 'r-1']), 200, { hold: new Set(['r-1']) });
+    const el = await openDialog();
+    // Release tools is still being checked, so nothing is preselected yet.
+    expect(picker(el).value).toBe('');
+    const select = picker(el);
+    select.value = 'w-1';
+    select.dispatchEvent(new Event('sl-change'));
+    await settle(el);
+    expect(picker(el).value).toBe('w-1');
+  });
+
+  it('says so when the project list stopped at the cap', async () => {
+    mockFetch([WEB], new Set(['w-1']), 200, { nextCursor: 'more' });
+    const el = await openDialog();
+    expect(el.shadowRoot!.querySelector('.choices-note.truncated')!.textContent).toContain(
+      'Showing projects from the first 2000'
+    );
+  });
+
+  it('reports how many choices it found when the load finishes', async () => {
+    mockFetch([GLOBAL, WEB, BILLING], new Set(['g-1', 'w-1']));
+    const el = document.createElement(
+      'scion-artifact-publish-dialog'
+    ) as ScionArtifactPublishDialog;
+    el.chooseProject = true;
+    const counts: number[] = [];
+    el.addEventListener('artifact-publish-choices', (e) =>
+      counts.push((e as CustomEvent<{ count: number }>).detail.count)
+    );
+    document.body.appendChild(el);
+    el.open = true;
+    await settle(el);
+    expect(counts).toEqual([2]);
   });
 
   it('without chooseProject shows no picker and loads no projects', async () => {

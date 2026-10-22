@@ -29,13 +29,15 @@ import {
   formatBytes,
   isInlineType,
   linkLifetimeChoices,
-  listMemberProjects,
+  listReadableProjects,
   listProjectArtifacts,
   orderArtifactRefs,
   parseArtifactPagePath,
   PublishError,
   publishErrorMessage,
   publishFiles,
+  PUBLISH_CHECK_CONCURRENCY,
+  READABLE_PROJECTS_CAP,
   rendererFor,
   sha256Hex,
   shareLinkUrl,
@@ -690,13 +692,46 @@ describe('where the caller may publish (ptone/scion#5477)', () => {
     expect(check).toHaveBeenCalledTimes(6);
   });
 
-  it('with firstOnly, stops after the batch holding the first publishable project', async () => {
-    const projects = ['g', 'a', 'b', 'c', 'd', 'e', 'f', 'h', 'i'].map((id) => choice(id, id));
-    const check = vi.fn((id: string) => Promise.resolve(id === 'a' || id === 'f'));
+  it('with firstOnly, starts no new check after the first pass', async () => {
+    const projects = Array.from({ length: 20 }, (_, i) => choice(`p${i}`, `p${i}`));
+    // The first project (global, in real use) passes: its answer comes back
+    // first, so no further check starts.
+    const check = vi.fn((id: string) => Promise.resolve(id === 'p0' || id === 'p15'));
     const out = await filterPublishable(projects, { check, firstOnly: true });
-    expect(out.map((p) => p.id)).toEqual(['a']);
-    // One batch of four checks, not all nine.
-    expect(check).toHaveBeenCalledTimes(4);
+    expect(out.map((p) => p.id)).toEqual(['p0']);
+    // Only the first pool's worth of checks ran, not all twenty.
+    expect(check).toHaveBeenCalledTimes(PUBLISH_CHECK_CONCURRENCY);
+  });
+
+  it('keeps at most PUBLISH_CHECK_CONCURRENCY checks in flight', async () => {
+    const projects = Array.from({ length: 20 }, (_, i) => choice(`p${i}`, `p${i}`));
+    let inFlight = 0;
+    let peak = 0;
+    const check = async (): Promise<boolean> => {
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      await new Promise((r) => setTimeout(r, 0));
+      inFlight--;
+      return true;
+    };
+    const out = await filterPublishable(projects, { check });
+    expect(out).toHaveLength(20);
+    expect(peak).toBe(PUBLISH_CHECK_CONCURRENCY);
+  });
+
+  it('reports the publishable projects so far, in order, as checks pass', async () => {
+    const projects = ['a', 'b', 'c'].map((id) => choice(id, id));
+    // c answers first, then a; b is not publishable.
+    const delays: Record<string, number> = { a: 5, b: 1, c: 0 };
+    const check = (id: string): Promise<boolean> =>
+      new Promise((r) => setTimeout(() => r(id !== 'b'), delays[id]));
+    const updates: string[][] = [];
+    const out = await filterPublishable(projects, {
+      check,
+      onUpdate: (sofar) => updates.push(sofar.map((p) => p.id)),
+    });
+    expect(updates).toEqual([['c'], ['a', 'c']]);
+    expect(out.map((p) => p.id)).toEqual(['a', 'c']);
   });
 
   it('fails the whole filter when one check fails', async () => {
@@ -730,7 +765,7 @@ describe('where the caller may publish (ptone/scion#5477)', () => {
     expect(urls[0]).toBe('/api/v1/artifacts?mine=1&scope=yes&limit=1');
   });
 
-  it("lists the caller's projects across pages, global first", async () => {
+  it('lists the projects the caller can see across pages, global first, without mine', async () => {
     const urls: string[] = [];
     vi.stubGlobal(
       'fetch',
@@ -751,15 +786,36 @@ describe('where the caller may publish (ptone/scion#5477)', () => {
         );
       })
     );
-    const out = await listMemberProjects();
-    expect(out).toEqual([
-      { id: 'g', name: 'Global', slug: 'global' },
-      { id: 'w', name: 'Web', slug: 'web' },
-      { id: 'x', name: 'x', slug: 'x' },
-    ]);
-    expect(urls).toEqual([
-      '/api/v1/projects?mine=true&limit=200',
-      '/api/v1/projects?mine=true&limit=200&cursor=c1',
-    ]);
+    const out = await listReadableProjects();
+    expect(out).toEqual({
+      projects: [
+        { id: 'g', name: 'Global', slug: 'global' },
+        { id: 'w', name: 'Web', slug: 'web' },
+        { id: 'x', name: 'x', slug: 'x' },
+      ],
+      truncated: false,
+    });
+    expect(urls).toEqual(['/api/v1/projects?limit=200', '/api/v1/projects?limit=200&cursor=c1']);
+    // mine=true means projects the caller owns: a member may publish too.
+    for (const u of urls) expect(new URL(u, 'http://x').searchParams.has('mine')).toBe(false);
+  });
+
+  it('stops at the cap and says the list was truncated', async () => {
+    let n = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => {
+        n++;
+        const projects = Array.from({ length: 200 }, (_, i) => ({
+          id: `p${n}-${i}`,
+          slug: `s${n}-${i}`,
+        }));
+        return Promise.resolve(json({ projects, nextCursor: `c${n}` }));
+      })
+    );
+    const out = await listReadableProjects();
+    expect(out.projects).toHaveLength(READABLE_PROJECTS_CAP);
+    expect(out.truncated).toBe(true);
+    expect(n).toBe(READABLE_PROJECTS_CAP / 200);
   });
 });
