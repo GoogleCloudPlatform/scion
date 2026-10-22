@@ -968,8 +968,16 @@ func (d *UsageDeriver) fingerprint(scopeName, eventName string, record *logspb.L
 	h.Write([]byte{0})
 	h.Write([]byte(scopeName))
 	h.Write([]byte{0})
+	// time_unix_nano, else observed_time_unix_nano: a source that sets only
+	// the observed time (codex) would otherwise key on 0 and merge distinct
+	// same-millisecond calls with identical attributes. A retransmitted
+	// record keeps both times, so replays still dedupe.
+	recordTime := record.GetTimeUnixNano()
+	if recordTime == 0 {
+		recordTime = record.GetObservedTimeUnixNano()
+	}
 	var timeBuf [8]byte
-	binary.BigEndian.PutUint64(timeBuf[:], record.GetTimeUnixNano())
+	binary.BigEndian.PutUint64(timeBuf[:], recordTime)
 	h.Write(timeBuf[:])
 	h.Write([]byte{0})
 	h.Write([]byte(eventName))
