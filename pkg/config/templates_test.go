@@ -2294,3 +2294,42 @@ func TestFindTemplateContentHashDirHasNoName(t *testing.T) {
 		})
 	}
 }
+
+func TestModelSizeAlias(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"small", "small"},
+		{"medium", "medium"},
+		{"large", "large"},
+		{"extra-large", "extra-large"},
+		{"s", "small"},
+		{"m", "medium"},
+		{"l", "large"},
+		{"xl", "extra-large"},
+		{"XL", "extra-large"},
+		{"Large", "large"},
+		{"claude-opus-4-8", ""},
+		{"gpt-6.1-sol", ""},
+		{"x-large", ""},
+		{" large", ""},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			if got := ModelSizeAlias(tt.input); got != tt.want {
+				t.Errorf("ModelSizeAlias(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+			// A size is recorded exactly when ResolveModelAlias treats the
+			// value as an alias.
+			resolved := ResolveModelAlias(tt.input, map[string]string{
+				"small": "concrete-s", "medium": "concrete-m", "large": "concrete-l", "extra-large": "concrete-xl",
+			})
+			isAlias := resolved != tt.input && resolved != NormalizeModelAlias(tt.input)
+			if isAlias != (ModelSizeAlias(tt.input) != "") {
+				t.Errorf("ModelSizeAlias(%q) = %q disagrees with ResolveModelAlias -> %q", tt.input, ModelSizeAlias(tt.input), resolved)
+			}
+		})
+	}
+}
