@@ -17,6 +17,7 @@ package runtimebroker
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/url"
 	"os"
@@ -248,6 +249,12 @@ func hubEndpointFromProjectSettings(projectPath string) string {
 		return ""
 	}
 	settingsDir := resolveProjectSettingsDir(projectPath)
+	if settingsDir != projectPath {
+		if ignored := config.GetSettingsPath(projectPath); ignored != "" {
+			slog.Warn("Ignoring a settings file at the workspace root; project settings are read from the project's .scion directory",
+				"path", ignored, "settings_dir", settingsDir)
+		}
+	}
 	projectSettings, err := config.LoadSettingsFromDir(settingsDir)
 	if err != nil {
 		return ""
