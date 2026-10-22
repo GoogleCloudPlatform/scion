@@ -382,6 +382,14 @@ func TestHMACPeerAuthRing_WireFormats(t *testing.T) {
 			h.Add(HeaderPeerSignatureVersion, "2")
 			h.Add(HeaderPeerSignatureVersion, "2")
 		}},
+		{"valid ID-less signature plus a key ID and version 3", func(h http.Header) {
+			h.Set(HeaderPeerKeyID, "old")
+			h.Set(HeaderPeerSignatureVersion, "3")
+		}},
+		{"valid ID-less signature plus a malformed key ID and version 2", func(h http.Header) {
+			h.Set(HeaderPeerKeyID, "old!")
+			h.Set(HeaderPeerSignatureVersion, "2")
+		}},
 		{"valid ID-less signature plus a repeated key ID", func(h http.Header) {
 			h.Add(HeaderPeerKeyID, "old")
 			h.Add(HeaderPeerKeyID, "old")

@@ -37,8 +37,9 @@ import (
 // TestConduitPeerAuthKeyring_TwoReplicas: a replica's real internal relay
 // API, keyed from its signing ring, accepts a peer replica on another
 // active generation, in both signature formats and both peer-auth modes;
-// it still refuses a replay, a request for another target, an unknown key ID, a generation that is not
-// a legacy reader, and, in OIDC mode, a missing or disallowed ID token.
+// it still refuses a replay, a request for another target, an unknown key
+// ID, a generation that is not a legacy reader, and, in OIDC mode, a
+// missing or disallowed ID token.
 func TestConduitPeerAuthKeyring_TwoReplicas(t *testing.T) {
 	for _, mode := range []string{config.ConduitPeerAuthHMAC, config.ConduitPeerAuthOIDC} {
 		for _, emit := range []keyring.Emit{keyring.EmitLegacy, keyring.EmitVersioned} {
