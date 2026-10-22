@@ -4699,6 +4699,12 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		gc.WorkspaceStorage = v1.WorkspaceStorage
 	}
 
+	// Shared dir storage — thread into GlobalConfig so the hub's shared-dir
+	// browser resolves where the brokers mount shared dirs.
+	if v1.SharedDirStorage != nil {
+		gc.SharedDirStorage = v1.SharedDirStorage
+	}
+
 	// Native chat — thread into GlobalConfig so the hub can gate chat routes.
 	if v1.NativeChat != nil {
 		gc.NativeChat = v1.NativeChat

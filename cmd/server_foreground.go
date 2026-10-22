@@ -2786,6 +2786,7 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		OIDCConfig:              cfg.OIDC,
 		Federation:              cfg.Federation,
 		WorkspaceStorageConfig:  cfg.WorkspaceStorage,
+		SharedDirStorageConfig:  cfg.SharedDirStorage,
 		// nil (no server.native_chat section) means enabled — chat is default-on.
 		NativeChatEnabled: cfg.NativeChat.EnabledSetting(),
 		// server.hub.port_proxy.response_header_timeout (validated at startup).
