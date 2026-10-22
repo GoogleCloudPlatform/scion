@@ -1104,8 +1104,11 @@ func downloadSkillFile(ctx context.Context, fileURL, destPath string, maxSize in
 		return newSkillInstallError(msg, errors.New(msg))
 	}
 
-	// S5: Enforce size limit
-	limitedReader := io.LimitReader(resp.Body, maxSize+1)
+	// S5: Enforce size limit. bodyReader records a read error so a failure
+	// while receiving the body is reported as a download failure, not as a
+	// local write failure (ptone/scion#5033).
+	body := &bodyReader{r: resp.Body}
+	limitedReader := io.LimitReader(body, maxSize+1)
 
 	f, err := os.Create(destPath)
 	if err != nil {
@@ -1114,6 +1117,17 @@ func downloadSkillFile(ctx context.Context, fileURL, destPath string, maxSize in
 	defer func() { _ = f.Close() }()
 
 	n, err := io.Copy(f, limitedReader)
+	if body.err != nil {
+		// The read error names no URL (a *url.Error is reduced to its
+		// cause), but is kept out of the user text all the same.
+		cause := body.err.Error()
+		var ue *url.Error
+		if errors.As(body.err, &ue) {
+			cause = transportFailureCause(ue)
+		}
+		return newSkillInstallError("download failed while reading the response",
+			fmt.Errorf("download from %s failed while reading the response: %s", parsed.Host, cause))
+	}
 	if err != nil {
 		return fmt.Errorf("failed to write file: %w", err)
 	}
@@ -1128,6 +1142,22 @@ func downloadSkillFile(ctx context.Context, fileURL, destPath string, maxSize in
 	util.Debugf("provision: downloaded skill file %s (%d bytes)", filepath.Base(destPath), n)
 
 	return nil
+}
+
+// bodyReader wraps a download response body and records the first read
+// error other than io.EOF, so a failed read can be told apart from a failed
+// write in an io.Copy.
+type bodyReader struct {
+	r   io.Reader
+	err error
+}
+
+func (b *bodyReader) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	if err != nil && err != io.EOF && b.err == nil {
+		b.err = err
+	}
+	return n, err
 }
 
 // transportFailureCause returns the cause of a client.Do failure as text that
