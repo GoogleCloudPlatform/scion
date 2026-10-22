@@ -16,9 +16,11 @@ package runtime
 
 import (
 	"context"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -145,7 +147,7 @@ func TestSyncWorkspaceToPod_Excludes(t *testing.T) {
 		t.Run(map[bool]string{true: "annotated", false: "plain"}[excluded], func(t *testing.T) {
 			rt, _, _ := newTestK8sRuntime()
 			pod := newFakeAgentPodWithWorkspaceAnnotation("test-agent", "/some/workspace")
-			pod.Annotations = withWorkspaceAgentsAnnotation(pod.Annotations, excluded)
+			pod.Annotations = withScionAnnotation(pod.Annotations, k8sWorkspaceAgentsAnnotation, "true", excluded)
 			var calls []string
 			rt.syncTransfer = func(_ context.Context, _, podName, src, dest string, toPod bool, excludes []string) error {
 				calls = append(calls, podName+" "+src+" -> "+dest)
@@ -177,7 +179,7 @@ func TestSync_WorkspaceAgentsAnnotationExcludes(t *testing.T) {
 			t.Run(string(dir)+map[bool]string{true: "/annotated", false: "/plain"}[excluded], func(t *testing.T) {
 				rt, cs, _ := newTestK8sRuntime()
 				pod := newFakeAgentPodWithHomeDirAnnotation("test-agent", "/some/agent/home")
-				pod.Annotations = withWorkspaceAgentsAnnotation(pod.Annotations, excluded)
+				pod.Annotations = withScionAnnotation(pod.Annotations, k8sWorkspaceAgentsAnnotation, "true", excluded)
 				if _, err := cs.CoreV1().Pods("default").Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
 					t.Fatal(err)
 				}
@@ -268,5 +270,76 @@ func TestSyncArchiveArgs_ExcludeAgentsDir(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dest, "README.md")); err != nil {
 		t.Errorf("workspace file not extracted: %v", err)
+	}
+}
+
+// withScionAnnotation sets or removes one key and leaves the rest as they
+// are. It never modifies its input, and returns the input itself when the
+// key is to be removed and is absent.
+func TestWithScionAnnotation(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		in   map[string]string
+		set  bool
+		want map[string]string
+	}{
+		{"set on nil", nil, true, map[string]string{"k": "v"}},
+		{"set beside others", map[string]string{"other": "x"}, true, map[string]string{"k": "v", "other": "x"}},
+		{"set replaces a caller value", map[string]string{"k": "caller", "other": "x"}, true, map[string]string{"k": "v", "other": "x"}},
+		{"unset removes a caller value", map[string]string{"k": "caller", "other": "x"}, false, map[string]string{"other": "x"}},
+		{"unset when absent", map[string]string{"other": "x"}, false, map[string]string{"other": "x"}},
+		{"unset on nil", nil, false, nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			before := maps.Clone(tt.in)
+			got := withScionAnnotation(tt.in, "k", "v", tt.set)
+			if !maps.Equal(got, tt.want) || (got == nil) != (tt.want == nil) {
+				t.Errorf("withScionAnnotation = %v, want %v", got, tt.want)
+			}
+			if !maps.Equal(tt.in, before) {
+				t.Errorf("input changed to %v, was %v", tt.in, before)
+			}
+			_, had := tt.in["k"]
+			if same := reflect.ValueOf(got).UnsafePointer() == reflect.ValueOf(tt.in).UnsafePointer(); same != (!tt.set && !had) {
+				t.Errorf("returned the input map = %v, want %v", same, !tt.set && !had)
+			}
+		})
+	}
+}
+
+// buildPod stamps both annotations it owns from its own decisions: the NFS
+// home and the in-project agents exclusion together, and neither on a
+// plain pod, whatever the caller passed for them.
+func TestBuildPod_HomeAndAgentsAnnotations(t *testing.T) {
+	shared := sharedRepoWithScionDir(t)
+	caller := map[string]string{k8sHomeStorageAnnotation: "caller", k8sWorkspaceAgentsAnnotation: "caller", "other": "x"}
+	for _, tt := range []struct {
+		name string
+		cfg  RunConfig
+		want map[string]string
+	}{
+		{"NFS home, shared workspace", nfsHomeTestConfig(true), map[string]string{
+			k8sHomeStorageAnnotation: HomeStorageNFS, k8sWorkspaceAgentsAnnotation: "true", "other": "x",
+		}},
+		{"plain pod", nfsHomeTestConfig(false), map[string]string{"other": "x"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			rt, _, _ := newTestK8sRuntime()
+			cfg := tt.cfg
+			cfg.Annotations = maps.Clone(caller)
+			if tt.want[k8sWorkspaceAgentsAnnotation] == "true" {
+				cfg.RepoRoot, cfg.Workspace = shared, shared
+			}
+			pod, err := rt.buildPod("default", cfg)
+			if err != nil {
+				t.Fatalf("buildPod: %v", err)
+			}
+			if !maps.Equal(pod.Annotations, tt.want) {
+				t.Errorf("pod annotations = %v, want %v", pod.Annotations, tt.want)
+			}
+			if !maps.Equal(cfg.Annotations, caller) {
+				t.Errorf("buildPod changed the caller's annotations to %v", cfg.Annotations)
+			}
+		})
 	}
 }
