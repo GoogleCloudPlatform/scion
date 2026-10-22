@@ -162,6 +162,37 @@ func copyPluginsTree(srcDir, srcRel, dstDir, dstRel string) error {
 }
 
 func copyPluginsTreeWithLimits(srcDir, srcRel, dstDir, dstRel string, lim agentplugin.Limits) error {
+	var dstRoot *os.Root
+	defer func() {
+		if dstRoot != nil {
+			_ = dstRoot.Close()
+		}
+	}()
+	reset := func() error {
+		var err error
+		if dstRoot, err = os.OpenRoot(dstDir); err != nil {
+			return err
+		}
+		if err := dstRoot.RemoveAll(dstRel); err != nil {
+			return err
+		}
+		return dstRoot.MkdirAll(dstRel, 0o755)
+	}
+	install := func(srcRoot *os.Root, srcPlugin, name string) error {
+		_, err := agentplugin.CopyTree(srcRoot, srcPlugin, dstRoot, filepath.Join(dstRel, name), lim)
+		return err
+	}
+	return walkPluginsTree(srcDir, srcRel, reset, install)
+}
+
+// walkPluginsTree is the plugin-directory walk shared by both directions of
+// the Agent Plugins tree copy (snapshot: home to record, copyPluginsTree;
+// restore: record to home, restorePluginsTree). A missing source, or one
+// that is not a real directory, copies nothing. Otherwise reset prepares
+// the destination, and install copies each entry of srcRel that is a real
+// directory with a valid plugin name (srcPlugin is its path in srcRoot),
+// in name order; an install error names the plugin.
+func walkPluginsTree(srcDir, srcRel string, reset func() error, install func(srcRoot *os.Root, srcPlugin, name string) error) error {
 	srcRoot, err := os.OpenRoot(srcDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -174,15 +205,7 @@ func copyPluginsTreeWithLimits(srcDir, srcRel, dstDir, dstRel string, lim agentp
 	if ok, err := realDirChain(srcRoot, srcRel, true); err != nil || !ok {
 		return err
 	}
-	dstRoot, err := os.OpenRoot(dstDir)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = dstRoot.Close() }()
-	if err := dstRoot.RemoveAll(dstRel); err != nil {
-		return err
-	}
-	if err := dstRoot.MkdirAll(dstRel, 0o755); err != nil {
+	if err := reset(); err != nil {
 		return err
 	}
 	entries, err := readRootDir(srcRoot, srcRel)
@@ -201,7 +224,7 @@ func copyPluginsTreeWithLimits(srcDir, srcRel, dstDir, dstRel string, lim agentp
 		if !fi.IsDir() {
 			continue
 		}
-		if _, err := agentplugin.CopyTree(srcRoot, filepath.Join(srcRel, name), dstRoot, filepath.Join(dstRel, name), lim); err != nil {
+		if err := install(srcRoot, filepath.Join(srcRel, name), name); err != nil {
 			return fmt.Errorf("copy agent plugin %q: %w", name, err)
 		}
 	}
@@ -377,54 +400,27 @@ func copyRegularFilesToHome(src string, home *agenthome.Home, dstRel string) err
 // entries that are not real directories with a valid plugin name are
 // skipped.
 func restorePluginsTree(srcDir, srcRel string, home *agenthome.Home, dstRel string) error {
-	srcRoot, err := os.OpenRoot(srcDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	defer func() { _ = srcRoot.Close() }()
-	srcRel = filepath.Clean(srcRel)
-	if ok, err := realDirChain(srcRoot, srcRel, true); err != nil || !ok {
-		return err
-	}
-	if err := home.RemoveAll(dstRel); err != nil {
-		return err
-	}
-	if err := home.MkdirAll(dstRel, 0o755); err != nil {
-		return err
-	}
-	entries, err := readRootDir(srcRoot, srcRel)
-	if err != nil {
-		return err
-	}
-	lim := agenthome.Limits{
-		MaxFiles: agentplugin.DefaultLimits.MaxFiles,
-		MaxBytes: agentplugin.DefaultLimits.MaxBytes,
-		MaxDepth: agentplugin.DefaultLimits.MaxDepth,
-	}
-	for _, e := range entries {
-		name := e.Name()
-		if agentplugin.ValidateName(name) != nil {
-			continue
-		}
-		fi, err := srcRoot.Lstat(filepath.Join(srcRel, name))
-		if err != nil {
+	return restorePluginsTreeWithLimits(srcDir, srcRel, home, dstRel, agentplugin.DefaultLimits)
+}
+
+func restorePluginsTreeWithLimits(srcDir, srcRel string, home *agenthome.Home, dstRel string, lim agentplugin.Limits) error {
+	reset := func() error {
+		if err := home.RemoveAll(dstRel); err != nil {
 			return err
 		}
-		if !fi.IsDir() {
-			continue
-		}
-		if err := home.InstallTree(srcRoot, filepath.Join(srcRel, name), path.Join(dstRel, name), lim); err != nil {
-			var le *agenthome.LimitError
-			if errors.As(err, &le) {
-				err = &agentplugin.LimitError{Limit: le.Limit}
-			}
-			return fmt.Errorf("copy agent plugin %q: %w", name, err)
-		}
+		return home.MkdirAll(dstRel, 0o755)
 	}
-	return nil
+	homeLim := agenthome.Limits{MaxFiles: lim.MaxFiles, MaxBytes: lim.MaxBytes, MaxDepth: lim.MaxDepth}
+	install := func(srcRoot *os.Root, srcPlugin, name string) error {
+		err := home.InstallTree(srcRoot, srcPlugin, path.Join(dstRel, name), homeLim)
+		var le *agenthome.LimitError
+		if errors.As(err, &le) {
+			// Report a limit the way the snapshot direction does.
+			return &agentplugin.LimitError{Limit: le.Limit}
+		}
+		return err
+	}
+	return walkPluginsTree(srcDir, srcRel, reset, install)
 }
 
 // recordHasAgentPlugins reports whether the control-plane inputs record

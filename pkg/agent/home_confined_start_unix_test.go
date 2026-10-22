@@ -488,3 +488,45 @@ func TestRemoveStaleAuthCandidates_LinkLeafAndComponent(t *testing.T) {
 		t.Fatalf("missing home: %v", err)
 	}
 }
+
+// The restore direction reports a per-plugin limit exactly as the snapshot
+// direction does: an *agentplugin.LimitError naming the plugin, with the
+// same message.
+func TestRestorePluginsTree_LimitErrorMatchesSnapshot(t *testing.T) {
+	src := t.TempDir()
+	for rel, content := range map[string]string{
+		"plugins/ok/plugin.json": "{}",
+		"plugins/big/a":          strings.Repeat("x", 1<<20),
+		"plugins/big/b":          "y",
+	} {
+		p := filepath.Join(src, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lim := agentplugin.Limits{MaxFiles: 100, MaxBytes: 1 << 20, MaxDepth: 4}
+	snapErr := copyPluginsTreeWithLimits(src, "plugins", t.TempDir(), "rec/plugins", lim)
+
+	c := newConfinedHome(t)
+	h, err := agenthome.Open(c.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = h.Close() }()
+	restoreErr := restorePluginsTreeWithLimits(src, "plugins", h, agentplugin.InputsRel+"/plugins", lim)
+	for name, err := range map[string]error{"snapshot": snapErr, "restore": restoreErr} {
+		if !agentplugin.IsLimitError(err) || !strings.Contains(err.Error(), `copy agent plugin "big"`) {
+			t.Fatalf("%s: err = %v, want a limit error naming the plugin", name, err)
+		}
+	}
+	if snapErr.Error() != restoreErr.Error() {
+		t.Fatalf("restore error %q differs from snapshot error %q", restoreErr, snapErr)
+	}
+	if !strings.Contains(restoreErr.Error(), "1 MiB") {
+		t.Fatalf("restore error %q does not name the limit in MiB", restoreErr)
+	}
+	c.checkOutside(t)
+}

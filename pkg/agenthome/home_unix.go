@@ -401,7 +401,7 @@ func copyTreeInto(src *os.Root, srcRel string, dstFd int, b *treeBudget, depth i
 			if err := b.entry(); err != nil {
 				return err
 			}
-			if err := copyFileInto(src, s, dstFd, name, copyMode(fi.Mode()), b); err != nil {
+			if err := copyFileInto(src, s, fi, dstFd, name, copyMode(fi.Mode()), b); err != nil {
 				return err
 			}
 		default:
@@ -414,9 +414,10 @@ func copyTreeInto(src *os.Root, srcRel string, dstFd int, b *treeBudget, depth i
 	return nil
 }
 
-// copyFileInto copies the regular file s in src to name in the directory
-// dstFd refers to, created with O_EXCL|O_NOFOLLOW.
-func copyFileInto(src *os.Root, s string, dstFd int, name string, mode os.FileMode, b *treeBudget) error {
+// copyFileInto copies the regular file s in src (fi is its Lstat) to name
+// in the directory dstFd refers to, created with O_EXCL|O_NOFOLLOW. A
+// source replaced since the Lstat is refused.
+func copyFileInto(src *os.Root, s string, fi os.FileInfo, dstFd int, name string, mode os.FileMode, b *treeBudget) error {
 	in, err := src.Open(s)
 	if err != nil {
 		return err
@@ -424,8 +425,8 @@ func copyFileInto(src *os.Root, s string, dstFd int, name string, mode os.FileMo
 	defer func() { _ = in.Close() }()
 	if st, err := in.Stat(); err != nil {
 		return err
-	} else if !st.Mode().IsRegular() {
-		return fmt.Errorf("agenthome: %s is not a regular file", s)
+	} else if !st.Mode().IsRegular() || !os.SameFile(fi, st) {
+		return fmt.Errorf("agenthome: %s changed while being copied", s)
 	}
 	out, err := dirfd.CreateExclAt(dstFd, name, 0o600)
 	if err != nil {

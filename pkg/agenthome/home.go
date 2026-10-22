@@ -24,8 +24,11 @@
 // a temporary file and renaming it over the leaf (an entry at the leaf,
 // a link included, is replaced, never written through), and recursive
 // removal never descends through a link. On unix this is built on the
-// pkg/sciontool/dirfd primitives; other platforms use an os.Root opened on
-// the home with an Lstat check of every directory component.
+// pkg/sciontool/dirfd primitives. Other platforms (none of which runs a
+// broker) use an os.Root opened on the home with an Lstat check of every
+// directory component: every operation stays inside the home, but the
+// no-follow checks there are check-then-act rather than descriptor-based,
+// and their errors may name paths relative to the home.
 //
 // Paths passed to a Home are relative to the home, slash or OS separated.
 // An absolute path or one with a ".." component is refused.
@@ -171,9 +174,18 @@ func (b *treeBudget) remainingBytes() int64 {
 func (b *treeBudget) addBytes(n int64) error {
 	b.bytes += n
 	if b.lim.MaxBytes > 0 && b.bytes > b.lim.MaxBytes {
-		return &LimitError{Limit: fmt.Sprintf("%d bytes", b.lim.MaxBytes)}
+		return &LimitError{Limit: formatBytes(b.lim.MaxBytes)}
 	}
 	return nil
+}
+
+// formatBytes formats a byte limit the way pkg/agentplugin does: whole MiB
+// as "N MiB", otherwise "N bytes".
+func formatBytes(n int64) string {
+	if n >= 1<<20 && n%(1<<20) == 0 {
+		return fmt.Sprintf("%d MiB", n>>20)
+	}
+	return fmt.Sprintf("%d bytes", n)
 }
 
 // readDirSorted lists the directory rel in src, sorted by name, so the copy
