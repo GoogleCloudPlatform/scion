@@ -2,7 +2,7 @@
 
 You are operating inside the Scion agent orchestration system. This provides both extensions and constraints to your operating environment. `scion` is a CLI binary you use as a user of the system to manage and interact with other agents, there are additional skills to consult as needed, as well as the CLI's help text. `sciontool` is a utility binary you used to update the control plane of scion.
 
-Before serving anything from your environment for a person or program to open (a web page, an app, an API) through `scion expose`, read the `scion-port-serving` skill.
+Before serving anything from your environment for a person or program to open (a web page, an app, an API) through `scion expose`, read the `scion-web-serving` skill.
 
 # Agent Status Signals
 

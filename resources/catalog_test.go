@@ -152,13 +152,13 @@ func TestPlatformSkillsFS_ScionAgentManageLifecycleDescribesMove(t *testing.T) {
 	}
 }
 
-// TestPlatformSkillsFS_ScionPortServing pins the scion-port-serving platform
+// TestPlatformSkillsFS_ScionWebServing pins the scion-web-serving platform
 // skill (ptone/scion#5567). It reads the embedded copies, the ones agents
 // get, so it fails if the skill or its web-apps reference is not embedded,
 // is gated to a subset of agents, or loses its guidance: scion expose
 // and the URL as printed, what the proxy carries, scion tunnel for full apps,
 // and for pages one self-contained file and an honest browser check.
-func TestPlatformSkillsFS_ScionPortServing(t *testing.T) {
+func TestPlatformSkillsFS_ScionWebServing(t *testing.T) {
 	read := func(name string) string {
 		t.Helper()
 		data, err := fs.ReadFile(PlatformSkillsFS(), name)
@@ -167,24 +167,27 @@ func TestPlatformSkillsFS_ScionPortServing(t *testing.T) {
 		}
 		return strings.ReplaceAll(string(data), "\r\n", "\n")
 	}
-	skillRaw := read("scion-port-serving/SKILL.md")
-	webRaw := read("scion-port-serving/references/web-apps.md")
+	skillRaw := read("scion-web-serving/SKILL.md")
+	webRaw := read("scion-web-serving/references/web-apps.md")
 
 	front, _, ok := strings.Cut(strings.TrimPrefix(skillRaw, "---\n"), "\n---\n")
 	if !strings.HasPrefix(skillRaw, "---\n") || !ok {
-		t.Fatalf("embedded scion-port-serving/SKILL.md has no frontmatter block")
+		t.Fatalf("embedded scion-web-serving/SKILL.md has no frontmatter block")
 	}
-	if !strings.Contains(front, "\nname: scion-port-serving\n") && !strings.HasPrefix(front, "name: scion-port-serving\n") {
-		t.Errorf("frontmatter does not declare name: scion-port-serving:\n%s", front)
+	if !strings.Contains(front, "\nname: scion-web-serving\n") && !strings.HasPrefix(front, "name: scion-web-serving\n") {
+		t.Errorf("frontmatter does not declare name: scion-web-serving:\n%s", front)
 	}
 	if !strings.Contains(front, "description:") {
 		t.Errorf("frontmatter has no description")
 	}
-	if strings.Contains(front, "inject_when") {
-		t.Errorf("scion-port-serving must reach every agent; frontmatter sets inject_when:\n%s", front)
+	if !strings.Contains(strings.Join(strings.Fields(front), " "), "The link serves web protocols only; for a non-HTTP port, point the person to scion tunnel.") {
+		t.Errorf("frontmatter description does not say the link serves web protocols only and points to scion tunnel:\n%s", front)
 	}
-	if _, err := fs.Stat(PlatformSkillsFS(), "scion-web-serving"); err == nil {
-		t.Errorf("the old scion-web-serving skill directory is still embedded")
+	if strings.Contains(front, "inject_when") {
+		t.Errorf("scion-web-serving must reach every agent; frontmatter sets inject_when:\n%s", front)
+	}
+	if _, err := fs.Stat(PlatformSkillsFS(), "scion-port-serving"); err == nil {
+		t.Errorf("the interim scion-port-serving skill directory is still embedded")
 	}
 
 	// Compare with whitespace collapsed, so a reflow does not break the pins.
@@ -209,6 +212,9 @@ func TestPlatformSkillsFS_ScionPortServing(t *testing.T) {
 			"scion tunnel <agent> --port <port>",
 			"https://googlecloudplatform.github.io/scion/hosted/user/port-forwarding/",
 			"references/web-apps.md",
+			"The link serves web protocols only",
+			"For a non-HTTP port",
+			"the person uses `scion tunnel` instead, and the port must stay exposed",
 		}},
 		{"references/web-apps.md", web, []string{
 			"one self-contained HTML file",
@@ -231,7 +237,7 @@ func TestPlatformSkillsFS_ScionPortServing(t *testing.T) {
 	for _, p := range pins {
 		for _, want := range p.want {
 			if !strings.Contains(p.content, want) {
-				t.Errorf("embedded scion-port-serving/%s does not contain %q", p.file, want)
+				t.Errorf("embedded scion-web-serving/%s does not contain %q", p.file, want)
 			}
 		}
 	}
@@ -249,16 +255,16 @@ func TestPlatformSkillsFS_ScionPortServing(t *testing.T) {
 			`"homepage": "."`,
 		} {
 			if strings.Contains(lower, unwanted) {
-				t.Errorf("embedded scion-port-serving/%s contains %q, guidance that does not hold for pages opened through the link today", p.file, unwanted)
+				t.Errorf("embedded scion-web-serving/%s contains %q, guidance that does not hold for pages opened through the link today", p.file, unwanted)
 			}
 		}
 	}
 }
 
-// TestMandatoryBoilerplate_PointsToPortServingSkill pins the one-line hint
-// to the scion-port-serving skill in the boilerplate every agent receives
+// TestMandatoryBoilerplate_PointsToWebServingSkill pins the one-line hint
+// to the scion-web-serving skill in the boilerplate every agent receives
 // (ptone/scion#5567).
-func TestMandatoryBoilerplate_PointsToPortServingSkill(t *testing.T) {
+func TestMandatoryBoilerplate_PointsToWebServingSkill(t *testing.T) {
 	fsys := MandatoryBoilerplateFS()
 	entries, err := fs.ReadDir(fsys, ".")
 	if err != nil {
@@ -274,16 +280,16 @@ func TestMandatoryBoilerplate_PointsToPortServingSkill(t *testing.T) {
 			t.Fatalf("reading %s: %v", e.Name(), err)
 		}
 		for _, line := range strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n") {
-			if strings.Contains(line, "scion-port-serving") {
+			if strings.Contains(line, "scion-web-serving") {
 				hits = append(hits, e.Name()+": "+line)
 			}
 		}
 	}
 	if len(hits) != 1 {
-		t.Fatalf("mandatory boilerplate has %d lines naming scion-port-serving, want exactly 1: %q", len(hits), hits)
+		t.Fatalf("mandatory boilerplate has %d lines naming scion-web-serving, want exactly 1: %q", len(hits), hits)
 	}
 	if !strings.Contains(hits[0], "scion expose") {
-		t.Errorf("scion-port-serving hint does not mention scion expose: %q", hits[0])
+		t.Errorf("scion-web-serving hint does not mention scion expose: %q", hits[0])
 	}
 }
 

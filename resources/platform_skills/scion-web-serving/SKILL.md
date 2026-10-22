@@ -1,19 +1,24 @@
 ---
-name: scion-port-serving
+name: scion-web-serving
 description: >-
-  How to serve anything that listens on a port inside your agent (a web page
-  or app, an API, a dashboard, a docs preview) so a person or program can
-  reach it through the Hub's port proxy: scion expose and unexpose, the URL to
-  hand over, what the proxy carries, and scion tunnel for full apps. Use
-  before running scion expose. For web pages and apps, also read
-  references/web-apps.md.
+  How to serve a web page, app, API or other HTTP service from inside your
+  agent so a person or program can reach it through the Hub's port proxy:
+  scion expose and unexpose, the URL to hand over, what the proxy carries,
+  and scion tunnel for full apps. The link serves web protocols only; for a
+  non-HTTP port, point the person to scion tunnel. Use before running scion
+  expose. For web pages and apps, also read references/web-apps.md.
 ---
 
-# Serving from your agent through the port proxy
+# Serving web content from your agent through the port proxy
 
 Services inside your agent are not reachable from outside it. `scion expose`
 registers a local port with the Hub, which then serves it at a URL that
 people with access to your agent can open.
+
+The link serves web protocols only (HTTP, and WebSockets where supported; see
+below). For a non-HTTP port (a database, a debugger, SSH or another TCP
+service), the person uses `scion tunnel` instead, and the port must stay
+exposed (see Full apps: scion tunnel).
 
 ## Steps
 
