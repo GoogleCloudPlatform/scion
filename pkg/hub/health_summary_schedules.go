@@ -51,9 +51,12 @@ var healthSummaryScheduleScanLimit = 2000
 const healthScheduleLastErrorMaxRunes = 300
 
 // HealthSummarySchedules is the schedules section of the health summary.
-// The failing and paused lists each hold only schedules in projects where
-// the caller holds scheduled_event.read, so two callers can see different
-// lists; the section never changes the overall status.
+// For a user caller, the failing and paused lists each hold only schedules
+// in projects where the caller holds scheduled_event.read (decided once per
+// project). For an agent caller, each row is decided on its own: only
+// schedules in the agent's own project that the agent holds are listed. Two
+// callers can see different lists; the section never changes the overall
+// status.
 type HealthSummarySchedules struct {
 	// Failing lists active schedules whose last run failed, most recent
 	// failure first, capped at healthSummaryScheduleLimit. Never null.

@@ -731,3 +731,68 @@ func TestAgentScheduleScope_HealthNonUUIDProjectClaimIsEmpty(t *testing.T) {
 	assert.Zero(t, sec.Total)
 	assert.Zero(t, reads.reads, "the store is not read")
 }
+
+// An agent caller's hub-paused list in the health summary holds only the
+// schedule it holds: the store narrows the paused scan to it, and with a
+// store that ignores the agent and project filters the per-row decision
+// still leaves out the rows another agent, a user or no recorded principal
+// holds. A schedule the agent holds that a user paused (no reason) is not a
+// hub-paused schedule and is not listed.
+func TestAgentScheduleScope_HealthPausedShowsHeldRows(t *testing.T) {
+	srv, s, projectID := setupScheduleTest(t)
+	ids := map[agentScopeHolder]string{}
+	for _, h := range agentScopeHolders {
+		sc := storeAgentScopeSchedule(t, s, projectID, "scope-paused-"+string(h), h, store.ScheduleStatusActive)
+		require.NoError(t, s.UpdateScheduleStatus(context.Background(), sc.ID, store.ScheduleStatusPaused, store.ScheduleStatusReasonCreatorDeleted))
+		ids[h] = sc.ID
+	}
+	userPaused := storeAgentScopeSchedule(t, s, projectID, "scope-paused-user-pause", holderCallerAgent, store.ScheduleStatusActive)
+	require.NoError(t, s.UpdateScheduleStatus(context.Background(), userPaused.ID, store.ScheduleStatusPaused, store.ScheduleStatusReasonNone))
+
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/admin/health/summary", nil)
+	r = r.WithContext(contextWithIdentity(r.Context(), agentScopeCaller(projectID)))
+	sec, err := srv.healthSummarySchedules(r)
+	require.NoError(t, err)
+	assert.False(t, sec.PausedUnavailable)
+	require.Len(t, sec.Paused, 1)
+	assert.Equal(t, ids[holderCallerAgent], sec.Paused[0].ID)
+	assert.Equal(t, 1, sec.PausedTotal)
+
+	srv.store = scheduledListWideStore{Store: s}
+	t.Cleanup(func() { srv.store = s })
+	sec, err = srv.healthSummarySchedules(r)
+	require.NoError(t, err)
+	require.Len(t, sec.Paused, 1)
+	assert.Equal(t, ids[holderCallerAgent], sec.Paused[0].ID)
+	assert.Equal(t, 1, sec.PausedTotal)
+}
+
+// An agent caller with an empty ID, or whose project claim is not a project
+// ID, gets an empty (not null) hub-paused list, and the store is not read.
+func TestAgentScheduleScope_HealthPausedEmptyWithoutScope(t *testing.T) {
+	srv, s, projectID := setupScheduleTest(t)
+	held := storeAgentScopeSchedule(t, s, projectID, "scope-paused-no-scope", holderCallerAgent, store.ScheduleStatusActive)
+	require.NoError(t, s.UpdateScheduleStatus(context.Background(), held.ID, store.ScheduleStatusPaused, store.ScheduleStatusReasonCreatorDeleted))
+	noID := &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: ""},
+		ProjectID: projectID,
+		Scopes:    []AgentTokenScope{ScopeProjectRead},
+	}}
+	nonUUID := authzHelperAgent("not-a-project-id", ScopeProjectRead)
+	reads := &scheduledListReadStore{Store: s}
+	srv.store = reads
+	t.Cleanup(func() { srv.store = s })
+
+	for _, caller := range []Identity{noID, nonUUID} {
+		r := httptest.NewRequest(http.MethodGet, "/api/v1/admin/health/summary", nil)
+		r = r.WithContext(contextWithIdentity(r.Context(), caller))
+		sec, err := srv.healthSummarySchedules(r)
+		require.NoError(t, err)
+		require.NotNil(t, sec)
+		require.NotNil(t, sec.Paused, "the paused section lists no rows as an empty list, not null")
+		assert.Empty(t, sec.Paused)
+		assert.Zero(t, sec.PausedTotal)
+		assert.False(t, sec.PausedUnavailable)
+	}
+	assert.Zero(t, reads.reads, "the store is not read")
+}
