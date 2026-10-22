@@ -54,24 +54,41 @@ function space(id: string, name: string): any {
   };
 }
 
-function railPrefs(threadGroups: Record<string, unknown[]>): any {
-  return {
-    spaceSortMode: 'activity',
-    threadSortMode: 'activity',
-    spaceOrder: undefined,
-    threadOrder: undefined,
-    threadGroups,
-  };
+interface TestGroup {
+  id: string;
+  name: string;
+  threadIds: string[];
 }
 
 /**
- * Mocks a single space, "p-a", with the given thread groups and (optional)
- * threads — the shape every auto-expand test needs: one space, its thread
+ * Give the rail project thread groups per space, as if each space's groups
+ * had loaded with its threads, and route the selection to space "p-a" (the
+ * space every test here uses), so the auto-expand decision has the groups
+ * of the selected thread's space (see `groupsKnownForSelection`).
+ */
+function setGroupsFrom(el: any, byProject: Record<string, TestGroup[]>): void {
+  el.projectGroups = new Map(Object.entries(byProject));
+  el.selectedProjectId = 'p-a';
+}
+
+/** The `/api/v1/thread-groups` wire form of a space's groups. */
+function wireGroups(projectId: string, groups: TestGroup[]): unknown[] {
+  return groups.map((g) => ({
+    id: g.id,
+    projectId,
+    name: g.name,
+    threads: g.threadIds.map((t) => ({ threadId: t, conversationId: `c-${t}`, name: t })),
+  }));
+}
+
+/**
+ * Mocks a single space, "p-a", with the given project thread groups and
+ * (optional) threads — the shape every auto-expand test needs: one space, its thread
  * list, and its groups, all 200s. Each call replaces the mock wholesale, so
  * a test can call this again mid-test (e.g. after a server-side change) to
  * simulate a follow-up reload seeing new data.
  */
-function serveGroups(threadGroups: Record<string, unknown[]>, threads: unknown[] = []): void {
+function serveGroups(threadGroups: Record<string, TestGroup[]>, threads: unknown[] = []): void {
   apiFetchMock.mockImplementation((path: string) => {
     if (path === '/api/v1/chat/spaces') {
       return Promise.resolve(
@@ -82,14 +99,31 @@ function serveGroups(threadGroups: Record<string, unknown[]>, threads: unknown[]
       return Promise.resolve(new Response(JSON.stringify({ threads }), { status: 200 }));
     }
     if (path === '/api/v1/chat/user-prefs') {
+      return Promise.resolve(new Response('{}', { status: 200 }));
+    }
+    if (path.startsWith('/api/v1/thread-groups?projectId=')) {
+      const projectId = path.slice('/api/v1/thread-groups?projectId='.length);
       return Promise.resolve(
-        new Response(JSON.stringify({ threadGroups: JSON.stringify(threadGroups) }), {
-          status: 200,
-        })
+        new Response(
+          JSON.stringify({ threadGroups: wireGroups(projectId, threadGroups[projectId] ?? []) }),
+          { status: 200 }
+        )
       );
     }
     return Promise.resolve(new Response('{}', { status: 200 }));
   });
+}
+
+/**
+ * Let the loads that follow `rail-loaded` settle: a space's thread list,
+ * and its project thread groups with it, load after the spaces and
+ * preferences do.
+ */
+async function flushLoads(el: any): Promise<void> {
+  for (let i = 0; i < 8; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await el.updateComplete;
+  }
 }
 
 /** Default mock: both endpoints return empty, successful responses. */
@@ -257,7 +291,7 @@ describe('space rail — pruning stale entries', () => {
     const el = mount();
     await el.updateComplete; // restore, before hand-setting spaces/prefs below
     el.spaces = [space('p-a', 'Alpha')];
-    el.prefs = railPrefs({ 'p-a': [{ id: 'live-group', name: 'Live', threadIds: [] }] });
+    setGroupsFrom(el, { 'p-a': [{ id: 'live-group', name: 'Live', threadIds: [] }] });
 
     el.pruneCollapsedGroups();
 
@@ -350,7 +384,7 @@ describe('space rail — auto-expand group for a selected/deep-linked thread (N1
     const el = document.createElement('scion-chat-space-rail') as any;
     el.collapsedGroups = new Set(['g-live']);
     el.selectedKey = 'thread-1';
-    el.prefs = railPrefs({ 'p-a': [{ id: 'g-live', name: 'Live', threadIds: ['thread-1'] }] });
+    setGroupsFrom(el, { 'p-a': [{ id: 'g-live', name: 'Live', threadIds: ['thread-1'] }] });
     el._prefsLoaded = true;
     localStorage.setItem(STORAGE_KEY, JSON.stringify(['g-live']));
 
@@ -369,7 +403,7 @@ describe('space rail — auto-expand group for a selected/deep-linked thread (N1
     const el = document.createElement('scion-chat-space-rail') as any;
     el.collapsedGroups = new Set(['g-live']);
     el.selectedKey = 'not-in-any-group';
-    el.prefs = railPrefs({ 'p-a': [{ id: 'g-live', name: 'Live', threadIds: ['thread-1'] }] });
+    setGroupsFrom(el, { 'p-a': [{ id: 'g-live', name: 'Live', threadIds: ['thread-1'] }] });
     el._prefsLoaded = true;
 
     el.maybeAutoExpandGroupForSelectedKey();
@@ -385,7 +419,7 @@ describe('space rail — auto-expand group for a selected/deep-linked thread (N1
     // race between that load and this setup.
     await el.reload();
 
-    el.prefs = railPrefs({ 'p-a': [{ id: 'g-live', name: 'Live', threadIds: ['thread-1'] }] });
+    setGroupsFrom(el, { 'p-a': [{ id: 'g-live', name: 'Live', threadIds: ['thread-1'] }] });
     el.collapsedGroups = new Set(['g-live']);
     await el.updateComplete;
 
@@ -400,7 +434,7 @@ describe('space rail — auto-expand group for a selected/deep-linked thread (N1
     const el = mount();
     await el.reload();
 
-    el.prefs = railPrefs({ 'p-a': [{ id: 'g-live', name: 'Live', threadIds: ['thread-1'] }] });
+    setGroupsFrom(el, { 'p-a': [{ id: 'g-live', name: 'Live', threadIds: ['thread-1'] }] });
     el.collapsedGroups = new Set(['g-live']);
     el.selectedKey = 'thread-1';
     await el.updateComplete;
@@ -422,7 +456,7 @@ describe('space rail — auto-expand must never leak into the persisted set (R2 
     document.body.appendChild(el);
     await el.updateComplete; // restore ['g-sel'], before hand-setting prefs below
     el.selectedKey = 'thread-1';
-    el.prefs = railPrefs({ 'p-a': [{ id: 'g-sel', name: 'Sel', threadIds: ['thread-1'] }] });
+    setGroupsFrom(el, { 'p-a': [{ id: 'g-sel', name: 'Sel', threadIds: ['thread-1'] }] });
     el._prefsLoaded = true;
 
     el.maybeAutoExpandGroupForSelectedKey();
@@ -447,7 +481,7 @@ describe('space rail — auto-expand must never leak into the persisted set (R2 
     el.spaces = [space('p-a', 'Alpha')];
     // g-stale no longer exists server-side; g-sel still does and still holds
     // the selected thread.
-    el.prefs = railPrefs({ 'p-a': [{ id: 'g-sel', name: 'Sel', threadIds: ['thread-1'] }] });
+    setGroupsFrom(el, { 'p-a': [{ id: 'g-sel', name: 'Sel', threadIds: ['thread-1'] }] });
     el._prefsLoaded = true;
 
     el.maybeAutoExpandGroupForSelectedKey();
@@ -517,6 +551,8 @@ describe('space rail — cold deep link auto-expands before any reload (R4 regre
     // Flush the *initial* connectedCallback-triggered load — not reload(),
     // which round 2's tests used and which is what masked this regression.
     await loaded;
+    // The space's project groups load with its threads, just after.
+    await flushLoads(el);
 
     expect(el.autoExpandedGroupId).toBe('g-sel');
   });
@@ -536,6 +572,7 @@ describe('space rail — cold deep link auto-expands before any reload (R4 regre
     );
     const el = container.querySelector('scion-chat-space-rail') as any;
     await waitForRailLoaded(el);
+    await flushLoads(el);
 
     expect(el.autoExpandedGroupId).toBe('g-sel');
   });
@@ -551,6 +588,7 @@ describe('space rail — toggling the auto-expanded group (R5 regression)', () =
     el.selectedKey = 'thread-1';
     document.body.appendChild(el);
     await waitForRailLoaded(el);
+    await flushLoads(el);
     expect(el.autoExpandedGroupId).toBe('g-sel');
 
     // The click that's supposed to visually re-collapse the group.
@@ -743,8 +781,10 @@ describe('space rail — auto-expand override cleared when the thread changes gr
     const el = document.createElement('scion-chat-space-rail') as any;
     el.currentUserId = 'user-1';
     el.selectedKey = 'thread-1';
+    el.selectedProjectId = 'p-a';
     document.body.appendChild(el);
     await el.reload();
+    await flushLoads(el);
     expect(el.autoExpandedGroupId).toBe('g-a');
 
     // The thread moves server-side from g-a to g-b; both stay collapsed.
@@ -756,6 +796,7 @@ describe('space rail — auto-expand override cleared when the thread changes gr
     });
 
     await el.reload();
+    await flushLoads(el);
 
     // Cleared, not re-picked to g-b. collapsedGroups (the user's real
     // preference for each group) is untouched by any of this.
@@ -768,7 +809,7 @@ describe('space rail — auto-expand override cleared when the thread changes gr
     const el = document.createElement('scion-chat-space-rail') as any;
     el.selectedKey = 'thread-1';
     el.autoExpandedGroupId = 'g-gone';
-    el.prefs = railPrefs({ 'p-a': [] }); // g-gone no longer exists
+    setGroupsFrom(el, { 'p-a': [] }); // g-gone no longer exists
 
     el.clearStaleAutoExpand();
 
@@ -786,8 +827,10 @@ describe('space rail — a new selection re-decides the override (N6, intended b
     const el = document.createElement('scion-chat-space-rail') as any;
     el.currentUserId = 'user-1';
     el.selectedKey = 'thread-a';
+    el.selectedProjectId = 'p-a';
     document.body.appendChild(el);
     await el.reload();
+    await flushLoads(el);
     expect(el.autoExpandedGroupId).toBe('g-shared');
 
     // The user re-collapses it for this view.
@@ -806,19 +849,16 @@ describe('space rail — a new selection re-decides the override (N6, intended b
 });
 
 /**
- * With project thread groups on (ptone/scion#4424, `hub.chat_thread_groups`),
- * collapse state stays local and per user, but groups load per space with
- * its threads instead of with the preferences. Pruning must not mistake an
- * unloaded space's groups for stale ones, and must keep the hidden personal
- * groups' entries so turning the flag off restores them; the deep-link
- * auto-expand must wait for the selected thread's space's groups.
+ * With project thread groups (ptone/scion#4424), collapse state stays local
+ * and per user, but groups load per space with its threads instead of with
+ * the preferences. Pruning must not mistake an unloaded space's groups for
+ * stale ones; the deep-link auto-expand must wait for the selected thread's
+ * space's groups.
  */
 describe('space rail — collapse with project thread groups', () => {
-  const FLAG_KEY = 'scion:feature:hub.chat_thread_groups';
-
   /**
-   * Two spaces; p-a has project group g-proj, personal group g-personal is
-   * hidden. A space mapped to null answers its groups request with a 500.
+   * Two spaces; p-a has project group g-proj, and the older personal group
+   * g-personal is hidden. A space mapped to null answers its groups request with a 500.
    */
   function serveProjectGroups(threadGroupsFor: Record<string, unknown[] | null>): void {
     apiFetchMock.mockImplementation((path: string) => {
@@ -889,10 +929,6 @@ describe('space rail — collapse with project thread groups', () => {
     }
   }
 
-  beforeEach(() => {
-    localStorage.setItem(FLAG_KEY, 'true');
-  });
-
   it("does not prune while a space's project groups have not loaded", async () => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(['g-proj', 'g-other-space']));
     // p-b's groups never load (activity sort loads every space's threads,
@@ -912,7 +948,7 @@ describe('space rail — collapse with project thread groups', () => {
     expect(stored).toEqual(expect.arrayContaining(['g-proj', 'g-other-space']));
   });
 
-  it('prunes once every space has its groups, keeping live project and hidden personal ids', async () => {
+  it('prunes once every space has its groups, keeping only live project group ids', async () => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(['g-proj', 'g-personal', 'stale-group']));
     serveProjectGroups({ 'p-a': [projectGroup] });
 
@@ -926,9 +962,10 @@ describe('space rail — collapse with project thread groups', () => {
     await el.reload();
     await flush(el);
 
-    expect([...el.collapsedGroups].sort()).toEqual(['g-personal', 'g-proj']);
+    // A hidden personal group is never shown, so its entry is stale too.
+    expect([...el.collapsedGroups]).toEqual(['g-proj']);
     const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '[]') as string[];
-    expect(stored.sort()).toEqual(['g-personal', 'g-proj']);
+    expect(stored).toEqual(['g-proj']);
   });
 
   it('collapses a project group locally, without any request', async () => {

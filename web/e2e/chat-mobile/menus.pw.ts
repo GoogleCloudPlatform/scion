@@ -67,9 +67,26 @@ async function groupAndDMMocks(page: Page): Promise<void> {
         threadSortMode: 'activity',
         spaceOrder: '[]',
         threadOrder: '{}',
-        threadGroups: JSON.stringify({
-          [PROJECT_A.id]: [{ id: 'grp-design', name: GROUP_NAME, threadIds: ['thread-04'] }],
-        }),
+        threadGroups: '{}',
+      },
+    });
+  });
+  // The rail shows project thread groups, which the hub serves per space.
+  await page.route(/\/api\/v1\/thread-groups(\?|$)/, (route) => {
+    const projectId = new URL(route.request().url()).searchParams.get('projectId');
+    void route.fulfill({
+      json: {
+        threadGroups:
+          projectId === PROJECT_A.id
+            ? [
+                {
+                  id: 'grp-design',
+                  projectId: PROJECT_A.id,
+                  name: GROUP_NAME,
+                  threads: [{ threadId: 'thread-04', conversationId: 'conv-thread-04' }],
+                },
+              ]
+            : [],
       },
     });
   });
