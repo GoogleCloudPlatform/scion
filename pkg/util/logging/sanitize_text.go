@@ -19,6 +19,8 @@ import (
 	"regexp"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util/urlredact"
 )
 
 // MaxSanitizedTextBytes bounds the text SanitizeText returns.
@@ -42,8 +44,6 @@ const textValueDelimiters = ",;&\"'}]"
 var (
 	// A PEM block, or an unterminated one running to the end of the text.
 	textPEMRe = regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]+-----.*?(?:-----END [A-Z0-9 ]+-----|$)`)
-	// The userinfo part of a URL: scheme://user:pass@host.
-	textURLUserInfoRe = regexp.MustCompile(`\b([A-Za-z][A-Za-z0-9+.-]*://)[^\s/?#@]+@`)
 	// A bearer authorization scheme followed by its credentials.
 	textBearerRe = regexp.MustCompile(`(?i)\b(bearer)\s+[A-Za-z0-9._~+/=-]{8,}`)
 	// A basic authorization scheme and the word after it; blankBasic
@@ -83,7 +83,10 @@ var (
 // create and start failure causes through it.
 func SanitizeText(text string) string {
 	s := textPEMRe.ReplaceAllString(text, RedactedMarker)
-	s = textURLUserInfoRe.ReplaceAllString(s, "${1}"+RedactedMarker+"@")
+	// URL user info follows the CLI display rule (urlredact): the whole
+	// user info becomes the marker, or the whole URL after its scheme when
+	// the user info cannot be told apart from the host and path.
+	s = urlredact.RedactUserInfoIn(s, RedactedMarker)
 	s = textBearerRe.ReplaceAllString(s, "${1} "+RedactedMarker)
 	s = textBasicRe.ReplaceAllStringFunc(s, blankBasic)
 	s = textJWTRe.ReplaceAllString(s, RedactedMarker)
