@@ -12,7 +12,8 @@
 # `npm ci && npm run build`.
 #
 # Usage: pass --ignore-file=image-build/gcloudignore-omni to
-# gcloud builds submit when building the omni or hub-gke target.
+# gcloud builds submit when building the omni target or the repo-root
+# Dockerfile (hub-gke or its default target).
 #
 # Gitignore semantics: a pattern without a slash matches at any depth, which
 # would also drop files under //go:embed roots (e.g. pkg/config/embeds/,
