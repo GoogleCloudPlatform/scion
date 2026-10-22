@@ -3104,7 +3104,7 @@ func TestReincarnateAgent_ReprovisionFailure_RerendersPreviousConfig(t *testing.
 	require.Len(t, cfgs, 2)
 	assert.Contains(t, cfgs[0].Task, "[SCION REINCARNATION]", "the first dispatch carries the fresh config")
 	require.NotNil(t, r.PreviousAppliedConfig)
-	assert.Equal(t, *r.PreviousAppliedConfig, cfgs[1], "the re-render dispatches exactly the previous config")
+	assert.Equal(t, *reincarnationRecoveryConfig(r.PreviousAppliedConfig, r.ToGeneration, r.Handoff, store.AgentReincarnationStateProvisioning), cfgs[1], "the re-render dispatches the previous config with the recovery Task")
 	assert.Zero(t, disp.startCalls)
 
 	final, err := s.GetAgent(context.Background(), agent.ID)
@@ -3135,7 +3135,7 @@ func TestReincarnateAgent_StartFailure_RerendersPreviousConfig(t *testing.T) {
 	calls, cfgs := disp.reprovisionSnapshot()
 	require.Equal(t, 2, calls)
 	require.NotNil(t, r.PreviousAppliedConfig)
-	assert.Equal(t, *r.PreviousAppliedConfig, cfgs[1], "the re-render dispatches exactly the previous config")
+	assert.Equal(t, *reincarnationRecoveryConfig(r.PreviousAppliedConfig, r.ToGeneration, r.Handoff, store.AgentReincarnationStateStarting), cfgs[1], "the re-render dispatches the previous config with the recovery Task")
 
 	final, err := s.GetAgent(context.Background(), agent.ID)
 	require.NoError(t, err)
@@ -3167,7 +3167,7 @@ func TestReincarnateAgent_SecretResolutionError_FailsAndRerenders(t *testing.T) 
 	calls, cfgs := disp.reprovisionSnapshot()
 	require.Equal(t, 2, calls, "one reprovision, one re-render of the previous config")
 	require.NotNil(t, r.PreviousAppliedConfig)
-	assert.Equal(t, *r.PreviousAppliedConfig, cfgs[1])
+	assert.Equal(t, *reincarnationRecoveryConfig(r.PreviousAppliedConfig, r.ToGeneration, r.Handoff, store.AgentReincarnationStateStarting), cfgs[1])
 
 	final, err := s.GetAgent(context.Background(), agent.ID)
 	require.NoError(t, err)
@@ -3397,7 +3397,7 @@ func TestReincarnateAgent_AdvanceToStartingFailure_RerendersPreviousConfig(t *te
 	calls, cfgs := disp.reprovisionSnapshot()
 	require.Equal(t, 2, calls, "the reprovision plus one re-render")
 	require.NotNil(t, r.PreviousAppliedConfig)
-	assert.Equal(t, *r.PreviousAppliedConfig, cfgs[1])
+	assert.Equal(t, *reincarnationRecoveryConfig(r.PreviousAppliedConfig, r.ToGeneration, r.Handoff, store.AgentReincarnationStateProvisioning), cfgs[1])
 	assert.Zero(t, disp.startCalls)
 
 	final, err := s.GetAgent(context.Background(), agent.ID)
@@ -3445,7 +3445,7 @@ func TestReincarnateAgent_StartingWriteFailure_RerendersPreviousConfig(t *testin
 	calls, cfgs := disp.reprovisionSnapshot()
 	require.Equal(t, 2, calls, "the reprovision plus one re-render")
 	require.NotNil(t, r.PreviousAppliedConfig)
-	assert.Equal(t, *r.PreviousAppliedConfig, cfgs[1])
+	assert.Equal(t, *reincarnationRecoveryConfig(r.PreviousAppliedConfig, r.ToGeneration, r.Handoff, store.AgentReincarnationStateStarting), cfgs[1])
 	assert.Zero(t, disp.startCalls, "no start is dispatched when the starting step cannot be recorded")
 
 	final, err := s.GetAgent(context.Background(), agent.ID)

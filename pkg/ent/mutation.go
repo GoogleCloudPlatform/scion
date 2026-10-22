@@ -18035,6 +18035,7 @@ type AgentReincarnationMutation struct {
 	source_broker_id        *string
 	target_broker_id        *string
 	source_cleanup          *string
+	transfer_mode           *string
 	clearedFields           map[string]struct{}
 	done                    bool
 	oldValue                func(context.Context) (*AgentReincarnation, error)
@@ -18842,6 +18843,55 @@ func (m *AgentReincarnationMutation) ResetSourceCleanup() {
 	delete(m.clearedFields, agentreincarnation.FieldSourceCleanup)
 }
 
+// SetTransferMode sets the "transfer_mode" field.
+func (m *AgentReincarnationMutation) SetTransferMode(s string) {
+	m.transfer_mode = &s
+}
+
+// TransferMode returns the value of the "transfer_mode" field in the mutation.
+func (m *AgentReincarnationMutation) TransferMode() (r string, exists bool) {
+	v := m.transfer_mode
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTransferMode returns the old "transfer_mode" field's value of the AgentReincarnation entity.
+// If the AgentReincarnation object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentReincarnationMutation) OldTransferMode(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTransferMode is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTransferMode requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTransferMode: %w", err)
+	}
+	return oldValue.TransferMode, nil
+}
+
+// ClearTransferMode clears the value of the "transfer_mode" field.
+func (m *AgentReincarnationMutation) ClearTransferMode() {
+	m.transfer_mode = nil
+	m.clearedFields[agentreincarnation.FieldTransferMode] = struct{}{}
+}
+
+// TransferModeCleared returns if the "transfer_mode" field was cleared in this mutation.
+func (m *AgentReincarnationMutation) TransferModeCleared() bool {
+	_, ok := m.clearedFields[agentreincarnation.FieldTransferMode]
+	return ok
+}
+
+// ResetTransferMode resets all changes to the "transfer_mode" field.
+func (m *AgentReincarnationMutation) ResetTransferMode() {
+	m.transfer_mode = nil
+	delete(m.clearedFields, agentreincarnation.FieldTransferMode)
+}
+
 // Where appends a list predicates to the AgentReincarnationMutation builder.
 func (m *AgentReincarnationMutation) Where(ps ...predicate.AgentReincarnation) {
 	m.predicates = append(m.predicates, ps...)
@@ -18876,7 +18926,7 @@ func (m *AgentReincarnationMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentReincarnationMutation) Fields() []string {
-	fields := make([]string, 0, 15)
+	fields := make([]string, 0, 16)
 	if m.agent_id != nil {
 		fields = append(fields, agentreincarnation.FieldAgentID)
 	}
@@ -18922,6 +18972,9 @@ func (m *AgentReincarnationMutation) Fields() []string {
 	if m.source_cleanup != nil {
 		fields = append(fields, agentreincarnation.FieldSourceCleanup)
 	}
+	if m.transfer_mode != nil {
+		fields = append(fields, agentreincarnation.FieldTransferMode)
+	}
 	return fields
 }
 
@@ -18960,6 +19013,8 @@ func (m *AgentReincarnationMutation) Field(name string) (ent.Value, bool) {
 		return m.TargetBrokerID()
 	case agentreincarnation.FieldSourceCleanup:
 		return m.SourceCleanup()
+	case agentreincarnation.FieldTransferMode:
+		return m.TransferMode()
 	}
 	return nil, false
 }
@@ -18999,6 +19054,8 @@ func (m *AgentReincarnationMutation) OldField(ctx context.Context, name string) 
 		return m.OldTargetBrokerID(ctx)
 	case agentreincarnation.FieldSourceCleanup:
 		return m.OldSourceCleanup(ctx)
+	case agentreincarnation.FieldTransferMode:
+		return m.OldTransferMode(ctx)
 	}
 	return nil, fmt.Errorf("unknown AgentReincarnation field %s", name)
 }
@@ -19113,6 +19170,13 @@ func (m *AgentReincarnationMutation) SetField(name string, value ent.Value) erro
 		}
 		m.SetSourceCleanup(v)
 		return nil
+	case agentreincarnation.FieldTransferMode:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTransferMode(v)
+		return nil
 	}
 	return fmt.Errorf("unknown AgentReincarnation field %s", name)
 }
@@ -19197,6 +19261,9 @@ func (m *AgentReincarnationMutation) ClearedFields() []string {
 	if m.FieldCleared(agentreincarnation.FieldSourceCleanup) {
 		fields = append(fields, agentreincarnation.FieldSourceCleanup)
 	}
+	if m.FieldCleared(agentreincarnation.FieldTransferMode) {
+		fields = append(fields, agentreincarnation.FieldTransferMode)
+	}
 	return fields
 }
 
@@ -19237,6 +19304,9 @@ func (m *AgentReincarnationMutation) ClearField(name string) error {
 		return nil
 	case agentreincarnation.FieldSourceCleanup:
 		m.ClearSourceCleanup()
+		return nil
+	case agentreincarnation.FieldTransferMode:
+		m.ClearTransferMode()
 		return nil
 	}
 	return fmt.Errorf("unknown AgentReincarnation nullable field %s", name)
@@ -19290,6 +19360,9 @@ func (m *AgentReincarnationMutation) ResetField(name string) error {
 		return nil
 	case agentreincarnation.FieldSourceCleanup:
 		m.ResetSourceCleanup()
+		return nil
+	case agentreincarnation.FieldTransferMode:
+		m.ResetTransferMode()
 		return nil
 	}
 	return fmt.Errorf("unknown AgentReincarnation field %s", name)

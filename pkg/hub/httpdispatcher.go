@@ -1913,7 +1913,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 // agent is provisioned without injected secrets. The broker's provision does
 // not read them, and a later start resolves them again and fails there.
 func (d *HTTPAgentDispatcher) DispatchAgentProvision(ctx context.Context, agent *store.Agent) error {
-	return d.dispatchProvision(ctx, agent, "DispatchAgentProvision", false, "")
+	return d.dispatchProvision(ctx, agent, "DispatchAgentProvision", false, "", "")
 }
 
 // DispatchAgentReprovision re-renders an EXISTING agent's on-disk config
@@ -1936,14 +1936,26 @@ func (d *HTTPAgentDispatcher) DispatchAgentProvision(ctx context.Context, agent 
 // does that separately via DispatchAgentStart. Precondition: the agent's
 // container is already stopped.
 func (d *HTTPAgentDispatcher) DispatchAgentReprovision(ctx context.Context, agent *store.Agent) error {
-	return d.dispatchProvision(ctx, agent, "DispatchAgentReprovision", true, "")
+	return d.dispatchProvision(ctx, agent, "DispatchAgentReprovision", true, "", "")
 }
 
 // dispatchProvision is the shared implementation behind DispatchAgentProvision
 // and DispatchAgentReprovision: build a provision-only create request, dispatch
 // it with the GatherEnv two-pass mechanism, and merge any resolved storage env
 // back into AppliedConfig.
-func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *store.Agent, callerName string, reprovision bool, expectNFSWorkspace string) (err error) {
+func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *store.Agent, callerName string, reprovision bool, expectNFSWorkspace, moveReincarnationID string) (err error) {
+	// sent is set at the send boundary below. Every error returned once it
+	// is set is marked errProvisionSent (provisionSent), except a deferred
+	// route (ErrLifecycleDeferred), which sends nothing; an error returned
+	// before it is never marked. A forced move removes files on the target
+	// only for a marked error (moveTargetUntouched), so an early return
+	// added here later stays safe.
+	sent := false
+	defer func() {
+		if err != nil && sent && !errors.Is(err, ErrLifecycleDeferred) {
+			err = provisionSent(err)
+		}
+	}()
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
 	}
@@ -1993,6 +2005,7 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 	req.ProvisionOnly = true
 	req.Reprovision = reprovision
 	req.ExpectExistingNFSWorkspace = expectNFSWorkspace
+	req.MoveReincarnationID = moveReincarnationID
 	req.GatherEnv = true
 	wantSharedDirChange := false
 	if reprovision && agent.AppliedConfig != nil && len(agent.AppliedConfig.SharedDirBackendChanges) > 0 {
@@ -2006,6 +2019,12 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 
 	// First pass: use CreateAgentWithGather so the broker can report which
 	// env vars are still needed (returned as a 202 with env requirements).
+	//
+	// The send boundary: from here on the request may have reached the
+	// broker, so every error is marked sent (see the deferred wrap above).
+	// That is conservative: a dial or marshal failure inside the transport
+	// is ambiguous and counts as sent, so a forced move cleans up after it.
+	sent = true
 	resp, envReqs, err := d.client.CreateAgentWithGather(ctx, agent.RuntimeBrokerID, endpoint, req)
 	if isHashMismatchError(err) {
 		if repairErr := d.repairHashMismatch(ctx, agent, err); repairErr == nil {

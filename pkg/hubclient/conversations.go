@@ -88,7 +88,7 @@ type CreateConversationRequest struct {
 	Kind        string `json:"kind,omitempty"`
 	// ThreadGroupID files the new group conversation into this project
 	// thread group (ptone/scion#4424). The group must be in the
-	// conversation's project. A hub with the hub.chat_thread_groups
+	// conversation's project. An older hub with its thread groups
 	// experiment off answers 400 when it is set.
 	ThreadGroupID string `json:"threadGroupId,omitempty"`
 }

@@ -142,9 +142,11 @@ func TestInvitedUser_PreRecordedBindings_InertUntilSignIn(t *testing.T) {
 	assert.True(t, member)
 }
 
-// An invited user's request is answered exactly like that of a signed-in
-// user with no access to the project.
-func TestInvitedUser_PreRecordedBindings_SameResponseAsNonMember(t *testing.T) {
+// An invited user's pre-recorded bindings give its requests nothing: a hub
+// user token whose account is still invited is refused at authentication,
+// before any binding is read, whereas a signed-in user with no access to
+// the project gets the not-found answer.
+func TestInvitedUser_PreRecordedBindings_TokenRefused(t *testing.T) {
 	f := newInvitedBindingsFixture(t)
 	dave := &store.User{ID: tid("user-dave"), Email: "dave@test.com", DisplayName: "dave",
 		Role: store.UserRoleMember, Status: store.UserStatusActive, Created: time.Now()}
@@ -156,9 +158,10 @@ func TestInvitedUser_PreRecordedBindings_SameResponseAsNonMember(t *testing.T) {
 	} {
 		invited := doRequestAsUser(t, f.srv, f.carol, req.method, req.path, map[string]interface{}{})
 		nonMember := doRequestAsUser(t, f.srv, dave, req.method, req.path, map[string]interface{}{})
-		assert.NotEqual(t, http.StatusOK, invited.Code, "%s %s", req.method, req.path)
-		assert.Equal(t, nonMember.Code, invited.Code, "%s %s", req.method, req.path)
-		assert.JSONEq(t, nonMember.Body.String(), invited.Body.String(), "%s %s", req.method, req.path)
+		assert.Equal(t, http.StatusUnauthorized, invited.Code, "%s %s: %s", req.method, req.path, invited.Body.String())
+		assert.JSONEq(t, `{"error":{"code":"unauthorized","message":"invalid access token"}}`, invited.Body.String(), "%s %s", req.method, req.path)
+		assert.NotEqual(t, http.StatusOK, nonMember.Code, "%s %s", req.method, req.path)
+		assert.NotEqual(t, http.StatusUnauthorized, nonMember.Code, "%s %s", req.method, req.path)
 	}
 }
 

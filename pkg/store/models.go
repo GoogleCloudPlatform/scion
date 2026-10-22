@@ -453,6 +453,21 @@ type AgentAppliedConfig struct {
 	// Observability only; never read by a decision path (ptone/scion#620).
 	HarnessConfigSource string `json:"harnessConfigSource,omitempty"`
 
+	// Harness is the harness type the hub resolved for the agent at create
+	// (for example "claude"; see resolveAgentHarnessType in pkg/hub), so
+	// agent lists and events can derive the harness vendor without a
+	// harness-config lookup per agent. Empty on agents created before it
+	// was recorded, and when the harness did not resolve. Display only;
+	// the harness is a fixed key, so it does not change after create.
+	Harness string `json:"harness,omitempty"`
+	// ModelSize is the model size alias (small, medium, large or
+	// extra-large; short forms normalized) that Model held before the hub
+	// resolved it to a concrete model ID, from whichever precedence layer
+	// (request > project > template > hub) supplied it. Empty when the
+	// model was an explicit ID or unset, and on agents created before it
+	// was recorded. Display only.
+	ModelSize string `json:"modelSize,omitempty"`
+
 	// CreatorName is the human-readable identity of who created this agent.
 	// For user-created agents, this is the user's email.
 	// For agent-created sub-agents, this is the creating agent's name.
@@ -822,6 +837,14 @@ const (
 // with that slug, and the store agents group marker backfill writes it on
 // legitimate pre-upgrade groups.
 const AnnotationProjectAgentsGroup = "scion.io/project-agents-group"
+
+// AnnotationProjectActiveProfile is the project annotation that holds the
+// project's activeProfile setting. The hub writes it as a project setting
+// (pkg/hub keeps its own literal, projectSettingActiveProfile, which its
+// settings registry guard requires, and a pkg/hub test pins that the two
+// agree); readers outside pkg/hub, such as the rebuild preflight, use this
+// one.
+const AnnotationProjectActiveProfile = "scion.io/active-profile"
 
 // IsProjectMembersGroup reports whether g is a system project members group:
 // it belongs to a project and carries either members-group marker key with
@@ -2584,11 +2607,11 @@ type Group struct {
 }
 
 // GroupMember represents membership in a group.
-// Members can be either users or other groups (for nested group support).
+// Members can be users, other groups (for nested group support), or agents.
 type GroupMember struct {
 	GroupID    string    `json:"groupId"`    // The group this membership belongs to
-	MemberType string    `json:"memberType"` // "user" or "group"
-	MemberID   string    `json:"memberId"`   // User ID or Group ID
+	MemberType string    `json:"memberType"` // "user", "group", or "agent"
+	MemberID   string    `json:"memberId"`   // User ID, Group ID, or Agent ID
 	Role       string    `json:"role"`       // "member", "admin", "owner"
 	AddedAt    time.Time `json:"addedAt"`
 	AddedBy    string    `json:"addedBy,omitempty"`

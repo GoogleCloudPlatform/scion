@@ -286,7 +286,8 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		// hub.github_app.read and hub.github_app.update: now route-enforced via route_metadata.go
 
 		// User/project permissions — NonRouteUse only
-		"project.clone":                "NonRouteUse only, no route declaration",
+		"project.clone":                "Checked as a token selector in authorizeProjectClone and with project.update by set-template; neither is a route base permission",
+		"project.register":             "Reserved in the permission registry: project register checks project.create",
 		"project.set_messaging_policy": "Inline admin/owner check in project_messaging_policy.go, not route-enforced",
 		"agent.grant_hub_mode":         "Inline authorization in authorize_message_mode_grant.go, not route-enforced",
 		"agent.lifecycle":              "Inline authorization in authorizeAgentLifecycle/handleAgentAction (start, stop, suspend, restart, restore) and authorizeAgentReincarnate (reincarnate), not route-enforced",

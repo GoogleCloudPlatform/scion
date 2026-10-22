@@ -411,7 +411,8 @@ func (a *AuthzService) activeProjectEdges(ctx context.Context, agentID, projectI
 
 // devLocalHopUsable applies both local-development checks to a hop with
 // dev_local provenance: dev-auth is enabled on this server, and the hop's
-// delegator is user:DevUserID and that user is active. devUserActive caches
+// delegator is user:DevUserID and that user is active (checkUserAccount, the
+// account-status rule shared with decide). devUserActive caches
 // the GetUser result across hops of one fold. A failed check returns
 // errSourceNotAllowed; a GetUser fault returns a wrapped lookup error.
 func (a *AuthzService) devLocalHopUsable(ctx context.Context, edge *store.DelegationEdge, devUserActive *bool) error {
@@ -424,14 +425,11 @@ func (a *AuthzService) devLocalHopUsable(ctx context.Context, edge *store.Delega
 	if devUserActive != nil && *devUserActive {
 		return nil
 	}
-	user, err := a.store.GetUser(ctx, DevUserID)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return fmt.Errorf("%w: %s", errSourceNotAllowed, reasonPrincipalInactive)
-		}
+	switch user, err := checkUserAccount(ctx, a.store, devUserPrincipal()); classifyUserAccount(user, err) {
+	case accountAllowed:
+	case accountLookupFault:
 		return fmt.Errorf("local development user lookup: %w", err)
-	}
-	if user == nil || user.Status != store.UserStatusActive {
+	default:
 		return fmt.Errorf("%w: %s", errSourceNotAllowed, reasonPrincipalInactive)
 	}
 	if devUserActive != nil {
@@ -704,15 +702,11 @@ func (a *AuthzService) loadScopeCeilings(ctx context.Context, agent *store.Agent
 			continue
 		}
 		devUserChecked = true
-		user, err := a.store.GetUser(ctx, DevUserID)
-		if err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				sc.DevLocalUsable = false
-				continue
-			}
+		switch user, err := checkUserAccount(ctx, a.store, devUserPrincipal()); classifyUserAccount(user, err) {
+		case accountAllowed:
+		case accountLookupFault:
 			return ScopeCeilings{}, fmt.Errorf("local development user lookup: %w", err)
-		}
-		if user == nil || user.Status != store.UserStatusActive {
+		default:
 			sc.DevLocalUsable = false
 		}
 	}

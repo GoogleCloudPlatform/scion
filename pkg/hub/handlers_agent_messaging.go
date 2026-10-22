@@ -2007,6 +2007,42 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	}
 	messaging.RecordStep(ctx, "agent_loaded")
 
+	// Ownership check: verify the DM key IDs match the actual participants.
+	// The agent in the DM key must match the target agent; the user must match
+	// the AUTHENTICATED identity (not the client-supplied SenderID, which can
+	// be spoofed).
+	//
+	// parseDMKeyIDs's second slot is always semantically a USER (A25.7 R2):
+	// the authenticated principal must actually be a user, not merely have a
+	// UUID that happens to equal that slot's value — otherwise an agent
+	// sender can name its own UUID there and pass. See the commit history
+	// for the phantom-participant-row rationale.
+	if structuredMsg != nil && structuredMsg.ThreadID != "" &&
+		strings.HasPrefix(structuredMsg.ThreadID, "dm:") {
+		dmAgentID, dmUserID := parseDMKeyIDs(structuredMsg.ThreadID)
+		var authenticatedUserID string
+		isAuthenticatedUser := false
+		if user := GetUserIdentityFromContext(ctx); user != nil {
+			authenticatedUserID = user.ID()
+			isAuthenticatedUser = true
+		} else if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+			authenticatedUserID = agentIdent.ID()
+		}
+		if !isAuthenticatedUser || dmAgentID != agent.ID || dmUserID != authenticatedUserID {
+			BadRequest(w, "DM thread_id does not match the sender and recipient")
+			return
+		}
+	}
+
+	// The sender of a post with no conversation_id is decided here, by the
+	// conversation key the request derives: after the recipient is loaded
+	// (its project decides) and after the DM key ownership check above, and
+	// before the wake, the phase answers, the broker availability answer, the
+	// chat integration reference and any row (decideKeyedPostSender).
+	if structuredMsg.ConversationID == "" && !s.decideKeyedPostSender(w, r, structuredMsg, agent) {
+		return
+	}
+
 	// Old-CLI skew dedup gate. Placed here, before any conversation
 	// resolution runs, rather than immediately before ExecuteAgentDM, so a
 	// deduplicated POST cannot mint a conversation for a send that turns out
@@ -2181,33 +2217,6 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		}
 	}
 
-	// Ownership check: verify the DM key IDs match the actual participants.
-	// The agent in the DM key must match the target agent; the user must match
-	// the AUTHENTICATED identity (not the client-supplied SenderID, which can
-	// be spoofed).
-	//
-	// parseDMKeyIDs's second slot is always semantically a USER (A25.7 R2):
-	// the authenticated principal must actually be a user, not merely have a
-	// UUID that happens to equal that slot's value — otherwise an agent
-	// sender can name its own UUID there and pass. See the commit history
-	// for the phantom-participant-row rationale.
-	if structuredMsg != nil && structuredMsg.ThreadID != "" &&
-		strings.HasPrefix(structuredMsg.ThreadID, "dm:") {
-		dmAgentID, dmUserID := parseDMKeyIDs(structuredMsg.ThreadID)
-		var authenticatedUserID string
-		isAuthenticatedUser := false
-		if user := GetUserIdentityFromContext(ctx); user != nil {
-			authenticatedUserID = user.ID()
-			isAuthenticatedUser = true
-		} else if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
-			authenticatedUserID = agentIdent.ID()
-		}
-		if !isAuthenticatedUser || dmAgentID != agent.ID || dmUserID != authenticatedUserID {
-			BadRequest(w, "DM thread_id does not match the sender and recipient")
-			return
-		}
-	}
-
 	// Wake handling: if requested, resume a suspended agent before message delivery.
 	// For agent-to-agent DMs, wake is handled by ExecuteAgentDM after admission
 	// checks so that denied requests cannot resume an agent (#1691 AC-2).
@@ -2311,6 +2320,10 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// Persist to message store before delivery attempt. Set dispatch_state
 	// to "dispatched" (no new pending rows per delivery policy).
 	var persistedMsgID string
+	// persistedConversationID is the conversation the persisted message
+	// landed in; the response reports it to a project visitor only
+	// (visitorDeliveryConversation).
+	var persistedConversationID string
 	// artifactWarning reports artifact references not attached on the
 	// non-agent-sender path below (admitMessageArtifacts).
 	var artifactWarning string
@@ -2583,7 +2596,8 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			} else {
 				// An agent sender's message mode is checked before the
 				// thread conversation is resolved, so a refused post writes
-				// no row (group_message_mode.go).
+				// no row (group_message_mode.go). Every other sender of a
+				// thread post was decided by decideKeyedPostSender.
 				if kind == "group" && authKind == "agent" {
 					sender, ok := s.loadGroupPostSender(ctx, w, authID)
 					if !ok {
@@ -2837,6 +2851,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			s.messageLog.Error("Failed to persist message", "error", err)
 		} else {
 			persistedMsgID = storeMsg.ID
+			persistedConversationID = storeMsg.ConversationID
 			recordedRefs = s.recordMessageArtifacts(ctx, storeMsg.ID, artifactRefs)
 		}
 		messaging.RecordStep(ctx, "message_persisted")
@@ -3076,6 +3091,11 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		mentionResults = s.processMentions(ctx, req.Mentions, agent, structuredMsg, mentionParticipantGroupID, groupConversationThreadKey)
 	}
 
+	// A project visitor learns the conversation and DM key its message
+	// landed in, so it can read the DM; no other sender's response
+	// changes.
+	visitorConvID, visitorConvKey := visitorDeliveryConversation(GetIdentityFromContext(ctx), agent, persistedConversationID)
+
 	if deferDelivery {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)
@@ -3087,6 +3107,8 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			MentionResults:  mentionResults,
 			Deferred:        deferredReason(agent),
 			ArtifactWarning: artifactWarning,
+			ConversationID:  visitorConvID,
+			ConversationKey: visitorConvKey,
 		})
 		return
 	}
@@ -3100,6 +3122,8 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		AgentPhase:      agent.Phase,
 		MentionResults:  mentionResults,
 		ArtifactWarning: artifactWarning,
+		ConversationID:  visitorConvID,
+		ConversationKey: visitorConvKey,
 	})
 }
 
@@ -3122,6 +3146,13 @@ type MessageDeliveryResponse struct {
 	// ArtifactWarning is set when artifact references the request named
 	// were not attached (ptone/scion#3222).
 	ArtifactWarning string `json:"artifact_warning,omitempty"`
+	// ConversationID and ConversationKey are set only for a project
+	// visitor sender (ptone/scion#4603): the conversation its message was
+	// persisted in, and the visitor's DM key with the agent
+	// (dm:agent:<agentId>:user:<visitorId>), which the visitor DM read
+	// routes take. Omitted for every other sender.
+	ConversationID  string `json:"conversation_id,omitempty"`
+	ConversationKey string `json:"conversation_key,omitempty"`
 }
 
 // GroupMessageRecipientResult represents the delivery status for one recipient in a group[] delivery.
@@ -4301,6 +4332,83 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 	}
 
 	return results
+}
+
+// decideKeyedPostSender decides whether the sender of a post with no
+// conversation_id may post by the conversation key the request derives
+// (messaging.DeriveConversationKey, with the same inputs the conversation
+// resolution uses). A direct key is decided by the DM key ownership check.
+// For a group (thread) key, a user must be able to read the recipient
+// agent's project; an agent goes on, and its message mode decides before
+// the thread conversation is resolved (precheckThreadGroupPost); any other
+// sender is refused. A key kind with no rule here is refused. A refusal is
+// written to w and ok is false.
+//
+// It runs before every other answer that depends on the recipient, so a
+// refused sender cannot tell this agent from an unknown one by the answer.
+func (s *Server) decideKeyedPostSender(w http.ResponseWriter, r *http.Request, msg *messages.StructuredMessage, agent *store.Agent) bool {
+	ctx := r.Context()
+	authKind, authID := authenticatedSender(ctx)
+	_, kind, _, err := messaging.DeriveConversationKey(messaging.KeyInputs{
+		ThreadID:      msg.ThreadID,
+		ProjectID:     agent.ProjectID,
+		SenderKind:    authKind,
+		SenderID:      authID,
+		RecipientKind: "agent",
+		RecipientID:   agent.ID,
+	})
+	if err != nil {
+		// A thread key fails derivation when the recipient agent has no
+		// project (DeriveErrThreadNoProject). That is defended here, and
+		// unreachable through the ent store, where project_id is a
+		// required edge of the agent schema. Such a thread post is refused
+		// for every sender kind, without evaluating the empty project. Any
+		// other failure is a direct key (a dm: thread_id, or the sender and
+		// recipient pair), which is not a post into a project's
+		// conversation: the resolution step refuses it with write-deny on,
+		// and otherwise goes on without a conversation.
+		if msg.ThreadID != "" && !strings.HasPrefix(msg.ThreadID, "dm:") {
+			s.refuseKeyedPostAsNotFound(w, r, agent.ProjectID, "thread post: conversation key not derived")
+			return false
+		}
+		return true
+	}
+	switch kind {
+	case "direct":
+		return true
+	case "group":
+		switch authKind {
+		case "user":
+			if !s.senderCanReadGroup(ctx, agent.ProjectID) {
+				s.refuseKeyedPostAsNotFound(w, r, agent.ProjectID, "thread post: sender cannot read the project")
+				return false
+			}
+			return true
+		case "agent":
+			return true
+		default:
+			s.refuseKeyedPostAsNotFound(w, r, agent.ProjectID, "thread post: unsupported sender kind")
+			return false
+		}
+	default:
+		s.refuseKeyedPostAsNotFound(w, r, agent.ProjectID, "post by key: unsupported conversation kind")
+		return false
+	}
+}
+
+// refuseKeyedPostAsNotFound refuses a post by conversation key from a sender
+// who may not post into projectID's conversations. The answer is the one an
+// unknown recipient agent gets (404), so the refusal says nothing about the
+// agent or its project; the reason is logged as an authorization denial.
+// A visitor gets the one visitor refusal, its answer for an unknown agent.
+func (s *Server) refuseKeyedPostAsNotFound(w http.ResponseWriter, r *http.Request, projectID, reason string) {
+	identity := GetIdentityFromContext(r.Context())
+	logAuthzDenial(r, identity, Resource{Type: "project", ID: projectID}, ActionRead, reason)
+	if isVisitorIdentity(identity) {
+		writeVisitorRefusal(w)
+		return
+	}
+	writeErrorFromErr(w, store.ErrNotFound, "")
 }
 
 // authenticatedSender returns the principal kind ("user" or "agent") and ID

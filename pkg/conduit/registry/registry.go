@@ -509,6 +509,26 @@ func (r *Registry) EligibleRelays(ctx context.Context, transport string, now tim
 	return out, nil
 }
 
+// LiveRelays returns the relays live by relayStale with a non-empty
+// internal_endpoint, draining ones included: the relays that may hold
+// sessions, which a terminating hub ingress asks to drain the sessions it
+// proxied (design §3.9 "Drain through the proxy").
+func (r *Registry) LiveRelays(ctx context.Context, now time.Time) ([]RelayInstance, error) {
+	all, err := r.store.ListRelays(ctx)
+	if err != nil {
+		return nil, err
+	}
+	now = now.UTC()
+	var out []RelayInstance
+	for _, ri := range all {
+		if r.relayStale(ri, now) || ri.InternalEndpoint == "" {
+			continue
+		}
+		out = append(out, ri)
+	}
+	return out, nil
+}
+
 // EpochCurrent reports whether s holds the current connection_epoch for its
 // principal, per the kind-specific rule of design §3.4 ("Epoch currency by
 // principal kind"):
