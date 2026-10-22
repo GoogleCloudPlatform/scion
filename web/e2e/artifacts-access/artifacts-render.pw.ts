@@ -114,6 +114,7 @@ import {
   chatArtifactLinkFor,
   chatFooterButton,
   chatHtmlFrame,
+  chatRemoteImagesNotice,
   fileIconButton,
   fileRow,
   historyViewButton,
@@ -230,8 +231,7 @@ const ROWS: Record<string, RowSpec> = {
   },
   'R2-18': {
     role: '-',
-    title:
-      'cleanup by absence: artifacts, membership, projects, chat (R2b-12), identities, temp files',
+    title: 'cleanup by absence: artifacts, membership, project, identities, temp files',
     where: 'cleanup',
   },
   'R2-19': {
@@ -2788,6 +2788,8 @@ const r2b = {
   dmRefused: undefined as string | undefined,
   /** A view URL minted for the member in the chat preview (in memory only), for R2-18. */
   heldMemberViewUrl: undefined as string | undefined,
+  /** Index into r2.mints where the R2b rows start (the cleanup's fallback for the held URL). */
+  mintsFrom: undefined as number | undefined,
 };
 
 function preChat(): string | undefined {
@@ -3016,6 +3018,7 @@ function mintsSince(key: Key, since: number): Mint[] {
 const CHAT_STEPS = ['R2b-02', 'R2b-03', 'R2b-04', 'R2b-05', 'R2b-06'];
 
 async function runChatHtmlRows(): Promise<void> {
+  r2b.mintsFrom = r2.mints.length;
   await setUpChatHtml();
   const id = (): string => bundleId();
   const fx = r2.chatHtml.fixture as Record<string, unknown>;
@@ -3092,7 +3095,17 @@ async function runChatHtmlRows(): Promise<void> {
       const mints = r2.mints.length;
       const reqs = j.who('member').requests.length;
       await openBundlePreview(page, 0);
-      const labels = ownerLabels();
+      // The owner label the member's artifact page showed (R2-13), when it
+      // was recorded; otherwise either known label (the source is recorded).
+      const pageOwner = (j.state.rows['R2-13']?.ui.reader as { owner?: string } | undefined)?.owner;
+      const fromPage =
+        typeof pageOwner === 'string' &&
+        pageOwner.startsWith('Owner: ') &&
+        pageOwner !== 'Owner: You'
+          ? pageOwner.slice('Owner: '.length)
+          : null;
+      const labels = fromPage !== null ? [fromPage] : ownerLabels();
+      r.ui.ownerLabelSource = fromPage !== null ? 'R2-13 (artifact page)' : 'identity labels';
       const title = r2.bundle!.title;
       const barWants = labels.map(
         (l) => `Content published by ${l} · runs sandboxed, isolated from Scion`
@@ -3103,7 +3116,7 @@ async function runChatHtmlRows(): Promise<void> {
       const ui = {
         label: await textOf(page.locator(RENDER_SELECTORS.chatPreviewLabel)),
         badge: await pollTextIn(page.locator(RENDER_SELECTORS.chatVersionBadge), ['v3 · current']),
-        notice: await textOf(page.locator(RENDER_SELECTORS.chatRemoteImagesNotice)),
+        notice: await textOf(chatRemoteImagesNotice(page)),
         bar: await pollTextIn(page.locator(RENDER_SELECTORS.chatUntrustedBar), barWants),
         footerPath: await pollTextIn(page.locator(RENDER_SELECTORS.chatFooterPath), footerWants),
         copyLink: await isShown(chatFooterButton(page, 'Copy link')),
@@ -3428,12 +3441,7 @@ async function runChatHtmlRows(): Promise<void> {
         if (apiNavStatus !== 200 && apiNavStatus !== 401) {
           j.state.findings.push({ id: 'R2b-06', text: ISOLATION_FAIL });
         }
-        // Restore: close the preview and open it again (a fresh mint).
-        await page.locator(RENDER_SELECTORS.chatDialogClose).click();
-        await expect(page.locator(RENDER_SELECTORS.chatPreviewDialog)).toHaveCount(0);
-        await openBundlePreview(page, 0);
-        const restored = await textIs(chatHtmlFrame(page).locator('#ver'), 'R2 bundle v3');
-        const probeRec = {
+        const probeRec: Record<string, unknown> = {
           who: 'member',
           step: 'R2b-06',
           ...result,
@@ -3442,7 +3450,6 @@ async function runChatHtmlRows(): Promise<void> {
           nav,
           apiNavStatus,
           session,
-          restored,
         };
         r2.probes.push(probeRec);
         (r2.chatHtml.probes as Array<Record<string, unknown>>).push(probeRec);
@@ -3474,12 +3481,23 @@ async function runChatHtmlRows(): Promise<void> {
         );
         checks.apiNavClassifiedFrameInitiated = apiNavRec?.classification === 'frame-initiated';
         // (c)
-        checks.readyToClick = ready.held;
         checks.popupBlocked = String(result.popup).startsWith('blocked:');
         checks.pageUrlUnchanged = nav.pageUrlUnchanged;
         checks.dialogStillOpen = nav.dialogOpen;
         checks.noProbePathRequests = nav.probePathRequests === 0;
         checks.noNewPages = nav.newPages === 0;
+        // Restore (not an isolation property, so never a check): close the
+        // preview and open it again (a fresh mint). Recorded only; a failure
+        // here cannot touch the checks or the probe record above.
+        try {
+          await page.locator(RENDER_SELECTORS.chatDialogClose).click();
+          await expect(page.locator(RENDER_SELECTORS.chatPreviewDialog)).toHaveCount(0);
+          await openBundlePreview(page, 0);
+          probeRec.restored = await textIs(chatHtmlFrame(page).locator('#ver'), 'R2 bundle v3');
+        } catch (err) {
+          probeRec.restored = false;
+          probeRec.restoreError = redactViews(firstLine(err));
+        }
       }),
     { pre: preChat }
   );
@@ -3685,6 +3703,7 @@ async function runChatHtmlRows(): Promise<void> {
       const browserFetch = await fetched;
       await settle(page);
       const hidden = {
+        anchor: RENDER_SELECTORS.chatPageRail,
         anchored,
         browserFetch,
         messageShown: await page.getByText('R2b bundle for review').count(),
@@ -3695,7 +3714,7 @@ async function runChatHtmlRows(): Promise<void> {
       const api = await j.api('outsider', 'GET', msgPath, undefined, r);
       r.ui.outsiderThread = { ...hidden, apiStatus: api.status, apiCode: api.code ?? null };
       r2.chatHtml.outsiderThread = r.ui.outsiderThread;
-      expect.soft(api.status >= 200 && api.status < 300, 'messages GET is not 2xx').toBe(false);
+      expect.soft([403, 404], 'messages GET 403 or 404').toContain(api.status);
       expect.soft(hidden.mints, 'no view minted').toBe(0);
       if (!anchored) {
         r.legNotRun = 'the chat page shell did not render, so the hidden checks have no anchor';
@@ -3938,6 +3957,16 @@ async function runCleanup(testInfo: {
   }
 
   // The member's view URL from the chat preview (R2b) no longer serves either.
+  // R2b-02's mint, or any view minted for the member in the R2b rows.
+  if (r2b.mintsFrom !== undefined) {
+    r2b.heldMemberViewUrl ??=
+      r2.mints.slice(r2b.mintsFrom).find((m) => m.who === 'member' && m.url !== null)?.url ??
+      undefined;
+  }
+  if (r2b.topicId && !r2b.heldMemberViewUrl) {
+    // Recorded, not residue: no view was minted, so none can still serve.
+    cleanup.heldMemberViewAfterDelete = 'not run: no view was minted for the member in R2b';
+  }
   if (r2b.heldMemberViewUrl && j.state.target) {
     try {
       const res = await fetch(new URL(r2b.heldMemberViewUrl, j.target().baseURL));
@@ -4314,7 +4343,12 @@ async function cleanupDmMessage(
   residue: string[],
   states: Record<string, string>
 ): Promise<Record<string, unknown> | null> {
-  if (!r2b.dmKey || !r2b.dmMessageId || !j.state.ids.owner) return null;
+  if (!r2b.dmKey || !j.state.ids.owner) return null;
+  if (!r2b.dmMessageId) {
+    // A 2xx send without a message id: the message cannot be deleted or found.
+    states['R2b DM message'] = 'unknown (no message id)';
+    return { messageDelete: 'not run: the send returned no message id' };
+  }
   const out: Record<string, unknown> = { dmPair: 'no delete route; goes with the throwaway hub' };
   try {
     const base = `/api/v1/chat/conversations/${encodeURIComponent(r2b.dmKey)}/messages`;

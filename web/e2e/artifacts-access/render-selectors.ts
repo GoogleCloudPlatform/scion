@@ -147,6 +147,13 @@ export function publishFolderMode(page: Page): Locator {
   return page.locator(RENDER_SELECTORS.publishModeFolder);
 }
 
+/** The chat preview's remote-images notice (filtered by its text). */
+export function chatRemoteImagesNotice(page: Page): Locator {
+  return page
+    .locator(RENDER_SELECTORS.chatRemoteImagesNotice)
+    .filter({ hasText: 'Remote images are not loaded' });
+}
+
 /** The chat preview's HTML frame content. */
 export function chatHtmlFrame(page: Page): ReturnType<Page['frameLocator']> {
   return page.frameLocator(RENDER_SELECTORS.chatHtmlFrame);
