@@ -1067,6 +1067,12 @@ func TestDeleteAgentFiles_ProvisionAgentAttachToUserWorktree_NeverRemoved(t *tes
 	if _, _, _, err := ProvisionAgent(context.Background(), "agent-x", "default", "", "", scionDir, "", "created", branch, ""); err != nil {
 		t.Fatalf("provision agent-x (attach to user-created worktree): %v", err)
 	}
+	// Provisioning records, broker-side, that the attached worktree is the
+	// agent's own checkout, so its .scion is not treated as project
+	// configuration.
+	if agentDir := config.ResolveAgentDir(scionDir, "agent-x"); !isAgentOwnWorkspace(agentDir, userWorktree) {
+		t.Errorf("attached worktree %s not recorded as the agent's own (agent dir %s, record %q)", userWorktree, agentDir, readAgentOwnWorkspace(agentDir))
+	}
 
 	root, err := util.RepoRootDir(projectDir)
 	if err != nil {

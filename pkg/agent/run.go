@@ -2822,6 +2822,35 @@ func writeAgentTokenFile(agentHome, token string) error {
 	return nil
 }
 
+// isAgentOwnWorkspace reports whether workspace is the agent's own checkout:
+// <agentDir>/workspace, or the existing worktree provisioning attached the
+// agent to, as recorded in agentDir (writeAgentOwnWorkspace). It compares
+// broker-owned paths only, after resolving symlinks, and never looks at the
+// workspace's contents, which the agent can write. With no record, only
+// <agentDir>/workspace counts, so any other workspace's .scion is treated as
+// project configuration (read-only).
+func isAgentOwnWorkspace(agentDir, workspace string) bool {
+	if agentDir == "" || workspace == "" {
+		return false
+	}
+	ws := resolvedClean(workspace)
+	if ws == resolvedClean(filepath.Join(agentDir, "workspace")) {
+		return true
+	}
+	if recorded := readAgentOwnWorkspace(agentDir); recorded != "" {
+		return ws == resolvedClean(recorded)
+	}
+	return false
+}
+
+// resolvedClean returns p with symlinks resolved where it exists, cleaned.
+func resolvedClean(p string) string {
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		p = resolved
+	}
+	return filepath.Clean(p)
+}
+
 // detectRepoRoot resolves the git repo root to bind-mount for an agent, or ""
 // for a plain in-place workspace mount. An explicit --workspace skips git
 // detection: a workspace that merely sits inside a repo must not be widened to
@@ -2829,25 +2858,6 @@ func writeAgentTokenFile(agentHome, token string) error {
 // inside a repo" (provision.go). explicit is set on first start (opts.Workspace)
 // and re-derived on resume from the persisted ExplicitWorkspace flag, so the
 // guarantee holds on every entry path.
-// isAgentOwnWorkspace reports whether workspace is the agent's own
-// directory, <agentDir>/workspace (its worktree or private checkout),
-// comparing the broker's own paths after resolving symlinks. It never looks
-// at the workspace's contents, which the agent can write.
-func isAgentOwnWorkspace(agentDir, workspace string) bool {
-	if agentDir == "" || workspace == "" {
-		return false
-	}
-	own := filepath.Join(agentDir, "workspace")
-	if resolved, err := filepath.EvalSymlinks(own); err == nil {
-		own = resolved
-	}
-	ws := workspace
-	if resolved, err := filepath.EvalSymlinks(ws); err == nil {
-		ws = resolved
-	}
-	return filepath.Clean(ws) == filepath.Clean(own)
-}
-
 func detectRepoRoot(explicit bool, effectiveWorkspace, projectDir string) string {
 	if explicit {
 		return ""

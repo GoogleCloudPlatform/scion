@@ -1808,6 +1808,11 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 				workspaceSource = existingPath
 				agentWorkspace = "" // Using external worktree
 				usedExistingWorktree = true
+				// Record, broker-side, that this worktree is the agent's
+				// own checkout (see isAgentOwnWorkspace).
+				if err := writeAgentOwnWorkspace(agentDir, existingPath); err != nil {
+					return "", "", nil, fmt.Errorf("record the attached worktree: %w", err)
+				}
 				fmt.Printf("Warning: Relying on existing worktree for branch '%s' at '%s'\n", targetBranch, existingPath)
 				// Register as sharer for refcounted teardown (I3). Fail loudly:
 				// an untracked agent breaks the refcount (premature/leaked removal).
@@ -3303,6 +3308,39 @@ func writeProvisionedWorktreeRepoRoot(agentDir, repoRoot string) error {
 		return err
 	}
 	return writeAgentInfoFile(filepath.Join(agentDir, provisionedWorktreeStateFile), data, 0o644)
+}
+
+// agentOwnWorkspaceFile records, in agentDir, a workspace outside
+// <agentDir>/workspace that provisioning gave the agent as its own checkout
+// (an existing worktree of its branch it attached to). agentDir is
+// broker-owned state, never inside an agent's writable mounts.
+const agentOwnWorkspaceFile = "own-workspace.json"
+
+type agentOwnWorkspaceState struct {
+	Workspace string `json:"workspace"`
+}
+
+// writeAgentOwnWorkspace records workspace as the agent's own checkout.
+func writeAgentOwnWorkspace(agentDir, workspace string) error {
+	data, err := json.Marshal(agentOwnWorkspaceState{Workspace: workspace})
+	if err != nil {
+		return err
+	}
+	return writeAgentInfoFile(filepath.Join(agentDir, agentOwnWorkspaceFile), data, 0o644)
+}
+
+// readAgentOwnWorkspace returns the workspace writeAgentOwnWorkspace
+// recorded, or "" when there is none or it does not parse.
+func readAgentOwnWorkspace(agentDir string) string {
+	data, err := os.ReadFile(filepath.Join(agentDir, agentOwnWorkspaceFile))
+	if err != nil {
+		return ""
+	}
+	var state agentOwnWorkspaceState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return ""
+	}
+	return state.Workspace
 }
 
 // readProvisionedWorktreeRepoRoot reads the value written by
