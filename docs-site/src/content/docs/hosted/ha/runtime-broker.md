@@ -203,7 +203,7 @@ With the experiment on, a Runtime Broker's Conduit session also carries the Hub'
 
 Fields set through the update API (`PATCH /api/v1/runtime-brokers/{id}`) persist across registrations:
 
-- **GCP host service account and project.** They are written together. Registration fills them only while they are unset; a value set or cleared through the update API stays until the next update. Send `gcpHostPinned: false` in an update to hand them back to registration.
+- **GCP host service account and project.** They are written together (`gcpHostServiceAccountEmail` and `gcpHostProjectId`). Registration fills them only while they are unset; a value set or cleared through the update API stays until the next update. Send `gcpHostPinned: false` in an update to hand them back to registration. When [`gcp_iam_check_mode`](/scion/reference/server-config/#gcp-iam-check-mode) is `enforce`, setting or changing the host service account or project in an update requires a user principal who holds `iam.serviceAccounts.actAs` on the requested service account (leaving the pair unchanged or clearing the email needs no check), and registration checks `actAs` when it will write the pair (a new broker, or an existing broker whose host service account and project are unset and not pinned). A denied check returns `403 Forbidden` before any write. Updates write the pair with a compare-and-set against the stored pair the `actAs` decision was evaluated against (`409 Conflict` if a concurrent registration or update changed it).
 - **Name.** Registration keeps the stored name.
 - **Labels.** Labels a registration sends are added when the key is absent; an existing key keeps its value.
 
