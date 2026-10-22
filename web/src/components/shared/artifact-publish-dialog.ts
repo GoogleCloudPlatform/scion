@@ -318,8 +318,11 @@ export class ScionArtifactPublishDialog extends LitElement {
    * again) instead of falling to the dialog.
    */
   private async retryChoices(): Promise<void> {
-    const gen = this.choicesGen + 1;
-    await this.loadChoices();
+    const load = this.loadChoices();
+    // loadChoices sets its generation before its first await: read it
+    // rather than predict it.
+    const gen = this.choicesGen;
+    await load;
     await this.updateComplete;
     if (!this.open || gen !== this.choicesGen) return;
     const target = this.choicesError
