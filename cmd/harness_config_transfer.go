@@ -149,10 +149,10 @@ func uploadHarnessConfigFileBySignedURL(
 	return nil
 }
 
-// writeHarnessConfigFile writes content to relPath inside root through
-// transfer.WriteFileInRoot, which also creates any missing parent directories.
-func writeHarnessConfigFile(root *os.Root, relPath string, content []byte) error {
-	if err := transfer.WriteFileInRoot(root, relPath, content, 0644); err != nil {
+// writeHarnessConfigFile writes a pulled harness-config file through
+// writePulledFile, with the mode the Hub recorded for it.
+func writeHarnessConfigFile(root *os.Root, relPath string, content []byte, mode string) error {
+	if err := writePulledFile(root, relPath, content, mode); err != nil {
 		return fmt.Errorf("write harness config file: %w", err)
 	}
 	return nil

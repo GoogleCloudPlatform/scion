@@ -37,8 +37,8 @@
 #       Compile shard K only (binary discarded).
 #   shard.sh vet K
 #       go vet shard K with -tags no_sqlite and with -tags 'integration
-#       volume_test tzcontract': together, the shards' vets cover every
-#       file the module-wide vets (make lint, make vet-integration) cover.
+#       tzcontract': together, the shards' vets cover every file the
+#       module-wide vets (make lint, make vet-integration) cover.
 #   shard.sh postgres K|all TAGS TEST...
 #       Run the named tests (the shard binary with -test.v and -test.run)
 #       in the shard that holds each (in every shard holding one for
@@ -195,7 +195,7 @@ test)
 
 vet)
 	[ $# -eq 0 ] || usage
-	for extra in no_sqlite integration,volume_test,tzcontract; do
+	for extra in no_sqlite integration,tzcontract; do
 		echo "== go vet pkg/hub shard $shard (tags: $(with_tags "$shard" "$extra"))"
 		step env GOGC="$build_gogc" go vet -p "$par" -overlay "$overlay" -tags "$(with_tags "$shard" "$extra")" ./pkg/hub
 	done

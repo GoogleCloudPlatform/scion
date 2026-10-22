@@ -5207,8 +5207,23 @@ func (s *Server) cancelScheduledEventsForAgent(ctx context.Context, agent *store
 		if !eventTargetsAgent(evt, agent) {
 			continue
 		}
-		if err := s.store.UpdateScheduledEventStatus(ctx, evt.ID,
-			store.ScheduledEventCancelled, nil, "target agent deleted"); err != nil {
+		// The cancel only changes an event that is still pending. An event
+		// that fired or was claimed after the list above keeps its status.
+		if err := s.store.CancelScheduledEventWithReason(ctx, evt.ID,
+			"target agent deleted"); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				// No longer pending: it fired or was claimed between
+				// the list and this cancel. That is a normal outcome,
+				// so keep its status and leave its timer alone. If this
+				// replica is firing it, the timer stays registered until
+				// fireEvent returns, and StopEventTimer would cancel the
+				// context of the running handler and of its final
+				// status write. If another replica claimed it, this
+				// replica's timer loses the claim and skips by itself.
+				s.agentLifecycleLog.Debug("Scheduled event no longer pending; not cancelled",
+					"event_id", evt.ID, "agent_id", agent.ID)
+				continue
+			}
 			s.agentLifecycleLog.Warn("Failed to cancel scheduled event",
 				"event_id", evt.ID, "agent_id", agent.ID, "error", err)
 			continue
