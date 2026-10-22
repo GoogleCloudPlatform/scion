@@ -269,6 +269,8 @@ func newHarness(t *testing.T, mediatorURL string) *harness {
 		"CR_CLAIM_BACKOFF_SECONDS": "0",
 		"CR_METADATA_URL":          h.meta.URL,
 		"STUB_OUT":                 h.stubOut,
+		// The runner-output FIFOs go under the test's own temp dir, not /tmp.
+		"CR_FIFO_TMPDIR": root,
 	}
 	return h
 }
