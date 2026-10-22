@@ -484,3 +484,5 @@ func TestUnmarshalNullLabels(t *testing.T) {
 		t.Errorf("re-marshal of null labels = %s (%v), want []", out, err)
 	}
 }
+
+func jsonUnmarshalForTest(data []byte, v any) error { return json.Unmarshal(data, v) }
