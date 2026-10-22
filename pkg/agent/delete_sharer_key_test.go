@@ -29,7 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// Tests for ptone/scion#3405: DeleteAgentFilesFor finds the worktree and
+// Tests for ptone/scion#3405: DeleteHubAgentFiles finds the worktree and
 // sharer registry entry under the sharer key (a broker's hub agent ID), and
 // for the last sharer removes the worktree and git's entry for it before
 // the registry entry, so a failure leaves a state a retry completes.
@@ -146,7 +146,7 @@ func TestDeleteAgentFilesFor_SharerKey(t *testing.T) {
 	wtA := p.add(t, "dev-a", "uuid-a", "shared")
 	p.add(t, "dev-b", "uuid-b", "shared")
 
-	if _, err := DeleteAgentFilesFor("dev-b", "uuid-b", p.projectPath, true); err != nil {
+	if _, err := DeleteHubAgentFiles("dev-b", "uuid-b", p.projectPath, "", true); err != nil {
 		t.Fatalf("delete dev-b: %v", err)
 	}
 	sharers, _, err := provision.ListSharers(p.base, "", "shared")
@@ -157,7 +157,7 @@ func TestDeleteAgentFilesFor_SharerKey(t *testing.T) {
 		t.Fatalf("after deleting dev-b: shared worktree gone: %v", err)
 	}
 
-	branchDeleted, err := DeleteAgentFilesFor("dev-a", "uuid-a", p.projectPath, true)
+	branchDeleted, err := DeleteHubAgentFiles("dev-a", "uuid-a", p.projectPath, "", true)
 	if err != nil {
 		t.Fatalf("delete dev-a: %v", err)
 	}
@@ -174,7 +174,7 @@ func TestDeleteAgentFilesFor_FallsBackToName(t *testing.T) {
 	p := newSharerKeyProject(t)
 	wt := p.add(t, "dev-a", "dev-a", "shared")
 
-	if _, err := DeleteAgentFilesFor("dev-a", "uuid-a", p.projectPath, true); err != nil {
+	if _, err := DeleteHubAgentFiles("dev-a", "uuid-a", p.projectPath, "", true); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 	p.assertTornDown(t, "dev-a", "dev-a", wt, "shared")
@@ -186,7 +186,7 @@ func TestDeleteAgentFilesFor_InvalidSharerKey(t *testing.T) {
 	p := newSharerKeyProject(t)
 	wt := p.add(t, "dev-a", "uuid-a", "shared")
 	for _, key := range []string{"..", "../uuid-a", "a/b"} {
-		if _, err := DeleteAgentFilesFor("dev-a", key, p.projectPath, true); err == nil {
+		if _, err := DeleteHubAgentFiles("dev-a", key, p.projectPath, "", true); err == nil {
 			t.Errorf("sharer key %q: expected an error", key)
 		}
 	}
@@ -221,7 +221,7 @@ func TestDeleteAgentFilesFor_WorktreeRemovalFails_RegistryKept(t *testing.T) {
 				}
 				return false, errors.New("forced removal failure")
 			})
-			if _, err := DeleteAgentFilesFor("dev-a", "uuid-a", p.projectPath, true); err == nil {
+			if _, err := DeleteHubAgentFiles("dev-a", "uuid-a", p.projectPath, "", true); err == nil {
 				t.Fatal("expected the delete to fail")
 			}
 			p.assertKept(t, "dev-a", "uuid-a", "shared")
@@ -230,7 +230,7 @@ func TestDeleteAgentFilesFor_WorktreeRemovalFails_RegistryKept(t *testing.T) {
 			}
 
 			removeWorktree = restore
-			if _, err := DeleteAgentFilesFor("dev-a", "uuid-a", p.projectPath, true); err != nil {
+			if _, err := DeleteHubAgentFiles("dev-a", "uuid-a", p.projectPath, "", true); err != nil {
 				t.Fatalf("retry: %v", err)
 			}
 			p.assertTornDown(t, "dev-a", "uuid-a", wt, "shared")
@@ -245,7 +245,7 @@ func TestDeleteAgentFilesFor_WorktreeStillPresent_RegistryKept(t *testing.T) {
 	p.add(t, "dev-a", "uuid-a", "shared")
 	setSeam(t, &removeWorktree, func(string, string, bool) (bool, error) { return false, nil })
 
-	if _, err := DeleteAgentFilesFor("dev-a", "uuid-a", p.projectPath, true); err == nil {
+	if _, err := DeleteHubAgentFiles("dev-a", "uuid-a", p.projectPath, "", true); err == nil {
 		t.Fatal("expected the delete to fail")
 	}
 	p.assertKept(t, "dev-a", "uuid-a", "shared")
@@ -260,13 +260,13 @@ func TestDeleteAgentFilesFor_WorktreeEntry(t *testing.T) {
 		restore := removeWorktreeEntry
 		setSeam(t, &removeWorktreeEntry, func(string, string) error { return errors.New("forced entry failure") })
 
-		if _, err := DeleteAgentFilesFor("dev-a", "uuid-a", p.projectPath, true); err == nil {
+		if _, err := DeleteHubAgentFiles("dev-a", "uuid-a", p.projectPath, "", true); err == nil {
 			t.Fatal("expected the delete to fail")
 		}
 		p.assertKept(t, "dev-a", "uuid-a", "shared")
 
 		removeWorktreeEntry = restore
-		if _, err := DeleteAgentFilesFor("dev-a", "uuid-a", p.projectPath, true); err != nil {
+		if _, err := DeleteHubAgentFiles("dev-a", "uuid-a", p.projectPath, "", true); err != nil {
 			t.Fatalf("retry: %v", err)
 		}
 		p.assertTornDown(t, "dev-a", "uuid-a", wt, "shared")
@@ -292,7 +292,7 @@ func TestDeleteAgentFilesFor_WorktreeEntry(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if _, err := DeleteAgentFilesFor("dev-a", "uuid-a", p.projectPath, true); err != nil {
+			if _, err := DeleteHubAgentFiles("dev-a", "uuid-a", p.projectPath, "", true); err != nil {
 				t.Fatalf("delete: %v", err)
 			}
 			p.assertTornDown(t, "dev-a", "uuid-a", wt, "shared")
@@ -310,7 +310,7 @@ func TestDeleteAgentFilesFor_DefaultKeyIsName(t *testing.T) {
 	wt := p.add(t, "dev-a", "dev-a", "shared")
 	p.add(t, "dev-b", "dev-b", "shared")
 
-	if _, err := DeleteAgentFilesFor("dev-b", "", p.projectPath, true); err != nil {
+	if _, err := DeleteHubAgentFiles("dev-b", "", p.projectPath, "", true); err != nil {
 		t.Fatalf("delete dev-b: %v", err)
 	}
 	if sharers, _, err := provision.ListSharers(p.base, "", "shared"); err != nil || !slices.Equal(sharers, []string{"dev-a"}) {
@@ -334,7 +334,7 @@ func TestDeleteAgentFilesFor_LockedWorktreeEntry_FailsClosed(t *testing.T) {
 	}
 
 	for attempt := 1; attempt <= 2; attempt++ {
-		if _, err := DeleteAgentFilesFor("dev-a", "uuid-a", p.projectPath, true); err == nil {
+		if _, err := DeleteHubAgentFiles("dev-a", "uuid-a", p.projectPath, "", true); err == nil {
 			t.Fatalf("attempt %d: expected the delete of a locked worktree to fail", attempt)
 		}
 		p.assertKept(t, "dev-a", "uuid-a", "shared")
@@ -348,8 +348,53 @@ func TestDeleteAgentFilesFor_LockedWorktreeEntry_FailsClosed(t *testing.T) {
 	if err := os.Remove(filepath.Join(p.entry("uuid-a"), "locked")); err != nil {
 		t.Fatalf("unlock: %v", err)
 	}
-	if _, err := DeleteAgentFilesFor("dev-a", "uuid-a", p.projectPath, true); err != nil {
+	if _, err := DeleteHubAgentFiles("dev-a", "uuid-a", p.projectPath, "", true); err != nil {
 		t.Fatalf("retry after unlock: %v", err)
 	}
 	p.assertTornDown(t, "dev-a", "uuid-a", wt, "shared")
+}
+
+// A hub agent with both a worktree under the sharer key and a state
+// directory resolved from its Hub project ID (distinct from the project-id
+// marker): one delete removes both, keeps the project workspace and the
+// repository, and a second delete is a no-op.
+func TestDeleteHubAgentFiles_WorktreeAndHubStateDir(t *testing.T) {
+	const (
+		markerID = "11111111-aaaa-4aaa-8aaa-111111111111"
+		hubID    = "33333333-cccc-4ccc-8ccc-333333333333"
+	)
+	p := newSharerKeyProject(t)
+	wt := p.add(t, "dev-a", "uuid-a", "shared")
+	if err := config.WriteProjectID(p.scionDir, markerID); err != nil {
+		t.Fatalf("WriteProjectID: %v", err)
+	}
+	stateDir, err := config.AgentDirForProject(p.scionDir, "dev-a", true, hubID)
+	if err != nil {
+		t.Fatalf("AgentDirForProject: %v", err)
+	}
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "scion-agent.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for call := 1; call <= 2; call++ {
+		if _, err := DeleteHubAgentFiles("dev-a", "uuid-a", p.projectPath, hubID, true); err != nil {
+			t.Fatalf("call %d: DeleteHubAgentFiles: %v", call, err)
+		}
+		p.assertTornDown(t, "dev-a", "uuid-a", wt, "shared")
+		if out, err := exec.Command("git", "-C", p.base, "branch", "--list", "shared").Output(); err != nil || strings.TrimSpace(string(out)) != "" {
+			t.Errorf("call %d: branch shared not deleted: %q (err %v)", call, out, err)
+		}
+		if _, err := os.Stat(stateDir); !os.IsNotExist(err) {
+			t.Errorf("call %d: Hub-ID state dir %s still present: %v", call, stateDir, err)
+		}
+		if _, err := os.Stat(filepath.Join(p.base, ".git")); err != nil {
+			t.Errorf("call %d: repository removed: %v", call, err)
+		}
+		if _, err := os.Stat(filepath.Join(p.base, "README.md")); err != nil {
+			t.Errorf("call %d: project workspace removed: %v", call, err)
+		}
+	}
 }

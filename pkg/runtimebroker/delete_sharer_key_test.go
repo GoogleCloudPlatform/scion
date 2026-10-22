@@ -43,7 +43,8 @@ import (
 
 // sharerFilesManager is a filteringMockManager whose DeleteTarget also
 // removes the agent's files the way AgentManager does, through
-// agent.DeleteAgentFilesFor with the sharer key the handler passes.
+// agent.DeleteHubAgentFiles with the sharer key the handler passes and the
+// Hub project ID from ctx.
 type sharerFilesManager struct {
 	filteringMockManager
 }
@@ -55,7 +56,7 @@ func (m *sharerFilesManager) DeleteTarget(ctx context.Context, agentName, sharer
 	if !deleteFiles {
 		return false, nil
 	}
-	deleted, err := agent.DeleteAgentFilesFor(agentName, sharerKey, projectPath, removeBranch)
+	deleted, err := agent.DeleteHubAgentFiles(agentName, sharerKey, projectPath, api.HubProjectIDFromContext(ctx), removeBranch)
 	if err != nil && !errors.Is(err, agent.ErrAgentProjectUnresolved) {
 		return deleted, fmt.Errorf("%w: %w", agent.ErrAgentFilesDelete, err)
 	}

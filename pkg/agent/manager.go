@@ -94,7 +94,9 @@ type Manager interface {
 	// file-only agent; ref.RunID is that entry's run ID) and project path.
 	// It never re-resolves by slug. sharerKey is the key the agent is
 	// registered under in a worktree-per-agent shared base (its hub agent
-	// ID on a Runtime Broker); "" means agentName (see DeleteAgentFilesFor).
+	// ID on a Runtime Broker); "" means agentName. File deletion goes
+	// through DeleteHubAgentFiles, with the Hub project ID from ctx
+	// (api.HubProjectIDFromContext).
 	DeleteTarget(ctx context.Context, agentName, sharerKey string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error)
 
 	// List returns active agents
@@ -545,8 +547,9 @@ var ErrAgentFilesDelete = errors.New("failed to delete agent files")
 // it cannot drift to a same-slug agent in another project. ref.ID may be
 // empty for an agent that has files but no backing container; ref.RunID is
 // the resolved entry's run ID and is passed through to Runtime.Delete.
-// projectPath is used verbatim for file deletion. sharerKey is passed to
-// DeleteAgentFilesFor ("" means agentName).
+// projectPath is used verbatim for file deletion. sharerKey ("" means
+// agentName) and the Hub project ID from ctx (api.HubProjectIDFromContext)
+// are passed to DeleteHubAgentFiles.
 func (m *AgentManager) DeleteTarget(ctx context.Context, agentName, sharerKey string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
 	return m.deleteResolved(ctx, agentName, sharerKey, ref, deleteFiles, projectPath, removeBranch)
 }

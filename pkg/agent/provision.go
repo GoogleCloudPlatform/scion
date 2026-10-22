@@ -47,9 +47,9 @@ import (
 	"github.com/google/uuid"
 )
 
-// ErrAgentProjectUnresolved is returned by DeleteAgentFiles and
-// DeleteAgentFilesForHubProject when the project path resolves to no
-// existing project directory.
+// ErrAgentProjectUnresolved is returned by DeleteAgentFiles,
+// DeleteAgentFilesForHubProject and DeleteHubAgentFiles when the project
+// path resolves to no existing project directory.
 var ErrAgentProjectUnresolved = errors.New("the agent's project directory does not exist")
 
 // DeleteAgentFiles removes agentName's files in the project projectPath
@@ -57,8 +57,8 @@ var ErrAgentProjectUnresolved = errors.New("the agent's project directory does n
 // removeBranch, branch, and its external per-agent state). It never touches
 // another project's directories; the global project's agents are deleted
 // only when the global project is the target. It is DeleteHubAgentFiles
-// with the agent name as the sharer key and no Hub project ID, as a
-// local-mode agent is registered.
+// with no sharer key (the agent name, as a local-mode agent is registered)
+// and no Hub project ID.
 //
 // It resolves the external per-agent state from the project-id marker only.
 // A caller that knows the Hub project ID the agent was started with uses
@@ -80,36 +80,30 @@ func DeleteAgentFilesForHubProject(agentName, projectPath, hubProjectID string, 
 }
 
 // Seams for tests that force a failure of the last sharer's worktree
-// teardown (DeleteAgentFilesFor).
+// teardown (deleteAgentFiles).
 var (
 	removeWorktree      = util.RemoveWorktree
 	removeWorktreeEntry = util.RemoveWorktreeEntryIn
 )
 
-// DeleteAgentFilesFor is DeleteAgentFiles with the key the agent is
-// registered under in a worktree-per-agent shared base: the sharer registry
-// entry and the worktree directory (<base>/worktrees/<key>). A Runtime
-// Broker provisions a hub agent under its hub agent ID, so a hosted delete
-// passes that ID; an empty sharerKey means agentName, as for local mode.
-// When nothing is registered under sharerKey, agentName is looked up as
-// well, since an agent provisioned through ProvisionAgent (local mode, a
-// workstation's linked checkout) is registered by name. Everything else
-// (the agent and external directories, the branch fallback) is keyed on
-// agentName.
+// DeleteHubAgentFiles is DeleteAgentFiles for a hub agent: sharerKey is the
+// key the agent is registered under in a worktree-per-agent shared base
+// (the sharer registry entry and the worktree directory
+// <base>/worktrees/<key>), and hubProjectID is the Hub project ID it was
+// started with. A Runtime Broker provisions a hub agent under its hub agent
+// ID, so its delete and failed-start cleanups pass that ID; an empty
+// sharerKey means agentName, as for local mode. When nothing is registered
+// under sharerKey, agentName is looked up as well, since an agent
+// provisioned through ProvisionAgent (local mode, a workstation's linked
+// checkout) is registered by name. Everything else (the agent and external
+// directories, the branch fallback) is keyed on agentName. With a
+// non-empty hubProjectID it also removes the agent's state directory as
+// DeleteAgentFilesForHubProject does; an empty one changes nothing.
 //
 // For the last sharer of a worktree the worktree is removed first, then
 // git's entry for it, and only then the registry entry, so a failure in
 // either removal leaves the registry entry in place and a retry finds the
 // same state.
-func DeleteAgentFilesFor(agentName, sharerKey string, projectPath string, removeBranch bool) (bool, error) {
-	return deleteAgentFiles(agentName, sharerKey, projectPath, "", removeBranch)
-}
-
-// DeleteHubAgentFiles is DeleteAgentFilesFor for an agent started with the
-// Hub project ID hubProjectID: it also removes the agent's state directory
-// as DeleteAgentFilesForHubProject does. A Runtime Broker's delete and
-// failed-start cleanups pass both the hub agent ID (sharerKey) and the Hub
-// project ID.
 func DeleteHubAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, removeBranch bool) (bool, error) {
 	return deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID, removeBranch)
 }
@@ -499,7 +493,7 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 
 // sharerKeys returns the keys an agent may be registered under in a
 // worktree-per-agent shared base: its sharer key and, when different, its
-// name (see DeleteAgentFilesFor).
+// name (see DeleteHubAgentFiles).
 func sharerKeys(sharerKey, agentName string) []string {
 	if sharerKey == agentName {
 		return []string{agentName}

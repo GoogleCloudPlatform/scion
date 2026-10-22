@@ -780,7 +780,7 @@ func isSingleCleanPathElement(name string) bool {
 }
 
 // startSharerKey is the sharer key a failed start's file cleanup passes to
-// agent.DeleteAgentFilesFor: the hub agent ID the start provisioned the
+// agent.DeleteHubAgentFiles: the hub agent ID the start provisioned the
 // agent's worktree under, or "" (the agent name) when the ID is not a
 // valid path element, which no worktree was provisioned under.
 func startSharerKey(agentID string) string {
@@ -8269,7 +8269,7 @@ type deleteTarget struct {
 }
 
 // deleteSharerKey decides, for a delete, the key the agent's worktree and
-// sharer registry entry are found under (agent.DeleteAgentFilesFor; ""
+// sharer registry entry are found under (agent.DeleteHubAgentFiles; ""
 // means the agent name), from the hub's agent ID (hubAgentID, already
 // validated), the runtime entry's agent_id label (labelID, "" for a
 // file-only or unlabelled entry) and the agent name. mismatch reports a
