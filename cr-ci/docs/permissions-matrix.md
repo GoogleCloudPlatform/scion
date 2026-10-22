@@ -335,11 +335,16 @@ Still UNVERIFIED (to settle in P2, P4 or P6). Each item's runtime check is in
   volumes on jobs, `run jobs deploy/update` volume flags) was not looked up;
   the floor is a recent release. **UNVERIFIED**; lower or raise it once
   checked against the gcloud release notes.
-- **U9 (resolved in P6). Job volume flags.** The GA `gcloud run jobs` group
-  accepts `--add-volume=name=scratch,type=ephemeral-disk,size=<n>Gi` with
-  `--add-volume-mount` (verified in deploy-demo-test). The same deploy showed
-  that the Cloud Run server rejects ephemeral-disk totals above 10 GiB per
-  instance, so `RUNNER_DISK_GI` is limited to 10 (default 10).
+- **U9 (half resolved in P6). Job volume flags.** Create: the GA
+  `gcloud run jobs create` accepts
+  `--add-volume=name=scratch,type=ephemeral-disk,size=<n>Gi` with
+  `--add-volume-mount` (verified in deploy-demo-test; no `gcloud beta`
+  needed). The same deploy showed that the Cloud Run server rejects
+  ephemeral-disk totals above 10 GiB per instance, so `RUNNER_DISK_GI` is
+  limited to 10 (default 10). Update: **UNVERIFIED** that `--clear-volumes
+  --clear-volume-mounts` and the same `--add-volume` flags combine in one
+  `gcloud run jobs update` call (the P6 deploy ran only creates). Checked by
+  [poc-checklist B2](poc-checklist.md) on a second `deploy-job.sh --apply`.
 - **U10 (resolved by design). Cloud Build staging access.** `gcloud builds
   submit` uploads the source to a bucket the build SA must read. Instead of
   granting access to the shared default `gs://GCP_PROJECT_cloudbuild`,

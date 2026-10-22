@@ -128,10 +128,12 @@ scripts/deploy-job.sh --apply [--tag TAG]
     seconds);
   - service account `EXEC_SA_NAME`, label `managed-by=cr-ci`;
   - an ephemeral-disk volume of `RUNNER_DISK_GI` GiB mounted at `/scratch`.
-- An update replaces the volume (`--clear-volumes --clear-volume-mounts`,
-  then the same `--add-volume`). Unverified: that gcloud accepts these flags
-  together, and whether ephemeral-disk volumes need `gcloud beta`
-  ([matrix U9](permissions-matrix.md#5-design-corrections-and-open-items)).
+- The GA `gcloud run jobs create` accepts the ephemeral-disk flags (verified
+  in the P6 deploy). An update replaces the volume (`--clear-volumes
+  --clear-volume-mounts`, then the same `--add-volume`); that clear and add
+  combine in one `update` call is still unverified
+  ([matrix U9](permissions-matrix.md#5-design-corrections-and-open-items),
+  checked by [poc-checklist B2](poc-checklist.md)).
 - With `--apply` it refuses to run if the image tag does not exist.
 - Grants `MEDIATOR_SA_NAME` `roles/run.developer` on this job only (C10), then
   re-checks that `EXEC_SA_NAME` holds no project role.
