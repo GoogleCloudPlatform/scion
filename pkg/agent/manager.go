@@ -90,8 +90,10 @@ type Manager interface {
 	// DeleteTarget terminates and removes an agent the caller has already
 	// resolved to a specific runtime entry (ref.ID, may be empty for a
 	// file-only agent; ref.RunID is that entry's run ID) and project path.
-	// It never re-resolves by slug.
-	DeleteTarget(ctx context.Context, agentName string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error)
+	// It never re-resolves by slug. sharerKey is the key the agent is
+	// registered under in a worktree-per-agent shared base (its hub agent
+	// ID on a Runtime Broker); "" means agentName (see DeleteAgentFilesFor).
+	DeleteTarget(ctx context.Context, agentName, sharerKey string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error)
 
 	// List returns active agents
 	List(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error)
@@ -505,7 +507,7 @@ func (m *AgentManager) Delete(ctx context.Context, agentID string, deleteFiles b
 			target = runtime.RunRef{ID: runtime.AgentOperationID(entry), RunID: entry.RunID}
 		}
 	}
-	return m.deleteResolved(ctx, agentID, target, deleteFiles, projectPath, removeBranch)
+	return m.deleteResolved(ctx, agentID, "", target, deleteFiles, projectPath, removeBranch)
 }
 
 // ErrAgentFilesDelete wraps a failure of the agent's file cleanup in a
@@ -519,12 +521,13 @@ var ErrAgentFilesDelete = errors.New("failed to delete agent files")
 // it cannot drift to a same-slug agent in another project. ref.ID may be
 // empty for an agent that has files but no backing container; ref.RunID is
 // the resolved entry's run ID and is passed through to Runtime.Delete.
-// projectPath is used verbatim for file deletion.
-func (m *AgentManager) DeleteTarget(ctx context.Context, agentName string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
-	return m.deleteResolved(ctx, agentName, ref, deleteFiles, projectPath, removeBranch)
+// projectPath is used verbatim for file deletion. sharerKey is passed to
+// DeleteAgentFilesFor ("" means agentName).
+func (m *AgentManager) DeleteTarget(ctx context.Context, agentName, sharerKey string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+	return m.deleteResolved(ctx, agentName, sharerKey, ref, deleteFiles, projectPath, removeBranch)
 }
 
-func (m *AgentManager) deleteResolved(ctx context.Context, agentName string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+func (m *AgentManager) deleteResolved(ctx context.Context, agentName, sharerKey string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
 	if targetID := ref.ID; targetID != "" {
 		// Stop the container gracefully before force-removing it. This ensures
 		// bind mounts (e.g. shared-dir volumes) are properly released before
@@ -547,7 +550,7 @@ func (m *AgentManager) deleteResolved(ctx context.Context, agentName string, ref
 
 	if deleteFiles {
 		util.Debugf("delete: starting filesystem cleanup for agent %s", agentName)
-		branchDeleted, err := DeleteAgentFiles(agentName, projectPath, removeBranch)
+		branchDeleted, err := DeleteAgentFilesFor(agentName, sharerKey, projectPath, removeBranch)
 		util.Debugf("delete: filesystem cleanup completed for agent %s", agentName)
 		if errors.Is(err, ErrAgentProjectUnresolved) {
 			// No project directory: none of the agent's files remain

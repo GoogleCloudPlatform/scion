@@ -159,13 +159,13 @@ type relistingManager struct {
 	refused bool
 }
 
-func (m *relistingManager) DeleteTarget(ctx context.Context, agentName string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+func (m *relistingManager) DeleteTarget(ctx context.Context, agentName, sharerKey string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
 	m.mu.Lock()
 	first := !m.refused
 	m.refused = true
 	m.mu.Unlock()
 	if !first {
-		return m.filteringMockManager.DeleteTarget(ctx, agentName, ref, deleteFiles, projectPath, removeBranch)
+		return m.filteringMockManager.DeleteTarget(ctx, agentName, sharerKey, ref, deleteFiles, projectPath, removeBranch)
 	}
 	m.mu.Lock()
 	m.agents = m.after

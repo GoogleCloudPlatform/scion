@@ -68,6 +68,7 @@ type mockManager struct {
 	lastDeleteRunID        string
 	lastDeleteFiles        bool
 	lastDeleteRemoveBranch bool
+	lastDeleteSharerKey    string
 	lastStopAgentID        string
 	lastStopRunID          string
 	// lastStartCtx captures the context passed to Start, so tests can assert
@@ -200,7 +201,7 @@ func (m *mockManager) Delete(ctx context.Context, agentID string, deleteFiles bo
 	return true, nil
 }
 
-func (m *mockManager) DeleteTarget(ctx context.Context, agentName string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+func (m *mockManager) DeleteTarget(ctx context.Context, agentName, sharerKey string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.lastDeleteProjectPath = projectPath
@@ -209,6 +210,7 @@ func (m *mockManager) DeleteTarget(ctx context.Context, agentName string, ref ru
 	m.lastDeleteRunID = ref.RunID
 	m.lastDeleteFiles = deleteFiles
 	m.lastDeleteRemoveBranch = removeBranch
+	m.lastDeleteSharerKey = sharerKey
 	m.deleteCalls++
 	if m.deleteTargetErr != nil {
 		return false, m.deleteTargetErr
@@ -318,6 +320,13 @@ func (m *mockManager) LastDeleteFiles() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.lastDeleteFiles
+}
+
+// LastDeleteSharerKey returns the sharer key of the last DeleteTarget call.
+func (m *mockManager) LastDeleteSharerKey() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastDeleteSharerKey
 }
 
 func (m *mockManager) LastListFilter() map[string]string {

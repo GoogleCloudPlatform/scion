@@ -55,8 +55,39 @@ var ErrAgentProjectUnresolved = errors.New("the agent's project directory does n
 // resolves to (its agent directory and workspace, worktree and, with
 // removeBranch, branch, and its external per-agent state). It never touches
 // another project's directories; the global project's agents are deleted
-// only when the global project is the target.
+// only when the global project is the target. It is DeleteAgentFilesFor
+// with the agent name as the sharer key, as a local-mode agent is
+// registered.
 func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (bool, error) {
+	return DeleteAgentFilesFor(agentName, "", projectPath, removeBranch)
+}
+
+// Seams for tests that force a failure of the last sharer's worktree
+// teardown (DeleteAgentFilesFor).
+var (
+	removeWorktree      = util.RemoveWorktree
+	removeWorktreeEntry = util.RemoveWorktreeEntryIn
+)
+
+// DeleteAgentFilesFor is DeleteAgentFiles with the key the agent is
+// registered under in a worktree-per-agent shared base: the sharer registry
+// entry and the worktree directory (<base>/worktrees/<key>). A Runtime
+// Broker provisions a hub agent under its hub agent ID, so a hosted delete
+// passes that ID; an empty sharerKey means agentName, as for local mode.
+// When nothing is registered under sharerKey, agentName is looked up as
+// well, since an agent provisioned through ProvisionAgent (local mode, a
+// workstation's linked checkout) is registered by name. Everything else
+// (the agent and external directories, the branch fallback) is keyed on
+// agentName.
+//
+// For the last sharer of a worktree the worktree is removed first, then
+// git's entry for it, and only then the registry entry, so a failure in
+// either removal leaves the registry entry in place and a retry finds the
+// same state.
+func DeleteAgentFilesFor(agentName, sharerKey string, projectPath string, removeBranch bool) (bool, error) {
+	if sharerKey == "" {
+		sharerKey = agentName
+	}
 	// Every path built below joins agentName onto some directory -- the
 	// project's agents dir, the external per-agent
 	// state dir, or the shared worktree base -- so an unvalidated name could
@@ -69,6 +100,13 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 	// branch regardless of which directory ends up being touched.
 	if _, err := checkAgentDirContained(projectPath, agentName, false); err != nil {
 		return false, fmt.Errorf("delete: %w", err)
+	}
+	// The sharer key is joined onto the shared base's worktrees directory
+	// the same way, so it is held to the same rule.
+	if sharerKey != agentName {
+		if _, err := checkAgentDirContained(projectPath, sharerKey, false); err != nil {
+			return false, fmt.Errorf("delete: sharer key: %w", err)
+		}
 	}
 
 	// The agent's files live under its project only. A project path that
@@ -90,10 +128,11 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 	// be registered. Only these entries are removed from git's worktree
 	// list; other worktrees' entries are never touched (ptone/scion#5060).
 	var ownWorktreePaths []string
-	// sharedBaseWorktree is the agent's path under the worktree-per-agent
-	// shared base. It is added to ownWorktreePaths only once the sharer
-	// check below has shown that no other agent still uses it.
-	var sharedBaseWorktree string
+	// sharedBaseWorktrees are the agent's paths under the worktree-per-agent
+	// shared base (for its sharer key and, when different, its name). They
+	// are added to ownWorktreePaths only once the sharer check below has
+	// shown that no other agent still uses them.
+	var sharedBaseWorktrees []string
 	var globalWorkspaceDir string
 	// resolvedProjectDir is config.GetResolvedProjectDir's return value,
 	// captured here (rather than only inside the block below) so the
@@ -128,10 +167,16 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 		layout = resolveAgentProjectLayout(projectDir)
 		repoRoot = layout.repoRoot
 		if layout.sharedBaseIsRepo {
-			wtPath := filepath.Join(layout.sharedBase, "worktrees", agentName)
-			sharedBaseWorktree = wtPath
-			if _, statErr := os.Stat(wtPath); statErr == nil {
-				worktreeDir = wtPath
+			// The agent's worktree is at worktrees/<sharerKey>; an agent
+			// registered by name has it at worktrees/<agentName>.
+			for _, key := range sharerKeys(sharerKey, agentName) {
+				wtPath := filepath.Join(layout.sharedBase, "worktrees", key)
+				sharedBaseWorktrees = append(sharedBaseWorktrees, wtPath)
+				if worktreeDir == "" {
+					if _, statErr := os.Stat(wtPath); statErr == nil {
+						worktreeDir = wtPath
+					}
+				}
 			}
 		}
 
@@ -144,7 +189,13 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 	// Every removal below passes the guard (projectAgentFilesGuard): only
 	// the agent's own directories may be removed, never a project
 	// workspace. Each removal acts on the path the guard returns.
-	guard := projectAgentFilesGuardWithLayout(context.Background(), resolvedProjectDir, layout, agentName)
+	// A sharer key other than the name owns its worktree under the shared
+	// base too, so that path is one of the agent's own.
+	var keyRoots []string
+	if sharerKey != agentName && layout.sharedBaseIsRepo {
+		keyRoots = append(keyRoots, filepath.Join(layout.sharedBase, "worktrees", sharerKey))
+	}
+	guard := projectAgentFilesGuardWithLayout(context.Background(), resolvedProjectDir, layout, agentName, keyRoots...)
 	// Empty-per-agent (design #2703): the agent's workspace is a private,
 	// non-git directory that owns no worktree or branch. Even when the
 	// agent ran `git init` in it, or the project sits inside an enclosing
@@ -183,104 +234,36 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 		// Do NOT silently swallow registry errors and fall through to the legacy
 		// path — that path could delete the shared worktree out from under live
 		// joiners. On a real registry I/O error, fail loudly instead.
-		branch, _, found, findErr := provision.FindBranchForAgent(repoRoot, resolvedProjectDir, agentName)
-		if findErr != nil {
-			return branchDeleted, fmt.Errorf("delete: FindBranchForAgent for %s: %w", agentName, findErr)
+		var branch, registeredKey string
+		found := false
+		for _, key := range sharerKeys(sharerKey, agentName) {
+			b, _, ok, findErr := provision.FindBranchForAgent(repoRoot, resolvedProjectDir, key)
+			if findErr != nil {
+				return branchDeleted, fmt.Errorf("delete: FindBranchForAgent for %s: %w", key, findErr)
+			}
+			if ok {
+				branch, registeredKey, found = b, key, true
+				break
+			}
 		}
 		if found {
-			remaining, wtPath, unregErr := provision.UnregisterSharer(repoRoot, resolvedProjectDir, branch, agentName)
-			if unregErr != nil {
-				return branchDeleted, fmt.Errorf("delete: UnregisterSharer for branch %s agent %s: %w", branch, agentName, unregErr)
+			handled, err := teardownSharer(repoRoot, resolvedProjectDir, branch, registeredKey, removeBranch, guard)
+			if handled.branchDeleted {
+				branchDeleted = true
 			}
-			if len(remaining) == 0 {
-				// Additional check: re-check wtPath's unresolved/lexical form
-				// against a scion-created shape immediately before acting on
-				// it, rather than trusting that UnregisterSharer's return
-				// value is still exactly what the read boundary validated.
-				// This is deliberately a second LEXICAL check, not a new
-				// EvalSymlinks anchor for the removal step below — the
-				// resolved-containment check inside util.RemoveWorktree stays
-				// anchored at repoRoot (see its own doc comment on why
-				// narrowing that anchor to a per-marker subdirectory would
-				// let a symlinked intermediate component pass through
-				// unchecked, defeating that check's purpose). This only scopes what counts as
-				// an acceptable shape going into that call, one guard closer
-				// to the removal itself.
-				if wtPath != "" && !provision.WorktreePathIsScionCreated(repoRoot, resolvedProjectDir, wtPath) {
-					slog.Warn("delete: worktree path no longer matches a scion-created shape at removal time; skipping worktree removal",
-						"agent_id", agentName, "branch", branch, "path", wtPath)
-					wtPath = ""
-				}
-				if wtPath == "" {
-					// The registry read boundary (pkg/provision.readMarker)
-					// already fails closed on an out-of-tree/relative/empty
-					// WorktreePath, discarding the whole marker. There is no
-					// validated in-tree path to remove — do not guess one.
-					slog.Warn("delete: no valid worktree path for last sharer; skipping worktree removal",
-						"agent_id", agentName, "branch", branch)
-				} else {
-					util.Debugf("delete: last sharer for branch %s, removing worktree at %s", branch, wtPath)
-					// The last sharer removes the shared worktree, which
-					// the registry and the shape check above establish is
-					// scion's, not the project's.
-					// A worktree directory that is already gone has
-					// nothing on disk to check or remove; RemoveWorktree
-					// still runs (it returns at once) and git's entry is
-					// removed below. Any other Lstat result goes through
-					// the guard.
-					var wtRemove string
-					if _, lerr := os.Lstat(wtPath); !errors.Is(lerr, fs.ErrNotExist) {
-						var err error
-						if wtRemove, err = guard.check(wtPath, wtPath); err != nil {
-							return branchDeleted, fmt.Errorf("delete: %w", err)
-						}
-					}
-					worktreeStart := time.Now()
-					if deleted, err := util.RemoveWorktree(repoRoot, wtPath, removeBranch); err == nil {
-						if deleted {
-							branchDeleted = true
-						}
-						util.Debugf("delete: shared worktree removal completed in %v (branch deleted: %v)", time.Since(worktreeStart), deleted)
-					} else {
-						util.Debugf("delete: shared worktree removal failed in %v: %v", time.Since(worktreeStart), err)
-						if errors.Is(err, util.ErrPathNotContained) {
-							// The marker's WorktreePath passed the lexical
-							// read-boundary check but resolves
-							// outside repoRoot once symlinks are followed
-							// (e.g. a symlinked worktrees dir or leaf).
-							// Do NOT fall back to a raw recursive removal —
-							// that is exactly what this check exists to
-							// prevent.
-							slog.Warn("delete: refusing fallback removal; worktree path does not resolve under repo root",
-								"agent_id", agentName, "branch", branch, "path", wtPath, "repo_root", repoRoot)
-						} else {
-							if wtRemove != "" {
-								_ = util.RemoveAllSafe(wtRemove)
-							}
-						}
-						// Worktree removal failed, so the branch wasn't deleted by it —
-						// fall back to deleting the branch by name (like the legacy path).
-						if removeBranch && !branchDeleted {
-							if util.DeleteBranchIn(repoRoot, branch) {
-								branchDeleted = true
-								util.Debugf("delete: deleted branch %s via fallback after worktree removal failure", branch)
-							}
-						}
-					}
-				}
-			} else {
-				util.Debugf("delete: %d sharers remain for branch %s, detaching agent %s", len(remaining), branch, agentName)
-				sharersRemain = true
+			if err != nil {
+				return branchDeleted, err
 			}
-			if len(remaining) == 0 && wtPath != "" {
-				ownWorktreePaths = append(ownWorktreePaths, wtPath)
+			sharersRemain = handled.sharersRemain
+			if handled.worktreePath != "" {
+				ownWorktreePaths = append(ownWorktreePaths, handled.worktreePath)
 			}
 			refcountHandled = true
 		}
 	}
 
-	if sharedBaseWorktree != "" && !sharersRemain {
-		ownWorktreePaths = append(ownWorktreePaths, sharedBaseWorktree)
+	if !sharersRemain {
+		ownWorktreePaths = append(ownWorktreePaths, sharedBaseWorktrees...)
 	}
 
 	// Worktree-per-agent: remove the agent's worktree from the shared base.
@@ -469,6 +452,161 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 	return branchDeleted, nil
 }
 
+// sharerKeys returns the keys an agent may be registered under in a
+// worktree-per-agent shared base: its sharer key and, when different, its
+// name (see DeleteAgentFilesFor).
+func sharerKeys(sharerKey, agentName string) []string {
+	if sharerKey == agentName {
+		return []string{agentName}
+	}
+	return []string{sharerKey, agentName}
+}
+
+// sharerTeardown is what teardownSharer did.
+type sharerTeardown struct {
+	// sharersRemain is set when other agents still share the worktree.
+	sharersRemain bool
+	// worktreePath is the last sharer's worktree path, whose git entry the
+	// caller may remove once its directory is gone; "" otherwise.
+	worktreePath  string
+	branchDeleted bool
+}
+
+// teardownSharer removes key from the sharer registry entry of branch in
+// the repository at repoRoot.
+//
+// While other sharers remain, the registry entry is rewritten atomically
+// without key and the worktree is left alone.
+//
+// For the last sharer the order is: remove the worktree directory, check
+// that it is gone, remove git's entry for that worktree only (never a
+// repository-wide prune, ptone/scion#5060), and only then remove the
+// registry entry. When the removal or the entry removal fails, it returns
+// the error with the registry entry still in place, so a retry finds the
+// worktree registered and completes the teardown; a worktree or entry that
+// is already gone counts as removed.
+//
+// A recorded worktree path that is empty or not of a scion-created shape,
+// or one that resolves outside repoRoot (util.ErrPathNotContained), is
+// never removed: the registry entry is removed and the worktree left in
+// place, as no retry could remove it either.
+func teardownSharer(repoRoot, projectDir, branch, key string, removeBranch bool, guard *agentFilesGuard) (sharerTeardown, error) {
+	var out sharerTeardown
+	sharers, wtPath, err := provision.ListSharers(repoRoot, projectDir, branch)
+	if err != nil {
+		return out, fmt.Errorf("delete: ListSharers for branch %s: %w", branch, err)
+	}
+	others := 0
+	for _, s := range sharers {
+		if s != key {
+			others++
+		}
+	}
+	unregister := func() ([]string, error) {
+		remaining, _, err := provision.UnregisterSharer(repoRoot, projectDir, branch, key)
+		if err != nil {
+			return nil, fmt.Errorf("delete: UnregisterSharer for branch %s agent %s: %w", branch, key, err)
+		}
+		return remaining, nil
+	}
+	if others > 0 {
+		remaining, err := unregister()
+		if err != nil {
+			return out, err
+		}
+		if len(remaining) > 0 {
+			util.Debugf("delete: %d sharers remain for branch %s, detaching agent %s", len(remaining), branch, key)
+			out.sharersRemain = true
+			return out, nil
+		}
+		// The other sharers unregistered meanwhile and UnregisterSharer
+		// removed the entry; as before, the worktree is this agent's to
+		// remove below.
+	}
+
+	// Last sharer. Re-check wtPath's unresolved/lexical form against a
+	// scion-created shape immediately before acting on it. This is
+	// deliberately a LEXICAL check, not a new EvalSymlinks anchor for the
+	// removal step below — the resolved-containment check inside
+	// util.RemoveWorktree stays anchored at repoRoot (see its own doc
+	// comment on why narrowing that anchor to a per-marker subdirectory
+	// would let a symlinked intermediate component pass through unchecked).
+	if wtPath != "" && !provision.WorktreePathIsScionCreated(repoRoot, projectDir, wtPath) {
+		slog.Warn("delete: worktree path no longer matches a scion-created shape at removal time; skipping worktree removal",
+			"agent_id", key, "branch", branch, "path", wtPath)
+		wtPath = ""
+	}
+	if wtPath == "" {
+		// The registry read boundary (pkg/provision.readMarker) already
+		// fails closed on an out-of-tree/relative/empty WorktreePath,
+		// discarding the whole marker. There is no validated in-tree path
+		// to remove — do not guess one.
+		slog.Warn("delete: no valid worktree path for last sharer; skipping worktree removal",
+			"agent_id", key, "branch", branch)
+		if others == 0 {
+			if _, err := unregister(); err != nil {
+				return out, err
+			}
+		}
+		return out, nil
+	}
+
+	util.Debugf("delete: last sharer for branch %s, removing worktree at %s", branch, wtPath)
+	// The last sharer removes the shared worktree, which the registry and
+	// the shape check above establish is scion's, not the project's. A
+	// worktree directory that is already gone has nothing on disk to check
+	// or remove; RemoveWorktree then returns at once. Any other Lstat result
+	// goes through the guard.
+	if _, lerr := os.Lstat(wtPath); !errors.Is(lerr, fs.ErrNotExist) {
+		if _, err := guard.check(wtPath, wtPath); err != nil {
+			return out, fmt.Errorf("delete: %w", err)
+		}
+	}
+	worktreeStart := time.Now()
+	deleted, rmErr := removeWorktree(repoRoot, wtPath, removeBranch)
+	switch {
+	case rmErr == nil:
+		util.Debugf("delete: shared worktree removal completed in %v (branch deleted: %v)", time.Since(worktreeStart), deleted)
+		out.branchDeleted = deleted
+		// RemoveWorktreeEntryIn does nothing while the directory exists,
+		// so the directory must be gone before the entry, and with it the
+		// registry entry, can be removed.
+		if _, lerr := os.Lstat(wtPath); !errors.Is(lerr, fs.ErrNotExist) {
+			return out, fmt.Errorf("delete: the worktree at %s is still present after its removal; the sharer registry entry for branch %s is kept", wtPath, branch)
+		}
+		if err := removeWorktreeEntry(repoRoot, wtPath); err != nil {
+			return out, fmt.Errorf("delete: remove the worktree entry for %s; the sharer registry entry for branch %s is kept: %w", wtPath, branch, err)
+		}
+	case errors.Is(rmErr, util.ErrPathNotContained):
+		// The marker's WorktreePath passed the lexical read-boundary check
+		// but resolves outside repoRoot once symlinks are followed (e.g. a
+		// symlinked worktrees dir or leaf). Do NOT fall back to a raw
+		// recursive removal — that is exactly what this check exists to
+		// prevent. No retry could remove it either, so the entry goes.
+		slog.Warn("delete: refusing fallback removal; worktree path does not resolve under repo root",
+			"agent_id", key, "branch", branch, "path", wtPath, "repo_root", repoRoot)
+		wtPath = ""
+	default:
+		util.Debugf("delete: shared worktree removal failed in %v: %v", time.Since(worktreeStart), rmErr)
+		return out, fmt.Errorf("delete: remove the worktree at %s; the sharer registry entry for branch %s is kept: %w", wtPath, branch, rmErr)
+	}
+	if removeBranch && !out.branchDeleted {
+		// The worktree was already gone (a retry), or its removal could not
+		// delete the branch: delete it by name, as the legacy path does.
+		if util.DeleteBranchIn(repoRoot, branch) {
+			out.branchDeleted = true
+			util.Debugf("delete: deleted branch %s by name after the worktree teardown", branch)
+		}
+	}
+	if others == 0 {
+		if _, err := unregister(); err != nil {
+			return out, err
+		}
+	}
+	out.worktreePath = wtPath
+	return out, nil
+}
+
 // persistedEmptyPerAgent reports whether the agent's persisted
 // scion-agent.json (in any of its agent dirs, or the external per-agent state
 // dir) records the empty-per-agent workspace mode.
@@ -559,7 +697,7 @@ func StopProjectContainers(ctx context.Context, mgr Manager, projectName string,
 		util.Debugf("StopProjectContainers: removing container %s (agent %s, project %s)", c.ContainerID, agentName, projectName)
 		// Use Delete with deleteFiles=false — we only want to remove the container,
 		// not the filesystem artifacts (those will be removed by RemoveProjectConfig).
-		if _, err := mgr.DeleteTarget(ctx, agentName, runtime.RunRef{ID: c.ContainerID, RunID: c.RunID}, false, "", false); err != nil {
+		if _, err := mgr.DeleteTarget(ctx, agentName, "", runtime.RunRef{ID: c.ContainerID, RunID: c.RunID}, false, "", false); err != nil {
 			util.Debugf("StopProjectContainers: failed to remove container for agent %s: %v", agentName, err)
 		} else {
 			stopped = append(stopped, agentName)

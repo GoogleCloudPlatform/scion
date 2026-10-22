@@ -648,7 +648,7 @@ func (s *Server) cleanupLaunchFiles(rec *launchRecord, opts api.StartOptions, sh
 			"agent_id", rec.AgentID, "launch_id", rec.ID, "run_id", opts.RunID, "files_run_id", owner)
 		return nil
 	}
-	if _, err := agent.DeleteAgentFiles(opts.Name, opts.ProjectPath, true); err != nil && !errors.Is(err, agent.ErrAgentProjectUnresolved) {
+	if _, err := agent.DeleteAgentFilesFor(opts.Name, startSharerKey(rec.AgentID), opts.ProjectPath, true); err != nil && !errors.Is(err, agent.ErrAgentProjectUnresolved) {
 		s.agentLifecycleLog.Warn("runLaunch: failed to clean up agent files",
 			"agent_id", rec.AgentID, "launch_id", rec.ID, "error", err)
 		rec.filesCleanupFailed.Store(true)
