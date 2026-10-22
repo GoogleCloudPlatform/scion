@@ -63,7 +63,20 @@ Do not post credentials, tokens, keys or other sensitive material in a space thr
 :::
 
 :::note[Attachment and shared-directory permissions]
-Shared directories and the storage that holds chat attachments do not have fine-grained permissions: access is not limited per conversation or per member. Do not rely on attachments or shared directories for files that only some project members may see. A planned move of attachments to artifacts will add finer-grained access for attachments.
+Shared directories, and the attachment store that holds chat attachments by default, grant access by project, not per conversation or per member. Keep files that only some project members may see out of them.
+
+With the `hub.attachment_artifacts` experiment on, a file uploaded in web chat is stored as an attachment of the message it is sent in, and is exactly as readable as that message at the moment it is read:
+
+- **Direct message:** its two participants.
+- **Thread in a project space:** everyone who can read the project.
+- **Group conversation without a project:** its current participants. Someone who joins can read the attachments of earlier messages, and someone who leaves stops being able to read them.
+- **Anyone the message is addressed to.**
+
+When the message goes to an agent, the file is also copied into the project's shared directory so the agent can open it, and there project access applies (until ptone/scion#4597 delivers files to the agent's own home instead).
+
+Until it is sent, only the uploader can read it, and an upload that is not sent within 24 hours is removed. Deleting a message makes its attachments unreadable at once, and their stored bytes are removed after the artifact garbage-collection grace period. Any user who cannot read it gets the same "not found" answer as for an attachment that does not exist. These attachments are read through a signed-in session, such as the web chat; user access tokens do not read, list or send them yet (ptone/scion#4596), and an upload made with a token is stored the previous way. Attachments are read only through their message: they have no share links, grants or versions, and they are not listed among artifacts.
+
+Each file can be up to the artifact file size limit (`artifacts.max_file_bytes`, 32 MiB by default), with up to 10 files per message. The experiment uses the artifact service, with its settings section enabled; `hub.artifacts` can stay off. Attachments stored while the experiment is on stay readable after it is turned off.
 :::
 
 ---
@@ -90,7 +103,7 @@ Right-clicking a message (on desktop) or tapping it (on touch devices without ho
 - **Layout Density**: Choose between **Dense** and **Comfortable** layout modes via the density toggle. Dense mode reduces whitespace for maximum information density; Comfortable mode provides more breathing room for extended reading.
 
 #### 3. High-Density Developer Utilities
-- **Quick Command Palette**: On the chat page, press Cmd/Ctrl-K to open a grouped, fuzzy-matched palette for jumping to any thread or DM, or opening a recent file, without leaving your keyboard. Results are grouped into **Agents**, **Threads**, **People** and **Documents**; threads also match their space's name, and **Documents** lists the files (attachments and detected file paths) that have most recently appeared in your chats. Each agent row also shows the agent's project slug, so same-named agents in different projects can be told apart, and you can search by project slug or name. A space in your query also matches a hyphen or underscore, so `code review` finds `code-review` and `code_review`. Choosing an agent opens your DM with it, including peers you have not messaged before; choosing a document opens it in a preview dialog over the current conversation, which is left as it was (files that cannot be shown offer a **Download** button instead). Use **Tab** / **Shift+Tab** to jump between groups, the arrow keys to move within the results, **Enter** to open and **Esc** to close. A button in the chat header also opens the same palette by tap or click, which is especially useful on touch screens, where the keyboard shortcut isn't available.
+- **Quick Command Palette**: On the chat page, press Cmd/Ctrl-K to open a grouped, fuzzy-matched palette for jumping to any thread or DM, or opening a recent file, without leaving your keyboard. Results are grouped into **Agents**, **Threads**, **People** and **Documents**; threads also match their space's name, and **Documents** lists the files (attachments and detected file paths) that have most recently appeared in your chats. With an empty query, **People** lists up to 100 of the most recently active people on the hub; type two or more characters to search all hub users by name or email. Each agent row also shows the agent's project slug, so same-named agents in different projects can be told apart, and you can search by project slug or name. A space in your query also matches a hyphen or underscore, so `code review` finds `code-review` and `code_review`. Choosing an agent opens your DM with it, including peers you have not messaged before; choosing a document opens it in a preview dialog over the current conversation, which is left as it was (files that cannot be shown offer a **Download** button instead). Use **Tab** / **Shift+Tab** to jump between groups, the arrow keys to move within the results, **Enter** to open and **Esc** to close. A button in the chat header also opens the same palette by tap or click, which is especially useful on touch screens, where the keyboard shortcut isn't available.
 - **Jump-to-Message from Search**: Clicking a search result automatically scrolls to the target message, even when it falls outside the currently loaded message buffer. The target message receives a highlight-flash animation, and a "Jump to latest" button appears to return to the live message stream.
 - **Unread Divider with Watermark**: An unread indicator bar automatically segments new messages since your last visit, including a watermark to ensure you never miss a transition. A thread with unread messages opens scrolled to the **New messages** divider rather than to the bottom.
 - **Day Separators**: Messages, including inter-agent messages, are split by day with the same date separator used throughout the thread.
@@ -143,6 +156,7 @@ When writing instructions, you can easily pull other agents into the thread:
 - **Autocomplete Popup**: Typing `@` in the chat input opens a dropdown list of active agents in the project. The list supports fuzzy-matching as you type, and full keyboard navigation (arrow keys to select, `Enter` to insert).
 - **Code-Fence Guard**: The mention autocomplete is smart — it automatically disables itself when typing inside Markdown code fences (e.g., ` ``` ` blocks) so code snippets don't trigger unwanted dropdowns.
 - **Mention Leak Protection**: Direct mentions are safely partitioned, resolving a previous bug where mentions would leak into the default agent tab.
+- **Recipient-Form Mentions**: A mention written in recipient syntax, such as `@agent:hub-ops`, is rewritten to `@hub-ops` in the message body before the Hub stores it, so the mention reaches the named agent. The Hub does this for web, chat and CLI sends alike (`scion message` applies the same rewrite before sending). Code spans, fenced code blocks and quoted (`>`) lines are left as written, and an address such as `ops@agent:foo` is not a mention.
 - **Fan-Out Restrictions**: For platform stability, a single message is fanned out to a maximum of **10 recipients** per `@-mention` broadcast.
 - **Bidirectional Mention Translation**: Mentions are automatically translated between the formats used by agents and the web chat. In the chat UI, mentions display as `@firstname-lastname`; when delivered to agents, they are translated to `@email` format, and vice versa. This ensures both humans and agents see the most natural identifier for their context.
 - **Composer Default-Agent Disambiguation**: When sending messages in collaborative project spaces with multiple active agents, typing a message without an explicit target or `@-mention` triggers a smart disambiguation interface. This guides the user to select which agent the message should target (or fall back to the project's configured default agent), keeping routing unambiguous and conversations clear.
@@ -249,11 +263,11 @@ scion message --non-interactive @reviewer "PR #42 is ready for review.\n\nBranch
 ### Related Commands
 
 - **`scion broadcast`**: Send a message to all agents in the current project, or use `--all` for a global broadcast. The `--broadcast` and `--all` flags on `scion message` have been removed; use this command instead.
-- **`scion keys`**: Send literal terminal input to an agent's tmux session (e.g., `scion keys editor "Enter"`, as a separate call from `scion keys editor "Escape"`), with no envelope and no automatic Enter. Useful for unblocking interactive prompts. Works for container-backed agents in Hub and local mode; not supported for managed-runtime agents (see [Managed Agents](/scion/hosted/single-node/managed-agents/#limitations)). When run by an agent, it can only target agents in the agent's own project — cross-project targets are refused, by the CLI and the Hub alike; a human operator using `--project` can target other projects, in Hub mode with the same authority as `scion attach` on the target. Local mode has no Hub authorization. In Hub mode it is authorized like terminal attach rather than messaging — message mode does not gate it — and requires, for an agent caller, a live attach relationship on the target in addition to shared project membership (see [CLI Reference](/scion/reference/cli/#scion-keys)). There is no key-sequence syntax: issue one `scion keys` call per key press. This replaces the removed `--raw` flag on `scion message`, which now fails with guidance naming `scion keys`.
+- **`scion keys`**: Send literal terminal input to an agent's tmux session (e.g., `scion keys editor "Enter"`, as a separate call from `scion keys editor "Escape"`), with no envelope and no automatic Enter. Useful for unblocking interactive prompts. Works for container-backed agents; not supported for managed-runtime agents (see [Managed Agents](/scion/hosted/single-node/managed-agents/#limitations)). When run by an agent, it can only target agents in the agent's own project — cross-project targets are refused, by the CLI and the Hub alike; a human operator using `--project` can target other projects, with the same authority as `scion attach` on the target. It is authorized like terminal attach rather than messaging — message mode does not gate it — and requires, for an agent caller, a live attach relationship on the target in addition to shared project membership (see [CLI Reference](/scion/reference/cli/#scion-keys)). There is no key-sequence syntax: issue one `scion keys` call per key press. This replaces the removed `--raw` flag on `scion message`, which now fails with guidance naming `scion keys`.
 
 ### Conversation Management
 
-The `scion conversation` command (alias `conv`) provides a surface-agnostic interface for managing conversations — the containers for message threads that span across the web chat, external channels, and CLI. Requires Hub mode.
+The `scion conversation` command (alias `conv`) provides a surface-agnostic interface for managing conversations — the containers for message threads that span across the web chat, external channels, and CLI.
 
 Conversations are referenced using one of three forms:
 - `conv:<uuid>` — by conversation ID.
@@ -507,6 +521,28 @@ When an agent signals `WAITING_FOR_INPUT` (by calling `sciontool status ask_user
 
 * **Parent Agent Role**: If you are the parent agent that created the waiting agent, you may be the intended respondent. Use `scion message @<name>` to reply with the answer.
 * **Peer Agent Rule**: Unrelated peer agents should **NOT** reply to waiting-for-input notifications. Answering a peer's input prompt wastes context tokens, causes false loop signals, and violates project-scoped boundaries. To request a peer's input, always send it an explicit message instead.
+
+#### Halted Agent Notifications
+
+When the platform [halts](/scion/concepts/#halted-phase-the-platform-ended-the-run) an agent (for example its Kubernetes pod was preempted or evicted, or it was killed for running out of memory), Scion sends one `HALTED` notification for that halt, with text such as:
+
+```
+worker-1 was halted by the platform (preempted). Workspace kept. Resume: scion start worker-1.
+```
+
+The workspace part says what `scion start` does with the workspace: `Workspace kept`, `Workspace re-cloned` (a workspace on the pod's own storage), or `Workspace may be re-cloned` (where it lives is not known).
+
+Who receives it:
+
+* **The agent's creator**, when they have no subscription to the agent or its project: the user who created the agent, or the agent that created it (while that agent still exists in the same project). A creator who has a subscription gets `HALTED` only if that subscription selects it.
+* **Subscribers with the `HALTED` trigger.** `HALTED` is one of the default triggers of the subscription recorded when an agent is created with notify on, and one of the Web Dashboard's default and selectable triggers. The default triggers of `scion notifications subscribe` do not include it; add it with `--triggers`.
+* **Subscribers with only the `ERROR` trigger**, when the halt replaced what would have been an `error` (for example a preempted pod whose workspace did not survive). They receive it with status `ERROR`, as they would have without the halt.
+
+Each subscriber, including the creator, receives one notification per halt.
+
+#### Notification Delivery Retries
+
+If a notification cannot be delivered to a subscriber agent (for example because its Runtime Broker is not connected), it is not marked as sent. The Hub tries again on a sweep about every 5 minutes, and again when the Runtime Broker reconnects, for up to 24 hours after the notification was created. Each notification records its number of delivery attempts (`dispatchAttempts`) and an outcome (`dispatchOutcome`): `delivered`, or `failed` once the 24 hours have passed or the subscription, subscriber or watched agent is gone. The outcome is empty while delivery is still pending. A subscriber agent that has no Runtime Broker is not attempted, so its notification stays pending and does not reach the 24-hour limit.
 
 :::tip[Project-Scoped Message Isolation]
 When using slug-based query paths or addressing agents via `agent:<name>` (e.g., `scion message agent:<name>`), Scion strictly scopes all message queries and deliveries by the active `ProjectID`. This ensures that even if different projects contain agents with identical names or slugs, messages are completely isolated within each project and never leak across project boundaries.

@@ -38,7 +38,7 @@ The git history here is shallow, so the comparison is by tree content. Of roughl
 | Quota | Per Runtime Broker only (`max_agents_per_broker`, `BrokerSettings.MaxAgents`) | Each flat Runtime Broker is its own scope. Aggregate limits are a P3/P5 question. |
 | Conduit | `conduit_session.exec_scope`, `endpoint_incarnation` and `connection_epoch` exist. Nothing computes a Runtime Broker exec scope. Gated by `hub.conduit` | Section 13 records the fencing contract that flat dispatch preserves. |
 | Settings | Storage and eviction keys on runtime/profile entries. `schema_version` is not checked at load. Unknown keys are dropped silently | Schema stays `"1"` with an additive key and a strict loader (section 2). |
-| Experiments | Server and web layers, `Server.experimentEnabled`, `requireExperiment` (no production callers), `dispatchExperimentNames` | `hub.flat_runtime_brokers` is a server-layer experiment (section 14). |
+| Experiments | Server and web layers, `Server.experimentEnabled`, `requireExperiment` (no production callers), `dispatchExperimentNames` | `hub.flat_runtime_brokers` is a server- and web-layer experiment (section 14). The web layer only selects the Brokers UI; it is presentation only and every Hub check is unchanged. |
 
 In-flight work this was checked against:
 - ptone/scion#3081 and ptone/scion#3091 (start claims, queued stops, recovery)
@@ -342,6 +342,19 @@ Registration **authorization** is unchanged and is not part of these rules: the 
   - creates the global project if it is missing (as today), but **creates no provider link and sets no default Runtime Broker for the flat row** (section 17). A project reaches the flat instance only through an explicit link;
   - records `SetEmbeddedBrokerID(flatID)`, so the Hub-default passthrough gate identifies the flat instance as the embedded Runtime Broker;
   - activates only on a bound result (R10), and reports any refusal (412 `experiment_disabled` at first boot, `ErrExecutionScopeChanged`, an identity error, an R3 or R2 refusal, an ack code) through `EmbeddedBrokerRegistrationFailed`. It never falls back to the legacy identity.
+- **R11 Field ownership on registration.** Values set through the update API (`PATCH /api/v1/runtime-brokers/{id}`) persist across registrations, on flat and legacy rows alike:
+
+  | Field | Set by | Registration of an existing row | Co-located registration |
+  |---|---|---|---|
+  | GCP host service account and project (written as a pair) | Creation, or the update API | Filled only while both are unset and were not set or cleared through the update API (`gcp_host_source` is not `admin`). An empty request value never clears them | Flat: never written. Legacy: the metadata-detected value replaces a value whose source is not `admin` |
+  | `gcp_host_source` | The Hub | `registration` when registration fills the pair | `detected` (legacy) |
+  | Name | Creation, or the update API | Kept (R2), including on the deprecated `RegisterProject` broker path | Kept |
+  | Slug | Creation only (a rename through the update API changes the name, not the slug) | Kept | Kept |
+  | `scion.io/plugin`, `scion.io/broker-role` labels | The Hub | Dropped from the request (`broker-role` is `remote` on rows created over the API) | `broker-role=embedded` |
+  | Other labels | Creation, or the update API | Added when the key is absent; an existing key keeps its value; no key is removed | Unchanged |
+  | AutoProvide | The registrant (R8) | As sent | From operator config |
+
+  A requested value that is not applied is listed in the registration response (`keptSettings`) and in the register audit event. The GCP host pair and its source are written only by `CreateRuntimeBroker` and the `SetRuntimeBrokerGCPHost*` store methods, never by `UpdateRuntimeBroker`. Change these fields through the update API.
 
 ### Every writer
 
@@ -353,11 +366,12 @@ Registration **authorization** is unchanged and is not part of these rules: the 
 | Embedded flat registration | new, `RegisterEmbeddedFlatRuntimeBroker` | R1–R7. No orphan reassignment, no profile write | P1.2 |
 | Legacy broker-ID recovery | `cmd/server_foreground.go resolveBrokerID` → `FindEmbeddedBroker` (recovers a lost legacy Runtime Broker ID from the single row labelled `scion.io/broker-role=embedded` and persists it into legacy settings) | Never selects a row with a stored runtime target (`runtime_target_id IS NULL`), so it never adopts or persists a flat Runtime Broker ID. The flat row keeps its `embedded` label (R7) | P1.2 |
 | `RegisterProject` with `brokerId` (link to an existing Runtime Broker) | `pkg/hub/handlers_projects_core.go handleProjectRegister`, `req.BrokerID` branch (`AddProjectProvider`, default if none) | **Refuses a flat row** before any project is created or changed. A read-only `GetRuntimeBroker(req.BrokerID)` is added to the pre-mutation block, after the `project.create` and project-update gates and before "Create new project if not found". It refuses only a flat row; the existing lookup, its not-found response and the link stay where they are for legacy rows. Refusal: 409 `runtime_broker_link_path_unsupported` ("flat Runtime Brokers are linked only through POST /api/v1/projects/{id}/providers"). Legacy rows are unchanged. This keeps the providers endpoint the **one** explicit link path for flat rows | P1.2 |
-| Deprecated `RegisterProject` with `broker` | `pkg/hub/handlers_projects_core.go` (ID then name lookup, name/slug/profile overwrite) | Its name lookup uses `GetLegacyRuntimeBrokerByName`, not `GetRuntimeBrokerByName`, so the result doesn't depend on row order. Decided **in the pre-mutation lookup and authorization block**, before any project is created or changed: a flat row found by ID gets 409 `runtime_target_changed`; a name/slug collision with a flat row gets 409 `runtime_broker_name_conflict` (no adoption, no duplicate). It never writes profiles to a flat row | P1.2 |
+| Deprecated `RegisterProject` with `broker` | `pkg/hub/handlers_projects_core.go` (ID then name lookup; profile overwrite; name and slug kept, R11) | Its name lookup uses `GetLegacyRuntimeBrokerByName`, not `GetRuntimeBrokerByName`, so the result doesn't depend on row order. Decided **in the pre-mutation lookup and authorization block**, before any project is created or changed: a flat row found by ID gets 409 `runtime_target_changed`; a name/slug collision with a flat row gets 409 `runtime_broker_name_conflict` (no adoption, no duplicate). It never writes profiles to a flat row | P1.2 |
 | Status/connection-only writers | `UpdateRuntimeBrokerHeartbeat`, `ClaimRuntimeBrokerConnection`, `ReleaseRuntimeBrokerConnection`, `ReleaseAndMarkBrokerOffline`, `ReapStaleBrokerAffinity`, `MarkStaleBrokersOffline`, `MarkBrokerOffline`, `SetRuntimeBrokerCreatedByIfEmpty` | Unaffected. They write only status, heartbeat, connection-affinity or created-by columns, never the target, name or profiles | — |
 | Messaging-plugin Runtime Broker rows | `cmd/server_foreground.go runServerStart` (`CreateRuntimeBroker` for `plugin-<type>` with a deterministic ID, only when that ID is missing) | Unchanged. These are legacy rows created by ID with a reserved name pattern; no name lookup and no profiles. A flat registration whose name or slug collides with one gets R2's 409 at its own creation | — |
 | Admin PATCH `updateRuntimeBroker` | `pkg/hub/handlers_runtime_brokers.go` (rename, labels; read-modify-write) | A rename that would make a flat row's name/slug collide with another row, or another row's with a flat row, gets 409 `runtime_broker_name_conflict`. Profiles are handled by the store strip | P1.2 |
 | Heartbeat refresh | `pkg/hub/handlers_runtime_brokers.go` (capabilities, workspace storage, default profile, profile attach) | For a flat row, `DefaultProfile`/`ProfileAttach` from a heartbeat are dropped with a warning log. Capabilities and workspace storage refresh as today | P1.2/P1.3 |
+| GCP host writers | `SetRuntimeBrokerGCPHostIfUnset` (registration), `SetRuntimeBrokerGCPHostDetected` (legacy co-located detection), `SetRuntimeBrokerGCPHost` and `SetRuntimeBrokerGCPHostSource` (update API) | R11. Registration and detection write through single conditional `UPDATE`s; the update-API writers are a compare-and-set on `lock_version` that returns the values they replaced. `UpdateRuntimeBroker` never writes the GCP host pair or its source | — |
 | Any `UpdateRuntimeBroker` caller | `pkg/store/entadapter/project_store.go` | **Store strip:** on a row with a stored target, `Profiles`/`DefaultProfile` are written empty, whatever the model holds, and a warning is logged when non-empty values were dropped. Non-flat rows are unaffected. It never writes target columns | **P1.1** |
 
 The registration and control channel are not Conduit-fenced. Section 13 puts no constraint on this descriptor.
@@ -636,8 +650,9 @@ GoogleCloudPlatform/scion#2479 and GoogleCloudPlatform/scion#2483 are in flight 
 - **Name: `hub.flat_runtime_brokers`**, exported as `experiments.FlatRuntimeBrokers`.
 - **Fields:**
   - Title: "Flat Runtime Brokers"
-  - Description: "Lets a Runtime Broker serve exactly one runtime target with a stable identity: the hub accepts single-target Runtime Broker registrations, pins new agents to that target and rejects mismatched dispatches. Existing profile-based Runtime Brokers are unchanged."
-  - Layers `[LayerServer]`, Default `false`, Stage `alpha`, Issue `ptone/scion#2926` (the delivery tracker, which outlives P1.1 until the experiment graduates or is retired), Owner `runtime-broker`, ReviewBy `2027-03-31`.
+  - Description: "Lets a Runtime Broker serve exactly one runtime target with a stable identity: the hub accepts single-target Runtime Broker registrations, pins new agents to that target and rejects mismatched dispatches. Existing profile-based Runtime Brokers are unchanged. The web layer only lets the web UI read the flag (presentation only); every hub check is LayerServer. With it on, the web UI shows the Brokers area."
+  - Layers `[LayerServer, LayerWeb]`, Default `false`, Stage `alpha`, Issue `ptone/scion#2926` (the delivery tracker, which outlives P1.1 until the experiment graduates or is retired), Owner `runtime-broker`, ReviewBy `2027-03-31`.
+- **Web layer:** `LayerWeb` lets the browser read the flag to select the Brokers UI. It is presentation only; every Hub check below is unchanged, and `Default` stays `false` (not in `DEFAULT_ON_FLAGS`).
 - **Enforcement:** in Hub code with `s.experimentEnabled(experiments.FlatRuntimeBrokers)`, at registration (R1, including the embedded wrapper) and at agent create (section 10).
   - It is not a UI-only flag and is not exposed through `/api/v1/settings/public`.
   - It is not added to `dispatchExperimentNames`. A Runtime Broker's flat behaviour comes from its own configuration.

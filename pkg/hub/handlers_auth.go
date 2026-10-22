@@ -511,7 +511,7 @@ func (s *Server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
 	// See isReservedPlatformIdentity: every path that provisions a user or
 	// mints/re-mints a hub token checks this, including an already-issued
 	// refresh token for the configured service account.
-	if isReservedPlatformIdentity(claims.Email, s.platformAuthSA) {
+	if s.isTransportIdentity(claims.Email) {
 		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 			"invalid refresh token", nil)
 		return
@@ -555,6 +555,15 @@ func (s *Server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("Refresh rejected: user is suspended", "email", claims.Email, "user_id", user.ID)
 		writeError(w, http.StatusForbidden, ErrCodeForbidden,
 			"user account is suspended", nil)
+		return
+	}
+	// Only an active account renews its tokens. An invited row (for
+	// example the same email re-invited after the token's user was
+	// removed) becomes active at first sign-in, not through refresh.
+	if user != nil && user.Status != store.UserStatusActive {
+		slog.Warn("Refresh rejected: user is not active", "email", claims.Email, "user_id", user.ID)
+		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+			"invalid refresh token", nil)
 		return
 	}
 	refreshUserID := ""
@@ -639,7 +648,7 @@ func (s *Server) handleAuthValidate(w http.ResponseWriter, r *http.Request) {
 	// See isReservedPlatformIdentity: a token for the reserved identity must
 	// not be reported valid, matching the same token's rejection at the
 	// UnifiedAuthMiddleware choke point.
-	if isReservedPlatformIdentity(claims.Email, s.platformAuthSA) {
+	if s.isTransportIdentity(claims.Email) {
 		writeJSON(w, http.StatusOK, AuthValidateResponse{Valid: false})
 		return
 	}
@@ -731,8 +740,25 @@ func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, AuthLogoutResponse{Success: true})
 }
 
-// handleAuthMe handles GET /api/v1/auth/me.
+// handleAuthMe handles GET /api/v1/auth/me. Only the credentials the
+// user.self.profile catalog operation declares are admitted (an
+// interactive session, a dev credential, a user access token, an agent
+// JWT and a visitor's federated user credential); any token reads its
+// holder's own profile, and a visitor reads its own federated account.
 func (s *Server) handleAuthMe(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		MethodNotAllowed(w, http.MethodGet)
+		return
+	}
+	identity := GetIdentityFromContext(r.Context())
+	if identity == nil {
+		Unauthorized(w)
+		return
+	}
+	if _, ok := selfReadCredential(r.Context(), identity, "user.self.profile"); !ok {
+		refuseSelfReadCredential(w, r, identity, "user")
+		return
+	}
 	// Check for agent identity first — agent tokens don't implement UserIdentity
 	// but should still be recognized as authenticated callers.
 	if agentIdent := GetAgentIdentityFromContext(r.Context()); agentIdent != nil {
@@ -772,6 +798,12 @@ type AdminStatusResponse struct {
 // admins and super admins; a member holding system-scoped permissions through
 // another role gets isAdmin=false with those permissions listed. The frontend
 // decides which admin sections and routes to show from the permissions list.
+//
+// For a user access token the permissions list holds only the permissions
+// the token may use: those its ceiling allows that are eligible for its
+// boundary kind, and isAdmin and isSuperAdmin are false. Only the
+// credentials the user.self.adminstatus catalog operation declares are
+// admitted.
 func (s *Server) handleAuthAdminStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w, http.MethodGet)
@@ -781,6 +813,11 @@ func (s *Server) handleAuthAdminStatus(w http.ResponseWriter, r *http.Request) {
 	user := GetUserIdentityFromContext(r.Context())
 	if user == nil {
 		Unauthorized(w)
+		return
+	}
+	token, ok := selfReadCredential(r.Context(), user, "user.self.adminstatus")
+	if !ok {
+		refuseSelfReadCredential(w, r, user, "user")
 		return
 	}
 
@@ -810,6 +847,13 @@ func (s *Server) handleAuthAdminStatus(w http.ResponseWriter, r *http.Request) {
 		perms = effective
 		isAdmin = s.authzService.IsSystemAdmin(r.Context(), user.ID()) ||
 			s.authzService.IsHubAdmin(r.Context(), user.ID())
+	}
+
+	if token != nil {
+		perms = filterPermissionsForToken(token, perms)
+		// A token reports no admin status: isAdmin and isSuperAdmin
+		// describe an unscoped caller.
+		isAdmin = false
 	}
 
 	// Ensure JSON serializes as [] rather than null when there are no permissions.
@@ -849,6 +893,26 @@ func requireSessionCredential(ctx context.Context) error {
 func denyTokenManagement(w http.ResponseWriter, r *http.Request, identity Identity, err error) {
 	logAuthzDenial(r, identity, Resource{Type: "user_access_token"}, ActionManage, err.Error())
 	writeSessionOnlyDenial(w, ErrCodeForbidden, err.Error(), authzop.ReasonCredentialManagement)
+}
+
+// refuseNonSessionCredentialIssuance writes the refusal of a request to the
+// credential-issuing endpoint from an authenticated caller that is not a
+// user holding an interactive session or dev credential, and reports
+// whether it did. The refusal is the same for every such caller, whatever
+// its identity type, credential kind (known, unknown or empty) or
+// requested target: 403 with the fixed ErrUATCredentialDenied message and
+// the CREDENTIAL_MANAGEMENT session-only reason. It reads nothing but the
+// request context. A request with no identity is left to the caller (401).
+func refuseNonSessionCredentialIssuance(w http.ResponseWriter, r *http.Request) bool {
+	identity := GetIdentityFromContext(r.Context())
+	if isNilIdentity(identity) {
+		return false
+	}
+	if _, ok := identity.(UserIdentity); ok && sessionCredentialAllowed(r.Context()) {
+		return false
+	}
+	denyTokenManagement(w, r, identity, ErrUATCredentialDenied)
+	return true
 }
 
 // handleTokens routes user access token requests.
@@ -927,17 +991,19 @@ func (s *Server) handleListTokens(w http.ResponseWriter, r *http.Request) {
 
 // handleCreateToken handles POST /api/v1/auth/tokens.
 func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
-	user := GetUserIdentityFromContext(r.Context())
-	if user == nil {
+	if isNilIdentity(GetIdentityFromContext(r.Context())) {
 		Unauthorized(w)
 		return
 	}
 
-	// B4/A1: Credential caveat — only session/dev credentials may manage tokens.
-	if err := requireSessionCredential(r.Context()); err != nil {
-		denyTokenManagement(w, r, user, err)
+	// B4/A1: Credential caveat — only session/dev credentials of a user may
+	// create tokens. Every other authenticated caller gets one refusal,
+	// before the body is read or any target is resolved.
+	if refuseNonSessionCredentialIssuance(w, r) {
 		return
 	}
+	// Non-nil: refuseNonSessionCredentialIssuance admitted only a user.
+	user := GetUserIdentityFromContext(r.Context())
 
 	var req TokenCreateRequest
 	if err := readJSON(r, &req); err != nil {
@@ -1570,11 +1636,12 @@ var ErrUserSuspended = errors.New("user account is suspended")
 // authorized, or ErrUserSuspended when the user is suspended.
 // On success it also ensures hub-members group membership.
 func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*store.User, error) {
-	// The hub does not create or authenticate user accounts for its
-	// configured transport service account. Checked before authorization and
+	// The hub does not create or authenticate user accounts for a transport
+	// identity (its configured transport service account or a proxy driver
+	// principal). Checked before authorization and
 	// before find-or-create so this covers both a brand-new identity and an
 	// already-existing user row for that email.
-	if isReservedPlatformIdentity(info.Email, s.platformAuthSA) {
+	if s.isTransportIdentity(info.Email) {
 		return nil, ErrAccessDenied
 	}
 	// The reserved test-identity domain is created only by the issuance
@@ -1932,6 +1999,12 @@ func (s *Server) handleInviteRedeem(w http.ResponseWriter, r *http.Request) {
 	if !requireProfileWriter(w, r) {
 		return
 	}
+	// Redeeming an invite binds the invitation to the caller's identity:
+	// session-only (IDENTITY_BINDING), so a token is refused before the
+	// body is read.
+	if !requireIdentityBindingCredential(w, r) {
+		return
+	}
 
 	var req struct {
 		Code string `json:"code"`
@@ -2203,6 +2276,18 @@ func (s *Server) handleAuthScopes(w http.ResponseWriter, r *http.Request) {
 		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
+	// Only the credentials the user.self.scopes catalog operation declares
+	// are admitted: an interactive session, a dev credential and a user
+	// access token.
+	identity := GetIdentityFromContext(r.Context())
+	if identity == nil {
+		Unauthorized(w)
+		return
+	}
+	if _, ok := selfReadCredential(r.Context(), identity, "user.self.scopes"); !ok {
+		refuseSelfReadCredential(w, r, identity, "user")
+		return
+	}
 
 	boundary, handled := parseAuthScopesBoundary(w, r)
 	if handled {
@@ -2214,9 +2299,7 @@ func (s *Server) handleAuthScopes(w http.ResponseWriter, r *http.Request) {
 	var eligByScope map[string]SelectorEligibility
 	if boundary != nil {
 		// Eligibility is a per-user computation (CanMintSelector requires a
-		// local user principal); the parameterless catalog below has no
-		// such requirement and stays available to any authenticated
-		// identity, exactly as before this endpoint gained eligibility.
+		// local user principal).
 		user := GetUserIdentityFromContext(r.Context())
 		if user == nil {
 			Unauthorized(w)

@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -72,7 +73,7 @@ func TestHandleAgentByID_QueryParameters(t *testing.T) {
 				agents: agents,
 			}
 			// Note: New expects agent.Manager. Config is ServerConfig in server.go
-			srv := New(ServerConfig{}, mgr, nil)
+			srv := New(ServerConfig{}, mgr, nil, config.RuntimeBuildRecord{})
 
 			req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/agents/%s?%s", agentID, tt.query), nil)
 			w := httptest.NewRecorder()

@@ -32,13 +32,20 @@ func TestHasAttachSupport_CloudRunSandboxRuntimeSupported(t *testing.T) {
 	}
 }
 
-// Neither Cloud Run runtime calls RunConfig.Checkpoint or
-// RunConfig.OnResourceCreated, so both must opt out of async launch until
-// they do; otherwise an aborted launch would clean up nothing.
-func TestHasAsyncLaunchSupport_CloudRunRuntimesOptOut(t *testing.T) {
-	for _, rt := range []Runtime{&CloudRunRuntime{}, &CloudRunSandboxRuntime{}} {
-		if HasAsyncLaunchSupport(rt) {
-			t.Errorf("HasAsyncLaunchSupport(%T) = true, want false: Run calls neither Checkpoint nor OnResourceCreated", rt)
-		}
+// CloudRunRuntime.Run calls both async launch hooks and DeleteResource
+// cleans up a reported instance; the live API check (ptone/scion#4760)
+// found the Instances API behaves as that cleanup assumes, so the runtime
+// must not opt out of async launch.
+func TestHasAsyncLaunchSupport_CloudRunSupported(t *testing.T) {
+	if !HasAsyncLaunchSupport(&CloudRunRuntime{}) {
+		t.Error("HasAsyncLaunchSupport(&CloudRunRuntime{}) = false, want true: the Cloud Run runtime no longer opts out of async launch")
+	}
+}
+
+// CloudRunSandboxRuntime.Run calls both async launch hooks, so the runtime
+// must not opt out of async launch.
+func TestHasAsyncLaunchSupport_CloudRunSandboxSupported(t *testing.T) {
+	if !HasAsyncLaunchSupport(&CloudRunSandboxRuntime{}) {
+		t.Error("HasAsyncLaunchSupport(&CloudRunSandboxRuntime{}) = false, want true: Run calls Checkpoint and OnResourceCreated")
 	}
 }

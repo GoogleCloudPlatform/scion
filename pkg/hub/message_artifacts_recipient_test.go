@@ -123,7 +123,7 @@ func TestArtifactRecipientWarning_PrincipalGrant(t *testing.T) {
 	readyRecipientAgent(t, s, target)
 	_, err := st.PutGrant(context.Background(), &artifacts.Grant{ID: uuid.NewString(), ArtifactID: elsewhere,
 		SubjectKind: artifacts.SubjectPrincipal, SubjectRef: artifacts.PrincipalRef(artifacts.PrincipalKindAgent, target.ID),
-		Permission: artifacts.GrantRead, CreatedAt: time.Now()}, 100, false)
+		Permission: artifacts.GrantRead, CreatedAt: time.Now()}, 100, false, &artifacts.Actor{Kind: artifacts.PrincipalKindUser, Ref: "test-setup", Authority: artifacts.AuthorityOwner})
 	require.NoError(t, err)
 	_, _, warning := srv.admitMessageArtifacts(ctx,
 		refsMD(artifacts.MessageRef{ArtifactID: own}, artifacts.MessageRef{ArtifactID: elsewhere}),

@@ -26,7 +26,7 @@ Each broker maintains a persistent WebSocket connection to the Hub. The Hub acts
 
 On each machine you want to register:
 
-1. **Install Scion**, sign in to the Hub (`scion hub auth login --hub-url <hub-url>`), and set the Hub endpoint in your global settings (`scion config set --global hub.endpoint <hub-url>`). The `scion runtime-broker` commands read it (or `--hub`, which takes a URL or a hub list nickname); they do not use the current Hub selected with `scion use`. To keep the Runtime Broker process off the deprecated `hub.endpoint` fallback, also set `server.broker.hub_endpoint` (see [Runtime Broker prerequisites](/scion/hosted/ha/runtime-broker/#0-prerequisites)).
+1. **Install Scion**, add the Hub to your hub list and make it current (`scion hub add <name> <hub-url> --use`), and sign in (`scion hub auth login`). `register`, `join` and the other Runtime Broker administration commands (`deregister` picks the hub connection from the Runtime Broker's stored connections (with `--name` when there are several), or, with none stored, the registration in the global settings, but sends the deregistration to the Hub the CLI selects, so select that connection's Hub first) use that Hub (or `--hub`, which takes a URL or a hub list nickname). The Runtime Broker process takes its Hub from `server.broker.hub_endpoint` instead, which `register` and `join` save when it is unset (except on a host that runs a workstation Hub) (see [Runtime Broker prerequisites](/scion/hosted/ha/runtime-broker/#0-prerequisites)).
 2. **Start the broker**:
    ```bash
    scion runtime-broker start
@@ -72,7 +72,9 @@ When an agent runs `scion start` or `scion create` inside its container, the CLI
 
 With the `hub.flat_runtime_brokers` [experiment](/scion/reference/experiments/) on (default off), the Hub accepts Runtime Brokers that each serve exactly one runtime target with a stable identity. A new agent placed on such a Runtime Broker is pinned to its runtime target and stays on it across restarts, and the Hub refuses a dispatch for a different target. The agent's record shows the pin as a read-only `pinnedRuntimeTarget`, and the Runtime Broker's record shows its `runtimeTarget` (see the [Agents API](/scion/reference/api/#agents-apiv1agents)). A pinned agent cannot be [moved to another Runtime Broker](#moving-an-agent-to-another-runtime-broker), and an agent cannot be moved onto a flat Runtime Broker (`409 runtime_target_move_unsupported`). Existing profile-based Runtime Brokers are unchanged.
 
-To run a flat Runtime Broker, add an entry under `server.broker.instances` in `settings.yaml`:
+The experiment also switches the web UI's **Brokers** pages to the Brokers area. The list shows each Runtime Broker's kind (flat or legacy) and runtime target, and marks the Runtime Brokers that run in this server's own process. Each Runtime Broker's page has Overview, Agents & projects, Health and Configure tabs. Health is shown only to users who can read the Hub health summary. Configure is shown only to users who can update or unregister the Runtime Broker. With the experiment off, the Brokers pages are unchanged.
+
+To run flat Runtime Brokers, add one entry per instance under `server.broker.instances` in the global `settings.yaml`. Each entry has an immutable local `key`, a `name` that it registers under, and exactly one `runtime_target`: the local Docker daemon, or a Kubernetes cluster and namespace.
 
 ```yaml
 server:
@@ -82,23 +84,58 @@ server:
         name: local-docker
         runtime_target:
           type: docker
+      - key: k8s-batch
+        name: k8s-batch
+        runtime_target:
+          type: kubernetes
+          context: batch-cluster
+          namespace: agents
+          shared_dir_size: 40Gi
+          safe_to_evict: false
 ```
 
-Several entries may be listed, each with a unique `key`; `runtime_target.type` is `docker` or `kubernetes`. A process with `server.broker.instances` hosts only the flat instances, not a regular Runtime Broker. With the Hub in the same process, the instances register through it. A process without the Hub hosts them remotely: register each one first with `scion runtime-broker register --instance <key>`, which saves the instance's own credentials, and they are checked against the Hub at every start. Startup is refused if an entry does not validate. If the Hub refuses the registration, for example a first registration while the `hub.flat_runtime_brokers` experiment is off, the process still starts and logs that the instance was not activated. See [`server.broker`](/scion/reference/server-config/#broker-settings-serverbroker) for the fields.
+Each `key` must be unique. A process with `server.broker.instances` hosts only the flat instances, not a regular Runtime Broker. With the Hub in the same process, the instances register through it. A process without the Hub hosts them remotely: register each one first with `scion runtime-broker register --instance <key>`, which saves the instance's own credentials, and they are checked against the Hub at every start. Startup is refused if an entry does not validate. An instance that cannot serve is refused and reported, and the other instances keep running. If the Hub refuses the registration, for example a first registration while the `hub.flat_runtime_brokers` experiment is off, the process still starts and logs that the instance was not activated. See [`server.broker`](/scion/reference/server-config/#broker-settings-serverbroker) for the fields.
 
-A flat Runtime Broker does not use Runtime Broker profiles. Instead, an entry may set `agent_defaults`: the image registry, default harness config, volumes, resources, harness overrides, required secrets and clone depth of the agents it runs. Each default sits where the matching profile setting sat, so templates, the agent's own configuration and the request keep winning where they won over a profile. See [flat instance agent defaults](/scion/reference/server-config/#flat-instance-agent-defaults-serverbrokerinstancesagent_defaults).
+A flat instance never uses Runtime Broker Profiles: not the active profile, and not a profile named in a request. Defaults that a profile or its runtime entry supplied to a regular Runtime Broker are set on the instance's `runtime_target` instead. These are:
+
+- the shared directory PVC class and size;
+- `safe_to_evict`;
+- the pod priority class;
+- GKE mode;
+- the shared directory and home storage backends.
+
+Each default keeps its usual precedence. An agent's own Kubernetes setting still wins over it, and an unset field falls back to the same global setting as before. An agent keeps the storage backends it recorded at its first start. See [the runtime target fields](/scion/reference/server-config/#flat-instance-runtime-target-serverbrokerinstancesruntime_target) for every field.
+
+An entry may also set `agent_defaults`: the image registry, default harness config, volumes, resources, harness overrides, required secrets and clone depth of the agents it runs. Each default sits where the matching profile setting sat, so templates, the agent's own configuration and the request keep winning where they won over a profile. See [flat instance agent defaults](/scion/reference/server-config/#flat-instance-agent-defaults-serverbrokerinstancesagent_defaults).
+
+#### Inconsistent agent placement
+
+Every operation that reaches a Runtime Broker for an existing pinned agent first checks the agent's saved placement: start, restart, stop, suspend, delete, reset-auth, messages, keys, logs, exec, attach, conduit streams and port proxying, workspace sync, and dispatches queued for a Runtime Broker that was offline. Reading the agent (get, list, status) is not checked. The placement is inconsistent when the agent's pin does not name the Runtime Broker it is assigned to, the pin is incomplete, the agent has no Runtime Broker, the Runtime Broker no longer serves a single runtime target, or that Runtime Broker serves another runtime target. The Hub then refuses the operation with `409 runtime_target_pin_stale` (or `409 runtime_target_mismatch`), or with `409 runtime_broker_missing` when the Runtime Broker the agent is pinned to is no longer registered. Nothing is sent to any Runtime Broker, and Scion never looks for another one to run the agent on.
+
+An ordinary delete is refused in the same way, with or without `force`: removing the agent's record without reaching its Runtime Broker could leave a running workload behind and release its capacity with no evidence that it was torn down. The agent's record and its accounting stay as they are. A stop that was queued while the Runtime Broker was offline and is refused this way when the Runtime Broker reconnects leaves the agent stopped with the container status `stop_queued`, and the agent keeps its Runtime Broker capacity slot until an inventory shows the container gone or the placement is repaired. No per-agent repair is available in this release; the recovery path is tracked in [ptone/scion#4844](https://github.com/ptone/scion/issues/4844).
+
+Because such an agent's record stays, it also counts as a live agent of its project: a project delete without `force` is refused while it remains ([ptone/scion#4811](https://github.com/ptone/scion/issues/4811)). A project delete with `force` removes the project's agent records with only best-effort runtime deletes. That is an operator's explicit, project-wide choice; Scion never selects it on its own. The refusal of a project delete without `force` mentions the force option generically, also when an agent whose placement is inconsistent is what blocks the delete. For such an agent nothing is sent to any Runtime Broker: its workload is left running there with no agent record, the Hub logs an error naming the agent and its pinned Runtime Broker, and the workload has to be removed on that Runtime Broker by hand.
+
+#### Capacity of flat Runtime Brokers
+
+The `max_agents_per_broker` limit applies per Runtime Broker ID, and every flat instance has its own ID: two instances have two limits, and the sum of their limits is the host's effective ceiling. Filling one instance never consumes or bypasses another's capacity. Set each instance's cap with its `maxAgents` setting (see [Broker Settings](/scion/reference/api/#broker-settings-apiv1runtime-brokersidsettings)); `0` means unlimited, and an instance without the setting inherits the hub-wide default. An agent pinned to one instance that still holds a reservation on another is refused with `409 broker_reservation_scope_conflict`, and its reservation is never moved.
+
+A legacy Runtime Broker's limit is not copied to the instances that replace it, because copying it to each instance would multiply the aggregate. The conversion rule is: a positive legacy `maxAgents` of L is split across n instances when L is at least n (by default floor(L/n) each, the remainder to the first instance; an operator may choose any positive caps that sum to at most L); with fewer than n slots, or when the legacy broker only inherited a binding or the hub default (each instance would inherit it, so the aggregate would become n times larger), an operator decision is required; a legacy `maxAgents` of `0` (unlimited) needs nothing. A plan computed while broker quotas are not enforced, or whose receiving instance would get fewer slots than the legacy broker's active reservations, is flagged.
 
 ## Moving an Agent to Another Runtime Broker
 
 `scion reincarnate <agent> --broker <name|id>` moves an agent to another Runtime Broker, for example to drain a broker or to reach different hardware. The agent keeps its ID, slug, and generation chain, and its workspace, uncommitted and unpushed changes included. The move is a [reincarnation](/scion/reference/cli/#scion-reincarnate): the agent starts a new generation on the target with a Hub-built preamble and the handoff you provide.
 
-The workspace is never copied. A move works only when both Runtime Brokers mount the **same NFS export**, so the target sees the very directory the source used. A move that does not meet that requirement is refused; there is no fallback that re-clones or copies the workspace.
+The workspace is never copied. An ordinary move works only when both Runtime Brokers mount the **same NFS export**, so the target sees the very directory the source used (`transferMode: "export"`). A move that does not meet that requirement is refused. When a forced move would apply, the CLI prints a hint pointing at `--dry-run --force`, which previews recreating a clone-per-agent or empty-per-agent workspace on the target (`transferMode: "recreate"`) and giving up the source's local state; executing such a move is not enabled yet and returns `501 Not Implemented`.
 
 ```bash
 # Check the move without changing anything
 scion reincarnate my-agent --broker broker-b --dry-run
 
-# Move it
+# Preview a forced move when the workspace is not on a shared NFS export
+scion reincarnate my-agent --broker broker-b --dry-run --force
+
+# Move it (when the workspace is carried through the shared NFS export)
 scion reincarnate my-agent --broker broker-b --handoff-file handoff.md
 ```
 
@@ -123,9 +160,9 @@ scion reincarnate my-agent --broker broker-b --handoff-file handoff.md
 
 ### Checks and dry run
 
-The Hub checks the move in a fixed order: workspace mode, workspace storage reported by both Runtime Brokers, same NFS export, workspace on the export, target profile, target health, access, agent-move capability, and capacity. The first failing check decides the answer, and the CLI prints every check as passed, failed, or not evaluated.
+The Hub checks the move in a fixed order: `runtime_target`, `workspace_mode`, `workspace_storage_reported`, `same_export`, `workspace_on_export`, `workspace_recreatable`, `target_profile`, `target_health`, `access`, `capability`, and `capacity`. The first failing check decides the answer, and the CLI prints the transfer mode of an eligible move (`export` or `recreate`), every check (`passed`, `failed`, `not_evaluated`, or `waived`), and the move's `consequences` (what is `kept`, `carried`, `recreated`, and `lost`). With `--force` (`--dry-run --force`), the export checks run first so an eligible shared-export move still uses `transferMode: "export"`; only when they fail on `workspace_storage_reported`, `same_export`, `workspace_on_export`, or the Kubernetes export constraint on `target_profile` are those three export checks marked `waived`, `target_profile` re-evaluated for a recreated workspace, and `workspace_recreatable` evaluated for a fresh clone-per-agent or empty-per-agent workspace on the target (which must advertise `agentMoveRecreate`).
 
-A refused move is refused **before any side effect**: the agent is not stopped, no quota changes, and the target is not linked to the project. `--dry-run` runs the same checks and returns the verdict and plan without doing anything else. Without `--dry-run`, the CLI sends a dry run first and stops if it is refused, so a real request is only sent for an eligible move, and never to a Hub that does not support `--broker`. Patch flags such as `--model` or `--image` combine with `--broker`, and the checks judge the patched configuration.
+A refused move is refused **before any side effect**: the agent is not stopped, no quota changes, and the target is not linked to the project. `--dry-run` runs the same checks and returns the verdict and plan without doing anything else. Without `--dry-run`, the CLI sends a dry run first and stops if it is refused, so a real request is only sent for an eligible move, and never to a Hub that does not support `--broker`, or, when `--force` is passed, to a Hub that does not support `--force`. Executing a forced move whose transfer mode is `recreate` is not enabled yet and returns `501 Not Implemented`. Patch flags such as `--model` or `--image` combine with `--broker`, and the checks judge the patched configuration.
 
 ### Permissions
 
@@ -188,6 +225,6 @@ See [Brokers behind IAP](/scion/hosted/ha/auth-proxy-iap/#brokers-behind-iap) fo
 
 - Each broker manages its own **port pools, container images, and local storage**. Images must be available on each broker independently.
 - **Shared directories** (mounted volumes) only work within a single broker by default. Agents on different brokers cannot share a local directory. To share them across brokers, set [`server.shared_dir_storage.backend`](/scion/reference/server-config/#shared-directory-storage-servershared_dir_storage) to `nfs` in every broker's global settings, pointing at the same NFS export.
-- **Workspace strategy** may differ per broker: local brokers typically use git worktrees (`.scion_worktrees/`), while hub-hosted git projects use a single workspace checkout.
+- **Workspace strategy** depends on the project's sharing mode: worktree-per-agent projects use a git worktree per agent over a shared base clone on the broker, shared-workspace projects mount one checkout, and other git projects use a per-agent clone.
 - **Per-broker agent limit.** The Hub caps how many agents can be running on each broker with the `max_agents_per_broker` limit (default **100**). The limit is checked before an agent is created and again when it is started, resumed, or restarted. A request over the limit fails with `429 Too Many Requests` (`quota_exceeded`) instead of overloading the broker's host. A restart that is refused this way leaves the running container alone; it is not stopped first. Only running agents count: stopping, suspending, or exiting an agent frees its slot. Admins can change the hub-wide default through the [admin limits API](/scion/reference/api/#admin-apiv1admin), and override it for a single broker — including to a value *lower* than the hub-wide default — through that broker's settings (see [Broker Settings](/scion/reference/api/#broker-settings-apiv1runtime-brokersidsettings)). The Hub does not balance load across brokers; size the limit to each machine's resources, and lower it below the default if any broker in the fleet is a single-node Cloud Run deployment.
 - **Global project on multi-hub brokers.** A broker connected to more than one Hub rejects agents in the global project with `409 Conflict` and the error code `global_project_disabled` (formerly `global_grove_disabled`).

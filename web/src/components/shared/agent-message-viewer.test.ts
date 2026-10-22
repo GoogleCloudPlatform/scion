@@ -20,7 +20,7 @@
  * not render as "unknown -> unknown" rows.
  */
 
-import { describe, it, expect, beforeAll, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyEl = any;
@@ -29,8 +29,19 @@ beforeAll(async () => {
   await import('./agent-message-viewer.js');
 });
 
+// The viewer renders ingested entries on the next animation frame
+// (webperf C6); run frames synchronously so `updateComplete` covers them.
+beforeEach(() => {
+  vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+    cb(0);
+    return 1;
+  });
+  vi.stubGlobal('cancelAnimationFrame', () => {});
+});
+
 afterEach(() => {
   document.body.innerHTML = '';
+  vi.unstubAllGlobals();
 });
 
 function entry(insertId: string, labels: Record<string, string>) {
@@ -59,7 +70,7 @@ describe('scion-agent-message-viewer message log filtering', () => {
     ]);
     await el.updateComplete;
 
-    const ids = (el.messages as { insertId: string }[]).map((m) => m.insertId);
+    const ids = (el.buffer.items as { insertId: string }[]).map((m) => m.insertId);
     expect(ids).toEqual(['record']);
 
     const actors = Array.from(

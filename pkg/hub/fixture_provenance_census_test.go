@@ -162,8 +162,8 @@ var fixtureCreateSites = []fixtureCreateSite{
 		"createProjectGroup: the project's implicit agents group; stampProjectGroup copies the project's stamp"},
 	{"pkg/hub/handlers_projects_core.go", "s.store.CreateGroup(ctx, membersGroup)", true,
 		"createProjectMembersGroup: the project's members group; stampProjectGroup copies the project's stamp"},
-	{"pkg/hub/handlers_groups.go", "s.store.CreateGroup(ctx, group)", true,
-		"group API create; stampGroup from the request principal"},
+	{"pkg/hub/handlers_groups.go", "tx.CreateGroup(ctx, group)", true,
+		"group API create; stampGroup from the request principal, before the create transaction"},
 	{"pkg/hub/handlers_schedules.go", "s.store.CreateSchedule(r.Context(), &schedule)", true,
 		"schedule API create; stampSchedule from the request principal"},
 

@@ -114,7 +114,7 @@ Pre-start hooks are also fully supported in the Scion Web Dashboard, matching ex
 Here are typical use cases for pre-start hooks:
 
 ### 1. Installing Custom OS Packages
-If your template image is missing utility CLI tools, you can install them on the fly:
+If your agent image is missing utility CLI tools, you can install them on the fly:
 
 ```bash
 #!/usr/bin/env bash

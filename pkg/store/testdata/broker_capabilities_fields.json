@@ -1,9 +1,12 @@
 {
   "fields": [
     "agentMove",
+    "agentMoveRecreate",
     "asyncLaunch",
+    "asyncStart",
     "attach",
     "emptyPerAgentWorkspace",
+    "nodeImageRegistry",
     "reprovision",
     "reprovisionEmptyPerAgent",
     "startsInFlight",

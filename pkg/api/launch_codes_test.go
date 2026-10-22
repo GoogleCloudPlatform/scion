@@ -36,6 +36,9 @@ func TestLaunchVocabularyValues(t *testing.T) {
 		{LaunchStepStartupGate, "startup_gate"},
 		{LaunchStepLaunching, "launching"},
 		{LaunchStepSandboxLayout, "sandbox_layout"},
+		{LaunchStepWorkspaceProvision, "workspace_provision"},
+		{LaunchStepInstanceStart, "instance_start"},
+		{LaunchStepInstanceCreate, "instance_create"},
 
 		{LaunchCodeLaunchTimeout, "launch_timeout"},
 		{LaunchCodeBrokerLost, "broker_lost"},
@@ -56,6 +59,7 @@ func TestLaunchVocabularyValues(t *testing.T) {
 		{LaunchCodeInitContainerFailed, "init_container_failed"},
 		{LaunchCodeUnschedulable, "unschedulable"},
 		{LaunchCodeBrokerRestarted, "broker_restarted"},
+		{LaunchCodeDispatchFailed, "dispatch_failed"},
 		{LaunchCodePodDisrupted, "pod_disrupted"},
 	} {
 		if c.got != c.want {

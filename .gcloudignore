@@ -4,7 +4,9 @@
 # files they need is:
 #   image-build/   — Dockerfiles, scripts
 #   harnesses/     — harness Dockerfiles and assets
-#   cmd/, pkg/     — Go source (compiled in scion-base)
+#   cmd/, internal/, pkg/, proto/, third_party/
+#                  — Go source (compiled in scion-base and omni;
+#                    hack/check-image-go-dirs.sh keeps this list complete)
 #   resources/     — embedded resources
 #   web/*.go       — Go embed stubs only
 #   go.mod, go.sum
@@ -33,7 +35,6 @@
 /examples/
 /extras/
 /hack/
-/internal/
 /reviews/
 /scratch/
 /scripts/

@@ -43,7 +43,7 @@ func markClaudeStale(t *testing.T, s store.Store, id string) {
 	require.NoError(t, err)
 	require.NotNil(t, hc)
 	hc.ContentHash = "stale"
-	require.NoError(t, s.UpdateHarnessConfig(context.Background(), hc))
+	require.NoError(t, setHarnessConfigContentForTest(context.Background(), s, hc))
 }
 
 func TestInstallSourceURL_CanonicalURLIsBuiltinManagedAndUpdated(t *testing.T) {

@@ -180,6 +180,17 @@ func (s *Server) runAutoSuspendBatch(ctx context.Context, batch []store.Agent) {
 	s.autoSuspendStalledAgents(ctx, batch)
 }
 
+// haltAutoSuspendWorker drops later hand-offs and pending agents without
+// waiting for the auto-suspend in flight (stopAutoSuspendWorker does).
+// The hub calls it when it begins shutting down (Server.BeginShutdown,
+// ptone/scion#5054). It is idempotent.
+func (s *Server) haltAutoSuspendWorker() {
+	w := &s.autoSuspend
+	w.mu.Lock()
+	w.stopped = true
+	w.mu.Unlock()
+}
+
 // stopAutoSuspendWorker stops the auto-suspend worker: later hand-offs and
 // pending agents are dropped, and it waits for the worker goroutine to end,
 // at most until ctx is done or autoSuspendStopGrace has passed. The caller
@@ -187,9 +198,7 @@ func (s *Server) runAutoSuspendBatch(ctx context.Context, batch []store.Agent) {
 // starts; the one in flight runs to the end of its own bound.
 func (s *Server) stopAutoSuspendWorker(ctx context.Context) {
 	w := &s.autoSuspend
-	w.mu.Lock()
-	w.stopped = true
-	w.mu.Unlock()
+	s.haltAutoSuspendWorker()
 
 	done := make(chan struct{})
 	go func() {

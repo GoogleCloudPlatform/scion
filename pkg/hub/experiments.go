@@ -56,17 +56,7 @@ func (s *Server) experimentEnabled(name string) bool {
 // snapshot and resolve every name from it, so a concurrent refresh cannot
 // produce a mixed answer (ptone/scion#2217).
 func (s *Server) experimentEnabledIn(snap ExperimentsSnapshot, name string) bool {
-	exp, ok := s.experimentRegistry().Lookup(name)
-	if !ok {
-		return false // unknown or retired → off, never panic
-	}
-	if snap.Malformed && exp.HasLayer(experiments.LayerServer) {
-		return false // fail closed for server behaviour
-	}
-	if v, set := snap.Overrides[name]; set {
-		return v
-	}
-	return exp.Default
+	return s.experimentRegistry().Resolve(name, snap.Overrides, snap.Malformed)
 }
 
 // resolvedExperiments returns the effective value of every registered
@@ -105,7 +95,7 @@ func (s *Server) requireExperiment(name string, next http.HandlerFunc) http.Hand
 // dispatchExperimentNames are the server-layer experiments whose state the
 // hub sends with each agent dispatch, because they change what the broker
 // does. hub.conduit is added separately (see dispatchExperiments).
-var dispatchExperimentNames = []string{experiments.K8sNFSHome}
+var dispatchExperimentNames = []string{experiments.K8sNFSHome, experiments.AgentPlugins}
 
 // dispatchExperiments returns the dispatch experiments that are enabled
 // now, resolved from one snapshot, or nil when none is. hub.conduit is a

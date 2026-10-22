@@ -309,7 +309,7 @@ func (s *Server) handleWorkspaceApply(w http.ResponseWriter, r *http.Request) {
 // It first tries to find the container and inspect its volume mounts,
 // then falls back to the known worktree location pattern.
 func (s *Server) getAgentWorkspacePath(ctx context.Context, agentID string) (string, error) {
-	defMgr, defRT := s.defaultPair()
+	defMgr, defRT, _ := s.defaultPair()
 	// First, try to find the agent in the manager
 	agents, err := defMgr.List(ctx, map[string]string{"scion.agent": "true"})
 	if err != nil {

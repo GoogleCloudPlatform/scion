@@ -202,6 +202,15 @@ func TestBuiltInRoles_HubAdminConstraintPermissions(t *testing.T) {
 		"hub-admin must include access_constraint.admin for operator-complete access constraint management")
 }
 
+// TestBuiltInRoles_HubAdminRevision pins the hub-admin revision and its
+// latest addition: revision 8 adds project.manage_visitors
+// (ptone/scion#4603).
+func TestBuiltInRoles_HubAdminRevision(t *testing.T) {
+	admin := builtInRoleByName(t, store.SystemRoleHubAdmin)
+	assert.Equal(t, 8, admin.Revision)
+	assert.Contains(t, admin.Permissions, "project.manage_visitors")
+}
+
 // TestBuiltInRoles_ProjectMemberPermissions verifies that the curated
 // project-member role contains expected permissions and excludes permissions
 // that should be reserved for higher roles or are meaningless in project scope.
@@ -1037,7 +1046,7 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 			name:  "project-owner",
 			perms: projectOwnerPermissionIDs(),
 			want: []string{
-				"artifact.create", "artifact.read",
+				"artifact.create", "artifact.read", "artifact.steward",
 				"agent.create", "agent.delete", "agent.lifecycle", "agent.list",
 				"agent.message", "agent.port_access", "agent.read",
 				"agent.set_message_mode", "agent.stop_all", "agent.update",
@@ -1110,7 +1119,7 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 // TestProjectRoleRevisions verifies the current revision of each project role.
 func TestProjectRoleRevisions(t *testing.T) {
 	wantRevisions := map[string]int{
-		store.ProjectRoleOwner:   9,
+		store.ProjectRoleOwner:   10,
 		store.ProjectRoleAdmin:   8,
 		store.ProjectRoleMember:  5,
 		store.ProjectRoleVisitor: 1,
@@ -1136,7 +1145,7 @@ func TestProjectRoleReconciliationConverges(t *testing.T) {
 		revision    int
 		permissions func() []string
 	}{
-		{store.ProjectRoleOwner, 9, projectOwnerPermissionIDs},
+		{store.ProjectRoleOwner, 10, projectOwnerPermissionIDs},
 		{store.ProjectRoleAdmin, 8, projectAdminPermissionIDs},
 		{store.ProjectRoleMember, 5, projectMemberCuratedPermissionIDs},
 		{store.ProjectRoleVisitor, 1, projectVisitorPermissionIDs},

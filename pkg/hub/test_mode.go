@@ -21,12 +21,15 @@ package hub
 //	off          no test identities (the default)
 //	member       member and viewer test identities (POST /api/v1/test-identities)
 //	admin        member, plus the test hub-admin kind
-//	super-admin  admin, plus the test super-admin kind (refused until phase A2)
+//	super-admin  admin, plus the test super-admin kind (only with a complete
+//	             test-admin policy classification, test_admin_policy.go)
 //
 // Every level other than off requires, all together: a hub with a user
 // store, the hub id binding (the value after the colon equals the resolved
-// hub id), server.hub.class: test, a test infrastructure marker for this
-// hub id in the database, and no explicit --production. admin and
+// hub id), a pinned hub id (server.hub.hub_id or SCION_SERVER_HUB_HUBID set
+// explicitly, never derived from the hostname or K_SERVICE),
+// server.hub.class: test, a test infrastructure marker for this hub id in
+// the database, and no explicit --production. admin and
 // super-admin add the rest of the test admin gate (test_admin_gate.go). A
 // level whose preconditions are not all met refuses to start; it is never
 // lowered to a smaller level.
@@ -114,6 +117,7 @@ const (
 	TestModePreconditionUserStore           = "user_store"
 	TestModePreconditionNotProduction       = "not_production"
 	TestModePreconditionHubIDBinding        = "hub_id_binding"
+	TestModePreconditionHubIDPinned         = "hub_id_pinned"
 	TestModePreconditionHubClassTest        = "hub_class_test"
 	TestModePreconditionMarker              = "test_infra_marker"
 	TestModePreconditionNotWorkstation      = "not_workstation"
@@ -121,6 +125,10 @@ const (
 	TestModePreconditionNoSharedSecret      = "no_shared_signing_secret"
 	TestModePreconditionNoPreconfiguredKey  = "no_preconfigured_signing_key"
 	TestModePreconditionSigningKeysHubLocal = "signing_keys_hub_local"
+	// TestModePreconditionPolicyComplete is the super-admin level's G3:
+	// the test-admin policy classification of this binary is complete
+	// (TestAdminPolicyComplete).
+	TestModePreconditionPolicyComplete = "test_admin_policy_complete"
 )
 
 // TestModeMemberPreconditions returns the preconditions every level other
@@ -131,6 +139,7 @@ func TestModeMemberPreconditions() []string {
 		TestModePreconditionUserStore,
 		TestModePreconditionNotProduction,
 		TestModePreconditionHubIDBinding,
+		TestModePreconditionHubIDPinned,
 		TestModePreconditionHubClassTest,
 		TestModePreconditionMarker,
 	}
@@ -212,10 +221,10 @@ var ErrTestModeRemovedFlag = testAdminGateErr("test_mode", "removed_flag",
 // is one of the four allowlisted strings, the switches the hub runs with
 // (EnableTestIdentities, TestAdminGate) are exactly what the level grants,
 // and, for every level but off, the member preconditions the resolution
-// carries hold (hub id binding equals cfg.HubID, hub class test, marker for
-// this hub id with class test, no explicit --production). The user store is
-// checked by New itself. It does not repeat the admin gate checks
-// (validateTestAdminGateConfig) or read the database.
+// carries hold (hub id binding equals cfg.HubID, cfg.HubIDPinned, hub class
+// test, marker for this hub id with class test, no explicit --production).
+// The user store is checked by New itself. It does not repeat the admin
+// gate checks (validateTestAdminGateConfig) or read the database.
 func ValidateTestModeConfig(cfg ServerConfig) error {
 	level := cfg.TestMode.level()
 	known := false
@@ -245,6 +254,8 @@ func ValidateTestModeConfig(cfg ServerConfig) error {
 		return ErrTestAdminProductionFlag
 	case t.HubID == "" || t.HubID != cfg.HubID:
 		return ErrTestAdminHubIDMismatch
+	case !cfg.HubIDPinned:
+		return ErrTestModeHubIDNotPinned
 	case !config.IsTestHubClass(t.HubClass):
 		return ErrTestAdminHubClassNotTest
 	case t.MarkerHubID == "":
@@ -285,6 +296,11 @@ func (s *Server) testModePreconditions() []string {
 	return append([]string{}, s.testMode.preconditions...)
 }
 
+// testModeSecretsWarning is written in the startup line of every level
+// other than off (DEC-10): member-tier test identities are not clamped, so
+// their agents receive hub- and broker-scope material like any member's.
+const testModeSecretsWarning = "test-mode: hub and broker env secrets are injected into every member agent; keep only test-grade secrets on this hub"
+
 // testAdminAuditEventTestModeStart is the startup line of the member level.
 // The admin levels write the test_admin_gate_start line instead, which
 // carries the same test_mode and preconditions fields.
@@ -297,6 +313,7 @@ func (s *Server) emitTestModeStart() error {
 	if err := s.testAdminAudit.emit(testAdminAuditEventTestModeStart, map[string]any{
 		"level":         "WARN",
 		"msg":           "TEST MODE ENABLED: this hub can issue test identities. Test hubs only.",
+		"warning":       testModeSecretsWarning,
 		"test_mode":     string(s.TestModeLevel()),
 		"preconditions": s.testModePreconditions(),
 		"hub_id":        s.config.HubID,

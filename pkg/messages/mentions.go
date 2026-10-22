@@ -83,10 +83,7 @@ func ExtractMentions(text string) []string {
 		if !strings.HasPrefix(word, "@") {
 			continue
 		}
-		name := strings.TrimPrefix(word, "@")
-		name = strings.TrimRightFunc(name, func(r rune) bool {
-			return unicode.IsPunct(r) && r != '_' && r != '-'
-		})
+		name := trimMentionPunct(strings.TrimPrefix(word, "@"))
 		if name == "" {
 			continue
 		}
@@ -119,12 +116,29 @@ func ExtractProseMentions(text string) []string {
 // outside the stripped spans.
 func stripNonProseSpans(text string) string {
 	lines := strings.Split(text, "\n")
+	prose := proseLines(lines)
+	for i, line := range lines {
+		if !prose[i] {
+			lines[i] = blankString(line)
+			continue
+		}
+		lines[i] = stripInlineBackticks(line)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// proseLines reports, for each line, whether it is a prose line: not part
+// of a fenced code block (opening fence, content, or closing fence) and not
+// a blockquote line. Inline code spans within a prose line are handled
+// separately (see inlineCodeSpans). Shared by stripNonProseSpans and
+// RewriteAgentMentions so both skip exactly the same lines.
+func proseLines(lines []string) []bool {
+	prose := make([]bool, len(lines))
 	var fenceChar byte // '`' or '~' while inside a fence, 0 otherwise.
 	var fenceLen int   // length of the run that opened the current fence.
 	for i, line := range lines {
 		trimmed := strings.TrimLeft(line, " \t")
 		if fenceChar != 0 {
-			lines[i] = blankString(line)
 			// The same ≤3-column indentation rule that gates an opener
 			// (below) also gates a closer: a candidate closing run indented
 			// 4 or more columns is an indented code block, i.e. still
@@ -142,16 +156,14 @@ func stripNonProseSpans(text string) string {
 		if ch, length, ok := openingFence(trimmed); ok && fenceIndentWidth(line) <= 3 {
 			fenceChar = ch
 			fenceLen = length
-			lines[i] = blankString(line)
 			continue
 		}
 		if strings.HasPrefix(trimmed, ">") {
-			lines[i] = blankString(line)
 			continue
 		}
-		lines[i] = stripInlineBackticks(line)
+		prose[i] = true
 	}
-	return strings.Join(lines, "\n")
+	return prose
 }
 
 // fenceIndentWidth returns line's leading indentation width in columns, the
@@ -264,9 +276,19 @@ func blankString(s string) string {
 // placeholder rune that must itself not introduce or remove a boundary).
 func stripInlineBackticks(line string) string {
 	runes := []rune(line)
-	out := make([]rune, len(runes))
-	copy(out, runes)
+	for _, span := range inlineCodeSpans(runes) {
+		blankRunes(runes, span[0], span[1])
+	}
+	return string(runes)
+}
 
+// inlineCodeSpans returns the [start, end) rune bounds of every
+// backtick-delimited code span in runes, using the CommonMark run-length
+// matching described on stripInlineBackticks. Shared by
+// stripInlineBackticks and RewriteAgentMentions so both skip exactly the
+// same spans.
+func inlineCodeSpans(runes []rune) [][2]int {
+	var spans [][2]int
 	i := 0
 	for i < len(runes) {
 		if runes[i] != '`' {
@@ -289,10 +311,10 @@ func stripInlineBackticks(line string) string {
 			// than treating the rest of the line as code.
 			continue
 		}
-		blankRunes(out, openStart, closeEnd)
+		spans = append(spans, [2]int{openStart, closeEnd})
 		i = closeEnd
 	}
-	return string(out)
+	return spans
 }
 
 // findBacktickRun scans runes starting at from for the next run of
@@ -454,4 +476,91 @@ func DeliveredSlugs(results []MentionResult) []string {
 		}
 	}
 	return slugs
+}
+
+// agentMentionPrefix is the recipient-syntax prefix that agents sometimes
+// carry into an @-mention (for example "@agent:hub-ops").
+const agentMentionPrefix = "@agent:"
+
+// agentMentionSlug reports whether word, a whitespace-delimited token, is an
+// @-mention written in recipient syntax ("@agent:<slug>") with a non-empty
+// slug, and returns that slug with trailing punctuation trimmed the same way
+// ExtractMentions trims a name. A bare "@agent:" with no slug is not a match.
+func agentMentionSlug(word string) (string, bool) {
+	if !strings.HasPrefix(word, agentMentionPrefix) {
+		return "", false
+	}
+	slug := trimMentionPunct(word[len(agentMentionPrefix):])
+	if slug == "" {
+		return "", false
+	}
+	return slug, true
+}
+
+// trimMentionPunct strips trailing punctuation, except underscores and
+// hyphens, from a mention name.
+func trimMentionPunct(name string) string {
+	return strings.TrimRightFunc(name, func(r rune) bool {
+		return unicode.IsPunct(r) && r != '_' && r != '-'
+	})
+}
+
+// RewriteAgentMentions rewrites every @-mention written in recipient syntax
+// ("@agent:<slug>") to the conventional "@<slug>" form, so the body renders
+// by convention and ExtractProseMentions on the result yields "<slug>".
+//
+// Only prose is rewritten, using the same skip rules as
+// ExtractProseMentions: fenced code blocks, inline code spans and quoted
+// ('>') lines are left byte-for-byte unchanged. A token counts as a mention
+// only when its '@' starts the token (line start, after whitespace, or right
+// after a code span, matching what ExtractProseMentions sees), so an
+// address such as "ops@agent:foo" is unchanged. A bare "@agent:" with no
+// slug is unchanged.
+func RewriteAgentMentions(text string) string {
+	if !strings.Contains(text, agentMentionPrefix) {
+		return text
+	}
+	lines := strings.Split(text, "\n")
+	prose := proseLines(lines)
+	for i, line := range lines {
+		if prose[i] && strings.Contains(line, agentMentionPrefix) {
+			lines[i] = rewriteAgentMentionsInLine(line)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// rewriteAgentMentionsInLine applies RewriteAgentMentions to one prose
+// line, skipping its inline code spans.
+func rewriteAgentMentionsInLine(line string) string {
+	runes := []rune(line)
+	inCode := make([]bool, len(runes))
+	for _, span := range inlineCodeSpans(runes) {
+		for k := span[0]; k < span[1]; k++ {
+			inCode[k] = true
+		}
+	}
+	prefixLen := len([]rune(agentMentionPrefix)) - 1 // runes after the '@'
+	out := make([]rune, 0, len(runes))
+	i := 0
+	for i < len(runes) {
+		atBoundary := i == 0 || unicode.IsSpace(runes[i-1]) || inCode[i-1]
+		if runes[i] != '@' || inCode[i] || !atBoundary {
+			out = append(out, runes[i])
+			i++
+			continue
+		}
+		j := i
+		for j < len(runes) && !unicode.IsSpace(runes[j]) && !inCode[j] {
+			j++
+		}
+		if _, ok := agentMentionSlug(string(runes[i:j])); ok {
+			out = append(out, '@')
+			out = append(out, runes[i+1+prefixLen:j]...)
+		} else {
+			out = append(out, runes[i:j]...)
+		}
+		i = j
+	}
+	return string(out)
 }

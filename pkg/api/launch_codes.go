@@ -65,6 +65,15 @@ const (
 	// the agent's host directory layout, before its Starting entry and
 	// `sandbox run` (which use LaunchStepLaunching).
 	LaunchStepSandboxLayout = "sandbox_layout"
+	// LaunchStepWorkspaceProvision: the Cloud Run Instances runtime is
+	// provisioning the agent's NFS workspace and agent directories.
+	LaunchStepWorkspaceProvision = "workspace_provision"
+	// LaunchStepInstanceStart: the Cloud Run Instances runtime is starting
+	// an existing instance (StartInstance).
+	LaunchStepInstanceStart = "instance_start"
+	// LaunchStepInstanceCreate: the Cloud Run Instances runtime is creating
+	// the agent's instance (CreateInstance).
+	LaunchStepInstanceCreate = "instance_create"
 )
 
 // Launch failure codes.
@@ -106,4 +115,9 @@ const (
 	// LaunchCodeBrokerRestarted: the broker restarted while the launch was
 	// in flight.
 	LaunchCodeBrokerRestarted = "broker_restarted"
+	// LaunchCodeDispatchFailed: the runtime broker did not accept the
+	// launch. The hub's send failed with a known outcome (the broker
+	// refused it or could not be reached), or the broker acknowledged a
+	// different launch. The launch ends not_launched with this code.
+	LaunchCodeDispatchFailed = "dispatch_failed"
 )

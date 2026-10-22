@@ -31,6 +31,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -239,9 +240,10 @@ func TestUserTemplateWrites_FederatedUserRefused(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
 
-// TestUserTemplateWrites_SessionAndTokenUnchanged pins that a session and a
-// user access credential keep their behaviour on the user template writes.
-func TestUserTemplateWrites_SessionAndTokenUnchanged(t *testing.T) {
+// TestUserTemplateWrites_SessionWritesTokenNeedsSelector pins that a
+// session writes its user templates, and that a user access credential
+// without a template selector is refused on every user template write.
+func TestUserTemplateWrites_SessionWritesTokenNeedsSelector(t *testing.T) {
 	f := newProfileWriteFixture(t)
 
 	sessionTmpl := createUserTemplate(t, f.store, f.alice.ID, "session-template")
@@ -259,7 +261,7 @@ func TestUserTemplateWrites_SessionAndTokenUnchanged(t *testing.T) {
 	tokenTmpl := createUserTemplate(t, f.store, f.alice.ID, "token-template")
 	writes := userTemplateWrites(t, tokenTmpl.ID)
 	writes[0] = jsonProfileRequest(t, http.MethodPost, "/api/v1/users/me/templates", CreateTemplateRequest{Name: "token-created"})
-	want = []int{http.StatusCreated, http.StatusOK, http.StatusForbidden, http.StatusForbidden, http.StatusNoContent}
+	want = []int{http.StatusForbidden, http.StatusForbidden, http.StatusForbidden, http.StatusForbidden, http.StatusForbidden}
 	for i, pr := range writes {
 		rec := f.asBearer(pr, f.token)
 		assert.Equal(t, want[i], rec.Code, "user access credential %s %s: %s", pr.method, pr.path, rec.Body.String())
@@ -390,8 +392,9 @@ func TestChatProfileWrites_SessionAndTokenUnchanged(t *testing.T) {
 }
 
 // TestChatLinkVerification_FederatedUserRefused pins that a federated user
-// gets 403 on each chat link verify route and the code stays pending, while
-// a session and a user access credential still link the account.
+// gets 403 on each chat link verify route and the code stays pending, that
+// a session links the account, and that a user access token is refused as
+// session-only (IDENTITY_BINDING) with its code left pending.
 func TestChatLinkVerification_FederatedUserRefused(t *testing.T) {
 	srv := &Server{
 		telegramLinkService: NewTelegramLinkService(),
@@ -435,7 +438,14 @@ func TestChatLinkVerification_FederatedUserRefused(t *testing.T) {
 
 			p.service.RegisterCode("TOK123", p.name+"-token")
 			token := NewScopedUserIdentity(member, "", []string{"hub_config:read"})
-			assert.Equal(t, http.StatusOK, verify(p.handler, token, "TOK123").Code)
+			rec := verify(p.handler, token, "TOK123")
+			assert.Equal(t, http.StatusForbidden, rec.Code)
+			reason, credential := sessionOnlyDetailsOf(rec)
+			assert.Equal(t, string(authzop.ReasonIdentityBinding), reason)
+			assert.Equal(t, sessionRequiredCredential, credential)
+			status, userID, _ = p.service.GetStatusByUser(p.name + "-token")
+			assert.Equal(t, "pending", status)
+			assert.Empty(t, userID)
 		})
 	}
 }
@@ -475,10 +485,11 @@ func TestGenericUserTemplateWrites_FederatedUserRefused(t *testing.T) {
 	assert.Equal(t, owned.Status, result.Items[0].Status)
 }
 
-// TestGenericUserTemplateWrites_SessionAndTokenUnchanged pins that a
-// session and a user access credential keep their behaviour on the
-// /api/v1/templates user-scope create, patch and delete.
-func TestGenericUserTemplateWrites_SessionAndTokenUnchanged(t *testing.T) {
+// TestGenericUserTemplateWrites_SessionWritesTokenNeedsSelector pins that
+// a session creates, patches and deletes its user-scope templates through
+// /api/v1/templates, and that a user access credential without a template
+// selector is refused on each of them.
+func TestGenericUserTemplateWrites_SessionWritesTokenNeedsSelector(t *testing.T) {
 	f := newProfileWriteFixture(t)
 	writes := func(id, name string) []profileRequest {
 		return []profileRequest{
@@ -493,7 +504,7 @@ func TestGenericUserTemplateWrites_SessionAndTokenUnchanged(t *testing.T) {
 		want []int
 	}{
 		{"session", f.session, []int{http.StatusCreated, http.StatusOK, http.StatusNoContent}},
-		{"user access credential", f.token, []int{http.StatusForbidden, http.StatusForbidden, http.StatusNoContent}},
+		{"user access credential", f.token, []int{http.StatusForbidden, http.StatusForbidden, http.StatusForbidden}},
 	}
 	for _, tc := range cases {
 		tmpl := createUserTemplate(t, f.store, f.alice.ID, tc.name+"-generic")
@@ -622,8 +633,10 @@ func TestUserResourceImport_FederatedUserRefused(t *testing.T) {
 }
 
 // TestInviteRedeem_FederatedUserRefused pins that a federated user gets
-// 403 on invite redeem, that the invite is not used and the allow-list is
-// unchanged, while a session and a user access credential still redeem.
+// 403 on invite redeem, that the invite is not used and the allow-list
+// keeps no entry for the caller, that a session redeems, and that a user
+// access token is refused as session-only (IDENTITY_BINDING) without using
+// the invite.
 func TestInviteRedeem_FederatedUserRefused(t *testing.T) {
 	f := newProfileWriteFixture(t)
 	ctx := context.Background()
@@ -641,10 +654,12 @@ func TestInviteRedeem_FederatedUserRefused(t *testing.T) {
 	rec := f.asBearer(redeem, f.session)
 	assert.Equal(t, http.StatusOK, rec.Code, "session: %s", rec.Body.String())
 	rec = f.asBearer(redeem, f.token)
-	assert.Equal(t, http.StatusOK, rec.Code, "user access credential: %s", rec.Body.String())
+	assert.Equal(t, http.StatusForbidden, rec.Code, "user access token: %s", rec.Body.String())
+	reason, _ := sessionOnlyDetailsOf(rec)
+	assert.Equal(t, string(authzop.ReasonIdentityBinding), reason)
 	got, err = f.store.GetInviteCode(ctx, invite.ID)
 	require.NoError(t, err)
-	assert.Equal(t, 2, got.UseCount)
+	assert.Equal(t, 1, got.UseCount)
 }
 
 // TestProfileWrite_PrimaryLoginUserAllowed pins that a user who signed in

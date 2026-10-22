@@ -41,7 +41,7 @@ func overlayWithProfiles() *SettingsOverlay {
 	o.Update(
 		map[string]V1RuntimeConfig{"docker": {Type: "docker"}, "k8s": {Type: "kubernetes"}},
 		map[string]V1ProfileConfig{"local": {Runtime: "docker"}, "cluster": {Runtime: "k8s"}},
-		nil, "")
+		nil)
 	return o
 }
 
@@ -114,7 +114,7 @@ func TestSettingsOverlay_ActiveProfile_UnsetNamesUnsetAndAvailable(t *testing.T)
 func TestSettingsOverlay_ActiveProfile_UnchangedWithoutOverlaidProfiles(t *testing.T) {
 	vs := overlayActiveProfileFixture("gone")
 	o := NewSettingsOverlay()
-	o.Update(map[string]V1RuntimeConfig{"docker": {Type: "docker"}}, nil, nil, "")
+	o.Update(map[string]V1RuntimeConfig{"docker": {Type: "docker"}}, nil, nil)
 	o.Apply(vs)
 
 	_, _, err := vs.ResolveRuntime("")
@@ -198,7 +198,7 @@ func TestSettingsOverlay_ActiveProfile_SingleStoredProfileUsed(t *testing.T) {
 			o.Update(
 				map[string]V1RuntimeConfig{"k8s": {Type: "kubernetes"}},
 				map[string]V1ProfileConfig{"cluster": {Runtime: "k8s"}},
-				nil, "")
+				nil)
 
 			for i := 0; i < 3; i++ {
 				vs := overlayActiveProfileFixture(active)
@@ -254,7 +254,7 @@ func TestSettingsOverlay_ActiveProfile_FallbackLogDedup(t *testing.T) {
 	o.Update(
 		map[string]V1RuntimeConfig{"k8s": {Type: "kubernetes"}},
 		map[string]V1ProfileConfig{"cluster": {Runtime: "k8s"}},
-		nil, "")
+		nil)
 	count := func() int { return strings.Count(logs.String(), "Default profile set to the only stored profile") }
 
 	for i := 0; i < 4; i++ {
@@ -307,7 +307,7 @@ func TestSettingsOverlay_ActiveProfile_SeveralStoredProfilesRefused(t *testing.T
 		t.Run(name, func(t *testing.T) {
 			logs := captureSlog(t)
 			o := NewSettingsOverlay()
-			o.Update(map[string]V1RuntimeConfig{"k8s": {Type: "kubernetes"}}, tc.profiles, nil, "")
+			o.Update(map[string]V1RuntimeConfig{"k8s": {Type: "kubernetes"}}, tc.profiles, nil)
 			vs := overlayActiveProfileFixture("gone")
 			o.Apply(vs)
 
@@ -351,8 +351,8 @@ func TestSettingsOverlay_FlatInstanceViewIsolatedFromOverlay(t *testing.T) {
 			o.Update(
 				map[string]V1RuntimeConfig{"cluster": {Type: "kubernetes", Namespace: "stored-ns", SharedDirStorageClass: "rt-stored", SharedDirSize: "50Gi"}},
 				profiles,
-				map[string]HarnessConfigEntry{"claude": {}},
-				"registry.example/stored")
+				map[string]HarnessConfigEntry{"claude": {}})
+			o.UpdateImageRegistryInputs(ImageRegistryHubInputs{FileTier: ImageRegistryFileTier{Top: "registry.example/stored"}})
 			o.Apply(vs)
 
 			policy := k8sPolicy("k8s-nfs-1", "inst-rwx", "40Gi")
@@ -389,8 +389,8 @@ func TestSettingsOverlay_FlatInstanceViewIsolatedFromOverlay(t *testing.T) {
 			}
 
 			// Non-profile overlay values stay shared, on their own rungs.
-			if view.ImageRegistry != "registry.example/stored" {
-				t.Errorf("ImageRegistry = %q, want the overlay's top-level value", view.ImageRegistry)
+			if got := view.SettingsImageRegistry(""); got != "registry.example/stored" {
+				t.Errorf("SettingsImageRegistry = %q, want the overlay's file-tier top-level value", got)
 			}
 			if _, ok := view.HarnessConfigs["claude"]; !ok {
 				t.Errorf("HarnessConfigs = %v, want the overlay's entries", view.HarnessConfigs)

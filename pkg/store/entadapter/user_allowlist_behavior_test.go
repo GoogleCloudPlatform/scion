@@ -87,6 +87,31 @@ func TestUserStore_UpdateLastSeen(t *testing.T) {
 	assert.ErrorIs(t, us.UpdateUserLastSeen(ctx, uuid.NewString(), ts), store.ErrNotFound)
 }
 
+func TestUserStore_UpdateLastLoginPreservesOtherFields(t *testing.T) {
+	ctx := context.Background()
+	us := NewUserStore(newTestEntClient(t))
+	ts := time.Now().UTC().Truncate(time.Second)
+	id := uuid.NewString()
+	require.NoError(t, us.CreateUser(ctx, &store.User{
+		ID: id, Email: "login@example.com", DisplayName: "Login",
+		Role: store.UserRoleMember, Status: store.UserStatusActive,
+		LastLogin: ts.Add(-time.Hour), LastSeen: ts.Add(-time.Minute),
+		Preferences: &store.UserPreferences{Theme: "dark", Timezone: "Asia/Singapore"},
+	}))
+	before, err := us.GetUser(ctx, id)
+	require.NoError(t, err)
+
+	require.NoError(t, us.UpdateUserLastLogin(ctx, id, ts))
+	got, err := us.GetUser(ctx, id)
+	require.NoError(t, err)
+	assert.WithinDuration(t, ts, got.LastLogin, 0)
+	before.LastLogin = got.LastLogin
+	assert.Equal(t, before, got, "only the login timestamp may change")
+
+	assert.ErrorIs(t, us.UpdateUserLastLogin(ctx, uuid.NewString(), ts), store.ErrNotFound)
+	assert.Error(t, us.UpdateUserLastLogin(ctx, "invalid-id", ts))
+}
+
 // TestAllowList_BulkAddIdempotent verifies INSERT-OR-IGNORE semantics: emails
 // already present or repeated within the batch are skipped, not errored.
 func TestAllowList_BulkAddIdempotent(t *testing.T) {

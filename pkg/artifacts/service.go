@@ -17,6 +17,7 @@ package artifacts
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -94,6 +95,9 @@ type Service struct {
 	// fetchFloor overrides the fetch floor in tests; zero means the
 	// fetcher's connect timeout.
 	fetchFloor time.Duration
+
+	// logFn yields the decision logger (SetLogger; auditlog.go).
+	logFn func() *slog.Logger
 }
 
 // Backend is what a request needs from the service's environment: the

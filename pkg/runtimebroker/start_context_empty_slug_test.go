@@ -185,6 +185,13 @@ func TestCreateAgent_GlobalDirRefusalWritesNothing(t *testing.T) {
 	if err := os.MkdirAll(globalDir, 0755); err != nil {
 		t.Fatal(err)
 	}
+	// With a default harness config (the embedded defaults set one), the
+	// handler resolves it, and hydrates the default template under HOME,
+	// before this refusal (ptone/scion#5432); clear it so the refusal
+	// itself is what is tested.
+	if err := os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte("schema_version: \"1\"\ndefault_harness_config: \"\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	before := treeSnapshot(t, home)
 
 	body := `{

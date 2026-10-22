@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -201,6 +202,57 @@ func TestSubmitAgentEnv_AsyncLaunch(t *testing.T) {
 		assert.Equal(t, string(state.PhaseProvisioning), row.Phase)
 		assert.True(t, row.IsInFlight())
 		assert.Equal(t, f.client.sends[0].LaunchID, row.LaunchID)
+	})
+
+	// A failed finalize keeps the row in provisioning (the env can be
+	// submitted again once the start claim is released), so the ended
+	// launch carries dispatch_failed: a client following the launch sees it
+	// failed (ptone/scion#5283).
+	t.Run("send failure keeps provisioning and ends the launch with dispatch_failed", func(t *testing.T) {
+		srv, s := testServer(t)
+		f, path := setup(t, s)
+		srv.SetDispatcher(f.dispatcher)
+		f.client.answer = func(*RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+			return nil, nil, errors.New("broker refused the create")
+		}
+		agent := f.agent(t, "env-sendfail", string(state.PhaseProvisioning), true)
+
+		rec := doRequest(t, srv, http.MethodPost, fmt.Sprintf(path, agent.Slug), envBody)
+		require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
+		require.Len(t, f.client.sends, 1)
+
+		rec = doRequest(t, srv, http.MethodGet, "/api/v1/agents/"+agent.ID, nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var got struct {
+			Phase  string             `json:"phase"`
+			Launch *store.AgentLaunch `json:"launch"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+		assert.Equal(t, string(state.PhaseProvisioning), got.Phase, "the row stays resubmittable")
+		require.NotNil(t, got.Launch)
+		assert.False(t, got.Launch.Active)
+		assert.Equal(t, store.LaunchEndReasonNotLaunched, got.Launch.EndReason)
+		assert.Equal(t, store.LaunchErrorDispatchFailed, got.Launch.Error)
+
+		// The failed send keeps the start claim unconfirmed, so the env
+		// can be submitted again once the start-claim reaper releases it
+		// (simulated here). The next launch then clears the code.
+		// Mutant: drop SetLaunchError("") in the store's beginLaunch.
+		claimed := f.row(t, agent.ID)
+		require.Equal(t, store.StartClaimUnconfirmed, claimed.StartClaimState, "setup: the failed finalize keeps its claim unconfirmed")
+		released, err := s.ReleaseUnconfirmedStart(context.Background(), agent.ID, claimed.StartClaimID)
+		require.NoError(t, err)
+		require.True(t, released)
+		f.client.answer = func(req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+			return acceptedAnswer(req, req.LaunchID), nil, nil
+		}
+		rec = doRequest(t, srv, http.MethodPost, fmt.Sprintf(path, agent.Slug), envBody)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		require.Len(t, f.client.sends, 2)
+		row := f.row(t, agent.ID)
+		assert.True(t, row.IsInFlight(), "the resubmitted launch is active")
+		assert.Equal(t, f.client.sends[1].LaunchID, row.LaunchID)
+		assert.Empty(t, row.LaunchError, "the new launch clears the failed launch's code")
 	})
 
 	t.Run("launch that cannot begin answers 409 with no send", func(t *testing.T) {

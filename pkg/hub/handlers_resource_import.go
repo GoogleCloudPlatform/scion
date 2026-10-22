@@ -216,6 +216,16 @@ type ImportResourcesResponse struct {
 	Failed   []ImportFailure `json:"failed,omitempty"`
 }
 
+// userScopeImportResource returns the Resource for a new record of
+// authzType ("template" or "harness_config") in the caller's own user
+// scope.
+func userScopeImportResource(authzType string, userIdent UserIdentity) Resource {
+	if authzType == "harness_config" {
+		return harnessConfigUserScopeResource(userIdent)
+	}
+	return templateUserScopeResource(userIdent)
+}
+
 // handleResourcesImport handles POST /api/v1/resources/import: a single,
 // kind/scope-generic import endpoint sitting over the shared import driver
 // (resource_import.go). Global-scope import requires hub-admin; project-scope
@@ -271,15 +281,15 @@ func (s *Server) handleResourcesImport(w http.ResponseWriter, r *http.Request) {
 	var projectID, scope string
 	switch req.Scope {
 	case "global", "":
-		// Global import is hub-admin only. CheckAccess on an ownerless,
-		// parentless global resource grants only on admin bypass (or an explicit
-		// hub-wide policy), which is exactly the hub-admin gate we want.
+		// Global import is hub-admin only. The create check on an ownerless,
+		// parentless resource at the hub scope grants only through hub-wide
+		// authority, which is exactly the hub-admin gate we want.
 		userIdent := GetUserIdentityFromContext(ctx)
 		if userIdent == nil {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
 			return
 		}
-		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{Type: authzType}, ActionCreate)
+		decision := s.globalImportDecision(ctx, userIdent, authzType)
 		if !decision.Allowed {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden,
 				"You don't have permission to import global "+kind.noun, nil)
@@ -315,6 +325,14 @@ func (s *Server) handleResourcesImport(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !requireProfileWriter(w, r) {
+			return
+		}
+		// Import creates records in the caller's user scope: a user access
+		// token needs the create selector of the kind (template:create or
+		// harness_config:create) on a hub boundary.
+		if !s.authzService.CheckAccess(ctx, userIdent, userScopeImportResource(authzType, userIdent), ActionCreate).Allowed {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"You don't have permission to import "+kind.noun+" into your user scope", nil)
 			return
 		}
 		// projectID carries the user ID here. importFromRemote uses it for:
@@ -483,6 +501,29 @@ func (s *Server) projectImportDecision(ctx context.Context, user UserIdentity, p
 	}
 	return s.authzService.CheckAccessWithEvidence(ctx, user, target, ActionCreate,
 		projectCollectionEvidence(permissionID, projectID))
+}
+
+// globalImportDecision decides whether a user may discover or import
+// resources of authzResourceType ("template" or "harness_config") into the
+// global catalog. The check is the resource's create permission
+// (template.create or harness_config.create) on a collection-level request at
+// the hub scope, so a user access token needs that selector on a hub
+// boundary. The target is the global-scope collection resource built by
+// templateScopeResource / harnessConfigScopeResource, the same target the
+// direct global create routes check. Any other resource type is refused.
+func (s *Server) globalImportDecision(ctx context.Context, user UserIdentity, authzResourceType string) Decision {
+	var target Resource
+	var permissionID string
+	switch authzResourceType {
+	case "template":
+		target, permissionID = templateScopeResource(store.TemplateScopeGlobal, ""), "template.create"
+	case "harness_config":
+		target, permissionID = harnessConfigScopeResource(store.HarnessConfigScopeGlobal, ""), "harness_config.create"
+	default:
+		return Decision{Allowed: false, Reason: "unsupported import resource type"}
+	}
+	return s.authzService.CheckAccessWithEvidence(ctx, user, target, ActionCreate,
+		hubCollectionEvidence(permissionID))
 }
 
 // DiscoverResourcesRequest is the body for discover endpoints. Exactly one of
@@ -657,7 +698,7 @@ func (s *Server) handleResourcesDiscover(w http.ResponseWriter, r *http.Request)
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
 			return
 		}
-		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{Type: authzType}, ActionCreate)
+		decision := s.globalImportDecision(ctx, userIdent, authzType)
 		if !decision.Allowed {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden,
 				"You don't have permission to discover global "+kind.noun, nil)
@@ -691,7 +732,14 @@ func (s *Server) handleResourcesDiscover(w http.ResponseWriter, r *http.Request)
 				"Authentication required", nil)
 			return
 		}
-		// No authz check — users can always discover for their own scope.
+		// Discovery for the caller's user scope needs the create permission
+		// of the kind, as import does: a user access token needs
+		// template:create or harness_config:create on a hub boundary.
+		if !s.authzService.CheckAccess(ctx, userIdent, userScopeImportResource(authzType, userIdent), ActionCreate).Allowed {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"You don't have permission to discover "+kind.noun+" for your user scope", nil)
+			return
+		}
 		// Discovery only fetches and walks directories; the fetch uses the
 		// caller's own credentials (see importCredential).
 		scope, scopeID = store.TemplateScopeUser, userIdent.ID()

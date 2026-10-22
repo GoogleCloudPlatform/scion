@@ -127,10 +127,17 @@ type ResolvedSkillResponse struct {
 }
 
 // ResolveSkillError describes a resolution failure for a single skill.
+// Message is the fixed reason phrase for Code (see
+// agent.SkillResolutionPhrase). Status is the HTTP status of the upstream
+// response that failed the resolution, when one is known. CorrelationID
+// ties the error to the server-side log record that holds the full error
+// (see newSkillResolveError).
 type ResolveSkillError struct {
-	URI     string `json:"uri"`
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	URI           string `json:"uri"`
+	Code          string `json:"code"`
+	Message       string `json:"message"`
+	Status        int    `json:"status,omitempty"`
+	CorrelationID string `json:"correlationId,omitempty"`
 }
 
 // UpdateSkillRequest is the request body for updating a skill.
@@ -250,6 +257,15 @@ func (s *Server) listSkills(w http.ResponseWriter, r *http.Request) {
 
 	identity := GetIdentityFromContext(ctx)
 
+	// A user access token lists skills only when its ceiling carries
+	// skill.list and skill.list is eligible for its boundary kind. Without
+	// it the list is empty: no row query runs.
+	token, isToken := identity.(*ScopedUserIdentity)
+	if isToken && !uatListPermitted(token, "skill.list") {
+		writeJSON(w, http.StatusOK, ListSkillsResponse{Skills: []SkillWithCapabilities{}, TotalCount: 0})
+		return
+	}
+
 	// ptone/scion#1901 (pagination follow-up): resolve the caller's project
 	// memberships and push the whole read boundary (hub scope, own user
 	// scope, member projects) into the store query, ahead of COUNT and
@@ -261,7 +277,9 @@ func (s *Server) listSkills(w http.ResponseWriter, r *http.Request) {
 	// in pkg/store/entadapter/skill_store.go. Visibility no longer widens
 	// this boundary (ptone/scion#1903): an anonymous caller gets an
 	// AccessScope with no matching terms, which authorizes nothing.
-	scopeResult, err := s.authzService.ResolveListScopes(ctx, identity, "project.list")
+	// A token's project set is further reduced by its boundary, and it must
+	// carry skill.list (checked above and again here).
+	scopeResult, err := s.authzService.resolveListScopesWithCeiling(ctx, identity, "project.list", "skill.list")
 	resolutionFailed := err != nil
 	if resolutionFailed {
 		// ptone/scion#1954: a principal-resolution error here (e.g. a
@@ -318,6 +336,14 @@ func (s *Server) listSkills(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// A token's page, TotalCount and cursor come from the per-row skill
+	// read gate, so they count only rows the token may read. Its cursor is
+	// sealed and bound to the credential.
+	if isToken {
+		s.listSkillsForToken(w, r, token, filter, scopeResult.Scopes)
+		return
+	}
+
 	result, err := s.store.ListSkills(ctx, filter, listOptionsFromQuery(query))
 	if err != nil {
 		writeErrorFromErr(w, err, "")
@@ -354,6 +380,60 @@ func (s *Server) listSkills(w http.ResponseWriter, r *http.Request) {
 		NextCursor:   result.NextCursor,
 		TotalCount:   result.TotalCount,
 		Capabilities: scopeCap,
+	})
+}
+
+// listSkillsForToken writes the skill list for a user access token. The
+// store query keeps the token's read boundary (filter.AccessScope), and
+// every candidate row then passes the token's own skill read decision.
+// The page, TotalCount and next cursor are computed over the rows that pass,
+// so a row the token may not read is neither returned nor counted. The
+// cursor is sealed and bound to the endpoint, the filter and the
+// credential, so it opens only for this token.
+func (s *Server) listSkillsForToken(w http.ResponseWriter, r *http.Request, token *ScopedUserIdentity, filter store.SkillFilter, projects ScopeSet) {
+	ctx, query := r.Context(), r.URL.Query()
+	limit := listOptionsFromQuery(query).Limit
+	if limit > authorizedListMaxPageSize {
+		limit = authorizedListMaxPageSize
+	}
+	cursorBinding := scopedCursorBinding("skills", filter, token)
+	readable := func(ctx context.Context, identity Identity, resources []Resource) ([]bool, error) {
+		caps := s.authzService.ComputeCapabilitiesForActions(ctx, identity, resources, []Action{ActionRead})
+		allowed := make([]bool, len(caps))
+		for i := range caps {
+			allowed[i] = capabilityAllows(caps[i], ActionRead)
+		}
+		return allowed, nil
+	}
+	result, err := listAuthorizedOrAll(
+		ctx, token, query.Get("cursor"), limit, cursorBinding, s.listCursorSealer, true,
+		func(ctx context.Context, opts store.ListOptions) (*store.ListResult[store.Skill], error) {
+			return s.store.ListSkills(ctx, filter, opts)
+		},
+		skillResource,
+		func(sk *store.Skill) string { return authorizedListCursor(sk.Created, sk.ID, cursorBinding) },
+		readable,
+	)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	// The read gate above decides only ActionRead per candidate; the full
+	// capability set is computed once, for the returned page only.
+	resources := make([]Resource, len(result.Items))
+	for i := range result.Items {
+		resources[i] = skillResource(&result.Items[i])
+	}
+	caps := s.authzService.ComputeCapabilitiesBatch(ctx, token, resources, "skill")
+	skills := make([]SkillWithCapabilities, 0, len(result.Items))
+	for i := range result.Items {
+		skills = append(skills, SkillWithCapabilities{Skill: result.Items[i], Cap: caps[i]})
+	}
+	writeJSON(w, http.StatusOK, ListSkillsResponse{
+		Skills:       skills,
+		NextCursor:   result.NextCursor,
+		TotalCount:   result.TotalCount,
+		Capabilities: s.skillListCapabilities(ctx, filter.Scope, filter.ScopeID, projects),
 	})
 }
 
@@ -557,7 +637,12 @@ func (s *Server) createSkill(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
 			return
 		}
-		decision := s.authzService.CheckAccess(ctx, userIdent, skillScopeResource(scope, ""), globalWriteAction(scope, ActionCreate))
+		// A global or core skill is a new record in the hub catalog: the
+		// check is skill.create_global on a collection-level request at the
+		// hub scope, so a user access token needs skill:create_global on a
+		// hub boundary.
+		decision := s.authzService.CheckAccessWithEvidence(ctx, userIdent, skillScopeResource(scope, ""),
+			globalWriteAction(scope, ActionCreate), hubCollectionEvidence("skill.create_global"))
 		if !decision.Allowed {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to create global skills", nil)
 			return
@@ -598,6 +683,13 @@ func (s *Server) createSkill(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		req.ScopeID = userIdent.ID()
+		// A user-scope skill is a new record in the caller's user scope: a
+		// user access token needs skill:create on a hub boundary.
+		decision := s.authzService.CheckAccess(ctx, userIdent, skillUserScopeResource(userIdent), ActionCreate)
+		if !decision.Allowed {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to create skills in your user scope", nil)
+			return
+		}
 	}
 
 	slug := api.Slugify(req.Name)
@@ -1589,11 +1681,20 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 	// project's GitHub App token, so the caller must be authorized for the
 	// project — otherwise anyone could borrow another project's installation to
 	// read its private repositories. An empty ProjectID resolves anonymously
-	// (no token minted) and needs no check. Evaluated once, up front, and only
-	// when the request actually contains a gh:// URI.
+	// (no token minted). Evaluated once, up front, and only when the request
+	// actually contains a gh:// URI.
 	ghProjectAllowed := true
-	if req.ProjectID != "" && hasGitHubSkillRef(req.Skills) {
-		ghProjectAllowed = s.canUseProjectGitHubToken(ctx, req.ProjectID)
+	ghDeniedMessage := "caller may not resolve GitHub skills for this project"
+	if hasGitHubSkillRef(req.Skills) {
+		if req.ProjectID != "" {
+			ghProjectAllowed = s.canUseProjectGitHubToken(ctx, req.ProjectID)
+		} else {
+			// With no ProjectID the Hub fetches public repositories and
+			// writes its resolution cache on the caller's behalf: a user
+			// access token needs skill:read on a hub boundary.
+			ghProjectAllowed = s.tokenMayResolvePublicGitHubSkills(r)
+			ghDeniedMessage = "caller may not resolve GitHub skills"
+		}
 	}
 
 	// Per-request memo for (owner,repo,ref,tokenScope) → commitSHA.
@@ -1605,10 +1706,8 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 		// GitHub skill resolution: gh:// URIs are handled by the Hub's GitHub resolution cache
 		if strings.HasPrefix(skillRef.URI, "gh://") {
 			if !ghProjectAllowed {
-				resolveErrors = append(resolveErrors, ResolveSkillError{
-					URI: skillRef.URI, Code: agent.SkillErrCodeForbidden,
-					Message: "you do not have permission to resolve GitHub skills for this project",
-				})
+				resolveErrors = append(resolveErrors, *newSkillResolveError(ctx, skillResolveSourceGitHub,
+					skillRef.URI, agent.SkillErrCodeForbidden, 0, ghDeniedMessage))
 				continue
 			}
 			ghResolved, err := s.resolveGitHubSkill(ctx, skillRef.URI, req.ProjectID, refSHAMemo)
@@ -1620,9 +1719,8 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 				} else if isGHNotFound(err) {
 					code = agent.SkillErrCodeNotFound
 				}
-				resolveErrors = append(resolveErrors, ResolveSkillError{
-					URI: skillRef.URI, Code: code, Message: err.Error(),
-				})
+				resolveErrors = append(resolveErrors, *newSkillResolveError(ctx, skillResolveSourceGitHub,
+					skillRef.URI, code, ghErrorStatus(err), err.Error()))
 			} else {
 				resolved = append(resolved, *ghResolved)
 			}
@@ -1631,9 +1729,8 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 
 		uri, err := api.ParseSkillURI(skillRef.URI)
 		if err != nil {
-			resolveErrors = append(resolveErrors, ResolveSkillError{
-				URI: skillRef.URI, Code: "invalid_uri", Message: err.Error(),
-			})
+			resolveErrors = append(resolveErrors, *newSkillResolveError(ctx, skillResolveSourceRegistry,
+				skillRef.URI, agent.SkillErrCodeInvalidURI, 0, err.Error()))
 			continue
 		}
 
@@ -1829,6 +1926,16 @@ func skillScopeResource(scope, scopeID string) Resource {
 	return r
 }
 
+// skillUserScopeResource builds the "skill" Resource for a new skill in
+// the caller's own user scope. Like templateUserScopeResource, it takes the
+// authenticated UserIdentity, so the owner and scope user always name the
+// caller and never a request field.
+func skillUserScopeResource(userIdent UserIdentity) Resource {
+	r := skillScopeResource(store.SkillScopeUser, userIdent.ID())
+	r.OwnerID = userIdent.ID()
+	return r
+}
+
 // hasGitHubSkillRef reports whether any reference in the batch is a gh:// URI.
 func hasGitHubSkillRef(refs []ResolveSkillRef) bool {
 	for _, ref := range refs {
@@ -1872,6 +1979,23 @@ func (s *Server) canUseProjectGitHubToken(ctx context.Context, projectID string)
 		return false
 	}
 	return s.authzService.CheckAccess(ctx, userIdent, skillScopeResource(store.SkillScopeProject, projectID), ActionRead).Allowed
+}
+
+// tokenMayResolvePublicGitHubSkills reports whether a request may have the
+// Hub resolve gh:// skills from public repositories with no project
+// credentials. A user access token needs skill.read on the global catalog,
+// which resolves to the hub scope, so the token needs skill:read on a hub
+// boundary. The check applies to user access token requests.
+func (s *Server) tokenMayResolvePublicGitHubSkills(r *http.Request) bool {
+	ctx := r.Context()
+	userIdent := GetUserIdentityFromContext(ctx)
+	if userIdent == nil || !isUserAccessTokenRequest(r, userIdent) {
+		return true
+	}
+	if s.authzService == nil {
+		return false
+	}
+	return s.authzService.CheckAccess(ctx, userIdent, skillScopeResource(store.SkillScopeGlobal, ""), ActionRead).Allowed
 }
 
 // resolveGitHubToken determines the GitHub token scope and mints a token if needed.

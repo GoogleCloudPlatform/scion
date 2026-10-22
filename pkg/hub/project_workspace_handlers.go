@@ -1271,8 +1271,11 @@ func (s *Server) resolveNFSSharedDirPath(dirName, projectID string) (resolution 
 	}
 	if globalSettings.Server == nil || globalSettings.Server.SharedDirStorage == nil {
 		// A file that loaded successfully as v1 is authoritative: no block
-		// means genuinely unset. Only a LEGACY-format file that mentions the
-		// key can silently drop it, gated by GlobalSettingsIsLegacyFormat.
+		// means genuinely unset. A legacy-format file is converted with its
+		// server block kept (ptone/scion#3919), so a real block loads above;
+		// one that mentions the key but loaded no block (for example a
+		// misplaced or commented-out block) fails closed, gated by
+		// GlobalSettingsIsLegacyFormat.
 		if config.GlobalSettingsIsLegacyFormat() && config.GlobalSettingsMentions("shared_dir_storage") {
 			return nil, true, fmt.Errorf(
 				"server.shared_dir_storage: global settings mention it but it was not loaded (missing schema_version \"1\"?)")

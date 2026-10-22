@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"testing"
 	"time"
@@ -111,6 +112,21 @@ func TestIsRetired(t *testing.T) {
 	}
 	if r.IsRetired("web.never_existed") {
 		t.Error("IsRetired(web.never_existed) = true, want false")
+	}
+}
+
+func TestRetired_SortedCopy(t *testing.T) {
+	r, err := NewRegistry(nil, []string{"web.zeta", "web.alpha"})
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	got := r.Retired()
+	if want := []string{"web.alpha", "web.zeta"}; !slices.Equal(got, want) {
+		t.Fatalf("Retired() = %v, want %v", got, want)
+	}
+	got[0] = "web.mutated"
+	if r.Retired()[0] != "web.alpha" || r.IsRetired("web.mutated") {
+		t.Error("mutating the Retired() result must not affect the Registry")
 	}
 }
 
@@ -347,8 +363,11 @@ func TestFlatRuntimeBrokersExperimentRegistered(t *testing.T) {
 	if e.Default {
 		t.Fatal("flat Runtime Brokers must default to off")
 	}
-	if !e.HasLayer(LayerServer) || e.HasLayer(LayerWeb) {
-		t.Fatalf("must be a server-layer (only) experiment, got %v", e.Layers)
+	// LayerServer gates every hub check. LayerWeb was added only so the
+	// browser can read the flag and switch to the Brokers area (delivery
+	// lead ruling, 2026-10-20): it is presentation only.
+	if !e.HasLayer(LayerServer) || !e.HasLayer(LayerWeb) {
+		t.Fatalf("must be a server- and web-layer experiment, got %v", e.Layers)
 	}
 	if e.Title == "" || e.Description == "" || e.Issue != "ptone/scion#2926" || e.Owner == "" || e.Stage != StageAlpha {
 		t.Fatalf("incomplete registration: %+v", e)
@@ -413,16 +432,16 @@ func TestFederationProjectVisitors_RegisteredDefaultOff(t *testing.T) {
 	}
 }
 
-// TestChatThreadGroups_RegisteredDefaultOff pins hub.chat_thread_groups
-// (ptone/scion#4424): it gates the web rail and the hub routes, so it needs
-// both layers, and it ships off.
-func TestChatThreadGroups_RegisteredDefaultOff(t *testing.T) {
-	entry, ok := Default().Lookup(ChatThreadGroups)
+// TestAttachmentArtifacts_RegisteredDefaultOff pins hub.attachment_artifacts
+// (ptone/scion#4595): it gates the hub's attachment upload path and the web
+// surfaces of later phases, so it has both layers, and it ships off.
+func TestAttachmentArtifacts_RegisteredDefaultOff(t *testing.T) {
+	entry, ok := Default().Lookup(AttachmentArtifacts)
 	if !ok {
-		t.Fatalf("compiled registry entry %q absent", ChatThreadGroups)
+		t.Fatalf("compiled registry entry %q absent", AttachmentArtifacts)
 	}
-	if entry.Name != "hub.chat_thread_groups" {
-		t.Errorf("Name = %q, want hub.chat_thread_groups", entry.Name)
+	if entry.Name != "hub.attachment_artifacts" {
+		t.Errorf("Name = %q, want hub.attachment_artifacts", entry.Name)
 	}
 	if entry.Default {
 		t.Error("Default = true, want false")
@@ -430,8 +449,8 @@ func TestChatThreadGroups_RegisteredDefaultOff(t *testing.T) {
 	if len(entry.Layers) != 2 || !entry.HasLayer(LayerWeb) || !entry.HasLayer(LayerServer) {
 		t.Errorf("Layers = %v, want exactly LayerWeb and LayerServer", entry.Layers)
 	}
-	if entry.Stage != StageAlpha || entry.Issue != "ptone/scion#4424" || entry.Owner != "native-chat" || entry.ReviewBy != "2027-01-11" {
-		t.Errorf("chat thread groups experiment metadata mismatch: %+v", entry)
+	if entry.Stage != StageAlpha || entry.Issue != "ptone/scion#4594" || entry.Owner != "artifacts" {
+		t.Errorf("attachment artifacts experiment metadata mismatch: %+v", entry)
 	}
 }
 
@@ -453,6 +472,28 @@ func TestAsyncAgentLaunchExperimentRegistered(t *testing.T) {
 		t.Fatalf("must be a server-layer (only) experiment, got %v", e.Layers)
 	}
 	if e.Issue != "ptone/scion#4991" || e.Stage != StageAlpha {
+		t.Fatalf("unexpected registration: %+v", e)
+	}
+}
+
+// TestAsyncAgentStartExperimentRegistered pins hub.async_agent_start
+// (ptone/scion#4669): it gates hub behaviour only, so it is server-layer
+// only, and it ships off.
+func TestAsyncAgentStartExperimentRegistered(t *testing.T) {
+	e, ok := Default().Lookup(AsyncAgentStart)
+	if !ok {
+		t.Fatalf("%s is not registered", AsyncAgentStart)
+	}
+	if AsyncAgentStart != "hub.async_agent_start" {
+		t.Fatalf("frozen name changed: %q", AsyncAgentStart)
+	}
+	if e.Default {
+		t.Fatal("async agent start must default to off")
+	}
+	if !e.HasLayer(LayerServer) || e.HasLayer(LayerWeb) {
+		t.Fatalf("must be a server-layer (only) experiment, got %v", e.Layers)
+	}
+	if e.Issue != "ptone/scion#4669" || e.Stage != StageAlpha || e.Owner != "async-start" {
 		t.Fatalf("unexpected registration: %+v", e)
 	}
 }

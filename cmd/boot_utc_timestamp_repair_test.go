@@ -280,6 +280,38 @@ func TestUTCTimestampRepair_SnapshotInProgressRefuses(t *testing.T) {
 	assert.Equal(t, unreadableStamp, created)
 }
 
+// TestUTCTimestampRepair_StaleSnapshotTempRemoved checks that a snapshot
+// temporary file older than every writer's budget (a killed process, for
+// example the hub's run at start) no longer blocks the repair.
+func TestUTCTimestampRepair_StaleSnapshotTempRemoved(t *testing.T) {
+	ctx := context.Background()
+	f := newRepairFixture(t)
+	s := f.boot(t)
+	f.seed(t, s)
+	db := s.(timestampRepairDB).DB()
+	f.corrupt(t, db)
+	tmp := f.dbPath + "." + utcTimestampSnapshotLabel + ".tmp"
+	require.NoError(t, os.WriteFile(tmp, nil, 0o600))
+	old := time.Now().Add(-utcTimestampStaleTmpAge - time.Minute)
+	require.NoError(t, os.Chtimes(tmp, old, old))
+
+	logs, restore := captureSlog(t)
+	defer restore()
+	res := repairUnreadableTimestamps(ctx, s.(timestampRepairDB))
+	assert.True(t, res.Completed, logs.String())
+	assert.Contains(t, logs.String(), "removed the temporary file of an interrupted snapshot")
+	_, err := os.Stat(tmp)
+	assert.ErrorIs(t, err, os.ErrNotExist)
+	assert.Len(t, f.snapshots(t), 1)
+}
+
+// TestUTCTimestampSnapshotLabel_SharedWithHub pins that the boot repair and
+// the hub's run at start use one label, so they share one snapshot.
+func TestUTCTimestampSnapshotLabel_SharedWithHub(t *testing.T) {
+	assert.Equal(t, entadapter.UTCTimestampSnapshotLabel, utcTimestampSnapshotLabel)
+	assert.Equal(t, "pre-utc-timestamp-normalize", utcTimestampSnapshotLabel)
+}
+
 func TestUTCTimestampRepair_SnapshotFailureWritesNothing(t *testing.T) {
 	ctx := context.Background()
 	f := newRepairFixture(t)

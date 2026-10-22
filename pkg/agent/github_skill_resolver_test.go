@@ -1613,7 +1613,7 @@ func TestGitHubPrivateRepoInstall_NoDoubleDownload(t *testing.T) {
 	agentHome := t.TempDir()
 	skillsDest := filepath.Join(agentHome, ".claude", "skills")
 
-	_, err = installResolvedSkills(context.Background(), result.Resolved, skillsDest, agentHome)
+	_, _, err = installResolvedSkills(context.Background(), result.Resolved, skillsDest, agentHome)
 	if err != nil {
 		// If the fix is absent, this fails with "download failed with status 404"
 		// because the install phase hits the mock server without a token.

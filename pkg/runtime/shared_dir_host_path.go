@@ -178,7 +178,9 @@ func ResolveSharedDirHostPath(gs *config.VersionedSettings, home, slug, projectI
 // LoadSharedDirStorageSettings loads the global settings
 // ResolveSharedDirHostPath reads, failing closed the way agent start does
 // (pkg/agent Start): a global settings file that cannot be loaded, or a
-// legacy-format file whose server block was dropped, is an error wrapping
+// legacy-format file from which no shared_dir_storage block loaded (its
+// server block is kept, ptone/scion#3919, so only a misplaced or
+// commented-out block), is an error wrapping
 // ErrSharedDirStorageUnavailable only when it mentions shared_dir_storage.
 // Otherwise unreadable settings mean the local layout (nil settings).
 func LoadSharedDirStorageSettings() (*config.VersionedSettings, error) {

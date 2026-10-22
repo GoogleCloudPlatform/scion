@@ -16,6 +16,7 @@ package hub
 
 import (
 	"maps"
+	"net/http"
 	"sort"
 	"strings"
 	"testing"
@@ -154,5 +155,192 @@ func TestNewRefusesInvalidSessionOnlyRoute(t *testing.T) {
 				t.Fatalf("err = %v; want it to name the session-only route %q", err, tc.pattern)
 			}
 		})
+	}
+}
+
+func TestValidateVisitorRoutes(t *testing.T) {
+	base := RouteMetadata{Pattern: "/api/v1/test/visitor", RouteID: "test.visitor",
+		VisitorMethods: []string{http.MethodGet}}
+	for _, tc := range []struct {
+		c       RouteClassification
+		allowed bool
+	}{
+		{RouteAuthenticated, true},
+		{RoutePolicy, true},
+		{RoutePublic, false},
+		{RouteHubAdmin, false},
+		{RouteWorkstation, false},
+		{RouteBrokerHMAC, false},
+		{RouteAgentToken, false},
+		{RouteWebhook, false},
+	} {
+		t.Run(string(tc.c), func(t *testing.T) {
+			m := base
+			m.Classification = tc.c
+			err := validateVisitorRoutes(map[string]RouteMetadata{m.Pattern: m})
+			if tc.allowed {
+				if err != nil {
+					t.Fatalf("err = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("err = nil, want a visitor route metadata error")
+			}
+			for _, w := range []string{`"/api/v1/test/visitor" (test.visitor)`, "visitor methods", `classification "` + string(tc.c) + `"`} {
+				if !strings.Contains(err.Error(), w) {
+					t.Errorf("err = %v; want it to contain %q", err, w)
+				}
+			}
+		})
+	}
+	m := base
+	m.Classification, m.VisitorMethods = RouteHubAdmin, nil
+	if err := validateVisitorRoutes(map[string]RouteMetadata{m.Pattern: m}); err != nil {
+		t.Fatalf("a route with no visitor methods: err = %v, want nil", err)
+	}
+}
+
+// TestValidateVisitorRoutesMethods: each listed method must be known,
+// listed once, and served by the pattern; a method-qualified pattern serves
+// only its method, and HEAD for GET.
+func TestValidateVisitorRoutesMethods(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		pattern string
+		methods []string
+		want    []string // substrings of the error; nil = valid
+	}{
+		{"unqualified reads", "/api/v1/test/visitor", []string{http.MethodGet, http.MethodHead}, nil},
+		{"unqualified write", "/api/v1/test/visitor", []string{http.MethodPost}, nil},
+		{"GET pattern with GET and HEAD", "GET /api/v1/test/visitor", []string{http.MethodGet, http.MethodHead}, nil},
+		{"POST pattern with POST", "POST /api/v1/test/visitor", []string{http.MethodPost}, nil},
+		{"GET pattern with POST", "GET /api/v1/test/visitor", []string{http.MethodPost},
+			[]string{`method "POST" is not served by the pattern's method "GET"`}},
+		{"POST pattern with GET", "POST /api/v1/test/visitor", []string{http.MethodGet},
+			[]string{`method "GET" is not served by the pattern's method "POST"`}},
+		{"POST pattern with HEAD", "POST /api/v1/test/visitor", []string{http.MethodHead},
+			[]string{`method "HEAD" is not served by the pattern's method "POST"`}},
+		{"lower-case method", "/api/v1/test/visitor", []string{"get"}, []string{`unknown method "get"`}},
+		{"method listed twice", "/api/v1/test/visitor", []string{http.MethodGet, http.MethodGet},
+			[]string{`method "GET" listed twice`}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := RouteMetadata{Pattern: tc.pattern, RouteID: "test.visitor",
+				Classification: RouteAuthenticated, VisitorMethods: tc.methods}
+			err := validateVisitorRoutes(map[string]RouteMetadata{tc.pattern: m})
+			if tc.want == nil {
+				if err != nil {
+					t.Fatalf("err = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("err = nil, want a visitor route metadata error")
+			}
+			for _, w := range append([]string{"visitor methods", `(test.visitor)`}, tc.want...) {
+				if !strings.Contains(err.Error(), w) {
+					t.Errorf("err = %v; want it to contain %q", err, w)
+				}
+			}
+		})
+	}
+}
+
+// TestRouteMetadataTableVisitorRoutesAreValid: the route table passes the
+// visitor route startup check.
+func TestRouteMetadataTableVisitorRoutesAreValid(t *testing.T) {
+	if err := validateVisitorRoutes(routeMetadataTable); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// startNewWithRouteTable runs New with table as the startup route table
+// and returns its error. table must fail only the visitor route check, and
+// New must refuse to start with exactly that check's error. A panic in New
+// fails the test: it means New ran past the visitor route check.
+func startNewWithRouteTable(t *testing.T, table map[string]RouteMetadata) error {
+	t.Helper()
+	if err := validateSessionOnlyRoutes(table); err != nil {
+		t.Fatalf("the test route table fails the session-only check: %v", err)
+	}
+	want := validateVisitorRoutes(table)
+	if want == nil {
+		t.Fatal("the test route table passes the visitor route check; want one New refuses")
+	}
+	prev := startupRouteMetadata
+	startupRouteMetadata = func() map[string]RouteMetadata { return table }
+	t.Cleanup(func() { startupRouteMetadata = prev })
+
+	srv, err := func() (_ *Server, err error) {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("New panicked (%v); want it to refuse to start with the visitor route error %q", r, want)
+			}
+		}()
+		return New(ServerConfig{}, nil)
+	}()
+	if err == nil || srv != nil {
+		t.Fatalf("New = %v, %v; want a refusal with the visitor route error %q", srv, err, want)
+	}
+	if err.Error() != want.Error() {
+		t.Fatalf("New err = %q; want the visitor route error %q", err, want)
+	}
+	return err
+}
+
+// TestNewRefusesInvalidVisitorRoute: New refuses to start when a route the
+// guard would not authorize for a visitor lists VisitorMethods.
+func TestNewRefusesInvalidVisitorRoute(t *testing.T) {
+	const pattern = "/healthz"
+	table := maps.Clone(routeMetadataTable)
+	m, ok := table[pattern]
+	if !ok {
+		t.Fatalf("no route %q in the table", pattern)
+	}
+	m.VisitorMethods = []string{http.MethodGet}
+	table[pattern] = m
+
+	err := startNewWithRouteTable(t, table)
+	if !strings.Contains(err.Error(), "visitor methods") || !strings.Contains(err.Error(), pattern) {
+		t.Fatalf("err = %v; want it to name the visitor route %q", err, pattern)
+	}
+}
+
+// TestNewRefusesVisitorMethodNotServedByPattern: New refuses to start when
+// a method-qualified authenticated or policy route lists a visitor method
+// its pattern does not serve.
+func TestNewRefusesVisitorMethodNotServedByPattern(t *testing.T) {
+	table := maps.Clone(routeMetadataTable)
+	patterns := make([]string, 0, len(table))
+	for p := range table {
+		patterns = append(patterns, p)
+	}
+	sort.Strings(patterns)
+	var pattern, method string
+	for _, p := range patterns {
+		c := table[p].Classification
+		pm, _, qualified := strings.Cut(p, " ")
+		if !qualified || (c != RouteAuthenticated && c != RoutePolicy) {
+			continue
+		}
+		pattern, method = p, http.MethodPost
+		if pm == http.MethodPost {
+			method = http.MethodGet
+		}
+		break
+	}
+	if pattern == "" {
+		t.Fatal("no method-qualified authenticated or policy route in the table")
+	}
+	m := table[pattern]
+	m.VisitorMethods = []string{method}
+	table[pattern] = m
+
+	err := startNewWithRouteTable(t, table)
+	for _, w := range []string{"visitor methods", pattern, `method "` + method + `" is not served`} {
+		if !strings.Contains(err.Error(), w) {
+			t.Fatalf("err = %v; want it to contain %q", err, w)
+		}
 	}
 }

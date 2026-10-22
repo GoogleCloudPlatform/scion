@@ -32,6 +32,23 @@ func ValidateTelemetryTLS(tls *api.TelemetryTLS) error {
 	return nil
 }
 
+// ValidateV1TelemetryTLS applies ValidateTelemetryTLS to a settings-file
+// (or hub telemetry section) telemetry.cloud.tls value. It is the one place
+// the TLS rule is applied to V1 settings (the settings loader and the hub
+// settings validation both call it). A nil tls is valid.
+func ValidateV1TelemetryTLS(tls *V1TelemetryTLSConfig) error {
+	if tls == nil {
+		return nil
+	}
+	return ValidateTelemetryTLS(&api.TelemetryTLS{
+		Enabled:            tls.Enabled,
+		InsecureSkipVerify: tls.InsecureSkipVerify,
+		CAFile:             tls.CAFile,
+		CertFile:           tls.CertFile,
+		KeyFile:            tls.KeyFile,
+	})
+}
+
 // ValidateTelemetryEnv applies ValidateTelemetryTLS to the OTLP TLS
 // variables in a final agent environment (KEY=VALUE entries; the last entry
 // for a key wins). This is the result of every merge (settings, template,

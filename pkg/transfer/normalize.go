@@ -25,7 +25,7 @@ import (
 
 // NormalizeFileContent normalizes line endings from CRLF to LF for text files.
 // Binary content (detected by the presence of null bytes or invalid UTF-8 in
-// the first 8KB) is returned unchanged.
+// the first 8KB, extended to a rune boundary) is returned unchanged.
 func NormalizeFileContent(data []byte) []byte {
 	if !isTextContent(data) {
 		return data
@@ -37,11 +37,16 @@ func NormalizeFileContent(data []byte) []byte {
 }
 
 // isTextContent returns true if data appears to be text (UTF-8, no null bytes).
-// It inspects at most the first 8KB.
+// It inspects the first 8KB, plus up to three bytes to finish a UTF-8 rune.
 func isTextContent(data []byte) bool {
 	sample := data
 	if len(sample) > 8192 {
-		sample = sample[:8192]
+		end := 8192
+		// Do not reject valid text just because the sample splits a rune.
+		for end < len(data) && end < 8192+utf8.UTFMax-1 && !utf8.RuneStart(data[end]) {
+			end++
+		}
+		sample = data[:end]
 	}
 	if bytes.ContainsRune(sample, 0) {
 		return false
@@ -59,17 +64,16 @@ var binaryExtensions = map[string]bool{
 	".bin": true, ".dat": true, ".db": true, ".sqlite": true,
 }
 
-// NormalizeDir walks dir and normalizes line endings (CRLF → LF) for all text
-// files in place. Binary files are left unchanged.
+// NormalizeDir walks dir and normalizes line endings (CRLF → LF) in regular
+// text files in place. Binary files are left unchanged.
 func NormalizeDir(dir string) error {
 	return filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() {
-			return nil
-		}
-		if d.Type()&os.ModeSymlink != 0 {
+		// Skip symlinks and special files before reading: FIFOs can block,
+		// while sockets and devices do not represent normalizable text files.
+		if !d.Type().IsRegular() {
 			return nil
 		}
 		ext := strings.ToLower(filepath.Ext(path))
@@ -89,10 +93,32 @@ func NormalizeDir(dir string) error {
 		if err != nil {
 			return err
 		}
-		tmpPath := path + ".tmp"
-		if err := os.WriteFile(tmpPath, normalized, info.Mode()); err != nil {
+		// A fixed path + ".tmp" could overwrite an existing file or follow a symlink.
+		tmp, err := os.CreateTemp(filepath.Dir(path), ".scion-normalize.tmp-*")
+		if err != nil {
 			return err
 		}
-		return os.Rename(tmpPath, path)
+		tmpPath := tmp.Name()
+		renamed := false
+		defer func() {
+			_ = tmp.Close()
+			if !renamed {
+				_ = os.Remove(tmpPath)
+			}
+		}()
+		if _, err := tmp.Write(normalized); err != nil {
+			return err
+		}
+		if err := tmp.Chmod(info.Mode()); err != nil {
+			return err
+		}
+		if err := tmp.Close(); err != nil {
+			return err
+		}
+		if err := os.Rename(tmpPath, path); err != nil {
+			return err
+		}
+		renamed = true
+		return nil
 	})
 }

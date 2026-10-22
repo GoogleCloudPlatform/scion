@@ -20,7 +20,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -173,8 +172,8 @@ func TestFederateResolve_PinnedHashMismatch(t *testing.T) {
 	if resolveErr.Code != "trust_violation" {
 		t.Errorf("expected code trust_violation, got %s", resolveErr.Code)
 	}
-	if !strings.Contains(resolveErr.Message, "content hash mismatch") {
-		t.Errorf("expected mismatch message, got: %s", resolveErr.Message)
+	if resolveErr.Message != "skill content hash not trusted" {
+		t.Errorf("expected the fixed trust phrase, got: %s", resolveErr.Message)
 	}
 }
 
@@ -214,8 +213,8 @@ func TestFederateResolve_NoPinConfigured(t *testing.T) {
 	if resolveErr.Code != "trust_violation" {
 		t.Errorf("expected code trust_violation, got %s", resolveErr.Code)
 	}
-	if !strings.Contains(resolveErr.Message, "no pinned hash") {
-		t.Errorf("expected 'no pinned hash' message, got: %s", resolveErr.Message)
+	if resolveErr.Message != "skill content hash not trusted" {
+		t.Errorf("expected the fixed trust phrase, got: %s", resolveErr.Message)
 	}
 }
 

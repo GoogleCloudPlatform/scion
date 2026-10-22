@@ -325,7 +325,10 @@ func waitForDaemonServerReady(globalDir string, daemonArgs []string) error {
 // runs it. The child's working directory is the global directory
 // (daemon.StartComponent), so it resolves settings from there, not from the
 // project of the directory 'server start' was run in: a registry set only in
-// that project does not keep the child's broker on.
+// that project does not keep the child's broker on. It reads the node env and
+// the settings file only; the child also counts a registry saved in the hub
+// database (ptone/scion#3916). So it can only under-report, which is benign:
+// the wait then skips a broker listener that does come up.
 func daemonRegistryCheck(globalDir string) func() error {
 	return func() error { return requireImageRegistryForBrokerAt(globalDir) }
 }

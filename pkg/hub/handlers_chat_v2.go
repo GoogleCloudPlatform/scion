@@ -1167,8 +1167,10 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 	}
 
 	// Validated before the idempotency lookup, so an invalid body is never
-	// answered with a replay. sendChatMessage validates again.
-	content, _, serr := s.validateChatSendInput(ctx, user, target, in)
+	// answered with a replay. sendChatMessage validates again. An artifact
+	// attachment the sender already sent passes here only, so a retry of
+	// the send that bound it reaches the lookup (prevalidateChatSendInput).
+	content, serr := s.prevalidateChatSendInput(ctx, user, target, in)
 	if serr != nil {
 		serr.write(w)
 		return
@@ -1259,7 +1261,12 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 // scratchpad shared dir first. Staging is best-effort: when it is
 // unavailable the hub-local path is sent, which host-process agents can
 // still read. Call it only after the message is authorized and stored.
-func (s *Server) stageChatAttachments(ctx context.Context, projectID string, attachmentRefs []AttachmentRef) []string {
+//
+// An attachment stored as an artifact has no hub-local path: it is staged
+// from its stored bytes (stageArtifactAttachment), or left out when the
+// project has no staging directory. messageID is the stored message the
+// attachments are bound to.
+func (s *Server) stageChatAttachments(ctx context.Context, projectID, messageID string, attachmentRefs []AttachmentRef) []string {
 	if len(attachmentRefs) == 0 {
 		return nil
 	}
@@ -1267,13 +1274,23 @@ func (s *Server) stageChatAttachments(ctx context.Context, projectID string, att
 	as := s.attachmentStore
 	wcs := s.webChatStore
 	s.mu.RUnlock()
-	localAS, ok := as.(*LocalDiskAttachmentStore)
-	if !ok {
-		return nil
-	}
+	localAS, _ := as.(*LocalDiskAttachmentStore)
 	var paths []string
 	staging := s.resolveAttachmentStaging(ctx, projectID)
 	for _, ref := range attachmentRefs {
+		if ref.artifact {
+			staged, err := s.stageArtifactAttachment(ctx, staging, messageID, ref)
+			if err != nil {
+				s.messageLog.Error("Failed to stage attachment for agent",
+					"attachment", ref.ID, "error", err)
+				continue
+			}
+			paths = append(paths, staged)
+			continue
+		}
+		if localAS == nil {
+			continue
+		}
 		// A file lives under the project it was uploaded to, which is not
 		// this message's project when it was uploaded from a DM — those
 		// uploads carry no project at all.
@@ -1423,6 +1440,7 @@ var unreachablePhases = map[string]bool{
 	string(state.PhaseStopping):  true,
 	string(state.PhaseStopped):   true,
 	string(state.PhaseError):     true,
+	string(state.PhaseHalted):    true,
 }
 
 // agentGoneReason is the failure reason recorded when the primary agent no
@@ -1866,10 +1884,14 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 	}
 	recordedRefs := s.recordMessageArtifacts(ctx, storeMsg.ID, artifactRefs)
 
+	// Attachments stored as artifacts move to the message's scope now that
+	// it is stored; one that cannot be bound is left out of the message.
+	attachmentRefs = s.bindChatAttachments(ctx, user, storeMsg.ID, attachmentRefs)
+
 	// Attachment files are copied to the agent's scratchpad only now: every
 	// check that can refuse the send (authorization, validation, wake,
 	// conversation resolution, persistence) has passed.
-	msg.Attachments = append(msg.Attachments, s.stageChatAttachments(ctx, projectID, attachmentRefs)...)
+	msg.Attachments = append(msg.Attachments, s.stageChatAttachments(ctx, projectID, storeMsg.ID, attachmentRefs)...)
 
 	// The row was stored with the optimistic "dispatched" state, which the
 	// primary dispatch below confirms or replaces. If the function exits
@@ -1903,7 +1925,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 	linkWcs := s.webChatStore
 	s.mu.RUnlock()
 	if linkWcs != nil && len(attachmentRefs) > 0 {
-		for _, ref := range attachmentRefs {
+		for _, ref := range legacyAttachmentRefs(attachmentRefs) {
 			if err := linkWcs.LinkAttachmentToMessage(ctx, storeMsg.ID, ref.ID); err != nil {
 				s.messageLog.Error("Failed to link attachment to message", "attachment", ref.ID, "error", err)
 			}
@@ -2474,9 +2496,13 @@ func (s *Server) sendHumanToHuman(ctx context.Context, key, projectID string, us
 		}
 	}
 
+	// Attachments stored as artifacts move to the message's scope now that
+	// it is stored; one that cannot be bound is left out of the message.
+	attachmentRefs = s.bindChatAttachments(ctx, user, storeMsg.ID, attachmentRefs)
+
 	// W7: Link attachments to the persisted message.
 	if wcs != nil && len(attachmentRefs) > 0 {
-		for _, ref := range attachmentRefs {
+		for _, ref := range legacyAttachmentRefs(attachmentRefs) {
 			if err := wcs.LinkAttachmentToMessage(ctx, storeMsg.ID, ref.ID); err != nil {
 				slog.Error("Failed to link attachment to message", "attachment", ref.ID, "error", err)
 			}
@@ -2745,6 +2771,8 @@ func (s *Server) handleMessageDelete(w http.ResponseWriter, r *http.Request, key
 	if err := wcs.UpdateMessageContent(ctx, messageID, ""); err != nil {
 		slog.Error("Failed to clear message content on delete", "messageId", messageID, "error", err)
 	}
+	// Its attachments stored as artifacts go with it, unreadable at once.
+	s.retireMessageAttachments(ctx, messageID)
 
 	// Publish SSE event.
 	s.events.PublishChatMessageDeleted(ctx, projectID, key, ChatMessageDeletedEvent{
@@ -2879,6 +2907,16 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	// historyChannel limits the page to the web chat's channel. A project
+	// visitor (ptone/scion#4603) reads its own DM with an agent through the
+	// hub API, never the web chat, and the DM is admitted only as its own
+	// (admitVisitorSubRoute), so its page lists every message of the
+	// conversation, whatever channel each message came from.
+	historyChannel := "web"
+	if isVisitorIdentity(GetIdentityFromContext(ctx)) {
+		historyChannel = ""
+	}
+
 	// Phase 8 read-switch: when ConversationReadSwitch is ON, resolve the
 	// conversation and query by ConversationID instead of Channel+ThreadID.
 	// G3: fallback to channel+thread is REMOVED. Unresolved conversations
@@ -2930,7 +2968,7 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 			// to messages from Discord, telegram, etc. that share the same
 			// conversation_id. Widening is not recoverable; narrowing is.
 			filter = store.MessageFilter{
-				Channel:        "web",
+				Channel:        historyChannel,
 				ConversationID: convResult.ConversationID,
 			}
 			historyConvID = convResult.ConversationID
@@ -2956,7 +2994,7 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		}
 	} else {
 		filter = store.MessageFilter{
-			Channel:  "web",
+			Channel:  historyChannel,
 			ThreadID: key,
 		}
 	}
@@ -2984,7 +3022,7 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 			}
 			return
 		}
-		if anchor.Channel != filter.Channel ||
+		if (filter.Channel != "" && anchor.Channel != filter.Channel) ||
 			(filter.ConversationID != "" && anchor.ConversationID != filter.ConversationID) ||
 			(filter.ThreadID != "" && anchor.ThreadID != filter.ThreadID) {
 			NotFound(w, "Message")
@@ -3072,6 +3110,9 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 				messageAttachments[msgID] = refs
 			}
 		}
+		// Attachments stored as artifacts are bound to their message's
+		// scope; history lists both stores.
+		messageAttachments = s.mergeArtifactAttachments(ctx, msgIDs, messageAttachments)
 	}
 
 	// Phase-3: Enrich messages with extension data (reply-to, edited, deleted)
@@ -5879,16 +5920,28 @@ func (s *Server) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Decided once per request: while hub.attachment_artifacts is on (and
+	// the artifact service is ready and the caller is a session), each file
+	// is stored as an upload in the artifact service, with the artifact file
+	// size limit.
+	toArtifacts := s.attachmentUploadsToArtifacts(ctx)
+	maxFile := s.attachmentMaxBytes(ctx, toArtifacts)
+	formLimit := maxFile * MaxAttachmentsPerMessage
+
+	// The body is capped before anything reads it, so the total-size limit
+	// (the per-file limit times MaxAttachmentsPerMessage, plus room for the
+	// form fields) applies to the whole multipart body. Parts above
+	// uploadFormMemory are spooled to temporary files, not held in memory.
+	r.Body = http.MaxBytesReader(w, r.Body, formLimit+1024*1024)
+	if err := r.ParseMultipartForm(uploadFormMemory); err != nil {
+		BadRequest(w, "invalid multipart form or request too large")
+		return
+	}
+
 	// project_id scopes the upload to a space. DMs belong to no space, so it is
 	// optional: an upload without one is stored project-less and reachable only
 	// through the messages that reference it.
 	projectID := r.FormValue("project_id")
-	if projectID == "" {
-		// Try multipart form value.
-		if err := r.ParseMultipartForm(MaxAttachmentSize * MaxAttachmentsPerMessage); err == nil {
-			projectID = r.FormValue("project_id")
-		}
-	}
 
 	// Authorize: user must have read access to the project (same as sending
 	// messages). A project-less upload is a profile write: it needs no
@@ -5911,13 +5964,6 @@ func (s *Server) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Parse multipart form (limit total to MaxAttachmentSize * MaxAttachmentsPerMessage).
-	r.Body = http.MaxBytesReader(w, r.Body, int64(MaxAttachmentSize*MaxAttachmentsPerMessage)+1024*1024)
-	if err := r.ParseMultipartForm(MaxAttachmentSize * MaxAttachmentsPerMessage); err != nil {
-		BadRequest(w, "invalid multipart form or request too large")
-		return
-	}
-
 	files := r.MultipartForm.File["files"]
 	if len(files) == 0 {
 		ValidationError(w, "no files uploaded", nil)
@@ -5935,7 +5981,13 @@ func (s *Server) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) 
 	failures := make([]attachmentUploadFailure, 0)
 	internalError := false
 	for _, fh := range files {
-		result, err := s.storeUploadedFile(ctx, as, wcs, projectID, user.ID(), fh)
+		var result attachmentUploadResult
+		var err error
+		if toArtifacts {
+			result, err = s.storeUploadedArtifact(ctx, maxFile, fh)
+		} else {
+			result, err = s.storeUploadedFile(ctx, as, wcs, projectID, user.ID(), fh)
+		}
 		if err != nil {
 			var rejection attachmentRejection
 			if !errors.As(err, &rejection) {
@@ -5973,6 +6025,10 @@ func (s *Server) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+// uploadFormMemory is how much of an upload's multipart body is held in
+// memory; larger parts are spooled to temporary files by ParseMultipartForm.
+const uploadFormMemory = 32 << 20
+
 // attachmentRejection is a refusal the uploader caused and could fix — a
 // blocked extension, an unreadable type, an oversized file. Anything else is
 // ours and is reported as an internal error instead.
@@ -5995,47 +6051,87 @@ func uploadFailureMessage(err error) string {
 	return "upload failed"
 }
 
+// storeUploadedArtifact validates and classifies one uploaded file like
+// storeUploadedFile, and stores it as an upload of the caller in the
+// artifact service (ptone/scion#4595). The response has the same shape;
+// its id is the artifact id.
+func (s *Server) storeUploadedArtifact(ctx context.Context, maxFile int64, fh *multipart.FileHeader) (attachmentUploadResult, error) {
+	file, safeName, mimeType, err := openClassifiedUpload(fh, maxFile)
+	if err != nil {
+		return attachmentUploadResult{}, err
+	}
+	defer func() { _ = file.Close() }()
+	info, err := s.attachmentService().CreateAttachment(ctx, safeName, mimeType, file)
+	switch {
+	case errors.Is(err, artifacts.ErrAttachmentTooLarge):
+		return attachmentUploadResult{}, rejectAttachment("file exceeds the maximum size of %d bytes", maxFile)
+	case errors.Is(err, artifacts.ErrAttachmentName):
+		return attachmentUploadResult{}, rejectAttachment("invalid filename")
+	case err != nil:
+		return attachmentUploadResult{}, fmt.Errorf("save attachment: %w", err)
+	}
+	return attachmentUploadResult{
+		ID:       info.ID,
+		Name:     info.Name,
+		MimeType: info.MediaType,
+		Size:     info.Size,
+		URL:      "/api/v1/chat/attachments/" + info.ID,
+	}, nil
+}
+
+// openClassifiedUpload checks one uploaded file against the size limit
+// maxFile, the filename rules and the type classifier, and returns it
+// opened and rewound, with its sanitized name and classified MIME type. A
+// refusal the uploader can fix is an attachmentRejection.
+func openClassifiedUpload(fh *multipart.FileHeader, maxFile int64) (multipart.File, string, string, error) {
+	if fh.Size > maxFile {
+		return nil, "", "", rejectAttachment("file exceeds the maximum size of %d bytes", maxFile)
+	}
+	safeName, err := SanitizeFilename(fh.Filename)
+	if err != nil {
+		return nil, "", "", attachmentRejection{msg: err.Error()}
+	}
+	file, err := fh.Open()
+	if err != nil {
+		return nil, "", "", fmt.Errorf("open uploaded file: %w", err)
+	}
+	head := make([]byte, contentSniffLen)
+	n, err := io.ReadFull(file, head)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		_ = file.Close()
+		return nil, "", "", fmt.Errorf("read uploaded file: %w", err)
+	}
+	mimeType, err := ClassifyAttachment(safeName, head[:n])
+	if err != nil {
+		_ = file.Close()
+		return nil, "", "", attachmentRejection{msg: err.Error()}
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		_ = file.Close()
+		return nil, "", "", fmt.Errorf("rewind uploaded file: %w", err)
+	}
+	return file, safeName, mimeType, nil
+}
+
 // storeUploadedFile validates, classifies, and stores one uploaded file.
 func (s *Server) storeUploadedFile(
 	ctx context.Context, as AttachmentStore, wcs WebChatStore,
 	projectID, userID string, fh *multipart.FileHeader,
 ) (attachmentUploadResult, error) {
-	if fh.Size > MaxAttachmentSize {
-		return attachmentUploadResult{}, rejectAttachment(
-			"file exceeds the maximum size of %d bytes", MaxAttachmentSize)
-	}
-
-	safeName, err := SanitizeFilename(fh.Filename)
+	// The filename error is passed through without a prefix. Every error
+	// SanitizeFilename can return already names the problem — "invalid
+	// filename", or the refused extension — and the failure entry carries
+	// the filename beside it, so a wrapper only stacks two subjects on one
+	// line ("invalid filename: invalid filename"). Nothing here echoes the
+	// uploader's text: the two extension errors interpolate a key of our own
+	// blocklists (#1045). The type is classified from the content, not from
+	// the Content-Type the client put on the part: that header is a claim
+	// the uploader controls.
+	file, safeName, mimeType, err := openClassifiedUpload(fh, MaxAttachmentSize)
 	if err != nil {
-		// Passed through without a prefix. Every error this can return already
-		// names the problem — "invalid filename", or the refused extension —
-		// and the failure entry carries the filename beside it, so a wrapper
-		// only stacks two subjects on one line ("invalid filename: invalid
-		// filename"). Nothing here echoes the uploader's text: the two
-		// extension errors interpolate a key of our own blocklists (#1045).
-		return attachmentUploadResult{}, attachmentRejection{msg: err.Error()}
-	}
-
-	file, err := fh.Open()
-	if err != nil {
-		return attachmentUploadResult{}, fmt.Errorf("open uploaded file: %w", err)
+		return attachmentUploadResult{}, err
 	}
 	defer func() { _ = file.Close() }()
-
-	// Classify from the content, not from the Content-Type the client put on
-	// the part: that header is a claim the uploader controls.
-	head := make([]byte, contentSniffLen)
-	n, err := io.ReadFull(file, head)
-	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
-		return attachmentUploadResult{}, fmt.Errorf("read uploaded file: %w", err)
-	}
-	mimeType, err := ClassifyAttachment(safeName, head[:n])
-	if err != nil {
-		return attachmentUploadResult{}, attachmentRejection{msg: err.Error()}
-	}
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return attachmentUploadResult{}, fmt.Errorf("rewind uploaded file: %w", err)
-	}
 
 	meta, err := as.Save(ctx, projectID, safeName, file, fh.Size, mimeType)
 	if err != nil {
@@ -6081,7 +6177,33 @@ func (s *Server) handleAttachmentDownload(w http.ResponseWriter, r *http.Request
 	as := s.attachmentStore
 	s.mu.RUnlock()
 
+	// An attachment stored as an artifact (ptone/scion#4595) is resolved
+	// first, whether or not hub.attachment_artifacts is on now, so files
+	// stored while it was on stay readable. The artifact service decides
+	// who reads it and delivers it; a caller who may not read it gets the
+	// same answer as for an unknown id, and its id is never looked up in
+	// the AttachmentStore.
+	artifactsReady := s.attachmentArtifactsReady()
+	if artifactsReady {
+		switch s.attachmentService().ServeAttachment(w, r, id) {
+		case artifacts.ServeWritten:
+			return
+		case artifacts.ServeRefused:
+			logReferenceRefused(ctx, logging.RequestPath(r), "caller may not read this attachment", user)
+			NotFound(w, "Attachment")
+			return
+		case artifacts.ServeNotFound:
+			// Not an artifact attachment: look in the AttachmentStore.
+		}
+	}
+
 	if wcs == nil || as == nil {
+		if artifactsReady {
+			// The artifact service answered for this route: an id it does
+			// not know gets the same answer as one the caller may not read.
+			NotFound(w, "Attachment")
+			return
+		}
 		writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Attachments not available", nil)
 		return
 	}
@@ -6098,7 +6220,9 @@ func (s *Server) handleAttachmentDownload(w http.ResponseWriter, r *http.Request
 	// attached to. Anyone else gets the same answer as for an unknown
 	// attachment; the reason is logged.
 	// A token reads a file of a project through project:read on that
-	// project only.
+	// project only. A token reads a file with no project only through a
+	// message it may read, or as the uploader of a file not sent yet (see
+	// canReadAttachment).
 	var allowed bool
 	if token := chatToken(ctx); token != nil && meta.ProjectID != "" {
 		allowed = s.canReadProject(ctx, token, meta.ProjectID)
@@ -6114,7 +6238,7 @@ func (s *Server) handleAttachmentDownload(w http.ResponseWriter, r *http.Request
 	// Get file from storage.
 	reader, fileMeta, err := as.Get(ctx, meta.ProjectID, id)
 	if err != nil {
-		NotFound(w, "Attachment file")
+		NotFound(w, "Attachment")
 		return
 	}
 	defer func() { _ = reader.Close() }()

@@ -1,0 +1,105 @@
+{
+  "profile_map": {},
+  "findings": [
+    {
+      "code": "unsupported_flat_target_type",
+      "severity": "blocking",
+      "path": "profiles.p-implicit.runtime",
+      "profiles": [
+        "p-implicit"
+      ],
+      "message_contains": [
+        "runtime type podman has no flat Runtime Broker target"
+      ]
+    },
+    {
+      "code": "unsupported_flat_target_type",
+      "severity": "blocking",
+      "path": "profiles.p-none.runtime",
+      "profiles": [
+        "p-none"
+      ],
+      "message_contains": [
+        "profile p-none names no runtime entry"
+      ]
+    },
+    {
+      "code": "unsupported_flat_target_type",
+      "severity": "blocking",
+      "path": "runtimes.apple.type",
+      "profiles": [
+        "p-container"
+      ],
+      "message_contains": [
+        "runtime type container has no flat Runtime Broker target"
+      ]
+    },
+    {
+      "code": "unsupported_flat_target_type",
+      "severity": "blocking",
+      "path": "runtimes.dock.substrate",
+      "profiles": [
+        "p-docker-substrate"
+      ],
+      "message_contains": [
+        "runtime entry dock configures substrate"
+      ]
+    },
+    {
+      "code": "unsupported_flat_target_type",
+      "severity": "blocking",
+      "path": "runtimes.pod.type",
+      "profiles": [
+        "p-podman"
+      ],
+      "message_contains": [
+        "runtime type podman has no flat Runtime Broker target",
+        "legacy Runtime Broker"
+      ]
+    },
+    {
+      "code": "unsupported_flat_target_type",
+      "severity": "blocking",
+      "path": "runtimes.run.type",
+      "profiles": [
+        "p-cloudrun"
+      ],
+      "message_contains": [
+        "runtime type cloudrun has"
+      ]
+    },
+    {
+      "code": "unsupported_flat_target_type",
+      "severity": "blocking",
+      "path": "runtimes.runi.type",
+      "profiles": [
+        "p-instances"
+      ],
+      "message_contains": [
+        "runtime type cloudrun-instances has"
+      ]
+    },
+    {
+      "code": "unsupported_flat_target_type",
+      "severity": "blocking",
+      "path": "runtimes.runs.type",
+      "profiles": [
+        "p-sandbox"
+      ],
+      "message_contains": [
+        "runtime type cloudrun-sandbox has"
+      ]
+    },
+    {
+      "code": "unsupported_flat_target_type",
+      "severity": "blocking",
+      "path": "runtimes.sub.type",
+      "profiles": [
+        "p-substrate"
+      ],
+      "message_contains": [
+        "runtime type substrate has"
+      ]
+    }
+  ]
+}

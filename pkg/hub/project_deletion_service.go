@@ -123,6 +123,9 @@ type CascadeSummary struct {
 	ProjectProviders  int `json:"project_providers_deleted"`
 	ProjectSyncStates int `json:"project_sync_states_deleted"`
 	DelegationEdges   int `json:"delegation_edges_deactivated"`
+	// ProjectVisitorRules is the number of project visitor rules deleted;
+	// their bindings and exclusions are deleted with them.
+	ProjectVisitorRules int `json:"project_visitor_rules_deleted"`
 	// DelegationEdgeOpID is the operation ID stamped on every edge
 	// deactivated by the delete; empty when no edge was deactivated.
 	DelegationEdgeOpID string `json:"delegation_edge_op_id,omitempty"`
@@ -156,9 +159,9 @@ const (
 //
 // The method:
 //  1. Resolves the target project (fail-closed on not-found).
-//  2. Checks base permission (project.delete).
-//  3. Enforces ownership/ancestry governance.
-//  4. Checks actor status (not suspended).
+//  2. Checks actor status (not suspended).
+//  3. Checks base permission (project.delete).
+//  4. Enforces ownership/ancestry governance.
 //  5. Checks credential ceiling (session JWT only, no scoped UAT/agent).
 //  6. Acquires the project membership lock for serialization.
 //  7. Re-evaluates authority under lock (TOCTOU closure).
@@ -196,7 +199,14 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 		}
 	}
 
-	// 2. Check base permission (project.delete) via the authz evaluator.
+	// 2. Check actor status — suspended users cannot delete projects.
+	// Runs before the permission check, which denies every account that is
+	// not active, so a suspended actor keeps its own denial code.
+	if err := svc.checkActorStatus(ctx, req.Actor.ID()); err != nil {
+		return nil, err
+	}
+
+	// 3. Check base permission (project.delete) via the authz evaluator.
 	if svc.authz != nil {
 		resource := Resource{
 			Type:    "project",
@@ -215,7 +225,7 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 		}
 	}
 
-	// 3. Enforce ownership/ancestry governance.
+	// 4. Enforce ownership/ancestry governance.
 	// Project deletion requires the actor to be:
 	//   - A direct project owner (active binding), OR
 	//   - A super-admin (system-scoped)
@@ -224,11 +234,6 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 	govDecision := svc.checkDeletionGovernance(ctx, req)
 	if !govDecision.Allowed {
 		return nil, &govDecision
-	}
-
-	// 4. Check actor status — suspended users cannot delete projects.
-	if err := svc.checkActorStatus(ctx, req.Actor.ID()); err != nil {
-		return nil, err
 	}
 
 	// 5. Credential ceiling — project deletion is restricted to full session.
@@ -411,6 +416,9 @@ func (svc *ProjectDeletionService) cleanupNFSSharedDirTree(ctx context.Context, 
 	if globalSettings == nil {
 		return
 	}
+	// A legacy-format file is converted with its server block kept
+	// (ptone/scion#3919); this fires only when such a file mentions the key
+	// but no block loaded (for example a misplaced or commented-out block).
 	if (globalSettings.Server == nil || globalSettings.Server.SharedDirStorage == nil) &&
 		config.GlobalSettingsIsLegacyFormat() && config.GlobalSettingsMentions("shared_dir_storage") {
 		svc.logger.ErrorContext(ctx, "global settings mention shared_dir_storage but it was not loaded (legacy format); skipping NFS shared-dir cleanup on project delete",
@@ -615,6 +623,20 @@ func (svc *ProjectDeletionService) cascadeSecurityState(ctx context.Context, tx 
 		}
 	}
 
+	// 1b. Project visitor rules — each rule, with the bindings it created
+	// and its exclusions. The rule rows have no foreign key to the project;
+	// a rule left behind would bind matching visitors at the deleted
+	// project's ID again on their next request. Bindings are deleted here
+	// before the rules are locked, while removing or changing one rule
+	// locks the rule before its bindings; both take the project row lock
+	// first (Delete step 6, purgeFixtureProject), so they do not run
+	// interleaved.
+	if n, err := tx.DeleteProjectVisitorRulesByProject(ctx, projectID); err != nil {
+		return cs, fmt.Errorf("cascade project visitor rules: %w", err)
+	} else {
+		cs.ProjectVisitorRules = n
+	}
+
 	// 2. Groups — project-scoped groups (which may carry role bindings).
 	// Paginate to ensure completeness for projects with many groups.
 	for {
@@ -764,6 +786,8 @@ func (svc *ProjectDeletionService) cascadeSecurityState(ctx context.Context, tx 
 	// | Table                  | Mechanism                                              | Security |
 	// |------------------------|---------------------------------------------------------|----------|
 	// | role_bindings          | Transactional: DeleteRoleBindingsForScope (step 1)      | Auth     |
+	// | project_visitor_rules  | Transactional: DeleteProjectVisitorRulesByProject (1b)   | Auth     |
+	// |   (+ project_visitor_exclusions and the rules' role_bindings)                       |          |
 	// | groups                 | Transactional: ListGroups + DeleteGroup (step 2)         | Auth     |
 	// | secrets                | Transactional: DeleteSecretsByScope (step 3)             | Cred     |
 	// | env_vars               | Transactional: DeleteEnvVarsByScope (step 4)             | Config   |

@@ -92,6 +92,7 @@ type Schedule struct {
 	EventType     string     `json:"eventType"`
 	Payload       string     `json:"payload"`
 	Status        string     `json:"status"`
+	StatusReason  string     `json:"statusReason,omitempty"` // system pause reason: creator_deleted, cron_zone_unsupported
 	NextRunAt     *time.Time `json:"nextRunAt,omitempty"`
 	LastRunAt     *time.Time `json:"lastRunAt,omitempty"`
 	LastRunStatus string     `json:"lastRunStatus,omitempty"`

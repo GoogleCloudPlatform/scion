@@ -2,7 +2,7 @@
 title: About Workspaces
 ---
 
-Every Scion agent has a dedicated **Workspace**, mounted at `/workspace` inside the agent's container. This is where the agent reads code, makes changes, and runs commands.
+Every Scion agent has a dedicated **Workspace**, mounted at `/workspace` inside the agent's container. In worktree-per-agent mode the agent instead works in its worktree under `/repo-root` (for a repository linked to the local workstation Hub, `/repo-root/.scion/agents/<name>/workspace`; see [Linked git projects](#linked-git-projects)); scripts should use `$PWD` or `git rev-parse --show-toplevel`. This is where the agent reads code, makes changes, and runs commands.
 
 Scion provides flexible options for how this workspace is backed on your host machine, ranging from isolated git worktrees to direct directory mounts.
 
@@ -14,7 +14,7 @@ When you start an agent, Scion determines its workspace based on the following p
     If you provide a path via `--workspace`, Scion mounts that directory directly. This works in both Git and non-Git environments.
 
 2.  **Git Worktree** (Git repositories):
-    If you are in a Git repository and do not provide an explicit workspace, Scion uses [Git Worktrees](https://git-scm.com/docs/git-worktree) to give the agent its own isolated working directory and branch.
+    A repository you use with Scion is linked to a Hub on its first command. On the local workstation Hub, each new agent gets a [git worktree](https://git-scm.com/docs/git-worktree) of your checkout and its own branch (section 2). On a remote Hub, and for projects linked before local worktrees existed, each agent clones the repository's remote instead. See [Linked git projects](#linked-git-projects).
 
 3.  **Project Root / CWD** (Non-Git environments):
     If you are not in a Git repository, Scion mounts the project root (or current directory for global agents) directly.
@@ -61,9 +61,9 @@ scion start my-agent "fix web bugs" --workspace packages/web
 
 ---
 
-## 2. Git Worktrees (Automatic Isolation)
+## 2. Git Worktrees
 
-When working inside a Git repository without an explicit `--workspace`, Scion automatically manages **Git Worktrees**. This ensures that each agent has its own isolated checkout of the code, allowing them to work on different branches simultaneously without interfering with your main working directory.
+In a repository linked to the local workstation Hub, each new agent gets a git worktree of your checkout at `.scion/agents/<name>/workspace` (see [Linked git projects](#linked-git-projects) for the requirements and the checks). Agents imported from a release that ran them without a Hub keep their worktrees at the same place. Each agent has its own isolated working directory and branch, so agents can work on different branches at the same time without touching your own working directory. The rules below describe how those worktrees are set up.
 
 ### Prerequisites
 - Git **2.48.0** or newer is required (for relative path support).
@@ -87,8 +87,10 @@ Scion determines which branch to check out in the worktree:
 ### Reusing Existing Worktrees
 If you request a branch that is already checked out in another worktree (e.g., by another agent or manually created), Scion detects this.
 - Instead of failing or creating a conflict, Scion **mounts the existing worktree path**.
-- A warning is displayed: `Warning: Relying on existing worktree for branch '...'`.
+- A warning is logged: `Relying on existing worktree for branch '...'`. With the workstation server it appears in `~/.scion/server.log`, not in the CLI.
+- If that worktree is your own checkout (the agent is named after the branch you have checked out), the agent edits your working tree directly.
 - This allows multiple agents to collaborate on the same branch/worktree if desired.
+- An existing worktree is reused only while its directory is still in place. If git still lists the branch in a worktree that no longer exists, the start fails with an error that names that path; run `git worktree remove "<path>"` in the repository and start again. Scion removes only the agent's own worktree entry, when provisioning and when cleaning up, and does not prune other worktrees (except when a Runtime Broker cannot remove a partly created worktree; it then prunes stale entries so the start can be retried).
 
 ---
 
@@ -154,33 +156,123 @@ By default, git projects use a shallow clone with `depth=1` for fast startup.
 
 Authentication is handled via the `GITHUB_TOKEN` environment variable, injected from the project's secrets or your local environment through the env-gather flow.
 
-### Linked Projects (clone-based by default, even when the repo is local)
+### Linked git projects
 
-When you link an existing local git project to a Hub (`scion hub link`), the project becomes **Hub-managed**. Once linked, agents started via the Hub use clone-based provisioning by default, even if the broker machine already has the repository checked out locally.
+This section is the reference for how agents in a git repository on your machine get their
+workspace; other pages link here.
 
-This is intentional: the Hub enforces a consistent, unambiguous workspace strategy for all git-based projects, rather than depending on what happens to already be checked out on whichever broker machine an agent lands on. A project can instead be configured for worktree-per-agent mode, in which case Hub-dispatched agents get the same host-side shared-clone-plus-worktree strategy local mode uses, gated on the broker's git version being 2.48 or later (falling back to clone-based provisioning otherwise).
+A repository on your machine becomes a **linked project** when it links to a Hub: on its first
+command against the local workstation Hub (no prompt), or with `scion hub link`. Run `scion init`
+in the repository first. In a git repository without its own `.scion`, where the project would
+otherwise fall back to the global project (no `--global` or `--project` given), `scion hub link`
+and the automatic link refuse with:
+
+```
+this git repository is not a scion project yet; run 'scion init' here first (or pass --global to link the global project)
+```
+
+A `.scion`-less repository inside another scion project is not refused: it links that parent
+project, so run `scion init` in the repository itself.
+
+`scion init` adds an untracked `.scion/` to your checkout and, unless it is already ignored, appends `.scion/agents/` to your `.gitignore`.
+
+#### On the local workstation Hub: a worktree of your checkout
+
+A repository that links to the local workstation Hub is registered with the `worktree-per-agent`
+mode. Each new agent then gets a git worktree of **your checkout** at
+`.scion/agents/<name>/workspace`, on its own branch (see [Branch resolution](#branch-resolution)).
+The CLI says so when the agent starts:
+
+```
+Using hub, git worktree per agent for repo <remote>
+  (for a checkout linked on this machine, each agent gets a worktree of it under .scion/agents/<name>/workspace; otherwise the runtime broker makes per-agent worktrees of its own clone)
+```
+
+- **No clone and no token.** Nothing is fetched from the remote.
+- **What the agent sees.** The worktree starts from your checkout's current commit, so commits you
+  have not pushed are visible to the agent; uncommitted changes are not.
+- **Branches land in your repository.** The agent's branch shows up in `git branch`; merge it
+  directly.
+- **The working directory is the worktree, not `/workspace`.** Your repository is mounted in the
+  container at `/repo-root`, and the agent starts in `/repo-root/.scion/agents/<name>/workspace`.
+  `/workspace` is not mounted for these agents. Scripts and instructions should use `$PWD` or
+  `git rev-parse --show-toplevel` instead of a hard-coded `/workspace`.
+- **Deleting an agent deletes its branch**, including commits you have not merged, unless you pass
+  `--preserve-branch` to `scion delete`.
+- **Git 2.48 or newer.** The first agent worktree sets `repositoryformatversion=1` and
+  `extensions.relativeWorktrees` in your repository's git config. From then on, git older than 2.48
+  cannot read that checkout (it reports an unknown repository extension).
+- **No reincarnate** for these agents yet; to rebuild an agent's home, delete it and start it again.
+- This applies to the Runtime Broker inside the workstation server. Kubernetes runtimes are not
+  routed this way.
+
+:::caution[An agent named after your checked-out branch works in your checkout]
+If an agent's name matches the branch you have checked out, the agent attaches to your own
+checkout, as it did before the Hub was required, and edits your working tree directly, uncommitted changes included.
+The warning ("Relying on existing worktree") appears only in `~/.scion/server.log`, not in the
+CLI. Give agents names that are not your current branch.
+:::
+
+Before each start, the broker checks the checkout. If a check fails, the start stops; it never
+falls back to a clone. The CLI shows:
+
+```
+Error: failed to start agent via Hub: runtime broker failure: <reason> (broker code: local_worktree_refused, broker status: 409, request: <id>)
+```
+
+where `<reason>` starts with `cannot create a local worktree for this agent:` and names the cause
+and the fix:
+
+| Cause | Reason (after the prefix) |
+| --- | --- |
+| git too old | `git >= 2.48.0 required for worktree-per-agent mode (--relative-paths), found <version>; upgrade git on this machine` |
+| not a git checkout | `the project's local path <path> is not in a git checkout; restore the checkout there, or run 'scion hub link' from the project's git checkout` |
+| repository root unreadable | `git could not determine the repository root of the project's checkout at <path>; check that git can read that repository (for example, its ownership and safe.directory setting)` |
+| no origin | `the project's checkout at <repo> has no origin remote, but the hub project's repository is <url>; add it with 'git remote add origin <url>'` |
+| different origin | `the project's checkout at <repo> has origin <url>, but the hub project's repository is <url>; point origin at the hub project's repository, or link this checkout as its own project` |
+
+Agents that already have a workspace keep it: agents imported from a release that ran them without
+a Hub keep their worktrees at `.scion/agents/<name>/workspace`, and agents that already have a
+clone keep their clone.
+
+#### Projects linked earlier: still cloning
+
+The workspace mode is set when a hub project is created and cannot be changed. A repository that
+was linked to the local workstation Hub by hand before local worktrees existed keeps cloning (see
+the next section) until you re-link it to a new hub project. Running `scion hub unlink` and then
+`scion hub link` is not enough: it re-attaches the old project. To re-link:
+
+1. Finish the project's agents, or delete them with `scion delete <name>`.
+2. Delete the hub project: `scion hub projects delete <name>`. This removes the project's agent
+   records on the Hub for every broker.
+3. In the repository, run `scion hub link` (or any agent command, which links automatically). The
+   new project is registered with the `worktree-per-agent` mode; check with
+   `scion hub projects info <name> --format json` (the text output does not show labels).
+
+#### On a remote Hub: a clone per agent
+
+A repository linked to a remote Hub, or one of the projects above that still clones, gets
+clone-based provisioning: each new agent clones the repository's remote over HTTPS inside its
+container, on branch `scion/<agent-name>`. The Hub enforces one workspace strategy for the
+project, whichever broker an agent lands on.
 
 **What this means in practice:**
 
-- **SSH credentials are not used** for workspace provisioning. Even if your machine has SSH keys configured for the repo, agents always clone via HTTPS using `GITHUB_TOKEN`.
-- **A `GITHUB_TOKEN` is required.** Set it as a project or user secret on the Hub, or ensure it is present in your local environment (the env-gather flow will collect it):
+- **SSH credentials are not used** for workspace provisioning. Agents clone via HTTPS using `GITHUB_TOKEN`.
+- **A `GITHUB_TOKEN` is required** for private repositories. Set it as a project or user secret on the Hub, or ensure it is present in your local environment (the env-gather flow will collect it):
   ```bash
-  scion hub secret set --project my-project GITHUB_TOKEN=ghp_xxxxxxxxxxxx
+  scion hub secret set --project=my-project GITHUB_TOKEN ghp_xxxxxxxxxxxx
   ```
-- **The CLI will tell you** when this mode is in effect. When starting an agent via a Hub-linked git project, you will see:
+- **The CLI will tell you** when this mode is in effect:
   ```
   Using hub, cloning repo https://github.com/org/repo.git
-    (Hub mode uses HTTPS clone with GITHUB_TOKEN; local worktrees are not used)
   ```
-- **Merging agent work** is done via git push and pull request, not by merging worktrees back into your local checkout.
+- **The agent works from the remote's state**, not from your checkout, and its branch reaches you only after it pushes. Merge agent work via git push and pull request.
 
-To return to local worktree-based mode, disable hub integration:
-
-```bash
-scion hub disable
-# or run with --no-hub
-scion start my-agent --no-hub "fix the bug"
-```
+To give agents on a remote Hub git worktrees instead of separate clones, create the project with the
+`worktree-per-agent` [workspace sharing mode](/scion/local/workspaces-and-sharing/): the broker then
+makes a worktree per agent of its own shared clone. The mode is set when the project is created on
+the Hub and cannot be changed later.
 
 ---
 
@@ -359,7 +451,7 @@ When you delete an agent:
 ```bash
 scion delete <agent-name>
 ```
-- **Worktrees**: The worktree directory is removed and git metadata is pruned.
+- **Worktrees**: The worktree directory and git's entry for that one worktree are removed. Scion does not run a repository-wide `git worktree prune`, so other worktrees' entries are left alone.
 - **Branches**: By default, the branch is deleted. Use `--preserve-branch` (or `-b`) to keep it.
 - **Explicit Workspaces**: Directories mounted via `--workspace` are **NOT** deleted. Scion only cleans up resources it created.
 

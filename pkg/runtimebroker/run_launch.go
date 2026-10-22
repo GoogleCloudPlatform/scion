@@ -17,7 +17,9 @@ package runtimebroker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"runtime/debug"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
@@ -117,18 +119,28 @@ func shouldCleanupAfterSucceededReport(result *hubclient.AgentLaunchReportResult
 	return true // 403, 404 agent_launch_unknown, every other 409 reason (notably timed_out)
 }
 
-// launchCtx bundles what runLaunch needs beyond ctx and rec: the original
-// create request (for the optional GCS download and ProvisionOnly/Reprovision
-// gating, never read for its *http.Request — there is none here), the
-// resolved start options, the manager to launch with, the registry key, and
-// whether this project uses the shared-workspace layout (for the marker
-// path). It is built entirely from values already resolved by the admission
-// phase, before the goroutine starts (design §7 P1b-1 B-6: the goroutine
-// never touches *http.Request).
+// launchCtx bundles what runLaunch needs beyond ctx and rec: the resolved
+// start options, the manager to launch with, the registry key, whether this
+// project uses the shared-workspace layout (for the marker path), the
+// Hub's project ID and keepalive interval, and, for a create launch only,
+// the original create request (the optional GCS download's input, never
+// read for its *http.Request — there is none here). It is built entirely
+// from values already resolved by the admission phase, before the
+// goroutine starts (design §7 P1b-1 B-6: the goroutine never touches
+// *http.Request). A start launch (design wave 3 §2 D-f) leaves req zero.
 type launchCtx struct {
-	req             CreateAgentRequest
+	// req is the create request of a create launch (beginAsyncLaunch); the
+	// GCS workspace download reads it, and runs for create launches only.
+	// Zero for a start launch.
+	req CreateAgentRequest
+	// projectID is the Hub project ID the request was scoped to, for logs.
+	projectID string
+	// keepalive is the Hub's keepalive interval (LaunchKeepaliveSeconds);
+	// zero uses the sender's default.
+	keepalive       time.Duration
 	opts            api.StartOptions
 	mgr             agent.Manager
+	runtimeName     string
 	key             launchKey
 	sharedWorkspace bool
 	// owned is the flat instance's ownership mirror for this run, handed
@@ -148,10 +160,11 @@ type launchCtx struct {
 	afterStartSelected func(*launchSender)
 }
 
-// runLaunch is the async-create launch goroutine (design §3.8.2 step 5). It
-// runs with ctx' = WithDeadline(WithoutCancel(the admission context),
+// runLaunch is the async launch goroutine of a create (design §3.8.2 step
+// 5) or of a start of an existing agent (design wave 3 §2 D-f). It runs
+// with ctx' = WithDeadline(WithoutCancel(the admission context),
 // receivedAt + LaunchTimeoutSeconds - 20s), built by the caller
-// (beginAsyncLaunch) before this goroutine starts.
+// (acceptAsyncLaunch) before this goroutine starts.
 func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx) {
 	// A flat instance's ownership mirror, handed over when the launch was
 	// accepted, is released when the launch ends, on every return before
@@ -166,9 +179,21 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 	defer s.releaseOwnedMirror(lc.opts.RunID, lc.owned)
 	defer rec.cancel() // ctx' must not outlive runLaunch on any path
 	defer s.launchRegistry.Finish(lc.key, rec)
-	defer removeLaunchMarkerIfMatches(lc.opts.ProjectPath, lc.sharedWorkspace, lc.key.Slug, rec.ID)
+	// Runs just before Finish, after every report and cleanup.
+	defer s.endLaunchJournal(rec)
+	// The marker is kept when deleting the agent's files failed, or the
+	// terminal report got no answer (a retried report may confirm a
+	// clean-up, ptone/scion#5186): the
+	// retry at the next boot checks it before deleting them
+	// (ptone/scion#5177), and removes it once it settles.
+	defer func() {
+		if !rec.filesCleanupFailed.Load() && !rec.terminalUndelivered.Load() {
+			removeLaunchMarkerIfMatches(lc.opts.ProjectPath, lc.sharedWorkspace, lc.key.Slug, rec.ID)
+		}
+	}()
 
-	sender := newLaunchSender(s, rec, rec.AgentID, s.launchInstanceID, time.Duration(lc.req.LaunchKeepaliveSeconds)*time.Second)
+	sender := newLaunchSender(s, rec, rec.AgentID, s.launchInstanceID, lc.keepalive)
+	rec.journal.setSender(sender)
 	// The keepalive runs throughout, including while the claim itself is
 	// still blocked on backoff (design §3.8.5), so it starts before
 	// SendClaim, not after.
@@ -190,6 +215,10 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 		switch {
 		case errors.Is(claimErr, errAbortedByKeepalive):
 			s.handleKeepaliveAbort(sender, rec, lc)
+			return
+		case errors.Is(claimErr, context.Canceled) && shutdownCancelled(ctx):
+			// The broker is shutting down (design wave 3 §1 C-e).
+			s.failLaunch(ctx, sender, rec, lc, false, currentStep, api.LaunchCodeBrokerRestarted, launchShutdownMessage, "")
 			return
 		case errors.Is(claimErr, context.Canceled):
 			// A local stop/delete (launchRegistry.CancelLocalFor) woke the
@@ -245,7 +274,7 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 			// The report carries fixed text (ptone/scion#3113): the os error
 			// names broker filesystem paths. The full error is logged here.
 			s.agentLifecycleLog.Error("runLaunch: failed to write launch marker; failing the launch rather than risk undeletable files",
-				"agent_id", rec.AgentID, "project_id", lc.req.ProjectID, "run_id", lc.opts.RunID,
+				"agent_id", rec.AgentID, "project_id", lc.projectID, "run_id", lc.opts.RunID,
 				"launch_id", rec.ID, "error", err)
 			s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, currentStep, api.LaunchCodeRuntimeError, runtimeOpError("write launch marker", err).Error(), "")
 			return
@@ -256,14 +285,25 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 		return
 	}
 
-	// Step 3: optional GCS workspace download, identical to the synchronous
-	// path's admission step (§3.1), just run here instead.
+	// Step 3: optional GCS workspace download (create launches only),
+	// identical to the synchronous create's admission step (§3.1), just run
+	// here instead. A start launch has no create request and downloads
+	// nothing, as a synchronous start does not.
 	download := s.downloadWorkspaceFromGCS
 	if lc.downloadWorkspaceFromGCS != nil {
 		download = lc.downloadWorkspaceFromGCS
 	}
+	if rec.Kind != store.LaunchKindCreate {
+		download = func(_ context.Context, _ CreateAgentRequest, opts api.StartOptions) (api.StartOptions, string, string, error) {
+			return opts, "", "", nil
+		}
+	}
 	opts, _, dlMessage, dlErr := download(ctx, lc.req, lc.opts)
 	if dlErr != nil {
+		if shutdownCancelled(ctx) {
+			s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, currentStep, api.LaunchCodeBrokerRestarted, launchShutdownMessage, "")
+			return
+		}
 		if locallyCancelled(ctx) {
 			// Same rule as Start's local-cancel case below: keyed on ctx',
 			// not on the error the download returned.
@@ -286,11 +326,20 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 	// A flat instance's ownership mirror checkpoint (installed by
 	// buildStartContext) runs first.
 	lc.opts.Checkpoint = chainCheckpoint(lc.opts.Checkpoint, sender.Checkpoint)
-	lc.opts.OnResourceCreated = rec.AddHandle
+	// Each handle is journalled as it is recorded (design wave 3 §1 C-a
+	// write 2), so a restarted broker can remove it.
+	lc.opts.OnResourceCreated = func(h agent.ResourceHandle) {
+		rec.AddHandle(h)
+		rec.journal.update()
+	}
 	// The non-blocking step hook (design wave 3 §3 E-b): the runtime
 	// records each step it reaches, and the progress poster reports the
-	// latest one to the Hub at most once per progressInterval.
-	lc.opts.Progress = sender.Progress
+	// latest one to the Hub at most once per progressInterval. A step
+	// change also queues one journal write, without blocking.
+	lc.opts.Progress = func(step, message string) {
+		sender.Progress(step, message)
+		rec.journal.stepChanged()
+	}
 	sender.StartProgress(ctx)
 	// Deferred after the keepalive's stop/wait pair, so it runs before
 	// them: StopKeepalive closes the channel the poster also exits on.
@@ -311,6 +360,19 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 	}
 	startCh := make(chan startResult, 1)
 	go func() {
+		// A runtime panic in Manager.Start would end the whole broker
+		// process from this goroutine (net/http's per-request recovery does
+		// not reach it). It becomes the start's error instead, so the
+		// launch ends failed and cleans up as for any failure, as the
+		// synchronous start's reportRuntimePanic contains it there.
+		defer func() {
+			if p := recover(); p != nil {
+				s.agentLifecycleLog.Error("runLaunch: Manager.Start panicked",
+					"agent_id", rec.AgentID, "launch_id", rec.ID, "panic", p, "stack", string(debug.Stack()))
+				err := s.completeOwnedStart(ctx, lc.mgr, lc.opts.RunID, fmt.Errorf("panic: %v", p), false)
+				startCh <- startResult{nil, err}
+			}
+		}()
 		ownedKey := s.ownedRunKeyFor(lc.opts.RunID)
 		rec.ownedRunMu.Lock()
 		rec.ownedRun = ownedKey
@@ -348,6 +410,13 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 	}
 
 	if sr.err != nil {
+		if shutdownCancelled(ctx) {
+			// The broker is shutting down (design wave 3 §1 C-e): report
+			// broker_restarted, then clean up on a confirming answer, as
+			// for any failure. Keyed on ctx', like the local-cancel case.
+			s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, stepOr(sender.LastStep(), api.LaunchStepLaunching), api.LaunchCodeBrokerRestarted, launchShutdownMessage, "")
+			return
+		}
 		if locallyCancelled(ctx) {
 			// A local stop/delete (launchRegistry.CancelLocalFor) woke Start
 			// via ctx' cancellation, not a real deadline (the
@@ -368,6 +437,7 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 			// delete is conditional on the identity recorded at create
 			// time, so a newer launch's same-named resources are untouched.
 			if !alreadyCompleted && !sender.IsCompleted() {
+				rec.resourcesOnlyCleanup.Store(true)
 				s.cleanupLaunchResources(lc.mgr, rec)
 			}
 			return
@@ -380,9 +450,24 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 		code, step, message := classifyStartError(ctx, sr.err, lc.opts.TemplateName, sender.LastStep())
 		// message is fixed text for the client (ptone/scion#3113); the
 		// full error reaches only the broker's own log.
-		s.agentLifecycleLog.Error("runLaunch: agent start failed", append([]any{
-			"agent_id", rec.AgentID, "project_id", lc.req.ProjectID, "run_id", lc.opts.RunID,
-			"launch_id", rec.ID, "error_code", code, "error", sr.err}, runtimeFailureLogAttrs(sr.err)...)...)
+		// A skill failure anywhere in the error chain has its full text
+		// logged once, with a correlation id, whatever the launch code (a
+		// resolver cut off by the launch deadline reports launch_timeout).
+		// The stored text is the skill failure's fixed text only for
+		// skill_resolution_failed.
+		launchSkill := skillFailureFrom(sr.err, lc.opts.RunID)
+		s.agentLifecycleLog.Error("runLaunch: agent start failed", append(append([]any{
+			"agent_id", rec.AgentID, "project_id", lc.projectID, "run_id", lc.opts.RunID,
+			"launch_id", rec.ID, "error_code", code, "runtime", lc.runtimeName, "profile", lc.opts.Profile},
+			failureLogAttrs(sr.err, launchSkill)...),
+			runtimeCauseLogAttrs(sr.err, launchSkill)...)...)
+		if launchSkill != nil {
+			s.logSkillResolutionFailure(launchSkill,
+				"agent_id", rec.AgentID, "project_id", lc.projectID, "run_id", lc.opts.RunID, "launch_id", rec.ID)
+			if code == ErrCodeSkillResolution {
+				message = launchSkill.publicText()
+			}
+		}
 		if sender.CheckpointUnreachable() {
 			// A pre-create checkpoint blocked until ctx' expired with no
 			// definitive Hub answer (design §3.8.2: failed{hub_unreachable}).
@@ -398,7 +483,7 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 	// Step 6: success. Send succeeded even if an earlier gate already
 	// answered completed (design §3.8.2 step 5.6, F3): "This also applies
 	// after an earlier completed answer."
-	terminalCtx, cancel := terminalContext(rec.Deadline)
+	terminalCtx, cancel := s.launchTerminalContext(rec.Deadline)
 	defer cancel()
 	var info *hubclient.AgentLaunchReportInfo
 	if sr.info != nil {
@@ -423,13 +508,19 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 			WorkspacePlacement:  sr.info.WorkspacePlacement,
 		}
 	}
+	// Journalled before it is sent (design wave 3 §1 C-a write 3): a
+	// restarted broker resends it unchanged and never turns it into a
+	// failure.
+	rec.journal.terminal(journalTerminal{Succeeded: true, AgentInfo: info})
 	result, err := sender.SendTerminal(terminalCtx, true, "", "", "", "", info)
 	if err != nil {
 		// No definitive answer by the TTL: no cleanup (same rule as a
-		// failed report, design §3.8.2 step 7).
+		// failed report, design §3.8.2 step 7); the journal record is kept so
+		// the next boot resends the report (ptone/scion#5186).
+		rec.terminalUndelivered.Store(true)
 		s.agentLifecycleLog.Warn("runLaunch: succeeded report did not get a definitive answer within the TTL",
 			"agent_id", rec.AgentID, "launch_id", rec.ID, "error", err)
-		s.forceHeartbeatAll("create", rec.AgentID)
+		s.forceHeartbeatAll(rec.Kind, rec.AgentID)
 		return
 	}
 	if shouldCleanupAfterSucceededReport(result) {
@@ -441,16 +532,18 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 		s.cleanupAbortedLaunch(lc.mgr, rec, lc)
 		return
 	}
-	s.forceHeartbeatAll("create", rec.AgentID)
+	s.forceHeartbeatAll(rec.Kind, rec.AgentID)
 }
 
 // locallyCancelled reports whether ctx' was cancelled rather than having
-// reached its deadline. Once the keepalive-abort paths have returned, the only
-// remaining source of that cancellation is a local stop/delete
-// (launchRegistry.CancelLocalFor): runLaunch itself cancels ctx' only on the
-// KeepaliveAborted branch, which returns, and in its deferred cleanup.
+// reached its deadline, other than by the broker's shutdown drain
+// (shutdownCancelled, checked first by every caller). Once the
+// keepalive-abort paths have returned, the only remaining source of that
+// cancellation is a local stop/delete (launchRegistry.CancelLocalFor):
+// runLaunch itself cancels ctx' only on the KeepaliveAborted branch, which
+// returns, and in its deferred cleanup.
 func locallyCancelled(ctx context.Context) bool {
-	return errors.Is(ctx.Err(), context.Canceled)
+	return errors.Is(ctx.Err(), context.Canceled) && !errors.Is(context.Cause(ctx), errBrokerShutdown)
 }
 
 // handleKeepaliveAbort acts on the outcome a keepalive answer recorded
@@ -481,13 +574,16 @@ func (s *Server) failLaunch(ctx context.Context, sender *launchSender, rec *laun
 	// The terminal's own context: retries continue past ctx' (which may
 	// already be expired, e.g. the launch-timeout case) until deadline +
 	// 10 min (design §3.8.5), never ctx' itself.
-	terminalCtx, cancel := terminalContext(rec.Deadline)
+	terminalCtx, cancel := s.launchTerminalContext(rec.Deadline)
 	defer cancel()
 
+	rec.journal.terminal(journalTerminal{Step: step, ErrorCode: errorCode, Message: message, Cause: cause})
 	result, err := sender.SendTerminal(terminalCtx, false, step, errorCode, message, cause, nil)
 	if err != nil {
 		// No definitive answer by the TTL: the Hub has reaped the record by
-		// then, and `scion delete` removes the resources. No cleanup here.
+		// then. No cleanup here; the journal record is kept so the next
+		// boot resends the report (ptone/scion#5186).
+		rec.terminalUndelivered.Store(true)
 		s.agentLifecycleLog.Warn("runLaunch: failed report did not get a definitive answer within the TTL",
 			"agent_id", rec.AgentID, "launch_id", rec.ID, "error_code", errorCode, "error", err)
 		return
@@ -499,58 +595,85 @@ func (s *Server) failLaunch(ctx context.Context, sender *launchSender, rec *laun
 
 // cleanupAbortedLaunch deletes the launch's runtime resources and, for a
 // create launch whose marker still holds this launch's ID, its agent files
-// (design §3.8.4).
-func (s *Server) cleanupAbortedLaunch(mgr agent.Manager, rec *launchRecord, lc launchCtx) {
-	s.cleanupLaunchResources(mgr, rec)
+// (design §3.8.4). It returns the failed steps (cleanupFailure, each also
+// recorded on rec), or nil; a skip is not a failure.
+func (s *Server) cleanupAbortedLaunch(mgr agent.Manager, rec *launchRecord, lc launchCtx) error {
+	return errors.Join(
+		s.cleanupLaunchResources(mgr, rec),
+		s.cleanupLaunchFiles(rec, lc.opts, lc.sharedWorkspace, lc.key.Slug),
+	)
+}
 
-	if rec.Kind != store.LaunchKindCreate || lc.opts.ProjectPath == "" {
-		return
+// cleanupLaunchFiles deletes a create launch's agent files when its marker
+// still holds this launch's ID and no other run owns the files (design
+// §3.8.4). opts needs only Name, ProjectPath, HubProjectID,
+// SharedWorkspace and RunID, so boot recovery can rebuild it from the
+// launch journal.
+func (s *Server) cleanupLaunchFiles(rec *launchRecord, opts api.StartOptions, sharedWorkspace bool, slug string) error {
+	if rec.Kind != store.LaunchKindCreate || opts.ProjectPath == "" {
+		return nil
 	}
 	// The ownership checks and the removal run under the process-wide
 	// workspace lock on the agent's files.
-	lockCtx, cancelLock := context.WithTimeout(context.Background(), 60*time.Second)
+	lockWait := 60 * time.Second
+	if s.agentFilesLockWait > 0 {
+		lockWait = s.agentFilesLockWait
+	}
+	lockCtx, cancelLock := context.WithTimeout(context.Background(), lockWait)
 	defer cancelLock()
-	unlock, err := s.lockAgentFiles(lockCtx, lc.opts.ProjectPath, lc.opts.Name)
+	unlock, err := s.lockAgentFiles(lockCtx, opts.ProjectPath, opts.Name)
 	if err != nil {
 		s.agentLifecycleLog.Warn("runLaunch: skipped agent file cleanup: the agent's workspace lock is unavailable",
 			"agent_id", rec.AgentID, "launch_id", rec.ID, "error", err)
-		return
+		rec.filesCleanupFailed.Store(true)
+		return failCleanup(rec, cleanupFailFilesLock)
 	}
 	defer unlock()
-	if !launchMarkerMatches(lc.opts.ProjectPath, lc.sharedWorkspace, lc.key.Slug, rec.ID) {
+	if !launchMarkerMatches(opts.ProjectPath, sharedWorkspace, slug, rec.ID) {
 		// A newer launch's marker write means this one's files are no
 		// longer this launch's to delete (design §3.8.4).
-		return
+		return nil
 	}
-	if owner := agentFilesRunOwner(lc.opts.Name, lc.opts.ProjectPath, lc.opts.RunID); owner != "" {
+	target := agent.RunOwnerTargetFor(opts)
+	target.SharedWorkspace = target.SharedWorkspace || sharedWorkspace
+	if owner, ownerErr := agentFilesRunOwner(target, opts.RunID); ownerErr != nil {
+		// The owner of the files is unknown (ptone/scion#4771): keep them.
+		s.agentLifecycleLog.Warn("runLaunch: skipped agent file cleanup: the owner of the agent's files is unknown",
+			"agent_id", rec.AgentID, "launch_id", rec.ID, "run_id", opts.RunID, "error", ownerErr)
+		return nil
+	} else if owner != "" {
 		// The files record a different run as their owner
 		// (ptone/scion#2675): they are not this launch's to delete.
 		s.agentLifecycleLog.Info("runLaunch: skipped agent file cleanup: the agent's files belong to another run",
-			"agent_id", rec.AgentID, "launch_id", rec.ID, "run_id", lc.opts.RunID, "files_run_id", owner)
-		return
+			"agent_id", rec.AgentID, "launch_id", rec.ID, "run_id", opts.RunID, "files_run_id", owner)
+		return nil
 	}
-	if _, err := agent.DeleteAgentFiles(lc.opts.Name, lc.opts.ProjectPath, true); err != nil && !errors.Is(err, agent.ErrAgentProjectUnresolved) {
+	if _, err := agent.DeleteAgentFiles(opts.Name, opts.ProjectPath, true); err != nil && !errors.Is(err, agent.ErrAgentProjectUnresolved) {
 		s.agentLifecycleLog.Warn("runLaunch: failed to clean up agent files",
 			"agent_id", rec.AgentID, "launch_id", rec.ID, "error", err)
+		rec.filesCleanupFailed.Store(true)
+		return failCleanup(rec, cleanupFailFilesDelete)
 	}
+	return nil
 }
 
 // cleanupLaunchResources deletes the runtime resources the launch recorded
 // (design §3.8.4), on a fresh context: ctx' may already be done.
-func (s *Server) cleanupLaunchResources(mgr agent.Manager, rec *launchRecord) {
+func (s *Server) cleanupLaunchResources(mgr agent.Manager, rec *launchRecord) error {
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), scionrt.AsyncLaunchCleanupBudget)
 	defer cancel()
 	handles := rec.HandlesSnapshot()
 	if err := mgr.CleanupLaunch(cleanupCtx, handles); err != nil {
 		s.agentLifecycleLog.Warn("runLaunch: failed to clean up launch resources",
 			"agent_id", rec.AgentID, "launch_id", rec.ID, "error", err)
-		return
+		return failCleanup(rec, cleanupFailRuntimeResources)
 	}
 	// A flat instance finishes only this launch's run in its records.
 	rec.ownedRunMu.Lock()
 	key := rec.ownedRun
 	rec.ownedRunMu.Unlock()
 	s.finishCleanedRun(key, handles)
+	return nil
 }
 
 // launchFailureCause returns the cause code a failed launch report carries
@@ -572,11 +695,77 @@ func launchFailureCause(code string, err error) string {
 // still be able to retry its failed{launch_timeout} report after ctx' itself
 // has expired.
 func terminalContext(deadline time.Time) (context.Context, context.CancelFunc) {
+	return terminalContextFrom(context.Background(), deadline)
+}
+
+// terminalContextFrom is terminalContext derived from parent.
+func terminalContextFrom(parent context.Context, deadline time.Time) (context.Context, context.CancelFunc) {
 	ttl := time.Until(deadline.Add(scionrt.AsyncLaunchReportTTL))
 	if ttl < 0 {
 		ttl = 0
 	}
-	return context.WithTimeout(context.Background(), ttl)
+	return context.WithTimeout(parent, ttl)
+}
+
+// launchTerminalContext is the context of a running launch's terminal send:
+// terminalContext, also ended when a shutdown drain's wait ends, so the
+// send stops and its terminal stays in the journal for the next boot
+// (design wave 3 §1 C-e).
+func (s *Server) launchTerminalContext(deadline time.Time) (context.Context, context.CancelFunc) {
+	return terminalContextFrom(s.terminalSendContext(), deadline)
+}
+
+// shutdownCancelled reports whether ctx' was cancelled by the broker's
+// shutdown drain (DrainLaunches) rather than by a local stop or delete.
+func shutdownCancelled(ctx context.Context) bool {
+	return errors.Is(ctx.Err(), context.Canceled) && errors.Is(context.Cause(ctx), errBrokerShutdown)
+}
+
+// stepOr returns step, or def when step is empty.
+func stepOr(step, def string) string {
+	if step == "" {
+		return def
+	}
+	return step
+}
+
+// endLaunchJournal ends a launch's journal record when runLaunch returns:
+// the launch leaves the drain set, and its record is removed (design wave
+// 3 §1 C-a write 4). Once a shutdown drain's wait has ended, the record is
+// kept instead: its terminal may not have been delivered, or its cleanup
+// may have been cut short, and the next boot's recovery finishes both.
+//
+// A launch whose clean-up failed keeps its record too, as cleanup_pending,
+// so the next boot's recovery retries the clean-up (ptone/scion#5177), and
+// so does a launch whose terminal report got no hub answer, as
+// terminal_pending, so the next boot resends it (ptone/scion#5186).
+func (s *Server) endLaunchJournal(rec *launchRecord) {
+	s.untrackAsyncLaunch(rec)
+	if s.drainExpired() {
+		return
+	}
+	if rec.terminalUndelivered.Load() {
+		// The terminal report got no hub answer: its terminal_pending
+		// record stays for the next boot to resend (ptone/scion#5186).
+		s.agentLifecycleLog.Warn("runLaunch: the terminal report got no hub answer; its journal record is kept for a retry at the next broker start",
+			"agent_id", rec.AgentID, "launch_id", rec.ID, "run_id", rec.RunID)
+		return
+	}
+	if class := rec.cleanupFailure.Load(); class != nil {
+		s.agentLifecycleLog.Warn("runLaunch: launch clean-up failed; its journal record is kept for a retry at the next broker start",
+			"agent_id", rec.AgentID, "launch_id", rec.ID, "run_id", rec.RunID, "error_class", string(*class))
+		scope := ""
+		if rec.resourcesOnlyCleanup.Load() {
+			scope = cleanupScopeResources
+		}
+		if rec.journal.cleanupPending(time.Now(), scope) {
+			return
+		}
+		// The record could not be kept: remove it, as before #5177, so
+		// it never sits in launching or terminal_pending after the hub
+		// has answered.
+	}
+	rec.journal.remove()
 }
 
 // Async launch failure codes reported to the hub (alongside
@@ -694,9 +883,10 @@ func classifyStartErrorCode(err error, templateSlug string) (code, message strin
 		return api.LaunchCodeNameInUse, scionrt.ErrRunConflict.Error()
 	case errors.As(err, &skillErr):
 		// A required skill could not be resolved: the same code a
-		// synchronous create or start returns, with the error naming the
-		// skill and its cause.
-		return ErrCodeSkillResolution, err.Error()
+		// synchronous create or start returns, with a fixed reason phrase
+		// naming the skill. runLaunch adds the correlation id and logs the
+		// full error (see skillResolutionPublicText).
+		return ErrCodeSkillResolution, skillResolutionPublicText(skillErr, "")
 	case errors.Is(err, config.ErrTemplateNotFound), errors.Is(err, config.ErrHarnessConfigNotFound):
 		// The same text the synchronous create gives: it names the
 		// template or harness-config (the ptone/scion#1316 404 contract)

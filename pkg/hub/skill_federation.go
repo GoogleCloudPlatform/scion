@@ -21,37 +21,77 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 const (
 	federationTimeout     = 30 * time.Second
 	federationMaxBodySize = 10 * 1024 * 1024 // 10MB
+	// federationMaxErrorText bounds the text kept from a registry's error
+	// response: a non-OK body, or the message of a per-skill error.
+	federationMaxErrorText = 1024
 )
+
+// federationTokenPattern matches a code or correlation id from a registry
+// that is used as it is: at most 64 characters of [A-Za-z0-9._-].
+var federationTokenPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+
+// federationInvalidToken is logged in place of a registry code or
+// correlation id that federationTokenPattern does not match.
+const federationInvalidToken = "(invalid)"
+
+// boundedFederationToken returns s, a code or correlation id from a
+// registry, for the log: s when it matches federationTokenPattern or is
+// empty, else federationInvalidToken.
+func boundedFederationToken(s string) string {
+	if s == "" || federationTokenPattern.MatchString(s) {
+		return s
+	}
+	return federationInvalidToken
+}
+
+// federationStatus returns status, an HTTP status from a registry (of
+// its response or of a per-skill error), when it is in 100..599, else 0.
+func federationStatus(status int) int {
+	if status >= 100 && status <= 599 {
+		return status
+	}
+	return 0
+}
+
+// truncateUTF8 returns s cut to at most limit bytes, backing off to the
+// start of a UTF-8 sequence so that a character is not split.
+func truncateUTF8(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
+}
 
 // federateResolve proxies a skill resolve request to an external registry.
 func (s *Server) federateResolve(ctx context.Context, registryName string, skillRef ResolveSkillRef) (*ResolvedSkillResponse, *ResolveSkillError) {
 	registry, err := s.store.GetSkillRegistryByName(ctx, registryName)
 	if err != nil {
-		return nil, &ResolveSkillError{
-			URI: skillRef.URI, Code: "unknown_registry",
-			Message: fmt.Sprintf("registry %q is not configured", registryName),
-		}
+		return nil, newSkillResolveError(ctx, skillResolveSourceFederation, skillRef.URI,
+			agent.SkillErrCodeUnknownRegistry, 0, fmt.Sprintf("registry %q is not configured: %v", registryName, err))
 	}
 	if registry.Status != store.SkillRegistryStatusActive {
-		return nil, &ResolveSkillError{
-			URI: skillRef.URI, Code: "registry_disabled",
-			Message: fmt.Sprintf("registry %q is disabled", registryName),
-		}
+		return nil, newSkillResolveError(ctx, skillResolveSourceFederation, skillRef.URI,
+			agent.SkillErrCodeRegistryDisabled, 0, fmt.Sprintf("registry %q is disabled", registryName))
 	}
 	if registry.Type != store.SkillRegistryTypeHub {
-		return nil, &ResolveSkillError{
-			URI: skillRef.URI, Code: "wrong_registry_type",
-			Message: fmt.Sprintf("registry %q is type %q, not hub", registryName, registry.Type),
-		}
+		return nil, newSkillResolveError(ctx, skillResolveSourceFederation, skillRef.URI,
+			agent.SkillErrCodeWrongRegistryType, 0, fmt.Sprintf("registry %q is type %q, not hub", registryName, registry.Type))
 	}
 
 	resolvePath := registry.ResolvePath
@@ -72,12 +112,14 @@ func (s *Server) federateResolve(ctx context.Context, registryName string, skill
 	}
 	body, err := json.Marshal(proxyReq)
 	if err != nil {
-		return nil, &ResolveSkillError{URI: skillRef.URI, Code: "internal_error", Message: err.Error()}
+		return nil, newSkillResolveError(ctx, skillResolveSourceFederation, skillRef.URI,
+			agent.SkillErrCodeInternalError, 0, err.Error())
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, resolveURL, bytes.NewReader(body))
 	if err != nil {
-		return nil, &ResolveSkillError{URI: skillRef.URI, Code: "internal_error", Message: err.Error()}
+		return nil, newSkillResolveError(ctx, skillResolveSourceFederation, skillRef.URI,
+			agent.SkillErrCodeInternalError, 0, err.Error())
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	if registry.AuthToken != "" {
@@ -86,41 +128,45 @@ func (s *Server) federateResolve(ctx context.Context, registryName string, skill
 
 	resp, err := s.federationClient.Do(httpReq)
 	if err != nil {
-		return nil, &ResolveSkillError{
-			URI: skillRef.URI, Code: "federation_error",
-			Message: fmt.Sprintf("failed to connect to registry %q: %v", registryName, err),
-		}
+		return nil, newSkillResolveError(ctx, skillResolveSourceFederation, skillRef.URI,
+			agent.SkillErrCodeFederationError, 0, fmt.Sprintf("failed to connect to registry %q: %v", registryName, err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, &ResolveSkillError{
-			URI: skillRef.URI, Code: "federation_error",
-			Message: fmt.Sprintf("registry %q returned %d: %s", registryName, resp.StatusCode, string(respBody)),
-		}
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, federationMaxErrorText))
+		return nil, newSkillResolveError(ctx, skillResolveSourceFederation, skillRef.URI,
+			agent.SkillErrCodeFederationError, federationStatus(resp.StatusCode),
+			fmt.Sprintf("registry %q returned %d: %s", registryName, resp.StatusCode, string(respBody)),
+			"remote_status", resp.StatusCode)
 	}
 
 	var resolveResp ResolveSkillsResponse
 	if err := json.NewDecoder(io.LimitReader(resp.Body, federationMaxBodySize)).Decode(&resolveResp); err != nil {
-		return nil, &ResolveSkillError{
-			URI: skillRef.URI, Code: "federation_error",
-			Message: fmt.Sprintf("failed to decode response from registry %q: %v", registryName, err),
-		}
+		return nil, newSkillResolveError(ctx, skillResolveSourceFederation, skillRef.URI,
+			agent.SkillErrCodeFederationError, 0, fmt.Sprintf("failed to decode response from registry %q: %v", registryName, err))
 	}
 
 	if len(resolveResp.Errors) > 0 {
-		return nil, &ResolveSkillError{
-			URI:     skillRef.URI,
-			Code:    resolveResp.Errors[0].Code,
-			Message: fmt.Sprintf("registry %q: %s", registryName, resolveResp.Errors[0].Message),
+		// The registry's code is returned when it is a bounded token, else
+		// federation_error; its message, code and correlation id are logged
+		// bounded, and its status is kept only when it is an HTTP status
+		// (the log keeps the raw status as remote_status).
+		remote := resolveResp.Errors[0]
+		code := agent.SkillErrCodeFederationError
+		if federationTokenPattern.MatchString(remote.Code) {
+			code = remote.Code
 		}
+		return nil, newSkillResolveError(ctx, skillResolveSourceFederation, skillRef.URI,
+			code, federationStatus(remote.Status),
+			fmt.Sprintf("registry %q: %s", registryName, truncateUTF8(remote.Message, federationMaxErrorText)),
+			"remote_status", remote.Status,
+			"remote_code", boundedFederationToken(remote.Code),
+			"remote_correlation_id", boundedFederationToken(remote.CorrelationID))
 	}
 	if len(resolveResp.Resolved) == 0 {
-		return nil, &ResolveSkillError{
-			URI: skillRef.URI, Code: "not_found",
-			Message: fmt.Sprintf("skill not found in registry %q", registryName),
-		}
+		return nil, newSkillResolveError(ctx, skillResolveSourceFederation, skillRef.URI,
+			agent.SkillErrCodeNotFound, 0, fmt.Sprintf("skill not found in registry %q", registryName))
 	}
 
 	resolved := &resolveResp.Resolved[0]
@@ -129,17 +175,15 @@ func (s *Server) federateResolve(ctx context.Context, registryName string, skill
 	if registry.TrustLevel == store.SkillRegistryTrustPinned {
 		pinnedHash, err := s.store.GetPinnedHash(ctx, registry.ID, skillRef.URI)
 		if err != nil {
-			return nil, &ResolveSkillError{
-				URI: skillRef.URI, Code: "trust_violation",
-				Message: fmt.Sprintf("no pinned hash for %q in registry %q; use 'scion skills registries pin' first", skillRef.URI, registryName),
-			}
+			return nil, newSkillResolveError(ctx, skillResolveSourceFederation, skillRef.URI,
+				agent.SkillErrCodeTrustViolation, 0,
+				fmt.Sprintf("no pinned hash for %q in registry %q; use 'scion skills registries pin' first", skillRef.URI, registryName))
 		}
 		if resolved.ContentHash != pinnedHash {
-			return nil, &ResolveSkillError{
-				URI: skillRef.URI, Code: "trust_violation",
-				Message: fmt.Sprintf("content hash mismatch for %q from registry %q: expected %s, got %s",
-					skillRef.URI, registryName, pinnedHash, resolved.ContentHash),
-			}
+			return nil, newSkillResolveError(ctx, skillResolveSourceFederation, skillRef.URI,
+				agent.SkillErrCodeTrustViolation, 0,
+				fmt.Sprintf("content hash mismatch for %q from registry %q: expected %s, got %s",
+					skillRef.URI, registryName, pinnedHash, resolved.ContentHash))
 		}
 	}
 

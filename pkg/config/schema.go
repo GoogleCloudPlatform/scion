@@ -176,6 +176,7 @@ func ValidateSettings(data []byte, schemaVersion string) ([]ValidationError, err
 		}
 		errs = append(errs, RuntimeBrokerInstanceDuplicateKeys(vs.Server.Broker.Instances)...)
 		errs = append(errs, RuntimeBrokerInstanceSharedDirSizes(vs.Server.Broker.Instances)...)
+		errs = append(errs, RuntimeBrokerInstanceNFSErrors(vs.Server.Broker.Instances, vs.Server.SharedDirStorage)...)
 	}
 	return errs, nil
 }
@@ -212,6 +213,16 @@ func ValidateAgentConfig(data []byte, schemaVersion string) ([]ValidationError, 
 // ValidateHarnessConfig validates a standalone harness-config config.yaml by
 // wrapping it in the versioned settings schema's harness_configs map.
 func ValidateHarnessConfig(data []byte) ([]ValidationError, error) {
+	return validateHarnessConfigWith(data, func(wrapped []byte) ([]ValidationError, error) {
+		return ValidateSettings(wrapped, "1")
+	})
+}
+
+// validateHarnessConfigWith wraps a harness-config config.yaml in a v1
+// settings document and validates it with validateSettings. Tests pass a
+// validator for an older settings schema (see
+// TestHarnessConfigs_ValidateAgainstPre3698Schema).
+func validateHarnessConfigWith(data []byte, validateSettings func([]byte) ([]ValidationError, error)) ([]ValidationError, error) {
 	var doc interface{}
 	if err := yaml.Unmarshal(data, &doc); err != nil {
 		return nil, fmt.Errorf("failed to parse harness config: %w", err)
@@ -228,7 +239,7 @@ func ValidateHarnessConfig(data []byte) ([]ValidationError, error) {
 		return nil, fmt.Errorf("failed to prepare harness config for validation: %w", err)
 	}
 
-	errors, err := ValidateSettings(wrappedData, "1")
+	errors, err := validateSettings(wrappedData)
 	if err != nil {
 		return nil, err
 	}
@@ -267,7 +278,13 @@ func validateAgainstSchema(data []byte, schemaVersion string, schemaFiles map[st
 	if err != nil {
 		return nil, fmt.Errorf("failed to read embedded schema: %w", err)
 	}
+	return validateDocAgainstSchemaJSON(doc, schemaPath, schemaData)
+}
 
+// validateDocAgainstSchemaJSON validates doc (already converted by
+// convertYAMLToJSON) against the JSON Schema schemaData, registered under
+// resource name schemaPath.
+func validateDocAgainstSchemaJSON(doc interface{}, schemaPath string, schemaData []byte) ([]ValidationError, error) {
 	var schemaDoc interface{}
 	if err := json.Unmarshal(schemaData, &schemaDoc); err != nil {
 		return nil, fmt.Errorf("failed to parse schema: %w", err)
