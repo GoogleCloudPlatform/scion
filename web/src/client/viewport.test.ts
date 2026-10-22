@@ -29,6 +29,7 @@ import {
   SHORT_FRAME_MAX_PX,
   TIGHT_FRAME_MAX_PX,
 } from './viewport.js';
+import { TOUCH_PRIMARY_QUERY } from '../utils/input-modality.js';
 
 interface FakeVisualViewport extends EventTarget {
   scale: number;
@@ -39,6 +40,8 @@ interface FakeVisualViewport extends EventTarget {
 interface FakeWindow extends EventTarget {
   visualViewport: FakeVisualViewport | null;
   innerHeight: number;
+  innerWidth?: number;
+  matchMedia?: (query: string) => { matches: boolean };
   scrollY: number;
   document: Document;
   scrollTo: ReturnType<typeof vi.fn>;
@@ -158,6 +161,32 @@ describe('installViewportFrame: keyboard state', () => {
     expect(root().dataset['keyboard']).toBeUndefined();
   });
 
+  it('follows a rotation with the keyboard open, and clears when the keyboard closes after it', () => {
+    install();
+    emit(vv, 'resize', { height: 480 });
+
+    // Portrait to landscape: both viewports change and the window resizes.
+    win.innerHeight = 375;
+    emit(win, 'resize', { height: 160 });
+    expect(root().style.getPropertyValue('--scion-app-height')).toBe('160px');
+    expect(root().dataset['keyboard']).toBe('open');
+
+    emit(vv, 'resize', { height: 375 });
+    expect(root().style.getPropertyValue('--scion-app-height')).toBe('');
+    expect(root().dataset['keyboard']).toBeUndefined();
+  });
+
+  it('does not count a rotation with no keyboard as a keyboard', () => {
+    install();
+    win.innerHeight = 375;
+    emit(win, 'resize', { height: 375 });
+    win.innerHeight = LAYOUT_HEIGHT;
+    emit(win, 'resize', { height: LAYOUT_HEIGHT });
+
+    expect(root().hasAttribute('style')).toBe(false);
+    expect(root().hasAttribute('data-keyboard')).toBe(false);
+  });
+
   it('does nothing while pinch-zoomed, even with a large inset', () => {
     install();
     emit(vv, 'resize', { scale: 2, height: 400 });
@@ -186,7 +215,7 @@ describe('installViewportFrame: keyboard state', () => {
     expect(win.scrollTo).not.toHaveBeenCalled();
   });
 
-  it('is a no-op on Android with resizes-content, where both viewports shrink together', () => {
+  it('sets no frame state on Android with resizes-content, where both viewports shrink together', () => {
     root().classList.add(APP_FRAME_CLASS);
     install();
     win.innerHeight = 480;
@@ -195,6 +224,166 @@ describe('installViewportFrame: keyboard state', () => {
     expect(root().hasAttribute('style')).toBe(false);
     expect(root().hasAttribute('data-keyboard')).toBe(false);
     expect(win.scrollTo).not.toHaveBeenCalled();
+  });
+});
+
+describe('installViewportFrame: Android keyboard (resizes-content)', () => {
+  const PORTRAIT_WIDTH = 375;
+
+  /** A touch-primary (or, with `touch` false, desktop) window in portrait. */
+  function installAndroid(touch = true): void {
+    win.innerWidth = PORTRAIT_WIDTH;
+    win.matchMedia = (query: string) => ({
+      matches: touch && query === TOUCH_PRIMARY_QUERY,
+    });
+    install();
+  }
+
+  /** Both viewports change together, as resizes-content does, and the window resizes. */
+  function resizeLayout(height: number, width = win.innerWidth ?? PORTRAIT_WIDTH): void {
+    win.innerHeight = height;
+    win.innerWidth = width;
+    emit(win, 'resize', { height });
+  }
+
+  function focusField(tag: 'textarea' | 'input' = 'textarea', type = 'text'): HTMLElement {
+    const field = document.createElement(tag);
+    if (field instanceof HTMLInputElement) field.type = type;
+    document.body.append(field);
+    field.focus();
+    flushFrames();
+    return field;
+  }
+
+  it('sets data-keyboard, and nothing else, when a focused field and a shrunk layout show the keyboard', () => {
+    installAndroid();
+    focusField();
+    resizeLayout(480);
+
+    expect(root().dataset['keyboard']).toBe('open');
+    expect(root().hasAttribute('style')).toBe(false);
+  });
+
+  it('clears data-keyboard when the layout grows back', () => {
+    installAndroid();
+    focusField();
+    resizeLayout(480);
+    resizeLayout(LAYOUT_HEIGHT);
+
+    expect(root().hasAttribute('data-keyboard')).toBe(false);
+  });
+
+  it('clears data-keyboard when the field loses focus', () => {
+    installAndroid();
+    const field = focusField();
+    resizeLayout(480);
+    field.blur();
+    flushFrames();
+
+    expect(root().hasAttribute('data-keyboard')).toBe(false);
+  });
+
+  it('sees a focused textarea inside a shadow root, as xterm uses', () => {
+    installAndroid();
+    const host = document.createElement('div');
+    document.body.append(host);
+    const field = document.createElement('textarea');
+    host.attachShadow({ mode: 'open' }).append(field);
+    field.focus();
+    resizeLayout(480);
+
+    expect(root().dataset['keyboard']).toBe('open');
+  });
+
+  it('does not count a shrink with no field focused, such as a split-screen resize', () => {
+    installAndroid();
+    resizeLayout(480);
+
+    expect(root().hasAttribute('data-keyboard')).toBe(false);
+  });
+
+  it('does not count a focused control that takes no text', () => {
+    installAndroid();
+    focusField('input', 'checkbox');
+    resizeLayout(480);
+
+    expect(root().hasAttribute('data-keyboard')).toBe(false);
+  });
+
+  it('treats a shrink at or below the threshold as no keyboard', () => {
+    installAndroid();
+    focusField();
+    resizeLayout(LAYOUT_HEIGHT - KEYBOARD_MIN_INSET_PX);
+    expect(root().hasAttribute('data-keyboard')).toBe(false);
+
+    resizeLayout(LAYOUT_HEIGHT - KEYBOARD_MIN_INSET_PX - 1);
+    expect(root().dataset['keyboard']).toBe('open');
+  });
+
+  it('never triggers on a desktop, even with a focused field and a much shorter window', () => {
+    installAndroid(false);
+    focusField();
+    resizeLayout(480);
+
+    expect(root().hasAttribute('data-keyboard')).toBe(false);
+  });
+
+  it('never triggers with a hardware keyboard, which leaves the layout height alone', () => {
+    installAndroid();
+    focusField();
+    emit(win, 'resize');
+
+    expect(root().hasAttribute('data-keyboard')).toBe(false);
+  });
+
+  it('keeps a baseline per orientation across rotations', () => {
+    installAndroid();
+    focusField();
+    resizeLayout(480);
+    expect(root().dataset['keyboard']).toBe('open');
+
+    // To landscape, keyboard closed: the new width starts its own baseline.
+    resizeLayout(PORTRAIT_WIDTH, LAYOUT_HEIGHT);
+    expect(root().hasAttribute('data-keyboard')).toBe(false);
+
+    // The keyboard opens in landscape.
+    resizeLayout(160, LAYOUT_HEIGHT);
+    expect(root().dataset['keyboard']).toBe('open');
+
+    // Back to portrait with the keyboard up: portrait's own baseline holds.
+    resizeLayout(480, PORTRAIT_WIDTH);
+    expect(root().dataset['keyboard']).toBe('open');
+    resizeLayout(LAYOUT_HEIGHT, PORTRAIT_WIDTH);
+    expect(root().hasAttribute('data-keyboard')).toBe(false);
+  });
+
+  it('keeps one baseline across fractional widths that round to the same pixel', () => {
+    installAndroid();
+    resizeLayout(LAYOUT_HEIGHT, PORTRAIT_WIDTH + 0.4);
+    focusField();
+    // The keyboard opens at a width that differs only below a pixel.
+    resizeLayout(480, PORTRAIT_WIDTH - 0.4);
+
+    expect(root().dataset['keyboard']).toBe('open');
+  });
+
+  it('does nothing while pinch-zoomed', () => {
+    installAndroid();
+    focusField();
+    win.innerHeight = 480;
+    emit(win, 'resize', { height: 240, scale: 2 });
+
+    expect(root().hasAttribute('data-keyboard')).toBe(false);
+  });
+
+  it('the disposer clears data-keyboard', () => {
+    installAndroid();
+    focusField();
+    resizeLayout(480);
+    dispose?.();
+    dispose = null;
+
+    expect(root().hasAttribute('data-keyboard')).toBe(false);
   });
 });
 

@@ -255,7 +255,8 @@ func (t *Transport) DoNoRetry(ctx context.Context, req *http.Request) (*http.Res
 // Redirects follow HTTPClient.CheckRedirect when it is set, and otherwise the
 // net/http default limit of 10 hops. Before either, a hop to another origin
 // has its Authorization, Proxy-Authorization and X-Serverless-Authorization
-// headers removed; same-origin hops keep the credential.
+// headers removed; same-origin hops keep the credential. The base client's
+// cookie jar, timeout and other settings are preserved.
 func (t *Transport) AuthenticatedHTTPClient() *http.Client {
 	base := t.HTTPClient
 	if base == nil {
@@ -263,30 +264,29 @@ func (t *Transport) AuthenticatedHTTPClient() *http.Client {
 	}
 	hub := parseOrigin(t.BaseURL)
 	baseCheck := base.CheckRedirect
-	return &http.Client{
-		Timeout: base.Timeout,
-		Transport: &authRoundTripper{
-			base:  base.Transport,
-			other: withoutHubOnlyLayers(base.Transport),
-			auth:  t.Auth,
-			ua:    t.UserAgent,
-			hub:   hub,
-		},
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if !sameOrigin(req.URL, hub) {
-				for _, h := range crossOriginDroppedHeaders {
-					req.Header.Del(h)
-				}
-			}
-			if baseCheck != nil {
-				return baseCheck(req, via)
-			}
-			if len(via) >= maxRedirects {
-				return fmt.Errorf("stopped after %d redirects", maxRedirects)
-			}
-			return nil
-		},
+	client := *base
+	client.Transport = &authRoundTripper{
+		base:  base.Transport,
+		other: withoutHubOnlyLayers(base.Transport),
+		auth:  t.Auth,
+		ua:    t.UserAgent,
+		hub:   hub,
 	}
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if !sameOrigin(req.URL, hub) {
+			for _, h := range crossOriginDroppedHeaders {
+				req.Header.Del(h)
+			}
+		}
+		if baseCheck != nil {
+			return baseCheck(req, via)
+		}
+		if len(via) >= maxRedirects {
+			return fmt.Errorf("stopped after %d redirects", maxRedirects)
+		}
+		return nil
+	}
+	return &client
 }
 
 // HubOnlyRoundTripper is implemented by a RoundTripper layer that adds a
@@ -393,6 +393,10 @@ func (rt *authRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 	if sameOrigin(clone.URL, rt.hub) {
 		if rt.auth != nil {
 			if err := rt.auth.ApplyAuth(clone); err != nil {
+				// The base transport will not receive this request to close its body.
+				if clone.Body != nil {
+					_ = clone.Body.Close()
+				}
 				return nil, fmt.Errorf("failed to apply auth: %w", err)
 			}
 		}

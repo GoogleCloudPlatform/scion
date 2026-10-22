@@ -113,6 +113,29 @@ func configReadProjectDir() string {
 	return projectDir
 }
 
+// cliModeEnvUnsetNote is what config unset prints, instead of the
+// still-set warning, when SCION_CLI_MODE sets cli.mode: the documented way
+// back from agent mode (cliModeAgentNote) sets it for that command only, so
+// the note says what cli.mode is without it. ok is false for any other key
+// or variable, or when that value cannot be resolved.
+func cliModeEnvUnsetNote(key, envName string) (note string, ok bool) {
+	if key != "cli.mode" || envName != "SCION_CLI_MODE" {
+		return "", false
+	}
+	without, err := config.ResolveSettingValueIgnoringEnv(configReadProjectDir(), key, envName)
+	if err != nil {
+		return "", false
+	}
+	value := "<unset>"
+	if without.Value != "" {
+		value = without.Value
+		if without.Source != "" {
+			value += " (" + without.Source + ")"
+		}
+	}
+	return fmt.Sprintf("Note: SCION_CLI_MODE sets cli.mode for this command; without it, cli.mode is now %s.", value), true
+}
+
 // cliModeAgentNote is printed when config set writes cli.mode agent: agent
 // mode removes the config commands, so config unset cannot undo it.
 const cliModeAgentNote = `Note: agent mode removes the "config" commands, so "scion config unset cli.mode" is not available afterwards.
@@ -319,7 +342,14 @@ Examples:
 		// The value the setting has now, and where it comes from.
 		now, nowErr := config.ResolveSettingValue(configReadProjectDir(), key)
 		if nowErr == nil && strings.HasPrefix(now.Source, "env ") {
-			_, _ = fmt.Fprintf(errOut, "Warning: %s is still set by %s\n", key, strings.TrimPrefix(now.Source, "env "))
+			envName := strings.TrimPrefix(now.Source, "env ")
+			if note, ok := cliModeEnvUnsetNote(key, envName); ok {
+				// The documented way back from agent mode sets
+				// SCION_CLI_MODE for this one command (ptone/scion#5483).
+				_, _ = fmt.Fprintln(errOut, note)
+			} else {
+				_, _ = fmt.Fprintf(errOut, "Warning: %s is still set by %s\n", key, envName)
+			}
 		}
 		if nowErr == nil && strings.HasPrefix(now.Source, "project-id file ") {
 			_, _ = fmt.Fprintf(errOut, "Note: %s still comes from %s\n", key, strings.TrimPrefix(now.Source, "project-id file "))

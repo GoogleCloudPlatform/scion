@@ -429,8 +429,9 @@ func TestCloudRunRun_ReuseIsRunChecked(t *testing.T) {
 // Stop then start of the same agent still works: the stop leaves run A's
 // instance, Start's pre-clean (pkg/agent/run.go) deletes every listed
 // non-running entry with its run, and Run for run B then creates a fresh
-// instance labelled run B. Cloud Run's List sets no Phase, so the listed
-// instance always counts as not running.
+// instance labelled run B. Cloud Run's List never reports "running"
+// (cloudRunInstancePhase), so the listed instance always counts as not
+// running.
 func TestCloudRunRun_StopThenStartNewRun(t *testing.T) {
 	s := newStatefulInstances()
 	rt := newStatefulCloudRunRuntime(t, s)
