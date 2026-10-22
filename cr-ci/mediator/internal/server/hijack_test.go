@@ -477,3 +477,50 @@ func TestSecretRefetchDoesNotBlockValidDeliveries(t *testing.T) {
 		t.Errorf("forged delivery: %d, want 401", code)
 	}
 }
+
+// TestSwapInheritedBudget: runner_swap logs the task time the taker inherits
+// (TASK_TIMEOUT minus the execution's age), with a WARNING below 20 minutes.
+// After a restart the age comes from the execution's creation time.
+func TestSwapInheritedBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		age     time.Duration
+		restart bool
+		budget  string
+		low     bool
+	}{
+		{"fresh runner", 0, false, "45m0s", false},
+		{"budget just at the threshold", 25 * time.Minute, false, "20m0s", false},
+		{"old runner", 30 * time.Minute, false, "15m0s", true},
+		{"old runner after a restart", 30 * time.Minute, true, "15m0s", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, harnessOpts{})
+			h.addSameRepoRun(10)
+			h.addSameRepoRun(11)
+			h.queued(100, 10)
+			h.clock.Add(tc.age)
+			if tc.restart {
+				h = newHarness(t, harnessOpts{reuseFrom: h})
+			}
+			if code, out := h.webhook(inProgress(101, 11, testRepo, "cr-job-100")); code != http.StatusOK || !strings.Contains(out, "swap") {
+				t.Fatalf("in_progress: %d %q", code, out)
+			}
+			logs := h.logs.String()
+			h.wantLog(logging.EventRunnerSwap)
+			if want := `"inherited_budget":"` + tc.budget + `"`; !strings.Contains(logs, want) {
+				t.Errorf("no %s in:\n%s", want, logs)
+			}
+			if want := `"execution_age":"` + tc.age.String() + `"`; !strings.Contains(logs, want) {
+				t.Errorf("no %s in:\n%s", want, logs)
+			}
+			gotLow := strings.Contains(logs, `"event":"`+logging.EventRunnerSwapLowBudget+`"`)
+			if gotLow != tc.low {
+				t.Errorf("runner_swap_low_budget logged = %v, want %v:\n%s", gotLow, tc.low, logs)
+			}
+			if tc.low && !strings.Contains(logs, `"severity":"WARNING"`) {
+				t.Errorf("low-budget line is not a WARNING:\n%s", logs)
+			}
+		})
+	}
+}

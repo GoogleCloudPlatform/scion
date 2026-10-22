@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/cr-ci/mediator/internal/githubapp"
 	"github.com/GoogleCloudPlatform/scion/cr-ci/mediator/internal/logging"
@@ -61,19 +62,20 @@ func (s *Server) checkRunnerJob(ctx context.Context, repoFull string, jobID, run
 		serveRepo = rec.repo
 	}
 	if reason == "" {
+		v := newView()
 		if rec == nil {
-			rec = &runnerRecord{repo: repo, serve: served, at: s.o.Now()}
+			rec = &runnerRecord{repo: repo, serve: served, at: s.launchedAt(ctx, v, runnerName)}
 			s.runners[runnerName] = rec
 		}
 		if !rec.reassigned {
 			rec.reassigned = true
-			s.log().Info("runner picked up another legitimate job", append(attrs, "event", logging.EventRunnerSwap)...)
+			s.logSwap(rec, attrs)
 		}
 		// The displaced job needs a runner; the job that took this runner
 		// owns a free name for it. If the taker already has a runner, that
 		// one is now idle and serves the displaced job: rebind its record,
 		// so that cancelling the displaced job while queued stops it.
-		out, err := s.dispatchLocked(ctx, newView(), serveRepo, served, rec.runID, jobID, "swap")
+		out, err := s.dispatchLocked(ctx, v, serveRepo, served, rec.runID, jobID, "swap")
 		if err != nil {
 			return "", err
 		}
@@ -117,4 +119,41 @@ func (s *Server) checkRunnerJob(ctx context.Context, repoFull string, jobID, run
 		s.log().Error("re-serving the displaced job failed; reconcile will retry", append(attrs, "event", logging.EventError, "error", err.Error())...)
 	}
 	return "killed", nil
+}
+
+// lowSwapBudget: below this, a job that took over a runner is warned about
+// (runner_swap_low_budget); it may hit the task timeout.
+const lowSwapBudget = 20 * time.Minute
+
+// logSwap logs a legitimate runner swap with the time budget the job that took
+// the runner inherits: the execution's TASK_TIMEOUT minus its age.
+// RUNNER_IDLE_TIMEOUT bounds the age at which a runner can still take a job,
+// so the budget is at least TASK_TIMEOUT - RUNNER_IDLE_TIMEOUT. Nothing is
+// moved: the warning is for diagnosis.
+func (s *Server) logSwap(rec *runnerRecord, attrs []any) {
+	age := s.o.Now().Sub(rec.at)
+	budget := s.o.TaskTimeout - age
+	attrs = append(attrs, "execution_age", age.Round(time.Second).String(), "inherited_budget", budget.Round(time.Second).String())
+	s.log().Info("runner picked up another legitimate job", append(attrs, "event", logging.EventRunnerSwap)...)
+	if budget < lowSwapBudget {
+		s.log().Warn("job inherited a runner with little task time left; it may hit the task timeout",
+			append(attrs, "event", logging.EventRunnerSwapLowBudget, "threshold", lowSwapBudget.String())...)
+	}
+}
+
+// launchedAt returns when runnerName's execution was created, for a runner this
+// process has no record of (after a restart). It falls back to now when the
+// execution is not found or the list fails, which overstates the budget.
+func (s *Server) launchedAt(ctx context.Context, v *view, runnerName string) time.Time {
+	execs, err := s.execsIn(ctx, v)
+	if err != nil {
+		s.log().Warn("listing executions failed; runner age unknown", "event", logging.EventError, "runner", runnerName, "error", err.Error())
+		return s.o.Now()
+	}
+	for _, e := range execs {
+		if e.RunnerName == runnerName && !e.Created.IsZero() {
+			return e.Created
+		}
+	}
+	return s.o.Now()
 }

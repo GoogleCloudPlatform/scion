@@ -67,7 +67,7 @@ commands without `--apply`; read that transcript before applying.
 | :--- | :--- |
 | Any config value the mediator uses (`TARGET_REPOS`, `MAX_CONCURRENT_RUNNERS`, `CLAIM_TTL`, ...) | edit `config.env`, `scripts/deploy-mediator.sh --apply` |
 | Mediator code | commit, then `scripts/deploy-mediator.sh --apply` (new tag from the source tree hash) |
-| Runner shape (`RUNNER_CPU`, `RUNNER_MEMORY`, `RUNNER_DISK_GI`, `TASK_TIMEOUT`) | edit `config.env`, `scripts/deploy-job.sh --apply` |
+| Runner shape (`RUNNER_CPU`, `RUNNER_MEMORY`, `RUNNER_DISK_GI`, `TASK_TIMEOUT`, `RUNNER_IDLE_TIMEOUT`) | edit `config.env`, `scripts/deploy-job.sh --apply` |
 | Runner image | see [Runner image updates](#runner-image-updates) |
 | `RECONCILE_SCHEDULE` or `MEDIATOR_URL` | `scripts/deploy-scheduler.sh --apply` (after `deploy-mediator.sh` for `MEDIATOR_URL`) |
 
@@ -173,7 +173,8 @@ logged (a unit test enforces this).
 | `claim_consumed` / `claim_rejected` | INFO / WARNING | Runner fetched its JIT config / was refused: `identity_missing` or `identity_invalid` (401, claim kept; repeated ones from outside the runner are worth a look), or an unknown, used or expired token (410) |
 | `SECURITY_REJECT_FORK_PR` | WARNING | Fork-PR or `pull_request_target` run refused a runner. **Alert on this.** |
 | `SECURITY_KILL_HIJACKED_RUNNER` | ERROR | An untrusted job started on a cr-ci runner minted for another job; the execution was cancelled and the registration deleted ([architecture](architecture.md#residual-risk-label-matched-job-assignment)). **Alert on this and review the run.** |
-| `runner_swap` | INFO | A runner started a different legitimate job; harmless |
+| `runner_swap` | INFO | A runner started a different legitimate job; harmless. `inherited_budget` is the task time that job has left (`TASK_TIMEOUT` minus `execution_age`) |
+| `runner_swap_low_budget` | WARNING | That job inherited less than 20 minutes; if it fails on the task timeout, re-run it. Frequent ones: lower `RUNNER_IDLE_TIMEOUT` or raise `TASK_TIMEOUT` ([architecture](architecture.md#flow)) |
 | `webhook_rejected` | WARNING | Bad signature, malformed payload or repo outside `TARGET_REPOS` |
 | `webhook_ignored` | INFO / DEBUG / WARNING | Not `workflow_job`, or job without `RUNNER_LABEL`; WARNING with `reason=labels_unservable` when a job has `RUNNER_LABEL` plus other labels a cr-ci runner cannot satisfy (fix its `runs-on`) |
 | `reconcile` | INFO | Reconcile summary (reaped, backfilled, left queued, errors) |
@@ -203,6 +204,12 @@ logged (a unit test enforces this).
   registration still carries the job's runner name. Look for
   `SECURITY_KILL_HIJACKED_RUNNER` followed by an `error` with
   `stage`/`source=hijack_recovery`; no action is needed.
+- **Runner execution ends with `idle_timeout:` in its log:** expected, exit 0.
+  The runner started no job within `RUNNER_IDLE_TIMEOUT` of its start (usually
+  its job was taken by another runner or cancelled), so it stopped itself rather
+  than wait for a job it could only give part of the task timeout. The next
+  `/reconcile` reaps its registration (`runner_reaped`) and re-serves its job if
+  that is still queued.
 - **Legitimate job killed with `reason=run_lookup_failed`:** a GitHub API
   error hit the hijack guard during a runner swap; the guard fails closed.
   Re-run the job.

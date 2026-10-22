@@ -112,9 +112,11 @@ a runner's execution by its `RUNNER_NAME` env, never by job ID.
 3. **Runner start.** The entrypoint points the workspace, temp dirs and Go
    caches at `/scratch`, so they do not consume RAM. Cloud Run's root
    filesystem is in memory. The entrypoint exchanges the claim token for the
-   JIT config (contract below) and `exec`s `run.sh --jitconfig` as PID 1.
-   GitHub assigns exactly one job; the process exits; the execution ends and
-   billing stops.
+   JIT config (contract below) and starts `run.sh --jitconfig` as its child
+   (it forwards Cloud Run's SIGTERM and reports the runner's real exit code;
+   [runner README](../runner/README.md)). GitHub assigns exactly one job; the
+   process exits; the execution ends and billing stops. A runner that gets no
+   job within `RUNNER_IDLE_TIMEOUT` stops itself (step 4, inherited time budget).
 4. **Hijack guard (in progress or completed on a cr-ci runner).** For any
    `in_progress` or `completed` event whose `runner_name` is `cr-job-*`,
    whatever the job's labels, the mediator compares the job with the job the
@@ -133,6 +135,25 @@ a runner's execution by its `RUNNER_NAME` env, never by job ID.
      reassigned, and make sure the job that took it has a runner named for it
      (a no-op if it has one). That runner, idle, serves the displaced job.
      Runners and queued jobs stay one to one.
+
+   **Inherited time budget.** The job that takes a runner gets only what is left
+   of that execution's `TASK_TIMEOUT` (P6: a job taken by a 40-minute-old runner
+   was killed 5 minutes later). Two things bound this:
+   - **Idle timeout.** The entrypoint stops a runner that has not started a job
+     within `RUNNER_IDLE_TIMEOUT` (default 10m, at least 1m, at most half of
+     `TASK_TIMEOUT`) of the container start, gracefully (SIGTERM to `run.sh`), and
+     exits 0 with an `idle_timeout:` log line. So a runner can only take a job
+     while it is young, and **every job gets at least
+     `TASK_TIMEOUT - RUNNER_IDLE_TIMEOUT`** (35 minutes with the defaults). The
+     offline registration is reaped by the next `/reconcile` (it is aged from its
+     launch, so with the default idle timeout it is already past the five-minute
+     reap age), which also re-serves the job it was launched for if that is still
+     queued.
+   - **Logging.** `runner_swap` carries `execution_age` and `inherited_budget`
+     (`TASK_TIMEOUT` minus the age, from the launch time in memory or, after a
+     restart, from the execution's creation time). Below 20 minutes a WARNING
+     `runner_swap_low_budget` follows. The taker is not moved: GitHub has already
+     started it there.
 
    `/reconcile` repeats this check for every `in_progress` job on a `cr-job-*`
    runner, which covers a missed webhook.
