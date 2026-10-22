@@ -52,6 +52,11 @@ func StaticCapabilities(rt scionrt.Runtime, nodeImageRegistry string) *hubclient
 		// This broker's reprovision reuses an empty-per-agent workspace in
 		// place (miller79/scion#167).
 		ReprovisionEmptyPerAgent: true,
+		// This broker re-renders the provision-rendered keys the hub lists
+		// in changed_fields at start (ptone/scion#3982).
+		ChangedFields: true,
+		// This broker applies cleared_fields at start (ptone/scion#4890).
+		ClearedFields: true,
 		// This broker redeems attachment delivery capabilities and writes
 		// the files into the agent's home (ptone/scion#4596).
 		AttachmentDelivery: true,
@@ -116,6 +121,8 @@ func StaticCapabilityNames(rt scionrt.Runtime) []string {
 	add(c.AgentMove, "agentMove")
 	add(c.AgentMoveRecreate, "agentMoveRecreate")
 	add(c.ReprovisionEmptyPerAgent, "reprovisionEmptyPerAgent")
+	add(c.ChangedFields, "changedFields")
+	add(c.ClearedFields, "clearedFields")
 	add(c.AttachmentDelivery, "attachmentDelivery")
 	return names
 }
