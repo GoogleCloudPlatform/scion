@@ -53,14 +53,19 @@ import {
 /** The multi-file page's sub-resources, relative to the proxy root. */
 const SUBRESOURCES = ['site.css', 'app.js', 'img/dot.png'] as const;
 
-/** Start of the no-credentials answer's body. */
+/** Parts of the no-credentials answer's body: its start and the docs section it points to. */
 const NO_CREDENTIALS_BODY_START = 'Scion port proxy: ';
+const NO_CREDENTIALS_DOCS_ANCHOR = '/port-forwarding/#multi-file-apps';
 
 let hub: HubState;
 let suite: SuiteState;
 let context: BrowserContext;
 let identityId = '';
-/** Requests the browser context sent with an Authorization header. */
+/**
+ * Page requests the browser context sent with an Authorization header.
+ * Every journey request is made by a page; only global setup and the
+ * redeem in beforeAll use the context's request API, without one.
+ */
 const bearerRequests: string[] = [];
 
 /** The path proxy root of an agent's fixture port, without the trailing slash. */
@@ -197,7 +202,9 @@ for (const transport of TRANSPORTS) {
           .soft(headers['x-scion-proxy-hint'], `${name} hint header`)
           .toBe('sandboxed-subresource');
         expect.soft(sent['cookie'], `${name} request cookie`).toBeUndefined();
-        expect.soft(await res.text(), `${name} body`).toContain(NO_CREDENTIALS_BODY_START);
+        const body = await res.text();
+        expect.soft(body.startsWith(NO_CREDENTIALS_BODY_START), `${name} body start`).toBe(true);
+        expect.soft(body, `${name} body docs link`).toContain(NO_CREDENTIALS_DOCS_ANCHOR);
       }
       // The module never ran and the stylesheet never applied.
       await expect(page.locator('#probe')).toHaveText('');
@@ -208,17 +215,20 @@ for (const transport of TRANSPORTS) {
     test('journey 2: the bare proxy URL answers 308 to the trailing slash', async () => {
       const agentId = agentFor(transport);
       const bare = `${proxyBase(agentId)}?view=e2e&n=1`;
-      const res = await context.request.get(bare, { maxRedirects: 0 });
-      expect(res.status()).toBe(308);
-      const location = res.headers()['location'] ?? '';
-      expect(new URL(location, bare).toString()).toBe(`${proxyBase(agentId)}/?view=e2e&n=1`);
-      await res.dispose();
-
-      // A browser navigation follows it and lands on the proxy root.
+      const root = `${proxyBase(agentId)}/?view=e2e&n=1`;
+      // A page navigation, so the request guard sees every hop.
       const page = await context.newPage();
       const nav = await page.goto(bare, { waitUntil: 'load' });
       expect(nav?.status()).toBe(200);
-      expect(page.url()).toBe(`${proxyBase(agentId)}/?view=e2e&n=1`);
+      expect(page.url()).toBe(root);
+
+      // The first hop: the bare URL, answered 308 with the query kept.
+      const first = nav?.request().redirectedFrom();
+      expect(first?.url()).toBe(bare);
+      const redirect = await first?.response();
+      expect(redirect?.status()).toBe(308);
+      const location = (await redirect?.allHeaders())?.['location'] ?? '';
+      expect(new URL(location, bare).toString()).toBe(root);
       await page.close();
     });
   });

@@ -54,8 +54,9 @@ No container runtime or credentials are needed.
   writes its ready file once the port answers through the hub.
 - **Browser**: a member test identity, made project-admin of the fixture
   project, redeems a web-login code in its own browser context. The
-  journeys use that session cookie only; the spec fails any request that
-  carries an Authorization header.
+  journeys use that session cookie only. Every journey request is made by a
+  page, and the spec fails any page request that carries an Authorization
+  header (the 308 check reads the redirect hop of a page navigation).
 
 No traces, videos or screenshots are kept: they would hold the session
 cookie.

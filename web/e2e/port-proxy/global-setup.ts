@@ -123,7 +123,7 @@ async function globalSetup(): Promise<void> {
     await setUp(dir);
   } catch (err) {
     // Stop whatever did start before reporting the failure.
-    globalTeardown();
+    await globalTeardown();
     throw err;
   }
 }

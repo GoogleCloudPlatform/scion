@@ -100,5 +100,5 @@ export function removeStateDir(): void {
     console.info(`[teardown] E2E_KEEP_HUB_STATE=1: kept ${dir} (contains hub credentials)`);
     return;
   }
-  fs.rmSync(dir, { recursive: true, force: true });
+  fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
 }
