@@ -460,6 +460,7 @@ var testAdminSettingsKeyPolicy = map[string]testAdminPolicy{
 	"telemetry.cloud.protocol":                 testAdminPolicyDeny,
 	"telemetry.cloud.headers":                  testAdminPolicyDeny,
 	"telemetry.cloud.provider":                 testAdminPolicyDeny,
+	"telemetry.cloud.gcp_project_id":           testAdminPolicyDeny,
 	"telemetry.cloud.tls":                      testAdminPolicyDeny,
 	"telemetry.cloud.tls.enabled":              testAdminPolicyDeny,
 	"telemetry.cloud.tls.insecure_skip_verify": testAdminPolicyDeny,
