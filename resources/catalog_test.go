@@ -163,7 +163,7 @@ func TestPlatformSkillsFS_ScionWebServing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading embedded scion-web-serving skill: %v", err)
 	}
-	raw := string(data)
+	raw := strings.ReplaceAll(string(data), "\r\n", "\n")
 
 	front, _, ok := strings.Cut(strings.TrimPrefix(raw, "---\n"), "\n---\n")
 	if !strings.HasPrefix(raw, "---\n") || !ok {
