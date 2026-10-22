@@ -353,8 +353,8 @@ func TestLifecycleStore_ObserverOffChangesNothing(t *testing.T) {
 }
 
 // TestLifecycleStore_ConcurrentWritersDenseRevisions: concurrent observed
-// writes on distinct agents and on one agent commit dense per-agent
-// revisions in commit order.
+// writes on distinct agents commit dense per-agent revisions (same-agent
+// races: TestLifecycleStore_SameAgentConcurrentWriters).
 func TestLifecycleStore_ConcurrentWritersDenseRevisions(t *testing.T) {
 	f := newLifecycleFixture(t)
 	var wg sync.WaitGroup
@@ -378,6 +378,76 @@ func TestLifecycleStore_ConcurrentWritersDenseRevisions(t *testing.T) {
 	for _, id := range ids {
 		evs, _ := lifecycleEvents(t, f.cs, id)
 		assert.Equal(t, "created@1 deleted@2(hard)", lcSeq(evs))
+	}
+}
+
+// TestLifecycleStore_SameAgentConcurrentWriters is the design section 8
+// same-agent concurrency test: every slice-1 observed writer races on ONE
+// agent (soft finalize, hard finalize, DeleteAgent and the purge), for
+// several agents at once. Whatever the commit order, each agent gets
+// created(1) and exactly one deleted(2): dense revisions in commit order,
+// no resynced, no write rolled back by a cursor conflict, and no cursor
+// left behind. On PostgreSQL (integration build) this exercises the agent
+// row locks that serialize the observers; on SQLite the single writer.
+func TestLifecycleStore_SameAgentConcurrentWriters(t *testing.T) {
+	f := newLifecycleFixture(t)
+	ctx := context.Background()
+	const agents = 6
+	ids := make([]string, agents)
+	for i := range ids {
+		ids[i] = f.create(fmt.Sprintf("lc-same-%d", i)).ID
+	}
+	live := store.DeletionPredicate{DeletedAtNull: true}
+	var wg sync.WaitGroup
+	errs := make(chan error, agents*4)
+	for _, id := range ids {
+		id := id
+		writers := []func() error{
+			func() error {
+				now := time.Now()
+				_, err := f.cs.FinalizeAgentDeletion(ctx, id, live, store.DeletionFinalizeSoft, store.DeletionFields{DeletedAt: &now}, nil)
+				return err
+			},
+			func() error {
+				_, err := f.cs.FinalizeAgentDeletion(ctx, id, live, store.DeletionFinalizeHard, store.DeletionFields{}, nil)
+				return err
+			},
+			func() error {
+				err := f.cs.DeleteAgent(ctx, id)
+				if errors.Is(err, store.ErrNotFound) {
+					return nil // another writer removed it first
+				}
+				return err
+			},
+			func() error {
+				_, err := f.cs.PurgeDeletedAgentsByID(ctx, []string{id}, time.Now().Add(time.Hour))
+				return err
+			},
+		}
+		for _, w := range writers {
+			wg.Add(1)
+			go func(w func() error) {
+				defer wg.Done()
+				if err := w(); err != nil {
+					errs <- err
+				}
+			}(w)
+		}
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("a concurrent writer failed (a cursor conflict would roll a product write back): %v", err)
+	}
+	for _, id := range ids {
+		evs, _ := lifecycleEvents(t, f.cs, id)
+		require.Len(t, evs, 2, "agent %s: %s", id, lcSeq(evs))
+		assert.Equal(t, tc.TransitionCreated, evs[0].Transition)
+		assert.Equal(t, int64(1), evs[0].TransitionRevision)
+		assert.Equal(t, tc.TransitionDeleted, evs[1].Transition, "exactly one deleted: %s", lcSeq(evs))
+		assert.Equal(t, int64(2), evs[1].TransitionRevision, "dense revisions: %s", lcSeq(evs))
+		assert.Contains(t, []string{tc.DeleteModeSoft, tc.DeleteModeHard}, evs[1].DeleteMode)
+		assert.False(t, cursorExists(t, f.cs, id), "agent %s: the row is gone, so is its cursor", id)
 	}
 }
 
