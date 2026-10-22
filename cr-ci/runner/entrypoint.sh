@@ -90,7 +90,7 @@ die() {
 # start: as PID 1, an untrapped TERM would simply be dropped.
 runner_pid=""
 pending_signal=""
-# shellcheck disable=SC2329 # invoked by the traps below
+# shellcheck disable=SC2317,SC2329 # invoked by the traps below (SC2317: shellcheck <0.10, SC2329: >=0.10)
 on_signal() {
   if [[ -n $runner_pid ]]; then
     log "received SIG$1; forwarding it to run.sh (graceful job cancel)"
