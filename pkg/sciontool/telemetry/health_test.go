@@ -1660,7 +1660,7 @@ func TestAnalyticsLedgerLockTimeoutIsStatsFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX); err != nil {
 		t.Fatal(err)
 	}
@@ -1720,7 +1720,7 @@ func TestDegradedSnapshotNeverWaitsOnOutboxLock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX); err != nil {
 		t.Fatal(err)
 	}
