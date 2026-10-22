@@ -217,13 +217,17 @@ func (s *Server) lifecycleContext(ctx context.Context) context.Context {
 // running drainer's done channel (closed when that drainer exits), or nil
 // when no drainer runs.
 func (s *Server) startLifecycleEvents(ctx context.Context) <-chan struct{} {
+	ls, ok := s.store.(lifecycleEventStore)
+	if !ok {
+		return nil
+	}
 	rt := &s.lifecycleEvents
 	rt.mu.Lock()
-	rt.started = true
-	rt.mu.Unlock()
-	s.reconcileLifecycleEvents(ctx)
-	rt.mu.Lock()
 	defer rt.mu.Unlock()
+	rt.started = true
+	s.reconcileLocked(ctx, ls)
+	// Read under the same lock: a backlog-only drainer that exits at once
+	// cannot clear rt.done before it is returned.
 	return rt.done
 }
 
@@ -244,6 +248,12 @@ func (s *Server) reconcileLifecycleEvents(ctx context.Context) {
 	if !rt.started {
 		return
 	}
+	s.reconcileLocked(ctx, ls)
+}
+
+// reconcileLocked is reconcileLifecycleEvents with rt.mu held.
+func (s *Server) reconcileLocked(ctx context.Context, ls lifecycleEventStore) {
+	rt := &s.lifecycleEvents
 	ctx = s.lifecycleContext(ctx)
 	want := s.experimentEnabled(experiments.LifecycleEvents)
 	installed := ls.AgentWriteObserverInstalled()
