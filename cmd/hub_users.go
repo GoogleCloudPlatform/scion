@@ -282,7 +282,7 @@ func collectInviteAddresses(opts hubUsersInviteOptions) ([]hubclient.InviteBatch
 			return nil, fmt.Errorf("failed to read %s: %w", opts.File, err)
 		}
 		for _, rec := range records {
-			out = append(out, hubclient.InviteBatchEmail{Email: rec.Email, Note: rec.Note})
+			out = append(out, hubclient.InviteBatchEmail(rec))
 		}
 	}
 	if opts.Note != "" {

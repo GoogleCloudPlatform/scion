@@ -93,13 +93,6 @@ func (f *batchFixture) events(typ InviteAuditEventType) []*InviteAuditEvent {
 	return out
 }
 
-func (f *batchFixture) userID(t *testing.T, email string) string {
-	t.Helper()
-	u, err := f.store.GetUserByEmail(context.Background(), email)
-	require.NoError(t, err)
-	return u.ID
-}
-
 func (f *batchFixture) noUser(t *testing.T, email string) {
 	t.Helper()
 	_, err := f.store.GetUserByEmail(context.Background(), email)
