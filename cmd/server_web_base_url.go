@@ -207,7 +207,7 @@ func globalSettingsFileLabel() string {
 // refusal also names the listen address and both fixes.
 func checkWebBaseURLListener(base resolvedWebBaseURL, listenHost string, listenPort int) error {
 	u, err := url.Parse(base.URL)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
 		return fmt.Errorf("refusing to start the web server: its base URL %s (from %s) is not a valid http or https URL "+
 			"with a host. Set --base-url, SCION_SERVER_BASE_URL or server.hub.public_url in the global settings file "+
 			"to a URL such as https://hub.example.com", base.URL, base.Source)

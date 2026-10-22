@@ -217,7 +217,7 @@ func TestCheckWebBaseURLListener_Cases(t *testing.T) {
 // http stays allowed on a loopback listener (ptone/scion#5364).
 func TestCheckWebBaseURLListener_MalformedRefusedOnEveryListener(t *testing.T) {
 	for _, host := range []string{"127.0.0.1", "::1", "localhost", "0.0.0.0"} {
-		for _, raw := range []string{"https://localhost:8443/%zz", "https://host:abc", "://bad", "https://", "ftp://hub.example.com"} {
+		for _, raw := range []string{"https://localhost:8443/%zz", "https://host:abc", "://bad", "https://", "https://:443", "ftp://hub.example.com"} {
 			err := checkWebBaseURLListener(resolvedWebBaseURL{URL: raw, Source: "--base-url"}, host, 8080)
 			require.Error(t, err, "listen host %q, base URL %q", host, raw)
 			assert.Contains(t, err.Error(), "is not a valid http or https URL with a host", "listen host %q, base URL %q", host, raw)

@@ -636,7 +636,7 @@ func (ws *WebServer) logger() *slog.Logger {
 //
 // A base URL that does not parse falls back to the scheme text before the
 // first ":", compared case-insensitively with "https" (not an "https://"
-// prefix test, which "https:/host" would fail), so the decision fails
+// prefix test, which "https:/%zz" would fail), so the decision fails
 // closed. The fail-safe default for Secure is true: a Secure cookie on an
 // http URL breaks login visibly, while a non-Secure cookie on an https URL
 // leaks silently. This fallback is a second line of defence: the server

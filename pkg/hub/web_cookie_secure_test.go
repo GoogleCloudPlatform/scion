@@ -37,9 +37,13 @@ func TestNewWebServer_SessionCookieSecureFollowsScheme(t *testing.T) {
 		// An https URL that does not parse: Secure (fail closed).
 		{"https://localhost:8443/%zz", true},
 		{"HTTPS://host:abc", true},
-		// A single slash: Secure. This row tells a scheme match apart from
-		// an "https://" prefix test, which would fall open.
+		// A single slash that parses: the parsed branch answers (scheme
+		// https).
 		{"https:/host", true},
+		// A single slash that does not parse: the fallback answers. This row
+		// tells the scheme match apart from an "https://" prefix test, which
+		// would fall open.
+		{"https:/%zz", true},
 		// Unparsable and not https: not Secure.
 		{"http://host:abc", false},
 	} {
