@@ -292,16 +292,44 @@ func TestReincarnateSameAccountClaimIsNotRestored(t *testing.T) {
 }
 
 // restoreStepFaultStore fails the reactivation of the replaced assignment,
-// inside transactions too, while fail is set.
+// inside transactions too, while fail is set. While moved is above zero, a
+// deactivation by row ID selects nothing and decrements it, as when another
+// write ended the row first; deactivations counts those calls.
 type restoreStepFaultStore struct {
 	store.Store
-	fail *atomic.Bool
+	fail          *atomic.Bool
+	moved         *atomic.Int32
+	deactivations *atomic.Int32
 }
 
 func (f *restoreStepFaultStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
 	return f.Store.WithTx(ctx, func(tx store.Store) error {
-		return fn(&restoreStepFaultStore{Store: tx, fail: f.fail})
+		return fn(&restoreStepFaultStore{Store: tx, fail: f.fail, moved: f.moved, deactivations: f.deactivations})
 	})
+}
+
+func (f *restoreStepFaultStore) DeactivateAgentServiceAccountAssignment(ctx context.Context, agentID, rowID string, d store.Deactivation) (int, error) {
+	f.deactivations.Add(1)
+	if f.moved.Load() > 0 {
+		f.moved.Add(-1)
+		return 0, nil
+	}
+	return f.Store.DeactivateAgentServiceAccountAssignment(ctx, agentID, rowID, d)
+}
+
+// newRestoreStepFaultFixture is a claimed agent, with a previous
+// assignment, on a server whose store is a restoreStepFaultStore, advanced
+// to provisioning with the next generation's configuration written.
+func newRestoreStepFaultFixture(t *testing.T) (*replacedAssignmentFixture, *restoreStepFaultStore) {
+	t.Helper()
+	srv, s := testServer(t)
+	wrapped, _ := installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *restoreStepFaultStore {
+		return &restoreStepFaultStore{Store: inner, fail: &atomic.Bool{}, moved: &atomic.Int32{}, deactivations: &atomic.Int32{}}
+	})
+	f := newClaimedAssignmentFixtureOn(t, newSPCFixtureOn(t, srv, s), true)
+	f.advance(t, store.AgentReincarnationStateStopping, store.AgentReincarnationStateProvisioning)
+	f.writeFresh(t, store.ReincarnationStateProvisioning)
+	return f, wrapped
 }
 
 func (f *restoreStepFaultStore) ReactivateAgentServiceAccountAssignments(ctx context.Context, agentID string, cause store.EdgeDeactivationCause, opID string) (int, error) {
@@ -316,16 +344,9 @@ func (f *restoreStepFaultStore) ReactivateAgentServiceAccountAssignments(ctx con
 // commit together. A failing restore step rolls the agent write back,
 // including the replacement's deactivation; a later write lands both.
 func TestReincarnateAssignmentRestoreCommitsWithAgentWrite(t *testing.T) {
-	srv, s := testServer(t)
-	var fail atomic.Bool
-	installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *restoreStepFaultStore {
-		return &restoreStepFaultStore{Store: inner, fail: &fail}
-	})
-	f := newClaimedAssignmentFixtureOn(t, newSPCFixtureOn(t, srv, s), true)
-	f.advance(t, store.AgentReincarnationStateStopping, store.AgentReincarnationStateProvisioning)
-	f.writeFresh(t, store.ReincarnationStateProvisioning)
+	f, wrapped := newRestoreStepFaultFixture(t)
 
-	fail.Store(true)
+	wrapped.fail.Store(true)
 	f.srv.failReincarnation(context.Background(), f.agent.ID, f.rec.ID, store.AgentReincarnationStateProvisioning,
 		"reprovision failed", f.rec.PreviousAppliedConfig)
 	got, err := f.s.GetAgentReincarnation(context.Background(), f.rec.ID)
@@ -339,10 +360,39 @@ func TestReincarnateAssignmentRestoreCommitsWithAgentWrite(t *testing.T) {
 	assert.Equal(t, f.replaced.ID, rows[0].ID, "the replacement's deactivation rolled back")
 	assert.Empty(t, agentAudits(t, f.s, mutationTypeAgentReincarnateAssignmentRestore, f.agent.ID))
 
-	fail.Store(false)
+	wrapped.fail.Store(false)
 	f.srv.writeFailedAgent(context.Background(), f.agent.ID, f.rec.ID, store.EdgeDeactivationReincarnateFailed,
 		"reprovision failed", f.rec.PreviousAppliedConfig, time.Now())
 	f.assertRestored(t, store.EdgeDeactivationReincarnateFailed)
+}
+
+// TestReincarnateAssignmentRestoreRetriesWhenReplacementChanges: the
+// replacement is deactivated by row ID, and when that selects nothing (a
+// write ended the row after the restore read it) the failure write rolls
+// back and runs again on a fresh read.
+func TestReincarnateAssignmentRestoreRetriesWhenReplacementChanges(t *testing.T) {
+	t.Run("once", func(t *testing.T) {
+		f, wrapped := newRestoreStepFaultFixture(t)
+		wrapped.moved.Store(1)
+		f.srv.failReincarnation(context.Background(), f.agent.ID, f.rec.ID, store.AgentReincarnationStateProvisioning,
+			"reprovision failed", f.rec.PreviousAppliedConfig)
+		assert.EqualValues(t, 2, wrapped.deactivations.Load(), "the failure write ran again")
+		f.assertRestored(t, store.EdgeDeactivationReincarnateFailed)
+	})
+	t.Run("every attempt", func(t *testing.T) {
+		f, wrapped := newRestoreStepFaultFixture(t)
+		wrapped.moved.Store(1000)
+		f.srv.failReincarnation(context.Background(), f.agent.ID, f.rec.ID, store.AgentReincarnationStateProvisioning,
+			"reprovision failed", f.rec.PreviousAppliedConfig)
+		assert.EqualValues(t, reincarnationStepMaxAttempts+3, wrapped.deactivations.Load(), "each attempt retried")
+		agent := mustGetAgent(t, f.s, f.agent.ID)
+		assert.Equal(t, store.ReincarnationStateProvisioning, agent.ReincarnationState, "nothing is written")
+		assert.Equal(t, f.next.ID, agentAssignedServiceAccountID(agent))
+		rows := activeAssignments(t, f.s, f.agent.ID)
+		require.Len(t, rows, 1)
+		assert.Equal(t, f.replaced.ID, rows[0].ID)
+		assert.Empty(t, agentAudits(t, f.s, mutationTypeAgentReincarnateAssignmentRestore, f.agent.ID))
+	})
 }
 
 // TestReincarnateSoftDeleteDuringReincarnationRestoresPriorOnRestore: a soft

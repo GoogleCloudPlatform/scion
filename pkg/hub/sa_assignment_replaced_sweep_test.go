@@ -235,8 +235,12 @@ func TestSAParentCeiling_ReplacedAssignmentRemovedByHardDelete(t *testing.T) {
 	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
 	assert.True(t, agentGone(t, f.s, f.agent.ID))
 	assert.Empty(t, activeAssignments(t, f.s, f.agent.ID), "no active assignment remains")
-	assert.EqualValues(t, 1, auditSummary(t, f.s, mutationTypeAgentHardDelete, f.agent.ID)["assignments_deactivated"],
-		"the restored row is the one assignment deactivated")
+	sum := auditSummary(t, f.s, mutationTypeAgentHardDelete, f.agent.ID)
+	assert.EqualValues(t, 1, sum["assignments_deactivated"], "one assignment is deactivated")
+	opID, _ := sum["op_id"].(string)
+	require.NotEmpty(t, opID, "the hard delete audit records its operation ID")
+	assert.Equal(t, 1, countDeactivatedAssignments(t, f.s, f.agent.ID, f.previous.ID,
+		store.EdgeDeactivationAgentHardDelete, opID), "the restored row is the one deactivated")
 	assertParentCeilingDenied(t, f.evalFor(f.sa.ID), DenyCauseCeilingOrphaned)
 	assertParentCeilingDenied(t, f.evalFor(f.next.ID), DenyCauseCeilingOrphaned)
 }

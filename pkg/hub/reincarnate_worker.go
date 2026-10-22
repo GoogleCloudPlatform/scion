@@ -1212,7 +1212,10 @@ func (s *Server) writeFailedAgent(ctx context.Context, agentID, reincarnationID 
 	if restoreConfig != nil {
 		upd.appliedConfig = restoreConfig
 		upd.txWork = func(ctx context.Context, tx store.Store, agent *store.Agent) error {
-			return restoreReincarnationAssignment(ctx, tx, agent, reincarnationID, cause, now)
+			if err := restoreReincarnationAssignment(ctx, tx, agent, reincarnationID, cause, now); err != nil {
+				return fmt.Errorf("assignment restore: %w", err)
+			}
+			return nil
 		}
 	}
 	// Extra attempts, same reasoning as the completion write: a lost write
@@ -1224,6 +1227,14 @@ func (s *Server) writeFailedAgent(ctx context.Context, agentID, reincarnationID 
 	if err != nil {
 		s.agentLifecycleLog.Error("failReincarnation: failed to update agent after retries",
 			"agent_id", agentID, "error", err)
+		if restoreConfig != nil {
+			// The agent write and the assignment restore roll back
+			// together, so the agent keeps its in-flight state and
+			// assignment; the sweep's orphaned agent-state reset clears the
+			// state later, without restoring the configuration.
+			s.agentLifecycleLog.Error("failReincarnation: agent write and assignment restore not applied; the agent is left for the orphaned agent-state sweep",
+				"agent_id", agentID, "reincarnation_id", reincarnationID, "error", err)
+		}
 	} else if s.events != nil {
 		s.events.PublishAgentStatus(ctx, agent)
 	}

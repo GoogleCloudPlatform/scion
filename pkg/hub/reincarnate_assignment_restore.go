@@ -38,7 +38,7 @@ const mutationTypeAgentReincarnateAssignmentRestore = "agent_reincarnate_assignm
 // (reincarnateClaimTx). Here:
 //
 //   - When the replacement is the agent's one active row, it is deactivated
-//     with cause under the reincarnation ID and the replaced row is
+//     by row ID with cause under the reincarnation ID and the replaced row is
 //     reactivated, with its own source and frozen ceiling. When the agent had
 //     no assignment before the claim, none is active afterwards, which
 //     matches the restored configuration.
@@ -66,8 +66,14 @@ func restoreReincarnationAssignment(ctx context.Context, tx store.Store, agent *
 	var deactivated, reactivated, remarked int
 	switch {
 	case len(rows) == 1 && rows[0].ID == reincarnationID:
-		if deactivated, err = tx.DeactivateAgentServiceAccountAssignments(ctx, agent.ID, failed); err != nil {
+		if deactivated, err = tx.DeactivateAgentServiceAccountAssignment(ctx, agent.ID, reincarnationID, failed); err != nil {
 			return fmt.Errorf("reincarnation assignment restore: deactivate replacement: %w", err)
+		}
+		if deactivated != 1 {
+			// A write between the read above and this one ended the
+			// replacement. A version conflict re-runs the failure write,
+			// whose fresh read then sees that write.
+			return fmt.Errorf("%w: reincarnation assignment restore: the replacement changed", store.ErrVersionConflict)
 		}
 		reactivated, err = tx.ReactivateAgentServiceAccountAssignments(ctx, agent.ID, store.EdgeDeactivationReincarnateReplaced, reincarnationID)
 		if err != nil {
