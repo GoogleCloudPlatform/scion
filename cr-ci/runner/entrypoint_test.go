@@ -20,16 +20,22 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // stubRunSh records how it was started, then exits 0. It writes its args
-// one per line, its PID, its working directory and selected env vars.
+// one per line, its PID and parent PID, its SIGINT disposition, its working
+// directory and selected env vars. Tests append to it (stubRunShWith) to
+// change how it ends.
 const stubRunSh = `#!/usr/bin/env bash
 set -euo pipefail
 out=${STUB_OUT:?}
 printf '%s\n' "$@" > "$out/args"
 echo "$$" > "$out/pid"
+echo "$PPID" > "$out/ppid"
+trap -p INT > "$out/int_trap"
 pwd > "$out/cwd"
 {
   echo "RUNNER_WORKSPACE=${RUNNER_WORKSPACE:-}"
@@ -44,6 +50,17 @@ pwd > "$out/cwd"
 } > "$out/env"
 echo "stub run.sh started"
 `
+
+// stubRunShWith returns the stub run.sh with tail appended after its recording.
+func stubRunShWith(tail string) string { return stubRunSh + tail }
+
+// setRunSh replaces the harness's run.sh.
+func (h *harness) setRunSh(script string) {
+	h.t.Helper()
+	if err := os.WriteFile(filepath.Join(h.runnerDir, "run.sh"), []byte(script), 0o755); err != nil {
+		h.t.Fatal(err)
+	}
+}
 
 func requireTools(t *testing.T) {
 	t.Helper()
@@ -354,8 +371,14 @@ func TestEntrypointSuccess(t *testing.T) {
 	if got, want := h.stubFile("args"), "--jitconfig\n"+h.jit; got != want {
 		t.Errorf("run.sh args = %q, want --jitconfig and the claimed config", got)
 	}
-	if got := h.stubFile("pid"); got != strconv.Itoa(res.pid) {
-		t.Errorf("run.sh pid = %s, entrypoint pid = %d: run.sh was not exec'd in place", got, res.pid)
+	// run.sh is the entrypoint's child (not exec'd), so the entrypoint can report the
+	// runner's real exit code and forward signals.
+	if got := h.stubFile("ppid"); got != strconv.Itoa(res.pid) {
+		t.Errorf("run.sh parent pid = %s, entrypoint pid = %d: run.sh is not the entrypoint's child", got, res.pid)
+	}
+	// An ignored SIGINT would break run.sh's graceful cancel (RUNNER_MANUALLY_TRAP_SIG).
+	if got := h.stubFile("int_trap"); got != "" {
+		t.Errorf("run.sh starts with SIGINT disposition %q, want the default (not ignored)", got)
 	}
 	if got := h.stubFile("cwd"); got != h.runnerDir {
 		t.Errorf("run.sh cwd = %s, want %s", got, h.runnerDir)
@@ -1083,5 +1106,136 @@ func TestEntrypointHomeLinkCreateFails(t *testing.T) {
 	expectFailure(t, h, res, 2, "cannot create symlink "+h.home+"/work -> "+h.scratch+"/_work")
 	if n := len(cs.recorded()); n != 0 {
 		t.Errorf("claim requests = %d, want 0 (token must not be spent)", n)
+	}
+}
+
+// --- Exit code and signals (section 5) ------------------------------------------
+
+func newSuccessHarness(t *testing.T) *harness {
+	t.Helper()
+	var h *harness
+	cs := newClaimServer(t, func(w http.ResponseWriter) { respondJIT(h.jit)(w) })
+	h = newHarness(t, cs.URL)
+	return h
+}
+
+func TestEntrypointPropagatesRunShExitCode(t *testing.T) {
+	h := newSuccessHarness(t)
+	h.setRunSh(stubRunShWith("exit 134\n"))
+	res := h.run()
+	if res.exitCode != 134 {
+		t.Errorf("exit code = %d, want run.sh's 134; stderr:\n%s", res.exitCode, res.stderr)
+	}
+	if !strings.Contains(res.stderr, "run.sh exited 134") {
+		t.Errorf("stderr does not report run.sh's exit code:\n%s", res.stderr)
+	}
+}
+
+// run-helper.sh (actions/runner) turns an unknown Runner.Listener exit code into
+// "Exiting with unknown error code: N" and exit 0; run.sh then exits 0 too.
+func TestEntrypointMapsRunHelperUnknownExitCode(t *testing.T) {
+	h := newSuccessHarness(t)
+	h.setRunSh(stubRunShWith(`echo "Runner listener exited"
+echo "Exiting with unknown error code: 134"
+echo "Exiting runner..."
+exit 0
+`))
+	res := h.run()
+	if res.exitCode != 134 {
+		t.Errorf("exit code = %d, want 134 from run-helper's line; stderr:\n%s", res.exitCode, res.stderr)
+	}
+	for _, line := range []string{"Exiting with unknown error code: 134", "Exiting runner..."} {
+		if !strings.Contains(res.stdout, line+"\n") {
+			t.Errorf("runner output line %q was not passed through to stdout:\n%s", line, res.stdout)
+		}
+	}
+	if !strings.Contains(res.stderr, "unknown exit code 134") {
+		t.Errorf("stderr does not explain the mapped exit code:\n%s", res.stderr)
+	}
+}
+
+// Only run-helper.sh's exact line counts: anchored, digits only.
+func TestEntrypointIgnoresOtherUnknownCodeLines(t *testing.T) {
+	for _, line := range []string{
+		"job step said: Exiting with unknown error code: 7",
+		"Exiting with unknown error code: 7 (and more)",
+		"Exiting with unknown error code: abc",
+		"Exiting with unknown error code: ",
+	} {
+		t.Run(line, func(t *testing.T) {
+			h := newSuccessHarness(t)
+			h.setRunSh(stubRunShWith("printf '%s\\n' '" + line + "'\nexit 0\n"))
+			if res := h.run(); res.exitCode != 0 {
+				t.Errorf("exit code = %d, want 0: %q must not be taken as run-helper's line; stderr:\n%s", res.exitCode, line, res.stderr)
+			}
+		})
+	}
+}
+
+// signalStub waits until it is signalled, records the signal and exits with a
+// signal-specific code (42 for TERM, 43 for INT).
+const signalStub = `trap 'echo TERM > "$out/signal"; exit 42' TERM
+trap 'echo INT > "$out/signal"; exit 43' INT
+touch "$out/ready"
+for _ in $(seq 1 300); do sleep 0.1; done
+exit 9
+`
+
+func TestEntrypointForwardsSignals(t *testing.T) {
+	for _, tc := range []struct {
+		sig  syscall.Signal
+		name string
+		code int
+	}{{syscall.SIGTERM, "TERM", 42}, {syscall.SIGINT, "INT", 43}} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newSuccessHarness(t)
+			h.setRunSh(stubRunShWith(signalStub))
+			cmd := exec.Command("bash", "entrypoint.sh")
+			for k, v := range h.env {
+				cmd.Env = append(cmd.Env, k+"="+v)
+			}
+			var stdout, stderr strings.Builder
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			ready := filepath.Join(h.stubOut, "ready")
+			deadline := time.Now().Add(20 * time.Second)
+			for {
+				if _, err := os.Stat(ready); err == nil {
+					break
+				}
+				if time.Now().After(deadline) {
+					_ = cmd.Process.Kill()
+					t.Fatalf("stub run.sh never became ready; stderr:\n%s", stderr.String())
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			if err := cmd.Process.Signal(tc.sig); err != nil {
+				t.Fatal(err)
+			}
+			err := cmd.Wait()
+			code := 0
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) {
+				code = exitErr.ExitCode()
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if got := h.stubFile("signal"); got != tc.name {
+				t.Errorf("run.sh received %q, want %s forwarded from the entrypoint", got, tc.name)
+			}
+			if code != tc.code {
+				t.Errorf("exit code = %d, want run.sh's %d; stderr:\n%s", code, tc.code, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "received SIG"+tc.name+"; forwarding it to run.sh") {
+				t.Errorf("stderr does not log the forwarded signal:\n%s", stderr.String())
+			}
+			for name, secret := range map[string]string{"claim token": h.token, "JIT config": h.jit, "ID token": h.idToken} {
+				if strings.Contains(stdout.String(), secret) || strings.Contains(stderr.String(), secret) {
+					t.Errorf("%s leaked into entrypoint output", name)
+				}
+			}
+		})
 	}
 }

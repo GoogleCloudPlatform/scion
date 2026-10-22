@@ -34,10 +34,11 @@ ARG GO_SHA256
 ARG GOLANGCI_LINT_VERSION
 ARG GOLANGCI_LINT_SHA256
 
-# RUNNER_MANUALLY_TRAP_SIG=1 makes run.sh (PID 1) trap TERM/INT, forward
-# SIGINT to the runner's process group (graceful job cancel on Cloud Run's
-# SIGTERM) and exit with the runner's exit code. Without it, run.sh installs
-# no handler, so PID 1 drops SIGTERM, and it exits 0 whatever the runner returned.
+# RUNNER_MANUALLY_TRAP_SIG=1 makes run.sh trap TERM/INT and forward SIGINT to the
+# runner's process group: a graceful job cancel when entrypoint.sh (PID 1) forwards
+# Cloud Run's SIGTERM. Without it, run.sh installs no handler. run.sh exits 0 for
+# any runner exit code but 2 and 7 (run-helper.sh maps unknown codes to 0), so
+# entrypoint.sh recovers the real code (runner/README.md, step 5).
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     RUNNER_MANUALLY_TRAP_SIG=1

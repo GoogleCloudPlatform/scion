@@ -6,7 +6,7 @@ ephemeral GitHub Actions JIT runner. That runner takes one job and then exits.
 | File | Purpose |
 | :--- | :--- |
 | [`Dockerfile`](Dockerfile) | Image: Ubuntu 24.04, GitHub Actions runner, Go, golangci-lint, git, jq, curl, zstd, ca-certificates; non-root `runner` user (uid 1001, `HOME=/home/runner`) |
-| [`entrypoint.sh`](entrypoint.sh) | PID 1: checks `/scratch`, redirects caches, does the claim exchange, then `exec ./run.sh --jitconfig` |
+| [`entrypoint.sh`](entrypoint.sh) | PID 1: checks `/scratch`, redirects caches, does the claim exchange, then runs `./run.sh --jitconfig` as a child, forwards signals and exits with the runner's real exit code |
 | [`entrypoint_test.go`](entrypoint_test.go) | Offline harness: runs `entrypoint.sh` against a fake claim server on loopback with a stub `run.sh` |
 
 ## Build arguments
@@ -164,23 +164,33 @@ this, in order:
    | metadata: any other status, or 200 without a JWT | exit 3 at once |
    | claim: anything else (other status, wrong content type, bad JSON) | exit 3 at once; the claim may already be spent |
 
-5. **Starts the runner.** It unsets `RUNNER_CLAIM_TOKEN` and runs
-   `exec ./run.sh --jitconfig <config>` in `/home/runner/actions-runner`, so
-   `run.sh` is PID 1. The image sets `RUNNER_MANUALLY_TRAP_SIG=1`, which makes
-   `run.sh` take its `runWithManualTrap` path:
-   - **Graceful cancel:** it traps TERM and INT and forwards SIGINT to the
-     runner's process group. When Cloud Run sends SIGTERM (CancelExecution or
-     task timeout), the listener cancels the job gracefully before the SIGKILL
-     at the end of the grace period.
-   - **Exit code:** it exits with the runner's exit code, so a failed runner
-     shows as a failed execution.
+5. **Runs the runner and reports its real exit code.** It unsets
+   `RUNNER_CLAIM_TOKEN` and starts `./run.sh --jitconfig <config>` in
+   `/home/runner/actions-runner` as a **child** (not `exec`), for two reasons:
+   - **Exit code.** In actions/runner (checked in v2.338.0), `run-helper.sh`
+     maps every Runner.Listener exit code it does not know, an abort's 134
+     included, to exit 0 after printing `Exiting with unknown error code: N`.
+     `run.sh` then exits 0 too: it passes on only 2 (restart, handled inside it)
+     and 7. So `run.sh`'s own exit code cannot show a crashed runner (P6 PoC run 2:
+     the runner aborted with ENOSPC and the execution showed as succeeded). The
+     entrypoint copies the runner's output to stdout unchanged and matches
+     exactly that line (anchored, digits only). It exits with `run.sh`'s exit code
+     when that is non-zero, otherwise with N, otherwise 0.
+   - **Signals.** Cloud Run sends SIGTERM (CancelExecution or task timeout) to
+     PID 1, the entrypoint, which forwards SIGTERM or SIGINT to `run.sh`. The image
+     sets `RUNNER_MANUALLY_TRAP_SIG=1`, so `run.sh` takes its `runWithManualTrap`
+     path and turns the signal into a graceful job cancel: SIGINT to the runner's
+     process group, before the SIGKILL at the end of the grace period. `run.sh` is
+     started under job control (`set -m`): a plain background job would inherit an
+     ignored SIGINT, and the graceful cancel would silently stop working (a test
+     checks the disposition).
 
-   Without the variable, `run.sh` installs no handler. As PID 1 it would then
-   drop SIGTERM, and it would exit 0 whatever the runner returned. Exit code 2
-   from the runner helper means "restart" and loops inside `run.sh` in both
-   modes.
+   The output goes through two FIFOs in a private temp dir under `/tmp`, small and
+   on the root filesystem, never on `/scratch`. A watcher process that does not
+   finish within 5 s of `run.sh`'s exit is abandoned, so a stray process holding
+   the pipe cannot keep the execution alive.
 
-Exit codes before `run.sh` starts: **2** for a configuration error (env,
+Exit codes: the runner's (above) once `run.sh` has started. Before that, **2** for a configuration error (env,
 `HOME`, `/scratch`, a HOME link, missing `run.sh`) and **3** for a failed claim. Neither path starts
 `run.sh`. If a claim is lost (for example, the mediator restarted and its
 in-memory claims are gone), the runner exits 3. `/reconcile` then deletes the
@@ -190,7 +200,7 @@ orphaned `cr-job-*` registration and relaunches the job if it is still queued.
 ever printed, logged or written to disk. Both request headers reach curl on
 stdin, as a curl config, not in its argv. `curl -q` ignores any `~/.curlrc`,
 so no config file can turn on verbose header output. Responses stay in shell
-memory, and the ID token is cleared before the exec. The script never
+memory, and the ID token is cleared before `run.sh` starts. The script never
 uses `set -x`; keep it that way. The JIT config does appear in `run.sh`'s argv,
 as the runner requires. That is acceptable because it is single use and dies
 with the execution.
@@ -217,12 +227,17 @@ server, the fake one answers 403 without `Metadata-Flavor: Google`; it also
 answers 400 on a wrong audience or a missing `format=full`. The harness
 covers:
 
+- **Exit code and signals.** A stub `run.sh` exiting 134 makes the
+  entrypoint exit 134. One that prints run-helper's `Exiting with unknown error
+  code: 134` and exits 0 also makes it exit 134; the same text inside another
+  line, with trailing text or without digits, is ignored. SIGTERM and SIGINT
+  sent to the entrypoint reach `run.sh`, and its exit code is returned.
 - **Success.** The metadata request carries the flavor header,
   `audience=MEDIATOR_URL` (with any trailing slash stripped) and
   `format=full`. The claim carries `Bearer <ID token>` and
   `X-Runner-Claim: <claim token>`. `run.sh` gets `--jitconfig <config>`, is
-  exec'd (same PID), runs in the runner dir, and sees the `/scratch` env but
-  no token. The claim token, the ID token and the config appear on neither
+  the entrypoint's child with SIGINT not ignored, runs in the runner dir, and
+  sees the `/scratch` env but no token. The claim token, the ID token and the config appear on neither
   stdout nor stderr. A RUNNER_NAME/GH_JOB_ID mismatch only warns.
 - **Identity.** A claim 401 exits 3 without retrying. Two metadata 5xx
   responses and then a token leads to a normal start on attempt 3. Five

@@ -14,8 +14,9 @@
 #      token>", "X-Runner-Claim: <RUNNER_CLAIM_TOKEN>" and an empty body.
 #      200 returns {"jit_config":"..."}; 401 means the identity was rejected,
 #      410 that the claim is unknown/expired/used; 5xx is transient.
-#   4. exec ./run.sh --jitconfig <config> so that the runner is PID 1 and runs
-#      exactly one job.
+#   4. Run ./run.sh --jitconfig <config> as a child that runs exactly one job,
+#      forward SIGTERM/SIGINT to it, and exit with the runner's real exit code
+#      (section 5).
 #
 # Neither the claim token, the ID token nor the JIT config is ever printed,
 # logged or written to disk. Do NOT add `set -x` or debug echoes of them. The
@@ -28,11 +29,13 @@
 #   GH_JOB_ID           GitHub workflow job ID (logging only)
 #   RUNNER_NAME         cr-job-<GH_JOB_ID> (logging only)
 #
-# Exit codes (run.sh's own exit code once it is exec'd):
+# Exit codes:
 #   2  configuration error: missing or invalid env (HOME included), /scratch missing or
 #      not writable, a HOME link (~/work, ~/.cache, ~/go) that is not the expected symlink
 #   3  claim failed: 401, 410, other non-retryable response (mediator or
 #      metadata server), or retries exhausted; run.sh not started
+#   otherwise run.sh's exit code, or, when run.sh exits 0, the runner exit code that
+#      run-helper.sh reported as unknown (for example 134 after an abort)
 #
 # Overrides, for the offline test harness (runner/entrypoint_test.go) only;
 # production leaves them unset:
@@ -43,6 +46,8 @@
 #   CR_EXPECTED_HOME         required value of HOME       (default /home/runner)
 #   CR_METADATA_URL          metadata server origin       (default http://metadata.google.internal;
 #                            otherwise only http://127.0.0.1[:port] or http://localhost[:port])
+#   CR_FIFO_TMPDIR           where the runner-output FIFOs go (default /tmp)
+#   CR_WATCHER_GRACE_SECONDS how long to wait for the output watcher (default 5)
 # The harness also puts stub `stat` and `sleep` commands first on PATH.
 set -euo pipefail
 
@@ -354,7 +359,85 @@ id_token=""
 # The token is spent; keep it out of the job's environment.
 unset RUNNER_CLAIM_TOKEN
 
-# --- 5. Hand over to the runner as PID 1 --------------------------------------
+# --- 5. Run the runner and report its real exit code --------------------------
+# run.sh is started as a child, not exec'd, for two reasons:
+#   - actions/runner's run-helper.sh maps any Runner.Listener exit code it does not
+#     know (an abort, 134, included) to 0, and run.sh then exits 0 too. An aborted
+#     runner would therefore look like a successful Cloud Run execution. The output
+#     is watched for run-helper's "Exiting with unknown error code: N" line, and N
+#     becomes this script's exit code when run.sh itself exits 0.
+#   - Cloud Run delivers SIGTERM (cancel, task timeout) to PID 1, this script. It is
+#     forwarded to run.sh, whose RUNNER_MANUALLY_TRAP_SIG handler turns it into a
+#     graceful job cancel (SIGINT to the runner's process group). Job control (set -m)
+#     starts run.sh in its own process group with SIGINT NOT ignored; a plain
+#     background job would inherit an ignored SIGINT, and the graceful cancel would
+#     silently stop working.
+# The JIT config is in run.sh's argv (the runner requires it); it is single use and
+# never printed.
+fifo_dir=$(mktemp -d "${CR_FIFO_TMPDIR:-/tmp}/cr-ci-entrypoint.XXXXXX") ||
+  die "$EXIT_CONFIG" "cannot create a private temp directory"
+out_fifo="$fifo_dir/runner-output"
+done_fifo="$fifo_dir/watcher-done"
+listener_code_file="$fifo_dir/listener-exit-code"
+mkfifo -m 600 -- "$out_fifo" "$done_fifo" || die "$EXIT_CONFIG" "cannot create FIFOs in $fifo_dir"
+# Opened read-write, so neither side ever blocks on open.
+exec {done_fd}<>"$done_fifo"
 
-log "exec run.sh (ephemeral JIT runner)"
-exec ./run.sh --jitconfig "$jit_config"
+# Copies the runner's output to stdout line by line and records the exit code that
+# run-helper.sh reports as unknown. Signals a done marker at end of input.
+watch_runner_output() {
+  local line
+  while IFS= read -r line || [[ -n $line ]]; do
+    printf '%s\n' "$line"
+    # Exactly run-helper.sh's line (anchored, digits only); nothing else is captured.
+    if [[ $line =~ ^Exiting\ with\ unknown\ error\ code:\ ([0-9]{1,3})$ ]]; then
+      printf '%s\n' "${BASH_REMATCH[1]}" >"$listener_code_file"
+    fi
+  done <"$out_fifo"
+  printf 'done\n' >&"$done_fd"
+}
+
+watch_runner_output &
+watcher_pid=$!
+
+log "starting run.sh (ephemeral JIT runner)"
+set -m
+./run.sh --jitconfig "$jit_config" >"$out_fifo" 2>&1 &
+runner_pid=$!
+set +m
+jit_config=""
+
+# shellcheck disable=SC2329 # invoked by the traps below
+forward_signal() {
+  log "received SIG$1; forwarding it to run.sh (graceful job cancel)"
+  kill -s "$1" "$runner_pid" 2>/dev/null || true
+}
+trap 'forward_signal TERM' TERM
+trap 'forward_signal INT' INT
+
+runner_rc=0
+while :; do
+  if wait "$runner_pid"; then runner_rc=0; else runner_rc=$?; fi
+  # wait returns early (128+n) when a trapped signal arrives while run.sh still runs.
+  kill -0 "$runner_pid" 2>/dev/null || break
+done
+trap - TERM INT
+
+# Let the watcher drain the last lines (bounded: a process left holding the pipe
+# open must not keep the execution alive).
+read -r -t "${CR_WATCHER_GRACE_SECONDS:-5}" -u "$done_fd" _ || log "warning: runner output watcher did not finish in time"
+listener_code=""
+[[ -s $listener_code_file ]] && listener_code=$(<"$listener_code_file")
+kill "$watcher_pid" 2>/dev/null || true
+rm -rf -- "$fifo_dir"
+
+if ((runner_rc != 0)); then
+  log "run.sh exited $runner_rc"
+  exit "$runner_rc"
+fi
+if [[ $listener_code =~ ^[0-9]+$ ]] && ((listener_code != 0)); then
+  log "run.sh exited 0, but run-helper.sh reported the runner's unknown exit code $listener_code; exiting $listener_code so the execution shows as failed"
+  exit $((listener_code > 255 ? 1 : listener_code))
+fi
+log "run.sh exited 0"
+exit 0
