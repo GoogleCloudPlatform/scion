@@ -28,26 +28,31 @@ import (
 const (
 	// memoryBaselineStreams is how many events streams the baseline opens.
 	memoryBaselineStreams = 500
-	// memoryBaselineCeiling is the per-stream heap ceiling. The design
+	// memoryBaselineCeiling is the per-stream memory ceiling. The design
 	// estimates 25-50 KiB per stream; the ceiling is generous so only real
 	// growth fails the test.
 	memoryBaselineCeiling = 128 << 10
 )
 
-// heapInUse returns the live heap after a full collection.
+// heapInUse returns the live heap plus the goroutine stack memory in use,
+// after a full collection. Each stream holds goroutines (the server's
+// handler and connection reader, the client transport's reader and
+// writer), whose stacks are not in HeapAlloc.
 func heapInUse() uint64 {
 	runtime.GC()
 	runtime.GC()
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
-	return ms.HeapAlloc
+	return ms.HeapAlloc + ms.StackInuse
 }
 
 // TestEventStreamMemoryBaseline opens 500 events streams against an
 // in-process web server, waits for the first heartbeat on each, and reports
-// the live-heap growth per stream (ptone/scion#5229). The figure includes
-// the client side of each connection (the test's HTTP transport and
-// readers), so it is an upper bound on the server's cost. It fails above
+// the growth per stream of the live heap plus goroutine stacks
+// (ptone/scion#5229). Client and server share the process, so the figure
+// is the cost of both ends of a connection (the test's HTTP transport and
+// readers included), not of the server alone. It leaves out memory outside
+// the Go runtime's accounting (kernel socket buffers). It fails above
 // memoryBaselineCeiling.
 func TestEventStreamMemoryBaseline(t *testing.T) {
 	if testing.Short() {
@@ -94,10 +99,10 @@ func TestEventStreamMemoryBaseline(t *testing.T) {
 		delta = after - before
 	}
 	perStream := delta / memoryBaselineStreams
-	t.Logf("events stream memory baseline: %d streams, heap %d -> %d bytes, %.1f KiB per stream (client side included)",
+	t.Logf("events stream memory baseline: %d streams, heap+stacks %d -> %d bytes, %.1f KiB per stream (client side included)",
 		memoryBaselineStreams, before, after, float64(perStream)/1024)
 	require.LessOrEqual(t, perStream, uint64(memoryBaselineCeiling),
-		"per-stream heap %d bytes exceeds the %d byte ceiling", perStream, memoryBaselineCeiling)
+		"per-stream heap+stacks %d bytes exceeds the %d byte ceiling", perStream, memoryBaselineCeiling)
 
 	cancel()
 	for _, s := range streams {

@@ -169,9 +169,18 @@ func TestEventStreamRegistry_ClientDisconnect(t *testing.T) {
 	assert.Equal(t, 1, snap[0].Subjects)
 	for _, s := range snap {
 		assert.Len(t, s.Key.ConnID, 16)
-		assert.Positive(t, s.BytesWritten, "the heartbeat counts as bytes written")
 		assert.Zero(t, s.EventsWritten, "a heartbeat is not an event")
 	}
+	// The handler counts a heartbeat's bytes after it flushes them, so the
+	// count can trail the client's read.
+	require.Eventually(t, func() bool {
+		for _, s := range reg.Snapshot() {
+			if s.BytesWritten <= 0 {
+				return false
+			}
+		}
+		return true
+	}, 5*time.Second, 10*time.Millisecond, "the heartbeat counts as bytes written")
 	assert.Empty(t, logs.closeLines(t), "no close line while the streams are open")
 
 	for i := range cancels {
