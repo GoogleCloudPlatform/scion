@@ -621,34 +621,6 @@ func TestObserverLabelRoundTrip(t *testing.T) {
 	}
 }
 
-// TestObserverResyncNonDetectionLimits pins the documented B3 limits
-// (design section 4): a fingerprint sees only a final row that differs.
-// An unobserved change that is reverted before the next observed write
-// yields no resync, and an unobserved change with no later observed write
-// yields nothing at all.
-func TestObserverResyncNonDetectionLimits(t *testing.T) {
-	h := newHarness(t)
-	a := baseAgent()
-	h.create(a)
-	// Unobserved phase change and revert: the before row of the next
-	// observed write equals the last observed row.
-	h.write(context.Background(), store.AgentWrite{Op: store.AgentWriteHardDelete, Before: clone(a)})
-	if got := seq(h.events()); got != "created@1 deleted@2(hard)" {
-		t.Fatalf("change-then-revert must not resync: %s", got)
-	}
-
-	h2 := newHarness(t)
-	h2.create(a)
-	// An unobserved change with no later observed write: nothing is
-	// emitted, and the cursor still holds the created fingerprint.
-	if got := seq(h2.events()); got != "created@1" {
-		t.Fatalf("events = %s", got)
-	}
-	if c, _ := h2.db.cursor(agentA); c.TransitionRevision != 1 {
-		t.Fatalf("cursor moved without an observed write: %+v", c)
-	}
-}
-
 // TestObserverSoftDeleteOfRunningAgent is design r3 N3: a soft delete of a
 // running agent emits only deleted (no stopped), and a zero-transition
 // write then advances the fingerprint with no revision allocated (r2 B2).
@@ -671,11 +643,14 @@ func TestObserverSoftDeleteOfRunningAgent(t *testing.T) {
 	d2.DeletedAt = t0.Add(time.Minute)
 	h.write(context.Background(), store.AgentWrite{Op: store.AgentWriteSoftDelete, Before: clone(d), After: d2})
 	c, _ := h.db.cursor(agentA)
-	if c.TransitionRevision != 2 || c.LastFingerprint == "" {
+	if c.TransitionRevision != 2 {
 		t.Fatalf("zero-transition write allocated a revision: %+v", c)
 	}
-	h.write(context.Background(), store.AgentWrite{Op: store.AgentWritePurge, Before: clone(d2)})
-	if got := seq(h.events()); got != "created@1 deleted@2(soft)" {
-		t.Fatalf("the advanced fingerprint must prevent a resync: %s", got)
+	rs, err := newRowState(d2, Creator{Type: "user", ID: "u1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := Fingerprint(d2, rs.digest); c.LastFingerprint != want {
+		t.Fatalf("zero-transition write did not advance the fingerprint to the committed row's")
 	}
 }

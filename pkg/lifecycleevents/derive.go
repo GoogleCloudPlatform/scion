@@ -173,6 +173,17 @@ func deleteModeFor(op store.AgentWriteOp, cause Cause) string {
 //     create-failure cause is annotated] + deleted. The snapshot is the
 //     before row when the row is removed and the committed row on a soft
 //     delete.
+//
+// Known non-detection (design section 4; documented limits, not tested
+// behaviour): the resync compares only the before row of an observed write
+// with the last observed row, so an unobserved change that is reverted
+// before the next observed write, or an unobserved change with no later
+// observed write, is never seen. Rule 2 also ignores the fingerprint once
+// the cursor saw the row deleted: an unobserved restore and second soft
+// delete followed by a purge emits nothing, because a fingerprint mismatch
+// on a deleted row cannot tell a second deletion from any other unobserved
+// change, and emitting deleted would assert a deletion that may not have
+// happened.
 func Derive(f Facts) Plan {
 	var plan Plan
 	add := func(p Planned) { plan.Events = append(plan.Events, p) }

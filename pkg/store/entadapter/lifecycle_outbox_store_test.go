@@ -35,6 +35,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentlifecyclecursor"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
+	"github.com/GoogleCloudPlatform/scion/pkg/labels"
 	"github.com/GoogleCloudPlatform/scion/pkg/lifecycleevents"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	tc "github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
@@ -167,6 +168,31 @@ func TestLifecycleStore_CreateCommitsEventAndCursor(t *testing.T) {
 	assert.Equal(t, int64(1), f.counters.Get(telemetryemit.MetricEventsEnqueued, "created"), "counted after commit")
 }
 
+// TestLifecycleStore_LabelRoundTripAtAPILimits stores labels.MaxLabels
+// labels whose keys and values are 63 bytes of printable ASCII, including
+// the characters JSON escapes, and requires the created event to carry
+// them exactly.
+func TestLifecycleStore_LabelRoundTripAtAPILimits(t *testing.T) {
+	f := newLifecycleFixture(t)
+	const alphabet = "\"\\/<>&'.:-_ ~!@#$%^*()[]{}|?=+,;`"
+	fill := func(prefix string, n int) string {
+		s := prefix
+		for i := 0; len(s) < n; i++ {
+			s += string(alphabet[i%len(alphabet)])
+		}
+		return s[:n]
+	}
+	in := map[string]string{}
+	for i := 0; i < labels.MaxLabels; i++ {
+		in[fill(fmt.Sprintf("k%02d", i), labels.MaxKeyLen)] = fill(fmt.Sprintf("v%02d", i), labels.MaxValueLen)
+	}
+	require.NoError(t, labels.Validate(in), "the label set must be API-valid")
+	a := f.create("lc-label-limits", func(a *store.Agent) { a.Labels = in })
+	evs, _ := lifecycleEvents(t, f.cs, a.ID)
+	require.Len(t, evs, 1)
+	assert.Equal(t, in, evs[0].Metadata.Labels.Map(), "labels round trip exactly at the API limits")
+}
+
 func TestLifecycleStore_CreateOutsideTxIsObserved(t *testing.T) {
 	f := newLifecycleFixture(t)
 	a := makeAgent(f.projectID, "lc-notx")
@@ -217,7 +243,8 @@ func TestLifecycleStore_ObserverErrorRollsBackWrite(t *testing.T) {
 var errInjectedLC = errors.New("injected lifecycle failure")
 
 // lifecycleSnapshot is the lifecycle table state a failed write must not
-// change: the outbox row count and every cursor's revision and fingerprint.
+// change: the outbox row count and every cursor's revisions, digest and
+// fingerprint.
 func lifecycleSnapshot(t *testing.T, cs *CompositeStore) string {
 	t.Helper()
 	ctx := context.Background()
@@ -228,7 +255,7 @@ func lifecycleSnapshot(t *testing.T, cs *CompositeStore) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "outbox=%d", n)
 	for _, c := range cursors {
-		fmt.Fprintf(&b, " %s:%d:%s:%v", c.ID, c.TransitionRevision, c.LastFingerprint, c.LastDeleted)
+		fmt.Fprintf(&b, " %s:%d:%d:%s:%s:%v", c.ID, c.TransitionRevision, c.MetadataRevision, c.MetadataDigest, c.LastFingerprint, c.LastDeleted)
 	}
 	return b.String()
 }
@@ -287,9 +314,10 @@ func TestLifecycleStore_ObserverErrorRollsBackEveryWriter(t *testing.T) {
 			func(f *lifecycleFixture, a *store.Agent) error { return f.cs.DeleteAgent(ctx, a.ID) }, present},
 		{"purge",
 			func(f *lifecycleFixture) *store.Agent {
-				// Soft delete with the observer off, so the purge has an
-				// event to emit (the r6 N2 path) and therefore an observer
-				// call that can fail.
+				// Soft delete with the observer off, so the purge takes the
+				// r6 N2 path (gap + resynced + deleted) and the rollback
+				// covers real event rows. (The purge calls the observer for
+				// every removed row in any case.)
 				a := f.create("rb-purge")
 				f.cs.SetAgentWriteObserver(nil)
 				f.finalize(ctx, a.ID, store.DeletionFinalizeSoft)
