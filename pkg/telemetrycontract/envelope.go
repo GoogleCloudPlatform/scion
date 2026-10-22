@@ -664,8 +664,20 @@ func checkValues(v reflect.Value, path string) error {
 		}
 	case reflect.Slice:
 		if v.Type() == labelsType {
+			// The allowlist admits exported fields only, so the value is
+			// always interfaceable; the reflective path is a defensive
+			// fallback that cannot panic.
+			if v.CanInterface() {
+				for i, l := range v.Interface().(Labels) {
+					if !utf8.ValidString(l.Key) || !utf8.ValidString(l.Value) {
+						return fmt.Errorf("telemetrycontract: field %s[%d] is not valid UTF-8", path, i)
+					}
+				}
+				return nil
+			}
 			for i := 0; i < v.Len(); i++ {
-				if !utf8.ValidString(v.Index(i).Field(0).String()) || !utf8.ValidString(v.Index(i).Field(1).String()) {
+				l := v.Index(i)
+				if !utf8.ValidString(l.FieldByName("Key").String()) || !utf8.ValidString(l.FieldByName("Value").String()) {
 					return fmt.Errorf("telemetrycontract: field %s[%d] is not valid UTF-8", path, i)
 				}
 			}
@@ -687,6 +699,15 @@ func checkValues(v reflect.Value, path string) error {
 	return nil
 }
 
+// envelopeWireNames are the Envelope's JSON field names.
+var envelopeWireNames = func() []string {
+	names := make([]string, envelopeType.NumField())
+	for i := range names {
+		names[i], _, _ = strings.Cut(envelopeType.Field(i).Tag.Get("json"), ",")
+	}
+	return names
+}()
+
 // maxWireDepth bounds the walk over decoded event bytes.
 const maxWireDepth = 128
 
@@ -707,18 +728,20 @@ func checkWire(data []byte, want *Envelope) error {
 	if err := checkWireNumbers(tree, "", 0); err != nil {
 		return err
 	}
+	// Exact keys: encoding/json binds struct fields case-insensitively
+	// (Unicode simple folding, e.g. "ſ" for "s"), so first reject any
+	// top-level key that folds to an envelope field name without being
+	// exactly it. After that, one struct decode can only bind exact keys.
+	for k := range top {
+		for _, name := range envelopeWireNames {
+			if k != name && strings.EqualFold(k, name) {
+				return fmt.Errorf("telemetrycontract: wire key %q is a case variant of envelope field %q", k, name)
+			}
+		}
+	}
 	var got Envelope
-	gv := reflect.ValueOf(&got).Elem()
-	for i := 0; i < envelopeType.NumField(); i++ {
-		name, _, _ := strings.Cut(envelopeType.Field(i).Tag.Get("json"), ",")
-		raw, present := top[name]
-		if !present {
-			continue
-		}
-		b, _ := json.Marshal(raw)
-		if err := json.Unmarshal(b, gv.Field(i).Addr().Interface()); err != nil {
-			return fmt.Errorf("telemetrycontract: wire field %s: %w", name, err)
-		}
+	if err := json.Unmarshal(data, &got); err != nil {
+		return fmt.Errorf("telemetrycontract: decoding the wire envelope: %w", err)
 	}
 	if !reflect.DeepEqual(got, *want) {
 		return fmt.Errorf("telemetrycontract: envelope on the wire %+v differs from the event's envelope %+v", got, *want)
