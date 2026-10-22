@@ -69,8 +69,12 @@ type GitHub struct {
 	InstallationID int64
 
 	// Failure injection.
-	FailJIT       bool
-	FailDelete    bool
+	FailJIT    bool
+	FailDelete bool
+	// FailListRuns / FailListJobs: HTTP status to answer for a repo's runs list
+	// (key "owner/repo") or a run's jobs list (key run ID).
+	FailListRuns  map[string]int
+	FailListJobs  map[int64]int
 	BusyOnDelete  bool          // DELETE answers 422 as if the runner just picked up a job
 	TokenLifetime time.Duration // default 1 h
 
@@ -372,6 +376,10 @@ func (g *GitHub) listRuns(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if code := g.FailListRuns[full]; code != 0 {
+		writeJSON(w, code, map[string]string{"message": "injected failure"})
+		return
+	}
 	var ids []int64
 	for id, run := range g.runs {
 		if strings.EqualFold(run.Repo, full) && (status == "" || run.Status == status) {
@@ -390,6 +398,10 @@ func (g *GitHub) listJobs(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if code := g.FailListJobs[id]; code != 0 {
+		writeJSON(w, code, map[string]string{"message": "injected failure"})
+		return
+	}
 	run, ok := g.runs[id]
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"message": "Not Found"})

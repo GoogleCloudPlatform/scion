@@ -17,14 +17,17 @@ import (
 
 // ReconcileResult is the /reconcile response body.
 type ReconcileResult struct {
-	ClaimsExpired      int      `json:"claims_expired"`
-	RunnersReaped      int      `json:"runners_reaped"`
-	ExecutionsReaped   int      `json:"executions_reaped"`
-	HijacksKilled      int      `json:"hijacks_killed"`
-	Backfilled         int      `json:"backfilled"`
-	LeftQueued         int      `json:"left_queued"`
-	ForkRunsRejected   int      `json:"fork_runs_rejected"`
-	Errors             []string `json:"errors,omitempty"`
+	ClaimsExpired    int      `json:"claims_expired"`
+	RunnersReaped    int      `json:"runners_reaped"`
+	ExecutionsReaped int      `json:"executions_reaped"`
+	HijacksKilled    int      `json:"hijacks_killed"`
+	Backfilled       int      `json:"backfilled"`
+	LeftQueued       int      `json:"left_queued"`
+	ForkRunsRejected int      `json:"fork_runs_rejected"`
+	Errors           []string `json:"errors,omitempty"`
+	// Skipped: steps for one repo, run or job that GitHub answered with a 5xx.
+	// They are retried by the next pass and do not fail this one (HTTP 200).
+	Skipped            []string `json:"skipped,omitempty"`
 	CapacityFullAtStop bool     `json:"capacity_full,omitempty"`
 }
 
@@ -81,7 +84,16 @@ type runnerJob struct {
 //     capacity.
 func (s *Server) Reconcile(ctx context.Context) ReconcileResult {
 	var res ReconcileResult
+	// Every GitHub call in a pass concerns one repo, run or job. A GitHub 5xx
+	// there (a 502 on one run's jobs list, say) skips that item only: the rest of
+	// the pass goes on, and the next pass retries it. Anything else is an error
+	// and makes /reconcile answer 500.
 	addErr := func(stage string, err error) {
+		if githubServerError(err) {
+			res.Skipped = append(res.Skipped, stage+": "+err.Error())
+			s.log().Warn("reconcile step skipped after a GitHub server error; retried next pass", "event", logging.EventReconcileSkip, "stage", stage, "error", err.Error())
+			return
+		}
 		res.Errors = append(res.Errors, stage+": "+err.Error())
 		s.log().Error("reconcile step failed", "event", logging.EventError, "stage", stage, "error", err.Error())
 	}
@@ -149,8 +161,14 @@ func (s *Server) Reconcile(ctx context.Context) ReconcileResult {
 	s.log().Info("reconcile finished", "event", logging.EventReconcile,
 		"claims_expired", res.ClaimsExpired, "runners_reaped", res.RunnersReaped, "executions_reaped", res.ExecutionsReaped,
 		"hijacks_killed", res.HijacksKilled, "backfilled", res.Backfilled, "left_queued", res.LeftQueued,
-		"fork_runs_rejected", res.ForkRunsRejected, "errors", len(res.Errors))
+		"fork_runs_rejected", res.ForkRunsRejected, "errors", len(res.Errors), "skipped", len(res.Skipped))
 	return res
+}
+
+// githubServerError reports whether err is a GitHub 5xx response.
+func githubServerError(err error) bool {
+	var ae *githubapp.APIError
+	return errors.As(err, &ae) && ae.Status >= 500 && ae.Status <= 599
 }
 
 // discover lists queued and in_progress runs of every served repo. It

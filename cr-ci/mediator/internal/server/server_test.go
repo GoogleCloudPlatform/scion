@@ -809,6 +809,39 @@ func TestReconcileReapsIdleStoppedRunnerOnFirstPass(t *testing.T) {
 	h.wantLog(logging.EventRunnerReaped)
 }
 
+// TestReconcileSkipsGitHubServerErrors: a GitHub 5xx on one run's jobs list
+// (ii3: a 502 failed two whole passes) skips that run only; the pass answers
+// 200, serves the other runs, and the next pass picks the skipped run up.
+// Other GitHub errors still fail the pass.
+func TestReconcileSkipsGitHubServerErrors(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	h.addSameRepoRun(10, fakes.GitHubJob{ID: 100, Status: "queued", Labels: []string{testLabel}})
+	h.addSameRepoRun(11, fakes.GitHubJob{ID: 110, Status: "queued", Labels: []string{testLabel}})
+	h.gh.FailListJobs = map[int64]int{10: http.StatusBadGateway}
+	res := h.reconcile() // fails the test unless 200
+	if res.Backfilled != 1 || h.activeFor("cr-job-110") != 1 {
+		t.Errorf("result %+v, want run 11 served despite run 10's 502", res)
+	}
+	if len(res.Errors) != 0 || len(res.Skipped) != 1 || !strings.Contains(res.Skipped[0], "list_jobs") {
+		t.Errorf("errors %q, skipped %q; want one skipped list_jobs", res.Errors, res.Skipped)
+	}
+	h.wantLog(logging.EventReconcileSkip)
+
+	h.gh.FailListJobs = nil
+	if res := h.reconcile(); res.Backfilled != 1 || h.activeFor("cr-job-100") != 1 || len(res.Skipped) != 0 {
+		t.Errorf("next pass: %+v, want run 10 served", res)
+	}
+
+	h.gh.FailListRuns = map[string]int{testRepo: http.StatusForbidden}
+	if code, res := h.reconcileWith(h.google.IDToken(testMediatorURL, schedulerEmail, h.clock.Now())); code != http.StatusInternalServerError || len(res.Errors) != 2 || len(res.Skipped) != 0 {
+		t.Errorf("403 on the runs list: %d %+v, want 500 with an error per status list", code, res)
+	}
+	h.gh.FailListRuns = map[string]int{testRepo: http.StatusServiceUnavailable}
+	if res := h.reconcile(); len(res.Skipped) != 2 || len(res.Errors) != 0 {
+		t.Errorf("503 on the runs list: %+v, want both status lists skipped", res)
+	}
+}
+
 func TestReconcileBackfill(t *testing.T) {
 	h := newHarness(t, harnessOpts{max: 2})
 	t0 := h.clock.Now().Add(-10 * time.Minute)

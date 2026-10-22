@@ -177,7 +177,8 @@ logged (a unit test enforces this).
 | `runner_swap_low_budget` | WARNING | That job inherited less than 20 minutes; if it fails on the task timeout, re-run it. Frequent ones: lower `RUNNER_IDLE_TIMEOUT` or raise `TASK_TIMEOUT` ([architecture](architecture.md#flow)) |
 | `webhook_rejected` | WARNING | Bad signature, malformed payload or repo outside `TARGET_REPOS` |
 | `webhook_ignored` | INFO / DEBUG / WARNING | Not `workflow_job`, or job without `RUNNER_LABEL`; WARNING with `reason=labels_unservable` when a job has `RUNNER_LABEL` plus other labels a cr-ci runner cannot satisfy (fix its `runs-on`) |
-| `reconcile` | INFO | Reconcile summary (reaped, backfilled, left queued, errors) |
+| `reconcile` | INFO | Reconcile summary (reaped, backfilled, left queued, errors, skipped). Any error makes `/reconcile` answer 500; skipped items do not |
+| `reconcile_skip` | WARNING | GitHub answered one repo's, run's or job's call in a reconcile with a 5xx (`stage`); that item is skipped and retried next pass, the rest of the pass goes on and `/reconcile` still answers 200 (listed under `skipped`). Only the same `stage` across many passes needs a look |
 | `reconcile_denied` | WARNING | `/reconcile` called without a valid scheduler ID token |
 | `runner_reaped` / `execution_reaped` | WARNING | Stale registration deleted / execution past the task timeout cancelled |
 | `error` | ERROR | A GitHub, Cloud Run or Secret Manager call failed (`stage`, `error`) |
