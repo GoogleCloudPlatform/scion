@@ -639,10 +639,13 @@ func (ws *WebServer) logger() *slog.Logger {
 // prefix test, which "https:/host" would fail), so the decision fails
 // closed. The fail-safe default for Secure is true: a Secure cookie on an
 // http URL breaks login visibly, while a non-Secure cookie on an https URL
-// leaks silently. This fallback is a second line of defence only: the
-// server refuses a base URL that does not parse at startup
-// (checkWebBaseURLListener in cmd), and this function must not be read as
-// making that validation optional.
+// leaks silently. This fallback is a second line of defence: the server
+// refuses a base URL that does not parse at startup (checkWebBaseURLListener
+// in cmd), and this function must not be read as making that validation
+// optional. Nor is the fallback dead code: NewWebServer is exported, so a
+// direct caller bypasses the startup preflight, and on that path the
+// fallback is the only cover. "The preflight already validates" is not a
+// reason to delete it.
 func baseURLIsHTTPS(baseURL string) bool {
 	u, err := url.Parse(baseURL)
 	if err != nil {
