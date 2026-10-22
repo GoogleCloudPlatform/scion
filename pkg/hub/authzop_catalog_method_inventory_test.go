@@ -187,7 +187,6 @@ var suffixCheckExclusions = map[liveInventoryKey]string{
 	{OperationID: "hub.integrations.update", Method: "PUT", Pattern: "/api/v1/admin/integrations/{name}/config"}:                 "handleAdminIntegrationByName splits the sub-path into at most three parts and the config branch ignores the third, so a suffix reaches the same config update as the bare path",
 	{OperationID: "hub.integrations.update", Method: "POST", Pattern: "/api/v1/admin/integrations/{name}/restart"}:               "handleAdminIntegrationByName splits the sub-path into at most three parts and the restart branch ignores the third, so a suffix restarts the integration as the bare path does",
 	{OperationID: "hub.integrations.install", Method: "POST", Pattern: "/api/v1/admin/integrations/{name}/install"}:              "handleAdminIntegrationByName splits the sub-path into at most three parts and the install branch ignores the third, so a suffix reaches the same install handling as the bare path",
-	{OperationID: "hub.integrations.install", Method: "POST", Pattern: "/api/v1/admin/integrations/{name}/update"}:               "handleAdminIntegrationByName splits the sub-path into at most three parts and a POST to update with a third part starts the same update as the bare path",
 	// handleSkillByID (skill_handlers.go) splits the path into at most
 	// three segments, so the action handlers below receive any trailing
 	// segment as part of the third one and ignore it, or treat it as a
