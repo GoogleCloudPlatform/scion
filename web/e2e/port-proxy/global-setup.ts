@@ -24,6 +24,11 @@
  *    clients in process. It creates a project and one agent per transport,
  *    each registering the fixture port, and writes a ready file once each
  *    port answers through the hub.
+ * 4. Issues the member test identity (web-login code in the state dir) and
+ *    makes it project-admin of the fixture project.
+ * 5. Restarts the hub without development sign-in, as in production (the
+ *    dev token is not accepted afterwards); the spec waits for the agents
+ *    to reconnect.
  *
  * The hub binary (make build), the web assets (npm run build) and the
  * helper binary must exist with E2E_PREBUILT=1; otherwise they are built
@@ -35,7 +40,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { startHub } from '../harness/hub.js';
+import { type HubState, restartHubWithoutDevAuth, runScionCLI, startHub } from '../harness/hub.js';
 import globalTeardown from './global-teardown.js';
 import {
   createStateDir,
@@ -203,6 +208,77 @@ async function setUp(dir: string): Promise<void> {
   console.info(
     `[setup] Agents ready on port ${port}: ${ready.agents.map((a) => `${a.name} (${a.transport})`).join(', ')}`
   );
+
+  // The member identity, its web-login code and its project role need the
+  // dev token, so they are created before the restart below.
+  const member = await createMember(hub, dir, ready.projectId);
+  writeSuiteState({ fixturePid, helperPid, port, ...ready, member });
+
+  // The journeys run against a hub without development sign-in, as in
+  // production: a request without credentials is not signed in. The
+  // agents reconnect on their own; the spec waits for them.
+  await restartHubWithoutDevAuth(hubStateFile());
+}
+
+/** An admin API call with the dev token (setup only). */
+async function adminJSON(
+  hub: HubState,
+  method: string,
+  apiPath: string,
+  body?: unknown
+): Promise<unknown> {
+  const res = await fetch(`${hub.baseURL}${apiPath}`, {
+    method,
+    headers: { Authorization: `Bearer ${hub.devToken}`, 'Content-Type': 'application/json' },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  if (!res.ok) throw new Error(`${method} ${apiPath} answered ${res.status}`);
+  return (await res.json()) as unknown;
+}
+
+/**
+ * Issues a member test identity, writes its web-login code to a 0600 file
+ * in the state dir (the API token is removed unused) and makes it
+ * project-admin of the fixture project, the role that opens its agents'
+ * exposed ports.
+ */
+async function createMember(
+  hub: HubState,
+  dir: string,
+  projectId: string
+): Promise<{ email: string; codeFile: string }> {
+  const tokenFile = path.join(dir, 'member.token');
+  const issued = JSON.parse(
+    runScionCLI(hub, [
+      'hub',
+      'test-identity',
+      'issue',
+      '--role',
+      'member',
+      '--purpose',
+      'e2e port proxy',
+      '--out',
+      tokenFile,
+      '--json',
+    ])
+  ) as { identity: { id: string; email: string } };
+  fs.rmSync(tokenFile, { force: true });
+  const codeFile = path.join(dir, 'member.code');
+  runScionCLI(hub, ['hub', 'test-identity', 'web-code', issued.identity.id, '--out', codeFile]);
+
+  const roles = (await adminJSON(
+    hub,
+    'GET',
+    `/api/v1/projects/${projectId}/members/assignable-roles`
+  )) as { items?: Array<{ id: string; name: string }> };
+  const role = roles.items?.find((r) => r.name === 'project-admin');
+  if (!role) throw new Error('no assignable project-admin role');
+  await adminJSON(hub, 'POST', `/api/v1/projects/${projectId}/members`, {
+    roleDefinitionId: role.id,
+    principalType: 'user',
+    principalId: issued.identity.email,
+  });
+  return { email: issued.identity.email, codeFile };
 }
 
 export default globalSetup;

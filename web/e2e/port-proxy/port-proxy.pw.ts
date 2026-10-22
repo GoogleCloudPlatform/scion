@@ -34,18 +34,14 @@
  * work, and fixture/abs.html loads its script by root-relative URL.
  */
 
-import * as fs from 'node:fs';
-import * as path from 'node:path';
-
 import { type BrowserContext, expect, type Page, type Response, test } from '@playwright/test';
 
 import { assertTestIdentity, redeemTestIdentity } from '../harness/auth.js';
-import { type HubState, readHubState, runScionCLI } from '../harness/hub.js';
+import { type HubState, readHubState } from '../harness/hub.js';
 import {
   hubStateFile,
   readSuiteState,
   SINGLE_PROBE_TEXT,
-  stateDir,
   type SuiteState,
   TRANSPORTS,
 } from './state.js';
@@ -60,11 +56,11 @@ const NO_CREDENTIALS_DOCS_ANCHOR = '/port-forwarding/#multi-file-apps';
 let hub: HubState;
 let suite: SuiteState;
 let context: BrowserContext;
-let identityId = '';
 /**
  * Page requests the browser context sent with an Authorization header.
- * Every journey request is made by a page; only global setup and the
- * redeem in beforeAll use the context's request API, without one.
+ * Every journey request is made by a page; only beforeAll (the redeem, the
+ * identity check and the readiness wait) uses the context's request API,
+ * without one.
  */
 const bearerRequests: string[] = [];
 
@@ -79,15 +75,31 @@ function agentFor(transport: string): string {
   return agent.id;
 }
 
-/** An admin API call (setup only; the browser never holds this token). */
-async function adminJSON(method: string, apiPath: string, body?: unknown): Promise<unknown> {
-  const res = await fetch(`${hub.baseURL}${apiPath}`, {
-    method,
-    headers: { Authorization: `Bearer ${hub.devToken}`, 'Content-Type': 'application/json' },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-  });
-  if (!res.ok) throw new Error(`${method} ${apiPath} answered ${res.status}`);
-  return res.status === 204 ? null : ((await res.json()) as unknown);
+/** How long beforeAll waits for the agents to serve their port again after the hub restart. */
+const READY_TIMEOUT_MS = 90_000;
+
+/**
+ * Waits until the agent's fixture port answers single.html through the
+ * proxy for the signed-in context (the agents reconnect after global
+ * setup restarted the hub).
+ */
+async function waitServed(agentId: string): Promise<void> {
+  const url = `${proxyBase(agentId)}/single.html`;
+  const deadline = Date.now() + READY_TIMEOUT_MS;
+  let last = 'no answer';
+  while (Date.now() < deadline) {
+    try {
+      const res = await context.request.get(url, { maxRedirects: 0 });
+      const body = await res.text();
+      await res.dispose();
+      if (res.status() === 200 && body.includes(SINGLE_PROBE_TEXT)) return;
+      last = `status ${res.status()}`;
+    } catch (err) {
+      last = String((err as Error).message).split('\n')[0];
+    }
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  throw new Error(`agent ${agentId} did not serve its port within ${READY_TIMEOUT_MS}ms: ${last}`);
 }
 
 /** Opens a page and records the response of each proxied sub-resource. */
@@ -109,58 +121,32 @@ async function openRecorded(
 test.describe.configure({ mode: 'serial' });
 
 test.beforeAll(async ({ browser }) => {
+  // The readiness wait below can take up to READY_TIMEOUT_MS per agent.
+  test.setTimeout(60_000 + READY_TIMEOUT_MS * 2);
   const h = readHubState(hubStateFile());
   const s = readSuiteState();
   if (!h || !s) throw new Error('global setup did not record the hub and suite state');
   hub = h;
   suite = s;
 
-  // A member test identity with a web-login code; the API token is not used.
-  const tokenFile = path.join(stateDir(), 'member.token');
-  const issued = JSON.parse(
-    runScionCLI(hub, [
-      'hub',
-      'test-identity',
-      'issue',
-      '--role',
-      'member',
-      '--purpose',
-      'e2e port proxy',
-      '--out',
-      tokenFile,
-      '--json',
-    ])
-  ) as { identity: { id: string; email: string } };
-  fs.rmSync(tokenFile, { force: true });
-  identityId = issued.identity.id;
-  const codeFile = path.join(stateDir(), 'member.code');
-  runScionCLI(hub, ['hub', 'test-identity', 'web-code', identityId, '--out', codeFile]);
-
-  // project-admin of the fixture project: the role that opens its agents'
-  // exposed ports.
-  const roles = (await adminJSON(
-    'GET',
-    `/api/v1/projects/${suite.projectId}/members/assignable-roles`
-  )) as { items?: Array<{ id: string; name: string }> };
-  const role = roles.items?.find((r) => r.name === 'project-admin');
-  if (!role) throw new Error('no assignable project-admin role');
-  await adminJSON('POST', `/api/v1/projects/${suite.projectId}/members`, {
-    roleDefinitionId: role.id,
-    principalType: 'user',
-    principalId: issued.identity.email,
-  });
+  // The member identity global setup created (project-admin of the
+  // fixture project), signed in through its web-login code.
+  if (!suite.member) throw new Error('global setup did not create the member identity');
+  const member = suite.member;
 
   context = await browser.newContext({ baseURL: hub.baseURL });
   context.on('request', (req) => {
     if (req.headers()['authorization'] !== undefined) bearerRequests.push(req.url());
   });
-  await redeemTestIdentity(context, { codeFile });
-  await assertTestIdentity(context.request, { email: issued.identity.email, role: 'member' });
+  await redeemTestIdentity(context, { codeFile: member.codeFile });
+  await assertTestIdentity(context.request, { email: member.email, role: 'member' });
+  for (const agent of suite.agents) await waitServed(agent.id);
 });
 
+// The hub runs without development sign-in now, so no admin is left to
+// delete the identity; it goes with the throwaway hub at teardown.
 test.afterAll(async () => {
   await context?.close();
-  if (identityId) runScionCLI(hub, ['hub', 'test-identity', 'delete', identityId]);
 });
 
 test.afterEach(() => {

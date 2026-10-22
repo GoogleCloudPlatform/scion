@@ -53,6 +53,12 @@ export interface SuiteState {
   brokerId: string;
   projectId: string;
   agents: SuiteAgent[];
+  /**
+   * The member test identity the journeys sign in as: project-admin of
+   * the fixture project, with a single-use web-login code in codeFile
+   * (0600, under the state dir). Unset until setup has created it.
+   */
+  member?: { email: string; codeFile: string };
 }
 
 /** Creates the private state dir and publishes its path. */
