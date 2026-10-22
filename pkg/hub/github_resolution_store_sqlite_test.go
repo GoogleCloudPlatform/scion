@@ -107,9 +107,9 @@ func TestGitHubResolutionStore_Put_UpsertUpdatesExistingRow(t *testing.T) {
 
 	// Exactly one row for this cache_key: a conflict-target-less upsert that
 	// instead fell back to always inserting (the failure mode this guards
-	// against) would leave two. Filtered by cache_key, not a bare Count(),
-	// since this DSN (file:ent?mode=memory&cache=shared) is shared across the
-	// package's tests and could otherwise pick up rows left by another test.
+	// against) would leave two. The test has its own database, so a bare
+	// Count() would also work today; the cache_key filter keeps the assertion
+	// about this key alone if a stray row ever lands in the table.
 	count, err := client.GitHubResolutionCache.Query().
 		Where(githubresolutioncache.CacheKeyEQ(cacheKey)).
 		Count(ctx)
