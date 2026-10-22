@@ -153,9 +153,12 @@ const ChatScheduledSend = "web.chat_scheduled_send"
 // needs explicit owner approval.
 const AuthorizationDecisionAuditV2 = "hub.authorization_decision_audit_v2"
 
-// AgentEdit gates the web Edit agent page (/agents/{id}/edit) and the Edit
-// button on the agent page. It is web-only for now: the hub's config PATCH
-// accepts edits of agents with no container whether or not it is on.
+// AgentEdit gates what the web Edit agent page (/agents/{id}/edit) adds
+// beyond the retired Configure page: the grouping of its fields by when an
+// edit applies, and the summary strip counting them. The page itself, and
+// the Edit button on the agent page, are always available. It is web-only:
+// the hub's config PATCH accepts edits of agents with no container whether
+// or not it is on.
 const AgentEdit = "web.agent_edit"
 
 // AgentDelegation gates agent delegation (.design/agent-delegation.md §10):
@@ -196,8 +199,8 @@ const AsyncAgentLaunch = "hub.async_agent_launch"
 // on too. Turn it on only after every hub node runs a version that
 // advertises async_start_v1 in the hub-instance registry; to roll back,
 // turn it off and wait launch_timeout plus 15 seconds before downgrading
-// any node. This release registers it only: every start stays synchronous
-// whatever its value.
+// any node. While any live hub instance lacks async_start_v1, starts stay
+// synchronous whatever its value.
 const AsyncAgentStart = "hub.async_agent_start"
 
 // compiled is the production experiment list. It is reachable only through
@@ -207,7 +210,7 @@ var compiled = []Experiment{
 	{
 		Name:        AsyncAgentStart,
 		Title:       "Asynchronous agent start",
-		Description: "Lets the hub answer a start, resume or restart of an existing agent as soon as the Runtime Broker accepts it, like an asynchronous create; it applies only while hub.async_agent_launch is also on. Turn it on only after every hub node runs a version that supports it (each advertises async_start_v1). To roll back, turn it off and wait launch_timeout plus 15 seconds before downgrading any node. In this release starts stay synchronous whatever its value.",
+		Description: "Lets the hub answer a start, resume or restart of an existing agent as soon as the Runtime Broker accepts it, like an asynchronous create; it applies only while hub.async_agent_launch is also on. Turn it on only after every hub node runs a version that supports it (each advertises async_start_v1). While any live hub instance lacks async_start_v1, starts stay synchronous. To roll back, turn it off and wait launch_timeout plus 15 seconds before downgrading any node.",
 		Default:     false,
 		Layers:      []Layer{LayerServer},
 		Stage:       StageAlpha,
@@ -342,8 +345,8 @@ var compiled = []Experiment{
 	{
 		Name:        AgentEdit,
 		Title:       "Edit agent",
-		Description: "Adds an Edit button on the agent page and the Edit page at /agents/{id}/edit, which edits a created, stopped, failed or suspended agent's model and limits, and shows for every field whether it applies at the next start or resume, needs a reincarnation, or is fixed.",
-		Default:     false,
+		Description: "On the Edit agent page, adds a view that groups the fields by when an edit applies (next start or resume, held, needs a reincarnation, immediately, fixed) and a summary strip counting them. The page and its by-function view are always available.",
+		Default:     true,
 		Layers:      []Layer{LayerWeb},
 		Stage:       StageAlpha,
 		Issue:       "ptone/scion#3952",

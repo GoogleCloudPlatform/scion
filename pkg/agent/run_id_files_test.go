@@ -242,7 +242,7 @@ func TestStart_FailureAfterPreCleanRecordsNewRun(t *testing.T) {
 	rt := &runtime.MockRuntime{
 		ListFunc: func(context.Context, map[string]string) ([]api.AgentInfo, error) {
 			return []api.AgentInfo{{
-				Name: "tz-agent", ContainerID: "cid-run-1", RunID: "run-1", Phase: "stopped",
+				Name: "tz-agent", ContainerID: "cid-run-1", RunID: "run-1", Phase: "stopped", ProjectID: identityProjB,
 				Labels: map[string]string{"scion.name": "tz-agent", api.LabelRunID: "run-1"},
 			}}, nil
 		},
@@ -257,6 +257,7 @@ func TestStart_FailureAfterPreCleanRecordsNewRun(t *testing.T) {
 	}
 	_, err := NewManager(rt).Start(context.Background(), api.StartOptions{
 		Name: "tz-agent", ProjectPath: projectScionDir, BrokerMode: true, NoAuth: true, RunID: "run-2",
+		Env: map[string]string{"SCION_PROJECT_ID": identityProjB},
 	})
 	if err == nil {
 		t.Fatal("Start succeeded with an unreadable scion-agent.json")
@@ -276,12 +277,13 @@ func TestStart_PreCleanFailureKeepsPreviousRun(t *testing.T) {
 	writeHostStateRun(t, projectScionDir, "tz-agent", "run-1")
 	rt := &runtime.MockRuntime{
 		ListFunc: func(context.Context, map[string]string) ([]api.AgentInfo, error) {
-			return []api.AgentInfo{{Name: "tz-agent", ContainerID: "cid-run-1", RunID: "run-1", Phase: "stopped"}}, nil
+			return []api.AgentInfo{{Name: "tz-agent", ContainerID: "cid-run-1", RunID: "run-1", Phase: "stopped", ProjectID: identityProjB}}, nil
 		},
 		DeleteFunc: func(context.Context, runtime.RunRef) error { return errors.New("runtime unavailable") },
 	}
 	if _, err := NewManager(rt).Start(context.Background(), api.StartOptions{
 		Name: "tz-agent", ProjectPath: projectScionDir, BrokerMode: true, NoAuth: true, RunID: "run-2",
+		Env: map[string]string{"SCION_PROJECT_ID": identityProjB},
 	}); err == nil {
 		t.Fatal("Start succeeded although the pre-clean failed")
 	}
@@ -303,7 +305,8 @@ func TestProvision_CreateRecordsProvisionOwner(t *testing.T) {
 	}{
 		{"provision-only create", true, nil, false},
 		{"provision of an existing agent", false, nil, false},
-		{"create while a runtime entry holds the name", true, []api.AgentInfo{{Name: "tz-agent", ContainerID: "cid-ghost", RunID: "run-ghost"}}, false},
+		{"create while a runtime entry holds the name", true, []api.AgentInfo{{Name: "tz-agent", ContainerID: "cid-ghost", RunID: "run-ghost",
+			Labels: map[string]string{"scion.name": "tz-agent", "scion.project_id": "this-project"}}}, false},
 		{"create when the runtime cannot be listed", true, nil, true},
 		{"create while only another project's entry holds the name", true, []api.AgentInfo{{
 			Name: "tz-agent", ContainerID: "cid-other", RunID: "run-other",
@@ -328,7 +331,7 @@ func TestProvision_CreateRecordsProvisionOwner(t *testing.T) {
 			got := hostStateRun(t, projectScionDir, "tz-agent")
 			blocked := tc.listErr
 			for _, e := range tc.entries {
-				if e.Labels["scion.project_id"] == "" {
+				if e.Labels["scion.project_id"] == "this-project" {
 					blocked = true
 				}
 			}

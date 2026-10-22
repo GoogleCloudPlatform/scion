@@ -4356,6 +4356,10 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		// A failed registration leaves it disabled: the overlay is unchanged.
 		enableColocatedProfileReferences(ctx, hubSrv)
 	}
+	// Kubernetes placement defaults: sibling runtime entries must agree.
+	// Logged, never fatal; after the overlay install so it sees the stored
+	// runtimes.
+	checkPlacementSiblingsAtStartup(cfg, log.Printf)
 
 	rhSrv := runtimebroker.New(rhCfg, mgr, rt, rtRecord)
 	// The broker phase of the process's graceful shutdown bounds the

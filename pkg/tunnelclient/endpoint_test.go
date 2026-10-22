@@ -41,6 +41,17 @@ func TestNormalizeEndpoint(t *testing.T) {
 	}
 }
 
+// Only ASCII letters are lowercased, as config.NormalizeEndpoint does: a
+// host with KELVIN SIGN and one with "k" are different hubs.
+func TestNormalizeEndpointASCIIOnly(t *testing.T) {
+	if a, b := NormalizeEndpoint("https://\u212Aub.example.com"), NormalizeEndpoint("https://kub.example.com"); a == b {
+		t.Errorf("KELVIN SIGN and k share the key %q", a)
+	}
+	if got := NormalizeEndpoint("https://Kub.Example.com"); got != "https://kub.example.com" {
+		t.Errorf("NormalizeEndpoint = %q, want ASCII letters lowercased", got)
+	}
+}
+
 // Spellings that normalise the same share one session key.
 func TestSessionKeySharedAcrossSpellings(t *testing.T) {
 	id := Identity{Kind: CredentialOAuth, Subject: "u1", Scope: ScopeHub}

@@ -2031,3 +2031,55 @@ func (o *OperationalSettings) ReadAuthoritativeExperiments(ctx context.Context) 
 func applySnapshotLogLevel(level string) {
 	logging.ApplyLogLevelSetting("server.log_level", level)
 }
+
+// DefaultAttachmentDeliveryMaxBytes is the compiled default of
+// messaging.attachment_delivery_max_bytes (ptone/scion#4596): 32 MiB.
+const DefaultAttachmentDeliveryMaxBytes int64 = 32 << 20
+
+// DefaultAttachmentInboxRetentionDays is the compiled default of
+// messaging.attachment_inbox_retention_days (ptone/scion#4596).
+const DefaultAttachmentInboxRetentionDays = 7
+
+// messagingSection returns the cached messaging section, and false when it
+// is absent or unreadable.
+func (o *OperationalSettings) messagingSection() (opsettings.MessagingSettings, bool) {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	var ms opsettings.MessagingSettings
+	state, ok := o.cache["messaging"]
+	if !ok || state.Malformed {
+		return ms, false
+	}
+	if err := json.Unmarshal(state.Value, &ms); err != nil {
+		return opsettings.MessagingSettings{}, false
+	}
+	return ms, true
+}
+
+// AttachmentDeliveryMaxBytes returns the per-message total size limit of
+// attachments for a message with an agent recipient (ptone/scion#4596).
+// 0 means delivery is off. The compiled default applies when the section
+// or field is absent or unreadable, or the value is negative.
+//
+// Hot-reloadable: reads from the DB-backed cache.
+func (o *OperationalSettings) AttachmentDeliveryMaxBytes() int64 {
+	ms, ok := o.messagingSection()
+	if !ok || ms.AttachmentDeliveryMaxBytes == nil || *ms.AttachmentDeliveryMaxBytes < 0 {
+		return DefaultAttachmentDeliveryMaxBytes
+	}
+	return *ms.AttachmentDeliveryMaxBytes
+}
+
+// AttachmentInboxRetentionDays returns how many days a broker keeps
+// delivered attachments in an agent's inbox (ptone/scion#4596). The
+// compiled default applies when the section or field is absent or
+// unreadable, or the value is below 1.
+//
+// Hot-reloadable: reads from the DB-backed cache.
+func (o *OperationalSettings) AttachmentInboxRetentionDays() int {
+	ms, ok := o.messagingSection()
+	if !ok || ms.AttachmentInboxRetentionDays == nil || *ms.AttachmentInboxRetentionDays < 1 {
+		return DefaultAttachmentInboxRetentionDays
+	}
+	return *ms.AttachmentInboxRetentionDays
+}
