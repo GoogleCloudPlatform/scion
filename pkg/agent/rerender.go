@@ -24,7 +24,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strings"
 
@@ -55,8 +54,9 @@ import (
 // agent or its harness changed since are left alone until the hub's value
 // changes again. The record lies in the agent directory, outside every
 // container mount (config.RerenderRecordFileName), and provisioning
-// deletes it, so a new generation of the agent never matches a fingerprint
-// from the previous one.
+// resets it (dropping every fingerprint and recording where it rendered
+// the system prompt), so a new generation of the agent never matches a
+// fingerprint from the previous one.
 
 // Rerender groups: the keys whose files one provisioning step renders
 // together. The instructions and the system prompt are one group because
@@ -106,9 +106,19 @@ type rerenderInputs struct {
 	WriteHome func(func() error) error
 }
 
-// rerenderRecord is the rerender record: the fingerprint of what was last
-// rendered for each group.
-type rerenderRecord map[string]string
+// rerenderRecord is the rerender record.
+type rerenderRecord struct {
+	// Fingerprints holds the fingerprint of what was last rendered for
+	// each group.
+	Fingerprints map[string]string `json:"fingerprints,omitempty"`
+	// SystemPromptPaths are the agent-home paths (slash-separated,
+	// relative) Scion last rendered the system prompt to, for a harness
+	// that reads prompts from the agent home: written by provisioning and
+	// by each prompt re-render. Only these are removed when a later render
+	// no longer produces them, so a file a template's home/ supplies is
+	// kept, as a reincarnation keeps it.
+	SystemPromptPaths []string `json:"systemPromptPaths,omitempty"`
+}
 
 func rerenderRecordPath(agentDir string) string {
 	return filepath.Join(agentDir, config.RerenderRecordFileName)
@@ -116,12 +126,13 @@ func rerenderRecordPath(agentDir string) string {
 
 func readRerenderRecord(agentDir string) rerenderRecord {
 	rec := rerenderRecord{}
-	data, err := os.ReadFile(rerenderRecordPath(agentDir))
-	if err != nil {
-		return rec
+	if data, err := os.ReadFile(rerenderRecordPath(agentDir)); err == nil {
+		if json.Unmarshal(data, &rec) != nil {
+			rec = rerenderRecord{}
+		}
 	}
-	if json.Unmarshal(data, &rec) != nil {
-		return rerenderRecord{}
+	if rec.Fingerprints == nil {
+		rec.Fingerprints = map[string]string{}
 	}
 	return rec
 }
@@ -134,13 +145,18 @@ func writeRerenderRecord(agentDir string, rec rerenderRecord) error {
 	return os.WriteFile(rerenderRecordPath(agentDir), data, 0o644)
 }
 
-// removeRerenderRecord deletes the rerender record (ProvisionAgent: the
-// files it renders are the new baseline).
-func removeRerenderRecord(agentDir string) error {
-	if err := os.Remove(rerenderRecordPath(agentDir)); err != nil && !os.IsNotExist(err) {
-		return err
+// resetRerenderRecord replaces the rerender record with one holding no
+// fingerprints and the system-prompt paths provisioning just rendered
+// (ProvisionAgent: the files it renders are the new baseline), or deletes
+// it when there are none.
+func resetRerenderRecord(agentDir string, systemPromptPaths []string) error {
+	if len(systemPromptPaths) == 0 {
+		if err := os.Remove(rerenderRecordPath(agentDir)); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
 	}
-	return nil
+	return writeRerenderRecord(agentDir, rerenderRecord{SystemPromptPaths: systemPromptPaths})
 }
 
 // rerenderProvisionedFiles re-renders the files provisioning wrote for
@@ -170,14 +186,14 @@ func rerenderProvisionedFiles(ctx context.Context, in rerenderInputs) ([]string,
 	changed := false
 
 	if groups[rerenderGroupPrompts] {
-		fp, warn, err := rerenderPrompts(in, rec[rerenderGroupPrompts], write)
+		fp, warn, err := rerenderPrompts(in, &rec, write)
 		if err != nil {
 			return warnings, err
 		}
 		if warn != "" {
 			warnings = append(warnings, warn)
-		} else if fp != rec[rerenderGroupPrompts] {
-			rec[rerenderGroupPrompts] = fp
+		} else if fp != rec.Fingerprints[rerenderGroupPrompts] {
+			rec.Fingerprints[rerenderGroupPrompts] = fp
 			changed = true
 		}
 	}
@@ -186,11 +202,11 @@ func rerenderProvisionedFiles(ctx context.Context, in rerenderInputs) ([]string,
 		if err != nil {
 			return warnings, err
 		}
-		if fp != rec[rerenderGroupSkills] {
+		if fp != rec.Fingerprints[rerenderGroupSkills] {
 			if err := write(func() error { return rerenderSkills(ctx, in) }); err != nil {
 				return warnings, err
 			}
-			rec[rerenderGroupSkills] = fp
+			rec.Fingerprints[rerenderGroupSkills] = fp
 			changed = true
 		}
 	}
@@ -199,11 +215,11 @@ func rerenderProvisionedFiles(ctx context.Context, in rerenderInputs) ([]string,
 		if err != nil {
 			return warnings, err
 		}
-		if fp != rec[rerenderGroupServices] {
+		if fp != rec.Fingerprints[rerenderGroupServices] {
 			if err := write(func() error { return rerenderServices(in.AgentHome, in.Config.Services) }); err != nil {
 				return warnings, err
 			}
-			rec[rerenderGroupServices] = fp
+			rec.Fingerprints[rerenderGroupServices] = fp
 			changed = true
 		}
 	}
@@ -222,7 +238,8 @@ func rerenderProvisionedFiles(ctx context.Context, in rerenderInputs) ([]string,
 // restages inputs from it), else the agent home. It returns the
 // fingerprint, or a warning when the prompts cannot be rendered because a
 // value names a template file and the template does not resolve.
-func rerenderPrompts(in rerenderInputs, recorded string, write func(func() error) error) (string, string, error) {
+func rerenderPrompts(in rerenderInputs, rec *rerenderRecord, write func(func() error) error) (string, string, error) {
+	recorded := rec.Fingerprints[rerenderGroupPrompts]
 	if len(in.Chain) == 0 {
 		// Without a template, provisioning renders a value as content; a
 		// value the hub did not send is a template file name here.
@@ -251,7 +268,7 @@ func rerenderPrompts(in rerenderInputs, recorded string, write func(func() error
 			cfg.SystemPrompt = in.Inline.SystemPrompt
 		}
 	}
-	if err := injectPromptFiles(in.Harness, scratch, in.Chain, &cfg, in.Inline); err != nil {
+	if _, err := injectPromptFiles(in.Harness, scratch, in.Chain, &cfg, in.Inline); err != nil {
 		return "", "", err
 	}
 	files, err := readTree(scratch)
@@ -284,20 +301,25 @@ func rerenderPrompts(in rerenderInputs, recorded string, write func(func() error
 		util.Debugf("rerender: staged prompts for agent %s in the inputs record", in.AgentName)
 		return fp, "", nil
 	}
-	// When this start clears the system prompt, a system-prompt file the
-	// render no longer produces (no template default) is removed, as the
-	// clear reverts to nothing. Otherwise a file the render does not
-	// produce, such as one a template's home/ supplies, is left alone.
-	var stale []string
-	if in.Inline != nil && slices.Contains(in.Inline.ClearedFields, "system_prompt") {
-		targets, err := systemPromptTargets(in.Harness)
-		if err != nil {
-			return "", "", err
+	// A system-prompt file Scion rendered last time (provisioning or an
+	// earlier re-render, rec.SystemPromptPaths) that this render no longer
+	// produces is removed: a cleared prompt with no template default
+	// reverts to nothing. Any other file the render does not produce, such
+	// as one a template's home/ supplies, is left alone, as a reincarnation
+	// leaves it.
+	targets, err := systemPromptTargets(in.Harness)
+	if err != nil {
+		return "", "", err
+	}
+	var stale, rendered []string
+	for _, rel := range rec.SystemPromptPaths {
+		if _, ok := files[rel]; !ok {
+			stale = append(stale, rel)
 		}
-		for _, rel := range targets {
-			if _, rendered := files[rel]; !rendered {
-				stale = append(stale, rel)
-			}
+	}
+	for _, rel := range targets {
+		if _, ok := files[rel]; ok {
+			rendered = append(rendered, rel)
 		}
 	}
 	// Writes are confined to the agent home (home_confined_write_*.go).
@@ -322,6 +344,7 @@ func rerenderPrompts(in rerenderInputs, recorded string, write func(func() error
 	if err != nil {
 		return "", "", err
 	}
+	rec.SystemPromptPaths = rendered
 	util.Debugf("rerender: wrote prompts for agent %s into the agent home", in.AgentName)
 	return fp, "", nil
 }

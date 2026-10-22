@@ -131,7 +131,7 @@ func TestRerender_SystemPrompt_OncePerChange(t *testing.T) {
 	}
 
 	// Provisioning (and so reincarnation) resets the record.
-	if err := removeRerenderRecord(f.agentDir); err != nil {
+	if err := resetRerenderRecord(f.agentDir, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := rerenderProvisionedFiles(context.Background(), f.inputs(h, keys, cfg, inline, nil)); err != nil {
@@ -400,7 +400,7 @@ func TestStart_RerendersChangedProvisionedFiles(t *testing.T) {
 }
 
 // TestProvisionAgent_RemovesRerenderRecord: provisioning (and so a
-// reincarnation's reprovision) deletes the rerender record, so the next
+// reincarnation's reprovision) resets the rerender record, so the next
 // re-render never matches a fingerprint of the previous generation.
 func TestProvisionAgent_RemovesRerenderRecord(t *testing.T) {
 	e := newPolicyTestEnv(t)
@@ -410,8 +410,8 @@ func TestProvisionAgent_RemovesRerenderRecord(t *testing.T) {
 	if _, _, _, err := ProvisionAgent(context.Background(), "prov-rr", "", "", "hc-decl", e.scion, "", "", "", ""); err != nil {
 		t.Fatalf("ProvisionAgent: %v", err)
 	}
-	if _, err := os.Stat(rerenderRecordPath(agentDir)); !os.IsNotExist(err) {
-		t.Fatalf("rerender record survived provisioning (err %v)", err)
+	if rec := readRerenderRecord(agentDir); len(rec.Fingerprints) != 0 {
+		t.Fatalf("fingerprints of the previous generation survived provisioning: %v", rec.Fingerprints)
 	}
 }
 
@@ -531,23 +531,70 @@ func TestStart_ClearsTheMergeKeepsAreNotRendered(t *testing.T) {
 }
 
 // TestRerender_ClearedPromptRemovedForNonContainerHarness: for a harness
-// that writes prompts into the agent home, a system prompt the render no
-// longer produces (cleared, no template default) is removed, while the
-// instructions file is rewritten.
+// that writes prompts into the agent home, a system prompt file Scion
+// rendered last time (recorded by provisioning or an earlier re-render)
+// that the render no longer produces (cleared, no template default) is
+// removed, while the instructions file is rewritten.
 func TestRerender_ClearedPromptRemovedForNonContainerHarness(t *testing.T) {
 	f := newRerenderFixture(t)
 	h := &harness.Generic{}
 	promptFile := filepath.Join(f.agentHome, ".scion", "system_prompt.md")
 	writeFileString(t, promptFile, "old prompt")
+	if err := resetRerenderRecord(f.agentDir, []string{".scion/system_prompt.md"}); err != nil {
+		t.Fatal(err)
+	}
 	inline := &api.ScionConfig{ClearedFields: []string{"system_prompt"}}
 	if _, err := rerenderProvisionedFiles(context.Background(), f.inputs(h, []string{"system_prompt"}, &api.ScionConfig{}, inline, []*config.Template{{Name: "t", Path: t.TempDir()}})); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(promptFile); !os.IsNotExist(err) {
-		t.Fatalf("a cleared system prompt stayed in the agent home (err %v)", err)
+		t.Fatalf("a cleared system prompt Scion rendered stayed in the agent home (err %v)", err)
 	}
 	if _, err := os.Stat(filepath.Join(f.agentHome, "agents.md")); err != nil {
 		t.Fatalf("instructions not rendered: %v", err)
+	}
+	if rec := readRerenderRecord(f.agentDir); len(rec.SystemPromptPaths) != 0 {
+		t.Fatalf("record still lists system prompt paths: %v", rec.SystemPromptPaths)
+	}
+}
+
+// TestRerender_ClearedPromptKeepsTemplateHomeFile: a system prompt file
+// Scion did not render (one a template's home/ supplied) is kept when the
+// system prompt is cleared, as a reincarnation keeps it.
+func TestRerender_ClearedPromptKeepsTemplateHomeFile(t *testing.T) {
+	f := newRerenderFixture(t)
+	promptFile := filepath.Join(f.agentHome, ".scion", "system_prompt.md")
+	writeFileString(t, promptFile, "template home prompt")
+	inline := &api.ScionConfig{ClearedFields: []string{"system_prompt"}}
+	if _, err := rerenderProvisionedFiles(context.Background(), f.inputs(&harness.Generic{}, []string{"system_prompt"}, &api.ScionConfig{}, inline, []*config.Template{{Name: "t", Path: t.TempDir()}})); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFileString(t, promptFile); got != "template home prompt" {
+		t.Fatalf("a cleared system prompt removed or changed a template-home file: %q", got)
+	}
+}
+
+// TestProvisionAgent_RecordsSystemPromptPaths: provisioning a harness that
+// reads prompts from the agent home records where it rendered the system
+// prompt, so a later clear can remove exactly that file.
+func TestProvisionAgent_RecordsSystemPromptPaths(t *testing.T) {
+	e := newPolicyTestEnv(t)
+	e.projectHC(t, "hc-decl", policyTestDecl)
+	agentDir := config.ResolveAgentDir(e.scion, "prov-sp")
+	if _, _, _, err := ProvisionAgent(context.Background(), "prov-sp", "", "", "hc-decl", e.scion, "", "", "", "", &api.ScionConfig{SystemPrompt: "be brief"}); err != nil {
+		t.Fatalf("ProvisionAgent: %v", err)
+	}
+	rec := readRerenderRecord(agentDir)
+	if len(rec.SystemPromptPaths) == 0 {
+		t.Fatalf("provisioning recorded no system prompt paths: %+v", rec)
+	}
+	for _, rel := range rec.SystemPromptPaths {
+		if got := readFileString(t, filepath.Join(config.GetAgentHomePath(e.scion, "prov-sp"), filepath.FromSlash(rel))); !strings.Contains(got, "be brief") {
+			t.Fatalf("recorded path %s does not hold the rendered prompt: %q", rel, got)
+		}
+	}
+	if len(rec.Fingerprints) != 0 {
+		t.Fatalf("provisioning recorded fingerprints: %v", rec.Fingerprints)
 	}
 }
 
@@ -584,5 +631,101 @@ func TestRerender_InstructionsChangeKeepsTemplateHomePrompt(t *testing.T) {
 	}
 	if got := readFileString(t, promptFile); got != "template home prompt" {
 		t.Fatalf("an instructions-only re-render changed the system prompt file: %q", got)
+	}
+}
+
+// versionedSkillResolver resolves "<base>@<version>" references to a skill
+// named after the base, with a SKILL.md naming the version, and records
+// the references of each call.
+type versionedSkillResolver struct{ calls [][]string }
+
+func (r *versionedSkillResolver) Resolve(_ context.Context, refs []api.SkillReference, _ ResolveOpts) (*ResolveResult, error) {
+	var uris []string
+	out := &ResolveResult{}
+	for _, ref := range refs {
+		uris = append(uris, ref.URI)
+		base, version, _ := strings.Cut(ref.URI, "@")
+		name := base[strings.LastIndex(base, "/")+1:]
+		out.Resolved = append(out.Resolved, ResolvedSkill{
+			Name:    name,
+			URI:     ref.URI,
+			Version: version,
+			Files:   []ResolvedFile{{Path: "SKILL.md", Content: []byte("version " + version + "\n")}},
+		})
+	}
+	r.calls = append(r.calls, uris)
+	return out, nil
+}
+
+// TestStart_SkillVersionChangeInstallsNewVersion: a skill version change
+// (same base URI and install name), which the hub reports applied at the
+// next start, ends with the new version installed in place of the old.
+// The persisted list holds only the new reference, as the broker's merge
+// and dedupe leave it (pkg/runtimebroker
+// TestApplyInlineConfigUpdate_VersionCollapse); the start then resolves
+// only that reference and replaces the installed directory.
+func TestStart_SkillVersionChangeInstallsNewVersion(t *testing.T) {
+	e := newPolicyTestEnv(t)
+	e.projectHC(t, "hc-skills", policyTestScripted+"skills_dir: .agents/skills\n")
+	e.template(t, "tplv", "harness_config: hc-skills\n")
+	mgr := policyTestManager(nil)
+	resolver := &versionedSkillResolver{}
+	ctx := ContextWithSkillResolver(context.Background(), resolver)
+	if _, err := mgr.Start(ctx, api.StartOptions{Name: "ver", ProjectPath: e.scion, Template: "tplv", NoAuth: true}); err != nil {
+		t.Fatalf("first start: %v", err)
+	}
+	agentDir := config.ResolveAgentDir(e.scion, "ver")
+	home := config.GetAgentHomePath(e.scion, "ver")
+	skill := filepath.Join(home, ".agents", "skills", "a", "SKILL.md")
+
+	setSkills := func(uri string) *api.ScionConfig {
+		t.Helper()
+		path := filepath.Join(agentDir, "scion-agent.json")
+		var cfg api.ScionConfig
+		if err := json.Unmarshal([]byte(readFileString(t, path)), &cfg); err != nil {
+			t.Fatal(err)
+		}
+		cfg.Skills = []api.SkillReference{{URI: uri, Scope: "template"}}
+		data, err := json.Marshal(&cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeFileString(t, path, string(data))
+		return &api.ScionConfig{Skills: []api.SkillReference{{URI: uri}}, ChangedFields: []string{"skills"}}
+	}
+	start := func(inline *api.ScionConfig) {
+		t.Helper()
+		if _, err := mgr.Start(ctx, api.StartOptions{Name: "ver", ProjectPath: e.scion, NoAuth: true, InlineConfig: inline, RerenderKeys: api.RerenderConfigKeys(inline)}); err != nil {
+			t.Fatalf("start: %v", err)
+		}
+	}
+
+	start(setSkills("hub://skills/a@v1"))
+	if got := readFileString(t, skill); got != "version v1\n" {
+		t.Fatalf("after v1: SKILL.md = %q", got)
+	}
+	start(setSkills("hub://skills/a@v2"))
+	if got := readFileString(t, skill); got != "version v2\n" {
+		t.Fatalf("after the version change: SKILL.md = %q, want v2", got)
+	}
+	last := resolver.calls[len(resolver.calls)-1]
+	if len(last) != 1 || last[0] != "hub://skills/a@v2" {
+		t.Fatalf("the start resolved %v, want only hub://skills/a@v2", last)
+	}
+	entries, err := os.ReadDir(filepath.Join(home, ".agents", "skills"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "a") && e.Name() != "a" {
+			t.Fatalf("a second copy of the skill is installed: %s", e.Name())
+		}
+		if strings.HasPrefix(e.Name(), ".a.") {
+			t.Fatalf("a temporary skill directory was left behind: %s", e.Name())
+		}
+	}
+	record := readFileString(t, filepath.Join(home, ".scion", resolvedSkillsInputName))
+	if !strings.Contains(record, "hub://skills/a@v2") || strings.Contains(record, "hub://skills/a@v1") {
+		t.Fatalf("the resolution record does not list only v2: %s", record)
 	}
 }

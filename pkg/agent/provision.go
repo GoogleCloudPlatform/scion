@@ -2183,7 +2183,8 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	}
 
 	// Steps 4 and 5: inject the agent instructions and the system prompt.
-	if err := injectPromptFiles(h, agentHome, chain, finalScionCfg, inlineCfg); err != nil {
+	systemPromptRendered, err := injectPromptFiles(h, agentHome, chain, finalScionCfg, inlineCfg)
+	if err != nil {
 		return "", "", nil, err
 	}
 
@@ -2483,8 +2484,16 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	}
 	// The files rendered above are the new baseline for the start-time
 	// re-render of provision-rendered keys (rerender.go): drop the
-	// fingerprints of the previous generation's renders.
-	if err := removeRerenderRecord(agentDir); err != nil {
+	// fingerprints of the previous generation's renders, and record where
+	// the system prompt was rendered for a harness that reads it from the
+	// agent home.
+	var systemPromptPaths []string
+	if _, isContainerScript := h.(*harness.ContainerScriptHarness); !isContainerScript && systemPromptRendered {
+		if systemPromptPaths, err = systemPromptTargets(h); err != nil {
+			return "", "", nil, fmt.Errorf("reset rerender record: %w", err)
+		}
+	}
+	if err := resetRerenderRecord(agentDir, systemPromptPaths); err != nil {
 		return "", "", nil, fmt.Errorf("reset rerender record: %w", err)
 	}
 
@@ -4375,12 +4384,13 @@ func worktreeInPlace(path string) bool {
 // inlineCfg sets is content, any other value is a file resolved in chain.
 // When cfg names no file, the template's agents.md and system-prompt.md are
 // picked up by convention and recorded in cfg. Instructions are rendered
-// before the system prompt, which a harness may prepend to them.
-func injectPromptFiles(h api.Harness, agentHome string, chain []*config.Template, finalScionCfg, inlineCfg *api.ScionConfig) error {
+// before the system prompt, which a harness may prepend to them. It reports
+// whether a system prompt was rendered.
+func injectPromptFiles(h api.Harness, agentHome string, chain []*config.Template, finalScionCfg, inlineCfg *api.ScionConfig) (systemPromptRendered bool, err error) {
 	// Load mandatory preamble — prepended to all agent instructions.
 	mandatoryPreamble, err := loadMandatoryPreamble(resources.MandatoryBoilerplateFS())
 	if err != nil {
-		return fmt.Errorf("failed to load mandatory boilerplate: %w", err)
+		return false, fmt.Errorf("failed to load mandatory boilerplate: %w", err)
 	}
 
 	// Determine whether inline config provided content directly (already resolved).
@@ -4415,14 +4425,14 @@ func injectPromptFiles(h api.Harness, agentHome string, chain []*config.Template
 				var err error
 				content, err = config.ResolveContentInChain(chain, finalScionCfg.AgentInstructions)
 				if err != nil {
-					return fmt.Errorf("failed to resolve agent_instructions: %w", err)
+					return false, fmt.Errorf("failed to resolve agent_instructions: %w", err)
 				}
 			}
 			composed := composeInstructions(mandatoryPreamble, content)
 			if composed != nil {
 				util.Debugf("ProvisionAgent: injecting agent instructions (%d bytes) into %s", len(composed), agentHome)
 				if err := h.InjectAgentInstructions(agentHome, composed); err != nil {
-					return fmt.Errorf("failed to inject agent instructions: %w", err)
+					return false, fmt.Errorf("failed to inject agent instructions: %w", err)
 				}
 			} else {
 				util.Debugf("ProvisionAgent: both mandatory preamble and template content are nil, skipping injection")
@@ -4430,7 +4440,7 @@ func injectPromptFiles(h api.Harness, agentHome string, chain []*config.Template
 		} else if len(mandatoryPreamble) > 0 {
 			util.Debugf("ProvisionAgent: no agent_instructions configured; injecting mandatory preamble only (%d bytes)", len(mandatoryPreamble))
 			if err := h.InjectAgentInstructions(agentHome, mandatoryPreamble); err != nil {
-				return fmt.Errorf("failed to inject agent instructions: %w", err)
+				return false, fmt.Errorf("failed to inject agent instructions: %w", err)
 			}
 		} else {
 			util.Debugf("ProvisionAgent: no agent_instructions configured and no agents.md found in template")
@@ -4457,14 +4467,15 @@ func injectPromptFiles(h api.Harness, agentHome string, chain []*config.Template
 				var err error
 				content, err = config.ResolveContentInChain(chain, finalScionCfg.SystemPrompt)
 				if err != nil {
-					return fmt.Errorf("failed to resolve system_prompt: %w", err)
+					return false, fmt.Errorf("failed to resolve system_prompt: %w", err)
 				}
 			}
 			if content != nil {
 				util.Debugf("ProvisionAgent: injecting system prompt (%d bytes) into %s", len(content), agentHome)
 				if err := h.InjectSystemPrompt(agentHome, content); err != nil {
-					return fmt.Errorf("failed to inject system prompt: %w", err)
+					return false, fmt.Errorf("failed to inject system prompt: %w", err)
 				}
+				systemPromptRendered = true
 			}
 		}
 	} else if inlineCfg != nil {
@@ -4474,23 +4485,24 @@ func injectPromptFiles(h api.Harness, agentHome string, chain []*config.Template
 			composed := composeInstructions(mandatoryPreamble, content)
 			util.Debugf("ProvisionAgent: injecting inline agent_instructions (%d bytes, no template)", len(composed))
 			if err := h.InjectAgentInstructions(agentHome, composed); err != nil {
-				return fmt.Errorf("failed to inject agent instructions: %w", err)
+				return false, fmt.Errorf("failed to inject agent instructions: %w", err)
 			}
 		} else if len(mandatoryPreamble) > 0 {
 			util.Debugf("ProvisionAgent: injecting mandatory preamble only (%d bytes, no template, no inline instructions)", len(mandatoryPreamble))
 			if err := h.InjectAgentInstructions(agentHome, mandatoryPreamble); err != nil {
-				return fmt.Errorf("failed to inject agent instructions: %w", err)
+				return false, fmt.Errorf("failed to inject agent instructions: %w", err)
 			}
 		}
 		if finalScionCfg.SystemPrompt != "" {
 			content := []byte(finalScionCfg.SystemPrompt)
 			util.Debugf("ProvisionAgent: injecting inline system_prompt (%d bytes, no template)", len(content))
 			if err := h.InjectSystemPrompt(agentHome, content); err != nil {
-				return fmt.Errorf("failed to inject system prompt: %w", err)
+				return false, fmt.Errorf("failed to inject system prompt: %w", err)
 			}
+			systemPromptRendered = true
 		}
 	}
-	return nil
+	return systemPromptRendered, nil
 }
 
 // resolveAndInstallSkills resolves the skill references skills with the
