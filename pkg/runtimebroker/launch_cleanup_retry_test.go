@@ -27,6 +27,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -359,7 +360,7 @@ func TestLaunchCleanup_LiveFilesFailureRetriedAtRecovery(t *testing.T) {
 	srv.launchJournal.Close()
 	cfg := srv.config
 	cfg.StateDir = srv.stateDir
-	srv2 := New(cfg, mgr, &runtime.MockRuntime{NameFunc: func() string { return "mock" }})
+	srv2 := New(cfg, mgr, &runtime.MockRuntime{NameFunc: func() string { return "mock" }}, config.RuntimeBuildRecord{})
 	closeJournalAtCleanup(t, srv2)
 	runRecovery(t, srv2)
 

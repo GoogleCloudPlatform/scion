@@ -23,7 +23,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -109,7 +108,7 @@ func TestRelayTunnel_RenewalUnsupportedPrincipalEnforce(t *testing.T) {
 // TestRelayTunnel_RenewalUnsupportedPrincipalOff: under off, the same
 // tunnel is served with an unstamped grant (no via, scope or authz_until)
 // and no scheduling hints; nothing is refused, and the open is counted as
-// unstamped with the principal kind and the cause
+// unstamped with route relay_tunnel, the principal kind and the cause
 // renewal_principal_unsupported.
 func TestRelayTunnel_RenewalUnsupportedPrincipalOff(t *testing.T) {
 	for kind, ident := range relayRenewalUnsupportedPrincipals() {
@@ -130,13 +129,9 @@ func TestRelayTunnel_RenewalUnsupportedPrincipalOff(t *testing.T) {
 			assert.Zero(t, open.AuthzUntil)
 			assert.Zero(t, open.AuthzIntervalS)
 			assert.Empty(t, o.rec.list(), "off refuses nothing")
-			unstamped := o.rec.unstampedList()
-			require.Len(t, unstamped, 1)
-			// TODO(route-label follow-up): assert the route label relay_tunnel
-			// here once the off renewal-unsupported-principal count carries it;
-			// until then only the principal kind and the cause are pinned.
-			assert.True(t, strings.HasSuffix(unstamped[0], "/"+kind+"/"+conduitCauseRenewalPrincipalUnsupported),
-				"counted with principal kind %s and cause %s: %s", kind, conduitCauseRenewalPrincipalUnsupported, unstamped[0])
+			// The relay-held tunnel's count carries route relay_tunnel (a
+			// caller that left Route unset would fall back to tunnel).
+			assert.Equal(t, []string{conduitRouteRelayTunnel + "/" + kind + "/" + conduitCauseRenewalPrincipalUnsupported}, o.rec.unstampedList())
 		})
 	}
 }

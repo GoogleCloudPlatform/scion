@@ -201,6 +201,12 @@ type Config struct {
 	// ShutdownTimeout bounds the whole shutdown; zero means
 	// runtimebroker.ShutdownDeadline (30s, as for a single Runtime Broker).
 	ShutdownTimeout time.Duration
+	// ShutdownContext, when set, returns the context Run passes to
+	// Shutdown once its ctx ends, so the process can bound the host's
+	// shutdown by its own shutdown budget (ptone/scion#5054); the
+	// ShutdownTimeout bound still applies within it. Nil:
+	// context.Background().
+	ShutdownContext func() (context.Context, context.CancelFunc)
 }
 
 // InstanceStatus is the reported state of one configured instance.
@@ -733,7 +739,12 @@ func (h *Host) Run(ctx context.Context) error {
 		}
 		return err
 	case <-ctx.Done():
-		return h.Shutdown(context.Background())
+		sctx, cancel := context.Background(), context.CancelFunc(func() {})
+		if h.cfg.ShutdownContext != nil {
+			sctx, cancel = h.cfg.ShutdownContext()
+		}
+		defer cancel()
+		return h.Shutdown(sctx)
 	}
 }
 

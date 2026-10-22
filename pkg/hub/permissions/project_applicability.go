@@ -50,8 +50,10 @@ var ProjectTargetApplicability = map[string]bool{
 
 	// project.* — read/update/delete/manage/set_messaging_policy target an
 	// existing project; create/register/clone/list are hub-level collection
-	// actions (create: no project exists yet; register/clone/list reviewed
-	// conservatively false — flagged for D.2 confirmation, not blocking).
+	// actions (create: no project exists yet). register and clone are false:
+	// their creation half is project.create on hub collection evidence, and
+	// a clone's source half is project.read on the source project. list is
+	// a collection list.
 	"project.create": false, "project.read": true, "project.update": true,
 	"project.delete": true, "project.manage": true, "project.register": false,
 	"project.set_messaging_policy": true, "project.clone": false, "project.list": false,
@@ -225,6 +227,10 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	// project.list's selector lists projects on either boundary; a project
 	// token lists only its boundary project.
 	"project.list": {BoundaryKindProject, BoundaryKindHub},
+	// project.create provisions a project at the hub; a project boundary
+	// never covers a project that does not exist yet.
+	"project.create": {BoundaryKindHub},
+
 	"skill.create": {BoundaryKindProject, BoundaryKindHub}, "skill.read": {BoundaryKindProject, BoundaryKindHub},
 	"skill.update": {BoundaryKindProject, BoundaryKindHub}, "skill.delete": {BoundaryKindProject, BoundaryKindHub},
 	"skill.list": {BoundaryKindProject, BoundaryKindHub}, "skill.register": {BoundaryKindHub}, "skill.create_global": {BoundaryKindHub},
@@ -398,6 +404,9 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	// project.list is a hub-level collection action (false in
 	// ProjectTargetApplicability), so hub-boundary mint needs a system grant.
 	"project.list": {TargetClassKindHubResource},
+	// project.create is a hub-level collection action: no project exists
+	// yet, so hub-boundary mint needs a system grant.
+	"project.create": {TargetClassKindHubResource},
 
 	// artifact.* — project-homed, no scope-kind split and no global catalog.
 	"artifact.read": {TargetClassKindProjectScoped}, "artifact.create": {TargetClassKindProjectScoped},

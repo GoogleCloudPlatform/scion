@@ -124,8 +124,7 @@ Starting an **error**-phase agent still fails with a conflict: use
 place, the Hub applies only the task and `--attach`. Other configuration flags
 you set explicitly (for example `--type`, `--image`, `--harness-config`,
 `--broker`, `--label` or `--no-auth`) are not applied, and the CLI prints a
-warning that names them. `--no-auth` on an existing agent is tracked in
-ptone/scion#1855.
+warning that names them.
 
 **Usage:** `scion start <agent-name> [task] [flags]`
 
@@ -731,6 +730,10 @@ is a Hub-built preamble plus the handoff you provide. Requires a Hub connection.
 
 The Hub accepts the request with `202 Accepted` and completes the migration in the background. If
 the new generation cannot be provisioned, the Hub restores the previous generation's configuration.
+If you supplied a handoff, the restored configuration's task is that handoff, headed by a note that
+the migration failed and the agent remains at its current generation. The next fresh start delivers
+it, so the agent is not handed the previous generation's handoff. With no handoff, the previous
+task is kept.
 
 While the migration is in progress, messages to the agent are saved to its history rather than
 delivered or dropped (the send returns `202` with status `deferred`); scheduled messages fail
@@ -750,9 +753,10 @@ An interrupted migration is not resumed. For example, if the Hub restarts in the
 migration, the Hub marks it failed and puts the agent in the `error` phase with the reason in its
 status message. Run `scion reincarnate` again with the same flags: the Hub does not keep a failed
 migration's patch flags. A migration that had not started yet fails within about 10 minutes with
-"reincarnation failed: did not start, so no changes were applied; run reincarnate again". None of
-its patch flags are applied. A migration that had started fails after 30 minutes without progress.
-The Hub restores the previous configuration unless the new generation had already been provisioned.
+"reincarnation failed: did not start, so no changes were applied except that any handoff is
+carried forward for recovery; run reincarnate again". None of its patch flags are applied. A
+migration that had started fails after 30 minutes without progress. The Hub restores the previous
+configuration unless the new generation had already been provisioned.
 Until the migration fails, a new request for the agent is refused with `409`.
 
 Reincarnation works for agents in clone-per-agent, shared-workspace (shared-plain), and
@@ -774,8 +778,9 @@ as stop, start, and restart); an agent can always reincarnate itself.
 - **Flags:**
     - `--handoff-file <path>`: File whose content becomes the new generation's first task. Required for self-migration.
     - `--handoff-template`: Print the handoff template and exit. Ignores other flags and arguments, and does not contact the Hub.
-    - `--dry-run`: Print the resolved plan (old → new template, image, harness config, model, env key names, and branch) without migrating anything.
-    - `--broker <name|id>`: Move the agent to another Runtime Broker (see [Moving to another Runtime Broker](#moving-to-another-runtime-broker) below). Both Runtime Brokers must mount the same NFS export, so the workspace moves without being copied. The CLI dry-runs the move first and stops if it is refused; add `--dry-run` to only check it.
+    - `--dry-run`: Print the resolved plan (old → new template, image, harness config, model, env key names, and branch; for legacy agents created before `createInputs` was recorded, any remaining inline env keys other than `SCION_AUTO_EXPOSE_PORTS` and adopted `TZ` are kept as explicit with a warning in the plan) without migrating anything.
+    - `--broker <name|id>`: Move the agent to another Runtime Broker (see [Moving to another Runtime Broker](#moving-to-another-runtime-broker) below). Both Runtime Brokers must mount the same NFS export, so the workspace moves without being copied (`transferMode: "export"`). The CLI dry-runs the move first and stops if it is refused; add `--dry-run` to only check it.
+    - `--force`: With `--broker <name|id>`, check a forced move that recreates a clone-per-agent or empty-per-agent workspace on the target (`transferMode: "recreate"`) when the workspace cannot travel through a shared NFS export, waiving the export checks and printing what is kept, carried, recreated, and lost. Currently available with `--dry-run` only (executing a forced move that recreates the workspace returns `501 Not Implemented`).
     - `--service-account <id|email|name>`: Patch the GCP service account of the new generation. Accepts the same forms and gets the same access checks as `scion create`.
     - `--role <role>`: Patch the agent role of the new generation: `none`, `readonly`, `baseline`, or `full`. Gets the same access checks as `scion create`; an agent reincarnating itself can lower its own role but not raise it.
     - `--model <model>`: Patch the model of the new generation. Model aliases are accepted, as with `scion start`.
@@ -832,12 +837,12 @@ the same NFS export, keeping its ID, slug, generation chain, and workspace. The 
 permissions, and operator notes are in
 [Moving an agent to another Runtime Broker](/scion/hosted/ha/multi-broker/#moving-an-agent-to-another-runtime-broker).
 
-The CLI first sends the same request as a dry run. The Hub runs nine checks in this order: workspace
-mode, workspace storage reported by both Runtime Brokers, same NFS export, workspace on the export,
-target profile, target health, access, agent-move capability (on both Runtime Brokers, with the source
-online), and capacity. The first failing check decides the answer, with `400`, `403`, `409`, `412`,
-`429`, or `503`, and the CLI prints every check as passed, failed, or not evaluated. A refused move
-stops there, before anything changes. With `--dry-run` the CLI only prints the verdict and plan.
+The CLI first sends the same request as a dry run. The Hub runs eleven checks in this order:
+`runtime_target`, `workspace_mode`, `workspace_storage_reported`, `same_export`, `workspace_on_export`,
+`workspace_recreatable`, `target_profile`, `target_health`, `access`, `capability` (on both Runtime
+Brokers, with the source online), and `capacity`. The first failing check decides the answer, with `400`, `403`, `409`, `412`,
+`429`, or `503`, and the CLI prints the transfer mode of an eligible move (`export` or `recreate`), every check (`passed`, `failed`, `not_evaluated`, or `waived`), and the move's `consequences` (`kept`, `carried`, `recreated`, and `lost`). When a move without `--force` fails only because the workspace cannot travel through a shared export and a forced move onto the target would apply, the CLI also prints a hint pointing at `--dry-run --force`. A refused move
+stops there, before anything changes. With `--dry-run` (or `--dry-run --force`) the CLI only prints the verdict and plan.
 
 When the checks pass, the Hub accepts the move with `202 Accepted` and runs it in the background. It
 stops the agent on the source, moves its quota to the target, provisions it on the target (which first
@@ -986,19 +991,27 @@ In a git repository, `scion clean` removes the repository's `.scion` but leaves 
 
 View and modify configuration settings.
 
-- `list`: List all effective settings.
-- `get <key>`: Get a specific configuration value.
+- `list`: List all effective settings and where each comes from.
+- `get <key>`: Get a specific configuration value (`--source` adds where it comes from).
 - `set <key> <value>`: Set a configuration value.
+- `unset <key>`: Remove a setting so it takes its value from the layer below.
 - `validate`: Validate settings files against the schema.
 - `migrate`: Migrate configuration to the latest versioned format.
 - `dir`: Print the path to the active configuration directory.
 
-`config get` supports the top-level settings keys (`active_profile`, `default_template`,
-`default_harness_config`, `workspace_path`, `image_registry`, `project_id`, `cli.autohelp`,
-`hub.enabled`, `hub.linked`, `hub.endpoint`, `hub.local_only`, `hub.brokerId`,
-`hub.brokerToken`, `hub.brokerNickname` — note that `hub.brokerToken` prints its value,
-as it always has), plus dotted paths into a named entry of the `profiles` or `runtimes`
-maps: `profiles.<name>.<field>` and `runtimes.<name>.<field>`, where `<field>` is one of
+`config list` shows every key `config set` accepts, the hub transport settings
+(`hub.transport.mode`, `hub.transport.audience`) and each hub connection's endpoint
+(`hub_connections.<name>.endpoint`), with the effective value and its source: `default`
+(the embedded defaults), `global <file>`, `project <file>`, `env <VARIABLE>` or
+`project-id file <file>`. A setting with no value shows `<unset>`. `config get <key>`
+reads the same settings and gives the same value and source. The value of a
+credential-like key (for example `hub.brokerToken`) is masked in both. With
+`--format json`, `config list` prints an object keyed by setting
+(`{"<key>": {"value": "...", "source": "..."}}`) and `config get` prints
+`{"key": "...", "value": "...", "source": "..."}`.
+
+`config get` supports those keys (including `cli.mode`) plus dotted paths into a named
+entry of the `profiles` or `runtimes` maps: `profiles.<name>.<field>` and `runtimes.<name>.<field>`, where `<field>` is one of
 that entry's scalar settings named by its `settings.yaml` key (e.g.
 `profiles.local.runtime`, `runtimes.kubernetes.namespace`). Within a profiles/runtimes
 entry, structured fields (maps, lists, nested objects — e.g. `env`, `volumes`,
@@ -1016,7 +1029,25 @@ would accept but never read, and leaves the file unchanged:
 `server.auth.display_name`, `server.auth.email` and `server.auth.username` at the
 project layer (they are read only from the global settings). The error names the key
 and does not include the value. After a successful write, the value of a
-credential-like key (for example `hub.brokerToken`) is shown masked.
+credential-like key (for example `hub.brokerToken`) is shown masked. `cli.mode`
+accepts `human` or `agent`. Agent mode removes the `config` commands, so after
+`scion config set cli.mode agent` the way back is
+`SCION_CLI_MODE=human scion config unset [--global] cli.mode` (or removing `mode` from
+the `cli` section of the settings file by hand); `config set` prints this when it writes
+`agent`.
+
+`config unset <key>` removes the key from the project's own settings, or from the
+global settings with `--global`, so the setting takes its value from the layers below
+instead of, for example, a boolean being written `false`. It accepts the keys
+`config set` accepts, under the same rules. A key that is not in the file changes
+nothing (a legacy-format file is then not migrated). A YAML file is edited in place,
+and a section left empty is removed with the key. An environment variable that sets
+the key still applies, and the command warns about it. When a file of the edited
+layer still sets the key afterwards (a spelling `config unset` does not edit, or the
+in-repo `.scion/settings.yaml` of a project whose settings are kept in its external
+settings directory), the command names that file, and `--format json` adds it as
+`still_set_in`. `config unset` is available in human mode
+only, like `config set`.
 
 ### `scion cd-config`
 

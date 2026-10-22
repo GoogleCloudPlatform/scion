@@ -15,13 +15,13 @@
  */
 
 /**
- * Event contract between the header's palette button and the chat page that
- * owns the quick switcher. The header renders as a sibling of the chat page
- * (slotted into `scion-chat-shell`, not an ancestor), so it has no direct
- * reference to call through — it dispatches this event instead, the same
- * decoupling `TERMINAL_SESSION_COUNT_EVENT` uses between the terminal
- * workspace and the header.
+ * Event contract between the chat page's quick-switcher buttons (pinned
+ * below its spaces rail, and below its members column on phones) and the
+ * page's open-request handler. The buttons dispatch this event rather than
+ * calling the page directly, so the request goes through the same document
+ * listener and guards (route, page visibility, unrelated modal) however it
+ * is raised; the unit and e2e tests raise it the same way.
  */
 
-/** Dispatched by the header's palette button to request the quick switcher open. */
+/** Dispatched by the chat page's quick-switcher buttons to request the quick switcher open. */
 export const CHAT_PALETTE_OPEN_REQUEST_EVENT = 'scion:chat-palette-open-request';

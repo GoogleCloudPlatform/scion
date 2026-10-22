@@ -284,6 +284,22 @@ type conduitGrantRequest struct {
 	// CanRenew reports that this node can deliver renewals for the stream
 	// on the resolved route.
 	CanRenew bool
+	// Route is the metric and log route label of the open
+	// (conduitRouteRelayTunnel for a relay-held tunnel; contracts
+	// 1bbe35f0 §2, Renewal path unavailable, Message and observability).
+	// Empty means conduitRouteOf(Via). It is hub-internal: only the hub's
+	// own caller sets it, never from a request or relay field; it is never
+	// in the grant, an instruction or any wire field, and never an input to
+	// authorization or the re-check (Via is).
+	Route string
+}
+
+// route is req's metric and log route label: Route, or the label of Via.
+func (req conduitGrantRequest) route() string {
+	if req.Route != "" {
+		return req.Route
+	}
+	return conduitRouteOf(req.Via)
 }
 
 // mintConduitGrant authorizes req and, only if every check passes, mints a
@@ -361,10 +377,10 @@ func (s *Server) mintConduitGrant(ctx context.Context, req conduitGrantRequest) 
 	// renewal): the backstop of the open paths' check on the resolved row,
 	// at the same point, so it precedes the placement guard. Only user
 	// stream origins (tunnel, proxy, pty) are concerned.
-	if req.Via != "" && s.conduitTargetUpgradeRequired(ctx, req.Identity, req.TargetRenews, conduitRouteOf(req.Via), agent.ID) {
+	if req.Via != "" && s.conduitTargetUpgradeRequired(ctx, req.Identity, req.TargetRenews, req.route(), agent.ID) {
 		return nil, nil, errConduitAgentUpgradeRequired
 	}
-	if s.conduitRenewalPathUnavailable(ctx, req.Identity, req.TargetRenews, req.CanRenew, conduitRouteOf(req.Via), agent.ID) {
+	if s.conduitRenewalPathUnavailable(ctx, req.Identity, req.TargetRenews, req.CanRenew, req.route(), agent.ID) {
 		return nil, nil, errConduitStreamRenewalUnavailable
 	}
 	// Design v2.21.36 §3.5, Principals without a renewal path: with off, a
@@ -478,7 +494,7 @@ func (s *Server) mintConduitGrant(ctx context.Context, req conduitGrantRequest) 
 	if unstampedKind != "" {
 		slog.InfoContext(ctx, "Conduit open grant minted without a deadline: the principal has no renewal path",
 			"agent_id", agent.ID, "kind", req.Stream.Kind, "via", req.Via, "principal_kind", unstampedKind)
-		s.recordConduitOpenUnstamped(conduitRouteOf(req.Via), unstampedKind)
+		s.recordConduitOpenUnstamped(req.route(), unstampedKind)
 	}
 	return tok, &claims, nil
 }
@@ -658,26 +674,28 @@ func (s *Server) renewConduitStream(ctx context.Context, req conduitRenewalReque
 // row that is gone wraps errConduitPrincipalInactive; a failed lookup wraps
 // errConduitAuthzUnavailable.
 func (s *Server) conduitRenewalIdentity(ctx context.Context, c *grant.RecheckClaims, userID string) (Identity, error) {
+	// The development user (design v2.21.40 §3.5, Dev user) is rebuilt as
+	// such only while development authentication is enabled on this hub,
+	// read now and never from the grant. With it off, the user id takes the
+	// normal path, and a missing row is an inactive principal. Either way
+	// the account-status rule (checkUserAccount) applies to the user row.
+	devUser := userID == DevUserID && s.authConfig.DevAuthEnabled
+	principal := PrincipalContext{Kind: PrincipalKindUser, ID: userID}
+	if devUser {
+		principal = devUserPrincipal()
+	}
+	user, err := checkUserAccount(ctx, s.store, principal)
+	switch refusal := classifyUserAccount(user, err); refusal {
+	case accountAllowed:
+	case accountLookupFault:
+		return nil, fmt.Errorf("%w: user lookup: %v", errConduitAuthzUnavailable, err)
+	default:
+		return nil, fmt.Errorf("%w: %s", errConduitPrincipalInactive, accountRefusalReason(refusal))
+	}
 	var ident UserIdentity
-	if userID == DevUserID && s.authConfig.DevAuthEnabled {
-		// The development user (design v2.21.40 §3.5, Dev user) is rebuilt
-		// as such only while development authentication is enabled on this
-		// hub, read now and never from the grant. With it off, the user id
-		// takes the normal path below, and a missing row is an inactive
-		// principal.
+	if devUser {
 		ident = NewDevUser(s.authConfig.DevUserCfg)
 	} else {
-		user, err := s.store.GetUser(ctx, userID)
-		switch {
-		case errors.Is(err, store.ErrNotFound):
-			return nil, fmt.Errorf("%w: user not found", errConduitPrincipalInactive)
-		case err != nil:
-			return nil, fmt.Errorf("%w: user lookup: %v", errConduitAuthzUnavailable, err)
-		case user == nil:
-			// The store returned neither a user nor an error: an internal
-			// inconsistency, not an inactive user and not a decision.
-			return nil, fmt.Errorf("%w: user lookup returned no user", errConduitAuthzUnavailable)
-		}
 		ident = NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "")
 	}
 	if c.Scope == nil {

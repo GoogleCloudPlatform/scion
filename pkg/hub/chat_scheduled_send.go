@@ -802,14 +802,7 @@ func (s *Server) startScheduledSendSweeper(ctx context.Context) {
 // longer than ctx allows. The runtime cannot be started again afterwards.
 func (s *Server) stopScheduledSendSweeper(ctx context.Context) {
 	rt := s.scheduledRuntime()
-	rt.mu.Lock()
-	rt.stopped = true
-	stop := rt.stopLoop
-	rt.stopLoop = nil
-	rt.mu.Unlock()
-	if stop != nil {
-		stop()
-	}
+	s.haltScheduledSendSweeper()
 	done := make(chan struct{})
 	go func() {
 		rt.running.Wait()
@@ -832,6 +825,23 @@ func (s *Server) stopScheduledSendSweeper(ctx context.Context) {
 		scheduledSendLog().Warn("scheduled send: shutdown deadline reached while deliveries were finishing")
 	case <-final.C:
 		scheduledSendLog().Warn("scheduled send: deliveries did not finish after being cut short")
+	}
+}
+
+// haltScheduledSendSweeper stops the sweeper loop, so no new sweep or
+// delivery starts, without waiting for the ones in progress
+// (stopScheduledSendSweeper does). The hub calls it when it begins
+// shutting down (Server.BeginShutdown, ptone/scion#5054). It is
+// idempotent, and the runtime cannot be started again afterwards.
+func (s *Server) haltScheduledSendSweeper() {
+	rt := s.scheduledRuntime()
+	rt.mu.Lock()
+	rt.stopped = true
+	stop := rt.stopLoop
+	rt.stopLoop = nil
+	rt.mu.Unlock()
+	if stop != nil {
+		stop()
 	}
 }
 

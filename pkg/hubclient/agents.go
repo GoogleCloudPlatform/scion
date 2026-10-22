@@ -688,7 +688,10 @@ type ScopeReissueResult struct {
 	CredentialsRevoked int                       `json:"credentials_revoked"`
 	Dispatched         bool                      `json:"dispatched"`
 	DispatchError      string                    `json:"dispatch_error,omitempty"`
-	Message            string                    `json:"message"`
+	// ReloadUnconfirmed is set when the new credential was delivered but
+	// the running agent did not confirm the reload.
+	ReloadUnconfirmed string `json:"reload_unconfirmed,omitempty"`
+	Message           string `json:"message"`
 }
 
 // ReissueScopes posts {"reissue_scopes": true, "dry_run": dryRun} to the
@@ -724,6 +727,9 @@ type ScopeReissueBulkAgent struct {
 	RoleAfter     string   `json:"role_after,omitempty"`
 	OpID          string   `json:"op_id,omitempty"`
 	DispatchError string   `json:"dispatch_error,omitempty"`
+	// ReloadUnconfirmed is set on a "changed" agent whose new credential
+	// was delivered but whose running agent did not confirm the reload.
+	ReloadUnconfirmed string `json:"reload_unconfirmed,omitempty"`
 }
 
 // ScopeReissueBulkRef names an agent in a bulk result list.
@@ -1304,6 +1310,10 @@ type ReincarnateAgentResponse struct {
 	TargetBrokerID string `json:"targetBrokerId,omitempty"`
 	// MoveVerdict is the move eligibility verdict of a dry-run move.
 	MoveVerdict *MoveVerdict `json:"moveVerdict,omitempty"`
+	// TransferMode is how an accepted cross-broker move carries the
+	// workspace: "export" or "recreate" (a forced move). Empty for a plain
+	// reincarnation and from a hub that predates forced moves.
+	TransferMode string `json:"transferMode,omitempty"`
 }
 
 // MoveVerdict is the hub's eligibility verdict for moving an agent to

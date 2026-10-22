@@ -172,11 +172,15 @@ These are read by the Scion broker (or CLI) **to configure itself as a process**
 part of the agent settings chain at all, and an agent never sees them by this route.
 
 They enter through the koanf environment layer in `LoadVersionedSettings`
-(`pkg/config/settings_v1.go`), which is loaded **last** — after the embedded defaults, the global
+(`pkg/config/settings_v1.go`; `LoadSettings` and `LoadEffectiveSettings` both read through its layers via `loadVersionedSettings` in `pkg/config/settings_view.go`), loaded **last** — after the embedded defaults, the global
 `~/.scion/settings.yaml`, the in-repo `.scion/settings.yaml`, and any external project config.
-Loaded last means **highest priority**: a `SCION_*` variable in the broker's process environment
-overrides every settings file. An exported but empty `SCION_*` variable counts as unset, so it never
-clears a value from a settings file.
+Legacy-format settings files (those without `schema_version`) are converted to the v1 shape at
+their own layer when read, keeping only keys whose legacy source key the file sets, and a versioned file's legacy camelCase `hub.projectId` is read as a fallback when
+`hub.project_id` is absent. Loaded last means **highest priority**: a `SCION_*` variable in the
+broker's process environment overrides every settings file. An exported but empty `SCION_*`
+variable counts as unset, so it never clears a value from a settings file. Inside a Hub-managed agent container (`SCION_AGENT_ID` set), `SCION_WORKSPACE_PATH` and `SCION_RUNTIME`, which the runtime sets for the agent, are ignored as settings overrides, so they do not override `workspace_path` or `runtime`. The retired
+`SCION_HUB_BROKER_ID`, `SCION_HUB_BROKER_TOKEN`, `SCION_HUB_BROKER_NICKNAME`, and `SCION_BUCKET_*`
+variables are not read.
 
 ```
 embedded defaults  <  ~/.scion/settings.yaml  <  .scion/settings.yaml
@@ -187,10 +191,10 @@ Key names are mapped by `versionedEnvKeyMapper`: the `SCION_` prefix is stripped
 lowercased, and `_` becomes a settings path separator — so `SCION_HUB_PROJECT_ID` sets
 `hub.project_id`.
 
-`SCION_HUB_PROJECT_ID` also outranks the project's `.scion/project-id` file, in both settings
-loaders, and a warning names both sources when they disagree. `SCION_PROJECT_ID` ranks lower: it
-sets the top-level `project_id`, and a `hub.project_id` from the settings files or the
-`project-id` file wins over it. When both variables are set, `SCION_HUB_PROJECT_ID` wins.
+`SCION_HUB_PROJECT_ID` also outranks the project's `.scion/project-id` file, and a warning names
+both sources when they disagree. `SCION_PROJECT_ID` ranks lower: it sets the top-level
+`project_id`, and a `hub.project_id` from the settings files or the `project-id` file wins over it.
+When both variables are set, `SCION_HUB_PROJECT_ID` wins.
 
 :::caution[Same prefix, unrelated mechanism]
 Bucket 1 and [Bucket 2](#bucket-2--scion_-variables-that-scion-injects-into-agents) both use the
@@ -217,7 +221,7 @@ existing value.
 | `SCION_AGENT_NAME` | agent name | **Unconditional** — overwrites |
 | `SCION_PROJECT` | project name | **Unconditional** — overwrites |
 | `SCION_TEMPLATE_NAME` | resolved template slug, or `custom` | **Unconditional** — overwrites |
-| `SCION_CLI_MODE` | always `agent` inside a container | **Unconditional** — overwrites |
+| `SCION_CLI_MODE` | always `agent` inside a container (outside one, it outranks the `cli.mode` setting; see below) | **Unconditional** — overwrites |
 | `SCION_MAX_TURNS` | from the resolved `ScionConfig` | **Unconditional** — overwrites the hub-supplied value |
 | `SCION_MAX_MODEL_CALLS` | from the resolved `ScionConfig` | **Unconditional** — overwrites the hub-supplied value |
 | `SCION_MAX_DURATION` | from the resolved `ScionConfig` | **Unconditional** — overwrites the hub-supplied value |
@@ -276,6 +280,13 @@ change that must not ride along in a precedence change. Adding an entry to a mis
 outbound-only filter would look like a fix and would not be one.
 
 ---
+
+The CLI mode itself is chosen as `SCION_CLI_MODE`, then the `cli.mode` setting (from the
+merged settings files), then `human`. `scion config set cli.mode agent` therefore switches
+every later command on that machine (or in that project) to agent mode, and agent mode removes
+the `config` commands, so `scion config unset cli.mode` is then unavailable. To return, run
+`SCION_CLI_MODE=human scion config unset [--global] cli.mode`, or remove `mode` from the `cli`
+section of the settings file by hand.
 
 ## Bucket 3 — end-user settings
 
@@ -689,14 +700,10 @@ over-collection is recorded separately under
 deliberately stops short of calling it a bug rather than a wart.
 
 **There is no third channel — and specifically, there is no settings-file *layering* channel.**
-This matters because it looks as though there is one. `MergeSettings` composes a whole
-`harness_overrides` block when layering one settings file over another: it merges `Env` per key,
-appends `Volumes`, and runs `MergeResourceSpec` over `Resources`. It reads as thoroughly
-load-bearing. **It is dead code.** Renaming its declaration leaves `go build ./...` green, which
-is the type checker asserting that no production caller exists — a claim grep cannot make, because
-`go build` excludes `_test.go` by definition and so cannot be satisfied by a fixture. Under the
-identical procedure, renaming `ResolveHarnessConfig` turns the build red. So do not infer a
-file-layering precedence rule for this key from reading `MergeSettings`; nothing reaches it.
+Settings files are merged by the one settings loader as plain data, and no code composes a
+`harness_overrides` block across files (the former `MergeSettings` layering helper, which never
+had a production caller, has been removed). So there is no file-layering precedence rule for this
+key beyond the ordinary last-layer-wins merge of the loader.
 
 :::caution[If you go looking for this in the source, two of the three matches are decoys]
 The line `if override.Env != nil {` appears at **three** sites, and one grep finds all three:

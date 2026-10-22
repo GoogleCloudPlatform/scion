@@ -117,6 +117,7 @@ func (s *Server) openConduitPort(ctx context.Context, identity Identity, agent *
 			return err
 		}
 		sc := newStreamConn(st, agent.ID, port)
+		sc.route = conduitRouteLogAttrs(res)
 		target := conduitLeafTarget(res, st, bridge)
 		tracked := &conduitUserStream{
 			Kind:      grant.StreamKindTCP,
@@ -288,8 +289,12 @@ func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent
 		slog.Debug("Conduit proxy: cannot lift the connection deadlines", "agent_id", agent.ID, "error", err)
 	}
 	// Logged on the way out, so an aborted response is logged too.
+	var route []any
+	if sc, ok := conn.(*streamConn); ok {
+		route = sc.route
+	}
 	defer func() {
-		slog.Debug("Proxy request",
+		slog.Debug("Proxy request", append([]any{
 			"agent_id", agent.ID,
 			"port", port,
 			"caller", identityStringFromContext(r.Context()),
@@ -298,7 +303,7 @@ func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent
 			"status", status,
 			"transport", "conduit",
 			"duration", time.Since(start),
-		)
+		}, route...)...)
 	}()
 	rp.ServeHTTP(w, r)
 }
@@ -522,6 +527,9 @@ func writeAgentOffline(w http.ResponseWriter, r *http.Request) {
 type streamConn struct {
 	conduit.Stream
 	local, remote net.Addr
+	// route holds the routing log fields of the stream
+	// (conduitRouteLogAttrs).
+	route []any
 
 	// untrack ends the stream's authorization re-checks (set once, before
 	// the conn is used).

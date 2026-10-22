@@ -48,7 +48,9 @@ type AgentReincarnation struct {
 	TargetBrokerID string `json:"target_broker_id,omitempty"`
 	// SourceCleanup holds the value of the "source_cleanup" field.
 	SourceCleanup string `json:"source_cleanup,omitempty"`
-	selectValues  sql.SelectValues
+	// TransferMode holds the value of the "transfer_mode" field.
+	TransferMode string `json:"transfer_mode,omitempty"`
+	selectValues sql.SelectValues
 }
 
 // scanValues returns the types for scanning values from sql.Rows.
@@ -58,7 +60,7 @@ func (*AgentReincarnation) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case agentreincarnation.FieldFromGeneration, agentreincarnation.FieldToGeneration:
 			values[i] = new(sql.NullInt64)
-		case agentreincarnation.FieldAgentID, agentreincarnation.FieldRequestedBy, agentreincarnation.FieldState, agentreincarnation.FieldError, agentreincarnation.FieldPreviousAppliedConfig, agentreincarnation.FieldNewAppliedConfig, agentreincarnation.FieldHandoff, agentreincarnation.FieldSourceBrokerID, agentreincarnation.FieldTargetBrokerID, agentreincarnation.FieldSourceCleanup:
+		case agentreincarnation.FieldAgentID, agentreincarnation.FieldRequestedBy, agentreincarnation.FieldState, agentreincarnation.FieldError, agentreincarnation.FieldPreviousAppliedConfig, agentreincarnation.FieldNewAppliedConfig, agentreincarnation.FieldHandoff, agentreincarnation.FieldSourceBrokerID, agentreincarnation.FieldTargetBrokerID, agentreincarnation.FieldSourceCleanup, agentreincarnation.FieldTransferMode:
 			values[i] = new(sql.NullString)
 		case agentreincarnation.FieldRequestedAt, agentreincarnation.FieldUpdatedAt, agentreincarnation.FieldCompletedAt:
 			values[i] = new(sql.NullTime)
@@ -176,6 +178,12 @@ func (_m *AgentReincarnation) assignValues(columns []string, values []any) error
 			} else if value.Valid {
 				_m.SourceCleanup = value.String
 			}
+		case agentreincarnation.FieldTransferMode:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field transfer_mode", values[i])
+			} else if value.Valid {
+				_m.TransferMode = value.String
+			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
 		}
@@ -258,6 +266,9 @@ func (_m *AgentReincarnation) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("source_cleanup=")
 	builder.WriteString(_m.SourceCleanup)
+	builder.WriteString(", ")
+	builder.WriteString("transfer_mode=")
+	builder.WriteString(_m.TransferMode)
 	builder.WriteByte(')')
 	return builder.String()
 }

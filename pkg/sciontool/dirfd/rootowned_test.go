@@ -5,6 +5,7 @@ Copyright 2026 The Scion Authors.
 package dirfd
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -346,5 +347,49 @@ func TestVerifyRootOwnedExecutable_RefusesSymlinkLoop(t *testing.T) {
 
 	if err := VerifyRootOwnedExecutable(a); err == nil {
 		t.Error("VerifyRootOwnedExecutable() = nil, want an error (symlink loop)")
+	}
+}
+
+func TestOpenParentNoFollowOwnedBy(t *testing.T) {
+	uid := uint32(os.Getuid())
+	base := t.TempDir()
+	dir := filepath.Join(base, "a", "b")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "f")
+
+	fd, leaf, err := OpenParentNoFollowOwnedBy(base, target, uid)
+	if err != nil {
+		t.Fatalf("owned chain refused: %v", err)
+	}
+	_ = syscall.Close(fd)
+	if leaf != "f" {
+		t.Fatalf("leaf=%q", leaf)
+	}
+
+	if _, _, err := OpenParentNoFollowOwnedBy(base, target, uid+1); !errors.Is(err, ErrNotOwned) {
+		t.Fatalf("another owner required: err=%v, want ErrNotOwned", err)
+	}
+	if _, _, err := OpenParentNoFollowOwnedBy(base, "/etc/passwd", uid); err == nil {
+		t.Fatal("a path outside base was accepted")
+	}
+
+	if err := os.Chmod(filepath.Join(base, "a"), 0o775); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := OpenParentNoFollowOwnedBy(base, target, uid); !errors.Is(err, ErrNotOwned) {
+		t.Fatalf("group-writable component: err=%v, want ErrNotOwned", err)
+	}
+	_ = os.Chmod(filepath.Join(base, "a"), 0o755)
+
+	if err := os.Rename(dir, dir+".real"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(dir+".real", dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := OpenParentNoFollowOwnedBy(base, target, uid); err == nil {
+		t.Fatal("a symlinked component was followed")
 	}
 }
