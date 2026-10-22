@@ -29,7 +29,10 @@
  * - env may not set a harness-owned key (hub id, hub class, HOME, broker
  *   host, test mode and test identity settings): startHub throws and runs
  *   nothing;
- * - runtimeBroker without testIdentities is refused.
+ * - runtimeBroker without testIdentities is refused;
+ * - startupExperiments turns each experiment on through the admin
+ *   experiments API and restarts the server on the same database, port,
+ *   HOME and hub id; without it there is one start and no API call.
  */
 
 import * as fs from 'node:fs';
@@ -41,6 +44,7 @@ import { expect, test } from '@playwright/test';
 import { isHarnessOwnedEnv, keepHubState, startHub, stopHub } from '../harness/hub.js';
 
 interface Invocation {
+  pid: number;
   argv: string[];
   env: Record<string, string | undefined>;
 }
@@ -62,7 +66,7 @@ import * as http from 'node:http';
 const argv = process.argv.slice(2);
 const env = {};
 for (const key of ${JSON.stringify(RECORDED_ENV)}) env[key] = process.env[key];
-fs.appendFileSync(process.env.HARNESS_SELFTEST_LOG, JSON.stringify({ argv, env }) + '\\n');
+fs.appendFileSync(process.env.HARNESS_SELFTEST_LOG, JSON.stringify({ pid: process.pid, argv, env }) + '\\n');
 if (argv[0] === 'server' && argv[1] === 'test-infra') {
   console.log('marked');
   process.exit(0);
@@ -73,6 +77,17 @@ if (argv[0] === 'server' && argv[1] === 'start') {
   fs.writeFileSync(tokenFile, 'scion_dev_0123456789abcdef\\n', { mode: 0o600 });
   http
     .createServer((req, res) => {
+      if (req.url === '/api/v1/admin/experiments') {
+        let body = '';
+        req.on('data', (chunk) => (body += chunk));
+        req.on('end', () => {
+          const record = { method: req.method, auth: req.headers.authorization, body };
+          fs.appendFileSync(process.env.HARNESS_SELFTEST_LOG + '.requests', JSON.stringify(record) + '\\n');
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ revision: 7, experiments: [] }));
+        });
+        return;
+      }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ status: 'healthy' }));
     })
@@ -113,6 +128,32 @@ function invocations(): Invocation[] {
     .trim()
     .split('\n')
     .map((line) => JSON.parse(line) as Invocation);
+}
+
+interface ExperimentsRequest {
+  method: string;
+  auth?: string;
+  body: string;
+}
+
+/** The admin experiments requests the stand-in answered. */
+function experimentsRequests(): ExperimentsRequest[] {
+  const file = `${logFile}.requests`;
+  if (!fs.existsSync(file)) return [];
+  return fs
+    .readFileSync(file, 'utf-8')
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line) as ExperimentsRequest);
+}
+
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function flagValue(argv: string[], flag: string): string | undefined {
@@ -251,4 +292,51 @@ test('E2E_KEEP_HUB_STATE=1 keeps the hub temp dir at stop; unset removes it', as
     if (previous === undefined) delete process.env.E2E_KEEP_HUB_STATE;
     else process.env.E2E_KEEP_HUB_STATE = previous;
   }
+});
+
+test('startupExperiments sets the overrides and restarts on the same database', async () => {
+  const state = await startHub({
+    testLogin: false,
+    testIdentities: true,
+    build: false,
+    binary,
+    stateFile,
+    startupExperiments: ['hub.conduit', 'hub.example'],
+  });
+
+  const calls = invocations();
+  expect(calls.map((c) => c.argv.slice(0, 3).join(' '))).toEqual([
+    'server test-infra mark',
+    'server start --foreground',
+    'server start --foreground',
+  ]);
+  const [, first, second] = calls;
+  // Same arguments (database, port, test mode with the hub id) and
+  // environment (HOME, hub id) for the restart.
+  expect(second.argv).toEqual(first.argv);
+  expect(second.env).toEqual(first.env);
+  expect(flagValue(second.argv, '--web-port')).toBe(String(state.port));
+  expect(second.env.HOME).toBe(state.homeDir);
+
+  // The overrides were set through the admin API, as the dev-auth admin,
+  // before the restart; the first process is gone and the state names
+  // the second.
+  const requests = experimentsRequests();
+  expect(requests.map((r) => r.method)).toEqual(['GET', 'PUT']);
+  for (const r of requests) expect(r.auth).toBe(`Bearer ${state.devToken}`);
+  expect(JSON.parse(requests[1].body)).toEqual({
+    overrides: { 'hub.conduit': true, 'hub.example': true },
+    expected_revision: 7,
+  });
+  expect(alive(first.pid), 'the first server stopped').toBe(false);
+  expect(state.pid).toBe(second.pid);
+});
+
+test('without startupExperiments the server starts once and no experiment is set', async () => {
+  await startHub({ testLogin: false, testIdentities: true, build: false, binary, stateFile });
+  expect(invocations().map((c) => c.argv.slice(0, 2).join(' '))).toEqual([
+    'server test-infra',
+    'server start',
+  ]);
+  expect(experimentsRequests()).toEqual([]);
 });

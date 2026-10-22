@@ -29,7 +29,7 @@
  */
 
 import * as crypto from 'node:crypto';
-import { execFileSync, execSync, spawn } from 'node:child_process';
+import { type ChildProcess, execFileSync, execSync, spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as net from 'node:net';
 import * as os from 'node:os';
@@ -99,6 +99,13 @@ export interface StartHubOptions {
   runtimeBroker?: boolean;
   /** Hub binary to run. Default: build/scion. For the harness's own tests. */
   binary?: string;
+  /**
+   * Experiments the hub reads only at process start (such as hub.conduit,
+   * whose relay starts only if it is on at startup). Each one is turned on
+   * through the admin experiments API, and then the hub is restarted on
+   * the same database, port, HOME and hub id. Default: none (one start).
+   */
+  startupExperiments?: string[];
 }
 
 /**
@@ -282,6 +289,128 @@ async function waitForHealth(baseURL: string, timeoutMs = 30_000): Promise<void>
   );
 }
 
+/** A started hub process and the dev token it printed. */
+interface LaunchedHub {
+  hubProcess: ChildProcess;
+  devToken: string;
+}
+
+/**
+ * Spawns the hub (its own process group), echoes its output with any dev
+ * token redacted, waits for health and reads the dev token from the file
+ * the hub printed.
+ */
+async function launchHub(
+  binary: string,
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  cwd: string,
+  baseURL: string
+): Promise<LaunchedHub> {
+  const hubProcess = spawn(binary, args, {
+    cwd,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    detached: true,
+    env,
+  });
+
+  // Capture the dev token file path from hub startup logs; the token is
+  // read from that file once the hub is healthy.
+  let devTokenFile = '';
+  const captureDevTokenFile = (line: string) => {
+    const match = hubLogMessage(line).match(DEV_TOKEN_FILE_PATTERN);
+    if (match) {
+      devTokenFile = unquoteShellSingle(match[1]);
+    }
+  };
+
+  // Log hub output for debugging and capture the dev token file path
+  hubProcess.stdout?.on('data', (data: Buffer) => {
+    const lines = data.toString().trim().split('\n');
+    for (const line of lines) {
+      console.log(`[hub:stdout] ${redact(line)}`);
+      captureDevTokenFile(line);
+    }
+  });
+
+  hubProcess.stderr?.on('data', (data: Buffer) => {
+    const lines = data.toString().trim().split('\n');
+    for (const line of lines) {
+      console.log(`[hub:stderr] ${redact(line)}`);
+      captureDevTokenFile(line);
+    }
+  });
+
+  hubProcess.on('error', (err) => {
+    console.error(`[hub] Process error: ${err.message}`);
+  });
+
+  hubProcess.on('exit', (code, signal) => {
+    console.log(`[hub] Process exited: code=${code}, signal=${signal}`);
+  });
+
+  // Wait for health
+  await waitForHealth(baseURL);
+
+  if (!devTokenFile) {
+    throw new Error(
+      'Failed to capture the dev token file path from hub output. ' +
+        'Ensure the hub is started with --dev-auth.'
+    );
+  }
+  // A relative path is relative to the hub's working directory.
+  const devToken = readDevTokenFile(path.resolve(cwd, devTokenFile));
+
+  console.log(`[hub] Dev token captured.`);
+  return { hubProcess, devToken };
+}
+
+/** Turns each named experiment on through the admin experiments API. */
+async function setExperimentOverrides(
+  baseURL: string,
+  devToken: string,
+  names: string[]
+): Promise<void> {
+  const url = `${baseURL}/api/v1/admin/experiments`;
+  const headers = { Authorization: `Bearer ${devToken}`, 'Content-Type': 'application/json' };
+  const read = await fetch(url, { headers, signal: AbortSignal.timeout(10_000) });
+  if (read.status !== 200) {
+    throw new Error(`startHub: GET /api/v1/admin/experiments answered ${read.status}`);
+  }
+  const { revision } = (await read.json()) as { revision: number };
+  const overrides = Object.fromEntries(names.map((name) => [name, true]));
+  const put = await fetch(url, {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify({ overrides, expected_revision: revision }),
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (put.status !== 200) {
+    throw new Error(`startHub: PUT /api/v1/admin/experiments answered ${put.status}`);
+  }
+}
+
+/** Stops a hub started by launchHub (its process group) and waits for its exit. */
+async function stopProcessGroup(child: ChildProcess, timeoutMs = 30_000): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
+  try {
+    process.kill(-child.pid!, 'SIGTERM');
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code === 'ESRCH') return;
+    throw err;
+  }
+  let timer: NodeJS.Timeout | undefined;
+  const timedOut = new Promise<'timeout'>((resolve) => {
+    timer = setTimeout(() => resolve('timeout'), timeoutMs);
+  });
+  const result = await Promise.race([exited, timedOut]);
+  clearTimeout(timer);
+  if (result === 'timeout') {
+    throw new Error(`startHub: the hub (PID ${child.pid}) did not exit within ${timeoutMs}ms`);
+  }
+}
+
 /**
  * Build assets and start the hub. Returns the hub state (port, PID, dev token, etc.).
  * The state is also written to a temp file for the teardown script.
@@ -389,61 +518,21 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubState>
   if (testLogin) args.push('--enable-test-login', '--session-secret', E2E_SESSION_SECRET);
   if (testIdentities) args.push(`--test-mode=member:${hubId}`);
   args.push('--db', dbPath, '--web-assets-dir', webAssetsDir);
-  const hubProcess = spawn(binary, args, {
-    cwd: homeDir ?? WORKSPACE_ROOT,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    detached: true,
-    env,
-  });
+  const cwd = homeDir ?? WORKSPACE_ROOT;
+  let { hubProcess, devToken } = await launchHub(binary, args, env, cwd, baseURL);
 
-  // Capture the dev token file path from hub startup logs; the token is
-  // read from that file once the hub is healthy.
-  let devTokenFile = '';
-  const captureDevTokenFile = (line: string) => {
-    const match = hubLogMessage(line).match(DEV_TOKEN_FILE_PATTERN);
-    if (match) {
-      devTokenFile = unquoteShellSingle(match[1]);
-    }
-  };
-
-  // Log hub output for debugging and capture the dev token file path
-  hubProcess.stdout?.on('data', (data: Buffer) => {
-    const lines = data.toString().trim().split('\n');
-    for (const line of lines) {
-      console.log(`[hub:stdout] ${redact(line)}`);
-      captureDevTokenFile(line);
-    }
-  });
-
-  hubProcess.stderr?.on('data', (data: Buffer) => {
-    const lines = data.toString().trim().split('\n');
-    for (const line of lines) {
-      console.log(`[hub:stderr] ${redact(line)}`);
-      captureDevTokenFile(line);
-    }
-  });
-
-  hubProcess.on('error', (err) => {
-    console.error(`[hub] Process error: ${err.message}`);
-  });
-
-  hubProcess.on('exit', (code, signal) => {
-    console.log(`[hub] Process exited: code=${code}, signal=${signal}`);
-  });
-
-  // Wait for health
-  await waitForHealth(baseURL);
-
-  if (!devTokenFile) {
-    throw new Error(
-      'Failed to capture the dev token file path from hub output. ' +
-        'Ensure the hub is started with --dev-auth.'
+  // Startup-read experiments: set the overrides through the admin API,
+  // then restart the hub on the same database, port, HOME and hub id, so
+  // they apply from process start.
+  const startupExperiments = options.startupExperiments ?? [];
+  if (startupExperiments.length > 0) {
+    await setExperimentOverrides(baseURL, devToken, startupExperiments);
+    console.info(
+      `[hub] Restarting the hub for startup experiments: ${startupExperiments.join(', ')}`
     );
+    await stopProcessGroup(hubProcess);
+    ({ hubProcess, devToken } = await launchHub(binary, args, env, cwd, baseURL));
   }
-  // A relative path is relative to the hub's working directory.
-  const devToken = readDevTokenFile(path.resolve(homeDir ?? WORKSPACE_ROOT, devTokenFile));
-
-  console.log(`[hub] Dev token captured.`);
 
   const state: HubState = {
     pid: hubProcess.pid!,
