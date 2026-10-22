@@ -47,8 +47,8 @@ const (
 
 // Cloud Run limits and contract defaults.
 const (
-	maxOwnerLen              = 39
-	maxCloudRunTaskTimeout   = 168 * time.Hour
+	maxOwnerLen            = 39
+	maxCloudRunTaskTimeout = 168 * time.Hour
 	// maxEphemeralDiskGi: the Cloud Run server rejected an ephemeral-disk
 	// total above 10 GiB per instance in the P6 deploy (deploy-demo-test),
 	// although the volume API documents up to 100 GiB.
