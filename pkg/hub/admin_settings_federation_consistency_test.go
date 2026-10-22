@@ -56,7 +56,12 @@ func TestServerConfigDB_GetFederationOneSource(t *testing.T) {
 	require.NotNil(t, resp.Server)
 	assert.Nil(t, resp.Server.Federation, "server.federation must not show the settings.yaml seed")
 
-	rr := putServerConfigDB(t, srv, ops, `{"federation":{"enabled":false,"algorithms":["ES256"],"refresh_interval":"3h"}}`)
+	// One trusted issuer, so the GET conversion reports the section even
+	// though it is disabled (a disabled, issuer-less section is omitted
+	// from GET; that is tracked separately).
+	rr := putServerConfigDB(t, srv, ops, `{"federation":{"enabled":false,`+
+		`"trusted_issuers":[{"issuer_url":"https://issuer-z.example.com","issuer_type":"hub"}],`+
+		`"algorithms":["ES256"],"refresh_interval":"3h"}}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 
 	resp = getServerConfigDB(t, srv, ops)
@@ -65,8 +70,9 @@ func TestServerConfigDB_GetFederationOneSource(t *testing.T) {
 	require.NotNil(t, resp.Server.Federation)
 	assert.Equal(t, resp.Federation, resp.Server.Federation, "both places report the same federation")
 	assert.Equal(t, []string{"ES256"}, resp.Federation.Algorithms)
-	assert.Equal(t, "3h", resp.Federation.RefreshInterval)
-	assert.Empty(t, resp.Federation.TrustedIssuers, "the settings.yaml seed issuers are not in effect")
+	assert.Equal(t, "3h0m0s", resp.Federation.RefreshInterval, "GET formats the interval as a Go duration")
+	require.Len(t, resp.Federation.TrustedIssuers, 1, "only the stored issuer, not the settings.yaml seed issuers")
+	assert.Equal(t, "https://issuer-z.example.com", resp.Federation.TrustedIssuers[0].IssuerURL)
 }
 
 // File tier: both places read the same settings.yaml block.
