@@ -172,6 +172,80 @@ func TestAgentDelegatedMessageAndAttach_OneRecordPerCheckAndNoReason(t *testing.
 	}
 }
 
+// TestAgentDelegatedMessage_ChargedToTheAgentSendBudget: a delegated send
+// is an agent send, so it shares the actor agent's send budget with the
+// agent's own sends. With a budget of one send a minute, a delegated send
+// after the agent's own send (and after another delegated send) answers
+// 429 with Retry-After, and nothing more is dispatched or stored.
+func TestAgentDelegatedMessage_ChargedToTheAgentSendBudget(t *testing.T) {
+	ctx := context.Background()
+	for _, first := range []string{"the agent's own send", "a delegated send"} {
+		t.Run("after "+first, func(t *testing.T) {
+			f := newADTFixture(t, "adt-msg-budget")
+			dispatcher := f.adtMessageWorld(t)
+			cred := f.delegated(t, f.adtIssueGrant(t, map[string]string{"kind": "hub"}, "agent:message").ID)
+			f.srv.chatSendLimiter = newChatSendLimiterWithRates(map[chatSenderClass]float64{
+				chatSenderHuman: 60,
+				chatSenderAgent: 1,
+			}, time.Now)
+			if first == "the agent's own send" {
+				f.limiterSpend(t)
+			} else {
+				require.Equal(t, http.StatusOK, f.sendMessage(t, cred.Token, agentMessagePath(f.agentB.ID), adtText("first")).Code)
+			}
+			calls := len(dispatcher.getCalls())
+			stored, err := f.store.ListMessages(ctx, store.MessageFilter{RecipientID: f.agentB.ID}, store.ListOptions{Limit: 10})
+			require.NoError(t, err)
+
+			rec := f.sendMessage(t, cred.Token, agentMessagePath(f.agentB.ID), adtText("second"))
+			adtAssertAPIError(t, rec, http.StatusTooManyRequests, ErrCodeRateLimited)
+			assert.NotEmpty(t, rec.Header().Get("Retry-After"))
+			assert.Len(t, dispatcher.getCalls(), calls, "the limited send was not dispatched")
+			after, err := f.store.ListMessages(ctx, store.MessageFilter{RecipientID: f.agentB.ID}, store.ListOptions{Limit: 10})
+			require.NoError(t, err)
+			assert.Len(t, after.Items, len(stored.Items), "the limited send was not stored")
+		})
+	}
+}
+
+// limiterSpend spends agent A's send budget the way an agent's own send
+// does (ExecuteAgentDM charges SenderAgent.ID as an agent sender).
+func (f *adtFixture) limiterSpend(t *testing.T) {
+	t.Helper()
+	require.True(t, f.srv.chatSendLimiter.Allow(f.agentA.ID, chatSenderAgent).Allowed, "the budget starts with one send")
+}
+
+// TestSenderAgentProject_CoversDelegatedSenders: the sender project used
+// for the stored SenderProjectID and for the cross-project observer
+// sanitizing is the agent caller's project, or for a delegated credential
+// the actor agent's project (from the request's loaded agent row, else the
+// identity). A human caller has none.
+func TestSenderAgentProject_CoversDelegatedSenders(t *testing.T) {
+	f := newADTFixture(t, "adt-sender-project")
+	cred := f.delegated(t, f.adtIssueGrant(t, map[string]string{"kind": "hub"}, "agent:read").ID)
+	st := adtLoadedState(t, f, cred.Token)
+	withState := contextWithDelegatedState(contextWithIdentity(context.Background(), st.identity), st)
+
+	got, ok := senderAgentProject(withState)
+	assert.True(t, ok)
+	assert.Equal(t, f.agentA.ProjectID, got, "the actor agent's project from the loaded row")
+	assert.NotEqual(t, f.agentB.ProjectID, got, "a send to B in P2 is cross-project, so its observer copy is sanitized")
+
+	bare := adtTestIdentity("agent-x", "project-x")
+	got, ok = senderAgentProject(contextWithIdentity(context.Background(), bare))
+	assert.True(t, ok)
+	assert.Equal(t, "project-x", got, "without loaded state, the identity's agent project")
+
+	got, ok = senderAgentProject(contextWithIdentity(context.Background(), newAgentIdentityFromStore(f.agentC)))
+	assert.True(t, ok)
+	assert.Equal(t, f.agentC.ProjectID, got)
+
+	got, ok = senderAgentProject(contextWithIdentity(context.Background(), authUser(f.alice)))
+	assert.False(t, ok)
+	assert.Empty(t, got)
+	assert.Empty(t, senderAgentProjectID(context.Background()))
+}
+
 // TestAgentDelegatedMessage_SuperAdminIssuerPiercesNoMode: a super-admin's
 // hub grant lets its agent message an agent in another project, but the
 // delegated sender pierces no message mode, although the super-admin

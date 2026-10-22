@@ -1888,13 +1888,19 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// route's own agent only (delegatedMessageRequestRefusal); every other
 	// field is refused before anything is looked up or written. The hub
 	// sets the timestamp.
-	if isDelegatedAgentIdentity(GetIdentityFromContext(ctx)) {
+	if delegated := delegatedAgentIdentityFromContext(ctx); delegated != nil {
 		if field := delegatedMessageRequestRefusal(&req); field != "" {
 			ValidationError(w, field+" is not available to a delegated credential", map[string]interface{}{"field": field})
 			return
 		}
 		if req.StructuredMessage != nil {
 			req.StructuredMessage.Timestamp = ""
+		}
+		// A delegated send is an agent send: it is charged to the actor
+		// agent's send budget (AC-2), the same budget ExecuteAgentDM
+		// charges for the agent's own sends, before anything is written.
+		if !s.allowChatSend(w, delegated.ID(), chatSenderAgent) {
+			return
 		}
 	}
 
@@ -2408,13 +2414,9 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		storeMsg.RecipientProjectID = &recipientProjectID
 		// SenderProjectID is derived from the authenticated sender.
 		// For human senders, SenderProjectID remains nil (no project-level provenance).
-		if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
-			senderProjID := agentIdent.ProjectID()
-			storeMsg.SenderProjectID = &senderProjID
-		} else if delegated := delegatedAgentIdentityFromContext(ctx); delegated != nil {
-			// A delegated send is an agent-sender row: the actor agent's
-			// project, like every other agent-to-agent row.
-			senderProjID := delegatedSenderProjectID(ctx, delegated)
+		// A delegated send is an agent-sender row too: the actor agent's
+		// project, like every other agent-to-agent row.
+		if senderProjID, ok := senderAgentProject(ctx); ok {
 			storeMsg.SenderProjectID = &senderProjID
 		}
 
@@ -3053,10 +3055,8 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				if bp := s.GetMessageBrokerProxy(); bp != nil {
 					observerMsg := *structuredMsg
 					observerMsg.ObserverOnly = true
-					isCrossProjectObs := false
-					if senderAgent := GetAgentIdentityFromContext(ctx); senderAgent != nil {
-						isCrossProjectObs = senderAgent.ProjectID() != "" && senderAgent.ProjectID() != agent.ProjectID
-					}
+					senderProjectID := senderAgentProjectID(ctx)
+					isCrossProjectObs := senderProjectID != "" && senderProjectID != agent.ProjectID
 					if isCrossProjectObs {
 						sanitizeCrossProjectObserver(&observerMsg)
 					}

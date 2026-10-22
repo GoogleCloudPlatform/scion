@@ -63,3 +63,24 @@ func delegatedSenderProjectID(ctx context.Context, d *DelegatedAgentIdentity) st
 	}
 	return d.AgentProjectID()
 }
+
+// senderAgentProject returns the project of the agent that sends on the
+// request in ctx: an agent caller's own project, or the actor agent's
+// project for an agent delegated credential. ok is false for any other
+// caller (a human sender has no sender project).
+func senderAgentProject(ctx context.Context) (projectID string, ok bool) {
+	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+		return agentIdent.ProjectID(), true
+	}
+	if delegated := delegatedAgentIdentityFromContext(ctx); delegated != nil {
+		return delegatedSenderProjectID(ctx, delegated), true
+	}
+	return "", false
+}
+
+// senderAgentProjectID is senderAgentProject's project, or "" for a caller
+// that is not an agent sender.
+func senderAgentProjectID(ctx context.Context) string {
+	projectID, _ := senderAgentProject(ctx)
+	return projectID
+}
