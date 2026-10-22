@@ -2922,7 +2922,8 @@ func detectRepoRoot(explicit bool, effectiveWorkspace, projectDir string, settin
 			if ownGitErr != nil {
 				// A project root inside an enclosing repository (a
 				// subdirectory project) has no .git of its own. The broker
-				// keeps no record of that layout, so it is mounted plain.
+				// keeps no record of that layout, so it is mounted plain
+				// (ptone/scion#5758 tracks recording it at link time).
 				if enclosing := projectRepoRoot(filepath.Dir(effectiveWorkspace)); enclosing != "" {
 					slog.Warn("Project root is a subdirectory of a repository; mounting the workspace only; in-container git is unavailable for this layout",
 						"workspace", effectiveWorkspace, "repository", enclosing)
@@ -2941,8 +2942,8 @@ func detectRepoRoot(explicit bool, effectiveWorkspace, projectDir string, settin
 			return effectiveWorkspace, nil
 		}
 		if hasOwnGitDir {
-			// A .git directory git rejects (or a probe that does not
-			// finish) gives a plain mount: it never falls through to a
+			// A .git directory git rejects gives a plain mount (a probe
+			// that does not finish refuses): it never falls through to a
 			// wider root.
 			isRepo, err := checkOwnCommonDir(effectiveWorkspace)
 			if err != nil {
@@ -2958,7 +2959,11 @@ func detectRepoRoot(explicit bool, effectiveWorkspace, projectDir string, settin
 		if projectRepo != "" && resolvedPathWithin(effectiveWorkspace, projectRepo) {
 			ceiling = filepath.Dir(projectRepo)
 		}
-		if commonDir, err := boundedCommonGitDir(effectiveWorkspace, ceiling); err == nil {
+		commonDir, err := boundedCommonGitDir(effectiveWorkspace, ceiling)
+		if errors.Is(err, errGitProbeTimeout) {
+			return "", gitProbeTimeoutError(effectiveWorkspace, err)
+		}
+		if err == nil {
 			if projectCommon := projectCommonDir(projectRepo); projectCommon != "" && samePath(commonDir, projectCommon) {
 				return filepath.Dir(projectCommon), nil
 			}
@@ -2977,6 +2982,8 @@ func detectRepoRoot(explicit bool, effectiveWorkspace, projectDir string, settin
 			"workspace", effectiveWorkspace, "repository", projectRepo)
 		return "", nil
 	}
+	// Any failure here, a timeout included, gives a plain mount, never the
+	// project's repository.
 	top, err := boundedRevParse(projectDir, filepath.Dir(projectRepo), "--show-toplevel")
 	if err != nil {
 		return "", nil
@@ -2990,10 +2997,14 @@ func detectRepoRoot(explicit bool, effectiveWorkspace, projectDir string, settin
 // checkOwnCommonDir checks a workspace with its own .git directory. It
 // reports false when git does not treat the workspace as a repository at all
 // (for example an empty .git directory), and refuses with an error when git
-// does, but with a common dir other than that .git directory.
+// does, but with a common dir other than that .git directory, or when the
+// probe does not finish in time.
 func checkOwnCommonDir(workspace string) (bool, error) {
 	ownGitDir := filepath.Join(workspace, ".git")
 	commonDir, err := boundedCommonGitDir(workspace, filepath.Dir(workspace))
+	if errors.Is(err, errGitProbeTimeout) {
+		return false, gitProbeTimeoutError(workspace, err)
+	}
 	if err != nil {
 		return false, nil
 	}
@@ -3024,9 +3035,24 @@ func boundedRevParse(dir, ceiling string, args ...string) (string, error) {
 	cmd.Env = append(worktreeGitEnv(), "GIT_CEILING_DIRECTORIES="+ceiling)
 	out, err := cmd.Output()
 	if err != nil {
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("git rev-parse %s in %s: %w after %s", strings.Join(args, " "), dir, errGitProbeTimeout, worktreeGitTimeout)
+		}
 		return "", fmt.Errorf("git rev-parse %s in %s: %w", strings.Join(args, " "), dir, err)
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// errGitProbeTimeout marks a boundedRevParse call that did not finish in
+// time. A probe in the workspace that times out refuses the start: it is
+// never read as "not a repository", which could otherwise pick a different
+// layout than the workspace's own git metadata allows.
+var errGitProbeTimeout = errors.New("git probe timed out")
+
+// gitProbeTimeoutError is detectRepoRoot's refusal for a git probe in the
+// workspace that did not finish in time.
+func gitProbeTimeoutError(workspace string, err error) error {
+	return fmt.Errorf("cannot check the git metadata of workspace %s: %w; refusing to start: check the workspace's .git metadata and the filesystem", workspace, err)
 }
 
 // boundedCommonGitDir returns dir's git common dir as an absolute path, with

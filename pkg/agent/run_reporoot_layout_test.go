@@ -16,9 +16,11 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -533,6 +535,9 @@ func TestStart_SharedWorkspaceWithoutGitNeverMountsAncestorRepo(t *testing.T) {
 				if err == nil {
 					t.Fatalf("restart succeeded with RepoRoot %q; want a refusal", captured.RepoRoot)
 				}
+				if !strings.Contains(err.Error(), "outside the permitted workspace root") {
+					t.Fatalf("restart should be refused by the workspace containment check, got: %v", err)
+				}
 				if calls != 0 {
 					t.Fatalf("runtime Run was called %d time(s) on a refused start", calls)
 				}
@@ -728,25 +733,79 @@ func TestDetectRepoRoot_RejectedGitDirOutsideProjectRepoIsPlain(t *testing.T) {
 	}
 }
 
-// A git probe that does not finish in time gives a plain mount for a
-// checkout outside the project's repository, never a wider root.
-func TestDetectRepoRoot_ProbeTimeoutOutsideProjectRepoIsPlain(t *testing.T) {
-	base := t.TempDir()
-	root := mkGitRepo(t, filepath.Join(base, "repo"))
-	projectDir := filepath.Join(root, config.DotScion)
-	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+// slowGitIn puts a git first on PATH that blocks (until the probe deadline
+// kills it) when its working directory is dir, and runs the real git
+// everywhere else, and lowers the probe deadline. Only probes run in dir
+// time out; probes in the broker-side project dir still complete.
+func slowGitIn(t *testing.T, dir string) {
+	t.Helper()
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("git not found: %v", err)
+	}
+	binDir := t.TempDir()
+	script := fmt.Sprintf("#!/bin/sh\ncase \"$(pwd -P)\" in\n  %q) exec sleep 30 ;;\nesac\nexec %q \"$@\"\n", eval(t, dir), realGit)
+	if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	ws := mkGitRepo(t, filepath.Join(base, "backend", "workspace"))
-	if got := mustDetectRepoRoot(t, false, ws, projectDir); eval(t, got) != eval(t, ws) {
-		t.Fatalf("fixture: repo root = %q before the timeout, want the workspace %q", got, ws)
-	}
-
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	orig := worktreeGitTimeout
-	worktreeGitTimeout = time.Nanosecond
+	worktreeGitTimeout = 500 * time.Millisecond
 	t.Cleanup(func() { worktreeGitTimeout = orig })
-	if got := mustDetectRepoRoot(t, false, ws, projectDir); got != "" {
-		t.Fatalf("repo root = %q after a probe timeout, want \"\" (plain mount), never %q", got, root)
+}
+
+// A probe that does not finish in time in the workspace refuses the start,
+// in every branch that consults the workspace's git metadata: it is never
+// read as "not a repository", which would otherwise give the project's
+// repository (for a checkout outside the project) or let a redirected
+// worktree pointer through.
+func TestDetectRepoRoot_WorkspaceProbeTimeoutRefuses(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, base, root string) (ws, projectDir string)
+	}{
+		{name: "checkout outside the project", setup: func(t *testing.T, base, root string) (string, string) {
+			return mkGitRepo(t, filepath.Join(base, "backend", "workspace")), filepath.Join(root, config.DotScion)
+		}},
+		{name: "redirected worktree pointer", setup: func(t *testing.T, base, root string) (string, string) {
+			other := mkGitRepo(t, filepath.Join(base, "other"))
+			otherWT := filepath.Join(base, "other-wt")
+			runGitIn(t, other, "worktree", "add", "-b", "x", otherWT)
+			projectDir := filepath.Join(root, config.DotScion)
+			ws := filepath.Join(projectDir, "agents", "dev", "workspace")
+			if err := os.MkdirAll(filepath.Dir(ws), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			runGitIn(t, root, "worktree", "add", "-b", "dev", ws)
+			pointer, err := os.ReadFile(filepath.Join(otherWT, ".git"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(ws, ".git"), pointer, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			return ws, projectDir
+		}},
+		{name: "shared workspace at the project root", setup: func(t *testing.T, base, root string) (string, string) {
+			return root, filepath.Join(root, config.DotScion)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := t.TempDir()
+			root := mkGitRepo(t, filepath.Join(base, "repo"))
+			ws, projectDir := tc.setup(t, base, root)
+			if err := os.MkdirAll(projectDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			slowGitIn(t, ws)
+			got, err := detectRepoRoot(false, ws, projectDir, nil)
+			if err == nil || got != "" {
+				t.Fatalf("detectRepoRoot = (%q, %v), want a refusal", got, err)
+			}
+			if !errors.Is(err, errGitProbeTimeout) {
+				t.Fatalf("refusal should name the probe timeout: %v", err)
+			}
+		})
 	}
 }
 
@@ -764,5 +823,128 @@ func TestDetectRepoRoot_RejectedGitDirInsideProjectRepoIsPlain(t *testing.T) {
 	}
 	if got := mustDetectRepoRoot(t, false, ws, projectDir); got != "" {
 		t.Fatalf("repo root = %q, want \"\" (plain mount), never the project repository %q", got, root)
+	}
+}
+
+// Through Start: a workspace storage backend checkout outside the project
+// whose git probe does not finish in time refuses the start; the runtime is
+// not called (it would otherwise get the project's repository).
+func TestStartNFSWorkspace_ProbeTimeoutRefuses(t *testing.T) {
+	mountRoot := filepath.Join(t.TempDir(), "nfs")
+	wsPath := mkGitRepo(t, filepath.Join(mountRoot, "share-1", "projects", testNFSWorkspaceProjectID, "workspace"))
+
+	f := newSharedDirStorageRunFixture(t)
+	f.writeGlobalSettings(t, fmt.Sprintf(nfsWorkspaceStartYAML, mountRoot))
+
+	var calls int
+	mgr := NewManager(&runtime.MockRuntime{
+		NameFunc: func() string { return "kubernetes" },
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, rc runtime.RunConfig) (string, error) {
+			calls++
+			return "mock-id", nil
+		},
+	})
+	slowGitIn(t, wsPath)
+	_, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        "test-agent",
+		ProjectPath: f.projectScionDir,
+		NoAuth:      true,
+		Env: map[string]string{
+			"SCION_AGENT_ID":   "agent-2157",
+			"SCION_PROJECT_ID": testNFSWorkspaceProjectID,
+		},
+		GitClone: &api.GitCloneConfig{URL: "https://example.com/repo.git", Branch: "main"},
+	})
+	if err == nil || !errors.Is(err, errGitProbeTimeout) {
+		t.Fatalf("Start error = %v, want a refusal naming the probe timeout", err)
+	}
+	if calls != 0 {
+		t.Fatalf("runtime Run was called %d time(s) on a refused start", calls)
+	}
+}
+
+// Through Start: a worktree-per-agent agent of a local git project whose
+// worktree .git pointer was redirected to another repository, and whose git
+// probe then does not finish in time, is refused on restart; the runtime is
+// not called.
+func TestStart_RedirectedWorktreeProbeTimeoutRefuses(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	home := t.TempDir()
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(home)
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	t.Setenv("HOME", home)
+	if old, ok := os.LookupEnv("SCION_AUTO_EXPOSE_PORTS"); ok {
+		_ = os.Unsetenv("SCION_AUTO_EXPOSE_PORTS")
+		t.Cleanup(func() { _ = os.Setenv("SCION_AUTO_EXPOSE_PORTS", old) })
+	}
+	globalScionDir := filepath.Join(home, config.GlobalDir)
+	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
+	tplDir := filepath.Join(globalScionDir, "templates", "default")
+	for _, d := range []string{hcDir, tplDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for path, content := range map[string]string{
+		filepath.Join(hcDir, "config.yaml"):            "harness: generic\nuser: scion\nimage: layout-image:v1\n",
+		filepath.Join(tplDir, "scion-agent.json"):      `{"default_harness_config": "test-harness"}`,
+		filepath.Join(globalScionDir, "settings.yaml"): "schema_version: \"1\"\nactive_profile: local\nprofiles:\n  local:\n    runtime: docker\n",
+	} {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	proj := filepath.Join(home, "proj")
+	if err := os.MkdirAll(filepath.Join(proj, config.DotScion), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(proj, ".gitignore"), []byte("agents/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	setupGitRepo(t, proj)
+	other := mkGitRepo(t, filepath.Join(home, "other"))
+	otherWT := filepath.Join(home, "other-wt")
+	runGitIn(t, other, "worktree", "add", "-b", "x", otherWT)
+
+	var calls int
+	var captured runtime.RunConfig
+	mgr := NewManager(&runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+			calls++
+			captured = cfg
+			return "mock-id", nil
+		},
+	})
+	opts := api.StartOptions{Name: "dev", ProjectPath: filepath.Join(proj, config.DotScion), NoAuth: true}
+	if _, err := mgr.Start(context.Background(), opts); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if calls != 1 || eval(t, captured.RepoRoot) != eval(t, proj) {
+		t.Fatalf("first start: calls %d, RepoRoot %q, want 1 and the project repository %q", calls, captured.RepoRoot, proj)
+	}
+	ws := captured.Workspace
+
+	pointer, err := os.ReadFile(filepath.Join(otherWT, ".git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, ".git"), pointer, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	slowGitIn(t, ws)
+	calls = 0
+	_, err = mgr.Start(context.Background(), opts)
+	if err == nil || !errors.Is(err, errGitProbeTimeout) {
+		t.Fatalf("restart error = %v, want a refusal naming the probe timeout", err)
+	}
+	if calls != 0 {
+		t.Fatalf("runtime Run was called %d time(s) on a refused start", calls)
 	}
 }
