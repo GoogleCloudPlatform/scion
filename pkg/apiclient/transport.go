@@ -299,6 +299,10 @@ func (t *Transport) prepare(req *http.Request) error {
 	}
 	if t.Auth != nil {
 		if err := t.Auth.ApplyAuth(req); err != nil {
+			// The HTTP client will not receive req, so it cannot close the body.
+			if req.Body != nil {
+				_ = req.Body.Close()
+			}
 			return fmt.Errorf("failed to apply auth: %w", err)
 		}
 	}
