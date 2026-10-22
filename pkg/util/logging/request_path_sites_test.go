@@ -69,7 +69,7 @@ var requestPathSites = []requestPathSite{
 	{"agent_run_scope.go", "runScopeRequestFrom", "URL.Path", 1, "classification only: classPath picks the run-scope route class and is never logged (the logged path is logging.RequestPath)"},
 	{"artifacts_host.go", "isArtifactCapabilityRequest", "URL.EscapedPath", 1, "comparison: checks the shape of a credential-less artifact read on both path forms"},
 	{"artifacts_host.go", "isArtifactCapabilityRequest", "URL.Path", 4, "comparison: checks the shape of a credential-less artifact read on both path forms"},
-	{"auth.go", "UnifiedAuthMiddleware", "URL.Path", 1, "comparison: health and unauthenticated endpoint checks"},
+	{"auth.go", "UnifiedAuthMiddleware", "URL.Path", 2, "comparison: health and unauthenticated endpoint checks, and the port proxy route check for the no-credentials answer"},
 	{"auth.go", "isConstraintAuditAuthFailureRoute", "URL.EscapedPath", 1, "comparison: matches the constraint-audit routes on both path forms"},
 	{"auth.go", "isConstraintAuditAuthFailureRoute", "URL.Path", 4, "comparison: matches the constraint-audit routes on both path forms"},
 	{"auth.go", "isConstraintAuditAuthFailureRoute", "URL.RawPath", 1, "comparison: matches the constraint-audit routes on both path forms"},
