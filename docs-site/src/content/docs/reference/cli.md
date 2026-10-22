@@ -1007,8 +1007,8 @@ View and modify configuration settings.
 (`hub.transport.mode`, `hub.transport.audience`) and each hub connection's endpoint
 (`hub_connections.<name>.endpoint`), with the effective value and its source: `default`
 (the embedded defaults), `global <file>`, `project <file>`, `env <VARIABLE>` or
-`project-id file <file>`. A setting with no value shows `<unset>`. `config get <key>`
-reads the same settings and gives the same value and source. The value of a
+`project-id file <file>` (for `hub.endpoint`, see below). A setting with no value shows
+`<unset>`. `config get <key>` reads the same settings and gives the same value and source. The value of a
 credential-like key (for example `hub.brokerToken`) is masked in both. With
 `--format json`, `config list` prints an object keyed by setting
 (`{"<key>": {"value": "...", "source": "..."}}`) and `config get` prints
@@ -1052,6 +1052,39 @@ in-repo `.scion/settings.yaml` of a project whose settings are kept in its exter
 settings directory), the command names that file, and `--format json` adds it as
 `still_set_in`. `config unset` is available in human mode
 only, like `config set`.
+
+`hub.endpoint` is a front end to the hub list (`~/.scion/context.yaml`): `config set`
+never writes it into a settings file, and the CLI does not read it from one. (A
+`hub.endpoint` left in the global settings is still read once by the import into the
+hub list, and by the server and the Runtime Broker as a deprecated fallback for
+`server.hub.public_url` and `server.broker.hub_endpoint`.)
+
+- `scion config set --global hub.endpoint <url>` works like
+  [`scion hub add`](#scion-hub) followed by `scion use --hub`: the URL must pass the same
+  check, an existing entry with the same URL is reused, a new one is named after the
+  host (`-2`, `-3`, ... when the name is taken), the Hub's health is checked with the
+  same warning, and the Hub becomes the current Hub
+  (`Hub '<name>' (<url>) is now the current hub.`).
+- In a project, `scion config set hub.endpoint <url>` links the project directory to
+  that Hub instead (its link entry, as `scion hub link` records it), without changing
+  the current Hub.
+- When the Hub just set is not the one that applies (`SCION_HUB_ENDPOINT` or
+  `SCION_HUB_URL` is set, `--hub` is given, or, for `--global`, the current directory is
+  linked to another Hub), `config set` says so on stderr; stdout keeps its one line.
+- With `--format json`, `config set` adds `hub`, `endpoint`, `scope` (`global` or
+  `local`), `created` (a new hub entry was added), `reachable`, and the effective `value`
+  and `source` to `details`; `config unset` adds `hub` (the Hub it cleared or unlinked),
+  `removed`, `legacy_setting_removed`, `scope`, and the effective `value` and `source`.
+- `scion config get hub.endpoint` and `scion config list` show the Hub the command uses,
+  as `scion hub status` reports it, with its source: `flag --hub`, `env <VARIABLE>`,
+  `link hub '<name>'` or `current hub '<name>'`.
+- `scion config unset --global hub.endpoint` makes no Hub current; the Hub stays in the
+  hub list with its stored login, so selecting it again needs no new login. It also
+  removes a `hub.endpoint` left in the global settings file, and says so on stderr, so
+  a server or Runtime Broker started from those settings no longer falls back to it.
+  In a project, `scion config unset hub.endpoint` removes the project's link entry
+  (and the project's settings are then never imported into a link), and the current
+  Hub applies there again.
 
 ### `scion cd-config`
 
