@@ -4217,6 +4217,9 @@ func (s *Server) agentEditAccessFor(ctx context.Context, identity Identity, agen
 		return agentEditAccess{}
 	}
 	access := agentEditAccess{CanUpdate: slices.Contains(caps.Actions, string(ActionUpdate))}
+	if access.CanUpdate {
+		access.Broker = s.agentBrokerStartSupport(ctx, agent)
+	}
 	if !access.CanUpdate || !slices.Contains(caps.Actions, string(ActionLifecycle)) || s.authzService == nil {
 		return access
 	}
@@ -4541,6 +4544,12 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		// config leaves empty; the cleared paths it sends with each start
 		// let the broker remove them (ptone/scion#3906).
 		merged.ClearedFields = nextClearedFields(old.InlineConfig, cfg, rawFields, cleared, canAttachEnv)
+		// The provision-rendered keys changed since creation, which a
+		// broker with changedFields re-renders at start; for such a broker
+		// they take effect at the next start, not at the next
+		// reincarnation (ptone/scion#3982).
+		merged.ChangedFields = nextChangedFields(old.InlineConfig, provision)
+		provision = s.agentBrokerStartSupport(ctx, agent).heldProvisionEdits(provision)
 		warnings = append(warnings, reincarnateOnlyEditWarnings(provision, cleared)...)
 		warnings = append(warnings, removedEntriesWarnings(removed)...)
 		configApplied, configHeldForReincarnate = configEditDisposition(rawFields, cfg, old.InlineConfig, provision, cleared, removed)

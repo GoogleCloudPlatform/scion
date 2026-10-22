@@ -3672,6 +3672,10 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 	if agent.AppliedConfig != nil {
 		inlineConfig = tel.inlineConfig(agent.AppliedConfig.InlineConfig)
 	}
+	// A broker that does not re-render provision-rendered keys at start
+	// (no changedFields capability) starts with their previous files: say
+	// so in the start response (ptone/scion#3982).
+	d.warnRerenderUnsupported(ctx, agent, inlineConfig)
 
 	// TODO(#1350): Thread envClassifications to broker via client.StartAgent.
 	// PRECONDITION for P3b: without this, the broker receives nil (state 3,

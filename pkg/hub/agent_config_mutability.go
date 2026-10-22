@@ -43,7 +43,10 @@ import (
 //     values), so a clear only takes effect at the next reincarnation.
 //   - T2, provision-rendered: rendered into files when the agent is
 //     provisioned, so only a reincarnation (which reprovisions) applies a
-//     change (system prompt, agent instructions, skills, services).
+//     change (system prompt, agent instructions, skills, services) --
+//     unless the agent's broker re-renders the key at start
+//     (brokerStartSupport, the changedFields capability): then an edit of
+//     an agent with no container takes effect at the next start.
 //   - T3, principal: changes the agent's authority or identity; applied only
 //     by an explicit reincarnation, authorized against the requester
 //     (role, GCP identity).
@@ -158,7 +161,9 @@ var agentEditFields = []agentEditField{
 	{Key: "config.task", Tier: EditTierContainer, NotOnResume: true},
 	{Key: "explicitTimezone", Tier: EditTierContainer, AnyPhase: true},
 
-	// T2: rendered at provision; applied only by a reincarnation.
+	// T2: rendered at provision; applied only by a reincarnation, or at
+	// the next start by a broker that re-renders the key
+	// (brokerStartSupport.appliesAtStart; not secrets).
 	{Key: "config.system_prompt", Tier: EditTierProvision},
 	{Key: "config.agent_instructions", Tier: EditTierProvision},
 	{Key: "config.skills", Tier: EditTierProvision},
@@ -193,6 +198,9 @@ var agentEditFields = []agentEditField{
 	// cleared_fields is derived by the hub from a PATCH's clears
 	// (nextClearedFields); a request never sets it.
 	{Key: "config.cleared_fields", Tier: EditTierImmutable, LockedReason: editReasonInternal},
+	// changed_fields is derived by the hub from a PATCH's changes to
+	// provision-rendered keys (nextChangedFields); a request never sets it.
+	{Key: "config.changed_fields", Tier: EditTierImmutable, LockedReason: editReasonInternal},
 	// A template key: the hub reads it from the template's snapshot at
 	// create (ptone/scion#4222). An agent's mode is the top-level messageMode.
 	{Key: "config.message_mode", Tier: EditTierImmutable, LockedReason: "Set the agent's message mode with messageMode."},
@@ -311,6 +319,10 @@ type agentEditAccess struct {
 	// reincarnating it: agent.lifecycle on the agent, and authority to
 	// delegate the agent's role.
 	CanChangeRole bool
+	// Broker is what the agent's broker applies at a start
+	// (agentBrokerStartSupport): with changedFields, provision-rendered
+	// keys of an agent with no container are editable "now".
+	Broker brokerStartSupport
 }
 
 // buildAgentEditability applies the table to agent for a caller with
@@ -328,6 +340,11 @@ func buildAgentEditability(agent *store.Agent, access agentEditAccess) *AgentEdi
 	live := phaseHasLiveOrTransitionalContainer(agent.Phase)
 	for _, f := range agentEditFields {
 		d, reason := editDisposition(f, agent.Phase, deleted)
+		// A provision-rendered key the agent's broker re-renders at start
+		// takes effect at the next start when no container is live.
+		if d == EditReincarnate && !live && access.Broker.appliesAtStart(f.Key) {
+			d = EditNow
+		}
 		// Held edits do not exist yet, and a config PATCH of an agent
 		// with a live or transitional container is refused, so every
 		// config key of such an agent is locked, provision-rendered keys

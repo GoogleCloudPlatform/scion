@@ -635,8 +635,9 @@ func redactCreateInputsForResponse(ci *AgentCreateInputs, canAttach bool) *Agent
 // response body: Env and the Telemetry cloud-export header map are cleared
 // unless canAttach is true, and GITHUB_TOKEN is stripped from Env
 // unconditionally, mirroring AgentAppliedConfig's own top-level rule (see
-// ResponseView/MarshalJSON above). ClearedFields is dropped for every
-// viewer: it is hub-internal bookkeeping (ptone/scion#3906), its env.<KEY>
+// ResponseView/MarshalJSON above). ClearedFields and ChangedFields are
+// dropped for every viewer: they are hub-internal bookkeeping
+// (ptone/scion#3906, ptone/scion#3982), ClearedFields' env.<KEY>
 // entries name env keys a viewer without attach access must not learn, and
 // leaving it out means a GET echoed back into a PATCH never carries it. The
 // input is never mutated.
@@ -659,6 +660,7 @@ func redactInlineConfigForResponse(cfg *api.ScionConfig, canAttach bool) *api.Sc
 	}
 	copied := *cfg
 	copied.ClearedFields = nil
+	copied.ChangedFields = nil
 	if !canAttach {
 		copied.Env = nil
 	} else if len(cfg.Env) > 0 {
