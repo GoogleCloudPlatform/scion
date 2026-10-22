@@ -182,9 +182,10 @@ func assertPortProxyAdmitted(t *testing.T, who string, ep authzop.EntryPoint, pa
 // path authorizePortAccess admits without ever calling CheckAccess/Decide
 // (port_forward_handlers.go). All reach proxyAgentPort and fail the same
 // way (503, no tunnel) once past authorization, proving reachability; GET
-// of the bare pattern gets the 308 to .../proxy/ first (assertPortProxyAdmitted). A
-// second, DIFFERENT agent is rejected before Decide too (403), since
-// self-access compares agent identity to the target agent directly.
+// of the bare pattern gets the 308 to .../proxy/ first
+// (assertPortProxyAdmitted). A second, DIFFERENT agent is rejected before
+// Decide too (403), since self-access compares agent identity to the
+// target agent directly.
 func TestCatalogRoute_PortProxy_AgentSelfAccess(t *testing.T) {
 	srv, s := testServer(t)
 	_, agent := portProxyTestAgent(t, s, "self")
@@ -222,8 +223,8 @@ func TestCatalogRoute_PortProxy_AgentSelfAccess(t *testing.T) {
 // path that actually reaches Decide/CheckAccess (authorizePortAccess,
 // port_forward_handlers.go): an authorized user (holding a project-scoped
 // agent.port_access grant) gets 503 (no tunnel, same as self-access, once
-// past authorization; the bare GET gets the 308 first); an unauthorized user (ordinary project member, no
-// such grant) gets 403.
+// past authorization; the bare GET gets the 308 first); an unauthorized
+// user (ordinary project member, no such grant) gets 403.
 func TestCatalogRoute_PortProxy_UserSession(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
