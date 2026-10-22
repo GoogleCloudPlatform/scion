@@ -36,7 +36,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	tc "github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetryemit"
 )
@@ -248,9 +250,12 @@ func TestLifecycleEvents_SyncCreateStartingAnswer(t *testing.T) {
 	assertDense(t, evs)
 }
 
-// TestLifecycleEvents_SyncCreateLegacyStartingAnswer: a legacy broker
-// answering starting with no run gives no started (F2, tele-wp1-arch
-// 22:06): neither a correlated start nor a legacy running observation.
+// TestLifecycleEvents_SyncCreateLegacyStartingAnswer: on a plain sync
+// create, a legacy broker answering starting with no run gives no started.
+// The plain create keeps the broker's phase; the F2 case proper (a
+// Hub-forced running on env submit after a legacy starting answer) is
+// pinned at store and unit level (TestLifecycleStore2_SyncDispatchResult,
+// TestNewDispatchResult), review r2 O1.
 func TestLifecycleEvents_SyncCreateLegacyStartingAnswer(t *testing.T) {
 	srv, ls, projectID, sink, _ := lcDispatchServer(t, "starting", false)
 	id := lifecycleCreateAgent(t, srv, projectID, "lc-legacy-starting")
@@ -259,6 +264,59 @@ func TestLifecycleEvents_SyncCreateLegacyStartingAnswer(t *testing.T) {
 		assert.NotEqual(t, tc.TransitionStarted, e.Transition, "no started: %s", lcSeqFull(evs))
 	}
 	assertDense(t, evs)
+}
+
+// TestLifecycleEvents_EnvSubmitForcedRunning is F2 (tele-wp1-arch 22:06)
+// and the r7 N1 env-submit fixture on the real finalize-env path: the
+// broker answers provisioning, the Hub forces running, and that is no
+// start, whether or not the answer named the run (no E(iv), no legacy
+// running observation). A run-named running answer is a correlated start.
+func TestLifecycleEvents_EnvSubmitForcedRunning(t *testing.T) {
+	for _, c := range []struct {
+		name        string
+		phase       string
+		echoRun     bool
+		wantStarted bool
+	}{
+		{"legacy provisioning answer, Hub-forced running", "provisioning", false, false},
+		{"run-named provisioning answer, Hub-forced running", "provisioning", true, false},
+		{"run-named running answer", "running", true, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			srv, ls, projectID, sink, _ := lcDispatchServer(t, c.phase, c.echoRun)
+			ctx := context.Background()
+			project, err := srv.store.GetProject(ctx, projectID)
+			require.NoError(t, err)
+			agent := &store.Agent{
+				ID: tid("agent-lc-env-" + c.phase), Name: "lc-env", Slug: "lc-env",
+				ProjectID: projectID, RuntimeBrokerID: project.DefaultRuntimeBrokerID,
+				Phase:         string(state.PhaseProvisioning),
+				AppliedConfig: &store.AgentAppliedConfig{HarnessConfig: "claude", Task: "task"},
+			}
+			require.NoError(t, srv.store.CreateAgent(ctx, agent))
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/env",
+				SubmitEnvRequest{Env: map[string]string{"SOME_KEY": "v"}})
+			require.Less(t, rec.Code, 300, rec.Body.String())
+			row, err := srv.store.GetAgent(ctx, agent.ID)
+			require.NoError(t, err)
+			require.Equal(t, string(state.PhaseRunning), row.Phase, "the Hub forces running after env submit")
+			evs := lcEvents(t, ls, sink, agent.ID)
+			assertDense(t, evs)
+			started := 0
+			for _, e := range evs {
+				if e.Transition == tc.TransitionStarted {
+					started++
+					assert.Empty(t, e.Cause, "only a correlated start is expected")
+					assert.Equal(t, row.RunID, e.LaunchID)
+				}
+			}
+			if c.wantStarted {
+				assert.Equal(t, 1, started, lcSeqFull(evs))
+			} else {
+				assert.Zero(t, started, "a Hub-forced running is not a start: %s", lcSeqFull(evs))
+			}
+		})
+	}
 }
 
 // TestLifecycleEvents_StopRestartHalt: the HTTP restart of a running agent

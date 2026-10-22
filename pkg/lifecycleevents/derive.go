@@ -539,7 +539,12 @@ func deriveRunWrite(f Facts, plan *Plan) {
 		case r.OpenRun != "" && r.PendingRunChangeAt == nil:
 			r.PendingRunChangeAt = &now
 		}
-		r.PendingAdoptedFrom = f.BeforeRunID
+		// A second adoption before any event carried the first one chains
+		// it: the original run keeps its alias to the final run (review r2
+		// O2), rather than the first alias being dropped.
+		if r.PendingAdoptedFrom == "" || r.PendingAdoptedTo != f.BeforeRunID {
+			r.PendingAdoptedFrom = f.BeforeRunID
+		}
 		r.PendingAdoptedAt = &now
 		r.PendingAdoptionSource = f.AdoptionSource
 		r.PendingAdoptedTo = f.AfterRunID

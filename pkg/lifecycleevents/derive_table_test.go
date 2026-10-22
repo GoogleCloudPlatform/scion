@@ -34,8 +34,9 @@ import (
 	tc "github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 )
 
-// fullPlanString renders a plan with every field the rules decide: the
-// enum fields, then the flags lid (launch_failed names its run), nolid
+// fullPlanString renders a plan with every per-event field the rules
+// decide: the enum fields, then the flags before (the event describes the
+// before row), lid (launch_failed names its run), nolid
 // (any other transition with launch_id omitted), closes (frozen closure of
 // the open segment), seg (terminal of the committed run's own segment),
 // async, nextgen, adopt and owner=<launch owner>.
@@ -56,6 +57,7 @@ func fullPlanString(p Plan) string {
 				attrs = append(attrs, name)
 			}
 		}
+		flag(e.Row == RowBefore, "before")
 		flag(e.Transition == tc.TransitionLaunchFailed && !e.OmitLaunchID, "lid")
 		flag(e.Transition != tc.TransitionLaunchFailed && e.OmitLaunchID, "nolid")
 		flag(e.ClosesOpenRun, "closes")
@@ -350,13 +352,13 @@ func expectCase(bp, ap string, ra runAxis, k store.AgentWriteKind, h hintAxis, d
 		var parts []string
 		switch h {
 		case hCreateRolledBack:
-			parts = append(parts, "launch_failed(create_rolled_back,dispatch,lid,async)")
+			parts = append(parts, "launch_failed(create_rolled_back,dispatch,before,lid,async)")
 		case hCreateFailed:
-			parts = append(parts, "launch_failed(create_failed,provision,lid,async)")
+			parts = append(parts, "launch_failed(create_failed,provision,before,lid,async)")
 		}
-		del := "deleted(hard)"
+		del := "deleted(hard,before)"
 		if h == hCreateRolledBack {
-			del = "deleted(create_rolled_back)"
+			del = "deleted(create_rolled_back,before)"
 		}
 		if openRun || ra == runMint || ra == runRevert || ra == runAdoptRebind {
 			del = strings.TrimSuffix(del, ")") + ",closes)"
@@ -404,6 +406,54 @@ func expectCase(bp, ap string, ra runAxis, k store.AgentWriteKind, h hintAxis, d
 	return strings.Join(parts, " ")
 }
 
+// runString renders the run-segment state a plan leaves in the cursor.
+func runString(p Plan) string {
+	r := p.Run
+	pend := "-"
+	if r.PendingRunChangeAt != nil {
+		pend = "set"
+	}
+	adopt := "-"
+	if r.PendingAdoptedFrom != "" {
+		adopt = r.PendingAdoptedFrom + ">" + r.PendingAdoptedTo
+	}
+	return fmt.Sprintf("open=%s/%s/%d pend=%s adopt=%s base=%s freeze=%v",
+		r.OpenRun, r.OpenRunGeneration, r.OpenRunMetadataRevision, pend, adopt, r.ReincarnationBaseRunID, p.FreezeSegment)
+}
+
+// expectRun is the expected run state of one enumerated case, from the
+// axes and the case's expected events (design 2.4a cursor run state): a
+// deletion resets it; run-ID writes apply step 0; otherwise the cursor's
+// open segment survives unless superseded or closed (seg), and a started
+// opens the committed run's segment (frozen at this write).
+func expectRun(ra runAxis, d delAxis, wantEvents string) string {
+	none := "open=//0 pend=- adopt=- base= freeze=false"
+	if d != dNo {
+		return none
+	}
+	switch ra {
+	case runMint:
+		return "open=R1/1/1 pend=set adopt=- base= freeze=false"
+	case runRevert:
+		return "open=R1/1/1 pend=- adopt=- base= freeze=false"
+	case runAdoptRebind:
+		return "open=L1/1/1 pend=- adopt=R1>L1 base= freeze=false"
+	case runAdoptNoOpen:
+		return "open=//0 pend=- adopt=R1>L1 base= freeze=false"
+	}
+	open := none
+	if ra == runOpenSame {
+		open = "open=R1/1/1 pend=- adopt=- base= freeze=false"
+	}
+	if strings.Contains(wantEvents, "superseded") || strings.Contains(wantEvents, ",seg") || strings.Contains(wantEvents, "(seg)") {
+		open = none
+	}
+	if strings.Contains(wantEvents, "started") {
+		open = "open=R1/1/0 pend=- adopt=- base= freeze=true"
+	}
+	return open
+}
+
 // TestDeriveCoversEveryCase is the exhaustive pairs x run identity test
 // (design 2.4a). Every case must have exactly one expectation (phaseRules
 // is total: "NO RULE" fails), and Derive must match it.
@@ -428,6 +478,9 @@ func TestDeriveCoversEveryCase(t *testing.T) {
 									f := caseFacts(bp, ap, ra, k, h, d, ev, la)
 									p := Derive(f)
 									got := fullPlanString(p)
+									// Compare the cursor's run-state delta too (review r2 O3).
+									want += " | " + expectRun(ra, d, want)
+									got += " | " + runString(p)
 									if strings.Contains(want, "NO RULE") || got != want {
 										fails++
 										if fails <= 40 {
@@ -590,7 +643,7 @@ func TestDeriveAdoptionRidesOnlyOnTheAdoptedRun(t *testing.T) {
 			f := base("L1", "running", "running", "L1", "L1")
 			f.Op, f.HasAfter = store.AgentWriteHardDelete, false
 			return f
-		}(), "deleted(hard,closes,adopt) rmcursor", false},
+		}(), "deleted(hard,before,closes,adopt) rmcursor", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -658,5 +711,27 @@ func TestDeriveReincarnationTagsSparesTheBaseRun(t *testing.T) {
 				t.Errorf("got %q, want %q", got, c.want)
 			}
 		})
+	}
+}
+
+// TestDeriveSecondAdoptionChains is review r2 O2: a second adoption L1 ->
+// L2 before any event carried the pending R1 -> L1 keeps R1 as the origin
+// (R1 -> L2) instead of dropping the first alias; an adoption from a run
+// that is not the pending target starts a new alias.
+func TestDeriveSecondAdoptionChains(t *testing.T) {
+	adopt := func(before, after string) Facts {
+		return Facts{Op: store.AgentWriteRunID, Kind: store.WriteKindRunAdopt, AdoptionSource: store.AdoptionSourceHeartbeat,
+			HasBefore: true, BeforeLive: true, HasAfter: true, BeforePhase: "running", AfterPhase: "running",
+			BeforeRunID: before, AfterRunID: after, BeforeGeneration: 1, AfterGeneration: 1, Now: tableNow,
+			BeforeDigest: "d", AfterDigest: "d", Cursor: adoptedCursor("L1")}
+	}
+	p := Derive(adopt("L1", "L2"))
+	if p.Run.PendingAdoptedFrom != "R1" || p.Run.PendingAdoptedTo != "L2" || p.Run.OpenRun != "L2" {
+		t.Errorf("chained adoption: got from=%q to=%q open=%q, want R1 -> L2 with the segment rebound",
+			p.Run.PendingAdoptedFrom, p.Run.PendingAdoptedTo, p.Run.OpenRun)
+	}
+	p = Derive(adopt("X9", "L3"))
+	if p.Run.PendingAdoptedFrom != "X9" || p.Run.PendingAdoptedTo != "L3" {
+		t.Errorf("unrelated adoption: got from=%q to=%q, want X9 -> L3", p.Run.PendingAdoptedFrom, p.Run.PendingAdoptedTo)
 	}
 }

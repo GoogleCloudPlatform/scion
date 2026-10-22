@@ -38,8 +38,6 @@ type dispatchAnswer struct {
 	AgentID string
 	// RunID is the row's run after adoptBrokerRunID.
 	RunID string
-	// BrokerNamedRun: the answer named RunID.
-	BrokerNamedRun bool
 	// BrokerPhaseRunning: the answer reported phase running.
 	BrokerPhaseRunning bool
 	// BrokerRunID is the run the answer named ("" for a legacy broker).

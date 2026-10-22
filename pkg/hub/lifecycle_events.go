@@ -453,7 +453,6 @@ func onSyncDispatchAnswer(ctx context.Context, agent *store.Agent, resp *RemoteA
 	recordDispatchAnswer(ctx, dispatchAnswer{
 		AgentID:            agent.ID,
 		RunID:              agent.RunID,
-		BrokerNamedRun:     resp.Agent.RunID != "" && resp.Agent.RunID == agent.RunID,
 		BrokerPhaseRunning: resp.Agent.Phase == string(state.PhaseRunning),
 		BrokerRunID:        resp.Agent.RunID,
 	})

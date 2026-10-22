@@ -595,7 +595,7 @@ func Spec() []TableFixture {
 				"last_deleted": false, "open_run": "", "open_run_generation": "",
 				"open_run_metadata_revision": 0, "pending_run_change_at": nil,
 				"reincarnation_base_run_id": "", "pending_adopted_from": "",
-				"pending_adopted_at": nil, "pending_adoption_source": "",
+				"pending_adopted_at": nil, "pending_adoption_source": "", "pending_adopted_to": "",
 				"creator_principal_type": "user", "creator_principal_id": userID,
 				"updated_at": baseTime,
 			},

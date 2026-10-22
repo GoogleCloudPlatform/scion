@@ -472,6 +472,13 @@ jobs:
           # Invoked directly, like check-security-marker-gates, so exit 1
           # (finding) and exit 2 (nothing analysed) stay distinct.
           set +e
+          ./hack/check-agent-mutators.sh --self-test
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            set -e
+            echo "::error title=Agent mutators NOT checked::check-agent-mutators --self-test failed (exit $rc) — the guard itself is broken or could not run, so nothing was analysed."
+            exit "$rc"
+          fi
           ./hack/check-agent-mutators.sh
           rc=$?
           set -e

@@ -41,7 +41,9 @@ const examplesPath = "testdata/lifecycle-examples-slice2.jsonl"
 // -update-examples.
 func TestLifecycleExamplesSlice2(t *testing.T) {
 	h := newHarness(t)
-	at := func(s int) time.Time { return t0.Add(time.Duration(s) * time.Second) }
+	// Commit times precede the observer's observed_ts clock (t0 onward), as
+	// in production, where observed_ts is taken after the write (review r2 N2).
+	at := func(s int) time.Time { return t0.Add(-time.Minute + time.Duration(s)*time.Second) }
 	ctx := context.Background()
 
 	// a1: sync create, E(iv), label change, HTTP restart, queued restart,

@@ -15,6 +15,7 @@
 package main
 
 import (
+	"io"
 	"strings"
 	"testing"
 )
@@ -56,5 +57,29 @@ func TestAllowed(t *testing.T) {
 		if got := allowed(p); got != want {
 			t.Errorf("allowed(%q) = %v, want %v", p, got, want)
 		}
+	}
+}
+
+// TestRunExitCodes is review r2 O4: findings give 1, an empty selection
+// (no package importing pkg/ent) gives 2, a clean package gives 0, and the
+// self-test passes from the module root.
+func TestRunExitCodes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("type-checks testdata packages")
+	}
+	for _, c := range []struct {
+		pattern string
+		want    int
+	}{
+		{"./testdata/mutates", 1},
+		{"./testdata/clean", 0},
+		{".", 2}, // this package does not import pkg/ent
+	} {
+		if got := run(".", []string{c.pattern}, io.Discard, io.Discard); got != c.want {
+			t.Errorf("run(%s) = %d, want %d", c.pattern, got, c.want)
+		}
+	}
+	if got := selfTest("../..", io.Discard); got != 0 {
+		t.Errorf("selfTest = %d, want 0", got)
 	}
 }

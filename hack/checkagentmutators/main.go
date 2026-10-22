@@ -39,6 +39,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"io"
 	"os"
 	"sort"
 	"strings"
@@ -150,22 +151,53 @@ func load(dir string, patterns ...string) ([]*packages.Package, error) {
 }
 
 func main() {
-	patterns := os.Args[1:]
+	args := os.Args[1:]
+	if len(args) == 1 && args[0] == "--self-test" {
+		os.Exit(selfTest(".", os.Stderr))
+	}
+	os.Exit(run(".", args, os.Stdout, os.Stderr))
+}
+
+// run analyses patterns (default ./...) under dir and returns the exit
+// code: 0 no finding, 1 findings, 2 could not analyse, including an empty
+// selection (review r2 O4: every real run selects pkg/hub and cmd).
+func run(dir string, patterns []string, stdout, stderr io.Writer) int {
 	if len(patterns) == 0 {
 		patterns = []string{"./..."}
 	}
-	pkgs, err := load(".", patterns...)
+	pkgs, err := load(dir, patterns...)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "ABORT: check-agent-mutators could not analyse: %v\n", err)
-		os.Exit(2)
+		_, _ = fmt.Fprintf(stderr, "ABORT: check-agent-mutators could not analyse: %v\n", err)
+		return 2
+	}
+	if len(pkgs) == 0 {
+		_, _ = fmt.Fprintln(stderr, "ABORT: check-agent-mutators selected no package importing pkg/ent; nothing was analysed")
+		return 2
 	}
 	fs := findings(pkgs)
 	for _, f := range fs {
-		fmt.Println(f)
+		_, _ = fmt.Fprintln(stdout, f)
 	}
 	if len(fs) > 0 {
-		fmt.Fprintf(os.Stderr, "check-agent-mutators: %d agent mutation(s) outside pkg/store; route them through a store method that runs the lifecycle observer (WP1 design 2.8)\n", len(fs))
-		os.Exit(1)
+		_, _ = fmt.Fprintf(stderr, "check-agent-mutators: %d agent mutation(s) outside pkg/store; route them through a store method that runs the lifecycle observer (WP1 design 2.8)\n", len(fs))
+		return 1
 	}
-	fmt.Printf("check-agent-mutators: %d package(s) importing pkg/ent checked, no agent mutation outside pkg/store\n", len(pkgs))
+	_, _ = fmt.Fprintf(stdout, "check-agent-mutators: %d package(s) importing pkg/ent checked, no agent mutation outside pkg/store\n", len(pkgs))
+	return 0
+}
+
+// selfTest proves the guard can fail: the proof package must give 1 and a
+// selection with no pkg/ent importer must give 2. It returns 0 when both
+// hold, 2 otherwise (the guard is broken: nothing it reports is trusted).
+func selfTest(dir string, stderr io.Writer) int {
+	if got := run(dir, []string{"./hack/checkagentmutators/testdata/mutates"}, io.Discard, io.Discard); got != 1 {
+		_, _ = fmt.Fprintf(stderr, "check-agent-mutators self-test: the proof package gave exit %d, want 1\n", got)
+		return 2
+	}
+	if got := run(dir, []string{"./hack/checkagentmutators"}, io.Discard, io.Discard); got != 2 {
+		_, _ = fmt.Fprintf(stderr, "check-agent-mutators self-test: an empty selection gave exit %d, want 2\n", got)
+		return 2
+	}
+	_, _ = fmt.Fprintln(stderr, "check-agent-mutators self-test: ok")
+	return 0
 }
