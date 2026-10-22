@@ -276,8 +276,11 @@ func TestObserverUnobservedSoftDeleteThenPurge(t *testing.T) {
 			deleted.DeletedAt = t0.Add(time.Minute)
 			h.write(context.Background(), store.AgentWrite{Op: op, Before: deleted})
 			mode := tc.DeleteModeHard
-			if op == store.AgentWriteProjectDelete {
+			switch op {
+			case store.AgentWriteProjectDelete:
 				mode = tc.DeleteModeProjectDeleted
+			case store.AgentWritePurge:
+				mode = tc.DeleteModePurged
 			}
 			if got, want := seq(h.events()), "created@1 resynced@3(unobserved_change) deleted@4("+mode+")"; got != want {
 				t.Fatalf("events = %s, want %s", got, want)
@@ -415,7 +418,7 @@ func TestObserverBuildFailureNextWriteResyncs(t *testing.T) {
 	good.Labels["k"] = "fixed"
 	good.DeletedAt = t0
 	h.write(context.Background(), store.AgentWrite{Op: store.AgentWritePurge, Before: good})
-	if got, want := seq(h.events()), "created@1 resynced@3(unobserved_change) deleted@4(hard)"; got != want {
+	if got, want := seq(h.events()), "created@1 resynced@3(unobserved_change) deleted@4(purged)"; got != want {
 		t.Fatalf("events = %s, want %s", got, want)
 	}
 }

@@ -179,6 +179,7 @@ func TestLifecycleValidateRules(t *testing.T) {
 		{"unknown end_reason", func(e *LifecycleEvent) { e.EndReason = "bored" }, TransitionLaunchFailed, "not a known value"},
 		{"deleted without delete_mode", func(e *LifecycleEvent) { e.DeleteMode = "" }, TransitionDeleted, "delete_mode is required"},
 		{"unknown delete_mode", func(e *LifecycleEvent) { e.DeleteMode = "shredded" }, TransitionDeleted, "not a known value"},
+		{"purged delete_mode", func(e *LifecycleEvent) { e.DeleteMode = DeleteModePurged }, TransitionDeleted, ""},
 		{"delete_mode elsewhere", func(e *LifecycleEvent) { e.DeleteMode = DeleteModeSoft }, TransitionCreated, "delete_mode is only allowed"},
 		{"resynced without cause", func(e *LifecycleEvent) { e.Cause = "" }, TransitionResynced, "not a resynced cause"},
 		{"resynced unobserved without gap", func(e *LifecycleEvent) { e.Cause = CauseUnobservedChange }, TransitionResynced, "gap must be true"},

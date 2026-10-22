@@ -69,6 +69,10 @@ const (
 	DeleteModeHard             = "hard"
 	DeleteModeCreateRolledBack = "create_rolled_back"
 	DeleteModeProjectDeleted   = "project_deleted"
+	// DeleteModePurged: the retention purge removed a row whose deletion
+	// was never observed (observer off); the original delete mode and time
+	// are unknown, and event_ts is the purge commit.
+	DeleteModePurged = "purged"
 )
 
 // cause values with a fixed meaning. launch_failed carries the broker's
@@ -98,7 +102,7 @@ var (
 	endReasons = setOf(EndReasonNotLaunched, EndReasonFailed, EndReasonTimedOut, EndReasonLost,
 		EndReasonCreateRolledBack, EndReasonCreateFailed, EndReasonLaunchError, EndReasonDispatchFailed,
 		EndReasonRestartFailed, EndReasonCancelled)
-	deleteModes     = setOf(DeleteModeSoft, DeleteModeHard, DeleteModeCreateRolledBack, DeleteModeProjectDeleted)
+	deleteModes     = setOf(DeleteModeSoft, DeleteModeHard, DeleteModeCreateRolledBack, DeleteModeProjectDeleted, DeleteModePurged)
 	resyncedCauses  = setOf(CauseUnobservedChange, CauseNoCursor)
 	stoppedCauses   = setOf(CauseDeleteRollback, CauseRestartStopLeg, CauseStartUnobserved)
 	startedCauses   = setOf(CauseRunUncorrelated)

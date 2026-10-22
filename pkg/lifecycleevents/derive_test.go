@@ -101,7 +101,7 @@ func TestDeriveSliceOneTable(t *testing.T) {
 
 		// Review r6 N2: the soft delete ran unobserved.
 		{"purge after unobserved soft delete", Facts{Op: store.AgentWritePurge, HasBefore: true, Cursor: cursorLiveDiffers},
-			"gap resynced(unobserved_change,before) deleted(hard,before) rmcursor"},
+			"gap resynced(unobserved_change,before) deleted(purged,before) rmcursor"},
 		{"project delete after unobserved soft delete", Facts{Op: store.AgentWriteProjectDelete, HasBefore: true, Cursor: cursorLiveDiffers},
 			"gap resynced(unobserved_change,before) deleted(project_deleted,before) rmcursor"},
 		{"hard finalize after unobserved soft delete", Facts{Op: store.AgentWriteHardDelete, HasBefore: true, Cursor: cursorLiveDiffers},

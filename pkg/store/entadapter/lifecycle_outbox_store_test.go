@@ -268,7 +268,7 @@ func TestLifecycleStore_ToggleUnobservedSoftDelete(t *testing.T) {
 	_, err := f.cs.PurgeDeletedAgentsByID(context.Background(), []string{a.ID}, time.Now().Add(time.Hour))
 	require.NoError(t, err)
 	evs, _ := lifecycleEvents(t, f.cs, a.ID)
-	assert.Equal(t, "created@1 resynced@3(unobserved_change) deleted@4(hard)", lcSeq(evs))
+	assert.Equal(t, "created@1 resynced@3(unobserved_change) deleted@4(purged)", lcSeq(evs))
 	assert.False(t, cursorExists(t, f.cs, a.ID))
 }
 

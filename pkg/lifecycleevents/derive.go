@@ -137,7 +137,12 @@ func deleteModeFor(op store.AgentWriteOp, cause Cause) string {
 		return telemetrycontract.DeleteModeSoft
 	case store.AgentWriteProjectDelete:
 		return telemetrycontract.DeleteModeProjectDeleted
-	default: // hard finalize, DeleteAgent, purge
+	case store.AgentWritePurge:
+		// A purge removes only already-deleted rows, so it emits only on the
+		// N2 evidence: the deletion went unobserved and its mode and time
+		// are unknown (design v6.7, vm-deploy 07:27).
+		return telemetrycontract.DeleteModePurged
+	default: // hard finalize, DeleteAgent
 		return telemetrycontract.DeleteModeHard
 	}
 }
@@ -156,7 +161,9 @@ func deleteModeFor(op store.AgentWriteOp, cause Cause) string {
 //     no event, cursor cleanup only — unless the cursor shows the row
 //     live at the last observed write, which proves the soft delete ran
 //     unobserved and no deleted was ever emitted. Then: a skipped
-//     revision, resynced(unobserved_change) and deleted (review r6 N2).
+//     revision, resynced(unobserved_change) and deleted (review r6 N2),
+//     with delete_mode purged for a purge and the operation's own mode
+//     (hard, project_deleted) otherwise.
 //     With no cursor (pre-rollout) nothing is emitted.
 //  3. Resync: no cursor gives resynced(no_cursor); a cursor whose
 //     fingerprint differs from the before row's gives a skipped revision
