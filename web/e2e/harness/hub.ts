@@ -55,8 +55,13 @@ export interface HubState {
   port: number;
   baseURL: string;
   dbDir: string;
-  /** Dev-auth token for API calls (super-admin). */
+  /**
+   * Dev-auth token for API calls (super-admin). Empty after
+   * restartHubWithoutDevAuth: that hub no longer accepts it.
+   */
   devToken: string;
+  /** False after restartHubWithoutDevAuth; unset (dev auth on) otherwise. */
+  devAuth?: boolean;
   /** Hub id of a member-level test hub (testIdentities), else unset. */
   hubId?: string;
   /** Private HOME of a member-level test hub (under dbDir), else unset. */
@@ -289,6 +294,17 @@ async function waitForHealth(baseURL: string, timeoutMs = 30_000): Promise<void>
   );
 }
 
+/** How a hub started by startHub in this process was launched (by state file). */
+interface HubLaunch {
+  binary: string;
+  args: string[];
+  env: NodeJS.ProcessEnv;
+  cwd: string;
+  baseURL: string;
+  child: ChildProcess;
+}
+const launches = new Map<string, HubLaunch>();
+
 /** A started hub process and the dev token it printed. */
 interface LaunchedHub {
   hubProcess: ChildProcess;
@@ -306,7 +322,8 @@ async function launchHub(
   env: NodeJS.ProcessEnv,
   cwd: string,
   baseURL: string,
-  onSpawn?: (child: ChildProcess) => void
+  onSpawn?: (child: ChildProcess) => void,
+  requireDevToken = true
 ): Promise<LaunchedHub> {
   const hubProcess = spawn(binary, args, {
     cwd,
@@ -353,6 +370,9 @@ async function launchHub(
 
   // Wait for health
   await waitForHealth(baseURL);
+
+  // A hub started without --dev-auth prints no dev token.
+  if (!requireDevToken) return { hubProcess, devToken: '' };
 
   if (!devTokenFile) {
     throw new Error(
@@ -577,7 +597,62 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubState>
   // Unref so the parent process can exit cleanly
   hubProcess.unref();
 
+  launches.set(path.resolve(stateFile), { binary, args, env, cwd, baseURL, child: hubProcess });
   return state;
+}
+
+/**
+ * Restarts a hub that startHub started in this process on the same
+ * database, port, HOME and hub id, with the same arguments except
+ * --dev-auth: requests without a credential are then no longer signed in
+ * as the dev user, as on a hub in production. Run the setup that needs the
+ * dev token (test identities, memberships, fixtures) before this; the dev
+ * token is not accepted afterwards. Test identity web sessions and
+ * web-login codes, agent and broker credentials keep working (they live in
+ * the database). The state file is rewritten with the new PID, an empty
+ * devToken and devAuth: false. If the restarted hub does not get healthy,
+ * it is killed and the call throws.
+ */
+export async function restartHubWithoutDevAuth(stateFile: string = STATE_FILE): Promise<HubState> {
+  const key = path.resolve(stateFile);
+  const launch = launches.get(key);
+  const state = readHubState(stateFile);
+  if (!launch || !state) {
+    throw new Error(
+      'restartHubWithoutDevAuth: no hub started by startHub in this process for that state file'
+    );
+  }
+  if (!launch.args.includes('--dev-auth')) {
+    throw new Error('restartHubWithoutDevAuth: the hub already runs without dev auth');
+  }
+  const args = launch.args.filter((arg) => arg !== '--dev-auth');
+  console.info('[hub] Restarting the hub without dev auth...');
+  await stopProcessGroup(launch.child);
+  let current: ChildProcess | undefined;
+  let hubProcess: ChildProcess;
+  try {
+    ({ hubProcess } = await launchHub(
+      launch.binary,
+      args,
+      launch.env,
+      launch.cwd,
+      launch.baseURL,
+      (child) => {
+        current = child;
+      },
+      false
+    ));
+  } catch (err) {
+    if (current) killProcessGroup(current);
+    launches.delete(key);
+    throw err;
+  }
+  const next: HubState = { ...state, pid: hubProcess.pid!, devToken: '', devAuth: false };
+  fs.rmSync(stateFile, { force: true });
+  fs.writeFileSync(stateFile, JSON.stringify(next, null, 2), { mode: 0o600, flag: 'wx' });
+  hubProcess.unref();
+  launches.set(key, { ...launch, args, child: hubProcess });
+  return next;
 }
 
 /** Read the hub state from the temp file (used by teardown and tests). */

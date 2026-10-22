@@ -160,6 +160,16 @@ Three more `startHub()` options, all off by default:
   anything fails before the restarted hub is healthy, the hub process is
   killed and `startHub()` throws.
 
+`restartHubWithoutDevAuth(stateFile)` restarts a hub that `startHub()`
+started in the same process on the same database, port, HOME and hub id,
+with the same arguments except `--dev-auth`, so a request without
+credentials is not signed in, as on a hub in production. Do the setup that
+needs the dev token first (test identities and their web-login codes,
+memberships, fixtures): the dev token is not accepted afterwards, and the
+state file is rewritten with the new PID, an empty `devToken` and
+`devAuth: false`. Test identity web sessions, web-login codes and agent
+and broker credentials keep working across the restart.
+
 `E2E_KEEP_HUB_STATE=1` makes `stopHub()` keep the hub's temp dir (the
 SQLite database, the private HOME and the hub's files) and print its
 path, for inspecting a run afterwards. It is off by default. The dir

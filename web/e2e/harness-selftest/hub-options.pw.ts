@@ -33,7 +33,9 @@
  * - startupExperiments turns each experiment on through the admin
  *   experiments API and restarts the server on the same database, port,
  *   HOME and hub id; without it there is one start and no API call; a
- *   failure before the restart completes leaves no hub running.
+ *   failure before the restart completes leaves no hub running;
+ * - restartHubWithoutDevAuth restarts the server with the same arguments
+ *   except --dev-auth and rewrites the state file (new PID, no dev token).
  */
 
 import * as fs from 'node:fs';
@@ -42,7 +44,14 @@ import * as path from 'node:path';
 
 import { expect, test } from '@playwright/test';
 
-import { isHarnessOwnedEnv, keepHubState, startHub, stopHub } from '../harness/hub.js';
+import {
+  isHarnessOwnedEnv,
+  keepHubState,
+  readHubState,
+  restartHubWithoutDevAuth,
+  startHub,
+  stopHub,
+} from '../harness/hub.js';
 
 interface Invocation {
   pid: number;
@@ -363,4 +372,42 @@ test('a failed startupExperiments restart leaves no hub running', async () => {
   expect(starts).toHaveLength(1);
   await expect.poll(() => alive(starts[0].pid), { message: 'the hub was stopped' }).toBe(false);
   expect(fs.existsSync(stateFile), 'no state file').toBe(false);
+});
+
+test('restartHubWithoutDevAuth restarts without --dev-auth and rewrites the state', async () => {
+  const before = await startHub({
+    testLogin: false,
+    testIdentities: true,
+    build: false,
+    binary,
+    stateFile,
+  });
+  const after = await restartHubWithoutDevAuth(stateFile);
+
+  const starts = invocations().filter((c) => c.argv[1] === 'start');
+  expect(starts).toHaveLength(2);
+  const [first, second] = starts;
+  expect(first.argv).toContain('--dev-auth');
+  expect(second.argv).toEqual(first.argv.filter((arg) => arg !== '--dev-auth'));
+  expect(second.env).toEqual(first.env);
+  await expect.poll(() => alive(first.pid), { message: 'the first server stopped' }).toBe(false);
+
+  expect(after.pid).toBe(second.pid);
+  expect(after.devToken).toBe('');
+  expect(after.devAuth).toBe(false);
+  expect({ ...after, pid: before.pid, devToken: before.devToken, devAuth: undefined }).toEqual({
+    ...before,
+    devAuth: undefined,
+  });
+  expect(readHubState(stateFile)).toEqual(after);
+  await expect(restartHubWithoutDevAuth(stateFile)).rejects.toThrow(
+    'restartHubWithoutDevAuth: the hub already runs without dev auth'
+  );
+});
+
+test('restartHubWithoutDevAuth refuses a hub it did not start', async () => {
+  await expect(restartHubWithoutDevAuth(path.join(dir, 'other-state.json'))).rejects.toThrow(
+    'restartHubWithoutDevAuth: no hub started by startHub in this process'
+  );
+  expect(invocations(), 'nothing ran').toEqual([]);
 });
