@@ -20,10 +20,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"log/slog"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -290,14 +290,14 @@ func (c *ContainerScriptHarness) GetTelemetryEnv() map[string]string { return ni
 // pre-start script copies it to the harness-native location declared in
 // config.yaml (instructions_file).
 func (c *ContainerScriptHarness) InjectAgentInstructions(agentHome string, content []byte) error {
-	return c.stageInputFile(agentHome, "instructions.md", content)
+	return stageInputFileInHome(agentHome, "instructions.md", content)
 }
 
 // InjectSystemPrompt stages system-prompt content under
 // agent_home/.scion/harness/inputs/system-prompt.md. The container-side script
 // honors system_prompt_mode (native | prepend_to_instructions | none).
 func (c *ContainerScriptHarness) InjectSystemPrompt(agentHome string, content []byte) error {
-	return c.stageInputFile(agentHome, "system-prompt.md", content)
+	return stageInputFileInHome(agentHome, "system-prompt.md", content)
 }
 
 // adcContainerPath is where ResolveAuth maps the GCP ADC file
@@ -516,49 +516,56 @@ type ProvisionPlatform struct {
 //	  outputs/  (writable by the script)
 //	  secrets/  (populated by runtime secret projection)
 //	agent_home/.scion/hooks/pre-start.d/20-harness-provision  (trusted wrapper)
+//
+// Every write is confined to the agent home (pkg/agenthome), through one
+// handle opened on the home: a link at a staged file is replaced, never
+// written through, and a linked directory component is refused.
 func (c *ContainerScriptHarness) Provision(ctx context.Context, agentName, agentDir, agentHome, agentWorkspace string) error {
 	c.agentHome = agentHome
 	bundleHostPath := filepath.Join(agentHome, ".scion", "harness")
 	bundleContainerPath := containerBundlePath(agentHome)
 
+	home, err := agenthome.OpenCreate(agentHome, 0755)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = home.Close() }()
+
 	for _, sub := range []string{"", "inputs", "outputs", "secrets"} {
-		if err := os.MkdirAll(filepath.Join(bundleHostPath, sub), 0755); err != nil {
+		if err := home.MkdirAll(path.Join(bundleRel, sub), 0755); err != nil {
 			return fmt.Errorf("create bundle dir %q: %w", sub, err)
 		}
 	}
 
 	// Copy config.yaml from the harness-config root into the bundle.
-	if err := copyHarnessConfigFile(filepath.Join(c.configDirPath, "config.yaml"), filepath.Join(bundleHostPath, "config.yaml")); err != nil {
+	if err := copyHarnessConfigFile(filepath.Join(c.configDirPath, "config.yaml"), home, path.Join(bundleRel, "config.yaml"), 0644); err != nil {
 		return fmt.Errorf("stage config.yaml: %w", err)
 	}
 
 	// Copy provision.py if present in the harness-config dir.
 	provisionSrc := filepath.Join(c.configDirPath, "provision.py")
 	if fileExistsHelper(provisionSrc) {
-		if err := copyHarnessConfigFile(provisionSrc, filepath.Join(bundleHostPath, "provision.py")); err != nil {
+		if err := copyHarnessConfigFile(provisionSrc, home, path.Join(bundleRel, "provision.py"), 0755); err != nil {
 			return fmt.Errorf("stage provision.py: %w", err)
-		}
-		if err := os.Chmod(filepath.Join(bundleHostPath, "provision.py"), 0755); err != nil {
-			return fmt.Errorf("chmod provision.py: %w", err)
 		}
 	}
 
 	// Stage capture_auth.py and capture-auth-config.json into the bundle.
-	if err := c.stageCaptureAuthConfig(agentHome); err != nil {
+	if err := stageCaptureAuthAssets(home, c.configDirPath, c.entry.Auth); err != nil {
 		return fmt.Errorf("stage capture-auth assets: %w", err)
 	}
 
 	// Copy dialect.yaml if present.
 	dialectSrc := filepath.Join(c.configDirPath, "dialect.yaml")
 	if fileExistsHelper(dialectSrc) {
-		if err := copyHarnessConfigFile(dialectSrc, filepath.Join(bundleHostPath, "dialect.yaml")); err != nil {
+		if err := copyHarnessConfigFile(dialectSrc, home, path.Join(bundleRel, "dialect.yaml"), 0644); err != nil {
 			return fmt.Errorf("stage dialect.yaml: %w", err)
 		}
 	}
 
 	// Stage scion_harness.py next to provision.py so the in-container script
 	// can import it. The lib mode (vendored | injected) determines the source.
-	if err := c.stageHarnessLib(bundleHostPath); err != nil {
+	if err := c.stageHarnessLib(home); err != nil {
 		return err
 	}
 
@@ -602,16 +609,15 @@ func (c *ContainerScriptHarness) Provision(ctx context.Context, agentName, agent
 		manifest.Inputs.AgentPlugins = filepath.Join(bundleContainerPath, "inputs", "plugins.json")
 	}
 
-	manifestPath := filepath.Join(bundleHostPath, "manifest.json")
 	manifestData, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal manifest: %w", err)
 	}
-	if err := os.WriteFile(manifestPath, manifestData, 0644); err != nil {
+	if err := home.WriteFile(manifestRel, manifestData, 0644); err != nil {
 		return fmt.Errorf("write manifest.json: %w", err)
 	}
 
-	if err := writeHookWrapper(agentHome, bundleContainerPath); err != nil {
+	if err := writeHookWrapper(home, bundleContainerPath); err != nil {
 		return fmt.Errorf("stage lifecycle hook wrapper: %w", err)
 	}
 	return nil
@@ -623,11 +629,20 @@ func (c *ContainerScriptHarness) Provision(ctx context.Context, agentName, agent
 // /repo-root/<relative path> for a worktree under the repo root) rather than
 // at the host path Provision receives, so Start calls this once the
 // container-side workspace is known. A missing manifest (no container-script
-// bundle staged) is not an error.
+// bundle staged) is not an error. The manifest is read and rewritten
+// confined to the agent home (pkg/agenthome): a link at the manifest or at a
+// directory component is not followed.
 func SetManifestAgentWorkspace(agentHome, containerWorkspace string) error {
-	manifestPath := filepath.Join(agentHome, ".scion", "harness", "manifest.json")
-	data, err := os.ReadFile(manifestPath)
-	if os.IsNotExist(err) {
+	home, err := agenthome.Open(agentHome)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer func() { _ = home.Close() }()
+	data, err := home.ReadFile(manifestRel, maxManifestSize)
+	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
@@ -642,7 +657,7 @@ func SetManifestAgentWorkspace(agentHome, containerWorkspace string) error {
 	if err != nil {
 		return fmt.Errorf("marshal manifest: %w", err)
 	}
-	if err := os.WriteFile(manifestPath, manifestData, 0644); err != nil {
+	if err := home.WriteFile(manifestRel, manifestData, 0644); err != nil {
 		return fmt.Errorf("write manifest.json: %w", err)
 	}
 	return nil
@@ -665,17 +680,27 @@ func SetManifestAgentWorkspace(agentHome, containerWorkspace string) error {
 // recorded in file_secret_files in auth-candidates.json so the container-side
 // script can write a fresh writable copy. The FileMapping is removed from
 // resolved.Files so the runtime does not bind-mount the file read-only.
+//
+// Every write is confined to the agent home (pkg/agenthome), through one
+// handle opened on the home: a link at a staged file is replaced, never
+// written through, and a linked directory component is refused.
 func (c *ContainerScriptHarness) ApplyAuthSettings(agentHome string, resolved *api.ResolvedAuth) error {
 	if resolved == nil {
 		return nil
 	}
 
-	envSecretFiles, err := c.stageEnvSecretFiles(agentHome, resolved.EnvVars)
+	home, err := agenthome.OpenCreate(agentHome, 0755)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = home.Close() }()
+
+	envSecretFiles, err := c.stageEnvSecretFiles(home, resolved.EnvVars)
 	if err != nil {
 		return err
 	}
 
-	fileSecretFiles, remainingFiles, err := c.stageFileSecretFiles(agentHome, resolved.Files)
+	fileSecretFiles, remainingFiles, err := c.stageFileSecretFiles(home, resolved.Files)
 	if err != nil {
 		return err
 	}
@@ -755,7 +780,7 @@ func (c *ContainerScriptHarness) ApplyAuthSettings(agentHome string, resolved *a
 	if err != nil {
 		return fmt.Errorf("marshal auth candidates: %w", err)
 	}
-	return c.stageInputFile(agentHome, "auth-candidates.json", data)
+	return stageInputFile(home, "auth-candidates.json", data)
 }
 
 // selectedAuthType returns the explicitly selected auth type for
@@ -892,7 +917,7 @@ func IsHarnessImplementationName(s string) bool {
 //
 // This prevents read-only bind-mounts for credential files that the container-side
 // provisioner script needs to write (e.g. Codex auth.json).
-func (c *ContainerScriptHarness) stageFileSecretFiles(agentHome string, files []api.FileMapping) (map[string]string, []api.FileMapping, error) {
+func (c *ContainerScriptHarness) stageFileSecretFiles(home *agenthome.Home, files []api.FileMapping) (map[string]string, []api.FileMapping, error) {
 	fileSecretFiles := map[string]string{}
 	if len(files) == 0 || c.entry.Auth == nil {
 		return fileSecretFiles, files, nil
@@ -929,7 +954,6 @@ func (c *ContainerScriptHarness) stageFileSecretFiles(agentHome string, files []
 		return p
 	}
 
-	dir := filepath.Join(agentHome, ".scion", "harness", "secrets")
 	dirCreated := false
 
 	var remaining []api.FileMapping
@@ -973,14 +997,13 @@ func (c *ContainerScriptHarness) stageFileSecretFiles(agentHome string, files []
 		}
 
 		if !dirCreated {
-			if err := os.MkdirAll(dir, 0700); err != nil {
+			if err := home.MkdirAll(secretsRel, 0700); err != nil {
 				return nil, nil, fmt.Errorf("create secrets dir: %w", err)
 			}
 			dirCreated = true
 		}
 
-		target := filepath.Join(dir, matchedName)
-		if err := os.WriteFile(target, content, 0600); err != nil {
+		if err := home.WriteFile(path.Join(secretsRel, matchedName), content, 0600); err != nil {
 			return nil, nil, fmt.Errorf("write file secret %s: %w", matchedName, err)
 		}
 		fileSecretFiles[matchedName] = "$HOME/.scion/harness/secrets/" + matchedName
@@ -996,13 +1019,12 @@ func (c *ContainerScriptHarness) stageFileSecretFiles(agentHome string, files []
 // of env-var name -> container-relative secret file path. The returned paths
 // use the literal "$HOME/.scion/harness/secrets/<NAME>" form so they remain
 // portable across host/container path layouts.
-func (c *ContainerScriptHarness) stageEnvSecretFiles(agentHome string, envVars map[string]string) (map[string]string, error) {
+func (c *ContainerScriptHarness) stageEnvSecretFiles(home *agenthome.Home, envVars map[string]string) (map[string]string, error) {
 	out := map[string]string{}
 	if len(envVars) == 0 {
 		return out, nil
 	}
-	dir := filepath.Join(agentHome, ".scion", "harness", "secrets")
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := home.MkdirAll(secretsRel, 0700); err != nil {
 		return nil, fmt.Errorf("create secrets dir: %w", err)
 	}
 	for _, name := range sortedKeys(envVars) {
@@ -1015,8 +1037,7 @@ func (c *ContainerScriptHarness) stageEnvSecretFiles(agentHome string, envVars m
 		if !isSafeEnvName(name) {
 			continue
 		}
-		target := filepath.Join(dir, name)
-		if err := os.WriteFile(target, []byte(val), 0600); err != nil {
+		if err := home.WriteFile(path.Join(secretsRel, name), []byte(val), 0600); err != nil {
 			return nil, fmt.Errorf("write secret %s: %w", name, err)
 		}
 		out[name] = "$HOME/.scion/harness/secrets/" + name
@@ -1059,11 +1080,11 @@ func (c *ContainerScriptHarness) recordedSecretFiles(agentHome string) (map[stri
 		if err != nil || info.Mode()&os.ModeType != 0 || info.Size() == 0 {
 			continue
 		}
-		path := "$HOME/.scion/harness/secrets/" + name
+		secretPath := "$HOME/.scion/harness/secrets/" + name
 		if c.isRequiredFileSecret(name) {
-			fileSecrets[name] = path
+			fileSecrets[name] = secretPath
 		} else {
-			envSecrets[name] = path
+			envSecrets[name] = secretPath
 		}
 	}
 	return envSecrets, fileSecrets
@@ -1103,7 +1124,7 @@ func (c *ContainerScriptHarness) ApplyMCPSettings(agentHome string, mcpServers m
 	if err != nil {
 		return fmt.Errorf("marshal mcp servers input: %w", err)
 	}
-	return c.stageInputFile(agentHome, "mcp-servers.json", data)
+	return stageInputFileInHome(agentHome, "mcp-servers.json", data)
 }
 
 // ApplyTelemetrySettings stages telemetry config into
@@ -1118,24 +1139,27 @@ func (c *ContainerScriptHarness) ApplyTelemetrySettings(agentHome string, teleme
 	if err != nil {
 		return fmt.Errorf("marshal telemetry input: %w", err)
 	}
-	return c.stageInputFile(agentHome, "telemetry.json", data)
+	return stageInputFileInHome(agentHome, "telemetry.json", data)
 }
 
-// stageCaptureAuthConfig delegates to the shared StageCaptureAuthAssets
-// helper to generate inputs/capture-auth-config.json from the harness
-// config's auth.types.*.required_files declarations.
-func (c *ContainerScriptHarness) stageCaptureAuthConfig(agentHome string) error {
-	return StageCaptureAuthAssets(agentHome, c.configDirPath, c.entry.Auth)
+// stageInputFileInHome opens the agent home at agentHome and stages content
+// as inputs/<name> (stageInputFile).
+func stageInputFileInHome(agentHome, name string, content []byte) error {
+	home, err := agenthome.OpenCreate(agentHome, 0755)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = home.Close() }()
+	return stageInputFile(home, name, content)
 }
 
-// stageInputFile writes content under agent_home/.scion/harness/inputs/<name>.
-// Inputs are not secrets; mode 0644 is fine.
-func (c *ContainerScriptHarness) stageInputFile(agentHome, name string, content []byte) error {
-	dir := filepath.Join(agentHome, ".scion", "harness", "inputs")
-	if err := os.MkdirAll(dir, 0755); err != nil {
+// stageInputFile writes content under agent_home/.scion/harness/inputs/<name>,
+// confined to the home. Inputs are not secrets; mode 0644 is fine.
+func stageInputFile(home *agenthome.Home, name string, content []byte) error {
+	if err := home.MkdirAll(inputsRel, 0755); err != nil {
 		return fmt.Errorf("create inputs dir: %w", err)
 	}
-	return os.WriteFile(filepath.Join(dir, name), content, 0644)
+	return home.WriteFile(path.Join(inputsRel, name), content, 0644)
 }
 
 // containerBundlePath returns the path the script will see inside the
@@ -1159,14 +1183,15 @@ func containerBundlePath(_ string) string {
 //   - injected (or absent): write the binary-embedded copy (legacy behavior).
 //
 // Both modes log the staged source and LIB_VERSION for diagnostics.
-func (c *ContainerScriptHarness) stageHarnessLib(bundleHostPath string) error {
-	dst := filepath.Join(bundleHostPath, "scion_harness.py")
+func (c *ContainerScriptHarness) stageHarnessLib(home *agenthome.Home) error {
+	dst := path.Join(bundleRel, "scion_harness.py")
 	libMode := "injected"
 	if c.entry.Provisioner != nil && c.entry.Provisioner.Lib != "" {
 		libMode = c.entry.Provisioner.Lib
 	}
 
 	var stagedSource string
+	var staged []byte
 	switch libMode {
 	case "vendored":
 		src := filepath.Join(c.configDirPath, "scion_harness.py")
@@ -1174,22 +1199,22 @@ func (c *ContainerScriptHarness) stageHarnessLib(bundleHostPath string) error {
 			return fmt.Errorf("stage scion_harness.py: provisioner.lib is %q but %s does not exist — "+
 				"run 'go generate ./harnesses/' or include scion_harness.py in the harness bundle", libMode, src)
 		}
-		if err := copyHarnessConfigFile(src, dst); err != nil {
+		data, err := os.ReadFile(src)
+		if err == nil {
+			err = home.WriteFile(dst, data, 0644)
+		}
+		if err != nil {
 			return fmt.Errorf("stage scion_harness.py (vendored): %w", err)
 		}
-		stagedSource = "vendored"
+		staged, stagedSource = data, "vendored"
 	default:
-		if err := writeSharedHarnessHelper(dst); err != nil {
+		if err := home.WriteFile(dst, SharedHarnessHelperSource(), 0644); err != nil {
 			return fmt.Errorf("stage scion_harness.py (injected): %w", err)
 		}
-		stagedSource = "injected"
+		staged, stagedSource = SharedHarnessHelperSource(), "injected"
 	}
 
-	staged, err := os.ReadFile(dst)
-	if err == nil {
-		version := parseLibVersion(string(staged))
-		slog.Info("staged scion_harness.py", "source", stagedSource, "lib_version", version)
-	}
+	slog.Info("staged scion_harness.py", "source", stagedSource, "lib_version", parseLibVersion(string(staged)))
 	return nil
 }
 
@@ -1228,11 +1253,19 @@ const HarnessProvisionHookFilename = "20-harness-provision"
 const (
 	// bundleRel is the staged harness bundle directory.
 	bundleRel = ".scion/harness"
+	// inputsRel, secretsRel and manifestRel are in the bundle.
+	inputsRel   = bundleRel + "/inputs"
+	secretsRel  = bundleRel + "/secrets"
+	manifestRel = bundleRel + "/manifest.json"
 	// hookDirRel is the pre-start hook directory.
 	hookDirRel = ".scion/hooks/pre-start.d"
 	// provisionHookRel is the staged provisioner wrapper.
 	provisionHookRel = hookDirRel + "/" + HarnessProvisionHookFilename
 )
+
+// maxManifestSize bounds the staged manifest SetManifestAgentWorkspace reads
+// back.
+const maxManifestSize = 4 << 20
 
 // HarnessProvisionHookPath is where a container-script harness stages its
 // provisioner wrapper in an agent home.
@@ -1282,9 +1315,10 @@ func ClearStagedProvisioning(agentHome string) error {
 	return nil
 }
 
-func writeHookWrapper(agentHome, bundleContainerPath string) error {
-	dir := filepath.Join(agentHome, ".scion", "hooks", "pre-start.d")
-	if err := os.MkdirAll(dir, 0755); err != nil {
+// writeHookWrapper stages the provisioner wrapper in the agent home,
+// confined to the home.
+func writeHookWrapper(home *agenthome.Home, bundleContainerPath string) error {
+	if err := home.MkdirAll(hookDirRel, 0755); err != nil {
 		return err
 	}
 	wrapper := fmt.Sprintf(`#!/bin/sh
@@ -1292,29 +1326,18 @@ func writeHookWrapper(agentHome, bundleContainerPath string) error {
 set -eu
 exec sciontool harness provision --manifest "%s/manifest.json"
 `, bundleContainerPath)
-	target := filepath.Join(dir, HarnessProvisionHookFilename)
-	if err := os.WriteFile(target, []byte(wrapper), 0755); err != nil {
-		return err
-	}
-	return nil
+	return home.WriteFile(provisionHookRel, []byte(wrapper), 0755)
 }
 
-func copyHarnessConfigFile(src, dst string) error {
-	in, err := os.Open(src)
+// copyHarnessConfigFile copies src, a file of the harness-config directory,
+// to dstRel in the agent home with mode, confined to the home. dstRel's
+// parent must exist.
+func copyHarnessConfigFile(src string, home *agenthome.Home, dstRel string, mode os.FileMode) error {
+	data, err := os.ReadFile(src)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = in.Close() }()
-	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
-		return err
-	}
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = out.Close() }()
-	_, err = io.Copy(out, in)
-	return err
+	return home.WriteFile(dstRel, data, mode)
 }
 
 func fileExistsHelper(path string) bool {
@@ -1369,23 +1392,27 @@ func expandEnvTemplate(value, agentName, agentHome, unixUsername string) string 
 // authMeta provides the required_files declarations used to generate the
 // capture-auth-config.json input.
 func StageCaptureAuthAssets(agentHome, configDirPath string, authMeta *config.HarnessAuthMetadata) error {
-	bundleDir := filepath.Join(agentHome, ".scion", "harness")
-	inputsDir := filepath.Join(bundleDir, "inputs")
+	home, err := agenthome.OpenCreate(agentHome, 0755)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = home.Close() }()
+	return stageCaptureAuthAssets(home, configDirPath, authMeta)
+}
 
-	for _, dir := range []string{bundleDir, inputsDir} {
-		if err := os.MkdirAll(dir, 0755); err != nil {
+// stageCaptureAuthAssets is StageCaptureAuthAssets on an open agent home;
+// every write is confined to the home.
+func stageCaptureAuthAssets(home *agenthome.Home, configDirPath string, authMeta *config.HarnessAuthMetadata) error {
+	for _, dir := range []string{bundleRel, inputsRel} {
+		if err := home.MkdirAll(dir, 0755); err != nil {
 			return fmt.Errorf("create dir %q: %w", dir, err)
 		}
 	}
 
 	captureAuthSrc := filepath.Join(configDirPath, "capture_auth.py")
 	if fileExistsHelper(captureAuthSrc) {
-		dst := filepath.Join(bundleDir, "capture_auth.py")
-		if err := copyHarnessConfigFile(captureAuthSrc, dst); err != nil {
+		if err := copyHarnessConfigFile(captureAuthSrc, home, path.Join(bundleRel, "capture_auth.py"), 0755); err != nil {
 			return fmt.Errorf("stage capture_auth.py: %w", err)
-		}
-		if err := os.Chmod(dst, 0755); err != nil {
-			return fmt.Errorf("chmod capture_auth.py: %w", err)
 		}
 	}
 
@@ -1441,5 +1468,5 @@ func StageCaptureAuthAssets(agentHome, configDirPath string, authMeta *config.Ha
 	if err != nil {
 		return fmt.Errorf("marshal capture-auth config: %w", err)
 	}
-	return os.WriteFile(filepath.Join(inputsDir, "capture-auth-config.json"), data, 0644)
+	return home.WriteFile(path.Join(inputsRel, "capture-auth-config.json"), data, 0644)
 }
