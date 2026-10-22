@@ -182,3 +182,19 @@ func TestBuildProfileReferencesDetailed_SharedWorkspaceProvenance(t *testing.T) 
 		}
 	}
 }
+
+func TestCountsOnBroker(t *testing.T) {
+	cases := []struct {
+		agentBroker string
+		want        bool
+	}{
+		{"", true},          // unplaced
+		{"co-1", true},      // on the co-located broker
+		{"remote-2", false}, // on another broker
+	}
+	for _, c := range cases {
+		if got := CountsOnBroker(c.agentBroker, "co-1"); got != c.want {
+			t.Errorf("CountsOnBroker(%q, %q) = %v, want %v", c.agentBroker, "co-1", got, c.want)
+		}
+	}
+}

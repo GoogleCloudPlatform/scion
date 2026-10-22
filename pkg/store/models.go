@@ -838,6 +838,14 @@ const (
 // legitimate pre-upgrade groups.
 const AnnotationProjectAgentsGroup = "scion.io/project-agents-group"
 
+// AnnotationProjectActiveProfile is the project annotation that holds the
+// project's activeProfile setting. The hub writes it as a project setting
+// (pkg/hub keeps its own literal, projectSettingActiveProfile, which its
+// settings registry guard requires, and a pkg/hub test pins that the two
+// agree); readers outside pkg/hub, such as the rebuild preflight, use this
+// one.
+const AnnotationProjectActiveProfile = "scion.io/active-profile"
+
 // IsProjectMembersGroup reports whether g is a system project members group:
 // it belongs to a project and carries either members-group marker key with
 // the value "true".

@@ -67,6 +67,16 @@ type CountedAgent struct {
 	Profile     string
 }
 
+// CountsOnBroker reports whether an agent placed on runtimeBrokerID counts
+// toward the profile references of the co-located broker colocatedBrokerID:
+// an unplaced agent ("") or one on that broker does; an agent on any other
+// broker resolves profiles against its own settings and does not. It is the
+// one rule BuildProfileReferencesDetailed and the rebuild preflight's agent
+// reader apply.
+func CountsOnBroker(runtimeBrokerID, colocatedBrokerID string) bool {
+	return runtimeBrokerID == "" || runtimeBrokerID == colocatedBrokerID
+}
+
 // BuildProfileReferences counts the references the co-located broker's
 // settings overlay uses to retain built-in profiles. It is
 // BuildProfileReferencesDetailed without the list of counted agents.
@@ -118,7 +128,7 @@ func BuildProfileReferencesDetailed(globalDir, colocatedBrokerID string, in Prof
 	var counted []CountedAgent
 	missing, unreadable := 0, 0
 	for _, a := range in.Agents {
-		if a.RuntimeBrokerID != "" && a.RuntimeBrokerID != colocatedBrokerID {
+		if !CountsOnBroker(a.RuntimeBrokerID, colocatedBrokerID) {
 			continue // counted nowhere; skip before any disk read
 		}
 		profile := a.AppliedProfile
