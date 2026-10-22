@@ -346,7 +346,7 @@ var compiled = []Experiment{
 		Name:        AgentEdit,
 		Title:       "Edit agent",
 		Description: "On the Edit agent page, adds a view that groups the fields by when an edit applies (next start or resume, held, needs a reincarnation, immediately, fixed) and a summary strip counting them. The page and its by-function view are always available.",
-		Default:     false,
+		Default:     true,
 		Layers:      []Layer{LayerWeb},
 		Stage:       StageAlpha,
 		Issue:       "ptone/scion#3952",

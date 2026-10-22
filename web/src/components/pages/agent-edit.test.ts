@@ -661,6 +661,13 @@ describe('agent edit page phases and gate', () => {
     expect(patches().map((c) => c.body)).toEqual([{ stateVersion: 5, config: { max_turns: 40 } }]);
   });
 
+  it('default (no experiment value set): the toggle and strip are shown', async () => {
+    window.__SCION_FEATURES__ = {};
+    const el = await mount(makeAgent('stopped', 5));
+    expect(button(el, 'grouping')).not.toBeNull();
+    expect(formOf(el)!.shadowRoot!.querySelector('[data-testid="tier-summary"]')).not.toBeNull();
+  });
+
   it('experiment on: the grouping toggle and the tier summary strip', async () => {
     window.__SCION_FEATURES__ = { 'web.agent_edit': true };
     const el = await mount(makeAgent('stopped', 5));
