@@ -141,9 +141,9 @@ func TestHarnessPolicyHook_CreateRefusesBeforeSideEffects(t *testing.T) {
 	root := t.TempDir()
 	scion := filepath.Join(root, ".scion")
 	writeHarnessConfigDirAt(t, filepath.Join(scion, "harness-configs", "tpl-hc"), scriptedHarnessYAML)
-	// Templates resolve against the project path as given, as launch
-	// resolves them.
-	tplDir := filepath.Join(root, "templates", "tplx")
+	// For a project path that is a workspace root, templates resolve
+	// against its .scion directory, as launch resolves them.
+	tplDir := filepath.Join(scion, "templates", "tplx")
 	if err := os.MkdirAll(tplDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
