@@ -165,7 +165,9 @@ func chatSendPostDenied() *chatSendError {
 // the holder of a user access token, the caller otherwise. A token keeps
 // needing only inbox:write for a send; the post permission is a property
 // of the account the token acts for, so it is checked on that account and
-// never widens what the token may do.
+// never widens what the token may do. The project:chat_post selector does
+// not change this: it only keeps project.chat_post in the token's ceiling,
+// so the token can delegate roles that include it.
 func chatPostIdentity(user UserIdentity) UserIdentity {
 	if scoped, ok := user.(*ScopedUserIdentity); ok && scoped != nil && scoped.UserIdentity != nil {
 		return scoped.UserIdentity
