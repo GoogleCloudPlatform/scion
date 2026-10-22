@@ -382,10 +382,7 @@ export class ScionApp extends LitElement {
     if (path.match(/^\/projects\/[^/]+\/metrics$/)) {
       return 'Project Metrics';
     }
-    if (
-      path.match(/^\/projects\/[^/]+\/artifacts\/[^/]+$/) &&
-      isFeatureEnabled(ARTIFACTS_FLAG)
-    ) {
+    if (path.match(/^\/projects\/[^/]+\/artifacts\/[^/]+$/) && isFeatureEnabled(ARTIFACTS_FLAG)) {
       return 'Artifact';
     }
     if (path === '/artifacts' && isFeatureEnabled(ARTIFACTS_FLAG)) {

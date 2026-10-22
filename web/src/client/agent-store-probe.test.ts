@@ -1576,7 +1576,7 @@ describe('AgentStore delta probe on a server-filtered list (ptone/scion#3030)', 
     const labels = a.labels ?? {};
     for (const label of params.getAll('label')) {
       const [k, v] = label.split('=');
-      if (labels[k!] !== v) return false;
+      if (labels[k] !== v) return false;
     }
     return params.get('scope') !== 'mine' || labels.mine === 'yes';
   }
@@ -1623,7 +1623,8 @@ describe('AgentStore delta probe on a server-filtered list (ptone/scion#3030)', 
     h.server.agents.push(row('a3', 11, { labels: { team: 'a' } }));
     await tick();
 
-    expect(h.server.walks()).toBe(1);
+    // Added by the probe itself: no walk.
+    expect(h.server.walks(), 'walks after the probe').toBe(1);
     expect(h.server.probes()).toBe(1);
     expect(ids(h.store.peek(LABELLED)).sort()).toEqual(['a1', 'a2', 'a3']);
   });
