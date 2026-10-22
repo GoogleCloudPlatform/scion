@@ -609,7 +609,42 @@ func getHubClient(settings *config.Settings) (hubclient.Client, error) {
 // hubClientForEndpoint returns a client for the hub at endpoint, with the
 // credential getHubClient would choose for that endpoint.
 func hubClientForEndpoint(settings *config.Settings, endpoint string) (hubclient.Client, error) {
+	c, _, err := hubClientAndAuthSourceForEndpoint(settings, endpoint)
+	return c, err
+}
+
+// Hub credential sources, as "scion doctor" reports them (hub.authSource
+// in its JSON output). Each names where the credential came from, never
+// the credential itself.
+const (
+	hubAuthSourceHubProfile     = "hub_profile"
+	hubAuthSourceStoredLogin    = "stored_login"
+	hubAuthSourceAgentTokenFile = "agent_token_file"
+	hubAuthSourceEnvAuthToken   = "env_auth_token"
+	hubAuthSourceEnvHubToken    = "env_hub_token"
+	hubAuthSourceDev            = "dev"
+	hubAuthSourceNone           = "none"
+)
+
+// getHubClientWithAuthSource is getHubClient that also names the source
+// of the credential the client sends (a hubAuthSource value).
+func getHubClientWithAuthSource(settings *config.Settings) (hubclient.Client, string, error) {
+	if hubProfileSelected() {
+		c, err := openHubProfileClient()
+		return c, hubAuthSourceHubProfile, err
+	}
+	endpoint := invocationHubEndpoint()
+	if endpoint == "" {
+		return nil, "", errHubNotConfigured
+	}
+	return hubClientAndAuthSourceForEndpoint(settings, endpoint)
+}
+
+// hubClientAndAuthSourceForEndpoint is hubClientForEndpoint that also
+// names the source of the credential it chose (a hubAuthSource value).
+func hubClientAndAuthSourceForEndpoint(settings *config.Settings, endpoint string) (hubclient.Client, string, error) {
 	var opts []hubclient.Option
+	source := ""
 
 	// Get auth info for logging
 	info := getAuthInfo(settings, endpoint)
@@ -627,6 +662,7 @@ func hubClientForEndpoint(settings *config.Settings, endpoint string) (hubclient
 	if accessToken := credentials.GetAccessToken(endpoint); accessToken != "" {
 		opts = append(opts, hubclient.WithBearerToken(accessToken))
 		authConfigured = true
+		source = hubAuthSourceStoredLogin
 	}
 
 	// Check for agent auth token from canonical token file, then bootstrap env var
@@ -636,15 +672,18 @@ func hubClientForEndpoint(settings *config.Settings, endpoint string) (hubclient
 				if devToken := apiclient.ResolveDevToken(); devToken != "" {
 					opts = append(opts, hubclient.WithBearerToken(devToken))
 					authConfigured = true
+					source = hubAuthSourceDev
 				}
 			}
 			if !authConfigured {
 				opts = append(opts, hubclient.WithAgentToken(token))
 				authConfigured = true
+				source = hubAuthSourceAgentTokenFile
 			}
 		} else if token := os.Getenv("SCION_AUTH_TOKEN"); token != "" {
 			opts = append(opts, hubclient.WithAgentToken(token))
 			authConfigured = true
+			source = hubAuthSourceEnvAuthToken
 		}
 	}
 
@@ -653,6 +692,7 @@ func hubClientForEndpoint(settings *config.Settings, endpoint string) (hubclient
 		if token := os.Getenv("SCION_HUB_TOKEN"); token != "" {
 			opts = append(opts, hubclient.WithBearerToken(token))
 			authConfigured = true
+			source = hubAuthSourceEnvHubToken
 		}
 	}
 
@@ -660,6 +700,11 @@ func hubClientForEndpoint(settings *config.Settings, endpoint string) (hubclient
 	// This checks SCION_DEV_TOKEN env var and ~/.scion/dev-token file
 	if !authConfigured {
 		opts = append(opts, hubclient.WithAutoDevAuth())
+		// WithAutoDevAuth sends no credential when it finds no dev token.
+		source = hubAuthSourceNone
+		if apiclient.ResolveDevToken() != "" {
+			source = hubAuthSourceDev
+		}
 	}
 
 	util.Debugf("Hub client auth: %s (source: %s)", info.Method, info.Source)
@@ -667,7 +712,8 @@ func hubClientForEndpoint(settings *config.Settings, endpoint string) (hubclient
 
 	opts = append(opts, hubclient.WithTimeout(30*time.Second))
 
-	return hubclient.New(endpoint, opts...)
+	c, err := hubclient.New(endpoint, opts...)
+	return c, source, err
 }
 
 // hubEndpointScope describes where the effective hub endpoint comes from.

@@ -55,11 +55,46 @@ const (
 	doctorHealthSummaryUnavailable = "Health data not available (database unreachable from this hub instance)"
 )
 
+// Platform Health states in the JSON output (platformHealth.state). Any
+// state other than ok means the summary was not checked, never that the
+// platform is healthy.
+const (
+	// doctorPHStateOK: the summary was read.
+	doctorPHStateOK = "ok"
+	// doctorPHStateSkipped: doctor did not get the summary, and as far as
+	// it knows nothing is wrong with the Hub's ability to produce it.
+	doctorPHStateSkipped = "skipped"
+	// doctorPHStateUnavailable: the Hub was asked and could not produce it.
+	doctorPHStateUnavailable = "unavailable"
+)
+
+// Platform Health reason codes (platformHealth.reason). They are part of
+// the documented JSON output (docs-site reference/cli.md): keep them
+// stable, and document any new one.
+const (
+	doctorPHReasonNoHubEndpoint     = "no_hub_endpoint"
+	doctorPHReasonHubUnreachable    = "hub_unreachable"
+	doctorPHReasonClientUnavailable = "client_unavailable"
+	doctorPHReasonPermissionDenied  = "permission_denied"
+	doctorPHReasonNotSupported      = "not_supported"
+	doctorPHReasonHubUnavailable    = "hub_unavailable"
+	doctorPHReasonError             = "error"
+)
+
 // doctorPlatformHealth is the outcome of reading the health summary:
-// either the summary, or the lines that explain why it is not available.
+// either the summary, or the lines that explain why it is not available
+// together with the state and reason code for the JSON output.
 type doctorPlatformHealth struct {
 	summary *hubclient.HealthSummary
 	checks  []scionruntime.CheckResult
+	// state is one of the doctorPHState values; "" is read as ok when
+	// summary is set (tests build doctorPlatformHealth{summary: ...}).
+	state string
+	// reason is one of the doctorPHReason values; empty when ok.
+	reason string
+	// httpStatus is the Hub's HTTP status when it answered the summary
+	// request with an error; 0 otherwise.
+	httpStatus int
 }
 
 // fetchDoctorPlatformHealth reads the health summary when the Hub answered
@@ -68,23 +103,27 @@ type doctorPlatformHealth struct {
 // warning with a fixed message, and any other failure is a warning; in
 // every one of those cases the caller falls back to the list-based checks.
 func fetchDoctorPlatformHealth(hubEP string, hubReachable bool, client hubclient.Client) doctorPlatformHealth {
-	skip := func(msg string) doctorPlatformHealth {
-		return doctorPlatformHealth{checks: []scionruntime.CheckResult{{Name: doctorHealthSummaryCheck, Status: "skip", Message: msg}}}
+	notRead := func(state, reason string, httpStatus int, c scionruntime.CheckResult) doctorPlatformHealth {
+		c.Name = doctorHealthSummaryCheck
+		return doctorPlatformHealth{checks: []scionruntime.CheckResult{c}, state: state, reason: reason, httpStatus: httpStatus}
+	}
+	skip := func(reason, msg string) doctorPlatformHealth {
+		return notRead(doctorPHStateSkipped, reason, 0, scionruntime.CheckResult{Status: "skip", Message: msg})
 	}
 	switch {
 	case hubEP == "":
-		return skip("No Hub endpoint configured")
+		return skip(doctorPHReasonNoHubEndpoint, "No Hub endpoint configured")
 	case !hubReachable:
-		return skip("Skipped (Hub connectivity check failed)")
+		return skip(doctorPHReasonHubUnreachable, "Skipped (Hub connectivity check failed)")
 	case client == nil:
-		return skip("Skipped (Hub client not available)")
+		return skip(doctorPHReasonClientUnavailable, "Skipped (Hub client not available)")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	summary, err := client.HealthSummary(ctx)
 	if err == nil && summary != nil {
-		return doctorPlatformHealth{summary: summary}
+		return doctorPlatformHealth{summary: summary, state: doctorPHStateOK}
 	}
 
 	var apiErr *apiclient.APIError
@@ -94,31 +133,31 @@ func fetchDoctorPlatformHealth(hubEP string, hubReachable bool, client hubclient
 	}
 	switch statusCode {
 	case http.StatusForbidden:
-		return doctorPlatformHealth{checks: []scionruntime.CheckResult{{
-			Name:        doctorHealthSummaryCheck,
+		return notRead(doctorPHStateSkipped, doctorPHReasonPermissionDenied, statusCode, scionruntime.CheckResult{
 			Status:      "skip",
 			Message:     doctorHealthSummaryForbidden,
 			Remediation: "Platform Health needs a hub admin login, or a hub-boundary access token with hub_health:read (see 'scion doctor --help'). The broker and agent checks above cover only what you can list",
-		}}}
+		})
 	case http.StatusServiceUnavailable:
-		return doctorPlatformHealth{checks: []scionruntime.CheckResult{{
-			Name:        doctorHealthSummaryCheck,
+		return notRead(doctorPHStateUnavailable, doctorPHReasonHubUnavailable, statusCode, scionruntime.CheckResult{
 			Status:      "warn",
 			Message:     doctorHealthSummaryUnavailable,
 			Remediation: "Check the Hub's database connectivity and the Hub server logs",
-		}}}
+		})
 	case http.StatusNotFound:
-		return skip("This Hub does not provide a health summary (older Hub version)")
+		return notRead(doctorPHStateSkipped, doctorPHReasonNotSupported, statusCode, scionruntime.CheckResult{
+			Status:  "skip",
+			Message: "This Hub does not provide a health summary (older Hub version)",
+		})
 	}
 	if err == nil {
 		err = errors.New("empty response")
 	}
-	return doctorPlatformHealth{checks: []scionruntime.CheckResult{{
-		Name:   doctorHealthSummaryCheck,
+	return notRead(doctorPHStateUnavailable, doctorPHReasonError, statusCode, scionruntime.CheckResult{
 		Status: "warn",
 		// The error can carry a proxy's or the Hub's response body.
 		Message: singleLine(fmt.Sprintf("Could not read the health summary: %v", err)),
-	}}}
+	})
 }
 
 // renderDoctorHealthSummary turns the summary into Platform Health lines:
