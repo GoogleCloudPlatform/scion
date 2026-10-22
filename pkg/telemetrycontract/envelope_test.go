@@ -722,8 +722,9 @@ func TestCheckStructureEqualDepthTaggedConflict(t *testing.T) {
 	if strings.Contains(string(b), "agent_ref") {
 		t.Fatalf("premise: encoding/json was expected to drop agent_ref: %s", b)
 	}
-	// Rejected by the root-pointer/named-struct rule (an unnamed StructOf
-	// type), and, as a pointer, by the embedding rule.
+	// Both forms are rejected by the root-pointer/named-struct rule (the
+	// StructOf type is unnamed); embeddings themselves are covered by
+	// TestCheckStructureRejectsOtherEmbeddings.
 	if err := checkStructure(typ); err == nil || !strings.Contains(err.Error(), "pointer to a named struct") {
 		t.Errorf("equal-depth conflict type: err = %v", err)
 	}
@@ -1112,6 +1113,17 @@ func TestListsFollowOmitPolicy(t *testing.T) {
 	var back listEvent
 	if err := Unmarshal(got, &back); err != nil || back.Maybe == nil || len(*back.Maybe) != 0 {
 		t.Errorf("round trip of *[]T: %+v, %v", back, err)
+	}
+
+	// N7-2: a non-nil pointer to a nil list, and a nil list nested in a
+	// struct inside a list, are both written-as-null cases.
+	if _, err := Marshal(&listEvent{Envelope: env, Caps: []string{}, Maybe: new([]string)}); err == nil || !strings.Contains(err.Error(), "written as null") {
+		t.Errorf("pointer to nil list: err = %v", err)
+	}
+	nested := validAllowed(env)
+	nested.NS[0].Tags = nil
+	if _, err := Marshal(nested); err == nil || !strings.Contains(err.Error(), "written as null") {
+		t.Errorf("nil list nested in a list element: err = %v", err)
 	}
 }
 
