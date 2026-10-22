@@ -376,23 +376,28 @@ describe('scion-agent-config-form edit-mode field set', () => {
     expect(keys).toEqual(['config.model', 'config.max_turns', 'config.max_duration']);
   });
 
-  it('without fieldKeys, renders no create-only field in edit mode', async () => {
+  it('without fieldKeys, renders every field in edit mode, the edit-only ones included', async () => {
     const el = await mount({ fieldKeys: null });
     const keys = Array.from(el.shadowRoot!.querySelectorAll('.field')).map(
       (f) => (f as HTMLElement).dataset.key
     );
-    for (const createOnly of [
+    for (const key of [
+      'name',
+      'config.task',
+      'projectId',
       'branch',
       'autoExpose',
+      'explicitTimezone',
       'agentRole',
       'messageMode',
-      'gcp_identity',
       'config.env',
       'labels',
+      'config.auth_selectedType',
     ]) {
-      expect(keys).not.toContain(createOnly);
+      expect(keys).toContain(key);
     }
-    expect(keys).toContain('config.auth_selectedType');
+    // The GCP identity field renders only with the page's picker state.
+    expect(keys).not.toContain('gcp_identity');
   });
 });
 

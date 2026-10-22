@@ -17,8 +17,7 @@
 /**
  * ptone/scion#5311: GET /api/v1/settings/public is read once per page load.
  * The boot fetch (applyServerFeatureFlags) fills the cache that the create
- * form, the configure page and the project settings fallback then read; an
- * admin save drops it.
+ * form and the project settings fallback then read; an admin save drops it.
  */
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
@@ -54,9 +53,6 @@ function stubFetch(): void {
       // Project settings: an older hub without the resolved endpoint, which
       // is the path that reads the public settings.
       if (url.includes('/settings/resolved')) return json({}, 404);
-      if (url.includes('/api/v1/agents/a1')) {
-        return json({ id: 'a1', name: 'a1', phase: 'running' });
-      }
       if (url.includes('/api/v1/projects?')) return json({ projects: [{ id: 'p1', name: 'P1' }] });
       if (url.match(/\/api\/v1\/projects\/proj-1(\?|$)/)) {
         return json({ id: 'proj-1', name: 'Proj', slug: 'proj' });
@@ -75,7 +71,6 @@ beforeAll(async () => {
   stubFetch();
   await Promise.all([
     import('./agent-create.js'),
-    import('./agent-configure.js'),
     import('./project-settings.js'),
   ]);
 }, 30_000);
@@ -98,14 +93,6 @@ describe('shared public settings (ptone/scion#5311)', () => {
     };
     document.body.appendChild(create);
     await until(() => create.hubSettings.telemetryEnabled === true);
-
-    window.history.replaceState({}, '', '/agents/a1/configure');
-    const configure = document.createElement('scion-page-agent-configure') as HTMLElement & {
-      loading: boolean;
-      globalTelemetryDefault: boolean;
-    };
-    document.body.appendChild(configure);
-    await until(() => !configure.loading && configure.globalTelemetryDefault);
 
     const settings = document.createElement('scion-page-project-settings') as HTMLElement & {
       projectId: string;

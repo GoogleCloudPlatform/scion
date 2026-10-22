@@ -93,6 +93,7 @@ import type { ScionAgentMessageViewer } from '../shared/agent-message-viewer.js'
 import '../shared/chat/chat-thread.js';
 import type { ScionChatThread } from '../shared/chat/chat-thread.js';
 import { isFeatureEnabled, AGENT_EDIT_FLAG } from '../../utils/feature-flags.js';
+import { REINCARNATE_CONFIRM_MESSAGE } from '../../shared/agent-reincarnate.js';
 import '../shared/hash-display.js';
 import '../shared/quick-message-dialog.js';
 import '../shared/cascade-mode-dialog.js';
@@ -172,10 +173,8 @@ function parseDuration(s: string): number {
  */
 export const DELETE_REDIRECT_DELAY_MS = 1000;
 
-/** Body of the Reincarnate confirm dialog (ptone/scion#3707). */
-export const REINCARNATE_CONFIRM_MESSAGE =
-  'The agent will be stopped and re-provisioned with its current settings and template. ' +
-  'Any work running in its current session is interrupted.';
+// Shared with the Edit page (shared/agent-reincarnate.ts); re-exported for existing importers.
+export { REINCARNATE_CONFIRM_MESSAGE };
 
 /**
  * Format seconds as "Xh Ym Zs".
@@ -1972,16 +1971,6 @@ export class ScionPageAgentDetail extends LitElement {
                     </sl-button>
                   `
                 : nothing}
-          ${agent.phase === 'created' || can(agent._capabilities, 'update')
-            ? html`
-                <a href="/agents/${this.agentId}/configure" style="text-decoration: none;">
-                  <sl-button variant="default" size="small">
-                    <sl-icon slot="prefix" name="sliders"></sl-icon>
-                    Configure
-                  </sl-button>
-                </a>
-              `
-            : nothing}
           ${isFeatureEnabled(AGENT_EDIT_FLAG) && can(agent._capabilities, 'update')
             ? html`
                 <a

@@ -16,14 +16,18 @@
 
 /**
  * Edit agent page (/agents/{id}/edit), behind the web.agent_edit
- * experiment (ptone/scion#3952).
+ * experiment (ptone/scion#3952, ptone/scion#3975).
  *
- * Loads the agent with its per-field editability and renders the shared
- * <scion-agent-config-form>. Save sends only the touched fields, always with
- * the agent's stateVersion; a 409 means the agent changed since the page
- * loaded and offers a reload that keeps the user's edits. Save & Start
- * (created, stopped, error) and Save & Resume (suspended) save, then start
- * the agent, whose new container runs with the edits.
+ * Loads the agent with its per-field editability and renders every field
+ * of the shared <scion-agent-config-form>, grouped by function or by tier
+ * (the user's last choice is remembered). Save sends only the touched
+ * fields, always with the agent's stateVersion; a 409 means the agent
+ * changed since the page loaded and offers a reload that keeps the user's
+ * edits. The actions follow the phase: Save & Start (created, stopped,
+ * error) and Save & Resume (suspended) save, then start the agent, whose
+ * new container runs with the edits; Reincarnate… is offered whenever the
+ * hub holds edits only a reincarnation applies. Delete stays on the agent's
+ * page; Back returns there.
  */
 
 import { LitElement, html, css, nothing } from 'lit';
@@ -33,30 +37,33 @@ import { apiFetch, extractApiError } from '../../client/api.js';
 import { navigateTo } from '../../client/navigation.js';
 import { lifecycleActionErrorMessage } from '../../client/agent-delete.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
+import { GCPServiceAccountsLoader } from '../../client/gcp-sa-accounts-loader.js';
 import { agentStatusBadge } from '../../shared/agent-state-display.js';
+import { heldReincarnateKeys, REINCARNATE_CONFIRM_MESSAGE } from '../../shared/agent-reincarnate.js';
+import { GcpIdentityState } from '../../shared/gcp-identity-state.js';
+import { assignStatusTarget } from '../../shared/gcp-sa-assign-status.js';
+import { isTargetKubernetesOnly } from '../../shared/runtime-kind.js';
 import { isFeatureEnabled, AGENT_EDIT_FLAG } from '../../utils/feature-flags.js';
 import { showToast } from '../../utils/toast.js';
-import type { Agent, AgentUpdateDisposition } from '../../shared/types.js';
 import type {
+  Agent,
+  AgentInlineConfig,
+  AgentUpdateDisposition,
+  RuntimeBroker,
+} from '../../shared/types.js';
+import type {
+  AgentConfigEditValues,
+  AgentConfigGrouping,
   AgentConfigPatch,
   AgentConfigPlaceholder,
+  AgentConfigTopLevel,
   ScionAgentConfigForm,
 } from '../shared/agent-config-form.js';
+import { showConfirm } from '../shared/confirm-dialog.js';
 import '../shared/agent-config-form.js';
 import '../shared/detail-header.js';
 import '../shared/status-badge.js';
 import './not-found.js';
-
-/**
- * The fields the Edit page renders: Model, Max turns and Max duration. The
- * rest of the shared form's fields arrive on this page with its full field
- * set.
- */
-export const AGENT_EDIT_FIELD_KEYS: readonly string[] = [
-  'config.model',
-  'config.max_turns',
-  'config.max_duration',
-];
 
 /** The agent PATCH response fields this page reads. */
 interface AgentPatchResponse {
@@ -65,9 +72,29 @@ interface AgentPatchResponse {
 }
 
 /** The agent PATCH body the page sends. */
-export interface AgentEditPatchBody {
+export type AgentEditPatchBody = AgentConfigTopLevel & {
   stateVersion: number;
   config?: AgentConfigPatch;
+};
+
+/** Where the user's last grouping choice is kept. */
+export const AGENT_EDIT_GROUPING_KEY = 'scion:agent-edit:grouping';
+
+/** The user's last grouping choice; by function when none is stored. */
+export function loadEditGrouping(): AgentConfigGrouping {
+  try {
+    return localStorage.getItem(AGENT_EDIT_GROUPING_KEY) === 'tier' ? 'tier' : 'function';
+  } catch {
+    return 'function';
+  }
+}
+
+function saveEditGrouping(grouping: AgentConfigGrouping): void {
+  try {
+    localStorage.setItem(AGENT_EDIT_GROUPING_KEY, grouping);
+  } catch {
+    // Storage unavailable: the choice lasts for this page only.
+  }
 }
 
 /** The start action the page offers for a phase, if any. */
@@ -85,14 +112,15 @@ export function editStartAction(phase: string | undefined): 'start' | 'resume' |
 }
 
 /**
- * The PATCH body for a save: stateVersion always, config only when the form
- * has touched fields.
+ * The PATCH body for a save: stateVersion always, the touched top-level
+ * keys, and config only when the form has touched config fields.
  */
 export function buildAgentEditPatchBody(
   config: AgentConfigPatch,
-  stateVersion: number | undefined
+  stateVersion: number | undefined,
+  topLevel: AgentConfigTopLevel = {}
 ): AgentEditPatchBody {
-  const body: AgentEditPatchBody = { stateVersion: stateVersion ?? 0 };
+  const body: AgentEditPatchBody = { stateVersion: stateVersion ?? 0, ...topLevel };
   if (Object.keys(config).length > 0) body.config = config;
   return body;
 }
@@ -102,12 +130,49 @@ export function agentEditPlaceholders(agent: Agent): Record<string, AgentConfigP
   const applied = agent.appliedConfig;
   const out: Record<string, AgentConfigPlaceholder> = {
     'config.max_turns': { source: 'the template or hub defaults' },
+    'config.max_model_calls': { source: 'the template or hub defaults' },
     'config.max_duration': { source: 'the template or hub defaults' },
   };
   out['config.model'] = applied?.model
     ? { value: applied.model, source: 'resolved when the agent was created' }
     : { source: 'the template or harness default' };
+  out['config.image'] = applied?.image
+    ? { value: applied.image, source: 'resolved when the agent was created' }
+    : { source: 'the template or harness default' };
   return out;
+}
+
+/**
+ * The stored values the form shows: the agent's inline config, with the
+ * task the hub re-sends at a fresh start when the inline config has none.
+ */
+export function agentEditValues(agent: Agent): AgentInlineConfig {
+  const inline = agent.appliedConfig?.inlineConfig ?? {};
+  const task = inline.task || agent.appliedConfig?.task;
+  return task ? { ...inline, task } : inline;
+}
+
+/** The agent's values outside its inline config, for the form. */
+export function agentEditTopValues(agent: Agent): AgentConfigEditValues {
+  const applied = agent.appliedConfig;
+  return {
+    name: agent.name,
+    labels: agent.labels ?? {},
+    explicitTimezone: applied?.explicitTimezone,
+    explicitTimezoneLegacy: applied?.explicitTimezoneLegacy,
+    messageMode: agent.messageMode,
+    agentRole: applied?.agentRole,
+    env: applied?.env,
+    detailHref: `/agents/${encodeURIComponent(agent.id)}`,
+    fixed: {
+      projectId: agent.project || agent.projectSlug || agent.projectId,
+      template: agent.template,
+      harnessConfig: agent.harnessConfig || applied?.harnessConfig || '',
+      runtimeBrokerId: agent.runtimeBrokerName || agent.runtimeBrokerId || '',
+      profile: applied?.profile ?? '',
+      branch: applied?.branch || applied?.inlineConfig?.branch || '',
+    },
+  };
 }
 
 /** One line summarizing a save's disposition, by when each edit takes effect. */
@@ -136,6 +201,35 @@ export class ScionPageAgentEdit extends LitElement {
   @state() private conflict = false;
   @state() private touched: string[] = [];
   @state() private warnings: string[] = [];
+  @state() private grouping: AgentConfigGrouping = loadEditGrouping();
+  /** The agent's runtime broker, to tell whether its target is Kubernetes. */
+  @state() private targetBroker: RuntimeBroker | null = null;
+
+  /**
+   * The GCP identity picker's state: the agent's stored identity is shown,
+   * and only an explicit pick is sent.
+   */
+  readonly gcp = new GcpIdentityState();
+
+  private readonly gcpAccounts = new GCPServiceAccountsLoader({
+    projectId: () => this.agent?.projectId ?? '',
+    target: () =>
+      assignStatusTarget(
+        this.targetRuntimeIsKubernetesOnly,
+        this.agent?.runtimeBrokerId ?? '',
+        this.agent?.appliedConfig?.profile ?? ''
+      ),
+    accounts: () => this.gcp.gcpServiceAccounts,
+    setAccounts: (accounts) => this.gcp.setAccounts(accounts),
+  });
+
+  /** Whether the agent's broker and profile are reliably known to be Kubernetes. */
+  private get targetRuntimeIsKubernetesOnly(): boolean {
+    return isTargetKubernetesOnly(
+      this.targetBroker ?? undefined,
+      this.agent?.appliedConfig?.profile ?? ''
+    );
+  }
 
   override connectedCallback(): void {
     super.connectedCallback();
@@ -149,13 +243,22 @@ export class ScionPageAgentEdit extends LitElement {
     void this.load();
   }
 
+  override willUpdate(changed: Map<string, unknown>): void {
+    super.willUpdate(changed);
+    if (changed.has('targetBroker') || changed.has('agent')) {
+      this.gcp.setTarget(this.targetRuntimeIsKubernetesOnly, this.agent?.appliedConfig?.profile ?? '');
+    }
+    if (changed.has('targetBroker')) void this.gcpAccounts.targetChanged();
+  }
+
   private get form(): ScionAgentConfigForm | null {
     return this.shadowRoot?.querySelector('scion-agent-config-form') ?? null;
   }
 
   /** Loads the agent. The form keeps its edits across a reload. */
   private async load(): Promise<void> {
-    this.loading = this.agent === null;
+    const first = this.agent === null;
+    this.loading = first;
     this.error = null;
     try {
       const res = await apiFetch(`/api/v1/agents/${encodeURIComponent(this.agentId)}`);
@@ -164,13 +267,33 @@ export class ScionPageAgentEdit extends LitElement {
         return;
       }
       if (!res.ok) throw new Error(await extractApiError(res, `HTTP ${res.status}`));
-      this.agent = (await res.json()) as Agent;
+      const agent = (await res.json()) as Agent;
+      this.agent = agent;
       this.conflict = false;
-      dispatchPageTitle(this, 'Edit', this.agent.name || this.agentId);
+      // A stored identity is shown, never a pick the user has made.
+      if (!this.gcp.gcpIdentityUserSet) {
+        const id = agent.appliedConfig?.gcpIdentity;
+        this.gcp.applyStored(id?.metadataMode, id?.serviceAccountId);
+      }
+      dispatchPageTitle(this, 'Edit', agent.name || this.agentId);
+      if (first) {
+        void this.gcpAccounts.load();
+        if (agent.runtimeBrokerId) void this.loadTargetBroker(agent.runtimeBrokerId);
+      }
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Failed to load agent';
     } finally {
       this.loading = false;
+    }
+  }
+
+  /** Loads the agent's runtime broker; an unknown broker leaves the target unknown. */
+  private async loadTargetBroker(brokerId: string): Promise<void> {
+    try {
+      const res = await apiFetch(`/api/v1/runtime-brokers/${encodeURIComponent(brokerId)}`);
+      if (res.ok) this.targetBroker = (await res.json()) as RuntimeBroker;
+    } catch {
+      // Non-critical: the same "do not guess" default as no broker at all.
     }
   }
 
@@ -187,11 +310,12 @@ export class ScionPageAgentEdit extends LitElement {
       return false;
     }
     const config = form.collectConfigPatch();
-    if (Object.keys(config).length === 0) return true;
+    const topLevel = form.collectTopLevel();
+    if (Object.keys(config).length === 0 && Object.keys(topLevel).length === 0) return true;
     const res = await apiFetch(`/api/v1/agents/${encodeURIComponent(this.agentId)}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(buildAgentEditPatchBody(config, this.agent.stateVersion)),
+      body: JSON.stringify(buildAgentEditPatchBody(config, this.agent.stateVersion, topLevel)),
     });
     if (res.status === 409) {
       this.conflict = true;
@@ -211,6 +335,8 @@ export class ScionPageAgentEdit extends LitElement {
     this.warnings = body.warnings ?? [];
     showToast(dispositionSummary(body.disposition), 'success');
     form.reset();
+    // The saved identity is now the stored one.
+    this.gcp.gcpIdentityUserSet = false;
     return true;
   }
 
@@ -229,6 +355,11 @@ export class ScionPageAgentEdit extends LitElement {
 
   private async handleSaveAndStart(): Promise<void> {
     if (this.busy) return;
+    const missing = this.form?.missingRequiredEnv() ?? [];
+    if (missing.length > 0) {
+      this.error = `Missing required environment variables: ${missing.join(', ')}. Fill them in under Environment variables.`;
+      return;
+    }
     this.busy = true;
     this.error = null;
     try {
@@ -249,9 +380,49 @@ export class ScionPageAgentEdit extends LitElement {
     }
   }
 
+  /**
+   * Reincarnates the agent, which applies the held edits only a
+   * reincarnation applies. The confirm names them.
+   */
+  private async handleReincarnate(): Promise<void> {
+    if (this.busy) return;
+    const held = heldReincarnateKeys(this.agent);
+    const confirmed = await showConfirm(
+      `${REINCARNATE_CONFIRM_MESSAGE} It applies the held edits: ${held
+        .map((k) => k.replace(/^config\./, ''))
+        .join(', ')}.`,
+      { title: 'Reincarnate agent', confirmText: 'Reincarnate' }
+    );
+    if (!confirmed) return;
+    this.busy = true;
+    this.error = null;
+    try {
+      const res = await apiFetch(
+        `/api/v1/agents/${encodeURIComponent(this.agentId)}/reincarnate`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }
+      );
+      if (!res.ok) {
+        this.error = await lifecycleActionErrorMessage(res, 'Failed to reincarnate agent');
+        return;
+      }
+      navigateTo(`/agents/${encodeURIComponent(this.agentId)}`);
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : 'Failed to reincarnate agent';
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  private setGrouping(grouping: AgentConfigGrouping): void {
+    if (grouping === this.grouping) return;
+    this.grouping = grouping;
+    saveEditGrouping(grouping);
+  }
+
   private renderActions() {
     const action = editStartAction(this.agent?.phase);
     const nothingTouched = this.touched.length === 0;
+    const held = heldReincarnateKeys(this.agent);
     return html`
       <div class="actions">
         <sl-button
@@ -274,9 +445,42 @@ export class ScionPageAgentEdit extends LitElement {
               ${action === 'resume' ? 'Save & Resume' : 'Save & Start'}
             </sl-button>`
           : nothing}
-        <a href="/agents/${encodeURIComponent(this.agentId)}" class="back">Back to agent</a>
+        ${held.length > 0
+          ? html`<sl-button
+              variant="default"
+              ?disabled=${this.busy}
+              data-testid="reincarnate"
+              @click=${() => void this.handleReincarnate()}
+            >
+              <sl-icon slot="prefix" name="arrow-repeat"></sl-icon>
+              Reincarnate…
+            </sl-button>`
+          : nothing}
+        <a
+          href="/agents/${encodeURIComponent(this.agentId)}"
+          class="back"
+          data-testid="back"
+          >Back to agent</a
+        >
       </div>
     `;
+  }
+
+  private renderGroupingToggle() {
+    return html`<sl-radio-group
+      class="grouping"
+      size="small"
+      label="Group fields"
+      data-testid="grouping"
+      .value=${this.grouping}
+      @sl-change=${(e: Event) =>
+        this.setGrouping(
+          (e.target as HTMLElement & { value: string }).value === 'tier' ? 'tier' : 'function'
+        )}
+    >
+      <sl-radio-button value="function">By function</sl-radio-button>
+      <sl-radio-button value="tier">By when it applies</sl-radio-button>
+    </sl-radio-group>`;
   }
 
   override render() {
@@ -312,13 +516,16 @@ export class ScionPageAgentEdit extends LitElement {
             ${this.warnings.map((w) => html`<div>${w}</div>`)}
           </sl-alert>`
         : nothing}
+      ${this.renderGroupingToggle()}
       <scion-agent-config-form
         mode="edit"
-        .fieldKeys=${AGENT_EDIT_FIELD_KEYS}
-        .values=${agent.appliedConfig?.inlineConfig ?? {}}
+        .grouping=${this.grouping}
+        .values=${agentEditValues(agent)}
+        .editValues=${agentEditTopValues(agent)}
         .placeholders=${agentEditPlaceholders(agent)}
         .editability=${agent.editability ?? null}
         .harnessCapabilities=${agent.harnessCapabilities ?? null}
+        .gcpIdentity=${this.gcp}
         ?disabled=${this.busy}
         @agent-config-change=${(e: CustomEvent<{ touched: string[] }>) => {
           this.touched = e.detail.touched;
@@ -339,6 +546,9 @@ export class ScionPageAgentEdit extends LitElement {
       padding: 3rem;
     }
     sl-alert {
+      margin-bottom: 1rem;
+    }
+    .grouping {
       margin-bottom: 1rem;
     }
     .actions {

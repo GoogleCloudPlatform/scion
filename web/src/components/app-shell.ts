@@ -403,9 +403,6 @@ export class ScionApp extends LitElement {
     if (this.currentPath === '/terminals' || this.currentPath.match(/^\/terminals\/[^/]+$/)) {
       return 'Terminals';
     }
-    if (this.currentPath.match(/^\/agents\/[^/]+\/configure$/)) {
-      return 'Configure Agent';
-    }
     if (this.currentPath.match(/^\/agents\/[^/]+\/edit$/)) {
       return 'Edit Agent';
     }

@@ -128,7 +128,6 @@ describe('agent detail header actions order', () => {
       'Message',
       'Terminal',
       'Start',
-      'Configure',
       'trash',
     ]);
   });
@@ -169,54 +168,43 @@ describe('agent detail header actions order', () => {
     expect(message.querySelector(':scope > sl-button')!.hasAttribute('disabled')).toBe(true);
   });
 
-  // The configure page carries the Timezone row, which works in any phase,
-  // so Configure shows whenever the caller may update the agent.
-  it('shows Configure for a running agent with update capability', () => {
-    expect(
-      headerActionLabels(
-        makeAgent({
-          phase: 'running',
-          _capabilities: { actions: ['read', 'lifecycle', 'attach', 'update', 'delete'] },
-        })
-      )
-    ).toEqual([GRAPH, 'Message', 'Terminal', 'Suspend', 'Stop', 'Configure', 'trash']);
-  });
-
-  it.each(['stopped', 'suspended', 'error'] as const)(
-    'shows Configure for a %s agent with update capability',
-    (phase) => {
-      const labels = headerActionLabels(
-        makeAgent({ phase, _capabilities: { actions: ['read', 'lifecycle', 'update'] } })
-      );
-      expect(labels).toContain('Configure');
-    }
-  );
-
-  it('hides Configure for a running agent without update capability', () => {
-    const labels = headerActionLabels(makeAgent({ phase: 'running' }));
-    expect(labels).not.toContain('Configure');
-  });
-
-  it('links Configure to the agent configure page', () => {
-    const actions = renderHeaderActions(
-      makeAgent({ phase: 'running', _capabilities: { actions: ['read', 'update'] } })
-    );
-    expect(actions.querySelector('a[href="/agents/a-1/configure"]')).not.toBeNull();
-  });
-
-  // The Edit page (experiment web.agent_edit) sits next to Configure for a
-  // caller who may update the agent.
+  // The Edit page (experiment web.agent_edit, ptone/scion#3975) replaced
+  // the Configure page: Edit shows in every phase for a caller who may
+  // update the agent, in Configure's place before Delete.
   describe('Edit button', () => {
     afterEach(() => {
       window.__SCION_FEATURES__ = {};
     });
 
-    it('shows Edit next to Configure while the experiment is on', () => {
+    it('shows Edit for a running agent with update capability, before Delete', () => {
       window.__SCION_FEATURES__ = { 'web.agent_edit': true };
-      const agent = makeAgent({ phase: 'stopped', _capabilities: { actions: ['read', 'update'] } });
-      const labels = headerActionLabels(agent);
-      expect(labels.indexOf('Edit')).toBe(labels.indexOf('Configure') + 1);
-      expect(renderHeaderActions(agent).querySelector('a[href="/agents/a-1/edit"]')).not.toBeNull();
+      expect(
+        headerActionLabels(
+          makeAgent({
+            phase: 'running',
+            _capabilities: { actions: ['read', 'lifecycle', 'attach', 'update', 'delete'] },
+          })
+        )
+      ).toEqual([GRAPH, 'Message', 'Terminal', 'Suspend', 'Stop', 'Edit', 'trash']);
+    });
+
+    it.each(['created', 'stopped', 'suspended', 'error', 'running'] as const)(
+      'shows Edit linking to the Edit page for a %s agent with update capability',
+      (phase) => {
+        window.__SCION_FEATURES__ = { 'web.agent_edit': true };
+        const agent = makeAgent({ phase, _capabilities: { actions: ['read', 'lifecycle', 'update'] } });
+        expect(headerActionLabels(agent)).toContain('Edit');
+        expect(
+          renderHeaderActions(agent).querySelector('a[href="/agents/a-1/edit"]')
+        ).not.toBeNull();
+      }
+    );
+
+    it('never shows Configure, nor links to the retired configure page', () => {
+      window.__SCION_FEATURES__ = { 'web.agent_edit': true };
+      const agent = makeAgent({ phase: 'created', _capabilities: { actions: ['read', 'update'] } });
+      expect(headerActionLabels(agent)).not.toContain('Configure');
+      expect(renderHeaderActions(agent).querySelector('a[href$="/configure"]')).toBeNull();
     });
 
     it('hides Edit while the experiment is off', () => {
@@ -224,13 +212,13 @@ describe('agent detail header actions order', () => {
       const labels = headerActionLabels(
         makeAgent({ phase: 'stopped', _capabilities: { actions: ['read', 'update'] } })
       );
-      expect(labels).toContain('Configure');
       expect(labels).not.toContain('Edit');
     });
 
-    it('hides Edit without update capability', () => {
+    it('hides Edit without update capability, a created agent included', () => {
       window.__SCION_FEATURES__ = { 'web.agent_edit': true };
       expect(headerActionLabels(makeAgent({ phase: 'stopped' }))).not.toContain('Edit');
+      expect(headerActionLabels(makeAgent({ phase: 'created' }))).not.toContain('Edit');
     });
   });
 
