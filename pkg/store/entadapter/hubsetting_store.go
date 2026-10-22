@@ -376,11 +376,14 @@ func (s *HubSettingStore) DeleteHubSettingRevision(ctx context.Context, section 
 // The origin of an operational section is part of the settings a reader
 // sees (a seeded endpoints row's public_url is not a saved value), so when
 // the update changes an operational row, the operational-settings revision
-// is bumped in the same transaction. The bump is decided by the rows the
-// operational update changed, not by the rows a query found first: a
-// replica that backfills concurrently finds its rows already changed once
-// the first replica commits (Postgres re-checks the predicate after the
-// row lock), updates none and does not bump.
+// is bumped in the same transaction. The rows are updated in two
+// statements partitioned by section name (the sections registered in
+// opsettings.SectionNames), never by the rows a query found
+// first, so a row committed between the statements is still counted on
+// the right side; the bump is decided by the rows the operational update
+// changed. A replica that backfills concurrently finds its rows already
+// changed once the first replica commits (Postgres re-checks the predicate
+// after the row lock), updates none and does not bump.
 func (s *HubSettingStore) BackfillOrigin(ctx context.Context) error {
 	tx, err := s.client.Tx(ctx)
 	if err != nil {
@@ -394,37 +397,32 @@ func (s *HubSettingStore) BackfillOrigin(ctx context.Context) error {
 		hubsetting.SectionNEQ(store.HubSettingsRevisionSection),
 		hubsetting.OriginEQ(hubsetting.OriginSeeded),
 	}
-	sections, err := tx.HubSetting.Query().Where(match...).Select(hubsetting.FieldSection).Strings(ctx)
+	// Early exit when nothing matches; the updates below do not depend on
+	// this read.
+	found, err := tx.HubSetting.Query().Where(match...).Exist(ctx)
 	if err != nil {
 		return fmt.Errorf("backfill origin: query: %w", err)
 	}
-	if len(sections) == 0 {
+	if !found {
 		return nil
 	}
-	var operational []string
-	for _, section := range sections {
-		if isOperationalSection(section) {
-			operational = append(operational, section)
-		}
-	}
+	operational := opsettings.SectionNames()
 	if _, err := tx.HubSetting.Update().
 		Where(append(match, hubsetting.SectionNotIn(operational...))...).
 		SetOrigin(hubsetting.OriginManaged).
 		Save(ctx); err != nil {
 		return fmt.Errorf("backfill origin: %w", err)
 	}
-	if len(operational) > 0 {
-		n, err := tx.HubSetting.Update().
-			Where(append(match, hubsetting.SectionIn(operational...))...).
-			SetOrigin(hubsetting.OriginManaged).
-			Save(ctx)
-		if err != nil {
+	n, err := tx.HubSetting.Update().
+		Where(append(match, hubsetting.SectionIn(operational...))...).
+		SetOrigin(hubsetting.OriginManaged).
+		Save(ctx)
+	if err != nil {
+		return fmt.Errorf("backfill origin: %w", err)
+	}
+	if n > 0 {
+		if _, err := bumpSettingsRevision(ctx, tx); err != nil {
 			return fmt.Errorf("backfill origin: %w", err)
-		}
-		if n > 0 {
-			if _, err := bumpSettingsRevision(ctx, tx); err != nil {
-				return fmt.Errorf("backfill origin: %w", err)
-			}
 		}
 	}
 	if err := tx.Commit(); err != nil {

@@ -22,6 +22,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/hook"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/hubsetting"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
@@ -249,4 +251,45 @@ func TestIsHubSettingSectionConflict_SQLiteDuplicateSection(t *testing.T) {
 	_, err = client.HubSetting.Create().SetSection("lifecycle").SetValue(json.RawMessage(`{}`)).Save(ctx)
 	require.Error(t, err)
 	assert.True(t, isHubSettingSectionConflict(err), "duplicate section: %v", err)
+}
+
+// BackfillOrigin partitions its two updates by section name, not by the
+// rows its first read found: an operational row that appears after that
+// read (committed by another writer between the statements) is updated by
+// the operational update, with a bump, never silently by the other one
+// (ptone/scion#5666 review). The hook stands in for the other writer by
+// inserting the row just before the first update runs.
+func TestHubSettingsRevision_BackfillOriginRowAppearingBetweenStatements(t *testing.T) {
+	client := enttest.NewClient(t)
+	s := NewHubSettingStore(client)
+	ctx := context.Background()
+
+	_, err := client.HubSetting.Create().SetSection("migration_example_marker_v1").
+		SetValue(json.RawMessage(`{}`)).SetUpdatedBy("migration").SetOrigin(hubsetting.OriginSeeded).Save(ctx)
+	require.NoError(t, err)
+	require.Equal(t, int64(0), settingsRevision(t, s))
+
+	inserted := false
+	client.HubSetting.Use(func(next ent.Mutator) ent.Mutator {
+		return hook.HubSettingFunc(func(ctx context.Context, m *ent.HubSettingMutation) (ent.Value, error) {
+			if !inserted && m.Op().Is(ent.OpUpdate) {
+				inserted = true
+				if _, err := m.Client().HubSetting.Create().SetSection("lifecycle").
+					SetValue(json.RawMessage(`{}`)).SetUpdatedBy("admin@test.com").SetOrigin(hubsetting.OriginSeeded).Save(ctx); err != nil {
+					return nil, err
+				}
+			}
+			return next.Mutate(ctx, m)
+		})
+	})
+
+	require.NoError(t, s.BackfillOrigin(ctx))
+	require.True(t, inserted, "the hook ran before the first update")
+	got, err := s.GetHubSetting(ctx, "lifecycle")
+	require.NoError(t, err)
+	assert.Equal(t, "managed", got.Origin)
+	assert.Equal(t, int64(1), settingsRevision(t, s), "the operational row's backfill bumps the revision")
+	marker, err := s.GetHubSetting(ctx, "migration_example_marker_v1")
+	require.NoError(t, err)
+	assert.Equal(t, "managed", marker.Origin)
 }
