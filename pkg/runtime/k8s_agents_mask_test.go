@@ -81,6 +81,20 @@ func TestBuildPod_SharedWorkspaceAgentsMask(t *testing.T) {
 		{"NFS shared, no agents dir", shared(nfsBaseConfig("nfs"), scionOnly), true, false, true},
 		{"NFS shared without .scion", shared(nfsBaseConfig("nfs"), noScion), false, false, false},
 		{"NFS shared, .scion marker file", shared(nfsBaseConfig("nfs"), markerOnly), false, false, true},
+		// The pod mounts the export subPath (the broker's config.Workspace)
+		// at /workspace; a workspace below the repo root (a subdirectory
+		// project) gets its own .scion mounted at /workspace/.scion from
+		// <subPath>/.scion.
+		{"NFS shared, workspace below the repo root", func() RunConfig {
+			c := nfsBaseConfig("nfs")
+			c.RepoRoot, c.Workspace = filepath.Dir(scionOnly), scionOnly
+			return c
+		}(), false, false, true},
+		{"NFS shared, agent's own workspace", func() RunConfig {
+			c := shared(nfsBaseConfig("nfs"), scionOnly)
+			c.AgentOwnWorkspace = true
+			return c
+		}(), true, false, false},
 		{"NFS shared, repo root reported elsewhere", func() RunConfig {
 			c := shared(nfsBaseConfig("nfs"), scionOnly)
 			c.RepoRoot = noScion
