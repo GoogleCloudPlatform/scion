@@ -373,3 +373,15 @@ func TestBuildPod_ProjectConfigSymlinkRefused(t *testing.T) {
 		t.Fatalf("buildPod error = %v, want errProjectConfigSymlink", err)
 	}
 }
+
+// An NFS-shared workspace the broker cannot see refuses the pod instead of
+// leaving out the read-only .scion mount.
+func TestBuildPod_ProjectConfigUncheckableWorkspaceRefused(t *testing.T) {
+	cfg := nfsBaseConfig("nfs")
+	missing := filepath.Join(t.TempDir(), "not-mounted")
+	cfg.RepoRoot, cfg.Workspace = missing, missing
+	_, err := newNFSTestK8sRuntime().buildPod("default", cfg)
+	if err == nil || !strings.Contains(err.Error(), "cannot check the shared workspace") {
+		t.Fatalf("buildPod error = %v, want a refusal", err)
+	}
+}

@@ -16,6 +16,8 @@ package runtime
 
 import (
 	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -92,7 +94,7 @@ var errProjectConfigSymlink = errors.New("the workspace's .scion is a symbolic l
 // errProjectConfigMarkerNoBind is returned for a workspace whose .scion is
 // a project marker file on a runtime that cannot bind a single file: the
 // marker would stay writable, so the agent could replace it.
-var errProjectConfigMarkerNoBind = errors.New("the workspace's .scion is a project marker file, which this container runtime cannot mount read-only; use a runtime that can (docker, podman or kubernetes), or keep the project configuration in a .scion directory")
+var errProjectConfigMarkerNoBind = errors.New("the workspace's .scion is a project marker file, which this container runtime cannot mount read-only: on this runtime, commit a .scion/ directory to the repository, or use a non-shared workspace")
 
 // workspaceProjectConfigMount returns the broker-side .scion entry of a
 // workspace that is mounted into the container at containerWorkspace, and
@@ -113,19 +115,30 @@ var errProjectConfigMarkerNoBind = errors.New("the workspace's .scion is a proje
 //
 // ok is false when there is no .scion at all: binding a missing path would
 // make the container runtime create it in the host checkout. A .scion that
-// is a symbolic link is refused with errProjectConfigSymlink.
+// is a symbolic link is refused with errProjectConfigSymlink, and a
+// workspace or .scion entry that cannot be checked is refused with an error.
 func workspaceProjectConfigMount(workspace, containerWorkspace string, allowMarkerFile bool) (hostPath, target string, ok bool, err error) {
 	if workspace == "" || containerWorkspace == "" {
 		return "", "", false, nil
 	}
+	// Fail closed: a workspace or .scion entry that cannot be checked (other
+	// than not existing) is refused, never left without the read-only
+	// mount.
 	root, err := filepath.EvalSymlinks(workspace)
-	if err != nil {
+	if errors.Is(err, fs.ErrNotExist) {
+		// No workspace yet, so no .scion in it to protect.
 		return "", "", false, nil
+	}
+	if err != nil {
+		return "", "", false, fmt.Errorf("cannot check the workspace for project configuration to mount read-only: %w", err)
 	}
 	candidate := filepath.Join(root, workspaceProjectConfigDir)
 	info, err := os.Lstat(candidate)
-	if err != nil {
+	if errors.Is(err, fs.ErrNotExist) {
 		return "", "", false, nil
+	}
+	if err != nil {
+		return "", "", false, fmt.Errorf("cannot check the workspace's .scion to mount it read-only: %w", err)
 	}
 	target = path.Join(containerWorkspace, workspaceProjectConfigDir)
 	switch {

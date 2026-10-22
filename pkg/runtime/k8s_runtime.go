@@ -5061,6 +5061,11 @@ func k8sProjectConfigVolumeMount(config RunConfig) (corev1.VolumeMount, bool, er
 	if config.Workspace == "" || config.AgentOwnWorkspace {
 		return corev1.VolumeMount{}, false, nil
 	}
+	// The broker must see the shared workspace to decide; a workspace it
+	// cannot check refuses the pod rather than omit the read-only mount.
+	if _, err := os.Lstat(config.Workspace); err != nil {
+		return corev1.VolumeMount{}, false, fmt.Errorf("cannot check the shared workspace for project configuration to mount read-only: %w", err)
+	}
 	_, target, ok, err := workspaceProjectConfigMount(config.Workspace, "/workspace", true)
 	if err != nil || !ok {
 		return corev1.VolumeMount{}, false, err

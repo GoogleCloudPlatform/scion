@@ -486,3 +486,31 @@ func TestBuildCommonRunArgs_FallbackAppleMarkerRefused(t *testing.T) {
 		t.Fatalf("buildCommonRunArgs error = %v, want errProjectConfigMarkerNoBind", err)
 	}
 }
+
+// A .scion entry that cannot be checked (other than not existing) refuses
+// the mount decision with an error instead of leaving the workspace
+// without its read-only bind.
+func TestWorkspaceProjectConfigMount_UncheckableEntryRefused(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission checks do not apply to root")
+	}
+	ws := filepath.Join(t.TempDir(), "ws")
+	mkdirs(t, filepath.Join(ws, ".scion"))
+	if err := os.Chmod(ws, 0o600); err != nil { // no search permission
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(ws, 0o755) })
+	if _, _, ok, err := workspaceProjectConfigMount(ws, "/workspace", true); ok || err == nil {
+		t.Fatalf("(ok=%v, err=%v), want an error", ok, err)
+	}
+}
+
+// The Apple marker refusal says what to do on that runtime.
+func TestErrProjectConfigMarkerNoBindText(t *testing.T) {
+	msg := errProjectConfigMarkerNoBind.Error()
+	for _, want := range []string{"commit a .scion/ directory to the repository", "use a non-shared workspace", "on this runtime"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message %q lacks %q", msg, want)
+		}
+	}
+}
