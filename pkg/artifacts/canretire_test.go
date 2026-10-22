@@ -17,6 +17,7 @@
 package artifacts
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"testing"
@@ -117,5 +118,47 @@ func TestCanRetireUnreadableIsMissing(t *testing.T) {
 	rec := f.do(&blind, http.MethodGet, artifactPath(f.id), nil, nil)
 	if rec.Code != http.StatusNotFound || strings.Contains(rec.Body.String(), "canRetire") {
 		t.Fatalf("GET by a non-reading admin: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestCanRetireIsAdviceDeleteDecidesFresh: canRetire is a snapshot taken
+// at GET. When the authority behind it is withdrawn before the DELETE (an
+// admin grant removed, a steward clause gone, the home-project admin's
+// credential no longer permitting artifact.manage), the DELETE decides
+// again and refuses with 403, deleting nothing. It fails if the route ever
+// trusts the flag, cached or client-supplied, instead of deciding afresh.
+func TestCanRetireIsAdviceDeleteDecidesFresh(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		who    principal
+		revoke func(f *stewardFixture)
+	}{
+		{"admin grant removed", stAdminGrantee, func(f *stewardFixture) {
+			f.exec(f.t, `DELETE FROM artifact_grant WHERE artifact_id = ? AND subject_ref = ?`,
+				f.id, PrincipalRef(stAdminGrantee.kind, stAdminGrantee.ref))
+		}},
+		{"steward clause gone", ownerSteward, func(f *stewardFixture) {
+			f.host.mu.Lock()
+			defer f.host.mu.Unlock()
+			delete(f.host.stewards, PrincipalRef(ownerSteward.kind, ownerSteward.ref)+" "+agentA.ref+" project-1")
+		}},
+		{"custodian credential narrowed", custodianP, func(f *stewardFixture) {
+			f.host.deny(custodianP, "project-1", PermissionManage)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newStewardFixture(t)
+			get := f.do(&tc.who, http.MethodGet, artifactPath(f.id), nil, nil)
+			if get.Code != http.StatusOK || !decodeInto[ArtifactResponse](t, get).CanRetire {
+				t.Fatalf("GET before the change: %d %s; want canRetire true", get.Code, get.Body.String())
+			}
+			tc.revoke(f)
+			if rec := f.del(tc.who, f.id); rec.Code != http.StatusForbidden {
+				t.Fatalf("DELETE after the authority was withdrawn: %d %s; want 403", rec.Code, rec.Body.String())
+			}
+			if _, err := f.store.GetArtifact(context.Background(), f.id); err != nil {
+				t.Fatalf("the refused delete deleted the artifact: %v", err)
+			}
+		})
 	}
 }
