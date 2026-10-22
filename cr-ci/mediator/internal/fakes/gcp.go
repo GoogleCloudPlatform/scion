@@ -224,6 +224,13 @@ func (g *GoogleAPIs) SetSecret(name string, v []byte) {
 	g.secrets[name] = v
 }
 
+// SetSecretGate installs the secret access gate (see SecretStarted).
+func (g *GoogleAPIs) SetSecretGate(started, release chan struct{}) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.SecretStarted, g.SecretRelease = started, release
+}
+
 // DeleteSecret removes secret name.
 func (g *GoogleAPIs) DeleteSecret(name string) {
 	g.mu.Lock()
@@ -324,7 +331,7 @@ func NewGoogle(key *rsa.PrivateKey) *Google {
 	g.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		g.mu.Lock()
 		g.Fetches++
-		fail, started, release := g.Fail, g.Started, g.Release
+		fail, started, release, kid := g.Fail, g.Started, g.Release, g.Kid
 		g.mu.Unlock()
 		if started != nil {
 			started <- struct{}{}
@@ -336,7 +343,7 @@ func NewGoogle(key *rsa.PrivateKey) *Google {
 		}
 		w.Header().Set("Cache-Control", "public, max-age=3600")
 		writeJSON(w, http.StatusOK, map[string]any{"keys": []any{map[string]string{
-			"kid": g.Kid, "kty": "RSA", "alg": "RS256", "use": "sig",
+			"kid": kid, "kty": "RSA", "alg": "RS256", "use": "sig",
 			"n": base64.RawURLEncoding.EncodeToString(key.N.Bytes()),
 			"e": base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key.E)).Bytes()),
 		}}})
@@ -346,6 +353,33 @@ func NewGoogle(key *rsa.PrivateKey) *Google {
 
 // Close stops the server.
 func (g *Google) Close() { g.Server.Close() }
+
+// GateBackstop bounds how long a test waits for work that must finish while a
+// gated fake request is held. On a pass the work takes milliseconds; the bound
+// only turns a regression (the work waiting for the gate, which is released
+// after the wait) into a failure instead of a hang, so it can be generous.
+const GateBackstop = 30 * time.Second
+
+// SetKid changes the kid the JWKS serves and IDToken signs with (key rotation).
+func (g *Google) SetKid(kid string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.Kid = kid
+}
+
+// SetFail makes the JWKS endpoint answer 500 (true) or normally (false).
+func (g *Google) SetFail(fail bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.Fail = fail
+}
+
+// SetGate installs the JWKS request gate (see Started and Release).
+func (g *Google) SetGate(started, release chan struct{}) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.Started, g.Release = started, release
+}
 
 // Mint returns an ID token with claims, signed by key under kid.
 func Mint(key *rsa.PrivateKey, kid string, claims map[string]any) string {
@@ -362,7 +396,10 @@ func Mint(key *rsa.PrivateKey, kid string, claims map[string]any) string {
 
 // IDToken returns a valid-looking Google ID token for aud and email.
 func (g *Google) IDToken(aud, email string, now time.Time) string {
-	return Mint(g.Key, g.Kid, map[string]any{
+	g.mu.Lock()
+	kid := g.Kid
+	g.mu.Unlock()
+	return Mint(g.Key, kid, map[string]any{
 		"iss": "https://accounts.google.com", "aud": aud, "email": email, "email_verified": true,
 		"iat": now.Unix(), "exp": now.Add(time.Hour).Unix(), "sub": "1234567890",
 	})

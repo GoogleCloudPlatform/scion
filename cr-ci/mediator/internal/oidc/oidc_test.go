@@ -92,7 +92,7 @@ func with(m map[string]any, k string, v any) map[string]any {
 func TestJWKSOutageBackoff(t *testing.T) {
 	g := fakes.NewGoogle(fakes.Key(1))
 	defer g.Close()
-	g.Fail = true
+	g.SetFail(true)
 	now := time.Unix(1_700_000_000, 0)
 	v := &Verifier{CertsURL: g.Server.URL, Audience: aud, Email: email, Now: func() time.Time { return now }}
 	tok := g.IDToken(aud, email, now)
@@ -104,7 +104,7 @@ func TestJWKSOutageBackoff(t *testing.T) {
 	if g.Fetches != 1 {
 		t.Errorf("JWKS fetched %d times during an outage, want 1", g.Fetches)
 	}
-	g.Fail = false
+	g.SetFail(false)
 	now = now.Add(61 * time.Second)
 	if err := v.Verify(context.Background(), g.IDToken(aud, email, now)); err != nil {
 		t.Errorf("after the outage: %v", err)
@@ -129,12 +129,13 @@ func TestFetchDoesNotBlockCachedKeys(t *testing.T) {
 	now = now.Add(61 * time.Second) // refetch allowed; keys still fresh (1 h)
 	mu.Unlock()
 
-	g.Started, g.Release = make(chan struct{}), make(chan struct{})
+	started, release := make(chan struct{}), make(chan struct{})
+	g.SetGate(started, release)
 	done := make(chan error, 1)
 	go func() {
 		done <- v.Verify(ctx, fakes.Mint(g.Key, "other-kid", map[string]any{"iss": "accounts.google.com"}))
 	}()
-	<-g.Started // the fetch is in flight and blocked
+	<-started // the fetch is in flight and blocked
 
 	fast := make(chan error, 1)
 	go func() { fast <- v.Verify(ctx, g.IDToken(aud, email, clock())) }()
@@ -143,10 +144,10 @@ func TestFetchDoesNotBlockCachedKeys(t *testing.T) {
 		if err != nil {
 			t.Errorf("cached-key verify failed: %v", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(fakes.GateBackstop): // the fetch stays blocked until release
 		t.Error("a cached-key verify waited for the in-flight JWKS fetch")
 	}
-	close(g.Release)
+	close(release)
 	if err := <-done; err == nil {
 		t.Error("unknown kid verified")
 	}
@@ -165,7 +166,7 @@ func TestFetchSurvivesCancelledTrigger(t *testing.T) {
 		t.Fatalf("initial verify: %v", err)
 	}
 	// Google rotates to a new kid; the refetch slot is open again.
-	g.Kid = "rotated-kid"
+	g.SetKid("rotated-kid")
 	now = now.Add(61 * time.Second)
 
 	cancelled, cancel := context.WithCancel(context.Background())

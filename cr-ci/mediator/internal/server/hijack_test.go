@@ -450,13 +450,14 @@ func TestSecretRefetchDoesNotBlockValidDeliveries(t *testing.T) {
 		t.Fatalf("first delivery: %d", code)
 	}
 	h.clock.Add(61 * time.Second)
-	h.gapis.SecretStarted, h.gapis.SecretRelease = make(chan struct{}), make(chan struct{})
+	started, release := make(chan struct{}), make(chan struct{})
+	h.gapis.SetSecretGate(started, release)
 	bad := make(chan int, 1)
 	go func() {
 		code, _ := h.webhookWith("FAKE-forged-secret", "ping", ping)
 		bad <- code
 	}()
-	<-h.gapis.SecretStarted // the refetch is in flight and blocked
+	<-started // the refetch is in flight and blocked
 
 	fast := make(chan int, 1)
 	go func() {
@@ -468,10 +469,10 @@ func TestSecretRefetchDoesNotBlockValidDeliveries(t *testing.T) {
 		if code != http.StatusOK {
 			t.Errorf("valid delivery during a refetch: %d", code)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(fakes.GateBackstop): // the refetch stays blocked until release
 		t.Error("a correctly signed delivery waited for the in-flight secret refetch")
 	}
-	close(h.gapis.SecretRelease)
+	close(release)
 	if code := <-bad; code != http.StatusUnauthorized {
 		t.Errorf("forged delivery: %d, want 401", code)
 	}
