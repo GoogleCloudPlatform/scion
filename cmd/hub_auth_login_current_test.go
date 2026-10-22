@@ -76,7 +76,7 @@ func TestRecordLoginHub_NoCurrentHubSelectsLoginHub(t *testing.T) {
 			})
 			assert.Contains(t, out, "Registered hub 'new' ("+newHub+"); rename with 'scion hub rename'.\n"+
 				"Hub 'new' ("+newHub+") is now the current hub.\n")
-			assert.NotContains(t, out, "To make it the current hub")
+			assert.NotContains(t, out, "the current hub, run")
 			c := readTestContext(t)
 			require.NotNil(t, c.Hubs["new"])
 			assert.Equal(t, newHub, c.Hubs["new"].Endpoint)
@@ -118,7 +118,7 @@ func TestRecordLoginHub_CurrentHubNotSwitched(t *testing.T) {
 
 	out, errOut := loginRecord(t, hubAuthHubURL)
 	assert.Equal(t, "Registered hub 'other' (https://other.example.com); rename with 'scion hub rename'.\n"+
-		"To make it the current hub, run 'scion use --hub other'.\n", out)
+		"To make hub 'other' the current hub, run 'scion use --hub other'.\n", out)
 	assert.Empty(t, errOut)
 	c := readTestContext(t)
 	assert.NotNil(t, c.Hubs["other"])
@@ -171,4 +171,43 @@ func TestHubAuthLogin_FailureWritesNothing(t *testing.T) {
 	assert.NotContains(t, out.String(), "is now the current hub")
 	assert.Empty(t, readContextFileOrEmpty(t), "nothing is written")
 	assert.False(t, credentials.IsAuthenticated(hubAuthHubURL))
+}
+
+// With no current hub, --hub-url with a nickname makes that hub current.
+func TestRecordLoginHub_NoCurrentHubHubURLNickname(t *testing.T) {
+	setupLoginNoCurrentHubTest(t)
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		return c.AddHub("staging", "https://staging.example.com")
+	}))
+	hubAuthHubURL = "staging"
+	require.NoError(t, resolveInvocationTarget(findCommand(t, "hub", "auth", "login"), ModeHuman))
+	hubURL, err := hubAuthURL(hubAuthHubURL)
+	require.NoError(t, err)
+	require.Equal(t, "https://staging.example.com", hubURL)
+
+	out, errOut := loginRecord(t, hubURL)
+	assert.Equal(t, "Hub 'staging' (https://staging.example.com) is now the current hub.\n", out)
+	assert.Empty(t, errOut)
+	assert.Equal(t, "staging", readTestContext(t).CurrentHub, "the --hub-url nickname's hub becomes current")
+}
+
+// With no current hub, a bare login in a linked directory makes the hub of
+// the directory's link entry current and says so after the usual line.
+func TestRecordLoginHub_LinkEntryHubNoCurrentHubSelected(t *testing.T) {
+	setupLoginNoCurrentHubTest(t)
+	dotScion := makeLinkedDirProject(t, "")
+	saveLinkEntry(t, dotScion, linkEntryTestHub, "linked")
+	require.Empty(t, readTestContext(t).CurrentHub)
+
+	require.NoError(t, resolveInvocationTarget(findCommand(t, "hub", "auth", "login"), ModeHuman))
+	require.Equal(t, targetSourceDirectory, hubSource)
+	hubURL, err := hubAuthURL(hubAuthHubURL)
+	require.NoError(t, err)
+	require.Equal(t, linkEntryTestHub, hubURL)
+
+	out, errOut := loginRecord(t, hubURL)
+	assert.Equal(t, "Logged in to "+linkEntryTestHub+" (the hub this directory is linked to).\n"+
+		"Hub 'linked' ("+linkEntryTestHub+") is now the current hub.\n", out)
+	assert.Empty(t, errOut)
+	assert.Equal(t, "linked", readTestContext(t).CurrentHub, "the link entry's hub becomes current")
 }

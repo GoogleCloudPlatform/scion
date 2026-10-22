@@ -93,9 +93,10 @@ A login never changes settings files. Credentials are stored in
 --hub accepts a hub nickname ('scion hub list'). A hub URL given with
 --hub that is not in the hub list yet is added to it after a successful
 login, with a nickname derived from its host. When no hub is current yet,
-the hub given with --hub becomes the current hub.
+the hub logged in to becomes the current hub (not one taken from
+SCION_HUB_ENDPOINT or SCION_HUB_URL).
 A login never switches a hub that is already current.
-To make it the current hub, run 'scion use --hub <name>'.
+To make hub <name> the current hub, run 'scion use --hub <name>'.
 
 Example:
   scion hub auth login
@@ -243,7 +244,9 @@ var errHubAlreadyListed = errors.New("hub already registered")
 // configuration.
 //
 //   - The current hub ('scion use') or the hub of the linked directory:
-//     one line saying which hub that was.
+//     one line saying which hub that was. The hub of the linked directory
+//     becomes the current hub when none is (selectLoginHubIfNoneCurrent),
+//     and one more line says so.
 //   - A URL given with --hub or --hub-url: added to the hub list when it
 //     has no entry (registerHubInList).
 //   - A hub given with --hub or --hub-url (URL or nickname): when no hub
@@ -261,6 +264,7 @@ func recordLoginHub(out, stderr io.Writer, hubURL string) {
 		return
 	case hubAuthHubURL == "" && hubSource == targetSourceDirectory:
 		_, _ = fmt.Fprintf(out, "Logged in to %s (the hub this directory is linked to).\n", config.RedactURL(hubURL))
+		printLoginHubSelected(out, stderr, hubURL)
 		return
 	case hubAuthHubURL == "" && hubFlagEndpoint() == "":
 		return
@@ -268,8 +272,7 @@ func recordLoginHub(out, stderr io.Writer, hubURL string) {
 	if loginHubURLGivenExplicitly() {
 		registerHubInList(out, stderr, hubURL)
 	}
-	if name, endpoint, ok := selectLoginHubIfNoneCurrent(stderr, hubURL); ok {
-		_, _ = fmt.Fprintf(out, "Hub '%s' (%s) is now the current hub.\n", name, config.RedactURL(endpoint))
+	if printLoginHubSelected(out, stderr, hubURL) {
 		return
 	}
 	c, err := config.LoadCLIContext()
@@ -277,8 +280,18 @@ func recordLoginHub(out, stderr io.Writer, hubURL string) {
 		return
 	}
 	if name, h := c.HubByEndpoint(hubURL); h != nil && name != c.CurrentHub {
-		_, _ = fmt.Fprintf(out, "To make it the current hub, run 'scion use --hub %s'.\n", name)
+		_, _ = fmt.Fprintf(out, "To make hub '%s' the current hub, run 'scion use --hub %s'.\n", name, name)
 	}
+}
+
+// printLoginHubSelected makes the hub at hubURL the current hub when none
+// is (selectLoginHubIfNoneCurrent) and prints one line when it did.
+func printLoginHubSelected(out, stderr io.Writer, hubURL string) bool {
+	name, endpoint, ok := selectLoginHubIfNoneCurrent(stderr, hubURL)
+	if ok {
+		_, _ = fmt.Fprintf(out, "Hub '%s' (%s) is now the current hub.\n", name, config.RedactURL(endpoint))
+	}
+	return ok
 }
 
 // selectLoginHubIfNoneCurrent makes the hub list entry for hubURL the

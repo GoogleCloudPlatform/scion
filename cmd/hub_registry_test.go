@@ -853,7 +853,7 @@ func TestFinishHubAuthLogin_RegistersOnlyExplicitURL(t *testing.T) {
 			require.NoError(t, finishHubAuthLogin(hubAuthLoginCmd, hubAuthHubURL, token))
 		})
 		assert.Contains(t, out, "Registered hub 'new' ("+newHub+"); rename with 'scion hub rename'.\n")
-		assert.Contains(t, out, "To make it the current hub, run 'scion use --hub new'.\n")
+		assert.Contains(t, out, "To make hub 'new' the current hub, run 'scion use --hub new'.\n")
 		assert.NotContains(t, out, "Saved hub endpoint")
 		assert.Empty(t, settingsEndpoint(t, filepath.Join(os.Getenv("HOME"), ".scion")), "no settings file gets the endpoint")
 		c := readTestContext(t)
