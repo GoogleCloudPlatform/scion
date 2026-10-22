@@ -44,8 +44,10 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
@@ -173,8 +175,9 @@ func NewEnvelope(eventType, eventID, producerNamespace string, eventTS, observed
 }
 
 // Event is implemented by every analytics event type, through the promoted
-// Envelope.AnalyticsEnvelope method plus the type's own Validate (which
-// should call Envelope.Validate first).
+// Envelope.AnalyticsEnvelope method plus the type's own Validate for its
+// payload. Marshal and Unmarshal always validate the envelope itself
+// (AnalyticsEnvelope().Validate) before calling the event's Validate.
 type Event interface {
 	AnalyticsEnvelope() *Envelope
 	Validate() error
@@ -286,9 +289,14 @@ func (l Labels) Validate() error {
 	return nil
 }
 
-// MarshalJSON writes a nil label set as [] rather than null: "no labels" is
-// a known, empty set, not an unknown one.
+// MarshalJSON validates the set (Labels.Validate) and writes it; a nil set
+// is written as [] rather than null: "no labels" is a known, empty set, not
+// an unknown one. Validating here means whatever label set encoding/json
+// actually serializes -- wherever it sits in an event -- is checked.
 func (l Labels) MarshalJSON() ([]byte, error) {
+	if err := l.Validate(); err != nil {
+		return nil, err
+	}
 	if l == nil {
 		return []byte("[]"), nil
 	}
@@ -296,6 +304,24 @@ func (l Labels) MarshalJSON() ([]byte, error) {
 	// outer encoder's SetEscapeHTML(false) does not undo a Marshaler's
 	// own escaping.
 	return encodeNoHTMLEscape([]Label(l))
+}
+
+// UnmarshalJSON decodes a label array and requires canonical form (unique,
+// bytewise-ordered keys). JSON null decodes as a nil set.
+func (l *Labels) UnmarshalJSON(data []byte) error {
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		*l = nil
+		return nil
+	}
+	var raw []Label
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if err := Labels(raw).Validate(); err != nil {
+		return err
+	}
+	*l = raw
+	return nil
 }
 
 // encodeNoHTMLEscape is json.Marshal without HTML escaping and without the
@@ -311,43 +337,79 @@ func encodeNoHTMLEscape(v any) ([]byte, error) {
 	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
 }
 
-// Marshal serializes ev deterministically: it validates ev, then walks
-// every serialized field and rejects non-integer numerics, integers beyond
-// MaxSafeInteger, strings that are not valid UTF-8, and any Labels value
-// that fails Labels.Validate (so label invariants hold even if an event
-// type's own Validate forgets them). It
-// encodes with encoding/json (struct fields in declaration order) without
-// HTML escaping, so label punctuation such as "<" and "&" stays verbatim.
-// The result has no trailing newline.
+// Marshal serializes ev deterministically (encoding/json, struct fields in
+// declaration order, no HTML escaping, no trailing newline) and validates
+// both the value and the bytes it produced:
+//
+//  1. the envelope (ev.AnalyticsEnvelope().Validate) and the event
+//     (ev.Validate);
+//  2. a structural check of the event type: no wire name may be declared
+//     twice in one JSON object (encoding/json would silently drop or
+//     shadow it), no ",string" tag option, no omitempty on a Labels field;
+//  3. a walk over every reachable value -- every field except those tagged
+//     exactly json:"-" -- rejecting floating-point and json.Number values and strings that are
+//     not valid UTF-8 (encoding/json would rewrite them to U+FFFD);
+//  4. Labels validate themselves as they are encoded (Labels.MarshalJSON);
+//  5. the produced bytes: every JSON number must be an integer within
+//     ±MaxSafeInteger, and the envelope rebuilt from the object's exact
+//     top-level keys must equal ev.AnalyticsEnvelope().
+//
+// Checks 2 and 3 over-approximate on purpose: they reject anything
+// encoding/json might handle differently instead of modelling its rules;
+// check 5 validates what is actually written.
 func Marshal(ev Event) ([]byte, error) {
-	if ev == nil || isNilPointer(ev) {
-		return nil, errors.New("telemetrycontract: nil event")
-	}
-	if err := ev.Validate(); err != nil {
+	if err := validateEvent(ev); err != nil {
 		return nil, err
 	}
-	if err := checkValues(reflect.ValueOf(ev), ""); err != nil {
+	if err := checkStructure(reflect.TypeOf(ev)); err != nil {
+		return nil, err
+	}
+	if err := checkReachable(reflect.ValueOf(ev)); err != nil {
 		return nil, err
 	}
 	data, err := encodeNoHTMLEscape(ev)
 	if err != nil {
 		return nil, fmt.Errorf("telemetrycontract: encoding event: %w", err)
 	}
+	if err := checkWire(data, ev.AnalyticsEnvelope()); err != nil {
+		return nil, err
+	}
 	return data, nil
 }
 
-// Unmarshal decodes data into ev and validates it. Unknown fields are
-// ignored, so a consumer built against an older schema still decodes a
-// newer, additively extended event. A non-integer or out-of-range number
-// in an integer field is a decode error.
+// Unmarshal decodes data into ev and validates the input bytes (integer
+// numbers, envelope keys) and the decoded event. Unknown fields are
+// ignored, so a consumer built against an older schema still decodes an
+// additively extended event. Like encoding/json it matches keys
+// case-insensitively and keeps the last duplicate key, so it is a decoder
+// for producer output, not a strict validator of third-party input.
 func Unmarshal(data []byte, ev Event) error {
 	if ev == nil || isNilPointer(ev) {
 		return errors.New("telemetrycontract: nil event")
 	}
+	if err := checkStructure(reflect.TypeOf(ev)); err != nil {
+		return err
+	}
 	if err := json.Unmarshal(data, ev); err != nil {
 		return fmt.Errorf("telemetrycontract: decoding event: %w", err)
 	}
-	if err := checkValues(reflect.ValueOf(ev), ""); err != nil {
+	if err := validateEvent(ev); err != nil {
+		return err
+	}
+	if err := checkReachable(reflect.ValueOf(ev)); err != nil {
+		return err
+	}
+	return checkWire(data, ev.AnalyticsEnvelope())
+}
+
+// validateEvent runs the envelope's own Validate (so the frozen invariants
+// never depend on an event type remembering to call it) and then the
+// event's.
+func validateEvent(ev Event) error {
+	if ev == nil || isNilPointer(ev) {
+		return errors.New("telemetrycontract: nil event")
+	}
+	if err := ev.AnalyticsEnvelope().Validate(); err != nil {
 		return err
 	}
 	return ev.Validate()
@@ -360,91 +422,188 @@ func isNilPointer(v any) bool {
 
 var (
 	labelsType        = reflect.TypeOf(Labels(nil))
+	envelopeType      = reflect.TypeOf(Envelope{})
 	jsonNumberType    = reflect.TypeOf(json.Number(""))
 	jsonMarshalerType = reflect.TypeOf((*json.Marshaler)(nil)).Elem()
 	textMarshalerType = reflect.TypeOf((*encoding.TextMarshaler)(nil)).Elem()
 )
 
-// checkValues walks exactly the fields encoding/json serializes and reports
-// the first value that would break the wire conventions:
-//   - a float/complex value, a json.Number (it can carry a fraction), or an
-//     integer outside ±MaxSafeInteger;
-//   - a numeric or bool field tagged ",string" (written as a JSON string);
-//   - a string that is not valid UTF-8;
-//   - a Labels value that fails Labels.Validate;
-//   - any other type with its own JSON or text encoding (time.Time
-//     included): the walk cannot see what it writes, and timestamps must be
-//     FormatTS strings.
-//
-// Field selection mirrors encoding/json: exported fields, plus embedded
-// structs (or pointers to structs) even when their type is unexported,
-// whose exported fields are promoted; json:"-" is skipped. path uses the
-// wire (json tag) names.
-func checkValues(v reflect.Value, path string) error {
+// maxWalkDepth bounds the reachable-value walk; deeper (or cyclic) values
+// are rejected instead of overflowing the stack.
+const maxWalkDepth = 64
+
+// checkStructure inspects the event type (not a value, so a nil embedded
+// pointer cannot hide anything). For each JSON object -- a struct plus the
+// fields promoted into it from embedded structs -- every wire name must be
+// declared once. It also rejects the ",string" tag option, omitempty on a
+// Labels field, invalid tag names, and embedded types with their own
+// encoding (whose promotion rules differ). Envelope must be embedded
+// (promoted), never a named field.
+func checkStructure(t reflect.Type) error {
+	return checkStructureType(t, map[reflect.Type]bool{})
+}
+
+func checkStructureType(t reflect.Type, done map[reflect.Type]bool) error {
+	for t.Kind() == reflect.Pointer || t.Kind() == reflect.Slice || t.Kind() == reflect.Array || t.Kind() == reflect.Map {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct || done[t] || t == labelsType {
+		return nil
+	}
+	done[t] = true
+	seen := map[string]string{}
+	var nested []reflect.Type
+	if err := collectObjectFields(t, "", seen, &nested, 0); err != nil {
+		return err
+	}
+	for _, n := range nested {
+		if err := checkStructureType(n, done); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// collectObjectFields records the wire names of t's fields into seen,
+// descending into promoted embedded structs, and queues every non-promoted
+// struct-typed field type for its own object check.
+func collectObjectFields(t reflect.Type, path string, seen map[string]string, nested *[]reflect.Type, depth int) error {
+	if depth > maxWalkDepth {
+		return fmt.Errorf("telemetrycontract: type %s embeds too deeply", t)
+	}
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		goPath := joinPath(path, f.Name)
+		tag := f.Tag.Get("json")
+		if tag == "-" {
+			continue
+		}
+		name, opts, _ := strings.Cut(tag, ",")
+		if name != "" && !isValidTagName(name) {
+			return fmt.Errorf("telemetrycontract: field %s has an invalid json tag name %q", goPath, name)
+		}
+		if hasTagOption(opts, "string") {
+			return fmt.Errorf("telemetrycontract: field %s uses the \",string\" option, which changes its wire type", goPath)
+		}
+		ft := f.Type
+		if ft.Kind() == reflect.Pointer {
+			ft = ft.Elem()
+		}
+		if f.Type == labelsType && hasTagOption(opts, "omitempty") {
+			return fmt.Errorf("telemetrycontract: Labels field %s must not use omitempty (a known-empty set would be omitted); use *Labels for unknown", goPath)
+		}
+		if f.Anonymous && name == "" && ft.Kind() == reflect.Struct {
+			if implementsEncoder(ft) {
+				return fmt.Errorf("telemetrycontract: embedded field %s has its own JSON encoding; embed plain structs only", goPath)
+			}
+			if err := collectObjectFields(ft, goPath, seen, nested, depth+1); err != nil {
+				return err
+			}
+			continue
+		}
+		if !f.IsExported() {
+			continue
+		}
+		if ft == envelopeType {
+			return fmt.Errorf("telemetrycontract: field %s holds Envelope as a named field; embed it so its fields are top-level", goPath)
+		}
+		if elem := innermost(f.Type); elem != labelsType && implementsEncoder(elem) {
+			return fmt.Errorf("telemetrycontract: field %s has type %s with its own encoding (time.Time included); use plain strings (FormatTS for timestamps) and integers", goPath, elem)
+		}
+		if name == "" {
+			name = f.Name
+		}
+		if prev, dup := seen[name]; dup {
+			return fmt.Errorf("telemetrycontract: wire name %q is declared by both %s and %s; encoding/json would drop or shadow it", name, prev, goPath)
+		}
+		seen[name] = goPath
+		*nested = append(*nested, f.Type)
+	}
+	return nil
+}
+
+// innermost strips pointer, slice, array and map layers from t.
+func innermost(t reflect.Type) reflect.Type {
+	for t.Kind() == reflect.Pointer || t.Kind() == reflect.Slice || t.Kind() == reflect.Array || t.Kind() == reflect.Map {
+		if t == labelsType {
+			return t
+		}
+		t = t.Elem()
+	}
+	return t
+}
+
+func implementsEncoder(t reflect.Type) bool {
+	return t.Implements(jsonMarshalerType) || t.Implements(textMarshalerType) ||
+		reflect.PointerTo(t).Implements(jsonMarshalerType) || reflect.PointerTo(t).Implements(textMarshalerType)
+}
+
+// isValidTagName mirrors encoding/json's isValidTag: names it would ignore
+// (falling back to the Go name) are rejected here instead.
+func isValidTagName(s string) bool {
+	for _, c := range s {
+		switch {
+		case strings.ContainsRune("!#$%&()*+-./:;<=>?@[]^_{|}~ ", c):
+		case !unicode.IsLetter(c) && !unicode.IsDigit(c):
+			return false
+		}
+	}
+	return true
+}
+
+// checkReachable walks every value reachable from v -- exported or not;
+// only fields tagged exactly json:"-" are skipped -- and rejects floating-point and json.Number values
+// and strings that are not valid UTF-8. Labels values are validated too.
+// Pointer cycles and excessive depth are errors.
+func checkReachable(v reflect.Value) error {
+	return walkReachable(v, "", map[uintptr]bool{}, 0)
+}
+
+func walkReachable(v reflect.Value, path string, visited map[uintptr]bool, depth int) error {
+	if depth > maxWalkDepth {
+		return fmt.Errorf("telemetrycontract: value at %s is nested too deeply (or cyclic)", path)
+	}
+	if !v.IsValid() {
+		return nil
+	}
 	t := v.Type()
+	if t == jsonNumberType {
+		return fmt.Errorf("telemetrycontract: field %s has type json.Number; analytics numerics must be Go integers", path)
+	}
 	if t == labelsType {
 		if err := labelsFromValue(v).Validate(); err != nil {
 			return fmt.Errorf("field %s: %w", path, err)
 		}
 		return nil
 	}
-	if t == jsonNumberType {
-		return fmt.Errorf("telemetrycontract: field %s has type json.Number; analytics numerics must be Go integers", path)
-	}
-	if v.Kind() != reflect.Pointer && v.Kind() != reflect.Interface &&
-		(t.Implements(jsonMarshalerType) || t.Implements(textMarshalerType) ||
-			reflect.PointerTo(t).Implements(jsonMarshalerType) || reflect.PointerTo(t).Implements(textMarshalerType)) {
-		return fmt.Errorf("telemetrycontract: field %s has type %s with its own encoding; use plain strings (FormatTS for timestamps) and integers", path, t)
-	}
 	switch v.Kind() {
-	case reflect.Pointer, reflect.Interface:
+	case reflect.Pointer:
 		if v.IsNil() {
 			return nil
 		}
-		return checkValues(v.Elem(), path)
+		if visited[v.Pointer()] {
+			return fmt.Errorf("telemetrycontract: value at %s contains a pointer cycle", path)
+		}
+		visited[v.Pointer()] = true
+		defer delete(visited, v.Pointer())
+		return walkReachable(v.Elem(), path, visited, depth+1)
+	case reflect.Interface:
+		if v.IsNil() {
+			return nil
+		}
+		return walkReachable(v.Elem(), path, visited, depth+1)
 	case reflect.Struct:
 		for i := 0; i < t.NumField(); i++ {
-			f := t.Field(i)
-			tag := f.Tag.Get("json")
-			if tag == "-" {
-				continue
+			if t.Field(i).Tag.Get("json") == "-" {
+				continue // never serialized (exactly "-"; "-," names a field "-")
 			}
-			wireName, opts, _ := strings.Cut(tag, ",")
-			if f.Anonymous {
-				ft := f.Type
-				if ft.Kind() == reflect.Pointer {
-					ft = ft.Elem()
-				}
-				if !f.IsExported() && ft.Kind() != reflect.Struct {
-					continue
-				}
-			} else if !f.IsExported() {
-				continue
-			}
-			name := path
-			switch {
-			case f.Anonymous && wireName == "" && derefKind(f.Type) == reflect.Struct:
-				// Promoted: its fields are written at this level.
-			case wireName != "":
-				name = joinPath(path, wireName)
-			default:
-				name = joinPath(path, f.Name)
-			}
-			if hasTagOption(opts, "string") {
-				switch derefKind(f.Type) {
-				case reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-					reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
-					reflect.Float32, reflect.Float64:
-					return fmt.Errorf("telemetrycontract: field %s uses the \",string\" option; numeric and bool fields must keep their JSON type", name)
-				}
-			}
-			if err := checkValues(v.Field(i), name); err != nil {
+			if err := walkReachable(v.Field(i), fieldPath(path, t.Field(i)), visited, depth+1); err != nil {
 				return err
 			}
 		}
 	case reflect.Slice, reflect.Array:
 		for i := 0; i < v.Len(); i++ {
-			if err := checkValues(v.Index(i), fmt.Sprintf("%s[%d]", path, i)); err != nil {
+			if err := walkReachable(v.Index(i), fmt.Sprintf("%s[%d]", path, i), visited, depth+1); err != nil {
 				return err
 			}
 		}
@@ -452,10 +611,10 @@ func checkValues(v reflect.Value, path string) error {
 		iter := v.MapRange()
 		for iter.Next() {
 			elem := fmt.Sprintf("%s[%v]", path, iter.Key())
-			if err := checkValues(iter.Key(), elem+"(key)"); err != nil {
+			if err := walkReachable(iter.Key(), elem+"(key)", visited, depth+1); err != nil {
 				return err
 			}
-			if err := checkValues(iter.Value(), elem); err != nil {
+			if err := walkReachable(iter.Value(), elem, visited, depth+1); err != nil {
 				return err
 			}
 		}
@@ -464,24 +623,90 @@ func checkValues(v reflect.Value, path string) error {
 			return fmt.Errorf("telemetrycontract: field %s is not valid UTF-8", path)
 		}
 	case reflect.Float32, reflect.Float64, reflect.Complex64, reflect.Complex128:
-		return fmt.Errorf("telemetrycontract: field %s has non-integer type %s; analytics numerics must be integers", path, v.Type())
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		if n := v.Int(); n > MaxSafeInteger || n < -MaxSafeInteger {
-			return fmt.Errorf("telemetrycontract: field %s = %d exceeds the exactly representable range ±%d", path, n, int64(MaxSafeInteger))
+		return fmt.Errorf("telemetrycontract: field %s has non-integer type %s; analytics numerics must be integers", path, t)
+	}
+	return nil
+}
+
+// checkWire validates encoded bytes: a JSON object whose numbers are all
+// integers within ±MaxSafeInteger, and whose envelope, rebuilt from the
+// exact top-level keys, equals want.
+func checkWire(data []byte, want *Envelope) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	var tree any
+	if err := dec.Decode(&tree); err != nil {
+		return fmt.Errorf("telemetrycontract: event bytes are not JSON: %w", err)
+	}
+	top, ok := tree.(map[string]any)
+	if !ok {
+		return errors.New("telemetrycontract: event is not a JSON object")
+	}
+	if err := checkWireNumbers(tree, "", 0); err != nil {
+		return err
+	}
+	var got Envelope
+	gv := reflect.ValueOf(&got).Elem()
+	for i := 0; i < envelopeType.NumField(); i++ {
+		name, _, _ := strings.Cut(envelopeType.Field(i).Tag.Get("json"), ",")
+		raw, present := top[name]
+		if !present {
+			continue
 		}
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-		if n := v.Uint(); n > MaxSafeInteger {
-			return fmt.Errorf("telemetrycontract: field %s = %d exceeds the exactly representable range ±%d", path, n, int64(MaxSafeInteger))
+		b, _ := json.Marshal(raw)
+		if err := json.Unmarshal(b, gv.Field(i).Addr().Interface()); err != nil {
+			return fmt.Errorf("telemetrycontract: wire field %s: %w", name, err)
+		}
+	}
+	if !reflect.DeepEqual(got, *want) {
+		return fmt.Errorf("telemetrycontract: envelope on the wire %+v differs from the event's envelope %+v", got, *want)
+	}
+	return got.Validate()
+}
+
+func checkWireNumbers(node any, path string, depth int) error {
+	if depth > maxWalkDepth*2 {
+		return fmt.Errorf("telemetrycontract: wire value at %s is nested too deeply", path)
+	}
+	switch n := node.(type) {
+	case json.Number:
+		s := string(n)
+		if strings.ContainsAny(s, ".eE") {
+			return fmt.Errorf("telemetrycontract: wire field %s = %s is not an integer", path, s)
+		}
+		i, err := strconv.ParseInt(s, 10, 64)
+		if err != nil || i > MaxSafeInteger || i < -MaxSafeInteger {
+			return fmt.Errorf("telemetrycontract: wire field %s = %s exceeds the exactly representable range ±%d", path, s, int64(MaxSafeInteger))
+		}
+	case map[string]any:
+		for k, v := range n {
+			if err := checkWireNumbers(v, joinPath(path, k), depth+1); err != nil {
+				return err
+			}
+		}
+	case []any:
+		for i, v := range n {
+			if err := checkWireNumbers(v, fmt.Sprintf("%s[%d]", path, i), depth+1); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
 }
 
-func derefKind(t reflect.Type) reflect.Kind {
-	if t.Kind() == reflect.Pointer {
-		return t.Elem().Kind()
+// fieldPath names a struct field for error messages by its wire name: the
+// json tag name if set, nothing for a promoted (anonymous, untagged)
+// struct, else the Go name.
+func fieldPath(path string, f reflect.StructField) string {
+	name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+	switch {
+	case name != "" && name != "-":
+		return joinPath(path, name)
+	case f.Anonymous && name == "":
+		return path
+	default:
+		return joinPath(path, f.Name)
 	}
-	return t.Kind()
 }
 
 func joinPath(path, name string) string {
@@ -503,7 +728,7 @@ func hasTagOption(opts, want string) bool {
 }
 
 // labelsFromValue reads a Labels value through reflection, so it also works
-// for a value reached via an unexported embedded struct, where
+// for a value reached via an unexported field, where
 // reflect.Value.Interface is not allowed.
 func labelsFromValue(v reflect.Value) Labels {
 	if v.IsNil() {
