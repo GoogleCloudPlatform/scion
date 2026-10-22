@@ -36,6 +36,7 @@ printf '%s\n' "$@" > "$out/args"
 echo "$$" > "$out/pid"
 echo "$PPID" > "$out/ppid"
 trap -p INT > "$out/int_trap"
+ls -l /proc/$$/fd > "$out/fds_long" 2>/dev/null || true
 pwd > "$out/cwd"
 {
   echo "RUNNER_WORKSPACE=${RUNNER_WORKSPACE:-}"
@@ -377,6 +378,11 @@ func TestEntrypointSuccess(t *testing.T) {
 	// runner's real exit code and forward signals.
 	if got := h.stubFile("ppid"); got != strconv.Itoa(res.pid) {
 		t.Errorf("run.sh parent pid = %s, entrypoint pid = %d: run.sh is not the entrypoint's child", got, res.pid)
+	}
+	// The watcher's done FIFO is closed for the child: no fd of run.sh points at it.
+	// (Other inherited fds, such as a build wrapper's lock, are not the entrypoint's.)
+	if fds := h.stubFile("fds_long"); strings.Contains(fds, "watcher-done") {
+		t.Errorf("run.sh inherited the watcher's done FIFO:\n%s", fds)
 	}
 	// An ignored SIGINT would break run.sh's graceful cancel (RUNNER_MANUALLY_TRAP_SIG).
 	if got := h.stubFile("int_trap"); got != "" {

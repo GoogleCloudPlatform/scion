@@ -494,7 +494,8 @@ watcher_pid=$!
 exit_if_signalled
 log "starting run.sh (ephemeral JIT runner)"
 set -m
-./run.sh --jitconfig "$jit_config" >"$out_fifo" 2>&1 &
+# {done_fd}>&-: the watcher's done FIFO is not passed on to run.sh or the job steps.
+./run.sh --jitconfig "$jit_config" >"$out_fifo" 2>&1 {done_fd}>&- &
 runner_pid=$!
 set +m
 jit_config=""
