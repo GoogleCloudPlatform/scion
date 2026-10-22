@@ -4334,10 +4334,34 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 		}
 	}
 
-	// Try to load agent-info.json first to get the template
 	agentInfoPath := filepath.Join(agentHome, "agent-info.json")
 	var agentInfo *api.AgentInfo
 	effectiveTemplate := defaultTemplate
+	if infoData, err := os.ReadFile(agentInfoPath); err == nil {
+		if err := json.Unmarshal(infoData, &agentInfo); err != nil {
+			agentInfo = nil
+		}
+	}
+
+	// The template chain comes from the template recorded in the agent's
+	// broker-side image provenance (provisioning writes the same template
+	// there and in agent-info.json), never from agent-info.json in the agent
+	// home, which also replaces Info's template fields below. An agent
+	// provisioned before that record existed keeps agent-info.json's
+	// template. With a record that exists but cannot be used, no recorded
+	// template applies (the settings default chain); Start then fails on
+	// the same record.
+	provenance, provErr := readImageProvenance(agentDir)
+	if provErr != nil {
+		logImageProvenanceError(agentName, provErr)
+	}
+	var templateRecord *api.AgentInfo
+	switch {
+	case provenance != nil:
+		templateRecord = &api.AgentInfo{Template: provenance.Template, TemplateHash: provenance.TemplateHash}
+	case provErr == nil:
+		templateRecord = agentInfo
+	}
 
 	// A template recorded as loaded from a content-addressed cache (a
 	// TemplateHash, or a content hash stored as the name by older versions)
@@ -4345,12 +4369,17 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	// name: the agent loads from its persisted config alone, as it did when
 	// the stored name was the cache directory's hash.
 	hydratedTemplate := false
-	if infoData, err := os.ReadFile(agentInfoPath); err == nil {
-		if err := json.Unmarshal(infoData, &agentInfo); err == nil {
-			hydratedTemplate = normalizeHydratedTemplateInfo(agentInfo, api.TemplateNameFromContext(ctx))
-			if agentInfo.Template != "" {
-				effectiveTemplate = agentInfo.Template
-			}
+	if templateRecord != nil {
+		hydratedTemplate = normalizeHydratedTemplateInfo(templateRecord, api.TemplateNameFromContext(ctx))
+		if templateRecord.Template != "" {
+			effectiveTemplate = templateRecord.Template
+		}
+	}
+	if agentInfo != nil && templateRecord != agentInfo {
+		if templateRecord != nil {
+			agentInfo.Template, agentInfo.TemplateHash = templateRecord.Template, templateRecord.TemplateHash
+		} else {
+			agentInfo.Template, agentInfo.TemplateHash = "", ""
 		}
 	}
 
@@ -4364,7 +4393,7 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 
 	var chain []*config.Template
 	if hydratedTemplate {
-		err = config.NewTemplateNotFoundError(effectiveTemplate, fmt.Sprintf("template %q was loaded from a content-addressed cache (%s)", effectiveTemplate, agentInfo.TemplateHash))
+		err = config.NewTemplateNotFoundError(effectiveTemplate, fmt.Sprintf("template %q was loaded from a content-addressed cache (%s)", effectiveTemplate, templateRecord.TemplateHash))
 	} else {
 		chain, err = config.GetTemplateChainInProject(effectiveTemplate, projectPath)
 	}

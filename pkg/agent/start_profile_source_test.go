@@ -15,6 +15,7 @@
 package agent
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -87,6 +88,48 @@ func TestStart_ProfileNotTakenFromAgentInfo(t *testing.T) {
 			}
 			if info != nil && info.Profile == "other" {
 				t.Errorf("restart reported profile %q from agent-info.json", info.Profile)
+			}
+		})
+	}
+}
+
+// TestGetAgent_TemplateChainFromBrokerRecord: an existing agent's template
+// chain comes from the template recorded in its broker-side image
+// provenance. An agent-info.json rewritten to name another template does
+// not bring that template's job keys (here beta's max_turns) into the
+// agent's config, nor become Info's template. An agent provisioned before
+// image provenance was recorded keeps agent-info.json's template.
+func TestGetAgent_TemplateChainFromBrokerRecord(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		legacy       bool
+		wantMaxTurns int
+		wantTemplate string
+	}{
+		{name: "provisioned agent", legacy: false, wantMaxTurns: 0, wantTemplate: "alpha"},
+		{name: "agent without image provenance", legacy: true, wantMaxTurns: 99, wantTemplate: "beta"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			projectScionDir := imagePrecedenceFixture(t, "", noOverrideSettings)
+			writeTemplate(t, "alpha", `{"default_harness_config": "test-harness"}`)
+			writeTemplate(t, "beta", `{"default_harness_config": "test-harness", "max_turns": 99}`)
+			startCapturingRun(t, api.StartOptions{Name: "test-agent", Template: "alpha", ProjectPath: projectScionDir, Profile: "staging"})
+			rewriteAgentInfo(t, projectScionDir, func(raw map[string]any) { raw["template"] = "beta" })
+			if tc.legacy {
+				if err := os.Remove(filepath.Join(projectScionDir, "agents", "test-agent", imageProvenanceFile)); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			_, _, _, cfg, err := GetAgent(context.Background(), "test-agent", "", "", "", projectScionDir, "", "", "", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.MaxTurns != tc.wantMaxTurns {
+				t.Errorf("max_turns = %d, want %d", cfg.MaxTurns, tc.wantMaxTurns)
+			}
+			if cfg.Info == nil || cfg.Info.Template != tc.wantTemplate {
+				t.Errorf("Info template = %v, want %q", cfg.Info, tc.wantTemplate)
 			}
 		})
 	}
