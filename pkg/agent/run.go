@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -31,6 +32,8 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/agenthome"
+	"github.com/GoogleCloudPlatform/scion/pkg/agentplugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -400,6 +403,16 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		logImageProvenanceError(opts.Name, err)
 		return nil, err
 	}
+	// startProfile is the settings profile this start resolves the agent's
+	// settings with when the request names none: opts.Profile (a broker
+	// start or restart fills it from the provisioned profile, else the
+	// Hub-sent one), else the profile recorded in broker-side image
+	// provenance. The profile in agent-info.json (finalScionCfg.Info, read
+	// from the agent home) is never used for it.
+	startProfile := opts.Profile
+	if startProfile == "" && provenance != nil {
+		startProfile = provenance.Profile
+	}
 	// A template recorded as loaded from a content-addressed cache is not
 	// available by name here: the recorded name is then a display name
 	// only, so it is never looked up, and the template counts as
@@ -492,21 +505,11 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	}
 
 	if settings != nil && harnessConfigName != "" {
-		// A local restart (no --profile) has no request-level profile to
-		// resolve settings against; fall back to the profile the agent was
-		// actually created with (finalScionCfg.Info.Profile, already loaded —
-		// the same value agent.GetSavedProfile would read from
-		// agent-info.json), matching the broker's own restart-dispatch
-		// behavior (runtimebroker/handlers.go's GetSavedProfile calls).
-		settingsProfile := opts.Profile
-		if settingsProfile == "" && finalScionCfg != nil && finalScionCfg.Info != nil {
-			settingsProfile = finalScionCfg.Info.Profile
-		}
+		// Settings are resolved against startProfile (see above).
+		settingsProfile := startProfile
 		// The image and pull-policy lookups use the profile recorded in
-		// broker-side image provenance when it exists, rather than the
-		// agent-info.json profile or the broker's restart profile (which is
-		// read from agent-info.json). An agent
-		// provisioned before provenance was recorded keeps the legacy
+		// broker-side image provenance when it exists. An agent
+		// provisioned before provenance was recorded keeps the
 		// settingsProfile lookup.
 		imageProfile := settingsProfile
 		if provenance != nil {
@@ -565,10 +568,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		ownEnv = persisted
 	}
 	if finalScionCfg != nil {
-		envProfile := opts.Profile
-		if envProfile == "" && finalScionCfg.Info != nil {
-			envProfile = finalScionCfg.Info.Profile
-		}
+		envProfile := startProfile
 		finalScionCfg = withEnvironment(finalScionCfg, ownEnv.clone())
 		finalScionCfg.Volumes = mergeEnvironmentVolumes(settingsVolumes, fileVolumes, ownEnv.Volumes)
 		applyEnvironmentResources(ctx, finalScionCfg, settings, envProfile, harnessConfigName)
@@ -648,10 +648,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// agent was created with, else the active profile). Unset keeps the
 	// depth sent with the request.
 	if opts.GitClone != nil {
-		cdProfile := opts.Profile
-		if cdProfile == "" && finalScionCfg != nil && finalScionCfg.Info != nil {
-			cdProfile = finalScionCfg.Info.Profile
-		}
+		cdProfile := startProfile
 		var cdIn cloneDepthInput
 		if finalScionCfg != nil {
 			cdIn.Template = finalScionCfg.CloneDepth
@@ -827,9 +824,8 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// node), so we must skip the local check to ensure registry rewrite applies.
 	if settings != nil && resolvedImage != "" {
 		// The profile-level image_registry is looked up with the
-		// provisioned profile recorded in broker-side provenance, never a
-		// profile read from agent-info.json (a broker start/restart fills
-		// opts.Profile from there); legacy agents keep opts.Profile.
+		// provisioned profile recorded in broker-side provenance; legacy
+		// agents keep opts.Profile (the Hub-sent profile on a broker start).
 		registryProfile := opts.Profile
 		if provenance != nil {
 			registryProfile = provenance.Profile
@@ -1339,8 +1335,7 @@ authDone:
 	if opts.NoAuth {
 		// Clean up stale auth-candidates from a prior run so the
 		// provisioner sees no candidates and runs in no-auth mode.
-		authCandidatesPath := filepath.Join(agentHome, ".scion", "harness", "inputs", "auth-candidates.json")
-		if err := os.Remove(authCandidatesPath); err != nil && !os.IsNotExist(err) {
+		if err := removeStaleAuthCandidates(agentHome); err != nil {
 			util.Debugf("Start: failed to remove stale auth-candidates: %v", err)
 		}
 	}
@@ -1747,8 +1742,12 @@ authDone:
 	}
 	preValidationWorkspace := effectiveWorkspace
 	repoRoot := validatedWorktreeRepoRoot(candidateRepoRoot, effectiveWorkspace)
+	// A refusal from detectRepoRoot is returned after the workspace source
+	// check below, which reports the more specific errors for the shapes it
+	// rejects; nothing between here and there sets up a mount.
+	var detectErr error
 	if repoRoot == "" {
-		repoRoot = detectRepoRoot(explicitWorkspace, effectiveWorkspace, projectDir)
+		repoRoot, detectErr = detectRepoRoot(explicitWorkspace, effectiveWorkspace, projectDir, settings)
 	}
 	// Empty-per-agent (design #2703): the workspace is exactly the private
 	// agents/<slug>/workspace directory, never a git checkout, so no repo
@@ -1761,6 +1760,7 @@ authDone:
 			return nil, fmt.Errorf("empty-per-agent agent %q must use its private workspace %s, not %q", opts.Name, emptyPerAgentWorkspace, effectiveWorkspace)
 		}
 		repoRoot = ""
+		detectErr = nil
 	}
 
 	// Reject a workspace source that is not an allowed workspace path before
@@ -1806,6 +1806,9 @@ authDone:
 			return nil, fmt.Errorf("%w (delete and recreate this agent, or restart it with an explicit --workspace, to use a workspace under the project's own directory)", err)
 		}
 		return nil, err
+	}
+	if detectErr != nil {
+		return nil, detectErr
 	}
 	effectiveWorkspace = resolvedWorkspace
 
@@ -1932,10 +1935,7 @@ authDone:
 			// The profile is the one named for this start, else the one
 			// the agent was created with (as for the shared-dir PVC
 			// defaults below); an agent that recorded its backend keeps it.
-			sdStorageProfile := opts.Profile
-			if sdStorageProfile == "" && finalScionCfg != nil && finalScionCfg.Info != nil {
-				sdStorageProfile = finalScionCfg.Info.Profile
-			}
+			sdStorageProfile := startProfile
 			cfg, err := selectSharedDirStorage(globalSettings, sdStorageProfile, recordedSharedDirBackend, opts.Name)
 			if err != nil {
 				return nil, err
@@ -2011,10 +2011,7 @@ authDone:
 	// Home storage: local, or (Kubernetes only) an NFS home on the export of
 	// the profile's shared_dir_storage. Chosen at the agent's first start
 	// and recorded, before any pod exists; later starts use the record.
-	homeStorageProfile := opts.Profile
-	if homeStorageProfile == "" && finalScionCfg != nil && finalScionCfg.Info != nil {
-		homeStorageProfile = finalScionCfg.Info.Profile
-	}
+	homeStorageProfile := startProfile
 	homePlan, err := resolveHomeStorage(homeStorageInput{
 		AgentDir:     agentDir,
 		AgentName:    opts.Name,
@@ -2281,7 +2278,11 @@ authDone:
 	if effectiveWorkspace != preBackendWorkspace && !emptyPerAgent {
 		repoRoot = validatedWorktreeRepoRoot(candidateRepoRoot, effectiveWorkspace)
 		if repoRoot == "" {
-			repoRoot = detectRepoRoot(explicitWorkspace, effectiveWorkspace, projectDir)
+			var detectErr error
+			repoRoot, detectErr = detectRepoRoot(explicitWorkspace, effectiveWorkspace, projectDir, settings)
+			if detectErr != nil {
+				return nil, detectErr
+			}
 		}
 	}
 
@@ -2321,10 +2322,7 @@ authDone:
 	// other runtimes it is accepted and ignored, with a warning.
 	var sdClass, sdSize string
 	var settingsSafeToEvict *bool
-	sdProfile := opts.Profile
-	if sdProfile == "" && finalScionCfg != nil && finalScionCfg.Info != nil {
-		sdProfile = finalScionCfg.Info.Profile
-	}
+	sdProfile := startProfile
 	var tmplSafeToEvict *bool
 	if finalScionCfg != nil && finalScionCfg.Kubernetes != nil {
 		tmplSafeToEvict = finalScionCfg.Kubernetes.SafeToEvict
@@ -2842,27 +2840,53 @@ func workspacePlacementFor(in workspacePlacementInput) string {
 // §5. util.Debugf is deliberately not used for the failures: per #1339, debug
 // output from this subsystem may not emit at all, so a Debugf here is a failure
 // report that can vanish.
+//
+// The writes are confined to the agent home (pkg/agenthome), through one
+// handle opened on the home: a link at the token file or its temp file is
+// replaced, never written through, and a linked .scion is refused.
 func writeAgentTokenFile(agentHome, token string) error {
 	scionDir := filepath.Join(agentHome, ".scion")
-	if err := os.MkdirAll(scionDir, 0700); err != nil {
+	home, err := agenthome.OpenCreate(agentHome, 0700)
+	if err != nil {
+		return fmt.Errorf("create agent token directory %s: %w", scionDir, err)
+	}
+	defer func() { _ = home.Close() }()
+	if err := home.MkdirAll(".scion", 0700); err != nil {
 		return fmt.Errorf("create agent token directory %s: %w", scionDir, err)
 	}
 
+	const tokenRel, tmpRel = ".scion/scion-token", ".scion/scion-token.tmp"
 	tokenPath := filepath.Join(scionDir, "scion-token")
 	tmp := tokenPath + ".tmp"
-	if err := os.WriteFile(tmp, []byte(token), 0600); err != nil {
-		_ = os.Remove(tmp)
+	if err := home.WriteFile(tmpRel, []byte(token), 0600); err != nil {
+		_ = home.Remove(tmpRel)
 		return fmt.Errorf("write agent token file %s: %w", tmp, err)
 	}
-	if err := os.Rename(tmp, tokenPath); err != nil {
+	if err := home.Rename(tmpRel, tokenRel); err != nil {
 		// Best effort: the temp file holds the credential, so leaving it behind
 		// on a path we are about to abort on is worse than a lost error here.
-		_ = os.Remove(tmp)
+		_ = home.Remove(tmpRel)
 		return fmt.Errorf("install agent token file %s from %s: %w", tokenPath, tmp, err)
 	}
 
 	util.Debugf("Start: wrote agent token to %s", tokenPath)
 	return nil
+}
+
+// removeStaleAuthCandidates removes the staged auth-candidates.json from the
+// agent home, confined to the home (pkg/agenthome): a link there is removed
+// itself and a linked directory component is refused. A missing home or file
+// is not an error.
+func removeStaleAuthCandidates(agentHome string) error {
+	home, err := agenthome.Open(agentHome)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer func() { _ = home.Close() }()
+	return home.Remove(agentplugin.InputsRel + "/auth-candidates.json")
 }
 
 // detectRepoRoot resolves the git repo root to bind-mount for an agent, or ""
@@ -2872,22 +2896,297 @@ func writeAgentTokenFile(agentHome, token string) error {
 // inside a repo" (provision.go). explicit is set on first start (opts.Workspace)
 // and re-derived on resume from the persisted ExplicitWorkspace flag, so the
 // guarantee holds on every entry path.
-func detectRepoRoot(explicit bool, effectiveWorkspace, projectDir string) string {
+//
+// The returned root picks the container mount layout (pkg/runtime's
+// buildCommonRunArgs), so it is taken only from paths the broker itself
+// knows: the workspace path and the project's own root
+// (brokerProjectRoot). Git metadata inside the workspace is writable from
+// the container, so git's answer is used only to check those paths, never
+// as the root itself:
+//   - workspace at the project root (a shared workspace): the root is the
+//     workspace when it has a .git entry of its own (a .git directory must
+//     be one git accepts), otherwise "" (a plain mount). It is never an
+//     enclosing repository: a workspace whose .git is missing is
+//     indistinguishable from one whose .git was removed;
+//   - workspace that is a plain checkout elsewhere (for example a workspace
+//     storage backend's host path): the root is the workspace;
+//   - workspace that is a worktree or a subdirectory of a repository: the
+//     root is the directory holding the project's own common git dir
+//     (projectCommonDir), which is the main repository when the project is
+//     itself checked out in a linked worktree. The project's repository is
+//     the nearest one enclosing the project root, so this bound is "the
+//     project's enclosing repository", not the project root itself.
+//
+// Every git probe here is bounded with GIT_CEILING_DIRECTORIES, so git never
+// searches above the directory the answer has to match. When git reports a
+// common dir (or top level) that does not belong to these paths, the start
+// is refused with an error instead of mounting anything.
+func detectRepoRoot(explicit bool, effectiveWorkspace, projectDir string, settings *config.VersionedSettings) (string, error) {
 	if explicit {
-		return ""
+		return "", nil
 	}
-	if effectiveWorkspace != "" && util.IsGitRepoDir(effectiveWorkspace) {
-		commonDir, err := util.GetCommonGitDir(effectiveWorkspace)
-		if err == nil {
-			return filepath.Dir(commonDir)
+	projectRoot := brokerProjectRoot(settings, projectDir)
+	if effectiveWorkspace != "" {
+		ownGitDir := filepath.Join(effectiveWorkspace, ".git")
+		ownGitInfo, ownGitErr := os.Lstat(ownGitDir)
+		hasOwnGitDir := ownGitErr == nil && ownGitInfo.IsDir()
+		if samePath(effectiveWorkspace, projectRoot) {
+			if ownGitErr != nil {
+				// A project root inside an enclosing repository (a
+				// subdirectory project) has no .git of its own. The broker
+				// keeps no record of that layout, so it is mounted plain
+				// (ptone/scion#5758 tracks recording it at link time).
+				if enclosing := projectRepoRoot(filepath.Dir(effectiveWorkspace)); enclosing != "" {
+					slog.Warn("Project root is a subdirectory of a repository; mounting the workspace only; in-container git is unavailable for this layout",
+						"workspace", effectiveWorkspace, "repository", enclosing)
+				}
+				return "", nil
+			}
+			if hasOwnGitDir {
+				isRepo, err := checkOwnCommonDir(effectiveWorkspace)
+				if err != nil {
+					return "", err
+				}
+				if !isRepo {
+					return "", nil
+				}
+			}
+			return effectiveWorkspace, nil
 		}
+		if hasOwnGitDir {
+			// A .git directory git rejects gives a plain mount (a probe
+			// that does not finish refuses): it never falls through to a
+			// wider root.
+			isRepo, err := checkOwnCommonDir(effectiveWorkspace)
+			if err != nil {
+				return "", err
+			}
+			if !isRepo {
+				return "", nil
+			}
+			return effectiveWorkspace, nil
+		}
+		projectRepo := projectRepoRoot(projectRoot)
+		ceiling := filepath.Dir(effectiveWorkspace)
+		if projectRepo != "" && resolvedPathWithin(effectiveWorkspace, projectRepo) {
+			ceiling = filepath.Dir(projectRepo)
+		}
+		commonDir, err := boundedCommonGitDir(effectiveWorkspace, ceiling)
+		if errors.Is(err, errGitProbeTimeout) {
+			return "", gitProbeTimeoutError(effectiveWorkspace, err)
+		}
+		if err == nil {
+			if projectCommon := projectCommonDir(projectRepo); projectCommon != "" && samePath(commonDir, projectCommon) {
+				return filepath.Dir(projectCommon), nil
+			}
+			return "", workspaceCommonDirError(effectiveWorkspace, commonDir)
+		}
+	}
+	// The project-dir fallback names a root only for a workspace inside the
+	// project's repository (or no workspace at all), so it never widens a
+	// workspace elsewhere to the whole repository.
+	projectRepo := projectRepoRoot(projectRoot)
+	if projectRepo == "" || !resolvedPathWithin(projectDir, projectRepo) {
+		return "", nil
+	}
+	if effectiveWorkspace != "" && !resolvedPathWithin(effectiveWorkspace, projectRepo) {
+		slog.Warn("Workspace is outside the project's repository; mounting the workspace only, without the repository",
+			"workspace", effectiveWorkspace, "repository", projectRepo)
+		return "", nil
+	}
+	// Any failure here, a timeout included, gives a plain mount, never the
+	// project's repository.
+	top, err := boundedRevParse(projectDir, filepath.Dir(projectRepo), "--show-toplevel")
+	if err != nil {
+		return "", nil
+	}
+	if samePath(top, projectRepo) {
+		return projectRepo, nil
+	}
+	return "", fmt.Errorf("git reports repository root %s for project %s, which is not the project's own repository; refusing to start: check the repository's git configuration", top, projectDir)
+}
+
+// checkOwnCommonDir checks a workspace with its own .git directory. It
+// reports false when git does not treat the workspace as a repository at all
+// (for example an empty .git directory), and refuses with an error when git
+// does, but with a common dir other than that .git directory, or when the
+// probe does not finish in time.
+func checkOwnCommonDir(workspace string) (bool, error) {
+	ownGitDir := filepath.Join(workspace, ".git")
+	commonDir, err := boundedCommonGitDir(workspace, filepath.Dir(workspace))
+	if errors.Is(err, errGitProbeTimeout) {
+		return false, gitProbeTimeoutError(workspace, err)
+	}
+	if err != nil {
+		return false, nil
+	}
+	if !samePath(commonDir, ownGitDir) {
+		return false, workspaceCommonDirError(workspace, commonDir)
+	}
+	return true, nil
+}
+
+// workspaceCommonDirError is detectRepoRoot's refusal for a workspace whose
+// git common dir does not belong to the project.
+func workspaceCommonDirError(workspace, commonDir string) error {
+	return fmt.Errorf("git common dir %s of workspace %s is outside the project's own repository; refusing to start: check the workspace's .git metadata", commonDir, workspace)
+}
+
+// boundedRevParse runs git rev-parse with args in dir, with ceiling as
+// GIT_CEILING_DIRECTORIES: git checks dir and its ancestors below ceiling for
+// a repository, never ceiling itself or anything above it. The environment
+// is worktreeGitEnv's, so an inherited GIT_DIR or similar cannot override
+// the search. Like the package's other git calls in agent-writable
+// directories, it is bounded by worktreeGitTimeout.
+func boundedRevParse(dir, ceiling string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), worktreeGitTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-c", "core.fsmonitor=false", "rev-parse"}, args...)...)
+	cmd.WaitDelay = 5 * time.Second
+	cmd.Dir = dir
+	cmd.Env = append(worktreeGitEnv(), "GIT_CEILING_DIRECTORIES="+ceiling)
+	out, err := cmd.Output()
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("git rev-parse %s in %s: %w after %s", strings.Join(args, " "), dir, errGitProbeTimeout, worktreeGitTimeout)
+		}
+		return "", fmt.Errorf("git rev-parse %s in %s: %w", strings.Join(args, " "), dir, err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// errGitProbeTimeout marks a boundedRevParse call that did not finish in
+// time. A probe in the workspace that times out refuses the start: it is
+// never read as "not a repository", which could otherwise pick a different
+// layout than the workspace's own git metadata allows.
+var errGitProbeTimeout = errors.New("git probe timed out")
+
+// gitProbeTimeoutError is detectRepoRoot's refusal for a git probe in the
+// workspace that did not finish in time.
+func gitProbeTimeoutError(workspace string, err error) error {
+	return fmt.Errorf("cannot check the git metadata of workspace %s: %w; refusing to start: check the workspace's .git metadata and the filesystem", workspace, err)
+}
+
+// boundedCommonGitDir returns dir's git common dir as an absolute path, with
+// the repository search bounded by ceiling (see boundedRevParse).
+func boundedCommonGitDir(dir, ceiling string) (string, error) {
+	commonDir, err := boundedRevParse(dir, ceiling, "--git-common-dir")
+	if err != nil {
+		return "", err
+	}
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Join(dir, commonDir)
+	}
+	return filepath.Clean(commonDir), nil
+}
+
+// brokerProjectRoot is the project's own root directory as the broker knows
+// it, from paths only: the recorded workspace path of a project whose
+// configuration lives in the broker's project-configs tree, otherwise the
+// directory holding the project's .scion directory, otherwise the project
+// directory itself. A workspace_path setting is used only from the
+// project-configs tree: merged settings can include a settings file inside
+// the project, which a shared workspace mount exposes.
+func brokerProjectRoot(settings *config.VersionedSettings, projectDir string) string {
+	if settings != nil && settings.WorkspacePath != "" && isProjectConfigsPath(projectDir) {
+		return settings.WorkspacePath
+	}
+	if filepath.Base(projectDir) == config.DotScion {
+		return filepath.Dir(projectDir)
+	}
+	return projectDir
+}
+
+// projectRepoRoot returns the project's repository root: the nearest of
+// projectRoot and its ancestors that holds a .git entry, symlinks resolved,
+// or "" if there is none. It reads only the directory layout, never git
+// configuration.
+func projectRepoRoot(projectRoot string) string {
+	if projectRoot == "" {
 		return ""
 	}
-	if util.IsGitRepoDir(projectDir) {
-		root, _ := util.RepoRootDir(projectDir)
-		return root
+	// A project root that cannot be resolved has no repository root, on
+	// purpose: callers then mount the workspace plain or refuse, rather than
+	// walk up from an unresolved spelling of the path.
+	dir, err := filepath.EvalSymlinks(projectRoot)
+	if err != nil {
+		return ""
 	}
-	return ""
+	for {
+		if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
+// projectCommonDir returns the common git dir of the project checkout at
+// top (projectRepoRoot's result), or "" if it cannot be told from the
+// layout: top's .git directory, or, when top's .git is a pointer file (the
+// project is checked out in a linked worktree), the directory holding the
+// worktrees/<name> directory the pointer names. The commondir file inside
+// that worktree's admin directory is deliberately not read: it sits in the
+// main repository's .git directory, which worktree layouts mount writable
+// into agent containers. A pointer to a gitdir not shaped
+// <common>/worktrees/<name> (a submodule, for example) is used as is.
+func projectCommonDir(top string) string {
+	if top == "" {
+		return ""
+	}
+	dotGit := filepath.Join(top, ".git")
+	info, err := os.Lstat(dotGit)
+	if err != nil {
+		return ""
+	}
+	if info.IsDir() {
+		return dotGit
+	}
+	if !info.Mode().IsRegular() {
+		return ""
+	}
+	gitdir, ok := readGitdirPointer(dotGit)
+	if !ok {
+		return ""
+	}
+	if filepath.Base(filepath.Dir(gitdir)) == "worktrees" {
+		return filepath.Dir(filepath.Dir(gitdir))
+	}
+	return gitdir
+}
+
+// resolvedPathWithin is pathWithin on symlink-resolved paths (cleaned paths
+// are compared when either cannot be resolved).
+func resolvedPathWithin(p, root string) bool {
+	if p == "" || root == "" {
+		return false
+	}
+	// Both sides are compared in the same form on purpose (both resolved, or
+	// both as given): comparing a resolved path with an unresolved one can
+	// make a path whose symlinked components lead elsewhere look contained.
+	rp, errP := filepath.EvalSymlinks(p)
+	rr, errR := filepath.EvalSymlinks(root)
+	if errP != nil || errR != nil {
+		rp, rr = p, root
+	}
+	return pathWithin(rp, rr)
+}
+
+// samePath reports whether a and b name the same path once symlinks are
+// resolved (cleaned paths are compared when either cannot be resolved).
+func samePath(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	ra, errA := filepath.EvalSymlinks(a)
+	rb, errB := filepath.EvalSymlinks(b)
+	if errA != nil || errB != nil {
+		return filepath.Clean(a) == filepath.Clean(b)
+	}
+	return ra == rb
 }
 
 // workspaceSourceRoots returns the per-project root(s) a resolved workspace
