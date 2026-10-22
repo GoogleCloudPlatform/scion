@@ -1850,11 +1850,12 @@ Exactly one list is.
 
    ARGV BEATS THE ENVIRONMENT AT BOTH SITES, and the environment variable is
    one this chart renders, so an argv --base-url shadows a live value rather
-   than a hypothetical one, with no error and, unless --debug is on, no log
-   line either. The two sites also rank SCION_SERVER_BASE_URL and
-   SCION_SERVER_HUB_ENDPOINT in opposite orders, so setting both (for example
-   through hub.extraEnv) can give the OAuth redirect and the agent endpoint
-   two different base URLs in one process, each correct by its own rule.
+   than a hypothetical one, with no error and, unless
+   --debug is on, no log line either. The two sites also rank
+   SCION_SERVER_BASE_URL and SCION_SERVER_HUB_ENDPOINT in opposite orders, so
+   setting both (for example through hub.extraEnv) can give the OAuth redirect
+   and the agent endpoint two different base URLs in one process, each correct
+   by its own rule.
 
    That is why this entry is reserved rather than merely discouraged. A later
    phase may still choose argv as the delivery channel for base-url, and this
