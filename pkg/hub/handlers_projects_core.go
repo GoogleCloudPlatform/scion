@@ -2505,8 +2505,8 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Every subtree that reads or writes the project workspace — WebDAV, the
-	// file API, the archive, pull, sync status and the cache endpoints — is
+	// Every subtree that reads or writes the project workspace — the file
+	// API, the archive, pull, sync status and the cache endpoints — is
 	// dispatched through one entry point that authorizes before it routes.
 	//
 	// These used to be seven sibling branches here, each calling straight into
@@ -3603,7 +3603,6 @@ func (s *Server) executePostDeletionEffects(ctx context.Context, projectID strin
 	// broker (skipped by Effect 3), linked-path providers and brokers
 	// without a provider row.
 	s.startHubNFSProjectTreeCleanup(projectID)
-	s.webdavLocks.Delete(projectID)
 
 	// Effect 6: Clear ephemeral project warning suppression.
 	s.warnedEphemeralProjects.Delete(project.Slug)

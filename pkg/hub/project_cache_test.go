@@ -75,24 +75,24 @@ func createTestLinkedProject(t *testing.T, srv *Server, s store.Store, name, rem
 }
 
 // ============================================================================
-// resolveProjectWebDAVPath Tests
+// resolveProjectWorkspacePath Tests
 // ============================================================================
 
-func TestResolveProjectWebDAVPath_HubManagedProject(t *testing.T) {
+func TestResolveProjectWorkspacePath_HubManagedProject(t *testing.T) {
 	srv, _ := testServer(t)
-	project, workspacePath := createTestHubManagedProject(t, srv, "WebDAV HubManaged")
+	project, workspacePath := createTestHubManagedProject(t, srv, "WsPath HubManaged")
 
-	path, err := srv.resolveProjectWebDAVPath(context.Background(), project)
+	path, err := srv.resolveProjectWorkspacePath(context.Background(), project)
 	require.NoError(t, err)
 	assert.Equal(t, workspacePath, path)
 }
 
-func TestResolveProjectWebDAVPath_LinkedProject_CacheDir(t *testing.T) {
+func TestResolveProjectWorkspacePath_LinkedProject_CacheDir(t *testing.T) {
 	srv, s := testServer(t)
-	project, _ := createTestLinkedProject(t, srv, s, "WebDAV Linked", "https://github.com/org/linked-repo.git")
+	project, _ := createTestLinkedProject(t, srv, s, "WsPath Linked", "https://github.com/org/linked-repo.git")
 
-	// resolveProjectWebDAVPath should return the hub cache path for remote linked projects
-	path, err := srv.resolveProjectWebDAVPath(context.Background(), project)
+	// resolveProjectWorkspacePath should return the hub cache path for remote linked projects
+	path, err := srv.resolveProjectWorkspacePath(context.Background(), project)
 	require.NoError(t, err)
 
 	expectedCache, err := hubManagedProjectPath(project.Slug)
@@ -100,11 +100,11 @@ func TestResolveProjectWebDAVPath_LinkedProject_CacheDir(t *testing.T) {
 	assert.Equal(t, expectedCache, path)
 }
 
-func TestResolveProjectWebDAVPath_LinkedProject_EmbeddedBroker(t *testing.T) {
+func TestResolveProjectWorkspacePath_LinkedProject_EmbeddedBroker(t *testing.T) {
 	srv, s := testServer(t)
 
 	// Create a project and set up an embedded broker
-	project := createTestGitProject(t, srv, "WebDAV Embedded", "https://github.com/org/embedded-repo.git")
+	project := createTestGitProject(t, srv, "WsPath Embedded", "https://github.com/org/embedded-repo.git")
 
 	embeddedPath := t.TempDir()
 	embeddedBrokerID := tid("test-embedded-broker")
@@ -124,7 +124,7 @@ func TestResolveProjectWebDAVPath_LinkedProject_EmbeddedBroker(t *testing.T) {
 	}))
 
 	// For embedded broker, should serve directly from local path
-	path, err := srv.resolveProjectWebDAVPath(context.Background(), project)
+	path, err := srv.resolveProjectWorkspacePath(context.Background(), project)
 	require.NoError(t, err)
 	assert.Equal(t, embeddedPath, path)
 }
@@ -236,37 +236,6 @@ func TestProjectCacheStatus_MethodNotAllowed(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodPost,
 		fmt.Sprintf("/api/v1/projects/%s/workspace/cache/status", project.ID), nil)
 	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
-}
-
-// ============================================================================
-// WebDAV Access for Linked Projects
-// ============================================================================
-
-func TestProjectWebDAV_LinkedProject_ServesFromCache(t *testing.T) {
-	srv, s := testServer(t)
-	project, _ := createTestLinkedProject(t, srv, s, "WebDAV Linked Serve", "https://github.com/org/dav-linked.git")
-
-	// Populate the cache directory
-	cachePath, err := hubManagedProjectPath(project.Slug)
-	require.NoError(t, err)
-	require.NoError(t, os.MkdirAll(cachePath, 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(cachePath, "hello.txt"), []byte("hello from cache"), 0644))
-
-	// WebDAV PROPFIND should work for linked projects (serves from cache)
-	rec := doRequestWithMethod(t, srv, "PROPFIND",
-		fmt.Sprintf("/api/v1/projects/%s/dav/", project.ID))
-	// WebDAV PROPFIND returns 207 Multi-Status on success
-	assert.Equal(t, http.StatusMultiStatus, rec.Code, "body: %s", rec.Body.String())
-}
-
-func TestProjectWebDAV_LinkedProject_EmptyCache(t *testing.T) {
-	srv, s := testServer(t)
-	project, _ := createTestLinkedProject(t, srv, s, "WebDAV Linked Empty", "https://github.com/org/dav-empty.git")
-
-	// WebDAV PROPFIND on empty cache should still work (creates the directory)
-	rec := doRequestWithMethod(t, srv, "PROPFIND",
-		fmt.Sprintf("/api/v1/projects/%s/dav/", project.ID))
-	assert.Equal(t, http.StatusMultiStatus, rec.Code, "body: %s", rec.Body.String())
 }
 
 // ============================================================================
@@ -412,19 +381,59 @@ func TestHasProjectCache(t *testing.T) {
 }
 
 // ============================================================================
-// Helpers
+// Sync status and cache exclusion helpers
 // ============================================================================
 
-// doRequestWithMethod performs a raw HTTP request with a custom method (e.g., PROPFIND).
-func doRequestWithMethod(t *testing.T, srv *Server, method, path string) *httptest.ResponseRecorder {
-	t.Helper()
-	req := httptest.NewRequest(method, path, nil)
-	req.Header.Set("Authorization", "Bearer "+testDevToken)
-	// WebDAV PROPFIND requires a Depth header
-	if method == "PROPFIND" {
-		req.Header.Set("Depth", "1")
+func TestProjectSyncStatusResponse_JSON_NoLegacyGroveID(t *testing.T) {
+	data, err := json.Marshal(ProjectSyncStatusResponse{ProjectID: "p1"})
+	require.NoError(t, err)
+
+	var m map[string]interface{}
+	require.NoError(t, json.Unmarshal(data, &m))
+
+	assert.Equal(t, "p1", m["projectId"])
+	_, hasGroveID := m["groveId"]
+	assert.False(t, hasGroveID)
+}
+
+func TestIsExcluded(t *testing.T) {
+	tests := []struct {
+		name     string
+		path     string
+		excluded bool
+	}{
+		// Directory exclusions
+		{"git dir", ".git", true},
+		{"git subpath", ".git/objects/pack", true},
+		{"scion dir", ".scion", true},
+		{"scion subpath", ".scion/config.yaml", true},
+		{"node_modules", "node_modules", true},
+		{"node_modules subpath", "node_modules/lodash/index.js", true},
+
+		// Extension exclusions
+		{"env file", ".env", true},
+		{"env file in subdir", "config/.env", true},
+		{"dotenv production", "config/production.env", true},
+
+		// Should NOT be excluded
+		{"regular file", "main.go", false},
+		{"nested file", "src/app/main.go", false},
+		{"gitignore", ".gitignore", false},
+		{"env-like name", "environment.go", false},
+		{"root", "/", false},
+		{"empty", "", false},
+		{"dot", ".", false},
+
+		// Leading slash normalization
+		{"leading slash git", "/.git", true},
+		{"leading slash file", "/main.go", false},
+		{"leading slash scion", "/.scion/config", true},
 	}
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-	return rec
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isExcluded(tt.path)
+			assert.Equal(t, tt.excluded, got, "isExcluded(%q)", tt.path)
+		})
+	}
 }

@@ -668,7 +668,7 @@ func (m *AgentManager) finishProvision(opts api.StartOptions, agentDir, agentHom
 // Agent names are unique only within a project, so entries that belong to
 // another project on the same broker are skipped: otherwise a running agent
 // with the same name elsewhere would make every reprovision of this one
-// refuse. The scoping is a post-filter (matchAgentProject), not a runtime
+// refuse. The scoping is a post-filter (mayBeProjectsEntry), not a runtime
 // label filter, so it fails closed: an entry whose project cannot be told
 // (legacy labels, project ID only on AgentInfo, or no project info at all)
 // still counts as this agent's container.
@@ -678,7 +678,7 @@ func (m *AgentManager) containerIsRunning(ctx context.Context, name, projectName
 		return false, err
 	}
 	for _, a := range agents {
-		if !matchAgentProject(a, projectName, projectID) {
+		if !mayBeProjectsEntry(a, projectName, projectID) {
 			continue
 		}
 		if a.Name == name || strings.TrimPrefix(a.Name, "/") == name || strings.EqualFold(a.Name, name) {
@@ -688,6 +688,35 @@ func (m *AgentManager) containerIsRunning(ctx context.Context, name, projectName
 		}
 	}
 	return false, nil
+}
+
+// mayBeProjectsEntry reports whether an entry may belong to the project, for
+// the running-container check above. That check refuses when in doubt, so it
+// skips only entries positively identified as another project's: by a
+// project ID (label, then field) that differs from projectID, or, when the
+// request or the entry has no ID, by a project name (label, then field) that
+// differs from projectName. Every other entry, including one with no project
+// information at all, counts. This is deliberately not matchAgentProject,
+// which decides which entry an operation may act on and so accepts only
+// entries proven to be the project's.
+func mayBeProjectsEntry(a api.AgentInfo, projectName, projectID string) bool {
+	if projectID != "" {
+		if labelProjectID := projectkeys.ProjectIDFromLabels(a.Labels); labelProjectID != "" {
+			return labelProjectID == projectID
+		}
+		if a.ProjectID != "" {
+			return a.ProjectID == projectID
+		}
+	}
+	if projectName != "" {
+		if labelProject := projectkeys.ProjectNameFromLabels(a.Labels); labelProject != "" {
+			return labelProject == projectName
+		}
+		if a.Project != "" {
+			return a.Project == projectName
+		}
+	}
+	return true
 }
 
 // ErrReprovisionRefused wraps every refusal Reprovision returns (design §3.4
@@ -2137,11 +2166,15 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 
 	// Step 3b: Resolve and install referenced skills from skill bank
 	var resolvedSkillsRecord *SkillResolutionRecord
-	if len(finalScionCfg.Skills) > 0 {
+	// Optional scion-platform:// entries are display-only: Step 3a2 installs
+	// those skills, so they are left out of resolution rather than logged as
+	// skipped on every start (ptone/scion#5431).
+	skillRefs := resolvableSkillRefs(finalScionCfg.Skills)
+	if len(skillRefs) > 0 {
 		resolver := SkillResolverFromContext(ctx)
 		if resolver == nil {
 			// S1: Fail closed for required skills
-			requiredURIs := collectRequiredSkillURIs(finalScionCfg.Skills)
+			requiredURIs := collectRequiredSkillURIs(skillRefs)
 			if len(requiredURIs) > 0 {
 				return "", "", nil, fmt.Errorf(
 					"skill resolution failed: %d required skill(s) declared but no skill resolver available\n"+
@@ -2149,7 +2182,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 						"  hint: connect to a Hub or mark skills as optional",
 					len(requiredURIs), strings.Join(requiredURIs, ", "))
 			}
-			util.Debugf("provision: %d optional skill(s) declared but no resolver available, skipping", len(finalScionCfg.Skills))
+			util.Debugf("provision: %d optional skill(s) declared but no resolver available, skipping", len(skillRefs))
 		} else {
 			projectID := ResolveProjectIDFromContext(ctx)
 			if projectID == "" {
@@ -2161,18 +2194,18 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			}
 
 			skillFetchStart := time.Now()
-			result, err := resolver.Resolve(ctx, finalScionCfg.Skills, resolveOpts)
+			result, err := resolver.Resolve(ctx, skillRefs, resolveOpts)
 			slog.Info("provision: skill fetch complete", "agent", agentName,
 				"elapsed_ms", time.Since(skillFetchStart).Milliseconds(),
-				"requested", len(finalScionCfg.Skills), "ok", err == nil)
+				"requested", len(skillRefs), "ok", err == nil)
 			if err != nil {
 				return "", "", nil, fmt.Errorf("skill resolution failed: %w", err)
 			}
 
 			// S1 completeness: build requested URI set
-			requestedURIs := make(map[string]*api.SkillReference, len(finalScionCfg.Skills))
-			for i := range finalScionCfg.Skills {
-				requestedURIs[finalScionCfg.Skills[i].URI] = &finalScionCfg.Skills[i]
+			requestedURIs := make(map[string]*api.SkillReference, len(skillRefs))
+			for i := range skillRefs {
+				requestedURIs[skillRefs[i].URI] = &skillRefs[i]
 			}
 
 			resolvedURIs := make(map[string]bool)
@@ -3067,8 +3100,10 @@ func (m *AgentManager) hasRuntimeEntry(ctx context.Context, opts api.StartOption
 	if err != nil {
 		return true
 	}
+	// projectName is a slug, "global" or "unknown", never empty, so the
+	// match is scoped: without a project ID it accepts no entry.
 	for _, e := range entries {
-		if matchAgentProject(e, projectName, projectID) {
+		if matchAgentProject(e, projectName, scopeProjectID(projectID, opts.ProjectPath)) {
 			return true
 		}
 	}

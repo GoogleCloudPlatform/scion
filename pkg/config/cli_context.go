@@ -325,18 +325,28 @@ func ValidHubName(name string) bool {
 }
 
 // NormalizeEndpoint returns endpoint in the form in which two spellings of
-// one hub URL compare equal: spaces and trailing slashes trimmed, scheme and
-// host lowercased, and the scheme's default port (80 for http, 443 for
-// https) dropped. A value that does not parse as a URL with a host is only
-// trimmed. It is the key of hub entries and of stored logins.
+// one hub URL compare equal: spaces and trailing slashes trimmed, the ASCII
+// letters of the scheme and host lowercased, and the scheme's default port
+// (80 for http, 443 for https) dropped. A value that does not parse as a
+// URL with a host is only trimmed. It is the key of hub entries and of
+// stored logins, so two different hubs must never get the same key:
+//
+//   - only ASCII letters are lowercased; a non-ASCII host is kept as
+//     written, because Unicode case mapping folds some characters into
+//     ASCII ones (U+212A KELVIN SIGN becomes "k");
+//   - an IDN host and its punycode form ("xn--...") are different keys;
+//   - a host with a trailing dot ("hub.example.com.") is a different key
+//     from the one without;
+//   - any non-default port is kept as written ("0443" stays "0443");
+//   - the path keeps its case and its escaping.
 func NormalizeEndpoint(endpoint string) string {
 	e := strings.TrimRight(strings.TrimSpace(endpoint), "/")
 	u, err := url.Parse(e)
 	if err != nil || u.Host == "" {
 		return e
 	}
-	u.Scheme = strings.ToLower(u.Scheme)
-	host := strings.ToLower(u.Hostname())
+	u.Scheme = asciiLower(u.Scheme)
+	host := asciiLower(u.Hostname())
 	port := u.Port()
 	if (u.Scheme == "http" && port == "80") || (u.Scheme == "https" && port == "443") {
 		port = ""

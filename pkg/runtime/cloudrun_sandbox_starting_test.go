@@ -268,25 +268,23 @@ func preCleanForTest(ctx context.Context, rt *CloudRunSandboxRuntime, task bool,
 	return false, nil
 }
 
-// matchProjectForTest mirrors matchAgentProject (pkg/agent/run.go).
+// matchProjectForTest mirrors matchAgentProject (pkg/agent/run.go): an
+// unscoped call matches every entry; a scoped one needs a projectID and an
+// entry of it, identified by its project ID label or field. (The pkg/agent
+// rule also accepts a container with no project identity whose recorded
+// path identifies as the project; these entries record no path, so that
+// branch never applies here.)
 func matchProjectForTest(a api.AgentInfo, projectName, projectID string) bool {
-	if projectID != "" {
-		if l := projectkeys.ProjectIDFromLabels(a.Labels); l != "" {
-			return l == projectID
-		}
-		if a.ProjectID != "" {
-			return a.ProjectID == projectID
-		}
+	if projectName == "" && projectID == "" {
+		return true
 	}
-	if projectName != "" {
-		if l := projectkeys.ProjectNameFromLabels(a.Labels); l != "" {
-			return l == projectName
-		}
-		if a.Project != "" {
-			return a.Project == projectName
-		}
+	if projectID == "" {
+		return false
 	}
-	return true
+	if l := projectkeys.ProjectIDFromLabels(a.Labels); l != "" {
+		return l == projectID
+	}
+	return a.ProjectID != "" && a.ProjectID == projectID
 }
 
 // writeStartingEntryForTest writes a Starting entry of runID under "dev"
