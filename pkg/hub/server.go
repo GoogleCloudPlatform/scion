@@ -808,8 +808,8 @@ type StartExtras struct {
 	// AsyncLaunch, LaunchID, LaunchTimeoutSeconds and LaunchKeepaliveSeconds
 	// are a start's asynchronous launch fields (ptone/scion#4669), sent
 	// under the same wire keys as a create's (RemoteCreateAgentRequest).
-	// Zero values send nothing; this release never sets them, so every
-	// start is sent synchronously.
+	// Zero values send nothing: the start is sent synchronously. Set by
+	// dispatchAgentStart for an asynchronous start.
 	AsyncLaunch            bool
 	LaunchID               string
 	LaunchTimeoutSeconds   int
@@ -1126,6 +1126,19 @@ func withRunIDURL(endpoint, runID string) string {
 		return endpoint + "&runId=" + url.QueryEscape(runID)
 	}
 	return endpoint + "?runId=" + url.QueryEscape(runID)
+}
+
+// withDispatchAgentIDURL appends the api.AgentIDQueryParam query
+// parameter to a start request URL (or path) when an agent ID was attached
+// with withDispatchAgentID (ptone/scion#4669): the broker's asynchronous
+// start needs the hub's agent ID before it reads the body. An older broker
+// ignores it.
+func withDispatchAgentIDURL(ctx context.Context, endpoint string) string {
+	sep := "?"
+	if strings.Contains(endpoint, "?") {
+		sep = "&"
+	}
+	return endpoint + dispatchAgentIDQuery(ctx, sep)
 }
 
 // withRunIDQuery is withRunIDURL for a bare query string.
@@ -2215,6 +2228,9 @@ type Server struct {
 	// httpDrains marks brokers with a heartbeat-triggered drain of queued
 	// stops running on this node (http_broker_drain.go).
 	httpDrains sync.Map
+	// asyncStartGate caches whether every live hub instance advertises
+	// async_start_v1 (async_start_gate.go). The zero value reads false.
+	asyncStartGate asyncStartGate
 
 	// Subsystem loggers for handler methods
 	agentLifecycleLog *slog.Logger
