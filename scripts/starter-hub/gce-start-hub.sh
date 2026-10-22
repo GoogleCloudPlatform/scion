@@ -21,9 +21,12 @@
 #   Default (fast): pull → build → restart → health check
 #   --full:         Also uploads config files, installs Caddy, updates systemd/Caddy
 #   --no-tls:       Skip the Caddy/TLS step, for a hub behind an upstream TLS
-#                   terminator (env: SKIP_TLS=true). HUB_BASE_URL must then be
-#                   that terminator's https:// URL; the script stops before
-#                   doing anything otherwise, because the hub refuses to start
+#                   terminator (env: SKIP_TLS=true). The base URL that takes
+#                   effect (SCION_SERVER_BASE_URL in hub.env if it sets one,
+#                   which must then agree with HUB_BASE_URL if that is set,
+#                   else HUB_BASE_URL) must be that terminator's https:// URL;
+#                   the script stops before doing anything otherwise, because
+#                   the hub refuses to start
 #                   with an http base URL on a non-loopback listener (OAuth
 #                   callbacks and session cookies would cross the network
 #                   unencrypted). No Caddyfile is written, Caddy is not
@@ -130,16 +133,9 @@ done
 # Public base URL (SCION_SERVER_BASE_URL in the unit): the OAuth redirect
 # base and the URL dispatched to agents.
 if [[ "${SKIP_TLS}" == "true" ]]; then
-    # Without Caddy, the hub listens on 0.0.0.0:8080 itself, and it refuses
-    # to start with an http base URL there. So --no-tls needs the https://
-    # URL of an upstream TLS terminator.
-    HUB_BASE_URL="${HUB_BASE_URL:-}"
-    if [[ "${HUB_BASE_URL,,}" != https://* ]]; then
-        echo "Error: --no-tls (SKIP_TLS=true) needs HUB_BASE_URL set to the https:// URL of the TLS terminator in front of the hub${HUB_BASE_URL:+ (got ${HUB_BASE_URL})}."
-        echo "  The hub refuses to start with an http base URL on a non-loopback listener: OAuth callbacks and session cookies would cross the network unencrypted."
-        echo "  Set HUB_BASE_URL=https://<terminator host>, or drop --no-tls to let Caddy terminate TLS."
-        exit 1
-    fi
+    # Without Caddy the hub needs the https:// URL of an upstream TLS
+    # terminator; checks the value that takes effect (hub.env included).
+    require_no_tls_https_base_url
 else
     HUB_BASE_URL="${HUB_BASE_URL:-https://${HUB_DOMAIN}}"
 fi

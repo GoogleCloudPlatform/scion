@@ -28,6 +28,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -627,6 +628,17 @@ func (ws *WebServer) logger() *slog.Logger {
 	return slog.Default()
 }
 
+// baseURLIsHTTPS reports whether baseURL's scheme is https, compared
+// case-insensitively at the point of use, so a direct caller of
+// WebServerConfig or NewWebServer cannot get a non-Secure session cookie
+// from an upper-case "HTTPS://" base URL. (The server's resolver also
+// lower-cases the scheme; this does not rely on it.) A base URL that does
+// not parse is not https.
+func baseURLIsHTTPS(baseURL string) bool {
+	u, err := url.Parse(baseURL)
+	return err == nil && strings.EqualFold(u.Scheme, "https")
+}
+
 // IsLoopbackHost reports whether host is a loopback address (127.0.0.0/8,
 // ::1, or "localhost"). It returns false for non-loopback IPs (including
 // "0.0.0.0" and "::") and for unresolvable hostnames. It is
@@ -707,7 +719,7 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 		Path:     "/",
 		MaxAge:   86400, // 24 hours
 		HttpOnly: true,
-		Secure:   strings.HasPrefix(cfg.BaseURL, "https://"),
+		Secure:   baseURLIsHTTPS(cfg.BaseURL),
 		SameSite: http.SameSiteLaxMode,
 	}
 	// Keep securecookie's timestamp window in sync with the cookie MaxAge. We

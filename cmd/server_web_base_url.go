@@ -95,9 +95,15 @@ func resolveWebBaseURL(cfg *config.GlobalConfig, m serverEndpointMode, globalSet
 	if m.baseURLFlag != "" {
 		return resolvedWebBaseURL{URL: normalize(m.baseURLFlag), Source: "--base-url"}
 	}
-	// Explicit override step: SCION_SERVER_BASE_URL outranks the hub-side
-	// values (SCION_SERVER_HUB_ENDPOINT and the file) for the web, unlike
-	// for the hub endpoint, which ranks SCION_SERVER_HUB_ENDPOINT first.
+	// Explicit override step: SCION_SERVER_BASE_URL deliberately outranks
+	// SCION_SERVER_HUB_ENDPOINT (and the file) for the web, the opposite of
+	// the hub endpoint order, which ranks SCION_SERVER_HUB_ENDPOINT first.
+	// The reason: SCION_SERVER_HUB_ENDPOINT is the agent-facing hub endpoint
+	// override, and it must not be able to move the OAuth redirect base or
+	// the session cookie's Secure decision away from SCION_SERVER_BASE_URL.
+	// With both set, one process has two different URLs (the hub endpoint
+	// for agents, the base URL for the web), by design. Do not harmonise
+	// the two orders: that would silently reintroduce the problem.
 	if baseURL := os.Getenv("SCION_SERVER_BASE_URL"); baseURL != "" {
 		return resolvedWebBaseURL{URL: normalize(baseURL), Source: "SCION_SERVER_BASE_URL"}
 	}
@@ -160,6 +166,9 @@ func devAuthBindError(webHost string) error {
 // passed to initWebServer, and logs it with its source.
 func webStartupPreflight(cfg *config.GlobalConfig, m serverEndpointMode, globalSettingsFile string) (resolvedWebBaseURL, error) {
 	webHost := webListenHost(cfg)
+	// Gated on cfg.Auth.Enabled (dev auth configured), which is deliberately
+	// stricter than initWebServer's devAuthToken != "" check: it refuses
+	// before a token exists. Do not align the two by loosening this one.
 	if cfg.Auth.Enabled && !hub.IsLoopbackHost(webHost) {
 		return resolvedWebBaseURL{}, devAuthBindError(webHost)
 	}

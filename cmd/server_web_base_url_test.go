@@ -266,3 +266,24 @@ func TestWebStartupPreflight(t *testing.T) {
 		assert.Equal(t, "default", got.Source)
 	})
 }
+
+// SCION_SERVER_BASE_URL outranks SCION_SERVER_HUB_ENDPOINT for the web, the
+// opposite of the hub endpoint order, so the agent-facing hub endpoint
+// override cannot move the OAuth redirect base or the cookie's Secure
+// decision. With both set, the web and the hub endpoint use two different
+// URLs in one process, by design (ptone/scion#5364).
+func TestWebBaseURL_AgentFacingHubEndpointCannotMoveTheOAuthBase(t *testing.T) {
+	webBaseURLTestEnv(t)
+	t.Setenv("SCION_SERVER_BASE_URL", "https://hub.example.com")
+	t.Setenv(hubEndpointEnvVar, "https://agents.internal.example.com")
+	cfg := &config.GlobalConfig{}
+	cfg.Hub.Endpoint = "https://agents.internal.example.com" // applied over the file value when the config loads
+	mode := serverEndpointMode{hubEnabled: true, webEnabled: true, webPort: 8080}
+
+	web := resolveWebBaseURL(cfg, mode, "")
+	hubEndpoint, hubSrc := resolveHubEndpointFrom(cfg, mode, "", nil)
+
+	assert.Equal(t, resolvedWebBaseURL{URL: "https://hub.example.com", Source: "SCION_SERVER_BASE_URL"}, web)
+	assert.Equal(t, "https://agents.internal.example.com", hubEndpoint)
+	assert.Equal(t, hubEndpointSourceConfig, hubSrc)
+}
