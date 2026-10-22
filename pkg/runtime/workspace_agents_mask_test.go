@@ -549,3 +549,42 @@ func TestMountinfoReadOnly(t *testing.T) {
 		t.Errorf("appleNestedReadOnlyTargets = %q", got)
 	}
 }
+
+// The plain layout (no repo root) on Apple: the read-only .scion bind alone
+// is version-gated and checked after the start.
+func TestAppleContainerRuntime_Run_PlainReadOnlyBindGate(t *testing.T) {
+	ws := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(filepath.Join(ws, ".scion"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		name      string
+		opts      appleGateOpts
+		wantErr   string
+		wantCalls []string
+	}{
+		{"below the floor", appleGateOpts{version: "container CLI version 0.11.0", statOut: "x"}, "older than 0.12.0", []string{"--version"}},
+		{"verified", appleGateOpts{version: "container CLI version 1.6.0", statOut: "x"}, "", []string{"--version", "run", "exec"}},
+		{"writable fails", appleGateOpts{version: "container CLI version 1.6.0", statOut: "x", mountinfo: "101 100 0:50 /.scion /workspace/.scion rw - virtiofs share rw"},
+			"is not mounted read-only", []string{"--version", "run", "exec", "kill", "rm"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			command, calls := appleGateMock(t, tt.opts)
+			rt := &AppleContainerRuntime{Command: command}
+			_, err := rt.Run(context.Background(), RunConfig{
+				Harness: &harness.Generic{}, Name: "test-agent", UnixUsername: "scion",
+				Image: "scion-agent:latest", Workspace: ws,
+			})
+			if tt.wantErr == "" && err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("Run error = %v, want %q", err, tt.wantErr)
+			}
+			if got := readAppleGateCalls(t, calls); !slices.Equal(got, tt.wantCalls) {
+				t.Errorf("CLI calls = %q, want %q", got, tt.wantCalls)
+			}
+		})
+	}
+}

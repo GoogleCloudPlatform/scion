@@ -323,10 +323,9 @@ func (r *AppleContainerRuntime) verifyMasks(ctx context.Context, id string, targ
 // failed or stat exited non-zero). A result is never retried: equal
 // devices, or output that does not parse, fail closed at once.
 func (r *AppleContainerRuntime) verifyMask(ctx context.Context, id, target string) error {
-	agents := target
-	out, err := r.appleExecCheck(ctx, id, "/usr/bin/env", "-i", "/usr/bin/stat", "-c", "%d", agents, path.Dir(agents))
+	out, err := r.appleExecCheck(ctx, id, "/usr/bin/env", "-i", "/usr/bin/stat", "-c", "%d", target, path.Dir(target))
 	if err != nil {
-		return fmt.Errorf("could not check that the mask is mounted at %s in the container: %w (output: %q)", agents, err, truncateCheckOutput(out))
+		return fmt.Errorf("could not check that the mask is mounted at %s in the container: %w (output: %q)", target, err, truncateCheckOutput(out))
 	}
 	devs := strings.Fields(out)
 	numeric := len(devs) == 2
@@ -336,10 +335,10 @@ func (r *AppleContainerRuntime) verifyMask(ctx context.Context, id, target strin
 		}
 	}
 	if !numeric {
-		return fmt.Errorf("could not check that the mask is mounted at %s in the container: unexpected stat output %q", agents, truncateCheckOutput(out))
+		return fmt.Errorf("could not check that the mask is mounted at %s in the container: unexpected stat output %q", target, truncateCheckOutput(out))
 	}
 	if devs[0] == devs[1] {
-		return fmt.Errorf("the mask is not mounted at %s in the container", agents)
+		return fmt.Errorf("the mask is not mounted at %s in the container", target)
 	}
 	return nil
 }

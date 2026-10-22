@@ -108,6 +108,17 @@ func TestBuildCommonRunArgs_ProjectConfigReadOnly(t *testing.T) {
 			return cfg
 		}
 	}
+	// An old-style non-git project keeps the agent's home under the
+	// workspace's own .scion/agents, below the read-only bind and the mask;
+	// its separate home bind stays read-write.
+	plainHomeInside := func(t *testing.T, cfg RunConfig) RunConfig {
+		ws := filepath.Join(t.TempDir(), "project")
+		writeFile(t, filepath.Join(ws, ".scion", "settings.yaml"), "x: y\n")
+		cfg.HomeDir = filepath.Join(ws, ".scion", "agents", "me", "home")
+		mkdirs(t, cfg.HomeDir)
+		cfg.Workspace = ws
+		return cfg
+	}
 	plainMarker := func(t *testing.T, cfg RunConfig) RunConfig {
 		ws := filepath.Join(t.TempDir(), "project")
 		writeFile(t, filepath.Join(ws, ".scion"), "project-id: x\n")
@@ -182,6 +193,7 @@ func TestBuildCommonRunArgs_ProjectConfigReadOnly(t *testing.T) {
 			{"shared, .scion symlink outside the workspace", symlinkOutside, "", "", "", "", false, true},
 			{"plain, in-place .scion with agents", plainWith(true), ".scion", "/workspace/.scion", "/workspace/.scion/agents", "", false, false},
 			{"plain, in-place .scion", plainWith(false), ".scion", "/workspace/.scion", "", "", false, false},
+			{"plain, agent home under .scion/agents", plainHomeInside, ".scion", "/workspace/.scion", "/workspace/.scion/agents", "", false, false},
 			{"plain, .scion symlink", plainSymlink, "", "", "", "", false, true},
 			{"plain, .scion marker file", plainMarker, "", "", "", "", true, false},
 			{"worktree", worktree, "", "", "", "", false, false},
