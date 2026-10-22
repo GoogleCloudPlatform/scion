@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -400,4 +401,61 @@ func countContaining(list []string, sub string) int {
 		}
 	}
 	return n
+}
+
+// TestAgentConfigPatch_ResourcesSubFieldDropIsHeld: a resources edit that
+// drops a stored sub-field is held for reincarnation with the cleared
+// warning on every broker, and nothing is recorded in cleared_fields (that
+// would revert the whole resources value) (ptone/scion#5676).
+func TestAgentConfigPatch_ResourcesSubFieldDropIsHeld(t *testing.T) {
+	for _, caps := range []*store.BrokerCapabilities{
+		{Reprovision: true},
+		{Reprovision: true, ChangedFields: true, ClearedFields: true},
+	} {
+		t.Run(fmt.Sprintf("clearedFields=%v", caps.ClearedFields), func(t *testing.T) {
+			disp := &inlineCaptureDispatcher{reincarnateTestDispatcher: newReincarnateTestDispatcher()}
+			srv, s, project, broker := setupReincarnateTestServer(t, disp)
+			setBrokerCaps(t, s, broker, caps)
+			agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+				a.Phase = string(state.PhaseStopped)
+				a.AppliedConfig.InlineConfig = &api.ScionConfig{Harness: "claude", Resources: &api.ResourceSpec{
+					Requests: api.ResourceList{CPU: "1", Memory: "1Gi"},
+				}}
+			})
+			resp, code, body := patchAgentBody(t, srv, agent.ID, map[string]interface{}{
+				"config": map[string]interface{}{"resources": map[string]interface{}{"requests": map[string]string{"cpu": "2"}}},
+			})
+			require.Equal(t, http.StatusOK, code, body)
+			assert.Empty(t, resp.Disposition.Applied)
+			assert.Equal(t, []string{"config.resources"}, resp.Disposition.HeldForReincarnate)
+			require.Len(t, resp.Warnings, 1, "%v", resp.Warnings)
+			assert.Contains(t, resp.Warnings[0], "config.resources: cleared now")
+			stored, err := s.GetAgent(context.Background(), agent.ID)
+			require.NoError(t, err)
+			assert.NotContains(t, stored.AppliedConfig.InlineConfig.ClearedFields, "resources")
+			assert.Equal(t, "2", stored.AppliedConfig.InlineConfig.Resources.Requests.CPU)
+		})
+	}
+}
+
+// TestAgentConfigPatch_ResourcesSubFieldChangeIsApplied: a resources edit
+// that changes one sub-field and sends every other stored sub-field
+// unchanged is applied at the next start; only a dropped stored sub-field
+// is held (ptone/scion#5676).
+func TestAgentConfigPatch_ResourcesSubFieldChangeIsApplied(t *testing.T) {
+	disp := &inlineCaptureDispatcher{reincarnateTestDispatcher: newReincarnateTestDispatcher()}
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.Phase = string(state.PhaseStopped)
+		a.AppliedConfig.InlineConfig = &api.ScionConfig{Harness: "claude", Resources: &api.ResourceSpec{
+			Requests: api.ResourceList{CPU: "1", Memory: "1Gi"},
+		}}
+	})
+	resp, code, body := patchAgentBody(t, srv, agent.ID, map[string]interface{}{
+		"config": map[string]interface{}{"resources": map[string]interface{}{"requests": map[string]string{"cpu": "2", "memory": "1Gi"}}},
+	})
+	require.Equal(t, http.StatusOK, code, body)
+	assert.Equal(t, []string{"config.resources"}, resp.Disposition.Applied)
+	assert.Empty(t, resp.Disposition.HeldForReincarnate)
+	assert.Empty(t, resp.Warnings)
 }

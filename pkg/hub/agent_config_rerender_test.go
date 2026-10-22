@@ -273,3 +273,36 @@ func TestCapabilitiesFromStrings_ClearedFields(t *testing.T) {
 	}
 	assert.False(t, capabilitiesFromStrings([]string{"changedFields"}).ClearedFields)
 }
+
+// TestWithDroppedResourcesSubField: a resources edit that drops a stored
+// sub-field is counted as a clear for reporting (ptone/scion#5676); one that
+// keeps or replaces every stored sub-field, or an empty whole value
+// (already a clear), is not added again.
+func TestWithDroppedResourcesSubField(t *testing.T) {
+	old := &api.ScionConfig{Resources: &api.ResourceSpec{
+		Requests: api.ResourceList{CPU: "1", Memory: "1Gi"},
+		Limits:   api.ResourceList{Memory: "2Gi"},
+		Disk:     "10Gi",
+	}}
+	present := map[string]bool{"resources": true}
+	for _, tc := range []struct {
+		name string
+		req  *api.ResourceSpec
+		want []string
+	}{
+		{"drops requests.memory", &api.ResourceSpec{Requests: api.ResourceList{CPU: "2"}, Limits: api.ResourceList{Memory: "2Gi"}, Disk: "10Gi"}, []string{"config.max_turns", "config.resources"}},
+		{"drops limits.memory", &api.ResourceSpec{Requests: api.ResourceList{CPU: "1", Memory: "1Gi"}, Disk: "10Gi"}, []string{"config.max_turns", "config.resources"}},
+		{"drops disk", &api.ResourceSpec{Requests: api.ResourceList{CPU: "1", Memory: "1Gi"}, Limits: api.ResourceList{Memory: "2Gi"}}, []string{"config.max_turns", "config.resources"}},
+		{"changes cpu, keeps every other stored sub-field", &api.ResourceSpec{Requests: api.ResourceList{CPU: "2", Memory: "1Gi"}, Limits: api.ResourceList{Memory: "2Gi"}, Disk: "10Gi"}, []string{"config.max_turns"}},
+		{"replaces every stored sub-field", &api.ResourceSpec{Requests: api.ResourceList{CPU: "2", Memory: "2Gi"}, Limits: api.ResourceList{Memory: "4Gi", CPU: "1"}, Disk: "20Gi"}, []string{"config.max_turns"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := withDroppedResourcesSubField([]string{"config.max_turns"}, old, &api.ScionConfig{Resources: tc.req}, present)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+	already := []string{"config.resources"}
+	assert.Equal(t, already, withDroppedResourcesSubField(already, old, &api.ScionConfig{Resources: &api.ResourceSpec{}}, present), "a whole clear is already counted")
+	assert.Nil(t, withDroppedResourcesSubField(nil, old, &api.ScionConfig{Resources: &api.ResourceSpec{Requests: api.ResourceList{CPU: "2"}}}, map[string]bool{"model": true}), "resources not in the request")
+	assert.Nil(t, withDroppedResourcesSubField(nil, &api.ScionConfig{}, &api.ScionConfig{Resources: &api.ResourceSpec{Requests: api.ResourceList{CPU: "2"}}}, present), "nothing stored")
+}

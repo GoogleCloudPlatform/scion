@@ -16,6 +16,7 @@ package hub
 
 import (
 	"encoding/json"
+	"slices"
 	"sort"
 	"strings"
 
@@ -93,6 +94,34 @@ func nextClearedFields(old, req *api.ScionConfig, rawConfig map[string]json.RawM
 	for p := range set {
 		out = append(out, p)
 	}
+	sort.Strings(out)
+	return out
+}
+
+// withDroppedResourcesSubField returns cleared (wire keys of cleared
+// container keys, from reincarnateOnlyConfigEdits) with config.resources
+// added, in sorted order, when the request presents resources with a value
+// that is not empty yet drops a sub-field old stores (requests or limits
+// cpu or memory, or disk). The start merge (config.MergeResourceSpec)
+// applies only non-empty sub-fields, so the dropped one keeps its previous
+// value until the next reincarnation, which is what the cleared warning
+// and the held disposition say (ptone/scion#5676). It is never recorded in
+// cleared_fields: that would revert the whole resources value, the
+// sub-fields the request sets included. A resources value that is empty
+// as a whole is a clear reincarnateOnlyConfigEdits already reports.
+func withDroppedResourcesSubField(cleared []string, old, req *api.ScionConfig, present map[string]bool) []string {
+	const key = agentConfigKeyPrefix + "resources"
+	if !present["resources"] || old == nil || old.Resources == nil || req == nil || req.Resources == nil || slices.Contains(cleared, key) {
+		return cleared
+	}
+	o, r := old.Resources, req.Resources
+	dropped := func(oldV, newV string) bool { return oldV != "" && newV == "" }
+	if !dropped(o.Requests.CPU, r.Requests.CPU) && !dropped(o.Requests.Memory, r.Requests.Memory) &&
+		!dropped(o.Limits.CPU, r.Limits.CPU) && !dropped(o.Limits.Memory, r.Limits.Memory) &&
+		!dropped(o.Disk, r.Disk) {
+		return cleared
+	}
+	out := append(append([]string(nil), cleared...), key)
 	sort.Strings(out)
 	return out
 }

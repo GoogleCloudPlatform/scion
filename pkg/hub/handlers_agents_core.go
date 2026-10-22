@@ -4549,6 +4549,12 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		// they take effect at the next start, not at the next
 		// reincarnation (ptone/scion#3982).
 		merged.ChangedFields = nextChangedFields(old.InlineConfig, provision)
+		// A resources edit that drops a stored sub-field keeps that
+		// sub-field at start (the merge applies only non-empty values) and
+		// records no clear, so it waits for the next reincarnation
+		// (ptone/scion#5676). Added after the clears are recorded:
+		// recording it would revert the whole resources value.
+		cleared = withDroppedResourcesSubField(cleared, old.InlineConfig, cfg, presentConfigKeys)
 		// A broker with clearedFields applies the clears recorded above at
 		// the next start (ptone/scion#4890), so only the rest are held.
 		// What is reported applied follows what was recorded above.
