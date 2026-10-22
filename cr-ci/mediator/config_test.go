@@ -197,6 +197,9 @@ var invalidCases = []struct {
 	{EnvRunnerIdleTimeout, "30m"}, // more than half of the default TASK_TIMEOUT (45m)
 	{EnvRunnerIdleTimeout, "10"},  // not a duration
 	{EnvRunnerBuildCacheInRAM, "TRUE"},
+	{EnvMediatorMinInstances, "2"}, // max-instances is 1
+	{EnvMediatorMinInstances, "-1"},
+	{EnvMediatorMinInstances, "one"},
 	{EnvMaxConcurrentRunners, "-1"},
 	{EnvTaskTimeout, "45"},
 	{EnvTaskTimeout, "30s"},
@@ -334,8 +337,9 @@ var validCases = []map[string]string{
 	{EnvRunnerDiskGi: "100"}, // Cloud Run's per-volume maximum
 	{EnvRunnerBuildCacheInRAM: "true"},
 	{EnvRunnerBuildCacheInRAM: "true", EnvRunnerMemory: "32768Mi"},
-	{EnvGitHubInstallScope: ""},                         // defaults to repo
-	{EnvRunnerIdleTimeout: "22m30s"},                    // exactly half of 45m
+	{EnvGitHubInstallScope: ""},      // defaults to repo
+	{EnvRunnerIdleTimeout: "22m30s"}, // exactly half of 45m
+	{EnvMediatorMinInstances: "1"},
 	{EnvRunnerIdleTimeout: "30m", EnvTaskTimeout: "2h"}, // fine with a longer TASK_TIMEOUT
 }
 

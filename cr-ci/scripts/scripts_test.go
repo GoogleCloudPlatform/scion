@@ -959,3 +959,16 @@ func TestDefaultTag(t *testing.T) {
 		t.Errorf("no warning for a missing runner job:\n%s", r.stderr)
 	}
 }
+
+// TestDeployMediatorMinInstances: MEDIATOR_MIN_INSTANCES reaches gcloud run
+// deploy; max-instances stays 1.
+func TestDeployMediatorMinInstances(t *testing.T) {
+	cfg := baseConfig()
+	cfg["MEDIATOR_MIN_INSTANCES"] = "1"
+	e := newEnv(t, cfg)
+	r := e.run("deploy-mediator.sh", "", "--config", "config.env", "--tag", "golden")
+	wantCode(t, r, 0)
+	if !strings.Contains(r.stdout, " --min-instances=1 --max-instances=1 ") {
+		t.Errorf("dry-run lacks --min-instances=1 --max-instances=1:\n%s", r.stdout)
+	}
+}

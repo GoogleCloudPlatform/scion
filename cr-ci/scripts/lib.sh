@@ -492,6 +492,10 @@ crci_validate_config() {
     true | false) ;;
     *) _crci_fail RUNNER_BUILD_CACHE_IN_RAM "\"${CFG[RUNNER_BUILD_CACHE_IN_RAM]}\" must be true or false" ;;
   esac
+  case ${CFG[MEDIATOR_MIN_INSTANCES]} in
+    0 | 1) ;;
+    *) _crci_fail MEDIATOR_MIN_INSTANCES "\"${CFG[MEDIATOR_MIN_INSTANCES]}\" must be 0 or 1 (max-instances is always 1)" ;;
+  esac
   # The in-RAM cache (~9.5 GB) plus the ~21 GB compile need the 32 GiB shape (P6 run 4).
   if [[ ${CFG[RUNNER_BUILD_CACHE_IN_RAM]} == true && -n $mi ]] && ((mi >= 512 && mi < 32 * 1024)); then
     _crci_fail RUNNER_BUILD_CACHE_IN_RAM "true needs RUNNER_MEMORY=32Gi (the in-RAM build cache plus the compile need ~28 GB), got ${CFG[RUNNER_MEMORY]}"

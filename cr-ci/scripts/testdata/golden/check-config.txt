@@ -18,6 +18,7 @@ RUNNER_IDLE_TIMEOUT=10m
 ARTIFACT_REPO=cr-runners
 BUILD_STAGING_BUCKET=
 MEDIATOR_SERVICE_NAME=cr-runner-mediator
+MEDIATOR_MIN_INSTANCES=0
 RECONCILER_JOB_NAME=cr-runner-reconciler
 RECONCILE_SCHEDULE=*/5 * * * *
 MEDIATOR_URL=https://cr-runner-mediator-abc123-uc.a.run.app

@@ -44,6 +44,7 @@ const (
 	EnvWebhookSecretName       = "GITHUB_WEBHOOK_SECRET_NAME"
 	EnvClaimTTL                = "CLAIM_TTL"
 	EnvRunnerIdleTimeout       = "RUNNER_IDLE_TIMEOUT"
+	EnvMediatorMinInstances    = "MEDIATOR_MIN_INSTANCES"
 	EnvRunnerBuildCacheInRAM   = "RUNNER_BUILD_CACHE_IN_RAM"
 )
 
@@ -137,6 +138,7 @@ type Config struct {
 	WebhookSecretName       string
 	ClaimTTL                time.Duration
 	RunnerIdleTimeout       time.Duration // used by deploy-job.sh and the runner entrypoint only
+	MediatorMinInstances    int           // used by deploy-mediator.sh only: 0 or 1
 	RunnerBuildCacheInRAM   bool          // used by deploy-job.sh and the runner entrypoint only
 }
 
@@ -174,6 +176,7 @@ func Defaults() map[string]string {
 		EnvWebhookSecretName:       defaultWebhookSecret,
 		EnvClaimTTL:                defaultClaimTTL,
 		EnvRunnerIdleTimeout:       defaultRunnerIdleTimeout,
+		EnvMediatorMinInstances:    "0",
 		EnvRunnerBuildCacheInRAM:   "false",
 	}
 }
@@ -341,6 +344,15 @@ func Load(getenv func(string) string) (*Config, error) {
 	case "false":
 	default:
 		fail(EnvRunnerBuildCacheInRAM, "%q must be true or false", raw)
+	}
+	// max-instances is always 1 (claims live in memory), so min-instances is 0
+	// (scale to zero) or 1 (always warm: no cold-start 429s on webhooks).
+	switch raw := get(EnvMediatorMinInstances); raw {
+	case "0":
+	case "1":
+		c.MediatorMinInstances = 1
+	default:
+		fail(EnvMediatorMinInstances, "%q must be 0 or 1 (max-instances is always 1)", raw)
 	}
 	// The in-RAM cache (~9.5 GB) comes on top of the lint's ~21 GB compile (P6 PoC
 	// run 4: 27.9 GB of 32 GiB), so only the 32 GiB shape has room for it.

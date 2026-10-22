@@ -48,8 +48,28 @@ Before setting the routing variable on any repository, check the
 ## Mediator: single instance
 
 The mediator keeps pending claims and its launch records in memory. Deploy it
-with **`max-instances=1`** (and `min-instances=0`); a second instance would
-answer 410 to claims issued by the first, and capacity checks could race.
+with **`max-instances=1`**; a second instance would answer 410 to claims
+issued by the first, and capacity checks could race.
+
+**Cold-start 429s and `MEDIATOR_MIN_INSTANCES`.** With the default
+`MEDIATOR_MIN_INSTANCES=0` the service scales to zero when idle. Webhook
+deliveries that arrive while its single instance starts can be refused by Cloud
+Run with 429 before they reach the mediator (us-west2: two deliveries at
+16:52:54-56Z, 30 s before the first 200), and GitHub does not retry them. The
+mediator itself starts serving at once (it reads secrets lazily), so this is
+Cloud Run's instance limit, not startup work. The cost of a lost delivery is
+latency, not a lost job: a `queued` job is backfilled by the next `/reconcile`
+(within `RECONCILE_SCHEDULE`), and an `in_progress` one is hijack-checked there.
+To check, look for 429s on `POST /webhook` in the service's request log, or in
+the App's **Recent Deliveries**, and redeliver them if the delay matters.
+
+`MEDIATOR_MIN_INSTANCES=1` (then `deploy-mediator.sh --apply`) keeps one instance
+warm: no cold-start 429s, and pending claims also survive idle periods. It costs
+one 1 vCPU / 512 MiB instance billed at Cloud Run's idle min-instance rate around
+the clock: about 2.6 million instance-seconds a month, roughly USD 10 at the
+tier-1 rates when this was written (check the
+[Cloud Run pricing](https://cloud.google.com/run/pricing) page for `REGION`).
+Deploys still restart the instance.
 
 A restart (deploy, crash, scale to zero with a claim pending) loses pending
 claims. The affected runner gets 410 and exits 3 without running a job; the
@@ -65,7 +85,7 @@ commands without `--apply`; read that transcript before applying.
 
 | Change | Command |
 | :--- | :--- |
-| Any config value the mediator uses (`TARGET_REPOS`, `MAX_CONCURRENT_RUNNERS`, `CLAIM_TTL`, ...) | edit `config.env`, `scripts/deploy-mediator.sh --apply` |
+| Any config value the mediator uses (`TARGET_REPOS`, `MAX_CONCURRENT_RUNNERS`, `CLAIM_TTL`, `MEDIATOR_MIN_INSTANCES`, ...) | edit `config.env`, `scripts/deploy-mediator.sh --apply` |
 | Mediator code | commit, then `scripts/deploy-mediator.sh --apply` (new tag from the source tree hash) |
 | Runner shape (`RUNNER_CPU`, `RUNNER_MEMORY`, `RUNNER_DISK_GI`, `TASK_TIMEOUT`, `RUNNER_IDLE_TIMEOUT`) | edit `config.env`, `scripts/deploy-job.sh --apply` |
 | Runner image | see [Runner image updates](#runner-image-updates) |

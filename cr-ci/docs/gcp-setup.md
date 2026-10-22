@@ -226,7 +226,7 @@ scripts/deploy-mediator.sh --apply [--tag TAG] [--local] [--no-invoker-iam-check
    `config.env` or stray file leaves the machine.
 3. Deploys `MEDIATOR_SERVICE_NAME` as `MEDIATOR_SA_NAME` (C12):
    - `--max-instances=1` (**required**: claims live in the mediator's memory)
-     and `--min-instances=0`; 1 vCPU, 512 MiB, request timeout 300 s;
+     and `--min-instances` from `MEDIATOR_MIN_INSTANCES` (default 0; 1 keeps it warm, see [operations](operations.md#mediator-single-instance)); 1 vCPU, 512 MiB, request timeout 300 s;
    - public ingress;
    - every config key as an env var (`--set-env-vars` with the `^;^`
      delimiter, because values contain commas and spaces). The secrets are
