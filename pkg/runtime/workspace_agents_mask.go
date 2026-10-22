@@ -160,7 +160,9 @@ func workspaceProjectConfigMount(workspace, containerWorkspace string, allowMark
 // nestedProjectConfigRel returns the path of the project's .scion entry
 // (projectConfigPath, or <projectConfigPath>/.scion when that is a project
 // root) relative to repoRoot, when it lies below repoRoot somewhere other
-// than <repoRoot>/.scion.
+// than <repoRoot>/.scion. repoRoot must already be resolved (symlink-free),
+// as buildCommonRunArgs resolves it; a caller passing an unresolved repo
+// root must resolve it first.
 func nestedProjectConfigRel(repoRoot, projectConfigPath string) (string, bool) {
 	if repoRoot == "" || projectConfigPath == "" {
 		return "", false
