@@ -1959,7 +1959,8 @@ func ReadAgentTokenFile() string {
 // observational — it never changes auth priority or behavior.
 //
 // Note: hub.token and hub.apiKey are deprecated and no longer used for auth.
-// Auth priority: OAuth credentials > scion-token file > SCION_AUTH_TOKEN env > auto dev auth.
+// Auth priority: OAuth credentials > scion-token file > SCION_AUTH_TOKEN env > SCION_HUB_TOKEN env >
+// auto dev auth, which applies to a loopback hub only (IsLocalhostEndpoint).
 // Exception: for localhost endpoints, dev auth takes priority over non-dev agent tokens
 // to avoid stale scion-token files from previous remote hub connections. This exception
 // is suppressed for hub-managed agents (config.IsHubManagedAgent(), i.e. SCION_AGENT_ID
@@ -2086,7 +2087,10 @@ func ScopedTokenProjectNotFoundError(projectID string) error {
 		ErrScopedTokenProjectNotFound, projectID)
 }
 
-func isLocalhostEndpoint(endpoint string) bool {
+// IsLocalhostEndpoint reports whether endpoint is a loopback hub: its host is
+// localhost, 127.0.0.1 or ::1. It is the one rule for where a dev credential
+// may go: the CLI reports one only for such a hub and sends one only to it.
+func IsLocalhostEndpoint(endpoint string) bool {
 	u, err := url.Parse(endpoint)
 	if err != nil {
 		return false
@@ -2094,6 +2098,8 @@ func isLocalhostEndpoint(endpoint string) bool {
 	host := u.Hostname()
 	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
+
+func isLocalhostEndpoint(endpoint string) bool { return IsLocalhostEndpoint(endpoint) }
 
 // emptyResponseNote replaces the hub-check hint when the hub answered a call
 // that needs a body with an empty response (apiclient.ErrNoContent). The hub

@@ -454,13 +454,10 @@ func printTokenExpiry(expiry time.Time) {
 	fmt.Printf("Expires:    %s (%s)\n", when, clitime.Relative(expiry))
 }
 
+// isLocalhostEndpoint is hubsync.IsLocalhostEndpoint: the loopback rule the
+// CLI uses both to report a dev credential and to send one.
 func isLocalhostEndpoint(endpoint string) bool {
-	u, err := url.Parse(endpoint)
-	if err != nil {
-		return false
-	}
-	host := u.Hostname()
-	return host == "localhost" || host == "127.0.0.1" || host == "::1"
+	return hubsync.IsLocalhostEndpoint(endpoint)
 }
 
 // readAgentTokenFile reads the canonical agent token from ~/.scion/scion-token.
@@ -616,7 +613,8 @@ func hubClientForEndpoint(settings *config.Settings, endpoint string) (hubclient
 
 	// Add authentication - check in priority order.
 	// Note: hub.token and hub.apiKey are deprecated and no longer used for auth.
-	// Auth priority: OAuth credentials > scion-token file > SCION_AUTH_TOKEN env > SCION_HUB_TOKEN env > auto dev auth.
+	// Auth priority: OAuth credentials > scion-token file > SCION_AUTH_TOKEN env > SCION_HUB_TOKEN env >
+	// auto dev auth, which applies to a loopback hub only (isLocalhostEndpoint).
 	// Exception: for localhost endpoints, dev auth takes priority over non-dev agent tokens
 	// to avoid stale scion-token files from previous remote hub connections. This exception
 	// is suppressed for hub-managed agents (config.IsHubManagedAgent()) — see the matching

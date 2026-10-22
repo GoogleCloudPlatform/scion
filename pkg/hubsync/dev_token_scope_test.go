@@ -104,3 +104,21 @@ func TestCreateHubClient_DevAuthOnlyForLoopbackHub(t *testing.T) {
 		t.Errorf("loopback hub got Authorization %q, want the dev token", got)
 	}
 }
+
+// IsLocalhostEndpoint is the loopback rule for dev credentials.
+func TestIsLocalhostEndpoint_LoopbackRule(t *testing.T) {
+	for ep, want := range map[string]bool{
+		"http://localhost:8080":   true,
+		"http://127.0.0.1:8080":   true,
+		"http://[::1]:8080":       true,
+		"http://127.0.0.2:8080":   false,
+		"http://0.0.0.0:8080":     false,
+		"https://hub.example.com": false,
+		"http://localhost.:8080":  false,
+		"":                        false,
+	} {
+		if got := IsLocalhostEndpoint(ep); got != want {
+			t.Errorf("IsLocalhostEndpoint(%q) = %v, want %v", ep, got, want)
+		}
+	}
+}
