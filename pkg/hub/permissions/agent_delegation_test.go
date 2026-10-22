@@ -41,10 +41,12 @@ func TestAgentDelegableRegistry_KeysAreRegisteredPermissions(t *testing.T) {
 // TestAgentDelegable_ExactKeysOnly: delegability is exact; absent
 // permissions and absent boundary kinds are not delegable.
 func TestAgentDelegable_ExactKeysOnly(t *testing.T) {
-	if !AgentDelegable("agent.read", BoundaryKindHub) || !AgentDelegable("agent.read", BoundaryKindProject) {
-		t.Fatal("agent.read must be delegable under project and hub boundaries")
+	for _, id := range []string{"agent.read", "project.read"} {
+		if !AgentDelegable(id, BoundaryKindHub) || !AgentDelegable(id, BoundaryKindProject) {
+			t.Fatalf("%s must be delegable under project and hub boundaries", id)
+		}
 	}
-	for _, id := range []string{"agent.create", "agent.delete", "agent.lifecycle", "agent.attach", "agent.message", "project.read", "agent.list", "agent", "agent.*", ""} {
+	for _, id := range []string{"agent.create", "agent.delete", "agent.lifecycle", "agent.attach", "agent.message", "project.update", "project.list", "agent.list", "agent", "agent.*", ""} {
 		if AgentDelegable(id, BoundaryKindHub) || AgentDelegable(id, BoundaryKindProject) {
 			t.Errorf("%q must not be delegable", id)
 		}
