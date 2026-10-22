@@ -300,13 +300,15 @@ func buildHealthEvent(in healthInputs) (*telemetrycontract.HealthEvent, error) {
 // lossIndicated reports whether any counter in the snapshot records a
 // possible loss (design section 3.2): refused (overflow, oversize) or failed
 // analytics appends, torn lines, events without identity, quarantined and
-// dead-lettered lines, and metric/log records rejected,
+// dead-lettered lines, corrupt intents, invalid (not appended) events, and
+// metric/log records rejected,
 // dropped or terminal without confirmation. It is evidence to examine, not
 // a measured token loss.
 func lossIndicated(in healthInputs) bool {
 	a := in.Analytics
 	if in.AnalyticsEnabled && (a.OverflowTotal > 0 || a.Overflow > 0 || a.AppendFailed > 0 || a.AppendFailedTotal > 0 ||
-		a.OversizeTotal > 0 || a.Torn > 0 || a.DroppedNoIdentity > 0 || a.Quarantined > 0 || a.DeadLetters > 0 || a.DeadLettersTotal > 0) {
+		a.OversizeTotal > 0 || a.Torn > 0 || a.DroppedNoIdentity > 0 || a.Quarantined > 0 || a.DeadLetters > 0 || a.DeadLettersTotal > 0 ||
+		a.CorruptIntents > 0 || a.Invalid > 0) {
 		return true
 	}
 	for _, s := range []DeliverySnapshot{in.Metrics, in.Logs} {
@@ -439,6 +441,10 @@ func (h analyticsHandles) counters() telemetrycontract.HealthAnalyticsCounters {
 		OversizeTotal:     s.PersistedOversize,
 		AppendFailedTotal: s.PersistedAppendFailed,
 		DeadLettersTotal:  s.PersistedDeadLetters,
+		SyncUncertain:     s.SyncUncertain,
+		CorruptIntents:    s.CorruptIntents,
+		Invalid:           h.native.Invalid(),
+		RetainedBytes:     s.RetainedBytes,
 		PendingBytes:      s.PendingBytes,
 		ProducerEpoch:     epoch,
 		ProducerSeqLast:   seq,

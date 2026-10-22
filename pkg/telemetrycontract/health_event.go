@@ -121,6 +121,8 @@ type HealthAnalyticsCounters struct {
 	Torn, HubIDMismatch                                  int64
 	Conflicts, Quarantined, DeadLetters                  int64
 	OversizeTotal, AppendFailedTotal, DeadLettersTotal   int64
+	SyncUncertain, CorruptIntents, Invalid               int64
+	RetainedBytes                                        int64
 	PendingBytes                                         int64
 	// OldestPendingFileAgeMs is nil when nothing is pending (omitted).
 	OldestPendingFileAgeMs *int64
@@ -203,8 +205,19 @@ type HealthEvent struct {
 	AnalyticsOversizeTotal     *int64 `json:"analytics_oversize_total,omitempty"`
 	AnalyticsAppendFailedTotal *int64 `json:"analytics_append_failed_total,omitempty"`
 	AnalyticsDeadLettersTotal  *int64 `json:"analytics_dead_letters_total,omitempty"`
-	AnalyticsHubIDMismatch     *int64 `json:"analytics_hub_id_mismatch,omitempty"`
-	AnalyticsPendingBytes      *int64 `json:"analytics_pending_bytes,omitempty"`
+	// SyncUncertain: appends whose durability recovery decided (written;
+	// quality, not loss). CorruptIntents: unreadable append intents set
+	// aside, so whether their line landed is unknown (possible loss).
+	// Invalid: events this process could not append (outbox unavailable
+	// or append error; includes analytics_append_failed). RetainedBytes:
+	// gauge of everything the outbox cap applies to (pending, dead-lettered
+	// and quarantined bytes).
+	AnalyticsSyncUncertain  *int64 `json:"analytics_sync_uncertain,omitempty"`
+	AnalyticsCorruptIntents *int64 `json:"analytics_corrupt_intents,omitempty"`
+	AnalyticsInvalid        *int64 `json:"analytics_invalid,omitempty"`
+	AnalyticsRetainedBytes  *int64 `json:"analytics_retained_bytes,omitempty"`
+	AnalyticsHubIDMismatch  *int64 `json:"analytics_hub_id_mismatch,omitempty"`
+	AnalyticsPendingBytes   *int64 `json:"analytics_pending_bytes,omitempty"`
 	// AnalyticsOldestPendingFileAgeMs is the age of the oldest pending
 	// outbox FILE's last modification: a lower bound on the oldest pending
 	// event's age. Omitted when nothing is pending.
@@ -449,6 +462,8 @@ func (e *HealthEvent) analyticsCounters() map[string]*int64 {
 		"analytics_conflicts": e.AnalyticsConflicts, "analytics_quarantined": e.AnalyticsQuarantined,
 		"analytics_dead_letters": e.AnalyticsDeadLetters, "analytics_oversize_total": e.AnalyticsOversizeTotal,
 		"analytics_append_failed_total": e.AnalyticsAppendFailedTotal, "analytics_dead_letters_total": e.AnalyticsDeadLettersTotal,
+		"analytics_sync_uncertain": e.AnalyticsSyncUncertain, "analytics_corrupt_intents": e.AnalyticsCorruptIntents,
+		"analytics_invalid": e.AnalyticsInvalid, "analytics_retained_bytes": e.AnalyticsRetainedBytes,
 		"analytics_pending_bytes": e.AnalyticsPendingBytes, "analytics_retry_backoff_ms": e.AnalyticsRetryBackoffMs,
 		"producer_seq_last": e.ProducerSeqLast,
 	}
@@ -516,6 +531,8 @@ func (e *HealthEvent) SetAnalyticsCounters(c HealthAnalyticsCounters) {
 	e.AnalyticsConflicts, e.AnalyticsQuarantined, e.AnalyticsDeadLetters = i64(c.Conflicts), i64(c.Quarantined), i64(c.DeadLetters)
 	e.AnalyticsOversizeTotal, e.AnalyticsAppendFailedTotal = i64(c.OversizeTotal), i64(c.AppendFailedTotal)
 	e.AnalyticsDeadLettersTotal = i64(c.DeadLettersTotal)
+	e.AnalyticsSyncUncertain, e.AnalyticsCorruptIntents = i64(c.SyncUncertain), i64(c.CorruptIntents)
+	e.AnalyticsInvalid, e.AnalyticsRetainedBytes = i64(c.Invalid), i64(c.RetainedBytes)
 	e.AnalyticsPendingBytes, e.AnalyticsRetryBackoffMs = i64(c.PendingBytes), i64(c.RetryBackoffMs)
 	e.AnalyticsOldestPendingFileAgeMs = nil
 	if c.OldestPendingFileAgeMs != nil {

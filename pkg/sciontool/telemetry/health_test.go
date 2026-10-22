@@ -449,6 +449,8 @@ func TestFinalFlushOutcomeAndLoss(t *testing.T) {
 		"quarantined":         func(in *healthInputs) { in.Analytics.Quarantined = 1 },
 		"oversize total":      func(in *healthInputs) { in.Analytics.OversizeTotal = 1 },
 		"append failed total": func(in *healthInputs) { in.Analytics.AppendFailedTotal = 1 },
+		"corrupt intents":     func(in *healthInputs) { in.Analytics.CorruptIntents = 1 },
+		"invalid":             func(in *healthInputs) { in.Analytics.Invalid = 1 },
 	} {
 		in := fixedHealthInputs(telemetrycontract.HealthTriggerPeriodic)
 		mutate(&in)
@@ -458,8 +460,9 @@ func TestFinalFlushOutcomeAndLoss(t *testing.T) {
 	}
 	conflict := fixedHealthInputs(telemetrycontract.HealthTriggerPeriodic)
 	conflict.Analytics.Conflicts = 1
+	conflict.Analytics.SyncUncertain = 1 // written; durability decided by recovery
 	if ev, _ := buildHealthEvent(conflict); ev.LossIndicated {
-		t.Error("a request_id conflict is a quality signal, not loss")
+		t.Error("conflicts and sync_uncertain are quality signals, not loss")
 	}
 	for name, mutate := range map[string]func(*healthInputs){
 		"metric residual":   func(in *healthInputs) { in.FinalResidualRecords = 1 },

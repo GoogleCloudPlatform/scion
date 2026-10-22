@@ -177,6 +177,7 @@ func clearAnalytics(e *HealthEvent) {
 	e.AnalyticsSendFailures, e.AnalyticsSendRetries, e.AnalyticsTorn, e.AnalyticsHubIDMismatch = nil, nil, nil, nil
 	e.AnalyticsConflicts, e.AnalyticsQuarantined, e.AnalyticsDeadLetters = nil, nil, nil
 	e.AnalyticsOversizeTotal, e.AnalyticsAppendFailedTotal, e.AnalyticsDeadLettersTotal = nil, nil, nil
+	e.AnalyticsSyncUncertain, e.AnalyticsCorruptIntents, e.AnalyticsInvalid, e.AnalyticsRetainedBytes = nil, nil, nil, nil
 	e.AnalyticsPendingBytes, e.AnalyticsRetryBackoffMs, e.ProducerSeqLast = nil, nil, nil
 	e.AnalyticsStatsFailed, e.ProducerEpoch, e.AnalyticsOldestPendingFileAgeMs = nil, "", nil
 	if e.hasAnalyticsCounters() {
