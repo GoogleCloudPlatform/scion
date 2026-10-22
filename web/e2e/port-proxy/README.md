@@ -53,13 +53,15 @@ No container runtime or credentials are needed.
   built for each agent. Each agent registers the fixture port; the helper
   writes its ready file once the port answers through the hub.
 - **Restart**: after the agents are ready, global setup issues the member
-  test identity (its web-login code goes in the state dir) and makes it
-  project-admin of the fixture project, then restarts the hub without
-  development sign-in (`restartHubWithoutDevAuth`), as in production. The
-  agents reconnect on their own; the spec waits until each port answers
-  again before the journeys.
-- **Browser**: the member test identity redeems its web-login code in its
-  own browser context. The
+  test identity and makes it project-admin of the fixture project, then
+  restarts the hub without development sign-in
+  (`restartHubWithoutDevAuth`), as in production. The agents reconnect on
+  their own; the spec waits until each port answers again before the
+  journeys.
+- **Browser**: global setup redeems the member's web-login code once after
+  the restart and keeps the session as a storage state (0600, in the
+  state dir); the spec's browser context loads it, so a retried run signs
+  in the same way. The
   journeys use that session cookie only. Every journey request is made by a
   page, and the spec fails any page request that carries an Authorization
   header (the 308 check reads the redirect hop of a page navigation).

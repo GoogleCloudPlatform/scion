@@ -611,7 +611,8 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubState>
  * web-login codes, agent and broker credentials keep working (they live in
  * the database). The state file is rewritten with the new PID, an empty
  * devToken and devAuth: false. If the restarted hub does not get healthy,
- * it is killed and the call throws.
+ * it is killed, the state file is rewritten the same way with the killed
+ * process's PID, and the call throws.
  */
 export async function restartHubWithoutDevAuth(stateFile: string = STATE_FILE): Promise<HubState> {
   const key = path.resolve(stateFile);
@@ -645,6 +646,16 @@ export async function restartHubWithoutDevAuth(stateFile: string = STATE_FILE): 
   } catch (err) {
     if (current) killProcessGroup(current);
     launches.delete(key);
+    // Rewritten so it names the last hub process (now stopped) and no
+    // longer offers the dev token; stopHub still removes the temp dir.
+    const failed: HubState = {
+      ...state,
+      pid: current?.pid ?? state.pid,
+      devToken: '',
+      devAuth: false,
+    };
+    fs.rmSync(stateFile, { force: true });
+    fs.writeFileSync(stateFile, JSON.stringify(failed, null, 2), { mode: 0o600, flag: 'wx' });
     throw err;
   }
   const next: HubState = { ...state, pid: hubProcess.pid!, devToken: '', devAuth: false };

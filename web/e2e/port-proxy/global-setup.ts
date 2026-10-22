@@ -24,11 +24,13 @@
  *    clients in process. It creates a project and one agent per transport,
  *    each registering the fixture port, and writes a ready file once each
  *    port answers through the hub.
- * 4. Issues the member test identity (web-login code in the state dir) and
- *    makes it project-admin of the fixture project.
+ * 4. Issues the member test identity and makes it project-admin of the
+ *    fixture project.
  * 5. Restarts the hub without development sign-in, as in production (the
  *    dev token is not accepted afterwards); the spec waits for the agents
  *    to reconnect.
+ * 6. Redeems the member's web-login code once and saves the session as a
+ *    storage state (0600, state dir) that every browser context loads.
  *
  * The hub binary (make build), the web assets (npm run build) and the
  * helper binary must exist with E2E_PREBUILT=1; otherwise they are built
@@ -39,6 +41,8 @@ import { execFileSync, spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import { request } from '@playwright/test';
 
 import { type HubState, restartHubWithoutDevAuth, runScionCLI, startHub } from '../harness/hub.js';
 import globalTeardown from './global-teardown.js';
@@ -212,12 +216,55 @@ async function setUp(dir: string): Promise<void> {
   // The member identity, its web-login code and its project role need the
   // dev token, so they are created before the restart below.
   const member = await createMember(hub, dir, ready.projectId);
-  writeSuiteState({ fixturePid, helperPid, port, ...ready, member });
 
   // The journeys run against a hub without development sign-in, as in
   // production: a request without credentials is not signed in. The
   // agents reconnect on their own; the spec waits for them.
   await restartHubWithoutDevAuth(hubStateFile());
+
+  // Redeem the single-use web-login code once, here, and keep the session
+  // as a storage state, so a retried beforeAll reuses the session instead
+  // of a code that is already spent.
+  const storageFile = await redeemToStorageState(hub.baseURL, member.codeFile, dir);
+  writeSuiteState({
+    fixturePid,
+    helperPid,
+    port,
+    ...ready,
+    member: { email: member.email, storageFile },
+  });
+}
+
+/**
+ * Redeems a web-login code (POST /auth/test-identity/redeem) in a fresh
+ * request context and saves the session cookie as a Playwright storage
+ * state in a 0600 file under the state dir. The code file is removed after
+ * a successful redeem. A failure throws with the status only.
+ */
+async function redeemToStorageState(
+  baseURL: string,
+  codeFile: string,
+  dir: string
+): Promise<string> {
+  const code = fs.readFileSync(codeFile, 'utf-8').trim();
+  const ctx = await request.newContext({ baseURL });
+  try {
+    const res = await ctx.post('/auth/test-identity/redeem', {
+      data: { code },
+      headers: { 'Content-Type': 'application/json' },
+      maxRedirects: 0,
+    });
+    const status = res.status();
+    await res.dispose();
+    if (status !== 204) throw new Error(`test identity redeem answered ${status}, want 204`);
+    fs.rmSync(codeFile, { force: true });
+    const storageFile = path.join(dir, 'member-storage.json');
+    const state = await ctx.storageState();
+    fs.writeFileSync(storageFile, JSON.stringify(state), { mode: 0o600, flag: 'wx' });
+    return storageFile;
+  } finally {
+    await ctx.dispose();
+  }
 }
 
 /** An admin API call with the dev token (setup only). */

@@ -36,7 +36,7 @@
 
 import { type BrowserContext, expect, type Page, type Response, test } from '@playwright/test';
 
-import { assertTestIdentity, redeemTestIdentity } from '../harness/auth.js';
+import { assertTestIdentity } from '../harness/auth.js';
 import { type HubState, readHubState } from '../harness/hub.js';
 import {
   hubStateFile,
@@ -58,9 +58,9 @@ let suite: SuiteState;
 let context: BrowserContext;
 /**
  * Page requests the browser context sent with an Authorization header.
- * Every journey request is made by a page; only beforeAll (the redeem, the
- * identity check and the readiness wait) uses the context's request API,
- * without one.
+ * Every journey request is made by a page; only beforeAll (the identity
+ * check and the readiness wait) uses the context's request API, without
+ * one.
  */
 const bearerRequests: string[] = [];
 
@@ -76,7 +76,8 @@ function agentFor(transport: string): string {
 }
 
 /** How long beforeAll waits for the agents to serve their port again after the hub restart. */
-const READY_TIMEOUT_MS = 90_000;
+// The legacy tunnel retries a lost hub after 5s, then 10s, 20s and 40s.
+const READY_TIMEOUT_MS = 150_000;
 
 /**
  * Waits until the agent's fixture port answers single.html through the
@@ -129,16 +130,16 @@ test.beforeAll(async ({ browser }) => {
   hub = h;
   suite = s;
 
-  // The member identity global setup created (project-admin of the
-  // fixture project), signed in through its web-login code.
+  // The member identity global setup created and signed in (project-admin
+  // of the fixture project); its session is loaded from the storage state,
+  // so a retried beforeAll signs in the same way.
   if (!suite.member) throw new Error('global setup did not create the member identity');
   const member = suite.member;
 
-  context = await browser.newContext({ baseURL: hub.baseURL });
+  context = await browser.newContext({ baseURL: hub.baseURL, storageState: member.storageFile });
   context.on('request', (req) => {
     if (req.headers()['authorization'] !== undefined) bearerRequests.push(req.url());
   });
-  await redeemTestIdentity(context, { codeFile: member.codeFile });
   await assertTestIdentity(context.request, { email: member.email, role: 'member' });
   for (const agent of suite.agents) await waitServed(agent.id);
 });

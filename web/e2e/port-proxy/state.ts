@@ -55,10 +55,11 @@ export interface SuiteState {
   agents: SuiteAgent[];
   /**
    * The member test identity the journeys sign in as: project-admin of
-   * the fixture project, with a single-use web-login code in codeFile
-   * (0600, under the state dir). Unset until setup has created it.
+   * the fixture project. storageFile is its signed-in session as a
+   * Playwright storage state (0600, under the state dir). Unset until
+   * setup has redeemed it.
    */
-  member?: { email: string; codeFile: string };
+  member?: { email: string; storageFile: string };
 }
 
 /** Creates the private state dir and publishes its path. */

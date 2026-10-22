@@ -35,7 +35,9 @@
  *   HOME and hub id; without it there is one start and no API call; a
  *   failure before the restart completes leaves no hub running;
  * - restartHubWithoutDevAuth restarts the server with the same arguments
- *   except --dev-auth and rewrites the state file (new PID, no dev token).
+ *   except --dev-auth and rewrites the state file (new PID, no dev token);
+ *   if the restarted server never gets healthy it is killed and the state
+ *   file names it, without the dev token.
  */
 
 import * as fs from 'node:fs';
@@ -99,8 +101,12 @@ if (argv[0] === 'server' && argv[1] === 'start') {
         });
         return;
       }
+      // HARNESS_SELFTEST_UNHEALTHY_WITHOUT_DEV_AUTH=1: a start without
+      // --dev-auth never reports healthy.
+      const unhealthy =
+        process.env.HARNESS_SELFTEST_UNHEALTHY_WITHOUT_DEV_AUTH === '1' && !argv.includes('--dev-auth');
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'healthy' }));
+      res.end(JSON.stringify({ status: unhealthy ? 'degraded' : 'healthy' }));
     })
     .listen(port, '127.0.0.1', () => {
       console.log("export SCION_DEV_TOKEN=$(cat '" + tokenFile + "')");
@@ -410,4 +416,37 @@ test('restartHubWithoutDevAuth refuses a hub it did not start', async () => {
     'restartHubWithoutDevAuth: no hub started by startHub in this process'
   );
   expect(invocations(), 'nothing ran').toEqual([]);
+});
+
+test('a failed restartHubWithoutDevAuth kills the new hub and rewrites the state', async () => {
+  test.setTimeout(90_000); // the health wait gives up after 30s
+  // Set before startHub: the restart reuses the first start's environment.
+  // The first start has --dev-auth, so it is healthy.
+  process.env.HARNESS_SELFTEST_UNHEALTHY_WITHOUT_DEV_AUTH = '1';
+  let before;
+  try {
+    before = await startHub({
+      testLogin: false,
+      testIdentities: true,
+      build: false,
+      binary,
+      stateFile,
+    });
+    await expect(restartHubWithoutDevAuth(stateFile)).rejects.toThrow('did not become healthy');
+  } finally {
+    delete process.env.HARNESS_SELFTEST_UNHEALTHY_WITHOUT_DEV_AUTH;
+  }
+  const starts = invocations().filter((c) => c.argv[1] === 'start');
+  expect(starts).toHaveLength(2);
+  await expect
+    .poll(() => alive(starts[0].pid), { message: 'the first server stopped' })
+    .toBe(false);
+  await expect
+    .poll(() => alive(starts[1].pid), { message: 'the failed server was killed' })
+    .toBe(false);
+  const state = readHubState(stateFile);
+  expect(state?.pid).toBe(starts[1].pid);
+  expect(state?.devToken).toBe('');
+  expect(state?.devAuth).toBe(false);
+  expect(state?.dbDir).toBe(before.dbDir);
 });
