@@ -621,12 +621,12 @@ var identityOperations = []OperationSpec{
 	{
 		ID:          "user.admin.provision",
 		Domain:      "user.admin",
-		Description: "Pre-register a user (status invited) through POST /api/v1/users; invitation-equivalent, shares the invite creation core; no role, no grants",
+		Description: "Pre-register a user (status invited) through POST /api/v1/users; invitation-equivalent, shares the invite creation core; no role, no grants. A token needs user:invite on the hub boundary and the holder's live user.invite authority, checked at the hub user collection; the user_provision audit records the token as the credential. Refused for every caller on a hub running with dev authentication",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users", Method: "POST"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
 		ResourceResolver: "hub-scoped",
 		BasePermission:   "user.invite",
 		// EffectCreateResource: the invited row. EffectIssueCredential and
@@ -646,21 +646,26 @@ var identityOperations = []OperationSpec{
 			AfterFields:   []string{"target_user_id", "email", "status", "display_name"},
 			Atomic:        true,
 		},
-		// forbidden: rows 4, 4a, 5 and 8 (row 4a carries the
-		// dev_auth_not_supported reason, row 5 the session-only reason);
+		// forbidden: rows 4, 4a and 8 (row 4a carries the
+		// dev_auth_not_supported reason; a credential kind other than a
+		// session or a user access token gets the session-only reason);
+		// credential_insufficient: the details.reason of a token without
+		// user:invite on a hub boundary (rows 6-7, wire code forbidden);
 		// user_suspended: the auth middleware (row 3); conflict: an
 		// existing record (rows 15-17); role_assignment_forbidden: the
 		// denial-log classification of a request that names a role (row
-		// 12, wire code unprocessable). credential_insufficient is added
-		// with hub token admission (rows 6-7).
-		DenialCodes: []DenialCode{DenialForbidden, DenialUserSuspended, DenialConflict,
+		// 12, wire code unprocessable).
+		DenialCodes: []DenialCode{DenialForbidden, DenialCredentialInsufficient, DenialUserSuspended, DenialConflict,
 			DenialRoleAssignmentForbidden},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
 			{Package: "pkg/hub", Function: "TestHandleProvisionUser"},
+			{Package: "pkg/hub", Function: "TestProvisionToken_RequiresInviteSelectorAndHubBoundary"},
+			{Package: "pkg/hub", Function: "TestProvisionToken_DetailViewNeedsReadSelector"},
+			{Package: "pkg/hub", Function: "TestProvisionToken_RecordOutlivesTokenAndHolderAuthority"},
+			{Package: "pkg/hub", Function: "TestInvitationToken_CreatesNoRoleBindingOrGroupMembership"},
 		},
-		// Token admission opens with the hub UAT phase of this operation.
-		Bearer: SessionOnly(ReasonGovernancePending),
+		Bearer: AdmitOn(BearerTargetHubCollection, BearerBoundaryHub),
 	},
 	{
 		ID:          "user.admin.promote",

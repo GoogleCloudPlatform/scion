@@ -375,7 +375,7 @@ var Registry = []Permission{
 	{ID: "scheduled_event.update", Resource: ResourceScheduledEvent, Action: ActionUpdate, CapabilityKind: CapabilityResource, UATScope: "scheduled_event:update", Description: "Update, pause or resume a recurring schedule", Enforcement: []string{"pkg/hub/handlers_schedules.go"}},
 
 	// Extensions to existing resource types (Phase 2 D4 resolution)
-	{ID: "user.invite", Resource: ResourceUser, Action: ActionInvite, CapabilityKind: CapabilityScope, UATScope: "user:invite", Description: "Invite users", Enforcement: []string{"pkg/hub/handlers_users_provision.go:handleProvisionUser"}, NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+	{ID: "user.invite", Resource: ResourceUser, Action: ActionInvite, CapabilityKind: CapabilityScope, UATScope: "user:invite", Description: "Invite users", Enforcement: []string{"pkg/hub/route_metadata.go:admin.users.invite", "pkg/hub/route_metadata.go:admin.users.invite.bulk", "pkg/hub/route_metadata.go:admin.invites", "pkg/hub/route_metadata.go:admin.invites.byId", "pkg/hub/handlers_users_provision.go:handleProvisionUser"}},
 	{ID: "user.suspend", Resource: ResourceUser, Action: ActionSuspend, CapabilityKind: CapabilityResource, UATScope: "user:suspend", Description: "Suspend users", Enforcement: []string{"pkg/hub/handlers_users_core.go"}},
 	{ID: "user.promote", Resource: ResourceUser, Action: ActionPromote, CapabilityKind: CapabilityResource, Description: "Promote or demote users", Enforcement: []string{"pkg/hub/handlers_users_core.go"}},
 	{ID: "user.delete", Resource: ResourceUser, Action: ActionDelete, CapabilityKind: CapabilityResource, Description: "Delete users", Enforcement: []string{"pkg/hub/handlers_users_core.go"}},
