@@ -20,9 +20,13 @@ package hub
 // refusal's own 409 code, guidance and details (ptone/scion#5623).
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -157,4 +161,103 @@ func TestAgentDelete_PreCheckAnswerCarriesDetails(t *testing.T) {
 	assert.Equal(t, a.PinnedRuntimeTargetID, details["pinnedRuntimeTargetId"])
 	assert.Equal(t, a.RuntimeBrokerID, details["runtimeBrokerId"])
 	assert.False(t, f.client.deleteCalled)
+}
+
+// --- failed-create cleanup (ptone/scion#4962) --------------------------------
+
+// A failed create whose cleanup delete is refused for an inconsistent
+// saved placement keeps its row, as for a run mismatch: no compensation,
+// the row in phase error with the cleanup prefix and the placement
+// guidance (no advice to delete it, which is refused too), its quotas held.
+// The phase-error write is guarded on the run the refused delete named,
+// when the refusal carries it.
+func TestCleanupFailedCreate_PlacementRefusalKeepsRow(t *testing.T) {
+	type outcome int
+	const (
+		markedError outcome = iota
+		untouched
+	)
+	for _, tc := range []struct {
+		name    string
+		wrapRun bool // the refusal carries the run the delete named
+		moveTo  string
+		want    outcome
+	}{
+		{name: "refused, run carried", wrapRun: true, want: markedError},
+		{name: "refused, no run carried", want: markedError},
+		{name: "refused, row moved to another run", wrapRun: true, moveTo: "run-other", want: untouched},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s := testServer(t)
+			var logs bytes.Buffer
+			srv.agentLifecycleLog = slog.New(slog.NewTextHandler(&logs, nil))
+			setBrokerAgentCeiling(t, s, 5)
+			agent := setupBrokerAgentInPhase(t, s, "pr-cleanup-"+uuid.NewString()[:8], state.PhaseProvisioning)
+			ctx := context.Background()
+			broker, err := s.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
+			require.NoError(t, err)
+			reserveBrokerSlot(t, s, broker, agent.ID)
+			_, err = s.SetAgentRunID(ctx, agent.ID, "run-mine", nil)
+			require.NoError(t, err)
+			agent = mustGetAgent(t, s, agent.ID)
+			before := agent.Phase
+
+			var refusalErr error = placementConflict(stalePinRefusal(agent, "test: refused by the backstop"))
+			if tc.wrapRun {
+				refusalErr = &createCleanupDeleteError{runID: "run-mine", err: refusalErr}
+			}
+			corrID := srv.cleanupFailedCreate(ctx, createRollback{
+				Agent:           agent,
+				RuntimeBrokerID: agent.RuntimeBrokerID,
+				Stage:           createStageDispatch,
+				Cause:           errors.New("dispatch failed"),
+				DeleteRuntime: func(dctx context.Context) error {
+					if tc.moveTo != "" {
+						if _, err := s.SetAgentRunID(dctx, agent.ID, tc.moveTo, nil); err != nil {
+							return err
+						}
+					}
+					return refusalErr
+				},
+			})
+			assert.Empty(t, corrID)
+
+			got, err := s.GetAgent(ctx, agent.ID)
+			require.NoError(t, err, "the row was removed after the placement refusal")
+			assert.EqualValues(t, 1, brokerReservationCount(t, s, agent.RuntimeBrokerID), "the reservation is held")
+			assert.Contains(t, logs.String(), "agent placement is inconsistent; nothing was dispatched, keeping the agent row")
+			switch tc.want {
+			case markedError:
+				assert.Equal(t, string(state.PhaseError), got.Phase)
+				assert.True(t, strings.HasPrefix(got.Message, createCleanupRefusedPrefix), got.Message)
+				assert.Contains(t, got.Message, "saved placement is inconsistent")
+				assert.NotContains(t, got.Message, "Delete the agent to retry")
+				assert.True(t, isCreateCleanupRefusedRow(got))
+			case untouched:
+				assert.Equal(t, tc.moveTo, got.RunID)
+				assert.Equal(t, before, got.Phase, "the live run was marked failed")
+				assert.NotContains(t, got.Message, "cleanup was refused")
+				assert.Contains(t, logs.String(), "not marking it failed")
+			}
+		})
+	}
+}
+
+// The failed-create cleanup's broker delete returns the dispatcher's
+// placement refusal with the run it named, and sends nothing.
+func TestDispatchDeleteFailedCreate_PlacementRefusalCarriesRun(t *testing.T) {
+	ctx := context.Background()
+	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
+	a := f.stalePinnedAgent(t, "stale-create-cleanup", string(state.PhaseProvisioning))
+	_, err := f.s.SetAgentRunID(ctx, a.ID, "run-created", nil)
+	require.NoError(t, err)
+
+	err = dispatchDeleteFailedCreate(f.s, f.srv.GetDispatcher(), a)(ctx)
+	refusal, ok := placementRefusalOf(err)
+	require.True(t, ok, "a placement refusal: %v", err)
+	assert.Equal(t, ErrCodeRuntimeTargetPinStale, refusal.Code)
+	assert.Equal(t, "run-created", createCleanupTargetRun(err))
+	assert.False(t, f.client.deleteCalled, "nothing is sent")
+
+	assert.Equal(t, "", createCleanupTargetRun(errors.New("other")))
 }

@@ -1085,11 +1085,13 @@ type createRollback struct {
 // the client sees a timeout rather than the create error — a deliberate
 // trade for not leaking the agent's row, runtime resources and reservations.
 //
-// Failures of steps 1, 2 and 4 are logged and otherwise ignored, with one
-// exception: when the broker refuses step 2 because it holds a different
+// Failures of steps 1, 2 and 4 are logged and otherwise ignored, with two
+// exceptions: when the broker refuses step 2 because it holds a different
 // run of the agent (ptone/scion#3080) and refuseDeleteRunMismatch refuses,
-// steps 3 and 4 are skipped, and the row is left in phase error with its
-// quotas held (markCreateCleanupRefused). When the
+// or when the dispatcher refuses it because the agent's saved placement is
+// inconsistent (placementRefusalOf), steps 3 and 4 are skipped, and the
+// row is left in phase error with its quotas held
+// (markCreateCleanupRefused). When the
 // compensation transaction fails, the failure is logged at ERROR with a
 // correlation ID and the compensation's op ID, and a fallback runs: a
 // delete of the agent row without the audit record, in one transaction
@@ -1125,14 +1127,29 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (co
 			}
 		}()
 		var refused *DeleteRunMismatchError
+		var deleteErr error
 		func() {
 			rctx, cancel := detachedCleanupContext(ctx, createCleanupRuntimeTimeout)
 			defer cancel()
 			if err := rb.DeleteRuntime(rctx); err != nil {
 				s.agentLifecycleLog.Warn("Create-failure cleanup: runtime delete failed", "agent_id", agent.ID, "error", err)
 				errors.As(err, &refused)
+				deleteErr = err
 			}
 		}()
+		// The agent's saved placement is inconsistent, so the dispatcher
+		// refused the delete before sending anything: as for a run
+		// mismatch, removing the row could leave a workload running with
+		// no row and release its capacity with no evidence of teardown.
+		// The row is kept in phase error with the placement guidance and
+		// its quotas stay held, as the delete engine keeps it
+		// (rollbackPlacement).
+		if refusal, ok := placementRefusalOf(deleteErr); ok {
+			s.agentLifecycleLog.Warn("Create-failure cleanup: agent placement is inconsistent; nothing was dispatched, keeping the agent row",
+				"agent_id", agent.ID, "code", refusal.Code, "stage", rb.Stage)
+			s.markCreateCleanupRefused(ctx, agent.ID, createCleanupTargetRun(deleteErr), createCleanupRefusedPrefix+refusal.Message)
+			return ""
+		}
 		// The broker holds a different run of the agent than the row
 		// records and deleted nothing (ptone/scion#3080): removing the row
 		// would leave that run with no row. The row is kept in phase error
@@ -1143,7 +1160,7 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (co
 		if refused != nil && refuseDeleteRunMismatch(false, true) {
 			s.agentLifecycleLog.Warn("Create-failure cleanup: broker holds a different run than the hub recorded; keeping the agent row",
 				"agent_id", agent.ID, "hub_run_id", refused.RequestedRunID, "broker_run_id", refused.CurrentRunID, "stage", rb.Stage)
-			s.markCreateCleanupRefused(ctx, agent.ID, refused)
+			s.markCreateCleanupRefused(ctx, agent.ID, refused.RequestedRunID, createCleanupRefusedMessage(refused))
 			return ""
 		}
 	}
@@ -1231,21 +1248,22 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (co
 }
 
 // markCreateCleanupRefused leaves a failed create's row, whose runtime
-// delete the broker refused because it holds another run
-// (ptone/scion#3080), in phase error with the refusal's message.
+// delete was refused, in phase error with message: the broker holds
+// another run (ptone/scion#3080, createCleanupRefusedMessage), or the
+// agent's saved placement is inconsistent (createCleanupRefusedPrefix and
+// the placement guidance).
 //
 // The write is guarded on the run the refused delete named
-// (IfRunID: refused.RequestedRunID, ptone/scion#2550): when the row has
-// moved on since (to the broker's run, or any newer one), it records a live
-// run, which must not be marked failed, so nothing is written. Failures
-// are logged.
-func (s *Server) markCreateCleanupRefused(ctx context.Context, agentID string, refused *DeleteRunMismatchError) {
+// (IfRunID: runID, ptone/scion#2550): when the row has moved on since (to
+// the broker's run, or any newer one), it records a live run, which must
+// not be marked failed, so nothing is written. Failures are logged.
+func (s *Server) markCreateCleanupRefused(ctx context.Context, agentID, runID, message string) {
 	mctx, cancel := detachedCleanupContext(ctx, createCleanupStoreTimeout)
 	defer cancel()
 	err := s.store.UpdateAgentStatus(mctx, agentID, store.AgentStatusUpdate{
 		Phase:   string(state.PhaseError),
-		Message: createCleanupRefusedMessage(refused),
-		IfRunID: refused.RequestedRunID,
+		Message: message,
+		IfRunID: runID,
 	})
 	switch {
 	case errors.Is(err, store.ErrRunChanged):
@@ -1254,7 +1272,7 @@ func (s *Server) markCreateCleanupRefused(ctx context.Context, agentID string, r
 			current = a.RunID
 		}
 		s.agentLifecycleLog.Warn("Create-failure cleanup: the agent moved to another run after the refused delete; not marking it failed",
-			"agent_id", agentID, "hub_run_id", refused.RequestedRunID, "broker_run_id", refused.CurrentRunID, "current_run_id", current)
+			"agent_id", agentID, "hub_run_id", runID, "current_run_id", current)
 	case err != nil:
 		s.agentLifecycleLog.Warn("Create-failure cleanup: marking the kept row failed also failed", "agent_id", agentID, "error", err)
 	}
@@ -1370,8 +1388,36 @@ func writeCreateFailure(w http.ResponseWriter, correlationID string, writeOrigin
 // name a run that never reached the broker (ptone/scion#2550).
 func dispatchDeleteFailedCreate(st store.Store, dispatcher AgentDispatcher, agent *store.Agent) func(context.Context) error {
 	return func(ctx context.Context) error {
-		return dispatcher.DispatchAgentDelete(ctx, failedCreateDeleteTarget(ctx, st, agent), true, true, false, time.Time{})
+		target := failedCreateDeleteTarget(ctx, st, agent)
+		err := dispatcher.DispatchAgentDelete(ctx, target, true, true, false, time.Time{})
+		if _, ok := placementRefusalOf(err); ok {
+			return &createCleanupDeleteError{runID: target.RunID, err: err}
+		}
+		return err
 	}
+}
+
+// createCleanupDeleteError is a failed create's refused runtime delete,
+// with the run it named, so the cleanup can guard its write of the kept
+// row on that run (markCreateCleanupRefused). It wraps the refusal.
+type createCleanupDeleteError struct {
+	runID string
+	err   error
+}
+
+func (e *createCleanupDeleteError) Error() string { return e.err.Error() }
+
+func (e *createCleanupDeleteError) Unwrap() error { return e.err }
+
+// createCleanupTargetRun is the run a failed create's refused runtime
+// delete named (createCleanupDeleteError), or "" (no run guard) when err
+// does not carry it.
+func createCleanupTargetRun(err error) string {
+	var ce *createCleanupDeleteError
+	if errors.As(err, &ce) {
+		return ce.runID
+	}
+	return ""
 }
 
 // failedCreateDeleteTarget returns the agent a failed create's cleanup
