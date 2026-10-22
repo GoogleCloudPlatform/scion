@@ -570,3 +570,195 @@ func TestMarshalErrorsUseWireNames(t *testing.T) {
 		t.Errorf("error = %v, want it to name agent_id", err)
 	}
 }
+
+// --- WP0 review r3: name resolution, envelope gate, wire validation -----
+
+// (a) the same tagged wire name at equal depth from two embedded structs:
+// encoding/json would drop it silently. Built with reflect.StructOf
+// because go vet's structtag check rejects the literal declaration.
+type IdsTagged1 struct {
+	Ref1 string `json:"agent_ref"`
+}
+
+type IdsTagged2 struct {
+	Ref2 string `json:"agent_ref"`
+}
+
+func equalDepthConflictType() reflect.Type {
+	return reflect.StructOf([]reflect.StructField{
+		{Name: "Envelope", Type: envelopeType, Anonymous: true},
+		{Name: "IdsTagged1", Type: reflect.TypeOf(IdsTagged1{}), Anonymous: true},
+		{Name: "IdsTagged2", Type: reflect.TypeOf(IdsTagged2{}), Anonymous: true},
+	})
+}
+
+func TestCheckStructureEqualDepthTaggedConflict(t *testing.T) {
+	typ := equalDepthConflictType()
+	// Confirm the premise: encoding/json really drops the field.
+	v := reflect.New(typ).Elem()
+	v.Field(1).Field(0).SetString("x")
+	b, _ := json.Marshal(v.Interface())
+	if strings.Contains(string(b), "agent_ref") {
+		t.Fatalf("premise: encoding/json was expected to drop agent_ref: %s", b)
+	}
+	if err := checkStructure(typ); err == nil {
+		t.Error("checkStructure accepted an equal-depth tagged conflict")
+	}
+}
+
+// (b) an outer field shadowing an Envelope field.
+type shadowEvent struct {
+	Envelope
+	EventType string `json:"event_type"`
+}
+
+func (e *shadowEvent) Validate() error { return nil }
+
+// (c) a conflict hidden behind a nil embedded pointer: the embedded
+// field's tag and the outer field's untagged Go name are both "AgentRef".
+type idsC struct {
+	Ref string `json:"AgentRef"`
+}
+
+type nilPtrConflictEvent struct {
+	Envelope
+	*idsC
+	AgentRef string
+}
+
+func (e *nilPtrConflictEvent) Validate() error { return nil }
+
+// Envelope as a named field nests it instead of flattening.
+type namedEnvelopeEvent struct {
+	Env Envelope `json:"env"`
+	Envelope
+}
+
+func (e *namedEnvelopeEvent) Validate() error { return nil }
+
+func TestMarshalRejectsDuplicateAndShadowedWireNames(t *testing.T) {
+	env := NewEnvelope(EventTypeUsage, "u", "ns", testEventTS, testEventTS)
+	cases := map[string]Event{
+		"shadows event_type":   &shadowEvent{Envelope: env, EventType: EventTypeUsage},
+		"behind nil pointer":   &nilPtrConflictEvent{Envelope: env, AgentRef: "x"},
+		"named envelope field": &namedEnvelopeEvent{Env: env, Envelope: env},
+	}
+	for name, ev := range cases {
+		if _, err := Marshal(ev); err == nil {
+			t.Errorf("%s: Marshal accepted it", name)
+		}
+	}
+	var dst shadowEvent
+	if err := Unmarshal([]byte(fullTestEventGolden), &dst); err == nil {
+		t.Error("Unmarshal into a type with a shadowed envelope field accepted it")
+	}
+}
+
+// R3-2: the envelope is validated even if the event's Validate skips it.
+type laxEnvelopeEvent struct {
+	Envelope
+	Count int64 `json:"count"`
+}
+
+func (e *laxEnvelopeEvent) Validate() error { return nil }
+
+func TestMarshalValidatesEnvelopeRegardlessOfEventValidate(t *testing.T) {
+	bad := NewEnvelope(EventTypeUsage, "", "", testEventTS, testEventTS)
+	if _, err := Marshal(&laxEnvelopeEvent{Envelope: bad}); err == nil {
+		t.Error("Marshal accepted an invalid envelope behind a lax Validate")
+	}
+	data := []byte(`{"schema_version":2,"event_type":"agent.usage","event_id":"u","producer_namespace":"ns","event_ts":"2026-10-22T00:00:00Z","observed_ts":"2026-10-22T00:00:00Z","count":1}`)
+	var ev laxEnvelopeEvent
+	if err := Unmarshal(data, &ev); err == nil {
+		t.Error("Unmarshal accepted schema_version 2 behind a lax Validate")
+	}
+}
+
+type omitLabelsEvent struct {
+	Envelope
+	Labels Labels `json:"labels,omitempty"`
+}
+
+func (e *omitLabelsEvent) Validate() error { return nil }
+
+type ptrLabelsEvent struct {
+	Envelope
+	Labels *Labels `json:"labels,omitempty"`
+}
+
+func (e *ptrLabelsEvent) Validate() error { return nil }
+
+type stringOptStringEvent struct {
+	Envelope
+	Name string `json:"name,string"`
+}
+
+func (e *stringOptStringEvent) Validate() error { return nil }
+
+type cycleNode struct {
+	Next *cycleNode `json:"next,omitempty"`
+}
+
+type cycleEvent struct {
+	Envelope
+	Node *cycleNode `json:"node,omitempty"`
+}
+
+func (e *cycleEvent) Validate() error { return nil }
+
+// N3-1, N3-2, N3-3.
+func TestMarshalTagRulesAndCycles(t *testing.T) {
+	env := NewEnvelope(EventTypeUsage, "u", "ns", testEventTS, testEventTS)
+	if _, err := Marshal(&omitLabelsEvent{Envelope: env}); err == nil {
+		t.Error("omitempty on a Labels field accepted")
+	}
+	empty := Labels{}
+	got, err := Marshal(&ptrLabelsEvent{Envelope: env, Labels: &empty})
+	if err != nil || !strings.Contains(string(got), `"labels":[]`) {
+		t.Errorf("*Labels with omitempty: %s, %v", got, err)
+	}
+	if got, err := Marshal(&ptrLabelsEvent{Envelope: env}); err != nil || strings.Contains(string(got), "labels") {
+		t.Errorf("nil *Labels must be omitted (unknown): %s, %v", got, err)
+	}
+	if _, err := Marshal(&stringOptStringEvent{Envelope: env, Name: "x"}); err == nil {
+		t.Error(`",string" on a string field accepted`)
+	}
+	n := &cycleNode{}
+	n.Next = n
+	if _, err := Marshal(&cycleEvent{Envelope: env, Node: n}); err == nil {
+		t.Error("a pointer cycle must be an error, not a stack overflow")
+	}
+}
+
+func TestCheckWire(t *testing.T) {
+	env := NewEnvelope(EventTypeUsage, "u", "ns", testEventTS, testEventTS)
+	base := `{"schema_version":1,"event_type":"agent.usage","event_id":"u","producer_namespace":"ns","event_ts":"2026-10-22T00:05:00Z","observed_ts":"2026-10-22T00:05:00Z"`
+	if err := checkWire([]byte(base+`,"n":{"deep":[1,2,-3]}}`), &env); err != nil {
+		t.Errorf("valid wire rejected: %v", err)
+	}
+	for name, tail := range map[string]string{
+		"fraction":         `,"n":1.5}`,
+		"exponent":         `,"n":[1e2]}`,
+		"beyond safe":      `,"n":{"x":9007199254740992}}`,
+		"envelope differs": `,"event_id":"other"}`,
+	} {
+		if err := checkWire([]byte(base+tail), &env); err == nil {
+			t.Errorf("%s: checkWire accepted it", name)
+		}
+	}
+	if err := checkWire([]byte(`[1]`), &env); err == nil {
+		t.Error("a non-object accepted")
+	}
+}
+
+// Labels validate themselves when encoded, wherever they sit.
+func TestLabelsMarshalJSONValidates(t *testing.T) {
+	if _, err := json.Marshal(Labels{{"b", ""}, {"a", ""}}); err == nil {
+		t.Error("out-of-order Labels encoded")
+	}
+	env := NewEnvelope(EventTypeHealth, "h", "ns", testEventTS, testEventTS)
+	ev := &walkEvent{Envelope: env, Map: map[string]any{"labels": Labels{{"k", ""}, {"k", ""}}}}
+	if _, err := Marshal(ev); err == nil {
+		t.Error("invalid Labels inside an interface map accepted")
+	}
+}
