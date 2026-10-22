@@ -45,6 +45,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
@@ -340,7 +341,7 @@ func newFixture(t *testing.T) *fixture {
 		SecretKey:   base64.StdEncoding.EncodeToString(brokerKey),
 		HubEndpoint: f.proxy.URL(),
 	}
-	broker := runtimebroker.New(bcfg, agent.NewManager(rt), rt)
+	broker := runtimebroker.New(bcfg, agent.NewManager(rt), rt, config.RuntimeBuildRecord{})
 	bctx, cancel := context.WithCancel(context.Background())
 	require.NoError(t, broker.StartServices(bctx))
 	t.Cleanup(func() {

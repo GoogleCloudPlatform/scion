@@ -32,7 +32,9 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
+	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
@@ -392,7 +394,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		writeAgentList(w, p.view, sortedShortCircuitResponse(p))
+		s.writeAgentList(ctx, w, p.view, sortedShortCircuitResponse(p))
 	}
 
 	// RS2: Unauthenticated callers get an empty list immediately.
@@ -556,7 +558,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 
 	agents, scopeCap := s.buildGlobalAgentPage(ctx, identity, result.Items)
 
-	writeAgentList(w, legacyAgentListView(query), ListAgentsResponse{
+	s.writeAgentList(ctx, w, legacyAgentListView(query), ListAgentsResponse{
 		Agents:                agents,
 		NextCursor:            result.NextCursor,
 		TotalCount:            result.TotalCount,
@@ -4155,6 +4157,8 @@ func (s *Server) writeAgentGetResponse(w http.ResponseWriter, r *http.Request, a
 		Agent:               *agent,
 		ResolvedHarness:     resolvedHarness,
 		HarnessCapabilities: &harnessCaps,
+		HarnessVendor:       harness.Vendor(agentBadgeHarness(agent, resolvedHarness)),
+		ModelSize:           agentModelSize(agent),
 		CloudLogging:        s.logQueryService != nil,
 		SSHHostKey:          s.agentSSHHostKey(agent),
 	}
@@ -4436,12 +4440,21 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 				return
 			}
 		}
+		var modelSize string
 		if cfg.Model != "" {
 			// Resolved here, ahead of both recordExplicitEdits and the live
 			// write below, so both compare/store the same resolved value
 			// the requester's alias (if any) maps to -- not the raw alias
 			// they typed. This also ensures InlineConfig (set later)
 			// carries the resolved value.
+			// The size alias, if any, is taken first: it replaces the
+			// recorded size with the model below, so an explicit ID
+			// clears it. Declined limitation (#5502 review M2):
+			// CreateInputs records the resolved model, not the alias, so
+			// a reincarnation after this PATCH re-derives no size. The
+			// badge is display-only, and keeping the alias would change
+			// the reincarnate explicit-input contract.
+			modelSize = config.ModelSizeAlias(cfg.Model)
 			cfg.Model = s.resolveModelAliasForAgent(ctx, agent, cfg.Model)
 		}
 
@@ -4481,6 +4494,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		}
 		if cfg.Model != "" {
 			agent.AppliedConfig.Model = cfg.Model
+			agent.AppliedConfig.ModelSize = modelSize
 		}
 		// Thinking level is applied only when the request names it; an
 		// explicit null unsets it, an absent key leaves it alone.
