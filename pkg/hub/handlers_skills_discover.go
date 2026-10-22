@@ -74,6 +74,12 @@ type DiscoverSkillsResponse struct {
 	Count   int               `json:"count"`
 }
 
+// discoverNormalizeSkillURI is api.NormalizeSkillURI. It is a variable only so
+// that a test can substitute a normalizer whose error text echoes its input,
+// which checks the logging control below on its own, independently of the
+// error texts api.NormalizeSkillURI happens to produce.
+var discoverNormalizeSkillURI = api.NormalizeSkillURI
+
 // maxDiscoverBodyBytes caps the request body. The body is two short strings;
 // anything larger is a mistake or an attempt to make the hub buffer garbage.
 const maxDiscoverBodyBytes = 64 << 10
@@ -177,6 +183,10 @@ func (s *Server) handleSkillsDiscoverDirectory(w http.ResponseWriter, r *http.Re
 	u.Host = "github.com"
 	u.User = nil
 	u.RawQuery = ""
+	// A bare trailing '?' (".../skills?" or ".../skills?#notes") parses with an
+	// empty RawQuery but ForceQuery set, and u.String() would still write the
+	// '?': base and every child URL would carry it.
+	u.ForceQuery = false
 	u.Fragment = ""
 	base := u.String()
 
@@ -238,7 +248,7 @@ func (s *Server) handleSkillsDiscoverDirectory(w http.ResponseWriter, r *http.Re
 		// normalizing first and appending gives the same URI as normalizing
 		// the URI with the suffix.
 		candidate := api.SkillURIWithoutQuery(d.sourceURL)
-		uri, normErr := api.NormalizeSkillURI(candidate)
+		uri, normErr := discoverNormalizeSkillURI(candidate)
 		if normErr != nil {
 			// Defence in depth. The /tree/ check above means a well-formed GitHub
 			// URL should always normalize, so this branch is not reachable from

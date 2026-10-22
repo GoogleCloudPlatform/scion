@@ -972,6 +972,30 @@ func TestHandleSkillsDiscoverDirectory_QueryParams(t *testing.T) {
 				"gh://acme/repo/beta-skill@main",
 			},
 		},
+		{
+			name:  "percent-encoded token name dropped",
+			query: "?%74oken=made-up-value-9",
+			want: []string{
+				"gh://acme/repo/alpha-skill@main",
+				"gh://acme/repo/beta-skill@main",
+			},
+		},
+		{
+			name:  "bare trailing question mark",
+			query: "?",
+			want: []string{
+				"gh://acme/repo/alpha-skill@main",
+				"gh://acme/repo/beta-skill@main",
+			},
+		},
+		{
+			name:  "bare question mark before fragment",
+			query: "?#notes",
+			want: []string{
+				"gh://acme/repo/alpha-skill@main",
+				"gh://acme/repo/beta-skill@main",
+			},
+		},
 	}
 	for i, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1033,6 +1057,7 @@ func TestHandleSkillsDiscoverDirectory_InvalidTokenValue(t *testing.T) {
 		"?token=GOOD;x=made-up-value-6",
 		"?token=made-up-value-7&token=GOOD_TOKEN",
 		"?access_token=made-up-value-1&token=made-up-value-8",
+		"?token=A%2Bmade-up-value-10",
 	} {
 		t.Run(query, func(t *testing.T) {
 			srv, s, _ := testTemplateBootstrapServer(t)
@@ -1123,6 +1148,69 @@ func TestHandleSkillsDiscoverDirectory_LogsCandidateWithoutQuery(t *testing.T) {
 		}
 		if strings.Contains(rec.Body.String(), leaked) {
 			t.Errorf("response contains %q: %s", leaked, rec.Body.String())
+		}
+	}
+}
+
+// TestHandleSkillsDiscoverDirectory_LogControlIndependentOfErrorText checks
+// the logging control on its own. The substitute normalizer's error text
+// echoes its whole input, so a query reaching the normalizer would reach the
+// log; the control (normalize the candidate without its query) keeps it out
+// whatever error texts api.NormalizeSkillURI produces.
+func TestHandleSkillsDiscoverDirectory_LogControlIndependentOfErrorText(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	admin := skillDiscoverAdmin(t, s, "user-skill-discover-logcontrol")
+	var logBuf bytes.Buffer
+	srv.resourceLog = slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	var normalized []string
+	orig := discoverNormalizeSkillURI
+	discoverNormalizeSkillURI = func(input string) (string, error) {
+		normalized = append(normalized, input)
+		return "", fmt.Errorf("echo %q", input)
+	}
+	defer func() { discoverNormalizeSkillURI = orig }()
+
+	defer mockSkillTarball(t, map[string]string{
+		"repo-main/skills/alpha-skill/SKILL.md": "alpha",
+	})()
+
+	rec := doRequestAsUser(t, srv, admin, http.MethodPost, skillsDiscoverPath, DiscoverSkillsRequest{
+		SourceURL: "https://github.com/acme/repo/tree/main/skills?token=GOOD_TOKEN&access_token=made-up-value-1",
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if want := []string{"https://github.com/acme/repo/tree/main/skills/alpha-skill"}; !slices.Equal(normalized, want) {
+		t.Errorf("normalizer inputs = %q, want %q", normalized, want)
+	}
+
+	type record struct {
+		Msg       string `json:"msg"`
+		SourceURL string `json:"sourceURL"`
+		Error     string `json:"error"`
+	}
+	var skipped []record
+	for _, line := range strings.Split(strings.TrimSpace(logBuf.String()), "\n") {
+		var r record
+		if err := json.Unmarshal([]byte(line), &r); err != nil {
+			t.Fatalf("decode log line %q: %v", line, err)
+		}
+		if r.Msg == "skipping discovered skill with unnormalizable URI" {
+			skipped = append(skipped, r)
+		}
+	}
+	want := []record{{
+		Msg:       "skipping discovered skill with unnormalizable URI",
+		SourceURL: "https://github.com/acme/repo/tree/main/skills/alpha-skill",
+		Error:     `echo "https://github.com/acme/repo/tree/main/skills/alpha-skill"`,
+	}}
+	if !slices.Equal(skipped, want) {
+		t.Errorf("skipped-skill log records = %+v, want %+v", skipped, want)
+	}
+	for _, leaked := range []string{"GOOD_TOKEN", "made-up-value", "token="} {
+		if strings.Contains(logBuf.String(), leaked) {
+			t.Errorf("logs contain %q: %s", leaked, logBuf.String())
 		}
 	}
 }
