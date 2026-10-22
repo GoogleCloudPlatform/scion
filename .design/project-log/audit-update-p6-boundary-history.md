@@ -14,7 +14,7 @@ Milestone 1 made CREATE write its `access_constraint_history` row in the same tr
 - **Recovery** (`RecoveryService`; still unwired, still tests only). `DisableAll` and `RecoverAll` take the acting `PrincipalContext`.
   - Each affected constraint runs in its own transaction: its mutation plus one row, `recovery_disable` (classification relax) or `recovery_enable` (tighten), processed sequentially.
   - The revision fields hold the revisions read in that transaction before and after the mutation. `DisableAccessConstraint` does not bump the revision, so a `recovery_disable` row truthfully shows before == after.
-  - Each transaction re-reads its constraint first. A constraint whose disabled state already matches the target (it changed after the list was taken) is skipped: no mutation, no row, not counted.
+  - Each transaction re-reads its constraint first. A constraint that no longer exists, or whose disabled state already matches the target (it changed after the list was taken), is skipped: no mutation, no row, not counted.
   - Results carry `AuditIDs`, aligned with the constraint IDs. The old aggregate `"all"` entry, with its counts in revision fields, is gone.
 - **DELETE.** After the delete commits, exactly one `access_boundary/delete` envelope goes out (commit/succeeded, info, structured_log only).
   - It carries principal, resource (`access_constraint`, ID and scope as for CREATE), the request ref (ID, method, route `/api/v1/admin/access-constraints/{id}`, surface; as for CREATE), classification and `before_revision`. It has no boundary name, subject, purpose or email. Credential decoration (token name and labels, when a user access token was used) follows the CREATE envelope contract; in practice a delete needs an interactive session, so it is usually absent.
@@ -26,7 +26,7 @@ Milestone 1 made CREATE write its `access_constraint_history` row in the same tr
 - **Removed:** `BoundaryAuditWriter` with its slice, `AuditRequest`, `BoundaryAuditEntry`, `ImpactCounts`, `generateAuditID`, `validateAuditEntry`, the package-level `computeStateFingerprint`, `computeImpactCounts`, `compensateAuditFailure`, and the recovery rollbacks. The authzop mutation catalog is updated to match. `BoundaryMetrics` stays.
 - **Fingerprint naming.** `(*PreviewService).computeStateFingerprint` is renamed `computeConstraintStateFingerprint`. Its mismatch message and the `CommitBoundaryChange` step comments no longer claim role bindings or memberships, because it hashes constraint state only. No logic change.
 
-- **User docs.** `reference/permissions-policy.md` and `hosted/ha/permissions.md` no longer claim a "tamper-evident" "secure audit ledger" or a mutation audit log for boundaries. They now say: CREATE/UPDATE history is written in the same transaction and readable while the boundary exists (newest 1,000 kept); a delete deletes the history and emits only a best-effort log event, with no persisted record.
+- **User docs.** `reference/permissions-policy.md` and `hosted/ha/permissions.md` no longer claim a "tamper-evident" "secure audit ledger" or a mutation audit log for boundaries. They now say: CREATE/UPDATE history is written in the same transaction and readable while the boundary exists. The newest 1,000 entries are kept, so the creation entry can be pruned. A delete deletes the history and emits only a best-effort log event, with no persisted record.
 
 ## History versus log: durability
 
@@ -48,7 +48,8 @@ Deferred from review round 1 (fix-round-1.md):
 - **FU-2:** fold CREATE onto `accessConstraintAuditIdentities` (mechanical; deferred because CREATE is unchanged in P6).
 - **FU-3:** enforce catalog destinations at `Emit` and at the history mapping (defense in depth).
 - **FU-4:** make the DELETE revision check and the delete atomic (WithTx plus a row lock, or a conditional delete). This changes pre-existing domain behaviour.
-- **FU-5:** add `DisableAccessConstraint` to `authzop.SecurityMutationSymbols` and classify `DisableAll`. This is needed before any recovery wiring.
+- **FU-5:** add `DisableAccessConstraint` to `authzop.SecurityMutationSymbols` and classify `DisableAll`. Extended in review round 2: the recovery skip re-read is not a locking read, so add the row lock (or a conditional update) to it. Both are needed before any recovery wiring.
+- **FU-7 (review round 2):** the offline recover-authz docs (outside this diff) call a best-effort write a "permanent" audit record. Fix that wording.
 - **FU-6:** replace `user.Email()` and the boundary name in the handler operational lines (a boundary-family decision); map `RecoveryPartialError` to a generic message if recovery is ever wired; remove the `correlationIDKey` fallback.
 
 Earlier follow-ups:
