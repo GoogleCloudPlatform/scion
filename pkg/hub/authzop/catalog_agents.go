@@ -331,7 +331,7 @@ var agentOperations = []OperationSpec{
 		Bearer: AdmitOn(BearerTargetAgentRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
-		ID:          "agent.update.pending_config.delete",
+		ID:          "agent.update.pendingconfig.delete",
 		Domain:      "agent",
 		Description: "Discard an agent's pending config edits (behind hub.agent_edit_held; 404 while it is off)",
 		EntryPoints: []EntryPoint{

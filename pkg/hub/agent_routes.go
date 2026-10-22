@@ -190,7 +190,7 @@ const (
 	opAgentEnv              authzop.OperationID = "agent.lifecycle.env"
 	opAgentResetAuth        authzop.OperationID = "agent.lifecycle.resetauth"
 	opAgentHoldLift         authzop.OperationID = "agent.hold.lift"
-	opAgentPendingDiscard   authzop.OperationID = "agent.update.pending_config.delete"
+	opAgentPendingDiscard   authzop.OperationID = "agent.update.pendingconfig.delete"
 	opAgentReincarnate      authzop.OperationID = "agent.lifecycle.reincarnate"
 	opAgentSetMessageMode   authzop.OperationID = "agent.setmessagemode"
 	opAgentTokenRefresh     authzop.OperationID = "agent.token.refresh"

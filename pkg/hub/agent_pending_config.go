@@ -378,48 +378,56 @@ func startFoldTrigger(opts StartOpts) string {
 // foldPendingConfigAtStart applies the agent's pending T1 keys before a
 // start is dispatched: startAgentCore calls it under the start claim, after
 // the fence check, so every start path (start, restart, resume and wake,
-// and the starts of create-on-existing) dispatches them. The applied config
-// and the remaining pending config are persisted with the state_version
-// compare-and-set (UpdateAgentConfig, which leaves the row's status
-// columns, already moved on by the start, as they are); on a conflict the
-// agent's config is re-read and the fold runs again. agent's applied
-// config, pending config and state version are updated in memory, so the
-// dispatch sends the folded config. It returns the keys that stay pending
-// (T2), for the start's warning. With hub.agent_edit_held off it does
-// nothing: stored pending edits stay inert.
+// and the starts of create-on-existing) dispatches them. It returns the
+// keys that stay pending (T2), for the start's warning. With
+// hub.agent_edit_held off it does nothing: stored pending edits stay inert.
+//
+// The fold runs twice, with the same pending keys. On the stored row, read
+// here: its result is persisted with the state_version compare-and-set
+// (UpdateAgentConfig, which leaves the row's status columns, already moved
+// on by the start, as they are), and a conflict re-reads the row and runs
+// again. And on the caller's copy of the agent, whose applied config the
+// dispatch sends and may hold start inputs not yet written (a task), so
+// they are neither lost nor written early. The caller's copy takes the new
+// state version only if it was current; a stale copy keeps its version, so
+// its later whole-row write still fails its compare-and-set as before.
 func (s *Server) foldPendingConfigAtStart(ctx context.Context, agent *store.Agent, trigger string) ([]string, error) {
 	if !s.heldEditsEnabled() || agent.PendingConfig.IsEmpty() {
 		return nil, nil
 	}
 	for attempt := 0; attempt < pendingFoldAttempts; attempt++ {
-		scratch := *agent
-		scratch.AppliedConfig = cloneAppliedConfig(agent.AppliedConfig)
-		scratch.PendingConfig = agent.PendingConfig.Clone()
-		folded := s.foldPendingConfig(ctx, &scratch, isContainerConfigField)
-		if len(folded) == 0 {
-			return pendingConfigKeys(agent.PendingConfig), nil
-		}
-		version, err := s.store.UpdateAgentConfig(ctx, agent.ID, agent.StateVersion, scratch.AppliedConfig, scratch.PendingConfig)
-		if err == nil {
-			agent.AppliedConfig = scratch.AppliedConfig
-			agent.PendingConfig = scratch.PendingConfig
-			agent.StateVersion = version
-			s.auditPendingConfig(ctx, agent.ID, mutationTypeAgentPendingConfigApplied, folded, trigger)
-			return pendingConfigKeys(agent.PendingConfig), nil
-		}
-		if !errors.Is(err, store.ErrVersionConflict) {
-			return nil, fmt.Errorf("%w: %w", errPendingConfigFold, err)
-		}
-		fresh, err := s.store.GetAgent(ctx, agent.ID)
+		stored, err := s.store.GetAgent(ctx, agent.ID)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %w", errPendingConfigFold, err)
 		}
-		agent.AppliedConfig = fresh.AppliedConfig
-		agent.PendingConfig = fresh.PendingConfig
-		agent.StateVersion = fresh.StateVersion
-		if agent.PendingConfig.IsEmpty() {
-			return nil, nil
+		st := *stored
+		st.AppliedConfig = cloneAppliedConfig(stored.AppliedConfig)
+		st.PendingConfig = stored.PendingConfig.Clone()
+		folded := s.foldPendingConfig(ctx, &st, isContainerConfigField)
+		if len(folded) == 0 {
+			// Nothing to apply now (another start applied it, or it was
+			// discarded): the caller's copy follows the stored row.
+			agent.PendingConfig = stored.PendingConfig
+			return pendingConfigKeys(stored.PendingConfig), nil
 		}
+		version, err := s.store.UpdateAgentConfig(ctx, agent.ID, stored.StateVersion, st.AppliedConfig, st.PendingConfig)
+		if errors.Is(err, store.ErrVersionConflict) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("%w: %w", errPendingConfigFold, err)
+		}
+		mem := *agent
+		mem.AppliedConfig = cloneAppliedConfig(agent.AppliedConfig)
+		mem.PendingConfig = stored.PendingConfig.Clone()
+		s.foldPendingConfig(ctx, &mem, isContainerConfigField)
+		agent.AppliedConfig = mem.AppliedConfig
+		agent.PendingConfig = st.PendingConfig
+		if agent.StateVersion == stored.StateVersion {
+			agent.StateVersion = version
+		}
+		s.auditPendingConfig(ctx, agent.ID, mutationTypeAgentPendingConfigApplied, folded, trigger)
+		return pendingConfigKeys(st.PendingConfig), nil
 	}
 	return nil, fmt.Errorf("%w: %w", errPendingConfigFold, store.ErrVersionConflict)
 }
