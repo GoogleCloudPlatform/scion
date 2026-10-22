@@ -38,6 +38,7 @@ func TestAnalyticsDrainerHoldsUntilHubAndBacksOff(t *testing.T) {
 
 	resolveErr = nil
 	c.fail = errors.New("logging unavailable")
+	clock = clock.Add(2 * time.Second) // past the hub-resolve backoff (1 s)
 	d.RunOnce(context.Background())
 	if d.Backoff() != time.Second {
 		t.Errorf("first backoff = %v, want 1s", d.Backoff())

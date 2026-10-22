@@ -60,6 +60,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -165,6 +166,11 @@ type AnalyticsOutbox struct {
 	chown   func(path string, uid, gid int) error
 
 	deadLetters, syncUncertain, corruptIntents, unresolved, commitDeferred atomic.Int64
+
+	// lockWait overrides analyticsLockWait and lockAcquiredHook runs in the
+	// lock goroutine right after the flock is acquired (test seams).
+	lockWait         time.Duration
+	lockAcquiredHook func()
 
 	// expireBatch is ExpireIndex's per-lock batch size and beforeExpireBatch
 	// runs before each batch (test seams).
@@ -325,11 +331,18 @@ func (o *AnalyticsOutbox) lock() (func(), error) {
 	}
 	// A blocking flock queues in the kernel instead of polling, so a
 	// waiter is not starved by peers that re-take the lock immediately. It
-	// runs in a goroutine so the wait stays bounded; if the wait times out,
-	// the goroutine releases the lock as soon as it gets it.
-	type result struct{ err error }
-	done := make(chan result, 1)
-	var abandoned atomic.Bool
+	// runs in a goroutine so the wait stays bounded. Ownership of the lock
+	// and the file is handed over under mu: exactly one side releases them
+	// -- the caller if the result was delivered, the goroutine if the wait
+	// was abandoned first.
+	const (
+		waiting = iota
+		delivered
+		abandoned
+	)
+	var mu sync.Mutex
+	state := waiting
+	done := make(chan error, 1) // buffered: the goroutine never blocks on send
 	go func() {
 		var err error
 		for {
@@ -338,34 +351,49 @@ func (o *AnalyticsOutbox) lock() (func(), error) {
 				break
 			}
 		}
-		if err == nil && abandoned.Load() {
-			_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
-			_ = f.Close()
-			return
+		if o.lockAcquiredHook != nil {
+			o.lockAcquiredHook()
 		}
-		done <- result{err}
-	}()
-	timer := time.NewTimer(analyticsLockWait)
-	defer timer.Stop()
-	select {
-	case r := <-done:
-		if r.err != nil {
-			_ = f.Close()
-			return nil, fmt.Errorf("analytics outbox: locking: %w", r.err)
-		}
-	case <-timer.C:
-		abandoned.Store(true)
-		// The goroutine may have just acquired the lock and sent before
-		// seeing abandoned; drain that case here.
-		select {
-		case r := <-done:
-			if r.err == nil {
+		mu.Lock()
+		if state == abandoned {
+			mu.Unlock()
+			if err == nil {
 				_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
 			}
 			_ = f.Close()
-		default:
-			// The goroutine closes f after it acquires (and releases).
+			return
 		}
+		state = delivered
+		mu.Unlock()
+		done <- err
+	}()
+	wait := o.lockWait
+	if wait <= 0 {
+		wait = analyticsLockWait
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		if err != nil {
+			_ = f.Close()
+			return nil, fmt.Errorf("analytics outbox: locking: %w", err)
+		}
+	case <-timer.C:
+		mu.Lock()
+		if state == delivered {
+			// The goroutine handed over just before the timeout: the
+			// result is (or is about to be) in done, and it is ours to
+			// release.
+			mu.Unlock()
+			if err := <-done; err == nil {
+				_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
+			}
+			_ = f.Close()
+			return nil, ErrAnalyticsOutboxLocked
+		}
+		state = abandoned // the goroutine releases when it gets the lock
+		mu.Unlock()
 		return nil, ErrAnalyticsOutboxLocked
 	}
 	return func() {
@@ -440,6 +468,11 @@ func (o *AnalyticsOutbox) appendUsage(ev *telemetrycontract.UsageEvent) (outcome
 	}
 	defer unlock()
 	if err := o.recoverIntentLocked(); err != nil {
+		if errors.Is(err, ErrAnalyticsOutboxHeld) {
+			// This observation is refused while held: consume a seq for it
+			// (after the held intent's), so the loss is a visible gap.
+			o.consumeSeqDuringHold()
+		}
 		return 0, err
 	}
 
@@ -592,11 +625,27 @@ func (o *AnalyticsOutbox) truncateTo(name string, size int64) error {
 	if err != nil {
 		return fmt.Errorf("analytics outbox: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	if err := f.Truncate(size); err != nil {
 		return fmt.Errorf("analytics outbox: truncating %s: %w", name, err)
 	}
 	return o.fsyncFile(f)
+}
+
+// consumeSeqDuringHold advances seq past both the persisted value and the
+// held intent's seq (best effort; caller holds the lock).
+func (o *AnalyticsOutbox) consumeSeqDuringHold() {
+	cur, err := o.readInt("seq")
+	if err != nil {
+		return
+	}
+	if b, err := os.ReadFile(o.path("intent")); err == nil {
+		var in appendIntent
+		if json.Unmarshal(b, &in) == nil && in.Seq > cur {
+			cur = in.Seq
+		}
+	}
+	_ = o.writeFileAtomic("seq", []byte(strconv.FormatInt(cur+1, 10)))
 }
 
 // appendIntent is the in-flight append record (see the file comment).
@@ -690,6 +739,22 @@ func (o *AnalyticsOutbox) recoverIntent() (landed bool, err error) {
 		}
 		return true, o.commitIntent(in)
 	}
+	// The line is absent -- but "absent" must be durable too (a truncate
+	// whose sync failed could reappear after a crash). Hold until staging
+	// syncs, as the commit branch does.
+	if err := o.syncStaging(); err != nil {
+		return false, fmt.Errorf("%w: %v", ErrAnalyticsOutboxHeld, err)
+	}
+	// The line did not survive: the observation is lost. Consume its seq so
+	// the loss is a visible gap downstream (the index is left untouched, so
+	// a source retry is a clean first sighting).
+	if cur, err := o.readInt("seq"); err != nil {
+		return false, err
+	} else if in.Seq > cur {
+		if err := o.writeFileAtomic("seq", []byte(strconv.FormatInt(in.Seq, 10))); err != nil {
+			return false, err
+		}
+	}
 	if err := os.Remove(o.path("intent")); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return false, fmt.Errorf("analytics outbox: %w", err)
 	}
@@ -706,7 +771,7 @@ func (o *AnalyticsOutbox) syncStaging() error {
 	if err != nil {
 		return fmt.Errorf("analytics outbox: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	if err := o.fsyncFile(f); err != nil {
 		return fmt.Errorf("analytics outbox: syncing staging: %w", err)
 	}
@@ -741,7 +806,7 @@ func (o *AnalyticsOutbox) lastStagingLine() ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("analytics outbox: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	info, err := f.Stat()
 	if err != nil {
 		return nil, fmt.Errorf("analytics outbox: %w", err)
@@ -850,7 +915,7 @@ func analyticsIndexName(namespace, sourceKind, sourceEventID string) string {
 func lengthPrefixedHash(parts ...string) string {
 	h := sha256.New()
 	for _, p := range parts {
-		fmt.Fprintf(h, "%d:", len(p))
+		_, _ = fmt.Fprintf(h, "%d:", len(p))
 		h.Write([]byte(p))
 	}
 	return hex.EncodeToString(h.Sum(nil))
@@ -875,7 +940,7 @@ func (o *AnalyticsOutbox) appendLineAt(name string, line []byte) (int64, error) 
 	if err != nil {
 		return -1, fmt.Errorf("analytics outbox: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	// The pre-append size is the truncate-back point; without it nothing
 	// may be written (a wrong offset could cut committed lines).
 	info, err := f.Stat()
@@ -1083,7 +1148,7 @@ func (o *AnalyticsOutbox) finalizeFile(name, hubID string) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("analytics outbox: %w", err)
 	}
-	defer src.Close()
+	defer func() { _ = src.Close() }()
 	next, err := o.nextReadyNumber()
 	if err != nil {
 		return 0, err
@@ -1097,24 +1162,25 @@ func (o *AnalyticsOutbox) finalizeFile(name, hubID string) (int, error) {
 			line = bytes.TrimSuffix(line, []byte("\n"))
 			if len(line) > 0 {
 				var ev telemetrycontract.UsageEvent
-				if uerr := telemetrycontract.Unmarshal(line, &ev); uerr != nil {
+				final := line
+				uerr := telemetrycontract.Unmarshal(line, &ev)
+				if uerr == nil && ev.HubID == "" {
+					ev.HubID = hubID
+					final, uerr = telemetrycontract.Marshal(&ev)
+				}
+				if uerr != nil {
+					// A torn fragment, or a line this build cannot accept
+					// (e.g. written by an older build): never drop it --
+					// keep it in the dead-letter file (persisted count).
 					o.torn.Add(1)
+					if derr := o.deadLetter(line); derr != nil {
+						return derr
+					}
 				} else {
-					final := line
-					if ev.HubID == "" {
-						ev.HubID = hubID
-						var merr error
-						if final, merr = telemetrycontract.Marshal(&ev); merr != nil {
-							o.torn.Add(1)
-							final = nil
-						}
+					if _, werr := w.Write(append(final, '\n')); werr != nil {
+						return werr
 					}
-					if final != nil {
-						if _, werr := w.Write(append(final, '\n')); werr != nil {
-							return werr
-						}
-						n++
-					}
+					n++
 				}
 			}
 			if readErr != nil {
@@ -1669,7 +1735,7 @@ func syncDir(dir string) error {
 	if err != nil {
 		return fmt.Errorf("analytics outbox: %w", err)
 	}
-	defer d.Close()
+	defer func() { _ = d.Close() }()
 	if err := d.Sync(); err != nil {
 		return fmt.Errorf("analytics outbox: syncing %s: %w", dir, err)
 	}

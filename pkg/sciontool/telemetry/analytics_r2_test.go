@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
+	"golang.org/x/sys/unix"
 )
 
 var errInjectedSync = errors.New("injected sync failure")
@@ -265,6 +266,26 @@ func TestOutboxPersistentSyncFailureHoldsThenResolves(t *testing.T) {
 		if got := len(stagingLines(t, reopened)); got != 1 {
 			t.Errorf("lineSurvives=%v: staging lines = %d, want exactly 1", lineSurvives, got)
 		}
+		// Seq accounting is explicit: the held append had seq 1, the
+		// append refused during the hold had seq 2 (both consumed). A new
+		// event gets seq 3 either way; when the held line was lost, seq 1
+		// is a real gap (no line carries it).
+		next := mustAppend(t, reopened, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:after", 1), AppendWritten)
+		if !lineSurvives {
+			// The retry above took seq 3; this one is 4.
+			if next.ProducerSeq != 4 {
+				t.Errorf("line lost: next seq = %d, want 4", next.ProducerSeq)
+			}
+		} else if next.ProducerSeq != 3 {
+			t.Errorf("line survived: next seq = %d, want 3", next.ProducerSeq)
+		}
+		seqs := map[int64]bool{}
+		for _, l := range stagingLines(t, reopened) {
+			seqs[decodeUsage(t, l).ProducerSeq] = true
+		}
+		if seqs[1] != lineSurvives || seqs[2] {
+			t.Errorf("lineSurvives=%v: staged seqs = %v; seq 1 present only if the line survived, seq 2 (refused during the hold) never", lineSurvives, seqs)
+		}
 	}
 }
 
@@ -399,5 +420,110 @@ func TestOutboxFinalizeStreamsLeftoversWhileHeld(t *testing.T) {
 	n, err := o.Finalize()
 	if n != 1 || !errors.Is(err, ErrAnalyticsOutboxHeld) {
 		t.Errorf("Finalize while held = %d, %v; want the leftover finalized and the hold reported", n, err)
+	}
+}
+
+// token-analyst-2 (60daf2e8): the lock goroutine acquires the flock right
+// after the caller's wait timed out (between acquisition and the handoff
+// check). The lock must still be released, not leaked.
+func TestOutboxLockTimeoutHandoffReleases(t *testing.T) {
+	o := testOutbox(t)
+	holder, err := os.OpenFile(filepath.Join(o.Dir(), "lock"), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Flock(int(holder.Fd()), unix.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	o.lockWait = 50 * time.Millisecond
+	acquired := make(chan struct{})
+	proceed := make(chan struct{})
+	o.lockAcquiredHook = func() {
+		close(acquired)
+		<-proceed // stay between acquisition and the handoff check
+	}
+	errc := make(chan error, 1)
+	go func() {
+		_, err := o.lock()
+		errc <- err
+	}()
+	if err := <-errc; !errors.Is(err, ErrAnalyticsOutboxLocked) {
+		t.Fatalf("lock() = %v; want a timeout", err)
+	}
+	// Release the holder: the abandoned goroutine now acquires the flock
+	// and parks in the hook, after the caller has given up.
+	_ = unix.Flock(int(holder.Fd()), unix.LOCK_UN)
+	<-acquired
+	close(proceed)
+
+	// The lock must become available again.
+	o.lockAcquiredHook = nil
+	o.lockWait = 2 * time.Second
+	unlock, err := o.lock()
+	if err != nil {
+		t.Fatalf("lock leaked by the abandoned goroutine: %v", err)
+	}
+	unlock()
+	_ = holder.Close()
+}
+
+// WP2 r4 O2: discarding an intent requires "absent" to be durable: if
+// staging cannot be synced after the truncate-back, the outbox holds
+// instead of discarding (a reappearing line would otherwise be unindexed).
+func TestOutboxDiscardRequiresDurableAbsence(t *testing.T) {
+	o := testOutbox(t)
+	calls := 0
+	o.fsyncFile = func(f *os.File) error {
+		calls++
+		return errInjectedSync // append sync, truncate sync, recovery sync all fail
+	}
+	if _, err := o.AppendUsage(requestIDDraft(5)); !errors.Is(err, ErrAnalyticsOutboxHeld) {
+		t.Fatalf("append = %v; want held (absence not durable)", err)
+	}
+	if !o.Stats().HeldIntent {
+		t.Error("intent must be kept until absence is durable")
+	}
+	o.fsyncFile = func(f *os.File) error { return f.Sync() }
+	reopened, _ := OpenAnalyticsOutbox(o.Dir())
+	if reopened.Stats().HeldIntent {
+		t.Error("intent must resolve once staging syncs")
+	}
+	ev := mustAppend(t, reopened, requestIDDraft(5), AppendWritten)
+	if ev.ProducerSeq != 2 || len(stagingLines(t, reopened)) != 1 {
+		t.Errorf("retry seq %d lines %d; want 2 (gap for the lost attempt) and 1", ev.ProducerSeq, len(stagingLines(t, reopened)))
+	}
+}
+
+// WP2 r4 O3: a complete staging line the current build cannot accept is
+// dead-lettered (kept, counted), not dropped.
+func TestOutboxFinalizeDeadLettersInvalidLines(t *testing.T) {
+	o := testOutbox(t)
+	_, _ = o.PinHubID("hub")
+	mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:ok", 1), AppendWritten)
+	f, _ := os.OpenFile(filepath.Join(o.Dir(), "staging.jsonl"), os.O_APPEND|os.O_WRONLY, 0)
+	_, _ = f.WriteString(`{"schema_version":99,"event_type":"agent.usage"}` + "\n")
+	_ = f.Close()
+	if n, err := o.Finalize(); err != nil || n != 1 {
+		t.Fatalf("Finalize = %d, %v", n, err)
+	}
+	dl, _ := os.ReadFile(filepath.Join(o.Dir(), "dead_letter.jsonl"))
+	if !strings.Contains(string(dl), `"schema_version":99`) || o.Stats().PersistedDeadLetters != 1 {
+		t.Errorf("invalid line not kept: dead letters %q, count %d", dl, o.Stats().PersistedDeadLetters)
+	}
+}
+
+// WP2 r4 O5: hub ID resolution backs off while unresolved.
+func TestAnalyticsDrainerResolveBackoff(t *testing.T) {
+	o := testOutbox(t)
+	calls := 0
+	d := NewAnalyticsDrainer(o, (&capture{}).send, func(context.Context) (string, error) { calls++; return "", errors.New("no hub_id") })
+	clock := time.Date(2026, 10, 22, 0, 0, 0, 0, time.UTC)
+	d.now = func() time.Time { return clock }
+	for i := 0; i < 5; i++ {
+		d.RunOnce(context.Background())
+		clock = clock.Add(500 * time.Millisecond)
+	}
+	if calls != 2 {
+		t.Errorf("resolver called %d times in 2.5 s, want 2 (backoff 1 s, then 2 s)", calls)
 	}
 }
