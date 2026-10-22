@@ -77,7 +77,10 @@ RUN curl -fsSL -o /tmp/golangci-lint.tgz \
 
 # GitHub Actions runner. installdependencies.sh ships in the verified tarball
 # and installs the .NET runtime libraries (libicu, libssl, ...) via apt.
-# _diag is a symlink into /scratch so the runner's logs land on the ephemeral disk.
+# _diag (the runner's own logs, about 1 MB per job) stays a plain directory on the
+# root filesystem, NOT on /scratch: when a job fills /scratch, the runner must still be
+# able to write its logs and report the failure (P6 PoC run 2 lost the runner, and the
+# job's log, to ENOSPC on _diag).
 # The work folder is /home/runner/work (the mediator's JIT work_folder), which
 # entrypoint.sh links to /scratch/_work; the _work symlink here only covers a JIT
 # config that names the default _work. Nothing here may create /home/runner/work,
@@ -91,7 +94,7 @@ RUN curl -fsSL -o /tmp/actions-runner.tgz \
  && ./bin/installdependencies.sh \
  && rm -rf /var/lib/apt/lists/* \
  && ln -s /scratch/_work _work \
- && ln -s /scratch/_diag _diag \
+ && mkdir -p _diag \
  && chown -R runner:runner /home/runner
 
 COPY --chmod=0755 entrypoint.sh /usr/local/bin/entrypoint.sh

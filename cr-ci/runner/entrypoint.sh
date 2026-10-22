@@ -213,8 +213,9 @@ export GOCACHE="$HOME/.cache/go-build"
 export GOMODCACHE="$HOME/go/pkg/mod"
 export GOLANGCI_LINT_CACHE="$HOME/.cache/golangci-lint"
 
-# _diag is the target of the runner's _diag symlink (runner logs; see Dockerfile).
-mkdir -p -- "$RUNNER_TEMP" "$GOCACHE" "$GOMODCACHE" "$GOLANGCI_LINT_CACHE" "$scratch/_diag"
+# The runner's _diag (its own logs) is NOT on /scratch (see Dockerfile): a job that
+# fills /scratch must not take the runner, and the job's log, down with it.
+mkdir -p -- "$RUNNER_TEMP" "$GOCACHE" "$GOMODCACHE" "$GOLANGCI_LINT_CACHE"
 log "work folder, temp and caches on $scratch ($scratch_fstype) via $HOME/{work,.cache,go}"
 
 # Check the runner before spending the single-use token.

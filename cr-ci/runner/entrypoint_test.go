@@ -404,7 +404,11 @@ func TestEntrypointSuccess(t *testing.T) {
 		}
 	}
 	h.checkHomeLinks()
-	for _, d := range []string{"_work", "_temp", "_diag", ".cache/go-build", ".cache/golangci-lint", "go/pkg/mod"} {
+	// The runner's _diag must stay off /scratch (F-D).
+	if _, err := os.Lstat(filepath.Join(h.scratch, "_diag")); !os.IsNotExist(err) {
+		t.Errorf("%s/_diag exists (err %v); the runner's logs must not go to /scratch", h.scratch, err)
+	}
+	for _, d := range []string{"_work", "_temp", ".cache/go-build", ".cache/golangci-lint", "go/pkg/mod"} {
 		if fi, err := os.Stat(filepath.Join(h.scratch, d)); err != nil || !fi.IsDir() {
 			t.Errorf("%s/%s was not created: %v", h.scratch, d, err)
 		}
