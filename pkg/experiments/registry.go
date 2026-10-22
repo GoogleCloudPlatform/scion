@@ -356,7 +356,7 @@ var compiled = []Experiment{
 		Default:     false,
 		Layers:      []Layer{LayerWeb, LayerServer},
 		Stage:       StageAlpha,
-		Issue:       "TBD (placeholder: starred-messages tracking issue to be set before graduation)",
+		Issue:       "ptone/scion#5797",
 		Owner:       "native-chat",
 		ReviewBy:    "2027-01-31",
 	},
