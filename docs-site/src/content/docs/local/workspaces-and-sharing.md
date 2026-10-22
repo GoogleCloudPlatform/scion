@@ -23,6 +23,8 @@ This is the default for **plain (non-git) projects**, where there is no git hist
 - **Requires git:** no.
 - **Best for:** plain projects; tasks where agents are meant to work on a common, shared set of files.
 
+When the shared directory holds the project's `.scion` directory (project settings, templates and harness-configs), agents get it **read-only**. The same applies to any workspace mounted at `/workspace` that has a `.scion` directory in place. Agents can read the project configuration but cannot change it in place. Change it from the host, through the Hub, or by committing it from an agent that works in its own worktree or clone. The project's agents directory (`.scion/agents`) stays hidden from agents, as before. Agent homes are separate mounts and stay writable.
+
 ### Worktree-per-agent
 
 Each agent gets its own [git worktree](https://git-scm.com/docs/git-worktree) over a **shared checkout**, isolating working trees while sharing one clone's history.
