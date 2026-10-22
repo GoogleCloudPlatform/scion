@@ -135,3 +135,39 @@ func TestFindTemplateInProjectPath_HubWorkspaceWithoutScion(t *testing.T) {
 		t.Errorf("t1 = (%+v, %v)", tpl, err)
 	}
 }
+
+// The project settings layer is skipped for a hub-managed workspace root
+// without a .scion entry; its own settings.yaml is not read.
+func TestLoadVersionedSettings_HubWorkspaceWithoutScionSkipsRootSettings(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root := filepath.Join(home, ".scion", "projects", "proj")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "settings.yaml"), []byte("schema_version: \"1\"\ndefault_template: from-root\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	vs, err := LoadVersionedSettings(root)
+	if err != nil {
+		t.Fatalf("LoadVersionedSettings: %v", err)
+	}
+	if vs.DefaultTemplate == "from-root" {
+		t.Error("settings read from the hub workspace root's own settings.yaml")
+	}
+	// Outside the hub projects directory the path is used as given.
+	plain := filepath.Join(t.TempDir(), "proj")
+	if err := os.MkdirAll(plain, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(plain, "settings.yaml"), []byte("schema_version: \"1\"\ndefault_template: from-plain\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	vs, err = LoadVersionedSettings(plain)
+	if err != nil {
+		t.Fatalf("LoadVersionedSettings: %v", err)
+	}
+	if vs.DefaultTemplate != "from-plain" {
+		t.Errorf("plain path: default_template = %q, want from-plain", vs.DefaultTemplate)
+	}
+}

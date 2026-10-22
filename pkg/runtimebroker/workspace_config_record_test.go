@@ -15,6 +15,7 @@
 package runtimebroker
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -274,6 +275,75 @@ func TestWorkspaceConfigRecord_MarkerReplacedByDirectoryRefused(t *testing.T) {
 		srv.Handler().ServeHTTP(w, req)
 		if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "not in the state the Runtime Broker recorded") {
 			t.Fatalf("%s: expected 409, got %d: %s", op, w.Code, w.Body.String())
+		}
+	}
+}
+
+// A change made between the check and the broker's own writes (here a
+// marker replaced with a .scion directory without a project-id, which
+// recordHubProjectFiles would otherwise fill in) is refused and not
+// recorded; the broker's own marker write is recorded.
+func TestRecordHubProjectFilesChecked_ChangeDuringWriteRefused(t *testing.T) {
+	srv := newTestServer(t)
+	ws := hubWorkspace(t)
+	in := startContextInputs{AgentID: "a1", ProjectPath: ws, ProjectID: recordHubID, ProjectSlug: "proj"}
+
+	// absent -> marker written by the broker: recorded.
+	if err := srv.recordHubProjectFilesChecked(context.Background(), in); err != nil {
+		t.Fatalf("first record: %v", err)
+	}
+	if !config.IsProjectMarkerFile(filepath.Join(ws, ".scion")) {
+		t.Fatal("fixture: expected the broker to write a marker")
+	}
+	recorded, _, err := checkWorkspaceConfigRecordState(ws, recordHubID)
+	if err != nil || recorded.Kind != workspaceConfigMarker {
+		t.Fatalf("recorded state = %+v, %v", recorded, err)
+	}
+
+	afterWorkspaceConfigCheckHook = func() { entryDir("")(t, ws) }
+	t.Cleanup(func() { afterWorkspaceConfigCheckHook = nil })
+	var ce *workspaceConfigChangedError
+	if err := srv.recordHubProjectFilesChecked(context.Background(), in); !errors.As(err, &ce) {
+		t.Fatalf("swap during the write: err = %v, want a refusal", err)
+	}
+	afterWorkspaceConfigCheckHook = nil
+	// The record still says marker, so the next start is refused too.
+	if err := checkWorkspaceConfigRecord(ws, recordHubID); !errors.As(err, &ce) {
+		t.Fatalf("next check: err = %v, want a refusal", err)
+	}
+}
+
+func TestBrokerWorkspaceConfigChange(t *testing.T) {
+	ws := hubWorkspace(t)
+	entryMarker(t, ws)
+	own, err := observeWorkspaceConfigState(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	absent := workspaceConfigState{Kind: workspaceConfigAbsent}
+	dirNoID := workspaceConfigState{Kind: workspaceConfigDirectory}
+	dirHub := workspaceConfigState{Kind: workspaceConfigDirectory, Detail: recordHubID}
+	dirOther := workspaceConfigState{Kind: workspaceConfigDirectory, Detail: "77777777-7777-7777-7777-777777777777"}
+	for _, tt := range []struct {
+		name          string
+		before, after workspaceConfigState
+		slug          string
+		want          bool
+	}{
+		{"unchanged", dirNoID, dirNoID, "proj", true},
+		{"marker written where absent", absent, own, "proj", true},
+		{"marker for another slug", absent, own, "other", false},
+		{"stale marker rewritten", workspaceConfigState{Kind: workspaceConfigMarker, Detail: "x"}, own, "proj", true},
+		{"project-id written into an existing directory", dirNoID, dirHub, "proj", true},
+		{"stale project-id rewritten", dirOther, dirHub, "proj", true},
+		{"directory with another id", dirNoID, dirOther, "proj", false},
+		{"directory where absent", absent, dirHub, "proj", false},
+		{"directory where marker", own, dirHub, "proj", false},
+		{"absent where marker", own, absent, "proj", false},
+		{"symlink", dirNoID, workspaceConfigState{Kind: workspaceConfigSymlink, Detail: "x"}, "proj", false},
+	} {
+		if got := brokerWorkspaceConfigChange(ws, tt.before, tt.after, recordHubID, tt.slug); got != tt.want {
+			t.Errorf("%s: got %v, want %v", tt.name, got, tt.want)
 		}
 	}
 }

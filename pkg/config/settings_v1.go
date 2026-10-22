@@ -3738,7 +3738,10 @@ func loadVersionedLayers(projectPath string, opts versionedLoadOptions) (*versio
 		legacy.hubIDFromCamel = false
 		delete(res.sources, projectkeys.ConfigHubProjectIDKey)
 	}
-	if projectPath != "" && projectPath != globalDir {
+	// A hub-managed workspace root without a .scion entry has no project
+	// settings: its own settings file is workspace content.
+	noProjectLayer := isHubWorkspaceRootWithoutScion(projectPath)
+	if projectPath != "" && projectPath != globalDir && !noProjectLayer {
 		migratedHub, err := fileLayer("project", projectPath)
 		if err != nil {
 			return nil, err
@@ -3755,7 +3758,7 @@ func loadVersionedLayers(projectPath string, opts versionedLoadOptions) (*versio
 	// project is found via the current directory (resolveEffectiveProjectPath
 	// -> FindProjectRoot): step 3 above never runs in that case, so the
 	// precedence check must run here too, not only in step 3.
-	if effectiveProjectPath != "" && effectiveProjectPath != globalDir && effectiveProjectPath != projectPath {
+	if effectiveProjectPath != "" && effectiveProjectPath != globalDir && effectiveProjectPath != projectPath && !noProjectLayer {
 		migratedHub, err := fileLayer("project", effectiveProjectPath)
 		if err != nil {
 			return nil, err

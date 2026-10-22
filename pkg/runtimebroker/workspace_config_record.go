@@ -15,6 +15,7 @@
 package runtimebroker
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -174,47 +175,113 @@ func workspaceConfigRecordFor(projectPath, hubProjectID string) (canonical, reco
 	return canonical, filepath.Join(globalDir, workspaceConfigRecordsDir, hex.EncodeToString(sum[:16])+".json"), true, nil
 }
 
+// recordHubProjectFilesChecked runs recordHubProjectFiles between a check
+// and a record of the workspace's .scion state, all under the workspace
+// lock the caller holds: the entry must match the record before, and may
+// differ afterwards only by a change the broker itself makes
+// (brokerWorkspaceConfigChange). Any other difference, such as a marker
+// replaced while the broker was writing, is refused and not recorded.
+func (s *Server) recordHubProjectFilesChecked(ctx context.Context, in startContextInputs) error {
+	before, applies, err := checkWorkspaceConfigRecordState(in.ProjectPath, in.ProjectID)
+	if err != nil {
+		return err
+	}
+	if afterWorkspaceConfigCheckHook != nil {
+		afterWorkspaceConfigCheckHook()
+	}
+	s.recordHubProjectFiles(ctx, in)
+	if !applies {
+		return nil
+	}
+	canonical, _, _, _ := workspaceConfigRecordFor(in.ProjectPath, in.ProjectID)
+	after, err := observeWorkspaceConfigState(canonical)
+	if err != nil {
+		return &workspaceConfigChangedError{Path: canonical, Reason: "the entry cannot be read"}
+	}
+	if !brokerWorkspaceConfigChange(canonical, before, after, in.ProjectID, in.ProjectSlug) {
+		return &workspaceConfigChangedError{Path: canonical, Recorded: before, Found: after}
+	}
+	if err := recordWorkspaceConfigState(in.ProjectPath, in.ProjectID); err != nil {
+		s.agentLifecycleLog.Warn("Failed to record the hub-managed workspace's .scion state",
+			"agent_id", in.AgentID, "project_id", in.ProjectID, "path", in.ProjectPath, "error", err)
+	}
+	return nil
+}
+
+// afterWorkspaceConfigCheckHook, when set (tests only), runs between the
+// check and recordHubProjectFiles in recordHubProjectFilesChecked, where a
+// change made by someone other than the broker must be caught.
+var afterWorkspaceConfigCheckHook func()
+
+// brokerWorkspaceConfigChange reports whether the .scion entry of the
+// workspace at canonical going from before to after is a change
+// recordHubProjectFiles makes: none; a marker for this Hub project and slug
+// written where there was none or where a stale one was; or this Hub
+// project ID written into a .scion directory that was already there.
+func brokerWorkspaceConfigChange(canonical string, before, after workspaceConfigState, hubProjectID, slug string) bool {
+	if after == before {
+		return true
+	}
+	switch {
+	case after.Kind == workspaceConfigMarker && (before.Kind == workspaceConfigAbsent || before.Kind == workspaceConfigMarker):
+		m, err := config.ReadProjectMarker(filepath.Join(canonical, config.DotScion))
+		return err == nil && m.ProjectID == hubProjectID && m.ProjectSlug == slug
+	case after.Kind == workspaceConfigDirectory && before.Kind == workspaceConfigDirectory:
+		return after.Detail == hubProjectID
+	default:
+		return false
+	}
+}
+
 // checkWorkspaceConfigRecord refuses (with *workspaceConfigChangedError) a
 // hub-managed workspace whose .scion entry is not in the recorded state.
 // It is a no-op where workspaceConfigRecordFor does not apply, when there
 // is no record, or when the record is for another Hub project ID. The
 // caller holds the workspace lock on projectPath.
 func checkWorkspaceConfigRecord(projectPath, hubProjectID string) error {
+	_, _, err := checkWorkspaceConfigRecordState(projectPath, hubProjectID)
+	return err
+}
+
+// checkWorkspaceConfigRecordState is checkWorkspaceConfigRecord, also
+// returning the observed state and whether the workspace is recorded at all
+// (a hub-managed workspace root that exists, with a Hub project ID).
+func checkWorkspaceConfigRecordState(projectPath, hubProjectID string) (workspaceConfigState, bool, error) {
 	canonical, recordPath, ok, err := workspaceConfigRecordFor(projectPath, hubProjectID)
 	if err != nil {
-		return &workspaceConfigChangedError{Path: projectPath, Reason: "the workspace path cannot be resolved"}
+		return workspaceConfigState{}, false, &workspaceConfigChangedError{Path: projectPath, Reason: "the workspace path cannot be resolved"}
 	}
 	if !ok {
-		return nil
+		return workspaceConfigState{}, false, nil
 	}
 	if _, err := os.Stat(canonical); errors.Is(err, fs.ErrNotExist) {
 		// The workspace is gone (removed, about to be provisioned again):
 		// its record no longer describes anything.
 		_ = os.Remove(recordPath)
-		return nil
+		return workspaceConfigState{}, false, nil
+	}
+	found, err := observeWorkspaceConfigState(canonical)
+	if err != nil {
+		return workspaceConfigState{}, true, &workspaceConfigChangedError{Path: canonical, Reason: "the entry cannot be read"}
 	}
 	data, err := os.ReadFile(recordPath)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil
+		return found, true, nil
 	}
 	var rec workspaceConfigRecord
 	if err == nil {
 		err = json.Unmarshal(data, &rec)
 	}
 	if err != nil {
-		return &workspaceConfigChangedError{Path: canonical, Reason: "the Runtime Broker's record of it cannot be read"}
+		return found, true, &workspaceConfigChangedError{Path: canonical, Reason: "the Runtime Broker's record of it cannot be read"}
 	}
 	if rec.Path != canonical || rec.HubProjectID != hubProjectID {
-		return nil
-	}
-	found, err := observeWorkspaceConfigState(canonical)
-	if err != nil {
-		return &workspaceConfigChangedError{Path: canonical, Reason: "the entry cannot be read"}
+		return found, true, nil
 	}
 	if found != rec.State {
-		return &workspaceConfigChangedError{Path: canonical, Recorded: rec.State, Found: found}
+		return found, true, &workspaceConfigChangedError{Path: canonical, Recorded: rec.State, Found: found}
 	}
-	return nil
+	return found, true, nil
 }
 
 // recordWorkspaceConfigState records the current state of a hub-managed

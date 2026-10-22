@@ -511,7 +511,7 @@ func projectTemplatesRoot(projectPath string) string {
 		return projectPath
 	}
 	if _, err := os.Lstat(filepath.Join(projectPath, DotScion)); err != nil {
-		if isUnderHubProjectsDir(projectPath) {
+		if isHubWorkspaceRootWithoutScion(projectPath) {
 			// A hub-managed workspace root without a .scion entry has no
 			// project template tier.
 			return ""
@@ -523,6 +523,19 @@ func projectTemplatesRoot(projectPath string) string {
 		return projectPath
 	}
 	return resolved
+}
+
+// isHubWorkspaceRootWithoutScion reports whether p is a hub-managed
+// workspace root (below the hub projects directory, not a .scion path)
+// that has no .scion entry: it then has no project configuration tier.
+func isHubWorkspaceRootWithoutScion(p string) bool {
+	if p == "" || filepath.Base(p) == DotScion {
+		return false
+	}
+	if _, err := os.Lstat(filepath.Join(p, DotScion)); err == nil {
+		return false
+	}
+	return isUnderHubProjectsDir(p)
 }
 
 // isUnderHubProjectsDir reports whether p lies below the global
