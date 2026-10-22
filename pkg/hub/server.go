@@ -1718,6 +1718,10 @@ type Server struct {
 	// federationApply records why the last ApplySnapshot did not install
 	// the federation configuration, for the save report.
 	federationApply federationApplyState
+	// settingsApply is the apply lock: it serializes ApplySnapshot and
+	// ApplyMaintenanceFromSnapshot and holds the revision last applied, so
+	// an older snapshot never overwrites a newer one (ptone/scion#4457).
+	settingsApply settingsApplyState
 
 	config ServerConfig
 	// startupHubName is the name resolved at startup (ServerConfig.HubName,
@@ -1795,7 +1799,7 @@ type Server struct {
 	// replaces conduitRouteCanRenew's decision.
 	conduitRouteCanRenewTest conduitRouteRenewFunc
 	conduitBrokerRevoke      atomic.Pointer[conduitBrokerRevoker] // broker session re-check (conduit_broker_revoke.go)
-	// portProxyMetrics counts agent port proxy upstream header timeouts
+	// portProxyMetrics counts agent port proxy events
 	// (port_proxy_metrics.go); nil until SetPortProxyMetrics.
 	portProxyMetrics atomic.Pointer[portProxyMetrics]
 	// conduitRefreshMetrics counts agent AuthRefresh outcomes
@@ -3250,6 +3254,9 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		// Proxy driver principals (test identities phase WS2): a
 		// verified assertion for one of them is refused at Step 3a.
 		DriverPrincipals: srv.proxyDrivers,
+
+		// Plain-text no-credentials 401s on port proxy routes.
+		RecordPortProxyNoCredentials: srv.recordPortProxyNoCredentials,
 	}
 	if rs := srv.authConfig.AgentRunScope; rs != nil {
 		rs.route = func(r *http.Request) string {
