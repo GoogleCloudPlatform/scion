@@ -522,18 +522,26 @@ func deriveRunWrite(f Facts, plan *Plan) {
 		if !changed {
 			return // a same-value settle
 		}
-		if r.OpenRun != "" && r.OpenRun == f.BeforeRunID {
+		switch {
+		case r.OpenRun != "" && r.OpenRun == f.BeforeRunID:
 			// The broker reports that its runtime holds this run for the
 			// Hub's current dispatch: a rebinding, not a new run.
 			r.OpenRun = f.AfterRunID
-		} else if r.OpenRun != "" && f.AfterRunID != r.OpenRun && r.PendingRunChangeAt == nil {
+		case r.OpenRun != "" && f.AfterRunID == r.OpenRun:
+			// A start of a running agent minted a run and the broker
+			// reported the open run back: no run change.
+			r.PendingRunChangeAt = nil
+		case r.OpenRun != "" && r.PendingRunChangeAt == nil:
 			r.PendingRunChangeAt = &now
 		}
 		r.PendingAdoptedFrom = f.BeforeRunID
 		r.PendingAdoptedAt = &now
 		r.PendingAdoptionSource = f.AdoptionSource
 	case store.WriteKindRunMint:
-		if r.OpenRun != "" && f.AfterRunID != r.OpenRun && r.PendingRunChangeAt == nil {
+		switch {
+		case r.OpenRun != "" && f.AfterRunID == r.OpenRun:
+			r.PendingRunChangeAt = nil
+		case r.OpenRun != "" && r.PendingRunChangeAt == nil:
 			r.PendingRunChangeAt = &now
 		}
 	case store.WriteKindRunRevert:
