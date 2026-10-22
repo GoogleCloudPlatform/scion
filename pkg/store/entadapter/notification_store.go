@@ -21,6 +21,7 @@ import (
 	"time"
 
 	entsql "entgo.io/ent/dialect/sql"
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/notification"
@@ -137,6 +138,8 @@ func entNotifToStore(e *ent.Notification) *store.Notification {
 
 		DispatchAttempts: e.DispatchAttempts,
 		DispatchOutcome:  e.DispatchOutcome,
+		DispatchReason:   e.DispatchReason,
+		NextAttemptAt:    e.NextAttemptAt,
 	}
 }
 
@@ -617,20 +620,26 @@ func (s *NotificationStore) ClaimNotificationForDispatch(ctx context.Context, id
 // keeps a row whose outcome another caller has already recorded dispatched
 // (ptone/scion#5030): reverting it would leave dispatched=false with an
 // outcome set, and the sweep would deliver it again. Returns false (no error)
-// when the row has an outcome or does not exist.
-func (s *NotificationStore) UnmarkNotificationDispatched(ctx context.Context, id string) (bool, error) {
+// when the row has an outcome or does not exist. notBefore sets
+// next_attempt_at (the sweep's retry backoff); a zero notBefore clears it.
+func (s *NotificationStore) UnmarkNotificationDispatched(ctx context.Context, id string, notBefore time.Time) (bool, error) {
 	uid, err := parseUUID(id)
 	if err != nil {
 		return false, err
 	}
 
-	affected, err := s.client.Notification.Update().
+	upd := s.client.Notification.Update().
 		Where(
 			notification.IDEQ(uid),
 			notification.DispatchOutcomeEQ(""),
 		).
-		SetDispatched(false).
-		Save(ctx)
+		SetDispatched(false)
+	if notBefore.IsZero() {
+		upd = upd.ClearNextAttemptAt()
+	} else {
+		upd = upd.SetNextAttemptAt(notBefore)
+	}
+	affected, err := upd.Save(ctx)
 	if err != nil {
 		return false, mapError(err)
 	}
@@ -659,9 +668,19 @@ func (s *NotificationStore) RecordNotificationDispatchAttempt(ctx context.Contex
 // delivered write applies unless the row is already delivered (it replaces
 // failed), and a failed write applies only while no outcome is recorded.
 // Returns false (no error) when the write is refused, and ErrNotFound when
-// the row does not exist.
-func (s *NotificationStore) SetNotificationDispatchOutcome(ctx context.Context, id string, outcome string) (bool, error) {
-	if outcome != store.NotificationOutcomeDelivered && outcome != store.NotificationOutcomeFailed {
+// the row does not exist. reason is stored with failed; delivered takes no
+// reason and clears a recorded one.
+func (s *NotificationStore) SetNotificationDispatchOutcome(ctx context.Context, id string, outcome string, reason string) (bool, error) {
+	switch outcome {
+	case store.NotificationOutcomeDelivered:
+		if reason != "" {
+			return false, store.ErrInvalidInput
+		}
+	case store.NotificationOutcomeFailed:
+		if reason != "" && !store.ValidNotificationReason(reason) {
+			return false, store.ErrInvalidInput
+		}
+	default:
 		return false, store.ErrInvalidInput
 	}
 	uid, err := parseUUID(id)
@@ -681,6 +700,7 @@ func (s *NotificationStore) SetNotificationDispatchOutcome(ctx context.Context, 
 		).
 		SetDispatched(true).
 		SetDispatchOutcome(outcome).
+		SetDispatchReason(reason).
 		Save(ctx)
 	if err != nil {
 		return false, mapError(err)
@@ -698,6 +718,30 @@ func (s *NotificationStore) SetNotificationDispatchOutcome(ctx context.Context, 
 		return false, store.ErrNotFound
 	}
 	return false, nil
+}
+
+// ExpireStaleAgentNotifications records outcome failed with reason expired
+// on every pending agent-targeted notification (dispatched=false, no
+// outcome) created before cutoff, whatever its subscriber's state, and
+// returns how many it expired. The dispatched=false and empty-outcome
+// predicates leave claimed (in-flight) rows and recorded outcomes
+// (ptone/scion#5030) untouched.
+func (s *NotificationStore) ExpireStaleAgentNotifications(ctx context.Context, cutoff time.Time) (int, error) {
+	n, err := s.client.Notification.Update().
+		Where(
+			notification.DispatchedEQ(false),
+			notification.DispatchOutcomeEQ(""),
+			notification.SubscriberTypeEQ(store.SubscriberTypeAgent),
+			notification.CreatedLT(cutoff),
+		).
+		SetDispatched(true).
+		SetDispatchOutcome(store.NotificationOutcomeFailed).
+		SetDispatchReason(store.NotificationReasonExpired).
+		Save(ctx)
+	if err != nil {
+		return n, mapError(err)
+	}
+	return n, nil
 }
 
 // orphanPurgeBatchSize caps how many rows one purge statement deletes so a
@@ -772,8 +816,24 @@ const undispatchedGracePeriod = 60 * time.Second
 // per query to avoid loading unbounded rows into memory.
 const undispatchedBatchLimit = 100
 
+// writeNotSuspended appends a "phase is not suspended" condition to an
+// EXISTS subquery over the agents table. The phase column is nullable and a
+// NULL phase is not suspended, so it compares COALESCE(phase, empty string). A suspended subscriber's notifications are
+// parked: never claimed or attempted, and selected again once the agent
+// leaves the suspended phase. ExpireStaleAgentNotifications bounds how long
+// they can stay parked.
+func writeNotSuspended(b *entsql.Builder) {
+	b.WriteString(" AND COALESCE(")
+	b.Ident(agent.Table)
+	b.WriteString(".")
+	b.Ident(agent.FieldPhase)
+	b.WriteString(", '') != ")
+	b.Arg(string(state.PhaseSuspended))
+}
+
 // GetUndispatchedAgentNotifications returns agent-targeted notifications with
-// dispatched=false, ordered oldest-first, limited to 100 rows.
+// dispatched=false, ordered oldest-first, limited to 100 rows. A
+// notification whose subscriber agent is suspended is never returned.
 //
 // When brokerID is empty (sweep mode), a 60s grace period is applied so the
 // sweep does not race with an in-flight primary dispatch. When brokerID is
@@ -790,8 +850,17 @@ func (s *NotificationStore) GetUndispatchedAgentNotifications(ctx context.Contex
 	// Grace period only in sweep mode (empty brokerID) to avoid racing with
 	// the primary dispatch path's 30s retry + margin.
 	if brokerID == "" {
-		cutoff := time.Now().Add(-undispatchedGracePeriod)
+		now := time.Now()
+		cutoff := now.Add(-undispatchedGracePeriod)
 		query = query.Where(notification.CreatedLT(cutoff))
+
+		// Retry backoff: a notification whose last delivery failed waits
+		// until next_attempt_at. The broker-connect drain ignores it,
+		// since the broker coming back is what the backoff waits for.
+		query = query.Where(notification.Or(
+			notification.NextAttemptAtIsNil(),
+			notification.NextAttemptAtLTE(now),
+		))
 
 		// Only return notifications whose subscriber agent currently has a
 		// RuntimeBrokerID. Without this filter the sweep would claim
@@ -816,6 +885,7 @@ func (s *NotificationStore) GetUndispatchedAgentNotifications(ctx context.Contex
 				b.Ident(agent.FieldProjectID)
 				b.WriteString(" = ")
 				b.WriteString(projIDCol)
+				writeNotSuspended(b)
 				b.WriteString(" AND ")
 				b.Ident(agent.Table)
 				b.WriteString(".")
@@ -848,6 +918,7 @@ func (s *NotificationStore) GetUndispatchedAgentNotifications(ctx context.Contex
 				b.Ident(agent.FieldProjectID)
 				b.WriteString(" = ")
 				b.WriteString(projIDCol)
+				writeNotSuspended(b)
 				b.WriteString(" AND ")
 				b.Ident(agent.Table)
 				b.WriteString(".")
