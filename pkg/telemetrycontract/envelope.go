@@ -386,13 +386,14 @@ func Unmarshal(data []byte, ev Event) error {
 	if err := checkStructure(reflect.TypeOf(ev)); err != nil {
 		return err
 	}
+	// json.Unmarshal would rewrite invalid UTF-8 to U+FFFD; check the input.
+	if !utf8.Valid(data) {
+		return errors.New("telemetrycontract: event bytes are not valid UTF-8")
+	}
 	if err := json.Unmarshal(data, ev); err != nil {
 		return fmt.Errorf("telemetrycontract: decoding event: %w", err)
 	}
 	if err := validateEvent(ev); err != nil {
-		return err
-	}
-	if err := checkStrings(reflect.ValueOf(ev), ""); err != nil {
 		return err
 	}
 	return checkWire(data, ev.AnalyticsEnvelope())
@@ -418,6 +419,7 @@ func isNilPointer(v any) bool {
 
 var (
 	labelsType        = reflect.TypeOf(Labels(nil))
+	labelType         = reflect.TypeOf(Label{})
 	envelopeType      = reflect.TypeOf(Envelope{})
 	jsonMarshalerType = reflect.TypeOf((*json.Marshaler)(nil)).Elem()
 	textMarshalerType = reflect.TypeOf((*encoding.TextMarshaler)(nil)).Elem()
@@ -434,21 +436,22 @@ type structureResult struct{ err error }
 // named struct whose fields are:
 //
 //   - the embedded, untagged Envelope (root struct only), or
-//   - exported, non-embedded fields with an explicit, valid json tag name
-//     and no option other than omitempty (never omitempty on Labels),
+//   - exported, non-embedded fields with an explicit json tag name of
+//     [a-z0-9_] and no option other than omitempty -- never on Labels or a
+//     non-pointer integer or bool (a known zero would read as unknown),
+//     always on a pointer (unknown is omitted, never null) --
 //     whose type is one of: the predeclared string, bool or integer types
 //     (not named types such as json.Number); Labels; an exported named
-//     struct obeying the same field rules
-//     (non-recursive); a pointer to any of these; a slice of any of these
-//     except byte slices.
+//     struct obeying the same field rules (non-recursive, not Label or
+//     Envelope); an unnamed pointer to any of these; an unnamed slice of
+//     any of these except byte slices.
 //
 // No type other than Labels may implement json.Marshaler or
 // encoding.TextMarshaler (the root included). Everything else -- floats,
 // interfaces, maps, arrays, unexported or json:"-" fields, other
 // embeddings -- is rejected, so encoding/json has no rule left to apply
 // that these checks would have to model. Wire names must be unique per JSON
-// object, compared case-insensitively (BigQuery columns and encoding/json
-// decoding both fold case).
+// object.
 func checkStructure(t reflect.Type) error {
 	if cached, ok := structureCache.Load(t); ok {
 		return cached.(structureResult).err
@@ -478,13 +481,12 @@ func checkStructType(t reflect.Type, root bool, ancestors map[reflect.Type]bool)
 	ancestors[t] = true
 	defer delete(ancestors, t)
 
-	seen := map[string]string{} // lower-cased wire name -> Go field
+	seen := map[string]string{} // wire name ([a-z0-9_], so case cannot differ) -> Go field
 	record := func(name, goName string) error {
-		key := strings.ToLower(name)
-		if prev, dup := seen[key]; dup {
-			return fmt.Errorf("telemetrycontract: wire name %q of %s.%s collides with %s (case-insensitive)", name, t.Name(), goName, prev)
+		if prev, dup := seen[name]; dup {
+			return fmt.Errorf("telemetrycontract: wire name %q of %s.%s collides with %s", name, t.Name(), goName, prev)
 		}
-		seen[key] = t.Name() + "." + goName
+		seen[name] = t.Name() + "." + goName
 		return nil
 	}
 	for i := 0; i < t.NumField(); i++ {
@@ -508,12 +510,18 @@ func checkStructType(t reflect.Type, root bool, ancestors map[reflect.Type]bool)
 			return fmt.Errorf("telemetrycontract: field %s.%s is unexported; event types hold wire fields only", t.Name(), f.Name)
 		case !hasTag || name == "" || name == "-":
 			return fmt.Errorf("telemetrycontract: field %s.%s needs an explicit json tag name", t.Name(), f.Name)
-		case !isValidTagName(name):
-			return fmt.Errorf("telemetrycontract: field %s.%s has an invalid json tag name %q", t.Name(), f.Name, name)
+		case !isWireName(name):
+			return fmt.Errorf("telemetrycontract: field %s.%s has json tag name %q; wire names are [a-z0-9_] (BigQuery-safe)", t.Name(), f.Name, name)
 		case opts != "" && opts != "omitempty":
 			return fmt.Errorf("telemetrycontract: field %s.%s: only the omitempty tag option is allowed, got %q", t.Name(), f.Name, opts)
 		case opts == "omitempty" && f.Type == labelsType:
 			return fmt.Errorf("telemetrycontract: Labels field %s.%s must not use omitempty (a known-empty set would be omitted); use *Labels for unknown", t.Name(), f.Name)
+		case opts == "omitempty" && isIntOrBool(f.Type.Kind()):
+			// A known 0 or false would be omitted and read as unknown.
+			return fmt.Errorf("telemetrycontract: field %s.%s: omitempty on an integer or bool drops a known zero; use a pointer for unknown", t.Name(), f.Name)
+		case opts != "omitempty" && f.Type.Kind() == reflect.Pointer:
+			// Unknown values are omitted, never written as null.
+			return fmt.Errorf("telemetrycontract: pointer field %s.%s must use omitempty (unknown is omitted, never null)", t.Name(), f.Name)
 		}
 		if err := record(name, f.Name); err != nil {
 			return err
@@ -542,11 +550,19 @@ func checkFieldType(t reflect.Type, field string, ancestors map[reflect.Type]boo
 		}
 		return nil
 	case reflect.Pointer:
+		if t.PkgPath() != "" {
+			return fmt.Errorf("telemetrycontract: field %s has named pointer type %s; use *T", field, t)
+		}
 		if t.Elem().Kind() == reflect.Pointer || t.Elem().Kind() == reflect.Slice && t.Elem() != labelsType {
 			return fmt.Errorf("telemetrycontract: field %s has unsupported type %s", field, t)
 		}
 		return checkFieldType(t.Elem(), field, ancestors)
 	case reflect.Slice:
+		// Named slice types (other than Labels, handled above) can carry
+		// their own encoding or alias label shapes without validation.
+		if t.PkgPath() != "" {
+			return fmt.Errorf("telemetrycontract: field %s has named slice type %s; use []T (or Labels for labels)", field, t)
+		}
 		if t.Elem().Kind() == reflect.Uint8 {
 			return fmt.Errorf("telemetrycontract: field %s is a byte slice (encoded as base64); use a string", field)
 		}
@@ -557,6 +573,9 @@ func checkFieldType(t reflect.Type, field string, ancestors map[reflect.Type]boo
 	case reflect.Struct:
 		if t == envelopeType {
 			return fmt.Errorf("telemetrycontract: field %s holds Envelope as a named field; embed it in the root struct instead", field)
+		}
+		if t == labelType {
+			return fmt.Errorf("telemetrycontract: field %s uses Label outside Labels; label sets must be Labels so they are validated", field)
 		}
 		if t.Name() == "" || !isExportedName(t.Name()) {
 			return fmt.Errorf("telemetrycontract: field %s has type %s; nested objects must be exported named structs", field, t)
@@ -577,17 +596,29 @@ func implementsEncoder(t reflect.Type) bool {
 		reflect.PointerTo(t).Implements(jsonMarshalerType) || reflect.PointerTo(t).Implements(textMarshalerType)
 }
 
-// isValidTagName mirrors encoding/json's isValidTag; names it would ignore
-// are rejected.
-func isValidTagName(s string) bool {
-	for _, c := range s {
-		switch {
-		case strings.ContainsRune("!#$%&()*+-./:;<=>?@[]^_{|}~ ", c):
-		case !unicode.IsLetter(c) && !unicode.IsDigit(c):
+// isWireName reports whether name is a valid analytics wire name:
+// non-empty [a-z0-9_], which encoding/json accepts verbatim and BigQuery
+// accepts as a column name; lower case only, so names cannot collide by
+// case folding.
+func isWireName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, c := range name {
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_') {
 			return false
 		}
 	}
 	return true
+}
+
+func isIntOrBool(k reflect.Kind) bool {
+	switch k {
+	case reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return true
+	}
+	return false
 }
 
 // checkStrings walks a value of an allowlisted type and rejects strings

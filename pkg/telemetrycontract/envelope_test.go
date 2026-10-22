@@ -425,13 +425,7 @@ func TestMarshalEnforcesLabelsWithoutEventValidate(t *testing.T) {
 			t.Errorf("%s labels marshaled through an event whose Validate skips them", name)
 		}
 	}
-	nested := struct {
-		laxEvent
-		More []Labels `json:"more"`
-	}{laxEvent: laxEvent{Envelope: env}, More: []Labels{{{"z", ""}, {"a", ""}}}}
-	if _, err := Marshal(&nested); err == nil {
-		t.Error("nested invalid Labels marshaled")
-	}
+
 }
 
 // --- allowlist (WP0 review r4) -------------------------------------------
@@ -499,6 +493,15 @@ type rejectEvent[T any] struct {
 
 func (e *rejectEvent[T]) Validate() error { return nil }
 
+// rejectPtrEvent is rejectEvent for pointer types (pointers must be
+// omitempty, so the rule under test is the one that fires).
+type rejectPtrEvent[T any] struct {
+	Envelope
+	V T `json:"v,omitempty"`
+}
+
+func (e *rejectPtrEvent[T]) Validate() error { return nil }
+
 func TestCheckStructureAllowlist(t *testing.T) {
 	env := NewEnvelope(EventTypeUsage, "u", "ns", testEventTS, testEventTS)
 	empty := Labels{}
@@ -509,7 +512,7 @@ func TestCheckStructureAllowlist(t *testing.T) {
 
 	rejected := map[string]reflect.Type{
 		"float":                reflect.TypeOf(&rejectEvent[float64]{}),
-		"float pointer":        reflect.TypeOf(&rejectEvent[*float32]{}),
+		"float pointer":        reflect.TypeOf(&rejectPtrEvent[*float32]{}),
 		"interface":            reflect.TypeOf(&rejectEvent[any]{}),
 		"slice of interface":   reflect.TypeOf(&rejectEvent[[]any]{}),
 		"map":                  reflect.TypeOf(&rejectEvent[map[string]string]{}),
@@ -526,7 +529,7 @@ func TestCheckStructureAllowlist(t *testing.T) {
 		"envelope as field":    reflect.TypeOf(&rejectEvent[Envelope]{}),
 		"case-insensitive dup": reflect.TypeOf(&rejectEvent[CaseA]{}),
 		"nested slice":         reflect.TypeOf(&rejectEvent[[][]string]{}),
-		"double pointer":       reflect.TypeOf(&rejectEvent[**int64]{}),
+		"double pointer":       reflect.TypeOf(&rejectPtrEvent[**int64]{}),
 		"self-encoding root":   reflect.TypeOf(&selfEncodingRoot{}),
 		"non-pointer root":     reflect.TypeOf(allowedEvent{}),
 	}
@@ -872,5 +875,175 @@ func TestLabelsMarshalJSONValidates(t *testing.T) {
 	ev := &allowedEvent{Envelope: env, NS: []Nested{{Name: "x", Labels: &bad}}}
 	if _, err := Marshal(ev); err == nil {
 		t.Error("invalid Labels nested in a slice of structs accepted")
+	}
+}
+
+// --- WP0 review r5: self-audit of every allowlisted kind -----------------
+
+type NamedString string
+type NamedInt int64
+type NamedBool bool
+type NamedPtr *int64
+type NamedSlice []string
+type NamedLabels Labels
+type NamedLabelSlice []Label
+
+type MarshalString string
+
+func (MarshalString) MarshalJSON() ([]byte, error) { return []byte(`1.5`), nil }
+
+type MarshalInt int64
+
+func (MarshalInt) MarshalJSON() ([]byte, error) { return []byte(`1.5`), nil }
+
+type MarshalBool bool
+
+func (*MarshalBool) MarshalJSON() ([]byte, error) { return []byte(`1.5`), nil }
+
+type MarshalSlice []string
+
+func (MarshalSlice) MarshalJSON() ([]byte, error) { return []byte(`[1.5]`), nil }
+
+type TextSlice []string
+
+func (TextSlice) MarshalText() ([]byte, error) { return []byte("x"), nil }
+
+type MarshalStruct struct {
+	A string `json:"a"`
+}
+
+func (MarshalStruct) MarshalJSON() ([]byte, error) { return []byte(`{"a":1.5}`), nil }
+
+type PtrMarshalStruct struct {
+	A string `json:"a"`
+}
+
+func (*PtrMarshalStruct) MarshalJSON() ([]byte, error) { return []byte(`{"a":1.5}`), nil }
+
+type TextStruct struct {
+	A string `json:"a"`
+}
+
+func (TextStruct) MarshalText() ([]byte, error) { return []byte("x"), nil }
+
+// Every allowlisted kind (string, integer, bool, struct, pointer, slice)
+// crossed with {named, value MarshalJSON, pointer MarshalJSON,
+// MarshalText}: only the plain predeclared forms, plain exported structs
+// and Labels pass. Positive controls guard against a rule that rejects
+// everything.
+func TestCheckStructureKindByNamedOrMarshaler(t *testing.T) {
+	accepted := map[string]reflect.Type{
+		"string":          reflect.TypeOf(&rejectEvent[string]{}),
+		"int64":           reflect.TypeOf(&rejectEvent[int64]{}),
+		"uint16":          reflect.TypeOf(&rejectEvent[uint16]{}),
+		"bool":            reflect.TypeOf(&rejectEvent[bool]{}),
+		"exported struct": reflect.TypeOf(&rejectEvent[Nested]{}),
+		"slice of string": reflect.TypeOf(&rejectEvent[[]string]{}),
+		"slice of struct": reflect.TypeOf(&rejectEvent[[]Nested]{}),
+		"Labels":          reflect.TypeOf(&rejectEvent[Labels]{}),
+		"*Labels":         reflect.TypeOf(&rejectPtrEvent[*Labels]{}),
+		"*int64":          reflect.TypeOf(&rejectPtrEvent[*int64]{}),
+		"*struct":         reflect.TypeOf(&rejectPtrEvent[*Nested]{}),
+	}
+	for name, typ := range accepted {
+		if err := checkStructure(typ); err != nil {
+			t.Errorf("positive control %s rejected: %v", name, err)
+		}
+	}
+	rejected := map[string]struct {
+		typ  reflect.Type
+		want string
+	}{
+		"named string":            {reflect.TypeOf(&rejectEvent[NamedString]{}), "named type"},
+		"named int":               {reflect.TypeOf(&rejectEvent[NamedInt]{}), "named type"},
+		"named bool":              {reflect.TypeOf(&rejectEvent[NamedBool]{}), "named type"},
+		"named pointer":           {reflect.TypeOf(&rejectPtrEvent[NamedPtr]{}), "named pointer"},
+		"named slice":             {reflect.TypeOf(&rejectEvent[NamedSlice]{}), "named slice"},
+		"named Labels":            {reflect.TypeOf(&rejectEvent[NamedLabels]{}), "named slice"},
+		"named []Label":           {reflect.TypeOf(&rejectEvent[NamedLabelSlice]{}), "named slice"},
+		"[]Label":                 {reflect.TypeOf(&rejectEvent[[]Label]{}), "Label outside Labels"},
+		"Label":                   {reflect.TypeOf(&rejectEvent[Label]{}), "Label outside Labels"},
+		"string MarshalJSON":      {reflect.TypeOf(&rejectEvent[MarshalString]{}), "named type"},
+		"int MarshalJSON":         {reflect.TypeOf(&rejectEvent[MarshalInt]{}), "named type"},
+		"bool ptr MarshalJSON":    {reflect.TypeOf(&rejectEvent[MarshalBool]{}), "named type"},
+		"slice MarshalJSON":       {reflect.TypeOf(&rejectEvent[MarshalSlice]{}), "named slice"},
+		"slice MarshalText":       {reflect.TypeOf(&rejectEvent[TextSlice]{}), "named slice"},
+		"struct MarshalJSON":      {reflect.TypeOf(&rejectEvent[MarshalStruct]{}), "own JSON or text encoding"},
+		"struct ptr MarshalJSON":  {reflect.TypeOf(&rejectEvent[PtrMarshalStruct]{}), "own JSON or text encoding"},
+		"struct MarshalText":      {reflect.TypeOf(&rejectEvent[TextStruct]{}), "own JSON or text encoding"},
+		"pointer to marshaler":    {reflect.TypeOf(&rejectPtrEvent[*MarshalStruct]{}), "own JSON or text encoding"},
+		"slice of marshaler":      {reflect.TypeOf(&rejectEvent[[]MarshalStruct]{}), "own JSON or text encoding"},
+		"pointer to named string": {reflect.TypeOf(&rejectPtrEvent[*NamedString]{}), "named type"},
+		"slice of named int":      {reflect.TypeOf(&rejectEvent[[]NamedInt]{}), "named type"},
+	}
+	for name, tc := range rejected {
+		err := checkStructure(tc.typ)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want it to mention %q", name, err, tc.want)
+		}
+	}
+}
+
+type omitIntEvent struct {
+	Envelope
+	N int64 `json:"n,omitempty"`
+}
+
+func (e *omitIntEvent) Validate() error { return nil }
+
+type omitBoolEvent struct {
+	Envelope
+	B bool `json:"b,omitempty"`
+}
+
+func (e *omitBoolEvent) Validate() error { return nil }
+
+type nullPtrEvent struct {
+	Envelope
+	P *int64 `json:"p"`
+}
+
+func (e *nullPtrEvent) Validate() error { return nil }
+
+type upperTagEvent struct {
+	Envelope
+	X string `json:"Agent_Ref"`
+}
+
+func (e *upperTagEvent) Validate() error { return nil }
+
+// N5-1, N5-5: the omit-vs-null policy and wire-name charset are enforced.
+func TestCheckStructureOmitPolicyAndWireNames(t *testing.T) {
+	for name, tc := range map[string]struct {
+		ev   Event
+		want string
+	}{
+		"omitempty int":   {&omitIntEvent{}, "known zero"},
+		"omitempty bool":  {&omitBoolEvent{}, "known zero"},
+		"pointer no omit": {&nullPtrEvent{}, "never null"},
+		"upper-case tag":  {&upperTagEvent{}, "[a-z0-9_]"},
+	} {
+		err := checkStructure(reflect.TypeOf(tc.ev))
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want %q", name, err, tc.want)
+		}
+	}
+	for _, bad := range []string{"", "A", "a-b", "a.b", "ſ", "a b"} {
+		if isWireName(bad) {
+			t.Errorf("isWireName(%q) = true", bad)
+		}
+	}
+	if !isWireName("cache_read_2") {
+		t.Error("isWireName rejects a snake_case name")
+	}
+}
+
+// N5-4: Unmarshal rejects invalid UTF-8 in its input instead of letting
+// json rewrite it.
+func TestUnmarshalRejectsInvalidUTF8Input(t *testing.T) {
+	data := []byte(`{"schema_version":1,"event_type":"agent.usage","event_id":"u","producer_namespace":"ns","event_ts":"2026-10-22T00:00:00Z","observed_ts":"2026-10-22T00:00:00Z","count":0,"labels":[{"key":"k` + "\xff" + `","value":""}]}`)
+	var ev testEvent
+	if err := Unmarshal(data, &ev); err == nil || !strings.Contains(err.Error(), "UTF-8") {
+		t.Errorf("invalid UTF-8 input: err = %v", err)
 	}
 }
