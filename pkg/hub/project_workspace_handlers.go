@@ -391,6 +391,7 @@ type ProjectWorkspaceUploadResponse struct {
 // an fs.ErrNotExist the caller renders as an empty listing or a 404, so that
 // browsing a project can no longer bring directories into being as a side
 // effect.
+// TODO(P2): fold into projectfs.openConfinedDir
 func openConfinedBase(base string, createIfMissing bool) (*os.Root, error) {
 	fi, err := os.Lstat(base)
 	switch {

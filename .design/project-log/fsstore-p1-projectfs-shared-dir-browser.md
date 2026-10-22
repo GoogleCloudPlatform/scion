@@ -2,7 +2,7 @@
 
 **Date**: 2026-10-22
 **Issue**: ptone/scion#5806 (sub-issues #5807–#5812, tracking #5805)
-**Design**: fs-cleanup design-v3 §P1, §P3 shared-dir rows, Phase 1 (gs://scion-xproject-exchange/fs-cleanup/design-v3.md)
+**Design**: fs-cleanup design-v4 §P1, §P3 shared-dir rows, Phase 1 (gs://scion-xproject-exchange/fs-cleanup/design-v4.md, sha256 baac4e1e…a21c7f)
 
 ## Summary
 
@@ -91,8 +91,8 @@ Changes:
   user-owned Mounts. Open round trip, symlink refusal at the project,
   shared-dirs and leaf components (with create and without), the
   symlinked-host-base allowance, and the local backend.
-- `pkg/config`: `TestNFSLayout`, `TestGetSharedDirPath_ValidatesName`. The env
-  contract test now models `server.shared_dir_storage` on `GlobalConfig`.
+- `pkg/config`: `TestNFSLayout`, `TestGetSharedDirPath_ValidatesName`,
+  `TestLoadHubSharedDirStorage` (env-free startup read, fail closed).
 - `pkg/hub` (`shared_dir_layout_test.go`): precedence table, warnings, the
   T4 uuid tree for scratchpad and a custom dir (upload plus agent-side write),
   remote-linked project, embedded linked project kept local (and refused on

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // Package projectfs is the single authority for where a project's storage
-// lives (design fs-cleanup design-v3 §P1, ptone/scion#5805). It answers
+// lives (design fs-cleanup design-v4 §P1, ptone/scion#5805). It answers
 // "host path / subPath / server path for (project, agent, Mount)" for every
 // component, keyed by the project UUID on shared backends and by today's
 // slug-keyed layout on the local backend.
