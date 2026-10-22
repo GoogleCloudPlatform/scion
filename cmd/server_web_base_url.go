@@ -34,8 +34,9 @@ import (
 // It is read only from operator inputs: the --base-url flag, the
 // environment (SCION_SERVER_HUB_ENDPOINT, SCION_SERVER_BASE_URL) and the
 // GLOBAL settings FILE (server.hub.public_url, and the IAP audience
-// server.auth.proxy.iap.audience that a Cloud Run URL is derived from; the
-// server loads both from the global settings directory only). It is never
+// server.auth.proxy.iap.audience that a Cloud Run URL is derived from, or
+// its SCION_SERVER_AUTH_PROXY_IAP_AUDIENCE env override; the server loads
+// the file from the global settings directory only). It is never
 // read from the settings database or any value saved through the admin
 // settings API: it is resolved at startup, before the store is opened. A runtime
 // write through the admin API (from a compromised or mistaken web session)
@@ -46,7 +47,7 @@ import (
 // Order (ptone/scion#5364): --base-url, then SCION_SERVER_BASE_URL, then
 // SCION_SERVER_HUB_ENDPOINT, then server.hub.public_url from the global
 // settings file, then (hosted mode only) the Cloud Run URL derived from the
-// IAP audience in the global settings file, then the default
+// IAP audience (the global settings file or its env override), then the default
 // http://localhost:<port>. The two inputs
 // the web server read before (--base-url and SCION_SERVER_BASE_URL) keep
 // their relative order and win; SCION_SERVER_HUB_ENDPOINT and the file only
@@ -72,7 +73,8 @@ import (
 // hub endpoint derived from the IAP audience (a Cloud Run IAP front end;
 // see iapAudienceToCloudRunURL). That URL is built from operator
 // configuration only (server.auth.proxy.iap.audience in the global settings
-// file, never the settings database) and is https by construction. It is
+// file or its SCION_SERVER_AUTH_PROXY_IAP_AUDIENCE env override, never the
+// settings database) and is https by construction. It is
 // one of the two availability decisions of ptone/scion#5364, decided true:
 // a Cloud Run IAP deployment with no explicit base URL starts with the
 // derived https URL instead of the default, which a non-loopback listener
