@@ -412,6 +412,15 @@ func TestConduitGrantRing_Ed25519RotationAcrossReplicasOnV2(t *testing.T) {
 	_, _, err = k2.store.Load(ctx)
 	assert.ErrorIs(t, err, errConduitGrantRingUnreadable)
 	assert.ErrorIs(t, err, secret.ErrUnknownKeyID)
+	// Precondition: A really holds a cached ring, older than the refresh,
+	// so its refusals below prove the stale cache is not served.
+	ka.mu.Lock()
+	cached, age := ka.ring != nil, clock.Now().Sub(ka.loadedAt)
+	ka.mu.Unlock()
+	require.True(t, cached, "replica A holds a cached ring")
+	require.GreaterOrEqual(t, age, conduitGrantKeyRefresh, "replica A's cached ring is past its refresh")
+	// For A, signer, publicKeys and freshPublicKeys carry the stale-cache
+	// check; recheckKeys (and rotate, revoke) clear or bypass the cache.
 	for name, k := range map[string]*conduitGrantKeys{"running replica A": ka, "cold k2-only node": k2} {
 		_, err := k.signer(ctx)
 		assert.ErrorIs(t, err, errConduitGrantRingUnreadable, "%s: no signer from an unreadable ring (not a cached one)", name)
