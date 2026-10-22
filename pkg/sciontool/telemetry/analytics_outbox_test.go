@@ -338,8 +338,10 @@ func TestOutboxTornLineIsIsolatedAndCounted(t *testing.T) {
 	if n, _ := o.Finalize(); n != 2 {
 		t.Errorf("finalized %d, want 2", n)
 	}
-	if o.Stats().Torn != 1 {
-		t.Errorf("torn = %d, want 1", o.Stats().Torn)
+	// The next writer terminated the fragment with a newline, so it is a
+	// complete (invalid) line now; it is dead-lettered, never dropped.
+	if st := o.Stats(); st.InvalidLines != 1 || st.PersistedDeadLetters != 1 {
+		t.Errorf("invalid lines = %d, dead letters = %d; want 1 and 1", st.InvalidLines, st.PersistedDeadLetters)
 	}
 }
 

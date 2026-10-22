@@ -133,10 +133,13 @@ var ErrAnalyticsOutboxLocked = errors.New("analytics outbox: lock wait timed out
 type AnalyticsOutboxStats struct {
 	Appended, CertainDuplicates, Overflow, AppendFailed int64
 	Finalized, Delivered, SendFailures, Torn            int64
-	HubIDMismatch, Conflicts, Quarantined, DeadLetters  int64
-	SyncUncertain, CorruptIntents, Unresolved           int64
-	CommitDeferred                                      int64
-	PersistedSyncUncertain, PersistedCommitDeferred     int64
+	// InvalidLines counts complete lines the current build rejected
+	// (dead-lettered); Torn counts only fragments without a newline.
+	InvalidLines                                       int64
+	HubIDMismatch, Conflicts, Quarantined, DeadLetters int64
+	SyncUncertain, CorruptIntents, Unresolved          int64
+	CommitDeferred                                     int64
+	PersistedSyncUncertain, PersistedCommitDeferred    int64
 	// HeldIntent is true while an unresolved append holds the outbox.
 	HeldIntent                                  bool
 	PersistedOverflow, PersistedOversize        int64
@@ -166,11 +169,14 @@ type AnalyticsOutbox struct {
 	chown   func(path string, uid, gid int) error
 
 	deadLetters, syncUncertain, corruptIntents, unresolved, commitDeferred atomic.Int64
+	invalidLines                                                           atomic.Int64
 
 	// lockWait overrides analyticsLockWait and lockAcquiredHook runs in the
 	// lock goroutine right after the flock is acquired (test seams).
-	lockWait         time.Duration
-	lockAcquiredHook func()
+	lockWait          time.Duration
+	lockAcquiredHook  func()
+	lockDeliveredHook func() // after the handoff to the caller, before the send
+	lockTimeoutHook   func() // when the wait times out, before the handoff check
 
 	// expireBatch is ExpireIndex's per-lock batch size and beforeExpireBatch
 	// runs before each batch (test seams).
@@ -221,7 +227,19 @@ func OpenAnalyticsOutbox(dir string) (*AnalyticsOutbox, error) {
 // creates is chowned to owner.
 func OpenAnalyticsOutboxOwned(dir string, owner *OutboxOwner) (*AnalyticsOutbox, error) {
 	o := newOutboxHandle(dir, owner)
-	if err := o.open(); err != nil {
+	if err := o.open(false); err != nil {
+		return nil, err
+	}
+	return o, nil
+}
+
+// openAnalyticsOutboxTolerant is OpenAnalyticsOutboxOwned for the
+// long-lived pipeline: a lock timeout on an already-initialized outbox
+// (epoch present) is tolerated, deferring intent recovery to the first
+// locked operation, instead of disabling analytics for the process's life.
+func openAnalyticsOutboxTolerant(dir string, owner *OutboxOwner) (*AnalyticsOutbox, error) {
+	o := newOutboxHandle(dir, owner)
+	if err := o.open(true); err != nil {
 		return nil, err
 	}
 	return o, nil
@@ -250,7 +268,7 @@ func newOutboxHandle(dir string, owner *OutboxOwner) *AnalyticsOutbox {
 	}
 }
 
-func (o *AnalyticsOutbox) open() error {
+func (o *AnalyticsOutbox) open(tolerateLocked bool) error {
 	if o.dir == "" {
 		return errors.New("analytics outbox: empty directory")
 	}
@@ -267,6 +285,11 @@ func (o *AnalyticsOutbox) open() error {
 	}
 	unlock, err := o.lock()
 	if err != nil {
+		if tolerateLocked && errors.Is(err, ErrAnalyticsOutboxLocked) {
+			if e, rerr := o.readTrimmed("epoch"); rerr == nil && e != "" {
+				return nil
+			}
+		}
 		return err
 	}
 	defer unlock()
@@ -365,6 +388,9 @@ func (o *AnalyticsOutbox) lock() (func(), error) {
 		}
 		state = delivered
 		mu.Unlock()
+		if o.lockDeliveredHook != nil {
+			o.lockDeliveredHook()
+		}
 		done <- err
 	}()
 	wait := o.lockWait
@@ -380,6 +406,9 @@ func (o *AnalyticsOutbox) lock() (func(), error) {
 			return nil, fmt.Errorf("analytics outbox: locking: %w", err)
 		}
 	case <-timer.C:
+		if o.lockTimeoutHook != nil {
+			o.lockTimeoutHook()
+		}
 		mu.Lock()
 		if state == delivered {
 			// The goroutine handed over just before the timeout: the
@@ -468,11 +497,9 @@ func (o *AnalyticsOutbox) appendUsage(ev *telemetrycontract.UsageEvent) (outcome
 	}
 	defer unlock()
 	if err := o.recoverIntentLocked(); err != nil {
-		if errors.Is(err, ErrAnalyticsOutboxHeld) {
-			// This observation is refused while held: consume a seq for it
-			// (after the held intent's), so the loss is a visible gap.
-			o.consumeSeqDuringHold()
-		}
+		// This observation is refused (held, or recovery failed): consume
+		// a seq for it (after any intent's), so the loss is a visible gap.
+		o.consumeSeqDuringHold()
 		return 0, err
 	}
 
@@ -1140,7 +1167,7 @@ func (o *AnalyticsOutbox) finalizingFiles() ([]string, error) {
 
 // finalizeFile streams one finalizing file into a new ready file (lines
 // with hub_id copied byte for byte, others stamped and re-marshaled,
-// undecodable lines dropped and counted), then removes it. A crash after
+// undecodable lines dead-lettered and counted), then removes it. A crash after
 // the ready file is renamed but before the remove repeats the copy; the
 // duplicate lines are byte-identical, which is neutral downstream.
 func (o *AnalyticsOutbox) finalizeFile(name, hubID string) (int, error) {
@@ -1169,10 +1196,15 @@ func (o *AnalyticsOutbox) finalizeFile(name, hubID string) (int, error) {
 					final, uerr = telemetrycontract.Marshal(&ev)
 				}
 				if uerr != nil {
-					// A torn fragment, or a line this build cannot accept
-					// (e.g. written by an older build): never drop it --
-					// keep it in the dead-letter file (persisted count).
-					o.torn.Add(1)
+					// A torn fragment (no newline: a crashed writer) or a
+					// complete line this build cannot accept (e.g. written
+					// by an older build): never drop it -- keep it in the
+					// dead-letter file (persisted count).
+					if readErr != nil {
+						o.torn.Add(1)
+					} else {
+						o.invalidLines.Add(1)
+					}
 					if derr := o.deadLetter(line); derr != nil {
 						return derr
 					}
@@ -1263,7 +1295,10 @@ func IsPermanentSendError(err error) bool {
 }
 
 // deadLetter durably appends a permanently rejected line to
-// dead_letter.jsonl and increments the persisted dead_letters count. The
+// dead_letter.jsonl and increments the persisted dead_letters count. A
+// crash (or a failed rename/cursor write) right after it can make the next
+// pass dead-letter the same line again: lines are never lost, but the count
+// can exceed the number of distinct lines. The
 // file counts against the outbox cap (retainedBytes), so a destination
 // that rejects everything ends in visible overflow, not unbounded disk.
 func (o *AnalyticsOutbox) deadLetter(line []byte) error {
@@ -1541,6 +1576,8 @@ type OutboxLedger struct {
 	OverflowTotal, OversizeTotal, AppendFailedTotal, DeadLettersTotal int64
 	SyncUncertainTotal, CommitDeferredTotal                           int64
 
+	QuarantineFiles int64 // truncated ready files kept as quarantine-N.jsonl
+
 	Held          bool  // an unresolved append intent is on disk
 	PendingBytes  int64 // undelivered: staging, finalizing, ready past the cursor
 	RetainedBytes int64 // PendingBytes (same read) + dead-letter + quarantine files
@@ -1550,7 +1587,9 @@ type OutboxLedger struct {
 }
 
 // LedgerSnapshot reads every ledger value once under the outbox lock, so
-// the values are mutually consistent (no in-flight append between them).
+// the values are consistent with respect to producers (no in-flight append
+// or rotation between them); the drainer works without the lock, so drain
+// progress (cursor, a dead letter, a deleted ready file) may be mid-step.
 // A counter file that does not exist yet reads as 0; any other read or
 // parse error, or ErrAnalyticsOutboxLocked, is returned.
 func (o *AnalyticsOutbox) LedgerSnapshot() (OutboxLedger, error) {
@@ -1602,6 +1641,9 @@ func (o *AnalyticsOutbox) ledgerLocked() (OutboxLedger, error) {
 		return d, err
 	}
 	d.RetainedBytes = d.PendingBytes + kept
+	if q, err := filepath.Glob(o.path("quarantine-*.jsonl")); err == nil {
+		d.QuarantineFiles = int64(len(q))
+	}
 	return d, nil
 }
 
@@ -1638,6 +1680,7 @@ func (o *AnalyticsOutbox) MemoryStats() AnalyticsOutboxStats {
 		CorruptIntents:    o.corruptIntents.Load(),
 		Unresolved:        o.unresolved.Load(),
 		CommitDeferred:    o.commitDeferred.Load(),
+		InvalidLines:      o.invalidLines.Load(),
 	}
 }
 

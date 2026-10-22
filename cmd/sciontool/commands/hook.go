@@ -538,7 +538,5 @@ func hookUsageAnalytics(cfg *telemetry.Config) *telemetry.UsageAnalytics {
 	// The directory is the agent home's (the hook runs as the agent user,
 	// HOME=<agent home>), the same one init resolves for the pipeline.
 	dir := telemetry.AnalyticsOutboxDirFor(hookHomeDir())
-	return telemetry.NewLazyUsageAnalytics(func() (*telemetry.AnalyticsOutbox, error) {
-		return telemetry.OpenAnalyticsOutbox(dir)
-	}, telemetrycontract.UsageSourceHooks)
+	return telemetry.NewLazyUsageAnalytics(dir, nil, telemetrycontract.UsageSourceHooks)
 }
