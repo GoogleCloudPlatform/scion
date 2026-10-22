@@ -572,7 +572,7 @@ describe('AgentStore delta probe', () => {
       h.server.agents.push(
         active('a2', 2, {
           appliedConfig: { creatorName: 'Ada', harness: 'claude' },
-        } as Partial<Agent>)
+        })
       );
       await h.emitAgent('created', { agentId: 'a2', name: 'a2', slug: 'a2', phase: 'running' });
       await settle();
@@ -1472,7 +1472,7 @@ describe('AgentStore delta probe', () => {
   });
 
   it('merges compact rows into full rows without dropping full fields', async () => {
-    const full = row('a1', 1, { appliedConfig: { harness: 'claude' } } as Partial<Agent>);
+    const full = row('a1', 1, { appliedConfig: { harness: 'claude' } });
     const h = await loaded([full], HUB, { view: 'full' });
     h.server.agents[0] = row('a1', 10, { name: 'renamed' });
     await tick();

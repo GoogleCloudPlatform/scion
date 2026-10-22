@@ -64,17 +64,16 @@ var binaryExtensions = map[string]bool{
 	".bin": true, ".dat": true, ".db": true, ".sqlite": true,
 }
 
-// NormalizeDir walks dir and normalizes line endings (CRLF → LF) for all text
-// files in place. Binary files are left unchanged.
+// NormalizeDir walks dir and normalizes line endings (CRLF → LF) in regular
+// text files in place. Binary files are left unchanged.
 func NormalizeDir(dir string) error {
 	return filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() {
-			return nil
-		}
-		if d.Type()&os.ModeSymlink != 0 {
+		// Skip symlinks and special files before reading: FIFOs can block,
+		// while sockets and devices do not represent normalizable text files.
+		if !d.Type().IsRegular() {
 			return nil
 		}
 		ext := strings.ToLower(filepath.Ext(path))

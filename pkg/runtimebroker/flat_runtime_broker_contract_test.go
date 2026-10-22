@@ -170,7 +170,7 @@ func newFlatInstanceTestServer(t *testing.T, opts flatInstanceOpts) *flatInstanc
 			HubEndpoint: cfg.HubEndpoint,
 		}
 	}
-	srv = New(cfg, mgr, srv.runtime)
+	srv = New(cfg, mgr, srv.runtime, config.RuntimeBuildRecord{})
 	endAsyncLaunchesAtCleanup(t, srv)
 	return &flatInstanceFixture{srv: srv, mgr: mgr, identity: id, instances: instances, globalDir: globalDir}
 }

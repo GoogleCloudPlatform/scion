@@ -46,7 +46,7 @@ func TestHeartbeatCapabilities_StaticSetPlusTemplateTiers(t *testing.T) {
 	if StaticCapabilities(nil, "").TemplateTiers {
 		t.Error("the static set (sent at registration) must not carry TemplateTiers")
 	}
-	wantNames := []string{"sync", "attach", "reprovision", "asyncLaunch", "asyncStart", "emptyPerAgentWorkspace", "agentMove", "reprovisionEmptyPerAgent"}
+	wantNames := []string{"sync", "attach", "reprovision", "asyncLaunch", "asyncStart", "emptyPerAgentWorkspace", "agentMove", "agentMoveRecreate", "reprovisionEmptyPerAgent"}
 	if got := StaticCapabilityNames(nil); !reflect.DeepEqual(got, wantNames) {
 		t.Errorf("registration capability names = %v, want %v", got, wantNames)
 	}

@@ -363,6 +363,10 @@ func (s *AgentStore) applyLaunchReportPreRunning(ctx context.Context, ltx *launc
 		// Bypasses seq.
 		upd := ltx.client.Agent.UpdateOneID(current.ID).
 			SetPhase(string(state.PhaseRunning)).
+			// The first running write: the exit fields describe the
+			// previous run, as in UpdateAgentStatus (ptone/scion#5384).
+			ClearExitCode().
+			SetExitReason("").
 			SetLaunchError("").
 			SetLaunchCause("").
 			SetLaunchState(store.LaunchStateEnded).

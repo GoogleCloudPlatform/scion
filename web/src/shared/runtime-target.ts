@@ -29,7 +29,9 @@
 
 import type {
   PresentedResourceSpec,
+  PresentedToleration,
   PresentedVolume,
+  RuntimeBroker,
   RuntimeTargetDescriptor,
   RuntimeTargetPresentation,
 } from './types.js';
@@ -154,5 +156,76 @@ export function presentationRows(p: RuntimeTargetPresentation): DisplayRow[] {
       value: parts.length > 0 ? parts.join(' · ') : '—',
     });
   }
+  return rows;
+}
+
+/** A broker the list and detail pages can classify: flat or legacy. */
+type ClassifiableBroker = Pick<RuntimeBroker, 'runtimeTarget' | 'runtimeTargetPresentation'>;
+
+/**
+ * Whether the broker is a flat Runtime Broker: it has a runtime target.
+ * Decided from data, never from a browser flag.
+ */
+export function isFlatBroker(broker: ClassifiableBroker): boolean {
+  return !!broker.runtimeTarget;
+}
+
+/**
+ * The one-line runtime target label of a flat broker, for example
+ * "kubernetes · Cluster A · ns agents"; the namespace appears only when the
+ * instance reported one. Empty for a legacy broker.
+ */
+export function runtimeTargetLabel(broker: ClassifiableBroker): string {
+  const target = broker.runtimeTarget;
+  if (!target) return '';
+  const parts = [target.type];
+  if (target.displayName) parts.push(target.displayName);
+  const ns = broker.runtimeTargetPresentation?.target?.namespace;
+  if (ns) parts.push(`ns ${ns}`);
+  return parts.join(' · ');
+}
+
+/**
+ * One toleration as text, built from its four named fields only; any other
+ * key on the object is ignored (it is never rendered). Examples:
+ * "dedicated=agents:NoSchedule", "gpu Exists (any effect)",
+ * "all taints (Exists)".
+ */
+export function tolerationLabel(t: PresentedToleration): string {
+  const key = typeof t.key === 'string' ? t.key : '';
+  const operator = typeof t.operator === 'string' && t.operator ? t.operator : 'Equal';
+  const value = typeof t.value === 'string' ? t.value : '';
+  const effect = typeof t.effect === 'string' && t.effect ? t.effect : '';
+  const effectText = effect ? `:${effect}` : ' (any effect)';
+  if (operator === 'Exists') {
+    if (!key) return effect ? `all taints (Exists):${effect}` : 'all taints (Exists)';
+    return `${key} Exists${effectText}`;
+  }
+  return `${key}=${value}${effectText}`;
+}
+
+/**
+ * The Placement rows of a Kubernetes flat target: node selector,
+ * tolerations and runtime class, each only when reported. Empty for any
+ * other runtime type, so docker and future types show no Placement group.
+ */
+export function placementRows(
+  target: RuntimeTargetDescriptor,
+  presentation?: RuntimeTargetPresentation
+): DisplayRow[] {
+  if (target.type !== 'kubernetes') return [];
+  const t = presentation?.target;
+  if (!t) return [];
+  const rows: DisplayRow[] = [];
+  // Defensive (the payload is JSON from the Hub): a node selector only when it is a plain object,
+  // tolerations only when they are objects.
+  const ns = t.nodeSelector;
+  if (ns && typeof ns === 'object' && !Array.isArray(ns)) {
+    push(rows, 'Node selector', sortedPairs(ns));
+  }
+  const tolerations = Array.isArray(t.tolerations) ? t.tolerations : [];
+  const objects = tolerations.filter((x) => !!x && typeof x === 'object' && !Array.isArray(x));
+  push(rows, 'Tolerations', objects.map(tolerationLabel).join('; '));
+  push(rows, 'Runtime class', t.runtimeClassName);
   return rows;
 }

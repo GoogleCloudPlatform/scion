@@ -109,6 +109,7 @@ var expectedSelectorRegistry = map[string][]string{
 	"project:read":                    {"project.read"},
 	"project:update":                  {"project.update"},
 	"project:list":                    {"project.list"},
+	"project:create":                  {"project.create"},
 	"skill:create":                    {"skill.create"},
 	"skill:create_global":             {"skill.create_global"},
 	"skill:delete":                    {"skill.delete"},
@@ -530,7 +531,7 @@ func TestSupportedTargetClasses_UnknownPermissionDeniesRatherThanGuess(t *testin
 // coverage this table requires: ResolveTargetScope's collection-evidence
 // cross-check
 // needs a reviewed class set for every Registry permission, not just
-// mintable ones (project.create has no UATScope at all).
+// mintable ones (for example project.register, which has no UATScope).
 func TestCollectionTargetClasses_CoversEveryRegistryPermission(t *testing.T) {
 	for _, p := range Registry {
 		if _, reviewed := CollectionTargetClassesFor(p.ID); !reviewed {

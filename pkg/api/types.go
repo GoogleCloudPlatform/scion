@@ -1473,6 +1473,13 @@ type StartOptions struct {
 	// the template env fallback (ptone/scion#4524). Unlike Template, it never
 	// affects image, harness-config or agent config resolution.
 	TemplateEnvSource string
+
+	// MoveReincarnationID, on the provision of a forced move (the
+	// fresh-agent-dir expectation), is the move's reincarnation ID. The
+	// provision writes it into the agent directory it creates, as the move
+	// marker, before anything else; a rollback delete removes only
+	// directories marked with it.
+	MoveReincarnationID string
 }
 
 // KubernetesBlockIdentity describes how a GCP identity "block" pod runs on

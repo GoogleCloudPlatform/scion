@@ -68,7 +68,6 @@ var PendingBearerDispositions = []PendingEntry{
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/groups", Method: "GET", Area: AreaAgents},
 	// --- projects ---
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/shared/{token}", Method: "GET", Area: AreaProjects},
-	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/clone", Method: "POST", Area: AreaProjects},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/gcp-service-accounts/mint", Method: "POST", Area: AreaProjects},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/gcp-service-accounts/{saId}", Method: "DELETE", Area: AreaProjects},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/gcp-service-accounts/{saId}", Method: "GET", Area: AreaProjects},
@@ -86,6 +85,8 @@ var PendingBearerDispositions = []PendingEntry{
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/principals/agent/{id}", Method: "GET", Area: AreaIdentity},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/principals/group/{id}", Method: "GET", Area: AreaIdentity},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/principals/user/{id}", Method: "GET", Area: AreaIdentity},
+	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/visitor-dms", Method: "GET", Area: AreaIdentity},
+	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/visitor-grants", Method: "GET", Area: AreaIdentity},
 	// --- hub ---
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/delegation-adoption", Method: "GET", Area: AreaHub},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/delegation-adoption/commits", Method: "POST", Area: AreaHub},
@@ -146,8 +147,6 @@ var PendingBearerOperations = []OperationID{
 	"hub.adminmode.read",
 	"hub.adminmode.update",
 	"hub.maintenance.execute",
-	"project.lifecycle.create",
-	"project.register",
 	"secret.read",
 	"secret.write",
 	"user.read",

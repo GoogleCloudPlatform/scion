@@ -2320,6 +2320,10 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// Persist to message store before delivery attempt. Set dispatch_state
 	// to "dispatched" (no new pending rows per delivery policy).
 	var persistedMsgID string
+	// persistedConversationID is the conversation the persisted message
+	// landed in; the response reports it to a project visitor only
+	// (visitorDeliveryConversation).
+	var persistedConversationID string
 	// artifactWarning reports artifact references not attached on the
 	// non-agent-sender path below (admitMessageArtifacts).
 	var artifactWarning string
@@ -2847,6 +2851,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			s.messageLog.Error("Failed to persist message", "error", err)
 		} else {
 			persistedMsgID = storeMsg.ID
+			persistedConversationID = storeMsg.ConversationID
 			recordedRefs = s.recordMessageArtifacts(ctx, storeMsg.ID, artifactRefs)
 		}
 		messaging.RecordStep(ctx, "message_persisted")
@@ -3086,6 +3091,11 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		mentionResults = s.processMentions(ctx, req.Mentions, agent, structuredMsg, mentionParticipantGroupID, groupConversationThreadKey)
 	}
 
+	// A project visitor learns the conversation and DM key its message
+	// landed in, so it can read the DM; no other sender's response
+	// changes.
+	visitorConvID, visitorConvKey := visitorDeliveryConversation(GetIdentityFromContext(ctx), agent, persistedConversationID)
+
 	if deferDelivery {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)
@@ -3097,6 +3107,8 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			MentionResults:  mentionResults,
 			Deferred:        deferredReason(agent),
 			ArtifactWarning: artifactWarning,
+			ConversationID:  visitorConvID,
+			ConversationKey: visitorConvKey,
 		})
 		return
 	}
@@ -3110,6 +3122,8 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		AgentPhase:      agent.Phase,
 		MentionResults:  mentionResults,
 		ArtifactWarning: artifactWarning,
+		ConversationID:  visitorConvID,
+		ConversationKey: visitorConvKey,
 	})
 }
 
@@ -3132,6 +3146,13 @@ type MessageDeliveryResponse struct {
 	// ArtifactWarning is set when artifact references the request named
 	// were not attached (ptone/scion#3222).
 	ArtifactWarning string `json:"artifact_warning,omitempty"`
+	// ConversationID and ConversationKey are set only for a project
+	// visitor sender (ptone/scion#4603): the conversation its message was
+	// persisted in, and the visitor's DM key with the agent
+	// (dm:agent:<agentId>:user:<visitorId>), which the visitor DM read
+	// routes take. Omitted for every other sender.
+	ConversationID  string `json:"conversation_id,omitempty"`
+	ConversationKey string `json:"conversation_key,omitempty"`
 }
 
 // GroupMessageRecipientResult represents the delivery status for one recipient in a group[] delivery.

@@ -550,14 +550,15 @@ var projectOperations = []OperationSpec{
 	// Domain: project — project lifecycle
 	// =====================================================================
 	{
-		ID:          "project.lifecycle.create",
-		Domain:      "project",
-		Description: "Create a new project",
+		ID:     "project.lifecycle.create",
+		Domain: "project",
+		Description: "Create a new project. project.create is checked as a collection-level create at the hub scope; " +
+			"a token needs project:create on a hub boundary. Naming an existing project by id needs project.update on it",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects", Method: "POST"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
 		ResourceResolver: "hub-scoped",
 		BasePermission:   "project.create",
 		Effects:          []SecurityEffect{EffectCreateResource, EffectGrantAuthority},
@@ -579,7 +580,11 @@ var projectOperations = []OperationSpec{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
 			{Package: "pkg/hub", Function: "TestOwnerGrantCoverageCheck"},
 			{Package: "pkg/hub", Function: "TestOwnerBindingAuditFailureRollsBack"},
+			{Package: "pkg/hub", Function: "TestProjectCreateToken_RequiresCreateSelectorAndHubBoundary"},
+			{Package: "pkg/hub", Function: "TestProjectCreateToken_IdempotentPathRequiresUpdate"},
 		},
+		Bearer: BearerDisposition{Kind: BearerAdmit, Target: BearerTargetHubCollection,
+			Boundaries: []BearerBoundary{BearerBoundaryHub}, Pin: "TestProjectCreateToken_RequiresCreateSelectorAndHubBoundary"},
 	},
 	{
 		ID:          "project.lifecycle.delete",
@@ -718,22 +723,24 @@ var projectOperations = []OperationSpec{
 		Bearer:           AdmitOn(BearerTargetProjectPath, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
-		ID:          "project.register",
-		Domain:      "project",
-		Description: "Register a project from an external source",
+		ID:     "project.register",
+		Domain: "project",
+		Description: "Register a project from an external source. Register checks project.create as a collection-level create at the hub scope; " +
+			"a token needs project:create on a hub boundary. An existing project named by id or matched by slug needs project.update on it. " +
+			"The embedded-broker form (a broker in the request body) is session-only (CREDENTIAL_MANAGEMENT): a token or any other non-session credential is refused before any lookup or write",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/register", Method: "POST", Response: ResponseCredential},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
 		ResourceResolver: "project-from-body",
-		BasePermission:   "project.register",
+		BasePermission:   "project.create",
 		Effects:          []SecurityEffect{EffectCreateResource, EffectGrantAuthority},
 		DelegationKind:   DelegationNonAmplification,
 		DelegationDescription: "When the call creates the project, the creator is bound to the project-owner role on it; " +
 			"registering an existing project binds no owner. " +
 			"A credential with a permission ceiling must cover every permission of that role before any write (projectOwnerGrantDenial); " +
-			"for other callers project.register gates the grant",
+			"for other callers project.create gates the grant",
 		AuthorityEval: AuthorityEvalNone,
 		// createProjectWithOwner writes the project row, the owner binding
 		// and this record in one transaction.
@@ -748,7 +755,46 @@ var projectOperations = []OperationSpec{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
 			{Package: "pkg/hub", Function: "TestOwnerGrantCoverageCheck"},
 			{Package: "pkg/hub", Function: "TestOwnerBindingAuditFailureRollsBack"},
+			{Package: "pkg/hub", Function: "TestProjectRegisterToken_EnforcesProjectCreate"},
+			{Package: "pkg/hub", Function: "TestProjectRegisterToken_EmbeddedBrokerFormIsSessionOnly"},
 		},
+		Bearer: BearerDisposition{Kind: BearerAdmit, Target: BearerTargetHubCollection,
+			Boundaries: []BearerBoundary{BearerBoundaryHub}, Pin: "TestProjectRegisterToken_EnforcesProjectCreate"},
+	},
+	{
+		ID:     "project.clone",
+		Domain: "project",
+		Description: "Clone a project into a new project owned by the caller. The caller needs project.read on the source and " +
+			"project.create as a collection-level create at the hub scope; a token also needs the project:clone selector",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/clone", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "project-from-url",
+		BasePermission:   "project.create",
+		Effects:          []SecurityEffect{EffectCreateResource, EffectGrantAuthority},
+		DelegationKind:   DelegationNonAmplification,
+		DelegationDescription: "The caller is bound to the project-owner role on the clone. " +
+			"A credential with a permission ceiling must cover every permission of that role before any write (projectOwnerGrantDenial); " +
+			"for other callers project.create gates the grant",
+		AuthorityEval: AuthorityEvalNone,
+		// createProjectWithOwner writes the project row, the owner binding
+		// and this record in one transaction.
+		AuditObligation: &AuditObligation{
+			EventType:     "project_member_add",
+			ContextFields: []string{"actor_id", "project_id"},
+			AfterFields:   []string{"user_id", "role"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden, DenialResourceNotFound},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestOwnerBindingRequiresCanDelegate"},
+			{Package: "pkg/hub", Function: "TestProjectCloneToken_RequiresSourceReadCloneAndCreate"},
+		},
+		Bearer: BearerDisposition{Kind: BearerAdmit, Target: BearerTargetHubCollection,
+			Boundaries: []BearerBoundary{BearerBoundaryHub}, Pin: "TestProjectCloneToken_RequiresSourceReadCloneAndCreate"},
 	},
 
 	// =====================================================================

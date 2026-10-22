@@ -49,7 +49,7 @@ interface HarnessConfigEntry {
 import { isAgentLaunching, isIncompleteCreate, isSharedWorkspace } from '../../shared/types.js';
 import { isTargetKubernetesOnly } from '../../shared/runtime-kind.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
-import { defaultTriggersHint } from '../../shared/notification-triggers.js';
+import { AGENT_CREATE_TRIGGERS, defaultTriggersHint } from '../../shared/notification-triggers.js';
 import {
   resolveInheritedPlaceholders,
   type AgentConfigPlaceholder,
@@ -1270,7 +1270,7 @@ export class ScionPageAgentCreate extends LitElement {
         >
           Notify me on important agent state changes
         </sl-checkbox>
-        <sl-tooltip content=${defaultTriggersHint()} hoist>
+        <sl-tooltip content=${defaultTriggersHint(AGENT_CREATE_TRIGGERS)} hoist>
           <span class="help-badge">?</span>
         </sl-tooltip>
       </div>
