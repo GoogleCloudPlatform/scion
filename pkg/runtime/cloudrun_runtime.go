@@ -1068,21 +1068,22 @@ func (r *CloudRunRuntime) List(ctx context.Context, labelFilter map[string]strin
 }
 
 // cloudRunInstancePhase maps inst to the agent phase and container status
-// List reports (ptone/scion#5270). In order:
+// List reports (ptone/scion#5270, ptone/scion#5295). The Instances API has
+// no run-state field; the mapping follows the shapes recorded from a live
+// instance through create, stop, start, exit and delete. In order:
 //   - delete_time set: "stopped" (the instance is soft-deleted);
-//   - reconciling: "provisioning" (the system is still acting on it);
-//   - Ready condition succeeded: "provisioning" (see below);
-//   - Ready condition failed: "error";
+//   - reconciling: "provisioning" (the system is still acting on it:
+//     creating, stopping, restarting or deleting);
+//   - terminal condition succeeded: "running" (a started instance);
+//   - terminal condition failed with a clean end (see
+//     cloudRunInstanceEndedCleanly): "stopped";
+//   - terminal condition failed otherwise: "error";
 //   - otherwise (no condition, unspecified, pending, reconciling state):
 //     "provisioning".
 //
-// A succeeded Ready condition is ambiguous: it is reported for a serving
-// instance, and may also be what a stopped instance reports, since the API
-// has no run-state field and the shape after StopInstance is unverified
-// (ptone/scion#5295). Reporting it as "running" would make Start's
-// pre-clean keep a stopped instance instead of recreating it, so it is
-// reported as "provisioning", a non-terminal phase that is not running,
-// until that shape is known.
+// A stopped instance and one whose container exited 0 on its own both
+// report a failed terminal condition with no reason and no Retry
+// condition; no structured field tells them apart, so both are "stopped".
 //
 // The container status is the raw condition state ("unknown" without a
 // condition), with ",reconciling" appended while reconciling.
@@ -1103,13 +1104,37 @@ func cloudRunInstancePhase(inst *runpb.Instance) (phase, containerStatus string)
 	case inst.GetReconciling():
 		phase = string(state.PhaseProvisioning)
 	case condState == runpb.Condition_CONDITION_SUCCEEDED:
-		phase = string(state.PhaseProvisioning)
+		phase = string(state.PhaseRunning)
+	case condState == runpb.Condition_CONDITION_FAILED && cloudRunInstanceEndedCleanly(inst):
+		phase = string(state.PhaseStopped)
 	case condState == runpb.Condition_CONDITION_FAILED:
 		phase = string(state.PhaseError)
 	default:
 		phase = string(state.PhaseProvisioning)
 	}
 	return phase, containerStatus
+}
+
+// cloudRunInstanceEndedCleanly reports whether inst, whose terminal
+// condition failed, has the shape recorded for a stopped instance and for
+// one whose container exited 0: the terminal condition carries no reason
+// of any kind, and the instance has no Retry condition (a started instance
+// always had one). Any reason or a Retry condition, as a crash or a
+// platform failure may report, is not a clean end and stays "error". The
+// condition message is free text and is not read.
+func cloudRunInstanceEndedCleanly(inst *runpb.Instance) bool {
+	tc := inst.GetTerminalCondition()
+	if tc.GetReason() != runpb.Condition_COMMON_REASON_UNDEFINED ||
+		tc.GetRevisionReason() != runpb.Condition_REVISION_REASON_UNDEFINED ||
+		tc.GetExecutionReason() != runpb.Condition_EXECUTION_REASON_UNDEFINED {
+		return false
+	}
+	for _, c := range inst.GetConditions() {
+		if c.GetType() == "Retry" {
+			return false
+		}
+	}
+	return true
 }
 
 // cloudRunAgentName is the agent name List reports for inst: the agent slug

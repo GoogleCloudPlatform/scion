@@ -3831,6 +3831,12 @@ type AgentServiceAccountAssignmentStore interface {
 	// ErrAlreadyExists.
 	ReplaceAgentServiceAccountAssignment(ctx context.Context, a *AgentServiceAccountAssignment) error
 
+	// ReplaceAgentServiceAccountAssignmentWith is
+	// ReplaceAgentServiceAccountAssignment with the deactivation record of
+	// the replaced row given by d. d.Cause must satisfy
+	// ValidAssignmentDeactivationCause and d.OpID must be set.
+	ReplaceAgentServiceAccountAssignmentWith(ctx context.Context, a *AgentServiceAccountAssignment, d Deactivation) error
+
 	// GetActiveAgentServiceAccountAssignments returns the agent's active
 	// rows, oldest first. More than one row is a defect that readers treat
 	// as ambiguous.
@@ -3841,11 +3847,24 @@ type AgentServiceAccountAssignmentStore interface {
 	// ValidAssignmentDeactivationCause and d.OpID must be set.
 	DeactivateAgentServiceAccountAssignments(ctx context.Context, agentID string, d Deactivation) (int, error)
 
+	// DeactivateAgentServiceAccountAssignment deactivates the agent's row
+	// rowID when it is active and records d. It returns 0 when that row is
+	// not the agent's or is inactive. d.Cause must satisfy
+	// ValidAssignmentDeactivationCause and d.OpID must be set.
+	DeactivateAgentServiceAccountAssignment(ctx context.Context, agentID, rowID string, d Deactivation) (int, error)
+
 	// ReactivateAgentServiceAccountAssignments reactivates exactly the
 	// agent's rows deactivated with cause under opID and clears their
 	// deactivation record. A conflict with an active row surfaces as
 	// ErrAlreadyExists.
 	ReactivateAgentServiceAccountAssignments(ctx context.Context, agentID string, cause EdgeDeactivationCause, opID string) (int, error)
+
+	// RemarkDeactivatedAgentServiceAccountAssignments replaces the
+	// deactivation record of the agent's inactive rows deactivated with
+	// cause under opID (only the row with ID rowID when rowID is set) by
+	// to. The rows stay inactive. to.Cause must satisfy
+	// ValidAssignmentDeactivationCause and to.OpID must be set.
+	RemarkDeactivatedAgentServiceAccountAssignments(ctx context.Context, agentID, rowID string, cause EdgeDeactivationCause, opID string, to Deactivation) (int, error)
 }
 
 // DelegationEdgeStore defines delegation edge persistence operations.

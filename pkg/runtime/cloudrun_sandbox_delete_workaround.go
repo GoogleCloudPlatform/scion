@@ -144,7 +144,7 @@ func (r *CloudRunSandboxRuntime) runDeleteWithTimeout(ctx context.Context, id st
 	select {
 	case err := <-done:
 		out := readSandboxCommandOutput(outFile)
-		result := classifySandboxDelete(ctx, out, err, false)
+		result := classifySandboxDelete(err, false)
 		if err != nil {
 			slog.Warn("sandbox delete --force returned with error",
 				"sandbox", id, "result", result.String(), "error", err, "output", sandboxCommandOutputForLog(out))
@@ -177,7 +177,7 @@ func (r *CloudRunSandboxRuntime) runDeleteWithTimeout(ctx context.Context, id st
 		err := <-done
 		out := readSandboxCommandOutput(outFile)
 		slog.Warn("sandbox delete --force cancelled",
-			"sandbox", id, "result", classifySandboxDelete(ctx, out, err, false).String(),
+			"sandbox", id, "result", classifySandboxDelete(err, false).String(),
 			"error", err, "output", sandboxCommandOutputForLog(out))
 		return sandboxDeleteFailed, err, ctx.Err()
 	}

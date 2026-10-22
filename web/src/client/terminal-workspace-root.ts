@@ -44,6 +44,7 @@ import {
   getTestInfraStatus,
   loadTestInfraStatus,
 } from './test-infra-status.js';
+import { noteShownEntry } from './navigation.js';
 
 interface RailEntry {
   session: TerminalSession;
@@ -2154,6 +2155,7 @@ export class TerminalWorkspaceRoot {
     // Only update if URL actually changed
     if (newUrl !== window.location.pathname + window.location.search) {
       window.history.replaceState(window.history.state, '', newUrl);
+      noteShownEntry();
     }
   }
 
@@ -2695,6 +2697,23 @@ export class TerminalWorkspaceRoot {
           border-right: 0;
           border-bottom: 1px solid var(--scion-border, #e2e8f0);
         }
+      }
+      /* While an on-screen keyboard is up (ptone/scion#5059) the screen is
+         the terminal and the keyboard. client/viewport.ts detects the
+         keyboard and sets html[data-keyboard='open'] (iOS Safari, where it
+         also shrinks the frame to the visible height, and Android Chrome,
+         where resizes-content shrinks the frame itself); the panes refit to
+         what is left through their own ResizeObserver. Nothing hidden here holds a text field, so
+         hiding it cannot blur the field that raised the keyboard. */
+      html[data-keyboard='open'] #terminal-workspace > .terminal-test-hub-banner,
+      html[data-keyboard='open'] #terminal-workspace > scion-header,
+      html[data-keyboard='open'] #terminal-workspace .terminal-rail,
+      html[data-keyboard='open'] #terminal-workspace .terminal-layout-bar {
+        display: none;
+      }
+      html[data-keyboard='open'] #terminal-workspace .terminal-workspace-shell {
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-rows: minmax(0, 1fr);
       }
     `;
     this.element.appendChild(style);

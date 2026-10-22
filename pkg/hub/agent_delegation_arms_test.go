@@ -23,6 +23,7 @@ import (
 	"go/token"
 	"net/http"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -439,6 +440,73 @@ func TestAgentEnvVisibility_DecidedOnlyByTheHelpers(t *testing.T) {
 		})
 	}
 	assert.Positive(t, sites)
+
+	// MCP server env and headers and service env (like InlineConfig.Env and
+	// the telemetry headers) are redacted inside store's ResponseView, which only
+	// agent_env_redaction.go calls (checked above), so the same two helpers
+	// decide them. Pin that chain in pkg/store.
+	assertStoreResponseRedactionChain(t)
+}
+
+// storeResponseRedactionCallers names, for each redaction step below
+// store.AgentAppliedConfig.ResponseView, the only functions that may call
+// it.
+var storeResponseRedactionCallers = map[string][]string{
+	"redactMCPServersForResponse":   {"redactInlineConfigForResponse"},
+	"redactServicesForResponse":     {"redactInlineConfigForResponse"},
+	"redactInlineConfigForResponse": {"ResponseView", "redactCreateInputsForResponse"},
+	"redactCreateInputsForResponse": {"ResponseView"},
+}
+
+// assertStoreResponseRedactionChain checks that every call in pkg/store to a
+// step of storeResponseRedactionCallers comes from an allowed caller and
+// passes that caller's canAttach through unchanged, so ResponseView's
+// canAttach (decided by envViewAllowed or canViewAgentEnv) is the only
+// visibility input.
+func assertStoreResponseRedactionChain(t *testing.T) {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join("..", "store", "*.go"))
+	require.NoError(t, err)
+	fset := token.NewFileSet()
+	seen := map[string]int{}
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, name, nil, 0)
+		require.NoError(t, err)
+		for _, decl := range file.Decls {
+			fd, ok := decl.(*ast.FuncDecl)
+			if !ok || fd.Body == nil {
+				continue
+			}
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				fn, ok := call.Fun.(*ast.Ident)
+				if !ok {
+					return true
+				}
+				allowed, tracked := storeResponseRedactionCallers[fn.Name]
+				if !tracked {
+					return true
+				}
+				seen[fn.Name]++
+				pos := fset.Position(call.Pos())
+				assert.Contains(t, allowed, fd.Name.Name, "%s: %s called outside the response view chain", pos, fn.Name)
+				require.Len(t, call.Args, 2, "%s", pos)
+				arg, ok := call.Args[1].(*ast.Ident)
+				assert.True(t, ok && arg.Name == "canAttach",
+					"%s: %s must get its caller's canAttach unchanged", pos, fn.Name)
+				return true
+			})
+		}
+	}
+	for fn := range storeResponseRedactionCallers {
+		assert.Positive(t, seen[fn], "%s is not called from the response view chain", fn)
+	}
 }
 
 // TestAgentDelegationRoutes_ResolveToTheirOperations pins the agent
