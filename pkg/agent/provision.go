@@ -2892,11 +2892,13 @@ func readSavedAgentInfo(agentName string, projectPath string) (*api.AgentInfo, S
 	if err != nil {
 		return nil, SavedProfileMissing
 	}
-	agentInfoPath := filepath.Join(config.GetAgentHomePath(projectDir, agentName), "agent-info.json")
-	if _, err := os.Stat(agentInfoPath); err != nil {
+	// Read confined to the agent home (readHomeAgentInfo): a link, a
+	// non-regular file or a second hard link at agent-info.json is
+	// unreadable, never read through.
+	data, err := readHomeAgentInfo(config.GetAgentHomePath(projectDir, agentName))
+	if errors.Is(err, fs.ErrNotExist) {
 		return nil, SavedProfileMissing
 	}
-	data, err := os.ReadFile(agentInfoPath)
 	if err != nil {
 		return nil, SavedProfileUnreadable
 	}
@@ -2982,7 +2984,7 @@ func updateSavedAgentInfo(agentName string, projectPath string, update func(*api
 	// This might happen if provisioning failed or hasn't finished.
 	// Checked before the lock too, so no lock file is left in a home
 	// that has no agent-info.json.
-	if _, err := os.Stat(agentInfoPath); os.IsNotExist(err) {
+	if _, err := os.Lstat(agentInfoPath); os.IsNotExist(err) {
 		return nil
 	}
 
@@ -3014,23 +3016,14 @@ func updateSavedAgentInfo(agentName string, projectPath string, update func(*api
 
 	// The read, update and write run under the agent-info lock, so a
 	// concurrent writer in the container (sciontool) or another host
-	// process cannot lose this update or have its own lost (#4681).
-	return agentinfolock.Update(agentInfoPath, agentinfolock.Options{}, func() error {
-		mode := os.FileMode(0o644)
-		if fi, err := os.Stat(agentInfoPath); os.IsNotExist(err) {
-			return nil
-		} else if err == nil {
-			mode = fi.Mode().Perm()
-		}
-
-		data, err := os.ReadFile(agentInfoPath)
-		if err != nil {
-			return err
-		}
-
+	// process cannot lose this update or have its own lost (#4681). They
+	// are confined to the agent home (updateHomeAgentInfo): a link at
+	// agent-info.json or at a directory component is refused, never read
+	// through or written through.
+	return updateHomeAgentInfo(agentHome, true, func(data []byte) ([]byte, error) {
 		var info api.AgentInfo
 		if err := json.Unmarshal(data, &info); err != nil {
-			return err
+			return nil, err
 		}
 
 		update(&info)
@@ -3041,12 +3034,7 @@ func updateSavedAgentInfo(agentName string, projectPath string, update func(*api
 			info.RunID = ""
 		}
 
-		newData, err := marshalAgentInfoKeepUnknown(data, &info)
-		if err != nil {
-			return err
-		}
-
-		return writeAgentInfoFile(agentInfoPath, newData, mode)
+		return marshalAgentInfoKeepUnknown(data, &info)
 	})
 }
 
@@ -4023,7 +4011,7 @@ func dirHasEntries(path string) (bool, error) {
 // GetAgent reads it from) if it parses and names a template or
 // harness-config, or nil otherwise.
 func readStoredAgentRecord(agentHome string) *api.AgentInfo {
-	data, err := os.ReadFile(filepath.Join(agentHome, "agent-info.json"))
+	data, err := readHomeAgentInfo(agentHome)
 	if err != nil {
 		return nil
 	}
@@ -4212,8 +4200,8 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 		}
 	}
 
-	// Try to load agent-info.json first to get the template
-	agentInfoPath := filepath.Join(agentHome, "agent-info.json")
+	// Try to load agent-info.json first to get the template (read confined
+	// to the agent home; a link there is refused, never read through).
 	var agentInfo *api.AgentInfo
 	effectiveTemplate := defaultTemplate
 
@@ -4223,7 +4211,7 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	// name: the agent loads from its persisted config alone, as it did when
 	// the stored name was the cache directory's hash.
 	hydratedTemplate := false
-	if infoData, err := os.ReadFile(agentInfoPath); err == nil {
+	if infoData, err := readHomeAgentInfo(agentHome); err == nil {
 		if err := json.Unmarshal(infoData, &agentInfo); err == nil {
 			hydratedTemplate = normalizeHydratedTemplateInfo(agentInfo, api.TemplateNameFromContext(ctx))
 			if agentInfo.Template != "" {
