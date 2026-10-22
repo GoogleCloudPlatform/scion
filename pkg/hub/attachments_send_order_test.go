@@ -84,3 +84,22 @@ func TestAgentSend_ThreadPostByNonReaderRefusedBeforeAttachmentIDs(t *testing.T)
 	require.NoError(t, err)
 	require.Equal(t, artifacts.ScopeKindUpload, a.ScopeKind, "the upload is not bound")
 }
+
+// TestAgentSend_AgentSenderDMKeyRefusedBeforeAttachmentIDs: an agent sender
+// naming a dm: thread_id (a DM key's second slot is always a user, so the
+// ownership check refuses any agent sender), with another principal's upload
+// id, gets the ownership check's 400, never an attachment answer, and binds
+// nothing.
+func TestAgentSend_AgentSenderDMKeyRefusedBeforeAttachmentIDs(t *testing.T) {
+	f := newSendFixture(t)
+	foreign := f.uploadAs(t, f.ub, f.projB.ID, "bob.txt", "bob's bytes")
+	body := f.messageBody(f.target, "an agent naming a dm key", []string{foreign})
+	body.StructuredMessage.ThreadID = dmKeyFor(t, "agent", f.target.ID, "user", f.ua.ID)
+	body.StructuredMessage.Channel = "web"
+
+	rec := f.agentRequest(t, f.sender, jsonRequest(t, "/api/v1/agents/"+f.target.ID+"/message", body))
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "DM thread_id does not match the sender and recipient")
+	require.NotContains(t, rec.Body.String(), "attachment")
+	f.requireUnbound(t, foreign)
+}
