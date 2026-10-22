@@ -1039,7 +1039,7 @@ at its default `local` backend. With that backend each replica keeps
 hub-managed project workspaces on its own container storage, so replicas
 can see different workspace content, and the content is lost when an
 instance is replaced. On Cloud Run the Hub also refuses workspace writes
-(file edits, WebDAV, git clone) with `503 Service Unavailable` while the
+(file edits, git clone) with `503 Service Unavailable` while the
 backend is `local` (see
 [Ephemeral Storage & 503 Safety Gate](/scion/reference/server-config/#ephemeral-storage--503-safety-gate)).
 

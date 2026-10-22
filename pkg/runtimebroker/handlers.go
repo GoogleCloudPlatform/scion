@@ -62,9 +62,8 @@ import (
 var tracer = otel.Tracer("scion-broker")
 
 // matchesAgent checks whether an agent matches the given id and optional projectID.
-// When projectID is provided, it must match for uniqueness across projects.
-// When projectID is empty, matching falls back to name/containerID/slug only
-// (backward compatible with solo/CLI mode and pre-existing containers).
+// When projectID is provided, the entry must belong to it (matchesAgentProject).
+// When projectID is empty, matching is by name/containerID/slug only.
 func matchesAgent(a api.AgentInfo, id, projectID string) bool {
 	nameMatch := a.Name == id || a.ContainerID == id || a.Slug == id
 	if !nameMatch {
@@ -76,17 +75,13 @@ func matchesAgent(a api.AgentInfo, id, projectID string) bool {
 	return matchesAgentProject(a, projectID)
 }
 
+// matchesAgentProject reports whether an entry may stand for an agent of
+// projectID (agent.EntryInProject): positively identified as belonging to
+// it, or an entry with no project identity whose recorded path identifies
+// as projectID (legacyEntryInProject), the rule every project-scoped
+// operation applies.
 func matchesAgentProject(a api.AgentInfo, projectID string) bool {
-	// Check the runtime's project_id label first, then the ProjectID field.
-	if labelProjectID := projectkeys.ProjectIDFromLabels(a.Labels); labelProjectID != "" {
-		return labelProjectID == projectID
-	}
-	if a.ProjectID != "" {
-		return a.ProjectID == projectID
-	}
-	// No project_id on container — match anyway for backward compatibility
-	// with containers created before project_id labeling was added.
-	return true
+	return agent.EntryInProject(a, projectID)
 }
 
 // ============================================================================
@@ -346,7 +341,7 @@ func isLocalOnlyRuntime(runtimeType string) bool {
 // "k8s-staging" of type kubernetes) is advertised, and filtered, as the
 // type it actually runs.
 func (s *Server) buildInfoProfiles(defaultRuntimeType string) []BrokerProfile {
-	vs, _, err := config.LoadEffectiveSettings("")
+	vs, err := globalEffectiveSettings()
 	if err != nil || len(vs.Profiles) == 0 {
 		return []BrokerProfile{
 			{Name: "default", Type: defaultRuntimeType, Available: true, Attach: s.attachSupportedForProfile(defaultRuntimeType, defaultRuntimeType)},
@@ -394,6 +389,21 @@ func (s *Server) buildInfoProfiles(defaultRuntimeType string) []BrokerProfile {
 	}
 
 	return profiles
+}
+
+// globalEffectiveSettings loads the broker's effective settings from its
+// global settings directory: embedded defaults, the global settings file,
+// the environment and the DB overlay, but never a project found from the
+// process working directory. A request-time read must not depend on where
+// the broker process was started (ptone/scion#5363), as the server's
+// startup loads do not (ptone/scion#5362).
+func globalEffectiveSettings() (*config.VersionedSettings, error) {
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		return nil, err
+	}
+	vs, _, err := config.LoadEffectiveSettings(globalDir)
+	return vs, err
 }
 
 // heartbeatProfileAttach returns the attach capability of each profile
@@ -932,6 +942,22 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	var hubGlobalProject bool
 	req.ProjectSlug, hubGlobalProject = splitHubGlobalSlug(req.ProjectPath, req.ProjectSlug)
 
+	// A project path that is this broker's global directory, for a project
+	// other than the global one, is refused here, before anything reads or
+	// writes settings or templates: the env-gather preflight and the
+	// harness-config policy gate below resolve (and can hydrate) templates
+	// under HOME. buildStartContext repeats the check for every caller
+	// (ptone/scion#5432).
+	if req.ProjectPath != "" {
+		if msg := globalDirProjectConflict(req.ProjectPath, req.ProjectID, hubGlobalProject); msg != "" {
+			sce := &startContextError{Status: http.StatusConflict, Message: msg}
+			span.SetStatus(codes.Error, startContextSpanText(sce))
+			status := s.writeStartContextError(w, sce, "create agent", "agent_id", req.ID, "profile", createRequestProfile(req))
+			markAttemptFailed(status, sce.Error())
+			return
+		}
+	}
+
 	// Resolve project path early for env-gather (needs settings access before buildStartContext)
 	if req.ProjectSlug != "" && req.ProjectPath == "" {
 		globalDir, err := config.GetGlobalDir()
@@ -1016,10 +1042,10 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// download (DefaultHydratorConfig's DownloadTimeout is 5 minutes)
 		// would fail creates here that launch would have completed.
 		//
-		// This hydration runs ahead of the global-project 409, the
-		// harness-config policy refusal, and the NFS check below, so a
-		// request those would otherwise reject can pay for a hub round trip
-		// first. Kept in this order to sit next to the harness-config
+		// This hydration runs ahead of the harness-config policy refusal
+		// and the NFS check below (the global-project 409 now comes before
+		// it, ptone/scion#5432), so a request those would otherwise reject
+		// can pay for a hub round trip first. Kept in this order to sit next to the harness-config
 		// hydration it mirrors; revisit if that ordering cost matters.
 		if req.Config != nil && (req.Config.TemplateID != "" || req.Config.TemplateHash != "") {
 			hubConn := s.resolveHubConnection(r)
@@ -1443,6 +1469,22 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	s.agentLifecycleLog.Info("Agent dispatch: buildStartContext complete",
 		"agent_id", req.ID, "name", req.Name, "elapsed", time.Since(buildCtxStart).String())
 
+	// Kubernetes placement defaults, resolved once for the runtime
+	// buildStartContext chose, before any 201 (sync or async). The async
+	// worker uses this result and does not resolve again. Provision-only
+	// creates start no pod and skip it; a reprovision is always
+	// provision-only.
+	if !req.ProvisionOnly {
+		rp, perr := s.placementForStart(ctx, sc.Resolution, opts.ProjectPath)
+		if perr != nil {
+			span.SetStatus(codes.Error, perr.Error())
+			status := s.writeStartContextError(w, perr, "create agent", "agent_id", req.ID, "profile", createRequestProfile(req))
+			markAttemptFailed(status, perr.Error())
+			return
+		}
+		opts.ResolvedPlacement, opts.PlacementResolved = rp, true
+	}
+
 	// Inject skill resolver from Hub connection for skill provisioning.
 	ctx = s.attachSkillResolver(ctx, r, skillResolverInputs{
 		HubEndpoint:          req.HubEndpoint,
@@ -1832,7 +1874,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 					s.agentLifecycleLog.Info("Skipped agent file cleanup after start failure: the agent's files belong to another run",
 						"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name,
 						"run_id", opts.RunID, "files_run_id", owner)
-				} else if _, cleanupErr := agent.DeleteAgentFiles(opts.Name, opts.ProjectPath, true); cleanupErr != nil && !errors.Is(cleanupErr, agent.ErrAgentProjectUnresolved) {
+				} else if _, cleanupErr := agent.DeleteAgentFilesForHubProject(opts.Name, opts.ProjectPath, opts.HubProjectID, true); cleanupErr != nil && !errors.Is(cleanupErr, agent.ErrAgentProjectUnresolved) {
 					s.agentLifecycleLog.Warn("Failed to clean up agent files after start failure",
 						"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name, "error", cleanupErr)
 				} else {
@@ -2897,7 +2939,10 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	s.agentLifecycleLog.Debug("Agent delete: resolved target",
 		"agent_id", id, "project_id", agentProjectID, "run_id", runID,
 		"container_id", target.containerID, "target_run_id", target.runID)
-	_, err = target.mgr.DeleteTarget(ctx, target.name, deleteRunRef(target, runID), filesToDelete, projectPath, removeBranch)
+	// The request's project ID is the Hub project ID the agent was started
+	// with (opts.HubProjectID); file deletion resolves the agent's state
+	// directory with it, as lookup does. Without one, nothing changes.
+	_, err = target.mgr.DeleteTarget(api.ContextWithHubProjectID(ctx, projectID), target.name, deleteRunRef(target, runID), filesToDelete, projectPath, removeBranch)
 	// A soft delete marks agent-info.json deleted only once the runtime
 	// entry is gone (ptone/scion#4766): some runtimes do not let the host
 	// write files in the container, so the host never writes the file while
@@ -3460,6 +3505,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	// on the default runtime (ptone/scion#2709). buildStartContext already
 	// logged any recorded-runtime fallback at Warn, so log it at Debug here.
 	res, err := s.resolveManagerForOptsStrict(runtimeOpts, existingAgentProfileResolution(runtimeOpts.Profile, provisioned), slog.LevelDebug)
+	res = res.forExistingAgent(id)
 	mgr, resolvedRuntimeType := res.Manager, res.RuntimeType
 	if err != nil {
 		if s.refuseCancelledStart(w, span, ss, id, projectID, trackedRunID) {
@@ -3510,6 +3556,23 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		s.writeHarnessPolicyRefusal(w, d, "start agent", id, nil)
 		return
 	}
+
+	// Kubernetes placement defaults for the runtime this start uses, and
+	// the agent's own kubernetes block as the inline update below would
+	// leave it, checked before that update writes anything.
+	rp, perr := s.placementForStart(ctx, res, opts.ProjectPath)
+	if perr == nil {
+		perr = s.checkStartLegacyPlacement(id, opts.ProjectPath, startReq.InlineConfig, startReq.SharedWorkspace, rp)
+	}
+	if perr != nil {
+		if s.refuseCancelledStart(w, span, ss, id, projectID, trackedRunID) {
+			return
+		}
+		span.SetStatus(codes.Error, perr.Error())
+		s.writeStartContextError(w, perr, "start agent", "agent_id", id, "runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile)
+		return
+	}
+	opts.ResolvedPlacement, opts.PlacementResolved = rp, true
 
 	// Apply updated InlineConfig to scion-agent.json before starting.
 	if startReq.InlineConfig != nil && opts.ProjectPath != "" {
@@ -3650,6 +3713,37 @@ func restartAgentConfig(namesProject bool, harnessConfig, harnessConfigID, harne
 	}
 }
 
+// loadedAgentConfig is readAgentScionConfig's result: the parsed config,
+// the resolved project directory and the file's path, or, on error, the
+// stage that failed ("resolve", "read" or "parse").
+type loadedAgentConfig struct {
+	cfg        *api.ScionConfig
+	projectDir string
+	path       string
+	stage      string
+}
+
+// readAgentScionConfig reads and parses the agent's persisted
+// scion-agent.json, the file applyInlineConfigUpdate updates:
+// config.GetAgentDir(projectDir, agentName, sharedWorkspace)/scion-agent.json,
+// with projectDir resolved from projectPath.
+func readAgentScionConfig(agentName, projectPath string, sharedWorkspace bool) (loadedAgentConfig, error) {
+	projectDir, err := config.GetResolvedProjectDir(projectPath)
+	if err != nil {
+		return loadedAgentConfig{stage: "resolve"}, err
+	}
+	cfgPath := filepath.Join(config.GetAgentDir(projectDir, agentName, sharedWorkspace), "scion-agent.json")
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		return loadedAgentConfig{projectDir: projectDir, path: cfgPath, stage: "read"}, err
+	}
+	var existing api.ScionConfig
+	if err := json.Unmarshal(data, &existing); err != nil {
+		return loadedAgentConfig{projectDir: projectDir, path: cfgPath, stage: "parse"}, err
+	}
+	return loadedAgentConfig{cfg: &existing, projectDir: projectDir, path: cfgPath}, nil
+}
+
 // applyInlineConfigUpdate merges the updated InlineConfig into the agent's
 // scion-agent.json. This ensures config changes made via the Hub (e.g. limits
 // set in the web configure form) are applied before the agent starts.
@@ -3658,25 +3752,20 @@ func restartAgentConfig(namesProject bool, harnessConfig, harnessConfigID, harne
 // scion-agent.json externally (~/.scion.project-configs/<slug>__<uuid>/.scion/
 // agents/<name>/) so siblings cannot read it via /workspace.
 func (s *Server) applyInlineConfigUpdate(ctx context.Context, agentName, projectPath string, inlineConfig *api.ScionConfig, sharedWorkspace bool) {
-	projectDir, err := config.GetResolvedProjectDir(projectPath)
-	if err != nil {
-		s.agentLifecycleLog.Warn("applyInlineConfigUpdate: failed to resolve project dir", "agent", agentName, "error", err)
-		return
-	}
-	agentDir := config.GetAgentDir(projectDir, agentName, sharedWorkspace)
-	cfgPath := filepath.Join(agentDir, "scion-agent.json")
-
 	// Load existing config
-	data, err := os.ReadFile(cfgPath)
+	loaded, err := readAgentScionConfig(agentName, projectPath, sharedWorkspace)
 	if err != nil {
-		s.agentLifecycleLog.Warn("applyInlineConfigUpdate: failed to read scion-agent.json", "agent", agentName, "path", cfgPath, "error", err)
+		switch loaded.stage {
+		case "resolve":
+			s.agentLifecycleLog.Warn("applyInlineConfigUpdate: failed to resolve project dir", "agent", agentName, "error", err)
+		case "read":
+			s.agentLifecycleLog.Warn("applyInlineConfigUpdate: failed to read scion-agent.json", "agent", agentName, "path", loaded.path, "error", err)
+		default:
+			s.agentLifecycleLog.Warn("applyInlineConfigUpdate: failed to parse scion-agent.json", "agent", agentName, "error", err)
+		}
 		return
 	}
-	var existing api.ScionConfig
-	if err := json.Unmarshal(data, &existing); err != nil {
-		s.agentLifecycleLog.Warn("applyInlineConfigUpdate: failed to parse scion-agent.json", "agent", agentName, "error", err)
-		return
-	}
+	projectDir, cfgPath, existing := loaded.projectDir, loaded.path, *loaded.cfg
 
 	// The Hub sends the agent's complete list of hub-, user- and
 	// project-scoped skills whenever it sends skills at all, so drop the
@@ -3793,19 +3882,17 @@ func isContainerStopTolerable(err error) bool {
 		strings.Contains(msg, "exit status 125")
 }
 
-// agentsWithoutProjectLabel returns the subset of agents that carry no
-// project identity: no scion.project_id label and no ProjectID field
-// (agentHasNoProjectIdentity). The project-scoped lookups fall back to a
-// slug-only search for backward compatibility with pre-existing / solo-mode
-// containers that predate project labels; that fallback must only match such
-// genuinely unlabeled containers. A container labeled for a *different*
-// project must never satisfy a project-scoped request, or same-slug agents
-// across projects would collide. The ProjectID field counts too, because
-// Cloud Run stores the label under its GCP-sanitized key (ptone/scion#5268).
-func agentsWithoutProjectLabel(agents []api.AgentInfo) []api.AgentInfo {
+// legacyAgentsInProject returns the entries that carry no project identity
+// but whose recorded project path identifies as projectID
+// (legacyEntryInProject). The project-scoped lookups fall back to these
+// when no entry is positively identified as belonging to projectID, for
+// containers that predate project labels. A same-named entry with no
+// project identity from another project, or with no recorded path, is not
+// returned, so every verb resolves such entries the way delete does.
+func legacyAgentsInProject(agents []api.AgentInfo, projectID string) []api.AgentInfo {
 	filtered := make([]api.AgentInfo, 0, len(agents))
 	for _, a := range agents {
-		if agentHasNoProjectIdentity(a) {
+		if legacyEntryInProject(a, projectID) {
 			filtered = append(filtered, a)
 		}
 	}
@@ -4624,6 +4711,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	// the fallback cannot fire and the 503 is returned, which fails safe.
 	// buildStartContext already logged any fallback at Warn; Debug here.
 	res, err := s.resolveExistingAgentManager(runtimeOpts, existingAgentProfileResolution(runtimeOpts.Profile, provisioned), slog.LevelDebug, pin)
+	res = res.forExistingAgent(id)
 	mgr, resolvedRuntimeType := res.Manager, res.RuntimeType
 	if err != nil {
 		writeProfileUnresolved(w, err)
@@ -4658,6 +4746,22 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		s.writeHarnessPolicyRefusal(w, d, "restart agent", id, nil)
 		return
 	}
+
+	// Kubernetes placement defaults for the runtime the restart starts on,
+	// and the agent's persisted kubernetes block, checked before this
+	// endpoint's stop: a refusal here leaves the agent running. (A restart
+	// the hub performs as its own stop followed by a start reaches the start
+	// handler, whose refusal leaves the agent stopped.)
+	rp, perr := s.placementForStart(ctx, res, opts.ProjectPath)
+	if perr == nil {
+		perr = s.checkRestartLegacyPlacement(id, opts.ProjectPath, restartReq.SharedWorkspace, rp)
+	}
+	if perr != nil {
+		trace.SpanFromContext(ctx).SetStatus(codes.Error, perr.Error())
+		s.writeStartContextError(w, perr, "restart agent", "agent_id", id, "runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile)
+		return
+	}
+	opts.ResolvedPlacement, opts.PlacementResolved = rp, true
 
 	// Stop then start — tolerate stop errors since the container may already
 	// be exited and the subsequent start will handle cleanup.
@@ -4746,6 +4850,15 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 			// deleted nothing of it (ptone/scion#2550). Fixed text: the
 			// wrapped error carries identity (see runtimeOpError).
 			writeError(w, http.StatusConflict, ErrCodeConflict, scionrt.ErrRunConflict.Error(), details)
+			return
+		}
+		// A template or harness-config the restart's start could not
+		// resolve is reported as such, with the same 404 not_found text
+		// create uses (notFoundMessage), before the "not found" text match
+		// below, which would report the agent itself as missing although
+		// it exists (ptone/scion#5433).
+		if errors.Is(err, config.ErrHarnessConfigNotFound) || errors.Is(err, config.ErrTemplateNotFound) {
+			writeError(w, http.StatusNotFound, ErrCodeNotFound, notFoundMessage("restart agent", err, opts.TemplateName), details)
 			return
 		}
 		if strings.Contains(err.Error(), "not found") {
@@ -6504,6 +6617,9 @@ func (s *Server) resolveHarnessConfigForEnvGather(req CreateAgentRequest, settin
 	return res.Name
 }
 
+// hasAgentInProjectOrUnlabeled reports whether any entry may stand for an
+// agent of projectID (matchesAgentProject): one identified as belonging to
+// it, or one with no project identity accepted by legacyEntryInProject.
 func hasAgentInProjectOrUnlabeled(agents []api.AgentInfo, projectID string) bool {
 	for _, info := range agents {
 		if matchesAgentProject(info, projectID) {
@@ -6843,6 +6959,10 @@ type runtimeResolution struct {
 	// profile was resolved from settings. Cause is reserved for a fixed
 	// cause and is not set yet.
 	Profile, DispatchEntry, Cause string
+	// Agent names the agent in placement fixed causes; set by forCreate
+	// and forExistingAgent (placement_resolve.go), which also settle How
+	// for a profile resolution with an empty selection profile.
+	Agent string
 }
 
 // defaultResolution is a resolution to the default holder from one
@@ -8124,20 +8244,18 @@ func agentNameMatches(a api.AgentInfo, id string) bool {
 		strings.TrimPrefix(a.Name, "/") == id
 }
 
-// agentInProjectStrict reports whether an entry is positively identified as
-// belonging to projectID (label first, then the ProjectID field). Unlike
-// matchesAgentProject, an entry with no project identity does not match.
+// agentInProjectStrict is agent.InProjectStrict. Unlike matchesAgentProject,
+// an entry with no project identity does not match.
 func agentInProjectStrict(a api.AgentInfo, projectID string) bool {
-	if labelProjectID := projectkeys.ProjectIDFromLabels(a.Labels); labelProjectID != "" {
-		return labelProjectID == projectID
-	}
-	return a.ProjectID != "" && a.ProjectID == projectID
+	return agent.InProjectStrict(a, projectID)
 }
 
-// agentHasNoProjectIdentity reports whether an entry carries no project ID in
-// either labels or fields (a pre-label legacy container).
-func agentHasNoProjectIdentity(a api.AgentInfo) bool {
-	return projectkeys.ProjectIDFromLabels(a.Labels) == "" && a.ProjectID == ""
+// legacyEntryInProject is agent.LegacyEntryInProject: an entry with no
+// project identity stands for an agent of projectID only if it is a
+// container whose recorded project path identifies as projectID. Every
+// project-scoped operation applies this one rule.
+func legacyEntryInProject(a api.AgentInfo, projectID string) bool {
+	return agent.LegacyEntryInProject(a, projectID)
 }
 
 // agentCandidate is a runtime entry for an agent name, with the manager
@@ -8214,8 +8332,7 @@ func (s *Server) collectAgentCandidates(ctx context.Context, managers []agent.Ma
 			// projectID; otherwise a same-named legacy container from another
 			// project could be deleted.
 			matches = collect(map[string]string{"scion.agent": "true"}, func(a api.AgentInfo) bool {
-				return a.ContainerID != "" && agentHasNoProjectIdentity(a) &&
-					pathIdentifiesAs(a.ProjectPath, projectID)
+				return legacyEntryInProject(a, projectID)
 			})
 		}
 	} else {
@@ -8573,96 +8690,17 @@ func linkedProjectAgentDir(path, agentName, projectID string) string {
 	return scionDir
 }
 
-// scionEntry returns the .scion entry for path, which may be the project root
-// or the .scion entry itself.
-func scionEntry(path string) string {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return ""
-	}
-	if filepath.Base(abs) == config.DotScion {
-		return abs
-	}
-	return filepath.Join(abs, config.DotScion)
-}
+// scionEntry is agent.ScionEntry.
+func scionEntry(path string) string { return agent.ScionEntry(path) }
 
-// projectIDAtPath returns the project identity recorded at path, or "".
-// For a .scion directory it is the project-id file. For a
-// .scion marker file (non-git linked project) it is the marker's project ID.
-// If path is a project's external config dir, which has no project-id file,
-// the result is "".
-func projectIDAtPath(path string) string {
-	if path == "" {
-		return ""
-	}
-	marker := scionEntry(path)
-	if marker == "" {
-		return ""
-	}
-	info, err := os.Stat(marker)
-	if err != nil {
-		return ""
-	}
-	if info.IsDir() {
-		id, _ := config.ReadProjectID(marker)
-		return id
-	}
-	if m, err := config.ReadProjectMarker(marker); err == nil {
-		return m.ProjectID
-	}
-	return ""
-}
+// projectIDAtPath is agent.ProjectIDAtPath.
+func projectIDAtPath(path string) string { return agent.ProjectIDAtPath(path) }
 
-// pathIdentifiesAs reports whether the project at path verifiably belongs to
-// projectID: either its recorded identity (projectIDAtPath) equals projectID,
-// or path is the project's external config dir
-// ~/.scion/project-configs/<slug>__<short-id>/.scion, whose name encodes the
-// project ID (non-git linked projects record that dir as the agent's project
-// path). A projectID outside the project ID format never matches.
-func pathIdentifiesAs(path, projectID string) bool {
-	if path == "" || config.ValidateProjectID(projectID) != nil {
-		return false
-	}
-	if projectIDAtPath(path) == projectID {
-		return true
-	}
-	short, ok := externalConfigShortID(path)
-	return ok && short == (config.ProjectMarker{ProjectID: projectID}).ShortUUID()
-}
+// pathIdentifiesAs is agent.PathIdentifiesAs.
+func pathIdentifiesAs(path, projectID string) bool { return agent.PathIdentifiesAs(path, projectID) }
 
-// externalConfigShortID returns the short project ID encoded in path if path
-// is an external project config dir ~/.scion/project-configs/<slug>__<short-id>/.scion.
-// path is resolved through symlinks before it is split, so a path reached
-// through a pre-rename entry (config.MigrateLegacyGlobalLayout leaves a
-// symlink at each individual entry it moves, e.g.
-// ~/.scion/grove-configs/<name> -> ../project-configs/<name>, while the
-// legacy root itself stays a real directory) still identifies as this
-// project's external config dir.
-func externalConfigShortID(path string) (string, bool) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return "", false
-	}
-	abs = projectkeys.ResolvePathForCompare(abs)
-	if filepath.Base(abs) != config.DotScion {
-		return "", false
-	}
-	globalDir, err := config.GetGlobalDir()
-	if err != nil {
-		return "", false
-	}
-	projectDir := filepath.Dir(abs)
-	parent := filepath.Dir(projectDir)
-	if !projectkeys.ResolvedPathEqual(parent, filepath.Join(globalDir, config.ProjectConfigsDir)) {
-		return "", false
-	}
-	name := filepath.Base(projectDir)
-	i := strings.LastIndex(name, "__")
-	if i <= 0 || i+2 >= len(name) {
-		return "", false
-	}
-	return name[i+2:], true
-}
+// externalConfigShortID is agent.ExternalConfigShortID.
+func externalConfigShortID(path string) (string, bool) { return agent.ExternalConfigShortID(path) }
 
 // trustedEntryProjectPath reports whether a project path taken from a runtime
 // entry may be used for file operations. With a projectID, the path must

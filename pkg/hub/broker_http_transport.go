@@ -200,6 +200,7 @@ func (t *brokerHTTPTransport) StartAgent(ctx context.Context, brokerID, brokerEn
 		endpoint += "?projectId=" + url.QueryEscape(projectID)
 	}
 	endpoint = withRunIDURL(endpoint, extras.RunID)
+	endpoint = withDispatchAgentIDURL(ctx, endpoint)
 	payload := map[string]interface{}{}
 	if task != "" {
 		payload["task"] = task

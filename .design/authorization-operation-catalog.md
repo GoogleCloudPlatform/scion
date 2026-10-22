@@ -107,8 +107,8 @@
 - [project.template.set](#projecttemplateset) — Mark or unmark a project as a template. The caller needs project.update and project.clone on the project
 - [template.project.import](#templateprojectimport) — Discover or import templates into a project
 - [harnessconfig.project.import](#harnessconfigprojectimport) — Discover or import harness configs into a project
-- [project.workspace.read](#projectworkspaceread) — Read a project's workspace: WebDAV reads, sync status, cache status, archive and file reads
-- [project.workspace.write](#projectworkspacewrite) — Change a project's workspace: WebDAV writes, cache refresh and notify, file upload, write and delete, and git pull
+- [project.workspace.read](#projectworkspaceread) — Read a project's workspace: sync status, cache status, archive and file reads
+- [project.workspace.write](#projectworkspacewrite) — Change a project's workspace: cache refresh and notify, file upload, write and delete, and git pull
 - [project.github.read](#projectgithubread) — Read a project's GitHub status, GitHub permissions and git identity
 - [project.github.write](#projectgithubwrite) — Change a project's GitHub installation, status check, GitHub permissions and git identity
 - [project.members.assignableroles](#projectmembersassignableroles) — List the roles the caller may assign in a project
@@ -4344,15 +4344,12 @@
 
 **Domain:** project
 
-**Description:** Read a project's workspace: WebDAV reads, sync status, cache status, archive and file reads
+**Description:** Read a project's workspace: sync status, cache status, archive and file reads
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | GET | `/api/v1/projects/{id}/dav/{path}` |
-| http_route | HEAD | `/api/v1/projects/{id}/dav/{path}` |
-| http_route | OPTIONS | `/api/v1/projects/{id}/dav/{path}` |
 | http_route | GET | `/api/v1/projects/{id}/sync/status` |
 | http_route | GET | `/api/v1/projects/{id}/workspace/archive` |
 | http_route | GET | `/api/v1/projects/{id}/workspace/cache/status` |
@@ -4383,22 +4380,12 @@
 
 **Domain:** project
 
-**Description:** Change a project's workspace: WebDAV writes, cache refresh and notify, file upload, write and delete, and git pull
+**Description:** Change a project's workspace: cache refresh and notify, file upload, write and delete, and git pull
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | PUT | `/api/v1/projects/{id}/dav/{path}` |
-| http_route | PROPPATCH | `/api/v1/projects/{id}/dav/{path}` |
-| http_route | LOCK | `/api/v1/projects/{id}/dav/{path}` |
-| http_route | UNLOCK | `/api/v1/projects/{id}/dav/{path}` |
-| http_route | COPY | `/api/v1/projects/{id}/dav/{path}` |
-| http_route | MOVE | `/api/v1/projects/{id}/dav/{path}` |
-| http_route | POST | `/api/v1/projects/{id}/dav/{path}` |
-| http_route | PROPFIND | `/api/v1/projects/{id}/dav/{path}` |
-| http_route | DELETE | `/api/v1/projects/{id}/dav/{path}` |
-| http_route | MKCOL | `/api/v1/projects/{id}/dav/{path}` |
 | http_route | POST | `/api/v1/projects/{id}/workspace/cache/notify` |
 | http_route | POST | `/api/v1/projects/{id}/workspace/cache/refresh` |
 | http_route | POST | `/api/v1/projects/{id}/workspace/files` |

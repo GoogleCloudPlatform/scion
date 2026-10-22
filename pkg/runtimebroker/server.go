@@ -2103,8 +2103,9 @@ func (s *Server) LookupContainerID(ctx context.Context, slug, projectID string) 
 //
 //  1. a project-scoped search (scion.name plus the project label);
 //  2. only when projectID is set and stage 1 found nothing, a slug-only
-//     search that accepts just containers carrying no project label at all
-//     (pre-label or solo/CLI containers — see agentsWithoutProjectLabel).
+//     search that accepts just containers carrying no project identity
+//     whose recorded path identifies as projectID (pre-label containers —
+//     see legacyAgentsInProject; the same rule delete applies).
 //
 // Errors:
 //   - a default-runtime List failure, in either stage, wraps
@@ -2204,9 +2205,10 @@ func (s *Server) lookupAgentMatch(ctx context.Context, slug, projectID string) (
 	}
 
 	// Backward compatibility: retry without project filter, but only accept
-	// containers that lack a project label (pre-existing agents or solo/CLI
-	// mode). A container labeled for a different project must not match a
-	// project-scoped request, or same-slug agents across projects would collide.
+	// containers that carry no project identity and whose recorded path
+	// identifies as projectID (legacyAgentsInProject). A container of a
+	// different project must not match a project-scoped request, or same-slug
+	// agents across projects would collide.
 	if len(agents) == 0 && projectID != "" {
 		fallbackFilter := map[string]string{"scion.name": slug}
 		if useDefault {
@@ -2214,13 +2216,13 @@ func (s *Server) lookupAgentMatch(ctx context.Context, slug, projectID string) (
 			if err != nil {
 				return agentMatch{}, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
 			}
-			agents = agentsWithoutProjectLabel(agents)
+			agents = legacyAgentsInProject(agents, projectID)
 		}
 		matchManager = defMgr
 		matchRuntime = defRT
 		matchRecord = defRec
 		if len(agents) == 0 {
-			auxAgents, aux, auxErr := s.auxListAgentsSorted(ctx, slug, true, fallbackFilter, agentsWithoutProjectLabel)
+			auxAgents, aux, auxErr := s.auxListAgentsSorted(ctx, slug, true, fallbackFilter, func(a []api.AgentInfo) []api.AgentInfo { return legacyAgentsInProject(a, projectID) })
 			if auxErr != nil {
 				return agentMatch{}, auxErr
 			}
@@ -2305,7 +2307,8 @@ func (e *otherRunsHoldNameError) Error() string {
 
 // listInOwnRuntime lists agent slug in the agent's own runtime with the
 // project scoping lookupAgentMatch and LookupAgent use: entries labelled for
-// projectID, else (with a projectID) entries carrying no project label. A
+// projectID, else (with a projectID) entries carrying no project identity
+// whose recorded path identifies as projectID (legacyAgentsInProject). A
 // failed List wraps ErrAgentListUnavailable.
 func listInOwnRuntime(ctx context.Context, own *agentOwnRuntime, slug, projectID string) ([]api.AgentInfo, error) {
 	agents, err := own.mgr.List(ctx, scopedNameFilter(slug, projectID))
@@ -2318,7 +2321,7 @@ func listInOwnRuntime(ctx context.Context, own *agentOwnRuntime, slug, projectID
 		if err != nil {
 			return nil, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
 		}
-		agents = agentsWithoutProjectLabel(agents)
+		agents = legacyAgentsInProject(agents, projectID)
 	}
 	return agents, nil
 }
@@ -2487,8 +2490,9 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 	}
 
 	// Backward compatibility: retry without project filter, but only accept
-	// containers that lack a project label (pre-existing agents or solo/CLI
-	// mode). A container labeled for a different project must not match a
+	// containers that carry no project identity and whose recorded path
+	// identifies as projectID (legacyAgentsInProject), as lookupAgentMatch
+	// does. A container of a different project must not match a
 	// project-scoped request, or same-slug agents across projects would collide.
 	if len(agents) == 0 && projectID != "" && own == nil {
 		fallbackFilter := map[string]string{"scion.name": slug}
@@ -2496,7 +2500,7 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 		if err != nil {
 			return nil, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
 		}
-		agents = agentsWithoutProjectLabel(agents)
+		agents = legacyAgentsInProject(agents, projectID)
 		if len(agents) == 0 {
 			for _, aux := range s.sortedAuxiliaryRuntimes() {
 				auxAgents, auxErr := aux.Manager.List(ctx, fallbackFilter)
@@ -2504,7 +2508,7 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 					listUnavailable = true
 					continue
 				}
-				auxAgents = agentsWithoutProjectLabel(auxAgents)
+				auxAgents = legacyAgentsInProject(auxAgents, projectID)
 				if len(auxAgents) > 0 {
 					agents = auxAgents
 					// See the identity note above: use the runtime's own

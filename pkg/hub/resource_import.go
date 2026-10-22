@@ -246,7 +246,7 @@ func (s *Server) importFromWorkspace(ctx context.Context, project *store.Project
 	}
 
 	// Resolve the project's workspace root on disk.
-	projectRoot, err := s.resolveProjectWebDAVPath(ctx, project)
+	projectRoot, err := s.resolveProjectWorkspacePath(ctx, project)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve project workspace: %w", err)
 	}
@@ -680,7 +680,7 @@ func (s *Server) discoverFromWorkspace(ctx context.Context, project *store.Proje
 		return nil, nil, fmt.Errorf("%s storage is not configured", kind.noun)
 	}
 
-	projectRoot, err := s.resolveProjectWebDAVPath(ctx, project)
+	projectRoot, err := s.resolveProjectWorkspacePath(ctx, project)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to resolve project workspace: %w", err)
 	}
