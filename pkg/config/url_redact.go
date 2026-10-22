@@ -16,6 +16,7 @@ package config
 
 import (
 	"net/url"
+	"regexp"
 	"strings"
 )
 
@@ -130,32 +131,45 @@ func redactURLParams(raw string) string {
 	return out
 }
 
+// urlSchemePrefix is a URL's scheme and "://", the anchored prefix the
+// user info rules (userInfoRe) also start with.
+const urlSchemePrefix = `[A-Za-z][A-Za-z0-9+.-]*://`
+
+// urlSchemePrefixRe matches urlSchemePrefix at the start of a string only.
+var urlSchemePrefixRe = regexp.MustCompile("^" + urlSchemePrefix)
+
 // redactPathParams masks the credential values of the path parameters in
-// base (a URL up to its query): each ";name=value" after the authority, up
-// to the next "/" or ";", as in /app;jsessionid=X. The scheme and authority
-// are not touched.
+// base (a URL up to its query, or only its path): each ";name=value" in a
+// path segment, as in /app;jsessionid=X. The scheme and authority are
+// skipped only when base STARTS with a scheme, so a URL embedded later in
+// the path (/app;jsessionid=X/r/https://y/) never hides the parameters
+// before it, and a whole URL and its path alone are masked the same way.
 func redactPathParams(base string) string {
-	start := 0
-	if i := strings.Index(base, "://"); i >= 0 {
-		j := strings.IndexByte(base[i+3:], '/')
-		if j < 0 {
+	prefix, path := "", base
+	if scheme := urlSchemePrefixRe.FindString(base); scheme != "" {
+		afterScheme, _ := strings.CutPrefix(base, scheme)
+		authority, rest, hasPath := strings.Cut(afterScheme, "/")
+		if !hasPath {
 			return base
 		}
-		start = i + 3 + j
+		prefix, path = scheme+authority+"/", rest
 	}
-	path := base[start:]
 	if !strings.Contains(path, ";") {
 		return base
 	}
-	parts := strings.Split(path, ";")
-	for k := 1; k < len(parts); k++ {
-		param, slash, rest := parts[k], "", ""
-		if i := strings.IndexByte(param, '/'); i >= 0 {
-			param, slash, rest = param[:i], "/", param[i+1:]
+	segments := strings.Split(path, "/")
+	for i, segment := range segments {
+		name, params, hasParams := strings.Cut(segment, ";")
+		if !hasParams {
+			continue
 		}
-		parts[k] = redactParam(param, 1) + slash + rest
+		list := strings.Split(params, ";")
+		for k, param := range list {
+			list[k] = redactParam(param, 1)
+		}
+		segments[i] = name + ";" + strings.Join(list, ";")
 	}
-	return base[:start] + strings.Join(parts, ";")
+	return prefix + strings.Join(segments, "/")
 }
 
 // redactParamList masks the credential values of a list of name=value

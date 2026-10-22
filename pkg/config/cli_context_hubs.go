@@ -67,7 +67,7 @@ func ValidateHubURL(endpoint string) error {
 // the last '@' before the host.
 // pkg/apiclient keeps a copy of these rules (redactURLCredentials), since it
 // imports no scion package; change both together.
-var userInfoRe = regexp.MustCompile(`^([A-Za-z][A-Za-z0-9+.-]*://)?[^/?#]*@`)
+var userInfoRe = regexp.MustCompile("^(" + urlSchemePrefix + ")?[^/?#]*@")
 
 // textURLRe matches the scheme and authority of each http(s) URL in a
 // text. The authority ends at the path, query or fragment, at white space,

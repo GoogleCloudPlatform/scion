@@ -164,6 +164,12 @@ var urlCredentialCases = []struct{ name, in, want string }{
 	{"phpsessid query", "https://hub.example.com/x?PHPSESSID=s3cret&a=1", "https://hub.example.com/x?PHPSESSID=xxxxx&a=1"},
 	{"pass is an exact name only", "https://hub.example.com/x?bypass=1&compass=n&passthrough=yes&pass=s3cret", "https://hub.example.com/x?bypass=1&compass=n&passthrough=yes&pass=xxxxx"},
 	{"session and sid are not masked", "https://hub.example.com/x?session=abc&sid=def", "https://hub.example.com/x?session=abc&sid=def"},
+	{"path param before an embedded URL", "https://hub.example.com/app;jsessionid=s3cret/r/https://x.example.com/y", "https://hub.example.com/app;jsessionid=xxxxx/r/https://x.example.com/y"},
+	{"path params before and inside an embedded URL", "https://hub.example.com/app;jsessionid=s3cret/https://y.example.com/p;jsessionid=s3cret", "https://hub.example.com/app;jsessionid=xxxxx/https://y.example.com/p;jsessionid=xxxxx"},
+	{"several path params in one segment", "https://hub.example.com/a;v=1;jsessionid=s3cret/b?x=1", "https://hub.example.com/a;v=1;jsessionid=xxxxx/b?x=1"},
+	{"path param after an embedded URL", "https://hub.example.com/r/https://x.example.com/p;token=s3cret", "https://hub.example.com/r/https://x.example.com/p;token=xxxxx"},
+	{"trailing embedded URL", "https://hub.example.com/app;jsessionid=s3cret/https://y.example.com/", "https://hub.example.com/app;jsessionid=xxxxx/https://y.example.com/"},
+	{"no path, semicolon in authority", "https://hub.example.com;v=1", "https://hub.example.com;v=1"},
 	{"question mark in a fragment value", "https://hub.example.com/cb#access_token=tok3n&state=a?b", "https://hub.example.com/cb#access_token=xxxxx&state=a?b"},
 }
 
@@ -312,4 +318,27 @@ func TestRedactURL_PropertyNestedURL(t *testing.T) {
 			t.Fatalf("RedactURL(%q) = %q, lost the nested destination", in, got)
 		}
 	}
+}
+
+// A credential path parameter before a URL embedded in the path is masked,
+// whatever follows, through RedactURL (ptone/scion#5356 review).
+func TestRedactURL_PropertyEmbeddedURLInPath(t *testing.T) {
+	r := rand.New(rand.NewSource(53562))
+	for i := 0; i < 5000; i++ {
+		in := "https://hub.example.com/" + redactPropertySafeJunk(r) + ";jsessionid=S3CRETVALUE/r/https://x.example.com/" + redactPropertyJunk(r)
+		if got := RedactURL(in); strings.Contains(got, "S3CRETVALUE") {
+			t.Fatalf("RedactURL(%q) = %q, shows the token", in, got)
+		}
+		if got := RedactURLsIn("see " + in + " now"); strings.Contains(got, "S3CRETVALUE") {
+			t.Fatalf("RedactURLsIn(%q) = %q, shows the token", in, got)
+		}
+	}
+}
+
+func redactPropertySafeJunk(r *rand.Rand) string {
+	var b strings.Builder
+	for n := r.Intn(10); n > 0; n-- {
+		b.WriteString(redactPropertySafe[r.Intn(len(redactPropertySafe))])
+	}
+	return b.String()
 }
