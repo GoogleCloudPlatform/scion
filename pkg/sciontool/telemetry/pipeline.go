@@ -542,7 +542,11 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 	// Final bounded analytics drain while the exporter is still open.
 	p.analytics.stop(ctx)
 	// Final health snapshot: after the final metric flush and analytics
-	// drain (it reports their outcome), before the exporter closes.
+	// drain (it reports their outcome), before the exporter closes. A stop
+	// that already has errors is reported as degraded (set again below).
+	if len(errs) > 0 {
+		p.deliveryState.Store("degraded")
+	}
 	p.emitFinalHealth(ctx)
 
 	// Shutdown exporter to flush any buffered spans

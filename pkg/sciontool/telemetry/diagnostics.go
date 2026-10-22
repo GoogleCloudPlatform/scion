@@ -154,7 +154,12 @@ func (p *Pipeline) logDeliverySnapshot(force bool) {
 	diagnostics := p.Diagnostics()
 	analytics := "disabled"
 	if counters, ok, reason := p.AnalyticsDiagnostics(); ok {
-		analytics = fmt.Sprintf("%+v", counters)
+		age := "none"
+		if counters.OldestPendingFileAgeMs != nil {
+			age = fmt.Sprintf("%d", *counters.OldestPendingFileAgeMs)
+		}
+		counters.OldestPendingFileAgeMs = nil // printed as a value below, not a pointer
+		analytics = fmt.Sprintf("%+v oldest_pending_file_age_ms=%s", counters, age)
 	} else if reason != "" {
 		analytics = "disabled(" + reason + ")"
 	}

@@ -95,6 +95,7 @@
   "queue_records": 0,
   "health_send_failures": 0,
   "health_superseded": 0,
+  "health_rejected": 0,
   "loss_indicated": true,
   "final_residual_records": 2,
   "final_flush_outcome": "not_drained"

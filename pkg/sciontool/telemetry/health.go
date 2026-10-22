@@ -21,6 +21,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -189,7 +190,7 @@ type healthInputs struct {
 	Metrics, Logs DeliverySnapshot
 	Queue         QueueDepth
 
-	SendFailures, Superseded int64
+	SendFailures, Superseded, Rejected int64
 
 	FinalResidualRecords int64
 }
@@ -260,6 +261,7 @@ func buildHealthEvent(in healthInputs) (*telemetrycontract.HealthEvent, error) {
 		QueueRecords:            int64(in.Queue.Records),
 		HealthSendFailures:      in.SendFailures,
 		HealthSuperseded:        in.Superseded,
+		HealthRejected:          in.Rejected,
 	}
 	if d := in.UsageDiag; d != nil && in.Usage.Source == telemetrycontract.UsageSourceNative {
 		ev.SetUsageCounters(telemetrycontract.HealthUsageCounters{
@@ -306,6 +308,11 @@ func buildHealthEvent(in healthInputs) (*telemetrycontract.HealthEvent, error) {
 // a measured token loss.
 func lossIndicated(in healthInputs) bool {
 	a := in.Analytics
+	if a.StatsFailed {
+		// Disk-derived totals are unknown in this snapshot: only measured
+		// counters count (stats_failed is a separate unknown-state signal).
+		a.OverflowTotal, a.OversizeTotal, a.AppendFailedTotal, a.DeadLettersTotal = 0, 0, 0, 0
+	}
 	if in.AnalyticsEnabled && (a.OverflowTotal > 0 || a.Overflow > 0 || a.AppendFailed > 0 || a.AppendFailedTotal > 0 ||
 		a.OversizeTotal > 0 || a.Torn > 0 || a.DroppedNoIdentity > 0 || a.Quarantined > 0 || a.DeadLetters > 0 || a.DeadLettersTotal > 0 ||
 		a.CorruptIntents > 0 || a.Invalid > 0) {
@@ -373,7 +380,7 @@ type healthEmitter struct {
 	started   bool // the start event was enqueued
 	selection UsageSourceSelection
 
-	sendFailures, superseded int64
+	sendFailures, superseded, rejected int64
 
 	send  AnalyticsSendFunc
 	hubID func(context.Context) string
@@ -405,28 +412,59 @@ type analyticsHandles struct {
 	disabledReason string
 }
 
-// outboxLedger reads the outbox's persisted epoch and last assigned seq.
-func outboxLedger(o *AnalyticsOutbox) (epoch string, seq int64) {
+// outboxDisk is the outbox's on-disk state read for one snapshot. Each
+// value is read exactly once, and failed is set if ANY read failed: then
+// none of these values is a measurement (design 1.3, analytics_stats_failed).
+type outboxDisk struct {
+	epoch                               string
+	seq, overflowTotal, oversizeTotal   int64
+	appendFailedTotal, deadLettersTotal int64
+	pending, retained                   int64
+	oldest                              time.Time
+	failed                              bool
+}
+
+// readOutboxDisk reads the persisted ledger, totals and pending figures,
+// keeping every error (Stats discards them as zeros).
+func readOutboxDisk(o *AnalyticsOutbox) outboxDisk {
+	var d outboxDisk
 	if o == nil {
-		return "", 0
+		d.failed = true
+		return d
 	}
-	epoch, _ = o.readTrimmed("epoch")
-	seq, _ = o.readInt("seq")
-	return epoch, seq
+	var errs [8]error
+	d.epoch, errs[0] = o.readTrimmed("epoch")
+	if errs[0] == nil && d.epoch == "" {
+		errs[0] = errors.New("outbox epoch is missing") // created when the outbox opens
+	}
+	d.seq, errs[1] = o.readInt("seq")
+	d.overflowTotal, errs[2] = o.readInt("overflow")
+	d.oversizeTotal, errs[3] = o.readInt("oversize")
+	d.deadLettersTotal, errs[4] = o.readInt("dead_letters")
+	if info, err := os.Stat(o.path("append_failed")); err == nil {
+		d.appendFailedTotal = info.Size() // WP2: one byte per failure, lock-free
+	} else if !errors.Is(err, os.ErrNotExist) {
+		errs[5] = err
+	}
+	d.pending, d.oldest, errs[6] = o.pendingBytes()
+	d.retained, errs[7] = o.retainedBytes()
+	for _, err := range errs {
+		if err != nil {
+			d.failed = true
+		}
+	}
+	return d
 }
 
 func (h analyticsHandles) counters() telemetrycontract.HealthAnalyticsCounters {
 	outbox := h.native.Outbox()
-	s := outbox.Stats()
-	epoch, seq := outboxLedger(outbox)
-	// Stats swallows a failed disk read as 0 pending; re-check so that a
-	// failure is reported, never mistaken for an empty outbox.
-	_, _, statErr := outbox.pendingBytes()
+	s := outbox.Stats() // in-memory counters only; disk values come from readOutboxDisk
+	d := readOutboxDisk(outbox)
 	c := telemetrycontract.HealthAnalyticsCounters{
 		Appended:          s.Appended,
 		CertainDuplicates: s.CertainDuplicates,
 		Overflow:          s.Overflow,
-		OverflowTotal:     s.PersistedOverflow,
+		OverflowTotal:     d.overflowTotal,
 		AppendFailed:      s.AppendFailed,
 		DroppedNoIdentity: h.native.DroppedNoIdentity(),
 		Finalized:         s.Finalized,
@@ -438,20 +476,23 @@ func (h analyticsHandles) counters() telemetrycontract.HealthAnalyticsCounters {
 		Conflicts:         s.Conflicts,
 		Quarantined:       s.Quarantined,
 		DeadLetters:       s.DeadLetters,
-		OversizeTotal:     s.PersistedOversize,
-		AppendFailedTotal: s.PersistedAppendFailed,
-		DeadLettersTotal:  s.PersistedDeadLetters,
+		OversizeTotal:     d.oversizeTotal,
+		AppendFailedTotal: d.appendFailedTotal,
+		DeadLettersTotal:  d.deadLettersTotal,
 		SyncUncertain:     s.SyncUncertain,
 		CorruptIntents:    s.CorruptIntents,
 		Invalid:           h.native.Invalid(),
-		RetainedBytes:     s.RetainedBytes,
-		PendingBytes:      s.PendingBytes,
-		ProducerEpoch:     epoch,
-		ProducerSeqLast:   seq,
-		StatsFailed:       statErr != nil,
+		RetainedBytes:     d.retained,
+		PendingBytes:      d.pending,
+		ProducerEpoch:     d.epoch,
+		ProducerSeqLast:   d.seq,
+		StatsFailed:       d.failed,
 	}
-	if s.PendingBytes > 0 {
-		age := s.OldestPendingAge.Milliseconds()
+	if !d.failed && d.pending > 0 && !d.oldest.IsZero() {
+		age := time.Since(d.oldest).Milliseconds()
+		if age < 0 {
+			age = 0
+		}
 		c.OldestPendingFileAgeMs = &age
 	}
 	if h.drainer != nil {
@@ -502,14 +543,14 @@ func (p *Pipeline) startHealth(ctx context.Context, gcp *GCPExporter, handles an
 	h.seq = 0
 	h.queue = nil
 	h.started = false
-	h.sendFailures, h.superseded = 0, 0
+	h.sendFailures, h.superseded, h.rejected = 0, 0, 0
 	h.finalUsage, h.finalNative, h.finalResidual = nil, false, 0
 	h.send = gcp.SendAnalytics
 	if h.sendOverride != nil {
 		h.send = h.sendOverride
 	}
 	if outbox := handles.native.Outbox(); outbox != nil {
-		h.hubID = func(context.Context) string { return outbox.PinnedHubIDOrEmpty() }
+		h.hubID = func(context.Context) string { return outbox.PinnedHubID() }
 	} else {
 		// No outbox (analytics disabled): resolve the hub ID the same
 		// way the drainer does, cached in memory.
@@ -647,6 +688,7 @@ func (p *Pipeline) healthSnapshotInputs(trigger string) healthInputs {
 		Trigger:              trigger,
 		SendFailures:         h.sendFailures,
 		Superseded:           h.superseded,
+		Rejected:             h.rejected,
 		FinalResidualRecords: h.finalResidual,
 	}
 	sel := h.selection
@@ -712,6 +754,9 @@ func (p *Pipeline) emitHealth(trigger string) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if !h.enabled {
+		return // the final flush disabled the emitter meanwhile
+	}
 	if len(h.queue) >= healthQueueCap {
 		// Drop the oldest queued periodic snapshot; a newer one supersedes
 		// it. Start and final are kept.
@@ -774,6 +819,17 @@ func (p *Pipeline) flushHealth(ctx context.Context) {
 		if err := send(ctx, item.line); err != nil {
 			h.mu.Lock()
 			h.sendFailures++
+			if IsPermanentSendError(err) {
+				// The destination rejects these bytes for good: drop the
+				// event so it cannot block the queue, count it, log once.
+				if len(h.queue) > 0 && h.queue[0] == item {
+					h.queue = h.queue[1:]
+				}
+				h.rejected++
+				h.mu.Unlock()
+				log.Error("Telemetry health event %s permanently rejected, dropped: %v", item.ev.EventID, err)
+				continue
+			}
 			h.mu.Unlock()
 			log.Debug("Telemetry health send failed: %v", err)
 			return
@@ -784,14 +840,6 @@ func (p *Pipeline) flushHealth(ctx context.Context) {
 		}
 		h.mu.Unlock()
 	}
-}
-
-// PinnedHubIDOrEmpty is PinnedHubID, safe on a nil outbox.
-func (o *AnalyticsOutbox) PinnedHubIDOrEmpty() string {
-	if o == nil {
-		return ""
-	}
-	return o.PinnedHubID()
 }
 
 // AnalyticsDiagnostics returns the analytics outbox counters, or ok=false

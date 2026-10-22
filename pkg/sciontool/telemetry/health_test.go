@@ -945,3 +945,176 @@ func TestPipelineStopEmitsFinalHealth(t *testing.T) {
 		t.Fatalf("final: collection %q derived %v residual %v outcome %q", final.UsageCollection, final.UsageObservationsDerived, final.FinalResidualRecords, final.FinalFlushOutcome)
 	}
 }
+
+// R2-1: a failed read of the persisted ledger or totals is a stats
+// failure, never a measured 0; pending is read once.
+func TestAnalyticsLedgerReadFailureIsStatsFailure(t *testing.T) {
+	setAnalyticsEnv(t, "claude")
+	for name, corrupt := range map[string]func(dir string) error{
+		"garbage seq":      func(dir string) error { return os.WriteFile(filepath.Join(dir, "seq"), []byte("not-a-number"), 0o600) },
+		"garbage overflow": func(dir string) error { return os.WriteFile(filepath.Join(dir, "overflow"), []byte("x"), 0o600) },
+		"garbage dead_letters": func(dir string) error {
+			return os.WriteFile(filepath.Join(dir, "dead_letters"), []byte("x"), 0o600)
+		},
+		"missing epoch": func(dir string) error { return os.Remove(filepath.Join(dir, "epoch")) },
+	} {
+		dir := filepath.Join(t.TempDir(), "ob")
+		o, err := OpenAnalyticsOutbox(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := corrupt(dir); err != nil {
+			t.Fatal(err)
+		}
+		c := analyticsHandles{native: NewUsageAnalytics(o, telemetrycontract.UsageSourceNative)}.counters()
+		if !c.StatsFailed {
+			t.Errorf("%s: stats_failed = false; the value would read as a measured 0", name)
+		}
+		in := fixedHealthInputs(telemetrycontract.HealthTriggerFinal)
+		in.Analytics = c
+		ev, err := buildHealthEvent(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ev.FinalFlushOutcome != "not_drained" {
+			t.Errorf("%s: final outcome %q with unmeasured disk state", name, ev.FinalFlushOutcome)
+		}
+	}
+	// Healthy outbox: no failure, measured zeros.
+	o, err := OpenAnalyticsOutbox(filepath.Join(t.TempDir(), "ob"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := (analyticsHandles{native: NewUsageAnalytics(o, telemetrycontract.UsageSourceNative)}).counters(); c.StatsFailed || c.ProducerEpoch == "" {
+		t.Fatalf("healthy outbox: %+v", c)
+	}
+}
+
+// R2-2: a permanently rejected health event is dropped and counted, and the
+// next event is delivered; a transient failure still holds the queue.
+func TestHealthPermanentRejectionDoesNotBlock(t *testing.T) {
+	h := newHealthHarness(t)
+	rejectStart := true
+	h.p.health.mu.Lock()
+	h.p.health.send = func(_ context.Context, line []byte) error {
+		var ev telemetrycontract.HealthEvent
+		_ = telemetrycontract.Unmarshal(line, &ev)
+		if ev.Trigger == "start" && rejectStart {
+			return PermanentSendError(errors.New("invalid argument"))
+		}
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		h.sent = append(h.sent, append([]byte(nil), line...))
+		return nil
+	}
+	h.p.health.mu.Unlock()
+	h.p.SettleUsageSource(nil, "")
+	h.p.emitHealth(telemetrycontract.HealthTriggerPeriodic)
+	h.p.flushHealth(context.Background())
+	evs := h.sentEvents(t)
+	if len(evs) != 1 || evs[0].Trigger != "periodic" || len(h.p.health.queue) != 0 {
+		t.Fatalf("sent %d events, queue %d", len(evs), len(h.p.health.queue))
+	}
+	h.p.emitHealth(telemetrycontract.HealthTriggerPeriodic)
+	h.p.flushHealth(context.Background())
+	last := h.sentEvents(t)[1]
+	if last.HealthRejected != 1 || last.HealthSendFailures != 1 {
+		t.Fatalf("rejected %d send_failures %d, want 1 and 1", last.HealthRejected, last.HealthSendFailures)
+	}
+}
+
+// N2-2: a final event during a stop that already has errors reports
+// delivery_state degraded, not running.
+func TestPipelineStopFinalReportsDegraded(t *testing.T) {
+	setAnalyticsEnv(t, "claude")
+	clearUsageSourceEnv(t)
+	setTestVersion(t)
+	client := &mockMetricClient{exportFunc: func(context.Context, *colmetricpb.ExportMetricsServiceRequest, ...grpc.CallOption) (*colmetricpb.ExportMetricsServiceResponse, error) {
+		return &colmetricpb.ExportMetricsServiceResponse{}, nil
+	}}
+	p := &Pipeline{running: true, config: &Config{Enabled: true}, exporter: &CloudExporter{metricClient: client}, metricStreams: newMetricStreams(), metricLastFlush: time.Now()}
+	p.deliveryState.Store("running")
+	var sent [][]byte
+	p.health.sendOverride = func(_ context.Context, line []byte) error { sent = append(sent, line); return nil }
+	p.health.hubIDOverride = func(context.Context) string { return "hub-1" }
+	p.health.periodic, p.health.retry = time.Hour, time.Hour
+	p.startHealth(context.Background(), &GCPExporter{}, analyticsHandles{disabledReason: telemetrycontract.AnalyticsDisabledOutboxUnavailable})
+	if err := p.metricStreams.add([]*metricpb.ResourceMetrics{stopTestMetric(5, 2)}); err != nil {
+		t.Fatal(err)
+	}
+	p.metricDirtyRecords, p.metricDirtyEntries = 1, 1
+	p.budget.records, p.budget.entries = 1, 1
+	stopCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_ = p.Stop(stopCtx)
+	var ev telemetrycontract.HealthEvent
+	if len(sent) == 0 {
+		t.Fatal("no event sent")
+	}
+	if err := telemetrycontract.Unmarshal(sent[len(sent)-1], &ev); err != nil {
+		t.Fatal(err)
+	}
+	if ev.Trigger != "final" || ev.DeliveryState != "degraded" {
+		t.Fatalf("final trigger %q delivery_state %q", ev.Trigger, ev.DeliveryState)
+	}
+}
+
+// Valid epoch/seq -> failed read -> the same valid epoch/seq: the failed row
+// carries no epoch and no seq at all (no placeholder that could read as an
+// epoch change or clear a tail-loss check), and the rows around it agree.
+func TestHealthStatsFailureNoFalseEpochOrSeq(t *testing.T) {
+	h := newHealthHarness(t)
+	native := h.p.health.analyticsHandles.native
+	obs := claudeObservation("api_request", claudeRecord("req_011CUabcdefghijklmnopq", "1", 5, fullClaudeTokens).Attributes)
+	obs.Identity, obs.SourceEventID, obs.SourceKind, obs.Status, obs.Calls = telemetrycontract.SourceIdentityComposite, "cmp1:bb", "claude.api_request", "success", 1
+	if out, err := native.Record(obs); err != nil || out != AppendWritten {
+		t.Fatalf("append: %v %v", out, err)
+	}
+	h.p.SettleUsageSource(nil, "")
+	seqPath := filepath.Join(h.outbox.Dir(), "seq")
+	good, err := os.ReadFile(seqPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.p.emitHealth(telemetrycontract.HealthTriggerPeriodic) // valid
+	// Corrupt seq, take a snapshot, restore.
+	if err := os.WriteFile(seqPath, []byte("garbage"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.p.emitHealth(telemetrycontract.HealthTriggerPeriodic)
+	if err := os.WriteFile(seqPath, good, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.p.emitHealth(telemetrycontract.HealthTriggerPeriodic)
+	h.p.flushHealth(context.Background())
+
+	h.mu.Lock()
+	lines := append([][]byte(nil), h.sent...)
+	h.mu.Unlock()
+	if len(lines) != 4 {
+		t.Fatalf("sent %d events, want 4 (start, valid, failed, valid)", len(lines))
+	}
+	type row struct {
+		epoch  any
+		seq    any
+		failed any
+	}
+	var rows []row
+	for _, l := range lines {
+		var raw map[string]any
+		if err := json.Unmarshal(l, &raw); err != nil {
+			t.Fatal(err)
+		}
+		rows = append(rows, row{raw["producer_epoch"], raw["producer_seq_last"], raw["analytics_stats_failed"]})
+	}
+	valid := rows[1]
+	if valid.epoch == nil || valid.seq != float64(1) || valid.failed != false {
+		t.Fatalf("valid row: %+v", valid)
+	}
+	if rows[2].epoch != nil || rows[2].seq != nil || rows[2].failed != true {
+		t.Fatalf("failed row must omit epoch and seq: %+v", rows[2])
+	}
+	if rows[3] != valid || rows[0] != valid {
+		t.Fatalf("rows around the failure disagree: %+v / %+v / %+v", rows[0], valid, rows[3])
+	}
+}

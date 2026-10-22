@@ -129,7 +129,12 @@ func TestHealthEventValidate(t *testing.T) {
 			clearAnalytics(e)
 			e.AnalyticsState, e.AnalyticsDisabledReason = AnalyticsStateDisabled, "unknown"
 		}, "analytics_disabled_reason"},
-		"bad origin": {func(e *HealthEvent) { e.UsageSourceOrigin = "" }, "usage_source_origin"},
+		"stats_failed with placeholders": {func(e *HealthEvent) {
+			failed := true
+			e.AnalyticsStatsFailed = &failed
+		}, "must be omitted"},
+		"measured without epoch": {func(e *HealthEvent) { e.ProducerEpoch = "" }, "required unless analytics_stats_failed"},
+		"bad origin":             {func(e *HealthEvent) { e.UsageSourceOrigin = "" }, "usage_source_origin"},
 	}
 	for name, c := range cases {
 		ev := validHealth()
@@ -182,5 +187,28 @@ func clearAnalytics(e *HealthEvent) {
 	e.AnalyticsStatsFailed, e.ProducerEpoch, e.AnalyticsOldestPendingFileAgeMs = nil, "", nil
 	if e.hasAnalyticsCounters() {
 		panic("clearAnalytics missed a field")
+	}
+}
+
+// With analytics_stats_failed the on-disk fields are omitted, not zeros,
+// while the in-memory counters stay.
+func TestHealthStatsFailedOmitsDiskFields(t *testing.T) {
+	ev := validHealth()
+	ev.SetAnalyticsCounters(HealthAnalyticsCounters{Appended: 3, ProducerEpoch: "e", ProducerSeqLast: 9, PendingBytes: 1, StatsFailed: true})
+	line, err := Marshal(ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	_ = json.Unmarshal(line, &raw)
+	for _, k := range []string{"producer_epoch", "producer_seq_last", "analytics_pending_bytes", "analytics_retained_bytes",
+		"analytics_overflow_total", "analytics_oversize_total", "analytics_append_failed_total", "analytics_dead_letters_total",
+		"analytics_oldest_pending_file_age_ms"} {
+		if _, ok := raw[k]; ok {
+			t.Errorf("%s must be omitted when stats failed", k)
+		}
+	}
+	if raw["analytics_appended"] != float64(3) || raw["analytics_stats_failed"] != true {
+		t.Errorf("in-memory counters and the flag stay: %v %v", raw["analytics_appended"], raw["analytics_stats_failed"])
 	}
 }

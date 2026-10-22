@@ -129,8 +129,10 @@ type HealthAnalyticsCounters struct {
 	RetryBackoffMs         int64
 	ProducerEpoch          string
 	ProducerSeqLast        int64
-	// StatsFailed means the outbox's on-disk pending state could not be
-	// read: PendingBytes is then not a measured value.
+	// StatsFailed means some on-disk read failed (pending, retained,
+	// epoch, seq or a persisted total): SetAnalyticsCounters then omits
+	// PendingBytes, RetainedBytes, the *Total counters, ProducerEpoch,
+	// ProducerSeqLast and the pending age (unknown, never placeholders).
 	StatsFailed bool
 }
 
@@ -258,6 +260,10 @@ type HealthEvent struct {
 
 	HealthSendFailures int64 `json:"health_send_failures"`
 	HealthSuperseded   int64 `json:"health_superseded"`
+	// HealthRejected counts earlier health events of this run that the
+	// destination permanently rejected and that were dropped (each also
+	// counted in health_send_failures).
+	HealthRejected int64 `json:"health_rejected"`
 
 	// LossIndicated is true when any INCLUDED loss counter in this
 	// snapshot is non-zero (design note section 3.2). false never means
@@ -393,8 +399,21 @@ func (e *HealthEvent) Validate() error {
 	default:
 		errs = append(errs, fmt.Errorf("analytics_state %q is not known", e.AnalyticsState))
 	}
-	if (e.AnalyticsStatsFailed == nil) != (e.AnalyticsPendingBytes == nil) {
+	if (e.AnalyticsStatsFailed == nil) != (e.AnalyticsAppended == nil) {
 		errs = append(errs, errors.New("analytics_stats_failed is reported with the analytics_* counters"))
+	}
+	disk := e.analyticsDiskCounters()
+	if !groupComplete(disk) {
+		errs = append(errs, errors.New("the on-disk analytics fields are reported as a complete group or not at all"))
+	}
+	diskSet := e.AnalyticsPendingBytes != nil || e.ProducerEpoch != ""
+	if e.AnalyticsStatsFailed != nil {
+		if *e.AnalyticsStatsFailed && (diskSet || e.AnalyticsOldestPendingFileAgeMs != nil) {
+			errs = append(errs, errors.New("with analytics_stats_failed the on-disk fields must be omitted (unknown), never placeholders"))
+		}
+		if !*e.AnalyticsStatsFailed && (e.AnalyticsPendingBytes == nil || e.ProducerEpoch == "") {
+			errs = append(errs, errors.New("measured on-disk fields (pending, retained, totals, producer_epoch, producer_seq_last) are required unless analytics_stats_failed"))
+		}
 	}
 	if !groupComplete(e.usageCounters()) || !groupComplete(e.analyticsCounters()) {
 		errs = append(errs, errors.New("usage_* and analytics_* counters are each reported as a complete group or not at all"))
@@ -424,7 +443,7 @@ func (e *HealthEvent) checkNonNegative() error {
 		"log_export_attempts": e.LogExportAttempts, "log_export_failures": e.LogExportFailures,
 		"log_export_retries": e.LogExportRetries,
 		"queue_bytes":        e.QueueBytes, "queue_records": e.QueueRecords,
-		"health_send_failures": e.HealthSendFailures, "health_superseded": e.HealthSuperseded,
+		"health_send_failures": e.HealthSendFailures, "health_superseded": e.HealthSuperseded, "health_rejected": e.HealthRejected,
 	}
 	for k, p := range e.optionalCounters() {
 		if p != nil {
@@ -454,25 +473,36 @@ func (e *HealthEvent) usageCounters() map[string]*int64 {
 func (e *HealthEvent) analyticsCounters() map[string]*int64 {
 	return map[string]*int64{
 		"analytics_appended": e.AnalyticsAppended, "analytics_certain_duplicates": e.AnalyticsCertainDuplicates,
-		"analytics_overflow": e.AnalyticsOverflow, "analytics_overflow_total": e.AnalyticsOverflowTotal,
+		"analytics_overflow":      e.AnalyticsOverflow,
 		"analytics_append_failed": e.AnalyticsAppendFailed, "analytics_dropped_no_identity": e.AnalyticsDroppedNoIdentity,
 		"analytics_finalized": e.AnalyticsFinalized, "analytics_delivered": e.AnalyticsDelivered,
 		"analytics_send_failures": e.AnalyticsSendFailures, "analytics_send_retries": e.AnalyticsSendRetries,
 		"analytics_torn": e.AnalyticsTorn, "analytics_hub_id_mismatch": e.AnalyticsHubIDMismatch,
 		"analytics_conflicts": e.AnalyticsConflicts, "analytics_quarantined": e.AnalyticsQuarantined,
-		"analytics_dead_letters": e.AnalyticsDeadLetters, "analytics_oversize_total": e.AnalyticsOversizeTotal,
-		"analytics_append_failed_total": e.AnalyticsAppendFailedTotal, "analytics_dead_letters_total": e.AnalyticsDeadLettersTotal,
+		"analytics_dead_letters":   e.AnalyticsDeadLetters,
 		"analytics_sync_uncertain": e.AnalyticsSyncUncertain, "analytics_corrupt_intents": e.AnalyticsCorruptIntents,
-		"analytics_invalid": e.AnalyticsInvalid, "analytics_retained_bytes": e.AnalyticsRetainedBytes,
-		"analytics_pending_bytes": e.AnalyticsPendingBytes, "analytics_retry_backoff_ms": e.AnalyticsRetryBackoffMs,
+		"analytics_invalid": e.AnalyticsInvalid, "analytics_retry_backoff_ms": e.AnalyticsRetryBackoffMs,
+	}
+}
+
+// analyticsDiskCounters are the fields read from the outbox directory:
+// present only when analytics_stats_failed is false (a failed read is
+// omitted, never a placeholder).
+func (e *HealthEvent) analyticsDiskCounters() map[string]*int64 {
+	return map[string]*int64{
+		"analytics_overflow_total": e.AnalyticsOverflowTotal, "analytics_oversize_total": e.AnalyticsOversizeTotal,
+		"analytics_append_failed_total": e.AnalyticsAppendFailedTotal, "analytics_dead_letters_total": e.AnalyticsDeadLettersTotal,
+		"analytics_retained_bytes": e.AnalyticsRetainedBytes, "analytics_pending_bytes": e.AnalyticsPendingBytes,
 		"producer_seq_last": e.ProducerSeqLast,
 	}
 }
 
 func (e *HealthEvent) optionalCounters() map[string]*int64 {
 	out := e.usageCounters()
-	for k, v := range e.analyticsCounters() {
-		out[k] = v
+	for _, m := range []map[string]*int64{e.analyticsCounters(), e.analyticsDiskCounters()} {
+		for k, v := range m {
+			out[k] = v
+		}
 	}
 	out["analytics_oldest_pending_file_age_ms"] = e.AnalyticsOldestPendingFileAgeMs
 	return out
@@ -488,9 +518,11 @@ func (e *HealthEvent) hasUsageCounters() bool {
 }
 
 func (e *HealthEvent) hasAnalyticsCounters() bool {
-	for _, p := range e.analyticsCounters() {
-		if p != nil {
-			return true
+	for _, m := range []map[string]*int64{e.analyticsCounters(), e.analyticsDiskCounters()} {
+		for _, p := range m {
+			if p != nil {
+				return true
+			}
 		}
 	}
 	return e.AnalyticsOldestPendingFileAgeMs != nil || e.ProducerEpoch != "" || e.AnalyticsStatsFailed != nil
@@ -523,23 +555,28 @@ func (e *HealthEvent) SetUsageCounters(c HealthUsageCounters) {
 // SetAnalyticsCounters fills the usage outbox counter fields from c.
 func (e *HealthEvent) SetAnalyticsCounters(c HealthAnalyticsCounters) {
 	e.AnalyticsAppended, e.AnalyticsCertainDuplicates = i64(c.Appended), i64(c.CertainDuplicates)
-	e.AnalyticsOverflow, e.AnalyticsOverflowTotal = i64(c.Overflow), i64(c.OverflowTotal)
-	e.AnalyticsAppendFailed, e.AnalyticsDroppedNoIdentity = i64(c.AppendFailed), i64(c.DroppedNoIdentity)
+	e.AnalyticsOverflow, e.AnalyticsAppendFailed = i64(c.Overflow), i64(c.AppendFailed)
+	e.AnalyticsDroppedNoIdentity = i64(c.DroppedNoIdentity)
 	e.AnalyticsFinalized, e.AnalyticsDelivered = i64(c.Finalized), i64(c.Delivered)
 	e.AnalyticsSendFailures, e.AnalyticsSendRetries = i64(c.SendFailures), i64(c.SendRetries)
 	e.AnalyticsTorn, e.AnalyticsHubIDMismatch = i64(c.Torn), i64(c.HubIDMismatch)
 	e.AnalyticsConflicts, e.AnalyticsQuarantined, e.AnalyticsDeadLetters = i64(c.Conflicts), i64(c.Quarantined), i64(c.DeadLetters)
-	e.AnalyticsOversizeTotal, e.AnalyticsAppendFailedTotal = i64(c.OversizeTotal), i64(c.AppendFailedTotal)
-	e.AnalyticsDeadLettersTotal = i64(c.DeadLettersTotal)
 	e.AnalyticsSyncUncertain, e.AnalyticsCorruptIntents = i64(c.SyncUncertain), i64(c.CorruptIntents)
-	e.AnalyticsInvalid, e.AnalyticsRetainedBytes = i64(c.Invalid), i64(c.RetainedBytes)
-	e.AnalyticsPendingBytes, e.AnalyticsRetryBackoffMs = i64(c.PendingBytes), i64(c.RetryBackoffMs)
-	e.AnalyticsOldestPendingFileAgeMs = nil
+	e.AnalyticsInvalid, e.AnalyticsRetryBackoffMs = i64(c.Invalid), i64(c.RetryBackoffMs)
+	failed := c.StatsFailed
+	e.AnalyticsStatsFailed = &failed
+	// On-disk values: omitted (unknown) when any read failed.
+	e.AnalyticsOverflowTotal, e.AnalyticsOversizeTotal, e.AnalyticsAppendFailedTotal, e.AnalyticsDeadLettersTotal = nil, nil, nil, nil
+	e.AnalyticsRetainedBytes, e.AnalyticsPendingBytes, e.ProducerSeqLast = nil, nil, nil
+	e.AnalyticsOldestPendingFileAgeMs, e.ProducerEpoch = nil, ""
+	if failed {
+		return
+	}
+	e.AnalyticsOverflowTotal, e.AnalyticsOversizeTotal = i64(c.OverflowTotal), i64(c.OversizeTotal)
+	e.AnalyticsAppendFailedTotal, e.AnalyticsDeadLettersTotal = i64(c.AppendFailedTotal), i64(c.DeadLettersTotal)
+	e.AnalyticsRetainedBytes, e.AnalyticsPendingBytes = i64(c.RetainedBytes), i64(c.PendingBytes)
+	e.ProducerEpoch, e.ProducerSeqLast = c.ProducerEpoch, i64(c.ProducerSeqLast)
 	if c.OldestPendingFileAgeMs != nil {
 		e.AnalyticsOldestPendingFileAgeMs = i64(*c.OldestPendingFileAgeMs)
 	}
-	e.ProducerEpoch = c.ProducerEpoch
-	e.ProducerSeqLast = i64(c.ProducerSeqLast)
-	failed := c.StatsFailed
-	e.AnalyticsStatsFailed = &failed
 }

@@ -671,7 +671,11 @@ type UsageDeriver struct {
 // Malformed counts malformed log records plus malformed metric batches, so
 // its units are mixed; LogRecordsMalformed and MetricBatchesMalformed are
 // the per-unit counters. Each field is loaded separately, so a snapshot is
-// not atomic across fields: invariants hold between updates only.
+// not atomic across fields: invariants hold between updates only. The
+// counters live on the deriver, which Pipeline.Start creates anew, so they
+// are per pipeline run (they restart at 0 after an in-process Stop/Start).
+// For copilot (metric-only) LogRecordsReceived counts log records offered to
+// its log rule, which never matches.
 type UsageDiagnostics struct {
 	Derived, Duplicate, Malformed int64
 	ClampedInput                  int64
