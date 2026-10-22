@@ -79,6 +79,9 @@ type tokenView struct {
 }
 
 func tokensOf(ev telemetrycontract.UsageEvent) tokenView {
+	if len(ev.MalformedFields) == 0 {
+		ev.MalformedFields = nil // always written as []; compare as "none"
+	}
 	return tokenView{ev.Input, ev.Output, ev.CacheRead, ev.CacheWrite, ev.Reasoning,
 		ev.ReasoningOverlapsOutput != nil && *ev.ReasoningOverlapsOutput, ev.InputDerivation, ev.TokenStatus, ev.MalformedFields}
 }

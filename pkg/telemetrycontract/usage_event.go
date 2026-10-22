@@ -18,7 +18,10 @@ package telemetrycontract
 // telemetry/design/wp2-design.md, section 3). One event is produced per
 // accepted usage increment -- the same increment that updates the canonical
 // gen_ai.api.calls / scion.usage.tokens counters -- and never from session
-// summaries. Field types are fixed forever: a type change on an existing
+// summaries. A repeat the counters' in-memory dedupe rejects is still
+// offered to the outbox: a verified request ID repeat is suppressed as a
+// certain duplicate, any other repeat is written as a further occurrence
+// marked identity_ambiguous (counted only toward WP4's upper bound). Field types are fixed forever: a type change on an existing
 // field becomes a BigQuery export error.
 
 import (
@@ -117,10 +120,11 @@ type UsageEvent struct {
 	Reasoning  *int64 `json:"reasoning,omitempty"`
 	// ReasoningOverlapsOutput is set (true) only with Reasoning, and only
 	// where adapter evidence shows Output already includes reasoning.
-	ReasoningOverlapsOutput *bool    `json:"reasoning_overlaps_output,omitempty"`
-	InputDerivation         string   `json:"input_derivation,omitempty"`
-	TokenStatus             string   `json:"token_status"`
-	MalformedFields         []string `json:"malformed_fields,omitempty"`
+	ReasoningOverlapsOutput *bool  `json:"reasoning_overlaps_output,omitempty"`
+	InputDerivation         string `json:"input_derivation,omitempty"`
+	TokenStatus             string `json:"token_status"`
+	// MalformedFields is always written ([] when none).
+	MalformedFields []string `json:"malformed_fields"`
 
 	// IntervalStart is omitted when the source does not report it.
 	IntervalStart string `json:"interval_start,omitempty"`
