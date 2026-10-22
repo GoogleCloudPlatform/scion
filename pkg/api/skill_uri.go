@@ -76,7 +76,20 @@ func ValidateSkillName(name string) error {
 //   - Bare:        scion
 //
 // Returns an error for invalid URIs (empty name, invalid scope, bad chars).
+//
+// skill:// URIs and bare names take no query. When raw contains a '?' and
+// does not parse, the error quotes raw only up to the '?' and gives no
+// detail (the detail could quote a segment, name or scope taken from after
+// the '?'), so whatever the caller put after it is never echoed.
 func ParseSkillURI(raw string) (*SkillURI, error) {
+	uri, err := parseSkillURI(raw)
+	if err != nil && strings.Contains(raw, "?") {
+		return nil, fmt.Errorf("invalid skill URI %q: not a valid skill:// URI or bare skill name (the text from '?' on is not shown)", SkillURIWithoutQuery(raw))
+	}
+	return uri, err
+}
+
+func parseSkillURI(raw string) (*SkillURI, error) {
 	if raw == "" {
 		return nil, fmt.Errorf("skill URI must not be empty")
 	}

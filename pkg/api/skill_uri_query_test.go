@@ -100,6 +100,7 @@ func TestSkillURIWithoutQuery(t *testing.T) {
 		{"gh://acme/repo/alpha-skill@main?token=made-up-value-5", "gh://acme/repo/alpha-skill@main"},
 		{"gh://acme/repo/alpha-skill?a=1?b=made-up-value-2", "gh://acme/repo/alpha-skill"},
 		{"?made-up-value-3", ""},
+		{"https://github.com/acme/repo/tree/main/skills?", "https://github.com/acme/repo/tree/main/skills"},
 	}
 	for _, tt := range tests {
 		if got := SkillURIWithoutQuery(tt.in); got != tt.want {
@@ -174,6 +175,69 @@ func TestNormalizeSkillURI_ErrorsOmitQuery(t *testing.T) {
 			}
 			if strings.Contains(err.Error(), "made-up-value") {
 				t.Errorf("error contains the query value: %q", err.Error())
+			}
+		})
+	}
+}
+
+// TestParseSkillURI_ErrorsOmitQuery checks the whole error text for skill://
+// URIs and bare names that carry a '?': the input is quoted only up to the
+// '?', and nothing after it (name, scope or segment detail included) appears.
+// Inputs without a '?' keep their detailed errors.
+func TestParseSkillURI_ErrorsOmitQuery(t *testing.T) {
+	const omitted = ": not a valid skill:// URI or bare skill name (the text from '?' on is not shown)"
+	tests := []struct {
+		name    string
+		input   string
+		wantErr string
+	}{
+		{
+			name:    "single name with query",
+			input:   "skill://my-skill?token=made-up-value-11",
+			wantErr: `invalid skill URI "skill://my-skill"` + omitted,
+		},
+		{
+			name:    "bare name with query",
+			input:   "my-skill?token=made-up-value-12",
+			wantErr: `invalid skill URI "my-skill"` + omitted,
+		},
+		{
+			name:    "query inside the scope segment",
+			input:   "skill://scion/co?x=made-up-value-13/re/name",
+			wantErr: `invalid skill URI "skill://scion/co"` + omitted,
+		},
+		{
+			name:    "alias with query in the name",
+			input:   "skill://project/my-skill?made-up-value-14",
+			wantErr: `invalid skill URI "skill://project/my-skill"` + omitted,
+		},
+		{
+			name:    "bare name with path and query",
+			input:   "a/b?made-up-value-15",
+			wantErr: `invalid skill URI "a/b"` + omitted,
+		},
+		{
+			name:    "no query keeps the detailed error",
+			input:   "skill://scion/bogus/my-skill",
+			wantErr: `invalid skill URI "skill://scion/bogus/my-skill": unrecognized scope "bogus" (must be core, global, project, or user)`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ParseSkillURI(tt.input)
+			if err == nil {
+				t.Fatalf("ParseSkillURI(%q) succeeded, want an error", tt.input)
+			}
+			if err.Error() != tt.wantErr {
+				t.Errorf("error = %q\nwant    %q", err.Error(), tt.wantErr)
+			}
+			if strings.Contains(err.Error(), "made-up-value") {
+				t.Errorf("error contains the query value: %q", err.Error())
+			}
+			// NormalizeSkillURI reaches ParseSkillURI for skill:// and bare
+			// names and returns its error unchanged.
+			if _, nerr := NormalizeSkillURI(tt.input); nerr == nil || nerr.Error() != tt.wantErr {
+				t.Errorf("NormalizeSkillURI(%q) error = %v, want %q", tt.input, nerr, tt.wantErr)
 			}
 		})
 	}
