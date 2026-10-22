@@ -72,7 +72,7 @@ var requestPathSites = []requestPathSite{
 	{"attachments_agent_upload.go", "Server.chatAttachmentRoute", "URL.Path", 1, "comparison: admits agents only on the upload collection path"},
 	{"artifacts_host.go", "isArtifactCapabilityRequest", "URL.EscapedPath", 1, "comparison: checks the shape of a credential-less artifact read on both path forms"},
 	{"artifacts_host.go", "isArtifactCapabilityRequest", "URL.Path", 4, "comparison: checks the shape of a credential-less artifact read on both path forms"},
-	{"auth.go", "UnifiedAuthMiddleware", "URL.Path", 1, "comparison: health and unauthenticated endpoint checks"},
+	{"auth.go", "UnifiedAuthMiddleware", "URL.Path", 2, "comparison: health and unauthenticated endpoint checks, and the port proxy route check for the no-credentials answer"},
 	{"auth.go", "isConstraintAuditAuthFailureRoute", "URL.EscapedPath", 1, "comparison: matches the constraint-audit routes on both path forms"},
 	{"auth.go", "isConstraintAuditAuthFailureRoute", "URL.Path", 4, "comparison: matches the constraint-audit routes on both path forms"},
 	{"auth.go", "isConstraintAuditAuthFailureRoute", "URL.RawPath", 1, "comparison: matches the constraint-audit routes on both path forms"},
