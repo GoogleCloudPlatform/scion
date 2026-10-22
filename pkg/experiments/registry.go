@@ -153,9 +153,12 @@ const ChatScheduledSend = "web.chat_scheduled_send"
 // needs explicit owner approval.
 const AuthorizationDecisionAuditV2 = "hub.authorization_decision_audit_v2"
 
-// AgentEdit gates the web Edit agent page (/agents/{id}/edit) and the Edit
-// button on the agent page. It is web-only for now: the hub's config PATCH
-// accepts edits of agents with no container whether or not it is on.
+// AgentEdit gates what the web Edit agent page (/agents/{id}/edit) adds
+// beyond the retired Configure page: the grouping of its fields by when an
+// edit applies, and the summary strip counting them. The page itself, and
+// the Edit button on the agent page, are always available. It is web-only:
+// the hub's config PATCH accepts edits of agents with no container whether
+// or not it is on.
 const AgentEdit = "web.agent_edit"
 
 // AgentDelegation gates agent delegation (.design/agent-delegation.md §10):
@@ -177,13 +180,6 @@ const AgentDelegation = "hub.agent_delegation"
 // unaffected).
 const FederationProjectVisitors = "federation.project_visitors"
 
-// ChatThreadGroups gates project-scoped chat thread groups
-// (ptone/scion#4424): the hub's /api/v1/thread-groups routes (404 while
-// off), the threadGroupId field on conversation create, the migration of
-// personal groups into project groups, and the web rail's project groups.
-// Turning it off hides the feature but keeps every stored group.
-const ChatThreadGroups = "hub.chat_thread_groups"
-
 // AgentPlugins gates native install of Agent Plugins 1.0.0 bundles declared
 // in a template's agent_plugins. The hub sends it to the broker at each
 // dispatch; outside broker mode the settings key local_experiments decides.
@@ -203,9 +199,15 @@ const AsyncAgentLaunch = "hub.async_agent_launch"
 // on too. Turn it on only after every hub node runs a version that
 // advertises async_start_v1 in the hub-instance registry; to roll back,
 // turn it off and wait launch_timeout plus 15 seconds before downgrading
-// any node. This release registers it only: every start stays synchronous
-// whatever its value.
+// any node. While any live hub instance lacks async_start_v1, starts stay
+// synchronous whatever its value.
 const AsyncAgentStart = "hub.async_agent_start"
+
+// AgentBadges gates the agent badges (ptone/scion#5503): a harness vendor
+// mark and a model size chip in the upper-left of agent cards, table rows
+// and graph nodes. It is web-only and presentation-only: the hub sends the
+// harnessVendor and modelSize fields whether or not it is on.
+const AgentBadges = "web.agent_badges"
 
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
@@ -214,7 +216,7 @@ var compiled = []Experiment{
 	{
 		Name:        AsyncAgentStart,
 		Title:       "Asynchronous agent start",
-		Description: "Lets the hub answer a start, resume or restart of an existing agent as soon as the Runtime Broker accepts it, like an asynchronous create; it applies only while hub.async_agent_launch is also on. Turn it on only after every hub node runs a version that supports it (each advertises async_start_v1). To roll back, turn it off and wait launch_timeout plus 15 seconds before downgrading any node. In this release starts stay synchronous whatever its value.",
+		Description: "Lets the hub answer a start, resume or restart of an existing agent as soon as the Runtime Broker accepts it, like an asynchronous create; it applies only while hub.async_agent_launch is also on. Turn it on only after every hub node runs a version that supports it (each advertises async_start_v1). While any live hub instance lacks async_start_v1, starts stay synchronous. To roll back, turn it off and wait launch_timeout plus 15 seconds before downgrading any node.",
 		Default:     false,
 		Layers:      []Layer{LayerServer},
 		Stage:       StageAlpha,
@@ -349,8 +351,8 @@ var compiled = []Experiment{
 	{
 		Name:        AgentEdit,
 		Title:       "Edit agent",
-		Description: "Adds an Edit button on the agent page and the Edit page at /agents/{id}/edit, which edits a created, stopped, failed or suspended agent's model and limits, and shows for every field whether it applies at the next start or resume, needs a reincarnation, or is fixed.",
-		Default:     false,
+		Description: "On the Edit agent page, adds a view that groups the fields by when an edit applies (next start or resume, held, needs a reincarnation, immediately, fixed) and a summary strip counting them. The page and its by-function view are always available.",
+		Default:     true,
 		Layers:      []Layer{LayerWeb},
 		Stage:       StageAlpha,
 		Issue:       "ptone/scion#3952",
@@ -358,15 +360,15 @@ var compiled = []Experiment{
 		ReviewBy:    "2027-01-07",
 	},
 	{
-		Name:        ChatThreadGroups,
-		Title:       "Project thread groups in chat",
-		Description: "Makes chat thread groups belong to the project, so every project member (user or agent) sees the same groups and can file threads into them; each user keeps their own sidebar order. Gates the web rail (LayerWeb) and the hub's /api/v1/thread-groups routes, which answer 404 while it is off, plus the copy of personal groups into project groups (LayerServer). Turning it off hides project groups and restores personal groups; no data is deleted.",
+		Name:        AgentBadges,
+		Title:       "Agent badges",
+		Description: "Shows a harness vendor mark and the configured model size (S, M, L, XL) in the upper-left of each agent in the agent list, agent cards and graph views; the tooltip names the harness and the size. Multi-vendor harnesses (OpenCode, Copilot, Hermes) show the harness mark only. Presentation only: the hub sends the fields whether or not it is on.",
 		Default:     false,
-		Layers:      []Layer{LayerWeb, LayerServer},
+		Layers:      []Layer{LayerWeb},
 		Stage:       StageAlpha,
-		Issue:       "ptone/scion#4424",
-		Owner:       "native-chat",
-		ReviewBy:    "2027-01-11",
+		Issue:       "ptone/scion#5503",
+		Owner:       "web",
+		ReviewBy:    "2027-01-19",
 	},
 	{
 		Name:        AgentPlugins,
@@ -392,6 +394,8 @@ var compiledRetired = []string{
 	"web.access_boundaries_authoring",
 	// Graduated: the terminal workspace is always on (ptone/scion#4917).
 	"web.terminal_workspace",
+	// Graduated: project thread groups are always on (ptone/scion#5546).
+	"hub.chat_thread_groups",
 }
 
 // Registry is an immutable, validated set of experiments. It is the only way

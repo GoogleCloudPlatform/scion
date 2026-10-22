@@ -262,7 +262,7 @@ Set up once:
 - in each agent, a listener on port 8000 that is exposed:
 
   ```sh
-  scion ssh --hub HUB_URL P1/A1 'nohup python3 -m http.server 8000 --bind 127.0.0.1 >/dev/null 2>&1 & sciontool expose 8000'
+  scion ssh --hub HUB_URL P1/A1 'nohup python3 -m http.server 8000 --bind 127.0.0.1 >/dev/null 2>&1 & scion expose 8000'
   ```
 
   (and the same for `P1/A2` and `P2/A3`).
@@ -292,7 +292,7 @@ reason, under "CI only" after the checklist.
    (sleep 600) | scion tunnel --hub HUB_URL --project P2 A3 --port 8000 --stdio; echo "exit $?"
    ```
 
-   Then run `scion ssh --hub HUB_URL P2/A3 sciontool unexpose 8000`. The
+   Then run `scion ssh --hub HUB_URL P2/A3 scion unexpose 8000`. The
    held stdio tunnel exits 7 within one recheck interval (60s at the
    default) with `Error: tunnel closed by policy (authz_expired)`. The
    listener tunnel to `A3` (port 18003) refuses its next connection, and

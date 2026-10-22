@@ -19,6 +19,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"time"
 
@@ -594,6 +596,11 @@ type AgentAppliedConfig struct {
 // caller's original agent object (which the persistence path may still
 // write from) must come out of this call unmodified.
 //
+// Each InlineConfig.MCPServers entry's env and headers maps and each
+// InlineConfig.Services entry's env map are cleared the same way (see
+// redactMCPServersForResponse and redactServicesForResponse), matching env:
+// the entries themselves stay in the response.
+//
 // CreateInputs.InlineConfig gets the same treatment as InlineConfig, through
 // a deep copy of CreateInputs (see redactCreateInputsForResponse).
 //
@@ -632,11 +639,14 @@ func redactCreateInputsForResponse(ci *AgentCreateInputs, canAttach bool) *Agent
 }
 
 // redactInlineConfigForResponse returns a deep copy of cfg suitable for a
-// response body: Env and the Telemetry cloud-export header map are cleared
-// unless canAttach is true, and GITHUB_TOKEN is stripped from Env
+// response body: Env, the Telemetry cloud-export header map, every MCP
+// server's env and headers and every service's env are cleared unless
+// canAttach is true, and
+// GITHUB_TOKEN is stripped from Env
 // unconditionally, mirroring AgentAppliedConfig's own top-level rule (see
-// ResponseView/MarshalJSON above). ClearedFields is dropped for every
-// viewer: it is hub-internal bookkeeping (ptone/scion#3906), its env.<KEY>
+// ResponseView/MarshalJSON above). ClearedFields and ChangedFields are
+// dropped for every viewer: they are hub-internal bookkeeping
+// (ptone/scion#3906, ptone/scion#3982), ClearedFields' env.<KEY>
 // entries name env keys a viewer without attach access must not learn, and
 // leaving it out means a GET echoed back into a PATCH never carries it. The
 // input is never mutated.
@@ -659,6 +669,7 @@ func redactInlineConfigForResponse(cfg *api.ScionConfig, canAttach bool) *api.Sc
 	}
 	copied := *cfg
 	copied.ClearedFields = nil
+	copied.ChangedFields = nil
 	if !canAttach {
 		copied.Env = nil
 	} else if len(cfg.Env) > 0 {
@@ -675,7 +686,63 @@ func redactInlineConfigForResponse(cfg *api.ScionConfig, canAttach bool) *api.Sc
 		copied.Env = env
 	}
 	copied.Telemetry = redactTelemetryForResponse(cfg.Telemetry, canAttach)
+	copied.MCPServers = redactMCPServersForResponse(cfg.MCPServers, canAttach)
+	copied.Services = redactServicesForResponse(cfg.Services, canAttach)
 	return &copied
+}
+
+// redactServicesForResponse returns a deep copy of services suitable for a
+// response body. Each service's env map gets the same default-closed
+// treatment as InlineConfig.Env: it is cleared unless canAttach is true.
+// Every other field of an entry (name, command, restart, ready_check) is
+// copied through, so the response still lists every service. canAttach is
+// ResponseView's own parameter, passed through unchanged by
+// redactInlineConfigForResponse. The input is never mutated.
+func redactServicesForResponse(services []api.ServiceSpec, canAttach bool) []api.ServiceSpec {
+	if services == nil {
+		return nil
+	}
+	copied := make([]api.ServiceSpec, len(services))
+	for i, svc := range services {
+		svc.Command = slices.Clone(svc.Command)
+		if svc.ReadyCheck != nil {
+			rc := *svc.ReadyCheck
+			svc.ReadyCheck = &rc
+		}
+		if canAttach {
+			svc.Env = maps.Clone(svc.Env)
+		} else {
+			svc.Env = nil
+		}
+		copied[i] = svc
+	}
+	return copied
+}
+
+// redactMCPServersForResponse returns a deep copy of servers suitable for a
+// response body. Each server's env and headers maps get the same
+// default-closed treatment as InlineConfig.Env: they are cleared unless
+// canAttach is true. Every other field of an entry (transport, command,
+// args, url, scope) is copied through, so the response still lists every
+// server. canAttach is ResponseView's own parameter, passed through
+// unchanged by redactInlineConfigForResponse. The input is never mutated.
+func redactMCPServersForResponse(servers map[string]api.MCPServerConfig, canAttach bool) map[string]api.MCPServerConfig {
+	if servers == nil {
+		return nil
+	}
+	copied := make(map[string]api.MCPServerConfig, len(servers))
+	for name, srv := range servers {
+		srv.Args = slices.Clone(srv.Args)
+		if canAttach {
+			srv.Env = maps.Clone(srv.Env)
+			srv.Headers = maps.Clone(srv.Headers)
+		} else {
+			srv.Env = nil
+			srv.Headers = nil
+		}
+		copied[name] = srv
+	}
+	return copied
 }
 
 // redactTelemetryForResponse returns a deep copy of cfg with the cloud-export
@@ -837,6 +904,14 @@ const (
 // with that slug, and the store agents group marker backfill writes it on
 // legitimate pre-upgrade groups.
 const AnnotationProjectAgentsGroup = "scion.io/project-agents-group"
+
+// AnnotationProjectActiveProfile is the project annotation that holds the
+// project's activeProfile setting. The hub writes it as a project setting
+// (pkg/hub keeps its own literal, projectSettingActiveProfile, which its
+// settings registry guard requires, and a pkg/hub test pins that the two
+// agree); readers outside pkg/hub, such as the rebuild preflight, use this
+// one.
+const AnnotationProjectActiveProfile = "scion.io/active-profile"
 
 // IsProjectMembersGroup reports whether g is a system project members group:
 // it belongs to a project and carries either members-group marker key with
@@ -1314,6 +1389,12 @@ type BrokerCapabilities struct {
 	// with a fresh workspace after confirming it has no files for the agent.
 	// The hub refuses a forced move onto a broker without it (412).
 	AgentMoveRecreate bool `json:"agentMoveRecreate,omitempty"`
+	// AttachmentDelivery indicates the broker can receive attachment
+	// deliveries: it redeems the capabilities of a message request's
+	// attachments field and writes the files into the agent's home before
+	// delivering the text (ptone/scion#4596). The hub issues capabilities
+	// only to brokers that report it.
+	AttachmentDelivery bool `json:"attachmentDelivery"`
 	// ReprovisionEmptyPerAgent indicates the broker's reprovision reuses an
 	// empty-per-agent agent's private workspace in place (same-broker
 	// `scion reincarnate`, miller79/scion#167). The hub refuses same-broker
@@ -1321,6 +1402,19 @@ type BrokerCapabilities struct {
 	// stopped. It says what the broker build can do; runtime suitability is
 	// a separate hub check.
 	ReprovisionEmptyPerAgent bool `json:"reprovisionEmptyPerAgent,omitempty"`
+	// ChangedFields indicates the broker re-renders, at start, the files
+	// provisioning wrote for the provision-rendered keys the hub lists in
+	// the inline config's changed_fields (ptone/scion#3982). Only for such
+	// a broker does the hub report an edit of those keys on a stopped,
+	// created or suspended agent as applied at the next start rather than
+	// held for a reincarnation.
+	ChangedFields bool `json:"changedFields,omitempty"`
+	// ClearedFields indicates the broker applies the inline config's
+	// cleared_fields at start (ptone/scion#3906, ptone/scion#4890). Only
+	// for such a broker does the hub report a clear of a key the broker
+	// applies (api.ClearableConfigPath, and env key removals) as applied
+	// at the next start rather than held for a reincarnation.
+	ClearedFields bool `json:"clearedFields,omitempty"`
 	// StartsInFlight indicates the broker reports the agent starts still
 	// running on it in every heartbeat (BrokerHeartbeat.StartsInFlight). Only
 	// then does the hub read a start's absence from that list as "no start
@@ -3160,6 +3254,19 @@ type Message struct {
 	DispatchState         string     `json:"dispatchState,omitempty"`
 	DispatchedAt          *time.Time `json:"dispatchedAt,omitempty"`
 	DispatchFailureReason *string    `json:"dispatchFailureReason,omitempty"`
+
+	// DeferredAttachments is never stored. For a deferred message, the
+	// conversation messages route lists its attachments stored as
+	// artifacts here, to a reader only, so catch-up can say they were not
+	// delivered (ptone/scion#4596).
+	DeferredAttachments []DeferredAttachment `json:"deferredAttachments,omitempty"`
+}
+
+// DeferredAttachment names one attachment of a deferred message: its
+// reduced file name and size, and nothing else.
+type DeferredAttachment struct {
+	Name string `json:"name"`
+	Size int64  `json:"size"`
 }
 
 // MessageFilter defines query parameters for listing messages.
@@ -3773,6 +3880,12 @@ type HubSetting struct {
 	Origin    string          `json:"origin,omitempty"`
 	CreatedAt time.Time       `json:"createdAt"`
 	UpdatedAt time.Time       `json:"updatedAt"`
+
+	// SettingsRevision is the operational-settings revision (see
+	// HubSettingsRevisionSection) after the write that returned this row:
+	// set by UpsertHubSetting for an operational section on a store that
+	// keeps the revision, 0 otherwise.
+	SettingsRevision int64 `json:"-"`
 }
 
 // =============================================================================
@@ -4212,6 +4325,17 @@ const (
 	// EdgeDeactivationSACleared marks an assignment ended by a write that
 	// removed the agent's assign-mode GCP identity.
 	EdgeDeactivationSACleared EdgeDeactivationCause = "sa_cleared"
+	// EdgeDeactivationReincarnateFailed marks the assignment a reincarnation
+	// claim recorded for a new account, ended when the reincarnation failed
+	// and the previous configuration was restored by the worker.
+	EdgeDeactivationReincarnateFailed EdgeDeactivationCause = "reincarnate_failed"
+	// EdgeDeactivationReincarnatePendingSwept is EdgeDeactivationReincarnateFailed
+	// for a reincarnation the sweep failed because its worker never started.
+	EdgeDeactivationReincarnatePendingSwept EdgeDeactivationCause = "reincarnate_pending_swept"
+	// EdgeDeactivationReincarnateStaleSwept is EdgeDeactivationReincarnateFailed
+	// for a reincarnation the sweep failed after its worker stopped
+	// reporting progress.
+	EdgeDeactivationReincarnateStaleSwept EdgeDeactivationCause = "reincarnate_stale_swept"
 )
 
 // ValidAssignmentDeactivationCause reports whether c is a cause that may be
@@ -4222,7 +4346,14 @@ func ValidAssignmentDeactivationCause(c EdgeDeactivationCause) bool {
 		EdgeDeactivationAgentHardDelete,
 		EdgeDeactivationCreateCompensation,
 		EdgeDeactivationSAReplaced,
-		EdgeDeactivationSACleared:
+		EdgeDeactivationSACleared,
+		// On an assignment, reincarnate_replaced marks the row a
+		// reincarnation claim replaced with one for another account; the
+		// claim's reincarnation ID is its operation ID.
+		EdgeDeactivationReincarnateReplaced,
+		EdgeDeactivationReincarnateFailed,
+		EdgeDeactivationReincarnatePendingSwept,
+		EdgeDeactivationReincarnateStaleSwept:
 		return true
 	}
 	return false

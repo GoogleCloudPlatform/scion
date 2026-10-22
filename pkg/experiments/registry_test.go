@@ -432,25 +432,25 @@ func TestFederationProjectVisitors_RegisteredDefaultOff(t *testing.T) {
 	}
 }
 
-// TestChatThreadGroups_RegisteredDefaultOff pins hub.chat_thread_groups
-// (ptone/scion#4424): it gates the web rail and the hub routes, so it needs
-// both layers, and it ships off.
-func TestChatThreadGroups_RegisteredDefaultOff(t *testing.T) {
-	entry, ok := Default().Lookup(ChatThreadGroups)
+// TestAgentBadges_RegisteredDefaultOff pins web.agent_badges
+// (ptone/scion#5503): a presentation-only web gate, so it has only the web
+// layer, and it ships off.
+func TestAgentBadges_RegisteredDefaultOff(t *testing.T) {
+	entry, ok := Default().Lookup(AgentBadges)
 	if !ok {
-		t.Fatalf("compiled registry entry %q absent", ChatThreadGroups)
+		t.Fatalf("compiled registry entry %q absent", AgentBadges)
 	}
-	if entry.Name != "hub.chat_thread_groups" {
-		t.Errorf("Name = %q, want hub.chat_thread_groups", entry.Name)
+	if entry.Name != "web.agent_badges" {
+		t.Errorf("Name = %q, want web.agent_badges", entry.Name)
 	}
 	if entry.Default {
 		t.Error("Default = true, want false")
 	}
-	if len(entry.Layers) != 2 || !entry.HasLayer(LayerWeb) || !entry.HasLayer(LayerServer) {
-		t.Errorf("Layers = %v, want exactly LayerWeb and LayerServer", entry.Layers)
+	if len(entry.Layers) != 1 || entry.Layers[0] != LayerWeb {
+		t.Errorf("Layers = %v, want exactly LayerWeb", entry.Layers)
 	}
-	if entry.Stage != StageAlpha || entry.Issue != "ptone/scion#4424" || entry.Owner != "native-chat" || entry.ReviewBy != "2027-01-11" {
-		t.Errorf("chat thread groups experiment metadata mismatch: %+v", entry)
+	if entry.Stage != StageAlpha || entry.Issue != "ptone/scion#5503" || entry.Owner != "web" || entry.ReviewBy != "2027-01-19" {
+		t.Errorf("agent badges experiment metadata mismatch: %+v", entry)
 	}
 }
 

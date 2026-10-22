@@ -55,20 +55,17 @@ describe('triggerLabel', () => {
       'COMPLETED',
       'WAITING_FOR_INPUT',
       'LIMITS_EXCEEDED',
+      'STALLED',
+      'ERROR',
       'HALTED',
     ]);
+    expect(AGENT_CREATE_TRIGGERS).toEqual(DEFAULT_TRIGGERS);
   });
 });
 
 describe('defaultTriggersHint', () => {
   it('lists the default triggers by display label', () => {
     expect(defaultTriggersHint()).toBe(
-      'You will be notified when this agent reaches: Completed, Waiting on Parent, Limits Exceeded, or Halted.'
-    );
-  });
-
-  it('lists the agent-create triggers by display label', () => {
-    expect(defaultTriggersHint(AGENT_CREATE_TRIGGERS)).toBe(
       'You will be notified when this agent reaches: Completed, Waiting on Parent, Limits Exceeded, Stalled, Error, or Halted.'
     );
   });

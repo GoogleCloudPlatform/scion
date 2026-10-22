@@ -82,6 +82,8 @@ func (a *HMACAuth) Refresh() (bool, error) { return false, nil }
 // BuildCanonicalString builds the canonical string for HMAC signing.
 // Format: METHOD\nPATH\nQUERY\nTIMESTAMP\nNONCE\nSIGNED_HEADERS\nBODY_HASH
 // This function must produce identical output to hub/hostauth.go:buildCanonicalString.
+// If the body is buffered, the original r.Body is closed and replaced with
+// an in-memory reader.
 func BuildCanonicalString(r *http.Request, timestamp, nonce string) []byte {
 	var buf bytes.Buffer
 

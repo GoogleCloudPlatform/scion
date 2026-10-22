@@ -17,7 +17,6 @@ package runtimebroker
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -275,7 +274,7 @@ func (s *Server) recoveryManager(jr *journalRecord) agent.Manager {
 	if jr.Profile == "" {
 		return nil
 	}
-	res, err := s.resolveManagerForOptsStrict(api.StartOptions{Name: jr.AgentName, ProjectPath: jr.ProjectPath, Profile: jr.Profile}, profileLenient, slog.LevelWarn)
+	res, err := s.resolveManagerForOptsStrict(api.StartOptions{Name: jr.AgentName, ProjectPath: jr.ProjectPath, Profile: jr.Profile}, profileLenient)
 	mgr := res.Manager
 	if err != nil || mgr == nil || s.launchRuntimeIdentity(mgr) != id {
 		return nil
@@ -369,7 +368,7 @@ func (s *Server) deleteRecoveredRun(ctx context.Context, mgr agent.Manager, jr *
 			"agent_id", jr.AgentID, "launch_id", jr.LaunchID, "error", err)
 		return failCleanup(nil, cleanupFailRunList)
 	}
-	target, found, err := agent.SelectExactRunTarget(infos, jr.AgentName, jr.ProjectPath, jr.RunID)
+	target, found, err := agent.SelectExactRunTarget(infos, jr.AgentName, jr.ProjectPath, jr.ProjectID, jr.RunID)
 	if err != nil {
 		s.agentLifecycleLog.Warn("Launch recovery: run-scoped cleanup skipped", "agent_id", jr.AgentID, "launch_id", jr.LaunchID, "error", err)
 		return nil
