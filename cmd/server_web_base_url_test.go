@@ -42,14 +42,14 @@ func TestResolveWebBaseURL_Order(t *testing.T) {
 	t.Run("default", func(t *testing.T) {
 		webBaseURLTestEnv(t)
 		got := resolveWebBaseURL(&config.GlobalConfig{}, mode, file)
-		assert.Equal(t, webBaseURL{URL: "http://localhost:8080", Source: "default"}, got)
+		assert.Equal(t, resolvedWebBaseURL{URL: "http://localhost:8080", Source: "default"}, got)
 	})
 	t.Run("global settings file public_url", func(t *testing.T) {
 		webBaseURLTestEnv(t)
 		cfg := &config.GlobalConfig{}
 		cfg.Hub.Endpoint = "https://file.example.com/"
 		got := resolveWebBaseURL(cfg, mode, file)
-		assert.Equal(t, webBaseURL{URL: "https://file.example.com", Source: "server.hub.public_url in " + file}, got)
+		assert.Equal(t, resolvedWebBaseURL{URL: "https://file.example.com", Source: "server.hub.public_url in " + file}, got)
 	})
 	t.Run("global settings file label fallback", func(t *testing.T) {
 		webBaseURLTestEnv(t)
@@ -64,7 +64,7 @@ func TestResolveWebBaseURL_Order(t *testing.T) {
 		cfg := &config.GlobalConfig{}
 		cfg.Hub.Endpoint = "https://file.example.com"
 		got := resolveWebBaseURL(cfg, mode, file)
-		assert.Equal(t, webBaseURL{URL: "https://env.example.com", Source: "SCION_SERVER_BASE_URL"}, got)
+		assert.Equal(t, resolvedWebBaseURL{URL: "https://env.example.com", Source: "SCION_SERVER_BASE_URL"}, got)
 	})
 	t.Run("SCION_SERVER_HUB_ENDPOINT outranks SCION_SERVER_BASE_URL", func(t *testing.T) {
 		webBaseURLTestEnv(t)
@@ -73,7 +73,7 @@ func TestResolveWebBaseURL_Order(t *testing.T) {
 		cfg := &config.GlobalConfig{}
 		cfg.Hub.Endpoint = "https://hubenv.example.com" // applied over the file value when the config loads
 		got := resolveWebBaseURL(cfg, mode, file)
-		assert.Equal(t, webBaseURL{URL: "https://hubenv.example.com", Source: hubEndpointEnvVar}, got)
+		assert.Equal(t, resolvedWebBaseURL{URL: "https://hubenv.example.com", Source: hubEndpointEnvVar}, got)
 	})
 	t.Run("--base-url outranks everything", func(t *testing.T) {
 		webBaseURLTestEnv(t)
@@ -84,7 +84,7 @@ func TestResolveWebBaseURL_Order(t *testing.T) {
 		m := mode
 		m.baseURLFlag = "https://flag.example.com/"
 		got := resolveWebBaseURL(cfg, m, file)
-		assert.Equal(t, webBaseURL{URL: "https://flag.example.com", Source: "--base-url"}, got)
+		assert.Equal(t, resolvedWebBaseURL{URL: "https://flag.example.com", Source: "--base-url"}, got)
 	})
 	t.Run("the legacy settings hub.endpoint is not followed", func(t *testing.T) {
 		webBaseURLTestEnv(t)
@@ -114,7 +114,7 @@ func TestResolveWebBaseURL_IAPAudienceDecision(t *testing.T) {
 		assert.Equal(t, "https://hub-123.us-central1.run.app", got.URL)
 		assert.Equal(t, "derived from the IAP audience (server.auth.proxy.iap.audience)", got.Source)
 	} else {
-		assert.Equal(t, webBaseURL{URL: "http://localhost:8080", Source: "default"}, got)
+		assert.Equal(t, resolvedWebBaseURL{URL: "http://localhost:8080", Source: "default"}, got)
 	}
 }
 
@@ -122,7 +122,7 @@ func TestResolveWebBaseURL_IAPAudienceDecision(t *testing.T) {
 // and the message names the URL, its source, the listen address, that it
 // is not loopback, and both fixes (ptone/scion#5364).
 func TestCheckWebBaseURLListener_RefusalMessage(t *testing.T) {
-	err := checkWebBaseURLListener(webBaseURL{URL: "http://hub.example.com:8080", Source: "SCION_SERVER_BASE_URL"}, "0.0.0.0", 8080)
+	err := checkWebBaseURLListener(resolvedWebBaseURL{URL: "http://hub.example.com:8080", Source: "SCION_SERVER_BASE_URL"}, "0.0.0.0", 8080)
 	require.Error(t, err)
 	msg := err.Error()
 	for _, want := range []string{
@@ -138,17 +138,17 @@ func TestCheckWebBaseURLListener_RefusalMessage(t *testing.T) {
 		assert.Contains(t, msg, want)
 	}
 
-	err = checkWebBaseURLListener(webBaseURL{URL: "http://x", Source: "--base-url"}, "::", 9090)
+	err = checkWebBaseURLListener(resolvedWebBaseURL{URL: "http://x", Source: "--base-url"}, "::", 9090)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "listens on [::]:9090")
 }
 
 func TestCheckWebBaseURLListener_Cases(t *testing.T) {
-	https := webBaseURL{URL: "https://hub.example.com", Source: "--base-url"}
-	http := webBaseURL{URL: "http://hub.example.com", Source: "--base-url"}
+	https := resolvedWebBaseURL{URL: "https://hub.example.com", Source: "--base-url"}
+	http := resolvedWebBaseURL{URL: "http://hub.example.com", Source: "--base-url"}
 	for _, tc := range []struct {
 		name   string
-		base   webBaseURL
+		base   resolvedWebBaseURL
 		host   string
 		refuse bool
 	}{
@@ -161,10 +161,13 @@ func TestCheckWebBaseURLListener_Cases(t *testing.T) {
 		{"http on ::", http, "::", true},
 		{"http on a private address", http, "192.168.1.10", true},
 		{"http on localhost with a trailing dot", http, "localhost.", true},
-		{"unparsable base URL", webBaseURL{URL: "://bad", Source: "--base-url"}, "0.0.0.0", true},
-		{"https without a host", webBaseURL{URL: "https://", Source: "--base-url"}, "0.0.0.0", true},
-		{"another scheme", webBaseURL{URL: "ftp://hub.example.com", Source: "--base-url"}, "0.0.0.0", true},
-		{"the default on a public listener", webBaseURL{URL: "http://localhost:8080", Source: "default"}, "0.0.0.0", webBaseURLRefuseDefault},
+		{"unparsable base URL", resolvedWebBaseURL{URL: "://bad", Source: "--base-url"}, "0.0.0.0", true},
+		{"https without a host", resolvedWebBaseURL{URL: "https://", Source: "--base-url"}, "0.0.0.0", true},
+		{"another scheme", resolvedWebBaseURL{URL: "ftp://hub.example.com", Source: "--base-url"}, "0.0.0.0", true},
+		// Pins the current D2 decision (webBaseURLRefuseDefault = true,
+		// ptone/scion#5364) as a literal: flipping the const must change
+		// this row, deliberately and visibly.
+		{"the default on a public listener", resolvedWebBaseURL{URL: "http://localhost:8080", Source: "default"}, "0.0.0.0", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := checkWebBaseURLListener(tc.base, tc.host, 8080)
@@ -182,7 +185,7 @@ func TestCheckWebBaseURLListener_Cases(t *testing.T) {
 // (ip6-localhost, localhost.localdomain) or a public DNS name that does
 // (localtest.me) is refused with an http base URL (ptone/scion#5364).
 func TestCheckWebBaseURLListener_AHostnameResolvingToLoopbackDoesNotQualify(t *testing.T) {
-	http := webBaseURL{URL: "http://hub.example.com", Source: "SCION_SERVER_BASE_URL"}
+	http := resolvedWebBaseURL{URL: "http://hub.example.com", Source: "SCION_SERVER_BASE_URL"}
 	for _, host := range []string{"ip6-localhost", "localhost.localdomain", "localtest.me"} {
 		assert.Error(t, checkWebBaseURLListener(http, host, 8080), "listen host %q", host)
 	}

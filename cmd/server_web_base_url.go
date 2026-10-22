@@ -62,9 +62,9 @@ const webBaseURLRefuseDefault = true
 // webBaseURLSourceDefault is the source of the default base URL.
 const webBaseURLSourceDefault = "default"
 
-// webBaseURL is the resolved web base URL and the input it came from, as
+// resolvedWebBaseURL is the resolved web base URL and the input it came from, as
 // logged at startup and named by the listener check.
-type webBaseURL struct {
+type resolvedWebBaseURL struct {
 	URL    string
 	Source string
 }
@@ -72,7 +72,7 @@ type webBaseURL struct {
 // resolveWebBaseURL returns the web base URL for mode m (see above).
 // globalSettingsFile names the global settings file in the source label of
 // a server.hub.public_url value.
-func resolveWebBaseURL(cfg *config.GlobalConfig, m serverEndpointMode, globalSettingsFile string) webBaseURL {
+func resolveWebBaseURL(cfg *config.GlobalConfig, m serverEndpointMode, globalSettingsFile string) resolvedWebBaseURL {
 	// The web server always fronts the hub, so the hub-enabled order
 	// applies; the legacy settings endpoint is left out ("").
 	m.hubEnabled = true
@@ -80,24 +80,24 @@ func resolveWebBaseURL(cfg *config.GlobalConfig, m serverEndpointMode, globalSet
 	endpoint = strings.TrimRight(endpoint, "/")
 	switch src {
 	case hubEndpointSourceBaseURLFlag:
-		return webBaseURL{URL: endpoint, Source: "--base-url"}
+		return resolvedWebBaseURL{URL: endpoint, Source: "--base-url"}
 	case hubEndpointSourceBaseURLEnv:
-		return webBaseURL{URL: endpoint, Source: "SCION_SERVER_BASE_URL"}
+		return resolvedWebBaseURL{URL: endpoint, Source: "SCION_SERVER_BASE_URL"}
 	case hubEndpointSourceConfig:
 		if os.Getenv(hubEndpointEnvVar) != "" {
-			return webBaseURL{URL: endpoint, Source: hubEndpointEnvVar}
+			return resolvedWebBaseURL{URL: endpoint, Source: hubEndpointEnvVar}
 		}
 		file := globalSettingsFile
 		if file == "" {
 			file = "the global settings file"
 		}
-		return webBaseURL{URL: endpoint, Source: "server.hub.public_url in " + file}
+		return resolvedWebBaseURL{URL: endpoint, Source: "server.hub.public_url in " + file}
 	case hubEndpointSourceIAPAudience:
 		if webBaseURLFollowsIAPAudience {
-			return webBaseURL{URL: endpoint, Source: "derived from the IAP audience (server.auth.proxy.iap.audience)"}
+			return resolvedWebBaseURL{URL: endpoint, Source: "derived from the IAP audience (server.auth.proxy.iap.audience)"}
 		}
 	}
-	return webBaseURL{URL: fmt.Sprintf("http://localhost:%d", m.webPort), Source: webBaseURLSourceDefault}
+	return resolvedWebBaseURL{URL: fmt.Sprintf("http://localhost:%d", m.webPort), Source: webBaseURLSourceDefault}
 }
 
 // globalSettingsFileLabel returns the path of the global settings file for
@@ -118,7 +118,7 @@ func globalSettingsFileLabel() string {
 // resolved, so a hosts-file name that points at 127.0.0.1 counts as not
 // loopback. The error names the base URL, its source, the listen address,
 // and both fixes.
-func checkWebBaseURLListener(base webBaseURL, listenHost string, listenPort int) error {
+func checkWebBaseURLListener(base resolvedWebBaseURL, listenHost string, listenPort int) error {
 	// The loopback rule, stated so it is not "fixed" either way later:
 	// "localhost" is accepted as a literal name by convention, not because
 	// anything resolved it; every other name is refused without being
