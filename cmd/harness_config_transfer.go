@@ -150,9 +150,12 @@ func uploadHarnessConfigFileBySignedURL(
 }
 
 // writeHarnessConfigFile writes content to relPath inside root through
-// transfer.WriteFileInRoot, which also creates any missing parent directories.
-func writeHarnessConfigFile(root *os.Root, relPath string, content []byte) error {
-	if err := transfer.WriteFileInRoot(root, relPath, content, 0644); err != nil {
+// transfer.WriteFileInRootMode, which also creates any missing parent
+// directories, with the normalised mode the Hub recorded for it ("0755"
+// keeps an executable such as provision.py runnable; an empty mode, from a
+// Hub before ptone/scion#5652, is 0644).
+func writeHarnessConfigFile(root *os.Root, relPath string, content []byte, mode string) error {
+	if err := transfer.WriteFileInRootMode(root, relPath, content, transfer.NormalizeMode(mode)); err != nil {
 		return fmt.Errorf("write harness config file: %w", err)
 	}
 	return nil

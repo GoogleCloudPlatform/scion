@@ -486,6 +486,18 @@ func upsertTemplateFile(files []store.TemplateFile, entry store.TemplateFile) []
 	return out
 }
 
+// newFileMode is the mode a file written through a file API is recorded
+// with: the mode files already records for p, so editing an executable
+// keeps its executable bit (ptone/scion#5652), else "0644".
+func newFileMode(files []store.TemplateFile, p string) string {
+	for _, f := range files {
+		if f.Path == p && f.Mode != "" {
+			return f.Mode
+		}
+	}
+	return "0644"
+}
+
 // removeTemplateFile returns a copy of files without the entry for p.
 func removeTemplateFile(files []store.TemplateFile, p string) []store.TemplateFile {
 	out := make([]store.TemplateFile, 0, len(files))
