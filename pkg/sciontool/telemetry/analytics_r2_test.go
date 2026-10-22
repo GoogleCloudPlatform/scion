@@ -7,6 +7,7 @@ package telemetry
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -891,5 +892,124 @@ func TestLazyOpenRecoveryErrorConsumesSeq(t *testing.T) {
 	next := mustAppend(t, o, requestIDDraft(5), AppendWritten)
 	if next.ProducerSeq != 2 || o.Stats().PersistedAppendFailed != 1 {
 		t.Errorf("seq %d append_failed %d; want 2 (gap) and 1", next.ProducerSeq, o.Stats().PersistedAppendFailed)
+	}
+}
+
+// Pre-review B1: a quarantine whose cursor commit was lost leaves the
+// cursor at (N, offset>0) with no ready-N. New events must not be written
+// to a reused ready-N (Drain would seek them to the stale offset), and a
+// later quarantine must never overwrite kept bytes.
+func TestOutboxStaleCursorAfterQuarantineLosesNothing(t *testing.T) {
+	o, lines := preparedReady(t, 2)
+	files, _ := o.readyFiles()
+	n := files[0]
+	// Simulate the interrupted quarantine: ready-N renamed, cursor stale.
+	_ = os.Rename(filepath.Join(o.Dir(), readyName(n)), filepath.Join(o.Dir(), fmt.Sprintf("quarantine-%d.jsonl", n)))
+	if err := o.writeCursor(n, int64(len(lines[0])+1)); err != nil {
+		t.Fatal(err)
+	}
+	mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:after1", 1), AppendWritten)
+	mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:after2", 1), AppendWritten)
+	if _, err := o.Finalize(); err != nil {
+		t.Fatal(err)
+	}
+	if next, _ := o.readyFiles(); len(next) != 1 || next[0] == n {
+		t.Fatalf("new ready files %v must not reuse number %d", next, n)
+	}
+	c := &capture{}
+	if _, err := o.Drain(context.Background(), c.send); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.lines) != 2 || !strings.Contains(c.lines[0], "cmp1:after1") || !strings.Contains(c.lines[1], "cmp1:after2") {
+		t.Errorf("events after the stale cursor = %q; both must be delivered whole", c.lines)
+	}
+	// A second quarantine for the same number never overwrites the first.
+	_ = os.WriteFile(filepath.Join(o.Dir(), readyName(n)), []byte(`{"truncated`), 0o600)
+	_ = o.writeCursor(n, 0)
+	if _, err := o.Drain(context.Background(), c.send); err != nil {
+		t.Fatal(err)
+	}
+	q, _ := filepath.Glob(filepath.Join(o.Dir(), fmt.Sprintf("quarantine-%d*.jsonl", n)))
+	if len(q) != 2 {
+		t.Errorf("quarantine files = %v; the first must be kept", q)
+	}
+}
+
+// Pre-review B2: a failed chown never leaves a root-owned file behind; the
+// next attempt re-creates and re-chowns it.
+func TestOutboxChownFailureIsRetried(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "home", ".scion", AnalyticsOutboxDirName)
+	failures := map[string]int{}
+	owned := map[string]bool{}
+	prevEuid, prevChown := outboxGeteuid, outboxChown
+	outboxGeteuid = func() int { return 0 }
+	outboxChown = func(p string, uid, gid int) error {
+		base := filepath.Base(p)
+		if (base == "lock" || base == "staging.jsonl") && failures[base] == 0 {
+			failures[base]++
+			return errors.New("injected chown failure")
+		}
+		owned[base] = true
+		return nil
+	}
+	defer func() { outboxGeteuid, outboxChown = prevEuid, prevChown }()
+	owner := &OutboxOwner{UID: 1000, GID: 1001}
+
+	if _, err := OpenAnalyticsOutboxOwned(dir, owner); err == nil {
+		t.Fatal("open with a failing lock chown succeeded")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "lock")); !os.IsNotExist(err) {
+		t.Fatal("a lock file whose chown failed must be removed")
+	}
+	o, err := OpenAnalyticsOutboxOwned(dir, owner) // retry: re-created, chowned
+	if err != nil || !owned["lock"] {
+		t.Fatalf("retry open = %v, lock owned %v", err, owned["lock"])
+	}
+	if _, err := o.AppendUsage(draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:a", 1)); err == nil {
+		t.Fatal("append with a failing staging chown succeeded")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "staging.jsonl")); !os.IsNotExist(err) {
+		t.Error("a staging file whose chown failed must be removed (else it stays root-owned)")
+	}
+	mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:b", 1), AppendWritten)
+	if !owned["staging.jsonl"] || !owned["append_failed"] {
+		t.Errorf("owned = %v; staging and the append_failed evidence must end up agent-owned", owned)
+	}
+}
+
+// Pre-review M1: a missing epoch at append time consumes a seq.
+func TestOutboxMissingEpochConsumesSeq(t *testing.T) {
+	o := testOutbox(t)
+	epoch, _ := os.ReadFile(filepath.Join(o.Dir(), "epoch"))
+	_ = os.Remove(filepath.Join(o.Dir(), "epoch"))
+	if _, err := o.AppendUsage(requestIDDraft(5)); err == nil {
+		t.Fatal("append without an epoch succeeded")
+	}
+	_ = os.WriteFile(filepath.Join(o.Dir(), "epoch"), epoch, 0o600)
+	if next := mustAppend(t, o, requestIDDraft(5), AppendWritten); next.ProducerSeq != 2 {
+		t.Errorf("seq after the refusal = %d, want 2 (gap)", next.ProducerSeq)
+	}
+}
+
+// Pre-review M2: recovery must not take an older line with the same
+// deterministic event_id (index expired) for the intent's line.
+func TestOutboxRecoveryMatchesSeqNotJustEventID(t *testing.T) {
+	o := testOutbox(t)
+	first := mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:x", 1), AppendWritten)
+	// The index entry expires; the same identity is observed again and
+	// gets occurrence 1 (same event_id); crash after the intent.
+	_ = os.RemoveAll(o.indexDir())
+	_ = os.Mkdir(o.indexDir(), 0o700)
+	o.crashAt = "intent"
+	if _, err := o.AppendUsage(draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:x", 1)); !errors.Is(err, errSimulatedCrash) {
+		t.Fatalf("simulated crash = %v", err)
+	}
+	o.crashAt = ""
+	reopened, _ := OpenAnalyticsOutbox(o.Dir())
+	next := mustAppend(t, reopened, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:other", 1), AppendWritten)
+	// The crashed observation (seq 2) was lost: a gap, so the next is 3,
+	// and the older line (seq 1, same event_id) was not mistaken for it.
+	if first.ProducerSeq != 1 || next.ProducerSeq != 3 || len(stagingLines(t, reopened)) != 2 {
+		t.Errorf("first seq %d, next seq %d, lines %d; want 1, 3, 2", first.ProducerSeq, next.ProducerSeq, len(stagingLines(t, reopened)))
 	}
 }
