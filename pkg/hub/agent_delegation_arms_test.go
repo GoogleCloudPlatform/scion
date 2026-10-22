@@ -435,8 +435,8 @@ func TestAgentEnvVisibility_DecidedOnlyByTheHelpers(t *testing.T) {
 	}
 	assert.Positive(t, sites)
 
-	// MCP server env and headers (like InlineConfig.Env and the telemetry
-	// headers) are redacted inside store's ResponseView, which only
+	// MCP server env and headers and service env (like InlineConfig.Env and
+	// the telemetry headers) are redacted inside store's ResponseView, which only
 	// agent_env_redaction.go calls (checked above), so the same two helpers
 	// decide them. Pin that chain in pkg/store.
 	assertStoreResponseRedactionChain(t)
@@ -447,6 +447,7 @@ func TestAgentEnvVisibility_DecidedOnlyByTheHelpers(t *testing.T) {
 // it.
 var storeResponseRedactionCallers = map[string][]string{
 	"redactMCPServersForResponse":   {"redactInlineConfigForResponse"},
+	"redactServicesForResponse":     {"redactInlineConfigForResponse"},
 	"redactInlineConfigForResponse": {"ResponseView", "redactCreateInputsForResponse"},
 	"redactCreateInputsForResponse": {"ResponseView"},
 }

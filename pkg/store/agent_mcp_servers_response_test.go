@@ -134,3 +134,89 @@ func TestResponseViewMCPServers_InputUnchanged(t *testing.T) {
 	assert.Equal(t, want, ac.InlineConfig.MCPServers)
 	assert.Equal(t, want, ac.CreateInputs.InlineConfig.MCPServers)
 }
+
+func servicesFixture() []api.ServiceSpec {
+	return []api.ServiceSpec{
+		{
+			Name:       "browser",
+			Command:    []string{"browser", "--headless"},
+			Restart:    "always",
+			Env:        map[string]string{"BROWSER_TOKEN": "service-env-value"},
+			ReadyCheck: &api.ReadyCheck{Type: "tcp", Target: "localhost:9222", Timeout: "5s"},
+		},
+	}
+}
+
+func servicesResponseConfig() *AgentAppliedConfig {
+	return &AgentAppliedConfig{
+		InlineConfig: &api.ScionConfig{Services: servicesFixture()},
+		CreateInputs: &AgentCreateInputs{
+			InlineConfig: &api.ScionConfig{Services: servicesFixture()},
+		},
+	}
+}
+
+// decodeServices marshals view and returns the services lists of
+// inlineConfig and createInputs.inlineConfig, as a client would read them.
+func decodeServices(t *testing.T, view *AgentAppliedConfig) map[string][]api.ServiceSpec {
+	t.Helper()
+	data, err := json.Marshal(view)
+	require.NoError(t, err)
+	var decoded struct {
+		InlineConfig struct {
+			Services []api.ServiceSpec `json:"services"`
+		} `json:"inlineConfig"`
+		CreateInputs struct {
+			InlineConfig struct {
+				Services []api.ServiceSpec `json:"services"`
+			} `json:"inlineConfig"`
+		} `json:"createInputs"`
+	}
+	require.NoError(t, json.Unmarshal(data, &decoded))
+	return map[string][]api.ServiceSpec{
+		"inlineConfig":              decoded.InlineConfig.Services,
+		"createInputs.inlineConfig": decoded.CreateInputs.InlineConfig.Services,
+	}
+}
+
+// TestResponseViewServices_NoAttachOmitsEnv: without attach, every
+// service's env is omitted from the response, in InlineConfig and in
+// CreateInputs.InlineConfig, like InlineConfig.Env. The entries and their
+// other fields stay visible.
+func TestResponseViewServices_NoAttachOmitsEnv(t *testing.T) {
+	for where, services := range decodeServices(t, servicesResponseConfig().ResponseView(false)) {
+		require.Len(t, services, 1, where)
+		want := servicesFixture()[0]
+		want.Env = nil
+		assert.Equal(t, want, services[0], "%s: service env must be omitted without attach", where)
+	}
+}
+
+// TestResponseViewServices_AttachKeepsValues: with attach, service env
+// values are returned unchanged.
+func TestResponseViewServices_AttachKeepsValues(t *testing.T) {
+	for where, services := range decodeServices(t, servicesResponseConfig().ResponseView(true)) {
+		assert.Equal(t, servicesFixture(), services, where)
+	}
+}
+
+// TestResponseViewServices_InputUnchanged: the redaction is response-only.
+// Neither view mutates the original config, and changing the view does not
+// reach the original.
+func TestResponseViewServices_InputUnchanged(t *testing.T) {
+	ac := servicesResponseConfig()
+	want := servicesFixture()
+
+	_ = ac.ResponseView(false)
+	assert.Equal(t, want, ac.InlineConfig.Services)
+	assert.Equal(t, want, ac.CreateInputs.InlineConfig.Services)
+
+	view := ac.ResponseView(true)
+	view.InlineConfig.Services[0].Env["BROWSER_TOKEN"] = "changed"
+	view.InlineConfig.Services[0].Command[0] = "changed"
+	view.InlineConfig.Services[0].ReadyCheck.Target = "changed"
+	view.InlineConfig.Services[0].Name = "changed"
+	view.CreateInputs.InlineConfig.Services[0].Env["BROWSER_TOKEN"] = "changed"
+	assert.Equal(t, want, ac.InlineConfig.Services)
+	assert.Equal(t, want, ac.CreateInputs.InlineConfig.Services)
+}

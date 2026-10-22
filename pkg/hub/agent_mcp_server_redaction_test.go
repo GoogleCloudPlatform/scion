@@ -46,55 +46,69 @@ func mcpRedactionServers() map[string]api.MCPServerConfig {
 	}
 }
 
+// mcpRedactionServices returns a service list with one service carrying env.
+func mcpRedactionServices() []api.ServiceSpec {
+	return []api.ServiceSpec{
+		{Name: "browser", Command: []string{"browser", "--headless"}, Env: map[string]string{"BROWSER_TOKEN": "service-env-value"}},
+	}
+}
+
+// inlineConfigInResponse is the part of an inline config this test reads.
+type inlineConfigInResponse struct {
+	MCPServers map[string]api.MCPServerConfig `json:"mcp_servers"`
+	Services   []api.ServiceSpec              `json:"services"`
+}
+
 // mcpServersInResponse is the part of an agent response this test reads:
-// the MCP server maps of inlineConfig and createInputs.inlineConfig, as a
-// client decodes them.
+// the MCP server maps and service lists of inlineConfig and
+// createInputs.inlineConfig, as a client decodes them.
 type mcpServersInResponse struct {
 	ID            string `json:"id"`
 	AppliedConfig *struct {
-		InlineConfig *struct {
-			MCPServers map[string]api.MCPServerConfig `json:"mcp_servers"`
-		} `json:"inlineConfig"`
+		InlineConfig *inlineConfigInResponse `json:"inlineConfig"`
 		CreateInputs *struct {
-			InlineConfig *struct {
-				MCPServers map[string]api.MCPServerConfig `json:"mcp_servers"`
-			} `json:"inlineConfig"`
+			InlineConfig *inlineConfigInResponse `json:"inlineConfig"`
 		} `json:"createInputs"`
 	} `json:"appliedConfig"`
 }
 
-// servers returns both MCP server maps, keyed by where they appear.
-func (r mcpServersInResponse) servers(t *testing.T) map[string]map[string]api.MCPServerConfig {
+// configs returns both inline configs, keyed by where they appear.
+func (r mcpServersInResponse) configs(t *testing.T) map[string]*inlineConfigInResponse {
 	t.Helper()
 	require.NotNil(t, r.AppliedConfig, "agent %s: response has no appliedConfig", r.ID)
 	require.NotNil(t, r.AppliedConfig.InlineConfig, "agent %s: response has no inlineConfig", r.ID)
 	require.NotNil(t, r.AppliedConfig.CreateInputs, "agent %s: response has no createInputs", r.ID)
 	require.NotNil(t, r.AppliedConfig.CreateInputs.InlineConfig, "agent %s: response has no createInputs.inlineConfig", r.ID)
-	return map[string]map[string]api.MCPServerConfig{
-		"inlineConfig":              r.AppliedConfig.InlineConfig.MCPServers,
-		"createInputs.inlineConfig": r.AppliedConfig.CreateInputs.InlineConfig.MCPServers,
+	return map[string]*inlineConfigInResponse{
+		"inlineConfig":              r.AppliedConfig.InlineConfig,
+		"createInputs.inlineConfig": r.AppliedConfig.CreateInputs.InlineConfig,
 	}
 }
 
-// assertMCPValuesOmitted: both servers are listed, with their env and
-// headers omitted (like env for a caller without attach).
+// assertMCPValuesOmitted: both servers and the service are listed, with
+// their env and headers omitted (like env for a caller without attach).
 func assertMCPValuesOmitted(t *testing.T, r mcpServersInResponse, path string) {
 	t.Helper()
-	for where, servers := range r.servers(t) {
+	for where, cfg := range r.configs(t) {
+		servers := cfg.MCPServers
 		require.Len(t, servers, 2, "%s %s: every MCP server stays listed", path, where)
 		assert.Nil(t, servers["local-tool"].Env, "%s %s: MCP server env must be omitted without attach", path, where)
 		assert.Equal(t, "local-tool", servers["local-tool"].Command, "%s %s", path, where)
 		assert.Nil(t, servers["remote-tool"].Headers, "%s %s: MCP server headers must be omitted without attach", path, where)
 		assert.Equal(t, "https://mcp.example.com/mcp", servers["remote-tool"].URL, "%s %s", path, where)
+		require.Len(t, cfg.Services, 1, "%s %s: every service stays listed", path, where)
+		assert.Nil(t, cfg.Services[0].Env, "%s %s: service env must be omitted without attach", path, where)
+		assert.Equal(t, "browser", cfg.Services[0].Name, "%s %s", path, where)
 	}
 }
 
 // assertMCPValuesVisible: env and header values are returned unchanged.
 func assertMCPValuesVisible(t *testing.T, r mcpServersInResponse, path string) {
 	t.Helper()
-	for where, servers := range r.servers(t) {
-		assert.Equal(t, map[string]string{"TOOL_API_KEY": "stdio-env-value"}, servers["local-tool"].Env, "%s %s", path, where)
-		assert.Equal(t, map[string]string{"Authorization": "Bearer header-value"}, servers["remote-tool"].Headers, "%s %s", path, where)
+	for where, cfg := range r.configs(t) {
+		assert.Equal(t, map[string]string{"TOOL_API_KEY": "stdio-env-value"}, cfg.MCPServers["local-tool"].Env, "%s %s", path, where)
+		assert.Equal(t, map[string]string{"Authorization": "Bearer header-value"}, cfg.MCPServers["remote-tool"].Headers, "%s %s", path, where)
+		assert.Equal(t, mcpRedactionServices(), cfg.Services, "%s %s", path, where)
 	}
 }
 
@@ -131,7 +145,8 @@ func decodeListedAgentMCP(t *testing.T, body []byte, agentID string) mcpServersI
 }
 
 // TestAgentResponseMCPServerEnvAndHeaders_CrossMember: agent response
-// redaction covers every MCP server's env and headers, under the same
+// redaction covers every MCP server's env and headers and every service's
+// env, under the same
 // visibility decision as env. A project owner and a project admin acting on
 // another member's agent hold agent update and lifecycle but not attach
 // (see TestCrossMemberAttach_Matrix), so every response path they reach
@@ -149,9 +164,9 @@ func TestAgentResponseMCPServerEnvAndHeaders_CrossMember(t *testing.T) {
 		OwnerID:   alice.ID,
 		Phase:     string(state.PhaseStopped),
 		AppliedConfig: &store.AgentAppliedConfig{
-			InlineConfig: &api.ScionConfig{MCPServers: mcpRedactionServers()},
+			InlineConfig: &api.ScionConfig{MCPServers: mcpRedactionServers(), Services: mcpRedactionServices()},
 			CreateInputs: &store.AgentCreateInputs{
-				InlineConfig: &api.ScionConfig{MCPServers: mcpRedactionServers()},
+				InlineConfig: &api.ScionConfig{MCPServers: mcpRedactionServers(), Services: mcpRedactionServices()},
 			},
 		},
 	}
@@ -225,14 +240,16 @@ func TestAgentResponseMCPServerEnvAndHeaders_CrossMember(t *testing.T) {
 		assertMCPValuesVisible(t, decodeSingleAgentMCP(t, rec.Body.Bytes()), "POST stop")
 	})
 
-	t.Run("stored MCP server env and headers are unchanged", func(t *testing.T) {
+	t.Run("stored MCP server env and headers and service env are unchanged", func(t *testing.T) {
 		stored, err := s.GetAgent(ctx, agent.ID)
 		require.NoError(t, err)
 		require.NotNil(t, stored.AppliedConfig)
 		require.NotNil(t, stored.AppliedConfig.InlineConfig)
 		assert.Equal(t, mcpRedactionServers(), stored.AppliedConfig.InlineConfig.MCPServers)
+		assert.Equal(t, mcpRedactionServices(), stored.AppliedConfig.InlineConfig.Services)
 		require.NotNil(t, stored.AppliedConfig.CreateInputs)
 		require.NotNil(t, stored.AppliedConfig.CreateInputs.InlineConfig)
 		assert.Equal(t, mcpRedactionServers(), stored.AppliedConfig.CreateInputs.InlineConfig.MCPServers)
+		assert.Equal(t, mcpRedactionServices(), stored.AppliedConfig.CreateInputs.InlineConfig.Services)
 	})
 }
