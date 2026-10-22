@@ -125,6 +125,8 @@ func BuildCanonicalString(r *http.Request, timestamp, nonce string) []byte {
 		// We need to read and restore the body
 		bodyBytes, err := io.ReadAll(r.Body)
 		if err == nil {
+			// Release the original body before replacing it with the buffered copy.
+			_ = r.Body.Close()
 			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 			bodyHash := sha256.Sum256(bodyBytes)
 			buf.WriteString(base64.StdEncoding.EncodeToString(bodyHash[:]))
