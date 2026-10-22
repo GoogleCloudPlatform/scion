@@ -727,3 +727,59 @@ func TestAgentPendingConfig_ReincarnateDoesNotApplyPendingYet(t *testing.T) {
 	require.NotNil(t, final.PendingConfig)
 	assert.Equal(t, []string{"config.system_prompt"}, pendingConfigKeys(final.PendingConfig))
 }
+
+// TestAgentPendingConfig_StartOfRunningAgentKeepsHeldEdits: a start of an
+// agent that is already running keeps its running container, so held
+// edits stay held: nothing is applied, the pending config is kept and no
+// applied audit is written. The next container creation applies them.
+func TestAgentPendingConfig_StartOfRunningAgentKeepsHeldEdits(t *testing.T) {
+	srv, s, disp, agent := heldEditsFixture(t, state.PhaseRunning)
+	patchPending(t, srv, agent.ID, map[string]interface{}{
+		"config": map[string]interface{}{"model": "held-model"},
+	})
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/start", nil)
+	require.Less(t, rec.Code, 300, rec.Body.String())
+	after := pendingReloadAgent(t, s, agent.ID)
+	assert.Equal(t, "old-model", after.AppliedConfig.Model, "the running container was not recreated")
+	require.NotNil(t, after.PendingConfig, "the held edit stays held")
+	assert.Equal(t, []string{"config.model"}, pendingConfigKeys(after.PendingConfig))
+	for _, st := range disp.snapshot() {
+		assert.Equal(t, "old-model", st.model)
+	}
+	recs, _, err := s.ListMutationAudits(context.Background(), store.MutationAuditFilter{
+		MutationType: mutationTypeAgentPendingConfigApplied, TargetID: agent.ID, Limit: 5,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, recs, "nothing was applied")
+
+	pendingLifecycleWarnings(t, srv, agent.ID, "stop")
+	pendingLifecycleWarnings(t, srv, agent.ID, "start")
+	starts := disp.snapshot()
+	require.NotEmpty(t, starts)
+	assert.Equal(t, "held-model", starts[len(starts)-1].model, "the next container creation applies the held edit")
+	assert.Nil(t, pendingReloadAgent(t, s, agent.ID).PendingConfig)
+}
+
+// TestAgentPendingConfig_UndecodableStoredKeyIsRemovedAtStart: a stored
+// pending key that no longer decodes can never be applied; the start
+// removes it (and applies the rest), so it does not stay pending or warn.
+func TestAgentPendingConfig_UndecodableStoredKeyIsRemovedAtStart(t *testing.T) {
+	srv, s, disp, agent := heldEditsFixture(t, state.PhaseStopped)
+	cur := pendingReloadAgent(t, s, agent.ID)
+	cur.PendingConfig = &store.AgentPendingConfig{Config: map[string]json.RawMessage{
+		"model":     json.RawMessage(`"good-model"`),
+		"max_turns": json.RawMessage(`"not a number"`),
+	}}
+	require.NoError(t, s.UpdateAgent(context.Background(), cur))
+
+	warnings := pendingLifecycleWarnings(t, srv, agent.ID, "start")
+	for _, w := range warnings {
+		assert.NotContains(t, w, heldReincarnateWarningPrefix)
+	}
+	starts := disp.snapshot()
+	require.Len(t, starts, 1)
+	assert.Equal(t, "good-model", starts[0].model)
+	assert.Equal(t, 3, starts[0].inline.MaxTurns, "the undecodable value is not applied")
+	assert.Nil(t, pendingReloadAgent(t, s, agent.ID).PendingConfig, "the undecodable key is removed")
+}

@@ -490,13 +490,13 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 	// (ptone/scion#3819). A provisioned agent has no previous run, and a
 	// start of a running agent (other than a restart's start leg) keeps
 	// the running pod, so its workspace is not re-cloned.
-	hadEphemeral := !provisioned && hasEphemeralWorkspace(agent) &&
-		(agent.Phase != string(state.PhaseRunning) || opts.Kind == store.StartClaimRestart)
+	createsContainer := agent.Phase != string(state.PhaseRunning) || opts.Kind == store.StartClaimRestart
+	hadEphemeral := !provisioned && hasEphemeralWorkspace(agent) && createsContainer
 	supersedesQueuedStop := agent.ContainerStatus == containerStatusStopQueued
 	sd := opts.Dispatch
 	callerDeadline, hasCallerDeadline := ctx.Deadline()
-	// stillHeld are the pending config keys the start left pending (they
-	// wait for a reincarnation), reported once the start succeeded.
+	// stillHeld are the pending config keys a container-creating start left
+	// pending (provision-rendered keys), reported once the start succeeded.
 	var stillHeld []string
 	err := s.withStartClaim(ctx, agent, opts.Kind, opts.Existing, func(ctx context.Context, fence func() error) (bool, error) {
 		endOp := s.beginLifecycleOp(agent.ID)
@@ -513,13 +513,18 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 		}
 		// Held config edits (ptone/scion#3976) are applied here, under the
 		// claim and after the fence, so the dispatch below sends them; a
-		// save racing this fold fails its compare-and-set.
-		held, err := s.foldPendingConfigAtStart(ctx, agent, startFoldTrigger(opts))
-		if err != nil {
-			sd.rollback(ctx)
-			return false, err
+		// save racing this fold fails its compare-and-set. Only a start
+		// that creates a container applies them: a start of a running
+		// agent (other than a restart's start leg) keeps the running
+		// container, so its held edits stay held.
+		if createsContainer {
+			held, err := s.foldPendingConfigAtStart(ctx, agent, startFoldTrigger(opts))
+			if err != nil {
+				sd.rollback(ctx)
+				return false, err
+			}
+			stillHeld = held
 		}
-		stillHeld = held
 		dctx := ctx
 		if opts.KeepCallerDeadline && hasCallerDeadline {
 			var cancel context.CancelFunc
@@ -529,6 +534,7 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 		dispatch := func(c context.Context) error {
 			return dispatcher.DispatchAgentStart(c, agent, opts.Task, opts.Resume)
 		}
+		var err error
 		if opts.SyncDispatchBound {
 			err = syncDispatch(dctx, dispatch)
 		} else {

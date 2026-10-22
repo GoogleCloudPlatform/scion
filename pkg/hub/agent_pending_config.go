@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"net/http"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -354,25 +355,49 @@ func (s *Server) foldPendingConfig(ctx context.Context, agent *store.Agent, keep
 	if agent.PendingConfig.IsEmpty() {
 		return nil
 	}
-	p := pendingConfigPatch(agent.PendingConfig).subset(keep)
+	full := pendingConfigPatch(agent.PendingConfig)
+	rest := agent.PendingConfig.Clone()
+	// A stored key that no longer decodes (pendingConfigPatch logged it), or
+	// that the edit table no longer knows, can never be applied: it is
+	// removed here, so it does not stay pending.
+	undecodable := false
+	for k := range rest.Config {
+		_, decoded := full.raw[k]
+		_, known := agentConfigEditFieldByLowerKey[strings.ToLower(k)]
+		if !decoded || !known {
+			slog.Warn("pending config: removing a stored key that cannot be applied", "agent_id", agent.ID, "key", k)
+			delete(rest.Config, k)
+			undecodable = true
+		}
+	}
+	p := full.subset(keep)
 	if p.empty() {
+		if undecodable {
+			agent.PendingConfig = restOrNil(rest)
+		}
 		return nil
 	}
 	s.applyAgentConfigPatch(ctx, agent, p, agent.PendingConfig.EnvSaverCanViewEnv)
-	rest := agent.PendingConfig.Clone()
 	var folded []string
 	for _, f := range configPatchKeys(p.raw) {
 		folded = append(folded, f.Key)
 		delete(rest.Config, strings.TrimPrefix(f.Key, agentConfigKeyPrefix))
 	}
+	agent.PendingConfig = restOrNil(rest)
+	return folded
+}
+
+// restOrNil returns rest, a pending config some keys were removed from, as
+// the agent's new pending config: nil when no key is left, and without the
+// env saver flag when env is gone.
+func restOrNil(rest *store.AgentPendingConfig) *store.AgentPendingConfig {
 	if _, ok := rest.Config["env"]; !ok {
 		rest.EnvSaverCanViewEnv = false
 	}
 	if rest.IsEmpty() {
-		rest = nil
+		return nil
 	}
-	agent.PendingConfig = rest
-	return folded
+	return rest
 }
 
 // dropPendingKeysNamed removes from the agent's pending config, in memory,
@@ -461,9 +486,9 @@ func (s *Server) foldPendingConfigAtStart(ctx context.Context, agent *store.Agen
 		st.AppliedConfig = cloneAppliedConfig(stored.AppliedConfig)
 		st.PendingConfig = stored.PendingConfig.Clone()
 		folded := s.foldPendingConfig(ctx, &st, isContainerConfigField)
-		if len(folded) == 0 {
-			// Nothing to apply now (another start applied it, or it was
-			// discarded): the caller's copy follows the stored row.
+		if len(folded) == 0 && slices.Equal(pendingConfigKeys(st.PendingConfig), pendingConfigKeys(stored.PendingConfig)) {
+			// Nothing to apply or remove now (another start applied it, or
+			// it was discarded): the caller's copy follows the stored row.
 			agent.PendingConfig = stored.PendingConfig
 			return pendingConfigKeys(stored.PendingConfig), nil
 		}
@@ -483,7 +508,9 @@ func (s *Server) foldPendingConfigAtStart(ctx context.Context, agent *store.Agen
 		if agent.StateVersion == stored.StateVersion {
 			agent.StateVersion = version
 		}
-		s.auditPendingConfig(ctx, agent.ID, mutationTypeAgentPendingConfigApplied, folded, trigger)
+		if len(folded) > 0 {
+			s.auditPendingConfig(ctx, agent.ID, mutationTypeAgentPendingConfigApplied, folded, trigger)
+		}
 		return pendingConfigKeys(st.PendingConfig), nil
 	}
 	return nil, fmt.Errorf("%w: %w", errPendingConfigFold, store.ErrVersionConflict)
