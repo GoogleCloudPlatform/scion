@@ -576,6 +576,13 @@ func TestConfigSetHubEndpoint_ReportsAnotherHubOnlyWhenOneApplies(t *testing.T) 
 			require.NoError(t, err)
 			assert.Equal(t, 1, strings.Count(stdout, "\n"), "stdout keeps one line: %q", stdout)
 			assert.Equal(t, tc.want, stderr)
+			// Where stderr would be the same without the flag, this tells the
+			// rows apart: the run's hub came from --hub.
+			if tc.flag != "" {
+				h := resolveCLIHub()
+				assert.Equal(t, useSourceFlag, h.Source, "the run took its hub from --hub")
+				assert.Equal(t, tc.flag, h.Endpoint)
+			}
 		})
 	}
 }
