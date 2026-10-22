@@ -1283,19 +1283,26 @@ func (o *AnalyticsOutbox) retainedBytes() (int64, error) {
 	if err != nil {
 		return 0, err
 	}
+	kept, err := o.keptBytes()
+	return pending + kept, err
+}
+
+// keptBytes sums dead-letter and quarantine files (kept, not delivered).
+func (o *AnalyticsOutbox) keptBytes() (int64, error) {
 	entries, err := os.ReadDir(o.dir)
 	if err != nil {
 		return 0, fmt.Errorf("analytics outbox: %w", err)
 	}
+	var kept int64
 	for _, e := range entries {
 		name := e.Name()
 		if name == "dead_letter.jsonl" || strings.HasPrefix(name, "quarantine-") {
 			if info, err := e.Info(); err == nil {
-				pending += info.Size()
+				kept += info.Size()
 			}
 		}
 	}
-	return pending, nil
+	return kept, nil
 }
 
 func (o *AnalyticsOutbox) readCursor() (file, offset int64, err error) {
@@ -1521,9 +1528,100 @@ func (o *AnalyticsOutbox) removeIndexBatch(batch []indexAge) (int, error) {
 	return 0, nil
 }
 
-// Stats returns the outbox counters. Pending figures are read from disk.
-func (o *AnalyticsOutbox) Stats() AnalyticsOutboxStats {
-	s := AnalyticsOutboxStats{
+// OutboxLedger is a typed, read-only snapshot of the outbox's on-disk
+// ledger: everything shared by all producer processes and kept across
+// restarts. It is the only supported way for other code (WP3 diagnostics)
+// to read the ledger; the file names stay private here.
+type OutboxLedger struct {
+	Dir         string
+	Epoch       string // never "" for an opened outbox
+	LastSeq     int64  // last allocated producer_seq
+	PinnedHubID string // "" until pinned
+
+	OverflowTotal, OversizeTotal, AppendFailedTotal, DeadLettersTotal int64
+	SyncUncertainTotal, CommitDeferredTotal                           int64
+
+	Held          bool  // an unresolved append intent is on disk
+	PendingBytes  int64 // undelivered: staging, finalizing, ready past the cursor
+	RetainedBytes int64 // PendingBytes (same read) + dead-letter + quarantine files
+	// OldestPending is the oldest pending file's modification time; zero
+	// when nothing is pending.
+	OldestPending time.Time
+}
+
+// LedgerSnapshot reads every ledger value once under the outbox lock, so
+// the values are mutually consistent (no in-flight append between them).
+// A counter file that does not exist yet reads as 0; any other read or
+// parse error, or ErrAnalyticsOutboxLocked, is returned.
+func (o *AnalyticsOutbox) LedgerSnapshot() (OutboxLedger, error) {
+	unlock, err := o.lock()
+	if err != nil {
+		return OutboxLedger{Dir: o.dir}, err
+	}
+	defer unlock()
+	return o.ledgerLocked()
+}
+
+// ledgerLocked reads the ledger; the caller holds the lock.
+func (o *AnalyticsOutbox) ledgerLocked() (OutboxLedger, error) {
+	d := OutboxLedger{Dir: o.dir}
+	var err error
+	if d.Epoch, err = o.readTrimmed("epoch"); err != nil {
+		return d, err
+	}
+	if d.Epoch == "" {
+		return d, errors.New("analytics outbox: epoch missing")
+	}
+	if d.PinnedHubID, err = o.readTrimmed("hub_id"); err != nil {
+		return d, err
+	}
+	for name, dst := range map[string]*int64{
+		"seq": &d.LastSeq, "overflow": &d.OverflowTotal, "oversize": &d.OversizeTotal, "dead_letters": &d.DeadLettersTotal,
+	} {
+		if *dst, err = o.readInt(name); err != nil {
+			return d, err
+		}
+	}
+	for name, dst := range map[string]*int64{
+		"append_failed": &d.AppendFailedTotal, "sync_uncertain": &d.SyncUncertainTotal, "commit_deferred": &d.CommitDeferredTotal,
+	} {
+		if *dst, err = o.byteCounter(name); err != nil {
+			return d, err
+		}
+	}
+	if _, err := os.Stat(o.path("intent")); err == nil {
+		d.Held = true
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return d, fmt.Errorf("analytics outbox: %w", err)
+	}
+	if d.PendingBytes, d.OldestPending, err = o.pendingBytes(); err != nil {
+		return d, err
+	}
+	kept, err := o.keptBytes()
+	if err != nil {
+		return d, err
+	}
+	d.RetainedBytes = d.PendingBytes + kept
+	return d, nil
+}
+
+// byteCounter reads a one-byte-per-event counter file (its size).
+func (o *AnalyticsOutbox) byteCounter(name string) (int64, error) {
+	info, err := os.Stat(o.path(name))
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("analytics outbox: %w", err)
+	}
+	return info.Size(), nil
+}
+
+// MemoryStats returns only this process's in-memory counters (no disk
+// access); the Persisted*/disk-derived fields are left zero. Use
+// LedgerSnapshot for the ledger.
+func (o *AnalyticsOutbox) MemoryStats() AnalyticsOutboxStats {
+	return AnalyticsOutboxStats{
 		Appended:          o.appended.Load(),
 		CertainDuplicates: o.certainDup.Load(),
 		Overflow:          o.overflow.Load(),
@@ -1535,34 +1633,33 @@ func (o *AnalyticsOutbox) Stats() AnalyticsOutboxStats {
 		HubIDMismatch:     o.hubIDMismatch.Load(),
 		Conflicts:         o.conflicts.Load(),
 		Quarantined:       o.quarantined.Load(),
+		DeadLetters:       o.deadLetters.Load(),
+		SyncUncertain:     o.syncUncertain.Load(),
+		CorruptIntents:    o.corruptIntents.Load(),
+		Unresolved:        o.unresolved.Load(),
+		CommitDeferred:    o.commitDeferred.Load(),
 	}
-	s.DeadLetters = o.deadLetters.Load()
-	s.SyncUncertain = o.syncUncertain.Load()
-	s.CorruptIntents = o.corruptIntents.Load()
-	s.Unresolved = o.unresolved.Load()
-	if _, err := os.Stat(o.path("intent")); err == nil {
-		s.HeldIntent = true
+}
+
+// Stats returns MemoryStats plus the disk-derived fields from one
+// LedgerSnapshot (best effort: a snapshot error leaves them zero).
+func (o *AnalyticsOutbox) Stats() AnalyticsOutboxStats {
+	s := o.MemoryStats()
+	d, err := o.LedgerSnapshot()
+	if err != nil {
+		return s
 	}
-	s.PersistedOverflow, _ = o.readInt("overflow")
-	s.PersistedOversize, _ = o.readInt("oversize")
-	persisted := func(name string) int64 {
-		if info, err := os.Stat(o.path(name)); err == nil {
-			return info.Size()
-		}
-		return 0
-	}
-	s.PersistedAppendFailed = persisted("append_failed")
-	s.PersistedSyncUncertain = persisted("sync_uncertain")
-	s.PersistedCommitDeferred = persisted("commit_deferred")
-	s.CommitDeferred = o.commitDeferred.Load()
-	s.PersistedDeadLetters, _ = o.readInt("dead_letters")
-	s.RetainedBytes, _ = o.retainedBytes()
-	pending, oldest, err := o.pendingBytes()
-	if err == nil {
-		s.PendingBytes = pending
-		if !oldest.IsZero() {
-			s.OldestPendingAge = o.now().Sub(oldest)
-		}
+	s.HeldIntent = d.Held
+	s.PersistedOverflow = d.OverflowTotal
+	s.PersistedOversize = d.OversizeTotal
+	s.PersistedAppendFailed = d.AppendFailedTotal
+	s.PersistedSyncUncertain = d.SyncUncertainTotal
+	s.PersistedCommitDeferred = d.CommitDeferredTotal
+	s.PersistedDeadLetters = d.DeadLettersTotal
+	s.PendingBytes = d.PendingBytes
+	s.RetainedBytes = d.RetainedBytes
+	if !d.OldestPending.IsZero() {
+		s.OldestPendingAge = o.now().Sub(d.OldestPending)
 	}
 	return s
 }
