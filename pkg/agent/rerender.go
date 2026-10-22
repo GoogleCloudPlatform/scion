@@ -1,0 +1,400 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package agent
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
+)
+
+// Start-time re-render of provision-rendered files (ptone/scion#3982).
+//
+// Provisioning renders four config keys into files in the agent home: the
+// agent instructions and system prompt (through the harness), the skills
+// (installed into the harness's skills directory, with a resolution
+// record) and the services (.scion/scion-services.yaml). A start only
+// merges the hub's inline config into scion-agent.json, so a change to one
+// of them would otherwise reach the agent only at a reincarnation. The hub
+// lists the keys it changed in ScionConfig.ChangedFields (and the ones it
+// cleared in ClearedFields); the broker passes them to Start as
+// StartOptions.RerenderKeys, and Start re-runs the provisioning step of
+// each listed key (rerenderProvisionedFiles) with the same code
+// ProvisionAgent uses.
+//
+// The hub's lists are sticky, so a key stays listed on every later start.
+// The re-render runs once per change: the rerender record keeps a
+// fingerprint of what was last rendered for each group of keys, and a
+// group whose fingerprint is unchanged is not written again, so files the
+// agent or its harness changed since are left alone until the hub's value
+// changes again. The record lies in the agent directory, outside every
+// container mount (config.RerenderRecordFileName), and provisioning
+// deletes it, so a new generation of the agent never matches a fingerprint
+// from the previous one.
+
+// Rerender groups: the keys whose files one provisioning step renders
+// together. The instructions and the system prompt are one group because
+// a harness may prepend the system prompt to the instructions.
+const (
+	rerenderGroupPrompts  = "prompts"
+	rerenderGroupSkills   = "skills"
+	rerenderGroupServices = "services"
+)
+
+// rerenderGroupOf maps a rerenderable config key to its group.
+var rerenderGroupOf = map[string]string{
+	"system_prompt":      rerenderGroupPrompts,
+	"agent_instructions": rerenderGroupPrompts,
+	"skills":             rerenderGroupSkills,
+	"services":           rerenderGroupServices,
+}
+
+// promptInputNames are the control-plane inputs the prompt group stages for
+// a container-script harness (its InjectAgentInstructions and
+// InjectSystemPrompt).
+var promptInputNames = []string{"instructions.md", "system-prompt.md"}
+
+// resolvedSkillsInputName is the control-plane input the skills group
+// stages for a container-script harness.
+const resolvedSkillsInputName = "resolved-skills.json"
+
+// rerenderInputs is what rerenderProvisionedFiles needs from the start.
+type rerenderInputs struct {
+	// Keys are the config keys to re-render (StartOptions.RerenderKeys).
+	Keys       []string
+	AgentName  string
+	AgentDir   string
+	AgentHome  string
+	ProjectDir string
+	Harness    api.Harness
+	// Chain is the agent's live template chain; nil when it does not
+	// resolve.
+	Chain []*config.Template
+	// Config is the agent's resolved config for this start.
+	Config *api.ScionConfig
+	// Inline is the hub's inline config for this start: a prompt value it
+	// sets is content, as at provision.
+	Inline *api.ScionConfig
+	// WriteHome runs a write into the agent home (writeAgentHome at
+	// start); nil runs it directly.
+	WriteHome func(func() error) error
+}
+
+// rerenderRecord is the rerender record: the fingerprint of what was last
+// rendered for each group.
+type rerenderRecord map[string]string
+
+func rerenderRecordPath(agentDir string) string {
+	return filepath.Join(agentDir, config.RerenderRecordFileName)
+}
+
+func readRerenderRecord(agentDir string) rerenderRecord {
+	rec := rerenderRecord{}
+	data, err := os.ReadFile(rerenderRecordPath(agentDir))
+	if err != nil {
+		return rec
+	}
+	if json.Unmarshal(data, &rec) != nil {
+		return rerenderRecord{}
+	}
+	return rec
+}
+
+func writeRerenderRecord(agentDir string, rec rerenderRecord) error {
+	data, err := json.MarshalIndent(rec, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(rerenderRecordPath(agentDir), data, 0o644)
+}
+
+// removeRerenderRecord deletes the rerender record (ProvisionAgent: the
+// files it renders are the new baseline).
+func removeRerenderRecord(agentDir string) error {
+	if err := os.Remove(rerenderRecordPath(agentDir)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// rerenderProvisionedFiles re-renders the files provisioning wrote for
+// in.Keys whose fingerprint changed since the last render, and records the
+// new fingerprints. It writes only the files the provisioning step of each
+// key writes: the harness's instruction and system-prompt files (for a
+// container-script harness, the control-plane inputs record they are
+// restaged from), the installed skills and their resolution record, and
+// the services file. It returns warnings for keys it could not re-render;
+// an error fails the start, as the same failure fails a provision.
+func rerenderProvisionedFiles(ctx context.Context, in rerenderInputs) ([]string, error) {
+	groups := map[string]bool{}
+	for _, k := range in.Keys {
+		if g, ok := rerenderGroupOf[k]; ok {
+			groups[g] = true
+		}
+	}
+	if len(groups) == 0 || in.Config == nil || in.Harness == nil {
+		return nil, nil
+	}
+	write := in.WriteHome
+	if write == nil {
+		write = func(f func() error) error { return f() }
+	}
+	rec := readRerenderRecord(in.AgentDir)
+	var warnings []string
+	changed := false
+
+	if groups[rerenderGroupPrompts] {
+		fp, warn, err := rerenderPrompts(in, rec[rerenderGroupPrompts], write)
+		if err != nil {
+			return warnings, err
+		}
+		if warn != "" {
+			warnings = append(warnings, warn)
+		} else if fp != rec[rerenderGroupPrompts] {
+			rec[rerenderGroupPrompts] = fp
+			changed = true
+		}
+	}
+	if groups[rerenderGroupSkills] {
+		fp, err := fingerprintJSON(in.Config.Skills)
+		if err != nil {
+			return warnings, err
+		}
+		if fp != rec[rerenderGroupSkills] {
+			if err := write(func() error { return rerenderSkills(ctx, in) }); err != nil {
+				return warnings, err
+			}
+			rec[rerenderGroupSkills] = fp
+			changed = true
+		}
+	}
+	if groups[rerenderGroupServices] {
+		fp, err := fingerprintJSON(in.Config.Services)
+		if err != nil {
+			return warnings, err
+		}
+		if fp != rec[rerenderGroupServices] {
+			if err := write(func() error { return rerenderServices(in.AgentHome, in.Config.Services) }); err != nil {
+				return warnings, err
+			}
+			rec[rerenderGroupServices] = fp
+			changed = true
+		}
+	}
+	if changed {
+		if err := writeRerenderRecord(in.AgentDir, rec); err != nil {
+			return warnings, fmt.Errorf("record re-rendered files: %w", err)
+		}
+	}
+	return warnings, nil
+}
+
+// rerenderPrompts renders the instructions and system prompt into a
+// scratch home with injectPromptFiles (the provisioning step), fingerprints
+// the result, and, when it differs from recorded, copies it into place: the
+// control-plane inputs record for a container-script harness (Start
+// restages inputs from it), else the agent home. It returns the
+// fingerprint, or a warning when the prompts cannot be rendered because a
+// value names a template file and the template does not resolve.
+func rerenderPrompts(in rerenderInputs, recorded string, write func(func() error) error) (string, string, error) {
+	if len(in.Chain) == 0 {
+		// Without a template, provisioning renders a value as content; a
+		// value the hub did not send is a template file name here.
+		for _, f := range []struct{ cfg, inline string }{
+			{in.Config.AgentInstructions, inlineString(in.Inline, func(c *api.ScionConfig) string { return c.AgentInstructions })},
+			{in.Config.SystemPrompt, inlineString(in.Inline, func(c *api.ScionConfig) string { return c.SystemPrompt })},
+		} {
+			if f.cfg != "" && f.inline == "" {
+				return "", "system_prompt, agent_instructions: not re-rendered at this start because the agent's template could not be resolved; they take effect at the next reincarnation", nil
+			}
+		}
+	}
+	scratch, err := os.MkdirTemp("", "scion-rerender-")
+	if err != nil {
+		return "", "", err
+	}
+	defer func() { _ = os.RemoveAll(scratch) }()
+	// A prompt value the hub sends is content and wins, as the merge into
+	// the persisted config made it win at provision.
+	cfg := *in.Config
+	if in.Inline != nil {
+		if in.Inline.AgentInstructions != "" {
+			cfg.AgentInstructions = in.Inline.AgentInstructions
+		}
+		if in.Inline.SystemPrompt != "" {
+			cfg.SystemPrompt = in.Inline.SystemPrompt
+		}
+	}
+	if err := injectPromptFiles(in.Harness, scratch, in.Chain, &cfg, in.Inline); err != nil {
+		return "", "", err
+	}
+	files, err := readTree(scratch)
+	if err != nil {
+		return "", "", err
+	}
+	fp := fingerprintFiles(files)
+	if fp == recorded {
+		return fp, "", nil
+	}
+	if isContainerScriptHarness(in.Harness) {
+		record := filepath.Join(in.AgentDir, controlPlaneInputsDirName)
+		if err := os.MkdirAll(record, 0o755); err != nil {
+			return "", "", err
+		}
+		staged := filepath.ToSlash(filepath.Join(".scion", "harness", "inputs"))
+		for _, name := range promptInputNames {
+			dst := filepath.Join(record, name)
+			data, ok := files[staged+"/"+name]
+			if !ok {
+				if err := os.Remove(dst); err != nil && !os.IsNotExist(err) {
+					return "", "", err
+				}
+				continue
+			}
+			if err := os.WriteFile(dst, data, 0o644); err != nil {
+				return "", "", err
+			}
+		}
+		util.Debugf("rerender: staged prompts for agent %s in the inputs record", in.AgentName)
+		return fp, "", nil
+	}
+	err = write(func() error {
+		for rel, data := range files {
+			dst := filepath.Join(in.AgentHome, filepath.FromSlash(rel))
+			if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+				return err
+			}
+			if err := os.WriteFile(dst, data, 0o644); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return "", "", err
+	}
+	util.Debugf("rerender: wrote prompts for agent %s into the agent home", in.AgentName)
+	return fp, "", nil
+}
+
+// rerenderSkills resolves and installs the agent's skills
+// (resolveAndInstallSkills, the provisioning step) and, for a
+// container-script harness, records the staged resolution record in the
+// control-plane inputs record Start restages from. Skills dropped from the
+// list stay installed, as after a reprovision.
+func rerenderSkills(ctx context.Context, in rerenderInputs) error {
+	record, err := resolveAndInstallSkills(ctx, in.AgentName, in.ProjectDir, in.Harness, in.AgentHome, in.Config.Skills)
+	if err != nil {
+		return err
+	}
+	if record == nil || !isContainerScriptHarness(in.Harness) {
+		return nil
+	}
+	data, err := os.ReadFile(filepath.Join(stagedInputsDir(in.AgentHome), resolvedSkillsInputName))
+	if err != nil {
+		return fmt.Errorf("read staged skill resolution record: %w", err)
+	}
+	dir := filepath.Join(in.AgentDir, controlPlaneInputsDirName)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, resolvedSkillsInputName), data, 0o644)
+}
+
+// rerenderServices writes the services file (writeServicesFile, the
+// provisioning step), or removes it when the agent has no services.
+func rerenderServices(agentHome string, services []api.ServiceSpec) error {
+	if len(services) > 0 {
+		return writeServicesFile(agentHome, services)
+	}
+	err := os.Remove(filepath.Join(agentHome, ".scion", servicesFileName))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func inlineString(c *api.ScionConfig, get func(*api.ScionConfig) string) string {
+	if c == nil {
+		return ""
+	}
+	return get(c)
+}
+
+// readTree reads every regular file under root, keyed by slash-separated
+// relative path.
+func readTree(root string) (map[string][]byte, error) {
+	files := map[string][]byte{}
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			return err
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		files[filepath.ToSlash(rel)] = data
+		return nil
+	})
+	return files, err
+}
+
+// fingerprintFiles hashes files (path and content, in path order).
+func fingerprintFiles(files map[string][]byte) string {
+	names := make([]string, 0, len(files))
+	for n := range files {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	h := sha256.New()
+	for _, n := range names {
+		fmt.Fprintf(h, "%d:%s\n%d:", len(n), n, len(files[n]))
+		h.Write(files[n])
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// fingerprintJSON hashes v's JSON encoding; an empty slice or map hashes
+// like nil.
+func fingerprintJSON(v any) (string, error) {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return "", err
+	}
+	if s := strings.TrimSpace(string(data)); s == "[]" || s == "{}" {
+		data = []byte("null")
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}

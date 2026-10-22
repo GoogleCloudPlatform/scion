@@ -1036,6 +1036,34 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		} else if err := ensureControlPlaneInputsRecord(agentDir); err != nil {
 			return nil, fmt.Errorf("record harness inputs: %w", err)
 		}
+		// Re-render the provision-rendered files of the keys the hub
+		// changed or cleared since provisioning (ptone/scion#3982), with
+		// the provisioning steps themselves, into the agent home and the
+		// inputs record restaged below. A key whose rendered result is
+		// unchanged since its last render is left alone.
+		if len(opts.RerenderKeys) > 0 {
+			rerenderWarns, err := rerenderProvisionedFiles(ctx, rerenderInputs{
+				Keys:       opts.RerenderKeys,
+				AgentName:  opts.Name,
+				AgentDir:   agentDir,
+				AgentHome:  agentHome,
+				ProjectDir: projectDir,
+				Harness:    h,
+				Chain:      envChain,
+				Config:     finalScionCfg,
+				Inline:     opts.InlineConfig,
+				WriteHome:  func(f func() error) error { return writeAgentHome(ctx, f) },
+			})
+			if err != nil {
+				return nil, fmt.Errorf("re-render provision-time files: %w", err)
+			}
+			for _, msg := range rerenderWarns {
+				if !slices.Contains(warnings, msg) {
+					slog.Warn(msg, "agent", opts.Name)
+					warnings = append(warnings, msg)
+				}
+			}
+		}
 		// Never skipped: on a permission error the home's ownership is
 		// repaired and the clear retried, or the start fails.
 		if err := writeAgentHome(ctx, func() error { return resetStagedProvisioning(agentHome) }); err != nil {

@@ -315,6 +315,9 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			// This broker's reprovision reuses an empty-per-agent
 			// workspace in place (miller79/scion#167).
 			ReprovisionEmptyPerAgent: true,
+			// Provision-rendered keys listed in changed_fields are
+			// re-rendered at start (ptone/scion#3982).
+			ChangedFields: true,
 			// Hub telemetry defaults and policy are separate tiers
 			// (ptone/scion#4218).
 			TemplateTiers: true,
@@ -3515,6 +3518,10 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	if startReq.InlineConfig != nil && opts.ProjectPath != "" {
 		s.applyInlineConfigUpdate(ctx, id, opts.ProjectPath, startReq.InlineConfig, startReq.SharedWorkspace)
 	}
+	// The provision-rendered keys the hub changed or cleared since
+	// provisioning: the start renders their files again
+	// (ptone/scion#3982).
+	opts.RerenderKeys = api.RerenderConfigKeys(startReq.InlineConfig)
 
 	// The hub is the source of truth for resume intent: when it sets
 	// req.Resume the harness must continue its prior session. We still fall
@@ -3701,11 +3708,14 @@ func (s *Server) applyInlineConfigUpdate(ctx context.Context, agentName, project
 	// the agent. Remove the paths the Hub lists as cleared, after the merge
 	// and before anything reads the config at start (ptone/scion#3906).
 	// MergeScionConfig itself stays non-zero-wins: provisioning and
-	// template layering depend on it. The list is never written to disk.
+	// template layering depend on it. Neither the cleared list nor the
+	// changed list (read by the start, StartOptions.RerenderKeys) is
+	// written to disk.
 	if inlineConfig != nil {
 		s.applyClearedFields(ctx, merged, projectPath, projectDir, agentName, inlineConfig.ClearedFields)
 	}
 	merged.ClearedFields = nil
+	merged.ChangedFields = nil
 
 	// Write back
 	updated, err := json.MarshalIndent(merged, "", "  ")

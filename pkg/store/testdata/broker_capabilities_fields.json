@@ -5,6 +5,7 @@
     "asyncLaunch",
     "asyncStart",
     "attach",
+    "changedFields",
     "emptyPerAgentWorkspace",
     "nodeImageRegistry",
     "reprovision",

@@ -2481,6 +2481,12 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	if err := ensureSecretsRecord(agentDir); err != nil {
 		return "", "", nil, fmt.Errorf("record harness secrets: %w", err)
 	}
+	// The files rendered above are the new baseline for the start-time
+	// re-render of provision-rendered keys (rerender.go): drop the
+	// fingerprints of the previous generation's renders.
+	if err := removeRerenderRecord(agentDir); err != nil {
+		return "", "", nil, fmt.Errorf("reset rerender record: %w", err)
+	}
 
 	// 3. Harness provisioning
 	if err := h.Provision(ctx, agentName, agentDir, agentHome, agentWorkspace); err != nil {
@@ -4491,7 +4497,7 @@ func injectPromptFiles(h api.Harness, agentHome string, chain []*config.Template
 // context's skill resolver, installs them into agentHome's skills directory
 // for h, and writes the resolution record (S4), staging it for a
 // container-script harness: Step 3b of ProvisionAgent, shared with the
-// start-time re-render. Required skills fail
+// start-time re-render (rerenderProvisionedFiles). Required skills fail
 // closed. It returns the record, nil when nothing was installed.
 func resolveAndInstallSkills(ctx context.Context, agentName, projectDir string, h api.Harness, agentHome string, skills []api.SkillReference) (*SkillResolutionRecord, error) {
 	skillsDir := h.SkillsDir()

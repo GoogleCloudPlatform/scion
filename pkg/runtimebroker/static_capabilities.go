@@ -52,6 +52,9 @@ func StaticCapabilities(rt scionrt.Runtime, nodeImageRegistry string) *hubclient
 		// This broker's reprovision reuses an empty-per-agent workspace in
 		// place (miller79/scion#167).
 		ReprovisionEmptyPerAgent: true,
+		// This broker re-renders the provision-rendered keys the hub lists
+		// in changed_fields at start (ptone/scion#3982).
+		ChangedFields: true,
 	}
 }
 
@@ -113,5 +116,6 @@ func StaticCapabilityNames(rt scionrt.Runtime) []string {
 	add(c.AgentMove, "agentMove")
 	add(c.AgentMoveRecreate, "agentMoveRecreate")
 	add(c.ReprovisionEmptyPerAgent, "reprovisionEmptyPerAgent")
+	add(c.ChangedFields, "changedFields")
 	return names
 }

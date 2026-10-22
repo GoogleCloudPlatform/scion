@@ -1329,6 +1329,13 @@ type BrokerCapabilities struct {
 	// stopped. It says what the broker build can do; runtime suitability is
 	// a separate hub check.
 	ReprovisionEmptyPerAgent bool `json:"reprovisionEmptyPerAgent,omitempty"`
+	// ChangedFields indicates the broker re-renders, at start, the files
+	// provisioning wrote for the provision-rendered keys the hub lists in
+	// the inline config's changed_fields (ptone/scion#3982). Only for such
+	// a broker does the hub report an edit of those keys on a stopped,
+	// created or suspended agent as applied at the next start rather than
+	// held for a reincarnation.
+	ChangedFields bool `json:"changedFields,omitempty"`
 	// StartsInFlight indicates the broker reports the agent starts still
 	// running on it in every heartbeat (BrokerHeartbeat.StartsInFlight). Only
 	// then does the hub read a start's absence from that list as "no start

@@ -181,6 +181,8 @@ func TestRegisterInstance_CapabilitiesBeforeFirstHeartbeat(t *testing.T) {
 	assert.Equal(t, want.EmptyPerAgentWorkspace, row.Capabilities.EmptyPerAgentWorkspace)
 	assert.Equal(t, want.AgentMove, row.Capabilities.AgentMove)
 	assert.Equal(t, want.ReprovisionEmptyPerAgent, row.Capabilities.ReprovisionEmptyPerAgent)
+	assert.Equal(t, want.ChangedFields, row.Capabilities.ChangedFields)
+	assert.True(t, row.Capabilities.ChangedFields, "changedFields is known before the first heartbeat")
 	assert.True(t, row.Capabilities.AsyncLaunch, "asyncLaunch is known before the first heartbeat")
 	assert.True(t, row.Capabilities.EmptyPerAgentWorkspace, "a Docker instance supports empty-per-agent workspaces")
 }
