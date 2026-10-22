@@ -166,6 +166,9 @@ var catalog = []CatalogEntry{{
 	// there is no principal; the resource is the request's broker ID
 	// under the same bound rule as auth_failure. A failed join is
 	// (failure, failed): the common matrix admits failed only there.
+	// failure_code is optional here because the catalog has no per-pair
+	// required leaves; BuildBrokerEvent enforces the per-pair rule
+	// (required on failure/failed, absent on commit/succeeded).
 	AllowedPairs:           []PhaseOutcome{{Phase: PhaseCommit, Outcome: OutcomeSucceeded}, {Phase: PhaseFailure, Outcome: OutcomeFailed}},
 	ResourceKind:           BrokerResourceKind,
 	RequiredEnvelopeLeaves: brokerEnvelopeLeavesWith(),

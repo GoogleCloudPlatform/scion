@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
@@ -149,7 +150,7 @@ func brokerEnvelopeInput(ctx context.Context, action auditevent.BrokerAction, ev
 			// deregister; the catalog admits only commit/succeeded.
 			return input, brokerAuditDropUnrepresentableOutcome
 		}
-		principal, ok := brokerEnvelopePrincipal(action, event)
+		principal, ok := brokerEnvelopePrincipal(event)
 		if !ok {
 			return input, brokerAuditDropMissingActor
 		}
@@ -173,16 +174,12 @@ func classifiedOrOther(code auditevent.BrokerFailureCode) auditevent.BrokerFailu
 }
 
 // brokerEnvelopePrincipal maps the legacy actor to the envelope principal
-// (Q8). {system, "hub"} is used ONLY for the embedded-register branch
-// where the hub itself performs the registration
-// (LogEmbeddedRegistrationEvent with no caller user). Any other empty
-// actor ID, or an actor type other than user or broker, is a bug path and
-// the event is dropped: there is no generic system fallback.
-func brokerEnvelopePrincipal(action auditevent.BrokerAction, event *BrokerAuthEvent) (*auditevent.IdentityRef, bool) {
+// (Q8 as amended by R14). Every empty actor ID, embedded register
+// included, and every actor type other than user or broker is a bug path:
+// the event is dropped with the rate-limited warning. There is no system
+// fallback; a user-initiated action is never attributed to the hub.
+func brokerEnvelopePrincipal(event *BrokerAuthEvent) (*auditevent.IdentityRef, bool) {
 	if event.ActorID == "" {
-		if action == auditevent.BrokerActionRegister && event.hubPerformedRegistration {
-			return &auditevent.IdentityRef{Kind: auditevent.IdentitySystem, ID: "hub"}, true
-		}
 		return nil, false
 	}
 	switch event.ActorType {
@@ -229,6 +226,14 @@ func brokerAuthFailureCode(err error) auditevent.BrokerFailureCode {
 		return auditevent.BrokerFailureClockSkew
 	case errors.Is(err, errBrokerAuthReplay):
 		return auditevent.BrokerFailureReplay
+	case (errors.Is(err, errBrokerAuthSecretLookup) || errors.Is(err, errBrokerAuthSecretsLookup)) && errors.Is(err, store.ErrInvalidInput):
+		// The store rejects a claimed broker ID that cannot be a broker key
+		// (not a UUID) with ErrInvalidInput, wrapped under the lookup
+		// sentinel. That is a caller-supplied unknown broker, not a hub
+		// fault: classifying it internal would let any unauthenticated
+		// caller fill the internal bucket at will. Error() text and the
+		// order of the checks are unchanged; only the audit code differs.
+		return auditevent.BrokerFailureUnknownBroker
 	case errors.Is(err, errBrokerAuthNonceCheck), errors.Is(err, errBrokerAuthSecretLookup), errors.Is(err, errBrokerAuthSecretsLookup):
 		return auditevent.BrokerFailureInternal
 	case errors.Is(err, errBrokerAuthUnknownBroker), errors.Is(err, errBrokerAuthNoValidSecrets):

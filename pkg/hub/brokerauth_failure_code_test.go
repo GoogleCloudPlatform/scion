@@ -136,6 +136,8 @@ func TestBrokerAuthFailure_Q3_ResponseBodiesUnchangedAndClassified(t *testing.T)
 			wantMessage: "nonce already used (possible replay attack)", wantCode: auditevent.BrokerFailureReplay},
 		{name: "unknown broker", req: unsignedBrokerRequest(unknownID, now, "n5"),
 			wantMessage: "unknown broker: " + unknownID, wantCode: auditevent.BrokerFailureUnknownBroker},
+		{name: "non-UUID claimed broker", req: unsignedBrokerRequest("probe-1", now, "n10"),
+			wantMessage: `failed to get broker secret: invalid input: invalid UUID "probe-1"`, wantCode: auditevent.BrokerFailureUnknownBroker},
 		{name: "secret lookup failure", svc: faultSvc, req: unsignedBrokerRequest(brokerID, now, "n6"),
 			wantMessage: "failed to get broker secret: db down", wantCode: auditevent.BrokerFailureInternal},
 		{name: "revoked secret", req: unsignedBrokerRequest(revokedID, now, "n7"),
@@ -208,6 +210,11 @@ func TestBrokerAuthFailure_Q3_ErrorTextUnchangedOutsideMiddleware(t *testing.T) 
 	require.Error(t, err)
 	assert.Equal(t, "unknown broker: "+unknownID, err.Error())
 	assert.Equal(t, auditevent.BrokerFailureUnknownBroker, brokerAuthFailureCode(err))
+
+	_, err = svc.ValidateBrokerSignatureWithRotation(ctx, unsignedBrokerRequest("probe-1", "1", "n"))
+	require.Error(t, err)
+	assert.Equal(t, `failed to get broker secrets: invalid input: invalid UUID "probe-1"`, err.Error())
+	assert.Equal(t, auditevent.BrokerFailureUnknownBroker, brokerAuthFailureCode(err), "a non-UUID claimed ID is an unknown broker")
 
 	_, err = faultSvc.ValidateBrokerSignatureWithRotation(ctx, unsignedBrokerRequest(unknownID, "1", "n"))
 	require.Error(t, err)

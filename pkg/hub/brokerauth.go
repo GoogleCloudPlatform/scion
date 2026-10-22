@@ -937,10 +937,12 @@ var (
 	errBrokerAuthUnknownBroker      = errors.New("unknown broker")
 	errBrokerAuthSecretLookup       = errors.New("failed to get broker secret")
 	errBrokerAuthSecretsLookup      = errors.New("failed to get broker secrets")
-	errBrokerAuthSecretInactive     = errors.New("broker secret is")
-	errBrokerAuthSecretExpired      = errors.New("broker secret has expired")
-	errBrokerAuthInvalidSignature   = errors.New("invalid signature")
-	errBrokerAuthNoValidSecrets     = errors.New("no valid secrets found")
+	// errBrokerAuthSecretInactive is a fragment: it is only ever returned
+	// wrapped with the secret status ("%w %s" gives "broker secret is <status>").
+	errBrokerAuthSecretInactive   = errors.New("broker secret is")
+	errBrokerAuthSecretExpired    = errors.New("broker secret has expired")
+	errBrokerAuthInvalidSignature = errors.New("invalid signature")
+	errBrokerAuthNoValidSecrets   = errors.New("no valid secrets found")
 )
 
 // ValidateBrokerSignature validates an HMAC-signed request from a Runtime Broker.

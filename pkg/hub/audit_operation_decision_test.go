@@ -20,10 +20,13 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 // T2 (remaining-audit P4 slice 1): the ingress operation middleware leaves
@@ -81,4 +84,50 @@ func TestAuditOperation_T2_NoRequestLoggerStillExcludedCorrelation(t *testing.T)
 	require.NoError(t, srv.CloseAuditWriter(context.Background()))
 	assert.Empty(t, capture.records())
 	assert.Zero(t, srv.auditWriter.Snapshot().Enqueued)
+}
+
+// Re-entry characterization (R14 disclosure (b)): conduit_relay_admit.go
+// re-runs applyMiddleware on a request derived from the outer one, and the
+// inner RequestLog mints a new request ID. The middleware keeps the outer
+// operation, so a decision made inside carries the OUTER correlation and
+// omits request.id (validate.go:185 at fce92df9 forbids request.id !=
+// correlation_id). Its disposition is unchanged: it is still recorded.
+func TestAuditOperation_T2_ReentryDecisionKeepsOuterCorrelation(t *testing.T) {
+	capture := &decisionLogCapture{}
+	srv, s := newDecisionLogServer(t, capture)
+	member, _, projectID := seedDecisionLogProject(t, s)
+	setDecisionLogFlag(t, srv, true)
+	counts := srv.decisionAuditLogger.counts
+	before := counts.get(decisionAuditEnqueued, true)
+	identity := NewAuthenticatedUser(member.ID, member.Email, member.DisplayName, member.Role, "web")
+
+	var decision Decision
+	decided := 0
+	inner := auditOperationMiddleware(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		c := r.Context()
+		req := AuthzRequestFromContext(c, Resource{Type: "project", ID: projectID}, ActionRead)
+		req.Permission = "project.read"
+		decision = srv.authzService.Decide(c, req)
+		decided++
+	}))
+	outer := auditOperationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fwd := r.Clone(logging.ContextWithRequestMeta(r.Context(), &logging.RequestMeta{RequestID: "t2-reentry-inner"}))
+		inner.ServeHTTP(w, fwd)
+	}))
+	ctx := logging.ContextWithRequestMeta(contextWithIdentity(context.Background(), identity),
+		&logging.RequestMeta{RequestID: "t2-reentry-outer"})
+	outer.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/v1/conduit", nil).WithContext(ctx))
+
+	require.Equal(t, 1, decided)
+	require.True(t, decision.Allowed, "fixture: the member may read the project: %+v", decision)
+	require.Equal(t, before+1, counts.get(decisionAuditEnqueued, true), "disposition unchanged: recorded")
+
+	require.NoError(t, srv.CloseAuditWriter(context.Background())) // drains
+	assert.Empty(t, capture.recordsFor("t2-reentry-inner"), "the inner request ID is not the correlation")
+	lines := capture.recordsFor("t2-reentry-outer")
+	require.Len(t, lines, 1, "all: %v", capture.records())
+	assert.Equal(t, "authorization", lines[0]["family"])
+	if request, ok := lines[0]["request"].(map[string]any); ok {
+		assert.NotContains(t, request, "id", "request.id is omitted when it differs from the correlation")
+	}
 }

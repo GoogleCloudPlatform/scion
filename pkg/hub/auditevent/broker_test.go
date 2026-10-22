@@ -52,6 +52,9 @@ func validBrokerEnvelopeFixture(action string) EnvelopeV1 {
 		event.Principal = nil
 		event.Payload = BrokerPayload{FailureCode: BrokerFailureOther}
 	case BrokerActionJoin:
+		// A failed join, so failure_code is meaningful (the builder ties it
+		// to the failure pair; see TestBuildBrokerEvent_RejectsContractViolations).
+		event.Phase, event.Outcome, event.Severity = PhaseFailure, OutcomeFailed, SeverityWarning
 		event.Principal = nil
 		event.Payload = BrokerPayload{FailureCode: BrokerFailureInternal}
 	}
@@ -232,7 +235,7 @@ func TestBuildBrokerEvent_T4_EveryActionAndPairValidates(t *testing.T) {
 		},
 		{
 			name:         "register project scope",
-			input:        BrokerEventInput{Action: BrokerActionRegister, Principal: &IdentityRef{Kind: IdentitySystem, ID: "hub"}, BrokerID: "broker-1", ProjectID: "project-1", Operation: BrokerRegisterReregister},
+			input:        BrokerEventInput{Action: BrokerActionRegister, Principal: &IdentityRef{Kind: IdentityUser, ID: "user-9"}, BrokerID: "broker-1", ProjectID: "project-1", Operation: BrokerRegisterReregister},
 			wantPhase:    "commit",
 			wantOutcome:  "succeeded",
 			wantSeverity: "info",
@@ -326,6 +329,8 @@ func TestBuildBrokerEvent_RejectsContractViolations(t *testing.T) {
 		{"auth_failure with principal", BrokerEventInput{Action: BrokerActionAuthFailure, BrokerID: "b", FailureCode: BrokerFailureOther, Principal: user}, "principal"},
 		{"join with principal", BrokerEventInput{Action: BrokerActionJoin, BrokerID: "b", Principal: user}, "principal"},
 		{"successful join with failure code", BrokerEventInput{Action: BrokerActionJoin, BrokerID: "b", FailureCode: BrokerFailureOther}, "payload.failure_code"},
+		{"failed join without failure code", BrokerEventInput{Action: BrokerActionJoin, BrokerID: "b", Failed: true}, "payload.failure_code"},
+		{"failed join undeclared failure code", BrokerEventInput{Action: BrokerActionJoin, BrokerID: "b", Failed: true, FailureCode: "boom"}, "payload.failure_code"},
 		{"register without principal", BrokerEventInput{Action: BrokerActionRegister, BrokerID: "b"}, "principal"},
 		{"rotate without principal", BrokerEventInput{Action: BrokerActionRotate, BrokerID: "b"}, "principal"},
 		{"deregister without principal", BrokerEventInput{Action: BrokerActionDeregister, BrokerID: "b"}, "principal"},

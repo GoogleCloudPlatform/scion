@@ -2133,9 +2133,9 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			// its agents' reservations back before the registration answers.
 			s.BackfillBrokerOnRegistration(ctx, broker.ID)
 		}
-		// linkedByForProvider is "" when there is no caller user: the hub
-		// itself performs this registration, the one branch whose envelope
-		// principal is {system, "hub"} (LogEmbeddedRegistrationEvent, R12 Q8).
+		// The embedded branch requires an authenticated session user, so the
+		// actor is that user (an empty ID is a bug path; the audit envelope
+		// is then dropped with a warning, R14).
 		LogEmbeddedRegistrationEvent(ctx, s.auditLogger, broker.ID, broker.Name, project.ID, linkedByForProvider(callerUser), getClientIP(r),
 			registerOperation, mergeBrokerAuditDetails(brokerAuditCredentialDetails(ctx), "operation", string(registerOperation), "path", "embedded"))
 

@@ -264,6 +264,11 @@ func buildBrokerEvent(operation AuditOperationContext, input BrokerEventInput, e
 		claimedID = true
 		if input.Failed {
 			event.Phase, event.Outcome, event.Severity = PhaseFailure, OutcomeFailed, SeverityWarning
+			// The catalog has no per-pair required leaves, so the builder
+			// enforces that a failed join is classified.
+			if input.FailureCode == "" {
+				return EnvelopeV1{}, invalid("payload.failure_code", "is required for a failed join")
+			}
 		} else {
 			event.Phase, event.Outcome, event.Severity = PhaseCommit, OutcomeSucceeded, SeverityInfo
 			if input.FailureCode != "" {

@@ -104,11 +104,6 @@ type BrokerAuthEvent struct {
 	ProjectID string `json:"-"`
 	// RegisterOperation is register or reregister, for register events.
 	RegisterOperation auditevent.BrokerRegisterOperation `json:"-"`
-	// hubPerformedRegistration marks the embedded-register branch where
-	// the hub itself performs the registration with no caller user; only
-	// LogEmbeddedRegistrationEvent sets it. It is the one case whose
-	// principal is {system, "hub"}.
-	hubPerformedRegistration bool
 }
 
 // InviteAuditEventType defines the type of invite/allow-list audit event.
@@ -889,28 +884,27 @@ func LogRegistrationEvent(ctx context.Context, logger AuditLogger, brokerID, bro
 // LogEmbeddedRegistrationEvent logs the project-scoped registration made by
 // the deprecated embedded-broker branch of project registration. The
 // envelope is project-scoped with projectID. actorID is the caller user's
-// ID, or "" when there is no caller user; in that one branch the hub itself
-// performs the registration, and the envelope principal is {system, "hub"}
-// (architect ruling R12 Q8). Any other empty actor is a bug path and the
-// envelope is dropped.
+// ID. The branch requires an authenticated session user, so an empty
+// actorID is a bug path: like every empty actor, the envelope is dropped
+// with the rate-limited warning (architect ruling R14). A user-initiated
+// registration is never attributed to the hub.
 func LogEmbeddedRegistrationEvent(ctx context.Context, logger AuditLogger, brokerID, brokerName, projectID, actorID, ipAddress string, operation auditevent.BrokerRegisterOperation, details map[string]string) {
 	if logger == nil {
 		return
 	}
 
 	event := &BrokerAuthEvent{
-		EventType:                BrokerAuthEventRegister,
-		BrokerID:                 brokerID,
-		BrokerName:               brokerName,
-		IPAddress:                ipAddress,
-		Success:                  true,
-		ActorID:                  actorID,
-		ActorType:                "user",
-		Timestamp:                time.Now(),
-		Details:                  mergeBrokerAuditDetails(details),
-		ProjectID:                projectID,
-		RegisterOperation:        operation,
-		hubPerformedRegistration: actorID == "",
+		EventType:         BrokerAuthEventRegister,
+		BrokerID:          brokerID,
+		BrokerName:        brokerName,
+		IPAddress:         ipAddress,
+		Success:           true,
+		ActorID:           actorID,
+		ActorType:         "user",
+		Timestamp:         time.Now(),
+		Details:           mergeBrokerAuditDetails(details),
+		ProjectID:         projectID,
+		RegisterOperation: operation,
 	}
 
 	_ = logger.LogBrokerAuthEvent(ctx, event)

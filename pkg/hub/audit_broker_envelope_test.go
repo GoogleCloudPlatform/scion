@@ -271,23 +271,26 @@ func TestBrokerEnvelope_UnrepresentableCredential(t *testing.T) {
 	assert.Equal(t, "unrepresentable", recs[0]["payload"].(map[string]any)["credential_kind"])
 }
 
-// Q8: {system, "hub"} only on the embedded-register branch where the hub
-// itself performs the registration (no caller user).
-func TestBrokerEnvelope_Q8_EmbeddedRegisterByHubIsSystemPrincipal(t *testing.T) {
+// Q8 as amended by R14: an embedded register with an empty actor is a bug
+// path like every other empty actor: no envelope, one rate-limited
+// warning, and never a {system, "hub"} principal.
+func TestBrokerEnvelope_Q8_EmbeddedRegisterEmptyActorDrops(t *testing.T) {
 	logger, sink, buf := newBrokerEnvelopeTestLogger(t)
-	LogEmbeddedRegistrationEvent(brokerTestCtx(t, context.Background(), "req-embedded"), logger,
-		"broker-1", "name", "project-1", "", "203.0.113.7", auditevent.BrokerRegisterNew, nil)
+	ctx := brokerTestCtx(t, context.Background(), "req-embedded")
+	for i := 0; i < 2; i++ {
+		LogEmbeddedRegistrationEvent(ctx, logger,
+			"broker-1", "name", "project-1", "", "203.0.113.7", auditevent.BrokerRegisterNew, nil)
+	}
 
-	recs, _ := brokerEnvelopeRecords(t, sink)
-	require.Len(t, recs, 1)
-	assert.Equal(t, map[string]any{"kind": "system", "id": "hub"}, recs[0]["principal"])
-	assert.Equal(t, map[string]any{"kind": "runtime_broker", "id": "broker-1", "project_id": "project-1"}, recs[0]["resource"])
-	assert.Empty(t, auditRecordsWithMsg(t, buf, brokerAuditDroppedMsg))
+	assert.Empty(t, sink.Records(), "no envelope, and no system principal fallback")
+	warnings := auditRecordsWithMsg(t, buf, brokerAuditDroppedMsg)
+	require.Len(t, warnings, 1, "one rate-limited warning")
+	assertDropWarning(t, warnings[0], "register", brokerAuditDropMissingActor, "")
+	assert.Empty(t, auditRecordsWithMsg(t, buf, "Broker auth audit event"), "no legacy fallback line")
 }
 
-// Q8: any other empty actor is a bug path: no event, one rate-limited
-// warning carrying only the action and the reason, and no generic system
-// fallback.
+// Q8 (R14): every empty actor is a bug path: no event, one rate-limited
+// warning carrying only the action and the reason, and no system fallback.
 func TestBrokerEnvelope_Q8_EmptyActorDropsWithOneWarning(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -305,9 +308,6 @@ func TestBrokerEnvelope_Q8_EmptyActorDropsWithOneWarning(t *testing.T) {
 		}},
 		{"deregister", "deregister", func(ctx context.Context, logger *LogAuditLogger) {
 			LogDeregisterEvent(ctx, logger, "broker-1", "name", "", "203.0.113.7")
-		}},
-		{"hub flag is ignored outside register", "deregister", func(ctx context.Context, logger *LogAuditLogger) {
-			_ = logger.LogBrokerAuthEvent(ctx, &BrokerAuthEvent{EventType: BrokerAuthEventDeregister, BrokerID: "broker-1", Success: true, hubPerformedRegistration: true})
 		}},
 	}
 	for _, c := range cases {
