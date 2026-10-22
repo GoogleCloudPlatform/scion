@@ -29,6 +29,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
@@ -2082,10 +2083,10 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		// name was cleared to nil there so it falls through to the create
 		// branch below, leaving the matched broker untouched.
 		existingBroker := embeddedBroker
-		registerOperation := "register"
+		registerOperation := auditevent.BrokerRegisterNew
 
 		if existingBroker != nil {
-			registerOperation = "reregister"
+			registerOperation = auditevent.BrokerRegisterReregister
 			// Update existing broker. The name and slug are set at
 			// creation or through the update API, so they are kept.
 			broker = existingBroker
@@ -2132,8 +2133,11 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			// its agents' reservations back before the registration answers.
 			s.BackfillBrokerOnRegistration(ctx, broker.ID)
 		}
-		LogRegistrationEvent(ctx, s.auditLogger, broker.ID, broker.Name, linkedByForProvider(callerUser), getClientIP(r),
-			mergeBrokerAuditDetails(brokerAuditCredentialDetails(ctx), "operation", registerOperation, "path", "embedded"))
+		// linkedByForProvider is "" when there is no caller user: the hub
+		// itself performs this registration, the one branch whose envelope
+		// principal is {system, "hub"} (LogEmbeddedRegistrationEvent, R12 Q8).
+		LogEmbeddedRegistrationEvent(ctx, s.auditLogger, broker.ID, broker.Name, project.ID, linkedByForProvider(callerUser), getClientIP(r),
+			registerOperation, mergeBrokerAuditDetails(brokerAuditCredentialDetails(ctx), "operation", string(registerOperation), "path", "embedded"))
 
 		// Add as project provider.
 		localPath, err := s.registerProviderLocalPath(ctx, project, broker.ID, req.Path, created)

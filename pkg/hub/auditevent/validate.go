@@ -139,7 +139,18 @@ func validateSnapshot(event EnvelopeV1, payload map[string]any, hasPayload bool)
 		return invalid("principal", "is required by the catalog")
 	}
 	if event.Resource == nil {
-		return invalid("resource", "is required by the catalog")
+		// resource is required only where the catalog entry lists it in
+		// RequiredEnvelopeLeaves; every entry before the broker family lists
+		// it. An entry that omits it (broker/auth_failure, broker/join, whose
+		// caller-claimed broker ID may be unrepresentable) admits an event
+		// without one.
+		if slices.Contains(entry.RequiredEnvelopeLeaves, "resource") {
+			return invalid("resource", "is required by the catalog")
+		}
+		if !hasPayload {
+			return invalid("payload", "is required")
+		}
+		return validatePayload(entry, payload)
 	}
 	if event.Resource.Kind != entry.ResourceKind && !slices.Contains(entry.AdditionalResourceKinds, event.Resource.Kind) {
 		return invalid("resource.kind", "must match the catalog entry")

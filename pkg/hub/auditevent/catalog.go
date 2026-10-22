@@ -124,6 +124,72 @@ var catalog = []CatalogEntry{{
 	},
 	OptionalPayloadLeaves: []PayloadLeafSchema{{Name: "denied_by", Type: PayloadString, MaxBytes: 64}},
 	Destinations:          []Destination{DestinationStructuredLog},
+}, {
+	// Broker family (remaining-audit P4 slice 1): the Runtime Broker
+	// credential lifecycle and broker authentication failures. Principal and
+	// resource are required only for the authenticated administrative
+	// actions. The shared leaf schemas and their comments are in broker.go.
+	Family: BrokerFamily,
+	Action: string(BrokerActionAuthFailure),
+	// The caller is unauthenticated, so there is no principal. The
+	// resource ID, when present, is the caller's CLAIMED broker ID from
+	// the X-Scion-Broker-ID header: unauthenticated, and admitted only
+	// within the resource.id bound (otherwise omitted with
+	// broker_id_invalid=true). The event is never dropped for it.
+	AllowedPairs:           []PhaseOutcome{{Phase: PhaseDecision, Outcome: OutcomeDeny}},
+	ResourceKind:           BrokerResourceKind,
+	RequiredEnvelopeLeaves: brokerEnvelopeLeavesWith(),
+	ResourceScopes:         brokerSystemScope,
+	RequiredPayloadLeaves:  []PayloadLeafSchema{brokerFailureCodeLeaf},
+	OptionalPayloadLeaves: []PayloadLeafSchema{
+		brokerCredentialKindLeaf, brokerSourceIPLeaf, brokerSourceIPUnparsedLeaf,
+		brokerUserAgentLeaf, brokerUserAgentTruncatedLeaf, brokerUserAgentSanitizedLeaf,
+		brokerIDInvalidLeaf,
+	},
+	Destinations: []Destination{DestinationStructuredLog},
+}, {
+	Family:                 BrokerFamily,
+	Action:                 string(BrokerActionRegister),
+	AllowedPairs:           []PhaseOutcome{{Phase: PhaseCommit, Outcome: OutcomeSucceeded}},
+	ResourceKind:           BrokerResourceKind,
+	RequiredEnvelopeLeaves: brokerEnvelopeLeavesWith("principal", "resource"),
+	ResourceScopes: []ResourceScopeSchema{
+		{Scope: ResourceScopeSystem, ProjectID: ResourceProjectIDOmitted},
+		{Scope: ResourceScopeProject, ProjectID: ResourceProjectIDRequired},
+	},
+	OptionalPayloadLeaves: []PayloadLeafSchema{brokerCredentialKindLeaf, brokerSourceIPLeaf, brokerSourceIPUnparsedLeaf, brokerOperationLeaf},
+	Destinations:          []Destination{DestinationStructuredLog},
+}, {
+	Family: BrokerFamily,
+	Action: string(BrokerActionJoin),
+	// The joining broker is the subject, not an authenticated actor, so
+	// there is no principal; the resource is the request's broker ID
+	// under the same bound rule as auth_failure. A failed join is
+	// (failure, failed): the common matrix admits failed only there.
+	AllowedPairs:           []PhaseOutcome{{Phase: PhaseCommit, Outcome: OutcomeSucceeded}, {Phase: PhaseFailure, Outcome: OutcomeFailed}},
+	ResourceKind:           BrokerResourceKind,
+	RequiredEnvelopeLeaves: brokerEnvelopeLeavesWith(),
+	ResourceScopes:         brokerSystemScope,
+	OptionalPayloadLeaves:  []PayloadLeafSchema{brokerFailureCodeLeaf, brokerCredentialKindLeaf, brokerSourceIPLeaf, brokerSourceIPUnparsedLeaf, brokerIDInvalidLeaf},
+	Destinations:           []Destination{DestinationStructuredLog},
+}, {
+	Family:                 BrokerFamily,
+	Action:                 string(BrokerActionRotate),
+	AllowedPairs:           []PhaseOutcome{{Phase: PhaseCommit, Outcome: OutcomeSucceeded}},
+	ResourceKind:           BrokerResourceKind,
+	RequiredEnvelopeLeaves: brokerEnvelopeLeavesWith("principal", "resource"),
+	ResourceScopes:         brokerSystemScope,
+	OptionalPayloadLeaves:  []PayloadLeafSchema{brokerCredentialKindLeaf, brokerSourceIPLeaf, brokerSourceIPUnparsedLeaf},
+	Destinations:           []Destination{DestinationStructuredLog},
+}, {
+	Family:                 BrokerFamily,
+	Action:                 string(BrokerActionDeregister),
+	AllowedPairs:           []PhaseOutcome{{Phase: PhaseCommit, Outcome: OutcomeSucceeded}},
+	ResourceKind:           BrokerResourceKind,
+	RequiredEnvelopeLeaves: brokerEnvelopeLeavesWith("principal", "resource"),
+	ResourceScopes:         brokerSystemScope,
+	OptionalPayloadLeaves:  []PayloadLeafSchema{brokerCredentialKindLeaf, brokerSourceIPLeaf, brokerSourceIPUnparsedLeaf},
+	Destinations:           []Destination{DestinationStructuredLog},
 }}
 
 // Catalog returns a defensive snapshot of the schemas implemented in this
