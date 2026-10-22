@@ -923,12 +923,38 @@ const (
 	HeaderOnBehalfOf = "X-Scion-On-Behalf-Of"
 )
 
+// Broker signature validation errors. Each is a mechanical, unexported
+// sentinel so the auth_failure audit event can classify a failure without
+// matching error text (brokerAuthFailureCode). Error() text is
+// byte-identical to the strings these replace, because
+// writeBrokerAuthError sends err.Error() to the client; wrapping sites add
+// the same detail as before, with %w.
+var (
+	errBrokerAuthMissingBrokerID    = errors.New("missing X-Scion-Broker-ID header")
+	errBrokerAuthMissingTimestamp   = errors.New("missing X-Scion-Timestamp header")
+	errBrokerAuthMissingSignature   = errors.New("missing X-Scion-Signature header")
+	errBrokerAuthMissingNonce       = errors.New("missing X-Scion-Nonce header")
+	errBrokerAuthMalformedTimestamp = errors.New("invalid timestamp format")
+	errBrokerAuthClockSkew          = errors.New("timestamp outside acceptable range")
+	errBrokerAuthNonceCheck         = errors.New("nonce cache check failed")
+	errBrokerAuthReplay             = errors.New("nonce already used (possible replay attack)")
+	errBrokerAuthUnknownBroker      = errors.New("unknown broker")
+	errBrokerAuthSecretLookup       = errors.New("failed to get broker secret")
+	errBrokerAuthSecretsLookup      = errors.New("failed to get broker secrets")
+	// errBrokerAuthSecretInactive is a fragment: it is only ever returned
+	// wrapped with the secret status ("%w %s" gives "broker secret is <status>").
+	errBrokerAuthSecretInactive   = errors.New("broker secret is")
+	errBrokerAuthSecretExpired    = errors.New("broker secret has expired")
+	errBrokerAuthInvalidSignature = errors.New("invalid signature")
+	errBrokerAuthNoValidSecrets   = errors.New("no valid secrets found")
+)
+
 // ValidateBrokerSignature validates an HMAC-signed request from a Runtime Broker.
 func (s *BrokerAuthService) ValidateBrokerSignature(ctx context.Context, r *http.Request) (BrokerIdentity, error) {
 	// Extract required headers
 	brokerID := r.Header.Get(HeaderBrokerID)
 	if brokerID == "" {
-		return nil, errors.New("missing X-Scion-Broker-ID header")
+		return nil, errBrokerAuthMissingBrokerID
 	}
 	if err := s.admitBroker(ctx, brokerID); err != nil {
 		return nil, err
@@ -936,23 +962,23 @@ func (s *BrokerAuthService) ValidateBrokerSignature(ctx context.Context, r *http
 
 	timestamp := r.Header.Get(HeaderTimestamp)
 	if timestamp == "" {
-		return nil, errors.New("missing X-Scion-Timestamp header")
+		return nil, errBrokerAuthMissingTimestamp
 	}
 
 	signature := r.Header.Get(HeaderSignature)
 	if signature == "" {
-		return nil, errors.New("missing X-Scion-Signature header")
+		return nil, errBrokerAuthMissingSignature
 	}
 
 	nonce := r.Header.Get(HeaderNonce)
 	if nonce == "" {
-		return nil, errors.New("missing X-Scion-Nonce header")
+		return nil, errBrokerAuthMissingNonce
 	}
 
 	// Parse and validate timestamp
 	ts, err := strconv.ParseInt(timestamp, 10, 64)
 	if err != nil {
-		return nil, fmt.Errorf("invalid timestamp format: %w", err)
+		return nil, fmt.Errorf("%w: %w", errBrokerAuthMalformedTimestamp, err)
 	}
 
 	requestTime := time.Unix(ts, 0)
@@ -961,7 +987,7 @@ func (s *BrokerAuthService) ValidateBrokerSignature(ctx context.Context, r *http
 		clockSkew = -clockSkew
 	}
 	if clockSkew > s.config.MaxClockSkew {
-		return nil, fmt.Errorf("timestamp outside acceptable range (skew: %v)", clockSkew)
+		return nil, fmt.Errorf("%w (skew: %v)", errBrokerAuthClockSkew, clockSkew)
 	}
 
 	// Validate nonce if enabled — use DB-backed store for multi-instance
@@ -972,14 +998,14 @@ func (s *BrokerAuthService) ValidateBrokerSignature(ctx context.Context, r *http
 		if s.nonceStore != nil {
 			isNew, err := s.nonceStore.CheckAndStore(ctx, nonce, s.config.NonceCacheTTL)
 			if err != nil {
-				return nil, fmt.Errorf("nonce cache check failed: %w", err)
+				return nil, fmt.Errorf("%w: %w", errBrokerAuthNonceCheck, err)
 			}
 			if !isNew {
-				return nil, errors.New("nonce already used (possible replay attack)")
+				return nil, errBrokerAuthReplay
 			}
 		} else if s.nonces != nil {
 			if !s.nonces.Add(nonce) {
-				return nil, errors.New("nonce already used (possible replay attack)")
+				return nil, errBrokerAuthReplay
 			}
 		}
 	}
@@ -988,19 +1014,19 @@ func (s *BrokerAuthService) ValidateBrokerSignature(ctx context.Context, r *http
 	brokerSecret, err := s.store.GetBrokerSecret(ctx, brokerID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return nil, fmt.Errorf("unknown broker: %s", brokerID)
+			return nil, fmt.Errorf("%w: %s", errBrokerAuthUnknownBroker, brokerID)
 		}
-		return nil, fmt.Errorf("failed to get broker secret: %w", err)
+		return nil, fmt.Errorf("%w: %w", errBrokerAuthSecretLookup, err)
 	}
 
 	// Check if secret is active
 	if brokerSecret.Status != store.BrokerSecretStatusActive {
-		return nil, fmt.Errorf("broker secret is %s", brokerSecret.Status)
+		return nil, fmt.Errorf("%w %s", errBrokerAuthSecretInactive, brokerSecret.Status)
 	}
 
 	// Check expiry
 	if !brokerSecret.ExpiresAt.IsZero() && time.Now().After(brokerSecret.ExpiresAt) {
-		return nil, errors.New("broker secret has expired")
+		return nil, errBrokerAuthSecretExpired
 	}
 
 	// Build canonical string and verify signature
@@ -1009,7 +1035,7 @@ func (s *BrokerAuthService) ValidateBrokerSignature(ctx context.Context, r *http
 	expectedSigB64 := base64.StdEncoding.EncodeToString(expectedSig)
 
 	if !hmac.Equal([]byte(signature), []byte(expectedSigB64)) {
-		return nil, errors.New("invalid signature")
+		return nil, errBrokerAuthInvalidSignature
 	}
 
 	return NewBrokerIdentity(brokerID), nil
@@ -1163,7 +1189,7 @@ func (s *BrokerAuthService) ValidateBrokerSignatureWithRotation(ctx context.Cont
 	// Extract required headers
 	brokerID := r.Header.Get(HeaderBrokerID)
 	if brokerID == "" {
-		return nil, errors.New("missing X-Scion-Broker-ID header")
+		return nil, errBrokerAuthMissingBrokerID
 	}
 	if err := s.admitBroker(ctx, brokerID); err != nil {
 		return nil, err
@@ -1172,11 +1198,11 @@ func (s *BrokerAuthService) ValidateBrokerSignatureWithRotation(ctx context.Cont
 	// Get all active secrets for this broker
 	secrets, err := s.store.GetActiveSecrets(ctx, brokerID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get broker secrets: %w", err)
+		return nil, fmt.Errorf("%w: %w", errBrokerAuthSecretsLookup, err)
 	}
 
 	if len(secrets) == 0 {
-		return nil, fmt.Errorf("unknown broker: %s", brokerID)
+		return nil, fmt.Errorf("%w: %s", errBrokerAuthUnknownBroker, brokerID)
 	}
 
 	// Try each secret until one validates
@@ -1197,30 +1223,30 @@ func (s *BrokerAuthService) ValidateBrokerSignatureWithRotation(ctx context.Cont
 	if lastErr != nil {
 		return nil, lastErr
 	}
-	return nil, errors.New("no valid secrets found")
+	return nil, errBrokerAuthNoValidSecrets
 }
 
 // validateWithSecret validates a request using a specific secret key.
 func (s *BrokerAuthService) validateWithSecret(ctx context.Context, r *http.Request, brokerID string, secretKey []byte) (BrokerIdentity, error) {
 	timestamp := r.Header.Get(HeaderTimestamp)
 	if timestamp == "" {
-		return nil, errors.New("missing X-Scion-Timestamp header")
+		return nil, errBrokerAuthMissingTimestamp
 	}
 
 	signature := r.Header.Get(HeaderSignature)
 	if signature == "" {
-		return nil, errors.New("missing X-Scion-Signature header")
+		return nil, errBrokerAuthMissingSignature
 	}
 
 	nonce := r.Header.Get(HeaderNonce)
 	if nonce == "" {
-		return nil, errors.New("missing X-Scion-Nonce header")
+		return nil, errBrokerAuthMissingNonce
 	}
 
 	// Parse and validate timestamp
 	ts, err := strconv.ParseInt(timestamp, 10, 64)
 	if err != nil {
-		return nil, fmt.Errorf("invalid timestamp format: %w", err)
+		return nil, fmt.Errorf("%w: %w", errBrokerAuthMalformedTimestamp, err)
 	}
 
 	requestTime := time.Unix(ts, 0)
@@ -1229,7 +1255,7 @@ func (s *BrokerAuthService) validateWithSecret(ctx context.Context, r *http.Requ
 		clockSkew = -clockSkew
 	}
 	if clockSkew > s.config.MaxClockSkew {
-		return nil, fmt.Errorf("timestamp outside acceptable range (skew: %v)", clockSkew)
+		return nil, fmt.Errorf("%w (skew: %v)", errBrokerAuthClockSkew, clockSkew)
 	}
 
 	// Build canonical string and verify signature
@@ -1238,7 +1264,7 @@ func (s *BrokerAuthService) validateWithSecret(ctx context.Context, r *http.Requ
 	expectedSigB64 := base64.StdEncoding.EncodeToString(expectedSig)
 
 	if !hmac.Equal([]byte(signature), []byte(expectedSigB64)) {
-		return nil, errors.New("invalid signature")
+		return nil, errBrokerAuthInvalidSignature
 	}
 
 	// Only add nonce to cache after successful validation — use DB-backed
@@ -1249,14 +1275,14 @@ func (s *BrokerAuthService) validateWithSecret(ctx context.Context, r *http.Requ
 		if s.nonceStore != nil {
 			isNew, err := s.nonceStore.CheckAndStore(ctx, nonce, s.config.NonceCacheTTL)
 			if err != nil {
-				return nil, fmt.Errorf("nonce cache check failed: %w", err)
+				return nil, fmt.Errorf("%w: %w", errBrokerAuthNonceCheck, err)
 			}
 			if !isNew {
-				return nil, errors.New("nonce already used (possible replay attack)")
+				return nil, errBrokerAuthReplay
 			}
 		} else if s.nonces != nil {
 			if !s.nonces.Add(nonce) {
-				return nil, errors.New("nonce already used (possible replay attack)")
+				return nil, errBrokerAuthReplay
 			}
 		}
 	}

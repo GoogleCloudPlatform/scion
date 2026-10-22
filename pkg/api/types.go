@@ -1471,6 +1471,16 @@ type StartOptions struct {
 	// is recomputed on every dispatch.
 	KubernetesBlockIdentity *KubernetesBlockIdentity
 
+	// ResolvedPlacement is the Kubernetes placement (node selector,
+	// tolerations, runtime class) the agent runtime server resolved for this
+	// start from its settings (ptone/scion#5085), and PlacementResolved
+	// records that the server ran that resolution (ResolvedPlacement may
+	// then be nil: nothing configured, or not a Kubernetes runtime).
+	// Manager.Start applies it over the agent's own kubernetes block with
+	// config.ApplyPlacement. Never persisted: recomputed on every start.
+	ResolvedPlacement *ResolvedPlacement `json:"-"`
+	PlacementResolved bool               `json:"-"`
+
 	// HostCredentialFiles is set by a co-located workstation broker whose
 	// host-credential policy allows it (hub on loopback, dev auth,
 	// use_host_credentials on). In broker mode the agent manager then reads

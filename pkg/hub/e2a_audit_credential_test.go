@@ -19,6 +19,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
 )
 
 // ---------------------------------------------------------------------------
@@ -41,19 +43,24 @@ func ctxWithTestDecoration(tokenID, tokenName string) context.Context {
 	return contextWithCredentialContext(ctx, credentialContextForIdentity(scoped))
 }
 
+// P4 slice 1 (T8): register is a broker/register envelope. The credential
+// still comes from ctx, now as the envelope's credential leaf (kind, id and
+// boundary only, R12 Q5); the register principal is required, so the
+// fixture names the acting user.
 func TestLogBrokerAuthEvent_CarriesCredentialWhenPresent(t *testing.T) {
-	buf := captureAuditLogs(t)
-	logger := NewLogAuditLogger("[Test]", false)
+	logger, envelopes := newBrokerSlogEnvelopeLogger(t)
 
-	ctx := ctxWithTestDecoration("brokerauth-token", "ci-token")
+	ctx := brokerTestCtx(t, ctxWithTestDecoration("brokerauth-token", "ci-token"), "req-e2a")
 	err := logger.LogBrokerAuthEvent(ctx, &BrokerAuthEvent{
 		EventType: BrokerAuthEventRegister,
 		BrokerID:  "broker-1",
 		Success:   true,
+		ActorID:   "user-9",
+		ActorType: "user",
 	})
 	require.NoError(t, err)
 
-	rec := auditRecordWithMsg(t, buf, "Broker auth audit event")
+	rec := auditRecordWithMsg(t, envelopes, auditevent.EventName)
 	require.NotNil(t, rec, "no broker auth audit record was emitted")
 	cred, ok := rec["credential"].(map[string]any)
 	require.True(t, ok, "expected a credential group in the record: %v", rec)

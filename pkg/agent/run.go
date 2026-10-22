@@ -176,9 +176,13 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// Owner-filtered on a flat instance (listRuntime): a pre-clean never sees, or removes, another instance's object.
 	agents, listErr := m.listRuntime(ctx, map[string]string{"scion.name": slug})
 	if listErr == nil {
+		// projectName is never empty here, so the match is always scoped:
+		// without a project ID it accepts no entry.
+		matchID := scopeProjectID(projectID, projectDir)
 		for _, a := range agents {
-			// Skip agents from a different project
-			if !matchAgentProject(a, projectName, projectID) {
+			// Skip entries that are not this project's (matchAgentProject):
+			// the pre-clean deletes or adopts what it keeps.
+			if !matchAgentProject(a, projectName, matchID) {
 				continue
 			}
 			isRunning := a.Phase == string(state.PhaseRunning)
@@ -2355,6 +2359,19 @@ authDone:
 		}
 	}
 
+	// Kubernetes placement defaults resolved by the agent runtime server,
+	// applied over a copy of the agent's kubernetes block: the only place
+	// placement is applied (run_placement.go).
+	var agentK8s *api.KubernetesConfig
+	if finalScionCfg != nil {
+		agentK8s = finalScionCfg.Kubernetes
+	}
+	placedK8s, placementWarnings, err := m.applyStartPlacement(opts, agentK8s)
+	if err != nil {
+		return nil, err
+	}
+	warnings = append(warnings, placementWarnings...)
+
 	// The run ID was fixed (minted if absent) at the top of Start.
 	runID := opts.RunID
 	// SCION_LAUNCH_ID carries the same value as the run label, so the
@@ -2523,11 +2540,9 @@ authDone:
 			// on the Kubernetes runtime. They are resolved here at start
 			// time rather than persisted by ProvisionAgent, so a settings
 			// change applies on the next start, matching ImagePullPolicy.
-			var k8sCfg *api.KubernetesConfig
-			if finalScionCfg != nil && finalScionCfg.Kubernetes != nil {
-				cpy := *finalScionCfg.Kubernetes
-				k8sCfg = &cpy
-			}
+			// placedK8s is a fresh copy of the template/agent block with
+			// the resolved placement applied (nil when there is neither).
+			k8sCfg := placedK8s
 			if resolvedPullPolicy != "" || k8sCfg != nil {
 				if k8sCfg == nil {
 					k8sCfg = &api.KubernetesConfig{}
@@ -2705,7 +2720,7 @@ authDone:
 			matched := a.ContainerID == id || strings.EqualFold(a.Name, opts.Name)
 			// An owned (flat instance) manager matches by name only within
 			// the agent's project, never another project's same-named agent.
-			if matched && m.owner != nil && a.ContainerID != id && !matchAgentProject(a, projectName, projectID) {
+			if matched && m.owner != nil && a.ContainerID != id && !matchAgentProject(a, projectName, scopeProjectID(projectID, projectDir)) {
 				matched = false
 			}
 			if matched {
@@ -3111,30 +3126,29 @@ func filterWorkspaceVolume(volumes []api.VolumeMount) []api.VolumeMount {
 	return filtered
 }
 
-// matchAgentProject returns true if the agent belongs to the given project.
-// It checks the project_id label first (authoritative in hosted mode), then
-// falls back to the project name label.
+// matchAgentProject reports whether the agent belongs to the given project.
+// A request scoped to a project (projectName or projectID set) accepts an
+// entry only if it is an entry of projectID (EntryInProject): identified by
+// its project ID label or field, or, with no project identity, a container
+// whose recorded path identifies as projectID. A project name label alone
+// is not an identity (names are directory slugs that projects can share),
+// and a scoped request without a projectID accepts nothing. An unscoped
+// request matches every entry.
 func matchAgentProject(a api.AgentInfo, projectName, projectID string) bool {
-	// If we have a projectID, check the canonical project label first.
+	if projectName == "" && projectID == "" {
+		return true
+	}
+	return projectID != "" && EntryInProject(a, projectID)
+}
+
+// scopeProjectID returns the project ID a project-scoped match compares
+// entries against: projectID when known, else the ID recorded at
+// projectPath (ProjectIDAtPath), as the manager's stop and delete derive it.
+func scopeProjectID(projectID, projectPath string) string {
 	if projectID != "" {
-		if labelProjectID := projectkeys.ProjectIDFromLabels(a.Labels); labelProjectID != "" {
-			return labelProjectID == projectID
-		}
-		if a.ProjectID != "" {
-			return a.ProjectID == projectID
-		}
+		return projectID
 	}
-	// Fall back to project name matching
-	if projectName != "" {
-		if labelProject := projectkeys.ProjectNameFromLabels(a.Labels); labelProject != "" {
-			return labelProject == projectName
-		}
-		if a.Project != "" {
-			return a.Project == projectName
-		}
-	}
-	// No project info on either side — match for backward compatibility
-	return true
+	return ProjectIDAtPath(projectPath)
 }
 
 // containerName returns a project-scoped container name to prevent Docker name
