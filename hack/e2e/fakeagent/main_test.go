@@ -16,10 +16,12 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 )
 
 func TestParseFlags(t *testing.T) {
@@ -82,6 +84,24 @@ func TestErrorKeyDropsTheRequestSuffix(t *testing.T) {
 	b := errors.New("forbidden: no (status: 403, request: b)")
 	if errorKey(a) != errorKey(b) || errorKey(a) != "forbidden: no" {
 		t.Errorf("errorKey: %q, %q", errorKey(a), errorKey(b))
+	}
+}
+
+func TestRetryable(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want bool
+	}{
+		{errors.New("connection refused"), true},
+		{&apiclient.APIError{StatusCode: 503, Code: "unavailable"}, true},
+		{&apiclient.APIError{StatusCode: 500, Code: "internal_error"}, true},
+		{&apiclient.APIError{StatusCode: 412, Code: "unsupported_capability"}, false},
+		{&apiclient.APIError{StatusCode: 409, Code: "conflict"}, false},
+		{fmt.Errorf("wrapped: %w", &apiclient.APIError{StatusCode: 403, Code: "forbidden"}), false},
+	} {
+		if got := retryable(tc.err); got != tc.want {
+			t.Errorf("retryable(%v) = %v, want %v", tc.err, got, tc.want)
+		}
 	}
 }
 

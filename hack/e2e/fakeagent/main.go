@@ -48,6 +48,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -219,6 +220,11 @@ func run(ctx context.Context, o options) error {
 	bcfg.HubEnabled = true
 	bcfg.HubEndpoint = o.hubURL
 	bcfg.ControlChannelEnabled = true
+	// The mock runtime reports a real runtime name ("docker"), and the broker
+	// is forced to it: the broker resolves each start's runtime by name from
+	// the project's settings and profiles, which name only real runtimes, so
+	// any other name would leave the broker looking for a runtime it does not
+	// have instead of using this one.
 	bcfg.ForceRuntime = rt.Name()
 	// The hub's default harness config provisions by script inside the
 	// container; nothing is provisioned here, so allow it.
@@ -276,8 +282,9 @@ func run(ctx context.Context, o options) error {
 	return nil
 }
 
-// createAgent creates an agent on the broker, retrying while the broker's
-// control channel is not connected yet.
+// createAgent creates an agent on the broker. It retries transport errors
+// and 5xx answers (the broker's control channel may still be connecting);
+// any 4xx answer is final.
 func createAgent(ctx context.Context, c hubclient.Client, projectID, brokerID, name string) (string, error) {
 	var lastErr error
 	for {
@@ -297,12 +304,25 @@ func createAgent(ctx context.Context, c hubclient.Client, projectID, brokerID, n
 			fmt.Fprintf(os.Stderr, "[fakeagent] create agent %s: %v (retrying)\n", name, err)
 		}
 		lastErr = err
+		if !retryable(err) {
+			return "", fmt.Errorf("create agent %s: %w", name, err)
+		}
 		select {
 		case <-ctx.Done():
 			return "", fmt.Errorf("create agent %s: %w", name, lastErr)
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
+}
+
+// retryable reports whether a create failure may pass on its own: no HTTP
+// answer at all, or a 5xx answer.
+func retryable(err error) bool {
+	var apiErr *apiclient.APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.StatusCode >= 500
+	}
+	return true
 }
 
 // errorKey is an error's text without the per-request suffix, so a
@@ -576,6 +596,7 @@ func (s *agentSet) runtime() *runtime.MockRuntime {
 		return nil
 	}
 	return &runtime.MockRuntime{
+		// A real runtime name; see ForceRuntime in run().
 		NameFunc: func() string { return "docker" },
 		ListFunc: func(_ context.Context, filter map[string]string) ([]api.AgentInfo, error) {
 			return s.list(filter), nil
