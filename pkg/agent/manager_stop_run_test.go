@@ -43,7 +43,7 @@ func TestStop_RunIDMatchStopsThatEntry(t *testing.T) {
 		{Name: "dev", ContainerID: "cid-b", RunID: "run-b"},
 	}, &stopped)}
 
-	if err := mgr.Stop(context.Background(), "dev", "", "run-b"); err != nil {
+	if err := mgr.Stop(context.Background(), "dev", "", "", "run-b"); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
 	want := runtime.RunRef{ID: "cid-b", RunID: "run-b"}
@@ -59,7 +59,7 @@ func TestStop_RunIDMismatchIsNotFoundWithoutStopOrFallback(t *testing.T) {
 		{Name: "dev", ContainerID: "cid-b", RunID: "run-b"},
 	}, &stopped)}
 
-	err := mgr.Stop(context.Background(), "dev", "", "run-a")
+	err := mgr.Stop(context.Background(), "dev", "", "", "run-a")
 	if !errors.Is(err, ErrStopRunNotFound) {
 		t.Fatalf("Stop err = %v, want ErrStopRunNotFound", err)
 	}
@@ -73,7 +73,7 @@ func TestStop_RunIDNoEntryIsNotFoundWithoutNameFallback(t *testing.T) {
 	var stopped []runtime.RunRef
 	mgr := &AgentManager{Runtime: stopRunRuntime(nil, &stopped)}
 
-	err := mgr.Stop(context.Background(), "dev", "", "run-a")
+	err := mgr.Stop(context.Background(), "dev", "", "", "run-a")
 	if !errors.Is(err, ErrStopRunNotFound) {
 		t.Fatalf("Stop err = %v, want ErrStopRunNotFound", err)
 	}
@@ -90,7 +90,7 @@ func TestStop_RunIDListErrorDoesNotFallBack(t *testing.T) {
 	}
 	mgr := &AgentManager{Runtime: rt}
 
-	if err := mgr.Stop(context.Background(), "dev", "", "run-a"); err == nil {
+	if err := mgr.Stop(context.Background(), "dev", "", "", "run-a"); err == nil {
 		t.Fatal("expected the list error, got nil")
 	}
 	if len(stopped) != 0 {
@@ -105,7 +105,7 @@ func TestStop_RunIDPrefersExactRunAndAcceptsLegacyEntry(t *testing.T) {
 			{Name: "dev", ContainerID: "cid-legacy"},
 			{Name: "dev", ContainerID: "cid-a", RunID: "run-a"},
 		}, &stopped)}
-		if err := mgr.Stop(context.Background(), "dev", "", "run-a"); err != nil {
+		if err := mgr.Stop(context.Background(), "dev", "", "", "run-a"); err != nil {
 			t.Fatalf("Stop: %v", err)
 		}
 		if len(stopped) != 1 || stopped[0].ID != "cid-a" {
@@ -117,7 +117,7 @@ func TestStop_RunIDPrefersExactRunAndAcceptsLegacyEntry(t *testing.T) {
 		mgr := &AgentManager{Runtime: stopRunRuntime([]api.AgentInfo{
 			{Name: "dev", ContainerID: "cid-legacy"},
 		}, &stopped)}
-		if err := mgr.Stop(context.Background(), "dev", "", "run-a"); err != nil {
+		if err := mgr.Stop(context.Background(), "dev", "", "", "run-a"); err != nil {
 			t.Fatalf("Stop: %v", err)
 		}
 		if len(stopped) != 1 || stopped[0].ID != "cid-legacy" {
@@ -132,7 +132,7 @@ func TestStop_EmptyRunIDUnchanged(t *testing.T) {
 		mgr := &AgentManager{Runtime: stopRunRuntime([]api.AgentInfo{
 			{Name: "dev", ContainerID: "cid-b", RunID: "run-b"},
 		}, &stopped)}
-		if err := mgr.Stop(context.Background(), "dev", "", ""); err != nil {
+		if err := mgr.Stop(context.Background(), "dev", "", "", ""); err != nil {
 			t.Fatalf("Stop: %v", err)
 		}
 		if len(stopped) != 1 || stopped[0].ID != "cid-b" {
@@ -142,7 +142,7 @@ func TestStop_EmptyRunIDUnchanged(t *testing.T) {
 	t.Run("falls back to the bare name", func(t *testing.T) {
 		var stopped []runtime.RunRef
 		mgr := &AgentManager{Runtime: stopRunRuntime(nil, &stopped)}
-		if err := mgr.Stop(context.Background(), "abc123", "", ""); err != nil {
+		if err := mgr.Stop(context.Background(), "abc123", "", "", ""); err != nil {
 			t.Fatalf("Stop: %v", err)
 		}
 		want := runtime.RunRef{ID: "abc123"}

@@ -62,9 +62,8 @@ import (
 var tracer = otel.Tracer("scion-broker")
 
 // matchesAgent checks whether an agent matches the given id and optional projectID.
-// When projectID is provided, it must match for uniqueness across projects.
-// When projectID is empty, matching falls back to name/containerID/slug only
-// (backward compatible with solo/CLI mode and pre-existing containers).
+// When projectID is provided, the entry must belong to it (matchesAgentProject).
+// When projectID is empty, matching is by name/containerID/slug only.
 func matchesAgent(a api.AgentInfo, id, projectID string) bool {
 	nameMatch := a.Name == id || a.ContainerID == id || a.Slug == id
 	if !nameMatch {
@@ -76,17 +75,13 @@ func matchesAgent(a api.AgentInfo, id, projectID string) bool {
 	return matchesAgentProject(a, projectID)
 }
 
+// matchesAgentProject reports whether an entry may stand for an agent of
+// projectID (agent.EntryInProject): positively identified as belonging to
+// it, or an entry with no project identity whose recorded path identifies
+// as projectID (legacyEntryInProject), the rule every project-scoped
+// operation applies.
 func matchesAgentProject(a api.AgentInfo, projectID string) bool {
-	// Check the runtime's project_id label first, then the ProjectID field.
-	if labelProjectID := projectkeys.ProjectIDFromLabels(a.Labels); labelProjectID != "" {
-		return labelProjectID == projectID
-	}
-	if a.ProjectID != "" {
-		return a.ProjectID == projectID
-	}
-	// No project_id on container — match anyway for backward compatibility
-	// with containers created before project_id labeling was added.
-	return true
+	return agent.EntryInProject(a, projectID)
 }
 
 // ============================================================================
@@ -3884,19 +3879,17 @@ func isContainerStopTolerable(err error) bool {
 		strings.Contains(msg, "exit status 125")
 }
 
-// agentsWithoutProjectLabel returns the subset of agents that carry no
-// project identity: no scion.project_id label and no ProjectID field
-// (agentHasNoProjectIdentity). The project-scoped lookups fall back to a
-// slug-only search for backward compatibility with pre-existing / solo-mode
-// containers that predate project labels; that fallback must only match such
-// genuinely unlabeled containers. A container labeled for a *different*
-// project must never satisfy a project-scoped request, or same-slug agents
-// across projects would collide. The ProjectID field counts too, because
-// Cloud Run stores the label under its GCP-sanitized key (ptone/scion#5268).
-func agentsWithoutProjectLabel(agents []api.AgentInfo) []api.AgentInfo {
+// legacyAgentsInProject returns the entries that carry no project identity
+// but whose recorded project path identifies as projectID
+// (legacyEntryInProject). The project-scoped lookups fall back to these
+// when no entry is positively identified as belonging to projectID, for
+// containers that predate project labels. A same-named entry with no
+// project identity from another project, or with no recorded path, is not
+// returned, so every verb resolves such entries the way delete does.
+func legacyAgentsInProject(agents []api.AgentInfo, projectID string) []api.AgentInfo {
 	filtered := make([]api.AgentInfo, 0, len(agents))
 	for _, a := range agents {
-		if agentHasNoProjectIdentity(a) {
+		if legacyEntryInProject(a, projectID) {
 			filtered = append(filtered, a)
 		}
 	}
@@ -6611,6 +6604,9 @@ func (s *Server) resolveHarnessConfigForEnvGather(req CreateAgentRequest, settin
 	return res.Name
 }
 
+// hasAgentInProjectOrUnlabeled reports whether any entry may stand for an
+// agent of projectID (matchesAgentProject): one identified as belonging to
+// it, or one with no project identity accepted by legacyEntryInProject.
 func hasAgentInProjectOrUnlabeled(agents []api.AgentInfo, projectID string) bool {
 	for _, info := range agents {
 		if matchesAgentProject(info, projectID) {
@@ -8235,20 +8231,18 @@ func agentNameMatches(a api.AgentInfo, id string) bool {
 		strings.TrimPrefix(a.Name, "/") == id
 }
 
-// agentInProjectStrict reports whether an entry is positively identified as
-// belonging to projectID (label first, then the ProjectID field). Unlike
-// matchesAgentProject, an entry with no project identity does not match.
+// agentInProjectStrict is agent.InProjectStrict. Unlike matchesAgentProject,
+// an entry with no project identity does not match.
 func agentInProjectStrict(a api.AgentInfo, projectID string) bool {
-	if labelProjectID := projectkeys.ProjectIDFromLabels(a.Labels); labelProjectID != "" {
-		return labelProjectID == projectID
-	}
-	return a.ProjectID != "" && a.ProjectID == projectID
+	return agent.InProjectStrict(a, projectID)
 }
 
-// agentHasNoProjectIdentity reports whether an entry carries no project ID in
-// either labels or fields (a pre-label legacy container).
-func agentHasNoProjectIdentity(a api.AgentInfo) bool {
-	return projectkeys.ProjectIDFromLabels(a.Labels) == "" && a.ProjectID == ""
+// legacyEntryInProject is agent.LegacyEntryInProject: an entry with no
+// project identity stands for an agent of projectID only if it is a
+// container whose recorded project path identifies as projectID. Every
+// project-scoped operation applies this one rule.
+func legacyEntryInProject(a api.AgentInfo, projectID string) bool {
+	return agent.LegacyEntryInProject(a, projectID)
 }
 
 // agentCandidate is a runtime entry for an agent name, with the manager
@@ -8325,8 +8319,7 @@ func (s *Server) collectAgentCandidates(ctx context.Context, managers []agent.Ma
 			// projectID; otherwise a same-named legacy container from another
 			// project could be deleted.
 			matches = collect(map[string]string{"scion.agent": "true"}, func(a api.AgentInfo) bool {
-				return a.ContainerID != "" && agentHasNoProjectIdentity(a) &&
-					pathIdentifiesAs(a.ProjectPath, projectID)
+				return legacyEntryInProject(a, projectID)
 			})
 		}
 	} else {
@@ -8684,96 +8677,17 @@ func linkedProjectAgentDir(path, agentName, projectID string) string {
 	return scionDir
 }
 
-// scionEntry returns the .scion entry for path, which may be the project root
-// or the .scion entry itself.
-func scionEntry(path string) string {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return ""
-	}
-	if filepath.Base(abs) == config.DotScion {
-		return abs
-	}
-	return filepath.Join(abs, config.DotScion)
-}
+// scionEntry is agent.ScionEntry.
+func scionEntry(path string) string { return agent.ScionEntry(path) }
 
-// projectIDAtPath returns the project identity recorded at path, or "".
-// For a .scion directory it is the project-id file. For a
-// .scion marker file (non-git linked project) it is the marker's project ID.
-// If path is a project's external config dir, which has no project-id file,
-// the result is "".
-func projectIDAtPath(path string) string {
-	if path == "" {
-		return ""
-	}
-	marker := scionEntry(path)
-	if marker == "" {
-		return ""
-	}
-	info, err := os.Stat(marker)
-	if err != nil {
-		return ""
-	}
-	if info.IsDir() {
-		id, _ := config.ReadProjectID(marker)
-		return id
-	}
-	if m, err := config.ReadProjectMarker(marker); err == nil {
-		return m.ProjectID
-	}
-	return ""
-}
+// projectIDAtPath is agent.ProjectIDAtPath.
+func projectIDAtPath(path string) string { return agent.ProjectIDAtPath(path) }
 
-// pathIdentifiesAs reports whether the project at path verifiably belongs to
-// projectID: either its recorded identity (projectIDAtPath) equals projectID,
-// or path is the project's external config dir
-// ~/.scion/project-configs/<slug>__<short-id>/.scion, whose name encodes the
-// project ID (non-git linked projects record that dir as the agent's project
-// path). A projectID outside the project ID format never matches.
-func pathIdentifiesAs(path, projectID string) bool {
-	if path == "" || config.ValidateProjectID(projectID) != nil {
-		return false
-	}
-	if projectIDAtPath(path) == projectID {
-		return true
-	}
-	short, ok := externalConfigShortID(path)
-	return ok && short == (config.ProjectMarker{ProjectID: projectID}).ShortUUID()
-}
+// pathIdentifiesAs is agent.PathIdentifiesAs.
+func pathIdentifiesAs(path, projectID string) bool { return agent.PathIdentifiesAs(path, projectID) }
 
-// externalConfigShortID returns the short project ID encoded in path if path
-// is an external project config dir ~/.scion/project-configs/<slug>__<short-id>/.scion.
-// path is resolved through symlinks before it is split, so a path reached
-// through a pre-rename entry (config.MigrateLegacyGlobalLayout leaves a
-// symlink at each individual entry it moves, e.g.
-// ~/.scion/grove-configs/<name> -> ../project-configs/<name>, while the
-// legacy root itself stays a real directory) still identifies as this
-// project's external config dir.
-func externalConfigShortID(path string) (string, bool) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return "", false
-	}
-	abs = projectkeys.ResolvePathForCompare(abs)
-	if filepath.Base(abs) != config.DotScion {
-		return "", false
-	}
-	globalDir, err := config.GetGlobalDir()
-	if err != nil {
-		return "", false
-	}
-	projectDir := filepath.Dir(abs)
-	parent := filepath.Dir(projectDir)
-	if !projectkeys.ResolvedPathEqual(parent, filepath.Join(globalDir, config.ProjectConfigsDir)) {
-		return "", false
-	}
-	name := filepath.Base(projectDir)
-	i := strings.LastIndex(name, "__")
-	if i <= 0 || i+2 >= len(name) {
-		return "", false
-	}
-	return name[i+2:], true
-}
+// externalConfigShortID is agent.ExternalConfigShortID.
+func externalConfigShortID(path string) (string, bool) { return agent.ExternalConfigShortID(path) }
 
 // trustedEntryProjectPath reports whether a project path taken from a runtime
 // entry may be used for file operations. With a projectID, the path must

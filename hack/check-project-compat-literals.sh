@@ -195,6 +195,10 @@ allowed_paths=(
   "^extras/scion-telegram/internal/telegram/broker_v2.go$"
 
   # Core compatibility adapters and bounded legacy protocol/storage surfaces.
+  # ExternalConfigShortID's comment names the pre-rename global entry
+  # (~/.scion/grove-configs/<name>) that config.MigrateLegacyGlobalLayout leaves
+  # as a symlink, which is why the path is resolved before it is split.
+  "^pkg/agent/project_identity.go$"
   "^pkg/config/koanf.go$"
   "^pkg/config/legacy_grove_migration.go$"
   "^pkg/config/project_marker.go$"
@@ -209,7 +213,6 @@ allowed_paths=(
   # already allowlisted above) so the read-only admin-dir mount narrowing
   # applies to both current and pre-migration hub-native project layouts.
   "^pkg/runtime/common.go$"
-  "^pkg/runtimebroker/handlers.go$"
   # Reserved-identity-attribute denylist: the three retired grove-named
   # telemetry keys (scion.grove, scion.grove.id, scion.grove_id) are kept
   # here so the receiver still strips them from user-supplied attributes,
