@@ -295,7 +295,9 @@ func (o *AnalyticsOutbox) open(tolerateLocked bool) error {
 	defer unlock()
 	if _, err := os.Stat(o.path("epoch")); errors.Is(err, os.ErrNotExist) {
 		if err := o.writeFileAtomic("epoch", []byte(telemetrycontract.NewEventID())); err != nil {
-			o.consumeSeqDuringHold() // a lazy producer's observation is lost with the lock held
+			if !tolerateLocked {
+				o.consumeSeqDuringHold() // a lazy producer's observation is lost with the lock held
+			}
 			return err
 		}
 	}
@@ -303,8 +305,11 @@ func (o *AnalyticsOutbox) open(tolerateLocked bool) error {
 	// mutating operations stay blocked until the intent resolves.
 	if err := o.recoverIntentLocked(); err != nil && !errors.Is(err, ErrAnalyticsOutboxHeld) {
 		// The open fails; a lazy producer then loses its observation with
-		// the lock held, so consume a seq for it (a visible gap).
-		o.consumeSeqDuringHold()
+		// the lock held, so consume a seq for it (a visible gap). The
+		// pipeline's open (tolerateLocked) has no observation in flight.
+		if !tolerateLocked {
+			o.consumeSeqDuringHold()
+		}
 		return err
 	}
 	return nil

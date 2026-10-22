@@ -137,8 +137,8 @@ func (a *UsageAnalytics) Dir() string {
 	if a == nil {
 		return ""
 	}
-	if o := a.Outbox(); o != nil {
-		return o.Dir()
+	if a.outbox != nil { // never opens a lazy outbox (a getter has no side effects)
+		return a.outbox.Dir()
 	}
 	return a.failDir
 }

@@ -1013,3 +1013,22 @@ func TestOutboxRecoveryMatchesSeqNotJustEventID(t *testing.T) {
 		t.Errorf("first seq %d, next seq %d, lines %d; want 1, 3, 2", first.ProducerSeq, next.ProducerSeq, len(stagingLines(t, reopened)))
 	}
 }
+
+// WP2 r7 O1: a failed pipeline start (no observation in flight) does not
+// consume a seq; O2: Dir() on a lazy producer does not open the outbox.
+func TestFailedPipelineStartNoSpuriousGapAndLazyDirNoOpen(t *testing.T) {
+	a, dir, _ := failedStartState(t)
+	_ = a
+	if _, err := os.Stat(filepath.Join(dir, "seq")); !os.IsNotExist(err) {
+		t.Error("a failed pipeline start must not write a seq gap")
+	}
+
+	lazyDir := filepath.Join(t.TempDir(), "home", ".scion", AnalyticsOutboxDirName)
+	lazy := NewLazyUsageAnalytics(lazyDir, nil, telemetrycontract.UsageSourceHooks)
+	if got := lazy.Dir(); got != lazyDir {
+		t.Errorf("Dir = %q, want %q", got, lazyDir)
+	}
+	if _, err := os.Stat(lazyDir); !os.IsNotExist(err) {
+		t.Error("Dir() must not open (create) a lazy outbox")
+	}
+}
