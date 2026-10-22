@@ -586,6 +586,31 @@ func Spec() []TableFixture {
 			},
 		}},
 
+		// ---- Agent lifecycle event sequencing and outbox (WP1) ----
+		{Table: "agent_lifecycle_cursors", Rows: []row{
+			{
+				"agent_id": agentID, "project_id": projectID,
+				"transition_revision": 3, "metadata_revision": 2,
+				"metadata_digest": strings.Repeat("d", 64), "last_fingerprint": strings.Repeat("f", 64),
+				"last_deleted": false, "open_run": "", "open_run_generation": "",
+				"open_run_metadata_revision": 0, "pending_run_change_at": nil,
+				"reincarnation_base_run_id": "", "pending_adopted_from": "",
+				"pending_adopted_at": nil, "pending_adoption_source": "",
+				"creator_principal_type": "user", "creator_principal_id": userID,
+				"updated_at": baseTime,
+			},
+		}},
+		{Table: "agent_lifecycle_outbox", Rows: []row{
+			{
+				"seq": 1, "event_id": "e1000000-0000-4000-8000-000000000001", "agent_id": agentID,
+				"transition_revision": 1,
+				"payload":             `{"schema_version":1,"event_type":"agent.lifecycle","event_id":"e1000000-0000-4000-8000-000000000001","transition":"created","metadata":{"name":"naïve café 北京 🚀","labels":[]}}`,
+				"created_at":          baseTime, "attempts": 2, "permanent_failures": 0,
+				"next_attempt_at": baseTime.Add(time.Minute), "lease_owner": "", "lease_until": nil,
+				"last_error": "unavailable: fixture",
+			},
+		}},
+
 		// ---- Agent runtime observations (start claims) ----
 		{Table: "agent_recoveries", Rows: []row{
 			{
