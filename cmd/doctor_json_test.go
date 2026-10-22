@@ -17,6 +17,7 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -350,6 +351,13 @@ func TestDoctorDisplayEndpoint(t *testing.T) {
 		"https://alice:pw@hub.example.com:80a/p?k=s3cr3t-tok#frag": "https://hub.example.com:80a/p",
 		"alice:pw@hub.example.com/p?k=s3cr3t-tok#frag":             "hub.example.com/p",
 		"alice:pw@%zz?k=s3cr3t-tok#frag":                           "%zz",
+		// User info with "/", "?", "#", ":" or white space in the
+		// password: everything up to the last "@" is dropped first.
+		"https://svc:Zm9v/YmFy@hub.example.com":     "https://hub.example.com",
+		"https://alice:hunter2?x@hub.example.com":   "https://hub.example.com",
+		"https://alice:se#cret@hub.example.com":     "https://hub.example.com",
+		"https://alice:1234/56@hub.example.com":     "https://hub.example.com",
+		"https://alice:long secret@hub.example.com": "https://hub.example.com",
 	}
 	for in, want := range tests {
 		assert.Equal(t, want, doctorDisplayEndpoint(in), in)
@@ -364,7 +372,7 @@ func credentialedEndpoint(base string) string {
 
 func assertNoEndpointCredentials(t *testing.T, out string) {
 	t.Helper()
-	for _, secret := range []string{"alice", "pa55word", "s3cr3t-tok", "token=", "#frag", "frag/"} {
+	for _, secret := range []string{"alice", "pa55", "word", "s3cr3t-tok", "token=", "#frag", "frag/"} {
 		assert.NotContains(t, out, secret)
 	}
 }
@@ -408,12 +416,30 @@ func TestDoctorHubEndpointCredentialsNeverShown(t *testing.T) {
 // malformedEndpoints do not parse as absolute URLs; each carries user
 // info, a query and a fragment.
 var malformedEndpoints = map[string]string{
-	"bad port":  "https://alice:pa55word@hub.example.com:80a/p?k=s3cr3t-tok#frag",
-	"no scheme": "alice:pa55word@hub.example.com/p?k=s3cr3t-tok#frag",
-	"garbage":   "alice:pa55word@%zz?k=s3cr3t-tok#frag",
+	"bad port":               "https://alice:pa55word@hub.example.com:80a/p?k=s3cr3t-tok#frag",
+	"no scheme":              "alice:pa55word@hub.example.com/p?k=s3cr3t-tok#frag",
+	"garbage":                "alice:pa55word@%zz?k=s3cr3t-tok#frag",
+	"slash in password":      "https://alice:pa55/word@hub.example.com/p?k=s3cr3t-tok#frag",
+	"question in password":   "https://alice:pa55?word@hub.example.com/p?k=s3cr3t-tok#frag",
+	"hash in password":       "https://alice:pa55#word@hub.example.com/p?k=s3cr3t-tok#frag",
+	"space in password":      "https://alice:pa55 word@hub.example.com/p?k=s3cr3t-tok#frag",
+	"password reads as port": "https://alice:1234/pa55word@hub.example.com/p?k=s3cr3t-tok#frag",
+}
+
+// refusingTransport fails every request without touching the network.
+type refusingTransport struct{}
+
+func (refusingTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("connection refused")
 }
 
 func TestDoctorHubEndpointCredentialsNeverShown_MalformedEndpoint(t *testing.T) {
+	// An endpoint that parses with another host ("alice:1234") would
+	// otherwise send a request; the client's error still quotes its URL.
+	orig := http.DefaultTransport
+	http.DefaultTransport = refusingTransport{}
+	t.Cleanup(func() { http.DefaultTransport = orig })
+
 	for name, ep := range malformedEndpoints {
 		t.Run(name, func(t *testing.T) {
 			client := newDoctorTestClient(t, ep)
@@ -435,6 +461,18 @@ func TestScrubDoctorHubURLs_MalformedEndpoint(t *testing.T) {
 	in := `parse "https://alice:pw@hub.example.com:80a/?k=SECRET#f/healthz": invalid port ":80a" after host`
 	got := scrubDoctorHubURLs(in, ep)
 	assert.Equal(t, `parse "https://hub.example.com:80a/": invalid port ":80a" after host`, got)
+}
+
+func TestScrubDoctorHubURLs_SpaceInPassword(t *testing.T) {
+	ep := "https://alice:long secret@hub.example.com"
+	in := `parse "https://alice:long secret@hub.example.com/healthz": net/url: invalid userinfo`
+	assert.Equal(t, `parse "https://hub.example.com/healthz": net/url: invalid userinfo`, scrubDoctorHubURLs(in, ep))
+}
+
+func TestScrubDoctorHubURLs_ShortPassword(t *testing.T) {
+	ep := "https://u:p@hub.example.com"
+	in := `request to u:p@hub.example.com failed`
+	assert.Equal(t, `request to hub.example.com failed`, scrubDoctorHubURLs(in, ep))
 }
 
 func TestScrubDoctorHubURLs(t *testing.T) {

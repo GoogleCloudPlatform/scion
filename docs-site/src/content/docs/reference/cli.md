@@ -1678,12 +1678,12 @@ doctor did not learn is omitted, never filled in with a guess.
 | `generatedAt` | When doctor wrote the report, from this machine's clock, UTC (RFC 3339). |
 | `status` | `fail` when any check in any section failed, `warn` when any warned, `pass` otherwise. It includes the local checks (for example a missing Docker), and does not affect the exit status. |
 | `hub` | The Hub that answered. Omitted when no Hub endpoint is configured. |
-| `hub.endpoint` | The configured endpoint's scheme, host, port and path. User info, query and fragment are never shown. |
+| `hub.endpoint` | The configured endpoint's scheme, host, port and path. User info, query and fragment are never shown: everything up to the last `@` is dropped first, and an endpoint that does not parse as a URL is cut at its first `?` or `#`. |
 | `hub.source` | `healthSummary` when `version`, `instanceId` and `summaryGeneratedAt` come from the health summary; `healthz` when the summary could not be read and `version` comes from `/healthz`. Omitted when the Hub gave neither. |
 | `hub.version` | From the summary: the version every live Hub instance reports, or `mixed` when they differ. From `/healthz`: the version of the Hub process that answered. |
 | `hub.instanceId` | The Hub instance that served the summary. Only from the summary: `/healthz` does not report an instance. |
 | `hub.summaryGeneratedAt` | When the Hub generated the summary, from the Hub's clock. |
-| `hub.auth.source` | Where doctor's Hub credential came from (table below). Never the credential, a file path or an identity. |
+| `hub.auth.source` | Where doctor's Hub credential came from (table below). Never the credential, a file path or an identity. Omitted when doctor could not set up a Hub client, since no request was sent. |
 | `platformHealth.state` | `ok` when the summary was read; `skipped` when doctor did not get it and knows of nothing wrong with the Hub's ability to produce it; `unavailable` when the Hub was asked and could not produce it. Any state other than `ok` means the platform was **not checked**, never that it is healthy. |
 | `platformHealth.status` | Only when `state` is `ok`: the summary's verdict as a check status, `pass` (healthy), `warn` (degraded) or `fail` (unhealthy). Unlike the top-level `status`, it ignores this machine's checks. |
 | `platformHealth.reason` | Only when `state` is not `ok`: a reason code (table below). |
@@ -1711,7 +1711,7 @@ them:
 | Source | Credential |
 |---|---|
 | `stored_login` | The login stored by `scion hub auth login` for this Hub. |
-| `agent_token_file` | The agent token file of an agent container. It **takes precedence over `SCION_HUB_TOKEN`**: inside an agent container doctor uses the agent's identity even when `SCION_HUB_TOKEN` is set. |
+| `agent_token_file` | The agent token file of an agent container, whatever kind of token it holds. It **takes precedence over `SCION_HUB_TOKEN`**: inside an agent container doctor uses the agent's identity even when `SCION_HUB_TOKEN` is set. |
 | `env_auth_token` | `SCION_AUTH_TOKEN` (an agent token). |
 | `env_hub_token` | `SCION_HUB_TOKEN`, for example a hub-boundary access token. |
 | `dev` | A development token (`SCION_DEV_TOKEN`, `SCION_DEV_TOKEN_FILE` or `~/.scion/dev-token`). For a localhost Hub it is also preferred over an agent token file, except in a Hub-managed agent. |

@@ -28,9 +28,11 @@ import (
 	"os/exec"
 	"regexp"
 	goruntime "runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
@@ -401,43 +403,41 @@ const doctorTrailingPunct = ".,;:!?)]}"
 
 // scrubDoctorHubURLs removes the Hub endpoint's credentials from text, so
 // errors from the Hub client, which quote the request URL built from the
-// configured endpoint, never show them. It fails closed:
+// configured endpoint, never show them. It fails closed, in this order:
+//   - the endpoint's user info (everything between the scheme and the
+//     last "@"), as one string and in pieces, becomes "xxxxx" (see
+//     doctorEndpointUserinfo); this runs first, so no later step can
+//     split a secret before it is replaced;
 //   - every run of text (up to white space or a quote) that contains the
-//     endpoint up to its query or fragment, or its host and path, is shown
-//     as doctorDisplayEndpoint shows it, whether or not the endpoint
-//     parses;
+//     endpoint's host and path is shown as doctorDisplayEndpoint shows
+//     it, whether or not the endpoint parses;
 //   - when the endpoint parses, every URL on its host is shown that way
-//     too;
-//   - any remaining copy of the endpoint's user name or password (3
-//     characters or more) becomes "xxxxx".
+//     too.
 //
 // Other URLs are left to config.RedactURLsIn.
 func scrubDoctorHubURLs(text, hubEP string) string {
 	if hubEP == "" {
 		return text
 	}
-	// Keys: the endpoint up to its query or fragment, and its host and
-	// path alone, since the client can rewrite the user info it quotes.
+	for _, part := range doctorEndpointUserinfo(hubEP) {
+		text = strings.ReplaceAll(text, part, "xxxxx")
+	}
+	// The host and path alone: the client can rewrite the user info it
+	// quotes, and the step above has replaced it anyway.
 	hostPath := doctorDisplayEndpoint(hubEP)
 	if i := strings.Index(hostPath, "://"); i >= 0 {
 		hostPath = hostPath[i+3:]
 	}
-	var keys []string
-	for _, k := range []string{cutDoctorQueryFragment(hubEP), hostPath} {
-		if k = strings.TrimRight(k, "/"); k != "" {
-			keys = append(keys, k)
-		}
-	}
-	text = doctorTokenRe.ReplaceAllStringFunc(text, func(m string) string {
-		for _, key := range keys {
-			if strings.Contains(m, key) {
-				trimmed := strings.TrimRight(m, doctorTrailingPunct)
-				return doctorDisplayEndpoint(trimmed) + m[len(trimmed):]
+	if key := strings.TrimRight(hostPath, "/"); key != "" {
+		text = doctorTokenRe.ReplaceAllStringFunc(text, func(m string) string {
+			if !strings.Contains(m, key) {
+				return m
 			}
-		}
-		return m
-	})
-	if hub, err := url.Parse(hubEP); err == nil && hub.Hostname() != "" {
+			trimmed := strings.TrimRight(m, doctorTrailingPunct)
+			return doctorDisplayEndpoint(trimmed) + m[len(trimmed):]
+		})
+	}
+	if hub, err := url.Parse(stripDoctorUserinfo(hubEP)); err == nil && hub.Hostname() != "" {
 		text = doctorURLRe.ReplaceAllStringFunc(text, func(m string) string {
 			trimmed := strings.TrimRight(m, doctorTrailingPunct)
 			u, err := url.Parse(trimmed)
@@ -447,68 +447,75 @@ func scrubDoctorHubURLs(text, hubEP string) string {
 			return doctorDisplayEndpoint(trimmed) + m[len(trimmed):]
 		})
 	}
-	// Last, the user name and password wherever they are left on their
-	// own: an endpoint without a scheme ("alice:pw@host") makes the client
-	// quote "alice" as an unsupported scheme.
-	for _, part := range doctorEndpointUserinfo(hubEP) {
-		text = strings.ReplaceAll(text, part, "xxxxx")
-	}
 	return text
 }
 
 // doctorDisplayEndpoint is hubEP as doctor shows it, in text and JSON:
-// scheme, host, port and path only. User info, query and fragment are
-// dropped, so a credential in the endpoint never reaches the output. It
-// fails closed: an endpoint that does not parse as an absolute URL (no
-// scheme, a bad port, garbage) is cut at its first "?" or "#", and
-// anything up to the last "@" of its authority is dropped, by string
-// handling.
+// scheme, host, port and path only. It fails closed: before anything else,
+// everything between the scheme (or the start) and the LAST "@" of the
+// whole string is dropped, so user info containing "/", "?", "#", ":" or
+// white space cannot hide from the parser. What remains is shown as
+// scheme, host, port and path when it parses as an absolute URL, and
+// otherwise cut at its first "?" or "#".
 func doctorDisplayEndpoint(hubEP string) string {
-	if u, err := url.Parse(hubEP); err == nil && u.Scheme != "" && u.Host != "" {
+	s := stripDoctorUserinfo(hubEP)
+	if u, err := url.Parse(s); err == nil && u.Scheme != "" && u.Host != "" {
 		clean := url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path}
 		// Path parameters (";jsessionid=...") can carry credentials too.
 		return config.RedactURL(clean.String())
 	}
-	s := cutDoctorQueryFragment(hubEP)
-	prefix, rest := "", s
-	if i := strings.Index(s, "://"); i >= 0 {
-		prefix, rest = s[:i+3], s[i+3:]
-	}
-	authority, path := rest, ""
-	if i := strings.Index(rest, "/"); i >= 0 {
-		authority, path = rest[:i], rest[i:]
-	}
-	if i := strings.LastIndex(authority, "@"); i >= 0 {
-		authority = authority[i+1:]
-	}
-	return config.RedactURL(prefix + authority + path)
+	return config.RedactURL(cutDoctorQueryFragment(s))
 }
 
-// doctorEndpointUserinfo returns the user name and password of hubEP's
-// user info, found by string handling as in doctorDisplayEndpoint's
-// fallback, skipping parts shorter than 3 characters (too short to find
-// safely in free text).
-func doctorEndpointUserinfo(hubEP string) []string {
-	rest := cutDoctorQueryFragment(hubEP)
+// splitDoctorUserinfo splits hubEP into the part up to and including
+// "://" (empty without a scheme), the user info before the last "@" of
+// the rest (empty without an "@"), and what follows that "@".
+func splitDoctorUserinfo(hubEP string) (prefix, userinfo, rest string) {
+	rest = hubEP
 	if i := strings.Index(rest, "://"); i >= 0 {
-		rest = rest[i+3:]
+		prefix, rest = rest[:i+3], rest[i+3:]
 	}
-	if i := strings.Index(rest, "/"); i >= 0 {
-		rest = rest[:i]
+	if i := strings.LastIndex(rest, "@"); i >= 0 {
+		userinfo, rest = rest[:i], rest[i+1:]
 	}
-	i := strings.LastIndex(rest, "@")
-	if i < 0 {
+	return prefix, userinfo, rest
+}
+
+// stripDoctorUserinfo is hubEP without its user info (see
+// splitDoctorUserinfo).
+func stripDoctorUserinfo(hubEP string) string {
+	prefix, _, rest := splitDoctorUserinfo(hubEP)
+	return prefix + rest
+}
+
+// doctorEndpointUserinfo returns the strings to mask in free text for
+// hubEP's user info, longest first: the whole user info (any length), and
+// its pieces of 3 characters or more split at ":", "/", "?", "#" and
+// white space, each also in its unescaped form.
+func doctorEndpointUserinfo(hubEP string) []string {
+	_, userinfo, _ := splitDoctorUserinfo(hubEP)
+	if userinfo == "" {
 		return nil
 	}
+	seen := map[string]bool{}
 	var out []string
-	for _, part := range strings.SplitN(rest[:i], ":", 2) {
-		if len(part) >= 3 {
-			out = append(out, part)
+	add := func(s string, minLen int) {
+		if len(s) >= minLen && !seen[s] {
+			seen[s] = true
+			out = append(out, s)
 		}
-		if u, err := url.PathUnescape(part); err == nil && u != part && len(u) >= 3 {
+		if u, err := url.PathUnescape(s); err == nil && u != s && len(u) >= minLen && !seen[u] {
+			seen[u] = true
 			out = append(out, u)
 		}
 	}
+	add(userinfo, 1)
+	for _, piece := range strings.FieldsFunc(userinfo, func(r rune) bool {
+		return strings.ContainsRune(":/?#", r) || unicode.IsSpace(r)
+	}) {
+		add(piece, 3)
+	}
+	sort.SliceStable(out, func(i, j int) bool { return len(out[i]) > len(out[j]) })
 	return out
 }
 
@@ -549,11 +556,12 @@ func runDoctor() error {
 	// is configured.
 	var hubClient hubclient.Client
 	if hubEP != "" {
-		c, source, err := getHubClientWithAuthSource(settings)
-		if err == nil {
+		// The credential source is reported only for a client that was
+		// built: no request is sent otherwise.
+		if c, source, err := getHubClientWithAuthSource(settings); err == nil {
 			hubClient = c
+			r.authSource = source
 		}
-		r.authSource = source
 	}
 	var linkedProjectID string
 	if settings.Hub != nil {
