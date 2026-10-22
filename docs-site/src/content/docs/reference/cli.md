@@ -672,7 +672,9 @@ The Hub may answer `202` when teardown is still running (see [`DELETE /agents/:i
 
 Synchronizes the agent workspace between the host and the container.
 
-**Usage:** `scion sync to|from <agent-name> [flags]` (agent workspace; the direction is required), or `scion sync [push|pull]` (project workspace on the Hub)
+**Usage:** `scion sync to|from <agent-name> [flags]` (the direction is required)
+
+The project-level forms (bare `scion sync`, `scion sync push` and `scion sync pull`) and their `--force` flag were removed with the Hub's WebDAV endpoint. They exit with an error. To move project files, use git, or the project's Files tab in the web UI.
 
 - **Flags:**
     - `--dry-run`: Preview changes without syncing.

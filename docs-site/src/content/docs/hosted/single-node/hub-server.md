@@ -228,12 +228,6 @@ To guarantee server stability, the Hub enforces a strict **concurrency guard** o
 - **Conflict Rejection:** Any new maintenance request initiated while another is active returns a `409 Conflict` HTTP status code. This prevents resource exhaustion or server outages from concurrent builds.
 - **Status Monitoring:** Operators can trace progress and view active logs on the dashboard's maintenance interface.
 
-### WebDAV Synchronization
-
-The Hub provides robust WebDAV endpoints for transparent file access across native, shared, and remote linked projects.
-- WebDAV synchronization utilizes checksum comparisons for reliable file transfers.
-- A local storage HTTP proxy facilitates efficient remote file synchronization.
-
 ## Persistence
 
 The Hub requires a database to store its state.
