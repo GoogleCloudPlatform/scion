@@ -17,6 +17,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -378,5 +379,134 @@ func TestStart_SharedWorkspaceLayoutFromBrokerPaths(t *testing.T) {
 				t.Fatalf("runtime Run was called %d time(s) on a refused start", calls)
 			}
 		})
+	}
+}
+
+// A shared workspace whose .git was removed, inside an enclosing repository
+// (a repository in a parent directory, such as a home directory kept in git):
+// the result is a plain mount, never the enclosing repository.
+func TestDetectRepoRoot_SharedWorkspaceWithoutGitNeverUsesAncestorRepo(t *testing.T) {
+	ancestor := mkGitRepo(t, filepath.Join(t.TempDir(), "home"))
+	ws := mkGitRepo(t, filepath.Join(ancestor, "projects", "a"))
+	projectDir := filepath.Join(ws, config.DotScion)
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(ws, ".git")); err != nil {
+		t.Fatal(err)
+	}
+	if !util.IsGitRepoDir(ws) {
+		t.Fatal("fixture: git should find the enclosing repository from the workspace")
+	}
+	if got := mustDetectRepoRoot(t, false, ws, projectDir); got != "" {
+		t.Fatalf("repo root = %q, want \"\" (plain mount), never the enclosing repository %q", got, ancestor)
+	}
+}
+
+// The hub-native form of the same case: the project's clone lost its .git
+// and HOME is itself a git repository.
+func TestDetectRepoRoot_HubNativeSharedWorkspaceWithoutGitInGitHome(t *testing.T) {
+	home := mkGitRepo(t, filepath.Join(t.TempDir(), "home"))
+	t.Setenv("HOME", home)
+	ws := mkGitRepo(t, filepath.Join(home, config.GlobalDir, config.ProjectsDir, "a"))
+	projectDir := filepath.Join(home, config.GlobalDir, config.ProjectConfigsDir, "a__11111111", config.DotScion)
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(ws, ".git")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := detectRepoRoot(false, ws, projectDir, &config.VersionedSettings{WorkspacePath: ws})
+	if err != nil || got != "" {
+		t.Fatalf("detectRepoRoot = (%q, %v), want (\"\", nil): never the git HOME %q", got, err, home)
+	}
+}
+
+// A shared project whose root is a subdirectory of a repository (no .git of
+// its own) gets a plain mount: the broker has no record that tells it apart
+// from a workspace whose .git was removed.
+func TestDetectRepoRoot_SharedSubdirectoryProjectIsPlain(t *testing.T) {
+	repo := mkGitRepo(t, filepath.Join(t.TempDir(), "mono"))
+	ws := filepath.Join(repo, "svc")
+	projectDir := filepath.Join(ws, config.DotScion)
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var logs strings.Builder
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(old)
+
+	if got := mustDetectRepoRoot(t, false, ws, projectDir); got != "" {
+		t.Fatalf("repo root = %q, want \"\" (plain mount)", got)
+	}
+	out := logs.String()
+	for _, want := range []string{"Project root is a subdirectory of a repository", "in-container git is unavailable", "repository=" + eval(t, repo)} {
+		if !strings.Contains(out, want) {
+			t.Errorf("warning should contain %q, got: %s", want, out)
+		}
+	}
+}
+
+// brokerProjectRoot takes workspace_path only for a project-configs project
+// dir; for any other project dir a workspace_path from merged settings is
+// ignored.
+func TestBrokerProjectRoot_WorkspacePathOnlyFromProjectConfigs(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	settings := &config.VersionedSettings{WorkspacePath: filepath.Join(home, "elsewhere")}
+
+	inRepo := filepath.Join(home, "proj", config.DotScion)
+	if got := brokerProjectRoot(settings, inRepo); got != filepath.Join(home, "proj") {
+		t.Errorf("in-repo .scion: got %q, want the directory holding .scion", got)
+	}
+	other := filepath.Join(home, "some-project-dir")
+	if got := brokerProjectRoot(settings, other); got != other {
+		t.Errorf("other project dir: got %q, want the project dir itself", got)
+	}
+	external := filepath.Join(home, config.GlobalDir, config.ProjectConfigsDir, "p__1", config.DotScion)
+	if got := brokerProjectRoot(settings, external); got != settings.WorkspacePath {
+		t.Errorf("project-configs dir: got %q, want workspace_path %q", got, settings.WorkspacePath)
+	}
+}
+
+// Start of a hub-native shared-workspace agent whose clone lost its .git
+// while HOME is a git repository: the runtime gets a plain workspace mount
+// (no RepoRoot), never HOME's repository.
+func TestStart_SharedWorkspaceWithoutGitNeverMountsAncestorRepo(t *testing.T) {
+	markerPath, ws, _ := hubNativeSharedStartFixture(t)
+	setupGitRepo(t, os.Getenv("HOME"))
+
+	var captured runtime.RunConfig
+	mgr := NewManager(&runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+			captured = cfg
+			return "mock-id", nil
+		},
+	})
+	createOpts := hubNativeSharedStartOpts(markerPath)
+	createOpts.FreshProvision = true
+	if _, err := mgr.Start(context.Background(), createOpts); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if eval(t, captured.RepoRoot) != eval(t, ws) {
+		t.Fatalf("first start RepoRoot = %q, want the clone %q", captured.RepoRoot, ws)
+	}
+
+	if err := os.RemoveAll(filepath.Join(ws, ".git")); err != nil {
+		t.Fatal(err)
+	}
+	captured = runtime.RunConfig{}
+	if _, err := mgr.Start(context.Background(), hubNativeSharedStartOpts(markerPath)); err != nil {
+		t.Fatalf("Start after .git removal: %v", err)
+	}
+	if captured.RepoRoot != "" {
+		t.Fatalf("RunConfig.RepoRoot = %q after .git removal, want \"\" (plain mount)", captured.RepoRoot)
+	}
+	if eval(t, captured.Workspace) != eval(t, ws) {
+		t.Fatalf("RunConfig.Workspace = %q, want %q", captured.Workspace, ws)
 	}
 }

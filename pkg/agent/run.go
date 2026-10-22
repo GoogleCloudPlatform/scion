@@ -2842,14 +2842,18 @@ func writeAgentTokenFile(agentHome, token string) error {
 // the container, so git's answer is used only to check those paths, never
 // as the root itself:
 //   - workspace at the project root (a shared workspace): the root is the
-//     workspace, whatever git reports;
+//     workspace when it has a .git entry of its own, otherwise "" (a plain
+//     mount). It is never an enclosing repository: a workspace whose .git
+//     is missing is indistinguishable from one whose .git was removed;
 //   - workspace that is a plain checkout elsewhere (for example a workspace
 //     storage backend's host path): the root is the workspace;
 //   - workspace that is a worktree or a subdirectory of a repository: the
 //     root is the project's own repository root (projectRepoRoot).
 //
-// When git reports a common dir that does not belong to these paths, the
-// start is refused with an error instead of mounting anything.
+// Every git probe here is bounded with GIT_CEILING_DIRECTORIES, so git never
+// searches above the directory the answer has to match. When git reports a
+// common dir (or top level) that does not belong to these paths, the start
+// is refused with an error instead of mounting anything.
 func detectRepoRoot(explicit bool, effectiveWorkspace, projectDir string, settings *config.VersionedSettings) (string, error) {
 	if explicit {
 		return "", nil
@@ -2859,72 +2863,119 @@ func detectRepoRoot(explicit bool, effectiveWorkspace, projectDir string, settin
 		ownGitDir := filepath.Join(effectiveWorkspace, ".git")
 		ownGitInfo, ownGitErr := os.Lstat(ownGitDir)
 		hasOwnGitDir := ownGitErr == nil && ownGitInfo.IsDir()
-		if ownGitErr == nil && samePath(effectiveWorkspace, projectRoot) {
-			// The workspace is the project's own checkout: the layout is
-			// the workspace itself. A .git directory whose common dir is
-			// somewhere else is refused rather than started.
+		if samePath(effectiveWorkspace, projectRoot) {
+			if ownGitErr != nil {
+				// A project root inside an enclosing repository (a
+				// subdirectory project) has no .git of its own. The broker
+				// keeps no record of that layout, so it is mounted plain.
+				if enclosing := projectRepoRoot(filepath.Dir(effectiveWorkspace)); enclosing != "" {
+					slog.Warn("Project root is a subdirectory of a repository; mounting the workspace only; in-container git is unavailable for this layout",
+						"workspace", effectiveWorkspace, "repository", enclosing)
+				}
+				return "", nil
+			}
 			if hasOwnGitDir {
-				if commonDir, err := util.GetCommonGitDir(effectiveWorkspace); err != nil || !samePath(commonDir, ownGitDir) {
-					return "", workspaceCommonDirError(effectiveWorkspace, commonDir, err)
+				if err := checkOwnCommonDir(effectiveWorkspace); err != nil {
+					return "", err
 				}
 			}
 			return effectiveWorkspace, nil
 		}
-		if util.IsGitRepoDir(effectiveWorkspace) {
-			commonDir, err := util.GetCommonGitDir(effectiveWorkspace)
-			if err != nil {
-				return "", nil
+		if hasOwnGitDir {
+			if err := checkOwnCommonDir(effectiveWorkspace); err != nil {
+				return "", err
 			}
-			if hasOwnGitDir {
-				if samePath(commonDir, ownGitDir) {
-					return effectiveWorkspace, nil
-				}
-				return "", workspaceCommonDirError(effectiveWorkspace, commonDir, nil)
-			}
-			if projectRepo := projectRepoRoot(projectRoot); projectRepo != "" && samePath(filepath.Dir(commonDir), projectRepo) {
+			return effectiveWorkspace, nil
+		}
+		projectRepo := projectRepoRoot(projectRoot)
+		ceiling := filepath.Dir(effectiveWorkspace)
+		if projectRepo != "" && resolvedPathWithin(effectiveWorkspace, projectRepo) {
+			ceiling = filepath.Dir(projectRepo)
+		}
+		if commonDir, err := boundedCommonGitDir(effectiveWorkspace, ceiling); err == nil {
+			if projectRepo != "" && samePath(filepath.Dir(commonDir), projectRepo) {
 				return projectRepo, nil
 			}
 			return "", workspaceCommonDirError(effectiveWorkspace, commonDir, nil)
 		}
 	}
-	if util.IsGitRepoDir(projectDir) {
-		root, _ := util.RepoRootDir(projectDir)
-		if root == "" {
-			return "", nil
-		}
-		if projectRepo := projectRepoRoot(projectRoot); projectRepo != "" && samePath(root, projectRepo) {
-			return projectRepo, nil
-		}
-		return "", fmt.Errorf("git reports repository root %s for project %s, which is not the project's own repository; refusing to start: check the repository's git configuration", root, projectDir)
+	projectRepo := projectRepoRoot(projectRoot)
+	if projectRepo == "" || !resolvedPathWithin(projectDir, projectRepo) {
+		return "", nil
 	}
-	return "", nil
+	top, err := boundedRevParse(projectDir, filepath.Dir(projectRepo), "--show-toplevel")
+	if err != nil {
+		return "", nil
+	}
+	if samePath(top, projectRepo) {
+		return projectRepo, nil
+	}
+	return "", fmt.Errorf("git reports repository root %s for project %s, which is not the project's own repository; refusing to start: check the repository's git configuration", top, projectDir)
+}
+
+// checkOwnCommonDir refuses a workspace with its own .git directory whose
+// git common dir is not that directory.
+func checkOwnCommonDir(workspace string) error {
+	ownGitDir := filepath.Join(workspace, ".git")
+	commonDir, err := boundedCommonGitDir(workspace, filepath.Dir(workspace))
+	if err != nil {
+		return workspaceCommonDirError(workspace, "", err)
+	}
+	if !samePath(commonDir, ownGitDir) {
+		return workspaceCommonDirError(workspace, commonDir, nil)
+	}
+	return nil
 }
 
 // workspaceCommonDirError is detectRepoRoot's refusal for a workspace whose
 // git common dir does not belong to the project.
 func workspaceCommonDirError(workspace, commonDir string, err error) error {
 	if err != nil {
-		return fmt.Errorf("cannot resolve the git common dir of workspace %s: %w; refusing to start", workspace, err)
+		return fmt.Errorf("cannot resolve the git common dir of workspace %s: %w; refusing to start: check the workspace's .git metadata", workspace, err)
 	}
 	return fmt.Errorf("git common dir %s of workspace %s is outside the project's own repository; refusing to start: check the workspace's .git metadata", commonDir, workspace)
+}
+
+// boundedRevParse runs git rev-parse with args in dir, with ceiling as
+// GIT_CEILING_DIRECTORIES: git checks dir and its ancestors below ceiling for
+// a repository, never ceiling itself or anything above it.
+func boundedRevParse(dir, ceiling string, args ...string) (string, error) {
+	cmd := exec.Command("git", append([]string{"rev-parse"}, args...)...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_CEILING_DIRECTORIES="+ceiling)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse %s in %s: %w", strings.Join(args, " "), dir, err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// boundedCommonGitDir returns dir's git common dir as an absolute path, with
+// the repository search bounded by ceiling (see boundedRevParse).
+func boundedCommonGitDir(dir, ceiling string) (string, error) {
+	commonDir, err := boundedRevParse(dir, ceiling, "--git-common-dir")
+	if err != nil {
+		return "", err
+	}
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Join(dir, commonDir)
+	}
+	return filepath.Clean(commonDir), nil
 }
 
 // brokerProjectRoot is the project's own root directory as the broker knows
 // it, from paths only: the recorded workspace path of a project whose
 // configuration lives in the broker's project-configs tree, otherwise the
-// directory holding the project's .scion directory. A workspace_path setting
-// read from a .scion directory inside the project is not used here: that
-// file can sit inside a shared workspace mount.
+// directory holding the project's .scion directory, otherwise the project
+// directory itself. A workspace_path setting is used only from the
+// project-configs tree: merged settings can include a settings file inside
+// the project, which a shared workspace mount exposes.
 func brokerProjectRoot(settings *config.VersionedSettings, projectDir string) string {
-	hasWorkspacePath := settings != nil && settings.WorkspacePath != ""
-	if hasWorkspacePath && isProjectConfigsPath(projectDir) {
+	if settings != nil && settings.WorkspacePath != "" && isProjectConfigsPath(projectDir) {
 		return settings.WorkspacePath
 	}
 	if filepath.Base(projectDir) == config.DotScion {
 		return filepath.Dir(projectDir)
-	}
-	if hasWorkspacePath {
-		return settings.WorkspacePath
 	}
 	return projectDir
 }
@@ -2951,6 +3002,20 @@ func projectRepoRoot(projectRoot string) string {
 		}
 		dir = parent
 	}
+}
+
+// resolvedPathWithin is pathWithin on symlink-resolved paths (cleaned paths
+// are compared when either cannot be resolved).
+func resolvedPathWithin(p, root string) bool {
+	if p == "" || root == "" {
+		return false
+	}
+	rp, errP := filepath.EvalSymlinks(p)
+	rr, errR := filepath.EvalSymlinks(root)
+	if errP != nil || errR != nil {
+		rp, rr = p, root
+	}
+	return pathWithin(rp, rr)
 }
 
 // samePath reports whether a and b name the same path once symlinks are
