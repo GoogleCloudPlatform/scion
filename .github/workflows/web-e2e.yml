@@ -13,26 +13,33 @@
 # limitations under the License.
 
 # Web Playwright e2e suites (ptone/scion#2580). Advisory: not a required
-# check. PRs and main pushes run only when web/ (or this file) changes;
-# the nightly run covers everything else, such as browser drift.
+# check. PRs and main pushes run only when web/ (or this file) changes,
+# or one of the few Go paths the port-proxy suite exercises (listed under
+# on:, below); the nightly run covers everything else, such as browser
+# drift.
 #
 # One matrix job per suite config under web/e2e/*/playwright.config.ts,
-# all in full Chromium. Every suite except test-identity-session (below)
-# serves the web sources itself (Vite dev server or an esbuild bundle) with
-# a mocked hub. Only terminal-workspace also
+# all in full Chromium. Every suite except test-identity-session and
+# port-proxy (below) serves the web sources itself (Vite dev server or an
+# esbuild bundle) with a mocked hub. Only terminal-workspace also
 # needs a production build: some of its tests check the Shoelace icon files
 # in web/dist, so that job runs npm run build first.
 #
-# test-identity-session is the exception: it runs against the real Go hub
-# binary (a throwaway member-level test hub started by its global setup,
-# ptone/scion#4240). Only that job sets up Go (go.mod version, with
+# test-identity-session runs against the real Go hub binary (a throwaway
+# member-level test hub started by its global setup, ptone/scion#4240).
+# It and port-proxy are the only jobs that set up Go (go.mod version, with
 # setup-go's built-in cache; ci.yml uses per-job caches instead, see
 # .github/actions/setup-go-cache) and builds the binary (make build) and
 # the web assets (npm run build) before the suite runs.
 #
-# port-proxy (ptone/scion#5568) also runs against the real hub binary, with
-# the same Go setup, plus the fake agent helper (go build of
+# port-proxy (ptone/scion#5568) runs against the real hub binary too, with
+# the same Go setup and builds, plus the fake agent helper (go build of
 # hack/e2e/fakeagent) that serves the fixture app's port from agents.
+# The workflow-level path filter below also lists the Go files that suite
+# depends on (the hub's port proxy, its no-credentials answer and session
+# fallthrough, the agent-side tunnel clients and the helper). GitHub path
+# filters apply to the whole workflow, not one matrix entry, so a change to
+# those paths runs every suite here; the list is kept to those files.
 #
 # iap-driver (ptone/scion#4240, WS2) needs no hub and no web build: it
 # checks the e2e harness IAP driver hook against two local HTTP servers it
@@ -57,9 +64,10 @@
 # 50-60 runner-minutes across the 13 mocked-hub jobs; retries of failing
 # tests add to that. The terminal-workspace job also runs a Vite production
 # build first, which adds about 1 minute (that job takes about 4 minutes in
-# total). The 14th job, test-identity-session, adds setup-go, a Go build
-# (make build; a few minutes on a cold Go cache, less with the setup-go
-# cache) and a Vite production build before its short suite.
+# total). The two real-hub jobs, test-identity-session and port-proxy, each
+# add setup-go, a Go build (make build; a few minutes on a cold Go cache,
+# less with the setup-go cache) and a Vite production build before a short
+# suite; port-proxy also builds the helper.
 # Wall clock is bounded by the slowest job, about 8-10 minutes.
 
 name: Web E2E (advisory)
@@ -69,11 +77,31 @@ on:
     paths:
       - 'web/**'
       - '.github/workflows/web-e2e.yml'
+      # port-proxy suite (ptone/scion#5568): see the header.
+      - 'hack/e2e/**'
+      - 'pkg/hub/port_forward_handlers.go'
+      - 'pkg/hub/conduit_proxy.go'
+      - 'pkg/hub/project_workspace_handlers.go'
+      - 'pkg/hub/auth.go'
+      - 'pkg/hub/web.go'
+      - 'pkg/portforward/**'
+      - 'pkg/sciontool/portforward/**'
+      - 'pkg/sciontool/conduit/**'
   push:
     branches: [ main ]
     paths:
       - 'web/**'
       - '.github/workflows/web-e2e.yml'
+      # port-proxy suite (ptone/scion#5568): see the header.
+      - 'hack/e2e/**'
+      - 'pkg/hub/port_forward_handlers.go'
+      - 'pkg/hub/conduit_proxy.go'
+      - 'pkg/hub/project_workspace_handlers.go'
+      - 'pkg/hub/auth.go'
+      - 'pkg/hub/web.go'
+      - 'pkg/portforward/**'
+      - 'pkg/sciontool/portforward/**'
+      - 'pkg/sciontool/conduit/**'
   # The odd minute avoids the top-of-hour spike in scheduled GitHub jobs.
   schedule:
     - cron: '41 5 * * *'
