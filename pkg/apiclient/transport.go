@@ -244,19 +244,19 @@ func (t *Transport) DoNoRetry(ctx context.Context, req *http.Request) (*http.Res
 // raw *http.Client (e.g. the transfer client for signed URL uploads/downloads)
 // but still need to authenticate with the hub when signed URLs are HTTP proxy
 // URLs rather than GCS signed URLs or file:// URLs.
+// The base client's redirect policy, cookie jar, and timeout are preserved.
 func (t *Transport) AuthenticatedHTTPClient() *http.Client {
 	base := t.HTTPClient
 	if base == nil {
 		base = http.DefaultClient
 	}
-	return &http.Client{
-		Timeout: base.Timeout,
-		Transport: &authRoundTripper{
-			base: base.Transport,
-			auth: t.Auth,
-			ua:   t.UserAgent,
-		},
+	client := *base
+	client.Transport = &authRoundTripper{
+		base: base.Transport,
+		auth: t.Auth,
+		ua:   t.UserAgent,
 	}
+	return &client
 }
 
 // authRoundTripper is an http.RoundTripper that applies authentication headers.
