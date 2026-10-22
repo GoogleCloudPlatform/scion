@@ -367,17 +367,20 @@ func (s *HubSettingStore) DeleteHubSettingRevision(ctx context.Context, section 
 // BackfillOrigin sets the origin column for existing rows that predate
 // the origin field. Rows with updated_by="seed" keep origin="seeded" (the
 // column default). Rows with updated_by!="seed" (admin writes) get
-// origin="managed". The _meta row is exempt. The
-// store.HubSettingsRevisionSection row is never matched: bumpSettingsRevision
-// leaves its updated_by NULL, as opsettings.EffectiveOrigin also reads it.
-// Idempotent — rows that
-// already have the correct origin are unaffected because the column
-// default is "seeded" and this only updates the non-seed rows.
+// origin="managed". The _meta row and the reserved
+// store.HubSettingsRevisionSection row are exempt by name, as in
+// opsettings.EffectiveOrigin. Idempotent — rows that already have the
+// correct origin are unaffected because the column default is "seeded"
+// and this only updates the non-seed rows.
 //
 // The origin of an operational section is part of the settings a reader
 // sees (a seeded endpoints row's public_url is not a saved value), so when
-// an operational row changes, the operational-settings revision is bumped
-// in the same transaction.
+// the update changes an operational row, the operational-settings revision
+// is bumped in the same transaction. The bump is decided by the rows the
+// operational update changed, not by the rows a query found first: a
+// replica that backfills concurrently finds its rows already changed once
+// the first replica commits (Postgres re-checks the predicate after the
+// row lock), updates none and does not bump.
 func (s *HubSettingStore) BackfillOrigin(ctx context.Context) error {
 	tx, err := s.client.Tx(ctx)
 	if err != nil {
@@ -388,6 +391,7 @@ func (s *HubSettingStore) BackfillOrigin(ctx context.Context) error {
 	match := []predicate.HubSetting{
 		hubsetting.UpdatedByNEQ("seed"),
 		hubsetting.SectionNEQ("_meta"),
+		hubsetting.SectionNEQ(store.HubSettingsRevisionSection),
 		hubsetting.OriginEQ(hubsetting.OriginSeeded),
 	}
 	sections, err := tx.HubSetting.Query().Where(match...).Select(hubsetting.FieldSection).Strings(ctx)
@@ -397,18 +401,30 @@ func (s *HubSettingStore) BackfillOrigin(ctx context.Context) error {
 	if len(sections) == 0 {
 		return nil
 	}
+	var operational []string
+	for _, section := range sections {
+		if isOperationalSection(section) {
+			operational = append(operational, section)
+		}
+	}
 	if _, err := tx.HubSetting.Update().
-		Where(match...).
+		Where(append(match, hubsetting.SectionNotIn(operational...))...).
 		SetOrigin(hubsetting.OriginManaged).
 		Save(ctx); err != nil {
 		return fmt.Errorf("backfill origin: %w", err)
 	}
-	for _, section := range sections {
-		if isOperationalSection(section) {
+	if len(operational) > 0 {
+		n, err := tx.HubSetting.Update().
+			Where(append(match, hubsetting.SectionIn(operational...))...).
+			SetOrigin(hubsetting.OriginManaged).
+			Save(ctx)
+		if err != nil {
+			return fmt.Errorf("backfill origin: %w", err)
+		}
+		if n > 0 {
 			if _, err := bumpSettingsRevision(ctx, tx); err != nil {
 				return fmt.Errorf("backfill origin: %w", err)
 			}
-			break
 		}
 	}
 	if err := tx.Commit(); err != nil {

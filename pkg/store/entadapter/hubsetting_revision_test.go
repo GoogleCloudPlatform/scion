@@ -179,6 +179,35 @@ func TestHubSettingsRevision_BackfillOrigin(t *testing.T) {
 	row, err = s.GetHubSetting(ctx, store.HubSettingsRevisionSection)
 	require.NoError(t, err)
 	assert.Equal(t, "seeded", row.Origin, "the revision row is never backfilled")
+
+	// The revision row is excluded by name, not by its NULL updated_by: with
+	// an updated_by set it is still left alone, and it alone causes no bump
+	// (ptone/scion#5666).
+	_, err = client.HubSetting.Update().
+		Where(hubsetting.SectionEQ(store.HubSettingsRevisionSection)).
+		SetUpdatedBy("admin@test.com").
+		Save(ctx)
+	require.NoError(t, err)
+	require.NoError(t, s.BackfillOrigin(ctx))
+	row, err = s.GetHubSetting(ctx, store.HubSettingsRevisionSection)
+	require.NoError(t, err)
+	assert.Equal(t, "seeded", row.Origin, "the revision row is excluded by name")
+	assert.Equal(t, int64(2), row.Revision, "no bump when only the revision row matches the other conditions")
+
+	// An operational and a non-operational row backfilled together give one
+	// bump.
+	for _, sec := range []string{"lifecycle", "migration_example_marker_v2"} {
+		_, err = client.HubSetting.Create().SetSection(sec).
+			SetValue(json.RawMessage(`{}`)).SetUpdatedBy("admin@test.com").SetOrigin(hubsetting.OriginSeeded).Save(ctx)
+		require.NoError(t, err)
+	}
+	require.NoError(t, s.BackfillOrigin(ctx))
+	assert.Equal(t, int64(3), settingsRevision(t, s))
+	for _, sec := range []string{"lifecycle", "migration_example_marker_v2"} {
+		got, err := s.GetHubSetting(ctx, sec)
+		require.NoError(t, err)
+		assert.Equal(t, "managed", got.Origin, sec)
+	}
 }
 
 // DeleteHubSettingRevision returns the revision its own transaction bumped
@@ -208,4 +237,16 @@ func TestHubSettingsRevision_DeleteReturnsRevision(t *testing.T) {
 	var st store.Store = NewCompositeStore(enttest.NewClient(t))
 	_, ok := st.(store.HubSettingRevisionDeleter)
 	assert.True(t, ok, "the composite store promotes DeleteHubSettingRevision")
+}
+
+// A real duplicate-section insert on SQLite is classified as a section
+// conflict, so the -1 retry sees it (ptone/scion#5772).
+func TestIsHubSettingSectionConflict_SQLiteDuplicateSection(t *testing.T) {
+	client := enttest.NewClient(t)
+	ctx := context.Background()
+	_, err := client.HubSetting.Create().SetSection("lifecycle").SetValue(json.RawMessage(`{}`)).Save(ctx)
+	require.NoError(t, err)
+	_, err = client.HubSetting.Create().SetSection("lifecycle").SetValue(json.RawMessage(`{}`)).Save(ctx)
+	require.Error(t, err)
+	assert.True(t, isHubSettingSectionConflict(err), "duplicate section: %v", err)
 }
