@@ -152,6 +152,18 @@ var urlCredentialCases = []struct{ name, in, want string }{
 	{"U+212A before &", "https://h/x?a=\u212a&token=tok3n", "https://h/x?a=\u212a&token=xxxxx"},
 	{"U+212A in the value", "https://h/x?token=\u212atok3n&b=2", "https://h/x?token=xxxxx&b=2"},
 	{"non-ASCII path", "https://h/caf\u00e9/\u65e5?token=tok3n", "https://h/caf\u00e9/\u65e5?token=xxxxx"},
+	{"nested URL token", "https://hub.example.com/login?next=https://app.example.com/cb?token=tok3n", "https://hub.example.com/login?next=https://app.example.com/cb?token=xxxxx"},
+	{"nested URL destination readable", "https://hub.example.com/login?next=https://app.example.com/cb/x?state=s&code=s3cret&n=1", "https://hub.example.com/login?next=https://app.example.com/cb/x?state=s&code=xxxxx&n=1"},
+	{"nested URL second level left alone", "https://hub.example.com/a?next=https://b.example.com/?u=https://c.example.com/?code=deepvalue", "https://hub.example.com/a?next=https://b.example.com/?u=https://c.example.com/?code=deepvalue"},
+	{"nested URL without query", "https://hub.example.com/login?next=https://app.example.com/cb", "https://hub.example.com/login?next=https://app.example.com/cb"},
+	{"credential name with a URL value", "https://hub.example.com/x?token=https://app.example.com/?a=1", "https://hub.example.com/x?token=xxxxx"},
+	{"nested URL in a fragment", "https://hub.example.com/#next=https://app.example.com/cb?access_token=tok3n", "https://hub.example.com/#next=https://app.example.com/cb?access_token=xxxxx"},
+	{"jsessionid path parameter", "https://hub.example.com/app;jsessionid=s3cret/page?x=1", "https://hub.example.com/app;jsessionid=xxxxx/page?x=1"},
+	{"jsessionid last path parameter", "https://hub.example.com/app;JSESSIONID=s3cret", "https://hub.example.com/app;JSESSIONID=xxxxx"},
+	{"other path parameter kept", "https://hub.example.com/a;v=2/b", "https://hub.example.com/a;v=2/b"},
+	{"phpsessid query", "https://hub.example.com/x?PHPSESSID=s3cret&a=1", "https://hub.example.com/x?PHPSESSID=xxxxx&a=1"},
+	{"pass is an exact name only", "https://hub.example.com/x?bypass=1&compass=n&passthrough=yes&pass=s3cret", "https://hub.example.com/x?bypass=1&compass=n&passthrough=yes&pass=xxxxx"},
+	{"session and sid are not masked", "https://hub.example.com/x?session=abc&sid=def", "https://hub.example.com/x?session=abc&sid=def"},
 	{"question mark in a fragment value", "https://hub.example.com/cb#access_token=tok3n&state=a?b", "https://hub.example.com/cb#access_token=xxxxx&state=a?b"},
 }
 
@@ -267,6 +279,37 @@ func TestRedactURLsIn_PropertyNoPanicNoLeak(t *testing.T) {
 		got := RedactURLsIn(in)
 		if strings.Contains(got, "S3CRETVALUE") {
 			t.Fatalf("RedactURLsIn(%q) = %q, shows the token", in, got)
+		}
+	}
+}
+
+// redactPropertySafe is junk for a nested URL's path: no delimiter, so the
+// nested query starts where the test puts it.
+var redactPropertySafe = []string{"a", "Z", "/", ".", "-", "%", "%zz", "\xff", "\xc3", "\u023a", "\u212a", "\u00e9"}
+
+// A credential parameter in the query of a URL inside a parameter value
+// (one level deep) is masked, for any junk path, and nothing panics
+// (ptone/scion#5356 security review).
+func TestRedactURL_PropertyNestedURL(t *testing.T) {
+	r := rand.New(rand.NewSource(53561))
+	junk := func() string {
+		var b strings.Builder
+		for n := r.Intn(10); n > 0; n-- {
+			b.WriteString(redactPropertySafe[r.Intn(len(redactPropertySafe))])
+		}
+		return b.String()
+	}
+	for i := 0; i < 5000; i++ {
+		// The outer path is delimiter-free too: a "?" and "=" in it would
+		// make next=... itself a nested value, and its query the second
+		// nesting level, which is left alone by design.
+		in := "https://hub.example.com/" + junk() + "?next=https://app.example.com/" + junk() + "?token=S3CRETVALUE&" + redactPropertyJunk(r)
+		got := RedactURL(in)
+		if strings.Contains(got, "S3CRETVALUE") {
+			t.Fatalf("RedactURL(%q) = %q, shows the token", in, got)
+		}
+		if !strings.Contains(got, "next=https://app.example.com/") {
+			t.Fatalf("RedactURL(%q) = %q, lost the nested destination", in, got)
 		}
 	}
 }

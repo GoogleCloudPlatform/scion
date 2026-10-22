@@ -40,6 +40,8 @@ var urlCredentialParamNames = map[string]bool{
 	"signature":         true,
 	"pwd":               true,
 	"pass":              true,
+	"jsessionid":        true,
+	"phpsessid":         true,
 	"x-amz-credential":  true,
 	"x-amz-signature":   true,
 	"x-goog-credential": true,
@@ -103,7 +105,8 @@ func cutDelim(s string, delims []string) (before, delim, after string, found boo
 
 // redactURLParams returns raw (a URL, or the part of one from its path
 // on) with the value of every credential parameter in its query and its
-// fragment replaced by xxxxx. A fragment that holds a route with its own
+// fragment replaced by xxxxx, and the same for its path parameters
+// (redactPathParams). A fragment that holds a route with its own
 // query (#/path?code=...) has that query redacted, and the part before its
 // "?" is redacted as a parameter list too (a "?" can also sit inside a
 // fragment parameter's value). Parameters are split on "&" and ";", so a
@@ -113,7 +116,7 @@ func cutDelim(s string, delims []string) (before, delim, after string, found boo
 func redactURLParams(raw string) string {
 	rest, fdelim, fragment, hasFragment := cutDelim(raw, urlFragmentDelims)
 	base, qdelim, query, hasQuery := cutDelim(rest, urlQueryDelims)
-	out := base
+	out := redactPathParams(base)
 	if hasQuery {
 		out += qdelim + redactParamList(query)
 	}
@@ -127,13 +130,48 @@ func redactURLParams(raw string) string {
 	return out
 }
 
+// redactPathParams masks the credential values of the path parameters in
+// base (a URL up to its query): each ";name=value" after the authority, up
+// to the next "/" or ";", as in /app;jsessionid=X. The scheme and authority
+// are not touched.
+func redactPathParams(base string) string {
+	start := 0
+	if i := strings.Index(base, "://"); i >= 0 {
+		j := strings.IndexByte(base[i+3:], '/')
+		if j < 0 {
+			return base
+		}
+		start = i + 3 + j
+	}
+	path := base[start:]
+	if !strings.Contains(path, ";") {
+		return base
+	}
+	parts := strings.Split(path, ";")
+	for k := 1; k < len(parts); k++ {
+		param, slash, rest := parts[k], "", ""
+		if i := strings.IndexByte(param, '/'); i >= 0 {
+			param, slash, rest = param[:i], "/", param[i+1:]
+		}
+		parts[k] = redactParam(param, 1) + slash + rest
+	}
+	return base[:start] + strings.Join(parts, ";")
+}
+
 // redactParamList masks the credential values of a list of name=value
 // pairs. A name that does not unescape is compared as written.
 func redactParamList(list string) string {
+	return redactParamListAt(list, 0)
+}
+
+// redactParamListAt is redactParamList for a list at nesting depth depth
+// (0 for a URL's own query or fragment, 1 for the query of a URL inside a
+// parameter value).
+func redactParamListAt(list string, depth int) string {
 	var b strings.Builder
 	for {
 		pair, delim, rest, more := cutDelim(list, urlParamDelims)
-		b.WriteString(redactParam(pair))
+		b.WriteString(redactParam(pair, depth))
 		if !more {
 			return b.String()
 		}
@@ -143,9 +181,13 @@ func redactParamList(list string) string {
 }
 
 // redactParam masks the value of one name=value pair with a credential
-// name.
-func redactParam(pair string) string {
-	name, vdelim, _, hasValue := cutDelim(pair, urlValueDelims)
+// name. A value that is itself a URL with a query (it holds "://" and a
+// "?"), under any name, keeps its destination readable: the part after its
+// first "?" is redacted as a parameter list, one level deep only, by its
+// plain-text structure (no further percent-decoding). For example
+// next=https://h/cb?token=X becomes next=https://h/cb?token=xxxxx.
+func redactParam(pair string, depth int) string {
+	name, vdelim, value, hasValue := cutDelim(pair, urlValueDelims)
 	if !hasValue {
 		return pair
 	}
@@ -155,6 +197,11 @@ func redactParam(pair string) string {
 	}
 	if isURLCredentialParam(unescaped) {
 		return name + vdelim + redactedSecret
+	}
+	if depth == 0 && strings.Contains(value, "://") {
+		if dest, qdelim, query, ok := cutDelim(value, urlQueryDelims); ok {
+			return name + vdelim + dest + qdelim + redactParamListAt(query, depth+1)
+		}
 	}
 	return pair
 }
