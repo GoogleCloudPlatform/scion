@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
@@ -64,7 +65,7 @@ func TestHandlePTYStream_AuxRuntimeWithoutAttach_ClosesBeforeExec(t *testing.T) 
 			fakeRuntime := filepath.Join(dir, "fake-runtime")
 			require.NoError(t, os.WriteFile(fakeRuntime, []byte("#!/bin/sh\necho \"$@\" >> '"+marker+"'\nexit 1\n"), 0o700))
 
-			srv := New(DefaultServerConfig(), &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+			srv := New(DefaultServerConfig(), &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 			auxRT := &attachCapableTestRuntime{
 				MockRuntime:    &runtime.MockRuntime{NameFunc: func() string { return fakeRuntime }},
 				supportsAttach: false,
@@ -261,7 +262,7 @@ profiles:
 func TestHandleInfo_OptedOutDefaultRuntime_ReportsBrokerWideAttachFalse(t *testing.T) {
 	writeHomeSettings(t, `schema_version: "1"
 `)
-	srv := New(DefaultServerConfig(), &mockManager{}, newOptOutTestRuntime("optout"))
+	srv := New(DefaultServerConfig(), &mockManager{}, newOptOutTestRuntime("optout"), config.RuntimeBuildRecord{})
 
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/info", nil))
@@ -278,7 +279,7 @@ func TestHandleInfo_OptedOutDefaultRuntime_ReportsBrokerWideAttachFalse(t *testi
 // before the swap the heartbeat reports attach supported; after swapping
 // to a runtime that opts out, the next heartbeat must report false.
 func TestSwapRuntime_PropagatesAttachCapabilityToHeartbeat(t *testing.T) {
-	srv := New(DefaultServerConfig(), &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	srv := New(DefaultServerConfig(), &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 	hb := NewHeartbeatService(&mockRuntimeBrokerService{}, "test-host", time.Hour, &mockManager{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	hb.SetDefaultRuntime(srv.runtime)
 	srv.hubMu.Lock()
@@ -289,7 +290,7 @@ func TestSwapRuntime_PropagatesAttachCapabilityToHeartbeat(t *testing.T) {
 	require.NotNil(t, before.Capabilities)
 	require.True(t, before.Capabilities.Attach, "precondition: attach-capable default runtime reports Attach=true")
 
-	srv.SwapRuntime(newOptOutTestRuntime("optout"))
+	srv.SwapRuntime(newOptOutTestRuntime("optout"), config.RuntimeBuildRecord{})
 
 	after := hb.buildHeartbeat(context.Background())
 	require.NotNil(t, after.Capabilities)

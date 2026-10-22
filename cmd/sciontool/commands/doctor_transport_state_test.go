@@ -303,7 +303,7 @@ func TestPrintRemediation_ExpiredTransport(t *testing.T) {
 	for _, want := range []string{
 		"transport credential in use has expired",
 		"The last refresh did not renew it: mint failed for test",
-		"scion agent reset-auth <agent-name>  (also pushes a fresh transport token)",
+		"scion reset-auth <agent-name>  (also pushes a fresh transport token)",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("remediation missing %q:\n%s", want, out)
@@ -330,7 +330,7 @@ func TestCheckTransportAuth_MalformedFileFails(t *testing.T) {
 		t.Errorf("malformed credential must not be reported OK:\n%s", out)
 	}
 	rem := captureStdout(t, func() { printRemediation(time.Now().Add(time.Hour), "agent", true, diag) })
-	for _, want := range []string{"could not be parsed", "scion agent reset-auth"} {
+	for _, want := range []string{"could not be parsed", "scion reset-auth"} {
 		if !strings.Contains(rem, want) {
 			t.Errorf("remediation missing %q:\n%s", want, rem)
 		}

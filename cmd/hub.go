@@ -202,7 +202,8 @@ var hubBrokersInfoCmd = &cobra.Command{
 	Long: `Show detailed information about a runtime broker on the Hub.
 
 Displays broker metadata including name, status, version, last heartbeat,
-capabilities, available profiles, and projects it provides for.
+capabilities, available profiles (legacy) or runtime target (flat), and
+projects it provides for.
 
 If no broker name is provided, the current host's broker is used (if registered).
 
@@ -2205,42 +2206,7 @@ func runHubBrokersInfo(cmd *cobra.Command, args []string) error {
 	}
 
 	if isJSONOutput() {
-		output := map[string]interface{}{
-			"id":              broker.ID,
-			"name":            broker.Name,
-			"slug":            broker.Slug,
-			"version":         broker.Version,
-			"status":          broker.Status,
-			"connectionState": broker.ConnectionState,
-			"autoProvide":     broker.AutoProvide,
-			"created":         broker.Created,
-			"updated":         broker.Updated,
-		}
-		if !broker.LastHeartbeat.IsZero() {
-			output["lastHeartbeat"] = broker.LastHeartbeat
-		}
-		if broker.Endpoint != "" {
-			output["endpoint"] = broker.Endpoint
-		}
-		if broker.CreatedBy != "" {
-			output["createdBy"] = broker.CreatedBy
-		}
-		if broker.Capabilities != nil {
-			output["capabilities"] = broker.Capabilities
-		}
-		if len(broker.Profiles) > 0 {
-			output["profiles"] = broker.Profiles
-		}
-		if len(broker.Projects) > 0 {
-			output["projects"] = broker.Projects
-		}
-		if len(broker.Labels) > 0 {
-			output["labels"] = broker.Labels
-		}
-		if len(broker.Annotations) > 0 {
-			output["annotations"] = broker.Annotations
-		}
-		return outputJSON(output)
+		return outputJSON(brokerInfoJSON(broker))
 	}
 
 	// Text output
@@ -2306,6 +2272,11 @@ func runHubBrokersInfo(cmd *cobra.Command, args []string) error {
 				fmt.Printf("  - %s (%s) [%s]\n", p.Name, p.Type, availStr)
 			}
 		}
+	} else if broker.RuntimeTarget != nil {
+		// A flat Runtime Broker has no profiles: it serves one runtime
+		// target and shows what its instance reported.
+		fmt.Println()
+		writeRuntimeTargetSections(os.Stdout, broker.RuntimeTarget, broker.RuntimeTargetPresentation, broker.RuntimeTargetPresentationObservedAt)
 	} else {
 		fmt.Println()
 		fmt.Println("Profiles: none")
@@ -2325,6 +2296,54 @@ func runHubBrokersInfo(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// brokerInfoJSON is the `hub brokers info --json` document. A flat Runtime
+// Broker's reported presentation and its observation time are included as
+// the Hub returns them.
+func brokerInfoJSON(broker *hubclient.RuntimeBroker) map[string]interface{} {
+	output := map[string]interface{}{
+		"id":              broker.ID,
+		"name":            broker.Name,
+		"slug":            broker.Slug,
+		"version":         broker.Version,
+		"status":          broker.Status,
+		"connectionState": broker.ConnectionState,
+		"autoProvide":     broker.AutoProvide,
+		"created":         broker.Created,
+		"updated":         broker.Updated,
+	}
+	if !broker.LastHeartbeat.IsZero() {
+		output["lastHeartbeat"] = broker.LastHeartbeat
+	}
+	if broker.Endpoint != "" {
+		output["endpoint"] = broker.Endpoint
+	}
+	if broker.CreatedBy != "" {
+		output["createdBy"] = broker.CreatedBy
+	}
+	if broker.Capabilities != nil {
+		output["capabilities"] = broker.Capabilities
+	}
+	if len(broker.Profiles) > 0 {
+		output["profiles"] = broker.Profiles
+	}
+	if len(broker.Projects) > 0 {
+		output["projects"] = broker.Projects
+	}
+	if len(broker.Labels) > 0 {
+		output["labels"] = broker.Labels
+	}
+	if len(broker.Annotations) > 0 {
+		output["annotations"] = broker.Annotations
+	}
+	if broker.RuntimeTargetPresentation != nil {
+		output["runtimeTargetPresentation"] = broker.RuntimeTargetPresentation
+	}
+	if broker.RuntimeTargetPresentationObservedAt != nil {
+		output["runtimeTargetPresentationObservedAt"] = broker.RuntimeTargetPresentationObservedAt
+	}
+	return output
 }
 
 func runHubBrokersDelete(cmd *cobra.Command, args []string) error {

@@ -831,9 +831,11 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 	// SSE event so a client refetching on it already sees them. Only files the
 	// sender owns are linked (linkSenderOwnedAttachmentRefs): the refs come
 	// from message metadata, and a linked file downloads for the message's
-	// readers.
-	linkSenderOwnedAttachmentRefs(ctx, p.webChatStore, storeMsg.ID, projectID, msg.SenderID, parseAttachmentRefs(msg.Metadata), p.log)
-	delete(msg.Metadata, attachmentsMetadataKey) // strip internal transport key
+	// readers. The live event below carries exactly the linked refs, the
+	// files history lists (ptone/scion#5504). msg is shared with the bus's
+	// other subscribers, so its metadata, transport key included, is left
+	// as it is: nothing below reads the attachments key.
+	linkedRefs := linkSenderOwnedAttachmentRefs(ctx, p.webChatStore, storeMsg.ID, projectID, msg.SenderID, parseAttachmentRefs(msg.Metadata), p.log)
 
 	// Artifact references are recorded only when the hub's admission step
 	// set them on this in-process message. Any other value is ignored: it
@@ -899,10 +901,9 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 	}
 
 	// Publish SSE event so connected browser clients receive real-time inbox updates.
-	refs := parseAttachmentRefs(msg.Metadata)
-	p.events.PublishUserMessage(ctx, storeMsg, refs, artifactRefs)
+	p.events.PublishUserMessage(ctx, storeMsg, linkedRefs, artifactRefs)
 	if p.memberFanout != nil {
-		p.memberFanout(ctx, storeMsg, refs, artifactRefs)
+		p.memberFanout(ctx, storeMsg, linkedRefs, artifactRefs)
 	}
 
 	// Log to dedicated message audit log
@@ -912,10 +913,12 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 			"topic", topic,
 			"source", "broker",
 		}
+		// A copy: msg is shared with the bus's other subscribers.
+		logged := *msg
 		if storeMsg.ConversationID != "" {
-			msg.ConversationID = storeMsg.ConversationID
+			logged.ConversationID = storeMsg.ConversationID
 		}
-		logAttrs = append(logAttrs, msg.LogAttrs()...)
+		logAttrs = append(logAttrs, logged.LogAttrs()...)
 		p.messageLog.Info("user message delivered via broker", logAttrs...)
 	}
 	recorded = true

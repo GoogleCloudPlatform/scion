@@ -228,7 +228,7 @@ func TestStartAgent_UnresolvableSavedProfileOnKubernetesDefaultBroker(t *testing
 	cfg.StateDir = t.TempDir()
 	cfg.ContainerHubEndpoint = lifecycleBridge
 	mgr := &filteringMockManager{}
-	srv := New(cfg, mgr, &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }})
+	srv := New(cfg, mgr, &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}, config.RuntimeBuildRecord{})
 	logs := captureLifecycleLog(srv)
 
 	w := lifecyclePost(t, srv, "/api/v1/agents/"+name+"/start", map[string]any{
@@ -461,7 +461,7 @@ func TestStartAgent_RecordedRuntimeNoFallbackForInstanceRuntimes(t *testing.T) {
 					mgr.agents = append(mgr.agents, lifecycleAgent(name, projectPath, ""))
 					body = map[string]any{}
 				}
-				srv := New(cfg, mgr, c.rt)
+				srv := New(cfg, mgr, c.rt, config.RuntimeBuildRecord{})
 				logs := captureLifecycleLog(srv)
 
 				w := lifecyclePost(t, srv, "/api/v1/agents/"+name+"/"+action, body)

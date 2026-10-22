@@ -1,0 +1,37 @@
+Runtime target
+--------------
+ID:                         rt-1234
+Type:                       kubernetes
+Display name:               Cluster A
+Namespace:                  agents
+
+Reported defaults
+-----------------
+As reported by the instance at 2026-10-14 12:00:00 UTC; defaults for new agents only, not the configuration of existing agents and not a check of cluster permissions.
+Safe to evict:              false
+GKE:                        true
+Priority class:             agents-high
+Shared dir storage class:   standard-rwx
+Shared dir size:            40Gi
+Shared dir storage backend: nfs
+Shared dir backends:        cache=nfs, data=local
+Home storage backend:       nfs
+Default harness config:     claude
+Image registry:             registry.example/team
+Clone depth:                full
+Resources:                  requests cpu=1 memory=2Gi; limits cpu=2 memory=4Gi; disk 20Gi
+Volumes:
+  - /mnt/a (nfs, read-only)
+Secrets:
+  - API_KEY (file): the API key
+Harness overrides:
+  - claude
+      Image:             img:1
+      Image pull policy: Never
+      Auth type:         vertex-ai
+      User:              agent
+      Env keys:          EMPTY, TOKEN
+      Volumes:           /mnt/b (nfs, read-only)
+      Resources:         limits memory=8Gi
+  - gemini
+      Env keys:          OTHER

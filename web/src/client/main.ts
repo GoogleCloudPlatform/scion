@@ -47,7 +47,8 @@ import {
   type TerminalWorkspaceModule,
 } from './terminal-workspace-loader.js';
 import { showToast } from '../utils/toast.js';
-import { isFeatureEnabled } from '../utils/feature-flags.js';
+import { FLAT_BROKERS_FLAG, isFeatureEnabled } from '../utils/feature-flags.js';
+import { resolveBrokerRoute } from './broker-routes.js';
 import { applyServerFeatureFlags } from './server-feature-flags.js';
 import { setPreferredTimeZone } from '../utils/time.js';
 import { withTimeout } from './with-timeout.js';
@@ -484,16 +485,8 @@ const ROUTES: RouteConfig[] = [
     tag: 'scion-page-agents',
     load: () => import('../components/pages/agents.js'),
   },
-  {
-    pattern: /^\/brokers$/,
-    tag: 'scion-page-brokers',
-    load: () => import('../components/pages/brokers.js'),
-  },
-  {
-    pattern: /^\/brokers\/[^/]+$/,
-    tag: 'scion-page-broker-detail',
-    load: () => import('../components/pages/broker-detail.js'),
-  },
+  // /brokers and /brokers/{id} are resolved by resolveBrokerRoute
+  // (broker-routes.ts), ahead of this table.
   {
     pattern: /^\/skills$/,
     tag: 'scion-page-skills',
@@ -1122,6 +1115,8 @@ const NOT_FOUND_ROUTE: RouteConfig = {
  * Resolves a URL path to a route configuration
  */
 function resolveRoute(path: string): RouteConfig {
+  const brokerRoute = resolveBrokerRoute(path, isFeatureEnabled(FLAT_BROKERS_FLAG));
+  if (brokerRoute) return brokerRoute;
   for (const route of ROUTES) {
     if (route.pattern.test(path)) {
       return route;

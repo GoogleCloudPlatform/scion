@@ -45,6 +45,10 @@ func StaticCapabilities(rt scionrt.Runtime, nodeImageRegistry string) *hubclient
 		// This broker honours localOnly deletes and confirms a moved
 		// agent's NFS workspace before provisioning it (agent move).
 		AgentMove: true,
+		// This broker can be the target of a forced move: it confirms it
+		// has no files for the agent before provisioning it with a fresh
+		// workspace (ptone/scion#5441).
+		AgentMoveRecreate: true,
 		// This broker's reprovision reuses an empty-per-agent workspace in
 		// place (miller79/scion#167).
 		ReprovisionEmptyPerAgent: true,

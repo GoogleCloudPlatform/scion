@@ -830,6 +830,12 @@ func entBrokerToStore(b *ent.RuntimeBroker) *store.RuntimeBroker {
 			DisplayName: b.RuntimeTargetDisplayName,
 		}
 	}
+	unmarshalRawJSON(b.RuntimeTargetPresentation, &sb.RuntimeTargetPresentation)
+	sb.RuntimeTargetPresentationHash = b.RuntimeTargetPresentationHash
+	sb.RuntimeTargetPresentationObservedAt = b.PresentationObservedAt
+	sb.PresentationEpoch = b.PresentationEpoch
+	sb.PresentationSeq = b.PresentationSeq
+	sb.PresentationFencedAt = b.PresentationFencedAt
 	return sb
 }
 
@@ -858,6 +864,8 @@ func (s *ProjectStore) CreateRuntimeBroker(ctx context.Context, b *store.Runtime
 		SetHealth(marshalRawJSON(b.Health)).
 		SetLabels(b.Labels).
 		SetAnnotations(b.Annotations)
+	// The six presentation columns are never written at creation; only
+	// SetRuntimeBrokerPresentation writes them.
 	if b.IsFlat() {
 		create.SetRuntimeTargetID(b.RuntimeTarget.ID).
 			SetRuntimeTargetType(b.RuntimeTarget.Type).
@@ -957,7 +965,12 @@ func (s *ProjectStore) UpdateRuntimeBroker(ctx context.Context, b *store.Runtime
 		// On a flat row (stored runtime target), profiles never persist:
 		// strip rather than reject, so a leftover written by an older binary
 		// cannot make later read-modify-writes fail. The runtime_target_*
-		// columns are never written here.
+		// columns are never written here, and neither are the six
+		// presentation columns (runtime_target_presentation, its hash,
+		// presentation_epoch, presentation_seq, presentation_fenced_at,
+		// presentation_observed_at): only SetRuntimeBrokerPresentation
+		// writes them, so a write-back of a copy read before a presentation
+		// write cannot roll it back. Do not add them to this list.
 		profiles, defaultProfile := b.Profiles, b.DefaultProfile
 		if cur.RuntimeTargetID != nil && *cur.RuntimeTargetID != "" {
 			if len(profiles) > 0 || defaultProfile != "" {

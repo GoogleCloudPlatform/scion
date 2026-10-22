@@ -114,11 +114,11 @@ func (f ownerGrantFixture) ownerAudits(t *testing.T, except string) []*store.Mut
 }
 
 // The HTTP subtests below check the end-to-end result for a hub-boundary
-// UAT without owner coverage: 403 and no rows. That 403 comes from the
-// project.create authorization, which such a token does not pass, so these
-// subtests do not isolate the owner-coverage check. TestOwnerGrantCoverageCheck
-// tests the check itself, and TestOwnerGrantCheckPrecedesOwnerWrite pins its
-// call sites.
+// UAT without owner coverage: 403 and no rows. The clone subtest's 403
+// comes from the clone selector check, which runs first, so these subtests
+// do not isolate the owner-coverage check. TestOwnerGrantCoverageCheck tests
+// the check itself, TestOwnerGrantCheckPrecedesOwnerWrite pins its call
+// sites, and the project create token tests pin it over HTTP.
 func TestOwnerBindingRequiresCanDelegate(t *testing.T) {
 	t.Run("create denied without owner coverage", func(t *testing.T) {
 		f := newOwnerGrantFixture(t, "deny")
@@ -187,10 +187,8 @@ func TestOwnerGrantCoverageCheck(t *testing.T) {
 	assert.True(t, ok, "non-user identities are gated by project create authorization, not here")
 }
 
-// No credential that passes project.create authorization over HTTP lacks
-// owner coverage: a hub-boundary UAT is refused project.create ("token not
-// scoped for this project"), and a session or agent identity is not subject
-// to the check. So the call sites are pinned structurally. In each of
+// The call sites are pinned structurally, so that every path that writes an
+// owner binding runs the check whatever credential reaches it. In each of
 // createProject, handleProjectRegister and handleProjectClone, a statement
 // "if !s.authorizeProjectOwnerGrant(w, ctx) { return }" must come before every
 // createProjectWithOwner call, in a block that encloses that call. These
