@@ -631,14 +631,23 @@ func (ws *WebServer) logger() *slog.Logger {
 // baseURLIsHTTPS reports whether baseURL's scheme is https, compared
 // case-insensitively at the point of use, so a direct caller of
 // WebServerConfig or NewWebServer cannot get a non-Secure session cookie
-// from an upper-case "HTTPS://" base URL. (The server's resolver also
-// lower-cases the scheme; this does not rely on it.) A base URL that does
-// not parse falls back to a case-insensitive "https://" prefix check, so
-// an unparsable https URL still gets a Secure cookie (fail closed).
+// from an upper-case "HTTPS://" base URL. It does not rely on the server's
+// resolver, which also lower-cases the scheme.
+//
+// A base URL that does not parse falls back to the scheme text before the
+// first ":", compared case-insensitively with "https" (not an "https://"
+// prefix test, which "https:/host" would fail), so the decision fails
+// closed. The fail-safe default for Secure is true: a Secure cookie on an
+// http URL breaks login visibly, while a non-Secure cookie on an https URL
+// leaks silently. This fallback is a second line of defence only: the
+// server refuses a base URL that does not parse at startup
+// (checkWebBaseURLListener in cmd), and this function must not be read as
+// making that validation optional.
 func baseURLIsHTTPS(baseURL string) bool {
 	u, err := url.Parse(baseURL)
 	if err != nil {
-		return strings.HasPrefix(strings.ToLower(baseURL), "https://")
+		scheme, _, _ := strings.Cut(baseURL, ":")
+		return strings.EqualFold(scheme, "https")
 	}
 	return strings.EqualFold(u.Scheme, "https")
 }

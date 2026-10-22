@@ -212,6 +212,24 @@ func TestCheckWebBaseURLListener_Cases(t *testing.T) {
 	}
 }
 
+// The base URL must parse, use http or https and carry a host on EVERY
+// listener, loopback included, so no consumer sees a malformed value;
+// http stays allowed on a loopback listener (ptone/scion#5364).
+func TestCheckWebBaseURLListener_MalformedRefusedOnEveryListener(t *testing.T) {
+	for _, host := range []string{"127.0.0.1", "::1", "localhost", "0.0.0.0"} {
+		for _, raw := range []string{"https://localhost:8443/%zz", "https://host:abc", "://bad", "https://", "ftp://hub.example.com"} {
+			err := checkWebBaseURLListener(resolvedWebBaseURL{URL: raw, Source: "--base-url"}, host, 8080)
+			require.Error(t, err, "listen host %q, base URL %q", host, raw)
+			assert.Contains(t, err.Error(), "is not a valid http or https URL with a host", "listen host %q, base URL %q", host, raw)
+			assert.Contains(t, err.Error(), raw)
+			assert.Contains(t, err.Error(), "(from --base-url)")
+		}
+	}
+	for _, host := range []string{"127.0.0.1", "::1", "localhost"} {
+		assert.NoError(t, checkWebBaseURLListener(resolvedWebBaseURL{URL: "http://127.0.0.1:8080", Source: "--base-url"}, host, 8080), "http on loopback %q", host)
+	}
+}
+
 // A hostname resolving to loopback does not qualify: the listener check
 // never resolves a name, so a hosts-file name that points at 127.0.0.1
 // (ip6-localhost, localhost.localdomain) or a public DNS name that does

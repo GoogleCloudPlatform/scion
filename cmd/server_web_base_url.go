@@ -190,15 +190,28 @@ func globalSettingsFileLabel() string {
 	return config.GetSettingsPath(dir)
 }
 
-// checkWebBaseURLListener refuses a web server that listens on a
-// non-loopback address with a base URL that is not https: OAuth callbacks
-// and the session cookie would then cross the network unencrypted.
+// checkWebBaseURLListener validates the web base URL on every listener,
+// then refuses a non-loopback listener whose base URL is not https.
+//
+// First, on every listener (loopback included), the base URL must parse,
+// use the http or https scheme and carry a host; otherwise the server does
+// not start, so no consumer (the redirect URI, the cookie's Secure
+// decision, the client config) ever sees a malformed value. Then a web
+// server that listens on a non-loopback address with a base URL that is
+// not https is refused: OAuth callbacks and the session cookie would cross
+// the network unencrypted. http stays allowed on a loopback listener.
 // Loopback is decided from the literal listen host only (127.0.0.0/8, ::1
 // and the name "localhost"; config.IsLoopbackHost): a name is never
 // resolved, so a hosts-file name that points at 127.0.0.1 counts as not
-// loopback. The error names the base URL, its source, the listen address,
-// and both fixes.
+// loopback. Each error names the base URL and its source; the listener
+// refusal also names the listen address and both fixes.
 func checkWebBaseURLListener(base resolvedWebBaseURL, listenHost string, listenPort int) error {
+	u, err := url.Parse(base.URL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("refusing to start the web server: its base URL %s (from %s) is not a valid http or https URL "+
+			"with a host. Set --base-url, SCION_SERVER_BASE_URL or server.hub.public_url in the global settings file "+
+			"to a URL such as https://hub.example.com", base.URL, base.Source)
+	}
 	// The loopback rule, stated so it is not "fixed" either way later:
 	// "localhost" is accepted as a literal name by convention, not because
 	// anything resolved it; every other name is refused without being
@@ -212,8 +225,7 @@ func checkWebBaseURLListener(base resolvedWebBaseURL, listenHost string, listenP
 	if base.Source == webBaseURLSourceDefault && !webBaseURLRefuseDefault {
 		return nil
 	}
-	u, err := url.Parse(base.URL)
-	if err == nil && u.Scheme == "https" && u.Host != "" {
+	if u.Scheme == "https" {
 		return nil
 	}
 	listen := net.JoinHostPort(listenHost, strconv.Itoa(listenPort))
