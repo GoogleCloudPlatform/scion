@@ -60,6 +60,21 @@ exception: they are merged by scope rather than replaced along the ladder, by th
 and broker merge rules. Hub-injected skills keep travelling in the requester's inline config,
 labelled by scope.
 
+#### When an edit of an existing agent reaches it
+
+Editing an existing agent's config (`PATCH /api/v1/agents/{id}`) changes its requester inline
+config. A start merges that config into the agent's stored config, so most keys apply at the next
+start. Four job keys are different: `system_prompt`, `agent_instructions`, `skills` and
+`services` are rendered into files in the agent home when the agent is provisioned. The hub
+records which of them an edit changed (`changed_fields`), and a Runtime Broker with the
+`changedFields` capability renders those files again at the next start. It renders a key again
+only when the result differs from its last render, so a change made inside the agent to one of
+those files is overwritten only when the hub's value for that key changes again. A cleared key
+reverts to the inherited value (`cleared_fields`) at the next start on a Runtime Broker with the
+`clearedFields` capability; a cleared `system_prompt` is rendered again from the template. With
+an older Runtime Broker these edits apply at the next reincarnation, as before. See `PATCH /:id`
+in the [API reference](/scion/reference/api/).
+
 ### The telemetry ladder
 
 Lowest to highest:
