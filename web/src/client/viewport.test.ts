@@ -357,6 +357,16 @@ describe('installViewportFrame: Android keyboard (resizes-content)', () => {
     expect(root().hasAttribute('data-keyboard')).toBe(false);
   });
 
+  it('keeps one baseline across fractional widths that round to the same pixel', () => {
+    installAndroid();
+    resizeLayout(LAYOUT_HEIGHT, PORTRAIT_WIDTH + 0.4);
+    focusField();
+    // The keyboard opens at a width that differs only below a pixel.
+    resizeLayout(480, PORTRAIT_WIDTH - 0.4);
+
+    expect(root().dataset['keyboard']).toBe('open');
+  });
+
   it('does nothing while pinch-zoomed', () => {
     installAndroid();
     focusField();

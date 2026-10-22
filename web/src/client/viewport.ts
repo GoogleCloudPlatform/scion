@@ -251,8 +251,12 @@ export function installViewportFrame(win: Window = window): () => void {
     // text field holding focus while the layout height sits well below the
     // tallest seen at this width. Only the attribute is set: the frame
     // already follows the smaller layout viewport through 100dvh.
-    const tallest = Math.max(tallestAtWidth.get(win.innerWidth) ?? 0, win.innerHeight);
-    tallestAtWidth.set(win.innerWidth, tallest);
+    // Keyed on the whole-pixel width, so a fractional width (a high-DPI
+    // screen, or a zoom) neither misses its orientation's baseline nor adds
+    // an entry per sub-pixel step.
+    const width = Math.round(win.innerWidth);
+    const tallest = Math.max(tallestAtWidth.get(width) ?? 0, win.innerHeight);
+    tallestAtWidth.set(width, tallest);
     const layoutKeyboard =
       !keyboardOpen &&
       atZoom1 &&
