@@ -59,12 +59,12 @@ func adtGrantProjectPermissions(t *testing.T, s store.Store, userID, projectID s
 }
 
 // adtMessageWorld readies the fixture for delegated message tests: agent B
-// in P2 is running, Alice holds agent.message in P2 through a custom role
+// in P2 is running on the fixture's online broker, Alice holds agent.message in P2 through a custom role
 // (returned as its binding ID), and dispatches are recorded.
 func (f *adtFixture) adtMessageWorld(t *testing.T) *recordingDispatcher {
 	t.Helper()
 	adtGrantProjectPermissions(t, f.store, f.alice.ID, f.other.ID, "agent.message")
-	f.mutateAgent(t, f.agentB.ID, func(a *store.Agent) { a.Phase = "running" })
+	f.mutateAgent(t, f.agentB.ID, func(a *store.Agent) { a.Phase = "running"; a.RuntimeBrokerID = f.broker.ID })
 	d := &recordingDispatcher{}
 	f.srv.SetDispatcher(d)
 	return d
