@@ -130,6 +130,13 @@ func TestChatSendTopic_ChatPostCheckedOnTokenHolder(t *testing.T) {
 // without inbox:write is refused by the token's inbox.write check.
 func TestChatSendTopic_ChatPostSelectorDoesNotPost(t *testing.T) {
 	f := newChatFixture(t)
+	topicMessages := func() int {
+		t.Helper()
+		rows, err := f.s.ListMessages(context.Background(), store.MessageFilter{ThreadID: f.topicA}, store.ListOptions{Limit: 100})
+		require.NoError(t, err)
+		return len(rows.Items)
+	}
+	before := topicMessages()
 
 	selectorOnly := f.mint(t, f.member, projectBoundary(f.projA), "project:read", "project:chat_post")
 	rec := f.call(t, selectorOnly, http.MethodPost, chatConversationPath(f.topicA, "messages"), map[string]string{"content": "selector only"})
@@ -139,11 +146,14 @@ func TestChatSendTopic_ChatPostSelectorDoesNotPost(t *testing.T) {
 	wantResource, wantAction := selfPermissionResourceAction(permInboxWrite)
 	assert.Equal(t, wantResource, details["resource_type"])
 	assert.Equal(t, string(wantAction), details["denied_action"])
+	assert.Equal(t, before, topicMessages(), "a refused send writes no message")
 
-	// With inbox:write as well the same member posts.
+	// With inbox:write as well the same member posts, and the message is
+	// written (so the count above would have seen a write).
 	both := f.mint(t, f.member, projectBoundary(f.projA), "project:read", "project:chat_post", "inbox:write")
 	rec = f.call(t, both, http.MethodPost, chatConversationPath(f.topicA, "messages"), map[string]string{"content": "selector and inbox"})
 	assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	assert.Equal(t, before+1, topicMessages())
 }
 
 // TestChatPromote_RequiresChatPost: promoting an agent DM moves its
