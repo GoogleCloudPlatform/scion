@@ -782,4 +782,42 @@ func TestAgentPendingConfig_UndecodableStoredKeyIsRemovedAtStart(t *testing.T) {
 	assert.Equal(t, "good-model", starts[0].model)
 	assert.Equal(t, 3, starts[0].inline.MaxTurns, "the undecodable value is not applied")
 	assert.Nil(t, pendingReloadAgent(t, s, agent.ID).PendingConfig, "the undecodable key is removed")
+	discarded := pendingAudits(t, s, agent.ID, mutationTypeAgentPendingConfigDiscarded, 1)
+	keys, trigger := pendingAuditSummary(t, discarded[0])
+	assert.Equal(t, []string{"config.max_turns"}, keys)
+	assert.Equal(t, pendingDiscardTriggerUnappliable, trigger)
+}
+
+// TestAgentPendingConfig_StartRemovesUnappliableKeysWhenNothingFolds: with
+// no container key pending, a start still removes the stored keys that can
+// never be applied (one that no longer decodes, one the edit table does not
+// know) and persists that, keeps the valid provision-rendered key, warns
+// about it alone and writes no applied audit.
+func TestAgentPendingConfig_StartRemovesUnappliableKeysWhenNothingFolds(t *testing.T) {
+	srv, s, _, agent := heldEditsFixture(t, state.PhaseStopped)
+	cur := pendingReloadAgent(t, s, agent.ID)
+	cur.PendingConfig = &store.AgentPendingConfig{Config: map[string]json.RawMessage{
+		"system_prompt": json.RawMessage(`"be brief"`),
+		"max_turns":     json.RawMessage(`"not a number"`),
+		"no_such_key":   json.RawMessage(`1`),
+	}}
+	require.NoError(t, s.UpdateAgent(context.Background(), cur))
+	before := pendingReloadAgent(t, s, agent.ID)
+
+	warnings := pendingLifecycleWarnings(t, srv, agent.ID, "start")
+	assert.Contains(t, warnings, heldForReincarnateWarning([]string{"config.system_prompt"}))
+
+	after := pendingReloadAgent(t, s, agent.ID)
+	require.NotNil(t, after.PendingConfig)
+	assert.Equal(t, []string{"config.system_prompt"}, pendingConfigKeys(after.PendingConfig), "the valid provision-rendered key stays pending")
+	assert.Greater(t, after.StateVersion, before.StateVersion, "the removal is persisted")
+	recs, _, err := s.ListMutationAudits(context.Background(), store.MutationAuditFilter{
+		MutationType: mutationTypeAgentPendingConfigApplied, TargetID: agent.ID, Limit: 5,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, recs, "nothing was applied")
+	discarded := pendingAudits(t, s, agent.ID, mutationTypeAgentPendingConfigDiscarded, 1)
+	keys, trigger := pendingAuditSummary(t, discarded[0])
+	assert.Equal(t, []string{"config.max_turns", "config.no_such_key"}, keys)
+	assert.Equal(t, pendingDiscardTriggerUnappliable, trigger)
 }

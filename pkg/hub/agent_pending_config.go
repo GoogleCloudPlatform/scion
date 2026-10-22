@@ -22,7 +22,6 @@ import (
 	"log/slog"
 	"net/http"
 	"reflect"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -79,6 +78,11 @@ const (
 // written through (held edits off) replaced.
 const pendingDiscardTriggerSuperseded = "superseded"
 
+// pendingDiscardTriggerUnappliable is the trigger of an
+// agent_pending_config_discarded record for stored pending keys a fold
+// removed because they can never be applied.
+const pendingDiscardTriggerUnappliable = "unappliable"
+
 // agentViewEdit is the single-agent GET view (?view=edit) that adds
 // effectiveNextRun.
 const agentViewEdit = "edit"
@@ -132,6 +136,9 @@ type heldConfigUpdate struct {
 	// phase with no container).
 	saved  []string
 	folded []string
+	// unappliable lists stored pending keys the fold removed because they
+	// can never be applied.
+	unappliable []string
 }
 
 // applyAgentConfigUpdateHeld is the agent PATCH's config step with held
@@ -164,7 +171,7 @@ func (s *Server) applyAgentConfigUpdateHeld(ctx context.Context, w http.Response
 	}
 
 	if !live {
-		out.folded = s.foldPendingConfig(ctx, agent, isContainerConfigField)
+		out.folded, out.unappliable = s.foldPendingConfig(ctx, agent, isContainerConfigField)
 		if !nowPart.empty() {
 			res := s.applyAgentConfigPatch(ctx, agent, nowPart, canAttachEnv)
 			out.warnings = append(out.warnings, res.warnings...)
@@ -339,7 +346,6 @@ func pendingConfigPatch(pc *store.AgentPendingConfig) configPatch {
 			err = json.Unmarshal(one, p.cfg)
 		}
 		if err != nil {
-			slog.Warn("pending config: a stored key could not be decoded; ignoring it", "key", k, "error", err)
 			delete(p.raw, k)
 			delete(p.present, strings.ToLower(k))
 		}
@@ -349,42 +355,50 @@ func pendingConfigPatch(pc *store.AgentPendingConfig) configPatch {
 
 // foldPendingConfig applies the pending config's keys that keep accepts to
 // agent's applied config, through applyAgentConfigPatch, and removes them
-// from the pending config, in memory: the caller persists the agent. It
-// returns the applied keys as sorted wire keys, nil when there were none.
-func (s *Server) foldPendingConfig(ctx context.Context, agent *store.Agent, keep func(agentEditField) bool) []string {
+// from the pending config, in memory: the caller persists the agent. A
+// stored key that can never be applied (it no longer decodes, or the edit
+// table no longer knows it) is removed too. It returns the applied keys and
+// the removed unappliable keys, each as sorted wire keys (nil when none).
+// A caller that persists the result audits and logs the removed keys
+// (auditUnappliablePendingKeys); one that reads a scratch copy ignores them.
+func (s *Server) foldPendingConfig(ctx context.Context, agent *store.Agent, keep func(agentEditField) bool) (folded, unappliable []string) {
 	if agent.PendingConfig.IsEmpty() {
-		return nil
+		return nil, nil
 	}
 	full := pendingConfigPatch(agent.PendingConfig)
 	rest := agent.PendingConfig.Clone()
-	// A stored key that no longer decodes (pendingConfigPatch logged it), or
-	// that the edit table no longer knows, can never be applied: it is
-	// removed here, so it does not stay pending.
-	undecodable := false
 	for k := range rest.Config {
 		_, decoded := full.raw[k]
 		_, known := agentConfigEditFieldByLowerKey[strings.ToLower(k)]
 		if !decoded || !known {
-			slog.Warn("pending config: removing a stored key that cannot be applied", "agent_id", agent.ID, "key", k)
+			unappliable = append(unappliable, agentConfigKeyPrefix+k)
 			delete(rest.Config, k)
-			undecodable = true
 		}
 	}
+	sort.Strings(unappliable)
 	p := full.subset(keep)
-	if p.empty() {
-		if undecodable {
-			agent.PendingConfig = restOrNil(rest)
+	if !p.empty() {
+		s.applyAgentConfigPatch(ctx, agent, p, agent.PendingConfig.EnvSaverCanViewEnv)
+		for _, f := range configPatchKeys(p.raw) {
+			folded = append(folded, f.Key)
+			delete(rest.Config, strings.TrimPrefix(f.Key, agentConfigKeyPrefix))
 		}
-		return nil
 	}
-	s.applyAgentConfigPatch(ctx, agent, p, agent.PendingConfig.EnvSaverCanViewEnv)
-	var folded []string
-	for _, f := range configPatchKeys(p.raw) {
-		folded = append(folded, f.Key)
-		delete(rest.Config, strings.TrimPrefix(f.Key, agentConfigKeyPrefix))
+	if len(folded) > 0 || len(unappliable) > 0 {
+		agent.PendingConfig = restOrNil(rest)
 	}
-	agent.PendingConfig = restOrNil(rest)
-	return folded
+	return folded, unappliable
+}
+
+// auditUnappliablePendingKeys logs and audits pending keys a persisted fold
+// removed because they can never be applied (agent_pending_config_discarded,
+// trigger unappliable).
+func (s *Server) auditUnappliablePendingKeys(ctx context.Context, agentID string, keys []string) {
+	if len(keys) == 0 {
+		return
+	}
+	slog.WarnContext(ctx, "pending config: removed stored keys that cannot be applied", "agent_id", agentID, "keys", keys)
+	s.auditPendingConfig(ctx, agentID, mutationTypeAgentPendingConfigDiscarded, keys, pendingDiscardTriggerUnappliable)
 }
 
 // restOrNil returns rest, a pending config some keys were removed from, as
@@ -420,13 +434,7 @@ func dropPendingKeysNamed(agent *store.Agent, present map[string]bool) []string 
 	if len(dropped) == 0 {
 		return nil
 	}
-	if _, ok := rest.Config["env"]; !ok {
-		rest.EnvSaverCanViewEnv = false
-	}
-	if rest.IsEmpty() {
-		rest = nil
-	}
-	agent.PendingConfig = rest
+	agent.PendingConfig = restOrNil(rest)
 	sort.Strings(dropped)
 	return dropped
 }
@@ -485,8 +493,8 @@ func (s *Server) foldPendingConfigAtStart(ctx context.Context, agent *store.Agen
 		st := *stored
 		st.AppliedConfig = cloneAppliedConfig(stored.AppliedConfig)
 		st.PendingConfig = stored.PendingConfig.Clone()
-		folded := s.foldPendingConfig(ctx, &st, isContainerConfigField)
-		if len(folded) == 0 && slices.Equal(pendingConfigKeys(st.PendingConfig), pendingConfigKeys(stored.PendingConfig)) {
+		folded, unappliable := s.foldPendingConfig(ctx, &st, isContainerConfigField)
+		if len(folded) == 0 && len(unappliable) == 0 {
 			// Nothing to apply or remove now (another start applied it, or
 			// it was discarded): the caller's copy follows the stored row.
 			agent.PendingConfig = stored.PendingConfig
@@ -511,6 +519,7 @@ func (s *Server) foldPendingConfigAtStart(ctx context.Context, agent *store.Agen
 		if len(folded) > 0 {
 			s.auditPendingConfig(ctx, agent.ID, mutationTypeAgentPendingConfigApplied, folded, trigger)
 		}
+		s.auditUnappliablePendingKeys(ctx, agent.ID, unappliable)
 		return pendingConfigKeys(st.PendingConfig), nil
 	}
 	return nil, fmt.Errorf("%w: %w", errPendingConfigFold, store.ErrVersionConflict)
@@ -627,7 +636,7 @@ func (s *Server) effectiveNextRun(ctx context.Context, agent *store.Agent) *stor
 	scratch := *agent
 	scratch.AppliedConfig = cloneAppliedConfig(agent.AppliedConfig)
 	scratch.PendingConfig = agent.PendingConfig.Clone()
-	s.foldPendingConfig(ctx, &scratch, func(agentEditField) bool { return true })
+	_, _ = s.foldPendingConfig(ctx, &scratch, func(agentEditField) bool { return true })
 	if scratch.AppliedConfig != nil {
 		scratch.AppliedConfig.CreateInputs = nil
 	}

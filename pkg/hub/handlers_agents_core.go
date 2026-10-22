@@ -4442,7 +4442,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 	// being created or removed, are refused. With held edits on,
 	// applyAgentConfigUpdateHeld keeps such edits as the agent's pending
 	// config instead (agent_pending_config.go).
-	var configHeld, pendingSaved, pendingFolded, pendingSuperseded []string
+	var configHeld, pendingSaved, pendingFolded, pendingSuperseded, pendingUnappliable []string
 	if updates.Config != nil {
 		if !agent.DeletedAt.IsZero() {
 			Conflict(w, "Config cannot be updated for deleted agents")
@@ -4455,7 +4455,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 			}
 			warnings = append(warnings, out.warnings...)
 			configApplied, configHeld, configHeldForReincarnate = out.applied, out.held, out.heldForReincarnate
-			pendingSaved, pendingFolded = out.saved, out.folded
+			pendingSaved, pendingFolded, pendingUnappliable = out.saved, out.folded, out.unappliable
 		} else {
 			if !configPatchPhase(agent.Phase) {
 				Conflict(w, configPatchPhaseMessage)
@@ -4687,6 +4687,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 	if len(pendingSaved) > 0 {
 		s.auditPendingConfig(ctx, agent.ID, mutationTypeAgentPendingConfigSaved, pendingSaved, "")
 	}
+	s.auditUnappliablePendingKeys(ctx, agent.ID, pendingUnappliable)
 	if len(pendingSuperseded) > 0 {
 		s.auditPendingConfig(ctx, agent.ID, mutationTypeAgentPendingConfigDiscarded, pendingSuperseded, pendingDiscardTriggerSuperseded)
 	}

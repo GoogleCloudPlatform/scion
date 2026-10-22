@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -218,4 +219,24 @@ func TestLockedPatchKeysFor_HeldEdits(t *testing.T) {
 
 	echo := decodeConfigPatch(t, `{"branch":"main"}`)
 	assert.Nil(t, lockedPatchKeysFor(running, true, nil, echo.raw, echo.cfg, nil))
+}
+
+// TestFoldPendingConfig_RemovesUnappliableKeepsProvisionKeys: folding only
+// container keys, with none pending, applies nothing, removes the stored
+// keys that can never be applied, and keeps a valid provision-rendered key.
+func TestFoldPendingConfig_RemovesUnappliableKeepsProvisionKeys(t *testing.T) {
+	agent := &store.Agent{
+		AppliedConfig: &store.AgentAppliedConfig{InlineConfig: &api.ScionConfig{Model: "m"}},
+		PendingConfig: &store.AgentPendingConfig{Config: map[string]json.RawMessage{
+			"system_prompt": json.RawMessage(`"be brief"`),
+			"max_turns":     json.RawMessage(`"not a number"`),
+			"no_such_key":   json.RawMessage(`1`),
+		}},
+	}
+	folded, unappliable := (&Server{}).foldPendingConfig(context.Background(), agent, isContainerConfigField)
+	assert.Empty(t, folded)
+	assert.Equal(t, []string{"config.max_turns", "config.no_such_key"}, unappliable)
+	require.NotNil(t, agent.PendingConfig)
+	assert.Equal(t, []string{"config.system_prompt"}, pendingConfigKeys(agent.PendingConfig))
+	assert.Equal(t, "m", agent.AppliedConfig.InlineConfig.Model, "nothing was applied")
 }
