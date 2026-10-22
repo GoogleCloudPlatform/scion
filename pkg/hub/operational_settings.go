@@ -490,14 +490,21 @@ func (o *OperationalSettings) Refresh(ctx context.Context) ([]string, error) {
 // to the store, every section is reported changed, and the generation
 // moves so ApplySnapshot accepts the lower revision.
 //
+// A read that began before such a reset (the generation moved while it
+// was in flight) is discarded, so state from before the reset never enters
+// the new generation.
+//
 // This relies on every read seeing committed state at least as new as any
 // revision this process has observed: one primary database, which is how
-// the hub runs (one database connection for reads and writes, no
-// read-replica routing). A failover to a standby that lost commits is a
-// genuine step backward and is resynchronised the same way.
+// the hub runs (one database URL for reads and writes, no read-replica
+// routing). The database URL must target the read-write primary; with
+// several hosts, set target_session_attrs=read-write, so no connection
+// reads from a lagging standby. A failover to a standby that lost commits
+// is a genuine step backward and is resynchronised the same way.
 func (o *OperationalSettings) refresh(ctx context.Context) (changed []string, readRevision int64, accepted bool, err error) {
 	o.mu.RLock()
 	seqAtRead := o.cacheSeq
+	genAtRead := o.generation
 	o.mu.RUnlock()
 
 	rows, err := o.store.ListHubSettings(ctx)
@@ -514,6 +521,14 @@ func (o *OperationalSettings) refresh(ctx context.Context) (changed []string, re
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
+	// A read that was in flight while another read resynchronised to a
+	// reset store may hold the state from before the reset; it is never
+	// taken into the new generation, whatever its revision.
+	if o.generation != genAtRead {
+		slog.Debug("operational settings refresh: discarding a read that began before a store reset",
+			"read_revision", readRevision, "cached_revision", o.revision)
+		return nil, readRevision, false, nil
+	}
 	reset := false
 	if readRevision < o.revision {
 		if o.cacheSeq != seqAtRead {

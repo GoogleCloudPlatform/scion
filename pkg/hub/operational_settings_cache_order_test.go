@@ -175,13 +175,20 @@ func TestOperationalSettings_LocalDeleteTombstoneVersusNeverCached(t *testing.T)
 	assert.True(t, ok)
 	assert.Equal(t, before, counter.lists.Load(), "no re-read for a never-cached section")
 
-	// An accepted Refresh clears the tombstones.
+	// A direct delete leaves a tombstone, and an accepted Refresh clears it.
+	require.NoError(t, ops.DeleteSection(ctx, "quotas"))
+	ops.mu.RLock()
+	_, tombstoned := ops.tombstones["quotas"]
+	tombstones := len(ops.tombstones)
+	ops.mu.RUnlock()
+	require.True(t, tombstoned, "the direct delete recorded a tombstone")
+	require.Equal(t, 1, tombstones)
 	_, err = ops.Refresh(ctx)
 	require.NoError(t, err)
 	ops.mu.RLock()
-	tombstones := len(ops.tombstones)
+	tombstones = len(ops.tombstones)
 	ops.mu.RUnlock()
-	assert.Zero(t, tombstones)
+	assert.Zero(t, tombstones, "the accepted Refresh cleared the tombstones")
 }
 
 // Snapshots at an equal revision are ordered by the cache sequence; a
@@ -310,4 +317,50 @@ func TestOperationalSettings_RefreshAndApplyAfterStoreReset(t *testing.T) {
 	rs.mu.Unlock()
 	ops.refreshAndApply(ctx, srv)
 	assert.True(t, appliedAutoSuspend(srv), "the restored value is applied")
+}
+
+// A read that was in flight while another read resynchronised to a reset
+// store holds the state from before the reset; it is discarded, so that
+// state never enters the new generation (ptone/scion#5667 review).
+func TestOperationalSettings_ReadInFlightAcrossResetDiscarded(t *testing.T) {
+	_, st, ops := revisionTestServer(t)
+	rs := &replayListStore{HubSettingStore: ops.store}
+	ops.store = rs
+	ctx := context.Background()
+
+	_, err := ops.Update(ctx, "lifecycle", json.RawMessage(`{"auto_suspend_stalled":true}`), "admin@example.com", -1, "managed")
+	require.NoError(t, err)
+	backup, err := st.ListHubSettings(ctx)
+	require.NoError(t, err)
+	backupRev := ops.SettingsRevision()
+	_, err = ops.Update(ctx, "lifecycle", json.RawMessage(`{"auto_suspend_stalled":false}`), "admin@example.com", -1, "managed")
+	require.NoError(t, err)
+	_, err = ops.Update(ctx, "quotas", json.RawMessage(`{"enforce_broker_quotas":false}`), "admin@example.com", -1, "managed")
+	require.NoError(t, err)
+	before := ops.Snapshot()
+	require.Greater(t, before.Revision, backupRev)
+
+	// Read A reads the pre-reset store. While it is in flight, the store is
+	// restored to the backup and read B resynchronises to it.
+	var resetChanged []string
+	rs.mu.Lock()
+	rs.duringList = func() {
+		rs.mu.Lock()
+		rs.replay = backup
+		rs.mu.Unlock()
+		var err error
+		resetChanged, err = ops.Refresh(ctx)
+		require.NoError(t, err)
+	}
+	rs.mu.Unlock()
+	changed, err := ops.Refresh(ctx)
+	require.NoError(t, err)
+
+	assert.NotEmpty(t, resetChanged, "read B resynchronised to the reset store")
+	assert.Empty(t, changed, "read A, taken before the reset, was discarded")
+	assert.Equal(t, backupRev, ops.SettingsRevision(), "the revision stays at the reset store's")
+	after := ops.Snapshot()
+	assert.True(t, after.AutoSuspendStalled, "the restored value stays cached")
+	assert.Nil(t, after.EnforceBrokerQuotas, "the pre-reset quotas row did not come back")
+	assert.Greater(t, after.Generation, before.Generation)
 }
