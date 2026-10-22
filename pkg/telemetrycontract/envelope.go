@@ -46,6 +46,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -341,22 +342,17 @@ func encodeNoHTMLEscape(v any) ([]byte, error) {
 // declaration order, no HTML escaping, no trailing newline) and validates
 // both the value and the bytes it produced:
 //
-//  1. the envelope (ev.AnalyticsEnvelope().Validate) and the event
+//  1. the envelope (ev.AnalyticsEnvelope().Validate), then the event
 //     (ev.Validate);
-//  2. a structural check of the event type: no wire name may be declared
-//     twice in one JSON object (encoding/json would silently drop or
-//     shadow it), no ",string" tag option, no omitempty on a Labels field;
-//  3. a walk over every reachable value -- every field except those tagged
-//     exactly json:"-" -- rejecting floating-point and json.Number values and strings that are
-//     not valid UTF-8 (encoding/json would rewrite them to U+FFFD);
+//  2. the event type against checkStructure's allowlist, so encoding/json
+//     has no field-selection, naming or custom-encoding rule left to apply
+//     beyond plain tagged fields;
+//  3. every string is valid UTF-8 (encoding/json would silently rewrite
+//     invalid bytes to U+FFFD);
 //  4. Labels validate themselves as they are encoded (Labels.MarshalJSON);
-//  5. the produced bytes: every JSON number must be an integer within
+//  5. the produced bytes: every JSON number is an integer within
 //     ±MaxSafeInteger, and the envelope rebuilt from the object's exact
-//     top-level keys must equal ev.AnalyticsEnvelope().
-//
-// Checks 2 and 3 over-approximate on purpose: they reject anything
-// encoding/json might handle differently instead of modelling its rules;
-// check 5 validates what is actually written.
+//     top-level keys equals ev.AnalyticsEnvelope().
 func Marshal(ev Event) ([]byte, error) {
 	if err := validateEvent(ev); err != nil {
 		return nil, err
@@ -364,7 +360,7 @@ func Marshal(ev Event) ([]byte, error) {
 	if err := checkStructure(reflect.TypeOf(ev)); err != nil {
 		return nil, err
 	}
-	if err := checkReachable(reflect.ValueOf(ev)); err != nil {
+	if err := checkStrings(reflect.ValueOf(ev), ""); err != nil {
 		return nil, err
 	}
 	data, err := encodeNoHTMLEscape(ev)
@@ -396,7 +392,7 @@ func Unmarshal(data []byte, ev Event) error {
 	if err := validateEvent(ev); err != nil {
 		return err
 	}
-	if err := checkReachable(reflect.ValueOf(ev)); err != nil {
+	if err := checkStrings(reflect.ValueOf(ev), ""); err != nil {
 		return err
 	}
 	return checkWire(data, ev.AnalyticsEnvelope())
@@ -423,114 +419,157 @@ func isNilPointer(v any) bool {
 var (
 	labelsType        = reflect.TypeOf(Labels(nil))
 	envelopeType      = reflect.TypeOf(Envelope{})
-	jsonNumberType    = reflect.TypeOf(json.Number(""))
 	jsonMarshalerType = reflect.TypeOf((*json.Marshaler)(nil)).Elem()
 	textMarshalerType = reflect.TypeOf((*encoding.TextMarshaler)(nil)).Elem()
 )
 
-// maxWalkDepth bounds the reachable-value walk; deeper (or cyclic) values
-// are rejected instead of overflowing the stack.
-const maxWalkDepth = 64
+// structureCache memoizes checkStructure per event type (reflect.Type ->
+// error or nil); the result depends only on the type.
+var structureCache sync.Map
 
-// checkStructure inspects the event type (not a value, so a nil embedded
-// pointer cannot hide anything). For each JSON object -- a struct plus the
-// fields promoted into it from embedded structs -- every wire name must be
-// declared once. It also rejects the ",string" tag option, omitempty on a
-// Labels field, invalid tag names, and embedded types with their own
-// encoding (whose promotion rules differ). Envelope must be embedded
-// (promoted), never a named field.
+type structureResult struct{ err error }
+
+// checkStructure validates the event type against an ALLOWLIST (a type, not
+// a value, so nil pointers hide nothing). An event type is a pointer to a
+// named struct whose fields are:
+//
+//   - the embedded, untagged Envelope (root struct only), or
+//   - exported, non-embedded fields with an explicit, valid json tag name
+//     and no option other than omitempty (never omitempty on Labels),
+//     whose type is one of: the predeclared string, bool or integer types
+//     (not named types such as json.Number); Labels; an exported named
+//     struct obeying the same field rules
+//     (non-recursive); a pointer to any of these; a slice of any of these
+//     except byte slices.
+//
+// No type other than Labels may implement json.Marshaler or
+// encoding.TextMarshaler (the root included). Everything else -- floats,
+// interfaces, maps, arrays, unexported or json:"-" fields, other
+// embeddings -- is rejected, so encoding/json has no rule left to apply
+// that these checks would have to model. Wire names must be unique per JSON
+// object, compared case-insensitively (BigQuery columns and encoding/json
+// decoding both fold case).
 func checkStructure(t reflect.Type) error {
-	return checkStructureType(t, map[reflect.Type]bool{})
+	if cached, ok := structureCache.Load(t); ok {
+		return cached.(structureResult).err
+	}
+	err := checkRootType(t)
+	structureCache.Store(t, structureResult{err})
+	return err
 }
 
-func checkStructureType(t reflect.Type, done map[reflect.Type]bool) error {
-	for t.Kind() == reflect.Pointer || t.Kind() == reflect.Slice || t.Kind() == reflect.Array || t.Kind() == reflect.Map {
-		t = t.Elem()
+func checkRootType(t reflect.Type) error {
+	if t.Kind() != reflect.Pointer || t.Elem().Kind() != reflect.Struct || t.Elem().Name() == "" {
+		return fmt.Errorf("telemetrycontract: event type %s must be a pointer to a named struct", t)
 	}
-	if t.Kind() != reflect.Struct || done[t] || t == labelsType {
+	return checkStructType(t.Elem(), true, map[reflect.Type]bool{})
+}
+
+// checkStructType checks one JSON object's struct type. ancestors holds the
+// struct types on the current path, to reject recursive types (which would
+// make value depth unbounded).
+func checkStructType(t reflect.Type, root bool, ancestors map[reflect.Type]bool) error {
+	if ancestors[t] {
+		return fmt.Errorf("telemetrycontract: type %s is recursive", t)
+	}
+	if implementsEncoder(t) {
+		return fmt.Errorf("telemetrycontract: type %s has its own JSON or text encoding; only Labels may", t)
+	}
+	ancestors[t] = true
+	defer delete(ancestors, t)
+
+	seen := map[string]string{} // lower-cased wire name -> Go field
+	record := func(name, goName string) error {
+		key := strings.ToLower(name)
+		if prev, dup := seen[key]; dup {
+			return fmt.Errorf("telemetrycontract: wire name %q of %s.%s collides with %s (case-insensitive)", name, t.Name(), goName, prev)
+		}
+		seen[key] = t.Name() + "." + goName
 		return nil
 	}
-	done[t] = true
-	seen := map[string]string{}
-	var nested []reflect.Type
-	if err := collectObjectFields(t, "", seen, &nested, 0); err != nil {
-		return err
-	}
-	for _, n := range nested {
-		if err := checkStructureType(n, done); err != nil {
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		tag, hasTag := f.Tag.Lookup("json")
+		if f.Anonymous {
+			if !root || f.Type != envelopeType || hasTag {
+				return fmt.Errorf("telemetrycontract: field %s.%s: the only embedding allowed is an untagged Envelope in the event's root struct", t.Name(), f.Name)
+			}
+			for j := 0; j < envelopeType.NumField(); j++ {
+				name, _, _ := strings.Cut(envelopeType.Field(j).Tag.Get("json"), ",")
+				if err := record(name, "Envelope."+envelopeType.Field(j).Name); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		name, opts, _ := strings.Cut(tag, ",")
+		switch {
+		case !f.IsExported():
+			return fmt.Errorf("telemetrycontract: field %s.%s is unexported; event types hold wire fields only", t.Name(), f.Name)
+		case !hasTag || name == "" || name == "-":
+			return fmt.Errorf("telemetrycontract: field %s.%s needs an explicit json tag name", t.Name(), f.Name)
+		case !isValidTagName(name):
+			return fmt.Errorf("telemetrycontract: field %s.%s has an invalid json tag name %q", t.Name(), f.Name, name)
+		case opts != "" && opts != "omitempty":
+			return fmt.Errorf("telemetrycontract: field %s.%s: only the omitempty tag option is allowed, got %q", t.Name(), f.Name, opts)
+		case opts == "omitempty" && f.Type == labelsType:
+			return fmt.Errorf("telemetrycontract: Labels field %s.%s must not use omitempty (a known-empty set would be omitted); use *Labels for unknown", t.Name(), f.Name)
+		}
+		if err := record(name, f.Name); err != nil {
+			return err
+		}
+		if err := checkFieldType(f.Type, t.Name()+"."+f.Name, ancestors); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// collectObjectFields records the wire names of t's fields into seen,
-// descending into promoted embedded structs, and queues every non-promoted
-// struct-typed field type for its own object check.
-func collectObjectFields(t reflect.Type, path string, seen map[string]string, nested *[]reflect.Type, depth int) error {
-	if depth > maxWalkDepth {
-		return fmt.Errorf("telemetrycontract: type %s embeds too deeply", t)
+// checkFieldType checks a field's type against the allowlist.
+func checkFieldType(t reflect.Type, field string, ancestors map[reflect.Type]bool) error {
+	if t == labelsType {
+		return nil
 	}
-	for i := 0; i < t.NumField(); i++ {
-		f := t.Field(i)
-		goPath := joinPath(path, f.Name)
-		tag := f.Tag.Get("json")
-		if tag == "-" {
-			continue
+	switch t.Kind() {
+	case reflect.String, reflect.Bool,
+		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		// Predeclared types only: a named basic type can carry its own
+		// encoding, and encoding/json special-cases some (json.Number is a
+		// string written as a raw number).
+		if t.PkgPath() != "" {
+			return fmt.Errorf("telemetrycontract: field %s has named type %s; use the predeclared %s", field, t, t.Kind())
 		}
-		name, opts, _ := strings.Cut(tag, ",")
-		if name != "" && !isValidTagName(name) {
-			return fmt.Errorf("telemetrycontract: field %s has an invalid json tag name %q", goPath, name)
+		return nil
+	case reflect.Pointer:
+		if t.Elem().Kind() == reflect.Pointer || t.Elem().Kind() == reflect.Slice && t.Elem() != labelsType {
+			return fmt.Errorf("telemetrycontract: field %s has unsupported type %s", field, t)
 		}
-		if hasTagOption(opts, "string") {
-			return fmt.Errorf("telemetrycontract: field %s uses the \",string\" option, which changes its wire type", goPath)
+		return checkFieldType(t.Elem(), field, ancestors)
+	case reflect.Slice:
+		if t.Elem().Kind() == reflect.Uint8 {
+			return fmt.Errorf("telemetrycontract: field %s is a byte slice (encoded as base64); use a string", field)
 		}
-		ft := f.Type
-		if ft.Kind() == reflect.Pointer {
-			ft = ft.Elem()
+		if k := t.Elem().Kind(); k == reflect.Slice || k == reflect.Pointer {
+			return fmt.Errorf("telemetrycontract: field %s has unsupported type %s", field, t)
 		}
-		if f.Type == labelsType && hasTagOption(opts, "omitempty") {
-			return fmt.Errorf("telemetrycontract: Labels field %s must not use omitempty (a known-empty set would be omitted); use *Labels for unknown", goPath)
+		return checkFieldType(t.Elem(), field, ancestors)
+	case reflect.Struct:
+		if t == envelopeType {
+			return fmt.Errorf("telemetrycontract: field %s holds Envelope as a named field; embed it in the root struct instead", field)
 		}
-		if f.Anonymous && name == "" && ft.Kind() == reflect.Struct {
-			if implementsEncoder(ft) {
-				return fmt.Errorf("telemetrycontract: embedded field %s has its own JSON encoding; embed plain structs only", goPath)
-			}
-			if err := collectObjectFields(ft, goPath, seen, nested, depth+1); err != nil {
-				return err
-			}
-			continue
+		if t.Name() == "" || !isExportedName(t.Name()) {
+			return fmt.Errorf("telemetrycontract: field %s has type %s; nested objects must be exported named structs", field, t)
 		}
-		if !f.IsExported() {
-			continue
-		}
-		if ft == envelopeType {
-			return fmt.Errorf("telemetrycontract: field %s holds Envelope as a named field; embed it so its fields are top-level", goPath)
-		}
-		if elem := innermost(f.Type); elem != labelsType && implementsEncoder(elem) {
-			return fmt.Errorf("telemetrycontract: field %s has type %s with its own encoding (time.Time included); use plain strings (FormatTS for timestamps) and integers", goPath, elem)
-		}
-		if name == "" {
-			name = f.Name
-		}
-		if prev, dup := seen[name]; dup {
-			return fmt.Errorf("telemetrycontract: wire name %q is declared by both %s and %s; encoding/json would drop or shadow it", name, prev, goPath)
-		}
-		seen[name] = goPath
-		*nested = append(*nested, f.Type)
+		return checkStructType(t, false, ancestors)
+	default:
+		return fmt.Errorf("telemetrycontract: field %s has type %s, which is not allowed in an analytics event (allowed: string, bool, integers, Labels, exported structs, pointers and slices of these)", field, t)
 	}
-	return nil
 }
 
-// innermost strips pointer, slice, array and map layers from t.
-func innermost(t reflect.Type) reflect.Type {
-	for t.Kind() == reflect.Pointer || t.Kind() == reflect.Slice || t.Kind() == reflect.Array || t.Kind() == reflect.Map {
-		if t == labelsType {
-			return t
-		}
-		t = t.Elem()
-	}
-	return t
+func isExportedName(name string) bool {
+	r, _ := utf8.DecodeRuneInString(name)
+	return unicode.IsUpper(r)
 }
 
 func implementsEncoder(t reflect.Type) bool {
@@ -538,8 +577,8 @@ func implementsEncoder(t reflect.Type) bool {
 		reflect.PointerTo(t).Implements(jsonMarshalerType) || reflect.PointerTo(t).Implements(textMarshalerType)
 }
 
-// isValidTagName mirrors encoding/json's isValidTag: names it would ignore
-// (falling back to the Go name) are rejected here instead.
+// isValidTagName mirrors encoding/json's isValidTag; names it would ignore
+// are rejected.
 func isValidTagName(s string) bool {
 	for _, c := range s {
 		switch {
@@ -551,70 +590,35 @@ func isValidTagName(s string) bool {
 	return true
 }
 
-// checkReachable walks every value reachable from v -- exported or not;
-// only fields tagged exactly json:"-" are skipped -- and rejects floating-point and json.Number values
-// and strings that are not valid UTF-8. Labels values are validated too.
-// Pointer cycles and excessive depth are errors.
-func checkReachable(v reflect.Value) error {
-	return walkReachable(v, "", map[uintptr]bool{}, 0)
-}
-
-func walkReachable(v reflect.Value, path string, visited map[uintptr]bool, depth int) error {
-	if depth > maxWalkDepth {
-		return fmt.Errorf("telemetrycontract: value at %s is nested too deeply (or cyclic)", path)
-	}
-	if !v.IsValid() {
-		return nil
-	}
-	t := v.Type()
-	if t == jsonNumberType {
-		return fmt.Errorf("telemetrycontract: field %s has type json.Number; analytics numerics must be Go integers", path)
-	}
-	if t == labelsType {
-		if err := labelsFromValue(v).Validate(); err != nil {
-			return fmt.Errorf("field %s: %w", path, err)
-		}
-		return nil
-	}
+// checkStrings walks a value of an allowlisted type and rejects strings
+// that are not valid UTF-8 (encoding/json would rewrite them to U+FFFD,
+// which cannot be detected in the output). checkStructure has already
+// excluded every other kind, and recursive types, so the walk is bounded.
+func checkStrings(v reflect.Value, path string) error {
 	switch v.Kind() {
 	case reflect.Pointer:
 		if v.IsNil() {
 			return nil
 		}
-		if visited[v.Pointer()] {
-			return fmt.Errorf("telemetrycontract: value at %s contains a pointer cycle", path)
+		return checkStrings(v.Elem(), path)
+	case reflect.Struct:
+		t := v.Type()
+		for i := 0; i < t.NumField(); i++ {
+			if err := checkStrings(v.Field(i), fieldPath(path, t.Field(i))); err != nil {
+				return err
+			}
 		}
-		visited[v.Pointer()] = true
-		defer delete(visited, v.Pointer())
-		return walkReachable(v.Elem(), path, visited, depth+1)
-	case reflect.Interface:
-		if v.IsNil() {
+	case reflect.Slice:
+		if v.Type() == labelsType {
+			for i := 0; i < v.Len(); i++ {
+				if !utf8.ValidString(v.Index(i).Field(0).String()) || !utf8.ValidString(v.Index(i).Field(1).String()) {
+					return fmt.Errorf("telemetrycontract: field %s[%d] is not valid UTF-8", path, i)
+				}
+			}
 			return nil
 		}
-		return walkReachable(v.Elem(), path, visited, depth+1)
-	case reflect.Struct:
-		for i := 0; i < t.NumField(); i++ {
-			if t.Field(i).Tag.Get("json") == "-" {
-				continue // never serialized (exactly "-"; "-," names a field "-")
-			}
-			if err := walkReachable(v.Field(i), fieldPath(path, t.Field(i)), visited, depth+1); err != nil {
-				return err
-			}
-		}
-	case reflect.Slice, reflect.Array:
 		for i := 0; i < v.Len(); i++ {
-			if err := walkReachable(v.Index(i), fmt.Sprintf("%s[%d]", path, i), visited, depth+1); err != nil {
-				return err
-			}
-		}
-	case reflect.Map:
-		iter := v.MapRange()
-		for iter.Next() {
-			elem := fmt.Sprintf("%s[%v]", path, iter.Key())
-			if err := walkReachable(iter.Key(), elem+"(key)", visited, depth+1); err != nil {
-				return err
-			}
-			if err := walkReachable(iter.Value(), elem, visited, depth+1); err != nil {
+			if err := checkStrings(v.Index(i), fmt.Sprintf("%s[%d]", path, i)); err != nil {
 				return err
 			}
 		}
@@ -622,11 +626,12 @@ func walkReachable(v reflect.Value, path string, visited map[uintptr]bool, depth
 		if !utf8.ValidString(v.String()) {
 			return fmt.Errorf("telemetrycontract: field %s is not valid UTF-8", path)
 		}
-	case reflect.Float32, reflect.Float64, reflect.Complex64, reflect.Complex128:
-		return fmt.Errorf("telemetrycontract: field %s has non-integer type %s; analytics numerics must be integers", path, t)
 	}
 	return nil
 }
+
+// maxWireDepth bounds the walk over decoded event bytes.
+const maxWireDepth = 128
 
 // checkWire validates encoded bytes: a JSON object whose numbers are all
 // integers within ±MaxSafeInteger, and whose envelope, rebuilt from the
@@ -661,11 +666,12 @@ func checkWire(data []byte, want *Envelope) error {
 	if !reflect.DeepEqual(got, *want) {
 		return fmt.Errorf("telemetrycontract: envelope on the wire %+v differs from the event's envelope %+v", got, *want)
 	}
-	return got.Validate()
+	// want was validated by validateEvent, and got equals it.
+	return nil
 }
 
 func checkWireNumbers(node any, path string, depth int) error {
-	if depth > maxWalkDepth*2 {
+	if depth > maxWireDepth {
 		return fmt.Errorf("telemetrycontract: wire value at %s is nested too deeply", path)
 	}
 	switch n := node.(type) {
@@ -714,30 +720,4 @@ func joinPath(path, name string) string {
 		return name
 	}
 	return path + "." + name
-}
-
-func hasTagOption(opts, want string) bool {
-	for opts != "" {
-		var o string
-		o, opts, _ = strings.Cut(opts, ",")
-		if o == want {
-			return true
-		}
-	}
-	return false
-}
-
-// labelsFromValue reads a Labels value through reflection, so it also works
-// for a value reached via an unexported field, where
-// reflect.Value.Interface is not allowed.
-func labelsFromValue(v reflect.Value) Labels {
-	if v.IsNil() {
-		return nil
-	}
-	out := make(Labels, v.Len())
-	for i := range out {
-		e := v.Index(i)
-		out[i] = Label{Key: e.Field(0).String(), Value: e.Field(1).String()}
-	}
-	return out
 }
