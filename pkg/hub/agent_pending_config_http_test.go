@@ -83,8 +83,8 @@ func patchPending(t *testing.T, srv *Server, agentID string, body map[string]int
 	return resp
 }
 
-// lifecycleWarnings posts a lifecycle action and returns its warnings.
-func lifecycleWarnings(t *testing.T, srv *Server, agentID, action string) []string {
+// pendingLifecycleWarnings posts a lifecycle action and returns its warnings.
+func pendingLifecycleWarnings(t *testing.T, srv *Server, agentID, action string) []string {
 	t.Helper()
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agentID+"/"+action, nil)
 	require.Less(t, rec.Code, 300, "%s: %s", action, rec.Body.String())
@@ -95,7 +95,7 @@ func lifecycleWarnings(t *testing.T, srv *Server, agentID, action string) []stri
 	return resp.Warnings
 }
 
-func reloadAgent(t *testing.T, s store.Store, id string) *store.Agent {
+func pendingReloadAgent(t *testing.T, s store.Store, id string) *store.Agent {
 	t.Helper()
 	a, err := s.GetAgent(context.Background(), id)
 	require.NoError(t, err)
@@ -120,8 +120,8 @@ func pendingAudits(t *testing.T, s store.Store, agentID, mutationType string, wa
 	return got
 }
 
-// auditSummary decodes a pending config audit record's after summary.
-func auditSummary(t *testing.T, rec *store.MutationAuditRecord) (keys []string, trigger string) {
+// pendingAuditSummary decodes a pending config audit record's after summary.
+func pendingAuditSummary(t *testing.T, rec *store.MutationAuditRecord) (keys []string, trigger string) {
 	t.Helper()
 	var sum struct {
 		Keys    []string `json:"keys"`
@@ -150,7 +150,7 @@ func TestAgentPendingConfig_RunningModelHeldThenAppliedAtStart(t *testing.T) {
 	assert.JSONEq(t, `"new-model"`, string(resp.PendingConfig.Config["model"]))
 	assert.Greater(t, resp.StateVersion, agent.StateVersion, "a held save bumps the state version")
 
-	stored := reloadAgent(t, s, agent.ID)
+	stored := pendingReloadAgent(t, s, agent.ID)
 	assert.Equal(t, "old-model", stored.AppliedConfig.Model)
 	require.NotNil(t, stored.PendingConfig)
 	assert.True(t, strings.HasPrefix(stored.PendingConfig.SavedBy, "user:"), stored.PendingConfig.SavedBy)
@@ -159,8 +159,8 @@ func TestAgentPendingConfig_RunningModelHeldThenAppliedAtStart(t *testing.T) {
 	assert.Equal(t, agent.Generation, stored.PendingConfig.BaseGeneration)
 	assert.False(t, stored.PendingConfig.SavedAt.IsZero())
 
-	lifecycleWarnings(t, srv, agent.ID, "stop")
-	lifecycleWarnings(t, srv, agent.ID, "start")
+	pendingLifecycleWarnings(t, srv, agent.ID, "stop")
+	pendingLifecycleWarnings(t, srv, agent.ID, "start")
 
 	starts := disp.snapshot()
 	require.Len(t, starts, 1)
@@ -168,15 +168,15 @@ func TestAgentPendingConfig_RunningModelHeldThenAppliedAtStart(t *testing.T) {
 	assert.Equal(t, "new-model", starts[0].inline.Model)
 	assert.Equal(t, 3, starts[0].inline.MaxTurns, "keys the edit did not name are kept")
 
-	after := reloadAgent(t, s, agent.ID)
+	after := pendingReloadAgent(t, s, agent.ID)
 	assert.Nil(t, after.PendingConfig, "the pending config is cleared once applied")
 	assert.Equal(t, "new-model", after.AppliedConfig.Model)
 
 	saved := pendingAudits(t, s, agent.ID, mutationTypeAgentPendingConfigSaved, 1)
-	keys, _ := auditSummary(t, saved[0])
+	keys, _ := pendingAuditSummary(t, saved[0])
 	assert.Equal(t, []string{"config.model"}, keys)
 	applied := pendingAudits(t, s, agent.ID, mutationTypeAgentPendingConfigApplied, 1)
-	keys, trigger := auditSummary(t, applied[0])
+	keys, trigger := pendingAuditSummary(t, applied[0])
 	assert.Equal(t, []string{"config.model"}, keys)
 	assert.Equal(t, pendingFoldTriggerStart, trigger)
 }
@@ -191,8 +191,8 @@ func TestAgentPendingConfig_SuspendThenWakeAppliesHeldEdit(t *testing.T) {
 	})
 	assert.Equal(t, []string{"config.max_turns", "config.model"}, resp.Disposition.Held)
 
-	lifecycleWarnings(t, srv, agent.ID, "suspend")
-	suspended := reloadAgent(t, s, agent.ID)
+	pendingLifecycleWarnings(t, srv, agent.ID, "suspend")
+	suspended := pendingReloadAgent(t, s, agent.ID)
 	require.Equal(t, string(state.PhaseSuspended), suspended.Phase)
 	require.NotNil(t, suspended.PendingConfig, "a suspend keeps the pending config")
 
@@ -214,10 +214,10 @@ func TestAgentPendingConfig_SuspendThenWakeAppliesHeldEdit(t *testing.T) {
 	assert.True(t, starts[0].resume)
 	assert.Equal(t, "woken-model", starts[0].model)
 	assert.Equal(t, 12, starts[0].inline.MaxTurns)
-	assert.Nil(t, reloadAgent(t, s, agent.ID).PendingConfig)
+	assert.Nil(t, pendingReloadAgent(t, s, agent.ID).PendingConfig)
 
 	applied := pendingAudits(t, s, agent.ID, mutationTypeAgentPendingConfigApplied, 1)
-	_, trigger := auditSummary(t, applied[0])
+	_, trigger := pendingAuditSummary(t, applied[0])
 	assert.Equal(t, pendingFoldTriggerWake, trigger)
 }
 
@@ -260,7 +260,7 @@ func TestAgentPendingConfig_SaveDuringStartIsHeld(t *testing.T) {
 		t.Fatal("the start never reached its dispatch")
 	}
 
-	during := reloadAgent(t, s, agent.ID)
+	during := pendingReloadAgent(t, s, agent.ID)
 	require.Equal(t, string(state.PhaseStarting), during.Phase, "the start holds its claim with the agent starting")
 	require.NotEmpty(t, during.StartClaimID)
 	resp := patchPending(t, srv, agent.ID, map[string]interface{}{
@@ -281,17 +281,17 @@ func TestAgentPendingConfig_SaveDuringStartIsHeld(t *testing.T) {
 	starts := inner.snapshot()
 	require.Len(t, starts, 1)
 	assert.Equal(t, "old-model", starts[0].model, "the start in flight sends the config it began with")
-	held := reloadAgent(t, s, agent.ID)
+	held := pendingReloadAgent(t, s, agent.ID)
 	require.NotNil(t, held.PendingConfig)
 	assert.JSONEq(t, `"mid-start-model"`, string(held.PendingConfig.Config["model"]))
 	assert.Equal(t, "old-model", held.AppliedConfig.Model)
 
-	lifecycleWarnings(t, srv, agent.ID, "stop")
-	lifecycleWarnings(t, srv, agent.ID, "start")
+	pendingLifecycleWarnings(t, srv, agent.ID, "stop")
+	pendingLifecycleWarnings(t, srv, agent.ID, "start")
 	starts = inner.snapshot()
 	require.Len(t, starts, 2)
 	assert.Equal(t, "mid-start-model", starts[1].model)
-	assert.Nil(t, reloadAgent(t, s, agent.ID).PendingConfig)
+	assert.Nil(t, pendingReloadAgent(t, s, agent.ID).PendingConfig)
 }
 
 // TestAgentPendingConfig_SystemPromptHeldForReincarnate: a system prompt
@@ -312,13 +312,13 @@ func TestAgentPendingConfig_SystemPromptHeldForReincarnate(t *testing.T) {
 	require.Len(t, resp.Warnings, 1, "%v", resp.Warnings)
 	assert.Contains(t, resp.Warnings[0], "config.system_prompt: held until the next reincarnation")
 
-	warnings := lifecycleWarnings(t, srv, agent.ID, "start")
+	warnings := pendingLifecycleWarnings(t, srv, agent.ID, "start")
 	assert.Contains(t, warnings, "Held for reincarnation: system prompt")
 
 	starts := disp.snapshot()
 	require.Len(t, starts, 1)
 	assert.Empty(t, starts[0].inline.SystemPrompt, "a start does not apply a provision-rendered key")
-	after := reloadAgent(t, s, agent.ID)
+	after := pendingReloadAgent(t, s, agent.ID)
 	require.NotNil(t, after.PendingConfig, "the system prompt stays pending")
 	assert.Equal(t, []string{"config.system_prompt"}, pendingConfigKeys(after.PendingConfig))
 	assert.Equal(t, "Held for reincarnation: system prompt", after.Message)
@@ -343,8 +343,8 @@ func TestAgentPendingConfig_NowPhasePatchFoldsPendingFirst(t *testing.T) {
 	assert.Equal(t, []string{"config.max_duration", "config.model"}, resp.Disposition.Held)
 	assert.Equal(t, []string{"config.system_prompt"}, resp.Disposition.HeldForReincarnate)
 
-	lifecycleWarnings(t, srv, agent.ID, "stop")
-	stopped := reloadAgent(t, s, agent.ID)
+	pendingLifecycleWarnings(t, srv, agent.ID, "stop")
+	stopped := pendingReloadAgent(t, s, agent.ID)
 	require.Equal(t, string(state.PhaseStopped), stopped.Phase)
 	require.Len(t, stopped.PendingConfig.Config, 3, "a stop does not apply pending edits")
 
@@ -360,7 +360,7 @@ func TestAgentPendingConfig_NowPhasePatchFoldsPendingFirst(t *testing.T) {
 	assert.Equal(t, []string{"config.system_prompt"}, pendingConfigKeys(resp.PendingConfig), "only the provision-rendered key stays pending")
 
 	applied := pendingAudits(t, s, agent.ID, mutationTypeAgentPendingConfigApplied, 1)
-	keys, trigger := auditSummary(t, applied[0])
+	keys, trigger := pendingAuditSummary(t, applied[0])
 	assert.Equal(t, []string{"config.max_duration", "config.model"}, keys)
 	assert.Equal(t, pendingFoldTriggerUpdate, trigger)
 }
@@ -372,13 +372,13 @@ func TestAgentPendingConfig_RestartAppliesHeldEdit(t *testing.T) {
 	patchPending(t, srv, agent.ID, map[string]interface{}{
 		"config": map[string]interface{}{"max_turns": 21},
 	})
-	lifecycleWarnings(t, srv, agent.ID, "restart")
+	pendingLifecycleWarnings(t, srv, agent.ID, "restart")
 	starts := disp.snapshot()
 	require.Len(t, starts, 1)
 	assert.Equal(t, 21, starts[0].inline.MaxTurns)
-	assert.Nil(t, reloadAgent(t, s, agent.ID).PendingConfig)
+	assert.Nil(t, pendingReloadAgent(t, s, agent.ID).PendingConfig)
 	applied := pendingAudits(t, s, agent.ID, mutationTypeAgentPendingConfigApplied, 1)
-	_, trigger := auditSummary(t, applied[0])
+	_, trigger := pendingAuditSummary(t, applied[0])
 	assert.Equal(t, pendingFoldTriggerRestart, trigger)
 }
 
@@ -390,14 +390,14 @@ func TestAgentPendingConfig_ReconcileRestartKeepsPending(t *testing.T) {
 	patchPending(t, srv, agent.ID, map[string]interface{}{
 		"config": map[string]interface{}{"model": "held-model"},
 	})
-	before := reloadAgent(t, s, agent.ID)
+	before := pendingReloadAgent(t, s, agent.ID)
 
 	_, err := srv.execDispatchRestart(context.Background(), store.BrokerDispatch{
 		AgentID: agent.ID, BrokerID: agent.RuntimeBrokerID, Op: "restart",
 	})
 	require.NoError(t, err)
 
-	after := reloadAgent(t, s, agent.ID)
+	after := pendingReloadAgent(t, s, agent.ID)
 	require.NotNil(t, after.PendingConfig, "the reconcile restart keeps the pending config")
 	assert.JSONEq(t, `"held-model"`, string(after.PendingConfig.Config["model"]))
 	assert.Equal(t, "old-model", after.AppliedConfig.Model)
@@ -430,19 +430,19 @@ func TestAgentPendingConfig_DiscardClearsAndAudits(t *testing.T) {
 	assert.Nil(t, out.PendingConfig)
 	assert.Greater(t, out.StateVersion, resp.StateVersion)
 
-	after := reloadAgent(t, s, agent.ID)
+	after := pendingReloadAgent(t, s, agent.ID)
 	assert.Nil(t, after.PendingConfig)
 	assert.Equal(t, "old-model", after.AppliedConfig.Model, "discarding applies nothing")
 
 	discarded := pendingAudits(t, s, agent.ID, mutationTypeAgentPendingConfigDiscarded, 1)
-	keys, _ := auditSummary(t, discarded[0])
+	keys, _ := pendingAuditSummary(t, discarded[0])
 	assert.Equal(t, []string{"config.model", "config.system_prompt"}, keys)
 
 	again := doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+agent.ID+"/pending-config", nil)
 	require.Equal(t, http.StatusOK, again.Code, again.Body.String())
 	require.NoError(t, json.Unmarshal(again.Body.Bytes(), &out))
 	assert.Equal(t, []string{}, out.Discarded)
-	assert.Equal(t, after.StateVersion, reloadAgent(t, s, agent.ID).StateVersion, "an empty discard writes nothing")
+	assert.Equal(t, after.StateVersion, pendingReloadAgent(t, s, agent.ID).StateVersion, "an empty discard writes nothing")
 
 	wrong := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/pending-config", nil)
 	assert.Equal(t, http.StatusMethodNotAllowed, wrong.Code)
@@ -467,7 +467,7 @@ func TestAgentPendingConfig_FlagOffKeepsTodayBehaviour(t *testing.T) {
 		})
 		require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 		assert.Contains(t, rec.Body.String(), configPatchPhaseMessage)
-		assert.Nil(t, reloadAgent(t, s, running.ID).PendingConfig)
+		assert.Nil(t, pendingReloadAgent(t, s, running.ID).PendingConfig)
 		ed := getAgentEditability(t, srv, nil, running.ID)
 		assert.Equal(t, EditLocked, ed.Fields["config.model"].Disposition)
 	})
@@ -484,7 +484,7 @@ func TestAgentPendingConfig_FlagOffKeepsTodayBehaviour(t *testing.T) {
 			"agentRole": "readonly", "name": "renamed",
 		})
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-		assert.Equal(t, "renamed", reloadAgent(t, s, running.ID).Name)
+		assert.Equal(t, "renamed", pendingReloadAgent(t, s, running.ID).Name)
 	})
 
 	t.Run("provision-rendered key is written through", func(t *testing.T) {
@@ -499,14 +499,14 @@ func TestAgentPendingConfig_FlagOffKeepsTodayBehaviour(t *testing.T) {
 
 	t.Run("stored pending config stays inert at start", func(t *testing.T) {
 		srv, s, disp, stopped := off(t, state.PhaseStopped)
-		cur := reloadAgent(t, s, stopped.ID)
+		cur := pendingReloadAgent(t, s, stopped.ID)
 		cur.PendingConfig = &store.AgentPendingConfig{Config: map[string]json.RawMessage{"model": json.RawMessage(`"pending-model"`)}}
 		require.NoError(t, s.UpdateAgent(context.Background(), cur))
-		lifecycleWarnings(t, srv, stopped.ID, "start")
+		pendingLifecycleWarnings(t, srv, stopped.ID, "start")
 		starts := disp.snapshot()
 		require.Len(t, starts, 1)
 		assert.Equal(t, "old-model", starts[0].model)
-		assert.NotNil(t, reloadAgent(t, s, stopped.ID).PendingConfig)
+		assert.NotNil(t, pendingReloadAgent(t, s, stopped.ID).PendingConfig)
 	})
 }
 
@@ -519,7 +519,7 @@ func TestAgentPendingConfig_AgentRoleRefusedWithHeldEdits(t *testing.T) {
 	})
 	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "reincarnating")
-	after := reloadAgent(t, s, agent.ID)
+	after := pendingReloadAgent(t, s, agent.ID)
 	assert.Equal(t, agent.Name, after.Name)
 	assert.Equal(t, agent.StateVersion, after.StateVersion)
 }
@@ -535,7 +535,7 @@ func TestAgentPendingConfig_SaveValidation(t *testing.T) {
 		"config": map[string]interface{}{"thinking_level": 150},
 	})
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
-	unchanged := reloadAgent(t, s, agent.ID)
+	unchanged := pendingReloadAgent(t, s, agent.ID)
 	assert.Nil(t, unchanged.PendingConfig)
 	assert.Equal(t, agent.StateVersion, unchanged.StateVersion)
 
@@ -544,7 +544,7 @@ func TestAgentPendingConfig_SaveValidation(t *testing.T) {
 	})
 	assert.Contains(t, resp.Warnings, configEnvTZIgnoredWarning)
 	assert.Equal(t, []string{"config.env"}, resp.Disposition.Held, "the model equals its current value, so it is not an edit")
-	stored := reloadAgent(t, s, agent.ID)
+	stored := pendingReloadAgent(t, s, agent.ID)
 	require.NotNil(t, stored.PendingConfig)
 	assert.JSONEq(t, `{"FOO":"bar"}`, string(stored.PendingConfig.Config["env"]), "TZ is not stored")
 	assert.NotContains(t, stored.PendingConfig.Config, "model")
