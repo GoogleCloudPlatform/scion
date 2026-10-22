@@ -187,17 +187,24 @@ a runner's execution by its `RUNNER_NAME` env, never by job ID.
      every repo in `TARGET_REPOS` and their jobs;
    - the hijack guard for jobs running on `cr-job-*` runners (step 4);
    - drops expired claims;
-   - deletes offline, idle `cr-job-*` registrations older than five minutes
-     (`runner_reaped`), aged from the launch when this process launched the
-     runner and otherwise from the first reconcile that saw it offline. A
-     runner whose claim is still pending (slow cold start) is kept;
+   - deletes offline, idle `cr-job-*` registrations of **this stack** older
+     than five minutes (`runner_reaped`), aged from the launch when this
+     process launched the runner and otherwise from the first reconcile that
+     saw it offline. A runner whose claim is still pending (slow cold start)
+     is kept. Every runner is registered with `RUNNER_LABEL` plus a stack
+     label, `crci-stack-<REGION>-<RUNNER_JOB_NAME>`; a registration with
+     another stack's label is never reaped, one with no stack label (made
+     before stack labels) is. So two stacks serving the same repo, during a
+     region move, do not reap each other's cold-starting runners
+     ([operations](operations.md#two-stacks-region-move));
    - cancels executions older than `TASK_TIMEOUT` plus five minutes, a safety
      net behind Cloud Run's own task timeout (`execution_reaped`);
    - backfills queued, servable jobs of runs that pass the fork guard, oldest
      first, through the same dispatch path as a webhook, listing runners and
      executions once for the whole pass, and stopping when capacity is full.
 
-   It answers 200 with a JSON summary (500 if a step failed) and logs
+   It answers 200 with a JSON summary (500 if a step failed; a GitHub 5xx for
+   one repo, run or job only skips that item, `reconcile_skip`) and logs
    `reconcile`.
 
 ### Mediator-to-runner contract (claim contract v2)

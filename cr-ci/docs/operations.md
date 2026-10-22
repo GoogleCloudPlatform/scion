@@ -85,6 +85,31 @@ claims; affected jobs are relaunched by the next reconcile
 ([single instance](#mediator-single-instance)). Deploy outside busy CI
 periods when possible.
 
+## Two stacks (region move)
+
+A stack is one `REGION` and `RUNNER_JOB_NAME` (job, mediator, scheduler). Two stacks
+may serve the same repos and `RUNNER_LABEL` for a while, for example while moving
+to another region. What is scoped per stack and what is not:
+
+- **Reaping is per stack.** Each runner is registered with the stack label
+  `crci-stack-<REGION>-<RUNNER_JOB_NAME>` next to `RUNNER_LABEL` (jobs keep asking
+  for `RUNNER_LABEL` only). A reconcile reaps only registrations with its own stack
+  label or with none. Deploy this mediator version to **both** stacks before they
+  overlap: an older mediator reaps every offline `cr-job-*` registration, the other
+  stack's cold-starting runners included.
+- **Backfill and the hijack guard are not.** Both reconcilers see the same queued
+  jobs and the same `cr-job-*` runners. Runner names are `cr-job-<job id>` in every
+  stack and GitHub refuses a second registration with the same name, so one job
+  never gets two runners: the second stack sees the name registered and skips it.
+  Either stack may serve a job (and its capacity limit applies to its own
+  executions), and a hijacked runner is killed by whichever stack sees it first.
+- **Webhooks go to one stack**, the App's webhook URL. After changing it, see
+  [Webhook URL change](#webhook-url-change).
+
+Procedure: deploy the new stack (`REGION` changed in its `config.env`), switch the
+App's webhook URL to its `MEDIATOR_URL`, let the old stack's executions finish,
+then remove the old stack's regional resources.
+
 ## Secret rotation
 
 All values go through `scripts/set-secrets.sh` (file at mode 0600, or stdin),

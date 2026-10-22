@@ -462,7 +462,11 @@ func (g *GitHub) listRunners(w http.ResponseWriter, r *http.Request) {
 	out := []any{}
 	for _, id := range ids {
 		rn := g.runners[id]
-		out = append(out, map[string]any{"id": rn.ID, "name": rn.Name, "status": rn.Status, "busy": rn.Busy})
+		labels := []any{}
+		for _, l := range rn.Labels {
+			labels = append(labels, map[string]any{"name": l, "type": "custom"})
+		}
+		out = append(out, map[string]any{"id": rn.ID, "name": rn.Name, "status": rn.Status, "busy": rn.Busy, "labels": labels})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"total_count": len(out), "runners": out})
 }

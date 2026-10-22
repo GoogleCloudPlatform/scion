@@ -30,6 +30,7 @@ import (
 const (
 	testRepo        = "example-owner/example-repo"
 	testLabel       = "scion-cr-8c32g"
+	testStackLabel  = "crci-stack-us-central1-cr-gh-runner-8c32g"
 	testMediatorURL = "https://mediator.example.com"
 	testProject     = "example-project"
 	testJob         = "projects/example-project/locations/us-central1/jobs/cr-gh-runner-8c32g"
@@ -149,6 +150,7 @@ func newHarness(t *testing.T, o harnessOpts) *harness {
 		TargetRepos:   []githubapp.Repo{{Owner: "example-owner", Name: "example-repo"}},
 		OrgScope:      o.orgScope,
 		RunnerLabel:   testLabel,
+		StackLabel:    testStackLabel,
 		MaxConcurrent: o.max,
 		RunnerGroupID: 1,
 		MediatorURL:   o.mediator,
@@ -469,8 +471,8 @@ func TestQueuedLaunchAndClaim(t *testing.T) {
 	if req["name"] != "cr-job-100" || req["runner_group_id"] != float64(1) || req["work_folder"] != "/home/runner/work" {
 		t.Errorf("jit request = %v", req)
 	}
-	if ls, _ := req["labels"].([]any); len(ls) != 1 || ls[0] != testLabel {
-		t.Errorf("jit labels = %v, want only %q", req["labels"], testLabel)
+	if ls, _ := req["labels"].([]any); len(ls) != 2 || ls[0] != testLabel || ls[1] != testStackLabel {
+		t.Errorf("jit labels = %v, want %q and the stack label %q", req["labels"], testLabel, testStackLabel)
 	}
 	ex := h.executions()
 	if len(ex) != 1 {
@@ -765,6 +767,29 @@ func TestReconcileReapsStaleRunners(t *testing.T) {
 		t.Errorf("remaining runners = %v", names)
 	}
 	h.wantLog(logging.EventRunnerReaped)
+}
+
+// TestReconcileReapsOnlyItsOwnStack: during a region move two stacks serve
+// the same repo. Each reaps only registrations with its own stack label, or
+// with none (made before stack labels).
+func TestReconcileReapsOnlyItsOwnStack(t *testing.T) {
+	if want := "crci-stack-us-central1-cr-gh-runner-8c32g"; testStackLabel != want {
+		t.Fatalf("StackLabel = %q, want %q", testStackLabel, want)
+	}
+	h := newHarness(t, harnessOpts{})
+	scope := "repo:" + testRepo
+	other := StackLabel("us-west2", "cr-gh-runner-8c32g")
+	h.gh.AddRunner(fakes.GitHubRunner{Name: "cr-job-1", Status: "offline", Scope: scope, Labels: []string{testLabel, other}})
+	h.gh.AddRunner(fakes.GitHubRunner{Name: "cr-job-2", Status: "offline", Scope: scope, Labels: []string{testLabel, testStackLabel}})
+	h.gh.AddRunner(fakes.GitHubRunner{Name: "cr-job-3", Status: "offline", Scope: scope, Labels: []string{testLabel}})
+	h.reconcile()
+	h.clock.Add(6 * time.Minute)
+	if res := h.reconcile(); res.RunnersReaped != 2 {
+		t.Fatalf("reaped %d, want 2 (own stack and unlabelled)", res.RunnersReaped)
+	}
+	if rs := h.gh.Runners(); len(rs) != 1 || rs[0].Name != "cr-job-1" {
+		t.Errorf("remaining runners = %+v, want only the other stack's cr-job-1", rs)
+	}
 }
 
 // TestReconcileKeepsColdStartingRunners: a runner launched by this process is

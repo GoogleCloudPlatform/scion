@@ -259,8 +259,8 @@ func (s *Server) runnerScopes() []githubapp.Repo {
 	return out
 }
 
-// reapRunners deletes offline, idle cr-job-* registrations older than
-// ReapAfter. Age is measured from the launch when this process launched the
+// reapRunners deletes offline, idle cr-job-* registrations of this stack
+// (Options.StackLabel) older than ReapAfter. Age is measured from the launch when this process launched the
 // runner, otherwise from when reconcile first saw it offline. Runners whose
 // claim is still pending (cold start) are kept.
 func (s *Server) reapRunners(ctx context.Context, now time.Time, res *ReconcileResult, addErr func(string, error)) {
@@ -276,7 +276,7 @@ func (s *Server) reapRunners(ctx context.Context, now time.Time, res *ReconcileR
 		}
 		for _, rn := range runners {
 			nameID, ok := parseRunnerName(rn.Name)
-			if !ok || rn.Status != "offline" || rn.Busy {
+			if !ok || rn.Status != "offline" || rn.Busy || s.otherStack(rn) {
 				continue
 			}
 			stillOffline[rn.Name] = true
