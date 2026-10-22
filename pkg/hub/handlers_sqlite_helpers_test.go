@@ -572,6 +572,11 @@ type reincarnateTestDispatcher struct {
 	// HarnessAuth, Image, Profile).
 	reprovisionEcho func(cfg *store.AgentAppliedConfig)
 	startEcho       func(cfg *store.AgentAppliedConfig)
+	// startAgentEcho, when set, runs on a successful start against the
+	// dispatched agent itself, simulating the agent-level echo
+	// applyBrokerResponse writes in place (Template, Runtime,
+	// RuntimeState, ContainerStatus).
+	startAgentEcho func(agent *store.Agent)
 
 	// rerenderErr is returned by every reprovision call after the first:
 	// the worker's best-effort re-render of the previous config
@@ -5291,12 +5296,16 @@ func (d *reincarnateTestDispatcher) DispatchAgentStart(ctx context.Context, agen
 	err := d.startErr
 	image := d.startImage
 	echo := d.startEcho
+	agentEcho := d.startAgentEcho
 	d.mu.Unlock()
 	if err == nil && image != "" && agent.AppliedConfig != nil {
 		agent.AppliedConfig.Image = image
 	}
 	if err == nil && echo != nil && agent.AppliedConfig != nil {
 		echo(agent.AppliedConfig)
+	}
+	if err == nil && agentEcho != nil {
+		agentEcho(agent)
 	}
 	return err
 }
