@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/cmd/internal/cliutil"
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
@@ -582,13 +583,15 @@ func IsNonInteractive() bool {
 	return nonInteractive
 }
 
-// printDevTokenNotSentNote prints one note on stderr when a dev token is
-// configured (SCION_DEV_TOKEN, SCION_DEV_TOKEN_FILE or ~/.scion/dev-token)
-// and would be the CLI's credential for the selected hub, but the hub is not
-// a loopback hub, so the token is not sent (isLocalhostEndpoint). It explains
-// why such a hub then sees an unauthenticated request. Nothing is printed for
-// a loopback hub, without a selected hub, or when another credential (a
-// login, an agent token, SCION_HUB_TOKEN) applies.
+// printDevTokenNotSentNote prints one note on stderr when a dev token set
+// explicitly (SCION_DEV_TOKEN or SCION_DEV_TOKEN_FILE) would be the CLI's
+// credential for the selected hub, but the hub is not a loopback hub, so the
+// token is not sent (isLocalhostEndpoint). It explains why such a hub then
+// sees an unauthenticated request. Nothing is printed for a loopback hub,
+// without a selected hub, when another credential (a login, an agent token,
+// SCION_HUB_TOKEN) applies, or when the token comes only from the
+// ~/.scion/dev-token file, which the local workstation server writes and a
+// user of a remote hub does not mean to send.
 func printDevTokenNotSentNote(stderr io.Writer, projectPath string) {
 	endpoint := invocationHubEndpoint()
 	if endpoint == "" || isLocalhostEndpoint(endpoint) {
@@ -601,8 +604,15 @@ func printDevTokenNotSentNote(stderr io.Writer, projectPath string) {
 	if getAuthInfo(settings, endpoint).MethodType != "devauth" {
 		return
 	}
+	if _, source := apiclient.ResolveDevTokenWithSource(); source == defaultDevTokenFileSource {
+		return
+	}
 	_, _ = fmt.Fprintf(stderr, "Note: the dev token is used only for a local hub; it is not sent to %s.\n", config.RedactURL(endpoint))
 }
+
+// defaultDevTokenFileSource is the source apiclient.ResolveDevTokenWithSource
+// reports for the default ~/.scion/dev-token file.
+const defaultDevTokenFileSource = "~/.scion/dev-token"
 
 // checkAgentContainerContext detects when the CLI is running inside an agent
 // container (SCION_HOST_UID is set) but has no reachable Hub endpoint. In that

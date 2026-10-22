@@ -963,16 +963,18 @@ func TestOrdinaryCommandStillRequiresProject(t *testing.T) {
 	assert.Contains(t, err.Error(), "not in a scion project")
 }
 
-// printDevTokenNotSentNote: a dev token that would be the credential for a
-// hub that is not on a loopback address is not sent, and one stderr note says
-// so (with the hub URL redacted); a loopback hub, another credential, or no
-// dev token gives no note. Nothing goes to stdout.
+// printDevTokenNotSentNote: a dev token set explicitly (SCION_DEV_TOKEN or
+// SCION_DEV_TOKEN_FILE) that would be the credential for a hub that is not on
+// a loopback address is not sent, and one stderr note says so (with the hub
+// URL redacted). A loopback hub, another credential, no dev token, or a token
+// only in the ~/.scion/dev-token file gives no note. Nothing goes to stdout.
 func TestDevTokenNotSentNote(t *testing.T) {
 	tests := []struct {
 		name         string
 		hubEndpoint  string
 		devTokenEnv  string
-		devTokenFile string
+		devTokenFile string // written to ~/.scion/dev-token
+		devTokenPath string // written to a file named by SCION_DEV_TOKEN_FILE
 		hubTokenEnv  string
 		want         string
 	}{
@@ -980,8 +982,9 @@ func TestDevTokenNotSentNote(t *testing.T) {
 		{name: "remote hub, no dev token: no note", hubEndpoint: "https://hub.example.com"},
 		{name: "remote hub, dev token env var: note", hubEndpoint: "https://hub.example.com/", devTokenEnv: "placeholder-dev-token",
 			want: "Note: the dev token is used only for a local hub; it is not sent to https://hub.example.com/.\n"},
-		{name: "remote hub, dev token file: note", hubEndpoint: "https://hub.example.com", devTokenFile: "placeholder-dev-token",
+		{name: "remote hub, dev token in SCION_DEV_TOKEN_FILE: note", hubEndpoint: "https://hub.example.com", devTokenPath: "placeholder-dev-token",
 			want: "Note: the dev token is used only for a local hub; it is not sent to https://hub.example.com.\n"},
+		{name: "remote hub, dev token only in ~/.scion/dev-token: no note", hubEndpoint: "https://hub.example.com", devTokenFile: "placeholder-dev-token"},
 		{name: "remote hub with user info, dev token: note with the URL redacted", hubEndpoint: "https://user:placeholder@hub.example.com", devTokenEnv: "placeholder-dev-token",
 			want: "Note: the dev token is used only for a local hub; it is not sent to https://user:xxxxx@hub.example.com.\n"},
 		{name: "remote hub, dev token and SCION_HUB_TOKEN: no note", hubEndpoint: "https://hub.example.com", devTokenEnv: "placeholder-dev-token", hubTokenEnv: "placeholder-hub-token"},
@@ -998,6 +1001,11 @@ func TestDevTokenNotSentNote(t *testing.T) {
 			t.Setenv("SCION_AUTH_TOKEN", "")
 			t.Setenv("SCION_HUB_ENDPOINT", "")
 			t.Setenv("SCION_HUB_URL", "")
+			if tt.devTokenPath != "" {
+				path := filepath.Join(t.TempDir(), "token")
+				require.NoError(t, os.WriteFile(path, []byte(tt.devTokenPath+"\n"), 0o600))
+				t.Setenv("SCION_DEV_TOKEN_FILE", path)
+			}
 			if tt.devTokenFile != "" {
 				dir := filepath.Join(os.Getenv("HOME"), ".scion")
 				require.NoError(t, os.MkdirAll(dir, 0o700))

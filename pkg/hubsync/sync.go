@@ -2000,7 +2000,7 @@ func selectHubCredential(endpoint string) (hubclient.Option, CredentialKind) {
 
 	// 2. Check for agent token from canonical token file, then bootstrap env var
 	if token := ReadAgentTokenFile(); token != "" {
-		if !apiclient.IsDevToken(token) && isLocalhostEndpoint(endpoint) && !config.IsHubManagedAgent() {
+		if !apiclient.IsDevToken(token) && IsLocalhostEndpoint(endpoint) && !config.IsHubManagedAgent() {
 			if devToken := apiclient.ResolveDevToken(); devToken != "" {
 				return hubclient.WithBearerToken(devToken), CredentialKindDevAuto
 			}
@@ -2017,7 +2017,7 @@ func selectHubCredential(endpoint string) (hubclient.Option, CredentialKind) {
 
 	// 4. Fallback to auto dev auth, for a loopback hub only: a dev token
 	// is valid only on the local workstation server that wrote it.
-	if !isLocalhostEndpoint(endpoint) {
+	if !IsLocalhostEndpoint(endpoint) {
 		return nil, CredentialKindNone
 	}
 	return hubclient.WithAutoDevAuth(), CredentialKindDevAuto
@@ -2048,7 +2048,7 @@ func LinkedProjectLabels(endpoint, gitRemote string) map[string]string {
 // credential (OAuth login, agent token, SCION_HUB_TOKEN) is not one.
 // It makes no network calls.
 func IsLocalWorkstationEndpoint(endpoint string) bool {
-	if !isLocalhostEndpoint(endpoint) {
+	if !IsLocalhostEndpoint(endpoint) {
 		return false
 	}
 	if _, kind := selectHubCredential(endpoint); kind != CredentialKindDevAuto {
@@ -2098,8 +2098,6 @@ func IsLocalhostEndpoint(endpoint string) bool {
 	host := u.Hostname()
 	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
-
-func isLocalhostEndpoint(endpoint string) bool { return IsLocalhostEndpoint(endpoint) }
 
 // emptyResponseNote replaces the hub-check hint when the hub answered a call
 // that needs a body with an empty response (apiclient.ErrNoContent). The hub
