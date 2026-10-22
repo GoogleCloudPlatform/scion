@@ -27,6 +27,7 @@ package entadapter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"time"
@@ -608,24 +609,37 @@ func deleteProjectLifecycleCursors(ctx context.Context, client *ent.Client, proj
 	return err
 }
 
-// withLifecycleTx runs fn on a copy of s inside a new transaction and
-// commits it when fn returns nil. An observed writer called outside any
-// transaction uses it so the row write and its lifecycle rows commit
-// together.
-func (s *AgentStore) withLifecycleTx(ctx context.Context, fn func(ts *AgentStore) error) error {
+// errLifecycleWriterPanicked makes finish roll back when the writer
+// panics.
+var errLifecycleWriterPanicked = errors.New("agent writer panicked")
+
+// lifecycleTxStore returns the store an observed writer writes through.
+// When an observer is installed and s runs outside any transaction, that
+// is a copy of s on a new transaction, so the row and its lifecycle rows
+// commit together; otherwise it is s itself. The writer must call finish
+// with its result: finish commits the new transaction on success and
+// rolls it back on error (marking transient driver errors), and returns
+// the error unchanged when no transaction was opened.
+func (s *AgentStore) lifecycleTxStore(ctx context.Context, obs store.AgentWriteObserver) (*AgentStore, func(error) error, error) {
+	if obs == nil || s.inTx {
+		return s, func(err error) error { return err }, nil
+	}
 	tx, err := s.client.Tx(ctx)
 	if err != nil {
-		return markTransient(fmt.Errorf("begin transaction: %w", err))
+		return nil, nil, markTransient(fmt.Errorf("begin transaction: %w", err))
 	}
-	defer func() { _ = tx.Rollback() }()
 	ts := &AgentStore{client: tx.Client(), inTx: true, afterRunIDRead: s.afterRunIDRead, lifecycle: s.lifecycle, entTx: tx}
-	if err := fn(ts); err != nil {
-		return markTransient(err)
+	finish := func(err error) error {
+		if err != nil {
+			_ = tx.Rollback()
+			return markTransient(err)
+		}
+		if err := tx.Commit(); err != nil {
+			return markTransient(fmt.Errorf("commit transaction: %w", err))
+		}
+		return nil
 	}
-	if err := tx.Commit(); err != nil {
-		return markTransient(fmt.Errorf("commit transaction: %w", err))
-	}
-	return nil
+	return ts, finish, nil
 }
 
 // lifecycleWriteTx returns the client an observed writer writes with: its

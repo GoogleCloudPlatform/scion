@@ -193,6 +193,39 @@ func TestLifecycleStore_LabelRoundTripAtAPILimits(t *testing.T) {
 	assert.Equal(t, in, evs[0].Metadata.Labels.Map(), "labels round trip exactly at the API limits")
 }
 
+// TestLifecycleTxStore_FinishSemantics: outside a transaction with an
+// observer installed, lifecycleTxStore opens one; finish commits on
+// success and rolls back on error (the panic path passes an error). In a
+// transaction, or with no observer, it is a pass-through.
+func TestLifecycleTxStore_FinishSemantics(t *testing.T) {
+	f := newLifecycleFixture(t)
+	ctx := context.Background()
+	as := f.cs.AgentStore
+
+	ts, finish, err := as.lifecycleTxStore(ctx, f.obs)
+	require.NoError(t, err)
+	require.NotSame(t, as, ts, "a transactional copy")
+	require.True(t, ts.inTx)
+	rolled := makeAgent(f.projectID, "lts-rolled-back")
+	require.NoError(t, ts.CreateAgent(ctx, rolled))
+	require.ErrorIs(t, finish(errLifecycleWriterPanicked), errLifecycleWriterPanicked)
+	_, err = f.cs.GetAgent(ctx, rolled.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "an error rolls the transaction back")
+
+	ts, finish, err = as.lifecycleTxStore(ctx, f.obs)
+	require.NoError(t, err)
+	kept := makeAgent(f.projectID, "lts-committed")
+	require.NoError(t, ts.CreateAgent(ctx, kept))
+	require.NoError(t, finish(nil))
+	_, err = f.cs.GetAgent(ctx, kept.ID)
+	assert.NoError(t, err, "success commits")
+
+	same, pass, err := as.lifecycleTxStore(ctx, nil)
+	require.NoError(t, err)
+	assert.Same(t, as, same, "no observer: no transaction")
+	assert.ErrorIs(t, pass(errInjectedLC), errInjectedLC)
+}
+
 func TestLifecycleStore_CreateOutsideTxIsObserved(t *testing.T) {
 	f := newLifecycleFixture(t)
 	a := makeAgent(f.projectID, "lc-notx")

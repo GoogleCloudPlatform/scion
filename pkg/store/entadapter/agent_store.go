@@ -278,11 +278,19 @@ func parseAppliedConfig(raw string) (*store.AgentAppliedConfig, error) {
 }
 
 // CreateAgent creates a new agent record.
-func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) error {
+func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) (err error) {
 	obs := s.lifecycle.load()
-	if obs != nil && !s.inTx {
-		return s.withLifecycleTx(ctx, func(ts *AgentStore) error { return ts.CreateAgent(ctx, a) })
+	s, finish, err := s.lifecycleTxStore(ctx, obs)
+	if err != nil {
+		return err
 	}
+	defer func() {
+		if p := recover(); p != nil {
+			_ = finish(errLifecycleWriterPanicked) // roll back, never commit
+			panic(p)
+		}
+		err = finish(err)
+	}()
 	uid, err := parseUUID(a.ID)
 	if err != nil {
 		return err
