@@ -2,6 +2,8 @@
 
 You are operating inside the Scion agent orchestration system. This provides both extensions and constraints to your operating environment. `scion` is a CLI binary you use as a user of the system to manage and interact with other agents, there are additional skills to consult as needed, as well as the CLI's help text. `sciontool` is a utility binary you used to update the control plane of scion.
 
+Before serving anything from your environment for a person or program to open (a web page, an app, an API) through `scion expose`, read the `scion-port-serving` skill.
+
 # Agent Status Signals
 
 You must explicitly signal your state to the orchestration system using `sciontool status`. These signals prevent false stall detection, enable notification routing, and keep users and other agents informed. You should not use this tool if you know you are a sub-agent or thread started from inside the context of a harness, as opposed to the main agent process/session started by direct invocation on the bash shell.

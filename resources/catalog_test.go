@@ -152,71 +152,138 @@ func TestPlatformSkillsFS_ScionAgentManageLifecycleDescribesMove(t *testing.T) {
 	}
 }
 
-// TestPlatformSkillsFS_ScionWebServing pins the scion-web-serving platform
-// skill (ptone/scion#5567). It reads the embedded copy, the one agents get,
-// so it fails if the skill is missing from go:embed, gated to a subset of
-// agents, or loses the guidance for how pages behave today: one
-// self-contained file, scion tunnel for full apps, the URL as printed and an
-// honest browser check.
-func TestPlatformSkillsFS_ScionWebServing(t *testing.T) {
-	data, err := fs.ReadFile(PlatformSkillsFS(), "scion-web-serving/SKILL.md")
-	if err != nil {
-		t.Fatalf("reading embedded scion-web-serving skill: %v", err)
+// TestPlatformSkillsFS_ScionPortServing pins the scion-port-serving platform
+// skill (ptone/scion#5567). It reads the embedded copies, the ones agents
+// get, so it fails if the skill or its web-apps reference is missing from
+// go:embed, gated to a subset of agents, or loses its guidance: scion expose
+// and the URL as printed, what the proxy carries, scion tunnel for full apps,
+// and for pages one self-contained file and an honest browser check.
+func TestPlatformSkillsFS_ScionPortServing(t *testing.T) {
+	read := func(name string) string {
+		t.Helper()
+		data, err := fs.ReadFile(PlatformSkillsFS(), name)
+		if err != nil {
+			t.Fatalf("reading embedded %s: %v", name, err)
+		}
+		return strings.ReplaceAll(string(data), "\r\n", "\n")
 	}
-	raw := strings.ReplaceAll(string(data), "\r\n", "\n")
+	skillRaw := read("scion-port-serving/SKILL.md")
+	webRaw := read("scion-port-serving/references/web-apps.md")
 
-	front, _, ok := strings.Cut(strings.TrimPrefix(raw, "---\n"), "\n---\n")
-	if !strings.HasPrefix(raw, "---\n") || !ok {
-		t.Fatalf("embedded scion-web-serving/SKILL.md has no frontmatter block")
+	front, _, ok := strings.Cut(strings.TrimPrefix(skillRaw, "---\n"), "\n---\n")
+	if !strings.HasPrefix(skillRaw, "---\n") || !ok {
+		t.Fatalf("embedded scion-port-serving/SKILL.md has no frontmatter block")
 	}
-	if !strings.Contains(front, "\nname: scion-web-serving\n") && !strings.HasPrefix(front, "name: scion-web-serving\n") {
-		t.Errorf("frontmatter does not declare name: scion-web-serving:\n%s", front)
+	if !strings.Contains(front, "\nname: scion-port-serving\n") && !strings.HasPrefix(front, "name: scion-port-serving\n") {
+		t.Errorf("frontmatter does not declare name: scion-port-serving:\n%s", front)
 	}
 	if !strings.Contains(front, "description:") {
 		t.Errorf("frontmatter has no description")
 	}
 	if strings.Contains(front, "inject_when") {
-		t.Errorf("scion-web-serving must reach every agent; frontmatter sets inject_when:\n%s", front)
+		t.Errorf("scion-port-serving must reach every agent; frontmatter sets inject_when:\n%s", front)
+	}
+	if _, err := fs.Stat(PlatformSkillsFS(), "scion-web-serving"); err == nil {
+		t.Errorf("the old scion-web-serving skill directory is still embedded")
 	}
 
 	// Compare with whitespace collapsed, so a reflow does not break the pins.
-	content := strings.Join(strings.Fields(raw), " ")
-	for _, want := range []string{
-		"one self-contained HTML file",
-		"vite-plugin-singlefile",
-		"data:",
-		"scion expose <port>",
-		"exactly as printed",
-		"trailing `/`",
-		"Keep the port exposed with `scion expose <port>` (the tunnel only reaches exposed ports)",
-		"scion tunnel <agent> --port <port>",
-		"https://googlecloudplatform.github.io/scion/hosted/user/port-forwarding/#multi-file-apps",
-		"is NOT proof",
-		"headless browser",
-		"If you could not run a browser, say so",
-		"Does not work: client-side routing by path",
-		"`HashRouter`, `createWebHashHistory`",
-		"Search your SOURCE (not the build) for `BrowserRouter`, `createBrowserRouter` and `createWebHistory`",
-	} {
-		if !strings.Contains(content, want) {
-			t.Errorf("embedded scion-web-serving/SKILL.md does not contain %q", want)
+	skill := strings.Join(strings.Fields(skillRaw), " ")
+	web := strings.Join(strings.Fields(webRaw), " ")
+	pins := []struct {
+		file, content string
+		want          []string
+	}{
+		{"SKILL.md", skill, []string{
+			"scion expose <port> --label",
+			"scion expose --list",
+			"scion unexpose <port>",
+			"exactly as printed",
+			"trailing `/`",
+			"9810 and 18380 cannot be exposed",
+			"at most 10 ports exposed",
+			"may be exposed again on its next scan",
+			"WebSockets and streamed responses",
+			"a WebSocket request is refused",
+			"Keep the port exposed with `scion expose <port>` (the tunnel only reaches exposed ports)",
+			"scion tunnel <agent> --port <port>",
+			"https://googlecloudplatform.github.io/scion/hosted/user/port-forwarding/",
+			"references/web-apps.md",
+		}},
+		{"references/web-apps.md", web, []string{
+			"one self-contained HTML file",
+			"vite-plugin-singlefile",
+			"data:",
+			"scion expose <port>",
+			"exactly as printed",
+			"trailing `/`",
+			"Keep the port exposed with `scion expose <port>` (the tunnel only reaches exposed ports)",
+			"scion tunnel <agent> --port <port>",
+			"https://googlecloudplatform.github.io/scion/hosted/user/port-forwarding/#multi-file-apps",
+			"is NOT proof",
+			"headless browser",
+			"If you could not run a browser, say so",
+			"Does not work: client-side routing by path",
+			"`HashRouter`, `createWebHashHistory`",
+			"Search your SOURCE (not the build) for `BrowserRouter`, `createBrowserRouter` and `createWebHistory`",
+		}},
+	}
+	for _, p := range pins {
+		for _, want := range p.want {
+			if !strings.Contains(p.content, want) {
+				t.Errorf("embedded scion-port-serving/%s does not contain %q", p.file, want)
+			}
 		}
 	}
 
 	// Pages served through the link cannot load separate files today, so
-	// the skill must not tell agents that relative URLs or a relative base
+	// neither file may tell agents that relative URLs or a relative base
 	// make a multi-file app work.
-	lower := strings.ToLower(content)
-	for _, unwanted := range []string{
-		"relative urls work",
-		"only what the page can reach with relative urls",
-		"base './'",
-		"--base ./",
-		`"homepage": "."`,
-	} {
-		if strings.Contains(lower, unwanted) {
-			t.Errorf("embedded scion-web-serving/SKILL.md contains %q, guidance that does not hold for pages opened through the link today", unwanted)
+	for _, p := range pins {
+		lower := strings.ToLower(p.content)
+		for _, unwanted := range []string{
+			"relative urls work",
+			"only what the page can reach with relative urls",
+			"base './'",
+			"--base ./",
+			`"homepage": "."`,
+		} {
+			if strings.Contains(lower, unwanted) {
+				t.Errorf("embedded scion-port-serving/%s contains %q, guidance that does not hold for pages opened through the link today", p.file, unwanted)
+			}
 		}
+	}
+}
+
+// TestMandatoryBoilerplate_PointsToPortServingSkill pins the one-line hint
+// to the scion-port-serving skill in the boilerplate every agent receives
+// (ptone/scion#5567).
+func TestMandatoryBoilerplate_PointsToPortServingSkill(t *testing.T) {
+	fsys := MandatoryBoilerplateFS()
+	entries, err := fs.ReadDir(fsys, ".")
+	if err != nil {
+		t.Fatalf("reading mandatory boilerplate: %v", err)
+	}
+	var hits []string
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+			continue
+		}
+		data, err := fs.ReadFile(fsys, e.Name())
+		if err != nil {
+			t.Fatalf("reading %s: %v", e.Name(), err)
+		}
+		for _, line := range strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n") {
+			if strings.Contains(line, "scion-port-serving") {
+				hits = append(hits, e.Name()+": "+line)
+			}
+		}
+	}
+	if len(hits) != 1 {
+		t.Fatalf("mandatory boilerplate has %d lines naming scion-port-serving, want exactly 1: %q", len(hits), hits)
+	}
+	if !strings.Contains(hits[0], "scion expose") {
+		t.Errorf("scion-port-serving hint does not mention scion expose: %q", hits[0])
 	}
 }
 

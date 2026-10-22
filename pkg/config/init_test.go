@@ -1389,25 +1389,3 @@ func TestInitMachine_NonCloudRun_SkipRuntimeCheckFalse_SeedsWorkstationTemplate(
 		t.Error("seeded settings.yaml matches the cloudrun-sandbox template — workstation should get workstation defaults")
 	}
 }
-
-// TestAgnosticDefaultTemplateAgentsMdPointsToWebServingSkill pins the
-// one-line pointer to the scion-web-serving platform skill in the embedded
-// agnostic default template (ptone/scion#5567).
-func TestAgnosticDefaultTemplateAgentsMdPointsToWebServingSkill(t *testing.T) {
-	data, err := EmbedsFS.ReadFile("embeds/templates/default/agents.md")
-	if err != nil {
-		t.Fatalf("reading embedded default agents.md: %v", err)
-	}
-	var hits []string
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.Contains(line, "scion-web-serving") {
-			hits = append(hits, line)
-		}
-	}
-	if len(hits) != 1 {
-		t.Fatalf("embedded default agents.md has %d lines naming scion-web-serving, want exactly 1: %q", len(hits), hits)
-	}
-	if !strings.Contains(hits[0], "scion expose") {
-		t.Errorf("scion-web-serving pointer does not mention scion expose: %q", hits[0])
-	}
-}

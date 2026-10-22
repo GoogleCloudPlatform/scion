@@ -1,14 +1,7 @@
----
-name: scion-web-serving
-description: >-
-  How to serve a web app or page from inside an agent so a human can open it
-  through scion expose: ship one self-contained HTML file, the build settings
-  each common tool needs for that, how to hand over the right URL, and how to
-  verify it honestly. Use before running scion expose for a page or app a
-  person will open.
----
+# Web pages and apps through scion expose
 
-# Serving web apps through scion expose
+Read SKILL.md in this skill first for `scion expose` itself. This file covers
+pages and apps a person opens in their browser through the link.
 
 A person opens your page in their own browser through a link on the Hub. Today
 such a page can only use what is inside the page itself: separate scripts,
