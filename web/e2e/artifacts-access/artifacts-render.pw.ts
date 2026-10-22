@@ -17,8 +17,9 @@
  * throwaway hub with no broker.
  *
  * Three member test identities, each in its own browser context: owner
- * (publishes everything; owns the fixture project), member (the reader: a
- * project member with no grant) and outsider (no project). Rows, in order:
+ * (publishes everything; owns the fixture projects), member (the reader: a
+ * member of the home project with no grant) and outsider (no project).
+ * Rows, in order:
  *
  * - R2-01: the owner publishes an HTML bundle (index, a linked page, CSS,
  *   an image) as a folder through New artifact. A refused publish STOPS
@@ -36,14 +37,25 @@
  * - R2-17a: a view URL works without a session (by design, until it
  *   expires). R2-17b (expiry) is NOT RUN: the view lifetime is a fixed
  *   constant with no supported setting to lower it.
- * - R2-20: markdown in the chat preview. R2-21 (an HTML bundle in the chat
- *   preview) is NOT RUN: that preview is not on this build.
+ * - R2-20: markdown in the chat preview.
+ * - R2b-01..R2b-11 (they supersede R2-21): the HTML bundle in the chat
+ *   preview, opened by the reader through a linkified reference in a project
+ *   thread (posted through the API; the sender side via the composer is not
+ *   tested). The links; the dialog; the frame's sandbox against the artifact
+ *   page's; the bundle renders and its relative link stays on the version;
+ *   the frame's isolation (one generic verdict); closing removes the frame;
+ *   a pinned reference opens its version; Open in artifact viewer (R2b-08a,
+ *   a known defect: a pinned reference opens the current page,
+ *   ptone/scion#5602). A non-member cannot reach the thread (R2b-10); a
+ *   reference to an artifact in a project the reader is not in opens as
+ *   unavailable, with no view minted (R2b-11). R2b-11x (recorded only): the
+ *   same reference in a direct message to a non-member.
  * - R2-18/19 (afterAll): cleanup verified by absence, then the evidence.
  *
  * The UI observation decides each row; the API statuses are recorded and
  * must agree. Row assertions are soft. The isolation rows (R2-05, R2-06,
- * R2-13) report failures with one generic message only; their detail is
- * kept in the structured evidence fields.
+ * R2-13, R2b-06) report failures with one generic message only; their
+ * detail is kept in the structured evidence fields.
  */
 
 import * as crypto from 'node:crypto';
@@ -57,6 +69,7 @@ import {
   type Browser,
   type BrowserContext,
   type Frame,
+  type Locator,
   type Page,
   type Request,
 } from '@playwright/test';
@@ -78,6 +91,7 @@ import {
   redactPath,
   secretLikeStrings,
   type ReadState,
+  type RequestRecord,
 } from './journey-lib.js';
 import {
   API_PROBE_PATH,
@@ -97,6 +111,9 @@ import {
 } from './render-classify.js';
 import {
   RENDER_SELECTORS,
+  chatArtifactLinkFor,
+  chatFooterButton,
+  chatHtmlFrame,
   fileIconButton,
   fileRow,
   historyViewButton,
@@ -129,9 +146,9 @@ const ISOLATION_FAIL = 'R2 isolation row failed; see restricted evidence';
 const R2_17B_REASON =
   'NOT RUN: the view TTL is a fixed 30-minute constant (pkg/artifacts/view.go:52) with no ' +
   'supported setting to lower it; the run does not wait 30 minutes';
-const R2_21_REASON =
-  'NOT RUN: not implemented in this suite; the chat HTML preview landed on main after the ' +
-  'spec freeze; covered by follow-up R2b';
+/** The known-defect annotation of R2b-08a (artifacts-lead ruling Q-A3). */
+const R2B_08A_KNOWN_DEFECT =
+  "R2b-08a: a pinned reference opens the current version's page (ptone/scion#5602)";
 
 const VIEW_PREFIX = '/api/v1/artifacts/view/';
 
@@ -178,10 +195,43 @@ const ROWS: Record<string, RowSpec> = {
     title: 'recorded only: chips, references the hub recorded, artifactWarning',
     graded: false,
   },
-  'R2-21': { role: 'member', title: 'HTML bundle in the chat preview', where: 'skip' },
+  'R2b-01': { role: 'member', title: 'chat: the references render as links' },
+  'R2b-02': {
+    role: 'member',
+    title: 'chat: a click opens the HTML preview of the current version',
+  },
+  'R2b-03': { role: 'member', title: "chat: the frame's sandbox matches the artifact page's" },
+  'R2b-04': { role: 'member', title: 'chat: the bundle renders with its own CSS and image' },
+  'R2b-05': {
+    role: 'member',
+    title: 'chat: a relative link inside the frame stays on the version',
+  },
+  'R2b-06': {
+    role: 'member',
+    title: 'chat: isolation negatives of the preview frame',
+    genericError: ISOLATION_FAIL,
+  },
+  'R2b-07': { role: 'member', title: 'chat: closing the preview removes the frame' },
+  'R2b-08': { role: 'member', title: 'chat: a pinned reference opens its own version' },
+  'R2b-08a': {
+    role: 'member',
+    title: 'KNOWN DEFECT: a pinned reference opens its version in the artifact viewer',
+  },
+  'R2b-09': { role: 'member', title: 'chat: Open in artifact viewer opens the artifact page' },
+  'R2b-10': { role: 'outsider', title: 'chat: a non-member cannot reach the thread or reference' },
+  'R2b-11': {
+    role: 'member',
+    title: 'chat: a reference the reader cannot read opens as unavailable; no view',
+  },
+  'R2b-11x': {
+    role: 'owner -> outsider',
+    title: 'recorded only: a reference in a direct message to a non-member',
+    graded: false,
+  },
   'R2-18': {
     role: '-',
-    title: 'cleanup by absence: artifacts, membership, project, identities, temp files',
+    title:
+      'cleanup by absence: artifacts, membership, projects, chat (R2b-12), identities, temp files',
     where: 'cleanup',
   },
   'R2-19': {
@@ -324,6 +374,8 @@ const r2 = {
   /** Restricted: the whole-run frame session sweep; swept false means unknown. */
   frameSessionAll: { swept: false } as Record<string, number | boolean>,
   chat: {} as Record<string, unknown>,
+  /** R2b: the chat HTML preview's records (no view URL, ids only). */
+  chatHtml: { dialogs: [], frames: [], ready: [], probes: [] } as Record<string, unknown>,
 };
 
 function suffix(): string {
@@ -601,8 +653,8 @@ async function openArtifact(key: Key, url: string): Promise<Page> {
 }
 
 /** The HTML frame element's Frame, once its document has loaded. */
-async function bundleFrame(page: Page): Promise<Frame> {
-  const el = await page.locator(RENDER_SELECTORS.htmlFrame).elementHandle();
+async function bundleFrame(page: Page, sel: string = RENDER_SELECTORS.htmlFrame): Promise<Frame> {
+  const el = await page.locator(sel).elementHandle();
   if (!el) throw new Error('no HTML frame');
   const frame = await el.contentFrame();
   if (!frame) throw new Error('HTML frame has no content frame');
@@ -610,14 +662,17 @@ async function bundleFrame(page: Page): Promise<Frame> {
   return frame;
 }
 
-/** Attributes of the HTML frame element. */
-async function htmlFrameAttributes(page: Page): Promise<{
+/** Attributes of the HTML frame element (the artifact page's, or sel's). */
+async function htmlFrameAttributes(
+  page: Page,
+  sel: string = RENDER_SELECTORS.htmlFrame
+): Promise<{
   sandbox: string | null;
   referrerpolicy: string | null;
   title: string | null;
   src: string | null;
 }> {
-  return page.locator(RENDER_SELECTORS.htmlFrame).evaluate((f) => ({
+  return page.locator(sel).evaluate((f) => ({
     sandbox: f.getAttribute('sandbox'),
     referrerpolicy: f.getAttribute('referrerpolicy'),
     title: f.getAttribute('title'),
@@ -683,20 +738,22 @@ function nextAnimationFrame(): Promise<void> {
  * the conditions held before the deadline. There is no fixed sleep: each
  * round waits two animation frames (one when the box read fails). It never
  * clicks; the result says whether the conditions held, how long that took
- * and the last check seen.
+ * and the last check seen. sel picks the frame element: the artifact page's
+ * by default, or the chat preview's (a dialog that has just opened).
  */
 async function waitFrameReadyToClick(
   page: Page,
   expectedSeq: number,
   expectedEntry: string,
-  budgetMs = 15_000
+  budgetMs = 15_000,
+  sel: string = RENDER_SELECTORS.htmlFrame
 ): Promise<{ held: boolean; waitedMs: number; last: Record<string, boolean> }> {
   const started = Date.now();
   const deadline = started + budgetMs;
   // The bound for one read: at most 2 s and never past the deadline; 0 means
   // out of time, and a read is then skipped (a 0 timeout means none).
   const left = (): number => Math.max(0, Math.min(2_000, deadline - Date.now()));
-  const frameEl = page.locator(RENDER_SELECTORS.htmlFrame);
+  const frameEl = page.locator(sel);
   let last: Record<string, boolean> = {};
   while (left() > 0) {
     const visible = await frameEl.isVisible().catch(() => false);
@@ -1219,17 +1276,23 @@ function preHeld(): string | undefined {
 const TITLE_MAIN = 'R2: artifact page view and render, graded at the UI';
 const TITLE_CLEANUP = 'R2-18/R2-19: cleanup by absence, then the evidence';
 const skipTitle = (id: string): string => `${id}: ${ROWS[id].title}`;
-const SKIPPED: Record<string, string> = { 'R2-17b': R2_17B_REASON, 'R2-21': R2_21_REASON };
+const SKIPPED: Record<string, string> = { 'R2-17b': R2_17B_REASON };
 
-const ORACLE_ROW_MAP: Record<string, { test: string; note: string }> = Object.fromEntries(
-  Object.entries(ROWS).map(([id, spec]) => {
-    if (spec.where === 'skip') return [id, { test: skipTitle(id), note: SKIPPED[id] ?? '' }];
-    if (spec.where === 'cleanup') {
-      return [id, { test: TITLE_CLEANUP, note: `the afterAll hook: evidence.rows["${id}"]` }];
-    }
-    return [id, { test: TITLE_MAIN, note: `evidence.rows["${id}"] (a test step)` }];
-  })
-);
+const ORACLE_ROW_MAP: Record<string, { test: string; note: string }> = {
+  ...Object.fromEntries(
+    Object.entries(ROWS).map(([id, spec]) => {
+      if (spec.where === 'skip') return [id, { test: skipTitle(id), note: SKIPPED[id] ?? '' }];
+      if (spec.where === 'cleanup') {
+        return [id, { test: TITLE_CLEANUP, note: `the afterAll hook: evidence.rows["${id}"]` }];
+      }
+      return [id, { test: TITLE_MAIN, note: `evidence.rows["${id}"] (a test step)` }];
+    })
+  ),
+  'R2b-12': {
+    test: TITLE_CLEANUP,
+    note: 'graded with R2-18: evidence.rows["R2-18"] (ui.chatHtml, ui.final) and evidence.cleanup.chatHtml',
+  },
+};
 
 /**
  * Why this run may not carry the isolation rows, or undefined when it may:
@@ -1333,6 +1396,10 @@ test.describe.serial('artifact page view and render (R2)', () => {
         broker: 'none (R2 needs no broker, runtime, credentials or external network)',
         publishSurface: 'web New artifact and Upload new version dialogs (Folder mode)',
         project: 'home (owner, member); outsider in none',
+        chatHtml:
+          'R2b: a home thread and its messages posted through the API (sender side via ' +
+          'composer: not tested); a side project (owner only) with an artifact published ' +
+          'through New artifact; a DM from the owner to the outsider through the API',
       };
       j.state.tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'scion-e2e-r2-')));
       fs.chmodSync(j.state.tmpDir, 0o700);
@@ -2559,6 +2626,7 @@ async function runMain(browser: Browser): Promise<void> {
   // ---- R2-20: markdown in the chat preview -------------------------------
   r2.step = 'R2-20';
   await runChatRow();
+  await runChatHtmlRows();
 
   // No page stays open into the end of the test (defence in depth: nothing
   // left for a failure-time page capture).
@@ -2700,6 +2768,1107 @@ async function chatRow(r: RowRecord): Promise<void> {
   expect.soft(art.status, 'member reads the referenced artifact').toBe(200);
 }
 
+// ---- R2b: the HTML bundle in the chat preview (supersedes R2-21) ----------
+
+/** R2b's fixture facts, in memory (ids only; never a view URL in the evidence). */
+const r2b = {
+  /** Set when the thread or its message could not be set up: R2b rows are not run with it. */
+  fixtureRefused: undefined as string | undefined,
+  topicId: undefined as string | undefined,
+  /** The home project's name as the member reads it (the dialog footer shows it). */
+  homeName: '',
+  sideProjectId: undefined as string | undefined,
+  /** The side artifact's id from its create on (for the cleanup). */
+  sideCreatedId: undefined as string | undefined,
+  /** The side artifact and its message exist (R2b-11's precondition). */
+  side: undefined as { id: string; title: string } | undefined,
+  sideRefused: undefined as string | undefined,
+  dmKey: undefined as string | undefined,
+  dmMessageId: undefined as string | undefined,
+  dmRefused: undefined as string | undefined,
+  /** A view URL minted for the member in the chat preview (in memory only), for R2-18. */
+  heldMemberViewUrl: undefined as string | undefined,
+};
+
+function preChat(): string | undefined {
+  return preV3() ?? r2b.fixtureRefused;
+}
+function preSide(): string | undefined {
+  return (
+    preChat() ?? (r2b.side ? undefined : (r2b.sideRefused ?? 'the side artifact was not set up'))
+  );
+}
+function preDm(): string | undefined {
+  return preChat() ?? (r2b.dmKey ? undefined : (r2b.dmRefused ?? 'no direct message was sent'));
+}
+
+/** Sends a chat message with its artifact references as the composer does (fixture). */
+async function sendChat(
+  key: Key,
+  conversation: string,
+  content: string,
+  refs: string[]
+): Promise<{
+  ok: boolean;
+  status: number;
+  code: string | null;
+  messageId: string | null;
+  record: Record<string, unknown>;
+}> {
+  const res = await j.api(
+    key,
+    'POST',
+    `/api/v1/chat/conversations/${encodeURIComponent(conversation)}/messages`,
+    { content, idempotency_key: crypto.randomUUID(), metadata: { artifacts: JSON.stringify(refs) } }
+  );
+  const body = (res.body ?? {}) as { id?: string; artifacts?: unknown[]; artifactWarning?: string };
+  const ok = res.status >= 200 && res.status < 300;
+  return {
+    ok,
+    status: res.status,
+    code: res.code ?? null,
+    messageId: ok ? (body.id ?? null) : null,
+    record: {
+      status: res.status,
+      code: res.code ?? null,
+      referencesRecorded: Array.isArray(body.artifacts) ? body.artifacts.length : 0,
+      artifactWarning: body.artifactWarning ?? null,
+    },
+  };
+}
+
+/**
+ * R2b fixtures (API, not graded): a project thread holding one message with
+ * the bundle's unpinned and pinned (@1) references; a second project the
+ * member is not in, with an artifact published there through New artifact
+ * and referenced in a second message; and a direct message from the owner
+ * to the outsider with the bundle's reference. A refused step makes the
+ * rows that need it "not run" with the cause (no workaround).
+ */
+async function setUpChatHtml(): Promise<void> {
+  const fx: Record<string, unknown> = {};
+  r2.chatHtml.fixture = fx;
+  r2.step = 'R2b-fixture';
+  const pre = preV3();
+  if (pre) {
+    r2b.fixtureRefused = pre;
+    return;
+  }
+  try {
+    const projectId = j.state.projectId!;
+    const home = await j.api('member', 'GET', `/api/v1/projects/${projectId}`);
+    const homeBody = (home.body ?? {}) as { name?: string; slug?: string };
+    r2b.homeName = homeBody.name || homeBody.slug || '';
+    fx.homeRead = home.status;
+    const thread = await j.api('owner', 'POST', `/api/v1/chat/spaces/${projectId}/threads`, {
+      name: `R2b chat ${suffix()}`,
+    });
+    fx.threadCreate = thread.status;
+    const topicId = (thread.body as { id?: string } | null)?.id;
+    if (thread.status !== 201 || !topicId) {
+      r2b.fixtureRefused = `chat thread could not be created (${thread.status} ${String(thread.code)})`;
+      return;
+    }
+    r2b.topicId = topicId;
+    const id = bundleId();
+    const refs = [`scion://artifact/${id}`, `scion://artifact/${id}@1`];
+    const sent = await sendChat(
+      'owner',
+      topicId,
+      `R2b bundle for review: ${refs[0]} and the first version ${refs[1]}`,
+      refs
+    );
+    fx.send = sent.record;
+    if (!sent.ok) {
+      r2b.fixtureRefused = `chat message could not be sent (${sent.status} ${String(sent.code)})`;
+      return;
+    }
+  } catch (err) {
+    r2b.fixtureRefused = `chat fixture error: ${firstLine(err)}`;
+    return;
+  }
+  await setUpSideArtifact(fx);
+  await setUpDm(fx);
+}
+
+/** The second project (member not added), its artifact and a message referencing it. */
+async function setUpSideArtifact(fx: Record<string, unknown>): Promise<void> {
+  try {
+    const created = await j.api('owner', 'POST', '/api/v1/projects', {
+      name: `e2e-r2b-side-${suffix()}`,
+    });
+    fx.sideProjectCreate = created.status;
+    const pid = (created.body as { id?: string } | null)?.id;
+    if (created.status !== 201 || !pid) {
+      r2b.sideRefused = `side project could not be created (${created.status} ${String(created.code)})`;
+      return;
+    }
+    r2b.sideProjectId = pid;
+    const page = await j.pageOf('owner');
+    const since = j.who('owner').requests.length;
+    await page.goto(`/projects/${pid}`, { waitUntil: 'domcontentloaded' });
+    await revealFiles(page);
+    await page.locator(SELECTORS.filesSegmentArtifacts).click();
+    await expect(page.locator(SELECTORS.artifactList)).toBeAttached();
+    await newArtifactButton(page).click();
+    const title = `R2b side ${suffix()}`;
+    const pub = await publishThroughDialog(page, r2.dirs['bundle-v1'], {
+      title,
+      note: 'r2b side',
+      createPath: /^\/api\/v1\/artifacts$/,
+    });
+    if (pub.createdId) r2b.sideCreatedId = pub.createdId;
+    fx.sideCreate = { status: pub.createStatus, code: pub.createCode };
+    if (pub.createStatus !== 201 || !pub.createdId) {
+      r2b.sideRefused = `side artifact could not be published (${pub.createStatus} ${String(pub.createCode)})`;
+      return;
+    }
+    await expect(page).toHaveURL(new RegExp(`/projects/${pid}/artifacts/${pub.createdId}$`));
+    await settle(page);
+    const calls = publishCalls('owner', since, 1);
+    fx.sidePublish = calls;
+    const finalize = calls.find((c) => c.path.endsWith('/finalize'));
+    if (!finalize?.status || finalize.status < 200 || finalize.status >= 300) {
+      r2b.sideRefused = `side artifact finalize ${String(finalize?.status ?? 'missing')}`;
+      return;
+    }
+    const ref = `scion://artifact/${pub.createdId}`;
+    const sent = await sendChat('owner', r2b.topicId!, `R2b side artifact: ${ref}`, [ref]);
+    fx.sideSend = sent.record;
+    if (!sent.ok) {
+      r2b.sideRefused = `side message could not be sent (${sent.status} ${String(sent.code)})`;
+      return;
+    }
+    r2b.side = { id: pub.createdId, title };
+  } catch (err) {
+    r2b.sideRefused = `side fixture error: ${firstLine(err)}`;
+  }
+}
+
+/** A direct message from the owner to the outsider with the bundle's reference. */
+async function setUpDm(fx: Record<string, unknown>): Promise<void> {
+  try {
+    // Canonical key: both user tokens sorted byte-wise (pkg/messages/dm_key.go:44-79).
+    const tokensSorted = [`user:${j.who('owner').id}`, `user:${j.who('outsider').id}`].sort();
+    const key = `dm:${tokensSorted.join(':')}`;
+    const ref = `scion://artifact/${bundleId()}`;
+    const sent = await sendChat('owner', key, `R2b bundle: ${ref}`, [ref]);
+    fx.dm = sent.record;
+    if (!sent.ok) {
+      r2b.dmRefused = `the owner could not start a DM with a non-member (${sent.status} ${String(sent.code)})`;
+      return;
+    }
+    r2b.dmKey = key;
+    r2b.dmMessageId = sent.messageId ?? undefined;
+  } catch (err) {
+    r2b.dmRefused = `DM fixture error: ${firstLine(err)}`;
+  }
+}
+
+function threadPath(): string {
+  return `/chat/space/${j.state.projectId}/thread/${r2b.topicId}`;
+}
+
+/** Opens the R2b thread as key and waits for the bundle's unpinned link. */
+async function openThread(key: Key): Promise<Page> {
+  const page = await j.pageOf(key);
+  await page.goto(threadPath(), { waitUntil: 'domcontentloaded' });
+  await expect(chatArtifactLinkFor(page, bundleId(), 0), 'reference shown as a link').toBeVisible({
+    timeout: 30_000,
+  });
+  return page;
+}
+
+/** Clicks a bundle reference in the open thread and waits for the preview's frame. */
+async function openBundlePreview(page: Page, seq: number): Promise<void> {
+  await chatArtifactLinkFor(page, bundleId(), seq).click();
+  await expect(
+    page.locator(RENDER_SELECTORS.chatPreviewDialog),
+    'chat preview opened'
+  ).toBeVisible();
+  await page.locator(RENDER_SELECTORS.chatHtmlFrame).waitFor({ state: 'attached' });
+}
+
+/** Polls a locator's whitespace-collapsed text until one of wants matches (10 s); returns the last text. */
+async function pollTextIn(locator: Locator, wants: string[], timeoutMs = 10_000): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  let got = '';
+  while (Date.now() < deadline) {
+    got = await textOf(locator).catch(() => '');
+    if (wants.includes(got)) return got;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  return got;
+}
+
+/** Member API requests since index, by method and exact path. */
+function memberRequests(since: number, method: string, reqPath: string): RequestRecord[] {
+  return j
+    .who('member')
+    .requests.slice(since)
+    .filter((q) => q.method === method && q.path === reqPath);
+}
+
+function mintsSince(key: Key, since: number): Mint[] {
+  return r2.mints.slice(since).filter((m) => m.who === key);
+}
+
+const CHAT_STEPS = ['R2b-02', 'R2b-03', 'R2b-04', 'R2b-05', 'R2b-06'];
+
+async function runChatHtmlRows(): Promise<void> {
+  await setUpChatHtml();
+  const id = (): string => bundleId();
+  const fx = r2.chatHtml.fixture as Record<string, unknown>;
+
+  // ---- R2b-01: the references render as links ----------------------------
+  r2.step = 'R2b-01';
+  await j.row(
+    'R2b-01',
+    async (r) => {
+      r.api.push(
+        {
+          as: 'owner (fixture)',
+          method: 'POST',
+          path: `/api/v1/chat/spaces/${j.state.projectId}/threads`,
+          status: Number(fx.threadCreate ?? 0),
+          code: null,
+        },
+        {
+          as: 'owner (fixture)',
+          method: 'POST',
+          path: `/api/v1/chat/conversations/${r2b.topicId}/messages`,
+          status: Number((fx.send as { status?: number } | undefined)?.status ?? 0),
+          code: null,
+        }
+      );
+      const mints = r2.mints.length;
+      const reqs = j.who('member').requests.length;
+      const page = await openThread('member');
+      const plain = chatArtifactLinkFor(page, id(), 0);
+      const pinned = chatArtifactLinkFor(page, id(), 1);
+      await expect(pinned, 'pinned reference shown as a link').toBeVisible();
+      await settle(page);
+      const all = page.locator(`${RENDER_SELECTORS.chatArtifactLink}[data-artifact-id="${id()}"]`);
+      const links = {
+        count: await all.count(),
+        plainText: await textOf(plain),
+        pinnedText: await textOf(pinned),
+        plainHref: await plain.getAttribute('href'),
+        pinnedHref: await pinned.getAttribute('href'),
+      };
+      r.ui.links = links;
+      r.ui.chips = await page.locator(RENDER_SELECTORS.chatArtifactChip).count();
+      r.ui.dialogsOpen = await page.locator(RENDER_SELECTORS.chatPreviewDialog).count();
+      r.ui.mints = mintsSince('member', mints).length;
+      const msgPath = `/api/v1/chat/conversations/${r2b.topicId}/messages`;
+      const gets = memberRequests(reqs, 'GET', msgPath);
+      const msgStatus = gets.find((q) => q.status !== undefined)?.status ?? null;
+      r.api.push({
+        as: 'member',
+        method: 'GET',
+        path: msgPath,
+        status: msgStatus ?? 0,
+        code: null,
+      });
+      expect.soft(links.count, 'two links to the bundle').toBe(2);
+      expect.soft(links.plainText, 'unpinned text as written').toBe(`scion://artifact/${id()}`);
+      expect.soft(links.pinnedText, 'pinned text as written').toBe(`scion://artifact/${id()}@1`);
+      expect.soft(links.plainHref, 'unpinned href').toBe('#');
+      expect.soft(links.pinnedHref, 'pinned href').toBe('#');
+      expect.soft(r.ui.dialogsOpen, 'no preview open').toBe(0);
+      expect.soft(r.ui.mints, 'no view minted').toBe(0);
+      expect.soft(msgStatus, 'messages GET').toBe(200);
+    },
+    { pre: preChat }
+  );
+
+  // ---- R2b-02: a click opens the chat HTML preview -----------------------
+  r2.step = 'R2b-02';
+  await j.row(
+    'R2b-02',
+    async (r) => {
+      const page = await openThread('member');
+      const appUrl = page.url();
+      const mints = r2.mints.length;
+      const reqs = j.who('member').requests.length;
+      await openBundlePreview(page, 0);
+      const labels = ownerLabels();
+      const title = r2.bundle!.title;
+      const barWants = labels.map(
+        (l) => `Content published by ${l} · runs sandboxed, isolated from Scion`
+      );
+      const footerWants = labels.map((l) => `index.html · owner ${l} · ${r2b.homeName}`);
+      const viewer = chatFooterButton(page, 'Open in artifact viewer');
+      const dialog = page.locator(RENDER_SELECTORS.chatPreviewDialog);
+      const ui = {
+        label: await textOf(page.locator(RENDER_SELECTORS.chatPreviewLabel)),
+        badge: await pollTextIn(page.locator(RENDER_SELECTORS.chatVersionBadge), ['v3 · current']),
+        notice: await textOf(page.locator(RENDER_SELECTORS.chatRemoteImagesNotice)),
+        bar: await pollTextIn(page.locator(RENDER_SELECTORS.chatUntrustedBar), barWants),
+        footerPath: await pollTextIn(page.locator(RENDER_SELECTORS.chatFooterPath), footerWants),
+        copyLink: await isShown(chatFooterButton(page, 'Copy link')),
+        openInViewer: {
+          visible: await isShown(viewer),
+          href: (await viewer.first().getAttribute('href')) ?? null,
+        },
+        close: await chatFooterButton(page, 'Close').count(),
+        fullScreen: await dialog
+          .locator('sl-button')
+          .filter({ hasText: /Full screen/ })
+          .count(),
+        openInNewTab: await dialog
+          .locator('sl-button')
+          .filter({ hasText: /Open in new tab/ })
+          .count(),
+        urlUnchanged: page.url() === appUrl,
+      };
+      r.ui.dialog = ui;
+      (r2.chatHtml.dialogs as Array<Record<string, unknown>>).push({
+        who: 'member',
+        step: 'R2b-02',
+        ...ui,
+      });
+      expect.soft(ui.urlUnchanged, 'page URL unchanged').toBe(true);
+      expect.soft(ui.label, 'label names the bundle').toContain(title);
+      expect.soft(ui.badge, 'badge').toBe('v3 · current');
+      expect
+        .soft(ui.notice, 'remote-images notice')
+        .toContain('Remote images are not loaded in HTML artifacts; include them in the bundle.');
+      expect.soft(barWants, 'untrusted bar names the owner').toContain(ui.bar);
+      expect.soft(footerWants, 'footer path').toContain(ui.footerPath);
+      expect.soft(ui.copyLink, 'Copy link').toBe(true);
+      expect.soft(ui.openInViewer.visible, 'Open in artifact viewer').toBe(true);
+      expect
+        .soft(ui.openInViewer.href, 'viewer link')
+        .toBe(`/projects/${j.state.projectId}/artifacts/${id()}`);
+      expect.soft(ui.close, 'no Close for a readable artifact').toBe(0);
+      const mint = await latestMint('member', 3, mints);
+      r2b.heldMemberViewUrl = mint.url ?? undefined;
+      const metaPath = `/api/v1/artifacts/${id()}`;
+      const meta = memberRequests(reqs, 'GET', metaPath).find((q) => q.status !== undefined);
+      const entryFetched = j
+        .who('member')
+        .requests.slice(reqs)
+        .filter((q) => q.path.includes('/versions/3/files/index.html')).length;
+      r.api.push(
+        { as: 'member', method: 'GET', path: metaPath, status: meta?.status ?? 0, code: null },
+        {
+          as: 'member',
+          method: 'POST',
+          path: `${metaPath}/versions/3/view`,
+          status: mint.status,
+          code: null,
+        }
+      );
+      r.ui.mint = { status: mint.status, remoteImages: mint.remoteImages };
+      r.ui.entryFetched = entryFetched;
+      expect.soft(meta?.status, 'artifact GET').toBe(200);
+      expect.soft(mint.status, 'mint v3').toBe(200);
+      expect.soft(mint.remoteImages, 'remoteImages').toBe(true);
+      expect.soft(entryFetched, 'entry bytes not fetched').toBe(0);
+    },
+    { pre: preChat }
+  );
+
+  // ---- R2b-03: the chat frame's sandbox matches the artifact page's ------
+  r2.step = 'R2b-03';
+  await j.row(
+    'R2b-03',
+    async (r) => {
+      const page = await openThread('member');
+      await openBundlePreview(page, 0);
+      const sel = RENDER_SELECTORS.chatHtmlFrame;
+      const count = await page.locator(sel).count();
+      const attrs = await htmlFrameAttributes(page, sel);
+      const info = viewInfo(attrs.src, id());
+      const frame = {
+        count,
+        sandboxTokens: tokens(attrs.sandbox),
+        referrerpolicy: attrs.referrerpolicy,
+        title: attrs.title,
+        ...info,
+      };
+      const reader = j.state.rows['R2-13']?.ui.reader as
+        | {
+            frame?: {
+              sandboxTokens: string[];
+              referrerpolicy: string | null;
+              title: string | null;
+            };
+          }
+        | undefined;
+      const page13 = reader?.frame;
+      const same = page13
+        ? JSON.stringify(page13.sandboxTokens) === JSON.stringify(frame.sandboxTokens) &&
+          page13.referrerpolicy === frame.referrerpolicy &&
+          page13.title === frame.title
+        : null;
+      r.ui.frame = { ...frame, sameAsArtifactPage: same };
+      r2.frames.push({ who: 'member', step: 'R2b-03', kind: 'html (chat)', ...frame });
+      (r2.chatHtml.frames as Array<Record<string, unknown>>).push({
+        who: 'member',
+        step: 'R2b-03',
+        ...frame,
+        sameAsArtifactPage: same,
+      });
+      expect.soft(count, 'one frame in the dialog').toBe(1);
+      expect.soft(frame.sandboxTokens, 'sandbox exactly allow-scripts').toEqual(['allow-scripts']);
+      for (const t of SANDBOX_FORBIDDEN_HTML) {
+        expect.soft(frame.sandboxTokens, `no ${t}`).not.toContain(t);
+      }
+      expect.soft(attrs.referrerpolicy, 'referrerpolicy').toBe('no-referrer');
+      expect.soft(attrs.title, 'frame title').toBe(`${r2.bundle!.title} (sandboxed)`);
+      expect.soft(info.viewIdMatches, 'view names the bundle').toBe(true);
+      expect.soft(info.viewSeq, 'view names seq 3').toBe(3);
+      expect.soft(info.entry, 'view entry').toBe('index.html');
+      if (same === null) {
+        r.legNotRun = 'R2-13 recorded no frame attributes (the comparison leg)';
+      } else {
+        expect.soft(same, 'same attributes as the artifact page (R2-13)').toBe(true);
+      }
+      const headers = await viewHeaders('member', attrs.src ?? '', r);
+      r.ui.headers = headers;
+      expect.soft(headers.status, 'view document').toBe(200);
+      for (const part of [
+        'sandbox allow-scripts',
+        "connect-src 'none'",
+        "form-action 'none'",
+        "frame-ancestors 'self'",
+      ]) {
+        expect.soft(String(headers.csp), `CSP has ${part}`).toContain(part);
+      }
+      expect.soft(headers.xContentTypeOptions, 'nosniff').toBe('nosniff');
+      expect.soft(headers.referrerPolicy, 'Referrer-Policy').toBe('no-referrer');
+      expect.soft(headers.contentDisposition, 'Content-Disposition').toBe('inline');
+    },
+    { pre: preChat }
+  );
+
+  // ---- R2b-04: the bundle renders with its own files ---------------------
+  r2.step = 'R2b-04';
+  await j.row(
+    'R2b-04',
+    async (r) => {
+      const remoteBefore = {
+        requests: r2.remoteHost.requests,
+        cspBlocked: r2.remoteHost.cspBlocked,
+        responses: r2.remoteHost.responses,
+        notBlocked: r2.remoteHost.open.size,
+      };
+      const page = await openThread('member');
+      await openBundlePreview(page, 0);
+      const frame = await bundleFrame(page, RENDER_SELECTORS.chatHtmlFrame);
+      await expect(chatHtmlFrame(page).locator('#ver')).toHaveText('R2 bundle v3');
+      await expect
+        .poll(() =>
+          frame.evaluate(() => {
+            const chart = document.getElementById('chart') as HTMLImageElement | null;
+            const remote = document.getElementById('remote') as HTMLImageElement | null;
+            return (
+              !!chart && chart.complete && chart.naturalWidth > 0 && !!remote && remote.complete
+            );
+          })
+        )
+        .toBe(true);
+      const facts = await frame.evaluate(() => {
+        const probe = document.getElementById('css-probe');
+        const cs = probe ? getComputedStyle(probe) : null;
+        const chart = document.getElementById('chart') as HTMLImageElement | null;
+        const remote = document.getElementById('remote') as HTMLImageElement | null;
+        return {
+          heading: (document.getElementById('ver')?.textContent ?? '').trim(),
+          cssWidth: cs?.width ?? null,
+          cssColor: cs?.color ?? null,
+          chartNaturalWidth: chart?.naturalWidth ?? -1,
+          remoteNaturalWidth: remote?.naturalWidth ?? -1,
+        };
+      });
+      r.ui.render = facts;
+      expect.soft(facts.heading, 'v3 heading').toBe('R2 bundle v3');
+      expect.soft(facts.cssWidth, 'CSS applied (width)').toBe(CSS_PROBE.width);
+      expect.soft(facts.cssColor, 'CSS applied (colour)').toBe(CSS_PROBE.color);
+      expect.soft(facts.chartNaturalWidth, 'relative image loaded').toBe(CHART_SIZE.width);
+      expect.soft(facts.remoteNaturalWidth, 'remote image not loaded').toBe(0);
+      await settle(page);
+      const own = requestsIn('member', ['R2b-04']);
+      const css = own.find((q) => q.path.endsWith('/css/site.css'));
+      const png = own.find((q) => q.path.endsWith('/img/chart.png'));
+      const underView = (q: FrameRequest | undefined): boolean =>
+        !!q && q.path.startsWith(`${VIEW_PREFIX}<redacted>/`);
+      r.ui.subresources = {
+        css: { status: css?.status ?? null, underView: underView(css) },
+        png: { status: png?.status ?? null, underView: underView(png) },
+      };
+      expect.soft(css?.status, 'css 200').toBe(200);
+      expect.soft(png?.status, 'png 200').toBe(200);
+      expect.soft(underView(css), 'css under the view path').toBe(true);
+      expect.soft(underView(png), 'png under the view path').toBe(true);
+      const remote = {
+        requests: r2.remoteHost.requests - remoteBefore.requests,
+        cspBlocked: r2.remoteHost.cspBlocked - remoteBefore.cspBlocked,
+        responses: r2.remoteHost.responses - remoteBefore.responses,
+        notBlocked: r2.remoteHost.open.size - remoteBefore.notBlocked,
+      };
+      r.ui.remoteHost = remote;
+      expect.soft(remote.notBlocked, 'no remote image request past CSP').toBe(0);
+      expect.soft(remote.requests, 'every remote request refused by CSP').toBe(remote.cspBlocked);
+      expect.soft(remote.responses, 'no answer from the remote image host').toBe(0);
+    },
+    { pre: preChat }
+  );
+
+  // ---- R2b-05: a relative link inside the frame stays on the version -----
+  r2.step = 'R2b-05';
+  await j.row(
+    'R2b-05',
+    async (r) => {
+      const sel = RENDER_SELECTORS.chatHtmlFrame;
+      const page = await openThread('member');
+      const appUrl = page.url();
+      await openBundlePreview(page, 0);
+      const ready = await waitFrameReadyToClick(page, 3, 'index.html', 15_000, sel);
+      r.ui.readyToClick = ready;
+      (r2.chatHtml.ready as Array<Record<string, unknown>>).push({ step: 'R2b-05', ...ready });
+      expect(ready.held, 'chat frame ready to click (visible, stable box, loaded at its src)').toBe(
+        true
+      );
+      const frame = await bundleFrame(page, sel);
+      const capBefore = capabilityOf(frame.url());
+      await chatHtmlFrame(page).locator('#to-page2').click();
+      await expect(chatHtmlFrame(page).locator('#page2')).toHaveText('R2 page two v3');
+      await expect
+        .poll(() =>
+          frame.evaluate(
+            () => (document.getElementById('chart2') as HTMLImageElement | null)?.naturalWidth ?? -1
+          )
+        )
+        .toBe(CHART_SIZE.width);
+      const page2Info = viewInfo(frame.url(), id());
+      const sameCapability = capabilityOf(frame.url()) === capBefore;
+      await chatHtmlFrame(page).locator('#back').click();
+      await expect(chatHtmlFrame(page).locator('#ver')).toHaveText('R2 bundle v3');
+      const facts = {
+        page2Entry: page2Info.entry,
+        page2Seq: page2Info.viewSeq,
+        sameCapability,
+        urlUnchanged: page.url() === appUrl,
+        dialogOpen: await page.locator(RENDER_SELECTORS.chatPreviewDialog).isVisible(),
+      };
+      r.ui.link = facts;
+      expect.soft(facts.page2Entry, 'frame at page2.html').toBe('page2.html');
+      expect.soft(sameCapability, 'same capability').toBe(true);
+      expect.soft(facts.urlUnchanged, 'page URL unchanged').toBe(true);
+      expect.soft(facts.dialogOpen, 'dialog still open').toBe(true);
+      await settle(page);
+      const p2 = requestsIn('member', ['R2b-05']).find(
+        (q) => q.resourceType === 'document' && q.path.endsWith('/page2.html')
+      );
+      r.api.push({
+        as: 'member (frame)',
+        method: 'GET',
+        path: p2?.path ?? `${VIEW_PREFIX}<redacted>/page2.html`,
+        status: p2?.status ?? 0,
+        code: null,
+      });
+      expect.soft(p2?.status, 'page2 200').toBe(200);
+      if (p2) await frameSessionFacts([p2]);
+      r.ui.page2Classification = p2?.classification ?? null;
+      expect
+        .soft(p2?.classification, 'in-frame link navigation classified frame-initiated')
+        .toBe('frame-initiated');
+    },
+    { pre: preChat }
+  );
+
+  // ---- R2b-06: isolation negatives (one generic verdict) -----------------
+  r2.step = 'R2b-06';
+  await j.row(
+    'R2b-06',
+    (r) =>
+      isolationRow(r, async (checks) => {
+        const sel = RENDER_SELECTORS.chatHtmlFrame;
+        const page = await openThread('member');
+        const appUrl = page.url();
+        await openBundlePreview(page, 0);
+        const pagesBefore = j.who('member').context.pages().length;
+        const frame = await bundleFrame(page, sel);
+        const result = await readProbe(frame);
+        const parent = {
+          contentDocumentNull: await page
+            .locator(sel)
+            .evaluate((f) => (f as HTMLIFrameElement).contentDocument === null),
+          parentFlag: (await parentFlags(page)).r2probe,
+        };
+        const ready = await waitFrameReadyToClick(page, 3, 'index.html', 15_000, sel);
+        // (c) a user-activated top navigation attempt.
+        await chatHtmlFrame(page).locator('#top-nav').click();
+        await page.waitForTimeout(3000);
+        const probeRequests = j
+          .who('member')
+          .requests.filter((q) => Object.values(PROBE_PATHS).some((p) => q.path === p));
+        const nav = {
+          pageUrlUnchanged: page.url() === appUrl,
+          dialogOpen: await page.locator(RENDER_SELECTORS.chatPreviewDialog).isVisible(),
+          probePathRequests: probeRequests.length,
+          newPages: j.who('member').context.pages().length - pagesBefore,
+        };
+        // (b) the frame navigating itself to a hub API URL.
+        const apiNav = page.waitForResponse(
+          (res) =>
+            new URL(res.url()).pathname === API_PROBE_PATH &&
+            res.request().isNavigationRequest() &&
+            res.request().frame() !== page.mainFrame(),
+          { timeout: 15_000 }
+        );
+        await chatHtmlFrame(page).locator('#api-nav').click();
+        const apiNavStatus = (await apiNav).status();
+        await settle(page);
+        const session = await frameSessionFacts(requestsIn('member', CHAT_STEPS));
+        if (session.bearing > 0 || apiNavStatus === 200) r2.frameSessionAlert = true;
+        if (apiNavStatus !== 200 && apiNavStatus !== 401) {
+          j.state.findings.push({ id: 'R2b-06', text: ISOLATION_FAIL });
+        }
+        // Restore: close the preview and open it again (a fresh mint).
+        await page.locator(RENDER_SELECTORS.chatDialogClose).click();
+        await expect(page.locator(RENDER_SELECTORS.chatPreviewDialog)).toHaveCount(0);
+        await openBundlePreview(page, 0);
+        const restored = await textIs(chatHtmlFrame(page).locator('#ver'), 'R2 bundle v3');
+        const probeRec = {
+          who: 'member',
+          step: 'R2b-06',
+          ...result,
+          parent,
+          ready,
+          nav,
+          apiNavStatus,
+          session,
+          restored,
+        };
+        r2.probes.push(probeRec);
+        (r2.chatHtml.probes as Array<Record<string, unknown>>).push(probeRec);
+        r.ui.probe = probeRec;
+        r.api.push({
+          as: 'member (frame)',
+          method: 'GET',
+          path: API_PROBE_PATH,
+          status: apiNavStatus,
+          code: null,
+        });
+        // (a)
+        checks.framed = result.frame === 'framed';
+        checks.opaqueOrigin = result.origin === 'null';
+        checks.parentDomBlocked = String(result.parentDom).startsWith('blocked:');
+        checks.parentWriteBlocked = String(result.parentWrite).startsWith('blocked:');
+        checks.appCannotReadFrame = parent.contentDocumentNull;
+        checks.appFlagUnset = parent.parentFlag === null;
+        // (b)
+        checks.cookieBlocked = String(result.cookie).startsWith('blocked:');
+        checks.storageBlocked = String(result.storage).startsWith('blocked:');
+        checks.fetchBlocked = String(result.fetch).startsWith('blocked:');
+        checks.frameRequestsSeen = session.total > 0;
+        checks.headersAllRead = session.unread === 0;
+        checks.noSessionBearing = session.bearing === 0;
+        checks.apiNavUnauthenticated = apiNavStatus === 401;
+        const apiNavRec = requestsIn('member', ['R2b-06']).find(
+          (q) => q.resourceType === 'document' && q.path === API_PROBE_PATH
+        );
+        checks.apiNavClassifiedFrameInitiated = apiNavRec?.classification === 'frame-initiated';
+        // (c)
+        checks.readyToClick = ready.held;
+        checks.popupBlocked = String(result.popup).startsWith('blocked:');
+        checks.pageUrlUnchanged = nav.pageUrlUnchanged;
+        checks.dialogStillOpen = nav.dialogOpen;
+        checks.noProbePathRequests = nav.probePathRequests === 0;
+        checks.noNewPages = nav.newPages === 0;
+      }),
+    { pre: preChat }
+  );
+
+  // ---- R2b-07: closing the preview removes the frame ---------------------
+  r2.step = 'R2b-07';
+  await j.row(
+    'R2b-07',
+    async (r) => {
+      const page = await openThread('member');
+      await openBundlePreview(page, 0);
+      await page.locator(RENDER_SELECTORS.chatDialogClose).click();
+      await expect(page.locator(RENDER_SELECTORS.chatPreviewDialog), 'dialog closed').toHaveCount(
+        0
+      );
+      await expect(page.locator(RENDER_SELECTORS.chatAnyHtmlFrame), 'no frame left').toHaveCount(0);
+      await expect
+        .poll(() => page.frames().filter((f) => f.url().includes(VIEW_PREFIX)).length, {
+          message: 'no view frame left on the page',
+        })
+        .toBe(0);
+      const after = {
+        dialogs: await page.locator(RENDER_SELECTORS.chatPreviewDialog).count(),
+        frames: await page.locator(RENDER_SELECTORS.chatAnyHtmlFrame).count(),
+        viewFrames: page.frames().filter((f) => f.url().includes(VIEW_PREFIX)).length,
+        threadShown: await isShown(chatArtifactLinkFor(page, id(), 0)),
+      };
+      r.ui.afterClose = after;
+      r2.chatHtml.afterClose = after;
+      expect.soft(after.threadShown, 'thread still shown').toBe(true);
+    },
+    { pre: preChat }
+  );
+
+  // ---- R2b-08: a pinned reference opens its own version ------------------
+  r2.step = 'R2b-08';
+  await j.row(
+    'R2b-08',
+    async (r) => {
+      const sel = RENDER_SELECTORS.chatHtmlFrame;
+      const page = await openThread('member');
+      const mints = r2.mints.length;
+      const reqs = j.who('member').requests.length;
+      await openBundlePreview(page, 1);
+      const badge = await pollTextIn(page.locator(RENDER_SELECTORS.chatVersionBadge), ['v1']);
+      const label = await textOf(page.locator(RENDER_SELECTORS.chatPreviewLabel));
+      const info = viewInfo((await htmlFrameAttributes(page, sel)).src, id());
+      await expect(chatHtmlFrame(page).locator('#ver')).toHaveText('R2 bundle v1');
+      const ready = await waitFrameReadyToClick(page, 1, 'index.html', 15_000, sel);
+      (r2.chatHtml.ready as Array<Record<string, unknown>>).push({ step: 'R2b-08', ...ready });
+      expect(ready.held, 'chat frame ready to click (visible, stable box, loaded at its src)').toBe(
+        true
+      );
+      await chatHtmlFrame(page).locator('#to-page2').click();
+      const page2 = await textIs(chatHtmlFrame(page).locator('#page2'), 'R2 page two v1');
+      await chatHtmlFrame(page).locator('#back').click();
+      const back = await textIs(chatHtmlFrame(page).locator('#ver'), 'R2 bundle v1');
+      const footerPath = await textOf(page.locator(RENDER_SELECTORS.chatFooterPath));
+      const viewer = await isShown(chatFooterButton(page, 'Open in artifact viewer'));
+      r.ui.pinned = {
+        badge,
+        label,
+        viewSeq: info.viewSeq,
+        viewIdMatches: info.viewIdMatches,
+        page2,
+        back,
+        footerPath,
+        viewer,
+        ready,
+      };
+      expect.soft(badge, 'badge v1 without current').toBe('v1');
+      expect.soft(label, 'label names the bundle').toContain(r2.bundle!.title);
+      expect.soft(info.viewSeq, 'view names seq 1').toBe(1);
+      expect.soft(info.viewIdMatches, 'view names the bundle').toBe(true);
+      expect.soft(page2, 'page two v1').toBe(true);
+      expect.soft(back, 'back to v1').toBe(true);
+      expect.soft(footerPath.startsWith('index.html'), 'footer path').toBe(true);
+      expect.soft(viewer, 'Open in artifact viewer').toBe(true);
+      const versionPath = `/api/v1/artifacts/${id()}/versions/1`;
+      const meta = memberRequests(reqs, 'GET', versionPath).find((q) => q.status !== undefined);
+      const mint = await latestMint('member', 1, mints);
+      r.api.push(
+        { as: 'member', method: 'GET', path: versionPath, status: meta?.status ?? 0, code: null },
+        {
+          as: 'member',
+          method: 'POST',
+          path: `${versionPath}/view`,
+          status: mint.status,
+          code: null,
+        }
+      );
+      expect.soft(meta?.status, 'version 1 GET').toBe(200);
+      expect.soft(mint.status, 'mint v1').toBe(200);
+    },
+    { pre: preChat }
+  );
+
+  // ---- R2b-08a: KNOWN DEFECT, the pinned viewer link (ptone/scion#5602) --
+  r2.step = 'R2b-08a';
+  await j.row(
+    'R2b-08a',
+    async (r) => {
+      test.info().annotations.push({ type: 'known-defect', description: R2B_08A_KNOWN_DEFECT });
+      r.ui.knownDefect = R2B_08A_KNOWN_DEFECT;
+      const page = await openThread('member');
+      await openBundlePreview(page, 1);
+      const viewer = chatFooterButton(page, 'Open in artifact viewer');
+      await expect(viewer, 'Open in artifact viewer').toBeVisible();
+      const href = (await viewer.getAttribute('href')) ?? null;
+      const mints = r2.mints.length;
+      await viewer.click();
+      await page.waitForURL(
+        new RegExp(`/projects/${j.state.projectId}/artifacts/${id()}(/v/\\d+)?$`)
+      );
+      await anyPageHeading(page).waitFor({ state: 'visible' });
+      await page.locator(RENDER_SELECTORS.htmlFrame).waitFor({ state: 'attached' });
+      const landed = new URL(page.url()).pathname;
+      const atV1 = await textIs(htmlFrame(page).locator('#ver'), 'R2 bundle v1', 10_000);
+      const versionLabel = await textOf(page.locator(SELECTORS.versionMenu));
+      const heading = await frameHeading(page).catch(() => '');
+      const pageMint = mintsSince('member', mints).find((m) => m.seq === 1);
+      r.ui.viewer = {
+        href,
+        landed,
+        versionLabel,
+        heading,
+        atV1,
+        pageMintV1: pageMint?.status ?? null,
+      };
+      r.api.push({
+        as: 'member',
+        method: 'POST',
+        path: `/api/v1/artifacts/${id()}/versions/1/view`,
+        status: pageMint?.status ?? 0,
+        code: null,
+      });
+      const want = `/projects/${j.state.projectId}/artifacts/${id()}/v/1`;
+      expect.soft(href, 'viewer link names the pinned version').toBe(want);
+      expect.soft(landed, 'lands on the pinned version').toBe(want);
+      expect.soft(versionLabel, 'version label').toContain('Version v1');
+      expect.soft(heading, 'page frame shows v1').toBe('R2 bundle v1');
+      expect.soft(pageMint?.status, 'page mint v1').toBe(200);
+    },
+    { pre: preChat }
+  );
+
+  // ---- R2b-09: Open in artifact viewer opens the artifact page -----------
+  r2.step = 'R2b-09';
+  await j.row(
+    'R2b-09',
+    async (r) => {
+      const page = await openThread('member');
+      await openBundlePreview(page, 0);
+      const mints = r2.mints.length;
+      await chatFooterButton(page, 'Open in artifact viewer').click();
+      await expect(page).toHaveURL(new RegExp(`/projects/${j.state.projectId}/artifacts/${id()}$`));
+      await expect(headerTitle(page)).toHaveText(r2.bundle!.title);
+      await page.locator(RENDER_SELECTORS.htmlFrame).waitFor({ state: 'attached' });
+      await expectFrameText(page, r, 'viewer v3', '#ver', 'R2 bundle v3', 3);
+      const dialogs = await page.locator(RENDER_SELECTORS.chatPreviewDialog).count();
+      const mint = await latestMint('member', 3, mints);
+      r.ui.viewer = {
+        landed: new URL(page.url()).pathname,
+        heading: await frameHeading(page),
+        dialogs,
+      };
+      r.api.push({
+        as: 'member',
+        method: 'POST',
+        path: `/api/v1/artifacts/${id()}/versions/3/view`,
+        status: mint.status,
+        code: null,
+      });
+      expect.soft(dialogs, 'no chat preview left open').toBe(0);
+      expect.soft(mint.status, 'page mint v3').toBe(200);
+    },
+    { pre: preChat }
+  );
+
+  // ---- R2b-10: a non-member cannot reach the thread ----------------------
+  r2.step = 'R2b-10';
+  await j.row(
+    'R2b-10',
+    async (r) => {
+      const page = await j.pageOf('outsider');
+      const mints = r2.mints.length;
+      const msgPath = `/api/v1/chat/conversations/${r2b.topicId}/messages`;
+      const fetched = page
+        .waitForResponse(
+          (res) => new URL(res.url()).pathname === msgPath && res.request().method() === 'GET',
+          { timeout: 15_000 }
+        )
+        .then((res) => res.status())
+        .catch(() => null);
+      await page.goto(threadPath(), { waitUntil: 'domcontentloaded' });
+      const anchored = await page
+        .locator(RENDER_SELECTORS.chatPageRail)
+        .waitFor({ state: 'visible', timeout: 30_000 })
+        .then(() => true)
+        .catch(() => false);
+      // The anchor: the chat page shell, then the thread's message fetch
+      // answered (or none was made within 15 s).
+      const browserFetch = await fetched;
+      await settle(page);
+      const hidden = {
+        anchored,
+        browserFetch,
+        messageShown: await page.getByText('R2b bundle for review').count(),
+        links: await page.locator(RENDER_SELECTORS.chatArtifactLink).count(),
+        dialogs: await page.locator(RENDER_SELECTORS.chatPreviewDialog).count(),
+        mints: mintsSince('outsider', mints).length,
+      };
+      const api = await j.api('outsider', 'GET', msgPath, undefined, r);
+      r.ui.outsiderThread = { ...hidden, apiStatus: api.status, apiCode: api.code ?? null };
+      r2.chatHtml.outsiderThread = r.ui.outsiderThread;
+      expect.soft(api.status >= 200 && api.status < 300, 'messages GET is not 2xx').toBe(false);
+      expect.soft(hidden.mints, 'no view minted').toBe(0);
+      if (!anchored) {
+        r.legNotRun = 'the chat page shell did not render, so the hidden checks have no anchor';
+        return;
+      }
+      expect.soft(hidden.messageShown, 'message not shown').toBe(0);
+      expect.soft(hidden.links, 'no reference link').toBe(0);
+      expect.soft(hidden.dialogs, 'no preview').toBe(0);
+    },
+    { pre: preChat }
+  );
+
+  // ---- R2b-11: a reference the reader cannot read opens as unavailable ---
+  r2.step = 'R2b-11';
+  await j.row('R2b-11', (r) => unavailableRow(r, 'member'), { pre: preSide });
+
+  // ---- R2b-11x: recorded only, the outsider DM ---------------------------
+  r2.step = 'R2b-11x';
+  await j.row(
+    'R2b-11x',
+    async (r) => {
+      r.ui.send = fx.dm ?? null;
+      r.ui.note = 'recorded only; a sender warning depends on ptone/scion#4905';
+      try {
+        await unavailableFacts(
+          r,
+          'outsider',
+          `/chat/dm/${encodeURIComponent(r2b.dmKey!)}`,
+          bundleId()
+        );
+      } catch (err) {
+        r.ui.error = redactViews(firstLine(err));
+      }
+    },
+    { pre: preDm }
+  );
+}
+
+/**
+ * Opens path as key, clicks the reference to artifactId and records what the
+ * preview shows; asserts nothing (R2b-11 grades, R2b-11x records).
+ */
+async function unavailableFacts(
+  r: RowRecord,
+  key: Key,
+  pagePath: string,
+  artifactId: string
+): Promise<UnavailableFacts> {
+  const page = await j.pageOf(key);
+  const mints = r2.mints.length;
+  const reqs = j.who(key).requests.length;
+  await page.goto(pagePath, { waitUntil: 'domcontentloaded' });
+  const link = page.locator(
+    `${RENDER_SELECTORS.chatArtifactLink}[data-artifact-id="${artifactId}"]`
+  );
+  await link.first().waitFor({ state: 'visible', timeout: 30_000 });
+  await link.first().click();
+  const dialog = page.locator(RENDER_SELECTORS.chatPreviewDialog);
+  await dialog.waitFor({ state: 'visible' });
+  const label = await pollTextIn(page.locator(RENDER_SELECTORS.chatPreviewLabel), [
+    'Artifact unavailable',
+  ]);
+  const text = await pollTextIn(page.locator(RENDER_SELECTORS.chatUnavailableText), [
+    UNAVAILABLE_TEXT,
+  ]);
+  const dialogText = ((await dialog.textContent()) ?? '').replace(/\s+/g, ' ');
+  const names = [
+    ...(artifactId === r2b.side?.id ? [r2b.side.title] : []),
+    ...(artifactId === r2.bundle?.id ? [r2.bundle.title] : []),
+    'index.html',
+    ...ownerLabels(),
+  ];
+  const facts: UnavailableFacts = {
+    who: key,
+    label,
+    text,
+    frames: await page.locator(RENDER_SELECTORS.chatAnyHtmlFrame).count(),
+    bar: await page.locator(RENDER_SELECTORS.chatUntrustedBar).count(),
+    notice: await page.locator(RENDER_SELECTORS.chatRemoteImagesNotice).count(),
+    badge: await page.locator(RENDER_SELECTORS.chatVersionBadge).count(),
+    close: await isShown(chatFooterButton(page, 'Close')),
+    openInViewer: await chatFooterButton(page, 'Open in artifact viewer').count(),
+    footerPath: await textOf(page.locator(RENDER_SELECTORS.chatFooterPath)),
+    namesShown: names.filter((n) => n !== '' && dialogText.includes(n)).length,
+    versionShown: /\bv\d+\b/.test(dialogText),
+    closed: false,
+    framesAfterClose: -1,
+    artifactGet: null,
+    mints: 0,
+  };
+  if (facts.close) {
+    await chatFooterButton(page, 'Close').click();
+    facts.closed = await dialog
+      .waitFor({ state: 'detached', timeout: 10_000 })
+      .then(() => true)
+      .catch(() => false);
+    facts.framesAfterClose = await page.locator(RENDER_SELECTORS.chatAnyHtmlFrame).count();
+  }
+  const metaPath = `/api/v1/artifacts/${artifactId}`;
+  facts.artifactGet =
+    j
+      .who(key)
+      .requests.slice(reqs)
+      .find((q) => q.method === 'GET' && q.path === metaPath && q.status !== undefined)?.status ??
+    null;
+  facts.mints = mintsSince(key, mints).length;
+  r.ui.unavailable = facts;
+  r2.chatHtml.unavailable ??= [];
+  (r2.chatHtml.unavailable as Array<Record<string, unknown>>).push({ step: r.id, ...facts });
+  return facts;
+}
+
+/** What the chat preview shows for an unreadable reference (R2b-11, R2b-11x). */
+interface UnavailableFacts {
+  who: Key;
+  label: string;
+  text: string;
+  frames: number;
+  bar: number;
+  notice: number;
+  badge: number;
+  close: boolean;
+  openInViewer: number;
+  footerPath: string;
+  namesShown: number;
+  versionShown: boolean;
+  closed: boolean;
+  framesAfterClose: number;
+  artifactGet: number | null;
+  mints: number;
+}
+
+const UNAVAILABLE_TEXT = "This artifact doesn't exist or you don't have access to it.";
+
+/** R2b-11: the member opens the side artifact's reference in the home thread. */
+async function unavailableRow(r: RowRecord, key: Key): Promise<void> {
+  const sideId = r2b.side!.id;
+  const facts = await unavailableFacts(r, key, threadPath(), sideId);
+  expect.soft(facts.label, 'label').toBe('Artifact unavailable');
+  expect.soft(facts.text, 'unavailable text').toBe(UNAVAILABLE_TEXT);
+  expect.soft(facts.frames, 'no frame').toBe(0);
+  expect.soft(facts.bar, 'no untrusted bar').toBe(0);
+  expect.soft(facts.notice, 'no remote-images notice').toBe(0);
+  expect.soft(facts.badge, 'no version badge').toBe(0);
+  expect.soft(facts.close, 'Close').toBe(true);
+  expect.soft(facts.openInViewer, 'no Open in artifact viewer').toBe(0);
+  expect.soft(facts.footerPath, 'empty footer path').toBe('');
+  expect.soft(facts.namesShown, 'nothing names the artifact').toBe(0);
+  expect.soft(facts.versionShown, 'no version shown').toBe(false);
+  expect.soft(facts.closed, 'Close closes it').toBe(true);
+  expect.soft(facts.framesAfterClose, 'no frame after close').toBe(0);
+  const metaPath = `/api/v1/artifacts/${sideId}`;
+  r.api.push({
+    as: key,
+    method: 'GET',
+    path: metaPath,
+    status: facts.artifactGet ?? 0,
+    code: null,
+  });
+  expect.soft(facts.artifactGet, 'artifact GET').toBe(404);
+  expect.soft(facts.mints, 'no view minted').toBe(0);
+  const side = await j.api(key, 'GET', metaPath, undefined, r);
+  const random = await j.api(key, 'GET', `/api/v1/artifacts/${crypto.randomUUID()}`, undefined, r);
+  const nd = {
+    side: { status: side.status, code: side.code ?? null },
+    random: { status: random.status, code: random.code ?? null },
+  };
+  r.ui.nonDisclosure = nd;
+  r2.chatHtml.nonDisclosure = nd;
+  expect.soft(nd.side.status, 'side artifact 404').toBe(404);
+  expect.soft(nd.side, 'same status and code as a random id').toEqual(nd.random);
+}
+
 /** Every artifact this run created, as [name, id] (known from its create on). */
 function createdArtifacts(): Array<[string, string]> {
   const out: Array<[string, string]> = [];
@@ -2707,6 +3876,8 @@ function createdArtifacts(): Array<[string, string]> {
   const md = r2.markdown?.id ?? r2.markdownCreatedId;
   if (md) out.push(['markdown', md]);
   r2.extraArtifactIds.forEach((id, i) => out.push([`extra ${i + 1}`, id]));
+  const side = r2b.side?.id ?? r2b.sideCreatedId;
+  if (side) out.push(['side', side]);
   return out;
 }
 
@@ -2766,9 +3937,34 @@ async function runCleanup(testInfo: {
     }
   }
 
-  // The chat thread, while its project still exists (so a read proves the delete).
-  const chatCleanup = await cleanupChat(residue, states);
+  // The member's view URL from the chat preview (R2b) no longer serves either.
+  if (r2b.heldMemberViewUrl && j.state.target) {
+    try {
+      const res = await fetch(new URL(r2b.heldMemberViewUrl, j.target().baseURL));
+      await res.arrayBuffer();
+      cleanup.heldMemberViewAfterDelete = res.status;
+      states['member chat view URL after delete'] =
+        res.status === 404 ? 'absent' : `status ${res.status}`;
+    } catch (err) {
+      residue.push(`cleanup error (member chat view URL): ${firstLine(err)}`);
+    }
+  }
+
+  // The chat threads, while their project still exists (so a read proves the delete).
+  const chatCleanup = await cleanupChat(
+    residue,
+    states,
+    r2.chat.topicId as string | undefined,
+    'chat thread'
+  );
   if (chatCleanup) cleanup.chat = chatCleanup;
+  // R2b-12: the R2b thread and the DM message.
+  const chatHtmlCleanup: Record<string, unknown> = {};
+  const r2bThread = await cleanupChat(residue, states, r2b.topicId, 'R2b chat thread');
+  if (r2bThread) chatHtmlCleanup.thread = r2bThread;
+  const dm = await cleanupDmMessage(residue, states);
+  if (dm) chatHtmlCleanup.dm = dm;
+  cleanup.chatHtml = chatHtmlCleanup;
 
   // The membership, then the project.
   const removals: Record<string, number | string> = {};
@@ -2808,6 +4004,16 @@ async function runCleanup(testInfo: {
       residue.push(`cleanup error (project): ${firstLine(err)}`);
     }
   }
+  // R2b-12: the side project (its artifact was deleted above).
+  if (r2b.sideProjectId && j.state.ids.owner) {
+    try {
+      const res = await j.api('owner', 'DELETE', `/api/v1/projects/${r2b.sideProjectId}`);
+      cleanup.sideProjectDelete = res.status;
+      if (res.status >= 300) residue.push(`side project: DELETE ${res.status}`);
+    } catch (err) {
+      residue.push(`cleanup error (side project): ${firstLine(err)}`);
+    }
+  }
   // Final reads while the sessions still exist.
   try {
     for (const [name, id] of createdArtifacts()) {
@@ -2828,6 +4034,10 @@ async function runCleanup(testInfo: {
     if (j.state.projectId && j.state.ids.owner) {
       const res = await j.api('owner', 'GET', `/api/v1/projects/${j.state.projectId}`);
       states.project = classifyRead(res.status, res.body);
+    }
+    if (r2b.sideProjectId && j.state.ids.owner) {
+      const res = await j.api('owner', 'GET', `/api/v1/projects/${r2b.sideProjectId}`);
+      states['side project'] = classifyRead(res.status, res.body);
     }
   } catch (err) {
     residue.push(`cleanup error (final reads): ${firstLine(err)}`);
@@ -2891,13 +4101,19 @@ async function runCleanup(testInfo: {
   delete r18.reason;
   r18.status = residue.length === 0 ? 'passed' : 'failed';
   r18.errors = [...residue];
-  r18.ui = { final: cleanup.final, heldViewAfterDelete: cleanup.heldViewAfterDelete ?? null };
+  r18.ui = {
+    final: cleanup.final,
+    heldViewAfterDelete: cleanup.heldViewAfterDelete ?? null,
+    heldMemberViewAfterDelete: cleanup.heldMemberViewAfterDelete ?? null,
+    chatHtml: cleanup.chatHtml ?? null,
+  };
 
   // Evidence only now, after the cleanup.
   const ev = j.state.evidence;
   ev.artifacts = {
     bundle: r2.bundle ? { id: r2.bundle.id, title: r2.bundle.title, seqs: [1, 2, 3] } : null,
     markdown: r2.markdown ? { id: r2.markdown.id, title: r2.markdown.title } : null,
+    side: r2b.side ? { id: r2b.side.id, title: r2b.side.title } : null,
   };
   ev.frames = r2.frames;
   ev.probes = r2.probes;
@@ -2914,6 +4130,15 @@ async function runCleanup(testInfo: {
   ev.files = r2.files;
   ev.publishes = r2.publishes;
   ev.chat = r2.chat;
+  ev.chatHtml = {
+    ...r2.chatHtml,
+    topicId: r2b.topicId ?? null,
+    sideProjectId: r2b.sideProjectId ?? null,
+    fixtureRefused: r2b.fixtureRefused ?? null,
+    sideRefused: r2b.sideRefused ?? null,
+    dmRefused: r2b.dmRefused ?? null,
+    senderSide: 'sender side via composer: not tested (messages posted through the API)',
+  };
   ev.frameSessionAlert = r2.frameSessionAlert;
   ev.frameSessionAll = r2.frameSessionAll;
   ev.rows = j.state.rows;
@@ -3055,9 +4280,10 @@ function capabilityLike(text: string): number {
  */
 async function cleanupChat(
   residue: string[],
-  states: Record<string, string>
+  states: Record<string, string>,
+  topicId: string | undefined,
+  label: string
 ): Promise<Record<string, unknown> | null> {
-  const topicId = r2.chat.topicId as string | undefined;
   if (!topicId || !j.state.ids.owner) return null;
   const out: Record<string, unknown> = {};
   try {
@@ -3065,15 +4291,47 @@ async function cleanupChat(
     const del = await j.api('owner', 'DELETE', topicPath);
     out.threadDelete = del.status;
     const deleted = del.status >= 200 && del.status < 300;
-    if (!deleted) residue.push(`chat thread: DELETE ${del.status}`);
+    if (!deleted) residue.push(`${label}: DELETE ${del.status}`);
     const get = await j.api('owner', 'GET', topicPath);
     out.threadReadAfter = get.status;
     const deletedAt = (get.body as { deletedAt?: string } | null)?.deletedAt;
     out.deletedAtSet = !!deletedAt;
     const gone = deleted && (get.status === 404 || !!deletedAt);
-    states['chat thread'] = gone ? 'absent' : `delete ${del.status}, read ${get.status}`;
+    states[label] = gone ? 'absent' : `delete ${del.status}, read ${get.status}`;
   } catch (err) {
-    residue.push(`cleanup error (chat thread): ${firstLine(err)}`);
+    residue.push(`cleanup error (${label}): ${firstLine(err)}`);
+  }
+  return out;
+}
+
+/**
+ * R2b-12: the owner deletes the DM message (a soft delete that clears its
+ * content, handlers_chat_v2.go:2734-2789) and reads the DM back: the
+ * message is gone or shown deleted with no content. The DM pair itself has
+ * no delete route; it goes with the throwaway hub.
+ */
+async function cleanupDmMessage(
+  residue: string[],
+  states: Record<string, string>
+): Promise<Record<string, unknown> | null> {
+  if (!r2b.dmKey || !r2b.dmMessageId || !j.state.ids.owner) return null;
+  const out: Record<string, unknown> = { dmPair: 'no delete route; goes with the throwaway hub' };
+  try {
+    const base = `/api/v1/chat/conversations/${encodeURIComponent(r2b.dmKey)}/messages`;
+    const del = await j.api('owner', 'DELETE', `${base}/${encodeURIComponent(r2b.dmMessageId)}`);
+    out.messageDelete = del.status;
+    const deleted = del.status === 200;
+    if (!deleted) residue.push(`R2b DM message: DELETE ${del.status}`);
+    const list = await j.api('owner', 'GET', base);
+    out.readAfter = list.status;
+    const msgs = ((list.body ?? {}) as { messages?: Array<{ id: string; msg?: string }> }).messages;
+    const found = msgs?.find((m) => m.id === r2b.dmMessageId);
+    out.listed = !!found;
+    out.contentCleared = found ? (found.msg ?? '') === '' : null;
+    const gone = deleted && list.status === 200 && !!msgs && (!found || (found.msg ?? '') === '');
+    states['R2b DM message'] = gone ? 'absent' : `delete ${del.status}, read ${list.status}`;
+  } catch (err) {
+    residue.push(`cleanup error (R2b DM message): ${firstLine(err)}`);
   }
   return out;
 }
