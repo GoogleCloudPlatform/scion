@@ -5111,7 +5111,11 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 
 		plan, err := s.claimAgentDeletion(ctx, agent.ID, params)
 		if err != nil {
-			writeErrorFromErr(w, err, "")
+			// A placement refusal carries its details, as the engine's
+			// answer for the same refusal does.
+			if !writeRuntimeTargetRefusal(w, err) {
+				writeErrorFromErr(w, err, "")
+			}
 			return
 		}
 		if plan != nil {
@@ -5157,7 +5161,7 @@ func (s *Server) awaitAgentDeletion(w http.ResponseWriter, r *http.Request, plan
 		case deletionOutcomeDeleted:
 			w.WriteHeader(http.StatusNoContent)
 		case deletionOutcomeFailed:
-			writeDeletionFailure(w, plan.snapshot.ID, out.code, out.message, out.retryAfter, isAdmin)
+			writeDeletionFailureWithRefusal(w, plan.snapshot.ID, out.code, out.message, out.retryAfter, out.refusal, isAdmin)
 		default: // lost: someone else holds the row now
 			s.joinAgentDeletion(w, r, plan.snapshot.ID, plan.claim, deadline, isAdmin)
 		}
