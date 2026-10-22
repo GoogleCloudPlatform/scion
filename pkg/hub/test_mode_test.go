@@ -103,6 +103,7 @@ func TestValidateTestModeConfig(t *testing.T) {
 	cfg := func(level TestMode, ti, admin, super bool) ServerConfig {
 		return ServerConfig{
 			HubID:                "h",
+			HubIDPinned:          true,
 			EnableTestIdentities: ti,
 			TestAdminGate:        TestAdminGateConfig{HubAdmin: admin, SuperAdmin: super},
 			TestMode:             TestModeConfig{Level: level, HubID: "h", HubClass: "test", MarkerHubID: "h", MarkerClass: "test"},
@@ -140,6 +141,7 @@ func TestValidateTestModeConfig(t *testing.T) {
 func tmMemberServerConfig() ServerConfig {
 	cfg := testServerConfig()
 	cfg.HubID = tiaHubID
+	cfg.HubIDPinned = true
 	cfg.EnableTestIdentities = true
 	cfg.TestMode = TestModeConfig{
 		Level:         TestModeMember,
@@ -194,6 +196,9 @@ func TestTestMode_MemberStartupLineAndStatus(t *testing.T) {
 	assert.Equal(t, "member", recs[0]["test_mode"])
 	assert.Equal(t, anyStrings(TestModeMemberPreconditions()), recs[0]["preconditions"])
 	assert.Equal(t, tiaHubID, recs[0]["hub_id"])
+	// DEC-10: the member level warns that hub and broker material reaches
+	// every member agent.
+	assert.Equal(t, testModeSecretsWarning, recs[0]["warning"])
 
 	rec := doRequestNoAuth(t, srv, http.MethodGet, "/api/v1/test-infra/status", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -247,7 +252,7 @@ func TestTestMode_OffStatus(t *testing.T) {
 	srv, _, err := tiaNewServer(t, testServerConfig())
 	require.NoError(t, err)
 	assert.Equal(t, TestModeOff, srv.TestModeLevel())
-	assert.Empty(t, buf.String())
+	assert.Empty(t, buf.String(), "off writes no startup line, so no DEC-10 warning")
 
 	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -291,6 +296,7 @@ func TestTestMode_NewRechecksMemberPreconditions(t *testing.T) {
 		{"no hub id binding", func(c *ServerConfig) { c.TestMode.HubID = "" }, ErrTestAdminHubIDMismatch},
 		{"binding differs from the hub id", func(c *ServerConfig) { c.TestMode.HubID = "other-hub" }, ErrTestAdminHubIDMismatch},
 		{"hub id differs from the binding", func(c *ServerConfig) { c.HubID = "other-hub" }, ErrTestAdminHubIDMismatch},
+		{"hub id not pinned", func(c *ServerConfig) { c.HubIDPinned = false }, ErrTestModeHubIDNotPinned},
 		{"hub class absent", func(c *ServerConfig) { c.TestMode.HubClass = "" }, ErrTestAdminHubClassNotTest},
 		{"hub class case", func(c *ServerConfig) { c.TestMode.HubClass = "Test" }, ErrTestAdminHubClassNotTest},
 		{"marker absent", func(c *ServerConfig) { c.TestMode.MarkerHubID = "" }, ErrTestAdminMarkerAbsent},
@@ -312,6 +318,51 @@ func TestTestMode_NewRechecksMemberPreconditions(t *testing.T) {
 	}
 	// Off carries no preconditions and needs none.
 	assert.NoError(t, ValidateTestModeConfig(ServerConfig{}))
+}
+
+// TM-h: every level but off needs a pinned hub id (server.hub.hub_id or
+// SCION_SERVER_HUB_HUBID), so every replica of one hub shares it. New
+// refuses a derived id at each non-off level with the named error, which
+// names server.hub.hub_id, and writes no line; off starts with a derived id.
+func TestTestMode_NewRefusesUnpinnedHubIDAtEveryNonOffLevel(t *testing.T) {
+	for _, level := range []TestMode{TestModeMember, TestModeAdmin, TestModeSuperAdmin} {
+		t.Run(string(level), func(t *testing.T) {
+			cfg := tmMemberServerConfig()
+			if level.IsAdminLevel() {
+				cfg = tiaGateServerConfig()
+				cfg.TestAdminGate.SuperAdmin = level == TestModeSuperAdmin
+				cfg.TestMode.Level = level
+			}
+			require.NoError(t, ValidateTestModeConfig(cfg), "pinned: the level is admitted")
+			cfg.HubIDPinned = false
+			err := ValidateTestModeConfig(cfg)
+			require.ErrorIs(t, err, ErrTestModeHubIDNotPinned)
+			assert.Contains(t, err.Error(), "server.hub.hub_id")
+			assert.Contains(t, err.Error(), "hub_id_not_pinned")
+			var named *TestAdminGateError
+			require.True(t, errors.As(err, &named), "the error is named")
+
+			buf := tiaCaptureAudit(t)
+			srv, _, err := tiaNewServer(t, cfg)
+			require.Error(t, err)
+			assert.Nil(t, srv)
+			assert.True(t, errors.Is(err, ErrTestModeHubIDNotPinned), "got %v", err)
+			assert.Empty(t, buf.String(), "a refused level writes no line")
+		})
+	}
+	t.Run("off", func(t *testing.T) {
+		cfg := testServerConfig()
+		cfg.HubID = tiaHubID
+		cfg.HubIDPinned = false
+		require.NoError(t, ValidateTestModeConfig(cfg))
+		buf := tiaCaptureAudit(t)
+		srv, _, err := tiaNewServer(t, cfg)
+		require.NoError(t, err, "off starts with a derived hub id")
+		require.NotNil(t, srv)
+		assert.Equal(t, TestModeOff, srv.TestModeLevel())
+		assert.Empty(t, buf.String())
+	})
+	assert.Contains(t, TestModeMemberPreconditions(), TestModePreconditionHubIDPinned)
 }
 
 func TestTestMode_StartupLineWriteFailureRefusesStartup(t *testing.T) {

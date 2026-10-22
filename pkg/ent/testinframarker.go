@@ -19,7 +19,7 @@ type TestInfraMarker struct {
 	// ID of the ent.
 	// Fixed singleton id: test-infra-marker
 	ID string `json:"id,omitempty"`
-	// Resolved hub id (PersistentHubID or server.hub.hub_id) this database is designated for
+	// Resolved logical hub id (server.hub.hub_id, shared by every replica of the hub) this database is designated for
 	HubID string `json:"hub_id,omitempty"`
 	// Hub class; the only value written is "test"
 	Class string `json:"class,omitempty"`

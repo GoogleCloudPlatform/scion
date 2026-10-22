@@ -59,6 +59,10 @@ const (
 	HeaderRefusalReason = "X-Conduit-Refusal-Reason"
 )
 
+// staleReasonNotSent is the X-Conduit-Stale-Reason of an internal RPC
+// whose target session ended before the request was handed to it.
+const staleReasonNotSent = "not_sent"
+
 // refuseUnavailable writes the owner's own pre-admission 503 with its
 // §3.3.1 reason.
 func refuseUnavailable(w http.ResponseWriter, why, msg string) {
@@ -109,20 +113,55 @@ func (r *Relay) InternalHandler() http.Handler {
 	return http.HandlerFunc(r.serveInternal)
 }
 
-func (r *Relay) serveInternal(w http.ResponseWriter, req *http.Request) {
+// AuthenticatePeer runs the relay-peer checks of every request on this
+// relay's internal listener: the relay-peer authentication, and the target
+// instance and generation the request was signed for. It returns the
+// authenticated peer id. On a refusal it writes the answer (401, 409
+// relay_target_mismatch, or 503 when the relay no longer serves) and
+// returns false.
+func (r *Relay) AuthenticatePeer(w http.ResponseWriter, req *http.Request) (peer string, ok bool) {
+	return r.authenticatePeer(w, req, func(w http.ResponseWriter) {
+		refuseUnavailable(w, ReasonNotServing, "relay unavailable")
+	})
+}
+
+// AuthenticateIngressPeer is AuthenticatePeer for the conduit dials a hub
+// ingress proxies to the internal listener: a relay that no longer serves
+// answers 503 with reason relay_not_admitting (the relayrole refusal
+// shape), since the refusal comes before Admit and the ingress may re-pick
+// on that reason (design §3.9 "Relay selection").
+func (r *Relay) AuthenticateIngressPeer(w http.ResponseWriter, req *http.Request) (peer string, ok bool) {
+	return r.authenticatePeer(w, req, WriteNotAdmitting)
+}
+
+// WriteNotAdmitting answers 503 with reason relay_not_admitting in the
+// JSON error body: the refusal a relay gives before Admit when it does not
+// take new sessions, which a hub ingress re-picks on.
+func WriteNotAdmitting(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{
+		"code": "unavailable", "message": "This relay is not admitting conduit sessions",
+		"details": map[string]string{"reason": ReasonRelayNotAdmitting},
+	}})
+}
+
+// authenticatePeer runs the checks of AuthenticatePeer; refuseStopped
+// answers a relay that no longer serves.
+func (r *Relay) authenticatePeer(w http.ResponseWriter, req *http.Request, refuseStopped func(http.ResponseWriter)) (peer string, ok bool) {
 	if r.cfg.PeerAuth == nil {
 		http.Error(w, "relay-peer auth not configured", http.StatusUnauthorized)
-		return
+		return "", false
 	}
 	peer, err := r.cfg.PeerAuth.Verify(req)
 	if err != nil {
 		http.Error(w, "relay-peer identity required", http.StatusUnauthorized)
-		return
+		return "", false
 	}
 	target, targetGen := req.Header.Get(HeaderPeerTarget), req.Header.Get(HeaderPeerTargetGeneration)
 	if target == "" || targetGen == "" {
 		http.Error(w, "relay-peer target required", http.StatusUnauthorized)
-		return
+		return "", false
 	}
 	r.mu.Lock()
 	killed, gen := r.killed, r.gen
@@ -132,10 +171,18 @@ func (r *Relay) serveInternal(w http.ResponseWriter, req *http.Request) {
 		// a stale route for the caller, which re-resolves.
 		w.Header().Set(HeaderStaleReason, "relay_target_mismatch")
 		http.Error(w, "request is for another relay instance or generation", http.StatusConflict)
-		return
+		return "", false
 	}
 	if killed {
-		refuseUnavailable(w, ReasonNotServing, "relay unavailable")
+		refuseStopped(w)
+		return "", false
+	}
+	return peer, true
+}
+
+func (r *Relay) serveInternal(w http.ResponseWriter, req *http.Request) {
+	peer, ok := r.AuthenticatePeer(w, req)
+	if !ok {
 		return
 	}
 	path := req.URL.Path
@@ -146,6 +193,10 @@ func (r *Relay) serveInternal(w http.ResponseWriter, req *http.Request) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(selfResponse{InstanceID: r.cfg.InstanceID, Generation: r.Generation()})
+		return
+	}
+	if path == internalDrainPath {
+		r.serveDrain(w, req, peer)
 		return
 	}
 	rest, ok := strings.CutPrefix(path, internalSessions)
@@ -256,6 +307,25 @@ func (r *Relay) serveRPC(w http.ResponseWriter, req *http.Request, peer, session
 	ctx, cancel := context.WithTimeout(req.Context(), r.cfg.RPCTimeout)
 	defer cancel()
 	resp, err := ls.Call(ctx, rpc)
+	// Broker targets only: for them a draining target, or a request the
+	// target never received, is a stale route for that session, so the
+	// caller re-resolves. Every other target keeps the 502 below.
+	broker := ls.Info().PrincipalKind == registry.PrincipalBroker
+	switch {
+	case !broker:
+	case errors.Is(err, conduit.ErrDraining):
+		// The target session refused before sending: a stale route for
+		// this session only, so the caller re-resolves (the replacement
+		// session may be held by this same relay).
+		w.Header().Set(HeaderStaleReason, string(registry.ReasonDraining))
+		http.Error(w, "target session draining", http.StatusConflict)
+		return
+	case errors.Is(err, conduit.ErrRequestNotSent):
+		// The target session ended before the request reached it.
+		w.Header().Set(HeaderStaleReason, staleReasonNotSent)
+		http.Error(w, "target session ended before the request was sent", http.StatusConflict)
+		return
+	}
 	if err != nil {
 		code, why := codeAndReason(err, "target session call failed")
 		if errors.Is(err, context.DeadlineExceeded) {
@@ -359,12 +429,26 @@ func (r *Relay) serveStream(w http.ResponseWriter, req *http.Request, peer, sess
 		_ = st.CloseWithCode(conduit.CloseCancelled, ReasonCancelled)
 		return
 	}
-	if err := hop.grant(conduit.DefaultStreamWindow); err != nil {
+	// Renewals the caller sends for this stream go to the target stream.
+	if r, ok := st.(conduit.StreamRenewer); ok {
+		hop.setRenewalHandler(func(credential []byte) { _ = r.Renew(credential) })
+	}
+	// The target-side ids are this relay's own view of the stream it just
+	// opened: the id of the session it holds and the stream's id on it,
+	// never anything the caller sent.
+	if err := hop.grant(conduit.DefaultStreamWindow, TargetStream{SessionID: ls.Info().SessionID, StreamID: st.ID()}); err != nil {
 		_ = st.CloseWithCode(conduit.CloseCancelled, ReasonCancelled)
 		hop.end(errLinkLost, false)
 		return
 	}
 	cancel() // stop the opening watcher; the stream is established
+	// One debug line per internal stream this relay opens on a session it
+	// holds, so a stream that crossed nodes is visible on the owner too.
+	// The node that took the request logs the open at info with
+	// route=remote and owner_instance; port-proxy streams are per request,
+	// so the owner's line stays at debug for every stream.
+	r.log.Debug("Conduit internal stream opened", "session_id", ls.Info().SessionID, "stream_id", st.ID(),
+		"kind", open.GetKind().String(), "peer", peer)
 	splice(st, hop)
 }
 

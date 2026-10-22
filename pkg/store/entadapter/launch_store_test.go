@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
@@ -129,6 +130,76 @@ func TestLaunchStore_S1_EndLaunchActivelyEndingDoesNotBump(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, store.LaunchStateEnded, after.LaunchState, "setup: EndLaunch must have actually ended the (previously active) launch")
 	assert.Equal(t, before.StateVersion, after.StateVersion, "EndLaunch must never bump state_version, even when it actively ends a launch")
+}
+
+// EndLaunchWithCode ends the launch like EndLaunch and records the code as
+// the launch error, without changing the phase or bumping state_version
+// (ptone/scion#5283: the dispatcher's failed not_launched cases). EndLaunch
+// itself records no code.
+// Mutant S1: drop the SetLaunchError in endLaunch.
+func TestLaunchStore_EndLaunchWithCode_RecordsCode(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	assert.Equal(t, api.LaunchCodeDispatchFailed, store.LaunchErrorDispatchFailed, "the store code mirrors the API code")
+
+	a := createLaunchableAgent(t, ctx, s, projectID, "endlaunch-code")
+	launchID, err := s.BeginLaunch(ctx, a.ID, store.LaunchKindCreate, 5*time.Minute)
+	require.NoError(t, err)
+	before, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+
+	require.NoError(t, s.EndLaunchWithCode(ctx, a.ID, launchID, store.LaunchEndReasonNotLaunched, store.LaunchErrorDispatchFailed))
+
+	after, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.LaunchStateEnded, after.LaunchState)
+	assert.Equal(t, store.LaunchEndReasonNotLaunched, after.LaunchEndReason)
+	assert.Equal(t, store.LaunchErrorDispatchFailed, after.LaunchError)
+	assert.Equal(t, before.Phase, after.Phase, "the phase is not changed")
+	assert.Equal(t, before.StateVersion, after.StateVersion, "no state_version bump, as for EndLaunch")
+
+	plain := createLaunchableAgent(t, ctx, s, projectID, "endlaunch-nocode")
+	plainLaunch, err := s.BeginLaunch(ctx, plain.ID, store.LaunchKindCreate, 5*time.Minute)
+	require.NoError(t, err)
+	require.NoError(t, s.EndLaunch(ctx, plain.ID, plainLaunch, store.LaunchEndReasonNotLaunched))
+	got, err := s.GetAgent(ctx, plain.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.LaunchEndReasonNotLaunched, got.LaunchEndReason)
+	assert.Empty(t, got.LaunchError, "EndLaunch records no code")
+}
+
+// EndLaunchWithCode on a launch that is no longer the row's active one
+// writes nothing, as EndLaunch does.
+// Mutant S2: drop the launch ID / active check in endLaunch.
+func TestLaunchStore_EndLaunchWithCode_StaleIsNoOp(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	t.Run("other launch id", func(t *testing.T) {
+		a := createLaunchableAgent(t, ctx, s, projectID, "endlaunch-code-other")
+		_, err := s.BeginLaunch(ctx, a.ID, store.LaunchKindCreate, 5*time.Minute)
+		require.NoError(t, err)
+
+		require.NoError(t, s.EndLaunchWithCode(ctx, a.ID, uuid.NewString(), store.LaunchEndReasonNotLaunched, store.LaunchErrorDispatchFailed))
+
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.LaunchStateActive, got.LaunchState)
+		assert.Empty(t, got.LaunchError)
+	})
+	t.Run("already ended", func(t *testing.T) {
+		a := createLaunchableAgent(t, ctx, s, projectID, "endlaunch-code-ended")
+		launchID, err := s.BeginLaunch(ctx, a.ID, store.LaunchKindCreate, 5*time.Minute)
+		require.NoError(t, err)
+		require.NoError(t, s.EndLaunch(ctx, a.ID, launchID, store.LaunchEndReasonNotLaunched))
+
+		require.NoError(t, s.EndLaunchWithCode(ctx, a.ID, launchID, store.LaunchEndReasonNotLaunched, store.LaunchErrorDispatchFailed))
+
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.LaunchEndReasonNotLaunched, got.LaunchEndReason)
+		assert.Empty(t, got.LaunchError, "an ended launch is not rewritten")
+	})
 }
 
 // TestLaunchStore_S1_ReaperReapBumps covers a third bump-rule case: design
@@ -350,8 +421,9 @@ func TestLaunchStore_S2_BeginLaunchInvalidPhase(t *testing.T) {
 }
 
 // TestLaunchStore_S2_BeginLaunchRejectsNonCreateKind proves BeginLaunch's
-// kind must be store.LaunchKindCreate in P1a; start and restart are P6 and
-// must be rejected, not silently accepted and stored.
+// kind must be store.LaunchKindCreate; start and restart go through
+// BeginStartLaunch and must be rejected here, not silently accepted and
+// stored.
 func TestLaunchStore_S2_BeginLaunchRejectsNonCreateKind(t *testing.T) {
 	ctx := context.Background()
 	s, projectID := newTestAgentStore(t)

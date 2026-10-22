@@ -39,6 +39,12 @@ import (
 // newer create gives up.
 const defaultCreateSupersedeWait = 15 * time.Second
 
+// defaultSyncStartMaxDuration bounds a synchronous create's start once it
+// runs detached from the request (see bind). It is the bound the hub sizes
+// its unconfirmed-create holds from (api.SyncStartCeiling), so it must not
+// be changed here alone.
+const defaultSyncStartMaxDuration = api.SyncStartCeiling
+
 // createSupersedeRetryAfter is the Retry-After, in seconds, sent with the
 // prior_start_in_progress 503.
 const createSupersedeRetryAfter = "5"
@@ -85,52 +91,80 @@ type syncStart struct {
 	sharedWorkspace bool
 	registry        *launchRegistry
 	// ctx is done once the registration has been cancelled (stop, delete,
-	// newer start). It is a cancellation signal only; see bind.
+	// newer start). It is a cancellation signal only; see bind. It does not
+	// follow the request, so the request ending never cancels a start that
+	// has begun (see bind).
 	ctx context.Context
+	// reqCtx is the create request's own context. Until the start runs,
+	// the request ending still ends the create (see cancelled); the start
+	// itself never runs under it (see bind).
+	reqCtx context.Context
 	// handedOff is set once handOff has replaced rec in the registry with
 	// an async launch's record; finish then leaves the registry alone.
 	handedOff bool
 }
 
 // beginCreateRegistration registers a create for req under the agent's
-// name, before any name-addressed work (buildStartContext, the GCS
-// workspace download, provisioning) runs. The registration is cancelled
-// when the agent is deleted or stopped on this broker, or when a newer
-// start for the same name begins; bind carries that cancellation onto the
-// context the start later runs under. The caller must call finish exactly
-// once when the create ends.
-//
-// If an earlier start of the same name is still running here, it is
-// cancelled and waited for (bounded by ctx and the supersede wait) before
-// this returns, so that start's failure cleanup has fully run before this
-// create writes anything addressed by the name. The wait ends with
-// errCreateSupersedeTimeout or errCreateStartCancelled, and the
-// registration is released.
+// name (beginNameRegistration), keyed on the request's project and slug
+// (or, without a slug, its name), with the create's agent and run IDs.
 func (s *Server) beginCreateRegistration(ctx context.Context, req CreateAgentRequest) (*syncStart, error) {
 	slug := req.Slug
 	if slug == "" {
 		slug = req.Name
 	}
+	return s.beginNameRegistration(ctx, launchKey{ProjectID: req.ProjectID, Slug: slug}, req.ID, req.RunID, store.LaunchKindCreate)
+}
+
+// beginNameRegistration registers a start of kind (a create, or an async
+// start of an existing agent; design wave 3 §2 D-f) for agentID and runID
+// under key, the agent's name, before any name-addressed work
+// (buildStartContext, the GCS workspace download, provisioning) runs. The
+// registration is cancelled when the agent is deleted or stopped on this
+// broker, or when a newer start for the same name begins; bind carries that
+// cancellation onto the context the start later runs under. The caller must
+// call finish exactly once when the start ends.
+//
+// ctx is the context the caller's own cancellation comes from: the create
+// request's, or for a start the start tracker's (startsInFlight.beginRun),
+// so a tracker cancel (cancelInFlightStart, from a stop) that lands before
+// handOff makes cancelled true and handOff refuses (design wave 3 §2 D-f
+// step 2).
+//
+// If an earlier start of the same name is still running here, it is
+// cancelled and waited for (bounded by ctx and the supersede wait) before
+// this returns, so that start's failure cleanup has fully run before this
+// start writes anything addressed by the name. The wait ends with
+// errCreateSupersedeTimeout or errCreateStartCancelled, and the
+// registration is released.
+func (s *Server) beginNameRegistration(ctx context.Context, key launchKey, agentID, runID, kind string) (*syncStart, error) {
 	// The slug is joined onto the launch markers directory later. createAgent
-	// already checks Name and Slug at the request boundary; this check keeps
-	// the helper safe on its own, before any registry or filesystem use.
-	if !isSingleCleanPathElement(slug) {
+	// and startAgent already check it at the request boundary; this check
+	// keeps the helper safe on its own, before any registry or filesystem
+	// use.
+	if !isSingleCleanPathElement(key.Slug) {
 		return nil, errInvalidLaunchSlug
 	}
 	// regCtx is only a cancellation signal (ss.ctx), never the start's own
-	// context: it is derived from ctx before createAgent attaches the
+	// context: it is derived from ctx before the caller attaches the
 	// harness-config policy, skill resolver, hub agent defaults and
-	// worktree signal, so the start must not run under it (see bind).
-	regCtx, cancel := context.WithCancel(ctx)
+	// worktree signal, so the start must not run under it (see bind). It
+	// is detached from ctx's cancellation, so only a stop, delete or newer
+	// start cancels it, never the request ending (ptone/scion#4817); ctx
+	// is checked separately, before the start (cancelled).
+	regCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	ss := &syncStart{
-		key:      launchKey{ProjectID: req.ProjectID, Slug: slug},
+		key:      key,
 		owner:    "sync-" + uuid.NewString(),
 		registry: s.launchRegistry,
 		ctx:      regCtx,
+		reqCtx:   ctx,
 	}
-	ss.rec = newLaunchRecord(ss.owner, req.ID, store.LaunchKindCreate, "", time.Time{}, cancel)
-	ss.rec.RunID = req.RunID
+	ss.rec = newLaunchRecord(ss.owner, agentID, kind, "", time.Time{}, cancel)
+	ss.rec.RunID = runID
 
+	if testHookNameRegistrationBeforeBegin != nil {
+		testHookNameRegistrationBeforeBegin(key)
+	}
 	var supersededDone <-chan struct{}
 	if ss.registry != nil {
 		supersededDone = ss.registry.Begin(ss.key, ss.rec)
@@ -148,6 +182,11 @@ func (s *Server) beginCreateRegistration(ctx context.Context, req CreateAgentReq
 			timer.Stop()
 			ss.finish()
 			return nil, errCreateStartCancelled
+		case <-ctx.Done():
+			// The caller stopped waiting before the start began.
+			timer.Stop()
+			ss.finish()
+			return nil, errCreateStartCancelled
 		case <-timer.C:
 			ss.finish()
 			return nil, errCreateSupersedeTimeout
@@ -156,14 +195,33 @@ func (s *Server) beginCreateRegistration(ctx context.Context, req CreateAgentReq
 	return ss, nil
 }
 
-// bind returns a context derived from ctx -- the dispatch context with
-// everything createAgent attached after the registration (harness-config
-// policy hook, skill resolver, hub agent defaults, provisioned-worktree
-// signal) -- that is also cancelled when this registration is cancelled (a
-// stop, delete or newer start of the name), and a release func the caller
-// must call once the start has returned.
-func (ss *syncStart) bind(ctx context.Context) (context.Context, func()) {
-	startCtx, cancel := context.WithCancel(ctx)
+// bind returns the context a synchronous start runs under, and a release
+// func the caller must call once the start has returned. It carries every
+// value of ctx -- the dispatch context with everything createAgent
+// attached after the registration (harness-config policy hook, skill
+// resolver, hub agent defaults, provisioned-worktree signal) -- but not
+// ctx's cancellation: it is cancelled only when this registration is (a
+// stop, delete or newer start of the name), or after maxDuration.
+//
+// The request ending (the hub's synchronous dispatch timeout and its
+// control-channel cancel frame, the control channel closing, a hub
+// restart, or a dropped HTTP request) therefore does not cancel a start
+// that has begun. A cancelled start is one the runtime treats as abandoned
+// and removes what it created (the Kubernetes runtime deletes the pod and
+// its Secrets), and the broker removes the agent's files; the request
+// ending says only that the caller stopped waiting, not that the agent is
+// unwanted (ptone/scion#4817).
+//
+// A hub that gives the create up still tears it down by sending a delete,
+// which cancels the start through the registration. Only together with the
+// hub keeping the agent on its own dispatch timeout (rather than rolling
+// the create back) does a slow start survive that timeout; on its own,
+// this keeps the start when the hub's rollback delete never arrives.
+func (ss *syncStart) bind(ctx context.Context, maxDuration time.Duration) (context.Context, func()) {
+	if maxDuration <= 0 {
+		maxDuration = defaultSyncStartMaxDuration
+	}
+	startCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), maxDuration)
 	stop := context.AfterFunc(ss.ctx, cancel)
 	return startCtx, func() {
 		stop()
@@ -171,10 +229,14 @@ func (ss *syncStart) bind(ctx context.Context) (context.Context, func()) {
 	}
 }
 
-// cancelled reports whether this registration has been cancelled: a stop or
-// delete of the agent, or a newer start of the name, reached it.
+// cancelled reports whether this create must not go on to start: a stop or
+// delete of the agent, or a newer start of the name, reached the
+// registration, or the request itself has ended. It is checked only before
+// the start runs (after buildStartContext, at handOff, and immediately
+// before bind); once bound, a start ends only with the registration (see
+// bind).
 func (ss *syncStart) cancelled() bool {
-	return ss.ctx.Err() != nil
+	return ss.ctx.Err() != nil || (ss.reqCtx != nil && ss.reqCtx.Err() != nil)
 }
 
 // takeName writes this start's launch marker for the slug, under the
@@ -227,9 +289,17 @@ func (ss *syncStart) ownsName() bool {
 	return launchMarkerMatches(ss.projectPath, ss.sharedWorkspace, ss.key.Slug, ss.owner)
 }
 
+// testHookNameRegistrationBeforeBegin, when set (tests only), runs in
+// beginNameRegistration immediately before the registry's Begin.
+var testHookNameRegistrationBeforeBegin func(key launchKey)
+
 // testHookCreateBeforeBuildStartContext, when set (tests only), runs in
 // createAgent immediately before buildStartContext.
 var testHookCreateBeforeBuildStartContext func(req CreateAgentRequest)
+
+// testHookSyncCreateBeforeBind, when set (tests only), runs in createAgent
+// immediately before the last cancelled check ahead of bind.
+var testHookSyncCreateBeforeBind func(req CreateAgentRequest)
 
 // testHookSyncStartFinish, when set (tests only), runs at the start of
 // syncStart.finish.
@@ -276,6 +346,29 @@ func (s *Server) cancelLocalLaunchForRun(key launchKey, agentID, runID string) b
 	return s.launchRegistry.CancelLocalFor(key, agentID, runID)
 }
 
+// cancelLocalLaunchRecord is cancelLocalLaunchForRun that returns the
+// record it woke (nil if none), for recancelLocalLaunch.
+func (s *Server) cancelLocalLaunchRecord(key launchKey, agentID, runID string) *launchRecord {
+	if s.launchRegistry == nil {
+		return nil
+	}
+	return s.launchRegistry.cancelLocalForExcept(key, agentID, runID, nil)
+}
+
+// recancelLocalLaunch is a stop's second launch cancel, run after its start
+// tracker wait with the same agent and run scope as its first: it wakes a
+// launch registered since then, leaving alone woken, the record the first
+// cancel already woke. An async start whose registration began after the
+// first cancel, and handed over to its launch before the tracker cancel
+// reached it, is ended here (design wave 3 §2 D-f). It
+// reports whether it woke a launch.
+func (s *Server) recancelLocalLaunch(key launchKey, agentID, runID string, woken *launchRecord) bool {
+	if s.launchRegistry == nil {
+		return false
+	}
+	return s.launchRegistry.cancelLocalForExcept(key, agentID, runID, woken) != nil
+}
+
 // writeCreateRegistrationError answers a create whose registration under
 // the agent's name failed (beginCreateRegistration, or an async create's
 // handOff): 400 for an invalid slug, a retryable 503 prior_start_in_progress
@@ -304,5 +397,47 @@ func (s *Server) writeCreateRegistrationError(w http.ResponseWriter, span trace.
 	default:
 		markAttemptFailed(http.StatusInternalServerError, "failed to create agent")
 		RuntimeError(w, "Failed to create agent: "+err.Error())
+	}
+}
+
+// refuseCancelledStart answers an async start's admission failure with 409
+// start_cancelled when the start's registration has been cancelled (a stop
+// or delete of the agent, or a newer start of the name), and reports
+// whether it did. A cancelled registration also cancels admission's
+// context, so the step that failed may have failed only because of it;
+// either way nothing was started, which is what start_cancelled tells the
+// hub (design wave 3 §2 D-AC12 (i)). Without a registration (a synchronous
+// start) it does nothing.
+func (s *Server) refuseCancelledStart(w http.ResponseWriter, span trace.Span, ss *syncStart, id, projectID, runID string) bool {
+	if ss == nil || !ss.cancelled() {
+		return false
+	}
+	s.writeStartRegistrationError(w, span, id, projectID, runID, errCreateStartCancelled)
+	return true
+}
+
+// writeStartRegistrationError answers an async start whose registration
+// under the agent's name failed (beginNameRegistration, or handOff at the
+// transfer), with the codes a create gets (writeCreateRegistrationError):
+// 400 for an invalid slug, a retryable 503 prior_start_in_progress (with
+// Retry-After) when an earlier start of the name did not finish within the
+// wait, and 409 start_cancelled when the registration was cancelled first.
+// A start has no dispatch attempt to mark.
+func (s *Server) writeStartRegistrationError(w http.ResponseWriter, span trace.Span, id, projectID, runID string, err error) {
+	s.agentLifecycleLog.Warn("Agent start refused before start",
+		"agent_id", id, "project_id", projectID, "run_id", runID, "error", err)
+	span.SetStatus(codes.Error, err.Error())
+	switch {
+	case errors.Is(err, errInvalidLaunchSlug):
+		ValidationError(w, "agent id must be a single path element", nil)
+	case errors.Is(err, errCreateSupersedeTimeout):
+		w.Header().Set("Retry-After", createSupersedeRetryAfter)
+		writeError(w, http.StatusServiceUnavailable, api.BrokerErrCodePriorStartInProgress,
+			"Failed to start agent: "+err.Error()+"; retry shortly", nil)
+	case errors.Is(err, errCreateStartCancelled):
+		writeError(w, http.StatusConflict, api.BrokerErrCodeStartCancelled,
+			"Failed to start agent: "+err.Error()+" (stopped, deleted, or superseded by a newer start of the same name)", nil)
+	default:
+		RuntimeError(w, "Failed to start agent: "+err.Error())
 	}
 }

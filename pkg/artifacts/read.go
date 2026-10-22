@@ -109,6 +109,11 @@ func canReadWith(ctx context.Context, host Host, a *Artifact, grants func() ([]G
 	if a.ExpiresAt != nil && !now.Before(*a.ExpiresAt) {
 		return false
 	}
+	// An attachment's scope is not a project: it has its own rule, and no
+	// project permission or grant ever applies to it.
+	if IsAttachmentScope(a.ScopeKind) {
+		return canReadAttachmentScope(ctx, host, a, kind, ref)
+	}
 	// 1. Credential.
 	if !host.Permits(ctx, a.ScopeRef, PermissionRead) {
 		return false
@@ -132,6 +137,41 @@ func canReadWith(ctx context.Context, host Host, a *Artifact, grants func() ([]G
 		return false
 	}
 	return grantAllows(ctx, host, a, gs, now, kind, ref, grantsForRead, PermissionRead, true)
+}
+
+// canReadAttachmentScope is canReadWith for a row of an attachment scope
+// (ptone/scion#4595), whose caller is (kind, ref). The checks run in a fixed
+// order, and the first that fails refuses:
+//
+//  1. The host implements MessageScopeHost; a host without it makes every
+//     attachment unreadable.
+//  2. MessageScopeHost.PermitsMessageRead: the caller's credential allows
+//     reading messages at all. Nothing below reaches past it.
+//  3. The attachment has a ready version.
+//  4. An upload: the caller is its uploader (owner and scope ref). A
+//     message attachment: MessageScopeHost.MayReadMessage for its message,
+//     asked now, so a reader who loses the message loses the attachment on
+//     the next request.
+//
+// Grants never count: an attachment is exactly as readable as its message.
+func canReadAttachmentScope(ctx context.Context, host Host, a *Artifact, kind, ref string) bool {
+	mh, ok := host.(MessageScopeHost)
+	if !ok {
+		return false
+	}
+	if !mh.PermitsMessageRead(ctx) {
+		return false
+	}
+	if a.CurrentSeq == 0 {
+		return false
+	}
+	switch a.ScopeKind {
+	case ScopeKindUpload:
+		return kind == a.OwnerKind && ref == a.OwnerRef && a.ScopeRef == PrincipalRef(kind, ref)
+	case ScopeKindMessage:
+		return a.ScopeRef != "" && mh.MayReadMessage(ctx, a.ScopeRef)
+	}
+	return false
 }
 
 // Permission sets a grant must carry for each kind of access. A review
@@ -190,6 +230,7 @@ func (s *Service) readableArtifact(w http.ResponseWriter, r *http.Request, id st
 	}
 	a, err := b.store.GetArtifact(r.Context(), id)
 	if errors.Is(err, ErrNotFound) {
+		s.logHidden(r, &Artifact{ID: id}, logReasonNotFound)
 		writeNotFound(w)
 		return b, nil, false
 	}
@@ -205,6 +246,7 @@ func (s *Service) readableArtifact(w http.ResponseWriter, r *http.Request, id st
 		return b, nil, false
 	}
 	if !readable {
+		s.logHidden(r, a, logReasonHidden)
 		writeNotFound(w)
 		return b, nil, false
 	}
@@ -234,6 +276,26 @@ func readyVersion(w http.ResponseWriter, r *http.Request, b backend, a *Artifact
 	return v, true
 }
 
+// scopeDeleted reports whether a's home project no longer exists, by the
+// rule the list marks rows with (markDeletedScopes): only a project scope
+// can be deleted, and a project the ScopeChecker does not answer for, or a
+// host without one, counts as existing. A failed check is logged and
+// reported as false: the field is advisory, and the GET it rides on must
+// not fail over it.
+func (s *Service) scopeDeleted(ctx context.Context, a *Artifact) bool {
+	checker, ok := s.host.(ScopeChecker)
+	if !ok || a.ScopeKind != ScopeKindProject {
+		return false
+	}
+	exists, err := checker.ScopesExist(ctx, []string{a.ScopeRef})
+	if err != nil {
+		slog.WarnContext(ctx, "artifacts: home project check failed", "artifact", a.ID, "error", err)
+		return false
+	}
+	e, known := exists[a.ScopeRef]
+	return known && !e
+}
+
 // handleGetArtifact serves the metadata of an artifact and its current
 // version.
 func (s *Service) handleGetArtifact(w http.ResponseWriter, r *http.Request, id string) {
@@ -241,7 +303,7 @@ func (s *Service) handleGetArtifact(w http.ResponseWriter, r *http.Request, id s
 	if !ok {
 		return
 	}
-	resp := ArtifactResponse{Artifact: artifactInfo(a)}
+	resp := ArtifactResponse{Artifact: artifactInfo(a), ScopeDeleted: s.scopeDeleted(r.Context(), a)}
 	if !s.capabilities(w, r, b, a, &resp) {
 		return
 	}

@@ -96,13 +96,15 @@ func TestPutServerConfigDB_ConflictReportsWrittenKeysOnly(t *testing.T) {
 }
 
 // For a key that returns to the startup value when unset, GET shows the
-// value the hub runs with; a stored value is shown as stored.
+// value the hub runs with; a stored value is shown as stored. image_registry
+// shows this replica's file tier while no value is saved
+// (ptone/scion#3916).
 func TestGetServerConfigDB_ShowsRunningValueForUnsetKeys(t *testing.T) {
 	ctx := context.Background()
 	srv, _, ops := newTestDBServer(t)
 	srv.config.SoftDeleteRetention = 72 * time.Hour
 	srv.config.SoftDeleteRetainFiles = true
-	srv.config.MaintenanceConfig.ImageRegistry = "boot.example.com/scion"
+	setTestImageRegistryFileTier(t, ops, "boot.example.com/scion", nil)
 	srv.recordStartupLayer1Values()
 
 	_, err := ops.Update(ctx, "lifecycle", json.RawMessage(`{"auto_suspend_stalled":true}`), "admin", -1, "managed")
@@ -130,18 +132,18 @@ func TestGetServerConfigDB_ShowsRunningValueForUnsetKeys(t *testing.T) {
 	assert.Equal(t, "db.example.com/scion", resp.ImageRegistry)
 }
 
-// echoTestServer is a DB-backed server whose startup soft-delete and image
-// registry values are set, with managed lifecycle and endpoints rows that
-// leave those keys unset.
+// echoTestServer is a DB-backed server whose startup soft-delete values and
+// file-tier image registry are set, with managed lifecycle and endpoints
+// rows that leave those keys unset.
 func echoTestServer(t *testing.T) (*Server, *fakeHubSettingStore, *OperationalSettings) {
 	t.Helper()
 	ctx := context.Background()
 	srv, fakeStore, ops := newTestDBServer(t)
 	srv.config.SoftDeleteRetention = 72 * time.Hour
 	srv.config.SoftDeleteRetainFiles = true
-	// As if from this replica's own environment
-	// (SCION_MAINTENANCE_IMAGE_REGISTRY).
-	srv.config.MaintenanceConfig.ImageRegistry = "replica-env.example.com/scion"
+	// As if from this replica's own bootstrap (settings.yaml or
+	// SCION_SERVER_IMAGEREGISTRY).
+	setTestImageRegistryFileTier(t, ops, "replica-env.example.com/scion", nil)
 	srv.recordStartupLayer1Values()
 	_, err := ops.Update(ctx, "lifecycle", json.RawMessage(`{"auto_suspend_stalled":true}`), "admin", -1, "managed")
 	require.NoError(t, err)

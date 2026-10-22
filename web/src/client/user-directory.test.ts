@@ -111,6 +111,12 @@ describe('searchUsers', () => {
     expect(peekUser('u9')?.email).toBe('zed@example.com');
   });
 
+  it('passes a status filter to the hub when given one', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(json({ users: [] }));
+    await searchUsers('zed', { status: 'active' });
+    expect(urls()).toEqual(['/api/v1/users?search=zed&limit=20&status=active']);
+  });
+
   it('an empty query asks nothing', async () => {
     expect(await searchUsers('   ')).toEqual([]);
     expect(apiFetch).not.toHaveBeenCalled();

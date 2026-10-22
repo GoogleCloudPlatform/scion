@@ -128,7 +128,7 @@ describe('artifact list', () => {
   });
 
   it('has an empty state with a button, one sentence, and the agent command only in the help', async () => {
-    const { el } = await mountList({});
+    const { el } = await mountList({ 'mine=1': { artifacts: [], canCreate: true } });
     const empty = el.shadowRoot!.querySelector('.empty')!;
     expect(empty.querySelector('h3')!.textContent).toBe('No artifacts in this project yet');
     expect(empty.querySelectorAll(':scope > p')).toHaveLength(1);
@@ -165,6 +165,27 @@ describe('artifact list', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('shows New artifact only when the list says the caller may publish here (ptone/scion#4584)', async () => {
+    const newButtons = (el: ListElement): string[] =>
+      Array.from(el.shadowRoot!.querySelectorAll('sl-button'))
+        .map((b) => b.textContent!.trim())
+        .filter((t) => t === 'New artifact');
+    const { el: empty } = await mountList({ 'mine=1': { artifacts: [] } });
+    expect(empty.shadowRoot!.querySelector('.empty h3')).not.toBeNull();
+    expect(newButtons(empty)).toEqual([]);
+    empty.remove();
+
+    const { el: listed } = await mountList({ 'mine=1': { artifacts: [item('a')] } });
+    expect(listed.shadowRoot!.querySelectorAll('tbody tr').length).toBeGreaterThan(0);
+    expect(newButtons(listed)).toEqual([]);
+    listed.remove();
+
+    const { el: allowed } = await mountList({
+      'mine=1': { artifacts: [item('a')], canCreate: true },
+    });
+    expect(newButtons(allowed)).toEqual(['New artifact']);
   });
 });
 

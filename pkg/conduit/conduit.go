@@ -112,6 +112,11 @@ var (
 	// ErrDraining is returned by OpenStream on a session that has sent or
 	// received GoAway. Open the stream on the replacement session.
 	ErrDraining = errors.New("conduit: session draining")
+	// ErrRequestNotSent is returned by Call, together with
+	// ErrSessionClosed, when the session ended before the request's frame
+	// was handed to the transport: the peer never saw the request, so
+	// the caller may send it on another session whatever its kind.
+	ErrRequestNotSent = errors.New("conduit: request not sent")
 	// ErrKeepaliveTimeout ends a session whose peer has been silent for
 	// longer than the pong wait.
 	ErrKeepaliveTimeout = errors.New("conduit: keepalive timeout")
@@ -179,6 +184,22 @@ type Resizable interface {
 	Resizes() <-chan WindowSize
 }
 
+// FeatureStreamRenewal is the Hello capabilities feature of a target that
+// enforces stream authorization deadlines and accepts renewal grants that
+// carry the stream's kind and params (design v2.21.26 §3.5, "Target-side
+// deadlines"). A target advertising an earlier version counts as lacking
+// renewal.
+const FeatureStreamRenewal = "stream_renewal.v2"
+
+// StreamRenewer is implemented by every Stream the relay side opens toward
+// a target, local or bridged to another relay. Renew sends the hub's
+// renewal for the stream, AuthRefresh{stream_id, credential}, toward the
+// target, where credential is a renewal grant. Only the relay side sends
+// renewals.
+type StreamRenewer interface {
+	Renew(credential []byte) error
+}
+
 // SessionInfo describes a session. Field values use the canonical strings
 // of contracts §2.
 type SessionInfo struct {
@@ -220,6 +241,14 @@ type LocalSession interface {
 	// The relay validates credential refreshes one at a time; if several
 	// arrive while one is being validated, only the latest is kept.
 	RefreshAuth(credential []byte, streamID uint32) error
+	// NotifyGrantKeysChanged sends GrantKeysChanged{} from the relay side:
+	// the hub's published grant keys changed, and the target should fetch
+	// them again over its own authenticated channel (design v2.21.27 §3.5,
+	// Key-set freshness). The frame carries no keys. It never waits on
+	// the session: with the outbound buffer full it returns
+	// ErrBufferBudget and the session is left as it is. On a dialer it
+	// returns ErrNotRelaySide and sends nothing.
+	NotifyGrantKeysChanged() error
 	// Stats returns scheduler and buffer counters.
 	Stats() Stats
 }

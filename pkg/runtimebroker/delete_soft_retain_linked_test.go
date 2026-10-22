@@ -60,7 +60,7 @@ func newRealManagerScopeServer(t *testing.T, entries *[]api.AgentInfo) *Server {
 	cfg := DefaultServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
-	return New(cfg, agent.NewManager(rt), rt)
+	return New(cfg, agent.NewManager(rt), rt, config.RuntimeBuildRecord{})
 }
 
 // writeLinkedAgentFiles puts an agent-info.json in the agent's home and a

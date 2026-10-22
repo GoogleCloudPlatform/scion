@@ -540,6 +540,11 @@ type ScionConfig struct {
 	// Skills declares skill references to resolve at provision time.
 	Skills []SkillReference `json:"skills,omitempty" yaml:"skills,omitempty" koanf:"skills"`
 
+	// AgentPlugins declares Agent Plugins bundles to install natively into the
+	// harness (experiment hub.agent_plugins). Phase 1 resolves only
+	// template-relative paths.
+	AgentPlugins []AgentPluginReference `json:"agent_plugins,omitempty" yaml:"agent_plugins,omitempty" koanf:"agent_plugins"`
+
 	// Agnostic template fields
 	AgentInstructions    string `json:"agent_instructions,omitempty" yaml:"agent_instructions,omitempty"`
 	SystemPrompt         string `json:"system_prompt,omitempty" yaml:"system_prompt,omitempty"`
@@ -575,6 +580,18 @@ type ScionConfig struct {
 	// workspace resolution or an enclosing repo root, and so delete skips
 	// worktree/branch cleanup for it.
 	EmptyPerAgentWorkspace bool `json:"empty_per_agent_workspace,omitempty" yaml:"empty_per_agent_workspace,omitempty"`
+
+	// ClearedFields lists the config paths the agent's owner cleared after
+	// the agent was created, so the inherited value applies again
+	// (ptone/scion#3906). The Hub records it on the agent's live inline
+	// config and sends it with every start; a Runtime Broker removes each
+	// path from the agent's persisted config after merging the inline
+	// config over it (see ClearableConfigPath and ApplyClearedFields), and
+	// never writes the list itself to disk. It is wire-only: it is ignored
+	// if a template sets it (yaml:"-", and config.MergeScionConfig does not
+	// carry it). A broker that ignores it starts the agent exactly as before
+	// the field existed.
+	ClearedFields []string `json:"cleared_fields,omitempty" yaml:"-"`
 
 	// Info contains persisted metadata about the agent
 	Info *AgentInfo `json:"-" yaml:"-"`
@@ -646,7 +663,7 @@ type AgentInfo struct {
 	ID            string `json:"id,omitempty"`          // Hub UUID (database primary key, globally unique)
 	Slug          string `json:"slug,omitempty"`        // URL-safe slug identifier (unique per project)
 	ContainerID   string `json:"containerId,omitempty"` // Runtime container ID (ephemeral, runtime-assigned)
-	RunID         string `json:"runId,omitempty"`       // Per-run identity from the LabelRunID label; empty for pre-run-ID entries (ptone/scion#2550). In agent-info.json: the run that owns the agent's files (ptone/scion#2675); List never fills RunID from agent-info.json, so on the wire it is always the label
+	RunID         string `json:"runId,omitempty"`       // Per-run identity from the LabelRunID label; empty for pre-run-ID entries (ptone/scion#2550). The run that owns the agent's files (ptone/scion#2675) is recorded in the host-owned per-agent host state file, not here (ptone/scion#4771); List never fills RunID from agent-info.json, so on the wire it is always the label
 	Name          string `json:"name"`                  // Human-friendly display name
 	Template      string `json:"template"`
 	TemplateHash  string `json:"templateHash,omitempty"`  // Content hash of a template loaded from a content-addressed cache dir; when set, Template is a display name only and is never looked up by name
@@ -672,9 +689,11 @@ type AgentInfo struct {
 	// from the project directory. The Docker, Podman, Apple and Kubernetes
 	// List fill it from the container's scion.project_id label, which
 	// carries the Hub project ID; Cloud Run Sandbox List fills it from its
-	// state entry, which records the same value. Cloud Run List leaves it
-	// empty. The two sources can differ; callers that need the Hub project
-	// ID should read the scion.project_id label (ptone/scion#3020).
+	// state entry, which records the same value, and Cloud Run List from
+	// the instance's GCP-sanitized scion_project_id label (a Hub project ID
+	// is unchanged by the sanitizing). The two sources can differ; callers
+	// that need the Hub project ID should read the scion.project_id label
+	// (ptone/scion#3020).
 	ProjectID   string `json:"projectId,omitempty"`
 	ProjectPath string `json:"projectPath,omitempty"` // Filesystem path (solo mode)
 
@@ -687,7 +706,7 @@ type AgentInfo struct {
 	Phase           string       `json:"phase,omitempty"`           // Lifecycle phase (created, provisioning, running, stopped, error)
 	Activity        string       `json:"activity,omitempty"`        // Runtime activity (working, thinking, executing, waiting_for_input, completed)
 	ExitCode        *int         `json:"exitCode,omitempty"`        // Structured exit code from runtime (nil = unknown)
-	ExitReason      string       `json:"exitReason,omitempty"`      // Terminal reason (see state.ExitReason), e.g. "crashed", "preempted", "oom_killed"
+	ExitReason      string       `json:"exitReason,omitempty"`      // Terminal reason (see state.ExitReason), e.g. "crashed", "preempted", "oom_killed"; "signaled" is agent-reported
 	Detail          *AgentDetail `json:"detail,omitempty"`          // Freeform context about the current activity
 
 	// Runtime configuration
@@ -791,6 +810,16 @@ type SkillReference struct {
 	// Scope indicates the injection source of this skill reference.
 	// Valid values: "hub", "user", "project", "template", "platform", "" (empty = lowest precedence).
 	// Used for destination-name collision resolution: higher-scope skills win.
+	Scope string `json:"scope,omitempty" yaml:"scope,omitempty" koanf:"scope"`
+}
+
+// AgentPluginReference declares an Agent Plugins bundle to install natively.
+// Phase 1: Path is template-relative only (relative to the directory of the
+// template whose scion-agent.yaml declares it).
+type AgentPluginReference struct {
+	Path     string `json:"path" yaml:"path" koanf:"path"`
+	Optional bool   `json:"optional,omitempty" yaml:"optional,omitempty" koanf:"optional"`
+	// Scope is annotated by MergeScionConfig ("template"); informational in Phase 1.
 	Scope string `json:"scope,omitempty" yaml:"scope,omitempty" koanf:"scope"`
 }
 
@@ -954,8 +983,8 @@ type runIDContextKey struct{}
 
 // ContextWithRunID returns a new context carrying the run ID of the start
 // that is provisioning the agent (ptone/scion#2550), so provisioning can
-// record it in agent-info.json as the run that owns the agent's files
-// (ptone/scion#2675). An empty runID returns ctx unchanged.
+// record it in the host state file as the run that owns the agent's files
+// (ptone/scion#2675, ptone/scion#4771). An empty runID returns ctx unchanged.
 func ContextWithRunID(ctx context.Context, runID string) context.Context {
 	if runID == "" {
 		return ctx
@@ -1195,13 +1224,16 @@ func TemplateNameFromContext(ctx context.Context) string {
 // AutoExposePorts is the Hub's auto-expose-ports default
 // (SCION_AUTO_EXPOSE_PORTS). It is the lowest env tier: buildAgentEnv applies
 // it only when no higher tier (hub-resolved env, template, harness-config
-// env, scion-agent.json) left the key set. Unlike the three limit fields it is
-// sent on start and restart as well as create, so a change to the Hub default
-// reaches an agent at its next start.
+// env, scion-agent.json) left the key set. It is sent on start and restart as
+// well as create, so a change to the Hub default reaches an agent at its next
+// start.
 //
-// Resources are also sent on start and restart: the broker applies them per
-// start and never persists them into scion-agent.json (ptone/scion#4561). A
-// broker on this version that talks to an older Hub gets them only on create.
+// Resources and the three limit fields are also sent on start and restart:
+// the broker applies them per start and never persists them into
+// scion-agent.json (ptone/scion#4561, ptone/scion#623). A broker on this
+// version that talks to an older Hub gets resources only on create, and the
+// limits only on create (so after a restart the broker's own settings.yaml
+// limit defaults apply instead).
 type HubAgentDefaults struct {
 	MaxTurns        int           `json:"maxTurns,omitempty"`
 	MaxModelCalls   int           `json:"maxModelCalls,omitempty"`
@@ -1441,6 +1473,13 @@ type StartOptions struct {
 	// the template env fallback (ptone/scion#4524). Unlike Template, it never
 	// affects image, harness-config or agent config resolution.
 	TemplateEnvSource string
+
+	// MoveReincarnationID, on the provision of a forced move (the
+	// fresh-agent-dir expectation), is the move's reincarnation ID. The
+	// provision writes it into the agent directory it creates, as the move
+	// marker, before anything else; a rollback delete removes only
+	// directories marked with it.
+	MoveReincarnationID string
 }
 
 // KubernetesBlockIdentity describes how a GCP identity "block" pod runs on
@@ -1454,9 +1493,11 @@ type KubernetesBlockIdentity struct {
 // ResourceHandle identifies one runtime resource created during a launch
 // (design t1-async-create-v11.md §3.8.4), reported by the runtime via
 // StartOptions.OnResourceCreated after each true create. UID is the
-// identity a cleanup deletes by: the Kubernetes object UID, or the
-// container ID for container runtimes. Namespace is empty for runtimes
-// that have no namespaces.
+// identity a cleanup deletes by: the Kubernetes object UID, the
+// container ID for container runtimes, or, for Cloud Run instances and
+// sandboxes, the launch's run ID (scion.run_id), checked against the
+// resource's run label (a sandbox's: its state entry's) before deleting.
+// Namespace is empty for runtimes that have no namespaces.
 type ResourceHandle struct {
 	Kind      string // one of the ResourceKind* constants
 	Namespace string
@@ -1522,6 +1563,14 @@ const (
 	ResourceKindSecretProviderClass = "secretproviderclass"
 	ResourceKindPod                 = "pod"
 	ResourceKindContainer           = "container"
+	// ResourceKindSandbox is a cloudrun-sandbox sandbox; its handle's UID
+	// is the launch's run ID, not a container ID.
+	ResourceKindSandbox = "sandbox"
+	// ResourceKindCloudRunInstance is a Cloud Run Instances API instance;
+	// its handle's Namespace is the runtime's parent
+	// (projects/<p>/locations/<l>), Name the instance ID and UID the
+	// launch's run ID.
+	ResourceKindCloudRunInstance = "cloudrun_instance"
 )
 
 type StatusEvent struct {

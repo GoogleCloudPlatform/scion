@@ -27,6 +27,9 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { loadAdminStatus } from '../../client/admin-status.js';
+import { stateManager } from '../../client/state.js';
+import { canReissueAllScopes } from '../../lib/admin-permissions.js';
 import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { showToast } from '../../utils/toast.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
@@ -60,9 +63,23 @@ interface MaintenanceOperationWithRun extends MaintenanceOperation {
   lastRun?: MaintenanceRun;
 }
 
+/**
+ * Last systemd unit check of Rebuild from git, from the unitStatus field of
+ * GET /api/v1/admin/maintenance/operations. Only match and drift are stored.
+ */
+interface UnitDriftStatus {
+  status: 'match' | 'drift';
+  checkedAt: string;
+  commit: string;
+  branch: string;
+  service: string;
+  summary?: string[];
+}
+
 interface MaintenanceResponse {
   migrations: MaintenanceOperation[] | null;
   operations: MaintenanceOperationWithRun[] | null;
+  unitStatus?: UnitDriftStatus;
 }
 
 interface UpdateCommitInfo {
@@ -114,13 +131,149 @@ interface MaintenanceStateResponse {
 }
 
 /**
+ * One failed agent in a reset-auth-all result. For a classified failure
+ * `error` is a plain reason, not the raw error; `code` names the category.
+ */
+interface ResetAuthAllFailure {
+  id: string;
+  name: string;
+  error: string;
+  /** Failure category, e.g. delegation_creator_missing or agent_not_in_standing. */
+  code?: string;
+  /** Deny cause of a structural delegation denial. */
+  cause?: string;
+  /** Creator (depth 1) or ancestor whose delegation is missing. */
+  ancestor_id?: string;
+  ancestor_depth?: number;
+}
+
+/**
  * Result of POST /api/v1/admin/agents/reset-auth-all. The hub sends null
- * for an empty list.
+ * for an empty list. failed_by_code counts the failures per code, with
+ * "unclassified" for failures that carry none.
  */
 interface ResetAuthAllResult {
   succeeded: { id: string; name: string }[] | null;
-  failed: { id: string; name: string; error: string }[] | null;
+  failed: ResetAuthAllFailure[] | null;
   total: number;
+  failed_by_code?: Record<string, number>;
+}
+
+/** One agent's outcome in a bulk scope re-issue. */
+interface ScopeReissueAgent {
+  id: string;
+  name: string;
+  project_id?: string;
+  depth?: number;
+  /** changed | noop | refused | push_failed */
+  outcome: string;
+  cause?: string;
+  added?: string[] | null;
+  removed?: string[] | null;
+  role_before?: string;
+  role_after?: string;
+  op_id?: string;
+  dispatch_error?: string;
+  /**
+   * Set on a changed agent whose new credential was delivered but whose
+   * running agent did not confirm the reload.
+   */
+  reload_unconfirmed?: string;
+}
+
+/** An agent named in one of the bulk scope re-issue result lists. */
+interface ScopeReissueRef {
+  id: string;
+  name: string;
+  cause?: string;
+}
+
+/**
+ * Result of POST /api/v1/admin/agents/reset-auth-all with
+ * {"reissue_scopes": true}. The hub sends null for an empty list.
+ */
+interface ScopeReissueAllResult {
+  batch_op_id: string;
+  dry_run: boolean;
+  total: number;
+  succeeded: ScopeReissueRef[] | null;
+  noop: ScopeReissueRef[] | null;
+  refused: ScopeReissueRef[] | null;
+  push_failed: ScopeReissueRef[] | null;
+  agents: ScopeReissueAgent[] | null;
+  depth_unresolved: string[] | null;
+  batch_audit_recorded: boolean;
+}
+
+/** The number of agents whose reload the running agent did not confirm. */
+function reloadUnconfirmedCount(r: ScopeReissueAllResult): number {
+  return (r.agents ?? []).filter((a) => !!a.reload_unconfirmed).length;
+}
+
+/** The counts line of a scope re-issue result, worded as the CLI does. */
+function scopeReissueSummary(r: ScopeReissueAllResult): string {
+  const verb = r.dry_run ? 'would change' : 'changed';
+  return (
+    `${r.total} agents: ${r.succeeded?.length ?? 0} ${verb}, ` +
+    `${r.noop?.length ?? 0} unchanged, ${r.refused?.length ?? 0} refused, ` +
+    `${r.push_failed?.length ?? 0} token not delivered, ` +
+    `${reloadUnconfirmedCount(r)} reload unconfirmed`
+  );
+}
+
+/** Per-agent lines for every agent whose outcome is not noop. */
+function scopeReissueAgentLines(r: ScopeReissueAllResult): string {
+  const lines: string[] = [];
+  for (const a of r.agents ?? []) {
+    if (a.outcome === 'noop') continue;
+    lines.push(`${a.name || a.id} (${a.id}) ${a.outcome}${a.cause ? `: ${a.cause}` : ''}`);
+    if (a.role_after && a.role_before !== a.role_after) {
+      lines.push(`  role:     ${a.role_before ?? ''} -> ${a.role_after}`);
+    }
+    if (a.added?.length) lines.push(`  added:    ${a.added.join(', ')}`);
+    if (a.removed?.length) lines.push(`  removed:  ${a.removed.join(', ')}`);
+    if (a.dispatch_error) lines.push(`  token not delivered: ${a.dispatch_error}`);
+    if (a.reload_unconfirmed) lines.push(`  reload unconfirmed: ${a.reload_unconfirmed}`);
+  }
+  return lines.join('\n');
+}
+
+/** The note for agents the bulk run could not order by delegation depth. */
+function unresolvedNote(n: number): string {
+  return (
+    `${n} agents could not be ordered (their delegation record could not be read); ` +
+    'see their results below.'
+  );
+}
+
+/** Display labels for reset-auth-all failure codes. */
+const RESET_AUTH_CODE_LABELS: Record<string, string> = {
+  delegation_creator_missing: 'Creator delegation missing',
+  delegation_own_missing: 'Own delegation missing',
+  delegation_ceiling: 'Delegation chain invalid',
+  agent_not_in_standing: 'Not in good standing',
+  runtime_unavailable: 'Runtime unavailable',
+  reload_unconfirmed: 'Reload unconfirmed',
+  internal_error: 'Internal error',
+  unclassified: 'Other',
+};
+
+function resetAuthCodeLabel(code: string): string {
+  return RESET_AUTH_CODE_LABELS[code] ?? code;
+}
+
+/** The per-category failure counts, sorted by code, on one line. */
+function resetAuthCategorySummary(result: ResetAuthAllResult): string {
+  return Object.entries(result.failed_by_code ?? {})
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([code, n]) => `${resetAuthCodeLabel(code)}: ${n}`)
+    .join(' \u00b7 ');
+}
+
+/** One failed agent: its name, the reason and, when coded, the category. */
+function resetAuthFailureLine(f: ResetAuthAllFailure): string {
+  const category = f.code ? ` [${resetAuthCodeLabel(f.code)}]` : '';
+  return `${f.name || f.id}: ${f.error}${category}`;
 }
 
 @customElement('scion-page-admin-maintenance')
@@ -155,6 +308,13 @@ export class ScionPageAdminMaintenance extends LitElement {
   /** Whether a run request is in-flight. */
   @state()
   private runInProgress = false;
+
+  /**
+   * Open state of the completed-migrations group. Kept on the component so it
+   * survives reloads that swap the page content for the loading spinner.
+   */
+  @state()
+  private completedMigrationsOpen = false;
 
   /** Polling timer for running operations/migrations. */
   private pollTimer: ReturnType<typeof setInterval> | null = null;
@@ -199,6 +359,29 @@ export class ScionPageAdminMaintenance extends LitElement {
   @state()
   private resetAuthAllResult: ResetAuthAllResult | null = null;
 
+  /**
+   * Whether the scope re-issue controls are shown: the user is a
+   * super-admin per the shared admin status. The hub stays the authority.
+   */
+  @state()
+  private canReissueScopes = false;
+
+  /** Whether a scope re-issue request (dry run or apply) is in-flight. */
+  @state()
+  private reissueLoading = false;
+
+  /** Result of the last scope re-issue request. */
+  @state()
+  private reissueResult: ScopeReissueAllResult | null = null;
+
+  /** Error of the last scope re-issue request. */
+  @state()
+  private reissueError: string | null = null;
+
+  /** Whether the apply confirmation dialog is open. */
+  @state()
+  private reissueConfirmOpen = false;
+
   /** Deployment tier: "binary" or "source" (default). */
   @state()
   private deploymentTier: 'binary' | 'source' = 'source';
@@ -206,6 +389,10 @@ export class ScionPageAdminMaintenance extends LitElement {
   /** Stored update-available notification (from scheduled check). */
   @state()
   private updateAvailable: UpdateAvailableResponse | null = null;
+
+  /** Last systemd unit check of Rebuild from git (null when none). */
+  @state()
+  private unitStatus: UnitDriftStatus | null = null;
 
   /** Whether an update-binary operation is being triggered. */
   @state()
@@ -335,6 +522,27 @@ export class ScionPageAdminMaintenance extends LitElement {
       gap: 1rem;
     }
 
+    .card-list + .completed-migrations {
+      display: block;
+      margin-top: 1rem;
+    }
+
+    .completed-migrations::part(base) {
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: var(--scion-radius, 0.5rem);
+    }
+
+    .completed-migrations::part(header) {
+      font-size: 0.9375rem;
+      font-weight: 600;
+      color: var(--scion-text, #1e293b);
+      padding: 0.875rem 1rem;
+    }
+
+    .completed-migrations::part(content) {
+      padding: 0 1rem 1rem 1rem;
+    }
+
     .card {
       border: 1px solid var(--scion-border, #e2e8f0);
       border-radius: var(--scion-radius, 0.5rem);
@@ -402,6 +610,22 @@ export class ScionPageAdminMaintenance extends LitElement {
       align-items: center;
       justify-content: space-between;
       margin-top: 0.75rem;
+    }
+
+    .reissue-scopes {
+      margin-top: 1rem;
+      padding-top: 0.75rem;
+      border-top: 1px solid var(--scion-border, #e2e8f0);
+    }
+
+    .reissue-scopes .card-footer {
+      margin-top: 0;
+      margin-bottom: 0.5rem;
+    }
+
+    .reissue-actions {
+      display: inline-flex;
+      gap: 0.5rem;
     }
 
     /* -- Result log ------------------------------------------------------- */
@@ -670,6 +894,26 @@ export class ScionPageAdminMaintenance extends LitElement {
       font-weight: 600;
     }
 
+    .unit-drift-banner {
+      align-items: flex-start;
+      border-color: var(--sl-color-warning-300, #fcd34d);
+      background: var(--sl-color-warning-50, #fffbeb);
+    }
+
+    .unit-drift-banner sl-icon {
+      color: var(--sl-color-warning-600, #d97706);
+    }
+
+    .unit-drift-banner .unit-drift-summary {
+      margin-top: 0.5rem;
+    }
+
+    .unit-drift-banner .unit-drift-note {
+      display: block;
+      margin-top: 0.25rem;
+      font-size: 0.8125rem;
+    }
+
     .update-available-banner .banner-actions {
       display: flex;
       gap: 0.5rem;
@@ -712,6 +956,16 @@ export class ScionPageAdminMaintenance extends LitElement {
     void this.loadData();
     void this.fetchMaintenanceState();
     void this.fetchUpdateAvailable();
+    void this.loadReissueCapability();
+  }
+
+  private async loadReissueCapability(): Promise<void> {
+    try {
+      const status = await loadAdminStatus(stateManager.getCurrentUserId());
+      this.canReissueScopes = canReissueAllScopes(status);
+    } catch {
+      this.canReissueScopes = false;
+    }
   }
 
   override disconnectedCallback(): void {
@@ -740,13 +994,17 @@ export class ScionPageAdminMaintenance extends LitElement {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled: newValue }),
       });
-      if (res.ok) {
-        const data = (await res.json()) as MaintenanceStateResponse;
-        this.maintenanceEnabled = data.enabled;
-        this.maintenanceBreakGlass = data.break_glass === true;
+      if (!res.ok) {
+        throw new Error(await extractApiError(res, `HTTP ${res.status}`));
       }
-    } catch {
-      // Silently ignore — keep current state on failure.
+      const data = (await res.json()) as MaintenanceStateResponse;
+      this.maintenanceEnabled = data.enabled;
+      this.maintenanceBreakGlass = data.break_glass === true;
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Failed to update maintenance mode');
+      // The toggle renders from maintenanceEnabled, which is set only from a
+      // server response; re-read it so the toggle shows the saved state.
+      await this.fetchMaintenanceState();
     }
   }
 
@@ -834,6 +1092,10 @@ export class ScionPageAdminMaintenance extends LitElement {
       }
       if (JSON.stringify(this.operations) !== JSON.stringify(newOperations)) {
         this.operations = newOperations;
+      }
+      const newUnitStatus = data.unitStatus ?? null;
+      if (JSON.stringify(this.unitStatus) !== JSON.stringify(newUnitStatus)) {
+        this.unitStatus = newUnitStatus;
       }
 
       // Start polling if any migration or operation run is active.
@@ -961,7 +1223,9 @@ export class ScionPageAdminMaintenance extends LitElement {
       this.startPolling();
     } catch (err) {
       console.error('Failed to start migration:', err);
-      this.error = err instanceof Error ? err.message : 'Failed to start migration';
+      // The page stays as it is; a failed action is reported as a toast.
+      // The dialog stays open so the user can retry or cancel.
+      showToast(err instanceof Error ? err.message : 'Failed to start migration');
     } finally {
       this.runInProgress = false;
     }
@@ -995,7 +1259,9 @@ export class ScionPageAdminMaintenance extends LitElement {
       this.startPolling();
     } catch (err) {
       console.error('Failed to start operation:', err);
-      this.error = err instanceof Error ? err.message : 'Failed to start operation';
+      // The page stays as it is; a failed action is reported as a toast.
+      // The dialog stays open so the user can retry or cancel.
+      showToast(err instanceof Error ? err.message : 'Failed to start operation');
     } finally {
       this.runInProgress = false;
     }
@@ -1086,6 +1352,7 @@ export class ScionPageAdminMaintenance extends LitElement {
           ? this.renderError()
           : this.renderContent()}
       ${this.renderRunDialog()} ${this.renderRunDetailDialog()} ${this.renderRestartDialog()}
+      ${this.renderReissueConfirmDialog()}
     `;
   }
 
@@ -1115,8 +1382,48 @@ export class ScionPageAdminMaintenance extends LitElement {
 
   private renderContent() {
     return html`
-      ${this.renderUpdateAvailableBanner()} ${this.renderMaintenanceMode()}
-      ${this.renderQuickActions()} ${this.renderMigrations()} ${this.renderOperations()}
+      ${this.renderUpdateAvailableBanner()} ${this.renderUnitDriftBanner()}
+      ${this.renderMaintenanceMode()} ${this.renderQuickActions()} ${this.renderMigrations()}
+      ${this.renderOperations()}
+    `;
+  }
+
+  /**
+   * Banner shown while the last Rebuild from git found the installed systemd
+   * unit different from the template. It carries the full remediation, as the
+   * run log may be missing or superseded. All values are text bindings.
+   */
+  private renderUnitDriftBanner() {
+    const st = this.unitStatus;
+    if (!st || st.status !== 'drift') {
+      return nothing;
+    }
+    const where = st.commit ? `commit ${st.commit}` : 'the checked-out commit';
+    const rev = st.branch ? `${where} on branch ${st.branch}` : where;
+    const checked = this.formatDateTime(st.checkedAt) || 'unknown time';
+    const summary = st.summary ?? [];
+    return html`
+      <div class="update-available-banner unit-drift-banner">
+        <sl-icon name="exclamation-triangle"></sl-icon>
+        <span class="banner-text">
+          <strong>Re-provision needed:</strong> the installed systemd unit for ${st.service} differs
+          from the template (checked ${checked}). Rebuild from git updates the binary only.
+          <br />
+          To apply the template, run <code>scripts/starter-hub/gce-start-hub.sh --full</code> from
+          the workstation and checkout used to provision this hub, at ${rev}, with the same flags
+          and environment used at provisioning (for example --no-tls, HUB_BASE_URL). Running it
+          without the original flags can reconfigure the hub (for example enable TLS on a --no-tls
+          hub). --full also re-applies settings.yaml, hub.env, the Caddyfile and the sudoers rules
+          from that workstation, then restarts the hub.
+          <br />
+          Intentional local changes belong in a drop-in (${st.service}.d), which is not compared.
+          This notice clears after a Rebuild from git reports a match.
+          ${summary.length
+            ? html`<div class="result-log unit-drift-summary">${summary.join('\n')}</div>`
+            : nothing}
+          <span class="unit-drift-note">Details may also be in the Rebuild from git run log.</span>
+        </span>
+      </div>
     `;
   }
 
@@ -1216,21 +1523,214 @@ export class ScionPageAdminMaintenance extends LitElement {
                       ${this.resetAuthAllResult.failed?.length ?? 0}
                     </span>
                   </div>
+                  ${Object.keys(this.resetAuthAllResult.failed_by_code ?? {}).length > 0
+                    ? html`
+                        <div class="card-meta reset-auth-categories">
+                          <span>${resetAuthCategorySummary(this.resetAuthAllResult)}</span>
+                        </div>
+                      `
+                    : nothing}
                   ${(this.resetAuthAllResult.failed?.length ?? 0) > 0
                     ? html`
                         <div class="result-log result-error">
-                          ${this.resetAuthAllResult
-                            .failed!.map((f) => `${f.name || f.id}: ${f.error}`)
-                            .join('\n')}
+                          ${this.resetAuthAllResult.failed!.map(resetAuthFailureLine).join('\n')}
                         </div>
                       `
                     : nothing}
                 `
               : nothing}
+            ${this.canReissueScopes ? this.renderReissueScopes() : nothing}
           </div>
         </div>
       </div>
     `;
+  }
+
+  private renderReissueScopes() {
+    return html`
+      <div class="reissue-scopes">
+        <div class="card-footer">
+          <span class="card-title">Re-issue scopes</span>
+          <span class="reissue-actions">
+            <sl-button
+              class="reissue-dry-run"
+              size="small"
+              ?disabled=${this.reissueLoading}
+              ?loading=${this.reissueLoading && !this.reissueConfirmOpen}
+              @click=${() => this.handleReissueDryRun()}
+            >
+              <sl-icon slot="prefix" name="shield-check"></sl-icon>
+              Dry Run
+            </sl-button>
+            ${this.reissueResult?.dry_run
+              ? html`
+                  <sl-button
+                    class="reissue-apply"
+                    variant="warning"
+                    size="small"
+                    ?disabled=${this.reissueLoading}
+                    @click=${() => this.openReissueConfirm()}
+                  >
+                    <sl-icon slot="prefix" name="key"></sl-icon>
+                    Apply
+                  </sl-button>
+                `
+              : nothing}
+          </span>
+        </div>
+        <div class="card-description">
+          Re-issue every agent's role scopes from its delegator's current authority, the same as
+          scion reset-auth --all --reissue-scopes. A dry run shows what would change; nothing
+          changes until you apply it.
+        </div>
+        ${this.reissueError
+          ? html`<div class="result-log result-error reissue-error">${this.reissueError}</div>`
+          : nothing}
+        ${this.reissueResult ? this.renderReissueResult(this.reissueResult) : nothing}
+      </div>
+    `;
+  }
+
+  private renderReissueResult(r: ScopeReissueAllResult) {
+    const lines = scopeReissueAgentLines(r);
+    const unresolved = r.depth_unresolved?.length ?? 0;
+    const pushFailed = r.push_failed?.length ?? 0;
+    const warnings: string[] = [];
+    if (!r.batch_audit_recorded) {
+      warnings.push(
+        `The hub could not record the batch audit entry (batch ${r.batch_op_id}); ` +
+          'the per-agent results stand.'
+      );
+    }
+    if (pushFailed > 0) {
+      warnings.push(
+        `${pushFailed} agents did not receive their new token; run reset-auth for each.`
+      );
+    }
+    const reloadUnconfirmed = reloadUnconfirmedCount(r);
+    if (reloadUnconfirmed > 0) {
+      warnings.push(
+        `${reloadUnconfirmed} agents received their new token but did not confirm the reload; ` +
+          'if one keeps failing to authenticate, restart it.'
+      );
+    }
+    return html`
+      <div class="card-meta reissue-summary">
+        <span>${scopeReissueSummary(r)}</span>
+      </div>
+      ${r.dry_run
+        ? html`
+            <div class="card-meta reissue-dry-run-note">
+              <span>Dry run: nothing was changed. Apply to make these changes.</span>
+            </div>
+          `
+        : nothing}
+      ${unresolved > 0
+        ? html`
+            <div class="card-meta reissue-unresolved">
+              <span>${unresolvedNote(unresolved)}</span>
+            </div>
+          `
+        : nothing}
+      ${lines ? html`<div class="result-log reissue-agents">${lines}</div>` : nothing}
+      ${warnings.length > 0
+        ? html`<div class="result-log result-error reissue-warnings">${warnings.join('\n')}</div>`
+        : nothing}
+    `;
+  }
+
+  private renderReissueConfirmDialog() {
+    if (!this.reissueConfirmOpen) return nothing;
+    const r = this.reissueResult;
+    return html`
+      <sl-dialog
+        class="reissue-confirm"
+        label="Apply Scope Re-issue"
+        open
+        @sl-request-close=${(e: Event) => this.closeReissueConfirm(e)}
+      >
+        <div class="dialog-body">
+          <p>Re-issue role scopes for every agent on the hub?</p>
+          ${r ? html`<p>Last dry run: ${scopeReissueSummary(r)}.</p>` : nothing}
+          <p style="color: var(--sl-color-warning-700, #a16207); font-weight: 500;">
+            Changed agents get new tokens with their re-issued scopes. The result may differ from
+            the dry run if agents changed since.
+          </p>
+        </div>
+        <sl-button
+          slot="footer"
+          variant="default"
+          class="reissue-cancel"
+          ?disabled=${this.reissueLoading}
+          @click=${() => this.closeReissueConfirm()}
+          >Cancel</sl-button
+        >
+        <sl-button
+          slot="footer"
+          variant="warning"
+          class="reissue-confirm-apply"
+          ?loading=${this.reissueLoading}
+          @click=${() => this.handleReissueApply()}
+        >
+          <sl-icon slot="prefix" name="key"></sl-icon>
+          Apply
+        </sl-button>
+      </sl-dialog>
+    `;
+  }
+
+  private openReissueConfirm(): void {
+    if (this.reissueResult?.dry_run) this.reissueConfirmOpen = true;
+  }
+
+  /**
+   * Closes the apply confirmation. While a request is in flight the dialog
+   * stays open: the sl-request-close event is cancelled so it is not hidden.
+   */
+  private closeReissueConfirm(e?: Event): void {
+    if (this.reissueLoading) {
+      e?.preventDefault();
+      return;
+    }
+    this.reissueConfirmOpen = false;
+  }
+
+  /** Runs the bulk scope re-issue as a dry run and shows its result. */
+  private async handleReissueDryRun(): Promise<void> {
+    await this.runReissue(true);
+  }
+
+  /**
+   * Applies the bulk scope re-issue; reached only from the confirm dialog.
+   * A click while a request is in flight sends nothing.
+   */
+  private async handleReissueApply(): Promise<void> {
+    if (!this.reissueConfirmOpen || this.reissueLoading) return;
+    await this.runReissue(false);
+    this.reissueConfirmOpen = false;
+  }
+
+  private async runReissue(dryRun: boolean): Promise<void> {
+    this.reissueLoading = true;
+    this.reissueError = null;
+    this.reissueResult = null;
+    try {
+      const response = await apiFetch('/api/v1/admin/agents/reset-auth-all', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reissue_scopes: true, dry_run: dryRun }),
+        suppressAccessDeniedToast: true,
+      });
+      if (!response.ok) {
+        throw new Error(await extractApiError(response, `HTTP ${response.status}`));
+      }
+      this.reissueResult = (await response.json()) as ScopeReissueAllResult;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to re-issue scopes';
+      this.reissueError = `${dryRun ? 'Dry run' : 'Apply'} failed: ${msg}`;
+    } finally {
+      this.reissueLoading = false;
+    }
   }
 
   private async handleResetAuthAll() {
@@ -1390,6 +1890,8 @@ export class ScionPageAdminMaintenance extends LitElement {
   }
 
   private renderMigrations() {
+    const completed = this.migrations.filter((m) => m.status === 'completed');
+    const active = this.migrations.filter((m) => m.status !== 'completed');
     return html`
       <div class="section">
         <h2 class="section-title">Migrations</h2>
@@ -1400,12 +1902,42 @@ export class ScionPageAdminMaintenance extends LitElement {
         ${this.migrations.length === 0
           ? html`<div class="empty-inline">No migrations registered.</div>`
           : html`
-              <div class="card-list">
-                ${this.migrations.map((m) => this.renderMigrationCard(m))}
-              </div>
+              ${active.length > 0
+                ? html`
+                    <div class="card-list">${active.map((m) => this.renderMigrationCard(m))}</div>
+                  `
+                : nothing}
+              ${this.renderCompletedMigrations(completed)}
             `}
       </div>
     `;
+  }
+
+  /**
+   * Completed migrations are grouped in one collapsible element, collapsed by
+   * default. Its open state is tracked in completedMigrationsOpen from
+   * sl-show/sl-hide and bound back, so it is kept across poll refreshes and
+   * across reloads that re-create the element.
+   */
+  private renderCompletedMigrations(completed: MaintenanceOperation[]) {
+    if (completed.length === 0) return nothing;
+    return html`
+      <sl-details
+        class="completed-migrations"
+        summary="Completed migrations (${completed.length})"
+        ?open=${this.completedMigrationsOpen}
+        @sl-show=${(e: Event) => this.onCompletedMigrationsToggle(e, true)}
+        @sl-hide=${(e: Event) => this.onCompletedMigrationsToggle(e, false)}
+      >
+        <div class="card-list">${completed.map((m) => this.renderMigrationCard(m))}</div>
+      </sl-details>
+    `;
+  }
+
+  private onCompletedMigrationsToggle(e: Event, open: boolean): void {
+    // Ignore sl-show/sl-hide bubbling up from elements inside the cards.
+    if (e.target !== e.currentTarget) return;
+    this.completedMigrationsOpen = open;
   }
 
   private renderMigrationCard(m: MaintenanceOperation) {

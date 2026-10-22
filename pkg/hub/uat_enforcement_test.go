@@ -381,17 +381,42 @@ func TestUATEnforcement_NoPolicyScopesExist(t *testing.T) {
 		}
 	})
 
-	t.Run("no role UAT scopes", func(t *testing.T) {
-		for scope := range validScopes {
-			assert.NotContains(t, scope, "role:", "ValidUATScopes must not include any role:* entries, found: %s", scope)
-		}
+	// Role definitions and role bindings carry exactly the approved
+	// selectors, and each is selectable on a hub boundary only.
+	t.Run("role UAT scopes are the approved hub-only set", func(t *testing.T) {
+		rcaRequireApprovedHubScopes(t, validScopes, "role:", "role:read", "role:create", "role:update", "role:delete")
 	})
 
-	t.Run("no role_binding UAT scopes", func(t *testing.T) {
-		for scope := range validScopes {
-			assert.NotContains(t, scope, "role_binding:", "ValidUATScopes must not include any role_binding:* entries, found: %s", scope)
-		}
+	t.Run("role_binding UAT scopes are the approved hub-only set", func(t *testing.T) {
+		rcaRequireApprovedHubScopes(t, validScopes, "role_binding:", "role_binding:read", "role_binding:create", "role_binding:delete")
 	})
+}
+
+// rcaRequireApprovedHubScopes requires that the valid scopes with prefix are
+// exactly approved, and that each one's permission is selectable on a hub
+// boundary only.
+func rcaRequireApprovedHubScopes(t *testing.T, validScopes map[string]bool, prefix string, approved ...string) {
+	t.Helper()
+	want := map[string]bool{}
+	for _, a := range approved {
+		want[a] = true
+	}
+	for scope := range validScopes {
+		if strings.HasPrefix(scope, prefix) {
+			assert.True(t, want[scope], "ValidUATScopes includes %s, which is not an approved %s* selector", scope, prefix)
+		}
+	}
+	for _, a := range approved {
+		assert.True(t, validScopes[a], "ValidUATScopes should include %s", a)
+	}
+	for _, p := range permissions.Registry {
+		if !want[p.UATScope] {
+			continue
+		}
+		kinds, listed := permissions.SelectorAllowedBoundaries(p.ID)
+		assert.True(t, listed && len(kinds) == 1 && kinds[0] == permissions.BoundaryKindHub,
+			"%s (%s): selector boundaries = %v (listed=%v), want hub only", p.UATScope, p.ID, kinds, listed)
+	}
 }
 
 func TestUATEnforcement_AgentManageExpansionContents(t *testing.T) {
@@ -958,6 +983,8 @@ func TestValidUATScopes_Completeness(t *testing.T) {
 			"project:clone",
 			// Agent manage alias
 			"agent:manage",
+			// Quota administration scopes (hub boundary only)
+			"quota:read", "quota:create", "quota:update", "quota:delete",
 		}
 		for _, scope := range expectedScopes {
 			assert.True(t, validScopes[scope], "ValidUATScopes should include %s", scope)
@@ -965,8 +992,18 @@ func TestValidUATScopes_Completeness(t *testing.T) {
 	})
 
 	t.Run("excludes authority-escalation scopes", func(t *testing.T) {
-		excludedPrefixes := []string{"policy:", "role:", "role_binding:", "quota:", "hub:"}
+		excludedPrefixes := []string{"policy:", "role:", "role_binding:", "hub:"}
+		// Role definitions and role bindings have only the approved
+		// hub-only selectors (TestUATEnforcement_NoPolicyScopesExist);
+		// policy and hub:* have none.
+		approved := map[string]bool{
+			"role:read": true, "role:create": true, "role:update": true, "role:delete": true,
+			"role_binding:read": true, "role_binding:create": true, "role_binding:delete": true,
+		}
 		for scope := range validScopes {
+			if approved[scope] {
+				continue
+			}
 			for _, prefix := range excludedPrefixes {
 				assert.False(t, strings.HasPrefix(scope, prefix),
 					"ValidUATScopes must not include %s (authority-escalation scope)", scope)

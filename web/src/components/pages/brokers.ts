@@ -32,6 +32,7 @@ import '../shared/status-badge.js';
 import '../shared/view-toggle.js';
 import { formatRelative } from '../../utils/time.js';
 import { navigateTo } from '../../client/navigation.js';
+import { visibleInterval } from '../../client/visible-interval.js';
 
 @customElement('scion-page-brokers')
 export class ScionPageBrokers extends LitElement {
@@ -66,7 +67,7 @@ export class ScionPageBrokers extends LitElement {
   private viewMode: ViewMode = 'grid';
 
   private boundOnBrokersUpdated = this.onBrokersUpdated.bind(this);
-  private relativeTimeInterval: ReturnType<typeof setInterval> | null = null;
+  private stopRelativeTimeTick: (() => void) | null = null;
 
   static override styles = [
     listPageStyles,
@@ -169,16 +170,14 @@ export class ScionPageBrokers extends LitElement {
     stateManager.addEventListener('brokers-updated', this.boundOnBrokersUpdated);
 
     // Periodically re-render to keep relative timestamps fresh
-    this.relativeTimeInterval = setInterval(() => this.requestUpdate(), 15_000);
+    this.stopRelativeTimeTick = visibleInterval(() => this.requestUpdate(), 15_000);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     stateManager.removeEventListener('brokers-updated', this.boundOnBrokersUpdated);
-    if (this.relativeTimeInterval) {
-      clearInterval(this.relativeTimeInterval);
-      this.relativeTimeInterval = null;
-    }
+    this.stopRelativeTimeTick?.();
+    this.stopRelativeTimeTick = null;
   }
 
   private onBrokersUpdated(): void {
@@ -407,7 +406,7 @@ export class ScionPageBrokers extends LitElement {
   private renderCapabilities(capabilities: import('../../shared/types.js').BrokerCapabilities) {
     return html`
       <div class="broker-details">
-        <span class="capability-tag ${capabilities.webPTY ? 'enabled' : ''}">WebPTY</span>
+        <span class="capability-tag ${capabilities.webPty ? 'enabled' : ''}">WebPTY</span>
         <span class="capability-tag ${capabilities.sync ? 'enabled' : ''}">Sync</span>
         <span class="capability-tag ${capabilities.attach ? 'enabled' : ''}">Attach</span>
       </div>
@@ -465,7 +464,7 @@ export class ScionPageBrokers extends LitElement {
           ${broker.capabilities
             ? html`
                 <span class="capability-tags-inline">
-                  <span class="capability-tag ${broker.capabilities.webPTY ? 'enabled' : ''}"
+                  <span class="capability-tag ${broker.capabilities.webPty ? 'enabled' : ''}"
                     >WebPTY</span
                   >
                   <span class="capability-tag ${broker.capabilities.sync ? 'enabled' : ''}"

@@ -15,8 +15,6 @@
 package cmd
 
 import (
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 	"github.com/spf13/cobra"
 )
 
@@ -44,6 +42,7 @@ var hubOnlyCommands = map[string]bool{
 	"tunnel":     true,
 	"ssh":        true,
 	"ssh-config": true,
+	"vscode":     true,
 	"expose":     true,
 	"unexpose":   true,
 }
@@ -163,32 +162,4 @@ func subcommandGlobalFlagSet(cmd *cobra.Command) bool {
 		return false
 	}
 	return f.Changed && f.Value.String() == "true"
-}
-
-// isHubDispatchInvocation reports whether agent work for this invocation is
-// sent to a hub instead of run locally. It matches how hub dispatch is
-// decided (hubsync.EnsureHubReady) and how the endpoint is resolved
-// (GetHubEndpoint: --hub, then settings, then environment):
-//
-//   - inside a hub-connected container (config.IsHubContext);
-//   - a hub project reference (slug, name or git URL) for --project, which
-//     goes to the hub or fails with a hub-mode error;
-//   - hub enabled in settings with an endpoint from any source.
-//
-// --no-hub turns off the last two.
-func isHubDispatchInvocation(projectPath string) bool {
-	if config.IsHubContext() {
-		return true
-	}
-	if noHub {
-		return false
-	}
-	if projectPath != "" && hubsync.IsHubProjectRef(projectPath) {
-		return true
-	}
-	settings, err := config.LoadSettings(projectPath)
-	if err != nil || settings == nil {
-		return false
-	}
-	return settings.IsHubEnabled() && GetHubEndpoint(settings) != ""
 }

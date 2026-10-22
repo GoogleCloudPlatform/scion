@@ -23,7 +23,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"runtime"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -33,44 +32,22 @@ import (
 )
 
 // isGitRepoFunc is a package-level variable for testing. It reports whether
-// the current directory is inside a git work tree and returns an error
-// matching util.ErrGitDubiousOwnership when git refuses the repository
-// because of its ownership. Defaults to util.CheckGitRepoDir("").
-var isGitRepoFunc = func() (bool, error) { return util.CheckGitRepoDir("") }
+// dir (the current directory when dir is empty) is inside a git work tree and
+// returns an error matching util.ErrGitDubiousOwnership when git refuses the
+// repository because of its ownership. Defaults to util.CheckGitRepoDir.
+var isGitRepoFunc = util.CheckGitRepoDir
 
 // OverrideIsGitRepo replaces the git-repo detection function used by InitProject.
 // It returns a restore function that must be called to reset the override.
 // This is intended for use in tests outside the config package.
 func OverrideIsGitRepo(fn func() bool) func() {
 	orig := isGitRepoFunc
-	isGitRepoFunc = func() (bool, error) { return fn(), nil }
+	isGitRepoFunc = func(string) (bool, error) { return fn(), nil }
 	return func() { isGitRepoFunc = orig }
 }
 
 //go:embed all:embeds/*
 var EmbedsFS embed.FS
-
-// defaultSettingsYAMLToJSON reads an embedded YAML settings template and
-// converts it to the legacy JSON format consumed by LoadSettingsKoanf.
-// Versioned (v1+) templates are round-tripped through convertVersionedToLegacy;
-// legacy templates are marshalled directly.
-func defaultSettingsYAMLToJSON(yamlData []byte) ([]byte, error) {
-	version, _ := DetectSettingsFormat(yamlData)
-	if version != "" {
-		var vs VersionedSettings
-		if err := yaml.Unmarshal(yamlData, &vs); err != nil {
-			return nil, err
-		}
-		legacy := convertVersionedToLegacy(&vs)
-		return json.MarshalIndent(legacy, "", "  ")
-	}
-
-	var settings Settings
-	if err := yaml.Unmarshal(yamlData, &settings); err != nil {
-		return nil, err
-	}
-	return json.MarshalIndent(settings, "", "  ")
-}
 
 // getDefaultSettingsDataForRuntime generates default settings JSON with the
 // specified runtime for the local profile. Handles both versioned and legacy formats.
@@ -103,29 +80,6 @@ func getDefaultSettingsDataForRuntime(targetRuntime string) ([]byte, error) {
 		settings.Profiles["local"] = local
 	}
 	return json.MarshalIndent(settings, "", "  ")
-}
-
-// GetDefaultSettingsData returns the embedded default settings in JSON format.
-// This function adjusts the local profile runtime based on the OS. It is used as
-// a fallback default for settings loaders; during init, DetectLocalRuntime is used
-// instead for actual runtime probing.
-func GetDefaultSettingsData() ([]byte, error) {
-	// Cloud Run Instance with sandbox launcher: use the tier-specific
-	// defaults so that LoadSettingsKoanf never starts from workstation
-	// profiles that cannot work on this tier.
-	if isCloudRunSandboxEnvironment() {
-		data, err := EmbedsFS.ReadFile("embeds/default_settings_cloudrun_sandbox.yaml")
-		if err != nil {
-			return nil, fmt.Errorf("failed to read Cloud Run sandbox settings template: %w", err)
-		}
-		return defaultSettingsYAMLToJSON(data)
-	}
-
-	targetRuntime := "docker"
-	if runtime.GOOS == "darwin" {
-		targetRuntime = "container"
-	}
-	return getDefaultSettingsDataForRuntime(targetRuntime)
 }
 
 // SeedFileFromFS writes a file from an embed.FS to a target path.
@@ -302,17 +256,46 @@ func InitProject(targetDir string, harnesses []api.Harness, opts ...InitProjectO
 		opt = opts[0]
 	}
 
+	// The layout follows the directory being initialized: the current
+	// directory in the CLI form (empty targetDir), otherwise the directory
+	// that will contain targetDir. If that directory does not exist, the
+	// check reports "not a git repository" and the external layout is used,
+	// deliberately.
+	checkDir := ""
+	if targetDir != "" {
+		// Clean first so a trailing separator does not shift the
+		// directory checked here or the Lstat below.
+		targetDir = filepath.Clean(targetDir)
+		checkDir = filepath.Dir(targetDir)
+	}
+
 	// isGitRepoFunc always reports false alongside an error.
-	isGit, gitErr := isGitRepoFunc()
+	isGit, gitErr := isGitRepoFunc(checkDir)
 	if gitErr != nil {
-		// Only the current-directory form (empty targetDir) refuses here: the
-		// git check inspects the current directory, which in that form is the
-		// directory being initialized. With an explicit targetDir the current
-		// directory need not be related to the target, so keep the previous
-		// behaviour and treat the refusal as "not a git repository".
+		// Only the current-directory form (empty targetDir) refuses here.
+		// With an explicit targetDir keep the previous behaviour and treat
+		// the refusal as "not a git repository".
 		if targetDir == "" && errors.Is(gitErr, util.ErrGitDubiousOwnership) {
 			// Returned unwrapped: callers add their own context.
 			return gitErr
+		}
+	}
+
+	if targetDir != "" {
+		if info, err := os.Lstat(targetDir); err == nil {
+			// A symbolic link at an explicit target (for example one
+			// committed to the repository) is refused rather than
+			// followed, so the project is always written at targetDir.
+			if info.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("cannot initialize project: %s is a symbolic link; replace it with a directory or remove it", targetDir)
+			}
+			// An explicit target that is already a regular file is an
+			// existing project marker (for example one committed to the
+			// repository): keep using it through the external layout
+			// rather than replacing it.
+			if info.Mode().IsRegular() {
+				isGit = false
+			}
 		}
 	}
 
@@ -328,8 +311,10 @@ func InitProject(targetDir string, harnesses []api.Harness, opts ...InitProjectO
 		}
 	}
 
-	// Enforce .scion/agents/ in .gitignore for git repos
-	if isGit {
+	// Enforce .scion/agents/ in .gitignore for git repos initialized from
+	// the current directory. An explicit target leaves the repository's
+	// .gitignore untouched.
+	if isGit && targetDir == "" {
 		root, err := util.RepoRoot()
 		if err == nil {
 			if err := EnsureScionGitignore(root); err != nil {
@@ -461,21 +446,23 @@ func initInRepoProject(projectDir string, opt InitProjectOpts) error {
 	}
 
 	// Ensure project-id file exists for split storage, recording
-	// opt.ProjectID when set.
-	existingID, err := ReadProjectID(projectDir)
+	// opt.ProjectID when set. The read, like the writes below, goes through
+	// an os.Root on projectDir so project setup stays inside the project
+	// directory.
+	existingID, err := readProjectIDInDir(projectDir)
 	switch {
 	case err == nil:
 		if opt.ProjectID != "" && existingID != opt.ProjectID {
-			if err := WriteProjectID(projectDir, opt.ProjectID); err != nil {
-				return fmt.Errorf("failed to write project-id: %w", err)
+			if err := writeProjectIDInDir(projectDir, opt.ProjectID); err != nil {
+				return fmt.Errorf("cannot initialize project: failed to write project-id: %w", err)
 			}
 		}
 	case os.IsNotExist(err):
-		if err := WriteProjectID(projectDir, opt.newProjectID()); err != nil {
-			return fmt.Errorf("failed to write project-id: %w", err)
+		if err := writeProjectIDInDir(projectDir, opt.newProjectID()); err != nil {
+			return fmt.Errorf("cannot initialize project: failed to write project-id: %w", err)
 		}
 	default:
-		return fmt.Errorf("failed to read project-id: %w", err)
+		return fmt.Errorf("cannot initialize project: failed to read project-id: %w", err)
 	}
 
 	// Seed settings.yaml in the external config dir (machine-specific, not committed)
@@ -510,14 +497,16 @@ func initInRepoProject(projectDir string, opt InitProjectOpts) error {
 		}
 	}
 
-	// Create in-repo agents dir for git worktrees only
-	if err := os.MkdirAll(filepath.Join(projectDir, "agents"), 0755); err != nil {
-		return fmt.Errorf("failed to create agents directory: %w", err)
+	// Create in-repo agents dir for git worktrees only. Like the project-id
+	// file above, it is created through an os.Root on projectDir so project
+	// setup writes stay inside the project directory.
+	if err := mkdirAllInDir(projectDir, "agents", 0755); err != nil {
+		return fmt.Errorf("cannot initialize project: failed to create agents directory: %w", err)
 	}
 
 	// Create in-repo templates dir — lives in-repo so project templates can be committed
-	if err := os.MkdirAll(filepath.Join(projectDir, "templates"), 0755); err != nil {
-		return fmt.Errorf("failed to create templates directory: %w", err)
+	if err := mkdirAllInDir(projectDir, "templates", 0755); err != nil {
+		return fmt.Errorf("cannot initialize project: failed to create templates directory: %w", err)
 	}
 
 	return nil
@@ -543,8 +532,7 @@ func ensureProjectSettingsFile(configDir string, opt InitProjectOpts) error {
 		if err != nil {
 			return fmt.Errorf("failed to read default project settings: %w", err)
 		}
-		newSettingsPath := filepath.Join(configDir, "settings.yaml")
-		if err := os.WriteFile(newSettingsPath, defaultSettings, 0644); err != nil {
+		if err := seedSettingsFile(configDir, defaultSettings); err != nil {
 			return fmt.Errorf("failed to seed settings.yaml: %w", err)
 		}
 	}
@@ -571,8 +559,7 @@ func ensureProjectConfigFiles(configDir string, opt InitProjectOpts) error {
 		if err != nil {
 			return fmt.Errorf("failed to read default project settings: %w", err)
 		}
-		newSettingsPath := filepath.Join(configDir, "settings.yaml")
-		if err := os.WriteFile(newSettingsPath, defaultSettings, 0644); err != nil {
+		if err := seedSettingsFile(configDir, defaultSettings); err != nil {
 			return fmt.Errorf("failed to seed settings.yaml: %w", err)
 		}
 	}
@@ -642,12 +629,37 @@ func writeProjectSettings(externalPath, workspacePath, projectID string, opt Ini
 		return fmt.Errorf("failed to marshal project settings: %w", err)
 	}
 
-	settingsFile := filepath.Join(externalPath, "settings.yaml")
-	if err := os.WriteFile(settingsFile, data, 0644); err != nil {
+	if err := replaceSettingsFile(externalPath, filepath.Join(externalPath, "settings.yaml"), data); err != nil {
 		return fmt.Errorf("failed to write project settings.yaml: %w", err)
 	}
 
 	return nil
+}
+
+// seedSettingsFile writes data as settings.yaml in dir unless dir already
+// has a settings file, checked again under the settings lock so that two
+// concurrent seeds cannot replace a file another writer has just created.
+func seedSettingsFile(dir string, data []byte) error {
+	lock, err := LockSettingsDir(dir)
+	if err != nil {
+		return err
+	}
+	defer lock.Unlock()
+	if GetSettingsPath(dir) != "" {
+		return nil
+	}
+	return writeSettingsFileAtomic(lock, filepath.Join(dir, "settings.yaml"), data)
+}
+
+// replaceSettingsFile replaces the settings file at path in dir with data,
+// atomically and under the settings lock for dir.
+func replaceSettingsFile(dir, path string, data []byte) error {
+	lock, err := LockSettingsDir(dir)
+	if err != nil {
+		return err
+	}
+	defer lock.Unlock()
+	return writeSettingsFileAtomic(lock, path, data)
 }
 
 // InitMachineOpts controls optional behavior for InitMachine.
@@ -739,8 +751,7 @@ func InitMachine(harnesses []api.Harness, opts ...InitMachineOpts) error {
 			}
 		}
 
-		newSettingsPath := filepath.Join(globalDir, "settings.yaml")
-		if err := os.WriteFile(newSettingsPath, defaultSettings, 0644); err != nil {
+		if err := seedSettingsFile(globalDir, defaultSettings); err != nil {
 			return fmt.Errorf("failed to seed global settings.yaml: %w", err)
 		}
 	}
@@ -862,4 +873,36 @@ func EnsureScionGitignore(repoRoot string) error {
 	}
 
 	return os.WriteFile(gitignorePath, []byte(newContent), 0644)
+}
+
+// EnsureScionGitExclude ensures that .scion/agents/ is ignored by git at the
+// given repo root without changing the repository's tracked files. If no
+// existing source (any .gitignore, info/exclude or global excludes) already
+// covers the path, it appends .scion/agents/ to the repository's own
+// info/exclude file, which git never tracks.
+//
+// It is for checkouts the hub creates and seeds with an explicit .scion
+// target (InitProject leaves the tracked .gitignore alone there), so that
+// they pass the provisioning check that agent state is git-ignored.
+//
+// A symbolic link or other non-regular file at info or info/exclude is
+// refused rather than followed. If the path is still not ignored once the
+// rule is in place (a tracked negation such as "!.scion/agents/" outranks
+// info/exclude), it returns an error.
+func EnsureScionGitExclude(repoRoot string) error {
+	if util.IsIgnored(repoRoot, ".scion/agents/") {
+		return nil
+	}
+
+	excludePath, err := util.AppendGitExcludeLine(repoRoot, ".scion/agents/")
+	if err != nil {
+		return err
+	}
+
+	// info/exclude has the lowest precedence: a negation such as
+	// "!.scion/agents/" in a tracked .gitignore still wins over it.
+	if !util.IsIgnored(repoRoot, ".scion/agents/") {
+		return fmt.Errorf("the repository at %s un-ignores .scion/agents/; the rule in %s has no effect", repoRoot, excludePath)
+	}
+	return nil
 }

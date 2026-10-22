@@ -63,7 +63,9 @@ var conversationCmd = &cobra.Command{
 	Short:   "Manage conversations",
 	Long: `View and manage conversations you participate in.
 
-Conversations require Hub mode. Enable with 'scion hub enable <endpoint>'.
+Conversations go through the hub (start the local one with 'scion server start',
+or add a remote one with 'scion hub add <name> <url>' and select it with
+'scion use --hub <name>').
 
 Commands:
   scion conversation list                       List your conversations
@@ -72,6 +74,7 @@ Commands:
   scion conversation get-message <ref> <msg-id> Get a message from a conversation
   scion conversation create <name>              Create a new group conversation
   scion conversation set-default <ref> <agent>  Set default agent for a conversation
+  scion conversation group ...                  Manage project thread groups
 
 Conversation references:
   conv:<uuid>     Direct conversation ID
@@ -122,7 +125,11 @@ var conversationCreateCmd = &cobra.Command{
 Examples:
   scion conversation create "Design Discussion"
   scion conversation create "Sprint Planning" --project <project-id>
-  scion conversation create "Debug Thread" --json`,
+  scion conversation create "Debug Thread" --json
+  scion conversation create "release-notes" --group Release
+
+--group files the new conversation into a thread group of the same project
+(a group ID, or a name resolved within the project).`,
 	Args: cobra.ExactArgs(1),
 	RunE: runConversationCreate,
 }
@@ -434,8 +441,23 @@ func runConversationCreate(cmd *cobra.Command, args []string) error {
 		Kind:        "group",
 	}
 
+	// --group resolves within the same project the conversation is created
+	// in (ptone/scion#4424, design section 4); the hub also requires the
+	// group's project to equal the conversation's.
+	var group *hubclient.ThreadGroup
+	if convCreateGroup != "" {
+		group, err = resolveThreadGroup(ctx, client, convProject, projectResolveErr, convCreateGroup)
+		if err != nil {
+			return err
+		}
+		req.ThreadGroupID = group.ID
+	}
+
 	conv, err := client.Conversations().Create(ctx, req)
 	if err != nil {
+		if req.ThreadGroupID != "" && isThreadGroupsDisabledCreateError(err) {
+			return fmt.Errorf("failed to create conversation: %w", &hubclient.ThreadGroupsNotEnabledError{Err: err})
+		}
 		// If we couldn't resolve a project locally and the server's 400 is
 		// specifically the projectId-required guard, the resolveProjectID
 		// error ("Use --project flag or link this project with 'scion hub
@@ -470,7 +492,21 @@ func runConversationCreate(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Name:    %s\n", conv.DisplayName)
 	fmt.Printf("  Kind:    %s\n", conv.Kind)
 	fmt.Printf("  Surface: %s\n", conv.Surface)
+	if group != nil {
+		fmt.Printf("  Group:   %s\n", group.Name)
+	}
 	return nil
+}
+
+// isThreadGroupsDisabledCreateError reports whether err is an older hub's
+// 400 for a threadGroupId sent while its thread groups experiment is off
+// (ptone/scion#5546 removed it). --group normally lists the
+// project's groups first, which already reports such a hub; this covers a
+// group ID used with no resolved project.
+func isThreadGroupsDisabledCreateError(err error) bool {
+	var apiErr *apiclient.APIError
+	return errors.As(err, &apiErr) && apiErr.IsBadRequest() &&
+		strings.Contains(apiErr.Message, "thread groups are not enabled")
 }
 
 func runConversationGet(cmd *cobra.Command, args []string) error {

@@ -15,8 +15,10 @@
 package hub
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 
@@ -27,12 +29,35 @@ import (
 // accepts, in any mode (file, DB, and workstation, where other Layer-0 keys
 // are API-writable), for any caller. They are deploy-time inputs of the test
 // identity tiers (ptone/scion#4240): the hub class of the admin tier gate
-// (phase A0) and the workload issuer allowlist (phase X2, whose trust set
-// must not grow through the API). A key matches itself and every key nested
-// under it.
+// (phase A0), the workload issuer allowlist (phase X2, whose trust set
+// must not grow through the API), the proxy driver principals and driver
+// token audience (phase WS2, which decide who may carry test identity web
+// sessions behind the proxy), and the relay-peer secret (design §3.9:
+// never stored in the database or returned by the API). A key matches
+// itself and every key nested under it.
 var neverAPIWritableSettingsKeys = []string{
 	config.HubClassKey,
 	config.TestIdentitiesKey,
+	config.ProxyDriverPrincipalsKey,
+	config.ProxyDriverTokenAudienceKey,
+	config.ConduitPeerSecretKey,
+}
+
+// hideNeverAPIWritableProxyKeys blanks the WS2 proxy driver settings in a
+// server-config GET body: they are never API-writable, so they are not
+// shown either, and a client that echoes the body back does not send them.
+func hideNeverAPIWritableProxyKeys(srv *config.V1ServerConfig) {
+	if srv == nil || srv.Auth == nil || srv.Auth.Proxy == nil {
+		return
+	}
+	// Copies, so a config value the body shares pointers with is never
+	// changed.
+	proxy := *srv.Auth.Proxy
+	proxy.DriverPrincipals = nil
+	proxy.DriverTokenAudience = ""
+	auth := *srv.Auth
+	auth.Proxy = &proxy
+	srv.Auth = &auth
 }
 
 // testAdminTierRefusedSettingsKeys are settings keys refused by every
@@ -107,6 +132,59 @@ func matchedSettingsKeys(paths [][]string, keys []string) []string {
 		out = append(out, k)
 	}
 	sort.Strings(out)
+	return out
+}
+
+// dropEmptyPeerSecret returns rawBody without its
+// server.hub.conduit.peer_secret members whose value is "" or null, and
+// without the objects that removal leaves empty: an empty relay-peer secret
+// is treated as absent (ignored, nothing written), while any other value is
+// refused by rejectGateProtectedSettingsKeys. The body is returned unchanged
+// when it holds no such member or does not parse (the typed decode reports
+// that). Numbers keep their spelling. The body has already passed
+// rejectRepeatedJSONMembers.
+func dropEmptyPeerSecret(rawBody []byte) []byte {
+	dec := json.NewDecoder(bytes.NewReader(rawBody))
+	dec.UseNumber()
+	var root any
+	if err := dec.Decode(&root); err != nil {
+		return rawBody
+	}
+	var want []string
+	for _, seg := range strings.Split(config.ConduitPeerSecretKey, ".") {
+		want = append(want, foldJSONMemberName(seg))
+	}
+	var walk func(prefix []string, obj map[string]any) bool
+	walk = func(prefix []string, obj map[string]any) (dropped bool) {
+		for name, child := range obj {
+			path := append([]string(nil), prefix...)
+			for _, seg := range strings.Split(name, ".") {
+				path = append(path, foldJSONMemberName(seg))
+			}
+			if slices.Equal(path, want) {
+				if s, isString := child.(string); child == nil || (isString && s == "") {
+					delete(obj, name)
+					dropped = true
+				}
+				continue
+			}
+			if sub, ok := child.(map[string]any); ok && len(sub) > 0 && walk(path, sub) {
+				dropped = true
+				if len(sub) == 0 {
+					delete(obj, name)
+				}
+			}
+		}
+		return dropped
+	}
+	obj, ok := root.(map[string]any)
+	if !ok || !walk(nil, obj) {
+		return rawBody
+	}
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return rawBody
+	}
 	return out
 }
 

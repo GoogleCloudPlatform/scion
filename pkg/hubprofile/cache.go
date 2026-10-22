@@ -60,10 +60,24 @@ type CacheEntry struct {
 	Token          string    `json:"token"`
 }
 
-// IsMemberTier reports whether the entry is a member-tier identity (role
-// member or viewer), the only tier the CLI re-issues tokens for.
+// IsMemberTier reports whether the entry is a member-tier identity (kind
+// test_fixture, role member or viewer). A test hub-admin also has the
+// stored role member, so the kind decides.
 func (e *CacheEntry) IsMemberTier() bool {
-	return e.Role == "member" || e.Role == "viewer"
+	return e.Kind == KindTestFixture && (e.Role == "member" || e.Role == "viewer")
+}
+
+// AdminTier returns the admin delegation tier of an admin-kind entry
+// (TierHubAdmin for kind test_hub_admin, TierSuperAdmin for
+// test_super_admin), or "" for any other entry.
+func (e *CacheEntry) AdminTier() string {
+	switch e.Kind {
+	case KindTestHubAdmin:
+		return TierHubAdmin
+	case KindTestSuperAdmin:
+		return TierSuperAdmin
+	}
+	return ""
 }
 
 func profileCacheDir(home, profile string) string {

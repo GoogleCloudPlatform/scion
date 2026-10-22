@@ -68,18 +68,30 @@ func newTestStore(t testing.TB, url string) (store.Store, error) {
 	if url != ":memory:" {
 		return newTestStoreAt(t, "file:"+url+"?cache=shared")
 	}
+	s, _, err := newTestStoreWithClient(t)
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// newTestStoreWithClient is newTestStore(t, ":memory:") that also returns
+// the raw ent client, for tests that write rows past the store (for
+// example a stored document the store would never write).
+func newTestStoreWithClient(t testing.TB) (*entadapter.CompositeStore, *ent.Client, error) {
+	t.Helper()
 	dsn := fmt.Sprintf("file:hubtest%d?mode=memory&cache=shared", testStoreSeq.Add(1))
 	client, err := openTestClient(dsn)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	s := entadapter.NewCompositeStore(client)
 	if err := restoreTestStoreTemplate(context.Background(), s); err != nil {
 		_ = s.Close()
-		return nil, err
+		return nil, nil, err
 	}
 	t.Cleanup(func() { _ = s.Close() })
-	return s, nil
+	return s, client, nil
 }
 
 // newTestStoreAt opens a fresh, migrated Ent-backed store on the given SQLite
@@ -95,7 +107,7 @@ func newTestStoreAt(t testing.TB, dsn string) (store.Store, error) {
 		return nil, err
 	}
 	s := entadapter.NewCompositeStore(client)
-	if err := migrateTestStore(context.Background(), s); err != nil {
+	if err := s.Migrate(context.Background()); err != nil {
 		_ = s.Close()
 		return nil, err
 	}
@@ -176,8 +188,8 @@ type sqliteRestorer interface {
 
 // testStoreTemplate builds the migrate-once template the first time it is
 // called: it runs one full CompositeStore.Migrate (schema, backfills and
-// seeds) on the template database, under testMigrateMu like every other
-// test migration. Later calls return the first call's error.
+// seeds) on the template database. Later calls return the first call's
+// error.
 func testStoreTemplate(ctx context.Context) error {
 	testStoreTemplateOnce.Do(func() {
 		holder, err := (&sqlite.Driver{}).Open(testStoreTemplateURI)
@@ -192,7 +204,7 @@ func testStoreTemplate(ctx context.Context) error {
 			return
 		}
 		s := entadapter.NewCompositeStore(client)
-		err = migrateTestStore(ctx, s)
+		err = s.Migrate(ctx)
 		_ = s.Close()
 		if err != nil {
 			_ = holder.Close()

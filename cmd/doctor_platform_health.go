@@ -444,6 +444,9 @@ func healthSummaryTestIdentityLine(h hubclient.HealthSummaryHub) (string, bool) 
 	if h.TestIdentityWebSessionsEnabled {
 		on = append(on, "test identity web sessions")
 	}
+	if h.TestAdminWebSessionsEnabled {
+		on = append(on, "admin test identity web sessions")
+	}
 	if len(on) == 0 {
 		return "", false
 	}
@@ -453,6 +456,9 @@ func healthSummaryTestIdentityLine(h hubclient.HealthSummaryHub) (string, bool) 
 	}
 	if h.LiveTestAdminIdentities != nil {
 		line += fmt.Sprintf(" (%d live admin test identities)", *h.LiveTestAdminIdentities)
+	}
+	if !h.TestIdentityWebSessionsEnabled && h.TestIdentityWebSessionsUnavailableReason != "" {
+		line += "; test identity web sessions unavailable: " + h.TestIdentityWebSessionsUnavailableReason
 	}
 	return line, true
 }

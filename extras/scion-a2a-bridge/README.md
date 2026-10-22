@@ -186,6 +186,7 @@ Edit `scion-a2a-bridge.yaml`. The required fields are:
 | `hub.signing_key_secret` | GCP Secret Manager resource name for the signing key. Mutually exclusive with `hub.signing_key`. | `projects/my-project/secrets/hub-signing-key` |
 | `bridge.listen_address` | Address for the A2A HTTP server | `:8443` |
 | `bridge.external_url` | Public URL where A2A clients reach the bridge | `https://a2a.example.com` |
+| `bridge.async_create` | Optional, default `true`. Auto-provisioning asks the Hub for an asynchronous create. With a Hub that has async launch on, the task reports `working` while the agent starts (streaming and SDK clients also see "provisioning agent (<step>)"), then the message is sent; a failed start ends the task `failed` without a send (streaming and SDK clients see "Agent failed to start (<code>): <message>"). `false` always uses the synchronous create. | `true` |
 | `auth.api_key` | Static API key clients pass in the `X-API-Key` header. Supports env var expansion. | `${A2A_API_KEY}` |
 | `projects[].slug` | Project slug to expose. Add one entry per project. | `my-project` |
 | `plugin.listen_address` | Broker plugin RPC listen address | `localhost:9090` |
@@ -304,7 +305,7 @@ Replace `PROJECT` and `AGENT` with the target project slug and agent name. A suc
 
 ### 8. Docker deployment
 
-The Docker build requires `CGO_ENABLED=1` (for `go-sqlite3`). The default runtime image is `debian:bookworm-slim` (glibc). Alpine users must use a musl-compatible SQLite driver or switch to a glibc-based image.
+The bridge uses a pure-Go SQLite driver, so the Docker build sets `CGO_ENABLED=0` and needs no C toolchain. The default runtime image is `debian:bookworm-slim`; the binary does not depend on the image's C library.
 
 Build the image from the repository root (the Dockerfile expects the full repo context):
 

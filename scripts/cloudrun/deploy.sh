@@ -299,11 +299,11 @@ fi
 
 SETTINGS_SECRET="${SERVICE_NAME}-settings"
 SESSION_SECRET_NAME="${SERVICE_NAME}-session-secret"
-SESSION_SECRET="${SCION_SESSION_SECRET:-$(openssl rand -hex 32)}"
+SESSION_SECRET_VALUE="${SCION_SESSION_SECRET:-$(openssl rand -hex 32)}"
 
 log "Rendering production settings for ${PUBLIC_URL}"
 ensure_secret "$SETTINGS_SECRET" "$(render_settings "$PUBLIC_URL")"
-ensure_secret "$SESSION_SECRET_NAME" "$SESSION_SECRET"
+ensure_secret "$SESSION_SECRET_NAME" "$SESSION_SECRET_VALUE"
 
 log "Deploying Cloud Run service ${SERVICE_NAME}"
 deploy_service "$SETTINGS_SECRET" "$SESSION_SECRET_NAME"

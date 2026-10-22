@@ -81,19 +81,30 @@ type OTelConfig struct {
 	Endpoint string
 	// Protocol is the transport protocol ("grpc" or "http").
 	Protocol string
-	// Insecure skips TLS verification.
+	// Insecure selects plaintext transport (no TLS).
 	Insecure bool
+	// SkipTLSVerify keeps TLS but does not verify the endpoint certificate.
+	SkipTLSVerify bool
+	// CAFile is a PEM CA bundle for verifying the endpoint.
+	CAFile string
+	// CertFile and KeyFile are a PEM client certificate and key for mTLS.
+	// Set both or neither.
+	CertFile string
+	KeyFile  string
+	// Headers are sent with every export request.
+	Headers map[string]string
 	// ProjectID is the GCP project ID.
 	ProjectID string
 }
 
-// NewOTelHandler creates an slog handler that bridges to OTel logs.
-// Returns nil if lp is nil.
+// NewOTelHandler creates an slog handler that bridges to OTel logs, with
+// error-valued attributes rendered as sanitized strings. Returns nil if lp
+// is nil.
 func NewOTelHandler(component string, lp log.LoggerProvider) slog.Handler {
 	if lp == nil {
 		return nil
 	}
-	return otelslog.NewHandler(component, otelslog.WithLoggerProvider(lp))
+	return WithSanitizedErrorAttrs(otelslog.NewHandler(component, otelslog.WithLoggerProvider(lp)))
 }
 
 // SetupWithOTel initializes the global logger with optional OTel bridge.

@@ -120,14 +120,12 @@ func TestExecuteUsageOnError_EndToEnd(t *testing.T) {
 	// subtests below so they reach cobra's flag/Args validation or RunE
 	// instead of failing earlier on an unrelated "no project" or "no
 	// image_registry" error.
-	origNoHub := noHub
 	origProjectPath := projectPath
 	origSilenceUsage := attachCmd.SilenceUsage
 	origNonInteractive := nonInteractive
 	origAutoConfirm := autoConfirm
 	origAutoHelp := autoHelp
 	t.Cleanup(func() {
-		noHub = origNoHub
 		projectPath = origProjectPath
 		attachCmd.SilenceUsage = origSilenceUsage
 		// PersistentPreRunE mutates these (agent mode / cli.* settings) in
@@ -141,13 +139,10 @@ func TestExecuteUsageOnError_EndToEnd(t *testing.T) {
 		rootCmd.SetErr(nil)
 	})
 
-	t.Setenv("SCION_HOST_UID", "")
-	// A non-empty Hub endpoint makes config.IsHubContext() true, which is
-	// what PersistentPreRunE uses to skip the image_registry requirement.
-	// This doesn't affect the attach code path itself, which is gated
-	// separately by the package-level noHub flag set below.
-	t.Setenv("SCION_HUB_ENDPOINT", "https://hub.invalid.example")
-	noHub = true
+	// A fake hub: its endpoint in SCION_HUB_ENDPOINT makes
+	// config.IsHubContext() true, which is what PersistentPreRunE uses to
+	// skip the image_registry requirement, and attach reaches the hub.
+	withFakeHub(t)
 	projectPath = t.TempDir()
 
 	run := func(t *testing.T, args []string) (*cobra.Command, error) {
@@ -197,7 +192,6 @@ func TestExecuteUsageOnError_EndToEnd(t *testing.T) {
 // usage and runtime errors (hub or not) do not. A throwaway subcommand is
 // mounted on the real rootCmd so the whole cobra dispatch path is exercised.
 func TestExecuteUsageOnError_CentralSilence(t *testing.T) {
-	origNoHub := noHub
 	origProjectPath := projectPath
 	origNonInteractive := nonInteractive
 	origAutoConfirm := autoConfirm
@@ -225,7 +219,6 @@ func TestExecuteUsageOnError_CentralSilence(t *testing.T) {
 
 	t.Cleanup(func() {
 		rootCmd.RemoveCommand(probe)
-		noHub = origNoHub
 		projectPath = origProjectPath
 		nonInteractive = origNonInteractive
 		autoConfirm = origAutoConfirm
@@ -236,9 +229,7 @@ func TestExecuteUsageOnError_CentralSilence(t *testing.T) {
 		rootCmd.SetErr(nil)
 	})
 
-	hermeticCLIEnv(t)
-	t.Setenv("SCION_HUB_ENDPOINT", "https://hub.invalid.example")
-	noHub = true
+	withFakeHub(t)
 	projectPath = t.TempDir()
 
 	tests := []struct {
@@ -353,7 +344,7 @@ func resetCommandFlags(t *testing.T, c *cobra.Command) {
 	c.SilenceUsage = false
 	// LocalFlags, not Flags: once cobra has merged root's persistent flags
 	// into c.Flags() (Find and ExecuteC both do), resetting those would also
-	// reset the root package vars a test set up (projectPath, noHub, ...).
+	// reset the root package vars a test set up (projectPath, ...).
 	// The root --project Changed state is reset by resetRootProjectFlag.
 	// Persistent flags inherited from non-root parents (e.g. project
 	// messaging --project, hub allow-list --json) are not reset either; no
@@ -402,12 +393,12 @@ func resetRootProjectFlag(t *testing.T) {
 // validators, which cobra runs before the hook. Each row drives the real
 // rootCmd dispatch and must fail in that validator with usage shown.
 func TestExecuteUsageOnError_ArgsValidatorsKeepUsage(t *testing.T) {
-	origNoHub, origProjectPath := noHub, projectPath
+	origProjectPath := projectPath
 	origScheduleIn, origScheduleAt, origScheduleType := scheduleIn, scheduleAt, scheduleType
 	origScheduleAgent, origScheduleMessage := scheduleAgent, scheduleMessage
 	origDC, origDA, origCP := recoverDisableConstraint, recoverDisableAll, recoverConfirmationPhrase
 	t.Cleanup(func() {
-		noHub, projectPath = origNoHub, origProjectPath
+		projectPath = origProjectPath
 		scheduleIn, scheduleAt, scheduleType = origScheduleIn, origScheduleAt, origScheduleType
 		scheduleAgent, scheduleMessage = origScheduleAgent, origScheduleMessage
 		recoverDisableConstraint, recoverDisableAll, recoverConfirmationPhrase = origDC, origDA, origCP
@@ -415,9 +406,7 @@ func TestExecuteUsageOnError_ArgsValidatorsKeepUsage(t *testing.T) {
 		rootCmd.SetOut(nil)
 		rootCmd.SetErr(nil)
 	})
-	hermeticCLIEnv(t)
-	t.Setenv("SCION_HUB_ENDPOINT", "https://hub.invalid.example")
-	noHub = true
+	withFakeHub(t)
 	projectPath = t.TempDir()
 
 	saveCLIModeState(t)
@@ -500,7 +489,7 @@ func TestUsageError(t *testing.T) {
 // through the real rootCmd dispatch: the check runs after root's hook set
 // SilenceUsage, and must still show usage.
 func TestExecuteUsageOnError_RunEUsageErrors(t *testing.T) {
-	origNoHub, origProjectPath := noHub, projectPath
+	origProjectPath := projectPath
 	origMsgIn, origMsgAt := msgIn, msgAt
 	origScheduleName, origScheduleCron := scheduleName, scheduleCron
 	origSortField := sortField
@@ -510,7 +499,7 @@ func TestExecuteUsageOnError_RunEUsageErrors(t *testing.T) {
 		if f := rootCmd.PersistentFlags().Lookup("global"); f != nil {
 			f.Changed = false
 		}
-		noHub, projectPath = origNoHub, origProjectPath
+		projectPath = origProjectPath
 		msgIn, msgAt = origMsgIn, origMsgAt
 		scheduleName, scheduleCron = origScheduleName, origScheduleCron
 		sortField = origSortField
@@ -518,9 +507,7 @@ func TestExecuteUsageOnError_RunEUsageErrors(t *testing.T) {
 		rootCmd.SetOut(nil)
 		rootCmd.SetErr(nil)
 	})
-	hermeticCLIEnv(t)
-	t.Setenv("SCION_HUB_ENDPOINT", "https://hub.invalid.example")
-	noHub = true
+	withFakeHub(t)
 	tempProject := t.TempDir()
 	projectPath = tempProject
 
@@ -542,6 +529,8 @@ func TestExecuteUsageOnError_RunEUsageErrors(t *testing.T) {
 		{"skills publish: no --version", []string{"skills", "publish", "./skill"}, "--version is required"},
 		{"sync to: no agent", []string{"sync", "to"}, "agent-level sync requires an agent name"},
 		{"sync push: agent name given", []string{"sync", "push", "x"}, "'push' does not take an agent name"},
+		{"sync <agent>: no direction", []string{"sync", "a1"}, "agent-level sync requires a direction: scion sync to|from a1"},
+		{"sync: unknown direction", []string{"sync", "up", "a1"}, "invalid direction 'up', must be 'to' or 'from'"},
 		{"start: negative --wait-timeout", []string{"start", "a1", "--wait-timeout=-5s"}, "--wait-timeout must not be negative"},
 		{"service-accounts list: --assignable with --global", []string{"service-accounts", "list", "--global", "--assignable"}, "--assignable asks which accounts"},
 		{"project skills add: skill URI with --from-directory", []string{"project", "skills", "add", "skill://foo", "--from-directory", "https://github.com/org/repo/tree/main/skills"}, "cannot combine a skill URI argument with --from-directory"},
@@ -569,7 +558,6 @@ func TestExecuteUsageOnError_RunEUsageErrors(t *testing.T) {
 			assert.Contains(t, err.Error(), tt.wantErr)
 			assert.Equal(t, target, cmd)
 			assert.True(t, target.SilenceUsage, "the check must run after root's hook (RunE), not in Args")
-			assert.True(t, noHub, "the per-row flag reset must not undo the noHub setup")
 			assert.Equal(t, tempProject, projectPath, "the per-row flag reset must not undo the temp project")
 			assert.True(t, isUsageError(err), "error: %v", err)
 			assert.True(t, showUsageForError(cmd, err, true))
@@ -584,9 +572,9 @@ func TestExecuteUsageOnError_RunEUsageErrors(t *testing.T) {
 // reach them.
 func TestExecuteUsageOnError_HubPathUsageError(t *testing.T) {
 	saveCLIModeState(t)
-	origProjectPath, origNoHub := projectPath, noHub
+	origProjectPath := projectPath
 	t.Cleanup(func() {
-		projectPath, noHub = origProjectPath, origNoHub
+		projectPath = origProjectPath
 		rootCmd.SetArgs(nil)
 		rootCmd.SetOut(nil)
 		rootCmd.SetErr(nil)
@@ -629,7 +617,6 @@ func TestExecuteUsageOnError_HubPathUsageError(t *testing.T) {
 			// against the temp env project and never the repository's own
 			// .scion.
 			projectPath = setupEnvProject(t, tmpHome, server.URL)
-			noHub = false
 			var buf bytes.Buffer
 			rootCmd.SetOut(&buf)
 			rootCmd.SetErr(&buf)
@@ -758,7 +745,6 @@ func TestHubAuthLoginDoesNotRequireImageRegistry(t *testing.T) {
 	origProjectPath := projectPath
 	origProfile := profile
 	origOutputFormat := outputFormat
-	origNoHub := noHub
 	origHubEndpoint := hubEndpoint
 	origNonInteractive := nonInteractive
 	origAutoConfirm := autoConfirm
@@ -767,7 +753,6 @@ func TestHubAuthLoginDoesNotRequireImageRegistry(t *testing.T) {
 		projectPath = origProjectPath
 		profile = origProfile
 		outputFormat = origOutputFormat
-		noHub = origNoHub
 		hubEndpoint = origHubEndpoint
 		nonInteractive = origNonInteractive
 		autoConfirm = origAutoConfirm
@@ -785,7 +770,6 @@ func TestHubAuthLoginDoesNotRequireImageRegistry(t *testing.T) {
 	projectPath = ""
 	profile = ""
 	outputFormat = ""
-	noHub = false
 	hubEndpoint = "http://127.0.0.1:8080"
 	nonInteractive = true
 	autoConfirm = true
@@ -800,7 +784,6 @@ func TestServerStartDoesNotRequireImageRegistry(t *testing.T) {
 	origProjectPath := projectPath
 	origProfile := profile
 	origOutputFormat := outputFormat
-	origNoHub := noHub
 	origNonInteractive := nonInteractive
 	origAutoConfirm := autoConfirm
 	defer func() {
@@ -808,7 +791,6 @@ func TestServerStartDoesNotRequireImageRegistry(t *testing.T) {
 		projectPath = origProjectPath
 		profile = origProfile
 		outputFormat = origOutputFormat
-		noHub = origNoHub
 		nonInteractive = origNonInteractive
 		autoConfirm = origAutoConfirm
 	}()
@@ -826,7 +808,6 @@ func TestServerStartDoesNotRequireImageRegistry(t *testing.T) {
 	projectPath = ""
 	profile = ""
 	outputFormat = ""
-	noHub = true
 	nonInteractive = true
 	autoConfirm = true
 
@@ -840,7 +821,7 @@ func TestServerStartDoesNotRequireImageRegistry(t *testing.T) {
 
 // setupNoProjectPreRun prepares package-level command state for tests that
 // exercise rootCmd.PersistentPreRunE outside any scion project. It saves and
-// restores globalMode, projectPath, noHub, nonInteractive, autoConfirm,
+// restores globalMode, projectPath, nonInteractive, autoConfirm,
 // outputFormat, profile and autoHelp (mirroring the fields
 // TestServerStartDoesNotRequireImageRegistry resets, so a stale value from
 // another test — outputFormat in particular, which PersistentPreRunE
@@ -857,7 +838,6 @@ func setupNoProjectPreRun(t *testing.T) {
 
 	origGlobalMode := globalMode
 	origProjectPath := projectPath
-	origNoHub := noHub
 	origNonInteractive := nonInteractive
 	origAutoConfirm := autoConfirm
 	origOutputFormat := outputFormat
@@ -866,7 +846,6 @@ func setupNoProjectPreRun(t *testing.T) {
 	t.Cleanup(func() {
 		globalMode = origGlobalMode
 		projectPath = origProjectPath
-		noHub = origNoHub
 		nonInteractive = origNonInteractive
 		autoConfirm = origAutoConfirm
 		outputFormat = origOutputFormat
@@ -896,7 +875,6 @@ func setupNoProjectPreRun(t *testing.T) {
 
 	globalMode = false
 	projectPath = ""
-	noHub = true
 	nonInteractive = true
 	autoConfirm = true
 	outputFormat = ""
@@ -985,10 +963,8 @@ func TestOrdinaryCommandStillRequiresProject(t *testing.T) {
 
 func TestDevAuthWarning(t *testing.T) {
 	// Save and restore original flags
-	origNoHub := noHub
 	origHubEndpoint := hubEndpoint
 	defer func() {
-		noHub = origNoHub
 		hubEndpoint = origHubEndpoint
 	}()
 
@@ -1017,50 +993,63 @@ hub:
 
 	tests := []struct {
 		name          string
-		noHubFlag     bool
 		hubEndpoint   string
 		devTokenEnv   string
 		devTokenFile  string
+		hubTokenEnv   string
 		expectWarning bool
 	}{
 		{
-			name:          "No hub enabled, no warning",
-			noHubFlag:     true,
+			name:          "No dev token, no warning",
 			expectWarning: false,
 		},
 		{
-			name:          "Local hub endpoint with dev token env var",
-			noHubFlag:     false,
+			// The local workstation server on loopback is reached with its
+			// dev token by design: no banner.
+			name:          "Local workstation hub with dev token env var: no banner",
 			hubEndpoint:   "http://localhost:9810",
 			devTokenEnv:   "scion_dev_testtoken123",
-			expectWarning: true,
+			expectWarning: false,
 		},
 		{
 			name:          "Hub endpoint via flag, no dev token",
-			noHubFlag:     false,
 			hubEndpoint:   "http://localhost:9810",
 			devTokenEnv:   "",
 			expectWarning: false,
 		},
 		{
 			name:          "Remote hub with dev token env var warns",
-			noHubFlag:     false,
 			hubEndpoint:   "https://hub.demo.scion-ai.dev/",
 			devTokenEnv:   "scion_dev_testtoken123",
 			expectWarning: true,
 		},
 		{
 			name:          "Remote hub with dev token file does not warn",
-			noHubFlag:     false,
 			hubEndpoint:   "https://hub.demo.scion-ai.dev/",
 			devTokenFile:  "scion_dev_testtoken123",
 			expectWarning: false,
 		},
 		{
-			name:          "Local hub with dev token file warns",
-			noHubFlag:     false,
+			name:          "Local workstation hub with dev token file: no banner",
 			hubEndpoint:   "http://localhost:9810",
 			devTokenFile:  "scion_dev_testtoken123",
+			expectWarning: false,
+		},
+		{
+			// Loopback, but reached with an explicit token (SCION_HUB_TOKEN,
+			// which settings read as hub.token): not the local workstation
+			// hub and not dev auth, so no banner either way.
+			name:          "Loopback hub with dev token and SCION_HUB_TOKEN: explicit auth, no banner",
+			hubEndpoint:   "http://localhost:9810",
+			devTokenEnv:   "scion_dev_testtoken123",
+			hubTokenEnv:   "bearer-test-token",
+			expectWarning: false,
+		},
+		{
+			// Any other hub keeps the banner when dev auth is in use.
+			name:          "Another remote hub with dev token env var still warns",
+			hubEndpoint:   "https://dev-hub.example.com:9810",
+			devTokenEnv:   "scion_dev_testtoken123",
 			expectWarning: true,
 		},
 	}
@@ -1068,7 +1057,6 @@ hub:
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Set flags
-			noHub = tt.noHubFlag
 			hubEndpoint = tt.hubEndpoint
 
 			// Set environment
@@ -1079,10 +1067,13 @@ hub:
 				_ = os.Unsetenv("SCION_DEV_TOKEN")
 			}
 			_ = os.Unsetenv("SCION_DEV_TOKEN_FILE")
-			// Clear v1 settings env var to prevent it from leaking dev auth
-			origServerAuthToken := os.Getenv("SCION_AUTH_TOKEN")
-			_ = os.Unsetenv("SCION_AUTH_TOKEN")
-			defer func() { _ = os.Setenv("SCION_AUTH_TOKEN", origServerAuthToken) }()
+			// Hermetic credentials: the local-workstation check reads the
+			// selected hub credential (SCION_HUB_TOKEN, SCION_AUTH_TOKEN), and
+			// the endpoint must come only from the flag or settings here.
+			t.Setenv("SCION_HUB_TOKEN", tt.hubTokenEnv)
+			t.Setenv("SCION_AUTH_TOKEN", "")
+			t.Setenv("SCION_HUB_ENDPOINT", "")
+			t.Setenv("SCION_HUB_URL", "")
 
 			// Write dev token file if specified
 			devTokenPath := filepath.Join(scionDir, "dev-token")

@@ -206,6 +206,16 @@ func (s *Server) handlePutAdminExperiments(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Test identities with admin roles change no experiment (test-admin
+	// policy).
+	names := make([]string, 0, len(body.Overrides))
+	for name := range body.Overrides {
+		names = append(names, name)
+	}
+	if s.rejectTestAdminSettingsWrite(w, r, nil, names) {
+		return
+	}
+
 	reg := s.experimentRegistry()
 	for name, valPtr := range body.Overrides {
 		if valPtr == nil {
@@ -367,6 +377,15 @@ func (s *Server) handleDeleteAdminExperiments(w http.ResponseWriter, r *http.Req
 			writeError(w, http.StatusBadRequest, "validation_failed", "Invalid request body", nil)
 			return
 		}
+	}
+	// A reset touches every experiment: refused to test identities with
+	// admin roles (test-admin policy).
+	var resetNames []string
+	for _, e := range s.experimentRegistry().All() {
+		resetNames = append(resetNames, e.Name)
+	}
+	if s.rejectTestAdminSettingsWrite(w, r, nil, resetNames) {
+		return
 	}
 
 	ctx := r.Context()

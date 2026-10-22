@@ -328,7 +328,7 @@ var messagingOperations = []OperationSpec{
 		},
 		Bearer: AdmitOn(BearerTargetSelfRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
-	// Chat thread groups (ptone/scion#4424, experiment hub.chat_thread_groups):
+	// Chat thread groups (ptone/scion#4424):
 	// metadata over a project's group conversations, authorized exactly like
 	// a project group conversation. An agent must belong to the group's
 	// project.
@@ -642,5 +642,55 @@ var messagingOperations = []OperationSpec{
 			{Package: "pkg/hub", Function: "TestNotificationTemplates_ListedOnlyForReadableProjects"},
 		},
 		Bearer: AdmitOn(BearerTargetSelfRecord, BearerBoundaryProject, BearerBoundaryHub),
+	},
+	{
+		ID:          "project.conversation.gcsobject.read",
+		Domain:      "project",
+		Description: "Fetch a gs:// object named in a message of a project group conversation, through the sending agent's assigned service account. Needs project:read on the conversation's project; a token needs it inside its boundary",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/gcs/object", Method: "GET", Variant: "project_group"},
+		},
+		// The message named by the query decides the branch: a message of a
+		// project group conversation is read under project.read on the
+		// conversation's project (canReadGroupConversation); the URI must
+		// appear in the message body and the sender must be an agent with
+		// an admissible assigned service account.
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "message-conversation-project",
+		BasePermission:   "project.read",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialResourceNotFound},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestGCSObjectToken_ProjectGroupNeedsProjectRead"},
+		},
+		Bearer: AdmitOn(BearerTargetConversationRecord, BearerBoundaryProject, BearerBoundaryHub),
+	},
+	{
+		ID:          "web.events.stream",
+		Domain:      "web",
+		Description: "Stream hub events to the web client. The web server admits only a signed-in web session; a token never opens the stream",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointSSE, Pattern: "/events", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "event-subjects",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestWebEventStream_RefusesUserAccessToken"},
+		},
+		Exemptions: []Exemption{{
+			Kind:   ExemptionAuthenticationOnly,
+			Reason: "Each requested subject is authorized for the session user when the stream opens; no single resource permission applies",
+			Scope:  "web event stream",
+			Waives: []WaivedObligation{WaiveBasePermission},
+		}},
+		Bearer: SessionOnly(ReasonInteractiveState),
 	},
 }

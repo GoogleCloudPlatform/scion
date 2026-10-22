@@ -24,6 +24,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestRequireImageRegistryForBroker_NoRegistry(t *testing.T) {
@@ -49,16 +50,34 @@ func TestRequireImageRegistryForBroker_EnvVar(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestRequireImageRegistryForBroker_MaintenanceEnvVar(t *testing.T) {
+// TestRequireImageRegistryForBroker_MaintenanceEnvVarIsNotASource: the
+// maintenance registry applies to maintenance builds only, so it does not
+// satisfy the broker check, and the error names the replacement
+// (ptone/scion#3916). The broker and hosted error never mentions the
+// setup wizard, which neither has.
+func TestRequireImageRegistryForBroker_MaintenanceEnvVarIsNotASource(t *testing.T) {
 	t.Setenv("SCION_IMAGE_REGISTRY", "")
 	t.Setenv("SCION_MAINTENANCE_IMAGE_REGISTRY", "ghcr.io/test-maintenance")
 
 	// Point HOME at an empty temp dir so settings.yaml is absent.
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
+	t.Chdir(tmpHome)
 
 	err := requireImageRegistryForBroker()
-	assert.NoError(t, err)
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "SCION_MAINTENANCE_IMAGE_REGISTRY now applies only to maintenance builds; set SCION_IMAGE_REGISTRY or image_registry in settings.yaml")
+		assert.NotContains(t, err.Error(), "wizard")
+	}
+	assert.Contains(t, workstationRegistryDegradeWarning(), "SCION_MAINTENANCE_IMAGE_REGISTRY now applies only to maintenance builds")
+	assert.Contains(t, workstationRegistryDegradeWarning(), "setup wizard")
+
+	t.Setenv("SCION_MAINTENANCE_IMAGE_REGISTRY", "")
+	err = requireImageRegistryForBroker()
+	if assert.Error(t, err) {
+		assert.NotContains(t, err.Error(), "SCION_MAINTENANCE_IMAGE_REGISTRY")
+	}
+	assert.NotContains(t, workstationRegistryDegradeWarning(), "SCION_MAINTENANCE_IMAGE_REGISTRY")
 }
 
 func TestRequireImageRegistryForBroker_Settings(t *testing.T) {
@@ -155,7 +174,8 @@ func TestResolveBrokerIDPrefersConfiguredIDOverDefault(t *testing.T) {
 		Hub: &config.HubClientConfig{BrokerID: "configured-broker"},
 	}
 
-	got := resolveBrokerID(context.Background(), cfg, settings, nil, t.TempDir(), "cloudrun-default", nil)
+	got, err := resolveBrokerID(context.Background(), cfg, settings, nil, isolatedGlobalDir(t), "cloudrun-default", nil)
+	require.NoError(t, err)
 
 	assert.Equal(t, "configured-broker", got)
 }
@@ -177,11 +197,23 @@ func writeBrokerRuntimeSettings(t *testing.T, projectSettings string) string {
 	return projectDir
 }
 
+// recordingGetRuntime wraps getRuntime and keeps the build record it
+// returned, so a test can check resolveBrokerDefaultRuntime passes it
+// through unchanged.
+func recordingGetRuntime(getRuntime func(string, string) (scionruntime.Runtime, config.RuntimeBuildRecord)) (func(string, string) (scionruntime.Runtime, config.RuntimeBuildRecord), *config.RuntimeBuildRecord) {
+	var got config.RuntimeBuildRecord
+	return func(projectPath, profileName string) (scionruntime.Runtime, config.RuntimeBuildRecord) {
+		rt, rec := getRuntime(projectPath, profileName)
+		got = rec
+		return rt, rec
+	}, &got
+}
+
 // getRuntimeFor returns a getRuntime function for resolveBrokerDefaultRuntime
 // that resolves the default runtime against projectDir's settings.
-func getRuntimeFor(projectDir string) func(string, string) scionruntime.Runtime {
-	return func(string, string) scionruntime.Runtime {
-		return scionruntime.GetRuntime(projectDir, "")
+func getRuntimeFor(projectDir string) func(string, string) (scionruntime.Runtime, config.RuntimeBuildRecord) {
+	return func(string, string) (scionruntime.Runtime, config.RuntimeBuildRecord) {
+		return scionruntime.GetRuntimeWithRecord(projectDir, "")
 	}
 }
 
@@ -209,13 +241,14 @@ func TestResolveBrokerDefaultRuntime_InvalidSubstrateProfileRefusesStart(t *test
 	var logged []string
 	logf := func(format string, args ...interface{}) { logged = append(logged, fmt.Sprintf(format, args...)) }
 
-	rt, err := resolveBrokerDefaultRuntime(getRuntimeFor(projectDir), logf)
+	rt, rec, err := resolveBrokerDefaultRuntime(getRuntimeFor(projectDir), logf)
 	if err == nil {
 		t.Fatalf("expected startup to be refused, got runtime %q", rt.Name())
 	}
 	assert.ErrorIs(t, err, scionruntime.ErrSubstrateProfileInvalid)
 	assert.Contains(t, err.Error(), "substrate-prod")
 	assert.Nil(t, rt)
+	assert.Equal(t, config.RuntimeBuildRecord{}, rec, "a refused startup returns the zero build record")
 	assert.Empty(t, logged, "a refused startup must not log a runtime as in use")
 }
 
@@ -238,10 +271,12 @@ func TestResolveBrokerDefaultRuntime_NonSubstrateErrorRuntimeStartsDegraded(t *t
 	var logged []string
 	logf := func(format string, args ...interface{}) { logged = append(logged, fmt.Sprintf(format, args...)) }
 
-	rt, err := resolveBrokerDefaultRuntime(getRuntimeFor(projectDir), logf)
+	getRuntime, fromClosure := recordingGetRuntime(getRuntimeFor(projectDir))
+	rt, rec, err := resolveBrokerDefaultRuntime(getRuntime, logf)
 	if err != nil {
 		t.Fatalf("a non-substrate runtime failure must not refuse startup, got: %v", err)
 	}
+	assert.Equal(t, *fromClosure, rec, "the build record is passed through unchanged")
 	er, ok := rt.(*scionruntime.ErrorRuntime)
 	if !ok {
 		t.Fatalf("test setup: expected an *ErrorRuntime for an unloadable kubeconfig, got %T", rt)
@@ -256,7 +291,7 @@ func TestResolveBrokerDefaultRuntime_NonSubstrateErrorRuntimeStartsDegraded(t *t
 // an empty working directory so no project settings are picked up. The
 // returned getRuntime resolves the default runtime from operator settings
 // alone, the way a deployed broker does.
-func writeOperatorSubstrateSettings(t *testing.T, operatorSettings string) func(string, string) scionruntime.Runtime {
+func writeOperatorSubstrateSettings(t *testing.T, operatorSettings string) func(string, string) (scionruntime.Runtime, config.RuntimeBuildRecord) {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -267,8 +302,8 @@ func writeOperatorSubstrateSettings(t *testing.T, operatorSettings string) func(
 		t.Fatal(err)
 	}
 	t.Chdir(t.TempDir())
-	return func(string, string) scionruntime.Runtime {
-		return scionruntime.GetRuntime("", "")
+	return func(string, string) (scionruntime.Runtime, config.RuntimeBuildRecord) {
+		return scionruntime.GetRuntimeWithRecord("", "")
 	}
 }
 
@@ -347,13 +382,14 @@ func TestResolveBrokerDefaultRuntime_SubstrateConfigValidationFailureRefusesStar
 			var logged []string
 			logf := func(format string, args ...interface{}) { logged = append(logged, fmt.Sprintf(format, args...)) }
 
-			rt, err := resolveBrokerDefaultRuntime(getRuntime, logf)
+			rt, rec, err := resolveBrokerDefaultRuntime(getRuntime, logf)
 			if err == nil {
 				t.Fatalf("expected startup to be refused for a substrate config validation failure, got runtime %q", rt.Name())
 			}
 			assert.ErrorIs(t, err, scionruntime.ErrSubstrateProfileInvalid)
 			assert.Contains(t, err.Error(), tt.wantInErrMsg)
 			assert.Nil(t, rt)
+			assert.Equal(t, config.RuntimeBuildRecord{}, rec, "a refused startup returns the zero build record")
 			assert.Empty(t, logged, "a refused startup must not log a runtime as in use")
 			assert.Zero(t, built, "config validation must fail before the runtime is built")
 		})
@@ -376,15 +412,16 @@ func TestResolveBrokerDefaultRuntime_SubstrateBuildFailureStartsDegraded(t *test
 	})
 	t.Cleanup(restore)
 
-	getRuntime := writeOperatorSubstrateSettings(t, operatorSubstrateSettings(""))
+	getRuntime, fromClosure := recordingGetRuntime(writeOperatorSubstrateSettings(t, operatorSubstrateSettings("")))
 
 	var logged []string
 	logf := func(format string, args ...interface{}) { logged = append(logged, fmt.Sprintf(format, args...)) }
 
-	rt, err := resolveBrokerDefaultRuntime(getRuntime, logf)
+	rt, rec, err := resolveBrokerDefaultRuntime(getRuntime, logf)
 	if err != nil {
 		t.Fatalf("a substrate construct-time dependency failure must not refuse startup, got: %v", err)
 	}
+	assert.Equal(t, *fromClosure, rec, "the build record is passed through unchanged")
 	assert.Equal(t, 1, built, "test setup: the stubbed builder should have been called once")
 	er, ok := rt.(*scionruntime.ErrorRuntime)
 	if !ok {
@@ -396,16 +433,37 @@ func TestResolveBrokerDefaultRuntime_SubstrateBuildFailureStartsDegraded(t *test
 }
 
 // TestResolveBrokerDefaultRuntime_HealthyRuntimeStartsNormally: an ordinary
-// runtime is returned as-is and logged.
+// runtime is returned as-is, with its build record unchanged, and logged.
 func TestResolveBrokerDefaultRuntime_HealthyRuntimeStartsNormally(t *testing.T) {
 	healthy := scionruntime.NewDockerRuntime()
+	healthyRec := config.RuntimeBuildRecord{Present: true, EntryName: "docker-main"}
 	var logged []string
 	logf := func(format string, args ...interface{}) { logged = append(logged, fmt.Sprintf(format, args...)) }
 
-	rt, err := resolveBrokerDefaultRuntime(func(string, string) scionruntime.Runtime { return healthy }, logf)
+	rt, rec, err := resolveBrokerDefaultRuntime(func(string, string) (scionruntime.Runtime, config.RuntimeBuildRecord) {
+		return healthy, healthyRec
+	}, logf)
 	assert.NoError(t, err)
 	assert.Same(t, healthy, rt)
+	assert.Equal(t, healthyRec, rec, "the build record is passed through unchanged")
 	assert.Equal(t, []string{"Runtime broker using runtime: " + healthy.Name()}, logged)
+}
+
+// TestResolveBrokerDefaultRuntime_RefusalDropsRecord: a refused runtime
+// returns the zero build record even when getRuntime returned a non-zero
+// one, so no record outlives the runtime it describes.
+func TestResolveBrokerDefaultRuntime_RefusalDropsRecord(t *testing.T) {
+	refused := &scionruntime.ErrorRuntime{Err: fmt.Errorf("wrapped: %w", scionruntime.ErrSubstrateProfileInvalid)}
+	var logged []string
+	logf := func(format string, args ...interface{}) { logged = append(logged, fmt.Sprintf(format, args...)) }
+
+	rt, rec, err := resolveBrokerDefaultRuntime(func(string, string) (scionruntime.Runtime, config.RuntimeBuildRecord) {
+		return refused, config.RuntimeBuildRecord{Present: true, EntryName: "substrate-prod"}
+	}, logf)
+	assert.ErrorIs(t, err, scionruntime.ErrSubstrateProfileInvalid)
+	assert.Nil(t, rt)
+	assert.Equal(t, config.RuntimeBuildRecord{}, rec)
+	assert.Empty(t, logged, "a refused startup must not log a runtime as in use")
 }
 
 // TestRefuseErrorRuntimeAtStartup_OnlySubstrateFailuresRefuse pins the

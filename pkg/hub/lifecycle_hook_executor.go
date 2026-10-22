@@ -26,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/lifecyclehooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -240,6 +241,12 @@ func (e *HTTPExecutor) resolveIdentityAndToken(ctx context.Context, hook *store.
 	if err != nil {
 		return "", "", fmt.Errorf("resolve SA record %s: %w", hook.ExecutionIdentity, err)
 	}
+	// A broker host service account record is never a hook identity; a hook
+	// stored before that was refused at write time fails here, before any
+	// token is minted.
+	if store.IsHostSATranslationRecord(sa) {
+		return "", "", fmt.Errorf("hook %s: execution identity %s is a broker host service account record and cannot be used", hook.ID, hook.ExecutionIdentity)
+	}
 	saEmail = sa.Email
 
 	// For webhook actions, do NOT attach the SA token.
@@ -304,8 +311,18 @@ func (e *HTTPExecutor) buildRenderVars(ctx context.Context, hook *store.Lifecycl
 	if agent.Phase != "" {
 		vars["AGENT_STATUS"] = agent.Phase
 	}
-	if agent.Message != "" {
+	// A halted hook does not carry the agent's free-text message: a halt is
+	// the platform's finding, described by the exit reason alone.
+	if agent.Message != "" && trigger != store.LifecycleHookTriggerHalted {
 		vars["ERROR_MSG"] = agent.Message
+	}
+	// The exit reason, only when it is one of the known values; it reaches
+	// the request only as a JSON-encoded body value. The agent-reported
+	// signaled reason is left out, as unknown values are: it accompanies
+	// almost every ordinary stop.
+	if agent.ExitReason != "" && state.ExitReason(agent.ExitReason).IsValid() &&
+		state.ExitReason(agent.ExitReason) != state.ExitReasonSignaled {
+		vars["EXIT_REASON"] = agent.ExitReason
 	}
 
 	return vars

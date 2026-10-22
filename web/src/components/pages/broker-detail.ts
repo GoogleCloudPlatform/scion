@@ -32,9 +32,15 @@ import type {
   InheritedSetting,
 } from '../../shared/types.js';
 import { agentStatusBadge } from '../../shared/agent-state-display.js';
+import {
+  PRESENTATION_CAPTION,
+  presentationRows,
+  runtimeTargetRows,
+} from '../../shared/runtime-target.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
+import { visibleInterval } from '../../client/visible-interval.js';
 import { brokerTypeBadgeStyles } from '../shared/resource-styles.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 import { showToast } from '../../utils/toast.js';
@@ -97,7 +103,7 @@ export class ScionPageBrokerDetail extends LitElement {
   private brokerSettingsError: string | null = null;
 
   private boundOnBrokersUpdated = this.onBrokersUpdated.bind(this);
-  private relativeTimeInterval: ReturnType<typeof setInterval> | null = null;
+  private stopRelativeTimeTick: (() => void) | null = null;
 
   static override styles = [
     brokerTypeBadgeStyles,
@@ -166,6 +172,49 @@ export class ScionPageBrokerDetail extends LitElement {
         font-weight: 600;
         color: var(--scion-text, #1e293b);
         margin: 0;
+      }
+
+      .runtime-target-card {
+        padding: 1.25rem;
+        background: var(--scion-surface, #ffffff);
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: var(--scion-radius-lg, 0.75rem);
+      }
+
+      .runtime-target-header {
+        justify-content: flex-start;
+        gap: 0.5rem;
+      }
+
+      .runtime-target-card h3 {
+        font-size: 0.875rem;
+        font-weight: 600;
+        color: var(--scion-text, #1e293b);
+        margin: 1rem 0 0.5rem;
+      }
+
+      .runtime-target-rows {
+        display: grid;
+        grid-template-columns: max-content 1fr;
+        gap: 0.25rem 1rem;
+        margin: 0;
+        font-size: 0.875rem;
+      }
+
+      .runtime-target-rows dt {
+        color: var(--scion-text-muted, #64748b);
+      }
+
+      .runtime-target-rows dd {
+        margin: 0;
+        color: var(--scion-text, #1e293b);
+        word-break: break-word;
+      }
+
+      .presentation-caption {
+        font-size: 0.8125rem;
+        color: var(--scion-text-muted, #64748b);
+        margin: 0.75rem 0 0;
       }
 
       .capabilities-row {
@@ -453,16 +502,14 @@ export class ScionPageBrokerDetail extends LitElement {
 
     stateManager.addEventListener('brokers-updated', this.boundOnBrokersUpdated);
 
-    this.relativeTimeInterval = setInterval(() => this.requestUpdate(), 15_000);
+    this.stopRelativeTimeTick = visibleInterval(() => this.requestUpdate(), 15_000);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     stateManager.removeEventListener('brokers-updated', this.boundOnBrokersUpdated);
-    if (this.relativeTimeInterval) {
-      clearInterval(this.relativeTimeInterval);
-      this.relativeTimeInterval = null;
-    }
+    this.stopRelativeTimeTick?.();
+    this.stopRelativeTimeTick = null;
   }
 
   private onBrokersUpdated(): void {
@@ -538,6 +585,36 @@ export class ScionPageBrokerDetail extends LitElement {
     const label = brokerType.charAt(0).toUpperCase() + brokerType.slice(1);
     const cssClass = brokerType === 'hosted' ? 'broker-type-badge hosted' : 'broker-type-badge';
     return html`<span class=${cssClass}>${label}</span>`;
+  }
+
+  /**
+   * Warning for the two host identity states that need attention. The
+   * configured value is used either way; it is changed through the
+   * Runtime Broker update API.
+   */
+  private renderHostIdentityAlert() {
+    const hostIdentity = this.broker?.hostIdentity;
+    if (!hostIdentity) return '';
+    let message: string;
+    if (hostIdentity.state === 'mismatch') {
+      message = "Pinned host service account differs from the host's identity";
+    } else if (hostIdentity.state === 'pinned_absent') {
+      message = 'Pinned host service account is not present on the host';
+    } else {
+      return '';
+    }
+    const configured = this.broker?.gcp_host_service_account_email;
+    return html`
+      <sl-alert variant="warning" open class="host-identity-alert">
+        <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+        <strong>${message}</strong>
+        ${configured ? html`<div>Configured: ${configured}</div>` : ''}
+        ${hostIdentity.observedEmail
+          ? html`<div>Host reports: ${hostIdentity.observedEmail}</div>`
+          : ''}
+        <div>The configured value is used. Change it through the Runtime Broker update API.</div>
+      </sl-alert>
+    `;
   }
 
   private getBrokerStatusVariant(status: string): 'success' | 'warning' | 'danger' | 'neutral' {
@@ -687,7 +764,9 @@ export class ScionPageBrokerDetail extends LitElement {
           : ''}
       </div>
 
+      ${this.renderHostIdentityAlert()}
       ${this.broker.capabilities ? this.renderCapabilities(this.broker.capabilities) : ''}
+      ${this.renderRuntimeTargetCard(this.broker)}
       ${this.broker.profiles && this.broker.profiles.length > 0
         ? this.renderProfiles(this.broker.profiles)
         : ''}
@@ -940,10 +1019,54 @@ export class ScionPageBrokerDetail extends LitElement {
           <h2>Capabilities</h2>
         </div>
         <div class="capabilities-row">
-          <span class="capability-tag ${capabilities.webPTY ? 'enabled' : ''}">WebPTY</span>
+          <span class="capability-tag ${capabilities.webPty ? 'enabled' : ''}">WebPTY</span>
           <span class="capability-tag ${capabilities.sync ? 'enabled' : ''}">Sync</span>
           <span class="capability-tag ${capabilities.attach ? 'enabled' : ''}">Attach</span>
         </div>
+      </div>
+    `;
+  }
+
+  /**
+   * Read-only "Runtime target" card of a flat Runtime Broker: the stored
+   * target, then the defaults its instance reported (FC4-a fields only, by
+   * name; see shared/runtime-target.ts). Nothing here is editable from the
+   * Hub. A legacy broker has no card.
+   */
+  private renderRuntimeTargetCard(broker: RuntimeBroker) {
+    const target = broker.runtimeTarget;
+    if (!target) return nothing;
+    const presentation = broker.runtimeTargetPresentation;
+    const observed = this.formatDate(broker.runtimeTargetPresentationObservedAt);
+    const caption = `Reported by the instance at ${observed}. ${PRESENTATION_CAPTION}`;
+    return html`
+      <div class="section runtime-target-card">
+        <div class="section-header runtime-target-header">
+          <sl-icon name="hdd-rack"></sl-icon>
+          <h2>Runtime target</h2>
+        </div>
+        <dl class="runtime-target-rows target-rows">
+          ${runtimeTargetRows(target, presentation).map(
+            (r) => html`
+              <dt>${r.label}</dt>
+              <dd>${r.value}</dd>
+            `
+          )}
+        </dl>
+        <h3>Reported defaults</h3>
+        ${presentation
+          ? html`
+              <dl class="runtime-target-rows presentation-rows">
+                ${presentationRows(presentation).map(
+                  (r) => html`
+                    <dt>${r.label}</dt>
+                    <dd>${r.value}</dd>
+                  `
+                )}
+              </dl>
+              <p class="presentation-caption">${caption}</p>
+            `
+          : html`<p class="presentation-caption">No defaults reported yet.</p>`}
       </div>
     `;
   }

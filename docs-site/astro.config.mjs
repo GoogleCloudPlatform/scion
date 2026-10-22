@@ -27,11 +27,13 @@ const hostedUserGuide = {
 	label: 'User Guide',
 	items: [
 		{ label: 'Connecting to a Hub', slug: 'hosted/user/hosted-user' },
+		{ label: 'Working with Several Hubs', slug: 'hosted/user/multiple-hubs' },
 		{ label: 'User Access Tokens', slug: 'hosted/user/personal-access-tokens' },
 		{ label: 'Test Identities on Another Test Hub', slug: 'hosted/user/test-identity-target-hubs' },
 		{ label: 'CLI from a Coding Agent', slug: 'hosted/user/coding-agent-cli' },
 		{ label: 'Secrets & Environment', slug: 'hosted/user/secrets' },
 		{ label: 'Pre-Start Hooks', slug: 'hosted/user/pre-start-hooks' },
+		{ label: 'Agent Plugins (Experimental)', slug: 'local/agent-plugins' },
 		{ label: 'Port Forwarding & Auto-Expose', slug: 'hosted/user/port-forwarding' },
 		{ label: 'Messaging & Notifications', slug: 'hosted/user/messaging' },
 		{ label: 'Using Artifacts', slug: 'hosted/user/artifacts' },
@@ -101,6 +103,7 @@ export default defineConfig({
 							label: 'Release Notes',
 							items: [
 								{ label: 'Overview', slug: 'release-notes' },
+								{ label: 'Oct 12 -- 18', slug: 'release-notes/2026-10-12' },
 								{ label: 'Oct 5 -- 11', slug: 'release-notes/2026-10-05' },
 								{ label: 'Sep 28 -- Oct 4', slug: 'release-notes/2026-09-28' },
 								{ label: 'Sep 21 -- 27', slug: 'release-notes/2026-09-21' },
@@ -130,7 +133,7 @@ export default defineConfig({
 					],
 				},
 				{
-					label: 'Local Mode',
+					label: 'Agents on Your Machine',
 					items: [
 						{ label: 'Local Configuration', slug: 'local/local-governance' },
 						{ label: 'Working with Agents', slug: 'local/agent-lifecycle' },
@@ -138,6 +141,7 @@ export default defineConfig({
 						{ label: 'Workspaces & Sharing Modes', slug: 'local/workspaces-and-sharing' },
 						{ label: 'Templates & Roles', slug: 'local/templates' },
 						{ label: 'Skills (Authoring & Publishing)', slug: 'local/skills' },
+						{ label: 'Agent Plugins (Experimental)', slug: 'local/agent-plugins' },
 						{ label: 'GCP Skill Registry', slug: 'local/skill-registry-gcp' },
 						{ label: 'Agent Credentials', slug: 'local/agent-credentials' },
 						{ label: 'Custom Images', slug: 'local/custom-images' },
@@ -194,6 +198,7 @@ export default defineConfig({
 								{ label: 'Multi-Broker Setup', slug: 'hosted/ha/multi-broker' },
 								{ label: 'Identity & Access (RBAC)', slug: 'hosted/ha/permissions' },
 								{ label: 'Proxy Auth (IAP)', slug: 'hosted/ha/auth-proxy-iap' },
+								{ label: 'Separate Conduit Relays', slug: 'hosted/ha/separate-relay' },
 								{ label: 'Lifecycle Hooks', slug: 'hosted/ha/lifecycle-hooks' },
 								{ label: 'Observability', slug: 'hosted/single-node/observability' },
 								{ label: 'Metrics', slug: 'hosted/single-node/metrics' },

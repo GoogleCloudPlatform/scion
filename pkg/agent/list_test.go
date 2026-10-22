@@ -1235,7 +1235,9 @@ func TestListLocalProvisionedOnly(t *testing.T) {
 
 // A vanished-pod report (the previous pod, removed by a preemption) must not
 // rewrite agent-info.json: a start may be provisioning the next generation,
-// and its live pod (runtime phase "") takes its phase from that file.
+// and its live Running pod (runtime phase "") takes its phase from that file.
+// (A live Pending pod reports runtime phase "starting" instead,
+// ptone/scion#5365, which is not read from the file.)
 func TestListVanishedPodReportDoesNotTouchAgentInfo(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	tmpDir := t.TempDir()
@@ -1289,14 +1291,14 @@ func TestListVanishedPodReportDoesNotTouchAgentInfo(t *testing.T) {
 		t.Fatalf("agent-info.json phase = %q, want it unchanged (%q)", onDisk.Phase, state.PhaseCreated)
 	}
 
-	// The new generation's pod, still pending (runtime phase ""), keeps the
-	// on-disk phase.
-	entry = api.AgentInfo{Name: agentName, ProjectPath: projectPath, Runtime: "kubernetes", ContainerStatus: "Pending"}
+	// The new generation's Running pod (runtime phase "") keeps the on-disk
+	// phase.
+	entry = api.AgentInfo{Name: agentName, ProjectPath: projectPath, Runtime: "kubernetes", ContainerStatus: "Running"}
 	agents, err = mgr.List(context.Background(), filter)
 	if err != nil {
 		t.Fatalf("List() error: %v", err)
 	}
 	if len(agents) != 1 || agents[0].Phase != string(state.PhaseCreated) {
-		t.Fatalf("live pending entry = %+v, want phase %q", agents, state.PhaseCreated)
+		t.Fatalf("live running entry = %+v, want phase %q", agents, state.PhaseCreated)
 	}
 }

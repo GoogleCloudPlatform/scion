@@ -1920,7 +1920,7 @@ describe('palette load is cancelled on every close path', () => {
   });
 });
 
-describe('_handlePaletteOpenRequest: the header button opens with { mode: "open" }, guarded the same as the shortcut', () => {
+describe('_handlePaletteOpenRequest: the footer button opens with { mode: "open" }, guarded the same as the shortcut', () => {
   it('dispatches togglePalette({ mode: "open" }) when every guard holds', () => {
     const page = createEligiblePage();
     const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
@@ -2237,8 +2237,8 @@ describe('on a touch-primary device, the open request holds the on-screen keyboa
     return document.querySelector<HTMLInputElement>('input[data-palette-keyboard-proxy]');
   }
 
-  /** A button that focuses itself and sends the open request from its click, as the header's does. */
-  function headerButton(): { button: HTMLButtonElement; focusedInTap: () => Element | null } {
+  /** A button that focuses itself, then sends the open request, like the palette footer's. */
+  function openerButton(): { button: HTMLButtonElement; focusedInTap: () => Element | null } {
     const button = document.createElement('button');
     document.body.appendChild(button);
     let focused: Element | null = null;
@@ -2256,7 +2256,7 @@ describe('on a touch-primary device, the open request holds the on-screen keyboa
     stubTouchPrimary();
     const page = createEligiblePage();
     document.body.appendChild(page);
-    const { button, focusedInTap } = headerButton();
+    const { button, focusedInTap } = openerButton();
 
     button.click();
 
@@ -2372,7 +2372,7 @@ describe('on a touch-primary device, the open request holds the on-screen keyboa
     stubTouchPrimary();
     const page = createEligiblePage();
     document.body.appendChild(page);
-    const { button } = headerButton();
+    const { button } = openerButton();
     button.click();
     await page.togglePalette();
     // The pending open stops its capture once its lazy import settles.

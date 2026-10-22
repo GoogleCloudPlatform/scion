@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/sshd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
@@ -75,7 +76,7 @@ func TestConduitSSHOnlyWithConduit(t *testing.T) {
 		n := countSSHBuilds(t)
 		h := newPFHub(t, true)
 		client := hub.NewClientWithConfig(h.srv.URL, "token-1", "agent-1")
-		env := map[string]string{envProjectID: "project-1", conduit.EnvLaunchID: "launch-1"}
+		env := map[string]string{projectkeys.EnvProjectID: "project-1", conduit.EnvLaunchID: "launch-1"}
 		getenv := func(k string) string { return env[k] }
 		ssh := prepareConduitSSH(client, true, conduit.PTYUser{}, nil, getenv)
 		if ssh != nil {
@@ -112,7 +113,7 @@ func TestConduitSSHOnlyWithConduit(t *testing.T) {
 		client := hub.NewClientWithConfig(h.srv.URL, "token-1", "agent-1")
 		env := map[string]string{
 			conduit.EnvHubExperiments: conduit.ExperimentConduit,
-			envProjectID:              "project-1",
+			projectkeys.EnvProjectID:  "project-1",
 			conduit.EnvLaunchID:       "launch-1",
 		}
 		getenv := func(k string) string { return env[k] }

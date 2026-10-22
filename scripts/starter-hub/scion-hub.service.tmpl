@@ -1,0 +1,35 @@
+## scion-hub systemd unit template for the starter hub.
+## Rendered by gce-start-hub.sh --full (lines starting with ## are dropped).
+## Rebuild from git compares the installed unit against this file and asks
+## for a re-provision when they differ (pkg/hub/unitdrift).
+## Rules for editing:
+##  - Each @TOKEN@ must expand to exactly one non-empty token without
+##    whitespace. Inline anything else as literal text.
+##  - If you change Description=, append the old value to
+##    knownStarterHubDescriptions in pkg/hub/unitdrift.
+[Unit]
+Description=Scion Hub API Server
+After=network.target
+
+[Service]
+User=scion
+Group=scion
+WorkingDirectory=@REPO_DIR@
+EnvironmentFile=/home/scion/.scion/hub.env
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/lib/google-cloud-sdk/bin"
+Environment="HOME=/home/scion"
+Environment="USE_GKE_GCLOUD_AUTH_PLUGIN=True"
+# Public base URL dispatched to agents. This makes the broker route colocated
+# Docker agents through the public URL (Caddy, unless --no-tls) so each runs
+# under bridge networking (own netns) instead of host networking, avoiding
+# metadata-server and telemetry port collisions between concurrent agents.
+Environment="SCION_SERVER_BASE_URL=@HUB_BASE_URL@"
+# Use journald for log management
+StandardOutput=journal
+StandardError=journal
+ExecStart=@SCION_BIN@ --global server start --foreground --hosted --enable-hub --enable-runtime-broker --runtime-broker-port 9800 --enable-web --web-port 8080 --storage-bucket ${SCION_HUB_STORAGE_BUCKET} --auto-provide
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

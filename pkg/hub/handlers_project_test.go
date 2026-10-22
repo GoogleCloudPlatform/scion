@@ -439,14 +439,11 @@ func TestPopulateAgentConfig_NoTelemetryWrittenToRecord(t *testing.T) {
 	template := &store.Template{
 		ID:   "tmpl-no-tel",
 		Slug: "no-tel-template",
-		Config: &store.TemplateConfig{
+		AgentConfig: &api.ScionConfig{
 			Telemetry: &api.TelemetryConfig{
 				Enabled: &tmplEnabled,
 				Cloud:   &api.TelemetryCloudConfig{Endpoint: "https://template-otel.example.com"},
 			},
-		},
-		AgentConfig: &api.ScionConfig{
-			Telemetry: &api.TelemetryConfig{Enabled: &tmplEnabled},
 		},
 	}
 	project := &store.Project{
@@ -733,9 +730,10 @@ func TestDeleteProject_DeleteAgents_DispatchesToBroker(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent2))
 
-	// Delete project — agents are always cascade-deleted
+	// Delete project with force — live agents are cascade-deleted
+	// (without force the delete is refused, ptone/scion#4811)
 	rec := doRequest(t, srv, http.MethodDelete,
-		"/api/v1/projects/"+project.ID, nil)
+		"/api/v1/projects/"+project.ID+"?force=true", nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 
 	// Verify dispatcher was called for both agents
@@ -761,8 +759,9 @@ func TestDeleteProject_AlwaysCascadeDeletesAgents(t *testing.T) {
 
 	project, _, _ := setupOnlineBrokerAgent(t, s, "project-nodelflag")
 
-	// Delete project without explicit deleteAgents param — agents should still be deleted
-	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+project.ID, nil)
+	// Delete project without explicit deleteAgents param — with force,
+	// agents should still be deleted (ptone/scion#4811)
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+project.ID+"?force=true", nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 
 	// Dispatcher should have been called (cascade delete is always on)
@@ -2248,11 +2247,61 @@ func TestCloneSharedWorkspaceProject_Success(t *testing.T) {
 	_, err = os.Stat(scionDir)
 	assert.NoError(t, err, ".scion directory should exist in cloned workspace")
 
+	// The source repository does not ignore .scion/agents/; the seeded clone
+	// must still pass the provisioning ignore check, without a tracked
+	// .gitignore change.
+	ignored := util.IsIgnored(workspacePath, ".scion/agents/")
+	assert.True(t, ignored, ".scion/agents/ should be git-ignored in the seeded shared workspace")
+	_, err = os.Stat(filepath.Join(workspacePath, ".gitignore"))
+	assert.True(t, os.IsNotExist(err), "seeding should not create a tracked .gitignore")
+
 	// Verify git identity
 	cmd := exec.Command("git", "-C", workspacePath, "config", "user.name")
 	output, err := cmd.Output()
 	require.NoError(t, err)
 	assert.Equal(t, "Scion", strings.TrimSpace(string(output)))
+}
+
+func TestCloneSharedWorkspaceProject_IgnoreRuleFailure_CleansUpWithoutPath(t *testing.T) {
+	srv, _ := testServer(t)
+
+	// The source repository's tracked .gitignore un-ignores .scion/agents/, so
+	// the seed cannot make agent state ignored and must fail the clone.
+	sourceDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(sourceDir, ".gitignore"), []byte("!.scion/agents/\n"), 0644))
+	for _, args := range [][]string{
+		{"init"},
+		{"config", "user.email", "test@test.com"},
+		{"config", "user.name", "Test"},
+		{"add", ".gitignore"},
+		{"commit", "-m", "init"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = sourceDir
+		require.NoError(t, cmd.Run(), "git %v", args)
+	}
+
+	project := &store.Project{
+		ID:        "project-clone-unignored",
+		Name:      "Clone Unignored",
+		Slug:      "clone-unignored-" + api.NewUUID()[:8],
+		GitRemote: "local/test/unignored",
+		Labels: map[string]string{
+			store.LabelWorkspaceMode:   store.WorkspaceModeShared,
+			"scion.dev/clone-url":      sourceDir,
+			"scion.dev/default-branch": "master",
+		},
+	}
+	workspacePath, err := hubManagedProjectPath(project.Slug)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(workspacePath) })
+
+	err = srv.cloneSharedWorkspaceProject(context.Background(), project)
+	require.Error(t, err)
+	assert.Equal(t, "shared workspace clone failed: could not set up the .scion/agents/ ignore rule", err.Error())
+	assert.NotContains(t, err.Error(), workspacePath, "the error reaches API responses and must not name the host path")
+	_, statErr := os.Stat(workspacePath)
+	assert.True(t, os.IsNotExist(statErr), "workspace directory should be cleaned up when the ignore rule cannot be set up")
 }
 
 func TestCloneSharedWorkspaceProject_Failure_CleansUp(t *testing.T) {

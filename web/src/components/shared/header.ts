@@ -41,13 +41,12 @@
 import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
-import type { User } from '../../shared/types.js';
-import { isFeatureEnabled, TERMINAL_WORKSPACE_FLAG } from '../../utils/feature-flags.js';
+import type { Project, User } from '../../shared/types.js';
+import { isFeatureEnabled } from '../../utils/feature-flags.js';
 import { TouchPrimaryController } from '../../utils/input-modality.js';
 import { apiFetch } from '../../client/api.js';
 import { TERMINAL_SESSION_COUNT_EVENT } from '../../client/terminal-workspace-events.js';
 import { TRAY_COUNT_EVENT, type TrayCountDetail } from '../../client/tray-count-events.js';
-import { CHAT_PALETTE_OPEN_REQUEST_EVENT } from '../../client/chat-palette-events.js';
 import {
   CHAT_UNREAD_COUNT_EVENT,
   chatUnread,
@@ -76,19 +75,6 @@ import {
 /** Appends a shortcut hint to a tooltip label, e.g. "Chat · ⌘2". */
 function withHint(label: string, hint: { label: string } | null): string {
   return hint ? `${label} · ${hint.label}` : label;
-}
-
-/**
- * The view modes the mode switch offers besides Dashboard, or null when
- * neither Chat nor Terminal is on and the switch is not shown at all. The
- * switch, the narrow-layout menu and the keyboard shortcuts all read this,
- * so a shortcut only ever reaches a mode the switch shows.
- */
-function offeredViewModes(): { chat: boolean; terminals: boolean } | null {
-  const chat = isFeatureEnabled(NATIVE_CHAT_FLAG);
-  const terminals = isFeatureEnabled(TERMINAL_WORKSPACE_FLAG);
-  if (!chat && !terminals) return null;
-  return { chat, terminals };
 }
 
 // ---------------------------------------------------------------------------
@@ -273,9 +259,8 @@ export class ScionHeader extends LitElement {
       align-items: center;
       gap: 0.5rem;
       /* Lets the title truncate instead of forcing .header-left (and, past
-         it, the palette button and both dropdowns) wider than the
-         viewport at narrow widths — same reasoning as .header-left's own
-         min-width: 0 above. */
+         it, both dropdowns) wider than the viewport at narrow widths —
+         same reasoning as .header-left's own min-width: 0 above. */
       min-width: 0;
     }
 
@@ -294,8 +279,8 @@ export class ScionHeader extends LitElement {
       font-weight: 700;
       color: var(--scion-text, #1e293b);
       /* Truncates with an ellipsis rather than wrapping onto a second line
-         (which grows the header's height) once the palette button and both
-         dropdowns leave it less room than its own text needs. */
+         (which grows the header's height) once both dropdowns leave it
+         less room than its own text needs. */
       min-width: 0;
       overflow: hidden;
       text-overflow: ellipsis;
@@ -946,54 +931,41 @@ export class ScionHeader extends LitElement {
   }
 
   // =========================================================================
-  // Palette button -- opens a quick palette from the header: the chat quick
-  // switcher on a chat route, or a graph view's "Jump to agent" palette
-  // while one is on screen. One button, one render path, shared by every
-  // host -- see renderPaletteButton's own doc comment. The terminal view
-  // has none here: its "Jump to agent" button is a labelled footer in its
-  // Open terminals column (TerminalWorkspaceRoot.buildRailFooter).
+  // Palette button -- opens a graph view's "Jump to agent" palette from the
+  // header while one is on screen. The chat and terminal views have none
+  // here: each opens its palette from a labelled button pinned to the bottom
+  // of its own list column (the chat page's spaces rail, and on phones its
+  // members column too; TerminalWorkspaceRoot.buildRailFooter).
   // =========================================================================
 
   /**
    * The header's palette button. Renders as a single element shared by every
    * responsive tier (positioned via `.header-right`'s own flex layout, see
    * the render() call site) rather than duplicated per tier. Visible on
-   * every width when signed in on a route with a palette to open: narrow
-   * screens need it most since they have no keyboard shortcut, but desktop
-   * keeps it too, both to discover the shortcut (via the tooltip) and for a
-   * pointer/trackpad user who would rather click than reach for a chord.
-   *
-   * Which host owns the click is resolved once here, as its open-request
-   * event, and threaded through to the click handler rather than re-resolved
-   * there: the route could otherwise change between render and click
-   * (unlikely for a header button, but this keeps the two in sync by
-   * construction rather than by coincidence).
+   * every width when signed in while a graph view offers its palette:
+   * narrow screens need it most since they have no keyboard shortcut, but
+   * desktop keeps it too, both to discover the shortcut (via the tooltip)
+   * and for a pointer/trackpad user who would rather click than reach for a
+   * chord.
    */
   private renderPaletteButton(): TemplateResult | typeof nothing {
     if (!this.user) return nothing;
-    const isChat = this.isChatView();
-    const isGraph = !isChat && !this.isTerminalView() && this.graphPaletteAvailable;
-    if (!isChat && !isGraph) return nothing;
-    const openRequestEvent = isChat
-      ? CHAT_PALETTE_OPEN_REQUEST_EVENT
-      : GRAPH_PALETTE_OPEN_REQUEST_EVENT;
+    if (this.isChatView() || this.isTerminalView() || !this.graphPaletteAvailable) return nothing;
 
     const isTouch = this.touchPrimary.isTouch;
     const isMac = isMacPlatform();
     const shortcutLabel = isMac ? '⌘K' : 'Ctrl+K';
     const ariaKeyshortcuts = isMac ? 'Meta+K' : 'Control+K';
-    const label = isChat ? 'Quick switcher' : 'Jump to agent';
-    const ariaLabel = isChat ? 'Open quick switcher' : 'Open Jump to agent';
 
     return html`
-      <sl-tooltip content=${`${label} (${shortcutLabel})`} ?disabled=${isTouch}>
+      <sl-tooltip content=${`Jump to agent (${shortcutLabel})`} ?disabled=${isTouch}>
         <button
           type="button"
           class="palette-button"
-          aria-label=${ariaLabel}
+          aria-label="Open Jump to agent"
           aria-haspopup="dialog"
           aria-keyshortcuts=${isTouch ? nothing : ariaKeyshortcuts}
-          @click=${(e: Event): void => this.handlePaletteButtonClick(e, openRequestEvent)}
+          @click=${this.handlePaletteButtonClick}
         >
           <sl-icon name="compass" aria-hidden="true"></sl-icon>
         </button>
@@ -1003,16 +975,18 @@ export class ScionHeader extends LitElement {
 
   /**
    * iOS and macOS Safari do not focus a `<button>` on click, so without this
-   * the deep active element the owning host captures as "what to restore
-   * focus to" would be whatever was focused before the click — which could
-   * be the chat composer, popping the on-screen keyboard back open the
+   * the deep active element the graph palette host captures as "what to
+   * restore focus to" would be whatever was focused before the click — which
+   * could be a text field, popping the on-screen keyboard back open the
    * instant the palette closes. Focusing the button explicitly first, before
    * dispatching, makes capture reliably see this button instead.
    */
-  private handlePaletteButtonClick(e: Event, openRequestEvent: string): void {
+  private handlePaletteButtonClick(e: Event): void {
     const btn = e.currentTarget as HTMLElement;
     btn.focus({ preventScroll: true });
-    this.dispatchEvent(new CustomEvent(openRequestEvent, { bubbles: true, composed: true }));
+    this.dispatchEvent(
+      new CustomEvent(GRAPH_PALETTE_OPEN_REQUEST_EVENT, { bubbles: true, composed: true })
+    );
   }
 
   // =========================================================================
@@ -1022,13 +996,10 @@ export class ScionHeader extends LitElement {
   /**
    * Inline segmented control for switching between Dashboard / Chat /
    * Terminal modes. Used in the wide center column (with labels) and in
-   * the compact tier (icon-only via CSS). Returns nothing when no
-   * alternative modes are feature-flagged on.
+   * the compact tier (icon-only via CSS).
    */
-  private renderModeSwitch(): TemplateResult | typeof nothing {
-    const offered = offeredViewModes();
-    if (!offered) return nothing;
-    const { chat: chatEnabled, terminals: terminalsEnabled } = offered;
+  private renderModeSwitch(): TemplateResult {
+    const chatEnabled = isFeatureEnabled(NATIVE_CHAT_FLAG);
 
     const isChat = this.isChatView();
     const isTerminal = this.isTerminalView();
@@ -1073,23 +1044,19 @@ export class ScionHeader extends LitElement {
               </sl-tooltip>
             `
           : ''}
-        ${terminalsEnabled
-          ? html`
-              <sl-tooltip content=${withHint(terminalsLabel, terminalsHint)}>
-                <button
-                  class=${isTerminal ? 'active' : ''}
-                  @click=${(): void => {
-                    void this.handleModeSwitch('terminals');
-                  }}
-                  aria-label=${terminalsLabel}
-                  aria-keyshortcuts=${terminalsHint?.aria ?? nothing}
-                >
-                  <sl-icon name="terminal"></sl-icon>
-                  <span class="mode-label">Terminal</span>
-                </button>
-              </sl-tooltip>
-            `
-          : ''}
+        <sl-tooltip content=${withHint(terminalsLabel, terminalsHint)}>
+          <button
+            class=${isTerminal ? 'active' : ''}
+            @click=${(): void => {
+              void this.handleModeSwitch('terminals');
+            }}
+            aria-label=${terminalsLabel}
+            aria-keyshortcuts=${terminalsHint?.aria ?? nothing}
+          >
+            <sl-icon name="terminal"></sl-icon>
+            <span class="mode-label">Terminal</span>
+          </button>
+        </sl-tooltip>
       </div>
     `;
   }
@@ -1100,12 +1067,9 @@ export class ScionHeader extends LitElement {
 
   /**
    * Dropdown for switching between Dashboard / Chat / Terminal modes.
-   * Returns nothing when no alternative modes are feature-flagged on.
    */
-  private renderModeDropdown(): TemplateResult | typeof nothing {
-    const offered = offeredViewModes();
-    if (!offered) return nothing;
-    const { chat: chatEnabled, terminals: terminalsEnabled } = offered;
+  private renderModeDropdown(): TemplateResult {
+    const chatEnabled = isFeatureEnabled(NATIVE_CHAT_FLAG);
 
     const { icon, label } = this.getCurrentMode();
     const isChat = this.isChatView();
@@ -1152,20 +1116,14 @@ export class ScionHeader extends LitElement {
                 </sl-menu-item>
               `
             : ''}
-          ${terminalsEnabled
-            ? html`
-                <sl-menu-item value="terminals" ?checked=${isTerminal}>
-                  <sl-icon slot="prefix" name="terminal"></sl-icon>
-                  Terminal
-                  ${this.terminalSessionCount > 0
-                    ? html`<span slot="suffix" class="count-badge"
-                        >${this.terminalSessionCount}</span
-                      >`
-                    : ''}
-                  ${this.renderMenuShortcutHint('terminals')}
-                </sl-menu-item>
-              `
-            : ''}
+          <sl-menu-item value="terminals" ?checked=${isTerminal}>
+            <sl-icon slot="prefix" name="terminal"></sl-icon>
+            Terminal
+            ${this.terminalSessionCount > 0
+              ? html`<span slot="suffix" class="count-badge">${this.terminalSessionCount}</span>`
+              : ''}
+            ${this.renderMenuShortcutHint('terminals')}
+          </sl-menu-item>
         </sl-menu>
       </sl-dropdown>
     `;
@@ -1469,12 +1427,8 @@ export class ScionHeader extends LitElement {
     try {
       const res = await apiFetch(`/api/v1/projects?slug=${encodeURIComponent(slug)}&limit=1`);
       if (res.ok) {
-        const data = (await res.json()) as {
-          items?: Array<{ id: string; slug: string }>;
-        };
-        if (data.items && data.items.length > 0) {
-          return data.items[0].id;
-        }
+        const data = (await res.json()) as { projects?: Project[] };
+        return data.projects?.[0]?.id ?? '';
       }
     } catch {
       // Slug resolution is best-effort; fall back to the top-level view.
@@ -1621,10 +1575,7 @@ export class ScionHeader extends LitElement {
 
   /** Whether the mode switch currently offers `mode`. */
   private isModeOffered(mode: ViewModeTarget): boolean {
-    const offered = offeredViewModes();
-    if (!offered) return false;
-    if (mode === 'chat') return offered.chat;
-    if (mode === 'terminals') return offered.terminals;
+    if (mode === 'chat') return isFeatureEnabled(NATIVE_CHAT_FLAG);
     return true;
   }
 

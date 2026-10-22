@@ -35,7 +35,9 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
 	"github.com/knadh/koanf/parsers/yaml"
@@ -52,7 +54,23 @@ import (
 // ResolveHarnessConfig looks up a named harness config and merges profile-level overrides.
 // If profileName is empty, ActiveProfile is used. If the config name is not found in the
 // settings map, an empty HarnessConfigEntry is used as the base (profile overrides still apply).
+//
+// On a flat instance view (ForFlatInstance) the instance's agent_defaults
+// take the profile's place: its volumes and its harness_overrides.<hc> are
+// applied over the same harness_configs.<hc> base, and profileName is not
+// used.
 func (vs *VersionedSettings) ResolveHarnessConfig(profileName, harnessConfigName string) (HarnessConfigEntry, error) {
+	if vs != nil && vs.flat != nil {
+		result := vs.HarnessConfigs[harnessConfigName]
+		d := vs.flat.Defaults
+		if d.Volumes != nil {
+			result.Volumes = append(result.Volumes, d.Volumes...)
+		}
+		if override, ok := d.HarnessOverrides[harnessConfigName]; ok {
+			result = applyHarnessOverride(result, override)
+		}
+		return result, nil
+	}
 	if profileName == "" {
 		profileName = vs.ActiveProfile
 	}
@@ -97,53 +115,76 @@ func (vs *VersionedSettings) ResolveHarnessConfig(profileName, harnessConfigName
 	// Apply harness overrides from the profile
 	if profile.HarnessOverrides != nil {
 		if override, ok := profile.HarnessOverrides[harnessConfigName]; ok {
-			if override.Image != "" {
-				result.Image = override.Image
-			}
-			if override.ImagePullPolicy != "" {
-				result.ImagePullPolicy = override.ImagePullPolicy
-			}
-			if override.User != "" {
-				result.User = override.User
-			}
-			if override.AuthSelectedType != "" {
-				result.AuthSelectedType = override.AuthSelectedType
-			}
-			// profiles.<name>.harness_overrides.<hc>.env SURVIVES G3-full, which
-			// removed profiles.<name>.env above but deliberately stopped here.
-			//
-			// This is now the only profiles-scoped env injection point left, and it
-			// is the TOP-RANKED env source in this function — merged after the base,
-			// so it outranks harness_configs.<hc>.env. Removing it too was ruled
-			// against on reversibility: retiring this rank later is additive, while
-			// restoring it after shipping would be a revert of a documented breaking
-			// change.
-			//
-			// It is NOT the migration path for the removed profiles.<name>.env.
-			// That is harness_configs.<hc>.env, a different, top-level key, which
-			// survives independently of this one.
-			if override.Env != nil {
-				result.Env = mergeMaps(result.Env, override.Env)
-			}
-			if override.Volumes != nil {
-				result.Volumes = append(result.Volumes, override.Volumes...)
-			}
+			result = applyHarnessOverride(result, override)
 		}
 	}
 
 	return result, nil
 }
 
+// applyHarnessOverride returns result with one harness override applied:
+// a profile's harness_overrides.<hc>, or on a flat instance its
+// agent_defaults.harness_overrides.<hc>. override is only read.
+func applyHarnessOverride(result HarnessConfigEntry, override V1HarnessOverride) HarnessConfigEntry {
+	if override.Image != "" {
+		result.Image = override.Image
+	}
+	if override.ImagePullPolicy != "" {
+		result.ImagePullPolicy = override.ImagePullPolicy
+	}
+	if override.User != "" {
+		result.User = override.User
+	}
+	if override.AuthSelectedType != "" {
+		result.AuthSelectedType = override.AuthSelectedType
+	}
+	// profiles.<name>.harness_overrides.<hc>.env SURVIVES G3-full, which
+	// removed profiles.<name>.env (see ResolveHarnessConfig) but deliberately
+	// stopped here.
+	//
+	// This is now the only profiles-scoped env injection point left, and it
+	// is the TOP-RANKED env source in ResolveHarnessConfig — merged after the
+	// base, so it outranks harness_configs.<hc>.env. Removing it too was ruled
+	// against on reversibility: retiring this rank later is additive, while
+	// restoring it after shipping would be a revert of a documented breaking
+	// change. A flat instance's agent_defaults.harness_overrides.<hc>.env
+	// takes the same rank.
+	//
+	// It is NOT the migration path for the removed profiles.<name>.env.
+	// That is harness_configs.<hc>.env, a different, top-level key, which
+	// survives independently of this one.
+	if override.Env != nil {
+		result.Env = mergeMaps(result.Env, override.Env)
+	}
+	if override.Volumes != nil {
+		result.Volumes = append(result.Volumes, override.Volumes...)
+	}
+	return result
+}
+
 // ResolveRuntime resolves the runtime config for a profile.
 // Returns the runtime config, the effective runtime type, and any error.
-// If profileName is empty, ActiveProfile is used.
+// If profileName is empty, ActiveProfile is used; when the hub settings
+// overlay replaced the profiles map and ActiveProfile is not one of them,
+// the only stored profile is used when there is exactly one (the overlay
+// sets ActiveProfile to it); with zero or several, the error is an
+// *ActiveProfileError naming the configured value and the stored profiles.
+// A named profile missing
+// from an overlaid map gives a *StoredProfileNotFoundError naming it and
+// the stored profiles.
 // The runtime type is V1RuntimeConfig.Type if set, otherwise the map key name.
 func (vs *VersionedSettings) ResolveRuntime(profileName string) (V1RuntimeConfig, string, error) {
 	if profileName == "" {
+		if vs.activeProfileErr != nil {
+			return V1RuntimeConfig{}, "", vs.activeProfileErr
+		}
 		profileName = vs.ActiveProfile
 	}
 	profile, ok := vs.Profiles[profileName]
 	if !ok {
+		if vs.storedProfileNames != nil {
+			return V1RuntimeConfig{}, "", &StoredProfileNotFoundError{Requested: profileName, Available: vs.storedProfileNames, Retained: vs.retainedProfileNames}
+		}
 		return V1RuntimeConfig{}, "", fmt.Errorf("profile %q not found", profileName)
 	}
 	rtConfig, ok := vs.Runtimes[profile.Runtime]
@@ -296,6 +337,10 @@ const SharedDirStorageGlobalSource = "server.shared_dir_storage.backend"
 //
 // A dispatch-time NFS mount check should choose the backend through this
 // method too, so it agrees with the start path.
+//
+// On a flat instance view (ForFlatInstance) the instance's
+// runtime_target.shared_dir_storage_backend takes the place of the profile
+// and runtime entry, and no profile is consulted.
 func (vs *VersionedSettings) ResolveSharedDirStorage(profileName string) (cfg *V1SharedDirStorageConfig, source string) {
 	if vs == nil {
 		return nil, ""
@@ -304,9 +349,18 @@ func (vs *VersionedSettings) ResolveSharedDirStorage(profileName string) (cfg *V
 	if vs.Server != nil {
 		global = vs.Server.SharedDirStorage
 	}
-	backend, source := vs.ResolveProfileSetting(profileName, "shared_dir_storage_backend",
-		func(p V1ProfileConfig) string { return p.SharedDirStorageBackend },
-		func(r V1RuntimeConfig) string { return r.SharedDirStorageBackend })
+	var backend string
+	if vs.flat != nil {
+		// Flat instance: the instance's runtime_target takes the profile
+		// and runtime-entry rung; unset falls through to the global block.
+		if b := vs.flat.Target.SharedDirStorageBackend; b != "" {
+			backend, source = b, vs.flat.path("runtime_target.shared_dir_storage_backend")
+		}
+	} else {
+		backend, source = vs.ResolveProfileSetting(profileName, "shared_dir_storage_backend",
+			func(p V1ProfileConfig) string { return p.SharedDirStorageBackend },
+			func(r V1RuntimeConfig) string { return r.SharedDirStorageBackend })
+	}
 	if backend == "" {
 		if global == nil {
 			return nil, ""
@@ -336,10 +390,24 @@ func (vs *VersionedSettings) ResolveSharedDirStorage(profileName string) (cfg *V
 //
 // For a dir no per-dir entry names, the result matches the backend of
 // ResolveSharedDirStorage. Call this only on global settings, as for
-// ResolveSharedDirStorage.
+// ResolveSharedDirStorage. On a flat instance view the order is the
+// instance's runtime_target.shared_dir_storage_backends entry, its
+// shared_dir_storage_backend, then server.shared_dir_storage.backend.
 func (vs *VersionedSettings) ResolveSharedDirStorageBackend(profileName, dirName string) (backend, source string, perDir bool) {
 	if vs == nil {
 		return "", "", false
+	}
+	if vs.flat != nil {
+		// Flat instance: the instance's per-dir entry, else its single
+		// value, else the global backend. No profile is consulted.
+		t := vs.flat.Target
+		if v := t.SharedDirStorageBackends[dirName]; v != "" {
+			return v, vs.flat.path("runtime_target.shared_dir_storage_backends." + dirName), true
+		}
+		if v := t.SharedDirStorageBackend; v != "" {
+			return v, vs.flat.path("runtime_target.shared_dir_storage_backend"), false
+		}
+		return vs.globalSharedDirStorageBackend()
 	}
 	if profileName == "" {
 		profileName = vs.ActiveProfile
@@ -360,6 +428,12 @@ func (vs *VersionedSettings) ResolveSharedDirStorageBackend(profileName, dirName
 			}
 		}
 	}
+	return vs.globalSharedDirStorageBackend()
+}
+
+// globalSharedDirStorageBackend is the server.shared_dir_storage.backend
+// rung of ResolveSharedDirStorageBackend.
+func (vs *VersionedSettings) globalSharedDirStorageBackend() (backend, source string, perDir bool) {
 	if vs.Server != nil && vs.Server.SharedDirStorage != nil {
 		return vs.Server.SharedDirStorage.Backend, SharedDirStorageGlobalSource, false
 	}
@@ -367,7 +441,8 @@ func (vs *VersionedSettings) ResolveSharedDirStorageBackend(profileName, dirName
 }
 
 // SharedDirStorageNFSAnywhere reports whether the global backend or any
-// runtime or profile override selects nfs, and returns the nfs-backed
+// runtime, profile or flat Runtime Broker instance override selects nfs
+// (server.broker.instances[].runtime_target), and returns the nfs-backed
 // config to use for project-wide operations such as cleanup. It is nil
 // when no setting selects nfs. Like ResolveSharedDirStorage, call it only
 // on global settings.
@@ -391,6 +466,13 @@ func (vs *VersionedSettings) SharedDirStorageNFSAnywhere() (cfg *V1SharedDirStor
 	for _, p := range vs.Profiles {
 		if p.SharedDirStorageBackend == "nfs" || mapSelectsNFS(p.SharedDirStorageBackends) {
 			found = true
+		}
+	}
+	if vs.Server != nil && vs.Server.Broker != nil {
+		for _, inst := range vs.Server.Broker.Instances {
+			if t := inst.RuntimeTarget; t != nil && (t.SharedDirStorageBackend == "nfs" || mapSelectsNFS(t.SharedDirStorageBackends)) {
+				found = true
+			}
 		}
 	}
 	if !found {
@@ -518,12 +600,12 @@ func ValidateSharedDirSize(size string) error {
 //
 // A profile-level entry for gsaEmail takes precedence over a runtime-level
 // entry for the same gsaEmail — the same profile-overrides precedence
-// ResolveImageRegistry already applies, here evaluated per map key instead of
+// SettingsImageRegistry already applies, here evaluated per map key instead of
 // as a whole-value override, since this setting is a map rather than a
 // scalar. A profile with no entry for gsaEmail (including an empty-string
 // value, treated as unset) falls through to the runtime-level entry, rather
 // than that GSA having no mapping at all. profileName "" resolves to
-// vs.ActiveProfile, matching ResolveRuntime and ResolveImageRegistry. If
+// vs.ActiveProfile, matching ResolveRuntime and SettingsImageRegistry. If
 // ResolveRuntime cannot resolve profileName's runtime (unknown profile or
 // runtime), this returns false, the same as no mapping being found — callers
 // that need to distinguish "no mapping" from "settings error" should call
@@ -961,9 +1043,20 @@ func (vs *VersionedSettings) ResolveSafeToEvict(profileName string) *bool {
 // ResolveSafeToEvictWithSource is ResolveSafeToEvict that also returns the
 // settings key the value came from ("profiles.NAME.safe_to_evict" or
 // "runtimes.NAME.safe_to_evict"). source is empty when the value is nil.
-// The returned pointer is a fresh copy, never one held by vs.
+// The returned pointer is a fresh copy, never one held by vs. On a flat
+// instance view the value is the instance's runtime_target.safe_to_evict,
+// with source "server.broker.instances[KEY].runtime_target.safe_to_evict".
 func (vs *VersionedSettings) ResolveSafeToEvictWithSource(profileName string) (value *bool, source string) {
 	if vs == nil {
+		return nil, ""
+	}
+	if vs.flat != nil {
+		// Flat instance: the instance's runtime_target takes the profile
+		// and runtime-entry rung, false and true as written. There is no
+		// lower settings rung, so nil stays nil.
+		if v := vs.flat.Target.SafeToEvict; v != nil {
+			return copyBoolPtr(v), vs.flat.path("runtime_target.safe_to_evict")
+		}
 		return nil, ""
 	}
 	if profileName == "" {
@@ -992,8 +1085,19 @@ func (vs *VersionedSettings) ResolveSafeToEvictWithSource(profileName string) (v
 // This is a default only: a template's or agent's clone_depth wins over
 // it. The value is returned as written; callers validate it with
 // api.CloneDepth.GitDepth so the error can name its source.
+//
+// On a flat instance view (ForFlatInstance) the value is the instance's
+// agent_defaults.clone_depth, with source
+// "server.broker.instances[KEY].agent_defaults.clone_depth". There is no
+// lower settings rung, so unset means the default shallow clone.
 func (vs *VersionedSettings) ResolveCloneDepthWithSource(profileName string) (value api.CloneDepth, source string) {
 	if vs == nil {
+		return "", ""
+	}
+	if vs.flat != nil {
+		if d := vs.flat.Defaults.CloneDepth; d != "" {
+			return d, vs.flat.path("agent_defaults.clone_depth")
+		}
 		return "", ""
 	}
 	if profileName == "" {
@@ -1091,49 +1195,175 @@ func (vs *VersionedSettings) IsHubExplicitlyDisabled() bool {
 	return vs.Hub != nil && vs.Hub.Enabled != nil && !*vs.Hub.Enabled
 }
 
-// IsHubLocalOnly returns true if the project is configured for local-only mode.
-func (vs *VersionedSettings) IsHubLocalOnly() bool {
-	return vs.Hub != nil && vs.Hub.LocalOnly != nil && *vs.Hub.LocalOnly
-}
+// The Tier* accessors read the Runtime Broker Profile tier for the callers
+// that used to index Profiles directly. In legacy resolution each runs the
+// former call site's profile lookup, including its guard (an empty name,
+// after the active profile fallback, finds nothing). On a flat instance
+// view (ForFlatInstance) each reads the instance's agent_defaults instead,
+// whatever the name, so a flat request (whose profile name is always
+// empty) gets the instance's value at the profile's rung
+// (.design/flat-runtime-brokers/contract-appendix-p3.md FC5). The returned
+// values may share memory with the settings or the policy and must not be
+// modified. source names where the values are set ("" when none are).
 
-// IsImageRegistryConfigured returns true if image_registry is set at any level
-// (top-level or in any profile).
-func (vs *VersionedSettings) IsImageRegistryConfigured(profileName string) bool {
-	return vs.ResolveImageRegistry(profileName) != ""
-}
-
-// ResolveImageRegistry returns the effective image_registry for the given profile.
-// Profile-level image_registry takes precedence over the top-level setting.
-func (vs *VersionedSettings) ResolveImageRegistry(profileName string) string {
+// TierResources returns the tier's resources and its
+// harness_overrides.<harnessConfigName>.resources (either may be nil), and
+// the settings path of the block holding them. An empty profileName means
+// the active profile. The legacy lookup has no empty-name guard, as the
+// former resolveEnvironmentResources lookup had none.
+func (vs *VersionedSettings) TierResources(profileName, harnessConfigName string) (resources, harnessOverrideResources *api.ResourceSpec, source string) {
+	if vs == nil {
+		return nil, nil, ""
+	}
+	if vs.flat != nil {
+		d := vs.flat.Defaults
+		resources, harnessOverrideResources = d.Resources, d.HarnessOverrides[harnessConfigName].Resources
+		if resources == nil && harnessOverrideResources == nil {
+			return nil, nil, ""
+		}
+		return resources, harnessOverrideResources, vs.flat.path("agent_defaults")
+	}
 	if profileName == "" {
 		profileName = vs.ActiveProfile
 	}
-	if profile, ok := vs.Profiles[profileName]; ok && profile.ImageRegistry != "" {
-		return profile.ImageRegistry
+	p, ok := vs.Profiles[profileName]
+	if !ok {
+		return nil, nil, ""
 	}
-	return vs.ImageRegistry
+	return p.Resources, p.HarnessOverrides[harnessConfigName].Resources, "profiles." + profileName
 }
 
-// RequireImageRegistry checks that image_registry is configured and returns an
-// actionable error if not. This is called early in command execution to fail fast.
-func RequireImageRegistry(projectPath, profileName string) error {
-	vs, _, err := LoadEffectiveSettings(projectPath)
-	if err != nil {
-		// Can't load settings — let other code handle this error
-		return nil
-	}
+// TierSecrets returns the tier's secret declarations (required-env step
+// 3c, between the settings harness_configs secrets and the template's) and
+// their settings path. An empty profileName means the active profile.
+func (vs *VersionedSettings) TierSecrets(profileName string) ([]api.RequiredSecret, string) {
 	if vs == nil {
-		return nil
+		return nil, ""
 	}
-	if vs.IsImageRegistryConfigured(profileName) {
-		return nil
+	if vs.flat != nil {
+		if s := vs.flat.Defaults.Secrets; len(s) > 0 {
+			return s, vs.flat.path("agent_defaults.secrets")
+		}
+		return nil, ""
 	}
-	return fmt.Errorf("image_registry is not configured.\n\n" +
-		"Scion requires container images to run agents. To get started:\n\n" +
-		"  1. Build your images:  image-build/scripts/build-images.sh --registry <your-registry> --push\n" +
-		"     See image-build/README.md for detailed instructions.\n\n" +
-		"  2. Configure scion:   scion config set --global image_registry <your-registry>\n" +
-		"     Example:           scion config set --global image_registry ghcr.io/myorg")
+	if profileName == "" {
+		profileName = vs.ActiveProfile
+	}
+	if profileName == "" || vs.Profiles == nil {
+		return nil, ""
+	}
+	p, ok := vs.Profiles[profileName]
+	if !ok || len(p.Secrets) == 0 {
+		return nil, ""
+	}
+	return p.Secrets, "profiles." + profileName + ".secrets"
+}
+
+// TierHarnessOverride returns the tier's harness_overrides.<harnessConfigName>,
+// whether it is set, and its settings path. An empty profileName means the
+// active profile.
+func (vs *VersionedSettings) TierHarnessOverride(profileName, harnessConfigName string) (V1HarnessOverride, bool, string) {
+	if vs == nil {
+		return V1HarnessOverride{}, false, ""
+	}
+	if vs.flat != nil {
+		o, ok := vs.flat.Defaults.HarnessOverrides[harnessConfigName]
+		if !ok {
+			return V1HarnessOverride{}, false, ""
+		}
+		return o, true, vs.flat.path("agent_defaults.harness_overrides." + harnessConfigName)
+	}
+	if profileName == "" {
+		profileName = vs.ActiveProfile
+	}
+	if profileName == "" {
+		return V1HarnessOverride{}, false, ""
+	}
+	p, ok := vs.Profiles[profileName]
+	if !ok {
+		return V1HarnessOverride{}, false, ""
+	}
+	o, ok := p.HarnessOverrides[harnessConfigName]
+	if !ok {
+		return V1HarnessOverride{}, false, ""
+	}
+	return o, true, "profiles." + profileName + ".harness_overrides." + harnessConfigName
+}
+
+// TierAllHarnessOverrideEnvKeys returns the env keys that any of the tier's
+// harness overrides (not only the active harness config's) sets to an
+// empty value, which required-env extraction asks the user to supply, and
+// the settings path of those overrides. An empty profileName means the
+// active profile. The returned set is never shared.
+func (vs *VersionedSettings) TierAllHarnessOverrideEnvKeys(profileName string) (map[string]struct{}, string) {
+	if vs == nil {
+		return nil, ""
+	}
+	if vs.flat != nil {
+		keys := emptyHarnessOverrideEnvKeys(vs.flat.Defaults.HarnessOverrides)
+		if len(keys) == 0 {
+			return nil, ""
+		}
+		return keys, vs.flat.path("agent_defaults.harness_overrides")
+	}
+	if profileName == "" {
+		profileName = vs.ActiveProfile
+	}
+	if profileName == "" || vs.Profiles == nil {
+		return nil, ""
+	}
+	p, ok := vs.Profiles[profileName]
+	if !ok {
+		return nil, ""
+	}
+	keys := emptyHarnessOverrideEnvKeys(p.HarnessOverrides)
+	if len(keys) == 0 {
+		return nil, ""
+	}
+	return keys, "profiles." + profileName + ".harness_overrides"
+}
+
+// emptyHarnessOverrideEnvKeys returns the env keys any of overrides sets to
+// an empty value.
+func emptyHarnessOverrideEnvKeys(overrides map[string]V1HarnessOverride) map[string]struct{} {
+	keys := map[string]struct{}{}
+	for _, override := range overrides {
+		for k, v := range override.Env {
+			if v == "" {
+				keys[k] = struct{}{}
+			}
+		}
+	}
+	return keys
+}
+
+// TierDefaultHarnessConfig returns the tier's default_harness_config (rung
+// 6 of ResolveHarnessConfigName, above the top-level
+// default_harness_config) and a label naming where it is set: in legacy
+// resolution "profile-NAME", the label rung 6 has always logged; on a flat
+// instance "server.broker.instances[KEY].agent_defaults.default_harness_config".
+// An empty profileName means the active profile. Unset returns "", so the
+// top-level default still applies.
+func (vs *VersionedSettings) TierDefaultHarnessConfig(profileName string) (string, string) {
+	if vs == nil {
+		return "", ""
+	}
+	if vs.flat != nil {
+		if hc := vs.flat.Defaults.DefaultHarnessConfig; hc != "" {
+			return hc, vs.flat.path("agent_defaults.default_harness_config")
+		}
+		return "", ""
+	}
+	if profileName == "" {
+		profileName = vs.ActiveProfile
+	}
+	if profileName == "" {
+		return "", ""
+	}
+	if p, ok := vs.Profiles[profileName]; ok && p.DefaultHarnessConfig != "" {
+		return p.DefaultHarnessConfig, "profile-" + profileName
+	}
+	return "", ""
 }
 
 // RewriteImageRegistry replaces the registry prefix of a container image reference
@@ -1195,6 +1425,42 @@ type VersionedSettings struct {
 	Profiles             map[string]V1ProfileConfig    `json:"profiles,omitempty" yaml:"profiles,omitempty" koanf:"profiles"`
 	SharedDirs           []api.SharedDir               `json:"shared_dirs,omitempty" yaml:"shared_dirs,omitempty" koanf:"shared_dirs"`
 	ManagedAgents        *V1ManagedAgentsConfig        `json:"managed_agents,omitempty" yaml:"managed_agents,omitempty" koanf:"managed_agents"`
+
+	// LocalExperiments enables experiments for solo/local (non-broker)
+	// provisioning, where no hub decides. Only experiments the local
+	// provisioning path consults take effect (hub.agent_plugins); a broker
+	// never reads it. Unknown names are logged once and ignored.
+	LocalExperiments []string `json:"local_experiments,omitempty" yaml:"local_experiments,omitempty" koanf:"local_experiments"`
+
+	// activeProfileErr is set by the hub settings overlay when it replaced
+	// Profiles, ActiveProfile is not one of them, and there is not exactly
+	// one stored profile to use instead (see resolveOverlaidActiveProfile).
+	// It is not serialized.
+	activeProfileErr *ActiveProfileError
+	// activeProfileFallbackFrom is the configured ActiveProfile the hub
+	// settings overlay replaced with the only stored profile (see
+	// resolveOverlaidActiveProfile); nil when no fallback applied. It is not
+	// serialized; ConfiguredActiveProfile reads it.
+	activeProfileFallbackFrom *string
+	// storedProfileNames is the sorted list of profile names when the hub
+	// settings overlay replaced Profiles (non-nil exactly then); nil
+	// otherwise. It is not serialized.
+	storedProfileNames []string
+	// retainedProfileNames is the sorted list of built-in default profiles
+	// the hub settings overlay retained beside the stored ones because they
+	// are referenced (ptone/scion#5113); nil when none were. Disjoint from
+	// storedProfileNames. It is not serialized.
+	retainedProfileNames []string
+	// retainedRuntimeNames is the sorted list of built-in runtimes the
+	// overlay retained because an effective profile names them and the
+	// non-empty stored runtimes lack them (ptone/scion#5113); nil when none
+	// were. It is not serialized.
+	retainedRuntimeNames []string
+	// imageRegistryHub is the co-located hub's image_registry layers
+	// (managed database values, file tier, profile catalog), set by the
+	// settings overlay; nil elsewhere. It is not serialized; see
+	// ImageRegistryLayers.
+	imageRegistryHub *ImageRegistryHubInputs
 
 	// Default agent limits (applied when no explicit value is set)
 	DefaultMaxTurns      int               `json:"default_max_turns,omitempty" yaml:"default_max_turns,omitempty" koanf:"default_max_turns"`
@@ -1315,6 +1581,7 @@ type V1ServerConfig struct {
 	Mode             string                    `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
 	Env              string                    `json:"env,omitempty" yaml:"env,omitempty" koanf:"env"`
 	Hub              *V1ServerHubConfig        `json:"hub,omitempty" yaml:"hub,omitempty" koanf:"hub"`
+	Relay            *V1ServerRelayConfig      `json:"relay,omitempty" yaml:"relay,omitempty" koanf:"relay"`
 	Broker           *V1BrokerConfig           `json:"broker,omitempty" yaml:"broker,omitempty" koanf:"broker"`
 	Database         *V1DatabaseConfig         `json:"database,omitempty" yaml:"database,omitempty" koanf:"database"`
 	Auth             *V1AuthConfig             `json:"auth,omitempty" yaml:"auth,omitempty" koanf:"auth"`
@@ -1429,14 +1696,17 @@ type V1TrustedIssuerConfig struct {
 	IssuerType       string   `json:"issuer_type,omitempty" yaml:"issuer_type,omitempty" koanf:"issuer_type"`
 	DefaultRole      string   `json:"default_role,omitempty" yaml:"default_role,omitempty" koanf:"default_role"`
 	AllowedEmails    []string `json:"allowed_emails,omitempty" yaml:"allowed_emails,omitempty" koanf:"allowed_emails"`
-	// AllowedGCPProjects and AllowedDomains must stay the last two fields, in
-	// the same position and order as on TrustedIssuerConfig
-	// (federation_config.go): this file's own GlobalConfig<->V1Settings
-	// conversions do a direct struct type conversion between the two
-	// (TrustedIssuerConfig(vi) and V1TrustedIssuerConfig(ti), below), which
-	// requires identical field name/type/order (struct tags aside).
+	// AllowedGCPProjects, AllowedDomains, AcceptUserTokens and
+	// AllowVisitorGrants must stay the last four fields, in the same
+	// position and order as on TrustedIssuerConfig (federation_config.go):
+	// this file's own GlobalConfig<->V1Settings conversions do a direct
+	// struct type conversion between the two (TrustedIssuerConfig(vi) and
+	// V1TrustedIssuerConfig(ti), below), which requires identical field
+	// name/type/order (struct tags aside).
 	AllowedGCPProjects []string `json:"allowed_gcp_projects,omitempty" yaml:"allowed_gcp_projects,omitempty" koanf:"allowed_gcp_projects"`
 	AllowedDomains     []string `json:"allowed_domains,omitempty" yaml:"allowed_domains,omitempty" koanf:"allowed_domains"`
+	AcceptUserTokens   bool     `json:"accept_user_tokens,omitempty" yaml:"accept_user_tokens,omitempty" koanf:"accept_user_tokens"`
+	AllowVisitorGrants bool     `json:"allow_visitor_grants,omitempty" yaml:"allow_visitor_grants,omitempty" koanf:"allow_visitor_grants"`
 }
 
 // V1NotificationChannelConfig holds configuration for an external notification channel.
@@ -1533,6 +1803,9 @@ type V1PluginEntry struct {
 // settings layout.
 type V1TestIdentitiesConfig struct {
 	WorkloadIssuers []V1TestIdentityWorkloadIssuer `json:"workload_issuers,omitempty" yaml:"workload_issuers,omitempty" koanf:"workload_issuers"`
+	// AdminWebSessions is server.hub.test_identities.admin_web_sessions
+	// (see TestIdentitiesConfig.AdminWebSessions).
+	AdminWebSessions string `json:"admin_web_sessions,omitempty" yaml:"admin_web_sessions,omitempty" koanf:"admin_web_sessions"`
 }
 
 // V1TestIdentityWorkloadIssuer is one server.hub.test_identities.workload_issuers
@@ -1598,15 +1871,13 @@ type V1ServerHubConfig struct {
 	// wait for another hub node (e.g., "12m"; minimum 11m).
 	StartMaxDuration string `json:"start_max_duration,omitempty" yaml:"start_max_duration,omitempty" koanf:"start_max_duration"`
 	// StartUnconfirmedHold is the longest a start whose outcome is unknown
-	// blocks other starts of the agent (e.g., "13m"; minimum 12m40s).
+	// blocks other starts of the agent (e.g., "17m"; minimum 16m).
 	StartUnconfirmedHold string `json:"start_unconfirmed_hold,omitempty" yaml:"start_unconfirmed_hold,omitempty" koanf:"start_unconfirmed_hold"`
 	// StartCreateUnconfirmedHold is StartUnconfirmedHold for a new agent's
-	// create-and-start (e.g., "5m"; 3m up to StartUnconfirmedHold).
+	// create-and-start (e.g., "16m"; 16m up to StartUnconfirmedHold).
 	StartCreateUnconfirmedHold string `json:"start_create_unconfirmed_hold,omitempty" yaml:"start_create_unconfirmed_hold,omitempty" koanf:"start_create_unconfirmed_hold"`
 	// DisableLegacyStorageFallback disables legacy un-namespaced storage path fallback.
 	DisableLegacyStorageFallback *bool `json:"disable_legacy_storage_fallback,omitempty" yaml:"disable_legacy_storage_fallback,omitempty" koanf:"disable_legacy_storage_fallback"`
-	// AsyncAgentLaunch is the non-blocking agent create kill switch.
-	AsyncAgentLaunch *bool `json:"async_agent_launch,omitempty" yaml:"async_agent_launch,omitempty" koanf:"async_agent_launch"`
 	// PerfTrace turns on per-request performance tracing. Off by default.
 	PerfTrace *bool `json:"perf_trace,omitempty" yaml:"perf_trace,omitempty" koanf:"perf_trace"`
 	// MembershipSweepReportOnly makes the membership-standing sweep log and
@@ -1625,6 +1896,20 @@ type V1ServerHubConfig struct {
 	// PortProxy holds the agent port proxy settings. Read at startup;
 	// changes need a restart.
 	PortProxy *V1ServerHubPortProxyConfig `json:"port_proxy,omitempty" yaml:"port_proxy,omitempty" koanf:"port_proxy"`
+	// Observability holds the hub's own metrics and trace export switches
+	// (server.hub.observability). Read at startup; changes need a restart.
+	Observability *V1ServerHubObservabilityConfig `json:"observability,omitempty" yaml:"observability,omitempty" koanf:"observability"`
+}
+
+// V1ServerHubObservabilityConfig holds the switches for the hub's own
+// metrics and trace export (server.hub.observability). A nil switch is
+// unset: the hub then keeps the rule that applied before the switch existed
+// (see HubObservabilityConfig).
+type V1ServerHubObservabilityConfig struct {
+	// MetricsEnabled turns the hub metrics exporter on or off.
+	MetricsEnabled *bool `json:"metrics_enabled,omitempty" yaml:"metrics_enabled,omitempty" koanf:"metrics_enabled"`
+	// TracingEnabled turns the hub trace exporter on or off.
+	TracingEnabled *bool `json:"tracing_enabled,omitempty" yaml:"tracing_enabled,omitempty" koanf:"tracing_enabled"`
 }
 
 // V1ServerHubPortProxyConfig holds the agent port proxy settings of the
@@ -1697,6 +1982,43 @@ type V1ServerHubConduitConfig struct {
 	// re-checks the principal and renews or closes the stream (defaults
 	// "8h" for user, "24h" for broker and agent; each 1m-168h).
 	StreamAuthzMax *V1ServerHubConduitStreamAuthzMax `json:"stream_authz_max,omitempty" yaml:"stream_authz_max,omitempty" koanf:"stream_authz_max"`
+	// RelayMode is "in_process" (default: every hub process runs a relay)
+	// or "external" (the hub runs no relay; separate relay processes,
+	// scion server --role relay, hold the conduit sessions). Read at
+	// startup.
+	RelayMode string `json:"relay_mode,omitempty" yaml:"relay_mode,omitempty" koanf:"relay_mode"`
+	// Ingress is "proxy" (default: the hub reverse-proxies each conduit
+	// dial to the chosen relay) or "redirect" (the hub answers with the
+	// relay's public URL), in external relay mode. Read at startup.
+	Ingress string `json:"ingress,omitempty" yaml:"ingress,omitempty" koanf:"ingress"`
+	// TargetStreamDeadlines is "off" (default) or "enforce": whether
+	// targets enforce user streams' authorization deadlines locally
+	// (design §3.5, Target-side deadlines). The value is published to
+	// targets with the grant keys. The hub renews hub-held user streams
+	// to renewal-capable targets in both modes; with enforce, an open it
+	// cannot keep renewed is refused (503 unavailable,
+	// stream_renewal_unavailable). Requires the hub.conduit experiment.
+	TargetStreamDeadlines string `json:"target_stream_deadlines,omitempty" yaml:"target_stream_deadlines,omitempty" koanf:"target_stream_deadlines"`
+	// PeerSecret is the dedicated relay-peer secret: raw octets (one
+	// trailing newline removed), at least 32 of them, 16 distinct:
+	// the HMAC key of every relay-peer call is derived from it wherever a
+	// separate relay runs. Required in external mode and on --role relay;
+	// it must differ from the session secret. Never stored in the
+	// database, returned by the server-config API or logged. Read at
+	// startup.
+	PeerSecret string `json:"peer_secret,omitempty" yaml:"peer_secret,omitempty" koanf:"peer_secret"`
+}
+
+// V1ServerRelayConfig holds the settings of a separate relay process,
+// scion server --role relay (server.relay; design §3.9 "Separate relay").
+// Settings it shares with the hub's relay stay under server.hub.conduit.
+type V1ServerRelayConfig struct {
+	// HubInternalURL is the base URL of the hub internal API the relay
+	// calls for admission, RPCs and re-checks (any hub replica serves it).
+	HubInternalURL string `json:"hub_internal_url,omitempty" yaml:"hub_internal_url,omitempty" koanf:"hub_internal_url"`
+	// PublicURL is the relay's own public URL, recorded as its
+	// relay_instances.public_endpoint.
+	PublicURL string `json:"public_url,omitempty" yaml:"public_url,omitempty" koanf:"public_url"`
 }
 
 // V1ServerHubConduitStreamAuthzMax holds
@@ -1727,6 +2049,12 @@ type V1BrokerConfig struct {
 	// dispatch agents whose harness-config declares container-script
 	// provisioning. Defaults to true; set false to block container-script dispatches.
 	AllowContainerScriptHarnesses *bool `json:"allow_container_script_harnesses,omitempty" yaml:"allow_container_script_harnesses,omitempty" koanf:"allow_container_script_harnesses"`
+	// StateDir is the base directory of this broker's runtime state (launch
+	// journal, dispatch attempts, pending env-gather); the broker uses
+	// <state_dir>/<broker-id>. Empty means ~/.scion/runtime-broker-state.
+	// Must be absolute or start with ~/. Flat Runtime Broker instances do
+	// not use it. Read at startup.
+	StateDir string `json:"state_dir,omitempty" yaml:"state_dir,omitempty" koanf:"state_dir"`
 	// Instances declares the flat (single-target) Runtime Broker instances
 	// this process hosts (.design/flat-runtime-brokers-contract.md section 2).
 	// Empty or absent means legacy hosting. P1 accepts exactly one entry and
@@ -1746,6 +2074,27 @@ type V1RuntimeBrokerInstanceConfig struct {
 	Name string `json:"name" yaml:"name" koanf:"name"`
 	// RuntimeTarget declares the instance's single runtime target.
 	RuntimeTarget *V1RuntimeTargetConfig `json:"runtime_target,omitempty" yaml:"runtime_target,omitempty" koanf:"runtime_target"`
+	// AgentDefaults are the workload defaults of the agents this instance
+	// runs. Local operator policy, read from the global settings file only.
+	AgentDefaults *V1InstanceAgentDefaults `json:"agent_defaults,omitempty" yaml:"agent_defaults,omitempty" koanf:"agent_defaults"`
+}
+
+// V1InstanceAgentDefaults are a flat Runtime Broker instance's workload
+// defaults (.design/flat-runtime-brokers/contract-appendix-p3.md FC1, FC5).
+// Field names and types are exactly those of the V1ProfileConfig fields
+// they replace, so a profile's workload block converts by copy. Each value
+// takes the rung the profile's value took in that field's own precedence
+// chain: a template, the agent's own config or a request still wins
+// wherever it won over the profile, and an unset value falls through to the
+// same lower settings rungs.
+type V1InstanceAgentDefaults struct {
+	DefaultHarnessConfig string                       `json:"default_harness_config,omitempty" yaml:"default_harness_config,omitempty" koanf:"default_harness_config"`
+	ImageRegistry        string                       `json:"image_registry,omitempty" yaml:"image_registry,omitempty" koanf:"image_registry"`
+	Volumes              []api.VolumeMount            `json:"volumes,omitempty" yaml:"volumes,omitempty" koanf:"volumes"`
+	Resources            *api.ResourceSpec            `json:"resources,omitempty" yaml:"resources,omitempty" koanf:"resources"`
+	HarnessOverrides     map[string]V1HarnessOverride `json:"harness_overrides,omitempty" yaml:"harness_overrides,omitempty" koanf:"harness_overrides"`
+	Secrets              []api.RequiredSecret         `json:"secrets,omitempty" yaml:"secrets,omitempty" koanf:"secrets"`
+	CloneDepth           api.CloneDepth               `json:"clone_depth,omitempty" yaml:"clone_depth,omitempty" koanf:"clone_depth"`
 }
 
 // V1RuntimeTargetConfig declares a flat Runtime Broker's runtime target.
@@ -1769,11 +2118,42 @@ type V1RuntimeTargetConfig struct {
 	// SharedDirStorageClass and SharedDirSize are this Kubernetes
 	// instance's defaults for the ReadWriteMany PVCs backing project shared
 	// dirs: the flat counterparts of the runtime entry and profile settings
-	// of the same name, at the same rung (a template's or agent's
-	// kubernetes block wins over them). Local operator policy: never part
+	// of the same name, at the same rung (the agent's own kubernetes
+	// block wins over them). Local operator policy: never part
 	// of the persisted target identity. Kubernetes only.
 	SharedDirStorageClass string `json:"shared_dir_storage_class,omitempty" yaml:"shared_dir_storage_class,omitempty" koanf:"shared_dir_storage_class"`
 	SharedDirSize         string `json:"shared_dir_size,omitempty" yaml:"shared_dir_size,omitempty" koanf:"shared_dir_size"`
+	// GKE forces GKE mode on this Kubernetes instance's runtime; false
+	// means auto-detect, as for the runtime entry's gke. PriorityClassName
+	// is the instance's default pod spec.priorityClassName, below the
+	// agent's own (inline or persisted) kubernetes.priorityClassName.
+	// Kubernetes only.
+	GKE               bool   `json:"gke,omitempty" yaml:"gke,omitempty" koanf:"gke"`
+	PriorityClassName string `json:"priority_class_name,omitempty" yaml:"priority_class_name,omitempty" koanf:"priority_class_name"`
+	// SafeToEvict is the instance's safe_to_evict default: nil is unset,
+	// and an explicit false or true is kept as written. The agent's own
+	// kubernetes.safeToEvict wins over it. Kubernetes only.
+	SafeToEvict *bool `json:"safe_to_evict,omitempty" yaml:"safe_to_evict,omitempty" koanf:"safe_to_evict"`
+	// SharedDirStorageBackend and SharedDirStorageBackends ("local" or
+	// "nfs", the second per shared dir name) choose the shared-dir storage
+	// backend of the instance's new agents, between the agent's recorded
+	// backend and server.shared_dir_storage.backend. Docker and Kubernetes.
+	SharedDirStorageBackend  string            `json:"shared_dir_storage_backend,omitempty" yaml:"shared_dir_storage_backend,omitempty" koanf:"shared_dir_storage_backend"`
+	SharedDirStorageBackends map[string]string `json:"shared_dir_storage_backends,omitempty" yaml:"shared_dir_storage_backends,omitempty" koanf:"shared_dir_storage_backends"`
+	// HomeStorageBackend ("local" or "nfs") and HomeStorageLeaf ("pod" or
+	// "broker") choose the home storage of the instance's new agents, above
+	// server.home_storage. Kubernetes only.
+	HomeStorageBackend string `json:"home_storage_backend,omitempty" yaml:"home_storage_backend,omitempty" koanf:"home_storage_backend"`
+	HomeStorageLeaf    string `json:"home_storage_leaf,omitempty" yaml:"home_storage_leaf,omitempty" koanf:"home_storage_leaf"`
+}
+
+// KubernetesRuntimeConfig returns the runtime entry form of a Kubernetes
+// target, which a flat instance's runtime is built from: its context,
+// namespace, GKE mode and default priority class. ListAllNamespaces stays
+// false, because an instance is one cluster and namespace.
+func (t *V1RuntimeTargetConfig) KubernetesRuntimeConfig() V1RuntimeConfig {
+	return V1RuntimeConfig{Type: RuntimeTargetTypeKubernetes, Context: t.Context, Namespace: t.Namespace,
+		GKE: t.GKE, PriorityClassName: t.PriorityClassName}
 }
 
 // V1DatabaseConfig holds database settings.
@@ -1839,6 +2219,14 @@ type V1ProxyConfig struct {
 	JWT *V1JWTAuthConfig `json:"jwt,omitempty" yaml:"jwt,omitempty" koanf:"jwt"`
 	// RequireTrustedProxyIP enables defense-in-depth IP allowlisting.
 	RequireTrustedProxyIP bool `json:"require_trusted_proxy_ip,omitempty" yaml:"require_trusted_proxy_ip,omitempty" koanf:"require_trusted_proxy_ip"`
+	// DriverPrincipals lists the exact emails of the browser drivers that
+	// may carry test identity web sessions through the proxy
+	// (ProxyDriverPrincipalsKey). Startup config only; never API-writable.
+	DriverPrincipals []string `json:"driver_principals,omitempty" yaml:"driver_principals,omitempty" koanf:"driver_principals"`
+	// DriverTokenAudience is the audience (the IAP OAuth client ID) of a
+	// driver's Google ID token (ProxyDriverTokenAudienceKey). Startup config
+	// only; never API-writable.
+	DriverTokenAudience string `json:"driver_token_audience,omitempty" yaml:"driver_token_audience,omitempty" koanf:"driver_token_audience"`
 }
 
 // V1IAPConfig holds Google IAP-specific settings.
@@ -2746,6 +3134,12 @@ type HarnessConfigEntry struct {
 	NoAuthConfig      *HarnessNoAuthConfig             `json:"no_auth,omitempty" yaml:"no_auth,omitempty" koanf:"no_auth"`
 	MCP               *HarnessMCPConfig                `json:"mcp,omitempty" yaml:"mcp,omitempty" koanf:"mcp"`
 	Dialect           map[string]interface{}           `json:"dialect,omitempty" yaml:"dialect,omitempty" koanf:"dialect"`
+
+	// AgentPluginsSidecar is the agent_plugins capability read from the
+	// bundle's agent-plugins.yaml (AgentPluginsSidecarFile), nil when the
+	// bundle has none. It is not part of config.yaml. Read the effective value
+	// with AgentPluginsCapability.
+	AgentPluginsSidecar *api.CapabilityField `json:"-" yaml:"-" koanf:"-"`
 }
 
 // HarnessThinkingConfig maps the canonical 0-100 thinking level
@@ -2793,28 +3187,26 @@ func (t *HarnessThinkingConfig) Validate() error {
 	return nil
 }
 
-// Ready strategies for HarnessReadyConfig.Strategy.
+// Ready strategies for HarnessReadyConfig.Strategy, shared with the
+// readiness readers in pkg/agent/state.
 const (
 	// ReadyStrategyHook means the harness is ready once the ready marker for
 	// the current run is written (by a session-start hook) plus the settle.
-	ReadyStrategyHook = "hook"
+	ReadyStrategyHook = state.ReadyStrategyHook
 	// ReadyStrategyDelay means the harness is ready once its tmux session has
 	// existed for the settle period.
-	ReadyStrategyDelay = "delay"
+	ReadyStrategyDelay = state.ReadyStrategyDelay
 )
 
-// Ready and delivery defaults and limits. The ready defaults equal the
-// runtime's current readiness constants (state.ReadySettleSession,
-// state.ReadyDeadline and the host's post-marker settle); a test in
-// pkg/agent pins them together. The delivery defaults reproduce the
-// historical hard-coded delivery: Enter, then two more Enters 300ms apart.
+// Ready and delivery limits and delivery defaults. The ready defaults are
+// state.DefaultReadySpec and the ready limits are pkg/agent/state's, the
+// same values the readiness readers fall back to and check. The delivery
+// defaults reproduce the historical hard-coded delivery: Enter, then two
+// more Enters 300ms apart.
 const (
-	defaultReadySettleDelay   = 8 * time.Second
-	defaultReadySettleHook    = 1500 * time.Millisecond
-	defaultReadyTimeout       = 90 * time.Second
-	maxReadySettle            = 60 * time.Second
-	minReadyTimeout           = 10 * time.Second
-	maxReadyTimeout           = 10 * time.Minute
+	maxReadySettle            = state.MaxReadySettle
+	minReadyTimeout           = state.MinReadyTimeout
+	maxReadyTimeout           = state.MaxReadyTimeout
 	defaultDeliverySubmitKey  = "Enter"
 	defaultDeliveryExtras     = 2
 	defaultDeliveryExtraDelay = 300 * time.Millisecond
@@ -2862,12 +3254,10 @@ type HarnessDeliveryConfig struct {
 }
 
 // DefaultReadySpec returns the ready spec used for strategy when no value is
-// configured. An unknown strategy gets the delay defaults.
+// configured. An unknown strategy gets the delay defaults. It is
+// state.DefaultReadySpec.
 func DefaultReadySpec(strategy string) ReadySpec {
-	if strategy == ReadyStrategyHook {
-		return ReadySpec{Strategy: ReadyStrategyHook, Settle: defaultReadySettleHook, Timeout: defaultReadyTimeout}
-	}
-	return ReadySpec{Strategy: ReadyStrategyDelay, Settle: defaultReadySettleDelay}
+	return state.DefaultReadySpec(strategy)
 }
 
 // DefaultDeliverySpec returns the delivery spec used when no value is
@@ -3230,7 +3620,8 @@ type V1ProfileConfig struct {
 }
 
 // resolveEffectiveProjectPath resolves the effective project path for settings loading.
-// Shared by both LoadSettingsKoanf and LoadVersionedSettings.
+// Used by LoadVersionedSettings' layers (and so by LoadSettings and
+// LoadEffectiveSettings).
 // For git projects with split storage, this redirects to the external config dir
 // so that settings are loaded from ~/.scion/project-configs/<slug>__<uuid>/.scion/.
 func resolveEffectiveProjectPath(projectPath string) string {
@@ -3256,12 +3647,66 @@ func resolveEffectiveProjectPath(projectPath string) string {
 // 3. In-repo project settings file (.scion/settings.yaml or .json)
 // 4. External project config settings (for git projects with split storage)
 // 5. Environment variables (SCION_ prefix)
+//
+// A legacy-format file (no schema_version) is converted to the v1 shape at
+// its own layer (loadLegacySettingsLayer), so every format loads through
+// these layers; there is no separate legacy loader.
 func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
+	vs, _, err := loadVersionedSettings(projectPath, versionedLoadOptions{withDefaults: true})
+	return vs, err
+}
+
+// loadVersionedSettingsKoanf merges LoadVersionedSettings' layers into one
+// koanf instance. withDefaults false leaves out layer 1 (the embedded
+// defaults), so ProfileOrigins can tell settings that come from the files
+// and environment from the built-in defaults with the same layer list.
+func loadVersionedSettingsKoanf(projectPath string, withDefaults bool) (*koanf.Koanf, error) {
+	res, err := loadVersionedLayers(projectPath, versionedLoadOptions{withDefaults: withDefaults})
+	if err != nil {
+		return nil, err
+	}
+	return res.k, nil
+}
+
+// loadVersionedLayers merges LoadVersionedSettings' layers into one koanf
+// instance and returns it with what the load found on the way (see
+// versionedLoadResult).
+func loadVersionedLayers(projectPath string, opts versionedLoadOptions) (*versionedLoadResult, error) {
 	k := koanf.New(".")
+	res := &versionedLoadResult{k: k}
+	legacy := &legacyLayerState{}
+	// With trackSources, res.sources records the layer that set each key:
+	// touched collects the keys each file sets, and setSource records them.
+	var touched []string
+	if opts.trackSources {
+		res.sources = map[string]string{}
+		legacy.touched = &touched
+	}
+	setSource := func(label string, keys []string) {
+		if res.sources == nil {
+			return
+		}
+		for _, key := range keys {
+			res.sources[key] = label
+		}
+	}
+	// fileLayer loads one settings file and records the keys it set as
+	// coming from label and the file's path.
+	fileLayer := func(label, dir string) (bool, error) {
+		touched = touched[:0]
+		migrated, err := loadSettingsFileConverting(k, dir, legacy)
+		if err == nil {
+			setSource(label+" "+GetSettingsPath(dir), touched)
+		}
+		return migrated, err
+	}
 
 	// 1. Load embedded defaults (YAML)
-	if defaultData, err := GetDefaultSettingsDataYAML(); err == nil {
-		_ = k.Load(rawbytes.Provider(defaultData), yaml.Parser())
+	if opts.withDefaults {
+		if defaultData, err := GetDefaultSettingsDataYAML(); err == nil {
+			_ = k.Load(rawbytes.Provider(defaultData), yaml.Parser())
+			setSource("default", k.Keys())
+		}
 	}
 
 	// 2. Load global settings (~/.scion/settings.yaml or .json)
@@ -3269,15 +3714,18 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 	var globalMigratedHub bool
 	if globalDir != "" {
 		var err error
-		globalMigratedHub, err = loadSettingsFile(k, globalDir)
+		globalMigratedHub, err = fileLayer("global", globalDir)
 		if err != nil {
 			return nil, err
 		}
 	}
-	// Captured once, right after the global layer loads — see
-	// LoadSettingsKoanf's identical comment for why both step 3 and step 4
-	// compare against this same value, and why a migrated global value is
-	// not compared against at all.
+	// Captured once, right after the global layer loads: the precedence
+	// check below always compares a project layer's newly migrated value
+	// against the global value specifically, regardless of which layer
+	// (in-repo or external) turns out to hold the project's own file — see
+	// logHubProjectIDPrecedenceChange. A global value that was itself
+	// migrated from hub.grove_id in this load is not a pre-existing
+	// canonical value, so no precedence change is reported against it.
 	globalHubProjectID := k.String(projectkeys.ConfigHubProjectIDKey)
 	if globalMigratedHub {
 		globalHubProjectID = ""
@@ -3286,8 +3734,12 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 	// 3. Load in-repo project settings (.scion/settings.yaml)
 	effectiveProjectPath := resolveEffectiveProjectPath(projectPath)
 	dropInheritedHubProjectID(k, projectPath, effectiveProjectPath, globalDir)
+	if !k.Exists(projectkeys.ConfigHubProjectIDKey) {
+		legacy.hubIDFromCamel = false
+		delete(res.sources, projectkeys.ConfigHubProjectIDKey)
+	}
 	if projectPath != "" && projectPath != globalDir {
-		migratedHub, err := loadSettingsFile(k, projectPath)
+		migratedHub, err := fileLayer("project", projectPath)
 		if err != nil {
 			return nil, err
 		}
@@ -3298,10 +3750,13 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 	}
 
 	// 4. Load external project config settings (overrides in-repo for split
-	// storage), and where a plain project's settings.yaml is actually loaded
-	// when projectPath is "" (cwd-resolved) — see LoadSettingsKoanf's step 4.
+	// storage). This is also where a plain (non-split-storage) project's own
+	// settings.yaml is actually loaded when projectPath is "" and the
+	// project is found via the current directory (resolveEffectiveProjectPath
+	// -> FindProjectRoot): step 3 above never runs in that case, so the
+	// precedence check must run here too, not only in step 3.
 	if effectiveProjectPath != "" && effectiveProjectPath != globalDir && effectiveProjectPath != projectPath {
-		migratedHub, err := loadSettingsFile(k, effectiveProjectPath)
+		migratedHub, err := fileLayer("project", effectiveProjectPath)
 		if err != nil {
 			return nil, err
 		}
@@ -3310,8 +3765,26 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 		}
 	}
 
-	// 4. Load environment variables (SCION_ prefix)
-	_ = k.Load(env.ProviderWithValue("SCION_", ".", func(key, value string) (string, interface{}) {
+	// The hub project ID of the settings files, before the environment
+	// overlays it (for the precedence warning below).
+	fileHubProjectID := k.String(projectkeys.ConfigHubProjectIDKey)
+	res.fileHubProjectID = fileHubProjectID
+	res.fileHubProjectIDFromCamel = legacy.hubIDFromCamel
+	res.legacyWarnings = dedupeStrings(legacy.warnings)
+
+	// Report keys of the settings files that no setting reads, before the
+	// environment is loaded: SCION_* variables such as SCION_PROJECT or
+	// SCION_CREATOR map to no setting and would be false positives.
+	if opts.withDefaults {
+		if unused, err := decodeCollectingUnused(k, settingsProbeStruct(true)); err == nil {
+			warnUnusedKeysOnce("settings", settingsHierarchySources(globalDir, projectPath, effectiveProjectPath), unused)
+		}
+	}
+
+	// 5. Load environment variables (SCION_ prefix)
+	envNames := map[string]string{}
+	ek := koanf.New(".")
+	_ = ek.Load(env.ProviderWithValue("SCION_", ".", func(key, value string) (string, interface{}) {
 		// An exported but empty variable is treated as unset, so it never
 		// blanks a value from the settings files.
 		if value == "" {
@@ -3323,8 +3796,24 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 		if key == "SCION_OTEL_INSECURE" {
 			return "", nil
 		}
-		return versionedEnvKeyMapper(key), value
+		if opts.ignoreEnvProjectID && (key == projectkeys.EnvProjectID || key == projectkeys.EnvHubProjectID) {
+			return "", nil
+		}
+		if opts.skipEnv[key] {
+			return "", nil
+		}
+		mapped := versionedEnvKeyMapper(key)
+		if mapped != "" {
+			envNames[mapped] = key
+		}
+		return mapped, value
 	}), nil)
+	_ = k.Merge(ek)
+	for _, key := range ek.Keys() {
+		if name, ok := envNames[key]; ok {
+			setSource("env "+name, []string{key})
+		}
+	}
 	splitKoanfListKeys(k, conduitV1EnvListKeys)
 	// SCION_OTEL_INSECURE is a plaintext switch. Its value is the inverse of
 	// telemetry.cloud.tls.enabled, so a key-only mapper cannot apply it.
@@ -3334,54 +3823,57 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 				"settings: value does not parse; ignoring SCION_OTEL_INSECURE and using the configured telemetry.cloud.tls.enabled")
 		} else {
 			_ = k.Load(confmap.Provider(map[string]interface{}{"telemetry.cloud.tls.enabled": !plaintext}, "."), nil)
+			setSource("env SCION_OTEL_INSECURE", []string{"telemetry.cloud.tls.enabled"})
 		}
 	}
 
 	// For git projects, the project_id is stored in a project-id file inside the
 	// .scion directory rather than in the settings file. Read it here so that
 	// it overrides any hub.project_id inherited from global settings.
+	//
+	// SCION_HUB_PROJECT_ID (mapped to hub.project_id above) outranks both
+	// the settings files and this file; a disagreement is logged once per
+	// distinct pair of values. SCION_PROJECT_ID sets the top-level
+	// project_id only and does not compete with them.
+	hubEnv := envHubProjectID()
+	if opts.ignoreEnvProjectID {
+		hubEnv = ""
+	}
+	if hubEnv != "" {
+		res.hubEnvProjectID = hubEnv
+		warnProjectIDOverride(projectkeys.EnvHubProjectID, hubEnv, projectkeys.ConfigHubProjectIDKey, fileHubProjectID)
+	}
 	if projectPath != "" {
 		globalDir, _ := GetGlobalDir()
 		if projectPath != globalDir {
 			if projectID, err := ReadProjectID(projectPath); err == nil && projectID != "" {
-				_ = k.Load(confmap.Provider(map[string]interface{}{
-					projectkeys.ConfigHubProjectIDKey: projectID,
-				}, "."), nil)
+				if hubEnv != "" {
+					warnProjectIDOverride(projectkeys.EnvHubProjectID, hubEnv, projectIDFileSource(projectPath), projectID)
+				} else {
+					res.idFileProjectID = projectID
+					_ = k.Load(confmap.Provider(map[string]interface{}{
+						projectkeys.ConfigHubProjectIDKey: projectID,
+					}, "."), nil)
+					setSource("project-id file "+projectIDFileSource(projectPath), []string{projectkeys.ConfigHubProjectIDKey})
+				}
 			}
 		}
 	}
 
-	// Unmarshal into VersionedSettings struct
-	settings := &VersionedSettings{
-		Runtimes:       make(map[string]V1RuntimeConfig),
-		HarnessConfigs: make(map[string]HarnessConfigEntry),
-		Profiles:       make(map[string]V1ProfileConfig),
-	}
-
-	if err := unmarshalVersionedSettings(k, settings); err != nil {
-		return nil, err
-	}
-	if settings.Telemetry != nil && settings.Telemetry.Cloud != nil && settings.Telemetry.Cloud.TLS != nil {
-		if err := validateTelemetryTLS(settings.Telemetry.Cloud.TLS); err != nil {
-			return nil, err
-		}
-	}
-
-	return settings, nil
+	return res, nil
 }
 
-// validateTelemetryTLS rejects contradictory telemetry.cloud.tls settings:
-// plaintext together with verification or client certificate options, and
-// a client certificate without its key (or the reverse).
-func validateTelemetryTLS(tls *V1TelemetryTLSConfig) error {
-	clientCert := tls.CertFile != "" || tls.KeyFile != ""
-	if tls.Enabled != nil && !*tls.Enabled && ((tls.InsecureSkipVerify != nil && *tls.InsecureSkipVerify) || tls.CAFile != "" || clientCert) {
-		return fmt.Errorf("telemetry.cloud.tls: plaintext conflicts with certificate verification or client certificate settings")
+// warnUnknownLocalExperiments logs, once per name and process, each
+// local_experiments entry that is not a registered experiment. Unknown names
+// are never an error.
+func warnUnknownLocalExperiments(names []string) {
+	reg := experiments.Default()
+	for _, n := range names {
+		if _, ok := reg.Lookup(n); ok {
+			continue
+		}
+		warnUnparseableSettingOnce("local_experiments."+n, "settings: local_experiments names an unknown experiment; ignoring it")
 	}
-	if (tls.CertFile == "") != (tls.KeyFile == "") {
-		return fmt.Errorf("telemetry.cloud.tls: cert_file and key_file must be set together")
-	}
-	return nil
 }
 
 // unmarshalVersionedSettings decodes k into settings after normalizing
@@ -3411,10 +3903,14 @@ func unmarshalVersionedSettings(k *koanf.Koanf, settings *VersionedSettings) err
 			return err
 		}
 	}
-	if err := k.Unmarshal("", settings); err == nil {
-		return nil
+	err := k.Unmarshal("", settings)
+	if err != nil {
+		err = unmarshalSkippingBadSettings(k, settings)
 	}
-	return unmarshalSkippingBadSettings(k, settings)
+	if err == nil {
+		warnUnknownLocalExperiments(settings.LocalExperiments)
+	}
+	return err
 }
 
 // unmarshalSkippingBadSettings handles a decode failure in
@@ -3544,12 +4040,18 @@ func undecodableSettingsKeys(k *koanf.Koanf) []string {
 // its run label (pkg/hubprofile, ptone/scion#4240). The CLI reads them
 // directly; left mapped they would land on hub.profile and hub.run, which
 // are not settings.
+//
+// SCION_IMAGE_REGISTRY is the node env layer of image_registry, which beats
+// every settings value (ptone/scion#3916). Folded into the top-level
+// image_registry it would rank below a profile value and could be written
+// back into a settings file, so it is read only by ImageRegistryFromEnv.
 var settingsExcludedEnvVars = []string{
 	"SCION_AUTO_EXPOSE_PORTS",
 	"SCION_AUTO_EXPOSE_PORTS_LIST",
 	"SCION_HUB",
 	"SCION_HUB_PROFILE",
 	"SCION_HUB_RUN",
+	EnvImageRegistry,
 }
 
 // isSettingsExcludedEnv reports whether name is in settingsExcludedEnvVars.
@@ -3562,11 +4064,41 @@ func isSettingsExcludedEnv(name string) bool {
 	return false
 }
 
+// agentContainerEnvVars lists SCION_* variables the runtime sets inside an
+// agent container for sciontool and the harness: SCION_RUNTIME (for example
+// substrate) and SCION_WORKSPACE_PATH (the workspace mount). Left mapped,
+// they would land on the runtime and workspace_path settings of a CLI or
+// broker started in that container. Inside a hub-managed agent
+// (IsHubManagedAgent) versionedEnvKeyMapper drops them; outside one they
+// map as before.
+var agentContainerEnvVars = []string{
+	"SCION_RUNTIME",
+	"SCION_WORKSPACE_PATH",
+}
+
+// isAgentContainerEnv reports whether name is in agentContainerEnvVars and
+// this process runs inside a hub-managed agent container.
+func isAgentContainerEnv(name string) bool {
+	for _, e := range agentContainerEnvVars {
+		if e == name {
+			return IsHubManagedAgent()
+		}
+	}
+	return false
+}
+
 // versionedEnvKeyMapper maps SCION_* environment variables to versioned settings keys.
 // All keys are snake_case so no camelCase conversion is needed.
 func versionedEnvKeyMapper(s string) string {
 	if mapped, ok := projectkeys.EnvProjectIDConfigKey(s, false); ok {
 		return mapped
+	}
+	if isAgentContainerEnv(s) {
+		// See agentContainerEnvVars: set by the runtime inside an agent
+		// container, never a settings override there. Only this mapper
+		// drops them; the process env and their direct readers are
+		// unchanged.
+		return ""
 	}
 	if isSettingsExcludedEnv(s) {
 		// See settingsExcludedEnvVars for every excluded name and the reason.
@@ -3601,10 +4133,9 @@ func versionedEnvKeyMapper(s string) string {
 	if strings.HasPrefix(key, "cli_") {
 		return "cli." + strings.TrimPrefix(key, "cli_")
 	}
-	// Handle nested server keys — deep nesting requires mapping compound field names
+	// Server keys go through the env mapping table (server_env_table.go).
 	if strings.HasPrefix(key, "server_") {
-		rest := strings.TrimPrefix(key, "server_")
-		return "server." + mapServerEnvKey(rest)
+		return serverEnvToVersionedKey(s)
 	}
 	// Handle nested telemetry keys — deep nesting with compound field names
 	if strings.HasPrefix(key, "telemetry_") {
@@ -3626,142 +4157,26 @@ var conduitV1EnvListKeys = []string{
 	"server.hub.conduit.tcp_allowed_ports",
 }
 
-// knownCompoundFields lists multi-word snake_case field names used in server config.
-// These must be recognized as single fields rather than split into nested keys.
-// IMPORTANT: Sorted longest-first so that "dev_token_file" matches before "dev_token".
-var knownCompoundFields = []string{
-	"start_create_unconfirmed_hold",
-	"response_header_timeout",
-	"require_trusted_proxy_ip",
-	"soft_delete_retain_files",
-	"start_unconfirmed_hold",
-	"authz_recheck_interval",
-	"proxy_session_max_age",
-	"start_claim_lease_ttl",
-	"stream_authz_max",
-	"soft_delete_retention",
-	"peer_service_accounts",
-	"grant_key_activation",
-	"missing_agent_grace",
-	"internal_advertise",
-	"start_max_duration",
-	"tcp_allowed_ports",
-	"stalled_threshold",
-	"reconnect_window",
-	"internal_listen",
-	"shutdown_grace",
-	"peer_audience",
-	"lifetime_cap",
-	"instance_id",
-	"port_proxy",
-	"peer_auth",
-	"authorized_domains",
-	"platform_auth_sa",
-	"interval_seconds",
-	"public_key_file",
-	"max_concurrency",
-	"oidc_audience",
-	"jwks_url",
-	"jwks_file",
-	"broker_nickname",
-	"allowed_origins",
-	"allowed_methods",
-	"allowed_headers",
-	"dev_token_file",
-	"agent_endpoint",
-	"gcp_project_id",
-	"gcp_credentials",
-	"client_secret",
-	"write_timeout",
-	"read_timeout",
-	"display_name",
-	"broker_token",
-	"admin_emails",
-	"hub_endpoint",
-	"container_hub_endpoint",
-	"broker_name",
-	"public_url",
-	"local_path",
-	"log_format",
-	"broker_id",
-	"client_id",
-	"dev_token",
-	"log_level",
-	"dev_mode",
-	"max_age",
-}
-
-// mapServerEnvKey maps the portion after "server_" to a dotted path, recognizing
-// known multi-word snake_case fields so they are not incorrectly split.
-// For example: "hub_read_timeout" -> "hub.read_timeout"
-//
-//	"broker_broker_id" -> "broker.broker_id"
-//	"oauth_web_google_client_id" -> "oauth.web.google.client_id"
-func mapServerEnvKey(key string) string {
-	return mapEnvKeyRecursive(key)
-}
-
-// mapEnvKeyRecursive splits an env key fragment into dotted segments, recognizing
-// compound field names at each position.
-func mapEnvKeyRecursive(key string) string {
-	if key == "" {
+// serverEnvToVersionedKey maps a SCION_SERVER_* name to its VersionedSettings
+// key through the env mapping table: a canonical name or an alias of a
+// server setting lands on the setting's path. A name the table does not
+// hold resolves against V1ServerConfig by koanf tag (serverEnvResidue),
+// else to server. plus its lower-case segments joined with ".".
+func serverEnvToVersionedKey(name string) string {
+	if isServerEnvInert(name) {
 		return ""
 	}
-
-	// Check if the entire remaining key is a known compound field
-	for _, compound := range knownCompoundFields {
-		if key == compound {
-			return key
+	if e, _, ok := lookupServerEnv(name); ok && strings.HasPrefix(e.Path, "server.") {
+		if e, ok := resolveServerEnv(name, false); ok {
+			return e.Path
 		}
+		return "" // an alias the canonical name (or an earlier alias) overrides
 	}
-
-	// Try to match the longest known compound field at the end,
-	// treating the prefix as nesting segments.
-	// We scan for underscores and try to split at each one.
-	for i := 0; i < len(key); i++ {
-		if key[i] == '_' {
-			prefix := key[:i]
-			rest := key[i+1:]
-
-			// Check if the rest starts with a known compound field
-			matched := false
-			for _, compound := range knownCompoundFields {
-				if strings.HasPrefix(rest, compound) {
-					if len(rest) == len(compound) {
-						// Exact match for the rest
-						return prefix + "." + compound
-					}
-					if rest[len(compound)] == '_' {
-						// Compound field followed by more segments
-						return prefix + "." + compound + "." + mapEnvKeyRecursive(rest[len(compound)+1:])
-					}
-				}
-			}
-
-			if !matched {
-				// The prefix could be a section name (hub, broker, database, auth, oauth, storage, secrets, cors)
-				// Try recursively
-				subResult := mapEnvKeyRecursive(rest)
-				if subResult != rest || isSectionName(prefix) {
-					return prefix + "." + subResult
-				}
-			}
-		}
+	if directServerEnvNames[strings.ToUpper(name)] {
+		return "" // read directly with os.Getenv
 	}
-
-	// No compound match found — the key is a simple single-word field
-	return key
-}
-
-// isSectionName checks if a name is a known section in the server config hierarchy.
-func isSectionName(name string) bool {
-	switch name {
-	case "hub", "broker", "database", "auth", "oauth", "storage", "secrets", "cors",
-		"web", "cli", "device", "google", "github", "proxy", "iap", "jwt", "claims",
-		"transport", "scheduler":
-		return true
-	}
-	return false
+	rest := strings.ToLower(name[len(serverEnvPrefix):])
+	return settingsEnvResidue(strings.Split(rest, "_"), true, false)
 }
 
 // knownTelemetryCompoundFields lists multi-word snake_case field names used in telemetry config.
@@ -3910,7 +4325,7 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 			gc.Hub.HubClass = v1.Hub.HubClass
 		}
 		if v1.Hub.TestIdentities != nil {
-			ti := &TestIdentitiesConfig{}
+			ti := &TestIdentitiesConfig{AdminWebSessions: v1.Hub.TestIdentities.AdminWebSessions}
 			for _, e := range v1.Hub.TestIdentities.WorkloadIssuers {
 				ti.WorkloadIssuers = append(ti.WorkloadIssuers, TestIdentityWorkloadIssuer(e))
 			}
@@ -3966,9 +4381,6 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 				gc.Hub.StalledThreshold = d
 			}
 		}
-		if v1.Hub.AsyncAgentLaunch != nil {
-			gc.Hub.AsyncAgentLaunch = *v1.Hub.AsyncAgentLaunch
-		}
 		if v1.Hub.PerfTrace != nil {
 			gc.Hub.PerfTrace = *v1.Hub.PerfTrace
 		}
@@ -4009,19 +4421,23 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		}
 		if c := v1.Hub.Conduit; c != nil {
 			gc.Hub.Conduit = HubConduitConfig{
-				GrantKeyActivation:   c.GrantKeyActivation,
-				TCPAllowedPorts:      append([]int(nil), c.TCPAllowedPorts...),
-				InternalListen:       c.InternalListen,
-				InternalAdvertise:    c.InternalAdvertise,
-				PeerAuth:             c.PeerAuth,
-				PeerServiceAccounts:  append([]string(nil), c.PeerServiceAccounts...),
-				PeerAudience:         c.PeerAudience,
-				ReconnectWindow:      c.ReconnectWindow,
-				InstanceID:           c.InstanceID,
-				AuthzRecheckInterval: c.AuthzRecheckInterval,
-				LifetimeCap:          c.LifetimeCap,
-				ShutdownGrace:        c.ShutdownGrace,
-				ProxySessionMaxAge:   c.ProxySessionMaxAge,
+				GrantKeyActivation:    c.GrantKeyActivation,
+				TCPAllowedPorts:       append([]int(nil), c.TCPAllowedPorts...),
+				InternalListen:        c.InternalListen,
+				InternalAdvertise:     c.InternalAdvertise,
+				PeerAuth:              c.PeerAuth,
+				PeerServiceAccounts:   append([]string(nil), c.PeerServiceAccounts...),
+				PeerAudience:          c.PeerAudience,
+				ReconnectWindow:       c.ReconnectWindow,
+				InstanceID:            c.InstanceID,
+				AuthzRecheckInterval:  c.AuthzRecheckInterval,
+				LifetimeCap:           c.LifetimeCap,
+				ShutdownGrace:         c.ShutdownGrace,
+				ProxySessionMaxAge:    c.ProxySessionMaxAge,
+				RelayMode:             c.RelayMode,
+				Ingress:               c.Ingress,
+				TargetStreamDeadlines: c.TargetStreamDeadlines,
+				PeerSecret:            c.PeerSecret,
 			}
 			if m := c.StreamAuthzMax; m != nil {
 				gc.Hub.Conduit.StreamAuthzMax = HubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}
@@ -4030,6 +4446,16 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if p := v1.Hub.PortProxy; p != nil {
 			gc.Hub.PortProxy = HubPortProxyConfig{ResponseHeaderTimeout: p.ResponseHeaderTimeout}
 		}
+		if o := v1.Hub.Observability; o != nil {
+			gc.Hub.Observability = HubObservabilityConfig{
+				MetricsEnabled: copyBoolPtr(o.MetricsEnabled),
+				TracingEnabled: copyBoolPtr(o.TracingEnabled),
+			}
+		}
+	}
+
+	if r := v1.Relay; r != nil {
+		gc.Relay = RelayServerConfig{HubInternalURL: r.HubInternalURL, PublicURL: r.PublicURL}
 	}
 
 	// Broker config
@@ -4056,6 +4482,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		}
 		if v1.Broker.ContainerHubEndpoint != "" {
 			gc.RuntimeBroker.ContainerHubEndpoint = v1.Broker.ContainerHubEndpoint
+		}
+		if v1.Broker.StateDir != "" {
+			gc.RuntimeBroker.StateDir = v1.Broker.StateDir
 		}
 		if v1.Broker.BrokerID != "" {
 			gc.RuntimeBroker.BrokerID = v1.Broker.BrokerID
@@ -4133,6 +4562,8 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 			gc.Auth.Proxy = &ProxyAuthConfig{
 				Provider:              v1.Auth.Proxy.Provider,
 				RequireTrustedProxyIP: v1.Auth.Proxy.RequireTrustedProxyIP,
+				DriverPrincipals:      v1.Auth.Proxy.DriverPrincipals,
+				DriverTokenAudience:   v1.Auth.Proxy.DriverTokenAudience,
 			}
 			if v1.Auth.Proxy.IAP != nil {
 				gc.Auth.Proxy.IAP = &IAPAuthConfig{
@@ -4349,7 +4780,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		},
 	}
 	if gc.Hub.TestIdentities != nil {
-		ti := &V1TestIdentitiesConfig{}
+		ti := &V1TestIdentitiesConfig{AdminWebSessions: gc.Hub.TestIdentities.AdminWebSessions}
 		for _, e := range gc.Hub.TestIdentities.WorkloadIssuers {
 			ti.WorkloadIssuers = append(ti.WorkloadIssuers, V1TestIdentityWorkloadIssuer(e))
 		}
@@ -4366,19 +4797,23 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 	if c := gc.Hub.Conduit; !c.IsZero() {
 		v1Hub.Conduit = &V1ServerHubConduitConfig{
-			GrantKeyActivation:   c.GrantKeyActivation,
-			TCPAllowedPorts:      append([]int(nil), c.TCPAllowedPorts...),
-			InternalListen:       c.InternalListen,
-			InternalAdvertise:    c.InternalAdvertise,
-			PeerAuth:             c.PeerAuth,
-			PeerServiceAccounts:  append([]string(nil), c.PeerServiceAccounts...),
-			PeerAudience:         c.PeerAudience,
-			ReconnectWindow:      c.ReconnectWindow,
-			InstanceID:           c.InstanceID,
-			AuthzRecheckInterval: c.AuthzRecheckInterval,
-			LifetimeCap:          c.LifetimeCap,
-			ShutdownGrace:        c.ShutdownGrace,
-			ProxySessionMaxAge:   c.ProxySessionMaxAge,
+			GrantKeyActivation:    c.GrantKeyActivation,
+			TCPAllowedPorts:       append([]int(nil), c.TCPAllowedPorts...),
+			InternalListen:        c.InternalListen,
+			InternalAdvertise:     c.InternalAdvertise,
+			PeerAuth:              c.PeerAuth,
+			PeerServiceAccounts:   append([]string(nil), c.PeerServiceAccounts...),
+			PeerAudience:          c.PeerAudience,
+			ReconnectWindow:       c.ReconnectWindow,
+			InstanceID:            c.InstanceID,
+			AuthzRecheckInterval:  c.AuthzRecheckInterval,
+			LifetimeCap:           c.LifetimeCap,
+			ShutdownGrace:         c.ShutdownGrace,
+			ProxySessionMaxAge:    c.ProxySessionMaxAge,
+			RelayMode:             c.RelayMode,
+			Ingress:               c.Ingress,
+			TargetStreamDeadlines: c.TargetStreamDeadlines,
+			PeerSecret:            c.PeerSecret,
 		}
 		if m := c.StreamAuthzMax; !m.IsZero() {
 			v1Hub.Conduit.StreamAuthzMax = &V1ServerHubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}
@@ -4386,6 +4821,12 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 	if p := gc.Hub.PortProxy; !p.IsZero() {
 		v1Hub.PortProxy = &V1ServerHubPortProxyConfig{ResponseHeaderTimeout: p.ResponseHeaderTimeout}
+	}
+	if o := gc.Hub.Observability; !o.IsZero() {
+		v1Hub.Observability = &V1ServerHubObservabilityConfig{
+			MetricsEnabled: copyBoolPtr(o.MetricsEnabled),
+			TracingEnabled: copyBoolPtr(o.TracingEnabled),
+		}
 	}
 	if gc.Hub.StartClaimLeaseTTL > 0 {
 		v1Hub.StartClaimLeaseTTL = gc.Hub.StartClaimLeaseTTL.String()
@@ -4407,10 +4848,6 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		disableLegacy := true
 		v1Hub.DisableLegacyStorageFallback = &disableLegacy
 	}
-	if gc.Hub.AsyncAgentLaunch {
-		asyncLaunch := true
-		v1Hub.AsyncAgentLaunch = &asyncLaunch
-	}
 	if gc.Hub.PerfTrace {
 		perfTrace := true
 		v1Hub.PerfTrace = &perfTrace
@@ -4427,6 +4864,9 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		v1Hub.LaunchKeepaliveSeconds = &keepalive
 	}
 	v1.Hub = v1Hub
+	if r := gc.Relay; !r.IsZero() {
+		v1.Relay = &V1ServerRelayConfig{HubInternalURL: r.HubInternalURL, PublicURL: r.PublicURL}
+	}
 
 	// Broker config
 	v1.Broker = &V1BrokerConfig{
@@ -4437,6 +4877,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		WriteTimeout:                  gc.RuntimeBroker.WriteTimeout.String(),
 		HubEndpoint:                   gc.RuntimeBroker.HubEndpoint,
 		ContainerHubEndpoint:          gc.RuntimeBroker.ContainerHubEndpoint,
+		StateDir:                      gc.RuntimeBroker.StateDir,
 		BrokerID:                      gc.RuntimeBroker.BrokerID,
 		BrokerName:                    gc.RuntimeBroker.BrokerName,
 		AllowContainerScriptHarnesses: &gc.RuntimeBroker.AllowContainerScriptHarnesses,
@@ -4479,6 +4920,8 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		v1.Auth.Proxy = &V1ProxyConfig{
 			Provider:              gc.Auth.Proxy.Provider,
 			RequireTrustedProxyIP: gc.Auth.Proxy.RequireTrustedProxyIP,
+			DriverPrincipals:      gc.Auth.Proxy.DriverPrincipals,
+			DriverTokenAudience:   gc.Auth.Proxy.DriverTokenAudience,
 		}
 		if gc.Auth.Proxy.IAP != nil {
 			v1.Auth.Proxy.IAP = &V1IAPConfig{
@@ -4582,7 +5025,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 
 	// OIDC Identity Provider config
-	if gc.OIDC.Enabled || gc.OIDC.IssuerURL != "" {
+	if gc.OIDC.Enabled || gc.OIDC.IssuerURL != "" || len(gc.OIDC.UserTokenAudiences) > 0 || gc.OIDC.UserTokenLifetime != 0 {
 		oidc := gc.OIDC
 		v1.OIDC = &oidc
 	}
@@ -4755,8 +5198,7 @@ func AdaptLegacySettings(legacy *Settings) (*VersionedSettings, []string) {
 }
 
 // convertVersionedToLegacy maps VersionedSettings back to legacy Settings.
-// Used by GetDefaultSettingsData() so the legacy Koanf loader receives valid data
-// after the default file changes format.
+// settingsViewOf builds the LoadSettings view on it.
 func convertVersionedToLegacy(vs *VersionedSettings) *Settings {
 	if vs == nil {
 		return &Settings{}
@@ -4936,33 +5378,50 @@ func settingsCandidateDirs(projectPath string) []string {
 	return dirs
 }
 
-// LoadEffectiveSettings is a unified entry point that detects the settings format
-// and loads using the appropriate path.
-// - If any user file is versioned → uses LoadVersionedSettings
-// - If all user files are legacy or absent → uses LoadSettingsKoanf + AdaptLegacySettings
-// Returns (settings, deprecation_warnings, error).
+// LoadEffectiveSettings loads the effective settings for projectPath through
+// LoadVersionedSettings' layers, whatever the format of each file: a
+// legacy-format file is converted to the v1 shape at its own layer (see
+// loadLegacySettingsLayer). Returns (settings, deprecation_warnings, error):
+// the warnings name a versioned file that lacks schema_version, a file with
+// no recognized format, and every legacy key a converted file still uses.
 func LoadEffectiveSettings(projectPath string) (*VersionedSettings, []string, error) {
+	return loadEffectiveSettings(projectPath, true)
+}
+
+// loadEffectiveSettings is LoadEffectiveSettings; withGlobalOverlay false
+// skips the installed global settings overlay, for a caller that applies a
+// stored set of its own (ProfileCatalogView).
+func loadEffectiveSettings(projectPath string, withGlobalOverlay bool) (*VersionedSettings, []string, error) {
 	hasVersioned, missingSchemaVersion := detectHierarchyFormat(projectPath)
-	if hasVersioned {
-		vs, err := LoadVersionedSettings(projectPath)
-		if err != nil {
-			return nil, nil, fmt.Errorf("loading versioned settings: %w", err)
-		}
-		var warnings []string
-		if missingSchemaVersion {
-			warnings = append(warnings, missingSchemaVersionWarning)
-		}
-		// Apply DB-backed settings overlay (co-located hub+broker mode).
-		// DB values win over file values for runtimes, profiles, harness_configs.
-		if o := globalOverlay; o != nil {
-			o.Apply(vs)
-		}
-		return vs, warnings, nil
+	vs, res, err := loadVersionedSettings(projectPath, versionedLoadOptions{withDefaults: true})
+	if err != nil {
+		return nil, nil, fmt.Errorf("loading versioned settings: %w", err)
 	}
 
-	// Before falling through to the legacy path, check if any settings file
-	// has real content but lacks schema_version, harnesses key, and v1 runtime
-	// indicators — such files may not load correctly in future versions.
+	var warnings []string
+	if hasVersioned && missingSchemaVersion {
+		warnings = append(warnings, missingSchemaVersionWarning)
+	}
+	if !hasVersioned {
+		// A settings file with real content but no schema_version, no
+		// harnesses key and no v1 runtime indicator may not load correctly
+		// in future versions.
+		warnings = append(warnings, unrecognizedSettingsFormatWarnings(projectPath)...)
+	}
+	warnings = append(warnings, res.legacyWarnings...)
+
+	// Apply DB-backed settings overlay (co-located hub+broker mode).
+	// DB values win over file values for runtimes, profiles, harness_configs.
+	if o := globalOverlay; o != nil && withGlobalOverlay {
+		o.Apply(vs)
+	}
+	return vs, warnings, nil
+}
+
+// unrecognizedSettingsFormatWarnings returns a warning for each settings
+// file of projectPath's hierarchy that has real content but neither
+// schema_version nor any recognized format indicator.
+func unrecognizedSettingsFormatWarnings(projectPath string) []string {
 	var warnings []string
 	for _, dir := range settingsCandidateDirs(projectPath) {
 		path := GetSettingsPath(dir)
@@ -4988,19 +5447,7 @@ func LoadEffectiveSettings(projectPath string) (*VersionedSettings, []string, er
 			path,
 		))
 	}
-
-	// Legacy path: load via existing loader, then adapt
-	legacy, err := LoadSettingsKoanf(projectPath)
-	if err != nil {
-		return nil, nil, fmt.Errorf("loading legacy settings: %w", err)
-	}
-	vs, legacyWarnings := AdaptLegacySettings(legacy)
-	warnings = append(warnings, legacyWarnings...)
-	// Apply DB-backed settings overlay (co-located hub+broker mode).
-	if o := globalOverlay; o != nil {
-		o.Apply(vs)
-	}
-	return vs, warnings, nil
+	return warnings
 }
 
 // LoadGlobalSettings loads settings from the broker's global directory
@@ -5026,10 +5473,10 @@ func LoadEffectiveSettings(projectPath string) (*VersionedSettings, []string, er
 //
 // Round 6 addendum (nfs-gke UAT blocker, hy-em/hy-rev-6/hy-aud-6): this read
 // is now a fully dedicated, standalone loader (loadGlobalSettingsOnly,
-// below) rather than a call into LoadEffectiveSettings/LoadVersionedSettings/
-// LoadSettingsKoanf, for two independent reasons found in the same round:
+// below) rather than a call into LoadEffectiveSettings/LoadVersionedSettings,
+// for two independent reasons found in the same round:
 //
-//  1. Env-free. Those three functions all merge koanf's SCION_ environment
+//  1. Env-free. Those functions all merge koanf's SCION_ environment
 //     provider unconditionally. There is no env mapping for
 //     server.shared_dir_storage itself, so an env-free read of the file is
 //     semantically identical for this setting — but koanf's env provider
@@ -5051,8 +5498,7 @@ func LoadEffectiveSettings(projectPath string) (*VersionedSettings, []string, er
 //     variable. This is not hypothetical: it reproduces in any shell/agent
 //     container that happens to export SCION_AUTO_EXPOSE_PORTS or similar.
 //  2. Global-only, for real this time. resolveEffectiveProjectPath, called
-//     internally by LoadVersionedSettings/LoadSettingsKoanf/
-//     detectHierarchyFormat, treats WHATEVER path it is given as if it
+//     internally by LoadVersionedSettings and detectHierarchyFormat, treats WHATEVER path it is given as if it
 //     might be a project directory: if ~/.scion itself contains a
 //     project-id file (plausible — a broker's ~/.scion can
 //     double as its own hub-side project identity), it resolves to
@@ -5175,40 +5621,30 @@ func GlobalSettingsIsLegacyFormat() bool {
 // loadGlobalSettingsOnly loads the broker's global settings file — and
 // ONLY that file, GetSettingsPath(globalDir), plus embedded defaults — into
 // a VersionedSettings struct. It is entirely independent of
-// LoadVersionedSettings/LoadSettingsKoanf/LoadEffectiveSettings: no
+// LoadVersionedSettings/LoadEffectiveSettings: no
 // resolveEffectiveProjectPath, no GetProjectConfigDir, no SCION_
 // environment provider, no DB-backed settings overlay. See
-// LoadGlobalSettings' doc comment for why (round 6 addendum). The
-// versioned/legacy format decision is made via detectDirSettingsFormat on
-// this same single file, matching GlobalSettingsIsLegacyFormat exactly.
+// LoadGlobalSettings' doc comment for why (round 6 addendum). A
+// legacy-format file is converted at its own layer (loadLegacySettingsLayer);
+// the missing-schema_version warning is decided by detectDirSettingsFormat
+// on this same single file, matching GlobalSettingsIsLegacyFormat exactly.
 func loadGlobalSettingsOnly(globalDir string) (*VersionedSettings, []string, error) {
 	hasVersioned, missingSchemaVersion := detectDirSettingsFormat(globalDir)
 
-	if hasVersioned {
-		vs, err := loadVersionedSettingsFileOnly(globalDir)
-		if err != nil {
-			return nil, nil, fmt.Errorf("loading versioned settings: %w", err)
-		}
-		var warnings []string
-		if missingSchemaVersion {
-			warnings = append(warnings, missingSchemaVersionWarning)
-		}
-		return vs, warnings, nil
-	}
-
-	legacy, err := loadLegacySettingsFileOnly(globalDir)
+	vs, legacyWarnings, err := loadVersionedSettingsFileOnly(globalDir)
 	if err != nil {
-		return nil, nil, fmt.Errorf("loading legacy settings: %w", err)
+		return nil, nil, fmt.Errorf("loading versioned settings: %w", err)
 	}
-	vs, warnings := AdaptLegacySettings(legacy)
+	var warnings []string
+	if hasVersioned && missingSchemaVersion {
+		warnings = append(warnings, missingSchemaVersionWarning)
+	}
+	warnings = append(warnings, legacyWarnings...)
 	return vs, warnings, nil
 }
 
-// loadVersionedSettingsFileOnly and loadLegacySettingsFileOnly (the two
-// helpers loadGlobalSettingsOnly calls) live in koanf.go, which already
-// imports the koanf JSON parser under the bare name "json" — settings_v1.go
-// imports the standard library "encoding/json" under that name instead, so
-// they cannot both live here without an import alias.
+// loadVersionedSettingsFileOnly (the helper loadGlobalSettingsOnly calls)
+// lives in koanf.go, next to loadSettingsFile.
 
 // MigrationResult reports what happened during a migration.
 type MigrationResult struct {
@@ -5229,6 +5665,13 @@ type MigrationResult struct {
 // It reads only the file at the given directory, which is needed for UpdateVersionedSetting
 // to avoid clobbering other layers.
 func LoadSingleFileVersioned(dir string) (*VersionedSettings, error) {
+	return loadSingleFileVersioned(nil, dir)
+}
+
+// loadSingleFileVersioned is LoadSingleFileVersioned; held is the settings
+// lock for dir when the caller holds it (the legacy-key migration then
+// writes under it), else nil.
+func loadSingleFileVersioned(held *SettingsLock, dir string) (*VersionedSettings, error) {
 	settingsPath := GetSettingsPath(dir)
 	if settingsPath == "" {
 		// No file exists yet — return empty versioned settings
@@ -5239,7 +5682,7 @@ func LoadSingleFileVersioned(dir string) (*VersionedSettings, error) {
 	// reading, so the parse below sees the canonical key directly. override
 	// covers the case where the rewrite could not happen (read-only
 	// filesystem, not owner): the value to use in memory for this call.
-	_, override := migrateProjectSettingsFile(settingsPath)
+	_, override := migrateProjectSettingsFileHeld(settingsPath, held)
 
 	data, err := os.ReadFile(settingsPath)
 	if err != nil {
@@ -5291,37 +5734,54 @@ func LoadSingleFileVersioned(dir string) (*VersionedSettings, error) {
 // then rewritten from the struct instead, which loses comments and unknown keys and
 // reorders keys (logged at debug level).
 func UpdateVersionedSetting(dir string, key string, value string) error {
-	// Held from the first read to the rename (see LockSettingsFile).
-	unlock := LockSettingsFile()
-	defer unlock()
+	// The layer-independent part of the write policy, before any read:
+	// global=true skips the layer rule, which needs the scope only
+	// UpdateSetting knows.
+	if err := ValidateSettingWrite(key, true); err != nil {
+		return err
+	}
+
+	// Held from the first read to the rename (see LockSettingsDir).
+	lock, err := LockSettingsDir(dir)
+	if err != nil {
+		return err
+	}
+	defer lock.Unlock()
+	return updateVersionedSettingLocked(lock, dir, key, value)
+}
+
+// updateVersionedSettingLocked is UpdateVersionedSetting for a caller that
+// already holds the settings lock for dir.
+func updateVersionedSettingLocked(lock *SettingsLock, dir string, key string, value string) error {
 
 	settingsPath := GetSettingsPath(dir)
 	if filepath.Ext(settingsPath) == ".json" {
-		return updateVersionedSettingStruct(dir, key, value)
+		return updateVersionedSettingStruct(lock, dir, key, value)
 	}
 	edit, err := versionedSettingEditFor(key, value)
 	if err != nil {
 		return err
 	}
 	if edit.noop {
-		// Keys with no v1 equivalent are accepted and ignored. Loading still
-		// runs the legacy-key migration and surfaces a malformed file, as
-		// before.
-		_, err := LoadSingleFileVersioned(dir)
+		// hub_connections.* is accepted and left unchanged (see
+		// versionedSettingEditFor). Loading still runs the legacy-key
+		// migration and surfaces a malformed file, as before.
+		_, err := loadSingleFileVersioned(lock, dir)
 		return err
 	}
-	err = updateVersionedSettingYAML(dir, settingsPath, edit)
+	err = updateVersionedSettingYAML(lock, dir, settingsPath, edit)
 	if errors.Is(err, errYAMLEditThroughAlias) {
 		slog.Debug("settings: alias, anchor or key the edit cannot match by name on the edited path; rewriting the whole file from the struct (comments and unknown keys are lost)",
 			"path", settingsPath, "key", key)
-		return updateVersionedSettingStruct(dir, key, value)
+		return updateVersionedSettingStruct(lock, dir, key, value)
 	}
 	return err
 }
 
 // versionedSettingEdit is the v1 YAML edit that UpdateVersionedSetting makes
 // for one key: set path to value, or delete path when value is nil (an empty
-// string for an omitempty field). noop marks keys with no v1 equivalent.
+// string for an omitempty field). noop marks hub_connections.* keys, which
+// are accepted and left unchanged.
 type versionedSettingEdit struct {
 	path  []string
 	value *yamlv3.Node
@@ -5335,7 +5795,7 @@ type versionedSettingKey struct {
 }
 
 // versionedSettingKeys maps every key UpdateVersionedSetting accepts (other
-// than the project ID aliases and the ignored keys) to its v1 path. It must
+// than the project ID aliases and hub_connections.*) to its v1 path. It must
 // stay in step with the switch in updateVersionedSettingStruct; the
 // TestUpdateVersionedSetting_MatchesStructPath table test enforces that.
 var versionedSettingKeys = map[string]versionedSettingKey{
@@ -5345,6 +5805,7 @@ var versionedSettingKeys = map[string]versionedSettingKey{
 	"workspace_path":           {path: []string{"workspace_path"}},
 	"image_registry":           {path: []string{"image_registry"}},
 	"cli.autohelp":             {path: []string{"cli", "autohelp"}, isBool: true},
+	"cli.mode":                 {path: []string{"cli", "mode"}},
 	"hub.enabled":              {path: []string{"hub", "enabled"}, isBool: true},
 	"hub.linked":               {path: []string{"hub", "linked"}, isBool: true},
 	"hub.endpoint":             {path: []string{"hub", "endpoint"}},
@@ -5367,10 +5828,11 @@ func versionedSettingEditFor(key, value string) (versionedSettingEdit, error) {
 	switch {
 	case projectkeys.IsProjectIDConfigKey(key) || projectkeys.IsHubProjectIDConfigKey(key):
 		k = versionedSettingKey{path: []string{"hub", "project_id"}}
-	case key == "hub.token", key == "hub.apiKey", key == "hub.lastSyncedAt",
-		key == "bucket.provider", key == "bucket.name", key == "bucket.prefix",
-		strings.HasPrefix(key, "hub_connections."):
-		// Deprecated or unsupported in v1: accepted and ignored.
+	case strings.HasPrefix(key, "hub_connections."):
+		// Not written in v1: accepted and left unchanged. "config set"
+		// rejects these keys itself (ValidateConfigSetKey). Keys with no
+		// place in a v1 file at all are rejected before this point
+		// (ValidateSettingWrite).
 		return versionedSettingEdit{noop: true}, nil
 	default:
 		var ok bool
@@ -5390,7 +5852,7 @@ func versionedSettingEditFor(key, value string) (versionedSettingEdit, error) {
 
 // updateVersionedSettingYAML applies edit to the YAML settings file at
 // settingsPath (or creates dir/settings.yaml when settingsPath is empty).
-func updateVersionedSettingYAML(dir, settingsPath string, edit versionedSettingEdit) error {
+func updateVersionedSettingYAML(lock *SettingsLock, dir, settingsPath string, edit versionedSettingEdit) error {
 	targetPath := settingsPath
 	var orig []byte
 	var override string
@@ -5400,8 +5862,9 @@ func updateVersionedSettingYAML(dir, settingsPath string, edit versionedSettingE
 		}
 		targetPath = newSettingsFilePath(dir)
 	} else {
-		// Same legacy hub.grove_id migration LoadSingleFileVersioned runs.
-		_, override = migrateProjectSettingsFile(targetPath)
+		// Same legacy hub.grove_id migration LoadSingleFileVersioned runs,
+		// under the lock this write holds.
+		_, override = migrateProjectSettingsFileHeld(targetPath, lock)
 		var err error
 		if orig, err = os.ReadFile(targetPath); err != nil {
 			return fmt.Errorf("failed to read %s: %w", targetPath, err)
@@ -5473,18 +5936,18 @@ func updateVersionedSettingYAML(dir, settingsPath string, edit versionedSettingE
 		}
 	}
 	if !yamlDecodesTo(out, want) {
-		return fmt.Errorf("refusing to write %s: the re-encoded settings do not round-trip; set %s by editing the file", targetPath, strings.Join(edit.path, "."))
+		return fmt.Errorf("refusing to write %s: the re-encoded settings do not round-trip; change %s by editing the file", targetPath, strings.Join(edit.path, "."))
 	}
 	// Generic data equality is weaker than loadability (an alias key can
 	// duplicate a struct field without a duplicate map key), so the output
 	// must also decode into VersionedSettings without error, as the input did.
 	if err := decodeVersionedSettingsYAML(out); err != nil {
-		return fmt.Errorf("refusing to write %s: the updated settings would not load: %w; set %s by editing the file", targetPath, err, strings.Join(edit.path, "."))
+		return fmt.Errorf("refusing to write %s: the updated settings would not load: %w; change %s by editing the file", targetPath, err, strings.Join(edit.path, "."))
 	}
 	if bytes.Equal(out, orig) {
 		return nil
 	}
-	return writeSettingsFileAtomic(targetPath, out)
+	return writeSettingsFileAtomic(lock, targetPath, out)
 }
 
 // decodeVersionedSettingsYAML reports whether data decodes into a
@@ -5507,12 +5970,18 @@ var encodeSettingsYAML = encodeYAMLDocument
 // link), else settings.yaml. Any other dangling .yml link is skipped, as
 // the loaders skip it, and settings.yaml is written as before.
 func newSettingsFilePath(dir string) string {
+	return newSettingsFilePathWithout(dir, "")
+}
+
+// newSettingsFilePathWithout is newSettingsFilePath with the file at
+// without (a path in dir, or "") treated as absent.
+func newSettingsFilePathWithout(dir, without string) string {
 	yamlPath := filepath.Join(dir, "settings.yaml")
-	if _, err := os.Lstat(yamlPath); err == nil {
+	if _, err := os.Lstat(yamlPath); err == nil && yamlPath != without {
 		return yamlPath
 	}
 	ymlPath := filepath.Join(dir, "settings.yml")
-	if fi, err := os.Lstat(ymlPath); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+	if fi, err := os.Lstat(ymlPath); err == nil && ymlPath != without && fi.Mode()&os.ModeSymlink != 0 {
 		if _, err := os.Stat(ymlPath); err != nil {
 			if target, err := resolveSettingsWriteTarget(ymlPath); err == nil && dirWritable(filepath.Dir(target)) {
 				return ymlPath
@@ -5534,13 +6003,21 @@ func spliceVersionedSettingEdit(orig []byte, edit versionedSettingEdit, indent i
 	return spliceSetYAMLPath(orig, doc.Content[0], edit.path, edit.value, indent)
 }
 
-// writeSettingsFileAtomic atomically replaces the settings file at path.
+// writeSettingsFileAtomic atomically replaces the settings file at path. It
+// is the writer for whole settings files (the exceptions are listed in
+// settingsBypassAllowed in settings_bypass_guard_test.go): lock must be the
+// held settings lock for the directory containing path (see
+// LockSettingsDir), and the caller must have read the file it is replacing
+// under that same lock.
 // A symlinked settings file is followed (see resolveSettingsWriteTarget) so
 // the link itself survives. If the directory refuses new files (no write
 // permission, read-only mount) the file is written in place instead, as a
 // plain os.WriteFile always did, so a writable file in a read-only
 // directory can still be updated.
-func writeSettingsFileAtomic(path string, data []byte) error {
+func writeSettingsFileAtomic(lock *SettingsLock, path string, data []byte) error {
+	if err := lock.checkFor(path); err != nil {
+		return err
+	}
 	target, err := resolveSettingsWriteTarget(path)
 	if err != nil {
 		return err
@@ -5652,8 +6129,8 @@ func physicalParentPath(p string) (string, error) {
 // and YAML that cannot be edited in place (an alias, an anchor, or a key the
 // edit cannot match by name; see hasYAMLOpaqueKey). A YAML file is
 // saved back to the same path (settings.yml stays settings.yml).
-func updateVersionedSettingStruct(dir string, key string, value string) error {
-	vs, err := LoadSingleFileVersioned(dir)
+func updateVersionedSettingStruct(lock *SettingsLock, dir string, key string, value string) error {
+	vs, err := loadSingleFileVersioned(lock, dir)
 	if err != nil {
 		return err
 	}
@@ -5663,7 +6140,7 @@ func updateVersionedSettingStruct(dir string, key string, value string) error {
 			vs.Hub = &V1HubClientConfig{}
 		}
 		vs.Hub.ProjectID = value
-		return saveVersionedSettingsInPlace(dir, vs)
+		return saveVersionedSettingsInPlace(lock, dir, vs)
 	}
 
 	switch key {
@@ -5684,6 +6161,11 @@ func updateVersionedSettingStruct(dir string, key string, value string) error {
 		}
 		autohelp := value == "true"
 		vs.CLI.AutoHelp = &autohelp
+	case "cli.mode":
+		if vs.CLI == nil {
+			vs.CLI = &V1CLIConfig{}
+		}
+		vs.CLI.Mode = value
 	case "use_host_credentials":
 		use := value == "true"
 		vs.UseHostCredentials = &use
@@ -5765,25 +6247,16 @@ func updateVersionedSettingStruct(dir string, key string, value string) error {
 		}
 		vs.Server.Auth.Username = value
 
-	// --- Deprecated keys: skip silently in v1 ---
-	case "hub.token", "hub.apiKey", "hub.lastSyncedAt":
-		// These fields don't exist in v1 — skip without error
-		return nil
-
-	// --- Bucket: not present in v1 ---
-	case "bucket.provider", "bucket.name", "bucket.prefix":
-		// Bucket config is deprecated in v1 — skip without error
-		return nil
-
 	default:
-		// Handle hub_connections.* keys: skip in v1 format (not supported)
+		// hub_connections.* keys are left unchanged, as on the YAML path
+		// (versionedSettingEditFor).
 		if strings.HasPrefix(key, "hub_connections.") {
 			return nil
 		}
 		return fmt.Errorf("unknown or complex setting key: %s (manual edit recommended for registries)", key)
 	}
 
-	return saveVersionedSettingsInPlace(dir, vs)
+	return saveVersionedSettingsInPlace(lock, dir, vs)
 }
 
 // GetVersionedSettingValue retrieves a specific setting value from a VersionedSettings struct.
@@ -5813,6 +6286,36 @@ func GetVersionedSettingValue(vs *VersionedSettings, key string) (string, error)
 				return "true", nil
 			}
 			return "false", nil
+		}
+		return "", nil
+	case "server.auth.display_name":
+		if vs.Server != nil && vs.Server.Auth != nil {
+			return vs.Server.Auth.DisplayName, nil
+		}
+		return "", nil
+	case "server.auth.email":
+		if vs.Server != nil && vs.Server.Auth != nil {
+			return vs.Server.Auth.Email, nil
+		}
+		return "", nil
+	case "server.auth.username":
+		if vs.Server != nil && vs.Server.Auth != nil {
+			return vs.Server.Auth.Username, nil
+		}
+		return "", nil
+	case "cli.mode":
+		if vs.CLI != nil {
+			return vs.CLI.Mode, nil
+		}
+		return "", nil
+	case "hub.transport.mode":
+		if vs.Hub != nil && vs.Hub.Transport != nil {
+			return vs.Hub.Transport.Mode, nil
+		}
+		return "", nil
+	case "hub.transport.audience":
+		if vs.Hub != nil && vs.Hub.Transport != nil {
+			return vs.Hub.Transport.Audience, nil
 		}
 		return "", nil
 	case "use_host_credentials":
@@ -5867,6 +6370,15 @@ func GetVersionedSettingValue(vs *VersionedSettings, key string) (string, error)
 			return vs.Server.Broker.BrokerNickname, nil
 		}
 		return "", nil
+	}
+
+	if name, ok := strings.CutPrefix(key, "hub_connections."); ok {
+		if name, ok := strings.CutSuffix(name, ".endpoint"); ok && name != "" && !strings.Contains(name, ".") {
+			if c, ok := vs.HubConnections[name]; ok {
+				return c.Endpoint, nil
+			}
+			return "", nil
+		}
 	}
 
 	if val, err, handled := getNestedMapSettingValue(vs, key); handled {
@@ -6122,29 +6634,33 @@ func scalarValueString(v reflect.Value) (s string, ok bool) {
 // newSettingsFilePath). The file is replaced atomically, and left untouched when its
 // bytes would not change.
 //
-// It takes the settings-file lock for the write (see LockSettingsFile). A
-// caller that loaded vs from the file and wants the read-modify-write cycle
-// protected must not hold the lock itself; the lock covers the write only.
+// It is a blind replace: it takes the settings lock for the write only (see
+// LockSettingsDir), so a caller that loaded vs from the file would lose a
+// concurrent writer's change. Use LoadModifySaveVersionedSettings for a
+// read-modify-write cycle.
 func SaveVersionedSettings(dir string, vs *VersionedSettings) error {
-	unlock := LockSettingsFile()
-	defer unlock()
-	return writeVersionedSettingsFile(dir, newSettingsFilePath(dir), vs)
+	lock, err := LockSettingsDir(dir)
+	if err != nil {
+		return err
+	}
+	defer lock.Unlock()
+	return writeVersionedSettingsFile(lock, dir, newSettingsFilePath(dir), vs)
 }
 
 // saveVersionedSettingsInPlace saves vs back to the YAML settings file in
 // dir it was loaded from (settings.yaml or settings.yml; the mode is kept).
 // A JSON or missing file is saved like SaveVersionedSettings, to
 // newSettingsFilePath(dir).
-func saveVersionedSettingsInPlace(dir string, vs *VersionedSettings) error {
+func saveVersionedSettingsInPlace(lock *SettingsLock, dir string, vs *VersionedSettings) error {
 	if p := GetSettingsPath(dir); p != "" && filepath.Ext(p) != ".json" {
-		return writeVersionedSettingsFile(dir, p, vs)
+		return writeVersionedSettingsFile(lock, dir, p, vs)
 	}
-	// Not SaveVersionedSettings: callers already hold the settings-file lock.
-	return writeVersionedSettingsFile(dir, newSettingsFilePath(dir), vs)
+	// Not SaveVersionedSettings: callers already hold the settings lock.
+	return writeVersionedSettingsFile(lock, dir, newSettingsFilePath(dir), vs)
 }
 
 // writeVersionedSettingsFile marshals vs to targetPath in dir.
-func writeVersionedSettingsFile(dir, targetPath string, vs *VersionedSettings) error {
+func writeVersionedSettingsFile(lock *SettingsLock, dir, targetPath string, vs *VersionedSettings) error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create directory %s: %w", dir, err)
 	}
@@ -6157,7 +6673,7 @@ func writeVersionedSettingsFile(dir, targetPath string, vs *VersionedSettings) e
 	if existing, err := os.ReadFile(targetPath); err == nil && bytes.Equal(existing, data) {
 		return nil
 	}
-	return writeSettingsFileAtomic(targetPath, data)
+	return writeSettingsFileAtomic(lock, targetPath, data)
 }
 
 // MigrateSettingsFile migrates a single legacy settings file in dir to versioned format.
@@ -6170,11 +6686,30 @@ func writeVersionedSettingsFile(dir, targetPath string, vs *VersionedSettings) e
 // Returns MigrationResult describing what was (or would be) done.
 func MigrateSettingsFile(dir string, dryRun bool) (*MigrationResult, error) {
 	// Held from the first read to the final write, so the read, backup
-	// rename and write are one step for in-process writers (see
-	// LockSettingsFile). Nothing below takes the lock again.
-	unlock := LockSettingsFile()
-	defer unlock()
+	// and write are one step for every writer (see LockSettingsDir).
+	lock, err := LockSettingsDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer lock.Unlock()
+	return migrateSettingsFileLocked(lock, dir, dryRun)
+}
 
+// migrateStepHook, when set by a test, is called at each step of a
+// migration that changes files, so the test can check what a reader sees.
+var migrateStepHook func(step string)
+
+// migrateSettingsFileLocked is MigrateSettingsFile for a caller that already
+// holds the settings lock for dir. Nothing below takes the lock again.
+//
+// The new file is written before the original is moved out of the way, so
+// a reader (readers do not take the lock) always finds either the original
+// or the migrated settings file, never none: the backup is a hard link to
+// the original (a copy where links are not supported; a new link with the
+// same target when the original is a symlink), the migrated file then
+// atomically replaces the original or is written beside it, and only then
+// is an original under another name removed.
+func migrateSettingsFileLocked(lock *SettingsLock, dir string, dryRun bool) (*MigrationResult, error) {
 	result := &MigrationResult{}
 
 	// 1. Find settings file
@@ -6330,19 +6865,49 @@ func MigrateSettingsFile(dir string, dryRun bool) (*MigrationResult, error) {
 			return nil, fmt.Errorf("failed to load project state: %w", err)
 		}
 		state.LastSyncedAt = legacy.Hub.LastSyncedAt
-		if err := SaveProjectState(dir, state); err != nil {
+		if err := saveProjectStateLocked(lock, dir, state); err != nil {
 			return nil, fmt.Errorf("failed to save project state: %w", err)
 		}
 	}
 
-	// 8. Back up the original settings file
+	// 8. Back up the original settings file, leaving it in place.
 	backupPath := getBackupPath(settingsPath)
-	if err := os.Rename(settingsPath, backupPath); err != nil {
+	if err := backupSettingsFile(settingsPath, backupPath); err != nil {
 		return nil, fmt.Errorf("failed to create backup %s: %w", backupPath, err)
 	}
 	result.BackupPath = backupPath
+	if migrateStepHook != nil {
+		migrateStepHook("backed-up")
+	}
 
-	// 8b. Back up server.yaml if it was merged
+	// 9. Write versioned settings: to the file a write would target were
+	// the original gone (as when the original was renamed away first),
+	// replacing the original itself (not a symlink's target, which the
+	// backup still names) when that is the same file name.
+	targetPath := newSettingsFilePathWithout(dir, settingsPath)
+	var werr error
+	if targetPath == settingsPath {
+		werr = replaceSettingsFileByName(lock, targetPath, outputData)
+	} else {
+		werr = writeSettingsFileAtomic(lock, targetPath, outputData)
+	}
+	if werr != nil {
+		// The original was not touched; drop the backup.
+		_ = os.Remove(backupPath)
+		return nil, fmt.Errorf("failed to write versioned settings: %w", werr)
+	}
+	if migrateStepHook != nil {
+		migrateStepHook("written")
+	}
+	if targetPath != settingsPath {
+		if err := os.Remove(settingsPath); err != nil && !os.IsNotExist(err) {
+			result.Warnings = append(result.Warnings,
+				fmt.Sprintf("warning: failed to remove %s after migration (backup at %s): %v", settingsPath, backupPath, err))
+		}
+	}
+
+	// 9b. Back up server.yaml if it was merged. The migrated settings
+	// already carry its content under server.
 	if result.ServerMigrated && serverPath != "" {
 		serverBackup := getBackupPath(serverPath)
 		if err := os.Rename(serverPath, serverBackup); err != nil {
@@ -6354,17 +6919,60 @@ func MigrateSettingsFile(dir string, dryRun bool) (*MigrationResult, error) {
 		}
 	}
 
-	// 9. Write versioned settings
-	if err := saveVersionedSettingsData(dir, outputData); err != nil {
-		// Attempt to restore backups on failure
-		_ = os.Rename(backupPath, settingsPath)
-		if result.ServerBackupPath != "" {
-			_ = os.Rename(result.ServerBackupPath, serverPath)
-		}
-		return nil, fmt.Errorf("failed to write versioned settings: %w", err)
-	}
-
 	return result, nil
+}
+
+// replaceSettingsFileByName atomically replaces the directory entry at path
+// with a new regular file (mode 0644) holding data, without following a
+// symlink at path: a symlinked settings file is replaced by a file, and the
+// link's target is left as it was. lock is the settings lock for path's
+// directory. The migration uses it after backing up the original, as it
+// once renamed the original away before writing.
+func replaceSettingsFileByName(lock *SettingsLock, path string, data []byte) error {
+	if err := lock.checkFor(path); err != nil {
+		return err
+	}
+	return writeFileAtomicMode(path, data, 0644)
+}
+
+// backupSettingsFile makes backupPath a backup of the settings file at path
+// without moving path: a symlink is copied as a new symlink with the same
+// target (as renaming it would have kept it), and a regular file is hard
+// linked, or copied with its mode where hard links are not supported.
+func backupSettingsFile(path, backupPath string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		link, err := os.Readlink(path)
+		if err != nil {
+			return err
+		}
+		return os.Symlink(link, backupPath)
+	}
+	if err := os.Link(path, backupPath); err == nil {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(backupPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(backupPath)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(backupPath)
+		return err
+	}
+	return f.Close()
 }
 
 // loadServerConfigOnly loads a GlobalConfig from a single server.yaml file

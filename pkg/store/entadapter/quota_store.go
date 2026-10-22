@@ -16,11 +16,19 @@ package entadapter
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"time"
 
+	"entgo.io/ent/dialect"
+	entsql "entgo.io/ent/dialect/sql"
+	"github.com/google/uuid"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entitlementbinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/limitdefinition"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimebroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagereservation"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -328,9 +336,27 @@ func (q *QuotaStore) CreateUsageReservation(ctx context.Context, reservation *st
 
 	created, err := builder.Save(ctx)
 	if err != nil {
-		return nil, mapError(err)
+		mapped := mapError(err)
+		if errors.Is(mapped, store.ErrAlreadyExists) && isActiveReservationViolation(reservation, err) {
+			return nil, store.ErrActiveReservationExists
+		}
+		return nil, mapped
 	}
 	return entUsageReservationToStore(created), nil
+}
+
+// isActiveReservationViolation reports whether a unique violation from
+// CreateUsageReservation came from the unique active (limit_definition_id,
+// resource_id) index. The table has two unique indexes, that one and the
+// primary key. With a generated ID only the former can be violated; with a
+// caller-supplied ID, the error text names the index's resource_id column
+// (SQLite lists the columns; Postgres names the index after them), which a
+// primary key violation does not.
+func isActiveReservationViolation(reservation *store.UsageReservation, err error) bool {
+	if reservation.ID == "" {
+		return true
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "resource_id")
 }
 
 // CountActiveReservations counts non-released reservations for a specific
@@ -375,6 +401,26 @@ func (q *QuotaStore) HasActiveReservation(ctx context.Context, limitDefinitionID
 	return count > 0, nil
 }
 
+// GetActiveReservation returns resourceID's non-released reservation for
+// the given limit, whatever its scope, or store.ErrNotFound when none.
+func (q *QuotaStore) GetActiveReservation(ctx context.Context, limitDefinitionID, resourceID string) (*store.UsageReservation, error) {
+	ldUID, err := parseUUID(limitDefinitionID)
+	if err != nil {
+		return nil, err
+	}
+	r, err := q.client.UsageReservation.Query().
+		Where(
+			usagereservation.LimitDefinitionIDEQ(ldUID),
+			usagereservation.ResourceIDEQ(resourceID),
+			usagereservation.ReleasedAtIsNil(),
+		).
+		Only(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return entUsageReservationToStore(r), nil
+}
+
 // ReleaseReservation releases a reservation by setting released_at.
 // Matches on limit_definition_id and resource_id.
 func (q *QuotaStore) ReleaseReservation(ctx context.Context, limitDefinitionID, resourceID string) error {
@@ -390,6 +436,30 @@ func (q *QuotaStore) ReleaseReservation(ctx context.Context, limitDefinitionID, 
 			usagereservation.ReleasedAtIsNil(),
 		).
 		SetReleasedAt(now).
+		Save(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	if n == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+// ReleaseReservationByID releases the reservation with reservationID while
+// it is still active, in one conditional write; store.ErrNotFound when no
+// active row has that ID, including a malformed ID.
+func (q *QuotaStore) ReleaseReservationByID(ctx context.Context, reservationID string) error {
+	uid, err := parseGetID(reservationID)
+	if err != nil {
+		return err
+	}
+	n, err := q.client.UsageReservation.Update().
+		Where(
+			usagereservation.IDEQ(uid),
+			usagereservation.ReleasedAtIsNil(),
+		).
+		SetReleasedAt(time.Now()).
 		Save(ctx)
 	if err != nil {
 		return mapError(err)
@@ -492,4 +562,102 @@ func (q *QuotaStore) ListActiveReservations(ctx context.Context, limitDefinition
 		result[i] = entUsageReservationToStore(ur)
 	}
 	return result, nil
+}
+
+// ReleaseReservationIfAgent releases agentID's active reservation for the
+// limit only if cond holds on the agent row, in one transaction: the agent
+// row is read under SELECT ... FOR UPDATE on Postgres (SQLite serializes
+// writers), cond is evaluated on that row, and the release is written in
+// the same transaction. A malformed agent ID is a missing row
+// (store.ErrNotFound).
+func (q *QuotaStore) ReleaseReservationIfAgent(ctx context.Context, limitDefinitionID, agentID string, cond store.AgentReleaseCond) (bool, error) {
+	ldUID, err := parseUUID(limitDefinitionID)
+	if err != nil {
+		return false, err
+	}
+	agentUID, err := parseGetID(agentID)
+	if err != nil {
+		return false, err
+	}
+	var resUID uuid.UUID
+	if cond.ReservationID != "" {
+		if resUID, err = parseGetID(cond.ReservationID); err != nil {
+			return false, nil // no reservation can have that ID
+		}
+	}
+	tx, err := q.client.Tx(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	aq := tx.Agent.Query().Where(agent.IDEQ(agentUID))
+	if q.client.Driver().Dialect() == dialect.Postgres {
+		aq = aq.ForUpdate()
+	}
+	row, err := aq.Only(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	if !cond.Holds(entAgentToStore(row)) {
+		return false, nil
+	}
+	upd := tx.UsageReservation.Update().
+		Where(
+			usagereservation.LimitDefinitionIDEQ(ldUID),
+			usagereservation.ResourceIDEQ(agentID),
+			usagereservation.ReleasedAtIsNil(),
+		)
+	if cond.ReservationID != "" {
+		upd = upd.Where(usagereservation.IDEQ(resUID))
+	}
+	n, err := upd.SetReleasedAt(time.Now()).Save(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, mapError(err)
+	}
+	return n > 0, nil
+}
+
+// ReleaseReservationIfScopeBrokerAbsent releases the active reservation
+// reservationID only while no Runtime Broker has the ID scopeID, in one
+// conditional write:
+//
+//	UPDATE usage_reservations SET released_at = now
+//	WHERE id = :rid AND scope_type = 'broker' AND scope_id = :scopeID
+//	  AND released_at IS NULL
+//	  AND NOT EXISTS (SELECT 1 FROM runtime_brokers WHERE id = :scopeUUID)
+//
+// scopeID is parsed first. An unparseable scope ID matches no broker (as
+// GetRuntimeBroker reports ErrNotFound for it), so the row is released with
+// no broker check. A parsed one is bound as the typed UUID, so the
+// comparison is canonical and Postgres never casts a non-UUID literal.
+func (q *QuotaStore) ReleaseReservationIfScopeBrokerAbsent(ctx context.Context, reservationID, scopeID string) (bool, error) {
+	resUID, err := parseGetID(reservationID)
+	if err != nil {
+		return false, nil // no reservation can have that ID
+	}
+	upd := q.client.UsageReservation.Update().
+		Where(
+			usagereservation.IDEQ(resUID),
+			usagereservation.ScopeTypeEQ(usagereservation.ScopeType(store.QuotaScopeBroker)),
+			usagereservation.ScopeIDEQ(scopeID),
+			usagereservation.ReleasedAtIsNil(),
+		)
+	if scopeUID, perr := uuid.Parse(scopeID); perr == nil {
+		upd = upd.Where(func(s *entsql.Selector) {
+			s.Where(entsql.NotExists(
+				entsql.Select(runtimebroker.FieldID).
+					From(entsql.Table(runtimebroker.Table)).
+					Where(entsql.EQ(runtimebroker.FieldID, scopeUID)),
+			))
+		})
+	}
+	n, err := upd.SetReleasedAt(time.Now()).Save(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return n > 0, nil
 }

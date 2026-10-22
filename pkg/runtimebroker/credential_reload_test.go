@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 )
@@ -71,7 +72,7 @@ func TestCredentialReload_TakesEffectAfterReinitialize(t *testing.T) {
 	cfg.ControlChannelEnabled = true
 	cfg.BrokerAuthEnabled = true
 	cfg.BrokerAuthStrictMode = true
-	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 	srv.multiCredStore = brokercredentials.NewMultiStore(credDir)
 
 	conn, err := srv.createHubConnection(name, oldCreds)
@@ -185,7 +186,7 @@ func TestCredentialReload_InEffectMatchesConnectionAfterFailedStep(t *testing.T)
 	cfg.ControlChannelEnabled = false
 	cfg.BrokerAuthEnabled = true
 	cfg.BrokerAuthStrictMode = true
-	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 	srv.multiCredStore = brokercredentials.NewMultiStore(credDir)
 
 	conn, err := srv.createHubConnection(name, oldCreds)
@@ -283,7 +284,7 @@ func testRetriesFailedReinitialize(t *testing.T, otherChanged bool) {
 	cfg.HeartbeatEnabled = false
 	cfg.ControlChannelEnabled = false
 	cfg.BrokerAuthEnabled = false
-	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 	srv.multiCredStore = brokercredentials.NewMultiStore(credDir)
 	// Close every connection at the end, including one the watcher added,
 	// so no Start or reinitialize queued by a tick starts anything after

@@ -34,7 +34,7 @@ func setupTestNonceCacheStore(t *testing.T) *NonceCacheStore {
 	t.Cleanup(func() { _ = client.Close() })
 
 	ctx := context.Background()
-	err = client.Schema.Create(ctx)
+	err = entc.AutoMigrate(ctx, client)
 	require.NoError(t, err)
 
 	return NewNonceCacheStore(client)

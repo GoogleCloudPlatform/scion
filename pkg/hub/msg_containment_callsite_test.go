@@ -46,6 +46,8 @@ var targetSymbols = map[string]bool{
 	"DispatchAgentCreate":           true,
 	"DispatchAgentStart":            true,
 	"DispatchAgentCreateWithGather": true,
+	// The start-options entry point (ptone/scion#4669) sends the same start.
+	"DispatchAgentStartWithOptions": true,
 }
 
 func TestExternalEffectCallSiteClassification(t *testing.T) {
@@ -58,6 +60,24 @@ func TestExternalEffectCallSiteClassification(t *testing.T) {
 			t.Errorf("duplicate classification: %s:%s (%s)", e.file, e.function, e.symbol)
 		}
 		classified[k] = true
+	}
+
+	// Paired sites must share a classification.
+	classOf := make(map[effectCallSiteKey]string)
+	for _, e := range effectCallSiteClassifications {
+		classOf[effectCallSiteKey{e.file, e.function, e.symbol}] = e.class
+	}
+	for _, p := range sharedClassificationSites {
+		got, ok := classOf[p.site]
+		want, wantOK := classOf[p.sameAs]
+		if !ok || !wantOK {
+			t.Errorf("sharedClassificationSites pair %v / %v: both must be in effectCallSiteClassifications", p.site, p.sameAs)
+			continue
+		}
+		if got != want {
+			t.Errorf("classification mismatch: %s:%s is %q but %s:%s is %q; the two sites must be classified together",
+				p.site.file, p.site.function, got, p.sameAs.file, p.sameAs.function, want)
+		}
 	}
 
 	// Discover all call sites in production code.

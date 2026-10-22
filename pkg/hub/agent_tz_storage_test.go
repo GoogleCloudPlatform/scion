@@ -226,7 +226,7 @@ func TestResolveAgentTZ_ProfileSettingsAreNotARung(t *testing.T) {
 				"claude": {Env: map[string]string{"TZ": "Europe/Rome"}},
 			},
 		},
-	}, nil, "")
+	}, nil)
 	config.SetGlobalSettingsOverlay(overlay)
 	defer config.SetGlobalSettingsOverlay(nil)
 

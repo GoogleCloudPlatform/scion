@@ -63,6 +63,14 @@ func (HarnessConfig) Fields() []ent.Field {
 			Optional(),
 		field.String("storage_path").
 			Optional(),
+		// layout is the storage layout of the harness-config's files
+		// (ptone/scion#4219): "" is the legacy path layout
+		// (<storage_path>/<file path>), "blobs" is the content-addressed
+		// layout (<storage_path>.blobs/<sha256 hex>). Only
+		// CreateHarnessConfig and UpdateHarnessConfigContent write it.
+		field.String("layout").
+			Optional().
+			Default(""),
 		field.String("files").
 			Optional(),
 		field.Enum("status").
@@ -74,6 +82,14 @@ func (HarnessConfig) Fields() []ent.Field {
 		field.Time("image_status_checked_at").
 			Optional().
 			Nillable(),
+		// built_image is the image the hub's image-build executor last
+		// built for this harness-config (ptone/scion#4219). It is
+		// operational state, not derived from config.yaml: only the build
+		// executor writes it (UpdateHarnessConfigBuiltImage), and the
+		// commit path never touches it.
+		field.String("built_image").
+			Optional().
+			Default(""),
 		field.String("owner_id").
 			Optional(),
 		field.String("created_by").

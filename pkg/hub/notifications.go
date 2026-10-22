@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -126,6 +127,13 @@ func (nd *NotificationDispatcher) handleEvent(evt Event) {
 	// Skip events with no agent ID — can happen for system events fired during
 	// project creation before any agents exist.
 	if statusEvt.AgentID == "" {
+		return
+	}
+	// A halt is notified once, in-process, by the hub instance whose write
+	// halted the agent (dispatchHalted); the bus events of a halted agent,
+	// which every instance receives and heartbeats republish, notify
+	// nothing (ptone/scion#4853).
+	if statusEvt.Phase == string(state.PhaseHalted) {
 		return
 	}
 
@@ -338,13 +346,22 @@ func (nd *NotificationDispatcher) storeAndDispatch(ctx context.Context, sub *sto
 // to the subscriber, using agent as the watched agent (it is not re-read, so
 // it also works from a snapshot of an agent that has since been deleted).
 func (nd *NotificationDispatcher) storeAndDispatchForAgent(ctx context.Context, sub *store.NotificationSubscription, evt AgentStatusEvent, agent *store.Agent) {
-	// Use activity for matching/display; fall back to phase when activity is empty.
-	effectiveStatus := evt.Activity
-	if effectiveStatus == "" {
-		effectiveStatus = evt.Phase
-	}
+	nd.storeAndDispatchMessage(ctx, sub, evt, agent, formatNotificationMessage(agent, notificationEventStatus(evt)))
+}
 
-	message := formatNotificationMessage(agent, effectiveStatus)
+// notificationEventStatus is the status a notification for evt carries: its
+// activity, or its phase when the activity is empty.
+func notificationEventStatus(evt AgentStatusEvent) string {
+	if evt.Activity != "" {
+		return evt.Activity
+	}
+	return evt.Phase
+}
+
+// storeAndDispatchMessage is storeAndDispatchForAgent with the notification
+// text given by the caller.
+func (nd *NotificationDispatcher) storeAndDispatchMessage(ctx context.Context, sub *store.NotificationSubscription, evt AgentStatusEvent, agent *store.Agent, message string) {
+	effectiveStatus := notificationEventStatus(evt)
 
 	notif := &store.Notification{
 		ID:             api.NewUUID(),
@@ -400,8 +417,14 @@ func (nd *NotificationDispatcher) storeAndDispatchForAgent(ctx context.Context, 
 			nd.createInboxMessage(ctx, sub, notif, agent)
 		}
 
-		// Channel registry is a fallback for deployments without a broker.
-		nd.dispatchToChannels(ctx, sub, notif, agent.ID, agent.Slug)
+		// With a broker configured, user delivery goes through the broker
+		// only (plugin spokes plus deliverToUser), matching the outbound
+		// path (deliveryUserBroker); the registry is not a second path
+		// (ptone/scion#2752). The channel registry is the fallback for
+		// deployments without a broker.
+		if nd.brokerProxy == nil {
+			nd.dispatchToChannels(ctx, sub, notif, agent.ID, agent.Slug)
+		}
 	default:
 		nd.log.Warn("Unknown subscriber type", "type", sub.SubscriberType)
 	}
@@ -470,6 +493,7 @@ func (nd *NotificationDispatcher) dispatchToAgent(ctx context.Context, sub *stor
 	retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer retryCancel()
 
+	nd.recordAttempt(ctx, notif.ID)
 	if err := dispatchWithBrokerRetry(retryCtx, nd.messageLog, dispatcher, subscriber, notif.Message, false, structuredMsg); err != nil {
 		nd.log.Error("Failed to dispatch notification to agent; notification NOT dispatched",
 			"subscriberID", sub.SubscriberID, "notificationID", notif.ID, "error", err)
@@ -495,9 +519,14 @@ func (nd *NotificationDispatcher) dispatchToAgent(ctx context.Context, sub *stor
 		nd.messageLog.Debug("notification message dispatched", logAttrs...)
 	}
 
+	// setOutcome also sets dispatched=true; MarkNotificationDispatched is kept
+	// because it is what broadcasts the dispatched event to other replicas. It
+	// must run before setOutcome: it broadcasts only when its CAS on
+	// dispatched=false wins, and setOutcome would already have set the flag.
 	if err := nd.store.MarkNotificationDispatched(ctx, notif.ID); err != nil {
 		nd.log.Error("Failed to mark notification dispatched", "notificationID", notif.ID, "error", err)
 	}
+	nd.setOutcome(ctx, notif.ID, store.NotificationOutcomeDelivered)
 }
 
 // notificationMessageType returns the structured message type for a notification status.
@@ -728,6 +757,8 @@ func formatNotificationMessage(agent *store.Agent, status string) string {
 		return msg
 	case "DELETED":
 		return fmt.Sprintf("%s has been DELETED", agent.Slug)
+	case NotificationStatusHalted:
+		return haltedNotificationMessage(agent)
 	case "DELIVERY_FAILED":
 		msg := fmt.Sprintf("Message delivery to %s failed", agent.Slug)
 		if agent.Message != "" {

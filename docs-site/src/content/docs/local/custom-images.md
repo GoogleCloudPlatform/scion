@@ -230,7 +230,11 @@ profiles:
     image_registry: "us-central1-docker.pkg.dev/myproject/staging"
 ```
 
-Profile-level `image_registry` takes precedence over the top-level setting. The profile used is
+Profile-level `image_registry` takes precedence over the top-level setting of the same source.
+Across sources the order is: the Runtime Broker's `SCION_IMAGE_REGISTRY`, then values saved in the
+Hub (profile, then top level), then the settings file (profile, then top level). So a registry
+saved in the Hub, for example through the setup wizard, beats a settings-file profile value; save
+the profile value in the Hub to keep it. See [Image registry order](/scion/reference/settings-precedence/#image-registry-order). The profile used is
 the one the agent was provisioned with, recorded broker-side, on every start and restart; see
 [Settings precedence](/scion/reference/settings-precedence/#container-image-and-kubernetes-image-pull-policy--a-separate-chain-from-b1).
 
@@ -240,8 +244,11 @@ The `image_registry` setting is the lowest-priority way to configure images. Exp
 
 1. **CLI `--image` flag** (highest priority)
 2. **Profile `harness_overrides`** image field, when explicitly set
-3. **Template `scion-agent.yaml`** image field
-4. **`image_registry`** rewrite (lowest priority)
+3. **Agent inline config** (`--config`) image field
+4. **Settings `harness_configs.<name>.image`**, then the harness-config's own `config.yaml` image
+5. **`image_registry`** rewrite (lowest priority)
+
+A template's `image` field is ignored with a warning: a template describes the agent's job, and the image comes from the harness-config and settings.
 
 Each time a higher-priority source replaces another source's image, the agent start logs it at
 Info. See [Settings precedence](/scion/reference/settings-precedence/#container-image-and-kubernetes-image-pull-policy--a-separate-chain-from-b1)

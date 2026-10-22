@@ -75,7 +75,10 @@ func TestHandleHarnessConfigClone_Success(t *testing.T) {
 	assert.Equal(t, "Source desc", clone.Description)
 	assert.Equal(t, "claude", clone.Harness)
 	assert.Equal(t, "global", clone.Scope)
-	assert.NotNil(t, clone.Config)
+	// A clone never copies Config: the commit path re-derives it from the
+	// copied files (ptone/scion#4219). This source has no files, so the
+	// clone has no derived Config.
+	assert.Nil(t, clone.Config)
 }
 
 func TestHandleHarnessConfigClone_CrossScope(t *testing.T) {

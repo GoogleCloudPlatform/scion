@@ -249,8 +249,8 @@ func nfsWorktreeSubPath(workspaceRel, name string) string {
 
 // nfsWorktreeLockWait bounds how long RemoveNFSWorktree waits for the
 // project's provisioning lock, so a delete is never held up for long. The
-// steps under the lock are quick renames and git worktree prune, and run to
-// completion. A variable so tests can shorten it.
+// steps under the lock are quick renames and the removal of the worktree's
+// own git entry, and run to completion. A variable so tests can shorten it.
 var nfsWorktreeLockWait = 30 * time.Second
 
 // nfsWorktreeBackend selects the workspace backend RemoveNFSWorktree
@@ -376,6 +376,13 @@ func (m *AgentManager) RemoveNFSWorktree(ctx context.Context, projectPath, proje
 	// directory, not a symlink.
 	if real, err := filepath.EvalSymlinks(filepath.Dir(worktree)); err != nil || real != filepath.Dir(worktree) {
 		return worktree, fmt.Errorf("workspace_storage nfs: %s is not a plain directory on the export; left in place", filepath.Dir(worktree))
+	}
+
+	// The worktree is the agent's; the project's shared checkout around it
+	// is never removed (agentFilesGuard). RemoveMountedWorktree removes
+	// the worktree by name under the checkout checked here.
+	if _, err := newAgentFilesGuard(agentName, []string{resolvedHostBase}, []string{worktree}, []string{workspace}).check(worktree); err != nil {
+		return worktree, fmt.Errorf("workspace_storage nfs: %w", err)
 	}
 
 	stateDir, err := nfsRemovalStateDir(resolvedHostBase, rel, projectID)

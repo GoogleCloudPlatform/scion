@@ -1,0 +1,443 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package relayrole
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
+)
+
+var t0 = time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+
+// streamRecorder records what the scheduler did to one stream.
+type streamRecorder struct {
+	mu      sync.Mutex
+	renewed [][]byte
+	closed  []uint32
+	reasons []string
+}
+
+func (r *streamRecorder) Renew(grant []byte) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.renewed = append(r.renewed, append([]byte(nil), grant...))
+	return nil
+}
+
+func (r *streamRecorder) close(code uint32, reason string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.closed = append(r.closed, code)
+	r.reasons = append(r.reasons, reason)
+}
+
+func (r *streamRecorder) closes() []uint32 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]uint32(nil), r.closed...)
+}
+
+func newStreamRole(t *testing.T, hub *fakeHub, clk *clock.Fake, events Events) *Role {
+	t.Helper()
+	ro, err := New(Config{Hub: hub.client(), Clock: clk, RecheckInterval: time.Minute, Events: events})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ro
+}
+
+func trackStream(ro *Role, rec *streamRecorder) func() {
+	return ro.Streams.Track(TrackedStream{
+		UserSessionID: "user-s1",
+		Target:        relay.TargetStream{SessionID: "agent-s1", StreamID: 7},
+		OpenJTI:       "jti-1",
+		LatestGrant:   []byte("open-grant"),
+		AuthzUntil:    t0.Add(10 * time.Minute),
+		Interval:      10 * time.Minute,
+		Renewer:       rec,
+		Close:         rec.close,
+	})
+}
+
+func renewAnswer(grant string, until time.Time) func(string, []byte) hubAnswer {
+	return func(path string, body []byte) hubAnswer {
+		if path != "streams/recheck" {
+			return hubAnswer{status: http.StatusOK, body: relay.HubSessionRecheckResponse{}}
+		}
+		var req relay.HubStreamRecheckRequest
+		_ = json.Unmarshal(body, &req)
+		res := make([]relay.HubStreamRecheckResult, len(req.Items))
+		for i := range res {
+			res[i] = relay.HubStreamRecheckResult{Renew: true, RenewalGrant: []byte(grant), AuthzUntil: until}
+		}
+		return hubAnswer{status: http.StatusOK, body: relay.HubStreamRecheckResponse{Results: res}}
+	}
+}
+
+// TestStreamRenewalMovesDeadline: at about 80% of the interval the relay
+// re-checks the stream with its latest grant; a renewal moves the deadline
+// (the stream outlives the old one) and the next re-check presents the
+// renewal as the latest grant.
+func TestStreamRenewalMovesDeadline(t *testing.T) {
+	hub := newFakeHub(t)
+	clk := clock.NewFake(t0)
+	ro := newStreamRole(t, hub, clk, nil)
+	rec := &streamRecorder{}
+	hub.setAnswer(renewAnswer("renewal-1", t0.Add(20*time.Minute)))
+	defer trackStream(ro, rec)()
+
+	clk.Advance(7 * time.Minute)
+	if n := hub.count("streams/recheck"); n != 0 {
+		t.Fatalf("re-checked before 80%% of the interval (%d calls)", n)
+	}
+	clk.Advance(time.Minute) // 8m: 80%
+	if n := hub.count("streams/recheck"); n != 1 {
+		t.Fatalf("re-checks at 80%%: %d, want 1", n)
+	}
+	var req relay.HubStreamRecheckRequest
+	hub.last("streams/recheck", &req)
+	if string(req.Items[0].LatestGrant) != "open-grant" || req.Items[0].TargetStreamID != 7 || req.Items[0].OpenJTI != "jti-1" {
+		t.Fatalf("re-check item %+v", req.Items[0])
+	}
+
+	clk.Advance(4 * time.Minute) // 12m: past the old deadline
+	if c := rec.closes(); len(c) != 0 {
+		t.Fatalf("closed at the old deadline after a renewal: %v", c)
+	}
+	clk.Advance(4 * time.Minute) // 16m: 80% after the renewal at 8m
+	hub.last("streams/recheck", &req)
+	if string(req.Items[0].LatestGrant) != "renewal-1" {
+		t.Fatalf("latest grant presented: %q, want the renewal", req.Items[0].LatestGrant)
+	}
+}
+
+// fakeTargetSession records RefreshAuth calls (the rest of
+// conduit.LocalSession is not used).
+type fakeTargetSession struct {
+	conduit.LocalSession
+	mu   sync.Mutex
+	cred []byte
+	id   uint32
+}
+
+func (f *fakeTargetSession) RefreshAuth(cred []byte, streamID uint32) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cred, f.id = append([]byte(nil), cred...), streamID
+	return nil
+}
+
+// remoteTargetSession is a target session this relay does not hold (not a
+// conduit.LocalSession).
+type remoteTargetSession struct{ conduit.Session }
+
+// recordingStreamRenewer records the credentials passed to Renew.
+type recordingStreamRenewer struct {
+	mu  sync.Mutex
+	got [][]byte
+}
+
+func (r *recordingStreamRenewer) Renew(credential []byte) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.got = append(r.got, append([]byte(nil), credential...))
+	return nil
+}
+
+// TestStreamRenewalCrossesTheHop: a renewal for a target on another relay
+// goes to the bridged stream's own renewer (AuthRefresh over the hop), with
+// the hub's grant bytes unchanged.
+func TestStreamRenewalCrossesTheHop(t *testing.T) {
+	hub := newFakeHub(t)
+	clk := clock.NewFake(t0)
+	ro := newStreamRole(t, hub, clk, nil)
+	grant := []byte("renewal-grant-bytes-for-the-hop-test")
+	hub.setAnswer(renewAnswer(string(grant), t0.Add(20*time.Minute)))
+	bridged := &recordingStreamRenewer{}
+	rec := &streamRecorder{}
+	target := relay.TargetStream{SessionID: "agent-s2", StreamID: 7}
+	defer ro.Streams.Track(TrackedStream{
+		UserSessionID: "user-s2", Target: target,
+		OpenJTI: "jti-2", LatestGrant: []byte("open-grant"),
+		AuthzUntil: t0.Add(10 * time.Minute), Interval: 10 * time.Minute,
+		Renewer: RenewerFor(remoteTargetSession{}, target, bridged), Close: rec.close,
+	})()
+	clk.Advance(8 * time.Minute)
+	bridged.mu.Lock()
+	defer bridged.mu.Unlock()
+	if len(bridged.got) != 1 || !bytes.Equal(bridged.got[0], grant) {
+		t.Fatalf("bridged stream renewals %q; want one, the grant unchanged", bridged.got)
+	}
+}
+
+// TestHopRenewerWithoutAStreamFailsClosed: a stream to another relay with
+// no conduit.StreamRenewer gets a renewer that refuses every renewal with
+// ErrNoStreamRenewer instead of a nil one. A renewal for it does not panic
+// the scheduler, sends nothing, and leaves the stream open for the target
+// to end at its own deadline.
+func TestHopRenewerWithoutAStreamFailsClosed(t *testing.T) {
+	target := relay.TargetStream{SessionID: "agent-s3", StreamID: 9}
+	r := RenewerFor(remoteTargetSession{}, target, nil)
+	if r == nil {
+		t.Fatal("RenewerFor returned a nil renewer for a stream without a StreamRenewer")
+	}
+	if err := r.Renew([]byte("renewal-grant")); !errors.Is(err, ErrNoStreamRenewer) {
+		t.Fatalf("Renew = %v, want ErrNoStreamRenewer", err)
+	}
+	if HopRenewer(nil) == nil {
+		t.Fatal("HopRenewer(nil) returned a nil renewer")
+	}
+
+	hub := newFakeHub(t)
+	clk := clock.NewFake(t0)
+	ro := newStreamRole(t, hub, clk, nil)
+	hub.setAnswer(renewAnswer("renewal-grant-bytes-for-the-nil-test", t0.Add(20*time.Minute)))
+	rec := &streamRecorder{}
+	defer ro.Streams.Track(TrackedStream{
+		UserSessionID: "user-s3", Target: target,
+		OpenJTI: "jti-3", LatestGrant: []byte("open-grant"),
+		AuthzUntil: t0.Add(10 * time.Minute), Interval: 10 * time.Minute,
+		Renewer: r, Close: rec.close,
+	})()
+	clk.Advance(8 * time.Minute)
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.renewed) != 0 || len(rec.closed) != 0 {
+		t.Fatalf("renewed %d, closed %v; want nothing sent and the stream left open", len(rec.renewed), rec.closed)
+	}
+}
+
+// TestStreamRenewalSentAsAuthRefreshUnchanged (design §3.9 Delivery): a
+// renewal reaches a target this relay holds as AuthRefresh carrying the
+// hub's grant bytes unchanged and the target-side stream id.
+func TestStreamRenewalSentAsAuthRefreshUnchanged(t *testing.T) {
+	hub := newFakeHub(t)
+	clk := clock.NewFake(t0)
+	ro := newStreamRole(t, hub, clk, nil)
+	grant := []byte("eyJ0eXAiOiJjb25kdWl0LXJlbmV3YWwrand0In0.payload.sig")
+	hub.setAnswer(renewAnswer(string(grant), t0.Add(20*time.Minute)))
+	target := &fakeTargetSession{}
+	rec := &streamRecorder{}
+	defer ro.Streams.Track(TrackedStream{
+		UserSessionID: "user-s1", Target: relay.TargetStream{SessionID: "agent-s1", StreamID: 42},
+		OpenJTI: "jti-1", LatestGrant: []byte("open-grant"),
+		AuthzUntil: t0.Add(10 * time.Minute), Interval: 10 * time.Minute,
+		Renewer: RenewerFor(target, relay.TargetStream{SessionID: "agent-s1", StreamID: 42}, nil), Close: rec.close,
+	})()
+	clk.Advance(8 * time.Minute)
+	target.mu.Lock()
+	defer target.mu.Unlock()
+	if !bytes.Equal(target.cred, grant) || target.id != 42 {
+		t.Fatalf("AuthRefresh{%d, %q}; want {42, the grant unchanged}", target.id, target.cred)
+	}
+}
+
+// TestStreamRefusalCloses4401: a refused re-check closes the stream with
+// 4401, including a refusal for a grant that does not match its inputs.
+func TestStreamRefusalCloses4401(t *testing.T) {
+	for _, reason := range []string{"authz_expired", "grant mismatch"} {
+		t.Run(reason, func(t *testing.T) {
+			hub := newFakeHub(t)
+			clk := clock.NewFake(t0)
+			ro := newStreamRole(t, hub, clk, nil)
+			hub.setAnswer(func(path string, body []byte) hubAnswer {
+				return hubAnswer{status: http.StatusOK, body: relay.HubStreamRecheckResponse{Results: []relay.HubStreamRecheckResult{{Close: true, CloseCode: conduit.CloseUnauthenticated, Reason: reason}}}}
+			})
+			rec := &streamRecorder{}
+			defer trackStream(ro, rec)()
+			clk.Advance(8 * time.Minute)
+			if c := rec.closes(); len(c) != 1 || c[0] != conduit.CloseUnauthenticated {
+				t.Fatalf("closes %v, want [4401]", c)
+			}
+			rec.mu.Lock()
+			defer rec.mu.Unlock()
+			if len(rec.renewed) != 0 {
+				t.Fatal("a refusal forwarded something to the target")
+			}
+		})
+	}
+}
+
+// TestStreamHubUnreachableClosesAtDeadline: with the hub unreachable
+// nothing is renewed and the stream closes at its deadline.
+func TestStreamHubUnreachableClosesAtDeadline(t *testing.T) {
+	hub := newFakeHub(t)
+	clk := clock.NewFake(t0)
+	ro := newStreamRole(t, hub, clk, nil)
+	hub.srv.Close()
+	rec := &streamRecorder{}
+	defer trackStream(ro, rec)()
+	clk.Advance(9 * time.Minute)
+	if c := rec.closes(); len(c) != 0 {
+		t.Fatalf("closed before the deadline: %v", c)
+	}
+	clk.Advance(time.Minute) // 10m: the deadline
+	if c := rec.closes(); len(c) != 1 || c[0] != conduit.CloseUnauthenticated {
+		t.Fatalf("closes %v, want [4401] at the deadline", c)
+	}
+}
+
+// TestStreamRecheckTriggers: a sweep, a revocation event and an event
+// connection reconnect each re-check the stream.
+func TestStreamRecheckTriggers(t *testing.T) {
+	hub := newFakeHub(t)
+	clk := clock.NewFake(t0)
+	events := newFakeEvents()
+	ro := newStreamRole(t, hub, clk, events)
+	hub.setAnswer(renewAnswer("renewal", t0.Add(20*time.Minute)))
+	rec := &streamRecorder{}
+	defer trackStream(ro, rec)()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ro.Start(ctx)
+
+	clk.Advance(time.Minute) // a sweep
+	if n := hub.count("streams/recheck"); n != 1 {
+		t.Fatalf("sweep re-checks: %d, want 1", n)
+	}
+	events.reconnect()
+	if n := hub.count("streams/recheck"); n != 2 {
+		t.Fatalf("after a reconnect: %d re-checks, want 2", n)
+	}
+	events.ch <- "conduit.authz.changed"
+	hub.waitCalls("streams/recheck", 3)
+}
+
+// TestStreamTargetGoneCloses4404: a re-check that finds the target gone
+// closes the stream with 4404 and the target_not_found reason.
+func TestStreamTargetGoneCloses4404(t *testing.T) {
+	hub := newFakeHub(t)
+	clk := clock.NewFake(t0)
+	ro := newStreamRole(t, hub, clk, nil)
+	hub.setAnswer(func(path string, body []byte) hubAnswer {
+		return hubAnswer{status: http.StatusOK, body: relay.HubStreamRecheckResponse{Results: []relay.HubStreamRecheckResult{{Close: true, CloseCode: relay.CloseTargetNotFound, Reason: "target_not_found"}}}}
+	})
+	rec := &streamRecorder{}
+	defer trackStream(ro, rec)()
+	clk.Advance(8 * time.Minute)
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.closed) != 1 || rec.closed[0] != relay.CloseTargetNotFound || rec.reasons[0] != relay.ReasonTargetNotFound {
+		t.Fatalf("closes %v %v, want [4404] %s", rec.closed, rec.reasons, relay.ReasonTargetNotFound)
+	}
+}
+
+// TestRecheckRunsCoalesce: triggers arriving while a re-check runs leave at
+// most one run pending, which starts when the running one ends.
+func TestRecheckRunsCoalesce(t *testing.T) {
+	hub := newFakeHub(t)
+	clk := clock.NewFake(t0)
+	ro := newStreamRole(t, hub, clk, nil)
+	release := make(chan struct{})
+	renew := renewAnswer("renewal", t0.Add(20*time.Minute))
+	var first sync.Once
+	hub.setAnswer(func(path string, body []byte) hubAnswer {
+		first.Do(func() { <-release }) // the first run blocks at the hub
+		return renew(path, body)
+	})
+	rec := &streamRecorder{}
+	defer trackStream(ro, rec)()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ro.recheckAll(context.Background(), TriggerSweep)
+	}()
+	hub.waitCalls("streams/recheck", 1)
+	for i := 0; i < 5; i++ {
+		ro.recheckAll(context.Background(), TriggerNotify) // returns at once: coalesced
+	}
+	close(release)
+	<-done
+	if n := hub.count("streams/recheck"); n != 2 {
+		t.Fatalf("%d re-check runs, want 2 (the running one and one pending)", n)
+	}
+}
+
+// neitherAnswer answers every stream re-check item with result, a result
+// carrying neither renew nor close.
+func neitherAnswer(result relay.HubStreamRecheckResult) func(string, []byte) hubAnswer {
+	return func(path string, body []byte) hubAnswer {
+		if path != "streams/recheck" {
+			return hubAnswer{status: http.StatusOK, body: relay.HubSessionRecheckResponse{}}
+		}
+		var req relay.HubStreamRecheckRequest
+		_ = json.Unmarshal(body, &req)
+		res := make([]relay.HubStreamRecheckResult, len(req.Items))
+		for i := range res {
+			res[i] = result
+		}
+		return hubAnswer{status: http.StatusOK, body: relay.HubStreamRecheckResponse{Results: res}}
+	}
+}
+
+// TestStreamRecheckUnavailableNeverExtends (B5): an unavailable re-check
+// result, at the interval or on a sweep, renews nothing and never moves the
+// deadline: the stream still closes at its original deadline.
+func TestStreamRecheckUnavailableNeverExtends(t *testing.T) {
+	hub := newFakeHub(t)
+	clk := clock.NewFake(t0)
+	ro := newStreamRole(t, hub, clk, nil)
+	hub.setAnswer(neitherAnswer(relay.HubStreamRecheckResult{Reason: "unavailable"}))
+	rec := &streamRecorder{}
+	defer trackStream(ro, rec)()
+	clk.Advance(8 * time.Minute) // the interval re-check
+	ro.Streams.RecheckAll(context.Background(), TriggerSweep)
+	if n := hub.count("streams/recheck"); n != 2 {
+		t.Fatalf("%d re-checks, want 2", n)
+	}
+	rec.mu.Lock()
+	renewed := len(rec.renewed)
+	rec.mu.Unlock()
+	if renewed != 0 || len(rec.closes()) != 0 {
+		t.Fatalf("renewed %d, closed %v before the deadline; want nothing", renewed, rec.closes())
+	}
+	clk.Advance(2 * time.Minute) // 10m: the original deadline
+	if c := rec.closes(); len(c) != 1 || c[0] != conduit.CloseUnauthenticated {
+		t.Fatalf("closes %v, want [4401] at the original deadline", c)
+	}
+}
+
+// TestStreamRecheckNeitherFieldNeverCloses (B6): a re-check result with
+// neither renew nor close, after an interval re-check, a sweep and an
+// event, never closes the stream before its deadline.
+func TestStreamRecheckNeitherFieldNeverCloses(t *testing.T) {
+	hub := newFakeHub(t)
+	clk := clock.NewFake(t0)
+	ro := newStreamRole(t, hub, clk, nil)
+	hub.setAnswer(neitherAnswer(relay.HubStreamRecheckResult{}))
+	rec := &streamRecorder{}
+	defer trackStream(ro, rec)()
+	clk.Advance(8 * time.Minute)
+	ro.Streams.RecheckAll(context.Background(), TriggerSweep)
+	ro.Streams.RecheckAll(context.Background(), TriggerNotify)
+	if n := hub.count("streams/recheck"); n != 3 {
+		t.Fatalf("%d re-checks, want 3", n)
+	}
+	clk.Advance(time.Minute + 59*time.Second)
+	if c := rec.closes(); len(c) != 0 {
+		t.Fatalf("closes %v before the deadline, want none", c)
+	}
+}

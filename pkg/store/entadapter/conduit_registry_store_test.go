@@ -1064,3 +1064,28 @@ func TestConduitRegistry_PruneThenReRegister_GenerationStaysMonotonic(t *testing
 	}
 	require.NoError(t, f.reg.HeartbeatRelay(f.ctx, "relay-stable", g3))
 }
+
+// TestConduitRegistry_CountRelaySessions: the per-dial session count of
+// relay selection counts only the named relay generation's rows.
+func TestConduitRegistry_CountRelaySessions(t *testing.T) {
+	f := newConduitFixture(t)
+	g1 := f.registerRelay("relay-1")
+	other := f.registerRelay("relay-2")
+	f.insert(agentSession("s-1a", "relay-1", g1, "inc-A"))
+	f.insert(brokerSession("s-1b", "relay-1", g1, "binc", ""))
+	f.insert(brokerSession("s-2", "relay-2", other, "binc", ""))
+
+	count := func(id string, gen int64) int {
+		t.Helper()
+		n, err := f.store.CountRelaySessions(f.ctx, id, gen)
+		require.NoError(t, err)
+		return n
+	}
+	assert.Equal(t, 2, count("relay-1", g1))
+	assert.Equal(t, 1, count("relay-2", other))
+	assert.Equal(t, 0, count("relay-3", 1), "an unknown relay holds nothing")
+
+	g2 := f.registerRelay("relay-1")
+	assert.Equal(t, 0, count("relay-1", g2), "a new generation holds none of the old rows")
+	assert.Equal(t, 2, count("relay-1", g1))
+}

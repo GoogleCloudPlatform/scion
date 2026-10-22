@@ -30,6 +30,7 @@ import {
   UNREAD_ASK_TIMEOUT_MS,
   UNREAD_LOCK_NAME,
   UNREAD_REFRESH_DEBOUNCE_MS,
+  UNREAD_REFRESH_MAX_WAIT_MS,
   UNREAD_SHARE_KEY,
   unreadConversations,
 } from './chat-unread.js';
@@ -196,6 +197,22 @@ describe('ChatUnreadCounter', () => {
     await settle();
     expect(apiFetch).toHaveBeenCalledTimes(1);
     expect(c.count).toBe(3);
+  });
+
+  it('is not starved by a steady stream of events', async () => {
+    serveCount(0);
+    const c = counter();
+    c.start({ immediate: true });
+    await settle();
+    apiFetch.mockClear();
+
+    // An event every 300 ms never leaves the debounce's quiet period.
+    for (let t = 0; t < UNREAD_REFRESH_MAX_WAIT_MS; t += 300) {
+      stateManager.dispatchEvent(new CustomEvent('chat-message-received', { detail: {} }));
+      await vi.advanceTimersByTimeAsync(300);
+    }
+    await settle();
+    expect(apiFetch).toHaveBeenCalledTimes(1);
   });
 
   it('refreshes on a read-state event alone', async () => {

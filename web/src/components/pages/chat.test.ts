@@ -36,6 +36,7 @@ import {
   beforeAll,
   beforeEach,
   afterEach,
+  onTestFinished,
   type MockInstance,
 } from 'vitest';
 import { html, nothing, render, type TemplateResult } from 'lit';
@@ -55,6 +56,28 @@ import { RESUME_REFRESH_AFTER_MS } from '../../client/resume-refresh.js';
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 vi.mock('../../client/main.js', () => import('../../client/__fixtures__/main-stub.js'));
+
+/**
+ * Stop functions visibleInterval has handed out and nobody has called yet:
+ * the page's live polls, whatever timers the helper uses underneath.
+ */
+const { livePolls } = vi.hoisted(() => ({ livePolls: new Set<() => void>() }));
+
+vi.mock('../../client/visible-interval.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../client/visible-interval.js')>();
+  return {
+    ...actual,
+    visibleInterval: (...args: Parameters<typeof actual.visibleInterval>): (() => void) => {
+      const stop = actual.visibleInterval(...args);
+      const tracked = (): void => {
+        livePolls.delete(tracked);
+        stop();
+      };
+      livePolls.add(tracked);
+      return tracked;
+    },
+  };
+});
 
 vi.mock('../../client/api.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../client/api.js')>();
@@ -1965,9 +1988,10 @@ describe('chat page — late route lookups', () => {
     vi.mocked(apiFetch).mockImplementation(async (path: string) => {
       if (path.startsWith('/api/v1/projects?slug=')) {
         await held;
-        return new Response(JSON.stringify({ items: [{ id: 'p1', slug: 'alpha', name: 'A' }] }), {
-          status: 200,
-        });
+        return new Response(
+          JSON.stringify({ projects: [{ id: 'p1', slug: 'alpha', name: 'A' }], totalCount: 1 }),
+          { status: 200 }
+        );
       }
       return new Response('{}', { status: 200 });
     });
@@ -2042,6 +2066,55 @@ describe('chat page — late route lookups', () => {
     expect(el.mobilePanel).toBe('center');
   });
 
+  it('a slug lookup asks the hub for that slug and records the project it names', async () => {
+    const release = holdSlugLookup();
+    const el = mountedPage();
+    window.history.replaceState({}, '', '/chat/alpha/topic-1');
+    el.parseV2Route();
+
+    release();
+    await vi.waitFor(() => expect(el._slugToProjectId.get('alpha')).toBe('p1'));
+    expect(el._projectIdToSlug.get('p1')).toBe('alpha');
+    expect(vi.mocked(apiFetch)).toHaveBeenCalledWith('/api/v1/projects?slug=alpha&limit=1');
+  });
+
+  it.each([
+    {
+      name: 'an empty projects list',
+      answer: () =>
+        Promise.resolve(
+          new Response(JSON.stringify({ projects: [], totalCount: 0 }), { status: 200 })
+        ),
+    },
+    {
+      name: 'a non-OK response',
+      answer: () => Promise.resolve(new Response('{}', { status: 500 })),
+    },
+    {
+      name: 'a failed request',
+      answer: (): Promise<Response> => Promise.reject(new TypeError('Failed to fetch')),
+    },
+  ])('a slug lookup answered by $name resolves nothing and asks again', async ({ answer }) => {
+    vi.mocked(apiFetch).mockClear();
+    vi.mocked(apiFetch).mockImplementation(answer);
+    onTestFinished(() => {
+      vi.mocked(apiFetch).mockImplementation(() =>
+        Promise.resolve(new Response('{}', { status: 200 }))
+      );
+    });
+    const el = createPage();
+
+    expect(await el.resolveProjectBySlug('alpha')).toBe('');
+    expect(el._slugToProjectId.size).toBe(0);
+    expect(el._projectIdToSlug.size).toBe(0);
+
+    expect(await el.resolveProjectBySlug('alpha')).toBe('');
+    const lookups = vi
+      .mocked(apiFetch)
+      .mock.calls.filter(([path]) => path === '/api/v1/projects?slug=alpha&limit=1');
+    expect(lookups).toHaveLength(2);
+  });
+
   it('a burst of rail reloads does not pull the user back to the thread the URL named before', async () => {
     const release = holdSlugLookup();
     const el = mountedPage();
@@ -2113,9 +2186,10 @@ describe('chat page — late space lookups', () => {
     vi.mocked(apiFetch).mockImplementation(async (path: string) => {
       if (path.startsWith('/api/v1/projects?slug=')) {
         await slugHeld;
-        return new Response(JSON.stringify({ items: [{ id: 'p1', slug: 'alpha', name: 'A' }] }), {
-          status: 200,
-        });
+        return new Response(
+          JSON.stringify({ projects: [{ id: 'p1', slug: 'alpha', name: 'A' }], totalCount: 1 }),
+          { status: 200 }
+        );
       }
       if (path === '/api/v1/chat/spaces/p1/threads') {
         await threadsHeld;
@@ -2316,6 +2390,123 @@ describe('chat page — rail reload after a message', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('chat page — coalesced event refetches', () => {
+  const SPACE_KEY = '6f1c2a54-0000-4000-8000-000000000001';
+  const DM_KEY = 'dm:user:user-me:user:user-1';
+
+  function dmListLoads(): number {
+    return vi.mocked(apiFetch).mock.calls.filter(([path]) => path === '/api/v1/chat/dms').length;
+  }
+
+  /** An unconnected page whose shadow root answers with a stub rail. */
+  function pageWithRail(): { el: any; rail: { reload: MockInstance } } {
+    const el = createPage();
+    const rail = { reload: vi.fn(() => Promise.resolve()) };
+    Object.defineProperty(el, 'shadowRoot', {
+      get: () => ({
+        querySelector: (sel: string) => (sel === 'scion-chat-space-rail' ? rail : null),
+      }),
+    });
+    return { el, rail };
+  }
+
+  function chatMessage(data: Record<string, unknown> | undefined): CustomEvent {
+    return new CustomEvent('chat-message-received', { detail: { state: {}, data } });
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.mocked(apiFetch).mockClear();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('space message does not fetch /chat/dms', async () => {
+    const { el, rail } = pageWithRail();
+    el.handleChatMessage(chatMessage({ projectId: 'p1', threadId: SPACE_KEY, id: 'm1' }));
+    await vi.advanceTimersByTimeAsync(5000);
+
+    expect(dmListLoads()).toBe(0);
+    // The rail still reloads for it.
+    expect(rail.reload).toHaveBeenCalledTimes(1);
+    el._dmDotsRefresh.cancel();
+  });
+
+  it('DM and keyless messages refresh the DM dots', async () => {
+    const { el } = pageWithRail();
+    el.handleChatMessage(chatMessage({ threadId: DM_KEY, id: 'm1' }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(dmListLoads()).toBe(1);
+
+    // A lightweight event names no conversation: it might be a DM.
+    await vi.advanceTimersByTimeAsync(5000);
+    chatDMsLoad.invalidate();
+    el.handleChatMessage(chatMessage(undefined));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(dmListLoads()).toBe(2);
+    el._railReload.cancel();
+    el._dmDotsRefresh.cancel();
+  });
+
+  it('DM message burst fetches /chat/dms at most twice', async () => {
+    const { el } = pageWithRail();
+    // 20 DM events in 1 s.
+    for (let i = 0; i < 20; i++) {
+      el.handleChatMessage(chatMessage({ threadId: DM_KEY, id: `m${i}` }));
+      await vi.advanceTimersByTimeAsync(50);
+    }
+    await vi.advanceTimersByTimeAsync(5000);
+
+    expect(dmListLoads()).toBeGreaterThanOrEqual(1);
+    expect(dmListLoads()).toBeLessThanOrEqual(2);
+    el._railReload.cancel();
+  });
+
+  it('rail reload not starved by steady messages', async () => {
+    const { el, rail } = pageWithRail();
+    // One message a second for 10 s never leaves 2 s of quiet.
+    let reloadedBy = -1;
+    for (let t = 0; t < 10_000; t += 1000) {
+      el.handleChatMessage(chatMessage({ projectId: 'p1', threadId: SPACE_KEY, id: `m${t}` }));
+      await vi.advanceTimersByTimeAsync(1000);
+      if (reloadedBy < 0 && rail.reload.mock.calls.length > 0) reloadedBy = t + 1000;
+    }
+
+    expect(reloadedBy).toBeGreaterThan(0);
+    expect(reloadedBy).toBeLessThanOrEqual(6000);
+    el._railReload.cancel();
+  });
+
+  it('new-agent burst triggers one members fetch within maxWait', async () => {
+    const el = createPage();
+    el.v2Conversation = { conversationKey: SPACE_KEY, projectId: 'p1', isDM: false };
+    el._sidebarOwner = 'space';
+    const loadMembers = vi.fn(() => Promise.resolve());
+    el.loadV2Members = loadMembers;
+    const agents: Array<{ id: string; projectId: string; name: string }> = [];
+    const sm = stateManager as unknown as Record<string, unknown>;
+    sm.getAgents = () => agents;
+    sm.getDeletedAgentIds = () => [];
+    onTestFinished(() => {
+      delete sm.getAgents;
+      delete sm.getDeletedAgentIds;
+    });
+
+    // A new agent every 500 ms never leaves the 1 s quiet period.
+    for (let t = 0; t < 4000; t += 500) {
+      agents.push({ id: `new-${t}`, projectId: 'p1', name: `new ${t}` });
+      el._handleAgentsUpdated();
+      await vi.advanceTimersByTimeAsync(500);
+    }
+
+    expect(loadMembers).toHaveBeenCalledTimes(1);
+    expect(loadMembers).toHaveBeenCalledWith('p1');
+    el._canAttachRefresh.get('p1')?.cancel();
   });
 });
 
@@ -2745,6 +2936,7 @@ describe('chat page — startup after the page is removed', () => {
 
   it('a page removed before its lazy imports resolve loads nothing and starts no poll', async () => {
     vi.mocked(apiFetch).mockClear();
+    livePolls.clear();
     const intervals = trackIntervals();
     await loadLazyModules();
     const el = createUnrenderedPage();
@@ -2759,13 +2951,16 @@ describe('chat page — startup after the page is removed', () => {
     await startups.settled();
 
     expect(dmListLoads()).toBe(0);
-    expect(el._fallbackPollInterval).toBeNull();
+    expect(el._stopFallbackPoll).toBeNull();
+    expect(livePolls.size).toBe(0);
+    // No raw setInterval left running either (livePolls covers the poll).
     expect(intervals.live()).toEqual([]);
     expect(el.v2SpaceRailLoaded).toBe(false);
   });
 
   it('a page removed and connected again before its imports resolve initialises once', async () => {
     vi.mocked(apiFetch).mockClear();
+    livePolls.clear();
     const intervals = trackIntervals();
     await loadLazyModules();
     const el = createUnrenderedPage();
@@ -2782,12 +2977,16 @@ describe('chat page — startup after the page is removed', () => {
 
       expect(el.v2SpaceRailLoaded).toBe(true);
       expect(dmListLoads()).toBe(1);
-      // Exactly one live interval, and it is the connected page's poll: the
-      // first initV2 started nothing its disconnect could no longer clear.
-      expect(el._fallbackPollInterval).not.toBeNull();
-      expect(intervals.live()).toEqual([el._fallbackPollInterval]);
+      // Exactly one live poll, and it is the connected page's: the first
+      // initV2 started nothing its disconnect could no longer clear.
+      expect(el._stopFallbackPoll).not.toBeNull();
+      expect(livePolls.size).toBe(1);
+      // ...and that poll is the page's: stopping the page's poll ends it.
+      el._stopFallbackPoll();
+      expect(livePolls.size).toBe(0);
 
       el.remove();
+      // No raw setInterval left running either (livePolls covers the poll).
       expect(intervals.live()).toEqual([]);
     } finally {
       el.remove();
@@ -2814,13 +3013,17 @@ describe('chat page — startup after the page is removed', () => {
 
     it('refreshes the rail when the SSE feed reconnects after a drop, until removed', async () => {
       const el = await startedPage();
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
       try {
         stateManager.dispatchEvent(new CustomEvent('agents-resync'));
+        await vi.advanceTimersByTimeAsync(250);
         expect(el.refreshRail).toHaveBeenCalledTimes(1);
         el.remove();
         stateManager.dispatchEvent(new CustomEvent('agents-resync'));
+        await vi.advanceTimersByTimeAsync(5000);
         expect(el.refreshRail).toHaveBeenCalledTimes(1);
       } finally {
+        vi.useRealTimers();
         el.remove();
       }
     });
@@ -2831,12 +3034,14 @@ describe('chat page — startup after the page is removed', () => {
       let now = 5_000_000;
       vi.spyOn(Date, 'now').mockImplementation(() => now);
       const el = await startedPage();
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
       try {
         visibility = 'hidden';
         document.dispatchEvent(new Event('visibilitychange'));
         now += RESUME_REFRESH_AFTER_MS;
         visibility = 'visible';
         document.dispatchEvent(new Event('visibilitychange'));
+        await vi.advanceTimersByTimeAsync(250);
         expect(el.refreshRail).toHaveBeenCalledTimes(1);
 
         el.remove();
@@ -2845,8 +3050,37 @@ describe('chat page — startup after the page is removed', () => {
         now += RESUME_REFRESH_AFTER_MS;
         visibility = 'visible';
         document.dispatchEvent(new Event('visibilitychange'));
+        await vi.advanceTimersByTimeAsync(5000);
         expect(el.refreshRail).toHaveBeenCalledTimes(1);
       } finally {
+        vi.useRealTimers();
+        el.remove();
+      }
+    });
+
+    it('resume plus resync triggers one rail refresh', async () => {
+      let visibility: DocumentVisibilityState = 'visible';
+      vi.spyOn(document, 'visibilityState', 'get').mockImplementation(() => visibility);
+      let now = 5_000_000;
+      vi.spyOn(Date, 'now').mockImplementation(() => now);
+      const el = await startedPage();
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      try {
+        // A PWA resume: the page becomes visible after a long time hidden,
+        // and the feed it had lost reconnects moments later.
+        visibility = 'hidden';
+        document.dispatchEvent(new Event('visibilitychange'));
+        now += RESUME_REFRESH_AFTER_MS;
+        visibility = 'visible';
+        document.dispatchEvent(new Event('visibilitychange'));
+        await vi.advanceTimersByTimeAsync(100);
+        stateManager.dispatchEvent(new CustomEvent('agents-resync'));
+
+        // Well past the coalescing window: one refresh.
+        await vi.advanceTimersByTimeAsync(5000);
+        expect(el.refreshRail).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
         el.remove();
       }
     });
@@ -2946,6 +3180,7 @@ describe('chat page — startup after the page is removed', () => {
 
     it('logs the error, starts nothing, and flags the rail as failed', async () => {
       vi.mocked(apiFetch).mockClear();
+      livePolls.clear();
       const intervals = trackIntervals();
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       const el = createUnrenderedPage();
@@ -2959,7 +3194,9 @@ describe('chat page — startup after the page is removed', () => {
         expect(el.v2SpaceRailLoaded).toBe(false);
         expect(el.v2SpaceRailLoadFailed).toBe(true);
         expect(dmListLoads()).toBe(0);
-        expect(el._fallbackPollInterval).toBeNull();
+        expect(el._stopFallbackPoll).toBeNull();
+        expect(livePolls.size).toBe(0);
+        // No raw setInterval left running either (livePolls covers the poll).
         expect(intervals.live()).toEqual([]);
       } finally {
         el.remove();

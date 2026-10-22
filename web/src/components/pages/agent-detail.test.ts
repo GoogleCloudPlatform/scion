@@ -21,7 +21,7 @@
  * tabs, etc). The fix shows a brief client-side-only "deleted" state and
  * then navigates within the SPA (`nav-click`), both when this page
  * initiates the delete and when the agent is deleted elsewhere (observed
- * via an SSE `deleted` event through `onAgentsUpdated`).
+ * via an SSE `deleted` event through `onAgentsChanged`).
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -31,9 +31,14 @@ class FakeStateManager extends EventTarget {
   private agentsById = new Map<string, { id: string }>();
   /** Mirrors the real state manager's tombstone set (state.ts `deletedAgentIds`). */
   private deletedIds = new Set<string>();
+  /** IDs dirtied since the last flush, mirroring state.ts `dirty`. */
+  private dirtyUpserted = new Set<string>();
+  private dirtyDeleted = new Set<string>();
+  private projectsById = new Map<string, { id: string; updatedAt?: string }>();
   setAgent(agent: { id: string }): void {
     this.agentsById.set(agent.id, agent);
     this.deletedIds.delete(agent.id);
+    this.dirtyUpserted.add(agent.id);
   }
   /** Prune a stale row without a tombstone (mirrors the real `removeAgent`). */
   removeAgent(id: string): void {
@@ -43,6 +48,8 @@ class FakeStateManager extends EventTarget {
   deleteAgent(id: string): void {
     this.deletedIds.add(id);
     this.agentsById.delete(id);
+    this.dirtyUpserted.delete(id);
+    this.dirtyDeleted.add(id);
   }
   getAgent(id: string): { id: string } | undefined {
     return this.agentsById.get(id);
@@ -50,8 +57,13 @@ class FakeStateManager extends EventTarget {
   getDeletedAgentIds(): Set<string> {
     return this.deletedIds;
   }
-  getProject(): undefined {
-    return undefined;
+  getProject(id: string): { id: string; updatedAt?: string } | undefined {
+    return this.projectsById.get(id);
+  }
+  /** Store a project object as-is and fire `projects-updated` (state.ts handleProjectEvent). */
+  setProject(project: { id: string; updatedAt?: string }): void {
+    this.projectsById.set(project.id, project);
+    this.dispatchEvent(new CustomEvent('projects-updated'));
   }
   setScope(): void {}
   /** The quick message dialog reads this to build the agent DM link. */
@@ -63,7 +75,9 @@ class FakeStateManager extends EventTarget {
       if (!this.deletedIds.has(a.id)) this.agentsById.set(a.id, a);
     }
   }
-  seedProjects(): void {}
+  seedProjects(projects: Array<{ id: string }>): void {
+    for (const p of projects) this.projectsById.set(p.id, p);
+  }
   /** Seed-epoch surface used through AgentSeedEpoch; epochs record nothing here. */
   readonly scopeGeneration = 0;
   beginSeedEpoch(): symbol {
@@ -80,17 +94,50 @@ class FakeStateManager extends EventTarget {
     const existing = this.agentsById.get(id);
     if (!deletion || !existing || this.deletedIds.has(id)) return false;
     this.agentsById.set(id, { ...existing, deletion } as { id: string });
+    this.dirtyUpserted.add(id);
     this.notifyAgentsUpdated();
     return true;
   }
-  /** Fire the same coalesced event the real state manager dispatches after a flush. */
+  /**
+   * Fire the same coalesced events the real state manager dispatches after
+   * a flush: `agents-changed` naming the IDs dirtied since the last flush,
+   * then the legacy `agents-updated`.
+   */
   notifyAgentsUpdated(): void {
+    this.notifyAgentsChanged({
+      upserted: [...this.dirtyUpserted],
+      deleted: [...this.dirtyDeleted],
+    });
+    this.dirtyUpserted.clear();
+    this.dirtyDeleted.clear();
     this.dispatchEvent(new CustomEvent('agents-updated'));
+  }
+  /** Dispatch one `agents-changed` with an explicit payload. */
+  notifyAgentsChanged(change: {
+    upserted?: string[];
+    deleted?: string[];
+    unknown?: Map<string, unknown>;
+  }): void {
+    this.dispatchEvent(
+      new CustomEvent('agents-changed', {
+        detail: {
+          data: {
+            upserted: change.upserted ?? [],
+            deleted: change.deleted ?? [],
+            unknown: change.unknown ?? new Map(),
+            generation: 0,
+          },
+        },
+      })
+    );
   }
   /** Test-only: reset between specs so state never leaks across them. */
   reset(): void {
     this.agentsById.clear();
     this.deletedIds.clear();
+    this.dirtyUpserted.clear();
+    this.dirtyDeleted.clear();
+    this.projectsById.clear();
   }
 }
 const fakeStateManager = new FakeStateManager();
@@ -430,7 +477,7 @@ describe('scion-page-agent-detail delete navigation (ptone/scion#2480)', () => {
 
   // --- absence from stateManager is not the same as "deleted" -------------
 
-  it('an agents-updated flush during page load (project fetch held) does not show the deleted state', async () => {
+  it('an agents-changed flush for this agent during page load (project fetch held) does not show the deleted state', async () => {
     let resolveProject!: (value: Response) => void;
     const heldProject = new Promise<Response>((resolve) => {
       resolveProject = resolve;
@@ -464,9 +511,11 @@ describe('scion-page-agent-detail delete navigation (ptone/scion#2480)', () => {
     expect((el as unknown as { loading: boolean }).loading).toBe(true);
     expect(fakeStateManager.getAgent(AGENT_ID)).toBeUndefined();
 
-    // An unrelated flush (e.g. a status delta for any agent in the
-    // project) arrives in that window.
-    fakeStateManager.notifyAgentsUpdated();
+    // A flush naming this agent arrives in that window: a status delta
+    // for it lands while it is missing from the map, so the real state
+    // manager reports it under `unknown`. (A flush for any other agent is
+    // ignored outright.)
+    fakeStateManager.notifyAgentsChanged({ unknown: new Map([[AGENT_ID, { phase: 'running' }]]) });
     await el.updateComplete;
 
     expect((el as unknown as { deleted: boolean }).deleted).toBe(false);
@@ -482,9 +531,10 @@ describe('scion-page-agent-detail delete navigation (ptone/scion#2480)', () => {
     const el = await mount(makeAgent());
     fakeStateManager.setAgent({ id: AGENT_ID });
 
-    // A stale-row prune (chat.ts's use of removeAgent) with no deletion.
+    // A stale-row prune (chat.ts's use of removeAgent) with no deletion,
+    // then a flush naming this agent.
     fakeStateManager.removeAgent(AGENT_ID);
-    fakeStateManager.notifyAgentsUpdated();
+    fakeStateManager.notifyAgentsChanged({ unknown: new Map([[AGENT_ID, {}]]) });
     await el.updateComplete;
 
     expect((el as unknown as { deleted: boolean }).deleted).toBe(false);
@@ -689,6 +739,126 @@ describe('scion-page-agent-detail delete navigation (ptone/scion#2480)', () => {
     vi.advanceTimersByTime(DELETE_REDIRECT_DELAY_MS * 10);
     await Promise.resolve();
     expect(navClicks).toEqual([]);
+  });
+});
+
+describe('scion-page-agent-detail reacts only to its own agent (webperf C2)', () => {
+  const PROJECT = { id: 'proj-1', name: 'Proj One', updatedAt: '2026-10-01T00:00:00Z' };
+
+  beforeEach(() => {
+    fakeStateManager.reset();
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  /** Count `render()` calls on this element from here on. */
+  function spyRender(el: ScionPageAgentDetail): { calls: number } {
+    const target = el as unknown as { render(): unknown };
+    const counter = { calls: 0 };
+    const original = target.render.bind(el);
+    target.render = (): unknown => {
+      counter.calls += 1;
+      return original();
+    };
+    return counter;
+  }
+
+  it('agent-detail ignores agents-changed for sibling agents', async () => {
+    const el = await mount(makeAgent());
+    fakeStateManager.setAgent({ id: AGENT_ID });
+    fakeStateManager.notifyAgentsUpdated();
+    await el.updateComplete;
+    const renders = spyRender(el);
+
+    fakeStateManager.setAgent({ id: 'agent-B' });
+    fakeStateManager.notifyAgentsUpdated();
+    fakeStateManager.notifyAgentsChanged({
+      deleted: ['agent-C'],
+      unknown: new Map([['agent-D', { phase: 'running' }]]),
+    });
+    await el.updateComplete;
+
+    expect(renders.calls).toBe(0);
+  });
+
+  it('agent-detail tolerates a partial agents-changed payload', async () => {
+    const el = await mount(makeAgent());
+    const renders = spyRender(el);
+    fakeStateManager.setAgent({ ...makeAgent(), phase: 'stopped' } as { id: string });
+
+    // Payloads missing some or all of upserted/deleted/unknown.
+    for (const data of [{}, { deleted: ['agent-B'] }, { unknown: new Map() }, undefined]) {
+      expect(() =>
+        fakeStateManager.dispatchEvent(new CustomEvent('agents-changed', { detail: { data } }))
+      ).not.toThrow();
+    }
+    await el.updateComplete;
+    expect(renders.calls).toBe(0);
+
+    // A partial payload that names this agent is still applied.
+    fakeStateManager.dispatchEvent(
+      new CustomEvent('agents-changed', { detail: { data: { upserted: [AGENT_ID] } } })
+    );
+    await el.updateComplete;
+    expect(renders.calls).toBe(1);
+    expect((el as unknown as { agent: Agent }).agent.phase).toBe('stopped');
+  });
+
+  it('agent-detail re-renders for its own agent', async () => {
+    const el = await mount(makeAgent());
+    const renders = spyRender(el);
+
+    fakeStateManager.setAgent({ ...makeAgent(), phase: 'stopped' } as { id: string });
+    fakeStateManager.notifyAgentsUpdated();
+    await el.updateComplete;
+
+    expect(renders.calls).toBe(1);
+    expect((el as unknown as { agent: Agent }).agent.phase).toBe('stopped');
+  });
+
+  it('agent-detail project update with same reference ignored', async () => {
+    const el = await mount(makeAgent({ projectId: PROJECT.id }), PROJECT);
+    await el.updateComplete;
+    const renders = spyRender(el);
+
+    // loadData seeded the page's own project object: a flush that leaves
+    // it untouched (e.g. a different project's event) must not re-render.
+    const seeded = fakeStateManager.getProject(PROJECT.id);
+    expect(seeded).toBe((el as unknown as { project: unknown }).project);
+    fakeStateManager.setProject(seeded!);
+    await el.updateComplete;
+    expect(renders.calls).toBe(0);
+
+    // A new object with a new updatedAt is merged once...
+    fakeStateManager.setProject({ ...PROJECT, name: 'Renamed', updatedAt: '2026-10-02T00:00:00Z' });
+    await el.updateComplete;
+    expect(renders.calls).toBe(1);
+    expect((el as unknown as { project: { name: string } }).project.name).toBe('Renamed');
+
+    // ...and the same merged object again is ignored.
+    fakeStateManager.setProject(fakeStateManager.getProject(PROJECT.id)!);
+    await el.updateComplete;
+    expect(renders.calls).toBe(1);
+  });
+
+  it('agent-detail refetches its agent on agents-resync', async () => {
+    const el = await mount(makeAgent());
+    apiFetch.mockImplementation((url: string) =>
+      Promise.resolve(
+        url === `/api/v1/agents/${AGENT_ID}`
+          ? okJson(makeAgent({ phase: 'stopped' }))
+          : ({ ok: false, status: 404, json: () => Promise.resolve({}) } as unknown as Response)
+      )
+    );
+
+    fakeStateManager.dispatchEvent(new CustomEvent('agents-resync'));
+
+    await vi.waitFor(() => {
+      expect((el as unknown as { agent: Agent }).agent.phase).toBe('stopped');
+    });
+    expect(apiFetch).toHaveBeenCalledWith(`/api/v1/agents/${AGENT_ID}`);
   });
 });
 

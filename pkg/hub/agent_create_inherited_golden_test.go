@@ -63,15 +63,18 @@ type inheritedGoldenCase struct {
 // inheritedSources is the part of a case's sources this test applies.
 type inheritedSources struct {
 	Template struct {
-		Config *store.TemplateConfig `json:"config"`
 		// AgentConfig is the template's own scion-agent.yaml snapshot,
 		// the hub's only source of a template's job keys
 		// (ptone/scion#4222).
 		AgentConfig *api.ScionConfig `json:"agentConfig"`
+		// DefaultHarnessConfig is the template list item's declared
+		// default_harness_config, the hub's template harness-config rung.
+		DefaultHarnessConfig string `json:"defaultHarnessConfig"`
 	} `json:"template"`
 	ProjectSettings json.RawMessage `json:"projectSettings"`
 	HubSettings     struct {
 		DefaultModel           string `json:"defaultModel"`
+		DefaultHarnessConfig   string `json:"defaultHarnessConfig"`
 		AutoExposePortsEnabled *bool  `json:"autoExposePortsEnabled"`
 	} `json:"hubSettings"`
 }
@@ -132,6 +135,7 @@ func dispatchInheritedCase(t *testing.T, tier string, src inheritedSources) map[
 	// Hub tier.
 	srv.mu.Lock()
 	srv.config.AgentDefaults.DefaultModel = src.HubSettings.DefaultModel
+	srv.config.AgentDefaults.DefaultHarnessConfig = src.HubSettings.DefaultHarnessConfig
 	srv.config.AutoExposePortsDefault = src.HubSettings.AutoExposePortsEnabled
 	srv.mu.Unlock()
 
@@ -141,6 +145,9 @@ func dispatchInheritedCase(t *testing.T, tier string, src inheritedSources) map[
 	require.NoError(t, json.Unmarshal(pub.Body.Bytes(), &pubBody))
 	if src.HubSettings.DefaultModel != "" {
 		assert.Equal(t, src.HubSettings.DefaultModel, pubBody["defaultModel"])
+	}
+	if src.HubSettings.DefaultHarnessConfig != "" {
+		assert.Equal(t, src.HubSettings.DefaultHarnessConfig, pubBody["defaultHarnessConfig"])
 	}
 	if src.HubSettings.AutoExposePortsEnabled != nil {
 		assert.Equal(t, *src.HubSettings.AutoExposePortsEnabled, pubBody["autoExposePortsEnabled"])
@@ -160,15 +167,15 @@ func dispatchInheritedCase(t *testing.T, tier string, src inheritedSources) map[
 
 	// Template tier.
 	tmpl := &store.Template{
-		ID:          tid("template-inherited-" + tier),
-		Name:        "inherited-" + tier,
-		Slug:        "inherited-" + tier,
-		Harness:     "claude",
-		ContentHash: "d00dfeed",
-		Scope:       store.TemplateScopeGlobal,
-		Status:      store.TemplateStatusActive,
-		Config:      src.Template.Config,
-		AgentConfig: src.Template.AgentConfig,
+		ID:                   tid("template-inherited-" + tier),
+		Name:                 "inherited-" + tier,
+		Slug:                 "inherited-" + tier,
+		Harness:              "claude",
+		ContentHash:          "d00dfeed",
+		Scope:                store.TemplateScopeGlobal,
+		Status:               store.TemplateStatusActive,
+		AgentConfig:          src.Template.AgentConfig,
+		DefaultHarnessConfig: src.Template.DefaultHarnessConfig,
 	}
 	require.NoError(t, s.CreateTemplate(ctx, tmpl))
 
@@ -195,6 +202,10 @@ func dispatchInheritedCase(t *testing.T, tier string, src inheritedSources) map[
 			dispatched[key] = v
 		}
 	}
+	// The harness-config name the hub resolved for a create with none in
+	// the request (project > template default_harness_config > hub,
+	// ptone/scion#3914); the form's harness picker shows it.
+	set("harnessConfig", resp.Agent.AppliedConfig.HarnessConfig)
 	set("config.model", req.ResolvedEnv["SCION_MODEL"])
 	set("config.thinking_level", req.ResolvedEnv["SCION_THINKING_LEVEL"])
 	set("config.auth_selectedType", req.Config.HarnessAuth)
@@ -218,9 +229,12 @@ func dispatchInheritedCase(t *testing.T, tier string, src inheritedSources) map[
 			set("config.resources.limits.memory", r.Limits.Memory)
 			set("config.resources.disk", r.Disk)
 		}
-		if ic.Telemetry != nil && ic.Telemetry.Enabled != nil {
-			dispatched["config.telemetry"] = strconv.FormatBool(*ic.Telemetry.Enabled)
-		}
+		require.Nil(t, ic.Telemetry, "telemetry is never sent inline (ptone/scion#4224)")
+	}
+	// The project telemetry policy travels as its own tier
+	// (ptone/scion#4224); the form shows it as config.telemetry.
+	if p := req.Config.TelemetryPolicy; p != nil {
+		dispatched["config.telemetry"] = strconv.FormatBool(*p)
 	}
 	// Every agent gets a role and a message mode; record them only where
 	// the case's sources set one, the values the web can know.
@@ -229,10 +243,9 @@ func dispatchInheritedCase(t *testing.T, tier string, src inheritedSources) map[
 	if _, ok := ps["defaultAgentRole"]; ok {
 		dispatched["agentRole"] = resp.Agent.AppliedConfig.AgentRole
 	}
-	// The row's config.messageMode is recorded too, so a case can assert
-	// that it no longer contributes (ptone/scion#4222).
-	if (src.Template.Config != nil && src.Template.Config.MessageMode != "") ||
-		(src.Template.AgentConfig != nil && src.Template.AgentConfig.MessageMode != "") {
+	// The template's message mode comes only from its snapshot
+	// (ptone/scion#4222); the row has no config (ptone/scion#4224).
+	if src.Template.AgentConfig != nil && src.Template.AgentConfig.MessageMode != "" {
 		dispatched["messageMode"] = resp.Agent.MessageMode
 	}
 	return dispatched

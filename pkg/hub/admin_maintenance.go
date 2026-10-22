@@ -29,8 +29,10 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 )
 
@@ -347,13 +349,15 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 		return &UTCTimestampNormalizeExecutor{DB: db, Dialect: dbDialect}, nil
 	case entadapter.TemplateBlobGCKey:
 		return &TemplateBlobGCExecutor{srv: s}, nil
+	case entadapter.PassthroughTranslationReviewKey:
+		return &PassthroughTranslationReviewExecutor{srv: s}, nil
 	case "pull-images":
 		log.Debug("Resolved pull-images executor",
-			"runtime_bin", mc.RuntimeBin, "registry", mc.ImageRegistry,
+			"runtime_bin", mc.RuntimeBin, "registry", config.RedactImageRegistry(s.maintenanceImageRegistry()),
 			"tag", mc.ImageTag, "harnesses", fmt.Sprint(mc.Harnesses))
 		return NewPullImagesExecutor(PullImagesOptions{
 			RuntimeBin: mc.RuntimeBin,
-			Registry:   mc.ImageRegistry,
+			Registry:   s.maintenanceImageRegistry(),
 			Tag:        mc.ImageTag,
 			Harnesses:  mc.Harnesses,
 		}), nil
@@ -366,6 +370,7 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 			RepoBranch:  mc.RepoBranch,
 			BinaryDest:  mc.BinaryDest,
 			ServiceName: mc.ServiceName,
+			Store:       s.store,
 		}), nil
 	case "rebuild-web":
 		log.Debug("Resolved rebuild-web executor", "repo_path", mc.RepoPath, "branch", mc.RepoBranch)
@@ -378,12 +383,12 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 		return NewRebuildContainerBinariesExecutor(mc.RepoPath), nil
 	case "build-harness-config-image":
 		log.Debug("Resolved build-harness-config-image executor",
-			"runtime_bin", mc.RuntimeBin, "registry", mc.ImageRegistry, "tag", mc.ImageTag)
+			"runtime_bin", mc.RuntimeBin, "registry", config.RedactImageRegistry(s.maintenanceImageRegistry()), "tag", mc.ImageTag)
 		return NewBuildHarnessConfigImageExecutor(BuildHarnessConfigImageOptions{
 			Store:      s.store,
 			Storage:    s.GetStorage(),
 			RuntimeBin: mc.RuntimeBin,
-			Registry:   mc.ImageRegistry,
+			Registry:   s.maintenanceImageRegistry(),
 			Tag:        mc.ImageTag,
 			GCPProject: s.config.GCPProjectID,
 		}), nil
@@ -633,10 +638,38 @@ func (s *Server) listMaintenanceOperations(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	resp := map[string]interface{}{
 		"migrations": migrations,
 		"operations": operations,
-	})
+	}
+	if st := s.unitDriftStatus(r.Context()); st != nil {
+		resp["unitStatus"] = st
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// unitDriftStatus returns the stored result of the last systemd unit check
+// (see RebuildServerExecutor), decoded and re-encoded through its type, or
+// nil when there is none or it cannot be read or decoded.
+func (s *Server) unitDriftStatus(ctx context.Context) *UnitDriftStatus {
+	log := logging.Subsystem("hub.maintenance")
+	setting, err := s.store.GetHubSetting(ctx, HubSettingSectionUnitDrift)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			log.Warn("Failed to read the systemd unit status", "error", err)
+		}
+		return nil
+	}
+	var st UnitDriftStatus
+	if err := json.Unmarshal(setting.Value, &st); err != nil {
+		log.Debug("Ignoring an unreadable systemd unit status", "error", err)
+		return nil
+	}
+	if st.Status != "match" && st.Status != "drift" {
+		log.Debug("Ignoring a systemd unit status with an unknown status", "status", st.Status)
+		return nil
+	}
+	return &st
 }
 
 // getMaintenanceOperation returns a single operation by key.

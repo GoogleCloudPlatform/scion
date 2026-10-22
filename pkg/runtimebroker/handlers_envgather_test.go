@@ -25,6 +25,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -205,7 +206,7 @@ func newTestServerWithProjectPath(t *testing.T, settingsYAML string) (*Server, *
 	// NameFunc returns "docker" so resolveManagerForOpts matches the settings-resolved runtime.
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 
-	return New(cfg, mgr, rt), mgr, projectDir
+	return New(cfg, mgr, rt, config.RuntimeBuildRecord{}), mgr, projectDir
 }
 
 // TestEnvGather_AllSatisfied tests the fast path: all required env keys are provided
@@ -485,7 +486,7 @@ runtimes:
 	}
 
 	mgr := &envCapturingManager{}
-	srv := New(cfg, mgr, &runtime.MockRuntime{NameFunc: func() string { return "mock" }})
+	srv := New(cfg, mgr, &runtime.MockRuntime{NameFunc: func() string { return "mock" }}, config.RuntimeBuildRecord{})
 
 	body := fmt.Sprintf(`{
 		"requestId": "req-idempotent-1",
@@ -557,7 +558,7 @@ func newTestServerWithHarnessConfig(t *testing.T, harnessConfigName, configYAML,
 	// NameFunc returns "docker" so resolveManagerForOpts matches the settings-resolved runtime.
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 
-	return New(cfg, mgr, rt), mgr, projectDir
+	return New(cfg, mgr, rt, config.RuntimeBuildRecord{}), mgr, projectDir
 }
 
 // unsetHostGCPEnv temporarily removes the broker process's own GCP env vars
@@ -2027,7 +2028,7 @@ profiles:
 	mgr := &envCapturingManager{}
 	// NameFunc returns "docker" so resolveManagerForOpts matches the settings-resolved runtime.
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	// Send create request with NO projectPath — simulates a hub-only git project
 	body := `{
@@ -3185,6 +3186,47 @@ profiles:
 
 	if w.Code != http.StatusCreated {
 		t.Fatalf("expected 201 (auto-detect should pick api-key from settings env, needing no GCP keys), got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestEnvGather_AutoDetect_APIKeyBeatsVertexFileCredential is the broker
+// preflight twin of pkg/agent's
+// TestAutoDetectAuthSelectedType_APIKeyBeatsVertexFileCredential
+// (ptone/scion#4559): with both ANTHROPIC_API_KEY and a gcloud-adc file
+// credential, auto-detect picks api-key, so the Vertex project and region
+// are not required and the request is not held for env gathering.
+func TestEnvGather_AutoDetect_APIKeyBeatsVertexFileCredential(t *testing.T) {
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
+		"harness: claude\nimage: test-image\nuser: scion\n"+claudeAuthBlock,
+		`
+schema_version: "1"
+harness_configs:
+  claude:
+    harness: claude
+profiles:
+  default:
+    runtime: mock
+`)
+
+	body := `{
+		"name": "test-agent-autodetect-key-vs-adc",
+		"id": "agent-uuid-autodetect-key-vs-adc",
+		"gatherEnv": true,
+		"projectPath": "` + projectDir + `",
+		"resolvedEnv": {"ANTHROPIC_API_KEY": "sk-test"},
+		"resolvedSecrets": [
+			{"name": "gcloud-adc", "type": "file", "target": "/home/scion/.config/gcloud/application_default_credentials.json", "value": "{\"type\":\"authorized_user\"}", "source": "user"}
+		],
+		"config": {"template": "claude", "profile": "default"}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201 (auto-detect should pick api-key over the gcloud-adc file credential, needing no Vertex keys), got %d: %s", w.Code, w.Body.String())
 	}
 }
 

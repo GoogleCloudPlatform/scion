@@ -23,10 +23,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/imagecheck"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -66,8 +68,8 @@ func TestSystemRegistry_DBBackedWritesEndpointsSection(t *testing.T) {
 	if got := ops.Snapshot().ImageRegistry; got != "new.example.com" {
 		t.Errorf("snapshot image_registry = %q, want new.example.com", got)
 	}
-	if got := srv.config.MaintenanceConfig.ImageRegistry; got != "new.example.com" {
-		t.Errorf("applied image_registry = %q, want new.example.com", got)
+	if got := srv.resolveImageRegistry(); got != "new.example.com" {
+		t.Errorf("resolved image_registry = %q, want new.example.com", got)
 	}
 	data, err := os.ReadFile(settingsPath)
 	if err != nil {
@@ -159,6 +161,76 @@ func TestSystemRuntime_DBBackedNoRowStartsFromEffectiveProfiles(t *testing.T) {
 	otherDoc, _ := doc["other"].(map[string]interface{})
 	if otherDoc["runtime"] != "podman" {
 		t.Errorf("profiles.other.runtime = %v, want the bootstrap value carried into the new row", otherDoc["runtime"])
+	}
+}
+
+// With the co-located settings overlay installed and exactly one stored
+// profile that is not the configured active_profile, the overlay's
+// single-stored-profile default applies to dispatch only: the
+// system-runtime GET and PUT keep targeting the configured active profile,
+// and the only stored profile is left untouched.
+func TestSystemRuntime_DBBackedSingleStoredProfileNotRetargeted(t *testing.T) {
+	tempSettingsHome(t)
+	configured := activeProfileName() // before any overlay: the configured value
+	const stored = "cluster"
+	if configured == stored {
+		t.Fatalf("fixture: configured active profile %q must differ from the stored profile", configured)
+	}
+	prev := config.GetGlobalSettingsOverlay()
+	config.SetGlobalSettingsOverlay(config.NewSettingsOverlay())
+	t.Cleanup(func() { config.SetGlobalSettingsOverlay(prev) })
+
+	srv, st, _ := newSQLiteOpsServer(t, nil, map[string]string{
+		"profiles": `{"` + stored + `":{"runtime":"podman","default_template":"keep-me"}}`,
+	})
+	srv.imageChecker = imagecheck.NewChecker()
+
+	// The overlay now holds the one stored profile, so dispatch resolution
+	// falls back to it; the system-runtime target does not.
+	effective, _, err := config.LoadEffectiveSettings("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if effective.ActiveProfile != stored {
+		t.Fatalf("fixture: effective ActiveProfile = %q, want the single-stored-profile default %q", effective.ActiveProfile, stored)
+	}
+	if got := activeProfileName(); got != configured {
+		t.Fatalf("activeProfileName() = %q, want the configured %q", got, configured)
+	}
+
+	// GET reports the configured profile's runtime, which the stored
+	// profiles do not define, not the stored profile's.
+	rr := httptest.NewRecorder()
+	req := adminRequest(http.MethodGet, "/api/v1/system/runtime", "")
+	req.RemoteAddr = "127.0.0.1:1234"
+	srv.handleSystemRuntime(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("runtime GET: %d %s", rr.Code, rr.Body.String())
+	}
+	var resp systemRuntimeResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Configured != "" {
+		t.Errorf("GET configured = %q, want \"\" (the configured profile is not stored), not the stored profile's runtime", resp.Configured)
+	}
+
+	// PUT writes the configured profile and leaves the stored one as is.
+	rr = putSystem(t, srv, "/api/v1/system/runtime", `{"runtime":"container"}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("runtime PUT: %d %s", rr.Code, rr.Body.String())
+	}
+	_, doc := hubSettingDocMap(t, st, "profiles")
+	configuredDoc, _ := doc[configured].(map[string]interface{})
+	if configuredDoc["runtime"] != "container" {
+		t.Errorf("profiles.%s.runtime = %v, want container", configured, configuredDoc["runtime"])
+	}
+	storedDoc, _ := doc[stored].(map[string]interface{})
+	if storedDoc["runtime"] != "podman" || storedDoc["default_template"] != "keep-me" {
+		t.Errorf("profiles.%s = %v, want it untouched (runtime podman, default_template keep-me)", stored, storedDoc)
+	}
+	if len(doc) != 2 {
+		t.Errorf("profiles = %v, want exactly %q and %q", doc, configured, stored)
 	}
 }
 
@@ -275,5 +347,80 @@ func TestSystemRuntime_DBBackedValidationFailure400(t *testing.T) {
 	rr := putSystem(t, srv, "/api/v1/system/runtime", `{"runtime":"container"}`)
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestSystemRuntime_GlobalActiveProfileFromProjectDir checks that the
+// system runtime handlers resolve the global settings, not a project found
+// from the server's working directory (ptone/scion#5362): with the server
+// started inside a project whose active_profile differs, the PUT writes the
+// global active profile and the GET reports it, as the co-located broker
+// (which resolves its default runtime from the global settings) sees it.
+func TestSystemRuntime_GlobalActiveProfileFromProjectDir(t *testing.T) {
+	settingsPath := tempSettingsHome(t)
+	t.Setenv("SCION_ACTIVE_PROFILE", "")
+	if err := os.WriteFile(settingsPath, []byte(
+		"schema_version: \"1\"\nactive_profile: global-profile\nprofiles:\n  global-profile:\n    runtime: docker\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	project := t.TempDir()
+	projectScion := filepath.Join(project, ".scion")
+	if err := os.MkdirAll(projectScion, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectScion, "settings.yaml"), []byte(
+		"schema_version: \"1\"\nactive_profile: project-profile\nprofiles:\n  project-profile:\n    runtime: docker\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(project)
+
+	// The project layer is really there: a cwd-resolved load merges it.
+	merged, _, err := config.LoadEffectiveSettings("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := merged.ConfiguredActiveProfile(); got != "project-profile" {
+		t.Fatalf("test setup: cwd-resolved active profile = %q, want project-profile", got)
+	}
+	if got := activeProfileName(); got != "global-profile" {
+		t.Fatalf("activeProfileName() = %q, want global-profile", got)
+	}
+
+	srv, st, _ := newSQLiteOpsServer(t, nil, map[string]string{
+		"profiles": `{"global-profile":{"runtime":"docker"},"project-profile":{"runtime":"docker"}}`,
+	})
+	srv.imageChecker = imagecheck.NewChecker()
+
+	rr := httptest.NewRecorder()
+	req := adminRequest(http.MethodPut, "/api/v1/system/runtime", `{"runtime":"container"}`)
+	req.RemoteAddr = "127.0.0.1:1234"
+	srv.handleSystemRuntime(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("runtime PUT: %d %s", rr.Code, rr.Body.String())
+	}
+
+	_, doc := hubSettingDocMap(t, st, "profiles")
+	globalDoc, _ := doc["global-profile"].(map[string]interface{})
+	if globalDoc["runtime"] != "container" {
+		t.Errorf("profiles.global-profile.runtime = %v, want container", globalDoc["runtime"])
+	}
+	projectDoc, _ := doc["project-profile"].(map[string]interface{})
+	if projectDoc["runtime"] != "docker" {
+		t.Errorf("profiles.project-profile.runtime = %v, want docker (unchanged)", projectDoc["runtime"])
+	}
+
+	rr = httptest.NewRecorder()
+	req = adminRequest(http.MethodGet, "/api/v1/system/runtime", "")
+	req.RemoteAddr = "127.0.0.1:1234"
+	srv.handleSystemRuntime(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("runtime GET: %d %s", rr.Code, rr.Body.String())
+	}
+	var resp systemRuntimeResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Configured != "container" {
+		t.Errorf("GET configured = %q, want container (the global active profile)", resp.Configured)
 	}
 }

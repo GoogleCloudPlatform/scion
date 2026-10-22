@@ -109,6 +109,29 @@ func (RuntimeBroker) Fields() []ent.Field {
 		field.String("gcp_host_project_id").
 			Optional().
 			Nillable(),
+		// gcp_host_source records how the GCP host service account and
+		// project were last set: "registration", "detected" or "admin" (set
+		// through the update API). Empty means not recorded. The GCP host
+		// pair and this column are written only by CreateRuntimeBroker and
+		// the dedicated SetRuntimeBrokerGCPHost* store methods, never by
+		// UpdateRuntimeBroker.
+		field.String("gcp_host_source").
+			Optional().
+			Default(""),
+		// host_identity_* hold the last GCP identity a co-located server
+		// read from the metadata server for its own broker. They are written
+		// only by RecordRuntimeBrokerHostObservation, never by
+		// UpdateRuntimeBroker. The host identity state is derived from them
+		// at read time.
+		field.String("host_identity_observed_email").
+			Optional().
+			Nillable(),
+		field.String("host_identity_observation").
+			Optional().
+			Nillable(),
+		field.Time("host_identity_observed_at").
+			Optional().
+			Nillable(),
 		field.String("connected_hub_id").
 			Optional().
 			Nillable(),
@@ -134,6 +157,41 @@ func (RuntimeBroker) Fields() []ent.Field {
 		field.String("runtime_target_display_name").
 			Optional().
 			Default(""),
+		// --- Flat Runtime Broker presentation (store.RuntimeBroker.RuntimeTargetPresentation) ---
+		// The six presentation columns are written only by
+		// SetRuntimeBrokerPresentation (one conditional, epoch/seq-fenced
+		// update) and removed only by deleting the row. CreateRuntimeBroker,
+		// UpdateRuntimeBroker and every other full-row writer never write
+		// them, so a write-back of an older copy cannot roll them back.
+		//
+		// runtime_target_presentation is the JSON-encoded
+		// api.RuntimeTargetPresentation; empty means never reported.
+		field.String("runtime_target_presentation").
+			Optional(),
+		// runtime_target_presentation_hash is the Hub-computed hash of the
+		// stored presentation (never a hash sent by the Runtime Broker).
+		field.String("runtime_target_presentation_hash").
+			Optional(),
+		// presentation_epoch and presentation_seq are the fence of the last
+		// accepted write: the reporting process's start time (Unix
+		// nanoseconds) and its per-process heartbeat counter.
+		field.Int64("presentation_epoch").
+			Optional().
+			Nillable(),
+		field.Int64("presentation_seq").
+			Optional().
+			Nillable(),
+		// presentation_fenced_at is the Hub time of the last fence-advancing
+		// write (written or confirmed).
+		field.Time("presentation_fenced_at").
+			Optional().
+			Nillable(),
+		// presentation_observed_at is the Hub time the stored presentation
+		// was last written or confirmed, refreshed at most every
+		// store.PresentationObservedRefresh on an unchanged presentation.
+		field.Time("presentation_observed_at").
+			Optional().
+			Nillable(),
 		field.Time("created").
 			Default(time.Now).
 			Immutable(),

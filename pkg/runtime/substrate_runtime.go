@@ -230,7 +230,7 @@ func NewSubstrateRuntime(sc *config.V1SubstrateConfig) (*SubstrateRuntime, error
 // it hasn't seen before, for tests in other packages (e.g.
 // pkg/runtimebroker) that need to exercise the real memoized-by-config
 // resolution path — pkg/runtime/factory.go's "substrate" case calling
-// NewSubstrateRuntime, exactly as pkg/agent.ResolveRuntime/GetRuntime do in
+// NewSubstrateRuntime, exactly as pkg/agent.ResolveRuntimeWithRecord/GetRuntime do in
 // production — without dialing real ateapi/Kubernetes.
 //
 // Also swaps substrateRuntimes (the memo NewSubstrateRuntime caches built

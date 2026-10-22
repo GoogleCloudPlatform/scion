@@ -307,12 +307,25 @@ func retireDBTierProfileTimezones(ctx context.Context, ops *OperationalSettings,
 			"default_timezone", decision.copyZone)
 	}
 
-	// 2. Then strip the profiles row, keeping its origin.
+	// 2. Then strip the profiles row, keeping its origin. This write is
+	// outside the image_registry persistence rule (ptone/scion#3916): it
+	// keeps the origin and only deletes timezone keys. A seeded row never
+	// reaches it today (the boot sync re-seeds it without timezones first);
+	// if it ever does, write updated_by "seed", or the next boot's origin
+	// backfill adopts the row, file copies included, as managed.
 	if len(rowValues) > 0 {
 		for _, v := range rowValues {
 			if p, ok := profDoc[v.Profile].(map[string]any); ok {
 				delete(p, config.LegacyProfileTimezoneKey)
 			}
+		}
+		// The write is validated against the profiles section schema, which
+		// refuses a profile key with no V1ProfileConfig field. Drop such
+		// stored keys (for example a retired env) so they do not block the
+		// strip, as a server-config save drops forbidden stored keys
+		// (dropKeysForbiddenBySchema).
+		if err := dropForbiddenStoredProfileKeys(profDoc, log); err != nil {
+			return err
 		}
 		doc, err := json.Marshal(profDoc)
 		if err != nil {
@@ -330,6 +343,49 @@ func retireDBTierProfileTimezones(ctx context.Context, ops *OperationalSettings,
 	for _, v := range fileValues {
 		log.Warn("runtime-profile timezone in the settings file is ignored by this hub; remove it from the file",
 			"file", file.Path, "profile", v.Profile, "timezone", v.Timezone, "action", decision.action(v.Timezone))
+	}
+	return nil
+}
+
+// dropForbiddenStoredProfileKeys removes from each profile object in
+// profDoc the keys the profiles section schema does not allow (the
+// per-profile schema's properties, with additionalProperties false),
+// applying dropKeysForbiddenBySchema to each profile. It logs the dropped
+// key paths, never their values.
+func dropForbiddenStoredProfileKeys(profDoc map[string]any, log *slog.Logger) error {
+	sec, _ := opsettings.SchemaInfo()["profiles"].Schema.(map[string]interface{})
+	entry, _ := sec["additionalProperties"].(map[string]interface{})
+	if entry == nil {
+		return nil
+	}
+	names := make([]string, 0, len(profDoc))
+	for name := range profDoc {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		p, ok := profDoc[name].(map[string]any)
+		if !ok {
+			continue
+		}
+		raw := make(map[string]json.RawMessage, len(p))
+		for k, v := range p {
+			b, err := json.Marshal(v)
+			if err != nil {
+				return fmt.Errorf("encoding profiles.%s.%s: %w", name, k, err)
+			}
+			raw[k] = b
+		}
+		dropped := dropKeysForbiddenBySchema("profiles."+name, entry, raw)
+		if len(dropped) == 0 {
+			continue
+		}
+		for k := range p {
+			if _, kept := raw[k]; !kept {
+				delete(p, k)
+			}
+		}
+		log.Warn("removing stored profile keys the profiles section schema does not allow", "keys", dropped)
 	}
 	return nil
 }

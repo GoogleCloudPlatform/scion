@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -44,8 +45,9 @@ import (
 //     RunConfig.FallbackEnv (templateEnvFallback), which every runtime
 //     applies as the last step of its own env assembly
 //     (runtime.FallbackEnvEntries): a key is set only when no other source
-//     emitted it, and never for the harness-config's auth-candidate keys
-//     (RunConfig.SuppressedFallbackKeys). Values are literal: no expansion
+//     emitted it, and never for an env key the harness-config's auth
+//     metadata lists for any auth type (templateFallbackSuppressedKeys,
+//     RunConfig.SuppressedFallbackKeys). Values are literal: no expansion
 //     against the broker host environment and no host passthrough for empty
 //     values, so a template can never copy broker-host secrets into a
 //     container. Template env is never in the request env or agent config,
@@ -89,6 +91,35 @@ func (c *templateEnvWarnings) Warnings() []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return append([]string(nil), c.warnings...)
+}
+
+// addStartWarning records msg as a start warning: it appends it, once, to
+// ctx's collector (surfaced with the start warnings) and logs it. With no
+// collector (a direct create path) it is printed to stderr like other
+// provisioning warnings. A quiet collector drops it.
+func addStartWarning(ctx context.Context, msg string) {
+	c := templateEnvWarningsFrom(ctx)
+	if c != nil && c.quiet {
+		return
+	}
+	if c == nil {
+		slog.Warn(msg)
+		fmt.Fprintf(os.Stderr, "Warning: %s\n", msg)
+		return
+	}
+	c.mu.Lock()
+	if c.seen == nil {
+		c.seen = map[string]struct{}{}
+	}
+	_, dup := c.seen[msg]
+	if !dup {
+		c.seen[msg] = struct{}{}
+		c.warnings = append(c.warnings, msg)
+	}
+	c.mu.Unlock()
+	if !dup {
+		slog.Warn(msg)
+	}
 }
 
 // templateJobConfig returns tplCfg as merged into an agent's config: without

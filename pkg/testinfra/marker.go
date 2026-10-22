@@ -23,11 +23,20 @@
 //     route and no store.Store method can reach it; a pkg/hub test asserts
 //     that no non-test pkg/hub file references Mark or the marker's ent
 //     create builder.
-//   - Read is called only at server startup, by the test admin gate in cmd,
+//   - Read is called only at server startup, by the --test-mode gate in cmd,
 //     before the hub serves any request. ReadWebSessionKey is likewise
 //     called only at server startup, in cmd, when test identities are on.
 //   - Unmark, like Mark, is called only by the offline host command
 //     (`scion server test-infra unmark`).
+//   - Delegate and RevokeDelegation (delegate.go, phase DL) are called only
+//     by the offline host commands `scion server test-infra delegate` and
+//     `... delegate revoke`. Delegate is the only writer of a delegation
+//     whose grantor kind is test_infra_offline.
+//   - The running hub reads the marker's hub id, class and creation time
+//     (never the web session key) at every request through an offline
+//     delegation, through the one read-only store method
+//     GetTestInfraBinding (pkg/store/entadapter/test_infra_binding_read.go),
+//     so an unmark ends those delegations without a restart.
 //
 // The marker row also holds the hub-local test-identity web session key
 // (phase WS1, DEC-8): 64 bytes from crypto/rand that Mark generates. It is

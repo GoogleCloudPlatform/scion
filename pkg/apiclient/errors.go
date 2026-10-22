@@ -138,6 +138,14 @@ const (
 	// reports the outcome of the hub's removal of a container the broker had
 	// already started.
 	ErrCodeDeleteInProgress = "delete_in_progress"
+	// ErrCodeStartOutcomeUnknown is the hub's 504 code for a create or env
+	// submit whose dispatch to the runtime broker ended without an answer.
+	// The agent was kept and may still be starting (pkg/hub/apierr).
+	ErrCodeStartOutcomeUnknown = "start_outcome_unknown"
+	// ErrCodeOutcomeUnknown is the hub's 502 code for an exec whose request
+	// reached the runtime broker without a result coming back: it may have
+	// executed. The hub does not retry it, and neither should the client.
+	ErrCodeOutcomeUnknown = "outcome_unknown"
 	// ErrCodeMessageDenied is returned when message-send authorization
 	// denies a delivery. Details carry reason, senderMode and recipientMode.
 	ErrCodeMessageDenied = "message_denied"

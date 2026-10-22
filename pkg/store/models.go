@@ -57,7 +57,7 @@ type Agent struct {
 	ContainerStatus string `json:"containerStatus,omitempty"` // Container-level status
 	RuntimeState    string `json:"runtimeState,omitempty"`    // Low-level runtime state
 	ExitCode        *int   `json:"exitCode,omitempty"`        // Structured exit code from runtime (nil = unknown)
-	ExitReason      string `json:"exitReason,omitempty"`      // Terminal reason (see state.ExitReason), e.g. "crashed", "preempted", "oom_killed"
+	ExitReason      string `json:"exitReason,omitempty"`      // Terminal reason (see state.ExitReason), e.g. "crashed", "preempted", "oom_killed"; "signaled" is agent-reported
 
 	// Limits tracking (updated by sciontool status reports)
 	CurrentTurns      int       `json:"currentTurns,omitempty"`
@@ -153,10 +153,11 @@ type Agent struct {
 	//
 	// UpdateAgent (the whole-row CAS writer) never sets any of these from the
 	// caller's struct: they are absent from its Ent builder chain entirely.
-	// The only writers are BeginLaunch, MarkLaunchAccepted, EndLaunch,
-	// ApplyLaunchReport and RunLaunchReaperTick, plus the narrow "clear
-	// launch_error / end an active launch" rule inside UpdateAgent and
-	// UpdateAgentStatus when the written phase is "running" (§3.3).
+	// The only writers are BeginLaunch, BeginStartLaunch, MarkLaunchAccepted,
+	// EndLaunch, EndLaunchWithCode, ApplyLaunchReport and RunLaunchReaperTick,
+	// plus the narrow "clear launch_error / end an active launch" rule inside
+	// UpdateAgent and UpdateAgentStatus when the written phase is "running"
+	// (§3.3).
 	LaunchAsyncOptIn   bool      `json:"-"`
 	LaunchID           string    `json:"-"`
 	LaunchState        string    `json:"-"` // "" | "active" | "ended"
@@ -168,6 +169,24 @@ type Agent struct {
 	LaunchSeq          int64     `json:"-"`
 	LaunchStep         string    `json:"-"`
 	LaunchError        string    `json:"-"`
+	// LaunchCause is the fixed runtime cause code (api.BrokerRuntimeCause*)
+	// a failed launch report gave for LaunchError, or "" (ptone/scion#4666).
+	LaunchCause string `json:"-"`
+	// LaunchPriorPhase is the effective resting phase a start or restart
+	// launch began from (BeginStartLaunch; "" for a create launch). A
+	// failed start-kind launch reads it to choose its end phase
+	// (ptone/scion#4669).
+	LaunchPriorPhase string `json:"-"`
+	// LaunchRevokeOnFail is the Hub's decision, taken when a start launch
+	// began, whether a failed end revokes the start's credential.
+	LaunchRevokeOnFail bool `json:"-"`
+	// LaunchResumePhase is the resume memory of a failed start: the resting
+	// phase a start-kind launch began from when its failure left the row in
+	// phase error, or "". Read it through EffectiveRestingPhase. Written by
+	// the launch-ending writes of start-kind launches, and cleared by the
+	// store on any write of a phase other than starting or error
+	// (entc.ClearLaunchResumePhaseHook).
+	LaunchResumePhase string `json:"-"`
 
 	// RunID is the identity of the agent's current or most recent run
 	// (ptone/scion#2550), minted by the Hub per create/start/restart
@@ -317,11 +336,30 @@ func (a *Agent) IsIncompleteCreate() bool {
 		return false
 	}
 	switch a.Phase {
-	case "suspended", "stopping", "stopped", "error":
+	case "suspended", "stopping", "stopped", "error", "halted":
 	default:
 		return false
 	}
 	return a.LaunchState == "active" || a.LaunchError != ""
+}
+
+// EffectiveRestingPhase returns the phase the Hub's branch selectors read
+// to choose how to start agent a (ptone/scion#4669): the resume memory
+// LaunchResumePhase when the stored phase is error, the memory is set and
+// no launch is active on the row, and otherwise the stored phase. A failed
+// async start from suspended, created, provisioning or halted leaves the row
+// in error with the memory set, so a later plain start or resume behaves
+// as it would have before the failed attempt. Callers keep the result in
+// a local variable and never write it back to a.Phase, which whole-row
+// UpdateAgent writes would persist.
+func EffectiveRestingPhase(a *Agent) string {
+	if a == nil {
+		return ""
+	}
+	if a.Phase == "error" && a.LaunchResumePhase != "" && a.LaunchState != LaunchStateActive {
+		return a.LaunchResumePhase
+	}
+	return a.Phase
 }
 
 // ReincarnationState values for Agent.ReincarnationState.
@@ -414,6 +452,21 @@ type AgentAppliedConfig struct {
 	// older broker, in which case the previously recorded value is kept.
 	// Observability only; never read by a decision path (ptone/scion#620).
 	HarnessConfigSource string `json:"harnessConfigSource,omitempty"`
+
+	// Harness is the harness type the hub resolved for the agent at create
+	// (for example "claude"; see resolveAgentHarnessType in pkg/hub), so
+	// agent lists and events can derive the harness vendor without a
+	// harness-config lookup per agent. Empty on agents created before it
+	// was recorded, and when the harness did not resolve. Display only;
+	// the harness is a fixed key, so it does not change after create.
+	Harness string `json:"harness,omitempty"`
+	// ModelSize is the model size alias (small, medium, large or
+	// extra-large; short forms normalized) that Model held before the hub
+	// resolved it to a concrete model ID, from whichever precedence layer
+	// (request > project > template > hub) supplied it. Empty when the
+	// model was an explicit ID or unset, and on agents created before it
+	// was recorded. Display only.
+	ModelSize string `json:"modelSize,omitempty"`
 
 	// CreatorName is the human-readable identity of who created this agent.
 	// For user-created agents, this is the user's email.
@@ -582,7 +635,11 @@ func redactCreateInputsForResponse(ci *AgentCreateInputs, canAttach bool) *Agent
 // response body: Env and the Telemetry cloud-export header map are cleared
 // unless canAttach is true, and GITHUB_TOKEN is stripped from Env
 // unconditionally, mirroring AgentAppliedConfig's own top-level rule (see
-// ResponseView/MarshalJSON above). The input is never mutated.
+// ResponseView/MarshalJSON above). ClearedFields is dropped for every
+// viewer: it is hub-internal bookkeeping (ptone/scion#3906), its env.<KEY>
+// entries name env keys a viewer without attach access must not learn, and
+// leaving it out means a GET echoed back into a PATCH never carries it. The
+// input is never mutated.
 //
 // This redaction lives here, in the response-view copy, and deliberately
 // not as a MarshalJSON method on api.ScionConfig or api.TelemetryConfig:
@@ -601,6 +658,7 @@ func redactInlineConfigForResponse(cfg *api.ScionConfig, canAttach bool) *api.Sc
 		return nil
 	}
 	copied := *cfg
+	copied.ClearedFields = nil
 	if !canAttach {
 		copied.Env = nil
 	} else if len(cfg.Env) > 0 {
@@ -779,6 +837,14 @@ const (
 // with that slug, and the store agents group marker backfill writes it on
 // legitimate pre-upgrade groups.
 const AnnotationProjectAgentsGroup = "scion.io/project-agents-group"
+
+// AnnotationProjectActiveProfile is the project annotation that holds the
+// project's activeProfile setting. The hub writes it as a project setting
+// (pkg/hub keeps its own literal, projectSettingActiveProfile, which its
+// settings registry guard requires, and a pkg/hub test pins that the two
+// agree); readers outside pkg/hub, such as the rebuild preflight, use this
+// one.
+const AnnotationProjectActiveProfile = "scion.io/active-profile"
 
 // IsProjectMembersGroup reports whether g is a system project members group:
 // it belongs to a project and carries either members-group marker key with
@@ -1060,6 +1126,31 @@ type RuntimeBroker struct {
 	// has never reported it (an older broker).
 	Health *api.BrokerHealthReport `json:"health,omitempty"`
 
+	// RuntimeTargetPresentation is the publishable configuration a flat
+	// Runtime Broker instance last reported
+	// (.design/flat-runtime-brokers/contract-appendix-p3.md FC4-a;
+	// ptone/scion#3282). It is display data only: never used for
+	// placement, admission or dispatch. Nil means none was reported (a
+	// legacy row, or an older broker binary). It and the five fields below
+	// are written only by SetRuntimeBrokerPresentation and removed only by
+	// deleting the row; CreateRuntimeBroker and UpdateRuntimeBroker never
+	// write them.
+	RuntimeTargetPresentation *api.RuntimeTargetPresentation `json:"runtimeTargetPresentation,omitempty"`
+	// RuntimeTargetPresentationObservedAt is the Hub time the stored
+	// presentation was last written or confirmed ("as reported at"),
+	// refreshed at most every PresentationObservedRefresh while unchanged.
+	RuntimeTargetPresentationObservedAt *time.Time `json:"runtimeTargetPresentationObservedAt,omitempty"`
+	// RuntimeTargetPresentationHash is the Hub-computed hash of the stored
+	// presentation. Never serialized.
+	RuntimeTargetPresentationHash string `json:"-"`
+	// PresentationEpoch and PresentationSeq are the fence of the last
+	// accepted presentation write (the reporting process's start time in
+	// Unix nanoseconds, and its heartbeat counter); PresentationFencedAt is
+	// the Hub time of that write. Never serialized.
+	PresentationEpoch    *int64     `json:"-"`
+	PresentationSeq      *int64     `json:"-"`
+	PresentationFencedAt *time.Time `json:"-"`
+
 	// Metadata
 	Labels      map[string]string `json:"labels,omitempty"`
 	Annotations map[string]string `json:"annotations,omitempty"`
@@ -1084,12 +1175,117 @@ type RuntimeBroker struct {
 	// host machine. Set by the operator at registration/update time so the Hub
 	// can gate passthrough mode on an actAs check against this identity.
 	// Optional: brokers that never serve passthrough agents need not set them.
+	//
+	// The pair is written together, only by CreateRuntimeBroker and the
+	// dedicated SetRuntimeBrokerGCPHost* store methods. UpdateRuntimeBroker
+	// leaves the stored values unchanged whatever this copy carries.
 	GCPHostServiceAccountEmail string `json:"gcp_host_service_account_email,omitempty"`
 	GCPHostProjectID           string `json:"gcp_host_project_id,omitempty"`
+	// GCPHostSource records how the GCP host pair was last set; see the
+	// GCPHostSource* constants. Empty means not recorded. Not serialized.
+	GCPHostSource string `json:"-"`
+	// HostObservation is the last GCP identity a co-located server read
+	// from the metadata server for its own broker; nil when never observed
+	// (every remote broker). Written only by
+	// RecordRuntimeBrokerHostObservation. It is not serialized: the Hub
+	// shows the derived HostIdentity instead.
+	HostObservation *HostIdentityObservation `json:"-"`
+	// HostIdentity is the derived host identity state, filled in by the
+	// Hub for display. It is never stored.
+	HostIdentity *HostIdentityStatus `json:"hostIdentity,omitempty"`
 
 	// Ownership - tracks who registered this broker
 	CreatedBy     string `json:"createdBy,omitempty"`
 	CreatedByName string `json:"createdByName,omitempty"` // Enriched: resolved from CreatedBy
+}
+
+// PresentationFenceRecovery is how long a flat Runtime Broker's stored
+// presentation fence must have gone without a fence-advancing write before
+// SetRuntimeBrokerPresentation accepts a write with a lower epoch. It is a
+// Hub constant, 10 times the default 30s heartbeat interval, because the Hub
+// does not know a remote broker's configured interval. A live process
+// advances the fence on every heartbeat, so concurrent writers stay fenced;
+// a new process whose epoch is behind a stored epoch (a host clock that ran
+// ahead) takes over after this long.
+const PresentationFenceRecovery = 5 * time.Minute
+
+// PresentationObservedRefresh is how often a confirmed, unchanged
+// presentation refreshes RuntimeTargetPresentationObservedAt.
+const PresentationObservedRefresh = 5 * time.Minute
+
+// PresentationOutcome is the result of SetRuntimeBrokerPresentation.
+type PresentationOutcome string
+
+const (
+	// PresentationWritten: the hash differed; the presentation, hash,
+	// fence and observed-at were written.
+	PresentationWritten PresentationOutcome = "written"
+	// PresentationConfirmed: the hash was unchanged; only the fence (and
+	// observed-at, when older than PresentationObservedRefresh) was written.
+	PresentationConfirmed PresentationOutcome = "confirmed"
+	// PresentationStale: the fence did not advance; nothing was written.
+	PresentationStale PresentationOutcome = "stale"
+)
+
+// Values of RuntimeBroker.GCPHostSource.
+const (
+	// GCPHostSourceRegistration: filled by a registration while unset.
+	GCPHostSourceRegistration = "registration"
+	// GCPHostSourceDetected: read by a co-located server from the GCE
+	// metadata server.
+	GCPHostSourceDetected = "detected"
+	// GCPHostSourceAdmin: set or cleared through the update API. Registration
+	// and detection leave the pair unchanged until the next update.
+	GCPHostSourceAdmin = "admin"
+)
+
+// BrokerRoleLabel describes how a runtime broker is hosted:
+// BrokerRoleEmbedded for the co-located broker, BrokerRoleRemote otherwise.
+// BrokerTypeLabel is the broker type label (for example "external").
+const (
+	BrokerRoleLabel    = "scion.io/broker-role"
+	BrokerRoleEmbedded = "embedded"
+	BrokerRoleRemote   = "remote"
+	BrokerTypeLabel    = "scion.io/broker-type"
+)
+
+// Outcomes of a HostIdentityObservation.
+const (
+	// HostObservationPresent: the metadata server reported an account.
+	HostObservationPresent = "present"
+	// HostObservationAbsent: the metadata server is reachable but reports
+	// no default account (or an empty email).
+	HostObservationAbsent = "absent"
+	// HostObservationUnavailable: not on GCE, or the metadata server could
+	// not be read.
+	HostObservationUnavailable = "unavailable"
+)
+
+// HostIdentityObservation is what a co-located server read from the GCE
+// metadata server about its host's GCP identity.
+type HostIdentityObservation struct {
+	// Outcome is one of the HostObservation* constants.
+	Outcome string
+	// Email is the reported account (lowercased) when Outcome is present.
+	Email string
+	// ObservedAt is when the observation was made.
+	ObservedAt time.Time
+}
+
+// HostIdentityStatus is the derived host identity state of a broker, for
+// display. ObservedEmail and ObservedAt are set only for callers allowed to
+// update the broker.
+type HostIdentityStatus struct {
+	State         string     `json:"state"`
+	ObservedEmail string     `json:"observedEmail,omitempty"`
+	ObservedAt    *time.Time `json:"observedAt,omitempty"`
+}
+
+// GCPHostSetting is a stored GCP host service account, project and source.
+type GCPHostSetting struct {
+	Email   string
+	Project string
+	Source  string
 }
 
 // BrokerCapabilities describes what a runtime broker can do.
@@ -1106,6 +1302,11 @@ type BrokerCapabilities struct {
 	// create path and the launch-report protocol (design t1-async-create-v11.md
 	// §3.2, §7 P1b-1).
 	AsyncLaunch bool `json:"asyncLaunch"`
+	// AsyncStart indicates the broker can run a start or restart of an
+	// existing agent as an asynchronous launch (ptone/scion#4669). The hub
+	// sends start launch fields only to a broker that is not known to lack
+	// it.
+	AsyncStart bool `json:"asyncStart,omitempty"`
 	// EmptyPerAgentWorkspace indicates the broker can provision the
 	// empty-per-agent workspace sharing mode (private empty directory per
 	// agent on non-git projects). The hub refuses to dispatch such agents to
@@ -1116,6 +1317,11 @@ type BrokerCapabilities struct {
 	// --broker`). The hub refuses a move unless both the source and the
 	// target broker report it (412).
 	AgentMove bool `json:"agentMove"`
+	// AgentMoveRecreate indicates the broker can be the target of a forced
+	// move (`scion reincarnate --broker --force`): it provisions the agent
+	// with a fresh workspace after confirming it has no files for the agent.
+	// The hub refuses a forced move onto a broker without it (412).
+	AgentMoveRecreate bool `json:"agentMoveRecreate,omitempty"`
 	// ReprovisionEmptyPerAgent indicates the broker's reprovision reuses an
 	// empty-per-agent agent's private workspace in place (same-broker
 	// `scion reincarnate`, miller79/scion#167). The hub refuses same-broker
@@ -1135,6 +1341,12 @@ type BrokerCapabilities struct {
 	// does the hub stop writing those values into InlineConfig
 	// (ptone/scion#4222). Refreshed by every heartbeat.
 	TemplateTiers bool `json:"templateTiers,omitempty"`
+	// NodeImageRegistry is the broker's SCION_IMAGE_REGISTRY: the node env
+	// layer the hub resolves this broker's dispatches with
+	// (ptone/scion#3916). It is a node configuration value, not a feature
+	// flag. Sent at registration and in every heartbeat with capabilities;
+	// empty (an old broker, or none set) means no node env.
+	NodeImageRegistry string `json:"nodeImageRegistry,omitempty"`
 }
 
 // BrokerProfile describes a runtime profile available on a broker.
@@ -1230,10 +1442,8 @@ type Template struct {
 	Description string `json:"description,omitempty"` // Optional description
 
 	// Configuration
-	Harness              string          `json:"harness"`                        // claude, gemini, opencode, codex, generic
-	DefaultHarnessConfig string          `json:"defaultHarnessConfig,omitempty"` // default_harness_config name from template config (e.g. "claude-web")
-	Image                string          `json:"image"`                          // Default container image
-	Config               *TemplateConfig `json:"config,omitempty"`
+	Harness              string `json:"harness"`                        // claude, gemini, opencode, codex, generic
+	DefaultHarnessConfig string `json:"defaultHarnessConfig,omitempty"` // default_harness_config name from template config (e.g. "claude-web")
 
 	// AgentConfig is a derived, read-only snapshot of the template's own
 	// scion-agent.{yaml,yml,json}, with per-agent fields cleared. Only the
@@ -1335,6 +1545,14 @@ type HarnessConfig struct {
 	StorageBucket string `json:"storageBucket,omitempty"` // Bucket name
 	StoragePath   string `json:"storagePath,omitempty"`   // Path within bucket
 
+	// Layout is the storage layout of the harness-config's files
+	// (ptone/scion#4219): "" (legacy) stores each file at
+	// <StoragePath>/<path>; HarnessConfigLayoutBlobs stores each file once,
+	// by content, at <StoragePath>.blobs/<sha256 hex>. Only the hub's
+	// harness-config commit path changes it; CreateHarnessConfig and
+	// UpdateHarnessConfigContent write it and UpdateHarnessConfig never does.
+	Layout string `json:"layout,omitempty"`
+
 	// File manifest
 	Files []TemplateFile `json:"files,omitempty"` // Manifest of harness config files (reuses TemplateFile)
 
@@ -1343,6 +1561,14 @@ type HarnessConfig struct {
 	// Image status
 	ImageStatus          string     `json:"imageStatus"`                    // unknown, valid, invalid, error
 	ImageStatusCheckedAt *time.Time `json:"imageStatusCheckedAt,omitempty"` // last image check timestamp
+
+	// BuiltImage is the image the hub's image-build executor last built for
+	// this harness-config (ptone/scion#4219). It is operational state, not
+	// derived from config.yaml: only UpdateHarnessConfigBuiltImage writes it
+	// (CreateHarnessConfig stores it as given), and neither
+	// UpdateHarnessConfig nor UpdateHarnessConfigContent touches it. Readers
+	// that show or check "the image" prefer it over Config.Image.
+	BuiltImage string `json:"builtImage,omitempty"`
 
 	// Ownership
 	OwnerID   string `json:"ownerId,omitempty"`
@@ -1354,6 +1580,13 @@ type HarnessConfig struct {
 	Created time.Time `json:"created"`
 	Updated time.Time `json:"updated"`
 }
+
+// HarnessConfigLayoutBlobs is the content-addressed harness-config storage
+// layout (HarnessConfig.Layout). It is the same layout as
+// TemplateLayoutBlobs: every file is stored once at
+// <StoragePath>.blobs/<sha256 hex>, and objects are never overwritten with
+// different content (ptone/scion#4219).
+const HarnessConfigLayoutBlobs = TemplateLayoutBlobs
 
 // HarnessConfigData holds the harness-specific configuration details.
 type HarnessConfigData struct {
@@ -1377,8 +1610,11 @@ const (
 	HarnessConfigStatusArchived = "archived"
 )
 
-// HarnessConfigImageStatus constants — reflect registry/reference validity only.
-// Local image availability is runtime-dependent and not persisted here.
+// HarnessConfigImageStatus constants. For a registry-qualified image the stored
+// status reflects registry validity only; finding the image in a local image
+// store is reported to the caller but not persisted. A bare image name can only
+// be verified locally, so its stored status may come from a broker or local
+// runtime find.
 const (
 	HarnessConfigImageStatusUnknown = "unknown"
 	HarnessConfigImageStatusValid   = "valid"
@@ -1392,39 +1628,6 @@ const (
 	HarnessConfigScopeProject = "project"
 	HarnessConfigScopeUser    = "user"
 )
-
-// TemplateConfig holds template configuration details.
-type TemplateConfig struct {
-	Harness     string               `json:"harness,omitempty"`
-	Image       string               `json:"image,omitempty"`
-	ConfigDir   string               `json:"configDir,omitempty"`
-	Env         map[string]string    `json:"env,omitempty"`
-	Detached    bool                 `json:"detached,omitempty"`
-	CommandArgs []string             `json:"commandArgs,omitempty"`
-	Model       string               `json:"model,omitempty"`
-	Kubernetes  *KubernetesConfig    `json:"kubernetes,omitempty"`
-	HubAccess   *HubAccessConfig     `json:"hubAccess,omitempty"`
-	Secrets     []api.RequiredSecret `json:"secrets,omitempty"`
-	Telemetry   *api.TelemetryConfig `json:"telemetry,omitempty"`
-	MessageMode string               `json:"messageMode,omitempty"` // none, lineage, branch, project, hub
-}
-
-// HubAccessConfig defines what Hub API scopes an agent created from this template receives.
-type HubAccessConfig struct {
-	Scopes []string `json:"scopes,omitempty"`
-}
-
-// KubernetesConfig holds Kubernetes-specific configuration for templates.
-type KubernetesConfig struct {
-	Resources    *ResourceRequirements `json:"resources,omitempty"`
-	NodeSelector map[string]string     `json:"nodeSelector,omitempty"`
-}
-
-// ResourceRequirements defines compute resource requirements.
-type ResourceRequirements struct {
-	Limits   map[string]string `json:"limits,omitempty"`
-	Requests map[string]string `json:"requests,omitempty"`
-}
 
 // User represents a registered user in the Hub database.
 type User struct {
@@ -1475,15 +1678,16 @@ type User struct {
 	// Never bound from a request body (json:"-").
 	FederatedEmail *string `json:"-"`
 	HomeIssuer     *string `json:"-"`
-	// IssuerDelegationID is set only on a test-fixture row issued through
-	// a workload-bound issuer delegation (TestIdentityDelegation), at
-	// create, and never changes. Nil for session and PAT issuance.
+	// IssuerDelegationID is set only on a test identity row (test fixture,
+	// or an admin kind since phase X4) issued through a workload-bound
+	// issuer delegation (TestIdentityDelegation), at create, and never
+	// changes. Nil for session and PAT issuance.
 	IssuerDelegationID *string `json:"-"`
 
 	// Timestamps
 	Created   time.Time `json:"created"`
-	LastLogin time.Time `json:"lastLogin,omitempty"`
-	LastSeen  time.Time `json:"lastSeen,omitempty"`
+	LastLogin time.Time `json:"lastLogin,omitzero"`
+	LastSeen  time.Time `json:"lastSeen,omitzero"`
 }
 
 // IsTestFixture reports whether u is a hub-issued member-tier test fixture
@@ -1537,6 +1741,10 @@ type ExpiredTestFixtureQuery struct {
 	AfterID        string
 	// Limit caps the rows returned when positive.
 	Limit int
+	// IncludeAdminKinds also selects the admin-kind test identities
+	// (test_hub_admin, test_super_admin; admin tier A3), which always
+	// carry an expiry as well. False selects test_fixture rows only.
+	IncludeAdminKinds bool
 }
 
 // FixtureRootedResources is what Store.ListFixtureRootedResources found for
@@ -1610,8 +1818,8 @@ const (
 	// expiring system hub-admin binding (admin tier, ptone/scion#4240).
 	UserKindTestHubAdmin = "test_hub_admin"
 	// UserKindTestSuperAdmin is a hub-issued test identity holding a real,
-	// expiring system super-admin binding. Its issuance stays refused until
-	// the admin tier's policy phase ships.
+	// expiring system super-admin binding. It is issued only on a hub
+	// started with --test-mode=super-admin.
 	UserKindTestSuperAdmin = "test_super_admin"
 	// UserKindFederated is a local account for a user of a trusted
 	// external issuer. Only Store.CreateFederatedUser writes it.
@@ -1708,16 +1916,110 @@ type TestIdentityDelegation struct {
 	ID          string
 	GrantorID   string
 	WorkloadSub string
-	// Scope is the single delegated scope (test_identity:issue).
+	// Scope is the single delegated scope: test_identity:issue, or
+	// test_identity:issue_admin or test_identity:issue_super_admin (X4).
 	Scope string
 	// MemberCap is the number of live test identities the delegation may
-	// hold at once.
+	// hold at once: member and viewer identities for test_identity:issue,
+	// identities of the scope's admin kind for an admin scope (the API
+	// calls it adminCap there).
 	MemberCap int
 	Label     string
 	Created   time.Time
 	ExpiresAt time.Time
 	RevokedAt *time.Time
 	RevokedBy *string
+	// GrantorKind is DelegationGrantorHuman (the API path) or
+	// DelegationGrantorTestInfraOffline (phase DL: written only by the
+	// offline host command, member scope only). An empty value reads as
+	// human (the column default).
+	GrantorKind string
+	// HubID is the hub id an offline delegation is bound to; empty for a
+	// human grantor.
+	HubID string
+	// MarkerCreatedAt is the created_at of the test infrastructure marker
+	// an offline delegation is bound to; nil for a human grantor.
+	MarkerCreatedAt *time.Time
+}
+
+// Delegation grantor kinds (TestIdentityDelegation.GrantorKind). Every site
+// that reads a grantor switches on these explicitly and denies any other
+// value.
+const (
+	// DelegationGrantorHuman is a live human issuer who created the
+	// delegation through the hub API.
+	DelegationGrantorHuman = "human"
+	// DelegationGrantorTestInfraOffline is the offline host command
+	// `scion server test-infra delegate` (ptone/scion#4240, phase DL). It
+	// is not a principal: the delegation's GrantorID is
+	// TestInfraOfflineGrantorID(HubID), a reserved id that names no user.
+	DelegationGrantorTestInfraOffline = "test_infra_offline"
+)
+
+// Bounds of an offline (DelegationGrantorTestInfraOffline) delegation
+// (phase DL). The offline writer (`scion server test-infra delegate`) and the redeem gate
+// (pkg/hub) both enforce them.
+const (
+	// TestInfraOfflineDelegationScope is the only scope an offline
+	// delegation can hold: member and viewer test identity issuance.
+	TestInfraOfflineDelegationScope = "test_identity:issue"
+	// TestInfraOfflineDelegationMaxTTL is the longest lifetime of an
+	// offline delegation (a human member delegation allows 7 days; with no
+	// human grantor whose deactivation would end it, an offline one is
+	// capped at three default 8 h test identity lifetimes).
+	TestInfraOfflineDelegationMaxTTL = 24 * time.Hour
+	// TestInfraOfflineDelegationDefaultTTL is the default lifetime.
+	TestInfraOfflineDelegationDefaultTTL = 8 * time.Hour
+	// TestInfraOfflineDelegationMinTTL is the shortest lifetime.
+	TestInfraOfflineDelegationMinTTL = time.Minute
+	// TestInfraOfflineDelegationMaxMemberCap is the largest per-delegation
+	// identity cap (the member per-issuer cap; the hub-wide cap applies on
+	// top).
+	TestInfraOfflineDelegationMaxMemberCap = 5
+	// TestInfraOfflineMaxLiveDelegations is the most live offline
+	// delegations one hub may hold at once (4 x 5 = the hub-wide cap of 20).
+	TestInfraOfflineMaxLiveDelegations = 4
+)
+
+// testInfraOfflineGrantorNamespace is the UUID namespace of the reserved
+// grantor id of an offline delegation (a fixed, random v4 UUID).
+var testInfraOfflineGrantorNamespace = uuid.MustParse("6a0c55e2-3d5f-4c1b-9a47-0e8f2b7d91c4")
+
+// TestInfraOfflineGrantorID returns the reserved grantor id of an offline
+// delegation bound to hubID: a name-based (version 5) UUID of the hub id,
+// or "" for an empty hub id. It is a UUID so the generic principal paths
+// (group closure, binding lookup, kind read) treat it as an ordinary user id
+// that names no row: user ids are server-generated random (version 4)
+// UUIDs, so no user row can have it, and the offline redeem gate refuses a
+// delegation whose reserved id ever resolves to a user row.
+func TestInfraOfflineGrantorID(hubID string) string {
+	if hubID == "" {
+		return ""
+	}
+	return uuid.NewSHA1(testInfraOfflineGrantorNamespace, []byte("test-infra-offline:"+hubID)).String()
+}
+
+// EffectiveGrantorKind returns d's grantor kind, reading an empty value as
+// DelegationGrantorHuman (the column default). Any other value is returned
+// unchanged, so callers that switch on it deny an unknown kind.
+func (d *TestIdentityDelegation) EffectiveGrantorKind() string {
+	if d == nil {
+		return ""
+	}
+	if d.GrantorKind == "" {
+		return DelegationGrantorHuman
+	}
+	return d.GrantorKind
+}
+
+// TestInfraBinding is the read-only view of the test infrastructure
+// marker that the offline delegation redeem gate reads live (phase DL): the
+// hub id, class and creation time only. It never carries the marker's web
+// session key or attested facts.
+type TestInfraBinding struct {
+	HubID     string
+	Class     string
+	CreatedAt time.Time
 }
 
 // LiveAt reports whether d is neither revoked nor expired at now.
@@ -1856,6 +2158,11 @@ type InviteCode struct {
 	CreatedBy  string    `json:"createdBy"`
 	Note       string    `json:"note"`
 	Created    time.Time `json:"created"`
+	// IssuanceID is the issuance ID of the admin-kind test identity whose
+	// request created the row (admin tier A3 grant shaping). The store sets
+	// it only from the context's GrantShaping; a value supplied by the
+	// caller is ignored.
+	IssuanceID *string `json:"issuanceId,omitempty"`
 }
 
 // InviteCodePrefix distinguishes invite codes from other token types.
@@ -1923,6 +2230,11 @@ type BrokerJoinToken struct {
 	ExpiresAt time.Time `json:"expiresAt"`
 	CreatedAt time.Time `json:"createdAt"`
 	CreatedBy string    `json:"createdBy"` // User ID who created the token
+	// IssuanceID is the issuance ID of the admin-kind test identity whose
+	// request created the row (admin tier A3 grant shaping). The store sets
+	// it only from the context's GrantShaping; a value supplied by the
+	// caller is ignored.
+	IssuanceID *string `json:"issuanceId,omitempty"`
 }
 
 // BrokerStatus constants
@@ -2012,6 +2324,16 @@ const (
 // change must ship together with a data migration for existing rows.
 const MessageExpiredStuckPendingReason = "expired: stuck in pending state beyond TTL"
 
+// ExpiredPendingMessage names one message that
+// ExpireAndListStuckPendingMessages moved from "pending" to "failed" at the
+// stuck-pending TTL. It holds only identifiers and the routing target, never
+// the body, so the sweep can log what it expired (ptone/scion#5211).
+type ExpiredPendingMessage struct {
+	ID        string    // message UUID
+	Recipient string    // target, e.g. "agent:<slug>"
+	CreatedAt time.Time // when the row was written; pending since then
+}
+
 // =============================================================================
 // Notifications (Agent Status Notification System)
 // =============================================================================
@@ -2041,6 +2363,14 @@ type NotificationSubscription struct {
 	CreatedAt         time.Time `json:"createdAt"`
 	CreatedBy         string    `json:"createdBy"`
 }
+
+// CreatorFallbackSubscriptionID is the SubscriptionID of a notification
+// sent to an agent's creator without a subscription: the HALTED
+// notification a halted agent's creator gets when none of the creator's
+// subscriptions matched (ptone/scion#4853). It is the nil UUID, which no
+// subscription has; the column carries no foreign key, and the retry sweep
+// rebuilds such a notification's subscriber from the notification itself.
+const CreatorFallbackSubscriptionID = "00000000-0000-0000-0000-000000000000"
 
 // MatchesActivity returns true if the given activity matches any of the subscription's
 // trigger activities. Comparison is case-insensitive.
@@ -2078,7 +2408,27 @@ type Notification struct {
 	Dispatched     bool      `json:"dispatched"`   // Whether dispatch was attempted
 	Acknowledged   bool      `json:"acknowledged"` // Whether acknowledged (for human targets)
 	CreatedAt      time.Time `json:"createdAt"`
+	// DispatchAttempts counts delivery attempts to a subscriber agent. Rows
+	// stored before attempts were recorded read 0.
+	DispatchAttempts int `json:"dispatchAttempts"`
+	// DispatchOutcome is NotificationOutcomeDelivered, NotificationOutcomeFailed,
+	// or empty when no outcome is recorded (pending, in flight, or a row
+	// stored before outcomes were recorded, whose Dispatched flag keeps its
+	// old meaning).
+	DispatchOutcome string `json:"dispatchOutcome"`
 }
+
+// Notification.DispatchOutcome values.
+const (
+	// NotificationOutcomeDelivered: the notification was delivered to its
+	// subscriber agent.
+	NotificationOutcomeDelivered = "delivered"
+	// NotificationOutcomeFailed: dispatch gave up without delivering, either
+	// because retries were exhausted (notificationRetryMaxAge in pkg/hub) or
+	// because the subscription, subscriber or watched agent is gone. The row
+	// stays dispatched so the sweep does not retry it.
+	NotificationOutcomeFailed = "failed"
+)
 
 // ListOptions provides pagination and filtering for list operations.
 type ListOptions struct {
@@ -2257,14 +2607,23 @@ type Group struct {
 }
 
 // GroupMember represents membership in a group.
-// Members can be either users or other groups (for nested group support).
+// Members can be users, other groups (for nested group support), or agents.
 type GroupMember struct {
 	GroupID    string    `json:"groupId"`    // The group this membership belongs to
-	MemberType string    `json:"memberType"` // "user" or "group"
-	MemberID   string    `json:"memberId"`   // User ID or Group ID
+	MemberType string    `json:"memberType"` // "user", "group", or "agent"
+	MemberID   string    `json:"memberId"`   // User ID, Group ID, or Agent ID
 	Role       string    `json:"role"`       // "member", "admin", "owner"
 	AddedAt    time.Time `json:"addedAt"`
 	AddedBy    string    `json:"addedBy,omitempty"`
+	// ExpiresAt bounds the membership: past it the membership confers
+	// nothing and is not read. Nil is unbounded. Grant shaping forces it
+	// for a membership an admin-kind test identity adds.
+	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
+	// IssuanceID is the issuance ID of the admin-kind test identity whose
+	// request created the row (admin tier A3 grant shaping). The store sets
+	// it only from the context's GrantShaping; a value supplied by the
+	// caller is ignored.
+	IssuanceID *string `json:"issuanceId,omitempty"`
 }
 
 // GroupMemberType constants
@@ -2476,6 +2835,9 @@ const (
 	LifecycleHookTriggerSuspended = "suspended"
 	LifecycleHookTriggerStopped   = "stopped"
 	LifecycleHookTriggerError     = "error"
+	// LifecycleHookTriggerHalted fires when the platform halts an agent
+	// (ptone/scion#4853).
+	LifecycleHookTriggerHalted = "halted"
 )
 
 // LifecycleHookActionType constants (v1).
@@ -3038,10 +3400,11 @@ type Schedule struct {
 	ID            string     `json:"id"`
 	ProjectID     string     `json:"projectId"`
 	Name          string     `json:"name"`
-	CronExpr      string     `json:"cronExpr"`  // Standard 5-field cron expression (UTC)
-	EventType     string     `json:"eventType"` // "message" (future: "dispatch_agent")
-	Payload       string     `json:"payload"`   // JSON: handler-specific configuration
-	Status        string     `json:"status"`    // active, paused, deleted
+	CronExpr      string     `json:"cronExpr"`               // Standard 5-field cron expression (UTC)
+	EventType     string     `json:"eventType"`              // "message" (future: "dispatch_agent")
+	Payload       string     `json:"payload"`                // JSON: handler-specific configuration
+	Status        string     `json:"status"`                 // active, paused, deleted
+	StatusReason  string     `json:"statusReason,omitempty"` // system pause reason (ScheduleStatusReason*); empty otherwise
 	NextRunAt     *time.Time `json:"nextRunAt,omitempty"`
 	LastRunAt     *time.Time `json:"lastRunAt,omitempty"`
 	LastRunStatus string     `json:"lastRunStatus,omitempty"` // success, error
@@ -3079,6 +3442,23 @@ const (
 	ScheduleStatusDeleted = "deleted"
 )
 
+// ScheduleStatusReason* are the values Schedule.StatusReason may hold. Only
+// a pause made by the system sets a reason; every status write made by a
+// user (pause, resume, edit) clears it, so an empty reason on a paused
+// schedule means a user paused it.
+const (
+	// ScheduleStatusReasonNone: active, or paused by a user.
+	ScheduleStatusReasonNone = ""
+	// ScheduleStatusReasonCreatorDeleted: paused because the agent the
+	// schedule's authority resolves to was deleted. Resuming re-records the
+	// authority to the resumer and clears the reason.
+	ScheduleStatusReasonCreatorDeleted = "creator_deleted"
+	// ScheduleStatusReasonCronZoneUnsupported: paused because the cron
+	// expression carries a zone prefix (CRON_TZ= or TZ=), which is not
+	// supported. The expression must be edited to UTC before resuming.
+	ScheduleStatusReasonCronZoneUnsupported = "cron_zone_unsupported"
+)
+
 // ScheduleRunStatus constants
 const (
 	ScheduleRunSuccess = "success"
@@ -3090,6 +3470,13 @@ type ScheduleFilter struct {
 	ProjectID string
 	Status    string
 	Name      string
+	// LastRunStatus, when set, keeps only schedules whose most recent run
+	// ended with this status (ScheduleRunSuccess or ScheduleRunError).
+	LastRunStatus string
+	// SystemPausedOnly, when true, keeps only paused schedules with a
+	// non-empty StatusReason: schedules the hub paused itself. A schedule a
+	// user paused (empty reason) is left out.
+	SystemPausedOnly bool
 }
 
 // ToAPI converts a store.Agent to an api.AgentInfo for external consumption.
@@ -3529,6 +3916,11 @@ type RoleDefinition struct {
 	// the seeded project-visitor role. CreateRoleDefinition stores nil
 	// as true. Read it through ConfersProjectMembership.
 	ConfersMembership *bool `json:"confersMembership,omitempty"`
+	// IssuanceID is the issuance ID of the admin-kind test identity whose
+	// request created the row (admin tier A3 grant shaping). The store sets
+	// it only from the context's GrantShaping; a value supplied by the
+	// caller is ignored.
+	IssuanceID *string `json:"issuanceId,omitempty"`
 }
 
 // ConfersProjectMembership reports whether a binding of rd makes its
@@ -3553,6 +3945,15 @@ type RoleBinding struct {
 	ExpiresAt        *time.Time `json:"expiresAt"` // Binding is inactive after this time (kernel evaluates)
 	CreatedBy        string     `json:"createdBy"`
 	CreatedAt        time.Time  `json:"createdAt"`
+	// SourceRuleID is set only on a project-visitor binding created by a
+	// project visitor rule (ProjectVisitorRule.ID); removing the rule
+	// deletes the binding. Only CreateVisitorRoleBinding sets it.
+	SourceRuleID *string `json:"sourceRuleId,omitempty"`
+	// IssuanceID is the issuance ID of the admin-kind test identity whose
+	// request created the row (admin tier A3 grant shaping). The store sets
+	// it only from the context's GrantShaping; a value supplied by the
+	// caller is ignored.
+	IssuanceID *string `json:"issuanceId,omitempty"`
 }
 
 // ProjectMembership is a convenience view of role bindings scoped to a project.
@@ -3774,8 +4175,12 @@ type AuthorityProvenance struct {
 type EdgeDeactivationCause string
 
 const (
-	EdgeDeactivationAgentSoftDelete     EdgeDeactivationCause = "agent_soft_delete"
-	EdgeDeactivationAgentHardDelete     EdgeDeactivationCause = "agent_hard_delete"
+	EdgeDeactivationAgentSoftDelete EdgeDeactivationCause = "agent_soft_delete"
+	EdgeDeactivationAgentHardDelete EdgeDeactivationCause = "agent_hard_delete"
+	// EdgeDeactivationDelegatorDeleted is reserved: no path records it.
+	// Agent deletes deactivate only the edges where the agent is the
+	// delegate, and a project delete records agent_hard_delete on both
+	// sides. ValidEdgeDeactivationCause accepts it.
 	EdgeDeactivationDelegatorDeleted    EdgeDeactivationCause = "delegator_deleted"
 	EdgeDeactivationCreateCompensation  EdgeDeactivationCause = "create_compensation"
 	EdgeDeactivationReincarnateReplaced EdgeDeactivationCause = "reincarnate_replaced"
@@ -4356,6 +4761,12 @@ type MutationAuditRecord struct {
 	ExchangeAgentCredentialID string
 	ActorKind                 string
 	AgentDelegationCode       string
+
+	// ProvenanceBasis is the JSON provenance basis of a delete made by the
+	// test identity purge (3b), the purge of admin kinds (A3) or the
+	// issuer cleanup (3c, ptone/scion#4240): the creation-time stamp the
+	// delete relied on and its run. Empty for every other record.
+	ProvenanceBasis string
 }
 
 // MutationAuditFilter defines query parameters for listing mutation audit records.
@@ -4367,10 +4778,13 @@ type MutationAuditFilter struct {
 	TargetType         string
 	TargetID           string
 	CorrelationID      string
-	Since              time.Time
-	Until              time.Time
-	Limit              int
-	Offset             int
+	// ExecutorID, when set, keeps only records whose executor_id equals
+	// it (for example a test identity purge's test_identity:<id>).
+	ExecutorID string
+	Since      time.Time
+	Until      time.Time
+	Limit      int
+	Offset     int
 }
 
 // =============================================================================

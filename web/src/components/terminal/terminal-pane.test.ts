@@ -2,6 +2,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import type { ScionTerminalPane } from './terminal-pane.js';
 import { TerminalSessionRegistry } from '../../client/terminal-sessions.js';
 import { requestUrl } from '../../client/__fixtures__/request-url.js';
+import { getPublicSettings, invalidatePublicSettings } from '../../client/server-feature-flags.js';
 
 /**
  * The automatic reconnect after a 4503 close waits a full-jitter delay;
@@ -611,7 +612,7 @@ describe('initial-load preflight refusal', () => {
 });
 
 describe('bind-after-mount still arms frontmost', () => {
-  it('a pane mounted before open() (the legacy page order) still auto-reconnects on a retriable close', async () => {
+  it('a pane mounted before open() still auto-reconnects on a retriable close', async () => {
     const registry2 = new TerminalSessionRegistry(
       {
         hubUrl: window.location.origin,
@@ -620,8 +621,8 @@ describe('bind-after-mount still arms frontmost', () => {
       zeroJitter
     );
     const page2 = document.createElement('scion-terminal-pane');
-    // connectedCallback runs with no session bound yet — the exact order that
-    // pages/terminal.ts uses (mount the shell, then open()).
+    // connectedCallback runs with no session bound yet: mount the shell,
+    // then open().
     document.body.append(page2);
     try {
       page2.open(registry2, agentId);
@@ -644,6 +645,50 @@ describe('bind-after-mount still arms frontmost', () => {
       page2.dispose();
       page2.remove();
     }
+  });
+});
+
+// Ported from the deleted legacy page adapter tests (ptone/scion#4917): they
+// exercised the pane through pages/terminal.ts, and now drive it directly.
+describe('reconnect and metadata through the pane', () => {
+  it('reconnect keeps the old terminal on denial and resets only after a new socket opens', async () => {
+    await mountConnected();
+    const socket = FakeSocket.instances[0];
+    socket.readyState = 3;
+    // The pane is frontmost, so a retriable close attempts automatically;
+    // the denial has to be queued before the close fires.
+    fetcher
+      .mockResolvedValueOnce(json({ id: agentId, name: 'test', phase: 'running' }))
+      .mockResolvedValueOnce(json({}, 403));
+    socket.onclose?.({ code: 1006 });
+    await vi.waitFor(() => expect(page.shadowRoot?.textContent).toContain('permission'));
+    expect(terminal.instances[0].dispose).not.toHaveBeenCalled();
+    expect(terminal.instances[0].reset).not.toHaveBeenCalled();
+
+    // The automatic attempt failed (403 is terminal, not retriable), which
+    // blocks further auto-attempts, so a manual click is required.
+    fetcher.mockResolvedValue(json({ id: agentId, name: 'test', phase: 'running' }));
+    page.shadowRoot?.querySelector<HTMLButtonElement>('.reconnect-btn')?.click();
+    await vi.waitFor(() => expect(FakeSocket.instances).toHaveLength(2));
+    expect(terminal.instances[0].reset).not.toHaveBeenCalled();
+    FakeSocket.instances[1].open();
+    FakeSocket.instances[1].data(); // confirms the reconnect attempt live
+    expect(terminal.instances[0].reset).toHaveBeenCalledTimes(1);
+    expect(terminal.instances).toHaveLength(1);
+  });
+
+  it('connection notifications do not overwrite metadata refreshed by pane controls', async () => {
+    await mountConnected();
+    FakeEventSource.instances[0].onopen?.();
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(3));
+    const controls = page as unknown as { refreshAgentData(): Promise<void>; sendResize(): void };
+    fetcher.mockResolvedValueOnce(json({ id: agentId, name: 'test', phase: 'stopped' }));
+    await controls.refreshAgentData();
+    controls.sendResize();
+    await page.updateComplete;
+    expect(page.shadowRoot?.querySelector('scion-status-badge')?.getAttribute('status')).toBe(
+      'stopped'
+    );
   });
 });
 
@@ -997,6 +1042,9 @@ describe('Capture Auth scope dialog (design ptone/scion#2291 §7)', () => {
 
   beforeEach(() => {
     showToast.mockClear();
+    // The settings are cached per page load (ptone/scion#5311); each test
+    // starts as a fresh page.
+    invalidatePublicSettings();
   });
 
   // Design §10 test 6: setting off — both radios enabled, default is
@@ -1133,6 +1181,43 @@ describe('Capture Auth scope dialog (design ptone/scion#2291 §7)', () => {
     const conflicts = (page as unknown as { captureAuthConflicts: string[] | null })
       .captureAuthConflicts;
     expect(conflicts).toBeNull();
+  });
+
+  // ptone/scion#5311 keeps §7's fresh read: the dialog bypasses the shared
+  // per-page cache on every open, so a policy an admin turned off in another
+  // tab re-enables Project on the next open, and the fresh result refreshes
+  // the cache the other pages read.
+  it('each open reads the policy fresh, past the shared settings cache', async () => {
+    await makeCaptureEligible();
+    let policy = true;
+    let settingsFetches = 0;
+    fetcher.mockImplementation((url) => {
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+      if (path.includes('/api/v1/settings/public')) {
+        settingsFetches += 1;
+        return Promise.resolve(json({ agentSecretsUserScopeOnly: policy }));
+      }
+      return Promise.resolve(json(noAuthAgent));
+    });
+    // Another page already filled the cache with the policy on.
+    await getPublicSettings();
+    expect(settingsFetches).toBe(1);
+
+    await openDialog();
+    expect(settingsFetches).toBe(2);
+    expect(radio('project')?.hasAttribute('disabled')).toBe(true);
+
+    // An admin turns the policy off elsewhere.
+    policy = false;
+    (page as unknown as { captureAuthScopeDialogOpen: boolean }).captureAuthScopeDialogOpen = false;
+    await page.updateComplete;
+    await openDialog();
+
+    expect(settingsFetches).toBe(3);
+    expect(radio('project')?.hasAttribute('disabled')).toBe(false);
+    // The fresh result is now what the other pages read, with no request.
+    expect((await getPublicSettings())?.agentSecretsUserScopeOnly).toBe(false);
+    expect(settingsFetches).toBe(3);
   });
 
   /** A promise plus its resolver, for controlling exactly when a mocked fetch settles. */

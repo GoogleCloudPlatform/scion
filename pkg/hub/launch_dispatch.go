@@ -21,6 +21,7 @@ import (
 	"math"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -75,7 +76,8 @@ func envReqsResult(envReqs *RemoteEnvRequirementsResponse) *CreateDispatchResult
 // AsyncLaunchSettings are the Hub settings that govern asynchronous agent
 // launch.
 type AsyncLaunchSettings struct {
-	// Enabled is the hub.asyncAgentLaunch flag.
+	// Enabled is the hub.async_agent_launch experiment, resolved when the
+	// settings are read.
 	Enabled bool
 	// Timeout is the whole-launch budget (hub.launchTimeout).
 	Timeout time.Duration
@@ -83,13 +85,17 @@ type AsyncLaunchSettings struct {
 	KeepaliveSeconds int
 }
 
-// asyncLaunchSettings returns the server's async launch settings. They are
-// fixed at startup; read under s.mu like the other config fields.
+// asyncLaunchSettings returns the server's async launch settings. The
+// dispatcher calls it at every create send, so Enabled follows the
+// hub.async_agent_launch experiment without a restart. Timeout and
+// KeepaliveSeconds are fixed at startup; read under s.mu like the other
+// config fields.
 func (s *Server) asyncLaunchSettings() AsyncLaunchSettings {
+	enabled := s.experimentEnabled(experiments.AsyncAgentLaunch)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return AsyncLaunchSettings{
-		Enabled:          s.config.AsyncAgentLaunch,
+		Enabled:          enabled,
 		Timeout:          s.config.LaunchTimeout,
 		KeepaliveSeconds: s.config.LaunchKeepaliveSeconds,
 	}
@@ -138,7 +144,8 @@ func (c *HybridBrokerClient) createWithGatherWouldDefer(ctx context.Context, bro
 type createSendFunc func(ctx context.Context, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error)
 
 // asyncLaunchEligible reports whether a create send for agent may request an
-// asynchronous launch: the flag is on, the agent opted in, the
+// asynchronous launch: the hub.async_agent_launch experiment is on, the
+// agent opted in, the
 // request launches (not provision-only or reprovision), and the broker is not
 // known to lack support. A broker with no recorded capabilities, or one that
 // cannot be read, is tried: its echo is authoritative.
@@ -175,12 +182,19 @@ func remainingLaunchSeconds(timeout, elapsed time.Duration) int {
 //
 //   - ErrLifecycleDeferred: returned unchanged with no launch write here; the
 //     owner node runs dispatchLaunching itself.
-//   - error, env requirements, or a synchronous answer from a broker without
-//     async support: the launch is ended as not_launched.
+//   - an error whose outcome is unknown (isUnknownDispatchOutcome: the
+//     request may have reached the broker): the launch is kept and returned
+//     as accepted with no owner, and no error (ptone/scion#4866).
+//   - any other error: the launch is ended as not_launched with the code
+//     dispatch_failed, so a client following it sees a failed launch (the
+//     env and bootstrap finalize callers keep the row in provisioning).
+//   - env requirements, or a synchronous answer from a broker without async
+//     support: the launch is ended as not_launched without a code. Neither
+//     is a failure: the start goes on, or waits for env (see each case).
 //   - launchPending with the matching ID: the launch is marked accepted and
 //     returned. The agent row is now provisioning.
-//   - launchPending with another ID: the launch is ended and
-//     errLaunchEchoMismatch is returned.
+//   - launchPending with another ID: the launch is ended as not_launched
+//     with the code dispatch_failed and errLaunchEchoMismatch is returned.
 //
 // deferrable marks sends whose transport may defer to the owner node; for
 // those, a client that can predict deferral is asked first so no launch is
@@ -241,48 +255,88 @@ func (d *HTTPAgentDispatcher) dispatchLaunching(
 		// Raised by routing before any send. The owner's BeginLaunch
 		// supersedes launchID; no further write here.
 		return nil, nil, nil, err
+	case err != nil && isUnknownDispatchOutcome(err):
+		// The broker may have received the request and be launching
+		// (ptone/scion#4866): ending the launch here would make its claim
+		// answer 409 not_launched and tear the launch down. Accept the
+		// launch exactly as an acknowledged one, with no owner yet (the
+		// row moves to provisioning, so callers, the CLI and the web
+		// follow it as any accepted launch): the broker's first claim
+		// records the owner, and if the request never arrived the launch
+		// reaper ends the launch (lost, or timed out at its deadline). No
+		// error is returned, so the minted credential is kept, as for any
+		// accepted launch.
+		d.log.Warn("Async launch send outcome unknown; keeping the launch for the broker's claim or the launch reaper",
+			"agent_id", agent.ID, "launch_id", launchID, "error", err)
+		d.markLaunchAccepted(ctx, agent, launchID, "")
+		addDispatchWarnings(ctx, launchOutcomeUnknownWarning)
+		return nil, nil, &LaunchAccepted{ID: launchID}, nil
 	case err != nil:
-		d.endLaunchNotLaunched(ctx, agent, launchID)
+		// The broker refused the launch or was not reached: a failure. The
+		// code tells a client following the launch that it ended, whatever
+		// the caller then does with the row (ptone/scion#5283).
+		d.endLaunchNotLaunchedWithCode(ctx, agent, launchID, store.LaunchErrorDispatchFailed)
 		return nil, nil, nil, err
 	case envReqs != nil:
-		// Waiting for a human to supply env costs no launch budget.
+		// Waiting for a human to supply env costs no launch budget. No
+		// code: this is not a failure. The same request may begin a new
+		// launch at once (the gather second pass, the finalize retry), or
+		// the row waits in provisioning for the env to be submitted.
 		d.endLaunchNotLaunched(ctx, agent, launchID)
 		return resp, envReqs, nil, nil
 	case resp != nil && resp.LaunchPending && resp.LaunchID == launchID:
-		// Detached from the request, like endLaunchNotLaunched: the broker
-		// is already launching, so a client disconnect must not drop this
-		// write.
-		markCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		defer cancel()
-		_, err := d.store.MarkLaunchAccepted(markCtx, agent.ID, launchID, resp.LaunchInstanceID)
-		if err != nil {
-			// The broker is launching; its first claim records the owner
-			// if this write was lost.
-			d.log.Warn("Failed to record accepted launch",
-				"agent_id", agent.ID, "launch_id", launchID, "error", err)
-		}
+		d.markLaunchAccepted(ctx, agent, launchID, resp.LaunchInstanceID)
 		d.log.Info("Agent create accepted for async launch",
 			"agent_id", agent.ID, "project_id", agent.ProjectID, "launch_id", launchID,
 			"launched_by", agent.CreatedBy, "relationship", launchRelationship(agent))
 		return resp, nil, &LaunchAccepted{ID: launchID, Owner: resp.LaunchInstanceID}, nil
 	case resp == nil || !resp.LaunchPending:
-		// A broker without async support answered synchronously.
+		// A broker without async support answered synchronously. No code:
+		// the start goes on outside the launch record, and the caller
+		// applies the broker's phase from the answer.
 		d.endLaunchNotLaunched(ctx, agent, launchID)
 		return resp, nil, nil, nil
 	default:
-		d.endLaunchNotLaunched(ctx, agent, launchID)
+		// The broker is not running the launch the hub began: a failure.
+		d.endLaunchNotLaunchedWithCode(ctx, agent, launchID, store.LaunchErrorDispatchFailed)
 		d.log.Warn("Broker acknowledged a different launch ID; ending the launch",
 			"agent_id", agent.ID, "launch_id", launchID, "broker_launch_id", resp.LaunchID)
 		return nil, nil, nil, errLaunchEchoMismatch
 	}
 }
 
-// endLaunchNotLaunched ends launchID as not_launched. It uses a context
-// detached from the request so a client disconnect cannot strand the launch.
+// markLaunchAccepted records launchID as accepted (owner may be empty: the
+// broker's first claim records it). It uses a context detached from the
+// request, like endLaunchNotLaunched: the broker may already be launching,
+// so a client disconnect must not drop this write.
+func (d *HTTPAgentDispatcher) markLaunchAccepted(ctx context.Context, agent *store.Agent, launchID, owner string) {
+	markCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if _, err := d.store.MarkLaunchAccepted(markCtx, agent.ID, launchID, owner); err != nil {
+		// The broker is launching; its first claim records the owner
+		// if this write was lost.
+		d.log.Warn("Failed to record accepted launch",
+			"agent_id", agent.ID, "launch_id", launchID, "error", err)
+	}
+}
+
+// launchOutcomeUnknownWarning is the dispatch warning for a launch kept
+// after a send whose outcome is unknown.
+const launchOutcomeUnknownWarning = "The runtime broker did not confirm the launch request; the launch is kept and settles when the broker reports it, or ends when the launch times out."
+
+// endLaunchNotLaunched ends launchID as not_launched without a code, for
+// the cases that are not failures. It uses a context detached from the
+// request so a client disconnect cannot strand the launch.
 func (d *HTTPAgentDispatcher) endLaunchNotLaunched(ctx context.Context, agent *store.Agent, launchID string) {
+	d.endLaunchNotLaunchedWithCode(ctx, agent, launchID, "")
+}
+
+// endLaunchNotLaunchedWithCode ends launchID as not_launched and records
+// code ("" for none) as the launch error, like endLaunchNotLaunched.
+func (d *HTTPAgentDispatcher) endLaunchNotLaunchedWithCode(ctx context.Context, agent *store.Agent, launchID, code string) {
 	endCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
-	if err := d.store.EndLaunch(endCtx, agent.ID, launchID, store.LaunchEndReasonNotLaunched); err != nil {
+	if err := d.store.EndLaunchWithCode(endCtx, agent.ID, launchID, store.LaunchEndReasonNotLaunched, code); err != nil {
 		d.log.Warn("Failed to end launch",
 			"agent_id", agent.ID, "launch_id", launchID, "error", err)
 	}

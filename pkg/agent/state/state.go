@@ -18,9 +18,13 @@
 package state
 
 import (
+	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
 // HarnessExitCodeFile is the container-local path where the tmux agent-window
@@ -33,8 +37,10 @@ const HarnessExitCodeFile = "/tmp/scion-harness-exit-code"
 
 // HarnessInitRunFile is the container-local path where `sciontool init`
 // records the current init run, written at the start of each run before the
-// tmux session is created. It holds one line, "nonce=HEX mode=hook" or
-// "nonce=HEX mode=settle" (see FormatInitRun / ParseInitRun). The agent
+// tmux session is created. Line 1 is "nonce=HEX mode=hook" or
+// "nonce=HEX mode=settle" (see FormatInitRun / ParseInitRun); hosts that
+// predate the ready spec read only this line. An optional line 2 carries the
+// resolved ready spec (see FormatInitRunSpec / ParseInitRunSpec). The agent
 // runtime reads it to decide when the harness is ready for a pasted message.
 const HarnessInitRunFile = "/tmp/scion-init-run"
 
@@ -66,12 +72,135 @@ const (
 	// deadline the runtime pastes a buffered message anyway and init reports
 	// the agent as working, so no agent stays initializing forever.
 	ReadyDeadline = 90 * time.Second
+	// ReadySettleHook is how long the runtime waits after a fresh hook-mode
+	// ready marker before pasting, so the harness's input has mounted.
+	ReadySettleHook = 1500 * time.Millisecond
 )
+
+// Ready strategies, the values of a harness-config ready block's strategy
+// and of api.ReadySpec.Strategy.
+const (
+	// ReadyStrategyHook: the harness is ready once the ready marker for the
+	// current run is written (by a session-start hook) plus the settle.
+	ReadyStrategyHook = "hook"
+	// ReadyStrategyDelay: the harness is ready once its tmux session has
+	// existed for the settle period.
+	ReadyStrategyDelay = "delay"
+)
+
+// Limits on ready spec values, shared by harness-config validation and by
+// the readers of the init-run file and SCION_HARNESS_READY.
+const (
+	MaxReadySettle  = 60 * time.Second
+	MinReadyTimeout = 10 * time.Second
+	MaxReadyTimeout = 10 * time.Minute
+)
+
+// HarnessReadyEnv names the environment variable that carries the resolved
+// ready spec from the broker to `sciontool init`, in the JSON form written by
+// FormatReadySpecEnv.
+const HarnessReadyEnv = "SCION_HARNESS_READY"
+
+// DefaultReadySpec returns the ready spec used for strategy when no value is
+// configured: the readiness constants above. An unknown strategy gets the
+// delay defaults.
+func DefaultReadySpec(strategy string) api.ReadySpec {
+	if strategy == ReadyStrategyHook {
+		return api.ReadySpec{Strategy: ReadyStrategyHook, Settle: ReadySettleHook, Timeout: ReadyDeadline}
+	}
+	return api.ReadySpec{Strategy: ReadyStrategyDelay, Settle: ReadySettleSession}
+}
+
+// ReadyModeForStrategy returns the init-run line 1 mode for a ready
+// strategy: ReadyModeHook for hook, ReadyModeSettle otherwise.
+func ReadyModeForStrategy(strategy string) string {
+	if strategy == ReadyStrategyHook {
+		return ReadyModeHook
+	}
+	return ReadyModeSettle
+}
+
+// CheckReadySpec reports whether spec is a complete, in-range ready spec: a
+// known strategy, a settle within [0, MaxReadySettle], and a timeout within
+// [MinReadyTimeout, MaxReadyTimeout] for hook or zero for delay.
+func CheckReadySpec(spec api.ReadySpec) error {
+	switch spec.Strategy {
+	case ReadyStrategyHook:
+		if spec.Timeout < MinReadyTimeout || spec.Timeout > MaxReadyTimeout {
+			return fmt.Errorf("ready timeout %s out of range [%s, %s]", spec.Timeout, MinReadyTimeout, MaxReadyTimeout)
+		}
+	case ReadyStrategyDelay:
+		if spec.Timeout != 0 {
+			return fmt.Errorf("ready timeout %s not allowed with strategy %q", spec.Timeout, ReadyStrategyDelay)
+		}
+	default:
+		return fmt.Errorf("unknown ready strategy %q", spec.Strategy)
+	}
+	if spec.Settle < 0 || spec.Settle > MaxReadySettle {
+		return fmt.Errorf("ready settle %s out of range [0, %s]", spec.Settle, MaxReadySettle)
+	}
+	return nil
+}
 
 // FormatInitRun renders the HarnessInitRunFile content for nonce and mode,
 // including the trailing newline.
 func FormatInitRun(nonce, mode string) string {
 	return "nonce=" + nonce + " mode=" + mode + "\n"
+}
+
+// readySpecWire is the JSON form of a ready spec in HarnessReadyEnv. The
+// broker and the image are different binaries that can be of different
+// versions, so the names and units are fixed here rather than taken from the
+// Go type: whole milliseconds, as in the init-run file's line 2.
+type readySpecWire struct {
+	Strategy  string `json:"strategy"`
+	SettleMs  int64  `json:"settle_ms"`
+	TimeoutMs int64  `json:"timeout_ms"`
+}
+
+// FormatReadySpecEnv renders spec as the HarnessReadyEnv value, for example
+// {"strategy":"hook","settle_ms":1500,"timeout_ms":90000}.
+func FormatReadySpecEnv(spec api.ReadySpec) string {
+	b, _ := json.Marshal(readySpecWire{
+		Strategy:  spec.Strategy,
+		SettleMs:  spec.Settle.Milliseconds(),
+		TimeoutMs: spec.Timeout.Milliseconds(),
+	})
+	return string(b)
+}
+
+// ParseReadySpecEnv parses a HarnessReadyEnv value and checks it with
+// CheckReadySpec. Unknown fields are ignored, so a newer broker can add
+// fields; a missing field reads as zero.
+func ParseReadySpecEnv(raw string) (api.ReadySpec, error) {
+	var w readySpecWire
+	if err := json.Unmarshal([]byte(raw), &w); err != nil {
+		return api.ReadySpec{}, fmt.Errorf("%s is not valid JSON: %w", HarnessReadyEnv, err)
+	}
+	maxMs := MaxReadyTimeout.Milliseconds()
+	if w.SettleMs < 0 || w.SettleMs > maxMs || w.TimeoutMs < 0 || w.TimeoutMs > maxMs {
+		return api.ReadySpec{}, fmt.Errorf("%s values out of range: settle_ms=%d timeout_ms=%d", HarnessReadyEnv, w.SettleMs, w.TimeoutMs)
+	}
+	spec := api.ReadySpec{
+		Strategy: w.Strategy,
+		Settle:   time.Duration(w.SettleMs) * time.Millisecond,
+		Timeout:  time.Duration(w.TimeoutMs) * time.Millisecond,
+	}
+	if err := CheckReadySpec(spec); err != nil {
+		return api.ReadySpec{}, err
+	}
+	return spec, nil
+}
+
+// FormatInitRunSpec renders the two-line HarnessInitRunFile content for
+// nonce and spec, including the trailing newline. Line 1 is exactly
+// FormatInitRun(nonce, ReadyModeForStrategy(spec.Strategy)); line 2 is
+// "strategy=S settle_ms=N deadline_ms=N".
+func FormatInitRunSpec(nonce string, spec api.ReadySpec) string {
+	return FormatInitRun(nonce, ReadyModeForStrategy(spec.Strategy)) +
+		"strategy=" + spec.Strategy +
+		" settle_ms=" + strconv.FormatInt(spec.Settle.Milliseconds(), 10) +
+		" deadline_ms=" + strconv.FormatInt(spec.Timeout.Milliseconds(), 10) + "\n"
 }
 
 // FormatReadyMarker renders the HarnessReadyFile content for nonce,
@@ -80,11 +209,12 @@ func FormatReadyMarker(nonce string) string {
 	return "nonce=" + nonce + "\n"
 }
 
-// ParseInitRun parses HarnessInitRunFile content. ok is false when the
-// content is not exactly one well-formed line with a hex nonce and a known
-// mode; callers treat that as "no init-run file".
+// ParseInitRun parses line 1 of HarnessInitRunFile content; any later line
+// is ignored. ok is false when line 1 is not a well-formed line with a hex
+// nonce and a known mode; callers treat that as "no init-run file".
 func ParseInitRun(content string) (nonce, mode string, ok bool) {
-	fields, ok := parseReadinessFields(content)
+	line1, _, _ := strings.Cut(content, "\n")
+	fields, ok := parseReadinessFields(line1)
 	if !ok || len(fields) != 2 {
 		return "", "", false
 	}
@@ -93,6 +223,77 @@ func ParseInitRun(content string) (nonce, mode string, ok bool) {
 		return "", "", false
 	}
 	return nonce, mode, true
+}
+
+// InitRunSpec is HarnessInitRunFile content parsed by ParseInitRunSpec.
+type InitRunSpec struct {
+	// Nonce and Mode are line 1's values.
+	Nonce string
+	Mode  string
+	// HasSpec reports whether the file has a line 2. Without one (an image
+	// older than the ready spec), Spec is the defaults for Mode and readers
+	// use their own timings.
+	HasSpec bool
+	// Spec is line 2's ready spec, every field checked against the limits.
+	Spec api.ReadySpec
+}
+
+// ParseInitRunSpec parses HarnessInitRunFile content: line 1 as ParseInitRun
+// does, which must be valid for ok, and the optional line 2. Line 1's mode
+// decides the strategy: a line 2 strategy that is unknown or disagrees with
+// it is replaced by the strategy for the mode. In line 2, unknown keys and
+// tokens without "=" are ignored (so later fields can be added), the first
+// of a repeated key wins, and a missing, malformed or out-of-range value
+// becomes the strategy's default. The delay strategy has no deadline.
+func ParseInitRunSpec(content string) (InitRunSpec, bool) {
+	nonce, mode, ok := ParseInitRun(content)
+	if !ok {
+		return InitRunSpec{}, false
+	}
+	res := InitRunSpec{Nonce: nonce, Mode: mode}
+	strategy := ReadyStrategyDelay
+	if mode == ReadyModeHook {
+		strategy = ReadyStrategyHook
+	}
+	_, rest, _ := strings.Cut(content, "\n")
+	line2, _, _ := strings.Cut(rest, "\n")
+	line2 = strings.TrimSuffix(line2, "\r")
+	fields := map[string]string{}
+	for _, tok := range strings.Fields(line2) {
+		if key, val, found := strings.Cut(tok, "="); found {
+			if _, seen := fields[key]; !seen {
+				fields[key] = val
+			}
+		}
+	}
+	res.HasSpec = strings.TrimSpace(line2) != ""
+	if s := fields["strategy"]; s == ReadyStrategyHook || s == ReadyStrategyDelay {
+		if ReadyModeForStrategy(s) == mode {
+			strategy = s
+		}
+	}
+	res.Spec = DefaultReadySpec(strategy)
+	if d, ok := parseMillis(fields["settle_ms"]); ok && d <= MaxReadySettle {
+		res.Spec.Settle = d
+	}
+	if strategy == ReadyStrategyHook {
+		if d, ok := parseMillis(fields["deadline_ms"]); ok && d >= MinReadyTimeout && d <= MaxReadyTimeout {
+			res.Spec.Timeout = d
+		}
+	}
+	return res, true
+}
+
+// parseMillis parses a non-negative decimal count of milliseconds.
+func parseMillis(s string) (time.Duration, bool) {
+	if s == "" || len(s) > 9 {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || n < 0 || strings.HasPrefix(s, "+") {
+		return 0, false
+	}
+	return time.Duration(n) * time.Millisecond, true
 }
 
 // ParseReadyMarker parses HarnessReadyFile content. ok is false when the
@@ -159,6 +360,12 @@ const (
 	PhaseStopping     Phase = "stopping"
 	PhaseStopped      Phase = "stopped"
 	PhaseError        Phase = "error"
+	// PhaseHalted is terminal: the platform ended a run that should still
+	// be running (preempted, evicted, OOM-killed, or its container went
+	// missing). The detail is the agent's exit reason. Unlike stopped it is
+	// never a run the user or the agent ended, and unlike error it is not a
+	// harness crash. A start resumes it like a start from stopped.
+	PhaseHalted Phase = "halted"
 )
 
 // allPhases is the internal list; Phases() returns a copy.
@@ -172,6 +379,7 @@ var allPhases = []Phase{
 	PhaseStopping,
 	PhaseStopped,
 	PhaseError,
+	PhaseHalted,
 }
 
 // Phases returns a copy of all valid Phase values.
@@ -183,7 +391,8 @@ func Phases() []Phase {
 
 // Ordinal returns the forward-progress ordering of a phase.
 // Higher values represent later lifecycle stages.
-// Returns 0 for terminal or special phases (stopped, error, suspended, stopping)
+// Returns 0 for terminal or special phases (stopped, error, halted, suspended,
+// stopping)
 // where regression checks do not apply.
 func (p Phase) Ordinal() int {
 	switch p {
@@ -254,8 +463,9 @@ const (
 )
 
 // ExitReason describes why an agent process terminated. Unlike Activity
-// (self-reported by the agent), ExitReason is runtime-derived and set by
-// the platform when it observes a container/process exit.
+// (self-reported by the agent), ExitReason is runtime- or hub-derived and
+// set by the platform when it observes a container/process exit. The one
+// exception is ExitReasonSignaled, which the agent reports.
 type ExitReason string
 
 const (
@@ -276,6 +486,12 @@ const (
 	// reason OOMKilled). It is a crash, not a disruption: the workload
 	// exceeded its own limit, so a relaunch without a change hits it again.
 	ExitReasonOOMKilled ExitReason = "oom_killed"
+	// ExitReasonSignaled is agent-reported: the agent stopped after it
+	// received a termination signal (SIGTERM/SIGINT), without a crash or a
+	// limits stop. It is not halt evidence. It only fills an empty exit
+	// reason, and it is cleared when the agent next moves to starting or
+	// running.
+	ExitReasonSignaled ExitReason = "signaled"
 )
 
 // IsValid reports whether r is a recognised ExitReason value.
@@ -294,8 +510,34 @@ func (r ExitReason) IsValid() bool {
 		return true
 	case ExitReasonOOMKilled:
 		return true
+	case ExitReasonSignaled:
+		return true
 	}
 	return false
+}
+
+// exitReasonLabels are the display labels of the exit reasons a halted
+// agent can carry (and of the other known reasons), so text shown to users
+// names a reason from a fixed set and never repeats a reported value
+// verbatim.
+var exitReasonLabels = map[ExitReason]string{
+	ExitReasonCrashed:          "crashed",
+	ExitReasonLimitsExceeded:   "limits exceeded",
+	ExitReasonPreempted:        "preempted",
+	ExitReasonEvicted:          "evicted",
+	ExitReasonOOMKilled:        "out of memory",
+	ExitReasonContainerMissing: "container lost",
+	ExitReasonSignaled:         "signal",
+}
+
+// Label returns the label of r for display: a fixed phrase
+// for each known reason, and "unknown" for anything else, including no
+// reason (a halt always records one).
+func (r ExitReason) Label() string {
+	if l, ok := exitReasonLabels[r]; ok {
+		return l
+	}
+	return "unknown"
 }
 
 // ExitReasonContainerMissing is set by the Hub when the agent's runtime

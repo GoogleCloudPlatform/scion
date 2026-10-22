@@ -36,6 +36,14 @@ type startDispatch struct {
 	agent *store.Agent
 	// priorPhase is the agent's phase when beginStartDispatch was called.
 	priorPhase string
+	// priorRestingPhase is the agent's effective resting phase
+	// (store.EffectiveRestingPhase) when beginStartDispatch was called: the
+	// remembered phase for an error row that remembers the phase a failed
+	// asynchronous start began from, else priorPhase. An asynchronous start
+	// records it as its launch's prior phase, so the memory carries forward
+	// across repeated failures (ptone/scion#4669). rollback restores
+	// priorPhase, the stored phase, not this.
+	priorRestingPhase string
 	// reserved reports whether beginStartDispatch created the reservation
 	// (as opposed to finding one the agent already held).
 	reserved bool
@@ -138,10 +146,11 @@ func (s *Server) beginStartDispatch(ctx context.Context, agent *store.Agent) (*s
 		return nil, err
 	}
 	d := &startDispatch{
-		s:          s,
-		agent:      agent,
-		priorPhase: agent.Phase,
-		reserved:   reserved,
+		s:                 s,
+		agent:             agent,
+		priorPhase:        agent.Phase,
+		priorRestingPhase: store.EffectiveRestingPhase(agent),
+		reserved:          reserved,
 	}
 	if !isBrokerQuotaCountedPhase(agent.Phase) {
 		if err := s.store.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
@@ -212,9 +221,12 @@ func (d *startDispatch) rollback(ctx context.Context) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), startDispatchRollbackTimeout)
 	defer cancel()
 	if d.marked {
+		// Restore lets the prior phase be halted, which no other write
+		// may store directly (ptone/scion#4853).
 		err := d.s.store.UpdateAgentStatus(ctx, d.agent.ID, store.AgentStatusUpdate{
 			Phase:   d.priorPhase,
 			IfPhase: string(state.PhaseStarting),
+			Restore: true,
 		})
 		if err != nil && !errors.Is(err, store.ErrPhaseMismatch) {
 			d.s.agentLifecycleLog.Warn("start dispatch: failed to restore prior phase after failed dispatch",
@@ -246,11 +258,39 @@ func (d *startDispatch) wroteStarting() bool {
 	return d != nil && d.marked
 }
 
+// restingPhase returns the effective resting phase recorded when the
+// dispatch began (priorRestingPhase), or "" for a nil d.
+func (d *startDispatch) restingPhase() string {
+	if d == nil {
+		return ""
+	}
+	return d.priorRestingPhase
+}
+
 // settle marks d as finished without undoing anything: the dispatch
 // succeeded, or the caller recorded its own failure state.
 func (d *startDispatch) settle() {
 	if d != nil {
 		d.settled = true
+	}
+}
+
+// keepForUnknownOutcome prepares d's rollback for a start whose outcome is
+// unknown (ptone/scion#5143): the rollback then releases nothing, so the
+// reservation this hold created or re-asserted stays held, and it restores
+// stopped, not the prior phase, when this hold wrote starting (any
+// uncounted prior phase: a restored suspended, halted or error phase would
+// keep the agent from reading running if the start did land, and a
+// suspended one would resume the old session on the next start). The start
+// claim's settlement frees the slot: the reaper's release, then the idle
+// release. Nil-safe; a no-op once d is settled.
+func (d *startDispatch) keepForUnknownOutcome() {
+	if d == nil || d.settled {
+		return
+	}
+	d.reserved = false
+	if d.marked {
+		d.priorPhase = string(state.PhaseStopped)
 	}
 }
 

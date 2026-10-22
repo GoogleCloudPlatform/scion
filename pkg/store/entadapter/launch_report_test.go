@@ -312,7 +312,7 @@ func TestReport_H1_SucceededPreRunning(t *testing.T) {
 
 	answer, updated, err := s.ApplyLaunchReport(ctx, a.ID, a.RuntimeBrokerID, store.LaunchReport{
 		LaunchID: launchID, InstanceID: "i1", State: store.LaunchReportStateSucceeded,
-		Runtime: "kubernetes", RuntimeState: "Running",
+		AgentConfig: store.BrokerAgentConfig{Runtime: "kubernetes"}, RuntimeState: "Running",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, store.LaunchReportResultApplied, answer.Result)
@@ -401,7 +401,7 @@ func TestReport_H1_RunningObservedThenSucceededAppliesEcho(t *testing.T) {
 
 	answer, updated, err = s.ApplyLaunchReport(ctx, a.ID, a.RuntimeBrokerID, store.LaunchReport{
 		LaunchID: launchID, InstanceID: "i1", State: store.LaunchReportStateSucceeded,
-		Runtime: "docker",
+		AgentConfig: store.BrokerAgentConfig{Runtime: "docker"},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, store.LaunchReportResultCompleted, answer.Result)
@@ -574,22 +574,42 @@ func TestReport_H1_FailedConfirmingReapedLaunchRefinesLaunchError(t *testing.T) 
 
 // --- ApplyLaunchReport failed-path reservation release ---------------------
 
-// seedBrokerQuotaReservation creates a max_agents_per_broker limit definition
-// and an active reservation for agentID, returning the limit definition ID
-// for a HasActiveReservation check.
-func seedBrokerQuotaReservation(t *testing.T, ctx context.Context, s *AgentStore, agentID string) (quota *QuotaStore, limitDefID string) {
+// testQuotaBroker is the Runtime Broker the launch-end reservation tests
+// record on the agent row and scope the reservation to.
+const testQuotaBroker = "broker-1"
+
+// setAgentRuntimeBroker records broker on agent a's row through the ent
+// client (white-box: the launch tests' agents are created with no broker)
+// and on the caller's struct, which the tests' reports are sent from (a
+// report from any other broker is refused).
+func setAgentRuntimeBroker(t *testing.T, ctx context.Context, s *AgentStore, a *store.Agent, broker string) {
 	t.Helper()
+	uid, err := parseUUID(a.ID)
+	require.NoError(t, err)
+	_, err = s.client.Agent.UpdateOneID(uid).SetRuntimeBrokerID(broker).Save(ctx)
+	require.NoError(t, err)
+	a.RuntimeBrokerID = broker
+}
+
+// seedBrokerQuotaReservation records testQuotaBroker as a's Runtime Broker
+// (row and struct), creates a max_agents_per_broker limit definition and an
+// active reservation for a scoped to that broker, and returns the limit
+// definition ID for a HasActiveReservation check. A launch end releases only
+// a reservation on the agent's own broker (ptone/scion#5137).
+func seedBrokerQuotaReservation(t *testing.T, ctx context.Context, s *AgentStore, a *store.Agent) (quota *QuotaStore, limitDefID string) {
+	t.Helper()
+	setAgentRuntimeBroker(t, ctx, s, a, testQuotaBroker)
 	quota = NewQuotaStore(s.client)
 	ld, err := quota.CreateLimitDefinition(ctx, &store.LimitDefinition{
 		Name: store.LimitMaxAgentsPerBroker, ResourceType: "agent", Unit: "count", DefaultValue: 1,
 	})
 	require.NoError(t, err)
 	_, err = quota.CreateUsageReservation(ctx, &store.UsageReservation{
-		LimitDefinitionID: ld.ID, SubjectID: "broker-1", ScopeType: "broker", ScopeID: "broker-1",
-		ResourceID: agentID, Reserved: 1,
+		LimitDefinitionID: ld.ID, SubjectID: testQuotaBroker, ScopeType: "broker", ScopeID: testQuotaBroker,
+		ResourceID: a.ID, Reserved: 1,
 	})
 	require.NoError(t, err)
-	has, err := quota.HasActiveReservation(ctx, ld.ID, agentID)
+	has, err := quota.HasActiveReservation(ctx, ld.ID, a.ID)
 	require.NoError(t, err)
 	require.True(t, has, "setup: the reservation must be active before the failed report")
 	return quota, ld.ID
@@ -599,7 +619,7 @@ func TestReport_H1_FailedPreRunning_ReleasesReservation(t *testing.T) {
 	ctx := context.Background()
 	s, projectID := newTestAgentStore(t)
 	a, launchID := beginTestLaunch(t, ctx, s, projectID, "h1-release-prerunning")
-	quota, ldID := seedBrokerQuotaReservation(t, ctx, s, a.ID)
+	quota, ldID := seedBrokerQuotaReservation(t, ctx, s, a)
 
 	_, _, err := s.ApplyLaunchReport(ctx, a.ID, a.RuntimeBrokerID, store.LaunchReport{
 		LaunchID: launchID, InstanceID: "i1", State: store.LaunchReportStateFailed,
@@ -616,7 +636,7 @@ func TestReport_H1_ErrorByAnotherWriter_FailedReleasesReservation(t *testing.T) 
 	ctx := context.Background()
 	s, projectID := newTestAgentStore(t)
 	a, launchID := beginTestLaunch(t, ctx, s, projectID, "h1-release-error-writer")
-	quota, ldID := seedBrokerQuotaReservation(t, ctx, s, a.ID)
+	quota, ldID := seedBrokerQuotaReservation(t, ctx, s, a)
 
 	got, err := s.GetAgent(ctx, a.ID)
 	require.NoError(t, err)
@@ -645,7 +665,7 @@ func TestReport_H1_FailedPreRunning_ReleasesReservationOnPGWithSingleConnection(
 	ctx := context.Background()
 	s, projectID := newPGTestAgentStore(t, 1)
 	a, launchID := beginTestLaunch(t, ctx, s, projectID, "h1-release-prerunning-pg-single-conn")
-	quota, ldID := seedBrokerQuotaReservation(t, ctx, s, a.ID)
+	quota, ldID := seedBrokerQuotaReservation(t, ctx, s, a)
 
 	answer, _, err := s.ApplyLaunchReport(ctx, a.ID, a.RuntimeBrokerID, store.LaunchReport{
 		LaunchID: launchID, InstanceID: "i1", State: store.LaunchReportStateFailed,
@@ -793,7 +813,7 @@ func TestReport_H1_RunningPhaseSucceededAppliesEcho(t *testing.T) {
 	require.Equal(t, store.LaunchStateActive, before.LaunchState, "setup: the launch must still be active")
 
 	answer, updated, err := s.ApplyLaunchReport(ctx, a.ID, a.RuntimeBrokerID, store.LaunchReport{
-		LaunchID: launchID, InstanceID: "i1", State: store.LaunchReportStateSucceeded, Runtime: "docker",
+		LaunchID: launchID, InstanceID: "i1", State: store.LaunchReportStateSucceeded, AgentConfig: store.BrokerAgentConfig{Runtime: "docker"},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, store.LaunchReportResultApplied, answer.Result)
@@ -830,4 +850,48 @@ func TestReport_H1_RunningPhaseNonSucceededEndsAsRunningObserved(t *testing.T) {
 	assert.Equal(t, store.LaunchStateEnded, updated.LaunchState)
 	assert.Equal(t, store.LaunchEndReasonRunningObserved, updated.LaunchEndReason)
 	assert.True(t, answer.Changed, "ending an active launch as running_observed is a real write and must report Changed")
+}
+
+// TestReport_BrokerProgressSequenceUpdatesLaunchStep replays the reports an
+// async Kubernetes launch's broker sends (ptone/scion#4670 phase E1b): claim,
+// a pre-create checkpoint, then a progress report carrying a runtime step,
+// then a keepalive at the same seq. The progress step must become the
+// agent's launch step (the SSE/REST launch view) and report Changed so the
+// hub publishes it; the keepalive must not undo it.
+func TestReport_BrokerProgressSequenceUpdatesLaunchStep(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	a, launchID := beginTestLaunch(t, ctx, s, projectID, "e1b-progress-step")
+
+	report := func(seq int64, state, step, message string) (store.LaunchReportAnswer, store.Agent) {
+		t.Helper()
+		answer, updated, err := s.ApplyLaunchReport(ctx, a.ID, a.RuntimeBrokerID, store.LaunchReport{
+			LaunchID: launchID, InstanceID: "i1", State: state, Seq: seq, Step: step, Message: message,
+		})
+		require.NoError(t, err)
+		require.Zero(t, answer.HTTPStatus, "report %s seq %d answered %+v", state, seq, answer)
+		return answer, updated
+	}
+
+	_, claimed := report(1, store.LaunchReportStateClaim, "", "")
+	_, updated := report(2, store.LaunchReportStateCheckpoint, "pod_create", "")
+	assert.Equal(t, "pod_create", updated.LaunchStep)
+
+	answer, updated := report(3, store.LaunchReportStateProgress, "container_create", "preparing the container (image pull, volume mounts)")
+	assert.Equal(t, store.LaunchReportResultApplied, answer.Result)
+	assert.True(t, answer.Changed, "a progress report with a new step must report Changed, or the hub does not publish it")
+	assert.Equal(t, "container_create", updated.LaunchStep)
+	assert.Equal(t, "preparing the container (image pull, volume mounts)", updated.Message)
+	assert.Equal(t, claimed.Phase, updated.Phase, "a progress report must not move the phase")
+	assert.Equal(t, store.LaunchStateActive, updated.LaunchState, "a progress report must not end the launch")
+
+	// The keepalive reuses the current seq.
+	answer, _ = report(3, store.LaunchReportStateProgress, "", "")
+	assert.Equal(t, store.LaunchReportResultDuplicate, answer.Result)
+
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	view := store.ComputeAgentLaunch(got, time.Now())
+	require.NotNil(t, view, "an active launch must have a launch view")
+	assert.Equal(t, "container_create", view.Step)
 }

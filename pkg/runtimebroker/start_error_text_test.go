@@ -174,10 +174,12 @@ func TestAsyncStartError_NormalisedText(t *testing.T) {
 		{
 			// A hydrated cache directory is named by its content hash: the
 			// message names the template slug the caller sent instead
-			// (the request's config.template, "claude").
+			// (the request's config.template, "claude"). The log keeps the
+			// directory; the hash itself is a long hex run, which
+			// sanitizeFailureCause blanks.
 			name:      "template_not_found_hydrated_cache",
 			err:       config.NewTemplateNotFoundError(hydratedCachePath, "template path "+hydratedCachePath+" not found or not a directory"),
-			detail:    hydratedCachePath,
+			detail:    strings.TrimSuffix(hydratedCachePath, testContentHash) + redactedMarker,
 			forbid:    []string{"/var/cache/scion", testContentHash, "sha256:"},
 			wantCode:  "template_not_found",
 			wantMsg:   `Failed to create agent: template "claude" not found`,
@@ -235,7 +237,7 @@ func TestClassifyStartError_FixedText(t *testing.T) {
 		{&config.HarnessConfigNotFoundError{Name: "x", Searched: []string{"/srv/y"}}, `Failed to create agent: harness-config "x" not found`},
 	}
 	for _, c := range cases {
-		_, got := classifyStartError(t.Context(), c.err, "claude")
+		_, _, got := classifyStartError(t.Context(), c.err, "claude", "")
 		if got != c.want {
 			t.Errorf("classifyStartError(%q) message = %q, want %q", c.err, got, c.want)
 		}
@@ -334,10 +336,11 @@ func TestRunLaunch_LaunchMarkerWriteFailure_FixedText(t *testing.T) {
 	defer cancel()
 	rec := newLaunchRecord("L-"+name, name, store.LaunchKindCreate, "", time.Now().Add(time.Hour), cancel)
 	lc := launchCtx{
-		req:  CreateAgentRequest{ID: name, Name: name, ProjectID: startErrTextProjectID},
-		opts: api.StartOptions{Name: name, ProjectPath: projectPath, RunID: startErrTextRunID},
-		mgr:  mgr,
-		key:  launchKey{Slug: name},
+		req:       CreateAgentRequest{ID: name, Name: name, ProjectID: startErrTextProjectID},
+		projectID: startErrTextProjectID,
+		opts:      api.StartOptions{Name: name, ProjectPath: projectPath, RunID: startErrTextRunID},
+		mgr:       mgr,
+		key:       launchKey{Slug: name},
 	}
 	srv.runLaunch(ctx, rec, lc)
 

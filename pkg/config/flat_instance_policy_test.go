@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -103,7 +104,9 @@ func TestNewFlatInstancePolicy_CopiesEveryReferenceField(t *testing.T) {
 			}
 			b := true
 			f.Set(reflect.ValueOf(&b))
-		case reflect.Slice, reflect.Interface, reflect.Chan, reflect.Func:
+		case reflect.Slice, reflect.Interface, reflect.Chan, reflect.Func,
+			reflect.Struct, reflect.Array, reflect.UnsafePointer:
+			// A struct or array can hold a map or pointer of its own.
 			t.Fatalf("field %s: unsupported kind %s; extend this test", name, f.Kind())
 		default:
 			continue
@@ -129,6 +132,12 @@ func TestNewFlatInstancePolicy_CopiesEveryReferenceField(t *testing.T) {
 	}
 	if len(refFields) == 0 {
 		t.Fatal("V1RuntimeTargetConfig has no reference field; the test checks nothing")
+	}
+	// Not vacuous for the known reference fields.
+	for _, want := range []string{"KubernetesServiceAccountMappings", "SafeToEvict", "SharedDirStorageBackends"} {
+		if !slices.Contains(refFields, want) {
+			t.Fatalf("reference field %s was not checked (checked: %v)", want, refFields)
+		}
 	}
 }
 
@@ -350,7 +359,24 @@ func TestFlatBranches_NeverReachProfileTier(t *testing.T) {
 		t.Fatalf("flat branches reach the profile tier:\n%s", strings.Join(violations, "\n"))
 	}
 	// Not vacuous: every wired flat branch is found.
-	for _, want := range []string{"VersionedSettings.ResolveSharedDirDefaultsWithSource"} {
+	for _, want := range []string{
+		"VersionedSettings.ResolveSharedDirDefaultsWithSource",
+		"VersionedSettings.ResolveSafeToEvictWithSource",
+		"VersionedSettings.ResolveSharedDirStorage",
+		"VersionedSettings.ResolveSharedDirStorageBackend",
+		"VersionedSettings.ResolveHomeStorage",
+		// agent_defaults
+		"VersionedSettings.ResolveHarnessConfig",
+		"VersionedSettings.ResolveCloneDepthWithSource",
+		"VersionedSettings.ImageRegistryLayers",
+		"VersionedSettings.ProfileHarnessOverrideImage",
+		"VersionedSettings.ProfileHarnessOverrideImagePullPolicy",
+		"VersionedSettings.TierResources",
+		"VersionedSettings.TierSecrets",
+		"VersionedSettings.TierHarnessOverride",
+		"VersionedSettings.TierAllHarnessOverrideEnvKeys",
+		"VersionedSettings.TierDefaultHarnessConfig",
+	} {
 		found := false
 		for _, f := range flatFuncs {
 			found = found || f == want
@@ -404,5 +430,40 @@ func (vs *VersionedSettings) Clean() string {
 	}
 	if !reflect.DeepEqual(flatFuncs, []string{"VersionedSettings.Clean", "VersionedSettings.Direct", "VersionedSettings.Indirect"}) {
 		t.Fatalf("flat functions: %v", flatFuncs)
+	}
+}
+
+// TestConvertedProfileReaders_UseTierAccessors extends the guard to the call
+// sites that used to index Profiles directly (contract appendix FC5):
+// each now reads the Profile tier only through a Tier* accessor,
+// whose flat branch the guard above covers, so none may reference Profiles
+// again.
+func TestConvertedProfileReaders_UseTierAccessors(t *testing.T) {
+	for _, site := range []struct{ file, fn string }{
+		{"resolve_harness_config.go", "ResolveHarnessConfigName"},
+		{filepath.Join("..", "agent", "agent_environment.go"), "resolveEnvironmentResources"},
+		{filepath.Join("..", "runtimebroker", "handlers.go"), "extractRequiredEnvKeys"},
+	} {
+		f, err := parser.ParseFile(token.NewFileSet(), site.file, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, d := range f.Decls {
+			fn, ok := d.(*ast.FuncDecl)
+			if !ok || fn.Name.Name != site.fn || fn.Body == nil {
+				continue
+			}
+			found = true
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				if id, ok := n.(*ast.Ident); ok && id.Name == "Profiles" {
+					t.Errorf("%s (%s) references Profiles; read the Profile tier through a Tier* accessor", site.fn, site.file)
+				}
+				return true
+			})
+		}
+		if !found {
+			t.Fatalf("%s not found in %s", site.fn, site.file)
+		}
 	}
 }
