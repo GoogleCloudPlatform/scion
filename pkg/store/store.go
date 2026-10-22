@@ -3410,8 +3410,22 @@ type SkillInjectionStore interface {
 //
 // The hub uses the revision to order settings applies (a snapshot older
 // than the last one applied is skipped). It is the shared mechanism for a
-// revision-checked save precondition as well.
+// revision-checked save precondition as well; such a precondition must
+// compare against this stored row inside the write transaction (for
+// example after locking it), not against a cached copy.
 const HubSettingsRevisionSection = "_settings_revision"
+
+// HubSettingRevisionDeleter is an optional HubSettingStore method: a
+// delete that also returns the operational-settings revision its own
+// transaction bumped to (0 when the section is not operational), as
+// UpsertHubSetting does in HubSetting.SettingsRevision. It is a separate
+// interface so that DeleteHubSetting keeps its signature for its many
+// callers. The Ent-backed store (and the composite store the hub server
+// runs on) implements it; a store without it makes the hub re-read the
+// settings after a delete instead.
+type HubSettingRevisionDeleter interface {
+	DeleteHubSettingRevision(ctx context.Context, section string) (int64, error)
+}
 
 // HubSettingStore defines persistence operations for operational hub settings.
 // Each setting is a section (e.g. "access", "telemetry") with a JSON value.

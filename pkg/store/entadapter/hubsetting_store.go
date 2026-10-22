@@ -255,14 +255,23 @@ func (s *HubSettingStore) UpsertHubSetting(
 
 // DeleteHubSetting removes a hub setting by section name. Deleting an
 // operational section bumps the operational-settings revision in the same
-// transaction.
+// transaction (see DeleteHubSettingRevision).
 func (s *HubSettingStore) DeleteHubSetting(ctx context.Context, section string) error {
+	_, err := s.DeleteHubSettingRevision(ctx, section)
+	return err
+}
+
+// DeleteHubSettingRevision is DeleteHubSetting, also returning the
+// operational-settings revision the delete's transaction bumped to (0 for
+// a section that is not operational). It implements the optional
+// store.HubSettingRevisionDeleter.
+func (s *HubSettingStore) DeleteHubSettingRevision(ctx context.Context, section string) (int64, error) {
 	if section == store.HubSettingsRevisionSection {
-		return errSettingsRevisionRowReserved
+		return 0, errSettingsRevisionRowReserved
 	}
 	tx, err := s.client.Tx(ctx)
 	if err != nil {
-		return fmt.Errorf("delete hub setting: begin tx: %w", err)
+		return 0, fmt.Errorf("delete hub setting: begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
@@ -270,20 +279,21 @@ func (s *HubSettingStore) DeleteHubSetting(ctx context.Context, section string) 
 		Where(hubsetting.SectionEQ(section)).
 		Exec(ctx)
 	if err != nil {
-		return fmt.Errorf("delete hub setting: %w", err)
+		return 0, fmt.Errorf("delete hub setting: %w", err)
 	}
 	if n == 0 {
-		return store.ErrNotFound
+		return 0, store.ErrNotFound
 	}
+	var settingsRev int64
 	if isOperationalSection(section) {
-		if _, err := bumpSettingsRevision(ctx, tx); err != nil {
-			return fmt.Errorf("delete hub setting: %w", err)
+		if settingsRev, err = bumpSettingsRevision(ctx, tx); err != nil {
+			return 0, fmt.Errorf("delete hub setting: %w", err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("delete hub setting: commit: %w", err)
+		return 0, fmt.Errorf("delete hub setting: commit: %w", err)
 	}
-	return nil
+	return settingsRev, nil
 }
 
 // BackfillOrigin sets the origin column for existing rows that predate
@@ -339,5 +349,11 @@ func (s *HubSettingStore) BackfillOrigin(ctx context.Context) error {
 	return nil
 }
 
-// Compile-time assertion.
-var _ store.HubSettingStore = (*HubSettingStore)(nil)
+// Compile-time assertions. The composite store the hub server runs on
+// promotes the optional revision-returning delete from the embedded
+// HubSettingStore.
+var (
+	_ store.HubSettingStore           = (*HubSettingStore)(nil)
+	_ store.HubSettingRevisionDeleter = (*HubSettingStore)(nil)
+	_ store.HubSettingRevisionDeleter = (*CompositeStore)(nil)
+)

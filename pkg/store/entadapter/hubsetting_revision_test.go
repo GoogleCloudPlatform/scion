@@ -180,3 +180,32 @@ func TestHubSettingsRevision_BackfillOrigin(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "seeded", row.Origin, "the revision row is never backfilled")
 }
+
+// DeleteHubSettingRevision returns the revision its own transaction bumped
+// to, and the composite store promotes it (ptone/scion#4457).
+func TestHubSettingsRevision_DeleteReturnsRevision(t *testing.T) {
+	s := newTestHubSettingStore(t)
+	ctx := context.Background()
+
+	_, err := s.UpsertHubSetting(ctx, "access", json.RawMessage(`{}`), "x", -1, "managed")
+	require.NoError(t, err)
+	_, err = s.UpsertHubSetting(ctx, "migration_example_marker_v1", json.RawMessage(`{}`), "migration", -1, "seeded")
+	require.NoError(t, err)
+
+	rev, err := s.DeleteHubSettingRevision(ctx, "access")
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), rev)
+	assert.Equal(t, int64(2), settingsRevision(t, s))
+
+	rev, err = s.DeleteHubSettingRevision(ctx, "migration_example_marker_v1")
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), rev, "a non-operational delete does not bump")
+	_, err = s.DeleteHubSettingRevision(ctx, "access")
+	require.ErrorIs(t, err, store.ErrNotFound)
+	_, err = s.DeleteHubSettingRevision(ctx, store.HubSettingsRevisionSection)
+	require.ErrorIs(t, err, store.ErrInvalidInput)
+
+	var st store.Store = NewCompositeStore(enttest.NewClient(t))
+	_, ok := st.(store.HubSettingRevisionDeleter)
+	assert.True(t, ok, "the composite store promotes DeleteHubSettingRevision")
+}

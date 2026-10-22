@@ -293,10 +293,12 @@ type OperationalSettings struct {
 	stopPropagation context.CancelFunc
 	propagationWg   sync.WaitGroup
 
-	// revision is the operational-settings revision the cache holds
-	// (store.HubSettingsRevisionSection); 0 until the store reports one.
-	// It only grows: Refresh, Update and DeleteSection change the cache
-	// only with a revision at least this one. Guarded by mu.
+	// revision is the highest operational-settings revision
+	// (store.HubSettingsRevisionSection) seen by Refresh, Update or
+	// DeleteSection; 0 until the store reports one. It only grows. It is a
+	// high-water mark, not a promise that the cache holds every write up
+	// to it (Update and DeleteSection raise it while changing one
+	// section). Guarded by mu.
 	revision int64
 
 	// writeGuard, when set, is asked before every section write or delete
@@ -386,11 +388,17 @@ func (o *OperationalSettings) SetAboveSeedBootstrap(k *koanf.Koanf) {
 	o.aboveSeedKoanf = k
 }
 
-// SettingsRevision returns the operational-settings revision of the cached
-// values, the value Snapshot carries in Layer1Snapshot.Revision (0 when
-// the store reports none). It is the shared revision mechanism: settings
-// applies are ordered by it (ApplySnapshot), and a revision-checked save
-// precondition is to compare against it as well.
+// SettingsRevision returns the cached operational-settings revision, the
+// value Snapshot carries in Layer1Snapshot.Revision (0 when the store
+// reports none). Settings applies are ordered by it (ApplySnapshot).
+//
+// It is a cache high-water mark: the cache can lack writes at or below it
+// until the next read. So it is only an advisory hint for a client. The
+// store revision it mirrors is the shared mechanism for a revision-checked
+// save precondition, and such a precondition must compare the client's
+// revision with the stored store.HubSettingsRevisionSection revision
+// inside the write transaction (for example after locking that row), never
+// with this value.
 func (o *OperationalSettings) SettingsRevision() int64 {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
@@ -402,17 +410,29 @@ func (o *OperationalSettings) SettingsRevision() int64 {
 //
 // The rows and the operational-settings revision come from one read
 // (ListHubSettings returns the store.HubSettingsRevisionSection row with
-// the sections). A read whose revision is older than the cached one is
-// stale: an Update or a later Refresh on this replica has already cached
-// newer values, so the read is discarded and nothing is reported changed
-// (ptone/scion#4457).
+// the sections), so the read holds every operational write up to its
+// revision. A read whose revision is below the cached revision is
+// discarded and nothing is reported changed (ptone/scion#4457). The cached
+// revision is a high-water mark, not a promise that the cache holds every
+// write up to it: Update and DeleteSection raise it while caching one
+// section. Discarding is still safe because a later read at or above the
+// cached revision is guaranteed: every write that raised it publishes its
+// own settings event, whose refresh reads the store after that write
+// committed (and the poll backstop reads it again).
 func (o *OperationalSettings) Refresh(ctx context.Context) ([]string, error) {
+	changed, _, _, err := o.refresh(ctx)
+	return changed, err
+}
+
+// refresh is Refresh, also returning the revision of the read and whether
+// the read was taken into the cache (false when it was discarded as older
+// than the cached revision).
+func (o *OperationalSettings) refresh(ctx context.Context) (changed []string, readRevision int64, accepted bool, err error) {
 	rows, err := o.store.ListHubSettings(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("operational settings refresh: %w", err)
+		return nil, 0, false, fmt.Errorf("operational settings refresh: %w", err)
 	}
 
-	var readRevision int64
 	for _, row := range rows {
 		if row.Section == store.HubSettingsRevisionSection {
 			readRevision = row.Revision
@@ -423,13 +443,12 @@ func (o *OperationalSettings) Refresh(ctx context.Context) ([]string, error) {
 	defer o.mu.Unlock()
 
 	if readRevision < o.revision {
-		slog.Debug("operational settings refresh: discarding a read older than the cached values",
+		slog.Debug("operational settings refresh: discarding a read below the cached revision",
 			"read_revision", readRevision, "cached_revision", o.revision)
-		return nil, nil
+		return nil, readRevision, false, nil
 	}
 	o.revision = readRevision
 
-	var changed []string
 	seen := make(map[string]bool, len(rows))
 
 	for _, row := range rows {
@@ -483,7 +502,7 @@ func (o *OperationalSettings) Refresh(ctx context.Context) ([]string, error) {
 		}
 	}
 
-	return changed, nil
+	return changed, readRevision, true, nil
 }
 
 // experimentsOverridesFor returns the parsed "experiments" section overrides
@@ -711,13 +730,15 @@ func (o *OperationalSettings) Update(
 	}
 	experimentsOverrides, malformed := experimentsOverridesFor(section, result.Value, malformed)
 	o.mu.Lock()
-	// A cached revision newer than this write's means a Refresh read the
-	// store after this write committed: the cache already holds this write
-	// and possibly newer ones, so it is not overwritten (ptone/scion#4457).
-	if result.SettingsRevision > 0 && result.SettingsRevision < o.revision {
-		slog.Debug("operational settings: cache already newer than this write",
-			"section", section, "write_revision", result.SettingsRevision, "cached_revision", o.revision)
-	} else {
+	// A cached revision above this write's was raised by a newer local
+	// write or a newer read, after this write committed. The cache may
+	// still lack this write (an Update of another section raises the
+	// revision but caches only its own section), and writing this row
+	// could replace a newer value of the same section. So the cache is
+	// not written here; instead the store is read again below, before the
+	// self-apply (ptone/scion#4457).
+	reread := result.SettingsRevision > 0 && result.SettingsRevision < o.revision
+	if !reread {
 		o.cache[section] = sectionState{
 			Value:                result.Value,
 			Revision:             result.Revision,
@@ -732,6 +753,9 @@ func (o *OperationalSettings) Update(
 		}
 	}
 	o.mu.Unlock()
+	if reread {
+		o.refreshThrough(ctx, result.SettingsRevision, section)
+	}
 
 	// Publish admin.settings.updated event to propagate the change to other
 	// replicas via PostgresEventPublisher (design §3.6). On SQLite the
@@ -764,28 +788,37 @@ func (o *OperationalSettings) DeleteSection(ctx context.Context, section string)
 	if err := o.checkWriteGuard(ctx, section); err != nil {
 		return err
 	}
-	if err := o.store.DeleteHubSetting(ctx, section); err != nil {
+	// The delete's own revision comes from the optional
+	// store.HubSettingRevisionDeleter, so DeleteHubSetting keeps its
+	// signature for its many callers. A store without it gives revision 0.
+	var deleteRevision int64
+	if rd, ok := o.store.(store.HubSettingRevisionDeleter); ok {
+		rev, err := rd.DeleteHubSettingRevision(ctx, section)
+		if err != nil {
+			return err
+		}
+		deleteRevision = rev
+	} else if err := o.store.DeleteHubSetting(ctx, section); err != nil {
 		return err
 	}
-	// The delete bumped the operational-settings revision; read it back.
-	// Concurrent writes can make this read higher than the delete's own
-	// revision. That only delays an older snapshot until the next Refresh,
-	// which reads at least this revision. On a read error (or a store
-	// without the revision) the cached revision is kept.
-	deleteRevision := o.storedSettingsRevision(ctx)
 
 	o.mu.Lock()
-	// As in Update: a newer cached revision already reflects the delete.
-	if deleteRevision > 0 && deleteRevision < o.revision {
-		slog.Debug("operational settings: cache already newer than this delete",
-			"section", section, "delete_revision", deleteRevision, "cached_revision", o.revision)
-	} else {
+	// As in Update: with the cached revision above the delete's, the cache
+	// is not changed here and the store is read again before the
+	// self-apply. Revision 0 (a store or section without a revision) never
+	// skips the cache delete, and also re-reads, since nothing orders it
+	// against the cache (ptone/scion#4457).
+	reread := deleteRevision == 0 || deleteRevision < o.revision
+	if deleteRevision == 0 || deleteRevision >= o.revision {
 		delete(o.cache, section)
 		if deleteRevision > o.revision {
 			o.revision = deleteRevision
 		}
 	}
 	o.mu.Unlock()
+	if reread {
+		o.refreshThrough(ctx, deleteRevision, section)
+	}
 
 	if o.events != nil {
 		o.events.PublishRaw(settingsUpdatedSubject, SettingsUpdatedEvent{
@@ -803,18 +836,33 @@ func (o *OperationalSettings) DeleteSection(ctx context.Context, section string)
 	return nil
 }
 
-// storedSettingsRevision reads the operational-settings revision from the
-// store.HubSettingsRevisionSection row: 0 when the row does not exist or
-// cannot be read.
-func (o *OperationalSettings) storedSettingsRevision(ctx context.Context) int64 {
-	row, err := o.store.GetHubSetting(ctx, store.HubSettingsRevisionSection)
-	if err != nil {
-		if !errors.Is(err, store.ErrNotFound) {
-			slog.Warn("operational settings: cannot read the settings revision", "error", err)
+// refreshThroughAttempts bounds refreshThrough's reads.
+const refreshThroughAttempts = 3
+
+// refreshThrough re-reads the store until a read at or above writeRevision
+// is taken into the cache, so the cache holds the write that got
+// writeRevision before the writer's self-apply. Update and DeleteSection
+// call it, outside o.mu, when the cached revision is above their write's.
+// Any accepted read qualifies: it is at or above the cached revision,
+// which was above writeRevision, and a read at revision N holds every
+// operational write up to N. A read is discarded only when another write
+// raised the cached revision meanwhile, so the next read is newer; after
+// refreshThroughAttempts reads (or on a read error) it logs and returns,
+// and the writer's own settings event refreshes again.
+func (o *OperationalSettings) refreshThrough(ctx context.Context, writeRevision int64, section string) {
+	for attempt := 1; attempt <= refreshThroughAttempts; attempt++ {
+		_, read, accepted, err := o.refresh(ctx)
+		if err != nil {
+			slog.Warn("operational settings: re-read after a write failed; the settings event will refresh",
+				"section", section, "write_revision", writeRevision, "error", err)
+			return
 		}
-		return 0
+		if accepted && read >= writeRevision {
+			return
+		}
 	}
-	return row.Revision
+	slog.Warn("operational settings: re-read after a write kept losing to newer writes; the settings event will refresh",
+		"section", section, "write_revision", writeRevision, "attempts", refreshThroughAttempts)
 }
 
 // EnvOverriddenKeys returns the list of Layer-1 koanf keys that are overridden

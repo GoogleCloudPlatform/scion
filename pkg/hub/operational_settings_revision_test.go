@@ -211,10 +211,27 @@ type replayListStore struct {
 	store.HubSettingStore
 	mu     sync.Mutex
 	replay []store.HubSetting
-	// afterUpsert, when set, runs after a successful upsert and before it
-	// returns, standing in for work that lands between a write and the
-	// writer's cache update.
+	// afterUpsert and afterDelete, when set, run once after a successful
+	// upsert or delete and before it returns, standing in for work that
+	// lands between a write and the writer's cache update.
 	afterUpsert func()
+	afterDelete func()
+}
+
+// DeleteHubSettingRevision passes the optional revision-returning delete
+// through to the wrapped store (an embedded interface does not promote it).
+func (r *replayListStore) DeleteHubSettingRevision(ctx context.Context, section string) (int64, error) {
+	rd, ok := r.HubSettingStore.(store.HubSettingRevisionDeleter)
+	if !ok {
+		return 0, fmt.Errorf("wrapped store has no DeleteHubSettingRevision")
+	}
+	rev, err := rd.DeleteHubSettingRevision(ctx, section)
+	if err == nil && r.afterDelete != nil {
+		f := r.afterDelete
+		r.afterDelete = nil
+		f()
+	}
+	return rev, err
 }
 
 func (r *replayListStore) ListHubSettings(ctx context.Context) ([]store.HubSetting, error) {
@@ -277,8 +294,9 @@ func TestOperationalSettings_RefreshDiscardsStaleRead(t *testing.T) {
 }
 
 // When a Refresh after this write already cached a newer revision, Update
-// does not overwrite the cache with its own, older row (ptone/scion#4457).
-func TestOperationalSettings_UpdateSkipsOlderCacheWrite(t *testing.T) {
+// does not overwrite the cache with its own, older row; it re-reads, and
+// the newer value stays (ptone/scion#4457).
+func TestOperationalSettings_UpdateBelowCachedRevisionKeepsNewerValue(t *testing.T) {
 	st, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
 	ctx := context.Background()
@@ -334,4 +352,149 @@ func TestServerConfigDB_RevisionRowNotShown(t *testing.T) {
 	snapJSON, err := json.Marshal(ops.Snapshot())
 	require.NoError(t, err)
 	assert.False(t, strings.Contains(string(snapJSON), store.HubSettingsRevisionSection))
+}
+
+func appliedEnforceBrokerQuotas(srv *Server) *bool {
+	srv.mu.RLock()
+	defer srv.mu.RUnlock()
+	return srv.config.EnforceBrokerQuotas
+}
+
+// raceOpsServer is a SQLite-backed server that self-applies, with its
+// OperationalSettings store wrapped so a test can run work between a write
+// and the writer's cache update.
+func raceOpsServer(t *testing.T) (*Server, store.Store, *OperationalSettings, *replayListStore) {
+	t.Helper()
+	srv, st, ops := newSQLiteOpsServer(t, nil, nil)
+	rs := &replayListStore{HubSettingStore: ops.store}
+	ops.store = rs
+	return srv, st, ops, rs
+}
+
+// Two local Updates of different sections, the second one's cache step
+// landing before the first one's: both values end up in the cache, the
+// snapshot and the applied config (ptone/scion#4457).
+func TestOperationalSettings_ConcurrentUpdatesOfTwoSectionsBothApplied(t *testing.T) {
+	srv, st, ops, rs := raceOpsServer(t)
+	ctx := context.Background()
+
+	rs.afterUpsert = func() {
+		_, err := ops.Update(ctx, "quotas", json.RawMessage(`{"enforce_broker_quotas":false}`), "b@example.com", -1, "managed")
+		require.NoError(t, err)
+	}
+	_, err := ops.Update(ctx, "lifecycle", json.RawMessage(`{"auto_suspend_stalled":true}`), "a@example.com", -1, "managed")
+	require.NoError(t, err)
+
+	snap := ops.Snapshot()
+	assert.True(t, snap.AutoSuspendStalled, "the first write is in the snapshot")
+	require.NotNil(t, snap.EnforceBrokerQuotas)
+	assert.False(t, *snap.EnforceBrokerQuotas, "the second write is in the snapshot")
+	assert.True(t, appliedAutoSuspend(srv), "the first write is applied")
+	q := appliedEnforceBrokerQuotas(srv)
+	require.NotNil(t, q)
+	assert.False(t, *q, "the second write is applied")
+
+	row, err := st.GetHubSetting(ctx, "lifecycle")
+	require.NoError(t, err)
+	ops.mu.RLock()
+	cached := ops.cache["lifecycle"]
+	ops.mu.RUnlock()
+	assert.Equal(t, row.Revision, cached.Revision, "the cache holds the stored lifecycle row")
+	rev, err := st.GetHubSetting(ctx, store.HubSettingsRevisionSection)
+	require.NoError(t, err)
+	assert.Equal(t, rev.Revision, ops.SettingsRevision())
+}
+
+// A Delete whose cache step lands after a concurrent local Update of
+// another section: the section is gone from the cache, the snapshot and
+// the applied config, and the Update is kept (ptone/scion#4457).
+func TestOperationalSettings_DeleteRacingUpdateBothApplied(t *testing.T) {
+	srv, st, ops, rs := raceOpsServer(t)
+	ctx := context.Background()
+
+	_, err := ops.Update(ctx, "quotas", json.RawMessage(`{"enforce_broker_quotas":false}`), "a@example.com", -1, "managed")
+	require.NoError(t, err)
+	q := appliedEnforceBrokerQuotas(srv)
+	require.NotNil(t, q)
+	require.False(t, *q)
+
+	rs.afterDelete = func() {
+		_, err := ops.Update(ctx, "lifecycle", json.RawMessage(`{"auto_suspend_stalled":true}`), "b@example.com", -1, "managed")
+		require.NoError(t, err)
+	}
+	require.NoError(t, ops.DeleteSection(ctx, "quotas"))
+
+	ops.mu.RLock()
+	_, cached := ops.cache["quotas"]
+	ops.mu.RUnlock()
+	assert.False(t, cached, "the deleted section is not cached")
+	snap := ops.Snapshot()
+	assert.Nil(t, snap.EnforceBrokerQuotas, "the delete is in the snapshot")
+	assert.True(t, snap.AutoSuspendStalled, "the concurrent update is in the snapshot")
+	assert.Nil(t, appliedEnforceBrokerQuotas(srv), "the delete is applied")
+	assert.True(t, appliedAutoSuspend(srv), "the concurrent update is applied")
+	rev, err := st.GetHubSetting(ctx, store.HubSettingsRevisionSection)
+	require.NoError(t, err)
+	assert.Equal(t, rev.Revision, ops.SettingsRevision())
+}
+
+// countingListStore counts ListHubSettings calls on a store without the
+// optional revision-returning delete.
+type countingListStore struct {
+	*fakeHubSettingStore
+	mu    sync.Mutex
+	lists int
+}
+
+func (c *countingListStore) ListHubSettings(ctx context.Context) ([]store.HubSetting, error) {
+	c.mu.Lock()
+	c.lists++
+	c.mu.Unlock()
+	return c.fakeHubSettingStore.ListHubSettings(ctx)
+}
+
+func (c *countingListStore) listCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lists
+}
+
+// A store without the optional revision-returning delete gives revision 0:
+// DeleteSection still removes the section from the cache, even when a
+// revision was cached before, and re-reads the store before the
+// self-apply (ptone/scion#4457).
+func TestOperationalSettings_DeleteWithoutRevisionTakesSafePath(t *testing.T) {
+	fake := newFakeHubSettingStore()
+	cs := &countingListStore{fakeHubSettingStore: fake}
+	var _ store.HubSettingStore = cs
+	_, isDeleter := interface{}(cs).(store.HubSettingRevisionDeleter)
+	require.False(t, isDeleter, "the fake must not have the optional method")
+
+	ops := NewOperationalSettings(cs, emptyKoanf(), emptyKoanf())
+	fake.seedWithOrigin("quotas", json.RawMessage(`{"enforce_broker_quotas":false}`), "managed")
+	fake.seedWithOrigin("lifecycle", json.RawMessage(`{"auto_suspend_stalled":true}`), "managed")
+	_, err := ops.Refresh(context.Background())
+	require.NoError(t, err)
+
+	before := cs.listCount()
+	require.NoError(t, ops.DeleteSection(context.Background(), "quotas"))
+	assert.Greater(t, cs.listCount(), before, "the delete re-read the store")
+	ops.mu.RLock()
+	_, cached := ops.cache["quotas"]
+	ops.mu.RUnlock()
+	assert.False(t, cached)
+	assert.Nil(t, ops.Snapshot().EnforceBrokerQuotas)
+	assert.True(t, ops.Snapshot().AutoSuspendStalled)
+
+	// With a revision cached earlier, a revision-0 delete still removes the
+	// section from the cache.
+	ops.mu.Lock()
+	ops.revision = 5
+	ops.mu.Unlock()
+	require.NoError(t, ops.DeleteSection(context.Background(), "lifecycle"))
+	ops.mu.RLock()
+	_, cached = ops.cache["lifecycle"]
+	ops.mu.RUnlock()
+	assert.False(t, cached, "a revision-0 delete never skips its cache delete")
+	assert.False(t, ops.Snapshot().AutoSuspendStalled)
 }
