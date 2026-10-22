@@ -346,7 +346,7 @@ func isLocalOnlyRuntime(runtimeType string) bool {
 // "k8s-staging" of type kubernetes) is advertised, and filtered, as the
 // type it actually runs.
 func (s *Server) buildInfoProfiles(defaultRuntimeType string) []BrokerProfile {
-	vs, _, err := config.LoadEffectiveSettings("")
+	vs, err := globalEffectiveSettings()
 	if err != nil || len(vs.Profiles) == 0 {
 		return []BrokerProfile{
 			{Name: "default", Type: defaultRuntimeType, Available: true, Attach: s.attachSupportedForProfile(defaultRuntimeType, defaultRuntimeType)},
@@ -394,6 +394,21 @@ func (s *Server) buildInfoProfiles(defaultRuntimeType string) []BrokerProfile {
 	}
 
 	return profiles
+}
+
+// globalEffectiveSettings loads the broker's effective settings from its
+// global settings directory: embedded defaults, the global settings file,
+// the environment and the DB overlay, but never a project found from the
+// process working directory. A request-time read must not depend on where
+// the broker process was started (ptone/scion#5363), as the server's
+// startup loads do not (ptone/scion#5362).
+func globalEffectiveSettings() (*config.VersionedSettings, error) {
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		return nil, err
+	}
+	vs, _, err := config.LoadEffectiveSettings(globalDir)
+	return vs, err
 }
 
 // heartbeatProfileAttach returns the attach capability of each profile
@@ -932,6 +947,22 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	var hubGlobalProject bool
 	req.ProjectSlug, hubGlobalProject = splitHubGlobalSlug(req.ProjectPath, req.ProjectSlug)
 
+	// A project path that is this broker's global directory, for a project
+	// other than the global one, is refused here, before anything reads or
+	// writes settings or templates: the env-gather preflight and the
+	// harness-config policy gate below resolve (and can hydrate) templates
+	// under HOME. buildStartContext repeats the check for every caller
+	// (ptone/scion#5432).
+	if req.ProjectPath != "" {
+		if msg := globalDirProjectConflict(req.ProjectPath, req.ProjectID, hubGlobalProject); msg != "" {
+			sce := &startContextError{Status: http.StatusConflict, Message: msg}
+			span.SetStatus(codes.Error, startContextSpanText(sce))
+			status := s.writeStartContextError(w, sce, "create agent", "agent_id", req.ID, "profile", createRequestProfile(req))
+			markAttemptFailed(status, sce.Error())
+			return
+		}
+	}
+
 	// Resolve project path early for env-gather (needs settings access before buildStartContext)
 	if req.ProjectSlug != "" && req.ProjectPath == "" {
 		globalDir, err := config.GetGlobalDir()
@@ -1016,10 +1047,10 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// download (DefaultHydratorConfig's DownloadTimeout is 5 minutes)
 		// would fail creates here that launch would have completed.
 		//
-		// This hydration runs ahead of the global-project 409, the
-		// harness-config policy refusal, and the NFS check below, so a
-		// request those would otherwise reject can pay for a hub round trip
-		// first. Kept in this order to sit next to the harness-config
+		// This hydration runs ahead of the harness-config policy refusal
+		// and the NFS check below (the global-project 409 now comes before
+		// it, ptone/scion#5432), so a request those would otherwise reject
+		// can pay for a hub round trip first. Kept in this order to sit next to the harness-config
 		// hydration it mirrors; revisit if that ordering cost matters.
 		if req.Config != nil && (req.Config.TemplateID != "" || req.Config.TemplateHash != "") {
 			hubConn := s.resolveHubConnection(r)
@@ -4823,6 +4854,15 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 			// deleted nothing of it (ptone/scion#2550). Fixed text: the
 			// wrapped error carries identity (see runtimeOpError).
 			writeError(w, http.StatusConflict, ErrCodeConflict, scionrt.ErrRunConflict.Error(), details)
+			return
+		}
+		// A template or harness-config the restart's start could not
+		// resolve is reported as such, with the same 404 not_found text
+		// create uses (notFoundMessage), before the "not found" text match
+		// below, which would report the agent itself as missing although
+		// it exists (ptone/scion#5433).
+		if errors.Is(err, config.ErrHarnessConfigNotFound) || errors.Is(err, config.ErrTemplateNotFound) {
+			writeError(w, http.StatusNotFound, ErrCodeNotFound, notFoundMessage("restart agent", err, opts.TemplateName), details)
 			return
 		}
 		if strings.Contains(err.Error(), "not found") {
