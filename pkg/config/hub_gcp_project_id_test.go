@@ -114,3 +114,15 @@ func TestHubGCPProjectID_EnvTableEntryFromSchema(t *testing.T) {
 	}
 	t.Fatalf("no env table entry for %s", HubGCPProjectIDKey)
 }
+
+// The settings schema accepts the key (before ptone/scion#3830 it had no
+// node), and still rejects a non-string value.
+func TestHubGCPProjectID_SchemaAcceptsKey(t *testing.T) {
+	errs, err := ValidateSettings([]byte(hubGCPProjectIDSettingsYAML), "1")
+	require.NoError(t, err)
+	assert.Empty(t, errs, "server.hub.gcp_project_id must validate")
+
+	errs, err = ValidateSettings([]byte("schema_version: \"1\"\nserver:\n  hub:\n    gcp_project_id: 7\n"), "1")
+	require.NoError(t, err)
+	assert.NotEmpty(t, errs, "a non-string server.hub.gcp_project_id must not validate")
+}
