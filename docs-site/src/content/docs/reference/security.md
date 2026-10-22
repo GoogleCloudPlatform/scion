@@ -201,12 +201,12 @@ The `local` backend now encrypts secret values at rest using AES-256-GCM, with d
 
 Secrets are scoped and resolved hierarchically when an agent starts. The following scopes are merged in order (last one wins for the same key):
 
-1. **Hub scope** (lowest priority): Global defaults.
-2. **User scope**: Personal secrets for the agent's owner.
+1. **Runtime Broker scope** (lowest priority): Infrastructure-level defaults for agents on that broker.
+2. **Hub scope**: Global defaults.
 3. **Project scope**: Project-level secrets.
-4. **Runtime Broker scope** (highest priority): Infrastructure-level overrides.
+4. **User scope** (highest priority): Personal secrets for the agent's owner.
 
-This produces a merged set of secrets for each agent, where more specific scopes override broader ones.
+This produces a merged set of secrets for each agent: for the same key, User scope wins over Project scope, Project over Hub, and Hub over Runtime Broker. Environment variables use the same scope order, and for the same key a variable from any scope takes precedence over an environment-type secret.
 
 ### 4.3 Secret Types and Projection
 
