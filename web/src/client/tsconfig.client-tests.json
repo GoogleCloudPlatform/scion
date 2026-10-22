@@ -6,6 +6,8 @@
     "agent-store.test.ts",
     "agent-store-feed.test.ts",
     "agent-store-probe.test.ts",
+    "sse-client.test.ts",
+    "sse-hidden-tab-streams.test.ts",
     "paginate-all.test.ts",
     "chat-routes.test.ts",
     "chat-unread-dms.test.ts",

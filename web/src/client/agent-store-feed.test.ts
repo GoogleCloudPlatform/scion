@@ -622,7 +622,7 @@ describe('AgentStore seeded walks', () => {
     await first;
 
     h.stream().drop();
-    await vi.advanceTimersByTimeAsync(1_200);
+    await vi.advanceTimersByTimeAsync(2_000);
     await h.connect();
     h.events.dispatchEvent(new CustomEvent('scion:membership-changed'));
     await h.connect();
@@ -651,7 +651,7 @@ describe('AgentStore seeded walks', () => {
 
     h.stream().drop();
     const again = h.store.ensure(HUB);
-    await vi.advanceTimersByTimeAsync(1_200);
+    await vi.advanceTimersByTimeAsync(2_000);
     expect(h.server.requests).toHaveLength(requests);
 
     await h.connect();
@@ -670,7 +670,7 @@ describe('AgentStore freshness while the feed is down', () => {
     h.stream().drop();
     h.server.agents.push(agent('a2'));
     const again = h.store.ensure(HUB);
-    await vi.advanceTimersByTimeAsync(1_200);
+    await vi.advanceTimersByTimeAsync(2_000);
     await h.connect();
 
     expect(ids(await again)).toEqual(['a1', 'a2']);
@@ -690,7 +690,7 @@ describe('AgentStore freshness while the feed is down', () => {
     await settle();
     expect(h.server.walks()).toBe(1);
 
-    await vi.advanceTimersByTimeAsync(1_200);
+    await vi.advanceTimersByTimeAsync(2_000);
     await h.connect();
     const results = await Promise.all([first, refresh, refreshAgain]);
 
@@ -714,7 +714,7 @@ describe('AgentStore freshness while the feed is down', () => {
     expect(h.server.walks()).toBe(1);
     expect(resolved).toBe(false);
 
-    await vi.advanceTimersByTimeAsync(1_200);
+    await vi.advanceTimersByTimeAsync(2_000);
     await h.connect();
     await loading;
     expect(h.server.walks()).toBe(2);
@@ -746,7 +746,7 @@ describe('AgentStore freshness after a resync', () => {
     await first;
 
     h.stream().drop();
-    await vi.advanceTimersByTimeAsync(1_200);
+    await vi.advanceTimersByTimeAsync(2_000);
     await h.connect();
     expect(h.server.walks()).toBe(1);
     h.server.agents.push(agent('a2'));
@@ -813,7 +813,7 @@ describe('AgentStore feed completeness flag', () => {
       await h.connect();
 
       h.stream().drop();
-      await vi.advanceTimersByTimeAsync(1_200);
+      await vi.advanceTimersByTimeAsync(2_000);
       await h.connect();
       release();
       const releaseFollowUp = h.server.pause();

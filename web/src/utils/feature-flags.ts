@@ -173,3 +173,11 @@ export const AGENT_EDIT_FLAG = 'web.agent_edit';
  * every hub check is server-side. Default OFF (not in DEFAULT_ON_FLAGS).
  */
 export const FLAT_BROKERS_FLAG = 'hub.flat_runtime_brokers';
+
+/**
+ * Hidden-tab stream close (ptone/scion#5235): a tab hidden for 60 s closes
+ * its events streams (view, agent feed, terminal metadata) and reopens them
+ * with a resync when shown. PTY sockets are unaffected. Presentation only:
+ * the hub behaves the same either way. Default OFF.
+ */
+export const SSE_HIDDEN_TAB_CLOSE_FLAG = 'web.sse_hidden_tab_close';
