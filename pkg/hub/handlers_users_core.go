@@ -264,7 +264,7 @@ func updateUserSessionOnlyReason(ctx context.Context, id string) authzop.Session
 // updateUserCredential checks the credential of PATCH /api/v1/users/{id}
 // and returns the acting user (sessionOrUserTokenCredential, with the
 // path's session-only reason). A user access token is returned as token
-// too; its fields are checked by updateUserTokenFields, and its
+// too; updateUserTokenFields checks its fields, and the caller checks its
 // permissions on the hub-level user record.
 func (s *Server) updateUserCredential(w http.ResponseWriter, ctx context.Context, id string) (actor UserIdentity, token *ScopedUserIdentity, ok bool) {
 	return s.sessionOrUserTokenCredential(w, ctx, updateUserSessionOnlyReason(ctx, id))

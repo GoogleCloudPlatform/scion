@@ -100,8 +100,8 @@ func TestProvisionToken_RequiresInviteSelectorAndHubBoundary(t *testing.T) {
 	// A hub token of the same holder with another hub selector it holds.
 	unrelated := f.mint(t, hubBoundary(), "hub_allow_list:read")
 	projectToken := f.mint(t, projectBoundary(f.project), "project:read")
-	// A stored project-boundary row carrying the hub-only selector, as a
-	// legacy token would: refused at request time for the boundary.
+	// A stored project-boundary row carrying the hub-only selector:
+	// refused at request time for the boundary.
 	legacy := uatpInsertLegacyToken(t, f.s, f.admin.ID, f.project, []string{"user:invite"})
 	// A token minted while its holder held user.invite, used after the
 	// holder lost it: refused at request time.
