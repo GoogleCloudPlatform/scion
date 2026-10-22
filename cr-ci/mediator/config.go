@@ -49,10 +49,11 @@ const (
 const (
 	maxOwnerLen            = 39
 	maxCloudRunTaskTimeout = 168 * time.Hour
-	// maxEphemeralDiskGi: the Cloud Run server rejected an ephemeral-disk
-	// total above 10 GiB per instance in the P6 deploy (deploy-demo-test),
-	// although the volume API documents up to 100 GiB.
-	maxEphemeralDiskGi       = 10
+	// maxEphemeralDiskGi: the per-volume maximum Cloud Run documents. Above
+	// 10 GiB per instance needs the per-instance quota
+	// run.googleapis.com/max_per_instance_ephemeral_disk raised first (the
+	// server rejects the job otherwise); see docs/gcp-setup.md, "Quotas".
+	maxEphemeralDiskGi       = 100
 	maxCloudRunMemoryMi      = 32 * 1024
 	minCloudRunMemoryMi      = 512
 	defaultRunnerLabel       = "scion-cr-8c32g"

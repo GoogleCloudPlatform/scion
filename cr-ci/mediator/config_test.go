@@ -176,8 +176,7 @@ var invalidCases = []struct {
 	{EnvRunnerMemory, "99999999999999999999Mi"},
 	{EnvRunnerMemory, "2Gi"}, // below the 8-CPU floor of 4Gi
 	{EnvRunnerDiskGi, "0"},
-	{EnvRunnerDiskGi, "11"},
-	{EnvRunnerDiskGi, "20"}, // the old default; above the 10 GiB Cloud Run accepted in P6
+	{EnvRunnerDiskGi, "101"}, // above Cloud Run's 100 GiB per volume
 	{EnvMaxConcurrentRunners, "-1"},
 	{EnvTaskTimeout, "45"},
 	{EnvTaskTimeout, "30s"},
@@ -311,6 +310,8 @@ var validCases = []map[string]string{
 	{EnvGitHubAppID: "+0042", EnvRunnerGroupID: "007"},
 	{EnvReconcileSchedule: "0 */2 * * 1-5"},
 	{EnvBuildStagingBucket: "my-org_cr-ci-staging"},
+	{EnvRunnerDiskGi: "25"},  // needs the per-instance quota raised; the loader allows 1-100
+	{EnvRunnerDiskGi: "100"}, // Cloud Run's per-volume maximum
 }
 
 // TestScriptValidatorMatchesLoad keeps scripts/lib.sh's config validation

@@ -300,13 +300,18 @@ so it is deferred.
   (4 vCPU up to 16 GiB, 6 up to 24 GiB, 8 up to 32 GiB). The loader enforces
   this. The design's "> 16 GiB needs 4 vCPU" statement is wrong (see the
   [matrix, X6](permissions-matrix.md#5-design-corrections-and-open-items)).
-- **Ephemeral-disk quota and size:** the regional default quota is 100 GiB,
-  which fits `MAX_CONCURRENT_RUNNERS` 5 (up to 10) with the default 10 GiB
-  disks. `RUNNER_DISK_GI` is at most 10: the Cloud Run server rejected larger
-  ephemeral-disk totals per instance in the P6 deploy, although the volume
-  API documents up to 100 GiB. The design's 20-25 GiB `/scratch` is not
-  available; 10 GiB covers the lint job's caches and checkout (design 1.2). Raise both
-  together after a quota increase.
+- **Ephemeral-disk size and quotas:** two quotas apply. Per instance, Cloud Run
+  allows 10 GiB of ephemeral disk by default
+  (`run.googleapis.com/max_per_instance_ephemeral_disk`, raisable on request;
+  `RUNNER_DISK_GI` accepts 1-100). Per region, the allocation is 100 GiB by
+  default (`run.googleapis.com/ephemeral_disk_allocation`), consumed as
+  `RUNNER_DISK_GI` x running executions. The default 10 GiB is **not** enough
+  for a warm golangci-lint: the P6 PoC measured about 15-20 GiB on disk
+  (restored Go cache 4.8 GB growing to ~8-9.5 GB, workspace 1.1 GB, modules
+  ~1.3 GB, Go temp dirs up to ~2 GB), and runs with 10 GiB ran out of space. Raise
+  the per-instance quota and use about 25 GiB (or keep the build cache in RAM),
+  and size the regional quota for `MAX_CONCURRENT_RUNNERS` x `RUNNER_DISK_GI`
+  ([gcp-setup.md, "Quotas"](gcp-setup.md#9-quotas)).
 
 ## Failure modes
 

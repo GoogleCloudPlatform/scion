@@ -136,8 +136,9 @@ with `go.mod` and `GOLANGCI_LINT_VERSION` with the version CI pins.
 
 `MAX_CONCURRENT_RUNNERS` caps running executions; jobs above it stay queued
 and are dispatched first in, first out as executions finish. Each execution
-uses `RUNNER_DISK_GI` (at most 10 GiB) of the regional ephemeral-disk quota
-(default 100 GiB: 5 x 10 GiB fits, with room for 10 runners). To raise the cap, first request the quota increase
+uses `RUNNER_DISK_GI` of the regional ephemeral-disk quota (default 100 GiB:
+5 x 10 GiB fits, 4 x 25 GiB fits). Above 10 GiB per runner, the per-instance
+quota must be raised as well. To raise the cap, first request the quota increase
 ([gcp-setup.md, step 9](gcp-setup.md#9-quotas)), then raise
 `MAX_CONCURRENT_RUNNERS` and run `scripts/deploy-mediator.sh --apply`. A
 persistent `capacity_full` with few jobs actually running points to stuck

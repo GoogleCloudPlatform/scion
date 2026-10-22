@@ -244,20 +244,54 @@ the Cloud Scheduler docs). Newer projects have it by default.
 
 ## 9. Quotas
 
-Runner executions consume the regional Cloud Run ephemeral-disk quota as
-`RUNNER_DISK_GI` x running executions. The default quota of 100 GiB per region
-fits the defaults (5 x 10 GiB) with room for 10 runners. `RUNNER_DISK_GI` is
-at most 10: the Cloud Run server rejected larger ephemeral-disk totals per
-instance in the P6 deploy. To raise `MAX_CONCURRENT_RUNNERS`:
+Two Cloud Run ephemeral-disk quotas apply ([Cloud Run docs](https://docs.cloud.google.com/run/docs/configuring/jobs/ephemeral-disk)):
 
-1. In the console (IAM & Admin > Quotas), filter for Cloud Run Admin API
-   quotas in `REGION`: ephemeral disk, and the CPU and memory allocation
-   quotas if `MAX_CONCURRENT_RUNNERS` x `RUNNER_CPU` / `RUNNER_MEMORY` exceed
-   them. Request an increase to cover the new maximum (C15,
-   `roles/cloudquotas.admin`).
-2. After approval, raise `MAX_CONCURRENT_RUNNERS` in `config.env` and run
-   `scripts/deploy-mediator.sh --apply`. The mediator enforces the cap; the
-   job itself needs no change.
+| Quota (metric) | Default | Consumed as |
+| :--- | :--- | :--- |
+| Per instance: `run.googleapis.com/max_per_instance_ephemeral_disk` | 10 GiB | `RUNNER_DISK_GI` (one volume per execution) |
+| Per region: `run.googleapis.com/ephemeral_disk_allocation` | 100 GiB (granted on first use) | `RUNNER_DISK_GI` x running executions |
+
+`RUNNER_DISK_GI` accepts 1-100 and defaults to 10, which is the per-instance
+default. **10 GiB is too small for a warm golangci-lint**: the P6 PoC measured
+about 15-20 GiB on disk (the restored Go cache grows from 4.8 GB to about
+8-9.5 GB during the lint, plus a 1.1 GB workspace, about 1.3 GB of modules and
+up to 2 GB of Go temp dirs). Every lint run with 10 GiB ran out of space. Use
+about **25 GiB**, after raising the per-instance quota, or keep the build cache
+in RAM. A job above the per-instance quota is rejected at `deploy-job.sh`
+("Total size of ephemeral-disk volumes cannot exceed 10 GiB").
+
+To raise a quota (C15, `roles/cloudquotas.admin`; Google approves the request):
+
+1. Find the quota ID (the `gcloud quotas` commands are beta:
+   `gcloud components install beta`):
+
+   ```bash
+   gcloud beta quotas info list --service=run.googleapis.com --project=GCP_PROJECT \
+     --filter='metric:run.googleapis.com/max_per_instance_ephemeral_disk OR metric:run.googleapis.com/ephemeral_disk_allocation' \
+     --format='table(quotaId, metric, dimensions)'
+   ```
+
+2. Request the new value for `REGION`, for example 25 GiB per instance (and
+   enough regional allocation for `MAX_CONCURRENT_RUNNERS` x 25 GiB):
+
+   ```bash
+   gcloud beta quotas preferences create --service=run.googleapis.com --project=GCP_PROJECT \
+     --quota-id=QUOTA_ID_FROM_STEP_1 --dimensions=region=REGION --preferred-value=25 \
+     --email=YOU@example.com --justification='cr-ci runners: warm golangci-lint needs ~20 GiB of scratch'
+   ```
+
+   The value is in the quota's unit as listed by step 1 (GiB for these two).
+   **UNVERIFIED:** the exact `quotaId` strings and the `region` dimension key;
+   read them from step 1's output. The console works too: IAM & Admin >
+   Quotas, filter for the metric, **Edit quotas**.
+3. After approval, set `RUNNER_DISK_GI` (and, within the regional allocation,
+   `MAX_CONCURRENT_RUNNERS`) in `config.env`, then run
+   `scripts/deploy-job.sh --apply` (disk) and `scripts/deploy-mediator.sh --apply`
+   (concurrency).
+
+The regional CPU and memory allocation quotas apply too if
+`MAX_CONCURRENT_RUNNERS` x `RUNNER_CPU` / `RUNNER_MEMORY` exceed them; request
+them the same way.
 
 ## 10. Teardown: `scripts/teardown.sh`
 

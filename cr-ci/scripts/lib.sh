@@ -486,7 +486,7 @@ crci_validate_config() {
 
   n=$(_crci_posint RUNNER_DISK_GI) || true
   [[ -n $n ]] || _crci_fail RUNNER_DISK_GI "\"${CFG[RUNNER_DISK_GI]}\" is not a positive integer"
-  [[ -n $n ]] && ((n > 10)) && _crci_fail RUNNER_DISK_GI "$n exceeds the 10 GiB ephemeral-disk maximum"
+  [[ -n $n ]] && ((n > 100)) && _crci_fail RUNNER_DISK_GI "$n exceeds the 100 GiB ephemeral-disk maximum"
   n=$(_crci_posint MAX_CONCURRENT_RUNNERS) || true
   [[ -n $n ]] || _crci_fail MAX_CONCURRENT_RUNNERS "\"${CFG[MAX_CONCURRENT_RUNNERS]}\" is not a positive integer"
 
