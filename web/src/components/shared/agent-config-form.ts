@@ -1886,7 +1886,7 @@ export class ScionAgentConfigForm extends LitElement {
     }
     return html`${this.mode === 'edit'
         ? html`<div class="hint">
-              TZ is not set here: the Timezone field on the General tab pins the timezone.
+              TZ is not set here: the Timezone field pins the timezone.
             </div>
             <div class="hint" data-testid="env-replace-note">
               Saving a change here replaces the agent's stored environment with this list. Values

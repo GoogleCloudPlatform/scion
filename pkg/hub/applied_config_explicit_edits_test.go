@@ -130,8 +130,8 @@ func TestApplyAgentUpdate_EchoPatchLeavesCreateInputsByteIdentical(t *testing.T)
 	before, err := json.Marshal(agent.AppliedConfig.CreateInputs)
 	require.NoError(t, err)
 
-	// Echo every live value back, exactly as agent-configure.ts's
-	// populateForm/buildConfig round trip does -- including the image in its
+	// Echo every live value back, as the retired Configure page's
+	// load-and-save round trip did -- including the image in its
 	// BARE form (as a user could type, or as a stale page echoes it): the
 	// registry-qualified comparison must still see this as unchanged.
 	rec := patchAgentConfig(t, srv, agent.ID, map[string]interface{}{
@@ -522,9 +522,9 @@ func TestApplyAgentUpdate_ImageChangeIsRecorded(t *testing.T) {
 // Also covers R2-1 facet (a)'s two-step sequence: this fixture's live env
 // never had a SCION_AUTO_EXPOSE_* key, so after the untouched Save (step 1)
 // a second PATCH that only edits the one custom env key (step 2, as the
-// FIXED buildConfig would send after a reload -- see
-// agent-configure-build-config.test.ts's matching "facet (a)" vitest case)
-// must not synthesize one.
+// Configure page sent after a reload, and as the shared agent form's env
+// editor sends: the rows only, no untouched auto-expose key) must not
+// synthesize one.
 func TestApplyAgentUpdate_UntouchedSaveLeavesHubTelemetryAndEnvAlone(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
