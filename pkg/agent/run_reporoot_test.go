@@ -110,16 +110,21 @@ func TestDetectRepoRoot_AutoDetectFromWorkspace(t *testing.T) {
 }
 
 // TestDetectRepoRoot_AutoDetectFromProjectDir confirms the fallback branch: no
-// explicit workspace, a non-git effective workspace, but a git project dir ->
-// repoRoot resolves from the project dir.
+// explicit workspace and no workspace path, but a git project dir -> repoRoot
+// resolves from the project dir. A non-git workspace outside the project's
+// repository is not widened to it: it gets a plain mount.
 func TestDetectRepoRoot_AutoDetectFromProjectDir(t *testing.T) {
 	root := t.TempDir()
 	setupGitRepo(t, root)
-	plain := t.TempDir() // effective workspace, not a git repo
 
-	got := eval(t, mustDetectRepoRoot(t, false, plain, root))
+	got := eval(t, mustDetectRepoRoot(t, false, "", root))
 	if want := eval(t, root); got != want {
 		t.Fatalf("auto-detect from project dir: got repoRoot %q, want %q", got, want)
+	}
+
+	plain := t.TempDir() // effective workspace, not a git repo, outside root
+	if got := mustDetectRepoRoot(t, false, plain, root); got != "" {
+		t.Fatalf("plain workspace outside the project repository: got repoRoot %q, want \"\"", got)
 	}
 }
 

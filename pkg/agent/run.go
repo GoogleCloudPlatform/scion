@@ -2941,13 +2941,17 @@ func detectRepoRoot(explicit bool, effectiveWorkspace, projectDir string, settin
 			return effectiveWorkspace, nil
 		}
 		if hasOwnGitDir {
+			// A .git directory git rejects (or a probe that does not
+			// finish) gives a plain mount: it never falls through to a
+			// wider root.
 			isRepo, err := checkOwnCommonDir(effectiveWorkspace)
 			if err != nil {
 				return "", err
 			}
-			if isRepo {
-				return effectiveWorkspace, nil
+			if !isRepo {
+				return "", nil
 			}
+			return effectiveWorkspace, nil
 		}
 		projectRepo := projectRepoRoot(projectRoot)
 		ceiling := filepath.Dir(effectiveWorkspace)
@@ -2961,8 +2965,14 @@ func detectRepoRoot(explicit bool, effectiveWorkspace, projectDir string, settin
 			return "", workspaceCommonDirError(effectiveWorkspace, commonDir)
 		}
 	}
+	// The project-dir fallback names a root only for a workspace inside the
+	// project's repository (or no workspace at all), so it never widens a
+	// workspace elsewhere to the whole repository.
 	projectRepo := projectRepoRoot(projectRoot)
 	if projectRepo == "" || !resolvedPathWithin(projectDir, projectRepo) {
+		return "", nil
+	}
+	if effectiveWorkspace != "" && !resolvedPathWithin(effectiveWorkspace, projectRepo) {
 		return "", nil
 	}
 	top, err := boundedRevParse(projectDir, filepath.Dir(projectRepo), "--show-toplevel")

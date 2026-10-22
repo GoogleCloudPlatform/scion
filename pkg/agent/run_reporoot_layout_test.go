@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -231,7 +232,7 @@ func TestDetectRepoRoot_PlainCheckoutOutsideProjectRoot(t *testing.T) {
 	}
 }
 
-// The project-dir fallback (no git workspace): a repository whose
+// The project-dir fallback (no workspace path): a repository whose
 // core.worktree names another directory is refused instead of mounting it.
 func TestDetectRepoRoot_ProjectDirFallbackRefusesForeignTopLevel(t *testing.T) {
 	base := t.TempDir()
@@ -244,9 +245,7 @@ func TestDetectRepoRoot_ProjectDirFallbackRefusesForeignTopLevel(t *testing.T) {
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	plain := t.TempDir()
-
-	if got := mustDetectRepoRoot(t, false, plain, projectDir); eval(t, got) != eval(t, root) {
+	if got := mustDetectRepoRoot(t, false, "", projectDir); eval(t, got) != eval(t, root) {
 		t.Fatalf("repo root = %q, want %q", got, root)
 	}
 
@@ -254,7 +253,7 @@ func TestDetectRepoRoot_ProjectDirFallbackRefusesForeignTopLevel(t *testing.T) {
 	if top, _ := util.RepoRootDir(projectDir); eval(t, top) != eval(t, elsewhere) {
 		t.Fatalf("fixture: git should report %s as the top level, got %s", elsewhere, top)
 	}
-	if got, err := detectRepoRoot(false, plain, projectDir, nil); err == nil || got != "" {
+	if got, err := detectRepoRoot(false, "", projectDir, nil); err == nil || got != "" {
 		t.Fatalf("foreign top level: detectRepoRoot = (%q, %v), want a refusal", got, err)
 	}
 }
@@ -688,11 +687,11 @@ func TestStartNFSWorkspace_RefusesRedirectedCommonDir(t *testing.T) {
 	}
 }
 
-// A plain (non-git) workspace outside the project root, under an enclosing
-// repository (a git HOME), for a project with its own repository: the git
-// probe in the workspace is bounded at the workspace, so git never answers
-// with the enclosing repository, and the root is the project's repository.
-func TestDetectRepoRoot_PlainWorkspaceUnderGitHomeUsesProjectRepo(t *testing.T) {
+// A plain (non-git) workspace outside the project's repository, under an
+// enclosing repository (a git HOME): the git probe in the workspace is
+// bounded at the workspace, so git never answers with the enclosing
+// repository (which would be refused), and the workspace gets a plain mount.
+func TestDetectRepoRoot_PlainWorkspaceUnderGitHomeIsPlain(t *testing.T) {
 	home := mkGitRepo(t, filepath.Join(t.TempDir(), "home"))
 	proj := mkGitRepo(t, filepath.Join(home, "proj"))
 	projectDir := filepath.Join(proj, config.DotScion)
@@ -705,7 +704,65 @@ func TestDetectRepoRoot_PlainWorkspaceUnderGitHomeUsesProjectRepo(t *testing.T) 
 	if !util.IsGitRepoDir(ws) {
 		t.Fatal("fixture: an unbounded git search from the workspace should reach the git HOME")
 	}
-	if got := mustDetectRepoRoot(t, false, ws, projectDir); eval(t, got) != eval(t, proj) {
-		t.Fatalf("repo root = %q, want the project repository %q", got, proj)
+	got, err := detectRepoRoot(false, ws, projectDir, nil)
+	if err != nil || got != "" {
+		t.Fatalf("detectRepoRoot = (%q, %v), want (\"\", nil): a plain mount, never the git HOME %q", got, err, home)
+	}
+}
+
+// A checkout outside the project's repository (for example a workspace
+// storage backend's host path) whose own .git directory git rejects gets a
+// plain mount; it is never widened to the project's repository.
+func TestDetectRepoRoot_RejectedGitDirOutsideProjectRepoIsPlain(t *testing.T) {
+	base := t.TempDir()
+	root := mkGitRepo(t, filepath.Join(base, "repo"))
+	projectDir := filepath.Join(root, config.DotScion)
+	ws := filepath.Join(base, "backend", "workspace")
+	for _, d := range []string{projectDir, filepath.Join(ws, ".git")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := mustDetectRepoRoot(t, false, ws, projectDir); got != "" {
+		t.Fatalf("repo root = %q, want \"\" (plain mount), never the project repository %q", got, root)
+	}
+}
+
+// A git probe that does not finish in time gives a plain mount for a
+// checkout outside the project's repository, never a wider root.
+func TestDetectRepoRoot_ProbeTimeoutOutsideProjectRepoIsPlain(t *testing.T) {
+	base := t.TempDir()
+	root := mkGitRepo(t, filepath.Join(base, "repo"))
+	projectDir := filepath.Join(root, config.DotScion)
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ws := mkGitRepo(t, filepath.Join(base, "backend", "workspace"))
+	if got := mustDetectRepoRoot(t, false, ws, projectDir); eval(t, got) != eval(t, ws) {
+		t.Fatalf("fixture: repo root = %q before the timeout, want the workspace %q", got, ws)
+	}
+
+	orig := worktreeGitTimeout
+	worktreeGitTimeout = time.Nanosecond
+	t.Cleanup(func() { worktreeGitTimeout = orig })
+	if got := mustDetectRepoRoot(t, false, ws, projectDir); got != "" {
+		t.Fatalf("repo root = %q after a probe timeout, want \"\" (plain mount), never %q", got, root)
+	}
+}
+
+// A checkout nested inside the project's repository whose own .git
+// directory git rejects gets a plain mount: git's search past the rejected
+// .git (which would reach the project's repository) is not used.
+func TestDetectRepoRoot_RejectedGitDirInsideProjectRepoIsPlain(t *testing.T) {
+	root := mkGitRepo(t, filepath.Join(t.TempDir(), "repo"))
+	projectDir := filepath.Join(root, config.DotScion)
+	ws := filepath.Join(root, "vendor", "nested")
+	for _, d := range []string{projectDir, filepath.Join(ws, ".git")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := mustDetectRepoRoot(t, false, ws, projectDir); got != "" {
+		t.Fatalf("repo root = %q, want \"\" (plain mount), never the project repository %q", got, root)
 	}
 }
