@@ -188,6 +188,7 @@ func TestPlatformSkillsFS_ScionWebServing(t *testing.T) {
 		"scion expose <port>",
 		"exactly as printed",
 		"trailing `/`",
+		"Keep the port exposed with `scion expose <port>` (the tunnel only reaches exposed ports)",
 		"scion tunnel <agent> --port <port>",
 		"https://googlecloudplatform.github.io/scion/hosted/user/port-forwarding/#multi-file-apps",
 		"is NOT proof",

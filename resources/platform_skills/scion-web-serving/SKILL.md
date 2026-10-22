@@ -18,8 +18,8 @@ that, or point the person to `scion tunnel` (below).
 ## Steps
 
 1. Build the page as **one self-contained HTML file** (see Build settings).
-2. Serve it on `127.0.0.1` on a port of 1024 or above, not 9810 or 18380, as
-   `index.html` so the root URL opens it:
+2. Serve it on `127.0.0.1` on a free port (1024 or above; 9810 and 18380
+   cannot be exposed), as `index.html` so the root URL opens it:
    `python3 -m http.server <port> --bind 127.0.0.1 --directory <folder>`
 3. Run: `scion expose <port> --label "<what it is>"`
 4. Verify it (see Verifying honestly).
@@ -46,11 +46,13 @@ that, or point the person to `scion tunnel` (below).
 
 For a full multi-file app, a backend API or a dev server, the human can use
 `scion tunnel` from their machine with the scion CLI, if their Hub has
-`scion tunnel` turned on. Suggest:
+`scion tunnel` turned on. Keep the port exposed with `scion expose <port>`
+(the tunnel only reaches exposed ports), then suggest:
 
     scion tunnel <agent> --port <port>
 
-It opens the app on a local port with everything working. See
+The app then opens on a local port on their machine and works as it does
+inside the agent. See
 https://googlecloudplatform.github.io/scion/hosted/user/port-forwarding/#multi-file-apps
 
 ## Build settings (single-file output)
@@ -58,9 +60,9 @@ https://googlecloudplatform.github.io/scion/hosted/user/port-forwarding/#multi-f
 - **Vite** (React, Vue, Svelte, plain): add `vite-plugin-singlefile`
   (`npm i -D vite-plugin-singlefile`, then in `vite.config.*`
   `import { viteSingleFile } from 'vite-plugin-singlefile'` and
-  `plugins: [..., viteSingleFile()]`) and run `vite build`. `dist/index.html` is the whole
-  app: everything your code imports (CSS, images, fonts) is inlined. Serve
-  `dist`. Files in `public/` that the page refers to by URL (for example
+  `plugins: [..., viteSingleFile()]`) and run `vite build`.
+  `dist/index.html` is the whole app: everything your code imports (CSS,
+  images, fonts) is inlined. Serve `dist`. Files in `public/` that the page refers to by URL (for example
   `/favicon.svg` or `/data.json`) are NOT inlined and will not load through
   the link: import them from your code instead, or inline them by hand.
 - **Plain HTML**: put the CSS in `<style>` and the JS in `<script>`. Turn
