@@ -300,13 +300,13 @@ func createAgent(ctx context.Context, c hubclient.Client, projectID, brokerID, n
 		if err == nil {
 			err = errors.New("no agent in the create response")
 		}
+		if !retryable(err) {
+			return "", fmt.Errorf("create agent %s: %w", name, err)
+		}
 		if lastErr == nil || errorKey(lastErr) != errorKey(err) {
 			fmt.Fprintf(os.Stderr, "[fakeagent] create agent %s: %v (retrying)\n", name, err)
 		}
 		lastErr = err
-		if !retryable(err) {
-			return "", fmt.Errorf("create agent %s: %w", name, err)
-		}
 		select {
 		case <-ctx.Done():
 			return "", fmt.Errorf("create agent %s: %w", name, lastErr)
