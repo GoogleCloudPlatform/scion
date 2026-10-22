@@ -607,10 +607,10 @@ var projectSettingsNullClearsFields = map[string]bool{
 	projectSettingsFieldAutoExposePortsEnabled: true,
 }
 
-// projectSettingsNotStoredFields are the hubclient.ProjectSettings fields
-// the project settings endpoint does not store: bucket, runtimes, harnesses
-// and profiles are read from server and Runtime Broker settings, never
-// from a project's settings. A PUT carrying one of them with a value is
+// projectSettingsNotStoredFields are the request keys the project settings
+// endpoint does not store (hubclient.ProjectSettings has no fields for them,
+// ptone/scion#5360): bucket, runtimes, harnesses and profiles are read from
+// server and Runtime Broker settings, never from a project's settings. A PUT carrying one of them with a value is
 // refused (projectSettingsNotStoredFieldError) instead of being accepted
 // and dropped.
 var projectSettingsNotStoredFields = []string{"bucket", "runtimes", "harnesses", "profiles"}

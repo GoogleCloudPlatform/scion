@@ -1047,10 +1047,10 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// download (DefaultHydratorConfig's DownloadTimeout is 5 minutes)
 		// would fail creates here that launch would have completed.
 		//
-		// This hydration runs ahead of the global-project 409, the
-		// harness-config policy refusal, and the NFS check below, so a
-		// request those would otherwise reject can pay for a hub round trip
-		// first. Kept in this order to sit next to the harness-config
+		// This hydration runs ahead of the harness-config policy refusal
+		// and the NFS check below (the global-project 409 now comes before
+		// it, ptone/scion#5432), so a request those would otherwise reject
+		// can pay for a hub round trip first. Kept in this order to sit next to the harness-config
 		// hydration it mirrors; revisit if that ordering cost matters.
 		if req.Config != nil && (req.Config.TemplateID != "" || req.Config.TemplateHash != "") {
 			hubConn := s.resolveHubConnection(r)
