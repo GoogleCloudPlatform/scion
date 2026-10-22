@@ -375,6 +375,45 @@ func TestConfigSetGlobalHubEndpoint_JSON(t *testing.T) {
 	assert.Equal(t, "global", res.Details["scope"])
 	assert.Equal(t, true, res.Details["created"])
 	assert.Equal(t, true, res.Details["reachable"])
+	assert.Equal(t, "https://team.example.org", res.Details["value"])
+	assert.Equal(t, "current hub 'team'", res.Details["source"])
+}
+
+// When the hub config set selects does not apply, because the environment or
+// the directory's link chooses another hub, set says so on stderr and still
+// prints its one line on stdout.
+func TestConfigSetGlobalHubEndpoint_SaysWhenAnotherHubApplies(t *testing.T) {
+	t.Run("environment", func(t *testing.T) {
+		setupConfigHubTest(t)
+		hubResponds = func(string, bool) error { return nil }
+		t.Setenv("SCION_HUB_ENDPOINT", "https://env.example.org")
+
+		stdout, stderr, err := runConfig(t, "config", "set", "--global", "hub.endpoint", "https://team.example.org")
+		require.NoError(t, err)
+		assert.Equal(t, "Hub 'team' (https://team.example.org) is now the current hub.\n", stdout)
+		assert.Equal(t, "Warning: hub.endpoint is still set by SCION_HUB_ENDPOINT\n", stderr)
+		assert.Equal(t, "team", readTestContext(t).CurrentHub)
+	})
+	t.Run("directory link", func(t *testing.T) {
+		setupConfigHubTest(t)
+		hubResponds = func(string, bool) error { return nil }
+		root := makeDirProject(t, "")
+		saveLinkEntry(t, filepath.Join(root, ".scion"), "https://linked.example.org", "linked")
+
+		stdout, stderr, err := runConfig(t, "config", "set", "--global", "hub.endpoint", "https://team.example.org")
+		require.NoError(t, err)
+		assert.Equal(t, "Hub 'team' (https://team.example.org) is now the current hub.\n", stdout)
+		assert.Equal(t, "Note: here hub.endpoint still comes from link hub 'linked': https://linked.example.org\n", stderr)
+	})
+	t.Run("the same hub: nothing to say", func(t *testing.T) {
+		setupConfigHubTest(t)
+		hubResponds = func(string, bool) error { return nil }
+		t.Setenv("SCION_HUB_ENDPOINT", "https://team.example.org/")
+
+		_, stderr, err := runConfig(t, "config", "set", "--global", "hub.endpoint", "https://team.example.org")
+		require.NoError(t, err)
+		assert.Empty(t, stderr)
+	})
 }
 
 // In a linked project whose link was never imported, config unset
@@ -425,4 +464,11 @@ func TestConfigUnsetGlobalHubEndpoint_WarnsAboutAFormItCannotEdit(t *testing.T) 
 	_, stderr, err := runConfig(t, "config", "unset", "--global", "hub.endpoint")
 	require.NoError(t, err)
 	assert.Contains(t, stderr, "Warning: hub.endpoint is still set in "+globalSettingsPath()+" in a form config unset does not edit; remove it by hand")
+
+	// The environment setting the hub too does not hide the file.
+	t.Setenv("SCION_HUB_ENDPOINT", "https://env.example.org")
+	_, stderr, err = runConfig(t, "config", "unset", "--global", "hub.endpoint")
+	require.NoError(t, err)
+	assert.Contains(t, stderr, "Warning: hub.endpoint is still set in "+globalSettingsPath()+" in a form config unset does not edit; remove it by hand")
+	assert.Contains(t, stderr, "Warning: hub.endpoint is still set by SCION_HUB_ENDPOINT")
 }

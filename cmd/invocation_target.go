@@ -51,6 +51,10 @@ var (
 	// hubFlagName is the hub nickname given with --hub, which
 	// resolveInvocationTarget replaced by its endpoint in hubEndpoint, or "".
 	hubFlagName string
+	// hubEntryName is the name of the hub entry resolveInvocationTarget took
+	// hubEndpoint from (the link entry's hub or the current hub), as in the
+	// context it loaded, or "". It is for messages only.
+	hubEntryName string
 	// contextWarned records that resolveInvocationTarget already warned
 	// about an unreadable context.yaml in this invocation.
 	contextWarned bool
@@ -367,6 +371,7 @@ func resolveInvocationTargetWith(cmd *cobra.Command, mode CLIMode, r targetResol
 	contextProjectSlug = ""
 	contextWarned = false
 	hubFlagName = ""
+	hubEntryName = ""
 	if contextDisabled(mode) {
 		return nil
 	}
@@ -416,15 +421,17 @@ func resolveInvocationTargetWith(cmd *cobra.Command, mode CLIMode, r targetResol
 	}
 
 	if hubEndpoint == "" && envHub == "" && inFilesystemProject() {
-		if _, h := r.linkEntry(ctx, dir); h != nil {
+		if p, h := r.linkEntry(ctx, dir); h != nil {
 			hubEndpoint = h.Endpoint
 			hubSource = targetSourceDirectory
+			hubEntryName = p.Hub
 		}
 	}
 
 	if h := ctx.CurrentHubEntry(); h != nil && h.Endpoint != "" && hubEndpoint == "" && envHub == "" {
 		hubEndpoint = h.Endpoint
 		hubSource = targetSourceContext
+		hubEntryName = ctx.CurrentHub
 	}
 
 	if projectScoped {

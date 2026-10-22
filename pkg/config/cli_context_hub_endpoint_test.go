@@ -311,3 +311,35 @@ func TestUnsetSetting_RemovesTheGlobalHubEndpoint(t *testing.T) {
 		})
 	}
 }
+
+// GlobalSettingsFileWithHubEndpoint names the global settings file when it
+// sets hub.endpoint, in either spelling the loader reads, and ignores the
+// environment.
+func TestGlobalSettingsFileWithHubEndpoint(t *testing.T) {
+	for name, tc := range map[string]struct {
+		content string
+		env     string
+		want    bool
+	}{
+		"unversioned":     {content: "hub:\n  endpoint: https://legacy.example.org\n", want: true},
+		"versioned":       {content: "schema_version: \"1\"\nhub:\n  endpoint: https://legacy.example.org\n", want: true},
+		"other case":      {content: "schema_version: \"1\"\nhub:\n  Endpoint: https://legacy.example.org\n", want: true},
+		"no key":          {content: "image_registry: registry.example.test/team\n"},
+		"no key, env set": {content: "image_registry: registry.example.test/team\n", env: "https://env.example.org"},
+		"key and env set": {content: "hub:\n  endpoint: https://legacy.example.org\n", env: "https://env.example.org", want: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctxPath := cliContextTestHome(t)
+			t.Setenv("SCION_HUB_ENDPOINT", tc.env)
+			path := filepath.Join(filepath.Dir(ctxPath), "settings.yaml")
+			writeCLIContextFile(t, path, tc.content)
+			got := GlobalSettingsFileWithHubEndpoint()
+			if tc.want && got != GetSettingsPath(filepath.Dir(ctxPath)) {
+				t.Errorf("= %q, want the global settings file", got)
+			}
+			if !tc.want && got != "" {
+				t.Errorf("= %q, want none", got)
+			}
+		})
+	}
+}

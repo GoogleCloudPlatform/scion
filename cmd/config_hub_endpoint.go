@@ -64,8 +64,9 @@ func effectiveHubSetting() config.SettingValue {
 
 // effectiveHubSource is the source config get and config list show for the
 // hub h: "flag --hub", "env <VARIABLE>", "link hub '<name>'" or
-// "current hub '<name>'". The name is left out when the hub list cannot be
-// read or has no entry for the endpoint.
+// "current hub '<name>'", with the entry name the resolver recorded
+// (hubEntryName). The hub list is not read again, so the name is the one of
+// the context the resolver used.
 func effectiveHubSource(h cliHub) string {
 	switch h.Source {
 	case useSourceFlag:
@@ -80,10 +81,8 @@ func effectiveHubSource(h cliHub) string {
 	if h.Source == useSourceDirectory {
 		kind = "link hub"
 	}
-	if c, err := config.LoadCLIContext(); err == nil {
-		if name, _ := c.HubByEndpoint(h.Endpoint); name != "" {
-			return fmt.Sprintf("%s '%s'", kind, name)
-		}
+	if hubEntryName != "" {
+		return fmt.Sprintf("%s '%s'", kind, hubEntryName)
 	}
 	return kind
 }
@@ -153,6 +152,14 @@ func configSetHubEndpoint(out, stderr io.Writer, url string, global bool, projec
 	}
 
 	reachable := warnUnreachableHub(stderr, endpoint)
+	now, overridden := hubSettingAfterSet(global, name, endpoint)
+	if overridden {
+		if v, env := strings.CutPrefix(now.Source, "env "); env {
+			_, _ = fmt.Fprintf(stderr, "Warning: %s is still set by %s\n", configHubEndpointKey, v)
+		} else {
+			_, _ = fmt.Fprintf(stderr, "Note: here %s still comes from %s: %s\n", configHubEndpointKey, now.Source, now.Value)
+		}
+	}
 	scope := "global"
 	msg := fmt.Sprintf("Hub '%s' (%s) is now the current hub.", name, config.RedactURL(endpoint))
 	if !global {
@@ -171,6 +178,8 @@ func configSetHubEndpoint(out, stderr io.Writer, url string, global bool, projec
 				"scope":     scope,
 				"created":   created,
 				"reachable": reachable,
+				"value":     now.Value,
+				"source":    now.Source,
 			},
 		})
 	}
@@ -204,12 +213,10 @@ func removeLegacyGlobalHubSetting(stderr io.Writer) bool {
 	if res.Removed {
 		_, _ = fmt.Fprintf(stderr, "Removed the legacy %s from %s (the server and the Runtime Broker no longer fall back to it).\n", configHubEndpointKey, res.Path)
 	}
-	if globalDir, err := config.GetGlobalDir(); err == nil {
-		if v, err := config.ResolveSettingValue(globalDir, configHubEndpointKey); err == nil {
-			if file, ok := strings.CutPrefix(v.Source, "global "); ok {
-				_, _ = fmt.Fprintf(stderr, "Warning: %s is still set in %s in a form config unset does not edit; remove it by hand (the server and the Runtime Broker still fall back to it).\n", configHubEndpointKey, file)
-			}
-		}
+	// The global file alone, without the environment: a variable that sets
+	// the hub is reported separately.
+	if file := config.GlobalSettingsFileWithHubEndpoint(); file != "" {
+		_, _ = fmt.Fprintf(stderr, "Warning: %s is still set in %s in a form config unset does not edit; remove it by hand (the server and the Runtime Broker still fall back to it).\n", configHubEndpointKey, file)
 	}
 	return res.Removed
 }
@@ -297,6 +304,43 @@ func configUnsetHubEndpoint(out, stderr io.Writer, global bool, projectDir strin
 	_, _ = fmt.Fprintln(out, msg)
 	_, _ = fmt.Fprintf(out, "Now: %s\n", formatSettingValue(now))
 	return nil
+}
+
+// hubSettingAfterSet returns the effective hub.endpoint after config set
+// selected the hub name at endpoint as the current hub (global) or linked
+// the project to it. The --hub flag and the environment still win over
+// both, and a project link wins over the current hub, so the hub just set
+// is not always the one that applies (resolveCLIHub's order); for a global
+// set, the link of the directory it runs in counts too. overridden reports
+// that another hub applies.
+func hubSettingAfterSet(global bool, name, endpoint string) (v config.SettingValue, overridden bool) {
+	h := resolveCLIHub()
+	if h.Source == useSourceFlag || h.Source == useSourceEnv || (global && h.Source == useSourceDirectory) {
+		return effectiveHubSetting(), config.NormalizeEndpoint(h.Endpoint) != config.NormalizeEndpoint(endpoint)
+	}
+	// With --global the invocation does not resolve the directory's link,
+	// but later commands in this directory do, and the link wins over the
+	// current hub.
+	if global {
+		if c, err := config.LoadCLIContext(); err == nil {
+			if ep, linkHub := directoryLinkedHub(targetResolution{stderr: io.Discard}, c); ep != "" && config.NormalizeEndpoint(ep) != config.NormalizeEndpoint(endpoint) {
+				return config.SettingValue{
+					Key:    configHubEndpointKey,
+					Value:  config.RedactURL(ep),
+					Source: fmt.Sprintf("link hub '%s'", linkHub),
+				}, true
+			}
+		}
+	}
+	kind := "current hub"
+	if !global {
+		kind = "link hub"
+	}
+	return config.SettingValue{
+		Key:    configHubEndpointKey,
+		Value:  config.RedactURL(endpoint),
+		Source: fmt.Sprintf("%s '%s'", kind, name),
+	}, false
 }
 
 // hubSettingAfterUnset returns the effective hub.endpoint after config

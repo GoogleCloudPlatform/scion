@@ -58,15 +58,15 @@ func configTestProject(t *testing.T, globalYAML, projectYAML string) (root, glob
 		require.NoError(t, os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte(projectYAML), 0o644))
 	}
 	origProjectPath, origFormat := projectPath, outputFormat
-	origHubEndpoint, origHubSource, origHubFlagName := hubEndpoint, hubSource, hubFlagName
+	origHubEndpoint, origHubSource, origHubFlagName, origHubEntryName := hubEndpoint, hubSource, hubFlagName, hubEntryName
 	t.Cleanup(func() {
 		projectPath, outputFormat = origProjectPath, origFormat
-		hubEndpoint, hubSource, hubFlagName = origHubEndpoint, origHubSource, origHubFlagName
+		hubEndpoint, hubSource, hubFlagName, hubEntryName = origHubEndpoint, origHubSource, origHubFlagName, origHubEntryName
 	})
 	projectPath = root
 	// No hub from an earlier test's resolution: hub.endpoint reports the
 	// hub of this invocation (resolveCLIHub).
-	hubEndpoint, hubSource, hubFlagName = "", "", ""
+	hubEndpoint, hubSource, hubFlagName, hubEntryName = "", "", "", ""
 	return root, globalDir
 }
 
@@ -105,9 +105,9 @@ func TestConfigListGetAgree(t *testing.T) {
 	}{
 		{name: "defaults only",
 			check: map[string][2]string{"cli.autohelp": {"true", "default"}, "active_profile": {"local", "default"}}},
-		{name: "global file", global: "schema_version: \"1\"\nhub:\n  endpoint: https://g.example.com\n",
+		{name: "global file", global: "schema_version: \"1\"\nimage_registry: registry.example.test/g\nhub:\n  endpoint: https://g.example.com\n",
 			// A settings file is not a hub source.
-			check: map[string][2]string{"hub.endpoint": {"", ""}}},
+			check: map[string][2]string{"hub.endpoint": {"", ""}, "image_registry": {"registry.example.test/g", "global "}}},
 		{name: "project over global",
 			global:  "schema_version: \"1\"\ncli:\n  autohelp: false\n",
 			project: "schema_version: \"1\"\ncli:\n  autohelp: true\nactive_profile: remote\n",
@@ -117,8 +117,8 @@ func TestConfigListGetAgree(t *testing.T) {
 			env:     map[string]string{"SCION_HUB_ENDPOINT": "https://env.example.com"},
 			check:   map[string][2]string{"hub.endpoint": {"https://env.example.com", "env SCION_HUB_ENDPOINT"}}},
 		{name: "legacy-format project file",
-			project: "harnesses: {}\nhub:\n  endpoint: https://legacy.example.com\n",
-			check:   map[string][2]string{"hub.endpoint": {"", ""}}},
+			project: "harnesses: {}\nhub:\n  endpoint: https://legacy.example.com\n  brokerId: broker-l\n",
+			check:   map[string][2]string{"hub.endpoint": {"", ""}, "hub.brokerId": {"broker-l", "project "}}},
 		{name: "masked broker token",
 			global: "schema_version: \"1\"\nserver:\n  broker:\n    broker_token: do-not-print\n",
 			check:  map[string][2]string{"hub.brokerToken": {"********", "global "}}},

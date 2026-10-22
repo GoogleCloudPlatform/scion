@@ -318,6 +318,21 @@ var globalHubSettings = func() (string, *HubTransportConfig) {
 	return strings.TrimSpace(s.Hub.Endpoint), s.Hub.Transport
 }
 
+// GlobalSettingsFileWithHubEndpoint returns the path of the global settings
+// file when that file sets hub.endpoint (in any spelling the settings loader
+// reads), or "". Environment variables are not applied: only the file is
+// looked at.
+func GlobalSettingsFileWithHubEndpoint() string {
+	if ep, _ := globalHubSettings(); ep == "" {
+		return ""
+	}
+	dir, err := GetGlobalDir()
+	if err != nil {
+		return ""
+	}
+	return GetSettingsPath(dir)
+}
+
 // LoadCLIContextImported is LoadCLIContext plus the one-time import of the
 // global settings' hub configuration into the hub list. The CLI reads no
 // hub setting itself; this import is how an existing hub.endpoint carries
