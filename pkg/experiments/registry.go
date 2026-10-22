@@ -158,6 +158,17 @@ const AuthorizationDecisionAuditV2 = "hub.authorization_decision_audit_v2"
 // accepts edits of agents with no container whether or not it is on.
 const AgentEdit = "web.agent_edit"
 
+// AgentEditHeld gates held config edits (ptone/scion#3976): while it is on,
+// a config edit of an agent with a live or transitional container is kept
+// as the agent's pending config and applied at its next start, a
+// provision-rendered key is kept pending until a reincarnation, and DELETE
+// /api/v1/agents/{id}/pending-config discards pending edits. While it is
+// off the hub refuses a config edit of such an agent, as before, and leaves
+// any stored pending config untouched. It has its own default-off switch
+// because the Edit page experiment (AgentEdit) is turned on separately; the
+// web layer only mirrors the hub's check.
+const AgentEditHeld = "hub.agent_edit_held"
+
 // AgentDelegation gates agent delegation (.design/agent-delegation.md §10):
 // the grant issuance and credential exchange routes, the delegated
 // credential middleware arm, and the delegated decision procedure. While it
@@ -349,6 +360,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#3952",
 		Owner:       "web",
 		ReviewBy:    "2027-01-07",
+	},
+	{
+		Name:        AgentEditHeld,
+		Title:       "Held edits for running agents",
+		Description: "Lets an agent config edit be saved while the agent is running or starting: the hub keeps it as the agent's pending config and applies it at the next start, restart or resume. System prompt, agent instructions, skills and services edits are kept pending until the agent is reincarnated. Pending edits can be discarded. While off, a config edit of a running agent is refused as before, and stored pending edits are kept but not applied.",
+		Default:     false,
+		Layers:      []Layer{LayerServer, LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#3952",
+		Owner:       "web",
+		ReviewBy:    "2027-01-20",
 	},
 	{
 		Name:        AgentPlugins,

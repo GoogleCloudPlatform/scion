@@ -578,6 +578,17 @@ type AgentStore interface {
 	// It never writes soft_delete_op_id (see SetAgentSoftDeleteOpID).
 	UpdateAgent(ctx context.Context, agent *Agent) error
 
+	// UpdateAgentConfig writes only the agent's applied config (and its
+	// harness_config shadow) and pending config, compare-and-set on
+	// expectedVersion, and bumps state_version. A nil pending clears the
+	// pending config. It leaves every status, phase and lifecycle column as
+	// it is, so a start path that has moved the row on (the starting phase,
+	// a start claim) can persist a config change from its own copy of the
+	// agent without writing that copy's stale status back. Returns the new
+	// state version; ErrNotFound if the agent doesn't exist or is
+	// soft-deleted; ErrVersionConflict if the version doesn't match.
+	UpdateAgentConfig(ctx context.Context, agentID string, expectedVersion int64, applied *AgentAppliedConfig, pending *AgentPendingConfig) (int64, error)
+
 	// SetAgentSoftDeleteOpID sets the agent's soft_delete_op_id to opID, or
 	// clears it to NULL when opID is empty. It is the only writer of that
 	// column: UpdateAgent and CreateAgent leave it untouched. It does not

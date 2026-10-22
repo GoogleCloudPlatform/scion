@@ -87,7 +87,7 @@ func startOutcomeOf(err error) startOutcome {
 		return startReleased
 	case errors.Is(err, ErrLaunchInFlight), errors.As(err, &incomplete), errors.As(err, &stillMissing),
 		errors.Is(err, ErrLaunchInvalidPhase),
-		errors.Is(err, errStartRunNotBegun),
+		errors.Is(err, errStartRunNotBegun), errors.Is(err, errPendingConfigFold),
 		errors.As(err, &tokenErr), errors.Is(err, errBrokerLacksEmptyPerAgent),
 		isBrokerRuntimeUnavailable(err), isBrokerDraining(err), errors.Is(err, errStartClaimLost), errors.Is(err, store.ErrDeleteInProgress):
 		return startReleased
@@ -495,6 +495,9 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 	supersedesQueuedStop := agent.ContainerStatus == containerStatusStopQueued
 	sd := opts.Dispatch
 	callerDeadline, hasCallerDeadline := ctx.Deadline()
+	// stillHeld are the pending config keys the start left pending (they
+	// wait for a reincarnation), reported once the start succeeded.
+	var stillHeld []string
 	err := s.withStartClaim(ctx, agent, opts.Kind, opts.Existing, func(ctx context.Context, fence func() error) (bool, error) {
 		endOp := s.beginLifecycleOp(agent.ID)
 		defer endOp()
@@ -508,6 +511,15 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 			sd.rollback(ctx)
 			return false, err
 		}
+		// Held config edits (ptone/scion#3976) are applied here, under the
+		// claim and after the fence, so the dispatch below sends them; a
+		// save racing this fold fails its compare-and-set.
+		held, err := s.foldPendingConfigAtStart(ctx, agent, startFoldTrigger(opts))
+		if err != nil {
+			sd.rollback(ctx)
+			return false, err
+		}
+		stillHeld = held
 		dctx := ctx
 		if opts.KeepCallerDeadline && hasCallerDeadline {
 			var cancel context.CancelFunc
@@ -517,7 +529,6 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 		dispatch := func(c context.Context) error {
 			return dispatcher.DispatchAgentStart(c, agent, opts.Task, opts.Resume)
 		}
-		var err error
 		if opts.SyncDispatchBound {
 			err = syncDispatch(dctx, dispatch)
 		} else {
@@ -552,6 +563,7 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 	}
 	if err == nil || errors.Is(err, errStartedStatusWrite) {
 		s.addEphemeralWorkspaceStartWarning(ctx, agent, hadEphemeral)
+		s.noteHeldForReincarnate(ctx, agent, stillHeld)
 	}
 	if supersedesQueuedStop && (err == nil || errors.Is(err, errStartedStatusWrite)) {
 		s.replaceQueuedStop(ctx, agent, "running")

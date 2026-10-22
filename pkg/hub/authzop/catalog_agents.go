@@ -331,6 +331,30 @@ var agentOperations = []OperationSpec{
 		Bearer: AdmitOn(BearerTargetAgentRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
+		ID:          "agent.update.pending_config.delete",
+		Domain:      "agent",
+		Description: "Discard an agent's pending config edits (behind hub.agent_edit_held; 404 while it is off)",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/pending-config", Method: "DELETE", Response: ResponseCallerSpecific},
+		},
+		Principals:  []PrincipalKind{PrincipalUser},
+		Credentials: []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		// discardAgentPendingConfig also applies the optional stateVersion
+		// check. Discarding grants nothing: it only removes edits that were
+		// never applied.
+		ResourceResolver: "agent-from-url",
+		BasePermission:   "agent.update",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden, DenialConflict},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestAgentSubRoute_CatalogDrift"},
+			{Package: "pkg/hub", Function: "TestAgentPendingConfig_DiscardClearsAndAudits"},
+		},
+		Bearer: AdmitOn(BearerTargetAgentRecord, BearerBoundaryProject, BearerBoundaryHub),
+	},
+	{
 		ID:          "agent.status.update",
 		Domain:      "agent",
 		Description: "Report an agent's status: the agent itself, or a user who may update the agent",
