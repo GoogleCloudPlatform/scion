@@ -858,7 +858,7 @@ func TestAgentPortProxyOtherCredentialsNotPlainText(t *testing.T) {
 	})
 	t.Run("front_proxy_assertion_refused", func(t *testing.T) {
 		prev := srv.authConfig.ProxyAuthenticator
-		srv.authConfig.ProxyAuthenticator = stubProxyAuthenticator{err: errors.New("bad assertion")}
+		srv.authConfig.ProxyAuthenticator = portProxyStubAuthenticator{err: errors.New("bad assertion")}
 		t.Cleanup(func() { srv.authConfig.ProxyAuthenticator = prev })
 		w := serve(t, nil)
 		assert.Equal(t, http.StatusUnauthorized, w.Code)
@@ -867,7 +867,7 @@ func TestAgentPortProxyOtherCredentialsNotPlainText(t *testing.T) {
 	})
 	t.Run("front_proxy_assertion_user", func(t *testing.T) {
 		prevAuth, prevProv := srv.authConfig.ProxyAuthenticator, srv.authConfig.ProxyUserProvisioner
-		srv.authConfig.ProxyAuthenticator = stubProxyAuthenticator{user: &ProxyUserInfo{
+		srv.authConfig.ProxyAuthenticator = portProxyStubAuthenticator{user: &ProxyUserInfo{
 			Subject: "front-proxy-user-1", Email: "front-proxy-user@example.com",
 		}}
 		srv.authConfig.ProxyUserProvisioner = MakeProxyUserProvisioner(srv)
@@ -880,18 +880,18 @@ func TestAgentPortProxyOtherCredentialsNotPlainText(t *testing.T) {
 	assert.Zero(t, count())
 }
 
-// stubProxyAuthenticator is a front-proxy authenticator that answers every
+// portProxyStubAuthenticator is a front-proxy authenticator that answers every
 // request with user, or with err when it is set.
-type stubProxyAuthenticator struct {
+type portProxyStubAuthenticator struct {
 	user *ProxyUserInfo
 	err  error
 }
 
-func (a stubProxyAuthenticator) Authenticate(*http.Request) (*ProxyUserInfo, error) {
+func (a portProxyStubAuthenticator) Authenticate(*http.Request) (*ProxyUserInfo, error) {
 	return a.user, a.err
 }
 
-func (stubProxyAuthenticator) Name() string { return "stub" }
+func (portProxyStubAuthenticator) Name() string { return "stub" }
 
 // TestRedirectToProxyRootLocationIsOneLine (ptone/scion#5566): whatever
 // bytes the raw query holds, the bare-URL redirect writes exactly one

@@ -340,9 +340,9 @@ Access to the proxy and port registration APIs requires authentication, verified
 
 ## Browser vs. Non-Browser Error Handling
 
-When an unexposed port is accessed, or when the agent container's WebSocket connection is temporarily offline, the Hub reverse proxy performs smart **content negotiation** based on the request's `Accept` header:
-
 Requests to a proxy URL that carry no credential and are not a page navigation (a page's scripts, stylesheets, images and `fetch()` calls) get the plain-text `401` described in [Multi-file apps](#multi-file-apps), instead of the HTML page or the JSON error described below.
+
+When an unexposed port is accessed, or when the agent container's WebSocket connection is temporarily offline, the Hub reverse proxy performs smart **content negotiation** based on the request's `Accept` header:
 
 ### Browser Requests (`Accept: text/html`)
 If the request is initiated from a web browser, the proxy returns a friendly, self-contained **HTML error page** containing troubleshooting guidance:
