@@ -272,3 +272,38 @@ func TestBuildKitEverywhere(t *testing.T) {
 		}
 	}
 }
+
+// TestMediatorBuildContext: mediator/Dockerfile copies its whole build context
+// (so hack/check-image-go-dirs.sh, which guards root-module Dockerfiles,
+// accepts it), which is safe only because both context filters are
+// allowlists: .gcloudignore (Cloud Build upload, TestGcloudIgnoreAllowlist)
+// and .dockerignore (local builds), each allowing only go.mod and mediator/.
+func TestMediatorBuildContext(t *testing.T) {
+	df, err := os.ReadFile(filepath.Join("..", "mediator", "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var copies []string
+	for _, l := range strings.Split(string(df), "\n") {
+		if f := strings.Fields(l); len(f) > 0 && strings.EqualFold(f[0], "COPY") && !strings.Contains(l, "--from=") {
+			copies = append(copies, strings.Join(f, " "))
+		}
+	}
+	if strings.Join(copies, "|") != "COPY . ./" {
+		t.Errorf("mediator/Dockerfile context COPYs = %q, want only the whole-context COPY . ./", copies)
+	}
+	di, err := os.ReadFile(filepath.Join("..", ".dockerignore"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rules []string
+	for _, l := range strings.Split(string(di), "\n") {
+		if l = strings.TrimSpace(l); l != "" && !strings.HasPrefix(l, "#") {
+			rules = append(rules, l)
+		}
+	}
+	want := []string{"*", "!go.mod", "!mediator", "mediator/**/*_test.go"}
+	if strings.Join(rules, "\n") != strings.Join(want, "\n") {
+		t.Errorf(".dockerignore rules = %q, want the allowlist %q", rules, want)
+	}
+}

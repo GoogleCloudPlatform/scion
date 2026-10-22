@@ -10,8 +10,11 @@ ARG RUN_IMAGE=gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca
 
 FROM ${GO_IMAGE} AS build
 WORKDIR /src
-COPY go.mod ./
-COPY mediator/ ./mediator/
+# The build context holds only go.mod and the non-test files of mediator/:
+# .gcloudignore (Cloud Build upload) and .dockerignore (local builds) are
+# allowlists. So the whole context is copied; nothing else of the repo (and
+# no secret or config file) can be in it.
+COPY . ./
 ENV CGO_ENABLED=0 GOFLAGS=-trimpath GOTOOLCHAIN=local GOPROXY=off
 RUN go build -buildvcs=false -ldflags=-s -o /out/mediator ./mediator
 
