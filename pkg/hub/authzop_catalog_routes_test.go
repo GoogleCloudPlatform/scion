@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -151,13 +152,37 @@ func portProxyEntryPoints(t *testing.T) []authzop.EntryPoint {
 	return proxy
 }
 
+// assertPortProxyAdmitted checks the answer of an admitted caller on one
+// agent.portaccess entry point: proxyAgentPort answers 503 (no tunnel) once
+// past authorization. GET of the bare .../proxy pattern is answered with a
+// 308 to .../proxy/ instead (ptone/scion#5566), which is also given only
+// after authorization; the trailing-slash form then reaches the tunnel
+// step (503).
+func assertPortProxyAdmitted(t *testing.T, who string, ep authzop.EntryPoint, path string, do func(method, path string) *httptest.ResponseRecorder) {
+	t.Helper()
+	if ep.Method == http.MethodGet && !strings.Contains(ep.Pattern, "{subpath}") {
+		rec := do(ep.Method, path)
+		if rec.Code != http.StatusPermanentRedirect || rec.Header().Get("Location") != "proxy/" {
+			t.Errorf("%s %s (%s): got %d Location %q, want %d to proxy/ (the bare-URL redirect, given only past authorization)",
+				ep.Method, path, who, rec.Code, rec.Header().Get("Location"), http.StatusPermanentRedirect)
+		}
+		path += "/"
+	}
+	rec := do(ep.Method, path)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("%s %s (%s): got %d, want %d (ServiceUnavailable, proving it reached proxyAgentPort with no tunnel present)",
+			ep.Method, path, who, rec.Code, http.StatusServiceUnavailable)
+	}
+}
+
 // TestCatalogRoute_PortProxy_AgentSelfAccess drives every EntryPoint
 // authzop.Catalog declares for agent.portaccess's "{port}/proxy..." shape
 // (GET/POST/PUT/DELETE on the bare pattern, plus one subpath) through an
 // agent identity accessing its OWN port registration -- the self-access
 // path authorizePortAccess admits without ever calling CheckAccess/Decide
 // (port_forward_handlers.go). All reach proxyAgentPort and fail the same
-// way (503, no tunnel) once past authorization, proving reachability. A
+// way (503, no tunnel) once past authorization, proving reachability; GET
+// of the bare pattern gets the 308 to .../proxy/ first (assertPortProxyAdmitted). A
 // second, DIFFERENT agent is rejected before Decide too (403), since
 // self-access compares agent identity to the target agent directly.
 func TestCatalogRoute_PortProxy_AgentSelfAccess(t *testing.T) {
@@ -175,10 +200,9 @@ func TestCatalogRoute_PortProxy_AgentSelfAccess(t *testing.T) {
 		ep := ep
 		path := substitutePattern(ep.Pattern, agent.ID, "4000", "some/sub/path")
 		t.Run(ep.Method+"_"+ep.Pattern, func(t *testing.T) {
-			rec := doAgentTokenRequest(t, srv, ep.Method, path, nil, token)
-			if rec.Code != http.StatusServiceUnavailable {
-				t.Errorf("%s %s (self-access): got %d, want %d (ServiceUnavailable, proving it reached proxyAgentPort with no tunnel present)", ep.Method, path, rec.Code, http.StatusServiceUnavailable)
-			}
+			assertPortProxyAdmitted(t, "self-access", ep, path, func(method, path string) *httptest.ResponseRecorder {
+				return doAgentTokenRequest(t, srv, method, path, nil, token)
+			})
 		})
 	}
 
@@ -198,7 +222,7 @@ func TestCatalogRoute_PortProxy_AgentSelfAccess(t *testing.T) {
 // path that actually reaches Decide/CheckAccess (authorizePortAccess,
 // port_forward_handlers.go): an authorized user (holding a project-scoped
 // agent.port_access grant) gets 503 (no tunnel, same as self-access, once
-// past authorization); an unauthorized user (ordinary project member, no
+// past authorization; the bare GET gets the 308 first); an unauthorized user (ordinary project member, no
 // such grant) gets 403.
 func TestCatalogRoute_PortProxy_UserSession(t *testing.T) {
 	srv, s := testServer(t)
@@ -225,10 +249,9 @@ func TestCatalogRoute_PortProxy_UserSession(t *testing.T) {
 		path := substitutePattern(ep.Pattern, agent.ID, "4001", "some/sub/path")
 
 		t.Run(ep.Method+"_"+ep.Pattern+"/authorized_user", func(t *testing.T) {
-			rec := doRequestAsUser(t, srv, authorizedUser, ep.Method, path, nil)
-			if rec.Code != http.StatusServiceUnavailable {
-				t.Errorf("%s %s (authorized user): got %d, want %d (ServiceUnavailable, proving Decide admitted it and it reached proxyAgentPort with no tunnel present)", ep.Method, path, rec.Code, http.StatusServiceUnavailable)
-			}
+			assertPortProxyAdmitted(t, "authorized user, admitted by Decide", ep, path, func(method, path string) *httptest.ResponseRecorder {
+				return doRequestAsUser(t, srv, authorizedUser, method, path, nil)
+			})
 		})
 
 		t.Run(ep.Method+"_"+ep.Pattern+"/unauthorized_user", func(t *testing.T) {
