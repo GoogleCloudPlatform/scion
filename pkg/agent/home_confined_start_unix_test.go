@@ -18,6 +18,7 @@ package agent
 
 import (
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -25,6 +26,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agenthome"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentplugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
@@ -64,6 +66,11 @@ func newConfinedHome(t *testing.T) *confinedHome {
 		"20-harness-provision":     "outside hook",
 		"harness/manifest.json":    "outside manifest",
 		"hooks/pre-start.d/marker": "outside hook dir",
+		// Sentinels at the exact paths a followed link at .scion or
+		// .scion/hooks would reach.
+		"hooks/pre-start.d/20-harness-provision": "outside hook",
+		"pre-start.d/20-harness-provision":       "outside hook",
+		"scion-token":                            "outside token file",
 	} {
 		p := filepath.Join(c.outside, rel)
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
@@ -181,8 +188,8 @@ func TestResetStagedProvisioning_RefusesLinkedComponent(t *testing.T) {
 		t.Run(rel, func(t *testing.T) {
 			c := newConfinedHome(t)
 			c.link(t, c.outside, rel)
-			if err := resetStagedProvisioning(c.home); err == nil {
-				t.Fatal("expected a linked directory component to be refused")
+			if err := resetStagedProvisioning(c.home); !errors.Is(err, agenthome.ErrLinkComponent) {
+				t.Fatalf("err = %v, want a linked directory component refused", err)
 			}
 			c.checkOutside(t)
 		})
@@ -210,8 +217,8 @@ func TestResetStagedProvisioning_LinkReplantedBetweenStartsIsRefused(t *testing.
 		t.Fatal(err)
 	}
 	c.link(t, c.outside, ".scion/hooks")
-	if err := resetStagedProvisioning(c.home); err == nil {
-		t.Fatal("expected the re-planted link to be refused")
+	if err := resetStagedProvisioning(c.home); !errors.Is(err, agenthome.ErrLinkComponent) {
+		t.Fatalf("err = %v, want the re-planted link refused", err)
 	}
 	c.checkOutside(t)
 }
@@ -294,8 +301,8 @@ func TestRestoreControlPlaneInputs_RefusesLinkedComponent(t *testing.T) {
 			c := newConfinedHome(t)
 			writeInputsRecord(t, c.agentDir)
 			c.link(t, c.outside, rel)
-			if err := restoreControlPlaneInputs(c.agentDir, c.home, true); err == nil {
-				t.Fatal("expected a linked directory component to be refused")
+			if err := restoreControlPlaneInputs(c.agentDir, c.home, true); !errors.Is(err, agenthome.ErrLinkComponent) {
+				t.Fatalf("err = %v, want a linked directory component refused", err)
 			}
 			c.checkOutside(t)
 		})
@@ -315,8 +322,8 @@ func TestRestoreControlPlaneInputs_RefusesLinkedComponent(t *testing.T) {
 					c.link(t, c.outside, tc.rel)
 				}
 			})
-			if err := restoreControlPlaneInputs(c.agentDir, c.home, true); err == nil {
-				t.Fatal("expected the re-planted link to be refused")
+			if err := restoreControlPlaneInputs(c.agentDir, c.home, true); !errors.Is(err, agenthome.ErrLinkComponent) {
+				t.Fatalf("err = %v, want the re-planted link refused", err)
 			}
 			c.checkOutside(t)
 		})
@@ -397,8 +404,8 @@ func TestRestoreSecretsRecord_RefusesLinkedComponent(t *testing.T) {
 			c := newConfinedHome(t)
 			id := writeSecretsRecord(t, c.agentDir, "TOKEN_A")
 			c.link(t, c.outside, rel)
-			if _, err := restoreSecretsRecord(c.agentDir, c.home, "agent-x", id); err == nil {
-				t.Fatal("expected a linked directory component to be refused")
+			if _, err := restoreSecretsRecord(c.agentDir, c.home, "agent-x", id); !errors.Is(err, agenthome.ErrLinkComponent) {
+				t.Fatalf("err = %v, want a linked directory component refused", err)
 			}
 			c.checkOutside(t)
 		})
@@ -412,8 +419,8 @@ func TestRestoreSecretsRecord_LinkReplantedBetweenStartsIsRefused(t *testing.T) 
 		t.Fatal(err)
 	}
 	c.link(t, c.outside, stagedSecretsRel)
-	if _, err := restoreSecretsRecord(c.agentDir, c.home, "agent-x", id); err == nil {
-		t.Fatal("expected the re-planted link to be refused")
+	if _, err := restoreSecretsRecord(c.agentDir, c.home, "agent-x", id); !errors.Is(err, agenthome.ErrLinkComponent) {
+		t.Fatalf("err = %v, want the re-planted link refused", err)
 	}
 	c.checkOutside(t)
 }
@@ -439,8 +446,8 @@ func TestWriteAgentTokenFile_LinkLeavesReplaced(t *testing.T) {
 func TestWriteAgentTokenFile_RefusesLinkedComponent(t *testing.T) {
 	c := newConfinedHome(t)
 	c.link(t, c.outside, ".scion")
-	if err := writeAgentTokenFile(c.home, tokenFileSentinel); err == nil {
-		t.Fatal("expected a linked .scion to be refused")
+	if err := writeAgentTokenFile(c.home, tokenFileSentinel); !errors.Is(err, agenthome.ErrLinkComponent) {
+		t.Fatalf("err = %v, want a linked .scion refused", err)
 	}
 	c.checkOutside(t)
 }
@@ -451,8 +458,8 @@ func TestWriteAgentTokenFile_LinkReplantedBetweenStartsIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.link(t, c.outside, ".scion")
-	if err := writeAgentTokenFile(c.home, tokenFileSentinel); err == nil {
-		t.Fatal("expected the re-planted link to be refused")
+	if err := writeAgentTokenFile(c.home, tokenFileSentinel); !errors.Is(err, agenthome.ErrLinkComponent) {
+		t.Fatalf("err = %v, want the re-planted link refused", err)
 	}
 	c.checkOutside(t)
 }
@@ -472,8 +479,8 @@ func TestRemoveStaleAuthCandidates_LinkLeafAndComponent(t *testing.T) {
 	for _, comp := range []string{".scion", ".scion/harness", agentplugin.InputsRel} {
 		c := newConfinedHome(t)
 		c.link(t, c.outside, comp)
-		if err := removeStaleAuthCandidates(c.home); err == nil {
-			t.Fatalf("%s: expected a linked directory component to be refused", comp)
+		if err := removeStaleAuthCandidates(c.home); !errors.Is(err, agenthome.ErrLinkComponent) {
+			t.Fatalf("%s: err = %v, want a linked directory component refused", comp, err)
 		}
 		c.checkOutside(t)
 	}

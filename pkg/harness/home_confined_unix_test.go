@@ -18,13 +18,16 @@ package harness
 
 import (
 	"context"
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agenthome"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
@@ -173,8 +176,8 @@ func TestProvision_RefusesLinkedComponent(t *testing.T) {
 			f := newConfinedHomeFixture(t)
 			h := newConfinedTestHarness(t)
 			f.link(t, "sub", rel)
-			if err := h.Provision(context.Background(), "a", t.TempDir(), f.home, "/workspace"); err == nil {
-				t.Fatal("expected a linked directory component to be refused")
+			if err := h.Provision(context.Background(), "a", t.TempDir(), f.home, "/workspace"); !errors.Is(err, agenthome.ErrLinkComponent) {
+				t.Fatalf("err = %v, want a linked directory component refused", err)
 			}
 			f.checkOutside(t)
 		})
@@ -188,8 +191,8 @@ func TestProvision_LinkReplantedBetweenStartsIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.link(t, "sub", ".scion/hooks/pre-start.d")
-	if err := h.Provision(context.Background(), "a", t.TempDir(), f.home, "/workspace"); err == nil {
-		t.Fatal("expected the re-planted link to be refused")
+	if err := h.Provision(context.Background(), "a", t.TempDir(), f.home, "/workspace"); !errors.Is(err, agenthome.ErrLinkComponent) {
+		t.Fatalf("err = %v, want the re-planted link refused", err)
 	}
 	f.checkOutside(t)
 }
@@ -208,8 +211,8 @@ func TestStageCaptureAuthAssets_LinkLeafAndComponent(t *testing.T) {
 
 	f2 := newConfinedHomeFixture(t)
 	f2.link(t, "sub", ".scion/harness/inputs")
-	if err := StageCaptureAuthAssets(f2.home, h.configDirPath, h.entry.Auth); err == nil {
-		t.Fatal("expected a linked directory component to be refused")
+	if err := StageCaptureAuthAssets(f2.home, h.configDirPath, h.entry.Auth); !errors.Is(err, agenthome.ErrLinkComponent) {
+		t.Fatalf("err = %v, want a linked directory component refused", err)
 	}
 	f2.checkOutside(t)
 }
@@ -247,8 +250,8 @@ func TestApplyAuthSettings_RefusesLinkedComponent(t *testing.T) {
 			f := newConfinedHomeFixture(t)
 			h := newConfinedTestHarness(t)
 			f.link(t, "sub", rel)
-			if err := h.ApplyAuthSettings(f.home, confinedResolvedAuth(t)); err == nil {
-				t.Fatal("expected a linked directory component to be refused")
+			if err := h.ApplyAuthSettings(f.home, confinedResolvedAuth(t)); !errors.Is(err, agenthome.ErrLinkComponent) {
+				t.Fatalf("err = %v, want a linked directory component refused", err)
 			}
 			f.checkOutside(t)
 		})
@@ -262,8 +265,8 @@ func TestApplyAuthSettings_LinkReplantedBetweenStartsIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.link(t, "sub", ".scion/harness/secrets")
-	if err := h.ApplyAuthSettings(f.home, confinedResolvedAuth(t)); err == nil {
-		t.Fatal("expected the re-planted link to be refused")
+	if err := h.ApplyAuthSettings(f.home, confinedResolvedAuth(t)); !errors.Is(err, agenthome.ErrLinkComponent) {
+		t.Fatalf("err = %v, want the re-planted link refused", err)
 	}
 	f.checkOutside(t)
 }
@@ -291,8 +294,8 @@ func TestStagedInputs_LinkLeafAndComponent(t *testing.T) {
 
 			f2 := newConfinedHomeFixture(t)
 			f2.link(t, "sub", ".scion/harness/inputs")
-			if err := fn(h, f2.home); err == nil {
-				t.Fatal("expected a linked directory component to be refused")
+			if err := fn(h, f2.home); !errors.Is(err, agenthome.ErrLinkComponent) {
+				t.Fatalf("err = %v, want a linked directory component refused", err)
 			}
 			f2.checkOutside(t)
 		})
@@ -329,8 +332,8 @@ func TestWriteProjectPreStartHook_LinkLeafAndComponent(t *testing.T) {
 		for _, content := range []string{"#!/bin/sh\n", ""} {
 			f := newConfinedHomeFixture(t)
 			f.link(t, "sub", comp)
-			if err := WriteProjectPreStartHook(f.home, content); err == nil {
-				t.Fatalf("%s (content %q): expected a linked directory component to be refused", comp, content)
+			if err := WriteProjectPreStartHook(f.home, content); !errors.Is(err, agenthome.ErrLinkComponent) {
+				t.Fatalf("%s (content %q): err = %v, want a linked directory component refused", comp, content, err)
 			}
 			f.checkOutside(t)
 		}
@@ -340,15 +343,15 @@ func TestWriteProjectPreStartHook_LinkLeafAndComponent(t *testing.T) {
 func TestSetManifestAgentWorkspace_LinksNotFollowed(t *testing.T) {
 	f := newConfinedHomeFixture(t)
 	f.link(t, "manifest.json", ".scion/harness/manifest.json")
-	if err := SetManifestAgentWorkspace(f.home, "/repo-root/x"); err == nil {
-		t.Fatal("expected a link at the manifest to be refused")
+	if err := SetManifestAgentWorkspace(f.home, "/repo-root/x"); !errors.Is(err, syscall.ELOOP) {
+		t.Fatalf("err = %v, want a link at the manifest refused (ELOOP)", err)
 	}
 	f.checkOutside(t)
 
 	f2 := newConfinedHomeFixture(t)
 	f2.link(t, "sub", ".scion/harness")
-	if err := SetManifestAgentWorkspace(f2.home, "/repo-root/x"); err == nil {
-		t.Fatal("expected a linked directory component to be refused")
+	if err := SetManifestAgentWorkspace(f2.home, "/repo-root/x"); !errors.Is(err, agenthome.ErrLinkComponent) {
+		t.Fatalf("err = %v, want a linked directory component refused", err)
 	}
 	f2.checkOutside(t)
 
