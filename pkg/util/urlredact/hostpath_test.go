@@ -175,3 +175,28 @@ func TestRedactURLIn_ShortPart(t *testing.T) {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
+
+// A URL HostAndPath rejects still has its query and fragment removed from
+// a reformatted echo (a path added, a trailing '/'), as an accepted one
+// does, and an empty rendering is not replaced.
+func TestRedactURLIn_RejectedQueryFragment(t *testing.T) {
+	for _, tc := range []struct{ raw, secret string }{
+		{"https://git.example.com/acme/r@x.git?access_token=Zq7mWx2Pk", "Zq7mWx2Pk"},
+		{"https://git.example.com/acme/r@x.git#Zq7mWx2Pk", "Zq7mWx2Pk"},
+		{"https://git.example.com/acme/r@x.git?a=1#Zq7mWx2Pk", "Zq7mWx2Pk"},
+	} {
+		if _, ok := HostAndPath(tc.raw); ok {
+			t.Fatalf("HostAndPath(%q) accepted", tc.raw)
+		}
+		for _, echo := range urlredacttest.Echoes(tc.raw) {
+			text := "fatal: unable to access '" + echo + "': 403"
+			got := RedactURLIn(text, tc.raw, "[SHOWN]", "[M]")
+			if f := urlredacttest.SecretFragment(got, tc.secret); f != "" {
+				t.Errorf("RedactURLIn(%q, %q) = %q shows %q", text, tc.raw, got, f)
+			}
+		}
+	}
+	if got, want := RedactURLIn("abc", "#", "[SHOWN]", "[M]"), "abc"; got != want {
+		t.Errorf("RedactURLIn with an empty rendering = %q, want %q", got, want)
+	}
+}

@@ -28,28 +28,51 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/util/urlredact/urlredacttest"
 )
 
-// No part of the credential of any shape shows in the URL a failed fetch
-// logs. Only the url attribute is checked here: it is what redactURL
-// writes. The fetch fails before any connection (user info, or a host
-// that is not allowed).
+// No part of the credential of any shape shows in what a failed fetch logs
+// (every record and attribute of the JSON log, the url attribute that
+// redactURL writes checked on its own as well) or returns (err.Error()).
+// The fetch fails before any connection: on user info, the port, a host
+// that is not allowed, or (without AllowedHosts) a lookup that fails or
+// answers a denied address.
 func TestRedactURL_Shapes(t *testing.T) {
 	for _, s := range urlredacttest.Shapes {
 		if got := redactURL(s.URL); urlredacttest.SecretFragment(got, s.Secret) != "" {
 			t.Errorf("%s: redactURL(%q) = %q shows part of the secret", s.Name, s.URL, got)
 		}
-		var logs bytes.Buffer
-		f := New(Config{Timeout: 5 * time.Second, AllowedHosts: []string{"img.example.com"}, Logger: slog.New(slog.NewJSONHandler(&logs, nil))})
-		if _, err := f.FetchBytes(context.Background(), s.URL); err == nil {
-			t.Fatalf("%s: fetch of %q succeeded", s.Name, s.URL)
-		}
-		var rec struct {
-			URL string `json:"url"`
-		}
-		if err := json.Unmarshal(logs.Bytes(), &rec); err != nil || rec.URL == "" {
-			t.Fatalf("%s: no url in the log record %q (%v)", s.Name, logs.String(), err)
-		}
-		if urlredacttest.SecretFragment(rec.URL, s.Secret) != "" {
-			t.Errorf("%s: logged url %q shows part of the secret", s.Name, rec.URL)
+		for _, cfg := range []struct {
+			name    string
+			allowed []string
+			answers map[string][]netip.Addr
+		}{
+			{"allowed hosts", []string{"img.example.com"}, nil},
+			{"lookup fails", nil, nil},
+			{"denied address", nil, map[string][]netip.Addr{"tKn7Qz": addrs("127.0.0.1"), "git.example.com": addrs("127.0.0.1")}},
+		} {
+			var logs bytes.Buffer
+			f := New(Config{Timeout: 5 * time.Second, AllowedHosts: cfg.allowed, Logger: slog.New(slog.NewJSONHandler(&logs, nil))})
+			f.resolver = &fakeResolver{answers: cfg.answers}
+			_, err := f.FetchBytes(context.Background(), s.URL)
+			if err == nil {
+				t.Fatalf("%s, %s: fetch of %q succeeded", s.Name, cfg.name, s.URL)
+			}
+			var rec struct {
+				URL string `json:"url"`
+			}
+			last := logs.Bytes()
+			if i := bytes.LastIndexByte(bytes.TrimRight(last, "\n"), '\n'); i >= 0 {
+				last = last[i+1:]
+			}
+			if err := json.Unmarshal(last, &rec); err != nil || rec.URL == "" {
+				t.Fatalf("%s, %s: no url in the log record %q (%v)", s.Name, cfg.name, logs.String(), err)
+			}
+			if urlredacttest.SecretFragment(rec.URL, s.Secret) != "" {
+				t.Errorf("%s: logged url %q shows part of the secret", s.Name, rec.URL)
+			}
+			for what, out := range map[string]string{"error": err.Error(), "logs": logs.String()} {
+				if frag := urlredacttest.SecretFragment(out, s.Secret); frag != "" {
+					t.Errorf("%s, %s: %s %q shows %q", s.Name, cfg.name, what, out, frag)
+				}
+			}
 		}
 	}
 }

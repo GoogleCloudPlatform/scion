@@ -23,12 +23,13 @@ import (
 )
 
 // gitCloneOutput returns output a failed git clone of rawURL may print:
-// the URL as git prints it, and as given.
+// the URL as given, and reformatted (urlredacttest.Echoes).
 func gitCloneOutput(rawURL string) []string {
-	return []string{
-		"Cloning into 'repo'...\nfatal: unable to access '" + urlredacttest.GitEcho(rawURL) + "': The requested URL returned error: 403",
-		"fatal: repository '" + rawURL + "' not found",
+	out := []string{"fatal: repository '" + rawURL + "' not found"}
+	for _, echo := range urlredacttest.Echoes(rawURL) {
+		out = append(out, "Cloning into 'repo'...\nfatal: unable to access '"+echo+"': The requested URL returned error: 403")
 	}
+	return out
 }
 
 // No part of the credential of any shape shows in a clone error, built

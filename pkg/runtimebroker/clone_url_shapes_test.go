@@ -22,12 +22,13 @@ import (
 
 // cloneErrorTexts returns the error texts a failed clone of rawURL may
 // produce: provisioning's own "git clone <url>" error, with git's output
-// echoing the URL as git prints it.
+// echoing the URL reformatted (urlredacttest.Echoes).
 func cloneErrorTexts(rawURL string) []string {
-	return []string{
-		"git clone " + rawURL + ": exit status 128",
-		"git clone <redacted>: fatal: unable to access '" + urlredacttest.GitEcho(rawURL) + "': The requested URL returned error: 403",
+	texts := []string{"git clone " + rawURL + ": exit status 128"}
+	for _, echo := range urlredacttest.Echoes(rawURL) {
+		texts = append(texts, "git clone <redacted>: fatal: unable to access '"+echo+"': The requested URL returned error: 403")
 	}
+	return texts
 }
 
 // No part of the credential of any shape shows in the logged clone URL or

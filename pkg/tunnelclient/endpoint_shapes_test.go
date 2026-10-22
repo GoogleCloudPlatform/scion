@@ -29,6 +29,9 @@ import (
 func endpointErrors(t *testing.T, endpoint string) []string {
 	t.Helper()
 	texts := []string{`Get "` + endpoint + `": dial tcp: refused`}
+	for _, echo := range urlredacttest.Echoes(endpoint) {
+		texts = append(texts, `Get "`+echo+`": refused`)
+	}
 	cu, err := conduitURL(endpoint)
 	if err != nil {
 		return texts
@@ -75,6 +78,23 @@ func TestEndpointRedactors_KeepHostAndPath(t *testing.T) {
 			if !strings.Contains(got, strings.TrimPrefix(k.Want, "https://")) {
 				t.Errorf("%s: scrubEndpoint(%q) = %q lost the host and path", k.Name, text, got)
 			}
+		}
+	}
+}
+
+// The query of an endpoint, and each of its values, of scrubMinLen bytes or
+// more, are masked where they appear on their own, whether HostAndPath
+// accepts the endpoint or not (a key-only query included).
+func TestScrubEndpoint_BareQuery(t *testing.T) {
+	for _, tc := range []struct{ ep, secret string }{
+		{"https://git.example.com/acme/r@x.git?access_token=Zq7mWx2Pk", "Zq7mWx2Pk"},
+		{"https://hub.example.com/api?access_token=Zq7mWx2Pk", "Zq7mWx2Pk"},
+		{"https://hub.example.com/api?Zq7mWx2Pk", "Zq7mWx2Pk"},
+		{"https://git.example.com/acme/r@x.git?Zq7mWx2Pk", "Zq7mWx2Pk"},
+	} {
+		text := "token " + tc.secret + " expired (query " + tc.secret + ")"
+		if got := scrubEndpoint(text, tc.ep); urlredacttest.SecretFragment(got, tc.secret) != "" {
+			t.Errorf("scrubEndpoint(%q, %q) = %q shows part of the secret", text, tc.ep, got)
 		}
 	}
 }

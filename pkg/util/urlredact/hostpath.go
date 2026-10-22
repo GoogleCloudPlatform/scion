@@ -63,14 +63,18 @@ const minSecretLen = 3
 //     strconv.Quote writes it, and, when raw parses, as url.URL.String,
 //     url.URL.Redacted and net/http's errors write it;
 //   - when HostAndPath accepts raw, its user info followed by '@' (as
-//     url.URL writes it and as written in raw), its query after '?' and its
-//     fragment after '#' are removed wherever they still appear;
+//     url.URL writes it and as written in raw) is removed wherever it still
+//     appears;
 //   - when HostAndPath rejects a raw that holds an '@', the parts of it
 //     that may hold user info are replaced by mask wherever they appear, as
 //     given and as strconv.Quote, JSON, url.PathEscape and url.QueryEscape
 //     write them (see rawUserInfoParts): replacing more than the user info
 //     is safe, less is not. A raw without a scheme and "://" (or a leading
 //     "//") has no such parts;
+//   - when raw parses, accepted or not, its query after '?' and its fragment
+//     after '#', either of which may carry a token, are removed wherever
+//     they still appear (a URL built from raw, with a path added, keeps
+//     them);
 //   - last, the user info of every URL left in text is masked with mask by
 //     the shared rule (RedactUserInfoIn).
 //
@@ -83,14 +87,22 @@ func RedactURLIn(text, raw, shown, mask string) string {
 			renderings = append(renderings, u.String(), u.Redacted(), netHTTPForm(u))
 		}
 		for _, r := range renderings {
+			if r == "" {
+				// ReplaceAll would insert shown between every rune.
+				continue
+			}
 			text = strings.ReplaceAll(text, r, shown)
 		}
 		if _, ok := HostAndPath(raw); ok {
-			text = removeURLParts(text, raw, u)
+			text = removeUserInfo(text, raw, u)
 		} else {
 			for _, part := range rawUserInfoParts(raw) {
 				text = replaceForms(text, part, mask)
 			}
+		}
+		if err == nil {
+			// Accepted or not: a query or fragment may carry a token.
+			text = removeQueryAndFragment(text, u)
 		}
 	}
 	return RedactUserInfoIn(text, mask)
@@ -105,9 +117,9 @@ func netHTTPForm(u *url.URL) string {
 	return u.String()
 }
 
-// removeURLParts removes from text the user info, query and fragment of
-// raw (parsed as u, which HostAndPath accepts).
-func removeURLParts(text, raw string, u *url.URL) string {
+// removeUserInfo removes from text the user info of raw (parsed as u, which
+// HostAndPath accepts), followed by '@'.
+func removeUserInfo(text, raw string, u *url.URL) string {
 	var parts []string
 	// A user info with neither a user name nor a password ("@", ":@")
 	// carries nothing, and removing it would rewrite unrelated text.
@@ -119,6 +131,16 @@ func removeURLParts(text, raw string, u *url.URL) string {
 			}
 		}
 	}
+	for _, p := range parts {
+		text = strings.ReplaceAll(text, p, "")
+	}
+	return text
+}
+
+// removeQueryAndFragment removes from text the query of u after '?' and its
+// fragment after '#' (as escaped and as decoded).
+func removeQueryAndFragment(text string, u *url.URL) string {
+	var parts []string
 	if u.RawQuery != "" {
 		parts = append(parts, "?"+u.RawQuery)
 	}
@@ -134,11 +156,14 @@ func removeURLParts(text, raw string, u *url.URL) string {
 // rawUserInfoParts returns the parts of raw that may hold user info, read
 // from raw itself, longest first, for a raw whose user info cannot be
 // placed: the span from after its scheme and "://" (or a leading "//") up
-// to its last '@', path included; each part of that span between two '@'
-// (a URL printed with its user info removed up to its first '@', as git
-// prints one, still holds the rest); and the authority as raw itself ends
-// it, at its first '/', '?' or '#' (a URL built from raw with its query
-// cleared still holds it). It returns nil when raw holds no '@' or has
+// to its last '@', path included; each part of that span between two of
+// '@', '/', '?' and '#' (a URL printed with its user info removed up to its
+// first '@', as git prints one, still holds the rest, and a tool that reads
+// a '/', '?' or '#' in a password as the end of the authority may add a
+// path or drop the rest there); and the authority as raw itself ends it, at
+// its first '/', '?' or '#' (a URL built from raw with its query cleared
+// still holds it). Splitting replaces more than the user info, which is
+// safe for a URL whose user info cannot be placed. It returns nil when raw holds no '@' or has
 // neither prefix.
 func rawUserInfoParts(raw string) []string {
 	authority, rest, ok := cutRawAuthority(raw)
@@ -151,7 +176,7 @@ func rawUserInfoParts(raw string) []string {
 		return []string{authority}
 	}
 	span := after[:at]
-	parts := append([]string{span}, strings.Split(span, "@")...)
+	parts := append([]string{span}, strings.FieldsFunc(span, func(r rune) bool { return strings.ContainsRune("@/?#", r) })...)
 	parts = append(parts, authority)
 	sort.SliceStable(parts, func(i, j int) bool { return len(parts[i]) > len(parts[j]) })
 	return parts

@@ -182,7 +182,8 @@ type Shape struct {
 // the per-package tests that run a redactor in its own setting (an error
 // that quotes a URL built from the input, git's output). They hold a
 // delimiter in the password, a second '@', a password read as a port, a
-// token read as a host, and a URL nested in a query.
+// token read as a host, a URL nested in a query, and a token in the query
+// or fragment of a URL with an '@' in its path.
 var Shapes = []Shape{
 	{"slash in password", "https://alice:Zq/7mWx2@git.example.com/acme/repo.git", "Zq/7mWx2"},
 	{"question mark in password", "https://alice:Zq?7mWx2@git.example.com/acme/repo.git", "Zq?7mWx2"},
@@ -195,6 +196,8 @@ var Shapes = []Shape{
 	{"token read as a host", "https://tKn7Qz/x@git.example.com/acme/repo.git", "tKn7Qz/x"},
 	{"token read as a host, then '#'", "https://tKn7Qz#x@git.example.com/acme/repo.git", "tKn7Qz#x"},
 	{"URL with user info in a query value", "https://git.example.com/acme/repo.git?next=https://bob:Zq7mWx2@app.example.com/", "Zq7mWx2"},
+	{"'@' in the path, token in the query", "https://git.example.com/acme/r@x.git?access_token=Zq7mWx2Pk", "Zq7mWx2Pk"},
+	{"'@' in the path, token in the fragment", "https://git.example.com/acme/r@x.git#Zq7mWx2Pk", "Zq7mWx2Pk"},
 }
 
 // KeptURL is a URL a host and path redactor shows by its host and path,
@@ -229,4 +232,16 @@ func GitEcho(raw string) string {
 		rest = rest[i+1:]
 	}
 	return scheme + "://" + rest + "/"
+}
+
+// Echoes returns raw as a tool may print it reformatted, so that no
+// rendering of raw itself matches: as git prints it (GitEcho), with a path
+// added before its query or fragment ("/info/refs", as git requests it),
+// and with its query and fragment cut off.
+func Echoes(raw string) []string {
+	base, tail := raw, ""
+	if i := strings.IndexAny(raw, "?#"); i >= 0 {
+		base, tail = raw[:i], raw[i:]
+	}
+	return []string{GitEcho(raw), base + "/info/refs" + tail, base + "/"}
 }
