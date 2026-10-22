@@ -32,11 +32,12 @@ Changes:
   `Layout`. Results are identical for every valid input. The new validation
   applies only to inputs that the callers' own gates already reject.
 - **Hub**: `resolveSharedDirPath` builds its Layout from the in-memory
-  `ServerConfig`. `server.shared_dir_storage` is now loaded at startup into
-  `GlobalConfig` and `ServerConfig`, and `SCION_SERVER_SHARED_DIR_STORAGE_*`
-  applies, like `workspace_storage`. The per-request file read
-  (`resolveNFSSharedDirPath`) is deleted. Every shared-dir handle comes from
-  `Resolved.Open`.
+  `ServerConfig`. `server.shared_dir_storage` is read once at startup by
+  `config.LoadHubSharedDirStorage`, through the same env-free
+  `LoadGlobalSettings()` the brokers use. It fails closed when the file
+  mentions the key but cannot be loaded, and adds no env surface. The
+  per-request file read (`resolveNFSSharedDirPath`) is deleted. Every
+  shared-dir handle comes from `Resolved.Open`.
 - **Write gate**: on a Cloud Run Service, shared-dir writes are gated on the
   resolved Mount's backend (`projectfs.Backend.Durable`) rather than on the
   workspace's. A refused write is rejected before the directory is created,
@@ -55,11 +56,21 @@ Changes:
   brokers do (per-dir RWX claims). The write gate now answers 503 there
   instead of writing to instance disk. A note on ptone/scion#5823 says the
   gate opens once P3 places shared dirs on the shared volume.
-- **Linked project through the co-located broker keeps its local path** when
-  the Layout comes from `workspace_storage`. Local-container brokers keep
-  shared dirs local unless `shared_dir_storage` is nfs (findings D9). Git
-  projects whose only providers are remote brokers used to get a 409; on a
-  shared Layout they now resolve to the uuid tree.
+- **Q1 applied exactly (R1)**: there is no co-located-broker exception. The
+  T4 Cloud Run hub embeds a k8s broker that provides hub-native projects, so
+  such an exception would undo the fix. Known D9 gap until P3: a co-located
+  Docker broker with only `workspace_storage` nfs keeps its agents' shared
+  dirs node-local.
+- **Env**: no `SCION_SERVER_SHARED_DIR_STORAGE_*` surface in P1, so the hub
+  and brokers read the same file-only source. P3's `project_storage` can add
+  env to both together.
+- **Declaration DELETE** leaves the workspace-export leaf in place when the
+  Layout comes from `workspace_storage`. The lifecycle phase picks it up
+  (noted on ptone/scion#5835).
+- **Deviations (ruled)**: the 503 text names
+  shared_dir_storage/workspace_storage until `project_storage` exists
+  (ptone/scion#5821). `Layout.Realize` is deferred to P3, with its intended
+  signature recorded in `pkg/projectfs`.
 - **`Mount.Kind`** is an explicit discriminator (workspace | shared-dir).
   The design's sketch used `Name`, but `workspace` is also a valid
   shared-dir name.
