@@ -547,3 +547,102 @@ func TestDetectRepoRoot_SharedWorkspaceWithUnusableGitDirIsPlain(t *testing.T) {
 		})
 	}
 }
+
+// A project checked out in a linked worktree of another checkout: its
+// agents' worktrees share the main repository's common dir, and the repo
+// root is the main repository, as before. Rewriting the commondir files in
+// the main repository's worktree admin dirs (which a worktree layout mounts
+// writable) to name another repository is refused: the project's common
+// dir is taken from the path in the project checkout's own .git file.
+func TestDetectRepoRoot_ProjectInLinkedWorktree(t *testing.T) {
+	base := t.TempDir()
+	main := mkGitRepo(t, filepath.Join(base, "main"))
+	other := mkGitRepo(t, filepath.Join(base, "other"))
+	wt := filepath.Join(base, "wt")
+	runGitIn(t, main, "worktree", "add", "-b", "wt", wt)
+	projectDir := filepath.Join(wt, config.DotScion)
+	if err := os.MkdirAll(filepath.Join(projectDir, "agents", "dev"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ws := filepath.Join(projectDir, "agents", "dev", "workspace")
+	runGitIn(t, wt, "worktree", "add", "-b", "dev", ws)
+
+	if got := mustDetectRepoRoot(t, false, ws, projectDir); eval(t, got) != eval(t, main) {
+		t.Fatalf("repo root = %q, want the main repository %q", got, main)
+	}
+
+	otherGit := eval(t, filepath.Join(other, ".git"))
+	for _, checkout := range []string{wt, ws} {
+		gitdir, ok := readGitdirPointer(filepath.Join(checkout, ".git"))
+		if !ok {
+			t.Fatalf("fixture: %s has no .git pointer", checkout)
+		}
+		if err := os.WriteFile(filepath.Join(gitdir, "commondir"), []byte(otherGit+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, _ := util.GetCommonGitDir(ws); eval(t, got) != otherGit {
+		t.Fatalf("fixture: git should report %s as the workspace's common dir, got %s", otherGit, got)
+	}
+	if got, err := detectRepoRoot(false, ws, projectDir, nil); err == nil || got != "" {
+		t.Fatalf("rewritten commondir files: detectRepoRoot = (%q, %v), want a refusal", got, err)
+	}
+}
+
+// A workspace at the project root whose .git is a file (a checkout that is
+// itself a linked worktree) gets the shared layout: the root is the
+// workspace, not the repository the file points into.
+func TestDetectRepoRoot_ProjectRootWithGitFileIsShared(t *testing.T) {
+	base := t.TempDir()
+	main := mkGitRepo(t, filepath.Join(base, "main"))
+	ws := filepath.Join(base, "wt")
+	runGitIn(t, main, "worktree", "add", "-b", "wt", ws)
+	projectDir := filepath.Join(ws, config.DotScion)
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := mustDetectRepoRoot(t, false, ws, projectDir); eval(t, got) != eval(t, ws) {
+		t.Fatalf("repo root = %q, want the workspace %q", got, ws)
+	}
+}
+
+// The workspace storage backend re-resolution: the backend's workspace on
+// the export is a checkout whose commondir names another repository, so the
+// start is refused there and the runtime is not called.
+func TestStartNFSWorkspace_RefusesRedirectedCommonDir(t *testing.T) {
+	mountRoot := filepath.Join(t.TempDir(), "nfs")
+	wsPath := mkGitRepo(t, filepath.Join(mountRoot, "share-1", "projects", testNFSWorkspaceProjectID, "workspace"))
+	other := mkGitRepo(t, filepath.Join(mountRoot, "share-1", "projects", "other", "workspace"))
+	setCommonDir(t, wsPath, filepath.Join(other, ".git"), filepath.Join(other, ".git"))
+
+	f := newSharedDirStorageRunFixture(t)
+	f.writeGlobalSettings(t, fmt.Sprintf(nfsWorkspaceStartYAML, mountRoot))
+
+	var calls int
+	mgr := NewManager(&runtime.MockRuntime{
+		NameFunc: func() string { return "kubernetes" },
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, rc runtime.RunConfig) (string, error) {
+			calls++
+			return "mock-id", nil
+		},
+	})
+	_, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        "test-agent",
+		ProjectPath: f.projectScionDir,
+		NoAuth:      true,
+		Env: map[string]string{
+			"SCION_AGENT_ID":   "agent-2157",
+			"SCION_PROJECT_ID": testNFSWorkspaceProjectID,
+		},
+		GitClone: &api.GitCloneConfig{URL: "https://example.com/repo.git", Branch: "main"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "outside the project") {
+		t.Fatalf("Start error = %v, want a refusal naming the common dir", err)
+	}
+	if calls != 0 {
+		t.Fatalf("runtime Run was called %d time(s) on a refused start", calls)
+	}
+}

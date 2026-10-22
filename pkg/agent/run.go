@@ -2848,7 +2848,11 @@ func writeAgentTokenFile(agentHome, token string) error {
 //   - workspace that is a plain checkout elsewhere (for example a workspace
 //     storage backend's host path): the root is the workspace;
 //   - workspace that is a worktree or a subdirectory of a repository: the
-//     root is the project's own repository root (projectRepoRoot).
+//     root is the directory holding the project's own common git dir
+//     (projectCommonDir), which is the main repository when the project is
+//     itself checked out in a linked worktree. The project's repository is
+//     the nearest one enclosing the project root, so this bound is "the
+//     project's enclosing repository", not the project root itself.
 //
 // Every git probe here is bounded with GIT_CEILING_DIRECTORIES, so git never
 // searches above the directory the answer has to match. When git reports a
@@ -2900,8 +2904,8 @@ func detectRepoRoot(explicit bool, effectiveWorkspace, projectDir string, settin
 			ceiling = filepath.Dir(projectRepo)
 		}
 		if commonDir, err := boundedCommonGitDir(effectiveWorkspace, ceiling); err == nil {
-			if projectRepo != "" && samePath(filepath.Dir(commonDir), projectRepo) {
-				return projectRepo, nil
+			if projectCommon := projectCommonDir(projectRepo); projectCommon != "" && samePath(commonDir, projectCommon) {
+				return filepath.Dir(projectCommon), nil
 			}
 			return "", workspaceCommonDirError(effectiveWorkspace, commonDir)
 		}
@@ -2944,11 +2948,13 @@ func workspaceCommonDirError(workspace, commonDir string) error {
 
 // boundedRevParse runs git rev-parse with args in dir, with ceiling as
 // GIT_CEILING_DIRECTORIES: git checks dir and its ancestors below ceiling for
-// a repository, never ceiling itself or anything above it.
+// a repository, never ceiling itself or anything above it. The environment
+// is worktreeGitEnv's, so an inherited GIT_DIR or similar cannot override
+// the search.
 func boundedRevParse(dir, ceiling string, args ...string) (string, error) {
 	cmd := exec.Command("git", append([]string{"rev-parse"}, args...)...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GIT_CEILING_DIRECTORIES="+ceiling)
+	cmd.Env = append(worktreeGitEnv(), "GIT_CEILING_DIRECTORIES="+ceiling)
 	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("git rev-parse %s in %s: %w", strings.Join(args, " "), dir, err)
@@ -3008,6 +3014,40 @@ func projectRepoRoot(projectRoot string) string {
 		}
 		dir = parent
 	}
+}
+
+// projectCommonDir returns the common git dir of the project checkout at
+// top (projectRepoRoot's result), or "" if it cannot be told from the
+// layout: top's .git directory, or, when top's .git is a pointer file (the
+// project is checked out in a linked worktree), the directory holding the
+// worktrees/<name> directory the pointer names. The commondir file inside
+// that worktree's admin directory is deliberately not read: it sits in the
+// main repository's .git directory, which worktree layouts mount writable
+// into agent containers. A pointer to a gitdir not shaped
+// <common>/worktrees/<name> (a submodule, for example) is used as is.
+func projectCommonDir(top string) string {
+	if top == "" {
+		return ""
+	}
+	dotGit := filepath.Join(top, ".git")
+	info, err := os.Lstat(dotGit)
+	if err != nil {
+		return ""
+	}
+	if info.IsDir() {
+		return dotGit
+	}
+	if !info.Mode().IsRegular() {
+		return ""
+	}
+	gitdir, ok := readGitdirPointer(dotGit)
+	if !ok {
+		return ""
+	}
+	if filepath.Base(filepath.Dir(gitdir)) == "worktrees" {
+		return filepath.Dir(filepath.Dir(gitdir))
+	}
+	return gitdir
 }
 
 // resolvedPathWithin is pathWithin on symlink-resolved paths (cleaned paths
