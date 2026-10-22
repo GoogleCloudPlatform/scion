@@ -217,6 +217,13 @@ interface AppliedConfig {
 
 interface AgentWithConfig extends Omit<Agent, 'appliedConfig'> {
   appliedConfig?: AppliedConfig;
+  /**
+   * The resolved container timezone and its source, as on the PATCH
+   * response. The hub sends them only to a caller who may view the agent's
+   * env; absent otherwise.
+   */
+  resolvedTimezone?: string;
+  timezoneSource?: string;
 }
 
 /** The model choices offered by the configure form's model select. */
@@ -957,7 +964,14 @@ export class ScionPageAgentConfigure extends LitElement {
   private populateTimezone(): void {
     const ac = this.agent?.appliedConfig;
     this.tzPinned = ac?.explicitTimezone ?? '';
-    if (this.tzPinned) {
+    const resolved = this.agent?.resolvedTimezone;
+    const source = this.agent?.timezoneSource;
+    if (typeof resolved === 'string' && source) {
+      // The GET carries the resolved zone (only for a caller who may view
+      // the agent's env); otherwise fall back to the pin, or unknown.
+      this.tzResolved = resolved;
+      this.tzSource = source;
+    } else if (this.tzPinned) {
       this.tzResolved = this.tzPinned;
       this.tzSource = ac?.explicitTimezoneLegacy ? 'legacy' : 'explicit';
     } else {

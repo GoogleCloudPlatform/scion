@@ -17,7 +17,8 @@
 /**
  * Configure-page Timezone row (tz-refactor task 17): pin and unpin write the
  * agent PATCH's top-level explicitTimezone, the row shows resolvedTimezone
- * and timezoneSource from the PATCH response, a running agent gets the
+ * and timezoneSource from the agent GET (when the caller may view the
+ * agent's env) and from the PATCH response, a running agent gets the
  * "applies on next start" hint, and TZ never appears in (or leaves through)
  * the env table.
  */
@@ -200,6 +201,28 @@ describe('agent-configure Timezone row', () => {
       makeAgent('created', { explicitTimezone: 'Europe/Paris', explicitTimezoneLegacy: true })
     );
     expect(text(el, 'timezone-source')).toBe('Pinned (kept from an earlier TZ setting)');
+  });
+
+  it('on load shows the resolved zone and source the agent GET carries (ptone/scion#2767)', async () => {
+    const el = await mount({
+      ...makeAgent('created'),
+      resolvedTimezone: 'Asia/Tokyo',
+      timezoneSource: 'hub-default',
+    });
+    expect(text(el, 'timezone-value')).toBe('Asia/Tokyo');
+    expect(text(el, 'timezone-source')).toBe('Hub default timezone');
+    expect(q(el, 'timezone-unpin')).toBeNull();
+    expect(patchCalls).toHaveLength(0);
+  });
+
+  it('on load shows source "none" from the GET as the container default, UTC', async () => {
+    const el = await mount({
+      ...makeAgent('created'),
+      resolvedTimezone: '',
+      timezoneSource: 'none',
+    });
+    expect(text(el, 'timezone-value')).toBe('UTC');
+    expect(text(el, 'timezone-source')).toBe('Not set (container default)');
   });
 
   it('pins through the shared picker and shows the PATCH response', async () => {
