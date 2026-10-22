@@ -156,7 +156,14 @@ func (p *Pipeline) logDeliverySnapshotDisk(force, readDisk bool) {
 	}
 	var analytics string
 	if readDisk {
-		analytics = p.analyticsSnapshotLine(true)
+		// Rate-limit check first, so a skipped tick does no ledger read.
+		p.diagnosticMu.Lock()
+		limited := !force && time.Since(p.diagnosticLast) < diagnosticSnapshotInterval
+		p.diagnosticMu.Unlock()
+		if limited {
+			return
+		}
+		analytics = p.analyticsSnapshotLine(true) // outside diagnosticMu
 	}
 	p.diagnosticMu.Lock()
 	defer p.diagnosticMu.Unlock()

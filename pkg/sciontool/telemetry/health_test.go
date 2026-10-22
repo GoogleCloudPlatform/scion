@@ -1270,7 +1270,8 @@ func startRow(in healthInputs) healthInputs {
 }
 
 // healthRowViolations returns the cross-field invariants a single real
-// health row violates. The same checker runs over the goldens and over
+// health row violates (live invariants only; fixture-only rules are in
+// goldenStartIsQuiet). The same checker runs over the goldens and over
 // events captured from a real pipeline flow (TestHealthRealFlowSatisfiesInvariants),
 // so the goldens are held to what live events satisfy.
 func healthRowViolations(ev *telemetrycontract.HealthEvent) []string {
@@ -1338,11 +1339,23 @@ func healthRowViolations(ev *telemetrycontract.HealthEvent) []string {
 			bad("outbox outcomes %d exceed events offered %d", outcomes, offered)
 		}
 	}
-	if ev.Trigger == telemetrycontract.HealthTriggerStart && (v(ev.UsageObservationsDerived) != 0 || v(ev.AnalyticsAppended) != 0 ||
-		ev.MetricPointsAccepted != 0 || ev.LogRecordsAccepted != 0 || ev.HarnessVersion != "") {
-		bad("a start snapshot carries per-run activity")
-	}
 	return out
+}
+
+// goldenStartIsQuiet is a fixture-realism rule for the goldens only, NOT a
+// live invariant: a real start event is built after the pipeline started
+// and the provisioner ran, so it may already carry accepted points/records,
+// usage or a harness_version. The start goldens model the earliest possible
+// start (nothing yet) for WP4 fixtures.
+func goldenStartIsQuiet(ev *telemetrycontract.HealthEvent) bool {
+	v := func(p *int64) int64 {
+		if p == nil {
+			return 0
+		}
+		return *p
+	}
+	return ev.Trigger != telemetrycontract.HealthTriggerStart || (v(ev.UsageObservationsDerived) == 0 && v(ev.AnalyticsAppended) == 0 &&
+		ev.MetricPointsAccepted == 0 && ev.LogRecordsAccepted == 0 && ev.HarnessVersion == "")
 }
 
 // healthSetViolations returns the invariants a set of rows violates as if
@@ -1446,6 +1459,9 @@ func TestHealthGoldensAreConsistent(t *testing.T) {
 		}
 		for _, msg := range healthRowViolations(ev) {
 			t.Errorf("%s: %s", f, msg)
+		}
+		if !goldenStartIsQuiet(ev) {
+			t.Errorf("%s: a start golden carries per-run activity (fixture rule)", f)
 		}
 		evs[filepath.Base(f)] = ev
 	}
@@ -1732,6 +1748,14 @@ func TestDegradedSnapshotNeverWaitsOnOutboxLock(t *testing.T) {
 	p.markDeliveryDegraded() // already degraded, interval elapsed
 	if d := time.Since(start); d > 500*time.Millisecond {
 		t.Fatalf("degraded snapshots took %s with the outbox lock held; they must not read the ledger", d)
+	}
+	// The periodic snapshot was still blocked on its ledger read while the
+	// inline calls ran and returned (deterministic overlap check; the sleep
+	// above only makes the overlap likely to start inside the lock wait).
+	select {
+	case <-periodicDone:
+		t.Fatal("the periodic snapshot finished early; the overlap was not exercised")
+	default:
 	}
 	_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
 	unlocked = true

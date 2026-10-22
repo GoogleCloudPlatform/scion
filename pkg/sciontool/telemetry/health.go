@@ -131,7 +131,7 @@ func deriveUsageCollection(sel UsageSourceSelection, harness string, nativeActiv
 }
 
 // usageCapabilityTable is the static capability table (design section
-// 3.4), from adapter evidence at this revision: what the adapter CAN
+// 3.2), from adapter evidence at this revision: what the adapter CAN
 // report, not what a given record did.
 var usageCapabilityTable = map[string]struct {
 	caps        []string
@@ -625,11 +625,14 @@ func (p *Pipeline) stopHealthLoop() {
 // captureFinalUsage keeps the native deriver's diagnostics for the final
 // snapshot; Stop releases the deriver before the final event is built.
 func (p *Pipeline) captureFinalUsage(d *UsageDeriver) {
+	if d == nil {
+		return
+	}
 	diag := d.Diagnostics()
 	h := &p.health
 	h.mu.Lock()
 	h.finalUsage = &diag
-	h.finalNative = d != nil && len(d.rules) > 0
+	h.finalNative = len(d.rules) > 0
 	h.mu.Unlock()
 }
 
