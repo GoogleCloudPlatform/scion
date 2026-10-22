@@ -393,7 +393,13 @@ func redactURLError(err error) error {
 // original (code that walks to the innermost error and prints it would
 // show that text again), and so errors.As does not reach it; errors.Is,
 // and the Timeout and Temporary methods url.Error asks its Err for, are
-// answered from the original.
+// answered from the original, through any wrapping it has.
+//
+// Not reaching the concrete original with errors.As is safe for retry and
+// timeout handling: *url.Error itself satisfies net.Error and asks its Err
+// (this type) for Timeout and Temporary, so errors.As(err, &netErr) still
+// finds the *url.Error and reports the original's answer. There is
+// deliberately no As method, which would hand out the original.
 type urlDetailsHidden struct{ err error }
 
 func (e *urlDetailsHidden) Error() string { return "details not shown for a masked URL" }
@@ -402,14 +408,16 @@ func (e *urlDetailsHidden) Error() string { return "details not shown for a mask
 // so checks such as errors.Is(err, context.DeadlineExceeded) still work.
 func (e *urlDetailsHidden) Is(target error) bool { return errors.Is(e.err, target) }
 
-// Timeout reports whether the original error is a timeout.
+// Timeout reports whether the original error, or an error it wraps, is a
+// timeout.
 func (e *urlDetailsHidden) Timeout() bool {
-	t, ok := e.err.(interface{ Timeout() bool })
-	return ok && t.Timeout()
+	var t interface{ Timeout() bool }
+	return errors.As(e.err, &t) && t.Timeout()
 }
 
-// Temporary reports whether the original error is temporary.
+// Temporary reports whether the original error, or an error it wraps, is
+// temporary.
 func (e *urlDetailsHidden) Temporary() bool {
-	t, ok := e.err.(interface{ Temporary() bool })
-	return ok && t.Temporary()
+	var t interface{ Temporary() bool }
+	return errors.As(e.err, &t) && t.Temporary()
 }

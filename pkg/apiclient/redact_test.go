@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -365,8 +366,10 @@ func (fakeNetError) Temporary() bool { return true }
 
 // A *url.Error whose URL is masked whole shows a fixed message instead of
 // its error, but errors.Is, Timeout and Temporary still see the original
-// error. Walking errors.Unwrap to the bottom never reaches an error whose
-// text shows the URL or the original message.
+// error, also when the original wraps the error that answers them, and
+// errors.As still finds a net.Error (the *url.Error). Walking
+// errors.Unwrap to the bottom never reaches an error whose text shows the
+// URL (its user info or its host) or the original message.
 func TestRedactURLError_MaskedKeepsErrorChain(t *testing.T) {
 	const secret = "tok_fake/Pw9q"
 	const raw = "https://" + secret + "@hub.example.com/api"
@@ -380,6 +383,8 @@ func TestRedactURLError_MaskedKeepsErrorChain(t *testing.T) {
 		{"deadline", context.DeadlineExceeded, context.DeadlineExceeded, true, true},
 		{"canceled", context.Canceled, context.Canceled, false, false},
 		{"net timeout", fakeNetError{}, nil, true, true},
+		{"wrapped deadline", fmt.Errorf("read: %w", context.DeadlineExceeded), context.DeadlineExceeded, true, true},
+		{"wrapped net timeout", fmt.Errorf("dial: %w", fakeNetError{}), nil, true, true},
 	} {
 		err := redactURLError(&url.Error{Op: "Get", URL: raw, Err: tc.inner})
 		var ue *url.Error
@@ -395,6 +400,10 @@ func TestRedactURLError_MaskedKeepsErrorChain(t *testing.T) {
 		if ue.Timeout() != tc.timeout || ue.Temporary() != tc.temporary {
 			t.Errorf("%s: Timeout() = %v, Temporary() = %v, want %v, %v", tc.name, ue.Timeout(), ue.Temporary(), tc.timeout, tc.temporary)
 		}
+		var nerr net.Error
+		if !errors.As(err, &nerr) || nerr.Timeout() != tc.timeout {
+			t.Errorf("%s: errors.As(err, &net.Error) = %v (%T), want the *url.Error with Timeout() = %v", tc.name, nerr != nil, nerr, tc.timeout)
+		}
 		var ne fakeNetError
 		if errors.As(err, &ne) {
 			t.Errorf("%s: errors.As reaches the original error", tc.name)
@@ -405,6 +414,9 @@ func TestRedactURLError_MaskedKeepsErrorChain(t *testing.T) {
 				if strings.Contains(e.Error(), secret[i:i+4]) {
 					t.Errorf("%s: unwrapped error %d (%T) %q shows %q", tc.name, depth, e, e.Error(), secret[i:i+4])
 				}
+			}
+			if strings.Contains(e.Error(), "hub.example.com") {
+				t.Errorf("%s: unwrapped error %d (%T) %q shows the host of a URL masked whole", tc.name, depth, e, e.Error())
 			}
 			if strings.Contains(e.Error(), tc.inner.Error()) {
 				t.Errorf("%s: unwrapped error %d (%T) %q shows the original message", tc.name, depth, e, e.Error())

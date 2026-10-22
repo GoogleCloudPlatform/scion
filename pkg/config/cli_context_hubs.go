@@ -57,6 +57,13 @@ func ValidateHubName(name string) error {
 func ValidateHubURL(endpoint string) error {
 	// A hub URL never needs an '@'; with one, a password containing '/'
 	// can parse as a port and path, so the URL is not repeated.
+	//
+	// This check must stay BEFORE the parse-and-scheme check below. That
+	// check formats the endpoint with RedactURL and is the one place that
+	// gets non-http(s) URLs (a schemeless "user:pass@host" parses as an
+	// opaque URL that RedactURL leaves unchanged). It is safe only because
+	// every endpoint with an '@' has already returned here; swapping the
+	// two blocks would print such credentials.
 	if strings.Contains(endpoint, "@") {
 		return fmt.Errorf("invalid hub URL %q: a hub URL must not contain '@'", maskWholeURL(strings.TrimSpace(endpoint)))
 	}
