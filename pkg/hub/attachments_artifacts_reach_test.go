@@ -33,7 +33,8 @@ import (
 //
 //	sendAgentRouted -> stageChatAttachments -> stageArtifactAttachment -> OpenBoundAttachment
 //
-// and nothing else in the package (no handler, no route) may call any link
+// and nothing else in the package (and its guardScanSubdirs subpackages)
+// (no handler, no route) may call any link
 // of it; nor may any other package of the module reference the opener. A
 // new caller fails this test and needs a security review.
 func TestOpenBoundAttachmentReachableOnlyFromSendPath(t *testing.T) {

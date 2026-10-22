@@ -251,7 +251,8 @@ type tiCall struct {
 	pos token.Pos
 }
 
-// tiCensus parses every non-test .go file of the package and returns, per
+// tiCensus parses every non-test .go file of the package (and its
+// guardScanSubdirs subpackages) and returns, per
 // selector name, the call sites x.<name>(...) with the selector expression
 // x rendered as source-like text ("cfg.ProxyAuthenticator").
 func tiCensus(t *testing.T) (map[string]map[string][]tiCall, *token.FileSet) {

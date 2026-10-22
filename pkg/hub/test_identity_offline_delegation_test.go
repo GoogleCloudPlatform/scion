@@ -969,7 +969,8 @@ func (dlUserReadFaultStore) GetUser(context.Context, string) (*store.User, error
 }
 
 // Source pin: offlineGrantorStatusExempt is referenced once in this
-// package's non-test code, inside principalStatusGate, and the workload
+// package's non-test code (and its guardScanSubdirs subpackages'), inside
+// principalStatusGate, and the workload
 // delegation state's offlineGatePassed field is assigned once, in
 // test_identity_workload_issuer.go.
 func TestPrincipalStatusGate_OfflineExemptionSingleSite(t *testing.T) {

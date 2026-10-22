@@ -32,8 +32,9 @@ var postgresEventPublisherTestHooks = map[string]bool{
 }
 
 // TestPostgresEventPublisher_TestHooksSetOnlyInTests: no non-test file of
-// package hub assigns a PostgresEventPublisher test hook, as an assignment
-// or as a composite-literal key, so every hook is nil outside tests.
+// package hub (and its guardScanSubdirs subpackages) assigns a
+// PostgresEventPublisher test hook, as an assignment or as a
+// composite-literal key, so every hook is nil outside tests.
 func TestPostgresEventPublisher_TestHooksSetOnlyInTests(t *testing.T) {
 	// pkgmove:scan-covers pkg/hub/apierr
 	// scanned through guardScanSubdirs; guards PostgresEventPublisher test hook assignments.
