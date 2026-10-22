@@ -20,7 +20,15 @@ the values. Read them there.
 | `UBUNTU_IMAGE` | Base image, `ubuntu:24.04@sha256:<index digest>` | Docker Hub `library/ubuntu` tag `24.04`, top-level (multi-arch index) digest |
 | `ACTIONS_RUNNER_VERSION` / `ACTIONS_RUNNER_SHA256` | GitHub Actions runner, `actions-runner-linux-x64-<v>.tar.gz` | The release notes of <https://github.com/actions/runner/releases> list the SHA-256 of each tarball |
 | `GO_VERSION` / `GO_SHA256` | Go toolchain, `go<v>.linux-amd64.tar.gz` | <https://go.dev/dl/> (keep it in step with the repo's `go.mod`) |
-| `GOLANGCI_LINT_VERSION` / `GOLANGCI_LINT_SHA256` | golangci-lint, `golangci-lint-<v>-linux-amd64.tar.gz` | `golangci-lint-<v>-checksums.txt` on <https://github.com/golangci/golangci-lint/releases> (keep it in step with the version CI pins) |
+
+golangci-lint is not a download: the `golangci-lint` stage builds it with
+[`golangci-lint/build.sh`](golangci-lint/README.md), the same script, pins
+(`golangci-lint/VERSIONS`: module checksums and the patch sha256) and go-tools#1839
+patch that CI's lint job uses, so the image's binary is the one CI runs
+(`golangci-lint version` reports `2.15.0-scion-gotools1839`). The stage builds with
+the image's Go and fetches source from the Go module proxy, so the image build
+needs network access to proxy.golang.org (Cloud Build has it). Bump it in
+`golangci-lint/` (its README), not here.
 
 Every download is checked with `sha256sum -c`, and a mismatch fails the build.
 To override a pin, pass the version **and** its checksum with `--build-arg`,

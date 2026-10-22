@@ -92,12 +92,18 @@ v1 routes `lint` only.
 
 ### Things P6 must look at before P7
 
-- **golangci-lint version.** `ci.yml` installs golangci-lint v2.15.0 through
-  `golangci-lint-action`, and the runner image pins the same version
-  (`GOLANGCI_LINT_VERSION` in `runner/Dockerfile`). The routed `lint` job
-  still installs it through the action, and the PoC uses the image's
-  pre-installed binary. Bump both together: the image pin is the single
-  place for the image, and `ci.yml`'s `version:` input for CI.
+- **golangci-lint binary.** `ci.yml`'s lint job runs golangci-lint v2.15.0
+  built with the go-tools#1839 patch by `cr-ci/runner/golangci-lint/build.sh`:
+  it restores the binary from its own Actions cache entry (key
+  `golangci-lint-patched-<os>-<arch>-go<version>-<hash of cr-ci/runner/golangci-lint/**>`,
+  path `$RUNNER_TEMP/golangci-lint-patched`), or builds it, and puts it first on
+  `PATH`; `golangci-lint-action` then only restores the analysis cache
+  (`install-mode: none`). A routed `lint` job does the same on the cr-ci runner
+  (`RUNNER_TEMP` is `/home/runner/work/_temp` on both runner types, so the entry
+  is shared) and uses that binary, not the image's. The image ships the same
+  build (`runner/Dockerfile`, `golangci-lint` stage) for the PoC template and
+  anything else that calls `golangci-lint` directly. One set of pins
+  (`cr-ci/runner/golangci-lint/VERSIONS`) serves all of them.
 - **Caches under `$HOME` go to `/scratch`, in ubuntu-latest's layout.** See
   "Cache sharing" below. The runner entrypoint sets this up; the first step of
   both templates only checks it.

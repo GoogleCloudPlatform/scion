@@ -1,8 +1,11 @@
 # cr-ci routing snippet for the `lint` job of .github/workflows/ci.yml
 # (TEMPLATE, not a workflow). P7 applies it in a separate PR; see
 # cr-ci/workflows/README.md. Only the lines below change (plus one new step); everything else in
-# the job (checkout, setup-go-cache, the golangci-lint-action install, the
-# memory sampler, save-go-cache) stays exactly as it is.
+# the job (checkout, setup-go-cache, the restore / build / save steps of the
+# patched golangci-lint from cr-ci/runner/golangci-lint/, golangci-lint-action's
+# analysis-cache restore, the memory sampler, save-go-cache) stays exactly as it
+# is. On the cr-ci runner those steps build or restore the same binary as on
+# ubuntu-latest (shared cache entry); the runner image's copy is not used.
 #
 # 1. runs-on: the routing expression. It routes to the Actions variable
 #    SCION_LARGE_RUNNER (ROUTING_VARIABLE_NAME; set it to RUNNER_LABEL) only
@@ -82,7 +85,9 @@ lint:
           fail=1
         fi
         exit "$fail"
-    # ... unchanged steps: "Checkout code", "Setup Go", "Install golangci-lint" ...
+    # ... unchanged steps: "Checkout code", "Setup Go", "Restore patched golangci-lint",
+    # "Build patched golangci-lint", "Save patched golangci-lint",
+    # "Restore golangci-lint analysis cache" ...
     - name: golangci-lint
       shell: bash
       env:

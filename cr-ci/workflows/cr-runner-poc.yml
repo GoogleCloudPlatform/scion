@@ -22,7 +22,9 @@
 # RAM build cache.
 #
 # The tools come from the runner image (runner/Dockerfile): Go and
-# golangci-lint are pre-installed, which is part of what the PoC measures.
+# golangci-lint are pre-installed, which is part of what the PoC measures. The
+# image's golangci-lint is the patched build CI runs (cr-ci/runner/golangci-lint/,
+# dominikh/go-tools#1839), which removes most of the single-threaded tail P6b saw.
 # Only people with write access can push a branch or dispatch a workflow, so the
 # fork guard of the routing expression is not needed here; the mediator applies
 # its own fork guard to every run anyway.

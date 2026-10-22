@@ -192,7 +192,8 @@ versions it considers outdated, and an outdated runner tries to update
 itself at start-up on every execution. Check
 <https://github.com/actions/runner/releases> at least monthly and bump
 `ACTIONS_RUNNER_VERSION` soon after each release. Keep `GO_VERSION` in step
-with `go.mod` and `GOLANGCI_LINT_VERSION` with the version CI pins.
+with `go.mod`. golangci-lint follows `runner/golangci-lint/VERSIONS`, which CI's
+lint job uses too: a change there changes both.
 
 ## Capacity and quotas
 
