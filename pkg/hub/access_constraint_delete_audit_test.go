@@ -27,6 +27,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
 	"log/slog"
 	"net/http"
 	"path/filepath"
@@ -189,6 +190,41 @@ func TestGovernanceDeleteAudit_SinkFailurePreservesCommit(t *testing.T) {
 	assert.NotContains(t, failure, "error")
 }
 
+// O2: a delete whose log event cannot be built still commits; the failure
+// is logged with its own code and no error text, nothing is dispatched, and
+// the delete's auditId is empty.
+func TestGovernanceDeleteAudit_BuildFailurePreservesCommit(t *testing.T) {
+	gs, ps, _, s := govTestSetup(t)
+	adminID, created := p6SeedUpdatableConstraint(t, gs, ps, s, "p6-delete-build-failure")
+	deleteSink := &p6DeleteAuditSink{store: s}
+	gs.deleteAuditSink = deleteSink
+	logCapture := &capturingHandler{}
+	gs.logger = slog.New(logCapture)
+	// A malformed trusted correlation passes preview validation and
+	// authorization but fails envelope validation in the post-commit build.
+	ctx := auditevent.ContextWithOperation(context.Background(), auditevent.AuditOperationContext{CorrelationID: "bad\ncorrelation"})
+
+	result, err := p6CommitDelete(t, ctx, gs, ps, created, pvTestActor(adminID))
+	require.NoError(t, err, "a build failure never fails or compensates the committed delete")
+	require.NotNil(t, result)
+	assert.Empty(t, result.AuditID, "no event was built")
+	assert.Zero(t, deleteSink.calls, "nothing is dispatched")
+	_, err = s.GetAccessConstraint(context.Background(), created.ID)
+	require.ErrorIs(t, err, store.ErrNotFound, "the delete stays committed")
+
+	var failure map[string]any
+	for _, record := range logCapture.all() {
+		if record.Message == "failed to build committed access boundary delete audit event" {
+			require.Nil(t, failure, "exactly one build-failure line")
+			failure = recordAttrs(record)
+		}
+	}
+	require.NotNil(t, failure)
+	assert.Equal(t, "audit_event_build_failed", failure["failure_code"])
+	assert.Equal(t, created.ID, failure["constraint_id"])
+	assert.NotContains(t, failure, "error")
+}
+
 // R16 Q1: the production constructor routes DELETE through a sink over the
 // server's shared asynchronous audit writer, and leaves CREATE on its own
 // synchronous sink.
@@ -230,6 +266,11 @@ func TestInitBoundaryServices_DeleteSinkUsesSharedAsyncWriter(t *testing.T) {
 
 func TestAccessConstraintMutationResponses_AuditIDIsUUID(t *testing.T) {
 	srv, s := b7TestServer(t)
+	// The request-log middleware mints the request ID the handlers put on
+	// the audit request ref (a test server has no request logger by default).
+	srv.SetRequestLogger(slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	deleteSink := &p6DeleteAuditSink{store: s}
+	srv.governanceService.deleteAuditSink = deleteSink
 	targetID := pvSeedUser(t, s, "p6-http-target")
 	draft := func(permissions []string) map[string]any {
 		return map[string]any{
@@ -305,6 +346,23 @@ func TestAccessConstraintMutationResponses_AuditIDIsUUID(t *testing.T) {
 	p6RequireUUID(t, deleted.AuditID)
 	assert.False(t, strings.HasPrefix(deleted.AuditID, "aud_"))
 	assert.NotEqual(t, updated.AuditID, deleted.AuditID)
+
+	// O1: the DELETE envelope carries the same request ref as CREATE.
+	require.Equal(t, 1, deleteSink.calls)
+	assert.Empty(t, deleteSink.problems)
+	event := deleteSink.events[0]
+	assert.Equal(t, deleted.AuditID, event.EventID)
+	requestID := deleteResponse.Header().Get("X-Request-ID")
+	require.NotEmpty(t, requestID)
+	require.NotNil(t, event.Request)
+	assert.Equal(t, auditevent.RequestRef{
+		ID:      requestID,
+		Method:  http.MethodDelete,
+		Route:   "/api/v1/admin/access-constraints/{id}",
+		Surface: "api",
+	}, *event.Request)
+	assert.Equal(t, requestID, event.CorrelationID)
+	assert.NotContains(t, string(deleteSink.rendered[0]), "@", "no email in the envelope")
 
 	// The DELETE auditId names a log event only: the deleted constraint's
 	// history endpoint answers the non-enumerating 404.

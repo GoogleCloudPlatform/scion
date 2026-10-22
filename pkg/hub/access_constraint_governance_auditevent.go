@@ -90,13 +90,21 @@ func (gs *GovernanceService) updateAccessConstraintWithAudit(
 ) (*CommitResult, error) {
 	var result *CommitResult
 	err := gs.store.WithTx(ctx, func(tx store.Store) error {
+		before, err := tx.GetAccessConstraint(ctx, req.ConstraintID)
+		if err != nil {
+			return err
+		}
 		updated, err := tx.UpdateAccessConstraint(ctx, req.Draft, req.BaseRevision)
 		if err != nil {
 			return err
 		}
-		// The store increments the revision by exactly one under the row
-		// read in this transaction, so the pre-update revision is after-1.
-		beforeRevision := updated.Revision - 1
+		// The store bumps the revision by exactly one. If the row changed
+		// between this transaction's read and the store's locked read, the
+		// recorded before revision would be untrue: refuse it as a conflict.
+		if updated.Revision != before.Revision+1 {
+			return store.ErrRevisionConflict
+		}
+		beforeRevision := before.Revision
 		afterRevision := updated.Revision
 		candidate, err := buildAccessConstraintHistoryEvent(ctx, accessConstraintHistoryEventInput{
 			Action:         auditevent.AccessBoundaryUpdate,

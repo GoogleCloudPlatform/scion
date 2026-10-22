@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -34,7 +35,10 @@ import (
 // transaction together with exactly one access_constraint_history row
 // (operation recovery_disable or recovery_enable). Constraints are processed
 // sequentially; the first failure stops the operation, and the constraints
-// already committed stay committed (see RecoveryPartialError).
+// already committed stay committed (see RecoveryPartialError). Each
+// transaction re-reads its constraint first: one whose disabled state
+// already matches the target (it changed after the list was taken) is
+// skipped, with no mutation, no row, and no count.
 //
 // The service has no production caller; it is exercised by tests only.
 type RecoveryService struct {
@@ -93,6 +97,10 @@ func (e *RecoveryPartialError) Error() string {
 }
 
 func (e *RecoveryPartialError) Unwrap() error { return e.Err }
+
+// errRecoveryAlreadyInState ends a per-constraint transaction without a
+// change: the constraint already has the target state.
+var errRecoveryAlreadyInState = errors.New("constraint already in the target state")
 
 // ---------------------------------------------------------------------------
 // DisableAll — disable every active boundary, one transaction per boundary
@@ -162,6 +170,9 @@ func (rs *RecoveryService) DisableAll(ctx context.Context, actor PrincipalContex
 			if err != nil {
 				return fmt.Errorf("load constraint: %w", err)
 			}
+			if before.Disabled {
+				return errRecoveryAlreadyInState
+			}
 			if err := tx.DisableAccessConstraint(ctx, id); err != nil {
 				return fmt.Errorf("disable constraint: %w", err)
 			}
@@ -172,6 +183,9 @@ func (rs *RecoveryService) DisableAll(ctx context.Context, actor PrincipalContex
 			auditID, err = appendRecoveryHistory(ctx, tx, auditevent.AccessBoundaryRecoveryDisable, actor, before, after, ClassificationRelax)
 			return err
 		})
+		if errors.Is(err, errRecoveryAlreadyInState) {
+			continue
+		}
 		if err != nil {
 			return nil, &RecoveryPartialError{
 				Operation:    string(auditevent.AccessBoundaryRecoveryDisable),
@@ -287,6 +301,9 @@ func (rs *RecoveryService) RecoverAll(ctx context.Context, actor PrincipalContex
 			if err != nil {
 				return fmt.Errorf("load constraint: %w", err)
 			}
+			if !before.Disabled {
+				return errRecoveryAlreadyInState
+			}
 			enabled := *before
 			enabled.Disabled = false
 			after, err := tx.UpdateAccessConstraint(ctx, &enabled, before.Revision)
@@ -296,6 +313,9 @@ func (rs *RecoveryService) RecoverAll(ctx context.Context, actor PrincipalContex
 			auditID, err = appendRecoveryHistory(ctx, tx, auditevent.AccessBoundaryRecoveryEnable, actor, before, after, ClassificationTighten)
 			return err
 		})
+		if errors.Is(err, errRecoveryAlreadyInState) {
+			continue
+		}
 		if err != nil {
 			return nil, &RecoveryPartialError{
 				Operation:    string(auditevent.AccessBoundaryRecoveryEnable),

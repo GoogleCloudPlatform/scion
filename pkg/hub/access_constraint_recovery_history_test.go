@@ -46,6 +46,9 @@ type p6RecoveryFaults struct {
 	txCount   int
 	mutations []string // constraint ID per mutation attempt, in order
 	appends   []string // constraint ID per history append attempt, in order
+	// afterList, when set, runs once after the first ListAccessConstraints
+	// call: it simulates a change made after recovery took its list.
+	afterList func()
 }
 
 type p6RecoveryStore struct {
@@ -58,6 +61,15 @@ func (s *p6RecoveryStore) WithTx(ctx context.Context, fn func(tx store.Store) er
 	return s.Store.WithTx(ctx, func(tx store.Store) error {
 		return fn(&p6RecoveryStore{Store: tx, faults: s.faults})
 	})
+}
+
+func (s *p6RecoveryStore) ListAccessConstraints(ctx context.Context, limit, offset int) ([]*store.AccessConstraint, error) {
+	page, err := s.Store.ListAccessConstraints(ctx, limit, offset)
+	if hook := s.faults.afterList; hook != nil {
+		s.faults.afterList = nil
+		hook()
+	}
+	return page, err
 }
 
 func (s *p6RecoveryStore) mutationFault(id string) error {
@@ -269,6 +281,62 @@ func TestRecoveryHistory_DisableRecoverCycle(t *testing.T) {
 	assert.False(t, rs.recoveryLock.IsHeld())
 }
 
+// F3: each per-constraint transaction re-reads its constraint and skips one
+// whose state changed after the list was taken: no mutation, no row, no
+// count.
+func TestRecoveryHistory_SkipsConstraintAlreadyInTargetState(t *testing.T) {
+	t.Run("DisableAll", func(t *testing.T) {
+		_, _, _, s := govTestSetup(t)
+		actorID := govSeedAdminUser(t, s, "p6-skip-disable-actor")
+		constraints := p6SeedRecoveryConstraints(t, s, "p6-skip-disable", 3, false)
+		ids := p6IDs(constraints)
+		before := p6Snapshot(t, s, ids)
+		changed := ids[1]
+		faults := &p6RecoveryFaults{afterList: func() {
+			require.NoError(t, s.DisableAccessConstraint(context.Background(), changed))
+		}}
+		rs := NewRecoveryService(&p6RecoveryStore{Store: s, faults: faults}, nil, slog.Default())
+
+		result, err := rs.DisableAll(context.Background(), pvTestActor(actorID))
+		require.NoError(t, err)
+		assert.Equal(t, 2, result.DisabledCount, "the already-disabled constraint is not counted")
+		assert.ElementsMatch(t, []string{ids[0], ids[2]}, result.DisabledIDs)
+		assert.NotContains(t, faults.mutations, changed, "no mutation for the skipped constraint")
+		assert.NotContains(t, faults.appends, changed, "no row for the skipped constraint")
+		p6AssertRecoveryRows(t, s, "recovery_disable", ClassificationRelax, actorID, result.DisabledIDs, result.AuditIDs, before)
+		rows, err := s.ListConstraintHistory(context.Background(), changed)
+		require.NoError(t, err)
+		assert.Empty(t, rows)
+	})
+	t.Run("RecoverAll", func(t *testing.T) {
+		_, _, _, s := govTestSetup(t)
+		actorID := govSeedAdminUser(t, s, "p6-skip-recover-actor")
+		constraints := p6SeedRecoveryConstraints(t, s, "p6-skip-recover", 3, true)
+		ids := p6IDs(constraints)
+		changed := ids[1]
+		faults := &p6RecoveryFaults{afterList: func() {
+			current, err := s.GetAccessConstraint(context.Background(), changed)
+			require.NoError(t, err)
+			current.Disabled = false
+			_, err = s.UpdateAccessConstraint(context.Background(), current, current.Revision)
+			require.NoError(t, err)
+		}}
+		rs := NewRecoveryService(&p6RecoveryStore{Store: s, faults: faults}, nil, slog.Default())
+		before := p6Snapshot(t, s, ids)
+
+		result, err := rs.RecoverAll(context.Background(), pvTestActor(actorID))
+		require.NoError(t, err)
+		assert.Equal(t, 2, result.RecoveredCount, "the already-enabled constraint is not counted")
+		assert.ElementsMatch(t, []string{ids[0], ids[2]}, result.RecoveredIDs)
+		assert.NotContains(t, faults.mutations, changed)
+		assert.NotContains(t, faults.appends, changed)
+		p6AssertRecoveryRows(t, s, "recovery_enable", ClassificationTighten, actorID, result.RecoveredIDs, result.AuditIDs, before)
+		rows, err := s.ListConstraintHistory(context.Background(), changed)
+		require.NoError(t, err)
+		assert.Empty(t, rows)
+	})
+}
+
 func TestRecoveryHistory_FaultOnKthConstraintKeepsPriorCommits(t *testing.T) {
 	type operationCase struct {
 		name           string
@@ -327,7 +395,10 @@ func TestRecoveryHistory_FaultOnKthConstraintKeepsPriorCommits(t *testing.T) {
 					// k-th attempt is the failed constraint, and processing
 					// stopped there.
 					require.Len(t, faults.mutations, shape.k, "processing stops at the first failure")
-					committedIDs := faults.mutations[:shape.k-1]
+					// Copy: an empty prefix becomes nil (the service's
+					// "nothing committed" value), and the copy is detached
+					// from faults.mutations before the rerun resets it.
+					committedIDs := append([]string(nil), faults.mutations[:shape.k-1]...)
 					failedID := faults.mutations[shape.k-1]
 					assert.Equal(t, failedID, partial.FailedID)
 					assert.Equal(t, committedIDs, partial.CommittedIDs)

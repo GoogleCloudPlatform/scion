@@ -1395,14 +1395,23 @@ func (s *Server) deleteAccessConstraint(w http.ResponseWriter, r *http.Request, 
 		ID:   user.ID(),
 	}
 
-	result, err := s.governanceService.CommitBoundaryChange(r.Context(), CommitRequest{
+	commitRequest := CommitRequest{
 		Operation:    "delete",
 		ConstraintID: id,
 		BaseRevision: existing.Revision,
 		PreviewToken: previewToken,
 		Actor:        actor,
 		Credential:   user,
-	})
+	}
+	if requestID := logging.RequestIDFromContext(r.Context()); requestID != "" {
+		commitRequest.AuditRequest = &auditevent.RequestRef{
+			ID:      requestID,
+			Method:  r.Method,
+			Route:   "/api/v1/admin/access-constraints/{id}",
+			Surface: "api",
+		}
+	}
+	result, err := s.governanceService.CommitBoundaryChange(r.Context(), commitRequest)
 	if err != nil {
 		s.handleGovernanceError(w, err)
 		return
@@ -2071,10 +2080,12 @@ func parseIntOr(s string, defaultVal int) int {
 
 // sharedAuditLogSink returns the structured-log audit sink over the server's
 // shared asynchronous audit writer (s.auditWriter, built by
-// initDecisionAuditLog). Records through it are async, loss-counted and
-// best-effort: they are not persisted records. It is not gated by the
-// decision-audit experiment, which applies only to decision records. Nil
-// when the writer was not initialized.
+// initDecisionAuditLog). Records through it are async and best-effort, not
+// persisted records: queue-full, oversize and closed-writer rejections are
+// counted, but a record is silently not emitted (and not counted) when the
+// process log level is above info. It is not gated by the decision-audit
+// experiment, which applies only to decision records. Nil when the writer
+// was not initialized.
 func (s *Server) sharedAuditLogSink() auditevent.Sink {
 	if s.auditWriter == nil || s.decisionAuditLogger == nil || s.decisionAuditLogger.sink == nil {
 		return nil

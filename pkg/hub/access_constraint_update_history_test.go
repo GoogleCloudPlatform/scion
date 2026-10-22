@@ -303,8 +303,11 @@ func TestGovernanceUpdateHistory_RowsReadableByFreshServer(t *testing.T) {
 		first.governanceService, first.previewService, created, p6NarrowedDraft(created), pvTestActor(DevUserID))
 	require.NoError(t, err)
 
-	// A second Server on the same database has no process memory of the
-	// first; it can only answer from the persisted history table.
+	// Restart: shut the first Server down and close its store, then build a
+	// second Server on the same database. It has no process memory of the
+	// first and can only answer from the persisted history table.
+	require.NoError(t, first.Shutdown(context.Background()))
+	require.NoError(t, firstStore.Close())
 	second, _ := p6FileBackedBoundaryServer(t, dsn)
 	require.NotSame(t, first, second)
 	response := doRequest(t, second, http.MethodGet,
