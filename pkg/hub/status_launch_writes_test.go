@@ -146,9 +146,9 @@ func TestSyncStart_KeepsUnconfirmedLaunchOutcome(t *testing.T) {
 
 // keptCreateHeartbeatAgent stores an agent in phase starting with an empty
 // applied config and run run-1, as a create looks when the hub kept it after
-// an unknown dispatch outcome; claimState says which create claim it holds
-// ("" for none), and runtime is its stored runtime.
-func keptCreateHeartbeatAgent(t *testing.T, s store.Store, broker *store.RuntimeBroker, project *store.Project, name string, claimState store.StartClaimState, runtime string) *store.Agent {
+// an unknown dispatch outcome; claimKind and claimState say which claim it
+// holds (state "" for none), and runtime is its stored runtime.
+func keptCreateHeartbeatAgent(t *testing.T, s store.Store, broker *store.RuntimeBroker, project *store.Project, name string, claimKind store.StartClaimKind, claimState store.StartClaimState, runtime string) *store.Agent {
 	t.Helper()
 	ctx := context.Background()
 	agent := &store.Agent{
@@ -162,7 +162,7 @@ func keptCreateHeartbeatAgent(t *testing.T, s store.Store, broker *store.Runtime
 	_, err := s.SetAgentRunID(ctx, agent.ID, "run-1", nil)
 	require.NoError(t, err)
 	if claimState != "" {
-		c, err := s.ClaimAgentStart(ctx, agent.ID, "hub-x", store.StartClaimCreate, "", time.Hour)
+		c, err := s.ClaimAgentStart(ctx, agent.ID, "hub-x", claimKind, "", time.Hour)
 		require.NoError(t, err)
 		if claimState == store.StartClaimUnconfirmed {
 			held, err := s.MarkStartUnconfirmed(ctx, agent.ID, c.ID, "hub-x", time.Hour)
@@ -178,30 +178,33 @@ func keptCreateHeartbeatAgent(t *testing.T, s store.Store, broker *store.Runtime
 // the create's own run records the template, harness config and image (and
 // runtime) the runtime resolved, as a successful create's answer would. Both
 // gates are required: an entry with another or no run ID, or an agent with no
-// unconfirmed create claim (a live claim, or none), records nothing. An empty
-// runtime in the entry never clears the stored one.
+// unconfirmed create claim (an unconfirmed claim of another kind, a live
+// claim, or none), records nothing. An empty runtime in the entry never
+// clears the stored one.
 func TestHeartbeat_KeptCreateGetsResolvedConfig(t *testing.T) {
 	cases := []struct {
 		name         string
+		claimKind    store.StartClaimKind
 		claimState   store.StartClaimState
 		runID        string
 		hbRuntime    string
 		agentRuntime string
 		wantApply    bool
 	}{
-		{"kept create, own run", store.StartClaimUnconfirmed, "run-1", "kubernetes", "", true},
-		{"kept create, own run, empty runtime keeps stored", store.StartClaimUnconfirmed, "run-1", "", "docker", true},
-		{"kept create, other run", store.StartClaimUnconfirmed, "run-other", "kubernetes", "", false},
-		{"kept create, no run ID", store.StartClaimUnconfirmed, "", "kubernetes", "", false},
-		{"live create claim", store.StartClaimLive, "run-1", "kubernetes", "", false},
-		{"no claim", "", "run-1", "kubernetes", "", false},
+		{"kept create, own run", store.StartClaimCreate, store.StartClaimUnconfirmed, "run-1", "kubernetes", "", true},
+		{"kept create, own run, empty runtime keeps stored", store.StartClaimCreate, store.StartClaimUnconfirmed, "run-1", "", "docker", true},
+		{"kept create, other run", store.StartClaimCreate, store.StartClaimUnconfirmed, "run-other", "kubernetes", "", false},
+		{"kept create, no run ID", store.StartClaimCreate, store.StartClaimUnconfirmed, "", "kubernetes", "", false},
+		{"kept start claim, own run", store.StartClaimUser, store.StartClaimUnconfirmed, "run-1", "kubernetes", "", false},
+		{"live create claim", store.StartClaimCreate, store.StartClaimLive, "run-1", "kubernetes", "", false},
+		{"no claim", store.StartClaimCreate, "", "run-1", "kubernetes", "", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			srv, s := testServer(t)
 			grantDevUserRuntimeBrokerAccess(t, s)
 			broker, project := newQuotaTestBrokerAndProject(t, s, "kept-cfg")
-			agent := keptCreateHeartbeatAgent(t, s, broker, project, "kept-cfg-agent", c.claimState, c.agentRuntime)
+			agent := keptCreateHeartbeatAgent(t, s, broker, project, "kept-cfg-agent", c.claimKind, c.claimState, c.agentRuntime)
 
 			code := sendHeartbeat(t, srv, broker.ID, project.ID, brokerAgentHeartbeat{
 				Slug:                agent.Slug,
