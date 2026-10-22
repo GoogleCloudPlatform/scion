@@ -869,6 +869,9 @@ func redirectToProxyRoot(w http.ResponseWriter, r *http.Request) {
 // encodeLocationQuery percent-encodes the bytes of a raw query that may
 // not appear in a URL as is (controls, space, DEL and non-ASCII) and
 // leaves every other byte, existing percent-encodings included, unchanged.
+// Keep the set exactly that narrow: the query is already encoded, so
+// encoding more (for example '%') would encode existing sequences twice
+// (%20 becomes %2520) and change what the app receives.
 func encodeLocationQuery(q string) string {
 	const hex = "0123456789ABCDEF"
 	var b strings.Builder
