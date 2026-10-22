@@ -696,6 +696,19 @@ func (s *AgentStore) lifecycleWriteTx(ctx context.Context, obs store.AgentWriteO
 	return tx.Client(), tx, func() { _ = tx.Rollback() }, nil
 }
 
+// markOwnTxErr marks *errp transient (markTransient) when the writer opened
+// its own lifecycle transaction (tx is not the ambient one), as
+// CompositeStore.WithTx marks its body's errors: a serialization failure
+// stays retryable whether or not the observer moved the write into a
+// transaction (tele-wp1-arch 21:57, design item 16). markTransient marks
+// only real driver conflicts and is idempotent. Writers defer it with a
+// named error result.
+func markOwnTxErr(errp *error, tx, ambient *ent.Tx) {
+	if tx != nil && tx != ambient {
+		*errp = markTransient(*errp)
+	}
+}
+
 // commitLifecycleWriteTx commits tx when the writer opened it (it is not
 // the ambient transaction).
 func commitLifecycleWriteTx(tx, ambient *ent.Tx) error {
@@ -746,12 +759,13 @@ func lifecycleAfterRow(ctx context.Context, client *ent.Client, uid uuid.UUID) (
 // row is not observed. It is the observer entry point of writers whose
 // write is a single conditional statement (the run-ID writers,
 // ClaimAgentReincarnation).
-func (s *AgentStore) observedAgentWrite(ctx context.Context, obs store.AgentWriteObserver, uid uuid.UUID, op store.AgentWriteOp, hints store.AgentWriteHints, write func(client *ent.Client) (int, error)) (int, error) {
+func (s *AgentStore) observedAgentWrite(ctx context.Context, obs store.AgentWriteObserver, uid uuid.UUID, op store.AgentWriteOp, hints store.AgentWriteHints, write func(client *ent.Client) (int, error)) (_ int, err error) {
 	client, tx, done, err := s.lifecycleWriteTx(ctx, obs)
 	if err != nil {
 		return 0, err
 	}
 	defer done()
+	defer markOwnTxErr(&err, tx, s.entTx)
 	before, err := lifecycleBeforeRow(ctx, client, obs, uid)
 	if err != nil {
 		return 0, err
@@ -785,7 +799,7 @@ func (s *AgentStore) observedAgentWrite(ctx context.Context, obs store.AgentWrit
 // and outbox, never an agents column, and does nothing while no observer
 // is installed or when the agent is gone. It is not part of store.Store:
 // the hub type-asserts for it.
-func (s *AgentStore) RecordRestartStopLeg(ctx context.Context, agentID, runID string) error {
+func (s *AgentStore) RecordRestartStopLeg(ctx context.Context, agentID, runID string) (err error) {
 	obs := s.lifecycle.load()
 	if obs == nil || runID == "" {
 		return nil
@@ -799,6 +813,7 @@ func (s *AgentStore) RecordRestartStopLeg(ctx context.Context, agentID, runID st
 		return err
 	}
 	defer done()
+	defer markOwnTxErr(&err, tx, s.entTx)
 	row, err := lifecycleBeforeRow(ctx, client, obs, uid)
 	if err != nil || row == nil {
 		return err

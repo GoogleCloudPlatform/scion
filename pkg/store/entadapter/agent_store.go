@@ -278,7 +278,7 @@ func parseAppliedConfig(raw string) (*store.AgentAppliedConfig, error) {
 }
 
 // CreateAgent creates a new agent record.
-func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) error {
+func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) (err error) {
 	// With an observer installed outside a transaction, write through a
 	// copy of s on a new transaction (rolled back unless committed below),
 	// so the row and its lifecycle rows commit together; the same idiom as
@@ -290,6 +290,7 @@ func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) error {
 		return err
 	}
 	defer done()
+	defer markOwnTxErr(&err, tx, ambient)
 	if tx != ambient {
 		s = &AgentStore{client: client, inTx: true, afterRunIDRead: s.afterRunIDRead, lifecycle: s.lifecycle, entTx: tx}
 	}
@@ -828,12 +829,13 @@ func (s *AgentStore) updateAgentRunningTx(ctx context.Context, client *ent.Clien
 // the running write's conditional launch end, a read of the after row and
 // the observer. A CAS miss returns ErrNotFound / ErrVersionConflict and
 // observes nothing.
-func (s *AgentStore) updateAgentObserved(ctx context.Context, obs store.AgentWriteObserver, uid uuid.UUID, a *store.Agent, expectedVersion, newVersion int64, now time.Time) error {
+func (s *AgentStore) updateAgentObserved(ctx context.Context, obs store.AgentWriteObserver, uid uuid.UUID, a *store.Agent, expectedVersion, newVersion int64, now time.Time) (err error) {
 	client, tx, done, err := s.lifecycleWriteTx(ctx, obs)
 	if err != nil {
 		return err
 	}
 	defer done()
+	defer markOwnTxErr(&err, tx, s.entTx)
 	before, err := lifecycleBeforeRow(ctx, client, obs, uid)
 	if err != nil {
 		return err
@@ -981,7 +983,7 @@ func agentUpdateConflictError(ctx context.Context, ac *ent.AgentClient, uid uuid
 }
 
 // DeleteAgent permanently removes an agent by ID (hard delete).
-func (s *AgentStore) DeleteAgent(ctx context.Context, id string) error {
+func (s *AgentStore) DeleteAgent(ctx context.Context, id string) (err error) {
 	uid, err := parseUUID(id)
 	if err != nil {
 		return err
@@ -992,6 +994,7 @@ func (s *AgentStore) DeleteAgent(ctx context.Context, id string) error {
 		return err
 	}
 	defer done()
+	defer markOwnTxErr(&err, tx, s.entTx)
 	before, err := lifecycleBeforeRow(ctx, client, obs, uid)
 	if err != nil {
 		return err

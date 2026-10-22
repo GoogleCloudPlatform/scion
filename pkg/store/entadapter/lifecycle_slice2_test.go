@@ -21,11 +21,13 @@ package entadapter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -1064,4 +1066,50 @@ func TestLifecycleStore2_StopDuringReincarnation(t *testing.T) {
 	// for R1 (this direct store call sets no GuardReincarnation).
 	g.heartbeat(b.ID, "error", "R1")
 	assert.Equal(t, "created@1[/1] started@2[R1/1] stopped@3(error)[R1/1]", lcFull(g.events(b.ID)))
+}
+
+// TestLifecycleStore2_OwnTransactionMarksTransient is design item 16
+// (tele-wp1-arch 21:57, slice 1 CI-fix review r2 O1): when an observed
+// writer opens its own lifecycle transaction, a serialization failure in
+// its body is store.ErrTransient, as CompositeStore.WithTx marks its
+// body's errors; a non-conflict error is not marked.
+func TestLifecycleStore2_OwnTransactionMarksTransient(t *testing.T) {
+	ctx := context.Background()
+	conflict := fmt.Errorf("injected: %w", &pgconn.PgError{Code: "40001"})
+	plain := errors.New("injected: not a conflict")
+	writers := map[string]func(f *lifecycleFixture, a *store.Agent) error{
+		"CreateAgent": func(f *lifecycleFixture, a *store.Agent) error {
+			return f.cs.CreateAgent(ctx, makeAgent(f.projectID, "s2-transient-"+a.ID[:8]))
+		},
+		"DeleteAgent": func(f *lifecycleFixture, a *store.Agent) error { return f.cs.DeleteAgent(ctx, a.ID) },
+		"UpdateAgent": func(f *lifecycleFixture, a *store.Agent) error {
+			got, err := f.cs.GetAgent(ctx, a.ID)
+			if err != nil {
+				return err
+			}
+			got.Message = "x"
+			return f.cs.UpdateAgent(ctx, got)
+		},
+		"SetAgentRunID": func(f *lifecycleFixture, a *store.Agent) error {
+			_, err := f.cs.SetAgentRunID(ctx, a.ID, "RT", nil)
+			return err
+		},
+		"RecordRestartStopLeg": func(f *lifecycleFixture, a *store.Agent) error {
+			return f.cs.RecordRestartStopLeg(ctx, a.ID, "R1")
+		},
+	}
+	for name, write := range writers {
+		t.Run(name, func(t *testing.T) {
+			f, a := newS2Fixture(t)
+			f.cs.SetAgentWriteObserver(failingObserver{err: conflict})
+			err := write(f, a)
+			require.ErrorIs(t, err, conflict)
+			assert.ErrorIs(t, err, store.ErrTransient, "a body serialization failure stays retryable")
+
+			f.cs.SetAgentWriteObserver(failingObserver{err: plain})
+			err = write(f, a)
+			require.ErrorIs(t, err, plain)
+			assert.NotErrorIs(t, err, store.ErrTransient)
+		})
+	}
 }
