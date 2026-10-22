@@ -18,14 +18,17 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agenthome"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
@@ -1221,6 +1224,16 @@ func parseLibVersion(src string) string {
 // cycle — see that package's own copy of this name for the full reasoning.
 const HarnessProvisionHookFilename = "20-harness-provision"
 
+// Paths in the agent home, relative to the home, for pkg/agenthome.
+const (
+	// bundleRel is the staged harness bundle directory.
+	bundleRel = ".scion/harness"
+	// hookDirRel is the pre-start hook directory.
+	hookDirRel = ".scion/hooks/pre-start.d"
+	// provisionHookRel is the staged provisioner wrapper.
+	provisionHookRel = hookDirRel + "/" + HarnessProvisionHookFilename
+)
+
 // HarnessProvisionHookPath is where a container-script harness stages its
 // provisioner wrapper in an agent home.
 func HarnessProvisionHookPath(agentHome string) string {
@@ -1244,14 +1257,26 @@ func HarnessProvisionHookStaged(agentHome string) bool {
 // then restages its own bundle and wrapper, and the control plane restages
 // its inputs and secrets. Without a manifest, sciontool init does not treat
 // a launch as a container-script provision. Nothing staged is not an error.
+//
+// The removals are confined to the home (pkg/agenthome): a link at the hook
+// or the bundle is removed itself, the bundle is removed without following
+// a link inside it, and a linked directory component is refused.
 func ClearStagedProvisioning(agentHome string) error {
 	if agentHome == "" {
 		return nil
 	}
-	if err := os.Remove(HarnessProvisionHookPath(agentHome)); err != nil && !os.IsNotExist(err) {
+	home, err := agenthome.Open(agentHome)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer func() { _ = home.Close() }()
+	if err := home.Remove(provisionHookRel); err != nil {
 		return fmt.Errorf("remove stale harness provisioner hook: %w", err)
 	}
-	if err := os.RemoveAll(filepath.Join(agentHome, ".scion", "harness")); err != nil {
+	if err := home.RemoveAll(bundleRel); err != nil {
 		return fmt.Errorf("remove stale harness bundle: %w", err)
 	}
 	return nil

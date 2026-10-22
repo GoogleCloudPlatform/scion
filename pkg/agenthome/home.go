@@ -69,6 +69,17 @@ type LimitError struct{ Limit string }
 
 func (e *LimitError) Error() string { return "tree exceeds " + e.Limit }
 
+// OpenCreate is Open that first creates the home directory at path (and
+// any missing parents) with mode when it does not exist, as os.MkdirAll
+// would. path is the broker-side path of the home, which lies in the
+// broker-owned agent directory; nothing below the home is created here.
+func OpenCreate(path string, mode os.FileMode) (*Home, error) {
+	if err := os.MkdirAll(path, mode); err != nil {
+		return nil, err
+	}
+	return Open(path)
+}
+
 // splitRel validates rel and returns its cleaned components. "." (the home
 // itself) yields no components.
 func splitRel(rel string) ([]string, error) {
