@@ -85,6 +85,11 @@ func TestRedactURLsIn_UndelimitedUserInfo(t *testing.T) {
 		{"question mark", "dial https://alice:fake?Pw9q@hub.example.com/api: refused", "dial https://xxxxx: refused", "fake?Pw9q"},
 		{"hash", "hub at https://alice:fake#Pw9q@hub.example.com is down.", "hub at https://xxxxx is down.", "fake#Pw9q"},
 		{"user name with slash", "see https://tok_fake/Pw9q@hub.example.com/x, then", "see https://xxxxx, then", "tok_fake/Pw9q"},
+		{"'@' then ':' and '/' in password", `Get "https://alice:p@ss:x/w0rd@hub.example.com/api": refused`, `Get "https://xxxxx": refused`, "p@ss:x/w0rd"},
+		{"two '@' in password, bad port", "dial http://user:s3@cret@127.0.0.1:99999x/x: refused", "dial http://xxxxx@127.0.0.1:99999x/x: refused", "s3@cret"},
+		{"user info and '@' in the path", "dial https://alice:p@ss/w0rd@hub.example.com: refused", "dial https://xxxxx: refused", "p@ss/w0rd"},
+		{"user info and '@' in the query", "see https://alice:p@ss?w0rd@hub.example.com.", "see https://xxxxx.", "p@ss?w0rd"},
+		{"user info and no '@' after the host", "dial https://alice:s3cretPw@hub.example.com/u: refused", "dial https://alice:xxxxx@hub.example.com/u: refused", "s3cretPw"},
 		{"two URLs", "https://alice:fake/Pw9q@one.example.com and https://two.example.com/u/@me", "https://xxxxx and https://two.example.com/u/@me", "fake/Pw9q"},
 		{"e-mail in a path", "see https://hub.example.com/users/a@b.example.com/profile now", "see https://hub.example.com/users/a@b.example.com/profile now", "-"},
 	}

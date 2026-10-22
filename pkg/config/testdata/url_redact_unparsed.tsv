@@ -27,3 +27,13 @@ path starting with @	https://hub.example.com/@alice/repo	https://hub.example.com
 e-mail address in a query	https://hub.example.com/invite?to=a@b.example.com&n=1	https://hub.example.com/invite?to=a@b.example.com&n=1	-
 @ in the path of an IP literal host	http://[::1]:8080/u/a@b.example.com	http://[::1]:8080/u/a@b.example.com	-
 @ in the path of a non-ASCII host	https://café.example/u/a@b	https://café.example/u/a@b	-
+'@' then ':' and '/' in password	https://alice:p@ss:x/w0rd@hub.example.com/api	https://xxxxx	p@ss:x/w0rd
+'@' then ':' and '?' in password	https://alice:p@ss:x?w0rd@hub.example.com/api	https://xxxxx	p@ss:x?w0rd
+'@' then ':' and '#' in password	https://alice:p@ss:x#w0rd@hub.example.com/api	https://xxxxx	p@ss:x#w0rd
+two '@' in password, bad port	http://user:s3@cret@127.0.0.1:99999x	http://xxxxx@127.0.0.1:99999x	s3@cret
+two '@' in password, bad port and path	http://user:s3@cret@127.0.0.1:99999x/api?limit=5	http://xxxxx@127.0.0.1:99999x/api?limit=5	s3@cret
+user info and '@' in the path	https://alice:p@ss/w0rd@hub.example.com	https://xxxxx	p@ss/w0rd
+user info and '@' in the query	https://alice:p@ss?w0rd@hub.example.com	https://xxxxx	p@ss?w0rd
+user info and '@' in the fragment	https://alice:p@ss#w0rd@hub.example.com	https://xxxxx	p@ss#w0rd
+user name and '@' in the path	https://tok3n@ss/w0rd@hub.example.com/x	https://xxxxx	tok3n@ss/w0rd
+user info and no '@' after the host	https://alice:s3cretPw@hub.example.com/u/profile?x=1	https://alice:xxxxx@hub.example.com/u/profile?x=1	s3cretPw

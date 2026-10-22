@@ -255,22 +255,36 @@ func redactParam(pair string, depth int) string {
 // undelimitedUserInfo reports whether raw may carry user info that the
 // rules above cannot tell apart from its host and path, so that only its
 // scheme can be shown (see maskWholeURL). A '/', '?' or '#' in the user
-// info moves where the authority seems to end, and url.Parse and the user
-// info rule then both see another URL. That is the case when raw holds an
-// '@' and either raw does not parse and userInfo (the user info rule for
-// URLs url.Parse rejects) does not match it, or raw parses but its
-// authority, cut from raw itself, does not end in a host (see
-// rawAuthorityIsHost). The '@' is looked for in raw, never in a part of
-// it; without one there is no user info, and an '@' in the path of a URL
-// whose authority is a host (an e-mail address, "/@name") is not masked.
+// info moves where the authority seems to end, and an '@' in a password
+// moves where the user info seems to end. That is the case when raw holds
+// an '@' and either:
+//   - raw does not parse, and userInfo (the user info rule for URLs
+//     url.Parse rejects) does not match it, or raw holds another '@' after
+//     the match (a password such as "p@ss:x/w0rd": the rule stops at the
+//     first '/', and the rest of the password follows);
+//   - raw parses with user info and another '@' follows its authority, in
+//     the path, query or fragment (a password such as "p@ss/w0rd" parses as
+//     user "p", host "ss" and a path);
+//   - raw parses but its authority, cut from raw itself, does not end in a
+//     host (see rawAuthorityIsHost).
+//
+// The '@' is looked for in raw, never in a part of it; without one there
+// is no user info, and an '@' after the host of a URL without user info
+// (an e-mail address, "/@name") is not masked.
 func undelimitedUserInfo(raw string, userInfo *regexp.Regexp) bool {
 	if !strings.Contains(raw, "@") {
 		return false
 	}
-	if _, err := url.Parse(raw); err != nil {
-		return !userInfo.MatchString(raw)
+	u, err := url.Parse(raw)
+	if err != nil {
+		m := userInfo.FindStringIndex(raw)
+		return m == nil || strings.Contains(raw[m[1]:], "@")
 	}
-	return !rawAuthorityIsHost(raw)
+	authority, rest, hasAuthority := cutRawAuthority(raw)
+	if u.User != nil && strings.Contains(rest, "@") {
+		return true
+	}
+	return hasAuthority && !rawAuthorityIsHost(authority)
 }
 
 // maskWholeURL returns the scheme of raw and "://" followed by a fixed
@@ -280,26 +294,31 @@ func maskWholeURL(raw string) string {
 	return urlSchemePrefixRe.FindString(raw) + "xxxxx"
 }
 
-// rawAuthorityIsHost reports whether the authority of raw, from after its
-// scheme and "://" (or a leading "//") to its first '/', '?' or '#', ends
+// cutRawAuthority cuts raw, after its scheme and "://" (or a leading
+// "//"), at its first '/', '?' or '#': the authority, and the rest from
+// that delimiter on. hasAuthority is false when raw has neither prefix.
+func cutRawAuthority(raw string) (authority, rest string, hasAuthority bool) {
+	if scheme := urlSchemePrefixRe.FindString(raw); scheme != "" {
+		authority, hasAuthority = raw[len(scheme):], true
+	} else {
+		authority, hasAuthority = strings.CutPrefix(raw, "//")
+	}
+	if !hasAuthority {
+		return "", "", false
+	}
+	if i := strings.IndexAny(authority, "/?#"); i >= 0 {
+		authority, rest = authority[:i], authority[i:]
+	}
+	return authority, rest, true
+}
+
+// rawAuthorityIsHost reports whether authority (see cutRawAuthority) ends
 // in a host: after its last '@', if any, a name of ASCII letters, digits,
 // '-', '.' and any non-ASCII character but U+FFFD (none of which can hide
 // a '/', '?' or '#'), or a bracketed IP literal, then an optional ':' and
-// digits. A raw with no authority, or an empty one, passes.
-func rawAuthorityIsHost(raw string) bool {
-	var rest string
-	var ok bool
-	if scheme := urlSchemePrefixRe.FindString(raw); scheme != "" {
-		rest, ok = raw[len(scheme):], true
-	} else {
-		rest, ok = strings.CutPrefix(raw, "//")
-	}
-	if !ok {
-		return true
-	}
-	if i := strings.IndexAny(rest, "/?#"); i >= 0 {
-		rest = rest[:i]
-	}
+// digits. An empty authority passes.
+func rawAuthorityIsHost(authority string) bool {
+	rest := authority
 	if rest == "" {
 		return true
 	}
