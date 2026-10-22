@@ -343,13 +343,59 @@ func TestRedactURLCredentials_Unparsed(t *testing.T) {
 // Through the transport, a base URL with a '/' in its password that
 // url.Parse rejects is not quoted in the error.
 func TestTransportErrors_UnparsedBaseURL(t *testing.T) {
-	_, err := NewTransport("http://alice:fake/Pw9q@127.0.0.1:1").Get(context.Background(), "/healthz", nil)
+	const secret = "fake/Pw9q"
+	_, err := NewTransport("http://alice:"+secret+"@127.0.0.1:1").Get(context.Background(), "/healthz", nil)
 	if err == nil {
 		t.Fatal("no error")
 	}
-	for _, part := range []string{"fake", "Pw9q"} {
-		if strings.Contains(err.Error(), part) {
-			t.Errorf("error %q shows %q", err.Error(), part)
+	for i := 0; i+4 <= len(secret); i++ {
+		if strings.Contains(err.Error(), secret[i:i+4]) {
+			t.Errorf("error %q shows %q", err.Error(), secret[i:i+4])
+		}
+	}
+}
+
+// fakeNetError is a timeout and temporary error whose message quotes a
+// made-up secret.
+type fakeNetError struct{}
+
+func (fakeNetError) Error() string   { return "dial tcp: lookup tok_fake/Pw9q: timeout" }
+func (fakeNetError) Timeout() bool   { return true }
+func (fakeNetError) Temporary() bool { return true }
+
+// A *url.Error whose URL is masked whole shows a fixed message instead of
+// its error, but errors.Is, Timeout and Temporary still see the original
+// error.
+func TestRedactURLError_MaskedKeepsErrorChain(t *testing.T) {
+	const raw = "https://tok_fake/Pw9q@hub.example.com/api"
+	for _, tc := range []struct {
+		name      string
+		inner     error
+		is        error
+		timeout   bool
+		temporary bool
+	}{
+		{"deadline", context.DeadlineExceeded, context.DeadlineExceeded, true, true},
+		{"canceled", context.Canceled, context.Canceled, false, false},
+		{"net timeout", fakeNetError{}, nil, true, true},
+	} {
+		err := redactURLError(&url.Error{Op: "Get", URL: raw, Err: tc.inner})
+		var ue *url.Error
+		if !errors.As(err, &ue) {
+			t.Fatalf("%s: %v is not a *url.Error", tc.name, err)
+		}
+		if want := `Get "https://xxxxx": details not shown for a masked URL`; err.Error() != want {
+			t.Errorf("%s: error = %q, want %q", tc.name, err.Error(), want)
+		}
+		if tc.is != nil && !errors.Is(err, tc.is) {
+			t.Errorf("%s: errors.Is(err, %v) = false", tc.name, tc.is)
+		}
+		if ue.Timeout() != tc.timeout || ue.Temporary() != tc.temporary {
+			t.Errorf("%s: Timeout() = %v, Temporary() = %v, want %v, %v", tc.name, ue.Timeout(), ue.Temporary(), tc.timeout, tc.temporary)
+		}
+		var ne fakeNetError
+		if tc.inner == (fakeNetError{}) && !errors.As(err, &ne) {
+			t.Errorf("%s: errors.As does not reach the original error", tc.name)
 		}
 	}
 }

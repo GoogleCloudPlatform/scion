@@ -283,9 +283,9 @@ func maskWholeURL(raw string) string {
 // rawAuthorityIsHost reports whether the authority of raw, from after its
 // scheme and "://" (or a leading "//") to its first '/', '?' or '#', ends
 // in a host: after its last '@', if any, a name of ASCII letters, digits,
-// '-' and '.' (non-ASCII letters allowed) or a bracketed IP literal, then
-// an optional ':' and digits. A raw with no authority, or an empty one,
-// passes.
+// '-', '.' and any non-ASCII character but U+FFFD (none of which can hide
+// a '/', '?' or '#'), or a bracketed IP literal, then an optional ':' and
+// digits. A raw with no authority, or an empty one, passes.
 func rawAuthorityIsHost(raw string) bool {
 	var rest string
 	var ok bool
@@ -361,13 +361,32 @@ func redactURLError(err error) error {
 	if errors.As(err, &ue) {
 		if undelimitedUserInfo(ue.URL, urlUserInfoRe) {
 			// The parse or dial error may quote a part of such a URL.
-			ue.Err = errURLDetailsHidden
+			ue.Err = &urlDetailsHidden{err: ue.Err}
 		}
 		ue.URL = redactURLCredentials(ue.URL)
 	}
 	return err
 }
 
-// errURLDetailsHidden replaces the error of a *url.Error whose URL
-// redactURLError masks whole.
-var errURLDetailsHidden = errors.New("details not shown for a masked URL")
+// urlDetailsHidden replaces the error of a *url.Error whose URL
+// redactURLError masks whole. Its message is fixed, so no part of the URL
+// that the original error quotes is shown; errors.Is and errors.As, and
+// the Timeout and Temporary methods url.Error asks its Err for, still
+// reach the original error.
+type urlDetailsHidden struct{ err error }
+
+func (e *urlDetailsHidden) Error() string { return "details not shown for a masked URL" }
+
+func (e *urlDetailsHidden) Unwrap() error { return e.err }
+
+// Timeout reports whether the original error is a timeout.
+func (e *urlDetailsHidden) Timeout() bool {
+	t, ok := e.err.(interface{ Timeout() bool })
+	return ok && t.Timeout()
+}
+
+// Temporary reports whether the original error is temporary.
+func (e *urlDetailsHidden) Temporary() bool {
+	t, ok := e.err.(interface{ Temporary() bool })
+	return ok && t.Temporary()
+}

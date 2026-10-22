@@ -251,9 +251,9 @@ func maskWholeURL(raw string) string {
 // rawAuthorityIsHost reports whether the authority of raw, from after its
 // scheme and "://" (or a leading "//") to its first '/', '?' or '#', ends
 // in a host: after its last '@', if any, a name of ASCII letters, digits,
-// '-' and '.' (non-ASCII letters allowed) or a bracketed IP literal, then
-// an optional ':' and digits. A raw with no authority, or an empty one,
-// passes.
+// '-', '.' and any non-ASCII character but U+FFFD (none of which can hide
+// a '/', '?' or '#'), or a bracketed IP literal, then an optional ':' and
+// digits. A raw with no authority, or an empty one, passes.
 func rawAuthorityIsHost(raw string) bool {
 	var rest string
 	var ok bool
