@@ -36,6 +36,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/urlredact"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"gopkg.in/yaml.v3"
@@ -1452,20 +1453,22 @@ func effectiveGCPMetadataMode(isKubernetesDispatch bool, cfg *CreateAgentConfig,
 // redactCloneURL returns gc's clone URL with any userinfo removed, for
 // logging. This covers both a user:pass URL and a username-only token URL
 // (https://TOKEN@host) — net/url's Redacted() masks only a password, leaving
-// a username-only token visible. On a parse failure, the raw URL is never
-// logged: "<unparseable>" is returned instead.
+// a username-only token visible. A query string or fragment can carry a
+// bare access token (e.g. "?access_token=...") the same way, so both are
+// removed too. A URL that does not parse, or holds an '@' the shared user
+// info rule cannot place (urlredact.HostAndPath), is never logged:
+// "<unparseable>" is returned instead.
 func redactCloneURL(rawURL string) string {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return "<unparseable>"
+	u, ok := urlredact.HostAndPath(rawURL)
+	if !ok {
+		return unparseableCloneURL
 	}
-	u.User = nil
-	// A query string or fragment can carry a bare access token (e.g.
-	// "?access_token=..."), the same way userinfo can — clear both.
-	u.RawQuery = ""
-	u.Fragment = ""
 	return u.String()
 }
+
+// unparseableCloneURL is what redactCloneURL shows for a URL it cannot
+// show any part of.
+const unparseableCloneURL = "<unparseable>"
 
 // sanitizeCloneErrorText strips a clone URL's credentials, query string, and
 // fragment from errText. provision.ProvisionShared's own clone errors embed
@@ -1474,33 +1477,14 @@ func redactCloneURL(rawURL string) string {
 // omits userinfo on its own — this covers both by replacing the exact raw
 // URL wholesale, then removing the userinfo, query, and fragment
 // substrings individually so a reformatted echo of the same URL is caught
-// too. Used to keep a raw clone URL (and any credential or token it
-// carries) out of server-side logs, alongside the already-redacted
-// `clone_url` attribute logged next to it.
+// too (urlredact.RedactURLIn). Used to keep a raw clone URL (and any
+// credential or token it carries) out of server-side logs, alongside the
+// already-redacted `clone_url` attribute logged next to it.
 func sanitizeCloneErrorText(errText, rawURL string) string {
 	if rawURL == "" || errText == "" {
 		return errText
 	}
-	u, parseErr := url.Parse(rawURL)
-	if parseErr != nil {
-		// Even when rawURL itself cannot be parsed, this package always
-		// embeds it verbatim into its own error text, so the exact
-		// occurrence is still stripped rather than left in place.
-		return strings.ReplaceAll(errText, rawURL, "<unparseable>")
-	}
-	out := strings.ReplaceAll(errText, rawURL, redactCloneURL(rawURL))
-	if u.User != nil {
-		if pw, _ := u.User.Password(); u.User.Username() != "" || pw != "" {
-			out = strings.ReplaceAll(out, u.User.String()+"@", "")
-		}
-	}
-	if u.RawQuery != "" {
-		out = strings.ReplaceAll(out, "?"+u.RawQuery, "")
-	}
-	if u.Fragment != "" {
-		out = strings.ReplaceAll(out, "#"+u.Fragment, "")
-	}
-	return out
+	return urlredact.RedactURLIn(errText, rawURL, redactCloneURL(rawURL), urlredact.Mask)
 }
 
 // isStrictWorktreeChild reports whether path is a real descendant of

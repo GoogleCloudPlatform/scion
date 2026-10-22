@@ -85,17 +85,11 @@ var Columns = []struct{ Name, Const, Runner string }{
 // rule yet. Their current output is pinned all the same, so moving one of
 // them to the shared rule fails its test until it is taken off this list
 // and its column updated; and each must still show the secret of at least
-// one row, so the gap stays visible.
-var KnownUnmigrated = map[string]bool{
-	TunnelClientRedactEndpoint:         true,
-	TunnelClientScrubEndpoint:          true,
-	RuntimeBrokerRedactCloneURL:        true,
-	RuntimeBrokerSanitizeCloneErrorTxt: true,
-	ProvisionRedactCloneURL:            true,
-	ProvisionSanitizeCloneOutput:       true,
-	RemoteFetchRedactURL:               true,
-	CmdDisplaySourceURL:                true,
-}
+// one row, so the gap stays visible. Every redactor on the table uses the
+// shared rule now (the skills discover column is checked like a migrated
+// one, see Columns), so the list is empty; a redactor added to the table
+// before it is moved goes here.
+var KnownUnmigrated = map[string]bool{}
 
 // Text returns the error text a text column is run on: in quoted the way
 // net/http's errors quote a URL.
@@ -171,4 +165,68 @@ func fragmentIn(out, secret string) string {
 		}
 	}
 	return ""
+}
+
+// SecretFragment returns the first 4-byte part of secret found in out, or
+// "": the check Check makes, for tests of a redactor beyond the table.
+func SecretFragment(out, secret string) string { return fragmentIn(out, secret) }
+
+// Shape is a URL whose credential a redactor must not show any part of.
+// Every value is made up.
+type Shape struct {
+	Name, URL, Secret string
+}
+
+// Shapes are the URL shapes a redactor that shows a URL by its host and
+// path (urlredact.HostAndPath) must show no part of the credential of, for
+// the per-package tests that run a redactor in its own setting (an error
+// that quotes a URL built from the input, git's output). They hold a
+// delimiter in the password, a second '@', a password read as a port, a
+// token read as a host, and a URL nested in a query.
+var Shapes = []Shape{
+	{"slash in password", "https://alice:Zq/7mWx2@git.example.com/acme/repo.git", "Zq/7mWx2"},
+	{"question mark in password", "https://alice:Zq?7mWx2@git.example.com/acme/repo.git", "Zq?7mWx2"},
+	{"hash in password", "https://alice:Zq#7mWx2@git.example.com/acme/repo.git", "Zq#7mWx2"},
+	{"second '@' in password", "https://alice:Zq@7mWx2@git.example.com/acme/repo.git", "Zq@7mWx2"},
+	{"'@' then '/' in password", "https://alice:Zq@7m/Wx2@git.example.com/acme/repo.git", "Zq@7m/Wx2"},
+	{"'@' then '?' in password", "https://alice:Zq@7m?Wx2@git.example.com/acme/repo.git", "Zq@7m?Wx2"},
+	{"password read as a port and a path", "https://u:8461/Wx2@git.example.com/acme/repo.git", "8461/Wx2"},
+	{"password read as a port, then '?'", "https://u:8461?Wx2@git.example.com/acme/repo.git", "8461?Wx2"},
+	{"token read as a host", "https://tKn7Qz/x@git.example.com/acme/repo.git", "tKn7Qz/x"},
+	{"token read as a host, then '#'", "https://tKn7Qz#x@git.example.com/acme/repo.git", "tKn7Qz#x"},
+	{"URL with user info in a query value", "https://git.example.com/acme/repo.git?next=https://bob:Zq7mWx2@app.example.com/", "Zq7mWx2"},
+}
+
+// KeptURL is a URL a host and path redactor shows by its host and path,
+// without its credential. Every value is made up.
+type KeptURL struct {
+	Name, URL, Secret, Want string
+}
+
+// KeptURLs are ordinary URLs and token-bearing clone URLs: a host and path
+// redactor keeps their host and path and shows no part of the credential.
+var KeptURLs = []KeptURL{
+	{"no user info", "https://git.example.com/acme/repo.git", "", "https://git.example.com/acme/repo.git"},
+	{"token as password", "https://x-access-token:ghs_Zq7mWx2Pk@github.com/acme/repo.git", "ghs_Zq7mWx2Pk", "https://github.com/acme/repo.git"},
+	{"token as user name", "https://ghp_Zq7mWx2Pk@github.com/acme/repo.git", "ghp_Zq7mWx2Pk", "https://github.com/acme/repo.git"},
+	{"token, query and fragment", "https://oauth2:glpat-Zq7mWx2@gitlab.example.com/group/sub/repo.git?ref=Pk3Lm9#Rt5Vx2", "glpat-Zq7mWx2", "https://gitlab.example.com/group/sub/repo.git"},
+	{"second '@' in password", "https://alice:Zq@7mWx2@git.example.com/acme/repo.git", "Zq@7mWx2", "https://git.example.com/acme/repo.git"},
+}
+
+// GitEcho returns raw as git prints it in an error: with its user info
+// removed up to the first '@' of the authority, as git cuts it, and a
+// trailing slash.
+func GitEcho(raw string) string {
+	scheme, rest, ok := strings.Cut(raw, "://")
+	if !ok {
+		return raw
+	}
+	authority := rest
+	if i := strings.IndexAny(rest, "/?#"); i >= 0 {
+		authority = rest[:i]
+	}
+	if i := strings.IndexByte(authority, '@'); i >= 0 {
+		rest = rest[i+1:]
+	}
+	return scheme + "://" + rest + "/"
 }

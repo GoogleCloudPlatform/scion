@@ -21,16 +21,19 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util/urlredact"
 )
 
 // RedactEndpoint returns the hub endpoint as it is shown in status
 // records, status output and error lines: scheme, host, port and path
 // only, never userinfo, a query or a fragment, with trailing slashes
-// removed. An endpoint that does not parse as a URL with a host is shown
-// as "the configured hub endpoint".
+// removed. An endpoint that does not parse as a URL with a host, or that
+// holds an '@' the shared user info rule cannot place
+// (urlredact.HostAndPath), is shown as "the configured hub endpoint".
 func RedactEndpoint(endpoint string) string {
-	u, err := url.Parse(strings.TrimSpace(endpoint))
-	if err != nil || u.Scheme == "" || u.Host == "" {
+	u, ok := urlredact.HostAndPath(strings.TrimSpace(endpoint))
+	if !ok || u.Scheme == "" || u.Host == "" {
 		return "the configured hub endpoint"
 	}
 	r := url.URL{Scheme: u.Scheme, Host: u.Host, Path: strings.TrimRight(u.Path, "/")}
@@ -90,37 +93,46 @@ func asciiLower(s string) string {
 	return string(b)
 }
 
+// scrubMask replaces what scrubEndpoint masks.
+const scrubMask = "***"
+
 // scrubEndpoint removes the endpoint's userinfo, query and fragment from
-// text (for example, a transport error that quotes the URL).
+// text (for example, a transport error that quotes the URL, or the conduit
+// URL built from it), by the shared rule (urlredact.RedactURLIn): the
+// endpoint is shown by its scheme, host, port and path. An endpoint that
+// urlredact.HostAndPath rejects (it does not parse, or holds an '@' the
+// rule cannot place) is shown as its scheme and scrubMask. The credential
+// (a password, or a user name given without one) and every query value, of
+// three bytes or more, are also masked wherever they appear on their own.
 func scrubEndpoint(text, endpoint string) string {
-	u, err := url.Parse(strings.TrimSpace(endpoint))
+	ep := strings.TrimSpace(endpoint)
+	shown, ok := urlredact.HostAndPath(ep)
+	if !ok {
+		return urlredact.RedactURLIn(text, ep, urlredact.MaskWhole(ep, scrubMask), scrubMask)
+	}
+	text = urlredact.RedactURLIn(text, ep, shown.String(), scrubMask)
+	u, err := url.Parse(ep)
 	if err != nil {
+		// Not reached: HostAndPath accepted ep.
 		return text
 	}
+	// The credential: the password, or a user name given without one,
+	// which may itself be a token (as urlredact.RedactUserInfo reads it).
 	if u.User != nil {
-		name := u.User.Username()
-		text = strings.ReplaceAll(text, u.User.String()+"@", "")
-		text = strings.ReplaceAll(text, name+":***@", "")
-		if name != "" {
-			text = strings.ReplaceAll(text, name+"@", "")
+		secret, hasPassword := u.User.Password()
+		if !hasPassword {
+			secret = u.User.Username()
 		}
-		if pw, ok := u.User.Password(); ok && pw != "" {
-			text = strings.ReplaceAll(text, pw, "***")
+		if len(secret) >= 3 {
+			text = strings.ReplaceAll(text, secret, scrubMask)
 		}
 	}
-	if u.RawQuery != "" {
-		text = strings.ReplaceAll(text, "?"+u.RawQuery, "")
-		text = strings.ReplaceAll(text, u.RawQuery, "")
-		for _, vs := range u.Query() {
-			for _, v := range vs {
-				if len(v) >= 3 {
-					text = strings.ReplaceAll(text, v, "***")
-				}
+	for _, vs := range u.Query() {
+		for _, v := range vs {
+			if len(v) >= 3 {
+				text = strings.ReplaceAll(text, v, scrubMask)
 			}
 		}
-	}
-	if u.Fragment != "" {
-		text = strings.ReplaceAll(text, "#"+u.EscapedFragment(), "")
 	}
 	return text
 }

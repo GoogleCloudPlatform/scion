@@ -62,6 +62,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util/urlredact"
 )
 
 // Defaults for a zero Config field.
@@ -498,14 +500,15 @@ func SniffImage(b []byte) string {
 	return ""
 }
 
-// redactURL drops the query and fragment, which may carry tokens, from a URL
-// before it is logged.
+// redactURL drops the user info, query and fragment, which may carry
+// tokens, from a URL before it is logged. A URL that does not parse, or
+// holds an '@' the shared user info rule cannot place
+// (urlredact.HostAndPath), is shown as "(unparseable)".
 func redactURL(raw string) string {
-	u, err := url.Parse(raw)
-	if err != nil {
+	u, ok := urlredact.HostAndPath(raw)
+	if !ok {
 		return "(unparseable)"
 	}
-	u.RawQuery, u.Fragment, u.User = "", "", nil
 	return u.String()
 }
 
