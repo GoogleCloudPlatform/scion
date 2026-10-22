@@ -299,13 +299,18 @@ type FieldEditState struct {
 	// SessionSensitive is set on a field a resume applies but whose effect
 	// on the continued conversation depends on the harness.
 	SessionSensitive bool `json:"sessionSensitive,omitempty"`
-	// Note is "session" for a session-sensitive field of a suspended agent:
+	// Note is "session" for a session-sensitive field of a suspended agent,
+	// and for a provision-rendered field the broker re-renders at start:
 	// the edit applies at resume and the conversation continues.
 	Note string `json:"note,omitempty"`
-	// ClearNeedsReincarnate is set on a T1 field: clearing or zeroing it
-	// takes effect only at the next reincarnation. It is not set on a
-	// field whose clear the agent's broker applies at the next start
-	// (brokerStartSupport.clearAppliesAtStart).
+	// ClearNeedsReincarnate is set on a T1 field, and on a T2 field the
+	// agent's broker re-renders at start: clearing or zeroing it takes
+	// effect only at the next reincarnation. It is not set on a field
+	// whose clear the agent's broker applies at the next start
+	// (brokerStartSupport.clearAppliesAtStart). The count limits keep it
+	// with every broker: their 0 (Unlimited) is never applied at a start
+	// (ptone/scion#5605), although a null clear is; the flag cannot tell
+	// the two apart, so it errs toward the note.
 	ClearNeedsReincarnate bool `json:"clearNeedsReincarnate,omitempty"`
 	// Reason explains a locked field.
 	Reason string `json:"reason,omitempty"`
@@ -345,7 +350,8 @@ func buildAgentEditability(agent *store.Agent, access agentEditAccess) *AgentEdi
 		d, reason := editDisposition(f, agent.Phase, deleted)
 		// A provision-rendered key the agent's broker re-renders at start
 		// takes effect at the next start when no container is live.
-		if d == EditReincarnate && !live && access.Broker.appliesAtStart(f.Key) {
+		rerendered := d == EditReincarnate && !live && access.Broker.appliesAtStart(f.Key)
+		if rerendered {
 			d = EditNow
 		}
 		// Held edits do not exist yet, and a config PATCH of an agent
@@ -365,16 +371,24 @@ func buildAgentEditability(agent *store.Agent, access agentEditAccess) *AgentEdi
 				d, reason = EditLocked, editReasonCannotDelegate
 			}
 		}
+		// A clear needs a reincarnation for a container key the start
+		// merge keeps, and for a re-rendered key whose clear the start
+		// merge keeps too (agent_instructions, skills, services; the
+		// system prompt's clear is applied through cleared_fields).
+		clearHeld := (f.Tier == EditTierContainer && strings.HasPrefix(f.Key, agentConfigKeyPrefix)) || rerendered
 		st := FieldEditState{
 			Tier:                  f.Tier,
 			Disposition:           d,
 			SessionSensitive:      f.SessionSensitive,
-			ClearNeedsReincarnate: f.Tier == EditTierContainer && strings.HasPrefix(f.Key, agentConfigKeyPrefix) && !access.Broker.clearAppliesAtStart(f.Key),
+			ClearNeedsReincarnate: clearHeld && !access.Broker.clearAppliesAtStart(f.Key),
 		}
 		if d == EditLocked {
 			st.Reason = reason
 		}
-		if f.SessionSensitive && d == EditNow && state.Phase(agent.Phase) == state.PhaseSuspended {
+		// A resume continues the harness's conversation: whether a changed
+		// model, or a re-rendered prompt, instructions file, skill or
+		// service reaches the continued session depends on the harness.
+		if (f.SessionSensitive || rerendered) && d == EditNow && state.Phase(agent.Phase) == state.PhaseSuspended {
 			st.Note = "session"
 		}
 		out.Fields[f.Key] = st

@@ -18,7 +18,9 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -33,9 +35,15 @@ import (
 // setRerenderingBroker gives broker the changedFields capability.
 func setRerenderingBroker(t *testing.T, s store.Store, broker *store.RuntimeBroker) {
 	t.Helper()
+	setBrokerCaps(t, s, broker, &store.BrokerCapabilities{Reprovision: true, ChangedFields: true})
+}
+
+// setBrokerCaps replaces broker's stored capabilities.
+func setBrokerCaps(t *testing.T, s store.Store, broker *store.RuntimeBroker, caps *store.BrokerCapabilities) {
+	t.Helper()
 	b, err := s.GetRuntimeBroker(context.Background(), broker.ID)
 	require.NoError(t, err)
-	b.Capabilities = &store.BrokerCapabilities{Reprovision: true, ChangedFields: true}
+	b.Capabilities = caps
 	require.NoError(t, s.UpdateRuntimeBroker(context.Background(), b))
 }
 
@@ -224,4 +232,172 @@ func TestAgentConfigPatch_ClearingBrokerAppliesClearsAtStart(t *testing.T) {
 	starts := disp.snapshot()
 	require.Len(t, starts, 1)
 	assert.Equal(t, []string{"env.DROP", "max_model_calls", "max_turns"}, starts[0].inline.ClearedFields)
+}
+
+// newT2EditAgent is a stopped agent whose inline config already sets all
+// four re-rendered keys, two skills among them.
+func newT2EditAgent(t *testing.T, s store.Store, project *store.Project, broker *store.RuntimeBroker) *store.Agent {
+	t.Helper()
+	return newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.Phase = string(state.PhaseStopped)
+		a.AppliedConfig.InlineConfig = &api.ScionConfig{
+			Harness:           "claude",
+			SystemPrompt:      "old prompt",
+			AgentInstructions: "old instructions",
+			Skills:            []api.SkillReference{{URI: "hub://skills/review"}, {URI: "hub://skills/test"}},
+			Services:          []api.ServiceSpec{{Name: "db", Command: []string{"postgres"}}},
+		}
+	})
+}
+
+// TestAgentConfigPatch_RerenderingBrokerHoldsClearsTheMergeKeeps: the
+// broker renders the persisted config after merging the inline config into
+// it, and that merge keeps an empty agent_instructions or services value and
+// appends skill references. So on a broker that re-renders, clearing
+// agent_instructions, services or skills, or removing one skill, is held
+// for reincarnation with a warning; a system prompt clear is applied only
+// when the broker also applies cleared_fields; adding a skill is applied.
+func TestAgentConfigPatch_RerenderingBrokerHoldsClearsTheMergeKeeps(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		caps    *store.BrokerCapabilities
+		config  map[string]interface{}
+		applied []string
+		held    []string
+	}{
+		{"clear agent_instructions", &store.BrokerCapabilities{ChangedFields: true, ClearedFields: true},
+			map[string]interface{}{"agent_instructions": ""}, []string{}, []string{"config.agent_instructions"}},
+		{"clear services", &store.BrokerCapabilities{ChangedFields: true, ClearedFields: true},
+			map[string]interface{}{"services": []interface{}{}}, []string{}, []string{"config.services"}},
+		{"clear skills", &store.BrokerCapabilities{ChangedFields: true, ClearedFields: true},
+			map[string]interface{}{"skills": []interface{}{}}, []string{}, []string{"config.skills"}},
+		{"remove one skill", &store.BrokerCapabilities{ChangedFields: true, ClearedFields: true},
+			map[string]interface{}{"skills": []map[string]interface{}{{"uri": "hub://skills/review"}}}, []string{}, []string{"config.skills"}},
+		{"add a skill", &store.BrokerCapabilities{ChangedFields: true, ClearedFields: true},
+			map[string]interface{}{"skills": []map[string]interface{}{{"uri": "hub://skills/review"}, {"uri": "hub://skills/test"}, {"uri": "hub://skills/lint"}}}, []string{"config.skills"}, []string{}},
+		{"clear system_prompt with clearedFields", &store.BrokerCapabilities{ChangedFields: true, ClearedFields: true},
+			map[string]interface{}{"system_prompt": ""}, []string{"config.system_prompt"}, []string{}},
+		{"clear system_prompt without clearedFields", &store.BrokerCapabilities{ChangedFields: true},
+			map[string]interface{}{"system_prompt": ""}, []string{}, []string{"config.system_prompt"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			disp := &inlineCaptureDispatcher{reincarnateTestDispatcher: newReincarnateTestDispatcher()}
+			srv, s, project, broker := setupReincarnateTestServer(t, disp)
+			setBrokerCaps(t, s, broker, tc.caps)
+			agent := newT2EditAgent(t, s, project, broker)
+
+			resp, code, body := patchAgentBody(t, srv, agent.ID, map[string]interface{}{"config": tc.config})
+			require.Equal(t, http.StatusOK, code, body)
+			assert.Equal(t, tc.applied, resp.Disposition.Applied)
+			assert.Equal(t, tc.held, resp.Disposition.HeldForReincarnate)
+			if len(tc.held) > 0 {
+				require.Len(t, resp.Warnings, 1, "%v", resp.Warnings)
+				assert.Contains(t, resp.Warnings[0], tc.held[0]+": stored now; rendered at the next reincarnation")
+			} else {
+				assert.Empty(t, resp.Warnings)
+			}
+		})
+	}
+}
+
+// TestAgentConfigPatch_SystemPromptClearThenSet: a clear of the system
+// prompt is recorded in cleared_fields and changed_fields; setting it again
+// takes it off cleared_fields, and changed_fields keeps it (sticky).
+func TestAgentConfigPatch_SystemPromptClearThenSet(t *testing.T) {
+	disp := &inlineCaptureDispatcher{reincarnateTestDispatcher: newReincarnateTestDispatcher()}
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	setBrokerCaps(t, s, broker, &store.BrokerCapabilities{ChangedFields: true, ClearedFields: true})
+	agent := newT2EditAgent(t, s, project, broker)
+
+	inline := func() *api.ScionConfig {
+		got, err := s.GetAgent(context.Background(), agent.ID)
+		require.NoError(t, err)
+		return got.AppliedConfig.InlineConfig
+	}
+	_, code, body := patchAgentBody(t, srv, agent.ID, map[string]interface{}{"config": map[string]interface{}{"system_prompt": ""}})
+	require.Equal(t, http.StatusOK, code, body)
+	assert.Equal(t, []string{"system_prompt"}, inline().ClearedFields)
+	assert.Equal(t, []string{"system_prompt"}, inline().ChangedFields)
+
+	resp, code, body := patchAgentBody(t, srv, agent.ID, map[string]interface{}{"config": map[string]interface{}{"system_prompt": "new prompt"}})
+	require.Equal(t, http.StatusOK, code, body)
+	assert.Equal(t, []string{"config.system_prompt"}, resp.Disposition.Applied)
+	assert.Nil(t, inline().ClearedFields, "setting the prompt again takes it off cleared_fields")
+	assert.Equal(t, []string{"system_prompt"}, inline().ChangedFields, "changed_fields is sticky")
+	assert.Equal(t, "new prompt", inline().SystemPrompt)
+}
+
+// TestAgentConfigPatch_EnvClearByCallerWithoutEnvView: a caller who may
+// update the agent but cannot view its env records no env.KEY clears, so on
+// a broker that applies cleared_fields an env edit that drops keys is still
+// held for reincarnation, not reported applied.
+func TestAgentConfigPatch_EnvClearByCallerWithoutEnvView(t *testing.T) {
+	disp := &inlineCaptureDispatcher{reincarnateTestDispatcher: newReincarnateTestDispatcher()}
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	setBrokerCaps(t, s, broker, &store.BrokerCapabilities{ChangedFields: true, ClearedFields: true})
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.Phase = string(state.PhaseStopped)
+		a.AppliedConfig.InlineConfig = &api.ScionConfig{Harness: "claude", Env: map[string]string{"A": "1", "B": "2"}}
+	})
+	user := newReincarnateAuthzUser(t, s, "edit-no-env-view")
+	grantPermissionViaRoleBinding(t, s, user.ID, "agent.read", store.RoleScopeProject, project.ID)
+	grantPermissionViaRoleBinding(t, s, user.ID, "agent.update", store.RoleScopeProject, project.ID)
+	identity := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "session")
+
+	rec := doRequestAsIdentity(t, srv, identity, http.MethodPatch, "/api/v1/agents/"+agent.ID, map[string]interface{}{
+		"config": map[string]interface{}{"env": map[string]string{}},
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp agentPatchResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.NotContains(t, resp.Disposition.Applied, "config.env")
+	assert.Equal(t, []string{"config.env"}, resp.Disposition.HeldForReincarnate)
+	assert.NotEmpty(t, resp.Warnings)
+
+	stored, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	for _, p := range stored.AppliedConfig.InlineConfig.ClearedFields {
+		assert.False(t, strings.HasPrefix(p, api.ClearedEnvPathPrefix), "no env clear recorded for a caller without env view: %s", p)
+	}
+}
+
+// TestDispatchAgentStart_RerenderWarningInStartResponse drives the real
+// start dispatch: an agent with changed provision-rendered keys started on a
+// broker without changedFields gets the warning naming them, and the
+// dispatched inline config carries changed_fields; on a broker with
+// changedFields there is no warning.
+func TestDispatchAgentStart_RerenderWarningInStartResponse(t *testing.T) {
+	f := newTiersFixture(t, tiersKnownFalse)
+	agent := &store.Agent{
+		ID: tid("rerender-start"), Name: "rerender-start", Slug: "rerender-start", ProjectID: f.project.ID,
+		OwnerID: "dev@localhost", RuntimeBrokerID: tid("tiers-broker"),
+		AppliedConfig: &store.AgentAppliedConfig{
+			InlineConfig: &api.ScionConfig{SystemPrompt: "new prompt", ChangedFields: []string{"system_prompt"}},
+			CreateInputs: &store.AgentCreateInputs{},
+		},
+	}
+	ctx, warns := withDispatchWarnings(context.Background())
+	require.NoError(t, f.d.DispatchAgentStart(ctx, agent, "", false))
+	require.NotNil(t, f.client.lastInlineConfig)
+	assert.Equal(t, []string{"system_prompt"}, f.client.lastInlineConfig.ChangedFields)
+	assert.Equal(t, 1, countContaining(warns.Warnings(), "system_prompt: changed since the agent was provisioned"), "%v", warns.Warnings())
+
+	b, err := f.s.GetRuntimeBroker(context.Background(), tid("tiers-broker"))
+	require.NoError(t, err)
+	b.Capabilities = &store.BrokerCapabilities{ChangedFields: true}
+	require.NoError(t, f.s.UpdateRuntimeBroker(context.Background(), b))
+	ctx, warns = withDispatchWarnings(context.Background())
+	require.NoError(t, f.d.DispatchAgentStart(ctx, agent, "", false))
+	assert.Zero(t, countContaining(warns.Warnings(), "changed since the agent was provisioned"), "%v", warns.Warnings())
+}
+
+// countContaining counts the entries of list that contain sub.
+func countContaining(list []string, sub string) int {
+	n := 0
+	for _, s := range list {
+		if strings.Contains(s, sub) {
+			n++
+		}
+	}
+	return n
 }

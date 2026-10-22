@@ -73,8 +73,34 @@ func TestBrokerStartSupport_AppliesAtStart(t *testing.T) {
 		assert.Equal(t, wantRerenderedAtStart[f.Key], with.appliesAtStart(f.Key), "with changedFields: %s", f.Key)
 		assert.False(t, without.appliesAtStart(f.Key), "without changedFields: %s", f.Key)
 	}
-	assert.Equal(t, []string{"config.secrets"}, with.heldProvisionEdits([]string{"config.secrets", "config.skills", "config.system_prompt"}))
-	assert.Equal(t, []string{"config.secrets", "config.skills"}, without.heldProvisionEdits([]string{"config.secrets", "config.skills"}))
+	all := []string{"config.agent_instructions", "config.secrets", "config.services", "config.skills", "config.system_prompt"}
+	set := &api.ScionConfig{
+		AgentInstructions: "i", SystemPrompt: "p",
+		Skills:   []api.SkillReference{{URI: "hub://skills/a"}},
+		Services: []api.ServiceSpec{{Name: "db", Command: []string{"postgres"}}},
+		Secrets:  []api.RequiredSecret{{Key: "K"}},
+	}
+	assert.Equal(t, []string{"config.secrets"}, with.heldProvisionEdits(all, nil, set, nil), "set values reach the persisted config")
+	assert.Equal(t, all, without.heldProvisionEdits(all, nil, set, nil))
+
+	// Clears the start merge keeps are held: the broker would render the
+	// previous value. A system prompt clear is applied only when the broker
+	// also applies cleared_fields and the clear was recorded.
+	both := brokerStartSupportFrom(&store.BrokerCapabilities{ChangedFields: true, ClearedFields: true})
+	cleared := &api.ScionConfig{}
+	clears := []string{"config.agent_instructions", "config.services", "config.skills", "config.system_prompt"}
+	assert.Equal(t, clears, with.heldProvisionEdits(clears, set, cleared, []string{"system_prompt"}))
+	assert.Equal(t, []string{"config.agent_instructions", "config.services", "config.skills"}, both.heldProvisionEdits(clears, set, cleared, []string{"system_prompt"}))
+	assert.Equal(t, clears, both.heldProvisionEdits(clears, set, cleared, nil), "an unrecorded clear is not applied")
+
+	// A skill removal is held: the merge appends references and a re-render
+	// uninstalls nothing. Adding a skill is applied.
+	two := &api.ScionConfig{Skills: []api.SkillReference{{URI: "hub://skills/a"}, {URI: "hub://skills/b", As: "bee"}}}
+	one := &api.ScionConfig{Skills: []api.SkillReference{{URI: "hub://skills/a"}}}
+	renamed := &api.ScionConfig{Skills: []api.SkillReference{{URI: "hub://skills/a"}, {URI: "hub://skills/b"}}}
+	assert.Equal(t, []string{"config.skills"}, with.heldProvisionEdits([]string{"config.skills"}, two, one, nil))
+	assert.Equal(t, []string{"config.skills"}, with.heldProvisionEdits([]string{"config.skills"}, two, renamed, nil), "a changed install name removes the old one")
+	assert.Empty(t, with.heldProvisionEdits([]string{"config.skills"}, one, two, nil))
 }
 
 // TestAgentEditability_EveryKeyEveryPhaseByBroker enumerates every key,
@@ -94,10 +120,28 @@ func TestAgentEditability_EveryKeyEveryPhaseByBroker(t *testing.T) {
 			want := older.Fields[f.Key]
 			if wantRerenderedAtStart[f.Key] && noContainerPhases[phase] {
 				assert.Equal(t, EditReincarnate, want.Disposition, "older broker: %s in %s waits for a reincarnation", f.Key, phase)
+				assert.False(t, want.ClearNeedsReincarnate, "older broker: the whole edit waits, so no separate clear note")
 				want.Disposition = EditNow
+				// A clear of a re-rendered key is kept by the start merge
+				// (the system prompt's needs clearedFields, absent here).
+				want.ClearNeedsReincarnate = true
+				// A resume continues the conversation.
+				if phase == state.PhaseSuspended {
+					want.Note = "session"
+				}
 			}
 			assert.Equal(t, want, newer.Fields[f.Key], "%s in %s", f.Key, phase)
 		}
+	}
+	// With clearedFields too, a system prompt clear is applied at start;
+	// the other re-rendered keys' clears are not.
+	bothAccess := full
+	bothAccess.Broker = brokerStartSupport{ChangedFields: true, ClearedFields: true}
+	both := buildAgentEditability(&store.Agent{Phase: string(state.PhaseStopped)}, bothAccess)
+	assert.False(t, both.Fields["config.system_prompt"].ClearNeedsReincarnate)
+	for _, k := range []string{"config.agent_instructions", "config.skills", "config.services"} {
+		assert.True(t, both.Fields[k].ClearNeedsReincarnate, k)
+		assert.Equal(t, EditNow, both.Fields[k].Disposition, k)
 	}
 	// A caller without update gets nothing, whatever the broker.
 	noUpdate := buildAgentEditability(&store.Agent{Phase: string(state.PhaseStopped)}, agentEditAccess{Broker: brokerStartSupport{ChangedFields: true}})
@@ -147,19 +191,51 @@ func TestBrokerStartSupport_ClearAppliesAtStart(t *testing.T) {
 	}
 	cleared := []string{"config.max_turns", "config.model", "config.resources"}
 	nullClear := rawConfigOf(t, `{"Max_Turns": null, "model": "", "resources": {}}`)
-	assert.Equal(t, []string{"config.model"}, with.heldClearEdits(cleared, nullClear), "a null count limit is a clear the broker applies")
-	assert.Equal(t, cleared, without.heldClearEdits(cleared, nullClear))
+	recorded := []string{"max_turns", "resources"}
+	assert.Equal(t, []string{"config.model"}, with.heldClearEdits(cleared, nullClear, recorded, nil), "a null count limit is a clear the broker applies")
+	assert.Equal(t, cleared, without.heldClearEdits(cleared, nullClear, recorded, nil))
+	assert.Equal(t, cleared, with.heldClearEdits(cleared, nullClear, nil, nil), "a clear that was not recorded is not applied")
 	// Unlimited (0) on a count limit is never reported applied
 	// (ptone/scion#5605).
 	for _, key := range []string{"max_turns", "max_model_calls"} {
 		zero := rawConfigOf(t, `{"`+key+`": 0}`)
-		assert.Equal(t, []string{"config." + key}, with.heldClearEdits([]string{"config." + key}, zero), key)
+		assert.Equal(t, []string{"config." + key}, with.heldClearEdits([]string{"config." + key}, zero, []string{key}, nil), key)
 		null := rawConfigOf(t, `{"`+key+`": null}`)
-		assert.Empty(t, with.heldClearEdits([]string{"config." + key}, null), key)
+		assert.Empty(t, with.heldClearEdits([]string{"config." + key}, null, []string{key}, nil), key)
 	}
+	// env is applied only when every dropped key was recorded: a caller who
+	// cannot view env records none, and auto-expose and TZ keys are never
+	// recorded.
+	env := []string{"config.env"}
+	assert.Empty(t, with.heldClearEdits(env, nil, []string{"env.A", "env.B"}, []string{"A", "B"}))
+	assert.Equal(t, env, with.heldClearEdits(env, nil, []string{"env.A"}, []string{"A", "B"}))
+	assert.Equal(t, env, with.heldClearEdits(env, nil, nil, []string{"A"}))
+	assert.Equal(t, env, with.heldClearEdits(env, nil, nil, []string{"SCION_AUTO_EXPOSE_PORTS"}))
+	assert.Equal(t, env, without.heldClearEdits(env, nil, []string{"env.A"}, []string{"A"}))
+
 	removed := map[string][]string{"env": {"A"}, "volumes": {"/data"}}
-	assert.Equal(t, map[string][]string{"volumes": {"/data"}}, with.heldRemovals(removed))
-	assert.Equal(t, removed, without.heldRemovals(removed))
+	assert.Equal(t, map[string][]string{"volumes": {"/data"}}, with.heldRemovals(removed, []string{"env.A"}))
+	assert.Equal(t, removed, with.heldRemovals(removed, nil), "unrecorded env removals stay held")
+	assert.Equal(t, removed, without.heldRemovals(removed, []string{"env.A"}))
+}
+
+func TestDroppedEnvKeys(t *testing.T) {
+	old := &api.ScionConfig{Env: map[string]string{"A": "1", "B": "2", "C": "3"}}
+	present := map[string]bool{"env": true}
+	assert.Equal(t, []string{"A", "C"}, droppedEnvKeys(old, &api.ScionConfig{Env: map[string]string{"B": "2", "D": "4"}}, present))
+	assert.Equal(t, []string{"A", "B", "C"}, droppedEnvKeys(old, &api.ScionConfig{}, present))
+	assert.Nil(t, droppedEnvKeys(old, &api.ScionConfig{}, map[string]bool{"model": true}), "env not in the request drops nothing")
+	assert.Nil(t, droppedEnvKeys(nil, &api.ScionConfig{}, present))
+}
+
+func TestBrokerStartSupport_RerenderWarnings(t *testing.T) {
+	with := brokerStartSupport{ChangedFields: true}
+	got := with.reincarnateOnlyEditWarnings([]string{"config.services"}, []string{"config.model"})
+	require.Len(t, got, 2)
+	assert.Equal(t, "config.services: stored now; rendered at the next reincarnation (a start does not render secrets, and does not apply a cleared agent_instructions or services value or a removed skill)", got[0])
+	assert.Contains(t, got[1], "config.model: cleared now")
+	assert.Equal(t, reincarnateOnlyEditWarnings([]string{"config.services"}, nil), brokerStartSupport{}.reincarnateOnlyEditWarnings([]string{"config.services"}, nil))
+	assert.Equal(t, reincarnateOnlyEditWarnings(nil, []string{"config.model"}), with.reincarnateOnlyEditWarnings(nil, []string{"config.model"}))
 }
 
 // TestAgentEditability_ClearNeedsReincarnateByBroker: with clearedFields

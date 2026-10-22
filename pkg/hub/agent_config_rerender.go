@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"slices"
 	"sort"
 	"strings"
 
@@ -88,24 +89,75 @@ func (sup brokerStartSupport) appliesAtStart(key string) bool {
 
 // heldProvisionEdits returns the entries of provision (wire keys of
 // provision-rendered edits, from reincarnateOnlyConfigEdits) that still
-// wait for a reincarnation with this broker.
-func (sup brokerStartSupport) heldProvisionEdits(provision []string) []string {
+// wait for a reincarnation with this broker. old is the agent's inline
+// config before the PATCH, req the decoded request and recorded the
+// cleared paths the PATCH recorded (the new ClearedFields).
+//
+// The broker renders the agent's persisted config after merging the inline
+// config into it, so an edit is applied at the next start only when the
+// broker re-renders the key and the new value reaches the persisted config:
+//   - a non-empty value the start merge applies (startMergeKeepsBase is
+//     false), or a clear recorded in cleared_fields that the broker
+//     applies (system_prompt, with clearedFields). Any other clear -- an
+//     empty agent_instructions, skills or services value -- is held: the
+//     broker would render the previous value again.
+//   - for skills, in addition, no reference is removed: the merge appends
+//     skill references, and a re-render installs the listed skills without
+//     uninstalling others, so a removed skill stays installed.
+func (sup brokerStartSupport) heldProvisionEdits(provision []string, old, req *api.ScionConfig, recorded []string) []string {
 	var out []string
-	for _, k := range provision {
-		if !sup.appliesAtStart(k) {
-			out = append(out, k)
+	for _, key := range provision {
+		k := strings.TrimPrefix(key, agentConfigKeyPrefix)
+		// An empty value is a clear whatever the merge would do with it:
+		// an empty list is omitted on the wire and reaches the broker as
+		// nothing. Only a recorded clear the broker applies takes effect.
+		var applied bool
+		switch {
+		case !sup.appliesAtStart(key):
+		case configFieldZero(k, req):
+			applied = sup.ClearedFields && slices.Contains(recorded, k)
+		default:
+			applied = !startMergeKeepsBase(k, req)
+		}
+		if applied && k == "skills" && skillReferencesRemoved(old, req) {
+			applied = false
+		}
+		if !applied {
+			out = append(out, key)
 		}
 	}
 	return out
 }
 
-// clearAppliesAtStart reports whether the broker applies a clear or zero
+// skillReferencesRemoved reports whether req leaves out a skill reference
+// (URI and install name) that old lists.
+func skillReferencesRemoved(old, req *api.ScionConfig) bool {
+	if old == nil {
+		return false
+	}
+	kept := map[[2]string]bool{}
+	if req != nil {
+		for _, r := range req.Skills {
+			kept[[2]string{r.URI, r.As}] = true
+		}
+	}
+	for _, r := range old.Skills {
+		if !kept[[2]string{r.URI, r.As}] {
+			return true
+		}
+	}
+	return false
+}
+
+// clearAppliesAtStart reports whether the broker can apply a clear or zero
 // of the config key with wire key key at the next start: with
 // ClearedFields, a key api.ClearableConfigPath accepts, and env, whose
-// removed keys are sent as env.KEY entries. The count limits are left out:
-// their 0 (Unlimited) is not applied by any start or reincarnation over an
-// inherited limit (ptone/scion#5605), so the field keeps
-// clearNeedsReincarnate; their null clear is handled by heldClearEdits.
+// removed keys are sent as env.KEY entries. Whether a given PATCH's clear
+// is applied also depends on what it recorded (heldClearEdits). The count
+// limits are left out: their 0 (Unlimited) is not applied by any start or
+// reincarnation over an inherited limit (ptone/scion#5605), so the field
+// keeps clearNeedsReincarnate; their null clear is handled by
+// heldClearEdits.
 func (sup brokerStartSupport) clearAppliesAtStart(key string) bool {
 	k, ok := strings.CutPrefix(key, agentConfigKeyPrefix)
 	return ok && sup.ClearedFields && !countLimitKeys[k] && (k == "env" || api.ClearableConfigPath(k))
@@ -118,7 +170,15 @@ var countLimitKeys = map[string]bool{"max_turns": true, "max_model_calls": true}
 // heldClearEdits returns the entries of cleared (wire keys of cleared
 // container keys, from reincarnateOnlyConfigEdits) that still wait for a
 // reincarnation with this broker. rawConfig is the request's raw config
-// object.
+// object, recorded the cleared paths the PATCH recorded (the new
+// ClearedFields), and envDropped the env keys the request drops
+// (droppedEnvKeys).
+//
+// A clear is reported applied only when the broker applies cleared_fields
+// and the PATCH actually recorded it: the key itself, or, for env, an
+// env.KEY entry for every dropped key. A caller who cannot view the
+// agent's env records no env entries, and the auto-expose and TZ keys are
+// never recorded, so such an env edit stays held.
 //
 // A count limit sent as a number (0, Unlimited) is excluded from the
 // applied path and stays held, with today's warning: the broker would
@@ -126,14 +186,55 @@ var countLimitKeys = map[string]bool{"max_turns": true, "max_model_calls": true}
 // reincarnation can yet express "no limit" over an inherited one
 // (ptone/scion#5605). Only a null value is reported as a clear the broker
 // applies.
-func (sup brokerStartSupport) heldClearEdits(cleared []string, rawConfig map[string]json.RawMessage) []string {
+func (sup brokerStartSupport) heldClearEdits(cleared []string, rawConfig map[string]json.RawMessage, recorded, envDropped []string) []string {
 	var out []string
-	for _, k := range cleared {
-		countLimitClear := sup.ClearedFields && countLimitKeys[strings.TrimPrefix(k, agentConfigKeyPrefix)] && !countLimitSentAsNumber(k, rawConfig)
-		if !sup.clearAppliesAtStart(k) && !countLimitClear {
+	for _, key := range cleared {
+		k := strings.TrimPrefix(key, agentConfigKeyPrefix)
+		var applied bool
+		switch {
+		case !sup.ClearedFields:
+		case k == "env":
+			applied = envKeysRecorded(envDropped, recorded)
+		case countLimitKeys[k]:
+			applied = !countLimitSentAsNumber(key, rawConfig) && slices.Contains(recorded, k)
+		default:
+			applied = sup.clearAppliesAtStart(key) && slices.Contains(recorded, k)
+		}
+		if !applied {
+			out = append(out, key)
+		}
+	}
+	return out
+}
+
+// envKeysRecorded reports whether every key in keys has an env.KEY entry
+// in recorded.
+func envKeysRecorded(keys, recorded []string) bool {
+	for _, k := range keys {
+		if !slices.Contains(recorded, api.ClearedEnvPathPrefix+k) {
+			return false
+		}
+	}
+	return true
+}
+
+// droppedEnvKeys returns the keys of old's env that a request presenting
+// env (present["env"]) leaves out, sorted; nil when env is not present.
+func droppedEnvKeys(old, req *api.ScionConfig, present map[string]bool) []string {
+	if !present["env"] || old == nil {
+		return nil
+	}
+	var out []string
+	for k := range old.Env {
+		if req == nil {
+			out = append(out, k)
+			continue
+		}
+		if _, kept := req.Env[k]; !kept {
 			out = append(out, k)
 		}
 	}
+	sort.Strings(out)
 	return out
 }
 
@@ -154,20 +255,33 @@ func countLimitSentAsNumber(key string, rawConfig map[string]json.RawMessage) bo
 }
 
 // heldRemovals returns removed (the entries removedConfigEntries reports
-// per config key) without the keys whose removals this broker applies at
-// the next start: the env keys, which nextClearedFields records as
-// env.KEY entries under the same rule.
-func (sup brokerStartSupport) heldRemovals(removed map[string][]string) map[string][]string {
+// per config key) without the env removals this broker applies at the next
+// start: those whose every key the PATCH recorded as an env.KEY entry in
+// recorded (the new ClearedFields).
+func (sup brokerStartSupport) heldRemovals(removed map[string][]string, recorded []string) map[string][]string {
 	if len(removed) == 0 {
 		return removed
 	}
 	out := make(map[string][]string, len(removed))
 	for k, v := range removed {
-		if !sup.clearAppliesAtStart(agentConfigKeyPrefix + k) {
-			out[k] = v
+		if k == "env" && sup.ClearedFields && envKeysRecorded(v, recorded) {
+			continue
 		}
+		out[k] = v
 	}
 	return out
+}
+
+// reincarnateOnlyEditWarnings is the package's reincarnateOnlyEditWarnings
+// for this broker: with changedFields, the provision-rendered keys still
+// held are secrets and clears or removals a start does not apply, and the
+// warning says so instead of saying a start never re-renders.
+func (sup brokerStartSupport) reincarnateOnlyEditWarnings(provision, cleared []string) []string {
+	if !sup.ChangedFields || len(provision) == 0 {
+		return reincarnateOnlyEditWarnings(provision, cleared)
+	}
+	out := []string{strings.Join(provision, ", ") + ": stored now; rendered at the next reincarnation (a start does not render secrets, and does not apply a cleared agent_instructions or services value or a removed skill)"}
+	return append(out, reincarnateOnlyEditWarnings(nil, cleared)...)
 }
 
 // nextChangedFields returns the agent's live inline config's ChangedFields
