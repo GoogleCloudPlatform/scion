@@ -106,6 +106,20 @@ type DeleteIntentTarget struct {
 	ProjectID string `json:"projectId,omitempty"`
 	Slug      string `json:"slug"`
 	Runtime   string `json:"runtime,omitempty"`
+	// Pin is the agent's pinned runtime target when the intent was
+	// written, or nil for an unpinned agent (and for an intent written by
+	// an older hub). Executed without the row, the target takes this pin,
+	// so the dispatcher's placement check compares it with the Runtime
+	// Broker row as it is then (ptone/scion#4957).
+	Pin *DeleteIntentPin `json:"pin,omitempty"`
+}
+
+// DeleteIntentPin is an agent's pinned runtime target as a delete intent
+// records it (store.Agent's PinnedRuntime* fields).
+type DeleteIntentPin struct {
+	RuntimeBrokerID   string `json:"runtimeBrokerId"`
+	RuntimeTargetID   string `json:"runtimeTargetId"`
+	RuntimeTargetType string `json:"runtimeTargetType"`
 }
 
 // CheckPromptDispatchArgs is intentionally empty — the agent slug/ID in the

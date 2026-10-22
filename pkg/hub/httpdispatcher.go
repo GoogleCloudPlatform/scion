@@ -4416,6 +4416,7 @@ func (d *HTTPAgentDispatcher) deferredDelete(ctx context.Context, agent *store.A
 			ProjectID: agent.ProjectID,
 			Slug:      agent.Slug,
 			Runtime:   agent.Runtime,
+			Pin:       deleteIntentPinOf(agent),
 		},
 	}
 	// An engine delete records its claim, not its notAfter: the executing

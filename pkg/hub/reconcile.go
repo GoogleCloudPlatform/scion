@@ -442,7 +442,18 @@ func (s *Server) execDispatchDelete(ctx context.Context, d store.BrokerDispatch)
 		// that records its target is still sent from the intent alone
 		// (ptone/scion#3665); any other intent fails, as before.
 		if target, ok := deleteIntentTargetAgent(d, args); ok {
-			s.pinRowlessDeleteTarget(ctx, target)
+			if pin := args.Target.Pin; pin != nil {
+				// The pin the intent recorded: the dispatcher's
+				// placement check compares it with the Runtime Broker
+				// row as it is now (ptone/scion#4957).
+				target.PinnedRuntimeBrokerID = pin.RuntimeBrokerID
+				target.PinnedRuntimeTargetID = pin.RuntimeTargetID
+				target.PinnedRuntimeTargetType = pin.RuntimeTargetType
+			} else {
+				// No pin recorded (an unpinned agent, or an intent
+				// written by an older hub): inferred from the row.
+				s.pinRowlessDeleteTarget(ctx, target)
+			}
 			agent, err = target, nil
 		}
 	}
@@ -545,9 +556,23 @@ func deleteIntentTargetAgent(d store.BrokerDispatch, args *DeleteDispatchArgs) (
 	}, true
 }
 
+// deleteIntentPinOf is the pin a delete intent records for agent
+// (DeleteIntentTarget.Pin): nil when the agent is not pinned.
+func deleteIntentPinOf(agent *store.Agent) *DeleteIntentPin {
+	if !agent.IsPinned() {
+		return nil
+	}
+	return &DeleteIntentPin{
+		RuntimeBrokerID:   agent.PinnedRuntimeBrokerID,
+		RuntimeTargetID:   agent.PinnedRuntimeTargetID,
+		RuntimeTargetType: agent.PinnedRuntimeTargetType,
+	}
+}
+
 // pinRowlessDeleteTarget gives a rowless delete target
-// (deleteIntentTargetAgent) the pin of its Runtime Broker when that row is
-// flat. The intent names exactly that Runtime Broker (d.BrokerID), and a
+// (deleteIntentTargetAgent) whose intent recorded no pin (an unpinned
+// agent, or an intent written by an older hub) the pin of its Runtime
+// Broker when that row is flat. The intent names exactly that Runtime Broker (d.BrokerID), and a
 // flat Runtime Broker serves one runtime target that never changes, so
 // this is the agent's saved placement, not a guess; without it the
 // dispatcher's placement backstop would read the target as an unpinned

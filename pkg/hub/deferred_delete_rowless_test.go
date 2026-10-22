@@ -28,6 +28,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
@@ -607,4 +608,149 @@ func TestExecDispatchDelete_ClaimlessNotAfter(t *testing.T) {
 		assert.NotEmpty(t, client.sent(), "the engine's delete reached the broker")
 		assert.Empty(t, logs.named(staleClaimlessDeleteMsg), "an engine intent was logged as a claimless one")
 	})
+}
+
+// --- pinned target in the intent (ptone/scion#4957) --------------------------
+
+// newPinnedRowlessFixture is newRowlessFixture with the broker a flat
+// Runtime Broker (one docker target) and the agent pinned to it.
+func newPinnedRowlessFixture(t *testing.T) *rowlessFixture {
+	t.Helper()
+	ctx := context.Background()
+	cs := entadapter.NewCompositeStore(enttest.NewClient(t))
+	events := NewChannelEventPublisher()
+	t.Cleanup(events.Close)
+	proj := &store.Project{ID: uuid.NewString(), Name: "pin-proj", Slug: "pp-" + uuid.NewString()[:8], OwnerID: uuid.NewString()}
+	require.NoError(t, cs.CreateProject(ctx, proj))
+	broker := &store.RuntimeBroker{
+		ID: uuid.NewString(), Name: "flat-broker", Slug: "fb-" + uuid.NewString()[:8], Status: "online",
+		RuntimeTarget: &api.RuntimeTargetDescriptor{ID: "target-" + uuid.NewString()[:8], Type: "docker"},
+	}
+	require.NoError(t, cs.CreateRuntimeBroker(ctx, broker))
+	agent := &store.Agent{
+		ID: uuid.NewString(), Name: "pinned-agent", Slug: "pa-" + uuid.NewString()[:8], ProjectID: proj.ID,
+		RuntimeBrokerID:         broker.ID,
+		PinnedRuntimeBrokerID:   broker.ID,
+		PinnedRuntimeTargetID:   broker.RuntimeTarget.ID,
+		PinnedRuntimeTargetType: broker.RuntimeTarget.Type,
+	}
+	require.NoError(t, cs.CreateAgent(ctx, agent))
+	_, err := cs.SetAgentRunID(ctx, agent.ID, "run-a", nil)
+	require.NoError(t, err)
+	snapshot := *mustGetAgent(t, cs, agent.ID)
+	require.True(t, snapshot.PinValid())
+	snapshot.Runtime = "docker"
+	return &rowlessFixture{store: cs, events: events, broker: broker.ID, snapshot: snapshot}
+}
+
+// reregisterBroker replaces the fixture's Runtime Broker row with one of
+// the same ID serving another runtime target.
+func (f *rowlessFixture) reregisterBroker(t *testing.T) string {
+	t.Helper()
+	ctx := context.Background()
+	require.NoError(t, f.store.DeleteRuntimeBroker(ctx, f.broker))
+	target := "target-new-" + uuid.NewString()[:8]
+	require.NoError(t, f.store.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID: f.broker, Name: "flat-broker", Slug: "fb-" + uuid.NewString()[:8], Status: "online",
+		RuntimeTarget: &api.RuntimeTargetDescriptor{ID: target, Type: "docker"},
+	}))
+	return target
+}
+
+// execRowless runs the owning node's execution of a delete intent with
+// args for the fixture's agent, through a recording client.
+func (f *rowlessFixture) execRowless(t *testing.T, args *DeleteDispatchArgs) (*rowlessRecordingClient, error) {
+	t.Helper()
+	raw, err := MarshalDispatchArgs(args)
+	require.NoError(t, err)
+	client := newRowlessRecordingClient(nil)
+	owner, _ := f.owner(t, client)
+	_, execErr := owner.execDispatchDelete(context.Background(), store.BrokerDispatch{
+		ID: uuid.NewString(), BrokerID: f.broker, AgentID: f.snapshot.ID, AgentSlug: f.snapshot.Slug,
+		ProjectID: f.snapshot.ProjectID, Op: brokerDispatchOpDelete, Args: raw,
+	})
+	return client, execErr
+}
+
+// A pinned agent's project-delete intent records its pin, which survives
+// the round trip; executed without the row against the same Runtime
+// Broker row, the delete is sent.
+func TestProjectDeleteDeferred_IntentRecordsPin(t *testing.T) {
+	fenceNow(t)
+	ctx := context.Background()
+	f := newPinnedRowlessFixture(t)
+	f.removeRows(t)
+	d, wait := f.projectDeleteIntent(t)
+
+	args, err := UnmarshalDeleteArgs(d.Args)
+	require.NoError(t, err)
+	require.NotNil(t, args.Target)
+	assert.Equal(t, &DeleteIntentPin{
+		RuntimeBrokerID:   f.snapshot.PinnedRuntimeBrokerID,
+		RuntimeTargetID:   f.snapshot.PinnedRuntimeTargetID,
+		RuntimeTargetType: f.snapshot.PinnedRuntimeTargetType,
+	}, args.Target.Pin)
+
+	client := newRowlessRecordingClient(nil)
+	owner, _ := f.owner(t, client)
+	owner.drainBrokerDispatch(ctx, f.broker, nil)
+	wait()
+	row, err := f.store.GetBrokerDispatch(ctx, d.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.DispatchStateDone, row.State, "intent error: %s", row.Error)
+	assert.Equal(t, []string{"run-a"}, rowlessRuns(client.sent()))
+}
+
+// Executed without the row, an intent's recorded pin is compared with the
+// Runtime Broker row as it is then: a row that now serves another target
+// refuses the delete (nothing sent), where inferring the pin from the row
+// would have sent it. An intent with no pin (an older hub) still infers
+// it and is sent.
+func TestExecDispatchDelete_RowlessIntentPinComparedAtExecution(t *testing.T) {
+	target := func(f *rowlessFixture, pin *DeleteIntentPin) *DeleteIntentTarget {
+		return &DeleteIntentTarget{BrokerID: f.broker, ProjectID: f.snapshot.ProjectID, Slug: f.snapshot.Slug, Runtime: "docker", Pin: pin}
+	}
+	pinOf := func(f *rowlessFixture) *DeleteIntentPin {
+		return &DeleteIntentPin{
+			RuntimeBrokerID:   f.snapshot.PinnedRuntimeBrokerID,
+			RuntimeTargetID:   f.snapshot.PinnedRuntimeTargetID,
+			RuntimeTargetType: f.snapshot.PinnedRuntimeTargetType,
+		}
+	}
+
+	t.Run("pin matches the row: sent", func(t *testing.T) {
+		f := newPinnedRowlessFixture(t)
+		f.removeRows(t)
+		client, err := f.execRowless(t, &DeleteDispatchArgs{RunID: "run-a", Target: target(f, pinOf(f))})
+		require.NoError(t, err)
+		assert.Equal(t, []string{"run-a"}, rowlessRuns(client.sent()))
+	})
+	t.Run("row now serves another target: refused, nothing sent", func(t *testing.T) {
+		f := newPinnedRowlessFixture(t)
+		f.removeRows(t)
+		f.reregisterBroker(t)
+		client, err := f.execRowless(t, &DeleteDispatchArgs{RunID: "run-a", Target: target(f, pinOf(f))})
+		refusal, ok := placementRefusalOf(err)
+		require.True(t, ok, "a placement refusal: %v", err)
+		assert.Equal(t, ErrCodeRuntimeTargetMismatch, refusal.Code)
+		assert.Empty(t, client.sent())
+	})
+	t.Run("no pin recorded: inferred from the row, sent", func(t *testing.T) {
+		f := newPinnedRowlessFixture(t)
+		f.removeRows(t)
+		f.reregisterBroker(t)
+		client, err := f.execRowless(t, &DeleteDispatchArgs{RunID: "run-a", Target: target(f, nil)})
+		require.NoError(t, err)
+		assert.Equal(t, []string{"run-a"}, rowlessRuns(client.sent()))
+	})
+}
+
+// An unpinned agent's intent records no pin.
+func TestDeleteIntentPinOf(t *testing.T) {
+	assert.Nil(t, deleteIntentPinOf(&store.Agent{RuntimeBrokerID: "b"}))
+	assert.Equal(t, &DeleteIntentPin{RuntimeBrokerID: "b", RuntimeTargetID: "t", RuntimeTargetType: "docker"},
+		deleteIntentPinOf(&store.Agent{PinnedRuntimeBrokerID: "b", PinnedRuntimeTargetID: "t", PinnedRuntimeTargetType: "docker"}))
+	raw, err := MarshalDispatchArgs(&DeleteDispatchArgs{Target: &DeleteIntentTarget{BrokerID: "b", Slug: "s"}})
+	require.NoError(t, err)
+	assert.NotContains(t, raw, `"pin"`, "an unpinned target writes no pin")
 }
