@@ -2135,138 +2135,11 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		}
 	}
 
-	// Step 3b: Resolve and install referenced skills from skill bank
-	var resolvedSkillsRecord *SkillResolutionRecord
-	if len(finalScionCfg.Skills) > 0 {
-		resolver := SkillResolverFromContext(ctx)
-		if resolver == nil {
-			// S1: Fail closed for required skills
-			requiredURIs := collectRequiredSkillURIs(finalScionCfg.Skills)
-			if len(requiredURIs) > 0 {
-				return "", "", nil, fmt.Errorf(
-					"skill resolution failed: %d required skill(s) declared but no skill resolver available\n"+
-						"  skills: %s\n"+
-						"  hint: connect to a Hub or mark skills as optional",
-					len(requiredURIs), strings.Join(requiredURIs, ", "))
-			}
-			util.Debugf("provision: %d optional skill(s) declared but no resolver available, skipping", len(finalScionCfg.Skills))
-		} else {
-			projectID := ResolveProjectIDFromContext(ctx)
-			if projectID == "" {
-				projectID, _ = config.ReadProjectID(projectDir)
-			}
-			resolveOpts := ResolveOpts{
-				ProjectID: projectID,
-				UserID:    ResolveUserIDFromContext(ctx),
-			}
-
-			skillFetchStart := time.Now()
-			result, err := resolver.Resolve(ctx, finalScionCfg.Skills, resolveOpts)
-			slog.Info("provision: skill fetch complete", "agent", agentName,
-				"elapsed_ms", time.Since(skillFetchStart).Milliseconds(),
-				"requested", len(finalScionCfg.Skills), "ok", err == nil)
-			if err != nil {
-				return "", "", nil, fmt.Errorf("skill resolution failed: %w", err)
-			}
-
-			// S1 completeness: build requested URI set
-			requestedURIs := make(map[string]*api.SkillReference, len(finalScionCfg.Skills))
-			for i := range finalScionCfg.Skills {
-				requestedURIs[finalScionCfg.Skills[i].URI] = &finalScionCfg.Skills[i]
-			}
-
-			resolvedURIs := make(map[string]bool)
-			errorURIs := make(map[string]bool)
-
-			for _, rs := range result.Resolved {
-				if _, ok := requestedURIs[rs.URI]; !ok {
-					return "", "", nil, fmt.Errorf(
-						"resolver returned unrequested skill %q — possible resolver bug or injection", rs.URI)
-				}
-				if resolvedURIs[rs.URI] {
-					return "", "", nil, fmt.Errorf(
-						"resolver returned duplicate resolved skill %q", rs.URI)
-				}
-				resolvedURIs[rs.URI] = true
-			}
-
-			for _, re := range result.Errors {
-				errorURIs[re.URI] = true
-				ref := requestedURIs[re.URI]
-				if ref == nil || !ref.Optional {
-					return "", "", nil, &SkillResolutionError{URI: re.URI, Code: re.Code, Message: re.Message, RetryAfter: re.RetryAfter, Status: re.Status}
-				}
-				slog.WarnContext(ctx, "optional skill could not be resolved; skipped",
-					"skill_uri", LoggedSkillRef(re.URI), "code", re.Code,
-					"reason", ResolverReasonForLog(re.URI, re.Message))
-			}
-
-			// S1: verify every requested URI has an outcome
-			for uri, ref := range requestedURIs {
-				if !resolvedURIs[uri] && !errorURIs[uri] {
-					if ref.Optional {
-						slog.WarnContext(ctx, "optional skill missing from resolver response; skipped",
-							"skill_uri", LoggedSkillRef(uri), "reason", "missing from resolver response")
-					} else {
-						return "", "", nil, fmt.Errorf(
-							"required skill %q missing from resolver response — S1 fail-closed", LoggedSkillRef(uri))
-					}
-				}
-			}
-
-			// Capture local skills before installing registry skills (M2: avoid duplication)
-			var localSkills []SkillResolutionEntry
-			if skillsDir != "" {
-				localSkills = enumerateLocalSkills(agentHome, skillsDir)
-			}
-
-			if len(result.Resolved) > 0 {
-				if skillsDir == "" {
-					return "", "", nil, fmt.Errorf("harness does not support skills (no skills directory configured)")
-				}
-				skillsDest := filepath.Join(agentHome, skillsDir)
-				// The requested ref is authoritative for Optional: a resolver
-				// that does not copy it must not make an optional skill's
-				// install failure fail the create (#5020).
-				for i := range result.Resolved {
-					result.Resolved[i].Optional = requestedURIs[result.Resolved[i].URI].Optional
-				}
-				// Skipped optional skills are logged as warnings by
-				// installResolvedSkills.
-				record, _, err := installResolvedSkills(ctx, result.Resolved, skillsDest, agentHome)
-				if err != nil {
-					// A required skill's install failure is already a
-					// *SkillResolutionError naming the skill; return it as
-					// is so the broker reports it as a skill resolution
-					// failure rather than a generic runtime error.
-					var skillErr *SkillResolutionError
-					if errors.As(err, &skillErr) {
-						return "", "", nil, skillErr
-					}
-					return "", "", nil, fmt.Errorf("skill installation failed: %w", err)
-				}
-				record.Resolver = resolverName(resolver)
-				record.Skills = append(localSkills, record.Skills...)
-				resolvedSkillsRecord = record
-			}
-		}
-	}
-
-	// Write resolution record (S4)
-	if resolvedSkillsRecord != nil {
-		recordPath := filepath.Join(agentHome, ".scion", "resolved-skills.json")
-		if err := writeResolutionRecord(recordPath, resolvedSkillsRecord); err != nil {
-			util.Debugf("provision: failed to write resolution record: %v", err)
-		}
-
-		// Stage resolved-skills.json for container-script harnesses
-		if _, isContainerScript := h.(*harness.ContainerScriptHarness); isContainerScript {
-			recordData, _ := json.MarshalIndent(resolvedSkillsRecord, "", "  ")
-			inputPath := filepath.Join(agentHome, ".scion", "harness", "inputs", "resolved-skills.json")
-			if err := os.MkdirAll(filepath.Dir(inputPath), 0755); err == nil {
-				_ = os.WriteFile(inputPath, recordData, 0644)
-			}
-		}
+	// Step 3b: Resolve and install referenced skills from skill bank, and
+	// write the resolution record (S4).
+	resolvedSkillsRecord, err := resolveAndInstallSkills(ctx, agentName, projectDir, h, agentHome, finalScionCfg.Skills)
+	if err != nil {
+		return "", "", nil, err
 	}
 
 	// Step 3c: Stage agent plugins (hub.agent_plugins). Bundles are staged
@@ -2309,120 +2182,9 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		}
 	}
 
-	// Step 4: Inject agent instructions
-
-	// Load mandatory preamble — prepended to all agent instructions.
-	mandatoryPreamble, err := loadMandatoryPreamble(resources.MandatoryBoilerplateFS())
-	if err != nil {
-		return "", "", nil, fmt.Errorf("failed to load mandatory boilerplate: %w", err)
-	}
-
-	// Determine whether inline config provided content directly (already resolved).
-	// If so, we skip template-based file resolution for that field.
-	inlineProvidedAgentInstructions := inlineCfg != nil && inlineCfg.AgentInstructions != ""
-	inlineProvidedSystemPrompt := inlineCfg != nil && inlineCfg.SystemPrompt != ""
-
-	if len(chain) > 0 {
-		lastTpl := chain[len(chain)-1]
-
-		// Convention-based auto-detection: if agent_instructions is not set in
-		// the template config but an agents.md file exists in the template
-		// directory, use it automatically. This prevents a common oversight
-		// where a template author creates the file but forgets to reference it
-		// in scion-agent.yaml.
-		if finalScionCfg.AgentInstructions == "" {
-			conventionPath := filepath.Join(lastTpl.Path, "agents.md")
-			if _, err := os.Stat(conventionPath); err == nil {
-				util.Debugf("ProvisionAgent: agent_instructions not set in config, auto-detected agents.md in template %s", lastTpl.Path)
-				finalScionCfg.AgentInstructions = "agents.md"
-			}
-		}
-
-		if finalScionCfg.AgentInstructions != "" {
-			var content []byte
-			if inlineProvidedAgentInstructions {
-				// Inline config already has resolved content — use it directly
-				content = []byte(finalScionCfg.AgentInstructions)
-				util.Debugf("ProvisionAgent: using inline agent_instructions (%d bytes)", len(content))
-			} else {
-				util.Debugf("ProvisionAgent: resolving agent_instructions=%q across template chain (%d templates)", finalScionCfg.AgentInstructions, len(chain))
-				var err error
-				content, err = config.ResolveContentInChain(chain, finalScionCfg.AgentInstructions)
-				if err != nil {
-					return "", "", nil, fmt.Errorf("failed to resolve agent_instructions: %w", err)
-				}
-			}
-			composed := composeInstructions(mandatoryPreamble, content)
-			if composed != nil {
-				util.Debugf("ProvisionAgent: injecting agent instructions (%d bytes) into %s", len(composed), agentHome)
-				if err := h.InjectAgentInstructions(agentHome, composed); err != nil {
-					return "", "", nil, fmt.Errorf("failed to inject agent instructions: %w", err)
-				}
-			} else {
-				util.Debugf("ProvisionAgent: both mandatory preamble and template content are nil, skipping injection")
-			}
-		} else if len(mandatoryPreamble) > 0 {
-			util.Debugf("ProvisionAgent: no agent_instructions configured; injecting mandatory preamble only (%d bytes)", len(mandatoryPreamble))
-			if err := h.InjectAgentInstructions(agentHome, mandatoryPreamble); err != nil {
-				return "", "", nil, fmt.Errorf("failed to inject agent instructions: %w", err)
-			}
-		} else {
-			util.Debugf("ProvisionAgent: no agent_instructions configured and no agents.md found in template")
-		}
-
-		// Step 5: Inject system prompt
-		// Convention-based auto-detection for system prompt as well.
-		if finalScionCfg.SystemPrompt == "" {
-			conventionPath := filepath.Join(lastTpl.Path, "system-prompt.md")
-			if _, err := os.Stat(conventionPath); err == nil {
-				util.Debugf("ProvisionAgent: system_prompt not set in config, auto-detected system-prompt.md in template %s", lastTpl.Path)
-				finalScionCfg.SystemPrompt = "system-prompt.md"
-			}
-		}
-
-		if finalScionCfg.SystemPrompt != "" {
-			var content []byte
-			if inlineProvidedSystemPrompt {
-				// Inline config already has resolved content — use it directly
-				content = []byte(finalScionCfg.SystemPrompt)
-				util.Debugf("ProvisionAgent: using inline system_prompt (%d bytes)", len(content))
-			} else {
-				util.Debugf("ProvisionAgent: resolving system_prompt=%q across template chain (%d templates)", finalScionCfg.SystemPrompt, len(chain))
-				var err error
-				content, err = config.ResolveContentInChain(chain, finalScionCfg.SystemPrompt)
-				if err != nil {
-					return "", "", nil, fmt.Errorf("failed to resolve system_prompt: %w", err)
-				}
-			}
-			if content != nil {
-				util.Debugf("ProvisionAgent: injecting system prompt (%d bytes) into %s", len(content), agentHome)
-				if err := h.InjectSystemPrompt(agentHome, content); err != nil {
-					return "", "", nil, fmt.Errorf("failed to inject system prompt: %w", err)
-				}
-			}
-		}
-	} else if inlineCfg != nil {
-		// No template chain, but inline config may have content fields
-		if finalScionCfg.AgentInstructions != "" {
-			content := []byte(finalScionCfg.AgentInstructions)
-			composed := composeInstructions(mandatoryPreamble, content)
-			util.Debugf("ProvisionAgent: injecting inline agent_instructions (%d bytes, no template)", len(composed))
-			if err := h.InjectAgentInstructions(agentHome, composed); err != nil {
-				return "", "", nil, fmt.Errorf("failed to inject agent instructions: %w", err)
-			}
-		} else if len(mandatoryPreamble) > 0 {
-			util.Debugf("ProvisionAgent: injecting mandatory preamble only (%d bytes, no template, no inline instructions)", len(mandatoryPreamble))
-			if err := h.InjectAgentInstructions(agentHome, mandatoryPreamble); err != nil {
-				return "", "", nil, fmt.Errorf("failed to inject agent instructions: %w", err)
-			}
-		}
-		if finalScionCfg.SystemPrompt != "" {
-			content := []byte(finalScionCfg.SystemPrompt)
-			util.Debugf("ProvisionAgent: injecting inline system_prompt (%d bytes, no template)", len(content))
-			if err := h.InjectSystemPrompt(agentHome, content); err != nil {
-				return "", "", nil, fmt.Errorf("failed to inject system prompt: %w", err)
-			}
-		}
+	// Steps 4 and 5: inject the agent instructions and the system prompt.
+	if err := injectPromptFiles(h, agentHome, chain, finalScionCfg, inlineCfg); err != nil {
+		return "", "", nil, err
 	}
 
 	// 2e. Merge settings env, volumes and auth if available. The volumes,
@@ -2674,16 +2436,8 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 
 	// Write scion-services.yaml for sciontool to consume at container startup
 	if len(finalScionCfg.Services) > 0 {
-		scionDir := filepath.Join(agentHome, ".scion")
-		if err := os.MkdirAll(scionDir, 0755); err != nil {
-			return "", "", nil, fmt.Errorf("failed to create agent .scion directory: %w", err)
-		}
-		servicesData, err := yaml.Marshal(finalScionCfg.Services)
-		if err != nil {
-			return "", "", nil, fmt.Errorf("failed to marshal services config: %w", err)
-		}
-		if err := os.WriteFile(filepath.Join(scionDir, "scion-services.yaml"), servicesData, 0644); err != nil {
-			return "", "", nil, fmt.Errorf("failed to write scion-services.yaml: %w", err)
+		if err := writeServicesFile(agentHome, finalScionCfg.Services); err != nil {
+			return "", "", nil, err
 		}
 	}
 
@@ -4606,4 +4360,294 @@ func worktreeInPlace(path string) bool {
 	}
 	_, err := os.Lstat(filepath.Join(path, ".git"))
 	return err == nil
+}
+
+// injectPromptFiles renders the agent instructions (with the mandatory
+// preamble) and the system prompt into agentHome through h: Steps 4 and 5
+// of ProvisionAgent, shared with the start-time re-render
+// (rerenderProvisionedFiles). cfg is the agent's resolved config; a value
+// inlineCfg sets is content, any other value is a file resolved in chain.
+// When cfg names no file, the template's agents.md and system-prompt.md are
+// picked up by convention and recorded in cfg. Instructions are rendered
+// before the system prompt, which a harness may prepend to them.
+func injectPromptFiles(h api.Harness, agentHome string, chain []*config.Template, finalScionCfg, inlineCfg *api.ScionConfig) error {
+	// Load mandatory preamble — prepended to all agent instructions.
+	mandatoryPreamble, err := loadMandatoryPreamble(resources.MandatoryBoilerplateFS())
+	if err != nil {
+		return fmt.Errorf("failed to load mandatory boilerplate: %w", err)
+	}
+
+	// Determine whether inline config provided content directly (already resolved).
+	// If so, we skip template-based file resolution for that field.
+	inlineProvidedAgentInstructions := inlineCfg != nil && inlineCfg.AgentInstructions != ""
+	inlineProvidedSystemPrompt := inlineCfg != nil && inlineCfg.SystemPrompt != ""
+
+	if len(chain) > 0 {
+		lastTpl := chain[len(chain)-1]
+
+		// Convention-based auto-detection: if agent_instructions is not set in
+		// the template config but an agents.md file exists in the template
+		// directory, use it automatically. This prevents a common oversight
+		// where a template author creates the file but forgets to reference it
+		// in scion-agent.yaml.
+		if finalScionCfg.AgentInstructions == "" {
+			conventionPath := filepath.Join(lastTpl.Path, "agents.md")
+			if _, err := os.Stat(conventionPath); err == nil {
+				util.Debugf("ProvisionAgent: agent_instructions not set in config, auto-detected agents.md in template %s", lastTpl.Path)
+				finalScionCfg.AgentInstructions = "agents.md"
+			}
+		}
+
+		if finalScionCfg.AgentInstructions != "" {
+			var content []byte
+			if inlineProvidedAgentInstructions {
+				// Inline config already has resolved content — use it directly
+				content = []byte(finalScionCfg.AgentInstructions)
+				util.Debugf("ProvisionAgent: using inline agent_instructions (%d bytes)", len(content))
+			} else {
+				util.Debugf("ProvisionAgent: resolving agent_instructions=%q across template chain (%d templates)", finalScionCfg.AgentInstructions, len(chain))
+				var err error
+				content, err = config.ResolveContentInChain(chain, finalScionCfg.AgentInstructions)
+				if err != nil {
+					return fmt.Errorf("failed to resolve agent_instructions: %w", err)
+				}
+			}
+			composed := composeInstructions(mandatoryPreamble, content)
+			if composed != nil {
+				util.Debugf("ProvisionAgent: injecting agent instructions (%d bytes) into %s", len(composed), agentHome)
+				if err := h.InjectAgentInstructions(agentHome, composed); err != nil {
+					return fmt.Errorf("failed to inject agent instructions: %w", err)
+				}
+			} else {
+				util.Debugf("ProvisionAgent: both mandatory preamble and template content are nil, skipping injection")
+			}
+		} else if len(mandatoryPreamble) > 0 {
+			util.Debugf("ProvisionAgent: no agent_instructions configured; injecting mandatory preamble only (%d bytes)", len(mandatoryPreamble))
+			if err := h.InjectAgentInstructions(agentHome, mandatoryPreamble); err != nil {
+				return fmt.Errorf("failed to inject agent instructions: %w", err)
+			}
+		} else {
+			util.Debugf("ProvisionAgent: no agent_instructions configured and no agents.md found in template")
+		}
+
+		// Step 5: Inject system prompt
+		// Convention-based auto-detection for system prompt as well.
+		if finalScionCfg.SystemPrompt == "" {
+			conventionPath := filepath.Join(lastTpl.Path, "system-prompt.md")
+			if _, err := os.Stat(conventionPath); err == nil {
+				util.Debugf("ProvisionAgent: system_prompt not set in config, auto-detected system-prompt.md in template %s", lastTpl.Path)
+				finalScionCfg.SystemPrompt = "system-prompt.md"
+			}
+		}
+
+		if finalScionCfg.SystemPrompt != "" {
+			var content []byte
+			if inlineProvidedSystemPrompt {
+				// Inline config already has resolved content — use it directly
+				content = []byte(finalScionCfg.SystemPrompt)
+				util.Debugf("ProvisionAgent: using inline system_prompt (%d bytes)", len(content))
+			} else {
+				util.Debugf("ProvisionAgent: resolving system_prompt=%q across template chain (%d templates)", finalScionCfg.SystemPrompt, len(chain))
+				var err error
+				content, err = config.ResolveContentInChain(chain, finalScionCfg.SystemPrompt)
+				if err != nil {
+					return fmt.Errorf("failed to resolve system_prompt: %w", err)
+				}
+			}
+			if content != nil {
+				util.Debugf("ProvisionAgent: injecting system prompt (%d bytes) into %s", len(content), agentHome)
+				if err := h.InjectSystemPrompt(agentHome, content); err != nil {
+					return fmt.Errorf("failed to inject system prompt: %w", err)
+				}
+			}
+		}
+	} else if inlineCfg != nil {
+		// No template chain, but inline config may have content fields
+		if finalScionCfg.AgentInstructions != "" {
+			content := []byte(finalScionCfg.AgentInstructions)
+			composed := composeInstructions(mandatoryPreamble, content)
+			util.Debugf("ProvisionAgent: injecting inline agent_instructions (%d bytes, no template)", len(composed))
+			if err := h.InjectAgentInstructions(agentHome, composed); err != nil {
+				return fmt.Errorf("failed to inject agent instructions: %w", err)
+			}
+		} else if len(mandatoryPreamble) > 0 {
+			util.Debugf("ProvisionAgent: injecting mandatory preamble only (%d bytes, no template, no inline instructions)", len(mandatoryPreamble))
+			if err := h.InjectAgentInstructions(agentHome, mandatoryPreamble); err != nil {
+				return fmt.Errorf("failed to inject agent instructions: %w", err)
+			}
+		}
+		if finalScionCfg.SystemPrompt != "" {
+			content := []byte(finalScionCfg.SystemPrompt)
+			util.Debugf("ProvisionAgent: injecting inline system_prompt (%d bytes, no template)", len(content))
+			if err := h.InjectSystemPrompt(agentHome, content); err != nil {
+				return fmt.Errorf("failed to inject system prompt: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
+// resolveAndInstallSkills resolves the skill references skills with the
+// context's skill resolver, installs them into agentHome's skills directory
+// for h, and writes the resolution record (S4), staging it for a
+// container-script harness: Step 3b of ProvisionAgent, shared with the
+// start-time re-render. Required skills fail
+// closed. It returns the record, nil when nothing was installed.
+func resolveAndInstallSkills(ctx context.Context, agentName, projectDir string, h api.Harness, agentHome string, skills []api.SkillReference) (*SkillResolutionRecord, error) {
+	skillsDir := h.SkillsDir()
+	var resolvedSkillsRecord *SkillResolutionRecord
+	if len(skills) > 0 {
+		resolver := SkillResolverFromContext(ctx)
+		if resolver == nil {
+			// S1: Fail closed for required skills
+			requiredURIs := collectRequiredSkillURIs(skills)
+			if len(requiredURIs) > 0 {
+				return nil, fmt.Errorf(
+					"skill resolution failed: %d required skill(s) declared but no skill resolver available\n"+
+						"  skills: %s\n"+
+						"  hint: connect to a Hub or mark skills as optional",
+					len(requiredURIs), strings.Join(requiredURIs, ", "))
+			}
+			util.Debugf("provision: %d optional skill(s) declared but no resolver available, skipping", len(skills))
+		} else {
+			projectID := ResolveProjectIDFromContext(ctx)
+			if projectID == "" {
+				projectID, _ = config.ReadProjectID(projectDir)
+			}
+			resolveOpts := ResolveOpts{
+				ProjectID: projectID,
+				UserID:    ResolveUserIDFromContext(ctx),
+			}
+
+			skillFetchStart := time.Now()
+			result, err := resolver.Resolve(ctx, skills, resolveOpts)
+			slog.Info("provision: skill fetch complete", "agent", agentName,
+				"elapsed_ms", time.Since(skillFetchStart).Milliseconds(),
+				"requested", len(skills), "ok", err == nil)
+			if err != nil {
+				return nil, fmt.Errorf("skill resolution failed: %w", err)
+			}
+
+			// S1 completeness: build requested URI set
+			requestedURIs := make(map[string]*api.SkillReference, len(skills))
+			for i := range skills {
+				requestedURIs[skills[i].URI] = &skills[i]
+			}
+
+			resolvedURIs := make(map[string]bool)
+			errorURIs := make(map[string]bool)
+
+			for _, rs := range result.Resolved {
+				if _, ok := requestedURIs[rs.URI]; !ok {
+					return nil, fmt.Errorf(
+						"resolver returned unrequested skill %q — possible resolver bug or injection", rs.URI)
+				}
+				if resolvedURIs[rs.URI] {
+					return nil, fmt.Errorf(
+						"resolver returned duplicate resolved skill %q", rs.URI)
+				}
+				resolvedURIs[rs.URI] = true
+			}
+
+			for _, re := range result.Errors {
+				errorURIs[re.URI] = true
+				ref := requestedURIs[re.URI]
+				if ref == nil || !ref.Optional {
+					return nil, &SkillResolutionError{URI: re.URI, Code: re.Code, Message: re.Message, RetryAfter: re.RetryAfter, Status: re.Status}
+				}
+				slog.WarnContext(ctx, "optional skill could not be resolved; skipped",
+					"skill_uri", LoggedSkillRef(re.URI), "code", re.Code,
+					"reason", ResolverReasonForLog(re.URI, re.Message))
+			}
+
+			// S1: verify every requested URI has an outcome
+			for uri, ref := range requestedURIs {
+				if !resolvedURIs[uri] && !errorURIs[uri] {
+					if ref.Optional {
+						slog.WarnContext(ctx, "optional skill missing from resolver response; skipped",
+							"skill_uri", LoggedSkillRef(uri), "reason", "missing from resolver response")
+					} else {
+						return nil, fmt.Errorf(
+							"required skill %q missing from resolver response — S1 fail-closed", LoggedSkillRef(uri))
+					}
+				}
+			}
+
+			// Capture local skills before installing registry skills (M2: avoid duplication)
+			var localSkills []SkillResolutionEntry
+			if skillsDir != "" {
+				localSkills = enumerateLocalSkills(agentHome, skillsDir)
+			}
+
+			if len(result.Resolved) > 0 {
+				if skillsDir == "" {
+					return nil, fmt.Errorf("harness does not support skills (no skills directory configured)")
+				}
+				skillsDest := filepath.Join(agentHome, skillsDir)
+				// The requested ref is authoritative for Optional: a resolver
+				// that does not copy it must not make an optional skill's
+				// install failure fail the create (#5020).
+				for i := range result.Resolved {
+					result.Resolved[i].Optional = requestedURIs[result.Resolved[i].URI].Optional
+				}
+				// Skipped optional skills are logged as warnings by
+				// installResolvedSkills.
+				record, _, err := installResolvedSkills(ctx, result.Resolved, skillsDest, agentHome)
+				if err != nil {
+					// A required skill's install failure is already a
+					// *SkillResolutionError naming the skill; return it as
+					// is so the broker reports it as a skill resolution
+					// failure rather than a generic runtime error.
+					var skillErr *SkillResolutionError
+					if errors.As(err, &skillErr) {
+						return nil, skillErr
+					}
+					return nil, fmt.Errorf("skill installation failed: %w", err)
+				}
+				record.Resolver = resolverName(resolver)
+				record.Skills = append(localSkills, record.Skills...)
+				resolvedSkillsRecord = record
+			}
+		}
+	}
+
+	// Write resolution record (S4)
+	if resolvedSkillsRecord != nil {
+		recordPath := filepath.Join(agentHome, ".scion", "resolved-skills.json")
+		if err := writeResolutionRecord(recordPath, resolvedSkillsRecord); err != nil {
+			util.Debugf("provision: failed to write resolution record: %v", err)
+		}
+
+		// Stage resolved-skills.json for container-script harnesses
+		if _, isContainerScript := h.(*harness.ContainerScriptHarness); isContainerScript {
+			recordData, _ := json.MarshalIndent(resolvedSkillsRecord, "", "  ")
+			inputPath := filepath.Join(agentHome, ".scion", "harness", "inputs", "resolved-skills.json")
+			if err := os.MkdirAll(filepath.Dir(inputPath), 0755); err == nil {
+				_ = os.WriteFile(inputPath, recordData, 0644)
+			}
+		}
+	}
+	return resolvedSkillsRecord, nil
+}
+
+// servicesFileName is the file, in the agent home's .scion directory, that
+// sciontool reads the agent's services from at container startup.
+const servicesFileName = "scion-services.yaml"
+
+// writeServicesFile writes services to the agent home's scion-services.yaml
+// for sciontool to consume at container startup. Shared by ProvisionAgent
+// and the start-time re-render (rerenderProvisionedFiles).
+func writeServicesFile(agentHome string, services []api.ServiceSpec) error {
+	scionDir := filepath.Join(agentHome, ".scion")
+	if err := os.MkdirAll(scionDir, 0755); err != nil {
+		return fmt.Errorf("failed to create agent .scion directory: %w", err)
+	}
+	servicesData, err := yaml.Marshal(services)
+	if err != nil {
+		return fmt.Errorf("failed to marshal services config: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(scionDir, servicesFileName), servicesData, 0644); err != nil {
+		return fmt.Errorf("failed to write %s: %w", servicesFileName, err)
+	}
+	return nil
 }
