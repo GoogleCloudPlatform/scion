@@ -71,6 +71,9 @@ func newConfinedHome(t *testing.T) *confinedHome {
 		"hooks/pre-start.d/20-harness-provision": "outside hook",
 		"pre-start.d/20-harness-provision":       "outside hook",
 		"scion-token":                            "outside token file",
+		"harness/inputs/instructions.md":         "outside inputs",
+		"inputs/instructions.md":                 "outside inputs",
+		"secrets/TOKEN_A":                        "outside secret",
 	} {
 		p := filepath.Join(c.outside, rel)
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
