@@ -197,6 +197,38 @@ func TestResolveInvocationTarget_LinkedProjectImport(t *testing.T) {
 		assert.Empty(t, stderr.String(), "no note after config unset hub.endpoint")
 		assert.Equal(t, ctxTestHub, hubEndpoint)
 	})
+	for _, listed := range []bool{true, false} {
+		name := "read-only command, the project's hub not in the hub list: no note, nothing written"
+		if listed {
+			name = "read-only command, the project's hub in the hub list: linked in memory, nothing written"
+		}
+		t.Run(name, func(t *testing.T) {
+			setupContextTest(t)
+			enableGlobalHubImport(t)
+			saveTestContext(t, ctxTestHub, ctxTestProjectID)
+			if listed {
+				listTestHub(t, "pinned", linkEntryTestPinnedHub)
+			}
+			makeLinkedDirProject(t, linkEntryTestPinnedHub)
+			before := readFileT(t, contextFilePath())
+			c := findCommand(t, "config", "get")
+			var stderr bytes.Buffer
+			c.SetErr(&stderr)
+			t.Cleanup(func() { c.SetErr(nil) })
+
+			require.NoError(t, resolveInvocationTarget(c, ModeHuman))
+			assert.Empty(t, stderr.String())
+			assert.Equal(t, before, readFileT(t, contextFilePath()), "a read-only command writes nothing")
+			if listed {
+				assert.Equal(t, linkEntryTestPinnedHub, hubEndpoint)
+				assert.Equal(t, targetSourceDirectory, hubSource)
+				assert.Equal(t, "pinned", hubEntryName)
+			} else {
+				assert.Equal(t, ctxTestHub, hubEndpoint, "the current hub applies")
+				assert.Equal(t, targetSourceContext, hubSource)
+			}
+		})
+	}
 	t.Run("not imported", func(t *testing.T) {
 		setupContextTest(t)
 		saveTestContext(t, ctxTestHub, ctxTestProjectID)

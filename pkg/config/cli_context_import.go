@@ -190,6 +190,11 @@ func LinkEntryForProject(c *CLIContext, projectDir string) (*KnownProject, *HubE
 // gets the pending one-time import of the project's link (for a hub in the
 // hub list, as LinkEntryForProject), and nothing is written. A hub that is
 // not in the hub list gives no link, without an error (ptone/scion#5483).
+//
+// The caller must not save the context it passed in (for example with
+// UpdateCLIContext): this path checks the hub list only in c, without the
+// re-check under the lock that LinkEntryForProject does, and the saved hub
+// list can change between this read and a later write.
 func LinkEntryForProjectInMemory(c *CLIContext, projectDir string) (*KnownProject, *HubEntry) {
 	p, h, _ := linkEntryForProject(c, projectDir, false)
 	return p, h

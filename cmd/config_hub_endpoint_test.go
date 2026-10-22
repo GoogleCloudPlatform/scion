@@ -496,27 +496,23 @@ func TestConfigUnsetGlobalHubEndpoint_WarnsAboutAFormItCannotEdit(t *testing.T) 
 	assert.Contains(t, stderr, "Warning: hub.endpoint is still set by SCION_HUB_ENDPOINT")
 }
 
-// When the first-run import of the global settings' hub exists only in
-// memory (config get applies it without saving, and here context.yaml
-// could not be written anyway), config get still names the hub entry: the
-// name comes from the invocation's resolution, not from the file.
+// config get applies the first-run import of the global settings' hub in
+// memory only: context.yaml (writable here) and its lock are not created, so
+// a regression to the saving import fails this test. It still names the hub
+// entry: the name comes from the invocation's resolution, not from the file.
 func TestConfigGetHubEndpoint_NamesAnImportHeldInMemory(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("permissions are not enforced for root")
-	}
 	setupConfigHubTest(t)
 	enableGlobalHubImport(t)
 	writeHomeGlobalSettings(t, "hub:\n  endpoint: https://global.example.org\n")
-	dir := filepath.Dir(globalSettingsPath())
-	require.NoError(t, os.Chmod(dir, 0o500))
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
 
 	stdout, stderr, err := runConfig(t, "--global", "config", "get", "--source", "hub.endpoint")
 	require.NoError(t, err)
 	assert.Equal(t, "https://global.example.org  (current hub 'global')\n", stdout)
-	assert.NotContains(t, stderr, "Error")
-	_, statErr := os.Stat(contextFilePath())
-	assert.True(t, os.IsNotExist(statErr), "context.yaml was not written")
+	assert.NotContains(t, stderr, config.ErrCLIContextImport.Error())
+	for _, p := range []string{contextFilePath(), contextFilePath() + ".lock"} {
+		_, statErr := os.Stat(p)
+		assert.True(t, os.IsNotExist(statErr), "%s was created (stat error %v)", p, statErr)
+	}
 }
 
 // config set prints at most one line on stderr, and only when another hub
