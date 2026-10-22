@@ -23,6 +23,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
+	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 	"go.opentelemetry.io/otel"
 	otellog "go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/metric"
@@ -422,6 +423,7 @@ func runHookTelemetry(hubBudget context.Context, event *hooks.Event, hubClient *
 	}
 
 	telemetryHandler := handlers.NewTelemetryHandler(tp, lp, redactor, mp)
+	telemetryHandler.Analytics = hookUsageAnalytics(cfg)
 	wireSessionMetrics(hubBudget, telemetryHandler, hubClient, hookHomeDir())
 	if err := telemetryHandler.Handle(event); err != nil {
 		log.Debug("Hook telemetry handler: %v", err)
@@ -523,4 +525,19 @@ func hookHomeDir() string {
 	}
 	home, _ := os.UserHomeDir()
 	return home
+}
+
+// hookUsageAnalytics returns the hook-path agent.usage producer, or nil when
+// analytics is disabled: hook usage not selected (SCION_USAGE_SOURCE is not
+// "hooks"), no GCP exporter configured, or the outbox cannot be opened.
+func hookUsageAnalytics(cfg *telemetry.Config) *telemetry.UsageAnalytics {
+	if os.Getenv("SCION_USAGE_SOURCE") != telemetrycontract.UsageSourceHooks || !telemetry.AnalyticsEnabledForHooks(cfg) {
+		return nil
+	}
+	outbox, err := telemetry.OpenAnalyticsOutbox(telemetry.DefaultAnalyticsOutboxDir())
+	if err != nil {
+		log.Debug("Hook usage analytics disabled: %v", err)
+		return nil
+	}
+	return telemetry.NewUsageAnalytics(outbox, telemetrycontract.UsageSourceHooks)
 }
