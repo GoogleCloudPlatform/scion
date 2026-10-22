@@ -21,7 +21,6 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -37,11 +36,11 @@ import (
 // AttachmentRef.artifact.
 
 // TestArtifactAttachmentRef_OnlyConstructorSetsFlag walks the non-test
-// files of pkg/hub (and its guardScanSubdirs subpackages). Exactly one composite literal of AttachmentRef sets
-// artifact (keyed, positionally with every field, or keyed in a
-// type-elided element of a slice or map literal), and it is in
-// newArtifactAttachmentRef; no assignment outside that function has a
-// selector .artifact on its left-hand side.
+// files of pkg/hub (and its guardScanSubdirs subpackages). Exactly one
+// composite literal of AttachmentRef sets artifact (keyed, positionally with
+// every field, or keyed in a type-elided element of a slice or map literal),
+// and it is in newArtifactAttachmentRef; no assignment outside that function
+// has a selector .artifact on its left-hand side.
 func TestArtifactAttachmentRef_OnlyConstructorSetsFlag(t *testing.T) {
 	// pkgmove:scan-covers pkg/hub/apierr
 	// scanned through guardScanSubdirs; guards AttachmentRef.artifact writes.
@@ -238,8 +237,9 @@ func receiveEventWithin(t *testing.T, ch <-chan Event, subject string) Event {
 }
 
 // hubCallerFuncs returns, for every call in the non-test files of pkg/hub
-// (and its guardScanSubdirs subpackages) whose callee name is one of names (a plain identifier or the selector of
-// a method value), the "file:func" it is made from.
+// (and its guardScanSubdirs subpackages) whose callee name is one of names
+// (a plain identifier or the selector of a method value), the "file:func" it
+// is made from.
 func hubCallerFuncs(t *testing.T, names ...string) map[string][]string {
 	t.Helper()
 	want := map[string]bool{}
@@ -363,9 +363,9 @@ type renderSite struct {
 }
 
 // renderSites returns every RenderDeliveryText call in the non-test files
-// of pkg/hub (and its guardScanSubdirs subpackages). A call passes a plan when its argument is a
-// RenderDeliveryInput literal keying Plan, or a variable the function
-// assigns such a literal.
+// of pkg/hub (and its guardScanSubdirs subpackages). A call passes a plan
+// when its argument is a RenderDeliveryInput literal keying Plan, or a
+// variable the function assigns such a literal.
 func renderSites(t *testing.T) []renderSite {
 	t.Helper()
 	// pkgmove:scan-covers pkg/hub/apierr
@@ -465,9 +465,16 @@ func TestRenderSites_ApplyAttachmentPlan(t *testing.T) {
 }
 
 // TestNeverCarriesSites_NoDeliveries: the functions on the never-carries
-// list never set AttachmentDeliveries.
+// list, in pkg/hub and its guardScanSubdirs subpackages, never set
+// AttachmentDeliveries.
 func TestNeverCarriesSites_NoDeliveries(t *testing.T) {
-	paths, err := filepath.Glob("*.go")
+	// pkgmove:scan-covers pkg/hub/apierr
+	// scanned through guardScanSubdirs; guards never-carries render sites.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// scanned through guardScanSubdirs; guards never-carries render sites.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// scanned through guardScanSubdirs once it exists; guards never-carries render sites.
+	paths, err := globGuardScanDirs(".", "*.go")
 	require.NoError(t, err)
 	fset := token.NewFileSet()
 	for _, path := range paths {
