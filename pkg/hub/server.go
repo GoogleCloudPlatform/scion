@@ -7428,6 +7428,12 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	// This handles all authentication types: agent tokens, user tokens, API keys, dev tokens
 	h = UnifiedAuthMiddleware(s.authConfig)(h)
 
+	// The audit operation context (remaining-audit P4-1) sits directly
+	// inside the request logger, which mints the request ID it adopts, and
+	// outside every auth middleware, so broker auth audit events carry it.
+	// See auditOperationMiddleware for the re-entry and no-ID rules.
+	h = auditOperationMiddleware(h)
+
 	// The request logger wraps UnifiedAuthMiddleware, so it is the request
 	// logger's own next.ServeHTTP call that invokes auth: every request is
 	// logged with its final response status, whether auth allows it through
