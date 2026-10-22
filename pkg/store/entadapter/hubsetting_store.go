@@ -135,7 +135,9 @@ func (s *HubSettingStore) ListHubSettings(ctx context.Context) ([]store.HubSetti
 // expectedRevision semantics:
 //
 //	0:  create-only — returns ErrRevisionConflict if the section already exists.
-//	-1: unconditional upsert (for seeding) — always succeeds.
+//	-1: unconditional upsert (for seeding) — succeeds unless every one of
+//	    a bounded number of attempts loses a concurrent create of the
+//	    same section (see below).
 //	>0: CAS update — returns ErrRevisionConflict if current revision != expectedRevision.
 //
 // The upsert is atomic: a transaction with SELECT FOR UPDATE (Postgres) or
@@ -143,8 +145,12 @@ func (s *HubSettingStore) ListHubSettings(ctx context.Context) ([]store.HubSetti
 // CAS writers cannot both succeed.
 //
 // For -1, a lost create race is retried in a fresh transaction (at most
-// upsertCreateRaceAttempts attempts), so the "always succeeds" contract
-// holds on Postgres too. Concurrent writers there all find no row (FOR
+// upsertCreateRaceAttempts attempts), so the write succeeds on Postgres
+// too unless every attempt loses; then it returns a wrapped
+// ErrRevisionConflict naming the section and the attempt count. Only a
+// unique violation on the section key counts as a lost create race
+// (isHubSettingSectionConflict); any other constraint error is returned
+// as it is, never retried. Concurrent writers there all find no row (FOR
 // UPDATE locks nothing), all INSERT, and the losers fail on the unique
 // section index once the winner commits. Postgres aborts the loser's whole
 // transaction, so nothing of it (no revision bump) survives. The retry runs
@@ -162,15 +168,31 @@ func (s *HubSettingStore) UpsertHubSetting(
 	expectedRevision int64,
 	origin string,
 ) (*store.HubSetting, error) {
+	return retryHubSettingCreateRace(section, expectedRevision, func() (*store.HubSetting, error) {
+		return s.upsertHubSettingOnce(ctx, section, value, updatedBy, expectedRevision, origin)
+	})
+}
+
+// retryHubSettingCreateRace runs once, retrying a lost create race
+// (errHubSettingCreateRace) for expectedRevision -1 until
+// upsertCreateRaceAttempts attempts have run. A lost race is reported as
+// store.ErrRevisionConflict: bare for create-only (0) and CAS (>0), and
+// for -1 wrapped with the section and the attempt count, so an exhausted
+// bound can be told apart from a CAS conflict in logs while errors.Is
+// still matches.
+func retryHubSettingCreateRace(section string, expectedRevision int64, once func() (*store.HubSetting, error)) (*store.HubSetting, error) {
 	for attempt := 1; ; attempt++ {
-		row, err := s.upsertHubSettingOnce(ctx, section, value, updatedBy, expectedRevision, origin)
-		if errors.Is(err, errHubSettingCreateRace) {
-			if expectedRevision == -1 && attempt < upsertCreateRaceAttempts {
-				continue
-			}
+		row, err := once()
+		if !errors.Is(err, errHubSettingCreateRace) {
+			return row, err
+		}
+		if expectedRevision != -1 {
 			return nil, store.ErrRevisionConflict
 		}
-		return row, err
+		if attempt >= upsertCreateRaceAttempts {
+			return nil, fmt.Errorf("%w: hub setting %q: lost a concurrent create in all %d attempts",
+				store.ErrRevisionConflict, section, attempt)
+		}
 	}
 }
 
@@ -179,7 +201,8 @@ func (s *HubSettingStore) UpsertHubSetting(
 const upsertCreateRaceAttempts = 3
 
 // errHubSettingCreateRace reports that the create path lost a concurrent
-// insert of the same section (a unique-constraint error).
+// insert of the same section (a unique violation on the section key,
+// isHubSettingSectionConflict).
 // UpsertHubSetting retries it for -1 and maps it to ErrRevisionConflict
 // otherwise.
 var errHubSettingCreateRace = errors.New("hub setting create lost a concurrent insert")
@@ -231,7 +254,7 @@ func (s *HubSettingStore) upsertHubSettingOnce(
 		}
 		row, err := create.Save(ctx)
 		if err != nil {
-			if ent.IsConstraintError(err) {
+			if isHubSettingSectionConflict(err) {
 				// Concurrent insert race — the other writer won.
 				return nil, errHubSettingCreateRace
 			}
@@ -244,7 +267,7 @@ func (s *HubSettingStore) upsertHubSettingOnce(
 			}
 		}
 		if err := tx.Commit(); err != nil {
-			if ent.IsConstraintError(err) {
+			if isHubSettingSectionConflict(err) {
 				return nil, errHubSettingCreateRace
 			}
 			return nil, fmt.Errorf("upsert hub setting: commit create: %w", err)
