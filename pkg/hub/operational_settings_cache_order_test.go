@@ -237,3 +237,77 @@ func TestOperationalSettings_DirectWriteBelowHighWaterNotUndoneByOlderSnapshot(t
 	assert.Equal(t, true, res["skipped_stale"])
 	assert.True(t, appliedAutoSuspend(srv), "the write stays applied")
 }
+
+// A read below the cached revision with no change of the cache while it
+// was in flight means the stored revision went backward (hub_settings
+// restored from a backup). The cache, the revision and the applied
+// settings are resynchronised to the store instead of discarding every
+// read until the counter catches up (ptone/scion#5667).
+func TestOperationalSettings_RefreshResyncsAfterStoreReset(t *testing.T) {
+	srv, st, ops := revisionTestServer(t)
+	rs := &replayListStore{HubSettingStore: ops.store}
+	ops.store = rs
+	ctx := context.Background()
+
+	_, err := ops.Update(ctx, "lifecycle", json.RawMessage(`{"auto_suspend_stalled":true}`), "admin@example.com", -1, "managed")
+	require.NoError(t, err)
+	backup, err := st.ListHubSettings(ctx)
+	require.NoError(t, err)
+	backupRev := ops.SettingsRevision()
+
+	_, err = ops.Update(ctx, "lifecycle", json.RawMessage(`{"auto_suspend_stalled":false}`), "admin@example.com", -1, "managed")
+	require.NoError(t, err)
+	_, err = ops.Update(ctx, "quotas", json.RawMessage(`{"enforce_broker_quotas":false}`), "admin@example.com", -1, "managed")
+	require.NoError(t, err)
+	beforeReset := ops.Snapshot()
+	ApplySnapshot(srv, beforeReset)
+	require.False(t, appliedAutoSuspend(srv))
+	require.Greater(t, beforeReset.Revision, backupRev)
+
+	// The store now holds the backup.
+	rs.mu.Lock()
+	rs.replay = backup
+	rs.mu.Unlock()
+	changed, err := ops.Refresh(ctx)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"lifecycle", "quotas"}, changed, "every section is reported changed")
+	assert.Equal(t, backupRev, ops.SettingsRevision(), "the revision follows the store back")
+	afterReset := ops.Snapshot()
+	assert.True(t, afterReset.AutoSuspendStalled, "the restored value is cached")
+	assert.Nil(t, afterReset.EnforceBrokerQuotas, "a section absent from the backup is gone")
+	assert.Greater(t, afterReset.Generation, beforeReset.Generation)
+
+	res := ApplySnapshot(srv, afterReset)
+	assert.Nil(t, res["skipped_stale"], "the lower revision of the reset store is applied")
+	assert.True(t, appliedAutoSuspend(srv))
+	res = ApplySnapshot(srv, beforeReset)
+	assert.Equal(t, true, res["skipped_stale"], "a snapshot from before the reset is older")
+	assert.True(t, appliedAutoSuspend(srv))
+
+	// Reads of the restored store are taken as usual from now on.
+	changed, err = ops.Refresh(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, changed)
+	assert.Equal(t, backupRev, ops.SettingsRevision())
+}
+
+// The propagation path (poll or event) applies the resynchronised settings
+// after a store reset (ptone/scion#5667).
+func TestOperationalSettings_RefreshAndApplyAfterStoreReset(t *testing.T) {
+	srv, st, ops, rs := raceOpsServer(t)
+	ctx := context.Background()
+
+	_, err := ops.Update(ctx, "lifecycle", json.RawMessage(`{"auto_suspend_stalled":true}`), "admin@example.com", -1, "managed")
+	require.NoError(t, err)
+	backup, err := st.ListHubSettings(ctx)
+	require.NoError(t, err)
+	_, err = ops.Update(ctx, "lifecycle", json.RawMessage(`{"auto_suspend_stalled":false}`), "admin@example.com", -1, "managed")
+	require.NoError(t, err)
+	require.False(t, appliedAutoSuspend(srv))
+
+	rs.mu.Lock()
+	rs.replay = backup
+	rs.mu.Unlock()
+	ops.refreshAndApply(ctx, srv)
+	assert.True(t, appliedAutoSuspend(srv), "the restored value is applied")
+}

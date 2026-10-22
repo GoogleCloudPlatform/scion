@@ -247,6 +247,13 @@ type Layer1Snapshot struct {
 	// such a write never overwrites the writer's self-apply. 0 for a
 	// snapshot not built by OperationalSettings.Snapshot.
 	Seq uint64
+
+	// Generation counts the store resets OperationalSettings resynchronised
+	// to (a stored revision that went backward, ptone/scion#5667).
+	// ApplySnapshot orders DB-backed snapshots by (Generation, Revision,
+	// Seq), so after a reset the lower revisions of the restored store are
+	// applied, and a snapshot built before the reset is not.
+	Generation uint64
 }
 
 // settingsUpdatedSubject is the LISTEN/NOTIFY subject used to propagate
@@ -312,7 +319,9 @@ type OperationalSettings struct {
 
 	// revision is the highest operational-settings revision
 	// (store.HubSettingsRevisionSection) seen by Refresh, Update or
-	// DeleteSection; 0 until the store reports one. It only grows. It is a
+	// DeleteSection; 0 until the store reports one. It only grows, except
+	// when Refresh resynchronises to a store whose revision went backward
+	// (ptone/scion#5667). It is a
 	// high-water mark, not a promise that the cache holds every write up
 	// to it (Update and DeleteSection raise it while changing one
 	// section). Guarded by mu.
@@ -330,8 +339,12 @@ type OperationalSettings struct {
 	// Guarded by mu.
 	tombstones map[string]int64
 	// cacheSeq grows with every change of the cache or of revision; the
-	// snapshot carries it (Layer1Snapshot.Seq). Guarded by mu.
+	// snapshot carries it (Layer1Snapshot.Seq). Refresh also uses it to
+	// tell a store reset from a read that raced a newer one. Guarded by mu.
 	cacheSeq uint64
+	// generation counts the store resets Refresh resynchronised to; the
+	// snapshot carries it (Layer1Snapshot.Generation). Guarded by mu.
+	generation uint64
 
 	// writeGuard, when set, is asked before every section write or delete
 	// (Update, DeleteSection); a non-nil error refuses the write. The
@@ -444,8 +457,11 @@ func (o *OperationalSettings) SettingsRevision() int64 {
 // The rows and the operational-settings revision come from one read
 // (ListHubSettings returns the store.HubSettingsRevisionSection row with
 // the sections), so the read holds every operational write up to its
-// revision. A read whose revision is below the cached revision is
-// discarded and nothing is reported changed (ptone/scion#4457). The cached
+// revision. A read whose revision is below the cached revision because it
+// raced a newer read or write is discarded and nothing is reported changed
+// (ptone/scion#4457); a read below it with no such race means the stored
+// revision went backward, and is resynchronised to (see refresh,
+// ptone/scion#5667). The cached
 // revision is a high-water mark, not a promise that the cache holds every
 // write up to it: Update and DeleteSection raise it while caching one
 // section. Discarding is still safe because a later read at or above the
@@ -460,7 +476,30 @@ func (o *OperationalSettings) Refresh(ctx context.Context) ([]string, error) {
 // refresh is Refresh, also returning the revision of the read and whether
 // the read was taken into the cache (false when it was discarded as older
 // than the cached revision).
+//
+// A read below the cached revision is normally a read that raced a newer
+// one: another Refresh, Update or DeleteSection raised the cached revision
+// while the read was in flight, so the cache sequence moved. When the
+// sequence did not move, the cached revision was already set before the
+// read began, and every value it takes was committed in the store first.
+// A read that then sees a lower revision means the stored counter went
+// backward: hub_settings was restored from a backup or the database was
+// replaced (ptone/scion#5667). Discarding such reads would freeze settings
+// on this hub until the counter caught up, so the read is taken as a
+// reset: a Warn is logged, the cache and the revision are resynchronised
+// to the store, every section is reported changed, and the generation
+// moves so ApplySnapshot accepts the lower revision.
+//
+// This relies on every read seeing committed state at least as new as any
+// revision this process has observed: one primary database, which is how
+// the hub runs (one database connection for reads and writes, no
+// read-replica routing). A failover to a standby that lost commits is a
+// genuine step backward and is resynchronised the same way.
 func (o *OperationalSettings) refresh(ctx context.Context) (changed []string, readRevision int64, accepted bool, err error) {
+	o.mu.RLock()
+	seqAtRead := o.cacheSeq
+	o.mu.RUnlock()
+
 	rows, err := o.store.ListHubSettings(ctx)
 	if err != nil {
 		return nil, 0, false, fmt.Errorf("operational settings refresh: %w", err)
@@ -475,10 +514,17 @@ func (o *OperationalSettings) refresh(ctx context.Context) (changed []string, re
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
+	reset := false
 	if readRevision < o.revision {
-		slog.Debug("operational settings refresh: discarding a read below the cached revision",
+		if o.cacheSeq != seqAtRead {
+			slog.Debug("operational settings refresh: discarding a read below the cached revision",
+				"read_revision", readRevision, "cached_revision", o.revision)
+			return nil, readRevision, false, nil
+		}
+		reset = true
+		o.generation++
+		slog.Warn("operational settings: the stored settings revision went backward (hub_settings restored or the database replaced?); resynchronising this hub's settings to the store",
 			"read_revision", readRevision, "cached_revision", o.revision)
-		return nil, readRevision, false, nil
 	}
 	revisionRaised := readRevision != o.revision
 	o.revision = readRevision
@@ -494,7 +540,7 @@ func (o *OperationalSettings) refresh(ctx context.Context) (changed []string, re
 		seen[row.Section] = true
 
 		prev, exists := o.cache[row.Section]
-		if !exists || prev.Revision != row.Revision {
+		if reset || !exists || prev.Revision != row.Revision {
 			changed = append(changed, row.Section)
 		}
 		malformed := !json.Valid(row.Value)
@@ -538,7 +584,7 @@ func (o *OperationalSettings) refresh(ctx context.Context) (changed []string, re
 			delete(o.cache, name)
 		}
 	}
-	if revisionRaised || len(changed) > 0 {
+	if reset || revisionRaised || len(changed) > 0 {
 		o.cacheSeq++
 	}
 
@@ -599,6 +645,7 @@ func (o *OperationalSettings) Snapshot() Layer1Snapshot {
 	o.mu.RLock()
 	revision := o.revision
 	seq := o.cacheSeq
+	generation := o.generation
 	dbSections := make(map[string]json.RawMessage, len(o.cache))
 	for name, ss := range o.cache {
 		dbSections[name] = ss.Value
@@ -653,6 +700,7 @@ func (o *OperationalSettings) Snapshot() Layer1Snapshot {
 	snap.FromOperationalSettings = true
 	snap.Revision = revision
 	snap.Seq = seq
+	snap.Generation = generation
 
 	// hub_name is the one endpoints key that keeps its bootstrap value when
 	// a DB row omits it: a managed endpoints row carries hub_name only after
@@ -1095,12 +1143,18 @@ func (o *OperationalSettings) runPollBackstop(ctx context.Context, server *Serve
 // ApplySnapshot writes the same values and ApplyMaintenanceFromSnapshot
 // is idempotent by design.
 func (o *OperationalSettings) refreshAndApply(ctx context.Context, server *Server) {
+	o.mu.RLock()
+	generation := o.generation
+	o.mu.RUnlock()
 	changed, err := o.Refresh(ctx)
 	if err != nil {
 		slog.Error("Settings propagation refresh failed", "error", err)
 		return
 	}
-	if len(changed) > 0 {
+	o.mu.RLock()
+	reset := o.generation != generation
+	o.mu.RUnlock()
+	if len(changed) > 0 || reset {
 		slog.Info("Settings propagation detected changes", "sections", changed)
 		snap := o.Snapshot()
 		ApplySnapshot(server, snap)
@@ -1419,6 +1473,9 @@ type settingsApplyState struct {
 	// lastSeq is the Layer1Snapshot.Seq of the last DB-backed snapshot
 	// applied at lastRevision (ptone/scion#5762). Guarded by mu.
 	lastSeq uint64
+	// lastGeneration is the Layer1Snapshot.Generation of the last
+	// DB-backed snapshot applied (ptone/scion#5667). Guarded by mu.
+	lastGeneration uint64
 }
 
 // staleLocked reports whether snap is older than the last snapshot
@@ -1429,7 +1486,10 @@ type settingsApplyState struct {
 // skipped as well. A file snapshot (FromOperationalSettings false) has no
 // revision and is always applied: it occurs only on a hub without
 // OperationalSettings, where no DB-backed snapshot is ever applied and
-// lastRevision stays 0. At an equal revision the cache sequence decides
+// lastRevision stays 0. A snapshot of a later generation (taken after
+// the store was reset, ptone/scion#5667) is newer whatever its revision,
+// and one of an earlier generation is older. At an equal revision the
+// cache sequence decides
 // (Layer1Snapshot.Seq): a snapshot built before a write that was cached
 // below the high-water mark, which leaves the revision unchanged, is older
 // than the writer's self-apply and is skipped (ptone/scion#5762). An equal
@@ -1440,6 +1500,9 @@ type settingsApplyState struct {
 func (a *settingsApplyState) staleLocked(snap Layer1Snapshot) bool {
 	if !snap.FromOperationalSettings {
 		return false
+	}
+	if snap.Generation != a.lastGeneration {
+		return snap.Generation < a.lastGeneration
 	}
 	if snap.Revision != a.lastRevision {
 		return snap.Revision < a.lastRevision
@@ -1454,7 +1517,11 @@ func (a *settingsApplyState) recordLocked(snap Layer1Snapshot) {
 	if !snap.FromOperationalSettings {
 		return
 	}
-	if snap.Revision > a.lastRevision {
+	if snap.Generation > a.lastGeneration {
+		a.lastGeneration = snap.Generation
+		a.lastRevision = snap.Revision
+		a.lastSeq = snap.Seq
+	} else if snap.Revision > a.lastRevision {
 		a.lastRevision = snap.Revision
 		a.lastSeq = snap.Seq
 	} else if snap.Revision == a.lastRevision && snap.Seq > a.lastSeq {
