@@ -223,7 +223,8 @@ func runFinalizeFixture(t *testing.T) (*CompositeStore, *store.Agent, store.Dele
 	return cs, a, store.DeletionPredicate{Claim: &claim, States: []string{store.DeletionStateFinalizing}, DeletedAtNull: true}
 }
 
-// A soft finalize writes DeletionFields.RunID and PreviousRunIDs
+// A soft finalize writes DeletionFields.SoftFinishRunID and
+// SoftFinishPreviousRunIDs
 // (ptone/scion#5016); an empty list clears the previous runs.
 func TestFinalizeAgentDeletion_SoftWritesRunIDs(t *testing.T) {
 	for _, tc := range []struct {
@@ -247,7 +248,7 @@ func TestFinalizeAgentDeletion_SoftWritesRunIDs(t *testing.T) {
 			runID := "run-b"
 			prev := tc.prev
 			n, err := cs.FinalizeAgentDeletion(ctx, a.ID, pred, store.DeletionFinalizeSoft,
-				store.DeletionFields{State: &none, DeletedAt: &now, ClearLeaseAt: true, RunID: &runID, PreviousRunIDs: &prev}, nil)
+				store.DeletionFields{State: &none, DeletedAt: &now, ClearLeaseAt: true, SoftFinishRunID: &runID, SoftFinishPreviousRunIDs: &prev}, nil)
 			require.NoError(t, err)
 			assert.Equal(t, 1, n)
 			got, err := cs.GetAgent(ctx, a.ID)
@@ -283,8 +284,8 @@ func TestDeletionFields_RunIDsRefusedOutsideSoftFinalize(t *testing.T) {
 	runID := "run-b"
 	prev := []string{"run-a"}
 	for name, set := range map[string]store.DeletionFields{
-		"run ID":        {RunID: &runID},
-		"previous runs": {PreviousRunIDs: &prev},
+		"run ID":        {SoftFinishRunID: &runID},
+		"previous runs": {SoftFinishPreviousRunIDs: &prev},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := cs.FinalizeAgentDeletion(ctx, a.ID, pred, store.DeletionFinalizeHard, set, nil)
@@ -298,4 +299,24 @@ func TestDeletionFields_RunIDsRefusedOutsideSoftFinalize(t *testing.T) {
 			assert.True(t, got.DeletedAt.IsZero())
 		})
 	}
+}
+
+// UpdateAgentDeletion refuses the run fields also when Derive sets them,
+// and writes nothing.
+func TestUpdateAgentDeletion_RunIDsFromDeriveRefused(t *testing.T) {
+	ctx := context.Background()
+	cs, a, pred := runFinalizeFixture(t)
+	failed := store.DeletionStateFailed
+	_, err := cs.UpdateAgentDeletion(ctx, a.ID, pred, store.DeletionFields{
+		State: &failed,
+		Derive: func(_ *store.Agent, f *store.DeletionFields) {
+			runID := "run-b"
+			f.SoftFinishRunID = &runID
+		},
+	})
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+	got, err := cs.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "run-a", got.RunID)
+	assert.Equal(t, store.DeletionStateFinalizing, got.DeletionState, "nothing was written")
 }

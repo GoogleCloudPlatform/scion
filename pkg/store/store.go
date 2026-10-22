@@ -184,8 +184,11 @@ type Store interface {
 	// ptone/scion#2483 §2.3), as ONE transaction: it reads the agent
 	// (row-locked where supported), evaluates pred, and when it holds
 	// either applies set (DeletionFinalizeSoft, with UpdateAgentDeletion's
-	// semantics, Derive included) or removes the agent row and its cascade
-	// (DeletionFinalizeHard, as DeleteAgent). Then, still inside the
+	// semantics, Derive included, except that soft mode alone also accepts
+	// DeletionFields.SoftFinishRunID and SoftFinishPreviousRunIDs) or
+	// removes the agent row and its cascade (DeletionFinalizeHard, as
+	// DeleteAgent; a set carrying those run fields is refused with
+	// ErrInvalidInput). Then, still inside the
 	// transaction and just before commit, it calls hook (when non-nil) with
 	// a transaction-scoped Store, the agent (the post-write row for soft,
 	// the pre-delete row for hard) and the mode; a non-nil hook error rolls
