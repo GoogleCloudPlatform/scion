@@ -16,9 +16,12 @@ package apiclient
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"sort"
 	"strings"
 	"sync"
@@ -120,13 +123,15 @@ func doGet(t *testing.T, tr *Transport, path string, headers http.Header) {
 }
 
 // redirectNet builds an originTestNet with hub.test:80 redirecting
-// /start to loc, and hub.test:8080 and storage.test:80 recording too.
+// /start to loc, and hub.test:8080, api.hub.test:80 and storage.test:80
+// recording too.
 func redirectNet(t *testing.T, rec *hopRecorder, loc string) *originTestNet {
 	t.Helper()
 	h := rec.handler(map[string]string{"/start": loc})
 	return newOriginTestNet(t, map[string]http.HandlerFunc{
 		"hub.test:80":     h,
 		"hub.test:8080":   h,
+		"api.hub.test:80": h,
 		"storage.test:80": h,
 	})
 }
@@ -153,6 +158,65 @@ func TestDo_RedirectToOtherPortOmitsAuthorization(t *testing.T) {
 	}
 	if got := landed["Authorization"]; got != "" {
 		t.Errorf("hop to hub.test:8080 carried Authorization %q, want none", got)
+	}
+}
+
+// net/http keeps Authorization on a redirect to a subdomain of the
+// initial host; the hub origin rule treats a subdomain as another origin.
+func TestDo_RedirectToSubdomainOmitsAuthorization(t *testing.T) {
+	rec := &hopRecorder{}
+	n := redirectNet(t, rec, "http://api.hub.test/landed")
+	tr := newDoTransport(n, &BearerAuth{Token: "hub-token"})
+	doGet(t, tr, "/start", http.Header{"X-Scion-Run-Id": {"caller-run"}, "X-Custom": {"kept"}})
+
+	start, _ := rec.headers("hub.test/start")
+	if got := headerNames(start); got != "Authorization,X-Custom,X-Scion-Run-Id" {
+		t.Errorf("hub request headers = %s, want Authorization,X-Custom,X-Scion-Run-Id", got)
+	}
+	landed, ok := rec.headers("api.hub.test/landed")
+	if !ok {
+		t.Fatal("redirect to api.hub.test was not followed")
+	}
+	if got := headerNames(landed); got != "X-Custom" {
+		t.Errorf("hop to api.hub.test carried headers %s, want only X-Custom", got)
+	}
+}
+
+// net/http compares hosts only, so it keeps Authorization on a redirect
+// from https to http on the same host; the hub origin rule compares the
+// scheme too.
+func TestDo_RedirectToOtherSchemeOmitsAuthorization(t *testing.T) {
+	hubRec, plainRec := &hopRecorder{}, &hopRecorder{}
+	n := newOriginTestNet(t, map[string]http.HandlerFunc{
+		"hub.test:80": plainRec.handler(nil),
+	})
+	hub := httptest.NewTLSServer(hubRec.handler(map[string]string{"/start": "http://hub.test/landed"}))
+	t.Cleanup(hub.Close)
+	n.addrs["hub.test:443"] = hub.Listener.Addr().String()
+
+	roots := x509.NewCertPool()
+	roots.AddCert(hub.Certificate())
+	rt := n.transport()
+	// The httptest certificate names example.com; verify against it.
+	rt.TLSClientConfig = &tls.Config{RootCAs: roots, ServerName: "example.com"}
+	tr := NewTransport("https://hub.test",
+		WithHTTPClient(&http.Client{Transport: rt, Timeout: 10 * time.Second}),
+		WithAuth(&BearerAuth{Token: "hub-token"}))
+	doGet(t, tr, "/start", http.Header{"X-Scion-Run-Id": {"caller-run"}, "X-Custom": {"kept"}})
+
+	start, ok := hubRec.headers("hub.test/start")
+	if !ok {
+		t.Fatal("https hub request was not received")
+	}
+	if got := headerNames(start); got != "Authorization,X-Custom,X-Scion-Run-Id" {
+		t.Errorf("hub request headers = %s, want Authorization,X-Custom,X-Scion-Run-Id", got)
+	}
+	landed, ok := plainRec.headers("hub.test/landed")
+	if !ok {
+		t.Fatal("redirect to http://hub.test was not followed")
+	}
+	if got := headerNames(landed); got != "X-Custom" {
+		t.Errorf("hop to http://hub.test carried headers %s, want only X-Custom", got)
 	}
 }
 
