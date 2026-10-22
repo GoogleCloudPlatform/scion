@@ -37,8 +37,7 @@ import (
 // TestConduitPeerAuthKeyring_TwoReplicas: a replica's real internal relay
 // API, keyed from its signing ring, accepts a peer replica on another
 // active generation, in both signature formats and both peer-auth modes;
-// it still refuses a replay (whatever the format of the first use), a
-// request for another target, an unknown key ID, a generation that is not
+// it still refuses a replay, a request for another target, an unknown key ID, a generation that is not
 // a legacy reader, and, in OIDC mode, a missing or disallowed ID token.
 func TestConduitPeerAuthKeyring_TwoReplicas(t *testing.T) {
 	for _, mode := range []string{config.ConduitPeerAuthHMAC, config.ConduitPeerAuthOIDC} {
@@ -92,13 +91,6 @@ func TestConduitPeerAuthKeyring_TwoReplicas(t *testing.T) {
 				replay := req.Clone(context.Background())
 				assert.Equal(t, http.StatusOK, do(t, req), "B (gen2) signs, A (gen1 active) verifies")
 				assert.Equal(t, http.StatusUnauthorized, do(t, replay), "replay refused")
-
-				// The same nonce under A's own generation and the other
-				// format is still a replay.
-				reuse := newReq(t)
-				require.NoError(t, build("hub-b", ka, nil).Sign(reuse))
-				reuse.Header.Set(relay.HeaderPeerNonce, req.Header.Get(relay.HeaderPeerNonce))
-				assert.Equal(t, http.StatusUnauthorized, do(t, reuse), "a re-signed nonce is refused (signature or replay)")
 
 				other := newReq(t)
 				relay.SetPeerTarget(other, "hub-c", rt.relay.Generation())

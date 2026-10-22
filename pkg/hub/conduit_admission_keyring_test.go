@@ -269,10 +269,20 @@ func TestAdmissionKeyring_RetiredGenerationAndExpiry(t *testing.T) {
 			res := sessionRecheck(t, p.b.hub, relay.HubSessionRecheckItem{SessionID: "s-agent", AdmissionToken: adm.AdmissionToken})
 			require.True(t, res[0].OK, "expired claims, generation still verifying: %+v", res[0])
 
+			// A fresh gen1 token from A (whose gen1 is unbounded), its claims
+			// unexpired throughout: B's rpc accepts it just before gen1's
+			// verify_until and refuses it at and after.
+			*p.clock = admVerifyUntil.Add(-10 * time.Minute)
+			fresh := p.a.mustAdmit(t, p.agentHeader(t), "s-fresh")
+			assertTokenFormat(t, emit, "gen1", fresh.AdmissionToken)
+			*p.clock = admVerifyUntil.Add(-time.Second)
+			_, err := rpcCall(t, p.b.hub, "s-fresh", fresh.AdmissionToken, "/v1/unknown")
+			require.NoError(t, err, "rpc just before verify_until")
+
 			for _, at := range []time.Time{admVerifyUntil, admVerifyUntil.Add(time.Second)} {
 				*p.clock = at
-				_, err := rpcCall(t, p.b.hub, "s-agent", adm.AdmissionToken, "/v1/unknown")
-				assert.Equal(t, http.StatusUnauthorized, refusalStatus(t, err), "rpc at verify_until%+v", at.Sub(admVerifyUntil))
+				_, err := rpcCall(t, p.b.hub, "s-fresh", fresh.AdmissionToken, "/v1/unknown")
+				assert.Equal(t, http.StatusUnauthorized, refusalStatus(t, err), "rpc of an unexpired token at verify_until%+v", at.Sub(admVerifyUntil))
 				res := sessionRecheck(t, p.b.hub, relay.HubSessionRecheckItem{SessionID: "s-agent", AdmissionToken: adm.AdmissionToken})
 				assert.True(t, res[0].Close, "re-check under a retired generation closes")
 				assert.Empty(t, res[0].AdmissionToken)

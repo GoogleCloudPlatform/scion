@@ -471,9 +471,10 @@ func (a *HMACPeerAuth) Verify(req *http.Request) (string, error) {
 	if err != nil {
 		return "", ErrPeerUnauthenticated
 	}
+	now := a.cfg.Now()
 	input := canonical(req, peer, ts, nonce)
 	matched := false
-	for _, key := range a.verifyKeys(kid, a.cfg.Now()) {
+	for _, key := range a.verifyKeys(kid, now) {
 		if hmac.Equal(got, peerMAC(key, kid, input)) {
 			matched = true
 			break
@@ -486,7 +487,6 @@ func (a *HMACPeerAuth) Verify(req *http.Request) (string, error) {
 	if err != nil {
 		return "", ErrPeerUnauthenticated
 	}
-	now := a.cfg.Now()
 	at := time.Unix(sec, 0)
 	if d := now.Sub(at); d > a.cfg.MaxSkew || d < -a.cfg.MaxSkew {
 		return "", fmt.Errorf("%w: timestamp outside the allowed skew", ErrPeerUnauthenticated)

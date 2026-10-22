@@ -346,7 +346,7 @@ func TestHMACPeerAuthRing_WireFormats(t *testing.T) {
 		{"overlong key ID", func(h http.Header) { h.Set(HeaderPeerKeyID, strings.Repeat("a", 33)) }},
 		{"unknown key ID", func(h http.Header) { h.Set(HeaderPeerKeyID, "gen9") }},
 		{"key ID swapped to the other valid generation", func(h http.Header) { h.Set(HeaderPeerKeyID, "old") }},
-		{"versioned headers stripped (no ID-less retry)", func(h http.Header) {
+		{"a versioned signature with its headers stripped", func(h http.Header) {
 			h.Del(HeaderPeerKeyID)
 			h.Del(HeaderPeerSignatureVersion)
 		}},
@@ -364,6 +364,48 @@ func TestHMACPeerAuthRing_WireFormats(t *testing.T) {
 			}
 			if len(v.nonces) != 0 {
 				t.Fatal("a refused request recorded its nonce")
+			}
+		})
+	}
+
+	// Partial or repeated versioned headers on a request whose ID-less
+	// signature is valid for the verifier: an ID-less retry would accept
+	// it, so these cases fail if the selection ever falls back.
+	idless := ringAuth(t, ringSpec{active: "old", emit: keyring.EmitLegacy, readers: []string{"old"}}, "relay-a", clock)
+	partial := []struct {
+		name   string
+		mutate func(h http.Header)
+	}{
+		{"valid ID-less signature plus only a key ID", func(h http.Header) { h.Set(HeaderPeerKeyID, "old") }},
+		{"valid ID-less signature plus only a version", func(h http.Header) { h.Set(HeaderPeerSignatureVersion, "2") }},
+		{"valid ID-less signature plus a repeated version", func(h http.Header) {
+			h.Add(HeaderPeerSignatureVersion, "2")
+			h.Add(HeaderPeerSignatureVersion, "2")
+		}},
+		{"valid ID-less signature plus a repeated key ID", func(h http.Header) {
+			h.Add(HeaderPeerKeyID, "old")
+			h.Add(HeaderPeerKeyID, "old")
+		}},
+	}
+	for _, tc := range partial {
+		t.Run("refused: "+tc.name, func(t *testing.T) {
+			v := ringAuth(t, ringSpec{active: "new", emit: keyring.EmitLegacy, readers: []string{"new", "old"}}, "relay-b", clock)
+			req := newPeerRequest(t)
+			if err := idless.Sign(req); err != nil {
+				t.Fatal(err)
+			}
+			control := req.Clone(req.Context())
+			tc.mutate(req.Header)
+			if _, err := v.Verify(req); !errors.Is(err, ErrPeerUnauthenticated) {
+				t.Fatalf("Verify err = %v, want a refusal", err)
+			}
+			if len(v.nonces) != 0 {
+				t.Fatal("a refused request recorded its nonce")
+			}
+			// The unmodified request is valid: the refusal came from the
+			// header selection, not from the signature.
+			if _, err := v.Verify(control); err != nil {
+				t.Fatalf("the unmodified ID-less request: %v", err)
 			}
 		})
 	}

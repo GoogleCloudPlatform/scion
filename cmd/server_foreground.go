@@ -2593,8 +2593,8 @@ func resolveHubNameFromEnv() string {
 // deprecated SESSION_SECRET). The same value backs both the web session cookie
 // store and the hub JWT signing keys so that all replicas behind the load
 // balancer agree. With a keyring file it is the keyring's "legacy" signing
-// entry, which every purpose but the web session cookies still uses
-// (ptone/scion#1530 Phase 1); the legacy inputs are then refused at startup.
+// entry, which every purpose not yet on the signing ring still uses
+// (ptone/scion#1530); the legacy inputs are then refused at startup.
 func resolveSessionSecret() string {
 	if legacy, ok := keyringLegacySecret(); ok {
 		return legacy
