@@ -1385,3 +1385,53 @@ func TestListCreatedAgentSettingsFromBrokerRecords(t *testing.T) {
 		t.Errorf("filter on the agent-info.json harness-config matched %v, want none", names)
 	}
 }
+
+// TestListCreatedAgentWithoutUsableAgentInfo: an agent with no runtime entry
+// whose agent-info.json is missing, or present but corrupt, is still listed,
+// without a panic, with the profile from its image provenance record and the
+// harness-config from its scion-agent.json; nothing comes from the file.
+func TestListCreatedAgentWithoutUsableAgentInfo(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		info *string // nil: no agent-info.json
+	}{
+		{name: "missing agent-info.json", info: nil},
+		{name: "corrupt agent-info.json", info: func() *string { s := `{"profile": "rewritten-profile", "harnessConfig": "rewritten-hc"`; return &s }()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			t.Setenv("HOME", tmp)
+			projectPath := filepath.Join(tmp, "proj", ".scion")
+			agentDir := filepath.Join(projectPath, "agents", "alpha")
+			if err := os.MkdirAll(filepath.Join(agentDir, "home"), 0755); err != nil {
+				t.Fatal(err)
+			}
+			writeAgentConfigHarness(t, projectPath, "alpha", "hc-a")
+			if err := os.WriteFile(filepath.Join(agentDir, imageProvenanceFile), []byte(`{"version": 1, "profile": "prov"}`), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if tc.info != nil {
+				if err := os.WriteFile(filepath.Join(agentDir, "home", "agent-info.json"), []byte(*tc.info), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			agents, err := NewManager(&runtime.MockRuntime{}).List(context.Background(), map[string]string{"scion.project_path": projectPath})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var found *api.AgentInfo
+			for i := range agents {
+				if agents[i].Name == "alpha" {
+					found = &agents[i]
+				}
+			}
+			if found == nil {
+				t.Fatalf("agent not listed: %+v", agents)
+			}
+			if found.Profile != "prov" || found.HarnessConfig != "hc-a" || found.Runtime != "" {
+				t.Errorf("profile %q harness-config %q runtime %q; want prov, hc-a, none", found.Profile, found.HarnessConfig, found.Runtime)
+			}
+		})
+	}
+}
