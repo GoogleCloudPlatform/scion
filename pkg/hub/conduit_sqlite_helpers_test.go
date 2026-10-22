@@ -210,6 +210,13 @@ type conduitFixture struct {
 func newConduitFixture(t *testing.T) *conduitFixture {
 	t.Helper()
 	srv, s := testServer(t)
+	return newConduitFixtureOn(t, srv, s)
+}
+
+// newConduitFixtureOn is newConduitFixture on a server the caller built
+// over s (for example a keyring-configured replica).
+func newConduitFixtureOn(t *testing.T, srv *Server, s store.Store) *conduitFixture {
+	t.Helper()
 	ctx := context.Background()
 	f := &conduitFixture{srv: srv, store: s, clock: &conduitTestClock{now: time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)}}
 
