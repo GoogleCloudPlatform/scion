@@ -87,7 +87,7 @@ Any subpath or query parameters appended to the proxy path are forwarded faithfu
 `https://hub.scion.local/api/v1/agents/agent-abc-123/ports/8000/proxy/api/v1/metrics?raw=true`
 will forward a local request to `http://127.0.0.1:8000/api/v1/metrics?raw=true`.
 
-Open the base URL with its trailing slash. A `GET` or `HEAD` of the URL without it (`.../ports/8000/proxy`) is redirected with `308 Permanent Redirect` to `.../ports/8000/proxy/`, query string included, so that the page's relative links resolve under the proxy path. Other methods on the URL without the slash are forwarded as before.
+Open the base URL with its trailing slash. A `GET` or `HEAD` of the URL without it (`.../ports/8000/proxy`) is redirected with `308 Permanent Redirect` to `.../ports/8000/proxy/`, query string included, so that the page's relative links resolve under the proxy path. Other methods on the URL without the slash are forwarded as before. WebSocket upgrades to the URL without the slash are not redirected.
 
 ---
 
@@ -102,7 +102,7 @@ X-Scion-Proxy-Error: no-credentials
 X-Scion-Proxy-Hint: sandboxed-subresource
 ```
 
-`X-Scion-Proxy-Hint: sandboxed-subresource` is present when the request came from a page opened through the proxy. A request that carries no credential at all, from any client, gets the same answer without the hint. Opening a proxy URL in a browser tab without being signed in still takes you to the sign-in page.
+`X-Scion-Proxy-Hint: sandboxed-subresource` is present when the request came from a page opened through the proxy. Other requests to the link that are not page loads get the same plain-text answer. Opening a proxy URL in a browser tab without being signed in still takes you to the sign-in page.
 
 A request made with your own credential, for example with `curl` and an agent token or a [personal access token](/scion/hosted/user/personal-access-tokens/), is served for any path. That shows the app answers, not that the page works for a person who opens the link; check the page in a browser.
 
