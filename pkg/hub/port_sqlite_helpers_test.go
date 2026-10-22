@@ -55,6 +55,7 @@ func requirePortProxyNoCredentials(t *testing.T, code int, h http.Header, body s
 	assert.Equal(t, "no-store", h.Get("Cache-Control"))
 	assert.Equal(t, "*", h.Get("Access-Control-Allow-Origin"))
 	assert.Empty(t, h.Values("Access-Control-Allow-Credentials"))
+	assert.Equal(t, "X-Scion-Proxy-Error, X-Scion-Proxy-Hint", h.Get("Access-Control-Expose-Headers"))
 	assert.Equal(t, "no-credentials", h.Get("X-Scion-Proxy-Error"))
 	if wantHint {
 		assert.Equal(t, "sandboxed-subresource", h.Get("X-Scion-Proxy-Hint"))

@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -758,7 +759,11 @@ func TestAgentPortProxyNoCredentialsPlainText(t *testing.T) {
 		resp, err := http.DefaultClient.Do(req)
 		require.NoError(t, err)
 		defer func() { _ = resp.Body.Close() }()
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		assert.Empty(t, body)
 		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+		assert.Equal(t, "text/plain; charset=utf-8", resp.Header.Get("Content-Type"))
 		assert.Equal(t, "no-credentials", resp.Header.Get("X-Scion-Proxy-Error"))
 		assert.Equal(t, "sandboxed-subresource", resp.Header.Get("X-Scion-Proxy-Hint"))
 		assert.Equal(t, before+1, count())
@@ -851,8 +856,42 @@ func TestAgentPortProxyOtherCredentialsNotPlainText(t *testing.T) {
 		})
 		notPlainText(t, w)
 	})
+	t.Run("front_proxy_assertion_refused", func(t *testing.T) {
+		prev := srv.authConfig.ProxyAuthenticator
+		srv.authConfig.ProxyAuthenticator = stubProxyAuthenticator{err: errors.New("bad assertion")}
+		t.Cleanup(func() { srv.authConfig.ProxyAuthenticator = prev })
+		w := serve(t, nil)
+		assert.Equal(t, http.StatusUnauthorized, w.Code)
+		assert.Contains(t, w.Body.String(), "invalid proxy assertion")
+		notPlainText(t, w)
+	})
+	t.Run("front_proxy_assertion_user", func(t *testing.T) {
+		prevAuth, prevProv := srv.authConfig.ProxyAuthenticator, srv.authConfig.ProxyUserProvisioner
+		srv.authConfig.ProxyAuthenticator = stubProxyAuthenticator{user: &ProxyUserInfo{
+			Subject: "front-proxy-user-1", Email: "front-proxy-user@example.com",
+		}}
+		srv.authConfig.ProxyUserProvisioner = MakeProxyUserProvisioner(srv)
+		t.Cleanup(func() {
+			srv.authConfig.ProxyAuthenticator, srv.authConfig.ProxyUserProvisioner = prevAuth, prevProv
+		})
+		w := serve(t, nil)
+		notPlainText(t, w)
+	})
 	assert.Zero(t, count())
 }
+
+// stubProxyAuthenticator is a front-proxy authenticator that answers every
+// request with user, or with err when it is set.
+type stubProxyAuthenticator struct {
+	user *ProxyUserInfo
+	err  error
+}
+
+func (a stubProxyAuthenticator) Authenticate(*http.Request) (*ProxyUserInfo, error) {
+	return a.user, a.err
+}
+
+func (stubProxyAuthenticator) Name() string { return "stub" }
 
 // TestRedirectToProxyRootLocationIsOneLine (ptone/scion#5566): whatever
 // bytes the raw query holds, the bare-URL redirect writes exactly one

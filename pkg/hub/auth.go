@@ -601,7 +601,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				// 401. Any new step that lets a request without a
 				// credential through (as 3c to 3e do) goes ABOVE this
 				// one; placed below it, its port proxy requests would get
-				// this 401 instead.
+				// this 401 instead. (3f is left free for such a step.)
 				if isProxyRoute(r.URL.Path) && !isBrowserRequest(r) {
 					hinted := writePortProxyNoCredentials(w, r)
 					if cfg.RecordPortProxyNoCredentials != nil {

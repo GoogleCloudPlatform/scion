@@ -342,13 +342,13 @@ Access to the proxy and port registration APIs requires authentication, verified
 
 When an unexposed port is accessed, or when the agent container's WebSocket connection is temporarily offline, the Hub reverse proxy performs smart **content negotiation** based on the request's `Accept` header:
 
+Requests to a proxy URL that carry no credential and are not a page navigation (a page's scripts, stylesheets, images and `fetch()` calls) get the plain-text `401` described in [Multi-file apps](#multi-file-apps), instead of the HTML page or the JSON error described below.
+
 ### Browser Requests (`Accept: text/html`)
 If the request is initiated from a web browser, the proxy returns a friendly, self-contained **HTML error page** containing troubleshooting guidance:
 
 * **Port Not Exposed**: Returns an `HTTP 404 Not Found` page stating that the requested port has not been registered on this agent.
 * **Connection Offline**: Returns an `HTTP 503 Service Unavailable` page indicating that the agent's WebSocket connection is disconnected, and the agent may not be running or is starting up.
-
-Requests to a proxy URL that carry no credential and are not a page navigation (a page's scripts, stylesheets, images and `fetch()` calls) get the plain-text `401` described in [Multi-file apps](#multi-file-apps) instead of either answer below.
 
 ### API / Programmatic Requests (Other headers)
 For CLI, script, or webhook requests, the proxy bypasses the HTML template and returns standard, machine-readable **JSON error responses**:

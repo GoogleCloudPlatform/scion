@@ -349,19 +349,28 @@ func TestConduitProxyBareURLRedirect(t *testing.T) {
 	})
 
 	t.Run("caller_without_access_unchanged", func(t *testing.T) {
-		outsider, _, _, err := f.srv.userTokenService.GenerateTokenPair(
-			"conduit-outsider", "outsider@conduit.test", "Outsider", store.UserRoleMember, ClientTypeWeb)
+		// The fixture's stranger: a signed-in project member without
+		// port access to the owner's agents.
+		stranger, _, _, err := f.srv.userTokenService.GenerateTokenPair(
+			f.stranger.ID(), "stranger@conduit.test", "Stranger", store.UserRoleMember, ClientTypeWeb)
 		require.NoError(t, err)
-		for _, suffix := range []string{"", "/"} {
+		answer := func(suffix string) (int, http.Header, string) {
 			req, err := http.NewRequest(http.MethodGet, bare+suffix+"?x=1", nil)
 			require.NoError(t, err)
-			req.Header.Set("Authorization", "Bearer "+outsider)
+			req.Header.Set("Authorization", "Bearer "+stranger)
 			resp, err := noFollow.Do(req)
 			require.NoError(t, err)
-			_ = resp.Body.Close()
-			assert.NotEqual(t, http.StatusPermanentRedirect, resp.StatusCode, "suffix %q", suffix)
-			assert.Empty(t, resp.Header.Get("Location"), "suffix %q", suffix)
+			defer func() { _ = resp.Body.Close() }()
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			return resp.StatusCode, resp.Header, string(body)
 		}
+		bareCode, bareHeader, bareBody := answer("")
+		slashCode, _, slashBody := answer("/")
+		assert.Equal(t, http.StatusForbidden, bareCode, bareBody)
+		assert.Equal(t, slashCode, bareCode)
+		assert.Equal(t, slashBody, bareBody)
+		assert.Empty(t, bareHeader.Get("Location"))
 	})
 }
 
