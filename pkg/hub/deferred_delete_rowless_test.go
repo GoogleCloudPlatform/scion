@@ -685,11 +685,12 @@ func TestProjectDeleteDeferred_IntentRecordsPin(t *testing.T) {
 	args, err := UnmarshalDeleteArgs(d.Args)
 	require.NoError(t, err)
 	require.NotNil(t, args.Target)
-	assert.Equal(t, &DeleteIntentPin{
+	wantPin := &DeleteIntentPin{
 		RuntimeBrokerID:   f.snapshot.PinnedRuntimeBrokerID,
 		RuntimeTargetID:   f.snapshot.PinnedRuntimeTargetID,
 		RuntimeTargetType: f.snapshot.PinnedRuntimeTargetType,
-	}, args.Target.Pin)
+	}
+	assert.Equal(t, wantPin, args.Target.Pin, "the intent records the pin")
 
 	client := newRowlessRecordingClient(nil)
 	owner, _ := f.owner(t, client)
@@ -740,7 +741,7 @@ func TestExecDispatchDelete_RowlessIntentPinComparedAtExecution(t *testing.T) {
 		f.removeRows(t)
 		f.reregisterBroker(t)
 		client, err := f.execRowless(t, &DeleteDispatchArgs{RunID: "run-a", Target: target(f, nil)})
-		require.NoError(t, err)
+		require.NoError(t, err, "a pinless intent infers the pin and is sent")
 		assert.Equal(t, []string{"run-a"}, rowlessRuns(client.sent()))
 	})
 }

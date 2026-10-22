@@ -137,7 +137,7 @@ func TestAgentDelete_JoinAnswersRememberedRefusalForItsClaim(t *testing.T) {
 	require.True(t, f.srv.resolveJoinFromRow(rec, context.Background(), f.agent.ID, claim, true))
 	require.Equal(t, http.StatusConflict, rec.Code)
 	code, details := errorBody(t, rec)
-	assert.Equal(t, ErrCodeConflict, code)
+	assert.Equal(t, ErrCodeConflict, code, "an entry for another claim is not used")
 	assert.NotContains(t, details, "pinnedRuntimeTargetId")
 
 	// No entry: the plain conflict.
@@ -145,7 +145,7 @@ func TestAgentDelete_JoinAnswersRememberedRefusalForItsClaim(t *testing.T) {
 	rec = httptest.NewRecorder()
 	require.True(t, f.srv.resolveJoinFromRow(rec, context.Background(), f.agent.ID, claim, true))
 	code, _ = errorBody(t, rec)
-	assert.Equal(t, ErrCodeConflict, code)
+	assert.Equal(t, ErrCodeConflict, code, "no entry: the plain conflict")
 }
 
 // The claim's pre-check answer carries the refusal's details, as the
@@ -156,10 +156,10 @@ func TestAgentDelete_PreCheckAnswerCarriesDetails(t *testing.T) {
 
 	rec := doRequest(t, f.srv, http.MethodDelete, "/api/v1/agents/"+a.ID, nil)
 	details := requireAPIError(t, rec, http.StatusConflict, ErrCodeRuntimeTargetPinStale)
-	assert.Equal(t, a.ID, details["agentId"])
-	assert.Equal(t, a.PinnedRuntimeBrokerID, details["pinnedRuntimeBrokerId"])
-	assert.Equal(t, a.PinnedRuntimeTargetID, details["pinnedRuntimeTargetId"])
-	assert.Equal(t, a.RuntimeBrokerID, details["runtimeBrokerId"])
+	assert.Equal(t, a.ID, details["agentId"], "the pre-check answer names the agent")
+	assert.Equal(t, a.PinnedRuntimeBrokerID, details["pinnedRuntimeBrokerId"], "the pre-check answer names the pinned Runtime Broker")
+	assert.Equal(t, a.PinnedRuntimeTargetID, details["pinnedRuntimeTargetId"], "the pre-check answer names the pinned target")
+	assert.Equal(t, a.RuntimeBrokerID, details["runtimeBrokerId"], "the pre-check answer names the Runtime Broker")
 	assert.False(t, f.client.deleteCalled)
 }
 
@@ -278,8 +278,8 @@ func TestAgentDelete_PlacementPreCheckBeforeAvailability(t *testing.T) {
 		before := mustGetAgent(t, f.s, a.ID)
 
 		rec := doRequest(t, f.srv, http.MethodDelete, "/api/v1/agents/"+a.ID, nil)
-		details := requireAPIError(t, rec, http.StatusConflict, ErrCodeRuntimeTargetPinStale)
-		assert.Equal(t, a.ID, details["agentId"])
+		offlineDetails := requireAPIError(t, rec, http.StatusConflict, ErrCodeRuntimeTargetPinStale)
+		assert.Equal(t, a.ID, offlineDetails["agentId"])
 		assert.False(t, f.client.deleteCalled, "nothing is dispatched")
 		after := mustGetAgent(t, f.s, a.ID)
 		assert.Equal(t, before.DeletionClaim, after.DeletionClaim, "no claim is taken")
