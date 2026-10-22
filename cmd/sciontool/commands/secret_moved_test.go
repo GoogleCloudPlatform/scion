@@ -34,7 +34,7 @@ func TestSecretReadCommandsMoved(t *testing.T) {
 		return nil
 	}
 
-	for _, name := range []string{"get", "list"} {
+	for name, target := range map[string]string{"get": "secret get --value", "list": "secret list"} {
 		t.Run(name, func(t *testing.T) {
 			stub := sub(name)
 			if stub == nil {
@@ -50,7 +50,7 @@ func TestSecretReadCommandsMoved(t *testing.T) {
 			if err == nil {
 				t.Fatalf("sciontool secret %s should fail", name)
 			}
-			want := "sciontool secret " + name + " has moved to 'scion secret " + name + "'"
+			want := "sciontool secret " + name + " has moved to 'scion " + target + "'"
 			if err.Error() != want {
 				t.Errorf("error = %q, want %q", err.Error(), want)
 			}

@@ -211,7 +211,8 @@ func runAgentSecretGetValue(cmd *cobra.Command, key string) error {
 }
 
 // fetchProjectSecretMeta reads the metadata of a project-scoped secret from
-// the Hub for `scion secret get --metadata`. Overridden in tests.
+// the Hub for the `scion secret get` metadata view (the default, or
+// --metadata). Overridden in tests.
 var fetchProjectSecretMeta = func(cmd *cobra.Command, key string) (*hubclient.Secret, error) {
 	hubCtx, err := requireHub(projectPath)
 	if err != nil {
@@ -253,8 +254,8 @@ func runAgentSecretGetMetadata(cmd *cobra.Command, key string) error {
 	return nil
 }
 
-// printSecretMetadata writes the text metadata view of a secret, as printed
-// by `scion secret get KEY --metadata`.
+// printSecretMetadata writes the text metadata view of a secret, the
+// default output of `scion secret get KEY`.
 func printSecretMetadata(w io.Writer, secret *hubclient.Secret) {
 	_, _ = fmt.Fprintf(w, "Secret: %s\n", secret.Key)
 	_, _ = fmt.Fprintf(w, "  Scope:   %s\n", secret.Scope)

@@ -24,21 +24,22 @@ import (
 // CLI. It accepts any arguments and flags, and fails with a message naming
 // the new command (sciontool exits 1 on the returned error).
 func movedCommand(name string) *cobra.Command {
-	return movedSubcommand(name, name)
+	return movedSubcommand(name, name, name)
 }
 
 // movedSubcommand is movedCommand for a command registered as use under a
-// parent: path is its full command path below the root (for example
-// "secret get"), which is the same in sciontool and scion.
-func movedSubcommand(use, path string) *cobra.Command {
+// parent: path is its full sciontool command path below the root (for
+// example "secret get"), and target is the scion command that replaces it
+// (for example "secret get --value").
+func movedSubcommand(use, path, target string) *cobra.Command {
 	return &cobra.Command{
 		Use:                use,
-		Short:              fmt.Sprintf("Moved to 'scion %s'", path),
+		Short:              fmt.Sprintf("Moved to 'scion %s'", target),
 		Hidden:             true,
 		DisableFlagParsing: true,
 		SilenceUsage:       true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return fmt.Errorf("sciontool %s has moved to 'scion %s'", path, path)
+			return fmt.Errorf("sciontool %s has moved to 'scion %s'", path, target)
 		},
 	}
 }

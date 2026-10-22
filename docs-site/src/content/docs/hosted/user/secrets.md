@@ -227,7 +227,7 @@ From inside an agent container, read secrets with `scion secret`. The calls are 
     ```
     Without `--value`, `scion secret get MY_API_KEY` prints the secret's metadata.
 
-`sciontool secret get` and `sciontool secret list` have moved to these `scion` commands; they now print a message naming the `scion` command and exit `1`.
+`sciontool secret get` has moved to `scion secret get --value`, and `sciontool secret list` to `scion secret list`; the old commands now print a message naming the `scion` command and exit `1`.
 
 #### Writing secrets with `sciontool`
 

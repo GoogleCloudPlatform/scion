@@ -146,6 +146,7 @@ func TestSecretGet_ValueFlagPrintsValue(t *testing.T) {
 	out, err := runSecretGetTest(t, "MY_KEY")
 	require.NoError(t, err)
 	assert.Equal(t, secretGetTestValue, out)
+	assert.Equal(t, 1, h.requests)
 }
 
 // useSecretMetaFake replaces the metadata fetch with a fake returning meta,
@@ -288,9 +289,8 @@ func TestSecretGet_Flags(t *testing.T) {
 	}
 }
 
-// TestPrintSecretMetadata pins the text metadata view printed by
-// `scion secret get KEY --metadata` (the output plain get printed before
-// ptone/scion#5013).
+// TestPrintSecretMetadata pins the text metadata view, the default output
+// of `scion secret get KEY`.
 func TestPrintSecretMetadata(t *testing.T) {
 	ts := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	var buf bytes.Buffer

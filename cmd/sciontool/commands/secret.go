@@ -31,7 +31,8 @@ var secretCmd = &cobra.Command{
 	Short: "Manage agent secrets",
 	Long: `Commands for managing secrets from within an agent container.
 
-To read secrets, use 'scion secret get' and 'scion secret list'.`,
+To read a secret value, use 'scion secret get --value'; to list secrets, use
+'scion secret list'.`,
 }
 
 var secretSetCmd = &cobra.Command{
@@ -166,8 +167,8 @@ func init() {
 	secretCmd.AddCommand(secretSetCmd)
 	// get and list moved to the scion CLI (ptone/scion#5013); set stays
 	// for the harness capture and provisioning scripts.
-	secretCmd.AddCommand(movedSubcommand("get", "secret get"))
-	secretCmd.AddCommand(movedSubcommand("list", "secret list"))
+	secretCmd.AddCommand(movedSubcommand("get", "secret get", "secret get --value"))
+	secretCmd.AddCommand(movedSubcommand("list", "secret list", "secret list"))
 
 	secretSetCmd.Flags().StringVar(&secretType, "type", "", "Secret type: environment (default), variable, file")
 	secretSetCmd.Flags().StringVar(&secretTarget, "target", "", "Injection target path (defaults to key for env, required for file)")
