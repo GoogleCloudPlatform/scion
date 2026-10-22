@@ -44,6 +44,22 @@ type Record struct {
 	// carrying an open tunnel, sorted, without duplicates.
 	SessionIDs []string       `json:"session_ids"`
 	Tunnels    []TunnelRecord `json:"tunnels"`
+	// Listeners are the open --local-port listeners, with or without a
+	// connection. A record written before listeners were recorded has
+	// none.
+	Listeners []ListenerRecord `json:"listeners,omitempty"`
+}
+
+// ListenerRecord is one open local listener. It holds no credential, grant
+// or URL.
+type ListenerRecord struct {
+	Agent   string `json:"agent"`
+	Project string `json:"project"`
+	Kind    string `json:"kind"`
+	// LocalPort is the local port the listener accepts on (127.0.0.1),
+	// not the agent port of a tunnel.
+	LocalPort int       `json:"local_port"`
+	OpenedAt  time.Time `json:"opened_at"`
 }
 
 // TunnelRecord is one open tunnel.
@@ -320,10 +336,11 @@ func (f FileStore) read(id string) (*Record, bool, error) {
 // StatusEntry is one (endpoint, credential identity) with its sessions and
 // open tunnels.
 type StatusEntry struct {
-	Endpoint   string         `json:"endpoint"`
-	Credential Identity       `json:"credential"`
-	SessionIDs []string       `json:"session_ids"`
-	Tunnels    []TunnelRecord `json:"tunnels"`
+	Endpoint   string           `json:"endpoint"`
+	Credential Identity         `json:"credential"`
+	SessionIDs []string         `json:"session_ids"`
+	Tunnels    []TunnelRecord   `json:"tunnels"`
+	Listeners  []ListenerRecord `json:"listeners"`
 }
 
 // Status is the output of scion tunnel status.
@@ -349,7 +366,7 @@ func MergeStatus(records []Record, endpoint string) Status {
 		}
 		e, ok := byKey[k]
 		if !ok {
-			e = &StatusEntry{Endpoint: k.Endpoint, Credential: r.Credential, SessionIDs: []string{}, Tunnels: []TunnelRecord{}}
+			e = &StatusEntry{Endpoint: k.Endpoint, Credential: r.Credential, SessionIDs: []string{}, Tunnels: []TunnelRecord{}, Listeners: []ListenerRecord{}}
 			byKey[k] = e
 			order = append(order, k)
 		}
@@ -359,12 +376,14 @@ func MergeStatus(records []Record, endpoint string) Status {
 			}
 		}
 		e.Tunnels = append(e.Tunnels, r.Tunnels...)
+		e.Listeners = append(e.Listeners, r.Listeners...)
 	}
 	st := Status{Entries: []StatusEntry{}}
 	for _, k := range order {
 		e := byKey[k]
 		sort.Strings(e.SessionIDs)
 		sortTunnels(e.Tunnels)
+		sortListeners(e.Listeners)
 		st.Entries = append(st.Entries, *e)
 	}
 	sort.SliceStable(st.Entries, func(i, j int) bool {
@@ -396,5 +415,15 @@ func sortTunnels(ts []TunnelRecord) {
 			return ts[i].OpenedAt.Before(ts[j].OpenedAt)
 		}
 		return ts[i].Agent < ts[j].Agent
+	})
+}
+
+// sortListeners orders listeners by open time, then local port.
+func sortListeners(ls []ListenerRecord) {
+	sort.SliceStable(ls, func(i, j int) bool {
+		if !ls[i].OpenedAt.Equal(ls[j].OpenedAt) {
+			return ls[i].OpenedAt.Before(ls[j].OpenedAt)
+		}
+		return ls[i].LocalPort < ls[j].LocalPort
 	})
 }

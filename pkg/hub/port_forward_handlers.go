@@ -405,6 +405,19 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 		}
 		return
 	}
+	// The bare proxy URL (.../proxy, no trailing slash) is answered with a
+	// redirect to .../proxy/, so the page's relative URLs resolve inside
+	// the proxy path. Only GET and HEAD, and only after the checks above,
+	// so a caller without access, or for a port that is not exposed, gets
+	// the same answer as before. WebSocket upgrades are not redirected
+	// (WebSocket clients do not follow redirects) and are proxied as
+	// before. The upgrade check only decides whether the redirect is sent:
+	// it reads request headers the client chooses, so no access decision
+	// may depend on it; access was decided above.
+	if proxyPath == "" && (r.Method == http.MethodGet || r.Method == http.MethodHead) && !isWebSocketUpgrade(r) {
+		redirectToProxyRoot(w, r)
+		return
+	}
 	// Conduit first (hub.conduit on and this node runs the relay): an agent
 	// with a conduit session is proxied over it. An agent without one may
 	// be an older sciontool on the port-forward tunnel below. Every loopback
@@ -838,4 +851,86 @@ func (s *Server) refuseLegacyProxy(w http.ResponseWriter, r *http.Request, ident
 	}
 	writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, message, nil)
 	return true
+}
+
+// redirectToProxyRoot answers a request for the bare proxy URL with a 308
+// to the same URL with a trailing slash, keeping the raw query. The
+// Location is relative ("proxy/"), so it resolves against the URL the
+// client used, whatever prefix a front proxy put in front of the route.
+// Any control, space or non-ASCII byte left in the raw query is
+// percent-encoded, so the header value is always a single well-formed
+// line. The answer depends on the caller's access, so it is not stored.
+func redirectToProxyRoot(w http.ResponseWriter, r *http.Request) {
+	loc := "proxy/"
+	if r.URL.RawQuery != "" {
+		loc += "?" + encodeLocationQuery(r.URL.RawQuery)
+	}
+	w.Header().Set("Location", loc)
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusPermanentRedirect)
+}
+
+// encodeLocationQuery percent-encodes the bytes of a raw query that may
+// not appear in a URL as is (controls, space, DEL and non-ASCII) and
+// leaves every other byte, existing percent-encodings included, unchanged.
+// Keep the set exactly that narrow: the query is already encoded, so
+// encoding more (for example '%') would encode existing sequences twice
+// (%20 becomes %2520) and change what the app receives.
+func encodeLocationQuery(q string) string {
+	const hex = "0123456789ABCDEF"
+	var b strings.Builder
+	for i := 0; i < len(q); i++ {
+		c := q[i]
+		if c <= ' ' || c >= 0x7f {
+			b.WriteByte('%')
+			b.WriteByte(hex[c>>4])
+			b.WriteByte(hex[c&0x0f])
+			continue
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
+}
+
+// portProxyMultiFileDocsURL is the user guide section that the
+// no-credentials answer points to.
+const portProxyMultiFileDocsURL = "https://googlecloudplatform.github.io/scion/hosted/user/port-forwarding/#multi-file-apps"
+
+// portProxyNoCredentialsBody is the static body of the no-credentials
+// answer on proxy routes (writePortProxyNoCredentials).
+const portProxyNoCredentialsBody = "Scion port proxy: pages opened through this URL can only use what is " +
+	"inside the page itself; separate scripts, stylesheets and requests back to the app are not served. " +
+	"Serve a single self-contained page. See " + portProxyMultiFileDocsURL + ".\n"
+
+// Headers of the no-credentials answer on proxy routes.
+const (
+	portProxyErrorHeader       = "X-Scion-Proxy-Error"
+	portProxyHintHeader        = "X-Scion-Proxy-Hint"
+	portProxyErrorNoCredential = "no-credentials"
+	portProxyHintSandboxedSub  = "sandboxed-subresource"
+)
+
+// writePortProxyNoCredentials answers a request to a port proxy route that
+// carries no credential and is not a page navigation (a script,
+// stylesheet, image or fetch requested by a proxied page) with a
+// plain-text 401 the browser can show and the page can read, instead of
+// the hub's JSON 401, which browsers report only as a MIME type error.
+// The body is static. It reports whether the request looked like a
+// sub-request from a proxied page (Origin "null" or a cross-site fetch).
+func writePortProxyNoCredentials(w http.ResponseWriter, r *http.Request) (hinted bool) {
+	h := w.Header()
+	h.Set("Content-Type", "text/plain; charset=utf-8")
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Cache-Control", "no-store")
+	h.Set("Access-Control-Allow-Origin", "*")
+	h.Del("Access-Control-Allow-Credentials")
+	h.Set("Access-Control-Expose-Headers", portProxyErrorHeader+", "+portProxyHintHeader)
+	h.Set(portProxyErrorHeader, portProxyErrorNoCredential)
+	hinted = r.Header.Get("Origin") == "null" || r.Header.Get("Sec-Fetch-Site") == "cross-site"
+	if hinted {
+		h.Set(portProxyHintHeader, portProxyHintSandboxedSub)
+	}
+	w.WriteHeader(http.StatusUnauthorized)
+	_, _ = io.WriteString(w, portProxyNoCredentialsBody)
+	return hinted
 }

@@ -19,6 +19,7 @@
     "main-terminal-lazy.test.ts",
     "main-terminal-load-failure.test.ts",
     "main-terminal-superseded.test.ts",
+    "main-leave-guard.test.ts",
     "main-terminal-hides-outlet.test.ts",
     "main-terminal-loading.test.ts",
     "main-terminal-loading-handoff.test.ts",

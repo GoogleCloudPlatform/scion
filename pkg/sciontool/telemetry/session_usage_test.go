@@ -105,7 +105,7 @@ func TestAggregatorRecordUsageAccumulatesAcrossRestore(t *testing.T) {
 	a := NewAggregator()
 	a.StartSession("s1")
 	a.RecordTurn()
-	a.RecordToolEnd("Bash", "")
+	a.RecordToolEnd("Bash", ToolSucceeded)
 	a.RecordUsage(SessionUsage{Calls: 1, TokensInput: 10, TokensOutput: 2, TokensCached: 30, TokensReasoning: 1})
 
 	b := NewAggregator()

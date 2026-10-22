@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -268,25 +269,23 @@ func preCleanForTest(ctx context.Context, rt *CloudRunSandboxRuntime, task bool,
 	return false, nil
 }
 
-// matchProjectForTest mirrors matchAgentProject (pkg/agent/run.go).
+// matchProjectForTest mirrors matchAgentProject (pkg/agent/run.go): an
+// unscoped call matches every entry; a scoped one needs a projectID and an
+// entry of it, identified by its project ID label or field. (The pkg/agent
+// rule also accepts a container with no project identity whose recorded
+// path identifies as the project; these entries record no path, so that
+// branch never applies here.)
 func matchProjectForTest(a api.AgentInfo, projectName, projectID string) bool {
-	if projectID != "" {
-		if l := projectkeys.ProjectIDFromLabels(a.Labels); l != "" {
-			return l == projectID
-		}
-		if a.ProjectID != "" {
-			return a.ProjectID == projectID
-		}
+	if projectName == "" && projectID == "" {
+		return true
 	}
-	if projectName != "" {
-		if l := projectkeys.ProjectNameFromLabels(a.Labels); l != "" {
-			return l == projectName
-		}
-		if a.Project != "" {
-			return a.Project == projectName
-		}
+	if projectID == "" {
+		return false
 	}
-	return true
+	if l := projectkeys.ProjectIDFromLabels(a.Labels); l != "" {
+		return l == projectID
+	}
+	return a.ProjectID != "" && a.ProjectID == projectID
 }
 
 // writeStartingEntryForTest writes a Starting entry of runID under "dev"
@@ -310,13 +309,31 @@ func writeStartingEntryForTest(t *testing.T, path, runID string, at, until time.
 	return nonce
 }
 
-// goneBin returns a mock binary whose exec probe always answers "not
-// found"; other verbs succeed, and wait blocks.
-func goneBin(t *testing.T) string {
+// notRunningBin returns a mock binary whose exec probe always answers with
+// the CLI's verified wording for a missing sandbox, "Error: sandbox <name>
+// is not running" (ptone/scion#4776), and the path of a file that gets one
+// line per exec probe; other verbs succeed, and wait blocks.
+func notRunningBin(t *testing.T) (bin, probes string) {
 	t.Helper()
-	return writeMockBin(t, `[ "$1" = wait ] && exec sleep 60
-if [ "$1" = exec ]; then echo "sandbox not found" >&2; exit 1; fi
-exit 0`)
+	probes = filepath.Join(t.TempDir(), "probes")
+	bin = writeMockBin(t, fmt.Sprintf(`[ "$1" = wait ] && exec sleep 60
+if [ "$1" = exec ]; then echo "$2" >> %q; echo "Error: sandbox $2 is not running" >&2; exit 1; fi
+exit 0`, probes))
+	return bin, probes
+}
+
+// probeCount returns how many exec probes notRunningBin's probes file
+// recorded.
+func probeCount(t *testing.T, probes string) int {
+	t.Helper()
+	b, err := os.ReadFile(probes)
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Count(string(b), "\n")
 }
 
 // reconcileNow constructs another store on path and reconciles it with
@@ -901,24 +918,35 @@ func TestClassifySandboxLaunch(t *testing.T) {
 // -----------------------------------------------------------------------
 
 // Fault check S10: reconcile probes a young Starting entry.
-// With a not-found probe, a young entry is kept; an old one (StartingAt +
-// grace and StartingUntil both past) is removed.
-func TestSandboxReconcile_StartingYoungKeptOldRemoved(t *testing.T) {
+// With a not-running probe, a young entry is kept without a probe; an old
+// one (StartingAt + grace and StartingUntil both past) is probed once and
+// kept with the not-running warning (ptone/scion#4776: a probe never
+// drops an entry).
+func TestSandboxReconcile_StartingYoungKeptOldProbed(t *testing.T) {
 	now := time.Now()
 	for _, tc := range []struct {
 		name      string
 		at, until time.Time
-		kept      bool
+		probes    int
 	}{
-		{"young", now, now.Add(time.Minute), true},
-		{"old", now.Add(-time.Hour), now.Add(-time.Minute), false},
+		{"young", now, now.Add(time.Minute), 0},
+		{"old", now.Add(-time.Hour), now.Add(-time.Minute), 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			setRuntimeLogHandler(t, slog.NewTextHandler(&logs, nil))
 			path := filepath.Join(t.TempDir(), "state.json")
 			writeStartingEntryForTest(t, path, "run-x", tc.at, tc.until)
-			reconcileNow(path, goneBin(t))
-			if got := readStateForTest(t, path)["dev"] != nil; got != tc.kept {
-				t.Errorf("entry kept = %v, want %v", got, tc.kept)
+			bin, probes := notRunningBin(t)
+			reconcileNow(path, bin)
+			if e := readStateForTest(t, path)["dev"]; e == nil || !e.Starting {
+				t.Errorf("entry = %+v, want the Starting entry kept", e)
+			}
+			if got := probeCount(t, probes); got != tc.probes {
+				t.Errorf("probes = %d, want %d", got, tc.probes)
+			}
+			if got, want := strings.Contains(logs.String(), reconcileNotRunningLog), tc.probes > 0; got != want {
+				t.Errorf("not-running warning logged = %v, want %v (logs: %s)", got, want, logs.String())
 			}
 		})
 	}
@@ -942,10 +970,10 @@ exit 0`))
 // In flight: grace and horizon terms are ms and the start's ctx has no
 // deadline, so only the in-flight rule keeps the entry. A blocking `run`
 // is inside the start; another instance reconciles after the margins pass
-// with a not-found probe: the entry survives. Then `run` is killed:
-// `delete --force` is issued. Another process: an entry written directly
-// to the file, not in flight, with StartingAt older than the grace and
-// StartingUntil in the future, is kept.
+// with a not-running probe: the entry survives, unprobed. Then `run` is
+// killed: `delete --force` is issued. Another process: an entry written
+// directly to the file, not in flight, with StartingAt older than the
+// grace and StartingUntil in the future, is kept, unprobed.
 func TestSandboxReconcile_StartingInFlightKept(t *testing.T) {
 	t.Run("in flight", func(t *testing.T) {
 		setDuration(t, &sandboxStartingGrace, time.Millisecond)
@@ -961,7 +989,11 @@ func TestSandboxReconcile_StartingInFlightKept(t *testing.T) {
 		waitForFile(t, env.mark)
 		time.Sleep(50 * time.Millisecond) // past StartingAt + grace and StartingUntil
 
-		reconcileNow(env.state, goneBin(t))
+		bin, probes := notRunningBin(t)
+		reconcileNow(env.state, bin)
+		if n := probeCount(t, probes); n != 0 {
+			t.Errorf("probes = %d, want 0: the in-flight entry is kept without a probe", n)
+		}
 		if e := fileEntry(t, env.state); e == nil || !e.Starting || e.Labels[api.LabelRunID] != "run-a" {
 			t.Errorf("entry after reconcile = %+v, want run A's in-flight Starting entry kept", e)
 		}
@@ -976,9 +1008,13 @@ func TestSandboxReconcile_StartingInFlightKept(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "state.json")
 		now := time.Now()
 		writeStartingEntryForTest(t, path, "run-x", now.Add(-time.Hour), now.Add(time.Hour))
-		reconcileNow(path, goneBin(t))
+		bin, probes := notRunningBin(t)
+		reconcileNow(path, bin)
 		if readStateForTest(t, path)["dev"] == nil {
 			t.Error("entry before its StartingUntil removed, want kept")
+		}
+		if n := probeCount(t, probes); n != 0 {
+			t.Errorf("probes = %d, want 0: the entry before its StartingUntil is kept without a probe", n)
 		}
 	})
 }
@@ -988,8 +1024,9 @@ func TestSandboxReconcile_StartingInFlightKept(t *testing.T) {
 // with ctx deadline D: (i) the copy taken at `run` has StartingUntil =
 // D + skew + report window + cleanup budget + slack; (ii) `run` is killed
 // at D and the delete fails with another error, so the entry is kept; a
-// reconcile at StartingUntil - 100 ms with a not-found probe keeps it, and
-// one at StartingUntil + 100 ms removes it.
+// reconcile at StartingUntil - 100 ms keeps it without a probe, and one at
+// StartingUntil + 100 ms probes it, gets the not-running answer and keeps
+// it with the warning (ptone/scion#4776: a probe never drops an entry).
 func TestCloudRunSandboxStarting_StartingUntilHorizon(t *testing.T) {
 	setDuration(t, &sandboxStartingGrace, time.Millisecond)
 	setDuration(t, &asyncLaunchAdmissionSkew, 100*time.Millisecond)
@@ -1024,16 +1061,30 @@ func TestCloudRunSandboxStarting_StartingUntilHorizon(t *testing.T) {
 		t.Fatalf("entry after a failed cleanup delete = %+v, want it kept", kept)
 	}
 
-	gone := goneBin(t)
+	var logs bytes.Buffer
+	setRuntimeLogHandler(t, slog.NewTextHandler(&logs, nil))
+	bin, probes := notRunningBin(t)
 	setNow(t, want.Add(-100*time.Millisecond))
-	reconcileNow(env.state, gone)
+	reconcileNow(env.state, bin)
 	if fileEntry(t, env.state) == nil {
 		t.Error("reconcile at StartingUntil - 100ms removed the entry, want kept")
 	}
+	if n := probeCount(t, probes); n != 0 {
+		t.Errorf("probes at StartingUntil - 100ms = %d, want 0", n)
+	}
+	if strings.Contains(logs.String(), reconcileNotRunningLog) {
+		t.Errorf("not-running warning at StartingUntil - 100ms, want none (logs: %s)", logs.String())
+	}
 	setNow(t, want.Add(100*time.Millisecond))
-	reconcileNow(env.state, gone)
-	if e := fileEntry(t, env.state); e != nil {
-		t.Errorf("reconcile at StartingUntil + 100ms kept %+v, want removed", e)
+	reconcileNow(env.state, bin)
+	if e := fileEntry(t, env.state); e == nil || !e.Starting {
+		t.Errorf("reconcile at StartingUntil + 100ms left %+v, want the Starting entry kept", e)
+	}
+	if n := probeCount(t, probes); n != 1 {
+		t.Errorf("probes after StartingUntil + 100ms = %d, want 1", n)
+	}
+	if !strings.Contains(logs.String(), reconcileNotRunningLog) {
+		t.Errorf("no not-running warning at StartingUntil + 100ms (logs: %s)", logs.String())
 	}
 }
 

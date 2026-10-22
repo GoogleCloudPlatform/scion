@@ -696,20 +696,6 @@ func assertNoProjectWithSlug(t *testing.T, s store.Store, slug string) {
 	assert.ErrorIs(t, err, store.ErrNotFound, "no project may hold slug %q", slug)
 }
 
-// doDavRequest issues a WebDAV request with a raw body and optional headers.
-// The JSON-encoding doRequest helper cannot express these verbs.
-func doDavRequest(t *testing.T, srv *Server, method, urlPath string, body []byte, headers map[string]string) *httptest.ResponseRecorder {
-	t.Helper()
-	req := httptest.NewRequest(method, urlPath, bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+testDevToken)
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-	return rec
-}
-
 // workspaceSecret is planted in a victim project's workspace. No response to a
 // non-member may contain it.
 const workspaceSecret = "PRIVATE-WORKSPACE-BYTES-do-not-serve-this"

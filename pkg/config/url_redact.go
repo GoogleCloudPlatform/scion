@@ -219,3 +219,121 @@ func redactParam(pair string, depth int) string {
 	}
 	return pair
 }
+
+// undelimitedUserInfo reports whether raw may carry user info that the
+// rules above cannot tell apart from its host and path, so that only its
+// scheme can be shown (see maskWholeURL). A '/', '?' or '#' in the user
+// info moves where the authority seems to end, and an '@' in a password
+// moves where the user info seems to end. That is the case when raw holds
+// an '@' and either:
+//   - raw does not parse, and userInfo (the user info rule for URLs
+//     url.Parse rejects) does not match it, or raw holds another '@' after
+//     the match (a password such as "p@ss:x/w0rd": the rule stops at the
+//     first '/', and the rest of the password follows);
+//   - raw parses with user info and another '@' follows its authority, in
+//     the path, query or fragment (a password such as "p@ss/w0rd" parses as
+//     user "p", host "ss" and a path);
+//   - raw parses but its authority, cut from raw itself, does not end in a
+//     host (see rawAuthorityIsHost).
+//
+// The '@' is looked for in raw, never in a part of it; without one there
+// is no user info, and an '@' after the host of a URL without user info
+// (an e-mail address, "/@name") is not masked.
+func undelimitedUserInfo(raw string, userInfo *regexp.Regexp) bool {
+	if !strings.Contains(raw, "@") {
+		return false
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		m := userInfo.FindStringIndex(raw)
+		return m == nil || strings.Contains(raw[m[1]:], "@")
+	}
+	authority, rest, hasAuthority := cutRawAuthority(raw)
+	if u.User != nil && strings.Contains(rest, "@") {
+		return true
+	}
+	return hasAuthority && !rawAuthorityIsHost(authority)
+}
+
+// maskWholeURL returns the scheme of raw and "://" followed by a fixed
+// mask, or the mask alone when raw has no scheme. Nothing else of raw is
+// kept.
+func maskWholeURL(raw string) string {
+	return urlSchemePrefixRe.FindString(raw) + "xxxxx"
+}
+
+// cutRawAuthority cuts raw, after its scheme and "://" (or a leading
+// "//"), at its first '/', '?' or '#': the authority, and the rest from
+// that delimiter on. hasAuthority is false when raw has neither prefix.
+func cutRawAuthority(raw string) (authority, rest string, hasAuthority bool) {
+	if scheme := urlSchemePrefixRe.FindString(raw); scheme != "" {
+		authority, hasAuthority = raw[len(scheme):], true
+	} else {
+		authority, hasAuthority = strings.CutPrefix(raw, "//")
+	}
+	if !hasAuthority {
+		return "", "", false
+	}
+	if i := strings.IndexAny(authority, "/?#"); i >= 0 {
+		authority, rest = authority[:i], authority[i:]
+	}
+	return authority, rest, true
+}
+
+// rawAuthorityIsHost reports whether authority (see cutRawAuthority) ends
+// in a host: after its last '@', if any, a name of ASCII letters, digits,
+// '-', '.' and any non-ASCII character but U+FFFD (none of which can hide
+// a '/', '?' or '#'), or a bracketed IP literal, then an optional ':' and
+// digits. An empty authority passes.
+func rawAuthorityIsHost(authority string) bool {
+	rest := authority
+	if rest == "" {
+		return true
+	}
+	if i := strings.LastIndex(rest, "@"); i >= 0 {
+		rest = rest[i+1:]
+	}
+	host, port := rest, ""
+	if strings.HasPrefix(host, "[") {
+		end := strings.IndexByte(host, ']')
+		if end < 2 {
+			return false
+		}
+		for _, r := range host[1:end] {
+			if !isASCIIAlnum(r) && !strings.ContainsRune(":.%-", r) {
+				return false
+			}
+		}
+		if after := host[end+1:]; after != "" {
+			p, hasPort := strings.CutPrefix(after, ":")
+			if !hasPort {
+				return false
+			}
+			port = p
+		}
+		host = ""
+	} else {
+		if i := strings.LastIndexByte(host, ':'); i >= 0 {
+			host, port = host[:i], host[i+1:]
+		}
+		if host == "" {
+			return false
+		}
+	}
+	for _, r := range port {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	for _, r := range host {
+		if !isASCIIAlnum(r) && r != '-' && r != '.' && (r < 0x80 || r == '\uFFFD') {
+			return false
+		}
+	}
+	return true
+}
+
+// isASCIIAlnum reports whether r is an ASCII letter or digit.
+func isASCIIAlnum(r rune) bool {
+	return r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z'
+}

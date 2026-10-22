@@ -29,7 +29,8 @@ import (
 // records (<agent dir>/harness-inputs, config.HarnessInputsRecordDirName;
 // <agent dir>/harness-secrets, config.HarnessSecretsRecordDirName; and the
 // broker-side image provenance file <agent dir>/image-provenance.json,
-// config.ImageProvenanceFileName) are outside
+// config.ImageProvenanceFileName; and the rerender record
+// <agent dir>/rerender-record.json, config.RerenderRecordFileName) are outside
 // every container mount scion computes for the agent, in every runtime mode,
 // using the real mount builders. Author-configured volumes are excluded: they
 // are a separately tracked capability.
@@ -49,11 +50,12 @@ func TestHarnessInputsRecordOutsideScionMounts(t *testing.T) {
 
 // controlPlaneRecordNames are the agent-dir entries that must never be
 // visible inside the container: the harness inputs and secrets record
-// directories and the image provenance file.
+// directories, the image provenance file and the rerender record.
 var controlPlaneRecordNames = []string{
 	config.HarnessInputsRecordDirName,
 	config.HarnessSecretsRecordDirName,
 	config.ImageProvenanceFileName,
+	config.RerenderRecordFileName,
 }
 
 // pathWithin reports whether p is base or below it.
