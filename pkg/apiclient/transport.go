@@ -103,6 +103,35 @@ func NewTransport(baseURL string, opts ...TransportOption) *Transport {
 	return t
 }
 
+// requestTimeoutKey is the context key of WithRequestTimeout.
+type requestTimeoutKey struct{}
+
+// WithRequestTimeout returns a copy of ctx under which a Transport sends its
+// requests with client timeout d instead of its HTTPClient's Timeout. It
+// is for the few calls that can legitimately outlast the usual timeout,
+// such as a synchronous agent create; other requests keep theirs. A d of
+// zero or less leaves the usual timeout in place.
+func WithRequestTimeout(ctx context.Context, d time.Duration) context.Context {
+	return context.WithValue(ctx, requestTimeoutKey{}, d)
+}
+
+// client returns the *http.Client for a request sent under ctx: the
+// Transport's own, or a shallow copy with the timeout from
+// WithRequestTimeout. The copy shares the RoundTripper and its connection
+// pool.
+func (t *Transport) client(ctx context.Context) *http.Client {
+	base := t.HTTPClient
+	if base == nil {
+		base = http.DefaultClient
+	}
+	if d, ok := ctx.Value(requestTimeoutKey{}).(time.Duration); ok && d > 0 {
+		c := *base
+		c.Timeout = d
+		return &c
+	}
+	return base
+}
+
 // Do executes an HTTP request with configured behaviors.
 // Handles retries, timeout, and wraps errors.
 //
@@ -128,6 +157,7 @@ func (t *Transport) Do(ctx context.Context, req *http.Request) (*http.Response, 
 	var err error
 
 	canRewind := bodyRewindable(req)
+	hc := t.client(ctx)
 	attempts := t.MaxRetries + 1
 	for i := 0; i < attempts; i++ {
 		if i > 0 {
@@ -154,7 +184,7 @@ func (t *Transport) Do(ctx context.Context, req *http.Request) (*http.Response, 
 			attempt.Body = body
 		}
 
-		resp, err = t.HTTPClient.Do(attempt)
+		resp, err = hc.Do(attempt)
 		retry := i < t.MaxRetries && canRewind
 		if err != nil {
 			// Check if context was cancelled
@@ -215,10 +245,7 @@ func (t *Transport) DoNoRetry(ctx context.Context, req *http.Request) (*http.Res
 		return nil, err
 	}
 
-	base := t.HTTPClient
-	if base == nil {
-		base = http.DefaultClient
-	}
+	base := t.client(ctx)
 	// Shallow-copy the *http.Client so the underlying RoundTripper (and its
 	// connection pool) is shared with Do, but this one call's redirect policy
 	// is not: CheckRedirect is overridden to stop following at the first hop,
