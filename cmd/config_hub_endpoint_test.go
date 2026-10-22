@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -513,4 +514,66 @@ func TestConfigGetHubEndpoint_NamesAnImportHeldInMemory(t *testing.T) {
 	assert.Contains(t, stderr, "could not save the imported hub settings")
 	_, statErr := os.Stat(contextFilePath())
 	assert.True(t, os.IsNotExist(statErr), "context.yaml was not written")
+}
+
+// config set prints at most one line on stderr, and only when another hub
+// than the one it set applies: the cases of the --hub flag, the environment
+// and the directory's link, at both scopes.
+func TestConfigSetHubEndpoint_ReportsAnotherHubOnlyWhenOneApplies(t *testing.T) {
+	const (
+		newHub  = "https://team.example.org"
+		flagHub = "https://flag.example.org"
+		envHub  = "https://env.example.org"
+		linkHub = "https://linked.example.org"
+	)
+	cases := []struct {
+		name    string
+		global  bool
+		current bool   // a current hub is set
+		link    string // the directory's link entry ("" for none)
+		env     string
+		flag    string
+		want    string
+	}{
+		{name: "global, --hub names the new hub", global: true, flag: newHub},
+		{name: "global, --hub names the new hub, the directory link another", global: true, flag: newHub, link: linkHub,
+			want: "Note: here hub.endpoint still comes from link hub 'linked': " + linkHub + "\n"},
+		{name: "global, the directory link names the new hub", global: true, link: newHub},
+		{name: "project, --hub names another hub", flag: flagHub,
+			want: "Note: here hub.endpoint still comes from flag --hub: " + flagHub + "\n"},
+		{name: "project, --hub names the new hub", flag: newHub},
+		{name: "project, the environment names another hub", env: envHub,
+			want: "Warning: hub.endpoint is still set by SCION_HUB_ENDPOINT\n"},
+		{name: "project, the environment names the new hub", env: newHub},
+		{name: "project, a current hub", current: true},
+		{name: "project, an older link to another hub", link: linkHub},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setupConfigHubTest(t)
+			hubResponds = func(string, bool) error { return nil }
+			if tc.current {
+				saveTestContext(t, ctxTestHub, "")
+			}
+			root := makeDirProject(t, "")
+			if tc.link != "" {
+				saveLinkEntry(t, filepath.Join(root, ".scion"), tc.link, "linked")
+			}
+			t.Setenv("SCION_HUB_ENDPOINT", tc.env)
+			var args []string
+			if tc.flag != "" {
+				args = append(args, "--hub", tc.flag)
+			}
+			args = append(args, "config", "set")
+			if tc.global {
+				args = append(args, "--global")
+			}
+			args = append(args, "hub.endpoint", newHub)
+
+			stdout, stderr, err := runConfig(t, args...)
+			require.NoError(t, err)
+			assert.Equal(t, 1, strings.Count(stdout, "\n"), "stdout keeps one line: %q", stdout)
+			assert.Equal(t, tc.want, stderr)
+		})
+	}
 }
