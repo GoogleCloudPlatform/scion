@@ -51,7 +51,7 @@ func (s *Server) listProjectAgentsSortedAgentJWT(w http.ResponseWriter, r *http.
 	if p.cursor != "" {
 		decoded, err := store.DecodeAgentCursor(p.cursor, p.sort, p.dir, binding)
 		if err != nil {
-			BadRequest(w, "invalid cursor")
+			writeInvalidCursor(w)
 			return
 		}
 		cur = &decoded

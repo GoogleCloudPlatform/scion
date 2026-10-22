@@ -364,6 +364,17 @@ type httpStatusError interface {
 // ErrDeleteInProgress) and deleteInProgressRefusal.
 const DeleteInProgressMessage = "a delete is in progress for this agent; wait for it to finish, or force the delete"
 
+// InvalidCursorMessage is the client-facing message of every 400
+// invalid_cursor answer: a cursor that cannot be used, whatever the reason,
+// means "discard it and restart from the first page".
+const InvalidCursorMessage = "invalid cursor: restart pagination from the first page"
+
+// WriteInvalidCursor writes the uniform 400 invalid_cursor answer for a
+// pagination cursor or page token that cannot be used.
+func WriteInvalidCursor(w http.ResponseWriter) {
+	WriteError(w, http.StatusBadRequest, ErrCodeInvalidCursor, InvalidCursorMessage, nil)
+}
+
 // StoreMembersGroupPrincipalMessage is the client-facing message for a store
 // refusal (store.ErrProjectMembersGroupPrincipal), shared by WriteErrorFromErr
 // and storeMembersGroupPrincipalDecision so both routes return the same text.
@@ -425,6 +436,13 @@ func WriteErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 		statusCode = http.StatusBadRequest
 		code = ErrCodeInvalidRequest
 		message = StoreMembersGroupPrincipalMessage
+	case errors.Is(err, store.ErrInvalidCursor):
+		// Must precede ErrInvalidInput, which it wraps. Every malformed
+		// cursor gets the same answer as an authorizedList cursor failure
+		// (ptone/scion#3062).
+		statusCode = http.StatusBadRequest
+		code = ErrCodeInvalidCursor
+		message = InvalidCursorMessage
 	case errors.Is(err, store.ErrInvalidInput):
 		statusCode = http.StatusBadRequest
 		code = ErrCodeValidationError

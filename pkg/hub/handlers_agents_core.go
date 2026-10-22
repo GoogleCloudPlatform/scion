@@ -539,7 +539,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	cursor := query.Get("cursor")
 	if cursor != "" {
 		if err := validateAuthorizedListCursor(cursor, cursorBinding); err != nil {
-			BadRequest(w, err.Error())
+			writeInvalidCursor(w)
 			return
 		}
 	}

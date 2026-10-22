@@ -1017,7 +1017,7 @@ func (s *ScheduleStore) ListScheduledEvents(ctx context.Context, filter store.Sc
 	}
 
 	if opts.Cursor != "" {
-		cursorUID, err := parseUUID(opts.Cursor)
+		cursorUID, err := parseCursorUUID(opts.Cursor)
 		if err != nil {
 			return nil, err
 		}

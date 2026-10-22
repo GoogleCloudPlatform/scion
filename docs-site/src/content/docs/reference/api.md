@@ -17,7 +17,7 @@ Most endpoints require a `Bearer` token in the `Authorization` header.
 
 ### Pagination
 
-List endpoints for templates, harness configs and groups return an opaque `nextCursor`. Cursors are encrypted and bound to the endpoint, the filter and the caller that received them, so pass them back unchanged to the same endpoint with the same filter. A cursor that is malformed, tampered with, reused in a different context, or sealed with a key the Hub no longer holds (for example after a key rotation) is rejected with a uniform `400 Bad Request` and error code `invalid_cursor`; restart the listing from the first page.
+List endpoints for templates, harness configs and groups return an opaque `nextCursor`. Cursors are encrypted and bound to the endpoint, the filter and the caller that received them, so pass them back unchanged to the same endpoint with the same filter. A cursor that is malformed, tampered with, reused in a different context, or sealed with a key the Hub no longer holds (for example after a key rotation) is rejected with a uniform `400 Bad Request` and error code `invalid_cursor`; restart the listing from the first page. Every other paginated list endpoint answers a cursor or `pageToken` it cannot use (malformed, issued for another list, or naming an entry that no longer exists) the same way: `400` with error code `invalid_cursor` and the message `invalid cursor: restart pagination from the first page`.
 
 ### Core Resources
 
