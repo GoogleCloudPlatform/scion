@@ -340,7 +340,7 @@ func TestParityCatchesVetGap(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.genFiles["e_test.go"] = g
-	wantParityErrors(t, s, "vet: e_test.go was vetted by go vet -tags no_sqlite or -tags 'integration volume_test tzcontract', and no shard's vet covers it")
+	wantParityErrors(t, s, "vet: e_test.go was vetted by go vet -tags no_sqlite or -tags 'integration tzcontract', and no shard's vet covers it")
 }
 
 func TestParityCatchesCrossShardUse(t *testing.T) {
