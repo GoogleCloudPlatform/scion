@@ -92,7 +92,7 @@ type UsageEvent struct {
 	SourceEventID       string `json:"source_event_id,omitempty"`
 	SourceIdentity      string `json:"source_identity"`
 	SourceOccurrence    int64  `json:"source_occurrence"`
-	IdentityAmbiguous   bool   `json:"identity_ambiguous,omitempty"`
+	IdentityAmbiguous   bool   `json:"identity_ambiguous"`
 	// ProducerEpoch identifies one durable producer outbox; ProducerSeq is
 	// strictly increasing within it (advanced even when an event is refused
 	// for overflow), so a gap is evidence of loss and a new epoch for the
