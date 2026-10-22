@@ -374,12 +374,13 @@ func (p *Pipeline) Start(ctx context.Context) error {
 	p.running = true
 	p.deliveryState.Store("running")
 	p.startDiagnosticSnapshots(ctx)
-	p.logDeliverySnapshot(true)
 	var gcpExporter *GCPExporter
 	if p.exporter != nil {
 		gcpExporter = p.exporter.gcpExporter
 	}
 	p.startHealth(ctx, gcpExporter, p.analytics.handles())
+	// After startHealth, so the first snapshot shows this run's analytics.
+	p.logDeliverySnapshot(true)
 
 	// Start metric flush goroutine for batching exports to Cloud Monitoring.
 	if p.exporter != nil {

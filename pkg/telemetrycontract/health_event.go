@@ -122,17 +122,22 @@ type HealthAnalyticsCounters struct {
 	Conflicts, Quarantined, DeadLetters                  int64
 	OversizeTotal, AppendFailedTotal, DeadLettersTotal   int64
 	SyncUncertain, CorruptIntents, Invalid               int64
-	RetainedBytes                                        int64
-	PendingBytes                                         int64
+	Unresolved, CommitDeferred                           int64
+	SyncUncertainTotal, CommitDeferredTotal              int64
+	// Held is true when an unresolved append holds the outbox (on disk).
+	Held          bool
+	RetainedBytes int64
+	PendingBytes  int64
 	// OldestPendingFileAgeMs is nil when nothing is pending (omitted).
 	OldestPendingFileAgeMs *int64
 	RetryBackoffMs         int64
 	ProducerEpoch          string
 	ProducerSeqLast        int64
 	// StatsFailed means some on-disk read failed (pending, retained,
-	// epoch, seq or a persisted total): SetAnalyticsCounters then omits
-	// PendingBytes, RetainedBytes, the *Total counters, ProducerEpoch,
-	// ProducerSeqLast and the pending age (unknown, never placeholders).
+	// epoch, seq, the held intent or a persisted total):
+	// SetAnalyticsCounters then omits PendingBytes, RetainedBytes, the
+	// *Total counters, ProducerEpoch, ProducerSeqLast, Held and the pending
+	// age (unknown, never placeholders).
 	StatsFailed bool
 }
 
@@ -218,8 +223,18 @@ type HealthEvent struct {
 	AnalyticsCorruptIntents *int64 `json:"analytics_corrupt_intents,omitempty"`
 	AnalyticsInvalid        *int64 `json:"analytics_invalid,omitempty"`
 	AnalyticsRetainedBytes  *int64 `json:"analytics_retained_bytes,omitempty"`
-	AnalyticsHubIDMismatch  *int64 `json:"analytics_hub_id_mismatch,omitempty"`
-	AnalyticsPendingBytes   *int64 `json:"analytics_pending_bytes,omitempty"`
+	// Unresolved: appends whose own line could not be synced; the intent
+	// decides later (not known lost). CommitDeferred: durable lines whose
+	// index commit was completed later by recovery (quality). *_total are
+	// persisted across runs. Held (on disk): an unresolved append holds the
+	// outbox, so appends and finalization wait (nothing ships behind it).
+	AnalyticsUnresolved          *int64 `json:"analytics_unresolved,omitempty"`
+	AnalyticsCommitDeferred      *int64 `json:"analytics_commit_deferred,omitempty"`
+	AnalyticsSyncUncertainTotal  *int64 `json:"analytics_sync_uncertain_total,omitempty"`
+	AnalyticsCommitDeferredTotal *int64 `json:"analytics_commit_deferred_total,omitempty"`
+	AnalyticsHeld                *bool  `json:"analytics_held,omitempty"`
+	AnalyticsHubIDMismatch       *int64 `json:"analytics_hub_id_mismatch,omitempty"`
+	AnalyticsPendingBytes        *int64 `json:"analytics_pending_bytes,omitempty"`
 	// AnalyticsOldestPendingFileAgeMs is the age of the oldest pending
 	// outbox FILE's last modification: a lower bound on the oldest pending
 	// event's age. Omitted when nothing is pending.
@@ -230,9 +245,10 @@ type HealthEvent struct {
 	// producers).
 	ProducerEpoch   string `json:"producer_epoch,omitempty"`
 	ProducerSeqLast *int64 `json:"producer_seq_last,omitempty"`
-	// AnalyticsStatsFailed is true when the outbox's pending state could
-	// not be read from disk (analytics_pending_bytes is then not measured,
-	// and a final event is not_drained). Present only with analytics.
+	// AnalyticsStatsFailed is true when any on-disk read of the outbox
+	// failed (pending, retained, epoch, seq, the held intent or a persisted
+	// total): the disk-derived fields are then omitted (unknown) and a final
+	// event is not_drained. Present only with analytics.
 	AnalyticsStatsFailed *bool `json:"analytics_stats_failed,omitempty"`
 
 	MetricPointsAccepted    int64 `json:"metric_points_accepted"`
@@ -260,9 +276,10 @@ type HealthEvent struct {
 
 	HealthSendFailures int64 `json:"health_send_failures"`
 	HealthSuperseded   int64 `json:"health_superseded"`
-	// HealthRejected counts earlier health events of this run that the
-	// destination permanently rejected and that were dropped (each also
-	// counted in health_send_failures).
+	// HealthRejected counts earlier health events of this run that were
+	// dropped because they can never be delivered: permanently rejected by
+	// the destination (also counted in health_send_failures), or failing
+	// contract validation at freeze time (a producer bug).
 	HealthRejected int64 `json:"health_rejected"`
 
 	// LossIndicated is true when any INCLUDED loss counter in this
@@ -310,6 +327,14 @@ func (e *HealthEvent) Validate() error {
 	case HealthTriggerFinal:
 		if e.FinalFlushOutcome != FinalFlushDrained && e.FinalFlushOutcome != FinalFlushNotDrained {
 			errs = append(errs, fmt.Errorf("final_flush_outcome %q is not drained or not_drained", e.FinalFlushOutcome))
+		}
+		if e.FinalFlushOutcome == FinalFlushDrained {
+			stats := e.AnalyticsStatsFailed != nil && *e.AnalyticsStatsFailed
+			pending := e.AnalyticsPendingBytes != nil && *e.AnalyticsPendingBytes > 0
+			residual := e.FinalResidualRecords != nil && *e.FinalResidualRecords > 0
+			if stats || pending || residual || e.QueueRecords > 0 {
+				errs = append(errs, errors.New("final_flush_outcome drained contradicts stats_failed, pending bytes, residual records or queued records"))
+			}
 		}
 		if e.FinalResidualRecords == nil {
 			errs = append(errs, errors.New("trigger final requires final_residual_records"))
@@ -402,16 +427,19 @@ func (e *HealthEvent) Validate() error {
 	if (e.AnalyticsStatsFailed == nil) != (e.AnalyticsAppended == nil) {
 		errs = append(errs, errors.New("analytics_stats_failed is reported with the analytics_* counters"))
 	}
+	if e.AnalyticsRetainedBytes != nil && e.AnalyticsPendingBytes != nil && *e.AnalyticsRetainedBytes < *e.AnalyticsPendingBytes {
+		errs = append(errs, errors.New("analytics_retained_bytes includes the pending bytes and cannot be smaller"))
+	}
 	disk := e.analyticsDiskCounters()
 	if !groupComplete(disk) {
 		errs = append(errs, errors.New("the on-disk analytics fields are reported as a complete group or not at all"))
 	}
-	diskSet := e.AnalyticsPendingBytes != nil || e.ProducerEpoch != ""
+	diskSet := e.AnalyticsPendingBytes != nil || e.ProducerEpoch != "" || e.AnalyticsHeld != nil
 	if e.AnalyticsStatsFailed != nil {
 		if *e.AnalyticsStatsFailed && (diskSet || e.AnalyticsOldestPendingFileAgeMs != nil) {
 			errs = append(errs, errors.New("with analytics_stats_failed the on-disk fields must be omitted (unknown), never placeholders"))
 		}
-		if !*e.AnalyticsStatsFailed && (e.AnalyticsPendingBytes == nil || e.ProducerEpoch == "") {
+		if !*e.AnalyticsStatsFailed && (e.AnalyticsPendingBytes == nil || e.ProducerEpoch == "" || e.AnalyticsHeld == nil) {
 			errs = append(errs, errors.New("measured on-disk fields (pending, retained, totals, producer_epoch, producer_seq_last) are required unless analytics_stats_failed"))
 		}
 	}
@@ -482,6 +510,7 @@ func (e *HealthEvent) analyticsCounters() map[string]*int64 {
 		"analytics_dead_letters":   e.AnalyticsDeadLetters,
 		"analytics_sync_uncertain": e.AnalyticsSyncUncertain, "analytics_corrupt_intents": e.AnalyticsCorruptIntents,
 		"analytics_invalid": e.AnalyticsInvalid, "analytics_retry_backoff_ms": e.AnalyticsRetryBackoffMs,
+		"analytics_unresolved": e.AnalyticsUnresolved, "analytics_commit_deferred": e.AnalyticsCommitDeferred,
 	}
 }
 
@@ -493,7 +522,8 @@ func (e *HealthEvent) analyticsDiskCounters() map[string]*int64 {
 		"analytics_overflow_total": e.AnalyticsOverflowTotal, "analytics_oversize_total": e.AnalyticsOversizeTotal,
 		"analytics_append_failed_total": e.AnalyticsAppendFailedTotal, "analytics_dead_letters_total": e.AnalyticsDeadLettersTotal,
 		"analytics_retained_bytes": e.AnalyticsRetainedBytes, "analytics_pending_bytes": e.AnalyticsPendingBytes,
-		"producer_seq_last": e.ProducerSeqLast,
+		"producer_seq_last":              e.ProducerSeqLast,
+		"analytics_sync_uncertain_total": e.AnalyticsSyncUncertainTotal, "analytics_commit_deferred_total": e.AnalyticsCommitDeferredTotal,
 	}
 }
 
@@ -525,7 +555,7 @@ func (e *HealthEvent) hasAnalyticsCounters() bool {
 			}
 		}
 	}
-	return e.AnalyticsOldestPendingFileAgeMs != nil || e.ProducerEpoch != "" || e.AnalyticsStatsFailed != nil
+	return e.AnalyticsOldestPendingFileAgeMs != nil || e.ProducerEpoch != "" || e.AnalyticsStatsFailed != nil || e.AnalyticsHeld != nil
 }
 
 // groupComplete reports whether a counter group is all set or all unset.
@@ -563,12 +593,14 @@ func (e *HealthEvent) SetAnalyticsCounters(c HealthAnalyticsCounters) {
 	e.AnalyticsConflicts, e.AnalyticsQuarantined, e.AnalyticsDeadLetters = i64(c.Conflicts), i64(c.Quarantined), i64(c.DeadLetters)
 	e.AnalyticsSyncUncertain, e.AnalyticsCorruptIntents = i64(c.SyncUncertain), i64(c.CorruptIntents)
 	e.AnalyticsInvalid, e.AnalyticsRetryBackoffMs = i64(c.Invalid), i64(c.RetryBackoffMs)
+	e.AnalyticsUnresolved, e.AnalyticsCommitDeferred = i64(c.Unresolved), i64(c.CommitDeferred)
 	failed := c.StatsFailed
 	e.AnalyticsStatsFailed = &failed
 	// On-disk values: omitted (unknown) when any read failed.
 	e.AnalyticsOverflowTotal, e.AnalyticsOversizeTotal, e.AnalyticsAppendFailedTotal, e.AnalyticsDeadLettersTotal = nil, nil, nil, nil
 	e.AnalyticsRetainedBytes, e.AnalyticsPendingBytes, e.ProducerSeqLast = nil, nil, nil
 	e.AnalyticsOldestPendingFileAgeMs, e.ProducerEpoch = nil, ""
+	e.AnalyticsSyncUncertainTotal, e.AnalyticsCommitDeferredTotal, e.AnalyticsHeld = nil, nil, nil
 	if failed {
 		return
 	}
@@ -576,6 +608,9 @@ func (e *HealthEvent) SetAnalyticsCounters(c HealthAnalyticsCounters) {
 	e.AnalyticsAppendFailedTotal, e.AnalyticsDeadLettersTotal = i64(c.AppendFailedTotal), i64(c.DeadLettersTotal)
 	e.AnalyticsRetainedBytes, e.AnalyticsPendingBytes = i64(c.RetainedBytes), i64(c.PendingBytes)
 	e.ProducerEpoch, e.ProducerSeqLast = c.ProducerEpoch, i64(c.ProducerSeqLast)
+	e.AnalyticsSyncUncertainTotal, e.AnalyticsCommitDeferredTotal = i64(c.SyncUncertainTotal), i64(c.CommitDeferredTotal)
+	held := c.Held
+	e.AnalyticsHeld = &held
 	if c.OldestPendingFileAgeMs != nil {
 		e.AnalyticsOldestPendingFileAgeMs = i64(*c.OldestPendingFileAgeMs)
 	}

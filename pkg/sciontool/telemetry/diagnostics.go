@@ -159,7 +159,16 @@ func (p *Pipeline) logDeliverySnapshot(force bool) {
 			age = fmt.Sprintf("%d", *counters.OldestPendingFileAgeMs)
 		}
 		counters.OldestPendingFileAgeMs = nil // printed as a value below, not a pointer
-		analytics = fmt.Sprintf("%+v oldest_pending_file_age_ms=%s", counters, age)
+		if counters.StatsFailed {
+			// Disk-derived fields are unknown: never print placeholder zeros.
+			counters.PendingBytes, counters.RetainedBytes, counters.ProducerSeqLast, counters.ProducerEpoch = 0, 0, 0, ""
+			counters.OverflowTotal, counters.OversizeTotal, counters.AppendFailedTotal, counters.DeadLettersTotal = 0, 0, 0, 0
+			counters.SyncUncertainTotal, counters.CommitDeferredTotal, counters.Held = 0, 0, false
+			age = "unknown"
+			analytics = fmt.Sprintf("%+v disk=unknown(stats_failed)", counters)
+		} else {
+			analytics = fmt.Sprintf("%+v oldest_pending_file_age_ms=%s", counters, age)
+		}
 	} else if reason != "" {
 		analytics = "disabled(" + reason + ")"
 	}

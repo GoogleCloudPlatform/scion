@@ -416,12 +416,14 @@ type analyticsHandles struct {
 // value is read exactly once, and failed is set if ANY read failed: then
 // none of these values is a measurement (design 1.3, analytics_stats_failed).
 type outboxDisk struct {
-	epoch                               string
-	seq, overflowTotal, oversizeTotal   int64
-	appendFailedTotal, deadLettersTotal int64
-	pending, retained                   int64
-	oldest                              time.Time
-	failed                              bool
+	epoch                                   string
+	seq, overflowTotal, oversizeTotal       int64
+	appendFailedTotal, deadLettersTotal     int64
+	syncUncertainTotal, commitDeferredTotal int64
+	held                                    bool
+	pending, retained                       int64
+	oldest                                  time.Time
+	failed                                  bool
 }
 
 // readOutboxDisk reads the persisted ledger, totals and pending figures,
@@ -432,7 +434,7 @@ func readOutboxDisk(o *AnalyticsOutbox) outboxDisk {
 		d.failed = true
 		return d
 	}
-	var errs [8]error
+	var errs [11]error
 	d.epoch, errs[0] = o.readTrimmed("epoch")
 	if errs[0] == nil && d.epoch == "" {
 		errs[0] = errors.New("outbox epoch is missing") // created when the outbox opens
@@ -441,13 +443,32 @@ func readOutboxDisk(o *AnalyticsOutbox) outboxDisk {
 	d.overflowTotal, errs[2] = o.readInt("overflow")
 	d.oversizeTotal, errs[3] = o.readInt("oversize")
 	d.deadLettersTotal, errs[4] = o.readInt("dead_letters")
-	if info, err := os.Stat(o.path("append_failed")); err == nil {
-		d.appendFailedTotal = info.Size() // WP2: one byte per failure, lock-free
+	// WP2 lock-free persisted counters: one byte per event.
+	sizeOf := func(name string) (int64, error) {
+		info, err := os.Stat(o.path(name))
+		if err == nil {
+			return info.Size(), nil
+		}
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	d.appendFailedTotal, errs[5] = sizeOf("append_failed")
+	d.syncUncertainTotal, errs[8] = sizeOf("sync_uncertain")
+	d.commitDeferredTotal, errs[9] = sizeOf("commit_deferred")
+	if _, err := os.Stat(o.path("intent")); err == nil {
+		d.held = true
 	} else if !errors.Is(err, os.ErrNotExist) {
-		errs[5] = err
+		errs[10] = err
 	}
 	d.pending, d.oldest, errs[6] = o.pendingBytes()
-	d.retained, errs[7] = o.retainedBytes()
+	// retained = the SAME pending read + dead-lettered and quarantined
+	// files (WP2 retainedBytes' definition; TestRetainedMatchesOutbox pins
+	// that the two agree), so retained >= pending within one row.
+	var extra int64
+	extra, errs[7] = retainedExtraBytes(o.dir)
+	d.retained = d.pending + extra
 	for _, err := range errs {
 		if err != nil {
 			d.failed = true
@@ -458,35 +479,44 @@ func readOutboxDisk(o *AnalyticsOutbox) outboxDisk {
 
 func (h analyticsHandles) counters() telemetrycontract.HealthAnalyticsCounters {
 	outbox := h.native.Outbox()
+	if outbox == nil {
+		// A lazily opened outbox that failed: nothing is measurable.
+		return telemetrycontract.HealthAnalyticsCounters{StatsFailed: true, DroppedNoIdentity: h.native.DroppedNoIdentity(), Invalid: h.native.Invalid()}
+	}
 	s := outbox.Stats() // in-memory counters only; disk values come from readOutboxDisk
 	d := readOutboxDisk(outbox)
 	c := telemetrycontract.HealthAnalyticsCounters{
-		Appended:          s.Appended,
-		CertainDuplicates: s.CertainDuplicates,
-		Overflow:          s.Overflow,
-		OverflowTotal:     d.overflowTotal,
-		AppendFailed:      s.AppendFailed,
-		DroppedNoIdentity: h.native.DroppedNoIdentity(),
-		Finalized:         s.Finalized,
-		Delivered:         s.Delivered,
-		SendFailures:      s.SendFailures,
-		SendRetries:       h.send.Retries(),
-		Torn:              s.Torn,
-		HubIDMismatch:     s.HubIDMismatch,
-		Conflicts:         s.Conflicts,
-		Quarantined:       s.Quarantined,
-		DeadLetters:       s.DeadLetters,
-		OversizeTotal:     d.oversizeTotal,
-		AppendFailedTotal: d.appendFailedTotal,
-		DeadLettersTotal:  d.deadLettersTotal,
-		SyncUncertain:     s.SyncUncertain,
-		CorruptIntents:    s.CorruptIntents,
-		Invalid:           h.native.Invalid(),
-		RetainedBytes:     d.retained,
-		PendingBytes:      d.pending,
-		ProducerEpoch:     d.epoch,
-		ProducerSeqLast:   d.seq,
-		StatsFailed:       d.failed,
+		Appended:            s.Appended,
+		CertainDuplicates:   s.CertainDuplicates,
+		Overflow:            s.Overflow,
+		OverflowTotal:       d.overflowTotal,
+		AppendFailed:        s.AppendFailed,
+		DroppedNoIdentity:   h.native.DroppedNoIdentity(),
+		Finalized:           s.Finalized,
+		Delivered:           s.Delivered,
+		SendFailures:        s.SendFailures,
+		SendRetries:         h.send.Retries(),
+		Torn:                s.Torn,
+		HubIDMismatch:       s.HubIDMismatch,
+		Conflicts:           s.Conflicts,
+		Quarantined:         s.Quarantined,
+		DeadLetters:         s.DeadLetters,
+		OversizeTotal:       d.oversizeTotal,
+		AppendFailedTotal:   d.appendFailedTotal,
+		DeadLettersTotal:    d.deadLettersTotal,
+		SyncUncertain:       s.SyncUncertain,
+		CorruptIntents:      s.CorruptIntents,
+		Invalid:             h.native.Invalid(),
+		RetainedBytes:       d.retained,
+		Unresolved:          s.Unresolved,
+		CommitDeferred:      s.CommitDeferred,
+		SyncUncertainTotal:  d.syncUncertainTotal,
+		CommitDeferredTotal: d.commitDeferredTotal,
+		Held:                d.held,
+		PendingBytes:        d.pending,
+		ProducerEpoch:       d.epoch,
+		ProducerSeqLast:     d.seq,
+		StatsFailed:         d.failed,
 	}
 	if !d.failed && d.pending > 0 && !d.oldest.IsZero() {
 		age := time.Since(d.oldest).Milliseconds()
@@ -746,7 +776,7 @@ func (p *Pipeline) emitHealth(trigger string) {
 
 	ev, err := buildHealthEvent(p.healthSnapshotInputs(trigger))
 	if err != nil {
-		log.Info("Telemetry health not emitted: %v", err)
+		log.Info("Telemetry health event not emitted: SCION_AGENT_ID is unset")
 		return
 	}
 	if body, err := json.Marshal(ev); err == nil {
@@ -806,9 +836,12 @@ func (p *Pipeline) flushHealth(ctx context.Context) {
 			item.ev.HubID = hub
 			line, err := telemetrycontract.Marshal(item.ev)
 			if err != nil {
+				// A producer bug: counted with the rejected events so the
+				// seq gap is explained.
 				h.queue = h.queue[1:]
+				h.rejected++
 				h.mu.Unlock()
-				log.Error("Telemetry health event invalid, dropped: %v", err)
+				log.Error("Telemetry health event %s invalid, dropped: %v", item.ev.EventID, err)
 				continue
 			}
 			item.line = line
@@ -816,7 +849,10 @@ func (p *Pipeline) flushHealth(ctx context.Context) {
 		send := h.send
 		h.mu.Unlock()
 
-		if err := send(ctx, item.line); err != nil {
+		sendCtx, cancelSend := context.WithTimeout(ctx, analyticsSendTimeout)
+		err := send(sendCtx, item.line)
+		cancelSend()
+		if err != nil {
 			h.mu.Lock()
 			h.sendFailures++
 			if IsPermanentSendError(err) {
@@ -944,4 +980,30 @@ func finalHealthBudget(ctx context.Context, now time.Time) time.Duration {
 		budget = healthFinalMinBudget
 	}
 	return budget
+}
+
+// retainedExtraBytes sums the outbox files that count against the cap but
+// are not pending: dead_letter.jsonl and quarantine-* (as in WP2's
+// AnalyticsOutbox.retainedBytes).
+func retainedExtraBytes(dir string) (int64, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0, err
+	}
+	var total int64
+	for _, e := range entries {
+		name := e.Name()
+		if name != "dead_letter.jsonl" && !strings.HasPrefix(name, "quarantine-") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue // removed meanwhile
+			}
+			return 0, err
+		}
+		total += info.Size()
+	}
+	return total, nil
 }

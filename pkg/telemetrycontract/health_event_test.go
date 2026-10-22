@@ -183,6 +183,8 @@ func clearAnalytics(e *HealthEvent) {
 	e.AnalyticsConflicts, e.AnalyticsQuarantined, e.AnalyticsDeadLetters = nil, nil, nil
 	e.AnalyticsOversizeTotal, e.AnalyticsAppendFailedTotal, e.AnalyticsDeadLettersTotal = nil, nil, nil
 	e.AnalyticsSyncUncertain, e.AnalyticsCorruptIntents, e.AnalyticsInvalid, e.AnalyticsRetainedBytes = nil, nil, nil, nil
+	e.AnalyticsUnresolved, e.AnalyticsCommitDeferred, e.AnalyticsSyncUncertainTotal, e.AnalyticsCommitDeferredTotal = nil, nil, nil, nil
+	e.AnalyticsHeld = nil
 	e.AnalyticsPendingBytes, e.AnalyticsRetryBackoffMs, e.ProducerSeqLast = nil, nil, nil
 	e.AnalyticsStatsFailed, e.ProducerEpoch, e.AnalyticsOldestPendingFileAgeMs = nil, "", nil
 	if e.hasAnalyticsCounters() {
@@ -203,7 +205,7 @@ func TestHealthStatsFailedOmitsDiskFields(t *testing.T) {
 	_ = json.Unmarshal(line, &raw)
 	for _, k := range []string{"producer_epoch", "producer_seq_last", "analytics_pending_bytes", "analytics_retained_bytes",
 		"analytics_overflow_total", "analytics_oversize_total", "analytics_append_failed_total", "analytics_dead_letters_total",
-		"analytics_oldest_pending_file_age_ms"} {
+		"analytics_oldest_pending_file_age_ms", "analytics_held", "analytics_sync_uncertain_total", "analytics_commit_deferred_total"} {
 		if _, ok := raw[k]; ok {
 			t.Errorf("%s must be omitted when stats failed", k)
 		}

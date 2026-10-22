@@ -397,6 +397,7 @@ func TestHealthEventGolden(t *testing.T) {
 	final := fixedHealthInputs(telemetrycontract.HealthTriggerFinal)
 	final.Seq = 7
 	final.Analytics.PendingBytes, final.Analytics.OldestPendingFileAgeMs = 512, i64(61_000)
+	final.Analytics.RetainedBytes = 512 + 100 // retained includes pending (+ a dead-lettered line)
 	final.Analytics.Overflow, final.Analytics.OverflowTotal = 1, 1
 	final.FinalResidualRecords = 2
 	goldenHealth(t, "final-not-drained", final)
@@ -1116,5 +1117,114 @@ func TestHealthStatsFailureNoFalseEpochOrSeq(t *testing.T) {
 	}
 	if rows[3] != valid || rows[0] != valid {
 		t.Fatalf("rows around the failure disagree: %+v / %+v / %+v", rows[0], valid, rows[3])
+	}
+}
+
+// A persisted append intent on disk is reported as analytics_held (WP2
+// b987f78+: appends and finalize are held behind it), and a healthy outbox
+// reports held=false, not omitted.
+func TestAnalyticsHeldReported(t *testing.T) {
+	setAnalyticsEnv(t, "claude")
+	setTestVersion(t)
+	dir := filepath.Join(t.TempDir(), "ob")
+	o, err := OpenAnalyticsOutbox(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := analyticsHandles{native: NewUsageAnalytics(o, telemetrycontract.UsageSourceNative)}
+	if c := h.counters(); c.Held || c.StatsFailed {
+		t.Fatalf("healthy outbox: held %v stats_failed %v", c.Held, c.StatsFailed)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "intent"), []byte(`{"event_id":"u1-x"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := h.counters()
+	if !c.Held {
+		t.Fatal("intent on disk must report held")
+	}
+	in := fixedHealthInputs(telemetrycontract.HealthTriggerPeriodic)
+	in.Analytics = c
+	ev, err := buildHealthEvent(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev.HubID = "hub-1"
+	if _, err := telemetrycontract.Marshal(ev); err != nil || ev.AnalyticsHeld == nil || !*ev.AnalyticsHeld {
+		t.Fatalf("held event: err %v held %v", err, ev.AnalyticsHeld)
+	}
+}
+
+// R3-1: retained is derived from the snapshot's single pending read plus the
+// dead-letter and quarantine files, and agrees with WP2's own retainedBytes
+// on a quiescent outbox (drift guard for the shared definition).
+func TestRetainedMatchesOutbox(t *testing.T) {
+	setAnalyticsEnv(t, "claude")
+	dir := filepath.Join(t.TempDir(), "ob")
+	o, err := OpenAnalyticsOutbox(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	native := NewUsageAnalytics(o, telemetrycontract.UsageSourceNative)
+	obs := claudeObservation("api_request", claudeRecord("req_011CUabcdefghijklmnopq", "1", 5, fullClaudeTokens).Attributes)
+	obs.Identity, obs.SourceEventID, obs.SourceKind, obs.Status, obs.Calls = telemetrycontract.SourceIdentityComposite, "cmp1:cc", "claude.api_request", "success", 1
+	if _, err := native.Record(obs); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{"dead_letter.jsonl": "{\"x\":1}\n", "quarantine-1.jsonl": "{\"y\":2}\n", "unrelated.txt": "zzz"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := analyticsHandles{native: native}.counters()
+	want, err := o.retainedBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.StatsFailed || c.RetainedBytes != want || c.RetainedBytes < c.PendingBytes || c.PendingBytes == 0 {
+		t.Fatalf("retained %d (outbox %d) pending %d failed %v", c.RetainedBytes, want, c.PendingBytes, c.StatsFailed)
+	}
+	if extra := c.RetainedBytes - c.PendingBytes; extra != int64(len("{\"x\":1}\n")+len("{\"y\":2}\n")) {
+		t.Fatalf("extra retained bytes %d", extra)
+	}
+}
+
+// O-3: a lazily opened outbox that failed yields stats_failed, not a panic.
+func TestAnalyticsCountersNilOutbox(t *testing.T) {
+	setAnalyticsEnv(t, "claude")
+	lazy := NewLazyUsageAnalytics(func() (*AnalyticsOutbox, error) { return nil, errors.New("no home") }, telemetrycontract.UsageSourceHooks)
+	c := analyticsHandles{native: lazy}.counters()
+	if !c.StatsFailed {
+		t.Fatal("unavailable outbox must report stats_failed")
+	}
+	in := fixedHealthInputs(telemetrycontract.HealthTriggerFinal)
+	in.Analytics = c
+	ev, err := buildHealthEvent(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev.HubID = "hub-1"
+	if _, err := telemetrycontract.Marshal(ev); err != nil || ev.FinalFlushOutcome != "not_drained" {
+		t.Fatalf("err %v outcome %q", err, ev.FinalFlushOutcome)
+	}
+}
+
+// O-4: an event that fails contract validation at freeze time is dropped
+// and counted in health_rejected, so its seq gap is explained.
+func TestHealthInvalidEventCounted(t *testing.T) {
+	h := newHealthHarness(t)
+	h.p.SettleUsageSource(nil, "")
+	h.p.health.mu.Lock()
+	h.p.health.queue[0].ev.Trigger = "bogus" // make it fail Validate
+	h.p.health.mu.Unlock()
+	h.p.emitHealth(telemetrycontract.HealthTriggerPeriodic)
+	h.p.flushHealth(context.Background())
+	evs := h.sentEvents(t)
+	if len(evs) != 1 || evs[0].Trigger != "periodic" || evs[0].HealthRejected != 0 {
+		t.Fatalf("sent %d", len(evs))
+	}
+	h.p.emitHealth(telemetrycontract.HealthTriggerPeriodic)
+	h.p.flushHealth(context.Background())
+	if last := h.sentEvents(t)[1]; last.HealthRejected != 1 {
+		t.Fatalf("health_rejected = %d, want 1", last.HealthRejected)
 	}
 }
