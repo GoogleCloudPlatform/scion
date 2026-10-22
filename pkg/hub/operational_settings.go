@@ -219,6 +219,17 @@ type Layer1Snapshot struct {
 	// EnvOverrides lists Layer-1 koanf keys that are overridden by env vars
 	// on this node — used for drift warnings.
 	EnvOverrides []string
+
+	// Revision is the operational-settings revision the snapshot's values
+	// come from (store.HubSettingsRevisionSection): a counter the store
+	// bumps in the same transaction as every operational-settings write.
+	// OperationalSettings.Snapshot sets it together with the values, under
+	// one lock. ApplySnapshot skips a DB-backed snapshot whose Revision is
+	// older than the last one applied, so a snapshot built before a newer
+	// one never overwrites it (ptone/scion#4457). 0 means no revision: a
+	// file snapshot, a store that keeps none, or a database with no
+	// operational write yet.
+	Revision int64
 }
 
 // settingsUpdatedSubject is the LISTEN/NOTIFY subject used to propagate
@@ -281,6 +292,12 @@ type OperationalSettings struct {
 	// stopPropagation cancels the propagation goroutines (subscriber + poll ticker).
 	stopPropagation context.CancelFunc
 	propagationWg   sync.WaitGroup
+
+	// revision is the operational-settings revision the cache holds
+	// (store.HubSettingsRevisionSection); 0 until the store reports one.
+	// It only grows: Refresh, Update and DeleteSection change the cache
+	// only with a revision at least this one. Guarded by mu.
+	revision int64
 
 	// writeGuard, when set, is asked before every section write or delete
 	// (Update, DeleteSection); a non-nil error refuses the write. The
@@ -369,22 +386,54 @@ func (o *OperationalSettings) SetAboveSeedBootstrap(k *koanf.Koanf) {
 	o.aboveSeedKoanf = k
 }
 
+// SettingsRevision returns the operational-settings revision of the cached
+// values, the value Snapshot carries in Layer1Snapshot.Revision (0 when
+// the store reports none). It is the shared revision mechanism: settings
+// applies are ordered by it (ApplySnapshot), and a revision-checked save
+// precondition is to compare against it as well.
+func (o *OperationalSettings) SettingsRevision() int64 {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	return o.revision
+}
+
 // Refresh re-reads all hub_settings rows from the store, diffs revisions
 // against the cache, and returns the names of sections that changed.
+//
+// The rows and the operational-settings revision come from one read
+// (ListHubSettings returns the store.HubSettingsRevisionSection row with
+// the sections). A read whose revision is older than the cached one is
+// stale: an Update or a later Refresh on this replica has already cached
+// newer values, so the read is discarded and nothing is reported changed
+// (ptone/scion#4457).
 func (o *OperationalSettings) Refresh(ctx context.Context) ([]string, error) {
 	rows, err := o.store.ListHubSettings(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("operational settings refresh: %w", err)
 	}
 
+	var readRevision int64
+	for _, row := range rows {
+		if row.Section == store.HubSettingsRevisionSection {
+			readRevision = row.Revision
+		}
+	}
+
 	o.mu.Lock()
 	defer o.mu.Unlock()
+
+	if readRevision < o.revision {
+		slog.Debug("operational settings refresh: discarding a read older than the cached values",
+			"read_revision", readRevision, "cached_revision", o.revision)
+		return nil, nil
+	}
+	o.revision = readRevision
 
 	var changed []string
 	seen := make(map[string]bool, len(rows))
 
 	for _, row := range rows {
-		if row.Section == "_meta" {
+		if row.Section == "_meta" || row.Section == store.HubSettingsRevisionSection {
 			continue
 		}
 		seen[row.Section] = true
@@ -475,6 +524,7 @@ func experimentsOverridesFor(section string, raw json.RawMessage, malformed bool
 // are honored as seed input during the deprecation window.
 func (o *OperationalSettings) Snapshot() Layer1Snapshot {
 	o.mu.RLock()
+	revision := o.revision
 	dbSections := make(map[string]json.RawMessage, len(o.cache))
 	for name, ss := range o.cache {
 		dbSections[name] = ss.Value
@@ -527,6 +577,7 @@ func (o *OperationalSettings) Snapshot() Layer1Snapshot {
 
 	snap := buildSnapshotFromKoanf(merged)
 	snap.FromOperationalSettings = true
+	snap.Revision = revision
 
 	// hub_name is the one endpoints key that keeps its bootstrap value when
 	// a DB row omits it: a managed endpoints row carries hub_name only after
@@ -660,14 +711,25 @@ func (o *OperationalSettings) Update(
 	}
 	experimentsOverrides, malformed := experimentsOverridesFor(section, result.Value, malformed)
 	o.mu.Lock()
-	o.cache[section] = sectionState{
-		Value:                result.Value,
-		Revision:             result.Revision,
-		UpdatedAt:            result.UpdatedAt,
-		UpdatedBy:            result.UpdatedBy,
-		Origin:               result.Origin,
-		Malformed:            malformed,
-		ExperimentsOverrides: experimentsOverrides,
+	// A cached revision newer than this write's means a Refresh read the
+	// store after this write committed: the cache already holds this write
+	// and possibly newer ones, so it is not overwritten (ptone/scion#4457).
+	if result.SettingsRevision > 0 && result.SettingsRevision < o.revision {
+		slog.Debug("operational settings: cache already newer than this write",
+			"section", section, "write_revision", result.SettingsRevision, "cached_revision", o.revision)
+	} else {
+		o.cache[section] = sectionState{
+			Value:                result.Value,
+			Revision:             result.Revision,
+			UpdatedAt:            result.UpdatedAt,
+			UpdatedBy:            result.UpdatedBy,
+			Origin:               result.Origin,
+			Malformed:            malformed,
+			ExperimentsOverrides: experimentsOverrides,
+		}
+		if result.SettingsRevision > o.revision {
+			o.revision = result.SettingsRevision
+		}
 	}
 	o.mu.Unlock()
 
@@ -705,9 +767,24 @@ func (o *OperationalSettings) DeleteSection(ctx context.Context, section string)
 	if err := o.store.DeleteHubSetting(ctx, section); err != nil {
 		return err
 	}
+	// The delete bumped the operational-settings revision; read it back.
+	// Concurrent writes can make this read higher than the delete's own
+	// revision. That only delays an older snapshot until the next Refresh,
+	// which reads at least this revision. On a read error (or a store
+	// without the revision) the cached revision is kept.
+	deleteRevision := o.storedSettingsRevision(ctx)
 
 	o.mu.Lock()
-	delete(o.cache, section)
+	// As in Update: a newer cached revision already reflects the delete.
+	if deleteRevision > 0 && deleteRevision < o.revision {
+		slog.Debug("operational settings: cache already newer than this delete",
+			"section", section, "delete_revision", deleteRevision, "cached_revision", o.revision)
+	} else {
+		delete(o.cache, section)
+		if deleteRevision > o.revision {
+			o.revision = deleteRevision
+		}
+	}
 	o.mu.Unlock()
 
 	if o.events != nil {
@@ -724,6 +801,20 @@ func (o *OperationalSettings) DeleteSection(ctx context.Context, section string)
 	}
 
 	return nil
+}
+
+// storedSettingsRevision reads the operational-settings revision from the
+// store.HubSettingsRevisionSection row: 0 when the row does not exist or
+// cannot be read.
+func (o *OperationalSettings) storedSettingsRevision(ctx context.Context) int64 {
+	row, err := o.store.GetHubSetting(ctx, store.HubSettingsRevisionSection)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			slog.Warn("operational settings: cannot read the settings revision", "error", err)
+		}
+		return 0
+	}
+	return row.Revision
 }
 
 // EnvOverriddenKeys returns the list of Layer-1 koanf keys that are overridden
@@ -1193,14 +1284,67 @@ func (s *Server) startupHubNameOrDefault() string {
 	return config.ResolveHubNameOrDefault(s.startupHubName)
 }
 
+// settingsApplyState is the apply lock and the operational-settings
+// revision last applied (Server.settingsApply).
+//
+// Lock order: settings-file lock (a workstation save applies while holding
+// it), then mu, then s.mu and the other locks ApplySnapshot takes inside
+// (the notification registry, OperationalSettings.mu). mu is never taken
+// while holding s.mu, OperationalSettings.mu or a DB transaction: callers
+// build the snapshot first, then apply. Nothing under mu takes the
+// settings-file lock.
+type settingsApplyState struct {
+	mu sync.Mutex
+	// lastRevision is the highest Layer1Snapshot.Revision applied.
+	// Guarded by mu.
+	lastRevision int64
+}
+
+// staleLocked reports whether snap is older than the last snapshot
+// applied and must be skipped. Only DB-backed snapshots are ordered. A
+// DB-backed snapshot with Revision 0 was built before the store had a
+// revision (startup before the first operational write, or a read that
+// predates it); once a revision has been applied it is older, so it is
+// skipped as well. A file snapshot (FromOperationalSettings false) has no
+// revision and is always applied: it occurs only on a hub without
+// OperationalSettings, where no DB-backed snapshot is ever applied and
+// lastRevision stays 0. An equal revision is applied again, so the
+// double apply of a write (self-apply and the propagation event) stays
+// harmless. Caller holds mu.
+func (a *settingsApplyState) staleLocked(snap Layer1Snapshot) bool {
+	return snap.FromOperationalSettings && snap.Revision < a.lastRevision
+}
+
 // ApplySnapshot writes the Layer1Snapshot values into the Server's config
 // and MaintenanceState. This is the refactored body of the old reloadSettings()
 // logic — no consumer sites change; request-path code keeps reading s.config.*
 // under s.mu exactly as today.
 //
+// Applies are ordered by the snapshot revision (ptone/scion#4457): the
+// whole apply runs under the apply lock (Server.settingsApply), and a
+// DB-backed snapshot older than the last one applied is skipped, with
+// nothing applied. Callers that build a snapshot before any lock (the
+// self-apply after a save, the propagation event, the poll) are covered:
+// whichever of two concurrent applies runs second, the newer values stay.
+//
 // It returns the list of applied field names and the list of fields that
 // require a restart (for parity with the old reloadSettings return value).
 func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
+	s.settingsApply.mu.Lock()
+	defer s.settingsApply.mu.Unlock()
+	if s.settingsApply.staleLocked(snap) {
+		slog.Info("Settings apply skipped: snapshot older than the last applied",
+			"revision", snap.Revision, "last_applied_revision", s.settingsApply.lastRevision)
+		return map[string]interface{}{
+			"applied":          []string{},
+			"requires_restart": []string{},
+			"skipped_stale":    true,
+		}
+	}
+	if snap.FromOperationalSettings && snap.Revision > s.settingsApply.lastRevision {
+		s.settingsApply.lastRevision = snap.Revision
+	}
+
 	applied := []string{}
 
 	// GCP service-account permission check: decided before s.mu is taken
@@ -1667,6 +1811,17 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 func ApplyMaintenanceFromSnapshot(s *Server, snap Layer1Snapshot) {
 	if !snap.HasMaintenanceRow {
 		return
+	}
+	// Ordered like ApplySnapshot, under the same apply lock: a snapshot
+	// older than the last one applied leaves the maintenance state alone
+	// (ptone/scion#4457).
+	s.settingsApply.mu.Lock()
+	defer s.settingsApply.mu.Unlock()
+	if s.settingsApply.staleLocked(snap) {
+		return
+	}
+	if snap.FromOperationalSettings && snap.Revision > s.settingsApply.lastRevision {
+		s.settingsApply.lastRevision = snap.Revision
 	}
 
 	if s.maintenanceBreakGlass() {

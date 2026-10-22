@@ -3781,6 +3781,12 @@ type HubSetting struct {
 	Origin    string          `json:"origin,omitempty"`
 	CreatedAt time.Time       `json:"createdAt"`
 	UpdatedAt time.Time       `json:"updatedAt"`
+
+	// SettingsRevision is the operational-settings revision (see
+	// HubSettingsRevisionSection) after the write that returned this row:
+	// set by UpsertHubSetting for an operational section on a store that
+	// keeps the revision, 0 otherwise.
+	SettingsRevision int64 `json:"-"`
 }
 
 // =============================================================================

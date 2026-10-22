@@ -3398,6 +3398,21 @@ type SkillInjectionStore interface {
 	ListProgenySkillInjections(ctx context.Context, ancestorIDs []string) ([]SkillInjection, error)
 }
 
+// HubSettingsRevisionSection is the reserved hub_settings row that holds
+// the operational-settings revision: a counter in its revision column,
+// with the value {}. Every write (upsert or delete) of an operational
+// section (a section registered in opsettings) bumps it in the same
+// transaction, so it only grows, and ListHubSettings returns it with the
+// section rows in one read: a reader gets values and the revision that
+// matches them. Rows of other sections (migration markers, caches) do not
+// bump it. The row is created by the first bump; without it the revision
+// is 0. Callers cannot write or delete it.
+//
+// The hub uses the revision to order settings applies (a snapshot older
+// than the last one applied is skipped). It is the shared mechanism for a
+// revision-checked save precondition as well.
+const HubSettingsRevisionSection = "_settings_revision"
+
 // HubSettingStore defines persistence operations for operational hub settings.
 // Each setting is a section (e.g. "access", "telemetry") with a JSON value.
 type HubSettingStore interface {
@@ -3405,7 +3420,8 @@ type HubSettingStore interface {
 	// Returns ErrNotFound if the section doesn't exist.
 	GetHubSetting(ctx context.Context, section string) (*HubSetting, error)
 
-	// ListHubSettings returns all hub settings.
+	// ListHubSettings returns all hub settings, the
+	// HubSettingsRevisionSection row included when it exists, in one read.
 	ListHubSettings(ctx context.Context) ([]HubSetting, error)
 
 	// UpsertHubSetting creates or updates a hub setting with CAS semantics.
@@ -3413,11 +3429,16 @@ type HubSettingStore interface {
 	//   expectedRevision == -1: unconditional upsert (used for seeding); always succeeds.
 	//   expectedRevision > 0:   CAS update; returns ErrRevisionConflict if current revision != expectedRevision.
 	// origin must be "seeded" or "managed" — seed-writes pass "seeded", admin-PUT writes pass "managed".
+	// A write of an operational section bumps the HubSettingsRevisionSection
+	// revision in the same transaction and returns it in SettingsRevision.
+	// Writing HubSettingsRevisionSection itself is refused.
 	UpsertHubSetting(ctx context.Context, section string, value json.RawMessage,
 		updatedBy string, expectedRevision int64, origin string) (*HubSetting, error)
 
 	// DeleteHubSetting removes a hub setting by section name.
-	// Returns ErrNotFound if the section doesn't exist.
+	// Returns ErrNotFound if the section doesn't exist. Deleting an
+	// operational section bumps the HubSettingsRevisionSection revision in
+	// the same transaction; deleting HubSettingsRevisionSection is refused.
 	DeleteHubSetting(ctx context.Context, section string) error
 
 	// BackfillOrigin sets the origin column for existing rows that predate

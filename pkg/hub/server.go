@@ -1691,6 +1691,10 @@ type Server struct {
 	// federationApply records why the last ApplySnapshot did not install
 	// the federation configuration, for the save report.
 	federationApply federationApplyState
+	// settingsApply is the apply lock: it serializes ApplySnapshot and
+	// ApplyMaintenanceFromSnapshot and holds the revision last applied, so
+	// an older snapshot never overwrites a newer one (ptone/scion#4457).
+	settingsApply settingsApplyState
 
 	config ServerConfig
 	// startupHubName is the name resolved at startup (ServerConfig.HubName,
