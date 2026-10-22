@@ -89,8 +89,13 @@ var textFullURLRe = regexp.MustCompile(textURLRe.String() + "(?:[/?#](?:[^\\s\"<
 // given without a password, which may itself be a token; in its query and
 // fragment, the value of every parameter with a credential-like name (see
 // isURLCredentialParam). A URL that does not parse has its whole user info
-// replaced. A URL with nothing to mask is returned as given.
+// replaced. A URL whose user info cannot be delimited (see
+// undelimitedUserInfo) shows only its scheme and a mask. A URL with
+// nothing to mask is returned as given.
 func RedactURL(raw string) string {
+	if undelimitedUserInfo(raw, userInfoRe) {
+		return maskWholeURL(raw)
+	}
 	s := raw
 	if u, err := url.Parse(raw); err == nil {
 		if u.User != nil {

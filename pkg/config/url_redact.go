@@ -219,3 +219,102 @@ func redactParam(pair string, depth int) string {
 	}
 	return pair
 }
+
+// undelimitedUserInfo reports whether raw may carry user info that the
+// rules above cannot tell apart from its host and path, so that only its
+// scheme can be shown (see maskWholeURL). A '/', '?' or '#' in the user
+// info moves where the authority seems to end, and url.Parse and the user
+// info rule then both see another URL. That is the case when raw holds an
+// '@' and either raw does not parse and userInfo (the user info rule for
+// URLs url.Parse rejects) does not match it, or raw parses but its
+// authority, cut from raw itself, does not end in a host (see
+// rawAuthorityIsHost). The '@' is looked for in raw, never in a part of
+// it; without one there is no user info, and an '@' in the path of a URL
+// whose authority is a host (an e-mail address, "/@name") is not masked.
+func undelimitedUserInfo(raw string, userInfo *regexp.Regexp) bool {
+	if !strings.Contains(raw, "@") {
+		return false
+	}
+	if _, err := url.Parse(raw); err != nil {
+		return !userInfo.MatchString(raw)
+	}
+	return !rawAuthorityIsHost(raw)
+}
+
+// maskWholeURL returns the scheme of raw and "://" followed by a fixed
+// mask, or the mask alone when raw has no scheme. Nothing else of raw is
+// kept.
+func maskWholeURL(raw string) string {
+	return urlSchemePrefixRe.FindString(raw) + "xxxxx"
+}
+
+// rawAuthorityIsHost reports whether the authority of raw, from after its
+// scheme and "://" (or a leading "//") to its first '/', '?' or '#', ends
+// in a host: after its last '@', if any, a name of ASCII letters, digits,
+// '-' and '.' (non-ASCII letters allowed) or a bracketed IP literal, then
+// an optional ':' and digits. A raw with no authority, or an empty one,
+// passes.
+func rawAuthorityIsHost(raw string) bool {
+	var rest string
+	var ok bool
+	if scheme := urlSchemePrefixRe.FindString(raw); scheme != "" {
+		rest, ok = raw[len(scheme):], true
+	} else {
+		rest, ok = strings.CutPrefix(raw, "//")
+	}
+	if !ok {
+		return true
+	}
+	if i := strings.IndexAny(rest, "/?#"); i >= 0 {
+		rest = rest[:i]
+	}
+	if rest == "" {
+		return true
+	}
+	if i := strings.LastIndex(rest, "@"); i >= 0 {
+		rest = rest[i+1:]
+	}
+	host, port := rest, ""
+	if strings.HasPrefix(host, "[") {
+		end := strings.IndexByte(host, ']')
+		if end < 2 {
+			return false
+		}
+		for _, r := range host[1:end] {
+			if !isASCIIAlnum(r) && !strings.ContainsRune(":.%-", r) {
+				return false
+			}
+		}
+		if after := host[end+1:]; after != "" {
+			p, hasPort := strings.CutPrefix(after, ":")
+			if !hasPort {
+				return false
+			}
+			port = p
+		}
+		host = ""
+	} else {
+		if i := strings.LastIndexByte(host, ':'); i >= 0 {
+			host, port = host[:i], host[i+1:]
+		}
+		if host == "" {
+			return false
+		}
+	}
+	for _, r := range port {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	for _, r := range host {
+		if !isASCIIAlnum(r) && r != '-' && r != '.' && (r < 0x80 || r == '\uFFFD') {
+			return false
+		}
+	}
+	return true
+}
+
+// isASCIIAlnum reports whether r is an ASCII letter or digit.
+func isASCIIAlnum(r rune) bool {
+	return r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z'
+}
