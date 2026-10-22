@@ -174,6 +174,9 @@ var koanfPathToJSONField = map[string]map[string]string{
 		"server.federation.refresh_interval":  "refresh_interval",
 		"server.federation.debounce_interval": "debounce_interval",
 	},
+	"notifications": {
+		"server.notification_channels": "notification_channels",
+	},
 }
 
 // jsonFieldToKoanfPaths maps section name → json field → koanf path for the
@@ -235,6 +238,9 @@ var jsonFieldToKoanfPaths = map[string]map[string]string{
 		"refresh_interval":  "server.federation.refresh_interval",
 		"debounce_interval": "server.federation.debounce_interval",
 	},
+	"notifications": {
+		"notification_channels": "server.notification_channels",
+	},
 }
 
 // ExtractSectionFromKoanf extracts a section's JSON document from a koanf
@@ -263,8 +269,6 @@ func ExtractSectionFromKoanf(k *koanf.Koanf, sectionName string) (json.RawMessag
 		return extractAgentDefaults(k)
 	case "github_app":
 		return extractGitHubApp(k)
-	case "notifications":
-		return extractNotifications(k)
 	default:
 		return extractMappedSection(k, sectionName)
 	}
@@ -300,14 +304,6 @@ func extractAgentDefaults(k *koanf.Koanf) (json.RawMessage, error) {
 
 func extractGitHubApp(k *koanf.Koanf) (json.RawMessage, error) {
 	return extractMappedSection(k, "github_app")
-}
-
-func extractNotifications(k *koanf.Koanf) (json.RawMessage, error) {
-	doc := make(map[string]interface{})
-	if k.Exists("server.notification_channels") {
-		doc["notification_channels"] = k.Get("server.notification_channels")
-	}
-	return json.Marshal(doc)
 }
 
 func extractMappedSection(k *koanf.Koanf, sectionName string) (json.RawMessage, error) {
@@ -364,12 +360,6 @@ func loadSectionIntoKoanf(k *koanf.Koanf, sectionName string, doc json.RawMessag
 		return k.Load(confmap.Provider(raw, "."), nil)
 	case "github_app":
 		return loadMappedSection(k, "github_app", raw)
-	case "notifications":
-		flat := make(map[string]interface{})
-		for key, val := range raw {
-			flat["server."+key] = val
-		}
-		return k.Load(confmap.Provider(flat, "."), nil)
 	default:
 		return loadMappedSection(k, sectionName, raw)
 	}

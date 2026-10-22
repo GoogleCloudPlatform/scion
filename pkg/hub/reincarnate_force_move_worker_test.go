@@ -150,6 +150,11 @@ func TestReincarnateForceMove_TargetHasFilesRefused(t *testing.T) {
 
 	r, a := startForceMove(t, f)
 	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+	// reconcileFailedMove releases and re-asserts the source reservation
+	// after the agent row already reads failed, and records the source
+	// cleanup outcome last: wait for it before counting reservations.
+	r = waitForMoveSourceCleanup(t, f.s, r.ID)
+	assert.Equal(t, sourceCleanupSkippedInterrupted, r.SourceCleanup)
 	assert.Contains(t, r.Error, "the agent already has files on this broker; refusing to recreate over them")
 	for _, leak := range []string{"/srv", "/export", "agents/"} {
 		assert.NotContains(t, r.Error, leak, "the record's error must not name a broker path")
