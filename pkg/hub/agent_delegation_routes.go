@@ -176,17 +176,11 @@ func contextWithDelegatedTarget(ctx context.Context, target delegatedRouteTarget
 	return context.WithValue(ctx, delegatedRouteTargetKey{}, target)
 }
 
-// delegatedTargetFromContext returns the route target of an admitted
-// delegated request. A context with an agent sub-route and no explicit
-// target uses the sub-route's agent.
+// delegatedTargetFromContext returns the route target routeGuard stored for
+// an admitted delegated request.
 func delegatedTargetFromContext(ctx context.Context) (delegatedRouteTarget, bool) {
-	if target, ok := ctx.Value(delegatedRouteTargetKey{}).(delegatedRouteTarget); ok && target.ID != "" {
-		return target, true
-	}
-	if route, ok := agentSubRouteFromContext(ctx); ok && route.AgentID != "" {
-		return delegatedRouteTarget{Type: "agent", ID: route.AgentID}, true
-	}
-	return delegatedRouteTarget{}, false
+	target, ok := ctx.Value(delegatedRouteTargetKey{}).(delegatedRouteTarget)
+	return target, ok && target.ID != "" && target.Type != ""
 }
 
 // admitDelegatedHandler is the explicit delegated branch of every handler

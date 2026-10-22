@@ -626,13 +626,14 @@ the old agent credential valid until their own expiry (at most 60 minutes) and n
     `/api/v1/projects/{id}` (one segment, no sub-path, no trailing slash), with an operation only
     for `GET` (`project.read`). It is resolved only on the `projects.byId` mux route.
   - On a match, `routeGuard` puts the table's operation and the route's target (the agent or project
-    in the path) in the request context. The middleware never sets them.
+    in the path) in the request context. The middleware never sets them. `decideAgentDelegation`
+    denies when the operation is missing or unknown, including on internal service paths that reach
+    `Decide` outside an HTTP route.
   - **Handler branch.** Every handler that serves an admitted operation calls
     `admitDelegatedHandler(w, r, <operation>, <resource>)` after it loads the target and before it
     authorizes. For a delegated caller it answers 403 `credential_not_admitted` unless `routeGuard`
     admitted exactly that operation for that target. A drift test requires the operations named in
-    these calls to equal the catalog operations that admit the delegated pair. `decideAgentDelegation` denies when the operation is missing or unknown,
-    including on internal service paths that reach `Decide` outside an HTTP route.
+    these calls to equal the catalog operations that admit the delegated pair.
 - **Secondary checks.** A handler may call `Decide` again for another permission. For a delegated
   credential, that call is **evaluated** only if `(operation, permission)` is on the route's
   `Secondary` list, and the check still needs its own exact permission, ceiling and live issuer

@@ -15,10 +15,13 @@
 package hub
 
 import (
+	"context"
+	"encoding/json"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"sort"
 	"strconv"
@@ -198,5 +201,71 @@ func TestBearerStageAgentDelegationCode_MapsEveryStage(t *testing.T) {
 		"no_such_stage":                agentDelegationCodeEvaluationError,
 	} {
 		assert.Equal(t, code, bearerStageAgentDelegationCode(stage), "stage %q", stage)
+	}
+}
+
+// TestAdmitDelegatedHandler_DeniesUnlessAdmittedForThisOperationAndTarget:
+// the explicit handler branch lets a delegated caller through only when
+// routeGuard admitted exactly the handler's operation for exactly the
+// handler's resource; every other shape answers 403
+// credential_not_admitted. A non-delegated caller is never affected.
+func TestAdmitDelegatedHandler_DeniesUnlessAdmittedForThisOperationAndTarget(t *testing.T) {
+	agentEntry, ok := agentDelegationAdmissionFor(http.MethodGet, delegatedRouteID(AgentRouteRoot))
+	require.True(t, ok)
+	projectEntry, ok := agentDelegationAdmissionFor(http.MethodGet, projectResourceRouteID)
+	require.True(t, ok)
+	agentRes := Resource{Type: "agent", ID: "a-1"}
+	delegated := adtTestIdentity("agent-x", "project-x")
+
+	type ctxFn func(context.Context) context.Context
+	withEntry := func(e agentDelegationAdmission) ctxFn {
+		return func(ctx context.Context) context.Context { return contextWithDelegatedAdmission(ctx, e) }
+	}
+	withTarget := func(typ, id string) ctxFn {
+		return func(ctx context.Context) context.Context {
+			return contextWithDelegatedTarget(ctx, delegatedRouteTarget{Type: typ, ID: id})
+		}
+	}
+	cases := []struct {
+		name     string
+		identity Identity
+		setup    []ctxFn
+		op       authzop.OperationID
+		resource Resource
+		allowed  bool
+	}{
+		{"admitted for this operation and target", delegated, []ctxFn{withEntry(agentEntry), withTarget("agent", "a-1")}, opAgentRead, agentRes, true},
+		{"no admission entry", delegated, []ctxFn{withTarget("agent", "a-1")}, opAgentRead, agentRes, false},
+		{"admitted for another operation", delegated, []ctxFn{withEntry(projectEntry), withTarget("agent", "a-1")}, opAgentRead, agentRes, false},
+		{"no route target", delegated, []ctxFn{withEntry(agentEntry)}, opAgentRead, agentRes, false},
+		{"target of another type with the same ID", delegated, []ctxFn{withEntry(agentEntry), withTarget("project", "a-1")}, opAgentRead, agentRes, false},
+		{"target with another ID", delegated, []ctxFn{withEntry(agentEntry), withTarget("agent", "a-2")}, opAgentRead, agentRes, false},
+		{"empty resource ID", delegated, []ctxFn{withEntry(agentEntry), withTarget("agent", "a-1")}, opAgentRead, Resource{Type: "agent"}, false},
+		{"non-delegated caller without any admission", NewAuthenticatedUser("u-1", "u@example.com", "U", "member", "web"), nil, opAgentRead, agentRes, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := contextWithIdentity(context.Background(), tc.identity)
+			for _, fn := range tc.setup {
+				ctx = fn(ctx)
+			}
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/agents/a-1", nil).WithContext(ctx)
+			rec := httptest.NewRecorder()
+			got := admitDelegatedHandler(rec, req, tc.op, tc.resource)
+			assert.Equal(t, tc.allowed, got)
+			if tc.allowed {
+				assert.Equal(t, http.StatusOK, rec.Code, "nothing written on the allow path")
+				assert.Empty(t, rec.Body.String())
+				return
+			}
+			require.Equal(t, http.StatusForbidden, rec.Code)
+			var body struct {
+				Error struct {
+					Code string `json:"code"`
+				} `json:"error"`
+			}
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body), rec.Body.String())
+			assert.Equal(t, agentDelegationCodeCredentialNotAdmitted, body.Error.Code)
+		})
 	}
 }

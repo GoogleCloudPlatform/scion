@@ -201,7 +201,7 @@ func TestAgentDelegation_CapabilitiesArePrimaryActionOnly(t *testing.T) {
 	assert.Empty(t, a.ComputeCapabilities(context.Background(), id, agentResource(target)).Actions)
 
 	ctx := contextWithDelegatedAdmission(context.Background(), agentDelegationAdmittedRoutes[0])
-	ctx = withAgentSubRoute(ctx, AgentSubRoute{RouteID: AgentRouteRoot, OperationID: opAgentRead, Method: http.MethodGet, AgentID: target.ID})
+	ctx = contextWithDelegatedTarget(ctx, delegatedRouteTarget{Type: "agent", ID: target.ID})
 	assert.Equal(t, []string{string(ActionRead)}, a.ComputeCapabilities(ctx, id, agentResource(target)).Actions)
 
 	other := &store.Agent{ID: "agent-z", ProjectID: "project-x"}
