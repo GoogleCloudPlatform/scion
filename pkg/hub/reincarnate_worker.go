@@ -1791,9 +1791,9 @@ func (s *Server) sweepStaleReincarnationsWithCutoffs(ctx context.Context, cutoff
 	const reason = "hub restarted during reincarnation"
 	swept := 0
 	for _, rec := range stale {
-		recCutoff, recReason, recCause := cutoff, reason, store.EdgeDeactivationReincarnateFailed
+		recCutoff, recReason, recCause := cutoff, reason, store.EdgeDeactivationReincarnateStaleSwept
 		if rec.State == store.AgentReincarnationStatePending {
-			recCutoff, recReason = pendingCutoff, reincarnationDidNotStartReason
+			recCutoff, recReason, recCause = pendingCutoff, reincarnationDidNotStartReason, store.EdgeDeactivationReincarnatePendingSwept
 		}
 		if !rec.UpdatedAt.Before(recCutoff) {
 			continue
