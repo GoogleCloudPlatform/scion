@@ -30,6 +30,10 @@
 # .github/actions/setup-go-cache) and builds the binary (make build) and
 # the web assets (npm run build) before the suite runs.
 #
+# port-proxy (ptone/scion#5568) also runs against the real hub binary, with
+# the same Go setup, plus the fake agent helper (go build of
+# hack/e2e/fakeagent) that serves the fixture app's port from agents.
+#
 # iap-driver (ptone/scion#4240, WS2) needs no hub and no web build: it
 # checks the e2e harness IAP driver hook against two local HTTP servers it
 # starts itself, in well under a minute.
@@ -108,6 +112,7 @@ jobs:
           - test-hub-banner
           - broker-area
           - test-identity-session
+          - port-proxy
           - iap-driver
     steps:
       - name: Checkout code
@@ -126,9 +131,10 @@ jobs:
         working-directory: ./web
         run: npm ci
 
-      # test-identity-session only: the suite starts the real hub binary.
-      - name: Setup Go (test-identity-session)
-        if: matrix.suite == 'test-identity-session'
+      # test-identity-session and port-proxy: the suites start the real hub
+      # binary.
+      - name: Setup Go (real hub suites)
+        if: matrix.suite == 'test-identity-session' || matrix.suite == 'port-proxy'
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
@@ -139,6 +145,14 @@ jobs:
         run: |
           make build
           npm --prefix web run build
+
+      # port-proxy also runs the fake agent helper (hack/e2e/fakeagent).
+      - name: Build hub binary, web assets and fake agent helper (port-proxy)
+        if: matrix.suite == 'port-proxy'
+        run: |
+          make build
+          npm --prefix web run build
+          go build -buildvcs=false -o build/e2e-fakeagent ./hack/e2e/fakeagent
 
       # terminal-workspace tests (workspace.pw.ts, dm-buttons.pw.ts) read
       # icon files from the production build output in web/dist/client.
@@ -194,8 +208,8 @@ jobs:
         working-directory: ./web
         env:
           SUITE: ${{ matrix.suite }}
-          # Read only by test-identity-session: the binary and web assets
-          # were built in the step above.
+          # Read only by test-identity-session and port-proxy: the binaries
+          # and web assets were built in the steps above.
           E2E_PREBUILT: '1'
         run: |
           CHROMIUM_EXECUTABLE="$(node -p "require('playwright-core').chromium.executablePath()")"
