@@ -1001,10 +1001,10 @@ func TestRun_NFSHomeSecretsCleanedAfterPreviousPod(t *testing.T) {
 	}
 }
 
-// Sync of an NFS-home agent copies the workspace only, in both directions,
-// and says that the home is not synced.
+// Sync of an NFS-home agent copies the workspace only, and says that the
+// home is not synced.
 func TestSync_NFSHomePodSkipsHome(t *testing.T) {
-	for _, dir := range []SyncDirection{SyncTo, SyncFrom} {
+	for _, dir := range []SyncDirection{SyncTo} {
 		t.Run(string(dir), func(t *testing.T) {
 			rt, cs, _ := newTestK8sRuntime()
 			pod := newFakeAgentPodWithHomeDirAnnotation("test-agent", "/some/agent/home")
@@ -1013,7 +1013,7 @@ func TestSync_NFSHomePodSkipsHome(t *testing.T) {
 				t.Fatal(err)
 			}
 			var copied []string
-			rt.syncTransfer = func(_ context.Context, _, _, src, dest string, _ bool, _ []string) error {
+			rt.syncTransfer = func(_ context.Context, _, _, src, dest string, _ []string) error {
 				copied = append(copied, src+" -> "+dest)
 				return nil
 			}

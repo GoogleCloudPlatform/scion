@@ -23,8 +23,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/syncarchive"
-
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -149,14 +147,14 @@ func TestSyncWorkspaceToPod_Excludes(t *testing.T) {
 			pod := newFakeAgentPodWithWorkspaceAnnotation("test-agent", "/some/workspace")
 			pod.Annotations = withWorkspaceAgentsAnnotation(pod.Annotations, excluded)
 			var calls []string
-			rt.syncTransfer = func(_ context.Context, _, podName, src, dest string, toPod bool, excludes []string) error {
+			rt.syncTransfer = func(_ context.Context, _, podName, src, dest string, excludes []string) error {
 				calls = append(calls, podName+" "+src+" -> "+dest)
 				want := []string(nil)
 				if excluded {
 					want = []string{".scion/agents"}
 				}
-				if !toPod || !slices.Equal(excludes, want) {
-					t.Errorf("toPod=%v excludes=%q, want toPod and %q", toPod, excludes, want)
+				if !slices.Equal(excludes, want) {
+					t.Errorf("excludes = %q, want %q", excludes, want)
 				}
 				return nil
 			}
@@ -170,11 +168,11 @@ func TestSyncWorkspaceToPod_Excludes(t *testing.T) {
 	}
 }
 
-// Sync in both directions leaves the in-project agents root out of the
-// workspace copy when the pod's annotation says so, and only then. It
-// reads the pod returned by List and makes no other pod request.
+// Sync to the pod leaves the in-project agents root out of the workspace
+// copy when the pod's annotation says so, and only then. It reads the pod
+// returned by List and makes no other pod request.
 func TestSync_WorkspaceAgentsAnnotationExcludes(t *testing.T) {
-	for _, dir := range []SyncDirection{SyncTo, SyncFrom} {
+	for _, dir := range []SyncDirection{SyncTo} {
 		for _, excluded := range []bool{true, false} {
 			t.Run(string(dir)+map[bool]string{true: "/annotated", false: "/plain"}[excluded], func(t *testing.T) {
 				rt, cs, _ := newTestK8sRuntime()
@@ -185,7 +183,7 @@ func TestSync_WorkspaceAgentsAnnotationExcludes(t *testing.T) {
 				}
 				cs.ClearActions()
 				got := map[string][]string{}
-				rt.syncTransfer = func(_ context.Context, _, _, src, dest string, _ bool, excludes []string) error {
+				rt.syncTransfer = func(_ context.Context, _, _, src, dest string, excludes []string) error {
 					got[src+" -> "+dest] = excludes
 					return nil
 				}
@@ -217,8 +215,7 @@ func TestSync_WorkspaceAgentsAnnotationExcludes(t *testing.T) {
 }
 
 // The tar arguments a sync to the pod uses leave the agents root out of the
-// archive, and extraction of an archive from the pod leaves the broker's
-// .scion (agents root and project settings) as it was.
+// archive.
 func TestSyncArchiveArgs_ExcludeAgentsDir(t *testing.T) {
 	src := t.TempDir()
 	for _, f := range []string{"README.md", ".scion/agents/other/prompt.md", ".scion/settings.yaml"} {
@@ -243,43 +240,5 @@ func TestSyncArchiveArgs_ExcludeAgentsDir(t *testing.T) {
 	}
 	if strings.Contains(string(list), ".scion/agents") || !strings.Contains(string(list), "./.scion/settings.yaml") {
 		t.Errorf("archive members:\n%s", list)
-	}
-
-	// From the pod: a full archive extracts without touching the agents root.
-	full := filepath.Join(t.TempDir(), "full.tgz")
-	if out, err := exec.Command("tar", "-czf", full, "-C", src, ".").CombinedOutput(); err != nil {
-		t.Fatalf("tar create: %v: %s", err, out)
-	}
-	dest := t.TempDir()
-	kept := filepath.Join(dest, ".scion", "agents", "mine", "prompt.md")
-	if err := os.MkdirAll(filepath.Dir(kept), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(kept, []byte("mine"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	settings := filepath.Join(dest, ".scion", "settings.yaml")
-	if err := os.WriteFile(settings, []byte("broker"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	f, err := os.Open(full)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-	if _, err := syncarchive.ExtractGzip(f, dest, syncarchive.Options{Excludes: []string{sharedWorkspaceAgentsDir}}); err != nil {
-		t.Fatalf("extract: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(dest, ".scion", "agents", "other")); !os.IsNotExist(err) {
-		t.Errorf("extraction wrote into the agents root (stat err %v)", err)
-	}
-	if b, err := os.ReadFile(kept); err != nil || string(b) != "mine" {
-		t.Errorf("broker agents root changed: %q, %v", b, err)
-	}
-	if b, err := os.ReadFile(settings); err != nil || string(b) != "broker" {
-		t.Errorf("broker project settings changed: %q, %v", b, err)
-	}
-	if _, err := os.Stat(filepath.Join(dest, "README.md")); err != nil {
-		t.Errorf("workspace file not extracted: %v", err)
 	}
 }

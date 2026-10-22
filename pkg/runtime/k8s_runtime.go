@@ -40,7 +40,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/syncarchive"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/google/uuid"
@@ -92,10 +91,10 @@ type KubernetesRuntime struct {
 	// (syncToPod). Tests use it to observe the order of the start steps.
 	homeSync func(ctx context.Context, namespace, podName, sourcePath, destPath string, excludes []string) error
 
-	// syncTransfer, when set, replaces the copies Sync and the start's
-	// workspace sync perform (toPod is true for broker to pod). Tests use it
-	// to observe which paths they transfer, and what they leave out.
-	syncTransfer func(ctx context.Context, namespace, podName, src, dest string, toPod bool, excludes []string) error
+	// syncTransfer, when set, replaces the broker-to-pod copies Sync and the
+	// start's workspace sync perform. Tests use it to observe which paths
+	// they transfer, and what they leave out.
+	syncTransfer func(ctx context.Context, namespace, podName, src, dest string, excludes []string) error
 
 	// nowFn and sinceFn, when set, replace time.Now and time.Since for the
 	// per-run object sweep and the start's verify trigger (see
@@ -251,11 +250,6 @@ func (r *KubernetesRuntime) syncWithRetry(ctx context.Context, op func() error) 
 // the sync operation should be retried.
 func isSyncTransientError(err error) bool {
 	if err == nil {
-		return false
-	}
-	// A refused archive is refused again on retry, and its message quotes
-	// entry names from the pod, which must not decide whether to retry.
-	if errors.Is(err, syncarchive.ErrRefused) {
 		return false
 	}
 	msg := err.Error()
@@ -3699,121 +3693,6 @@ func (r *KubernetesRuntime) syncToPod(ctx context.Context, namespace, podName, s
 	return nil
 }
 
-func (r *KubernetesRuntime) syncFromPod(ctx context.Context, namespace, podName, remotePath, localPath string, excludes ...string) error {
-	if err := os.MkdirAll(localPath, 0755); err != nil {
-		return fmt.Errorf("failed to create local workspace directory: %w", err)
-	}
-	fmt.Printf("  Preparing remote tar archive from %s...\n", remotePath)
-
-	remoteCmd := fmt.Sprintf("tar -cz -C '%s' .", remotePath)
-	cmd := []string{"sh", "-c", remoteCmd}
-
-	req := r.Client.Clientset.CoreV1().RESTClient().Post().
-		Resource("pods").
-		Name(podName).
-		Namespace(namespace).
-		SubResource("exec")
-
-	option := &corev1.PodExecOptions{
-		Container: agentContainerName,
-		Command:   cmd,
-		Stdin:     false,
-		Stdout:    true,
-		Stderr:    true,
-		TTY:       false,
-	}
-
-	req.VersionedParams(
-		option,
-		scheme.ParameterCodec,
-	)
-
-	executor, err := remotecommand.NewSPDYExecutor(r.Client.Config, "POST", req.URL())
-	if err != nil {
-		return err
-	}
-
-	fmt.Printf("  Streaming archive from pod '%s' (destination: %s)...\n", podName, localPath)
-	var stderr bytes.Buffer
-	res, err := extractPodArchive(localPath, excludes, func(w io.Writer) error {
-		return executor.StreamWithContext(ctx, remotecommand.StreamOptions{
-			Stdout: w,
-			Stderr: &stderr,
-		})
-	}, &stderr)
-	if err != nil {
-		return err
-	}
-	reportSkippedSyncEntries(res)
-
-	fmt.Printf("  Sync from %s complete.\n", remotePath)
-	runtimeLog().Info("Sync from pod complete", "pod", podName, "dest", localPath,
-		"files", res.Files, "bytes", res.Bytes,
-		"skipped_protected", res.Protected, "skipped_unsafe", res.UnsafeCount)
-	return nil
-}
-
-// extractPodArchive runs stream, which writes a gzip-compressed tar archive
-// built in the pod, and extracts that archive into localPath while it
-// arrives. The archive is built by the agent, so it is extracted by
-// syncarchive rather than by tar: only regular files, directories and
-// in-tree symbolic links are written, nothing outside localPath and nothing
-// under .scion. remoteStderr, if not nil, is quoted when the stream fails.
-func extractPodArchive(localPath string, excludes []string, stream func(io.Writer) error, remoteStderr *bytes.Buffer) (syncarchive.Result, error) {
-	pr, pw := io.Pipe()
-	type extraction struct {
-		res syncarchive.Result
-		err error
-	}
-	done := make(chan extraction, 1)
-	go func() {
-		res, err := syncarchive.ExtractGzip(pr, localPath, syncarchive.Options{Excludes: excludes})
-		// If extraction stopped early, fail the stream's next write
-		// instead of leaving it blocked on the pipe.
-		if err != nil {
-			_ = pr.CloseWithError(err)
-		} else {
-			_ = pr.Close()
-		}
-		done <- extraction{res: res, err: err}
-	}()
-
-	streamErr := stream(pw)
-	// A nil streamErr closes the pipe with io.EOF, ending the archive.
-	_ = pw.CloseWithError(streamErr)
-	ext := <-done
-
-	// A refused archive is reported as such even though refusing it also
-	// broke the stream; otherwise a stream failure is the cause of any
-	// extraction error.
-	if ext.err != nil && (streamErr == nil || errors.Is(ext.err, syncarchive.ErrRefused)) {
-		return ext.res, fmt.Errorf("extract archive from pod: %w", ext.err)
-	}
-	if streamErr != nil {
-		var stderr string
-		if remoteStderr != nil {
-			stderr = remoteStderr.String()
-		}
-		return ext.res, fmt.Errorf("stream failed: %w (remote stderr: %s)", streamErr, stderr)
-	}
-	return ext.res, nil
-}
-
-// reportSkippedSyncEntries prints the entries of an archive from a pod that
-// were not copied because writing them would not be safe.
-func reportSkippedSyncEntries(res syncarchive.Result) {
-	if res.UnsafeCount == 0 {
-		return
-	}
-	fmt.Printf("  Warning: %d entries were not copied (only regular files, directories and links inside the workspace are):\n", res.UnsafeCount)
-	for _, s := range res.Unsafe {
-		fmt.Printf("    %s: %s\n", s.Name, s.Reason)
-	}
-	if more := res.UnsafeCount - len(res.Unsafe); more > 0 {
-		fmt.Printf("    ... and %d more\n", more)
-	}
-}
-
 // Stop is Delete on Kubernetes: ref.RunID is enforced by Delete (a pod of
 // another run is left untouched and ErrRunMismatch is returned).
 func (r *KubernetesRuntime) Stop(ctx context.Context, ref RunRef) error {
@@ -4416,7 +4295,17 @@ func (r *KubernetesRuntime) PullImage(ctx context.Context, image string) error {
 	return nil
 }
 
+// errK8sSyncFromUnsupported is Sync's error for SyncFrom: the Kubernetes
+// runtime only copies from the broker to the pod. A workspace comes back
+// from an agent through the Hub workspace API, and commits by pushing them
+// to the remote.
+var errK8sSyncFromUnsupported = errors.New("kubernetes: syncing from an agent is not supported by the Kubernetes runtime; use the Hub workspace API (scion sync from) and push commits to the remote")
+
 func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncDirection) error {
+	if direction == SyncFrom {
+		return errK8sSyncFromUnsupported
+	}
+
 	// Find pod first
 	agents, err := r.List(ctx, map[string]string{"scion.name": id})
 	if err != nil {
@@ -4445,9 +4334,8 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 		return fmt.Errorf("agent '%s' does not have a workspace path recorded", id)
 	}
 
-	// Only a path that passes the fixed floors may be used here, as either a
-	// sync source (broker disk -> agent, SyncTo direction) or a sync
-	// destination (agent -> broker disk, SyncFrom direction). This is a
+	// Only a path that passes the fixed floors may be used here as the sync
+	// source (broker disk -> agent). This is a
 	// value read straight from a persisted pod annotation, not freshly
 	// computed, so it needs this check independent of whatever validated it
 	// (or didn't) when it was first written. No per-project root is
@@ -4464,8 +4352,8 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 	username := agent.Annotations["scion.username"]
 
 	// Same reasoning as workspacePath above: homeDir is a host path read
-	// straight from a persisted annotation, used below as either a sync
-	// destination (SyncFrom) or a sync source (SyncTo), and needs the same
+	// straight from a persisted annotation, used below as the sync source,
+	// and needs the same
 	// check independent of whatever validated it when first written. This is
 	// an agent's home directory, not a workspace, so it goes through
 	// ValidateAgentHomeSource rather than ValidateWorkspaceSource: the two
@@ -4497,8 +4385,8 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 	}
 
 	// A pod whose annotation excludes the in-project agents root keeps it
-	// out of both directions: a sync to the pod does not put it in the
-	// agent's view, and a sync from it does not touch the broker's copy.
+	// out of the copy: a sync to the pod does not put it in the agent's
+	// view.
 	workspaceExcludes := k8sWorkspaceSyncExcludes(agent.Annotations)
 
 	// The home of an NFS-home agent is kept on the export across starts;
@@ -4508,28 +4396,9 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 		homeDir = ""
 	}
 
-	if direction == SyncFrom {
-		fmt.Printf("Syncing workspace (agent -> %s)...\n", workspacePath)
-		if err := r.syncWithRetry(ctx, func() error {
-			return r.syncTransferFn(ctx, namespace, agent.ContainerID, "/workspace", workspacePath, false, workspaceExcludes)
-		}); err != nil {
-			return err
-		}
-		if homeDir != "" && username != "" {
-			destHome := util.GetHomeDir(username)
-			fmt.Printf("Syncing agent home (agent -> %s)...\n", homeDir)
-			if err := r.syncWithRetry(ctx, func() error {
-				return r.syncTransferFn(ctx, namespace, agent.ContainerID, destHome, homeDir, false, nil)
-			}); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-
 	fmt.Printf("Syncing workspace (%s -> agent)...\n", workspacePath)
 	if err := r.syncWithRetry(ctx, func() error {
-		return r.syncTransferFn(ctx, namespace, agent.ContainerID, workspacePath, "/workspace", true, workspaceExcludes)
+		return r.syncTransferFn(ctx, namespace, agent.ContainerID, workspacePath, "/workspace", workspaceExcludes)
 	}); err != nil {
 		return err
 	}
@@ -4537,7 +4406,7 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 		destHome := util.GetHomeDir(username)
 		fmt.Printf("Syncing agent home (%s -> agent)...\n", homeDir)
 		if err := r.syncWithRetry(ctx, func() error {
-			return r.syncTransferFn(ctx, namespace, agent.ContainerID, homeDir, destHome, true, nil)
+			return r.syncTransferFn(ctx, namespace, agent.ContainerID, homeDir, destHome, nil)
 		}); err != nil {
 			return err
 		}
@@ -4550,20 +4419,17 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 // (k8sWorkspaceSyncExcludes).
 func (r *KubernetesRuntime) syncWorkspaceToPod(ctx context.Context, namespace string, pod *corev1.Pod, src string) error {
 	return r.syncWithRetry(ctx, func() error {
-		return r.syncTransferFn(ctx, namespace, pod.Name, src, "/workspace", true, k8sWorkspaceSyncExcludes(pod.Annotations))
+		return r.syncTransferFn(ctx, namespace, pod.Name, src, "/workspace", k8sWorkspaceSyncExcludes(pod.Annotations))
 	})
 }
 
-// syncTransferFn copies src to dest for Sync, from the broker to the pod
-// when toPod is true and back otherwise.
-func (r *KubernetesRuntime) syncTransferFn(ctx context.Context, namespace, podName, src, dest string, toPod bool, excludes []string) error {
+// syncTransferFn copies src on the broker to dest in the pod for Sync and
+// the start's workspace sync.
+func (r *KubernetesRuntime) syncTransferFn(ctx context.Context, namespace, podName, src, dest string, excludes []string) error {
 	if r.syncTransfer != nil {
-		return r.syncTransfer(ctx, namespace, podName, src, dest, toPod, excludes)
+		return r.syncTransfer(ctx, namespace, podName, src, dest, excludes)
 	}
-	if toPod {
-		return r.syncToPod(ctx, namespace, podName, src, dest, excludes...)
-	}
-	return r.syncFromPod(ctx, namespace, podName, src, dest, excludes...)
+	return r.syncToPod(ctx, namespace, podName, src, dest, excludes...)
 }
 
 func (r *KubernetesRuntime) Exec(ctx context.Context, id string, cmd []string) (string, error) {
@@ -5074,8 +4940,8 @@ func withWorkspaceAgentsAnnotation(annotations map[string]string, excluded bool)
 	return out
 }
 
-// k8sWorkspaceSyncExcludes returns the workspace paths a tar sync to or
-// from a pod with these annotations leaves out. The annotation records the
+// k8sWorkspaceSyncExcludes returns the workspace paths a tar sync to a
+// pod with these annotations leaves out. The annotation records the
 // decision buildPod made, so no RepoRoot is needed.
 func k8sWorkspaceSyncExcludes(annotations map[string]string) []string {
 	if annotations[k8sWorkspaceAgentsAnnotation] == "true" {
