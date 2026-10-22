@@ -69,6 +69,30 @@ export const RENDER_SELECTORS = {
   chatPreviewLabel: 'scion-chat-file-preview sl-dialog.file-preview-dialog[open] .artifact-label',
   chatMarkdownIframe:
     'scion-chat-file-preview scion-artifact-markdown-frame iframe[title="Markdown preview"]',
+  /**
+   * Chat preview of an HTML bundle: the shared untrusted frame and its bar
+   * (untrusted-view-frame.ts:54-69, rendered at chat-file-preview.ts:836-852),
+   * the remote-images notice, the version badge and the footer
+   * (chat-file-preview.ts:1114-1155), and the unavailable text (:123, renderBody's error state).
+   */
+  chatHtmlFrame: 'scion-chat-file-preview sl-dialog.file-preview-dialog[open] .untrusted iframe',
+  chatAnyHtmlFrame: 'scion-chat-file-preview .untrusted iframe',
+  chatUntrustedBar: 'scion-chat-file-preview sl-dialog.file-preview-dialog[open] .untrusted-bar',
+  chatRemoteImagesNotice:
+    'scion-chat-file-preview sl-dialog.file-preview-dialog[open] sl-alert.notice',
+  chatVersionBadge:
+    'scion-chat-file-preview sl-dialog.file-preview-dialog[open] .artifact-label .version-badge',
+  chatFooterPath:
+    'scion-chat-file-preview sl-dialog.file-preview-dialog[open] [slot="footer"] .path',
+  chatFooterButton:
+    'scion-chat-file-preview sl-dialog.file-preview-dialog[open] [slot="footer"] sl-button',
+  chatUnavailableText:
+    'scion-chat-file-preview sl-dialog.file-preview-dialog[open] .file-preview-placeholder.error p',
+  /** The dialog's own header close button (Shoelace sl-dialog part close-button). */
+  chatDialogClose:
+    'scion-chat-file-preview sl-dialog.file-preview-dialog[open] [part~="close-button"]',
+  /** The chat page shell (the conversation rail), the anchor for hidden checks. */
+  chatPageRail: 'scion-page-chat .v2-rail',
 } as const;
 
 /** A preview entry-bar button by exact label (Full screen, Open in new tab, Open raw, Download). */
@@ -121,4 +145,32 @@ export function historyViewButton(page: Page, seq: number): Locator {
 /** The publish dialog's Folder mode button. */
 export function publishFolderMode(page: Page): Locator {
   return page.locator(RENDER_SELECTORS.publishModeFolder);
+}
+
+/** The chat preview's remote-images notice (filtered by its text). */
+export function chatRemoteImagesNotice(page: Page): Locator {
+  return page
+    .locator(RENDER_SELECTORS.chatRemoteImagesNotice)
+    .filter({ hasText: 'Remote images are not loaded' });
+}
+
+/** The chat preview's HTML frame content. */
+export function chatHtmlFrame(page: Page): ReturnType<Page['frameLocator']> {
+  return page.frameLocator(RENDER_SELECTORS.chatHtmlFrame);
+}
+
+/** A chat preview footer button by exact label (Copy link, Open in artifact viewer, Close). */
+export function chatFooterButton(page: Page, label: string): Locator {
+  return page.locator(RENDER_SELECTORS.chatFooterButton).filter({ hasText: exact(label) });
+}
+
+/**
+ * A linkified artifact reference in chat: seq 0 is the unpinned link (no
+ * data-artifact-seq), any other seq the link pinned to it.
+ */
+export function chatArtifactLinkFor(page: Page, id: string, seq = 0): Locator {
+  const base = `${RENDER_SELECTORS.chatArtifactLink}[data-artifact-id="${id}"]`;
+  return page.locator(
+    seq > 0 ? `${base}[data-artifact-seq="${seq}"]` : `${base}:not([data-artifact-seq])`
+  );
 }
