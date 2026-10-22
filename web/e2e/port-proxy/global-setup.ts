@@ -152,6 +152,8 @@ async function setUp(dir: string): Promise<void> {
     process.env,
     fixtureLog
   );
+  // Recorded at once, so the teardown stops it even if it never gets ready.
+  writeSuiteState({ fixturePid, helperPid: 0, port: 0, brokerId: '', projectId: '', agents: [] });
   const { port } = await waitReady<{ port: number }>(
     fixtureReady,
     fixturePid,

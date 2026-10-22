@@ -144,3 +144,28 @@ func TestListFiltersByLabel(t *testing.T) {
 		t.Errorf("list(agent_id=a2) = %v, want none", got)
 	}
 }
+
+func TestStartCarriesTheRunID(t *testing.T) {
+	s := newAgentSet(8080)
+	defer s.stopAll()
+	info, err := s.start(api.StartOptions{
+		Name:  "port-proxy-legacy",
+		RunID: "run-1",
+		Env: map[string]string{
+			// Nothing listens here: the agent keeps retrying the port
+			// registration until stopAll.
+			"SCION_HUB_ENDPOINT": "http://127.0.0.1:1",
+			"SCION_AGENT_ID":     "agent-1",
+			"SCION_AUTH_TOKEN":   "token",
+		},
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if info.RunID != "run-1" || info.Labels[api.LabelRunID] != "run-1" {
+		t.Errorf("start info run = %q, label %q; want run-1", info.RunID, info.Labels[api.LabelRunID])
+	}
+	if got := s.list(map[string]string{api.LabelRunID: "run-1"}); len(got) != 1 {
+		t.Errorf("list by run label = %v, want the agent", got)
+	}
+}

@@ -451,9 +451,13 @@ func (s *agentSet) start(opts api.StartOptions) (*api.AgentInfo, error) {
 			ContainerID: "fakeagent-" + opts.Name,
 			Name:        opts.Name,
 			Phase:       "running",
+			// The run the hub minted for this start, as a real container
+			// carries it (label and launch id).
+			RunID: opts.RunID,
 			Labels: map[string]string{
-				"scion.name": opts.Name,
-				"agent_id":   agentID,
+				"scion.name":   opts.Name,
+				"agent_id":     agentID,
+				api.LabelRunID: opts.RunID,
 			},
 		},
 		cancel:    cancel,
@@ -466,14 +470,18 @@ func (s *agentSet) start(opts api.StartOptions) (*api.AgentInfo, error) {
 	client := scionhub.NewClientWithConfig(hubURL, token, agentID)
 	go func() {
 		defer close(a.done)
-		s.serve(ctx, a, client, transport, env)
+		s.serve(ctx, a, client, transport, env, opts.RunID)
 	}()
 	info := a.info
 	return &info, nil
 }
 
 // serve registers the port and keeps the transport up until ctx ends.
-func (s *agentSet) serve(ctx context.Context, a *fakeAgent, client *scionhub.Client, transport string, env map[string]string) {
+//
+// The conduit launch id is the run id: the broker drops SCION_LAUNCH_ID
+// from the start environment and the real agent manager sets it from the
+// run, so this does the same.
+func (s *agentSet) serve(ctx context.Context, a *fakeAgent, client *scionhub.Client, transport string, env map[string]string, runID string) {
 	for {
 		_, err := client.RegisterPort(ctx, scionhub.RegisterPortRequest{Port: s.port, Label: "fixture"})
 		if err == nil {
@@ -497,7 +505,7 @@ func (s *agentSet) serve(ctx context.Context, a *fakeAgent, client *scionhub.Cli
 			HubURL:     client.HubURL(),
 			AgentID:    client.AgentID(),
 			ProjectID:  env["SCION_PROJECT_ID"],
-			LaunchID:   env[conduit.EnvLaunchID],
+			LaunchID:   runID,
 			Token:      client.AuthToken,
 			HTTPClient: client.HTTPClient(),
 			NoPTY:      true,
