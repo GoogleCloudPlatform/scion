@@ -759,7 +759,7 @@ func TestHubAuthURLFlag(t *testing.T) {
 }
 
 // Only a URL given with --hub-url or --hub is added to the hub list after
-// a login; it is announced and does not become current.
+// a login; it is announced; registering never changes the current hub.
 func TestHubAuthLogin_RegistersExplicitURL(t *testing.T) {
 	origHubURL := hubAuthHubURL
 	t.Cleanup(func() { hubAuthHubURL = origHubURL })
@@ -802,7 +802,7 @@ func TestHubAuthLogin_RegistersExplicitURL(t *testing.T) {
 	assert.Empty(t, errOut.String())
 	c := readTestContext(t)
 	assert.Equal(t, newHub, c.Hubs["new"].Endpoint)
-	assert.Equal(t, "prod", c.CurrentHub, "a login never makes the hub current")
+	assert.Equal(t, "prod", c.CurrentHub, "registering never changes the current hub")
 
 	// An endpoint that is already registered is not announced or rewritten.
 	before, err := os.ReadFile(contextFilePath())
@@ -840,7 +840,7 @@ func TestHubTransportSettings(t *testing.T) {
 }
 
 // A successful login adds a URL given with --hub-url to the hub list
-// (announced, not made current); a hub from the environment is not added.
+// (announced; with a current hub set, it does not switch); a hub from the environment is not added.
 func TestFinishHubAuthLogin_RegistersOnlyExplicitURL(t *testing.T) {
 	const newHub = "https://new.example.com"
 	token := &hubclient.CLITokenResponse{AccessToken: "tok", ExpiresIn: 3600}
@@ -859,7 +859,7 @@ func TestFinishHubAuthLogin_RegistersOnlyExplicitURL(t *testing.T) {
 		c := readTestContext(t)
 		require.NotNil(t, c.Hubs["new"])
 		assert.Equal(t, newHub, c.Hubs["new"].Endpoint)
-		assert.Equal(t, "prod", c.CurrentHub, "a login never makes the hub current")
+		assert.Equal(t, "prod", c.CurrentHub, "a login does not switch the current hub")
 		assert.True(t, credentials.IsAuthenticated(newHub))
 	})
 

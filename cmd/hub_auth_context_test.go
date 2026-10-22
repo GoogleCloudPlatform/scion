@@ -100,7 +100,7 @@ func TestRecordLoginHub_HubURLAddedNotSaved(t *testing.T) {
 	assert.Equal(t, projectBefore, readFileT(t, projectFile), "project settings unchanged")
 	c := readTestContext(t)
 	assert.NotNil(t, c.Hubs["other"])
-	assert.Equal(t, "prod", c.CurrentHub, "a login never makes a hub current")
+	assert.Equal(t, "prod", c.CurrentHub, "a login does not switch the current hub")
 }
 
 // TestRecordLoginHub_FlagHubs: --hub with a nickname of a hub that is not
