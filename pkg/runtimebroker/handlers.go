@@ -7318,15 +7318,26 @@ func (s *Server) findAuxiliaryRuntimeByType(runtimeType string) (auxiliaryRuntim
 
 // resolveProjectSettingsDir returns the directory containing settings.yaml for a project.
 // For linked projects, projectPath already points to the .scion directory.
-// For hub-managed projects, projectPath is the workspace parent, so settings
-// live in the .scion subdirectory.
+// For hub-managed projects, projectPath is the workspace root, so settings
+// live in its .scion subdirectory (or the external directory a .scion
+// marker file names). A workspace root's own settings file is workspace
+// content, never project settings, so it is not read when the root has a
+// .scion entry (hubEndpointFromProjectSettings reports one it ignores).
 func resolveProjectSettingsDir(projectPath string) string {
-	if config.GetSettingsPath(projectPath) != "" {
+	if filepath.Base(projectPath) == config.DotScion {
 		return projectPath
 	}
-	candidate := filepath.Join(projectPath, ".scion")
-	if config.GetSettingsPath(candidate) != "" {
+	candidate := filepath.Join(projectPath, config.DotScion)
+	if info, err := os.Lstat(candidate); err == nil {
+		if !info.IsDir() {
+			if resolved, err := config.ResolveProjectMarker(candidate); err == nil {
+				return resolved
+			}
+		}
 		return candidate
+	}
+	if config.GetSettingsPath(projectPath) != "" {
+		return projectPath
 	}
 	return projectPath // fallback to original
 }
